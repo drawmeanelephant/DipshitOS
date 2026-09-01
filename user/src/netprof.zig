@@ -14,7 +14,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const ui = @import("lib/ui.zig");
 
-pub const profile_file_path = "/data/NET.TXT";
+pub const profile_file_path = "/host/NET.TXT"; // M34 HF5 (#739): user data lives in the host folder
 pub const max_profiles = 8;
 pub const max_name_len = 16;
 pub const max_file_size = 1024;

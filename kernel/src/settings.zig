@@ -43,6 +43,8 @@
 const std = @import("std");
 const fat = @import("fat.zig");
 const esp = @import("esp.zig");
+// M34 HF5 (issue #739): the host-share persistence path.
+const virtio_file = @import("virtio_file.zig");
 
 pub const filename = "SETTINGS.TXT";
 
@@ -348,23 +350,12 @@ pub fn serialize(out: []u8) usize {
     return pos;
 }
 
-/// Load configuration from `SETTINGS.TXT` on the DATA partition.
-/// Handles versioned (v1+) and legacy (no version header) files.
-pub fn load_from_disk(ops: ?fat.DiskOps) bool {
-    ensure_init();
-    if (ops == null) return false;
-
-    if (fat.mount_data(ops) != .ok) return false;
-    var file_buf: [2048]u8 = undefined;
-    const n = fat.read_file(filename, &file_buf);
-    if (n == null) {
-        _ = esp.set_disk(ops);
-        return false;
-    }
-
+/// Parse + apply a SETTINGS.TXT payload (versioned v1+ / legacy v0),
+/// shared by the DATA and host-share loaders. Returns false when a NEWER
+/// schema version is refused (honest degradation per issue #247).
+fn apply_bytes(bytes: []const u8) bool {
     var pos: usize = 0;
     var file_version: u32 = 0; // v0 = no header (legacy)
-    const bytes = file_buf[0..n.?];
 
     // Parse first line: check for version header
     if (bytes.len > 0) {
@@ -389,9 +380,7 @@ pub fn load_from_disk(ops: ?fat.DiskOps) bool {
 
     // Handle version-specific loading
     if (file_version > current_version) {
-        // Newer version than we support — refuse, use compiled defaults
-        // (honest degradation per issue #247)
-        _ = esp.set_disk(ops);
+        // Newer version than we support — refuse, use compiled defaults.
         return false;
     }
 
@@ -410,9 +399,38 @@ pub fn load_from_disk(ops: ?fat.DiskOps) bool {
     if (file_version < current_version) {
         migrate(file_version);
     }
-
-    _ = esp.set_disk(ops);
     return true;
+}
+
+/// M34 HF5 (issue #739): load settings from the HOST SHARE when the file
+/// channel is armed (the migration copies /data/SETTINGS.TXT over, so the
+/// share wins on the first share boot). No-op without a channel — the
+/// DATA loader above stays the fallback (dual path until HF6).
+pub fn load_from_share() bool {
+    ensure_init();
+    if (!virtio_file.available()) return false;
+    var file_buf: [2048]u8 = undefined;
+    const n = virtio_file.read_whole(filename, &file_buf) orelse return false;
+    return apply_bytes(file_buf[0..n]);
+}
+
+/// Load configuration from `SETTINGS.TXT` on the DATA partition.
+/// Handles versioned (v1+) and legacy (no version header) files.
+pub fn load_from_disk(ops: ?fat.DiskOps) bool {
+    ensure_init();
+    if (ops == null) return false;
+
+    if (fat.mount_data(ops) != .ok) return false;
+    var file_buf: [2048]u8 = undefined;
+    const n = fat.read_file(filename, &file_buf);
+    if (n == null) {
+        _ = esp.set_disk(ops);
+        return false;
+    }
+
+    const ok = apply_bytes(file_buf[0..n.?]);
+    _ = esp.set_disk(ops);
+    return ok;
 }
 
 /// Migrate from one version to the current version.
@@ -431,6 +449,15 @@ fn migrate(from_version: u32) void {
 /// Persist current in-memory configuration to `SETTINGS.TXT` on DATA partition.
 pub fn save_to_disk(ops: ?fat.DiskOps) bool {
     ensure_init();
+    // M34 HF5 (issue #739): the HOST SHARE is the persistence home when
+    // the channel is armed (write_whole = open/create + truncate +
+    // write + close, host-verified on disk by the gate). DATA fallback
+    // otherwise (dual path until HF6).
+    if (virtio_file.available()) {
+        var buf: [2048]u8 = undefined;
+        const len = serialize(&buf);
+        return virtio_file.write_whole(filename, buf[0..len]) == virtio_file.st_ok;
+    }
     if (ops == null) return false;
 
     const is_data_active = std.mem.eql(u8, esp.volume(), "data");

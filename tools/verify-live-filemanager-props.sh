@@ -55,6 +55,14 @@ codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/
 gate_begin live-filemanager-props
 echo "run dir: $RUN_DIR"
 
+# M34 HF5 (issue #739): FILE.BIN's root is the HOST SHARE — seed the two
+# byte-known DATA fixtures so the listing carries real entries + a live
+# F4 du= total (same bytes as image/mkfat32.py build_data_volume).
+SHARE="$RUN_DIR/share"
+mkdir -p "$SHARE"
+printf '%s\n' 'VirelaiOS general filesystem: a second FAT32 volume on the same disk (claim 3678, milestone four card 2)' > "$SHARE/README.TXT"
+printf '%s\n' 'general data volume contents: 1234567890' > "$SHARE/DATA.TXT"
+
 printf 'exec FILE.BIN\n' > "$RUN_DIR/script.txt"
 printf 'dui focus 0\necho m25-props-ok\n' > "$RUN_DIR/settle.txt"
 
@@ -64,6 +72,7 @@ rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log"
 set +e
 host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
     --serial "$RUN_DIR/vm-serial.log" \
+    --cvc-file "$SHARE" \
     --screen "$RUN_DIR/screen" \
     --via-virtio \
     --script "$RUN_DIR/script.txt" \
@@ -115,4 +124,4 @@ Verified:
 - Right-click dispatch path covered by host unit tests (claim-4769 wall)
 EOF
 
-echo "verify-live-filemanager-props: PASS — properties inspector + du total verified on VZ."
+echo "verify-live-filemanager-props: PASS — properties inspector + du total verified on VZ (HF5 share root)."

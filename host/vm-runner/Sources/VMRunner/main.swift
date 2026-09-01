@@ -263,6 +263,14 @@ var inputChordsAfter: String?
 // the input-depth gate lowers it to ~0.3 s to stress the guest's
 // multi-TRB interrupt-IN depth. Only meaningful with --input-chords.
 var inputChordsDelay: Double = 3.0
+// M34 HF5 (issue #739): force --input-chords through the VZVirtualMachineView
+// (NSEvents, honors --input-chords-delay) even when the custom-virtio INPUT
+// queue is attached. --cvc-file implies via-virtio, which switches chords to
+// the cv-input transport paced at 0.25 s per stroke — too fast for a launch-
+// then-focus handoff (observed live: the desktop composition gate's second
+// Return hit the desktop before FILE.BIN's window took focus). The view path
+// restores the slow, deterministic pacing for display-equipped gates.
+var chordsViaView = false
 // Milestone eight cards U4/U5 (claims 4993/0935): the pointer-synthesis
 // seam — "--pointer <x>,<y>[,c][;x2,y2[,c]...]" synthesizes one
 // NSEvent.mouseEvent per step (mouseMoved; + mouseDown/Up when the click
@@ -558,6 +566,10 @@ while idx < arguments.count {
         }
         inputChordsDelay = d
         idx += 2
+    } else if arg == "--chords-view" {
+        // M34 HF5 (issue #739): see the chordsViaView declaration above.
+        chordsViaView = true
+        idx += 1
     } else if arg == "--pointer", idx + 1 < arguments.count {
         pointerScript = arguments[idx + 1]
         idx += 2
@@ -2410,10 +2422,11 @@ func startChordInject() {
             if let log = try? String(contentsOf: serialURL, encoding: .utf8), log.contains(marker) {
                 Thread.sleep(forTimeInterval: 1.0) // let the armed ring settle
                 #if SPIKE
-                if viaVirtioEnabled {
+                if viaVirtioEnabled && !chordsViaView {
                     // Claim 9588: chords ride the custom-virtio INPUT queue —
                     // keyDown + keyUp per token as HID reports, no view, no
-                    // window, headless-safe.
+                    // window, headless-safe. (--chords-view forces the view
+                    // path below even when this queue is attached.)
                     guard #available(macOS 27.0, *) else {
                         fail("--via-virtio requires macOS 27 (VZCustomVirtioDevice).")
                     }

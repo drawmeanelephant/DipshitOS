@@ -25,7 +25,7 @@ pub const window_w: u32 = 512;
 pub const window_h: u32 = 384;
 
 pub const exit_status: u32 = 43;
-pub const data_path: []const u8 = "/data";
+pub const data_path: []const u8 = "/host";
 
 // Geometry (inside the 512x384 window).
 pub const title_rect = Rect.make(0, 0, 512, 22);
@@ -142,7 +142,7 @@ pub const ctx_menu_items = [_]ui.ContextMenuItem{
 /// Plain 8.3 name — leading-dot names are not representable in FAT
 /// short names (encode_83 rejects them), matching the WINDOWS.SAV /
 /// HISTORY.TXT house pattern for persisted state on this volume.
-pub const recent_file_path: []const u8 = "/data/RECENT.SAV";
+pub const recent_file_path: []const u8 = "/host/RECENT.SAV";
 /// The virtual first entry at the DATA root that opens the ring listing.
 pub const recent_virtual_name: []const u8 = "RECENT";
 
@@ -263,7 +263,7 @@ pub fn is_binary_content(content: []const u8) bool {
     return printable * 10 < content.len * 8;
 }
 
-/// Count path segments in an absolute path like "/data/docs".
+/// Count path segments in an absolute path like "/host/docs".
 pub fn path_segment_count(path: []const u8) usize {
     if (path.len == 0) return 0;
     var count: usize = 0;
@@ -302,7 +302,7 @@ pub fn format_breadcrumbs(path: []const u8, buf: []u8) []const u8 {
         first = false;
     }
     if (pos == 0 and path.len > 0) {
-        // root like "/" or "/data" with empty split — show raw path trimmed
+        // root like "/" or "/host" with empty split — show raw path trimmed
         const t = @min(path.len, buf.len);
         @memcpy(buf[0..t], path[0..t]);
         return buf[0..t];
@@ -484,7 +484,7 @@ pub const AppState = struct {
 
     // Current directory path (session-only, C7 breadcrumb).
     current_path: [path_max]u8 = [_]u8{0} ** path_max,
-    current_path_len: usize = 5, // "/data"
+    current_path_len: usize = 5, // "/host"
 
     // Read-only view state.
     view_mode: bool = false,
@@ -559,7 +559,7 @@ pub const AppState = struct {
 
     // F1 / F7 / F18: Modal Confirmation Dialogs & Progress Bar (GH #381, #387, #398)
     delete_dialog: ui.Dialog = ui.Dialog.init(Rect.make(0, 0, window_w, window_h), "Delete selected files?", false),
-    move_dialog: ui.Dialog = ui.Dialog.init(Rect.make(0, 0, window_w, window_h), "Move to dir (e.g. /data/docs):", true),
+    move_dialog: ui.Dialog = ui.Dialog.init(Rect.make(0, 0, window_w, window_h), "Move to dir (e.g. /host/docs):", true),
     batch_rename_dialog: ui.Dialog = ui.Dialog.init(Rect.make(0, 0, window_w, window_h), "Batch rename prefix (e.g. bak_):", true),
     progress_bar: ui.ProgressBar = ui.ProgressBar.init(Rect.make(6, 350, 500, 16)),
     progress_active: bool = false,
@@ -597,8 +597,8 @@ pub const AppState = struct {
 
     pub fn init() AppState {
         var s = AppState{};
-        // Initialize current_path to "/data".
-        const p = "/data";
+        // Initialize current_path to "/host".
+        const p = "/host";
         @memcpy(s.current_path[0..p.len], p);
         s.current_path_len = p.len;
         s.btn_open.bg_color = ui.COLOR_ACCENT;
@@ -911,7 +911,7 @@ pub const AppState = struct {
         if (self.trash_count >= 32) {
             var purge_buf: [64]u8 = undefined;
             const oldest_name = self.trash_names[0][0..self.trash_lens[0]];
-            const purge_path = build_path("/data/.trash", oldest_name, &purge_buf);
+            const purge_path = build_path("/host/.trash", oldest_name, &purge_buf);
             _ = ui.file_delete(purge_path);
 
             for (0..31) |ti| {
@@ -924,7 +924,7 @@ pub const AppState = struct {
         var old_buf: [64]u8 = undefined;
         var trash_buf: [64]u8 = undefined;
         const old_path = build_path(self.current_path_slice(), name, &old_buf);
-        const trash_path = build_path("/data/.trash", name, &trash_buf);
+        const trash_path = build_path("/host/.trash", name, &trash_buf);
         _ = ui.file_rename(old_path, trash_path);
 
         const n = @min(name.len, 32);
@@ -947,7 +947,7 @@ pub const AppState = struct {
 
         var trash_buf: [64]u8 = undefined;
         var restore_buf: [64]u8 = undefined;
-        const trash_path = build_path("/data/.trash", name, &trash_buf);
+        const trash_path = build_path("/host/.trash", name, &trash_buf);
         const restore_path = build_path(self.current_path_slice(), name, &restore_buf);
         _ = ui.file_rename(trash_path, restore_path);
 
@@ -1135,7 +1135,7 @@ pub const AppState = struct {
     pub fn toggle_split_pane(self: *AppState) bool {
         self.split_pane = !self.split_pane;
         if (self.split_pane and self.right_path_len == 0) {
-            const p = "/data";
+            const p = "/host";
             @memcpy(self.right_path[0..p.len], p);
             self.right_path_len = p.len;
         }
@@ -1234,7 +1234,7 @@ pub const AppState = struct {
 
     pub fn move_prompt(self: *AppState) bool {
         if (self.selected_count() == 0 and self.list.selected == null) return false;
-        self.move_dialog.message = "Move to dir (e.g. /data/docs):";
+        self.move_dialog.message = "Move to dir (e.g. /host/docs):";
         self.move_dialog.show();
         return true;
     }
@@ -1590,7 +1590,7 @@ pub const AppState = struct {
     /// Navigate to breadcrumb segment `keep` (0-based). Keeps segments 0..keep.
     pub fn navigate_to_segment(self: *AppState, keep: usize) void {
         const new_len = truncate_to_segment(&self.current_path, self.current_path_len, keep);
-        // Never truncate below "/data" (5 chars).
+        // Never truncate below "/host" (5 chars).
         self.current_path_len = @max(new_len, 5);
         self.view_mode = false;
         self.preview_loaded = false;
@@ -2519,7 +2519,7 @@ pub fn build_path(base: []const u8, name: []const u8, buf: []u8) []const u8 {
 
 /// Build `/data/<name>` into `buf` (caller provides ≥ 6 + name.len bytes).
 pub fn build_data_path(buf: []u8, name: []const u8) []const u8 {
-    const prefix = "/data/";
+    const prefix = "/host/";
     @memcpy(buf[0..prefix.len], prefix);
     @memcpy(buf[prefix.len .. prefix.len + name.len], name);
     return buf[0 .. prefix.len + name.len];
@@ -2687,10 +2687,10 @@ test "file: FileList selection, scrolling, and click mapping" {
     try std.testing.expectEqual(@as(?usize, null), fl.selected);
 }
 
-test "file: build_data_path prefixes /data/" {
+test "file: build_data_path prefixes /host/" {
     var buf: [64]u8 = undefined;
     const p = build_data_path(&buf, "README.TXT");
-    try std.testing.expectEqualStrings("/data/README.TXT", p);
+    try std.testing.expectEqualStrings("/host/README.TXT", p);
 }
 
 test "file: AppState fits the 16 KiB EL0 stack (W^X, claim B3)" {
@@ -2769,39 +2769,39 @@ test "file: is_binary_content sniff (C7)" {
 
 test "file: breadcrumbs format and hit-test (C7)" {
     var buf: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("data", format_breadcrumbs("/data", &buf));
-    try std.testing.expectEqualStrings("data > docs", format_breadcrumbs("/data/docs", &buf));
-    try std.testing.expectEqualStrings("data > docs > notes", format_breadcrumbs("/data/docs/notes", &buf));
-    try std.testing.expectEqual(@as(usize, 1), path_segment_count("/data"));
-    try std.testing.expectEqual(@as(usize, 2), path_segment_count("/data/docs"));
+    try std.testing.expectEqualStrings("host", format_breadcrumbs("/host", &buf));
+    try std.testing.expectEqualStrings("host > docs", format_breadcrumbs("/host/docs", &buf));
+    try std.testing.expectEqualStrings("host > docs > notes", format_breadcrumbs("/host/docs/notes", &buf));
+    try std.testing.expectEqual(@as(usize, 1), path_segment_count("/host"));
+    try std.testing.expectEqual(@as(usize, 2), path_segment_count("/host/docs"));
     try std.testing.expectEqual(@as(usize, 0), path_segment_count("/"));
     // hit-test: base 60, "data" 4*8=32px at 60..92, " > " 24px, "docs" 4*8=32 at 116..148
-    try std.testing.expectEqual(@as(?usize, 0), breadcrumb_hit_test("/data/docs", 60, 70));
-    try std.testing.expectEqual(@as(?usize, 1), breadcrumb_hit_test("/data/docs", 60, 120));
-    try std.testing.expectEqual(@as(?usize, null), breadcrumb_hit_test("/data/docs", 60, 200));
-    // truncate to segment 0 keeps "/data"
+    try std.testing.expectEqual(@as(?usize, 0), breadcrumb_hit_test("/host/docs", 60, 70));
+    try std.testing.expectEqual(@as(?usize, 1), breadcrumb_hit_test("/host/docs", 60, 120));
+    try std.testing.expectEqual(@as(?usize, null), breadcrumb_hit_test("/host/docs", 60, 200));
+    // truncate to segment 0 keeps "/host"
     var p: [64]u8 = [_]u8{0} ** 64;
-    @memcpy(p[0..10], "/data/docs");
+    @memcpy(p[0..10], "/host/docs");
     try std.testing.expectEqual(@as(usize, 5), truncate_to_segment(&p, 10, 0));
-    @memcpy(p[0..10], "/data/docs");
+    @memcpy(p[0..10], "/host/docs");
     try std.testing.expectEqual(@as(usize, 10), truncate_to_segment(&p, 10, 1));
 }
 
 test "file: build_path joins base and name (C7)" {
     var buf: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("/data/README.TXT", build_path("/data", "README.TXT", &buf));
-    try std.testing.expectEqualStrings("/data/docs/NOTES.TXT", build_path("/data/docs", "NOTES.TXT", &buf));
+    try std.testing.expectEqualStrings("/host/README.TXT", build_path("/host", "README.TXT", &buf));
+    try std.testing.expectEqualStrings("/host/docs/NOTES.TXT", build_path("/host/docs", "NOTES.TXT", &buf));
 }
 
 test "file: AppState current_path and breadcrumb navigation (C7)" {
     var app = AppState.init();
-    try std.testing.expectEqualStrings("/data", app.current_path_slice());
+    try std.testing.expectEqualStrings("/host", app.current_path_slice());
     // Enter subdirectory
     _ = app.enter_directory("docs");
-    try std.testing.expectEqualStrings("/data/docs", app.current_path_slice());
+    try std.testing.expectEqualStrings("/host/docs", app.current_path_slice());
     // Navigate back via breadcrumb segment 0
     app.navigate_to_segment(0);
-    try std.testing.expectEqualStrings("/data", app.current_path_slice());
+    try std.testing.expectEqualStrings("/host", app.current_path_slice());
     // Preview flag for directory (no load)
     app.entry_count = 1;
     app.entries[0] = .{ .name = [_]u8{0} ** 32, .size = 0, .is_dir = 1, .reserved = .{ 0, 0, 0 } };
@@ -2830,11 +2830,11 @@ test "file: selecting file auto-loads preview and keyboard nav refreshes (C7)" {
 test "file: breadcrumb_click hit-test via AppState (C7)" {
     var app = AppState.init();
     _ = app.enter_directory("docs");
-    try std.testing.expectEqualStrings("/data/docs", app.current_path_slice());
+    try std.testing.expectEqualStrings("/host/docs", app.current_path_slice());
     // Click on first segment "data" at x=64 (inside "data" 60..92)
     const hit = app.breadcrumb_click(64, 8);
     try std.testing.expect(hit);
-    try std.testing.expectEqualStrings("/data", app.current_path_slice());
+    try std.testing.expectEqualStrings("/host", app.current_path_slice());
 }
 
 test "file: M20-U8 — Ctrl+F filter narrows the listing in real time" {
@@ -3094,14 +3094,14 @@ test "file: F5 — recent files ring stores and shifts paths" {
     var app = AppState.init();
     try std.testing.expectEqual(@as(usize, 0), app.recent_count);
 
-    app.add_recent("/data/README.TXT");
+    app.add_recent("/host/README.TXT");
     try std.testing.expectEqual(@as(usize, 1), app.recent_count);
-    try std.testing.expectEqualStrings("/data/README.TXT", app.recent_ring[0][0..app.recent_lens[0]]);
+    try std.testing.expectEqualStrings("/host/README.TXT", app.recent_ring[0][0..app.recent_lens[0]]);
 
-    app.add_recent("/data/DOCS/NOTES.TXT");
+    app.add_recent("/host/DOCS/NOTES.TXT");
     try std.testing.expectEqual(@as(usize, 2), app.recent_count);
-    try std.testing.expectEqualStrings("/data/DOCS/NOTES.TXT", app.recent_ring[0][0..app.recent_lens[0]]);
-    try std.testing.expectEqualStrings("/data/README.TXT", app.recent_ring[1][0..app.recent_lens[1]]);
+    try std.testing.expectEqualStrings("/host/DOCS/NOTES.TXT", app.recent_ring[0][0..app.recent_lens[0]]);
+    try std.testing.expectEqualStrings("/host/README.TXT", app.recent_ring[1][0..app.recent_lens[1]]);
 }
 
 test "file: F6 — trash staging and restore" {
@@ -3150,18 +3150,18 @@ test "file: F9 — bookmarks add and jump" {
     var app = AppState.init();
     try std.testing.expectEqual(@as(usize, 0), app.bookmark_count);
 
-    // Ctrl+D bookmarks current path "/data"
+    // Ctrl+D bookmarks current path "/host"
     const ev_bk = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 1, .arg0 = 0x07, .arg1 = 0 };
     try std.testing.expect(app.handle_keyboard_event(&ev_bk));
     try std.testing.expectEqual(@as(usize, 1), app.bookmark_count);
-    try std.testing.expectEqualStrings("/data", app.bookmarks[0][0..app.bookmark_lens[0]]);
+    try std.testing.expectEqualStrings("/host", app.bookmarks[0][0..app.bookmark_lens[0]]);
     try std.testing.expectEqualStrings("Bookmarked", app.status_msg[0..app.status_len]);
 
     // Enter subfolder and jump back via bookmark
     _ = app.enter_directory("docs");
-    try std.testing.expectEqualStrings("/data/docs", app.current_path_slice());
+    try std.testing.expectEqualStrings("/host/docs", app.current_path_slice());
     try std.testing.expect(app.jump_bookmark(0));
-    try std.testing.expectEqualStrings("/data", app.current_path_slice());
+    try std.testing.expectEqualStrings("/host", app.current_path_slice());
 }
 
 test "file: F14 & F15 — terminal here and editor here shortcuts" {
@@ -3223,8 +3223,8 @@ test "file: F1 — Ctrl+M batch move dialog workflow and progress" {
     try std.testing.expect(app.move_dialog.has_input);
 
     // Type destination path into move dialog input
-    app.move_dialog.input.set_text("/data/archive");
-    try std.testing.expectEqualStrings("/data/archive", app.move_dialog.input.get_text());
+    app.move_dialog.input.set_text("/host/archive");
+    try std.testing.expectEqualStrings("/host/archive", app.move_dialog.input.get_text());
 
     // Enter confirms move
     const ev_enter = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 2, .arg0 = 0x28, .arg1 = '\n' };
@@ -3260,8 +3260,8 @@ test "file: F7 — Ctrl+Shift+R batch rename dialog workflow" {
 
 test "file: F9 — Ctrl+B bookmarks overlay navigation and jump" {
     var app = AppState.init();
-    _ = app.add_bookmark("/data/docs");
-    _ = app.add_bookmark("/data/music");
+    _ = app.add_bookmark("/host/docs");
+    _ = app.add_bookmark("/host/music");
 
     // Ctrl+B opens bookmarks overlay
     const ev_ctrl_b = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 1, .arg0 = 0x05, .arg1 = 2 };
@@ -3278,7 +3278,7 @@ test "file: F9 — Ctrl+B bookmarks overlay navigation and jump" {
     const ev_enter = Event{ .kind = ui.KEY_DOWN, .flags = 0, .seq = 3, .arg0 = 0x28, .arg1 = '\n' };
     try std.testing.expect(app.handle_keyboard_event(&ev_enter));
     try std.testing.expect(!app.bookmarks_active);
-    try std.testing.expectEqualStrings("/data/music", app.current_path_slice());
+    try std.testing.expectEqualStrings("/host/music", app.current_path_slice());
 }
 
 test "file: F13 — get_associated_app returns correct application" {
@@ -3386,25 +3386,25 @@ test "file: F3 — confirm_create_dir routes through the MODE_DIR seam" {
 
 test "file: F5 — recent ring dedups to front and persists (claim 2539)" {
     var app = AppState.init();
-    app.add_recent("/data/A.TXT");
-    app.add_recent("/data/B.TXT");
-    app.add_recent("/data/C.TXT");
+    app.add_recent("/host/A.TXT");
+    app.add_recent("/host/B.TXT");
+    app.add_recent("/host/C.TXT");
     try std.testing.expectEqual(@as(usize, 3), app.recent_count);
     // Re-opening A moves it to the front without duplicating.
-    app.add_recent("/data/A.TXT");
+    app.add_recent("/host/A.TXT");
     try std.testing.expectEqual(@as(usize, 3), app.recent_count);
-    try std.testing.expectEqualStrings("/data/A.TXT", app.recent_ring[0][0..app.recent_lens[0]]);
-    try std.testing.expectEqualStrings("/data/C.TXT", app.recent_ring[1][0..app.recent_lens[1]]);
+    try std.testing.expectEqualStrings("/host/A.TXT", app.recent_ring[0][0..app.recent_lens[0]]);
+    try std.testing.expectEqualStrings("/host/C.TXT", app.recent_ring[1][0..app.recent_lens[1]]);
 }
 
 test "file: F5 — virtual RECENT entry pins to the root listing and opens the ring" {
     var app = AppState.init();
-    _ = app.add_recent("/data/NOTES.TXT");
-    _ = app.add_recent("/data/DIARY.TXT");
+    _ = app.add_recent("/host/NOTES.TXT");
+    _ = app.add_recent("/host/DIARY.TXT");
 
     // Root listing injects RECENT as the pinned first row even with an
     // otherwise-empty directory.
-    app.current_path_len = 5; // "/data"
+    app.current_path_len = 5; // "/host"
     app.list_directory();
     try std.testing.expectEqual(@as(usize, 1), app.entry_count);
     const vrow = &app.entries[app.sort_indices[0]];
@@ -3416,7 +3416,7 @@ test "file: F5 — virtual RECENT entry pins to the root listing and opens the r
     try std.testing.expect(app.enter_directory("RECENT"));
     try std.testing.expect(app.recent_mode);
     try std.testing.expectEqual(@as(usize, 2), app.entry_count);
-    try std.testing.expectEqualStrings("/data/DIARY.TXT", entry_name(&app.entries[app.sort_indices[0]]));
+    try std.testing.expectEqualStrings("/host/DIARY.TXT", entry_name(&app.entries[app.sort_indices[0]]));
 
     // Opening a row views the stored path directly.
     try std.testing.expect(app.open_selected());

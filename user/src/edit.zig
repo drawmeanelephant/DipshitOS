@@ -48,7 +48,7 @@ const undo_cap: usize = 50;
 const delta_text_cap: usize = 64;
 
 // E17: crash recovery
-pub const recovery_path: []const u8 = "/data/EDIT_REC.TXT";
+pub const recovery_path: []const u8 = "/host/EDIT_REC.TXT"; // M34 HF5 (#739): user data lives in the host folder
 
 // E19: Editor Themes
 pub const Theme = struct {
@@ -1918,11 +1918,11 @@ pub const AppState = struct {
         const fname = self.tabs.get_filename(self.tabs.active);
         var target_buf: [64]u8 = undefined;
         const target_path = if (std.mem.eql(u8, fname, "UNTITLED") or fname.len == 0)
-            "/data/UNTITLED.TXT"
+            "/host/UNTITLED.TXT"
         else if (fname[0] == '/')
             fname
         else
-            std.fmt.bufPrint(&target_buf, "/data/{s}", .{fname}) catch fname;
+            std.fmt.bufPrint(&target_buf, "/host/{s}", .{fname}) catch fname;
 
         var fd_res = ui.file_open(target_path, ui.MODE_WRITE | ui.MODE_CREATE);
         if (fd_res < 0) {

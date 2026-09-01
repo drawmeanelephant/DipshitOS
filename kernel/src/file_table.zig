@@ -13,9 +13,25 @@ const process = @import("process.zig");
 const fat = @import("fat.zig");
 const virtio_blk = @import("virtio_blk.zig");
 // M34 HF4 (issue #738): the `.host` partition serves the `--cvc-file`
-// share through the host file channel — LIST/READ/STAT, no FAT. The
-// desktop re-points its APPS.TXT manifest at `/host/APPS.TXT`.
+// share through the host file channel — no FAT. HF5 (issue #739) makes
+// it READ-WRITE for userland (the persistence consumers re-point from
+// `/data` to `/host`); reads stay stateless (vf READ at the guest
+// cursor), writes ride the host's handle-table cursor (vf OPEN/WRITE/
+// TRUNCATE/CLOSE) with legacy FAT replace semantics (write-open
+// truncates to 0 unless append).
 const virtio_file = @import("virtio_file.zig");
+// HF5 deprecation: the one-shot `/data` deprecation line prints from the
+// kernel's serial path (main.zig owns uart_puts). The import is
+// COMPTIME-GUARDED: the module test build has no `build_options`, so
+// main.zig must never be analyzed there — `builtin.is_test` makes the
+// call site unreachable (lazy analysis skips the import entirely).
+const builtin = @import("builtin");
+
+fn data_deprecation_print() void {
+    if (comptime builtin.is_test) return;
+    const main = @import("main.zig");
+    main.uart_puts("file: /data (DATA partition) is deprecated — user data now lives in the host folder (--cvc-file)\n");
+}
 
 pub const max_handles_per_process: usize = 8;
 pub const max_path_len: usize = 64;
@@ -42,8 +58,7 @@ pub const Partition = enum {
     esp,
     data,
     /// M34 HF4 (issue #738): the host share (`--cvc-file`), served by
-    /// queue 5. READ-ONLY for userland until HF5 re-homes user data (the
-    /// monitor's `vf` commands remain the write path).
+    /// queue 5. HF5 (issue #739): READ-WRITE — user data lives here.
     host,
 };
 
@@ -59,6 +74,13 @@ pub const FileHandle = struct {
     /// the handle must never be read or written (a directory write would
     /// overwrite FAT metadata through fat.write_file's replace path).
     is_dir: bool = false,
+    /// M34 HF5 (issue #739): a `.host` write handle's host-side cursor
+    /// (the vf wire has no write-at-offset — the HOST's 8-slot table owns
+    /// the write position). Reads on host handles stay stateless (vf READ
+    /// at the guest `cursor`); writes advance the host cursor, mirrored
+    /// here by the confirmed byte count. Freed on close / process reset.
+    host_handle: u16 = 0,
+    host_handle_valid: bool = false,
 };
 
 pub const ParsedPath = struct {
@@ -88,6 +110,12 @@ fn get_disk_ops() ?fat.DiskOps {
     return virtio_blk.disk_ops();
 }
 
+/// HF5 deprecation one-shot: prints ONCE per boot, only on share boots
+/// (`virtio_file.available()`) so default boots stay byte-identical — the
+/// project-wide rule. `/data` still works until HF6 deletes it; the line
+/// is honest about where user data lives now.
+var data_deprecation_printed = false;
+
 fn mount_partition(p: Partition) bool {
     // M34 HF4: the host partition needs no FAT mount — it is "mounted"
     // exactly when the file channel is armed (queue 5 + `--cvc-file`).
@@ -99,7 +127,13 @@ fn mount_partition(p: Partition) bool {
         // Unreachable: the `.host` arm returned above.
         .host => unreachable,
     };
-    if (res == .ok) return true;
+    if (res == .ok) {
+        if (p == .data and !data_deprecation_printed and virtio_file.available()) {
+            data_deprecation_printed = true;
+            data_deprecation_print();
+        }
+        return true;
+    }
     // M22 D2 discovery (claim 9815): VZ's post-ExitBootServices device
     // reset makes the FIRST post-boot transport mount attempt fail with
     // io_failed while an immediate second attempt succeeds (observed on
@@ -111,6 +145,10 @@ fn mount_partition(p: Partition) bool {
         .data => fat.mount_data(ops),
         .host => unreachable,
     };
+    if (retry == .ok and p == .data and !data_deprecation_printed and virtio_file.available()) {
+        data_deprecation_printed = true;
+        data_deprecation_print();
+    }
     return retry == .ok;
 }
 
@@ -126,6 +164,11 @@ pub fn init() void {
 pub fn reset_process(pid: u64) void {
     if (pid >= process.max_processes) return;
     for (&handles[pid]) |*h| {
+        // HF5: a killed/exited process must free its HOST write handles
+        // (the host table is global — a leaked slot would starve others).
+        if (h.in_use and h.host_handle_valid) {
+            _ = virtio_file.close(h.host_handle);
+        }
         h.* = .{};
     }
 }
@@ -266,11 +309,61 @@ pub fn open(pid: u64, path_bytes: []const u8, flags: u32) i64 {
 
     const subpath = parsed.path[0..parsed.parsed_len()];
 
-    // M34 HF4: the host share is a read-only volume served by the file
-    // channel — STAT for the size, no FAT. A host path never reaches the
-    // create/replace logic below (refused before `existing_size`).
+    // M34 HF5 (issue #739): the host share is READ-WRITE now — the file
+    // channel is user data. MODE_DIR creates a directory (parity with the
+    // FAT mkdir path); MODE_WRITE (with optional CREATE/APPEND) opens a
+    // host write handle (the HOST owns the cursor; write-open without
+    // append truncates to 0 — the legacy FAT replace semantics the
+    // persistence consumers were built on); MODE_READ-only stays
+    // stateless (vf STAT for the size, vf READ at the guest cursor).
     if (parsed.partition == .host) {
-        if ((flags & (MODE_WRITE | MODE_CREATE | MODE_APPEND | MODE_DIR)) != 0) return -1; // EINVAL: read-only volume
+        if ((flags & MODE_DIR) != 0) {
+            const md = virtio_file.mkdir(subpath);
+            if (md == virtio_file.st_exists) return -9; // EEXIST
+            if (md != virtio_file.st_ok) return switch (md) {
+                virtio_file.st_not_found => -6,
+                else => -1,
+            };
+            handles[pid][slot] = .{
+                .in_use = true,
+                .partition = .host,
+                .flags = flags,
+                .path = parsed.path,
+                .path_len = parsed.path_len,
+                .is_dir = true,
+            };
+            return @intCast(slot);
+        }
+        if ((flags & MODE_WRITE) != 0) {
+            var oflags: u8 = 0;
+            if ((flags & MODE_CREATE) != 0) oflags |= virtio_file.open_flag_create;
+            if ((flags & MODE_APPEND) != 0) oflags |= virtio_file.open_flag_append;
+            var h: u16 = 0;
+            const ost = virtio_file.open(subpath, oflags, &h);
+            if (ost == virtio_file.st_not_found) return -6; // ENOENT (no create)
+            if (ost != virtio_file.st_ok) return -1; // EINVAL (host error / handle limit)
+            if ((flags & MODE_APPEND) == 0) {
+                // Replace semantics: a fresh write-open truncates. A failed
+                // truncate is honest (the handle is closed; nothing leaked).
+                if (virtio_file.truncate(h, 0) != virtio_file.st_ok) {
+                    _ = virtio_file.close(h);
+                    return -1;
+                }
+            }
+            handles[pid][slot] = .{
+                .in_use = true,
+                .partition = .host,
+                .flags = flags,
+                .cursor = 0,
+                .size = 0,
+                .path = parsed.path,
+                .path_len = parsed.path_len,
+                .is_dir = false,
+                .host_handle = h,
+                .host_handle_valid = true,
+            };
+            return @intCast(slot);
+        }
         var st = virtio_file.StatResult{};
         if (virtio_file.stat(subpath, &st) != virtio_file.st_ok) return -6; // ENOENT
         if (st.is_dir) return -1; // EINVAL: a directory opens as its own path, not a handle
@@ -417,10 +510,13 @@ pub fn write(pid: u64, fd: u64, in_buf: []const u8) i64 {
     if (!h.in_use) return -2; // EBADF
     if ((h.flags & MODE_WRITE) == 0) return -7; // EACCES
     if (h.is_dir) return -7; // M25 Lane B: never write through a dir handle
-    // M34 HF4: the host share is read-only for userland until HF5 — the
-    // monitor's `vf` commands are the write path (the host table owns the
-    // cursors there). Honest EACCES, never a silent FAT write.
-    if (h.partition == .host) return -7; // EACCES
+
+    // M34 HF5 (issue #739): host writes ride the host handle's cursor
+    // (chunked across WRITE round trips; the host returns the confirmed
+    // count, which is what advances our mirror cursor).
+    if (h.partition == .host) {
+        return write_host(h, in_buf);
+    }
 
     if (in_buf.len == 0) return 0;
     if (h.cursor + in_buf.len > fat.write_content_max) return -5; // ENOSPC
@@ -458,12 +554,42 @@ pub fn write(pid: u64, fd: u64, in_buf: []const u8) i64 {
     return @intCast(in_buf.len);
 }
 
+/// The `.host` partition's write loop: chunked vf WRITE round trips
+/// through the HOST handle (each ≤ write_chunk_max), mirroring the
+/// host-confirmed byte count into the guest cursor/size. Returns bytes
+/// written, or a negative error. The host's 8-slot handle table is a
+/// real cap (st_handle → ENOSPC-style EINVAL here — the guest never
+/// leaks: close/reset free slots).
+fn write_host(h: *FileHandle, in_buf: []const u8) i64 {
+    if (!h.host_handle_valid) return -7; // EACCES (no write handle)
+    if (in_buf.len == 0) return 0;
+    var off: usize = 0;
+    while (off < in_buf.len) {
+        const take = @min(in_buf.len - off, virtio_file.write_chunk_max);
+        var written: u64 = 0;
+        const st = virtio_file.write(h.host_handle, in_buf[off .. off + take], &written);
+        if (st != virtio_file.st_ok) {
+            // A partial write already advanced the host cursor; the guest
+            // mirror reflects only confirmed bytes — honest accounting.
+            return if (off > 0) @intCast(off) else -1;
+        }
+        off += @intCast(written);
+        h.cursor += @intCast(written);
+    }
+    h.size = @max(h.size, h.cursor);
+    return @intCast(in_buf.len);
+}
+
 /// Close open handle `fd`.
-/// Returns 0 on success, or -2 (`EBADF`).
+/// Returns 0 on success, or -2 (`EBADF`). A host write handle is closed
+/// on the HOST (flush + free the table slot) before the guest slot frees.
 pub fn close(pid: u64, fd: u64) i64 {
     if (pid >= process.max_processes or fd >= max_handles_per_process) return -2;
     if (!handles[pid][fd].in_use) return -2; // EBADF
 
+    if (handles[pid][fd].host_handle_valid) {
+        _ = virtio_file.close(handles[pid][fd].host_handle);
+    }
     handles[pid][fd] = .{};
     return 0;
 }
@@ -537,10 +663,17 @@ pub fn delete(pid: u64, path_bytes: []const u8) i64 {
     if (path_bytes.len == 0 or path_bytes.len > max_path_len) return -1;
     const parsed = parse_path(path_bytes) orelse return -1;
     if (!mount_partition(parsed.partition)) return -6;
-    // M34 HF4: the host share is read-only for userland (monitor `vf`
-    // commands mutate it) — never route a host path into the FAT driver.
-    if (parsed.partition == .host) return -1; // EINVAL: read-only volume
     const subpath = parsed.path[0..parsed.parsed_len()];
+    // M34 HF5 (issue #739): host deletes route to the channel — never the
+    // FAT driver.
+    if (parsed.partition == .host) {
+        return switch (virtio_file.delete(subpath)) {
+            virtio_file.st_ok => 0,
+            virtio_file.st_not_found => -6,
+            virtio_file.st_is_dir => -1,
+            else => -6,
+        };
+    }
     return switch (fat.delete_file(subpath)) {
         .ok => 0,
         .not_found => -6,
@@ -560,8 +693,15 @@ pub fn rename(pid: u64, old_bytes: []const u8, new_bytes: []const u8) i64 {
     const new = parse_path(new_bytes) orelse return -1;
     if (old.partition != new.partition) return -1; // cross-volume unsupported
     if (!mount_partition(old.partition)) return -6;
-    // M34 HF4: the host share is read-only for userland.
-    if (old.partition == .host) return -1; // EINVAL: read-only volume
+    // M34 HF5 (issue #739): host renames route to the channel (stateless
+    // NUL-framed RENAME; the host overwrites the target, like FAT).
+    if (old.partition == .host) {
+        return switch (virtio_file.rename(old.path[0..old.parsed_len()], new.path[0..new.parsed_len()])) {
+            virtio_file.st_ok => 0,
+            virtio_file.st_not_found => -6,
+            else => -1, // exists/host error — no EEXIST row in the frozen ABI
+        };
+    }
     return switch (fat.rename_file(old.path[0..old.parsed_len()], new.path[0..new.parsed_len()])) {
         .ok => 0,
         .not_found => -6,
@@ -583,8 +723,15 @@ pub fn truncate(pid: u64, fd: u64, new_size: u32) i64 {
     if (!h.in_use) return -2; // EBADF
     if ((h.flags & MODE_WRITE) == 0) return -7; // EACCES
     if (h.is_dir) return -7; // M25 Lane B: never truncate through a dir handle
-    // M34 HF4: the host share is read-only for userland.
-    if (h.partition == .host) return -7; // EACCES
+    // M34 HF5 (issue #739): host truncate rides the host handle.
+    if (h.partition == .host) {
+        if (!h.host_handle_valid) return -7; // EACCES
+        const st = virtio_file.truncate(h.host_handle, new_size);
+        if (st != virtio_file.st_ok) return -1; // EINVAL (host error)
+        h.size = new_size;
+        if (h.cursor > new_size) h.cursor = new_size;
+        return 0;
+    }
     if (!mount_partition(h.partition)) return -6;
 
     const subpath = h.path[0..h.path_len];

@@ -14,7 +14,7 @@ const ui = @import("lib/ui.zig");
 pub const default_ip: u32 = 0x0a000002; // 10.0.0.2
 pub const default_port: u16 = 80;
 pub const default_path: []const u8 = "/file.bin";
-pub const default_dest: []const u8 = "DOWNLOAD.OUT";
+pub const default_dest: []const u8 = "/host/DOWNLOAD.OUT"; // M34 HF5 (#739): downloads land in the host folder
 pub const header_scratch_max: usize = 1024;
 
 pub const ParsedUrl = struct {

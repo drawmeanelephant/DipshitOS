@@ -817,7 +817,7 @@ pub const AppState = struct {
     // Definitions (K15)
     // -------------------------------------------------------------------
 
-    const defs_path = "/data/calc_defs.txt";
+    const defs_path = "/host/calc_defs.txt"; // M34 HF5 (#739)
 
     fn defs_load(self: *AppState) void {
         var file_buf: [256]u8 = undefined;
@@ -842,7 +842,7 @@ pub const AppState = struct {
     // Settings / formatting controls (K12)
     // -------------------------------------------------------------------
 
-    const cfg_path = "/data/calc_cfg.txt";
+    const cfg_path = "/host/calc_cfg.txt"; // M34 HF5 (#739)
 
     fn cfg_load(self: *AppState) void {
         var file_buf: [64]u8 = undefined;

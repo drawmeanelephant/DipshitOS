@@ -40,7 +40,20 @@
 #   count (the ESP one has 19) — proving the desktop's manifest re-point
 #   to `/host/APPS.TXT`.
 #
-# Every boot repeats phases 1+2, so a 4-boot run covers everything.
+#   Phase 5 (HF5 — issue #739): USER-DATA MIGRATION, one boot: the boot
+#   itself runs the one-time /data -> /host migration (the image's DATA
+#   partition has README.TXT + DATA.TXT — byte-known fixtures; the hidden
+#   `.virelai-migrated` marker makes it one-time), then `settings set
+#   hostname hf5-box` persists to the SHARE (the kernel settings engine
+#   re-pointed) and `screenshot SHOT.BMP` streams the framebuffer BMP to
+#   the SHARE (re-pointed). The gate verifies ALL of it on the HOST DISK:
+#   README.TXT + DATA.TXT byte-match the /data fixtures, the marker
+#   exists, SETTINGS.TXT carries `hostname=hf5-box`, and SHOT.BMP is a
+#   real BMP of the right size. The migration's deprecation line
+#   (`migrate: copied 2 file(s) ... deprecated`) is the /data-deprecation
+#   needle.
+#
+# Every boot repeats phases 1+2, so a 5-boot run covers everything.
 #
 # Run isolation per claim 5069 (tools/lib/gate-run.sh): the share dir
 # lives inside the private RUN_DIR, so parallel gate instances cannot
@@ -59,7 +72,7 @@ GATE_LOG="$(art m34-hf1-hf2-hf3-hf4-live.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
 trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
-BOOTS="${BOOTS:-4}"
+BOOTS="${BOOTS:-5}"
 REPORT="$(art live-vf-report.txt)"
 STATIC_EXIT_LINE="tasks user-el0 exited status=7"
 PROBE_OK_LINE="vf: probe 32k ok len=0x8000 cksum=0x0000 free=0020"
@@ -68,7 +81,7 @@ HF4_MARKER="hf4: hello from host"
 HF4_EXIT="tasks user-exec exited status=43"
 HF4_MANIFEST_LINE="desktop: manifest apps=2"
 
-echo "=== verify-live-vf: M34 HF1+HF2+HF3+HF4 (issues #735/#736/#737/#738) — host file channel on VZ, $BOOTS boot(s) ==="
+echo "=== verify-live-vf: M34 HF1+HF2+HF3+HF4+HF5 (issues #735/#736/#737/#738/#739) — host file channel on VZ, $BOOTS boot(s) ==="
 zig version
 swift --version 2>&1 | head -1
 sw_vers
@@ -198,6 +211,13 @@ elif phase in ("delete", "app"):
         print("HF3-DISK: FAIL — hf3 dir missing after %s" % phase); ok = False
     else:
         print("HF3-DISK: hf3 dir survived %s" % phase)
+elif phase == "migrate":
+    # HF5 boot 1: nothing mutated yet — renamed.bin absent AND the hf3
+    # dir itself absent (the migrate boot runs BEFORE the mutate boot).
+    if os.path.exists(rp) or os.path.isdir(hd):
+        print("HF3-DISK: FAIL — hf3 state present before the mutate phase"); ok = False
+    else:
+        print("HF3-DISK: hf3 untouched before the mutate phase")
 sys.exit(0 if ok else 1)
 EOF
 }
@@ -205,6 +225,20 @@ EOF
 # --- per-phase guest scripts ---
 SCRIPT_H12="$RUN_DIR/script-h12.txt"
 printf 'vf ls\nvf cat big.bin\nvf ls sub\nvf cat sub/hello.txt\n' > "$SCRIPT_H12"
+
+# HF5 (issue #739): USER-DATA MIGRATION + re-pointed persistence. The
+# MIGRATION itself runs at boot (before this script) — /data (README.TXT +
+# DATA.TXT) lands in the share with the hidden .virelai-migrated marker;
+# then the script re-points two more consumers through the channel:
+# `settings set` (kernel settings engine → /host/SETTINGS.TXT) and
+# `screenshot SHOT.BMP` (framebuffer BMP streamed to the share).
+SCRIPT_MIGRATE="$RUN_DIR/script-migrate.txt"
+cat > "$SCRIPT_MIGRATE" <<'EOF'
+settings set hostname hf5-box
+settings get hostname
+screenshot SHOT.BMP
+echo rx-hf5-migrate
+EOF
 
 SCRIPT_MUTATE="$RUN_DIR/script-mutate.txt"
 cat > "$SCRIPT_MUTATE" <<'EOF'
@@ -238,7 +272,7 @@ exec DESKTOP.BIN
 echo rx-hf4-app
 EOF
 
-PHASES=(mutate readback delete app)
+PHASES=(migrate mutate readback delete app)
 phase_of() { local t=$((10#$1)); echo "${PHASES[$(( (t - 1) % ${#PHASES[@]} ))]}"; }
 cat_script_of() {
     local p="$1"
@@ -248,12 +282,66 @@ cat_script_of() {
     local out="$RUN_DIR/script-$p-combined.txt"
     cat "$SCRIPT_H12" > "$out"
     case "$p" in
+        migrate)  cat "$SCRIPT_MIGRATE" >> "$out" ;;
         mutate)   cat "$SCRIPT_MUTATE" >> "$out" ;;
         readback) cat "$SCRIPT_READBACK" >> "$out" ;;
         delete)   cat "$SCRIPT_DELETE" >> "$out" ;;
         app)      cat "$SCRIPT_APP" >> "$out" ;;
     esac
     echo "$out"
+}
+
+# HF5 host-disk verification: everything the guest wrote must be on the
+# macOS filesystem, byte-verifiable.
+verify_hf5_disk() {
+    python3 - "$SHARE" <<'PYEOF'
+import os, struct, sys
+share = sys.argv[1]
+ok = True
+# 1. Migration: README.TXT + DATA.TXT byte-match the /data volume fixtures
+#    (image/mkfat32.py build_data_volume), and the hidden marker exists.
+readme = b"VirelaiOS general filesystem: a second FAT32 volume on the " \
+         b"same disk (claim 3678, milestone four card 2)\n"
+data = b"general data volume contents: 1234567890\n"
+for name, expect in (("README.TXT", readme), ("DATA.TXT", data)):
+    p = os.path.join(share, name)
+    if not os.path.exists(p):
+        print("HF5-DISK: FAIL — %s missing (migration did not copy it)" % name); ok = False
+    elif open(p, "rb").read() != expect:
+        print("HF5-DISK: FAIL — %s bytes differ from the /data fixture" % name); ok = False
+    else:
+        print("HF5-DISK: %s migrated byte-exact from /data" % name)
+if not os.path.exists(os.path.join(share, ".virelai-migrated")):
+    print("HF5-DISK: FAIL — .virelai-migrated marker missing"); ok = False
+else:
+    print("HF5-DISK: .virelai-migrated marker present (one-time migration)")
+# 2. Settings: `settings set hostname hf5-box` persisted to the SHARE.
+sp = os.path.join(share, "SETTINGS.TXT")
+if not os.path.exists(sp):
+    print("HF5-DISK: FAIL — SETTINGS.TXT missing on the share"); ok = False
+elif b"hostname=hf5-box" not in open(sp, "rb").read():
+    print("HF5-DISK: FAIL — SETTINGS.TXT lacks hostname=hf5-box"); ok = False
+else:
+    print("HF5-DISK: SETTINGS.TXT carries hostname=hf5-box")
+# 3. Screenshot: SHOT.BMP is a real BMP (magic + size field == 54 + stride*720
+#    for the 1280x720 24bpp framebuffer; the guest streamed it in chunks).
+bp = os.path.join(share, "SHOT.BMP")
+if not os.path.exists(bp):
+    print("HF5-DISK: FAIL — SHOT.BMP missing on the share"); ok = False
+else:
+    blob = open(bp, "rb").read()
+    stride = 1280 * 3
+    expect_size = 54 + stride * 720
+    if len(blob) < 4 or blob[0:2] != b"BM":
+        print("HF5-DISK: FAIL — SHOT.BMP lacks the BM magic"); ok = False
+    elif struct.unpack("<I", blob[2:6])[0] != expect_size:
+        print("HF5-DISK: FAIL — SHOT.BMP size field %d != %d" % (struct.unpack("<I", blob[2:6])[0], expect_size)); ok = False
+    elif len(blob) != expect_size:
+        print("HF5-DISK: FAIL — SHOT.BMP on-disk %d != %d" % (len(blob), expect_size)); ok = False
+    else:
+        print("HF5-DISK: SHOT.BMP is a %d-byte BMP (magic + size + length match)" % expect_size)
+sys.exit(0 if ok else 1)
+PYEOF
 }
 
 run_one() {
@@ -265,14 +353,21 @@ run_one() {
     # The HF4 app phase execs two programs (app marker + exit report then
     # DESKTOP.BIN) after the H12 stream, so it needs a longer boot window
     # than the HF1–HF3 phases — observed live: the 90 s default cut the
-    # app's final marker mid-write at the deadline.
+    # app's final marker mid-write at the deadline. The HF5 migrate phase
+    # ALSO needs the longer window (the screenshot streams ~2.7 MiB in ~86
+    # chunk round trips) AND a GPU device (`screenshot` requires the
+    # framebuffer — gpu_ready — so --display is attached for that boot).
     local timeout=90
     [ "$phase" = app ] && timeout=150
+    [ "$phase" = migrate ] && timeout=180
     rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log"
 
+    local display_args=()
+    [ "$phase" = migrate ] && display_args=(--display --screen "$RUN_DIR/gpu-screen")
     set +e
     host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
         --cvc-file "$SHARE" \
+        "${display_args[@]}" \
         --serial "$RUN_DIR/vm-serial-$tag.log" \
         --script "$script" --script-after "$STATIC_EXIT_LINE" \
         --timeout "$timeout" > "$run_log" 2>&1
@@ -304,8 +399,27 @@ run_one() {
     fi
 
     # --- HF3/HF4 phase needles + host-disk verification ---
-    local phase_needs=1 hf3_disk=0
+    local phase_needs=1 hf3_disk=0 hf5_disk=0
     case "$phase" in
+        migrate)
+            # HF5 (issue #739): the boot-time migration copied the /data
+            # fixtures to the share (the summary line also carries the
+            # /data deprecation statement — the "reads emit the deprecation
+            # line" needle), `settings set` persisted to the SHARE, and
+            # `screenshot` streamed a BMP to the SHARE. Host-side byte
+            # verification runs below (verify_hf5_disk).
+            # Substring matches: the migrate summary continues past "to
+            # /host" with the deprecation statement, and settings prints
+            # the "settings: " prefix before the key=value.
+            [ "$(grep -aFc -- "migrate: copied 2 file(s) from /data to /host" "$SER" || true)" -ge 1 ] || phase_needs=0
+            [ "$(grep -aFc -- "is deprecated" "$SER" || true)" -ge 1 ] || phase_needs=0
+            [ "$(grep -aFc -- "hostname=hf5-box" "$SER" || true)" -ge 1 ] || phase_needs=0
+            [ "$(grep -aFc -- "screenshot: saved 1280x720 BMP to SHOT.BMP" "$SER" || true)" = 1 ] || phase_needs=0
+            [ "$(grep -aFxc -- "rx-hf5-migrate" "$SER" || true)" = 1 ] || phase_needs=0
+            [ "$(grep -aFc -- "VF-FILE: OPEN SETTINGS.TXT" "$run_log" || true)" -ge 1 ] || phase_needs=0
+            [ "$(grep -aFc -- "VF-FILE: WRITE h=" "$run_log" || true)" -ge 2 ] || phase_needs=0
+            [ "$(grep -aFc -- "VF-FILE: OPEN SHOT.BMP" "$run_log" || true)" -ge 1 ] || phase_needs=0
+            ;;
         mutate)
             [ "$(grep -aFxc -- "vf: open hf3/new.bin h=0" "$SER" || true)" = 1 ] || phase_needs=0
             [ "$(grep -aFxc -- "vf: write 0 n=100000 wrote=100000 chunks=4" "$SER" || true)" = 1 ] || phase_needs=0
@@ -355,17 +469,27 @@ run_one() {
     if verify_hf3_disk "$phase"; then
         hf3_disk=1
     fi
+    # HF5 (issue #739): the migrate boot's host-disk verification (the
+    # migration fixtures + marker + SETTINGS.TXT + SHOT.BMP). Other phases
+    # skip it (their share state is HF3/HF4's concern).
+    if [ "$phase" = migrate ]; then
+        if verify_hf5_disk; then
+            hf5_disk=1
+        fi
+    else
+        hf5_disk=1
+    fi
 
-    echo "$tag(phase=$phase): runner-rc=$rc serial-bytes=$bytes banner=$banner probe=$probe listed=$listed statline=$statline catok=$catok catcksum=$catcksum rts=$rts sub=$sub hello=$hello runner-write=$runner_write phase=$phase_needs hf3-disk=$hf3_disk fatal=$fatal" | tee -a "$REPORT"
+    echo "$tag(phase=$phase): runner-rc=$rc serial-bytes=$bytes banner=$banner probe=$probe listed=$listed statline=$statline catok=$catok catcksum=$catcksum rts=$rts sub=$sub hello=$hello runner-write=$runner_write phase=$phase_needs hf3-disk=$hf3_disk hf5-disk=$hf5_disk fatal=$fatal" | tee -a "$REPORT"
     [ "$rc" = 0 ] && [ "$banner" = 1 ] && [ "$probe" = 1 ] && [ "$listed" = 1 ] && \
         [ "$statline" = 1 ] && [ "$catok" = 1 ] && [ "$catcksum" = 1 ] && [ "$rts" -ge 2 ] && \
         [ "$sub" = 1 ] && [ "$hello" = 1 ] && [ "$runner_write" = 1 ] && \
-        [ "$phase_needs" = 1 ] && [ "$hf3_disk" = 1 ] && [ "$fatal" = 0 ]
+        [ "$phase_needs" = 1 ] && [ "$hf3_disk" = 1 ] && [ "$hf5_disk" = 1 ] && [ "$fatal" = 0 ]
 }
 
 : > "$REPORT"
 {
-    echo "VIRELAIOS live host-file-channel gate (M34 HF1+HF2+HF3+HF4, issues #735/#736/#737/#738)"
+    echo "VIRELAIOS live host-file-channel gate (M34 HF1+HF2+HF3+HF4+HF5, issues #735/#736/#737/#738/#739)"
     echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     echo
@@ -383,7 +507,7 @@ done
 echo
 echo "=== result ==="
 if [ "$pass" = "$n" ]; then
-    echo "verify-live-vf: PASS — VF_PROBE 32 KiB spike + vf ls/cat + HF3 mutation round-trips (host-verified) + HF4 drop-and-exec app delivery ($pass/$n boot(s)); see $REPORT and $GATE_LOG"
+    echo "verify-live-vf: PASS — VF_PROBE 32 KiB spike + vf ls/cat + HF3 mutation round-trips (host-verified) + HF4 drop-and-exec app delivery + HF5 user-data migration/settings/screenshot (host-verified) ($pass/$n boot(s)); see $REPORT and $GATE_LOG"
     exit 0
 else
     echo "verify-live-vf: FAILED — $pass/$n boot(s) passed; see $REPORT and per-boot logs."

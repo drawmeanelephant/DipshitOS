@@ -43,6 +43,10 @@ const driving_award = @import("driving_award.zig"); // claim 1543 (milestone six
 const wm_server = @import("wm_server.zig"); // M32 WMS2 (issue #622): when a WM registers, pacing moves off this idle drain to the tick path
 const scrollback_mod = @import("scrollback.zig"); // M18 T1 (issue #404): terminal scrollback ring
 const clipboard = @import("clipboard.zig"); // M18 T2 (issue #405): shared clipboard for copy/paste
+// M34 HF5 (issue #739): shell history + env persist to the HOST SHARE
+// when the file channel is armed (ESP fallback otherwise — dual path
+// until HF6).
+const virtio_file = @import("virtio_file.zig");
 
 /// M18 T4: path for persistent shell history file.
 const history_path = "HISTORY.TXT";
@@ -380,8 +384,31 @@ fn env_unset(name: []const u8) bool {
 }
 
 /// M19 P3: persist the full env table to FAT (one NAME=VAL per line).
+/// HF5: read the existing env file (share first, ESP fallback). No
+/// disk_ready guard on the ESP side — esp.lookup searches the window and
+/// returns null when absent (the M19 P3 test seeds ENV.TXT without a
+/// ready disk).
+fn env_read_existing(buf: []u8) usize {
+    if (virtio_file.available()) {
+        return virtio_file.read_whole(env_path, buf) orelse 0;
+    }
+    const entry = esp.lookup(env_path) orelse return 0;
+    const content = esp.content_of(entry);
+    const n = @min(content.len, buf.len);
+    @memcpy(buf[0..n], content[0..n]);
+    return n;
+}
+
+/// HF5: write the whole env file (share first, ESP fallback).
+fn env_write_all(bytes: []const u8) void {
+    if (virtio_file.available()) {
+        _ = virtio_file.write_whole(env_path, bytes);
+        return;
+    }
+    if (esp.disk_ready()) _ = esp.write_file(env_path, bytes);
+}
+
 fn save_env() void {
-    if (!esp.disk_ready()) return;
     var buf: [2048]u8 = undefined;
     var pos: usize = 0;
     var i: usize = 0;
@@ -400,15 +427,14 @@ fn save_env() void {
         buf[pos] = '\n';
         pos += 1;
     }
-    _ = esp.write_file(env_path, buf[0..pos]);
+    env_write_all(buf[0..pos]);
 }
 
-/// M19 P3: restore the env table from the ESP window on boot.
-/// No disk_ready guard needed — esp.lookup searches the window
-/// and returns null when the file is absent.
+/// M19 P3: restore the env table on boot (share first when armed, ESP
+/// fallback).
 fn load_env() void {
-    const entry = esp.lookup(env_path) orelse return;
-    const content = esp.content_of(entry);
+    var content_buf: [2048]u8 = undefined;
+    const content = content_buf[0..env_read_existing(&content_buf)];
     if (content.len == 0) return;
     var start: usize = 0;
     var i: usize = 0;
@@ -1169,17 +1195,34 @@ pub const Shell = struct {
     }
 };
 
+/// HF5: read the existing history file (share first when armed, ESP
+/// fallback) into `buf`. Returns the byte count (0 = absent/empty).
+fn history_read_existing(buf: []u8) usize {
+    if (virtio_file.available()) {
+        return virtio_file.read_whole(history_path, buf) orelse 0;
+    }
+    if (!esp.disk_ready()) return 0;
+    const entry = esp.lookup(history_path) orelse return 0;
+    const content = esp.content_of(entry);
+    const n = @min(content.len, buf.len);
+    @memcpy(buf[0..n], content[0..n]);
+    return n;
+}
+
+/// HF5: write the whole history file (share first, ESP fallback).
+fn history_write_all(bytes: []const u8) void {
+    if (virtio_file.available()) {
+        _ = virtio_file.write_whole(history_path, bytes);
+        return;
+    }
+    if (esp.disk_ready()) _ = esp.write_file(history_path, bytes);
+}
+
 /// M18 T4: append a command line to the persistent history file.
 fn save_to_history(line: []const u8) void {
-    if (!esp.disk_ready()) return;
     // Read existing history, trim oldest if at capacity, append new line.
     var existing: [2048]u8 = undefined;
-    var existing_len: usize = 0;
-    if (esp.lookup(history_path)) |entry| {
-        const content = esp.content_of(entry);
-        existing_len = @min(content.len, 2048);
-        @memcpy(existing[0..existing_len], content[0..existing_len]);
-    }
+    const existing_len = history_read_existing(&existing);
     var line_count: usize = 0;
     var i: usize = 0;
     while (i < existing_len) : (i += 1) {
@@ -1200,14 +1243,13 @@ fn save_to_history(line: []const u8) void {
     pos += line.len;
     buf[pos] = '\n';
     pos += 1;
-    _ = esp.write_file(history_path, buf[0..pos]);
+    history_write_all(buf[0..pos]);
 }
 
 /// M18 T4: load persistent history from HISTORY.TXT into editor ring.
 fn load_history(editor: *lineedit.LineEditor) void {
-    if (!esp.disk_ready()) return;
-    const entry = esp.lookup(history_path) orelse return;
-    const content = esp.content_of(entry);
+    var content_buf: [2048]u8 = undefined;
+    const content = content_buf[0..history_read_existing(&content_buf)];
     if (content.len == 0) return;
     var line_starts: [64]usize = undefined;
     var line_lens: [64]usize = undefined;
