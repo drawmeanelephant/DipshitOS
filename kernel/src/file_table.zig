@@ -329,9 +329,16 @@ pub fn read(pid: u64, fd: u64, out_buf: []u8) i64 {
     while (total < out_buf.len and h.cursor < h.size) {
         const r = virtio_file.read(subpath, h.cursor);
         if (r.status != virtio_file.st_ok or r.data.len == 0) break;
-        @memcpy(out_buf[total..][0..r.data.len], r.data);
-        total += r.data.len;
-        h.cursor += @intCast(r.data.len);
+        // W3 gate finding (claim 3456): a vf READ reply carries the whole
+        // remaining file (up to the 32 KiB reply window), not a capped
+        // chunk — the naive copy therefore overran out_buf.len, smashed
+        // the caller's staging, and returned a count BEYOND the caller's
+        // cap. Clamp to what the buffer holds; the next read resumes at
+        // the consistent cursor (the share is stateless per round trip).
+        const take = @min(r.data.len, out_buf.len - total);
+        @memcpy(out_buf[total..][0..take], r.data[0..take]);
+        total += take;
+        h.cursor += @intCast(take);
     }
     return @intCast(total);
 }
