@@ -175,6 +175,7 @@ loudly if the generator or a table is broken.
 | [7639-wms8-gate4-review-fixes](7639-wms8-gate4-review-fixes.md) | buffy (`agent/buffy/wms8-gate4-review-fixes`) | ✅ `agent/buffy/wms8-gate4-review-fixes` |
 | [7656-plan-milestone-15-desktop-completeness](7656-plan-milestone-15-desktop-completeness.md) | buffy (`freebuff/can-you-review-issues-223-247-and-try-to-provide-h-f6c8d8a0-9349-4ada-9bca-1705150f0bde`) | ✅ done 2026-08-20 — `docs/m17-desktop-completeness.md` exists, 127 lines, 10 cards (C1–C10) with status legend, evidence column, dependency notes, best-agent split, notes section, and three open questions for the user. |
 | [7675-m18-t2-selection](7675-m18-t2-selection.md) | buffy (`agent/buffy/m18-t2-selection`) | ✅ done 2026-08-22 |
+| [7710-m34-hf1-hf2-wire-transport](7710-m34-hf1-hf2-wire-transport.md) | buffy (`agent/buffy/m34-hf1-hf2-host-file-channel`) | ✅ done |
 | [7736-wms8-about-delete](7736-wms8-about-delete.md) | buffy (`agent/buffy/wms8-about-delete`) | ✅ `agent/buffy/wms8-about-delete` |
 | [7746-m23-editor-undo-goto-tabs-syntax](7746-m23-editor-undo-goto-tabs-syntax.md) | Buffy (`agent/buffy/m23-text-editor`) | ✅ done — 75/75 host tests pass, build clean, gate written |
 | [7921-m30-dynamic-linking](7921-m30-dynamic-linking.md) | buffy (`agent/buffy/m30-dynamic-linking`) | ✅ agent/buffy/m30-dynamic-linking |
