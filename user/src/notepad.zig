@@ -26,7 +26,7 @@ pub const window_w: u32 = 512;
 pub const window_h: u32 = 384;
 
 pub const exit_status: u32 = 43;
-pub const notes_path: []const u8 = "/data/notes.txt";
+pub const notes_path: []const u8 = "/host/notes.txt"; // M34 HF5 (#739): user data lives in the host folder
 
 // Text box geometry (the editor surface inside the window).
 pub const text_area = Rect.make(6, 36, 244, 150);

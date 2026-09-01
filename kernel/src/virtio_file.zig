@@ -414,6 +414,18 @@ pub fn read_into(path: []const u8, size: u64, out: []u8) ?usize {
     return total;
 }
 
+/// STAT + whole-file read in one call (the kernel-side consumers'
+/// pattern: settings, shell history/env, migration). Returns the byte
+/// count, or null when the file is absent / too big for `out` / the
+/// transport fails.
+pub fn read_whole(path: []const u8, out: []u8) ?usize {
+    if (!available()) return null;
+    var st = StatResult{};
+    if (stat(path, &st) != st_ok) return null;
+    if (st.is_dir or st.size == 0 or st.size > out.len) return null;
+    return read_into(path, st.size, out);
+}
+
 // ---------------------------------------------------------------------------
 // Mutation ops (HF3, issue #737)
 // ---------------------------------------------------------------------------
@@ -520,11 +532,43 @@ fn exchange_path(op: u8, path: []const u8) u8 {
     return decode_reply(vf_reply_buf[0..n]).status;
 }
 
+/// Whole-file replace-write (the FAT `write_file` semantics the
+/// persistence consumers were built on): OPEN(create) → TRUNCATE(0) →
+/// WRITE (chunked if needed) → CLOSE. Returns the final status; the host
+/// cursor owns the write position, so a concurrent read of the file
+/// between OPEN and CLOSE may see a partial write — honest, and the
+/// consumers (settings/history/env/migration) are single-writer.
+pub fn write_whole(path: []const u8, data: []const u8) u8 {
+    if (!available()) return st_host_error;
+    var h: u16 = 0;
+    const ost = open(path, open_flag_create, &h);
+    if (ost != st_ok) return ost;
+    defer _ = close(h);
+    if (truncate(h, 0) != st_ok) return st_host_error;
+    var off: usize = 0;
+    while (off < data.len) {
+        const take = @min(data.len - off, write_chunk_max);
+        var written: u64 = 0;
+        const wst = write(h, data[off .. off + take], &written);
+        if (wst != st_ok) return wst;
+        off += @intCast(written);
+    }
+    return st_ok;
+}
+
 /// Pattern staging for `write_pattern` — BSS (the 16 KiB boot stack cannot
 /// hold a 32 KiB chunk; claim-0015 also wants device paths runtime-only,
 /// though this buffer itself never touches the device — write() copies it
 /// into its own BSS request buffer).
 var vf_write_pattern_buf: [write_chunk_max]u8 align(16) = undefined;
+
+/// Shared chunk-assembly staging for kernel-side streamers (the monitor's
+/// `screenshot` BMP writer) — BSS, same reasoning as above: the 16 KiB
+/// boot stack cannot hold a 32 KiB chunk. Callers fill it and hand slices
+/// to `write` (which copies into its own request buffer), so it never
+/// touches the device directly. +32 KiB BSS (budget-checked in the class-A
+/// gate).
+pub var chunk_staging: [write_chunk_max]u8 align(16) = undefined;
 
 pub const WritePatternResult = struct {
     status: u8 = st_host_error,

@@ -12,18 +12,33 @@
 #      hardcoded fallback).
 #   2. The runner navigates the manifest menu to FILE.BIN and presses Enter;
 #      DESKTOP launches it through the M11 sys_exec seam (slot 28).
-#   3. FILE.BIN opens its own window (auto-focused), lists `/data/` via
-#      sys_dir_list (slot 27), and the runner's second Enter opens the
+#   3. FILE.BIN opens its own window (auto-focused), lists `/host/` via
+#      sys_dir_list (slot 27) — M34 HF5 (issue #739): FILE.BIN's root is
+#      the HOST SHARE (--cvc-file), which the gate seeds with the SAME
+#      byte-known fixtures (README.TXT + DATA.TXT) the FAT DATA volume
+#      carries, plus the shell's HISTORY.TXT (HF5 re-point — the shell
+#      history consumer now writes the share, so the root listing is 3
+#      entries) — and the runner's second Enter opens the
 #      selected first entry read-only via sys_file_open/read (slots 23/24).
+#      NOTE --chords-view: --cvc-file implies via-virtio, which would
+#      switch the chords to the cv-input transport paced at 0.25 s/stroke —
+#      too fast for the launch-then-focus handoff (the second Return hits
+#      the desktop before FILE.BIN's window takes focus). The flag forces
+#      the VZ view path, which honors --input-chords-delay 2.0, restoring
+#      the deterministic pre-HF5 pacing.
 #      OBSERVED 2026-08-24 (claim 2259): the opened entry is DATA.TXT —
 #      PR #512 (658bd86, 2026-08-23) added alphabetical sorting to the
 #      listing (sort_column=.name, sort_asc=true), and DATA.TXT sorts
 #      before README.TXT, so the initial selection (index 0) changed.
+#      The DESKTOP manifest still reads apps=19 from /esp/APPS.TXT: the
+#      share deliberately carries NO APPS.TXT, so the HF4 host-first open
+#      fails and the ESP fallback (also the migration/fallback proof) wins.
 #   4. The syscalls report proves the seam: sys_exec once, sys_dir_list
 #      twice (main listing + F4 du walk, claim 2539), file_open six times
-#      and file_read three times — desktop host-open (HF4, fails) + ESP
-#      manifest + FILE.BIN's recent-ring load (fails) + preview + view +
-#      recent-ring save (claim 2539) — see the needles below.
+#      and file_read three times — desktop host-open (HF4, no APPS.TXT in
+#      the share, fails) + ESP manifest + FILE.BIN's recent-ring load
+#      (absent, fails) + preview + view + recent-ring save (claim 2539) —
+#      see the needles below.
 #
 # Delete/rename (B1, slots 34-37) are proven separately by
 # tools/verify-live-fs-mutation.sh; this gate keeps the read-only browser
@@ -70,12 +85,25 @@ echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
 # Build all binaries and disk image
 zig build
 zig build image
-swift build --package-path host/vm-runner --configuration release
+# M34 HF5 (issue #739): the gate attaches the --cvc-file share, which
+# requires the SPIKE runner build (the custom-virtio FILE channel).
+swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 # --- per-run isolation -------------------------------------------------------
 gate_begin live-file-browser
 echo "run dir: $RUN_DIR"
+
+# M34 HF5 (issue #739): FILE.BIN's root is the HOST SHARE. Seed it with
+# the same two byte-known fixtures the FAT DATA volume carries (byte-identical
+# to image/mkfat32.py build_data_volume), and deliberately NO APPS.TXT so
+# the desktop falls back to /esp/APPS.TXT (manifest apps=19 preserved).
+SHARE="$RUN_DIR/share"
+mkdir -p "$SHARE"
+printf '%s' 'VirelaiOS general filesystem: a second FAT32 volume on the same disk (claim 3678, milestone four card 2)' > "$SHARE/README.TXT"
+printf '\n' >> "$SHARE/README.TXT"
+printf '%s' 'general data volume contents: 1234567890' > "$SHARE/DATA.TXT"
+printf '\n' >> "$SHARE/DATA.TXT"
 
 # Boot the desktop only; FILE.BIN is launched from EL0 by the desktop, never
 # exec'd by the monitor (the composition proof).
@@ -104,16 +132,18 @@ rm -f "$RUN_DIR"/gpu-screen-*
 set +e
 host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
     --serial "$RUN_DIR/vm-serial.log" \
+    --cvc-file "$SHARE" \
     --display --input --screen "$RUN_DIR/gpu-screen" \
     --script "$RUN_DIR/script.txt" \
     --script-after "$STATIC_EXIT_LINE" \
     --input-chords "$CHORDS" \
     --input-chords-after "desktop: menu ready" \
     --input-chords-delay 2.0 \
+    --chords-view \
     --script2 "$RUN_DIR/script2.txt" \
     --script2-after "file: view DATA.TXT" \
     --script-expect "done-file-sweep" \
-    --timeout 90 > "$(art live-file-browser-run.txt)" 2>&1
+    --timeout 120 > "$(art live-file-browser-run.txt)" 2>&1
 RC=$?
 set -e
 
@@ -155,21 +185,23 @@ grep -q "28 sys_exec calls=1" "$SER" || {
 }
 echo "SYS_EXEC: OK"
 
-# 3. FILE.BIN opened its window and browsed /data (claim 4742).
+# 3. FILE.BIN opened its window and browsed /host (claim 4742; M34 HF5
+#    issue #739 re-point: the share seeded with the DATA fixtures).
 grep -q "file: ready" "$SER" || {
     echo "ERROR: FILE.BIN ready marker missing from serial log"
     exit 1
 }
 echo "FILE.READY: OK"
-grep -q "file: listing 2 entries" "$SER" || {
-    echo "ERROR: FILE.BIN listing marker (2 entries) missing from serial log"
+# 3 entries: README.TXT + DATA.TXT (seeded) + HISTORY.TXT (the HF5 shell
+# history re-point writes the share at boot).
+grep -q "file: listing 3 entries" "$SER" || {
+    echo "ERROR: FILE.BIN listing marker (3 entries) missing from serial log"
     exit 1
 }
 echo "FILE.LIST: OK"
-# Expectation revised to OBSERVED BYTES (2026-09-01, claim 1732):
-# calls=2 — the main listing PLUS one recursive dir_list per level from
-# F4's bounded du total (claim 2539, depth ≤ 3; /data has no subdirs at
-# depth 1, so exactly one extra walk).
+# Expectation revised to OBSERVED BYTES (2026-09-01, claim 1732):#    calls=2 — the main listing PLUS one recursive dir_list per level from
+#    F4's bounded du total (claim 2539, depth ≤ 3; /host has no subdirs at
+#    depth 1, so exactly one extra walk).
 grep -q "27 sys_dir_list calls=2" "$SER" || {
     echo "ERROR: sys_dir_list call count (calls=2) missing from syscalls report"
     exit 1
@@ -191,17 +223,20 @@ grep -q "file: view DATA.TXT" "$SER" || {
 }
 echo "FILE.VIEW: OK"
 
-# 5. File seam accounting — OBSERVED BYTES (2026-09-01, claim 1732):
+#   5. File seam accounting — OBSERVED BYTES (2026-09-01, claims 1732 +
+#   3082; the count is IDENTICAL with the HF5 share armed, because the
+#    successes and failures swap roles without changing the totals):
 #    calls=6 today (was 3 at the 2026-08-24 revision):
-#      desktop host-manifest open /host/APPS.TXT — fails, still counts
-#        (M34 HF4 issue #738 host-first manifest, claim 7599)
+#      desktop host-manifest open /host/APPS.TXT — fails (no APPS.TXT in
+#        the share), still counts (M34 HF4 issue #738 host-first manifest)
 #      desktop /esp/APPS.TXT manifest open
-#      FILE.BIN startup recent-ring load /data/RECENT.SAV — absent, still
+#      FILE.BIN startup recent-ring load /host/RECENT.SAV — absent, still
 #        counts (M25 F5, claim 2539)
-#      FILE.BIN C7 inline preview open (DATA.TXT)
-#      FILE.BIN view open (DATA.TXT)
-#      FILE.BIN recent-ring save /data/RECENT.SAV (M25 F5, claim 2539)
-#    file_read stays calls=3 (the two opens that failed/saved never read).
+#      FILE.BIN C7 inline preview open (DATA.TXT — succeeds on the share)
+#      FILE.BIN view open (DATA.TXT — succeeds on the share)
+#      FILE.BIN recent-ring save /host/RECENT.SAV (M25 F5 — succeeds on
+#        the share)
+#    file_read stays calls=3 (the two opens that failed never read).
 grep -q "23 sys_file_open calls=6" "$SER" || {
     echo "ERROR: sys_file_open call count (calls=6) missing from syscalls report"
     exit 1
@@ -227,11 +262,11 @@ Status: PASS (1/1 on Apple Virtualization.framework)
 Verified Components:
 - DESKTOP.BIN: manifest-driven launcher (19 apps incl FILE.BIN, claim 8877)
 - sys_exec (ADR 0007 slot 28): DESKTOP launches FILE.BIN from EL0
-- FILE.BIN: lists /data and opens the selected entry (DATA.TXT) read-only (claim 4742)
+- FILE.BIN: lists /host (HF5 share) and opens the selected entry (DATA.TXT) read-only (claim 4742)
 - sys_dir_list (slot 27) / sys_file_open+read (slots 23/24)
 
 Serial Output Highlights:
 $(grep -E 'desktop:|file:|sys_(exec|dir_list|file_open|file_read)' "$SER" || true)
 EOF
 
-echo "verify-live-file-browser: PASS — DESKTOP.BIN launches FILE.BIN from the manifest menu and it browses /data on VZ."
+echo "verify-live-file-browser: PASS — DESKTOP.BIN launches FILE.BIN from the manifest menu and it browses /host on VZ."

@@ -5914,7 +5914,84 @@ fn cmd_screen_peek(m: *Monitor) ExecError {
     return .none;
 }
 
-/// M27 G27 (Issue #470): capture current framebuffer and save as BMP to FAT.
+/// M34 HF5 (issue #739): stream the framebuffer as a BMP to the HOST
+/// SHARE through queue 5 when the channel is armed (chunked WRITE round
+/// trips ≤ 32 KiB; a 1280×720 BMP is ~2.7 MiB ≈ 86 chunks — assembled in
+/// the module's BSS chunk_staging, never the 16 KiB boot stack). The 54-
+/// byte header layout is byte-identical to fat.write_fb_bmp (the host
+/// verifies the file on disk). Returns true on a fully-written file.
+fn vf_write_fb_bmp(path: []const u8, width: u32, height: u32, fb: [*]const u8) bool {
+    const row_raw: usize = @as(usize, width) * 3;
+    const row_pad: usize = (4 - (row_raw % 4)) % 4;
+    const row_stride: usize = row_raw + row_pad;
+    const total_pixel_bytes: usize = row_stride * @as(usize, height);
+    const total_file_size: usize = 54 + total_pixel_bytes;
+
+    var h: u16 = 0;
+    if (virtio_file.open(path, virtio_file.open_flag_create, &h) != virtio_file.st_ok) return false;
+    defer _ = virtio_file.close(h);
+    _ = virtio_file.truncate(h, 0);
+
+    const chunk = &virtio_file.chunk_staging;
+    var off: usize = 0;
+    // 54-byte standard BMP header (mirror of fat.write_fb_bmp).
+    @memset(chunk[0..54], 0);
+    chunk[0] = 'B';
+    chunk[1] = 'M';
+    std.mem.writeInt(u32, chunk[2..6], @intCast(total_file_size), .little);
+    std.mem.writeInt(u32, chunk[10..14], 54, .little);
+    std.mem.writeInt(u32, chunk[14..18], 40, .little);
+    std.mem.writeInt(i32, chunk[18..22], @intCast(width), .little);
+    std.mem.writeInt(i32, chunk[22..26], @intCast(height), .little);
+    std.mem.writeInt(u16, chunk[26..28], 1, .little);
+    std.mem.writeInt(u16, chunk[28..30], 24, .little);
+    std.mem.writeInt(u32, chunk[30..34], 0, .little);
+    std.mem.writeInt(u32, chunk[34..38], @intCast(total_pixel_bytes), .little);
+    std.mem.writeInt(i32, chunk[38..42], 2835, .little);
+    std.mem.writeInt(i32, chunk[42..46], 2835, .little);
+    off = 54;
+
+    const fb_stride = @as(usize, width) * 4;
+    var cur_y: usize = height;
+    while (cur_y > 0) {
+        cur_y -= 1;
+        const row_start = cur_y * fb_stride;
+        var x: usize = 0;
+        while (x < width) : (x += 1) {
+            const px_off = row_start + x * 4;
+            if (off + 3 > chunk.len) {
+                if (!vf_flush_chunk(h, chunk, &off)) return false;
+            }
+            chunk[off] = fb[px_off];
+            chunk[off + 1] = fb[px_off + 1];
+            chunk[off + 2] = fb[px_off + 2];
+            off += 3;
+        }
+        var pad: usize = 0;
+        while (pad < row_pad) : (pad += 1) {
+            if (off + 1 > chunk.len) {
+                if (!vf_flush_chunk(h, chunk, &off)) return false;
+            }
+            chunk[off] = 0;
+            off += 1;
+        }
+    }
+    return vf_flush_chunk(h, chunk, &off);
+}
+
+/// WRITE the assembled chunk and reset the offset (a zero-length flush is
+/// a no-op success).
+fn vf_flush_chunk(h: u16, chunk: []u8, off: *usize) bool {
+    if (off.* == 0) return true;
+    var written: u64 = 0;
+    const st = virtio_file.write(h, chunk[0..off.*], &written);
+    off.* = 0;
+    return st == virtio_file.st_ok;
+}
+
+/// M27 G27 (Issue #470): capture current framebuffer and save as BMP — to
+/// the HOST SHARE when the channel is armed (M34 HF5, issue #739), else
+/// to FAT (dual path until HF6).
 fn cmd_screenshot(m: *Monitor, args: []const []const u8) ExecError {
     if (!virtio_gpu.gpu_ready) {
         err_prefix(m);
@@ -5922,18 +5999,27 @@ fn cmd_screenshot(m: *Monitor, args: []const []const u8) ExecError {
         return .none;
     }
     const path = if (args.len > 0) args[0] else "SCREEN.BMP";
-    const res = fat.write_fb_bmp(path, virtio_gpu.fb_width, virtio_gpu.fb_height, @ptrCast(&virtio_gpu.gpu_fb));
-    if (res != .ok) {
-        err_prefix(m);
-        m.console.puts("screenshot: write failed: ");
-        m.console.puts(@tagName(res));
-        m.console.puts("\n");
-        return .none;
-    }
     const row_raw: usize = @as(usize, virtio_gpu.fb_width) * 3;
     const row_pad: usize = (4 - (row_raw % 4)) % 4;
     const row_stride: usize = row_raw + row_pad;
     const total_bytes: usize = 54 + row_stride * @as(usize, virtio_gpu.fb_height);
+
+    if (virtio_file.available()) {
+        if (!vf_write_fb_bmp(path, virtio_gpu.fb_width, virtio_gpu.fb_height, @ptrCast(&virtio_gpu.gpu_fb))) {
+            err_prefix(m);
+            m.console.print_line("screenshot: host write failed");
+            return .none;
+        }
+    } else {
+        const res = fat.write_fb_bmp(path, virtio_gpu.fb_width, virtio_gpu.fb_height, @ptrCast(&virtio_gpu.gpu_fb));
+        if (res != .ok) {
+            err_prefix(m);
+            m.console.puts("screenshot: write failed: ");
+            m.console.puts(@tagName(res));
+            m.console.puts("\n");
+            return .none;
+        }
+    }
     m.console.puts("screenshot: saved ");
     m.console.print_u64(virtio_gpu.fb_width);
     m.console.puts("x");

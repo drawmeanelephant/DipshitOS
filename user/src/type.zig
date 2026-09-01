@@ -1,7 +1,8 @@
 //! VirelaiOS twelfth ESP user program — TYPE.BIN (milestone ten, card F4, claim 0510).
 //!
-//! Reads and echoes persistent data from `/data/hello.txt` from EL0:
-//!   1. `sys_file_open("/data/hello.txt", 15, MODE_READ(1))` (slot 23).
+//! Reads and echoes persistent data from `/host/hello.txt` from EL0 (M34
+//! HF5 issue #739 — user data lives in the host folder):
+//!   1. `sys_file_open("/host/hello.txt", 15, MODE_READ(1))` (slot 23).
 //!   2. `sys_file_read(fd, buf, 64)` (slot 24).
 //!   3. `sys_file_close(fd)` (slot 26).
 //!   4. `sys_write(1, "type: read ", 11)` (slot 1) + `sys_write(1, buf, count)` (slot 1).
@@ -10,13 +11,13 @@
 
 const std = @import("std");
 
-pub const filename: []const u8 = "/data/hello.txt";
+pub const filename: []const u8 = "/host/hello.txt"; // M34 HF5 (#739)
 pub const prefix_line: []const u8 = "type: read ";
 pub const success_line: []const u8 = "type: success\n";
 
 export fn _start() callconv(.naked) noreturn {
     asm volatile (
-        \\// 1. sys_file_open("/data/hello.txt", 15, MODE_READ = 1)
+        \\// 1. sys_file_open("/host/hello.txt", 15, MODE_READ = 1)
         \\adr x0, 1f
         \\mov x1, #15
         \\mov x2, #1
@@ -77,7 +78,7 @@ export fn _start() callconv(.naked) noreturn {
         \\
         \\// Literals
         \\.p2align 2
-        \\1: .ascii "/data/hello.txt"
+        \\1: .ascii "/host/hello.txt"
         \\2: .ascii "type: read "
         \\3: .ascii "type: success\n"
     );

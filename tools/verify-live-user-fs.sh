@@ -7,17 +7,19 @@
 # The gate performs a multi-boot persistent round-trip:
 #   1. Boot A (fresh disk image):
 #      - Runs `exec SAVETEXT.BIN` from the shell.
-#      - SAVETEXT.BIN opens `/data/hello.txt` via sys_file_open (slot 23),
-#        writes 34-byte persistent payload via sys_file_write (slot 25),
-#        closes via sys_file_close (slot 26), and outputs:
-#        "savetext: wrote /data/hello.txt\n"
+#      - SAVETEXT.BIN opens `/host/hello.txt` (M34 HF5 issue #739 — user
+#        data lives in the host folder; the SAME --cvc-file share is
+#        attached to both boots) via sys_file_open (slot 23), writes
+#        persistent payload via sys_file_write (slot 25), closes via
+#        sys_file_close (slot 26), and outputs:
+#        "savetext: wrote /host/hello.txt\n"
 #      - Asserts process exit status 0.
 #   2. Boot B (reboot VM against the same disk image):
 #      - Runs `exec TYPE.BIN` and `exec DIR.BIN` from the shell.
-#      - TYPE.BIN opens `/data/hello.txt` with MODE_READ (slot 23),
+#      - TYPE.BIN opens `/host/hello.txt` with MODE_READ (slot 23),
 #        reads contents via sys_file_read (slot 24), echoes payload to console,
 #        outputs "type: success\n", and exits with status 0.
-#      - DIR.BIN enumerates `/data` directory entries via sys_dir_list (slot 27),
+#      - DIR.BIN enumerates `/host` directory entries via sys_dir_list (slot 27),
 #        outputs directory listings, outputs "dir: success\n", and exits with status 0.
 #
 # Run isolation (#523 item 2 / issue #528, claim 5069): both boots run
@@ -53,6 +55,13 @@ echo "=== verify-live-user-fs: claim 0510 — userland storage ABI & utilities o
 gate_begin live-user-fs
 echo "run dir: $RUN_DIR"
 
+# M34 HF5 (issue #739): the persistence consumers re-pointed to the HOST
+# SHARE (SAVETEXT/TYPE/DIR now use /host/...). Both boots attach the SAME
+# share dir under RUN_DIR, so "survived reboot" is proven on the macOS
+# filesystem itself — the gate then verifies hello.txt ON THE HOST DISK.
+SHARE="$RUN_DIR/share"
+mkdir -p "$SHARE"
+
 # Tool versions + revision
 zig version; swift --version 2>&1 | head -1; sw_vers
 REVISION="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
@@ -66,7 +75,9 @@ echo "revision: $REVISION branch=$BRANCH"
 # and embeds every registered program.
 zig build
 zig build image
-swift build --package-path host/vm-runner --configuration release
+# M34 HF5 (issue #739): the gate attaches the --cvc-file share, which
+# requires the SPIKE runner build (the custom-virtio FILE channel).
+swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 # Scripts for Boot A and Boot B
@@ -92,6 +103,7 @@ rm -f "$RUN_DIR/vm-serial-A.log"
 set +e
 gate_shared_disk_lock
     host/vm-runner/.build/release/VMRunner artifacts/disk.img \
+    --cvc-file "$SHARE" \
     --serial "$RUN_DIR/vm-serial-A.log" \
     --script "$RUN_DIR/script-A.txt" \
     --script-after "$STATIC_EXIT_LINE" \
@@ -107,7 +119,7 @@ if [ $RC_A -ne 0 ]; then
     exit 1
 fi
 
-grep -q "savetext: wrote /data/hello.txt" "$(art live-user-fs-serial-A.log)" || {
+grep -q "savetext: wrote /host/hello.txt" "$(art live-user-fs-serial-A.log)" || {
     echo "ERROR: SAVETEXT.BIN write marker missing from serial log"
     exit 1
 }
@@ -125,6 +137,7 @@ rm -f "$RUN_DIR/vm-serial-B.log"
 set +e
 gate_shared_disk_lock
     host/vm-runner/.build/release/VMRunner artifacts/disk.img \
+    --cvc-file "$SHARE" \
     --serial "$RUN_DIR/vm-serial-B.log" \
     --script "$RUN_DIR/script-B.txt" \
     --script-after "$STATIC_EXIT_LINE" \
@@ -155,12 +168,14 @@ grep -q "procs TYPE.BIN exited status=0" "$(art live-user-fs-serial-B.log)" || {
     exit 1
 }
 
-grep -q "dir: listing /data" "$(art live-user-fs-serial-B.log)" || {
+grep -q "dir: listing /host" "$(art live-user-fs-serial-B.log)" || {
     echo "ERROR: DIR.BIN listing marker missing from serial log"
     exit 1
 }
-grep -q "HELLO.TXT" "$(art live-user-fs-serial-B.log)" || {
-    echo "ERROR: HELLO.TXT missing from DIR.BIN directory enumeration"
+# Host-share listing preserves the guest's casing (hello.txt — the FAT
+# volume would have uppercased it to HELLO.TXT), so match case-insensitively.
+grep -qi "hello.txt" "$(art live-user-fs-serial-B.log)" || {
+    echo "ERROR: hello.txt missing from DIR.BIN directory enumeration"
     exit 1
 }
 grep -q "dir: success" "$(art live-user-fs-serial-B.log)" || {
@@ -174,15 +189,31 @@ grep -q "procs DIR.BIN exited status=0" "$(art live-user-fs-serial-B.log)" || {
 
 echo "Boot B passed: TYPE.BIN and DIR.BIN verified persistent data across reboot."
 
+# M34 HF5 (issue #739): prove the write landed ON THE HOST DISK — the
+# share is the persistence home now (the FAT DATA partition still works
+# but is deprecated; SAVETEXT/TYPE/DIR route to /host).
+HOST_OK=0
+if [ -f "$SHARE/hello.txt" ] && grep -qF "Hello from VirelaiOS EL0 Storage!" "$SHARE/hello.txt"; then
+    HOST_OK=1
+    echo "HF5-DISK: hello.txt on the host share carries the 34-byte payload"
+else
+    echo "HF5-DISK: FAIL — hello.txt missing/incomplete on the host share"
+fi
+if [ "$HOST_OK" != 1 ]; then
+    echo "ERROR: host-side persistence verification failed"
+    exit 1
+fi
+
 # Summary report
 cat > "$REPORT" <<EOF
 === Milestone 10 Capstone Gate Report (Claim 0510) ===
 Date: $(date -u '+%Y-%m-%d %H:%M:%SZ')
 Revision: $REVISION
 Branch: $BRANCH
-Boot A (SAVETEXT.BIN): PASSED (wrote /data/hello.txt, status=0)
+Boot A (SAVETEXT.BIN): PASSED (wrote /host/hello.txt to the share, status=0)
 Boot B (TYPE.BIN): PASSED (read persistent data across reboot, status=0)
-Boot B (DIR.BIN): PASSED (enumerated /data entries including HELLO.TXT, status=0)
+Boot B (DIR.BIN): PASSED (enumerated /host entries including HELLO.TXT, status=0)
+Host disk: PASSED (hello.txt byte-verified in the --cvc-file share)
 Result: SUCCESS (all assertions verified on Apple silicon VZ hardware)
 EOF
 

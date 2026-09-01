@@ -65,7 +65,9 @@ echo "revision: $REVISION branch=$BRANCH pairs=$PAIRS dirty-files=$DIRTY"
 zig fmt --check boot/src/*.zig kernel/src/*.zig build.zig
 zig build
 zig build image
-swift build --package-path host/vm-runner --configuration release
+# M34 HF5 (issue #739): the gate attaches the --cvc-file share, which
+# requires the SPIKE runner build (the custom-virtio FILE channel).
+swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 # --- per-run isolation -------------------------------------------------------------
@@ -74,6 +76,13 @@ codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/
 gate_begin live-settings
 echo "run dir: $RUN_DIR"
 
+# M34 HF5 (issue #739): settings now persist to the HOST SHARE (the kernel
+# settings engine re-pointed: SETTINGS.TXT lives in the --cvc-file folder;
+# the DATA partition is deprecated). Both boots attach the SAME share dir,
+# so "across reboot" is proven on the macOS filesystem itself, and the
+# gate verifies SETTINGS.TXT on the host disk after run B.
+SHARE="$RUN_DIR/share"
+mkdir -p "$SHARE"
 
 # --- scripted keystrokes -----------------------------------------------------
 cat > artifacts/live-settings-script-A.txt <<'EOF'
@@ -98,6 +107,7 @@ run_one() {
     set +e
     gate_shared_disk_lock
     host/vm-runner/.build/release/VMRunner artifacts/disk.img \
+        --cvc-file "$SHARE" \
         --serial "$RUN_DIR/vm-serial-$tag.log" \
         --script "$script" --script-expect "$expect" --timeout 40 \
         > "$(art live-settings-run-$tag.txt)" 2>&1
@@ -165,10 +175,20 @@ while [ "$n" -lt "$PAIRS" ]; do
     fi
 done
 
+# M34 HF5 (issue #739): verify the settings file ON THE HOST DISK — the
+# share is the persistence home now.
+HOST_OK=0
+if [ -f "$SHARE/SETTINGS.TXT" ] && grep -q 'hostname=elephant-box' "$SHARE/SETTINGS.TXT" && grep -q 'prompt=elephant>' "$SHARE/SETTINGS.TXT"; then
+    HOST_OK=1
+    echo "HF5-DISK: SETTINGS.TXT on the host share carries hostname=elephant-box + prompt=elephant>"
+else
+    echo "HF5-DISK: FAIL — SETTINGS.TXT missing/incomplete on the host share"
+fi
+
 echo
 echo "=== result ==="
-if [ "$PASS" = "$PAIRS" ]; then
-    echo "verify-live-settings: PASS — persistent settings configured on DATA partition, persisted to SETTINGS.TXT, and successfully restored upon fresh boot ($PASS/$PAIRS pair(s))."
+if [ "$PASS" = "$PAIRS" ] && [ "$HOST_OK" = 1 ]; then
+    echo "verify-live-settings: PASS — persistent settings configured on the HOST SHARE, persisted to SETTINGS.TXT (host-verified), and successfully restored upon fresh boot ($PASS/$PAIRS pair(s))."
     echo "PASS: $PASS/$PAIRS" >> "$REPORT"
     sleep 0.5
     exit 0

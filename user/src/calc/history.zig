@@ -101,10 +101,11 @@ pub const Ring = struct {
     // FAT persistence (K5)
     // -----------------------------------------------------------------------
 
-    /// Save history to `/data/calc_hst.txt` — one line per entry: "expr=result\n".
-    /// Overwrites the file entirely (bounded at 20 entries × ~44 chars = 880 bytes).
+    /// Save history to `/host/calc_hst.txt` (M34 HF5 #739) — one line per
+    /// entry: "expr=result\n". Overwrites the file entirely (bounded at
+    /// 20 entries × ~44 chars = 880 bytes).
     pub fn save_to_fat(self: *const Ring) void {
-        const path = "/data/calc_hst.txt";
+        const path = "/host/calc_hst.txt";
         var buf: [1024]u8 = undefined;
         var pos: usize = 0;
 
@@ -129,9 +130,10 @@ pub const Ring = struct {
         ui.file_close(@as(u32, @intCast(fd)));
     }
 
-    /// Load history from `/data/calc_hst.txt`.  Called at startup.
+    /// Load history from `/host/calc_hst.txt` (M34 HF5 #739). Called at
+    /// startup.
     pub fn load_from_fat(self: *Ring) void {
-        const path = "/data/calc_hst.txt";
+        const path = "/host/calc_hst.txt";
         var file_buf: [1024]u8 = undefined;
         const fd = ui.file_open(path, ui.MODE_READ);
         if (fd < 0) return;

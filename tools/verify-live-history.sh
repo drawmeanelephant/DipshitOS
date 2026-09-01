@@ -63,12 +63,22 @@ echo "revision: $REVISION branch=$BRANCH pairs=$BOOTS dirty-files=$DIRTY"
 zig fmt --check boot/src/*.zig kernel/src/*.zig build.zig
 zig build
 zig build image
-swift build --package-path host/vm-runner --configuration release
+# M34 HF5 (issue #739): the gate attaches the --cvc-file share, which
+# requires the SPIKE runner build (the custom-virtio FILE channel).
+swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 # --- per-run isolation -------------------------------------------------------
 gate_begin live-history
 echo "run dir: $RUN_DIR"
+
+# M34 HF5 (issue #739): shell history now persists to the HOST SHARE (the
+# shell's save_to_history/load_history re-pointed; the ESP is the fallback
+# until HF6). Both boots attach the SAME share dir, so "survived reboot"
+# is proven on the macOS filesystem, and the gate verifies HISTORY.TXT on
+# the host disk.
+SHARE="$RUN_DIR/share"
+mkdir -p "$SHARE"
 
 # --- boot 1: build history --------------------------------------------------
 # The LAST command is what a single Up arrow recalls after the newest-first
@@ -110,6 +120,7 @@ run_one() {
     set +e
     gate_shared_disk_lock
     host/vm-runner/.build/release/VMRunner artifacts/disk.img \
+        --cvc-file "$SHARE" \
         --serial "$RUN_DIR/vm-serial-$tag-boot1.log" \
         --script "$SCRIPT1" --script-expect "T4-third-marker" --timeout 30 \
         > "$(art live-history-run-$tag-boot1.txt)" 2>&1
@@ -139,6 +150,7 @@ PY
     set +e
     gate_shared_disk_lock
     host/vm-runner/.build/release/VMRunner artifacts/disk.img \
+        --cvc-file "$SHARE" \
         --serial "$RUN_DIR/vm-serial-$tag-boot2.log" \
         --input --display \
         --script "$RUN_DIR/empty.txt" \
@@ -208,10 +220,21 @@ while [ "$n" -lt "$BOOTS" ]; do
     fi
 done
 
+# M34 HF5 (issue #739): verify HISTORY.TXT ON THE HOST DISK — the share
+# is the persistence home now (the ESP fallback only applies without
+# --cvc-file).
+HOST_OK=0
+if [ -f "$SHARE/HISTORY.TXT" ] && grep -q 'T4-first-command' "$SHARE/HISTORY.TXT" && grep -q 'T4-third-marker' "$SHARE/HISTORY.TXT"; then
+    HOST_OK=1
+    echo "HF5-DISK: HISTORY.TXT on the host share carries the T4 commands"
+else
+    echo "HF5-DISK: FAIL — HISTORY.TXT missing/incomplete on the host share"
+fi
+
 echo
 echo "=== result ==="
-if [ "$PASS" = "$BOOTS" ]; then
-    echo "verify-live-history: PASS — persistent history survives reboot ($PASS/$BOOTS pair(s))."
+if [ "$PASS" = "$BOOTS" ] && [ "$HOST_OK" = 1 ]; then
+    echo "verify-live-history: PASS — persistent history survives reboot (host-verified HISTORY.TXT) ($PASS/$BOOTS pair(s))."
     echo "PASS: $PASS/$BOOTS" >> "$REPORT"
     sleep 0.5
     exit 0

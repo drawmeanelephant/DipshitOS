@@ -109,6 +109,8 @@ const syscall = @import("syscall.zig"); // claim 3594: fixed syscall ABI + runti
 const exec = @import("exec.zig"); // milestone-three card 6: ESP exec — owns the shared rebuild_user_root (claims 2665/3693)
 const virtio_custom = @import("virtio_custom.zig"); // claim 0828: custom-virtio spike driver (DID 0x1082)
 const virtio_file = @import("virtio_file.zig"); // M34 HF1+HF2 (issues #735/#736): host file channel client (queue 5)
+// M34 HF5 (issue #739): one-time /data → /host migration at boot.
+const migrate = @import("migrate.zig");
 const HandoffV2 = handoff.HandoffV2;
 
 // Claim 0020 phase selectors live with the transport (the exact-one-phase
@@ -1173,18 +1175,23 @@ const serial_ring = @import("serial_ring.zig"); // Arc5 #243: capture last 512B 
 /// swallowed the `elf: hello from HELLO.ELF` marker in the strace gate).
 var serial_at_bol: bool = true;
 
-/// Whether the CURRENT partial (mid-line) serial content was written by
-/// process stdout (sys_write). `process_stdout` consults it so the
-/// claim-1714 fresh-line prepend fires only when FOREIGN output (the
-/// shell's newline-less prompt, kernel/tracer prints) left the cursor
-/// mid-line — NOT when a program is mid-line composing its OWN multi-write
-/// line (USER.BIN's argv preamble is one logical line across three
-/// sys_write calls; the un-gated prepend fired on every call and split it,
-/// breaking verify-live-args). Cleared by any newline (a terminated line
-/// never continues) and by any non-stdout partial write from `uart_puts`
-/// (the prompt case — that open line belongs to the shell, so the next
-/// process write must fresh-line).
-var stdout_owns_open_line: bool = false;
+/// WHICH PROCESS owns the current partial (mid-line) serial content, if
+/// any. `process_stdout` consults it so the claim-1714 fresh-line prepend
+/// fires only when FOREIGN output (the shell's newline-less prompt,
+/// kernel/tracer prints, or ANOTHER process's partial line) left the
+/// cursor mid-line — NOT when a program is mid-line composing its OWN
+/// multi-write line (USER.BIN's argv preamble is one logical line across
+/// three sys_write calls; the un-gated prepend fired on every call and
+/// split it, breaking verify-live-args). The owner pid makes two
+/// CONSECUTIVE programs distinct: HF4APP.ELF leaves its 20-byte marker
+/// mid-line and exits; DESKTOP.BIN's first write is foreign and must
+/// fresh-line (without the pid, the desktop appended directly onto the
+/// app's marker — `hostdesktop:` — breaking the vf gate's exact-line
+/// needles). Cleared by any newline (a terminated line never continues)
+/// and by any non-stdout partial write from `uart_puts` (the prompt case
+/// — that open line belongs to the shell, so the next process write must
+/// fresh-line).
+var stdout_line_owner_pid: ?usize = null;
 
 fn uart_at_bol() bool {
     return serial_at_bol;
@@ -1196,7 +1203,7 @@ fn uart_putc(byte: u8) void {
     serial_ring.append(&[_]u8{byte});
     if (byte == '\n' or byte == '\r') {
         serial_at_bol = true;
-        stdout_owns_open_line = false;
+        stdout_line_owner_pid = null;
     } else {
         serial_at_bol = false;
     }
@@ -1240,14 +1247,14 @@ fn uart_putc(byte: u8) void {
     }
 }
 
-fn uart_puts(text: []const u8) void {
+pub fn uart_puts(text: []const u8) void {
     for (text) |byte| uart_putc(byte);
     // A non-newline-terminated write from THIS path is shell/kernel output
     // (the prompt): the open line belongs to the shell, so the next process
     // write must fresh-line. (process_stdout re-asserts stdout ownership
     // right after its own uart_puts call, so program lines stay open.)
     if (text.len > 0 and text[text.len - 1] != '\n' and text[text.len - 1] != '\r') {
-        stdout_owns_open_line = false;
+        stdout_line_owner_pid = null;
     }
     // Claim 0013: a virtio-console line without a trailing newline (e.g. the
     // shell's prompt) must still reach the host — flush any buffered bytes.
@@ -1746,6 +1753,13 @@ fn custom_virtio_spike() void {
         uart_puts(" free=");
         uart_puts(hex16(pr.free)[0..]);
         uart_puts("\n");
+        // M34 HF5 (issue #739): one-time /data → /host migration (the
+        // marker short-circuits later boots), then re-load settings from
+        // the share — the migration copied /data/SETTINGS.TXT over, so on
+        // the first share boot the migrated file wins; on later boots the
+        // share IS the settings home. No-op on default boots.
+        migrate.run();
+        _ = settings.load_from_share();
     } else {
         uart_puts("vf: queue 5 absent (no host file channel)\n");
     }
@@ -1795,12 +1809,21 @@ fn exception_report_writer(text: []const u8) void {
 fn process_stdout(text: []const u8) void {
     // Claim 1714: foreign output (the shell's drawn prompt) left the cursor
     // mid-line — start the program's output on a fresh line. But only when
-    // the open line is NOT the program's own: a program composing one line
+    // the open line is NOT THIS PROCESS's own: a program composing one line
     // across several sys_write calls (USER.BIN's argv preamble) must stay
-    // contiguous, or the markers split and the exact-line greps miss them.
-    if (!uart_at_bol() and !stdout_owns_open_line) uart_puts("\n");
+    // contiguous, and a DIFFERENT process's partial line must not be
+    // continued (the HF4APP.ELF marker → DESKTOP.BIN merge above). The
+    // shell's prompt is not a process, so uart_puts clears the owner and
+    // the next process write fresh-lines (the claim-1714 intent).
+    const pid = scheduler.current_id();
+    const owns_open_line = stdout_line_owner_pid != null and stdout_line_owner_pid.? == pid;
+    if (!uart_at_bol() and !owns_open_line) uart_puts("\n");
     uart_puts(text);
-    stdout_owns_open_line = text.len > 0 and text[text.len - 1] != '\n' and text[text.len - 1] != '\r';
+    if (text.len > 0 and text[text.len - 1] != '\n' and text[text.len - 1] != '\r') {
+        stdout_line_owner_pid = pid;
+    } else {
+        stdout_line_owner_pid = null;
+    }
 }
 
 /// Claim 9187 IRQ chain, registered as the exception module's dispatcher:
