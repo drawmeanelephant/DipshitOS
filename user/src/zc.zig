@@ -161,6 +161,7 @@ const TokenKind = enum {
     keyword_else,
     keyword_while,
     keyword_return,
+    keyword_struct,
     ident,
     number,
     string_lit,
@@ -335,6 +336,7 @@ const Tokenizer = struct {
                     if (std.mem.eql(u8, text, "else")) return Token{ .kind = .keyword_else, .text = text, .line = self.line };
                     if (std.mem.eql(u8, text, "while")) return Token{ .kind = .keyword_while, .text = text, .line = self.line };
                     if (std.mem.eql(u8, text, "return")) return Token{ .kind = .keyword_return, .text = text, .line = self.line };
+                    if (std.mem.eql(u8, text, "struct")) return Token{ .kind = .keyword_struct, .text = text, .line = self.line };
                     return Token{ .kind = .ident, .text = text, .line = self.line };
                 }
                 if (std.ascii.isDigit(c)) {
@@ -367,6 +369,21 @@ const LocalVar = struct {
     is_array: bool = false,
     array_len: usize = 0,
     elem_size: usize = 8,
+    is_struct: bool = false,
+    struct_idx: usize = 0,
+};
+
+const Field = struct {
+    name: []const u8,
+    offset: usize,
+    size: usize,
+};
+
+const StructDef = struct {
+    name: []const u8,
+    fields: [8]Field = undefined,
+    field_count: usize = 0,
+    size: usize = 0,
 };
 
 const CallPatch = struct {
@@ -398,6 +415,9 @@ var functions_count: usize = 0;
 var locals: [64]LocalVar = undefined;
 var locals_count: usize = 0;
 var frame_size: usize = 0;
+
+var structs: [8]StructDef = undefined;
+var structs_count: usize = 0;
 
 var call_patches: [64]CallPatch = undefined;
 var call_patches_count: usize = 0;
@@ -522,6 +542,23 @@ fn lookupLocalVar(name: []const u8) ?*LocalVar {
         i -= 1;
         if (std.mem.eql(u8, locals[i].name, name)) return &locals[i];
     }
+    return null;
+}
+
+fn lookupStruct(name: []const u8) ?*StructDef {
+    var i: usize = 0;
+    while (i < structs_count) : (i += 1) {
+        if (std.mem.eql(u8, structs[i].name, name)) return &structs[i];
+    }
+    return null;
+}
+
+fn typeSize(name: []const u8) ?usize {
+    if (std.mem.eql(u8, name, "u8")) return 1;
+    if (std.mem.eql(u8, name, "u16")) return 2;
+    if (std.mem.eql(u8, name, "u32")) return 4;
+    if (std.mem.eql(u8, name, "u64")) return 8;
+    if (lookupStruct(name)) |sd| return sd.size;
     return null;
 }
 
@@ -1032,13 +1069,62 @@ fn parsePrimary(p: *Parser) anyerror!void {
                         emit(enc_movz(2, @intCast(var_ptr.array_len * var_ptr.elem_size), 0));
                         emit(enc_movz(8, 1, 0));
                         emit(enc_svc(0));
+                    } else if (std.mem.eql(u8, member_tok.text, "print_struct")) {
+                        _ = try p.expect(.l_paren);
+                        const s_tok = try p.expect(.ident);
+                        _ = try p.expect(.r_paren);
+                        const var_ptr = lookupLocalVar(s_tok.text) orelse {
+                            print_err("undefined identifier", s_tok.line, s_tok.text);
+                            return error.CompileError;
+                        };
+                        if (!var_ptr.is_struct) {
+                            print_err("not a struct", s_tok.line, s_tok.text);
+                            return error.CompileError;
+                        }
+                        const sd = &structs[var_ptr.struct_idx];
+                        emit(enc_movz(0, 1, 0));
+                        emit(enc_add_imm(19, 1, @intCast(var_ptr.offset)));
+                        emit(enc_movz(2, @intCast(sd.size), 0));
+                        emit(enc_movz(8, 1, 0));
+                        emit(enc_svc(0));
                     } else {
                         print_err("unknown zc function", member_tok.line, member_tok.text);
                         return error.CompileError;
                     }
                 } else {
-                    print_err("unknown module", t.line, t.text);
-                    return error.CompileError;
+                    const var_ptr = lookupLocalVar(t.text);
+                    if (var_ptr) |vp| {
+                        if (vp.is_struct) {
+                            const sd = &structs[vp.struct_idx];
+                            var foff: usize = 0;
+                            var fsize: usize = 0;
+                            var found = false;
+                            for (sd.fields[0..sd.field_count]) |f| {
+                                if (std.mem.eql(u8, f.name, member_tok.text)) {
+                                    foff = f.offset;
+                                    fsize = f.size;
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if (!found) {
+                                print_err("unknown field", member_tok.line, member_tok.text);
+                                return error.CompileError;
+                            }
+                            emit(enc_add_imm(19, 1, @intCast(vp.offset + foff)));
+                            if (fsize == 1) {
+                                emit(enc_ldrb(1, 0, 0));
+                            } else {
+                                emit(enc_ldr(1, 0, 0));
+                            }
+                        } else {
+                            print_err("unknown module", t.line, t.text);
+                            return error.CompileError;
+                        }
+                    } else {
+                        print_err("unknown module", t.line, t.text);
+                        return error.CompileError;
+                    }
                 }
             } else if (p.peek() == .l_bracket) {
                 const var_ptr = lookupLocalVar(t.text) orelse {
@@ -1157,6 +1243,9 @@ fn compileStatement(p: *Parser) anyerror!void {
             var is_array = false;
             var arr_len: usize = 0;
             var elem_size: usize = 8;
+            var is_struct = false;
+            var struct_idx: usize = 0;
+            var struct_size: usize = 0;
             if (p.accept(.colon)) {
                 if (p.accept(.l_bracket)) {
                     const len_tok = try p.expect(.number);
@@ -1166,7 +1255,18 @@ fn compileStatement(p: *Parser) anyerror!void {
                     if (std.mem.eql(u8, elem_tok.text, "u8")) elem_size = 1 else if (std.mem.eql(u8, elem_tok.text, "u64")) elem_size = 8 else if (std.mem.eql(u8, elem_tok.text, "u32")) elem_size = 4 else if (std.mem.eql(u8, elem_tok.text, "u16")) elem_size = 2 else return error.CompileError;
                     is_array = true;
                 } else {
-                    _ = try p.expect(.ident);
+                    const type_tok = try p.expect(.ident);
+                    if (lookupStruct(type_tok.text)) |sd| {
+                        is_struct = true;
+                        struct_size = sd.size;
+                        var i: usize = 0;
+                        while (i < structs_count) : (i += 1) {
+                            if (std.mem.eql(u8, structs[i].name, type_tok.text)) {
+                                struct_idx = i;
+                                break;
+                            }
+                        }
+                    }
                 }
             }
             if (is_array) {
@@ -1186,6 +1286,23 @@ fn compileStatement(p: *Parser) anyerror!void {
                 _ = try p.expect(.semicolon);
                 if (locals_count >= locals.len) return error.CompileError;
                 locals[locals_count] = LocalVar{ .name = name_tok.text, .offset = offset, .is_array = true, .array_len = arr_len, .elem_size = elem_size };
+                locals_count += 1;
+            } else if (is_struct) {
+                const aligned = (struct_size + 7) & ~@as(usize, 7);
+                if (frame_size + aligned > 512) return error.CompileError;
+                const offset = frame_size;
+                frame_size += aligned;
+                if (p.accept(.equal)) {
+                    if (p.peek() == .ident and std.mem.eql(u8, p.currentToken().text, "undefined")) {
+                        _ = p.advance();
+                    } else {
+                        print_err("struct init not supported", name_tok.line, name_tok.text);
+                        return error.CompileError;
+                    }
+                }
+                _ = try p.expect(.semicolon);
+                if (locals_count >= locals.len) return error.CompileError;
+                locals[locals_count] = LocalVar{ .name = name_tok.text, .offset = offset, .is_struct = true, .struct_idx = struct_idx };
                 locals_count += 1;
             } else {
                 _ = try p.expect(.equal);
@@ -1315,6 +1432,34 @@ fn compileStatement(p: *Parser) anyerror!void {
                     try compileExpr(p);
                     _ = try p.expect(.semicolon);
                 }
+            } else if (p.peek() == .ident and p.idx + 3 < p.tokens.len and p.tokens[p.idx + 1].kind == .dot and p.tokens[p.idx + 2].kind == .ident and p.tokens[p.idx + 3].kind == .equal) {
+                const s_name = p.advance().text;
+                _ = p.advance(); // dot
+                const field_name = p.advance().text;
+                _ = p.advance(); // =
+                const var_ptr = lookupLocalVar(s_name) orelse return error.CompileError;
+                if (!var_ptr.is_struct) return error.CompileError;
+                const sd = &structs[var_ptr.struct_idx];
+                var foff: usize = 0;
+                var fsize: usize = 0;
+                var found = false;
+                for (sd.fields[0..sd.field_count]) |f| {
+                    if (std.mem.eql(u8, f.name, field_name)) {
+                        foff = f.offset;
+                        fsize = f.size;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) return error.CompileError;
+                try compileExpr(p); // value -> x0
+                _ = try p.expect(.semicolon);
+                emit(enc_add_imm(19, 1, @intCast(var_ptr.offset + foff)));
+                if (fsize == 1) {
+                    emit(enc_strb(1, 0, 0));
+                } else {
+                    emit(enc_str(1, 0, 0));
+                }
             } else {
                 try compileExpr(p);
                 _ = try p.expect(.semicolon);
@@ -1343,6 +1488,7 @@ fn compile(src: []const u8) !usize {
     call_patches_count = 0;
     locals_count = 0;
     frame_size = 0;
+    structs_count = 0;
     data_len = 0;
     string_patches_count = 0;
 
@@ -1368,7 +1514,40 @@ fn compile(src: []const u8) !usize {
             if (functions_count >= functions.len) return error.TooManyFunctions;
             functions[functions_count] = Function{ .name = name_tok.text, .address = 0, .param_count = param_count };
             functions_count += 1;
-        } else if (p1.peek() == .keyword_const or p1.peek() == .keyword_var or p1.peek() == .keyword_let) {
+        } else if (p1.peek() == .keyword_const) {
+            const save_idx = p1.idx;
+            _ = p1.advance(); // const
+            if (p1.peek() == .ident) {
+                const name_tok = p1.advance();
+                if (p1.accept(.equal) and p1.accept(.keyword_struct)) {
+                    _ = try p1.expect(.l_brace);
+                    var sd = StructDef{ .name = name_tok.text };
+                    var off: usize = 0;
+                    while (p1.peek() != .r_brace and p1.peek() != .eof) {
+                        const fname = try p1.expect(.ident);
+                        _ = try p1.expect(.colon);
+                        const tname = try p1.expect(.ident);
+                        const sz = typeSize(tname.text) orelse return error.CompileError;
+                        if (sd.field_count >= sd.fields.len) return error.CompileError;
+                        sd.fields[sd.field_count] = Field{ .name = fname.text, .offset = off, .size = sz };
+                        sd.field_count += 1;
+                        off += sz;
+                        _ = p1.accept(.comma);
+                    }
+                    _ = try p1.expect(.r_brace);
+                    sd.size = off;
+                    if (structs_count >= structs.len) return error.CompileError;
+                    structs[structs_count] = sd;
+                    structs_count += 1;
+                    _ = p1.accept(.semicolon);
+                    continue;
+                }
+            }
+            p1.idx = save_idx;
+            _ = p1.advance();
+            while (p1.peek() != .semicolon and p1.peek() != .eof) _ = p1.advance();
+            _ = p1.accept(.semicolon);
+        } else if (p1.peek() == .keyword_var or p1.peek() == .keyword_let) {
             _ = p1.advance();
             while (p1.peek() != .semicolon and p1.peek() != .eof) _ = p1.advance();
             _ = p1.accept(.semicolon);
@@ -1731,5 +1910,59 @@ test "zc: Z1b tokenizer handles brackets" {
     try testing.expectEqual(TokenKind.l_bracket, t.next().kind);
     try testing.expectEqual(TokenKind.number, t.next().kind);
     try testing.expectEqual(TokenKind.r_bracket, t.next().kind);
+    try testing.expectEqual(TokenKind.ident, t.next().kind);
+}
+
+test "zc: Z1c struct definition, field offsets, member load/store, print_struct" {
+    const src =
+        \\const zc = @import("zc");
+        \\const MyStruct = struct { a: u8, b: u8 };
+        \\pub fn main() void {
+        \\    var s: MyStruct = undefined;
+        \\    s.a = 65;
+        \\    s.b = 66;
+        \\    zc.print_struct(s);
+        \\    if (s.a == 65) {
+        \\        if (s.b == 66) {
+        \\            zc.exit(0);
+        \\        }
+        \\    }
+        \\    zc.exit(1);
+        \\}
+    ;
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
+    const total = try build_elf32_with_data(code[0..bytes], data_buf[0..data_len], 0, &image_buf);
+    try testing.expect(total == elf_code_offset + bytes + data_len);
+}
+
+test "zc: Z1c struct with u64 fields and mixed types" {
+    const src =
+        \\const zc = @import("zc");
+        \\const S = struct { x: u64, y: u64 };
+        \\pub fn main() void {
+        \\    var s: S = undefined;
+        \\    s.x = 10;
+        \\    s.y = 20;
+        \\    var sum: u64 = s.x + s.y;
+        \\    if (sum == 30) {
+        \\        zc.exit(0);
+        \\    } else {
+        \\        zc.exit(1);
+        \\    }
+        \\}
+    ;
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
+}
+
+test "zc: Z1c tokenizer handles struct keyword" {
+    const src = "const S = struct { a: u64, b: u8 };";
+    var t = Tokenizer{ .src = src };
+    try testing.expectEqual(TokenKind.keyword_const, t.next().kind);
+    try testing.expectEqual(TokenKind.ident, t.next().kind);
+    try testing.expectEqual(TokenKind.equal, t.next().kind);
+    try testing.expectEqual(TokenKind.keyword_struct, t.next().kind);
+    try testing.expectEqual(TokenKind.l_brace, t.next().kind);
     try testing.expectEqual(TokenKind.ident, t.next().kind);
 }
