@@ -1,6 +1,6 @@
 # WASM `env.*` import contract — frozen (W1a, #778)
 
-Status: **FROZEN** · Date: 2026-09-01 · Owner: W1a (#778) \
+Status: **FROZEN** · Date: 2026-09-01 · **Amended 2026-09-01 (audit, claim 5335):** §5.1 `file_open` MODE_* flags + DirEntry layout, §5.3 AudioInfo (16 B), §5.5 munmap, §6 list — corrected against the kernel dispatch table · Owner: W1a (#778) \
 Source of truth for: W3 (#764, import breadth), W5 (#766, `wc` capstone) \
 Normative syscall ABI: `docs/decisions/0007-syscall-abi.md` (ADR 0007) \
 Scoping doc: `docs/wasm-core-scoping.md` (W1a–W5 gated split)
@@ -145,7 +145,7 @@ slot it dispatches to, and the per-import argument/error shape. Unless noted,
 
 | Wasm import (WAT) | Slot | Signature (wasm) | Success → | Error mapping |
 |-------------------|------|-------------------|-----------|---------------|
-| `env.file_open` `(ptr i32, len i32, flags i32) -> i32` | 23 `sys_file_open` | `path_ptr, path_len, flags` — `flags` bit0 = `O_CREATE`-if-missing, bit1 = `O_APPEND`; 0 = read/write | fd `0..7` (per-process, ≤8 handles) | `EINVAL` bad path/zero/over-64, `EFAULT` bad ptr, `ENOENT` absent, `ENAMETOOLONG` name too long, `ENOSPC` table full |
+| `env.file_open` `(ptr i32, len i32, flags i32) -> i32` | 23 `sys_file_open` | `path_ptr, path_len, flags` — `flags` are ADR 0010 D2 `MODE_*` bits: bit0 `MODE_READ 0x1`, bit1 `MODE_WRITE 0x2`, bit2 `MODE_CREATE 0x4`, bit3 `MODE_APPEND 0x8`, bit4 `MODE_DIR 0x10` (create-directory); READ or WRITE required; `flags==0` or unknown bits → `EINVAL` | fd `0..7` (per-process, ≤8 handles) | `EINVAL` bad path/zero/over-64/invalid flags, `EFAULT` bad ptr, `ENOENT` absent, `ENAMETOOLONG` name too long, `ENOSPC` table full |
 | `env.file_read` `(fd i32, buf i32, cap i32) -> i32` | 24 `sys_file_read` | reads at most `cap` bytes (kernel stages ≤2048, honest truncation — `cap=0` → 0) | bytes read `0..cap` (`0` = EOF) | `EBADF` bad/closed fd, `EFAULT` bad buf (on non-empty read), `ENOSPC` if `cap>2048` is **not** an error — it truncates to 2048 (the kernel's `take_count` clamp) |
 | `env.file_write` `(fd i32, buf i32, len i32) -> i32` | 25 `sys_file_write` | writes exactly `len` bytes (kernel stages ≤2048; `len>2048` → error, not truncation) | bytes written `== len` | `EBADF`, `EFAULT`, `ENOSPC` when `len>2048` |
 | `env.file_close` `(fd i32) -> i32` | 26 `sys_file_close` | — | `0` | `EBADF` |
@@ -155,17 +155,19 @@ slot it dispatches to, and the per-import argument/error shape. Unless noted,
 | `env.file_truncate` `(fd i32, size i32) -> i32` | 36 `sys_file_truncate` | resize OPEN handle to `size` (shrink truncates, grow zero-fills; kernel bound ≤2048) | `0` | `EBADF` bad/closed handle, `EACCES` not open for write, `ENOSPC` size over bound, `ENOENT` |
 | `env.file_free` `(volume i32) -> i32` | 37 `sys_file_free` | `volume` `0` = DATA, `1` = ESP; query only | free bytes on volume (`≥0`, fits in `i32` on current volumes) | `EINVAL` bad volume, `ENOENT` unmounted, `EFAULT` n/a (no ptr) |
 
-**`DirEntry` layout** at `out_ptr` (LE, 40 bytes per entry, `path_len==0` root list
-is sorted by name — the HF2 wire shape, reused here):
+**`DirEntry` layout** at `out_ptr` (LE, 40 bytes per entry — ADR 0010 D3's
+`file_table.DirEntry`, verified from `handle_dir_list`'s `copy_out`; NOT the
+HF2 file-channel LIST row, which is a different 40-byte shape):
 
 ```
 offset  size  field
-0       31    name (NUL-padded, truncated host name ≤31 bytes shown)
-31      1     type  (0 = file, 1 = directory)
-32      8     size  (u64 LE, file bytes; 0 for dirs)
+0       32    name (NUL-padded, truncated host name ≤32 bytes shown)
+32      4     size  (u32 LE, file bytes; 0 for dirs)
+36      1     is_dir  (0 = file, 1 = directory)
+37      3     reserved (zero)
 ```
 
-WAT helper in `virelai.h`: `struct v_dirent { char name[31]; uint8_t type; uint64_t size; }` with `_Static_assert(sizeof==40)`.
+WAT helper in `virelai.h`: `struct v_dirent { char name[32]; uint32_t size; uint8_t is_dir; uint8_t reserved[3]; }` with `_Static_assert(sizeof==40)`.
 
 ### 5.2 Window — slots 12–20 (M6 G5/G6, ADR 0011)
 
@@ -191,24 +193,27 @@ Notes: `win_get`/`win_query` are the only window imports with a pointer.
 
 | Wasm import (WAT) | Slot | Signature (wasm) | Success → | Error mapping |
 |-------------------|------|-------------------|-----------|---------------|
-| `env.audio_info` `(out_ptr i32) -> i32` | 42 `sys_audio_info` | copies 24-byte `AudioInfo` to `out_ptr` (see layout) | `0` | `EINVAL` non-process caller, `EFAULT` bad ptr |
+| `env.audio_info` `(out_ptr i32) -> i32` | 42 `sys_audio_info` | copies 16-byte `AudioInfo` to `out_ptr` (see layout) | `0` | `EINVAL` non-process caller, `EFAULT` bad ptr |
 | `env.audio_play` `(buf i32, len i32) -> i32` | 43 `sys_audio_play` | play `len` bytes of PCM (format/rate/channels as reported by `audio_info`) | bytes played `== len` | `EINVAL` zero len / non-process caller, `ENAMETOOLONG` `len>64 KiB`, `EFAULT` bad ptr, `ENXIO` no sound device or device refusal |
 | `env.audio_volume` `(vol i32) -> i32` | 44 `sys_audio_volume` | `vol` `0..100` percent (kernel-side gain; persists across `--sound` re-attach) | `vol` (echoed) | `EINVAL` out-of-range / non-process caller |
 | `env.audio_mute` `(muted i32) -> i32` | 45 `sys_audio_mute` | `muted` `0`=unmute, `1`=mute (zeroed samples still drain) | `0` | `EINVAL` `muted∉{0,1}` |
 
-**`AudioInfo` layout** at `out_ptr` (LE, 24 bytes — `kernel/src/virtio_snd.zig`):
+**`AudioInfo` layout** at `out_ptr` (LE, **16 bytes** — `kernel/src/virtio_snd.zig`
+`AudioInfo`, verified `@sizeOf == 16`; the "24 bytes" comment in the kernel
+source is stale):
 
 ```
-offset  size  field            observed defaults (VZ, claims 6140/7636)
-0       4     ready            0/1 (first call drives probe+SET_PARAMS; later cached)
-4       4     format           e.g. 19 = FLOAT
-8       4     rate             e.g. 48000
-12      4     channels         1 or 2 (VZ is stereo 2)
-16      4     period_bytes     negotiated period size
-20      4     max_len          64 KiB (audio_max_len)
+offset  size  field            semantics (observed VZ, claims 6140/7636)
+0       4     ready            u32 0/1 (first call drives probe+SET_PARAMS; later cached)
+4       1     format           u8 negotiated FMT_* code (0xff = none)
+5       1     rate             u8 negotiated RATE_* code (0xff = none)
+6       1     channels         u8 1 or 2 (VZ is stereo 2)
+7       1     padding          u8 (zero)
+8       4     period_bytes     u32 negotiated period size
+12      4     max_len          u32 64 KiB (audio_max_len)
 ```
 
-WAT helper: `struct v_audio_info { int32_t ready, format, rate, channels, period_bytes, max_len; }` with `_Static_assert(sizeof==24)`.
+WAT helper: `struct v_audio_info { uint32_t ready; uint8_t format, rate, channels, padding; uint32_t period_bytes, max_len; }` with `_Static_assert(sizeof==16)`.
 
 ### 5.4 Timers — slots 40/41 (M14 S2)
 
@@ -241,7 +246,7 @@ capped at the interpreter level; `munmap` below tears down the arena.
 
 | Wasm import (WAT) | Slot | Signature (wasm) | Success → | Error mapping |
 |-------------------|------|-------------------|-----------|---------------|
-| `env.munmap` `(addr i32, len i32) -> i32` | 64 `sys_munmap` | — | `0` | `EINVAL` not a prior `mmap` region, `EFAULT` bad range |
+| `env.munmap` `(addr i32, len i32) -> i32` | 64 `sys_munmap` | unmap a prior `mmap` region (page-aligned `addr`, non-zero `len`; full-region only for scanout/shared surfaces) | `0` | `EINVAL` zero/unaligned `addr`, zero `len`, or partial unmap of a scanout/shared region |
 
 > `munmap` is listed for completeness — it is **not** part of the W3 frozen
 > set (the prompt's "mmap 63" row is the capstone requirement), but the
@@ -268,6 +273,7 @@ capped at the interpreter level; `munmap` below tears down the arena.
 * **Threads / atomics / SIMD / bulk-memory / multi-memory / GC** — traps or validation failure.
 * **Floating point** (W4) — `f32`/`f64` and their ops are **not** in the W1b/W3 subset; W4 adds them with a named float utility as gate. Linking a float-using module before W4 traps at validation.
 * **Networking (slots 9–11, 30–33), clipboard (38–39), exec/kill (28/29), wmctl (65)** — not `env.*` in M35. Raw `poll_event`/`wait_event` (21/22) are not imports; the interpreter pumps events.
+* **Window-depth and other kernel syscalls not in §5** — win_fill_batch (46), win_resize (47), win_raise_front (49), win_lower_back (50), notify (51), win_set_unsaved (53), drag_read (55), pipe_read/pipe_write (56/57), font_size (58), ping_send/ping_poll (59/60), win_set_title (61), net_stats (62) — all reserved for M35; a wasm app needing resize/title/unsaved flags is a future contract extension by ADR, never ad hoc.
 * **File-system mutation beyond §5.1:** pipe/mmap-shared tags/scanout — reserved.
 * Any import not listed in §5 — validation failure, never silent.
 
