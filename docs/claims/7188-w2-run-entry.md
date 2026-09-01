@@ -6,7 +6,7 @@
 - **Touches:** user/src/wasm.zig (run entry, parseInto split, syscall wrappers, import dispatch), build.zig (wasm target → segmented DSK3), tools/verify-live-wasm.sh (new), user/src/wasm-corpus/hello-env.wasm (new fixture), docs/claims/7188-w2-run-entry.md, docs/logs/freebuff-20260901-007.md
 - **Depends on:** W1b #762 merged (PR #794 — interpreter + WASM.BIN target on main); HF4 #738 merged (PR #769)
 - **Heartbeat:** 2026-09-01
-- **Status:** 🔄 in progress
+- **Status:** ✅ done
 
 ## Notes
 
