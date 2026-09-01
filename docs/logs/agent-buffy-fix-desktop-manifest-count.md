@@ -1,4 +1,4 @@
-# agent/buffy/fix-desktop-manifest-count
+# Log — fix stale desktop manifest-count gate needles
 
 ## 2026-09-01 — claim 1732: stale manifest-count needles in the two desktop gates
 
