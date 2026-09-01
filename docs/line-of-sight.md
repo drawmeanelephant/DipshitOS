@@ -158,7 +158,7 @@ lands.
 | Sexiburger god menu | #19 (6 open) | #701–#705 + umbrella #677 | action registry seam → menu shell → type-to-filter → test-app registration → covenant-of-six |
 | Self-hosting seed | #20 (16 open) | #706/#707 + #708 (Z0.5+VL6) + ladder **#749–#761** | see above; umbrella #620 closed |
 | WASM core interpreter | #22 **proposed** (5 open) | **#762–#766** (W1–W5) | one interpreter, the whole ecosystem: host-built wasm apps run in-guest; module = data via the file channel (no ELF contract); `env.*` imports → ADR 0007, no WASI; tracker `docs/wasm-core-scoping.md` |
-| M33 seam B (pixel ownership) | #17 | march tracker | SB1–SB4 done; SB5/SB6 pending (per status.md) |
+| M33 seam B (pixel ownership) | #17 ✅ closed 2026-09-01 | — | SB1–SB6 all landed (claims 7418/8878/3633/2382/7397/6864); SB6's yield-spin scheduler finding filed as #768 |
 | Bug cards (unmilestoned) | — | #729–#734 | P1 #729 (desktop launch err=6 ENOENT regression), P2 #730 (WND.BIN abort), P2 #732 (broken win harness), P3 #731/#733/#734 (stale chrome, dhcp fixture, glyph shift) |
 
 ## Suggested claim order when M34 finishes
