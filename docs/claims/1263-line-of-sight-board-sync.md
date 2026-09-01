@@ -6,7 +6,7 @@
 - **Touches:** docs/line-of-sight.md docs/claims/1263-line-of-sight-board-sync.md docs/logs/freebuff-20260901-001.md
 - **Depends on:** PR #767 merged (line-of-sight on main); HF4 merged (PR #769, claim 7599); the GitHub-side review pass (issues #773–#776, #708, #749, #761, #707 comment)
 - **Heartbeat:** 2026-09-01
-- **Status:** 🔄 in progress
+- **Status:** ✅ done
 
 ## Notes
 
