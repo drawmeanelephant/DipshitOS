@@ -391,6 +391,29 @@ pub fn read(path: []const u8, offset: u64) ReadResult {
     return .{ .status = st_ok, .data = rep.data };
 }
 
+/// Stream a whole file into `out` across READ round trips (each reply
+/// carries ≤ `reply_cap - reply_hdr_len` data bytes, so a >32 KiB file
+/// needs multiple exchanges). `size` from a prior STAT bounds the loop; a
+/// short final reply is EOF. Returns the byte count, or null when the
+/// file is absent, the transport fails, or `size` exceeds `out.len`.
+/// Callers that need to distinguish "too big for the buffer" must compare
+/// `size` against `out.len` BEFORE calling (exec.zig does — it maps that
+/// to `.too_large`).
+pub fn read_into(path: []const u8, size: u64, out: []u8) ?usize {
+    if (!available()) return null;
+    if (size > out.len) return null;
+    var offset: u64 = 0;
+    var total: usize = 0;
+    while (total < size) {
+        const r = read(path, offset);
+        if (r.status != st_ok or r.data.len == 0) return null;
+        @memcpy(out[total..][0..r.data.len], r.data);
+        total += r.data.len;
+        offset += r.data.len;
+    }
+    return total;
+}
+
 // ---------------------------------------------------------------------------
 // Mutation ops (HF3, issue #737)
 // ---------------------------------------------------------------------------

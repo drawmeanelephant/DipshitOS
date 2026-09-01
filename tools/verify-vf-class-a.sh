@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 #
-# verify-vf-class-a.sh -- M34 HF1 (issue #735) class-A gate: the host file
-# channel wire format is pinned BYTE-FOR-BYTE on both sides, and every
-# transport fact that needs no VM is asserted here.
+# verify-vf-class-a.sh -- M34 HF1–HF4 (issues #735/#736/#737/#738) class-A
+# gate: the host file channel wire format is pinned BYTE-FOR-BYTE on both
+# sides, and every transport fact that needs no VM is asserted here.
+# HF4 (issue #738) adds no wire ops — the exec host source rides READ/STAT
+# (chunked via virtio_file.read_into) and the /host file-table partition
+# rides LIST/READ/STAT, so this gate's parity pins still cover it.
 #
 #   G1-G12  kernel/src/virtio_file.zig host tests (generator parity,
 #           reply_len clamp math, probe framing, hostile envelopes, entry
@@ -27,7 +30,7 @@ GATE_LOG="artifacts/m34-hf1-class-a.txt"
 mkdir -p artifacts
 exec > >(tee "$GATE_LOG") 2>&1
 
-echo "=== verify-vf-class-a: M34 HF1–HF3 (issues #735/#736/#737) — host file channel wire parity (class A) ==="
+echo "=== verify-vf-class-a: M34 HF1–HF4 (issues #735/#736/#737/#738) — host file channel wire parity (class A) ==="
 zig version
 swift --version 2>&1 | head -1
 REVISION="$(git rev-parse HEAD 2>/dev/null || echo unknown)"

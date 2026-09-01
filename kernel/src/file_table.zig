@@ -12,6 +12,10 @@ const std = @import("std");
 const process = @import("process.zig");
 const fat = @import("fat.zig");
 const virtio_blk = @import("virtio_blk.zig");
+// M34 HF4 (issue #738): the `.host` partition serves the `--cvc-file`
+// share through the host file channel — LIST/READ/STAT, no FAT. The
+// desktop re-points its APPS.TXT manifest at `/host/APPS.TXT`.
+const virtio_file = @import("virtio_file.zig");
 
 pub const max_handles_per_process: usize = 8;
 pub const max_path_len: usize = 64;
@@ -37,6 +41,10 @@ pub const DirEntry = extern struct {
 pub const Partition = enum {
     esp,
     data,
+    /// M34 HF4 (issue #738): the host share (`--cvc-file`), served by
+    /// queue 5. READ-ONLY for userland until HF5 re-homes user data (the
+    /// monitor's `vf` commands remain the write path).
+    host,
 };
 
 pub const FileHandle = struct {
@@ -81,10 +89,15 @@ fn get_disk_ops() ?fat.DiskOps {
 }
 
 fn mount_partition(p: Partition) bool {
+    // M34 HF4: the host partition needs no FAT mount — it is "mounted"
+    // exactly when the file channel is armed (queue 5 + `--cvc-file`).
+    if (p == .host) return virtio_file.available();
     const ops = get_disk_ops() orelse return false;
     const res = switch (p) {
         .esp => fat.mount(ops),
         .data => fat.mount_data(ops),
+        // Unreachable: the `.host` arm returned above.
+        .host => unreachable,
     };
     if (res == .ok) return true;
     // M22 D2 discovery (claim 9815): VZ's post-ExitBootServices device
@@ -96,6 +109,7 @@ fn mount_partition(p: Partition) bool {
     const retry = switch (p) {
         .esp => fat.mount(ops),
         .data => fat.mount_data(ops),
+        .host => unreachable,
     };
     return retry == .ok;
 }
@@ -167,6 +181,17 @@ pub fn parse_path(raw: []const u8) ?ParsedPath {
         subpath = subpath[5..];
     } else if (subpath.len == 4 and std.ascii.eqlIgnoreCase(subpath[0..4], "data")) {
         partition = .data;
+        subpath = "";
+    } else if (subpath.len >= 5 and std.ascii.eqlIgnoreCase(subpath[0..5], "host/")) {
+        // M34 HF4 (issue #738): `/host/...` routes to the file-channel
+        // share (paths relative to the share root).
+        partition = .host;
+        subpath = subpath[5..];
+    } else if (subpath.len >= 5 and std.ascii.eqlIgnoreCase(subpath[0..5], "host:")) {
+        partition = .host;
+        subpath = subpath[5..];
+    } else if (subpath.len == 4 and std.ascii.eqlIgnoreCase(subpath[0..4], "host")) {
+        partition = .host;
         subpath = "";
     }
 
@@ -240,6 +265,30 @@ pub fn open(pid: u64, path_bytes: []const u8, flags: u32) i64 {
     if (!mount_partition(parsed.partition)) return -6; // ENOENT
 
     const subpath = parsed.path[0..parsed.parsed_len()];
+
+    // M34 HF4: the host share is a read-only volume served by the file
+    // channel — STAT for the size, no FAT. A host path never reaches the
+    // create/replace logic below (refused before `existing_size`).
+    if (parsed.partition == .host) {
+        if ((flags & (MODE_WRITE | MODE_CREATE | MODE_APPEND | MODE_DIR)) != 0) return -1; // EINVAL: read-only volume
+        var st = virtio_file.StatResult{};
+        if (virtio_file.stat(subpath, &st) != virtio_file.st_ok) return -6; // ENOENT
+        if (st.is_dir) return -1; // EINVAL: a directory opens as its own path, not a handle
+        handles[pid][slot] = .{
+            .in_use = true,
+            .partition = .host,
+            .flags = flags,
+            .cursor = 0,
+            // Clamp to u32 (the frozen ABI); host manifests are tiny and
+            // the read loop's EOF bound still holds for larger files.
+            .size = @intCast(@min(st.size, std.math.maxInt(u32))),
+            .path = parsed.path,
+            .path_len = parsed.path_len,
+            .is_dir = false,
+        };
+        return @intCast(slot);
+    }
+
     const existing_size = fat.file_size(subpath);
 
     var file_size_val: u32 = 0;
@@ -321,6 +370,12 @@ pub fn read(pid: u64, fd: u64, out_buf: []u8) i64 {
 
     if (!mount_partition(h.partition)) return -6;
 
+    // M34 HF4: the host share is stateless — each chunk is one vf READ
+    // round trip at the handle's cursor (a handle is path + size here).
+    if (h.partition == .host) {
+        return read_host(h, out_buf);
+    }
+
     var staging: [fat.write_content_max]u8 = undefined;
     const subpath = h.path[0..h.path_len];
     const total = fat.read_file(subpath, &staging) orelse return 0;
@@ -334,6 +389,26 @@ pub fn read(pid: u64, fd: u64, out_buf: []u8) i64 {
     return @intCast(take);
 }
 
+/// The `.host` partition's read loop: vf READ round trips at the handle's
+/// cursor until the caller's buffer is full or the file's STAT'd size is
+/// exhausted (each reply is memcpy'd out immediately — the module's reply
+/// buffer is valid only until the next exchange).
+fn read_host(h: *FileHandle, out_buf: []u8) i64 {
+    if ((h.flags & MODE_READ) == 0) return -7; // EACCES (read guard parity)
+    if (out_buf.len == 0) return 0;
+    if (h.cursor >= h.size) return 0; // EOF
+    const subpath = h.path[0..h.path_len];
+    var total: usize = 0;
+    while (total < out_buf.len and h.cursor < h.size) {
+        const r = virtio_file.read(subpath, h.cursor);
+        if (r.status != virtio_file.st_ok or r.data.len == 0) break;
+        @memcpy(out_buf[total..][0..r.data.len], r.data);
+        total += r.data.len;
+        h.cursor += @intCast(r.data.len);
+    }
+    return @intCast(total);
+}
+
 /// Write to open handle `fd`.
 /// Returns bytes written, or negative error code.
 pub fn write(pid: u64, fd: u64, in_buf: []const u8) i64 {
@@ -342,6 +417,10 @@ pub fn write(pid: u64, fd: u64, in_buf: []const u8) i64 {
     if (!h.in_use) return -2; // EBADF
     if ((h.flags & MODE_WRITE) == 0) return -7; // EACCES
     if (h.is_dir) return -7; // M25 Lane B: never write through a dir handle
+    // M34 HF4: the host share is read-only for userland until HF5 — the
+    // monitor's `vf` commands are the write path (the host table owns the
+    // cursors there). Honest EACCES, never a silent FAT write.
+    if (h.partition == .host) return -7; // EACCES
 
     if (in_buf.len == 0) return 0;
     if (h.cursor + in_buf.len > fat.write_content_max) return -5; // ENOSPC
@@ -402,8 +481,31 @@ pub fn dir_list(pid: u64, path_bytes: []const u8, out_entries: []DirEntry) i64 {
 
     if (!mount_partition(parsed.partition)) return -6;
 
-    var raw_entries: [fat.max_root_slots]fat.DirEntry = undefined;
     const subpath = parsed.path[0..parsed.path_len];
+
+    // M34 HF4: LIST the share through the file channel; the vf row shape
+    // (name / size / is_dir) maps 1:1 onto the frozen 40-byte DirEntry.
+    if (parsed.partition == .host) {
+        var lr = virtio_file.ListResult{};
+        if (virtio_file.list(subpath, &lr) != virtio_file.st_ok) return -6;
+        const take = @min(lr.count, out_entries.len);
+        var i: usize = 0;
+        while (i < take) : (i += 1) {
+            const raw = &lr.entries[i];
+            var de = DirEntry{
+                .name = [_]u8{0} ** 32,
+                .size = @intCast(@min(raw.size, std.math.maxInt(u32))),
+                .is_dir = if (raw.type == virtio_file.dir_type_dir) 1 else 0,
+                .reserved = .{ 0, 0, 0 },
+            };
+            const nlen = @min(raw.name_len, 31);
+            @memcpy(de.name[0..nlen], raw.name[0..nlen]);
+            out_entries[i] = de;
+        }
+        return @intCast(take);
+    }
+
+    var raw_entries: [fat.max_root_slots]fat.DirEntry = undefined;
     const count = fat.list_path(subpath, &raw_entries);
 
     const take = @min(count, out_entries.len);
@@ -435,6 +537,9 @@ pub fn delete(pid: u64, path_bytes: []const u8) i64 {
     if (path_bytes.len == 0 or path_bytes.len > max_path_len) return -1;
     const parsed = parse_path(path_bytes) orelse return -1;
     if (!mount_partition(parsed.partition)) return -6;
+    // M34 HF4: the host share is read-only for userland (monitor `vf`
+    // commands mutate it) — never route a host path into the FAT driver.
+    if (parsed.partition == .host) return -1; // EINVAL: read-only volume
     const subpath = parsed.path[0..parsed.parsed_len()];
     return switch (fat.delete_file(subpath)) {
         .ok => 0,
@@ -455,6 +560,8 @@ pub fn rename(pid: u64, old_bytes: []const u8, new_bytes: []const u8) i64 {
     const new = parse_path(new_bytes) orelse return -1;
     if (old.partition != new.partition) return -1; // cross-volume unsupported
     if (!mount_partition(old.partition)) return -6;
+    // M34 HF4: the host share is read-only for userland.
+    if (old.partition == .host) return -1; // EINVAL: read-only volume
     return switch (fat.rename_file(old.path[0..old.parsed_len()], new.path[0..new.parsed_len()])) {
         .ok => 0,
         .not_found => -6,
@@ -476,6 +583,8 @@ pub fn truncate(pid: u64, fd: u64, new_size: u32) i64 {
     if (!h.in_use) return -2; // EBADF
     if ((h.flags & MODE_WRITE) == 0) return -7; // EACCES
     if (h.is_dir) return -7; // M25 Lane B: never truncate through a dir handle
+    // M34 HF4: the host share is read-only for userland.
+    if (h.partition == .host) return -7; // EACCES
     if (!mount_partition(h.partition)) return -6;
 
     const subpath = h.path[0..h.path_len];
@@ -531,6 +640,18 @@ test "file_table: path parsing and volume routing" {
     const p4 = parse_path("data:config.sys").?;
     try std.testing.expectEqual(Partition.data, p4.partition);
     try std.testing.expectEqualStrings("config.sys", p4.path[0..p4.path_len]);
+
+    // M34 HF4 (issue #738): the host-share prefix routes to `.host` with
+    // the path relative to the share root.
+    const ph1 = parse_path("/host/APPS.TXT").?;
+    try std.testing.expectEqual(Partition.host, ph1.partition);
+    try std.testing.expectEqualStrings("APPS.TXT", ph1.path[0..ph1.path_len]);
+    const ph2 = parse_path("host:sub/app.bin").?;
+    try std.testing.expectEqual(Partition.host, ph2.partition);
+    try std.testing.expectEqualStrings("sub/app.bin", ph2.path[0..ph2.path_len]);
+    const ph3 = parse_path("/host").?;
+    try std.testing.expectEqual(Partition.host, ph3.partition);
+    try std.testing.expectEqual(ph3.path_len, 0);
 
     // Traversal defense: rejection of '..'
     try std.testing.expect(parse_path("../secret.txt") == null);
