@@ -206,6 +206,7 @@ pub const TrapKind = enum {
     call_depth,
     stack_overflow,
     imported_unwired, // calling an imported func before W3 dispatch
+    guest_exit, // host-test only: env.exit captured (the guest path is a real sys_exit)
 };
 
 pub const Trap = struct {
@@ -281,8 +282,11 @@ const Reader = struct {
 // ---------------------------------------------------------------------------
 // Parse
 // ---------------------------------------------------------------------------
-pub fn parse(bytes: []const u8) ParseError!Module {
-    var m = Module{};
+/// Parse into a caller-provided Module (W2: the guest `_start` parses into
+/// the file-scope global — the EL0 stack is only 32 KiB and a by-value
+/// 77 KiB Module would smash it). `parse` stays as the by-value host API.
+pub fn parseInto(m: *Module, bytes: []const u8) ParseError!void {
+    m.* = Module{};
     var r = Reader{ .bytes = bytes };
 
     const magic = try r.take(4);
@@ -290,7 +294,7 @@ pub fn parse(bytes: []const u8) ParseError!Module {
     const ver = try r.take(4);
     if (!std.mem.eql(u8, ver, "\x01\x00\x00\x00")) return error.BadVersion;
 
-    var seen = [_]bool{false} ** 11;
+    var seen = [_]bool{false} ** 12; // ids 0..11; the data section (11) is legal
     var prev_id: u8 = 0;
     while (r.pos < r.bytes.len) {
         const id = try r.u8_();
@@ -307,9 +311,14 @@ pub fn parse(bytes: []const u8) ParseError!Module {
         const payload_pos = r.pos;
         const payload = try r.take(size);
         var pr = Reader{ .bytes = payload, .base = payload_pos };
-        try parseSection(&m, &pr, id);
+        try parseSection(m, &pr, id);
         if (pr.pos != pr.bytes.len) return error.TrailingBytes;
     }
+}
+
+pub fn parse(bytes: []const u8) ParseError!Module {
+    var m = Module{};
+    try parseInto(&m, bytes);
     return m;
 }
 
@@ -402,17 +411,26 @@ fn parseSection(m: *Module, r: *Reader, id: u8) ParseError!void {
         },
         10 => { // code
             const n = try r.uleb();
-            if (n != m.func_count) return error.CodeCountMismatch;
-            for (0..n) |i| try parseCode(m, r, i);
+            // The code section counts DEFINED funcs only; imports live at
+            // the front of funcs[] and have no bodies (the hello-env W2
+            // fixture first tripped this).
+            if (n != m.func_count - m.imported_funcs) return error.CodeCountMismatch;
+            for (0..n) |i| try parseCode(m, r, i + m.imported_funcs); // imports hold funcs[0..imported_funcs)
         },
         11 => { // data
             const n = try r.uleb();
             for (0..n) |_| {
                 const seg_abs = r.absPos();
                 const flags = try r.u8_();
-                if (flags != 0x00) return error.BadElementKind;
-                const midx = try r.uleb();
-                if (midx != 0) return error.BadElementKind;
+                if (flags == 0x02) {
+                    // active segment with explicit memory index
+                    const midx = try r.uleb();
+                    if (midx != 0) return error.BadElementKind; // single memory only
+                } else if (flags != 0x00) {
+                    // 0x00 = active, memory 0 implicit (no index byte);
+                    // 1/3/4/5/6/7 = passive/declarative: out of subset
+                    return error.BadElementKind;
+                }
                 const init = try parseConstExpr(r);
                 const len = try r.uleb();
                 if (m.data_count >= max_datas) return error.TooManyEntries;
@@ -1065,7 +1083,7 @@ pub fn instantiate(mm: *Machine, m: *const Module, store: []u8, module_name: []c
 /// locals (param slots first). Trap results carry module + offset.
 pub fn call(mm: *Machine, m: *const Module, func_idx: u32, args: []const Value) CallResult {
     if (func_idx >= m.func_count) return mkTrap(.bounds, mm.module_name, 0);
-    if (func_idx < m.imported_funcs) return mkTrap(.imported_unwired, mm.module_name, 0);
+    if (func_idx < m.imported_funcs) return dispatchImport(mm, m, func_idx, args);
     return callInternal(mm, m, func_idx, args);
 }
 
@@ -1357,14 +1375,19 @@ fn execBody(mm: *Machine, m: *const Module, ft0: *const FuncType) CallResult {
             0x10 => { // call
                 const fi = body.uleb() catch return mkTrap(.bounds, mm.module_name, op_off);
                 if (fi >= m.func_count) return mkTrap(.bounds, mm.module_name, op_off);
-                if (fi < m.imported_funcs) return mkTrap(.imported_unwired, mm.module_name, op_off);
-                const callee = &m.types[m.funcs[fi].type_index];
+                const callee = if (fi < m.imported_funcs)
+                    &m.types[m.imports[fi].type_index]
+                else
+                    &m.types[m.funcs[fi].type_index];
                 // pop args into an array (last param topmost)
                 var args: [max_params]Value = undefined;
                 for (0..callee.param_count) |i| {
                     args[callee.param_count - 1 - i] = popVal(mm);
                 }
-                const r = callInternal(mm, m, fi, args[0..callee.param_count]);
+                const r = if (fi < m.imported_funcs)
+                    dispatchImport(mm, m, fi, args[0..callee.param_count])
+                else
+                    callInternal(mm, m, fi, args[0..callee.param_count]);
                 if (r == .trap) return r;
                 for (0..r.ret.count) |i| tryPush(mm, r.ret.vals[i]) catch return mkTrap(.stack_overflow, mm.module_name, op_off);
             },
@@ -1379,14 +1402,19 @@ fn execBody(mm: *Machine, m: *const Module, ft0: *const FuncType) CallResult {
                 }
                 const fi = mm.table[@intCast(tbl_idx)];
                 if (fi >= m.func_count) return mkTrap(.bounds, mm.module_name, op_off);
-                if (fi < m.imported_funcs) return mkTrap(.imported_unwired, mm.module_name, op_off);
-                const actual = &m.types[m.funcs[fi].type_index];
+                const actual = if (fi < m.imported_funcs)
+                    &m.types[m.imports[fi].type_index]
+                else
+                    &m.types[m.funcs[fi].type_index];
                 if (!FuncType.eql(expected.*, actual.*)) return mkTrap(.call_indirect_type, mm.module_name, op_off);
                 var args: [max_params]Value = undefined;
                 for (0..actual.param_count) |i| {
                     args[actual.param_count - 1 - i] = popVal(mm);
                 }
-                const r = callInternal(mm, m, fi, args[0..actual.param_count]);
+                const r = if (fi < m.imported_funcs)
+                    dispatchImport(mm, m, fi, args[0..actual.param_count])
+                else
+                    callInternal(mm, m, fi, args[0..actual.param_count]);
                 if (r == .trap) return r;
                 for (0..r.ret.count) |i| tryPush(mm, r.ret.vals[i]) catch return mkTrap(.stack_overflow, mm.module_name, op_off);
             },
@@ -1721,8 +1749,18 @@ fn rotr64(a: i64, b: i64) i64 {
 }
 
 // ---------------------------------------------------------------------------
-// Guest entry (W1b: build marker; `wasm run` command lands in W2)
+// Guest entry (W2: `exec WASM.BIN <file>`). The argv block rides the DSK3
+// writable data tail (card 3e; ELF images cannot take argv), the module
+// rides the `/host/` share (M34 HF4), and the linear memory is mmap'd at
+// runtime (M29 anonymous) — the loader's 256 KiB staging budget counts
+// .bss, so the 2 MiB D2 reservation never lives there.
 // ---------------------------------------------------------------------------
+const MODE_READ: u32 = 0x0001;
+const PROT_READ: u64 = 1;
+const PROT_WRITE: u64 = 2;
+const MAP_PRIVATE: u64 = 0x02;
+const MAP_ANONYMOUS: u64 = 0x20;
+
 fn sys_write(buf: []const u8) i64 {
     return asm volatile ("svc #0"
         : [ret] "={x0}" (-> i64),
@@ -1730,7 +1768,46 @@ fn sys_write(buf: []const u8) i64 {
           [fd] "{x0}" (@as(u64, 1)),
           [ptr] "{x1}" (@as(u64, @intFromPtr(buf.ptr))),
           [len] "{x2}" (@as(u64, buf.len)),
-    );
+        : .{ .memory = true });
+}
+
+fn file_open(path: []const u8, flags: u32) i64 {
+    return asm volatile ("svc #0"
+        : [ret] "={x0}" (-> i64),
+        : [num] "{x8}" (@as(u64, 23)),
+          [arg0] "{x0}" (@as(u64, @intFromPtr(path.ptr))),
+          [arg1] "{x1}" (@as(u64, path.len)),
+          [arg2] "{x2}" (@as(u64, flags)),
+        : .{ .memory = true });
+}
+
+fn file_read(handle: u32, buf: []u8) i64 {
+    return asm volatile ("svc #0"
+        : [ret] "={x0}" (-> i64),
+        : [num] "{x8}" (@as(u64, 24)),
+          [arg0] "{x0}" (@as(u64, handle)),
+          [arg1] "{x1}" (@as(u64, @intFromPtr(buf.ptr))),
+          [arg2] "{x2}" (@as(u64, buf.len)),
+        : .{ .memory = true });
+}
+
+fn file_close(handle: u32) void {
+    asm volatile ("svc #0"
+        :
+        : [num] "{x8}" (@as(u64, 26)),
+          [arg0] "{x0}" (@as(u64, handle)),
+        : .{ .memory = true });
+}
+
+fn mmap(addr: u64, len: u64, prot: u64, flags: u64) i64 {
+    return asm volatile ("svc #0"
+        : [ret] "={x0}" (-> i64),
+        : [num] "{x8}" (@as(u64, 63)),
+          [arg0] "{x0}" (addr),
+          [arg1] "{x1}" (len),
+          [arg2] "{x2}" (prot),
+          [arg3] "{x3}" (flags),
+        : .{ .memory = true });
 }
 
 fn console_puts(text: []const u8) void {
@@ -1747,14 +1824,128 @@ fn sys_exit(status: u64) noreturn {
     unreachable;
 }
 
+fn fail(msg: []const u8, status: u64) noreturn {
+    console_puts(msg);
+    sys_exit(status);
+}
+
+/// Host-test capture: when set, env.write copies into the buffer and
+/// env.exit records the status instead of reaching the console / svc.
+const HostCapture = struct {
+    write_buf: []u8,
+    wrote: usize = 0,
+    exit_status: i32 = -1,
+    exited: bool = false,
+};
+var g_capture: ?*HostCapture = null;
+
+/// Dispatch a call to an imported function. W2 wires exactly the two
+/// imports the frozen contract's first fixture needs (env.write → console
+/// byte-exact, env.exit → status); everything else keeps the W1b
+/// `imported_unwired` trap until W3's breadth lands.
+fn dispatchImport(mm: *Machine, m: *const Module, imp_idx: u32, args: []const Value) CallResult {
+    const imp = &m.imports[imp_idx]; // all imports are funcs (parse rejects the rest)
+    const ft = &m.types[imp.type_index];
+    if (std.mem.eql(u8, imp.module, "env")) {
+        if (std.mem.eql(u8, imp.name, "write") and
+            ft.param_count == 3 and ft.result_count == 1 and
+            ft.params[0] == .i32 and ft.params[1] == .i32 and ft.params[2] == .i32 and ft.results[0] == .i32)
+        {
+            const fd = args[0].i32;
+            const ptr: u32 = @bitCast(args[1].i32);
+            const len: u32 = @bitCast(args[2].i32);
+            const mem_len = @as(u64, mm.mem_pages) * page_size;
+            if (@as(u64, ptr) + len > mem_len) return mkTrap(.bounds, mm.module_name, 0);
+            const bytes = mm.store[ptr .. ptr + len];
+            var out: [max_results]Value = undefined;
+            if (g_capture) |c| {
+                const n = @min(@as(usize, len), c.write_buf.len - c.wrote);
+                @memcpy(c.write_buf[c.wrote .. c.wrote + n], bytes[0..n]);
+                c.wrote += n;
+                out[0] = .{ .i32 = @intCast(n) };
+                return .{ .ret = .{ .vals = out, .count = 1 } };
+            }
+            if (fd != 1) {
+                out[0] = .{ .i32 = -1 };
+                return .{ .ret = .{ .vals = out, .count = 1 } };
+            }
+            _ = sys_write(bytes);
+            out[0] = .{ .i32 = @intCast(len) };
+            return .{ .ret = .{ .vals = out, .count = 1 } };
+        }
+        if (std.mem.eql(u8, imp.name, "exit") and
+            ft.param_count == 1 and ft.result_count == 0 and ft.params[0] == .i32)
+        {
+            if (g_capture) |c| {
+                c.exited = true;
+                c.exit_status = args[0].i32;
+                // Stop the interpreter: a noreturn import terminates the
+                // call stack (the guest path is a real sys_exit; this
+                // marker exists only for host capture).
+                return mkTrap(.guest_exit, mm.module_name, 0);
+            }
+            sys_exit(@bitCast(@as(i64, args[0].i32)));
+        }
+    }
+    return mkTrap(.imported_unwired, mm.module_name, 0);
+}
+
+/// The interpreter's fixed state lives in .bss (never the 32 KiB EL0
+/// stack): the parsed module, the machine, and the module binary buffer.
+/// The linear-memory store is the only large region and it is mmap'd.
+const max_module_size: usize = 64 * 1024;
+var g_module: Module = undefined;
+var g_mod_buf: [max_module_size]u8 = undefined;
+var g_path_buf: [64]u8 = undefined;
+
+fn entryExport(m: *const Module) ?u32 {
+    var main: ?u32 = null;
+    var start: ?u32 = null;
+    for (m.exports[0..m.export_count]) |e| {
+        if (e.kind != .func) continue;
+        if (std.mem.eql(u8, e.name, "main")) main = e.index;
+        if (std.mem.eql(u8, e.name, "_start")) start = e.index;
+    }
+    return main orelse start;
+}
+
 pub export fn _start(argc: usize, argv: ?[*]const [32]u8) callconv(.c) noreturn {
-    // The `wasm run` command (module delivery through the file channel,
-    // entry dispatch) is W2. W1b ships the interpreter core + host tests;
-    // this marker is for the guest build/live gate.
-    _ = argc;
-    _ = argv;
-    console_puts("wasm: W1b interpreter core built\n");
-    sys_exit(0);
+    if (argc < 1 or argv == null) fail("wasm: usage: exec WASM.BIN <module.wasm>\n", 2);
+    const slot = argv.?[0];
+    const name_len = std.mem.indexOfScalar(u8, &slot, 0) orelse slot.len;
+    const name = slot[0..name_len];
+    const path = std.fmt.bufPrint(&g_path_buf, "/host/{s}", .{name}) catch fail("wasm: module name too long\n", 2);
+
+    const fd = file_open(path, MODE_READ);
+    if (fd < 0) fail("wasm: open failed\n", 3);
+    var n: usize = 0;
+    while (true) {
+        if (n >= g_mod_buf.len) fail("wasm: module too large\n", 4);
+        const r = file_read(@intCast(fd), g_mod_buf[n..]);
+        if (r <= 0) break;
+        n += @intCast(r);
+    }
+    file_close(@intCast(fd));
+    if (n == 0) fail("wasm: empty module\n", 4);
+
+    parseInto(&g_module, g_mod_buf[0..n]) catch fail("wasm: parse error\n", 10);
+    validate(&g_module) catch fail("wasm: validate error\n", 11);
+
+    // Linear memory: mmap'd (M29 anonymous, zero-filled COW), never .bss.
+    const store_len: usize = max_mem_pages * page_size; // 2 MiB hard cap (D2)
+    const mem = mmap(0, store_len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS);
+    if (mem < 0) fail("wasm: mmap failed\n", 5);
+    const store: []u8 = @as([*]u8, @ptrFromInt(@as(usize, @intCast(mem))))[0..store_len];
+
+    if (instantiate(&machine, &g_module, store, name)) |trap| {
+        _ = trap;
+        fail("wasm: instantiate trap\n", 12);
+    }
+    const entry = entryExport(&g_module) orelse fail("wasm: no entry export\n", 13);
+    switch (call(&machine, &g_module, entry, &.{})) {
+        .ret => sys_exit(0),
+        .trap => fail("wasm: trap during exec\n", 3),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1944,4 +2135,48 @@ test "corpus: hand-built fixture executes deterministically (byte-identical outp
     try testing.expect(a == .ret and b == .ret);
     try testing.expectEqual(a.ret.vals[0].i64, b.ret.vals[0].i64);
     try testing.expectEqual(@as(i64, 5040), a.ret.vals[0].i64); // 7!
+}
+
+test "w2: hello-env runs — env.write byte-exact, env.exit status observed" {
+    // The committed W2 fixture (user/src/wasm-corpus/hello-env.wasm): the
+    // C hello-world built on the HOST with `zig cc -target
+    // wasm32-freestanding -nostdlib`, importing env.write/env.exit and
+    // exporting _start. The interpreter dispatches the two imports (W2)
+    // and the capture seam proves byte-exact write + observed exit status
+    // without touching the console.
+    const fixture = @embedFile("wasm-corpus/hello-env.wasm");
+    var m = try parse(fixture);
+    try validate(&m);
+    var store: [max_mem_pages * page_size]u8 = undefined;
+    try testing.expect(instantiate(&machine, &m, &store, "hello-env") == null);
+    var capture_buf: [128]u8 = undefined;
+    var cap = HostCapture{ .write_buf = &capture_buf };
+    g_capture = &cap;
+    defer g_capture = null;
+    const entry = entryExport(&m).?;
+    const r = call(&machine, &m, entry, &.{});
+    switch (r) {
+        .ret => {},
+        // clang emits `unreachable` after the noreturn exit(55) call; the
+        // captured exit stops the interpreter first (guest_exit marker).
+        .trap => try testing.expectEqual(TrapKind.guest_exit, r.trap.kind),
+    }
+    try testing.expectEqualStrings("hello, wasm!\n", cap.write_buf[0..cap.wrote]);
+    try testing.expect(cap.exited);
+    try testing.expectEqual(@as(i32, 55), cap.exit_status);
+}
+
+test "w2: env.write with out-of-bounds pointer traps bounds" {
+    // (import "env" "write" (func (param i32 i32 i32) (result i32)))
+    // (func (export "_start")
+    //   i32.const 1  i32.const 0x7fffffff  i32.const 4  call 0  drop)
+    // No memory section: mem_pages == 0, so any write pointer traps.
+    const bytes = "\x00\x61\x73\x6d\x01\x00\x00\x00\x01\x0b\x02\x60\x03\x7f\x7f\x7f\x01\x7f\x60\x00\x00\x02\x0d\x01\x03\x65\x6e\x76\x05\x77\x72\x69\x74\x65\x00\x00\x03\x02\x01\x01\x07\x0a\x01\x06\x5f\x73\x74\x61\x72\x74\x00\x01\x0a\x11\x01\x0f\x00\x41\x01\x41\xff\xff\xff\xff\x07\x41\x04\x10\x00\x1a\x0b";
+    var m = try parse(bytes);
+    try validate(&m);
+    var store: [page_size]u8 = undefined;
+    try testing.expect(instantiate(&machine, &m, &store, "oob") == null);
+    const r = call(&machine, &m, entryExport(&m).?, &.{});
+    try testing.expect(r == .trap);
+    try testing.expectEqual(TrapKind.bounds, r.trap.kind);
 }
