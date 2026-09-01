@@ -6,7 +6,7 @@
 - **Touches:** user/src/zc.zig, user/src/lib/zc.zig, tools/verify-live-zc.sh, tests/zc-corpus/vl6-gui.z, docs/claims/6366-vl6-gui-consumer.md, docs/logs/agent-antigravity-vl6-gui-consumer.md
 - **Depends on:** 8956
 - **Heartbeat:** 2026-09-01
-- **Status:** 🔄 agent/antigravity/vl6-gui-consumer
+- **Status:** ✅ agent/antigravity/vl6-gui-consumer
 
 ## Notes
 
