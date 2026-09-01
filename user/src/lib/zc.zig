@@ -28,6 +28,11 @@ pub fn print_array(buf: anytype) void {
     _ = write(1, buf[0..]);
 }
 
+pub fn print_struct(buf: anytype) void {
+    const bytes: []const u8 = @as([*]const u8, @ptrCast(&buf))[0..@sizeOf(@TypeOf(buf))];
+    _ = write(1, bytes);
+}
+
 pub fn yield() void {
     asm volatile ("svc #0"
         :
