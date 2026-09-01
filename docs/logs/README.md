@@ -65,6 +65,9 @@ meaningful — on main.
 |--------|----------|
 | `freebuff/m22-lane-d-wave2` | [`0720-m22-lane-d-wave2.md`](0720-m22-lane-d-wave2.md) |
 | agent/antigravity/in-guest-compiler | [`agent-antigravity-in-guest-compiler.md`](agent-antigravity-in-guest-compiler.md) |
+| agent/antigravity/vl6-gui-consumer | [`agent-antigravity-vl6-gui-consumer.md`](agent-antigravity-vl6-gui-consumer.md) |
+| agent/antigravity/z05-dialect-contract | [`agent-antigravity-z05-dialect-contract.md`](agent-antigravity-z05-dialect-contract.md) |
+| agent/antigravity/z1a-data-segment | [`agent-antigravity-z1a-data-segment.md`](agent-antigravity-z1a-data-segment.md) |
 | `agent/buffy/arc1-checkbox-toggle` | [`agent-buffy-arc1-checkbox-toggle.md`](agent-buffy-arc1-checkbox-toggle.md) |
 | `agent/buffy/arc1-progressbar` | [`agent-buffy-arc1-progressbar.md`](agent-buffy-arc1-progressbar.md) |
 | `agent/buffy/arc1-scrollview` | [`agent-buffy-arc1-scrollview.md`](agent-buffy-arc1-scrollview.md) |
