@@ -24,6 +24,10 @@ pub fn print(msg: []const u8) void {
     _ = write(1, msg);
 }
 
+pub fn print_array(buf: anytype) void {
+    _ = write(1, buf[0..]);
+}
+
 pub fn yield() void {
     asm volatile ("svc #0"
         :
