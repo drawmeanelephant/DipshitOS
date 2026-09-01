@@ -1,0 +1,82 @@
+//! Host-side & in-guest prelude for zc (DipshitOS self-hosting compiler).
+//! Exposes syscall wrappers and helpers that match in-guest zc semantics.
+
+pub fn exit(status: u64) noreturn {
+    asm volatile ("svc #0"
+        :
+        : [num] "{x8}" (@as(u64, 3)),
+          [code] "{x0}" (status),
+    );
+    while (true) {}
+}
+
+pub fn write(fd: u64, buf: []const u8) i64 {
+    return asm volatile ("svc #0"
+        : [ret] "={x0}" (-> i64),
+        : [num] "{x8}" (@as(u64, 1)),
+          [fd] "{x0}" (fd),
+          [ptr] "{x1}" (@as(u64, @intFromPtr(buf.ptr))),
+          [len] "{x2}" (@as(u64, buf.len)),
+    );
+}
+
+pub fn yield() void {
+    asm volatile ("svc #0"
+        :
+        : [num] "{x8}" (@as(u64, 2)),
+    );
+}
+
+pub fn sleep(ticks: u64) void {
+    asm volatile ("svc #0"
+        :
+        : [num] "{x8}" (@as(u64, 4)),
+          [ticks] "{x0}" (ticks),
+    );
+}
+
+pub fn file_open(path: []const u8, flags: u32) i64 {
+    return asm volatile ("svc #0"
+        : [ret] "={x0}" (-> i64),
+        : [num] "{x8}" (@as(u64, 23)),
+          [p] "{x0}" (@as(u64, @intFromPtr(path.ptr))),
+          [l] "{x1}" (@as(u64, path.len)),
+          [f] "{x2}" (@as(u64, flags)),
+    );
+}
+
+pub fn file_read(fd: u32, buf: []u8) i64 {
+    return asm volatile ("svc #0"
+        : [ret] "={x0}" (-> i64),
+        : [num] "{x8}" (@as(u64, 24)),
+          [h] "{x0}" (@as(u64, fd)),
+          [p] "{x1}" (@as(u64, @intFromPtr(buf.ptr))),
+          [n] "{x2}" (@as(u64, buf.len)),
+    );
+}
+
+pub fn file_write(fd: u32, buf: []const u8) i64 {
+    return asm volatile ("svc #0"
+        : [ret] "={x0}" (-> i64),
+        : [num] "{x8}" (@as(u64, 25)),
+          [h] "{x0}" (@as(u64, fd)),
+          [p] "{x1}" (@as(u64, @intFromPtr(buf.ptr))),
+          [n] "{x2}" (@as(u64, buf.len)),
+    );
+}
+
+pub fn file_close(fd: u32) void {
+    asm volatile ("svc #0"
+        :
+        : [num] "{x8}" (@as(u64, 26)),
+          [h] "{x0}" (@as(u64, fd)),
+    );
+}
+
+pub fn svc(comptime num: u16, arg0: u64) i64 {
+    return asm volatile ("svc #0"
+        : [ret] "={x0}" (-> i64),
+        : [num] "{x8}" (@as(u64, num)),
+          [a0] "{x0}" (arg0),
+    );
+}

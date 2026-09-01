@@ -1,0 +1,5 @@
+const zc = @import("zc");
+
+pub fn main() void {
+    zc.exit(72);
+}
