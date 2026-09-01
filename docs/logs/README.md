@@ -78,6 +78,7 @@ meaningful — on main.
 | `agent/buffy/fix-728-esp-create-disk-full` | [`agent-buffy-fix-728-esp-create-disk-full.md`](agent-buffy-fix-728-esp-create-disk-full.md) |
 | fix verify-live-args console fresh-line split | [`agent-buffy-fix-args-console-split.md`](agent-buffy-fix-args-console-split.md) |
 | `agent/buffy/fix-boot-fat-geometry` | [`agent-buffy-fix-boot-fat-geometry.md`](agent-buffy-fix-boot-fat-geometry.md) |
+| fix stale desktop manifest-count gate needles | [`agent-buffy-fix-desktop-manifest-count.md`](agent-buffy-fix-desktop-manifest-count.md) |
 | full-table glyph goldens (issue 125 hardening) | [`agent-buffy-full-table-glyph-goldens.md`](agent-buffy-full-table-glyph-goldens.md) |
 | generalized bit-order mutation gate (claim 1027) | [`agent-buffy-generalized-mutations.md`](agent-buffy-generalized-mutations.md) |
 | issue 125 follow-on: refresh the public site screenshot | [`agent-buffy-glyph-mirror-fix.md`](agent-buffy-glyph-mirror-fix.md) |
@@ -212,6 +213,7 @@ meaningful — on main.
 | freebuff/b0ce3067 (host file channel — M34 planning) | [`freebuff-20260831-002.md`](freebuff-20260831-002.md) |
 | freebuff/okay-shower-thoughts-here-we-re-using-fat32-for-so-b0ce3067-2b04-4b81-984d-9fd76bfcf123 | [`freebuff-20260901-001.md`](freebuff-20260901-001.md) |
 | freebuff/okay-shower-thoughts-here-we-re-using-fat32-for-so-b0ce3067-2b04-4b81-984d-9fd76bfcf123 | [`freebuff-20260901-002.md`](freebuff-20260901-002.md) |
+| freebuff/okay-shower-thoughts-here-we-re-using-fat32-for-so-b0ce3067-2b04-4b81-984d-9fd76bfcf123 | [`freebuff-20260901-003.md`](freebuff-20260901-003.md) |
 | lane-b/m24-calc-features | [`lane-b-m24-calc-features.md`](lane-b-m24-calc-features.md) |
 | `lane-c/m20-text-rendering` | [`lane-c-m20-text-rendering.md`](lane-c-m20-text-rendering.md) |
 | `lane-d/m22-dev-tools` | [`lane-d-m22-dev-tools.md`](lane-d-m22-dev-tools.md) |
