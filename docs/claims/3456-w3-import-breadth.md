@@ -5,8 +5,8 @@
 - **Scope:** the interpreter's import surface + validation + shims + the W3 live-gate phases. Out: floats (W4 #765), the `wc` capstone (W5 #766), the event pump for timer delivery (contract §5.4 — imports dispatch; delivery extends by ADR), Go/WASI (post-M35), everything not in the contract (§6).
 - **Touches:** user/src/wasm.zig (frozen-table validation, svcN wrappers, 30-arm dispatch, capture seam, tests), tests/virelai.h + tests/virelai-probe.c + tests/winapp.c + tests/fileapp.c (new), tools/verify-virelai-probe.py (new), build.zig (shim-check step), tools/verify-live-wasm.sh (W3 phases), user/src/wasm-corpus/winapp.wasm + fileapp.wasm (new pinned fixtures), docs/claims/3456-w3-import-breadth.md, docs/logs/freebuff-20260901-008.md
 - **Depends on:** W2 #763 merged (PR #796); W1a #778 contract (PR #786)
-- **Heartbeat:** 2026-09-01 (re-verified 2026-09-01 after HF6 rebase)
-- **Status:** 🔄 in progress — class-A green, ready for PR
+- **Heartbeat:** 2026-09-01 (re-verified 2026-09-01 after HF6 rebase + review round)
+- **Status:** ✅ done — merged (PR #807)
 
 ## Notes
 
@@ -33,6 +33,17 @@ Gate: `zig test user/src/wasm.zig` **20/20** (13 W1b/W2 + 7 W3); `zig build shim
 - The generator's first fixtures omitted the vec-count bytes in the type/import sections (parse desync — `UnknownValueType` at the type tag); regenerated with counts. (Fixture bug, not interpreter bug — but it earned a python reader sanity pass.)
 - `@bitCast` size discipline in 0.16: i32→u64 needs an explicit `u32` bitcast + widen (`argU64` helper), not a direct bitcast.
 - `std.mem.allEqual` takes (T, slice, scalar) — call sites fixed.
+
+### Review round (pre-merge, same branch)
+
+Four review findings fixed in the final commit; all re-verified class-A (`zig test` 23/23 — 20 + 3 new, `shim-check` PASS, `zig build`/`image`/`wasm` byte-identical WASM.BIN 55200 B, `verify-coordination`/`verify-bss-budget` PASS):
+
+1. **Result-type validation gap:** `checkFrozenImport` checked params + counts but not `ft.results[0]` — a module declaring `env.win_open -> i64` validated and then read an i32-pushed `Value` through the i64 lane (stale stack in the high 32 bits). Result type is now part of the frozen-signature check; new test pins the rejection.
+2. **`file_close` discarded the kernel result** and always returned 0 — contract §5.1 says EBADF on a bad handle. The wrapper returns the slot-26 result and the arm passes it through.
+3. **Contract §3 zero-length discipline:** len==0 is valid at ANY pointer — `write`/`file_read` no longer bounds-trap on a zero-length OOB pointer, and `storeSlice` returns an empty slice at the store base instead of indexing at a wild pointer (latent panic: `dir_list` root form with a garbage `path_ptr`).
+4. **`dir_list` entry math was u32-wrap-able:** `max_entries * 40` wraps for ~2^26 entries, letting the wrapped value pass the range check; the check is now u64. Capture-seam out-fills clamped via a `captureFill` helper. Gate hygiene: stale `artifacts/gpu-screen-*` are cleared at run start so a previous run's captures cannot satisfy the red-fill proof on a local rerun.
+
+Known nit, left deliberately: `tests/winapp.c`'s dead `w3: unreachable\n` write declares 17 bytes of a 16-byte literal (the branch is never taken). Fixing it means regenerating + repinning `winapp.wasm` and re-rolling the whole class-B gate for zero behavioral change; noted here for W5's fixture rebuild.
 
 ### Documented deviations (none — scope discipline)
 

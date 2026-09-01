@@ -92,6 +92,11 @@ zig build shim-check
 swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
+# Gate-owned captures from a PREVIOUS run in this worktree must not
+# satisfy this run's red-fill scan (artifacts/ accumulates across local
+# reruns; CI runners are fresh). Gate-owned names only.
+rm -f artifacts/gpu-screen-* 2>/dev/null || true
+
 gate_begin live-wasm
 echo "run dir: $RUN_DIR"
 

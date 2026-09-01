@@ -163,6 +163,12 @@ fn checkFrozenImport(m: *const Module, imp: *const Import) ValidationError!void 
             for (0..f.pc) |i| {
                 if (ft.params[i] != f.params[i]) return error.ImportSignature;
             }
+            // Review fix (claim 3456): the result TYPE is part of the frozen
+            // signature too. Without this, a module declaring e.g.
+            // `env.win_open -> i64` validates, but the dispatch arm pushes an
+            // i32-lane Value the body reads through the i64 lane (stale
+            // stack in the high bits) — contract §5 signatures are exact.
+            if (f.rc == 1 and ft.results[0] != .i32) return error.ImportSignature;
             return;
         }
     }
@@ -1983,9 +1989,9 @@ fn file_read(handle: u32, buf: []u8) i64 {
         : .{ .memory = true });
 }
 
-fn file_close(handle: u32) void {
-    asm volatile ("svc #0"
-        :
+fn file_close(handle: u32) i64 {
+    return asm volatile ("svc #0"
+        : [ret] "={x0}" (-> i64),
         : [num] "{x8}" (@as(u64, 26)),
           [arg0] "{x0}" (@as(u64, handle)),
         : .{ .memory = true });
@@ -2016,7 +2022,7 @@ fn console_puts(text: []const u8) void {
 /// staging buffers — registered by the loader at exec time and never
 /// dropped. Fixed sizes mirror the kernel's own caps (write_cap 256,
 /// file staging 2048, max_path_len 64, dir_list 16 rows, audio staging
-/// 2 KiB — see the claim note on audio_play's staging window).
+/// 4 KiB — see the claim note on audio_play's staging window).
 const stage_write_len = 256; // kernel write_cap (excess -> einval)
 const stage_path_len = 64; // kernel max_path_len (excess -> einval / enametoolong)
 const stage_io_len = 2048; // kernel file staging (read take_count, write enospc cap)
@@ -2050,6 +2056,16 @@ fn stageOut(mm: *Machine, ptr: u32, src: []const u8) void {
     const n: u64 = src.len;
     if (n > mem_len - @min(@as(u64, ptr), mem_len)) return; // never OOB (validated already)
     @memcpy(mm.store[ptr .. ptr + src.len], src);
+}
+
+/// Capture-seam out-fill, clamped to the store. Test-only path, but a
+/// canned return may exceed the buffer the caller declared — fill what
+/// fits instead of slicing past the store.
+fn captureFill(mm: *Machine, ptr: u32, bytes: u64, fill: u8) void {
+    const mem_len = @as(u64, mm.mem_pages) * page_size;
+    const n = @min(bytes, mem_len - @min(@as(u64, ptr), mem_len));
+    if (n == 0) return;
+    @memset(mm.store[ptr .. ptr + @as(usize, @intCast(n))], fill);
 }
 
 fn sys_exit(status: u64) noreturn {
@@ -2162,9 +2178,12 @@ fn checkRange(mm: *Machine, ptr: u32, len: u32) bool {
     return @as(u64, ptr) + len <= @as(u64, mm.mem_pages) * page_size;
 }
 
-/// Range-checked store slice; len==0 yields an empty slice for any ptr.
+/// Range-checked store slice. len==0 is valid for ANY ptr (contract §3:
+/// zero-length means no access) — return an empty slice at the store base,
+/// never index at a wild pointer.
 fn storeSlice(mm: *Machine, ptr: u32, len: u32) ?[]const u8 {
-    if (len != 0 and !checkRange(mm, ptr, len)) return null;
+    if (len == 0) return mm.store[0..0];
+    if (!checkRange(mm, ptr, len)) return null;
     return mm.store[ptr .. ptr + len];
 }
 
@@ -2182,9 +2201,12 @@ fn dispatchImport(mm: *Machine, m: *const Module, imp_idx: u32, args: []const Va
         const ptr = argPtr(args, 1);
         const len: u32 = @bitCast(args[2].i32);
         const mem_len = @as(u64, mm.mem_pages) * page_size;
-        if (@as(u64, ptr) + len > mem_len) return mkTrap(.bounds, mm.module_name, 0);
+        // §3: zero-length is valid for ANY ptr (no access); a non-empty
+        // buffer must lie in the store or trap here, before any copy.
+        if (len != 0 and @as(u64, ptr) + len > mem_len) return mkTrap(.bounds, mm.module_name, 0);
         if (g_capture) |c| {
             c.logCall(.write, args);
+            if (len == 0) return importRet(0);
             const n = @min(@as(usize, len), c.write_buf.len - c.wrote);
             @memcpy(c.write_buf[c.wrote .. c.wrote + n], mm.store[ptr .. ptr + n]);
             c.wrote += n;
@@ -2227,7 +2249,8 @@ fn dispatchImport(mm: *Machine, m: *const Module, imp_idx: u32, args: []const Va
         const fd: u32 = @bitCast(args[0].i32);
         const buf_ptr = argPtr(args, 1);
         const cap: u32 = @bitCast(args[2].i32);
-        if (!checkRange(mm, buf_ptr, cap)) return mkTrap(.bounds, mm.module_name, 0);
+        // §3: cap==0 reads nothing — valid for any buf_ptr.
+        if (cap != 0 and !checkRange(mm, buf_ptr, cap)) return mkTrap(.bounds, mm.module_name, 0);
         if (g_capture) |c| {
             c.logCall(.file_read, args);
             return importRet(c.returns[@intFromEnum(CapId.file_read)]);
@@ -2259,19 +2282,25 @@ fn dispatchImport(mm: *Machine, m: *const Module, imp_idx: u32, args: []const Va
             return importRet(c.returns[@intFromEnum(CapId.file_close)]);
         }
         const fd: u32 = @bitCast(args[0].i32);
-        file_close(fd);
-        return importRet(0);
+        // Kernel slot 26 result passes through: 0 on success, ebadf (−2)
+        // on a bad/closed handle (contract §5.1 — review fix, the kernel
+        // result was previously discarded).
+        return importRet(file_close(fd));
     }
     if (std.mem.eql(u8, name, "dir_list")) {
         const path_ptr = argPtr(args, 0);
         const path_len: u32 = @bitCast(args[1].i32);
         const out_ptr = argPtr(args, 2);
         const max_entries: u32 = @bitCast(args[3].i32);
-        if (max_entries != 0 and !checkRange(mm, out_ptr, max_entries * 40)) return mkTrap(.bounds, mm.module_name, 0);
+        // u64 math: max_entries*40 must not wrap u32 before the range
+        // check (a ~2^26-entry request used to wrap to a passing value).
+        const need = @as(u64, max_entries) * 40;
+        const mem_len = @as(u64, mm.mem_pages) * page_size;
+        if (max_entries != 0 and @as(u64, out_ptr) + need > mem_len) return mkTrap(.bounds, mm.module_name, 0);
         if (g_capture) |c| {
             c.logCall(.dir_list, args);
             const n = c.returns[@intFromEnum(CapId.dir_list)];
-            if (n > 0) @memset(mm.store[out_ptr .. out_ptr + @as(usize, @intCast(n * 40))], c.out_fill);
+            if (n > 0) captureFill(mm, out_ptr, @as(u64, @intCast(n)) * 40, c.out_fill);
             return importRet(n);
         }
         // Kernel slot 27: path_len > max_path_len -> enametoolong (empty = root).
@@ -2508,7 +2537,7 @@ fn dispatchImport(mm: *Machine, m: *const Module, imp_idx: u32, args: []const Va
         if (g_capture) |c| {
             c.logCall(.procs, args);
             const n = c.returns[@intFromEnum(CapId.procs)];
-            if (n > 0) @memset(mm.store[buf_ptr .. buf_ptr + @as(usize, @intCast(n * 40))], c.out_fill);
+            if (n > 0) captureFill(mm, buf_ptr, @as(u64, @intCast(n)) * 40, c.out_fill);
             return importRet(n);
         }
         // Kernel slot 7: byte-budget max, rows floored to whole 40-byte rows.
@@ -2564,7 +2593,7 @@ pub export fn _start(argc: usize, argv: ?[*]const [32]u8) callconv(.c) noreturn 
         if (r <= 0) break;
         n += @intCast(r);
     }
-    file_close(@intCast(fd));
+    _ = file_close(@intCast(fd));
     if (n == 0) fail("wasm: empty module\n", 4);
 
     parseInto(&g_module, g_mod_buf[0..n]) catch fail("wasm: parse error\n", 10);
@@ -2980,6 +3009,56 @@ test "w3: pointer imports trap on out-of-bounds wasm pointers (never EFAULT at s
     try trap.expectBounds(call(&machine, &m, 2, &.{ .{ .i32 = 2 }, .{ .i32 = big } }));
     try trap.expectBounds(call(&machine, &m, 3, &.{.{ .i32 = big }}));
     try trap.expectBounds(call(&machine, &m, 4, &.{ .{ .i32 = big }, .{ .i32 = 8 } }));
+}
+
+test "w3: frozen import with a non-i32 result type is rejected (ImportSignature)" {
+    // env.win_open is (i32,i32,i32,i32) -> i32 (contract §5.2). A module
+    // declaring -> i64 must fail validation: the dispatch arm pushes an
+    // i32-lane Value, which the body would read through the i64 lane.
+    const bytes = "\x00\x61\x73\x6d\x01\x00\x00\x00" ++
+        "\x01\x09\x01\x60\x04\x7f\x7f\x7f\x7f\x01\x7e" ++
+        "\x02\x10\x01\x03\x65\x6e\x76\x08\x77\x69\x6e\x5f\x6f\x70\x65\x6e\x00\x00" ++
+        "\x05\x03\x01\x00\x01";
+    var m = try parse(bytes);
+    try testing.expectError(error.ImportSignature, validate(&m));
+}
+
+test "w3: zero-length buffers are valid at any pointer (contract §3)" {
+    // write(fd, 0x7fffffff, 0) and file_read(fd, 0x7fffffff, 0) touch no
+    // memory — they return (0), not bounds-trap.
+    const bytes = "\x00\x61\x73\x6d\x01\x00\x00\x00" ++
+        "\x01\x0f\x02\x60\x03\x7f\x7f\x7f\x01\x7f\x60\x03\x7f\x7f\x7f\x01\x7f" ++
+        "\x02\x1d\x02\x03\x65\x6e\x76\x05\x77\x72\x69\x74\x65\x00\x00\x03\x65\x6e\x76\x09\x66\x69\x6c\x65\x5f\x72\x65\x61\x64\x00\x00" ++
+        "\x05\x03\x01\x00\x01";
+    var m = try parse(bytes);
+    try validate(&m);
+    var store: [page_size]u8 = undefined;
+    try testing.expect(instantiate(&machine, &m, &store, "w3zlen") == null);
+    var cap = HostCapture{ .write_buf = &store };
+    g_capture = &cap;
+    defer g_capture = null;
+    const rw = call(&machine, &m, 0, &.{ .{ .i32 = 1 }, .{ .i32 = 0x7FFFFFFF }, .{ .i32 = 0 } });
+    try testing.expect(rw == .ret);
+    try testing.expectEqual(@as(i32, 0), rw.ret.vals[0].i32);
+    const rr = call(&machine, &m, 1, &.{ .{ .i32 = 0 }, .{ .i32 = 0x7FFFFFFF }, .{ .i32 = 0 } });
+    try testing.expect(rr == .ret);
+    try testing.expectEqual(@as(i32, 0), rr.ret.vals[0].i32);
+}
+
+test "w3: dir_list entry-count math is wrap-proof" {
+    // max_entries * 40 wraps u32 for ~2^26 entries; the wrapped value used
+    // to slip past the range check (here: 0x20000000 * 40 == 2^35, which
+    // truncates to 0). Root path (len 0) with a huge entry cap must trap.
+    var m = try parse(w3_file);
+    try validate(&m);
+    var store: [page_size]u8 = undefined;
+    try testing.expect(instantiate(&machine, &m, &store, "w3wrap") == null);
+    var cap = HostCapture{ .write_buf = &store };
+    g_capture = &cap;
+    defer g_capture = null;
+    const r = call(&machine, &m, 3, &.{ .{ .i32 = 0 }, .{ .i32 = 0 }, .{ .i32 = 0 }, .{ .i32 = 0x20000000 } });
+    try testing.expect(r == .trap);
+    try testing.expectEqual(TrapKind.bounds, r.trap.kind);
 }
 
 test "w3: live-gate app fixtures parse + validate against the frozen surface" {
