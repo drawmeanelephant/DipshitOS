@@ -53,12 +53,26 @@ gate_begin live-zc
 echo "run dir: $RUN_DIR"
 SCRIPT="$RUN_DIR/script.txt"
 
-# Stage a tiny program that exits 72.
+# Stage a tiny program that exits 72 in the honest Zig 0.16 dialect.
 # ZC.BIN is DSK3 so the kernel refuses args; use the no-arg form which
 # defaults to reading /esp/MAIN.Z and writing /esp/MAIN.ELF.
-SRC='fn main() void { svc(3, 72); }'
+SRC='const zc = @import("zc"); pub fn main() void { zc.exit(72); }'
 printf 'ls\nwrite MAIN.Z '\''%s'\''\nexec ZC.BIN\n' "$SRC" > "$SCRIPT"
 printf 'mount esp\nls\nexec MAIN.ELF\necho rx-zc-ok\n' > "$SCRIPT2"
+
+# --- host compile-check phase (Z0.5 dialect acceptance) -----------------------------
+echo "=== verify-live-zc: host compile check ==="
+HOST_CHECK_TMP="$RUN_DIR/main_check.zig"
+printf '%s\n' "$SRC" > "$HOST_CHECK_TMP"
+zig build-obj -target aarch64-freestanding --dep zc -Mroot="$HOST_CHECK_TMP" -Mzc=user/src/lib/zc.zig -femit-bin="$RUN_DIR/main_check.o"
+rm -f "$HOST_CHECK_TMP" "$RUN_DIR/main_check.o"
+
+# Also host compile-check the corpus fixture
+CORPUS_CHECK_TMP="$RUN_DIR/corpus_check.zig"
+cp tests/zc-corpus/z05-dialect.z "$CORPUS_CHECK_TMP"
+zig build-obj -target aarch64-freestanding --dep zc -Mroot="$CORPUS_CHECK_TMP" -Mzc=user/src/lib/zc.zig -femit-bin="$RUN_DIR/corpus_check.o"
+rm -f "$CORPUS_CHECK_TMP" "$RUN_DIR/corpus_check.o"
+echo "host compile check: ok (SRC + tests/zc-corpus/z05-dialect.z valid Zig 0.16)"
 
 run_one() {
     local tag="$1"

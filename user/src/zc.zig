@@ -151,6 +151,7 @@ const TokenKind = enum {
     eof,
     invalid,
     keyword_fn,
+    keyword_pub,
     keyword_let,
     keyword_var,
     keyword_const,
@@ -158,10 +159,12 @@ const TokenKind = enum {
     keyword_else,
     keyword_while,
     keyword_return,
-    keyword_svc,
     ident,
     number,
+    string_lit,
     char_lit,
+    dot,
+    at,
     l_paren,
     r_paren,
     l_brace,
@@ -227,6 +230,8 @@ const Tokenizer = struct {
         self.pos += 1;
 
         switch (c) {
+            '.' => return Token{ .kind = .dot, .text = self.src[start..self.pos], .line = self.line },
+            '@' => return Token{ .kind = .at, .text = self.src[start..self.pos], .line = self.line },
             '(' => return Token{ .kind = .l_paren, .text = self.src[start..self.pos], .line = self.line },
             ')' => return Token{ .kind = .r_paren, .text = self.src[start..self.pos], .line = self.line },
             '{' => return Token{ .kind = .l_brace, .text = self.src[start..self.pos], .line = self.line },
@@ -290,6 +295,17 @@ const Tokenizer = struct {
                 }
                 return Token{ .kind = .greater, .text = self.src[start..self.pos], .line = self.line };
             },
+            '"' => {
+                while (self.pos < self.src.len and self.src[self.pos] != '"') {
+                    if (self.pos + 1 < self.src.len and self.src[self.pos] == '\\') self.pos += 1;
+                    self.pos += 1;
+                }
+                if (self.pos < self.src.len and self.src[self.pos] == '"') {
+                    self.pos += 1;
+                    return Token{ .kind = .string_lit, .text = self.src[start..self.pos], .line = self.line };
+                }
+                return Token{ .kind = .invalid, .text = self.src[start..self.pos], .line = self.line };
+            },
             '\'' => {
                 if (self.pos < self.src.len and self.src[self.pos] != '\'') {
                     self.pos += 1;
@@ -304,6 +320,7 @@ const Tokenizer = struct {
                 if (std.ascii.isAlphabetic(c) or c == '_') {
                     while (self.pos < self.src.len and (std.ascii.isAlphanumeric(self.src[self.pos]) or self.src[self.pos] == '_')) self.pos += 1;
                     const text = self.src[start..self.pos];
+                    if (std.mem.eql(u8, text, "pub")) return Token{ .kind = .keyword_pub, .text = text, .line = self.line };
                     if (std.mem.eql(u8, text, "fn")) return Token{ .kind = .keyword_fn, .text = text, .line = self.line };
                     if (std.mem.eql(u8, text, "let")) return Token{ .kind = .keyword_let, .text = text, .line = self.line };
                     if (std.mem.eql(u8, text, "var")) return Token{ .kind = .keyword_var, .text = text, .line = self.line };
@@ -312,7 +329,6 @@ const Tokenizer = struct {
                     if (std.mem.eql(u8, text, "else")) return Token{ .kind = .keyword_else, .text = text, .line = self.line };
                     if (std.mem.eql(u8, text, "while")) return Token{ .kind = .keyword_while, .text = text, .line = self.line };
                     if (std.mem.eql(u8, text, "return")) return Token{ .kind = .keyword_return, .text = text, .line = self.line };
-                    if (std.mem.eql(u8, text, "svc")) return Token{ .kind = .keyword_svc, .text = text, .line = self.line };
                     return Token{ .kind = .ident, .text = text, .line = self.line };
                 }
                 if (std.ascii.isDigit(c)) {
@@ -659,7 +675,145 @@ fn parsePrimary(p: *Parser) anyerror!void {
             emitLoadImmediate(0, val);
         },
         .ident => {
-            if (std.mem.eql(u8, t.text, "read8")) {
+            if (p.accept(.dot)) {
+                const member_tok = try p.expect(.ident);
+                if (std.mem.eql(u8, t.text, "zc")) {
+                    if (std.mem.eql(u8, member_tok.text, "exit")) {
+                        _ = try p.expect(.l_paren);
+                        try compileExpr(p);
+                        _ = try p.expect(.r_paren);
+                        emit(enc_movz(8, 3, 0));
+                        emit(enc_svc(0));
+                    } else if (std.mem.eql(u8, member_tok.text, "write")) {
+                        _ = try p.expect(.l_paren);
+                        var arg_count: usize = 0;
+                        if (p.peek() != .r_paren) {
+                            try compileExpr(p);
+                            emit(enc_sub_imm(31, 31, 16));
+                            emit(enc_str(31, 0, 0));
+                            arg_count += 1;
+                            while (p.accept(.comma)) {
+                                try compileExpr(p);
+                                emit(enc_sub_imm(31, 31, 16));
+                                emit(enc_str(31, 0, 0));
+                                arg_count += 1;
+                            }
+                        }
+                        _ = try p.expect(.r_paren);
+                        var i = arg_count;
+                        while (i > 0) {
+                            i -= 1;
+                            emit(enc_ldr(31, @intCast(i), 0));
+                            emit(enc_add_imm(31, 31, 16));
+                        }
+                        emit(enc_movz(8, 1, 0));
+                        emit(enc_svc(0));
+                    } else if (std.mem.eql(u8, member_tok.text, "yield")) {
+                        _ = try p.expect(.l_paren);
+                        _ = try p.expect(.r_paren);
+                        emit(enc_movz(8, 2, 0));
+                        emit(enc_svc(0));
+                    } else if (std.mem.eql(u8, member_tok.text, "sleep")) {
+                        _ = try p.expect(.l_paren);
+                        try compileExpr(p);
+                        _ = try p.expect(.r_paren);
+                        emit(enc_movz(8, 4, 0));
+                        emit(enc_svc(0));
+                    } else if (std.mem.eql(u8, member_tok.text, "file_open")) {
+                        _ = try p.expect(.l_paren);
+                        try compileExpr(p);
+                        emit(enc_sub_imm(31, 31, 16));
+                        emit(enc_str(31, 0, 0));
+                        _ = try p.expect(.comma);
+                        try compileExpr(p);
+                        emit(enc_ldr(31, 1, 0));
+                        emit(enc_add_imm(31, 31, 16));
+                        _ = try p.expect(.r_paren);
+                        emit(enc_movz(8, 23, 0));
+                        emit(enc_svc(0));
+                    } else if (std.mem.eql(u8, member_tok.text, "file_read")) {
+                        _ = try p.expect(.l_paren);
+                        var arg_count: usize = 0;
+                        if (p.peek() != .r_paren) {
+                            try compileExpr(p);
+                            emit(enc_sub_imm(31, 31, 16));
+                            emit(enc_str(31, 0, 0));
+                            arg_count += 1;
+                            while (p.accept(.comma)) {
+                                try compileExpr(p);
+                                emit(enc_sub_imm(31, 31, 16));
+                                emit(enc_str(31, 0, 0));
+                                arg_count += 1;
+                            }
+                        }
+                        _ = try p.expect(.r_paren);
+                        var i = arg_count;
+                        while (i > 0) {
+                            i -= 1;
+                            emit(enc_ldr(31, @intCast(i), 0));
+                            emit(enc_add_imm(31, 31, 16));
+                        }
+                        emit(enc_movz(8, 24, 0));
+                        emit(enc_svc(0));
+                    } else if (std.mem.eql(u8, member_tok.text, "file_write")) {
+                        _ = try p.expect(.l_paren);
+                        var arg_count: usize = 0;
+                        if (p.peek() != .r_paren) {
+                            try compileExpr(p);
+                            emit(enc_sub_imm(31, 31, 16));
+                            emit(enc_str(31, 0, 0));
+                            arg_count += 1;
+                            while (p.accept(.comma)) {
+                                try compileExpr(p);
+                                emit(enc_sub_imm(31, 31, 16));
+                                emit(enc_str(31, 0, 0));
+                                arg_count += 1;
+                            }
+                        }
+                        _ = try p.expect(.r_paren);
+                        var i = arg_count;
+                        while (i > 0) {
+                            i -= 1;
+                            emit(enc_ldr(31, @intCast(i), 0));
+                            emit(enc_add_imm(31, 31, 16));
+                        }
+                        emit(enc_movz(8, 25, 0));
+                        emit(enc_svc(0));
+                    } else if (std.mem.eql(u8, member_tok.text, "file_close")) {
+                        _ = try p.expect(.l_paren);
+                        try compileExpr(p);
+                        _ = try p.expect(.r_paren);
+                        emit(enc_movz(8, 26, 0));
+                        emit(enc_svc(0));
+                    } else if (std.mem.eql(u8, member_tok.text, "svc")) {
+                        _ = try p.expect(.l_paren);
+                        const num_tok = try p.expect(.number);
+                        const syscall_num = std.fmt.parseInt(u16, num_tok.text, 0) catch return error.CompileError;
+                        var arg_count: usize = 0;
+                        while (p.accept(.comma)) {
+                            try compileExpr(p);
+                            emit(enc_sub_imm(31, 31, 16));
+                            emit(enc_str(31, 0, 0));
+                            arg_count += 1;
+                        }
+                        _ = try p.expect(.r_paren);
+                        var i = arg_count;
+                        while (i > 0) {
+                            i -= 1;
+                            emit(enc_ldr(31, @intCast(i), 0));
+                            emit(enc_add_imm(31, 31, 16));
+                        }
+                        emit(enc_movz(8, syscall_num, 0));
+                        emit(enc_svc(0));
+                    } else {
+                        print_err("unknown zc function", member_tok.line, member_tok.text);
+                        return error.CompileError;
+                    }
+                } else {
+                    print_err("unknown module", t.line, t.text);
+                    return error.CompileError;
+                }
+            } else if (std.mem.eql(u8, t.text, "read8")) {
                 _ = try p.expect(.l_paren);
                 try compileExpr(p);
                 _ = try p.expect(.r_paren);
@@ -734,27 +888,6 @@ fn parsePrimary(p: *Parser) anyerror!void {
                 };
                 emit(enc_ldr(19, 0, @intCast(offset)));
             }
-        },
-        .keyword_svc => {
-            _ = try p.expect(.l_paren);
-            const num_tok = try p.expect(.number);
-            const syscall_num = std.fmt.parseInt(u16, num_tok.text, 0) catch return error.CompileError;
-            var arg_count: usize = 0;
-            while (p.accept(.comma)) {
-                try compileExpr(p);
-                emit(enc_sub_imm(31, 31, 16));
-                emit(enc_str(31, 0, 0));
-                arg_count += 1;
-            }
-            _ = try p.expect(.r_paren);
-            var i = arg_count;
-            while (i > 0) {
-                i -= 1;
-                emit(enc_ldr(31, @intCast(i), 0));
-                emit(enc_add_imm(31, 31, 16));
-            }
-            emit(enc_movz(8, syscall_num, 0));
-            emit(enc_svc(0));
         },
         .l_paren => {
             try compileExpr(p);
@@ -838,7 +971,12 @@ fn compileStatement(p: *Parser) anyerror!void {
             emit(enc_ret(30));
         },
         else => {
-            if (p.peek() == .ident and p.idx + 1 < p.tokens.len and p.tokens[p.idx + 1].kind == .equal) {
+            if (p.peek() == .ident and std.mem.eql(u8, p.currentToken().text, "_") and p.idx + 1 < p.tokens.len and p.tokens[p.idx + 1].kind == .equal) {
+                _ = p.advance();
+                _ = p.advance();
+                try compileExpr(p);
+                _ = try p.expect(.semicolon);
+            } else if (p.peek() == .ident and p.idx + 1 < p.tokens.len and p.tokens[p.idx + 1].kind == .equal) {
                 const name_tok = p.advance();
                 _ = p.advance();
                 try compileExpr(p);
@@ -875,6 +1013,7 @@ fn compile(src: []const u8) !usize {
     // Pass 1: Gather function declarations
     var p1 = Parser{ .tokens = tokens };
     while (p1.peek() != .eof) {
+        _ = p1.accept(.keyword_pub);
         if (p1.peek() == .keyword_fn) {
             _ = p1.advance();
             const name_tok = try p1.expect(.ident);
@@ -893,6 +1032,10 @@ fn compile(src: []const u8) !usize {
             if (functions_count >= functions.len) return error.TooManyFunctions;
             functions[functions_count] = Function{ .name = name_tok.text, .address = 0, .param_count = param_count };
             functions_count += 1;
+        } else if (p1.peek() == .keyword_const or p1.peek() == .keyword_var or p1.peek() == .keyword_let) {
+            _ = p1.advance();
+            while (p1.peek() != .semicolon and p1.peek() != .eof) _ = p1.advance();
+            _ = p1.accept(.semicolon);
         } else {
             _ = p1.advance();
         }
@@ -907,6 +1050,7 @@ fn compile(src: []const u8) !usize {
     // Pass 2: Compile function bodies
     var p2 = Parser{ .tokens = tokens };
     while (p2.peek() != .eof) {
+        _ = p2.accept(.keyword_pub);
         if (p2.peek() == .keyword_fn) {
             _ = p2.advance();
             const name_tok = try p2.expect(.ident);
@@ -959,6 +1103,10 @@ fn compile(src: []const u8) !usize {
             emit(enc_ldr(31, 30, 0));
             emit(enc_add_imm(31, 31, 16));
             emit(enc_ret(30));
+        } else if (p2.peek() == .keyword_const or p2.peek() == .keyword_var or p2.peek() == .keyword_let) {
+            _ = p2.advance();
+            while (p2.peek() != .semicolon and p2.peek() != .eof) _ = p2.advance();
+            _ = p2.accept(.semicolon);
         } else {
             _ = p2.advance();
         }
@@ -1083,4 +1231,54 @@ test "zc: compiles simple expression arithmetic" {
     const src = "fn main() void { let x = (3 + 4) * 5; return; }";
     const bytes = try compile(src);
     try testing.expect(bytes > 0);
+}
+
+test "zc: Z0.5 dialect contract with @import(\"zc\") and zc.exit" {
+    const src =
+        \\const zc = @import("zc");
+        \\
+        \\pub fn main() void {
+        \\    zc.exit(72);
+        \\}
+    ;
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
+    // main is called from entry at byte 0
+    try testing.expectEqual(@as(u32, enc_bl(16)), std.mem.readInt(u32, code[0..4], .little));
+}
+
+test "zc: Z0.5 zc builtins (write, yield, sleep, file ops)" {
+    const src =
+        \\const zc = @import("zc");
+        \\
+        \\pub fn main() void {
+        \\    zc.yield();
+        \\    zc.sleep(5);
+        \\    _ = zc.write(1, 4096, 12);
+        \\    let fd = zc.file_open(100, 1);
+        \\    _ = zc.file_read(fd, 200, 50);
+        \\    _ = zc.file_write(fd, 200, 50);
+        \\    zc.file_close(fd);
+        \\    zc.exit(0);
+        \\}
+    ;
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
+}
+
+test "zc: tokenizer handles dot, at, string literals, and pub keyword" {
+    const src = "const zc = @import(\"zc\"); pub fn main() void {}";
+    var t = Tokenizer{ .src = src };
+    try testing.expectEqual(TokenKind.keyword_const, t.next().kind);
+    try testing.expectEqual(TokenKind.ident, t.next().kind);
+    try testing.expectEqual(TokenKind.equal, t.next().kind);
+    try testing.expectEqual(TokenKind.at, t.next().kind);
+    try testing.expectEqual(TokenKind.ident, t.next().kind);
+    try testing.expectEqual(TokenKind.l_paren, t.next().kind);
+    try testing.expectEqual(TokenKind.string_lit, t.next().kind);
+    try testing.expectEqual(TokenKind.r_paren, t.next().kind);
+    try testing.expectEqual(TokenKind.semicolon, t.next().kind);
+    try testing.expectEqual(TokenKind.keyword_pub, t.next().kind);
+    try testing.expectEqual(TokenKind.keyword_fn, t.next().kind);
+    try testing.expectEqual(TokenKind.ident, t.next().kind);
 }
