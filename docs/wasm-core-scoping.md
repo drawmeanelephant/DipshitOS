@@ -1,6 +1,6 @@
 # WASM core interpreter (M35 proposal) — scoping sketch and gated card split
 
-Status: **PROPOSED — no issue filed yet** · Date: 2026-09-01 ·
+Status: **PROPOSED — filed W1a + W1b + W2–W5 (#778, #762–#766)** · Date: 2026-09-01 ·
 Derived from: the custom-virtio file channel (M34 HF1–HF3, claims 7710/9459),
 ADR 0007's syscall ABI, the M32 in-guest compiler ladder (zc, #749–#761), and
 the M29 VM seam (`sys_mmap` slot 63).
@@ -79,7 +79,7 @@ A **wasm-core integer subset first**, growing honestly:
 |---------|----------------|-------|
 | Value types | i32, i64 | f32/f64 (W4) |
 | Control flow | block/loop/if/br/br_if/br_table/return/call/call_indirect | — |
-| Linear memory | one bounded memory (mmap-backed via slot 63) | multiple memories (spec later) |
+| Linear memory | one bounded memory, **2 MiB (32 pages) cap — trap on `memory.grow` beyond** (mmap-backed via slot 63) | multiple memories (spec later) |
 | Tables | one function table (call_indirect) | — |
 | Traps | bounds, call_indirect type, divide-by-zero, unreachable | — |
 | Threads / atomics / SIMD / bulk-memory | **never in scope** (bounded by design) | — |
@@ -94,7 +94,7 @@ WASI is POSIX-shaped — the thing the project rejects on principle. Instead
 the interpreter defines its own import namespace mapped to ADR 0007, e.g.
 `env.write(fd, ptr, len) → svc 1`, `env.exit(status) → svc 3`,
 `env.win_open(x,y,w,h) → svc 12`, … The mapping table is a frozen contract
-(W1) before any breadth (W3). Host toolchains link against a tiny `virelai.h`
+(**W1a — `docs/wasm-import-contract.md`**) before any breadth (W3). Host toolchains link against a tiny `virelai.h`
 / `virelai.zig` shim that emits `env.*` imports — so the C source is
 ordinary freestanding C with `#include "virelai.h"`.
 
@@ -110,14 +110,16 @@ off-ramp possible without rework.
 
 | # | Card | Depends | Gate |
 |---|------|---------|------|
-| W1 | **Contract + core interpreter** — `user/src/wasm.zig` (or `user/src/lib/wasm.zig` + thin `WASM.BIN`): wasm binary parse + validation + integer-subset execution (i32/i64, control flow, linear memory, call_indirect, traps), the frozen import-surface mapping table, host unit tests on BOTH parse and exec | — | `zig test` on the interpreter: a hand-built module executes, bounds trap named, call_indirect type-check traps, deterministic; the mapping table is a checked-in contract doc |
-| W2 | **First user surface + live proof** — `wasm run <file>` monitor command (or `exec WASM.BIN <file>`); module read through the file channel; class-B gate: host builds a C hello-world with `zig cc` (684 B), drops it in the share, guest runs it and the output is observed | W1 | `tools/verify-live-wasm.sh` PASS on VZ: `write` import lands on the console byte-exact, `exit` status observed, shell alive |
-| W3 | **Import breadth** — the full chosen syscall set (file, win, audio, clipboard, timers, mmap) behind `env.*` imports; a wasm app that opens a window and fills it, and a wasm app that reads a file through the channel | W2 | live gate: wasm window app's fill observed via the existing scanout/capture path; wasm file app's read verified byte-exact |
-| W4 | **Core completeness** — f32/f64, sign-extension ops, bulk-memory (as justified); a real program (e.g. a small C utility compiled with `zig cc`) runs in-guest with verified output | W3 | live gate: a floating-point-using wasm app produces pinned output; determinism fixtures |
-| W5 | **The ecosystem capstone** — port a real tool (e.g. a tiny C program that does actual work — text munging, a mini `wc`) to wasm via `zig cc`/clang, ship it as an HF4 app; document the WASI-free import contract for host authors | W4 | a "real work" wasm app ships and is used in a gate; the import contract doc is complete enough that a fresh host author writes a working `virelai.h` program from it alone |
+| W1a | **Import contract freeze** (#778) — the checked-in `docs/wasm-import-contract.md`: frozen `env.*` → ADR 0007 mapping (file 23–27 + 34–37, win 12–20, audio 42–45, timers 40/41, mmap 63, procs 7, wait 8), argument shapes + error mapping; **decisions pinned: Go wasm deferred to post-M35 (option b), 2 MiB / 32-page memory cap, W5 capstone = `wc`** | — (docs-only; parallel with W1b) | the contract doc is checked in and reviewed; W3/W5 point at it; a fresh host author can implement any listed import from it alone |
+| W1b | **Core interpreter** (#762) — `user/src/wasm.zig` (path frozen; builds `WASM.BIN`): wasm binary parse + validation + integer-subset execution (i32/i64, control flow, one bounded memory with 32-page cap + grow-trap, `call_indirect`, traps named with module+offset), host unit tests on parse AND exec; `tests/wasm-corpus/` starts here | — (parallel with W1a) | `zig test`: a hand-built module executes deterministically; each trap class fires named; `memory.grow` past 32 pages traps; BSS before/after recorded |
+| W2 | **First user surface + live proof** (#763) — `exec WASM.BIN <file>` (HF4 app delivery); module read through the file channel; class-B gate: host builds a C hello-world with `zig cc` (684 B), drops it in the share, guest runs it and the output is observed; `wasm run` monitor command optional/deferred | W1b | `tools/verify-live-wasm.sh` PASS on VZ: `write` import lands on the console byte-exact, `exit` status observed, shell alive |
+| W3 | **Import breadth** (#764) — the frozen syscall set (file, win, audio, clipboard, timers, mmap) behind `env.*` imports per the W1a contract; a wasm window app and a wasm file app; `virelai.h`/`virelai.zig` host shims | W2 + W1a | live gate: wasm window app's fill observed via the existing scanout/capture path; wasm file app's read verified byte-exact |
+| W4 | **Core completeness** (#765) — f32/f64, sign-extension ops, bulk-memory only as justified by the capstone; floats tied to a **named C float utility** (`zig cc`, pinned output) — not `wc`, which is integer-only | W3 | live gate: the named float utility produces pinned byte-exact output; determinism fixtures (extending `tests/wasm-corpus/`) |
+| W5 | **The ecosystem capstone** (#766) — **`wc`**: byte/line/word counts via file-channel reads, byte-exact; shipped as an HF4 app; the import contract rewritten to standalone-author standard, proven by a fresh host author writing a working `virelai.h` program from the doc alone | W4 | the `wc` app ships and runs in a live gate with byte-exact counts; a second app written from the contract doc alone compiles and runs |
 
-W1+W2 can be one claim if reviewers prefer a single vertical slice (the
-HF1+HF2 pattern — prove the whole concept in one PR).
+W1b+W2 can be one claim if reviewers prefer a single vertical slice (the
+HF1+HF2 pattern — prove the whole concept in one PR); W1a is docs-only and
+can be claimed in parallel by a second agent.
 
 ## Risks and honest limits
 
@@ -137,11 +139,11 @@ HF1+HF2 pattern — prove the whole concept in one PR).
   trips at 32 KiB — fine, but a documented latency, not an assumption).
 - **Performance** — an interpreter is slower than native. Fine for the
   experience layer; the AOT off-ramp is the documented later answer.
-- **Go's runtime needs WASI-ish imports.** `GOOS=wasip1` output imports
-  WASI symbols, not `env.*`. The honest options: (a) a thin WASI-shim
-  layer that maps the few imports Go actually uses onto ADR 0007, or (b)
-  documenting that Go wasm rides the interpreter only via the shim. Decide
-  in W1's contract, don't assume.
+- **Go's runtime needs WASI-ish imports — decided, not assumed.**
+  `GOOS=wasip1` output imports WASI symbols, not `env.*`. **Resolved
+  2026-09-01 (W1a, #778): option (b)** — Go wasm is deferred to post-M35;
+  the WASI-shim question is documented, not built, and W2's gate uses only
+  the 684-B `zig cc` fixture (no 1.9-MB fixture, no shim, in the first PR).
 - **Not a systems language.** Wasm apps can't touch kernel-touching work
   Zig does; it's for app breadth, not depth. The Zig/zc ladder stays the
   crown jewel; this is additive, not a replacement.
