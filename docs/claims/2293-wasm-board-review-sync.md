@@ -6,7 +6,7 @@
 - **Touches:** docs/wasm-core-scoping.md docs/line-of-sight.md docs/claims/2293-wasm-board-review-sync.md docs/logs/freebuff-20260901-002.md
 - **Depends on:** M35 issues #762–#766 filed (claim 3904); HF4 merged (PR #769); the self-hosting review pass (claim 1263, PR #777)
 - **Heartbeat:** 2026-09-01
-- **Status:** 🔄 in progress
+- **Status:** ✅ done
 
 ## Notes
 
