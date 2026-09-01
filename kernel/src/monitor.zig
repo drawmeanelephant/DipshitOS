@@ -37,6 +37,7 @@ const timer = @import("timer.zig");
 const uaccess = @import("uaccess.zig"); // claim 6120: fault-safe copy-in/copy-out
 const userspace = @import("userspace.zig"); // claim 5804: user-VA layout
 const virtio_blk = @import("virtio_blk.zig"); // claim 6420: the sector interface behind `mount` (milestone four card 2)
+const virtio_file = @import("virtio_file.zig"); // M34 HF1+HF2 (issues #735/#736): the host file channel behind `vf`
 const csprng = @import("csprng.zig"); // milestone four (claim 2665): the seeded CSPRNG behind `random`
 const clipboard = @import("clipboard.zig"); // milestone fourteen (claim 0169): the shared kernel clipboard behind `clip`
 const virtio_net = @import("virtio_net.zig"); // milestone five card N1 (claim 1373): the net transport behind `net`/`netsend`
@@ -285,7 +286,7 @@ pub const Command = struct {
 /// grows it 54 -> 55 (`sym`). Milestone twenty-two D5 (issue #328)
 /// grows it 55 -> 56 (`strace`). Milestone twenty-two D6 (issue #329)
 /// grows it 56 -> 57 (`ps`).
-pub const registry_count: usize = 71; // 51 + sh/calc + `font` (M20 U1) + sym/strace/ps (M22 D3/D5/D6) + `type` (M19 P1) + `mktemp` (M19 P16) + stat/find/dmesg/time/which/inventory (M22 D8/D12/D13/D16) + du (M25 F4) + screenshot/shortcuts (M27 G27/G29) + smp (M28) + `wm` (M32 WMS2, issue #622) + `wnd` (M32 WMS3, issue #623)
+pub const registry_count: usize = 72; // 51 + sh/calc + `font` (M20 U1) + sym/strace/ps (M22 D3/D5/D6) + `type` (M19 P1) + `mktemp` (M19 P16) + stat/find/dmesg/time/which/inventory (M22 D8/D12/D13/D16) + du (M25 F4) + screenshot/shortcuts (M27 G27/G29) + smp (M28) + `wm` (M32 WMS2, issue #622) + `wnd` (M32 WMS3, issue #623) + `vf` (M34 HF1+HF2, issues #735/#736)
 
 /// `sym <file>` reads at most this many bytes for on-disk symtab inspection
 /// (M22 D3). ELF symbol tables live near the file tail; 64 KiB covers every
@@ -366,6 +367,7 @@ fn ensure_registry() []const Command {
             .{ .name = "usb", .help = "XHCI host controller: `usb` transport report, `usb devices` enumerated HID devices, `usb report` last HID report", .usage = "usb [devices|report]", .category = .graphics_input, .handler = cmd_usb },
             .{ .name = "uname", .help = "compact system identity", .usage = "uname", .category = .machine_identity, .handler = cmd_uname },
             .{ .name = "version", .help = "display build information", .usage = "version", .category = .machine_identity, .handler = cmd_version },
+            .{ .name = "vf", .help = "host file channel (M34): 'vf ls [<path>]' lists a macOS share folder served over custom-virtio queue 5; 'vf cat <path>' streams a file from it (STAT byte count first, then READ round trips)", .usage = "vf [ls [<path>]|cat <path>]", .category = .storage, .max_args = 2, .handler = cmd_vf },
             .{ .name = "welcome", .help = "guided tour of the system for new users", .usage = "welcome", .category = .machine_identity, .handler = cmd_welcome },
             .{ .name = "dui", .help = "Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('dui focus <n>' focuses; 'dui raise <n>' raises; 'dui lower <n>' lowers to back; 'dui move <n> <x> <y>' moves a user window; 'dui close <n>' releases a user window; 'dui list <pid>' filters by owner; 'dui hit <x> <y>' hit-tests; 'dui cycle' cycles focus like Alt+Tab; 'dui tile <n>' toggles a user window floating/tiled (M21 W1); 'dui master' swaps master/detail (M21 W2))", .usage = "dui [focus <n>|raise <n>|lower <n>|move <n> <x> <y>|close <n>|list <pid>|hit <x> <y>|cycle|tile <n>|master]", .category = .graphics_input, .max_args = 4, .handler = cmd_dui },
             .{ .name = "write", .help = "write text to a file on the ESP", .usage = "write <file> <text...>", .category = .storage, .min_args = 1, .handler = cmd_write },
@@ -1342,6 +1344,130 @@ fn cmd_cat_path(m: *Monitor, path: []const u8) ExecError {
 /// driver replacing claim 3475's NVRAM variables): the file survives
 /// reboot because it is on the disk itself. Capacity is checked before the
 /// write; a failed sector write is reported honestly, never faked.
+// ---------------------------------------------------------------------------
+// M34 HF1+HF2 (issues #735/#736): the HOST FILE CHANNEL (`vf ls`/`vf cat`).
+// The guest userland filesystem is a macOS folder served over custom-virtio
+// queue 5 (runner flag --cvc-file <host-dir>); default boots print the
+// honest "no host file channel" line and stay byte-identical.
+// ---------------------------------------------------------------------------
+
+fn cmd_vf(m: *Monitor, args: []const []const u8) ExecError {
+    if (!virtio_file.available()) {
+        m.console.print_line("vf: no host file channel (boot the runner with --cvc-file <host-dir>)");
+        return .none;
+    }
+    if (args.len == 0) return cmd_vf_usage(m);
+    if (std.mem.eql(u8, args[0], "ls")) return cmd_vf_ls(m, args[1..]);
+    if (std.mem.eql(u8, args[0], "cat")) return cmd_vf_cat(m, args[1..]);
+    return cmd_vf_usage(m);
+}
+
+fn cmd_vf_usage(m: *Monitor) ExecError {
+    err_prefix(m);
+    m.console.print_line("vf usage: vf ls [<path>] | vf cat <path>");
+    return .invalid_argument;
+}
+
+fn vf_status_text(st: u8) []const u8 {
+    return switch (st) {
+        virtio_file.st_not_found => "not found on the host share",
+        virtio_file.st_is_dir => "is a directory",
+        virtio_file.st_truncated => "reply truncated (file larger than the 32 KiB per-round-trip cap)",
+        else => "host file-channel error",
+    };
+}
+
+fn cmd_vf_ls(m: *Monitor, args: []const []const u8) ExecError {
+    const path: []const u8 = if (args.len > 0) args[0] else "";
+    var res: virtio_file.ListResult = .{};
+    const st = virtio_file.list(path, &res);
+    if (st != virtio_file.st_ok) {
+        err_prefix(m);
+        m.console.puts("vf ls: ");
+        m.console.puts(if (path.len > 0) path else "/");
+        m.console.puts(": ");
+        m.console.print_line(vf_status_text(st));
+        return .invalid_argument;
+    }
+    var i: usize = 0;
+    while (i < res.count) : (i += 1) {
+        const e = res.entries[i];
+        m.console.puts(e.name[0..e.name_len]);
+        m.console.puts(if (e.type == virtio_file.dir_type_dir) "/ " else "  ");
+        m.console.print_u64(e.size);
+        m.console.puts("\n");
+    }
+    return .none;
+}
+
+fn cmd_vf_cat(m: *Monitor, args: []const []const u8) ExecError {
+    if (args.len == 0) return cmd_vf_usage(m);
+    const path = args[0];
+    var st_res: virtio_file.StatResult = .{};
+    const st = virtio_file.stat(path, &st_res);
+    if (st != virtio_file.st_ok) {
+        err_prefix(m);
+        m.console.puts("vf cat: ");
+        m.console.puts(path);
+        m.console.puts(": ");
+        m.console.print_line(vf_status_text(st));
+        return .invalid_argument;
+    }
+    if (st_res.is_dir) {
+        err_prefix(m);
+        m.console.puts("vf cat: ");
+        m.console.puts(path);
+        m.console.print_line(": is a directory");
+        return .invalid_argument;
+    }
+    // STAT first — the gate asserts the byte count before the stream.
+    m.console.puts("vf: cat ");
+    m.console.puts(path);
+    m.console.puts(" size=");
+    m.console.print_u64(st_res.size);
+    m.console.puts("\n");
+    var acc = virtio_file.StreamCksum{};
+    var off: u64 = 0;
+    var rts: usize = 0;
+    var total: u64 = 0;
+    while (true) {
+        const rr = virtio_file.read(path, off);
+        if (rr.status != virtio_file.st_ok) {
+            if (rr.status == virtio_file.st_not_found) break; // raced delete: honest partial
+            err_prefix(m);
+            m.console.puts("vf cat: ");
+            m.console.puts(path);
+            m.console.puts(": ");
+            m.console.print_line(vf_status_text(rr.status));
+            return .invalid_argument;
+        }
+        if (rr.data.len == 0) break; // EOF
+        rts += 1;
+        total += rr.data.len;
+        acc.add(rr.data);
+        off += rr.data.len;
+    }
+    m.console.puts("vf: cat ok bytes=");
+    m.console.print_u64(total);
+    m.console.puts(" rts=");
+    m.console.print_u64(rts);
+    m.console.puts(" cksum=0x");
+    m.console.puts(&vf_hex16(acc.finish()));
+    m.console.puts("\n");
+    return .none;
+}
+
+/// Compact lowercase 4-digit hex (the vf gate's cksum needle style).
+fn vf_hex16(value: u16) [4]u8 {
+    const digits = "0123456789abcdef";
+    var out: [4]u8 = undefined;
+    out[0] = digits[@intCast((value >> 12) & 0xf)];
+    out[1] = digits[@intCast((value >> 8) & 0xf)];
+    out[2] = digits[@intCast((value >> 4) & 0xf)];
+    out[3] = digits[@intCast(value & 0xf)];
+    return out;
+}
+
 fn cmd_write(m: *Monitor, args: []const []const u8) ExecError {
     const name = args[0];
     const parts = args[1..];

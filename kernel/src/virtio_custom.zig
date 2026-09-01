@@ -160,8 +160,14 @@ pub const input_qidx: u16 = 3;
 /// implies the full four-queue shape). Queue-count IS the capability
 /// signal, unchanged rule.
 pub const snap_qidx: u16 = 4;
-/// Probe up to the snapshot queue (the deepest optional queue).
-pub const max_queue_probe: u16 = snap_qidx + 1;
+/// The M34 host-file-channel queue index (present only under the runner's
+/// `--cvc-file <dir>`, which attaches SIX virtqueues; --cvc-file therefore
+/// implies the full five-queue shape below it — the deepest flag rule,
+/// unchanged). The file channel is a macOS folder served over this queue
+/// (issues #735/#736; guest client kernel/src/virtio_file.zig).
+pub const file_qidx: u16 = 5;
+/// Probe up to the file-channel queue (the deepest optional queue).
+pub const max_queue_probe: u16 = file_qidx + 1;
 /// The pre-armed push receive buffer: capacity (one device-write descriptor)
 /// and the exact request size the host writes (`"CVC-PING-0x42"`).
 pub const push_buf_len: usize = 16;
@@ -175,6 +181,8 @@ pub var has_push_queue: bool = false;
 pub var has_input_queue: bool = false;
 /// True when init armed the optional snapshot queue (index `snap_qidx`).
 pub var has_snap_queue: bool = false;
+/// True when init armed the optional file-channel queue (index `file_qidx`).
+pub var has_file_queue: bool = false;
 
 /// Descriptor flags (Virtio 1.3 §2.7.6).
 const vq_next: u16 = 0x1; // VIRTQ_DESC_F_NEXT: more descriptors follow
@@ -675,6 +683,7 @@ pub fn init() bool {
     has_push_queue = false;
     has_input_queue = false;
     has_snap_queue = false;
+    has_file_queue = false;
     var qi: u16 = 0;
     while (qi < max_queue_probe) : (qi += 1) {
         vp_write16(0x16, qi); // queue_select
@@ -704,6 +713,7 @@ pub fn init() bool {
     has_push_queue = armed_queues > push_qidx;
     has_input_queue = armed_queues > input_qidx;
     has_snap_queue = armed_queues > snap_qidx;
+    has_file_queue = armed_queues > file_qidx;
     vp_write8(0x14, 1 | 2 | 8 | 4); // DRIVER_OK
     if ((vp_read8(0x14) & 4) == 0) return false;
     cv_ready = true;
@@ -1581,10 +1591,12 @@ test "virtio_custom: push-echo shapes (claim 3141) — queue index, buffer sizes
     // descriptor of capacity 16 and the request is exactly 13 bytes
     // ("CVC-PING-0x42").
     try std.testing.expectEqual(@as(u16, 2), push_qidx);
-    // The probe depth now covers the claim-0680 snapshot queue too; the
-    // push queue sits two below it.
+    // The probe depth now covers the claim-0680 snapshot queue AND the
+    // M34 file-channel queue (issues #735/#736); the push queue sits three
+    // below the file queue.
     try std.testing.expectEqual(push_qidx + 1, input_qidx);
-    try std.testing.expectEqual(@as(u16, 5), max_queue_probe);
+    try std.testing.expectEqual(@as(u16, 6), max_queue_probe);
+    try std.testing.expectEqual(@as(u16, 5), file_qidx);
     try std.testing.expect(push_buf_len >= push_req_len);
     try std.testing.expectEqual(@as(usize, 16), push_rx_buf.len);
 }
@@ -1593,7 +1605,7 @@ test "virtio_custom: input-channel shapes (claim 9588) — queue index, envelope
     // The input queue rides at index 3 (four-queue --via-virtio device);
     // the envelope is a fixed 16 bytes carrying an 8-byte HID report.
     try std.testing.expectEqual(@as(u16, 3), input_qidx);
-    try std.testing.expectEqual(@as(u16, 5), max_queue_probe);
+    try std.testing.expectEqual(@as(u16, 6), max_queue_probe);
     try std.testing.expectEqual(@as(usize, 16), input_msg_len);
     try std.testing.expectEqual(@as(usize, 8), input_keyboard_rep_len);
     try std.testing.expectEqual(@as(u8, 1), input_kind_keyboard);

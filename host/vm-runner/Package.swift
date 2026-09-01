@@ -5,6 +5,11 @@
 // raw GPT+FAT disk image under UEFI (VZEFIBootLoader) and captures the
 // guest's serial console into a log file.
 //
+// M34 HF1 (issue #735): the pure-Swift VFWire module (wire-format
+// encode/decode for the host file channel — zero Virtualization imports,
+// so `swift test` runs without a VM) + the VMRunnerTests target locking
+// byte-parity with the guest side via the checked-in fixtures.
+//
 // Tools version 6.2 is the floor that parses on the CI toolchain (Swift
 // 6.3.3 on GitHub's macos-latest) while still exposing the macOS 26
 // platform case; the target language mode stays Swift 5 to keep the
@@ -22,9 +27,18 @@ let package = Package(
         .macOS(.v26)
     ],
     targets: [
+        .target(
+            name: "VFWire",
+            path: "Sources/VFWire"
+        ),
         .executableTarget(
             name: "VMRunner",
+            dependencies: ["VFWire"],
             path: "Sources/VMRunner"
+        ),
+        .testTarget(
+            name: "VMRunnerTests",
+            dependencies: ["VFWire"]
         )
     ],
     swiftLanguageModes: [.v5]

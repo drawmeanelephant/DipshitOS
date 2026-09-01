@@ -22,6 +22,12 @@
 //          streams its composed scanout over queue 4 as tagged binary
 //          messages; the runner reassembles them into a raw BGRX file.
 //          Implies --via-virtio.)
+//         [--cvc-file <host-dir>] (M34 HF1+HF2, issues #735/#736: attach
+//          the SIXTH virtqueue — the host file channel. The guest userland
+//          filesystem becomes a macOS folder served over queue 5 with plain
+//          FileManager calls rooted at <host-dir> (wire format in
+//          Sources/VFWire/VFWire.swift). The deepest flag implies the full
+//          five-queue shape below it.)
 //         [--cvc-console-file <path>] (claim 0680: structured console —
 //          capture every queue-1 guest log line to <path>; also arms the
 //          guest's console tee with a kind-3 control message once the pool
@@ -180,6 +186,7 @@ import DiskImageKit
 import Foundation
 import ScreenCaptureKit
 import Virtualization
+import VFWire
 
 // Diagnostics and the console tee must survive signal exits (SIGINT/SIGTERM),
 // so stdout is unbuffered: print() reaches the terminal/file immediately.
@@ -332,6 +339,13 @@ var viaVirtioEnabled = false
 // scraping (and its Screen Recording TCC dependency) for gates that opt in.
 // Implies --via-virtio (five contiguous queues).
 var cvcSnapEnabled = false
+// M34 HF1+HF2 (issues #735/#736): `--cvc-file <host-dir>` attaches the
+// SIXTH virtqueue — the host file channel. The guest userland filesystem
+// is a macOS folder served over queue 5 with plain FileManager calls
+// (wire format in Sources/VFWire/VFWire.swift). The deepest flag implies
+// the full five-queue shape below it (unchanged rule).
+var cvcFileShareDir: String?
+var cvcFileEnabled: Bool { cvcFileShareDir != nil }
 // Claim 0680: `--cvc-console-file <path>` captures every queue-1 guest log
 // line to a structured file (the structured console). When the file is set,
 // the host also answers the guest's "cvconsole-ready" line with a kind-3
@@ -630,6 +644,16 @@ while idx < arguments.count {
         customVirtioEnabled = true
         cvcEchoEnabled = true
         idx += 1
+    } else if arg == "--cvc-file", idx + 1 < arguments.count {
+        // M34 HF1+HF2 (issues #735/#736): the SIX-queue shape — attaches
+        // the host file channel (queue 5) serving the given macOS folder.
+        // The deepest flag implies the full shape below it.
+        cvcFileShareDir = arguments[idx + 1]
+        cvcSnapEnabled = true
+        viaVirtioEnabled = true
+        customVirtioEnabled = true
+        cvcEchoEnabled = true
+        idx += 2
     } else if arg == "--cvc-console-file", idx + 1 < arguments.count {
         // Claim 0680: structured console — capture every queue-1 guest log
         // line to this file and arm the guest's console tee (kind-3) when
@@ -3714,7 +3738,7 @@ enum CustomVirtioSpike {
     // claim-9588 input channel (--via-virtio) adds queue 3, and the
     // claim-0680 snapshot channel (--cvc-snap) adds queue 4 (virtqueues are
     // contiguous, so each deeper flag implies the full shape below it).
-    static let queueCount: UInt16 = cvcSnapEnabled ? 5 : (viaVirtioEnabled ? 4 : (cvcEchoEnabled ? 3 : 2))
+    static let queueCount: UInt16 = cvcFileEnabled ? 6 : (cvcSnapEnabled ? 5 : (viaVirtioEnabled ? 4 : (cvcEchoEnabled ? 3 : 2)))
 
     // ---- Claim 9588 INPUT channel (queue 3): HID-shaped input messages.
     // Wire format is normative in docs/hardware-contract.md:
@@ -4128,6 +4152,12 @@ enum CustomVirtioSpike {
         config.customVirtioDevices = [deviceConfig]
 
         let did = 0x1040 + Int(deviceID)  // virtio transitional PCI DID = 0x1040 + device_id (add, not OR)
+        if cvcFileEnabled {
+            return String(
+                format: "  custom virtio: ENABLED — VID 0x1af4 DID 0x%04x (virtio deviceID 0x%02x), class 0x%02x/0x%02x, %d queue(s) incl. push-echo, INPUT, SNAPSHOT, and the M34 FILE channel (queue 5) serving \"%@\" (--cvc-file)",
+                did, Int(deviceID), Int(pciClass), Int(pciSubclass), Int(queueCount), cvcFileShareDir ?? "<none>"
+            )
+        }
         if cvcSnapEnabled {
             return String(
                 format: "  custom virtio: ENABLED — VID 0x1af4 DID 0x%04x (virtio deviceID 0x%02x), class 0x%02x/0x%02x, %d queue(s) incl. the claim-3141 push-echo queue, the claim-9588 INPUT queue, and the claim-0680 SNAPSHOT queue (--cvc-snap)",
@@ -4206,6 +4236,15 @@ final class CustomVirtioSpikeDeviceDelegate: NSObject, VZCustomVirtioDeviceDeleg
             // acknowledged ("OK:<n>") and returned so the guest's next
             // submit can proceed.
             handleSnapshotNotification(queue: queue)
+            return
+        }
+        if queue.queueIndex == 5 && cvcFileEnabled {
+            // M34 HF1+HF2 (issues #735/#736): the host file channel — the
+            // guest sends one framed request per element; the host serves
+            // it with FileManager calls rooted at the share dir (stateless:
+            // no handles, nothing held between requests). VF_PROBE is the
+            // transport-only 32 KiB device-write spike.
+            handleFileNotification(queue: queue)
             return
         }
         // Drain every available element (many may be in flight — claim
@@ -4313,6 +4352,216 @@ final class CustomVirtioSpikeDeviceDelegate: NSObject, VZCustomVirtioDeviceDeleg
             }
             element.returnToQueue()
         }
+    }
+
+    /// M34 HF1+HF2 (issues #735/#736): queue-5 notifications — serve one
+    /// framed file-channel request per element with FileManager calls
+    /// rooted at the share dir. Stateless by design: READ carries an
+    /// explicit offset, so the host holds ZERO state between requests (an
+    /// untrusted guest cannot leak host fds). VF_PROBE is transport-only.
+    private func handleFileNotification(queue: VZVirtioQueue) {
+        while let element = queue.nextElement() {
+            var bytes: [UInt8] = []
+            for buffer in element.readBuffers() {
+                bytes.append(contentsOf: [UInt8](buffer))
+            }
+            serveFileRequest(bytes, element: element)
+            element.returnToQueue()
+        }
+    }
+
+    /// Serve ONE file-channel request. Never hangs, never falls through to
+    /// the filesystem for an unknown op (status 4 loudly).
+    private func serveFileRequest(_ bytes: [UInt8], element: VZVirtioQueueElement) {
+        guard bytes.count >= VFWire.requestHdrLen else {
+            print("VF-FILE: short request (\(bytes.count) byte(s)) — replying host error")
+            writeFileReply(element: element, status: VFWire.stHostError, data: [])
+            return
+        }
+        let op = bytes[0]
+        let flags = bytes[1]
+        let len = Int(bytes[2]) | (Int(bytes[3]) << 8)
+        guard bytes.count == VFWire.requestHdrLen + len else {
+            print("VF-FILE: request length mismatch (declared \(len), got \(bytes.count - VFWire.requestHdrLen)) — replying host error")
+            writeFileReply(element: element, status: VFWire.stHostError, data: [])
+            return
+        }
+        let payload = Array(bytes[VFWire.requestHdrLen...])
+        switch op {
+        case VFWire.opProbe:
+            serveProbe(element: element)
+        case VFWire.opList:
+            serveList(payload, element: element)
+        case VFWire.opRead:
+            serveRead(payload, element: element)
+        case VFWire.opStat:
+            serveStat(payload, element: element)
+        default:
+            print("VF-FILE: unknown op 0x\(String(format: "%02x", op)) — replying host error")
+            writeFileReply(element: element, status: VFWire.stHostError, data: [])
+        }
+        _ = flags
+    }
+
+    /// VF_PROBE: prove a full 32,768-byte device-WRITE reply (HF1's
+    /// acceptance case A). The reply is the RAW pattern (no frame). The
+    /// descriptor MUST carry the full write buffer — a short buffer is a
+    /// guest bug to surface loudly, never silent truncation.
+    private func serveProbe(element: VZVirtioQueueElement) {
+        guard element.writeBuffersByteCount >= VFWire.replyCap else {
+            print("VF-PROBE: FAILED — write buffers \(element.writeBuffersByteCount) < \(VFWire.replyCap) (guest bug: short write buffer)")
+            writeFileReply(element: element, status: VFWire.stHostError, data: [])
+            return
+        }
+        var reply = [UInt8](repeating: 0, count: VFWire.replyCap)
+        for i in 0..<reply.count { reply[i] = VFWire.pattern(i) }
+        do {
+            try element.write(Data(reply))
+            let wrote = element.writtenByteCount
+            print("VF-PROBE: wrote \(wrote)/\(VFWire.replyCap) bytes (write buffers \(element.writeBuffersByteCount))")
+            if wrote != VFWire.replyCap {
+                print("VF-PROBE: FAILED — writtenByteCount \(wrote) != \(VFWire.replyCap)")
+            }
+        } catch {
+            print("VF-PROBE: FAILED — reply write error: \(error)")
+        }
+    }
+
+    /// LIST: contentsOfDirectory at the resolved path, 40-byte rows,
+    /// sorted by name for deterministic gate greps.
+    private func serveList(_ payload: [UInt8], element: VZVirtioQueueElement) {
+        guard let root = shareRootURL(), let path = String(bytes: payload, encoding: .utf8),
+              let url = VFWire.resolveSubpath(root: root, path: path) else {
+            writeFileReply(element: element, status: VFWire.stHostError, data: [])
+            return
+        }
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: url.path, isDirectory: &isDir) else {
+            writeFileReply(element: element, status: VFWire.stNotFound, data: [])
+            return
+        }
+        guard isDir.boolValue else {
+            writeFileReply(element: element, status: VFWire.stIsDir, data: [])
+            return
+        }
+        guard let items = try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey], options: [.skipsHiddenFiles]) else {
+            writeFileReply(element: element, status: VFWire.stHostError, data: [])
+            return
+        }
+        let sorted = items.sorted { $0.lastPathComponent < $1.lastPathComponent }
+        var rows: [UInt8] = []
+        for item in sorted.prefix(VFWire.listMaxEntries) {
+            let values = try? item.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey])
+            let isDirItem = values?.isDirectory ?? false
+            let size = UInt64(values?.fileSize ?? 0)
+            rows.append(contentsOf: VFWire.encodeEntryRow(
+                VFWire.DirEntry(name: item.lastPathComponent, type: isDirItem ? VFWire.dirTypeDir : VFWire.dirTypeFile, size: size)
+            ))
+        }
+        writeFileReply(element: element, status: VFWire.stOk, data: rows)
+        print("VF-FILE: LIST \(path.isEmpty ? "/" : path) → \(sorted.count) entr\(sorted.count == 1 ? "y" : "ies") (\(rows.count / VFWire.entryRowLen) rows)")
+    }
+
+    /// STAT: size + type for the resolved path.
+    private func serveStat(_ payload: [UInt8], element: VZVirtioQueueElement) {
+        guard let root = shareRootURL(), let path = String(bytes: payload, encoding: .utf8),
+              let url = VFWire.resolveSubpath(root: root, path: path) else {
+            writeFileReply(element: element, status: VFWire.stHostError, data: [])
+            return
+        }
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: url.path, isDirectory: &isDir) else {
+            writeFileReply(element: element, status: VFWire.stNotFound, data: [])
+            return
+        }
+        guard let attrs = try? fm.attributesOfItem(atPath: url.path) else {
+            writeFileReply(element: element, status: VFWire.stHostError, data: [])
+            return
+        }
+        let size = (attrs[.size] as? NSNumber)?.uint64Value ?? 0
+        var data: [UInt8] = []
+        var s = size
+        for _ in 0..<8 { data.append(UInt8(s & 0xff)); s >>= 8 }
+        data.append(isDir.boolValue ? VFWire.dirTypeDir : VFWire.dirTypeFile)
+        writeFileReply(element: element, status: VFWire.stOk, data: data)
+        print("VF-FILE: STAT \(path) → \(isDir.boolValue ? "dir" : "file") size=\(size)")
+    }
+
+    /// READ at an explicit offset (stateless): open, seek, read a chunk
+    /// that fits the guest's reply buffer, close. EOF = an empty ok reply.
+    private func serveRead(_ payload: [UInt8], element: VZVirtioQueueElement) {
+        guard payload.count >= VFWire.readOffsetLen else {
+            writeFileReply(element: element, status: VFWire.stHostError, data: [])
+            return
+        }
+        let pathBytes = Array(payload[0..<(payload.count - VFWire.readOffsetLen)])
+        var offset: UInt64 = 0
+        for i in 0..<VFWire.readOffsetLen {
+            offset |= UInt64(payload[payload.count - VFWire.readOffsetLen + i]) << (8 * i)
+        }
+        guard let root = shareRootURL(), let path = String(bytes: pathBytes, encoding: .utf8),
+              let url = VFWire.resolveSubpath(root: root, path: path) else {
+            writeFileReply(element: element, status: VFWire.stHostError, data: [])
+            return
+        }
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else {
+            writeFileReply(element: element, status: VFWire.stNotFound, data: [])
+            return
+        }
+        if isDir.boolValue {
+            writeFileReply(element: element, status: VFWire.stIsDir, data: [])
+            return
+        }
+        guard let handle = try? FileHandle(forReadingFrom: url) else {
+            writeFileReply(element: element, status: VFWire.stHostError, data: [])
+            return
+        }
+        defer { try? handle.close() }
+        do {
+            try handle.seek(toOffset: offset)
+        } catch {
+            writeFileReply(element: element, status: VFWire.stHostError, data: [])
+            return
+        }
+        // The reply frame costs 3 bytes: one reply never exceeds the
+        // guest's 32 KiB buffer (32765 data bytes per round trip).
+        let maxData = max(0, Int(element.writeBuffersByteCount) - VFWire.replyHdrLen)
+        let chunk = (try? handle.read(upToCount: maxData)) ?? Data()
+        writeFileReply(element: element, status: VFWire.stOk, data: [UInt8](chunk))
+        print("VF-FILE: READ \(path) off=\(offset) → \(chunk.count) byte(s)")
+    }
+
+    /// Write a framed reply, honoring the element's write-buffer capacity
+    /// (an over-cap reply is reported status=3 honestly, never written
+    /// past the buffer).
+    private func writeFileReply(element: VZVirtioQueueElement, status: UInt8, data: [UInt8]) {
+        var reply = VFWire.encodeReply(status: status, data: data)
+        let cap = Int(element.writeBuffersByteCount)
+        if reply.count > cap {
+            reply = VFWire.encodeReply(status: VFWire.stTruncated, data: [])
+            print("VF-FILE: reply \(data.count)-byte data exceeds \(cap)-byte write buffer — status=3 truncated")
+        }
+        do {
+            try element.write(Data(reply))
+        } catch {
+            print("VF-FILE: reply write FAILED: \(error)")
+        }
+    }
+
+    /// The share root (validated once per serve; an unreadable share
+    /// dir is reported loudly, never silently served as empty).
+    private func shareRootURL() -> URL? {
+        guard let dir = cvcFileShareDir else { return nil }
+        let url = URL(fileURLWithPath: dir)
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else {
+            print("VF-FILE: share dir not found or not a directory: \(dir)")
+            return nil
+        }
+        return url
     }
 
     /// Consume one tagged snapshot message; nil = accepted, String = loud
