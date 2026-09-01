@@ -92,13 +92,15 @@ The wire format is pinned byte-for-byte by the checked-in fixtures
 host tests S1–S4 / guest tests G1–G6.
 
 Wire format (one request per element, polled like the exchange queue; the
-host holds ZERO state between requests — READ carries an explicit offset, so
-an untrusted guest cannot leak host fds):
+HF1/HF2 ops hold ZERO state between requests — READ carries an explicit
+offset, so an untrusted guest cannot leak host fds):
 
 ```
 request  [op u8][flags u8][len u16le][payload]      (len = payload length)
 reply    [status u8][dlen u16le][data]              (dlen = data length)
 ```
+
+Read-only ops:
 
 | Op | Payload | Reply data |
 |----|---------|-----------|
@@ -107,8 +109,35 @@ reply    [status u8][dlen u16le][data]              (dlen = data length)
 | READ `0x02` | `[path][u64le offset]` | ≤ 32,765 data bytes (the 3-byte frame leaves 32,765 of the 32 KiB reply cap) |
 | STAT `0x03` | path | `[size u64le][type u8]` |
 
+Mutation ops (HF3, issue #737 — **additive** 0x04..0x0b, so old hosts
+answer them with status `4` and old guests never send them: no version
+churn). OPEN/CLOSE/WRITE/TRUNCATE/FSYNC ride an 8-slot host handle table
+(parity with the kernel's `file_table.zig` ABI — the write cursors live on
+the HOST); RENAME/MKDIR/DELETE stay stateless path ops. All paths are
+resolved inside the share root by the same defense as reads.
+
+| Op | Payload | Reply data |
+|----|---------|-----------|
+| OPEN `0x04` | path · flags: bit0 = create-if-missing, bit1 = append | `[handle u16le]` |
+| CLOSE `0x05` | `[handle u16le]` | — (flush + free the slot) |
+| WRITE `0x06` | `[handle u16le][data]` (≤ 32,763 data bytes) | `[written u64le]` (cursor advances; append handles write at EOF) |
+| TRUNCATE `0x07` | `[handle u16le][size u64le]` | — (cursor clamped below new size) |
+| FSYNC `0x08` | `[handle u16le]` | — (synchronize() on the live fd — real durability) |
+| RENAME `0x09` | `[from][0x00][to]` (NUL separator; paths are NUL-free) | — |
+| MKDIR `0x0a` | path (one level; parents must exist) | — |
+| DELETE `0x0b` | path (file or EMPTY directory — never recursive) | — |
+
 Status: `0` ok, `1` not found, `2` is a directory, `3` truncated (reply
-exceeded the guest's buffer), `4` host error (unknown op / bad request).
+exceeded the guest's buffer), `4` host error (unknown op / bad request),
+`5` exists (create/rename/mkdir target collision), `6` handle error (host
+handle table full or bad handle).
+
+The host's 8-slot table is VZ-free (`VFWire.FileHandleTable`) — unit-tested
+for the cap, cursor advance, append-at-EOF, truncate clamp, and fsync on
+the live fd. WRITE data is capped at `write_chunk_max = 32763` per round
+trip (the 2-byte handle + the reply-cap symmetry); larger writes stream
+across chunks, and the guest's pattern write advances by the
+host-CONFIRMED written count so a partial write never corrupts the stream.
 
 VF_PROBE is HF1's acceptance case A — it proves the ONE unproven transport
 fact, a full **32,768-byte device-write reply** (claim 0680 proved 32 KiB

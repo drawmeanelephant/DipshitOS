@@ -367,7 +367,7 @@ fn ensure_registry() []const Command {
             .{ .name = "usb", .help = "XHCI host controller: `usb` transport report, `usb devices` enumerated HID devices, `usb report` last HID report", .usage = "usb [devices|report]", .category = .graphics_input, .handler = cmd_usb },
             .{ .name = "uname", .help = "compact system identity", .usage = "uname", .category = .machine_identity, .handler = cmd_uname },
             .{ .name = "version", .help = "display build information", .usage = "version", .category = .machine_identity, .handler = cmd_version },
-            .{ .name = "vf", .help = "host file channel (M34): 'vf ls [<path>]' lists a macOS share folder served over custom-virtio queue 5; 'vf cat <path>' streams a file from it (STAT byte count first, then READ round trips)", .usage = "vf [ls [<path>]|cat <path>]", .category = .storage, .max_args = 2, .handler = cmd_vf },
+            .{ .name = "vf", .help = "host file channel (M34): 'vf ls/cat/mkdir/rm/mv <path>' read + mutate a macOS share over custom-virtio queue 5; 'vf open/close/write/truncate/fsync <h>' manage write handles (8-slot host cursor table)", .usage = "vf [ls [<path>]|cat <path>|mkdir <path>|rm <path>|mv <from> <to>|open <path> [append]|close <h>|write <h> <n>|truncate <h> <n>|fsync <h>]", .category = .storage, .max_args = 4, .handler = cmd_vf },
             .{ .name = "welcome", .help = "guided tour of the system for new users", .usage = "welcome", .category = .machine_identity, .handler = cmd_welcome },
             .{ .name = "dui", .help = "Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('dui focus <n>' focuses; 'dui raise <n>' raises; 'dui lower <n>' lowers to back; 'dui move <n> <x> <y>' moves a user window; 'dui close <n>' releases a user window; 'dui list <pid>' filters by owner; 'dui hit <x> <y>' hit-tests; 'dui cycle' cycles focus like Alt+Tab; 'dui tile <n>' toggles a user window floating/tiled (M21 W1); 'dui master' swaps master/detail (M21 W2))", .usage = "dui [focus <n>|raise <n>|lower <n>|move <n> <x> <y>|close <n>|list <pid>|hit <x> <y>|cycle|tile <n>|master]", .category = .graphics_input, .max_args = 4, .handler = cmd_dui },
             .{ .name = "write", .help = "write text to a file on the ESP", .usage = "write <file> <text...>", .category = .storage, .min_args = 1, .handler = cmd_write },
@@ -1344,11 +1344,16 @@ fn cmd_cat_path(m: *Monitor, path: []const u8) ExecError {
 /// driver replacing claim 3475's NVRAM variables): the file survives
 /// reboot because it is on the disk itself. Capacity is checked before the
 /// write; a failed sector write is reported honestly, never faked.
-// ---------------------------------------------------------------------------
 // M34 HF1+HF2 (issues #735/#736): the HOST FILE CHANNEL (`vf ls`/`vf cat`).
 // The guest userland filesystem is a macOS folder served over custom-virtio
 // queue 5 (runner flag --cvc-file <host-dir>); default boots print the
 // honest "no host file channel" line and stay byte-identical.
+//
+// M34 HF3 (issue #737): mutation verbs. OPEN/CLOSE/WRITE/TRUNCATE/FSYNC
+// ride the HOST's 8-slot handle table (cursors live there — parity with
+// file_table.zig); `vf write <h> <n>` streams n deterministic probe-pattern
+// bytes through the cursor (the gate's python verifies the same bytes on
+// the host disk). `vf mkdir/rm/mv` are stateless path ops.
 // ---------------------------------------------------------------------------
 
 fn cmd_vf(m: *Monitor, args: []const []const u8) ExecError {
@@ -1359,12 +1364,20 @@ fn cmd_vf(m: *Monitor, args: []const []const u8) ExecError {
     if (args.len == 0) return cmd_vf_usage(m);
     if (std.mem.eql(u8, args[0], "ls")) return cmd_vf_ls(m, args[1..]);
     if (std.mem.eql(u8, args[0], "cat")) return cmd_vf_cat(m, args[1..]);
+    if (std.mem.eql(u8, args[0], "open")) return cmd_vf_open(m, args[1..]);
+    if (std.mem.eql(u8, args[0], "close")) return cmd_vf_close(m, args[1..]);
+    if (std.mem.eql(u8, args[0], "write")) return cmd_vf_write(m, args[1..]);
+    if (std.mem.eql(u8, args[0], "truncate")) return cmd_vf_truncate(m, args[1..]);
+    if (std.mem.eql(u8, args[0], "fsync")) return cmd_vf_fsync(m, args[1..]);
+    if (std.mem.eql(u8, args[0], "mkdir")) return cmd_vf_mkdir(m, args[1..]);
+    if (std.mem.eql(u8, args[0], "rm")) return cmd_vf_rm(m, args[1..]);
+    if (std.mem.eql(u8, args[0], "mv")) return cmd_vf_mv(m, args[1..]);
     return cmd_vf_usage(m);
 }
 
 fn cmd_vf_usage(m: *Monitor) ExecError {
     err_prefix(m);
-    m.console.print_line("vf usage: vf ls [<path>] | vf cat <path>");
+    m.console.print_line("vf usage: vf ls [<path>] | cat <path> | mkdir <path> | rm <path> | mv <from> <to> | open <path> [append] | close <h> | write <h> <n> | truncate <h> <n> | fsync <h>");
     return .invalid_argument;
 }
 
@@ -1372,9 +1385,138 @@ fn vf_status_text(st: u8) []const u8 {
     return switch (st) {
         virtio_file.st_not_found => "not found on the host share",
         virtio_file.st_is_dir => "is a directory",
+        virtio_file.st_exists => "already exists on the host share",
+        virtio_file.st_handle => "bad handle or host handle table full (8 open handles)",
         virtio_file.st_truncated => "reply truncated (file larger than the 32 KiB per-round-trip cap)",
         else => "host file-channel error",
     };
+}
+
+fn vf_err(m: *Monitor, verb: []const u8, path: []const u8, st: u8) ExecError {
+    err_prefix(m);
+    m.console.puts("vf ");
+    m.console.puts(verb);
+    m.console.puts(": ");
+    m.console.puts(path);
+    m.console.puts(": ");
+    m.console.print_line(vf_status_text(st));
+    return .invalid_argument;
+}
+
+/// `vf open <path> [append]` — create-if-missing read+write handle.
+fn cmd_vf_open(m: *Monitor, args: []const []const u8) ExecError {
+    if (args.len == 0) return cmd_vf_usage(m);
+    const path = args[0];
+    var flags: u8 = virtio_file.open_flag_create;
+    if (args.len > 1 and std.mem.eql(u8, args[1], "append")) flags |= virtio_file.open_flag_append;
+    var handle: u16 = 0;
+    const st = virtio_file.open(path, flags, &handle);
+    if (st != virtio_file.st_ok) return vf_err(m, "open", path, st);
+    m.console.puts("vf: open ");
+    m.console.puts(path);
+    m.console.puts(if ((flags & virtio_file.open_flag_append) != 0) " append" else "");
+    m.console.puts(" h=");
+    m.console.print_u64(handle);
+    m.console.puts("\n");
+    return .none;
+}
+
+/// `vf close <h>` — flush + free the host slot.
+fn cmd_vf_close(m: *Monitor, args: []const []const u8) ExecError {
+    if (args.len == 0) return cmd_vf_usage(m);
+    const handle = parseInt(args[0]) catch return cmd_vf_usage(m);
+    const st = virtio_file.close(@intCast(handle));
+    if (st != virtio_file.st_ok) return vf_err(m, "close", args[0], st);
+    m.console.puts("vf: close ");
+    m.console.puts(args[0]);
+    m.console.print_line(" ok");
+    return .none;
+}
+
+/// `vf write <h> <n>` — stream n probe-pattern bytes through the cursor.
+fn cmd_vf_write(m: *Monitor, args: []const []const u8) ExecError {
+    if (args.len < 2) return cmd_vf_usage(m);
+    const handle = parseInt(args[0]) catch return cmd_vf_usage(m);
+    const n = parseInt(args[1]) catch return cmd_vf_usage(m);
+    if (n == 0) return cmd_vf_usage(m);
+    const res = virtio_file.write_pattern(@intCast(handle), n);
+    if (res.status != virtio_file.st_ok) return vf_err(m, "write", args[0], res.status);
+    m.console.puts("vf: write ");
+    m.console.puts(args[0]);
+    m.console.puts(" n=");
+    m.console.print_u64(n);
+    m.console.puts(" wrote=");
+    m.console.print_u64(res.total);
+    m.console.puts(" chunks=");
+    m.console.print_u64(res.chunks);
+    m.console.puts("\n");
+    return .none;
+}
+
+/// `vf truncate <h> <n>` — set the file size through the handle.
+fn cmd_vf_truncate(m: *Monitor, args: []const []const u8) ExecError {
+    if (args.len < 2) return cmd_vf_usage(m);
+    const handle = parseInt(args[0]) catch return cmd_vf_usage(m);
+    const size = parseInt(args[1]) catch return cmd_vf_usage(m);
+    const st = virtio_file.truncate(@intCast(handle), size);
+    if (st != virtio_file.st_ok) return vf_err(m, "truncate", args[0], st);
+    m.console.puts("vf: truncate ");
+    m.console.puts(args[0]);
+    m.console.puts(" size=");
+    m.console.print_u64(size);
+    m.console.print_line(" ok");
+    return .none;
+}
+
+/// `vf fsync <h>` — real durability on the host fd.
+fn cmd_vf_fsync(m: *Monitor, args: []const []const u8) ExecError {
+    if (args.len == 0) return cmd_vf_usage(m);
+    const handle = parseInt(args[0]) catch return cmd_vf_usage(m);
+    const st = virtio_file.fsync(@intCast(handle));
+    if (st != virtio_file.st_ok) return vf_err(m, "fsync", args[0], st);
+    m.console.puts("vf: fsync ");
+    m.console.puts(args[0]);
+    m.console.print_line(" ok");
+    return .none;
+}
+
+/// `vf mkdir <path>` — one level; parents must exist.
+fn cmd_vf_mkdir(m: *Monitor, args: []const []const u8) ExecError {
+    if (args.len == 0) return cmd_vf_usage(m);
+    const path = args[0];
+    const st = virtio_file.mkdir(path);
+    if (st != virtio_file.st_ok) return vf_err(m, "mkdir", path, st);
+    m.console.puts("vf: mkdir ");
+    m.console.puts(path);
+    m.console.print_line(" ok");
+    return .none;
+}
+
+/// `vf rm <path>` — delete a file or EMPTY directory.
+fn cmd_vf_rm(m: *Monitor, args: []const []const u8) ExecError {
+    if (args.len == 0) return cmd_vf_usage(m);
+    const path = args[0];
+    const st = virtio_file.delete(path);
+    if (st != virtio_file.st_ok) return vf_err(m, "rm", path, st);
+    m.console.puts("vf: rm ");
+    m.console.puts(path);
+    m.console.print_line(" ok");
+    return .none;
+}
+
+/// `vf mv <from> <to>` — rename on the host share.
+fn cmd_vf_mv(m: *Monitor, args: []const []const u8) ExecError {
+    if (args.len < 2) return cmd_vf_usage(m);
+    const from = args[0];
+    const to = args[1];
+    const st = virtio_file.rename(from, to);
+    if (st != virtio_file.st_ok) return vf_err(m, "mv", from, st);
+    m.console.puts("vf: mv ");
+    m.console.puts(from);
+    m.console.puts(" -> ");
+    m.console.puts(to);
+    m.console.print_line(" ok");
+    return .none;
 }
 
 fn cmd_vf_ls(m: *Monitor, args: []const []const u8) ExecError {

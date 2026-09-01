@@ -3557,7 +3557,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  cat         print a file from the ESP (by name or /path)\n" ++
         "  ls          list files on the ESP (or a directory by path); '-l' for long format (D15)\n" ++
         "  mount       switch the active FAT volume (esp or data)\n" ++
-        "  vf          host file channel (M34): 'vf ls [<path>]' lists a macOS share folder served over custom-virtio queue 5; 'vf cat <path>' streams a file from it (STAT byte count first, then READ round trips)\n" ++
+        "  vf          host file channel (M34): 'vf ls/cat/mkdir/rm/mv <path>' read + mutate a macOS share over custom-virtio queue 5; 'vf open/close/write/truncate/fsync <h>' manage write handles (8-slot host cursor table)\n" ++
         "  write       write text to a file on the ESP\n" ++
         "  mktemp      create a temporary file (empty, unique name)\n" ++
         "  stat        file metadata: size, type, cluster, path (D8)\n" ++

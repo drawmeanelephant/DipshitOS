@@ -114,4 +114,140 @@ final class VFWireTests: XCTestCase {
         XCTAssertEqual(cksum, VFWire.checksum1071((0..<32768).map { VFWire.pattern($0) }))
         print("VF-CKSUM-32K: 0x\(String(format: "%04x", cksum))")
     }
+
+    // ------------------------------------------------------------------
+    // S5–S10 — HF3 (issue #737): mutation wire parity + the 8-slot
+    // FileHandleTable cursor semantics (VZ-free, runs anywhere). Mirrors
+    // the guest Zig tests G7–G12 byte-for-byte.
+    // ------------------------------------------------------------------
+
+    /// S5 — HF3 op/status constants, 8-handle parity, chunk math.
+    func testS5Hf3ConstantsParity() {
+        XCTAssertEqual(VFWire.opOpen, 0x04)
+        XCTAssertEqual(VFWire.opClose, 0x05)
+        XCTAssertEqual(VFWire.opWrite, 0x06)
+        XCTAssertEqual(VFWire.opTruncate, 0x07)
+        XCTAssertEqual(VFWire.opFsync, 0x08)
+        XCTAssertEqual(VFWire.opRename, 0x09)
+        XCTAssertEqual(VFWire.opMkdir, 0x0a)
+        XCTAssertEqual(VFWire.opDelete, 0x0b)
+        XCTAssertEqual(VFWire.stExists, 5)
+        XCTAssertEqual(VFWire.stHandle, 6)
+        // Parity with the kernel's file_table.zig (8 handles).
+        XCTAssertEqual(VFWire.maxFileHandles, 8)
+        // 32763 data bytes/WRITE round trip.
+        XCTAssertEqual(VFWire.writeChunkMax, 32763)
+    }
+
+    /// S6 — write/truncate payload builders + handle parse + reply
+    /// encoders (little-endian, mirroring the guest).
+    func testS6PayloadBuildersAndReplyEncoders() {
+        let wp = try! XCTUnwrap(VFWire.buildWritePayload(handle: 0x1122, data: Array("xyz".utf8)))
+        XCTAssertEqual(wp, [0x22, 0x11, 0x78, 0x79, 0x7a])
+        XCTAssertEqual(VFWire.handle(fromPayload: wp), 0x1122)
+        // Over-chunk write refused honestly.
+        XCTAssertNil(VFWire.buildWritePayload(handle: 0, data: [UInt8](repeating: 0, count: VFWire.writeChunkMax + 1)))
+
+        let tp = VFWire.buildTruncatePayload(handle: 7, size: 1234)
+        XCTAssertEqual(VFWire.handle(fromPayload: tp), 7)
+        var size: UInt64 = 0
+        for i in 0..<8 { size |= UInt64(tp[2 + i]) << (8 * i) }
+        XCTAssertEqual(size, 1234)
+
+        // OPEN reply [handle u16le] and WRITE reply [written u64le].
+        XCTAssertEqual(VFWire.encodeOpenReply(handle: 4660), [0x34, 0x12])
+        let wr = VFWire.encodeWrittenReply(written: 100000)
+        var written: UInt64 = 0
+        for i in 0..<8 { written |= UInt64(wr[i]) << (8 * i) }
+        XCTAssertEqual(written, 100000)
+    }
+
+    /// S7 — rename NUL framing + bounds.
+    func testS7RenameFraming() {
+        let rp = try! XCTUnwrap(VFWire.buildRenamePayload(from: "sub/old.bin", to: "sub/new.bin"))
+        let nul = rp.firstIndex(of: 0)!
+        XCTAssertEqual(String(bytes: rp[0..<nul], encoding: .utf8), "sub/old.bin")
+        XCTAssertEqual(String(bytes: rp[(nul + 1)...], encoding: .utf8), "sub/new.bin")
+        XCTAssertNil(VFWire.buildRenamePayload(from: "", to: "x"))
+    }
+
+    /// S8 — the 8-slot table: cursor advance + truncate clamp.
+    func testS8HandleTableCursorAndTruncate() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("vf-hf3-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("cur.bin")
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+
+        let table = FileHandleTable()
+        let fh = try FileHandle(forUpdating: url)
+        let (h, st) = table.open(path: "cur.bin", fh: fh, append: false)
+        XCTAssertEqual(st, VFWire.stOk)
+        XCTAssertEqual(h, 0)
+
+        let (w1, ws1) = table.write(h, data: Array("hello".utf8))
+        XCTAssertEqual(ws1, VFWire.stOk)
+        XCTAssertEqual(w1, 5)
+        // Second write lands AFTER the first (cursor advanced):
+        let (w2, _) = table.write(h, data: Array("world".utf8))
+        XCTAssertEqual(w2, 5)
+        XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), "helloworld")
+
+        // Read-modify-write truncate: shrink to 5 clamps the cursor.
+        XCTAssertEqual(table.truncate(h, size: 5), VFWire.stOk)
+        XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), "hello")
+        XCTAssertEqual(table.close(h), VFWire.stOk)
+    }
+
+    /// S9 — append handles write at EOF regardless of cursor.
+    func testS9HandleTableAppend() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("vf-hf3a-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("app.bin")
+        try Data("base".utf8).write(to: url)
+
+        let table = FileHandleTable()
+        let fh = try FileHandle(forUpdating: url)
+        let (h, st) = table.open(path: "app.bin", fh: fh, append: true)
+        XCTAssertEqual(st, VFWire.stOk)
+        let (w, _) = table.write(h, data: Array("-more".utf8))
+        XCTAssertEqual(w, 5)
+        XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), "base-more")
+        _ = table.close(h)
+    }
+
+    /// S10 — 8-slot cap (parity with the kernel ABI): the ninth open is
+    /// refused with stHandle; closing frees a slot.
+    func testS10HandleTableCap() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("vf-hf3c-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let table = FileHandleTable()
+        var handles: [Int] = []
+        for i in 0..<VFWire.maxFileHandles {
+            let url = dir.appendingPathComponent("f\(i).bin")
+            FileManager.default.createFile(atPath: url.path, contents: nil)
+            let fh = try FileHandle(forUpdating: url)
+            let (h, st) = table.open(path: "f\(i).bin", fh: fh, append: false)
+            XCTAssertEqual(st, VFWire.stOk)
+            handles.append(h)
+        }
+        // Ninth open → stHandle (table full).
+        let extraURL = dir.appendingPathComponent("extra.bin")
+        FileManager.default.createFile(atPath: extraURL.path, contents: nil)
+        let extraFh = try FileHandle(forUpdating: extraURL)
+        let (_, stFull) = table.open(path: "extra.bin", fh: extraFh, append: false)
+        XCTAssertEqual(stFull, VFWire.stHandle)
+        try? extraFh.close()
+
+        // Close frees a slot: the retry succeeds.
+        XCTAssertEqual(table.close(handles[0]), VFWire.stOk)
+        let retryFh = try FileHandle(forUpdating: extraURL)
+        let (h2, st2) = table.open(path: "extra.bin", fh: retryFh, append: false)
+        XCTAssertEqual(st2, VFWire.stOk)
+        XCTAssertEqual(h2, handles[0], "freed slot must be reused")
+        _ = table.close(h2)
+    }
 }
