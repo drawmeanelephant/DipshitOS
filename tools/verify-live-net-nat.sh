@@ -88,7 +88,7 @@ art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-net-nat-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'gate_shared_disk_unlock; gate_end 2>/dev/null || true; sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 REPORT="artifacts/live-net-nat-report.txt"
 

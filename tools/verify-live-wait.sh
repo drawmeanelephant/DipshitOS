@@ -114,13 +114,14 @@ echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
 zig fmt --check boot/src/*.zig kernel/src/*.zig user/src/*.zig build.zig
 zig build
 zig build image
-swift build --package-path host/vm-runner --configuration release
+swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 # --- per-run isolation -------------------------------------------------------------
 # Private scratch dir + pristine-boot overlay for EVERY boot.
 # See tools/lib/gate-run.sh.
 gate_begin live-wait
+gate_seed_share
 echo "run dir: $RUN_DIR"
 
 # Phase 1: the target (pid 1) + the observer (argv[0]=0 keeps the IPC path

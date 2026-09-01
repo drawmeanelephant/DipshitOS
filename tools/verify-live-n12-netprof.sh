@@ -2,7 +2,8 @@
 #
 # verify-live-n12-netprof.sh -- M26 N12 (issue #439, claim 7635) class-B gate:
 # NETPROF.BIN running at EL0 on real VZ hardware, managing network configuration
-# profiles and persisting to /data/NET.TXT, cleanly exiting status 0.
+# profiles and persisting to /host/NET.TXT (M34 HF6 re-point; the /data
+# volume is gone), cleanly exiting status 0.
 #
 # Class B — Apple silicon + VZ only; boots real VMs.
 
@@ -22,7 +23,7 @@ trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 REPORT="$(art live-n12-netprof-report.txt)"
 
-echo "=== verify-live-n12-netprof: M26 N12 — Network profile manager NETPROF.BIN live on VZ (EL0 profiles, /data/NET.TXT persistence, clean exit) ==="
+echo "=== verify-live-n12-netprof: M26 N12 — Network profile manager NETPROF.BIN live on VZ (EL0 profiles, /host/NET.TXT persistence, clean exit) ==="
 
 # --- tool versions + revision -----------------------------------------------
 zig version; swift --version 2>&1 | head -1; sw_vers
@@ -35,11 +36,12 @@ echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
 PATH=/opt/homebrew/bin:/bin:/usr/bin zig fmt --check boot/src/*.zig kernel/src/*.zig user/src/*.zig build.zig
 PATH=/opt/homebrew/bin:/bin:/usr/bin zig build
 PATH=/opt/homebrew/bin:/bin:/usr/bin zig build image
-swift build --package-path host/vm-runner --configuration release
+swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 # --- per-run isolation -------------------------------------------------------
 gate_begin live-n12-netprof
+gate_seed_share
 echo "run dir: $RUN_DIR"
 
 # --- scripted keystrokes -----------------------------------------------------
@@ -47,7 +49,6 @@ cat > "$RUN_DIR/script-1.txt" <<'EOF'
 exec NETPROF.BIN
 EOF
 cat > "$RUN_DIR/script-2.txt" <<'EOF'
-mount data
 cat NET.TXT
 procs
 echo netprof-ok
@@ -78,7 +79,7 @@ if [ -f "$SERIAL" ]; then
     grep -a -qF -- "--- network profiles ---" "$SERIAL" && P_HDR=1
     grep -a -qF -- "profile default: ip=10.0.0.1 gw=10.0.0.2 dns=1.1.1.1" "$SERIAL" && P_DEF=1
     grep -a -qF -- "profile home: ip=192.168.1.50 gw=192.168.1.1 dns=8.8.8.8" "$SERIAL" && P_HOME=1
-    grep -a -qF -- "netprof: saved to /data/NET.TXT" "$SERIAL" && P_SAVE=1
+    grep -a -qF -- "netprof: saved to /host/NET.TXT" "$SERIAL" && P_SAVE=1
     grep -a -qF -- "netprof: complete" "$SERIAL" && P_DONE=1
     grep -a -qF -- "default=10.0.0.1,10.0.0.2,1.1.1.1" "$SERIAL" && P_TYPE=1
     grep -a -E -- "procs NETPROF\.BIN exited status=0|NETPROF.*state=exited.*0" "$SERIAL" && P_REAPED=1

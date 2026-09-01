@@ -36,11 +36,12 @@ echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
 PATH=/opt/homebrew/bin:/bin:/usr/bin zig fmt --check boot/src/*.zig kernel/src/*.zig user/src/*.zig build.zig
 PATH=/opt/homebrew/bin:/bin:/usr/bin zig build
 PATH=/opt/homebrew/bin:/bin:/usr/bin zig build image
-swift build --package-path host/vm-runner --configuration release
+swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 # --- per-run isolation -------------------------------------------------------
 gate_begin live-n7-traceroute
+gate_seed_share
 echo "run dir: $RUN_DIR"
 
 # --- scripted keystrokes -----------------------------------------------------

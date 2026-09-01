@@ -5,12 +5,12 @@
 #
 # The chain, all asserted in vm-serial.log:
 #   1. A one-line (';'-separated) source program is staged via `write`.
-#   2. ASM.BIN assembles it to /esp/PROG.ELF ("asm: wrote 96 bytes").
+#   2. ASM.BIN assembles it to /host/PROG.ELF ("asm: wrote 96 bytes").
 #   3. DISAS.BIN reads that ELF and prints per-instruction lines; the gate
 #      asserts the exact hex-dump line for the first instruction
 #      ("00000054: 68 00 80 d2  movz x8, #3") plus the trailing svc —
 #      the D2->D4 round-trip closed end to end.
-#   4. After `mount esp`, PROG.ELF loads through the D1 loader and exits
+#   4. PROG.ELF loads through the D1 loader and exits
 #      status 71 — proving the bytes the disassembler showed are the bytes
 #      that execute.
 #   5. The shell stays responsive and nothing parked.
@@ -47,7 +47,7 @@ STATIC_EXIT_LINE="tasks user-el0 exited status=7"
 # claim-time 96 bytes to 84 and `exec PROG.ELF` failed with bad_entry.
 # The SRC is now single-quoted (the tokenizer's fully-literal quotes) so
 # the `;` separators reach ASM.BIN and the 96-byte needle holds again.
-ASM_WROTE_LINE="asm: wrote 96 bytes to /esp/PROG.ELF"
+ASM_WROTE_LINE="asm: wrote 96 bytes to /host/PROG.ELF"
 EXIT_LINE="tasks user-exec exited status=71"
 
 echo "=== verify-live-disas: M22 D4 (issue #327) — disassemble assembler output on the machine, $BOOTS boot(s) ==="
@@ -62,21 +62,24 @@ echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
 zig fmt --check boot/src/*.zig kernel/src/*.zig user/src/*.zig build.zig
 zig build
 zig build image
-swift build --package-path host/vm-runner --configuration release
+swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 # --- per-run isolation -------------------------------------------------------------
 # Private scratch dir + pristine-boot overlay for EVERY boot.
 # See tools/lib/gate-run.sh.
 gate_begin live-disas
+gate_seed_share
 echo "run dir: $RUN_DIR"
 SCRIPT2="$RUN_DIR/script2.txt"
 SCRIPT="$RUN_DIR/script.txt"
 
 
 SRC="'_start:;mov x8, 3;mov x0, 71;svc 0'"
-printf 'write PROG.S %s\nexec ASM.BIN /esp/PROG.S /esp/PROG.ELF\nexec DISAS.BIN /esp/PROG.ELF 84\necho disas-mid\n' "$SRC" > "$SCRIPT"
-printf 'mount esp\nexec PROG.ELF\necho rx-disas-ok\n' > "$SCRIPT2"
+# M34 HF6 (issue #740): the ESP is gone — ASM/DISAS read and write the
+# host share (/host paths; a bare name also routes to the share).
+printf 'write PROG.S %s\nexec ASM.BIN /host/PROG.S /host/PROG.ELF\nexec DISAS.BIN /host/PROG.ELF 84\necho disas-mid\n' "$SRC" > "$SCRIPT"
+printf 'exec PROG.ELF\necho rx-disas-ok\n' > "$SCRIPT2"
 
 run_one() {
     local tag="$1"

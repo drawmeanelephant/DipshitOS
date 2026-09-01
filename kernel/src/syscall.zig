@@ -72,7 +72,7 @@ const wm_server = @import("wm_server.zig"); // M32 WMS2 (issue #622): the render
 const events = @import("events.zig"); // Milestone 9 (claim 1016): application event queues
 const file_table = @import("file_table.zig"); // Milestone 10 (claim 3570): userland storage ABI
 const esp_exec = @import("exec.zig"); // Claim 6359 (ADR 0007 slot 28): the EL0 exec seam — reuse the EL1h loader
-const esp = @import("esp.zig"); // Claim 6359: the ESP name bound for the path check
+const virtio_file = @import("virtio_file.zig"); // HF6: the host channel's path max is the exec name bound (the ESP window is gone)
 const tcp = @import("tcp.zig"); // Milestone 12 (claim 7483): TCP client seam
 const timer = @import("timer.zig"); // Hardware cycle counter + ticks for TCP timeouts
 const csprng = @import("csprng.zig"); // ISN generation for TCP connect
@@ -1723,11 +1723,13 @@ fn handle_audio_mute(args: Args, _: *exceptions.VectorFrame) u64 {
 fn handle_exec(args: Args, _: *exceptions.VectorFrame) u64 {
     const path_ptr = args[0];
     const path_len = args[1];
-    if (path_len == 0 or path_len > esp.name_max) return error_result(.einval);
+    // M34 HF6 (issue #740): the name bound is the host channel's path
+    // max (the ESP 8.3 window is gone).
+    if (path_len == 0 or path_len > virtio_file.path_max) return error_result(.einval);
     // The caller must be a process (an EL1h task cannot exec from EL0).
     _ = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
 
-    var path_buf: [esp.name_max]u8 = undefined;
+    var path_buf: [virtio_file.path_max]u8 = undefined;
     if (uaccess.copy_in(&path_buf, path_ptr, @intCast(path_len)) != .ok) return error_result(.efault);
 
     const res = esp_exec.exec_file(path_buf[0..path_len], &.{});
@@ -4129,14 +4131,16 @@ test "syscall: slot 28 sys_exec marshals the path and maps loader errors" {
     _ = scheduler.register_worker(0x2000);
     _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
     scheduler.start();
-    esp.reset(); // no disk mounted — exec_file reports no_disk honestly
+    // No host file channel — exec_file reports no_disk honestly (HF6: the
+    // ESP disk is gone; the share is the only app source).
+    virtio_file.set_test_share(null);
     var frame = fresh_frame();
 
     // In task 0 (shell, not a registered process), sys_exec returns EINVAL
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_exec, .{ 0x1000, 8, 0, 0, 0, 0 }, &frame));
     // Empty path and an over-long path are EINVAL (checked before uaccess)
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_exec, .{ 0x1000, 0, 0, 0, 0, 0 }, &frame));
-    try std.testing.expectEqual(error_result(.einval), dispatch(sys_exec, .{ 0x1000, esp.name_max + 1, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_exec, .{ 0x1000, virtio_file.path_max + 1, 0, 0, 0, 0 }, &frame));
 
     // Yield to the user task (task 2, pid 0)
     try std.testing.expect(scheduler.yield_current()); // shell -> worker

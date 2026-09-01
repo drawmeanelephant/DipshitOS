@@ -25,7 +25,7 @@ memory / machine state
   timer       interrupt controller + timer status
   uaccess     user-memory copy diagnostics (valid, fault, recovery)
 tasks / processes
-  exec        load a user program from the ESP and enter it at EL0
+  exec        load a user program from the host share and enter it at EL0
   kill        terminate a running process (kernel-owned lifetime)
   mbox        per-process IPC mailbox: pending messages and drain counters
   procs       process registry: image, address space, lifecycle, exit status
@@ -37,11 +37,11 @@ tasks / processes
   tasks       tick-driven task scheduler status
   smp         multiprocessor topology, online CPU cores, and per-core task state
 storage
-  cat         print a file from the ESP (by name or /path)
-  ls          list files on the ESP (or a directory by path); '-l' for long format (D15)
-  mount       switch the active FAT volume (esp or data)
+  cat         print a file from the host share (by name or path)
+  ls          list files on the host share (or a directory by path); '-l' for long format (D15)
+  mount       report the host-share file store (HF6: the FAT volumes are gone)
   vf          host file channel (M34): 'vf ls/cat/mkdir/rm/mv <path>' read + mutate a macOS share over custom-virtio queue 5; 'vf open/close/write/truncate/fsync <h>' manage write handles (8-slot host cursor table)
-  write       write text to a file on the ESP
+  write       write text to a file on the host share
   mktemp      create a temporary file (empty, unique name)
   stat        file metadata: size, type, cluster, path (D8)
   du          recursive directory disk usage (M25 F4)
@@ -82,7 +82,7 @@ system
   type        echo stdin (the pipe source) to stdout — the right half of `a | type`
   dmesg       system log viewer: last bytes of serial output (D12)
   time        command timing: measure elapsed ticks and wall-clock time (D13)
-  which       locate a command: shell builtin, monitor command, or ESP application (D16)
+  which       locate a command: shell builtin, monitor command, or host-share application (D16; HF6: the ESP is gone)
 type 'help <command>' for details on a single command.
 type 'help <topic>' for a topic page (networking, windows, storage, graphics).
 virelai> version
@@ -123,17 +123,17 @@ tasks: enabled=0 current=0 switches=0 pool=4/11 zombies=0
 virelai> echo "elephant business"
 elephant business
 virelai> ls
-ls: esp=0x0000000000000003
-  KERNEL.BIN  0x0000000000088b38  [esp]
+ls: host=0x0000000000000003
+  KERNEL.BIN  0x0000000000000000  [host]
   EFI         0x0000000000000000  [dir]
-  BOOTED.TXT  0x0000000000000029  [esp]
+  BOOTED.TXT  0x0000000000000036  [host]
 virelai> cat BOOTED.TXT
 VIRELAIOS BOOTLOADER
 firmware has agreed to cooperate
 virelai> write hello.txt hello world
-error: hello.txt: not persisted - no disk (FAT volume unavailable)
+error: hello.txt: not persisted - host file-channel error
 virelai> cat hello.txt
-error: hello.txt: not found (no such file on the ESP)
+error: hello.txt: not found (no such file on the host share)
 virelai> pages bogus
 usage: pages [selftest]
 physical page allocator pool

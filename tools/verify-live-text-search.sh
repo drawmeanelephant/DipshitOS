@@ -12,7 +12,7 @@
 #      opens the M15 C6 find bar with Ctrl+F, searches "wor" and accepts
 #      with Enter (the app reports hit 1/1 over serial), then opens the
 #      M20-U3 Ctrl+G goto bar and jumps to line 2 (offset reported).
-#   2. FILE.BIN: Ctrl+F narrows the /data listing in real time; every
+#   2. FILE.BIN: Ctrl+F narrows the /host listing in real time; every
 #      keystroke applies the filter and reports shown/total over serial;
 #      "txt" matches the DATA-volume text files.
 #   3. The shell survives both walks: focus returns to the terminal via
@@ -62,6 +62,7 @@ swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPI
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 gate_begin live-text-search
+gate_seed_share
 echo "run dir: $RUN_DIR"
 
 run_boot() {

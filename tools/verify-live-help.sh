@@ -119,7 +119,8 @@ run_one() {
         # Topic pages.
         grep -qF -- "virtio-net (DID 0x1041), flag-gated" "$SER" && TOPIC_NET=1
         grep -qF -- "owns the window registry" "$SER" && TOPIC_WIN=1
-        grep -qF -- "GPT + FAT32 over virtio-blk" "$SER" && TOPIC_STORAGE=1
+        # M34 HF6 (issue #740): the storage topic describes the host share.
+        grep -qF -- "The macOS host share (custom-virtio queue 5" "$SER" && TOPIC_STORAGE=1
         grep -qF -- "1280x720 B8G8R8X8, 2D blits only" "$SER" && TOPIC_GFX=1
         # `help syscalls` — a command wins over any topic interpretation.
         grep -qF -- "syscalls - numbered syscall table" "$SER" && CMD_WINS=1

@@ -89,7 +89,7 @@ const wm_server = @import("wm_server.zig");
 // writes, safe in the exception context `exit_current` runs in.
 const tombstone = @import("tombstone.zig");
 const serial_ring = @import("serial_ring.zig"); // Arc5 #243: serial snapshot for tombstones
-const virtio_blk = @import("virtio_blk.zig"); // Arc5 #243: disk write for tombstones
+const virtio_file = @import("virtio_file.zig"); // Arc5 #243: tombstone write through the host file channel (HF6: the DATA partition is gone)
 const smp = @import("smp.zig");
 const spinlock = @import("spinlock.zig");
 
@@ -1028,14 +1028,13 @@ pub fn exit_current(status: u64) bool {
         var serial_buf: [512]u8 = undefined;
         const serial_n = serial_ring.snapshot(&serial_buf);
         tombstone.record(proc_name, pid_val, status, fault_addr, fault_pc, serial_buf[0..serial_n], serial_n);
-        // Arc5 issue #243: persist the tombstone to /data/crash/ on the DATA
-        // partition. The write is polled DMA through virtio-blk (no allocation,
-        // no interrupt, no global-state conflict with the exception context).
-        if (virtio_blk.blk_common != 0) {
-            _ = tombstone.write_to_disk(
-                tombstone.get(tombstone.count() - 1).?,
-                virtio_blk.disk_ops(),
-            );
+        // Arc5 issue #243: persist the tombstone to crash/ on the host
+        // share. The write is a polled exchange on the file channel (no
+        // allocation, no interrupt, no global-state conflict with the
+        // exception context). M34 HF6 (issue #740): the DATA partition /
+        // virtio-blk path is gone.
+        if (virtio_file.available()) {
+            _ = tombstone.write_to_disk(tombstone.get(tombstone.count() - 1).?);
         }
     }
     // Claim 3848: the exiting task's PROCESS (if any) becomes exited and

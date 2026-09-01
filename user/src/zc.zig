@@ -1478,11 +1478,14 @@ fn compile(src: []const u8) !usize {
 // ---------------------------------------------------------------------------
 pub export fn _start(argc: usize, argv: ?[*]const [32]u8) callconv(.c) noreturn {
     var src_path_buf: [40]u8 = [_]u8{0} ** 40;
-    @memcpy(src_path_buf[0..11], "/esp/MAIN.Z");
+    // M34 HF6 (issue #740): the host share is the only store — the
+    // defaults route to /host/ (the old /esp prefix would resolve to a
+    // literal "esp/" subdirectory on the share and fail to write).
+    @memcpy(src_path_buf[0..12], "/host/MAIN.Z");
     var out_path_buf: [40]u8 = [_]u8{0} ** 40;
-    @memcpy(out_path_buf[0..13], "/esp/MAIN.ELF");
-    var src_len: usize = 11;
-    var out_len: usize = 13;
+    @memcpy(out_path_buf[0..14], "/host/MAIN.ELF");
+    var src_len: usize = 12;
+    var out_len: usize = 14;
 
     if (argc >= 1) {
         if (argv) |slots| copy_arg(&src_path_buf, &src_len, slots[0]);

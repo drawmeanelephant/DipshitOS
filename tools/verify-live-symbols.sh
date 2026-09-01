@@ -5,7 +5,7 @@
 # table.
 #
 # The chain, all asserted in vm-serial.log:
-#   1. CRASH.ELF (tools/mkhello-elf.py --crash) is embedded on the ESP with
+#   1. CRASH.ELF (tools/mkhello-elf.py --crash) is seeded into the host share
 #      a real .symtab: one GLOBAL FUNC "crasher" covering its code block.
 #   2. `exec CRASH.ELF` loads it through the D1 ELF path — exec_file copies
 #      the .symtab entries into the kernel BSS symbol table (symbol.zig).
@@ -57,13 +57,14 @@ echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
 zig fmt --check boot/src/*.zig kernel/src/*.zig user/src/*.zig build.zig
 zig build
 zig build image
-swift build --package-path host/vm-runner --configuration release
+swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 # --- per-run isolation -------------------------------------------------------------
 # Private scratch dir + pristine-boot overlay for EVERY boot.
 # See tools/lib/gate-run.sh.
 gate_begin live-symbols
+gate_seed_share
 echo "run dir: $RUN_DIR"
 SCRIPT="$RUN_DIR/script.txt"
 

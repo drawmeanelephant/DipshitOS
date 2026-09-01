@@ -25,12 +25,12 @@
 # Run isolation (#523 item 2 / issue #528; fleet remainder claim 2259):
 # scripts, EFI var store, and serial logs live under $RUN_DIR. This is a
 # PERSISTENCE gate — boot 2 exists precisely to prove boot 1's HISTORY.TXT
-# write SURVIVED on the same image — so both boots attach the CANONICAL
-# artifacts/disk.img under tools/lib/gate-run.sh's gate_shared_disk_lock
-# (the macOS 27.0 fresh-copy FAT-write defect makes private copies/
-# overlays unusable here; observed claim 5069). Two concurrent instances
-# serialize on the lock instead of corrupting the shared disk. Set
-# VIRELAI_GATE_SUFFIX=_alt for distinct canonical evidence names.
+# write SURVIVED on the same medium — so both boots attach the SAME
+# private share dir (a real host folder; the M34 HF5/HF6 host file
+# channel replaced both the FAT volume and the claim-5069 disk-copy
+# dance). The boot image itself is the one shared read-only base
+# (--overlay-base; issue #740), so concurrent instances need no disk
+# lock. Set VIRELAI_GATE_SUFFIX=_alt for distinct canonical evidence names.
 #
 # Class B — Apple silicon + VZ only. Two boots required.
 
@@ -46,7 +46,7 @@ art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-history-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'gate_shared_disk_unlock; gate_end 2>/dev/null || true; sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 BOOTS="${BOOTS:-1}"
 REPORT="$(art live-history-report.txt)"
@@ -72,13 +72,12 @@ codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/
 gate_begin live-history
 echo "run dir: $RUN_DIR"
 
-# M34 HF5 (issue #739): shell history now persists to the HOST SHARE (the
-# shell's save_to_history/load_history re-pointed; the ESP is the fallback
-# until HF6). Both boots attach the SAME share dir, so "survived reboot"
-# is proven on the macOS filesystem, and the gate verifies HISTORY.TXT on
-# the host disk.
-SHARE="$RUN_DIR/share"
-mkdir -p "$SHARE"
+# M34 HF5/HF6 (issues #739/#740): shell history persists to the HOST
+# SHARE (the shell's save_to_history/load_history re-pointed; the ESP/FAT
+# fallback is gone). Both boots attach the SAME share dir, so "survived
+# reboot" is proven on the macOS filesystem, and the gate verifies
+# HISTORY.TXT on the host disk.
+gate_arm_share
 
 # --- boot 1: build history --------------------------------------------------
 # The LAST command is what a single Up arrow recalls after the newest-first
@@ -118,27 +117,13 @@ run_one() {
 
     # Boot 1: build history
     set +e
-    gate_shared_disk_lock
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img \
-        --cvc-file "$SHARE" \
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
         --serial "$RUN_DIR/vm-serial-$tag-boot1.log" \
         --script "$SCRIPT1" --script-expect "T4-third-marker" --timeout 30 \
         > "$(art live-history-run-$tag-boot1.txt)" 2>&1
     local RC1=$?
-    gate_shared_disk_unlock
     set -e
     [ -f "$RUN_DIR/vm-serial-$tag-boot1.log" ] && cp "$RUN_DIR/vm-serial-$tag-boot1.log" "$(art live-history-serial-$tag-boot1.log)" || true
-
-    # CHECKPOINT (temporary diagnostics): did boot-1 actually persist the
-    # T4 commands into artifacts/disk.img before boot-2 mounts it?
-    python3 - <<'PY' > "$(art history-checkpoint-boot1.txt)" 2>&1 || true
-import re
-p='artifacts/disk.img'
-d=open(p,'rb').read()
-print('disk bytes', len(d))
-for kw in [b'echo T4-first', b'echo T4-second', b'echo T4-third', b'input', b'history-live-ok', b'HISTORY.TXT']:
-    print(kw.decode(), len(re.findall(re.escape(kw), d)))
-PY
 
     if [ "$RC1" != 0 ]; then
         echo "$tag: boot1 failed rc=$RC1" | tee -a "$REPORT"
@@ -148,9 +133,7 @@ PY
     # Boot 2: verify history survived, recall via Up arrow (KEYBOARD)
     rm -f "$RUN_DIR/efi-vars.bin"
     set +e
-    gate_shared_disk_lock
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img \
-        --cvc-file "$SHARE" \
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
         --serial "$RUN_DIR/vm-serial-$tag-boot2.log" \
         --input --display \
         --script "$RUN_DIR/empty.txt" \
@@ -161,7 +144,6 @@ PY
         --timeout 60 \
         > "$(art live-history-run-$tag-boot2.txt)" 2>&1
     local RC2=$?
-    gate_shared_disk_unlock
     set -e
     [ -f "$RUN_DIR/vm-serial-$tag-boot2.log" ] && cp "$RUN_DIR/vm-serial-$tag-boot2.log" "$(art live-history-serial-$tag-boot2.log)" || true
     SER="$RUN_DIR/vm-serial-$tag-boot2.log"
@@ -202,7 +184,7 @@ PY
 {
     echo "VIRELAIOS live-history gate (M18 T4, issue #407) — persistent history on VZ"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
-    echo "boot 1: build history with distinctive commands (canonical artifacts/disk.img under gate_shared_disk_lock)"
+    echo "boot 1: build history with distinctive commands (shared read-only boot image + private share)"
     echo "boot 2: keyboard Up chord recalls T4-third-marker; serial \r submits, input report (events=1), marker echo"
     echo "assertions: banner, recall marker, input report events=1, done, runner input-chords flag"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"

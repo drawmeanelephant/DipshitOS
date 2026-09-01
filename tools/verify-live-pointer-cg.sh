@@ -44,12 +44,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+source tools/lib/gate-run.sh
+
 REQUEST_TRUST=0
 [ "${1:-}" = "--request-trust" ] && REQUEST_TRUST=1
 
 GATE_LOG="artifacts/pointer-cg-gate.txt"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 REPORT="artifacts/pointer-cg-report.txt"
 SCREEN_BASE="artifacts/pointer-cg-screen"
@@ -66,7 +68,11 @@ echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
 zig fmt --check boot/src/*.zig kernel/src/*.zig build.zig
 zig build
 zig build image
-swift build --package-path host/vm-runner --configuration release
+# M34 HF6 (issue #740): WINLOOP.BIN is exec'd from the --cvc-file host
+# share (the ESP is gone), which requires the SPIKE runner build.
+gate_begin live-pointer-cg
+gate_seed_share
+swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 # --- Accessibility trust preflight -----------------------------------------
@@ -137,9 +143,9 @@ EXTRA=()
 # bash 3.2 (macOS default) treats "${EXTRA[@]}" on an empty array as
 # unbound under `set -u`; the `+` guard expands to nothing instead.
 
-rm -f artifacts/efi-vars.bin artifacts/vm-serial.log "$SCREEN_BASE"*
+rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log" "$SCREEN_BASE"*
 set +e
-host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.log \
+host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" "$RUN_DIR/vm-serial.log" \
     --input --display \
     --script artifacts/pointer-cg-script.txt \
     --screen "$SCREEN_BASE" --screenshot-after "pointer-cg-ready" \
@@ -149,6 +155,7 @@ host/vm-runner/.build/release/VMRunner artifacts/disk.img artifacts/vm-serial.lo
     > artifacts/pointer-cg-run.txt 2>&1
 RC=$?
 set -e
+cp "$RUN_DIR/vm-serial.log" artifacts/vm-serial.log 2>/dev/null || true
 
 # --- serial assertions --------------------------------------------------------
 SERIAL="artifacts/vm-serial.log"

@@ -1,37 +1,29 @@
 #!/usr/bin/env bash
 #
-# verify-live-gfs.sh -- claim 3678 (milestone-four card 2) class-B gate: the
-# GENERAL (non-ESP) filesystem observed on real VZ hardware.
+# verify-live-gfs.sh -- M34 HF6 (issue #740) class-B gate: the GENERAL
+# filesystem surface observed on real VZ hardware. The old claim-3678 DATA
+# partition is GONE (HF6 deleted the second FAT volume + the guest FAT
+# driver); the general (non-boot) store is now the macOS host share — the
+# `mount` command reports it, `ls`/`cat`/`write` route to it, and a file
+# written in boot A persists in the host folder through boot B.
 #
-# The disk image (mkfat32.py, 128 MiB) carries TWO FAT32 partitions: the ESP
-# (type GUID C12A7328-F81F-11D2-BA4B-00A0C93EC93B at LBA 2048) and a DATA
-# partition (Linux-FS type GUID 0FC63DAF-8483-4772-8E79-3D69D8477DE4, 36 MiB
-# at the tail of the disk). The kernel boots the ESP as before; the new
-# `mount <esp|data>` monitor command switches the active FAT volume by type
-# GUID (fat.mount / fat.mount_data) and re-snapshots the window.
-#
-# The gate is TWO boots against the SAME disk image:
-#   run A (fresh image, rebuilt at gate start): script `mount data` + `ls` +
-#         `cat README.TXT` + `cat DATA.TXT` + `write hello.txt hello world`;
-#         asserts the mount reply (mount: data vol_lba=..), the data volume
-#         listing (README.TXT / DATA.TXT, labeled [data]), the DATA.TXT cat
-#         reply, and the write-ok reply.
-#   run B (same image): script `mount data` + `ls` + `cat hello.txt`;
-#         asserts the data volume still lists HELLO.TXT and cat prints the
-#         content — the general volume persisted across the reboot ON THE
-#         DISK, independent of the ESP.
-# This is the "arbitrary disk layout" + "file API beyond the ESP window"
-# proof on real hardware: a second partition on the same disk, mounted by
-# GUID, listed, read, written, and re-read after a reboot.
+# The gate is TWO boots against the SAME share:
+#   run A (fresh share with seeded fixtures): script `mount` + `write
+#         hello.txt hello world` + `ls` + `cat README.TXT` + `cat DATA.TXT`;
+#         asserts the mount reply (mount: host share armed files=N), the
+#         share listing (README.TXT / DATA.TXT, labeled [host]), the
+#         DATA.TXT cat reply, and the write-ok reply.
+#   run B (same share): script `mount` + `ls` + `cat hello.txt`;
+#         asserts the share still lists hello.txt and cat prints the
+#         content — the general store persisted across the reboot ON THE
+#         HOST DISK.
 #
 # Per run this reports: rc, serial-bytes, and per-assertion flags.
-# Run isolation (#523 item 2 / issue #528, claim 5069): every PAIR of boots
-# runs against a PRIVATE WRITABLE disk image ($RUN_DIR/disk-base.img, seeded
-# fresh from artifacts/disk.img after the build), a private EFI var store,
-# and private serial logs under $RUN_DIR — same shape as verify-live-fs.sh
-# (the writable copy is required: run B proves run A's write persisted on
-# the SAME image through a reboot). VIRELAI_GATE_SUFFIX=_alt gives distinct
-# canonical evidence names; VIRELAI_KEEP_RUN=1 keeps the scratch dir.
+# Run isolation (tools/lib/gate-run.sh, issue #740): every pair of boots
+# shares the read-only boot image (--overlay-base) and a PRIVATE share dir
+# (a real host folder, present across both boots — the persistence
+# medium). VIRELAI_GATE_SUFFIX=_alt gives distinct canonical evidence
+# names; VIRELAI_KEEP_RUN=1 keeps the scratch dir.
 #
 # Class B — Apple silicon + VZ only; boots real VMs.
 #
@@ -39,8 +31,7 @@
 #   bash tools/verify-live-gfs.sh
 #
 # Evidence saved under artifacts/: live-gfs-gate.txt, live-gfs-report.txt,
-# live-gfs-run-<A|B>-<NN>.txt, live-gfs-serial-<A|B>-<NN>.log,
-# live-gfs-script-<A|B>.txt.
+# live-gfs-run-<A|B>-<NN>.txt, live-gfs-serial-<A|B>-<NN>.log.
 
 set -euo pipefail
 
@@ -54,12 +45,12 @@ art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-gfs-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'gate_shared_disk_unlock; gate_end 2>/dev/null || true; sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 PAIRS="${BOOTS:-1}"
 REPORT="$(art live-gfs-report.txt)"
 
-echo "=== verify-live-gfs: claim 3678 — general (non-ESP) filesystem: data partition mount + persistence on VZ, $PAIRS pair(s) of boots ==="
+echo "=== verify-live-gfs: M34 HF6 — general filesystem: the host share as the non-boot store, mount + persistence on VZ, $PAIRS pair(s) of boots ==="
 
 # --- per-run isolation -------------------------------------------------------
 gate_begin live-gfs
@@ -76,19 +67,29 @@ echo "revision: $REVISION branch=$BRANCH pairs=$PAIRS dirty-files=$DIRTY"
 zig fmt --check boot/src/*.zig kernel/src/*.zig build.zig
 zig build
 zig build image
-swift build --package-path host/vm-runner --configuration release
+# The --cvc-file FILE channel requires the SPIKE runner build.
+swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
+
+# --- the host share: seeded fixtures + the persistence medium --------------
+# gate_arm_share creates $RUN_DIR/share and arms --cvc-file. The fixtures
+# mirror the OLD data partition's contents (README.TXT / DATA.TXT) so the
+# listing/cat needles survive the re-point.
+gate_arm_share
+echo "VirelaiOS general store README" > "$SHARE/README.TXT"
+echo "general data volume contents" > "$SHARE/DATA.TXT"
+echo "fixtures: README.TXT + DATA.TXT seeded on the share root"
 
 # --- scripted keystrokes -----------------------------------------------------
 cat > "$RUN_DIR/script-A.txt" <<'EOF'
-mount data
+mount
 write hello.txt hello world
 ls
 cat README.TXT
 cat DATA.TXT
 EOF
 cat > "$RUN_DIR/script-B.txt" <<'EOF'
-mount data
+mount
 ls
 cat hello.txt
 EOF
@@ -102,13 +103,11 @@ run_one() {
     fi
     rm -f "$RUN_DIR/vm-serial-$tag.log"
     set +e
-    gate_shared_disk_lock
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img \
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
         --serial "$RUN_DIR/vm-serial-$tag.log" \
         --script "$script" --script-expect "$expect" --timeout 40 \
         > "$(art live-gfs-run-$tag.txt)" 2>&1
     local RC=$?
-    gate_shared_disk_unlock
     set -e
     [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$(art live-gfs-serial-$tag.log)" || true
     local SER="$(art live-gfs-serial-$tag.log)"
@@ -117,18 +116,17 @@ run_one() {
     local MOUNTOK=0 LSHEAD=0 DATAFILES=0 CATDATA=0 WRITEOK=0 FILELISTED=0 CATHELLO=0
     if [ -f "$SER" ]; then
         SERIAL_BYTES=$(wc -c < "$SER" | tr -d ' ')
-        # The mount reply proves the DATA partition was discovered by type
-        # GUID and mounted (the general, non-ESP volume).
-        grep -a -qF -- "mount: data vol_lba=" "$SER" && MOUNTOK=1
-        # The re-snapshotted window is labeled data (ls: data=N, not esp=N).
-        grep -a -qF -- "ls: data=" "$SER" && LSHEAD=1
-        # The data volume's own files are listed (with [data], not [esp]).
+        # The mount reply reports the host share as the one general store.
+        grep -a -qF -- "mount: host share armed files=0x" "$SER" && MOUNTOK=1
+        # The share listing header (count in 16-hex form).
+        grep -a -qF -- "ls: host=0x" "$SER" && LSHEAD=1
+        # The general store's seeded files are listed (labeled [host]).
         grep -a -qF -- "  README.TXT" "$SER" && DATAFILES=1
         grep -a -qF -- "  DATA.TXT" "$SER" && DATAFILES=1
-        grep -a -qF -- "  [data]" "$SER" && DATAFILES=1
+        grep -a -qF -- "  [host]" "$SER" && DATAFILES=1
         # The DATA.TXT cat reply (volume content, not the ESP's).
         grep -a -qF -- "general data volume contents" "$SER" && CATDATA=1
-        # The write reply (hello world -> the DATA volume's root).
+        # The write reply (hello world -> the share root).
         grep -a -qF -- "write: ok (persisted" "$SER" && WRITEOK=1
         # hello.txt listed after the write (run A: window; run B: from disk).
         grep -a -qi -- "  hello" "$SER" && FILELISTED=1
@@ -136,8 +134,8 @@ run_one() {
         grep -a -qF -- "hello world" "$SER" && CATHELLO=1
     fi
     local PASS=0
-    # Common requirements (both runs): the DATA volume mounted by GUID, its
-    # window labeled [data] with its files listed, hello.txt listed, and the
+    # Common requirements (both runs): the share mounted/reported, its
+    # window labeled [host] with its files listed, hello.txt listed, and the
     # hello-world cat reply. Run A additionally requires the write-ok reply
     # and the DATA.TXT cat; run B's list+cat of hello.txt are the real
     # persistence proof (run A's "hello world" match is the command echo).
@@ -157,10 +155,10 @@ run_one() {
 
 : > "$REPORT"
 {
-    echo "VIRELAIOS live general-filesystem gate (claim 3678) — the DATA partition mounted by GUID, listed, read, written, and persistent across reboot (VZ hardware)"
+    echo "VIRELAIOS live general-filesystem gate (issue #740) — the host share as the general (non-boot) store: mounted, listed, read, written, and persistent across reboot (VZ hardware)"
     echo "revision: $REVISION branch=$BRANCH pairs=$PAIRS dirty-files=$DIRTY"
-    echo "run A: mount data + write hello.txt 'hello world' + ls + cat README.TXT + cat DATA.TXT (fresh disk image)"
-    echo "run B: mount data + ls + cat hello.txt (SAME image — persistence through reboot on the DATA volume)"
+    echo "run A: mount + write hello.txt 'hello world' + ls + cat README.TXT + cat DATA.TXT (fresh share)"
+    echo "run B: mount + ls + cat hello.txt (SAME share — persistence through reboot on the host disk)"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     echo
 } >> "$REPORT"
@@ -191,7 +189,7 @@ done
 echo
 echo "=== result ==="
 if [ "$PASS" = "$PAIRS" ]; then
-    echo "verify-live-gfs: PASS — the DATA partition (a second FAT32 volume on the same disk, Linux-FS type GUID) is mounted by GUID, its window labeled [data], its files listed and read, hello.txt written to it, and run B — a fresh boot against the same disk image — still lists and prints the file from the DATA volume ($PASS/$PAIRS pair(s))."
+    echo "verify-live-gfs: PASS — the host share is mounted/reported as the one general store, its window labeled [host], its files listed and read, hello.txt written to it, and run B — a fresh boot against the same share — still lists and prints the file ($PASS/$PAIRS pair(s))."
     echo "PASS: $PASS/$PAIRS" >> "$REPORT"
     sleep 0.5
     exit 0

@@ -58,13 +58,16 @@ echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
 zig fmt --check boot/src/*.zig kernel/src/*.zig build.zig
 zig build
 zig build image
-swift build --package-path host/vm-runner --configuration release
+# M34 HF6 (issue #740): `ls` lists the host share — the pipe gate arms
+# the channel (SPIKE runner build for --cvc-file).
+swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 # --- per-run isolation -------------------------------------------------------------
 # Private scratch dir + pristine-boot overlay for EVERY boot.
 # See tools/lib/gate-run.sh.
 gate_begin live-pipe
+gate_arm_share
 echo "run dir: $RUN_DIR"
 
 
@@ -98,7 +101,7 @@ run_one() {
         [ "$(grep -x -c "pipe-left-marker" "$SER" | tr -d ' ')" = 1 ] && PIPE=1
         # `ls | type` — the listing header only appears if ls ran and its
         # output travelled through the pipe to type.
-        grep -qF "ls: esp=" "$SER" && LS=1
+        grep -qF "ls: host=" "$SER" && LS=1
         grep -qF "pipes: only one pipe per line (no chaining)" "$SER" && CHAIN=1
         grep -qF "pipe-ok" "$SER" && DONE=1
     fi

@@ -2,7 +2,8 @@
 //!
 //! Listens for incoming TCP connections (passive open), parses HTTP/1.1 requests,
 //! serves an interactive HTML dashboard on `/`, dynamic JSON system telemetry
-//! on `/api/status`, and static files from the FAT32 volume.
+//! on `/api/status`, and static files from the host share (queue-5
+//! file channel; M34 HF6 shook out the old FAT32 volume).
 
 const std = @import("std");
 const ui = @import("lib/ui.zig");
@@ -323,7 +324,7 @@ pub fn format_file_browser(buf: []u8) []const u8 {
         \\<body>
         \\  <div class="container">
         \\    <a href="/" class="back">&larr; Return to Control Center</a>
-        \\    <h1>FAT32 Storage Explorer</h1>
+        \\    <h1>Host Share Explorer</h1>
         \\    <table>
         \\      <thead>
         \\        <tr><th>File Name</th><th>Size</th><th>Action</th></tr>
@@ -436,7 +437,7 @@ pub fn handle_request(req: Request) void {
         return;
     }
 
-    // Static file serving from FAT32
+    // Static file serving from the host share
     const clean_path = sanitize_path(req.path);
     if (clean_path == null) {
         const err_400 = "HTTP/1.1 400 Bad Request\r\nServer: VirelaiOS\r\nContent-Length: 16\r\nConnection: close\r\n\r\n400 Bad Request\n";
@@ -569,6 +570,6 @@ test "httpd: format_file_browser generates HTML table" {
     var buf: [2048]u8 = undefined;
     const html = format_file_browser(&buf);
     try std.testing.expect(std.mem.indexOf(u8, html, "<!DOCTYPE html>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, html, "FAT32 Storage Explorer") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "Host Share Explorer") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "</table>") != null);
 }

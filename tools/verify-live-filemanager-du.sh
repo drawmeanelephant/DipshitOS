@@ -46,8 +46,14 @@ swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPI
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 gate_begin live-filemanager-du
+gate_arm_share
 echo "run dir: $RUN_DIR"
 
+# M34 HF6 (issue #740): du walks the HOST SHARE — seed an EFI dir with a
+# 100-byte fixture so `du /EFI` reports nonzero bytes (the old ESP's
+# BOOTAA64.EFI role), and arm the channel.
+mkdir -p "$SHARE/EFI"
+python3 -c "open('$SHARE/EFI/BOOTAA64.EFI','wb').write(bytes(range(100)))"
 printf 'du /\ndu /EFI\necho m25-du-ok\n' > "$RUN_DIR/script.txt"
 
 rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log"

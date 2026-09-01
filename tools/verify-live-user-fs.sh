@@ -45,7 +45,7 @@ art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art live-user-fs-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'gate_shared_disk_unlock; gate_end 2>/dev/null || true; sleep 0.5' EXIT
+trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 REPORT="$(art live-user-fs-report.txt)"
 
@@ -55,12 +55,13 @@ echo "=== verify-live-user-fs: claim 0510 — userland storage ABI & utilities o
 gate_begin live-user-fs
 echo "run dir: $RUN_DIR"
 
-# M34 HF5 (issue #739): the persistence consumers re-pointed to the HOST
-# SHARE (SAVETEXT/TYPE/DIR now use /host/...). Both boots attach the SAME
-# share dir under RUN_DIR, so "survived reboot" is proven on the macOS
-# filesystem itself — the gate then verifies hello.txt ON THE HOST DISK.
-SHARE="$RUN_DIR/share"
-mkdir -p "$SHARE"
+# M34 HF5/HF6 (issues #739/#740): the persistence consumers re-pointed to
+# the HOST SHARE (SAVETEXT/TYPE/DIR now use /host/...; the FAT volume is
+# gone). Both boots attach the SAME share dir under RUN_DIR, so "survived
+# reboot" is proven on the macOS filesystem itself — the gate then
+# verifies hello.txt ON THE HOST DISK. The share is seeded with the app
+# bundle so `exec SAVETEXT.BIN` / `exec TYPE.BIN` / `exec DIR.BIN` resolve.
+gate_seed_share
 
 # Tool versions + revision
 zig version; swift --version 2>&1 | head -1; sw_vers
@@ -101,9 +102,7 @@ echo "--- Phase 1: Boot A (SAVETEXT.BIN) ---"
 rm -f "$RUN_DIR/efi-vars.bin"
 rm -f "$RUN_DIR/vm-serial-A.log"
 set +e
-gate_shared_disk_lock
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img \
-    --cvc-file "$SHARE" \
+host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
     --serial "$RUN_DIR/vm-serial-A.log" \
     --script "$RUN_DIR/script-A.txt" \
     --script-after "$STATIC_EXIT_LINE" \
@@ -111,7 +110,6 @@ gate_shared_disk_lock
     --timeout 40 > "$(art live-user-fs-run-A.txt)" 2>&1
 RC_A=$?
 set -e
-gate_shared_disk_unlock
 [ -f "$RUN_DIR/vm-serial-A.log" ] && cp "$RUN_DIR/vm-serial-A.log" "$(art live-user-fs-serial-A.log)" || true
 
 if [ $RC_A -ne 0 ]; then
@@ -135,9 +133,7 @@ echo "--- Phase 2: Boot B (TYPE.BIN + DIR.BIN persistence verification) ---"
 sleep 3
 rm -f "$RUN_DIR/vm-serial-B.log"
 set +e
-gate_shared_disk_lock
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img \
-    --cvc-file "$SHARE" \
+host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
     --serial "$RUN_DIR/vm-serial-B.log" \
     --script "$RUN_DIR/script-B.txt" \
     --script-after "$STATIC_EXIT_LINE" \
@@ -145,7 +141,6 @@ gate_shared_disk_lock
     --timeout 40 > "$(art live-user-fs-run-B.txt)" 2>&1
 RC_B=$?
 set -e
-gate_shared_disk_unlock
 [ -f "$RUN_DIR/vm-serial-B.log" ] && cp "$RUN_DIR/vm-serial-B.log" "$(art live-user-fs-serial-B.log)" || true
 
 if [ $RC_B -ne 0 ]; then
@@ -190,8 +185,8 @@ grep -q "procs DIR.BIN exited status=0" "$(art live-user-fs-serial-B.log)" || {
 echo "Boot B passed: TYPE.BIN and DIR.BIN verified persistent data across reboot."
 
 # M34 HF5 (issue #739): prove the write landed ON THE HOST DISK — the
-# share is the persistence home now (the FAT DATA partition still works
-# but is deprecated; SAVETEXT/TYPE/DIR route to /host).
+# share is the persistence home now (M34 HF6 deleted the FAT DATA
+# partition; SAVETEXT/TYPE/DIR route to /host).
 HOST_OK=0
 if [ -f "$SHARE/hello.txt" ] && grep -qF "Hello from VirelaiOS EL0 Storage!" "$SHARE/hello.txt"; then
     HOST_OK=1

@@ -64,13 +64,15 @@ codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/
 gate_begin live-filemanager-bulk
 echo "run dir: $RUN_DIR"
 
-# M34 HF5 (issue #739): the share is FILE.BIN's root — seed the same two
-# byte-known fixtures the FAT DATA volume carries (image/mkfat32.py
-# build_data_volume). The shell's HF5 re-point writes HISTORY.TXT at boot,
-# so select-all sees n=3 (DATA.TXT + HISTORY.TXT + README.TXT).
-SHARE="$RUN_DIR/share"
-mkdir -p "$SHARE"
-printf '%s\n' 'VirelaiOS general filesystem: a second FAT32 volume on the same disk (claim 3678, milestone four card 2)' > "$SHARE/README.TXT"
+# M34 HF6 (issue #740): FILE.BIN's root is the host share. This gate needs
+# a CONTROLLED listing (a select-all must count exactly 3), so arm an
+# EMPTY share and drop in only FILE.BIN + the two byte-known fixtures;
+# the shell writes HISTORY.TXT at boot, so select-all sees n=3 (DATA.TXT
+# + HISTORY.TXT + README.TXT). The app bundle stays out — the batch delete
+# must touch only these three.
+gate_arm_share
+cp zig-out/bin/FILE.BIN "$SHARE/"
+printf '%s\n' 'VirelaiOS general filesystem: host share fixtures' > "$SHARE/README.TXT"
 printf '%s\n' 'general data volume contents: 1234567890' > "$SHARE/DATA.TXT"
 
 printf 'exec FILE.BIN\n' > "$RUN_DIR/script.txt"
@@ -78,15 +80,15 @@ printf 'exec FILE.BIN\n' > "$RUN_DIR/script.txt"
 # the batch delete (the host-side absence check below is the assertion).
 printf 'dui focus 0\nvf ls\nsyscalls\necho m25-bulk-ok\n' > "$RUN_DIR/settle.txt"
 
-# The pristine DATA partition carries exactly two files (DATA.TXT +
-# README.TXT). Select all, open the delete dialog, confirm with Return.
+# The pristine share root carries exactly two seeded files (DATA.TXT +
+# README.TXT) + the boot-written HISTORY.TXT. Select all, open the delete
+# dialog, confirm with Return.
 CHORDS="ctrl-a,d,return"
 
 rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log"
 set +e
 host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
     --serial "$RUN_DIR/vm-serial.log" \
-    --cvc-file "$SHARE" \
     --screen "$RUN_DIR/screen" \
     --via-virtio \
     --script "$RUN_DIR/script.txt" \

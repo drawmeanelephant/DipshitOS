@@ -7,7 +7,8 @@
 # The gate verifies all Milestone 11 components end-to-end:
 #   1. Zero-allocation micro-widget toolkit (`user/src/lib/ui.zig`)
 #   2. CALC.BIN (64-bit interactive calculator with button grid & keyboard input)
-#   3. NOTEPAD.BIN (multi-line text editor with persistent /data load/save)
+#   3. NOTEPAD.BIN (multi-line text editor with persistent host-share
+#      load/save; M34 HF6 re-point — the /data volume is gone)
 #   4. TOP.BIN (graphical task manager introspecting sys_procs)
 #   5. DESKTOP.BIN (desktop launcher & environment catalog)
 #
@@ -62,11 +63,12 @@ echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
 # Build all binaries and disk image
 zig build
 zig build image
-swift build --package-path host/vm-runner --configuration release
+swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 # --- per-run isolation -------------------------------------------------------
 gate_begin live-desktop
+gate_seed_share
 echo "run dir: $RUN_DIR"
 
 # Scripts for Desktop Platform test
@@ -151,9 +153,10 @@ grep -q "desktop: menu ready" "$SER" || {
 echo "DESKTOP.BIN: OK"
 
 # 4b. Verify the launcher reads the APPS.TXT manifest (claim 8877, card
-# B2): the manifest marker names the count read from /esp/APPS.TXT, and
-# the manifest content is embedded in the image (verified above by the
-# image list).
+# B2): the manifest marker names the count read from /host/APPS.TXT — the
+# gate_seed_share helper drops image/apps.txt into the share (M34 HF6,
+# issue #740: the ESP is gone; the manifest is no longer embedded in the
+# image).
 # Expectation revised to OBSERVED BYTES (2026-09-01, claim 5251): the
 # serial marker reads `desktop: manifest apps=19` — image/apps.txt grew
 # from 9 entries at M13 close (d62c933) through M15 C4's SETTINGS.BIN
@@ -193,7 +196,7 @@ Status: PASS (1/1 on Apple Virtualization.framework)
 Verified Components:
 - Micro-Widget Toolkit & Runtime (user/src/lib/ui.zig)
 - CALC.BIN: Interactive Graphical Calculator (LAUNCHED BY DESKTOP through slot 28 sys_exec)
-- NOTEPAD.BIN: Graphical Text Editor with /data Storage
+- NOTEPAD.BIN: Graphical Text Editor (Host Share Storage)
 - TOP.BIN: Graphical Task Manager & Process Introspector
 - DESKTOP.BIN: Desktop Environment & Application Launcher (real EL0 exec)
 - sys_exec (ADR 0007 slot 28): calls=1 in the syscalls report

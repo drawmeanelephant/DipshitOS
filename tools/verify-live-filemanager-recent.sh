@@ -57,6 +57,7 @@ swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPI
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 gate_begin live-filemanager-recent
+gate_seed_share
 echo "run dir: $RUN_DIR"
 
 # M34 HF5 (issue #739): the share is FILE.BIN's root — seed the byte-known
@@ -75,7 +76,6 @@ rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log"
 set +e
 host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
     --serial "$RUN_DIR/vm-serial.log" \
-    --cvc-file "$SHARE" \
     --screen "$RUN_DIR/screen" \
     --via-virtio \
     --script "$RUN_DIR/script.txt" \

@@ -75,6 +75,7 @@ codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/
 
 # --- per-run isolation ---------------------------------------------------------
 gate_begin live-wnd5-geometry
+gate_seed_share
 echo "run dir: $RUN_DIR"
 
 run_boot() {

@@ -13,7 +13,7 @@ set -u
 # stray `just test` from a subdirectory cannot silently skip every module.
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-MODULES=(alloc app_timers arp console csprng dhcp dns driving_award esp events exec exceptions fat font8x8 gic handoff input ipv4 lineedit machine mailbox memmap mmu monitor nvram_console process psci redirect road_pops scheduler scrollback settings shared_region shell smp spinlock syscall tcp text timer tokenizer uaccess udp userspace virtio_blk virtio_custom virtio_entropy virtio_file virtio_gpu virtio_net wm_server wnd_core xhci)
+MODULES=(alloc app_timers arp console csprng dhcp dns driving_award events exec exceptions font8x8 gic handoff input ipv4 lineedit machine mailbox memmap mmu monitor nvram_console process psci redirect road_pops scheduler scrollback settings shared_region shell smp spinlock syscall tcp text timer tokenizer uaccess udp userspace virtio_custom virtio_entropy virtio_file virtio_gpu virtio_net wm_server wnd_core xhci)
 
 status=0
 present=0

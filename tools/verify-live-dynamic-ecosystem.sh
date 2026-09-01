@@ -5,7 +5,7 @@
 #
 # Asserts on real Apple Silicon VZ hardware:
 #   1. LD.SO, LIBUI.SO, LIBFONT.SO, PLUGIN.SO, DYNAPP.ELF, CALC.ELF, NOTEPAD.ELF,
-#      FILE.ELF, DESKTOP.ELF are embedded on the ESP.
+#      FILE.ELF, DESKTOP.ELF live in the host share.
 #   2. `exec DYNAPP.ELF`: loads via LD.SO, resolves LIBUI.SO/LIBFONT.SO, exits 0.
 #   3. `exec CALC.ELF`: loads via LD.SO, loads PLUGIN.SO via dlopen/dlsym,
 #      computes plugin pow(2, 8) = 256, renders UI, exits 0.
@@ -45,10 +45,11 @@ echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
 zig fmt --check boot/src/*.zig kernel/src/*.zig user/src/*.zig build.zig
 zig build
 zig build image
-swift build --package-path host/vm-runner --configuration release
+swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 gate_begin live-dynamic-ecosystem
+gate_seed_share
 echo "run dir: $RUN_DIR"
 
 test_one_app() {

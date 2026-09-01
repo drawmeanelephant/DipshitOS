@@ -47,6 +47,7 @@ codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/
 
 # --- per-run isolation -------------------------------------------------------
 gate_begin live-n11-download
+gate_seed_share
 echo "run dir: $RUN_DIR"
 
 # M34 HF5 (issue #739): DOWNLOAD.BIN's default destination is now
@@ -72,7 +73,6 @@ rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log" "$RUN_DIR/cap.bin"
 set +e
 host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
     --serial "$RUN_DIR/vm-serial.log" \
-    --cvc-file "$SHARE" \
     --net "$RUN_DIR/cap.bin" \
     --net-arp-respond 10.0.0.2 --net-tcp-respond 10.0.0.2:80 \
     --script "$RUN_DIR/script-1.txt" \

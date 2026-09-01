@@ -4,7 +4,9 @@
 # PERSISTENT SETTINGS observed across reboot on real Virtualization.framework hardware.
 #
 # Card U8 contract (ADR 0008 Card U8):
-#   - In-memory key-value store backed by `SETTINGS.TXT` on the DATA FAT32 partition.
+#   - In-memory key-value store backed by `SETTINGS.TXT` on the HOST SHARE
+#     (M34 HF6 deleted the DATA FAT32 partition; the kernel settings engine
+#     re-pointed to the queue-5 channel).
 #   - `settings get/set/list/reset` verbs.
 #   - Loaded automatically on kernel boot.
 #
@@ -76,13 +78,12 @@ codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/
 gate_begin live-settings
 echo "run dir: $RUN_DIR"
 
-# M34 HF5 (issue #739): settings now persist to the HOST SHARE (the kernel
-# settings engine re-pointed: SETTINGS.TXT lives in the --cvc-file folder;
-# the DATA partition is deprecated). Both boots attach the SAME share dir,
+# M34 HF5/HF6 (issues #739/#740): settings persist to the HOST SHARE (the
+# kernel settings engine re-pointed: SETTINGS.TXT lives in the --cvc-file
+# folder; the FAT volume is gone). Both boots attach the SAME share dir,
 # so "across reboot" is proven on the macOS filesystem itself, and the
 # gate verifies SETTINGS.TXT on the host disk after run B.
-SHARE="$RUN_DIR/share"
-mkdir -p "$SHARE"
+gate_arm_share
 
 # --- scripted keystrokes -----------------------------------------------------
 cat > artifacts/live-settings-script-A.txt <<'EOF'
@@ -105,15 +106,12 @@ run_one() {
     fi
     rm -f "$RUN_DIR/vm-serial-$tag.log"
     set +e
-    gate_shared_disk_lock
-    host/vm-runner/.build/release/VMRunner artifacts/disk.img \
-        --cvc-file "$SHARE" \
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
         --serial "$RUN_DIR/vm-serial-$tag.log" \
         --script "$script" --script-expect "$expect" --timeout 40 \
         > "$(art live-settings-run-$tag.txt)" 2>&1
     local RC=$?
     set -e
-    gate_shared_disk_unlock
     [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$(art live-settings-serial-$tag.log)" || true
     local SER="$(art live-settings-serial-$tag.log)"
 

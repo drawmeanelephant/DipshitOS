@@ -4,7 +4,7 @@
 # Freestanding Runtime Linker & Shared Libraries (LD.SO, LIBUI.SO, LIBFONT.SO, DYNAPP.ELF).
 #
 # The chain, all asserted in vm-serial.log on real Apple Silicon VZ hardware:
-#   1. DYNAPP.ELF, LD.SO, LIBUI.SO, LIBFONT.SO are embedded on the ESP.
+#   1. DYNAPP.ELF, LD.SO, LIBUI.SO, LIBFONT.SO live in the host share.
 #   2. `exec DYNAPP.ELF` sniffs ELF dynamic executable, loads PT_INTERP (LD.SO),
 #      maps interpreter segments and executable segments with strict W^X roots,
 #      and constructs the initial Auxiliary Vector (AT_PHDR, AT_ENTRY, AT_BASE, etc.).
@@ -45,10 +45,11 @@ echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
 zig fmt --check boot/src/*.zig kernel/src/*.zig user/src/*.zig build.zig
 zig build
 zig build image
-swift build --package-path host/vm-runner --configuration release
+swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 gate_begin live-dynamic-linking
+gate_seed_share
 echo "run dir: $RUN_DIR"
 SCRIPT="$RUN_DIR/script.txt"
 
