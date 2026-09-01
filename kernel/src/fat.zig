@@ -419,7 +419,9 @@ pub fn write_file(path: []const u8, content: []const u8) WriteResult {
         var raw: [32]u8 = undefined;
         if (!read_dir_slot(slots[i], &raw)) continue;
         const first = raw[0];
-        if (first == 0x00 and target == null) target = slots[i]; // end: first free slot
+        if (first == 0x00) {
+            if (target == null) target = slots[i]; // end: first free slot
+        }
         if (first == 0x00) break;
         if (first == 0xe5) {
             if (target == null) target = slots[i];
@@ -435,7 +437,14 @@ pub fn write_file(path: []const u8, content: []const u8) WriteResult {
             break;
         }
     }
-    const slot = target orelse return .disk_full;
+    const slot = target orelse blk: {
+        // No free slot in the chain — FAT32 directories (including the
+        // root) are growable: append a zeroed cluster and take its first
+        // slot (a fresh 0x00 end-of-directory marker).
+        const grown = grow_dir_chain(dir_cluster);
+        if (grown == 0) return .disk_full;
+        break :blk SlotRef{ .lba = cluster_lba(grown), .byte_off = 0 };
+    };
 
     // Allocate clusters (first-fit scan of the FAT).
     const bytes_per_cluster = @as(usize, state.geo.spc) * sector_size;
@@ -528,7 +537,11 @@ pub fn write_fb_bmp(path: []const u8, width: u32, height: u32, fb: [*]const u8) 
             break;
         }
     }
-    const slot = target orelse return .disk_full;
+    const slot = target orelse blk: {
+        const grown = grow_dir_chain(dir_cluster);
+        if (grown == 0) return .disk_full;
+        break :blk SlotRef{ .lba = cluster_lba(grown), .byte_off = 0 };
+    };
 
     const row_raw: usize = @as(usize, width) * 3;
     const row_pad: usize = (4 - (row_raw % 4)) % 4;
@@ -858,7 +871,11 @@ pub fn create_dir(path: []const u8) MkdirResult {
         }
         if (first == 0xe5 and target == null) target = slots[i];
     }
-    const slot = target orelse return .disk_full;
+    const slot = target orelse blk: {
+        const grown = grow_dir_chain(dir_cluster);
+        if (grown == 0) return .disk_full;
+        break :blk SlotRef{ .lba = cluster_lba(grown), .byte_off = 0 };
+    };
 
     // Allocate one cluster for the directory contents.
     var dir_cl: u32 = 0;
@@ -1151,6 +1168,43 @@ fn collect_dir_slots(cluster: u32, out: []SlotRef) usize {
 
 fn collect_root_slots(out: []SlotRef) usize {
     return collect_dir_slots(state.geo.root_cluster, out);
+}
+
+/// Grow a DIRECTORY's cluster chain by one zeroed cluster appended at the
+/// tail (FAT32 semantics: the root is an ordinary growable chain, unlike
+/// FAT16/12's fixed-size root). The fresh cluster is zeroed so its first
+/// slot is a clean 0x00 end-of-directory marker. Returns the new cluster,
+/// or 0 when the volume has no free cluster or an I/O failure occurred —
+/// the chain is left untouched on failure.
+fn grow_dir_chain(dir_cluster: u32) u32 {
+    if (dir_cluster < 2 or dir_cluster >= state.geo.total_clusters) return 0;
+    var cur = dir_cluster;
+    var hops: usize = 0;
+    while (hops < max_chain_clusters) : (hops += 1) {
+        const next = fat_entry(cur);
+        if (is_eoc(next)) break;
+        if (next < 2 or next >= state.geo.total_clusters) return 0; // malformed chain
+        cur = next;
+    }
+    if (hops >= max_chain_clusters) return 0; // bounded walk exhausted
+
+    var scan = FatScan{};
+    var c: u32 = 2;
+    while (c < state.geo.total_clusters) : (c += 1) {
+        if (scan.entry(c) != 0) continue;
+        var zero: [sector_size]u8 = [_]u8{0} ** sector_size;
+        var s: u8 = 0;
+        while (s < state.geo.spc) : (s += 1) {
+            if (!write_sector(cluster_lba(c) + s, &zero)) return 0;
+        }
+        if (!set_fat_entry(c, fat_eoc)) return 0;
+        if (!set_fat_entry(cur, c)) {
+            _ = set_fat_entry(c, 0); // release on failure — no orphans
+            return 0;
+        }
+        return c;
+    }
+    return 0; // volume has no free cluster
 }
 
 fn read_dir_slot(ref: SlotRef, out: *[32]u8) bool {
@@ -1751,6 +1805,45 @@ test "fat: write_file creates a file, persists in the image, survives remount" {
     try std.testing.expectEqual(@as(usize, 4), list_root(&out));
     const got2 = (read_file("HELLO.TXT", &buf) orelse return error.TestUnexpectedResult);
     try std.testing.expectEqualStrings("hello world", buf[0..got2]);
+}
+
+test "fat: write_file grows a full root directory chain (issue 728)" {
+    var fxt = try build_fixture(test_allocator, false);
+    defer test_allocator.free(fxt.buf);
+    make_state_fixture(&fxt);
+    try std.testing.expectEqual(MountResult.ok, mount(test_ops()));
+
+    // The fixture root is one cluster (16 slots) with 4 entries: fill the
+    // remaining 12 slots so the root is 16/16 and the next create MUST
+    // grow the chain instead of reporting disk full. Before the fix a
+    // full root returned .disk_full no matter how many free clusters the
+    // volume had (the 80/80-slot image root at issue 728).
+    var i: usize = 0;
+    while (i < 12) : (i += 1) {
+        var name: [8]u8 = undefined;
+        const n = try std.fmt.bufPrint(&name, "F{d:0>2}.TXT", .{i});
+        try std.testing.expectEqual(WriteResult.ok, write_file(n, "fill"));
+    }
+    try std.testing.expectEqual(WriteResult.ok, write_file("NEW.TXT", "created after root full"));
+
+    // The grown chain is walkable: 3 original entries + 12 fills + NEW.TXT.
+    var out: [64]DirEntry = undefined;
+    try std.testing.expectEqual(@as(usize, 16), list_root(&out));
+    var buf: [512]u8 = undefined;
+    const got = (read_file("NEW.TXT", &buf) orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqualStrings("created after root full", buf[0..got]);
+    // Cluster 2's FAT entry is no longer end-of-chain: the root grew.
+    const next = fat_entry(2);
+    try std.testing.expect(next != fat_eoc and next >= 2);
+
+    // "Reboot": fresh module state, same image, mount again — the grown
+    // root chain survives remount (chain walk, not a fixed root window).
+    state = .{};
+    test_fixture = fxt.buf;
+    try std.testing.expectEqual(MountResult.ok, mount(test_ops()));
+    try std.testing.expectEqual(@as(usize, 16), list_root(&out));
+    const got2 = (read_file("NEW.TXT", &buf) orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqualStrings("created after root full", buf[0..got2]);
 }
 
 test "fat: write_file replaces an existing file (size + content)" {

@@ -41,10 +41,13 @@ trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 BOOTS="${BOOTS:-1}"
 REPORT="$(art live-disas-report.txt)"
 STATIC_EXIT_LINE="tasks user-el0 exited status=7"
-# OBSERVED TODAY (2026-08-24, claim 5069): the assembled fixture is now
-# 84 bytes (`asm: wrote 84 bytes to /esp/PROG.ELF`), not the claim-time
-# 96 — later syscall/metadata changes shrank it.
-ASM_WROTE_LINE="asm: wrote 84 bytes to /esp/PROG.ELF"
+# M19 P3 chaining (claim 5759, issue #292) made `;` a statement operator,
+# so an UNQUOTED SRC was silently chain-split and `write` staged only
+# `_start:` (7 bytes) — the empty code made the ELF shrink from the
+# claim-time 96 bytes to 84 and `exec PROG.ELF` failed with bad_entry.
+# The SRC is now single-quoted (the tokenizer's fully-literal quotes) so
+# the `;` separators reach ASM.BIN and the 96-byte needle holds again.
+ASM_WROTE_LINE="asm: wrote 96 bytes to /esp/PROG.ELF"
 EXIT_LINE="tasks user-exec exited status=71"
 
 echo "=== verify-live-disas: M22 D4 (issue #327) — disassemble assembler output on the machine, $BOOTS boot(s) ==="
@@ -71,7 +74,7 @@ SCRIPT2="$RUN_DIR/script2.txt"
 SCRIPT="$RUN_DIR/script.txt"
 
 
-SRC='_start:;mov x8, 3;mov x0, 71;svc 0'
+SRC="'_start:;mov x8, 3;mov x0, 71;svc 0'"
 printf 'write PROG.S %s\nexec ASM.BIN /esp/PROG.S /esp/PROG.ELF\nexec DISAS.BIN /esp/PROG.ELF 84\necho disas-mid\n' "$SRC" > "$SCRIPT"
 printf 'mount esp\nexec PROG.ELF\necho rx-disas-ok\n' > "$SCRIPT2"
 
