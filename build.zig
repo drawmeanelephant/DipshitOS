@@ -1038,6 +1038,32 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_zc.step);
 
     // ------------------------------------------------------------------
+    // Guest: M35 W1b (#762) WASM.BIN — the wasm interpreter core.
+    // Build-only marker for now: `wasm run` module delivery + command
+    // wiring land with W2 (#763); the image is NOT touched here.
+    // ------------------------------------------------------------------
+    const wasm_prog = b.addExecutable(.{
+        .name = "user-wasm",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/wasm.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    wasm_prog.linker_script = b.path("user/linker.ld");
+    const wasm_step = b.step("wasm", "Build the M35 W1b wasm interpreter marker (zig-out/bin/WASM.BIN)");
+    // Non-segmented: the W1b marker has no mutable globals (Machine is
+    // caller-owned); the `wasm run` entry (W2) can move to --segments.
+    const wasm_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    wasm_elf2bin.addFileArg(wasm_prog.getEmittedBin());
+    const wasm_bin = wasm_elf2bin.addOutputFileArg("WASM.BIN");
+    wasm_elf2bin.has_side_effects = true;
+    wasm_elf2bin.stdio = .inherit;
+    wasm_step.dependOn(&wasm_elf2bin.step);
+    const install_wasm = b.addInstallFileWithDir(wasm_bin, .bin, "WASM.BIN");
+    b.getInstallStep().dependOn(&install_wasm.step);
+
+    // ------------------------------------------------------------------
     // Guest: thirty-third ESP user program (M22 D6 — issue #329) PS.BIN.
     // Windowed process viewer: 1 Hz sys_procs snapshot rendered as rows.
     // ------------------------------------------------------------------
