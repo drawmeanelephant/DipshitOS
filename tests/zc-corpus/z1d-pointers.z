@@ -1,0 +1,50 @@
+const zc = @import("zc");
+
+const Point = struct {
+    x: u64,
+    y: u64,
+};
+
+fn swap(a: *u64, b: *u64) void {
+    const tmp: u64 = a.*;
+    a.* = b.*;
+    b.* = tmp;
+}
+
+fn fill_buf(buf: [*]u8, len: u64) void {
+    var i: u64 = 0;
+    while (i < len) {
+        buf[i] = 65 + i;
+        i = i + 1;
+    }
+}
+
+fn set_point(p: *Point, x: u64, y: u64) void {
+    p.x = x;
+    p.y = y;
+}
+
+pub fn main() void {
+    var x: u64 = 10;
+    var y: u64 = 20;
+    swap(&x, &y);
+    if (x == 20) {
+        if (y == 10) {
+            var pt: Point = undefined;
+            set_point(&pt, 100, 200);
+            if (pt.x == 100) {
+                if (pt.y == 200) {
+                    var buf: [4]u8 = undefined;
+                    fill_buf(&buf, 4);
+                    zc.print_ptr(&buf, 4);
+                    if (buf[0] == 65) {
+                        if (buf[3] == 68) {
+                            zc.exit(72);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    zc.exit(1);
+}

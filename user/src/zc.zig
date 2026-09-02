@@ -371,6 +371,10 @@ const LocalVar = struct {
     elem_size: usize = 8,
     is_struct: bool = false,
     struct_idx: usize = 0,
+    is_ptr: bool = false,
+    ptr_elem_size: usize = 8,
+    ptr_is_struct: bool = false,
+    ptr_struct_idx: usize = 0,
 };
 
 const Field = struct {
@@ -391,7 +395,7 @@ const CallPatch = struct {
     target_func_idx: usize,
 };
 
-var code: [32768]u8 = undefined;
+pub var code: [32768]u8 = undefined;
 var code_len: usize = 0;
 
 var data_buf: [32768]u8 = undefined;
@@ -557,7 +561,7 @@ fn typeSize(name: []const u8) ?usize {
     if (std.mem.eql(u8, name, "u8")) return 1;
     if (std.mem.eql(u8, name, "u16")) return 2;
     if (std.mem.eql(u8, name, "u32")) return 4;
-    if (std.mem.eql(u8, name, "u64")) return 8;
+    if (std.mem.eql(u8, name, "u64") or std.mem.eql(u8, name, "usize") or std.mem.eql(u8, name, "i64")) return 8;
     if (lookupStruct(name)) |sd| return sd.size;
     return null;
 }
@@ -612,6 +616,79 @@ const Parser = struct {
         return false;
     }
 };
+
+const ParsedType = struct {
+    name: []const u8 = "",
+    is_ptr: bool = false,
+    ptr_elem_size: usize = 8,
+    is_struct: bool = false,
+    struct_idx: usize = 0,
+    ptr_is_struct: bool = false,
+    ptr_struct_idx: usize = 0,
+    is_array: bool = false,
+    array_len: usize = 0,
+    elem_size: usize = 8,
+};
+
+fn parseType(p: *Parser) anyerror!ParsedType {
+    var res = ParsedType{};
+    if (p.accept(.star)) {
+        res.is_ptr = true;
+        _ = p.accept(.keyword_const);
+        const id_tok = try p.expect(.ident);
+        res.name = id_tok.text;
+        if (lookupStruct(id_tok.text)) |sd| {
+            res.ptr_is_struct = true;
+            var i: usize = 0;
+            while (i < structs_count) : (i += 1) {
+                if (std.mem.eql(u8, structs[i].name, id_tok.text)) {
+                    res.ptr_struct_idx = i;
+                    break;
+                }
+            }
+            res.ptr_elem_size = sd.size;
+        } else {
+            res.ptr_elem_size = typeSize(id_tok.text) orelse 8;
+        }
+    } else if (p.accept(.l_bracket)) {
+        if (p.accept(.star)) {
+            _ = try p.expect(.r_bracket);
+            res.is_ptr = true;
+            _ = p.accept(.keyword_const);
+            const id_tok = try p.expect(.ident);
+            res.name = id_tok.text;
+            res.ptr_elem_size = typeSize(id_tok.text) orelse 1;
+        } else {
+            if (p.peek() == .number) {
+                const len_tok = try p.expect(.number);
+                res.array_len = std.fmt.parseInt(usize, len_tok.text, 0) catch return error.CompileError;
+            }
+            _ = try p.expect(.r_bracket);
+            _ = p.accept(.keyword_const);
+            const id_tok = try p.expect(.ident);
+            res.name = id_tok.text;
+            res.elem_size = typeSize(id_tok.text) orelse 1;
+            res.is_array = true;
+        }
+    } else {
+        const id_tok = try p.expect(.ident);
+        res.name = id_tok.text;
+        if (lookupStruct(id_tok.text)) |sd| {
+            res.is_struct = true;
+            var i: usize = 0;
+            while (i < structs_count) : (i += 1) {
+                if (std.mem.eql(u8, structs[i].name, id_tok.text)) {
+                    res.struct_idx = i;
+                    break;
+                }
+            }
+            res.elem_size = sd.size;
+        } else {
+            res.elem_size = typeSize(id_tok.text) orelse 8;
+        }
+    }
+    return res;
+}
 
 fn countParams(tokens: []const Token, start_idx: usize) usize {
     var idx = start_idx;
@@ -830,300 +907,370 @@ fn parsePrimary(p: *Parser) anyerror!void {
         },
         .ident => {
             if (p.accept(.dot)) {
-                const member_tok = try p.expect(.ident);
-                if (std.mem.eql(u8, t.text, "zc")) {
-                    if (std.mem.eql(u8, member_tok.text, "print")) {
-                        _ = try p.expect(.l_paren);
-                        if (p.peek() == .string_lit) {
-                            const str_tok = p.advance();
-                            const res = try addString(str_tok.text);
-                            emit(enc_movz(0, 1, 0)); // stdout fd = 1
-                            emitStringAdr(1, res.off); // x1 = ptr
-                            emit(enc_movz(2, @intCast(res.len), 0)); // x2 = len
-                            emit(enc_movz(8, 1, 0)); // sys_write
-                            emit(enc_svc(0));
-                        } else {
-                            try compileExpr(p);
-                            emit(enc_mov_reg(2, 1));
-                            emit(enc_mov_reg(1, 0));
-                            emit(enc_movz(0, 1, 0));
-                            emit(enc_movz(8, 1, 0));
-                            emit(enc_svc(0));
-                        }
-                        _ = try p.expect(.r_paren);
-                    } else if (std.mem.eql(u8, member_tok.text, "exit")) {
-                        _ = try p.expect(.l_paren);
-                        try compileExpr(p);
-                        _ = try p.expect(.r_paren);
-                        emit(enc_movz(8, 3, 0));
-                        emit(enc_svc(0));
-                    } else if (std.mem.eql(u8, member_tok.text, "write")) {
-                        _ = try p.expect(.l_paren);
-                        try compileExpr(p); // fd into x0
-                        _ = try p.expect(.comma);
-                        if (p.peek() == .string_lit) {
-                            const str_tok = p.advance();
-                            const res = try addString(str_tok.text);
-                            emit(enc_sub_imm(31, 31, 16));
-                            emit(enc_str(31, 0, 0)); // save fd
-                            emitStringAdr(1, res.off); // ptr into x1
-                            emit(enc_movz(2, @intCast(res.len), 0)); // len into x2
-                            emit(enc_ldr(31, 0, 0)); // restore fd
-                            emit(enc_add_imm(31, 31, 16));
-                            emit(enc_movz(8, 1, 0)); // sys_write
-                            emit(enc_svc(0));
-                        } else {
-                            emit(enc_sub_imm(31, 31, 16));
-                            emit(enc_str(31, 0, 0)); // save fd on stack
-                            try compileExpr(p); // evaluates 2nd arg into x0
-                            if (p.accept(.comma)) {
-                                emit(enc_sub_imm(31, 31, 16));
-                                emit(enc_str(31, 0, 0)); // save 2nd arg on stack
-                                try compileExpr(p); // evaluates 3rd arg into x0
-                                emit(enc_mov_reg(2, 0)); // len -> x2
-                                emit(enc_ldr(31, 1, 0)); // restore 2nd arg (ptr) -> x1
-                                emit(enc_add_imm(31, 31, 16));
-                                emit(enc_ldr(31, 0, 0)); // restore 1st arg (fd) -> x0
-                                emit(enc_add_imm(31, 31, 16));
-                            } else {
-                                emit(enc_mov_reg(2, 1));
-                                emit(enc_mov_reg(1, 0));
-                                emit(enc_ldr(31, 0, 0));
-                                emit(enc_add_imm(31, 31, 16));
-                            }
-                            emit(enc_movz(8, 1, 0));
-                            emit(enc_svc(0));
-                        }
-                        _ = try p.expect(.r_paren);
-                    } else if (std.mem.eql(u8, member_tok.text, "yield")) {
-                        _ = try p.expect(.l_paren);
-                        _ = try p.expect(.r_paren);
-                        emit(enc_movz(8, 2, 0));
-                        emit(enc_svc(0));
-                    } else if (std.mem.eql(u8, member_tok.text, "sleep")) {
-                        _ = try p.expect(.l_paren);
-                        try compileExpr(p);
-                        _ = try p.expect(.r_paren);
-                        emit(enc_movz(8, 4, 0));
-                        emit(enc_svc(0));
-                    } else if (std.mem.eql(u8, member_tok.text, "file_open")) {
-                        _ = try p.expect(.l_paren);
-                        try compileExpr(p);
-                        emit(enc_sub_imm(31, 31, 16));
-                        emit(enc_str(31, 0, 0));
-                        _ = try p.expect(.comma);
-                        try compileExpr(p);
-                        emit(enc_ldr(31, 1, 0));
-                        emit(enc_add_imm(31, 31, 16));
-                        _ = try p.expect(.r_paren);
-                        emit(enc_movz(8, 23, 0));
-                        emit(enc_svc(0));
-                    } else if (std.mem.eql(u8, member_tok.text, "file_read")) {
-                        _ = try p.expect(.l_paren);
-                        var arg_count: usize = 0;
-                        if (p.peek() != .r_paren) {
-                            try compileExpr(p);
-                            emit(enc_sub_imm(31, 31, 16));
-                            emit(enc_str(31, 0, 0));
-                            arg_count += 1;
-                            while (p.accept(.comma)) {
-                                try compileExpr(p);
-                                emit(enc_sub_imm(31, 31, 16));
-                                emit(enc_str(31, 0, 0));
-                                arg_count += 1;
-                            }
-                        }
-                        _ = try p.expect(.r_paren);
-                        var i = arg_count;
-                        while (i > 0) {
-                            i -= 1;
-                            emit(enc_ldr(31, @intCast(i), 0));
-                            emit(enc_add_imm(31, 31, 16));
-                        }
-                        emit(enc_movz(8, 24, 0));
-                        emit(enc_svc(0));
-                    } else if (std.mem.eql(u8, member_tok.text, "file_write")) {
-                        _ = try p.expect(.l_paren);
-                        var arg_count: usize = 0;
-                        if (p.peek() != .r_paren) {
-                            try compileExpr(p);
-                            emit(enc_sub_imm(31, 31, 16));
-                            emit(enc_str(31, 0, 0));
-                            arg_count += 1;
-                            while (p.accept(.comma)) {
-                                try compileExpr(p);
-                                emit(enc_sub_imm(31, 31, 16));
-                                emit(enc_str(31, 0, 0));
-                                arg_count += 1;
-                            }
-                        }
-                        _ = try p.expect(.r_paren);
-                        var i = arg_count;
-                        while (i > 0) {
-                            i -= 1;
-                            emit(enc_ldr(31, @intCast(i), 0));
-                            emit(enc_add_imm(31, 31, 16));
-                        }
-                        emit(enc_movz(8, 25, 0));
-                        emit(enc_svc(0));
-                    } else if (std.mem.eql(u8, member_tok.text, "file_close")) {
-                        _ = try p.expect(.l_paren);
-                        try compileExpr(p);
-                        _ = try p.expect(.r_paren);
-                        emit(enc_movz(8, 26, 0));
-                        emit(enc_svc(0));
-                    } else if (std.mem.eql(u8, member_tok.text, "win_open")) {
-                        _ = try p.expect(.l_paren);
-                        var arg_count: usize = 0;
-                        if (p.peek() != .r_paren) {
-                            try compileExpr(p);
-                            emit(enc_sub_imm(31, 31, 16));
-                            emit(enc_str(31, 0, 0));
-                            arg_count += 1;
-                            while (p.accept(.comma)) {
-                                try compileExpr(p);
-                                emit(enc_sub_imm(31, 31, 16));
-                                emit(enc_str(31, 0, 0));
-                                arg_count += 1;
-                            }
-                        }
-                        _ = try p.expect(.r_paren);
-                        var i = arg_count;
-                        while (i > 0) {
-                            i -= 1;
-                            emit(enc_ldr(31, @intCast(i), 0));
-                            emit(enc_add_imm(31, 31, 16));
-                        }
-                        emit(enc_movz(8, 12, 0));
-                        emit(enc_svc(0));
-                    } else if (std.mem.eql(u8, member_tok.text, "win_fill")) {
-                        _ = try p.expect(.l_paren);
-                        var arg_count: usize = 0;
-                        if (p.peek() != .r_paren) {
-                            try compileExpr(p);
-                            emit(enc_sub_imm(31, 31, 16));
-                            emit(enc_str(31, 0, 0));
-                            arg_count += 1;
-                            while (p.accept(.comma)) {
-                                try compileExpr(p);
-                                emit(enc_sub_imm(31, 31, 16));
-                                emit(enc_str(31, 0, 0));
-                                arg_count += 1;
-                            }
-                        }
-                        _ = try p.expect(.r_paren);
-                        var i = arg_count;
-                        while (i > 0) {
-                            i -= 1;
-                            emit(enc_ldr(31, @intCast(i), 0));
-                            emit(enc_add_imm(31, 31, 16));
-                        }
-                        emit(enc_movz(8, 13, 0));
-                        emit(enc_svc(0));
-                    } else if (std.mem.eql(u8, member_tok.text, "win_present")) {
-                        _ = try p.expect(.l_paren);
-                        try compileExpr(p);
-                        _ = try p.expect(.r_paren);
-                        emit(enc_movz(8, 14, 0));
-                        emit(enc_svc(0));
-                    } else if (std.mem.eql(u8, member_tok.text, "win_close")) {
-                        _ = try p.expect(.l_paren);
-                        try compileExpr(p);
-                        _ = try p.expect(.r_paren);
-                        emit(enc_movz(8, 15, 0));
-                        emit(enc_svc(0));
-                    } else if (std.mem.eql(u8, member_tok.text, "svc")) {
-                        _ = try p.expect(.l_paren);
-                        const num_tok = try p.expect(.number);
-                        const syscall_num = std.fmt.parseInt(u16, num_tok.text, 0) catch return error.CompileError;
-                        var arg_count: usize = 0;
-                        while (p.accept(.comma)) {
-                            try compileExpr(p);
-                            emit(enc_sub_imm(31, 31, 16));
-                            emit(enc_str(31, 0, 0));
-                            arg_count += 1;
-                        }
-                        _ = try p.expect(.r_paren);
-                        var i = arg_count;
-                        while (i > 0) {
-                            i -= 1;
-                            emit(enc_ldr(31, @intCast(i), 0));
-                            emit(enc_add_imm(31, 31, 16));
-                        }
-                        emit(enc_movz(8, syscall_num, 0));
-                        emit(enc_svc(0));
-                    } else if (std.mem.eql(u8, member_tok.text, "print_array")) {
-                        _ = try p.expect(.l_paren);
-                        const arr_tok = try p.expect(.ident);
-                        _ = try p.expect(.r_paren);
-                        const var_ptr = lookupLocalVar(arr_tok.text) orelse {
-                            print_err("undefined identifier", arr_tok.line, arr_tok.text);
-                            return error.CompileError;
-                        };
-                        if (!var_ptr.is_array) {
-                            print_err("not an array", arr_tok.line, arr_tok.text);
-                            return error.CompileError;
-                        }
-                        emit(enc_movz(0, 1, 0));
-                        emit(enc_add_imm(19, 1, @intCast(var_ptr.offset)));
-                        emit(enc_movz(2, @intCast(var_ptr.array_len * var_ptr.elem_size), 0));
-                        emit(enc_movz(8, 1, 0));
-                        emit(enc_svc(0));
-                    } else if (std.mem.eql(u8, member_tok.text, "print_struct")) {
-                        _ = try p.expect(.l_paren);
-                        const s_tok = try p.expect(.ident);
-                        _ = try p.expect(.r_paren);
-                        const var_ptr = lookupLocalVar(s_tok.text) orelse {
-                            print_err("undefined identifier", s_tok.line, s_tok.text);
-                            return error.CompileError;
-                        };
-                        if (!var_ptr.is_struct) {
-                            print_err("not a struct", s_tok.line, s_tok.text);
-                            return error.CompileError;
-                        }
-                        const sd = &structs[var_ptr.struct_idx];
-                        emit(enc_movz(0, 1, 0));
-                        emit(enc_add_imm(19, 1, @intCast(var_ptr.offset)));
-                        emit(enc_movz(2, @intCast(sd.size), 0));
-                        emit(enc_movz(8, 1, 0));
-                        emit(enc_svc(0));
-                    } else {
-                        print_err("unknown zc function", member_tok.line, member_tok.text);
+                if (p.accept(.star)) {
+                    const var_ptr = lookupLocalVar(t.text) orelse {
+                        print_err("undefined identifier", t.line, t.text);
                         return error.CompileError;
+                    };
+                    emit(enc_ldr(19, 1, @intCast(var_ptr.offset / 8)));
+                    if (var_ptr.ptr_elem_size == 1) {
+                        emit(enc_ldrb(1, 0, 0));
+                    } else {
+                        emit(enc_ldr(1, 0, 0));
                     }
                 } else {
-                    const var_ptr = lookupLocalVar(t.text);
-                    if (var_ptr) |vp| {
-                        if (vp.is_struct) {
-                            const sd = &structs[vp.struct_idx];
-                            var foff: usize = 0;
-                            var fsize: usize = 0;
-                            var found = false;
-                            for (sd.fields[0..sd.field_count]) |f| {
-                                if (std.mem.eql(u8, f.name, member_tok.text)) {
-                                    foff = f.offset;
-                                    fsize = f.size;
-                                    found = true;
-                                    break;
+                    const member_tok = try p.expect(.ident);
+                    if (std.mem.eql(u8, t.text, "zc")) {
+                        if (std.mem.eql(u8, member_tok.text, "print")) {
+                            _ = try p.expect(.l_paren);
+                            if (p.peek() == .string_lit) {
+                                const str_tok = p.advance();
+                                const res = try addString(str_tok.text);
+                                emit(enc_movz(0, 1, 0)); // stdout fd = 1
+                                emitStringAdr(1, res.off); // x1 = ptr
+                                emit(enc_movz(2, @intCast(res.len), 0)); // x2 = len
+                                emit(enc_movz(8, 1, 0)); // sys_write
+                                emit(enc_svc(0));
+                            } else {
+                                try compileExpr(p);
+                                emit(enc_mov_reg(2, 1));
+                                emit(enc_mov_reg(1, 0));
+                                emit(enc_movz(0, 1, 0));
+                                emit(enc_movz(8, 1, 0));
+                                emit(enc_svc(0));
+                            }
+                            _ = try p.expect(.r_paren);
+                        } else if (std.mem.eql(u8, member_tok.text, "exit")) {
+                            _ = try p.expect(.l_paren);
+                            try compileExpr(p);
+                            _ = try p.expect(.r_paren);
+                            emit(enc_movz(8, 3, 0));
+                            emit(enc_svc(0));
+                        } else if (std.mem.eql(u8, member_tok.text, "write")) {
+                            _ = try p.expect(.l_paren);
+                            try compileExpr(p); // fd into x0
+                            _ = try p.expect(.comma);
+                            if (p.peek() == .string_lit) {
+                                const str_tok = p.advance();
+                                const res = try addString(str_tok.text);
+                                emit(enc_sub_imm(31, 31, 16));
+                                emit(enc_str(31, 0, 0)); // save fd
+                                emitStringAdr(1, res.off); // ptr into x1
+                                emit(enc_movz(2, @intCast(res.len), 0)); // len into x2
+                                emit(enc_ldr(31, 0, 0)); // restore fd
+                                emit(enc_add_imm(31, 31, 16));
+                                emit(enc_movz(8, 1, 0)); // sys_write
+                                emit(enc_svc(0));
+                            } else {
+                                emit(enc_sub_imm(31, 31, 16));
+                                emit(enc_str(31, 0, 0)); // save fd on stack
+                                try compileExpr(p); // evaluates 2nd arg into x0
+                                if (p.accept(.comma)) {
+                                    emit(enc_sub_imm(31, 31, 16));
+                                    emit(enc_str(31, 0, 0)); // save 2nd arg on stack
+                                    try compileExpr(p); // evaluates 3rd arg into x0
+                                    emit(enc_mov_reg(2, 0)); // len -> x2
+                                    emit(enc_ldr(31, 1, 0)); // restore 2nd arg (ptr) -> x1
+                                    emit(enc_add_imm(31, 31, 16));
+                                    emit(enc_ldr(31, 0, 0)); // restore 1st arg (fd) -> x0
+                                    emit(enc_add_imm(31, 31, 16));
+                                } else {
+                                    emit(enc_mov_reg(2, 1));
+                                    emit(enc_mov_reg(1, 0));
+                                    emit(enc_ldr(31, 0, 0));
+                                    emit(enc_add_imm(31, 31, 16));
+                                }
+                                emit(enc_movz(8, 1, 0));
+                                emit(enc_svc(0));
+                            }
+                            _ = try p.expect(.r_paren);
+                        } else if (std.mem.eql(u8, member_tok.text, "yield")) {
+                            _ = try p.expect(.l_paren);
+                            _ = try p.expect(.r_paren);
+                            emit(enc_movz(8, 2, 0));
+                            emit(enc_svc(0));
+                        } else if (std.mem.eql(u8, member_tok.text, "sleep")) {
+                            _ = try p.expect(.l_paren);
+                            try compileExpr(p);
+                            _ = try p.expect(.r_paren);
+                            emit(enc_movz(8, 4, 0));
+                            emit(enc_svc(0));
+                        } else if (std.mem.eql(u8, member_tok.text, "file_open")) {
+                            _ = try p.expect(.l_paren);
+                            try compileExpr(p);
+                            emit(enc_sub_imm(31, 31, 16));
+                            emit(enc_str(31, 0, 0));
+                            _ = try p.expect(.comma);
+                            try compileExpr(p);
+                            emit(enc_ldr(31, 1, 0));
+                            emit(enc_add_imm(31, 31, 16));
+                            _ = try p.expect(.r_paren);
+                            emit(enc_movz(8, 23, 0));
+                            emit(enc_svc(0));
+                        } else if (std.mem.eql(u8, member_tok.text, "file_read")) {
+                            _ = try p.expect(.l_paren);
+                            var arg_count: usize = 0;
+                            if (p.peek() != .r_paren) {
+                                try compileExpr(p);
+                                emit(enc_sub_imm(31, 31, 16));
+                                emit(enc_str(31, 0, 0));
+                                arg_count += 1;
+                                while (p.accept(.comma)) {
+                                    try compileExpr(p);
+                                    emit(enc_sub_imm(31, 31, 16));
+                                    emit(enc_str(31, 0, 0));
+                                    arg_count += 1;
                                 }
                             }
-                            if (!found) {
-                                print_err("unknown field", member_tok.line, member_tok.text);
+                            _ = try p.expect(.r_paren);
+                            var i = arg_count;
+                            while (i > 0) {
+                                i -= 1;
+                                emit(enc_ldr(31, @intCast(i), 0));
+                                emit(enc_add_imm(31, 31, 16));
+                            }
+                            emit(enc_movz(8, 24, 0));
+                            emit(enc_svc(0));
+                        } else if (std.mem.eql(u8, member_tok.text, "file_write")) {
+                            _ = try p.expect(.l_paren);
+                            var arg_count: usize = 0;
+                            if (p.peek() != .r_paren) {
+                                try compileExpr(p);
+                                emit(enc_sub_imm(31, 31, 16));
+                                emit(enc_str(31, 0, 0));
+                                arg_count += 1;
+                                while (p.accept(.comma)) {
+                                    try compileExpr(p);
+                                    emit(enc_sub_imm(31, 31, 16));
+                                    emit(enc_str(31, 0, 0));
+                                    arg_count += 1;
+                                }
+                            }
+                            _ = try p.expect(.r_paren);
+                            var i = arg_count;
+                            while (i > 0) {
+                                i -= 1;
+                                emit(enc_ldr(31, @intCast(i), 0));
+                                emit(enc_add_imm(31, 31, 16));
+                            }
+                            emit(enc_movz(8, 25, 0));
+                            emit(enc_svc(0));
+                        } else if (std.mem.eql(u8, member_tok.text, "file_close")) {
+                            _ = try p.expect(.l_paren);
+                            try compileExpr(p);
+                            _ = try p.expect(.r_paren);
+                            emit(enc_movz(8, 26, 0));
+                            emit(enc_svc(0));
+                        } else if (std.mem.eql(u8, member_tok.text, "win_open")) {
+                            _ = try p.expect(.l_paren);
+                            var arg_count: usize = 0;
+                            if (p.peek() != .r_paren) {
+                                try compileExpr(p);
+                                emit(enc_sub_imm(31, 31, 16));
+                                emit(enc_str(31, 0, 0));
+                                arg_count += 1;
+                                while (p.accept(.comma)) {
+                                    try compileExpr(p);
+                                    emit(enc_sub_imm(31, 31, 16));
+                                    emit(enc_str(31, 0, 0));
+                                    arg_count += 1;
+                                }
+                            }
+                            _ = try p.expect(.r_paren);
+                            var i = arg_count;
+                            while (i > 0) {
+                                i -= 1;
+                                emit(enc_ldr(31, @intCast(i), 0));
+                                emit(enc_add_imm(31, 31, 16));
+                            }
+                            emit(enc_movz(8, 12, 0));
+                            emit(enc_svc(0));
+                        } else if (std.mem.eql(u8, member_tok.text, "win_fill")) {
+                            _ = try p.expect(.l_paren);
+                            var arg_count: usize = 0;
+                            if (p.peek() != .r_paren) {
+                                try compileExpr(p);
+                                emit(enc_sub_imm(31, 31, 16));
+                                emit(enc_str(31, 0, 0));
+                                arg_count += 1;
+                                while (p.accept(.comma)) {
+                                    try compileExpr(p);
+                                    emit(enc_sub_imm(31, 31, 16));
+                                    emit(enc_str(31, 0, 0));
+                                    arg_count += 1;
+                                }
+                            }
+                            _ = try p.expect(.r_paren);
+                            var i = arg_count;
+                            while (i > 0) {
+                                i -= 1;
+                                emit(enc_ldr(31, @intCast(i), 0));
+                                emit(enc_add_imm(31, 31, 16));
+                            }
+                            emit(enc_movz(8, 13, 0));
+                            emit(enc_svc(0));
+                        } else if (std.mem.eql(u8, member_tok.text, "win_present")) {
+                            _ = try p.expect(.l_paren);
+                            try compileExpr(p);
+                            _ = try p.expect(.r_paren);
+                            emit(enc_movz(8, 14, 0));
+                            emit(enc_svc(0));
+                        } else if (std.mem.eql(u8, member_tok.text, "win_close")) {
+                            _ = try p.expect(.l_paren);
+                            try compileExpr(p);
+                            _ = try p.expect(.r_paren);
+                            emit(enc_movz(8, 15, 0));
+                            emit(enc_svc(0));
+                        } else if (std.mem.eql(u8, member_tok.text, "svc")) {
+                            _ = try p.expect(.l_paren);
+                            const num_tok = try p.expect(.number);
+                            const syscall_num = std.fmt.parseInt(u16, num_tok.text, 0) catch return error.CompileError;
+                            var arg_count: usize = 0;
+                            while (p.accept(.comma)) {
+                                try compileExpr(p);
+                                emit(enc_sub_imm(31, 31, 16));
+                                emit(enc_str(31, 0, 0));
+                                arg_count += 1;
+                            }
+                            _ = try p.expect(.r_paren);
+                            var i = arg_count;
+                            while (i > 0) {
+                                i -= 1;
+                                emit(enc_ldr(31, @intCast(i), 0));
+                                emit(enc_add_imm(31, 31, 16));
+                            }
+                            emit(enc_movz(8, syscall_num, 0));
+                            emit(enc_svc(0));
+                        } else if (std.mem.eql(u8, member_tok.text, "print_array")) {
+                            _ = try p.expect(.l_paren);
+                            const arr_tok = try p.expect(.ident);
+                            _ = try p.expect(.r_paren);
+                            const var_ptr = lookupLocalVar(arr_tok.text) orelse {
+                                print_err("undefined identifier", arr_tok.line, arr_tok.text);
+                                return error.CompileError;
+                            };
+                            if (!var_ptr.is_array) {
+                                print_err("not an array", arr_tok.line, arr_tok.text);
                                 return error.CompileError;
                             }
-                            emit(enc_add_imm(19, 1, @intCast(vp.offset + foff)));
-                            if (fsize == 1) {
-                                emit(enc_ldrb(1, 0, 0));
+                            emit(enc_movz(0, 1, 0));
+                            emit(enc_add_imm(19, 1, @intCast(var_ptr.offset)));
+                            emit(enc_movz(2, @intCast(var_ptr.array_len * var_ptr.elem_size), 0));
+                            emit(enc_movz(8, 1, 0));
+                            emit(enc_svc(0));
+                        } else if (std.mem.eql(u8, member_tok.text, "print_struct")) {
+                            _ = try p.expect(.l_paren);
+                            const s_tok = try p.expect(.ident);
+                            _ = try p.expect(.r_paren);
+                            const var_ptr = lookupLocalVar(s_tok.text) orelse {
+                                print_err("undefined identifier", s_tok.line, s_tok.text);
+                                return error.CompileError;
+                            };
+                            if (!var_ptr.is_struct) {
+                                print_err("not a struct", s_tok.line, s_tok.text);
+                                return error.CompileError;
+                            }
+                            const sd = &structs[var_ptr.struct_idx];
+                            emit(enc_movz(0, 1, 0));
+                            emit(enc_add_imm(19, 1, @intCast(var_ptr.offset)));
+                            emit(enc_movz(2, @intCast(sd.size), 0));
+                            emit(enc_movz(8, 1, 0));
+                            emit(enc_svc(0));
+                        } else if (std.mem.eql(u8, member_tok.text, "print_ptr")) {
+                            _ = try p.expect(.l_paren);
+                            try compileExpr(p); // ptr -> x0
+                            emit(enc_sub_imm(31, 31, 16));
+                            emit(enc_str(31, 0, 0)); // save ptr
+                            _ = try p.expect(.comma);
+                            try compileExpr(p); // len -> x0
+                            emit(enc_mov_reg(2, 0)); // x2 = len
+                            emit(enc_ldr(31, 1, 0)); // x1 = ptr
+                            emit(enc_add_imm(31, 31, 16));
+                            emit(enc_movz(0, 1, 0)); // x0 = 1 (stdout)
+                            _ = try p.expect(.r_paren);
+                            emit(enc_movz(8, 1, 0)); // sys_write
+                            emit(enc_svc(0));
+                        } else if (std.mem.eql(u8, member_tok.text, "write_ptr")) {
+                            _ = try p.expect(.l_paren);
+                            try compileExpr(p); // fd -> x0
+                            emit(enc_sub_imm(31, 31, 16));
+                            emit(enc_str(31, 0, 0)); // save fd
+                            _ = try p.expect(.comma);
+                            try compileExpr(p); // ptr -> x0
+                            emit(enc_sub_imm(31, 31, 16));
+                            emit(enc_str(31, 0, 0)); // save ptr
+                            _ = try p.expect(.comma);
+                            try compileExpr(p); // len -> x0
+                            emit(enc_mov_reg(2, 0)); // x2 = len
+                            emit(enc_ldr(31, 1, 0)); // x1 = ptr
+                            emit(enc_add_imm(31, 31, 16));
+                            emit(enc_ldr(31, 0, 0)); // x0 = fd
+                            emit(enc_add_imm(31, 31, 16));
+                            _ = try p.expect(.r_paren);
+                            emit(enc_movz(8, 1, 0)); // sys_write
+                            emit(enc_svc(0));
+                        } else {
+                            print_err("unknown zc function", member_tok.line, member_tok.text);
+                            return error.CompileError;
+                        }
+                    } else {
+                        const var_ptr = lookupLocalVar(t.text);
+                        if (var_ptr) |vp| {
+                            if (vp.is_struct) {
+                                const sd = &structs[vp.struct_idx];
+                                var foff: usize = 0;
+                                var fsize: usize = 0;
+                                var found = false;
+                                for (sd.fields[0..sd.field_count]) |f| {
+                                    if (std.mem.eql(u8, f.name, member_tok.text)) {
+                                        foff = f.offset;
+                                        fsize = f.size;
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                                if (!found) {
+                                    print_err("unknown field", member_tok.line, member_tok.text);
+                                    return error.CompileError;
+                                }
+                                emit(enc_add_imm(19, 1, @intCast(vp.offset + foff)));
+                                if (fsize == 1) {
+                                    emit(enc_ldrb(1, 0, 0));
+                                } else {
+                                    emit(enc_ldr(1, 0, 0));
+                                }
+                            } else if (vp.is_ptr and vp.ptr_is_struct) {
+                                const sd = &structs[vp.ptr_struct_idx];
+                                var foff: usize = 0;
+                                var fsize: usize = 0;
+                                var found = false;
+                                for (sd.fields[0..sd.field_count]) |f| {
+                                    if (std.mem.eql(u8, f.name, member_tok.text)) {
+                                        foff = f.offset;
+                                        fsize = f.size;
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                                if (!found) {
+                                    print_err("unknown field", member_tok.line, member_tok.text);
+                                    return error.CompileError;
+                                }
+                                emit(enc_ldr(19, 1, @intCast(vp.offset / 8)));
+                                if (foff != 0) emit(enc_add_imm(1, 1, @intCast(foff)));
+                                if (fsize == 1) {
+                                    emit(enc_ldrb(1, 0, 0));
+                                } else {
+                                    emit(enc_ldr(1, 0, 0));
+                                }
                             } else {
-                                emit(enc_ldr(1, 0, 0));
+                                print_err("unknown module", t.line, t.text);
+                                return error.CompileError;
                             }
                         } else {
                             print_err("unknown module", t.line, t.text);
                             return error.CompileError;
                         }
-                    } else {
-                        print_err("unknown module", t.line, t.text);
-                        return error.CompileError;
                     }
                 }
             } else if (p.peek() == .l_bracket) {
@@ -1131,18 +1278,23 @@ fn parsePrimary(p: *Parser) anyerror!void {
                     print_err("undefined identifier", t.line, t.text);
                     return error.CompileError;
                 };
-                if (!var_ptr.is_array) {
-                    print_err("not an array", t.line, t.text);
+                if (!var_ptr.is_array and !var_ptr.is_ptr) {
+                    print_err("not an array or pointer", t.line, t.text);
                     return error.CompileError;
                 }
                 _ = p.advance(); // '['
                 try compileExpr(p); // index -> x0
                 _ = try p.expect(.r_bracket);
-                const shift = elemShift(var_ptr.elem_size);
+                const elem_sz = if (var_ptr.is_ptr) var_ptr.ptr_elem_size else var_ptr.elem_size;
+                const shift = elemShift(elem_sz);
                 if (shift != 0) emit(enc_lsl(0, 0, shift));
-                emit(enc_add_imm(19, 1, @intCast(var_ptr.offset)));
+                if (var_ptr.is_ptr) {
+                    emit(enc_ldr(19, 1, @intCast(var_ptr.offset / 8)));
+                } else {
+                    emit(enc_add_imm(19, 1, @intCast(var_ptr.offset)));
+                }
                 emit(enc_add_reg(1, 0, 1));
-                if (var_ptr.elem_size == 1) {
+                if (elem_sz == 1) {
                     emit(enc_ldrb(1, 0, 0));
                 } else {
                     emit(enc_ldr(1, 0, 0));
@@ -1220,12 +1372,67 @@ fn parsePrimary(p: *Parser) anyerror!void {
                     print_err("undefined identifier", t.line, t.text);
                     return error.CompileError;
                 };
-                emit(enc_ldr(19, 0, @intCast(offset)));
+                emit(enc_ldr(19, 0, @intCast(offset / 8)));
             }
         },
         .l_paren => {
             try compileExpr(p);
             _ = try p.expect(.r_paren);
+        },
+        .ampersand => {
+            const target_tok = try p.expect(.ident);
+            const var_ptr = lookupLocalVar(target_tok.text) orelse {
+                print_err("undefined identifier", target_tok.line, target_tok.text);
+                return error.CompileError;
+            };
+            if (p.accept(.dot)) {
+                const field_tok = try p.expect(.ident);
+                if (var_ptr.is_struct) {
+                    const sd = &structs[var_ptr.struct_idx];
+                    var foff: usize = 0;
+                    var found = false;
+                    for (sd.fields[0..sd.field_count]) |f| {
+                        if (std.mem.eql(u8, f.name, field_tok.text)) {
+                            foff = f.offset;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) return error.CompileError;
+                    emit(enc_add_imm(19, 0, @intCast(var_ptr.offset + foff)));
+                } else if (var_ptr.is_ptr and var_ptr.ptr_is_struct) {
+                    const sd = &structs[var_ptr.ptr_struct_idx];
+                    var foff: usize = 0;
+                    var found = false;
+                    for (sd.fields[0..sd.field_count]) |f| {
+                        if (std.mem.eql(u8, f.name, field_tok.text)) {
+                            foff = f.offset;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) return error.CompileError;
+                    emit(enc_ldr(19, 0, @intCast(var_ptr.offset / 8)));
+                    if (foff != 0) emit(enc_add_imm(0, 0, @intCast(foff)));
+                } else {
+                    return error.CompileError;
+                }
+            } else if (p.peek() == .l_bracket) {
+                _ = p.advance(); // '['
+                try compileExpr(p); // index -> x0
+                _ = try p.expect(.r_bracket);
+                const elem_sz = if (var_ptr.is_ptr) var_ptr.ptr_elem_size else var_ptr.elem_size;
+                const shift = elemShift(elem_sz);
+                if (shift != 0) emit(enc_lsl(0, 0, shift));
+                if (var_ptr.is_ptr) {
+                    emit(enc_ldr(19, 1, @intCast(var_ptr.offset / 8)));
+                } else {
+                    emit(enc_add_imm(19, 1, @intCast(var_ptr.offset)));
+                }
+                emit(enc_add_reg(0, 0, 1));
+            } else {
+                emit(enc_add_imm(19, 0, @intCast(var_ptr.offset)));
+            }
         },
         else => return error.CompileError,
     }
@@ -1246,30 +1453,53 @@ fn compileStatement(p: *Parser) anyerror!void {
             var is_struct = false;
             var struct_idx: usize = 0;
             var struct_size: usize = 0;
+            var is_ptr = false;
+            var ptr_elem_size: usize = 8;
+            var ptr_is_struct = false;
+            var ptr_struct_idx: usize = 0;
             if (p.accept(.colon)) {
-                if (p.accept(.l_bracket)) {
-                    const len_tok = try p.expect(.number);
-                    arr_len = std.fmt.parseInt(usize, len_tok.text, 0) catch return error.CompileError;
-                    _ = try p.expect(.r_bracket);
-                    const elem_tok = try p.expect(.ident);
-                    if (std.mem.eql(u8, elem_tok.text, "u8")) elem_size = 1 else if (std.mem.eql(u8, elem_tok.text, "u64")) elem_size = 8 else if (std.mem.eql(u8, elem_tok.text, "u32")) elem_size = 4 else if (std.mem.eql(u8, elem_tok.text, "u16")) elem_size = 2 else return error.CompileError;
+                const pt = try parseType(p);
+                if (pt.is_ptr) {
+                    is_ptr = true;
+                    ptr_elem_size = pt.ptr_elem_size;
+                    ptr_is_struct = pt.ptr_is_struct;
+                    ptr_struct_idx = pt.ptr_struct_idx;
+                } else if (pt.is_array) {
                     is_array = true;
+                    arr_len = pt.array_len;
+                    elem_size = pt.elem_size;
+                } else if (pt.is_struct) {
+                    is_struct = true;
+                    struct_idx = pt.struct_idx;
+                    struct_size = pt.elem_size;
                 } else {
-                    const type_tok = try p.expect(.ident);
-                    if (lookupStruct(type_tok.text)) |sd| {
-                        is_struct = true;
-                        struct_size = sd.size;
-                        var i: usize = 0;
-                        while (i < structs_count) : (i += 1) {
-                            if (std.mem.eql(u8, structs[i].name, type_tok.text)) {
-                                struct_idx = i;
-                                break;
-                            }
-                        }
-                    }
+                    elem_size = pt.elem_size;
                 }
             }
-            if (is_array) {
+            if (is_ptr) {
+                if (frame_size + 8 > 512) return error.CompileError;
+                const offset = frame_size;
+                frame_size += 8;
+                if (p.accept(.equal)) {
+                    if (p.peek() == .ident and std.mem.eql(u8, p.currentToken().text, "undefined")) {
+                        _ = p.advance();
+                    } else {
+                        try compileExpr(p);
+                        emit(enc_str(19, 0, @intCast(offset / 8)));
+                    }
+                }
+                _ = try p.expect(.semicolon);
+                if (locals_count >= locals.len) return error.CompileError;
+                locals[locals_count] = LocalVar{
+                    .name = name_tok.text,
+                    .offset = offset,
+                    .is_ptr = true,
+                    .ptr_elem_size = ptr_elem_size,
+                    .ptr_is_struct = ptr_is_struct,
+                    .ptr_struct_idx = ptr_struct_idx,
+                };
+                locals_count += 1;
+            } else if (is_array) {
                 const total = arr_len * elem_size;
                 const aligned = (total + 7) & ~@as(usize, 7);
                 if (frame_size + aligned > 512) return error.CompileError;
@@ -1319,7 +1549,7 @@ fn compileStatement(p: *Parser) anyerror!void {
                     _ = try p.expect(.semicolon);
                     const offset = frame_size;
                     frame_size += 8;
-                    emit(enc_str(19, 0, @intCast(offset)));
+                    emit(enc_str(19, 0, @intCast(offset / 8)));
                     if (locals_count >= locals.len) return error.CompileError;
                     locals[locals_count] = LocalVar{ .name = name_tok.text, .offset = offset };
                     locals_count += 1;
@@ -1393,9 +1623,9 @@ fn compileStatement(p: *Parser) anyerror!void {
                 try compileExpr(p);
                 _ = try p.expect(.semicolon);
                 const offset = lookupLocal(name_tok.text) orelse return error.CompileError;
-                emit(enc_str(19, 0, @intCast(offset)));
+                emit(enc_str(19, 0, @intCast(offset / 8)));
             } else if (p.peek() == .ident and p.idx + 1 < p.tokens.len and p.tokens[p.idx + 1].kind == .l_bracket) {
-                // possible array store: look for ']' then '='
+                // possible array/pointer store: look for ']' then '='
                 var found = false;
                 var j = p.idx + 2;
                 while (j < p.tokens.len) : (j += 1) {
@@ -1408,7 +1638,7 @@ fn compileStatement(p: *Parser) anyerror!void {
                 if (found) {
                     const arr_name = p.advance().text;
                     const var_ptr = lookupLocalVar(arr_name) orelse return error.CompileError;
-                    if (!var_ptr.is_array) return error.CompileError;
+                    if (!var_ptr.is_array and !var_ptr.is_ptr) return error.CompileError;
                     _ = p.advance(); // '['
                     try compileExpr(p); // index -> x0
                     _ = try p.expect(.r_bracket);
@@ -1419,11 +1649,16 @@ fn compileStatement(p: *Parser) anyerror!void {
                     _ = try p.expect(.semicolon);
                     emit(enc_ldr(31, 1, 0));
                     emit(enc_add_imm(31, 31, 16));
-                    const shift = elemShift(var_ptr.elem_size);
+                    const elem_sz = if (var_ptr.is_ptr) var_ptr.ptr_elem_size else var_ptr.elem_size;
+                    const shift = elemShift(elem_sz);
                     if (shift != 0) emit(enc_lsl(1, 1, shift));
-                    emit(enc_add_imm(19, 2, @intCast(var_ptr.offset)));
+                    if (var_ptr.is_ptr) {
+                        emit(enc_ldr(19, 2, @intCast(var_ptr.offset / 8)));
+                    } else {
+                        emit(enc_add_imm(19, 2, @intCast(var_ptr.offset)));
+                    }
                     emit(enc_add_reg(2, 1, 2));
-                    if (var_ptr.elem_size == 1) {
+                    if (elem_sz == 1) {
                         emit(enc_strb(2, 0, 0));
                     } else {
                         emit(enc_str(2, 0, 0));
@@ -1432,33 +1667,74 @@ fn compileStatement(p: *Parser) anyerror!void {
                     try compileExpr(p);
                     _ = try p.expect(.semicolon);
                 }
+            } else if (p.peek() == .ident and p.idx + 3 < p.tokens.len and p.tokens[p.idx + 1].kind == .dot and p.tokens[p.idx + 2].kind == .star and p.tokens[p.idx + 3].kind == .equal) {
+                const ptr_name = p.advance().text;
+                _ = p.advance(); // dot
+                _ = p.advance(); // star
+                _ = p.advance(); // =
+                const var_ptr = lookupLocalVar(ptr_name) orelse return error.CompileError;
+                if (!var_ptr.is_ptr) return error.CompileError;
+                try compileExpr(p); // value -> x0
+                _ = try p.expect(.semicolon);
+                emit(enc_ldr(19, 1, @intCast(var_ptr.offset / 8)));
+                if (var_ptr.ptr_elem_size == 1) {
+                    emit(enc_strb(1, 0, 0));
+                } else {
+                    emit(enc_str(1, 0, 0));
+                }
             } else if (p.peek() == .ident and p.idx + 3 < p.tokens.len and p.tokens[p.idx + 1].kind == .dot and p.tokens[p.idx + 2].kind == .ident and p.tokens[p.idx + 3].kind == .equal) {
                 const s_name = p.advance().text;
                 _ = p.advance(); // dot
                 const field_name = p.advance().text;
                 _ = p.advance(); // =
                 const var_ptr = lookupLocalVar(s_name) orelse return error.CompileError;
-                if (!var_ptr.is_struct) return error.CompileError;
-                const sd = &structs[var_ptr.struct_idx];
-                var foff: usize = 0;
-                var fsize: usize = 0;
-                var found = false;
-                for (sd.fields[0..sd.field_count]) |f| {
-                    if (std.mem.eql(u8, f.name, field_name)) {
-                        foff = f.offset;
-                        fsize = f.size;
-                        found = true;
-                        break;
+                if (var_ptr.is_struct) {
+                    const sd = &structs[var_ptr.struct_idx];
+                    var foff: usize = 0;
+                    var fsize: usize = 0;
+                    var found = false;
+                    for (sd.fields[0..sd.field_count]) |f| {
+                        if (std.mem.eql(u8, f.name, field_name)) {
+                            foff = f.offset;
+                            fsize = f.size;
+                            found = true;
+                            break;
+                        }
                     }
-                }
-                if (!found) return error.CompileError;
-                try compileExpr(p); // value -> x0
-                _ = try p.expect(.semicolon);
-                emit(enc_add_imm(19, 1, @intCast(var_ptr.offset + foff)));
-                if (fsize == 1) {
-                    emit(enc_strb(1, 0, 0));
+                    if (!found) return error.CompileError;
+                    try compileExpr(p); // value -> x0
+                    _ = try p.expect(.semicolon);
+                    emit(enc_add_imm(19, 1, @intCast(var_ptr.offset + foff)));
+                    if (fsize == 1) {
+                        emit(enc_strb(1, 0, 0));
+                    } else {
+                        emit(enc_str(1, 0, 0));
+                    }
+                } else if (var_ptr.is_ptr and var_ptr.ptr_is_struct) {
+                    const sd = &structs[var_ptr.ptr_struct_idx];
+                    var foff: usize = 0;
+                    var fsize: usize = 0;
+                    var found = false;
+                    for (sd.fields[0..sd.field_count]) |f| {
+                        if (std.mem.eql(u8, f.name, field_name)) {
+                            foff = f.offset;
+                            fsize = f.size;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) return error.CompileError;
+                    try compileExpr(p); // value -> x0
+                    _ = try p.expect(.semicolon);
+                    emit(enc_ldr(19, 1, @intCast(var_ptr.offset / 8)));
+                    if (foff != 0) emit(enc_add_imm(1, 1, @intCast(foff)));
+                    if (fsize == 1) {
+                        emit(enc_strb(1, 0, 0));
+                    } else {
+                        emit(enc_str(1, 0, 0));
+                    }
                 } else {
-                    emit(enc_str(1, 0, 0));
+                    return error.CompileError;
                 }
             } else {
                 try compileExpr(p);
@@ -1471,7 +1747,7 @@ fn compileStatement(p: *Parser) anyerror!void {
 // ---------------------------------------------------------------------------
 // Compiler Main Driver
 // ---------------------------------------------------------------------------
-fn compile(src: []const u8) !usize {
+pub fn compile(src: []const u8) !usize {
     var tokenizer = Tokenizer{ .src = src };
     tokens_count = 0;
     while (true) {
@@ -1503,7 +1779,7 @@ fn compile(src: []const u8) !usize {
             const param_count = countParams(tokens, p1.idx);
             while (p1.peek() != .r_paren and p1.peek() != .eof) _ = p1.advance();
             _ = try p1.expect(.r_paren);
-            _ = try p1.expect(.ident); // return type
+            _ = try parseType(&p1); // return type
             _ = try p1.expect(.l_brace);
             var brace_depth: usize = 1;
             while (brace_depth > 0 and p1.peek() != .eof) {
@@ -1580,21 +1856,45 @@ fn compile(src: []const u8) !usize {
             if (p2.peek() != .r_paren) {
                 const p_name = try p2.expect(.ident);
                 _ = try p2.expect(.colon);
-                _ = try p2.expect(.ident);
-                locals[locals_count] = LocalVar{ .name = p_name.text, .offset = frame_size };
+                const pt = try parseType(&p2);
+                locals[locals_count] = LocalVar{
+                    .name = p_name.text,
+                    .offset = frame_size,
+                    .is_ptr = pt.is_ptr,
+                    .ptr_elem_size = pt.ptr_elem_size,
+                    .ptr_is_struct = pt.ptr_is_struct,
+                    .ptr_struct_idx = pt.ptr_struct_idx,
+                    .is_struct = pt.is_struct,
+                    .struct_idx = pt.struct_idx,
+                    .is_array = pt.is_array,
+                    .array_len = pt.array_len,
+                    .elem_size = pt.elem_size,
+                };
                 locals_count += 1;
                 frame_size += 8;
                 while (p2.accept(.comma)) {
                     const next_p_name = try p2.expect(.ident);
                     _ = try p2.expect(.colon);
-                    _ = try p2.expect(.ident);
-                    locals[locals_count] = LocalVar{ .name = next_p_name.text, .offset = frame_size };
+                    const next_pt = try parseType(&p2);
+                    locals[locals_count] = LocalVar{
+                        .name = next_p_name.text,
+                        .offset = frame_size,
+                        .is_ptr = next_pt.is_ptr,
+                        .ptr_elem_size = next_pt.ptr_elem_size,
+                        .ptr_is_struct = next_pt.ptr_is_struct,
+                        .ptr_struct_idx = next_pt.ptr_struct_idx,
+                        .is_struct = next_pt.is_struct,
+                        .struct_idx = next_pt.struct_idx,
+                        .is_array = next_pt.is_array,
+                        .array_len = next_pt.array_len,
+                        .elem_size = next_pt.elem_size,
+                    };
                     locals_count += 1;
                     frame_size += 8;
                 }
             }
             _ = try p2.expect(.r_paren);
-            _ = try p2.expect(.ident); // return type
+            _ = try parseType(&p2); // return type
             _ = try p2.expect(.l_brace);
 
             // Function prologue
@@ -1607,7 +1907,7 @@ fn compile(src: []const u8) !usize {
 
             var i: usize = 0;
             while (i < functions[f_idx].param_count) : (i += 1) {
-                emit(enc_str(19, @intCast(i), @intCast(i * 8)));
+                emit(enc_str(19, @intCast(i), @intCast(i)));
             }
 
             while (p2.peek() != .r_brace and p2.peek() != .eof) try compileStatement(&p2);
@@ -1965,4 +2265,111 @@ test "zc: Z1c tokenizer handles struct keyword" {
     try testing.expectEqual(TokenKind.keyword_struct, t.next().kind);
     try testing.expectEqual(TokenKind.l_brace, t.next().kind);
     try testing.expectEqual(TokenKind.ident, t.next().kind);
+}
+
+test "zc: Z1d address-of and dereference load/store" {
+    const src =
+        \\const zc = @import("zc");
+        \\pub fn main() void {
+        \\    var x: u64 = 42;
+        \\    var p: *u64 = &x;
+        \\    var y: u64 = p.*;
+        \\    p.* = 84;
+        \\    if (x == 84) {
+        \\        if (y == 42) {
+        \\            zc.exit(0);
+        \\        }
+        \\    }
+        \\    zc.exit(1);
+        \\}
+    ;
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
+    const total = try build_elf32_with_data(code[0..bytes], data_buf[0..data_len], 0, &image_buf);
+    try testing.expect(total == elf_code_offset + bytes + data_len);
+}
+
+test "zc: Z1d pointer parameters swap" {
+    const src =
+        \\const zc = @import("zc");
+        \\fn swap(a: *u64, b: *u64) void {
+        \\    const tmp: u64 = a.*;
+        \\    a.* = b.*;
+        \\    b.* = tmp;
+        \\}
+        \\pub fn main() void {
+        \\    var x: u64 = 10;
+        \\    var y: u64 = 20;
+        \\    swap(&x, &y);
+        \\    if (x == 20) {
+        \\        if (y == 10) {
+        \\            zc.exit(0);
+        \\        }
+        \\    }
+        \\    zc.exit(1);
+        \\}
+    ;
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
+}
+
+test "zc: Z1d pointer buffer indexing and print_ptr" {
+    const src =
+        \\const zc = @import("zc");
+        \\fn fill_buf(buf: [*]u8, len: u64) void {
+        \\    var i: u64 = 0;
+        \\    while (i < len) {
+        \\        buf[i] = 65 + i;
+        \\        i = i + 1;
+        \\    }
+        \\}
+        \\pub fn main() void {
+        \\    var buf: [4]u8 = undefined;
+        \\    fill_buf(&buf, 4);
+        \\    zc.print_ptr(&buf, 4);
+        \\    if (buf[0] == 65) {
+        \\        if (buf[3] == 68) {
+        \\            zc.exit(72);
+        \\        }
+        \\    }
+        \\    zc.exit(1);
+        \\}
+    ;
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
+}
+
+test "zc: Z1d struct pointer parameter and member access" {
+    const src =
+        \\const zc = @import("zc");
+        \\const Point = struct { x: u64, y: u64 };
+        \\fn set_point(p: *Point, x: u64, y: u64) void {
+        \\    p.x = x;
+        \\    p.y = y;
+        \\}
+        \\pub fn main() void {
+        \\    var pt: Point = undefined;
+        \\    set_point(&pt, 100, 200);
+        \\    if (pt.x == 100) {
+        \\        if (pt.y == 200) {
+        \\            zc.exit(0);
+        \\        }
+        \\    }
+        \\    zc.exit(1);
+        \\}
+    ;
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
+}
+
+test "zc: Z1d tokenizer handles star and ampersand" {
+    const src = "var p: *u64 = &x; p.* = 1;";
+    var t = Tokenizer{ .src = src };
+    try testing.expectEqual(TokenKind.keyword_var, t.next().kind);
+    try testing.expectEqual(TokenKind.ident, t.next().kind);
+    try testing.expectEqual(TokenKind.colon, t.next().kind);
+    try testing.expectEqual(TokenKind.star, t.next().kind);
+    try testing.expectEqual(TokenKind.ident, t.next().kind);
+    try testing.expectEqual(TokenKind.equal, t.next().kind);
+    try testing.expectEqual(TokenKind.ampersand, t.next().kind);
 }
