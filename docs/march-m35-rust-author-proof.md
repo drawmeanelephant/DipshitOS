@@ -54,7 +54,7 @@ new `virelai.zig` shim, Rust through `#[link(wasm_import_module =
 6. Docs: contract §7 recipes made true (virelai.zig + rustc lines +
    corrected C line — `virelai.c` does not exist; the fixtures compile
    `app.c` alone against the header); scoping doc + status.md post-M35
-   notes; claim 4912 + branch log.
+   notes; claim 9746 + branch log.
 
 **Expected output math (host test + gate needles, computed from
 `tests/wc-fixture.txt`):** the 8 numbered lines `     1  w5 wc capstone

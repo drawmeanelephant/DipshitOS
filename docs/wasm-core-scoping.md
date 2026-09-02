@@ -154,6 +154,29 @@ extension) and the live gate proves the same bytes through the real
 guest path. Contract §7 gained the worked author example. **M35 is
 done — Milestone #22 6/6; the milestone closes with the branch's PR.**
 
+**Post-M35 — cross-language author proof (claim 9746,
+`docs/march-m35-rust-author-proof.md`):** the contract §1/§7 promises that
+already existed on paper — `tests/virelai.zig` (the Zig sibling of
+`virelai.h`) and a `rustc --target wasm32-unknown-unknown` author path —
+are now real and live-gated. `virelai.zig` compiles a probe whose import
+table is exactly the frozen 30-name `env.*` surface (`zig build
+shim-check` now runs BOTH the C and Zig probes through the same
+verifier). `tests/nl.rs` — a numbered-lines tool authored in Rust from
+the contract doc alone — runs byte-exact in-guest: `     1  w5 wc
+capstone fixture` … `     8  last line ends with a word` over the same
+WC.TXT fixture, exit 383 (pinned `nl.wasm`, 34f02644, rebuilt
+byte-identical from `rustc --crate-type=cdylib --target
+wasm32-unknown-unknown -O -C strip=debuginfo`). The rustc fixture also
+**flushed out a real interpreter bug**: wasm-ld emits call_indirect's
+tableidx (and the bulk-memory memidx family) as legal overlong 5-byte
+LEBs; the interpreter read one byte, desynced, and failed validate with a
+false TypeMismatch — fixed (all index immediates are now u32 LEBs) with a
+dedicated overlong-LEB regression test. Live-gate note: the cross-language
+phase runs NL in its own script3 phase (after the winapp) because a sixth
+concurrent exec burst pushed the open #803/#810 kernel exit-report
+corruption (issues #803/#810) to near-deterministic — see the claim log
+for the A/B evidence.
+
 ## Risks and honest limits
 
 - **The interpreter is real software.** A correct wasm-core validator +
