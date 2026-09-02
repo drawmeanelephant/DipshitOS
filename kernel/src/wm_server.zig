@@ -87,6 +87,12 @@ pub const wmctl_tray: u64 = 10;
 /// 0 close, 1 open, 2 toggle. A WM decision and a shim chord are identical
 /// kernel actions (parity by construction).
 pub const wmctl_dialog: u64 = 11;
+/// S6 Tab model (Milestone 19, issue #782): ATTACH_TAB (cmd 18), DETACH_TAB
+/// (cmd 19), ACTIVATE_TAB (cmd 20). The WM — not the kernel — owns tab
+/// grouping and layout; the kernel tracks the calls and validates IDs.
+pub const wmctl_attach_tab: u64 = 18;
+pub const wmctl_detach_tab: u64 = 19;
+pub const wmctl_activate_tab: u64 = 20;
 
 /// The single registered WM server process id; null = no WM registered
 /// (shim mode, the default — every pre-M32 gate runs in this state).
@@ -122,6 +128,10 @@ var tray_count: u64 = 0;
 /// WM's keyboard-driven modal-dialog decisions (about open/close/toggle)
 /// applied by the kernel.
 var dialog_count: u64 = 0;
+/// S6 Tab model (Milestone 19, issue #782): counters for tab operations.
+var tab_attach_count: u64 = 0;
+var tab_detach_count: u64 = 0;
+var tab_activate_count: u64 = 0;
 /// Set when the registered WM exits (teardown) — the shell idle loop drains
 /// this into the `wm: unregistered, shim resumed` report (the exit path is
 /// IRQ context and console-free, so the report is drained like the process
@@ -152,6 +162,9 @@ pub fn init() void {
     dock_count = 0;
     tray_count = 0;
     dialog_count = 0;
+    tab_attach_count = 0;
+    tab_detach_count = 0;
+    tab_activate_count = 0;
     pointer_fan_count = 0;
     window_mirror_count = 0;
     key_fan_count = 0;
@@ -528,6 +541,17 @@ pub fn note_tray() void {
 /// Note a DIALOG (cmd 11) submission — the WM's modal-dialog decision.
 pub fn note_dialog() void {
     dialog_count +%= 1;
+}
+
+/// S6 Tab model (Milestone 19, issue #782): notes for tab operations.
+pub fn note_tab_attach() void {
+    tab_attach_count +%= 1;
+}
+pub fn note_tab_detach() void {
+    tab_detach_count +%= 1;
+}
+pub fn note_tab_activate() void {
+    tab_activate_count +%= 1;
 }
 
 // ---------------------------------------------------------------------------

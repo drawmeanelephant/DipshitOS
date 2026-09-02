@@ -170,7 +170,7 @@ of the above.
 
 | Thread | Milestone | Open cards | Notes |
 |--------|-----------|-----------|-------|
-| Sexiburger god menu | #19 (7 open) | #701–#705 + umbrella #677 + **#782** (S6 tab model) | action registry seam → menu shell → type-to-filter → test-app registration → covenant-of-six → tab model (re-filed from #710) |
+| Sexiburger god menu | #19 ✅ closed 2026-09-02 | — | #677 umbrella, S1 action registry seam (#701), S2 menu shell (#702), S3 covenant of six (#703), S4 type-to-filter (#704), S5 test app registration & live invocation (#705), S6 tab model (#782), and mascot monitor command `sexiburger`; live gate PASS on VZ (claims 8326/6479) |
 | Self-hosting seed | #20 (21 open) | #706 umbrella (0a–0d → #773–#776) · #707 · #708 (VL6, depends #749) + ladder **#749–#761** + **#783** (shell completion) | see above; umbrella #620 closed |
 | WASM core interpreter | #22 **proposed** (6 open) | **#778** (W1a contract freeze) · **#762** (W1b interpreter) · **#763–#766** (W2–W5) | one interpreter, the whole ecosystem: host-built wasm apps run in-guest; module = data via the file channel (no ELF contract); `env.*` imports → ADR 0007, no WASI; **Go deferred to post-M35, 2 MiB memory cap, capstone = `wc`** (W1a decisions, #778); tracker `docs/wasm-core-scoping.md` |
 | M33 seam B (pixel ownership) | #17 ✅ closed 2026-09-01 | — | SB1–SB6 all landed (claims 7418/8878/3633/2382/7397/6864); SB6's yield-spin scheduler finding filed as #768; M33 weekly lanes #710–#712 closed 2026-09-01 as superseded (tab model → #782, shell completion → #783) |

@@ -1794,6 +1794,32 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_sexiburg.step);
 
     // ------------------------------------------------------------------
+    // Guest: Sexiburger Action & Tab test app (Milestone 19 — issues #701, #705, #782)
+    // SEXITEST.BIN. Live end-to-end action registration and tab model test.
+    // ------------------------------------------------------------------
+    const sexitest_mod = b.createModule(.{
+        .root_source_file = b.path("user/src/sexitest.zig"),
+        .target = kernel_target,
+        .optimize = .ReleaseSmall,
+    });
+    sexitest_mod.addAnonymousImport("wnd_core", .{ .root_source_file = b.path("kernel/src/wnd_core.zig") });
+    const sexitest_prog = b.addExecutable(.{
+        .name = "user-sexitest",
+        .root_module = sexitest_mod,
+    });
+    sexitest_prog.linker_script = b.path("user/linker.ld");
+    const sexitest_step = b.step("sexitest", "Build the Sexiburger Action & Tab test program (zig-out/bin/SEXITEST.BIN)");
+    const sexitest_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    sexitest_elf2bin.addFileArg(sexitest_prog.getEmittedBin());
+    const sexitest_bin = sexitest_elf2bin.addOutputFileArg("SEXITEST.BIN");
+    sexitest_elf2bin.has_side_effects = true;
+    sexitest_elf2bin.stdio = .inherit;
+    sexitest_step.dependOn(&sexitest_elf2bin.step);
+    const install_sexitest = b.addInstallFileWithDir(sexitest_bin, .bin, "SEXITEST.BIN");
+    sexitest_step.dependOn(&install_sexitest.step);
+    b.getInstallStep().dependOn(&install_sexitest.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple

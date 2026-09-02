@@ -284,7 +284,7 @@ pub const Command = struct {
 /// grows it 54 -> 55 (`sym`). Milestone twenty-two D5 (issue #328)
 /// grows it 55 -> 56 (`strace`). Milestone twenty-two D6 (issue #329)
 /// grows it 56 -> 57 (`ps`).
-pub const registry_count: usize = 72; // 51 + sh/calc + `font` (M20 U1) + sym/strace/ps (M22 D3/D5/D6) + `type` (M19 P1) + `mktemp` (M19 P16) + stat/find/dmesg/time/which/inventory (M22 D8/D12/D13/D16) + du (M25 F4) + screenshot/shortcuts (M27 G27/G29) + smp (M28) + `wm` (M32 WMS2, issue #622) + `wnd` (M32 WMS3, issue #623) + `vf` (M34 HF1+HF2, issues #735/#736)
+pub const registry_count: usize = 73; // 51 + sh/calc + `font` (M20 U1) + sym/strace/ps (M22 D3/D5/D6) + `type` (M19 P1) + `mktemp` (M19 P16) + stat/find/dmesg/time/which/inventory (M22 D8/D12/D13/D16) + du (M25 F4) + screenshot/shortcuts (M27 G27/G29) + smp (M28) + `wm` (M32 WMS2, issue #622) + `wnd` (M32 WMS3, issue #623) + `vf` (M34 HF1+HF2, issues #735/#736) + `sexiburger` (Milestone 19, issue #677)
 
 /// `sym <file>` reads at most this many bytes for on-disk symtab inspection
 /// (M22 D3). ELF symbol tables live near the file tail; 64 KiB covers every
@@ -319,6 +319,7 @@ fn ensure_registry() []const Command {
             .{ .name = "color", .help = "toggle ANSI terminal colors ('color on'/'color off'; 'color' shows current)", .usage = "color [on|off]", .category = .system, .max_args = 1, .handler = cmd_color },
             .{ .name = "echo", .help = "repeat your regrettable decisions", .usage = "echo <text...>", .category = .system, .handler = cmd_echo },
             .{ .name = "elephant", .help = "operational mascot diagnostics", .usage = "elephant", .category = .machine_identity, .handler = cmd_elephant },
+            .{ .name = "sexiburger", .help = "operational mascot diagnostics (the Sexipus burger)", .usage = "sexiburger", .category = .machine_identity, .handler = cmd_sexiburger },
             .{ .name = "exec", .help = "load a user program from the host share and enter it at EL0", .usage = "exec [<file> [arg...]]", .category = .tasks_processes, .max_args = 1 + esp_exec.max_exec_args, .handler = cmd_exec },
             .{ .name = "fault", .help = "trigger a synchronous exception (diagnostic)", .usage = "fault", .category = .memory_state, .handler = cmd_fault },
             .{ .name = "handoff", .help = "display boot-to-kernel ABI data", .usage = "handoff", .category = .memory_state, .handler = cmd_handoff },
@@ -3586,6 +3587,31 @@ pub fn elephant_lines() []const []const u8 {
         elephant_ready = true;
     }
     return &elephant_storage;
+}
+
+/// Fixed Sexiburger mascot art (Milestone 19, issue #677).
+/// Sexipus wearing a 6-layer burger with 6 tentacles, under the Covenant of Six.
+var sexiburger_diag_storage: [14][]const u8 = undefined;
+var sexiburger_diag_ready = false;
+pub fn sexiburger_lines() []const []const u8 {
+    if (!sexiburger_diag_ready) {
+        sexiburger_diag_storage[0] = "           .-------.";
+        sexiburger_diag_storage[1] = "          /  *   *  \\    [Crown: System]";
+        sexiburger_diag_storage[2] = "        (  .  *   .   ) ";
+        sexiburger_diag_storage[3] = "     (~~~\\___________/~~~) [Lettuce: Apps]";
+        sexiburger_diag_storage[4] = "      \\   [=========]   /  [Tomato: Active app]";
+        sexiburger_diag_storage[5] = "       \\   (=======)   /   [Cheese: Windows & tabs]";
+        sexiburger_diag_storage[6] = "        \\  |=======|  /    [Patty: Services]";
+        sexiburger_diag_storage[7] = "      __ \\ \\_______/ / __  [Heel: Power]";
+        sexiburger_diag_storage[8] = "     (  \\ \\_|_|_|_|_/ /  )";
+        sexiburger_diag_storage[9] = "      \\  \\___     ___/  /";
+        sexiburger_diag_storage[10] = "       )  (  |   |  )  (";
+        sexiburger_diag_storage[11] = "      /  /   |   |   \\  \\";
+        sexiburger_diag_storage[12] = "     (_ /    |   |    \\ _)";
+        sexiburger_diag_storage[13] = "  [6 tentacles | 6 layers | Covenant invariant intact]";
+        sexiburger_diag_ready = true;
+    }
+    return &sexiburger_diag_storage;
 }
 
 // ---------------------------------------------------------------------------
@@ -7144,6 +7170,23 @@ fn cmd_elephant(m: *Monitor, args: []const []const u8) ExecError {
     return .none;
 }
 
+fn cmd_sexiburger(m: *Monitor, args: []const []const u8) ExecError {
+    _ = args;
+    for (sexiburger_lines()) |line| m.console.print_line(line);
+    m.console.print_line("SEXIBURGER ONLINE");
+    print_plain_field(m, "mascot", "Sexipus (hexapus clade)");
+    m.console.puts("\n");
+    print_plain_field(m, "tentacles", "6 (3 left, 3 right, lower pair curling inward)");
+    m.console.puts("\n");
+    print_plain_field(m, "layers", "6 (Crown, Lettuce, Tomato, Cheese, Patty, Heel)");
+    m.console.puts("\n");
+    print_plain_field(m, "covenant", "the tentacle count is load-bearing");
+    m.console.puts("\n");
+    print_plain_field(m, "status", "all 6 invariants intact");
+    m.console.puts("\n");
+    return .none;
+}
+
 fn cmd_beans(m: *Monitor, args: []const []const u8) ExecError {
     var count: u64 = 42;
     if (args.len == 1) {
@@ -8364,6 +8407,25 @@ test "monitor: elephant is deterministic and reports diagnostics" {
     // Same input, same output: fully deterministic.
     env.mock.reset();
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"elephant"}));
+    try std.testing.expectEqualStrings(first, env.mock.contents());
+}
+
+test "monitor: sexiburger is deterministic and reports diagnostics" {
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"sexiburger"}));
+    const first = env.mock.contents();
+    try std.testing.expect(std.mem.startsWith(u8, first, sexiburger_lines()[0]));
+    const expected_tail = "SEXIBURGER ONLINE\n" ++
+        "  mascot: Sexipus (hexapus clade)\n" ++
+        "  tentacles: 6 (3 left, 3 right, lower pair curling inward)\n" ++
+        "  layers: 6 (Crown, Lettuce, Tomato, Cheese, Patty, Heel)\n" ++
+        "  covenant: the tentacle count is load-bearing\n" ++
+        "  status: all 6 invariants intact\n";
+    try std.testing.expect(std.mem.endsWith(u8, first, expected_tail));
+
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"sexiburger"}));
     try std.testing.expectEqualStrings(first, env.mock.contents());
 }
 

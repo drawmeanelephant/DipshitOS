@@ -19,5 +19,6 @@ FILE.ELF | Dynamic Files | b
 DESKTOP.ELF | Dynamic Desktop | d
 ZC.BIN | Zig Compiler | z
 SEXIBURG.BIN | Sexiburger | x | dock=true
+SEXITEST.BIN | Sexitest | x
 
 

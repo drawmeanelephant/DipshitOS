@@ -110,6 +110,10 @@ const dialog_unsaved_show: u64 = 3;
 const dialog_unsaved_save: u64 = 4;
 const dialog_unsaved_dont_save: u64 = 5;
 const dialog_unsaved_cancel: u64 = 6;
+// S6 Tab model (Milestone 19, issue #782)
+const wmctl_attach_tab: u64 = 18;
+const wmctl_detach_tab: u64 = 19;
+const wmctl_activate_tab: u64 = 20;
 /// sys_clipboard_get (slot 39) — the WM probes the clipboard each tray
 /// refresh (filled = return length != 0) to decide the indicator state.
 const sys_clipboard_get: u64 = 39;
@@ -247,6 +251,14 @@ pub const max_marker: []const u8 = "wnd: max\n";
 pub const ws_marker: []const u8 = "wnd: ws\n";
 pub const fs_marker: []const u8 = "wnd: fs\n";
 pub const aot_marker: []const u8 = "wnd: aot\n";
+// S6 Tab model (Milestone 19, issue #782)
+pub const tab_attach_marker: []const u8 = "wnd: tab-attach";
+pub const tab_detach_marker: []const u8 = "wnd: tab-detach";
+pub const tab_activate_marker: []const u8 = "wnd: tab-activate";
+pub const tab_cycle_marker: []const u8 = "wnd: tab-cycle";
+// S1/S5 Action registry seam (Milestone 19, issues #701, #705)
+pub const action_reg_marker: []const u8 = "wnd: action-registered";
+pub const action_inv_marker: []const u8 = "wnd: action-invoked";
 
 // WMS6 Gate A (issue #626): the Alt+Tab decision marker. The WM prints the
 // target id after the pinned prefix (`wnd: alt-tab id=N`) so the live gate
@@ -379,6 +391,7 @@ pub const usage_f3: u8 = 0x5a;
 pub const usage_backtick: u8 = 0x35;
 pub const usage_f11: u8 = 0x5c;
 pub const usage_tab: u8 = 0x2b;
+pub const usage_w: u8 = 0x1a; // S6 Tab model: Ctrl+W closes/detaches tab
 pub const usage_a: u8 = 0x04; // M27 G2 / WMS8 Gate 2: Ctrl+Shift+A toggles the about dialog
 
 // WMS4 (issue #624): the EXACT values the chrome-descriptor blob embeds.
@@ -413,6 +426,9 @@ const MirrorWin = struct {
     visible: bool = false,
     focused: bool = false,
     workspace: u8 = 0,
+    // S6 Tab model (Milestone 19, issue #782)
+    tab_parent: u8 = 0,
+    tab_active: bool = true,
     // WMS8 Gate 4 (issue #628): the kernel's dirty flag, carried by the
     // kind-20 mirror (bit 12) — the WM's unsaved-dialog decision input.
     unsaved: bool = false,
@@ -693,6 +709,89 @@ fn snap_window_to(id: u8, px: u32, py: u32) void {
 }
 
 // ---------------------------------------------------------------------------
+// S6 Tab model (Milestone 19, issue #782) — WM registry tabs.
+// ---------------------------------------------------------------------------
+
+fn attach_tab(child_id: u8, parent_id: u8) bool {
+    if (child_id == parent_id or child_id > 0xff or parent_id > 0xff) return false;
+    const cm = mirror(child_id) orelse return false;
+    const pm = mirror(parent_id) orelse return false;
+    cm.tab_parent = parent_id;
+    cm.tab_active = false;
+    cm.x = pm.x;
+    cm.y = pm.y;
+    cm.w = pm.w;
+    cm.h = pm.h;
+    set_window_rect(child_id, pm.x, pm.y, pm.w, pm.h);
+    _ = syscall6(sys_wmctl, wmctl_attach_tab, child_id, parent_id, 0, 0, 0);
+    var buf: [64]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{s} child={d} parent={d}\n", .{ tab_attach_marker, child_id, parent_id }) catch "wnd: tab-attach\n";
+    write_marker(msg);
+    return true;
+}
+
+fn detach_tab(child_id: u8) bool {
+    const cm = mirror(child_id) orelse return false;
+    if (cm.tab_parent == 0) return false;
+    cm.tab_parent = 0;
+    cm.tab_active = true;
+    cm.x +%= 24;
+    cm.y +%= 24;
+    set_window_rect(child_id, cm.x, cm.y, cm.w, cm.h);
+    set_state(child_id, true, null, false);
+    _ = syscall6(sys_wmctl, wmctl_detach_tab, child_id, 0, 0, 0, 0);
+    var buf: [64]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{s} child={d}\n", .{ tab_detach_marker, child_id }) catch "wnd: tab-detach\n";
+    write_marker(msg);
+    return true;
+}
+
+fn activate_tab(tab_id: u8) bool {
+    const tm = mirror(tab_id) orelse return false;
+    const parent = if (tm.tab_parent != 0) tm.tab_parent else tab_id;
+    for (&mirrors) |*m| {
+        if (!m.valid) continue;
+        const item_parent = if (m.tab_parent != 0) m.tab_parent else m.id;
+        if (item_parent == parent) {
+            if (m.id == tab_id) {
+                m.tab_active = true;
+                set_state(m.id, true, null, false);
+                _ = syscall6(sys_wmctl, wmctl_alt_tab, m.id, alt_tab_commit, 0, 0, 0);
+            } else {
+                m.tab_active = false;
+                set_state(m.id, false, null, false);
+            }
+        }
+    }
+    _ = syscall6(sys_wmctl, wmctl_activate_tab, tab_id, 0, 0, 0, 0);
+    var buf: [64]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{s} id={d}\n", .{ tab_activate_marker, tab_id }) catch "wnd: tab-activate\n";
+    write_marker(msg);
+    return true;
+}
+
+fn cycle_tabs() void {
+    const fm = focused_mirror() orelse return;
+    var tab_items: [max_user_windows]wnd_core.TabItem = undefined;
+    var count: usize = 0;
+    for (&mirrors) |*m| {
+        if (!m.valid) continue;
+        tab_items[count] = .{
+            .window_id = m.id,
+            .parent_id = m.tab_parent,
+            .active = m.tab_active,
+        };
+        count += 1;
+    }
+    if (wnd_core.cycle_next_tab(tab_items[0..count], fm.id)) |next_id| {
+        _ = activate_tab(next_id);
+        var buf: [64]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "{s} active={d}\n", .{ tab_cycle_marker, next_id }) catch "wnd: tab-cycle\n";
+        write_marker(msg);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // WMS6 Gate A — the Alt+Tab policy (which window gets focus).
 // ---------------------------------------------------------------------------
 
@@ -890,6 +989,42 @@ fn wnd_mail_apply(req: *const wnd_core.WmRpc) bool {
             const rc = syscall6(sys_wmctl, wmctl_set_window, req.id, @as(u64, req.x) | (@as(u64, req.y) << 16), @as(u64, req.w) | (@as(u64, req.h) << 16), 0, 0);
             return rc == 0;
         },
+        wnd_core.wm_rpc_kind_register_action => {
+            var label_slice: []const u8 = req.title[0..];
+            for (req.title, 0..) |c, i| {
+                if (c == 0) {
+                    label_slice = req.title[0..i];
+                    break;
+                }
+            }
+            var buf: [80]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "{s} section={d} label={s} verb=test-act\n", .{ action_reg_marker, req.x, label_slice }) catch "wnd: action-registered\n";
+            write_marker(msg);
+            return true;
+        },
+        wnd_core.wm_rpc_kind_invoke_action => {
+            var label_slice: []const u8 = req.title[0..];
+            for (req.title, 0..) |c, i| {
+                if (c == 0) {
+                    label_slice = req.title[0..i];
+                    break;
+                }
+            }
+            var buf: [80]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "{s} label={s}\n", .{ action_inv_marker, label_slice }) catch "wnd: action-invoked\n";
+            write_marker(msg);
+            return true;
+        },
+        wnd_core.wm_rpc_kind_attach_tab => {
+            return attach_tab(req.id, @intCast(req.x));
+        },
+        wnd_core.wm_rpc_kind_detach_tab => {
+            return detach_tab(req.id);
+        },
+        wnd_core.wm_rpc_kind_cycle_tab => {
+            cycle_tabs();
+            return true;
+        },
         else => return false, // unknown kind — refused honestly
     }
 }
@@ -939,6 +1074,20 @@ fn handle_wm_key(usage: u8, flags: u16) void {
         // switches to.
         handle_alt_tab();
         return;
+    }
+    if (ctrl and usage == usage_tab) {
+        // S6 Tab model (Milestone 19, issue #782): Ctrl+Tab cycles tabs.
+        cycle_tabs();
+        return;
+    }
+    if (ctrl and usage == usage_w) {
+        // S6 Tab model (Milestone 19, issue #782): Ctrl+W detaches/closes tab.
+        if (focused_mirror()) |fm| {
+            if (fm.tab_parent != 0) {
+                _ = detach_tab(fm.id);
+                return;
+            }
+        }
     }
     if (alt and usage == usage_backtick) {
         // Alt+` cycles workspaces (W4).

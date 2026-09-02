@@ -383,6 +383,13 @@ pub const WmRpc = extern struct {
 pub const wm_rpc_title_max: usize = 24;
 pub const wm_rpc_kind_raise: u8 = 1;
 pub const wm_rpc_kind_config: u8 = 2;
+/// S1/S5 Action registry seam (Milestone 19, issues #701, #705).
+pub const wm_rpc_kind_register_action: u8 = 3;
+pub const wm_rpc_kind_invoke_action: u8 = 4;
+/// S6 Tab model (Milestone 19, issue #782).
+pub const wm_rpc_kind_attach_tab: u8 = 5;
+pub const wm_rpc_kind_detach_tab: u8 = 6;
+pub const wm_rpc_kind_cycle_tab: u8 = 7;
 pub const wm_rpc_reply_flag: u8 = 0x80;
 /// The frozen mailbox slot bound the message must fit (ADR 0015 size
 /// decision — the compact fixed layout fits 64 B, so message_max stays).
@@ -463,6 +470,67 @@ pub fn chrome_title_layout(win_w: usize, label_len: usize) TitleLayout {
     if (win_w > text_px) x_off = (win_w - text_px) / 2;
     if (x_off < min_pad) x_off = min_pad;
     return .{ .x_off = x_off, .draw_len = draw_len, .truncated = truncated };
+}
+
+// ---------------------------------------------------------------------------
+// S6 Tab model (Milestone 19, issue #782) — pure tab layout and cycle rules.
+// ---------------------------------------------------------------------------
+
+pub const tab_bar_height: u32 = 22;
+pub const max_tabs_per_group: usize = 8;
+
+pub const TabItem = struct {
+    window_id: u8,
+    parent_id: u8, // 0 = container/standalone, >0 = parent tab group
+    active: bool,
+    title: [24]u8 = [_]u8{0} ** 24,
+    title_len: u8 = 0,
+};
+
+pub const TabRect = struct {
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+};
+
+/// Pure tab item rect calculation for tab bar layout:
+/// Given container window rect (x, y, w, h), tab index, and total tabs in group.
+pub fn tab_item_rect(win_x: u32, win_y: u32, win_w: u32, tab_idx: usize, total_tabs: usize) TabRect {
+    if (total_tabs == 0) return .{ .x = win_x, .y = win_y, .w = 0, .h = tab_bar_height };
+    const tab_w = @max(48, win_w / @as(u32, @intCast(total_tabs)));
+    const tab_x = win_x + @as(u32, @intCast(tab_idx)) * tab_w;
+    return .{
+        .x = tab_x,
+        .y = win_y,
+        .w = @min(tab_w, win_x + win_w - tab_x),
+        .h = tab_bar_height,
+    };
+}
+
+/// Pure tab cycle helper: given an array of tab items and currently active window ID,
+/// returns the next window ID in the group to activate.
+pub fn cycle_next_tab(tabs: []const TabItem, current_window_id: u8) ?u8 {
+    var parent: u8 = 0;
+    for (tabs) |t| {
+        if (t.window_id == current_window_id) {
+            parent = if (t.parent_id != 0) t.parent_id else t.window_id;
+            break;
+        }
+    }
+    if (parent == 0) return null;
+
+    var first_id: ?u8 = null;
+    var return_next = false;
+    for (tabs) |t| {
+        const item_parent = if (t.parent_id != 0) t.parent_id else t.window_id;
+        if (item_parent == parent) {
+            if (first_id == null) first_id = t.window_id;
+            if (return_next) return t.window_id;
+            if (t.window_id == current_window_id) return_next = true;
+        }
+    }
+    return first_id;
 }
 
 // ---------------------------------------------------------------------------
@@ -682,4 +750,28 @@ test "wnd_core: chrome descriptor is a flat 40-byte number struct (the frozen AB
     try std.testing.expectEqual(@as(u32, 0xef4444), p.close_rgb);
     try std.testing.expectEqual(@as(u32, 0x94a3b8), p.min_rgb);
     try std.testing.expectEqual(@as(u32, 0x38bdf8), p.pin_rgb);
+}
+
+test "wnd_core: tab item layout and cycle rules" {
+    // 1. Tab rects layout
+    const tr0 = tab_item_rect(100, 100, 300, 0, 3);
+    const tr1 = tab_item_rect(100, 100, 300, 1, 3);
+    const tr2 = tab_item_rect(100, 100, 300, 2, 3);
+    try std.testing.expectEqual(@as(u32, 100), tr0.x);
+    try std.testing.expectEqual(@as(u32, 200), tr1.x);
+    try std.testing.expectEqual(@as(u32, 300), tr2.x);
+    try std.testing.expectEqual(@as(u32, 100), tr0.w);
+    try std.testing.expectEqual(@as(u32, 22), tr0.h);
+
+    // 2. Tab cycling
+    const tabs = [_]TabItem{
+        .{ .window_id = 2, .parent_id = 0, .active = true },
+        .{ .window_id = 3, .parent_id = 2, .active = false },
+        .{ .window_id = 4, .parent_id = 2, .active = false },
+    };
+    try std.testing.expectEqual(@as(?u8, 3), cycle_next_tab(&tabs, 2));
+    try std.testing.expectEqual(@as(?u8, 4), cycle_next_tab(&tabs, 3));
+    try std.testing.expectEqual(@as(?u8, 2), cycle_next_tab(&tabs, 4));
+    // Non-tabbed window
+    try std.testing.expectEqual(@as(?u8, null), cycle_next_tab(&tabs, 5));
 }

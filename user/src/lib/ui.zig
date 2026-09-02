@@ -32,6 +32,11 @@ pub const WmRpc = extern struct {
 pub const wm_rpc_title_max: usize = 24;
 pub const wm_rpc_kind_raise: u8 = 1;
 pub const wm_rpc_kind_config: u8 = 2;
+pub const wm_rpc_kind_register_action: u8 = 3;
+pub const wm_rpc_kind_invoke_action: u8 = 4;
+pub const wm_rpc_kind_attach_tab: u8 = 5;
+pub const wm_rpc_kind_detach_tab: u8 = 6;
+pub const wm_rpc_kind_cycle_tab: u8 = 7;
 pub const wm_rpc_reply_flag: u8 = 0x80;
 pub const wm_rpc_max: usize = 64;
 
@@ -682,7 +687,7 @@ pub fn wm_mail_request(kind: u8, id: u32, x: u16, y: u16, w: u16, h: u16, title:
     // Await our own inbox for the ack (recv reads the CALLER's ring, so no
     // self-pid needed): a bounded poll over a sleep+yield.
     var tries: u32 = 0;
-    while (tries < 4000) : (tries += 1) {
+    while (tries < 200_000) : (tries += 1) {
         var raw: [wm_rpc_slot_bytes]u8 = undefined;
         const got = syscall2(sys_ipc_recv_num, @intFromPtr(&raw), raw.len);
         if (got >= @sizeOf(WmRpc)) {
@@ -720,6 +725,31 @@ pub fn wm_config(id: u32, x: u32, y: u32, w: u32, h: u32, self_name: []const u8)
     return syscall3(sys_win_move_num, id, x, y) == 0;
 }
 
+/// S1/S5 Action registry seam: register an action into section `section_id` for window `window_id`.
+pub fn wm_register_action(window_id: u32, section_id: u16, action_id: u16, label: []const u8, self_name: []const u8) bool {
+    return wm_mail_request(wm_rpc_kind_register_action, window_id, section_id, action_id, 0, 0, label, self_name, 1);
+}
+
+/// S5 Action registry seam: invoke a registered action.
+pub fn wm_invoke_action(label: []const u8, self_name: []const u8) bool {
+    return wm_mail_request(wm_rpc_kind_invoke_action, 0, 0, 0, 0, 0, label, self_name, 2);
+}
+
+/// S6 Tab model: attach window `child_id` as a tab of `parent_id`.
+pub fn wm_attach_tab(child_id: u32, parent_id: u32, self_name: []const u8) bool {
+    return wm_mail_request(wm_rpc_kind_attach_tab, child_id, @intCast(parent_id), 0, 0, 0, "", self_name, 3);
+}
+
+/// S6 Tab model: cycle active tab in the focused group.
+pub fn wm_cycle_tab(self_name: []const u8) bool {
+    return wm_mail_request(wm_rpc_kind_cycle_tab, 0, 0, 0, 0, 0, "", self_name, 4);
+}
+
+/// S6 Tab model: detach tab window `child_id` back to standalone.
+pub fn wm_detach_tab(child_id: u32, self_name: []const u8) bool {
+    return wm_mail_request(wm_rpc_kind_detach_tab, child_id, 0, 0, 0, 0, "", self_name, 5);
+}
+
 test "WMS7 Gate B: the toolkit WM_RPC wire mirror matches the frozen wnd_core ABI" {
     // The toolkit's mirror (user/src/lib/ui.zig) must stay byte-identical to
     // kernel/src/wnd_core.zig's WmRpc (the WM server parses this exact
@@ -728,6 +758,11 @@ test "WMS7 Gate B: the toolkit WM_RPC wire mirror matches the frozen wnd_core AB
     // is caught WITHOUT a VM.
     try std.testing.expectEqual(@as(u8, 1), wm_rpc_kind_raise);
     try std.testing.expectEqual(@as(u8, 2), wm_rpc_kind_config);
+    try std.testing.expectEqual(@as(u8, 3), wm_rpc_kind_register_action);
+    try std.testing.expectEqual(@as(u8, 4), wm_rpc_kind_invoke_action);
+    try std.testing.expectEqual(@as(u8, 5), wm_rpc_kind_attach_tab);
+    try std.testing.expectEqual(@as(u8, 6), wm_rpc_kind_detach_tab);
+    try std.testing.expectEqual(@as(u8, 7), wm_rpc_kind_cycle_tab);
     try std.testing.expectEqual(@as(u8, 0x80), wm_rpc_reply_flag);
     try std.testing.expectEqual(@as(u8, 24), wm_rpc_title_max);
     try std.testing.expectEqual(@as(usize, 64), wm_rpc_max);
