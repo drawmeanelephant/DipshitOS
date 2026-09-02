@@ -6,7 +6,7 @@
 - **Touches:** tests/wc.c (new — the app, written from the contract doc alone), user/src/wasm-corpus/wc.wasm (new pinned binary), user/src/wasm.zig (W5 host test: extend the HostCapture seam with a file-data simulation so the host test genuinely EXECUTES wc against the pinned bytes — parse → validate → instantiate → run, byte-exact output + exit = bytes; the capture already services env.write byte-exact), tools/verify-live-wasm.sh (W5 phase), docs/wasm-import-contract.md (§7 worked-author example + W5 provenance note), docs/wasm-core-scoping.md (W5 row when landed), docs/status.md (M35 row done), claim + branch log; claim id via `bash tools/status/claim-id.sh`
 - **Depends on:** W4 #765 (claim 7395, done 2026-09-02); W1a #778 contract
 - **Heartbeat:** 2026-09-02
-- **Status:** 🔄 agent/buffy2/m35-w5-wc-capstone
+- **Status:** ✅ DONE 2026-09-02 — wc capstone (issue #766) shipped and live-gated: tests/wc.c (written from the contract doc + virelai.h alone — the standalone-author provenance proof), pinned wc.wasm (b75c504d), 320-byte fixture cross-validated against host `wc`; live gate asserts `  8  32 320 /host/WC.TXT` + exit 320; contract §7 worked-author example landed. **Milestone #22 6/6.** Branch: `agent/buffy2/m35-w5-wc-capstone`
 
 ## Notes
 

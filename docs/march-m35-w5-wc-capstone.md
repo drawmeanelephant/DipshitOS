@@ -6,6 +6,13 @@ Tracker: `docs/wasm-core-scoping.md` card table. Baseline: W4 done
 (claim 7395) — f32/f64, sign-ext proof, bulk-memory 0xFC 8–11, floatapp
 live-gated; `user/src/wasm.zig` 38/38 host tests.
 
+> **STATUS: ✅ DONE 2026-09-02 — Milestone #22 6/6.** All slices landed
+> and live-gated: native cross-run caught two authoring slips (a
+> `put_pad` uninitialized-index bug and a 15-vs-14 length on the path
+> write) before anything was pinned; one gate boot hit the known M34
+> VZ-error flake (issue #803 class) and the rerun PASSed with all
+> needles green. See the claim log for the full evidence trail.
+
 ## Goal
 
 The milestone's payoff, per the issue: **a real tool — not a hello-world —

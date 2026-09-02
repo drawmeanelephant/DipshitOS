@@ -116,7 +116,7 @@ off-ramp possible without rework.
 | W2 | **First user surface + live proof** (#763) — `exec WASM.BIN <file>` (HF4 app delivery); module read through the file channel; class-B gate: host builds a C hello-world with `zig cc` (684 B), drops it in the share, guest runs it and the output is observed; `wasm run` monitor command optional/deferred | W1b | `tools/verify-live-wasm.sh` PASS on VZ: `write` import lands on the console byte-exact, `exit` status observed, shell alive |
 | W3 | **Import breadth** (#764) — the frozen syscall set (file, win, audio, clipboard, timers, mmap) behind `env.*` imports per the W1a contract; a wasm window app and a wasm file app; `virelai.h`/`virelai.zig` host shims | W2 + W1a | live gate: wasm window app's fill observed via the existing scanout/capture path; wasm file app's read verified byte-exact |
 | W4 | **Core completeness** (#765) — f32/f64, sign-extension ops, bulk-memory only as justified by the capstone; floats tied to a **named C float utility** (`zig cc`, pinned output) — not `wc`, which is integer-only | W3 | ✅ **DONE 2026-09-02** (claim 7395): named C float utility `tests/floatapp.c` pinned c963d5aa; live gate asserts five float opcode families byte-exact + exit 590; determinism fixtures extend `tests/wasm-corpus/` |
-| W5 | **The ecosystem capstone** (#766) — **`wc`**: byte/line/word counts via file-channel reads, byte-exact; shipped as an HF4 app; the import contract rewritten to standalone-author standard, proven by a fresh host author writing a working `virelai.h` program from the doc alone | W4 | the `wc` app ships and runs in a live gate with byte-exact counts; a second app written from the contract doc alone compiles and runs |
+| W5 | **The ecosystem capstone** (#766) — **`wc`**: byte/line/word counts via file-channel reads, byte-exact; shipped as an HF4 app; the import contract rewritten to standalone-author standard, proven by a fresh host author writing a working `virelai.h` program from the doc alone | W4 | ✅ **DONE 2026-09-02** (claim 5883): wc app (`tests/wc.c`, written from the contract doc + `virelai.h` alone), pinned `wc.wasm` (b75c504d) + 320-byte fixture; live-gate asserts the byte-exact count line, exit 320, shell echo — **Milestone #22 6/6** |
 
 W1b+W2 can be one claim if reviewers prefer a single vertical slice (the
 HF1+HF2 pattern — prove the whole concept in one PR); W1a is docs-only and
@@ -138,6 +138,21 @@ data segments. The named C float utility runs byte-exact in-guest: its
 status 590 in `tools/verify-live-wasm.sh`. Interpreter-side W4 surface:
 `user/src/wasm.zig` (+~600 lines over W3); WASM.BIN 63,456 B, inside the
 256 KiB loader budget.
+
+**What W5 landed (claim 5883, `docs/march-m35-w5-wc-capstone.md`):** the
+capstone — `wc` — a real tool ported to wasm via `zig cc` and shipped as
+an HF4 app. `tests/wc.c` was written from `docs/wasm-import-contract.md`
++ `tests/virelai.h` alone (the standalone-author provenance proof): reads
+`/host/WC.TXT` through `env.file_open/file_read/file_close` in 64-byte
+chunks, counts bytes/lines/words (the in-word state survives chunk seams),
+prints the classic right-aligned wc line byte-exact (`  8  32 320
+/host/WC.TXT` against the deterministic 320-byte fixture — counts
+cross-validated against host `wc`), exits 320. Pinned `wc.wasm`
+(b75c504d, rebuild-byte-identical); the host test executes wc end-to-end
+through a capture-seam file-channel simulation (a `HostCapture`
+extension) and the live gate proves the same bytes through the real
+guest path. Contract §7 gained the worked author example. **M35 is
+done — Milestone #22 6/6; the milestone closes with the branch's PR.**
 
 ## Risks and honest limits
 

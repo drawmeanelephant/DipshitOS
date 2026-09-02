@@ -285,6 +285,30 @@ capped at the interpreter level; `munmap` below tears down the arena.
 * **Drop & run:** copy `app.wasm` into the host share (`--cvc-file <dir>`) → guest `exec WASM.BIN app.wasm`. File paths resolve inside the share root; `write(1, ...)` (if used via the debug `env.write` shim) lands on the console byte-exact.
 * **Determinism:** modules are data — byte-identical input, deterministic traps. Gate fixtures pin stdout/exit/status exactly.
 
+### Worked example: the wc capstone (W5, #766 — what the sections above produced)
+
+The W5 provenance proof — a fresh host author, this document + `virelai.h`
+only — wrote [tests/wc.c](virelai.h) this way:
+
+* §5.1 rows for `env.file_open`/`file_read`/`file_close` gave the
+  signatures and semantics: open with `MODE_READ (0x1)` on a byte-slice
+  path (`path_ptr/path_len`, §3), read `n = file_read(fd, buf, cap)` with
+  `0` at EOF and caps clamped, negative returns are −errno (§4).
+* §3 said paths are byte strings (a `static const char path[]` + `sizeof-1`
+  slice), and §4 said never to touch a global errno — errors branch on the
+  negative return directly (`fd < 0`), with distinct exit statuses (41/42
+  mirroring fileapp's 31/32/33 discipline).
+* The read loop (`for (;;) { n = v_file_read(fd, g_buf, 64); if (n <= 0)
+  break; ... }`) is the §5.1 EOF contract in code; the in-word
+  whitespace state machine that survives chunk boundaries is tool
+  logic, not contract.
+* Compile line: `zig cc -target wasm32-freestanding -nostdlib
+  -fno-sanitize=undefined -g0 tests/wc.c -o wc.wasm`; `wasm-objdump -x`
+  shows exactly five imports — `env.file_open`, `env.write`, `env.exit`,
+  `env.file_close`, `env.file_read` — nothing else.
+* Deterministic pin: 320-byte fixture → `  8  32 320 /host/WC.TXT`, exit
+  320, asserted byte-exact by the class-B gate and the host test.
+
 ---
 
 ## 8. Normative references
@@ -295,4 +319,4 @@ capped at the interpreter level; `munmap` below tears down the arena.
 * ADR 0011 — window registry and compositor (§5.2).
 * `docs/wasm-core-scoping.md` — M35 gated card split (W1a/W1b/W2–W5) and proposal survey.
 
-W3 implementors: implement imports exactly as §5; W5 (`wc`) authors: use only §5.
+W3 implementors: implement imports exactly as §5; W5 (`wc`) authors: only §5 + this recipe were used — and nothing else was needed.

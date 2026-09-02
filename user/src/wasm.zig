@@ -2651,6 +2651,11 @@ const HostCapture = struct {
     log_count: usize = 0,
     returns: [cap_count]i64 = [_]i64{0} ** cap_count,
     out_fill: u8 = 0xA5,
+    // W5 (wc): when set, captured file_read serves bytes from file_data
+    // (0 at EOF, cap-clamped — contract §5 semantics) so a host test can
+    // execute a file-channel app end-to-end. file_pos advances per read.
+    file_data: []const u8 = &.{},
+    file_pos: usize = 0,
 
     fn logCall(c: *HostCapture, id: CapId, args: []const Value) void {
         if (c.log_count >= c.log.len) return;
@@ -2765,6 +2770,15 @@ fn dispatchImport(mm: *Machine, m: *const Module, imp_idx: u32, args: []const Va
         if (cap != 0 and !checkRange(mm, buf_ptr, cap)) return mkTrap(.bounds, mm.module_name, 0);
         if (g_capture) |c| {
             c.logCall(.file_read, args);
+            if (c.file_data.len > 0) {
+                if (c.file_pos < c.file_data.len) {
+                    const n = @min(@as(usize, cap), c.file_data.len - c.file_pos);
+                    stageOut(mm, buf_ptr, c.file_data[c.file_pos .. c.file_pos + n]);
+                    c.file_pos += n;
+                    return importRet(@intCast(n));
+                }
+                return importRet(0); // exhausted: EOF, exactly like the kernel
+            }
             return importRet(c.returns[@intFromEnum(CapId.file_read)]);
         }
         // Kernel slot 24: take_count = min(count, 2048); result copied out.
@@ -3940,4 +3954,55 @@ test "w4: floatapp fixture runs in-guest byte-exact (pinned output, exit = bytes
     try testing.expectEqualStrings(expected, cap.write_buf[0..cap.wrote]);
     try testing.expect(cap.exited);
     try testing.expectEqual(@as(i32, 590), cap.exit_status);
+}
+
+test "w5: wc capstone — byte/line/word counts run in-guest byte-exact (pinned)" {
+    // WC.WASM = the exact binary the class-B gate (tools/verify-live-wasm.sh
+    // W5 phase) drops into the share: tests/wc.c (written from the contract
+    // doc + tests/virelai.h alone — the standalone-author provenance proof)
+    // + tests/wc-fixture.txt (the gate's WC.TXT bytes, embedded verbatim
+    // below — 8 lines / 32 words / 320 bytes, cross-validated against host
+    // `wc`). The capture seam simulates the kernel file channel: file_open
+    // -> fd 0, file_read serves min(cap, remaining) chunks with 0 at EOF
+    // (contract §5.1), env.write captures the console byte-exact. Assert
+    // the exact wc line (right-aligned classic three-column shape) and exit
+    // status = 320 (the byte count — fileapp's length proof).
+    const fixture = @embedFile("wasm-corpus/wc.wasm");
+    const wc_txt =
+        "w5 wc capstone fixture\n" ++
+        "the quick brown fox\n" ++
+        "long-token-0001-abcdefghijklmnopqrstuvwxyz-this-token-is-longer-than-the-64-byte-reader-buffer-so-the-word-state-must-survive-the-chunk-seam\n" ++
+        "tab\tseparated\twords\n" ++
+        "crlf pairs end each line here\r\n" ++
+        "another line with trailing spaces   \n" ++
+        "  leading spaces too\n" ++
+        "last line ends with a word\n";
+    try testing.expectEqual(@as(usize, 320), wc_txt.len);
+    var m = try parse(fixture);
+    try validate(&m);
+    // Fresh memory is zero-initialized (the guest mmap provides it).
+    var store: [max_mem_pages * page_size]u8 = @splat(0);
+    try testing.expect(instantiate(&machine, &m, &store, "wc") == null);
+    var capture_buf: [512]u8 = undefined;
+    var cap = HostCapture{ .write_buf = &capture_buf, .file_data = wc_txt };
+    g_capture = &cap;
+    defer g_capture = null;
+    const entry = entryExport(&m).?;
+    const r = call(&machine, &m, entry, &.{});
+    switch (r) {
+        .ret => {},
+        .trap => try testing.expectEqual(TrapKind.guest_exit, r.trap.kind),
+    }
+    const expected = "  8  32 320 /host/WC.TXT\n";
+    try testing.expectEqual(@as(usize, expected.len), cap.wrote);
+    try testing.expectEqualStrings(expected, cap.write_buf[0..cap.wrote]);
+    try testing.expect(cap.exited);
+    try testing.expectEqual(@as(i32, 320), cap.exit_status);
+    // The file channel must be walked to EOF in chunks (320 / 64 = 5 data
+    // reads + the EOF probe returning 0).
+    var reads: usize = 0;
+    for (cap.log[0..cap.log_count]) |cl| {
+        if (cl.id == .file_read and cl.a[0] == 0) reads += 1;
+    }
+    try testing.expect(reads >= 5);
 }
