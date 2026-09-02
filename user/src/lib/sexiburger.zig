@@ -109,7 +109,7 @@ pub const SexiburgerMenu = struct {
         self.update_filter();
     }
 
-    fn update_filter(self: *SexiburgerMenu) void {
+    pub fn update_filter(self: *SexiburgerMenu) void {
         const q = self.get_search_query();
         self.filtered_count = self.registry.filter(q, &self.filtered);
         if (self.selected_filter_idx >= self.filtered_count and self.filtered_count > 0) {

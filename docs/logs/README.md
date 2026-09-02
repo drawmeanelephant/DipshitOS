@@ -64,6 +64,7 @@ meaningful — on main.
 | Branch | Log file |
 |--------|----------|
 | `freebuff/m22-lane-d-wave2` | [`0720-m22-lane-d-wave2.md`](0720-m22-lane-d-wave2.md) |
+| agent/antigravity/desktop-quality-821 | [`agent-antigravity-desktop-quality-821.md`](agent-antigravity-desktop-quality-821.md) |
 | agent/antigravity/in-guest-compiler | [`agent-antigravity-in-guest-compiler.md`](agent-antigravity-in-guest-compiler.md) |
 | agent/antigravity/raster-graphics-ui | [`agent-antigravity-raster-graphics-ui.md`](agent-antigravity-raster-graphics-ui.md) |
 | agent/antigravity/sexiburger | [`agent-antigravity-sexiburger.md`](agent-antigravity-sexiburger.md) |

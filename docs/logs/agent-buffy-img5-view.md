@@ -45,6 +45,16 @@
   deterministic fixtures (10/44 bytes) and force-add them to the branch so
   this claim's class-A test evidence is reproducible.
 
+- **2026-09-02** — *buffy (agent/buffy/img5-view)*: Merged origin/main
+  (PR #829 desktop-quality, #830 desktop-manifest-21, #831 indexes) into the
+  branch after the PR flagged CONFLICTING. Two content conflicts, both the
+  manifest-needle in tools/verify-live-desktop.sh + verify-live-file-browser.sh:
+  #830 had bumped 19 → 21 for main's 21-row APPS.TXT (closing #729); this
+  branch's row makes 22. Resolved to 22, folding #830's richer comment prose
+  (the M19 sexiburger rows, 5845d7f) plus the IMG5 VIEW.BIN note. No other
+  hunks conflicted; the coord/index regeneration tables from #831 merge
+  cleanly.
+
 - **2026-09-02** — *buffy (agent/buffy/img5-view)*: Class-A green — `zig
   build view` (VIEW.BIN, DSK3 segmented, bss tail 872 B) and `zig test
   user/src/view.zig` 81/81 (viewer pure-logic tests + transitively imported
