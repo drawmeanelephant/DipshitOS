@@ -1197,11 +1197,90 @@ pub fn draw_text_centered_large(win_id: u32, text: []const u8, rect: Rect, fg_rg
     draw_text_large(win_id, text, x, y, fg_rgb);
 }
 
-/// Blit raster image pixels to a window backing surface via win_fill_batched.
-/// Automatically skips fully transparent pixels (alpha == 0) and batches contiguous
-/// horizontal spans of identical RGB color into single fill rects to minimize syscalls.
+// ---------------------------------------------------------------------------
+// Window Backing Buffer Support & Raster Blitting
+// ---------------------------------------------------------------------------
+
+pub const WindowBacking = struct {
+    pixels: [*]u32,
+    width: u32,
+    height: u32,
+};
+
+const max_backing_windows: usize = 16;
+var window_backings: [max_backing_windows]?WindowBacking = [_]?WindowBacking{null} ** max_backing_windows;
+
+/// Associate a direct 32-bpp RGBA/RGBX backing buffer with a window ID.
+pub fn win_set_backing(win_id: u32, pixels: [*]u32, width: u32, height: u32) void {
+    if (win_id >= max_backing_windows) return;
+    window_backings[win_id] = .{
+        .pixels = pixels,
+        .width = width,
+        .height = height,
+    };
+}
+
+/// Disassociate any registered backing buffer for a window ID.
+pub fn win_clear_backing(win_id: u32) void {
+    if (win_id >= max_backing_windows) return;
+    window_backings[win_id] = null;
+}
+
+/// Retrieve the registered backing buffer for a window ID, if any.
+pub fn win_get_backing(win_id: u32) ?WindowBacking {
+    if (win_id >= max_backing_windows) return null;
+    return window_backings[win_id];
+}
+
+/// Standard Porter-Duff source-over alpha blending for 32-bpp 0xAARRGGBB pixels.
+pub fn blend_source_over(dst: u32, src: u32) u32 {
+    const src_a: u32 = (src >> 24) & 0xFF;
+    if (src_a == 0) return dst;
+    if (src_a == 255) return src;
+
+    const inv_a: u32 = 255 - src_a;
+    const src_r: u32 = (src >> 16) & 0xFF;
+    const src_g: u32 = (src >> 8) & 0xFF;
+    const src_b: u32 = src & 0xFF;
+
+    const dst_a: u32 = (dst >> 24) & 0xFF;
+    const dst_r: u32 = (dst >> 16) & 0xFF;
+    const dst_g: u32 = (dst >> 8) & 0xFF;
+    const dst_b: u32 = dst & 0xFF;
+
+    const out_r = (src_r * src_a + dst_r * inv_a) / 255;
+    const out_g = (src_g * src_a + dst_g * inv_a) / 255;
+    const out_b = (src_b * src_a + dst_b * inv_a) / 255;
+    const out_a = src_a + (dst_a * inv_a) / 255;
+
+    return (out_a << 24) | (out_r << 16) | (out_g << 8) | out_b;
+}
+
+/// Blit raster image pixels to a window backing surface.
+/// If a backing buffer is registered via win_set_backing, blends pixels directly
+/// with source-over alpha blending and boundary clipping.
+/// Otherwise, falls back to win_fill_batched span emission.
 pub fn draw_image(win_id: u32, x: u32, y: u32, img: image.Image) void {
     if (img.width == 0 or img.height == 0) return;
+    if (win_get_backing(win_id)) |backing| {
+        if (x >= backing.width or y >= backing.height) return;
+        const max_w = @min(img.width, backing.width - x);
+        const max_h = @min(img.height, backing.height - y);
+        var sy: u32 = 0;
+        while (sy < max_h) : (sy += 1) {
+            const dst_row = (y + sy) * backing.width + x;
+            var sx: u32 = 0;
+            while (sx < max_w) : (sx += 1) {
+                const px_ptr = img.pixel_at(sx, sy) orelse continue;
+                const src_px = px_ptr.*;
+                if (((src_px >> 24) & 0xFF) == 0) continue;
+                const dst_idx = dst_row + sx;
+                backing.pixels[dst_idx] = blend_source_over(backing.pixels[dst_idx], src_px);
+            }
+        }
+        return;
+    }
+
     var sy: u32 = 0;
     while (sy < img.height) : (sy += 1) {
         var sx: u32 = 0;
@@ -1228,8 +1307,34 @@ pub fn draw_image(win_id: u32, x: u32, y: u32, img: image.Image) void {
 }
 
 /// Draw a clipped raster image to a window, rendering only pixels that fall within clip.
+/// Uses direct backing buffer alpha blending when registered, otherwise batched fills.
 pub fn draw_image_clipped(win_id: u32, x: u32, y: u32, img: image.Image, clip: Rect) void {
     if (img.width == 0 or img.height == 0 or clip.w == 0 or clip.h == 0) return;
+    if (win_get_backing(win_id)) |backing| {
+        const clip_x0 = clip.x;
+        const clip_y0 = clip.y;
+        const clip_x1 = @min(clip.x + clip.w, backing.width);
+        const clip_y1 = @min(clip.y + clip.h, backing.height);
+        if (clip_x0 >= clip_x1 or clip_y0 >= clip_y1) return;
+
+        var sy: u32 = 0;
+        while (sy < img.height) : (sy += 1) {
+            const py = y + sy;
+            if (py < clip_y0 or py >= clip_y1) continue;
+            var sx: u32 = 0;
+            while (sx < img.width) : (sx += 1) {
+                const px_pos = x + sx;
+                if (px_pos < clip_x0 or px_pos >= clip_x1) continue;
+                const px_ptr = img.pixel_at(sx, sy) orelse continue;
+                const src_px = px_ptr.*;
+                if (((src_px >> 24) & 0xFF) == 0) continue;
+                const dst_idx = py * backing.width + px_pos;
+                backing.pixels[dst_idx] = blend_source_over(backing.pixels[dst_idx], src_px);
+            }
+        }
+        return;
+    }
+
     var sy: u32 = 0;
     while (sy < img.height) : (sy += 1) {
         const py = y + sy;
@@ -1262,8 +1367,30 @@ pub fn draw_image_clipped(win_id: u32, x: u32, y: u32, img: image.Image, clip: R
 }
 
 /// Nearest-neighbor scaled image blitting into target destination rectangle.
+/// Uses direct backing buffer alpha blending when registered, otherwise batched fills.
 pub fn draw_image_scaled(win_id: u32, dest: Rect, img: image.Image) void {
     if (dest.w == 0 or dest.h == 0 or img.width == 0 or img.height == 0) return;
+    if (win_get_backing(win_id)) |backing| {
+        if (dest.x >= backing.width or dest.y >= backing.height) return;
+        const max_w = @min(dest.w, backing.width - dest.x);
+        const max_h = @min(dest.h, backing.height - dest.y);
+        var dy: u32 = 0;
+        while (dy < max_h) : (dy += 1) {
+            const sy = (dy * img.height) / dest.h;
+            const dst_row = (dest.y + dy) * backing.width + dest.x;
+            var dx: u32 = 0;
+            while (dx < max_w) : (dx += 1) {
+                const sx = (dx * img.width) / dest.w;
+                const px_ptr = img.pixel_at(sx, sy) orelse continue;
+                const src_px = px_ptr.*;
+                if (((src_px >> 24) & 0xFF) == 0) continue;
+                const dst_idx = dst_row + dx;
+                backing.pixels[dst_idx] = blend_source_over(backing.pixels[dst_idx], src_px);
+            }
+        }
+        return;
+    }
+
     var dy: u32 = 0;
     while (dy < dest.h) : (dy += 1) {
         const sy = (dy * img.height) / dest.h;
@@ -4050,4 +4177,84 @@ test "ui: draw_image_clipped and draw_image_scaled" {
     // 4 rows of 1 span each = 4 spans
     try std.testing.expectEqual(4 * FILL_RECT_SIZE, fill_batcher.len);
     fill_batcher.reset();
+}
+
+test "ui: blend_source_over arithmetic" {
+    // 1. Transparent source: preserves destination
+    try std.testing.expectEqual(@as(u32, 0xFF112233), blend_source_over(0xFF112233, 0x00AABBCC));
+
+    // 2. Fully opaque source: completely replaces destination
+    try std.testing.expectEqual(@as(u32, 0xFFAABBCC), blend_source_over(0xFF112233, 0xFFAABBCC));
+
+    // 3. Partial alpha blending (50% red over black)
+    const blended = blend_source_over(0xFF000000, 0x80FF0000);
+    const r = (blended >> 16) & 0xFF;
+    const g = (blended >> 8) & 0xFF;
+    const b = blended & 0xFF;
+    const a = (blended >> 24) & 0xFF;
+    try std.testing.expect(r >= 127 and r <= 129);
+    try std.testing.expectEqual(@as(u32, 0), g);
+    try std.testing.expectEqual(@as(u32, 0), b);
+    try std.testing.expectEqual(@as(u32, 255), a);
+}
+
+test "ui: direct backing buffer draw_image with alpha blit and clipping" {
+    var buf = [_]u32{0xFF000000} ** (10 * 10);
+    win_set_backing(7, &buf, 10, 10);
+    defer win_clear_backing(7);
+
+    try std.testing.expect(win_get_backing(7) != null);
+    try std.testing.expectEqual(@as(u32, 10), win_get_backing(7).?.width);
+
+    var raw_src = [_]u32{
+        0x80FF0000, 0x8000FF00,
+        0x00000000, 0xFF0000FF,
+    };
+    const src_img = Image{ .width = 2, .height = 2, .pixels = &raw_src };
+
+    // Blit at (2, 3)
+    draw_image(7, 2, 3, src_img);
+
+    // Pixel at (2, 3) is 50% red over black -> ~0xFF800000
+    const p0 = buf[3 * 10 + 2];
+    try std.testing.expect(((p0 >> 16) & 0xFF) >= 127 and ((p0 >> 16) & 0xFF) <= 129);
+
+    // Pixel at (3, 3) is 50% green over black -> ~0xFF008000
+    const p1 = buf[3 * 10 + 3];
+    try std.testing.expect(((p1 >> 8) & 0xFF) >= 127 and ((p1 >> 8) & 0xFF) <= 129);
+
+    // Pixel at (2, 4) is 0% alpha -> remains unchanged (0xFF000000)
+    try std.testing.expectEqual(@as(u32, 0xFF000000), buf[4 * 10 + 2]);
+
+    // Pixel at (3, 4) is 100% blue -> becomes 0xFF0000FF
+    try std.testing.expectEqual(@as(u32, 0xFF0000FF), buf[4 * 10 + 3]);
+
+    // Test clipping: draw clipped to (2, 3, 1, 1) -> only (2, 3) blitted
+    buf = [_]u32{0xFF000000} ** (10 * 10);
+    draw_image_clipped(7, 2, 3, src_img, Rect.make(2, 3, 1, 1));
+    try std.testing.expect(((buf[3 * 10 + 2] >> 16) & 0xFF) >= 127);
+    try std.testing.expectEqual(@as(u32, 0xFF000000), buf[3 * 10 + 3]); // clipped out
+}
+
+test "ui: direct backing buffer draw_image_scaled" {
+    var buf = [_]u32{0xFF000000} ** (8 * 8);
+    win_set_backing(8, &buf, 8, 8);
+    defer win_clear_backing(8);
+
+    var raw_src = [_]u32{
+        0xFFFF0000, 0xFF00FF00,
+        0xFF0000FF, 0xFFFFFFFF,
+    };
+    const src_img = Image{ .width = 2, .height = 2, .pixels = &raw_src };
+
+    // Scale 2x2 to 4x4 placed at (2, 2)
+    draw_image_scaled(8, Rect.make(2, 2, 4, 4), src_img);
+
+    // Check quadrant 1 (top-left: (2..3, 2..3)) is red
+    try std.testing.expectEqual(@as(u32, 0xFFFF0000), buf[2 * 8 + 2]);
+    try std.testing.expectEqual(@as(u32, 0xFFFF0000), buf[3 * 8 + 3]);
+
+    // Check quadrant 2 (top-right: (4..5, 2..3)) is green
+    try std.testing.expectEqual(@as(u32, 0xFF00FF00), buf[2 * 8 + 4]);
+    try std.testing.expectEqual(@as(u32, 0xFF00FF00), buf[3 * 8 + 5]);
 }

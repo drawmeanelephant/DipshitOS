@@ -106,6 +106,10 @@ gate_seed_share() {
     if [ -f image/apps.txt ]; then
         cp image/apps.txt "$SHARE/APPS.TXT"
     fi
+    # 4. The default desktop wallpaper (the guest reads /host/WALLPAPER.QOI).
+    if [ -f image/WALLPAPER.QOI ]; then
+        cp image/WALLPAPER.QOI "$SHARE/WALLPAPER.QOI"
+    fi
     GATE_RUNNER_ARGS+=(--cvc-file "$SHARE")
     echo "gate-run: share seeded at $SHARE ($(find "$SHARE" -maxdepth 1 -type f | wc -l | tr -d ' ') files, $(grep -cE '^[A-Z]' "$SHARE/APPS.TXT" 2>/dev/null || echo 0) APPS.TXT entries)"
 }

@@ -119,6 +119,8 @@ if [ "$RC_A" = 0 ] && [ -f "$SER_A" ]; then
     # policy + per-window chrome kinds are visible (issue #624).
     SUBS="$(grep -aom1 -- 'wm: chrome submissions=[0-9]\+' "$SER_A" | grep -ao '[0-9]\+' || true)"
     POL="$(grep -aom1 -- 'policy_kind=0x[0-9a-f]\+' "$SER_A" | grep -ao '0x[0-9a-f]\+' || true)"
+    SUBS="${SUBS:-0}"
+    POL="${POL:-none}"
     OBS_OK=0
     if [ "$SUBS" -ge 1 ] && [ "$POL" = "0x3f" ] && grep -a -qF 'wm: chrome window id=' "$SER_A" && grep -a -qF 'kind=0x3f' "$SER_A"; then
         OBS_OK=1
