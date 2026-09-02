@@ -42,10 +42,16 @@ injection (claim 9367, issue #151), and the synthesized-keyboard `events=0`
 report is fixed by the headless virtio input channel (claims 9588/0680,
 issue #179). The project is now **VirelaiOS** (ADR 0017 ACCEPTED 2026-08-31,
 issue #676 — the DipshitOS name is retired to `docs/archive/dipshitos-name.md`
-and history). **M33 (seam B — full pixel ownership) is in progress** — SB1–SB4
-landed (ADR 0016 ACCEPTED, shared-anon mmap, surface handoff, damage
-tracking). For the canonical, always-current answer to "where are we, and
-what's next", read `docs/status.md`.
+and history). **M33 (seam B — full pixel ownership) done 2026-08-31**
+(SB1–SB6: ADR 0016 ACCEPTED, shared-anon mmap, surface handoff, damage
+tracking, WM compose-N, perf payoff — GH milestone 17 closed); **M34
+(FAT-free storage — the host file channel, issue #727) done 2026-09-02 —
+GH milestone 21 closed 8/8** (HF1–HF7, PRs #745/#747/#749/#792/#806/#816,
+including the HF7 CLONE COW dedup work); M35 (WASM core) done 2026-09-02
+(6/6, GH milestone 22). The open flake tracked: #810 (boot-probe S1PTW
+walk window; self-decoding instrumentation + claim 9094). For the
+canonical, always-current answer to "where are we, and what's next", read
+`docs/status.md`.
 
 ## Milestone scope rules
 
