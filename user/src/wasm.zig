@@ -939,7 +939,7 @@ fn validateOp(
             try vpop(vs, ctl[0..ctl_len.*], .i32);
             if (m.table_count == 0) return error.TableRequired;
             const ti = try body.uleb();
-            _ = try body.u8_(); // reserved table index byte
+            _ = try body.uleb(); // tableidx — U32 LEB (wasm 2.0; wasm-ld emits legal overlong encodings)
             if (ti >= m.type_count) return error.UnknownType;
             const callee = &m.types[ti];
             try vpopAll(vs, ctl[0..ctl_len.*], callee.params[0..callee.param_count]);
@@ -998,14 +998,14 @@ fn validateOp(
             try vpop(vs, ctl[0..ctl_len.*], storeType(op));
             try vpop(vs, ctl[0..ctl_len.*], .i32);
         },
-        0x3F => { // memory.size
+        0x3F => { // memory.size: memidx U32 LEB (wasm 2.0)
             if (!m.has_memory) return error.MemoryRequired;
-            _ = try body.u8_();
+            _ = try body.uleb();
             try vpush(vs, .i32);
         },
-        0x40 => { // memory.grow
+        0x40 => { // memory.grow: memidx U32 LEB (wasm 2.0)
             if (!m.has_memory) return error.MemoryRequired;
-            _ = try body.u8_();
+            _ = try body.uleb();
             try vpop(vs, ctl[0..ctl_len.*], .i32);
             try vpush(vs, .i32);
         },
@@ -1102,7 +1102,7 @@ fn validateOp(
                     if (!m.has_datacount) return error.DataCountMissing;
                     const didx = try body.uleb();
                     if (didx >= m.data_count_decl) return error.IndexOutOfRange;
-                    _ = try body.u8_(); // memidx (0)
+                    _ = try body.uleb(); // memidx U32 LEB
                     if (!m.has_memory) return error.MemoryRequired;
                     try vpop(vs, ctl[0..ctl_len.*], .i32);
                     try vpop(vs, ctl[0..ctl_len.*], .i32);
@@ -1113,17 +1113,17 @@ fn validateOp(
                     const didx = try body.uleb();
                     if (didx >= m.data_count_decl) return error.IndexOutOfRange;
                 },
-                10 => { // memory.copy: memidx memidx; [dst src n] -> []
+                10 => { // memory.copy: dst-memidx src-memidx (U32 LEBs); [dst src n] -> []
                     if (!m.has_memory) return error.MemoryRequired;
-                    _ = try body.u8_();
-                    _ = try body.u8_();
+                    _ = try body.uleb();
+                    _ = try body.uleb();
                     try vpop(vs, ctl[0..ctl_len.*], .i32);
                     try vpop(vs, ctl[0..ctl_len.*], .i32);
                     try vpop(vs, ctl[0..ctl_len.*], .i32);
                 },
-                11 => { // memory.fill: memidx; [dst val n] -> []
+                11 => { // memory.fill: memidx U32 LEB; [dst val n] -> []
                     if (!m.has_memory) return error.MemoryRequired;
-                    _ = try body.u8_();
+                    _ = try body.uleb();
                     try vpop(vs, ctl[0..ctl_len.*], .i32);
                     try vpop(vs, ctl[0..ctl_len.*], .i32);
                     try vpop(vs, ctl[0..ctl_len.*], .i32);
@@ -1421,10 +1421,13 @@ fn skipInstr(body: []const u8, pc: usize) usize {
             _ = readUlebRaw(body, &p);
             break :blk p;
         },
-        0x10, 0x11 => pc + 1 + lebLen(body, pc + 1) + @as(usize, @intFromBool(op == 0x11)),
+        0x10 => pc + 1 + lebLen(body, pc + 1),
+        // call_indirect: typeidx U32 LEB + tableidx U32 LEB (wasm 2.0 —
+        // wasm-ld emits legal overlong encodings, so both must be LEBs)
+        0x11 => pc + 1 + lebLen(body, pc + 1) + lebLen(body, pc + 1 + lebLen(body, pc + 1)),
         0x20...0x24 => pc + 1 + lebLen(body, pc + 1),
         0x28...0x3E => pc + 1 + lebLen(body, pc + 1) + lebLen(body, pc + 1 + lebLen(body, pc + 1)),
-        0x3F, 0x40 => pc + 2, // memory.size/grow: one reserved byte
+        0x3F, 0x40 => pc + 1 + lebLen(body, pc + 1), // memory.size/grow: memidx U32 LEB
         0x41, 0x42 => blk: {
             var p = pc + 1;
             while (p < body.len and body[p] & 0x80 != 0) p += 1;
@@ -1436,15 +1439,20 @@ fn skipInstr(body: []const u8, pc: usize) usize {
             var p = pc + 1;
             const sub = readUlebRaw(body, &p);
             switch (sub) {
-                8 => { // memory.init: dataidx uleb + memidx byte
+                8 => { // memory.init: dataidx U32 LEB + memidx U32 LEB
                     _ = readUlebRaw(body, &p);
-                    p += 1;
-                },
-                9 => { // data.drop: dataidx uleb
                     _ = readUlebRaw(body, &p);
                 },
-                10 => p += 2, // memory.copy: memidx memidx
-                11 => p += 1, // memory.fill: memidx
+                9 => { // data.drop: dataidx U32 LEB
+                    _ = readUlebRaw(body, &p);
+                },
+                10 => { // memory.copy: dst memidx + src memidx (U32 LEBs)
+                    _ = readUlebRaw(body, &p);
+                    _ = readUlebRaw(body, &p);
+                },
+                11 => { // memory.fill: memidx U32 LEB
+                    _ = readUlebRaw(body, &p);
+                },
                 else => {}, // trunc 0..7 and table ops carry no scanner-relevant extras
             }
             break :blk p;
@@ -1654,7 +1662,7 @@ fn execBody(mm: *Machine, m: *const Module, ft0: *const FuncType) CallResult {
             },
             0x11 => { // call_indirect
                 const ti = body.uleb() catch return mkTrap(.bounds, mm.module_name, op_off);
-                _ = body.u8_() catch return mkTrap(.bounds, mm.module_name, op_off);
+                _ = body.uleb() catch return mkTrap(.bounds, mm.module_name, op_off);
                 if (ti >= m.type_count) return mkTrap(.bounds, mm.module_name, op_off);
                 const expected = &m.types[ti];
                 const tbl_idx = popVal(mm).i32;
@@ -1730,11 +1738,11 @@ fn execBody(mm: *Machine, m: *const Module, ft0: *const FuncType) CallResult {
                 storeMem(mm, op, addr, off, v) catch return mkTrap(.bounds, mm.module_name, op_off);
             },
             0x3F => { // memory.size
-                _ = body.u8_() catch return mkTrap(.bounds, mm.module_name, op_off);
+                _ = body.uleb() catch return mkTrap(.bounds, mm.module_name, op_off);
                 tryPush(mm, .{ .i32 = @intCast(mm.mem_pages) }) catch return mkTrap(.stack_overflow, mm.module_name, op_off);
             },
             0x40 => { // memory.grow
-                _ = body.u8_() catch return mkTrap(.bounds, mm.module_name, op_off);
+                _ = body.uleb() catch return mkTrap(.bounds, mm.module_name, op_off);
                 const delta = @as(u32, @bitCast(popVal(mm).i32));
                 const cur = mm.mem_pages;
                 const new = cur +% delta;
@@ -1823,7 +1831,7 @@ fn execBody(mm: *Machine, m: *const Module, ft0: *const FuncType) CallResult {
                     },
                     8 => { // memory.init didx memidx: (dst src n), src in segment didx
                         const didx = body.uleb() catch return mkTrap(.bounds, mm.module_name, op_off);
-                        _ = body.u8_() catch return mkTrap(.bounds, mm.module_name, op_off);
+                        _ = body.uleb() catch return mkTrap(.bounds, mm.module_name, op_off);
                         const n = @as(u32, @bitCast(popVal(mm).i32));
                         const src = @as(u32, @bitCast(popVal(mm).i32));
                         const dst = @as(u32, @bitCast(popVal(mm).i32));
@@ -1845,8 +1853,8 @@ fn execBody(mm: *Machine, m: *const Module, ft0: *const FuncType) CallResult {
                         mm.data_dropped[didx] = true;
                     },
                     10 => { // memory.copy: (dst src n), memmove semantics
-                        _ = body.u8_() catch return mkTrap(.bounds, mm.module_name, op_off);
-                        _ = body.u8_() catch return mkTrap(.bounds, mm.module_name, op_off);
+                        _ = body.uleb() catch return mkTrap(.bounds, mm.module_name, op_off);
+                        _ = body.uleb() catch return mkTrap(.bounds, mm.module_name, op_off);
                         const n = @as(u32, @bitCast(popVal(mm).i32));
                         const src = @as(u32, @bitCast(popVal(mm).i32));
                         const dst = @as(u32, @bitCast(popVal(mm).i32));
@@ -1861,7 +1869,7 @@ fn execBody(mm: *Machine, m: *const Module, ft0: *const FuncType) CallResult {
                         }
                     },
                     11 => { // memory.fill: (dst val n)
-                        _ = body.u8_() catch return mkTrap(.bounds, mm.module_name, op_off);
+                        _ = body.uleb() catch return mkTrap(.bounds, mm.module_name, op_off);
                         const n = @as(u32, @bitCast(popVal(mm).i32));
                         const val = @as(u32, @bitCast(popVal(mm).i32));
                         const dst = @as(u32, @bitCast(popVal(mm).i32));
@@ -3626,6 +3634,29 @@ test "exec: call_indirect type-check traps on mismatch" {
     try testing.expectEqual(TrapKind.bounds, oob.trap.kind);
 }
 
+test "exec: overlong-LEB call_indirect immediates stay in sync (claim 9746 find)" {
+    // Same module as the type-check test above, but wasm-ld/LLVM encoded
+    // call_indirect's TWO U32 immediates as legal overlong 5-byte LEBs
+    // (`11 80 80 80 80 00 80 80 80 80 00`). The interpreter used to read
+    // the tableidx as ONE byte, desynced into the middle of the LEB, and
+    // misread 0x80 (i64.div_u) as the next opcode on an empty stack — a
+    // false TypeMismatch at validate. rustc-built modules (claim 9746's
+    // nl.wasm) carry exactly this encoding; clang/zig-cc emit minimal
+    // LEBs so the W2-W5 C fixtures never exposed it. Validate must
+    // consume BOTH LEBs and the dispatch must still work.
+    const bytes = "\x00\x61\x73\x6d\x01\x00\x00\x00\x01\x0f\x03\x60\x01\x7e\x01\x7e\x60\x00\x00\x60\x02\x7f\x7e\x01\x7e\x03\x04\x03\x00\x01\x02\x04\x04\x01\x70\x00\x02\x07\x12\x03\x01\x66\x00\x00\x01\x67\x00\x01\x06\x63\x61\x6c\x6c\x69\x74\x00\x02\x09\x08\x01\x00\x41\x00\x0b\x02\x00\x01\x0a\x1e\x03\x07\x00\x20\x00\x42\x01\x7c\x0b\x02\x00\x0b\x11\x00\x20\x01\x20\x00\x11\x80\x80\x80\x80\x00\x80\x80\x80\x80\x00\x0b";
+    var m = try parse(bytes);
+    try validate(&m);
+    var store: [page_size]u8 = undefined;
+    try testing.expect(instantiate(&machine, &m, &store, "ciover") == null);
+    const ok = call(&machine, &m, 2, &.{ .{ .i32 = 0 }, .{ .i64 = 41 } });
+    try testing.expect(ok == .ret);
+    try testing.expectEqual(@as(i64, 42), ok.ret.vals[0].i64);
+    const bad = call(&machine, &m, 2, &.{ .{ .i32 = 1 }, .{ .i64 = 0 } });
+    try testing.expect(bad == .trap);
+    try testing.expectEqual(TrapKind.call_indirect_type, bad.trap.kind);
+}
+
 test "corpus: hand-built fixture executes deterministically (byte-identical output)" {
     // The committed corpus module: user/src/wasm-corpus/fib-loop.wasm — the
     // same loop+br_if structure as the factorial test, selected by the
@@ -3998,6 +4029,69 @@ test "w5: wc capstone — byte/line/word counts run in-guest byte-exact (pinned)
     try testing.expectEqualStrings(expected, cap.write_buf[0..cap.wrote]);
     try testing.expect(cap.exited);
     try testing.expectEqual(@as(i32, 320), cap.exit_status);
+    // The file channel must be walked to EOF in chunks (320 / 64 = 5 data
+    // reads + the EOF probe returning 0).
+    var reads: usize = 0;
+    for (cap.log[0..cap.log_count]) |cl| {
+        if (cl.id == .file_read and cl.a[0] == 0) reads += 1;
+    }
+    try testing.expect(reads >= 5);
+}
+
+test "xl: rustc-authored nl fixture runs in-guest byte-exact (pinned)" {
+    // NL.WASM = the exact binary the class-B gate (tools/verify-live-wasm.sh
+    // cross-language phase, claim 9746) drops into the share:
+    // tests/nl.rs — a numbered-lines tool AUTHORED IN RUST from
+    // docs/wasm-import-contract.md alone (no virelai header, no WAT) and
+    // compiled `rustc --crate-type=cdylib --target wasm32-unknown-unknown
+    // -O -C strip=debuginfo`, rebuild-byte-identical (sha 34f02644). Its
+    // imports are exactly env.write/exit/file_open/file_read/file_close.
+    // Reads the SAME /host/WC.TXT the w5 test simulates, in 64-byte
+    // chunks, prints each line right-aligned %6d + two spaces (CRLF
+    // tolerant — the \r line of the fixture is terminator, not content),
+    // exits with the total output byte count (383). Cross-validated
+    // against an independent Python reimplementation of the fixture split
+    // AND the native cross-run of the same source.
+    const fixture = @embedFile("wasm-corpus/nl.wasm");
+    const wc_txt =
+        "w5 wc capstone fixture\n" ++
+        "the quick brown fox\n" ++
+        "long-token-0001-abcdefghijklmnopqrstuvwxyz-this-token-is-longer-than-the-64-byte-reader-buffer-so-the-word-state-must-survive-the-chunk-seam\n" ++
+        "tab\tseparated\twords\n" ++
+        "crlf pairs end each line here\r\n" ++
+        "another line with trailing spaces   \n" ++
+        "  leading spaces too\n" ++
+        "last line ends with a word\n";
+    try testing.expectEqual(@as(usize, 320), wc_txt.len);
+    var m = try parse(fixture);
+    try validate(&m);
+    // Fresh memory is zero-initialized (the guest mmap provides it).
+    var store: [max_mem_pages * page_size]u8 = @splat(0);
+    try testing.expect(instantiate(&machine, &m, &store, "nl") == null);
+    var capture_buf: [1024]u8 = undefined;
+    var cap = HostCapture{ .write_buf = &capture_buf, .file_data = wc_txt };
+    g_capture = &cap;
+    defer g_capture = null;
+    const entry = entryExport(&m).?;
+    const r = call(&machine, &m, entry, &.{});
+    switch (r) {
+        .ret => {},
+        .trap => try testing.expectEqual(TrapKind.guest_exit, r.trap.kind),
+    }
+    const expected =
+        "     1  w5 wc capstone fixture\n" ++
+        "     2  the quick brown fox\n" ++
+        "     3  long-token-0001-abcdefghijklmnopqrstuvwxyz-this-token-is-longer-than-the-64-byte-reader-buffer-so-the-word-state-must-survive-the-chunk-seam\n" ++
+        "     4  tab\tseparated\twords\n" ++
+        "     5  crlf pairs end each line here\n" ++
+        "     6  another line with trailing spaces   \n" ++
+        "     7    leading spaces too\n" ++
+        "     8  last line ends with a word\n";
+    try testing.expectEqual(@as(usize, 383), expected.len);
+    try testing.expectEqual(@as(usize, expected.len), cap.wrote);
+    try testing.expectEqualStrings(expected, cap.write_buf[0..cap.wrote]);
+    try testing.expect(cap.exited);
+    try testing.expectEqual(@as(i32, 383), cap.exit_status);
     // The file channel must be walked to EOF in chunks (320 / 64 = 5 data
     // reads + the EOF probe returning 0).
     var reads: usize = 0;

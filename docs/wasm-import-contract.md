@@ -281,8 +281,40 @@ capped at the interpreter level; `munmap` below tears down the arena.
 
 ## 7. Verification & author recipe
 
-* **Compile C:** `zig cc -target wasm32-freestanding -nostdlib -I . app.c virelai.c -o app.wasm` (or Rust `rustc --target wasm32-unknown-unknown` with the `virelai.zig` shim). Inspect with `wasm-objdump -x app.wasm` — imports must be exactly `env.*` from §5.
-* **Drop & run:** copy `app.wasm` into the host share (`--cvc-file <dir>`) → guest `exec WASM.BIN app.wasm`. File paths resolve inside the share root; `write(1, ...)` (if used via the debug `env.write` shim) lands on the console byte-exact.
+Three host toolchains can author against this contract — the §1 shims are
+spelling, the tables above are the ABI, and a module built by ANY of them
+must import exactly `env.*` (the interpreter validates that). Inspect with
+`wasm-objdump -x app.wasm` — imports must be exactly the `env.*` names
+from §5 (+ the §7 write/exit debug pair).
+
+* **Compile C:** `zig cc -target wasm32-freestanding -nostdlib
+  -fno-sanitize=undefined -g0 -I tests app.c -o app.wasm` — the app
+  `#include "virelai.h"` and links alone (no `virelai.c` exists; the
+  header carries the `import_module`/`import_name` attributes).
+* **Compile Zig** (the `virelai.zig` shim, claim 9746): the app
+  `const v = @import("virelai.zig");` and uses `v.write`/`v.exit`/
+  `v.file_open`/… — the shim declares `pub extern "env" fn write(…)`,
+  and on wasm Zig lowers that to an import from module `env` under the
+  DECLARATION's name, so the decls carry the bare contract names.
+  Build with `zig build-exe -target wasm32-freestanding -O ReleaseSmall
+  -fstrip app.zig -o app.wasm` and export `_start` yourself (`export fn
+  _start()` — the symbol wasm-ld wants as its entry). Compile-proven by
+  `zig build shim-check` (tests/virelai-probe.zig, import table exactly
+  the frozen 30).
+* **Compile Rust** (no shared header — the app spells §5 directly,
+  claim 9746): `#![no_std]` + `#[link(wasm_import_module = "env")]
+  extern "C" { fn write(fd: i32, buf: *const u8, n: u32) -> i32; … }`
+  declarations written from the tables above, a `#[no_mangle] pub
+  extern "C" fn _start()`, and a `#[panic_handler]`. Build with
+  `rustc --crate-type=cdylib --target wasm32-unknown-unknown -O -C
+  strip=debuginfo app.rs -o app.wasm` (the strip drops rustc's DWARF
+  custom sections — without it the module is ~600 KB; strip → ~6 KB,
+  inside the interpreter's 64-KiB module budget). rustc/wasm-ld emit
+  call_indirect's tableidx as legal overlong 5-byte LEBs; the
+  interpreter parses those (claim 9746 regression test). Proven live by
+  `tests/nl.rs` → `NL.WASM` (pinned 34f02644): numbered lines over
+  WC.TXT byte-exact, exit 383.
+* **Drop & run:** copy `app.wasm` into the host share (`--cvc-file <dir>`) → guest `exec WASM.BIN app.wasm`. File paths resolve inside the share root; `write(1, ...)` lands on the console byte-exact.
 * **Determinism:** modules are data — byte-identical input, deterministic traps. Gate fixtures pin stdout/exit/status exactly.
 
 ### Worked example: the wc capstone (W5, #766 — what the sections above produced)

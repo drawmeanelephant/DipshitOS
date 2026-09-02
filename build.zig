@@ -1043,13 +1043,14 @@ pub fn build(b: *std.Build) void {
     const install_wasm = b.addInstallFileWithDir(wasm_bin, .bin, "WASM.BIN");
     b.getInstallStep().dependOn(&install_wasm.step);
 
-    // M35 W3 (#764): the virelai.h host-author shim probe. `zig build
-    // shim-check` compiles tests/virelai-probe.c with the HOST zig cc to a
-    // wasm32 module and asserts its import table is exactly the frozen
+    // M35 W3 (#764) + claim 4912: the virelai.h / virelai.zig host-author
+    // shim probes. `zig build shim-check` compiles tests/virelai-probe.c
+    // (zig cc) AND tests/virelai-probe.zig (zig build-exe) to wasm32
+    // modules and asserts each import table is exactly the frozen
     // env.* surface (contract §5 + the W2 write/exit pair) — the W3
     // acceptance item "the shim compiles a host program against the
-    // contract alone", class-A reproducible.
-    const shim_step = b.step("shim-check", "Compile tests/virelai-probe.c and assert the frozen env.* import table");
+    // contract alone", class-A reproducible, for both languages.
+    const shim_step = b.step("shim-check", "Compile the virelai.h/virelai.zig probes and assert the frozen env.* import table");
     const shim_cc = b.addSystemCommand(&.{ "zig", "cc", "-target", "wasm32-freestanding", "-nostdlib", "-fno-sanitize=undefined", "-g0", "-I", "tests" });
     shim_cc.addFileArg(b.path("tests/virelai-probe.c"));
     shim_cc.addArg("-o");
@@ -1060,6 +1061,28 @@ pub fn build(b: *std.Build) void {
     shim_check.has_side_effects = true;
     shim_check.stdio = .inherit;
     shim_step.dependOn(&shim_check.step);
+
+    // Zig shim probe: tests/virelai-probe.zig against tests/virelai.zig,
+    // built with the Zig author recipe (zig build-exe, wasm32-freestanding,
+    // ReleaseSmall) and run through the SAME import-table verifier.
+    const wasm32_target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .freestanding,
+    });
+    const zig_probe = b.addExecutable(.{
+        .name = "virelai-probe-zig",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/virelai-probe.zig"),
+            .target = wasm32_target,
+            .optimize = .ReleaseSmall,
+            .strip = true,
+        }),
+    });
+    const zig_shim_check = b.addSystemCommand(&.{ "python3", "tools/verify-virelai-probe.py" });
+    zig_shim_check.addFileArg(zig_probe.getEmittedBin());
+    zig_shim_check.has_side_effects = true;
+    zig_shim_check.stdio = .inherit;
+    shim_step.dependOn(&zig_shim_check.step);
 
     // ------------------------------------------------------------------
     // Guest: thirty-third ESP user program (M22 D6 — issue #329) PS.BIN.

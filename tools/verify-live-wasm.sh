@@ -50,6 +50,28 @@
 #      against the deterministic 320-byte fixture, counts cross-validated
 #      against host `wc`), exits 320 (the byte count).
 #
+# Post-M35 cross-language phase (claim 9746 — the contract's own promises
+# in §1/§7 made real):
+#   5d. `exec WASM.BIN NL.WASM` (script3 phase, after the winapp exits) —
+#      a numbered-lines tool AUTHORED IN RUST (tests/nl.rs, no virelai
+#      header, no WAT) from docs/wasm-import-contract.md alone and
+#      compiled with `rustc --crate-type=cdylib --target
+#      wasm32-unknown-unknown -O -C strip=debuginfo` — imports exactly
+#      env.write/exit/file_open/file_read/file_close; pinned 34f02644
+#      (rebuild-byte-identical). It reads the SAME /host/WC.TXT the wc
+#      capstone counts, in 64-byte chunks, prints each line right-aligned
+#      (%6d + two spaces, CRLF tolerant), exits 383 (its own output byte
+#      count). Four distinctive numbered lines + the exit status + shell
+#      echo are asserted per run. Runs in its OWN script3 phase because a
+#      sixth concurrent exec burst pushed the kernel's #803-family
+#      exit-report corruption (issue #810) to near-deterministic — the
+#      five-exec W5 shape keeps floatapp's exit-590 line; NL alone after
+#      the winapp exits is clean.
+#      Side bonus: rustc/wasm-ld emit call_indirect's tableidx as legal
+#      overlong 5-byte LEBs — the interpreter previously read one byte,
+#      desynced, and failed validate with a false TypeMismatch; fixed by
+#      this claim (regression test + this live fixture).
+#
 # W4 (#765) phases (same boot, same fixture pattern):
 #   5b. `exec WASM.BIN FLOATAPP.WASM` — the wasm float app
 #      (tests/floatapp.c, compiled against tests/virelai.h alone, pinned
@@ -97,9 +119,17 @@ FILE_EXIT_LINE="tasks user-exec exited status=512"
 FLOAT_EXIT_LINE="tasks user-exec exited status=590"
 WC_LINE="  8  32 320 /host/WC.TXT"
 WC_EXIT_LINE="tasks user-exec exited status=320"
+# Post-M35 cross-language phase (claim 9746): the rustc-authored nl tool
+# (tests/nl.rs, from the contract doc alone). Byte-exact numbered lines
+# over the SAME WC.TXT fixture + exit = its own output byte count (383).
+NL_LINE1="     1  w5 wc capstone fixture"
+NL_LINE3="     3  long-token-0001-abcdefghijklmnopqrstuvwxyz-this-token-is-longer-than-the-64-byte-reader-buffer-so-the-word-state-must-survive-the-chunk-seam"
+NL_LINE7="     7    leading spaces too"
+NL_LINE8="     8  last line ends with a word"
+NL_EXIT_LINE="tasks user-exec exited status=383"
 FAIL_NEEDLES=("wasm: open failed" "wasm: parse error" "wasm: validate error" "wasm: mmap failed" "wasm: trap" "wasm: instantiate trap")
 
-echo "=== verify-live-wasm: M35 W2+W3+W4+W5 — C hello-world, wasm window/file/float apps + the wc capstone in-guest, $BOOTS boot(s) ==="
+echo "=== verify-live-wasm: M35 W2+W3+W4+W5 + the rustc cross-language app (nl) in-guest, $BOOTS boot(s) ==="
 zig version
 swift --version 2>&1 | head -1
 sw_vers
@@ -113,8 +143,9 @@ zig build
 zig build image
 # The custom-virtio file device needs the SPIKE build type (macOS 27 SDK).
 zig build wasm
-# W3 acceptance item: virelai.h compiles a host program against the
-# contract alone, and its import table is exactly the frozen surface.
+# W3 + claim 9746 acceptance item: virelai.h (C) AND virelai.zig (Zig)
+# each compile a host program against the contract alone, and each import
+# table is exactly the frozen surface.
 zig build shim-check
 swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
@@ -193,6 +224,18 @@ if [ "$WC_SHA" != "b75c504ddbb30b8ada6244cb95d3aaf532c49f79a45e7a68dc02151211e77
     echo "FAIL: the W5 capstone sha256 drifted from its pin (regenerate from tests/wc.c)" >&2
     exit 1
 fi
+# Post-M35 cross-language fixture (claim 9746): the rustc-authored nl tool
+# (tests/nl.rs — no virelai header; the app's own #[link(wasm_import_module
+# = "env")] externs spell the §5 rows), rebuilt-deterministic, sha-pinned.
+# It reads the SAME WC.TXT already in the share (order-independent, but
+# grouped with the short compute apps so the winapp's overlap stays <=1).
+cp user/src/wasm-corpus/nl.wasm "$SHARE/NL.WASM"
+NL_SHA="$(shasum -a 256 "$SHARE/NL.WASM" | cut -d' ' -f1)"
+echo "NL.WASM sha256=$NL_SHA (pinned 34f02644; rustc wasm32-unknown-unknown)"
+if [ "$NL_SHA" != "34f02644a8cd0f6fcf2af31c17909b4735c80c0444a4739424993ca724c3d8fe" ]; then
+    echo "FAIL: the cross-language app fixture sha256 drifted from its pin (regenerate from tests/nl.rs)" >&2
+    exit 1
+fi
 # The file-app fixture: 16-byte line x 32 = 512 bytes, byte-exact echo.
 python3 - "$SHARE/FILE.TXT" <<'EOF'
 import sys
@@ -207,10 +250,13 @@ echo "FILE.TXT: $(wc -c < "$SHARE/FILE.TXT" | tr -d ' ') bytes written to the sh
 # way to inspect the wasm window: the shell consumes script1 lines far
 # ahead of the apps (their exec streams the 55-KiB WASM.BIN through
 # chunked share reads), so a naive burst of `dui` lines races the window.
-# Script1: the four short non-display apps run first (floatapp, fileapp,
+# Script1: the short non-display apps run first (floatapp, fileapp,
 # hello, wc — pure compute/write, proven safe concurrently; the "faulted
 # once" three-way was a display-app overlap), then the winapp loads and
 # spins; the short apps first keep the winapp's overlap set at <=1 app.
+# The rustc-authored nl app runs AFTER the winapp exits, in script3 (see
+# 5d) — a 6-exec burst made the #803/#810 exit-report corruption
+# near-deterministic.
 # `w3: win ok`
 # (printed just before the spin) triggers script2: dui snapshots (window
 # rows), `dui raise 2` (the post-WMS composite trigger — the kernel no
@@ -228,6 +274,16 @@ SCRIPT2="$RUN_DIR/script2.txt"
 # window at (100,100,96,48), so the final `rx-wasm-ok` marker (capture
 # trigger) lands after 5 composites and the scanout shows it opaque.
 printf 'dui\necho rx-w3-dui\ndui raise 2\necho rx-w3-raised\ndui move 2 100 100\necho rx-w3-moved\ndui raise 2\necho rx-w3-raised2\ndui move 2 100 100\necho rx-w3-moved2\ndui raise 2\necho rx-w3-raised3\ndui\necho rx-w3-dui\necho rx-wasm-ok\n' > "$SCRIPT2"
+# Claim 9746: the rustc-authored nl app runs in its OWN phase (script3,
+# after the winapp exits) instead of script1 — six concurrent exec bursts
+# pushed the kernel's #803-family exit-report corruption (issue #810) to
+# near-deterministic (floatapp's exit-590 line vanished 8/8 boots with 6
+# execs; the W5 five-exec shape keeps it). Script3 fires after the winapp
+# exit (last of the short apps): NL streams + runs + exits alone, its
+# byte-exact numbered lines and exit-383 land well inside the 120 s
+# deadline.
+SCRIPT3="$RUN_DIR/script3.txt"
+printf 'exec WASM.BIN NL.WASM\necho rx-rust-nl\n' > "$SCRIPT3"
 
 run_one() {
     local tag="$1"
@@ -242,6 +298,7 @@ run_one() {
         --display --screen "$RUN_DIR/gpu-screen" \
         --script "$SCRIPT1" --script-after "$STATIC_EXIT_LINE" \
         --script2 "$SCRIPT2" --script2-after "w3: win ok" \
+        --script3 "$SCRIPT3" --script3-after "tasks user-exec exited status=21" \
         --screenshot-after "rx-wasm-ok" \
         --timeout 120 > "$run_log" 2>&1
     local rc=$?
@@ -251,7 +308,7 @@ run_one() {
     [ -f "$RUN_DIR/gpu-screen-after" ] && cp "$RUN_DIR/gpu-screen-after" "$(art "gpu-screen-after-$tag.png")" || true
     local SER="$serial_copy"
 
-    local bytes=0 banner=0 hello=0 exit55=0 heck0=0 winid=0 winok=0 win21=0 drow=0 file512=0 fileecho=0 float590=0 float1=0 float2=0 float3=0 float4=0 float5=0 heck4=0 wcline=0 wcexit=0 wcresp=0 ok=0 fatal=0 blitok=0
+    local bytes=0 banner=0 hello=0 exit55=0 heck0=0 winid=0 winok=0 win21=0 drow=0 file512=0 fileecho=0 float590=0 float1=0 float2=0 float3=0 float4=0 float5=0 heck4=0 wcline=0 wcexit=0 wcresp=0 nl1=0 nl3=0 nl7=0 nl8=0 nlexit=0 nlresp=0 ok=0 fatal=0 blitok=0
     if [ -f "$SER" ]; then
         bytes="$(wc -c < "$SER" | tr -d ' ')"
         [ "$(grep -aFxc -- "VirelaiOS kernel has seized control." "$SER" || true)" = 1 ] && banner=1
@@ -281,6 +338,16 @@ run_one() {
         [ "$(grep -aFxc -- "$WC_LINE" "$SER" || true)" -ge 1 ] && wcline=1
         [ "$(grep -aFxc -- "$WC_EXIT_LINE" "$SER" || true)" -ge 1 ] && wcexit=1
         [ "$(grep -aFxc -- "rx-w5-wc" "$SER" || true)" -ge 1 ] && wcresp=1
+        # Cross-language phase (claim 9746): the rustc-authored nl tool —
+        # numbered lines byte-exact over the same WC.TXT (lines 1, 3, 7, 8
+        # cover short, long-token, leading-spaces, trailing lines), exit =
+        # its 383 output bytes, shell echo after.
+        [ "$(grep -aFxc -- "$NL_LINE1" "$SER" || true)" -ge 1 ] && nl1=1
+        [ "$(grep -aFxc -- "$NL_LINE3" "$SER" || true)" -ge 1 ] && nl3=1
+        [ "$(grep -aFxc -- "$NL_LINE7" "$SER" || true)" -ge 1 ] && nl7=1
+        [ "$(grep -aFxc -- "$NL_LINE8" "$SER" || true)" -ge 1 ] && nl8=1
+        [ "$(grep -aFxc -- "$NL_EXIT_LINE" "$SER" || true)" -ge 1 ] && nlexit=1
+        [ "$(grep -aFxc -- "rx-rust-nl" "$SER" || true)" -ge 1 ] && nlresp=1
         [ "$(grep -aFxc -- "rx-wasm-ok" "$SER" || true)" = 1 ] && ok=1
         [ "$(grep -aEc -- "dui: windows=[4-9].*blits=[1-9][0-9]*" "$SER" || true)" -ge 1 ] && blitok=1
         for n in "${FAIL_NEEDLES[@]}"; do
@@ -288,7 +355,7 @@ run_one() {
         done
     fi
 
-    echo "run $tag: rc=$rc bytes=$bytes banner=$banner hello=$hello exit55=$exit55 helloresp=$heck0 winid=$winid winok=$winok win21=$win21 duirow=$drow file512=$file512 fileecho=$fileecho float590=$float590 float1=$float1 float2=$float2 float3=$float3 float4=$float4 float5=$float5 floatresp=$heck4 wcline=$wcline wcexit=$wcexit wcresp=$wcresp finalresp=$ok blits=$blitok fatal=$fatal"
+    echo "run $tag: rc=$rc bytes=$bytes banner=$banner hello=$hello exit55=$exit55 helloresp=$heck0 winid=$winid winok=$winok win21=$win21 duirow=$drow file512=$file512 fileecho=$fileecho float590=$float590 float1=$float1 float2=$float2 float3=$float3 float4=$float4 float5=$float5 floatresp=$heck4 wcline=$wcline wcexit=$wcexit wcresp=$wcresp nl1=$nl1 nl3=$nl3 nl7=$nl7 nl8=$nl8 nlexit=$nlexit nlresp=$nlresp finalresp=$ok blits=$blitok fatal=$fatal"
 
     local PASS=0
     if [ $banner -eq 1 ] && [ $hello -eq 1 ] && [ $exit55 -eq 1 ] && [ $heck0 -eq 1 ] && \
@@ -296,6 +363,7 @@ run_one() {
        [ $file512 -eq 1 ] && [ $fileecho -eq 1 ] && [ $float590 -eq 1 ] && \
        [ $float1 -eq 1 ] && [ $float2 -eq 1 ] && [ $float3 -eq 1 ] && [ $float4 -eq 1 ] && [ $float5 -eq 1 ] && \
        [ $heck4 -eq 1 ] && [ $wcline -eq 1 ] && [ $wcexit -eq 1 ] && [ $wcresp -eq 1 ] && \
+       [ $nl1 -eq 1 ] && [ $nl3 -eq 1 ] && [ $nl7 -eq 1 ] && [ $nl8 -eq 1 ] && [ $nlexit -eq 1 ] && [ $nlresp -eq 1 ] && \
        [ $ok -eq 1 ] && [ $blitok -eq 1 ] && [ $fatal -eq 0 ] && [ $rc -eq 0 ]; then
         PASS=1
     fi
@@ -399,7 +467,7 @@ EOF
     echo "redfill=$REDOK"
 
     if [ $PASS -eq 1 ] && [ "${REDOK:-0}" -eq 1 ]; then
-        echo "PASS $tag: hello (write byte-exact, exit 55) + wasm window app (dui row rect=100,100,96,48, blits>=1 post-raise, red fill block in the marker capture) + wasm file app (FILE.TXT echoed byte-exact, exit 512) + wasm float app (FLOATAPP.WASM: five float opcode families byte-exact, exit 590) + the wc capstone (WC.WASM: 8 lines 32 words 320 bytes byte-exact, exit 320 — a real tool ported to wasm, shipped as an HF4 app) — virelai.h contract proven live" | tee -a "$REPORT"
+        echo "PASS $tag: hello (write byte-exact, exit 55) + wasm window app (dui row rect=100,100,96,48, blits>=1 post-raise, red fill block in the marker capture) + wasm file app (FILE.TXT echoed byte-exact, exit 512) + wasm float app (FLOATAPP.WASM: five float opcode families byte-exact, exit 590) + the wc capstone (WC.WASM: 8 lines 32 words 320 bytes byte-exact, exit 320 — a real tool ported to wasm, shipped as an HF4 app) + the rustc-authored nl (NL.WASM: numbered WC.TXT lines byte-exact, exit 383 — the contract authored from Rust alone) — virelai.h/virelai.zig/rustc contract proven live cross-language" | tee -a "$REPORT"
         return 0
     fi
     echo "FAIL $tag: see $SER and $run_log" | tee -a "$REPORT"
