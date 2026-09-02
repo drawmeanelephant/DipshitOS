@@ -1,0 +1,51 @@
+const zc = @import("zc");
+
+fn int_to_str(val: u64) []const u8 {
+    return switch (val) {
+        0 => "zero",
+        1 => "one",
+        2, 3 => "two-three",
+        4...9 => "four-nine",
+        else => "other",
+    };
+}
+
+fn classify(val: u64) u64 {
+    var res: u64 = 0;
+    switch (val) {
+        0 => { res = 10; },
+        1, 2 => { res = 20; },
+        3...5 => { res = 30; },
+        else => { res = 40; },
+    }
+    return res;
+}
+
+pub fn main() void {
+    var sum: u64 = 0;
+    for (0..10) |i| {
+        sum = sum + i;
+    }
+    if (sum == 45) {
+        var arr: [4]u64 = undefined;
+        arr[0] = 10;
+        arr[1] = 20;
+        arr[2] = 30;
+        arr[3] = 40;
+        var total: u64 = 0;
+        for (arr, 0..) |v, i| {
+            total = total + v;
+            _ = i;
+        }
+        if (total == 100) {
+            if (classify(4) == 30) {
+                const s: []const u8 = int_to_str(1);
+                zc.print(s);
+                if (s[0] == 111) {
+                    zc.exit(72);
+                }
+            }
+        }
+    }
+    zc.exit(1);
+}

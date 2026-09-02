@@ -22,6 +22,7 @@ const enc_eor_reg = asmenc.enc_eor_reg;
 const enc_b = asmenc.enc_b;
 const enc_bl = asmenc.enc_bl;
 const enc_b_cond = asmenc.enc_b_cond;
+const Cond = asmenc.Cond;
 const enc_ldr = asmenc.enc_ldr;
 const enc_str = asmenc.enc_str;
 const enc_ldrb = asmenc.enc_ldrb;
@@ -162,11 +163,16 @@ const TokenKind = enum {
     keyword_while,
     keyword_return,
     keyword_struct,
+    keyword_for,
+    keyword_switch,
     ident,
     number,
     string_lit,
     char_lit,
     dot,
+    double_dot,
+    triple_dot,
+    equal_greater,
     at,
     l_paren,
     r_paren,
@@ -235,7 +241,17 @@ const Tokenizer = struct {
         self.pos += 1;
 
         switch (c) {
-            '.' => return Token{ .kind = .dot, .text = self.src[start..self.pos], .line = self.line },
+            '.' => {
+                if (self.pos + 1 < self.src.len and self.src[self.pos] == '.' and self.src[self.pos + 1] == '.') {
+                    self.pos += 2;
+                    return Token{ .kind = .triple_dot, .text = self.src[start..self.pos], .line = self.line };
+                }
+                if (self.pos < self.src.len and self.src[self.pos] == '.') {
+                    self.pos += 1;
+                    return Token{ .kind = .double_dot, .text = self.src[start..self.pos], .line = self.line };
+                }
+                return Token{ .kind = .dot, .text = self.src[start..self.pos], .line = self.line };
+            },
             '@' => return Token{ .kind = .at, .text = self.src[start..self.pos], .line = self.line },
             '(' => return Token{ .kind = .l_paren, .text = self.src[start..self.pos], .line = self.line },
             ')' => return Token{ .kind = .r_paren, .text = self.src[start..self.pos], .line = self.line },
@@ -277,6 +293,10 @@ const Tokenizer = struct {
                 if (self.pos < self.src.len and self.src[self.pos] == '=') {
                     self.pos += 1;
                     return Token{ .kind = .double_equal, .text = self.src[start..self.pos], .line = self.line };
+                }
+                if (self.pos < self.src.len and self.src[self.pos] == '>') {
+                    self.pos += 1;
+                    return Token{ .kind = .equal_greater, .text = self.src[start..self.pos], .line = self.line };
                 }
                 return Token{ .kind = .equal, .text = self.src[start..self.pos], .line = self.line };
             },
@@ -335,6 +355,8 @@ const Tokenizer = struct {
                     if (std.mem.eql(u8, text, "if")) return Token{ .kind = .keyword_if, .text = text, .line = self.line };
                     if (std.mem.eql(u8, text, "else")) return Token{ .kind = .keyword_else, .text = text, .line = self.line };
                     if (std.mem.eql(u8, text, "while")) return Token{ .kind = .keyword_while, .text = text, .line = self.line };
+                    if (std.mem.eql(u8, text, "for")) return Token{ .kind = .keyword_for, .text = text, .line = self.line };
+                    if (std.mem.eql(u8, text, "switch")) return Token{ .kind = .keyword_switch, .text = text, .line = self.line };
                     if (std.mem.eql(u8, text, "return")) return Token{ .kind = .keyword_return, .text = text, .line = self.line };
                     if (std.mem.eql(u8, text, "struct")) return Token{ .kind = .keyword_struct, .text = text, .line = self.line };
                     return Token{ .kind = .ident, .text = text, .line = self.line };
@@ -375,6 +397,7 @@ const LocalVar = struct {
     ptr_elem_size: usize = 8,
     ptr_is_struct: bool = false,
     ptr_struct_idx: usize = 0,
+    is_slice: bool = false,
 };
 
 const Field = struct {
@@ -628,6 +651,7 @@ const ParsedType = struct {
     is_array: bool = false,
     array_len: usize = 0,
     elem_size: usize = 8,
+    is_slice: bool = false,
 };
 
 fn parseType(p: *Parser) anyerror!ParsedType {
@@ -658,11 +682,17 @@ fn parseType(p: *Parser) anyerror!ParsedType {
             const id_tok = try p.expect(.ident);
             res.name = id_tok.text;
             res.ptr_elem_size = typeSize(id_tok.text) orelse 1;
+        } else if (p.peek() == .r_bracket) {
+            _ = p.advance(); // ']'
+            res.is_slice = true;
+            _ = p.accept(.keyword_const);
+            const id_tok = try p.expect(.ident);
+            res.name = id_tok.text;
+            res.elem_size = typeSize(id_tok.text) orelse 1;
+            res.ptr_elem_size = res.elem_size;
         } else {
-            if (p.peek() == .number) {
-                const len_tok = try p.expect(.number);
-                res.array_len = std.fmt.parseInt(usize, len_tok.text, 0) catch return error.CompileError;
-            }
+            const len_tok = try p.expect(.number);
+            res.array_len = std.fmt.parseInt(usize, len_tok.text, 0) catch return error.CompileError;
             _ = try p.expect(.r_bracket);
             _ = p.accept(.keyword_const);
             const id_tok = try p.expect(.ident);
@@ -904,6 +934,10 @@ fn parsePrimary(p: *Parser) anyerror!void {
             const res = try addString(t.text);
             emitStringAdr(0, res.off);
             emit(enc_movz(1, @intCast(res.len), 0));
+        },
+        .keyword_switch => {
+            p.idx -= 1;
+            try compileSwitch(p, true);
         },
         .ident => {
             if (p.accept(.dot)) {
@@ -1278,17 +1312,17 @@ fn parsePrimary(p: *Parser) anyerror!void {
                     print_err("undefined identifier", t.line, t.text);
                     return error.CompileError;
                 };
-                if (!var_ptr.is_array and !var_ptr.is_ptr) {
-                    print_err("not an array or pointer", t.line, t.text);
+                if (!var_ptr.is_array and !var_ptr.is_ptr and !var_ptr.is_slice) {
+                    print_err("not an array, pointer, or slice", t.line, t.text);
                     return error.CompileError;
                 }
                 _ = p.advance(); // '['
                 try compileExpr(p); // index -> x0
                 _ = try p.expect(.r_bracket);
-                const elem_sz = if (var_ptr.is_ptr) var_ptr.ptr_elem_size else var_ptr.elem_size;
+                const elem_sz = if (var_ptr.is_ptr or var_ptr.is_slice) var_ptr.ptr_elem_size else var_ptr.elem_size;
                 const shift = elemShift(elem_sz);
                 if (shift != 0) emit(enc_lsl(0, 0, shift));
-                if (var_ptr.is_ptr) {
+                if (var_ptr.is_ptr or var_ptr.is_slice) {
                     emit(enc_ldr(19, 1, @intCast(var_ptr.offset / 8)));
                 } else {
                     emit(enc_add_imm(19, 1, @intCast(var_ptr.offset)));
@@ -1368,11 +1402,14 @@ fn parsePrimary(p: *Parser) anyerror!void {
                     emit(0);
                 }
             } else {
-                const offset = lookupLocal(t.text) orelse {
+                const var_ptr = lookupLocalVar(t.text) orelse {
                     print_err("undefined identifier", t.line, t.text);
                     return error.CompileError;
                 };
-                emit(enc_ldr(19, 0, @intCast(offset / 8)));
+                emit(enc_ldr(19, 0, @intCast(var_ptr.offset / 8)));
+                if (var_ptr.is_slice) {
+                    emit(enc_ldr(19, 1, @intCast((var_ptr.offset + 8) / 8)));
+                }
             }
         },
         .l_paren => {
@@ -1438,6 +1475,131 @@ fn parsePrimary(p: *Parser) anyerror!void {
     }
 }
 
+fn compileSwitch(p: *Parser, is_expr: bool) anyerror!void {
+    _ = try p.expect(.keyword_switch);
+    _ = try p.expect(.l_paren);
+    try compileExpr(p);
+    _ = try p.expect(.r_paren);
+
+    if (frame_size + 8 > 512) return error.CompileError;
+    const val_offset = frame_size;
+    frame_size += 8;
+    emit(enc_str(19, 0, @intCast(val_offset / 8)));
+
+    _ = try p.expect(.l_brace);
+
+    var end_patches: [64]usize = undefined;
+    var end_patches_count: usize = 0;
+
+    while (p.peek() != .r_brace and p.peek() != .eof) {
+        if (p.peek() == .keyword_else) {
+            _ = p.advance();
+            _ = try p.expect(.equal_greater);
+            if (is_expr) {
+                try compileExpr(p);
+                _ = p.accept(.comma);
+            } else {
+                if (p.peek() == .l_brace) {
+                    _ = p.advance();
+                    while (p.peek() != .r_brace and p.peek() != .eof) try compileStatement(p);
+                    _ = try p.expect(.r_brace);
+                    _ = p.accept(.comma);
+                } else {
+                    try compileStatement(p);
+                    _ = p.accept(.comma);
+                }
+            }
+            break;
+        }
+
+        var match_branch_indices: [16]usize = undefined;
+        var match_conds: [16]Cond = undefined;
+        var match_branch_count: usize = 0;
+
+        while (true) {
+            try compileExpr(p);
+            emit(enc_ldr(19, 1, @intCast(val_offset / 8)));
+
+            if (p.peek() == .triple_dot or p.peek() == .double_dot) {
+                _ = p.advance();
+                emit(enc_cmp_reg(1, 0));
+                const skip_idx = code_len;
+                emit(0);
+
+                try compileExpr(p);
+                emit(enc_ldr(19, 1, @intCast(val_offset / 8)));
+                emit(enc_cmp_reg(1, 0));
+                match_branch_indices[match_branch_count] = code_len;
+                match_conds[match_branch_count] = .le;
+                match_branch_count += 1;
+                emit(0);
+
+                const skip_pc = code_len;
+                const rel_skip = @as(i32, @intCast(skip_pc - skip_idx));
+                std.mem.writeInt(u32, code[skip_idx..][0..4], enc_b_cond(.lt, rel_skip), .little);
+            } else {
+                emit(enc_cmp_reg(1, 0));
+                match_branch_indices[match_branch_count] = code_len;
+                match_conds[match_branch_count] = .eq;
+                match_branch_count += 1;
+                emit(0);
+            }
+
+            if (p.accept(.comma)) {
+                if (p.peek() == .equal_greater) break;
+                continue;
+            }
+            break;
+        }
+
+        _ = try p.expect(.equal_greater);
+
+        const next_prong_idx = code_len;
+        emit(0);
+
+        const match_pc = code_len;
+        var mi: usize = 0;
+        while (mi < match_branch_count) : (mi += 1) {
+            const m_idx = match_branch_indices[mi];
+            const rel = @as(i32, @intCast(match_pc - m_idx));
+            std.mem.writeInt(u32, code[m_idx..][0..4], enc_b_cond(match_conds[mi], rel), .little);
+        }
+
+        if (is_expr) {
+            try compileExpr(p);
+            _ = p.accept(.comma);
+        } else {
+            if (p.peek() == .l_brace) {
+                _ = p.advance();
+                while (p.peek() != .r_brace and p.peek() != .eof) try compileStatement(p);
+                _ = try p.expect(.r_brace);
+                _ = p.accept(.comma);
+            } else {
+                try compileStatement(p);
+                _ = p.accept(.comma);
+            }
+        }
+
+        if (end_patches_count < end_patches.len) {
+            end_patches[end_patches_count] = code_len;
+            end_patches_count += 1;
+            emit(0);
+        }
+
+        const next_prong_pc = code_len;
+        const rel_next = @as(i32, @intCast(next_prong_pc - next_prong_idx));
+        std.mem.writeInt(u32, code[next_prong_idx..][0..4], enc_b(rel_next), .little);
+    }
+
+    _ = try p.expect(.r_brace);
+
+    const end_pc = code_len;
+    for (end_patches[0..end_patches_count]) |e_idx| {
+        const rel_end = @as(i32, @intCast(end_pc - e_idx));
+        std.mem.writeInt(u32, code[e_idx..][0..4], enc_b(rel_end), .little);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Statement Compiler
 // ---------------------------------------------------------------------------
@@ -1457,6 +1619,7 @@ fn compileStatement(p: *Parser) anyerror!void {
             var ptr_elem_size: usize = 8;
             var ptr_is_struct = false;
             var ptr_struct_idx: usize = 0;
+            var is_slice = false;
             if (p.accept(.colon)) {
                 const pt = try parseType(p);
                 if (pt.is_ptr) {
@@ -1464,6 +1627,10 @@ fn compileStatement(p: *Parser) anyerror!void {
                     ptr_elem_size = pt.ptr_elem_size;
                     ptr_is_struct = pt.ptr_is_struct;
                     ptr_struct_idx = pt.ptr_struct_idx;
+                } else if (pt.is_slice) {
+                    is_slice = true;
+                    elem_size = pt.elem_size;
+                    ptr_elem_size = pt.ptr_elem_size;
                 } else if (pt.is_array) {
                     is_array = true;
                     arr_len = pt.array_len;
@@ -1497,6 +1664,29 @@ fn compileStatement(p: *Parser) anyerror!void {
                     .ptr_elem_size = ptr_elem_size,
                     .ptr_is_struct = ptr_is_struct,
                     .ptr_struct_idx = ptr_struct_idx,
+                };
+                locals_count += 1;
+            } else if (is_slice) {
+                if (frame_size + 16 > 512) return error.CompileError;
+                const offset = frame_size;
+                frame_size += 16;
+                if (p.accept(.equal)) {
+                    if (p.peek() == .ident and std.mem.eql(u8, p.currentToken().text, "undefined")) {
+                        _ = p.advance();
+                    } else {
+                        try compileExpr(p);
+                        emit(enc_str(19, 0, @intCast(offset / 8)));
+                        emit(enc_str(19, 1, @intCast((offset + 8) / 8)));
+                    }
+                }
+                _ = try p.expect(.semicolon);
+                if (locals_count >= locals.len) return error.CompileError;
+                locals[locals_count] = LocalVar{
+                    .name = name_tok.text,
+                    .offset = offset,
+                    .is_slice = true,
+                    .elem_size = elem_size,
+                    .ptr_elem_size = ptr_elem_size,
                 };
                 locals_count += 1;
             } else if (is_array) {
@@ -1545,14 +1735,30 @@ fn compileStatement(p: *Parser) anyerror!void {
                     locals[locals_count] = LocalVar{ .name = name_tok.text, .offset = offset };
                     locals_count += 1;
                 } else {
+                    const is_str = (p.peek() == .string_lit);
                     try compileExpr(p);
                     _ = try p.expect(.semicolon);
                     const offset = frame_size;
-                    frame_size += 8;
-                    emit(enc_str(19, 0, @intCast(offset / 8)));
-                    if (locals_count >= locals.len) return error.CompileError;
-                    locals[locals_count] = LocalVar{ .name = name_tok.text, .offset = offset };
-                    locals_count += 1;
+                    if (is_str) {
+                        frame_size += 16;
+                        emit(enc_str(19, 0, @intCast(offset / 8)));
+                        emit(enc_str(19, 1, @intCast((offset + 8) / 8)));
+                        if (locals_count >= locals.len) return error.CompileError;
+                        locals[locals_count] = LocalVar{
+                            .name = name_tok.text,
+                            .offset = offset,
+                            .is_slice = true,
+                            .elem_size = 1,
+                            .ptr_elem_size = 1,
+                        };
+                        locals_count += 1;
+                    } else {
+                        frame_size += 8;
+                        emit(enc_str(19, 0, @intCast(offset / 8)));
+                        if (locals_count >= locals.len) return error.CompileError;
+                        locals[locals_count] = LocalVar{ .name = name_tok.text, .offset = offset };
+                        locals_count += 1;
+                    }
                 }
             }
         },
@@ -1599,10 +1805,188 @@ fn compileStatement(p: *Parser) anyerror!void {
             const end_offset_bytes = @as(i32, @intCast(end_pc - end_branch_idx));
             std.mem.writeInt(u32, code[end_branch_idx..][0..4], enc_b_cond(.eq, end_offset_bytes), .little);
         },
+        .keyword_switch => try compileSwitch(p, false),
+        .keyword_for => {
+            _ = p.advance();
+            _ = try p.expect(.l_paren);
+
+            var has_dotdot = false;
+            var j = p.idx;
+            var depth: usize = 0;
+            while (j < p.tokens.len) : (j += 1) {
+                if (p.tokens[j].kind == .l_paren) depth += 1;
+                if (p.tokens[j].kind == .r_paren) {
+                    if (depth == 0) break;
+                    depth -= 1;
+                }
+                if (depth == 0 and p.tokens[j].kind == .comma) break;
+                if (depth == 0 and (p.tokens[j].kind == .double_dot or p.tokens[j].kind == .triple_dot)) {
+                    has_dotdot = true;
+                    break;
+                }
+            }
+
+            const saved_locals_count = locals_count;
+
+            if (has_dotdot) {
+                // Range loop: for (start..end) |i| or for (0..n) |i|
+                if (frame_size + 16 > 512) return error.CompileError;
+                const idx_offset = frame_size;
+                const limit_offset = frame_size + 8;
+                frame_size += 16;
+
+                if (p.peek() == .double_dot or p.peek() == .triple_dot) {
+                    _ = p.advance();
+                    emit(enc_movz(0, 0, 0));
+                    emit(enc_str(19, 0, @intCast(idx_offset / 8)));
+                    try compileExpr(p);
+                    emit(enc_str(19, 0, @intCast(limit_offset / 8)));
+                } else {
+                    try compileExpr(p);
+                    emit(enc_str(19, 0, @intCast(idx_offset / 8)));
+                    _ = p.accept(.double_dot) or p.accept(.triple_dot);
+                    try compileExpr(p);
+                    emit(enc_str(19, 0, @intCast(limit_offset / 8)));
+                }
+                _ = try p.expect(.r_paren);
+
+                if (p.accept(.pipe)) {
+                    const cap_tok = try p.expect(.ident);
+                    _ = try p.expect(.pipe);
+                    if (locals_count >= locals.len) return error.CompileError;
+                    locals[locals_count] = LocalVar{ .name = cap_tok.text, .offset = idx_offset };
+                    locals_count += 1;
+                }
+
+                const start_pc = code_len;
+                emit(enc_ldr(19, 0, @intCast(idx_offset / 8)));
+                emit(enc_ldr(19, 1, @intCast(limit_offset / 8)));
+                emit(enc_cmp_reg(0, 1));
+                const exit_branch_idx = code_len;
+                emit(0); // b.cs exit
+
+                _ = try p.expect(.l_brace);
+                while (p.peek() != .r_brace and p.peek() != .eof) try compileStatement(p);
+                _ = try p.expect(.r_brace);
+
+                // Step: idx += 1
+                emit(enc_ldr(19, 0, @intCast(idx_offset / 8)));
+                emit(enc_add_imm(0, 0, 1));
+                emit(enc_str(19, 0, @intCast(idx_offset / 8)));
+
+                const jump_back = @as(i32, @intCast(start_pc)) - @as(i32, @intCast(code_len));
+                emit(enc_b(jump_back));
+
+                const exit_pc = code_len;
+                const exit_offset_bytes = @as(i32, @intCast(exit_pc - exit_branch_idx));
+                std.mem.writeInt(u32, code[exit_branch_idx..][0..4], enc_b_cond(.cs, exit_offset_bytes), .little);
+            } else {
+                // Array loop: for (arr) |elem| or for (arr, 0..) |elem, i|
+                const arr_tok = try p.expect(.ident);
+                const arr_var = lookupLocalVar(arr_tok.text) orelse {
+                    print_err("undefined array", arr_tok.line, arr_tok.text);
+                    return error.CompileError;
+                };
+                if (!arr_var.is_array and !arr_var.is_slice) {
+                    print_err("not iterable", arr_tok.line, arr_tok.text);
+                    return error.CompileError;
+                }
+
+                if (p.accept(.comma)) {
+                    try compileExpr(p);
+                    _ = p.accept(.double_dot) or p.accept(.triple_dot);
+                }
+                _ = try p.expect(.r_paren);
+
+                if (frame_size + 24 > 512) return error.CompileError;
+                const idx_offset = frame_size;
+                const limit_offset = frame_size + 8;
+                const elem_offset = frame_size + 16;
+                frame_size += 24;
+
+                emit(enc_movz(0, 0, 0));
+                emit(enc_str(19, 0, @intCast(idx_offset / 8)));
+
+                if (arr_var.is_array) {
+                    emit(enc_movz(0, @intCast(arr_var.array_len), 0));
+                    emit(enc_str(19, 0, @intCast(limit_offset / 8)));
+                } else {
+                    emit(enc_ldr(19, 0, @intCast((arr_var.offset + 8) / 8)));
+                    emit(enc_str(19, 0, @intCast(limit_offset / 8)));
+                }
+
+                var cap_elem: ?[]const u8 = null;
+                var cap_idx: ?[]const u8 = null;
+                if (p.accept(.pipe)) {
+                    cap_elem = (try p.expect(.ident)).text;
+                    if (p.accept(.comma)) {
+                        cap_idx = (try p.expect(.ident)).text;
+                    }
+                    _ = try p.expect(.pipe);
+                }
+
+                if (cap_elem) |name| {
+                    if (locals_count >= locals.len) return error.CompileError;
+                    locals[locals_count] = LocalVar{
+                        .name = name,
+                        .offset = elem_offset,
+                        .elem_size = arr_var.elem_size,
+                    };
+                    locals_count += 1;
+                }
+                if (cap_idx) |name| {
+                    if (locals_count >= locals.len) return error.CompileError;
+                    locals[locals_count] = LocalVar{ .name = name, .offset = idx_offset };
+                    locals_count += 1;
+                }
+
+                const start_pc = code_len;
+                emit(enc_ldr(19, 0, @intCast(idx_offset / 8)));
+                emit(enc_ldr(19, 1, @intCast(limit_offset / 8)));
+                emit(enc_cmp_reg(0, 1));
+                const exit_branch_idx = code_len;
+                emit(0); // b.cs exit
+
+                // Load arr[idx] -> elem_offset
+                emit(enc_ldr(19, 1, @intCast(idx_offset / 8))); // x1 = idx
+                if (arr_var.is_array) {
+                    emit(enc_add_imm(19, 2, @intCast(arr_var.offset))); // x2 = &arr[0]
+                } else {
+                    emit(enc_ldr(19, 2, @intCast(arr_var.offset / 8))); // x2 = slice.ptr
+                }
+                if (arr_var.elem_size == 8) {
+                    emit(enc_lsl(1, 1, 3));
+                    emit(enc_add_reg(2, 1, 2));
+                    emit(enc_ldr(2, 0, 0));
+                } else {
+                    emit(enc_add_reg(2, 1, 2));
+                    emit(enc_ldrb(2, 0, 0));
+                }
+                emit(enc_str(19, 0, @intCast(elem_offset / 8)));
+
+                _ = try p.expect(.l_brace);
+                while (p.peek() != .r_brace and p.peek() != .eof) try compileStatement(p);
+                _ = try p.expect(.r_brace);
+
+                // Step: idx += 1
+                emit(enc_ldr(19, 0, @intCast(idx_offset / 8)));
+                emit(enc_add_imm(0, 0, 1));
+                emit(enc_str(19, 0, @intCast(idx_offset / 8)));
+
+                const jump_back = @as(i32, @intCast(start_pc)) - @as(i32, @intCast(code_len));
+                emit(enc_b(jump_back));
+
+                const exit_pc = code_len;
+                const exit_offset_bytes = @as(i32, @intCast(exit_pc - exit_branch_idx));
+                std.mem.writeInt(u32, code[exit_branch_idx..][0..4], enc_b_cond(.cs, exit_offset_bytes), .little);
+            }
+
+            locals_count = saved_locals_count;
+        },
         .keyword_return => {
             _ = p.advance();
-            if (p.peek() != .semicolon) try compileExpr(p);
-            _ = try p.expect(.semicolon);
+            if (p.peek() != .semicolon and p.peek() != .comma) try compileExpr(p);
+            _ = p.accept(.semicolon) or p.accept(.comma);
             emit(enc_add_imm(19, 31, 0));
             emit(enc_add_imm(31, 31, 512));
             emit(enc_ldr(31, 19, 0));
@@ -1616,14 +2000,19 @@ fn compileStatement(p: *Parser) anyerror!void {
                 _ = p.advance();
                 _ = p.advance();
                 try compileExpr(p);
-                _ = try p.expect(.semicolon);
+                _ = p.accept(.semicolon) or p.accept(.comma);
             } else if (p.peek() == .ident and p.idx + 1 < p.tokens.len and p.tokens[p.idx + 1].kind == .equal) {
                 const name_tok = p.advance();
                 _ = p.advance();
                 try compileExpr(p);
-                _ = try p.expect(.semicolon);
-                const offset = lookupLocal(name_tok.text) orelse return error.CompileError;
-                emit(enc_str(19, 0, @intCast(offset / 8)));
+                _ = p.accept(.semicolon) or p.accept(.comma);
+                const var_ptr = lookupLocalVar(name_tok.text) orelse return error.CompileError;
+                if (var_ptr.is_slice) {
+                    emit(enc_str(19, 0, @intCast(var_ptr.offset / 8)));
+                    emit(enc_str(19, 1, @intCast((var_ptr.offset + 8) / 8)));
+                } else {
+                    emit(enc_str(19, 0, @intCast(var_ptr.offset / 8)));
+                }
             } else if (p.peek() == .ident and p.idx + 1 < p.tokens.len and p.tokens[p.idx + 1].kind == .l_bracket) {
                 // possible array/pointer store: look for ']' then '='
                 var found = false;
@@ -2372,4 +2761,135 @@ test "zc: Z1d tokenizer handles star and ampersand" {
     try testing.expectEqual(TokenKind.ident, t.next().kind);
     try testing.expectEqual(TokenKind.equal, t.next().kind);
     try testing.expectEqual(TokenKind.ampersand, t.next().kind);
+}
+
+test "zc: Z1e for range iteration and sum" {
+    const src =
+        \\const zc = @import("zc");
+        \\pub fn main() void {
+        \\    var sum: u64 = 0;
+        \\    for (0..10) |i| {
+        \\        sum = sum + i;
+        \\    }
+        \\    if (sum == 45) {
+        \\        zc.exit(72);
+        \\    }
+        \\    zc.exit(1);
+        \\}
+    ;
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
+}
+
+test "zc: Z1e for array iteration with index capture" {
+    const src =
+        \\const zc = @import("zc");
+        \\pub fn main() void {
+        \\    var arr: [4]u64 = undefined;
+        \\    arr[0] = 10;
+        \\    arr[1] = 20;
+        \\    arr[2] = 30;
+        \\    arr[3] = 40;
+        \\    var total: u64 = 0;
+        \\    var last_idx: u64 = 0;
+        \\    for (arr, 0..) |v, i| {
+        \\        total = total + v;
+        \\        last_idx = i;
+        \\    }
+        \\    if (total == 100) {
+        \\        if (last_idx == 3) {
+        \\            zc.exit(72);
+        \\        }
+        \\    }
+        \\    zc.exit(1);
+        \\}
+    ;
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
+}
+
+test "zc: Z1e switch statement with int, multi-value, and range prongs" {
+    const src =
+        \\const zc = @import("zc");
+        \\fn classify(val: u64) u64 {
+        \\    var res: u64 = 0;
+        \\    switch (val) {
+        \\        0 => { res = 10; },
+        \\        1, 2 => { res = 20; },
+        \\        3...5 => { res = 30; },
+        \\        else => { res = 40; },
+        \\    }
+        \\    return res;
+        \\}
+        \\pub fn main() void {
+        \\    if (classify(0) == 10) {
+        \\        if (classify(2) == 20) {
+        \\            if (classify(4) == 30) {
+        \\                if (classify(9) == 40) {
+        \\                    zc.exit(72);
+        \\                }
+        \\            }
+        \\        }
+        \\    }
+        \\    zc.exit(1);
+        \\}
+    ;
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
+}
+
+test "zc: Z1e switch expression mapping int to string" {
+    const src =
+        \\const zc = @import("zc");
+        \\pub fn main() void {
+        \\    var sum: u64 = 0;
+        \\    for (0..10) |i| {
+        \\        sum = sum + i;
+        \\    }
+        \\    const s: []const u8 = switch (sum) {
+        \\        45 => "one",
+        \\        else => "bad",
+        \\    };
+        \\    zc.print(s);
+        \\    if (s[0] == 111) {
+        \\        zc.exit(72);
+        \\    }
+        \\    zc.exit(1);
+        \\}
+    ;
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
+}
+
+test "zc: Z1e tokenizer handles for, switch, .., ..., =>" {
+    const src = "for (0..10) |i| switch (x) { 0 => 1, 2...4 => 5, else => 6 }";
+    var t = Tokenizer{ .src = src };
+    try testing.expectEqual(TokenKind.keyword_for, t.next().kind);
+    try testing.expectEqual(TokenKind.l_paren, t.next().kind);
+    try testing.expectEqual(TokenKind.number, t.next().kind);
+    try testing.expectEqual(TokenKind.double_dot, t.next().kind);
+    try testing.expectEqual(TokenKind.number, t.next().kind);
+    try testing.expectEqual(TokenKind.r_paren, t.next().kind);
+    try testing.expectEqual(TokenKind.pipe, t.next().kind);
+    try testing.expectEqual(TokenKind.ident, t.next().kind);
+    try testing.expectEqual(TokenKind.pipe, t.next().kind);
+    try testing.expectEqual(TokenKind.keyword_switch, t.next().kind);
+    try testing.expectEqual(TokenKind.l_paren, t.next().kind);
+    try testing.expectEqual(TokenKind.ident, t.next().kind);
+    try testing.expectEqual(TokenKind.r_paren, t.next().kind);
+    try testing.expectEqual(TokenKind.l_brace, t.next().kind);
+    try testing.expectEqual(TokenKind.number, t.next().kind);
+    try testing.expectEqual(TokenKind.equal_greater, t.next().kind);
+    try testing.expectEqual(TokenKind.number, t.next().kind);
+    try testing.expectEqual(TokenKind.comma, t.next().kind);
+    try testing.expectEqual(TokenKind.number, t.next().kind);
+    try testing.expectEqual(TokenKind.triple_dot, t.next().kind);
+    try testing.expectEqual(TokenKind.number, t.next().kind);
+    try testing.expectEqual(TokenKind.equal_greater, t.next().kind);
+    try testing.expectEqual(TokenKind.number, t.next().kind);
+    try testing.expectEqual(TokenKind.comma, t.next().kind);
+    try testing.expectEqual(TokenKind.keyword_else, t.next().kind);
+    try testing.expectEqual(TokenKind.equal_greater, t.next().kind);
+    try testing.expectEqual(TokenKind.number, t.next().kind);
+    try testing.expectEqual(TokenKind.r_brace, t.next().kind);
 }
