@@ -158,12 +158,13 @@ echo "DESKTOP.BIN: OK"
 # issue #740: the ESP is gone; the manifest is no longer embedded in the
 # image).
 # Expectation revised to OBSERVED BYTES (2026-09-01, claim 5251): the
-# serial marker reads `desktop: manifest apps=19` — image/apps.txt grew
+# serial marker reads `desktop: manifest apps=21` — image/apps.txt grew
 # from 9 entries at M13 close (d62c933) through M15 C4's SETTINGS.BIN
 # (6c8b5b3), M23 E1's EDIT.BIN (ee3da3e), M27 G6's SYSMON.BIN, the M30/M31
-# ELF rows, and M32's ZC.BIN. `#` comments are skipped by parse_manifest.
-grep -q "desktop: manifest apps=19" "$SER" || {
-    echo "ERROR: DESKTOP.BIN manifest marker (apps=19) missing from serial log"
+# ELF rows, M32's ZC.BIN, and the M19 sexiburger rows (SEXIBURG.BIN +
+# SEXITEST.BIN, 5845d7f). `#` comments are skipped by parse_manifest.
+grep -q "desktop: manifest apps=21" "$SER" || {
+    echo "ERROR: DESKTOP.BIN manifest marker (apps=21) missing from serial log"
     exit 1
 }
 echo "DESKTOP.MANIFEST: OK"
