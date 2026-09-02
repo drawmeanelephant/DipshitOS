@@ -18,5 +18,6 @@ NOTEPAD.ELF | Dynamic Editor | n
 FILE.ELF | Dynamic Files | b
 DESKTOP.ELF | Dynamic Desktop | d
 ZC.BIN | Zig Compiler | z
+SEXIBURG.BIN | Sexiburger | x | dock=true
 
 
