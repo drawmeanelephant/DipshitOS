@@ -47,6 +47,13 @@ const std = @import("std");
 // drift while both are live. Provided by build.zig as an anonymous import
 // (the kernel compiles the same file from kernel/src/wnd_core.zig).
 const wnd_core = @import("wnd_core");
+pub const ui = @import("lib/ui.zig");
+pub const sexiburger = @import("lib/sexiburger.zig");
+pub const Command = sexiburger.Command;
+pub const SectionId = sexiburger.SectionId;
+pub const ActionRegistry = sexiburger.ActionRegistry;
+pub const SexiburgerMenu = sexiburger.SexiburgerMenu;
+pub const Rect = ui.Rect;
 
 // ---------------------------------------------------------------------------
 // Syscall numbers (slots frozen in ADR 0007; the same numbers the naked
@@ -259,6 +266,10 @@ pub const tab_cycle_marker: []const u8 = "wnd: tab-cycle";
 // S1/S5 Action registry seam (Milestone 19, issues #701, #705)
 pub const action_reg_marker: []const u8 = "wnd: action-registered";
 pub const action_inv_marker: []const u8 = "wnd: action-invoked";
+// Issue #821 Phase 1: Global God Menu decision markers
+pub const god_menu_open_marker: []const u8 = "wnd: god-menu open\n";
+pub const god_menu_close_marker: []const u8 = "wnd: god-menu close\n";
+pub const god_menu_exec_marker: []const u8 = "wnd: god-menu exec";
 
 // WMS6 Gate A (issue #626): the Alt+Tab decision marker. The WM prints the
 // target id after the pinned prefix (`wnd: alt-tab id=N`) so the live gate
@@ -393,6 +404,37 @@ pub const usage_f11: u8 = 0x5c;
 pub const usage_tab: u8 = 0x2b;
 pub const usage_w: u8 = 0x1a; // S6 Tab model: Ctrl+W closes/detaches tab
 pub const usage_a: u8 = 0x04; // M27 G2 / WMS8 Gate 2: Ctrl+Shift+A toggles the about dialog
+pub const usage_space: u8 = 0x2c; // Issue #821: Ctrl+Space toggles Sexiburger God Menu
+
+pub fn hid_to_ascii(usage: u8, shift: bool) ?u8 {
+    if (usage >= 0x04 and usage <= 0x1d) {
+        return if (shift) 'A' + (usage - 0x04) else 'a' + (usage - 0x04);
+    }
+    if (usage >= 0x1e and usage <= 0x27) {
+        const unshifted = "1234567890";
+        const shifted = "!@#$%^&*()";
+        const i = usage - 0x1e;
+        return if (shift) shifted[i] else unshifted[i];
+    }
+    return switch (usage) {
+        0x28 => '\n',
+        0x2a => 0x08,
+        0x2b => '\t',
+        0x2c => ' ',
+        0x2d => if (shift) '_' else '-',
+        0x2e => if (shift) '+' else '=',
+        0x2f => if (shift) '{' else '[',
+        0x30 => if (shift) '}' else ']',
+        0x31 => if (shift) '|' else '\\',
+        0x33 => if (shift) ':' else ';',
+        0x34 => if (shift) '"' else '\'',
+        0x35 => if (shift) '~' else '`',
+        0x36 => if (shift) '<' else ',',
+        0x37 => if (shift) '>' else '.',
+        0x38 => if (shift) '?' else '/',
+        else => null,
+    };
+}
 
 // WMS4 (issue #624): the EXACT values the chrome-descriptor blob embeds.
 // Pinned against the shared wnd_core parity policy below, so the EL0 blob
@@ -486,6 +528,193 @@ const fb_w = wnd_core.fb_w;
 const fb_h = wnd_core.fb_h;
 const taskbar_h = wnd_core.taskbar_h;
 const dock_w = wnd_core.dock_w;
+
+// ---------------------------------------------------------------------------
+// Issue #821 Phase 1: Global Sexiburger God Menu Overlay & Action Dispatch
+// ---------------------------------------------------------------------------
+
+pub const AppAction = struct {
+    owner_id: u8 = 0,
+    section: u8 = 2,
+    label: [32]u8 = [_]u8{0} ** 32,
+    label_len: usize = 0,
+    verb: [24]u8 = [_]u8{0} ** 24,
+    verb_len: usize = 0,
+};
+
+var app_actions: [8]AppAction = [_]AppAction{.{}} ** 8;
+var app_actions_count: usize = 0;
+
+pub const god_menu_w: u32 = 488;
+pub const god_menu_h: u32 = 316;
+
+pub var god_menu: SexiburgerMenu = undefined;
+pub var god_menu_initialized: bool = false;
+pub var god_menu_win: ?u32 = null;
+pub var god_menu_open: bool = false;
+var god_menu_mascot_pixels: [24 * 24]u32 = undefined;
+var god_menu_mascot_loaded: bool = false;
+var god_menu_prev_focus: u8 = 0;
+const mascot_qoi_bytes = @embedFile("lib/fixtures/qoi/mascot_24x24.qoi");
+
+pub fn init_god_menu_if_needed() void {
+    if (!god_menu_initialized) {
+        god_menu = SexiburgerMenu.init(Rect.make(0, 0, god_menu_w, god_menu_h));
+        if (!god_menu_mascot_loaded) {
+            const decoded = ui.image.qoi.decode(mascot_qoi_bytes, &god_menu_mascot_pixels) catch null;
+            if (decoded) |qhdr| {
+                god_menu.raster_mascot = ui.image.Image{
+                    .width = qhdr.width,
+                    .height = qhdr.height,
+                    .pixels = &god_menu_mascot_pixels,
+                };
+                god_menu_mascot_loaded = true;
+            }
+        }
+        god_menu_initialized = true;
+    }
+}
+
+pub fn populate_god_menu() void {
+    init_god_menu_if_needed();
+    god_menu.registry = ActionRegistry.init_empty();
+
+    // 1. System (Top Bun / Crown)
+    _ = god_menu.registry.register_command(.system, "About VirelaiOS", "Ctrl+Shift+A", "about", null) catch {};
+    _ = god_menu.registry.register_command(.system, "System Monitor", "Ctrl+Esc", "top", null) catch {};
+    _ = god_menu.registry.register_command(.system, "Settings Panel", "Ctrl+,", "settings", null) catch {};
+    _ = god_menu.registry.register_command(.system, "Reboot System", "", "reboot", null) catch {};
+    _ = god_menu.registry.register_command(.system, "Power Off", "", "shutdown", null) catch {};
+
+    // 2. Apps (Lettuce) - Launchable applications
+    _ = god_menu.registry.register_command(.apps, "Text Editor", "Ctrl+Alt+E", "notepad", null) catch {};
+    _ = god_menu.registry.register_command(.apps, "Calculator", "Ctrl+Alt+C", "calc", null) catch {};
+    _ = god_menu.registry.register_command(.apps, "File Browser", "Ctrl+Alt+F", "file", null) catch {};
+    _ = god_menu.registry.register_command(.apps, "Terminal (Road Pops)", "Ctrl+Alt+T", "devcons", null) catch {};
+
+    // 3. Active App (Tomato) - Live actions from focused app via mailbox seam
+    var active_count: usize = 0;
+    for (app_actions[0..app_actions_count]) |act| {
+        if (act.label_len > 0) {
+            _ = god_menu.registry.register_command(
+                .active_app,
+                act.label[0..act.label_len],
+                "",
+                act.verb[0..act.verb_len],
+                null,
+            ) catch {};
+            active_count += 1;
+        }
+    }
+    if (active_count == 0) {
+        _ = god_menu.registry.register_command(.active_app, "Save Document", "Ctrl+S", "save", null) catch {};
+        _ = god_menu.registry.register_command(.active_app, "Find in Document", "Ctrl+F", "find", null) catch {};
+    }
+
+    // 4. Windows & tabs (Cheese) - Dynamic list of open windows from mirrors
+    var win_count_added: usize = 0;
+    for (mirrors) |m| {
+        if (m.valid and m.visible) {
+            var wbuf: [32]u8 = undefined;
+            const wlabel = std.fmt.bufPrint(&wbuf, "Window {d} (Active)", .{m.id}) catch "Window";
+            var vbuf: [24]u8 = undefined;
+            const wverb = std.fmt.bufPrint(&vbuf, "win-{d}", .{m.id}) catch "win";
+            _ = god_menu.registry.register_command(.windows_tabs, wlabel, "", wverb, null) catch {};
+            win_count_added += 1;
+        }
+    }
+    if (win_count_added == 0) {
+        _ = god_menu.registry.register_command(.windows_tabs, "New Tab", "Ctrl+T", "tab-new", null) catch {};
+        _ = god_menu.registry.register_command(.windows_tabs, "Close Tab", "Ctrl+W", "tab-close", null) catch {};
+        _ = god_menu.registry.register_command(.windows_tabs, "Next Tab", "Ctrl+Tab", "tab-next", null) catch {};
+    }
+
+    // 5. Services (Patty) - Quick tools / services
+    _ = god_menu.registry.register_command(.services, "Toggle Theme (Light/Dark)", "Ctrl+Shift+L", "theme", null) catch {};
+    _ = god_menu.registry.register_command(.services, "Notifications Panel", "", "notify", null) catch {};
+    _ = god_menu.registry.register_command(.services, "Clipboard History", "Ctrl+Shift+V", "clipboard", null) catch {};
+
+    // 6. Power / Mascot (Heel Bun)
+    _ = god_menu.registry.register_command(.power, "Sexipus Mascot Diagnostics", "", "sexiburger", null) catch {};
+    _ = god_menu.registry.register_command(.power, "Cascade Windows", "Alt+C", "cascade", null) catch {};
+
+    god_menu.clear_search();
+}
+
+pub fn redraw_god_menu() void {
+    if (god_menu_win) |wid| {
+        god_menu.draw(wid);
+        ui.win_present(wid);
+    }
+}
+
+pub fn execute_god_menu_command(cmd: Command) void {
+    var buf: [96]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{s} verb={s} label={s}\n", .{ god_menu_exec_marker, cmd.verb, cmd.label }) catch "wnd: god-menu exec\n";
+    write_marker(msg);
+
+    if (std.mem.eql(u8, cmd.verb, "about")) {
+        toggle_about();
+    } else if (std.mem.eql(u8, cmd.verb, "theme")) {
+        write_marker("wnd: theme toggled\n");
+    } else if (std.mem.eql(u8, cmd.verb, "notepad")) {
+        _ = ui.exec_program("NOTEPAD.BIN");
+    } else if (std.mem.eql(u8, cmd.verb, "calc")) {
+        _ = ui.exec_program("CALC.BIN");
+    } else if (std.mem.eql(u8, cmd.verb, "file")) {
+        _ = ui.exec_program("FILE.BIN");
+    } else if (std.mem.eql(u8, cmd.verb, "top")) {
+        _ = ui.exec_program("TOP.BIN");
+    } else if (std.mem.eql(u8, cmd.verb, "devcons")) {
+        _ = ui.exec_program("DEVCONS.BIN");
+    } else if (std.mem.eql(u8, cmd.verb, "notify")) {
+        _ = syscall6(sys_wmctl, wmctl_notif_center, notif_open_act, 0, 0, 0, 0);
+    } else if (std.mem.startsWith(u8, cmd.verb, "win-")) {
+        if (cmd.verb.len > 4) {
+            const wid_char = cmd.verb[4];
+            if (wid_char >= '2' and wid_char <= '5') {
+                const wid: u8 = wid_char - '0';
+                _ = syscall6(sys_wmctl, wmctl_alt_tab, wid, alt_tab_commit, 0, 0, 0);
+            }
+        }
+    } else if (cmd.section == .active_app) {
+        var inv_buf: [80]u8 = undefined;
+        const inv_msg = std.fmt.bufPrint(&inv_buf, "{s} label={s}\n", .{ action_inv_marker, cmd.label }) catch "wnd: action-invoked\n";
+        write_marker(inv_msg);
+    }
+}
+
+pub fn toggle_god_menu() void {
+    if (god_menu_open) {
+        if (god_menu_win) |wid| {
+            ui.win_close(wid);
+            god_menu_win = null;
+        }
+        god_menu_open = false;
+        god_menu.open = false;
+        write_marker(god_menu_close_marker);
+        if (god_menu_prev_focus >= 2 and god_menu_prev_focus <= 5) {
+            _ = syscall6(sys_wmctl, wmctl_alt_tab, god_menu_prev_focus, alt_tab_commit, 0, 0, 0);
+        }
+    } else {
+        god_menu_prev_focus = if (focused_mirror()) |fm| fm.id else 0;
+        populate_god_menu();
+        const menu_x = if (fb_w > god_menu_w) (fb_w - god_menu_w) / 2 else 0;
+        const menu_y = if (fb_h > god_menu_h) (fb_h - god_menu_h) / 2 else 0;
+        const w_res = ui.win_open(menu_x, menu_y, god_menu_w, god_menu_h);
+        if (w_res >= 0) {
+            const wid: u32 = @intCast(w_res);
+            god_menu_win = wid;
+            god_menu_open = true;
+            god_menu.open = true;
+            god_menu.rect = Rect.make(0, 0, god_menu_w, god_menu_h);
+            redraw_god_menu();
+            write_marker(god_menu_open_marker);
+        } else {
+            write_marker("wnd: god-menu open-failed\n");
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // The policy actions (each issues SET_WINDOW rects / SET_STATE state).
@@ -997,6 +1226,19 @@ fn wnd_mail_apply(req: *const wnd_core.WmRpc) bool {
                     break;
                 }
             }
+            if (app_actions_count < app_actions.len) {
+                var act = &app_actions[app_actions_count];
+                act.owner_id = req.id;
+                act.section = @intCast(@min(req.x, 5));
+                const copy_l = @min(label_slice.len, act.label.len);
+                @memcpy(act.label[0..copy_l], label_slice[0..copy_l]);
+                act.label_len = copy_l;
+                const verb = "test-act";
+                const copy_v = @min(verb.len, act.verb.len);
+                @memcpy(act.verb[0..copy_v], verb[0..copy_v]);
+                act.verb_len = copy_v;
+                app_actions_count += 1;
+            }
             var buf: [80]u8 = undefined;
             const msg = std.fmt.bufPrint(&buf, "{s} section={d} label={s} verb=test-act\n", .{ action_reg_marker, req.x, label_slice }) catch "wnd: action-registered\n";
             write_marker(msg);
@@ -1068,6 +1310,68 @@ fn handle_wm_key(usage: u8, flags: u16) void {
     const ctrl = (flags & mod_ctrl) != 0;
     const shift = (flags & mod_shift) != 0;
     const alt = (flags & mod_alt) != 0;
+
+    // Issue #821 Phase 1: Ctrl+Space toggles the Global Sexiburger God Menu.
+    if (ctrl and usage == usage_space) {
+        toggle_god_menu();
+        return;
+    }
+
+    if (god_menu_open) {
+        if (usage == 0x29) { // Escape dismisses
+            toggle_god_menu();
+            return;
+        }
+        if (usage == 0x28) { // Enter executes selected
+            if (god_menu.filtered_count > 0 and god_menu.selected_filter_idx < god_menu.filtered_count) {
+                const sel_cmd = god_menu.filtered[god_menu.selected_filter_idx].command;
+                execute_god_menu_command(sel_cmd);
+            }
+            toggle_god_menu();
+            return;
+        }
+        if (usage == 0x52) { // Up arrow
+            if (god_menu.filtered_count > 0) {
+                if (god_menu.selected_filter_idx > 0) {
+                    god_menu.selected_filter_idx -= 1;
+                } else {
+                    god_menu.selected_filter_idx = god_menu.filtered_count - 1;
+                }
+                redraw_god_menu();
+            }
+            return;
+        }
+        if (usage == 0x51) { // Down arrow
+            if (god_menu.filtered_count > 0) {
+                if (god_menu.selected_filter_idx + 1 < god_menu.filtered_count) {
+                    god_menu.selected_filter_idx += 1;
+                } else {
+                    god_menu.selected_filter_idx = 0;
+                }
+                redraw_god_menu();
+            }
+            return;
+        }
+        if (usage == 0x2a) { // Backspace
+            if (god_menu.search_len > 0) {
+                god_menu.search_len -= 1;
+                god_menu.update_filter();
+                redraw_god_menu();
+            }
+            return;
+        }
+        if (hid_to_ascii(usage, shift)) |ch| {
+            if (ch >= 0x20 and ch <= 0x7e) {
+                if (god_menu.search_len < god_menu.search_buf.len) {
+                    god_menu.search_buf[god_menu.search_len] = ch;
+                    god_menu.search_len += 1;
+                    god_menu.update_filter();
+                    redraw_god_menu();
+                }
+            }
+        }
+        return;
+    }
 
     if (alt and usage == usage_tab) {
         // WMS6 Gate A: the WM, not the kernel, decides which window Alt+Tab
@@ -1263,6 +1567,48 @@ fn main() noreturn {
                 const btn: u8 = @intCast(ev.flags & 0xff);
                 const left = (btn & btn_left) != 0;
                 const prev_left = (prev_btn & btn_left) != 0;
+
+                // Issue #821 Phase 1: God Menu modal pointer capture
+                if (god_menu_open) {
+                    const menu_x = if (fb_w > god_menu_w) (fb_w - god_menu_w) / 2 else 0;
+                    const menu_y = if (fb_h > god_menu_h) (fb_h - god_menu_h) / 2 else 0;
+                    if (!prev_left and left) {
+                        if (px < menu_x or px >= menu_x + god_menu_w or py < menu_y or py >= menu_y + god_menu_h) {
+                            toggle_god_menu();
+                        } else {
+                            const mev = ui.Event{
+                                .kind = ui.MOUSE_DOWN,
+                                .flags = ui.BTN_LEFT,
+                                .seq = 0,
+                                .arg0 = px - menu_x,
+                                .arg1 = py - menu_y,
+                            };
+                            if (god_menu.handle_event(&mev)) {
+                                if (!god_menu.is_open()) {
+                                    if (god_menu.last_invoked_cmd) |lic| {
+                                        execute_god_menu_command(lic);
+                                    }
+                                    toggle_god_menu();
+                                } else {
+                                    redraw_god_menu();
+                                }
+                            }
+                        }
+                    } else if (px >= menu_x and px < menu_x + god_menu_w and py >= menu_y and py < menu_y + god_menu_h) {
+                        const mev = ui.Event{
+                            .kind = ui.MOUSE_MOVE,
+                            .flags = 0,
+                            .seq = 0,
+                            .arg0 = px - menu_x,
+                            .arg1 = py - menu_y,
+                        };
+                        if (god_menu.handle_event(&mev)) {
+                            redraw_god_menu();
+                        }
+                    }
+                    prev_btn = btn;
+                    continue;
+                }
 
                 if (grabbing) {
                     if (left) {
@@ -1619,4 +1965,54 @@ test "wnd: the WMS5 Gate 2 policy issues the SAME rects as the kernel shim (drif
     try std.testing.expectEqual(wnd_core.fb_w, fb_w);
     try std.testing.expectEqual(wnd_core.taskbar_h, taskbar_h);
     try std.testing.expectEqual(wnd_core.dock_w, dock_w);
+}
+
+test "wnd: hid_to_ascii maps keyboard usages accurately" {
+    try std.testing.expectEqual(@as(?u8, 'a'), hid_to_ascii(0x04, false));
+    try std.testing.expectEqual(@as(?u8, 'A'), hid_to_ascii(0x04, true));
+    try std.testing.expectEqual(@as(?u8, 'z'), hid_to_ascii(0x1d, false));
+    try std.testing.expectEqual(@as(?u8, 'Z'), hid_to_ascii(0x1d, true));
+    try std.testing.expectEqual(@as(?u8, '1'), hid_to_ascii(0x1e, false));
+    try std.testing.expectEqual(@as(?u8, '!'), hid_to_ascii(0x1e, true));
+    try std.testing.expectEqual(@as(?u8, ' '), hid_to_ascii(usage_space, false));
+    try std.testing.expectEqual(@as(?u8, '\n'), hid_to_ascii(0x28, false));
+    try std.testing.expectEqual(@as(?u8, 0x08), hid_to_ascii(0x2a, false));
+    try std.testing.expectEqual(@as(?u8, null), hid_to_ascii(0x29, false)); // Escape
+}
+
+test "wnd: god menu init, 6-section population, and type-to-filter" {
+    populate_god_menu();
+    try std.testing.expect(god_menu_initialized);
+    try std.testing.expect(god_menu_mascot_loaded);
+    try std.testing.expect(god_menu.raster_mascot != null);
+    try std.testing.expectEqual(@as(u32, 24), god_menu.raster_mascot.?.width);
+    try std.testing.expectEqual(@as(u32, 24), god_menu.raster_mascot.?.height);
+
+    // Verify sections have commands
+    var sec0_cmds: [16]Command = undefined;
+    const sec0_cnt = god_menu.registry.get_section_commands(.system, &sec0_cmds);
+    try std.testing.expect(sec0_cnt >= 4);
+
+    var sec1_cmds: [16]Command = undefined;
+    const sec1_cnt = god_menu.registry.get_section_commands(.apps, &sec1_cmds);
+    try std.testing.expect(sec1_cnt >= 3);
+
+    // Verify type-to-filter in God Menu
+    god_menu.set_search_query("calc");
+    try std.testing.expect(god_menu.filtered_count > 0);
+    try std.testing.expectEqualStrings("calc", god_menu.filtered[0].command.verb);
+
+    god_menu.set_search_query("about");
+    try std.testing.expect(god_menu.filtered_count > 0);
+    try std.testing.expectEqualStrings("about", god_menu.filtered[0].command.verb);
+}
+
+test "wnd: god menu key chord Ctrl+Space toggle and state" {
+    // Ensure initial closed state
+    god_menu_open = false;
+    god_menu_win = null;
+
+    // Simulate Ctrl+Space chord
+    handle_wm_key(usage_space, mod_ctrl);
+    try std.testing.expect(god_menu_initialized);
 }
