@@ -17,7 +17,7 @@
 //!   * The scheduler therefore only saves/restores per task: the
 //!     vector-frame pointer (sp), ELR_EL1 (interrupted PC) and SPSR_EL1
 //!     (interrupted PSTATE). The frame pointer reaches the tick through
-//!     `exceptions.resume_frame` (staged by `exc_dispatch` at IRQ entry);
+//!     `exceptions.resume_frame[c]` (staged by `exc_dispatch` at IRQ entry);
 //!     the tick rewrites that global to the NEXT task's frame and programs
 //!     ELR/SPSR, and the stub's `mov sp, x0` + register restore + `eret`
 //!     lands in the next task exactly as if IT had been interrupted.
@@ -260,8 +260,11 @@ const Task = struct {
 
 var tasks: [max_tasks]Task = [_]Task{.{}} ** max_tasks;
 var task_count: usize = 0;
-pub var current: usize = 0;
-pub var current_by_core: [smp.max_cores]usize = [_]usize{ 0, idle_id, idle_id, idle_id };
+/// The running task per core. Core 0 owns the task ring today
+/// (irq_dispatch gates tick to PE 0 — claim 7339); cores 1-3 sit in
+/// `idle_id` until the tick gate, ring locking, and task migration land.
+/// The old `current_by_core` vestige folded into this array.
+pub var current: [smp.max_cores]usize = [_]usize{ 0, idle_id, idle_id, idle_id };
 pub var sched_lock = spinlock.Spinlock.init();
 var enabled_flag: bool = false;
 var switches: u64 = 0;
@@ -274,13 +277,16 @@ var exits: u64 = 0;
 /// contract is in SCHEDULER ticks.
 var tick_count: u64 = 0;
 
-/// Restored-context staging: written by `switch_context` (the pure core),
-/// applied by `tick` (the aarch64 wrapper: msr ELR/SPSR + resume_frame).
-var pending_sp: u64 = 0;
-var pending_elr: u64 = 0;
-var pending_spsr: u64 = 0;
-var pending_sp_el0: u64 = 0;
-var pending_ttbr0: u64 = 0;
+/// Restored-context staging, PER-CORE: written by `switch_context`/
+/// `stage_current` (SVC context) and applied by `tick`/`apply_pending`
+/// (IRQ context) on the SAME core — staging and apply never cross cores,
+/// so indexing both by the running core keeps a switch atomic against that
+/// core's own ticks. Cores 1-3 hold idle staging until they run tasks.
+var pending_sp: [smp.max_cores]u64 = [_]u64{0} ** smp.max_cores;
+var pending_elr: [smp.max_cores]u64 = [_]u64{0} ** smp.max_cores;
+var pending_spsr: [smp.max_cores]u64 = [_]u64{0} ** smp.max_cores;
+var pending_sp_el0: [smp.max_cores]u64 = [_]u64{0} ** smp.max_cores;
+var pending_ttbr0: [smp.max_cores]u64 = [_]u64{0} ** smp.max_cores;
 
 /// Task reports (main-context console discipline, claim 9187): a task
 /// marks ITS OWN report slot pending (claim 6729: one slot per pool entry,
@@ -349,7 +355,7 @@ var spawn_demo_armed: bool = false;
 /// Returns the task id (0).
 pub fn init() usize {
     task_count = 0;
-    current = 0;
+    current[0] = 0; // the shell boots on core 0
     switches = 0;
     cooperative_yields = 0;
     exits = 0;
@@ -550,13 +556,14 @@ pub fn request_kill(id: usize) KillResult {
 /// runs in (no console, no allocation).
 pub fn fault_current(esr: u64, far: u64, pc: u64) void {
     if (task_count == 0) return;
+    const c = smp.core_id(); // per-core current
     // Prefer the PROCESS name (e.g. "GUARD.BIN") over the generic task name
     // ("user-exec") — the process name is a stable name_buf slice, so the
     // pointer is a safe FIFO snapshot (same rule as the exit reports).
-    const name: []const u8 = if (process.find_by_task(current)) |pid|
+    const name: []const u8 = if (process.find_by_task(current[c])) |pid|
         process.info(pid).?.name
     else
-        tasks[current].name;
+        tasks[current[c]].name;
     const ec = (esr >> 26) & 0x3f;
     if (fault_report_count == fault_report_max) {
         fault_report_head = (fault_report_head + 1) % fault_report_max;
@@ -567,7 +574,7 @@ pub fn fault_current(esr: u64, far: u64, pc: u64) void {
     fault_report_count += 1;
     // Arc5 issue #246: if the process has a memory limit and it's exceeded,
     // use status 140 (mem_limit) instead of 139 (guard page).
-    const fault_status = if (process.find_by_task(current)) |pid|
+    const fault_status = if (process.find_by_task(current[c])) |pid|
         if (process.check_mem_limit(pid)) reserved_mem_limit_status else reserved_fault_status
     else
         reserved_fault_status;
@@ -578,7 +585,7 @@ pub fn fault_current(esr: u64, far: u64, pc: u64) void {
 /// zero for EL1h tasks). The syscall layer arms these into uaccess at SVC
 /// entry so `sys_write` bounds always follow the task that issued the call.
 pub fn current_user_regions() UserRegions {
-    return tasks[current].regions;
+    return tasks[current[smp.core_id()]].regions;
 }
 
 /// Physical address of the static user stack pages (claim 6783: the boot
@@ -708,6 +715,7 @@ fn next_runnable(after: usize) ?usize {
 }
 
 fn stage_current() void {
+    const c = smp.core_id(); // per-core staging
     // Card 3c (claim 7786): a selected task with a pending kill is NOT
     // resumed — the ring converts its selection into the existing exit
     // path with the reserved status (the OS owns process lifetime). The
@@ -719,60 +727,62 @@ fn stage_current() void {
     // SPSR/TTBR0 machinery that follows any exit is used.
     // Claim 9094 (#810): validate `current` before the kill_pending read
     // (Task+0x178 — the exact byte read that faulted in run-11 boot 2).
-    audit.slot(current, .tick);
-    if (tasks[current].kill_pending) {
-        tasks[current].kill_pending = false;
+    audit.slot(current[c], .tick);
+    if (tasks[current[c]].kill_pending) {
+        tasks[current[c]].kill_pending = false;
         _ = exit_current(reserved_kill_status);
         return;
     }
-    pending_sp = tasks[current].sp;
-    pending_elr = tasks[current].elr;
-    pending_spsr = tasks[current].spsr;
-    pending_sp_el0 = tasks[current].sp_el0;
-    pending_ttbr0 = tasks[current].ttbr0;
+    pending_sp[c] = tasks[current[c]].sp;
+    pending_elr[c] = tasks[current[c]].elr;
+    pending_spsr[c] = tasks[current[c]].spsr;
+    pending_sp_el0[c] = tasks[current[c]].sp_el0;
+    pending_ttbr0[c] = tasks[current[c]].ttbr0;
     // Claim 6729: the selected task is now the one that will execute.
-    tasks[current].state = .running;
-    tasks[current].resumes += 1;
+    tasks[current[c]].state = .running;
+    tasks[current[c]].resumes += 1;
     switches += 1;
 }
 
 pub fn switch_context(frame_sp: u64, elr: u64, spsr: u64, sp_el0: u64) void {
     if (task_count == 0) return;
-    tasks[current].sp = frame_sp;
-    tasks[current].elr = elr;
-    tasks[current].spsr = spsr;
-    tasks[current].sp_el0 = sp_el0;
-    tasks[current].saves += 1;
+    const c = smp.core_id(); // per-core current
+    tasks[current[c]].sp = frame_sp;
+    tasks[current[c]].elr = elr;
+    tasks[current[c]].spsr = spsr;
+    tasks[current[c]].sp_el0 = sp_el0;
+    tasks[current[c]].saves += 1;
     // The preempted task is runnable again; only a zombie is removed from
     // the ring (claim 6729).
-    if (tasks[current].state == .running) tasks[current].state = .ready;
-    current = next_runnable(current) orelse return;
+    if (tasks[current[c]].state == .running) tasks[current[c]].state = .ready;
+    current[c] = next_runnable(current[c]) orelse return;
     stage_current();
 }
 
 fn apply_pending() void {
-    const cid = smp.core_id();
-    exceptions.resume_frame[cid] = pending_sp;
-    exceptions.resume_sp_el0[cid] = pending_sp_el0;
+    const c = smp.core_id(); // per-core staging: the core that staged it
+    exceptions.resume_frame[c] = pending_sp[c];
+    exceptions.resume_sp_el0[c] = pending_sp_el0[c];
     if (comptime builtin.is_test or builtin.cpu.arch != .aarch64) return;
     // Claim 5804: install the selected task's TTBR0 (with a full TLB
     // invalidation) before restoring its ELR/SPSR, so the eret to EL0 (or
     // the resumed EL1h instruction stream) sees the task's own user space.
-    mmu.set_ttbr0(pending_ttbr0);
+    mmu.set_ttbr0(pending_ttbr0[c]);
     asm volatile ("msr elr_el1, %[v]"
         :
-        : [v] "r" (pending_elr),
+        : [v] "r" (pending_elr[c]),
     );
     asm volatile ("msr spsr_el1, %[v]"
         :
-        : [v] "r" (pending_spsr),
+        : [v] "r" (pending_spsr[c]),
     );
     asm volatile ("isb");
 }
 
 fn current_exception_pc() struct { elr: u64, spsr: u64 } {
+    const c = smp.core_id(); // per-core current
     if (comptime builtin.is_test or builtin.cpu.arch != .aarch64) {
-        return .{ .elr = tasks[current].elr, .spsr = tasks[current].spsr };
+        return .{ .elr = tasks[current[c]].elr, .spsr = tasks[current[c]].spsr };
     }
     var elr: u64 = 0;
     var spsr: u64 = 0;
@@ -789,9 +799,9 @@ fn current_exception_pc() struct { elr: u64, spsr: u64 } {
 /// an IRQ frame would be, then another runnable task is staged for `eret`.
 pub fn yield_current() bool {
     if (!scheduling_active()) return false;
+    const c = smp.core_id(); // per-core current
     const pc = current_exception_pc();
-    const cid = smp.core_id();
-    switch_context(exceptions.resume_frame[cid], pc.elr, pc.spsr, exceptions.resume_sp_el0[cid]);
+    switch_context(exceptions.resume_frame[c], pc.elr, pc.spsr, exceptions.resume_sp_el0[c]);
     cooperative_yields +%= 1;
     apply_pending();
     return true;
@@ -806,22 +816,22 @@ pub fn yield_current() bool {
 /// tick, matching the 1 s timer period). Returns false (EINVAL) for the
 /// idle task or an inactive/rolled-back pool.
 pub fn sleep_current(ticks: u64) bool {
-    if (!scheduling_active() or task_count == 0 or current == idle_id) return false;
-    if (tasks[current].state != .ready and tasks[current].state != .running) return false;
+    const c = smp.core_id(); // per-core current
+    if (!scheduling_active() or task_count == 0 or current[c] == idle_id) return false;
+    if (tasks[current[c]].state != .ready and tasks[current[c]].state != .running) return false;
     const duration = if (ticks == 0) 1 else ticks;
     const deadline = std.math.add(u64, tick_count, duration) catch return false;
-    const sleeping = current;
+    const sleeping = current[c];
     const name = tasks[sleeping].name;
     // Save the calling task's context (frame SP + ELR/SPSR + SP_EL0), the
     // same seam yield_current uses — the task MUST find its saved SVC frame
     // intact when wake_expired flips it back to ready and the ring resumes
     // it. Unlike exit_current, which never resumes the saved context.
     const pc = current_exception_pc();
-    const cid = smp.core_id();
-    tasks[sleeping].sp = exceptions.resume_frame[cid];
+    tasks[sleeping].sp = exceptions.resume_frame[c];
     tasks[sleeping].elr = pc.elr;
     tasks[sleeping].spsr = pc.spsr;
-    tasks[sleeping].sp_el0 = exceptions.resume_sp_el0[cid];
+    tasks[sleeping].sp_el0 = exceptions.resume_sp_el0[c];
     tasks[sleeping].saves += 1;
     tasks[sleeping].state = .blocked;
     tasks[sleeping].wakeup_tick = deadline;
@@ -836,7 +846,7 @@ pub fn sleep_current(ticks: u64) bool {
     sleep_report_pending = true;
     sleep_report_name = name;
     sleep_report_ticks = duration;
-    current = next;
+    current[c] = next;
     stage_current();
     apply_pending();
     return true;
@@ -852,18 +862,18 @@ pub fn sleep_current(ticks: u64) bool {
 /// status when the caller resumes. Returns false (EINVAL) for the idle
 /// task or an inactive/rolled-back pool.
 pub fn wait_current(target_pid: usize) bool {
-    if (!scheduling_active() or task_count == 0 or current == idle_id) return false;
-    if (tasks[current].state != .ready and tasks[current].state != .running) return false;
-    const waiting = current;
+    const c = smp.core_id(); // per-core current
+    if (!scheduling_active() or task_count == 0 or current[c] == idle_id) return false;
+    if (tasks[current[c]].state != .ready and tasks[current[c]].state != .running) return false;
+    const waiting = current[c];
     const pc = current_exception_pc();
-    const cid = smp.core_id();
     // Save the calling task's context (frame SP + ELR/SPSR + SP_EL0), the
     // same seam yield_current/sleep_current use — the task MUST find its
     // saved SVC frame intact when the target exits and the ring resumes it.
-    tasks[waiting].sp = exceptions.resume_frame[cid];
+    tasks[waiting].sp = exceptions.resume_frame[c];
     tasks[waiting].elr = pc.elr;
     tasks[waiting].spsr = pc.spsr;
-    tasks[waiting].sp_el0 = exceptions.resume_sp_el0[cid];
+    tasks[waiting].sp_el0 = exceptions.resume_sp_el0[c];
     tasks[waiting].saves += 1;
     tasks[waiting].state = .blocked;
     tasks[waiting].wait_pid = target_pid;
@@ -875,7 +885,7 @@ pub fn wait_current(target_pid: usize) bool {
         tasks[waiting].saves -%= 1;
         return false;
     };
-    current = next;
+    current[c] = next;
     stage_current();
     apply_pending();
     return true;
@@ -885,15 +895,15 @@ pub fn wait_current(target_pid: usize) bool {
 /// arrives for process `pid`, then stage its successor. Rewinds ELR by 4
 /// so when the task wakes up, it re-executes `svc #0` under its own context.
 pub fn wait_event_current(pid: usize) bool {
-    if (!scheduling_active() or task_count == 0 or current == idle_id) return false;
-    if (tasks[current].state != .ready and tasks[current].state != .running) return false;
-    const waiting = current;
+    const c = smp.core_id(); // per-core current
+    if (!scheduling_active() or task_count == 0 or current[c] == idle_id) return false;
+    if (tasks[current[c]].state != .ready and tasks[current[c]].state != .running) return false;
+    const waiting = current[c];
     const pc = current_exception_pc();
-    const cid = smp.core_id();
-    tasks[waiting].sp = exceptions.resume_frame[cid];
+    tasks[waiting].sp = exceptions.resume_frame[c];
     tasks[waiting].elr = if (pc.elr >= 4) pc.elr - 4 else pc.elr;
     tasks[waiting].spsr = pc.spsr;
-    tasks[waiting].sp_el0 = exceptions.resume_sp_el0[cid];
+    tasks[waiting].sp_el0 = exceptions.resume_sp_el0[c];
     tasks[waiting].saves += 1;
     tasks[waiting].state = .blocked;
     tasks[waiting].wait_event_pid = pid;
@@ -902,7 +912,7 @@ pub fn wait_event_current(pid: usize) bool {
     // the blocking result (0) into the saved frame's x0 — the elr-4
     // re-execution must see the original x0, or the wake's copy_out
     // targets address 0 (EFAULT) and every blocking GUI event loop dies.
-    const saved_frame: *const exceptions.VectorFrame = @ptrFromInt(exceptions.resume_frame[cid]);
+    const saved_frame: *const exceptions.VectorFrame = @ptrFromInt(exceptions.resume_frame[c]);
     tasks[waiting].wait_event_buf = exceptions.frame_read(saved_frame, 0);
     const next = next_runnable(waiting) orelse {
         tasks[waiting].state = .ready;
@@ -911,7 +921,7 @@ pub fn wait_event_current(pid: usize) bool {
         tasks[waiting].saves -%= 1;
         return false;
     };
-    current = next;
+    current[c] = next;
     stage_current();
     apply_pending();
     return true;
@@ -976,6 +986,7 @@ fn wake_expired() void {
 /// counter and run the timer-driven wakeups. Called by the real `tick`
 /// before preemption; host tests call it directly to drive sleepers.
 pub fn on_tick() void {
+    const c = smp.core_id(); // per-core current
     tick_count +%= 1;
     wake_expired();
     // Milestone 14 (claim 7323): count every armed app timer down and fire
@@ -990,8 +1001,8 @@ pub fn on_tick() void {
     // Arc5 issue #246: per-process CPU limit enforcement. Increment the
     // current process's tick counter; if the limit is exceeded, terminate
     // the process with status 141 (distinct from guard-page 139).
-    if (current != idle_id and tasks[current].state == .running) {
-        if (process.find_by_task(current)) |pid| {
+    if (current[c] != idle_id and tasks[current[c]].state == .running) {
+        if (process.find_by_task(current[c])) |pid| {
             if (process.inc_cpu_ticks(pid)) {
                 _ = exit_current(reserved_cpu_limit_status);
             }
@@ -1005,9 +1016,10 @@ pub fn on_tick() void {
 /// ZOMBIE (its status is preserved for `terminated_status`); the idle task
 /// reaps it later. The idle task itself can never be exited.
 pub fn exit_current(status: u64) bool {
-    if (task_count == 0 or current == idle_id) return false;
-    if (tasks[current].state != .ready and tasks[current].state != .running) return false;
-    const exiting = current;
+    const c = smp.core_id(); // per-core current
+    if (task_count == 0 or current[c] == idle_id) return false;
+    if (tasks[current[c]].state != .ready and tasks[current[c]].state != .running) return false;
+    const exiting = current[c];
     const name = tasks[exiting].name;
     tasks[exiting].state = .zombie;
     tasks[exiting].exit_status = status;
@@ -1098,7 +1110,7 @@ pub fn exit_current(status: u64) bool {
     exit_reports[report_index] = .{ .name = name, .status = status };
     exit_report_count += 1;
     exits +%= 1;
-    current = next;
+    current[c] = next;
     stage_current();
     apply_pending();
     return true;
@@ -1194,12 +1206,13 @@ fn spawn_demo_entry() void {
 /// IRQ-context tick (called from the kernel's irq_dispatch right after
 /// timer.handle re-armed the comparator): preempt the current task and
 /// round-robin to the next. The interrupted task's vector frame is on the
-/// stack (`exceptions.resume_frame`); ELR_EL1/SPSR_EL1 still hold the
+/// stack (`exceptions.resume_frame[c]`); ELR_EL1/SPSR_EL1 still hold the
 /// interrupted PC/PSTATE. The switch itself only programs ELR/SPSR and the
 /// stub's restore frame — the stub does the register pop and eret.
 pub fn tick() void {
     if (comptime builtin.cpu.arch != .aarch64) return;
     if (!scheduling_active()) return;
+    const c = smp.core_id(); // per-core staging
     var elr: u64 = 0;
     var spsr: u64 = 0;
     asm volatile ("mrs %[v], elr_el1"
@@ -1209,8 +1222,7 @@ pub fn tick() void {
         : [v] "=r" (spsr),
     );
     on_tick();
-    const cid = smp.core_id();
-    timer_switch_context(exceptions.resume_frame[cid], elr, spsr, exceptions.resume_sp_el0[cid]);
+    timer_switch_context(exceptions.resume_frame[c], elr, spsr, exceptions.resume_sp_el0[c]);
     apply_pending();
 }
 
@@ -1448,7 +1460,8 @@ pub const audit = struct {
 /// this in its main-context loop).
 pub fn note_advance() void {
     if (task_count == 0) return;
-    tasks[current].advances += 1;
+    const c = smp.core_id(); // per-core current
+    tasks[current[c]].advances += 1;
 }
 
 /// Task-side: ask the shell idle loop to print the current task's advance
@@ -1458,9 +1471,10 @@ pub fn note_advance() void {
 /// reports cannot starve another's (the worker requests every 64
 /// iterations; the spawn-demo task every 16).
 pub fn request_report() void {
-    if (task_count == 0 or report_pending[current]) return;
-    report_pending[current] = true;
-    report_advances[current] = tasks[current].advances;
+    const c = smp.core_id(); // per-core current
+    if (task_count == 0 or report_pending[current[c]]) return;
+    report_pending[current[c]] = true;
+    report_advances[current[c]] = tasks[current[c]].advances;
 }
 
 /// Shell-side (main context, next to timer.maybe_heartbeat): print every
@@ -1570,7 +1584,7 @@ pub fn stats() Stats {
     }
     return .{
         .enabled = enabled_flag,
-        .current = current,
+        .current = current[smp.core_id()],
         .switches = switches,
         .count = task_count,
         .zombies = zombies,
@@ -1589,14 +1603,11 @@ pub fn task_info(id: usize) ?TaskInfo {
 }
 
 pub fn current_id() usize {
-    return current;
+    return current[smp.core_id()];
 }
 
 pub fn current_task_for_core(cid: usize) usize {
-    if (cid == 0) return current;
-    if (cid < smp.max_cores) {
-        return current_by_core[cid];
-    }
+    if (cid < smp.max_cores) return current[cid];
     return 0;
 }
 
@@ -1733,46 +1744,46 @@ test "scheduler: round-robin alternates and round-trips saved context" {
     // First switch: the shell is preempted at pc 0x1000; the worker is
     // restored to its synthetic frame.
     switch_context(0x1000, 0x1000, 0x5, 0xaaaa);
-    try std.testing.expectEqual(@as(usize, 1), current);
+    try std.testing.expectEqual(@as(usize, 1), current[0]);
     try std.testing.expectEqual(@as(u64, 1), switches);
     try std.testing.expectEqual(@as(u64, 1), tasks[0].saves);
     try std.testing.expectEqual(@as(u64, 0), tasks[0].resumes);
     try std.testing.expectEqual(@as(u64, 1), tasks[1].resumes);
     try std.testing.expectEqual(@as(u64, 0), tasks[1].saves);
-    try std.testing.expectEqual(tasks[1].sp, pending_sp);
-    try std.testing.expectEqual(worker_entry, pending_elr);
-    try std.testing.expectEqual(spsr_el1h_irqs, pending_spsr);
+    try std.testing.expectEqual(tasks[1].sp, pending_sp[0]);
+    try std.testing.expectEqual(worker_entry, pending_elr[0]);
+    try std.testing.expectEqual(spsr_el1h_irqs, pending_spsr[0]);
     // Second switch: the worker is preempted; the user task is restored to
     // its synthetic EL0t frame.
     switch_context(0x2000, 0x2000, 0x5, 0xbbbb);
-    try std.testing.expectEqual(@as(usize, 2), current);
+    try std.testing.expectEqual(@as(usize, 2), current[0]);
     try std.testing.expectEqual(@as(u64, 2), switches);
     try std.testing.expectEqual(@as(u64, 1), tasks[1].saves);
     try std.testing.expectEqual(@as(u64, 1), tasks[1].resumes);
-    try std.testing.expectEqual(tasks[2].sp, pending_sp);
-    try std.testing.expectEqual(@as(u64, 0x3000), pending_elr);
-    try std.testing.expectEqual(spsr_el0t_irqs, pending_spsr);
+    try std.testing.expectEqual(tasks[2].sp, pending_sp[0]);
+    try std.testing.expectEqual(@as(u64, 0x3000), pending_elr[0]);
+    try std.testing.expectEqual(spsr_el0t_irqs, pending_spsr[0]);
     // Third switch: the user is preempted; the idle task is restored.
     switch_context(0x3000, 0x3000, 0x0, 0xcccc);
-    try std.testing.expectEqual(@as(usize, idle_id), current);
+    try std.testing.expectEqual(@as(usize, idle_id), current[0]);
     try std.testing.expectEqual(@as(u64, 3), switches);
     try std.testing.expectEqual(@as(u64, 1), tasks[2].saves);
     try std.testing.expectEqual(@as(u64, 1), tasks[idle_id].resumes);
-    try std.testing.expectEqual(tasks[idle_id].sp, pending_sp);
+    try std.testing.expectEqual(tasks[idle_id].sp, pending_sp[0]);
     // Fourth switch: the idle task is preempted; the shell is restored to
     // its exact saved context (the round-trip).
     switch_context(0x4000, 0x4000, 0x5, 0xdddd);
-    try std.testing.expectEqual(@as(usize, 0), current);
+    try std.testing.expectEqual(@as(usize, 0), current[0]);
     try std.testing.expectEqual(@as(u64, 4), switches);
     try std.testing.expectEqual(@as(u64, 1), tasks[idle_id].saves);
     try std.testing.expectEqual(@as(u64, 1), tasks[0].resumes);
-    try std.testing.expectEqual(@as(u64, 0x1000), pending_sp);
-    try std.testing.expectEqual(@as(u64, 0x1000), pending_elr);
-    try std.testing.expectEqual(@as(u64, 0x5), pending_spsr);
-    try std.testing.expectEqual(@as(u64, 0xaaaa), pending_sp_el0);
+    try std.testing.expectEqual(@as(u64, 0x1000), pending_sp[0]);
+    try std.testing.expectEqual(@as(u64, 0x1000), pending_elr[0]);
+    try std.testing.expectEqual(@as(u64, 0x5), pending_spsr[0]);
+    try std.testing.expectEqual(@as(u64, 0xaaaa), pending_sp_el0[0]);
     // Fifth switch returns to the worker's saved context (the round-trip).
     switch_context(0x1000, 0x1001, 0x5, 0xaaaa);
-    try std.testing.expectEqual(@as(usize, 1), current);
+    try std.testing.expectEqual(@as(usize, 1), current[0]);
     try std.testing.expectEqual(@as(u64, 5), switches);
     try std.testing.expectEqual(@as(u64, 2), tasks[0].saves);
     try std.testing.expectEqual(@as(u64, 1), tasks[0].resumes);
@@ -1788,28 +1799,28 @@ test "scheduler: mixed EL1h and EL0t round-robin restores SP_EL0" {
     const initial_user_sp = tasks[2].sp_el0;
 
     switch_context(0x1000, 0x1000, spsr_el1h_irqs, 0xaaaa); // shell -> worker
-    try std.testing.expectEqual(@as(usize, 1), current);
+    try std.testing.expectEqual(@as(usize, 1), current[0]);
     switch_context(0x2000, 0x2000, spsr_el1h_irqs, 0xbbbb); // worker -> user
-    try std.testing.expectEqual(@as(usize, 2), current);
-    try std.testing.expectEqual(spsr_el0t_irqs, pending_spsr);
-    try std.testing.expectEqual(initial_user_sp, pending_sp_el0);
+    try std.testing.expectEqual(@as(usize, 2), current[0]);
+    try std.testing.expectEqual(spsr_el0t_irqs, pending_spsr[0]);
+    try std.testing.expectEqual(initial_user_sp, pending_sp_el0[0]);
 
     const preempted_user_sp: u64 = initial_user_sp - 16;
     // Claim 6729: the preempted EL0 task's successor is the idle task
     // (sp_el0 = 0 for an EL1h task), then the shell on the next switch.
     switch_context(0x3000, 0x3004, spsr_el0t_irqs, preempted_user_sp); // user -> idle
-    try std.testing.expectEqual(@as(usize, idle_id), current);
-    try std.testing.expectEqual(@as(u64, 0), pending_sp_el0);
+    try std.testing.expectEqual(@as(usize, idle_id), current[0]);
+    try std.testing.expectEqual(@as(u64, 0), pending_sp_el0[0]);
     try std.testing.expectEqual(preempted_user_sp, tasks[2].sp_el0);
     switch_context(0x4000, 0x4000, spsr_el1h_irqs, 0xcccc); // idle -> shell
-    try std.testing.expectEqual(@as(usize, 0), current);
-    try std.testing.expectEqual(@as(u64, 0xaaaa), pending_sp_el0);
+    try std.testing.expectEqual(@as(usize, 0), current[0]);
+    try std.testing.expectEqual(@as(u64, 0xaaaa), pending_sp_el0[0]);
 
     switch_context(0x1000, 0x1004, spsr_el1h_irqs, 0xaaaa);
     switch_context(0x2000, 0x2004, spsr_el1h_irqs, 0xbbbb);
-    try std.testing.expectEqual(@as(usize, 2), current);
-    try std.testing.expectEqual(preempted_user_sp, pending_sp_el0);
-    try std.testing.expectEqual(@as(u64, 0x3004), pending_elr);
+    try std.testing.expectEqual(@as(usize, 2), current[0]);
+    try std.testing.expectEqual(preempted_user_sp, pending_sp_el0[0]);
+    try std.testing.expectEqual(@as(u64, 0x3004), pending_elr[0]);
 }
 
 test "scheduler: only a tick preemption publishes the EL0 witness" {
@@ -1834,7 +1845,7 @@ test "scheduler: only a tick preemption publishes the EL0 witness" {
 test "scheduler: the worker's advance counter belongs to its own task" {
     _ = init();
     _ = register_worker(0x2000).?;
-    current = 1; // pretend the worker is running
+    current[0] = 1; // pretend the worker is running
     note_advance();
     note_advance();
     note_advance();
@@ -1845,7 +1856,7 @@ test "scheduler: the worker's advance counter belongs to its own task" {
 test "scheduler: worker report snapshots once and prints from the shell side" {
     _ = init();
     _ = register_worker(0x2000).?;
-    current = 1; // pretend the worker is running
+    current[0] = 1; // pretend the worker is running
     note_advance();
     note_advance();
     request_report();
@@ -1919,14 +1930,14 @@ test "scheduler: sleep_current blocks, wakes on the deadline tick, and rolls bac
     try std.testing.expect(sleep_current(2));
     try std.testing.expect(is_blocked(0));
     try std.testing.expectEqual(@as(u64, 2), tasks[0].wakeup_tick);
-    try std.testing.expectEqual(@as(usize, 1), current);
+    try std.testing.expectEqual(@as(usize, 1), current[0]);
     // The blocked task drops out of the ring: worker -> user -> idle -> worker.
     try std.testing.expect(yield_current());
-    try std.testing.expectEqual(@as(usize, 2), current);
+    try std.testing.expectEqual(@as(usize, 2), current[0]);
     try std.testing.expect(yield_current());
-    try std.testing.expectEqual(@as(usize, idle_id), current);
+    try std.testing.expectEqual(@as(usize, idle_id), current[0]);
     try std.testing.expect(yield_current());
-    try std.testing.expectEqual(@as(usize, 1), current);
+    try std.testing.expectEqual(@as(usize, 1), current[0]);
     // Tick 1: deadline (tick_count 0 + 2) not reached yet.
     on_tick();
     try std.testing.expect(is_blocked(0));
@@ -1938,10 +1949,10 @@ test "scheduler: sleep_current blocks, wakes on the deadline tick, and rolls bac
     try std.testing.expectEqual(@as(u64, 0), tasks[0].wakeup_tick);
     // The ring reaches the woken shell again.
     try std.testing.expect(yield_current()); // worker -> user
-    try std.testing.expectEqual(@as(usize, 2), current);
+    try std.testing.expectEqual(@as(usize, 2), current[0]);
     try std.testing.expect(yield_current()); // user -> idle
     try std.testing.expect(yield_current()); // idle -> shell
-    try std.testing.expectEqual(@as(usize, 0), current);
+    try std.testing.expectEqual(@as(usize, 0), current[0]);
 }
 
 test "scheduler: sleep guards — zero clamps to one tick, idle and inactive fail" {
@@ -1955,12 +1966,12 @@ test "scheduler: sleep guards — zero clamps to one tick, idle and inactive fai
     try std.testing.expect(sleep_current(0));
     try std.testing.expectEqual(@as(u64, 1), tasks[0].wakeup_tick);
     // The idle task cannot sleep (it is the ring's fallback).
-    current = idle_id;
+    current[0] = idle_id;
     try std.testing.expect(!sleep_current(1));
     try std.testing.expect(!is_blocked(idle_id));
     // A zombie cannot sleep either.
     tasks[1].state = .zombie;
-    current = 1;
+    current[0] = 1;
     try std.testing.expect(!sleep_current(1));
 }
 
@@ -2022,18 +2033,18 @@ test "scheduler: two live user tasks coexist with their own roots and regions" {
     try std.testing.expectEqual(root_b, task_ttbr0(user_b));
     // The current-task regions follow the ring: put A current and read its
     // regions, then B.
-    current = user_a;
+    current[0] = user_a;
     const ra = current_user_regions();
     try std.testing.expectEqual(userspace.text_va, ra.text.base);
     try std.testing.expectEqual(userspace.stack_va, ra.stack.base);
-    current = user_b;
+    current[0] = user_b;
     const rb = current_user_regions();
     try std.testing.expectEqual(userspace.text_va, rb.text.base);
     try std.testing.expectEqual(@as(u64, 0x1a400000), rb.stack.base);
     try std.testing.expectEqual(@as(u64, 8192), rb.stack.len);
     // Restore the ring position before the round-robin exercise (the region
     // checks above moved `current` for readability).
-    current = 0;
+    current[0] = 0;
     // Both run in the ring (round-robin reaches each).
     start();
     try std.testing.expect(yield_current()); // shell -> worker
