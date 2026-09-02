@@ -52,6 +52,26 @@
   read, B=−1 fn pointer, C=dead-space read), not a static overrun.
   Prime suspects remain the vf reply exchanges (queue-5 era, "hello.tx"
   on both decoded stacks) racing the tick/idle ring.
+  (6) **RUN-13 CORRECTION — the audit caught this family red-handed:**
+  the live `scheduler.audit` sweep (every vf exchange + reap + tick-
+  seam) recorded ZERO task-ring/process violations on the run-13 hang
+  boot — the ring is CLEAN, so the corruption hypothesis does NOT fit
+  this family. The self-decoded fault: `esr=0x97080010` with **S1PTW**
+  (iss bit 19 — external abort DURING a stage-1 walk), `far=0x20080296`
+  resolved by the [DEEP] walk to a VALID leaf (l3 pte=0x20080403, pa
+  0x20080296, low-RAM 512 MiB+ region) under the ACTIVE user root
+  (ttbr0 0x7df39000) — the table chain reads back VALID after the fault
+  (a transient window); x21=0x2008011e, x25=0x40000000, x19/x26 = GIC
+  BARs, x23=0x1e (timer PPI), x2=0x8000; elr text+0x768 (base
+  0x7daad000) in code storing qwords/rects toward 0x40000000-class
+  targets while referencing the 0x20080000-class page. Guest RAM class:
+  2 GiB @ 0 (image at 2 GiB − 22 MiB) — NOT the earlier "256 MiB @
+  0x70000000" guess (comments corrected). Working theory: a transient
+  translation window in the user root / surface region during the
+  exec/rebuild_user_root → TTBR0-switch → first-touch era (the vf era
+  is the scheduling context that coincides). Fix candidate: root-switch
+  discipline (TLBI/ISB vs first EL1h access) in
+  rebuild_user_root_full/apply_pending.
 - **Deep-dump instrumentation v2 (claim 9094, exceptions.zig,
   EL1h-sync-only so healthy boots stay byte-identical):** `[DEEP]` block
   on every unhandled EL1h sync — ttbr0/ttbr1/mair/tcr,
@@ -77,12 +97,24 @@
 - **Heartbeat:** 2026-09-02
 - **Status:** 🔄 in progress — claim 9094 (id via `bash tools/status/claim-id.sh`);
   instrumentation v2 landed + run-11 hang boots decoded (see Findings);
-  the corrupting WRITER is not yet named. Next step: catch the writer in
-  the act — either a canary/magic audit of the `tasks`/`processes` BSS
-  window from the vf exchange entry/exit, or bisect by disabling the vf
-  probe era (`hello.tx` cat) in one gate variant and comparing flake
-  rate. The v2 dump makes any further hang self-decoding at the exact
-  instruction.
+  the corrupting WRITER is not yet named. Run 13 CAUGHT the flake with
+  the audit live: **zero ring violations + S1PTW walk fault on a
+  transient user-root window** (see Findings) — the corruption theory
+  is now mostly ruled out and the fix hunt moves to the root-switch /
+  surface translation discipline (TLBI/ISB ordering), with the vf era
+  as the coinciding context. The audit + v2 dump remain armed for the
+  next catch. **Writer-hunt instrument ADDED 2026-09-02:**
+  `scheduler.audit` — a task-ring + process-registry INVARIANT audit
+  (instrumentation only, zero behavior change): every virtio_file
+  queue-5 exchange arms at entry / checks at exit; `reap_one_zombie`
+  and the tick's ring-select validate the slot before reading it; the
+  idle loop drains violations. Rules are strict supersets of observed
+  legal values (kernel pointers ∈ [0x1000, 0x80000000), the 256 MiB @
+  0x70000000 class ceiling; user VAs like sp_el0 are legal and
+  excluded; spsr allows only known-condition-bit shapes; raw enum
+  reads so a rogue byte can't UB the audit itself). Run 12 will show
+  the one-per-boot `[AUDIT] armed` evidence line; a corruption caught
+  prints slot/field/value/tag/tick BEFORE the faulting read.
 
 ## Notes
 

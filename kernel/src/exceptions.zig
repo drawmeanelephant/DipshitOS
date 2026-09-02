@@ -386,10 +386,13 @@ pub fn deep_dump(buf: []u8, esr: u64, far: u64, elr: u64, raw_sp: u64) []const u
     const shift_table = [_]u6{ 39, 30, 21, 12 };
     const block_mask = [_]u64{ 0, 0x3f_ffff, 0x1f_ffff, 0xfff };
     // Claim 9094 lesson: every read here must stay below the RAM ceiling
-    // (0x80000000 for the 256 MiB @ 0x70000000 class). The first version's
-    // unbound walk/crawl recursed SEA-on-SEA inside the dump itself (the
-    // run-7/8 storm ate the boot stack to text); bounded reads are
-    // SEA-proof, so one hang = exactly one clean dump.
+    // (0x80000000 = top of the guest's 2 GiB RAM @ 0 — the kernel image
+    // loads at ~0x7daa…, i.e. 2 GiB − 22 MiB; run-13 far=0x20080296 =
+    // 512 MiB+ region; NOT the "256 MiB @ 0x70000000" label guessed
+    // earlier). The first version's unbound walk/crawl recursed
+    // SEA-on-SEA inside the dump itself (the run-7/8 storm ate the boot
+    // stack to text); bounded reads are SEA-proof, so one hang = exactly
+    // one clean dump.
     const ram_ceiling: u64 = 0x8000_0000;
     var level: u4 = 0;
     var done = false;

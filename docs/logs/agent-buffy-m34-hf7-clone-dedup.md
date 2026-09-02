@@ -74,3 +74,46 @@ Branch: Freebuff worktree `freebuff/get-git-up-to-date-...`
   bounded SEA-proof reads, full DAIF mask on park) committed with this
   entry; run 11 already passed 5/6 boots + measurement with retries.
   Claim 9094 stays 🔄 — writer hunt is the next session's job.
+- **2026-09-02 #810 writer-hunt instrument (claim 9094, run 12/13):**
+  added `scheduler.audit` — task-ring + process-registry INVARIANT audit,
+  instrumentation only. Every virtio_file queue-5 exchange arms at entry /
+  checks at exit; `reap_one_zombie` and the tick ring-select validate the
+  slot before reading it (the exact +0x178 kill_pending read that faulted
+  in run-11 boot 2); the idle loop drains violations. Rules: kernel
+  pointers ∈ [0x1000, 0x80000000) (256 MiB @ 0x70000000 class ceiling,
+  same as the deep dump), ttbr0 additionally page-aligned, state/name raw
+  reads that cannot UB on rogue bytes (typed enum loads of rogue bytes are
+  UB in safe builds). Run-12 boot 1 caught a TOO-TIGHT rule: saved PSTATE
+  legitimately carries PAN/UAO/DAIF bits up to 0x60000000 and 0x80000005
+  (the #810 frames' spsr was itself legal!) — dropped the spsr check,
+  added (slot,field) repeat-suppression, fixed a `0x0x` hex prefix, and
+  made the virtio_file→scheduler import comptime-conditional (host-test
+  binaries must not pull in scheduler's transitive test blocks — the
+  driving_award SB4 composite test reaches an unconditional `dc ivac`
+  that is an illegal instruction on x86 hosts, ABRTing `zig test
+  virtio_file`). Run-13 boot 1: exactly ONE `[AUDIT] task-ring+procs
+  audit armed slots=11 procs=16` line on a healthy boot — no noise. The
+  next hang (if the flake cooperates) prints slot/field/value/tag/tick
+  BEFORE the faulting read, naming the corruption window.
+- **2026-09-02 #810 RUN-13 CATCH (claim 9094, audit + v2 dump armed):**
+  gate run 13 boot 2 hung exactly in the classic window (count=1408,
+  ≈1.4 s) with BOTH instruments live. The `[AUDIT]` ring sweep printed
+  ONLY the one armed line — **zero task-ring/process violations**: the
+  run-10/11 "BSS-corrupting writer" hypothesis is ruled out for this
+  family. Self-decoded fault: `esr=0x97080010` with S1PTW (iss bit 19
+  = external abort DURING the stage-1 walk), far=0x20080296 resolved by
+  the [DEEP] walk to a VALID leaf (l3 pte 0x20080403 → pa 0x20080296,
+  low-RAM) under the ACTIVE user root ttbr0=0x7df39000 — the same table
+  chain was walked successfully by the instrument immediately after
+  (transient window). Regs: x21=0x2008011e (same page as far),
+  x25=0x40000000 (rect/device-ish target in the elr text+0x768 window:
+  base 0x7daad000, `x9=x25+x20; strb [x9,#0x20]; stp q0,q1,[x9]`),
+  x19/x26 = GIC BARs, x23=0x1e, x2=0x8000. Guest RAM class corrected:
+  2 GiB @ 0 (kernel image at 0x7daa… = 2 GiB − 22 MiB); exceptions.zig
+  + scheduler.zig class comments fixed (the 0x80000000 ceiling bound
+  itself was right). Posted full decode to #810 (comment 4), claim
+  updated with finding (6). Working theory for the fix: transient
+  translation window in the user root / surface region during the
+  exec/rebuild_user_root → TTBR0-switch → first-touch era — next
+  session's fix candidate is the TLBI/ISB discipline in
+  rebuild_user_root_full/apply_pending.

@@ -41,6 +41,24 @@
 //! the shared class-A fixture `tests/vf-pattern-32k.bin` (sha256-pinned).
 
 const virtio_custom = @import("virtio_custom.zig");
+/// Claim 9094 (#810 writer hunt): the task-ring audit is a LIVE-gate
+/// instrument only — the scheduler import is comptime-conditional so
+/// host-test binaries never pull in scheduler's whole import tree (its
+/// transitively-imported test blocks change the host-test universe, e.g.
+/// driving_award's SB4 composite test reaches an unconditional `dc ivac`
+/// that is an illegal instruction on x86 hosts). The stub keeps the call
+/// sites type-identical in both worlds.
+const scheduler = if (builtin.is_test) struct {
+    pub const audit = struct {
+        pub const Tag = enum { vf, reap, tick, drain };
+        pub fn arm(tag: Tag) void {
+            _ = tag;
+        }
+        pub fn check(tag: Tag) void {
+            _ = tag;
+        }
+    };
+} else @import("scheduler.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -285,9 +303,19 @@ pub fn available() bool {
 /// One bounded exchange on queue 5: submit an ALREADY-ENCODED request
 /// (`req`), poll-wait for the host's reply, free the chain. Returns the
 /// used-ring length (bytes the host wrote), or null on transport
-/// failure/timeout.
+/// failure/timeout. Claim 9094 (#810 writer hunt): EVERY exchange arms
+/// the scheduler task-ring + process audit at entry and closes it at
+/// exit (covers the probe spike, read, write, list and clone — the
+/// vf-output era is where the corrupted-pointer faults were caught).
 fn exchange_raw(req: []const u8, reply_buf: []u8) ?u32 {
     if (!available()) return null;
+    scheduler.audit.arm(.vf);
+    const n = exchange_raw_inner(req, reply_buf);
+    scheduler.audit.check(.vf);
+    return n;
+}
+
+fn exchange_raw_inner(req: []const u8, reply_buf: []u8) ?u32 {
     vf_scatter[0] = req;
     const handle = virtio_custom.submit_ex(virtio_custom.file_qidx, &vf_scatter, reply_buf, false) orelse return null;
     const n = virtio_custom.wait(virtio_custom.file_qidx, handle, exchange_budget, reply_buf) orelse {
