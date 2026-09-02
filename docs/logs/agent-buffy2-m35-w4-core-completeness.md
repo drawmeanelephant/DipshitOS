@@ -61,3 +61,53 @@ Branch: `agent/buffy2/m35-w4-core-completeness` · Worktree: `../virelaios-buffy
   gated on the wc `zig cc` probe (per plan); the named C float utility +
   corpus fixture + `verify-live-wasm.sh` W4 phase; docs flips (scoping
   card, contract §6, status).
+## 2026-09-02 — bulk-memory probe + 0xFC 8–11 landed (W4, issue #765)
+
+- **Decision probe (run first, as the plan gated):** compiled a wc-shaped
+  program against the real `tests/virelai.h` shim under the plain W3
+  recipe (`zig cc -target wasm32-freestanding`, no bulk-memory flag) and
+  a `-mbulk-memory` variant. Constant-size memcpy/memset lower to
+  inlined i32 ops under both — but a **runtime-size** memcpy/memset
+  (the honest wc shape) emits `0xFC 0A` memory.copy and `0xFC 0B`
+  memory.fill under the plain recipe (clang enables bulk-memory by
+  default for wasm32). The W3 interpreter rejected those modules at
+  validate (`BulkMemoryOutOfSubset`). **Verdict: bulk-memory is
+  justified** — any real wc tool hits it.
+- **Parser:** DataCount section (id 12) accepted between element and code
+  with ordering enforced; `Module.has_datacount`/`data_count_decl`
+  added; count-vs-data-section mismatch → `DataCountMismatch`; passive
+  data flag 0x01 accepted; active segments stay flag 0/2 with the same
+  instantiate semantics. Passive data never lands at instantiate (poison
+  test pins store[0..8] = 0xEE after instantiate).
+- **Machine:** `Machine.data_dropped[max_datas]` per-instance state, reset
+  in `resetMachine`.
+- **Validation:** 0xFC 8 = memory.init (dataidx+memidx, `[dst src n]`),
+  9 = data.drop, 10 = memory.copy, 11 = memory.fill; 8/9 require the
+  DataCount section (`DataCountMissing`) and index < data_count_decl;
+  all four require a memory; 0xFC ≥ 12 (table.init/copy/grow etc.)
+  stays out of subset. skipInstr/scanner taught the 0xFC immediate
+  shapes so validateOp and exec agree.
+- **Exec:** memory.init/copy/fill/data.drop with the W1 bounds discipline
+  (module + offset named traps). copy is a true memmove (`@memmove`:
+  backward for dst > src) — the overlap test would smear under a plain
+  forward copy; init is `@memcpy` from the (possibly dropped) segment.
+- **Tests: 35/35** (`zig test user/src/wasm.zig`). New: init/copy/fill
+  byte-exact (right-shift 1,1,2,3,4,5,6,7,9 — index 8 keeps init's 9th
+  byte, proving copy never wrote past its window), data.drop makes a
+  later init trap bounds, memory.init without DataCount →
+  DataCountMissing, DataCount count mismatch → parse error, table ops
+  (0xFC 16) still BulkMemoryOutOfSubset. (Debugging note: three new
+  tests had off-by-one section/body size bytes and one had a wrong
+  expectation — exec was correct all along; fixed in-test.)
+- **End-to-end proof:** a self-contained clang module (runtime-size
+  memmove, exported `shift`, `--initial-memory`, no imports) parses →
+  validates → instantiates → executes through the interpreter:
+  `shift(4)=4` then `shift(3)=3` on the same instance — clang-emitted
+  memory.copy confirmed working, not just validated.
+- **Build + gates:** `zig build wasm` green — WASM.BIN image 63,456 B
+  (≈ 248 KiB staged incl. bss tail, inside the 256 KiB loader budget).
+  `verify-coordination` PASS; `verify-bss-budget` PASS (542 KiB
+  headroom). Probe scratch cleaned (nothing unreferenced left in tree).
+- **Still open on W4 (next commits):** the named C float utility +
+  pinned corpus fixture + `verify-live-wasm.sh` W4 live-gate phase;
+  docs flips (scoping card, contract §6, status).

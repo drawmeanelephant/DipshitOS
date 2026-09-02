@@ -186,11 +186,13 @@ pub const Element = struct {
     abs_off: usize = 0,
 };
 
-/// Active data segment (flag 0x00 form only; memory 0).
+/// Data segment: active (flags 0/2 — applied at instantiate) or passive
+/// (flag 1 — consumed at runtime by `memory.init` until `data.drop`).
 pub const Data = struct {
     offset: u32,
     bytes: []const u8 = &.{},
     abs_off: usize = 0,
+    passive: bool = false,
 };
 
 pub const Func = struct {
@@ -223,6 +225,8 @@ pub const Module = struct {
     element_count: u16 = 0,
     datas: [max_datas]Data = undefined,
     data_count: u16 = 0,
+    has_datacount: bool = false, // DataCount section (id 12) present
+    data_count_decl: u16 = 0, // value from that section (memory.init index cap)
 };
 
 // ---------------------------------------------------------------------------
@@ -236,6 +240,7 @@ pub const ParseError = error{
     UnknownSection,
     DuplicateSection,
     SectionOutOfOrder,
+    DataCountMismatch, // DataCount section count != actual data-section count
     UnknownValueType,
     UnknownImportKind,
     UnknownExportKind,
@@ -249,7 +254,8 @@ pub const ParseError = error{
 };
 
 pub const ValidationError = ParseError || error{
-    BulkMemoryOutOfSubset, // 0xFC subopcodes 8+ (bulk-memory/table: W4-gated, not yet in subset)
+    BulkMemoryOutOfSubset, // 0xFC subopcodes 12+ (table.* + future: not in subset)
+    DataCountMissing, // memory.init/data.drop without a DataCount section
     UnknownType,
     UnknownFunc,
     UnknownGlobal,
@@ -374,7 +380,7 @@ pub fn parseInto(m: *Module, bytes: []const u8) ParseError!void {
     const ver = try r.take(4);
     if (!std.mem.eql(u8, ver, "\x01\x00\x00\x00")) return error.BadVersion;
 
-    var seen = [_]bool{false} ** 12; // ids 0..11; the data section (11) is legal
+    var seen = [_]bool{false} ** 13; // ids 0..12 (DataCount is legal, id 12)
     var prev_id: u8 = 0;
     while (r.pos < r.bytes.len) {
         const id = try r.u8_();
@@ -382,11 +388,21 @@ pub fn parseInto(m: *Module, bytes: []const u8) ParseError!void {
             _ = try r.take(try r.uleb());
             continue;
         }
-        if (id > 11) return error.UnknownSection;
+        if (id > 12) return error.UnknownSection;
         if (seen[id]) return error.DuplicateSection;
-        if (id < prev_id) return error.SectionOutOfOrder;
-        seen[id] = true;
-        prev_id = id;
+        if (id == 12) {
+            // DataCount (bulk-memory proposal) sits BETWEEN the element
+            // section (9) and the code section (10) positionally — its id
+            // is numerically largest, so the monotonic check cannot rank
+            // it. Spec order: element, datacount, code, data.
+            if (seen[10] or seen[11]) return error.SectionOutOfOrder;
+            seen[id] = true;
+            prev_id = 9; // rank it just past element; code (10) follows
+        } else {
+            if (id < prev_id) return error.SectionOutOfOrder;
+            seen[id] = true;
+            prev_id = id;
+        }
         const size = try r.uleb();
         const payload_pos = r.pos;
         const payload = try r.take(size);
@@ -394,6 +410,7 @@ pub fn parseInto(m: *Module, bytes: []const u8) ParseError!void {
         try parseSection(m, &pr, id);
         if (pr.pos != pr.bytes.len) return error.TrailingBytes;
     }
+    if (m.has_datacount and m.data_count_decl != m.data_count) return error.DataCountMismatch;
 }
 
 pub fn parse(bytes: []const u8) ParseError!Module {
@@ -497,30 +514,57 @@ fn parseSection(m: *Module, r: *Reader, id: u8) ParseError!void {
             if (n != m.func_count - m.imported_funcs) return error.CodeCountMismatch;
             for (0..n) |i| try parseCode(m, r, i + m.imported_funcs); // imports hold funcs[0..imported_funcs)
         },
-        11 => { // data
+        11 => { // data (active flags 0/2 + passive flag 1; W4 bulk-memory)
             const n = try r.uleb();
             for (0..n) |_| {
                 const seg_abs = r.absPos();
                 const flags = try r.u8_();
-                if (flags == 0x02) {
+                if (flags == 0x00) {
+                    const init = try parseConstExpr(r);
+                    const len = try r.uleb();
+                    if (m.data_count >= max_datas) return error.TooManyEntries;
+                    m.datas[m.data_count] = .{
+                        .offset = @bitCast(init.i32),
+                        .bytes = try r.take(len),
+                        .abs_off = seg_abs,
+                        .passive = false,
+                    };
+                    m.data_count += 1;
+                } else if (flags == 0x01) { // passive: no offset expr
+                    const len = try r.uleb();
+                    if (m.data_count >= max_datas) return error.TooManyEntries;
+                    m.datas[m.data_count] = .{
+                        .offset = 0,
+                        .bytes = try r.take(len),
+                        .abs_off = seg_abs,
+                        .passive = true,
+                    };
+                    m.data_count += 1;
+                } else if (flags == 0x02) {
                     // active segment with explicit memory index
                     const midx = try r.uleb();
                     if (midx != 0) return error.BadElementKind; // single memory only
-                } else if (flags != 0x00) {
-                    // 0x00 = active, memory 0 implicit (no index byte);
-                    // 1/3/4/5/6/7 = passive/declarative: out of subset
+                    const init = try parseConstExpr(r);
+                    const len = try r.uleb();
+                    if (m.data_count >= max_datas) return error.TooManyEntries;
+                    m.datas[m.data_count] = .{
+                        .offset = @bitCast(init.i32),
+                        .bytes = try r.take(len),
+                        .abs_off = seg_abs,
+                        .passive = false,
+                    };
+                    m.data_count += 1;
+                } else {
+                    // 3/4/5/6/7 = declarative/expr forms: out of subset
                     return error.BadElementKind;
                 }
-                const init = try parseConstExpr(r);
-                const len = try r.uleb();
-                if (m.data_count >= max_datas) return error.TooManyEntries;
-                m.datas[m.data_count] = .{
-                    .offset = @bitCast(init.i32),
-                    .bytes = try r.take(len),
-                    .abs_off = seg_abs,
-                };
-                m.data_count += 1;
             }
+        },
+        12 => { // DataCount: u32 count, must match the data section (checked in parseInto)
+            m.has_datacount = true;
+            const c = try r.uleb();
+            if (c > max_datas) return error.TooManyEntries;
+            m.data_count_decl = @intCast(c);
         },
         else => unreachable,
     }
@@ -1026,7 +1070,7 @@ fn validateOp(
             try vpop(vs, ctl[0..ctl_len.*], t.in);
             try vpush(vs, t.out);
         },
-        0xFC => { // 0xFC prefix: trunc 0..7 in subset; 8+ is bulk/table (W4-gated)
+        0xFC => { // 0xFC prefix: trunc 0..7 + bulk-memory 8..11 in subset
             const sub = try body.uleb();
             switch (sub) {
                 0...7 => {
@@ -1034,7 +1078,37 @@ fn validateOp(
                     try vpop(vs, ctl[0..ctl_len.*], t.in);
                     try vpush(vs, t.out);
                 },
-                else => return error.BulkMemoryOutOfSubset,
+                8 => { // memory.init: dataidx uleb + memidx byte; [dst src n] -> []
+                    if (!m.has_datacount) return error.DataCountMissing;
+                    const didx = try body.uleb();
+                    if (didx >= m.data_count_decl) return error.IndexOutOfRange;
+                    _ = try body.u8_(); // memidx (0)
+                    if (!m.has_memory) return error.MemoryRequired;
+                    try vpop(vs, ctl[0..ctl_len.*], .i32);
+                    try vpop(vs, ctl[0..ctl_len.*], .i32);
+                    try vpop(vs, ctl[0..ctl_len.*], .i32);
+                },
+                9 => { // data.drop: dataidx uleb; no stack effect
+                    if (!m.has_datacount) return error.DataCountMissing;
+                    const didx = try body.uleb();
+                    if (didx >= m.data_count_decl) return error.IndexOutOfRange;
+                },
+                10 => { // memory.copy: memidx memidx; [dst src n] -> []
+                    if (!m.has_memory) return error.MemoryRequired;
+                    _ = try body.u8_();
+                    _ = try body.u8_();
+                    try vpop(vs, ctl[0..ctl_len.*], .i32);
+                    try vpop(vs, ctl[0..ctl_len.*], .i32);
+                    try vpop(vs, ctl[0..ctl_len.*], .i32);
+                },
+                11 => { // memory.fill: memidx; [dst val n] -> []
+                    if (!m.has_memory) return error.MemoryRequired;
+                    _ = try body.u8_();
+                    try vpop(vs, ctl[0..ctl_len.*], .i32);
+                    try vpop(vs, ctl[0..ctl_len.*], .i32);
+                    try vpop(vs, ctl[0..ctl_len.*], .i32);
+                },
+                else => return error.BulkMemoryOutOfSubset, // table ops 12+ / future
             }
         },
         0x67...0x78 => {
@@ -1178,6 +1252,7 @@ pub const Machine = struct {
     mem_pages: u32 = 0,
     mem_max: u32 = 0,
     globals: [max_globals]Value = undefined,
+    data_dropped: [max_datas]bool = undefined, // per-instance data.drop state
     module_name: []const u8 = "module",
     last_trap: ?Trap = null,
 };
@@ -1190,6 +1265,7 @@ pub fn resetMachine(mm: *Machine) void {
     mm.store = &.{};
     mm.mem_pages = 0;
     mm.mem_max = 0;
+    mm.data_dropped = [_]bool{false} ** max_datas;
     mm.module_name = "module";
     mm.last_trap = null;
 }
@@ -1213,6 +1289,7 @@ pub fn instantiate(mm: *Machine, m: *const Module, store: []u8, module_name: []c
         for (0..el.count) |i| mm.table[el.offset + i] = el.funcs[i];
     }
     for (m.datas[0..m.data_count]) |d| {
+        if (d.passive) continue; // passive segments land via memory.init at runtime
         const mem_len = @as(u64, mm.mem_pages) * page_size;
         if (@as(u64, d.offset) + d.bytes.len > mem_len) return mkTrap(.bounds, module_name, d.abs_off);
         @memcpy(mm.store[d.offset .. d.offset + d.bytes.len], d.bytes);
@@ -1335,7 +1412,23 @@ fn skipInstr(body: []const u8, pc: usize) usize {
         },
         0x43 => pc + 5, // f32.const: 4-byte immediate
         0x44 => pc + 9, // f64.const: 8-byte immediate
-        0xFC => pc + 1 + lebLen(body, pc + 1), // 0xFC prefix: subopcode uleb (trunc 0..7 has no more immediates)
+        0xFC => blk: {
+            var p = pc + 1;
+            const sub = readUlebRaw(body, &p);
+            switch (sub) {
+                8 => { // memory.init: dataidx uleb + memidx byte
+                    _ = readUlebRaw(body, &p);
+                    p += 1;
+                },
+                9 => { // data.drop: dataidx uleb
+                    _ = readUlebRaw(body, &p);
+                },
+                10 => p += 2, // memory.copy: memidx memidx
+                11 => p += 1, // memory.fill: memidx
+                else => {}, // trunc 0..7 and table ops carry no scanner-relevant extras
+            }
+            break :blk p;
+        },
         else => pc + 1,
     };
 }
@@ -1690,11 +1783,67 @@ fn execBody(mm: *Machine, m: *const Module, ft0: *const FuncType) CallResult {
             0xB2...0xBF => { // float<->int converts + reinterpret
                 tryPush(mm, execConv(mm, op)) catch return mkTrap(.stack_overflow, mm.module_name, op_off);
             },
-            0xFC => { // trunc 0..7 (plain, trapping); 8+ rejected at validation
+            0xFC => { // trunc 0..7 + bulk-memory 8..11
                 const sub = body.uleb() catch return mkTrap(.bounds, mm.module_name, op_off);
-                if (sub > 7) return mkTrap(.bounds, mm.module_name, op_off);
-                const r = execTrunc(mm, sub) orelse return mkTrap(.invalid_conv, mm.module_name, op_off);
-                tryPush(mm, r) catch return mkTrap(.stack_overflow, mm.module_name, op_off);
+                switch (sub) {
+                    0...7 => {
+                        const r = execTrunc(mm, sub) orelse return mkTrap(.invalid_conv, mm.module_name, op_off);
+                        tryPush(mm, r) catch return mkTrap(.stack_overflow, mm.module_name, op_off);
+                    },
+                    8 => { // memory.init didx memidx: (dst src n), src in segment didx
+                        const didx = body.uleb() catch return mkTrap(.bounds, mm.module_name, op_off);
+                        _ = body.u8_() catch return mkTrap(.bounds, mm.module_name, op_off);
+                        const n = @as(u32, @bitCast(popVal(mm).i32));
+                        const src = @as(u32, @bitCast(popVal(mm).i32));
+                        const dst = @as(u32, @bitCast(popVal(mm).i32));
+                        const mem_len = @as(u64, mm.mem_pages) * page_size;
+                        if (didx >= m.data_count) return mkTrap(.bounds, mm.module_name, op_off);
+                        const seg_len: u64 = if (mm.data_dropped[didx]) 0 else m.datas[didx].bytes.len;
+                        if (@as(u64, dst) + n > mem_len) return mkTrap(.bounds, mm.module_name, op_off);
+                        if (@as(u64, src) + n > seg_len) return mkTrap(.bounds, mm.module_name, op_off);
+                        if (n > 0) {
+                            const d: usize = @intCast(dst);
+                            const s: usize = @intCast(src);
+                            const c: usize = @intCast(n);
+                            @memcpy(mm.store[d .. d + c], m.datas[didx].bytes[s .. s + c]);
+                        }
+                    },
+                    9 => { // data.drop didx
+                        const didx = body.uleb() catch return mkTrap(.bounds, mm.module_name, op_off);
+                        if (didx >= m.data_count) return mkTrap(.bounds, mm.module_name, op_off);
+                        mm.data_dropped[didx] = true;
+                    },
+                    10 => { // memory.copy: (dst src n), memmove semantics
+                        _ = body.u8_() catch return mkTrap(.bounds, mm.module_name, op_off);
+                        _ = body.u8_() catch return mkTrap(.bounds, mm.module_name, op_off);
+                        const n = @as(u32, @bitCast(popVal(mm).i32));
+                        const src = @as(u32, @bitCast(popVal(mm).i32));
+                        const dst = @as(u32, @bitCast(popVal(mm).i32));
+                        const mem_len = @as(u64, mm.mem_pages) * page_size;
+                        if (@as(u64, dst) + n > mem_len) return mkTrap(.bounds, mm.module_name, op_off);
+                        if (@as(u64, src) + n > mem_len) return mkTrap(.bounds, mm.module_name, op_off);
+                        if (n > 0) {
+                            const d: usize = @intCast(dst);
+                            const s: usize = @intCast(src);
+                            const c: usize = @intCast(n);
+                            @memmove(mm.store[d .. d + c], mm.store[s .. s + c]);
+                        }
+                    },
+                    11 => { // memory.fill: (dst val n)
+                        _ = body.u8_() catch return mkTrap(.bounds, mm.module_name, op_off);
+                        const n = @as(u32, @bitCast(popVal(mm).i32));
+                        const val = @as(u32, @bitCast(popVal(mm).i32));
+                        const dst = @as(u32, @bitCast(popVal(mm).i32));
+                        const mem_len = @as(u64, mm.mem_pages) * page_size;
+                        if (@as(u64, dst) + n > mem_len) return mkTrap(.bounds, mm.module_name, op_off);
+                        if (n > 0) {
+                            const d: usize = @intCast(dst);
+                            const c: usize = @intCast(n);
+                            @memset(mm.store[d .. d + c], @as(u8, @truncate(val)));
+                        }
+                    },
+                    else => return mkTrap(.bounds, mm.module_name, op_off), // unreachable post-validation
+                }
             },
             0xA7 => { // i32.wrap_i64
                 tryPush(mm, .{ .i32 = @truncate(popVal(mm).i64) }) catch return mkTrap(.stack_overflow, mm.module_name, op_off);
@@ -3047,6 +3196,95 @@ test "w4: f64.store/load round-trip (clang-probe memarg shape: align 3)" {
     const r = call(&machine, &m, 0, &.{});
     try testing.expect(r == .ret);
     try testing.expectEqual(@as(i32, 1), r.ret.vals[0].i32);
+}
+
+test "w4: bulk-memory — memory.init/copy/fill with passive data + DataCount" {
+    // (memory 1) (data passive "\x01\x02\x03\x04\x05\x06\x07\x08\x09")
+    // (func (export "go")
+    //   (memory.init 0 (i32.const 0) (i32.const 0) (i32.const 9))  ;; mem[0..9)=1..9
+    //   (memory.copy  (i32.const 1) (i32.const 0) (i32.const 7))   ;; right-shift: memmove
+    //   (memory.fill  (i32.const 32) (i32.const 0x37) (i32.const 5)))
+    const bytes = "\x00\x61\x73\x6d\x01\x00\x00\x00" ++
+        "\x01\x04\x01\x60\x00\x00" ++
+        "\x03\x02\x01\x00" ++
+        "\x05\x03\x01\x00\x01" ++
+        "\x07\x06\x01\x02\x67\x6f\x00\x00" ++
+        "\x0c\x01\x01" ++
+        "\x0a\x21\x01\x1f\x00" ++
+        "\x41\x00\x41\x00\x41\x09\xfc\x08\x00\x00" ++
+        "\x41\x01\x41\x00\x41\x07\xfc\x0a\x00\x00" ++
+        "\x41\x20\x41\x37\x41\x05\xfc\x0b\x00\x0b" ++
+        "\x0b\x0c\x01\x01\x09\x01\x02\x03\x04\x05\x06\x07\x08\x09";
+    var m = try parse(bytes);
+    try validate(&m);
+    var store: [page_size]u8 = undefined;
+    @memset(&store, 0xEE); // poison: passive data must NOT land at instantiate
+    try testing.expect(instantiate(&machine, &m, &store, "bulk1") == null);
+    try testing.expect(std.mem.eql(u8, store[0..8], &[_]u8{ 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE }));
+    const r = call(&machine, &m, 0, &.{});
+    try testing.expect(r == .ret);
+    // init placed 1..9 at [0..9); the right-shift copy is memmove-correct:
+    // [1..8) = [0..7) = 1,2,3,4,5,6,7, so index 8 keeps init's 9th byte (9):
+    // 1,1,2,3,4,5,6,7,9 (a forward memcpy would smear 1s leftward). The 9
+    // at index 8 also proves init wrote all 9 bytes and copy never touched
+    // [8..). Fill wrote 0x37 x5 at [32..37).
+    try testing.expect(std.mem.eql(u8, store[0..9], &[_]u8{ 1, 1, 2, 3, 4, 5, 6, 7, 9 }));
+    try testing.expect(std.mem.eql(u8, store[32..37], &[_]u8{ 0x37, 0x37, 0x37, 0x37, 0x37 }));
+}
+
+test "w4: bulk-memory — data.drop makes later memory.init trap bounds" {
+    // passive data "\x2a"; (func (export "boom")
+    //   (memory.init 0 (i32.const 0) (i32.const 0) (i32.const 1))
+    //   (data.drop 0)
+    //   (memory.init 0 (i32.const 0) (i32.const 0) (i32.const 1)))  ;; dropped -> trap
+    const bytes = "\x00\x61\x73\x6d\x01\x00\x00\x00" ++
+        "\x01\x04\x01\x60\x00\x00" ++
+        "\x03\x02\x01\x00" ++
+        "\x05\x03\x01\x00\x01" ++
+        "\x07\x08\x01\x04\x62\x6f\x6f\x6d\x00\x00" ++
+        "\x0c\x01\x01" ++
+        "\x0a\x1b\x01\x19\x00" ++
+        "\x41\x00\x41\x00\x41\x01\xfc\x08\x00\x00" ++
+        "\xfc\x09\x00" ++
+        "\x41\x00\x41\x00\x41\x01\xfc\x08\x00\x00\x0b" ++
+        "\x0b\x04\x01\x01\x01\x2a";
+    var m = try parse(bytes);
+    try validate(&m);
+    var store: [page_size]u8 = undefined;
+    try testing.expect(instantiate(&machine, &m, &store, "boom") == null);
+    const r = call(&machine, &m, 0, &.{});
+    try testing.expect(r == .trap and r.trap.kind == .bounds);
+}
+
+test "w4: bulk-memory — memory.init without DataCount fails validation" {
+    // same body as bulk1's init but NO DataCount section: spec requires it
+    const bytes = "\x00\x61\x73\x6d\x01\x00\x00\x00" ++
+        "\x01\x04\x01\x60\x00\x00" ++
+        "\x03\x02\x01\x00" ++
+        "\x05\x03\x01\x00\x01" ++
+        "\x0a\x0e\x01\x0c\x00\x41\x00\x41\x00\x41\x08\xfc\x08\x00\x00\x0b" ++
+        "\x0b\x0b\x01\x01\x08\x01\x02\x03\x04\x05\x06\x07\x08";
+    var m = try parse(bytes);
+    try testing.expectError(error.DataCountMissing, validate(&m));
+}
+
+test "w4: bulk-memory — DataCount count must match the data section" {
+    // datacount declares 2 but the data section holds 1 passive segment
+    const bytes = "\x00\x61\x73\x6d\x01\x00\x00\x00" ++
+        "\x0c\x01\x02" ++
+        "\x0b\x04\x01\x01\x01\x2a";
+    try testing.expectError(error.DataCountMismatch, parse(bytes));
+}
+
+test "w4: bulk-memory — table ops (0xFC 12+) still out of subset" {
+    // (func (result i32) i32.const 0 table.size 0)? -> table.size = 0xFC 16;
+    // validation must reject any 0xFC sub >= 12 with BulkMemoryOutOfSubset
+    const bytes = "\x00\x61\x73\x6d\x01\x00\x00\x00" ++
+        "\x01\x05\x01\x60\x00\x01\x7f" ++
+        "\x03\x02\x01\x00" ++
+        "\x0a\x09\x01\x07\x00\x41\x00\xfc\x10\x00\x0b";
+    var m = try parse(bytes);
+    try testing.expectError(error.BulkMemoryOutOfSubset, validate(&m));
 }
 
 test "w4: sign-extension ops 0xC0-0xC4 execute (W3 left them fixture-less)" {
