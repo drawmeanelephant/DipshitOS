@@ -1542,6 +1542,12 @@ fn vf_hex16(value: u16) [4]u8 {
 /// close through the queue-5 channel — the file persists on the macOS
 /// host disk, verified by the gates. Capacity is checked before the
 /// write; a failed exchange is reported honestly, never faked.
+/// Issue #803: 32 KiB staging can never live on the 16 KiB kernel stack
+/// (ADR 0004 D5). The write path is reached from the shell's merged
+/// boot_and_park frame; the local buffer overflowed the boot stack and
+/// corrupted the console state mid-print. Module BSS, like vf_write_buf.
+var cmd_write_buf: [virtio_file.reply_cap]u8 align(16) = undefined;
+
 fn cmd_write(m: *Monitor, args: []const []const u8) ExecError {
     const name = args[0];
     const parts = args[1..];
@@ -1556,7 +1562,7 @@ fn cmd_write(m: *Monitor, args: []const []const u8) ExecError {
         m.console.print_line(")");
         return .invalid_argument;
     }
-    var buf: [virtio_file.reply_cap]u8 = undefined;
+    const buf = &cmd_write_buf;
     var n: usize = 0;
     for (parts, 0..) |p, i| {
         if (i > 0) {
