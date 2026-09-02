@@ -43,6 +43,7 @@ pub const SexiburgerMenu = struct {
     hovered_section: ?SectionId = null,
     hovered_cmd_id: ?u16 = null,
     last_invoked_cmd: ?Command = null,
+    raster_mascot: ?ui.Image = null,
 
     pub fn init(rect: Rect) SexiburgerMenu {
         var menu = SexiburgerMenu{
@@ -403,7 +404,11 @@ pub const SexiburgerMenu = struct {
         // Draw Sexiburger 6-layer 6-tentacle graphic emblem (left side)
         const emblem_x = self.rect.x + 8;
         const emblem_y = self.rect.y + 6;
-        draw_sexiburger_emblem(win_id, emblem_x, emblem_y);
+        if (self.raster_mascot) |img| {
+            ui.draw_image(win_id, emblem_x, emblem_y, img);
+        } else {
+            draw_sexiburger_emblem(win_id, emblem_x, emblem_y);
+        }
 
         // Title and lore tag
         ui.draw_text(win_id, "SEXIBURGER", emblem_x + 36, self.rect.y + 8, ui.theme_accent());
@@ -620,6 +625,11 @@ pub fn draw_sexiburger_emblem(win_id: u32, x: u32, y: u32) void {
     ui.draw_rect(win_id, Rect.make(bx + 1, y + 19, bw - 2, 3), 0xC88628);
 }
 
+/// Blit a raster image mascot emblem using ui.draw_image.
+pub fn draw_sexiburger_raster_emblem(win_id: u32, x: u32, y: u32, img: ui.Image) void {
+    ui.draw_image(win_id, x, y, img);
+}
+
 // ---------------------------------------------------------------------------
 // Host Unit Tests
 // ---------------------------------------------------------------------------
@@ -716,4 +726,26 @@ test "sexiburger menu: type-to-filter interaction" {
     try std.testing.expect(!menu.is_open());
     try std.testing.expect(menu.last_invoked_cmd != null);
     try std.testing.expectEqualStrings("System Info", menu.last_invoked_cmd.?.label);
+}
+
+test "sexiburger menu: raster mascot emblem integration" {
+    const fixture_bytes = @embedFile("fixtures/qoi/mascot_24x24.qoi");
+    var mascot_pixels: [24 * 24]u32 = undefined;
+    const mascot_img = try ui.image.decode(fixture_bytes, &mascot_pixels);
+
+    try std.testing.expectEqual(@as(u32, 24), mascot_img.width);
+    try std.testing.expectEqual(@as(u32, 24), mascot_img.height);
+
+    var menu = SexiburgerMenu.init(Rect.make(0, 0, menu_default_width, menu_default_height));
+    menu.raster_mascot = mascot_img;
+    menu.show();
+
+    ui.fill_batcher.reset();
+    ui.fill_batcher.cur_id = 0;
+
+    menu.draw(1);
+
+    // Should have emitted fill batches for header, background, and the raster mascot
+    try std.testing.expect(ui.fill_batcher.len > 0);
+    ui.fill_batcher.reset();
 }

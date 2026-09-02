@@ -6,6 +6,8 @@
 
 const std = @import("std");
 pub const font8x8 = @import("font8x8.zig");
+pub const image = @import("image.zig");
+pub const Image = image.Image;
 
 // ---------------------------------------------------------------------------
 // M32 WMS7 Gate B (issue #627): the app↔WM mailbox protocol (WM_RPC) wire.
@@ -519,7 +521,7 @@ pub const FillBatcher = struct {
     len: usize = 0,
     cur_id: u32 = 0,
 
-    fn reset(self: *FillBatcher) void {
+    pub fn reset(self: *FillBatcher) void {
         self.len = 0;
     }
 
@@ -1193,6 +1195,101 @@ pub fn draw_text_centered_large(win_id: u32, text: []const u8, rect: Rect, fg_rg
     const x = if (rect.w > text_w) rect.x + (rect.w - text_w) / 2 else rect.x;
     const y = if (rect.h > text_h) rect.y + (rect.h - text_h) / 2 else rect.y;
     draw_text_large(win_id, text, x, y, fg_rgb);
+}
+
+/// Blit raster image pixels to a window backing surface via win_fill_batched.
+/// Automatically skips fully transparent pixels (alpha == 0) and batches contiguous
+/// horizontal spans of identical RGB color into single fill rects to minimize syscalls.
+pub fn draw_image(win_id: u32, x: u32, y: u32, img: image.Image) void {
+    if (img.width == 0 or img.height == 0) return;
+    var sy: u32 = 0;
+    while (sy < img.height) : (sy += 1) {
+        var sx: u32 = 0;
+        while (sx < img.width) {
+            const px_ptr = img.pixel_at(sx, sy) orelse break;
+            const px = px_ptr.*;
+            const a = (px >> 24) & 0xFF;
+            if (a == 0) {
+                sx += 1;
+                continue;
+            }
+            const rgb = px & 0x00FFFFFF;
+            const start_x = sx;
+            sx += 1;
+            while (sx < img.width) {
+                const next_ptr = img.pixel_at(sx, sy) orelse break;
+                const next_px = next_ptr.*;
+                if (((next_px >> 24) & 0xFF) == 0 or (next_px & 0x00FFFFFF) != rgb) break;
+                sx += 1;
+            }
+            win_fill_batched(win_id, x + start_x, y + sy, sx - start_x, 1, rgb);
+        }
+    }
+}
+
+/// Draw a clipped raster image to a window, rendering only pixels that fall within clip.
+pub fn draw_image_clipped(win_id: u32, x: u32, y: u32, img: image.Image, clip: Rect) void {
+    if (img.width == 0 or img.height == 0 or clip.w == 0 or clip.h == 0) return;
+    var sy: u32 = 0;
+    while (sy < img.height) : (sy += 1) {
+        const py = y + sy;
+        if (py < clip.y or py >= clip.y + clip.h) continue;
+
+        var sx: u32 = 0;
+        while (sx < img.width) {
+            const px_ptr = img.pixel_at(sx, sy) orelse break;
+            const px = px_ptr.*;
+            const a = (px >> 24) & 0xFF;
+            const cur_x = x + sx;
+            if (a == 0 or cur_x < clip.x or cur_x >= clip.x + clip.w) {
+                sx += 1;
+                continue;
+            }
+            const rgb = px & 0x00FFFFFF;
+            const start_x = sx;
+            sx += 1;
+            while (sx < img.width) {
+                const next_x = x + sx;
+                if (next_x >= clip.x + clip.w) break;
+                const next_ptr = img.pixel_at(sx, sy) orelse break;
+                const next_px = next_ptr.*;
+                if (((next_px >> 24) & 0xFF) == 0 or (next_px & 0x00FFFFFF) != rgb) break;
+                sx += 1;
+            }
+            win_fill_batched(win_id, x + start_x, py, sx - start_x, 1, rgb);
+        }
+    }
+}
+
+/// Nearest-neighbor scaled image blitting into target destination rectangle.
+pub fn draw_image_scaled(win_id: u32, dest: Rect, img: image.Image) void {
+    if (dest.w == 0 or dest.h == 0 or img.width == 0 or img.height == 0) return;
+    var dy: u32 = 0;
+    while (dy < dest.h) : (dy += 1) {
+        const sy = (dy * img.height) / dest.h;
+        var dx: u32 = 0;
+        while (dx < dest.w) {
+            const sx = (dx * img.width) / dest.w;
+            const px_ptr = img.pixel_at(sx, sy) orelse break;
+            const px = px_ptr.*;
+            const a = (px >> 24) & 0xFF;
+            if (a == 0) {
+                dx += 1;
+                continue;
+            }
+            const rgb = px & 0x00FFFFFF;
+            const start_dx = dx;
+            dx += 1;
+            while (dx < dest.w) {
+                const next_sx = (dx * img.width) / dest.w;
+                const next_ptr = img.pixel_at(next_sx, sy) orelse break;
+                const next_px = next_ptr.*;
+                if (((next_px >> 24) & 0xFF) == 0 or (next_px & 0x00FFFFFF) != rgb) break;
+                dx += 1;
+            }
+            win_fill_batched(win_id, dest.x + start_dx, dest.y + dy, dx - start_dx, 1, rgb);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3890,5 +3987,67 @@ test "ui: draw_char_16 emits 2px-tall spans, pixel-identical to old path (WMS9)"
         try std.testing.expectEqual(@as(u32, 2), h);
     }
 
+    fill_batcher.reset();
+}
+
+test "ui: draw_image skips transparent pixels and batches contiguous spans" {
+    fill_batcher.reset();
+    fill_batcher.cur_id = 0;
+
+    var raw_pixels = [_]u32{
+        0x00FFFFFF, 0xFFFF0000, 0xFFFF0000, 0x00000000, // Row 0: Transparent, Red, Red, Transparent
+        0xFF00FF00, 0xFF00FF00, 0xFF00FF00, 0xFF00FF00, // Row 1: 4 Green pixels
+    };
+    const img = Image{ .width = 4, .height = 2, .pixels = &raw_pixels };
+
+    draw_image(5, 10, 20, img);
+
+    // Should emit:
+    // Span 1: at (11, 20) with width 2 (2 Red pixels)
+    // Span 2: at (10, 21) with width 4 (4 Green pixels)
+    try std.testing.expectEqual(2 * FILL_RECT_SIZE, fill_batcher.len);
+
+    const x1 = std.mem.readInt(u32, fill_batcher.buf[4..8], .little);
+    const y1 = std.mem.readInt(u32, fill_batcher.buf[8..12], .little);
+    const w1 = std.mem.readInt(u32, fill_batcher.buf[12..16], .little);
+    const rgb1 = std.mem.readInt(u32, fill_batcher.buf[20..24], .little);
+
+    try std.testing.expectEqual(@as(u32, 11), x1);
+    try std.testing.expectEqual(@as(u32, 20), y1);
+    try std.testing.expectEqual(@as(u32, 2), w1);
+    try std.testing.expectEqual(@as(u32, 0x00FF0000), rgb1);
+
+    const x2 = std.mem.readInt(u32, fill_batcher.buf[FILL_RECT_SIZE + 4 ..][0..4], .little);
+    const y2 = std.mem.readInt(u32, fill_batcher.buf[FILL_RECT_SIZE + 8 ..][0..4], .little);
+    const w2 = std.mem.readInt(u32, fill_batcher.buf[FILL_RECT_SIZE + 12 ..][0..4], .little);
+    const rgb2 = std.mem.readInt(u32, fill_batcher.buf[FILL_RECT_SIZE + 20 ..][0..4], .little);
+
+    try std.testing.expectEqual(@as(u32, 10), x2);
+    try std.testing.expectEqual(@as(u32, 21), y2);
+    try std.testing.expectEqual(@as(u32, 4), w2);
+    try std.testing.expectEqual(@as(u32, 0x0000FF00), rgb2);
+
+    fill_batcher.reset();
+}
+
+test "ui: draw_image_clipped and draw_image_scaled" {
+    fill_batcher.reset();
+    fill_batcher.cur_id = 0;
+
+    var raw_pixels = [_]u32{
+        0xFFFF0000, 0xFFFF0000,
+        0xFFFF0000, 0xFFFF0000,
+    };
+    const img = Image{ .width = 2, .height = 2, .pixels = &raw_pixels };
+
+    // Clipped to only x=10..10, y=20..20 (1x1 area)
+    draw_image_clipped(5, 10, 20, img, Rect.make(10, 20, 1, 1));
+    try std.testing.expectEqual(1 * FILL_RECT_SIZE, fill_batcher.len);
+    fill_batcher.reset();
+
+    // Scaled 2x2 up to 4x4
+    draw_image_scaled(5, Rect.make(0, 0, 4, 4), img);
+    // 4 rows of 1 span each = 4 spans
+    try std.testing.expectEqual(4 * FILL_RECT_SIZE, fill_batcher.len);
     fill_batcher.reset();
 }
