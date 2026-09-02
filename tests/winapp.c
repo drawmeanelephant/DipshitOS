@@ -21,16 +21,18 @@ void _start(void) {
     if (v_win_set_visible(id, 2) != -1) v_exit(28); /* EINVAL proof */
     if (v_win_present(id) < 0) v_exit(29);
     v_write(1, "w3: win ok\n", 11);
-    /* Hold the window open ~12-15s of interpreted wasm so the live gate's
+    /* Hold the window open ~10-15s of interpreted wasm so the live gate's
        `dui` snapshots, the post-raise composite (`dui raise 2` blits the
        window into the scanout — post-WMS the kernel no longer composites
-       user windows unprompted), and the 10s screen capture all observe it
+       user windows unprompted), and the screen captures all observe it
        (z-order row + blits counter + the 0xFF0000 fill on the scanout
        prove the pixel path end to end). The monitor stays responsive —
        this process merely burns its own time slice. Pure i32 compute,
-       clang keeps the volatile accumulator live. */
+       clang keeps the volatile accumulator live. 15M iterations measured
+       ~10-15s on the gate host (120M never finished inside the runner's
+       120s window — claim 3456 review round). */
     volatile long acc = 0;
-    for (long i = 0; i < 120000000L; i++) acc += (i * i) | 1;
-    if (acc == 123456789L) v_write(1, "w3: unreachable\n", 17);
+    for (long i = 0; i < 15000000L; i++) acc += (i * i) | 1;
+    if (acc == 123456789L) v_write(1, "w3: unreachable\n", 16);
     v_exit(21);
 }

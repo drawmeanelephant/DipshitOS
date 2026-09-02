@@ -27,7 +27,7 @@
 #
 # W3 (#764) phases (same boot, --display armed for the window app):
 #   4. `exec WASM.BIN WINAPP.WASM` — the wasm window app (tests/winapp.c,
-#      compiled against tests/virelai.h alone, pinned 603dc2ab — the
+#      compiled against tests/virelai.h alone, pinned ee33f184 — the
 #      "host program against the contract alone" rule): opens a 96x48
 #      window at (100,100) via env.win_open (slot 12), prints its id,
 #      fills it 0xFF0000 with env.win_fill, provokes a kernel-side EINVAL
@@ -135,8 +135,8 @@ cp user/src/wasm-corpus/winapp.wasm "$SHARE/WINAPP.WASM"
 cp user/src/wasm-corpus/fileapp.wasm "$SHARE/FILEAPP.WASM"
 WIN_SHA="$(shasum -a 256 "$SHARE/WINAPP.WASM" | cut -d' ' -f1)"
 FIL_SHA="$(shasum -a 256 "$SHARE/FILEAPP.WASM" | cut -d' ' -f1)"
-echo "WINAPP.WASM sha256=$WIN_SHA (pinned 603dc2ab); FILEAPP.WASM sha256=$FIL_SHA (pinned 9f31d07e)"
-if [ "$WIN_SHA" != "603dc2ab19a9aca1e7ad4fe23eb4c277c526c2bd2802b2fc0721a486dde06d3e" ] || \
+echo "WINAPP.WASM sha256=$WIN_SHA (pinned ee33f184); FILEAPP.WASM sha256=$FIL_SHA (pinned 9f31d07e)"
+if [ "$WIN_SHA" != "ee33f184df3a5fed1cfc610b467b3595814afa2ab751cfc6fb84f85a32e353f6" ] || \
    [ "$FIL_SHA" != "9f31d07ec306d10eada0391e2ece92d92b21012fd71a2fdd90b24b9f62147c7c" ]; then
     echo "FAIL: a W3 app fixture sha256 drifted from its pin (regenerate from tests/*.c)" >&2
     exit 1

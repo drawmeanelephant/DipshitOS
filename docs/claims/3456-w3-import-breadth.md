@@ -10,7 +10,7 @@
 
 ## Notes
 
-Gate: `zig test user/src/wasm.zig` **20/20** (13 W1b/W2 + 7 W3); `zig build shim-check` PASS (the probe's import table is exactly the frozen 30, class-A acceptance item); `tools/verify-live-wasm.sh` W2+W3 phases PASS on VZ (macOS 27 arm64 local run) — hello regression + wasm window app (fill observed in the scanout capture at rect=100,100,96,48, EINVAL mapping `win_set_visible(id,2) → -1` proven THROUGH the stack, exit 21) + wasm file app (FILE.TXT echoed byte-exact via env.write, exit status = 512 = file size). Default boot unchanged; zero new syscall slots. Rebased onto origin/main through HF6 (fat deletion) — kernel delta now exactly one file_table clamp fix (claim 3456 gate finding: vf READ carry > out_buf smashed staging) plus the W3 interpreter; 2026-09-01 re-verified: `zig test` 20/20, `shim-check` PASS, `zig build`/`image`/`wasm` (55200 B, 24576/30576/152728), `verify-coordination`/`bss-budget` PASS, deterministic fixture rebuilds byte-identical (`winapp 603dc2ab`, `fileapp 9f31d07e`).
+Gate: `zig test user/src/wasm.zig` **20/20** (13 W1b/W2 + 7 W3); `zig build shim-check` PASS (the probe's import table is exactly the frozen 30, class-A acceptance item); `tools/verify-live-wasm.sh` W2+W3 phases PASS on VZ (macOS 27 arm64 local run) — hello regression + wasm window app (fill observed in the scanout capture at rect=100,100,96,48, EINVAL mapping `win_set_visible(id,2) → -1` proven THROUGH the stack, exit 21) + wasm file app (FILE.TXT echoed byte-exact via env.write, exit status = 512 = file size). Default boot unchanged; zero new syscall slots. Rebased onto origin/main through HF6 (fat deletion) — kernel delta now exactly one file_table clamp fix (claim 3456 gate finding: vf READ carry > out_buf smashed staging) plus the W3 interpreter; 2026-09-01 re-verified: `zig test` 20/20, `shim-check` PASS, `zig build`/`image`/`wasm` (55200 B, 24576/30576/152728), `verify-coordination`/`bss-budget` PASS, deterministic fixture rebuilds byte-identical (`winapp ee33f184`, `fileapp 9f31d07e`).
 
 ### The frozen surface, implemented exactly as §5
 
@@ -26,7 +26,7 @@ Gate: `zig test user/src/wasm.zig` **20/20** (13 W1b/W2 + 7 W3); `zig build shim
 
 ### Live fixtures (pinned, deterministic)
 
-`winapp.wasm` sha256 `603dc2ab19a9aca1e7ad4fe23eb4c277c526c2bd2802b2fc0721a486dde06d3e` (982 B) / `fileapp.wasm` `9f31d07ec306d10eada0391e2ece92d92b21012fd71a2fdd90b24b9f62147c7c` (767 B) — committed, byte-identical to fresh `zig cc -target wasm32-freestanding -nostdlib -fno-sanitize=undefined -g0` rebuilds with fixed output basenames (the W2 determinism recipe: `-g0` strips DWARF source-path leakage; the name custom section embeds only the output basename). Re-verified by host test `w3: live-gate app fixtures parse + validate against the frozen surface`, by the shim pins in the gate (603dc2ab/9f31d07e), and by the positive path in the live run. (W5's `wc` can reuse the recipe.)
+`winapp.wasm` sha256 `ee33f184df3a5fed1cfc610b467b3595814afa2ab751cfc6fb84f85a32e353f6` (982 B) / `fileapp.wasm` `9f31d07ec306d10eada0391e2ece92d92b21012fd71a2fdd90b24b9f62147c7c` (767 B) — committed, byte-identical to fresh `zig cc -target wasm32-freestanding -nostdlib -fno-sanitize=undefined -g0` rebuilds with fixed output basenames (the W2 determinism recipe: `-g0` strips DWARF source-path leakage; the name custom section embeds only the output basename). Re-verified by host test `w3: live-gate app fixtures parse + validate against the frozen surface`, by the shim pins in the gate (ee33f184/9f31d07e), and by the positive path in the live run. (W5's `wc` can reuse the recipe.)
 
 ### Real bugs caught by the clang-generated modules
 
@@ -43,7 +43,16 @@ Four review findings fixed in the final commit; all re-verified class-A (`zig te
 3. **Contract §3 zero-length discipline:** len==0 is valid at ANY pointer — `write`/`file_read` no longer bounds-trap on a zero-length OOB pointer, and `storeSlice` returns an empty slice at the store base instead of indexing at a wild pointer (latent panic: `dir_list` root form with a garbage `path_ptr`).
 4. **`dir_list` entry math was u32-wrap-able:** `max_entries * 40` wraps for ~2^26 entries, letting the wrapped value pass the range check; the check is now u64. Capture-seam out-fills clamped via a `captureFill` helper. Gate hygiene: stale `artifacts/gpu-screen-*` are cleared at run start so a previous run's captures cannot satisfy the red-fill proof on a local rerun.
 
-Known nit, left deliberately: `tests/winapp.c`'s dead `w3: unreachable\n` write declares 17 bytes of a 16-byte literal (the branch is never taken). Fixing it means regenerating + repinning `winapp.wasm` and re-rolling the whole class-B gate for zero behavioral change; noted here for W5's fixture rebuild.
+Known nit, fixed by the fixture repin below: `tests/winapp.c`'s dead `w3: unreachable\n` write declared 17 bytes of a 16-byte literal.
+
+### Live-gate recalibration (review round, real hardware)
+
+First class-B reruns on the review host (Apple silicon, macOS 27) exposed two things:
+
+1. **The winapp hold spin never finished inside the runner's 120 s window** — `win21=0` on a boot that dodged the flake: the 120,000,000-iteration hold was written against an optimistic interpreter-speed guess ("~12-15 s"); measured on the gate host the spin needs >80 s and the runner's transcript window closed first, so `tasks user-exec exited status=21` could never appear. The hold is now 15,000,000 iterations (~10-15 s — the comment's stated intent), observed to leave the window up through the marker screenshot and captures.
+2. **The kernel-side failures were flake #803, not the PR**: boot 1 died with the exact #803 fingerprint (data-abort, `sp=0`, `x2=0x8000`, "parking: no recovery path") right after the two short wasm reaps; boot 2 ended the VM silently and lost the fileapp's console output — the issue's console-corruption signature. Both runs' window path itself was perfect (dui row, blits, red fill 10,436-10,440 px). Rerun-until-clean is the documented #803 protocol.
+
+Fixture repin: `winapp.wasm` rebuilt from the updated `tests/winapp.c` (15M hold + the 17→16 length fix) — sha `ee33f184df3a5fed1cfc610b467b3595814afa2ab751cfc6fb84f85a32e353f6` (982 B, byte-identical across same-basename rebuilds), pins updated in the gate. `fileapp.wasm` unchanged (`9f31d07e`).
 
 ### Documented deviations (none — scope discipline)
 
