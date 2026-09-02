@@ -63,7 +63,10 @@ pub const IrqSaveSpinlock = struct {
 };
 
 fn disable_irq_save() u64 {
-    if (comptime builtin.cpu.arch == .aarch64) {
+    // Host test binaries run at EL0 (where `mrs daif` is illegal), so the
+    // guard must exclude tests — `builtin.cpu.arch` alone is not enough on
+    // Apple Silicon hosts.
+    if (comptime !builtin.is_test and builtin.cpu.arch == .aarch64) {
         var daif: u64 = 0;
         asm volatile ("mrs %[v], daif"
             : [v] "=r" (daif),
@@ -75,7 +78,7 @@ fn disable_irq_save() u64 {
 }
 
 fn restore_irq(saved_daif: u64) void {
-    if (comptime builtin.cpu.arch == .aarch64) {
+    if (comptime !builtin.is_test and builtin.cpu.arch == .aarch64) {
         asm volatile ("msr daif, %[v]"
             :
             : [v] "r" (saved_daif),

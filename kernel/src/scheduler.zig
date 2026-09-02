@@ -64,6 +64,7 @@ const shared_mmap = @import("shared_mmap.zig"); // M33 SB2 (claim 8878): shared-
 // + exit status). One-way import: process.zig knows nothing about this
 // module.
 const process = @import("process.zig");
+const usergate = @import("usergate.zig"); // claim 9498: unpinned user tasks on any core — gate before sched_lock, everywhere
 // Card 3f (claim 5965): the per-process IPC mailbox — the pool reset
 // clears it and the boot payload's process registration resets its ring.
 const mailbox = @import("mailbox.zig");
@@ -528,6 +529,11 @@ pub fn register_exec_user_auxv(
 ) ?usize {
     const sp_el0 = stack_va + stack_len;
     const id = spawn("user-exec", entry_va, spsr_el0t_irqs, kstack, root_phys, sp_el0) orelse return null;
+    // Claim 9498: unpinned user tasks may run on ANY core (the console TX
+    // is locked — claim 2369 — and the userspace-service gate serializes
+    // their syscalls). `exec -c<core>` / the WM registration pin after
+    // this via `pin_task`.
+    tasks[id].secondary_ok = true;
     tasks[id].regions = .{
         .text = .{ .base = userspace.text_va, .len = text_len },
         .stack = .{ .base = stack_va, .len = stack_len },
@@ -542,14 +548,17 @@ pub fn register_exec_user_auxv(
     return id;
 }
 
-/// Pin task `id` to run only on `core` (0 = any core, the default). A
-/// pinned task is also marked `secondary_ok` when the core is not 0, so
-/// a secondary core's pick can take it. Used by `exec -c<core>`; must be
-/// called right after the task is spawned (before it can be picked).
+/// Restrict task `id` to a single core (claim 9498: a RESTRICTION over
+/// the any-core default every user task now spawns with). `core > 0`
+/// pins to that secondary core (secondary_ok on, so that core's pick can
+/// take it); `core = 0` pins to CORE 0 only (secondary_ok off) — used by
+/// the registered WM, whose COMPOSITE_TICK pacing is core-0-tick-driven.
+/// Used by `exec -c<core>` and the WM registration; must be called right
+/// after the task is spawned (before it can be picked).
 pub fn pin_task(id: usize, core: usize) bool {
     if (id >= max_tasks or tasks[id].state == .free) return false;
     tasks[id].pin_core = core;
-    tasks[id].secondary_ok = (core != 0); // pinning back to 0 revokes secondary eligibility
+    tasks[id].secondary_ok = (core != 0);
     return true;
 }
 
@@ -678,6 +687,7 @@ pub fn register_user(entry: u64, image_base: u64) ?usize {
     const text = userspace.text_va_region();
     const stack = userspace.stack_va_region();
     const id = spawn("user-el0", entry_va, spsr_el0t_irqs, &user_kernel_stack, mmu.user_root_phys(), sp_el0) orelse return null;
+    tasks[id].secondary_ok = true; // claim 9498: user tasks may run on any core
     // Claim 0826: the boot payload carries its static apertures in the TCB
     // so the syscall layer can arm them at SVC entry like any user task.
     tasks[id].regions = .{ .text = text, .stack = stack };
@@ -807,9 +817,23 @@ fn stage_selected(c: usize, next: usize) void {
     // (Task+0x178 — the exact byte read that faulted in run-11 boot 2).
     audit.slot(next, .tick);
     if (tasks[next].kill_pending) {
-        tasks[next].kill_pending = false;
-        _ = exit_current_locked(reserved_kill_status);
-        return;
+        // Kill conversion runs the full exit teardown (window close,
+        // shared-surface revoke, file/event/timer reset) — userspace-gate
+        // state. SVC/exit callers already hold the gate (reentrant); the
+        // IRQ tick's ungated rotation (claim 9498: rotation runs on
+        // sched_lock alone so gate contention never stalls the ring)
+        // try-acquires it here — never spins, since we hold sched_lock.
+        // When a syscall on another core is mid-flight, stage the task
+        // one more quantum instead: kill_pending stays set, so the next
+        // selection converts it.
+        const already_held = usergate.held();
+        const acquired = !already_held and usergate.try_acquire();
+        if (already_held or acquired) {
+            defer if (acquired) usergate.release();
+            tasks[next].kill_pending = false;
+            _ = exit_current_locked(reserved_kill_status);
+            return;
+        }
     }
     pending_sp[c] = tasks[next].sp;
     pending_elr[c] = tasks[next].elr;
@@ -1145,6 +1169,14 @@ pub fn on_tick() void {
 /// safe — a main-context holder (the idle reaper) is never starved because
 /// its own preempting ticks `try_lock` and skip.
 pub fn exit_current(status: u64) bool {
+    // Userspace-service gate (claim 9498): the teardown below (window
+    // close, shared-surface revoke, file/event/timer reset) mutates the
+    // same state user syscalls hold the gate over — gate FIRST so the
+    // order is gate -> sched_lock everywhere. The syscall path already
+    // holds the gate (dispatch); the fault path does not.
+    const gated = !usergate.held();
+    if (gated) usergate.acquire();
+    defer if (gated) usergate.release();
     sched_lock_acquire();
     defer sched_lock_release();
     return exit_current_locked(status);
@@ -1295,6 +1327,11 @@ fn queue_exit_report(name: []const u8, status: u64) void {
 /// exited descriptor (name, status, stack VA) stays in the `procs` table
 /// for the claim-3848 exit record, but the memory is recycled immediately.
 pub fn reap(id: usize) bool {
+    // Gate first (claim 9498): release_pages_on_reap zeroes the exited
+    // process's registry rows, which sys_procs reads under the gate.
+    const gated = !usergate.held();
+    if (gated) usergate.acquire();
+    defer if (gated) usergate.release();
     sched_lock_acquire();
     defer sched_lock_release();
     if (id >= max_tasks or tasks[id].state != .zombie) return false;
@@ -1385,16 +1422,37 @@ fn spawn_demo_entry() void {
 pub fn tick() void {
     if (comptime builtin.cpu.arch != .aarch64) return;
     if (!scheduling_active()) return;
+    // Ring lock FIRST (held briefly): the preemption rotation (save,
+    // pick, stage) touches only per-core staging and ready<->running
+    // flips, which need no userspace gate. It must NOT be held hostage
+    // to the gate — a syscall on another core holds it for its WHOLE
+    // duration, and a tick that skipped on that would stall the ring
+    // (the idle reaper never runs, zombies pile up — the claim-9498
+    // live flake). Gate-protected work below (timekeeping + kill
+    // conversions) try-acquires it and defers only THAT work.
     if (!sched_lock.try_lock()) return; // ring busy (idle reaping etc.) — skip this beat
     sched_lock_holder = smp.core_id();
     defer sched_lock_release();
     const c = smp.core_id(); // per-core staging
     smp.core_ticks[c] +%= 1;
+    // Userspace-service gate: on_tick's registries (app timers, WM
+    // pacing, CPU-limit exits) mutate the same state user syscalls hold
+    // the gate over. Every gate hold masks IRQs, so a same-core holder
+    // can never be paused under a tick — contention here is always a
+    // syscall mid-flight on ANOTHER core, and the rotation below is safe
+    // without the gate (only on_tick's registry work + the exit
+    // teardowns need it). The held() check is a defensive bound: if a
+    // same-core holder ever IS paused under us, do not rotate (any task
+    // we switched to would spin on a gate only this core can release).
+    const gated = usergate.try_acquire();
+    defer if (gated) usergate.release();
+    if (!gated and usergate.held()) return;
     // Global timekeeping + registries (tick_count, wake_expired, app
     // timers, WM pacing, CPU limits) stay on the core-0 authority; a
     // secondary core runs ONLY the switch machinery on its own per-core
-    // staging (claim 8477 follow-up lift).
-    if (c == 0) on_tick();
+    // staging (claim 8477 follow-up lift). Skipped when the gate is
+    // contended (one 1 s cadence loss — the pre-existing skip semantic).
+    if (c == 0 and gated) on_tick();
     var elr: u64 = 0;
     var spsr: u64 = 0;
     asm volatile ("mrs %[v], elr_el1"
@@ -1423,6 +1481,16 @@ pub fn tick() void {
     }
     // A lone secondary-eligible task keeps running (the shared idle
     // fallback is core 0's, so there is no always-ready successor here).
+    // A kill_pending must still convert even without a successor to
+    // switch to — request_kill on a lone core-1 task would otherwise
+    // stall until it blocks (claim 9498). The conversion runs the exit
+    // teardown, so it needs the gate; when a syscall elsewhere holds it,
+    // the task runs one more quantum and the next beat converts it.
+    if (c != 0 and current[c] != idle_id and tasks[current[c]].kill_pending and gated) {
+        tasks[current[c]].kill_pending = false;
+        _ = exit_current_locked(reserved_kill_status); // tick holds the gate + sched_lock
+        return;
+    }
     if (c != 0 and next_runnable_for(current[c], c) == null) return;
     timer_switch_context(exceptions.resume_frame[c], elr, spsr, exceptions.resume_sp_el0[c]);
     apply_pending();
@@ -1919,41 +1987,38 @@ test "scheduler: register_worker builds a valid synthetic frame" {
     try std.testing.expect(!has_free_slot());
 }
 
-test "scheduler: secondary cores may only pick secondary_ok tasks" {
-    // SMP lift (claim 8477 follow-up): the shared ring is core-0's for
-    // shell + idle + user tasks; a secondary core may pick only the
-    // worker (console-free), never the shell or the shared idle slot.
+test "scheduler: user tasks are any-core and the shell/idle stay on core 0" {
+    // Claim 9498: the console TX is locked (2369) and the userspace gate
+    // serializes syscalls, so USER tasks default to ANY core. The shell
+    // (console owner / command runner) and the shared idle slot (core 0's
+    // reaper — one frame, one owner) stay core-0.
     _ = init();
     const worker = register_worker(0x1111).?; // secondary_ok = true
     try std.testing.expectEqual(@as(usize, 1), worker);
     try std.testing.expect(tasks[worker].secondary_ok);
     try std.testing.expect(!tasks[0].secondary_ok); // shell stays on core 0
     try std.testing.expect(!tasks[idle_id].secondary_ok); // idle is core-0's reaper
-    // Core 1 walking from the shell finds the worker first.
-    // Core 1 walking from the shell finds the worker first.
-    try std.testing.expectEqual(@as(?usize, worker), next_runnable_for(0, 1));
-    // Core 1 wrapping from the worker skips shell + idle and lands back
-    // on the worker (the only eligible task).
-    try std.testing.expectEqual(@as(?usize, worker), next_runnable_for(worker, 1));
-    // Core 0 from the worker wraps to the idle fallback (slot order: the
-    // shell sits at 0, below idle at max_tasks-1 — the ring finds idle
-    // first when walking forward from the worker).
-    try std.testing.expectEqual(@as(?usize, idle_id), next_runnable_for(worker, 0));
-    // A user task is NOT secondary-eligible and is skipped on core 1.
     const user = register_user(0x2222, 0).?;
     try std.testing.expectEqual(@as(usize, 2), user);
-    try std.testing.expect(!tasks[user].secondary_ok);
-    try std.testing.expectEqual(@as(?usize, worker), next_runnable_for(worker, 1));
-    // Core 0 picks the user task normally.
+    try std.testing.expect(tasks[user].secondary_ok); // any-core default
+    try std.testing.expectEqual(@as(usize, 0), tasks[user].pin_core);
+    // Core 1 walking from the shell finds the worker first (slot order).
+    try std.testing.expectEqual(@as(?usize, worker), next_runnable_for(0, 1));
+    // Core 1 from the worker finds the user task (now eligible) ahead of
+    // the wrap.
+    try std.testing.expectEqual(@as(?usize, user), next_runnable_for(worker, 1));
+    // Core 0 picks the user task normally too.
     try std.testing.expectEqual(@as(?usize, user), next_runnable_for(worker, 0));
 }
 
-test "scheduler: pin_task routes a user task to exactly one core" {
-    // SMP user tasks (claim 2369): `exec -c<core>` pins the spawned task
-    // — core 0's pick skips it outright, the pinned core's pick takes it.
+test "scheduler: pin_task restricts a user task to exactly one core" {
+    // SMP user tasks (claim 2369 + 9498): `exec -c<core>` pins a spawned
+    // task; `pin_task(.., 0)` pins back to CORE 0 only (the any-core
+    // default is a RESTRICTION removed by pinning, never re-added).
     _ = init();
     const worker = register_worker(0x1111).?;
     const user = register_user(0x2222, 0).?;
+    try std.testing.expect(tasks[user].secondary_ok); // any-core default
     try std.testing.expect(pin_task(user, 1));
     try std.testing.expectEqual(@as(usize, 1), tasks[user].pin_core);
     try std.testing.expect(tasks[user].secondary_ok); // pinned off core 0
@@ -1963,10 +2028,10 @@ test "scheduler: pin_task routes a user task to exactly one core" {
     // Core 0 skips the pinned task entirely — from the worker it wraps
     // straight to the idle fallback, never to the user task.
     try std.testing.expectEqual(@as(?usize, idle_id), next_runnable_for(worker, 0));
-    // Core 1 may also still pick the worker (unpinned, secondary_ok).
+    // Core 1 may also still pick the worker (any-core, secondary_ok).
     try std.testing.expectEqual(@as(?usize, worker), next_runnable_for(user, 1));
-    // Unpinning revokes secondary eligibility: core 1 skips it again and
-    // core 0 picks it again.
+    // Pinning to core 0 (the WM registration) makes the task core-0-ONLY:
+    // core 1 skips it again and core 0 picks it again.
     try std.testing.expect(pin_task(user, 0));
     try std.testing.expectEqual(@as(usize, 0), tasks[user].pin_core);
     try std.testing.expect(!tasks[user].secondary_ok);

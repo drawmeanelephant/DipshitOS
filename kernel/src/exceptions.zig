@@ -42,6 +42,7 @@ const mmu = @import("mmu.zig");
 const alloc = @import("alloc.zig");
 const process = @import("process.zig");
 const scheduler = @import("scheduler.zig");
+const usergate = @import("usergate.zig"); // claim 9498: demand-paging faults gate against user syscalls on other cores
 const memmap = @import("memmap.zig");
 const userspace = @import("userspace.zig");
 
@@ -743,6 +744,13 @@ pub fn try_handle_page_fault(esr: u64, far: u64) bool {
     const ec = (esr >> 26) & 0x3f;
     // Only handle EL0 Data Aborts (0x24)
     if (ec != 0x24) return false;
+    // Userspace-service gate (claim 9498): the mapping below allocates
+    // physical pages and mutates the process registry — the same state
+    // exec/mmap syscalls hold the gate over on ANY core. Runs in
+    // exception context (IRQ-masked): the holder always runs to
+    // completion, so spinning is safe.
+    usergate.acquire();
+    defer usergate.release();
 
     const pid = if (process.find_by_task(scheduler.current_id())) |p|
         p

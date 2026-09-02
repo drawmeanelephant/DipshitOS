@@ -59,6 +59,7 @@ const exceptions = @import("exceptions.zig");
 const mailbox = @import("mailbox.zig"); // claim 5965: per-process rings
 const process = @import("process.zig"); // claim 5965: target/current-process lookup
 const scheduler = @import("scheduler.zig");
+const usergate = @import("usergate.zig"); // claim 9498: unpinned user tasks on any core — one gate over shared service state
 const arp = @import("arp.zig"); // M26 N2 (issue #400): the ARP table for the net-stats snapshot
 const dhcp = @import("dhcp.zig"); // M26 N2 (issue #400): DHCP lease state for the net-stats snapshot
 const udp = @import("udp.zig"); // claim 1384 (card N6): the milestone-five UDP layer
@@ -456,6 +457,16 @@ pub fn call_count(number: u64) u64 {
 /// indexing the table. The caller writes this result into saved x0.
 pub fn dispatch(number: u64, args: Args, frame: *exceptions.VectorFrame) u64 {
     if (number >= slot_count) return error_result(.enosys);
+    // Userspace-service gate (claim 9498): every user syscall on EVERY
+    // core serializes here — the file/window/network/events/registry state
+    // the handlers touch is single-core-written. The hold is IRQ-masked
+    // and released on this return (a blocking syscall still unwinds here:
+    // the scheduler staged another task's frame, and the stub's eret goes
+    // to that frame after dispatch returns). Reentrancy (a handler that
+    // internally re-dispatches) never happens — handle_svc is the only
+    // production caller.
+    usergate.acquire();
+    defer usergate.release();
     call_counts[number] +%= 1;
     const handler = ensure_table()[number].handler orelse return error_result(.enosys);
     // M22 D5: sys_exit never returns from its handler (the scheduler
@@ -2457,6 +2468,12 @@ fn handle_wmctl(args: Args, _: *exceptions.VectorFrame) u64 {
             // the headless default VM.
             if (!virtio_gpu.gpu_setup_ok) return error_result(.enxio);
             _ = wm_server.register(pid);
+            // Claim 9498: the registered WM stays on CORE 0 — its
+            // COMPOSITE_TICK pacing is delivered from core 0's tick, so
+            // floating it to a secondary core would decouple the render
+            // server from the pacing clock. (User tasks default to any
+            // core; this pins the one tick-coupled process back.)
+            _ = scheduler.pin_task(scheduler.current_id(), 0);
             return 0;
         },
         wm_server.wmctl_set_window => {

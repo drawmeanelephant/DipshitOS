@@ -20,6 +20,7 @@ const builtin = @import("builtin");
 const alloc = @import("alloc.zig");
 const console = @import("console.zig");
 const esp_exec = @import("exec.zig"); // claim 6783: load a user program from the host share and enter it at EL0
+const usergate = @import("usergate.zig"); // claim 9498: monitor commands serialize with user syscalls on any core
 const syscall_mod = @import("syscall.zig"); // the strace seam (sets syscall_mod.strace_pid)
 const exceptions = @import("exceptions.zig");
 const gic = @import("gic.zig");
@@ -421,6 +422,13 @@ pub fn exec(m: *Monitor, argv: []const []const u8) ExecError {
         print_usage(m, cmd);
         return .usage;
     }
+    // Userspace-service gate (claim 9498): EL1h commands reach the same
+    // file/window/network/registry state user syscalls touch under the
+    // gate on ANY core, so they serialize together. The hold is IRQ-masked
+    // (a command can never be preempted mid-hold, so a core-1 syscall
+    // spinner always finds this holder running to completion).
+    usergate.acquire();
+    defer usergate.release();
     return cmd.handler(m, args);
 }
 
