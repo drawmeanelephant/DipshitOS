@@ -1,0 +1,51 @@
+const zc = @import("zc");
+
+const Color = enum(u8) {
+    red,
+    green,
+    blue,
+};
+
+const Mode = enum(u8) {
+    idle = 3,
+    busy,
+    done,
+};
+
+fn tag_of(c: Color) u8 {
+    return @intFromEnum(c);
+}
+
+fn color_name(c: Color) []const u8 {
+    return switch (c) {
+        Color.red => "red",
+        Color.green => "green",
+        Color.blue => "blue",
+    };
+}
+
+fn mode_stage(m: Mode) u64 {
+    var v: u64 = 0;
+    switch (m) {
+        Mode.idle => { v = 1; },
+        Mode.busy => { v = 2; },
+        Mode.done => { v = 3; },
+    }
+    return v;
+}
+
+pub fn main() void {
+    const c: Color = @enumFromInt(1);
+    if (tag_of(c) == 1) {
+        const s: []const u8 = color_name(c);
+        zc.print(s);
+        if (s[0] == 103) {
+            if (mode_stage(Mode.done) == 3) {
+                if (@intFromEnum(Mode.busy) == 4) {
+                    zc.exit(72);
+                }
+            }
+        }
+    }
+    zc.exit(1);
+}

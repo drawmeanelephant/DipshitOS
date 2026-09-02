@@ -54,8 +54,10 @@ gate_seed_share
 echo "run dir: $RUN_DIR"
 SCRIPT="$RUN_DIR/script.txt"
 
-# Stage a program that sums via for-loop, selects via switch, and prints slice, then exits 72.
-SRC='const zc = @import("zc"); pub fn main() void { var sum: u64 = 0; for (0..10) |i| { sum = sum + i; } const s: []const u8 = switch (sum) { 45 => "one", else => "bad" }; zc.print(s); if (s[0] == 111) { zc.exit(72); } zc.exit(1); }'
+# Stage a program that casts int->enum, switches over the enum value, prints the
+# tag string, then exits 72. Keep the whole line <=256 bytes: the shell's write
+# command refuses input lines longer than 256 bytes and mangles the file.
+SRC='const zc=@import("zc");const Color=enum(u8){red,green,blue};pub fn main()void{const c:Color=@enumFromInt(1);const s:[]const u8=switch(c){Color.green=>"green",else=>"x"};zc.print(s);if(s[0]==103){zc.exit(72);}zc.exit(1);}'
 printf 'ls\nwrite MAIN.Z '\''%s'\''\nexec ZC.BIN\n' "$SRC" > "$SCRIPT"
 printf 'ls\nexec MAIN.ELF\necho rx-zc-ok\n' > "$SCRIPT2"
 
@@ -102,7 +104,12 @@ cp tests/zc-corpus/z1e-control.z "$CORPUS_CONTROL_TMP"
 zig build-obj -target aarch64-freestanding --dep zc -Mroot="$CORPUS_CONTROL_TMP" -Mzc=user/src/lib/zc.zig -femit-bin="$RUN_DIR/corpus_control.o"
 rm -f "$CORPUS_CONTROL_TMP" "$RUN_DIR/corpus_control.o"
 
-echo "host compile check: ok (SRC + z05-dialect.z + vl6-gui.z + z1a-strings.z + z1b-arrays.z + z1c-structs.z + z1d-pointers.z + z1e-control.z valid Zig 0.16)"
+CORPUS_ENUM_TMP="$RUN_DIR/corpus_enum.zig"
+cp tests/zc-corpus/z1f-enums.z "$CORPUS_ENUM_TMP"
+zig build-obj -target aarch64-freestanding --dep zc -Mroot="$CORPUS_ENUM_TMP" -Mzc=user/src/lib/zc.zig -femit-bin="$RUN_DIR/corpus_enum.o"
+rm -f "$CORPUS_ENUM_TMP" "$RUN_DIR/corpus_enum.o"
+
+echo "host compile check: ok (SRC + z05-dialect.z + vl6-gui.z + z1a-strings.z + z1b-arrays.z + z1c-structs.z + z1d-pointers.z + z1e-control.z + z1f-enums.z valid Zig 0.16)"
 
 run_one() {
     local tag="$1"
@@ -129,7 +136,7 @@ run_one() {
         [ "$(grep -aFc -- "write: ok" "$SER" || true)" = 1 ] && written=1
         [ "$(grep -aFc -- "zc: successfully compiled in-guest" "$SER" || true)" = 1 ] && compiled=1
         [ "$(grep -aFc -- "exec: loaded MAIN.ELF size=" "$SER" || true)" = 1 ] && loaded=1
-        [ "$(grep -aFc -- "one" "$SER" || true)" -ge 1 ] && printed=1
+        [ "$(grep -aFc -- "green" "$SER" || true)" -ge 1 ] && printed=1
         [ "$(grep -aFxc -- "$EXIT_LINE" "$SER" || true)" -ge 1 ] && exit72=1
         [ "$(grep -aFc -- "$REAP_LINE" "$SER" || true)" -ge 2 ] && reaped=1
         [ "$(grep -aFxc -- "rx-zc-ok" "$SER" || true)" = 1 ] && echo_ok=1
