@@ -1,6 +1,6 @@
 # Claim: M34 HF7 — CLONE → clonefile COW dedup (worktree workload) (issue #741)
 
-- **Owner:** buffy (Freebuff worktree branch, see log)
+- **Owner:** buffy (`freebuff/get-git-up-to-date-there-were-quite-a-few-things-d-fe3ff43a-1217-4ca3-a9ad-b6faa6fbe86f`)
 - **Prompt / plan:** implement M34 HF7 (#741): the last card of milestone
   #21 (M34 — FAT-free storage). The host file channel gains a **CLONE
   opcode (0x0c)** mapped to APFS COW cloning — `clonefile(2)` for regular
@@ -40,7 +40,7 @@
 - **Depends on:** HF3 (mutation wire — CLONE rides the same exchange
   framing) — landed
 - **Heartbeat:** 2026-09-02
-- **Status:** 🔄 in progress — claim 1312 (id via `bash tools/status/claim-id.sh`)
+- **Status:** ✅ done — live gate PASS 6/6 (run 6, 2026-09-02), measurement artifact under `artifacts/m34-hf7-measurement.txt`; flake #810 filed (boot EL0 probe hang/park, 8/24 boots this session, retried in-gate)
 
 ## Notes
 
