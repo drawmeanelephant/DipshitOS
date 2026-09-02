@@ -237,12 +237,20 @@ pub fn installed() bool {
 // Counters
 // ---------------------------------------------------------------------------
 
-var handled_count_value: u64 = 0;
+/// Issue #810-family audit (claim 8513): PER-CORE. Every exception on
+/// every core increments this at `exc_dispatch` entry, and the secondary
+/// cores' timer IRQs fire in parallel with the scheduler core's dispatch —
+/// a shared counter was a plain RMW race that lost increments. Indexed by
+/// `resume_core()`; `handled_count()` sums the slots. Same literal-4
+/// rationale as `max_resume_cores` above (smp imports this module).
+var handled_count_value: [max_resume_cores]u64 = [_]u64{0} ** max_resume_cores;
 var resume_count_value: u64 = 0;
 
 /// Total exceptions taken since boot.
 pub fn handled_count() u64 {
-    return handled_count_value;
+    var sum: u64 = 0;
+    for (handled_count_value) |v| sum += v;
+    return sum;
 }
 
 /// Exceptions that were resumed (the deliberate test fault).
@@ -818,8 +826,8 @@ export fn exc_dispatch(
     spsr: u64,
     kind: u64,
 ) callconv(.c) Resume {
-    handled_count_value += 1;
-    const cid = resume_core();
+    const cid = resume_core(); // per-core resume handoff (issue #810)
+    handled_count_value[cid] += 1; // per-core: secondary-core IRQs fire in parallel
     resume_frame[cid] = @intFromPtr(frame);
     resume_sp_el0[cid] = source_sp_el0(frame, spsr);
     // Claim 7948: taken IRQs route to the registered dispatcher (GIC ack
@@ -883,7 +891,7 @@ export fn exc_dispatch(
         far,
         elr,
         spsr,
-        handled_count_value,
+        handled_count(), // claim 7339: summed across cores
         frame_read(frame, 0),
         frame_read(frame, 30),
         resume_sp_el0[cid],

@@ -1741,15 +1741,15 @@ fn custom_virtio_spike() void {
     // many IRQs the whole experiment actually delivered (VZ coalesces per
     // burst — claim 0828 — so expect a small count, honest either way).
     var drain: usize = 0;
-    while (drain < cv_wait_budget and virtio_custom.irq_count < 1) : (drain += 1) {}
+    while (drain < cv_wait_budget and virtio_custom.irq_count[0] < 1) : (drain += 1) {} // claim 7339: per-core; SPIs land on PE 0
 
     uart_puts("cvspike: irq=");
-    uart_hex(virtio_custom.irq_count);
-    if (virtio_custom.irq_count > 0) {
+    uart_hex(virtio_custom.irq_count[0]);
+    if (virtio_custom.irq_count[0] > 0) {
         uart_puts(" first="); // uart_hex emits the 0x prefix itself
-        uart_hex(virtio_custom.irq_first);
+        uart_hex(virtio_custom.irq_first[0]);
         uart_puts(" spi=");
-        uart_hex(virtio_custom.irq_first);
+        uart_hex(virtio_custom.irq_first[0]);
     } else {
         uart_puts(" first=none");
     }

@@ -3640,9 +3640,9 @@ fn cmd_timer(m: *Monitor, args: []const []const u8) ExecError {
     m.console.puts(" poll=");
     m.console.print_u64(timer.poll_ticks);
     m.console.puts(" acked=");
-    m.console.print_u64(gic.irqs_acked);
+    m.console.print_u64(gic.acked_total()); // claim 7339: summed across cores
     m.console.puts(" first=");
-    m.console.print_hex_min(gic.first_intid);
+    m.console.print_hex_min(gic.first_intid[0]); // PE-0 first (SPIs are IROUTER-pinned there)
     m.console.puts("\n");
     return .none;
 }
