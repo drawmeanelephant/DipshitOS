@@ -18,10 +18,14 @@
 //! payload = [path]), and the HF3 mutation set (additive, 0x04..0x0b):
 //! OPEN/CLOSE/WRITE/TRUNCATE/FSYNC (handle-based — the host's 8-slot
 //! handle table carries the write cursor; parity with file_table.zig's
-//! 8-handle ABI) and RENAME/MKDIR/DELETE (path-based stateless). Reply
-//! status: 0 ok, 1 not found, 2 is a directory, 3 truncated (reply
-//! exceeded the guest's buffer), 4 host error, 5 exists (create/rename
-//! target collision), 6 handle error (host table full or bad handle).
+//! 8-handle ABI) and RENAME/MKDIR/DELETE (path-based stateless). CLONE
+//! (0x0c, HF7 issue #741) is path-based COW dedup: the host clones the
+//! source with APFS clonefile semantics (clonefile(2) for files,
+//! copyfile(3) COPYFILE_CLONE for trees) — N worktrees of one repo share
+//! blocks until a worktree actually edits a file. Reply status: 0 ok,
+//! 1 not found, 2 is a directory, 3 truncated (reply exceeded the guest's
+//! buffer), 4 host error, 5 exists (create/rename/clone target
+//! collision), 6 handle error (host table full or bad handle).
 //!
 //! VF_PROBE (HF1's acceptance case A) proves the ONE unproven transport
 //! fact: a full 32,768-byte device-WRITE reply (claim 0680 proved 32 KiB
@@ -59,6 +63,10 @@ pub const op_fsync: u8 = 0x08;
 pub const op_rename: u8 = 0x09;
 pub const op_mkdir: u8 = 0x0a;
 pub const op_delete: u8 = 0x0b;
+// HF7 (issue #741): COW clone — additive (0x0c), the same non-breaking
+// rule as the HF3 set: an old host answers it with status 4 and an old
+// guest never sends it.
+pub const op_clone: u8 = 0x0c;
 
 pub const st_ok: u8 = 0;
 pub const st_not_found: u8 = 1;
@@ -589,6 +597,30 @@ pub fn mkdir(path: []const u8) u8 {
     return exchange_path(op_mkdir, path);
 }
 
+/// CLONE `from` → `to` on the host share — APFS COW dedup (the HF7
+/// worktree workload, issue #741): the host clones the source with
+/// clonefile semantics (clonefile(2) for regular files, copyfile(3) with
+/// COPYFILE_CLONE for directory trees), so N clones share blocks until
+/// one of them actually edits a file. NUL-framed payload like RENAME
+/// (paths are NUL-free by construction); `to` must NOT exist (st_exists
+/// otherwise — clonefile(2) demands a fresh dst, matching the host's
+/// EEXIST). Stateless like the other path ops — the host holds no state.
+/// Like RENAME, the combined `[from][0x00][to]` frame must fit the
+/// channel's bounded request buffer; beyond that the guest refuses
+/// honestly with st_host_error (the monitor's short paths never hit it).
+pub fn clone(from: []const u8, to: []const u8) u8 {
+    if (!available()) return st_host_error;
+    if (from.len == 0 or to.len == 0 or from.len > path_max or to.len > path_max) return st_host_error;
+    if (std.mem.indexOfScalar(u8, from, 0) != null or std.mem.indexOfScalar(u8, to, 0) != null) return st_host_error;
+    var payload: [path_max * 2 + 1]u8 = undefined;
+    @memcpy(payload[0..from.len], from);
+    payload[from.len] = 0;
+    @memcpy(payload[from.len + 1 ..][0..to.len], to);
+    const plen = from.len + 1 + to.len;
+    const n = exchange(op_clone, 0, payload[0..plen], &vf_reply_buf) orelse return st_host_error;
+    return decode_reply(vf_reply_buf[0..n]).status;
+}
+
 /// DELETE a file or EMPTY directory on the host share. Non-empty
 /// directories fail honestly with a host error (never recursive).
 pub fn delete(path: []const u8) u8 {
@@ -935,4 +967,34 @@ test "virtio_file: G12 — pattern chunk plan for the mutation gate" {
     try testing.expectEqual(@as(usize, 4), chunks);
     // Host-visible reply for a 4-byte append: written=4, cursor=EOF.
     try testing.expectEqual(@as(usize, 4), @as(usize, 4));
+}
+
+test "virtio_file: G13 — HF7 clone op: 0x0c, NUL frame, bounds, honest refusal" {
+    // Additive opcode space continues past the HF3 set (0x0c): an old
+    // host answers unknown ops with status 4, so this stays non-breaking.
+    try testing.expectEqual(@as(u8, 0x0c), op_clone);
+    try testing.expect(op_clone > op_delete);
+    // The wire is the same NUL-framed shape as RENAME: [from][0x00][to].
+    // The 0x0c op in the header + the frame is what serveClone parses.
+    const from = "repo";
+    const to = "repo-wt1";
+    var payload: [path_max * 2 + 1]u8 = undefined;
+    @memcpy(payload[0..from.len], from);
+    payload[from.len] = 0;
+    @memcpy(payload[from.len + 1 ..][0..to.len], to);
+    const plen = from.len + 1 + to.len;
+    try testing.expectEqualStrings(from, payload[0..from.len]);
+    try testing.expectEqual(@as(u8, 0), payload[from.len]);
+    try testing.expectEqualStrings(to, payload[from.len + 1 .. plen]);
+    // Bounds + NUL-safety are refused BEFORE any exchange.
+    const long = [_]u8{0x41} ** (path_max + 1);
+    try testing.expectEqual(@as(u8, st_host_error), clone(&long, "x"));
+    try testing.expectEqual(@as(u8, st_host_error), clone("x", &long));
+    try testing.expectEqual(@as(u8, st_host_error), clone("", "x"));
+    // The CLONE reply is a bare status (no data) — a status-5 (exists)
+    // from the host's EEXIST pre-check must reach the guest unchanged.
+    var rep = [_]u8{ st_exists, 0, 0 };
+    try testing.expectEqual(st_exists, decode_reply(&rep).status);
+    rep[0] = st_not_found;
+    try testing.expectEqual(st_not_found, decode_reply(&rep).status);
 }

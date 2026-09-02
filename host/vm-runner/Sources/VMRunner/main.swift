@@ -4452,6 +4452,8 @@ final class CustomVirtioSpikeDeviceDelegate: NSObject, VZCustomVirtioDeviceDeleg
             serveMkdir(payload, element: element)
         case VFWire.opDelete:
             serveDelete(payload, element: element)
+        case VFWire.opClone:
+            serveClone(payload, element: element)
         default:
             print("VF-FILE: unknown op 0x\(String(format: "%02x", op)) — replying host error")
             writeFileReply(element: element, status: VFWire.stHostError, data: [])
@@ -4744,6 +4746,65 @@ final class CustomVirtioSpikeDeviceDelegate: NSObject, VZCustomVirtioDeviceDeleg
         } catch {
             // Missing parent reads as not-found; other failures host error.
             writeFileReply(element: element, status: VFWire.stHostError, data: [])
+        }
+    }
+
+    /// CLONE [from][0x00][to] (HF7, issue #741): APFS COW dedup — the
+    /// worktree workload. Both subpaths go through the same traversal
+    /// defense as every VF op; src must exist, dst must NOT exist
+    /// (clonefile(2) demands a fresh dst — pre-checked, so the error
+    /// never surfaces as a raw EEXIST). Regular files clone with
+    /// Darwin.clonefile(2); DIRECTORY TREES clone with copyfile(3) +
+    /// COPYFILE_ALL | COPYFILE_CLONE | COPYFILE_RECURSIVE (the man page
+    /// explicitly prefers copyfile(3) over clonefile(2) for directories).
+    /// Clones share blocks until one side edits — measured live by the
+    /// HF7 gate (artifact m34-hf7-measurement.txt).
+    private func serveClone(_ payload: [UInt8], element: VZVirtioQueueElement) {
+        guard let root = shareRootURL(), let nul = payload.firstIndex(of: 0),
+              let from = String(bytes: payload[0..<nul], encoding: .utf8),
+              let to = String(bytes: payload[(nul + 1)...], encoding: .utf8),
+              let fromURL = VFWire.resolveSubpath(root: root, path: from),
+              let toURL = VFWire.resolveSubpath(root: root, path: to),
+              !from.isEmpty, !to.isEmpty else {
+            writeFileReply(element: element, status: VFWire.stHostError, data: [])
+            return
+        }
+        let fm = FileManager.default
+        var fromIsDir: ObjCBool = false
+        guard fm.fileExists(atPath: fromURL.path, isDirectory: &fromIsDir) else {
+            writeFileReply(element: element, status: VFWire.stNotFound, data: [])
+            return
+        }
+        if fm.fileExists(atPath: toURL.path) {
+            writeFileReply(element: element, status: VFWire.stExists, data: [])
+            return
+        }
+        let rc: Int32
+        if !fromIsDir.boolValue {
+            // Regular file: the raw clonefile(2) — COW clone, new inode.
+            rc = Darwin.clonefile(fromURL.path, toURL.path, 0)
+        } else {
+            // Directory tree: copyfile(3) with COPYFILE_CLONE does the
+            // same per-item COW clone the man page recommends. (Root's
+            // relative path strings are fine — the file names carry no
+            // leading separator because resolveSubpath stripped it.)
+            rc = copyfile(fromURL.path, toURL.path, nil,
+                          UInt32(COPYFILE_ALL | COPYFILE_CLONE | COPYFILE_RECURSIVE))
+        }
+        if rc == 0 {
+            writeFileReply(element: element, status: VFWire.stOk, data: [])
+            print("VF-FILE: CLONE \(from) → \(to) (\(fromIsDir.boolValue ? "tree" : "file") COW clone)")
+        } else {
+            // The dst-exists race (checked above, but two guests could
+            // clone concurrently): map EEXIST honestly, everything else
+            // is a host error with the errno for the log.
+            let e = errno
+            if e == EEXIST {
+                writeFileReply(element: element, status: VFWire.stExists, data: [])
+            } else {
+                writeFileReply(element: element, status: VFWire.stHostError, data: [])
+            }
+            print("VF-FILE: CLONE \(from) → \(to) FAILED errno=\(e) (\(String(cString: strerror(e))))")
         }
     }
 

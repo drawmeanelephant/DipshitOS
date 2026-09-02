@@ -171,6 +171,23 @@ final class VFWireTests: XCTestCase {
         XCTAssertNil(VFWire.buildRenamePayload(from: "", to: "x"))
     }
 
+    /// S11 — HF7 (issue #741): CLONE op constant (additive 0x0c, past
+    /// the HF3 delete) + the NUL-framed payload that mirrors RENAME.
+    /// Mirrors the guest G13 byte-for-byte.
+    func testS11CloneOpAndFraming() {
+        XCTAssertEqual(VFWire.opClone, 0x0c)
+        XCTAssertGreaterThan(VFWire.opClone, VFWire.opDelete)
+        let cp = try! XCTUnwrap(VFWire.buildClonePayload(from: "repo", to: "repo-wt1"))
+        let nul = cp.firstIndex(of: 0)!
+        XCTAssertEqual(String(bytes: cp[0..<nul], encoding: .utf8), "repo")
+        XCTAssertEqual(String(bytes: cp[(nul + 1)...], encoding: .utf8), "repo-wt1")
+        // Refused honestly: empty, over-long, NUL-smuggling paths.
+        XCTAssertNil(VFWire.buildClonePayload(from: "", to: "x"))
+        XCTAssertNil(VFWire.buildClonePayload(from: "x", to: ""))
+        XCTAssertNil(VFWire.buildClonePayload(from: String(repeating: "a", count: VFWire.pathMax + 1), to: "x"))
+        XCTAssertNil(VFWire.buildClonePayload(from: "a\u{0}b", to: "x"))
+    }
+
     /// S8 — the 8-slot table: cursor advance + truncate clamp.
     func testS8HandleTableCursorAndTruncate() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("vf-hf3-\(UUID().uuidString)", isDirectory: true)

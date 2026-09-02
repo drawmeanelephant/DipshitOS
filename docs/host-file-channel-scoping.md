@@ -136,15 +136,49 @@ firmware — the "tiny amount required" is literally zero lines of our code.
 The motivating workload is many Git worktrees of the same repo — the classic
 redundancy case. Facts: APFS has **no automatic dedup**; its mechanism is
 `clonefile` (COW clones — copies share blocks until modified). So the file
-channel gains a **CLONE opcode** mapped to `clonefile()`: creating a
-worktree clone is COW, and N worktrees of one repo share blocks until a
-worktree actually edits a file. Whole-file dedup at clone granularity is
-nearly the entire win for worktrees (unchanged files dominate across
-worktrees; only branch-differing files diverge). Alternative/bigger: point
-the shared directory at a ZFS volume for true block-level dedup + snapshots,
-inherited with zero guest code. Explicitly NOT: writing dedup into a guest
-filesystem (ZFS-grade chunked content-addressing is research-grade; the
-guest has no redundant workload beyond worktrees, and clones capture it).
+channel carries a **CLONE opcode (`0x0c`)** mapped to APFS COW semantics:
+creating a worktree clone is COW, and N worktrees of one repo share blocks
+until a worktree actually edits a file. Whole-file dedup at clone
+granularity is nearly the entire win for worktrees (unchanged files
+dominate across worktrees; only branch-differing files diverge).
+
+**Delivered (HF7, issue #741, claim 1312 — 2026-09-02).** The op rides the
+same stateless NUL-framed wire as RENAME: `vf clone <from> <to>` in the
+monitor; the runner resolves BOTH subpaths with the standard traversal
+defense, then clones regular files with `Darwin.clonefile(2)` and
+DIRECTORY TREES with `copyfile(3)` + `COPYFILE_ALL | COPYFILE_CLONE |
+COPYFILE_RECURSIVE` (the clonefile(2) man page explicitly prefers
+copyfile(3) for directories); `to` must not exist (→ status `5`, plus an
+EEXIST race fallback). The gate's measurement is honest about what du
+cannot see: `du` reports logical `st_blocks`, so a clone and a `cp` copy
+of the same fixture report IDENTICAL numbers (observed). The physical
+proof is the volume-level used-space delta (`os.statvfs` before/after):
+3 `cp -R` copies of a ~7.5 MiB repo measured ≈ 22.5 MiB while 3 page-
+channel clones measured ≈ ~0, and appending 512 bytes to ONE worktree
+file left the untouched siblings sha256-identical to the repo (byte
+compare) with a small observed delta. Raw before/after numbers live under
+`artifacts/m34-hf7-measurement.txt` (saved by the gate, never asserted
+as a constant).
+
+**Alternative, still the bigger hammer:** point the share at a volume that
+does its own dedup/snapshots and the channel inherits it with ZERO guest
+code — every VF op is a stateless `FileManager`/path call rooted at
+`--cvc-file <dir>`, so the device underneath can be anything. Options,
+honestly scoped: (1) **ZFS-backed share** (OpenZFS on macOS via a kext/
+MacFUSE system extension — `zpool` + `zfs set dedup=on compression=on` on
+the share volume): true BLOCK-LEVEL dedup (identical content anywhere in
+the tree collapses, not just whole-file clones) plus snapshots/rollback
+(`zfs snapshot` while the guest is quiesced; an untrusted guest can never
+snapshot — the HOST owns the pool). Costs: third-party kernel extension,
+not the default APFS experience. (2) **APFS local snapshots** on the
+share's own volume (`tmutil localsnapshot` or `diskutil apfs addSnapshot`):
+snapshots + rollback for free, still whole-file COW rather than block-
+dedup — strictly less than ZFS for dedup. (3) **Clonefile is the default
+story** and is what HF7 proves: near-zero sysadmin, captures the worktree
+win, and an edit in one worktree never duplicates untouched siblings.
+Explicitly NOT: writing dedup into a guest filesystem (ZFS-grade chunked
+content-addressing is research-grade; the guest has no redundant workload
+beyond worktrees, and clones capture it).
 
 ## Gated card split
 
@@ -156,7 +190,7 @@ guest has no redundant workload beyond worktrees, and clones capture it).
 | HF4 | **App delivery migration** — exec from the host folder, desktop manifest re-pointed, drop-`.ELF`-and-exec workflow; the image-rebuild loop dies — **issue #738** | HF2 (HF3 for write-if-needed) | ✅ **done 2026-09-01 (PR #749, claim 7599)** — live gate `verify-live-vf.sh` PASS 4/4 on VZ: the gate compiles a tiny freestanding ELF on the host AFTER the image is baked, drops it + a 2-entry `APPS.TXT` into the share, and the boot lists it (`vf ls`), execs it from the SHARE (`exec: loaded HF4APP.ELF`, marker, `exited status=43`, 3 chunked READ round trips), and DESKTOP.BIN prints `desktop: manifest apps=2` from the HOST manifest (vs the ESP's 19) — no image rebuild; kernel exec host-first + ESP fallback, read-only `/host` file-table partition, desktop `/host/APPS.TXT` first + `/esp` fallback |
 | HF5 | **User-data migration** — settings, notepad, calc history, downloads, screenshots, shell history, clipboard persist → host folder; `/data` deprecated — **issue #739** | HF3 | ✅ **done 2026-09-01 (PR #792, claim 3082)** — `/host` went READ-WRITE (host write handles, replace semantics; DELETE/RENAME/TRUNCATE/MKDIR route to the channel); one-time `/data`→share boot migration (hidden `.virelai-migrated` marker, skip-if-exists); `/data` mount prints an honest deprecation line; every `/data` consumer re-pointed (settings, notepad, calc, downloads, screenshots, shell history, env, file browser, savetext/type/dir); all persistence gates re-pointed through the channel and PASS with host-disk verification (`verify-live-vf` 5/5 + user-fs, n11-download, file-browser, filemanager-bulk/recent/props, settings, history); new runner `--chords-view` flag (--cvc-file implies via-virtio; display gates need the slow view-path chord pacing for launch-then-focus handoffs) |
 | HF6 | **FAT removal** — delete `fat.zig` + post-exit virtio-blk path + DATA partition; slim `mkfat32.py`/`make-image.sh` to a boot volume; gate fleet to one shared read-only boot image (kill private copies + shared-disk locks) — **issue #740** | HF4, HF5 | `verify-vz` full fleet green with FAT gone; boot image ≤ a few MiB |
-| HF7 | **Clone/dedup** — CLONE opcode → `clonefile`; prove N worktrees of one repo share blocks (host-side space measurement before/after); document the ZFS-backed-share option — **issue #741** | HF3 | live + host measurement under `artifacts/`; dedup savings shown, not asserted blindly |
+| HF7 | **Clone/dedup** — CLONE opcode → `clonefile`; prove N worktrees of one repo share blocks (host-side space measurement before/after); document the ZFS-backed-share option — **issue #741** | HF3 | ✅ **done 2026-09-02 (claim 1312)** — CLONE `0x0c` (additive), `vf clone <from> <to>`; files via `clonefile(2)`, trees via `copyfile(3)` `COPYFILE_CLONE`, traversal defense on both paths; the live gate measures the physical win at the VOLUME level (du cannot see COW — logical `st_blocks`; observed: a clone and a `cp` copy report identical du) — 3 copies ≈ 22.5 MiB vs 3 clones ≈ ~0, an edit in one worktree leaves untouched siblings byte-identical (sha256 tree compare), raw numbers under `artifacts/m34-hf7-measurement.txt`; the ZFS alternative is documented in §4 |
 
 HF1–HF3 are the "pays off early" core: the transport, the first commands,
 and mutation. HF4–HF6 are the deletion payoff. HF7 is the workload-specific

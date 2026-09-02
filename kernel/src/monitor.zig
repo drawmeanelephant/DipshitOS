@@ -1299,12 +1299,13 @@ fn cmd_vf(m: *Monitor, args: []const []const u8) ExecError {
     if (std.mem.eql(u8, args[0], "mkdir")) return cmd_vf_mkdir(m, args[1..]);
     if (std.mem.eql(u8, args[0], "rm")) return cmd_vf_rm(m, args[1..]);
     if (std.mem.eql(u8, args[0], "mv")) return cmd_vf_mv(m, args[1..]);
+    if (std.mem.eql(u8, args[0], "clone")) return cmd_vf_clone(m, args[1..]);
     return cmd_vf_usage(m);
 }
 
 fn cmd_vf_usage(m: *Monitor) ExecError {
     err_prefix(m);
-    m.console.print_line("vf usage: vf ls [<path>] | cat <path> | mkdir <path> | rm <path> | mv <from> <to> | open <path> [append] | close <h> | write <h> <n> | truncate <h> <n> | fsync <h>");
+    m.console.print_line("vf usage: vf ls [<path>] | cat <path> | mkdir <path> | rm <path> | mv <from> <to> | clone <from> <to> | open <path> [append] | close <h> | write <h> <n> | truncate <h> <n> | fsync <h>");
     return .invalid_argument;
 }
 
@@ -1439,6 +1440,25 @@ fn cmd_vf_mv(m: *Monitor, args: []const []const u8) ExecError {
     const st = virtio_file.rename(from, to);
     if (st != virtio_file.st_ok) return vf_err(m, "mv", from, st);
     m.console.puts("vf: mv ");
+    m.console.puts(from);
+    m.console.puts(" -> ");
+    m.console.puts(to);
+    m.console.print_line(" ok");
+    return .none;
+}
+
+/// `vf clone <from> <to>` — APFS COW clone on the host share (HF7, issue
+/// #741): the worktree workflow. `to` must not exist; N clones of one
+/// repo share blocks until a worktree actually edits a file (the host
+/// clones with clonefile/copyfile(COPYFILE_CLONE) — measured live by the
+/// HF7 gate). File or whole directory tree.
+fn cmd_vf_clone(m: *Monitor, args: []const []const u8) ExecError {
+    if (args.len < 2) return cmd_vf_usage(m);
+    const from = args[0];
+    const to = args[1];
+    const st = virtio_file.clone(from, to);
+    if (st != virtio_file.st_ok) return vf_err(m, "clone", from, st);
+    m.console.puts("vf: clone ");
     m.console.puts(from);
     m.console.puts(" -> ");
     m.console.puts(to);

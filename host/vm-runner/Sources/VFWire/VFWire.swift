@@ -34,6 +34,10 @@ public enum VFWire {
     public static let opRename: UInt8 = 0x09
     public static let opMkdir: UInt8 = 0x0a
     public static let opDelete: UInt8 = 0x0b
+    // HF7 (issue #741): COW clone — additive (0x0c), same non-breaking
+    // rule: an old host answers it with status 4 host error and an old
+    // guest never sends it.
+    public static let opClone: UInt8 = 0x0c
 
     // Reply statuses
     public static let stOk: UInt8 = 0
@@ -244,6 +248,20 @@ public enum VFWire {
         let f = Array(from.utf8)
         let t = Array(to.utf8)
         guard !f.isEmpty, !t.isEmpty, f.count <= pathMax, t.count <= pathMax else { return nil }
+        var out = f
+        out.append(0)
+        out.append(contentsOf: t)
+        return out
+    }
+
+    /// CLONE payload: the same NUL-framed shape as RENAME —
+    /// [from][0x00][to]. nil for over-long or empty paths (or a path
+    /// smuggling a NUL — the frame separator must be unambiguous).
+    public static func buildClonePayload(from: String, to: String) -> [UInt8]? {
+        let f = Array(from.utf8)
+        let t = Array(to.utf8)
+        guard !f.isEmpty, !t.isEmpty, f.count <= pathMax, t.count <= pathMax,
+              !f.contains(0), !t.contains(0) else { return nil }
         var out = f
         out.append(0)
         out.append(contentsOf: t)
