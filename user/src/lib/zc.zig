@@ -24,6 +24,20 @@ pub fn print(msg: []const u8) void {
     _ = write(1, msg);
 }
 
+pub fn write_ptr(fd: u64, ptr: [*]const u8, len: u64) i64 {
+    return asm volatile ("svc #0"
+        : [ret] "={x0}" (-> i64),
+        : [num] "{x8}" (@as(u64, 1)),
+          [fd] "{x0}" (fd),
+          [ptr] "{x1}" (@as(u64, @intFromPtr(ptr))),
+          [len] "{x2}" (len),
+    );
+}
+
+pub fn print_ptr(ptr: [*]const u8, len: u64) void {
+    _ = write_ptr(1, ptr, len);
+}
+
 pub fn print_array(buf: anytype) void {
     _ = write(1, buf[0..]);
 }

@@ -54,8 +54,8 @@ gate_seed_share
 echo "run dir: $RUN_DIR"
 SCRIPT="$RUN_DIR/script.txt"
 
-# Stage a program that serializes a two-field struct to bytes byte-exact, then exits 72.
-SRC='const zc = @import("zc"); const S = struct { a: u8, b: u8 }; pub fn main() void { var s: S = undefined; s.a = 65; s.b = 66; zc.print_struct(s); zc.exit(72); }'
+# Stage a program that swaps via pointers, fills a buffer via pointer, and prints it, then exits 72.
+SRC='const zc = @import("zc"); pub fn main() void { var x: u64 = 1; const p: *u64 = &x; p.* = 72; var buf: [2]u8 = undefined; const bp: [*]u8 = &buf; bp[0] = 65; bp[1] = 66; zc.print_ptr(bp, 2); zc.exit(x); }'
 printf 'ls\nwrite MAIN.Z '\''%s'\''\nexec ZC.BIN\n' "$SRC" > "$SCRIPT"
 printf 'ls\nexec MAIN.ELF\necho rx-zc-ok\n' > "$SCRIPT2"
 
@@ -92,7 +92,12 @@ cp tests/zc-corpus/z1c-structs.z "$CORPUS_STRUCTS_TMP"
 zig build-obj -target aarch64-freestanding --dep zc -Mroot="$CORPUS_STRUCTS_TMP" -Mzc=user/src/lib/zc.zig -femit-bin="$RUN_DIR/corpus_structs.o"
 rm -f "$CORPUS_STRUCTS_TMP" "$RUN_DIR/corpus_structs.o"
 
-echo "host compile check: ok (SRC + z05-dialect.z + vl6-gui.z + z1a-strings.z + z1b-arrays.z + z1c-structs.z valid Zig 0.16)"
+CORPUS_POINTERS_TMP="$RUN_DIR/corpus_pointers.zig"
+cp tests/zc-corpus/z1d-pointers.z "$CORPUS_POINTERS_TMP"
+zig build-obj -target aarch64-freestanding --dep zc -Mroot="$CORPUS_POINTERS_TMP" -Mzc=user/src/lib/zc.zig -femit-bin="$RUN_DIR/corpus_pointers.o"
+rm -f "$CORPUS_POINTERS_TMP" "$RUN_DIR/corpus_pointers.o"
+
+echo "host compile check: ok (SRC + z05-dialect.z + vl6-gui.z + z1a-strings.z + z1b-arrays.z + z1c-structs.z + z1d-pointers.z valid Zig 0.16)"
 
 run_one() {
     local tag="$1"
