@@ -87,11 +87,15 @@
   drift vs. the default-strip build — verified byte-identical when strip
   is left at the ReleaseSmall default); symbol work must rebuild with
   default strip or offsets lie.
-- **Touches:** kernel/src/{exceptions.zig,main.zig,scheduler.zig,
-  timer.zig,console.zig,mmu.zig} (whichever the root cause lands in) ·
+- **Touches:** kernel/src/{exceptions.zig, scheduler.zig, virtio_file.zig,
+  process.zig} (instruments landed in commits e27503a/76e989b) ·
   docs/claims/9094-fix-810-boot-probe-flake.md ·
   docs/logs/agent-buffy-m34-hf7-clone-dedup.md (appended entry) ·
-  possibly docs/status.md, docs/hardware-contract.md
+  possibly docs/status.md, docs/hardware-contract.md. NOTE: overlap
+  with ACTIVE claim 1432 (`agent/buffy/m34-flake803`, exceptions.zig)
+  is acknowledged — the #810 fix hunt (root-switch discipline) may land
+  under that claim or a new one; 9094 stays 🔄 for the instruments +
+  verification only.
 - **Depends on:** — (flake observed on main-era builds; #808's
   instrumentation is already in tree)
 - **Heartbeat:** 2026-09-02
