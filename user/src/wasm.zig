@@ -1,11 +1,12 @@
 //! The in-guest WASM core interpreter (M35 W1b, issue #762).
 //!
-//! Parses + validates + executes a bounded wasm-core integer subset:
-//! i32/i64, block/loop/if/br/br_if/br_table/return/call/call_indirect,
-//! one linear memory (2 MiB / 32 pages max — trap on `memory.grow`
-//! beyond, NO unbounded mmap), one function table. Traps are named with
-//! module + byte offset. Floats, threads, atomics, SIMD, bulk-memory are
-//! OUT of subset (W4 / never).
+//! Parses + validates + executes a bounded wasm-core subset:
+//! i32/i64/f32/f64 (W4), block/loop/if/br/br_if/br_table/return/call/
+//! call_indirect, one linear memory (2 MiB / 32 pages max — trap on
+//! `memory.grow` beyond, NO unbounded mmap), one function table. Traps
+//! are named with module + byte offset. Threads, atomics, SIMD, the 0xFC
+//! 12+ table ops, and multi-memory stay OUT of subset (the 0xFC 0..11
+//! trunc_sat + bulk-memory forms landed in W4).
 //!
 //! Import dispatch to ADR 0007 syscalls is W3 (`docs/wasm-import-
 //! contract.md`); imported functions parse + validate, but calling one
@@ -45,8 +46,8 @@ const page_size: usize = 64 * 1024;
 pub const ValType = enum(u8) {
     i32 = 0x7F,
     i64 = 0x7E,
-    f32 = 0x7D, // parsed; rejected at validation (W4)
-    f64 = 0x7C, // parsed; rejected at validation (W4)
+    f32 = 0x7D,
+    f64 = 0x7C,
 
     pub fn fromByte(b: u8) ParseError!ValType {
         return switch (b) {
@@ -59,11 +60,13 @@ pub const ValType = enum(u8) {
     }
 };
 
-/// Machine value. Only i32/i64 lanes are produced; the opcode selects
-/// which lane to read.
+/// Machine value. The opcode selects which lane to read (validation
+/// guarantees the type discipline; the exec arms pop/push by opcode).
 pub const Value = extern union {
     i32: i32,
     i64: i64,
+    f32: f32,
+    f64: f64,
 };
 
 pub const FuncType = struct {
@@ -93,7 +96,7 @@ pub const Import = struct {
 pub const Global = struct {
     val_type: ValType,
     mutable: bool,
-    init: Value, // i32.const / i64.const (subset init exprs)
+    init: Value, // i32/i64/f32/f64.const (subset init exprs)
 };
 
 pub const Export = struct {
@@ -183,11 +186,13 @@ pub const Element = struct {
     abs_off: usize = 0,
 };
 
-/// Active data segment (flag 0x00 form only; memory 0).
+/// Data segment: active (flags 0/2 — applied at instantiate) or passive
+/// (flag 1 — consumed at runtime by `memory.init` until `data.drop`).
 pub const Data = struct {
     offset: u32,
     bytes: []const u8 = &.{},
     abs_off: usize = 0,
+    passive: bool = false,
 };
 
 pub const Func = struct {
@@ -220,6 +225,8 @@ pub const Module = struct {
     element_count: u16 = 0,
     datas: [max_datas]Data = undefined,
     data_count: u16 = 0,
+    has_datacount: bool = false, // DataCount section (id 12) present
+    data_count_decl: u16 = 0, // value from that section (memory.init index cap)
 };
 
 // ---------------------------------------------------------------------------
@@ -233,6 +240,7 @@ pub const ParseError = error{
     UnknownSection,
     DuplicateSection,
     SectionOutOfOrder,
+    DataCountMismatch, // DataCount section count != actual data-section count
     UnknownValueType,
     UnknownImportKind,
     UnknownExportKind,
@@ -246,7 +254,8 @@ pub const ParseError = error{
 };
 
 pub const ValidationError = ParseError || error{
-    FloatOutOfSubset, // f32/f64 anywhere (W4)
+    BulkMemoryOutOfSubset, // 0xFC subopcodes 12+ (table.* + future: not in subset)
+    DataCountMissing, // memory.init/data.drop without a DataCount section
     UnknownType,
     UnknownFunc,
     UnknownGlobal,
@@ -277,7 +286,8 @@ pub const TrapKind = enum {
     @"unreachable", // the wasm `unreachable` instruction (keyword-escaped)
     bounds, // memory/table/index out of bounds
     call_indirect_type,
-    div_by_zero,
+    div_by_zero, // integer div/rem only — wasm float div yields +/-inf, never traps
+    invalid_conv, // 0xAA..0xB1 plain trunc*: NaN or out-of-range (W4)
     grow_limit,
     call_depth,
     stack_overflow,
@@ -370,7 +380,7 @@ pub fn parseInto(m: *Module, bytes: []const u8) ParseError!void {
     const ver = try r.take(4);
     if (!std.mem.eql(u8, ver, "\x01\x00\x00\x00")) return error.BadVersion;
 
-    var seen = [_]bool{false} ** 12; // ids 0..11; the data section (11) is legal
+    var seen = [_]bool{false} ** 13; // ids 0..12 (DataCount is legal, id 12)
     var prev_id: u8 = 0;
     while (r.pos < r.bytes.len) {
         const id = try r.u8_();
@@ -378,11 +388,21 @@ pub fn parseInto(m: *Module, bytes: []const u8) ParseError!void {
             _ = try r.take(try r.uleb());
             continue;
         }
-        if (id > 11) return error.UnknownSection;
+        if (id > 12) return error.UnknownSection;
         if (seen[id]) return error.DuplicateSection;
-        if (id < prev_id) return error.SectionOutOfOrder;
-        seen[id] = true;
-        prev_id = id;
+        if (id == 12) {
+            // DataCount (bulk-memory proposal) sits BETWEEN the element
+            // section (9) and the code section (10) positionally — its id
+            // is numerically largest, so the monotonic check cannot rank
+            // it. Spec order: element, datacount, code, data.
+            if (seen[10] or seen[11]) return error.SectionOutOfOrder;
+            seen[id] = true;
+            prev_id = 9; // rank it just past element; code (10) follows
+        } else {
+            if (id < prev_id) return error.SectionOutOfOrder;
+            seen[id] = true;
+            prev_id = id;
+        }
         const size = try r.uleb();
         const payload_pos = r.pos;
         const payload = try r.take(size);
@@ -390,6 +410,7 @@ pub fn parseInto(m: *Module, bytes: []const u8) ParseError!void {
         try parseSection(m, &pr, id);
         if (pr.pos != pr.bytes.len) return error.TrailingBytes;
     }
+    if (m.has_datacount and m.data_count_decl != m.data_count) return error.DataCountMismatch;
 }
 
 pub fn parse(bytes: []const u8) ParseError!Module {
@@ -493,30 +514,57 @@ fn parseSection(m: *Module, r: *Reader, id: u8) ParseError!void {
             if (n != m.func_count - m.imported_funcs) return error.CodeCountMismatch;
             for (0..n) |i| try parseCode(m, r, i + m.imported_funcs); // imports hold funcs[0..imported_funcs)
         },
-        11 => { // data
+        11 => { // data (active flags 0/2 + passive flag 1; W4 bulk-memory)
             const n = try r.uleb();
             for (0..n) |_| {
                 const seg_abs = r.absPos();
                 const flags = try r.u8_();
-                if (flags == 0x02) {
+                if (flags == 0x00) {
+                    const init = try parseConstExpr(r);
+                    const len = try r.uleb();
+                    if (m.data_count >= max_datas) return error.TooManyEntries;
+                    m.datas[m.data_count] = .{
+                        .offset = @bitCast(init.i32),
+                        .bytes = try r.take(len),
+                        .abs_off = seg_abs,
+                        .passive = false,
+                    };
+                    m.data_count += 1;
+                } else if (flags == 0x01) { // passive: no offset expr
+                    const len = try r.uleb();
+                    if (m.data_count >= max_datas) return error.TooManyEntries;
+                    m.datas[m.data_count] = .{
+                        .offset = 0,
+                        .bytes = try r.take(len),
+                        .abs_off = seg_abs,
+                        .passive = true,
+                    };
+                    m.data_count += 1;
+                } else if (flags == 0x02) {
                     // active segment with explicit memory index
                     const midx = try r.uleb();
                     if (midx != 0) return error.BadElementKind; // single memory only
-                } else if (flags != 0x00) {
-                    // 0x00 = active, memory 0 implicit (no index byte);
-                    // 1/3/4/5/6/7 = passive/declarative: out of subset
+                    const init = try parseConstExpr(r);
+                    const len = try r.uleb();
+                    if (m.data_count >= max_datas) return error.TooManyEntries;
+                    m.datas[m.data_count] = .{
+                        .offset = @bitCast(init.i32),
+                        .bytes = try r.take(len),
+                        .abs_off = seg_abs,
+                        .passive = false,
+                    };
+                    m.data_count += 1;
+                } else {
+                    // 3/4/5/6/7 = declarative/expr forms: out of subset
                     return error.BadElementKind;
                 }
-                const init = try parseConstExpr(r);
-                const len = try r.uleb();
-                if (m.data_count >= max_datas) return error.TooManyEntries;
-                m.datas[m.data_count] = .{
-                    .offset = @bitCast(init.i32),
-                    .bytes = try r.take(len),
-                    .abs_off = seg_abs,
-                };
-                m.data_count += 1;
             }
+        },
+        12 => { // DataCount: u32 count, must match the data section (checked in parseInto)
+            m.has_datacount = true;
+            const c = try r.uleb();
+            if (c > max_datas) return error.TooManyEntries;
+            m.data_count_decl = @intCast(c);
         },
         else => unreachable,
     }
@@ -603,6 +651,8 @@ fn parseConstExpr(r: *Reader) ParseError!Value {
     switch (op) {
         0x41 => v = .{ .i32 = @truncate(try r.sleb()) },
         0x42 => v = .{ .i64 = try r.sleb() },
+        0x43 => v = .{ .f32 = @bitCast(readInt(u32, (try r.take(4))[0..4])) },
+        0x44 => v = .{ .f64 = @bitCast(readInt(u64, (try r.take(8))[0..8])) },
         else => {
             return error.UnknownValueType;
         },
@@ -741,17 +791,6 @@ pub fn validate(m: *Module) ValidationError!void {
                 return error.UnsupportedImport;
             },
         }
-    }
-    for (m.types[0..m.type_count]) |ft| {
-        for (0..ft.param_count) |i| {
-            if (ft.params[i] == .f32 or ft.params[i] == .f64) return error.FloatOutOfSubset;
-        }
-        for (0..ft.result_count) |i| {
-            if (ft.results[i] == .f32 or ft.results[i] == .f64) return error.FloatOutOfSubset;
-        }
-    }
-    for (m.globals[0..m.global_count]) |g| {
-        if (g.val_type == .f32 or g.val_type == .f64) return error.FloatOutOfSubset;
     }
     for (m.funcs[0..m.func_count]) |f| {
         if (f.type_index >= m.type_count) return error.UnknownType;
@@ -943,7 +982,7 @@ fn validateOp(
             if (!m.globals[idx].mutable) return error.TypeMismatch;
             try vpop(vs, ctl[0..ctl_len.*], m.globals[idx].val_type);
         },
-        0x28...0x29, 0x2C...0x35 => { // loads (f32/f64.load = 0x2A/0x2B excluded)
+        0x28...0x35 => { // loads (i32/i64/f32/f64.load + the *_8/16/32 subloads)
             if (!m.has_memory) return error.MemoryRequired;
             const al = try body.uleb();
             _ = try body.uleb();
@@ -951,7 +990,7 @@ fn validateOp(
             try vpop(vs, ctl[0..ctl_len.*], .i32);
             try vpush(vs, loadType(op));
         },
-        0x36...0x37, 0x3A...0x3E => { // stores (f32/f64.store = 0x38/0x39 excluded)
+        0x36...0x3E => { // stores (i32/i64/f32/f64.store + the *_8/16/32 substores)
             if (!m.has_memory) return error.MemoryRequired;
             const al = try body.uleb();
             _ = try body.uleb();
@@ -959,9 +998,6 @@ fn validateOp(
             try vpop(vs, ctl[0..ctl_len.*], storeType(op));
             try vpop(vs, ctl[0..ctl_len.*], .i32);
         },
-        0x2A, 0x2B, 0x38, 0x39 => {
-            return error.FloatOutOfSubset;
-        }, // float memory ops
         0x3F => { // memory.size
             if (!m.has_memory) return error.MemoryRequired;
             _ = try body.u8_();
@@ -981,8 +1017,13 @@ fn validateOp(
             _ = try body.sleb();
             try vpush(vs, .i64);
         },
-        0x43, 0x44 => {
-            return error.FloatOutOfSubset;
+        0x43 => { // f32.const: 4-byte LE immediate
+            _ = try body.take(4);
+            try vpush(vs, .f32);
+        },
+        0x44 => { // f64.const: 8-byte LE immediate
+            _ = try body.take(8);
+            try vpush(vs, .f64);
         },
         0x45 => {
             try vpop(vs, ctl[0..ctl_len.*], .i32);
@@ -1002,8 +1043,93 @@ fn validateOp(
             try vpop(vs, ctl[0..ctl_len.*], .i64);
             try vpush(vs, .i32);
         },
-        0x5B...0x66, 0x8B...0xA6, 0xAA...0xBF => { // f32/f64: cmp, arith, trunc, convert, reinterpret
-            return error.FloatOutOfSubset;
+        0x5B...0x60 => { // f32 eq/ne/lt/gt/le/ge (no f32.eqz in wasm)
+            try vpop(vs, ctl[0..ctl_len.*], .f32);
+            try vpop(vs, ctl[0..ctl_len.*], .f32);
+            try vpush(vs, .i32);
+        },
+        0x61...0x66 => { // f64 eq/ne/lt/gt/le/ge
+            try vpop(vs, ctl[0..ctl_len.*], .f64);
+            try vpop(vs, ctl[0..ctl_len.*], .f64);
+            try vpush(vs, .i32);
+        },
+        0x8B...0x98 => { // f32 unary + binary (abs..copysign)
+            const unary = op <= 0x91; // abs,neg,ceil,floor,trunc,nearest,sqrt
+            try vpop(vs, ctl[0..ctl_len.*], .f32);
+            if (!unary) try vpop(vs, ctl[0..ctl_len.*], .f32);
+            try vpush(vs, .f32);
+        },
+        0x99...0xA6 => { // f64 unary + binary (abs..copysign)
+            const unary = op <= 0x9F;
+            try vpop(vs, ctl[0..ctl_len.*], .f64);
+            if (!unary) try vpop(vs, ctl[0..ctl_len.*], .f64);
+            try vpush(vs, .f64);
+        },
+        0xA8, 0xA9 => { // i32.trunc_f32_s/u — plain (trapping) trunc
+            try vpop(vs, ctl[0..ctl_len.*], .f32);
+            try vpush(vs, .i32);
+        },
+        0xAA, 0xAB => { // i32.trunc_f64_s/u
+            try vpop(vs, ctl[0..ctl_len.*], .f64);
+            try vpush(vs, .i32);
+        },
+        0xAC, 0xAD => { // i64.extend_i32_s / _u
+            try vpop(vs, ctl[0..ctl_len.*], .i32);
+            try vpush(vs, .i64);
+        },
+        0xAE, 0xAF => { // i64.trunc_f32_s/u
+            try vpop(vs, ctl[0..ctl_len.*], .f32);
+            try vpush(vs, .i64);
+        },
+        0xB0, 0xB1 => { // i64.trunc_f64_s/u
+            try vpop(vs, ctl[0..ctl_len.*], .f64);
+            try vpush(vs, .i64);
+        },
+        0xB2...0xBF => { // float<->int converts + reinterpret
+            const t = convStack(op); // {pop, push} pair
+            try vpop(vs, ctl[0..ctl_len.*], t.in);
+            try vpush(vs, t.out);
+        },
+        0xFC => { // 0xFC prefix: trunc_sat 0..7 + bulk-memory 8..11 in subset
+            const sub = try body.uleb();
+            switch (sub) {
+                0...7 => {
+                    const t = truncStack(sub);
+                    try vpop(vs, ctl[0..ctl_len.*], t.in);
+                    try vpush(vs, t.out);
+                },
+                8 => { // memory.init: dataidx uleb + memidx byte; [dst src n] -> []
+                    if (!m.has_datacount) return error.DataCountMissing;
+                    const didx = try body.uleb();
+                    if (didx >= m.data_count_decl) return error.IndexOutOfRange;
+                    _ = try body.u8_(); // memidx (0)
+                    if (!m.has_memory) return error.MemoryRequired;
+                    try vpop(vs, ctl[0..ctl_len.*], .i32);
+                    try vpop(vs, ctl[0..ctl_len.*], .i32);
+                    try vpop(vs, ctl[0..ctl_len.*], .i32);
+                },
+                9 => { // data.drop: dataidx uleb; no stack effect
+                    if (!m.has_datacount) return error.DataCountMissing;
+                    const didx = try body.uleb();
+                    if (didx >= m.data_count_decl) return error.IndexOutOfRange;
+                },
+                10 => { // memory.copy: memidx memidx; [dst src n] -> []
+                    if (!m.has_memory) return error.MemoryRequired;
+                    _ = try body.u8_();
+                    _ = try body.u8_();
+                    try vpop(vs, ctl[0..ctl_len.*], .i32);
+                    try vpop(vs, ctl[0..ctl_len.*], .i32);
+                    try vpop(vs, ctl[0..ctl_len.*], .i32);
+                },
+                11 => { // memory.fill: memidx; [dst val n] -> []
+                    if (!m.has_memory) return error.MemoryRequired;
+                    _ = try body.u8_();
+                    try vpop(vs, ctl[0..ctl_len.*], .i32);
+                    try vpop(vs, ctl[0..ctl_len.*], .i32);
+                    try vpop(vs, ctl[0..ctl_len.*], .i32);
+                },
+                else => return error.BulkMemoryOutOfSubset, // table ops 12+ / future
+            }
         },
         0x67...0x78 => {
             const unary = op <= 0x69;
@@ -1021,10 +1147,6 @@ fn validateOp(
             try vpop(vs, ctl[0..ctl_len.*], .i64);
             try vpush(vs, .i32);
         },
-        0xA8, 0xA9 => { // i64.extend_i32_s / _u
-            try vpop(vs, ctl[0..ctl_len.*], .i32);
-            try vpush(vs, .i64);
-        },
         0xC0...0xC4 => {
             const t: ValType = if (op <= 0xC1) .i32 else .i64;
             try vpop(vs, ctl[0..ctl_len.*], t);
@@ -1041,8 +1163,8 @@ fn natAlign(op: u8) u32 {
     return switch (op) {
         0x2C, 0x2D, 0x30, 0x31 => 0, // 8-bit
         0x2E, 0x2F, 0x32, 0x33 => 1, // 16-bit
-        0x28, 0x34, 0x35, 0x36, 0x3A, 0x3B, 0x3E => 2, // 32-bit
-        0x29, 0x37, 0x3C, 0x3D => 3, // 64-bit
+        0x28, 0x2A, 0x34, 0x35, 0x36, 0x38, 0x3A, 0x3B, 0x3E => 2, // 32-bit
+        0x29, 0x2B, 0x37, 0x39, 0x3C, 0x3D => 3, // 64-bit
         else => 0,
     };
 }
@@ -1050,14 +1172,49 @@ fn natAlign(op: u8) u32 {
 fn loadType(op: u8) ValType {
     return switch (op) {
         0x28, 0x2C...0x2F => .i32,
-        else => .i64,
+        0x2A => .f32,
+        0x2B => .f64,
+        else => .i64, // 0x29 + the i64 *_8/16/32 subloads
     };
 }
 
 fn storeType(op: u8) ValType {
     return switch (op) {
         0x36, 0x3A, 0x3B => .i32,
-        else => .i64,
+        0x38 => .f32,
+        0x39 => .f64,
+        else => .i64, // 0x37 + the i64 substores
+    };
+}
+
+/// Stack effect of the 0xB2..0xBF conversion/reinterpret opcodes.
+const ConvShape = struct { in: ValType, out: ValType };
+fn convStack(op: u8) ConvShape {
+    return switch (op) {
+        0xB2, 0xB3 => .{ .in = .i32, .out = .f32 }, // f32.convert_i32_s/u
+        0xB4, 0xB5 => .{ .in = .i64, .out = .f32 }, // f32.convert_i64_s/u
+        0xB6 => .{ .in = .f64, .out = .f32 }, // f32.demote_f64
+        0xB7, 0xB8 => .{ .in = .i32, .out = .f64 }, // f64.convert_i32_s/u
+        0xB9, 0xBA => .{ .in = .i64, .out = .f64 }, // f64.convert_i64_s/u
+        0xBB => .{ .in = .f32, .out = .f64 }, // f64.promote_f32
+        0xBC => .{ .in = .f32, .out = .i32 }, // i32.reinterpret_f32
+        0xBD => .{ .in = .f64, .out = .i64 }, // i64.reinterpret_f64
+        0xBE => .{ .in = .i32, .out = .f32 }, // f32.reinterpret_i32
+        else => .{ .in = .i64, .out = .f64 }, // 0xBF f64.reinterpret_i64
+    };
+}
+
+/// Stack effect of the trunc subopcodes 0..7 shared by the 0xFC 0..7
+/// trunc_sat forms and execTrunc's plain-trunc index mapping (the plain
+/// family's bytes 0xA8..0xB1 map to this index by skips: 0,1=f32→i32,
+/// 2,3=f64→i32, 4,5=f32→i64, 6,7=f64→i64 — 0xAC/0xAD are extends, not
+/// truncs).
+fn truncStack(sub: u32) ConvShape {
+    return switch (sub) {
+        0, 1 => .{ .in = .f32, .out = .i32 }, // i32.trunc_f32_s/u
+        2, 3 => .{ .in = .f64, .out = .i32 }, // i32.trunc_f64_s/u
+        4, 5 => .{ .in = .f32, .out = .i64 }, // i64.trunc_f32_s/u
+        else => .{ .in = .f64, .out = .i64 }, // 6, 7: i64.trunc_f64_s/u
     };
 }
 
@@ -1115,6 +1272,7 @@ pub const Machine = struct {
     mem_pages: u32 = 0,
     mem_max: u32 = 0,
     globals: [max_globals]Value = undefined,
+    data_dropped: [max_datas]bool = undefined, // per-instance data.drop state
     module_name: []const u8 = "module",
     last_trap: ?Trap = null,
 };
@@ -1127,6 +1285,7 @@ pub fn resetMachine(mm: *Machine) void {
     mm.store = &.{};
     mm.mem_pages = 0;
     mm.mem_max = 0;
+    mm.data_dropped = [_]bool{false} ** max_datas;
     mm.module_name = "module";
     mm.last_trap = null;
 }
@@ -1150,6 +1309,7 @@ pub fn instantiate(mm: *Machine, m: *const Module, store: []u8, module_name: []c
         for (0..el.count) |i| mm.table[el.offset + i] = el.funcs[i];
     }
     for (m.datas[0..m.data_count]) |d| {
+        if (d.passive) continue; // passive segments land via memory.init at runtime
         const mem_len = @as(u64, mm.mem_pages) * page_size;
         if (@as(u64, d.offset) + d.bytes.len > mem_len) return mkTrap(.bounds, module_name, d.abs_off);
         @memcpy(mm.store[d.offset .. d.offset + d.bytes.len], d.bytes);
@@ -1269,6 +1429,25 @@ fn skipInstr(body: []const u8, pc: usize) usize {
             var p = pc + 1;
             while (p < body.len and body[p] & 0x80 != 0) p += 1;
             break :blk p + 1;
+        },
+        0x43 => pc + 5, // f32.const: 4-byte immediate
+        0x44 => pc + 9, // f64.const: 8-byte immediate
+        0xFC => blk: {
+            var p = pc + 1;
+            const sub = readUlebRaw(body, &p);
+            switch (sub) {
+                8 => { // memory.init: dataidx uleb + memidx byte
+                    _ = readUlebRaw(body, &p);
+                    p += 1;
+                },
+                9 => { // data.drop: dataidx uleb
+                    _ = readUlebRaw(body, &p);
+                },
+                10 => p += 2, // memory.copy: memidx memidx
+                11 => p += 1, // memory.fill: memidx
+                else => {}, // trunc 0..7 and table ops carry no scanner-relevant extras
+            }
+            break :blk p;
         },
         else => pc + 1,
     };
@@ -1573,6 +1752,14 @@ fn execBody(mm: *Machine, m: *const Module, ft0: *const FuncType) CallResult {
                 const v = body.sleb() catch return mkTrap(.bounds, mm.module_name, op_off);
                 tryPush(mm, .{ .i64 = v }) catch return mkTrap(.stack_overflow, mm.module_name, op_off);
             },
+            0x43 => { // f32.const (4-byte LE immediate)
+                const raw = body.take(4) catch return mkTrap(.bounds, mm.module_name, op_off);
+                tryPush(mm, .{ .f32 = @bitCast(readInt(u32, raw[0..4])) }) catch return mkTrap(.stack_overflow, mm.module_name, op_off);
+            },
+            0x44 => { // f64.const (8-byte LE immediate)
+                const raw = body.take(8) catch return mkTrap(.bounds, mm.module_name, op_off);
+                tryPush(mm, .{ .f64 = @bitCast(readInt(u64, raw[0..8])) }) catch return mkTrap(.stack_overflow, mm.module_name, op_off);
+            },
             0x45 => { // i32.eqz
                 tryPush(mm, .{ .i32 = @intFromBool(popVal(mm).i32 == 0) }) catch return mkTrap(.stack_overflow, mm.module_name, op_off);
             },
@@ -1589,6 +1776,16 @@ fn execBody(mm: *Machine, m: *const Module, ft0: *const FuncType) CallResult {
                 const a = popVal(mm).i64;
                 tryPush(mm, .{ .i32 = cmpI64(op, a, b) }) catch return mkTrap(.stack_overflow, mm.module_name, op_off);
             },
+            0x5B...0x60 => { // f32 eq/ne/lt/gt/le/ge
+                const b = popVal(mm).f32;
+                const a = popVal(mm).f32;
+                tryPush(mm, .{ .i32 = cmpF32(op, a, b) }) catch return mkTrap(.stack_overflow, mm.module_name, op_off);
+            },
+            0x61...0x66 => { // f64 eq/ne/lt/gt/le/ge
+                const b = popVal(mm).f64;
+                const a = popVal(mm).f64;
+                tryPush(mm, .{ .i32 = cmpF64(op, a, b) }) catch return mkTrap(.stack_overflow, mm.module_name, op_off);
+            },
             0x67...0x78 => {
                 const r = execI32(mm, op) catch return mkTrap(.div_by_zero, mm.module_name, op_off);
                 tryPush(mm, .{ .i32 = r }) catch return mkTrap(.stack_overflow, mm.module_name, op_off);
@@ -1597,13 +1794,95 @@ fn execBody(mm: *Machine, m: *const Module, ft0: *const FuncType) CallResult {
                 const r = execI64(mm, op) catch return mkTrap(.div_by_zero, mm.module_name, op_off);
                 tryPush(mm, .{ .i64 = r }) catch return mkTrap(.stack_overflow, mm.module_name, op_off);
             },
+            0x8B...0x98 => { // f32 unary + binary (abs..copysign)
+                tryPush(mm, .{ .f32 = execFloat(f32, op - 0x8B, mm) }) catch return mkTrap(.stack_overflow, mm.module_name, op_off);
+            },
+            0x99...0xA6 => { // f64 unary + binary (abs..copysign)
+                tryPush(mm, .{ .f64 = execFloat(f64, op - 0x99, mm) }) catch return mkTrap(.stack_overflow, mm.module_name, op_off);
+            },
+            0xA8, 0xA9 => { // i32.trunc_f32_s/u — plain, traps on NaN/overflow
+                const r = execTrunc(mm, op - 0xA8) orelse return mkTrap(.invalid_conv, mm.module_name, op_off);
+                tryPush(mm, r) catch return mkTrap(.stack_overflow, mm.module_name, op_off);
+            },
+            0xAA, 0xAB => { // i32.trunc_f64_s/u
+                const r = execTrunc(mm, op - 0xAA + 2) orelse return mkTrap(.invalid_conv, mm.module_name, op_off);
+                tryPush(mm, r) catch return mkTrap(.stack_overflow, mm.module_name, op_off);
+            },
+            0xAE...0xB1 => { // i64.trunc_f32/f64_s/u (AE→4 .. B1→7)
+                const r = execTrunc(mm, op - 0xAE + 4) orelse return mkTrap(.invalid_conv, mm.module_name, op_off);
+                tryPush(mm, r) catch return mkTrap(.stack_overflow, mm.module_name, op_off);
+            },
+            0xB2...0xBF => { // float<->int converts + reinterpret
+                tryPush(mm, execConv(mm, op)) catch return mkTrap(.stack_overflow, mm.module_name, op_off);
+            },
+            0xFC => { // trunc_sat 0..7 + bulk-memory 8..11
+                const sub = body.uleb() catch return mkTrap(.bounds, mm.module_name, op_off);
+                switch (sub) {
+                    0...7 => { // trunc_sat: clamps, never traps
+                        tryPush(mm, execTruncSat(mm, sub)) catch return mkTrap(.stack_overflow, mm.module_name, op_off);
+                    },
+                    8 => { // memory.init didx memidx: (dst src n), src in segment didx
+                        const didx = body.uleb() catch return mkTrap(.bounds, mm.module_name, op_off);
+                        _ = body.u8_() catch return mkTrap(.bounds, mm.module_name, op_off);
+                        const n = @as(u32, @bitCast(popVal(mm).i32));
+                        const src = @as(u32, @bitCast(popVal(mm).i32));
+                        const dst = @as(u32, @bitCast(popVal(mm).i32));
+                        const mem_len = @as(u64, mm.mem_pages) * page_size;
+                        if (didx >= m.data_count) return mkTrap(.bounds, mm.module_name, op_off);
+                        const seg_len: u64 = if (mm.data_dropped[didx]) 0 else m.datas[didx].bytes.len;
+                        if (@as(u64, dst) + n > mem_len) return mkTrap(.bounds, mm.module_name, op_off);
+                        if (@as(u64, src) + n > seg_len) return mkTrap(.bounds, mm.module_name, op_off);
+                        if (n > 0) {
+                            const d: usize = @intCast(dst);
+                            const s: usize = @intCast(src);
+                            const c: usize = @intCast(n);
+                            @memcpy(mm.store[d .. d + c], m.datas[didx].bytes[s .. s + c]);
+                        }
+                    },
+                    9 => { // data.drop didx
+                        const didx = body.uleb() catch return mkTrap(.bounds, mm.module_name, op_off);
+                        if (didx >= m.data_count) return mkTrap(.bounds, mm.module_name, op_off);
+                        mm.data_dropped[didx] = true;
+                    },
+                    10 => { // memory.copy: (dst src n), memmove semantics
+                        _ = body.u8_() catch return mkTrap(.bounds, mm.module_name, op_off);
+                        _ = body.u8_() catch return mkTrap(.bounds, mm.module_name, op_off);
+                        const n = @as(u32, @bitCast(popVal(mm).i32));
+                        const src = @as(u32, @bitCast(popVal(mm).i32));
+                        const dst = @as(u32, @bitCast(popVal(mm).i32));
+                        const mem_len = @as(u64, mm.mem_pages) * page_size;
+                        if (@as(u64, dst) + n > mem_len) return mkTrap(.bounds, mm.module_name, op_off);
+                        if (@as(u64, src) + n > mem_len) return mkTrap(.bounds, mm.module_name, op_off);
+                        if (n > 0) {
+                            const d: usize = @intCast(dst);
+                            const s: usize = @intCast(src);
+                            const c: usize = @intCast(n);
+                            @memmove(mm.store[d .. d + c], mm.store[s .. s + c]);
+                        }
+                    },
+                    11 => { // memory.fill: (dst val n)
+                        _ = body.u8_() catch return mkTrap(.bounds, mm.module_name, op_off);
+                        const n = @as(u32, @bitCast(popVal(mm).i32));
+                        const val = @as(u32, @bitCast(popVal(mm).i32));
+                        const dst = @as(u32, @bitCast(popVal(mm).i32));
+                        const mem_len = @as(u64, mm.mem_pages) * page_size;
+                        if (@as(u64, dst) + n > mem_len) return mkTrap(.bounds, mm.module_name, op_off);
+                        if (n > 0) {
+                            const d: usize = @intCast(dst);
+                            const c: usize = @intCast(n);
+                            @memset(mm.store[d .. d + c], @as(u8, @truncate(val)));
+                        }
+                    },
+                    else => return mkTrap(.bounds, mm.module_name, op_off), // unreachable post-validation
+                }
+            },
             0xA7 => { // i32.wrap_i64
                 tryPush(mm, .{ .i32 = @truncate(popVal(mm).i64) }) catch return mkTrap(.stack_overflow, mm.module_name, op_off);
             },
-            0xA8 => { // i64.extend_i32_s
+            0xAC => { // i64.extend_i32_s
                 tryPush(mm, .{ .i64 = popVal(mm).i32 }) catch return mkTrap(.stack_overflow, mm.module_name, op_off);
             },
-            0xA9 => { // i64.extend_i32_u
+            0xAD => { // i64.extend_i32_u
                 const v = popVal(mm).i32;
                 tryPush(mm, .{ .i64 = @intCast(@as(u32, @bitCast(v))) }) catch return mkTrap(.stack_overflow, mm.module_name, op_off);
             },
@@ -1637,6 +1916,8 @@ fn loadMem(mm: *Machine, op: u8, addr: u32, off: u32) error{Bounds}!Value {
     return switch (op) {
         0x28 => .{ .i32 = @bitCast(readInt(u32, p[0..4])) },
         0x29 => .{ .i64 = @bitCast(readInt(u64, p[0..8])) },
+        0x2A => .{ .f32 = @bitCast(readInt(u32, p[0..4])) },
+        0x2B => .{ .f64 = @bitCast(readInt(u64, p[0..8])) },
         0x2C => .{ .i32 = @as(i8, @bitCast(p[0])) },
         0x2D => .{ .i32 = p[0] },
         0x2E => .{ .i32 = @as(i16, @bitCast(readInt(u16, p[0..2]))) },
@@ -1659,6 +1940,8 @@ fn storeMem(mm: *Machine, op: u8, addr: u32, off: u32, v: Value) error{Bounds}!v
     switch (op) {
         0x36 => writeInt(u32, p[0..4], @bitCast(v.i32)),
         0x37 => writeInt(u64, p[0..8], @bitCast(v.i64)),
+        0x38 => writeInt(u32, p[0..4], @bitCast(v.f32)),
+        0x39 => writeInt(u64, p[0..8], @bitCast(v.f64)),
         0x3A => p[0] = @truncate(@as(u32, @bitCast(v.i32))),
         0x3B => writeInt(u16, p[0..2], @truncate(@as(u32, @bitCast(v.i32)))),
         0x3C => p[0] = @truncate(@as(u64, @bitCast(v.i64))),
@@ -1672,8 +1955,8 @@ fn loadSize(op: u8) usize {
     return switch (op) {
         0x2C, 0x2D, 0x30, 0x31 => 1,
         0x2E, 0x2F, 0x32, 0x33 => 2,
-        0x34, 0x35, 0x28 => 4,
-        else => 8,
+        0x2A, 0x34, 0x35, 0x28 => 4,
+        else => 8, // 0x29 + 0x2B + the i64 subloads
     };
 }
 
@@ -1681,8 +1964,8 @@ fn storeSize(op: u8) usize {
     return switch (op) {
         0x3A, 0x3C => 1,
         0x3B, 0x3D => 2,
-        0x3E, 0x36 => 4,
-        else => 8,
+        0x38, 0x3E, 0x36 => 4,
+        else => 8, // 0x37 + 0x39 + the i64 substores
     };
 }
 
@@ -1828,6 +2111,235 @@ fn rotr64(a: i64, b: i64) i64 {
     const n: u6 = @truncate(@as(u64, @bitCast(b)));
     const x = @as(u64, @bitCast(a));
     return @bitCast((x >> n) | (x << (~n +% 1)));
+}
+
+// ---------------------------------------------------------------------------
+// Float exec (M35 W4, issue #765). IEEE-754 semantics: round-to-nearest-
+// even on the hardware default; div-by-zero yields +/-inf (NEVER a trap —
+// only the 0xFC trunc conversions trap, on NaN / out-of-range); min/max
+// are IEEE-754 minNum/maxNum; `nearest` is round-half-to-even.
+// ---------------------------------------------------------------------------
+fn cmpF32(op: u8, a: f32, b: f32) i32 {
+    return switch (op) {
+        0x5B => @intFromBool(a == b), // eq — NaN == x is false
+        0x5C => @intFromBool(a != b), // ne — NaN != x is true
+        0x5D => @intFromBool(a < b),
+        0x5E => @intFromBool(a > b),
+        0x5F => @intFromBool(a <= b),
+        else => @intFromBool(a >= b),
+    };
+}
+
+fn cmpF64(op: u8, a: f64, b: f64) i32 {
+    return switch (op) {
+        0x61 => @intFromBool(a == b),
+        0x62 => @intFromBool(a != b),
+        0x63 => @intFromBool(a < b),
+        0x64 => @intFromBool(a > b),
+        0x65 => @intFromBool(a <= b),
+        else => @intFromBool(a >= b),
+    };
+}
+
+fn negZero(comptime T: type, x: T) bool {
+    if (x != 0) return false;
+    return switch (T) {
+        f32 => (@as(u32, @bitCast(x)) & 0x8000_0000) != 0,
+        else => (@as(u64, @bitCast(x)) & 0x8000_0000_0000_0000) != 0,
+    };
+}
+
+/// IEEE-754 minNum (wasm fmin): numeric operand wins over NaN; on equal
+/// zeros the negative zero wins.
+fn fMinNum(comptime T: type, a: T, b: T) T {
+    if (a != a) return b; // a is NaN
+    if (b != b) return a; // b is NaN
+    if (a == b) {
+        if (negZero(T, a) or negZero(T, b)) return -@as(T, 0.0);
+        return a;
+    }
+    return if (a < b) a else b;
+}
+
+/// IEEE-754 maxNum (wasm fmax): numeric operand wins over NaN; on equal
+/// zeros the positive zero wins.
+fn fMaxNum(comptime T: type, a: T, b: T) T {
+    if (a != a) return b;
+    if (b != b) return a;
+    if (a == b) {
+        if (negZero(T, a) and negZero(T, b)) return -@as(T, 0.0);
+        return @as(T, 0.0);
+    }
+    return if (a > b) a else b;
+}
+
+/// wasm `nearest`: round-half-to-even (NOT `@round`, which rounds half
+/// away from zero). NaN/inf pass through.
+fn roundEven(comptime T: type, x: T) T {
+    if (x != x) return x;
+    const fl = @floor(x);
+    if (x == std.math.inf(T) or x == -std.math.inf(T)) return x;
+    const diff = x - fl;
+    if (diff < 0.5) return fl;
+    if (diff > 0.5) return fl + 1;
+    // exactly .5: pick the even neighbour
+    const r = if (@rem(fl, 2.0) == 0) fl else fl + 1;
+    if (r == 0 and x < 0) return -@as(T, 0.0);
+    return r;
+}
+
+/// Shared unary/binary float executor. `rel` is the opcode's offset into
+/// its 14-op block: 0..6 unary (abs, neg, ceil, floor, trunc, nearest,
+/// sqrt), 7..13 binary (add, sub, mul, div, min, max, copysign).
+fn execFloat(comptime T: type, rel: u8, mm: *Machine) T {
+    const b: T = switch (T) {
+        f32 => popVal(mm).f32,
+        else => popVal(mm).f64,
+    };
+    const unary = rel <= 6;
+    const a: T = if (unary) undefined else switch (T) {
+        f32 => popVal(mm).f32,
+        else => popVal(mm).f64,
+    };
+    return switch (rel) {
+        0 => @abs(b),
+        1 => -b,
+        2 => @ceil(b),
+        3 => @floor(b),
+        4 => @trunc(b),
+        5 => roundEven(T, b),
+        6 => @sqrt(b),
+        7 => a + b,
+        8 => a - b,
+        9 => a * b,
+        10 => a / b, // +/-inf on div-by-zero; NaN on 0/0 — never a trap
+        11 => fMinNum(T, a, b),
+        12 => fMaxNum(T, a, b),
+        else => std.math.copysign(a, b),
+    };
+}
+
+/// 0xB2..0xBF conversions + reinterpret. Never traps (converts from ints
+/// are exact-or-rounded; promote/demote/reinterpret are bit/rounding ops).
+fn execConv(mm: *Machine, op: u8) Value {
+    return switch (op) {
+        0xB2 => .{ .f32 = @floatFromInt(popVal(mm).i32) }, // f32.convert_i32_s
+        0xB3 => .{ .f32 = @floatFromInt(@as(u32, @bitCast(popVal(mm).i32))) },
+        0xB4 => .{ .f32 = @floatFromInt(popVal(mm).i64) },
+        0xB5 => .{ .f32 = @floatFromInt(@as(u64, @bitCast(popVal(mm).i64))) },
+        0xB6 => .{ .f32 = @floatCast(popVal(mm).f64) }, // f32.demote_f64
+        0xB7 => .{ .f64 = @floatFromInt(popVal(mm).i32) }, // f64.convert_i32_s
+        0xB8 => .{ .f64 = @floatFromInt(@as(u32, @bitCast(popVal(mm).i32))) },
+        0xB9 => .{ .f64 = @floatFromInt(popVal(mm).i64) }, // f64.convert_i64_s
+        0xBA => .{ .f64 = @floatFromInt(@as(u64, @bitCast(popVal(mm).i64))) },
+        0xBB => .{ .f64 = @floatCast(popVal(mm).f32) }, // f64.promote_f32
+        0xBC => .{ .i32 = @bitCast(popVal(mm).f32) }, // i32.reinterpret_f32
+        0xBD => .{ .i64 = @bitCast(popVal(mm).f64) }, // i64.reinterpret_f64
+        0xBE => .{ .f32 = @bitCast(popVal(mm).i32) }, // f32.reinterpret_i32
+        else => .{ .f64 = @bitCast(popVal(mm).i64) }, // 0xBF f64.reinterpret_i64
+    };
+}
+
+/// Range-checked truncation toward zero (wasm trunc*: traps on NaN and on
+/// results outside the target integer range — returns null to trap). The
+/// float is widened to f64 for the bound test (exact for both f32 and f64
+/// inputs), so one bound set serves both input widths.
+fn truncToInt(comptime F: type, comptime I: type, unsigned: bool, x: F) ?I {
+    const xd: f64 = x;
+    if (xd != xd) return null; // NaN
+    const in_range: bool = switch (I) {
+        i32 => if (unsigned) (xd > -1.0 and xd < 4294967296.0) else (xd > -2147483649.0 and xd < 2147483648.0),
+        else => if (unsigned) (xd > -1.0 and xd < 18446744073709551616.0) else (xd >= -9223372036854775808.0 and xd < 9223372036854775808.0),
+    };
+    if (!in_range) return null;
+    if (unsigned) {
+        if (comptime I == i32) return @bitCast(@as(u32, @intFromFloat(x)));
+        return @bitCast(@as(u64, @intFromFloat(x)));
+    }
+    return @intFromFloat(x);
+}
+
+/// 0xAA..0xB1 plain trunc conversions (the trapping forms). Returns null
+/// → invalid_conv trap. (The 0xFC 0..7 trunc_sat forms never trap — see
+/// execTruncSat.)
+fn execTrunc(mm: *Machine, sub: u32) ?Value {
+    return switch (sub) {
+        0 => blk: { // i32.trunc_f32_s
+            const r = truncToInt(f32, i32, false, popVal(mm).f32) orelse break :blk null;
+            break :blk .{ .i32 = r };
+        },
+        1 => blk: {
+            const r = truncToInt(f32, i32, true, popVal(mm).f32) orelse break :blk null;
+            break :blk .{ .i32 = r };
+        },
+        2 => blk: { // i32.trunc_f64_s
+            const r = truncToInt(f64, i32, false, popVal(mm).f64) orelse break :blk null;
+            break :blk .{ .i32 = r };
+        },
+        3 => blk: {
+            const r = truncToInt(f64, i32, true, popVal(mm).f64) orelse break :blk null;
+            break :blk .{ .i32 = r };
+        },
+        4 => blk: { // i64.trunc_f32_s
+            const r = truncToInt(f32, i64, false, popVal(mm).f32) orelse break :blk null;
+            break :blk .{ .i64 = r };
+        },
+        5 => blk: {
+            const r = truncToInt(f32, i64, true, popVal(mm).f32) orelse break :blk null;
+            break :blk .{ .i64 = r };
+        },
+        6 => blk: { // i64.trunc_f64_s
+            const r = truncToInt(f64, i64, false, popVal(mm).f64) orelse break :blk null;
+            break :blk .{ .i64 = r };
+        },
+        else => blk: {
+            const r = truncToInt(f64, i64, true, popVal(mm).f64) orelse break :blk null;
+            break :blk .{ .i64 = r };
+        },
+    };
+}
+
+/// Saturating truncation (0xFC 0..7 trunc_sat*, which clang lowers C
+/// float->int casts to): NaN -> 0 and out-of-range clamps to the integer
+/// min/max — NEVER traps. (The plain trunc* family at 0xAA..0xB1 keeps
+/// the trapping discipline; truncToInt's range test doubles as the exact
+/// clamp predicate.)
+fn truncSat(comptime F: type, comptime I: type, unsigned: bool, x: F) I {
+    const xd: f64 = x;
+    if (xd != xd) return 0; // NaN -> 0
+    const r = truncToInt(F, I, unsigned, x) orelse blk: {
+        if (unsigned) {
+            // Out of range upward -> max (stored as the signed container's
+            // bit pattern); negative -> 0 (trunc toward zero).
+            const mx: I = if (comptime I == i32)
+                @as(i32, @bitCast(@as(u32, std.math.maxInt(u32))))
+            else
+                @as(i64, @bitCast(@as(u64, std.math.maxInt(u64))));
+            break :blk if (xd > -1.0) mx else 0;
+        }
+        // Signed: xd >= 2^(W-1) -> max; xd <= -(2^(W-1))-1 -> min. (The
+        // exact halves, e.g. -2147483648.5, are truncToInt-in-range and
+        // never reach here.)
+        break :blk if (xd >= 0)
+            @as(I, @intCast(std.math.maxInt(I)))
+        else
+            @as(I, @intCast(std.math.minInt(I)));
+    };
+    return r;
+}
+
+/// 0xFC 0..7 trunc_sat conversions (saturating, never trap).
+fn execTruncSat(mm: *Machine, sub: u32) Value {
+    return switch (sub) {
+        0 => .{ .i32 = truncSat(f32, i32, false, popVal(mm).f32) }, // i32.trunc_sat_f32_s
+        1 => .{ .i32 = truncSat(f32, i32, true, popVal(mm).f32) },
+        2 => .{ .i32 = truncSat(f64, i32, false, popVal(mm).f64) }, // i32.trunc_sat_f64_s
+        3 => .{ .i32 = truncSat(f64, i32, true, popVal(mm).f64) },
+        4 => .{ .i64 = truncSat(f32, i64, false, popVal(mm).f32) }, // i64.trunc_sat_f32_s
+        5 => .{ .i64 = truncSat(f32, i64, true, popVal(mm).f32) },
+        6 => .{ .i64 = truncSat(f64, i64, false, popVal(mm).f64) }, // i64.trunc_sat_f64_s
+        else => .{ .i64 = truncSat(f64, i64, true, popVal(mm).f64) },
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -2139,6 +2651,11 @@ const HostCapture = struct {
     log_count: usize = 0,
     returns: [cap_count]i64 = [_]i64{0} ** cap_count,
     out_fill: u8 = 0xA5,
+    // W5 (wc): when set, captured file_read serves bytes from file_data
+    // (0 at EOF, cap-clamped — contract §5 semantics) so a host test can
+    // execute a file-channel app end-to-end. file_pos advances per read.
+    file_data: []const u8 = &.{},
+    file_pos: usize = 0,
 
     fn logCall(c: *HostCapture, id: CapId, args: []const Value) void {
         if (c.log_count >= c.log.len) return;
@@ -2253,6 +2770,15 @@ fn dispatchImport(mm: *Machine, m: *const Module, imp_idx: u32, args: []const Va
         if (cap != 0 and !checkRange(mm, buf_ptr, cap)) return mkTrap(.bounds, mm.module_name, 0);
         if (g_capture) |c| {
             c.logCall(.file_read, args);
+            if (c.file_data.len > 0) {
+                if (c.file_pos < c.file_data.len) {
+                    const n = @min(@as(usize, cap), c.file_data.len - c.file_pos);
+                    stageOut(mm, buf_ptr, c.file_data[c.file_pos .. c.file_pos + n]);
+                    c.file_pos += n;
+                    return importRet(@intCast(n));
+                }
+                return importRet(0); // exhausted: EOF, exactly like the kernel
+            }
             return importRet(c.returns[@intFromEnum(CapId.file_read)]);
         }
         // Kernel slot 24: take_count = min(count, 2048); result copied out.
@@ -2631,11 +3157,323 @@ test "parse: rejects truncated and unknown sections" {
     try testing.expectError(error.UnknownSection, parse("\x00asm\x01\x00\x00\x00\x63\x00"));
 }
 
-test "validate: rejects f64 type (W4 float out of subset)" {
-    // type section: one ( ) -> (f64) func type
+test "w4: f64 type section parses + validates (W4 acceptance)" {
+    // type section: one ( ) -> (f64) func type — the W1b reject now accepts
     const bytes = "\x00\x61\x73\x6d\x01\x00\x00\x00\x01\x05\x01\x60\x00\x01\x7c";
     var m = try parse(bytes);
-    try testing.expectError(error.FloatOutOfSubset, validate(&m));
+    try validate(&m);
+}
+
+test "w4: f64 scale — mul/add with consts (clang-probe shapes, byte-exact)" {
+    // (func (export "scale") (param f64) (result f64)
+    //   local.get 0  f64.const 0.5  f64.mul  f64.const 1.25  f64.add)
+    // f64.mul = 0xA2, f64.add = 0xA0 (verified against zig cc output)
+    const bytes = "\x00\x61\x73\x6d\x01\x00\x00\x00" ++
+        "\x01\x06\x01\x60\x01\x7c\x01\x7c" ++
+        "\x03\x02\x01\x00" ++
+        "\x07\x09\x01\x05\x73\x63\x61\x6c\x65\x00\x00" ++
+        "\x0a\x1a\x01\x18\x00" ++
+        "\x20\x00\x44\x00\x00\x00\x00\x00\x00\xe0\x3f\xa2" ++
+        "\x44\x00\x00\x00\x00\x00\x00\xf4\x3f\xa0\x0b";
+    var m = try parse(bytes);
+    try validate(&m);
+    var store: [page_size]u8 = undefined;
+    try testing.expect(instantiate(&machine, &m, &store, "scale") == null);
+    const r = call(&machine, &m, 0, &.{.{ .f64 = 2.0 }});
+    try testing.expect(r == .ret);
+    try testing.expectEqual(@as(f64, 2.25), r.ret.vals[0].f64);
+}
+
+test "w4: f32 div — f32.const + f32.div (0x95), IEEE result" {
+    // (func (export "rec") (param f32) (result f32)
+    //   f32.const 1.0f  local.get 0  f32.div)   -- 1/x, so x=0 hits div-by-zero
+    const bytes = "\x00\x61\x73\x6d\x01\x00\x00\x00" ++
+        "\x01\x06\x01\x60\x01\x7d\x01\x7d" ++
+        "\x03\x02\x01\x00" ++
+        "\x07\x07\x01\x03\x72\x65\x63\x00\x00" ++
+        "\x0a\x0c\x01\x0a\x00\x43\x00\x00\x80\x3f\x20\x00\x95\x0b";
+    var m = try parse(bytes);
+    try validate(&m);
+    var store: [page_size]u8 = undefined;
+    try testing.expect(instantiate(&machine, &m, &store, "rec") == null);
+    const r = call(&machine, &m, 0, &.{.{ .f32 = 2.0 }});
+    try testing.expect(r == .ret);
+    try testing.expectEqual(@as(f32, 0.5), r.ret.vals[0].f32);
+    // div by zero is NOT a trap: +inf per IEEE
+    const ri = call(&machine, &m, 0, &.{.{ .f32 = 0.0 }});
+    try testing.expect(ri == .ret);
+    try testing.expectEqual(std.math.inf(f32), ri.ret.vals[0].f32);
+}
+
+test "w4: trunc_sat (0xFC 2) saturates — NaN→0, overflow clamps, never traps" {
+    // clang lowers C float->int casts to the 0xFC trunc_sat forms (the
+    // nontrapping-float-to-int opcodes) — i32.trunc_sat_f64_s = 0xFC 2.
+    // (func (export "tr") (param f64) (result i32)
+    //   local.get 0  i32.trunc_sat_f64_s)
+    const bytes = "\x00\x61\x73\x6d\x01\x00\x00\x00" ++
+        "\x01\x06\x01\x60\x01\x7c\x01\x7f" ++
+        "\x03\x02\x01\x00" ++
+        "\x07\x06\x01\x02\x74\x72\x00\x00" ++
+        "\x0a\x08\x01\x06\x00\x20\x00\xfc\x02\x0b";
+    var m = try parse(bytes);
+    try validate(&m);
+    var store: [page_size]u8 = undefined;
+    try testing.expect(instantiate(&machine, &m, &store, "tr") == null);
+    const r = call(&machine, &m, 0, &.{.{ .f64 = 3.9 }});
+    try testing.expect(r == .ret);
+    try testing.expectEqual(@as(i32, 3), r.ret.vals[0].i32);
+    const rn = call(&machine, &m, 0, &.{.{ .f64 = -3.9 }});
+    try testing.expectEqual(@as(i32, -3), rn.ret.vals[0].i32);
+    const rnan = call(&machine, &m, 0, &.{.{ .f64 = std.math.nan(f64) }});
+    try testing.expect(rnan == .ret); // saturates: NaN -> 0, no trap
+    try testing.expectEqual(@as(i32, 0), rnan.ret.vals[0].i32);
+    const rhi = call(&machine, &m, 0, &.{.{ .f64 = 1e300 }});
+    try testing.expect(rhi == .ret); // clamps to i32 max, no trap
+    try testing.expectEqual(@as(i32, std.math.maxInt(i32)), rhi.ret.vals[0].i32);
+    const rlo = call(&machine, &m, 0, &.{.{ .f64 = -1e300 }});
+    try testing.expect(rlo == .ret);
+    try testing.expectEqual(@as(i32, std.math.minInt(i32)), rlo.ret.vals[0].i32);
+}
+
+test "w4: plain trunc (0xA8 i32.trunc_f32_s) traps on NaN/overflow" {
+    // The plain (trapping) trunc family lives at 0xA8/0xA9/0xAA/0xAB
+    // (to i32) and 0xAE..0xB1 (to i64) — 0xAC/0xAD are the i64.extend
+    // ops, NOT truncs (a misread of the opcode table the floatapp gate
+    // flushed out). floatapp carries 0xA8-adjacent plain truncs where
+    // clang can prove the value is in range.
+    // (func (export "tr") (param f32) (result i32)
+    //   local.get 0  i32.trunc_f32_s)
+    const bytes = "\x00\x61\x73\x6d\x01\x00\x00\x00" ++
+        "\x01\x06\x01\x60\x01\x7d\x01\x7f" ++
+        "\x03\x02\x01\x00" ++
+        "\x07\x06\x01\x02\x74\x72\x00\x00" ++
+        "\x0a\x07\x01\x05\x00\x20\x00\xa8\x0b";
+    var m = try parse(bytes);
+    try validate(&m);
+    var store: [page_size]u8 = undefined;
+    try testing.expect(instantiate(&machine, &m, &store, "trp") == null);
+    const r = call(&machine, &m, 0, &.{.{ .f32 = 3.9 }});
+    try testing.expect(r == .ret);
+    try testing.expectEqual(@as(i32, 3), r.ret.vals[0].i32);
+    const rt = call(&machine, &m, 0, &.{.{ .f32 = std.math.nan(f32) }});
+    try testing.expect(rt == .trap and rt.trap.kind == .invalid_conv);
+    const ro = call(&machine, &m, 0, &.{.{ .f32 = 1e30 }});
+    try testing.expect(ro == .trap and ro.trap.kind == .invalid_conv);
+}
+
+test "w4: i64.extend_i32_s/u (0xAC/0xAD) widen with the right sign" {
+    // (func (export "s") (param i32) (result i64)
+    //   local.get 0  i64.extend_i32_s)
+    const sb = "\x00\x61\x73\x6d\x01\x00\x00\x00" ++
+        "\x01\x06\x01\x60\x01\x7f\x01\x7e" ++
+        "\x03\x02\x01\x00" ++
+        "\x07\x05\x01\x01\x73\x00\x00" ++
+        "\x0a\x07\x01\x05\x00\x20\x00\xac\x0b";
+    var ms = try parse(sb);
+    try validate(&ms);
+    var store: [page_size]u8 = undefined;
+    try testing.expect(instantiate(&machine, &ms, &store, "exts") == null);
+    const r1 = call(&machine, &ms, 0, &.{.{ .i32 = -1 }});
+    try testing.expectEqual(@as(i64, -1), r1.ret.vals[0].i64);
+    const r2 = call(&machine, &ms, 0, &.{.{ .i32 = std.math.minInt(i32) }});
+    try testing.expectEqual(@as(i64, -2147483648), r2.ret.vals[0].i64);
+    // (func (export "u") (param i32) (result i64)
+    //   local.get 0  i64.extend_i32_u)
+    const ub = "\x00\x61\x73\x6d\x01\x00\x00\x00" ++
+        "\x01\x06\x01\x60\x01\x7f\x01\x7e" ++
+        "\x03\x02\x01\x00" ++
+        "\x07\x05\x01\x01\x75\x00\x00" ++
+        "\x0a\x07\x01\x05\x00\x20\x00\xad\x0b";
+    var mu = try parse(ub);
+    try validate(&mu);
+    try testing.expect(instantiate(&machine, &mu, &store, "extu") == null);
+    const r3 = call(&machine, &mu, 0, &.{.{ .i32 = -1 }});
+    try testing.expectEqual(@as(i64, 4294967295), r3.ret.vals[0].i64);
+}
+
+test "w4: f64.convert_i64_s (0xB9) exact-via-rounding + f64.reinterpret_i64 (0xBF)" {
+    // (func (export "i2d") (param i64) (result f64)
+    //   local.get 0  f64.convert_i64_s)
+    const bytes = "\x00\x61\x73\x6d\x01\x00\x00\x00" ++
+        "\x01\x06\x01\x60\x01\x7e\x01\x7c" ++
+        "\x03\x02\x01\x00" ++
+        "\x07\x07\x01\x03\x69\x32\x64\x00\x00" ++
+        "\x0a\x07\x01\x05\x00\x20\x00\xb9\x0b";
+    var m = try parse(bytes);
+    try validate(&m);
+    var store: [page_size]u8 = undefined;
+    try testing.expect(instantiate(&machine, &m, &store, "i2d") == null);
+    const r = call(&machine, &m, 0, &.{.{ .i64 = 42 }});
+    try testing.expect(r == .ret);
+    try testing.expectEqual(@as(f64, 42.0), r.ret.vals[0].f64);
+    // maxInt(i64) rounds to 2^63 in f64
+    const r2 = call(&machine, &m, 0, &.{.{ .i64 = std.math.maxInt(i64) }});
+    try testing.expectEqual(@as(f64, 9223372036854775808.0), r2.ret.vals[0].f64);
+}
+
+test "w4: float comparisons — NaN semantics (ne true, ordered false)" {
+    // (func (export "ne") (param f64 f64) (result i32)
+    //   local.get 0  local.get 1  f64.ne)
+    const bytes = "\x00\x61\x73\x6d\x01\x00\x00\x00" ++
+        "\x01\x07\x01\x60\x02\x7c\x7c\x01\x7f" ++
+        "\x03\x02\x01\x00" ++
+        "\x07\x06\x01\x02\x6e\x65\x00\x00" ++
+        "\x0a\x09\x01\x07\x00\x20\x00\x20\x01\x62\x0b";
+    var m = try parse(bytes);
+    try validate(&m);
+    var store: [page_size]u8 = undefined;
+    try testing.expect(instantiate(&machine, &m, &store, "ne") == null);
+    const nan = std.math.nan(f64);
+    const r1 = call(&machine, &m, 0, &.{ .{ .f64 = nan }, .{ .f64 = 1.0 } });
+    try testing.expectEqual(@as(i32, 1), r1.ret.vals[0].i32); // NaN != x
+    const r2 = call(&machine, &m, 0, &.{ .{ .f64 = 1.0 }, .{ .f64 = 1.0 } });
+    try testing.expectEqual(@as(i32, 0), r2.ret.vals[0].i32);
+}
+
+test "w4: f64.store/load round-trip (clang-probe memarg shape: align 3)" {
+    // (func (export "rt") (result i32) (memory 1)
+    //   i32.const 0  f64.const 1.5  f64.store align=3
+    //   i32.const 0  f64.load align=3  f64.const 1.5  f64.eq)
+    const bytes = "\x00\x61\x73\x6d\x01\x00\x00\x00" ++
+        "\x01\x05\x01\x60\x00\x01\x7f" ++
+        "\x03\x02\x01\x00" ++
+        "\x05\x03\x01\x00\x01" ++
+        "\x07\x06\x01\x02\x72\x74\x00\x00" ++
+        "\x0a\x21\x01\x1f\x00" ++
+        "\x41\x00\x44\x00\x00\x00\x00\x00\x00\xf8\x3f\x39\x03\x00" ++
+        "\x41\x00\x2b\x03\x00\x44\x00\x00\x00\x00\x00\x00\xf8\x3f\x61\x0b";
+    var m = try parse(bytes);
+    try validate(&m);
+    var store: [page_size]u8 = undefined;
+    try testing.expect(instantiate(&machine, &m, &store, "rt") == null);
+    const r = call(&machine, &m, 0, &.{});
+    try testing.expect(r == .ret);
+    try testing.expectEqual(@as(i32, 1), r.ret.vals[0].i32);
+}
+
+test "w4: bulk-memory — memory.init/copy/fill with passive data + DataCount" {
+    // (memory 1) (data passive "\x01\x02\x03\x04\x05\x06\x07\x08\x09")
+    // (func (export "go")
+    //   (memory.init 0 (i32.const 0) (i32.const 0) (i32.const 9))  ;; mem[0..9)=1..9
+    //   (memory.copy  (i32.const 1) (i32.const 0) (i32.const 7))   ;; right-shift: memmove
+    //   (memory.fill  (i32.const 32) (i32.const 0x37) (i32.const 5)))
+    const bytes = "\x00\x61\x73\x6d\x01\x00\x00\x00" ++
+        "\x01\x04\x01\x60\x00\x00" ++
+        "\x03\x02\x01\x00" ++
+        "\x05\x03\x01\x00\x01" ++
+        "\x07\x06\x01\x02\x67\x6f\x00\x00" ++
+        "\x0c\x01\x01" ++
+        "\x0a\x21\x01\x1f\x00" ++
+        "\x41\x00\x41\x00\x41\x09\xfc\x08\x00\x00" ++
+        "\x41\x01\x41\x00\x41\x07\xfc\x0a\x00\x00" ++
+        "\x41\x20\x41\x37\x41\x05\xfc\x0b\x00\x0b" ++
+        "\x0b\x0c\x01\x01\x09\x01\x02\x03\x04\x05\x06\x07\x08\x09";
+    var m = try parse(bytes);
+    try validate(&m);
+    var store: [page_size]u8 = undefined;
+    @memset(&store, 0xEE); // poison: passive data must NOT land at instantiate
+    try testing.expect(instantiate(&machine, &m, &store, "bulk1") == null);
+    try testing.expect(std.mem.eql(u8, store[0..8], &[_]u8{ 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE }));
+    const r = call(&machine, &m, 0, &.{});
+    try testing.expect(r == .ret);
+    // init placed 1..9 at [0..9); the right-shift copy is memmove-correct:
+    // [1..8) = [0..7) = 1,2,3,4,5,6,7, so index 8 keeps init's 9th byte (9):
+    // 1,1,2,3,4,5,6,7,9 (a forward memcpy would smear 1s leftward). The 9
+    // at index 8 also proves init wrote all 9 bytes and copy never touched
+    // [8..). Fill wrote 0x37 x5 at [32..37).
+    try testing.expect(std.mem.eql(u8, store[0..9], &[_]u8{ 1, 1, 2, 3, 4, 5, 6, 7, 9 }));
+    try testing.expect(std.mem.eql(u8, store[32..37], &[_]u8{ 0x37, 0x37, 0x37, 0x37, 0x37 }));
+}
+
+test "w4: bulk-memory — data.drop makes later memory.init trap bounds" {
+    // passive data "\x2a"; (func (export "boom")
+    //   (memory.init 0 (i32.const 0) (i32.const 0) (i32.const 1))
+    //   (data.drop 0)
+    //   (memory.init 0 (i32.const 0) (i32.const 0) (i32.const 1)))  ;; dropped -> trap
+    const bytes = "\x00\x61\x73\x6d\x01\x00\x00\x00" ++
+        "\x01\x04\x01\x60\x00\x00" ++
+        "\x03\x02\x01\x00" ++
+        "\x05\x03\x01\x00\x01" ++
+        "\x07\x08\x01\x04\x62\x6f\x6f\x6d\x00\x00" ++
+        "\x0c\x01\x01" ++
+        "\x0a\x1b\x01\x19\x00" ++
+        "\x41\x00\x41\x00\x41\x01\xfc\x08\x00\x00" ++
+        "\xfc\x09\x00" ++
+        "\x41\x00\x41\x00\x41\x01\xfc\x08\x00\x00\x0b" ++
+        "\x0b\x04\x01\x01\x01\x2a";
+    var m = try parse(bytes);
+    try validate(&m);
+    var store: [page_size]u8 = undefined;
+    try testing.expect(instantiate(&machine, &m, &store, "boom") == null);
+    const r = call(&machine, &m, 0, &.{});
+    try testing.expect(r == .trap and r.trap.kind == .bounds);
+}
+
+test "w4: bulk-memory — memory.init without DataCount fails validation" {
+    // same body as bulk1's init but NO DataCount section: spec requires it
+    const bytes = "\x00\x61\x73\x6d\x01\x00\x00\x00" ++
+        "\x01\x04\x01\x60\x00\x00" ++
+        "\x03\x02\x01\x00" ++
+        "\x05\x03\x01\x00\x01" ++
+        "\x0a\x0e\x01\x0c\x00\x41\x00\x41\x00\x41\x08\xfc\x08\x00\x00\x0b" ++
+        "\x0b\x0b\x01\x01\x08\x01\x02\x03\x04\x05\x06\x07\x08";
+    var m = try parse(bytes);
+    try testing.expectError(error.DataCountMissing, validate(&m));
+}
+
+test "w4: bulk-memory — DataCount count must match the data section" {
+    // datacount declares 2 but the data section holds 1 passive segment
+    const bytes = "\x00\x61\x73\x6d\x01\x00\x00\x00" ++
+        "\x0c\x01\x02" ++
+        "\x0b\x04\x01\x01\x01\x2a";
+    try testing.expectError(error.DataCountMismatch, parse(bytes));
+}
+
+test "w4: bulk-memory — table ops (0xFC 12+) still out of subset" {
+    // (func (result i32) i32.const 0 table.size 0)? -> table.size = 0xFC 16;
+    // validation must reject any 0xFC sub >= 12 with BulkMemoryOutOfSubset
+    const bytes = "\x00\x61\x73\x6d\x01\x00\x00\x00" ++
+        "\x01\x05\x01\x60\x00\x01\x7f" ++
+        "\x03\x02\x01\x00" ++
+        "\x0a\x09\x01\x07\x00\x41\x00\xfc\x10\x00\x0b";
+    var m = try parse(bytes);
+    try testing.expectError(error.BulkMemoryOutOfSubset, validate(&m));
+}
+
+test "w4: sign-extension ops 0xC0-0xC4 execute (W3 left them fixture-less)" {
+    // five exports over (i32->i32) type 0 / (i64->i64) type 1:
+    // e8 = i32.extend8_s(0xC0), e16 = i32.extend16_s(0xC1),
+    // x8 = i64.extend8_s(0xC2), x16 = i64.extend16_s(0xC3),
+    // x32 = i64.extend32_s(0xC4)
+    const bytes = "\x00\x61\x73\x6d\x01\x00\x00\x00" ++
+        "\x01\x0b\x02\x60\x01\x7f\x01\x7f\x60\x01\x7e\x01\x7e" ++
+        "\x03\x06\x05\x00\x00\x01\x01\x01" ++
+        "\x07\x1d\x05" ++
+        "\x02\x65\x38\x00\x00" ++
+        "\x03\x65\x31\x36\x00\x01" ++
+        "\x02\x78\x38\x00\x02" ++
+        "\x03\x78\x31\x36\x00\x03" ++
+        "\x03\x78\x33\x32\x00\x04" ++
+        "\x0a\x1f\x05" ++
+        "\x05\x00\x20\x00\xc0\x0b" ++
+        "\x05\x00\x20\x00\xc1\x0b" ++
+        "\x05\x00\x20\x00\xc2\x0b" ++
+        "\x05\x00\x20\x00\xc3\x0b" ++
+        "\x05\x00\x20\x00\xc4\x0b";
+    var m = try parse(bytes);
+    try validate(&m);
+    var store: [page_size]u8 = undefined;
+    try testing.expect(instantiate(&machine, &m, &store, "sext") == null);
+    const e8 = call(&machine, &m, 0, &.{.{ .i32 = 0x80 }});
+    try testing.expectEqual(@as(i32, -128), e8.ret.vals[0].i32);
+    const e16 = call(&machine, &m, 1, &.{.{ .i32 = 0x8000 }});
+    try testing.expectEqual(@as(i32, -32768), e16.ret.vals[0].i32);
+    const x8 = call(&machine, &m, 2, &.{.{ .i64 = 0x80 }});
+    try testing.expectEqual(@as(i64, -128), x8.ret.vals[0].i64);
+    const x16 = call(&machine, &m, 3, &.{.{ .i64 = 0x8000 }});
+    try testing.expectEqual(@as(i64, -32768), x16.ret.vals[0].i64);
+    const x32 = call(&machine, &m, 4, &.{.{ .i64 = 0x8000_0000 }});
+    try testing.expectEqual(@as(i64, -2147483648), x32.ret.vals[0].i64);
 }
 
 test "exec: add module returns deterministic sums" {
@@ -3082,4 +3920,89 @@ test "w3: live-gate app fixtures parse + validate against the frozen surface" {
     }
     try testing.expectEqual(@as(usize, 1), nwin);
     try testing.expectEqual(@as(usize, 1), nfile);
+}
+
+test "w4: floatapp fixture runs in-guest byte-exact (pinned output, exit = bytes)" {
+    // The exact FLOATAPP.WASM binary the class-B gate (tools/verify-live-wasm.sh
+    // W4 phase) drops into the share — the named C float utility from
+    // tests/floatapp.c (compiled against tests/virelai.h alone with the W3
+    // determinism recipe, volatile input tables so the float ops execute
+    // at runtime). env.write captures the FULL 590-byte output through the
+    // seam and env.exit's status is the byte count (fileapp's length
+    // proof): byte-exact output + exit = 590 in one host test.
+    const fixture = @embedFile("wasm-corpus/floatapp.wasm");
+    var m = try parse(fixture);
+    try validate(&m);
+    // Fresh memory is zero-initialized per spec; the guest runner gets
+    // zero pages from mmap, so the host test must zero too — floatapp is
+    // the first fixture that READS .bss (the env.write cursor) before
+    // writing it, and an undefined stack array poisons that read.
+    var store: [max_mem_pages * page_size]u8 = @splat(0);
+    try testing.expect(instantiate(&machine, &m, &store, "floatapp") == null);
+    var capture_buf: [1024]u8 = undefined;
+    var cap = HostCapture{ .write_buf = &capture_buf };
+    g_capture = &cap;
+    defer g_capture = null;
+    const entry = entryExport(&m).?;
+    const r = call(&machine, &m, entry, &.{});
+    switch (r) {
+        .ret => {},
+        .trap => try testing.expectEqual(TrapKind.guest_exit, r.trap.kind),
+    }
+    const expected = "c2f 0.00 = 32.00\nc2f 10.00 = 50.00\nc2f 21.50 = 70.70\nc2f -40.00 = -40.00\nc2f 100.00 = 212.00\nf2c 32.00 = 0.00\nf2c 50.00 = 10.00\nf2c 98.60 = 37.00\nf2c 212.00 = 100.00\nf2c -40.00 = -40.00\nmC 0 = 32.00\nmC 10000 = 50.00\nmC 21500 = 70.70\nmC -40000 = -40.00\nmC 100000 = 212.00\nf32 c2f 21.50 = 70.70\nf32 c2f 100.00 = 212.00\nf32 c2f -40.00 = -40.00\nf32 f2c 212.00 = 100.00\nf32 f2c 70.70 = 21.50\nf32 f2c -4.00 = -20.00\nbits64 c2f 21.50 = 4051accccccccccd\nbits64 c2f -40.00 = c044000000000000\nbits64 f2c 98.60 = 4042800000000000\nbits32 c2f 21.50 = 428d6666\nbits32 f2c 70.70 = 41abffff\nsext chk = -66\n";
+    try testing.expectEqual(@as(usize, expected.len), cap.wrote);
+    try testing.expectEqualStrings(expected, cap.write_buf[0..cap.wrote]);
+    try testing.expect(cap.exited);
+    try testing.expectEqual(@as(i32, 590), cap.exit_status);
+}
+
+test "w5: wc capstone — byte/line/word counts run in-guest byte-exact (pinned)" {
+    // WC.WASM = the exact binary the class-B gate (tools/verify-live-wasm.sh
+    // W5 phase) drops into the share: tests/wc.c (written from the contract
+    // doc + tests/virelai.h alone — the standalone-author provenance proof)
+    // + tests/wc-fixture.txt (the gate's WC.TXT bytes, embedded verbatim
+    // below — 8 lines / 32 words / 320 bytes, cross-validated against host
+    // `wc`). The capture seam simulates the kernel file channel: file_open
+    // -> fd 0, file_read serves min(cap, remaining) chunks with 0 at EOF
+    // (contract §5.1), env.write captures the console byte-exact. Assert
+    // the exact wc line (right-aligned classic three-column shape) and exit
+    // status = 320 (the byte count — fileapp's length proof).
+    const fixture = @embedFile("wasm-corpus/wc.wasm");
+    const wc_txt =
+        "w5 wc capstone fixture\n" ++
+        "the quick brown fox\n" ++
+        "long-token-0001-abcdefghijklmnopqrstuvwxyz-this-token-is-longer-than-the-64-byte-reader-buffer-so-the-word-state-must-survive-the-chunk-seam\n" ++
+        "tab\tseparated\twords\n" ++
+        "crlf pairs end each line here\r\n" ++
+        "another line with trailing spaces   \n" ++
+        "  leading spaces too\n" ++
+        "last line ends with a word\n";
+    try testing.expectEqual(@as(usize, 320), wc_txt.len);
+    var m = try parse(fixture);
+    try validate(&m);
+    // Fresh memory is zero-initialized (the guest mmap provides it).
+    var store: [max_mem_pages * page_size]u8 = @splat(0);
+    try testing.expect(instantiate(&machine, &m, &store, "wc") == null);
+    var capture_buf: [512]u8 = undefined;
+    var cap = HostCapture{ .write_buf = &capture_buf, .file_data = wc_txt };
+    g_capture = &cap;
+    defer g_capture = null;
+    const entry = entryExport(&m).?;
+    const r = call(&machine, &m, entry, &.{});
+    switch (r) {
+        .ret => {},
+        .trap => try testing.expectEqual(TrapKind.guest_exit, r.trap.kind),
+    }
+    const expected = "  8  32 320 /host/WC.TXT\n";
+    try testing.expectEqual(@as(usize, expected.len), cap.wrote);
+    try testing.expectEqualStrings(expected, cap.write_buf[0..cap.wrote]);
+    try testing.expect(cap.exited);
+    try testing.expectEqual(@as(i32, 320), cap.exit_status);
+    // The file channel must be walked to EOF in chunks (320 / 64 = 5 data
+    // reads + the EOF probe returning 0).
+    var reads: usize = 0;
+    for (cap.log[0..cap.log_count]) |cl| {
+        if (cl.id == .file_read and cl.a[0] == 0) reads += 1;
+    }
+    try testing.expect(reads >= 5);
 }

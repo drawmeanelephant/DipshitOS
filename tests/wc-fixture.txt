@@ -1,0 +1,8 @@
+w5 wc capstone fixture
+the quick brown fox
+long-token-0001-abcdefghijklmnopqrstuvwxyz-this-token-is-longer-than-the-64-byte-reader-buffer-so-the-word-state-must-survive-the-chunk-seam
+tab	separated	words
+crlf pairs end each line here
+another line with trailing spaces   
+  leading spaces too
+last line ends with a word

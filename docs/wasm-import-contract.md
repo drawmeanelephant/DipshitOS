@@ -270,8 +270,8 @@ capped at the interpreter level; `munmap` below tears down the arena.
 ## 6. What is NOT in the contract (explicit out of scope)
 
 * **WASI** — not exposed; `wasi_snapshot_preview1.*` imports always fail validation.
-* **Threads / atomics / SIMD / bulk-memory / multi-memory / GC** — traps or validation failure.
-* **Floating point** (W4) — `f32`/`f64` and their ops are **not** in the W1b/W3 subset; W4 adds them with a named float utility as gate. Linking a float-using module before W4 traps at validation.
+* **Threads / atomics / SIMD / GC / multi-memory / the 0xFC table ops (≥12)** — traps or validation failure. (Bulk-memory is NOT in this list: the 0xFC 8–11 `memory.init/copy/fill` + `data.drop` forms and the 0xFC 0–7 saturating truncs landed in W4 and are in subset; they execute normally and never trap on their own.)
+* **Floating point** — `f32`/`f64`, their ops, conversions, reinterpret, the plain trapping trunc family (0xA8–0xB1) and the saturating forms (0xFC 0–7) **landed in W4** (claim 7395): gated by the named C float utility `tests/floatapp.c` (pinned c963d5aa), which produces byte-exact live output (590 bytes, exit 590). A float-using module linked before W4 trapped at validation; that link-time rejection is gone.
 * **Networking (slots 9–11, 30–33), clipboard (38–39), exec/kill (28/29), wmctl (65)** — not `env.*` in M35. Raw `poll_event`/`wait_event` (21/22) are not imports; the interpreter pumps events.
 * **Window-depth and other kernel syscalls not in §5** — win_fill_batch (46), win_resize (47), win_raise_front (49), win_lower_back (50), notify (51), win_set_unsaved (53), drag_read (55), pipe_read/pipe_write (56/57), font_size (58), ping_send/ping_poll (59/60), win_set_title (61), net_stats (62) — all reserved for M35; a wasm app needing resize/title/unsaved flags is a future contract extension by ADR, never ad hoc.
 * **File-system mutation beyond §5.1:** pipe/mmap-shared tags/scanout — reserved.
@@ -285,6 +285,30 @@ capped at the interpreter level; `munmap` below tears down the arena.
 * **Drop & run:** copy `app.wasm` into the host share (`--cvc-file <dir>`) → guest `exec WASM.BIN app.wasm`. File paths resolve inside the share root; `write(1, ...)` (if used via the debug `env.write` shim) lands on the console byte-exact.
 * **Determinism:** modules are data — byte-identical input, deterministic traps. Gate fixtures pin stdout/exit/status exactly.
 
+### Worked example: the wc capstone (W5, #766 — what the sections above produced)
+
+The W5 provenance proof — a fresh host author, this document + `virelai.h`
+only — wrote [tests/wc.c](virelai.h) this way:
+
+* §5.1 rows for `env.file_open`/`file_read`/`file_close` gave the
+  signatures and semantics: open with `MODE_READ (0x1)` on a byte-slice
+  path (`path_ptr/path_len`, §3), read `n = file_read(fd, buf, cap)` with
+  `0` at EOF and caps clamped, negative returns are −errno (§4).
+* §3 said paths are byte strings (a `static const char path[]` + `sizeof-1`
+  slice), and §4 said never to touch a global errno — errors branch on the
+  negative return directly (`fd < 0`), with distinct exit statuses (41/42
+  mirroring fileapp's 31/32/33 discipline).
+* The read loop (`for (;;) { n = v_file_read(fd, g_buf, 64); if (n <= 0)
+  break; ... }`) is the §5.1 EOF contract in code; the in-word
+  whitespace state machine that survives chunk boundaries is tool
+  logic, not contract.
+* Compile line: `zig cc -target wasm32-freestanding -nostdlib
+  -fno-sanitize=undefined -g0 tests/wc.c -o wc.wasm`; `wasm-objdump -x`
+  shows exactly five imports — `env.file_open`, `env.write`, `env.exit`,
+  `env.file_close`, `env.file_read` — nothing else.
+* Deterministic pin: 320-byte fixture → `  8  32 320 /host/WC.TXT`, exit
+  320, asserted byte-exact by the class-B gate and the host test.
+
 ---
 
 ## 8. Normative references
@@ -295,4 +319,4 @@ capped at the interpreter level; `munmap` below tears down the arena.
 * ADR 0011 — window registry and compositor (§5.2).
 * `docs/wasm-core-scoping.md` — M35 gated card split (W1a/W1b/W2–W5) and proposal survey.
 
-W3 implementors: implement imports exactly as §5; W5 (`wc`) authors: use only §5.
+W3 implementors: implement imports exactly as §5; W5 (`wc`) authors: only §5 + this recipe were used — and nothing else was needed.

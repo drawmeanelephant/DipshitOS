@@ -40,6 +40,30 @@
 #      HF4 share transport, env.file_read in 128-byte chunks, each chunk
 #      echoed byte-exact to the console with env.write, and exit status =
 #      the total byte count (512 — asserted in the process report).
+#
+# W5 (#766) phase (same boot, the milestone's payoff — a real tool):
+#   5c. `exec WASM.BIN WC.WASM` — the wc capstone (tests/wc.c, written from
+#      the contract doc + tests/virelai.h alone — the standalone-author
+#      provenance proof; pinned b75c504d): reads /host/WC.TXT through the
+#      file channel in 64-byte chunks, counts bytes/lines/words, prints the
+#      classic right-aligned wc line byte-exact (`  8  32 320 /host/WC.TXT`
+#      against the deterministic 320-byte fixture, counts cross-validated
+#      against host `wc`), exits 320 (the byte count).
+#
+# W4 (#765) phases (same boot, same fixture pattern):
+#   5b. `exec WASM.BIN FLOATAPP.WASM` — the wasm float app
+#      (tests/floatapp.c, compiled against tests/virelai.h alone, pinned
+#      c963d5aa): a no-libc C float utility (C->F/F->C temperature
+#      converter) whose volatile input tables defeat constant-folding so
+#      the float opcodes execute at runtime — f64/f32 arith chains
+#      (0xA0/0xA2/0xA3, 0x92..), f64.convert_i64_s (0xB9),
+#      i32.trunc_sat_f64_s (0xFC 2 — clang lowers C casts to the
+#      saturating form), f64.promote_f32 (0xBB), the 0xAA..0xB1 plain
+#      trunc family where range is provable, bit-pattern hex dumps, and
+#      i64.extend_i32_s (0xAC) in the sign-ext sanity check. Five
+#      distinctive byte-exact output lines are asserted per run plus the
+#      exit status = 590 (the total output byte count — fileapp's length
+#      proof), so a float-op regression drifts both.
 #   6. `zig build shim-check` (class A, run here too): tests/virelai-probe.c
 #      compiles against tests/virelai.h and its import table is exactly
 #      the frozen env.* surface (contract §5 + write/exit).
@@ -70,9 +94,12 @@ WASM_EXIT_LINE="tasks user-exec exited status=55"
 WIN_OK_LINE="w3: win ok"
 WIN_EXIT_LINE="tasks user-exec exited status=21"
 FILE_EXIT_LINE="tasks user-exec exited status=512"
+FLOAT_EXIT_LINE="tasks user-exec exited status=590"
+WC_LINE="  8  32 320 /host/WC.TXT"
+WC_EXIT_LINE="tasks user-exec exited status=320"
 FAIL_NEEDLES=("wasm: open failed" "wasm: parse error" "wasm: validate error" "wasm: mmap failed" "wasm: trap" "wasm: instantiate trap")
 
-echo "=== verify-live-wasm: M35 W2+W3 — C hello-world, wasm window app + wasm file app in-guest, $BOOTS boot(s) ==="
+echo "=== verify-live-wasm: M35 W2+W3+W4+W5 — C hello-world, wasm window/file/float apps + the wc capstone in-guest, $BOOTS boot(s) ==="
 zig version
 swift --version 2>&1 | head -1
 sw_vers
@@ -141,6 +168,31 @@ if [ "$WIN_SHA" != "ee33f184df3a5fed1cfc610b467b3595814afa2ab751cfc6fb84f85a32e3
     echo "FAIL: a W3 app fixture sha256 drifted from its pin (regenerate from tests/*.c)" >&2
     exit 1
 fi
+# W4 fixture: the named C float utility (tests/floatapp.c — temp-unit
+# converter, volatile tables so the float ops run at runtime), built with
+# the same determinism recipe as the W3 app binaries; sha-pinned here and
+# re-verified by the host test "w4: floatapp fixture runs in-guest
+# byte-exact".
+cp user/src/wasm-corpus/floatapp.wasm "$SHARE/FLOATAPP.WASM"
+FLO_SHA="$(shasum -a 256 "$SHARE/FLOATAPP.WASM" | cut -d' ' -f1)"
+echo "FLOATAPP.WASM sha256=$FLO_SHA (pinned c963d5aa)"
+if [ "$FLO_SHA" != "c963d5aa897ca2b7607587ec9f9137cf188635545c8f0b3463117f23df348b42" ]; then
+    echo "FAIL: the W4 app fixture sha256 drifted from its pin (regenerate from tests/floatapp.c)" >&2
+    exit 1
+fi
+# W5 fixture: the wc capstone (tests/wc.c — written from the contract doc
+# + virelai.h alone), rebuilt-deterministic, sha-pinned; plus the
+# deterministic 320-byte WC.TXT it counts (tests/wc-fixture.txt — the SAME
+# bytes the host test embeds). Expected: 8 lines / 32 words / 320 bytes,
+# printed byte-exact as "  8  32 320 /host/WC.TXT", exit status 320.
+cp user/src/wasm-corpus/wc.wasm "$SHARE/WC.WASM"
+cp tests/wc-fixture.txt "$SHARE/WC.TXT"
+WC_SHA="$(shasum -a 256 "$SHARE/WC.WASM" | cut -d' ' -f1)"
+echo "WC.WASM sha256=$WC_SHA (pinned b75c504d); WC.TXT $(wc -c < "$SHARE/WC.TXT" | tr -d ' ') bytes"
+if [ "$WC_SHA" != "b75c504ddbb30b8ada6244cb95d3aaf532c49f79a45e7a68dc02151211e7746c" ]; then
+    echo "FAIL: the W5 capstone sha256 drifted from its pin (regenerate from tests/wc.c)" >&2
+    exit 1
+fi
 # The file-app fixture: 16-byte line x 32 = 512 bytes, byte-exact echo.
 python3 - "$SHARE/FILE.TXT" <<'EOF'
 import sys
@@ -155,17 +207,20 @@ echo "FILE.TXT: $(wc -c < "$SHARE/FILE.TXT" | tr -d ' ') bytes written to the sh
 # way to inspect the wasm window: the shell consumes script1 lines far
 # ahead of the apps (their exec streams the 55-KiB WASM.BIN through
 # chunked share reads), so a naive burst of `dui` lines races the window.
-# Layout: the two short apps run first (hello + fileapp — proven safe
-# concurrently, never the three-way overlap that faulted once), then the
-# winapp loads and spins; `w3: win ok` (printed just before the spin)
-# triggers script2: dui snapshots (window rows), `dui raise 2` (the
-# post-WMS composite trigger — the kernel no longer composites user
-# windows unprompted, so the raise blits it into the scanout and moves
-# user_blits), a confirming dui (blits>=1), and the final marker that
-# ALSO triggers the runner's marker-driven screenshot (deterministic
-# pixel capture — no race with the 5/10/15 s periodic captures).
+# Script1: the four short non-display apps run first (floatapp, fileapp,
+# hello, wc — pure compute/write, proven safe concurrently; the "faulted
+# once" three-way was a display-app overlap), then the winapp loads and
+# spins; the short apps first keep the winapp's overlap set at <=1 app.
+# `w3: win ok`
+# (printed just before the spin) triggers script2: dui snapshots (window
+# rows), `dui raise 2` (the post-WMS composite trigger — the kernel no
+# longer composites user windows unprompted, so the raise blits it into
+# the scanout and moves user_blits), a confirming dui (blits>=1), and the
+# final marker that ALSO triggers the runner's marker-driven screenshot
+# (deterministic pixel capture — no race with the 5/10/15 s periodic
+# captures).
 SCRIPT1="$RUN_DIR/script1.txt"
-printf 'exec WASM.BIN FILEAPP.WASM\necho rx-w3-file\nexec WASM.BIN HELLO.WASM\necho rx-wasm-hello\nexec WASM.BIN WINAPP.WASM\necho rx-w3-win\n' > "$SCRIPT1"
+printf 'exec WASM.BIN FLOATAPP.WASM\necho rx-w4-float\nexec WASM.BIN FILEAPP.WASM\necho rx-w3-file\nexec WASM.BIN HELLO.WASM\necho rx-wasm-hello\nexec WASM.BIN WC.WASM\necho rx-w5-wc\nexec WASM.BIN WINAPP.WASM\necho rx-w3-win\n' > "$SCRIPT1"
 SCRIPT2="$RUN_DIR/script2.txt"
 # Arc4 #239 fades windows in over 2x2 composites (25%% x2, 50%% x2, then
 # opaque), so the marker screenshot must fire after a few composite
@@ -196,7 +251,7 @@ run_one() {
     [ -f "$RUN_DIR/gpu-screen-after" ] && cp "$RUN_DIR/gpu-screen-after" "$(art "gpu-screen-after-$tag.png")" || true
     local SER="$serial_copy"
 
-    local bytes=0 banner=0 hello=0 exit55=0 heck0=0 winid=0 winok=0 win21=0 drow=0 file512=0 fileecho=0 ok=0 fatal=0 blitok=0
+    local bytes=0 banner=0 hello=0 exit55=0 heck0=0 winid=0 winok=0 win21=0 drow=0 file512=0 fileecho=0 float590=0 float1=0 float2=0 float3=0 float4=0 float5=0 heck4=0 wcline=0 wcexit=0 wcresp=0 ok=0 fatal=0 blitok=0
     if [ -f "$SER" ]; then
         bytes="$(wc -c < "$SER" | tr -d ' ')"
         [ "$(grep -aFxc -- "VirelaiOS kernel has seized control." "$SER" || true)" = 1 ] && banner=1
@@ -209,6 +264,23 @@ run_one() {
         [ "$(grep -aF -- "rect=100,100,96,48" "$SER" | wc -l | tr -d ' ')" -ge 1 ] && drow=1
         [ "$(grep -aFxc -- "$FILE_EXIT_LINE" "$SER" || true)" -ge 1 ] && file512=1
         [ "$(grep -aFc -- "w3-filerocks!!!" "$SER" || true)" -ge 1 ] && fileecho=1
+        [ "$(grep -aFxc -- "$FLOAT_EXIT_LINE" "$SER" || true)" -ge 1 ] && float590=1
+        # W4 float-app output: distinctive byte-exact lines, one per opcode
+        # family — f64 arith+mC loop, f64 bit-pattern hex, saturating
+        # trunc rounding, f32 path, i64.extend_i32_s. (The host test holds
+        # the full 590-byte byte-exact proof; these prove the SAME binary
+        # executes through the live boot.)
+        [ "$(grep -aFxc -- "mC 100000 = 212.00" "$SER" || true)" -ge 1 ] && float1=1
+        [ "$(grep -aFxc -- "bits64 c2f 21.50 = 4051accccccccccd" "$SER" || true)" -ge 1 ] && float2=1
+        [ "$(grep -aFxc -- "f2c 98.60 = 37.00" "$SER" || true)" -ge 1 ] && float3=1
+        [ "$(grep -aFxc -- "f32 f2c -4.00 = -20.00" "$SER" || true)" -ge 1 ] && float4=1
+        [ "$(grep -aFxc -- "sext chk = -66" "$SER" || true)" -ge 1 ] && float5=1
+        [ "$(grep -aFxc -- "rx-w4-float" "$SER" || true)" -ge 1 ] && heck4=1
+        # W5 capstone: the byte-exact wc line + the exit-status length
+        # proof + the shell staying responsive.
+        [ "$(grep -aFxc -- "$WC_LINE" "$SER" || true)" -ge 1 ] && wcline=1
+        [ "$(grep -aFxc -- "$WC_EXIT_LINE" "$SER" || true)" -ge 1 ] && wcexit=1
+        [ "$(grep -aFxc -- "rx-w5-wc" "$SER" || true)" -ge 1 ] && wcresp=1
         [ "$(grep -aFxc -- "rx-wasm-ok" "$SER" || true)" = 1 ] && ok=1
         [ "$(grep -aEc -- "dui: windows=[4-9].*blits=[1-9][0-9]*" "$SER" || true)" -ge 1 ] && blitok=1
         for n in "${FAIL_NEEDLES[@]}"; do
@@ -216,12 +288,15 @@ run_one() {
         done
     fi
 
-    echo "run $tag: rc=$rc bytes=$bytes banner=$banner hello=$hello exit55=$exit55 helloresp=$heck0 winid=$winid winok=$winok win21=$win21 duirow=$drow file512=$file512 fileecho=$fileecho finalresp=$ok blits=$blitok fatal=$fatal"
+    echo "run $tag: rc=$rc bytes=$bytes banner=$banner hello=$hello exit55=$exit55 helloresp=$heck0 winid=$winid winok=$winok win21=$win21 duirow=$drow file512=$file512 fileecho=$fileecho float590=$float590 float1=$float1 float2=$float2 float3=$float3 float4=$float4 float5=$float5 floatresp=$heck4 wcline=$wcline wcexit=$wcexit wcresp=$wcresp finalresp=$ok blits=$blitok fatal=$fatal"
 
     local PASS=0
     if [ $banner -eq 1 ] && [ $hello -eq 1 ] && [ $exit55 -eq 1 ] && [ $heck0 -eq 1 ] && \
        [ $winid -eq 1 ] && [ $winok -eq 1 ] && [ $win21 -eq 1 ] && [ $drow -eq 1 ] && \
-       [ $file512 -eq 1 ] && [ $fileecho -eq 1 ] && [ $ok -eq 1 ] && [ $blitok -eq 1 ] && [ $fatal -eq 0 ] && [ $rc -eq 0 ]; then
+       [ $file512 -eq 1 ] && [ $fileecho -eq 1 ] && [ $float590 -eq 1 ] && \
+       [ $float1 -eq 1 ] && [ $float2 -eq 1 ] && [ $float3 -eq 1 ] && [ $float4 -eq 1 ] && [ $float5 -eq 1 ] && \
+       [ $heck4 -eq 1 ] && [ $wcline -eq 1 ] && [ $wcexit -eq 1 ] && [ $wcresp -eq 1 ] && \
+       [ $ok -eq 1 ] && [ $blitok -eq 1 ] && [ $fatal -eq 0 ] && [ $rc -eq 0 ]; then
         PASS=1
     fi
 
@@ -324,7 +399,7 @@ EOF
     echo "redfill=$REDOK"
 
     if [ $PASS -eq 1 ] && [ "${REDOK:-0}" -eq 1 ]; then
-        echo "PASS $tag: hello (write byte-exact, exit 55) + wasm window app (dui row rect=100,100,96,48, blits>=1 post-raise, red fill block in the marker capture) + wasm file app (FILE.TXT echoed byte-exact, exit 512) — virelai.h contract proven live" | tee -a "$REPORT"
+        echo "PASS $tag: hello (write byte-exact, exit 55) + wasm window app (dui row rect=100,100,96,48, blits>=1 post-raise, red fill block in the marker capture) + wasm file app (FILE.TXT echoed byte-exact, exit 512) + wasm float app (FLOATAPP.WASM: five float opcode families byte-exact, exit 590) + the wc capstone (WC.WASM: 8 lines 32 words 320 bytes byte-exact, exit 320 — a real tool ported to wasm, shipped as an HF4 app) — virelai.h contract proven live" | tee -a "$REPORT"
         return 0
     fi
     echo "FAIL $tag: see $SER and $run_log" | tee -a "$REPORT"
