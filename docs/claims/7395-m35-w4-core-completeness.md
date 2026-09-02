@@ -6,7 +6,10 @@
 - **Touches:** user/src/wasm.zig (float value lanes, validation flips, f32/f64 const/load/store/arith/cmp/convert exec, trap naming, tests; 0xFC bulk-memory + DataCount/passive-data parse only if the W5 probe justifies), tests/wasm-corpus/*.wasm (new pinned float fixture(s)), tools/verify-live-wasm.sh (W4 phase), docs/march-m35-w4-core-completeness.md (prompt/plan), docs/wasm-core-scoping.md (card row when landed), claim + branch log; claim id via `bash tools/status/claim-id.sh`
 - **Depends on:** W3 #764 merged (PR #807); W1a #778 contract (PR #786); W2 #763 (PR #796)
 - **Heartbeat:** 2026-09-02
-- **Status:** ✅ DONE 2026-09-02 — floats (f32/f64 + conversions/reinterpret, IEEE trap discipline; plain trunc 0xA8–0xB1 traps, 0xFC 0–7 trunc_sat clamps), sign-extension proof fixture, bulk-memory 0xFC 8–11 (justified by clang probe; DataCount + passive data); named C float utility `tests/floatapp.c` pinned (c963d5aa) and byte-exact live-gated (590-byte output, exit 590). Branch: `agent/buffy2/m35-w4-core-completeness`
+- **Status:** ✅ DONE 2026-09-02 — floats (f32/f64 + conversions/reinterpret, IEEE trap discipline; plain trunc 0xA8–0xB1 traps, 0xFC 0–7 trunc_sat clamps), sign-extension proof fixture, bulk-memory 0xFC 8–11 (justified by clang probe; DataCount + passive data); named C float utility `tests/floatapp.c` pinned (c963d5aa) and byte-exact live-gated (590-byte output, exit 590). Branch: the slice
+rode `agent/buffy2/m35-w4-core-completeness` and was carried forward onto
+`agent/buffy2/m35-w5-wc-capstone` when W5 landed on the same (unmerged)
+worktree branch — the W4+W5 PR comes from one branch
 
 ## Notes
 
