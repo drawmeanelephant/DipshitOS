@@ -188,6 +188,41 @@ var exit_report_statuses: [exit_report_max]u64 = [_]u64{0} ** exit_report_max;
 var exit_report_head: usize = 0;
 var exit_report_count: usize = 0;
 
+// ---------------------------------------------------------------------------
+// Claim 9094 (#810 writer hunt): audit cells for the scheduler's task-ring
+// audit (the Process struct stays module-private — primitives only, no
+// pointers escape this module). The scheduler validates the invariants;
+// every read happens here, so a rogue byte in the registry can never fault
+// the audit itself.
+// ---------------------------------------------------------------------------
+
+pub const ProcAuditCell = struct {
+    name_len: usize = 0,
+    /// Raw state byte (0..3 = free/created/running/exited).
+    state: u8 = 0,
+    /// The live executor slot, or null (free / exited-and-reaped).
+    task_id: ?usize = null,
+    kstack_phys: u64 = 0,
+    text_phys: u64 = 0,
+    stack_phys: u64 = 0,
+};
+
+/// One audit cell per registry row. Raw byte read for the state enum
+/// (the typed load of a rogue byte as an enum is UB in safe builds).
+pub fn audit_proc(id: usize) ProcAuditCell {
+    if (id >= max_processes) return .{};
+    const p = &processes[id];
+    const raw_state: u8 = @as(*const u8, @ptrCast(&p.state)).*;
+    return .{
+        .name_len = p.name_len,
+        .state = raw_state,
+        .task_id = p.task_id,
+        .kstack_phys = p.kernel_stack.phys,
+        .text_phys = p.addr_space.text_phys,
+        .stack_phys = p.addr_space.stack_phys,
+    };
+}
+
 /// Reset the registry (boot + host tests; called by `scheduler.init` so
 /// every pool reset also clears the process layer).
 pub fn init() void {

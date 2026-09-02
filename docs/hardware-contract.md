@@ -126,6 +126,7 @@ resolved inside the share root by the same defense as reads.
 | RENAME `0x09` | `[from][0x00][to]` (NUL separator; paths are NUL-free) | — |
 | MKDIR `0x0a` | path (one level; parents must exist) | — |
 | DELETE `0x0b` | path (file or EMPTY directory — never recursive) | — |
+| CLONE `0x0c` | `[from][0x00][to]` (both paths resolved inside the share root) | — (APFS COW clone; `to` must NOT exist → status `5`) |
 
 Status: `0` ok, `1` not found, `2` is a directory, `3` truncated (reply
 exceeded the guest's buffer), `4` host error (unknown op / bad request),
@@ -138,6 +139,22 @@ the live fd. WRITE data is capped at `write_chunk_max = 32763` per round
 trip (the 2-byte handle + the reply-cap symmetry); larger writes stream
 across chunks, and the guest's pattern write advances by the
 host-CONFIRMED written count so a partial write never corrupts the stream.
+
+CLONE (HF7, issue #741 — additive `0x0c`) is the worktree-dedup op: the
+host clones with APFS copy-on-write semantics, so N worktrees of one repo
+share blocks until a worktree actually edits a file. Regular files use
+`Darwin.clonefile(2)`; DIRECTORY TREES use `copyfile(3)` with
+`COPYFILE_ALL | COPYFILE_CLONE | COPYFILE_RECURSIVE` (the clonefile(2)
+man page explicitly prefers copyfile(3) for directories). Both subpaths
+go through `VFWire.resolveSubpath` — absolute paths, `..`, and symlink
+escapes are refused before any syscall, and directory cloning copies
+symlinks as links (never chased). `to` must not exist: pre-checked
+(→ status `5`), plus an EEXIST race fallback that maps honestly. Space
+savings are measured at the VOLUME level, not with `du` — du reports
+logical `st_blocks` and cannot see COW sharing (empirically identical for
+a clone and a `cp` copy of the same fixture). Guarded live by the HF7
+phases of `tools/verify-live-vf.sh` with raw before/after numbers under
+`artifacts/m34-hf7-measurement.txt`. **[observed]** issue #741, claim 1312
 
 VF_PROBE is HF1's acceptance case A — it proves the ONE unproven transport
 fact, a full **32,768-byte device-write reply** (claim 0680 proved 32 KiB

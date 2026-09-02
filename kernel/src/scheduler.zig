@@ -717,6 +717,9 @@ fn stage_current() void {
     // accepts), so this is the real exit/reap/pages-return lifecycle, not
     // a special teardown. No switching-core change: the same frame/ELR/
     // SPSR/TTBR0 machinery that follows any exit is used.
+    // Claim 9094 (#810): validate `current` before the kill_pending read
+    // (Task+0x178 — the exact byte read that faulted in run-11 boot 2).
+    audit.slot(current, .tick);
     if (tasks[current].kill_pending) {
         tasks[current].kill_pending = false;
         _ = exit_current(reserved_kill_status);
@@ -1120,6 +1123,10 @@ pub fn reap(id: usize) bool {
 fn reap_one_zombie() void {
     var i: usize = 0;
     while (i < max_tasks) : (i += 1) {
+        // Claim 9094 (#810): validate the slot BEFORE reading its state —
+        // the idle reaper is where run-11 boots 2/3 faulted on wildly
+        // corrupted fields; the audit records the evidence first.
+        audit.slot(i, .reap);
         if (tasks[i].state != .zombie) continue;
         const name = tasks[i].name;
         if (!reap(i)) return;
@@ -1214,6 +1221,220 @@ pub fn user_timer_preemption_count() u64 {
 }
 
 // ---------------------------------------------------------------------------
+// Claim 9094 (#810 writer hunt): task-ring + process-registry audit
+// ---------------------------------------------------------------------------
+
+/// Instrumentation ONLY — no behavior change. The #810 corruption family
+/// (wild Task/Process field values in the vf-output era: 0xfcab6000, −1,
+/// 0x80000000-based pointers) always violates a field invariant BEFORE the
+/// faulting read, so the audit prints the slot/field/value that binds the
+/// corruption to its window. Windows: (a) EVERY virtio_file queue-5
+/// exchange arms at entry / checks at exit (`.vf`); (b) `reap_one_zombie`
+/// validates the slot it is about to read (`.reap`); (c) the tick's ring
+/// select validates `current` before the `kill_pending` read — the +0x178
+/// byte read that faulted in run-11 boots — (`.tick`, record-only: no
+/// console in IRQ context, claim 9187); (d) the shell idle loop drains
+/// recorded violations via `drain` (main context, inside `maybe_report`).
+///
+/// Bounds are strict supersets of observed LEGAL values: kernel pointers
+/// (image, BSS stacks, allocator frames) sit in [0x1000, 0x80000000) — the
+/// top of the guest's 2 GiB RAM @ 0 (the same ceiling as
+/// exceptions.deep_dump; the SEA at 0x80000178 proves nothing maps at or
+/// above it in this class). User-space VAs (sp_el0, the randomized user
+/// stack) are LEGAL as task fields and deliberately not validated. Task
+/// names are kernel string literals ("worker", "user-exec", …); process
+/// names are copied into BSS name buffers — all kernel memory.
+pub const audit = struct {
+    pub const ram_ceiling: u64 = 0x8000_0000;
+    pub const Tag = enum { vf, reap, tick, drain };
+    pub const Field = enum(u8) { state, name_ptr, name_len, sp, elr, ttbr0, p_state, p_name_len, p_task_id, p_kstack, p_text, p_stack };
+    const max_violations: usize = 8;
+    const Violation = struct {
+        tag: Tag = .drain,
+        field: Field = .state,
+        slot: usize = 0,
+        value: u64 = 0,
+        tick: u64 = 0,
+    };
+
+    /// Nested-arm depth (an exchange nested inside an exchange keeps ONE
+    /// armed window).
+    pub var depth: u32 = 0;
+    pub var arms: u64 = 0;
+    pub var checks: u64 = 0;
+    /// Scheduler tick at which the current window was armed.
+    pub var armed_tick: u64 = 0;
+    /// One "audit armed" evidence line per boot (proves the seam runs;
+    /// nothing else prints on healthy boots).
+    var boot_line: bool = false;
+    /// The last (slot, field) pair DRAINED this boot — repeating
+    /// violations (the reap pass re-validates the same corrupted slot
+    /// every idle iteration) print once, so one corruption = one line.
+    var last_slot: usize = 0;
+    var last_field: Field = .state;
+    var have_last: bool = false;
+
+    var viol: [max_violations]Violation = [_]Violation{.{}} ** max_violations;
+    var viol_head: usize = 0;
+    var viol_count: usize = 0;
+
+    /// Legal kernel pointer: 0 or a RAM-class address.
+    fn valid_ptr(v: u64) bool {
+        return v == 0 or (v >= 0x1000 and v < ram_ceiling);
+    }
+
+    /// Legal physical root/table pointer: page-aligned RAM-class or 0.
+    fn valid_aligned(v: u64) bool {
+        return v == 0 or ((v & 0xfff) == 0 and v >= 0x1000 and v < ram_ceiling);
+    }
+
+    /// NOTE: saved PSTATE is deliberately NOT validated — observed legal
+    /// spsr values span PAN/UAO/condition bits up to 0x60000000 and even
+    /// 0x80000005 (the #810 frames), so no shape check separates corrupt
+    /// from legit. Run-12 boot 1 proved it: a too-tight spsr rule fired
+    /// on every reap pass and flooded the serial with 38 false-positive
+    /// lines. Excluded; the remaining fields still catch every observed
+    /// corruption value (−1, 0xfcab6000, string bytes, dead-space VAs).
+    /// Raw storage read of the state enum — the TYPED load of a rogue
+    /// byte as an enum is UB in safe builds; the audit must not fault
+    /// itself.
+    fn enum_raw(ptr: *const anyopaque) u64 {
+        var raw: u64 = 0;
+        const bytes: [*]const u8 = @ptrCast(ptr);
+        var i: usize = 0;
+        while (i < @sizeOf(State)) : (i += 1) raw |= @as(u64, bytes[i]) << @intCast(i * 8);
+        return raw;
+    }
+
+    /// Arm a window (nested arms keep one open window).
+    pub fn arm(tag: Tag) void {
+        _ = tag;
+        if (depth == 0) armed_tick = tick_count;
+        depth +%= 1;
+        arms +%= 1;
+    }
+
+    /// Close the window and validate the whole ring + registry.
+    pub fn check(tag: Tag) void {
+        checks +%= 1;
+        if (depth > 0) depth -%= 1;
+        sweep(tag);
+    }
+
+    /// Validate ONE task slot (the reap/tick read seams).
+    pub fn slot(id: usize, tag: Tag) void {
+        if (id < max_tasks) check_task(id, tag);
+    }
+
+    fn sweep(tag: Tag) void {
+        if (comptime builtin.is_test or builtin.cpu.arch != .aarch64) return;
+        var i: usize = 0;
+        while (i < max_tasks) : (i += 1) check_task(i, tag);
+        var p: usize = 0;
+        while (p < process.max_processes) : (p += 1) check_proc(p, tag);
+    }
+
+    fn check_task(id: usize, tag: Tag) void {
+        const t = &tasks[id];
+        const st = enum_raw(&t.state);
+        if (st > @intFromEnum(State.zombie)) record(tag, .state, id, st);
+        const nptr = @intFromPtr(t.name.ptr);
+        if (!valid_ptr(nptr)) record(tag, .name_ptr, id, nptr);
+        if (t.name.len > 64) record(tag, .name_len, id, t.name.len);
+        if (!valid_ptr(t.sp)) record(tag, .sp, id, t.sp);
+        if (!valid_ptr(t.elr)) record(tag, .elr, id, t.elr);
+        if (!valid_aligned(t.ttbr0)) record(tag, .ttbr0, id, t.ttbr0);
+    }
+
+    fn check_proc(id: usize, tag: Tag) void {
+        const c = process.audit_proc(id);
+        if (c.state > @intFromEnum(process.State.exited)) record(tag, .p_state, id, c.state);
+        if (c.name_len > process.name_max) record(tag, .p_name_len, id, c.name_len);
+        if (c.task_id) |tid| {
+            if (tid >= max_tasks) record(tag, .p_task_id, id, tid);
+        }
+        if (!valid_aligned(c.kstack_phys)) record(tag, .p_kstack, id, c.kstack_phys);
+        if (!valid_aligned(c.text_phys)) record(tag, .p_text, id, c.text_phys);
+        if (!valid_aligned(c.stack_phys)) record(tag, .p_stack, id, c.stack_phys);
+    }
+
+    fn record(tag: Tag, field: Field, row: usize, value: u64) void {
+        const idx = (viol_head + viol_count) % max_violations;
+        if (viol_count == max_violations) {
+            viol_head = (viol_head + 1) % max_violations;
+        } else {
+            viol_count += 1;
+        }
+        viol[idx] = .{ .tag = tag, .field = field, .slot = row, .value = value, .tick = tick_count };
+    }
+
+    fn field_name(f: Field) []const u8 {
+        return switch (f) {
+            .state => "state",
+            .name_ptr => "name_ptr",
+            .name_len => "name_len",
+            .sp => "sp",
+            .elr => "elr",
+            .ttbr0 => "ttbr0",
+            .p_state => "procs.state",
+            .p_name_len => "procs.name_len",
+            .p_task_id => "procs.task_id",
+            .p_kstack => "procs.kstack",
+            .p_text => "procs.text",
+            .p_stack => "procs.stack",
+        };
+    }
+
+    fn tag_name(t: Tag) []const u8 {
+        return switch (t) {
+            .vf => "vf",
+            .reap => "reap",
+            .tick => "tick",
+            .drain => "drain",
+        };
+    }
+
+    /// Print the one-per-boot armed line and drain any recorded
+    /// violations (main context only — called from `maybe_report`).
+    pub fn drain(con: *console.Console) void {
+        if (comptime builtin.is_test or builtin.cpu.arch != .aarch64) return;
+        if (!boot_line) {
+            boot_line = true;
+            con.puts("[AUDIT] task-ring+procs audit armed slots=");
+            con.print_u64(max_tasks);
+            con.puts(" procs=");
+            con.print_u64(process.max_processes);
+            con.puts("\n");
+        }
+        while (viol_count > 0) {
+            const v = viol[viol_head];
+            viol_head = (viol_head + 1) % max_violations;
+            viol_count -= 1;
+            // Repeat-suppression: the same (slot, field) re-recorded by a
+            // later window (e.g. the next reap pass) is a repeat of the
+            // SAME corruption — one line per boot per corruption.
+            if (have_last and v.slot == last_slot and v.field == last_field) continue;
+            have_last = true;
+            last_slot = v.slot;
+            last_field = v.field;
+            const is_task = @intFromEnum(v.field) < @intFromEnum(Field.p_state);
+            con.puts("[AUDIT] ");
+            con.puts(if (is_task) "tasks slot=" else "procs id=");
+            con.print_u64(v.slot);
+            con.puts(" field=");
+            con.puts(field_name(v.field));
+            con.puts(" value=");
+            con.print_hex(v.value);
+            con.puts(" tag=");
+            con.puts(tag_name(v.tag));
+            con.puts(" tick=");
+            con.print_u64(v.tick);
+            con.puts("\n");
+        }
+    }
+};
+
+// ---------------------------------------------------------------------------
 // Worker progress (main context only — never from the IRQ tick)
 // ---------------------------------------------------------------------------
 
@@ -1239,6 +1460,10 @@ pub fn request_report() void {
 /// Shell-side (main context, next to timer.maybe_heartbeat): print every
 /// pending report line, then the exit/reap reports.
 pub fn maybe_report(con: *console.Console) void {
+    // Claim 9094 (#810): the idle-loop drain point for the task-ring/
+    // process audit — main context, console-safe (claim 9187). Nothing
+    // prints on healthy boots beyond the one-per-boot armed line.
+    audit.drain(con);
     var i: usize = 0;
     while (i < max_tasks) : (i += 1) {
         if (!report_pending[i]) continue;
