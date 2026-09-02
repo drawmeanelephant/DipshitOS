@@ -65,6 +65,7 @@ meaningful — on main.
 |--------|----------|
 | `freebuff/m22-lane-d-wave2` | [`0720-m22-lane-d-wave2.md`](0720-m22-lane-d-wave2.md) |
 | agent/antigravity/in-guest-compiler | [`agent-antigravity-in-guest-compiler.md`](agent-antigravity-in-guest-compiler.md) |
+| agent/antigravity/raster-graphics-ui | [`agent-antigravity-raster-graphics-ui.md`](agent-antigravity-raster-graphics-ui.md) |
 | agent/antigravity/sexiburger | [`agent-antigravity-sexiburger.md`](agent-antigravity-sexiburger.md) |
 | agent/antigravity/vl6-gui-consumer | [`agent-antigravity-vl6-gui-consumer.md`](agent-antigravity-vl6-gui-consumer.md) |
 | agent/antigravity/z05-dialect-contract | [`agent-antigravity-z05-dialect-contract.md`](agent-antigravity-z05-dialect-contract.md) |
