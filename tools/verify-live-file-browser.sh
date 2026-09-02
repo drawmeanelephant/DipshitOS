@@ -30,7 +30,7 @@
 #      PR #512 (658bd86, 2026-08-23) added alphabetical sorting to the
 #      listing (sort_column=.name, sort_asc=true), and DATA.TXT sorts
 #      before README.TXT, so the initial selection (index 0) changed.
-#      The DESKTOP manifest reads apps=21 from /host/APPS.TXT (M34 HF6:
+#      The DESKTOP manifest reads apps=22 from /host/APPS.TXT (M34 HF6:
 #      the share-seeded manifest is the ONLY source — the ESP is gone).
 #   4. The syscalls report proves the seam: sys_exec once, sys_dir_list
 #      twice (main listing + F4 du walk, claim 2539), file_open six times
@@ -170,13 +170,14 @@ echo "--- Phase 2: Verifying the composition arc ---"
 # 1. The desktop menu came from the manifest (11 entries, FILE.BIN included),
 #    not the hardcoded fallback (claim 8877 + B4).
 # Expectation revised to OBSERVED BYTES (2026-09-01, claim 5251): the
-# serial marker reads `desktop: manifest apps=21` — image/apps.txt grew
+# serial marker reads `desktop: manifest apps=22` — image/apps.txt grew
 # from 9 entries at M13 close (d62c933) through M15 C4's SETTINGS.BIN
 # (6c8b5b3), M23 E1's EDIT.BIN (ee3da3e), M27 G6's SYSMON.BIN, the M30/M31
-# ELF rows, M32's ZC.BIN, and the M19 sexiburger rows (SEXIBURG.BIN +
-# SEXITEST.BIN, 5845d7f). `#` comments are skipped by parse_manifest.
-grep -q "desktop: manifest apps=21" "$SER" || {
-    echo "ERROR: desktop manifest marker (apps=21) missing from serial log"
+# ELF rows, M32's ZC.BIN, the M19 sexiburger rows (SEXIBURG.BIN +
+# SEXITEST.BIN, 5845d7f), and M36 IMG5's VIEW.BIN (issue #826). `#`
+# comments are skipped by parse_manifest.
+grep -q "desktop: manifest apps=22" "$SER" || {
+    echo "ERROR: desktop manifest marker (apps=22) missing from serial log"
     exit 1
 }
 echo "DESKTOP.MANIFEST: OK"

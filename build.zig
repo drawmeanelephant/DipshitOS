@@ -1794,6 +1794,31 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_sexiburg.step);
 
     // ------------------------------------------------------------------
+    // Guest: VIEW.BIN — the M36 IMG5 raster image viewer (issue #826,
+    // claim 4574). DSK3 segmented (writable .data/.bss — the fill batcher
+    // global and mmap'd buffer bookkeeping need the RW data+bss aperture).
+    // ------------------------------------------------------------------
+    const view_prog = b.addExecutable(.{
+        .name = "user-view",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/view.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    view_prog.linker_script = b.path("user/linker-segmented.ld");
+    const view_step = b.step("view", "Build the image viewer (zig-out/bin/VIEW.BIN) — DSK3 segmented (writable .data/.bss)");
+    const view_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
+    view_elf2bin.addFileArg(view_prog.getEmittedBin());
+    const view_bin = view_elf2bin.addOutputFileArg("VIEW.BIN");
+    view_elf2bin.has_side_effects = true;
+    view_elf2bin.stdio = .inherit;
+    view_step.dependOn(&view_elf2bin.step);
+    const install_view = b.addInstallFileWithDir(view_bin, .bin, "VIEW.BIN");
+    view_step.dependOn(&install_view.step);
+    b.getInstallStep().dependOn(&install_view.step);
+
+    // ------------------------------------------------------------------
     // Guest: Sexiburger Action & Tab test app (Milestone 19 — issues #701, #705, #782)
     // SEXITEST.BIN. Live end-to-end action registration and tab model test.
     // ------------------------------------------------------------------
