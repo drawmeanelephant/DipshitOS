@@ -2046,11 +2046,21 @@ fn handle_mmap(args: Args, _: *exceptions.VectorFrame) u64 {
 
     if (!process.add_mmap_region(pid, va, aligned_len, prot, flags)) return error_result(.enomem);
 
+    // Register the region in BOTH places uaccess reads from: the transient
+    // module lists and the task TCB extras. handle_svc re-arms uaccess from
+    // the current task's TCB at EVERY svc entry, so a region only in the
+    // module lists (the historical sys_mmap behavior) vanishes before the
+    // next syscall — kernel copy_in/copy_out of mmap'd memory (e.g. the zc
+    // dialect file round trip, Z2a issue #756) then EFAULTs. exec.zig has
+    // always done both; sys_mmap only did the transient side.
+    const task_id = scheduler.current_id();
     if ((prot & 2) != 0) {
         uaccess.add_write_region(.{ .base = va, .len = aligned_len });
+        scheduler.add_task_write_region(task_id, .{ .base = va, .len = aligned_len });
     }
     if ((prot & 1) != 0) {
         uaccess.add_read_region(.{ .base = va, .len = aligned_len });
+        scheduler.add_task_read_region(task_id, .{ .base = va, .len = aligned_len });
     }
 
     // MAP_POPULATE (eager allocation)

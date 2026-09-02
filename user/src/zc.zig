@@ -1080,16 +1080,47 @@ fn parsePrimary(p: *Parser) anyerror!void {
                             _ = try p.expect(.r_paren);
                             emit(enc_movz(8, 4, 0));
                             emit(enc_svc(0));
+                        } else if (std.mem.eql(u8, member_tok.text, "mmap")) {
+                            // Z2a: sys_mmap (slot 63) over the prelude seam.
+                            // Anonymous RW private region, eager MAP_POPULATE so
+                            // kernel-side file copy_in/out can touch the pages.
+                            _ = try p.expect(.l_paren);
+                            try compileExpr(p); // len -> x0
+                            emit(enc_sub_imm(31, 31, 16));
+                            emit(enc_str(31, 0, 0)); // save len
+                            emit(enc_movz(0, 0, 0)); // x0 = addr hint 0
+                            emit(enc_ldr(31, 1, 0)); // x1 = len
+                            emit(enc_add_imm(31, 31, 16));
+                            emit(enc_movz(2, 3, 0)); // x2 = prot RW
+                            emit(enc_movz(3, 0x8022, 0)); // x3 = ANON|PRIVATE|POPULATE
+                            _ = try p.expect(.r_paren);
+                            emit(enc_movz(8, 63, 0));
+                            emit(enc_svc(0));
                         } else if (std.mem.eql(u8, member_tok.text, "file_open")) {
                             _ = try p.expect(.l_paren);
-                            try compileExpr(p);
+                            if (p.peek() != .string_lit) {
+                                print_err("file_open path must be a string literal", p.currentToken().line, p.currentToken().text);
+                                return error.CompileError;
+                            }
+                            const str_tok = p.advance();
+                            const res = try addString(str_tok.text);
+                            emitStringAdr(0, res.off); // x0 = path ptr
+                            emit(enc_movz(1, @intCast(res.len), 0)); // x1 = path len
                             emit(enc_sub_imm(31, 31, 16));
-                            emit(enc_str(31, 0, 0));
+                            emit(enc_str(31, 0, 0)); // save path ptr
+                            emit(enc_sub_imm(31, 31, 16));
+                            emit(enc_str(31, 1, 0)); // save path len
                             _ = try p.expect(.comma);
-                            try compileExpr(p);
-                            emit(enc_ldr(31, 1, 0));
-                            emit(enc_add_imm(31, 31, 16));
+                            try compileExpr(p); // flags -> x0
+                            emit(enc_sub_imm(31, 31, 16));
+                            emit(enc_str(31, 0, 0)); // save flags
                             _ = try p.expect(.r_paren);
+                            emit(enc_ldr(31, 2, 0)); // x2 = flags
+                            emit(enc_add_imm(31, 31, 16));
+                            emit(enc_ldr(31, 1, 0)); // x1 = path len
+                            emit(enc_add_imm(31, 31, 16));
+                            emit(enc_ldr(31, 0, 0)); // x0 = path ptr
+                            emit(enc_add_imm(31, 31, 16));
                             emit(enc_movz(8, 23, 0));
                             emit(enc_svc(0));
                         } else if (std.mem.eql(u8, member_tok.text, "file_read")) {
@@ -2553,7 +2584,7 @@ test "zc: Z0.5 zc builtins (write, yield, sleep, file ops)" {
         \\    zc.yield();
         \\    zc.sleep(5);
         \\    _ = zc.write(1, 4096, 12);
-        \\    let fd = zc.file_open(100, 1);
+        \\    let fd = zc.file_open("/f", 1);
         \\    _ = zc.file_read(fd, 200, 50);
         \\    _ = zc.file_write(fd, 200, 50);
         \\    zc.file_close(fd);
@@ -3076,6 +3107,100 @@ test "zc: Z1f enum with explicit tag values and statement switch" {
         \\        }
         \\    }
         \\    zc.exit(1);
+        \\}
+    ;
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
+}
+
+test "zc: Z2a mmap builtin returns a writable heap pointer" {
+    const src =
+        \\const zc = @import("zc");
+        \\pub fn main() void {
+        \\    const heap: [*]u8 = zc.mmap(16384);
+        \\    heap[0] = 65;
+        \\    heap[4096] = 66;
+        \\    if (heap[0] == 65) {
+        \\        zc.exit(72);
+        \\    }
+        \\    zc.exit(1);
+        \\}
+    ;
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
+}
+
+test "zc: Z2a file_open string path and pointer read/write compile" {
+    const src =
+        \\const zc = @import("zc");
+        \\pub fn main() void {
+        \\    const buf: [*]u8 = zc.mmap(4096);
+        \\    const fd: u64 = zc.file_open("/host/DATA.TXT", 1);
+        \\    const n: u64 = zc.file_read(fd, buf, 1024);
+        \\    const ofd: u64 = zc.file_open("/host/OUT.TXT", 6);
+        \\    _ = zc.file_write(ofd, buf, n);
+        \\    zc.file_close(fd);
+        \\    zc.file_close(ofd);
+        \\    if (n != 0) {
+        \\        zc.exit(72);
+        \\    }
+        \\    zc.exit(1);
+        \\}
+    ;
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
+}
+
+test "zc: Z2a chunked bump build and drain loops compile" {
+    const src =
+        \\const zc = @import("zc");
+        \\pub fn main() void {
+        \\    const heap_cap: u64 = 16384;
+        \\    const read_chunk: u64 = 1024;
+        \\    const heap: [*]u8 = zc.mmap(heap_cap);
+        \\    const in_fd: u64 = zc.file_open("/host/DATA.TXT", 1);
+        \\    const out_fd: u64 = zc.file_open("/host/OUT.TXT", 6);
+        \\    var used: u64 = 0;
+        \\    var n: u64 = zc.file_read(in_fd, heap, read_chunk);
+        \\    while (n != 0) {
+        \\        if (used + n <= heap_cap - read_chunk) {
+        \\            var i: u64 = 0;
+        \\            while (i < n) {
+        \\                heap[read_chunk + used + i] = heap[i];
+        \\                i = i + 1;
+        \\            }
+        \\            used = used + n;
+        \\        } else {
+        \\            zc.exit(2); // bounded arena overflow
+        \\        }
+        \\        n = zc.file_read(in_fd, heap, read_chunk);
+        \\    }
+        \\    zc.file_close(in_fd);
+        \\    if (used == 0) {
+        \\        zc.exit(73);
+        \\    }
+        \\    var c: u64 = 0;
+        \\    while (c < used) {
+        \\        heap[c] = heap[read_chunk + c];
+        \\        c = c + 1;
+        \\    }
+        \\    var left: u64 = used;
+        \\    while (left > 0) {
+        \\        var take: u64 = 2048;
+        \\        if (left < take) {
+        \\            take = left;
+        \\        }
+        \\        _ = zc.file_write(out_fd, heap, take);
+        \\        var j: u64 = 0;
+        \\        while (j < left - take) {
+        \\            heap[j] = heap[j + take];
+        \\            j = j + 1;
+        \\        }
+        \\        left = left - take;
+        \\    }
+        \\    zc.file_close(out_fd);
+        \\    zc.print("heap-ok\n");
+        \\    zc.exit(72);
         \\}
     ;
     const bytes = try compile(src);
