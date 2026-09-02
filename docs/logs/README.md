@@ -148,10 +148,12 @@ meaningful — on main.
 | agent/buffy/m33-sb4-damage-tracking | [`agent-buffy-m33-sb4-damage-tracking.md`](agent-buffy-m33-sb4-damage-tracking.md) |
 | agent/buffy/m33-sb5-wm-compose-n | [`agent-buffy-m33-sb5-wm-compose-n.md`](agent-buffy-m33-sb5-wm-compose-n.md) |
 | agent/buffy/m33-sb6-perf-payoff | [`agent-buffy-m33-sb6-perf-payoff.md`](agent-buffy-m33-sb6-perf-payoff.md) |
+| `agent/buffy/m34-flake803` | [`agent-buffy-m34-flake803.md`](agent-buffy-m34-flake803.md) |
 | `agent/buffy/m34-hf1-hf2-host-file-channel` | [`agent-buffy-m34-hf1-hf2-host-file-channel.md`](agent-buffy-m34-hf1-hf2-host-file-channel.md) |
 | M34 HF3 mutation ops (issue #737) | [`agent-buffy-m34-hf3-mutation.md`](agent-buffy-m34-hf3-mutation.md) |
 | M34 HF4 app delivery from the host folder (issue #738) | [`agent-buffy-m34-hf4-exec.md`](agent-buffy-m34-hf4-exec.md) |
 | M34 HF5 user-data migration to the host folder (issue #739) | [`agent-buffy-m34-hf5-user-data-migration.md`](agent-buffy-m34-hf5-user-data-migration.md) |
+| M34 HF6 FAT removal: slim to a boot volume, gate fleet simplification (issue #740) | [`agent-buffy-m34-hf6-fat-removal.md`](agent-buffy-m34-hf6-fat-removal.md) |
 | milestone nine interactive application events (claim 7463) | [`agent-buffy-m9-events.md`](agent-buffy-m9-events.md) |
 | milestone nine tracker (claim 8234) | [`agent-buffy-m9-tracker.md`](agent-buffy-m9-tracker.md) |
 | Roadmap refinement (claim 4951) | [`agent-buffy-roadmap-refinement.md`](agent-buffy-roadmap-refinement.md) |
@@ -222,11 +224,13 @@ meaningful — on main.
 | freebuff/okay-shower-thoughts-here-we-re-using-fat32-for-so-b0ce3067-2b04-4b81-984d-9fd76bfcf123 | [`freebuff-20260901-005.md`](freebuff-20260901-005.md) |
 | freebuff/okay-shower-thoughts-here-we-re-using-fat32-for-so-b0ce3067-2b04-4b81-984d-9fd76bfcf123 | [`freebuff-20260901-006.md`](freebuff-20260901-006.md) |
 | freebuff/okay-shower-thoughts-here-we-re-using-fat32-for-so-b0ce3067-2b04-4b81-984d-9fd76bfcf123 | [`freebuff-20260901-007.md`](freebuff-20260901-007.md) |
+| freebuff/okay-shower-thoughts-here-we-re-using-fat32-for-so-b0ce3067-2b04-4b81-984d-9fd76bfcf123 | [`freebuff-20260901-008.md`](freebuff-20260901-008.md) |
 | lane-b/m24-calc-features | [`lane-b-m24-calc-features.md`](lane-b-m24-calc-features.md) |
 | `lane-c/m20-text-rendering` | [`lane-c-m20-text-rendering.md`](lane-c-m20-text-rendering.md) |
 | `lane-d/m22-dev-tools` | [`lane-d-m22-dev-tools.md`](lane-d-m22-dev-tools.md) |
 | t3code/1145c9b5 (W1a import contract freeze) | [`t3code-1145c9b5.md`](t3code-1145c9b5.md) |
 | t3code/b2feefd3 | [`t3code-b2feefd3.md`](t3code-b2feefd3.md) |
+| t3code/b5bdb1b1 | [`t3code-b5bdb1b1.md`](t3code-b5bdb1b1.md) |
 | t3code concurrent-agents merge conflicts | [`t3code-concurrent-agents-merge-conflicts.md`](t3code-concurrent-agents-merge-conflicts.md) |
 | `t3code/fetch-issue-264-details` | [`t3code-fetch-issue-264-details.md`](t3code-fetch-issue-264-details.md) |
 | t3code/finish-523-console-snapshots | [`t3code-finish-523-console-snapshots.md`](t3code-finish-523-console-snapshots.md) |
@@ -236,4 +240,5 @@ meaningful — on main.
 | `t3code/issue-265-fix` | [`t3code-issue-265-fix.md`](t3code-issue-265-fix.md) |
 | `t3code/milestone-nine-triage` | [`t3code-milestone-nine-triage.md`](t3code-milestone-nine-triage.md) |
 | t3code/prune-claims-269 | [`t3code-prune-claims-269.md`](t3code-prune-claims-269.md) |
+| t3code/z1c-structs | [`t3code-z1c-structs.md`](t3code-z1c-structs.md) |
 <!-- LOGS_INDEX:END -->
