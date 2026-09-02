@@ -320,7 +320,7 @@ fn ensure_registry() []const Command {
             .{ .name = "echo", .help = "repeat your regrettable decisions", .usage = "echo <text...>", .category = .system, .handler = cmd_echo },
             .{ .name = "elephant", .help = "operational mascot diagnostics", .usage = "elephant", .category = .machine_identity, .handler = cmd_elephant },
             .{ .name = "sexiburger", .help = "operational mascot diagnostics (the Sexipus burger)", .usage = "sexiburger", .category = .machine_identity, .handler = cmd_sexiburger },
-            .{ .name = "exec", .help = "load a user program from the host share and enter it at EL0", .usage = "exec [<file> [arg...]]", .category = .tasks_processes, .max_args = 1 + esp_exec.max_exec_args, .handler = cmd_exec },
+            .{ .name = "exec", .help = "load a user program from the host share and enter it at EL0", .usage = "exec [-c<core>] [<file> [arg...]]", .category = .tasks_processes, .max_args = 1 + esp_exec.max_exec_args, .handler = cmd_exec },
             .{ .name = "fault", .help = "trigger a synchronous exception (diagnostic)", .usage = "fault", .category = .memory_state, .handler = cmd_fault },
             .{ .name = "handoff", .help = "display boot-to-kernel ABI data", .usage = "handoff", .category = .memory_state, .handler = cmd_handoff },
             .{ .name = "help", .help = "grouped command catalog and per-command/per-topic help", .usage = "help [<command>|<topic>]", .category = .system, .max_args = 1, .handler = cmd_help },
@@ -6378,9 +6378,35 @@ fn cmd_spawn(m: *Monitor, args: []const []const u8) ExecError {
 /// x0, argv block VA in x1) — bounded to `max_exec_args`; more than that
 /// is refused honestly. Every failure mode is reported honestly.
 fn cmd_exec(m: *Monitor, args: []const []const u8) ExecError {
-    const name = if (args.len >= 1) args[0] else esp_exec.default_name;
-    const prog_args = if (args.len >= 2) args[1..] else &.{};
-    switch (esp_exec.exec_file(name, prog_args)) {
+    // SMP user tasks (claim 2369): `exec -c<core> <file>` pins the spawned
+    // task to a secondary core (console TX is locked, so a pinned program
+    // may print from there). Any other leading token is the file name.
+    var pin: usize = 0;
+    var rest = args;
+    if (args.len >= 1 and args[0].len > 2 and args[0][0] == '-' and args[0][1] == 'c') {
+        var value: usize = 0;
+        for (args[0][2..]) |ch| {
+            if (ch < '0' or ch > '9') {
+                err_prefix(m);
+                m.console.print_line("-c<core>: core must be a decimal number");
+                return .invalid_argument;
+            }
+            value = value * 10 + (ch - '0');
+        }
+        if (value == 0 or value >= smp.max_cores) {
+            err_prefix(m);
+            m.console.puts("-c<core>: core must be in 1..");
+            m.console.print_u64(smp.max_cores - 1);
+            m.console.puts("\n");
+            return .invalid_argument;
+        }
+        pin = value;
+        rest = args[1..];
+    }
+    const name = if (rest.len >= 1) rest[0] else esp_exec.default_name;
+    const prog_args = if (rest.len >= 2) rest[1..] else &.{};
+    const result = if (pin != 0) esp_exec.exec_file_pinned(name, prog_args, pin) else esp_exec.exec_file(name, prog_args);
+    switch (result) {
         .ok => {
             const info = esp_exec.loaded().?;
             m.console.puts("exec: loaded ");

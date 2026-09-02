@@ -266,6 +266,36 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_status43.step);
 
     // ------------------------------------------------------------------
+    // Guest: the SMP user program (claim 2369) — SMP1.BIN, the FIRST user
+    // task that runs on a secondary core. Same freestanding target,
+    // linker script, elf2bin conversion, and ESP embedding as the others;
+    // the kernel's `exec -c1 SMP1.BIN` monitor command pins its task to
+    // core 1 (locked console TX makes a pinned program's sys_writes safe
+    // from there). It prints its hello marker, sleeps 2 ticks (the kernel
+    // parks core 1 on its WFE loop and resumes it after the wake), prints
+    // its exiting marker, and exits 0 — the live SMP gate's proof that a
+    // USER program ran on core 1 end to end.
+    // ------------------------------------------------------------------
+    const smp1 = b.addExecutable(.{
+        .name = "user-smp1",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/smp1.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    smp1.linker_script = b.path("user/linker.ld");
+    const smp1_step = b.step("smp1", "Build the SMP user program (zig-out/bin/SMP1.BIN; class A tooling, no VM)");
+    const smp1_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    smp1_elf2bin.addFileArg(smp1.getEmittedBin());
+    const smp1_bin = smp1_elf2bin.addOutputFileArg("SMP1.BIN");
+    smp1_elf2bin.has_side_effects = true;
+    smp1_elf2bin.stdio = .inherit;
+    smp1_step.dependOn(&smp1_elf2bin.step);
+    const install_smp1 = b.addInstallFileWithDir(smp1_bin, .bin, "SMP1.BIN");
+    b.getInstallStep().dependOn(&install_smp1.step);
+
+    // ------------------------------------------------------------------
     // Guest: fifth ESP user program (milestone five, card N6 — claim
     // 1384) — the UDP syscall proof UDP.BIN. Same freestanding target,
     // linker script, elf2bin conversion, and ESP embedding as USER.BIN /

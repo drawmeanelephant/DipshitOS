@@ -1137,6 +1137,43 @@ fn pl011_init() void {
 }
 
 const serial_ring = @import("serial_ring.zig"); // Arc5 #243: capture last 512B for tombstones
+const spinlock = @import("spinlock.zig"); // SMP user tasks (claim 2369): cross-core serial TX
+
+/// Serial TX lock (SMP user tasks on secondary cores). Every byte reaches
+/// the host through `uart_putc`; with the PE-0 tick gate lifted and user
+/// tasks allowed on cores 1-3, two cores can print concurrently. The lock
+/// is an IrqSaveSpinlock — IRQs stay MASKED for the whole write — because
+/// SVC-context prints run with IRQs unmasked: without the mask, a timer
+/// tick can preempt a print mid-line and the resumed shell (SAME core,
+/// "holder") would write INSIDE the critical section (observed live:
+/// `heap-oworker advances=18816` — the worker report merged into
+/// MAIN.ELF's heap-ok line in verify-live-zc). Polled TX holds are short,
+/// so a few microseconds of tick latency per line is nothing. The lock is
+/// holder-tracked so same-core reentry (a fault dump inside a print, or a
+/// nested uart_puts/uart_putc chain) proceeds instead of self-deadlocking
+/// — the claim-9408 `sched_lock_holder` pattern. IRQ context never prints
+/// (claim 9187 invariant), so a cross-core spinner always finds the holder
+/// running and releasing promptly. `smp.max_cores` = nobody.
+var serial_lock = spinlock.IrqSaveSpinlock{};
+var serial_lock_holder: usize = smp.max_cores;
+var serial_lock_daif: [smp.max_cores]u64 = [_]u64{ 0, 0, 0, 0 };
+
+fn serial_lock_held() bool {
+    return serial_lock_holder == smp.core_id();
+}
+
+fn serial_lock_acquire() void {
+    // Mask IRQs + take the spinlock; remember the pre-mask DAIF so the
+    // matching release restores it (reentrant calls never acquire, so the
+    // per-core slot holds exactly one outstanding save per core).
+    serial_lock_daif[smp.core_id()] = serial_lock.lock();
+    serial_lock_holder = smp.core_id();
+}
+
+fn serial_lock_release() void {
+    serial_lock_holder = smp.max_cores;
+    serial_lock.unlock(serial_lock_daif[smp.core_id()]);
+}
 
 /// Whether the serial cursor sits at the start of a line right now. Every
 /// byte reaches the TX through `uart_putc`, so tracking the delimiter here
@@ -1171,6 +1208,13 @@ fn uart_at_bol() bool {
 }
 
 fn uart_putc(byte: u8) void {
+    // Cross-core serial TX (SMP user tasks): hold the lock for the whole
+    // line at the `uart_puts` level; a standalone putc (uart_hex and
+    // friends) takes it per byte. Holder-tracked, so the inner calls from
+    // a locked uart_puts are no-ops.
+    const reentrant = serial_lock_held();
+    if (!reentrant) serial_lock_acquire();
+    defer if (!reentrant) serial_lock_release();
     // Arc5 #243: capture every serial byte into the ring buffer so
     // crash tombstones can include the last 512 bytes of serial output.
     serial_ring.append(&[_]u8{byte});
@@ -1221,6 +1265,12 @@ fn uart_putc(byte: u8) void {
 }
 
 pub fn uart_puts(text: []const u8) void {
+    // The whole write is one critical section so a secondary core's
+    // output never interleaves byte-wise with core 0's (holder-tracked:
+    // a fault dump or nested puts on the same core proceeds).
+    const reentrant = serial_lock_held();
+    if (!reentrant) serial_lock_acquire();
+    defer if (!reentrant) serial_lock_release();
     for (text) |byte| uart_putc(byte);
     // A non-newline-terminated write from THIS path is shell/kernel output
     // (the prompt): the open line belongs to the shell, so the next process

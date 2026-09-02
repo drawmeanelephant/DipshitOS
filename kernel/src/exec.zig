@@ -263,6 +263,18 @@ pub fn argv_va_for(content_len: usize) u64 {
 /// ESP stays the fallback (dual path until HF6 deletes the FAT app path),
 /// so every default boot is byte-identical.
 pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
+    return exec_file_impl(name, args, 0);
+}
+
+/// `exec_file` plus an SMP pin (claim 2369): the spawned task may run ONLY
+/// on `pin` (cores 1-3; the `exec -c<core>` monitor flag). Pinned user
+/// tasks are safe on a secondary core because console TX is now locked;
+/// they stay on their pinned core for their whole lifetime.
+pub fn exec_file_pinned(name: []const u8, args: []const []const u8, pin: usize) ExecResult {
+    return exec_file_impl(name, args, pin);
+}
+
+fn exec_file_impl(name: []const u8, args: []const []const u8, pin: usize) ExecResult {
     if (args.len > max_exec_args) return .too_many_args;
     if (name.len == 0) return .not_found;
 
@@ -333,7 +345,7 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
 
             if (image.interp) |interp_name| {
                 // Dynamic ELF executable (claim 7921): load runtime interpreter (LD.SO), setup auxv and shared library aperture.
-                return exec_dynamic_elf(name, args, program[0..got], image, interp_name);
+                return exec_dynamic_elf(name, args, program[0..got], image, interp_name, pin);
             }
 
             const seg0 = image.segments[0];
@@ -547,6 +559,7 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
             scheduler.add_task_write_region(task_id, .{ .base = data_va, .len = data_mem_size });
         }
         _ = process.bind(proc_id, task_id);
+        if (pin != 0) _ = scheduler.pin_task(task_id, pin); // SMP: `exec -c<core>`
     } else {
         // Defensive rollback (the upfront slot check makes this
         // unreachable): the process reap frees its owned pages.
@@ -565,6 +578,7 @@ fn exec_dynamic_elf(
     prog_buf: []const u8,
     image: elf_mod.Image,
     interp_name: []const u8,
+    pin: usize,
 ) ExecResult {
     if (!scheduler.has_free_slot()) return .pool_full;
 
@@ -848,6 +862,7 @@ fn exec_dynamic_elf(
         }
         scheduler.add_task_read_region(task_id, .{ .base = lib_va, .len = lib_pages * alloc.page_size });
         _ = process.bind(proc_id, task_id);
+        if (pin != 0) _ = scheduler.pin_task(task_id, pin); // SMP: `exec -c<core>`
     } else {
         _ = process.reap(proc_id);
         return .pool_full;
@@ -1204,6 +1219,35 @@ test "exec: ok path loads, validates, builds the root, and spawns the task" {
     // The loaded bytes landed in the process's OWN text page.
     const text_dst: [*]const u8 = @ptrFromInt(exec_proc.text_phys);
     try std.testing.expectEqualStrings("user: hello from the ESP\n", text_dst[0..25]);
+}
+
+test "exec: pinned exec routes the spawned task to exactly one core" {
+    // SMP user tasks (claim 2369): `exec -c<core>` (monitor flag) reaches
+    // the loader as `exec_file_pinned`, which pins the spawned task so
+    // core 0's pick skips it and only the pinned core can run it. This
+    // test pins to core 1, checks the TCB, then unpins with a plain exec
+    // (the spawned task must be free of the pin).
+    virtio_file.set_test_share(null);
+    defer virtio_file.set_test_share(null);
+    arm_allocator();
+    _ = mmu.build_user_root(userspace.text_va, 0x1000, 64, userspace.stack_va, 0x2000, 8192) orelse return error.TestUnexpectedResult;
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0);
+    scheduler.start();
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expect(scheduler.exit_current(7));
+    try std.testing.expect(scheduler.reap(2));
+    const img = dsk1("smp1: hello\n", dsk1_header_size, dsk1_header_size + 12);
+    test_seed("SMP1.BIN", img[0 .. dsk1_header_size + 12]);
+    try std.testing.expectEqual(ExecResult.ok, exec_file_pinned("SMP1.BIN", &.{}, 1));
+    const pinned = scheduler.task_info(2).?;
+    try std.testing.expectEqualStrings("user-exec", pinned.name);
+    try std.testing.expectEqual(@as(usize, 1), pinned.pin_core);
+    // A plain exec after it spawns into the next free slot, unpinned.
+    try std.testing.expectEqual(ExecResult.ok, exec_file("SMP1.BIN", &.{}));
+    try std.testing.expectEqual(@as(usize, 0), scheduler.task_info(3).?.pin_core);
 }
 
 test "exec: a second program loads and runs while the first is alive" {
