@@ -111,3 +111,59 @@ Branch: `agent/buffy2/m35-w4-core-completeness` · Worktree: `../virelaios-buffy
 - **Still open on W4 (next commits):** the named C float utility +
   pinned corpus fixture + `verify-live-wasm.sh` W4 live-gate phase;
   docs flips (scoping card, contract §6, status).
+
+## 2026-09-02 — W4 READY: float utility fixture + trunc-family correction + live-gate phase (claim done)
+
+- **The name:** the fixture is **floatapp** — a no-libc C temp-unit converter
+  (`tests/floatapp.c`, compiled against `tests/virelai.h` alone with the W3
+  determinism recipe — `zig cc -target wasm32-freestanding -nostdlib
+  -fno-sanitize=undefined -g0`, 3,441 B). Volatile input tables defeat
+  constant-folding so the float ops run at runtime; every emitted value was
+  cross-validated against independent IEEE arithmetic (Python `struct`
+  doubles) before pinning. Committed as `user/src/wasm-corpus/floatapp.wasm`
+  (sha256 **c963d5aa…48b42**); the W3 fixture-rebuild recipe reproduces the
+  existing pins byte-identically, so the pin is a true rebuild sentinel.
+- **The fixture flushed out a real opcode-map error (W4 fix):** floatapp's
+  `(long)d` lowering tripped the interpreter on 0xAC — which is
+  `i64.extend_i32_s`, NOT a trunc; my earlier float slice (and the W1b-era
+  wiring both) had misread the 0xA8–0xB1 region. Ground truth now matches
+  the spec/v8 opcode tables: plain trapping trunc lives at 0xA8/0xA9/0xAA/0xAB
+  (→i32) and 0xAE–0xB1 (→i64); 0xAC/0xAD are the i64 extends; the 0xFC 0–7
+  forms are the SATURATING (never-trap) trunc_sat family — which is what
+  clang actually emits for C casts. Rewired validate+exec: 0xFC 0–7 → the
+  new `truncSat` (NaN→0, clamp to min/max), 0xA8–0xB1 → trapping
+  `execTrunc` (NaN/out-of-range → `invalid_conv`). floatapp exercises both
+  families live. New host tests: trunc_sat saturates (no trap), plain trunc
+  traps, 0xAC/0xAD extend with correct sign.
+- **The .bss lesson (host-test contract, no interpreter change):** fresh
+  wasm memory is zero-initialized per spec; instantiate copies active data
+  segments on top and relies on the caller for zero pages (the guest runner
+  mmaps). floatapp is the first fixture that READS .bss (the env.write
+  cursor) before writing it — the host test's `undefined` stack store
+  poisoned that read (0xaa…) → false bounds trap. Fixed the test's store to
+  `@splat(0)`. Worth a note in the contract doc (§3 reads stay zero-copy).
+- **Live gate W4 phase (tools/verify-live-wasm.sh):** FLOATAPP.WASM is
+  sha-pinned (c963d5aa), exec'd FIRST in script1 (FLOATAPP, FILEAPP,
+  HELLO, then WINAPP — all short non-display apps stay in proven-safe
+  overlap classes; the winapp's overlap set stays ≤1 app). Per run the gate
+  asserts five distinctive byte-exact output needles, one per float opcode
+  family — `mC 100000 = 212.00` (f64 arith/mC loop), `bits64 c2f 21.50 =
+  4051accccccccccd` (f64 bit-pattern hex), `f2c 98.60 = 37.00` (saturating
+  trunc rounding), `f32 f2c -4.00 = -20.00` (f32 path), `sext chk = -66`
+  (i64.extend_i32_s) — plus `tasks user-exec exited status=590` (the total
+  output byte count: fileapp's length proof) and the `rx-w4-float` shell
+  response.
+- **Evidence (this boot, artifacts/):** `zig test user/src/wasm.zig`
+  **38/38**; `zig build wasm` green — WASM.BIN 63,456 B (bss tail 152,728,
+  inside the 256 KiB loader budget); `verify-coordination` + 
+  `verify-bss-budget` PASS (542 KiB headroom); **live class-B gate PASS
+  boot1** — float590=1 float1..5=1 floatresp=1, red fill 10,436 px,
+  fileapp 512, hello 55 all intact (artifacts/m35-wasm-live.txt,
+  live-wasm-report.txt, live-wasm-serial-boot1.log).
+- **Docs flipped:** wasm.zig header (0xFC 12+ out of subset, not 8+);
+  docs/wasm-core-scoping.md (W4 row ✅ 2026-09-02 + what-landed note, value
+  types/bulk-memory table rows, traps row); docs/wasm-import-contract.md
+  §6 (bulk-memory removed from the trap list — normative fix — and the
+  floating-point line says landed); docs/status.md (M35 table row: 5/6
+  closed, W5 open; open-workstreams pointer).
+- **W4 is done.** Remaining on the milestone: W5 #766 (the `wc` capstone).

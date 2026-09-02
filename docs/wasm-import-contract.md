@@ -270,8 +270,8 @@ capped at the interpreter level; `munmap` below tears down the arena.
 ## 6. What is NOT in the contract (explicit out of scope)
 
 * **WASI** — not exposed; `wasi_snapshot_preview1.*` imports always fail validation.
-* **Threads / atomics / SIMD / bulk-memory / multi-memory / GC** — traps or validation failure.
-* **Floating point** (W4) — `f32`/`f64` and their ops are **not** in the W1b/W3 subset; W4 adds them with a named float utility as gate. Linking a float-using module before W4 traps at validation.
+* **Threads / atomics / SIMD / GC / multi-memory / the 0xFC table ops (≥12)** — traps or validation failure. (Bulk-memory is NOT in this list: the 0xFC 8–11 `memory.init/copy/fill` + `data.drop` forms and the 0xFC 0–7 saturating truncs landed in W4 and are in subset; they execute normally and never trap on their own.)
+* **Floating point** — `f32`/`f64`, their ops, conversions, reinterpret, the plain trapping trunc family (0xA8–0xB1) and the saturating forms (0xFC 0–7) **landed in W4** (claim 7395): gated by the named C float utility `tests/floatapp.c` (pinned c963d5aa), which produces byte-exact live output (590 bytes, exit 590). A float-using module linked before W4 trapped at validation; that link-time rejection is gone.
 * **Networking (slots 9–11, 30–33), clipboard (38–39), exec/kill (28/29), wmctl (65)** — not `env.*` in M35. Raw `poll_event`/`wait_event` (21/22) are not imports; the interpreter pumps events.
 * **Window-depth and other kernel syscalls not in §5** — win_fill_batch (46), win_resize (47), win_raise_front (49), win_lower_back (50), notify (51), win_set_unsaved (53), drag_read (55), pipe_read/pipe_write (56/57), font_size (58), ping_send/ping_poll (59/60), win_set_title (61), net_stats (62) — all reserved for M35; a wasm app needing resize/title/unsaved flags is a future contract extension by ADR, never ad hoc.
 * **File-system mutation beyond §5.1:** pipe/mmap-shared tags/scanout — reserved.

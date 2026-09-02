@@ -4,9 +4,9 @@
 //! i32/i64/f32/f64 (W4), block/loop/if/br/br_if/br_table/return/call/
 //! call_indirect, one linear memory (2 MiB / 32 pages max — trap on
 //! `memory.grow` beyond, NO unbounded mmap), one function table. Traps
-//! are named with module + byte offset. Threads, atomics, SIMD,
-//! bulk-memory (0xFC 8+, the W4-gated 0xFC trunc/table/memory ops) and
-//! multi-memory stay OUT of subset.
+//! are named with module + byte offset. Threads, atomics, SIMD, the 0xFC
+//! 12+ table ops, and multi-memory stay OUT of subset (the 0xFC 0..11
+//! trunc_sat + bulk-memory forms landed in W4).
 //!
 //! Import dispatch to ADR 0007 syscalls is W3 (`docs/wasm-import-
 //! contract.md`); imported functions parse + validate, but calling one
@@ -287,7 +287,7 @@ pub const TrapKind = enum {
     bounds, // memory/table/index out of bounds
     call_indirect_type,
     div_by_zero, // integer div/rem only — wasm float div yields +/-inf, never traps
-    invalid_conv, // trunc*: NaN or out-of-range integer conversion (W4)
+    invalid_conv, // 0xAA..0xB1 plain trunc*: NaN or out-of-range (W4)
     grow_limit,
     call_depth,
     stack_overflow,
@@ -1065,12 +1065,32 @@ fn validateOp(
             if (!unary) try vpop(vs, ctl[0..ctl_len.*], .f64);
             try vpush(vs, .f64);
         },
+        0xA8, 0xA9 => { // i32.trunc_f32_s/u — plain (trapping) trunc
+            try vpop(vs, ctl[0..ctl_len.*], .f32);
+            try vpush(vs, .i32);
+        },
+        0xAA, 0xAB => { // i32.trunc_f64_s/u
+            try vpop(vs, ctl[0..ctl_len.*], .f64);
+            try vpush(vs, .i32);
+        },
+        0xAC, 0xAD => { // i64.extend_i32_s / _u
+            try vpop(vs, ctl[0..ctl_len.*], .i32);
+            try vpush(vs, .i64);
+        },
+        0xAE, 0xAF => { // i64.trunc_f32_s/u
+            try vpop(vs, ctl[0..ctl_len.*], .f32);
+            try vpush(vs, .i64);
+        },
+        0xB0, 0xB1 => { // i64.trunc_f64_s/u
+            try vpop(vs, ctl[0..ctl_len.*], .f64);
+            try vpush(vs, .i64);
+        },
         0xB2...0xBF => { // float<->int converts + reinterpret
             const t = convStack(op); // {pop, push} pair
             try vpop(vs, ctl[0..ctl_len.*], t.in);
             try vpush(vs, t.out);
         },
-        0xFC => { // 0xFC prefix: trunc 0..7 + bulk-memory 8..11 in subset
+        0xFC => { // 0xFC prefix: trunc_sat 0..7 + bulk-memory 8..11 in subset
             const sub = try body.uleb();
             switch (sub) {
                 0...7 => {
@@ -1126,10 +1146,6 @@ fn validateOp(
         0xA7 => {
             try vpop(vs, ctl[0..ctl_len.*], .i64);
             try vpush(vs, .i32);
-        },
-        0xA8, 0xA9 => { // i64.extend_i32_s / _u
-            try vpop(vs, ctl[0..ctl_len.*], .i32);
-            try vpush(vs, .i64);
         },
         0xC0...0xC4 => {
             const t: ValType = if (op <= 0xC1) .i32 else .i64;
@@ -1188,7 +1204,11 @@ fn convStack(op: u8) ConvShape {
     };
 }
 
-/// Stack effect of the 0xFC 0..7 trunc subopcodes.
+/// Stack effect of the trunc subopcodes 0..7 shared by the 0xFC 0..7
+/// trunc_sat forms and execTrunc's plain-trunc index mapping (the plain
+/// family's bytes 0xA8..0xB1 map to this index by skips: 0,1=f32→i32,
+/// 2,3=f64→i32, 4,5=f32→i64, 6,7=f64→i64 — 0xAC/0xAD are extends, not
+/// truncs).
 fn truncStack(sub: u32) ConvShape {
     return switch (sub) {
         0, 1 => .{ .in = .f32, .out = .i32 }, // i32.trunc_f32_s/u
@@ -1780,15 +1800,26 @@ fn execBody(mm: *Machine, m: *const Module, ft0: *const FuncType) CallResult {
             0x99...0xA6 => { // f64 unary + binary (abs..copysign)
                 tryPush(mm, .{ .f64 = execFloat(f64, op - 0x99, mm) }) catch return mkTrap(.stack_overflow, mm.module_name, op_off);
             },
+            0xA8, 0xA9 => { // i32.trunc_f32_s/u — plain, traps on NaN/overflow
+                const r = execTrunc(mm, op - 0xA8) orelse return mkTrap(.invalid_conv, mm.module_name, op_off);
+                tryPush(mm, r) catch return mkTrap(.stack_overflow, mm.module_name, op_off);
+            },
+            0xAA, 0xAB => { // i32.trunc_f64_s/u
+                const r = execTrunc(mm, op - 0xAA + 2) orelse return mkTrap(.invalid_conv, mm.module_name, op_off);
+                tryPush(mm, r) catch return mkTrap(.stack_overflow, mm.module_name, op_off);
+            },
+            0xAE...0xB1 => { // i64.trunc_f32/f64_s/u (AE→4 .. B1→7)
+                const r = execTrunc(mm, op - 0xAE + 4) orelse return mkTrap(.invalid_conv, mm.module_name, op_off);
+                tryPush(mm, r) catch return mkTrap(.stack_overflow, mm.module_name, op_off);
+            },
             0xB2...0xBF => { // float<->int converts + reinterpret
                 tryPush(mm, execConv(mm, op)) catch return mkTrap(.stack_overflow, mm.module_name, op_off);
             },
-            0xFC => { // trunc 0..7 + bulk-memory 8..11
+            0xFC => { // trunc_sat 0..7 + bulk-memory 8..11
                 const sub = body.uleb() catch return mkTrap(.bounds, mm.module_name, op_off);
                 switch (sub) {
-                    0...7 => {
-                        const r = execTrunc(mm, sub) orelse return mkTrap(.invalid_conv, mm.module_name, op_off);
-                        tryPush(mm, r) catch return mkTrap(.stack_overflow, mm.module_name, op_off);
+                    0...7 => { // trunc_sat: clamps, never traps
+                        tryPush(mm, execTruncSat(mm, sub)) catch return mkTrap(.stack_overflow, mm.module_name, op_off);
                     },
                     8 => { // memory.init didx memidx: (dst src n), src in segment didx
                         const didx = body.uleb() catch return mkTrap(.bounds, mm.module_name, op_off);
@@ -1848,10 +1879,10 @@ fn execBody(mm: *Machine, m: *const Module, ft0: *const FuncType) CallResult {
             0xA7 => { // i32.wrap_i64
                 tryPush(mm, .{ .i32 = @truncate(popVal(mm).i64) }) catch return mkTrap(.stack_overflow, mm.module_name, op_off);
             },
-            0xA8 => { // i64.extend_i32_s
+            0xAC => { // i64.extend_i32_s
                 tryPush(mm, .{ .i64 = popVal(mm).i32 }) catch return mkTrap(.stack_overflow, mm.module_name, op_off);
             },
-            0xA9 => { // i64.extend_i32_u
+            0xAD => { // i64.extend_i32_u
                 const v = popVal(mm).i32;
                 tryPush(mm, .{ .i64 = @intCast(@as(u32, @bitCast(v))) }) catch return mkTrap(.stack_overflow, mm.module_name, op_off);
             },
@@ -2228,7 +2259,9 @@ fn truncToInt(comptime F: type, comptime I: type, unsigned: bool, x: F) ?I {
     return @intFromFloat(x);
 }
 
-/// 0xFC 0..7 plain trunc conversions. Returns null → invalid_conv trap.
+/// 0xAA..0xB1 plain trunc conversions (the trapping forms). Returns null
+/// → invalid_conv trap. (The 0xFC 0..7 trunc_sat forms never trap — see
+/// execTruncSat.)
 fn execTrunc(mm: *Machine, sub: u32) ?Value {
     return switch (sub) {
         0 => blk: { // i32.trunc_f32_s
@@ -2263,6 +2296,49 @@ fn execTrunc(mm: *Machine, sub: u32) ?Value {
             const r = truncToInt(f64, i64, true, popVal(mm).f64) orelse break :blk null;
             break :blk .{ .i64 = r };
         },
+    };
+}
+
+/// Saturating truncation (0xFC 0..7 trunc_sat*, which clang lowers C
+/// float->int casts to): NaN -> 0 and out-of-range clamps to the integer
+/// min/max — NEVER traps. (The plain trunc* family at 0xAA..0xB1 keeps
+/// the trapping discipline; truncToInt's range test doubles as the exact
+/// clamp predicate.)
+fn truncSat(comptime F: type, comptime I: type, unsigned: bool, x: F) I {
+    const xd: f64 = x;
+    if (xd != xd) return 0; // NaN -> 0
+    const r = truncToInt(F, I, unsigned, x) orelse blk: {
+        if (unsigned) {
+            // Out of range upward -> max (stored as the signed container's
+            // bit pattern); negative -> 0 (trunc toward zero).
+            const mx: I = if (comptime I == i32)
+                @as(i32, @bitCast(@as(u32, std.math.maxInt(u32))))
+            else
+                @as(i64, @bitCast(@as(u64, std.math.maxInt(u64))));
+            break :blk if (xd > -1.0) mx else 0;
+        }
+        // Signed: xd >= 2^(W-1) -> max; xd <= -(2^(W-1))-1 -> min. (The
+        // exact halves, e.g. -2147483648.5, are truncToInt-in-range and
+        // never reach here.)
+        break :blk if (xd >= 0)
+            @as(I, @intCast(std.math.maxInt(I)))
+        else
+            @as(I, @intCast(std.math.minInt(I)));
+    };
+    return r;
+}
+
+/// 0xFC 0..7 trunc_sat conversions (saturating, never trap).
+fn execTruncSat(mm: *Machine, sub: u32) Value {
+    return switch (sub) {
+        0 => .{ .i32 = truncSat(f32, i32, false, popVal(mm).f32) }, // i32.trunc_sat_f32_s
+        1 => .{ .i32 = truncSat(f32, i32, true, popVal(mm).f32) },
+        2 => .{ .i32 = truncSat(f64, i32, false, popVal(mm).f64) }, // i32.trunc_sat_f64_s
+        3 => .{ .i32 = truncSat(f64, i32, true, popVal(mm).f64) },
+        4 => .{ .i64 = truncSat(f32, i64, false, popVal(mm).f32) }, // i64.trunc_sat_f32_s
+        5 => .{ .i64 = truncSat(f32, i64, true, popVal(mm).f32) },
+        6 => .{ .i64 = truncSat(f64, i64, false, popVal(mm).f64) }, // i64.trunc_sat_f64_s
+        else => .{ .i64 = truncSat(f64, i64, true, popVal(mm).f64) },
     };
 }
 
@@ -3115,9 +3191,11 @@ test "w4: f32 div — f32.const + f32.div (0x95), IEEE result" {
     try testing.expectEqual(std.math.inf(f32), ri.ret.vals[0].f32);
 }
 
-test "w4: trunc — i32.trunc_f64_s (0xFC 2) truncates and traps on NaN/overflow" {
+test "w4: trunc_sat (0xFC 2) saturates — NaN→0, overflow clamps, never traps" {
+    // clang lowers C float->int casts to the 0xFC trunc_sat forms (the
+    // nontrapping-float-to-int opcodes) — i32.trunc_sat_f64_s = 0xFC 2.
     // (func (export "tr") (param f64) (result i32)
-    //   local.get 0  i32.trunc_f64_s)
+    //   local.get 0  i32.trunc_sat_f64_s)
     const bytes = "\x00\x61\x73\x6d\x01\x00\x00\x00" ++
         "\x01\x06\x01\x60\x01\x7c\x01\x7f" ++
         "\x03\x02\x01\x00" ++
@@ -3132,10 +3210,71 @@ test "w4: trunc — i32.trunc_f64_s (0xFC 2) truncates and traps on NaN/overflow
     try testing.expectEqual(@as(i32, 3), r.ret.vals[0].i32);
     const rn = call(&machine, &m, 0, &.{.{ .f64 = -3.9 }});
     try testing.expectEqual(@as(i32, -3), rn.ret.vals[0].i32);
-    const rt = call(&machine, &m, 0, &.{.{ .f64 = std.math.nan(f64) }});
+    const rnan = call(&machine, &m, 0, &.{.{ .f64 = std.math.nan(f64) }});
+    try testing.expect(rnan == .ret); // saturates: NaN -> 0, no trap
+    try testing.expectEqual(@as(i32, 0), rnan.ret.vals[0].i32);
+    const rhi = call(&machine, &m, 0, &.{.{ .f64 = 1e300 }});
+    try testing.expect(rhi == .ret); // clamps to i32 max, no trap
+    try testing.expectEqual(@as(i32, std.math.maxInt(i32)), rhi.ret.vals[0].i32);
+    const rlo = call(&machine, &m, 0, &.{.{ .f64 = -1e300 }});
+    try testing.expect(rlo == .ret);
+    try testing.expectEqual(@as(i32, std.math.minInt(i32)), rlo.ret.vals[0].i32);
+}
+
+test "w4: plain trunc (0xA8 i32.trunc_f32_s) traps on NaN/overflow" {
+    // The plain (trapping) trunc family lives at 0xA8/0xA9/0xAA/0xAB
+    // (to i32) and 0xAE..0xB1 (to i64) — 0xAC/0xAD are the i64.extend
+    // ops, NOT truncs (a misread of the opcode table the floatapp gate
+    // flushed out). floatapp carries 0xA8-adjacent plain truncs where
+    // clang can prove the value is in range.
+    // (func (export "tr") (param f32) (result i32)
+    //   local.get 0  i32.trunc_f32_s)
+    const bytes = "\x00\x61\x73\x6d\x01\x00\x00\x00" ++
+        "\x01\x06\x01\x60\x01\x7d\x01\x7f" ++
+        "\x03\x02\x01\x00" ++
+        "\x07\x06\x01\x02\x74\x72\x00\x00" ++
+        "\x0a\x07\x01\x05\x00\x20\x00\xa8\x0b";
+    var m = try parse(bytes);
+    try validate(&m);
+    var store: [page_size]u8 = undefined;
+    try testing.expect(instantiate(&machine, &m, &store, "trp") == null);
+    const r = call(&machine, &m, 0, &.{.{ .f32 = 3.9 }});
+    try testing.expect(r == .ret);
+    try testing.expectEqual(@as(i32, 3), r.ret.vals[0].i32);
+    const rt = call(&machine, &m, 0, &.{.{ .f32 = std.math.nan(f32) }});
     try testing.expect(rt == .trap and rt.trap.kind == .invalid_conv);
-    const ro = call(&machine, &m, 0, &.{.{ .f64 = 1e300 }});
+    const ro = call(&machine, &m, 0, &.{.{ .f32 = 1e30 }});
     try testing.expect(ro == .trap and ro.trap.kind == .invalid_conv);
+}
+
+test "w4: i64.extend_i32_s/u (0xAC/0xAD) widen with the right sign" {
+    // (func (export "s") (param i32) (result i64)
+    //   local.get 0  i64.extend_i32_s)
+    const sb = "\x00\x61\x73\x6d\x01\x00\x00\x00" ++
+        "\x01\x06\x01\x60\x01\x7f\x01\x7e" ++
+        "\x03\x02\x01\x00" ++
+        "\x07\x05\x01\x01\x73\x00\x00" ++
+        "\x0a\x07\x01\x05\x00\x20\x00\xac\x0b";
+    var ms = try parse(sb);
+    try validate(&ms);
+    var store: [page_size]u8 = undefined;
+    try testing.expect(instantiate(&machine, &ms, &store, "exts") == null);
+    const r1 = call(&machine, &ms, 0, &.{.{ .i32 = -1 }});
+    try testing.expectEqual(@as(i64, -1), r1.ret.vals[0].i64);
+    const r2 = call(&machine, &ms, 0, &.{.{ .i32 = std.math.minInt(i32) }});
+    try testing.expectEqual(@as(i64, -2147483648), r2.ret.vals[0].i64);
+    // (func (export "u") (param i32) (result i64)
+    //   local.get 0  i64.extend_i32_u)
+    const ub = "\x00\x61\x73\x6d\x01\x00\x00\x00" ++
+        "\x01\x06\x01\x60\x01\x7f\x01\x7e" ++
+        "\x03\x02\x01\x00" ++
+        "\x07\x05\x01\x01\x75\x00\x00" ++
+        "\x0a\x07\x01\x05\x00\x20\x00\xad\x0b";
+    var mu = try parse(ub);
+    try validate(&mu);
+    try testing.expect(instantiate(&machine, &mu, &store, "extu") == null);
+    const r3 = call(&machine, &mu, 0, &.{.{ .i32 = -1 }});
+    try testing.expectEqual(@as(i64, 4294967295), r3.ret.vals[0].i64);
 }
 
 test "w4: f64.convert_i64_s (0xB9) exact-via-rounding + f64.reinterpret_i64 (0xBF)" {
@@ -3767,4 +3906,38 @@ test "w3: live-gate app fixtures parse + validate against the frozen surface" {
     }
     try testing.expectEqual(@as(usize, 1), nwin);
     try testing.expectEqual(@as(usize, 1), nfile);
+}
+
+test "w4: floatapp fixture runs in-guest byte-exact (pinned output, exit = bytes)" {
+    // The exact FLOATAPP.WASM binary the class-B gate (tools/verify-live-wasm.sh
+    // W4 phase) drops into the share — the named C float utility from
+    // tests/floatapp.c (compiled against tests/virelai.h alone with the W3
+    // determinism recipe, volatile input tables so the float ops execute
+    // at runtime). env.write captures the FULL 590-byte output through the
+    // seam and env.exit's status is the byte count (fileapp's length
+    // proof): byte-exact output + exit = 590 in one host test.
+    const fixture = @embedFile("wasm-corpus/floatapp.wasm");
+    var m = try parse(fixture);
+    try validate(&m);
+    // Fresh memory is zero-initialized per spec; the guest runner gets
+    // zero pages from mmap, so the host test must zero too — floatapp is
+    // the first fixture that READS .bss (the env.write cursor) before
+    // writing it, and an undefined stack array poisons that read.
+    var store: [max_mem_pages * page_size]u8 = @splat(0);
+    try testing.expect(instantiate(&machine, &m, &store, "floatapp") == null);
+    var capture_buf: [1024]u8 = undefined;
+    var cap = HostCapture{ .write_buf = &capture_buf };
+    g_capture = &cap;
+    defer g_capture = null;
+    const entry = entryExport(&m).?;
+    const r = call(&machine, &m, entry, &.{});
+    switch (r) {
+        .ret => {},
+        .trap => try testing.expectEqual(TrapKind.guest_exit, r.trap.kind),
+    }
+    const expected = "c2f 0.00 = 32.00\nc2f 10.00 = 50.00\nc2f 21.50 = 70.70\nc2f -40.00 = -40.00\nc2f 100.00 = 212.00\nf2c 32.00 = 0.00\nf2c 50.00 = 10.00\nf2c 98.60 = 37.00\nf2c 212.00 = 100.00\nf2c -40.00 = -40.00\nmC 0 = 32.00\nmC 10000 = 50.00\nmC 21500 = 70.70\nmC -40000 = -40.00\nmC 100000 = 212.00\nf32 c2f 21.50 = 70.70\nf32 c2f 100.00 = 212.00\nf32 c2f -40.00 = -40.00\nf32 f2c 212.00 = 100.00\nf32 f2c 70.70 = 21.50\nf32 f2c -4.00 = -20.00\nbits64 c2f 21.50 = 4051accccccccccd\nbits64 c2f -40.00 = c044000000000000\nbits64 f2c 98.60 = 4042800000000000\nbits32 c2f 21.50 = 428d6666\nbits32 f2c 70.70 = 41abffff\nsext chk = -66\n";
+    try testing.expectEqual(@as(usize, expected.len), cap.wrote);
+    try testing.expectEqualStrings(expected, cap.write_buf[0..cap.wrote]);
+    try testing.expect(cap.exited);
+    try testing.expectEqual(@as(i32, 590), cap.exit_status);
 }

@@ -1,6 +1,6 @@
 # WASM core interpreter (M35 proposal) — scoping sketch and gated card split
 
-Status: **PROPOSED — filed W1a + W1b + W2–W5 (#778, #762–#766)** · Date: 2026-09-01 ·
+Status: **OPEN — W1a + W1b + W2 + W3 + W4 landed (#778, #762–#765); W5 (`wc`, #766) remains** · Date: 2026-09-01 (updated 2026-09-02) ·
 Frozen import contract: **`docs/wasm-import-contract.md` (W1a #778) — normative for W3 (#764) + W5 (#766)** ·
 Derived from: the custom-virtio file channel (M34 HF1–HF3, claims 7710/9459),
 ADR 0007's syscall ABI, the M32 in-guest compiler ladder (zc, #749–#761), and
@@ -78,12 +78,12 @@ A **wasm-core integer subset first**, growing honestly:
 
 | Feature | In first slice | Later |
 |---------|----------------|-------|
-| Value types | i32, i64 | f32/f64 (W4) |
+| Value types | i32, i64 | — (f32/f64 landed in W4, claim 7395) |
 | Control flow | block/loop/if/br/br_if/br_table/return/call/call_indirect | — |
 | Linear memory | one bounded memory, **2 MiB (32 pages) cap — trap on `memory.grow` beyond** (mmap-backed via slot 63) | multiple memories (spec later) |
 | Tables | one function table (call_indirect) | — |
-| Traps | bounds, call_indirect type, divide-by-zero, unreachable | — |
-| Threads / atomics / SIMD / bulk-memory | **never in scope** (bounded by design) | — |
+| Traps | bounds, call_indirect type, divide-by-zero, unreachable, invalid_conv (plain trunc NaN/overflow), grow_limit, stack overflow | — |
+| Threads / atomics / SIMD / GC / multi-memory / 0xFC table ops (≥12) | **never in scope** (bounded by design) | — (bulk-memory 0xFC 8–11 + trunc_sat 0xFC 0–7 landed in W4 — no longer a trap) |
 
 Bounded like zc: one source file, fixed buffers, no heap in the interpreter
 itself (or a tiny bump arena if W3's file apps need it). Every trap names
@@ -115,12 +115,29 @@ off-ramp possible without rework.
 | W1b | **Core interpreter** (#762) — `user/src/wasm.zig` (path frozen; builds `WASM.BIN`): wasm binary parse + validation + integer-subset execution (i32/i64, control flow, one bounded memory with 32-page cap + grow-trap, `call_indirect`, traps named with module+offset), host unit tests on parse AND exec; `tests/wasm-corpus/` starts here | — (parallel with W1a) | `zig test`: a hand-built module executes deterministically; each trap class fires named; `memory.grow` past 32 pages traps; BSS before/after recorded |
 | W2 | **First user surface + live proof** (#763) — `exec WASM.BIN <file>` (HF4 app delivery); module read through the file channel; class-B gate: host builds a C hello-world with `zig cc` (684 B), drops it in the share, guest runs it and the output is observed; `wasm run` monitor command optional/deferred | W1b | `tools/verify-live-wasm.sh` PASS on VZ: `write` import lands on the console byte-exact, `exit` status observed, shell alive |
 | W3 | **Import breadth** (#764) — the frozen syscall set (file, win, audio, clipboard, timers, mmap) behind `env.*` imports per the W1a contract; a wasm window app and a wasm file app; `virelai.h`/`virelai.zig` host shims | W2 + W1a | live gate: wasm window app's fill observed via the existing scanout/capture path; wasm file app's read verified byte-exact |
-| W4 | **Core completeness** (#765) — f32/f64, sign-extension ops, bulk-memory only as justified by the capstone; floats tied to a **named C float utility** (`zig cc`, pinned output) — not `wc`, which is integer-only | W3 | live gate: the named float utility produces pinned byte-exact output; determinism fixtures (extending `tests/wasm-corpus/`) |
+| W4 | **Core completeness** (#765) — f32/f64, sign-extension ops, bulk-memory only as justified by the capstone; floats tied to a **named C float utility** (`zig cc`, pinned output) — not `wc`, which is integer-only | W3 | ✅ **DONE 2026-09-02** (claim 7395): named C float utility `tests/floatapp.c` pinned c963d5aa; live gate asserts five float opcode families byte-exact + exit 590; determinism fixtures extend `tests/wasm-corpus/` |
 | W5 | **The ecosystem capstone** (#766) — **`wc`**: byte/line/word counts via file-channel reads, byte-exact; shipped as an HF4 app; the import contract rewritten to standalone-author standard, proven by a fresh host author writing a working `virelai.h` program from the doc alone | W4 | the `wc` app ships and runs in a live gate with byte-exact counts; a second app written from the contract doc alone compiles and runs |
 
 W1b+W2 can be one claim if reviewers prefer a single vertical slice (the
 HF1+HF2 pattern — prove the whole concept in one PR); W1a is docs-only and
 can be claimed in parallel by a second agent.
+
+**What W4 landed (claim 7395, `docs/march-m35-w4-core-completeness.md`):**
+f32/f64 value types + the full float opcode surface (consts, load/store,
+cmps, unary/binary, converts, reinterpret) with the W1 trap discipline —
+float div-by-zero yields ±inf and never traps, the plain trapping trunc
+family (0xA8–0xB1) traps NaN/out-of-range as `invalid_conv`, and the
+saturating forms (0xFC 0–7, what clang lowers C casts to) clamp and never
+trap. Sign-extension ops (0xC0–0xC4) were already in W1b's integer set;
+W4 exercises them with a proof fixture. Bulk-memory 0xFC 8–11
+(`memory.init/copy/fill`, `data.drop`) was **justified by a compile probe**
+(clang emits `memory.copy`/`memory.fill` for runtime-size memcpy/memset
+under the plain W3 recipe) and landed with the DataCount section + passive
+data segments. The named C float utility runs byte-exact in-guest: its
+590-byte output is asserted line-by-line (five opcode families) with exit
+status 590 in `tools/verify-live-wasm.sh`. Interpreter-side W4 surface:
+`user/src/wasm.zig` (+~600 lines over W3); WASM.BIN 63,456 B, inside the
+256 KiB loader budget.
 
 ## Risks and honest limits
 
