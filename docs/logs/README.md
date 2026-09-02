@@ -65,9 +65,12 @@ meaningful — on main.
 |--------|----------|
 | `freebuff/m22-lane-d-wave2` | [`0720-m22-lane-d-wave2.md`](0720-m22-lane-d-wave2.md) |
 | agent/antigravity/in-guest-compiler | [`agent-antigravity-in-guest-compiler.md`](agent-antigravity-in-guest-compiler.md) |
+| agent/antigravity/sexiburger | [`agent-antigravity-sexiburger.md`](agent-antigravity-sexiburger.md) |
 | agent/antigravity/vl6-gui-consumer | [`agent-antigravity-vl6-gui-consumer.md`](agent-antigravity-vl6-gui-consumer.md) |
 | agent/antigravity/z05-dialect-contract | [`agent-antigravity-z05-dialect-contract.md`](agent-antigravity-z05-dialect-contract.md) |
 | agent/antigravity/z1a-data-segment | [`agent-antigravity-z1a-data-segment.md`](agent-antigravity-z1a-data-segment.md) |
+| agent/antigravity/z1d-pointers | [`agent-antigravity-z1d-pointers.md`](agent-antigravity-z1d-pointers.md) |
+| agent/antigravity/z1e-control-flow | [`agent-antigravity-z1e-control-flow.md`](agent-antigravity-z1e-control-flow.md) |
 | `agent/buffy/arc1-checkbox-toggle` | [`agent-buffy-arc1-checkbox-toggle.md`](agent-buffy-arc1-checkbox-toggle.md) |
 | `agent/buffy/arc1-progressbar` | [`agent-buffy-arc1-progressbar.md`](agent-buffy-arc1-progressbar.md) |
 | `agent/buffy/arc1-scrollview` | [`agent-buffy-arc1-scrollview.md`](agent-buffy-arc1-scrollview.md) |
@@ -154,6 +157,7 @@ meaningful — on main.
 | M34 HF4 app delivery from the host folder (issue #738) | [`agent-buffy-m34-hf4-exec.md`](agent-buffy-m34-hf4-exec.md) |
 | M34 HF5 user-data migration to the host folder (issue #739) | [`agent-buffy-m34-hf5-user-data-migration.md`](agent-buffy-m34-hf5-user-data-migration.md) |
 | M34 HF6 FAT removal: slim to a boot volume, gate fleet simplification (issue #740) | [`agent-buffy-m34-hf6-fat-removal.md`](agent-buffy-m34-hf6-fat-removal.md) |
+| `agent/buffy/fix-810-boot-probe-flake` | [`agent-buffy-m34-hf7-clone-dedup.md`](agent-buffy-m34-hf7-clone-dedup.md) |
 | milestone nine interactive application events (claim 7463) | [`agent-buffy-m9-events.md`](agent-buffy-m9-events.md) |
 | milestone nine tracker (claim 8234) | [`agent-buffy-m9-tracker.md`](agent-buffy-m9-tracker.md) |
 | Roadmap refinement (claim 4951) | [`agent-buffy-roadmap-refinement.md`](agent-buffy-roadmap-refinement.md) |
@@ -189,6 +193,9 @@ meaningful — on main.
 | `agent/buffy/wms8-unsaved-drain` | [`agent-buffy-wms8-unsaved-drain.md`](agent-buffy-wms8-unsaved-drain.md) |
 | agent/buffy/wms9-dsk1-drawing-apps (WMS9/DSK1 drawing-app fix) | [`agent-buffy-wms9-dsk1-drawing-apps.md`](agent-buffy-wms9-dsk1-drawing-apps.md) |
 | agent/buffy/wms9-surface-seam-perf | [`agent-buffy-wms9-surface-seam-perf.md`](agent-buffy-wms9-surface-seam-perf.md) |
+| m35-rust-author-proof: cross-language author proof (virelai.zig shim + rustc nl app) | [`agent-buffy2-m35-rust-author-proof.md`](agent-buffy2-m35-rust-author-proof.md) |
+| M35 W4 core completeness: f32/f64, sign-extension proof, bulk-memory gated (issue #765) | [`agent-buffy2-m35-w4-core-completeness.md`](agent-buffy2-m35-w4-core-completeness.md) |
+| M35 W5 — the ecosystem capstone: wc (issue #766) | [`agent-buffy2-m35-w5-wc-capstone.md`](agent-buffy2-m35-w5-wc-capstone.md) |
 | agent/gates fleet-remainder | [`agent-gates-fleet-remainder.md`](agent-gates-fleet-remainder.md) |
 | per-agent worktrees | [`agent-ox-alpha-agent-worktrees.md`](agent-ox-alpha-agent-worktrees.md) |
 | claim lifecycle: declared files + staleness | [`agent-ox-alpha-claim-lifecycle.md`](agent-ox-alpha-claim-lifecycle.md) |
