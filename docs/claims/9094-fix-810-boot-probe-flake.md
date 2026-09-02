@@ -14,15 +14,59 @@
   now retries around it, but the kernel bug is real (same family as #803,
   whose cmd_write fix was ONE stack offender — this looks like a second
   class in the timer/exit path, right after `tasks worker advances=2112`).
-- **Evidence:** `artifacts/live-vf-serial-{2,6}.log` (runs 2/5/6),
-  `artifacts/live-vf-run-{2,6}.txt`; committed at 30efba2 + 4cc4c25;
-  issue #810 (2 comment updates filed 2026-09-02).
-- **Hypotheses to test (in order):** (1) the timer IRQ / tick path reads
-  a device register at 0x80000178 during the probe task's exit (x23=0x1e
-  = timer PPI; crash sits between tick prints); read the GTDT/CNTP
-  constants in tree; (2) a corrupted task context with SP=0 being context-
-  switched (frame sp=0); (3) a stack offender in the probe-exit path
-  (reap/teardown) corrupting the exception frame (the #803 class).
+- **Evidence:** `artifacts/live-vf-serial-{1..6}.log` (runs 2/5/6/10/11),
+  `artifacts/live-vf-run-*.txt`; committed at 30efba2 + 4cc4c25;
+  issue #810 (3 comment updates filed 2026-09-02).
+- **Findings (2026-09-02, runs 10-11, v2 dumps):** (1) `sp=0` in the
+  parked frames is a NON-issue — the report's `sp=` field is `SP_EL0`
+  (`mrs sp_el0`, 0 during pure-EL1h execution); every frame carries real
+  esr/far/elr/spsr/x19..x28. (2) The faults are REAL EL1h data aborts,
+  ~1.4 s (≈1400 handled IRQs) into boot during desktop+scheduler churn,
+  ~1-in-6 boots. (3) The corrupted pointers all resolve into ONE BSS
+  neighborhood — image+0x5dda0 (a 12×0x180 table with a state byte at
+  +0x178 = the scheduler task-table family), ring base +0x64fa0
+  (0x7dadbfa0), +0xae4000 globals (0x7e55b000). (4) Decoded to exact
+  instructions: run-11 boot 2 = `ldrb w9,[x20,#0x178]` (text+0x371a4,
+  scheduler idle/reap inlined code) with x20 = dead identity-map space
+  (0xfcab6000, far = x20+0x178, esr DFSC=0x10 external abort); run-11
+  boot 3 = `ldr x8,[x8]; br x8` through a −1 function pointer (text+
+  0x3da00), same shell frame (identical raw_sp 0x7da72310, "hello.tx"
+  locals → the `vf cat hello.txt` output path). Earlier families: reads
+  at 0x80000178 (x20 = 0x80000000 = the FIXED pre-ASLR user-stack VA,
+  identity-mapped to PA 0x80000000 = exactly top of 256 MiB RAM @
+  0x70000000 → dead space → SEA; x2 = 0x8000 = 32 KiB), and far =
+  string bytes. (5) Multiple subsystems read the corrupted region at
+  different sites per boot → ONE BSS-corrupting writer (the #803/#808
+  "32 KiB staging" family) was the working hypothesis — REFINED by the
+  BSS-layout check (unstripped twin, strip-independent .bss):
+  `scheduler.tasks` spans 0x5dd30..0x5edb0 = 11×0x180 (0x178 = the LAST
+  field, `kill_pending`, read by the ring at scheduler.zig:720
+  `stage_current`), directly followed by `process.processes`;
+  `user_stack` at 0x66000. The vf staging buffers are FAR away
+  (`vf_reply_buf` 0x4455c0, `cmd_write_buf` 0xa84d20, `vf_write_buf`
+  0xad2f20) — NO clean overrun-lands-in-tasks adjacency. And `tasks`
+  itself is adrp-fixed BSS, so a WILD x20 (0xfcab6000) cannot come from
+  a sane `tasks[i]` index — the faulting code dereferenced a LOADED
+  pointer that was already corrupted. Writer is therefore a runtime,
+  timing-dependent race (different corrupted slot per boot: A=+0x178
+  read, B=−1 fn pointer, C=dead-space read), not a static overrun.
+  Prime suspects remain the vf reply exchanges (queue-5 era, "hello.tx"
+  on both decoded stacks) racing the tick/idle ring.
+- **Deep-dump instrumentation v2 (claim 9094, exceptions.zig,
+  EL1h-sync-only so healthy boots stay byte-identical):** `[DEEP]` block
+  on every unhandled EL1h sync — ttbr0/ttbr1/mair/tcr,
+  `userspace.user_stack_va()`, a bounded 4-level PTE walk of FAR, and
+  now a DOWNWARD stack crawl from raw_sp (v1 crawled UP into unused
+  stack; return addresses live BELOW raw_sp), plus x3..x18 and the 8 raw
+  instruction words at elr±16 — the dump names its own fault site (runs
+  11 boots 2/3 decoded to exact instructions + DWARF lines within
+  minutes). Park path masks all DAIF after an EL1h sync report (one
+  clean dump per hang; the run-7/8 storm was the v1 dump's OWN unbound
+  reads re-faulting — bounded reads are SEA-proof). Tooling note: setting
+  `root_module.strip = false` CHANGES CODEGEN (14 instructions + layout
+  drift vs. the default-strip build — verified byte-identical when strip
+  is left at the ReleaseSmall default); symbol work must rebuild with
+  default strip or offsets lie.
 - **Touches:** kernel/src/{exceptions.zig,main.zig,scheduler.zig,
   timer.zig,console.zig,mmu.zig} (whichever the root cause lands in) ·
   docs/claims/9094-fix-810-boot-probe-flake.md ·
@@ -31,7 +75,14 @@
 - **Depends on:** — (flake observed on main-era builds; #808's
   instrumentation is already in tree)
 - **Heartbeat:** 2026-09-02
-- **Status:** 🔄 in progress — claim 9094 (id via `bash tools/status/claim-id.sh`)
+- **Status:** 🔄 in progress — claim 9094 (id via `bash tools/status/claim-id.sh`);
+  instrumentation v2 landed + run-11 hang boots decoded (see Findings);
+  the corrupting WRITER is not yet named. Next step: catch the writer in
+  the act — either a canary/magic audit of the `tasks`/`processes` BSS
+  window from the vf exchange entry/exit, or bisect by disabling the vf
+  probe era (`hello.tx` cat) in one gate variant and comparing flake
+  rate. The v2 dump makes any further hang self-decoding at the exact
+  instruction.
 
 ## Notes
 

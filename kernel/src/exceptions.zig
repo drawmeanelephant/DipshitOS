@@ -339,6 +339,174 @@ fn append_u64(buf: []u8, value: u64) usize {
     return out;
 }
 
+/// Claim 9094 (#810): EL1h data-abort deep dump. Prints the translation
+/// system registers, a bounded 4-level stage-1 walk of `far` (root from
+/// TTBR0_EL1, 4 KiB granules; bails on non-RAM table addresses), and the
+/// kernel stack window around `raw_sp` with any value that looks like a
+/// text address (within ±0x50000 of `elr`) flagged for the offline
+/// symbol decode. Pure reads — safe from the synchronous handler.
+pub fn deep_dump(buf: []u8, esr: u64, far: u64, elr: u64, raw_sp: u64) []const u8 {
+    _ = esr; // reserved: the EC/ISS decode is printed by format_report
+    var pos: usize = 0;
+    pos += append_slice(buf[pos..], "[DEEP] ttbr0=0x");
+    var ttbr0: u64 = 0;
+    var ttbr1: u64 = 0;
+    var mair: u64 = 0;
+    var tcr: u64 = 0;
+    asm volatile ("mrs %[v], ttbr0_el1"
+        : [v] "=r" (ttbr0),
+    );
+    asm volatile ("mrs %[v], ttbr1_el1"
+        : [v] "=r" (ttbr1),
+    );
+    asm volatile ("mrs %[v], mair_el1"
+        : [v] "=r" (mair),
+    );
+    asm volatile ("mrs %[v], tcr_el1"
+        : [v] "=r" (tcr),
+    );
+    pos += append_hex(buf[pos..], ttbr0, 16);
+    pos += append_slice(buf[pos..], " ttbr1=0x");
+    pos += append_hex(buf[pos..], ttbr1, 16);
+    pos += append_slice(buf[pos..], " mair=0x");
+    pos += append_hex(buf[pos..], mair, 16);
+    pos += append_slice(buf[pos..], " tcr=0x");
+    pos += append_hex(buf[pos..], tcr, 16);
+    pos += append_slice(buf[pos..], "\n");
+    pos += append_slice(buf[pos..], "[DEEP] user_stack_va=0x");
+    pos += append_hex(buf[pos..], userspace.user_stack_va(), 16);
+    pos += append_slice(buf[pos..], "\n");
+    // Bounded 4-level walk of far (4 KiB granules, T0SZ=16 -> 48-bit VA).
+    // Every table address is RAM below 4 GiB; anything else bails.
+    pos += append_slice(buf[pos..], "[DEEP] walk far=0x");
+    pos += append_hex(buf[pos..], far, 16);
+    pos += append_slice(buf[pos..], "\n");
+    const root = ttbr0 & 0xffff_ffff_f000;
+    var table: u64 = root;
+    const shift_table = [_]u6{ 39, 30, 21, 12 };
+    const block_mask = [_]u64{ 0, 0x3f_ffff, 0x1f_ffff, 0xfff };
+    // Claim 9094 lesson: every read here must stay below the RAM ceiling
+    // (0x80000000 for the 256 MiB @ 0x70000000 class). The first version's
+    // unbound walk/crawl recursed SEA-on-SEA inside the dump itself (the
+    // run-7/8 storm ate the boot stack to text); bounded reads are
+    // SEA-proof, so one hang = exactly one clean dump.
+    const ram_ceiling: u64 = 0x8000_0000;
+    var level: u4 = 0;
+    var done = false;
+    var walk_ok = true;
+    while (level < 4 and !done and walk_ok) {
+        const idx = (far >> shift_table[level]) & 0x1ff;
+        if (table >= ram_ceiling or table < 0x1000) { // not a RAM table address
+            walk_ok = false;
+            break;
+        }
+        const pte_addr = table + idx * 8;
+        const pte: u64 = if (pte_addr < ram_ceiling) @as(*const u64, @ptrFromInt(pte_addr)).* else 0;
+        pos += append_slice(buf[pos..], "[DEEP]   l");
+        pos += append_u64(buf[pos..], level);
+        pos += append_slice(buf[pos..], " idx=0x");
+        pos += append_hex(buf[pos..], idx, 3);
+        pos += append_slice(buf[pos..], " pte=0x");
+        pos += append_hex(buf[pos..], pte, 16);
+        pos += append_slice(buf[pos..], "\n");
+        if ((pte & 1) == 0) {
+            done = true; // unmapped at this level
+            break;
+        }
+        if ((pte & 0x200) != 0 or level == 3) { // block or page leaf
+            pos += append_slice(buf[pos..], "[DEEP]   leaf pa=0x");
+            pos += append_hex(buf[pos..], (pte & ~block_mask[level]) | (far & block_mask[level]), 16);
+            pos += append_slice(buf[pos..], "\n");
+            done = true;
+            break;
+        }
+        table = pte & 0xffff_ffff_f000;
+        level += 1;
+    }
+    if (!walk_ok) {
+        pos += append_slice(buf[pos..], "[DEEP]   walk aborted (non-RAM table)\n");
+    }
+    // Claim 9094 (v2): stack crawl runs DOWNWARD from raw_sp (the stack
+    // grows down — the interrupted function's frame and its callers' saved
+    // x30/x29 links live BELOW raw_sp; the v1 crawl went UP into unused
+    // stack and printed only the known GPR-frame slots). Rows in the
+    // vector frames (raw_sp-768..raw_sp: the 256-byte GPR frame + 512-byte
+    // FP block) print unconditionally; deeper rows print only when the
+    // word looks like a text address (candidate saved return address),
+    // so one clean fault yields the caller chain in bounded output.
+    pos += append_slice(buf[pos..], "[DEEP] stack\n");
+    var off: u64 = 0;
+    var skipped: u64 = 0;
+    while (off < 2304) : (off += 8) {
+        const addr = raw_sp -% off -% 16;
+        const in_vector_frames = addr >= raw_sp -% 768;
+        const word: u64 = if (addr < ram_ceiling and addr >= 0x1000) @as(*const u64, @ptrFromInt(addr)).* else 0;
+        const near_text = (word >= elr -% 0x80000 and word <= elr +% 0x80000);
+        if (!in_vector_frames and !near_text) {
+            skipped += 1;
+            continue;
+        }
+        if (skipped > 0 and near_text) {
+            pos += append_slice(buf[pos..], "[DEEP]   ...");
+            pos += append_u64(buf[pos..], skipped);
+            pos += append_slice(buf[pos..], " non-text words\n");
+            skipped = 0;
+        }
+        pos += append_slice(buf[pos..], "[DEEP]   ");
+        pos += append_hex(buf[pos..], addr, 12);
+        pos += append_slice(buf[pos..], " ");
+        if (near_text) {
+            pos += append_slice(buf[pos..], "T ");
+            pos += append_hex(buf[pos..], word, 16);
+        } else {
+            pos += append_slice(buf[pos..], "  ");
+            pos += append_hex(buf[pos..], word, 16);
+        }
+        pos += append_slice(buf[pos..], "\n");
+        if (pos > buf.len - 96) break; // stay inside the caller's buffer
+    }
+    return buf[0..pos];
+}
+
+/// Claim 9094 (#810): EL1h-only extended dump — the volatile registers
+/// x3..x17 (the [EXC] report prints x0/x1/x2 and x19..x28; x8 and the
+/// arg registers are exactly what the faulting call was holding) and the
+/// eight raw instruction words at `elr` ± 16 bytes, so the report names
+/// its own fault site without offline symbol games (the booted image's
+/// offsets drift per build; raw words disassemble against the exact ELF).
+pub fn el1h_extras(buf: []u8, frame: *const VectorFrame, elr: u64) []const u8 {
+    var pos: usize = 0;
+    // Volatile registers x3..x17, two per line, mirroring the [EXC] shape.
+    var idx: usize = 3;
+    while (idx <= 17) : (idx += 2) {
+        pos += append_slice(buf[pos..], "[EXC]     x");
+        pos += append_u64(buf[pos..], idx);
+        pos += append_slice(buf[pos..], "=0x");
+        pos += append_hex(buf[pos..], frame_read(frame, @intCast(idx)), 16);
+        pos += append_slice(buf[pos..], " x");
+        pos += append_u64(buf[pos..], idx + 1);
+        pos += append_slice(buf[pos..], "=0x");
+        pos += append_hex(buf[pos..], frame_read(frame, @intCast(idx + 1)), 16);
+        pos += append_slice(buf[pos..], "\n");
+    }
+    // Instruction words around elr (bounded RAM reads; text sits below the
+    // RAM ceiling in the booted image). Read-only, SEA-proof by the bounds.
+    pos += append_slice(buf[pos..], "[DEEP] insn@elr-16..elr+16:\n");
+    const ram_ceiling: u64 = 0x8000_0000;
+    var i: i64 = -4;
+    while (i <= 4) : (i += 1) {
+        const addr = elr +% @as(u64, @bitCast(i * 4));
+        const word: u32 = if (addr < ram_ceiling and addr >= 0x1000) @as(*const u32, @ptrFromInt(addr)).* else 0;
+        pos += append_slice(buf[pos..], "[DEEP]   ");
+        pos += append_hex(buf[pos..], addr, 16);
+        pos += append_slice(buf[pos..], " 0x");
+        pos += append_hex(buf[pos..], word, 8);
+        if (i == 0) pos += append_slice(buf[pos..], "  <== elr");
+        pos += append_slice(buf[pos..], "\n");
+    }
+    return buf[0..pos];
+}
+
 /// Format the full `[EXC]` report into `buf` (caller-owned, >= 512 bytes
 /// recommended) and return the written slice. Deterministic byte-for-byte:
 /// the class B gate asserts substrings of this exact shape in vm-serial.log.
@@ -706,6 +874,32 @@ export fn exc_dispatch(
         frame_read(frame, 28),
     );
     if (report_writer) |w| w(report);
+    // Claim 9094 (#810 forensics): for EL1h synchronous aborts, append a
+    // deep dump — system translation regs, a bounded 4-level PTE walk of
+    // FAR, and the saved-return-address crawl of the kernel stack window
+    // (the [EXC] register dump alone could not name the faulting path;
+    // the parked frames carried elr inside a non-faulting outlined stub).
+    // EL1h-only, so EL0 faults and every healthy boot are byte-identical.
+    if (kind == kind_sync and (spsr & 0xf) == 0x5) {
+        // Claim 9094: the 0x97090010 storm (issue #810) re-enters the
+        // faulting path from the parked WFE on every un-masked IRQ, eating
+        // the boot stack until it walks into text; masking ALL of DAIF here
+        // stops the storm so the ONE original fault's dump stays decodable.
+        asm volatile ("msr daifset, #0b1111"); // D|A|I|F
+        // Claim 9094: the crawl (saved return addresses) is the call-path
+        // evidence, so it prints immediately after the [EXC] header block
+        // (run-11 dumps decoded cleanly in this order). The bounded reads
+        // + full DAIF mask above are what keep ONE fault = ONE dump — the
+        // v1 unbound walk recursed SEA-on-SEA (the run-7/8 storm).
+        var deep: [4096]u8 = undefined;
+        const d = deep_dump(&deep, esr, far, elr, raw_sp);
+        if (report_writer) |w| w(d);
+        // Claim 9094 (v2): the volatile registers x3..x17 + raw instruction
+        // words at elr — self-decoding evidence for the offline decode.
+        var extras: [1024]u8 = undefined;
+        const e = el1h_extras(&extras, frame, elr);
+        if (report_writer) |w| w(e);
+    }
     if (will_resume) {
         resume_armed = false;
         resume_count_value += 1;
