@@ -1770,6 +1770,30 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_sb6_new.step);
 
     // ------------------------------------------------------------------
+    // Guest: Sexiburger standalone component (Milestone 19 — issue #677)
+    // SEXIBURG.BIN. The Sexiburger god menu standalone component & harness.
+    // ------------------------------------------------------------------
+    const sexiburg_prog = b.addExecutable(.{
+        .name = "user-sexiburg",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/sexiburger.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    sexiburg_prog.linker_script = b.path("user/linker-segmented.ld");
+    const sexiburg_step = b.step("sexiburg", "Build the Sexiburger standalone program (zig-out/bin/SEXIBURG.BIN) — DSK3 segmented");
+    const sexiburg_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
+    sexiburg_elf2bin.addFileArg(sexiburg_prog.getEmittedBin());
+    const sexiburg_bin = sexiburg_elf2bin.addOutputFileArg("SEXIBURG.BIN");
+    sexiburg_elf2bin.has_side_effects = true;
+    sexiburg_elf2bin.stdio = .inherit;
+    sexiburg_step.dependOn(&sexiburg_elf2bin.step);
+    const install_sexiburg = b.addInstallFileWithDir(sexiburg_bin, .bin, "SEXIBURG.BIN");
+    sexiburg_step.dependOn(&install_sexiburg.step);
+    b.getInstallStep().dependOn(&install_sexiburg.step);
+
+    // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
     // skipped by the build cache. (No QEMU path: this project targets Apple
