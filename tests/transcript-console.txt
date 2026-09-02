@@ -8,6 +8,7 @@ machine / identity
   about       explain this questionable system
   beans       count beans, probably
   elephant    operational mascot diagnostics
+  sexiburger  operational mascot diagnostics (the Sexipus burger)
   sysinfo     comprehensive system and subsystem diagnostic snapshot
   tour        guided tour of the system for new users
   uname       compact system identity

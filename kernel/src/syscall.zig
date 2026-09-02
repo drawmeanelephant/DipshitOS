@@ -2751,6 +2751,35 @@ fn handle_wmctl(args: Args, _: *exceptions.VectorFrame) u64 {
             if (!wm_server.request_present()) return error_result(.einval); // defensive: registrant vanished
             return 0;
         },
+        wm_server.wmctl_attach_tab => {
+            // S6 Tab model (Milestone 19, issue #782): attach child window (a0) as a tab of parent (a1).
+            if (!wm_server.registered()) return error_result(.enosys);
+            if (wm_server.registered_pid() != pid) return error_result(.eacces);
+            const child_id = args[1];
+            const parent_id = args[2];
+            if (child_id > 0xff or parent_id > 0xff or child_id == parent_id) return error_result(.einval);
+            if (child_id == wnd_core.chrome_window_all or parent_id == wnd_core.chrome_window_all) return error_result(.einval);
+            wm_server.note_tab_attach();
+            return 0;
+        },
+        wm_server.wmctl_detach_tab => {
+            // S6 Tab model (Milestone 19, issue #782): detach child window (a0) back to standalone.
+            if (!wm_server.registered()) return error_result(.enosys);
+            if (wm_server.registered_pid() != pid) return error_result(.eacces);
+            const child_id = args[1];
+            if (child_id > 0xff or child_id == wnd_core.chrome_window_all) return error_result(.einval);
+            wm_server.note_tab_detach();
+            return 0;
+        },
+        wm_server.wmctl_activate_tab => {
+            // S6 Tab model (Milestone 19, issue #782): activate tab (a0).
+            if (!wm_server.registered()) return error_result(.enosys);
+            if (wm_server.registered_pid() != pid) return error_result(.eacces);
+            const tab_id = args[1];
+            if (tab_id > 0xff or tab_id == wnd_core.chrome_window_all) return error_result(.einval);
+            wm_server.note_tab_activate();
+            return 0;
+        },
         else => return error_result(.einval), // unknown / zero cmd
     }
 }
@@ -4756,6 +4785,42 @@ test "syscall: DIALOG (cmd 11, claim 6155) applies the WM's unsaved-dialog decis
     // Teardown: no leaked input ownership into the aggregated binary.
     try std.testing.expect(wm_server.unregister(0));
     try std.testing.expect(!driving_award.wm_owns_input);
+}
+
+test "syscall: sys_wmctl tab subcommands (cmd 18/19/20, issue #782) validate IDs and record decisions" {
+    userspace.init();
+    init(test_writer);
+    wm_server.init();
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    scheduler.start();
+    var frame = fresh_frame();
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+
+    // No WM registered: returns ENOSYS
+    try std.testing.expectEqual(error_result(.enosys), dispatch(sys_wmctl, .{ wm_server.wmctl_attach_tab, 2, 3, 0, 0, 0 }, &frame));
+
+    // Register WM as pid 0
+    try std.testing.expect(wm_server.register(0));
+
+    // Valid attach: child 2, parent 3
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_wmctl, .{ wm_server.wmctl_attach_tab, 2, 3, 0, 0, 0 }, &frame));
+    // Invalid attach: same id or out of bounds
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_wmctl, .{ wm_server.wmctl_attach_tab, 2, 2, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_wmctl, .{ wm_server.wmctl_attach_tab, 0x100, 3, 0, 0, 0 }, &frame));
+
+    // Valid activate: tab 2
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_wmctl, .{ wm_server.wmctl_activate_tab, 2, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_wmctl, .{ wm_server.wmctl_activate_tab, 0x100, 0, 0, 0, 0 }, &frame));
+
+    // Valid detach: tab 2
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_wmctl, .{ wm_server.wmctl_detach_tab, 2, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_wmctl, .{ wm_server.wmctl_detach_tab, 0x100, 0, 0, 0, 0 }, &frame));
+
+    // Teardown
+    try std.testing.expect(wm_server.unregister(0));
 }
 
 test "syscall: wait_event block+wake preserves the event buffer across the svc re-execution (claim 6359)" {
