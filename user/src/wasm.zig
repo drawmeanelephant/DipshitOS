@@ -26,7 +26,7 @@ pub const max_funcs = 64; // imported + defined functions
 pub const max_params = 16;
 pub const max_results = 2;
 pub const max_globals = 64;
-pub const max_imports = 16;
+pub const max_imports = 32; // the frozen env.* surface (29) + headroom
 pub const max_exports = 64;
 pub const max_table = 256; // the single funcref table
 pub const max_mem_pages = 32; // hard cap = 2 MiB (wasm-import-contract.md)
@@ -101,6 +101,79 @@ pub const Export = struct {
     kind: ExportKind,
     index: u32,
 };
+
+/// The frozen env.* surface — docs/wasm-import-contract.md §5 plus the W2
+/// debug pair (write/exit, contract §7). Validation rejects anything else:
+/// unknown name, foreign module, or a known name with a non-contract
+/// signature all fail BEFORE start (contract §1 "Unknown imports →
+/// validation failure"). This table is the single source of truth shared by
+/// the validator and the dispatch arms' shape checks.
+const Frozen = struct {
+    name: []const u8,
+    pc: u8,
+    params: [6]ValType,
+    rc: u8,
+};
+const frozen_imports = [_]Frozen{
+    // W2 debug pair (contract §7: env.write / env.exit shim)
+    .{ .name = "write", .pc = 3, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
+    .{ .name = "exit", .pc = 1, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 0 },
+    // §5.1 file — slots 23–27 + 34–37
+    .{ .name = "file_open", .pc = 3, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
+    .{ .name = "file_read", .pc = 3, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
+    .{ .name = "file_write", .pc = 3, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
+    .{ .name = "file_close", .pc = 1, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
+    .{ .name = "dir_list", .pc = 4, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
+    .{ .name = "file_delete", .pc = 2, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
+    .{ .name = "file_rename", .pc = 4, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
+    .{ .name = "file_truncate", .pc = 2, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
+    .{ .name = "file_free", .pc = 1, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
+    // §5.2 window — slots 12–20
+    .{ .name = "win_open", .pc = 4, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
+    .{ .name = "win_fill", .pc = 6, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
+    .{ .name = "win_present", .pc = 1, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
+    .{ .name = "win_close", .pc = 1, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
+    .{ .name = "win_move", .pc = 3, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
+    .{ .name = "win_raise", .pc = 1, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
+    .{ .name = "win_get", .pc = 2, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
+    .{ .name = "win_query", .pc = 2, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
+    .{ .name = "win_set_visible", .pc = 2, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
+    // §5.3 audio — slots 42–45
+    .{ .name = "audio_info", .pc = 1, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
+    .{ .name = "audio_play", .pc = 2, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
+    .{ .name = "audio_volume", .pc = 1, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
+    .{ .name = "audio_mute", .pc = 1, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
+    // §5.4 timers — slots 40/41
+    .{ .name = "timer_set", .pc = 1, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
+    .{ .name = "timer_cancel", .pc = 0, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
+    // §5.5 mmap — slot 63 over the wasm arena (munmap 64, same row)
+    .{ .name = "mmap", .pc = 4, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
+    .{ .name = "munmap", .pc = 2, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
+    // §5.6/5.7 processes + wait
+    .{ .name = "procs", .pc = 2, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
+    .{ .name = "wait", .pc = 1, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
+};
+
+fn checkFrozenImport(m: *const Module, imp: *const Import) ValidationError!void {
+    if (!std.mem.eql(u8, imp.module, "env")) return error.UnknownImportModule;
+    for (frozen_imports) |f| {
+        if (std.mem.eql(u8, imp.name, f.name)) {
+            const ft = &m.types[imp.type_index];
+            if (ft.param_count != f.pc or ft.result_count != f.rc) return error.ImportSignature;
+            for (0..f.pc) |i| {
+                if (ft.params[i] != f.params[i]) return error.ImportSignature;
+            }
+            // Review fix (claim 3456): the result TYPE is part of the frozen
+            // signature too. Without this, a module declaring e.g.
+            // `env.win_open -> i64` validates, but the dispatch arm pushes an
+            // i32-lane Value the body reads through the i64 lane (stale
+            // stack in the high bits) — contract §5 signatures are exact.
+            if (f.rc == 1 and ft.results[0] != .i32) return error.ImportSignature;
+            return;
+        }
+    }
+    return error.UnknownImport;
+}
 
 /// Active element segment (flag 0x00 form only; table 0).
 pub const Element = struct {
@@ -193,6 +266,9 @@ pub const ValidationError = ParseError || error{
     MemoryTooBig, // declared max pages > 32
     TableTooBig, // declared max > 256 entries
     UnsupportedImport, // imported table/memory/global (W3)
+    UnknownImportModule, // import module != "env" (W3: WASI etc. always rejected)
+    UnknownImport, // import name not in the frozen env.* surface (W3)
+    ImportSignature, // frozen name with a non-contract param/result shape (W3)
     MultiValueBlock, // blocktype with a type index (multi-value)
     StackOverflow,
 };
@@ -654,7 +730,13 @@ pub fn validate(m: *Module) ValidationError!void {
     }
     for (m.imports[0..m.import_count]) |imp| {
         switch (imp.kind) {
-            .func => if (imp.type_index >= m.type_count) return error.UnknownType,
+            .func => {
+                if (imp.type_index >= m.type_count) return error.UnknownType;
+                // W3: the import surface is the frozen env.* set and nothing
+                // else — unknown name / foreign module / bad signature all
+                // fail BEFORE start (contract §1).
+                try checkFrozenImport(m, &imp);
+            },
             .table, .memory, .global => {
                 return error.UnsupportedImport;
             },
@@ -1755,11 +1837,127 @@ fn rotr64(a: i64, b: i64) i64 {
 // runtime (M29 anonymous) — the loader's 256 KiB staging budget counts
 // .bss, so the 2 MiB D2 reservation never lives there.
 // ---------------------------------------------------------------------------
-const MODE_READ: u32 = 0x0001;
+const MODE_READ: u32 = 0x1;
+const MODE_WRITE: u32 = 0x2;
+const MODE_CREATE: u32 = 0x4;
+const MODE_APPEND: u32 = 0x8;
+const MODE_DIR: u32 = 0x10;
 const PROT_READ: u64 = 1;
 const PROT_WRITE: u64 = 2;
 const MAP_PRIVATE: u64 = 0x02;
 const MAP_ANONYMOUS: u64 = 0x20;
+
+/// Generic ADR 0007 svc seam (x8 = slot, x0..x5 = args, x0 = result).
+/// Unused arg registers are harmless zeroes, so one helper covers every
+/// slot in the frozen surface.
+inline fn svcN(num: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) i64 {
+    return asm volatile ("svc #0"
+        : [ret] "={x0}" (-> i64),
+        : [num] "{x8}" (num),
+          [a0] "{x0}" (a0),
+          [a1] "{x1}" (a1),
+          [a2] "{x2}" (a2),
+          [a3] "{x3}" (a3),
+          [a4] "{x4}" (a4),
+          [a5] "{x5}" (a5),
+        : .{ .memory = true });
+}
+
+fn file_write(fd: u64, buf: []const u8) i64 {
+    return svcN(25, fd, @intFromPtr(buf.ptr), buf.len, 0, 0, 0);
+}
+
+fn dir_list(path: []const u8, out: [*]u8, max_entries: u32) i64 {
+    return svcN(27, @intFromPtr(path.ptr), path.len, @intFromPtr(out), max_entries, 0, 0);
+}
+
+fn file_delete(path: []const u8) i64 {
+    return svcN(34, @intFromPtr(path.ptr), path.len, 0, 0, 0, 0);
+}
+
+fn file_rename(old_path: []const u8, new_path: []const u8) i64 {
+    return svcN(35, @intFromPtr(old_path.ptr), old_path.len, @intFromPtr(new_path.ptr), new_path.len, 0, 0);
+}
+
+fn file_truncate(fd: u64, size: u64) i64 {
+    return svcN(36, fd, size, 0, 0, 0, 0);
+}
+
+fn file_free(volume: u64) i64 {
+    return svcN(37, volume, 0, 0, 0, 0, 0);
+}
+
+fn win_open(x: u64, y: u64, w: u64, h: u64) i64 {
+    return svcN(12, x, y, w, h, 0, 0);
+}
+
+fn win_fill(id: u64, x: u64, y: u64, w: u64, h: u64, rgb: u64) i64 {
+    return svcN(13, id, x, y, w, h, rgb);
+}
+
+fn win_present(id: u64) i64 {
+    return svcN(14, id, 0, 0, 0, 0, 0);
+}
+
+fn win_close(id: u64) i64 {
+    return svcN(15, id, 0, 0, 0, 0, 0);
+}
+
+fn win_move(id: u64, x: u64, y: u64) i64 {
+    return svcN(16, id, x, y, 0, 0, 0);
+}
+
+fn win_raise(id: u64) i64 {
+    return svcN(17, id, 0, 0, 0, 0, 0);
+}
+
+fn win_get(id: u64, out: [*]u8) i64 {
+    return svcN(18, id, @intFromPtr(out), 0, 0, 0, 0);
+}
+
+fn win_query(id: u64, out: [*]u8) i64 {
+    return svcN(19, id, @intFromPtr(out), 0, 0, 0, 0);
+}
+
+fn win_set_visible(id: u64, visible: u64) i64 {
+    return svcN(20, id, visible, 0, 0, 0, 0);
+}
+
+fn audio_info(out: [*]u8) i64 {
+    return svcN(42, @intFromPtr(out), 0, 0, 0, 0, 0);
+}
+
+fn audio_play(buf: []const u8) i64 {
+    return svcN(43, @intFromPtr(buf.ptr), buf.len, 0, 0, 0, 0);
+}
+
+fn audio_volume(vol: u64) i64 {
+    return svcN(44, vol, 0, 0, 0, 0, 0);
+}
+
+fn audio_mute(muted: u64) i64 {
+    return svcN(45, muted, 0, 0, 0, 0, 0);
+}
+
+fn timer_set(delay_ticks: u64) i64 {
+    return svcN(40, delay_ticks, 0, 0, 0, 0, 0);
+}
+
+fn timer_cancel() i64 {
+    return svcN(41, 0, 0, 0, 0, 0, 0);
+}
+
+fn munmap(addr: u64, len: u64) i64 {
+    return svcN(64, addr, len, 0, 0, 0, 0);
+}
+
+fn procs(buf: [*]u8, max: u64) i64 {
+    return svcN(7, @intFromPtr(buf), max, 0, 0, 0, 0);
+}
+
+fn wait(pid: u64) i64 {
+    return svcN(8, pid, 0, 0, 0, 0, 0);
+}
 
 fn sys_write(buf: []const u8) i64 {
     return asm volatile ("svc #0"
@@ -1791,9 +1989,9 @@ fn file_read(handle: u32, buf: []u8) i64 {
         : .{ .memory = true });
 }
 
-fn file_close(handle: u32) void {
-    asm volatile ("svc #0"
-        :
+fn file_close(handle: u32) i64 {
+    return asm volatile ("svc #0"
+        : [ret] "={x0}" (-> i64),
         : [num] "{x8}" (@as(u64, 26)),
           [arg0] "{x0}" (@as(u64, handle)),
         : .{ .memory = true });
@@ -1815,6 +2013,61 @@ fn console_puts(text: []const u8) void {
     _ = sys_write(text);
 }
 
+/// Uaccess staging (claim 3456 W3 lesson, zero kernel changes): the
+/// kernel's claim-6120 uaccess region table is GLOBAL and reset by EVERY
+/// exec, so an mmap'd wasm store can lose its read/write registration the
+/// instant any interleaved command execs (observed live: env.write /
+/// env.file_open on store pointers returning EFAULT -3). Every dispatch
+/// arm therefore crosses the svc boundary through interpreter-owned .bss
+/// staging buffers — registered by the loader at exec time and never
+/// dropped. Fixed sizes mirror the kernel's own caps (write_cap 256,
+/// file staging 2048, max_path_len 64, dir_list 16 rows, audio staging
+/// 4 KiB — see the claim note on audio_play's staging window).
+const stage_write_len = 256; // kernel write_cap (excess -> einval)
+const stage_path_len = 64; // kernel max_path_len (excess -> einval / enametoolong)
+const stage_io_len = 2048; // kernel file staging (read take_count, write enospc cap)
+const stage_dir_len = 640; // 16 DirEntry rows (dir_list 16-entry cap, procs row budget)
+const stage_audio_len = 4096; // beep_period_bytes (kernel periods the play itself)
+const stage_info_len = 32; // win_get (16) / win_query (32) / audio_info (16) out
+const audio_max_len = 64 * 1024; // kernel virtio_snd.audio_max_len
+const audio_period_len = 4096; // kernel virtio_snd.beep_period_bytes
+var g_stage_write: [stage_write_len]u8 = undefined;
+var g_stage_path: [stage_path_len]u8 = undefined;
+var g_stage_path2: [stage_path_len]u8 = undefined;
+var g_stage_io: [stage_io_len]u8 = undefined;
+var g_stage_io2: [stage_io_len]u8 = undefined;
+var g_stage_dir: [stage_dir_len]u8 = undefined;
+var g_stage_audio: [stage_audio_len]u8 = undefined;
+var g_stage_info: [stage_info_len]u8 = undefined;
+
+/// Copy store[ptr..ptr+len] into a .bss stage. Null when out of the wasm
+/// store (bounds trap — contract §3) or larger than the stage (the arm
+/// maps that to the kernel's cap error, never silent truncation).
+fn stageIn(mm: *Machine, ptr: u32, len: u32, buf: []u8) ?[]u8 {
+    if (len > buf.len) return null;
+    const s = storeSlice(mm, ptr, len) orelse return null;
+    @memcpy(buf[0..len], s);
+    return buf[0..len];
+}
+
+/// Copy kernel output staged in .bss back into the wasm store.
+fn stageOut(mm: *Machine, ptr: u32, src: []const u8) void {
+    const mem_len = @as(u64, mm.mem_pages) * page_size;
+    const n: u64 = src.len;
+    if (n > mem_len - @min(@as(u64, ptr), mem_len)) return; // never OOB (validated already)
+    @memcpy(mm.store[ptr .. ptr + src.len], src);
+}
+
+/// Capture-seam out-fill, clamped to the store. Test-only path, but a
+/// canned return may exceed the buffer the caller declared — fill what
+/// fits instead of slicing past the store.
+fn captureFill(mm: *Machine, ptr: u32, bytes: u64, fill: u8) void {
+    const mem_len = @as(u64, mm.mem_pages) * page_size;
+    const n = @min(bytes, mem_len - @min(@as(u64, ptr), mem_len));
+    if (n == 0) return;
+    @memset(mm.store[ptr .. ptr + @as(usize, @intCast(n))], fill);
+}
+
 fn sys_exit(status: u64) noreturn {
     asm volatile ("svc #0"
         :
@@ -1829,64 +2082,479 @@ fn fail(msg: []const u8, status: u64) noreturn {
     sys_exit(status);
 }
 
-/// Host-test capture: when set, env.write copies into the buffer and
-/// env.exit records the status instead of reaching the console / svc.
+/// Host-test capture: when set, imports record their calls (id + args)
+/// and return canned values instead of reaching svc #0 (which a host test
+/// cannot execute). The W2 semantics carry: env.write copies into
+/// write_buf (byte-exact console proof) and env.exit marks exited + the
+/// guest_exit trap. Pointer imports that produce out-data fill their
+/// out-buffers with `out_fill` so tests can prove the copy crossed the
+/// wasm store.
+const CapId = enum(u8) {
+    write,
+    exit,
+    file_open,
+    file_read,
+    file_write,
+    file_close,
+    dir_list,
+    file_delete,
+    file_rename,
+    file_truncate,
+    file_free,
+    win_open,
+    win_fill,
+    win_present,
+    win_close,
+    win_move,
+    win_raise,
+    win_get,
+    win_query,
+    win_set_visible,
+    audio_info,
+    audio_play,
+    audio_volume,
+    audio_mute,
+    timer_set,
+    timer_cancel,
+    mmap,
+    munmap,
+    procs,
+    wait,
+    count,
+};
+const cap_count: usize = @intFromEnum(CapId.count);
+
+const CapturedCall = struct {
+    id: CapId,
+    a: [6]i64,
+    n: u8,
+};
+
 const HostCapture = struct {
     write_buf: []u8,
     wrote: usize = 0,
     exit_status: i32 = -1,
     exited: bool = false,
+    log: [96]CapturedCall = undefined,
+    log_count: usize = 0,
+    returns: [cap_count]i64 = [_]i64{0} ** cap_count,
+    out_fill: u8 = 0xA5,
+
+    fn logCall(c: *HostCapture, id: CapId, args: []const Value) void {
+        if (c.log_count >= c.log.len) return;
+        var cl = CapturedCall{ .id = id, .a = undefined, .n = 0 };
+        // The frozen surface is all-i32; log the i32 lanes sign-extended
+        // (Value is an extern union — reading .i64 of an i32 lane would
+        // see undefined high bits).
+        for (args, 0..) |v, i| {
+            if (i >= cl.a.len) break;
+            cl.a[i] = @as(i64, v.i32);
+            cl.n = @intCast(i + 1);
+        }
+        c.log[c.log_count] = cl;
+        c.log_count += 1;
+    }
 };
 var g_capture: ?*HostCapture = null;
 
-/// Dispatch a call to an imported function. W2 wires exactly the two
-/// imports the frozen contract's first fixture needs (env.write → console
-/// byte-exact, env.exit → status); everything else keeps the W1b
-/// `imported_unwired` trap until W3's breadth lands.
+/// Wrap a kernel i64 result as the import's single i32 return (§4: negative
+/// errno values stay negative through the truncation).
+fn importRet(v: i64) CallResult {
+    var out: [max_results]Value = undefined;
+    out[0] = .{ .i32 = @truncate(v) };
+    return .{ .ret = .{ .vals = out, .count = 1 } };
+}
+
+fn argPtr(args: []const Value, i: usize) u32 {
+    return @bitCast(args[i].i32);
+}
+
+fn argU64(args: []const Value, i: usize) u64 {
+    const u: u32 = @bitCast(args[i].i32);
+    return u;
+}
+
+fn checkRange(mm: *Machine, ptr: u32, len: u32) bool {
+    return @as(u64, ptr) + len <= @as(u64, mm.mem_pages) * page_size;
+}
+
+/// Range-checked store slice. len==0 is valid for ANY ptr (contract §3:
+/// zero-length means no access) — return an empty slice at the store base,
+/// never index at a wild pointer.
+fn storeSlice(mm: *Machine, ptr: u32, len: u32) ?[]const u8 {
+    if (len == 0) return mm.store[0..0];
+    if (!checkRange(mm, ptr, len)) return null;
+    return mm.store[ptr .. ptr + len];
+}
+
+/// Dispatch a call to an imported function. The frozen env.* surface
+/// (docs/wasm-import-contract.md §5 + the W2 write/exit pair) — validate()
+/// has already proven module + name + signature, so each arm extracts args
+/// and either records into the host capture or runs the ADR 0007 svc seam.
 fn dispatchImport(mm: *Machine, m: *const Module, imp_idx: u32, args: []const Value) CallResult {
     const imp = &m.imports[imp_idx]; // all imports are funcs (parse rejects the rest)
-    const ft = &m.types[imp.type_index];
-    if (std.mem.eql(u8, imp.module, "env")) {
-        if (std.mem.eql(u8, imp.name, "write") and
-            ft.param_count == 3 and ft.result_count == 1 and
-            ft.params[0] == .i32 and ft.params[1] == .i32 and ft.params[2] == .i32 and ft.results[0] == .i32)
-        {
-            const fd = args[0].i32;
-            const ptr: u32 = @bitCast(args[1].i32);
-            const len: u32 = @bitCast(args[2].i32);
-            const mem_len = @as(u64, mm.mem_pages) * page_size;
-            if (@as(u64, ptr) + len > mem_len) return mkTrap(.bounds, mm.module_name, 0);
-            const bytes = mm.store[ptr .. ptr + len];
-            var out: [max_results]Value = undefined;
-            if (g_capture) |c| {
-                const n = @min(@as(usize, len), c.write_buf.len - c.wrote);
-                @memcpy(c.write_buf[c.wrote .. c.wrote + n], bytes[0..n]);
-                c.wrote += n;
-                out[0] = .{ .i32 = @intCast(n) };
-                return .{ .ret = .{ .vals = out, .count = 1 } };
-            }
-            if (fd != 1) {
-                out[0] = .{ .i32 = -1 };
-                return .{ .ret = .{ .vals = out, .count = 1 } };
-            }
-            _ = sys_write(bytes);
-            out[0] = .{ .i32 = @intCast(len) };
-            return .{ .ret = .{ .vals = out, .count = 1 } };
+    const name = imp.name;
+
+    // -- W2 debug pair (contract §7) --------------------------------------
+    if (std.mem.eql(u8, name, "write")) {
+        const fd = args[0].i32;
+        const ptr = argPtr(args, 1);
+        const len: u32 = @bitCast(args[2].i32);
+        const mem_len = @as(u64, mm.mem_pages) * page_size;
+        // §3: zero-length is valid for ANY ptr (no access); a non-empty
+        // buffer must lie in the store or trap here, before any copy.
+        if (len != 0 and @as(u64, ptr) + len > mem_len) return mkTrap(.bounds, mm.module_name, 0);
+        if (g_capture) |c| {
+            c.logCall(.write, args);
+            if (len == 0) return importRet(0);
+            const n = @min(@as(usize, len), c.write_buf.len - c.wrote);
+            @memcpy(c.write_buf[c.wrote .. c.wrote + n], mm.store[ptr .. ptr + n]);
+            c.wrote += n;
+            return importRet(@intCast(n));
         }
-        if (std.mem.eql(u8, imp.name, "exit") and
-            ft.param_count == 1 and ft.result_count == 0 and ft.params[0] == .i32)
-        {
-            if (g_capture) |c| {
-                c.exited = true;
-                c.exit_status = args[0].i32;
-                // Stop the interpreter: a noreturn import terminates the
-                // call stack (the guest path is a real sys_exit; this
-                // marker exists only for host capture).
-                return mkTrap(.guest_exit, mm.module_name, 0);
-            }
-            sys_exit(@bitCast(@as(i64, args[0].i32)));
-        }
+        // Mirror kernel slot 1: fd must be 1 (ebadf), len capped at write_cap (einval).
+        if (fd != 1) return importRet(-2);
+        if (len > stage_write_len) return importRet(-1);
+        const staged = stageIn(mm, ptr, len, &g_stage_write) orelse return mkTrap(.bounds, mm.module_name, 0);
+        const r = sys_write(staged);
+        return importRet(@intCast(r));
     }
+    if (std.mem.eql(u8, name, "exit")) {
+        if (g_capture) |c| {
+            c.logCall(.exit, args);
+            c.exited = true;
+            c.exit_status = args[0].i32;
+            // A noreturn import terminates the call stack; the guest path
+            // is a real sys_exit, this marker exists only for capture.
+            return mkTrap(.guest_exit, mm.module_name, 0);
+        }
+        sys_exit(@bitCast(@as(i64, args[0].i32)));
+    }
+
+    // -- §5.1 file --------------------------------------------------------
+    if (std.mem.eql(u8, name, "file_open")) {
+        const path_ptr = argPtr(args, 0);
+        const path_len: u32 = @bitCast(args[1].i32);
+        const flags: u32 = @bitCast(args[2].i32);
+        if (g_capture) |c| {
+            c.logCall(.file_open, args);
+            return importRet(c.returns[@intFromEnum(CapId.file_open)]);
+        }
+        // Kernel slot 23: empty or > max_path_len path -> einval.
+        if (path_len == 0 or path_len > stage_path_len) return importRet(-1);
+        const staged = stageIn(mm, path_ptr, path_len, &g_stage_path) orelse return mkTrap(.bounds, mm.module_name, 0);
+        return importRet(file_open(staged, flags));
+    }
+    if (std.mem.eql(u8, name, "file_read")) {
+        const fd: u32 = @bitCast(args[0].i32);
+        const buf_ptr = argPtr(args, 1);
+        const cap: u32 = @bitCast(args[2].i32);
+        // §3: cap==0 reads nothing — valid for any buf_ptr.
+        if (cap != 0 and !checkRange(mm, buf_ptr, cap)) return mkTrap(.bounds, mm.module_name, 0);
+        if (g_capture) |c| {
+            c.logCall(.file_read, args);
+            return importRet(c.returns[@intFromEnum(CapId.file_read)]);
+        }
+        // Kernel slot 24: take_count = min(count, 2048); result copied out.
+        if (cap == 0) return importRet(0);
+        const take: u32 = @min(cap, stage_io_len);
+        const staged = stageIn(mm, buf_ptr, take, &g_stage_io) orelse return mkTrap(.bounds, mm.module_name, 0);
+        const r = file_read(fd, staged);
+        if (r > 0) stageOut(mm, buf_ptr, g_stage_io[0..@intCast(r)]);
+        return importRet(@intCast(r));
+    }
+    if (std.mem.eql(u8, name, "file_write")) {
+        const fd = argU64(args, 0);
+        const buf_ptr = argPtr(args, 1);
+        const len: u32 = @bitCast(args[2].i32);
+        if (g_capture) |c| {
+            c.logCall(.file_write, args);
+            return importRet(c.returns[@intFromEnum(CapId.file_write)]);
+        }
+        // Kernel slot 25: count > 2048 -> enospc (no truncation).
+        if (len > stage_io_len) return importRet(-5);
+        const staged = stageIn(mm, buf_ptr, len, &g_stage_io) orelse return mkTrap(.bounds, mm.module_name, 0);
+        return importRet(file_write(fd, staged));
+    }
+    if (std.mem.eql(u8, name, "file_close")) {
+        if (g_capture) |c| {
+            c.logCall(.file_close, args);
+            return importRet(c.returns[@intFromEnum(CapId.file_close)]);
+        }
+        const fd: u32 = @bitCast(args[0].i32);
+        // Kernel slot 26 result passes through: 0 on success, ebadf (−2)
+        // on a bad/closed handle (contract §5.1 — review fix, the kernel
+        // result was previously discarded).
+        return importRet(file_close(fd));
+    }
+    if (std.mem.eql(u8, name, "dir_list")) {
+        const path_ptr = argPtr(args, 0);
+        const path_len: u32 = @bitCast(args[1].i32);
+        const out_ptr = argPtr(args, 2);
+        const max_entries: u32 = @bitCast(args[3].i32);
+        // u64 math: max_entries*40 must not wrap u32 before the range
+        // check (a ~2^26-entry request used to wrap to a passing value).
+        const need = @as(u64, max_entries) * 40;
+        const mem_len = @as(u64, mm.mem_pages) * page_size;
+        if (max_entries != 0 and @as(u64, out_ptr) + need > mem_len) return mkTrap(.bounds, mm.module_name, 0);
+        if (g_capture) |c| {
+            c.logCall(.dir_list, args);
+            const n = c.returns[@intFromEnum(CapId.dir_list)];
+            if (n > 0) captureFill(mm, out_ptr, @as(u64, @intCast(n)) * 40, c.out_fill);
+            return importRet(n);
+        }
+        // Kernel slot 27: path_len > max_path_len -> enametoolong (empty = root).
+        if (path_len > stage_path_len) return importRet(-8);
+        const path = stageIn(mm, path_ptr, path_len, &g_stage_path) orelse return mkTrap(.bounds, mm.module_name, 0);
+        const take: u32 = @min(max_entries, 16); // kernel floors to 16 entries
+        const r = dir_list(path, &g_stage_dir, take);
+        if (r > 0) stageOut(mm, out_ptr, g_stage_dir[0 .. @as(usize, @intCast(r)) * 40]);
+        return importRet(@intCast(r));
+    }
+    if (std.mem.eql(u8, name, "file_delete")) {
+        const path_ptr = argPtr(args, 0);
+        const path_len = @as(u32, @bitCast(args[1].i32));
+        if (g_capture) |c| {
+            c.logCall(.file_delete, args);
+            return importRet(c.returns[@intFromEnum(CapId.file_delete)]);
+        }
+        // Kernel slot 34: empty or > max_path_len -> einval.
+        if (path_len == 0 or path_len > stage_path_len) return importRet(-1);
+        const path = stageIn(mm, path_ptr, path_len, &g_stage_path) orelse return mkTrap(.bounds, mm.module_name, 0);
+        return importRet(file_delete(path));
+    }
+    if (std.mem.eql(u8, name, "file_rename")) {
+        const old_ptr = argPtr(args, 0);
+        const old_len = @as(u32, @bitCast(args[1].i32));
+        const new_ptr = argPtr(args, 2);
+        const new_len = @as(u32, @bitCast(args[3].i32));
+        if (g_capture) |c| {
+            c.logCall(.file_rename, args);
+            return importRet(c.returns[@intFromEnum(CapId.file_rename)]);
+        }
+        // Kernel slot 35: any empty or > max_path_len side -> einval.
+        if (old_len == 0 or old_len > stage_path_len or new_len == 0 or new_len > stage_path_len) return importRet(-1);
+        const old_p = stageIn(mm, old_ptr, old_len, &g_stage_path) orelse return mkTrap(.bounds, mm.module_name, 0);
+        const new_p = stageIn(mm, new_ptr, new_len, &g_stage_path2) orelse return mkTrap(.bounds, mm.module_name, 0);
+        return importRet(file_rename(old_p, new_p));
+    }
+    if (std.mem.eql(u8, name, "file_truncate")) {
+        if (g_capture) |c| {
+            c.logCall(.file_truncate, args);
+            return importRet(c.returns[@intFromEnum(CapId.file_truncate)]);
+        }
+        return importRet(file_truncate(argU64(args, 0), argU64(args, 1)));
+    }
+    if (std.mem.eql(u8, name, "file_free")) {
+        if (g_capture) |c| {
+            c.logCall(.file_free, args);
+            return importRet(c.returns[@intFromEnum(CapId.file_free)]);
+        }
+        return importRet(file_free(argU64(args, 0)));
+    }
+
+    // -- §5.2 window ------------------------------------------------------
+    if (std.mem.eql(u8, name, "win_open")) {
+        if (g_capture) |c| {
+            c.logCall(.win_open, args);
+            return importRet(c.returns[@intFromEnum(CapId.win_open)]);
+        }
+        return importRet(win_open(
+            argU64(args, 0),
+            argU64(args, 1),
+            argU64(args, 2),
+            argU64(args, 3),
+        ));
+    }
+    if (std.mem.eql(u8, name, "win_fill")) {
+        if (g_capture) |c| {
+            c.logCall(.win_fill, args);
+            return importRet(c.returns[@intFromEnum(CapId.win_fill)]);
+        }
+        return importRet(win_fill(
+            argU64(args, 0),
+            argU64(args, 1),
+            argU64(args, 2),
+            argU64(args, 3),
+            argU64(args, 4),
+            argU64(args, 5),
+        ));
+    }
+    if (std.mem.eql(u8, name, "win_present")) {
+        if (g_capture) |c| {
+            c.logCall(.win_present, args);
+            return importRet(c.returns[@intFromEnum(CapId.win_present)]);
+        }
+        return importRet(win_present(argU64(args, 0)));
+    }
+    if (std.mem.eql(u8, name, "win_close")) {
+        if (g_capture) |c| {
+            c.logCall(.win_close, args);
+            return importRet(c.returns[@intFromEnum(CapId.win_close)]);
+        }
+        return importRet(win_close(argU64(args, 0)));
+    }
+    if (std.mem.eql(u8, name, "win_move")) {
+        if (g_capture) |c| {
+            c.logCall(.win_move, args);
+            return importRet(c.returns[@intFromEnum(CapId.win_move)]);
+        }
+        return importRet(win_move(
+            argU64(args, 0),
+            argU64(args, 1),
+            argU64(args, 2),
+        ));
+    }
+    if (std.mem.eql(u8, name, "win_raise")) {
+        if (g_capture) |c| {
+            c.logCall(.win_raise, args);
+            return importRet(c.returns[@intFromEnum(CapId.win_raise)]);
+        }
+        return importRet(win_raise(argU64(args, 0)));
+    }
+    if (std.mem.eql(u8, name, "win_get")) {
+        const out_ptr = argPtr(args, 1);
+        if (!checkRange(mm, out_ptr, 16)) return mkTrap(.bounds, mm.module_name, 0);
+        if (g_capture) |c| {
+            c.logCall(.win_get, args);
+            @memset(mm.store[out_ptr .. out_ptr + 16], c.out_fill);
+            return importRet(c.returns[@intFromEnum(CapId.win_get)]);
+        }
+        const r = win_get(argU64(args, 0), &g_stage_info);
+        if (r == 0) stageOut(mm, out_ptr, g_stage_info[0..16]);
+        return importRet(@intCast(r));
+    }
+    if (std.mem.eql(u8, name, "win_query")) {
+        const out_ptr = argPtr(args, 1);
+        if (!checkRange(mm, out_ptr, 32)) return mkTrap(.bounds, mm.module_name, 0);
+        if (g_capture) |c| {
+            c.logCall(.win_query, args);
+            @memset(mm.store[out_ptr .. out_ptr + 32], c.out_fill);
+            return importRet(c.returns[@intFromEnum(CapId.win_query)]);
+        }
+        const r = win_query(argU64(args, 0), &g_stage_info);
+        if (r == 0) stageOut(mm, out_ptr, g_stage_info[0..32]);
+        return importRet(@intCast(r));
+    }
+    if (std.mem.eql(u8, name, "win_set_visible")) {
+        if (g_capture) |c| {
+            c.logCall(.win_set_visible, args);
+            return importRet(c.returns[@intFromEnum(CapId.win_set_visible)]);
+        }
+        return importRet(win_set_visible(argU64(args, 0), argU64(args, 1)));
+    }
+
+    // -- §5.3 audio -------------------------------------------------------
+    if (std.mem.eql(u8, name, "audio_info")) {
+        const out_ptr = argPtr(args, 0);
+        if (!checkRange(mm, out_ptr, 16)) return mkTrap(.bounds, mm.module_name, 0);
+        if (g_capture) |c| {
+            c.logCall(.audio_info, args);
+            @memset(mm.store[out_ptr .. out_ptr + 16], c.out_fill);
+            return importRet(c.returns[@intFromEnum(CapId.audio_info)]);
+        }
+        const r = audio_info(&g_stage_info);
+        if (r == 0) stageOut(mm, out_ptr, g_stage_info[0..16]);
+        return importRet(@intCast(r));
+    }
+    if (std.mem.eql(u8, name, "audio_play")) {
+        const buf_ptr = argPtr(args, 0);
+        const raw_len = @as(u32, @bitCast(args[1].i32));
+        if (g_capture) |c| {
+            c.logCall(.audio_play, args);
+            return importRet(c.returns[@intFromEnum(CapId.audio_play)]);
+        }
+        // Kernel slot 43: zero -> einval, > audio_max_len -> enametoolong.
+        if (raw_len == 0) return importRet(-1);
+        if (raw_len > audio_max_len) return importRet(-8);
+        var off: u32 = 0;
+        while (off < raw_len) {
+            const chunk: u32 = @min(raw_len - off, audio_period_len);
+            const staged = stageIn(mm, buf_ptr + off, chunk, &g_stage_audio) orelse return mkTrap(.bounds, mm.module_name, 0);
+            const r = audio_play(staged);
+            if (r < 0) return importRet(@intCast(r));
+            off += chunk;
+        }
+        return importRet(@intCast(raw_len));
+    }
+    if (std.mem.eql(u8, name, "audio_volume")) {
+        if (g_capture) |c| {
+            c.logCall(.audio_volume, args);
+            return importRet(c.returns[@intFromEnum(CapId.audio_volume)]);
+        }
+        return importRet(audio_volume(argU64(args, 0)));
+    }
+    if (std.mem.eql(u8, name, "audio_mute")) {
+        if (g_capture) |c| {
+            c.logCall(.audio_mute, args);
+            return importRet(c.returns[@intFromEnum(CapId.audio_mute)]);
+        }
+        return importRet(audio_mute(argU64(args, 0)));
+    }
+
+    // -- §5.4 timers ------------------------------------------------------
+    if (std.mem.eql(u8, name, "timer_set")) {
+        if (g_capture) |c| {
+            c.logCall(.timer_set, args);
+            return importRet(c.returns[@intFromEnum(CapId.timer_set)]);
+        }
+        return importRet(timer_set(argU64(args, 0)));
+    }
+    if (std.mem.eql(u8, name, "timer_cancel")) {
+        if (g_capture) |c| {
+            c.logCall(.timer_cancel, args);
+            return importRet(c.returns[@intFromEnum(CapId.timer_cancel)]);
+        }
+        return importRet(timer_cancel());
+    }
+
+    // -- §5.5 mmap arena --------------------------------------------------
+    if (std.mem.eql(u8, name, "mmap")) {
+        if (g_capture) |c| {
+            c.logCall(.mmap, args);
+            return importRet(c.returns[@intFromEnum(CapId.mmap)]);
+        }
+        return importRet(mmap(
+            argU64(args, 0),
+            argU64(args, 1),
+            argU64(args, 2),
+            argU64(args, 3),
+        ));
+    }
+    if (std.mem.eql(u8, name, "munmap")) {
+        if (g_capture) |c| {
+            c.logCall(.munmap, args);
+            return importRet(c.returns[@intFromEnum(CapId.munmap)]);
+        }
+        return importRet(munmap(argU64(args, 0), argU64(args, 1)));
+    }
+
+    // -- §5.6/5.7 procs + wait -------------------------------------------
+    if (std.mem.eql(u8, name, "procs")) {
+        const buf_ptr = argPtr(args, 0);
+        const max: u32 = @bitCast(args[1].i32);
+        if (max != 0 and !checkRange(mm, buf_ptr, max)) return mkTrap(.bounds, mm.module_name, 0);
+        if (g_capture) |c| {
+            c.logCall(.procs, args);
+            const n = c.returns[@intFromEnum(CapId.procs)];
+            if (n > 0) captureFill(mm, buf_ptr, @as(u64, @intCast(n)) * 40, c.out_fill);
+            return importRet(n);
+        }
+        // Kernel slot 7: byte-budget max, rows floored to whole 40-byte rows.
+        if (max == 0) return importRet(0);
+        const budget: u64 = @min(@as(u64, max), stage_dir_len);
+        const r = procs(&g_stage_dir, budget);
+        if (r > 0) stageOut(mm, buf_ptr, g_stage_dir[0 .. @as(usize, @intCast(r)) * 40]);
+        return importRet(@intCast(r));
+    }
+    if (std.mem.eql(u8, name, "wait")) {
+        if (g_capture) |c| {
+            c.logCall(.wait, args);
+            return importRet(c.returns[@intFromEnum(CapId.wait)]);
+        }
+        return importRet(wait(argU64(args, 0)));
+    }
+
     return mkTrap(.imported_unwired, mm.module_name, 0);
 }
 
@@ -1925,7 +2593,7 @@ pub export fn _start(argc: usize, argv: ?[*]const [32]u8) callconv(.c) noreturn 
         if (r <= 0) break;
         n += @intCast(r);
     }
-    file_close(@intCast(fd));
+    _ = file_close(@intCast(fd));
     if (n == 0) fail("wasm: empty module\n", 4);
 
     parseInto(&g_module, g_mod_buf[0..n]) catch fail("wasm: parse error\n", 10);
@@ -2179,4 +2847,239 @@ test "w2: env.write with out-of-bounds pointer traps bounds" {
     const r = call(&machine, &m, entryExport(&m).?, &.{});
     try testing.expect(r == .trap);
     try testing.expectEqual(TrapKind.bounds, r.trap.kind);
+}
+
+// ---------------------------------------------------------------------------
+// W3 (#764) — the frozen env.* import surface (docs/wasm-import-contract.md
+// §5 + the W2 write/exit pair). Fixture modules are import-only (no code
+// section): parse + validate + instantiate, then each import is called
+// DIRECTLY by func index through the capture seam, which proves dispatch
+// shape, argument extraction, range checks, and canned returns without a
+// real svc #0 (undefinable in a host test).
+// ---------------------------------------------------------------------------
+const w3_all = "\x00\x61\x73\x6d\x01\x00\x00\x00\x01\x2d\x07\x60\x03\x7f\x7f\x7f\x01\x7f\x60\x01\x7f\x00\x60\x01\x7f\x01\x7f\x60\x04\x7f\x7f\x7f\x7f\x01\x7f\x60\x02\x7f\x7f\x01\x7f\x60\x06\x7f\x7f\x7f\x7f\x7f\x7f\x01\x7f\x60\x00\x01\x7f\x02\xdc\x03\x1e\x03\x65\x6e\x76\x05\x77\x72\x69\x74\x65\x00\x00\x03\x65\x6e\x76\x04\x65\x78\x69\x74\x00\x01\x03\x65\x6e\x76\x09\x66\x69\x6c\x65\x5f\x6f\x70\x65\x6e\x00\x00\x03\x65\x6e\x76\x09\x66\x69\x6c\x65\x5f\x72\x65\x61\x64\x00\x00\x03\x65\x6e\x76\x0a\x66\x69\x6c\x65\x5f\x77\x72\x69\x74\x65\x00\x00\x03\x65\x6e\x76\x0a\x66\x69\x6c\x65\x5f\x63\x6c\x6f\x73\x65\x00\x02\x03\x65\x6e\x76\x08\x64\x69\x72\x5f\x6c\x69\x73\x74\x00\x03\x03\x65\x6e\x76\x0b\x66\x69\x6c\x65\x5f\x64\x65\x6c\x65\x74\x65\x00\x04\x03\x65\x6e\x76\x0b\x66\x69\x6c\x65\x5f\x72\x65\x6e\x61\x6d\x65\x00\x03\x03\x65\x6e\x76\x0d\x66\x69\x6c\x65\x5f\x74\x72\x75\x6e\x63\x61\x74\x65\x00\x04\x03\x65\x6e\x76\x09\x66\x69\x6c\x65\x5f\x66\x72\x65\x65\x00\x02\x03\x65\x6e\x76\x08\x77\x69\x6e\x5f\x6f\x70\x65\x6e\x00\x03\x03\x65\x6e\x76\x08\x77\x69\x6e\x5f\x66\x69\x6c\x6c\x00\x05\x03\x65\x6e\x76\x0b\x77\x69\x6e\x5f\x70\x72\x65\x73\x65\x6e\x74\x00\x02\x03\x65\x6e\x76\x09\x77\x69\x6e\x5f\x63\x6c\x6f\x73\x65\x00\x02\x03\x65\x6e\x76\x08\x77\x69\x6e\x5f\x6d\x6f\x76\x65\x00\x00\x03\x65\x6e\x76\x09\x77\x69\x6e\x5f\x72\x61\x69\x73\x65\x00\x02\x03\x65\x6e\x76\x07\x77\x69\x6e\x5f\x67\x65\x74\x00\x04\x03\x65\x6e\x76\x09\x77\x69\x6e\x5f\x71\x75\x65\x72\x79\x00\x04\x03\x65\x6e\x76\x0f\x77\x69\x6e\x5f\x73\x65\x74\x5f\x76\x69\x73\x69\x62\x6c\x65\x00\x04\x03\x65\x6e\x76\x0a\x61\x75\x64\x69\x6f\x5f\x69\x6e\x66\x6f\x00\x02\x03\x65\x6e\x76\x0a\x61\x75\x64\x69\x6f\x5f\x70\x6c\x61\x79\x00\x04\x03\x65\x6e\x76\x0c\x61\x75\x64\x69\x6f\x5f\x76\x6f\x6c\x75\x6d\x65\x00\x02\x03\x65\x6e\x76\x0a\x61\x75\x64\x69\x6f\x5f\x6d\x75\x74\x65\x00\x02\x03\x65\x6e\x76\x09\x74\x69\x6d\x65\x72\x5f\x73\x65\x74\x00\x02\x03\x65\x6e\x76\x0c\x74\x69\x6d\x65\x72\x5f\x63\x61\x6e\x63\x65\x6c\x00\x06\x03\x65\x6e\x76\x04\x6d\x6d\x61\x70\x00\x03\x03\x65\x6e\x76\x06\x6d\x75\x6e\x6d\x61\x70\x00\x04\x03\x65\x6e\x76\x05\x70\x72\x6f\x63\x73\x00\x04\x03\x65\x6e\x76\x04\x77\x61\x69\x74\x00\x02\x05\x03\x01\x00\x01";
+const w3_foreign = "\x00\x61\x73\x6d\x01\x00\x00\x00\x01\x08\x01\x60\x03\x7f\x7f\x7f\x01\x7f\x02\x23\x01\x16\x77\x61\x73\x69\x5f\x73\x6e\x61\x70\x73\x68\x6f\x74\x5f\x70\x72\x65\x76\x69\x65\x77\x31\x08\x66\x64\x5f\x77\x72\x69\x74\x65\x00\x00";
+const w3_unknown = "\x00\x61\x73\x6d\x01\x00\x00\x00\x01\x06\x01\x60\x01\x7f\x01\x7f\x02\x0c\x01\x03\x65\x6e\x76\x04\x6e\x6f\x70\x65\x00\x00\x05\x03\x01\x00\x01";
+const w3_badsig = "\x00\x61\x73\x6d\x01\x00\x00\x00\x01\x06\x01\x60\x01\x7f\x01\x7f\x02\x10\x01\x03\x65\x6e\x76\x08\x77\x69\x6e\x5f\x6f\x70\x65\x6e\x00\x00\x05\x03\x01\x00\x01";
+const w3_ptr = "\x00\x61\x73\x6d\x01\x00\x00\x00\x01\x1b\x04\x60\x03\x7f\x7f\x7f\x01\x7f\x60\x04\x7f\x7f\x7f\x7f\x01\x7f\x60\x02\x7f\x7f\x01\x7f\x60\x01\x7f\x01\x7f\x02\x4b\x05\x03\x65\x6e\x76\x09\x66\x69\x6c\x65\x5f\x6f\x70\x65\x6e\x00\x00\x03\x65\x6e\x76\x08\x64\x69\x72\x5f\x6c\x69\x73\x74\x00\x01\x03\x65\x6e\x76\x07\x77\x69\x6e\x5f\x67\x65\x74\x00\x02\x03\x65\x6e\x76\x0a\x61\x75\x64\x69\x6f\x5f\x69\x6e\x66\x6f\x00\x03\x03\x65\x6e\x76\x05\x70\x72\x6f\x63\x73\x00\x02\x05\x03\x01\x00\x01";
+const w3_file = "\x00\x61\x73\x6d\x01\x00\x00\x00\x01\x10\x02\x60\x03\x7f\x7f\x7f\x01\x7f\x60\x04\x7f\x7f\x7f\x7f\x01\x7f\x02\x41\x04\x03\x65\x6e\x76\x09\x66\x69\x6c\x65\x5f\x6f\x70\x65\x6e\x00\x00\x03\x65\x6e\x76\x09\x66\x69\x6c\x65\x5f\x72\x65\x61\x64\x00\x00\x03\x65\x6e\x76\x0a\x66\x69\x6c\x65\x5f\x77\x72\x69\x74\x65\x00\x00\x03\x65\x6e\x76\x08\x64\x69\x72\x5f\x6c\x69\x73\x74\x00\x01\x05\x03\x01\x00\x01";
+const w3_win = "\x00\x61\x73\x6d\x01\x00\x00\x00\x01\x0f\x02\x60\x04\x7f\x7f\x7f\x7f\x01\x7f\x60\x02\x7f\x7f\x01\x7f\x02\x2e\x03\x03\x65\x6e\x76\x08\x77\x69\x6e\x5f\x6f\x70\x65\x6e\x00\x00\x03\x65\x6e\x76\x07\x77\x69\x6e\x5f\x67\x65\x74\x00\x01\x03\x65\x6e\x76\x09\x77\x69\x6e\x5f\x71\x75\x65\x72\x79\x00\x01\x05\x03\x01\x00\x01";
+const w3_otr = "\x00\x61\x73\x6d\x01\x00\x00\x00\x01\x18\x04\x60\x01\x7f\x01\x7f\x60\x00\x01\x7f\x60\x04\x7f\x7f\x7f\x7f\x01\x7f\x60\x02\x7f\x7f\x01\x7f\x02\x64\x07\x03\x65\x6e\x76\x0a\x61\x75\x64\x69\x6f\x5f\x69\x6e\x66\x6f\x00\x00\x03\x65\x6e\x76\x09\x74\x69\x6d\x65\x72\x5f\x73\x65\x74\x00\x00\x03\x65\x6e\x76\x0c\x74\x69\x6d\x65\x72\x5f\x63\x61\x6e\x63\x65\x6c\x00\x01\x03\x65\x6e\x76\x04\x6d\x6d\x61\x70\x00\x02\x03\x65\x6e\x76\x06\x6d\x75\x6e\x6d\x61\x70\x00\x03\x03\x65\x6e\x76\x05\x70\x72\x6f\x63\x73\x00\x03\x03\x65\x6e\x76\x04\x77\x61\x69\x74\x00\x00\x05\x03\x01\x00\x01";
+test "w3: validate rejects foreign module, unknown name, and bad signature" {
+    var m0 = try parse(w3_foreign);
+    try testing.expectError(error.UnknownImportModule, validate(&m0));
+    var m1 = try parse(w3_unknown);
+    try testing.expectError(error.UnknownImport, validate(&m1));
+    var m2 = try parse(w3_badsig);
+    try testing.expectError(error.ImportSignature, validate(&m2));
+}
+
+test "w3: all 30 frozen imports dispatch through the capture seam" {
+    var m = try parse(w3_all);
+    try validate(&m);
+    var store: [page_size]u8 = undefined;
+    try testing.expect(instantiate(&machine, &m, &store, "w3all") == null);
+    var cap = HostCapture{ .write_buf = &store };
+    g_capture = &cap;
+    defer g_capture = null;
+    cap.returns[@intFromEnum(CapId.file_open)] = 3;
+    cap.returns[@intFromEnum(CapId.win_open)] = 4;
+    cap.returns[@intFromEnum(CapId.mmap)] = 0x10000;
+    cap.returns[@intFromEnum(CapId.procs)] = 2;
+    const Z: [6]Value = .{ .{ .i32 = 0 }, .{ .i32 = 0 }, .{ .i32 = 0 }, .{ .i32 = 0 }, .{ .i32 = 0 }, .{ .i32 = 0 } };
+    for (0..m.import_count) |fi| {
+        const ft = &m.types[m.imports[fi].type_index];
+        const r = call(&machine, &m, @intCast(fi), Z[0..ft.param_count]);
+        const name = m.imports[fi].name;
+        if (std.mem.eql(u8, name, "exit")) {
+            // env.exit is noreturn: capture stops the interpreter.
+            try testing.expect(r == .trap);
+            try testing.expectEqual(TrapKind.guest_exit, r.trap.kind);
+            continue;
+        }
+        try testing.expect(r == .ret);
+        try testing.expectEqual(@as(usize, 1), r.ret.count);
+    }
+    try testing.expectEqual(@as(usize, 30), cap.log_count);
+    // CapId variants were declared in the same order as the frozen table,
+    // so the log ids line up with the import indices.
+    for (0..30) |i| try testing.expectEqual(i, @as(usize, @intFromEnum(cap.log[i].id)));
+    // Canned returns flowed back as the i32 result. The two direct re-calls
+    // below log two more entries (30 + 2 = 32).
+    const r11 = call(&machine, &m, 11, &.{ .{ .i32 = 0 }, .{ .i32 = 0 }, .{ .i32 = 0 }, .{ .i32 = 0 } });
+    try testing.expectEqual(@as(i32, 4), r11.ret.vals[0].i32);
+    const r26 = call(&machine, &m, 26, &.{ .{ .i32 = 0 }, .{ .i32 = 0 }, .{ .i32 = 0 }, .{ .i32 = 0 } });
+    try testing.expectEqual(@as(i32, 0x10000), r26.ret.vals[0].i32);
+    try testing.expectEqual(@as(usize, 32), cap.log_count);
+    try testing.expectEqual(@as(usize, @intFromEnum(CapId.win_open)), @as(usize, @intFromEnum(cap.log[30].id)));
+    try testing.expectEqual(@as(usize, @intFromEnum(CapId.mmap)), @as(usize, @intFromEnum(cap.log[31].id)));
+}
+
+test "w3: file imports carry paths and buffers across the store" {
+    var m = try parse(w3_file);
+    try validate(&m);
+    var store: [page_size]u8 = undefined;
+    try testing.expect(instantiate(&machine, &m, &store, "w3file") == null);
+    const path = "/host/A.BIN";
+    @memcpy(store[16 .. 16 + path.len], path);
+    var cap = HostCapture{ .write_buf = &store };
+    g_capture = &cap;
+    defer g_capture = null;
+    cap.returns[@intFromEnum(CapId.file_open)] = 3;
+    cap.returns[@intFromEnum(CapId.file_read)] = 17;
+    cap.returns[@intFromEnum(CapId.file_write)] = 8;
+    cap.returns[@intFromEnum(CapId.dir_list)] = 2;
+    const args1 = [_]Value{ .{ .i32 = 16 }, .{ .i32 = 13 }, .{ .i32 = 1 } };
+    const r0 = call(&machine, &m, 0, &args1);
+    try testing.expectEqual(@as(i32, 3), r0.ret.vals[0].i32);
+    try testing.expectEqual(@as(i64, 16), cap.log[0].a[0]);
+    try testing.expectEqual(@as(i64, 13), cap.log[0].a[1]);
+    try testing.expectEqual(@as(i64, 1), cap.log[0].a[2]);
+    const args2 = [_]Value{ .{ .i32 = 3 }, .{ .i32 = 64 }, .{ .i32 = 32 } };
+    const r1 = call(&machine, &m, 1, &args2);
+    try testing.expectEqual(@as(i32, 17), r1.ret.vals[0].i32);
+    const args3 = [_]Value{ .{ .i32 = 3 }, .{ .i32 = 64 }, .{ .i32 = 8 } };
+    try testing.expectEqual(@as(i32, 8), call(&machine, &m, 2, &args3).ret.vals[0].i32);
+    const args4 = [_]Value{ .{ .i32 = 16 }, .{ .i32 = 13 }, .{ .i32 = 128 }, .{ .i32 = 2 } };
+    const r3 = call(&machine, &m, 3, &args4);
+    try testing.expectEqual(@as(i32, 2), r3.ret.vals[0].i32);
+    try testing.expect(std.mem.allEqual(u8, store[128..208], 0xA5));
+}
+
+test "w3: window imports dispatch; win_get/win_query fill their out-buffers" {
+    var m = try parse(w3_win);
+    try validate(&m);
+    var store: [page_size]u8 = undefined;
+    try testing.expect(instantiate(&machine, &m, &store, "w3win") == null);
+    var cap = HostCapture{ .write_buf = &store };
+    g_capture = &cap;
+    defer g_capture = null;
+    cap.returns[@intFromEnum(CapId.win_open)] = 4;
+    const args0 = [_]Value{ .{ .i32 = 100 }, .{ .i32 = 200 }, .{ .i32 = 96 }, .{ .i32 = 48 } };
+    const r0 = call(&machine, &m, 0, &args0);
+    try testing.expectEqual(@as(i32, 4), r0.ret.vals[0].i32);
+    try testing.expectEqual(@as(i64, 100), cap.log[0].a[0]);
+    try testing.expectEqual(@as(i64, 200), cap.log[0].a[1]);
+    const args1 = [_]Value{ .{ .i32 = 4 }, .{ .i32 = 32 } };
+    try testing.expect(call(&machine, &m, 1, &args1) == .ret);
+    try testing.expect(std.mem.allEqual(u8, store[32..48], 0xA5));
+    const args2 = [_]Value{ .{ .i32 = 4 }, .{ .i32 = 64 } };
+    try testing.expect(call(&machine, &m, 2, &args2) == .ret);
+    try testing.expect(std.mem.allEqual(u8, store[64..96], 0xA5));
+}
+
+test "w3: audio, timer, mmap, procs, wait dispatch" {
+    var m = try parse(w3_otr);
+    try validate(&m);
+    var store: [page_size]u8 = undefined;
+    try testing.expect(instantiate(&machine, &m, &store, "w3otr") == null);
+    var cap = HostCapture{ .write_buf = &store };
+    g_capture = &cap;
+    defer g_capture = null;
+    cap.returns[@intFromEnum(CapId.timer_cancel)] = 1;
+    cap.returns[@intFromEnum(CapId.mmap)] = 0x10000;
+    cap.returns[@intFromEnum(CapId.procs)] = 3;
+    try testing.expect(call(&machine, &m, 0, &.{.{ .i32 = 16 }}) == .ret);
+    try testing.expect(std.mem.allEqual(u8, store[16..32], 0xA5));
+    try testing.expect(call(&machine, &m, 1, &.{.{ .i32 = 20 }}) == .ret);
+    try testing.expectEqual(@as(i32, 1), call(&machine, &m, 2, &.{}).ret.vals[0].i32);
+    const r3 = call(&machine, &m, 3, &.{ .{ .i32 = 0 }, .{ .i32 = 4096 }, .{ .i32 = 3 }, .{ .i32 = 0x22 } });
+    try testing.expectEqual(@as(i32, 0x10000), r3.ret.vals[0].i32);
+    try testing.expect(call(&machine, &m, 4, &.{ .{ .i32 = 0x10000 }, .{ .i32 = 4096 } }) == .ret);
+    const r5 = call(&machine, &m, 5, &.{ .{ .i32 = 128 }, .{ .i32 = 80 } });
+    try testing.expectEqual(@as(i32, 3), r5.ret.vals[0].i32);
+    try testing.expect(std.mem.allEqual(u8, store[128..248], 0xA5));
+    try testing.expect(call(&machine, &m, 6, &.{.{ .i32 = 2 }}) == .ret);
+}
+
+test "w3: pointer imports trap on out-of-bounds wasm pointers (never EFAULT at svc)" {
+    var m = try parse(w3_ptr);
+    try validate(&m);
+    var store: [page_size]u8 = undefined;
+    try testing.expect(instantiate(&machine, &m, &store, "w3ptr") == null);
+    const trap = struct {
+        fn expectBounds(r: CallResult) !void {
+            try testing.expect(r == .trap);
+            try testing.expectEqual(TrapKind.bounds, r.trap.kind);
+        }
+    };
+    const big = @as(i32, @bitCast(@as(u32, 0x7FFFFFFF)));
+    try trap.expectBounds(call(&machine, &m, 0, &.{ .{ .i32 = big }, .{ .i32 = 4 }, .{ .i32 = 1 } }));
+    try trap.expectBounds(call(&machine, &m, 1, &.{ .{ .i32 = 0 }, .{ .i32 = 0 }, .{ .i32 = big }, .{ .i32 = 2 } }));
+    try trap.expectBounds(call(&machine, &m, 2, &.{ .{ .i32 = 2 }, .{ .i32 = big } }));
+    try trap.expectBounds(call(&machine, &m, 3, &.{.{ .i32 = big }}));
+    try trap.expectBounds(call(&machine, &m, 4, &.{ .{ .i32 = big }, .{ .i32 = 8 } }));
+}
+
+test "w3: frozen import with a non-i32 result type is rejected (ImportSignature)" {
+    // env.win_open is (i32,i32,i32,i32) -> i32 (contract §5.2). A module
+    // declaring -> i64 must fail validation: the dispatch arm pushes an
+    // i32-lane Value, which the body would read through the i64 lane.
+    const bytes = "\x00\x61\x73\x6d\x01\x00\x00\x00" ++
+        "\x01\x09\x01\x60\x04\x7f\x7f\x7f\x7f\x01\x7e" ++
+        "\x02\x10\x01\x03\x65\x6e\x76\x08\x77\x69\x6e\x5f\x6f\x70\x65\x6e\x00\x00" ++
+        "\x05\x03\x01\x00\x01";
+    var m = try parse(bytes);
+    try testing.expectError(error.ImportSignature, validate(&m));
+}
+
+test "w3: zero-length buffers are valid at any pointer (contract §3)" {
+    // write(fd, 0x7fffffff, 0) and file_read(fd, 0x7fffffff, 0) touch no
+    // memory — they return (0), not bounds-trap.
+    const bytes = "\x00\x61\x73\x6d\x01\x00\x00\x00" ++
+        "\x01\x0f\x02\x60\x03\x7f\x7f\x7f\x01\x7f\x60\x03\x7f\x7f\x7f\x01\x7f" ++
+        "\x02\x1d\x02\x03\x65\x6e\x76\x05\x77\x72\x69\x74\x65\x00\x00\x03\x65\x6e\x76\x09\x66\x69\x6c\x65\x5f\x72\x65\x61\x64\x00\x00" ++
+        "\x05\x03\x01\x00\x01";
+    var m = try parse(bytes);
+    try validate(&m);
+    var store: [page_size]u8 = undefined;
+    try testing.expect(instantiate(&machine, &m, &store, "w3zlen") == null);
+    var cap = HostCapture{ .write_buf = &store };
+    g_capture = &cap;
+    defer g_capture = null;
+    const rw = call(&machine, &m, 0, &.{ .{ .i32 = 1 }, .{ .i32 = 0x7FFFFFFF }, .{ .i32 = 0 } });
+    try testing.expect(rw == .ret);
+    try testing.expectEqual(@as(i32, 0), rw.ret.vals[0].i32);
+    const rr = call(&machine, &m, 1, &.{ .{ .i32 = 0 }, .{ .i32 = 0x7FFFFFFF }, .{ .i32 = 0 } });
+    try testing.expect(rr == .ret);
+    try testing.expectEqual(@as(i32, 0), rr.ret.vals[0].i32);
+}
+
+test "w3: dir_list entry-count math is wrap-proof" {
+    // max_entries * 40 wraps u32 for ~2^26 entries; the wrapped value used
+    // to slip past the range check (here: 0x20000000 * 40 == 2^35, which
+    // truncates to 0). Root path (len 0) with a huge entry cap must trap.
+    var m = try parse(w3_file);
+    try validate(&m);
+    var store: [page_size]u8 = undefined;
+    try testing.expect(instantiate(&machine, &m, &store, "w3wrap") == null);
+    var cap = HostCapture{ .write_buf = &store };
+    g_capture = &cap;
+    defer g_capture = null;
+    const r = call(&machine, &m, 3, &.{ .{ .i32 = 0 }, .{ .i32 = 0 }, .{ .i32 = 0 }, .{ .i32 = 0x20000000 } });
+    try testing.expect(r == .trap);
+    try testing.expectEqual(TrapKind.bounds, r.trap.kind);
+}
+
+test "w3: live-gate app fixtures parse + validate against the frozen surface" {
+    // The exact WINAPP.WASM / FILEAPP.WASM binaries the class-B gate
+    // (tools/verify-live-wasm.sh W3 phases) drops into the share —
+    // compiled from tests/virelai.h alone (the "contract alone" rule)
+    // and pinned byte-identical (claim: fresh rebuild, fixed basenames).
+    const win = @embedFile("wasm-corpus/winapp.wasm");
+    const file = @embedFile("wasm-corpus/fileapp.wasm");
+    var mw = try parse(win);
+    try validate(&mw);
+    var mf = try parse(file);
+    try validate(&mf);
+    var nwin: usize = 0;
+    for (mw.imports[0..mw.import_count]) |imp| {
+        if (std.mem.eql(u8, imp.name, "win_open")) nwin += 1;
+    }
+    var nfile: usize = 0;
+    for (mf.imports[0..mf.import_count]) |imp| {
+        if (std.mem.eql(u8, imp.name, "file_read")) nfile += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), nwin);
+    try testing.expectEqual(@as(usize, 1), nfile);
 }
