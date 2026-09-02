@@ -68,3 +68,14 @@ W5-shape control also fails. Everything this claim adds is proven by
 host tests + class-A + live needles that pass whenever the guest runs;
 the remaining step — one clean live boot — needs the kernel/machine
 stable (it passed earlier today at ~11:00) or issue #810 fixed.
+
+## 2026-09-02 — LIVE GATE PASS boot1 (rc=0): claim complete
+
+`BOOTS=1 bash tools/verify-live-wasm.sh` → **PASS boot1**: every needle
+green — nl1/3/7/8 (numbered WC.TXT lines byte-exact), nlexit (exit 383),
+nlresp (shell echo) AND all W2-W5 intact: floatapp 590 + five float
+families, wc 320, fileapp 512, hello 55, winapp + red fill 10,436 px.
+The five-exec script1 + solo script3-phase design (NL after the winapp
+exits) restored floatapp's exit-590 line that the six-exec burst kept
+losing to #803/#810. Evidence: artifacts/live-wasm-serial-boot1.log,
+live-wasm-report.txt, m35-wasm-live.txt. Claim 9746 → ✅.
