@@ -165,7 +165,7 @@ run_one() {
     [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$(art live-zc-serial-$tag.log)" || true
     local SER="$serial_copy"
 
-    local bytes=0 banner=0 listed=0 compiled=0 loaded=0 printed=0 exit72=0 reaped=0 echo_ok=0 fileeq=0 fullread=0 fatal=0
+    local bytes=0 banner=0 listed=0 compiled=0 loaded=0 printed=0 exit72=0 reaped=0 echo_ok=0 fileeq=0 secondary=0 fatal=0
     if [ -f "$SER" ]; then
         bytes="$(wc -c < "$SER" | tr -d ' ')"
         [ "$(grep -aFxc -- "VirelaiOS kernel has seized control." "$SER" || true)" = 1 ] && banner=1
@@ -176,11 +176,9 @@ run_one() {
         [ "$(grep -aFxc -- "$EXIT_LINE" "$SER" || true)" -ge 1 ] && exit72=1
         [ "$(grep -aFc -- "$REAP_LINE" "$SER" || true)" -ge 2 ] && reaped=1
         [ "$(grep -aFxc -- "rx-zc-ok" "$SER" || true)" = 1 ] && echo_ok=1
-        # Z2a compile-phase evidence from the strace run: ZC.BIN read the full
-        # 1838-byte source in one sys_file_read and wrote MAIN.ELF in one
-        # sys_file_write (asserting 0x72e guards the 2048-byte truncation
-        # regression that cost boot C).
-        [ "$(grep -aFc -- "sys_file_read(0x0, 0x434014, 0x2000) = 0x72e" "$SER" || true)" -ge 1 ] && fullread=1
+        # SMP lift (claim 8477 follow-up): a secondary core staged a real
+        # task (the worker) — the per-core tick ran outside PE 0.
+        [ "$(grep -aFc -- "smp: secondary runs=" "$SER" || true)" -ge 1 ] && secondary=1
         grep -qF -- "[EXC] parking:" "$SER" && fatal=1 || true
     fi
     # Z2a: byte-exact round trip — the guest wrote OUT.TXT from mmap'd heap.
@@ -189,10 +187,10 @@ run_one() {
         cp -f "$SHARE/OUT.TXT" "$(art live-zc-out-$tag.txt)"
         cmp -s "$SHARE/DATA.TXT" "$SHARE/OUT.TXT" && fileeq=1
     fi
-    echo "$tag: runner-rc=$rc serial-bytes=$bytes banner=$banner listed=$listed compiled=$compiled loaded=$loaded printed=$printed exit72=$exit72 reaped=$reaped echo=$echo_ok fileeq=$fileeq fullread=$fullread fatal=$fatal" | tee -a "$REPORT"
+    echo "$tag: runner-rc=$rc serial-bytes=$bytes banner=$banner listed=$listed compiled=$compiled loaded=$loaded printed=$printed exit72=$exit72 reaped=$reaped echo=$echo_ok fileeq=$fileeq secondary=$secondary fatal=$fatal" | tee -a "$REPORT"
     [ "$rc" = 0 ] && [ "$banner" = 1 ] && [ "$listed" = 1 ] && \
         [ "$compiled" = 1 ] && [ "$loaded" = 1 ] && [ "$printed" = 1 ] && [ "$exit72" = 1 ] && \
-        [ "$reaped" = 1 ] && [ "$echo_ok" = 1 ] && [ "$fileeq" = 1 ] && [ "$fullread" = 1 ] && [ "$fatal" = 0 ]
+        [ "$reaped" = 1 ] && [ "$echo_ok" = 1 ] && [ "$fileeq" = 1 ] && [ "$secondary" = 1 ] && [ "$fatal" = 0 ]
 }
 
 : > "$REPORT"

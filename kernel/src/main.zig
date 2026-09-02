@@ -1820,11 +1820,14 @@ fn irq_dispatch() void {
         smp.handle_sgi(intid);
     } else if (timer.is_ppi(intid)) {
         if (smp.core_id() == 0) {
-            timer.handle();
-            scheduler.tick();
+            timer.handle(); // core-0 timekeeping authority (tick record + re-arm)
         } else {
-            timer.arm();
+            timer.arm(); // secondary core: re-arm only — no tick record
         }
+        // SMP lift (claim 8477 follow-up): every core runs the tick; on
+        // secondary cores it runs ONLY the switch machinery on its own
+        // per-core staging (global timekeeping/registries stay core-0).
+        scheduler.tick();
     } else {
         virtio_custom.note_irq(intid);
     }

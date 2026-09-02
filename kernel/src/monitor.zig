@@ -3724,6 +3724,8 @@ fn cmd_smp(m: *Monitor, args: []const []const u8) ExecError {
         m.console.print_hex(smp.core_mpidr[c]);
         m.console.puts(" state=");
         m.console.puts(if (smp.core_online[c]) "online" else "offline");
+        m.console.puts(" ticks=");
+        m.console.print_u64(smp.core_ticks[c]); // per-core tick counter (claim 8477 follow-up)
         m.console.puts(" task=");
         const cur_tid = scheduler.current_task_for_core(c);
         if (scheduler.task_info(cur_tid)) |info| {
