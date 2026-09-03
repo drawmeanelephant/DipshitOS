@@ -3166,16 +3166,39 @@ fn fg_run(mon: *monitor.Monitor, argv: []const []const u8) void {
 /// only the kernel seam touches this storage.
 var boot_shell_storage: Shell = undefined;
 
-/// Boot presentation for the kernel seam. Prints the banner; with an RX
-/// source wired it runs the interactive loop forever (never returns);
-/// without RX it prints the prompt and returns so the caller parks in WFE.
-/// Never spins hot, never reads a device register.
-pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
-    if (!rx_wired) {
-        monitor.banner(mon);
-        mon.console.puts(expanded_prompt());
-        return;
-    }
+/// Issue #814 (the #803/#810 stack-overflow family): the shell's RX path
+/// must NOT run on the 16 KiB handoff boot stack (ADR 0004 D5). Measured
+/// in the disassembly (2026-09-02, claim 8554): even the SETUP-ONLY path
+/// — Shell.init's by-value return staging inlined at sp+0x3c40, rc_buf,
+/// and the restore/dispatch locals — is an unconditional prologue
+/// `sub sp, #0x3000 + #0xfb0` (+ the callee-save stp) = ~0x4010, the full
+/// 16 KiB stack before kernel_main's live frame is even counted. The
+/// pre-fix merged frame (setup + loop inlined) measured 0x4750 = 18,256
+/// bytes, whose bottom and every IRQ frame pushed while parked land in
+/// the loader-data pocket BELOW the stack (handoff record / early-boot
+/// structures), silently corrupting state; deeper dips fault (issue
+/// #814's elr 0x8d44/0x8f54 corrupted-callee-saved class, observed in the
+/// verify-live-zc plain-exec boots ~50% of the time).
+///
+/// The fix runs the WHOLE RX path — init, setup, .virelairc AND the park
+/// loop — on a dedicated static task stack, the worker/idle/user standard
+/// ("one task, one stack" discipline, as `worker_stack`/`idle_stack`). 64
+/// KiB, not the 32 KiB task standard: LLVM keeps the deepest
+/// command-dispatch frames (~0x4000 each) as separate functions that NEST
+/// under park_body's merged frame rather than inlining them, and IRQ
+/// frames land on the task stack too; ~40 KiB worst measured depth fits
+/// with margin. BSS cost (+64 KiB against ~510 KiB headroom) is inside
+/// the verify-bss-budget allowance. Only the no-RX path (banner + prompt,
+/// ~0x100 of locals) still runs on the boot stack.
+var park_stack: [64 * 1024]u8 align(16) = undefined;
+
+/// Park-path body: the ENTIRE RX-wired shell path — init, history/env/
+/// window restore, .virelairc, then the interactive loop that never
+/// returns. Runs on park_stack: `boot_and_park` (aarch64) SP-switches to
+/// park_stack and `bl`s this AAPCS64 body; host builds call it directly
+/// (the comptime aarch64 branch is elided). Only `boot_and_park` reaches
+/// it — nothing else in the kernel touches the shell seam.
+fn park_body(mon: *monitor.Monitor) callconv(.c) void {
     const shell: *Shell = &boot_shell_storage;
     shell.* = Shell.init(mon.console, mon.state, mon.machine);
     shell.boot();
@@ -3391,6 +3414,51 @@ pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
             idle_wait_rx();
         }
     }
+}
+
+/// Boot presentation for the kernel seam. Prints the banner; with an RX
+/// source wired it SP-switches to `park_stack` FIRST (issue #814: even
+/// the setup-only path measures ~0x4010, the entire 16 KiB handoff boot
+/// stack, so NO part of the RX path may run there) and `park_body` takes
+/// over forever (never returns); without RX it prints the prompt and
+/// returns so the caller parks in WFE. Never spins hot, never reads a
+/// device register.
+pub fn boot_and_park(mon: *monitor.Monitor, rx_wired: bool) void {
+    if (!rx_wired) {
+        monitor.banner(mon);
+        mon.console.puts(expanded_prompt());
+        return;
+    }
+    // Issue #814: everything from here runs on the dedicated park stack
+    // (aarch64). One self-contained asm block: save boot SP/LR in
+    // callee-saved x19/x20, load the two arguments (AAPCS64: x0 = mon,
+    // x1 = park_stack top), `bl` the AAPCS64 body, restore. All operands
+    // are registers — no symbol fixups, no fn-pointer call, nothing for
+    // the optimizer to outline into a wrong-ABI shape (claim 8554: the
+    // naked-fn + fn-pointer first attempt was tail-merged with leftover
+    // registers and `mov sp, x2` ran with rc-remaining instead of the
+    // stack top — the silent-death regression this inline form avoids).
+    // The body never returns; the restore tail is the safety net.
+    // Host tests keep the plain Zig call below — the same body on the
+    // caller's stack, no asm on the host.
+    if (comptime builtin.cpu.arch == .aarch64) {
+        asm volatile (
+            \\mov x19, sp
+            \\mov x20, x30
+            \\mov x0, %[mon]
+            \\mov x1, %[top]
+            \\mov sp, x1
+            \\bl %[body]
+            \\mov sp, x19
+            \\mov x30, x20
+            :
+            : [mon] "r" (mon),
+              [top] "r" (@as(usize, @intFromPtr(&park_stack) + park_stack.len)),
+              [body] "X" (&park_body),
+            : .{ .x19 = true, .x20 = true, .x30 = true, .memory = true });
+        unreachable;
+    }
+    park_body(mon);
 }
 
 /// M21 W11: BSS counter for periodic window state persistence.
