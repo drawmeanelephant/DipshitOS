@@ -504,11 +504,41 @@ pub fn disarm_spi_window(first: u32, count: u32) void {
 // ---------------------------------------------------------------------------
 
 /// Non-spurious interrupts acked since init (diagnostic; the timer command
-/// prints it — if the GIC delivers on a different INTID than the timer's
-/// PPI, irqs_acked grows while ticks stays 0).
-pub var irqs_acked: u32 = 0;
-/// The first non-spurious INTID acked (0xffffffff until one arrives).
-pub var first_intid: u32 = 0xffffffff;
+/// prints the total — if the GIC delivers on a different INTID than the
+/// timer's PPI, irqs_acked grows while ticks stays 0).
+/// Issue #810-family audit (claim 7339): PER-CORE — `note_irq` runs from
+/// `irq_dispatch` on every core (a secondary core acks its own timer PPI
+/// and any SGI in parallel with core 0), so a shared counter was a plain
+/// RMW race that lost increments. Core count is literal (4): smp imports
+/// gic, so gic cannot import smp for `max_cores` (same idiom as
+/// `exceptions.max_resume_cores`).
+pub const cpu_cores: usize = 4;
+pub var irqs_acked: [cpu_cores]u32 = [_]u32{0} ** cpu_cores;
+/// The first non-spurious INTID acked per core (0xffffffff until one
+/// arrives). The monitor prints slot 0, which is the meaningful boot
+/// diagnostic: SPIs are IROUTER-pinned to PE 0, and a secondary core's
+/// first ack is its own timer PPI or an SGI by construction.
+pub var first_intid: [cpu_cores]u32 = [_]u32{0xffffffff} ** cpu_cores;
+
+/// This core's index into the per-core counters (MPIDR_EL1.Aff0; 0 on
+/// host tests / non-aarch64 — the exceptions.resume_core idiom).
+fn core_index() usize {
+    if (comptime builtin.is_test or builtin.cpu.arch != .aarch64) return 0;
+    var mpidr: u64 = 0;
+    asm volatile ("mrs %[v], mpidr_el1"
+        : [v] "=r" (mpidr),
+    );
+    const aff0: usize = @intCast(mpidr & 0xff);
+    return if (aff0 < cpu_cores) aff0 else 0;
+}
+
+/// Total non-spurious acks across all cores (what the `timer` command
+/// prints).
+pub fn acked_total() u64 {
+    var sum: u64 = 0;
+    for (irqs_acked) |v| sum += v;
+    return sum;
+}
 
 /// Read the acknowledged INTID from the CPU interface (ICC_IAR1_EL1 for
 /// v3, GICC_IAR for v2). 1023 = spurious (the same value in both).
@@ -533,10 +563,11 @@ pub fn is_spurious(intid: u32) bool {
     return intid == 1023;
 }
 
-/// Record a non-spurious ack for diagnostics.
+/// Record a non-spurious ack for diagnostics (per-core — claim 7339).
 pub fn note_irq(intid: u32) void {
-    irqs_acked += 1;
-    if (first_intid == 0xffffffff) first_intid = intid;
+    const cidx = core_index();
+    irqs_acked[cidx] += 1;
+    if (first_intid[cidx] == 0xffffffff) first_intid[cidx] = intid;
 }
 
 /// Deactivate the interrupt (ICC_EOIR1_EL1 for v3, GICC_EOIR for v2).

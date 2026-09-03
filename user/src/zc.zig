@@ -163,6 +163,7 @@ const TokenKind = enum {
     keyword_while,
     keyword_return,
     keyword_struct,
+    keyword_enum,
     keyword_for,
     keyword_switch,
     ident,
@@ -359,6 +360,7 @@ const Tokenizer = struct {
                     if (std.mem.eql(u8, text, "switch")) return Token{ .kind = .keyword_switch, .text = text, .line = self.line };
                     if (std.mem.eql(u8, text, "return")) return Token{ .kind = .keyword_return, .text = text, .line = self.line };
                     if (std.mem.eql(u8, text, "struct")) return Token{ .kind = .keyword_struct, .text = text, .line = self.line };
+                    if (std.mem.eql(u8, text, "enum")) return Token{ .kind = .keyword_enum, .text = text, .line = self.line };
                     return Token{ .kind = .ident, .text = text, .line = self.line };
                 }
                 if (std.ascii.isDigit(c)) {
@@ -413,6 +415,17 @@ const StructDef = struct {
     size: usize = 0,
 };
 
+const EnumMember = struct {
+    name: []const u8,
+    value: u64,
+};
+
+const EnumDef = struct {
+    name: []const u8,
+    members: [16]EnumMember = undefined,
+    member_count: usize = 0,
+};
+
 const CallPatch = struct {
     caller_pc: u32,
     target_func_idx: usize,
@@ -445,6 +458,9 @@ var frame_size: usize = 0;
 
 var structs: [8]StructDef = undefined;
 var structs_count: usize = 0;
+
+var enums: [8]EnumDef = undefined;
+var enums_count: usize = 0;
 
 var call_patches: [64]CallPatch = undefined;
 var call_patches_count: usize = 0;
@@ -580,12 +596,21 @@ fn lookupStruct(name: []const u8) ?*StructDef {
     return null;
 }
 
+fn lookupEnum(name: []const u8) ?*EnumDef {
+    var i: usize = 0;
+    while (i < enums_count) : (i += 1) {
+        if (std.mem.eql(u8, enums[i].name, name)) return &enums[i];
+    }
+    return null;
+}
+
 fn typeSize(name: []const u8) ?usize {
     if (std.mem.eql(u8, name, "u8")) return 1;
     if (std.mem.eql(u8, name, "u16")) return 2;
     if (std.mem.eql(u8, name, "u32")) return 4;
     if (std.mem.eql(u8, name, "u64") or std.mem.eql(u8, name, "usize") or std.mem.eql(u8, name, "i64")) return 8;
     if (lookupStruct(name)) |sd| return sd.size;
+    if (lookupEnum(name)) |_| return 8;
     return null;
 }
 
@@ -935,6 +960,17 @@ fn parsePrimary(p: *Parser) anyerror!void {
             emitStringAdr(0, res.off);
             emit(enc_movz(1, @intCast(res.len), 0));
         },
+        .at => {
+            const builtin_tok = try p.expect(.ident);
+            _ = try p.expect(.l_paren);
+            try compileExpr(p);
+            _ = try p.expect(.r_paren);
+            if (!std.mem.eql(u8, builtin_tok.text, "intFromEnum") and !std.mem.eql(u8, builtin_tok.text, "enumFromInt")) {
+                print_err("unknown zc builtin", builtin_tok.line, builtin_tok.text);
+                return error.CompileError;
+            }
+            // Enum tags are their integer values in zc, so both casts are identity ops.
+        },
         .keyword_switch => {
             p.idx -= 1;
             try compileSwitch(p, true);
@@ -954,7 +990,22 @@ fn parsePrimary(p: *Parser) anyerror!void {
                     }
                 } else {
                     const member_tok = try p.expect(.ident);
-                    if (std.mem.eql(u8, t.text, "zc")) {
+                    if (lookupEnum(t.text)) |ed| {
+                        var mval: u64 = 0;
+                        var mfound = false;
+                        for (ed.members[0..ed.member_count]) |m| {
+                            if (std.mem.eql(u8, m.name, member_tok.text)) {
+                                mval = m.value;
+                                mfound = true;
+                                break;
+                            }
+                        }
+                        if (!mfound) {
+                            print_err("unknown enum member", member_tok.line, member_tok.text);
+                            return error.CompileError;
+                        }
+                        emitLoadImmediate(0, mval);
+                    } else if (std.mem.eql(u8, t.text, "zc")) {
                         if (std.mem.eql(u8, member_tok.text, "print")) {
                             _ = try p.expect(.l_paren);
                             if (p.peek() == .string_lit) {
@@ -1029,16 +1080,47 @@ fn parsePrimary(p: *Parser) anyerror!void {
                             _ = try p.expect(.r_paren);
                             emit(enc_movz(8, 4, 0));
                             emit(enc_svc(0));
+                        } else if (std.mem.eql(u8, member_tok.text, "mmap")) {
+                            // Z2a: sys_mmap (slot 63) over the prelude seam.
+                            // Anonymous RW private region, eager MAP_POPULATE so
+                            // kernel-side file copy_in/out can touch the pages.
+                            _ = try p.expect(.l_paren);
+                            try compileExpr(p); // len -> x0
+                            emit(enc_sub_imm(31, 31, 16));
+                            emit(enc_str(31, 0, 0)); // save len
+                            emit(enc_movz(0, 0, 0)); // x0 = addr hint 0
+                            emit(enc_ldr(31, 1, 0)); // x1 = len
+                            emit(enc_add_imm(31, 31, 16));
+                            emit(enc_movz(2, 3, 0)); // x2 = prot RW
+                            emit(enc_movz(3, 0x8022, 0)); // x3 = ANON|PRIVATE|POPULATE
+                            _ = try p.expect(.r_paren);
+                            emit(enc_movz(8, 63, 0));
+                            emit(enc_svc(0));
                         } else if (std.mem.eql(u8, member_tok.text, "file_open")) {
                             _ = try p.expect(.l_paren);
-                            try compileExpr(p);
+                            if (p.peek() != .string_lit) {
+                                print_err("file_open path must be a string literal", p.currentToken().line, p.currentToken().text);
+                                return error.CompileError;
+                            }
+                            const str_tok = p.advance();
+                            const res = try addString(str_tok.text);
+                            emitStringAdr(0, res.off); // x0 = path ptr
+                            emit(enc_movz(1, @intCast(res.len), 0)); // x1 = path len
                             emit(enc_sub_imm(31, 31, 16));
-                            emit(enc_str(31, 0, 0));
+                            emit(enc_str(31, 0, 0)); // save path ptr
+                            emit(enc_sub_imm(31, 31, 16));
+                            emit(enc_str(31, 1, 0)); // save path len
                             _ = try p.expect(.comma);
-                            try compileExpr(p);
-                            emit(enc_ldr(31, 1, 0));
-                            emit(enc_add_imm(31, 31, 16));
+                            try compileExpr(p); // flags -> x0
+                            emit(enc_sub_imm(31, 31, 16));
+                            emit(enc_str(31, 0, 0)); // save flags
                             _ = try p.expect(.r_paren);
+                            emit(enc_ldr(31, 2, 0)); // x2 = flags
+                            emit(enc_add_imm(31, 31, 16));
+                            emit(enc_ldr(31, 1, 0)); // x1 = path len
+                            emit(enc_add_imm(31, 31, 16));
+                            emit(enc_ldr(31, 0, 0)); // x0 = path ptr
+                            emit(enc_add_imm(31, 31, 16));
                             emit(enc_movz(8, 23, 0));
                             emit(enc_svc(0));
                         } else if (std.mem.eql(u8, member_tok.text, "file_read")) {
@@ -2154,6 +2236,7 @@ pub fn compile(src: []const u8) !usize {
     locals_count = 0;
     frame_size = 0;
     structs_count = 0;
+    enums_count = 0;
     data_len = 0;
     string_patches_count = 0;
 
@@ -2184,28 +2267,58 @@ pub fn compile(src: []const u8) !usize {
             _ = p1.advance(); // const
             if (p1.peek() == .ident) {
                 const name_tok = p1.advance();
-                if (p1.accept(.equal) and p1.accept(.keyword_struct)) {
-                    _ = try p1.expect(.l_brace);
-                    var sd = StructDef{ .name = name_tok.text };
-                    var off: usize = 0;
-                    while (p1.peek() != .r_brace and p1.peek() != .eof) {
-                        const fname = try p1.expect(.ident);
-                        _ = try p1.expect(.colon);
-                        const tname = try p1.expect(.ident);
-                        const sz = typeSize(tname.text) orelse return error.CompileError;
-                        if (sd.field_count >= sd.fields.len) return error.CompileError;
-                        sd.fields[sd.field_count] = Field{ .name = fname.text, .offset = off, .size = sz };
-                        sd.field_count += 1;
-                        off += sz;
-                        _ = p1.accept(.comma);
+                if (p1.accept(.equal)) {
+                    if (p1.accept(.keyword_struct)) {
+                        _ = try p1.expect(.l_brace);
+                        var sd = StructDef{ .name = name_tok.text };
+                        var off: usize = 0;
+                        while (p1.peek() != .r_brace and p1.peek() != .eof) {
+                            const fname = try p1.expect(.ident);
+                            _ = try p1.expect(.colon);
+                            const tname = try p1.expect(.ident);
+                            const sz = typeSize(tname.text) orelse return error.CompileError;
+                            if (sd.field_count >= sd.fields.len) return error.CompileError;
+                            sd.fields[sd.field_count] = Field{ .name = fname.text, .offset = off, .size = sz };
+                            sd.field_count += 1;
+                            off += sz;
+                            _ = p1.accept(.comma);
+                        }
+                        _ = try p1.expect(.r_brace);
+                        sd.size = off;
+                        if (structs_count >= structs.len) return error.CompileError;
+                        structs[structs_count] = sd;
+                        structs_count += 1;
+                        _ = p1.accept(.semicolon);
+                        continue;
                     }
-                    _ = try p1.expect(.r_brace);
-                    sd.size = off;
-                    if (structs_count >= structs.len) return error.CompileError;
-                    structs[structs_count] = sd;
-                    structs_count += 1;
-                    _ = p1.accept(.semicolon);
-                    continue;
+                    if (p1.accept(.keyword_enum)) {
+                        // Optional explicit tag type: enum(u8)
+                        if (p1.accept(.l_paren)) {
+                            _ = try p1.expect(.ident); // tag type name (u8/u16/u32/u64/usize)
+                            _ = try p1.expect(.r_paren);
+                        }
+                        _ = try p1.expect(.l_brace);
+                        var ed = EnumDef{ .name = name_tok.text };
+                        var next_value: u64 = 0;
+                        while (p1.peek() != .r_brace and p1.peek() != .eof) {
+                            const m_tok = try p1.expect(.ident);
+                            if (p1.accept(.equal)) {
+                                const num_tok = try p1.expect(.number);
+                                next_value = std.fmt.parseInt(u64, num_tok.text, 0) catch return error.CompileError;
+                            }
+                            if (ed.member_count >= ed.members.len) return error.CompileError;
+                            ed.members[ed.member_count] = EnumMember{ .name = m_tok.text, .value = next_value };
+                            ed.member_count += 1;
+                            next_value += 1;
+                            _ = p1.accept(.comma);
+                        }
+                        _ = try p1.expect(.r_brace);
+                        if (enums_count >= enums.len) return error.CompileError;
+                        enums[enums_count] = ed;
+                        enums_count += 1;
+                        _ = p1.accept(.semicolon);
+                        continue;
+                    }
                 }
             }
             p1.idx = save_idx;
@@ -2471,7 +2584,7 @@ test "zc: Z0.5 zc builtins (write, yield, sleep, file ops)" {
         \\    zc.yield();
         \\    zc.sleep(5);
         \\    _ = zc.write(1, 4096, 12);
-        \\    let fd = zc.file_open(100, 1);
+        \\    let fd = zc.file_open("/f", 1);
         \\    _ = zc.file_read(fd, 200, 50);
         \\    _ = zc.file_write(fd, 200, 50);
         \\    zc.file_close(fd);
@@ -2892,4 +3005,204 @@ test "zc: Z1e tokenizer handles for, switch, .., ..., =>" {
     try testing.expectEqual(TokenKind.equal_greater, t.next().kind);
     try testing.expectEqual(TokenKind.number, t.next().kind);
     try testing.expectEqual(TokenKind.r_brace, t.next().kind);
+}
+
+test "zc: Z1f tokenizer handles enum keyword, tag type, and members" {
+    const src = "const Color = enum(u8) { red, green = 2, blue }; var c: Color = Color.green;";
+    var t = Tokenizer{ .src = src };
+    try testing.expectEqual(TokenKind.keyword_const, t.next().kind);
+    try testing.expectEqual(TokenKind.ident, t.next().kind);
+    try testing.expectEqual(TokenKind.equal, t.next().kind);
+    try testing.expectEqual(TokenKind.keyword_enum, t.next().kind);
+    try testing.expectEqual(TokenKind.l_paren, t.next().kind);
+    try testing.expectEqual(TokenKind.ident, t.next().kind);
+    try testing.expectEqual(TokenKind.r_paren, t.next().kind);
+    try testing.expectEqual(TokenKind.l_brace, t.next().kind);
+    try testing.expectEqual(TokenKind.ident, t.next().kind);
+    try testing.expectEqual(TokenKind.comma, t.next().kind);
+    try testing.expectEqual(TokenKind.ident, t.next().kind);
+    try testing.expectEqual(TokenKind.equal, t.next().kind);
+    try testing.expectEqual(TokenKind.number, t.next().kind);
+    try testing.expectEqual(TokenKind.comma, t.next().kind);
+    try testing.expectEqual(TokenKind.ident, t.next().kind);
+    try testing.expectEqual(TokenKind.r_brace, t.next().kind);
+    try testing.expectEqual(TokenKind.semicolon, t.next().kind);
+}
+
+test "zc: Z1f enum declaration, member constants, and equality" {
+    const src =
+        \\const zc = @import("zc");
+        \\const Color = enum(u8) { red, green, blue };
+        \\pub fn main() void {
+        \\    const c: Color = Color.green;
+        \\    if (c == Color.green) {
+        \\        zc.exit(72);
+        \\    }
+        \\    zc.exit(1);
+        \\}
+    ;
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
+}
+
+test "zc: Z1f enum-valued switch expression mapping tag to string" {
+    const src =
+        \\const zc = @import("zc");
+        \\const Color = enum(u8) { red, green, blue };
+        \\fn color_name(c: Color) []const u8 {
+        \\    return switch (c) {
+        \\        Color.red => "red",
+        \\        Color.green => "green",
+        \\        Color.blue => "blue",
+        \\    };
+        \\}
+        \\pub fn main() void {
+        \\    const c: Color = Color.green;
+        \\    const s: []const u8 = color_name(c);
+        \\    zc.print(s);
+        \\    if (s[0] == 103) {
+        \\        zc.exit(72);
+        \\    }
+        \\    zc.exit(1);
+        \\}
+    ;
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
+}
+
+test "zc: Z1f int-from-enum and enum-from-int casts" {
+    const src =
+        \\const zc = @import("zc");
+        \\const Color = enum(u8) { red, green, blue };
+        \\fn tag_of(c: Color) u8 {
+        \\    return @intFromEnum(c);
+        \\}
+        \\pub fn main() void {
+        \\    const c: Color = @enumFromInt(1);
+        \\    if (tag_of(c) == 1) {
+        \\        zc.exit(72);
+        \\    }
+        \\    zc.exit(1);
+        \\}
+    ;
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
+}
+
+test "zc: Z1f enum with explicit tag values and statement switch" {
+    const src =
+        \\const zc = @import("zc");
+        \\const Mode = enum(u8) { idle = 3, busy, done };
+        \\pub fn main() void {
+        \\    const m: Mode = Mode.done;
+        \\    var v: u64 = 0;
+        \\    switch (m) {
+        \\        Mode.idle => { v = 1; },
+        \\        Mode.busy => { v = 2; },
+        \\        Mode.done => { v = 3; },
+        \\    }
+        \\    if (v == 3) {
+        \\        if (@intFromEnum(m) == 5) {
+        \\            zc.exit(72);
+        \\        }
+        \\    }
+        \\    zc.exit(1);
+        \\}
+    ;
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
+}
+
+test "zc: Z2a mmap builtin returns a writable heap pointer" {
+    const src =
+        \\const zc = @import("zc");
+        \\pub fn main() void {
+        \\    const heap: [*]u8 = zc.mmap(16384);
+        \\    heap[0] = 65;
+        \\    heap[4096] = 66;
+        \\    if (heap[0] == 65) {
+        \\        zc.exit(72);
+        \\    }
+        \\    zc.exit(1);
+        \\}
+    ;
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
+}
+
+test "zc: Z2a file_open string path and pointer read/write compile" {
+    const src =
+        \\const zc = @import("zc");
+        \\pub fn main() void {
+        \\    const buf: [*]u8 = zc.mmap(4096);
+        \\    const fd: u64 = zc.file_open("/host/DATA.TXT", 1);
+        \\    const n: u64 = zc.file_read(fd, buf, 1024);
+        \\    const ofd: u64 = zc.file_open("/host/OUT.TXT", 6);
+        \\    _ = zc.file_write(ofd, buf, n);
+        \\    zc.file_close(fd);
+        \\    zc.file_close(ofd);
+        \\    if (n != 0) {
+        \\        zc.exit(72);
+        \\    }
+        \\    zc.exit(1);
+        \\}
+    ;
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
+}
+
+test "zc: Z2a chunked bump build and drain loops compile" {
+    const src =
+        \\const zc = @import("zc");
+        \\pub fn main() void {
+        \\    const heap_cap: u64 = 16384;
+        \\    const read_chunk: u64 = 1024;
+        \\    const heap: [*]u8 = zc.mmap(heap_cap);
+        \\    const in_fd: u64 = zc.file_open("/host/DATA.TXT", 1);
+        \\    const out_fd: u64 = zc.file_open("/host/OUT.TXT", 6);
+        \\    var used: u64 = 0;
+        \\    var n: u64 = zc.file_read(in_fd, heap, read_chunk);
+        \\    while (n != 0) {
+        \\        if (used + n <= heap_cap - read_chunk) {
+        \\            var i: u64 = 0;
+        \\            while (i < n) {
+        \\                heap[read_chunk + used + i] = heap[i];
+        \\                i = i + 1;
+        \\            }
+        \\            used = used + n;
+        \\        } else {
+        \\            zc.exit(2); // bounded arena overflow
+        \\        }
+        \\        n = zc.file_read(in_fd, heap, read_chunk);
+        \\    }
+        \\    zc.file_close(in_fd);
+        \\    if (used == 0) {
+        \\        zc.exit(73);
+        \\    }
+        \\    var c: u64 = 0;
+        \\    while (c < used) {
+        \\        heap[c] = heap[read_chunk + c];
+        \\        c = c + 1;
+        \\    }
+        \\    var left: u64 = used;
+        \\    while (left > 0) {
+        \\        var take: u64 = 2048;
+        \\        if (left < take) {
+        \\            take = left;
+        \\        }
+        \\        _ = zc.file_write(out_fd, heap, take);
+        \\        var j: u64 = 0;
+        \\        while (j < left - take) {
+        \\            heap[j] = heap[j + take];
+        \\            j = j + 1;
+        \\        }
+        \\        left = left - take;
+        \\    }
+        \\    zc.file_close(out_fd);
+        \\    zc.print("heap-ok\n");
+        \\    zc.exit(72);
+        \\}
+    ;
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
 }

@@ -42,6 +42,7 @@ const mmu = @import("mmu.zig");
 const alloc = @import("alloc.zig");
 const process = @import("process.zig");
 const scheduler = @import("scheduler.zig");
+const svclock = @import("svclock.zig"); // claim 9498 follow-on: demand-paging faults gate only the KERNEL domain (mmap-region/registry state)
 const memmap = @import("memmap.zig");
 const userspace = @import("userspace.zig");
 
@@ -237,12 +238,20 @@ pub fn installed() bool {
 // Counters
 // ---------------------------------------------------------------------------
 
-var handled_count_value: u64 = 0;
+/// Issue #810-family audit (claim 8513): PER-CORE. Every exception on
+/// every core increments this at `exc_dispatch` entry, and the secondary
+/// cores' timer IRQs fire in parallel with the scheduler core's dispatch —
+/// a shared counter was a plain RMW race that lost increments. Indexed by
+/// `resume_core()`; `handled_count()` sums the slots. Same literal-4
+/// rationale as `max_resume_cores` above (smp imports this module).
+var handled_count_value: [max_resume_cores]u64 = [_]u64{0} ** max_resume_cores;
 var resume_count_value: u64 = 0;
 
 /// Total exceptions taken since boot.
 pub fn handled_count() u64 {
-    return handled_count_value;
+    var sum: u64 = 0;
+    for (handled_count_value) |v| sum += v;
+    return sum;
 }
 
 /// Exceptions that were resumed (the deliberate test fault).
@@ -735,6 +744,13 @@ pub fn try_handle_page_fault(esr: u64, far: u64) bool {
     const ec = (esr >> 26) & 0x3f;
     // Only handle EL0 Data Aborts (0x24)
     if (ec != 0x24) return false;
+    // Userspace-service gate (claim 9498): the mapping below allocates
+    // physical pages and mutates the process registry — the same state
+    // exec/mmap syscalls hold the kernel-domain lock over on ANY core.
+    // Runs in exception context (IRQ-masked): the holder always runs to
+    // completion, so spinning is safe.
+    svclock.kernel.acquire();
+    defer svclock.kernel.release();
 
     const pid = if (process.find_by_task(scheduler.current_id())) |p|
         p
@@ -818,8 +834,8 @@ export fn exc_dispatch(
     spsr: u64,
     kind: u64,
 ) callconv(.c) Resume {
-    handled_count_value += 1;
-    const cid = resume_core();
+    const cid = resume_core(); // per-core resume handoff (issue #810)
+    handled_count_value[cid] += 1; // per-core: secondary-core IRQs fire in parallel
     resume_frame[cid] = @intFromPtr(frame);
     resume_sp_el0[cid] = source_sp_el0(frame, spsr);
     // Claim 7948: taken IRQs route to the registered dispatcher (GIC ack
@@ -883,7 +899,7 @@ export fn exc_dispatch(
         far,
         elr,
         spsr,
-        handled_count_value,
+        handled_count(), // claim 7339: summed across cores
         frame_read(frame, 0),
         frame_read(frame, 30),
         resume_sp_el0[cid],

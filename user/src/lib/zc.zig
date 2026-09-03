@@ -62,9 +62,12 @@ pub fn sleep(ticks: u64) void {
     );
 }
 
-pub fn file_open(path: []const u8, flags: u32) i64 {
+/// Z2a (issue #756): file ops take explicit ptr+len (the in-guest reg ABI is
+/// fd in x0, ptr in x1, count in x2); fds and byte counts are u64 so the
+/// dialect never needs int casts. Error returns (-errno) surface as huge u64.
+pub fn file_open(path: []const u8, flags: u32) u64 {
     return asm volatile ("svc #0"
-        : [ret] "={x0}" (-> i64),
+        : [ret] "={x0}" (-> u64),
         : [num] "{x8}" (@as(u64, 23)),
           [p] "{x0}" (@as(u64, @intFromPtr(path.ptr))),
           [l] "{x1}" (@as(u64, path.len)),
@@ -72,32 +75,47 @@ pub fn file_open(path: []const u8, flags: u32) i64 {
     );
 }
 
-pub fn file_read(fd: u32, buf: []u8) i64 {
+pub fn file_read(fd: u64, buf: [*]u8, len: u64) u64 {
     return asm volatile ("svc #0"
-        : [ret] "={x0}" (-> i64),
+        : [ret] "={x0}" (-> u64),
         : [num] "{x8}" (@as(u64, 24)),
           [h] "{x0}" (@as(u64, fd)),
-          [p] "{x1}" (@as(u64, @intFromPtr(buf.ptr))),
-          [n] "{x2}" (@as(u64, buf.len)),
+          [p] "{x1}" (@as(u64, @intFromPtr(buf))),
+          [n] "{x2}" (@as(u64, len)),
     );
 }
 
-pub fn file_write(fd: u32, buf: []const u8) i64 {
+pub fn file_write(fd: u64, buf: [*]const u8, len: u64) u64 {
     return asm volatile ("svc #0"
-        : [ret] "={x0}" (-> i64),
+        : [ret] "={x0}" (-> u64),
         : [num] "{x8}" (@as(u64, 25)),
           [h] "{x0}" (@as(u64, fd)),
-          [p] "{x1}" (@as(u64, @intFromPtr(buf.ptr))),
-          [n] "{x2}" (@as(u64, buf.len)),
+          [p] "{x1}" (@as(u64, @intFromPtr(buf))),
+          [n] "{x2}" (@as(u64, len)),
     );
 }
 
-pub fn file_close(fd: u32) void {
+pub fn file_close(fd: u64) void {
     asm volatile ("svc #0"
         :
         : [num] "{x8}" (@as(u64, 26)),
           [h] "{x0}" (@as(u64, fd)),
     );
+}
+
+/// Z2a (issue #756): anonymous RW private heap via sys_mmap (slot 63). The
+/// eager MAP_POPULATE flag (0x8000) is set so the kernel allocates the pages
+/// up front — kernel-side file copy_in/copy_out can then touch the region.
+pub fn mmap(len: u64) [*]u8 {
+    const va: u64 = asm volatile ("svc #0"
+        : [ret] "={x0}" (-> u64),
+        : [num] "{x8}" (@as(u64, 63)),
+          [a0] "{x0}" (@as(u64, 0)),
+          [a1] "{x1}" (@as(u64, len)),
+          [a2] "{x2}" (@as(u64, 3)),
+          [a3] "{x3}" (@as(u64, 0x8022)),
+    );
+    return @as([*]u8, @ptrFromInt(va));
 }
 
 pub fn win_open(x: u64, y: u64, w: u64, h: u64) u64 {

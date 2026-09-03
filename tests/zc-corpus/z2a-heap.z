@@ -1,0 +1,57 @@
+const zc = @import("zc");
+
+// Z2a (#756): a bounded bump arena over zc.mmap. Reads cap at 2048 B/call
+// and writes refuse >2048 B, so a >2 KiB round trip loops. Every read lands
+// in a 1 KiB landing zone at the arena head (file_read needs a plain base
+// pointer), is append-copied to the bump offset, then the file is compacted
+// to heap[0..used] and drained in <=2048 B writes. The arena only bumps.
+// Keep this file under ZC.BIN's 2048 B single-read source cap.
+
+pub fn main() void {
+    const heap_cap: u64 = 16384;
+    const read_chunk: u64 = 1024;
+    const heap: [*]u8 = zc.mmap(heap_cap);
+    const in_fd: u64 = zc.file_open("/host/DATA.TXT", 1);
+    const out_fd: u64 = zc.file_open("/host/OUT.TXT", 6);
+    var used: u64 = 0;
+    var n: u64 = zc.file_read(in_fd, heap, read_chunk);
+    while (n != 0) {
+        if (used + n <= heap_cap - read_chunk) {
+            var i: u64 = 0;
+            while (i < n) {
+                heap[read_chunk + used + i] = heap[i];
+                i = i + 1;
+            }
+            used = used + n;
+        } else {
+            zc.exit(2); // bounded arena overflow
+        }
+        n = zc.file_read(in_fd, heap, read_chunk);
+    }
+    zc.file_close(in_fd);
+    if (used == 0) {
+        zc.exit(73); // nothing read; DATA.TXT is non-empty in the gate
+    }
+    var c: u64 = 0;
+    while (c < used) {
+        heap[c] = heap[read_chunk + c];
+        c = c + 1;
+    }
+    var left: u64 = used;
+    while (left > 0) {
+        var take: u64 = 2048;
+        if (left < take) {
+            take = left;
+        }
+        _ = zc.file_write(out_fd, heap, take);
+        var j: u64 = 0;
+        while (j < left - take) {
+            heap[j] = heap[j + take];
+            j = j + 1;
+        }
+        left = left - take;
+    }
+    zc.file_close(out_fd);
+    zc.print("heap-ok\n");
+    zc.exit(72);
+}

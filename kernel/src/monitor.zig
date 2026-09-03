@@ -20,6 +20,7 @@ const builtin = @import("builtin");
 const alloc = @import("alloc.zig");
 const console = @import("console.zig");
 const esp_exec = @import("exec.zig"); // claim 6783: load a user program from the host share and enter it at EL0
+const svclock = @import("svclock.zig"); // claim 9498 follow-on: per-service-domain locks — commands take the kernel lock plus their domain(s)
 const syscall_mod = @import("syscall.zig"); // the strace seam (sets syscall_mod.strace_pid)
 const exceptions = @import("exceptions.zig");
 const gic = @import("gic.zig");
@@ -259,6 +260,11 @@ pub const Command = struct {
     category: Category,
     min_args: u8 = 0,
     max_args: u8 = max_args_limit,
+    /// Service-domain locks the command's handler touches, as an svclock
+    /// bitmask (claim 9498 follow-on): exec() holds the kernel lock (the
+    /// command's registry/lifecycle reads) plus these domains, in
+    /// canonical order (kernel last).
+    dom: u5 = 0,
     handler: *const fn (m: *Monitor, args: []const []const u8) ExecError,
 };
 
@@ -309,30 +315,30 @@ fn ensure_registry() []const Command {
             .{ .name = "beep", .help = "synthesize + play a sine through the virtio-snd PCM path ('beep <freq> <ms>' — reports the full control flow + submit/drain accounting)", .usage = "beep <freq> <ms>", .category = .system, .min_args = 2, .max_args = 2, .handler = cmd_beep },
             .{ .name = "about", .help = "explain this questionable system", .usage = "about", .category = .machine_identity, .handler = cmd_about },
             .{ .name = "beans", .help = "count beans, probably", .usage = "beans [count]", .category = .machine_identity, .max_args = 1, .handler = cmd_beans },
-            .{ .name = "calc", .help = "calculator utilities: 'calc history' shows saved calculation history from /data/calc_hst.txt", .usage = "calc [history]", .category = .system, .max_args = 1, .handler = cmd_calc },
-            .{ .name = "cat", .help = "print a file from the host share (by name or path)", .usage = "cat <file|path>", .category = .storage, .min_args = 1, .max_args = 1, .handler = cmd_cat },
+            .{ .name = "calc", .dom = svclock.dom_bit(.file), .help = "calculator utilities: 'calc history' shows saved calculation history from /data/calc_hst.txt", .usage = "calc [history]", .category = .system, .max_args = 1, .handler = cmd_calc },
+            .{ .name = "cat", .dom = svclock.dom_bit(.file), .help = "print a file from the host share (by name or path)", .usage = "cat <file|path>", .category = .storage, .min_args = 1, .max_args = 1, .handler = cmd_cat },
             .{ .name = "clear", .help = "clean up the crime scene", .usage = "clear", .category = .system, .handler = cmd_clear },
-            .{ .name = "font", .help = "terminal font size: small 8x8 (default), medium 16x16, large 24x24 (M20-U1)", .usage = "font [small|medium|large]", .category = .graphics_input, .min_args = 0, .max_args = 1, .handler = cmd_font },
+            .{ .name = "font", .dom = svclock.dom_bit(.win), .help = "terminal font size: small 8x8 (default), medium 16x16, large 24x24 (M20-U1)", .usage = "font [small|medium|large]", .category = .graphics_input, .min_args = 0, .max_args = 1, .handler = cmd_font },
             .{ .name = "compose", .help = "list available Alt+key compose sequences for accented characters", .usage = "compose", .category = .system, .handler = cmd_compose },
-            .{ .name = "crash", .help = "list recent crash tombstones from /data/crash/", .usage = "crash", .category = .system, .handler = cmd_crash },
+            .{ .name = "crash", .dom = svclock.dom_bit(.file), .help = "list recent crash tombstones from /data/crash/", .usage = "crash", .category = .system, .handler = cmd_crash },
             .{ .name = "clip", .help = "copy/paste the shared kernel clipboard ('clip <text...>' sets it, 'clip' prints it)", .usage = "clip [<text...>]", .category = .system, .handler = cmd_clip },
             .{ .name = "color", .help = "toggle ANSI terminal colors ('color on'/'color off'; 'color' shows current)", .usage = "color [on|off]", .category = .system, .max_args = 1, .handler = cmd_color },
             .{ .name = "echo", .help = "repeat your regrettable decisions", .usage = "echo <text...>", .category = .system, .handler = cmd_echo },
             .{ .name = "elephant", .help = "operational mascot diagnostics", .usage = "elephant", .category = .machine_identity, .handler = cmd_elephant },
             .{ .name = "sexiburger", .help = "operational mascot diagnostics (the Sexipus burger)", .usage = "sexiburger", .category = .machine_identity, .handler = cmd_sexiburger },
-            .{ .name = "exec", .help = "load a user program from the host share and enter it at EL0", .usage = "exec [<file> [arg...]]", .category = .tasks_processes, .max_args = 1 + esp_exec.max_exec_args, .handler = cmd_exec },
+            .{ .name = "exec", .dom = svclock.dom_bit(.file), .help = "load a user program from the host share and enter it at EL0", .usage = "exec [-c<core>] [<file> [arg...]]", .category = .tasks_processes, .max_args = 1 + esp_exec.max_exec_args, .handler = cmd_exec },
             .{ .name = "fault", .help = "trigger a synchronous exception (diagnostic)", .usage = "fault", .category = .memory_state, .handler = cmd_fault },
             .{ .name = "handoff", .help = "display boot-to-kernel ABI data", .usage = "handoff", .category = .memory_state, .handler = cmd_handoff },
             .{ .name = "help", .help = "grouped command catalog and per-command/per-topic help", .usage = "help [<command>|<topic>]", .category = .system, .max_args = 1, .handler = cmd_help },
             .{ .name = "hex", .help = "format an integer in hexadecimal", .usage = "hex <number>...", .category = .memory_state, .min_args = 1, .handler = cmd_hex },
             .{ .name = "input", .help = "keyboard/pointer event FIFO: armed state, occupancy, drop count, last keyboard + pointer events", .usage = "input", .category = .graphics_input, .handler = cmd_input },
             .{ .name = "kill", .help = "terminate a running process (kernel-owned lifetime)", .usage = "kill <pid|name>", .category = .tasks_processes, .min_args = 1, .max_args = 1, .handler = cmd_kill },
-            .{ .name = "ls", .help = "list files on the host share (or a directory by path); '-l' for long format (D15)", .usage = "ls [-l] [<dir>]", .category = .storage, .max_args = 2, .handler = cmd_ls },
+            .{ .name = "ls", .dom = svclock.dom_bit(.file), .help = "list files on the host share (or a directory by path); '-l' for long format (D15)", .usage = "ls [-l] [<dir>]", .category = .storage, .max_args = 2, .handler = cmd_ls },
             .{ .name = "mem", .help = "summarize the EFI memory map", .usage = "mem", .category = .memory_state, .handler = cmd_mem },
-            .{ .name = "mbox", .help = "per-process IPC mailbox: pending messages and drain counters", .usage = "mbox [<pid>]", .category = .tasks_processes, .max_args = 1, .handler = cmd_mbox },
-            .{ .name = "mount", .help = "report the host-share file store (HF6: the FAT volumes are gone)", .usage = "mount", .category = .storage, .max_args = 1, .handler = cmd_mount },
-            .{ .name = "net", .help = "virtio-net transport + RX + ARP + ICMP + UDP + DHCP + TCP + DNS: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames; 'net ip <a.b.c.d>' sets the static IP; 'net arp [<a.b.c.d>]' shows/resolves the ARP table; 'net ping <a.b.c.d>' sends an ICMP echo request; 'net udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]' drives UDP; 'net dhcp' runs the bounded DHCP client one step per invocation; 'net tcp [connect <addr> <port>|send <len>|recv|close|reset]' drives the bounded TCP client; 'net dns <hostname> [<server>]' resolves DNS A-records)", .usage = "net [recv|ip <addr>|arp [<addr>]|ping <addr>|udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]|dhcp|tcp [connect <addr> <port>|send <len>|recv|close|reset]|dns <host> [<server>]]", .category = .networking, .max_args = 5, .handler = cmd_net },
-            .{ .name = "netsend", .help = "send a known Ethernet frame (bounded staging, TX + used-ring drain)", .usage = "netsend <bytes>", .category = .networking, .min_args = 1, .max_args = 1, .handler = cmd_netsend },
+            .{ .name = "mbox", .dom = svclock.dom_bit(.ev), .help = "per-process IPC mailbox: pending messages and drain counters", .usage = "mbox [<pid>]", .category = .tasks_processes, .max_args = 1, .handler = cmd_mbox },
+            .{ .name = "mount", .dom = svclock.dom_bit(.file), .help = "report the host-share file store (HF6: the FAT volumes are gone)", .usage = "mount", .category = .storage, .max_args = 1, .handler = cmd_mount },
+            .{ .name = "net", .dom = svclock.dom_bit(.net), .help = "virtio-net transport + RX + ARP + ICMP + UDP + DHCP + TCP + DNS: device DID, MAC, queues, feature bits, RX counters ('net recv' prints received frames; 'net ip <a.b.c.d>' sets the static IP; 'net arp [<a.b.c.d>]' shows/resolves the ARP table; 'net ping <a.b.c.d>' sends an ICMP echo request; 'net udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]' drives UDP; 'net dhcp' runs the bounded DHCP client one step per invocation; 'net tcp [connect <addr> <port>|send <len>|recv|close|reset]' drives the bounded TCP client; 'net dns <hostname> [<server>]' resolves DNS A-records)", .usage = "net [recv|ip <addr>|arp [<addr>]|ping <addr>|udp [listen <port>|close <port>|send <addr> <port> <len>|recv [<port>]]|dhcp|tcp [connect <addr> <port>|send <len>|recv|close|reset]|dns <host> [<server>]]", .category = .networking, .max_args = 5, .handler = cmd_net },
+            .{ .name = "netsend", .dom = svclock.dom_bit(.net), .help = "send a known Ethernet frame (bounded staging, TX + used-ring drain)", .usage = "netsend <bytes>", .category = .networking, .min_args = 1, .max_args = 1, .handler = cmd_netsend },
             .{ .name = "pages", .help = "physical page allocator pool", .usage = "pages [selftest]", .category = .memory_state, .max_args = 1, .handler = cmd_pages },
             .{ .name = "pci", .help = "enumerate PCI devices on the bus", .usage = "pci", .category = .memory_state, .handler = cmd_pci },
             .{ .name = "procs", .help = "process registry: image, address space, lifecycle, exit status", .usage = "procs", .category = .tasks_processes, .handler = cmd_procs },
@@ -343,20 +349,20 @@ fn ensure_registry() []const Command {
             .{ .name = "sh", .help = "run a script file of shell commands ('sh <script>' executes it line by line; 64 lines max, 256 chars per line; '#' comments; 'exit' stops early)", .usage = "sh <script>", .category = .system, .min_args = 1, .max_args = 1, .handler = cmd_sh },
             .{ .name = "roadpops", .help = "Road Pops framebuffer console: armed/dirty/present counters (the boot terminal on the screen)", .usage = "roadpops", .category = .graphics_input, .handler = cmd_roadpops },
             .{ .name = "screen", .help = "virtio-gpu transport + framebuffer: device DID, features, scanout, status, re-arm ('screen fill <rrggbb>' fills the framebuffer and flushes it to the scanout)", .usage = "screen [fill <rrggbb>]", .category = .graphics_input, .max_args = 2, .handler = cmd_screen },
-            .{ .name = "screenshot", .help = "capture the current framebuffer (1280x720) and save as BMP to disk (G27)", .usage = "screenshot [<file>]", .category = .graphics_input, .max_args = 1, .handler = cmd_screenshot },
-            .{ .name = "settings", .help = "persistent configuration: `settings [list]`, `settings get <key>`, `settings set <key> <val>`, `settings reset`", .usage = "settings [list|get <key>|set <key> <val>|reset]", .category = .system, .max_args = 3, .handler = cmd_settings },
+            .{ .name = "screenshot", .dom = svclock.dom_bit(.file), .help = "capture the current framebuffer (1280x720) and save as BMP to disk (G27)", .usage = "screenshot [<file>]", .category = .graphics_input, .max_args = 1, .handler = cmd_screenshot },
+            .{ .name = "settings", .dom = svclock.dom_bit(.file) | svclock.dom_bit(.win), .help = "persistent configuration: `settings [list]`, `settings get <key>`, `settings set <key> <val>`, `settings reset`", .usage = "settings [list|get <key>|set <key> <val>|reset]", .category = .system, .max_args = 3, .handler = cmd_settings },
             .{ .name = "shortcuts", .help = "keyboard shortcut reference card (G29)", .usage = "shortcuts", .category = .system, .handler = cmd_shortcuts },
             .{ .name = "sound", .help = "virtio-snd transport: device DID, class, status, control-queue state, device-config counts (jacks/streams/channel-maps), re-arm; stream-state control: 'sound volume <0-100>' and 'sound mute <on|off>'", .usage = "sound [volume <0-100> | mute <on|off>]", .category = .system, .min_args = 0, .max_args = 2, .handler = cmd_sound },
-            .{ .name = "text", .help = "framebuffer text: text region, cursor, scrollback ('text put <string...>' renders + flushes to the scanout; 'text clear' clears; 'text putraw' skips the trailing newline; 'text fontdebug [on|off]' missing-glyph stats)", .usage = "text [put <string...>|putraw <string...>|clear|fontdebug [on|off]]", .category = .graphics_input, .min_args = 0, .max_args = 9, .handler = cmd_text },
+            .{ .name = "text", .dom = svclock.dom_bit(.win), .help = "framebuffer text: text region, cursor, scrollback ('text put <string...>' renders + flushes to the scanout; 'text clear' clears; 'text putraw' skips the trailing newline; 'text fontdebug [on|off]' missing-glyph stats)", .usage = "text [put <string...>|putraw <string...>|clear|fontdebug [on|off]]", .category = .graphics_input, .min_args = 0, .max_args = 9, .handler = cmd_text },
             .{ .name = "shutdown", .help = "request power-off", .usage = "shutdown", .category = .system, .handler = cmd_shutdown },
             .{ .name = "ps", .help = "process status table: PID, name, state, memory footprint, CPU ticks, and executor task per live/exited process (M22 D6)", .usage = "ps", .category = .tasks_processes, .handler = cmd_ps },
             .{ .name = "spawn", .help = "spawn the lifecycle demo task", .usage = "spawn", .category = .tasks_processes, .handler = cmd_spawn },
             .{ .name = "sysinfo", .help = "comprehensive system and subsystem diagnostic snapshot", .usage = "sysinfo", .category = .machine_identity, .handler = cmd_sysinfo },
-            .{ .name = "strace", .help = "trace a program's syscalls: 'strace exec APP.BIN [args]' arms the tracer around an exec and prints one line per syscall; 'strace off' disarms", .usage = "strace exec <file> [args...] | off", .category = .tasks_processes, .handler = cmd_strace },
-            .{ .name = "sym", .help = "crash-report symbol table: 'sym' lists symbols loaded from the last ELF exec; 'sym <file>' parses an ELF's symtab from disk", .usage = "sym [<file>]", .category = .tasks_processes, .max_args = 1, .handler = cmd_sym },
+            .{ .name = "strace", .dom = svclock.dom_bit(.file), .help = "trace a program's syscalls: 'strace exec APP.BIN [args]' arms the tracer around an exec and prints one line per syscall; 'strace off' disarms", .usage = "strace exec <file> [args...] | off", .category = .tasks_processes, .handler = cmd_strace },
+            .{ .name = "sym", .dom = svclock.dom_bit(.file), .help = "crash-report symbol table: 'sym' lists symbols loaded from the last ELF exec; 'sym <file>' parses an ELF's symtab from disk", .usage = "sym [<file>]", .category = .tasks_processes, .max_args = 1, .handler = cmd_sym },
             .{ .name = "syscalls", .help = "numbered syscall table and counters", .usage = "syscalls", .category = .tasks_processes, .handler = cmd_syscalls },
-            .{ .name = "wm", .help = "M32 WMS2/WMS4/WMS5 render-server register: the registered WM server pid, present-sequence counter, presents, COMPOSITE_TICK count, SET_WINDOW chrome submissions + SET_STATE visibility/workspace calls, and the WMS5 input-seam fan-out counters (ptr_fan = raw pointer samples, win_mirror = registry mirrors, key_fan = raw keyboard samples; 'wm none' means the shell idle shim is compositing)", .usage = "wm", .category = .graphics_input, .handler = cmd_wm },
-            .{ .name = "wnd", .help = "M32 WMS3 WM server: 'wnd' reports the registered WM server (pid, present seq/count, tick count; 'wnd: none' = shell-shim compositing); 'wnd start' launches the long-lived EL0 WND.BIN server (infrastructure — not in APPS.TXT; the default VM stays shim-only)", .usage = "wnd [start]", .category = .graphics_input, .max_args = 1, .handler = cmd_wnd },
+            .{ .name = "wm", .dom = svclock.dom_bit(.win) | svclock.dom_bit(.ev), .help = "M32 WMS2/WMS4/WMS5 render-server register: the registered WM server pid, present-sequence counter, presents, COMPOSITE_TICK count, SET_WINDOW chrome submissions + SET_STATE visibility/workspace calls, and the WMS5 input-seam fan-out counters (ptr_fan = raw pointer samples, win_mirror = registry mirrors, key_fan = raw keyboard samples; 'wm none' means the shell idle shim is compositing)", .usage = "wm", .category = .graphics_input, .handler = cmd_wm },
+            .{ .name = "wnd", .dom = svclock.dom_bit(.file) | svclock.dom_bit(.ev), .help = "M32 WMS3 WM server: 'wnd' reports the registered WM server (pid, present seq/count, tick count; 'wnd: none' = shell-shim compositing); 'wnd start' launches the long-lived EL0 WND.BIN server (infrastructure — not in APPS.TXT; the default VM stays shim-only)", .usage = "wnd [start]", .category = .graphics_input, .max_args = 1, .handler = cmd_wnd },
             .{ .name = "tasks", .help = "tick-driven task scheduler status", .usage = "tasks", .category = .tasks_processes, .handler = cmd_tasks },
             .{ .name = "smp", .help = "multiprocessor topology, online CPU cores, and per-core task state", .usage = "smp", .category = .tasks_processes, .handler = cmd_smp },
             .{ .name = "type", .help = "echo stdin (the pipe source) to stdout — the right half of `a | type`", .usage = "type", .category = .system, .handler = cmd_type },
@@ -366,18 +372,18 @@ fn ensure_registry() []const Command {
             .{ .name = "usb", .help = "XHCI host controller: `usb` transport report, `usb devices` enumerated HID devices, `usb report` last HID report", .usage = "usb [devices|report]", .category = .graphics_input, .handler = cmd_usb },
             .{ .name = "uname", .help = "compact system identity", .usage = "uname", .category = .machine_identity, .handler = cmd_uname },
             .{ .name = "version", .help = "display build information", .usage = "version", .category = .machine_identity, .handler = cmd_version },
-            .{ .name = "vf", .help = "host file channel (M34): 'vf ls/cat/mkdir/rm/mv <path>' read + mutate a macOS share over custom-virtio queue 5; 'vf open/close/write/truncate/fsync <h>' manage write handles (8-slot host cursor table)", .usage = "vf [ls [<path>]|cat <path>|mkdir <path>|rm <path>|mv <from> <to>|open <path> [append]|close <h>|write <h> <n>|truncate <h> <n>|fsync <h>]", .category = .storage, .max_args = 4, .handler = cmd_vf },
+            .{ .name = "vf", .dom = svclock.dom_bit(.file), .help = "host file channel (M34): 'vf ls/cat/mkdir/rm/mv <path>' read + mutate a macOS share over custom-virtio queue 5; 'vf open/close/write/truncate/fsync <h>' manage write handles (8-slot host cursor table)", .usage = "vf [ls [<path>]|cat <path>|mkdir <path>|rm <path>|mv <from> <to>|open <path> [append]|close <h>|write <h> <n>|truncate <h> <n>|fsync <h>]", .category = .storage, .max_args = 4, .handler = cmd_vf },
             .{ .name = "welcome", .help = "guided tour of the system for new users", .usage = "welcome", .category = .machine_identity, .handler = cmd_welcome },
-            .{ .name = "dui", .help = "Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('dui focus <n>' focuses; 'dui raise <n>' raises; 'dui lower <n>' lowers to back; 'dui move <n> <x> <y>' moves a user window; 'dui close <n>' releases a user window; 'dui list <pid>' filters by owner; 'dui hit <x> <y>' hit-tests; 'dui cycle' cycles focus like Alt+Tab; 'dui tile <n>' toggles a user window floating/tiled (M21 W1); 'dui master' swaps master/detail (M21 W2))", .usage = "dui [focus <n>|raise <n>|lower <n>|move <n> <x> <y>|close <n>|list <pid>|hit <x> <y>|cycle|tile <n>|master]", .category = .graphics_input, .max_args = 4, .handler = cmd_dui },
-            .{ .name = "write", .help = "write text to a file on the host share", .usage = "write <file> <text...>", .category = .storage, .min_args = 1, .handler = cmd_write },
-            .{ .name = "mktemp", .help = "create a temporary file (empty, unique name)", .usage = "mktemp [prefix]", .category = .storage, .max_args = 1, .handler = cmd_mktemp },
-            .{ .name = "stat", .help = "file metadata: size, type, cluster, path (D8)", .usage = "stat <file|path>", .category = .storage, .min_args = 1, .max_args = 1, .handler = cmd_stat },
-            .{ .name = "du", .help = "recursive directory disk usage (M25 F4)", .usage = "du [<path>]", .category = .storage, .max_args = 1, .handler = cmd_du },
-            .{ .name = "find", .help = "recursive file search with glob patterns ('find / -name \"*.BIN\"' — bounded 3 levels, 256 results)", .usage = "find <dir> -name <pattern>", .category = .storage, .min_args = 3, .max_args = 3, .handler = cmd_find },
+            .{ .name = "dui", .dom = svclock.dom_bit(.win), .help = "Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('dui focus <n>' focuses; 'dui raise <n>' raises; 'dui lower <n>' lowers to back; 'dui move <n> <x> <y>' moves a user window; 'dui close <n>' releases a user window; 'dui list <pid>' filters by owner; 'dui hit <x> <y>' hit-tests; 'dui cycle' cycles focus like Alt+Tab; 'dui tile <n>' toggles a user window floating/tiled (M21 W1); 'dui master' swaps master/detail (M21 W2))", .usage = "dui [focus <n>|raise <n>|lower <n>|move <n> <x> <y>|close <n>|list <pid>|hit <x> <y>|cycle|tile <n>|master]", .category = .graphics_input, .max_args = 4, .handler = cmd_dui },
+            .{ .name = "write", .dom = svclock.dom_bit(.file), .help = "write text to a file on the host share", .usage = "write <file> <text...>", .category = .storage, .min_args = 1, .handler = cmd_write },
+            .{ .name = "mktemp", .dom = svclock.dom_bit(.file), .help = "create a temporary file (empty, unique name)", .usage = "mktemp [prefix]", .category = .storage, .max_args = 1, .handler = cmd_mktemp },
+            .{ .name = "stat", .dom = svclock.dom_bit(.file), .help = "file metadata: size, type, cluster, path (D8)", .usage = "stat <file|path>", .category = .storage, .min_args = 1, .max_args = 1, .handler = cmd_stat },
+            .{ .name = "du", .dom = svclock.dom_bit(.file), .help = "recursive directory disk usage (M25 F4)", .usage = "du [<path>]", .category = .storage, .max_args = 1, .handler = cmd_du },
+            .{ .name = "find", .dom = svclock.dom_bit(.file), .help = "recursive file search with glob patterns ('find / -name \"*.BIN\"' — bounded 3 levels, 256 results)", .usage = "find <dir> -name <pattern>", .category = .storage, .min_args = 3, .max_args = 3, .handler = cmd_find },
             .{ .name = "dmesg", .help = "system log viewer: last bytes of serial output (D12)", .usage = "dmesg", .category = .system, .handler = cmd_dmesg },
             .{ .name = "time", .help = "command timing: measure elapsed ticks and wall-clock time (D13)", .usage = "time <command> [args...]", .category = .system, .min_args = 1, .handler = cmd_time },
-            .{ .name = "which", .help = "locate a command: shell builtin, monitor command, or host-share application (D16; HF6: the ESP is gone)", .usage = "which <name>", .category = .system, .min_args = 1, .max_args = 1, .handler = cmd_which },
-            .{ .name = "inventory", .help = "list all installed applications from APPS.TXT with sizes and types (D16)", .usage = "inventory", .category = .storage, .handler = cmd_inventory },
+            .{ .name = "which", .dom = svclock.dom_bit(.file), .help = "locate a command: shell builtin, monitor command, or host-share application (D16; HF6: the ESP is gone)", .usage = "which <name>", .category = .system, .min_args = 1, .max_args = 1, .handler = cmd_which },
+            .{ .name = "inventory", .dom = svclock.dom_bit(.file), .help = "list all installed applications from APPS.TXT with sizes and types (D16)", .usage = "inventory", .category = .storage, .handler = cmd_inventory },
         };
         registry_ready = true;
     }
@@ -420,6 +426,18 @@ pub fn exec(m: *Monitor, argv: []const []const u8) ExecError {
     if (args.len < cmd.min_args or args.len > cmd.max_args) {
         print_usage(m, cmd);
         return .usage;
+    }
+    // Service-domain locks (claim 9498 follow-on): every EL1h command
+    // holds the kernel lock (registry/lifecycle state) plus the domain
+    // lock(s) of the subsystems it touches — in canonical order, kernel
+    // last — so a same-domain core-1 syscall serializes with the command
+    // while unrelated-domain syscalls proceed. The holds are IRQ-masked
+    // (a command can never be preempted mid-hold). Nested commands
+    // (`time`/`sh` re-enter exec) skip re-acquisition via `held_set`.
+    const doms = svclock.dom_bit(.kernel) | cmd.dom;
+    if (!svclock.held_set(doms)) {
+        const taken = svclock.acquire_missing(doms);
+        defer svclock.release_set(taken);
     }
     return cmd.handler(m, args);
 }
@@ -3640,9 +3658,9 @@ fn cmd_timer(m: *Monitor, args: []const []const u8) ExecError {
     m.console.puts(" poll=");
     m.console.print_u64(timer.poll_ticks);
     m.console.puts(" acked=");
-    m.console.print_u64(gic.irqs_acked);
+    m.console.print_u64(gic.acked_total()); // claim 7339: summed across cores
     m.console.puts(" first=");
-    m.console.print_hex_min(gic.first_intid);
+    m.console.print_hex_min(gic.first_intid[0]); // PE-0 first (SPIs are IROUTER-pinned there)
     m.console.puts("\n");
     return .none;
 }
@@ -3724,6 +3742,8 @@ fn cmd_smp(m: *Monitor, args: []const []const u8) ExecError {
         m.console.print_hex(smp.core_mpidr[c]);
         m.console.puts(" state=");
         m.console.puts(if (smp.core_online[c]) "online" else "offline");
+        m.console.puts(" ticks=");
+        m.console.print_u64(smp.core_ticks[c]); // per-core tick counter (claim 8477 follow-up)
         m.console.puts(" task=");
         const cur_tid = scheduler.current_task_for_core(c);
         if (scheduler.task_info(cur_tid)) |info| {
@@ -6376,9 +6396,35 @@ fn cmd_spawn(m: *Monitor, args: []const []const u8) ExecError {
 /// x0, argv block VA in x1) — bounded to `max_exec_args`; more than that
 /// is refused honestly. Every failure mode is reported honestly.
 fn cmd_exec(m: *Monitor, args: []const []const u8) ExecError {
-    const name = if (args.len >= 1) args[0] else esp_exec.default_name;
-    const prog_args = if (args.len >= 2) args[1..] else &.{};
-    switch (esp_exec.exec_file(name, prog_args)) {
+    // SMP user tasks (claim 2369): `exec -c<core> <file>` pins the spawned
+    // task to a secondary core (console TX is locked, so a pinned program
+    // may print from there). Any other leading token is the file name.
+    var pin: usize = 0;
+    var rest = args;
+    if (args.len >= 1 and args[0].len > 2 and args[0][0] == '-' and args[0][1] == 'c') {
+        var value: usize = 0;
+        for (args[0][2..]) |ch| {
+            if (ch < '0' or ch > '9') {
+                err_prefix(m);
+                m.console.print_line("-c<core>: core must be a decimal number");
+                return .invalid_argument;
+            }
+            value = value * 10 + (ch - '0');
+        }
+        if (value == 0 or value >= smp.max_cores) {
+            err_prefix(m);
+            m.console.puts("-c<core>: core must be in 1..");
+            m.console.print_u64(smp.max_cores - 1);
+            m.console.puts("\n");
+            return .invalid_argument;
+        }
+        pin = value;
+        rest = args[1..];
+    }
+    const name = if (rest.len >= 1) rest[0] else esp_exec.default_name;
+    const prog_args = if (rest.len >= 2) rest[1..] else &.{};
+    const result = if (pin != 0) esp_exec.exec_file_pinned(name, prog_args, pin) else esp_exec.exec_file(name, prog_args);
+    switch (result) {
         .ok => {
             const info = esp_exec.loaded().?;
             m.console.puts("exec: loaded ");

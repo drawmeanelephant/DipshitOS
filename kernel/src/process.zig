@@ -359,8 +359,12 @@ pub fn create(
 /// Returns false for an invalid id or a process that is not `created`.
 pub fn bind(id: usize, task_id: usize) bool {
     if (id >= max_processes or processes[id].state != .created) return false;
-    processes[id].state = .running;
+    // Claim 9498 follow-on: publish the task_id BEFORE the .running state
+    // bit — a concurrent reader on another core (find_by_task under a
+    // syscall) keys off .running and must never observe a stale task_id
+    // (a torn read that would route its work at the wrong process).
     processes[id].task_id = task_id;
+    processes[id].state = .running;
     return true;
 }
 

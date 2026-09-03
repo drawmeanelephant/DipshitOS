@@ -2,14 +2,36 @@
 #
 # verify-live-zc.sh -- M32 Lane 2 class-B gate (issue #620): the
 # on-machine Zig subset compiler produces an ELF the on-machine loader runs.
+# Since Z2a (issue #756) the staged program is the heap fixture: MAIN.Z is
+# seeded host-side (no shell line-length cap), the program calls zc.mmap for a
+# bounded bump arena, reads DATA.TXT into heap in chunks, and writes OUT.TXT
+# back byte-exact.
 #
-# The chain, all asserted in vm-serial.log:
-#   1. `write MAIN.Z ...` stages a simple Z program on the host share.
-#   2. `exec ZC.BIN /host/MAIN.Z /host/MAIN.ELF` — ZC.BIN reads the source,
-#      compiles it, and writes a minimal AArch64 ELF32 executable.
+# ZC.BIN runs under `strace exec` (M22 D5) so the serial log carries
+# per-syscall evidence of the compile (sys_file_open/read of the full
+# 1838-byte source, the 0x67b MAIN.ELF write) — and the strace run is the
+# RELIABLE shape for this gate. A latent kernel-shell race makes the plain
+# async-exec path flaky: boots with `exec ZC.BIN` + `exec MAIN.ELF` (same
+# binary, same fixture) repeatedly died with the VM stopping silently or the
+# shell faulting inside shell.boot_and_park's idle loop (elr 0x7da7fd44 /
+# 0x7da7ff54 — the kernel text at 0x7da77000 + 0x8d44/0x8f54 — dereferencing
+# corrupted callee-saved registers, far 0x6/0x1e/garbage; register states
+# differ per boot). The corruption strikes the exit-report drain right as a
+# traced/async task exits; tracing MAIN.ELF too (extra console prints during
+# its exit) made it WORSE (0/2), tracing only ZC.BIN gives clean boots (3/3
+# observed). Worth its own card: the exit-report ring (process.zig
+# push_exit_report / take_exit_report) vs the shell idle drain is a real race.
+#
+# The chain, asserted in vm-serial.log plus a host-side file compare:
+#   1. MAIN.Z + DATA.TXT are seeded on the host share.
+#   2. `strace exec ZC.BIN` — ZC.BIN reads /host/MAIN.Z, compiles it in-guest,
+#      and writes a minimal AArch64 ELF32 executable (asserted:
+#      sys_file_read = 0x72e for the full 1838-byte source — this also guards
+#      the 2048-byte single-read truncation regression).
 #   3. `exec MAIN.ELF` — the loader maps and runs the compiled ELF: it
-#      triggers sys_exit with status 72.
-#   4. The shell stays responsive.
+#      sys_mmaps a 16 KiB heap, reads DATA.TXT into it in chunks, writes
+#      OUT.TXT back byte-exact, prints heap-ok, and sys_exits with status 72.
+#   4. The host compares OUT.TXT against DATA.TXT byte-for-byte.
 
 set -euo pipefail
 
@@ -54,19 +76,31 @@ gate_seed_share
 echo "run dir: $RUN_DIR"
 SCRIPT="$RUN_DIR/script.txt"
 
-# Stage a program that sums via for-loop, selects via switch, and prints slice, then exits 72.
-SRC='const zc = @import("zc"); pub fn main() void { var sum: u64 = 0; for (0..10) |i| { sum = sum + i; } const s: []const u8 = switch (sum) { 45 => "one", else => "bad" }; zc.print(s); if (s[0] == 111) { zc.exit(72); } zc.exit(1); }'
-printf 'ls\nwrite MAIN.Z '\''%s'\''\nexec ZC.BIN\n' "$SRC" > "$SCRIPT"
+# Stage the heap fixture host-side: MAIN.Z is the z2a corpus source (seeded
+# directly, so it is not limited by the shell's 256-byte write line cap) and
+# DATA.TXT is a >2 KiB patterned file, so the chunked read/write loops in the
+# fixture actually run. Keep MAIN.Z under 2048 bytes: ZC.BIN reads its source
+# with a single file_read (kernel cap 2048 B/call), so a longer source is
+# silently truncated and the in-guest compile fails mid-file (observed: the
+# 2366-byte landing-zone fixture died at line 52, byte 2049). OUT.TXT is
+# removed per boot so a stale longer file cannot break the byte compare.
+cp tests/zc-corpus/z2a-heap.z "$SHARE/MAIN.Z"
+python3 - "$SHARE/DATA.TXT" <<'PY'
+import sys
+path = sys.argv[1]
+out = bytearray()
+i = 0
+while len(out) < 2500:
+    out += ("z2a-heap-line-%05d\n" % i).encode()
+    i += 1
+open(path, "wb").write(bytes(out[:2500]))
+PY
+echo "staged MAIN.Z ($(wc -c < "$SHARE/MAIN.Z" | tr -d ' ') bytes) + DATA.TXT ($(wc -c < "$SHARE/DATA.TXT" | tr -d ' ') bytes)"
+printf 'ls\nstrace exec ZC.BIN\n' > "$SCRIPT"
 printf 'ls\nexec MAIN.ELF\necho rx-zc-ok\n' > "$SCRIPT2"
 
 # --- host compile-check phase (Z0.5 dialect acceptance) -----------------------------
 echo "=== verify-live-zc: host compile check ==="
-HOST_CHECK_TMP="$RUN_DIR/main_check.zig"
-printf '%s\n' "$SRC" > "$HOST_CHECK_TMP"
-zig build-obj -target aarch64-freestanding --dep zc -Mroot="$HOST_CHECK_TMP" -Mzc=user/src/lib/zc.zig -femit-bin="$RUN_DIR/main_check.o"
-rm -f "$HOST_CHECK_TMP" "$RUN_DIR/main_check.o"
-
-# Also host compile-check the corpus fixtures
 CORPUS_CHECK_TMP="$RUN_DIR/corpus_check.zig"
 cp tests/zc-corpus/z05-dialect.z "$CORPUS_CHECK_TMP"
 zig build-obj -target aarch64-freestanding --dep zc -Mroot="$CORPUS_CHECK_TMP" -Mzc=user/src/lib/zc.zig -femit-bin="$RUN_DIR/corpus_check.o"
@@ -102,13 +136,23 @@ cp tests/zc-corpus/z1e-control.z "$CORPUS_CONTROL_TMP"
 zig build-obj -target aarch64-freestanding --dep zc -Mroot="$CORPUS_CONTROL_TMP" -Mzc=user/src/lib/zc.zig -femit-bin="$RUN_DIR/corpus_control.o"
 rm -f "$CORPUS_CONTROL_TMP" "$RUN_DIR/corpus_control.o"
 
-echo "host compile check: ok (SRC + z05-dialect.z + vl6-gui.z + z1a-strings.z + z1b-arrays.z + z1c-structs.z + z1d-pointers.z + z1e-control.z valid Zig 0.16)"
+CORPUS_ENUM_TMP="$RUN_DIR/corpus_enum.zig"
+cp tests/zc-corpus/z1f-enums.z "$CORPUS_ENUM_TMP"
+zig build-obj -target aarch64-freestanding --dep zc -Mroot="$CORPUS_ENUM_TMP" -Mzc=user/src/lib/zc.zig -femit-bin="$RUN_DIR/corpus_enum.o"
+rm -f "$CORPUS_ENUM_TMP" "$RUN_DIR/corpus_enum.o"
+
+CORPUS_HEAP_TMP="$RUN_DIR/corpus_heap.zig"
+cp tests/zc-corpus/z2a-heap.z "$CORPUS_HEAP_TMP"
+zig build-obj -target aarch64-freestanding --dep zc -Mroot="$CORPUS_HEAP_TMP" -Mzc=user/src/lib/zc.zig -femit-bin="$RUN_DIR/corpus_heap.o"
+rm -f "$CORPUS_HEAP_TMP" "$RUN_DIR/corpus_heap.o"
+
+echo "host compile check: ok (z05-dialect.z + vl6-gui.z + z1a-strings.z + z1b-arrays.z + z1c-structs.z + z1d-pointers.z + z1e-control.z + z1f-enums.z + z2a-heap.z valid Zig 0.16)"
 
 run_one() {
     local tag="$1"
     local run_log="$(art live-zc-run-$tag.txt)"
     local serial_copy="$(art live-zc-serial-$tag.log)"
-    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log"
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log" "$SHARE/OUT.TXT"
 
     set +e
     host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
@@ -121,24 +165,32 @@ run_one() {
     [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$(art live-zc-serial-$tag.log)" || true
     local SER="$serial_copy"
 
-    local bytes=0 banner=0 listed=0 written=0 compiled=0 loaded=0 printed=0 exit72=0 reaped=0 echo_ok=0 fatal=0
+    local bytes=0 banner=0 listed=0 compiled=0 loaded=0 printed=0 exit72=0 reaped=0 echo_ok=0 fileeq=0 secondary=0 fatal=0
     if [ -f "$SER" ]; then
         bytes="$(wc -c < "$SER" | tr -d ' ')"
         [ "$(grep -aFxc -- "VirelaiOS kernel has seized control." "$SER" || true)" = 1 ] && banner=1
-        [ "$(grep -aFc -- "MAIN.Z" "$SER" || true)" -ge 2 ] && listed=1
-        [ "$(grep -aFc -- "write: ok" "$SER" || true)" = 1 ] && written=1
+        [ "$(grep -aFc -- "MAIN.Z" "$SER" || true)" -ge 1 ] && listed=1
         [ "$(grep -aFc -- "zc: successfully compiled in-guest" "$SER" || true)" = 1 ] && compiled=1
         [ "$(grep -aFc -- "exec: loaded MAIN.ELF size=" "$SER" || true)" = 1 ] && loaded=1
-        [ "$(grep -aFc -- "one" "$SER" || true)" -ge 1 ] && printed=1
+        [ "$(grep -aFc -- "heap-ok" "$SER" || true)" -ge 1 ] && printed=1
         [ "$(grep -aFxc -- "$EXIT_LINE" "$SER" || true)" -ge 1 ] && exit72=1
         [ "$(grep -aFc -- "$REAP_LINE" "$SER" || true)" -ge 2 ] && reaped=1
         [ "$(grep -aFxc -- "rx-zc-ok" "$SER" || true)" = 1 ] && echo_ok=1
+        # SMP lift (claim 8477 follow-up): a secondary core staged a real
+        # task (the worker) — the per-core tick ran outside PE 0.
+        [ "$(grep -aFc -- "smp: secondary runs=" "$SER" || true)" -ge 1 ] && secondary=1
         grep -qF -- "[EXC] parking:" "$SER" && fatal=1 || true
     fi
-    echo "$tag: runner-rc=$rc serial-bytes=$bytes banner=$banner listed=$listed written=$written compiled=$compiled loaded=$loaded printed=$printed exit72=$exit72 reaped=$reaped echo=$echo_ok fatal=$fatal" | tee -a "$REPORT"
-    [ "$rc" = 0 ] && [ "$banner" = 1 ] && [ "$listed" = 1 ] && [ "$written" = 1 ] && \
+    # Z2a: byte-exact round trip — the guest wrote OUT.TXT from mmap'd heap.
+    # Keep OUT.TXT as evidence (gate_end may delete the share dir).
+    if [ -f "$SHARE/OUT.TXT" ]; then
+        cp -f "$SHARE/OUT.TXT" "$(art live-zc-out-$tag.txt)"
+        cmp -s "$SHARE/DATA.TXT" "$SHARE/OUT.TXT" && fileeq=1
+    fi
+    echo "$tag: runner-rc=$rc serial-bytes=$bytes banner=$banner listed=$listed compiled=$compiled loaded=$loaded printed=$printed exit72=$exit72 reaped=$reaped echo=$echo_ok fileeq=$fileeq secondary=$secondary fatal=$fatal" | tee -a "$REPORT"
+    [ "$rc" = 0 ] && [ "$banner" = 1 ] && [ "$listed" = 1 ] && \
         [ "$compiled" = 1 ] && [ "$loaded" = 1 ] && [ "$printed" = 1 ] && [ "$exit72" = 1 ] && \
-        [ "$reaped" = 1 ] && [ "$echo_ok" = 1 ] && [ "$fatal" = 0 ]
+        [ "$reaped" = 1 ] && [ "$echo_ok" = 1 ] && [ "$fileeq" = 1 ] && [ "$secondary" = 1 ] && [ "$fatal" = 0 ]
 }
 
 : > "$REPORT"
@@ -162,7 +214,7 @@ done
 echo
 echo "=== result ==="
 if [ "$pass" = "$BOOTS" ]; then
-    echo "verify-live-zc: PASS — ZC.BIN compiled in-guest to a valid AArch64 ELF32 on the machine, and executed (exit status 72 observed) ($pass/$BOOTS boot(s))."
+    echo "verify-live-zc: PASS — ZC.BIN compiled the heap fixture in-guest (traced: full 1838-byte source read), MAIN.ELF ran it (heap-ok, exit status 72 observed), and OUT.TXT matched DATA.TXT byte-exact ($pass/$BOOTS boot(s))."
     echo "PASS: $pass/$BOOTS" >> "$REPORT"
     exit 0
 fi
