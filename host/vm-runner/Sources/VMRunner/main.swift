@@ -8,7 +8,11 @@
 //         [--timeout <s>] [--expect <line>] [--terminal-marker <line>]
 //         [--console] [--debug-input] [--dump-marker <file>]
 //         [--nvram-console <file>] [--script <file>]
-//         [--script-after <text>] [--script-expect <text>] [--custom-virtio]
+//         [--script-after <text>] [--script-expect <text>]
+//         [--script-expect-tail <s>] (claim 4912: hold the VM this long
+//          after the expected transcript first appears, so the kernel's
+//          async reap/report tail reaches the serial log before teardown;
+//          default 1.5, 0 = stop on first match) [--custom-virtio]
 //         [--cvc-echo] (claim 3141: the host-initiated custom-virtio push
 //          echo — implies --custom-virtio and attaches a third queue)
 //         [--via-virtio] (claim 9588, issue #523 item 3: inject keys through
@@ -329,6 +333,13 @@ var nvramConsolePath: String?
 var scriptPath: String?
 var scriptAfter: String?
 var scriptExpect: String?
+// Claim 4912: after --script-expect first matches, hold the VM this many
+// seconds (default 1.5 — one 1 Hz guest timer tick plus delivery/tee
+// margin) before teardown, so the kernel's async exit-report tail (the
+// `tasks/procs ... exited status=N` reap lines, drained from the shell
+// idle loop on the timer tick) reaches the serial log. 0 restores the
+// legacy stop-on-first-match behavior.
+var scriptExpectTail: Double = 1.5
 // Claim 4613: a second scripted phase. The primary --script is forwarded
 // in ONE burst (claim 6684), so a scripted command that must land AFTER a
 // background program exits and is reaped (the long-lived gate's re-exec
@@ -633,6 +644,13 @@ while idx < arguments.count {
         idx += 2
     } else if arg == "--script-expect", idx + 1 < arguments.count {
         scriptExpect = arguments[idx + 1]
+        idx += 2
+    } else if arg == "--script-expect-tail", idx + 1 < arguments.count {
+        // Claim 4912: seconds to hold the VM after --script-expect first
+        // matches, so post-marker kernel output (the async reap/report
+        // lines, drained on the guest's 1 Hz timer tick) reaches the serial
+        // log before teardown. 0 = legacy stop-on-first-match.
+        scriptExpectTail = Double(arguments[idx + 1]) ?? 1.5
         idx += 2
     } else if arg == "--script2", idx + 1 < arguments.count {
         script2Path = arguments[idx + 1]
@@ -1460,6 +1478,9 @@ if consoleMode {
     }
     if let cvcConsoleFilePath { print("  cvc-console-file: \(cvcConsoleFilePath)  (claim 0680: structured console — every queue-1 log line captured; kind-3 arms the guest tee on \"cvconsole-ready\")") }
     if let scriptExpect { print("  script-expect: \"\(scriptExpect)\"  (exit 0 iff observed in the serial log)") }
+    if scriptExpect != nil {
+        print("  script-expect-tail: \(scriptExpectTail)s  (claim 4912: hold the VM after the match so post-marker kernel output reaches the serial log; 0 = stop immediately)")
+    }
 } else {
     print("  serial log: \(serialLogPath)  (timeout: \(Int(timeout))s)")
     print("  expecting: \"\(expectLine)\"")
@@ -3638,29 +3659,71 @@ func buildIcmpEchoReply(_ reply: inout [UInt8], _ req: [UInt8], _ n: Int, _ host
 }
 
 // Claim 6684: script-mode lifecycle. Polls the serial log for the expected
-// transcript; success (exit 0) as soon as it appears, failure on timeout or
-// an early VM stop.
-func scriptPoll() {
+// transcript; success (exit 0) once it appears and the claim-4912 tail
+// window has elapsed, failure on timeout or an early VM stop.
+func scriptPoll(matchedAt: Date? = nil) {
+    var matchedAt = matchedAt
+    // An early VM stop ends the run: pass when the expected transcript was
+    // already observed (the tail window simply cannot capture more output),
+    // otherwise fail.
     if vmDidStart && (runner.vm.state == .stopped || runner.vm.state == .error) {
-        print("FAILURE: VM ended before the expected transcript appeared (state=\(runner.vm.state.rawValue)).")
-        finish(success: false)
+        if matchedAt != nil {
+            finish(success: true)
+        } else {
+            print("FAILURE: VM ended before the expected transcript appeared (state=\(runner.vm.state.rawValue)).")
+            finish(success: false)
+        }
         return
     }
     if let data = try? Data(contentsOf: serialURL), let text = String(data: data, encoding: .utf8) {
         if !text.isEmpty { lastText = text }
-        if let expect = scriptExpect, text.contains(expect) {
-            print("SUCCESS: expected transcript '\(expect)' observed in the serial log.")
-            print("----- captured serial console -----")
-            print(text)
-            print("-----------------------------------")
-            finish(success: true)
-            return
+        if matchedAt == nil, let expect = scriptExpect, text.contains(expect) {
+            // Claim 4912: the kernel prints the exec reap/report lines
+            // (`tasks` / `procs <name> exited status=N`) from the shell idle
+            // loop, which only wakes on the 1 Hz EL1 timer tick — up to ~1 s
+            // AFTER the program's own last marker lands in this log. Tearing
+            // down on the first match (the pre-4912 behavior) stopped the VM
+            // inside that window and dropped the tail, flaking the live
+            // gates. Hold the VM through `scriptExpectTail` so the tail
+            // reaches the log, then finish. 0 = legacy immediate stop.
+            if scriptExpectTail > 0 {
+                FileHandle.standardOutput.write(Data("script-expect: transcript '\(expect)' observed — holding the VM for the \(scriptExpectTail)s tail window so post-marker kernel output (reap lines) reaches the serial log\n".utf8))
+                matchedAt = Date()
+            } else {
+                print("SUCCESS: expected transcript '\(expect)' observed in the serial log.")
+                print("----- captured serial console -----")
+                print(text)
+                print("-----------------------------------")
+                finish(success: true)
+                return
+            }
         }
+    }
+    if let m = matchedAt, Date().timeIntervalSince(m) >= scriptExpectTail {
+        let expect = scriptExpect ?? "<none>"
+        print("SUCCESS: expected transcript '\(expect)' observed in the serial log (claim-4912 tail window \(scriptExpectTail)s elapsed; post-marker output captured).")
+        print("----- captured serial console -----")
+        print(lastText)
+        print("-----------------------------------")
+        finish(success: true)
+        return
     }
     captureScreenshotIfDue()
     captureScreenshotIfMarker(lastText)
     fireSnapshotsIfMarker(lastText)
     if Date() > deadline {
+        if matchedAt != nil {
+            // The transcript appeared but --timeout cut the tail window
+            // short — the gate's evidence is already in the log; pass.
+            print("SUCCESS: expected transcript '\(scriptExpect ?? "<none>")' observed before the deadline (claim-4912 tail window cut short by --timeout).")
+            if !lastText.isEmpty {
+                print("----- captured serial console -----")
+                print(lastText)
+                print("-----------------------------------")
+            }
+            finish(success: true)
+            return
+        }
         print("FAILURE: expected transcript '\(scriptExpect ?? "<none>")' not observed within \(Int(timeout))s.")
         if !lastText.isEmpty {
             print("----- captured serial console (partial) -----")
@@ -3670,7 +3733,7 @@ func scriptPoll() {
         finish(success: scriptExpect == nil)
         return
     }
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { scriptPoll() }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { scriptPoll(matchedAt: matchedAt) }
 }
 
 var signalSources: [DispatchSourceSignal] = []
