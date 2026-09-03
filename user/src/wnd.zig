@@ -494,7 +494,7 @@ const MirrorWin = struct {
 };
 
 /// The mirror table (id 2..5 -> slots 0..3).
-var mirrors: [max_user_windows]MirrorWin = undefined;
+var mirrors: [max_user_windows]MirrorWin = [_]MirrorWin{.{}} ** max_user_windows;
 // WMS8 Gate 4 (issue #628): the unsaved-changes dialog open state the WM
 // tracks to route dialog-button clicks (the kernel's open state is the
 // applied truth; this is the WM's decision-side mirror).
@@ -528,6 +528,147 @@ const fb_w = wnd_core.fb_w;
 const fb_h = wnd_core.fb_h;
 const taskbar_h = wnd_core.taskbar_h;
 const dock_w = wnd_core.dock_w;
+
+// ---------------------------------------------------------------------------
+// Issue #825 (IMG4): Desktop Wallpaper via Scanout Compositing
+// ---------------------------------------------------------------------------
+
+const m33_surf_scan_tag: u64 = 0x4000_0000_0000_0000;
+const prot_rw: u64 = 0x3;
+const map_anonymous: u64 = 0x20;
+const m33_map_shared: u64 = 0x10000;
+
+pub const wallpaper_loaded_marker: []const u8 = "wnd: wallpaper loaded\n";
+pub const wallpaper_present_marker: []const u8 = "wnd: wallpaper present\n";
+
+var wallpaper_loaded: bool = false;
+var wallpaper_bg_buf: ?[*]u32 = null;
+var scanout_ptr: ?[*]u32 = null;
+var scanout_mapped: bool = false;
+
+const max_wallpaper_file_bytes: usize = 96 * 1024;
+var wallpaper_file_buf: [max_wallpaper_file_bytes]u8 = undefined;
+
+/// Probe `/host/WALLPAPER.QOI` (falling back to `/host/WALLPAPER.PNG`). If present,
+/// decode and scale the image to 1280x720 and bind the scanout surface.
+pub fn init_wallpaper_if_present() void {
+    var fd = ui.file_open("/host/WALLPAPER.QOI", ui.MODE_READ);
+    if (fd < 0) {
+        fd = ui.file_open("/host/WALLPAPER.PNG", ui.MODE_READ);
+    }
+    if (fd < 0) {
+        write_marker("wnd: no wallpaper file\n");
+        return;
+    }
+    write_marker("wnd: wallpaper file opened\n");
+
+    const handle: u32 = @intCast(fd);
+    defer ui.file_close(handle);
+
+    var file_len: usize = 0;
+    while (file_len < max_wallpaper_file_bytes) {
+        const chunk = ui.file_read(handle, wallpaper_file_buf[file_len..]);
+        if (chunk <= 0) break;
+        file_len += @intCast(chunk);
+    }
+    if (file_len == 0) {
+        write_marker("wnd: wallpaper read fail\n");
+        return;
+    }
+
+    // 2. Map decode buffer (up to full frame pixels)
+    const fb_len: u64 = @as(u64, fb_w) * fb_h * 4;
+    const decode_va = ui.syscall4(ui.sys_mmap_num, 0, fb_len, prot_rw, map_anonymous);
+    if (decode_va <= 0) {
+        write_marker("wnd: wallpaper mmap decode fail\n");
+        return;
+    }
+    const decode_buf: [*]align(1) u32 = @ptrFromInt(@as(usize, @intCast(decode_va)));
+
+    // Decode QOI format (native desktop wallpaper format)
+    const qoi_hdr = ui.image.qoi.decode(wallpaper_file_buf[0..file_len], decode_buf[0..(@as(usize, fb_w) * fb_h)]) catch {
+        write_marker("wnd: wallpaper decode fail\n");
+        return;
+    };
+    const decoded = ui.image.Image{
+        .width = qoi_hdr.width,
+        .height = qoi_hdr.height,
+        .pixels = decode_buf[0..(@as(usize, qoi_hdr.width) * qoi_hdr.height)],
+    };
+
+    // 3. Map full 1280x720 background buffer
+    const bg_va = ui.syscall4(ui.sys_mmap_num, 0, fb_len, prot_rw, map_anonymous);
+    if (bg_va <= 0) {
+        write_marker("wnd: wallpaper mmap bg fail\n");
+        return;
+    }
+    const bg_pixels: [*]u32 = @ptrFromInt(@as(usize, @intCast(bg_va)));
+
+    // Scale to screen dimensions using nearest-neighbor
+    var dy: u32 = 0;
+    while (dy < fb_h) : (dy += 1) {
+        const sy = (dy * decoded.height) / fb_h;
+        var dx: u32 = 0;
+        while (dx < fb_w) : (dx += 1) {
+            const sx = (dx * decoded.width) / fb_w;
+            const px_ptr = decoded.pixel_at(sx, sy);
+            bg_pixels[dy * fb_w + dx] = if (px_ptr) |p| p.* else 0xFF1E1E2E;
+        }
+    }
+
+    // 4. Map the scanout surface
+    if (!scanout_mapped) {
+        const scan_va = ui.syscall4(ui.sys_mmap_num, m33_surf_scan_tag, fb_len, prot_rw, map_anonymous | m33_map_shared);
+        if (scan_va > 0) {
+            scanout_ptr = @ptrFromInt(@as(usize, @intCast(scan_va)));
+            scanout_mapped = true;
+        } else {
+            write_marker("wnd: wallpaper scanout map fail\n");
+        }
+    }
+
+    if (scanout_mapped) {
+        wallpaper_bg_buf = bg_pixels;
+        wallpaper_loaded = true;
+        write_marker(wallpaper_loaded_marker);
+    }
+}
+
+/// Blit the scaled wallpaper pixels to the scanout surface, preserving dock,
+/// taskbar, and all visible interactive windows.
+pub fn render_wallpaper_root() void {
+    const bg = wallpaper_bg_buf orelse return;
+    const scan = scanout_ptr orelse return;
+
+    const max_y = fb_h - taskbar_h;
+    var y: u32 = 0;
+    while (y < max_y) : (y += 1) {
+        const row_off = y * fb_w;
+        var x: u32 = dock_w;
+        while (x < fb_w) : (x += 1) {
+            // Check occlusion by visible windows
+            var occluded = false;
+            for (mirrors) |m| {
+                if (m.valid and m.visible and !m.minimized) {
+                    if (x >= m.x and x < m.x + m.w and y >= m.y and y < m.y + m.h) {
+                        occluded = true;
+                        break;
+                    }
+                }
+            }
+            if (!occluded and god_menu_open) {
+                const menu_x = if (fb_w > god_menu_w) (fb_w - god_menu_w) / 2 else 0;
+                const menu_y = if (fb_h > god_menu_h) (fb_h - god_menu_h) / 2 else 0;
+                if (x >= menu_x and x < menu_x + god_menu_w and y >= menu_y and y < menu_y + god_menu_h) {
+                    occluded = true;
+                }
+            }
+            if (!occluded) {
+                scan[row_off + x] = bg[row_off + x];
+            }
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Issue #821 Phase 1: Global Sexiburger God Menu Overlay & Action Dispatch
@@ -1473,6 +1614,12 @@ fn main() noreturn {
     }
     write_marker(registered_marker);
 
+    // Ensure mirror table is initialized cleanly.
+    mirrors = [_]MirrorWin{.{}} ** max_user_windows;
+
+    // Issue #825: probe for desktop wallpaper (/host/WALLPAPER.QOI or .PNG)
+    init_wallpaper_if_present();
+
     // WMS4 (issue #624): submit the chrome POLICY — one
     // sys_wmctl(SET_WINDOW, a0=ALL, a1=0, a2=0, ptr=desc, len=40). The WM
     // becomes the theme owner: the kernel blits chrome from this descriptor
@@ -1515,6 +1662,11 @@ fn main() noreturn {
         switch (ev.kind) {
             composite_tick_kind => {
                 ticks +%= 1;
+                // Issue #825: render wallpaper on root desktop behind windows
+                if (wallpaper_loaded and scanout_mapped) {
+                    render_wallpaper_root();
+                    write_marker(wallpaper_present_marker);
+                }
                 if (ticks % present_every == 0) {
                     _ = syscall6(sys_wmctl, wmctl_request_present, 0, 0, 0, 0, 0);
                     presents +%= 1;
@@ -1546,6 +1698,9 @@ fn main() noreturn {
                 const id: u8 = @intCast(ev.flags & 0xff);
                 const s = mirror_slot(id) orelse continue; // not a window we track
                 const m = &mirrors[s];
+                if (!m.valid) {
+                    m.* = .{};
+                }
                 m.id = id;
                 m.valid = true;
                 m.x = ev.arg0 & 0xffff;
@@ -2015,4 +2170,46 @@ test "wnd: god menu key chord Ctrl+Space toggle and state" {
     // Simulate Ctrl+Space chord
     handle_wm_key(usage_space, mod_ctrl);
     try std.testing.expect(god_menu_initialized);
+}
+
+test "wnd: wallpaper render occlusion and blit logic" {
+    var fake_scan = [_]u32{0xFF000000} ** (fb_w * fb_h);
+    var fake_bg = [_]u32{0xFF123456} ** (fb_w * fb_h);
+
+    scanout_ptr = &fake_scan;
+    scanout_mapped = true;
+    wallpaper_bg_buf = &fake_bg;
+    wallpaper_loaded = true;
+    defer {
+        scanout_ptr = null;
+        scanout_mapped = false;
+        wallpaper_bg_buf = null;
+        wallpaper_loaded = false;
+    }
+
+    // Set a window at x=100, y=100, w=200, h=150
+    mirrors[0] = .{
+        .id = 2,
+        .valid = true,
+        .x = 100,
+        .y = 100,
+        .w = 200,
+        .h = 150,
+        .visible = true,
+    };
+    defer mirrors[0] = .{};
+
+    render_wallpaper_root();
+
+    // Dock region (x < dock_w) should remain unpainted (0xFF000000)
+    try std.testing.expectEqual(@as(u32, 0xFF000000), fake_scan[50 * fb_w + 5]);
+
+    // Root desktop pixel (x=50, y=50) should have wallpaper color
+    try std.testing.expectEqual(@as(u32, 0xFF123456), fake_scan[50 * fb_w + 50]);
+
+    // Inside window area (x=150, y=150) should be occluded and unpainted (0xFF000000)
+    try std.testing.expectEqual(@as(u32, 0xFF000000), fake_scan[150 * fb_w + 150]);
+
+    // Taskbar area (y >= fb_h - taskbar_h) should remain unpainted (0xFF000000)
+    try std.testing.expectEqual(@as(u32, 0xFF000000), fake_scan[(fb_h - 10) * fb_w + 50]);
 }
