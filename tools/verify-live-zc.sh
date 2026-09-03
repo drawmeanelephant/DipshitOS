@@ -54,8 +54,8 @@ gate_seed_share
 echo "run dir: $RUN_DIR"
 SCRIPT="$RUN_DIR/script.txt"
 
-# Stage a program that sums via for-loop, selects via switch, and prints slice, then exits 72.
-SRC='const zc = @import("zc"); pub fn main() void { var sum: u64 = 0; for (0..10) |i| { sum = sum + i; } const s: []const u8 = switch (sum) { 45 => "one", else => "bad" }; zc.print(s); if (s[0] == 111) { zc.exit(72); } zc.exit(1); }'
+# Stage a program that defines enum, selects via switch, uses @intFromEnum, and prints slice, then exits 72.
+SRC='const zc = @import("zc"); const E = enum { a, b }; pub fn main() void { const c: E = .b; const s: []const u8 = switch (c) { .b => "one", else => "bad" }; zc.print(s); if (@intFromEnum(c) == 1) { zc.exit(72); } zc.exit(1); }'
 printf 'ls\nwrite MAIN.Z '\''%s'\''\nexec ZC.BIN\n' "$SRC" > "$SCRIPT"
 printf 'ls\nexec MAIN.ELF\necho rx-zc-ok\n' > "$SCRIPT2"
 
@@ -102,7 +102,12 @@ cp tests/zc-corpus/z1e-control.z "$CORPUS_CONTROL_TMP"
 zig build-obj -target aarch64-freestanding --dep zc -Mroot="$CORPUS_CONTROL_TMP" -Mzc=user/src/lib/zc.zig -femit-bin="$RUN_DIR/corpus_control.o"
 rm -f "$CORPUS_CONTROL_TMP" "$RUN_DIR/corpus_control.o"
 
-echo "host compile check: ok (SRC + z05-dialect.z + vl6-gui.z + z1a-strings.z + z1b-arrays.z + z1c-structs.z + z1d-pointers.z + z1e-control.z valid Zig 0.16)"
+CORPUS_ENUMS_TMP="$RUN_DIR/corpus_enums.zig"
+cp tests/zc-corpus/z1f-enums.z "$CORPUS_ENUMS_TMP"
+zig build-obj -target aarch64-freestanding --dep zc -Mroot="$CORPUS_ENUMS_TMP" -Mzc=user/src/lib/zc.zig -femit-bin="$RUN_DIR/corpus_enums.o"
+rm -f "$CORPUS_ENUMS_TMP" "$RUN_DIR/corpus_enums.o"
+
+echo "host compile check: ok (SRC + z05-dialect.z + vl6-gui.z + z1a-strings.z + z1b-arrays.z + z1c-structs.z + z1d-pointers.z + z1e-control.z + z1f-enums.z valid Zig 0.16)"
 
 run_one() {
     local tag="$1"

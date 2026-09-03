@@ -163,6 +163,7 @@ const TokenKind = enum {
     keyword_while,
     keyword_return,
     keyword_struct,
+    keyword_enum,
     keyword_for,
     keyword_switch,
     ident,
@@ -359,6 +360,7 @@ const Tokenizer = struct {
                     if (std.mem.eql(u8, text, "switch")) return Token{ .kind = .keyword_switch, .text = text, .line = self.line };
                     if (std.mem.eql(u8, text, "return")) return Token{ .kind = .keyword_return, .text = text, .line = self.line };
                     if (std.mem.eql(u8, text, "struct")) return Token{ .kind = .keyword_struct, .text = text, .line = self.line };
+                    if (std.mem.eql(u8, text, "enum")) return Token{ .kind = .keyword_enum, .text = text, .line = self.line };
                     return Token{ .kind = .ident, .text = text, .line = self.line };
                 }
                 if (std.ascii.isDigit(c)) {
@@ -398,6 +400,8 @@ const LocalVar = struct {
     ptr_is_struct: bool = false,
     ptr_struct_idx: usize = 0,
     is_slice: bool = false,
+    is_enum: bool = false,
+    enum_idx: usize = 0,
 };
 
 const Field = struct {
@@ -411,6 +415,25 @@ const StructDef = struct {
     fields: [8]Field = undefined,
     field_count: usize = 0,
     size: usize = 0,
+};
+
+const EnumField = struct {
+    name: []const u8,
+    value: u64,
+};
+
+const EnumDef = struct {
+    name: []const u8,
+    tag_type_size: usize = 8,
+    fields: [32]EnumField = undefined,
+    field_count: usize = 0,
+
+    fn findField(self: *const EnumDef, name: []const u8) ?u64 {
+        for (self.fields[0..self.field_count]) |f| {
+            if (std.mem.eql(u8, f.name, name)) return f.value;
+        }
+        return null;
+    }
 };
 
 const CallPatch = struct {
@@ -445,6 +468,9 @@ var frame_size: usize = 0;
 
 var structs: [8]StructDef = undefined;
 var structs_count: usize = 0;
+
+var enums: [16]EnumDef = undefined;
+var enums_count: usize = 0;
 
 var call_patches: [64]CallPatch = undefined;
 var call_patches_count: usize = 0;
@@ -580,12 +606,29 @@ fn lookupStruct(name: []const u8) ?*StructDef {
     return null;
 }
 
+fn lookupEnum(name: []const u8) ?*EnumDef {
+    var i: usize = 0;
+    while (i < enums_count) : (i += 1) {
+        if (std.mem.eql(u8, enums[i].name, name)) return &enums[i];
+    }
+    return null;
+}
+
+fn lookupEnumField(field_name: []const u8) ?u64 {
+    var i: usize = 0;
+    while (i < enums_count) : (i += 1) {
+        if (enums[i].findField(field_name)) |val| return val;
+    }
+    return null;
+}
+
 fn typeSize(name: []const u8) ?usize {
     if (std.mem.eql(u8, name, "u8")) return 1;
     if (std.mem.eql(u8, name, "u16")) return 2;
     if (std.mem.eql(u8, name, "u32")) return 4;
     if (std.mem.eql(u8, name, "u64") or std.mem.eql(u8, name, "usize") or std.mem.eql(u8, name, "i64")) return 8;
     if (lookupStruct(name)) |sd| return sd.size;
+    if (lookupEnum(name)) |ed| return ed.tag_type_size;
     return null;
 }
 
@@ -652,6 +695,8 @@ const ParsedType = struct {
     array_len: usize = 0,
     elem_size: usize = 8,
     is_slice: bool = false,
+    is_enum: bool = false,
+    enum_idx: usize = 0,
 };
 
 fn parseType(p: *Parser) anyerror!ParsedType {
@@ -713,6 +758,16 @@ fn parseType(p: *Parser) anyerror!ParsedType {
                 }
             }
             res.elem_size = sd.size;
+        } else if (lookupEnum(id_tok.text)) |ed| {
+            res.is_enum = true;
+            var i: usize = 0;
+            while (i < enums_count) : (i += 1) {
+                if (std.mem.eql(u8, enums[i].name, id_tok.text)) {
+                    res.enum_idx = i;
+                    break;
+                }
+            }
+            res.elem_size = ed.tag_type_size;
         } else {
             res.elem_size = typeSize(id_tok.text) orelse 8;
         }
@@ -938,6 +993,34 @@ fn parsePrimary(p: *Parser) anyerror!void {
         .keyword_switch => {
             p.idx -= 1;
             try compileSwitch(p, true);
+        },
+        .dot => {
+            const member_tok = try p.expect(.ident);
+            if (lookupEnumField(member_tok.text)) |val| {
+                emitLoadImmediate(0, val);
+            } else {
+                print_err("unknown enum member", member_tok.line, member_tok.text);
+                return error.CompileError;
+            }
+        },
+        .at => {
+            const intrinsic_name = try p.expect(.ident);
+            _ = try p.expect(.l_paren);
+            if (std.mem.eql(u8, intrinsic_name.text, "intFromEnum") or
+                std.mem.eql(u8, intrinsic_name.text, "enumFromInt") or
+                std.mem.eql(u8, intrinsic_name.text, "intCast"))
+            {
+                try compileExpr(p);
+                _ = try p.expect(.r_paren);
+            } else if (std.mem.eql(u8, intrinsic_name.text, "as")) {
+                _ = try parseType(p);
+                _ = try p.expect(.comma);
+                try compileExpr(p);
+                _ = try p.expect(.r_paren);
+            } else {
+                print_err("unknown builtin intrinsic", intrinsic_name.line, intrinsic_name.text);
+                return error.CompileError;
+            }
         },
         .ident => {
             if (p.accept(.dot)) {
@@ -1245,6 +1328,13 @@ fn parsePrimary(p: *Parser) anyerror!void {
                             emit(enc_svc(0));
                         } else {
                             print_err("unknown zc function", member_tok.line, member_tok.text);
+                            return error.CompileError;
+                        }
+                    } else if (lookupEnum(t.text)) |ed| {
+                        if (ed.findField(member_tok.text)) |val| {
+                            emitLoadImmediate(0, val);
+                        } else {
+                            print_err("unknown enum field", member_tok.line, member_tok.text);
                             return error.CompileError;
                         }
                     } else {
@@ -1620,6 +1710,8 @@ fn compileStatement(p: *Parser) anyerror!void {
             var ptr_is_struct = false;
             var ptr_struct_idx: usize = 0;
             var is_slice = false;
+            var is_enum = false;
+            var enum_idx: usize = 0;
             if (p.accept(.colon)) {
                 const pt = try parseType(p);
                 if (pt.is_ptr) {
@@ -1639,6 +1731,10 @@ fn compileStatement(p: *Parser) anyerror!void {
                     is_struct = true;
                     struct_idx = pt.struct_idx;
                     struct_size = pt.elem_size;
+                } else if (pt.is_enum) {
+                    is_enum = true;
+                    enum_idx = pt.enum_idx;
+                    elem_size = pt.elem_size;
                 } else {
                     elem_size = pt.elem_size;
                 }
@@ -1732,7 +1828,7 @@ fn compileStatement(p: *Parser) anyerror!void {
                     const offset = frame_size;
                     frame_size += 8;
                     if (locals_count >= locals.len) return error.CompileError;
-                    locals[locals_count] = LocalVar{ .name = name_tok.text, .offset = offset };
+                    locals[locals_count] = LocalVar{ .name = name_tok.text, .offset = offset, .elem_size = elem_size, .is_enum = is_enum, .enum_idx = enum_idx };
                     locals_count += 1;
                 } else {
                     const is_str = (p.peek() == .string_lit);
@@ -1756,7 +1852,7 @@ fn compileStatement(p: *Parser) anyerror!void {
                         frame_size += 8;
                         emit(enc_str(19, 0, @intCast(offset / 8)));
                         if (locals_count >= locals.len) return error.CompileError;
-                        locals[locals_count] = LocalVar{ .name = name_tok.text, .offset = offset };
+                        locals[locals_count] = LocalVar{ .name = name_tok.text, .offset = offset, .elem_size = elem_size, .is_enum = is_enum, .enum_idx = enum_idx };
                         locals_count += 1;
                     }
                 }
@@ -2154,6 +2250,7 @@ pub fn compile(src: []const u8) !usize {
     locals_count = 0;
     frame_size = 0;
     structs_count = 0;
+    enums_count = 0;
     data_len = 0;
     string_patches_count = 0;
 
@@ -2184,28 +2281,59 @@ pub fn compile(src: []const u8) !usize {
             _ = p1.advance(); // const
             if (p1.peek() == .ident) {
                 const name_tok = p1.advance();
-                if (p1.accept(.equal) and p1.accept(.keyword_struct)) {
-                    _ = try p1.expect(.l_brace);
-                    var sd = StructDef{ .name = name_tok.text };
-                    var off: usize = 0;
-                    while (p1.peek() != .r_brace and p1.peek() != .eof) {
-                        const fname = try p1.expect(.ident);
-                        _ = try p1.expect(.colon);
-                        const tname = try p1.expect(.ident);
-                        const sz = typeSize(tname.text) orelse return error.CompileError;
-                        if (sd.field_count >= sd.fields.len) return error.CompileError;
-                        sd.fields[sd.field_count] = Field{ .name = fname.text, .offset = off, .size = sz };
-                        sd.field_count += 1;
-                        off += sz;
-                        _ = p1.accept(.comma);
+                if (p1.accept(.equal)) {
+                    if (p1.accept(.keyword_struct)) {
+                        _ = try p1.expect(.l_brace);
+                        var sd = StructDef{ .name = name_tok.text };
+                        var off: usize = 0;
+                        while (p1.peek() != .r_brace and p1.peek() != .eof) {
+                            const fname = try p1.expect(.ident);
+                            _ = try p1.expect(.colon);
+                            const tname = try p1.expect(.ident);
+                            const sz = typeSize(tname.text) orelse return error.CompileError;
+                            if (sd.field_count >= sd.fields.len) return error.CompileError;
+                            sd.fields[sd.field_count] = Field{ .name = fname.text, .offset = off, .size = sz };
+                            sd.field_count += 1;
+                            off += sz;
+                            _ = p1.accept(.comma);
+                        }
+                        _ = try p1.expect(.r_brace);
+                        sd.size = off;
+                        if (structs_count >= structs.len) return error.CompileError;
+                        structs[structs_count] = sd;
+                        structs_count += 1;
+                        _ = p1.accept(.semicolon);
+                        continue;
+                    } else if (p1.accept(.keyword_enum)) {
+                        var tag_size: usize = 8;
+                        if (p1.accept(.l_paren)) {
+                            const tag_tok = try p1.expect(.ident);
+                            tag_size = typeSize(tag_tok.text) orelse return error.CompileError;
+                            _ = try p1.expect(.r_paren);
+                        }
+                        _ = try p1.expect(.l_brace);
+                        var ed = EnumDef{ .name = name_tok.text, .tag_type_size = tag_size };
+                        var next_val: u64 = 0;
+                        while (p1.peek() != .r_brace and p1.peek() != .eof) {
+                            const fname = try p1.expect(.ident);
+                            var fval: u64 = next_val;
+                            if (p1.accept(.equal)) {
+                                const num_tok = try p1.expect(.number);
+                                fval = std.fmt.parseInt(u64, num_tok.text, 0) catch return error.CompileError;
+                            }
+                            if (ed.field_count >= ed.fields.len) return error.CompileError;
+                            ed.fields[ed.field_count] = EnumField{ .name = fname.text, .value = fval };
+                            ed.field_count += 1;
+                            next_val = fval + 1;
+                            _ = p1.accept(.comma);
+                        }
+                        _ = try p1.expect(.r_brace);
+                        if (enums_count >= enums.len) return error.CompileError;
+                        enums[enums_count] = ed;
+                        enums_count += 1;
+                        _ = p1.accept(.semicolon);
+                        continue;
                     }
-                    _ = try p1.expect(.r_brace);
-                    sd.size = off;
-                    if (structs_count >= structs.len) return error.CompileError;
-                    structs[structs_count] = sd;
-                    structs_count += 1;
-                    _ = p1.accept(.semicolon);
-                    continue;
                 }
             }
             p1.idx = save_idx;
@@ -2892,4 +3020,163 @@ test "zc: Z1e tokenizer handles for, switch, .., ..., =>" {
     try testing.expectEqual(TokenKind.equal_greater, t.next().kind);
     try testing.expectEqual(TokenKind.number, t.next().kind);
     try testing.expectEqual(TokenKind.r_brace, t.next().kind);
+}
+
+test "zc: Z1f tokenizer handles enum keyword" {
+    const src = "const Color = enum { red, green, blue };";
+    var t = Tokenizer{ .src = src };
+    try testing.expectEqual(TokenKind.keyword_const, t.next().kind);
+    try testing.expectEqual(TokenKind.ident, t.next().kind);
+    try testing.expectEqual(TokenKind.equal, t.next().kind);
+    try testing.expectEqual(TokenKind.keyword_enum, t.next().kind);
+    try testing.expectEqual(TokenKind.l_brace, t.next().kind);
+    try testing.expectEqual(TokenKind.ident, t.next().kind);
+    try testing.expectEqual(TokenKind.comma, t.next().kind);
+    try testing.expectEqual(TokenKind.ident, t.next().kind);
+    try testing.expectEqual(TokenKind.comma, t.next().kind);
+    try testing.expectEqual(TokenKind.ident, t.next().kind);
+    try testing.expectEqual(TokenKind.r_brace, t.next().kind);
+    try testing.expectEqual(TokenKind.semicolon, t.next().kind);
+}
+
+test "zc: Z1f enum definition and member values" {
+    const src =
+        \\const zc = @import("zc");
+        \\const Color = enum {
+        \\    red,
+        \\    green,
+        \\    blue,
+        \\};
+        \\pub fn main() void {
+        \\    const c: Color = .green;
+        \\    if (c == Color.green) {
+        \\        if (c == .green) {
+        \\            zc.exit(72);
+        \\        }
+        \\    }
+        \\    zc.exit(1);
+        \\}
+    ;
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
+}
+
+test "zc: Z1f enum-valued switch statement and expression" {
+    const src =
+        \\const zc = @import("zc");
+        \\const Status = enum(u32) {
+        \\    ok = 10,
+        \\    pending = 20,
+        \\    err = 30,
+        \\};
+        \\fn check_status(s: Status) u64 {
+        \\    return switch (s) {
+        \\        .ok => 1,
+        \\        .pending => 2,
+        \\        .err => 3,
+        \\    };
+        \\}
+        \\pub fn main() void {
+        \\    var st: Status = Status.pending;
+        \\    if (check_status(st) == 2) {
+        \\        st = .ok;
+        \\        switch (st) {
+        \\            .ok => { zc.exit(72); },
+        \\            else => { zc.exit(1); },
+        \\        }
+        \\    }
+        \\    zc.exit(1);
+        \\}
+    ;
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
+}
+
+test "zc: Z1f cast to and from int (@intFromEnum, @enumFromInt)" {
+    const src =
+        \\const zc = @import("zc");
+        \\const Direction = enum {
+        \\    north = 0,
+        \\    east = 1,
+        \\    south = 2,
+        \\    west = 3,
+        \\};
+        \\pub fn main() void {
+        \\    const d: Direction = .south;
+        \\    const val: u64 = @intFromEnum(d);
+        \\    if (val == 2) {
+        \\        const d2: Direction = @enumFromInt(3);
+        \\        if (d2 == .west) {
+        \\            zc.exit(72);
+        \\        }
+        \\    }
+        \\    zc.exit(1);
+        \\}
+    ;
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
+}
+
+test "zc: Z1f corpus fixture z1f-enums.z compiles" {
+    const src =
+        \\const zc = @import("zc");
+        \\
+        \\const Color = enum {
+        \\    red,
+        \\    green,
+        \\    blue,
+        \\};
+        \\
+        \\const Status = enum(u32) {
+        \\    ok = 10,
+        \\    pending = 20,
+        \\    err = 30,
+        \\};
+        \\
+        \\fn color_weight(c: Color) u64 {
+        \\    return switch (c) {
+        \\        .red => 10,
+        \\        .green => 20,
+        \\        .blue => 30,
+        \\    };
+        \\}
+        \\
+        \\fn is_terminal(s: Status) u64 {
+        \\    return switch (s) {
+        \\        Status.ok, Status.err => 1,
+        \\        Status.pending => 0,
+        \\    };
+        \\}
+        \\
+        \\pub fn main() void {
+        \\    const c: Color = .green;
+        \\    const ci: u64 = @intFromEnum(c);
+        \\    if (ci == 1) {
+        \\        const c2: Color = @enumFromInt(2);
+        \\        if (c2 == Color.blue) {
+        \\            if (color_weight(c) == 20) {
+        \\                var st: Status = Status.pending;
+        \\                if (@intFromEnum(st) == 20) {
+        \\                    if (is_terminal(st) == 0) {
+        \\                        st = .ok;
+        \\                        if (is_terminal(st) == 1) {
+        \\                            zc.print("ok\n");
+        \\                            zc.exit(72);
+        \\                        }
+        \\                    }
+        \\                }
+        \\            }
+        \\        }
+        \\    }
+        \\    zc.exit(1);
+        \\}
+    ;
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
+}
+
+test "zc: verify-live-zc SRC compiles" {
+    const src = "const zc = @import(\"zc\"); const E = enum { a, b }; pub fn main() void { const c: E = .b; const s: []const u8 = switch (c) { .b => \"one\", else => \"bad\" }; zc.print(s); if (@intFromEnum(c) == 1) { zc.exit(72); } zc.exit(1); }";
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
 }
