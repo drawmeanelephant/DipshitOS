@@ -28,6 +28,7 @@ const enc_str = asmenc.enc_str;
 const enc_ldrb = asmenc.enc_ldrb;
 const enc_strb = asmenc.enc_strb;
 const enc_ret = asmenc.enc_ret;
+const enc_blr = asmenc.enc_blr;
 const enc_svc = asmenc.enc_svc;
 const enc_mul = asmenc.enc_mul;
 const enc_udiv = asmenc.enc_udiv;
@@ -162,6 +163,7 @@ const TokenKind = enum {
     keyword_else,
     keyword_while,
     keyword_return,
+    keyword_defer,
     keyword_struct,
     keyword_enum,
     keyword_for,
@@ -359,6 +361,7 @@ const Tokenizer = struct {
                     if (std.mem.eql(u8, text, "for")) return Token{ .kind = .keyword_for, .text = text, .line = self.line };
                     if (std.mem.eql(u8, text, "switch")) return Token{ .kind = .keyword_switch, .text = text, .line = self.line };
                     if (std.mem.eql(u8, text, "return")) return Token{ .kind = .keyword_return, .text = text, .line = self.line };
+                    if (std.mem.eql(u8, text, "defer")) return Token{ .kind = .keyword_defer, .text = text, .line = self.line };
                     if (std.mem.eql(u8, text, "struct")) return Token{ .kind = .keyword_struct, .text = text, .line = self.line };
                     if (std.mem.eql(u8, text, "enum")) return Token{ .kind = .keyword_enum, .text = text, .line = self.line };
                     return Token{ .kind = .ident, .text = text, .line = self.line };
@@ -400,6 +403,7 @@ const LocalVar = struct {
     ptr_is_struct: bool = false,
     ptr_struct_idx: usize = 0,
     is_slice: bool = false,
+    is_fnptr: bool = false,
 };
 
 const Field = struct {
@@ -464,6 +468,44 @@ var enums_count: usize = 0;
 
 var call_patches: [64]CallPatch = undefined;
 var call_patches_count: usize = 0;
+
+// ---------------------------------------------------------------------------
+// Z2b (issue #757): scope-exit defers + function pointers.
+//
+// A `defer` statement is NOT compiled where it appears: its token position is
+// recorded and the statement is skipped, then it is compiled again when its
+// scope exits (reverse registration order), or inline on a `return` that
+// unwinds the scope. Defer bodies are restricted to expression / simple-
+// assignment statements (no declarations, no control flow, no nested defer).
+// Entries survive their inline emission (return paths) so the same defers are
+// also emitted at the scope's fallthrough end — exactly one path executes.
+//
+// Function pointers: *const fn(<params>) <ret> types parse to an 8-byte code
+// address; `&fn` emits a PC-relative ADR patched once every function address
+// is known; a call through a function-pointer local/param parks the callee
+// address, pushes the arguments, pops the args into x0.., and dispatches with
+// blr (the callee is popped into x16, the intra-call scratch register).
+// ---------------------------------------------------------------------------
+const DeferEntry = struct {
+    stmt_start: usize,
+};
+
+const DeferScope = struct {
+    defer_base: usize,
+};
+
+const FnAddrPatch = struct {
+    code_pc: usize,
+    func_idx: usize,
+};
+
+var defer_entries: [48]DeferEntry = undefined;
+var defer_entries_count: usize = 0;
+var defer_scopes: [16]DeferScope = undefined;
+var defer_scope_depth: usize = 0;
+
+var fn_addr_patches: [32]FnAddrPatch = undefined;
+var fn_addr_patches_count: usize = 0;
 
 fn emit(word: u32) void {
     std.mem.writeInt(u32, code[code_len..][0..4], word, .little);
@@ -677,6 +719,7 @@ const ParsedType = struct {
     array_len: usize = 0,
     elem_size: usize = 8,
     is_slice: bool = false,
+    is_fnptr: bool = false,
 };
 
 fn parseType(p: *Parser) anyerror!ParsedType {
@@ -684,6 +727,19 @@ fn parseType(p: *Parser) anyerror!ParsedType {
     if (p.accept(.star)) {
         res.is_ptr = true;
         _ = p.accept(.keyword_const);
+        if (p.peek() == .keyword_fn) {
+            // Z2b: function-pointer type, e.g. *const fn(u64, u64) u64.
+            // The params and return type are consumed so the type parses
+            // under host zig 0.16 and in-guest alike; the value itself is a
+            // plain 8-byte code address.
+            res.is_fnptr = true;
+            _ = p.advance(); // 'fn'
+            _ = try p.expect(.l_paren);
+            while (p.peek() != .r_paren and p.peek() != .eof) _ = p.advance();
+            _ = try p.expect(.r_paren);
+            _ = try parseType(p); // return type (discarded)
+            return res;
+        }
         const id_tok = try p.expect(.ident);
         res.name = id_tok.text;
         if (lookupStruct(id_tok.text)) |sd| {
@@ -748,11 +804,104 @@ fn parseType(p: *Parser) anyerror!ParsedType {
 fn countParams(tokens: []const Token, start_idx: usize) usize {
     var idx = start_idx;
     if (tokens[idx].kind == .r_paren) return 0;
+    // Nesting-aware: a function-pointer param type carries its own parens
+    // and commas (e.g. f: *const fn(u64, u64) u64), which must not count.
+    var depth: usize = 0;
     var commas: usize = 0;
-    while (idx < tokens.len and tokens[idx].kind != .r_paren) : (idx += 1) {
-        if (tokens[idx].kind == .comma) commas += 1;
+    while (idx < tokens.len) : (idx += 1) {
+        const k = tokens[idx].kind;
+        switch (k) {
+            .l_paren, .l_bracket, .l_brace => depth += 1,
+            .r_bracket, .r_brace => {
+                if (depth > 0) depth -= 1;
+            },
+            .r_paren => {
+                if (depth == 0) break;
+                depth -= 1;
+            },
+            .comma => {
+                if (depth == 0) commas += 1;
+            },
+            else => {},
+        }
     }
     return commas + 1;
+}
+
+fn pushDeferScope() anyerror!void {
+    if (defer_scope_depth >= defer_scopes.len) return error.CompileError;
+    defer_scopes[defer_scope_depth] = DeferScope{ .defer_base = defer_entries_count };
+    defer_scope_depth += 1;
+}
+
+fn popDeferScope() void {
+    if (defer_scope_depth == 0) return;
+    defer_scope_depth -= 1;
+    defer_entries_count = defer_scopes[defer_scope_depth].defer_base;
+}
+
+/// Compile the defers registered in `scope_idx` (reverse order). Does NOT
+/// pop the scope: return paths emit entries inline and the same entries are
+/// emitted again at the scope's fallthrough end.
+fn emitScopeDefers(p: *Parser, scope_idx: usize) anyerror!void {
+    const base = defer_scopes[scope_idx].defer_base;
+    const end = if (scope_idx + 1 < defer_scope_depth) defer_scopes[scope_idx + 1].defer_base else defer_entries_count;
+    var i = end;
+    while (i > base) {
+        i -= 1;
+        const saved_idx = p.idx;
+        p.idx = defer_entries[i].stmt_start;
+        try compileStatement(p);
+        p.idx = saved_idx;
+    }
+}
+
+/// Run every currently open scope's defers, innermost first — the unwind a
+/// `return` performs (LIFO per scope, inner scopes before outer ones).
+fn emitOpenScopeDefers(p: *Parser) anyerror!void {
+    var d = defer_scope_depth;
+    while (d > 0) {
+        d -= 1;
+        try emitScopeDefers(p, d);
+    }
+}
+
+/// Consume tokens up to and including the parameter list's closing paren,
+/// honoring nested parens/brackets/braces (fn-pointer param types).
+fn skipToDeclCloseParen(p: *Parser) void {
+    var depth: usize = 0;
+    while (p.peek() != .eof) {
+        const k = p.peek();
+        if (k == .r_paren and depth == 0) {
+            _ = p.advance();
+            return;
+        }
+        if (k == .l_paren or k == .l_bracket or k == .l_brace) {
+            depth += 1;
+        } else if (k == .r_paren or k == .r_bracket or k == .r_brace) {
+            if (depth > 0) depth -= 1;
+        }
+        _ = p.advance();
+    }
+}
+
+/// Skip a deferred statement's tokens (up to its `;`/`,` at nesting depth 0)
+/// without compiling it — it is compiled later at scope exit.
+fn skipDeferBody(p: *Parser) void {
+    var depth: usize = 0;
+    while (p.peek() != .eof) {
+        const t = p.advance();
+        switch (t.kind) {
+            .l_paren, .l_bracket, .l_brace => depth += 1,
+            .r_paren, .r_bracket, .r_brace => {
+                if (depth > 0) depth -= 1;
+            },
+            .semicolon, .comma => {
+                if (depth == 0) return;
+            },
+            else => {},
+        }
+    }
 }
 
 fn compileExpr(p: *Parser) anyerror!void {
@@ -1450,6 +1599,22 @@ fn parsePrimary(p: *Parser) anyerror!void {
                 emit(enc_movz(0, 0, 0));
                 _ = try p.expect(.r_paren);
             } else if (p.peek() == .l_paren) {
+                // Direct call (function name) or, since Z2b (issue #757), an
+                // indirect call through a function-pointer local or param.
+                const direct_idx = lookupFunc(t.text);
+                const fnptr_var = if (direct_idx == null) lookupLocalVar(t.text) else null;
+                if (fnptr_var) |lv| {
+                    if (!lv.is_fnptr) {
+                        print_err("value is not a function pointer", t.line, t.text);
+                        return error.CompileError;
+                    }
+                    // Park the callee address under the arguments: the args
+                    // pop into x0.. first, then the callee pops into x16 and
+                    // is dispatched with blr.
+                    emit(enc_ldr(19, 0, @intCast(lv.offset / 8)));
+                    emit(enc_sub_imm(31, 31, 16));
+                    emit(enc_str(31, 0, 0));
+                }
                 _ = p.advance();
                 var arg_count: usize = 0;
                 if (p.peek() != .r_paren) {
@@ -1471,8 +1636,11 @@ fn parsePrimary(p: *Parser) anyerror!void {
                     emit(enc_ldr(31, @intCast(i), 0));
                     emit(enc_add_imm(31, 31, 16));
                 }
-                const func_idx = lookupFunc(t.text);
-                if (func_idx) |idx| {
+                if (fnptr_var != null) {
+                    emit(enc_ldr(31, 16, 0));
+                    emit(enc_add_imm(31, 31, 16));
+                    emit(enc_blr(16));
+                } else if (direct_idx) |idx| {
                     const target = functions[idx].address;
                     const rel = @as(i32, @intCast(target)) - @as(i32, @intCast(code_len));
                     emit(enc_bl(rel));
@@ -1500,57 +1668,66 @@ fn parsePrimary(p: *Parser) anyerror!void {
         },
         .ampersand => {
             const target_tok = try p.expect(.ident);
-            const var_ptr = lookupLocalVar(target_tok.text) orelse {
+            if (lookupFunc(target_tok.text)) |fidx| {
+                // Z2b: &fn evaluates to the function's runtime address — a
+                // PC-relative ADR patched at the end of compile() once every
+                // function's address is known.
+                if (fn_addr_patches_count >= fn_addr_patches.len) return error.CompileError;
+                fn_addr_patches[fn_addr_patches_count] = FnAddrPatch{ .code_pc = code_len, .func_idx = fidx };
+                fn_addr_patches_count += 1;
+                emit(0);
+            } else if (lookupLocalVar(target_tok.text)) |var_ptr| {
+                if (p.accept(.dot)) {
+                    const field_tok = try p.expect(.ident);
+                    if (var_ptr.is_struct) {
+                        const sd = &structs[var_ptr.struct_idx];
+                        var foff: usize = 0;
+                        var found = false;
+                        for (sd.fields[0..sd.field_count]) |f| {
+                            if (std.mem.eql(u8, f.name, field_tok.text)) {
+                                foff = f.offset;
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found) return error.CompileError;
+                        emit(enc_add_imm(19, 0, @intCast(var_ptr.offset + foff)));
+                    } else if (var_ptr.is_ptr and var_ptr.ptr_is_struct) {
+                        const sd = &structs[var_ptr.ptr_struct_idx];
+                        var foff: usize = 0;
+                        var found = false;
+                        for (sd.fields[0..sd.field_count]) |f| {
+                            if (std.mem.eql(u8, f.name, field_tok.text)) {
+                                foff = f.offset;
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found) return error.CompileError;
+                        emit(enc_ldr(19, 0, @intCast(var_ptr.offset / 8)));
+                        if (foff != 0) emit(enc_add_imm(0, 0, @intCast(foff)));
+                    } else {
+                        return error.CompileError;
+                    }
+                } else if (p.peek() == .l_bracket) {
+                    _ = p.advance(); // '['
+                    try compileExpr(p); // index -> x0
+                    _ = try p.expect(.r_bracket);
+                    const elem_sz = if (var_ptr.is_ptr) var_ptr.ptr_elem_size else var_ptr.elem_size;
+                    const shift = elemShift(elem_sz);
+                    if (shift != 0) emit(enc_lsl(0, 0, shift));
+                    if (var_ptr.is_ptr) {
+                        emit(enc_ldr(19, 1, @intCast(var_ptr.offset / 8)));
+                    } else {
+                        emit(enc_add_imm(19, 1, @intCast(var_ptr.offset)));
+                    }
+                    emit(enc_add_reg(0, 0, 1));
+                } else {
+                    emit(enc_add_imm(19, 0, @intCast(var_ptr.offset)));
+                }
+            } else {
                 print_err("undefined identifier", target_tok.line, target_tok.text);
                 return error.CompileError;
-            };
-            if (p.accept(.dot)) {
-                const field_tok = try p.expect(.ident);
-                if (var_ptr.is_struct) {
-                    const sd = &structs[var_ptr.struct_idx];
-                    var foff: usize = 0;
-                    var found = false;
-                    for (sd.fields[0..sd.field_count]) |f| {
-                        if (std.mem.eql(u8, f.name, field_tok.text)) {
-                            foff = f.offset;
-                            found = true;
-                            break;
-                        }
-                    }
-                    if (!found) return error.CompileError;
-                    emit(enc_add_imm(19, 0, @intCast(var_ptr.offset + foff)));
-                } else if (var_ptr.is_ptr and var_ptr.ptr_is_struct) {
-                    const sd = &structs[var_ptr.ptr_struct_idx];
-                    var foff: usize = 0;
-                    var found = false;
-                    for (sd.fields[0..sd.field_count]) |f| {
-                        if (std.mem.eql(u8, f.name, field_tok.text)) {
-                            foff = f.offset;
-                            found = true;
-                            break;
-                        }
-                    }
-                    if (!found) return error.CompileError;
-                    emit(enc_ldr(19, 0, @intCast(var_ptr.offset / 8)));
-                    if (foff != 0) emit(enc_add_imm(0, 0, @intCast(foff)));
-                } else {
-                    return error.CompileError;
-                }
-            } else if (p.peek() == .l_bracket) {
-                _ = p.advance(); // '['
-                try compileExpr(p); // index -> x0
-                _ = try p.expect(.r_bracket);
-                const elem_sz = if (var_ptr.is_ptr) var_ptr.ptr_elem_size else var_ptr.elem_size;
-                const shift = elemShift(elem_sz);
-                if (shift != 0) emit(enc_lsl(0, 0, shift));
-                if (var_ptr.is_ptr) {
-                    emit(enc_ldr(19, 1, @intCast(var_ptr.offset / 8)));
-                } else {
-                    emit(enc_add_imm(19, 1, @intCast(var_ptr.offset)));
-                }
-                emit(enc_add_reg(0, 0, 1));
-            } else {
-                emit(enc_add_imm(19, 0, @intCast(var_ptr.offset)));
             }
         },
         else => return error.CompileError,
@@ -1583,8 +1760,13 @@ fn compileSwitch(p: *Parser, is_expr: bool) anyerror!void {
             } else {
                 if (p.peek() == .l_brace) {
                     _ = p.advance();
+                    try pushDeferScope();
                     while (p.peek() != .r_brace and p.peek() != .eof) try compileStatement(p);
                     _ = try p.expect(.r_brace);
+                    // Z2b: a braced switch prong is a scope — its defers run
+                    // when the prong exits.
+                    try emitScopeDefers(p, defer_scope_depth - 1);
+                    popDeferScope();
                     _ = p.accept(.comma);
                 } else {
                     try compileStatement(p);
@@ -1653,8 +1835,13 @@ fn compileSwitch(p: *Parser, is_expr: bool) anyerror!void {
         } else {
             if (p.peek() == .l_brace) {
                 _ = p.advance();
+                try pushDeferScope();
                 while (p.peek() != .r_brace and p.peek() != .eof) try compileStatement(p);
                 _ = try p.expect(.r_brace);
+                // Z2b: a braced switch prong is a scope — its defers run when
+                // the prong exits.
+                try emitScopeDefers(p, defer_scope_depth - 1);
+                popDeferScope();
                 _ = p.accept(.comma);
             } else {
                 try compileStatement(p);
@@ -1701,6 +1888,7 @@ fn compileStatement(p: *Parser) anyerror!void {
             var ptr_elem_size: usize = 8;
             var ptr_is_struct = false;
             var ptr_struct_idx: usize = 0;
+            var is_fnptr = false;
             var is_slice = false;
             if (p.accept(.colon)) {
                 const pt = try parseType(p);
@@ -1709,6 +1897,7 @@ fn compileStatement(p: *Parser) anyerror!void {
                     ptr_elem_size = pt.ptr_elem_size;
                     ptr_is_struct = pt.ptr_is_struct;
                     ptr_struct_idx = pt.ptr_struct_idx;
+                    is_fnptr = pt.is_fnptr;
                 } else if (pt.is_slice) {
                     is_slice = true;
                     elem_size = pt.elem_size;
@@ -1746,6 +1935,7 @@ fn compileStatement(p: *Parser) anyerror!void {
                     .ptr_elem_size = ptr_elem_size,
                     .ptr_is_struct = ptr_is_struct,
                     .ptr_struct_idx = ptr_struct_idx,
+                    .is_fnptr = is_fnptr,
                 };
                 locals_count += 1;
             } else if (is_slice) {
@@ -1853,8 +2043,12 @@ fn compileStatement(p: *Parser) anyerror!void {
             const else_branch_idx = code_len;
             emit(0);
             _ = try p.expect(.l_brace);
+            try pushDeferScope();
             while (p.peek() != .r_brace and p.peek() != .eof) try compileStatement(p);
             _ = try p.expect(.r_brace);
+            // Z2b: the if-body's defers run when the body exits by fallthrough.
+            try emitScopeDefers(p, defer_scope_depth - 1);
+            popDeferScope();
             const end_branch_idx = code_len;
             emit(0);
             const else_pc = code_len;
@@ -1862,8 +2056,12 @@ fn compileStatement(p: *Parser) anyerror!void {
             std.mem.writeInt(u32, code[else_branch_idx..][0..4], enc_b_cond(.eq, else_offset_bytes), .little);
             if (p.accept(.keyword_else)) {
                 _ = try p.expect(.l_brace);
+                try pushDeferScope();
                 while (p.peek() != .r_brace and p.peek() != .eof) try compileStatement(p);
                 _ = try p.expect(.r_brace);
+                // Z2b: the else-body's defers run on its fallthrough exit.
+                try emitScopeDefers(p, defer_scope_depth - 1);
+                popDeferScope();
             }
             const end_pc = code_len;
             const end_offset_bytes = @as(i32, @intCast(end_pc - end_branch_idx));
@@ -1879,8 +2077,12 @@ fn compileStatement(p: *Parser) anyerror!void {
             const end_branch_idx = code_len;
             emit(0);
             _ = try p.expect(.l_brace);
+            try pushDeferScope();
             while (p.peek() != .r_brace and p.peek() != .eof) try compileStatement(p);
             _ = try p.expect(.r_brace);
+            // Z2b: the while-body's defers run at the end of every iteration.
+            try emitScopeDefers(p, defer_scope_depth - 1);
+            popDeferScope();
             const jump_back_offset = @as(i32, @intCast(start_pc)) - @as(i32, @intCast(code_len));
             emit(enc_b(jump_back_offset));
             const end_pc = code_len;
@@ -1948,8 +2150,12 @@ fn compileStatement(p: *Parser) anyerror!void {
                 emit(0); // b.cs exit
 
                 _ = try p.expect(.l_brace);
+                try pushDeferScope();
                 while (p.peek() != .r_brace and p.peek() != .eof) try compileStatement(p);
                 _ = try p.expect(.r_brace);
+                // Z2b: the loop-body's defers run at the end of every iteration.
+                try emitScopeDefers(p, defer_scope_depth - 1);
+                popDeferScope();
 
                 // Step: idx += 1
                 emit(enc_ldr(19, 0, @intCast(idx_offset / 8)));
@@ -2047,8 +2253,12 @@ fn compileStatement(p: *Parser) anyerror!void {
                 emit(enc_str(19, 0, @intCast(elem_offset / 8)));
 
                 _ = try p.expect(.l_brace);
+                try pushDeferScope();
                 while (p.peek() != .r_brace and p.peek() != .eof) try compileStatement(p);
                 _ = try p.expect(.r_brace);
+                // Z2b: the loop-body's defers run at the end of every iteration.
+                try emitScopeDefers(p, defer_scope_depth - 1);
+                popDeferScope();
 
                 // Step: idx += 1
                 emit(enc_ldr(19, 0, @intCast(idx_offset / 8)));
@@ -2067,7 +2277,22 @@ fn compileStatement(p: *Parser) anyerror!void {
         },
         .keyword_return => {
             _ = p.advance();
-            if (p.peek() != .semicolon and p.peek() != .comma) try compileExpr(p);
+            const has_value = p.peek() != .semicolon and p.peek() != .comma;
+            if (has_value) {
+                try compileExpr(p);
+                // Park the return value so scope-exit defers may clobber x0.
+                emit(enc_sub_imm(31, 31, 16));
+                emit(enc_str(31, 0, 0));
+            }
+            // Z2b: a return unwinds every scope that is still open — run
+            // their defers (innermost first, each LIFO). Entries are left in
+            // place so the same defers are emitted again at each scope's
+            // fallthrough end; only one of the two code paths executes.
+            try emitOpenScopeDefers(p);
+            if (has_value) {
+                emit(enc_ldr(31, 0, 0));
+                emit(enc_add_imm(31, 31, 16));
+            }
             _ = p.accept(.semicolon) or p.accept(.comma);
             emit(enc_add_imm(19, 31, 0));
             emit(enc_add_imm(31, 31, 512));
@@ -2076,6 +2301,24 @@ fn compileStatement(p: *Parser) anyerror!void {
             emit(enc_ldr(31, 30, 0));
             emit(enc_add_imm(31, 31, 16));
             emit(enc_ret(30));
+        },
+        .keyword_defer => {
+            _ = p.advance();
+            if (defer_scope_depth == 0) {
+                print_err("defer outside a function body", p.currentToken().line, p.currentToken().text);
+                return error.CompileError;
+            }
+            const t0 = p.currentToken();
+            if (t0.kind != .ident and t0.kind != .at) {
+                print_err("defer body must be an expression or simple assignment statement", t0.line, t0.text);
+                return error.CompileError;
+            }
+            if (defer_entries_count >= defer_entries.len) return error.CompileError;
+            defer_entries[defer_entries_count] = DeferEntry{ .stmt_start = p.idx };
+            defer_entries_count += 1;
+            // Do not compile the deferred statement now — it is compiled
+            // again (emitted) when its scope exits or a return unwinds it.
+            skipDeferBody(p);
         },
         else => {
             if (p.peek() == .ident and std.mem.eql(u8, p.currentToken().text, "_") and p.idx + 1 < p.tokens.len and p.tokens[p.idx + 1].kind == .equal) {
@@ -2233,6 +2476,9 @@ pub fn compile(src: []const u8) !usize {
     code_len = 0;
     functions_count = 0;
     call_patches_count = 0;
+    fn_addr_patches_count = 0;
+    defer_entries_count = 0;
+    defer_scope_depth = 0;
     locals_count = 0;
     frame_size = 0;
     structs_count = 0;
@@ -2249,8 +2495,7 @@ pub fn compile(src: []const u8) !usize {
             const name_tok = try p1.expect(.ident);
             _ = try p1.expect(.l_paren);
             const param_count = countParams(tokens, p1.idx);
-            while (p1.peek() != .r_paren and p1.peek() != .eof) _ = p1.advance();
-            _ = try p1.expect(.r_paren);
+            skipToDeclCloseParen(&p1);
             _ = try parseType(&p1); // return type
             _ = try p1.expect(.l_brace);
             var brace_depth: usize = 1;
@@ -2366,6 +2611,7 @@ pub fn compile(src: []const u8) !usize {
                     .ptr_elem_size = pt.ptr_elem_size,
                     .ptr_is_struct = pt.ptr_is_struct,
                     .ptr_struct_idx = pt.ptr_struct_idx,
+                    .is_fnptr = pt.is_fnptr,
                     .is_struct = pt.is_struct,
                     .struct_idx = pt.struct_idx,
                     .is_array = pt.is_array,
@@ -2385,6 +2631,7 @@ pub fn compile(src: []const u8) !usize {
                         .ptr_elem_size = next_pt.ptr_elem_size,
                         .ptr_is_struct = next_pt.ptr_is_struct,
                         .ptr_struct_idx = next_pt.ptr_struct_idx,
+                        .is_fnptr = next_pt.is_fnptr,
                         .is_struct = next_pt.is_struct,
                         .struct_idx = next_pt.struct_idx,
                         .is_array = next_pt.is_array,
@@ -2412,8 +2659,16 @@ pub fn compile(src: []const u8) !usize {
                 emit(enc_str(19, @intCast(i), @intCast(i)));
             }
 
+            try pushDeferScope();
             while (p2.peek() != .r_brace and p2.peek() != .eof) try compileStatement(&p2);
             _ = try p2.expect(.r_brace);
+
+            // Z2b: function-scope defers run on the fallthrough exit (in
+            // reverse registration order) before the epilogue. Return
+            // statements already emitted them inline, so each exit path runs
+            // them exactly once.
+            try emitScopeDefers(&p2, defer_scope_depth - 1);
+            popDeferScope();
 
             // Function epilogue
             emit(enc_add_imm(19, 31, 0));
@@ -2438,6 +2693,15 @@ pub fn compile(src: []const u8) !usize {
         if (target_addr == 0) return error.CompileError;
         const rel = @as(i32, @intCast(target_addr)) - @as(i32, @intCast(patch.caller_pc));
         std.mem.writeInt(u32, code[patch.caller_pc..][0..4], enc_bl(rel), .little);
+    }
+
+    // Resolve &fn address patches (Z2b): each is a PC-relative ADR whose
+    // target function's buffer address is known now that every body compiled.
+    for (fn_addr_patches[0..fn_addr_patches_count]) |patch| {
+        const target_addr = functions[patch.func_idx].address;
+        if (target_addr == 0) return error.CompileError;
+        const rel_bytes = @as(i32, @intCast(target_addr)) - @as(i32, @intCast(patch.code_pc));
+        std.mem.writeInt(u32, code[patch.code_pc..][0..4], enc_adr(0, rel_bytes), .little);
     }
 
     // Resolve string ADR patches
@@ -3005,6 +3269,97 @@ test "zc: Z1e tokenizer handles for, switch, .., ..., =>" {
     try testing.expectEqual(TokenKind.equal_greater, t.next().kind);
     try testing.expectEqual(TokenKind.number, t.next().kind);
     try testing.expectEqual(TokenKind.r_brace, t.next().kind);
+}
+
+test "zc: Z2b tokenizer handles the defer keyword and fn-pointer type tokens" {
+    const src = "defer *const fn(u64, u64) u64";
+    var t = Tokenizer{ .src = src };
+    try testing.expectEqual(TokenKind.keyword_defer, t.next().kind);
+    try testing.expectEqual(TokenKind.star, t.next().kind);
+    try testing.expectEqual(TokenKind.keyword_const, t.next().kind);
+    try testing.expectEqual(TokenKind.keyword_fn, t.next().kind);
+    try testing.expectEqual(TokenKind.l_paren, t.next().kind);
+    try testing.expectEqual(TokenKind.ident, t.next().kind);
+    try testing.expectEqual(TokenKind.comma, t.next().kind);
+    try testing.expectEqual(TokenKind.ident, t.next().kind);
+    try testing.expectEqual(TokenKind.r_paren, t.next().kind);
+    try testing.expectEqual(TokenKind.ident, t.next().kind);
+}
+
+test "zc: Z2b function-scope defers compile and run on the return path" {
+    const src =
+        \\const zc = @import("zc");
+        \\fn done() u64 {
+        \\    defer zc.print("cleanup-a\n");
+        \\    defer zc.print("cleanup-b\n");
+        \\    return 7;
+        \\}
+        \\pub fn main() void {
+        \\    const r: u64 = done();
+        \\    if (r == 7) {
+        \\        zc.exit(72);
+        \\    }
+        \\    zc.exit(1);
+        \\}
+    ;
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
+}
+
+test "zc: Z2b if/while/for/switch scope defers compile" {
+    const src =
+        \\const zc = @import("zc");
+        \\pub fn main() void {
+        \\    if (1 == 1) {
+        \\        defer zc.print("if-body\n");
+        \\    } else {
+        \\        defer zc.print("else-body\n");
+        \\    }
+        \\    var i: u64 = 0;
+        \\    while (i < 2) {
+        \\        defer zc.print("iter\n");
+        \\        i = i + 1;
+        \\    }
+        \\    for (0..2) |j| {
+        \\        defer zc.print("for-iter\n");
+        \\        _ = j;
+        \\    }
+        \\    switch (i) {
+        \\        2 => {
+        \\            defer zc.print("prong\n");
+        \\        },
+        \\        else => {
+        \\            defer zc.print("other\n");
+        \\        },
+        \\    }
+        \\    zc.exit(72);
+        \\}
+    ;
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
+}
+
+test "zc: Z2b fn-pointer types, &fn, and indirect calls compile" {
+    const src =
+        \\const zc = @import("zc");
+        \\fn add(a: u64, b: u64) u64 {
+        \\    return a + b;
+        \\}
+        \\fn run_op(f: *const fn(u64, u64) u64, x: u64, y: u64) u64 {
+        \\    return f(x, y);
+        \\}
+        \\pub fn main() void {
+        \\    const fp: *const fn(u64, u64) u64 = &add;
+        \\    if (run_op(fp, 40, 2) == 42) {
+        \\        if (fp(6, 7) == 13) {
+        \\            zc.exit(72);
+        \\        }
+        \\    }
+        \\    zc.exit(1);
+        \\}
+    ;
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
 }
 
 test "zc: Z1f tokenizer handles enum keyword, tag type, and members" {
