@@ -1,20 +1,24 @@
 #!/usr/bin/env bash
 #
-# verify-zc-corpus.sh -- M20 Z4a (issue #760): the corpus-parity gate.
-# Every fixture under tests/zc-corpus/ (plus the stdz library modules it
-# compiles with, user/src/lib/stdz/*.zig) must compile on BOTH sides:
+# verify-zc-corpus.sh -- M20 Z4a + Z4b (issues #760 + #761): the corpus
+# dual-parity gate. Every fixture under tests/zc-corpus/ (plus the stdz
+# library modules it compiles with, user/src/lib/stdz/*.zig) must compile on
+# BOTH sides:
 #
-#   host  : `zig build-obj -target aarch64-freestanding` against the real
-#           user/src/lib/zc.zig shim (parse + type-check only — the honest
-#           dialect is valid Zig 0.16, so this is the conformance check)
+#   host  : built with HOST zig 0.16 by the Z4b target recipe
+#           (tools/build-zc-host.sh: `zig build-exe` against the real
+#           user/src/lib/zc.zig shim, -T tools/zc-host-link.ld, full
+#           semantic analysis of every fixture body, loader-contract
+#           check) into artifacts/zc-host-<case>.elf
 #   guest : ZC.BIN compiles the same source(s) in-guest via `strace exec
 #           ZC.BIN <srcs...> <out.elf>` and the loader runs the ELF
 #
 # with pinned behavior per case (exit status, ordered markers, printed
 # needles, and byte-exact + sha256 file round trips where the fixture does
-# file IO). The dialect boundary (what the corpus may use, what is a
-# documented non-goal) lives in docs/line-of-sight.md — this gate is the
-# mechanical half of the contract.
+# file IO). Z4b adds the dual-RUN: each run case's host-built ELF gets its
+# own boot asserting the SAME pins, so behavior is byte-equivalent across
+# the two compilers. The dialect boundary and the host link contract live
+# in docs/line-of-sight.md — this gate is the mechanical half.
 #
 # Case model. One corpus "case" is one compile unit — a single fixture or a
 # multi-file group that the in-guest compiler sees as one flat namespace
@@ -57,18 +61,20 @@
 #
 # Usage:
 #   bash tools/verify-zc-corpus.sh            # full class-B: build + every case
-#   bash tools/verify-zc-corpus.sh --host     # class-A only: host compile checks
+#   bash tools/verify-zc-corpus.sh --host     # class-A only: host ELF builds
 #   CASES="z2b z3b" bash tools/verify-zc-corpus.sh          # subset (class-B)
 #   CASES="z2b" bash tools/verify-zc-corpus.sh --host z1a    # subset (--host)
 #   VIRELAI_GATE_SUFFIX=_alt bash tools/verify-zc-corpus.sh  # parallel instance
 #
 # Evidence: artifacts/m20-zc-corpus.txt (gate log), artifacts/zc-corpus-
-# report.txt (per-case verdicts), artifacts/zc-corpus-<case>-serial.log /
-# -run.txt / -out.txt per case.
+# report.txt (per-leg verdicts), artifacts/zc-corpus-<case>-serial.log /
+# -run.txt / -out.txt per case, artifacts/zc-host-<case>.elf (the host
+# images the dual-run executes in-guest).
 #
 # Wired into the zc verification path: verify-live-zc.sh delegates its
 # host compile-check phase here (--host), so the corpus case table is the
-# single source of truth for "every fixture is valid Zig 0.16".
+# single source of truth for "every fixture is valid Zig 0.16" — now
+# strict-valid, since the Z4b build analyzes every function body.
 
 set -euo pipefail
 
@@ -152,23 +158,28 @@ cases_selected() {
 
 # Validate the filter once at startup; SELECTED drives every phase.
 SELECTED="$(cases_selected)"
-[ -n "$SELECTED" ] || { echo "verify-zc-corpus: no cases selected" >&2; exit 1; }    # Host-side phase: every selected case's root (single fixture, or the group
-# concatenated in a fixed order) must parse + type-check under zig 0.16
-# against the zc shim; every source must stay under the in-guest 2048-B
-# single-read cap. Used standalone (--host), by verify-live-zc.sh, and as
-# the fast-fail front half of the full class-B run.
+[ -n "$SELECTED" ] || { echo "verify-zc-corpus: no cases selected" >&2; exit 1; }    # Host-side phase (Z4a + Z4b): every selected case's sources are built by
+# HOST zig 0.16 with the Z4b target recipe — tools/build-zc-host.sh, which
+# concatenates the sources with a `_start` epilogue, runs `zig build-exe`
+# (-fno-entry, custom -T script, 4 KiB pages, ReleaseSmall, stripped), and
+# validates the image against the kernel loader contract
+# (tools/check-zc-host-contract.py). This is strictly STRONGER than the
+# Z4a-era `zig build-obj` check: build-obj only lazily analyzes unreferenced
+# functions, so a fixture whose `main` body used e.g. `i += 1` or implicit
+# u64->u8 stores passed; build-exe with the epilogue forces FULL semantic
+# analysis of every fixture body. The emitted ELF (artifacts/zc-host-<case>.
+# elf) is ALSO the host side of the dual-run: the class-B host boot execs it
+# in-guest and asserts byte-equivalent behavior against the zc-compiled run.
+# Every source must stay under the in-guest 2048-B single-read cap.
+# Used standalone (--host), by verify-live-zc.sh, and as the fast-fail front
+# half of the full class-B run.
 host_check() {
-    # Global scratch dir (function-locals die on return; the EXIT trap must
-    # still see it). One host_check per process — direct in --host mode,
-    # inside a subshell in class-B mode — so a single global is safe.
-    HC_TMP="$(mktemp -d "${TMPDIR:-/tmp}/zc-corpus-host.XXXXXX")"
-    trap 'rm -rf "${HC_TMP:-}"' EXIT
     local npass=0 nfail=0 total=0
     for name in $(cases_selected); do
         total=$((total + 1))
         # size + existence guard (the in-guest file_read caps a read at
         # 2048 B; a larger source would silently truncate in-guest)
-        local ok=1
+        local ok=1 paths=""
         while read -r _ path; do
             if [ ! -f "$path" ]; then
                 echo "$name: MISSING source $path" >&2
@@ -177,26 +188,20 @@ host_check() {
                 echo "$name: source $path is >2048 B (in-guest single-read cap)" >&2
                 ok=0
             fi
+            paths="$paths $path"
         done < <(case_sources "$name")
         [ "$ok" = 1 ] || { nfail=$((nfail + 1)); continue; }
-        local root="$HC_TMP/$name.zig"
-        : > "$root"
-        while read -r _ path; do
-            cat "$path" >> "$root"
-            printf '\n' >> "$root"
-        done < <(case_sources "$name")
-        if zig build-obj -target aarch64-freestanding --dep zc \
-            -Mroot="$root" -Mzc=user/src/lib/zc.zig \
-            -femit-bin="$HC_TMP/$name.o" >/dev/null 2>"$HC_TMP/$name.err"; then
+        if bash tools/build-zc-host.sh -o "$(art zc-host-$name.elf)" $paths >/dev/null 2>"$(art zc-host-$name.err)"; then
             npass=$((npass + 1))
-            echo "host-compile $name: OK ($(case_sources "$name" | wc -l | tr -d ' ') source(s), $(wc -c < "$root" | tr -d ' ') B concatenated)"
+            echo "host-elf $name: OK — strict zig $(zig version) build + loader-contract check ($(case_sources "$name" | wc -l | tr -d ' ') source(s); $(wc -c < "$(art zc-host-$name.elf)" | tr -d ' ') B image)"
+            rm -f "$(art zc-host-$name.err)"
         else
             nfail=$((nfail + 1))
-            echo "host-compile $name: FAIL" >&2
-            sed 's/^/    /' "$HC_TMP/$name.err" >&2
+            echo "host-elf $name: FAIL" >&2
+            sed 's/^/    /' "$(art zc-host-$name.err)" >&2
         fi
     done
-    echo "verify-zc-corpus --host: $npass/$total roots compile under zig $(zig version)"
+    echo "verify-zc-corpus --host: $npass/$total cases build strict-valid host ELFs under zig $(zig version)"
     [ "$nfail" = 0 ]
 }
 
@@ -378,10 +383,102 @@ run_one() {
     [ "$pass" = 1 ]
 }
 
+# Z4b (issue #761) host-boot leg of the dual-run. The host-built ELF
+# (artifacts/zc-host-<name>.elf, produced by host_check via
+# tools/build-zc-host.sh) is exec'd in its own boot with the SAME behavior
+# pins as the zc-compiled run: exit status, needles, ordered markers, and
+# the byte-exact + sha256 file pins. Byte-equivalent behavior = the two
+# boots' assertion sets agree. No in-guest compile happens (the ELF was
+# built host-side); OUT.TXT is removed first so each run creates it fresh
+# (file_open CREATE|WRITE semantics are not truncate-on-open).
+run_one_host() {
+    local name="$1"
+    local kind exit_code ordered needles
+    IFS='|' read -r _ kind exit_code ordered needles <<< "$(case_def "$name")"
+    [ "$kind" = "run" ] || return 1
+    local outname
+    outname="$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')"
+    local hostelf="${outname}H.ELF"
+    local host_image="$(art zc-host-$name.elf)"
+    [ -f "$host_image" ] || { echo "$name-host: MISSING host ELF $host_image (host_check phase failed?)" >&2; return 1; }
+    local run_log="$(art zc-corpus-$name-host-run.txt)"
+    local serial_copy="$(art zc-corpus-$name-host-serial.log)"
+    local ser="$RUN_DIR/vm-serial-$name-host.log"
+    rm -f "$RUN_DIR/efi-vars.bin" "$ser" "$SHARE/OUT.TXT"
+    cp "$host_image" "$SHARE/$hostelf"
+
+    local script="$RUN_DIR/script-$name-host.txt"
+    printf 'ls\nexec %s\necho rx-%s-h-ok\n' "$hostelf" "$name" > "$script"
+    local exp_line="tasks user-exec exited status=$exit_code"
+
+    set +e
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
+        --serial "$ser" \
+        --script "$script" --script-after "$STATIC_EXIT_LINE" \
+        --script-expect "$exp_line" --timeout 90 > "$run_log" 2>&1
+    local rc=$?
+    set -e
+    [ -f "$ser" ] && cp "$ser" "$serial_copy" || true
+    local SER="$serial_copy"
+
+    local banner=0 needles_ok=0 markers_ok=0 ordered=0 loaded=0
+    local exit_ok=0 reaped=0 echo_ok=0 fatal=0 out_pin=0
+    if [ -f "$SER" ]; then
+        [ "$(grep -aFxc -- "VirelaiOS kernel has seized control." "$SER" || true)" = 1 ] && banner=1
+        [ "$(grep -aFc -- "exec: loaded $hostelf size=" "$SER" || true)" = 1 ] && loaded=1
+        [ "$(grep -aFxc -- "$exp_line" "$SER" || true)" -ge 1 ] && exit_ok=1
+        [ "$(grep -aFc -- "$REAP_LINE" "$SER" || true)" -ge 1 ] && reaped=1
+        [ "$(grep -aFxc -- "rx-$name-h-ok" "$SER" || true)" = 1 ] && echo_ok=1
+        local want=0 got=0 n=""
+        for n in $(echo "$needles" | tr '|' ' '); do
+            [ -z "$n" ] && continue
+            want=$((want + 1))
+            [ "$(grep -aFc -- "$n" "$SER" || true)" -ge 1 ] && got=$((got + 1))
+        done
+        [ "$want" = "$got" ] && needles_ok=1
+        local nwant=0 m=""
+        for m in $ordered; do nwant=$((nwant + 1)); done
+        if [ "$nwant" -ge 1 ]; then
+            local present=0
+            for m in $ordered; do
+                [ "$(grep -aFc -- "$m" "$SER" || true)" -ge 1 ] && present=$((present + 1))
+            done
+            [ "$present" = "$nwant" ] && markers_ok=1
+            markers_ordered "$SER" $ordered && ordered=1
+        else
+            markers_ok=1; ordered=1
+        fi
+        grep -qF -- "[EXC] parking:" "$SER" && fatal=1 || true
+    fi
+
+    # File pin: the HOST run must produce the same byte-exact output as the
+    # zc run (both equal the host-seeded expectation).
+    local exp_sha="-" got_sha="-"
+    case "$name" in
+        z2a) exp_sha="$(shasum -a 256 "$SHARE/DATA.TXT" | cut -d' ' -f1)" ;;
+        z3b) exp_sha="$(shasum -a 256 "$SHARE/REPORT.EXP" | cut -d' ' -f1)" ;;
+    esac
+    if [ "$exp_sha" != "-" ]; then
+        if [ -f "$SHARE/OUT.TXT" ]; then
+            cp -f "$SHARE/OUT.TXT" "$(art zc-corpus-$name-host-out.txt)"
+            got_sha="$(shasum -a 256 "$SHARE/OUT.TXT" | cut -d' ' -f1)"
+            [ "$got_sha" = "$exp_sha" ] && out_pin=1
+        fi
+    else
+        out_pin=1
+    fi
+
+    local pass=0
+    [ "$rc" = 0 ] && [ "$banner" = 1 ] && [ "$loaded" = 1 ] && [ "$exit_ok" = 1 ] && \
+        [ "$reaped" = 1 ] && [ "$echo_ok" = 1 ] && [ "$needles_ok" = 1 ] && \
+        [ "$markers_ok" = 1 ] && [ "$ordered" = 1 ] && [ "$out_pin" = 1 ] && [ "$fatal" = 0 ] && pass=1
+
+    echo "$name-host: runner-rc=$rc banner=$banner loaded=$loaded exit=$exit_ok reaped=$reaped echo=$echo_ok needles=$needles_ok markers=$markers_ok ordered=$ordered out-sha256=$got_sha (exp $exp_sha) out_pin=$out_pin fatal=$fatal -> $([ "$pass" = 1 ] && echo PASS || echo FAIL)" | tee -a "$REPORT"
+    [ "$pass" = 1 ]
+}
+
 # --- main --------------------------------------------------------------------
 if [ "$HOST_ONLY" = 1 ]; then
-    # direct call: host_check installs its own EXIT trap for its scratch dir;
-    # exit immediately so that trap fires as the script's own cleanup.
     host_check
     exit $?
 fi
@@ -393,17 +490,18 @@ trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
 REPORT="$(art zc-corpus-report.txt)"
 
-echo "=== verify-zc-corpus: M20 Z4a — corpus parity (host zig 0.16 + in-guest zc), cases: $(echo $SELECTED | tr '\n' ' ') ==="
+echo "=== verify-zc-corpus: M20 Z4a/Z4b — corpus dual parity (host zig 0.16 build + run vs in-guest zc), cases: $(echo $SELECTED | tr '\n' ' ') ==="
 zig version
 swift --version 2>&1 | head -1
 sw_vers
 echo "revision: $(git rev-parse HEAD 2>/dev/null || echo unknown) branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown) dirty=$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
 
 # Host side first (fast fail before the heavy builds/boots): every selected
-# case's root must parse + type-check under zig 0.16. Subshell isolates
-# host_check's scratch-dir EXIT trap from the gate_end trap below.
-if ! ( host_check ); then
-    echo "verify-zc-corpus: host compile phase FAILED — aborting before class-B" >&2
+# case builds a strict-valid host ELF (full semantic analysis + loader
+# contract) into artifacts/zc-host-<case>.elf. Those ELFs are the host half
+# of the dual-run — the class-B host boot execs each one in-guest.
+if ! host_check; then
+    echo "verify-zc-corpus: host build phase FAILED — aborting before class-B" >&2
     exit 1
 fi
 
@@ -420,7 +518,7 @@ echo "run dir: $RUN_DIR (share seeded with ZC.BIN only)"
 
 : > "$REPORT"
 {
-    echo "VIRELAIOS zc corpus-parity gate (M20 Z4a, issue #760)"
+    echo "VIRELAIOS zc corpus dual-parity gate (M20 Z4a #760 + Z4b #761)"
     echo "revision: $(git rev-parse HEAD 2>/dev/null || echo unknown)"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     echo
@@ -428,25 +526,32 @@ echo "run dir: $RUN_DIR (share seeded with ZC.BIN only)"
 
 nfail=0
 ntotal=0
+ndual=0
 for name in $SELECTED; do
     ntotal=$((ntotal + 1))
     echo
     echo "=== corpus case $name ($ntotal) ==="
     seed_case "$name" "$SHARE"
-    if run_one "$name"; then
-        :
-    else
+    if ! run_one "$name"; then
         nfail=$((nfail + 1))
+    fi
+    # Z4b dual-run: the host-built ELF gets its own boot with the same
+    # behavior pins (run cases only; vl6's run parity stays display-backed).
+    if [ "$(case_def "$name" | cut -d'|' -f2)" = "run" ]; then
+        ndual=$((ndual + 1))
+        if ! run_one_host "$name"; then
+            nfail=$((nfail + 1))
+        fi
     fi
 done
 
 echo
 echo "=== result ==="
 if [ "$nfail" = 0 ]; then
-    echo "verify-zc-corpus: PASS — all $ntotal corpus cases compiled with host zig $(zig version) AND in-guest ZC.BIN with pinned behavior (exit statuses, ordered markers, byte-exact + sha256 file pins; vl6 compile-only, run parity display-backed). See $REPORT."
-    echo "PASS: $ntotal/$ntotal" >> "$REPORT"
+    echo "verify-zc-corpus: PASS — every corpus case built strict-valid with host zig $(zig version) (host link contract, tools/build-zc-host.sh) AND compiled+run in-guest with ZC.BIN, with $ndual dual-run cases asserting byte-equivalent behavior (exit statuses, ordered markers, needles, byte-exact + sha256 file pins) between the host zig ELF and the zc ELF32; vl6 compile-only, run parity display-backed. See $REPORT."
+    echo "PASS: $ntotal/$ntotal cases, $ndual dual-run" >> "$REPORT"
     exit 0
 fi
-echo "verify-zc-corpus: FAILED — $nfail/$ntotal case(s) failed; see $REPORT and per-case logs."
+echo "verify-zc-corpus: FAILED — $nfail/$ntotal leg(s) failed; see $REPORT and per-case logs."
 echo "FAIL: $((ntotal - nfail))/$ntotal" >> "$REPORT"
 exit 1

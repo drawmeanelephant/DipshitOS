@@ -128,7 +128,7 @@ if ! bash tools/verify-zc-corpus.sh --host; then
     exit 1
 fi
 
-echo "host compile check: ok — every corpus case valid Zig 0.16 (see verify-zc-corpus --host above)"
+echo "host compile check: ok — every corpus case builds a strict-valid host ELF under zig $(zig version) (see verify-zc-corpus --host above)"
 
 run_one() {
     local tag="$1"

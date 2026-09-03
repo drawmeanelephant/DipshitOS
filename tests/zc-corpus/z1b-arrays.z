@@ -4,7 +4,7 @@ pub fn main() void {
     var buf: [8]u8 = undefined;
     var i: u64 = 0;
     while (i < 8) {
-        buf[i] = 65 + i;
+        buf[i] = @intCast(65 + i);
         i = i + 1;
     }
     zc.print_array(buf);

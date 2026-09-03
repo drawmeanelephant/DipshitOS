@@ -14,7 +14,7 @@ fn swap(a: *u64, b: *u64) void {
 fn fill_buf(buf: [*]u8, len: u64) void {
     var i: u64 = 0;
     while (i < len) {
-        buf[i] = 65 + i;
+        buf[i] = @intCast(65 + i);
         i = i + 1;
     }
 }
