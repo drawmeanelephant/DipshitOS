@@ -5,6 +5,17 @@
 //! Supports Grayscale (type 0), Truecolor RGB (type 2), and Truecolor+Alpha RGBA (type 6).
 //! Reconstructs scanlines across all 5 PNG filter types (None, Sub, Up, Average, Paeth)
 //! and decodes directly into 32-bpp B8G8R8X8_UNORM format.
+//!
+//! IMG5 follow-on (claim 7317): the decoder is **workspace-driven** — IDAT
+//! chunks are walked, CRC-checked, and streamed one at a time into a
+//! caller-provided staging buffer (`decode_with_buffers`); the decompressed
+//! scanline stream goes into a second caller-provided buffer. `scan` sizes
+//! both workspaces exactly from the file (no fixed 128 KiB IDAT / 256 KiB
+//! decompression BSS landmines — that static pair pushed every binary that
+//! linked the PNG path past the kernel's DSK3 256 KiB `data_mem` exec cap).
+//! The convenience `decode()` keeps small default workspaces for
+//! fixture/small-image use; larger images call `scan` then
+//! `decode_with_buffers` with caller memory (e.g. an M29 mmap region).
 
 const std = @import("std");
 const crc32 = @import("crc32.zig");
@@ -38,14 +49,41 @@ pub const PngHeader = struct {
 
 pub const PNG_SIGNATURE = [_]u8{ 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
 
-/// Maximum row bytes supported by the static row buffers (e.g. up to 1024 pixels * 4 = 4096 bytes).
+/// Maximum row bytes the default row buffers support (e.g. up to 1024
+/// pixels * 4 = 4096 bytes). `decode_with_buffers` accepts larger caller
+/// row buffers; the default `decode()` is bounded by this.
 pub const MAX_ROW_BYTES: usize = 4096;
-/// Default BSS workspace for IDAT assembly and decompression.
-pub const DECOMPRESS_BUF_SIZE: usize = 256 * 1024;
-var bss_idat_buf: [128 * 1024]u8 = undefined;
-var bss_decomp_buf: [DECOMPRESS_BUF_SIZE]u8 = undefined;
+/// Convenience-workspace caps for the default `decode()` (small images).
+/// Sizing workspaces from `scan` instead removes every cap for big images.
+pub const DEFAULT_IDAT_CAP: usize = 32 * 1024;
+pub const DEFAULT_DECOMP_CAP: usize = 96 * 1024;
+var bss_idat_buf: [DEFAULT_IDAT_CAP]u8 = undefined;
+var bss_decomp_buf: [DEFAULT_DECOMP_CAP]u8 = undefined;
 var bss_prev_row: [MAX_ROW_BYTES]u8 = undefined;
 var bss_cur_row: [MAX_ROW_BYTES]u8 = undefined;
+
+/// Result of `scan`: everything a caller needs to size exact IDAT + scanline
+/// workspaces before calling `decode_with_buffers`, with no fixed caps.
+pub const ScanInfo = struct {
+    width: u32,
+    height: u32,
+    bit_depth: u8,
+    color_type: u8,
+    /// Total bytes of all IDAT chunk payloads (the concatenated zlib stream).
+    idat_total: usize,
+    /// Exact decompressed scanline size: height * (row_bytes + 1 filter byte).
+    decomp_total: usize,
+
+    pub fn row_bytes(self: ScanInfo) usize {
+        const bpp: usize = switch (self.color_type) {
+            0 => 1,
+            2 => 3,
+            6 => 4,
+            else => 0,
+        };
+        return @as(usize, self.width) * bpp;
+    }
+};
 
 inline fn paeth_predictor(a: u8, b: u8, c: u8) u8 {
     const p: i32 = @as(i32, a) + @as(i32, b) - @as(i32, c);
@@ -57,6 +95,9 @@ inline fn paeth_predictor(a: u8, b: u8, c: u8) u8 {
     return c;
 }
 
+/// Convenience decode with the default (bounded) workspaces — suitable for
+/// small images and host tests. `scan` + `decode_with_buffers` covers any
+/// size with caller-provided memory.
 pub fn decode(bytes: []const u8, out_pixels: []align(1) u32) PngError!PngHeader {
     return decode_with_buffers(
         bytes,
@@ -66,6 +107,84 @@ pub fn decode(bytes: []const u8, out_pixels: []align(1) u32) PngError!PngHeader 
         &bss_prev_row,
         &bss_cur_row,
     );
+}
+
+/// Validate the signature and walk every chunk (per-chunk CRC included)
+/// without buffering: returns the IHDR geometry plus the exact IDAT and
+/// decompressed-scanline sizes a decode workspace needs. Errors mirror
+/// `decode_with_buffers` (structure/CRC/content support), so a caller can
+/// scan first and then decode the same bytes with an exactly-sized
+/// workspace.
+pub fn scan(bytes: []const u8) PngError!ScanInfo {
+    if (bytes.len < 8) return error.TruncatedInput;
+    if (!std.mem.eql(u8, bytes[0..8], &PNG_SIGNATURE)) return error.HeaderMagic;
+
+    var in_pos: usize = 8;
+    var header_opt: ?PngHeader = null;
+    var idat_total: usize = 0;
+
+    while (in_pos + 8 <= bytes.len) {
+        const chunk_len = std.mem.readInt(u32, bytes[in_pos..][0..4], .big);
+        const chunk_type = bytes[in_pos + 4 .. in_pos + 8];
+        in_pos += 8;
+
+        if (in_pos + chunk_len + 4 > bytes.len) return error.TruncatedInput;
+        const chunk_data = bytes[in_pos .. in_pos + chunk_len];
+        in_pos += chunk_len;
+
+        const expected_crc = std.mem.readInt(u32, bytes[in_pos..][0..4], .big);
+        in_pos += 4;
+
+        var running_crc = crc32.update(0xFFFFFFFF, chunk_type);
+        running_crc = crc32.update(running_crc, chunk_data);
+        if ((running_crc ^ 0xFFFFFFFF) != expected_crc) return error.InvalidCrc;
+
+        if (std.mem.eql(u8, chunk_type, "IHDR")) {
+            if (chunk_len != 13) return error.CorruptStream;
+            const w = std.mem.readInt(u32, chunk_data[0..4], .big);
+            const h = std.mem.readInt(u32, chunk_data[4..8], .big);
+            const bit_depth = chunk_data[8];
+            const color_type = chunk_data[9];
+            const comp = chunk_data[10];
+            const filter = chunk_data[11];
+            const interlace = chunk_data[12];
+
+            if (bit_depth != 8) return error.UnsupportedBitDepth;
+            if (color_type != 0 and color_type != 2 and color_type != 6) return error.UnsupportedColorType;
+            if (interlace != 0) return error.UnsupportedInterlace;
+            if (comp != 0 or filter != 0) return error.CorruptStream;
+
+            header_opt = .{
+                .width = w,
+                .height = h,
+                .bit_depth = bit_depth,
+                .color_type = color_type,
+                .compression_method = comp,
+                .filter_method = filter,
+                .interlace_method = interlace,
+            };
+        } else if (std.mem.eql(u8, chunk_type, "IDAT")) {
+            idat_total += chunk_len;
+        } else if (std.mem.eql(u8, chunk_type, "IEND")) {
+            break;
+        }
+    }
+
+    const header = header_opt orelse return error.CorruptStream;
+    const bpp: usize = switch (header.color_type) {
+        0 => 1,
+        2 => 3,
+        6 => 4,
+        else => return error.UnsupportedColorType,
+    };
+    return .{
+        .width = header.width,
+        .height = header.height,
+        .bit_depth = header.bit_depth,
+        .color_type = header.color_type,
+        .idat_total = idat_total,
+        .decomp_total = @as(usize, header.height) * (@as(usize, header.width) * bpp + 1),
+    };
 }
 
 pub fn decode_with_buffers(
@@ -274,6 +393,88 @@ test "png: decode non-square 12x4 fixture" {
 
     // Pixel (0, 0): r=0, g=0, b=100 -> 0xFF000064
     try std.testing.expectEqual(@as(u32, 0xFF000064), pixels[0]);
+}
+
+test "png: scan sizes the multi-chunk viewer fixture exactly" {
+    const fixture = @embedFile("fixtures/png/viewer_160x120.png");
+    const info = try scan(fixture);
+    try std.testing.expectEqual(@as(u32, 160), info.width);
+    try std.testing.expectEqual(@as(u32, 120), info.height);
+    try std.testing.expectEqual(@as(u8, 2), info.color_type); // RGB
+    // 2 IDAT chunks, 351 compressed bytes total; decompressed = 120 rows *
+    // (160*3 + 1 filter byte) = 57720.
+    try std.testing.expectEqual(@as(usize, 351), info.idat_total);
+    try std.testing.expectEqual(@as(usize, 57720), info.decomp_total);
+}
+
+test "png: workspace decode of the split-IDAT viewer fixture" {
+    const fixture = @embedFile("fixtures/png/viewer_160x120.png");
+    const info = try scan(fixture);
+
+    var pixels: [160 * 120]u32 = undefined;
+    var idat: [351]u8 = undefined;
+    var decomp: [57720]u8 = undefined;
+    var prev_row: [160 * 3]u8 = undefined;
+    var cur_row: [160 * 3]u8 = undefined;
+
+    const header = try decode_with_buffers(
+        fixture,
+        &pixels,
+        &idat,
+        &decomp,
+        &prev_row,
+        &cur_row,
+    );
+    try std.testing.expectEqual(info.width, header.width);
+    try std.testing.expectEqual(info.height, header.height);
+
+    // Vertical split: x<80 amber (0xFFE87A3A), x>=80 gray (0xFF808080).
+    try std.testing.expectEqual(@as(u32, 0xFFE87A3A), pixels[0]);
+    try std.testing.expectEqual(@as(u32, 0xFFE87A3A), pixels[79]); // x=79 amber
+    try std.testing.expectEqual(@as(u32, 0xFF808080), pixels[80]); // x=80 gray
+    try std.testing.expectEqual(@as(u32, 0xFFE87A3A), pixels[119 * 160]); // row 119, col 0 = amber
+}
+
+test "png: scan rejects bad signature and bad crc" {
+    try std.testing.expectError(error.HeaderMagic, scan("NOT_A_PNG_FILE"));
+
+    const fixture = @embedFile("fixtures/png/solid_rgb_4x4.png");
+    var corrupt: [fixture.len]u8 = undefined;
+    @memcpy(&corrupt, fixture);
+    corrupt[16] ^= 0xFF; // Corrupt one byte inside IHDR data
+    try std.testing.expectError(error.InvalidCrc, scan(&corrupt));
+}
+
+test "png: workspace decode covers images past the convenience caps" {
+    // 400x200 RGBA: 320200 decompressed scanline bytes > DEFAULT_DECOMP_CAP
+    // (96 KiB) with a 1154-byte IDAT. The convenience decode() reports
+    // BufferTooSmall; the scan-sized workspace path succeeds.
+    const fixture = @embedFile("fixtures/png/big_rgba_400x200.png");
+    const info = try scan(fixture);
+    try std.testing.expectEqual(@as(usize, 320200), info.decomp_total);
+    try std.testing.expect(info.decomp_total > DEFAULT_DECOMP_CAP);
+    try std.testing.expect(info.idat_total <= DEFAULT_IDAT_CAP);
+
+    const pixels = try std.testing.allocator.alloc(u32, 400 * 200);
+    defer std.testing.allocator.free(pixels);
+    const idat = try std.testing.allocator.alloc(u8, info.idat_total);
+    defer std.testing.allocator.free(idat);
+    const decomp = try std.testing.allocator.alloc(u8, info.decomp_total);
+    defer std.testing.allocator.free(decomp);
+    var prev_row: [400 * 4]u8 = undefined;
+    var cur_row: [400 * 4]u8 = undefined;
+
+    const header = try decode_with_buffers(fixture, pixels, idat, decomp, &prev_row, &cur_row);
+    try std.testing.expectEqual(@as(u32, 400), header.width);
+    try std.testing.expectEqual(@as(u32, 200), header.height);
+
+    // RGBA color words: (a<<24)|(r<<16)|(g<<8)|b. Row 0 alpha 255: cyan
+    // left (0,255,255), magenta right (255,0,255). Rows >= 100 alpha 128.
+    try std.testing.expectEqual(@as(u32, 0xFF00FFFF), pixels[0]);
+    try std.testing.expectEqual(@as(u32, 0xFF00FFFF), pixels[199]); // x=199 cyan
+    try std.testing.expectEqual(@as(u32, 0xFFFF00FF), pixels[200]); // x=200 magenta
+    try std.testing.expectEqual(@as(u32, 0x8000FFFF), pixels[100 * 400]);
+    try std.testing.expectEqual(@as(u32, 0x80FF00FF), pixels[199 * 400 + 399]);
 }
 
 test "png: decode grayscale 8x8 fixture" {
