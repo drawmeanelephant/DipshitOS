@@ -26,8 +26,24 @@ var log_buf: [log_lines * 128]u8 = undefined;
 var log_lens: [log_lines]u16 = undefined;
 var log_head: usize = 0;
 var log_count: usize = 0;
+var cursor_kind: ui.CursorKind = .arrow; // M37 DQ4: per-region cursor state
+
+/// M37 DQ4: ibeam over the prompt line (text entry), arrow elsewhere.
+/// Emits `devcons: cursor=<name>` on change (serial-observable).
+fn update_cursor(x: u32, y: u32) void {
+    _ = x;
+    const kind = ui.cursor_for_region(false, false, y >= prompt_y);
+    if (kind != cursor_kind) {
+        cursor_kind = kind;
+        var buf: [48]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "devcons: cursor={s}\n", .{kind.name()}) catch return;
+        ui.write_console(msg);
+    }
+}
 
 pub export fn _start() callconv(.c) noreturn {
+    // M37 DQ4: follow the desktop theme first.
+    _ = ui.sync_theme_from_host();
     const win_res = ui.win_open(win_x, win_y, win_w, win_h);
     if (win_res < 0) {
         ui.write_console("devcons: failed to open window\n");
@@ -40,6 +56,7 @@ pub export fn _start() callconv(.c) noreturn {
     log_append("Type commands at the prompt below.");
     log_append("---");
     refresh(win);
+    ui.emit_tokens_marker("devcons");
     ui.write_console("devcons: ready\n");
 
     var ev: ui.Event = undefined;
@@ -52,6 +69,10 @@ pub export fn _start() callconv(.c) noreturn {
             ui.WIN_CLOSE => {
                 ui.win_close(win);
                 ui.exit_process(0);
+            },
+            ui.MOUSE_MOVE => {
+                // M37 DQ4: cursor tracking only (no click actions).
+                update_cursor(ev.arg0, ev.arg1);
             },
             ui.KEY_DOWN => {
                 // ADR 0009 event convention (as EDIT.BIN consumes it): arg0 is
@@ -124,13 +145,13 @@ fn execute_command(cmd: []const u8) void {
 
 fn refresh(win: u32) void {
     // Background
-    ui.win_fill(win, 0, 0, win_w, win_h, ui.COLOR_BG);
+    ui.win_fill(win, 0, 0, win_w, win_h, ui.theme_bg());
     // Title bar
-    ui.win_fill(win, 0, 0, win_w, 6, ui.COLOR_SURFACE);
-    ui.draw_text(win, "Developer Console", 8, 8, ui.COLOR_TEXT_MUTED);
+    ui.win_fill(win, 0, 0, win_w, 6, ui.theme_surface());
+    ui.draw_text(win, "Developer Console", ui.pad_md, 8, ui.theme_text_muted());
 
-    // Log pane (top section)
-    ui.win_fill(win, 0, 18, win_w, prompt_y - 18, 0x1a1a2e);
+    // Log pane (top section) — M37 DQ4: unified surface (was 0x1a1a2e).
+    ui.win_fill(win, 0, 18, win_w, prompt_y - 18, ui.theme_surface());
     var y: u32 = 22;
     var i: usize = 0;
     while (i < log_count and i < log_lines) : (i += 1) {
@@ -138,20 +159,20 @@ fn refresh(win: u32) void {
         const len = log_lens[idx];
         if (len > 0) {
             const start = idx * 128;
-            ui.draw_text(win, log_buf[start..][0..len], 8, y, ui.COLOR_TEXT_PRIMARY);
+            ui.draw_text(win, log_buf[start..][0..len], ui.pad_md, y, ui.theme_text_primary());
         }
         y += log_line_h;
         if (y + log_line_h > prompt_y - 4) break;
     }
 
     // Separator
-    ui.win_fill(win, 0, prompt_y - 2, win_w, 1, ui.COLOR_TEXT_MUTED);
+    ui.win_fill(win, 0, prompt_y - 2, win_w, ui.border_w, ui.theme_text_muted());
 
     // Prompt area
-    ui.draw_text(win, "$ ", 4, prompt_y + 4, ui.COLOR_SUCCESS);
+    ui.draw_text(win, "$ ", ui.pad_sm, prompt_y + 4, ui.theme_success());
 
     // Show a hint about serial output
-    ui.draw_text(win, "(output on serial console)", 80, prompt_y + 4, ui.COLOR_TEXT_MUTED);
+    ui.draw_text(win, "(output on serial console)", 80, prompt_y + 4, ui.theme_text_muted());
 
     ui.win_present(win);
 }
