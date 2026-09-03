@@ -2,9 +2,9 @@
 //!
 //! A userland image viewer over the M36 raster engine (IMG1 `image.zig`,
 //! IMG4 toolkit blits): `exec VIEW.BIN <path>` loads a QOI or PNG from the
-//! host share, decodes with `image.decode()`, opens a window sized to the
-//! image aspect ratio (clamped to the kernel user back-buffer bounds), and
-//! provides pan & zoom:
+//! host share (magic-dispatched to lib/qoi.zig or lib/png.zig — see the
+//! import note), opens a window sized to the image aspect ratio (clamped to
+//! the kernel user back-buffer bounds), and provides pan & zoom:
 //!
 //!   - Keyboard: `+`/`=` zoom in, `-` zoom out, `0` resets 100%, arrow keys
 //!     pan when zoomed, `q`/Esc quits.
@@ -19,14 +19,17 @@
 
 const std = @import("std");
 const ui = @import("lib/ui.zig");
-// QOI-only by design: IMG1's image.decode() dispatch pulls in png.zig, whose
-// 128 KiB IDAT staging BSS (`bss_idat_buf`) pushes the DSK3 data_mem segment
-// past the kernel's 256 KiB exec cap — the kernel refused to load the binary
-// (observed live: `error: VIEW.BIN: image larger than the 0x40000-byte load
-// buffer`). The viewer imports qoi.zig directly, decoding into its own
-// mmap'd pixel buffer; PNG support lands with a stream-chunked IDAT path in
-// png.zig (a separate card).
+// Decode dispatch is by MAGIC (not extension): QOI via lib/qoi.zig, PNG via
+// lib/png.zig's stream-chunked workspace path (claim 7317) — `png.scan`
+// sizes exact IDAT + scanline workspaces from the file, and the viewer
+// backs them with M29 anonymous mmap regions. png.zig carries no giant
+// static staging (its original 128 KiB IDAT + 256 KiB decompression BSS
+// pushed this binary's DSK3 data_mem segment past the kernel's 256 KiB
+// exec cap — observed live), so this app's static data stays ~KiB-scale:
+// only the two 4 KiB PNG row buffers plus the QOI/file/pixel mmap
+// bookkeeping.
 const qoi = @import("lib/qoi.zig");
+const png = @import("lib/png.zig");
 
 const Event = ui.Event;
 const Rect = ui.Rect;
@@ -274,6 +277,15 @@ var st: State = .{};
 /// mmap'd storage (va captured at _start; empty until then).
 var file_bytes: []u8 = &.{};
 var pixel_buf: []align(1) u32 = &.{};
+
+// PNG stream-chunked workspace (claim 7317): the IDAT staging and the
+// decompressed-scanline buffers are mmap'd at the exact sizes `png.scan`
+// reports (a PNG is decoded once per exec, so a single map each suffices);
+// only the per-row filter buffers are static (4 KiB each, max row width).
+var png_idat: []u8 = &.{};
+var png_decomp: []u8 = &.{};
+var png_prev_row: [png.MAX_ROW_BYTES]u8 = [_]u8{0} ** png.MAX_ROW_BYTES;
+var png_cur_row: [png.MAX_ROW_BYTES]u8 = [_]u8{0} ** png.MAX_ROW_BYTES;
 
 // ---------------------------------------------------------------------------
 // Rendering
@@ -544,22 +556,94 @@ fn load(path: []const u8) void {
         return;
     }
 
-    const hdr = qoi.decode(file_bytes[0..total], pixel_buf) catch {
-        st.errored = true;
-        st.err = .decode_failed;
-        ui.write_console("view: decode err\n");
-        return;
-    };
+    const dims = decode_file(file_bytes[0..total]) orelse return;
     st.loaded = true;
     st.errored = false;
-    st.img_w = hdr.width;
-    st.img_h = hdr.height;
+    st.img_w = dims.width;
+    st.img_h = dims.height;
 
     var buf: [80]u8 = undefined;
     const line = std.fmt.bufPrint(&buf, "view: loaded {s} {d}x{d} {s} bytes={d}\n", .{
-        basename(path), hdr.width, hdr.height, st.fmt.tag(), total,
+        basename(path), dims.width, dims.height, st.fmt.tag(), total,
     }) catch "view: loaded\n";
     ui.write_console(line);
+}
+
+const ImageDims = struct { width: u32, height: u32 };
+
+fn decode_failed() void {
+    st.errored = true;
+    st.err = .decode_failed;
+    ui.write_console("view: decode err\n");
+}
+
+fn decode_too_large() void {
+    st.errored = true;
+    st.err = .too_large;
+    ui.write_console("view: too large\n");
+}
+
+/// Decode by sniffed magic: `qoif` -> QOI, the PNG signature -> the png.zig
+/// workspace path. Sets `st.fmt` from the magic (the marker/title show the
+/// real container, not the extension). On failure the error state is set and
+/// printed and null is returned.
+fn decode_file(bytes: []const u8) ?ImageDims {
+    if (bytes.len >= 4 and std.mem.eql(u8, bytes[0..4], "qoif")) {
+        st.fmt = .qoi;
+        const hdr = qoi.decode(bytes, pixel_buf) catch {
+            decode_failed();
+            return null;
+        };
+        return .{ .width = hdr.width, .height = hdr.height };
+    }
+    if (bytes.len >= 8 and std.mem.eql(u8, bytes[0..8], "\x89PNG\r\n\x1a\n")) {
+        st.fmt = .png;
+        return decode_png(bytes);
+    }
+    decode_failed();
+    return null;
+}
+
+/// PNG decode through png.zig's workspace path: scan for exact sizes, map
+/// the IDAT + scanline workspaces, decode straight into the mmap'd pixel
+/// buffer. Row buffers are the static 4 KiB pair; wider images error
+/// honestly (MAX_ROW_BYTES).
+fn decode_png(bytes: []const u8) ?ImageDims {
+    const info = png.scan(bytes) catch {
+        decode_failed();
+        return null;
+    };
+    const total_px = @as(usize, info.width) * info.height;
+    if (total_px == 0 or total_px > pixels_max) {
+        decode_too_large();
+        return null;
+    }
+    const row_bytes = info.row_bytes();
+    if (row_bytes == 0 or row_bytes > png.MAX_ROW_BYTES) {
+        decode_failed();
+        return null;
+    }
+    // The pixel-extent check above bounds decomp_total (<= px*4 + h), so
+    // these maps are small. Map once per exec (a PNG decodes once here).
+    if (png_idat.len == 0 and info.idat_total > 0) png_idat = map_region(info.idat_total);
+    if (png_decomp.len == 0 and info.decomp_total > 0) png_decomp = map_region(info.decomp_total);
+    if (png_idat.len < info.idat_total or png_decomp.len < info.decomp_total) {
+        decode_failed();
+        return null;
+    }
+
+    const hdr = png.decode_with_buffers(
+        bytes,
+        pixel_buf,
+        png_idat[0..info.idat_total],
+        png_decomp[0..info.decomp_total],
+        &png_prev_row,
+        &png_cur_row,
+    ) catch {
+        decode_failed();
+        return null;
+    };
+    return .{ .width = hdr.width, .height = hdr.height };
 }
 
 // ---------------------------------------------------------------------------

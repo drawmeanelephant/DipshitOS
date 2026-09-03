@@ -15,7 +15,7 @@
   docs/claims/7317-view-png.md, docs/logs/agent-buffy-img5-png.md
 - **Depends on:** PR #833 (VIEW.BIN on main, claim 4574)
 - **Heartbeat:** 2026-09-02
-- **Status:** 🔄 agent/buffy/img5-png
+- **Status:** ✅ agent/buffy/img5-png
 
 ## Notes
 

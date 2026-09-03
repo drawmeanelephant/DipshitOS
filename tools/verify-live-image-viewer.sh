@@ -3,13 +3,15 @@
 # verify-live-image-viewer.sh — M36 IMG5 class-B live gate (issue #826): the
 # VIEW.BIN image viewer on real VZ.
 #
-# Boots the kernel monitor (shell), seeds a QOI into the host share, and
-# launches VIEW.BIN with an argument path through the shell
-# (`exec VIEW.BIN /host/TEST.QOI` — the claim 4636 argv contract, the same
+# Boots the kernel monitor (shell), seeds both fixtures into the host
+# share, and launches VIEW.BIN with an argument path through the shell
+# (`exec VIEW.BIN /host/TEST.<ext>` — the claim 4636 argv contract, the same
 # direct-exec shape as verify-live-exec / verify-live-sexiburger-actions).
-# Asserts the viewer markers, the window-title push, and zoom/pan over the
-# headless virtio INPUT channel; the clean-quit contract is the app's own
-# `view: quit` marker plus the reaped `user-exec exited status=43` (also the
+# Boot 1 runs the QOI fixture; boot 2 runs the PNG fixture through the
+# png.zig scan + workspace decode path (claim 7317). Asserts the viewer
+# markers, the window-title push, and zoom/pan over the headless virtio
+# INPUT channel; the clean-quit contract is the app's own `view: quit`
+# marker plus the reaped `user-exec exited status=43` (also the
 # --script-expect line, so the VM keeps running until the reap lands).
 #
 set -euo pipefail
@@ -26,7 +28,11 @@ GATE_LOG="$(art live-image-viewer-gate.txt)"
 exec > >(tee "$GATE_LOG") 2>&1
 trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
-BOOTS="${BOOTS:-1}"
+BOOTS="${BOOTS:-2}"
+# Boot 1 exercises the QOI fixture, boot 2 the PNG fixture (same 160x120
+# two-tone content, so the window/zoom/pan geometry is identical); further
+# boots alternate. PNG runs the png.zig scan + workspace path (claim 7317).
+EXTS=(qoi png)
 REPORT="$(art live-image-viewer-report.txt)"
 
 echo "=== verify-live-image-viewer: M36 IMG5 VIEW.BIN on VZ ==="
@@ -49,14 +55,13 @@ gate_begin live-image-viewer
 gate_seed_share
 # IMG5: the viewer's test image rides the share (the M34 host file channel).
 cp tests/fixtures/qoi/viewer_160x120.qoi "$SHARE/TEST.QOI"
-echo "gate-run: seeded $SHARE/TEST.QOI"
+cp tests/fixtures/png/viewer_160x120.png "$SHARE/TEST.PNG"
+echo "gate-run: seeded $SHARE/TEST.QOI + $SHARE/TEST.PNG"
 
 echo "run dir: $RUN_DIR"
 
-SCRIPT="$RUN_DIR/script.txt"
-cat > "$SCRIPT" <<'EOF'
-exec VIEW.BIN /host/TEST.QOI
-EOF
+# Per-boot exec script (written in run_one): the fixture is TEST.QOI on
+# odd boots and TEST.PNG on even boots.
 
 # The shell prompt only prints once boot self-tests are done; the default
 # --script-after marker ("kernel terminal state") fires even earlier, so pin
@@ -69,7 +74,17 @@ EOF
 
 run_one() {
     local tag="$1"
+    local ext="$2"
+    local fmt byten
+    case "$ext" in
+        qoi) fmt=QOI  byten=340 ;;  # viewer_160x120.qoi
+        png) fmt=PNG  byten=420 ;;  # viewer_160x120.png (split-IDAT, claim 7317)
+        *) echo "bad ext $ext" >&2; return 1 ;;
+    esac
     rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log" "$RUN_DIR"/gpu-screen-*
+
+    SCRIPT="$RUN_DIR/script-$tag.txt"
+    printf 'exec VIEW.BIN /host/TEST.%s\n' "$ext" > "$SCRIPT"
 
     set +e
     host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
@@ -100,7 +115,7 @@ run_one() {
         grep -qF -- "VirelaiOS kernel has seized control." "$SER" && BANNER=1
         grep -qF -- "exec: loaded VIEW.BIN" "$SER" && EXECED=1
         grep -qE -- "view: open id=[0-9]+ 328x264" "$SER" && OPENED=1
-        grep -qF -- "view: loaded TEST.QOI 160x120 QOI bytes=340" "$SER" && LOADED=1
+        grep -qF -- "view: loaded TEST.$ext 160x120 $fmt bytes=$byten" "$SER" && LOADED=1
         grep -qF -- "view: ready" "$SER" && READY=1
         grep -qF -- "view: title set" "$SER" && TITLE=1
         grep -qF -- "view: zoom z=150%" "$SER" && ZIN=1
@@ -115,14 +130,14 @@ run_one() {
         grep -qE "sys_win_set_title calls=[0-9]+" "$SER" && SYSCALLS=1
     fi
 
-    echo "$tag: rc=$RC bytes=$SERIAL_BYTES banner=$BANNER exec=$EXECED opened=$OPENED loaded=$LOADED ready=$READY title=$TITLE zin=$ZIN zreset=$ZRESET zout=$ZOUT panx=$PANX pany=$PANY quit=$QUIT exit43=$EXIT43 syscalls=$SYSCALLS"
-    echo "$tag: rc=$RC bytes=$SERIAL_BYTES banner=$BANNER exec=$EXECED opened=$OPENED loaded=$LOADED ready=$READY title=$TITLE zin=$ZIN zreset=$ZRESET zout=$ZOUT panx=$PANX pany=$PANY quit=$QUIT exit43=$EXIT43 syscalls=$SYSCALLS" >> "$REPORT"
+    echo "$tag($ext): rc=$RC bytes=$SERIAL_BYTES banner=$BANNER exec=$EXECED opened=$OPENED loaded=$LOADED ready=$READY title=$TITLE zin=$ZIN zreset=$ZRESET zout=$ZOUT panx=$PANX pany=$PANY quit=$QUIT exit43=$EXIT43 syscalls=$SYSCALLS"
+    echo "$tag($ext): rc=$RC bytes=$SERIAL_BYTES banner=$BANNER exec=$EXECED opened=$OPENED loaded=$LOADED ready=$READY title=$TITLE zin=$ZIN zreset=$ZRESET zout=$ZOUT panx=$PANX pany=$PANY quit=$QUIT exit43=$EXIT43 syscalls=$SYSCALLS" >> "$REPORT"
 
     if [ $RC -ne 0 ] || [ $BANNER -ne 1 ] || [ $EXECED -ne 1 ] \
         || [ $OPENED -ne 1 ] || [ $LOADED -ne 1 ] || [ $READY -ne 1 ] || [ $TITLE -ne 1 ] \
         || [ $ZIN -ne 1 ] || [ $ZRESET -ne 1 ] || [ $ZOUT -ne 1 ] || [ $PANX -ne 1 ] \
         || [ $PANY -ne 1 ] || [ $QUIT -ne 1 ] || [ $EXIT43 -ne 1 ]; then
-        echo "FAIL: $tag failed live assertions" >&2
+        echo "FAIL: $tag($ext) failed live assertions" >&2
         return 1
     fi
 }
@@ -132,8 +147,9 @@ touch "$REPORT"
 
 for b in $(seq 1 "$BOOTS"); do
     tag="boot-$b"
-    echo "--- boot $b/$BOOTS ---"
-    run_one "$tag"
+    ext="${EXTS[$(((b - 1) % ${#EXTS[@]}))]}"
+    echo "--- boot $b/$BOOTS ($ext) ---"
+    run_one "$tag" "$ext"
 done
 
-echo "verify-live-image-viewer: PASS ($BOOTS/$BOOTS boots ok) — VIEW.BIN argument exec, decode, title, zoom (+/-/0), pan, and clean quit (status 43) live on VZ."
+echo "verify-live-image-viewer: PASS ($BOOTS/$BOOTS boots ok) — VIEW.BIN argument exec, QOI + PNG decode (scan/workspace path), title, zoom (+/-/0), pan, and clean quit (status 43) live on VZ."
