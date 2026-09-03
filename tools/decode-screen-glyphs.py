@@ -418,8 +418,10 @@ def main():
 
     ncols = (w - 0) // 16 + 2
 
-    def decode(ox, oy, mirror, pitch):
+    def decode(ox, oy, mirror, pitch, max_lines=None):
         nlines = (y1 - oy) // pitch + 2
+        if max_lines is not None:
+            nlines = min(nlines, max_lines)
         lines = []
         for line in range(nlines):
             s = []
@@ -454,7 +456,7 @@ def main():
     # unknowns and must not win — then minimize unknown cells, tie-broken
     # by more ink.
     def score(ox, oy, pitch):
-        lines = decode(ox, oy, False, pitch)
+        lines = decode(ox, oy, False, pitch, max_lines=6)
         nq = sum(l.count("?") for l in lines[:6])
         ink = sum(1 for l in lines[:6] for ch in l if ch != " ")
         return nq, ink
