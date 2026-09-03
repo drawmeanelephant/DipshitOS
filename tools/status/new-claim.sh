@@ -77,12 +77,12 @@ fi
 body="$(cat <<EOF
 ## Claim
 
-**Owner:** $OWNER (\`$BRANCH\`)
-**Scope:** $SCOPE
-**Touches:** $TOUCHES
-**Depends on:** $DEPENDS
-**Verification:** $VERIFICATION
-**Status:** 🔄
+- **Owner:** $OWNER (\`$BRANCH\`)
+- **Scope:** $SCOPE
+- **Touches:** $TOUCHES
+- **Depends on:** $DEPENDS
+- **Verification:** $VERIFICATION
+- **Status:** 🔄
 
 ## Notes
 

@@ -82,21 +82,30 @@ gate_seed_share
 echo "run dir: $RUN_DIR"
 
 # --- the session --------------------------------------------------------------
+# WINLOOP.BIN opens a user window (id 2) which takes focus.
+# script2 then exercises focus cycling: user window (2) -> terminal (0) -> user window (2).
 cat > "$RUN_DIR/script.txt" <<'EOF'
-dui cycle
 exec WINLOOP.BIN
+EOF
+cat > "$RUN_DIR/script2.txt" <<'EOF'
+dui cycle
+dui cycle
 echo hig-serial-ok
 EOF
 
-rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log" "$SCREEN_BASE"*
-set +e
+rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log" "$RUN_DIR"/snap-*.raw
 set +e
 host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
     --serial "$RUN_DIR/vm-serial.log" \
     --input --display \
+    --screen "$RUN_DIR/screen" \
+    --via-virtio --cvc-snap \
+    --snapshot-after "hig-serial-ok" \
+    --snapshot-out "$RUN_DIR/snap" \
     --script "$RUN_DIR/script.txt" \
-    --screen "$SCREEN_BASE" --screenshot-after "winloop: present ok" \
-    --timeout 120 \
+    --script2 "$RUN_DIR/script2.txt" --script2-after "winloop: loop ok" \
+    --script-expect "hig-serial-ok" \
+    --timeout 60 \
     > "$(art win-hig-run.txt)" 2>&1
 RC=$?
 set -e
@@ -104,116 +113,77 @@ set -e
 # --- serial assertions --------------------------------------------------------
 SERIAL="$RUN_DIR/vm-serial.log"
 cp "$SERIAL" "$(art win-hig-serial.log)" 2>/dev/null || true
-cp "$SCREEN_BASE"* artifacts/ 2>/dev/null || true
-CYCLED=0 THREE=0 OBSDONE=0 RUNNERFLAG=0
+for f in "$RUN_DIR"/snap-*.raw; do
+    [ -f "$f" ] && cp "$f" "$(art win-hig-snap-0.raw)" && break || true
+done
+
+CYCLED=0 THREE=0 OBSDONE=0
 if [ -f "$SERIAL" ]; then
-    grep -a -qF -- "dui: cycle focused=1" "$SERIAL" && CYCLED=1
+    grep -a -qF -- "dui: cycle focused=0" "$SERIAL" && \
+        grep -a -qF -- "dui: cycle focused=2" "$SERIAL" && CYCLED=1
     grep -a -qF -- "winloop: present ok" "$SERIAL" && THREE=1
     grep -a -qF -- "hig-serial-ok" "$SERIAL" && OBSDONE=1
 fi
-grep -a -qF -- "screenshot" artifacts/win-hig-run.txt && RUNNERFLAG=1
 
-# --- pixel assertions ---------------------------------------------------------
-# The clock sits at (960,16), 304x192; WINLOOP's window at (64,64), 256x192
-# (the G6 defaults). Framebuffer sample points (scaled to the capture):
-#   RING   (65, 65) — WINLOOP's ring corner (white 3px; focus follows
-#                      the window open, so the ring sits on the user window)
+# --- pixel assertions (headless virtio snapshot: 1280x720 BGRX raw scanout) ---
+# WINLOOP's window at (64,64), 512x384. Sample points:
+#   RING   (65, 65) — WINLOOP's ring corner (focus ring color: 0x3b82f6 -> (59, 130, 246))
 #   EDGE   (1, 1)    — the terminal corner, NOT ringed
-#   TITLE  (100, 68) — WINLOOP's title-bar strip
-RING=0 EDGE=0 TITLE=0 PIXELS=0
-CAP="$(ls -t "$SCREEN_BASE"-* 2>/dev/null | head -1 || true)"
-if [ -n "$CAP" ]; then
-    echo "decoding $CAP"
-    python3 - "$CAP" <<'EOF'
-import sys, zlib, struct
+#   TITLE  (100, 72) — WINLOOP's title-bar strip (0x1a2b3c -> (26, 43, 60))
+RING=0 EDGE=0 TITLE=0
+SNAP="$(ls -t "$RUN_DIR"/snap-*.raw 2>/dev/null | head -1 || ls -t artifacts/win-hig-snap-*.raw 2>/dev/null | head -1 || true)"
+if [ -n "$SNAP" ] && [ -f "$SNAP" ]; then
+    echo "decoding $SNAP"
+    python3 - "$SNAP" <<'EOF'
+import sys
 path = sys.argv[1]
-d = open(path, 'rb').read()
-assert d[:8] == b'\x89PNG\r\n\x1a\n', "not a PNG"
-pos = 8; idat = b''; w = h = ct = 0
-while pos < len(d):
-    ln, typ = struct.unpack('>I4s', d[pos:pos+8])
-    data = d[pos+8:pos+8+ln]
-    if typ == b'IHDR':
-        w, h, bd, ct = struct.unpack('>IIBB', data[:10])
-    elif typ == b'IDAT':
-        idat += data
-    pos += 12 + ln
-raw = zlib.decompress(idat)
-bpp = 4 if ct == 6 else 3
-stride = w * bpp
-out = bytearray(); prev = bytearray(stride); i = 0
-for y in range(h):
-    f = raw[i]; i += 1
-    line = bytearray(raw[i:i+stride]); i += stride
-    if f == 1:
-        for x in range(bpp, stride): line[x] = (line[x] + line[x-bpp]) & 0xff
-    elif f == 2:
-        for x in range(stride): line[x] = (line[x] + prev[x]) & 0xff
-    elif f == 3:
-        for x in range(stride):
-            a = line[x-bpp] if x >= bpp else 0
-            line[x] = (line[x] + ((a + prev[x]) >> 1)) & 0xff
-    elif f == 4:
-        for x in range(stride):
-            a = line[x-bpp] if x >= bpp else 0
-            b = prev[x]; c = prev[x-bpp] if x >= bpp else 0
-            p = a + b - c
-            pa, pb, pc = abs(p-a), abs(p-b), abs(p-c)
-            pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
-            line[x] = (line[x] + pr) & 0xff
-    out += line
-    prev = line
+data = open(path, 'rb').read()
+assert len(data) == 1280 * 720 * 4, f"unexpected snapshot size {len(data)}"
+w = 1280
 
 def px(x, y):
-    o = y * stride + x * bpp
-    if ct == 6:
-        return (out[o], out[o+1], out[o+2], out[o+3])
-    return (out[o], out[o+1], out[o+2], 255)
+    k = (y * w + x) * 4
+    return (data[k+2], data[k+1], data[k]) # R, G, B
 
 def near(c, t, tol):
     return all(abs(c[i] - t[i]) <= tol for i in range(3))
 
-# The capture may arrive at 1x OR 2x the 1280x720 framebuffer — scale the
-# framebuffer sample coordinates by whatever this capture actually is.
-s = w // 1280
-assert s in (1, 2), f"unexpected capture width {w}"
-def at(fx, fy):
-    return px(fx * s, fy * s)
+# Ring: theme accent 0x3b82f6 (59, 130, 246)
+ring = near(px(65, 65), (59, 130, 246), 25)
+# Edge: terminal corner should be terminal bg (16, 20, 24), definitely NOT the ring
+edge = not near(px(1, 1), (59, 130, 246), 25)
+# Title bar: user title bg 0x1a2b3c (26, 43, 60)
+title = near(px(100, 72), (26, 43, 60), 22)
 
-ring = near(at(65, 65), (255, 255, 255), 25)
-edge = not near(at(1, 1), (255, 255, 255), 25)
-title = near(at(100, 68), (30, 43, 59), 22)
-print(f"PIXEL scale={s} ring={int(ring)} edge_not_ringed={int(edge)} title={int(title)}")
-print(f"  ring sample {at(65,65)}  edge sample {at(1,1)}  title sample {at(100,68)}")
+print(f"PIXEL ring={int(ring)} edge_not_ringed={int(edge)} title={int(title)}")
+print(f"  ring sample {px(65,65)}  edge sample {px(1,1)}  title sample {px(100,72)}")
 sys.exit(0 if (ring and edge and title) else 1)
 EOF
-    PIXELS=$?
-    # The decode prints one PIXEL line (tee'd into the gate log); map it.
-    if grep -a -q "PIXEL scale=[12] ring=1 edge_not_ringed=1 title=1" "$GATE_LOG"; then RING=1; EDGE=1; TITLE=1; fi
+    if [ $? -eq 0 ]; then RING=1; EDGE=1; TITLE=1; fi
 else
-    echo "FAIL: no capture PNG"
+    echo "FAIL: no capture raw snapshot"
 fi
 
-echo "win-hig: rc=$RC cycled=$CYCLED windows3=$THREE obs-done=$OBSDONE runner-flag=$RUNNERFLAG pixels=$RING/$EDGE/$TITLE"
+echo "win-hig: rc=$RC cycled=$CYCLED windows3=$THREE obs-done=$OBSDONE pixels=$RING/$EDGE/$TITLE"
 
 PASS=0
 if [ "$RC" = 0 ] && [ "$CYCLED" = 1 ] && [ "$THREE" = 1 ] && [ "$OBSDONE" = 1 ] && \
-   [ "$RUNNERFLAG" = 1 ] && [ "$RING" = 1 ] && [ "$EDGE" = 1 ] && [ "$TITLE" = 1 ]; then
+   [ "$RING" = 1 ] && [ "$EDGE" = 1 ] && [ "$TITLE" = 1 ]; then
     PASS=1
 fi
 
 {
-    echo "VIRELAIOS win HIG gate (milestone eight card U5, claim 0935) — the focus ring + title bars are visible and move with focus, on real VZ"
+    echo "VIRELAIOS win HIG gate (milestone eight card U5, claim 0935 / issue #731) — focus ring + title bars on real VZ"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
-    echo "session: dui cycle (focus -> clock) + exec WINLOOP.BIN (a user window) + dui report; capture on windows=3"
-    echo "assertions: cycle marker, winloop present marker, serial marker, runner capture flag, ring-on-focused-window + edge-not-ringed + title-bar pixels"
+    echo "session: exec WINLOOP.BIN (user window takes focus) + dui cycle to terminal and back to user window; headless virtio snapshot on winloop: loop ok"
+    echo "assertions: cycle markers, winloop present marker, serial marker, ring-on-focused-window + edge-not-ringed + title-bar pixels"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 } > "$REPORT"
 
 echo
 echo "=== result ==="
 if [ "$PASS" = 1 ]; then
-    echo "verify-live-win-hig: PASS — the focus ring renders on the FOCUSED window (white, on WINLOOP after its open took focus from the cycled clock), the terminal edge is not ringed, and the user window carries its title bar — decoded from the composited capture, moving with focus exactly as ADR 0008 D4 requires. Cycling is driven by dui cycle (the HID Alt+Tab decode is host-tested; synthesized modifiers never reach VZ's report)."
+    echo "verify-live-win-hig: PASS — the focus ring renders on the FOCUSED user window (WINLOOP at (64,64)), the terminal edge is not ringed, and the user window carries its title bar — decoded headlessly from raw virtio scanout without ScreenCaptureKit/TCC. Focus cycling between user window and terminal via dui cycle verified."
     echo "PASS: $PASS" >> "$REPORT"
     sleep 0.5
     exit 0
