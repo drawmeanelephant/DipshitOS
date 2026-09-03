@@ -5,14 +5,14 @@ pub fn main() void {
     var i: u64 = 0;
     while (i < 8) {
         buf[i] = 65 + i;
-        i += 1;
+        i = i + 1;
     }
     zc.print_array(buf);
     var sum: u64 = 0;
     i = 0;
     while (i < 8) {
         sum = sum + buf[i];
-        i += 1;
+        i = i + 1;
     }
     if (sum == 548) {
         zc.exit(0);

@@ -61,8 +61,6 @@ Z3B_LABELS="tests/zc-corpus/z3b-labels.z"
 Z3B_FMT="user/src/lib/stdz/fmt.zig"
 Z3B_BUILDER="user/src/lib/stdz/string_builder.zig"
 Z3B_RING="user/src/lib/stdz/ring.zig"
-Z3A_MAIN="tests/zc-corpus/z3a-multifile.z"
-Z3A_LIB="tests/zc-corpus/z3a-lib.z"
 exec > >(tee "$GATE_LOG") 2>&1
 trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
@@ -116,75 +114,21 @@ printf 'bytes=24\nlines=2\nwords=5\nhex=18\n' > "$SHARE/REPORT.EXP"
 printf 'ls\nstrace exec ZC.BIN APP.Z LABELS.Z FMT.Z BUILDER.Z RING.Z MAIN.ELF\n' > "$SCRIPT"
 printf 'ls\nexec MAIN.ELF\necho rx-zc-ok\n' > "$SCRIPT2"
 
-# --- host compile-check phase (Z0.5 dialect acceptance) -----------------------------
-echo "=== verify-live-zc: host compile check ==="
-CORPUS_CHECK_TMP="$RUN_DIR/corpus_check.zig"
-cp tests/zc-corpus/z05-dialect.z "$CORPUS_CHECK_TMP"
-zig build-obj -target aarch64-freestanding --dep zc -Mroot="$CORPUS_CHECK_TMP" -Mzc=user/src/lib/zc.zig -femit-bin="$RUN_DIR/corpus_check.o"
-rm -f "$CORPUS_CHECK_TMP" "$RUN_DIR/corpus_check.o"
+# --- host compile-check phase (Z4a corpus parity, issue #760) -------------------
+# Delegate to the Z4a corpus gate's --host mode: every tests/zc-corpus
+# fixture (single files) and the multi-file groups (the z3a pair; the stdz
+# app + glue + library modules — CONCATENATED, the flat-namespace analogue
+# of the in-guest compile) must parse + type-check as valid Zig 0.16
+# against the real zc shim. The corpus case table in
+# tools/verify-zc-corpus.sh is the single source of truth for the
+# fixtures' host side.
+echo "=== verify-live-zc: host compile check (delegated to verify-zc-corpus.sh --host) ==="
+if ! bash tools/verify-zc-corpus.sh --host; then
+    echo "verify-live-zc: FAILED — corpus host compile phase failed" >&2
+    exit 1
+fi
 
-CORPUS_GUI_TMP="$RUN_DIR/corpus_gui.zig"
-cp tests/zc-corpus/vl6-gui.z "$CORPUS_GUI_TMP"
-zig build-obj -target aarch64-freestanding --dep zc -Mroot="$CORPUS_GUI_TMP" -Mzc=user/src/lib/zc.zig -femit-bin="$RUN_DIR/corpus_gui.o"
-rm -f "$CORPUS_GUI_TMP" "$RUN_DIR/corpus_gui.o"
-
-CORPUS_STRINGS_TMP="$RUN_DIR/corpus_strings.zig"
-cp tests/zc-corpus/z1a-strings.z "$CORPUS_STRINGS_TMP"
-zig build-obj -target aarch64-freestanding --dep zc -Mroot="$CORPUS_STRINGS_TMP" -Mzc=user/src/lib/zc.zig -femit-bin="$RUN_DIR/corpus_strings.o"
-rm -f "$CORPUS_STRINGS_TMP" "$RUN_DIR/corpus_strings.o"
-
-CORPUS_ARRAYS_TMP="$RUN_DIR/corpus_arrays.zig"
-cp tests/zc-corpus/z1b-arrays.z "$CORPUS_ARRAYS_TMP"
-zig build-obj -target aarch64-freestanding --dep zc -Mroot="$CORPUS_ARRAYS_TMP" -Mzc=user/src/lib/zc.zig -femit-bin="$RUN_DIR/corpus_arrays.o"
-rm -f "$CORPUS_ARRAYS_TMP" "$RUN_DIR/corpus_arrays.o"
-
-CORPUS_STRUCTS_TMP="$RUN_DIR/corpus_structs.zig"
-cp tests/zc-corpus/z1c-structs.z "$CORPUS_STRUCTS_TMP"
-zig build-obj -target aarch64-freestanding --dep zc -Mroot="$CORPUS_STRUCTS_TMP" -Mzc=user/src/lib/zc.zig -femit-bin="$RUN_DIR/corpus_structs.o"
-rm -f "$CORPUS_STRUCTS_TMP" "$RUN_DIR/corpus_structs.o"
-
-CORPUS_POINTERS_TMP="$RUN_DIR/corpus_pointers.zig"
-cp tests/zc-corpus/z1d-pointers.z "$CORPUS_POINTERS_TMP"
-zig build-obj -target aarch64-freestanding --dep zc -Mroot="$CORPUS_POINTERS_TMP" -Mzc=user/src/lib/zc.zig -femit-bin="$RUN_DIR/corpus_pointers.o"
-rm -f "$CORPUS_POINTERS_TMP" "$RUN_DIR/corpus_pointers.o"
-
-CORPUS_CONTROL_TMP="$RUN_DIR/corpus_control.zig"
-cp tests/zc-corpus/z1e-control.z "$CORPUS_CONTROL_TMP"
-zig build-obj -target aarch64-freestanding --dep zc -Mroot="$CORPUS_CONTROL_TMP" -Mzc=user/src/lib/zc.zig -femit-bin="$RUN_DIR/corpus_control.o"
-rm -f "$CORPUS_CONTROL_TMP" "$RUN_DIR/corpus_control.o"
-
-CORPUS_ENUM_TMP="$RUN_DIR/corpus_enum.zig"
-cp tests/zc-corpus/z1f-enums.z "$CORPUS_ENUM_TMP"
-zig build-obj -target aarch64-freestanding --dep zc -Mroot="$CORPUS_ENUM_TMP" -Mzc=user/src/lib/zc.zig -femit-bin="$RUN_DIR/corpus_enum.o"
-rm -f "$CORPUS_ENUM_TMP" "$RUN_DIR/corpus_enum.o"
-
-CORPUS_HEAP_TMP="$RUN_DIR/corpus_heap.zig"
-cp tests/zc-corpus/z2a-heap.z "$CORPUS_HEAP_TMP"
-zig build-obj -target aarch64-freestanding --dep zc -Mroot="$CORPUS_HEAP_TMP" -Mzc=user/src/lib/zc.zig -femit-bin="$RUN_DIR/corpus_heap.o"
-rm -f "$CORPUS_HEAP_TMP" "$RUN_DIR/corpus_heap.o"
-
-CORPUS_DEFER_TMP="$RUN_DIR/corpus_defer.zig"
-cp tests/zc-corpus/z2b-defer-fnptr.z "$CORPUS_DEFER_TMP"
-zig build-obj -target aarch64-freestanding --dep zc -Mroot="$CORPUS_DEFER_TMP" -Mzc=user/src/lib/zc.zig -femit-bin="$RUN_DIR/corpus_defer.o"
-rm -f "$CORPUS_DEFER_TMP" "$RUN_DIR/corpus_defer.o"
-
-# Z3a (issue #758): the multi-file pair is host-checked CONCATENATED — the
-# in-guest compile merges both files into one flat namespace, so cat'ing them
-# is the exact host-side analogue (no @import between them, per the ladder).
-CORPUS_MULTI_TMP="$RUN_DIR/corpus_multifile.zig"
-cat "$Z3A_LIB" "$Z3A_MAIN" > "$CORPUS_MULTI_TMP"
-zig build-obj -target aarch64-freestanding --dep zc -Mroot="$CORPUS_MULTI_TMP" -Mzc=user/src/lib/zc.zig -femit-bin="$RUN_DIR/corpus_multifile.o"
-rm -f "$CORPUS_MULTI_TMP" "$RUN_DIR/corpus_multifile.o"
-
-# Z3b (issue #759): the stdz app + app glue + three library modules
-# host-checked CONCATENATED — the flat-namespace analogue of the in-guest
-# compile (only the app imports zc; the library/glue modules are pure).
-CORPUS_STDZ_TMP="$RUN_DIR/corpus_stdz.zig"
-cat "$Z3B_FMT" "$Z3B_BUILDER" "$Z3B_RING" "$Z3B_LABELS" "$Z3B_APP" > "$CORPUS_STDZ_TMP"
-zig build-obj -target aarch64-freestanding --dep zc -Mroot="$CORPUS_STDZ_TMP" -Mzc=user/src/lib/zc.zig -femit-bin="$RUN_DIR/corpus_stdz.o"
-rm -f "$CORPUS_STDZ_TMP" "$RUN_DIR/corpus_stdz.o"
-
-echo "host compile check: ok (z05-dialect.z + vl6-gui.z + z1a-strings.z + z1b-arrays.z + z1c-structs.z + z1d-pointers.z + z1e-control.z + z1f-enums.z + z2a-heap.z + z2b-defer-fnptr.z + z3a pair + stdz fmt+builder+ring+app concatenated valid Zig 0.16)"
+echo "host compile check: ok — every corpus case valid Zig 0.16 (see verify-zc-corpus --host above)"
 
 run_one() {
     local tag="$1"
