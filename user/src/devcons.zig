@@ -58,6 +58,10 @@ pub export fn _start() callconv(.c) noreturn {
     refresh(win);
     ui.emit_tokens_marker("devcons");
     ui.write_console("devcons: ready\n");
+    // M37 DQ4 gate: let the compositor settle (several ticks) so the
+    // kind-4 snapshot captures the presented frame, not a stale one.
+    ui.sleep_ticks(50);
+    ui.write_console("devcons: settled\n");
 
     var ev: ui.Event = undefined;
     var input_buf: [input_max]u8 = undefined;

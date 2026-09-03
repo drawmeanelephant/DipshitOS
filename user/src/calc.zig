@@ -2359,6 +2359,10 @@ fn gui_main() noreturn {
     ui.win_present(win);
     ui.emit_tokens_marker("calc");
     ui.write_console("calc: ready\n");
+    // M37 DQ4 gate: let the compositor settle (several ticks) so the
+    // kind-4 snapshot captures the presented frame, not a stale one.
+    ui.sleep_ticks(50);
+    ui.write_console("calc: settled\n");
 
     var ev: Event = undefined;
     while (true) {
