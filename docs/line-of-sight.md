@@ -139,12 +139,30 @@ are the open end.
   `zig 0.16` output actually violates is the fixed base `0x00400000` (host
   emits `0x1000000`), the ≤2-PT_LOAD rule (host emits 3), the ≤256 KiB
   image cap (a trivial program measures ~283 KiB with debug info), and
-  entry-0 (needs `export fn _start`). So Z4a's gate is deliberately
-  *compile-only* on the host (parse + type-check), and full dual-*run*
-  parity (Z4b) needs a **host link contract** — linker script + target
-  recipe — negotiated on its own, not a kernel seam. That's the honest
-  answer to "how realistic is 0.16": dialect parity yes, run-parity only
-  with the link contract.
+  entry-0 (needs `export fn _start`). **Z4b's host link contract lands
+  (2026-09-03):** `tools/zc-host-link.ld` + `tools/build-zc-host.sh` —
+  `zig build-exe -target aarch64-freestanding -O ReleaseSmall -fstrip
+  -fno-PIE -fno-entry -z max-page-size=4096 -T tools/zc-host-link.ld` on a
+  root that concatenates the fixture sources (the flat Z3a namespace) with
+  an `export fn _start` epilogue calling `main`; the script merges text +
+  rodata into one R+X PT_LOAD at `0x0040_0000` and data + bss into a
+  second R+W PT_LOAD starting EXACTLY at `p_memsz[0]`, and
+  `tools/check-zc-host-contract.py` validates the image against elf.zig's
+  parse rules (entry inside the text file bytes, ≤256 KiB, ≤2 loads).
+  Host-built images of every corpus case run in-guest with byte-equivalent
+  behavior (dual-run in `verify-zc-corpus.sh`). So the honest answer to
+  "how realistic is 0.16" is now: dialect parity AND run parity for the
+  corpus, on a host-side link contract — no kernel seam.
+
+  **One honest flake, observed 2026-09-03:** the z2a *zc-leg* (the
+  in-guest-compiled heap fixture) intermittently (~2/7 boots across a
+  sweep) exits 72 with `heap-ok` while its OUT.TXT round trip comes back
+  missing or wrong — the zc-compiled binary's file-channel write is
+  unreliable, while the Z4b host-built z2a image does the identical round
+  trip byte-exact 7/7. Not a Z4b regression (fixture and ZC.BIN are
+  unchanged since Z4a); looks like the live-gate's documented
+  exit-drain/file-channel race family. Worth its own card before the
+  corpus gate is trusted for unattended CI.
 - **VL6 (the GUI consumer, #708) pairs with Z0.5 (#749).** It's svc-builtin
   work (win_open/fill/present) — no new language features. Land the dialect
   re-shape and the win builtins together, so the first GUI app is written
@@ -161,13 +179,21 @@ are the open end.
 ### The dialect boundary (Z4a, #760 — what the corpus may use)
 
 The corpus contract: every `tests/zc-corpus/*.z` fixture (and the stdz
-library modules `user/src/lib/stdz/*.zig` it compiles with) must parse +
-type-check under host `zig 0.16` AND compile + run in-guest with `zc`
+library modules `user/src/lib/stdz/*.zig` it compiles with) must build
+STRICT-valid under host `zig 0.16` AND compile + run in-guest with `zc`
 (compile-only for the vl6 GUI fixture — its run parity needs a
-window/pixel-observing gate, not a serial log). `tools/verify-zc-corpus.sh`
-is the mechanical half: one case per compile unit, per-case pinned exit
-status, ordered markers, and byte-exact + sha256 file pins where the
-fixture does file IO. This is the *shared subset* today, in one place:
+window/pixel-observing gate, not a serial log). Strict matters: the Z4a-era
+`zig build-obj` check analyzed lazily, so a fixture whose `main` body used
+`i += 1` or implicit u64→u8 stores passed; the Z4b host build
+(`tools/build-zc-host.sh`) links an entry that calls `main`, forcing full
+semantic analysis of every body — it caught exactly that drift class in
+z1b/z1d (fixed with the dialect's own `@intCast`, matching the z3b stdz
+glue). `tools/verify-zc-corpus.sh` is the mechanical half: one case per
+compile unit, per-case pinned exit status, ordered markers, and byte-exact
++ sha256 file pins where the fixture does file IO — and since Z4b, a
+DUAL-RUN: each case's host-built ELF gets its own boot asserting the same
+pins, so behavior is byte-equivalent across the two compilers. This is the
+*shared subset* today, in one place:
 
 **In the subset** (each rung's fixture is the living example):
 
