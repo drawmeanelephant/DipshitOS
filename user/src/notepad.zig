@@ -405,6 +405,7 @@ pub const AppState = struct {
     // cleared on save/load. Drives the compositor's close-button dialog.
     content_modified: bool = false,
     win_id: u32 = 0, // set after win_open in _start
+    cursor_kind: ui.CursorKind = .arrow, // M37 DQ4: per-region cursor state
 
     btn_load: Button = Button.init(Rect.make(6, 6, 44, 20), "Load"),
     btn_save: Button = Button.init(Rect.make(54, 6, 44, 20), "Save"),
@@ -415,6 +416,8 @@ pub const AppState = struct {
 
     pub fn init() AppState {
         var s = AppState{};
+        // M37 DQ4: frozen aliases on purpose — Button.draw resolves them
+        // live via ui.live_color(), so buttons follow the desktop theme.
         s.btn_save.bg_color = ui.COLOR_ACCENT;
         s.btn_clear.bg_color = ui.COLOR_DANGER;
         return s;
@@ -750,7 +753,7 @@ pub const AppState = struct {
 
     pub fn draw(self: *const AppState, win: u32) void {
         // Window background
-        ui.draw_rect(win, Rect.make(0, 0, window_w, window_h), ui.COLOR_BG);
+        ui.draw_rect(win, Rect.make(0, 0, window_w, window_h), ui.theme_bg());
 
         // Toolbar buttons
         self.btn_load.draw(win);
@@ -762,14 +765,14 @@ pub const AppState = struct {
 
         // Status label
         const status_rect = Rect.make(156, 6, 94, 20);
-        ui.draw_text(win, self.status_msg[0..self.status_len], status_rect.x + 8, status_rect.y + 6, ui.COLOR_TEXT_MUTED);
+        ui.draw_text(win, self.status_msg[0..self.status_len], status_rect.x + 8, status_rect.y + 6, ui.theme_text_muted());
 
         // Divider line
-        ui.draw_rect(win, Rect.make(0, 30, window_w, 1), ui.COLOR_BORDER);
+        ui.draw_rect(win, Rect.make(0, 30, window_w, 1), ui.theme_border());
 
         // Text editor box
-        ui.draw_rect(win, text_area, ui.COLOR_SURFACE);
-        ui.draw_rect_outline(win, text_area, 1, ui.COLOR_BORDER);
+        ui.draw_rect(win, text_area, ui.theme_surface());
+        ui.draw_rect_outline(win, text_area, ui.border_w, ui.theme_border());
 
         const slice = self.buffer.get_slice();
 
@@ -800,7 +803,7 @@ pub const AppState = struct {
             }
             @memcpy(nbuf[0..ti], tmp[0..ti]);
             nlen = ti;
-            ui.draw_text(win, nbuf[0..nlen], text_area.x + 2, gy, ui.COLOR_TEXT_MUTED);
+            ui.draw_text(win, nbuf[0..nlen], text_area.x + ui.pad_xs, gy, ui.theme_text_muted());
         }
 
         // M15 C5+C6: render visible rows with soft-wrap and substring highlight for find matches.
@@ -837,10 +840,10 @@ pub const AppState = struct {
                     if (si >= ms and si < ms + self.find_match_count) hl = true;
                 }
                 if (hl) {
-                    ui.draw_rect(win, Rect.make(x, y, glyph_w, 8), ui.COLOR_ACCENT);
-                    ui.draw_char(win, ch, x, y, 0xffffff);
+                    ui.draw_rect(win, Rect.make(x, y, glyph_w, 8), ui.theme_accent());
+                    ui.draw_char(win, ch, x, y, ui.theme_on_accent());
                 } else {
-                    ui.draw_char(win, ch, x, y, ui.COLOR_TEXT_PRIMARY);
+                    ui.draw_char(win, ch, x, y, ui.theme_text_primary());
                 }
             }
             scol += 1;
@@ -889,45 +892,45 @@ pub const AppState = struct {
                 stbuf[stpos] = r2[k - 1];
                 stpos += 1;
             }
-            ui.draw_text(win, stbuf[0..stpos], 6, window_h - 12, ui.COLOR_TEXT_MUTED);
+            ui.draw_text(win, stbuf[0..stpos], 6, window_h - 12, ui.theme_text_muted());
         }
 
         // M20-U3: goto-line bar at the bottom of text_area when active
         // (same zone the find bar uses; the two are mutually exclusive).
         if (self.goto_active) {
             const bar_y = text_area.y + text_area.h - 18;
-            ui.draw_rect(win, Rect.make(text_area.x, bar_y, text_area.w, 18), ui.COLOR_SURFACE);
-            ui.draw_rect_outline(win, Rect.make(text_area.x, bar_y, text_area.w, 18), 1, ui.COLOR_ACCENT);
-            ui.draw_text(win, "Goto:", text_area.x + 4, bar_y + 5, ui.COLOR_TEXT_MUTED);
-            ui.draw_text(win, self.goto_buf[0..self.goto_len], text_area.x + 40, bar_y + 5, ui.COLOR_TEXT_PRIMARY);
+            ui.draw_rect(win, Rect.make(text_area.x, bar_y, text_area.w, 18), ui.theme_surface());
+            ui.draw_rect_outline(win, Rect.make(text_area.x, bar_y, text_area.w, 18), 1, ui.theme_accent());
+            ui.draw_text(win, "Goto:", text_area.x + 4, bar_y + 5, ui.theme_text_muted());
+            ui.draw_text(win, self.goto_buf[0..self.goto_len], text_area.x + 40, bar_y + 5, ui.theme_text_primary());
         }
 
         // M15 C6: find bar at bottom of text_area when active.
         if (self.find_active) {
             const bar_y = text_area.y + text_area.h - 18;
-            ui.draw_rect(win, Rect.make(text_area.x, bar_y, text_area.w, 18), ui.COLOR_SURFACE);
-            ui.draw_rect_outline(win, Rect.make(text_area.x, bar_y, text_area.w, 18), 1, ui.COLOR_ACCENT);
-            ui.draw_text(win, "Find:", text_area.x + 4, bar_y + 5, ui.COLOR_TEXT_MUTED);
-            ui.draw_text(win, self.find_buf[0..self.find_len], text_area.x + 40, bar_y + 5, ui.COLOR_TEXT_PRIMARY);
+            ui.draw_rect(win, Rect.make(text_area.x, bar_y, text_area.w, 18), ui.theme_surface());
+            ui.draw_rect_outline(win, Rect.make(text_area.x, bar_y, text_area.w, 18), 1, ui.theme_accent());
+            ui.draw_text(win, "Find:", text_area.x + 4, bar_y + 5, ui.theme_text_muted());
+            ui.draw_text(win, self.find_buf[0..self.find_len], text_area.x + 40, bar_y + 5, ui.theme_text_primary());
             if (self.find_match_start != null) {
                 // M20-U8: real "Match N of M".
                 const cur = self.find_current_ordinal().? + 1;
                 const tot = self.find_all_count();
                 var mbuf: [24]u8 = undefined;
                 const mline = std.fmt.bufPrint(&mbuf, "{d} of {d}", .{ cur, tot }) catch "of";
-                ui.draw_text(win, mline, text_area.x + text_area.w - 60, bar_y + 5, ui.COLOR_TEXT_MUTED);
+                ui.draw_text(win, mline, text_area.x + text_area.w - 60, bar_y + 5, ui.theme_text_muted());
             }
             // Case-sensitivity chip: lit when matching is case-sensitive.
             {
                 const chip_x = text_area.x + 40 + @as(u32, @intCast(self.find_len)) * 6 + 8;
                 if (chip_x + 24 < text_area.x + text_area.w - 70) {
-                    ui.draw_rect_outline(win, Rect.make(chip_x, bar_y + 3, 22, 12), 1, if (self.find_case_sensitive) ui.COLOR_ACCENT else ui.COLOR_TEXT_MUTED);
-                    ui.draw_text(win, "Aa", chip_x + 4, bar_y + 5, if (self.find_case_sensitive) ui.COLOR_ACCENT else ui.COLOR_TEXT_MUTED);
+                    ui.draw_rect_outline(win, Rect.make(chip_x, bar_y + 3, 22, 12), 1, if (self.find_case_sensitive) ui.theme_accent() else ui.theme_text_muted());
+                    ui.draw_text(win, "Aa", chip_x + 4, bar_y + 5, if (self.find_case_sensitive) ui.theme_accent() else ui.theme_text_muted());
                 }
             }
             if (self.find_replace_active) {
-                ui.draw_text(win, "Replace:", text_area.x + 140, bar_y + 5, ui.COLOR_TEXT_MUTED);
-                ui.draw_text(win, self.replace_buf[0..self.replace_len], text_area.x + 200, bar_y + 5, ui.COLOR_TEXT_PRIMARY);
+                ui.draw_text(win, "Replace:", text_area.x + 140, bar_y + 5, ui.theme_text_muted());
+                ui.draw_text(win, self.replace_buf[0..self.replace_len], text_area.x + 200, bar_y + 5, ui.theme_text_primary());
             }
         }
 
@@ -939,7 +942,7 @@ pub const AppState = struct {
             const x = text_x0 + @as(u32, @intCast(cpos.col)) * glyph_w;
             const y = text_y0 + @as(u32, @intCast(cpos.row - self.layout.scroll)) * line_h;
             if (x + 2 <= text_area.x + text_area.w) {
-                ui.win_fill(win, x, y, 2, 8, ui.COLOR_ACCENT);
+                ui.win_fill(win, x, y, ui.caret_w, ui.caret_h, ui.theme_caret());
             }
         }
 
@@ -949,16 +952,37 @@ pub const AppState = struct {
             const sb_x = text_area.x + text_area.w - 5;
             const sb_y = text_area.y + 2;
             const sb_h = text_area.h - 4;
-            ui.draw_rect(win, Rect.make(sb_x, sb_y, 2, sb_h), ui.COLOR_BORDER);
+            ui.draw_rect(win, Rect.make(sb_x, sb_y, 2, sb_h), ui.theme_border());
             const thumb_h: u32 = @max(10, sb_h * @as(u32, @intCast(TextLayout.visible_rows)) / @as(u32, @intCast(total)));
             const ms: u32 = @intCast(TextLayout.max_scroll(slice));
             const thumb_y = sb_y + @as(u32, @intCast(self.layout.scroll)) * (sb_h - thumb_h) / ms;
-            ui.draw_rect(win, Rect.make(sb_x, thumb_y, 2, thumb_h), ui.COLOR_ACCENT);
+            ui.draw_rect(win, Rect.make(sb_x, thumb_y, 2, thumb_h), ui.theme_accent());
+        }
+    }
+
+    /// M37 DQ4: per-region cursor kind (ibeam over text, pointer over
+    /// clickables). Emits `notepad: cursor=<name>` on change (serial-
+    /// observable for the DQ4 gate).
+    pub fn update_cursor(self: *AppState, x: u32, y: u32) void {
+        const over_clickable = self.btn_load.rect.contains(x, y) or
+            self.btn_save.rect.contains(x, y) or
+            self.btn_clear.rect.contains(x, y) or
+            self.btn_find_next.rect.contains(x, y) or
+            self.btn_replace.rect.contains(x, y) or
+            self.btn_replace_all.rect.contains(x, y);
+        const kind = ui.cursor_for_region(false, over_clickable, text_area.contains(x, y));
+        if (kind != self.cursor_kind) {
+            self.cursor_kind = kind;
+            var buf: [48]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "notepad: cursor={s}\n", .{kind.name()}) catch return;
+            ui.write_console(msg);
         }
     }
 
     pub fn handle_mouse_events(self: *AppState, ev: *const Event) bool {
         var changed = false;
+
+        if (ev.kind == ui.MOUSE_MOVE) self.update_cursor(ev.arg0, ev.arg1);
 
         if (self.btn_load.handle_event(ev)) {
             self.load_notes();
@@ -1398,7 +1422,8 @@ pub export fn _start(argc: usize, argv: ?[*]const [32]u8) callconv(.c) noreturn 
         }
     }
 
-    // 1. Open Window
+    // 1. Open Window (M37 DQ4: follow the desktop theme first).
+    _ = ui.sync_theme_from_host();
     const win_res = ui.win_open(window_x, window_y, window_w, window_h);
     if (win_res < 0) {
         ui.write_console("notepad: failed to open window\n");
@@ -1412,6 +1437,7 @@ pub export fn _start(argc: usize, argv: ?[*]const [32]u8) callconv(.c) noreturn 
     // 2. Initial Draw & Present
     app.draw(win);
     ui.win_present(win);
+    ui.emit_tokens_marker("notepad");
     ui.write_console("notepad: ready\n");
 
     // 2b. Claim 3289: the composition selfdemo (paste + copy + blink).
