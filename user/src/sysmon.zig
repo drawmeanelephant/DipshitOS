@@ -20,7 +20,10 @@ const ProcInfo = ui.ProcInfo;
 pub const window_id: u32 = 8;
 pub const window_x: u32 = 60;
 pub const window_y: u32 = 60;
-pub const window_w: u32 = 540;
+// M37 DQ4: 512 wide — the compositor back-buffer caps user windows at
+// 512×424 (kernel/src/wnd_core.zig user_buf_w/h); 540 never opened
+// (pre-existing overflow, never live-gated).
+pub const window_w: u32 = 512;
 pub const window_h: u32 = 380;
 pub const exit_status: u32 = 0;
 
@@ -48,7 +51,7 @@ pub const SysmonState = struct {
     btn_overview: Button = Button.init(Rect.make(12, 10, 90, 22), "Overview"),
     btn_procs: Button = Button.init(Rect.make(108, 10, 90, 22), "Processes"),
     btn_storage: Button = Button.init(Rect.make(204, 10, 110, 22), "Storage & Net"),
-    btn_refresh: Button = Button.init(Rect.make(438, 10, 88, 22), "Refresh"),
+    btn_refresh: Button = Button.init(Rect.make(416, 10, 88, 22), "Refresh"),
     cursor_kind: ui.CursorKind = .arrow, // M37 DQ4: per-region cursor state
 
     /// M37 DQ4: pointer over the tab/refresh buttons, arrow elsewhere.
@@ -292,6 +295,10 @@ pub export fn _start() callconv(.c) noreturn {
     ui.win_present(win);
     ui.emit_tokens_marker("sysmon");
     ui.write_console("sysmon: ready\n");
+    // M37 DQ4 gate: let the compositor settle (several ticks) so the
+    // kind-4 snapshot captures the presented frame, not a stale one.
+    ui.sleep_ticks(50);
+    ui.write_console("sysmon: settled\n");
 
     _ = ui.timer_set(refresh_ticks);
 
