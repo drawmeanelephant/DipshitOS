@@ -631,6 +631,75 @@ pub fn draw_sexiburger_raster_emblem(win_id: u32, x: u32, y: u32, img: ui.Image)
 }
 
 // ---------------------------------------------------------------------------
+// Manifest → menu apps (M37 DQ1, issue #836)
+// ---------------------------------------------------------------------------
+// The same `NAME.BIN | Display Name | icon-char | dock=true` wire format
+// `desktop.zig:parse_manifest` reads (comments + blanks ignored) — a
+// different consumer (menu entries, not launcher rows), so the parser lives
+// here next to its tests rather than importing an app binary. Entries are
+// slices into `text`; the caller (WND.BIN) keeps its static manifest buffer
+// alive across populates. Pure and host-testable.
+
+/// One launchable app as the God Menu sees it.
+pub const MenuApp = struct {
+    name: []const u8 = "",
+    desc: []const u8 = "",
+    dock: bool = false,
+};
+
+/// Registry section cap: the apps section holds at most this many entries.
+pub const menu_apps_max: usize = 16;
+
+/// Parse manifest text into `out`, returning the entry count (capped at
+/// `out.len`). Malformed lines (fewer than 2 fields, empty name/desc) are
+/// skipped, never trapped.
+pub fn parse_apps_manifest(text: []const u8, out: []MenuApp) usize {
+    var count: usize = 0;
+    var line_start: usize = 0;
+    while (line_start <= text.len and count < out.len) {
+        var line_end = line_start;
+        while (line_end < text.len and text[line_end] != '\n') : (line_end += 1) {}
+        const line = text[line_start..line_end];
+
+        var s: usize = 0;
+        while (s < line.len and (line[s] == ' ' or line[s] == '\t' or line[s] == '\r')) : (s += 1) {}
+        if (s < line.len and line[s] != '#') {
+            const content = line[s..];
+            var fields: [4][]const u8 = undefined;
+            var field_count: usize = 0;
+            var fstart: usize = 0;
+            var i: usize = 0;
+            while (i <= content.len and field_count < 4) : (i += 1) {
+                if (i == content.len or content[i] == '|') {
+                    fields[field_count] = trim_field(content[fstart..i]);
+                    field_count += 1;
+                    fstart = i + 1;
+                }
+            }
+            if (field_count >= 2 and fields[0].len > 0 and fields[1].len > 0) {
+                out[count] = .{
+                    .name = fields[0],
+                    .desc = fields[1],
+                    .dock = field_count >= 4 and std.mem.eql(u8, fields[3], "dock=true"),
+                };
+                count += 1;
+            }
+        }
+        if (line_end == text.len) break;
+        line_start = line_end + 1;
+    }
+    return count;
+}
+
+fn trim_field(s: []const u8) []const u8 {
+    var start: usize = 0;
+    while (start < s.len and (s[start] == ' ' or s[start] == '\t' or s[start] == '\r')) : (start += 1) {}
+    var end = s.len;
+    while (end > start and (s[end - 1] == ' ' or s[end - 1] == '\t' or s[end - 1] == '\r')) : (end -= 1) {}
+    return s[start..end];
+}
+
+// ---------------------------------------------------------------------------
 // Host Unit Tests
 // ---------------------------------------------------------------------------
 
@@ -748,4 +817,37 @@ test "sexiburger menu: raster mascot emblem integration" {
     // Should have emitted fill batches for header, background, and the raster mascot
     try std.testing.expect(ui.fill_batcher.len > 0);
     ui.fill_batcher.reset();
+}
+
+test "sexiburger manifest: parses apps, skips comments/blanks/malformed" {
+    const text =
+        \\# comment line
+        \\
+        \\CALC.BIN | Calculator | c | dock=true
+        \\NOTEPAD.BIN|Text Editor|n
+        \\MALFORMED-NO-PIPE
+        \\ | Empty Name | x
+        \\FILE.BIN | File Browser | b |
+        \\
+    ;
+    var out: [menu_apps_max]MenuApp = undefined;
+    const n = parse_apps_manifest(text, &out);
+    try std.testing.expectEqual(@as(usize, 3), n);
+    try std.testing.expectEqualStrings("CALC.BIN", out[0].name);
+    try std.testing.expectEqualStrings("Calculator", out[0].desc);
+    try std.testing.expect(out[0].dock);
+    try std.testing.expectEqualStrings("NOTEPAD.BIN", out[1].name);
+    try std.testing.expect(!out[1].dock);
+    try std.testing.expectEqualStrings("FILE.BIN", out[2].name);
+}
+
+test "sexiburger manifest: empty text yields zero, overlong input caps at out.len" {
+    var out: [menu_apps_max]MenuApp = undefined;
+    try std.testing.expectEqual(@as(usize, 0), parse_apps_manifest("", &out));
+
+    var tiny: [2]MenuApp = undefined;
+    const n = parse_apps_manifest("A.BIN | A | a\nB.BIN | B | b\nC.BIN | C | c\n", &tiny);
+    try std.testing.expectEqual(@as(usize, 2), n);
+    try std.testing.expectEqualStrings("A.BIN", tiny[0].name);
+    try std.testing.expectEqualStrings("B.BIN", tiny[1].name);
 }
