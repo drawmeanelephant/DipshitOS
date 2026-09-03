@@ -110,7 +110,17 @@ gate_seed_share() {
     if [ -f image/WALLPAPER.QOI ]; then
         cp image/WALLPAPER.QOI "$SHARE/WALLPAPER.QOI"
     fi
-    GATE_RUNNER_ARGS+=(--cvc-file "$SHARE")
+    # 5. TrueType fonts (Inter for UI, Fira Code for Monospace / terminal).
+    if [ -f image/fonts/Inter-Regular.ttf ]; then
+        cp image/fonts/Inter-Regular.ttf "$SHARE/INTER.TTF"
+    elif [ -f FONTS-CHOOSE/Inter-4.1/extras/ttf/Inter-Regular.ttf ]; then
+        cp FONTS-CHOOSE/Inter-4.1/extras/ttf/Inter-Regular.ttf "$SHARE/INTER.TTF"
+    fi
+    if [ -f image/fonts/FiraCode-Regular.ttf ]; then
+        cp image/fonts/FiraCode-Regular.ttf "$SHARE/FIRACODE.TTF"
+    elif [ -f FONTS-CHOOSE/Fira_Code_v6.2/ttf/FiraCode-Regular.ttf ]; then
+        cp FONTS-CHOOSE/Fira_Code_v6.2/ttf/FiraCode-Regular.ttf "$SHARE/FIRACODE.TTF"
+    fi
     echo "gate-run: share seeded at $SHARE ($(find "$SHARE" -maxdepth 1 -type f | wc -l | tr -d ' ') files, $(grep -cE '^[A-Z]' "$SHARE/APPS.TXT" 2>/dev/null || echo 0) APPS.TXT entries)"
 }
 

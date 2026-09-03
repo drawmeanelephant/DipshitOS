@@ -6,6 +6,8 @@
 
 const std = @import("std");
 pub const font8x8 = @import("font8x8.zig");
+pub const font_ttf = @import("font_ttf.zig");
+pub const TrueTypeFace = font_ttf.TrueTypeFace;
 pub const image = @import("image.zig");
 pub const Image = image.Image;
 
@@ -1115,14 +1117,144 @@ pub fn draw_rect_outline(win_id: u32, rect: Rect, thickness: u32, rgb: u32) void
     }
 }
 
+// ---------------------------------------------------------------------------
+// Typography & Font Engine (Inter for UI, Fira Code for Monospace)
+// ---------------------------------------------------------------------------
+
+pub var active_ui_font: ?*const TrueTypeFace = null;
+pub var active_mono_font: ?*const TrueTypeFace = null;
+pub var active_ui_cache: TrueTypeFace.GlyphCache = .{};
+pub var active_mono_cache: TrueTypeFace.GlyphCache = .{};
+var static_inter_face: TrueTypeFace = undefined;
+var static_fira_face: TrueTypeFace = undefined;
+
+pub fn init_fonts() bool {
+    if (active_ui_font != null) return true;
+
+    // Probe /host/INTER.TTF
+    const fd_inter = file_open("/host/INTER.TTF", MODE_READ);
+    if (fd_inter >= 0) {
+        const handle: u32 = @intCast(fd_inter);
+        defer file_close(handle);
+
+        const max_bytes: u64 = 1024 * 1024;
+        const va = mmap(0, max_bytes, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE);
+        if (va > 0) {
+            const ptr: [*]u8 = @ptrFromInt(@as(usize, @intCast(va)));
+            var total_read: usize = 0;
+            while (total_read < max_bytes) {
+                const chunk = file_read(handle, ptr[total_read..max_bytes]);
+                if (chunk <= 0) break;
+                total_read += @intCast(chunk);
+            }
+            if (total_read > 1024) {
+                if (TrueTypeFace.init(ptr[0..total_read])) |face| {
+                    static_inter_face = face;
+                    active_ui_font = &static_inter_face;
+                } else |_| {}
+            }
+        }
+    }
+
+    // Probe /host/FIRACODE.TTF
+    const fd_fira = file_open("/host/FIRACODE.TTF", MODE_READ);
+    if (fd_fira >= 0) {
+        const handle: u32 = @intCast(fd_fira);
+        defer file_close(handle);
+
+        const max_bytes: u64 = 1024 * 1024;
+        const va = mmap(0, max_bytes, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE);
+        if (va > 0) {
+            const ptr: [*]u8 = @ptrFromInt(@as(usize, @intCast(va)));
+            var total_read: usize = 0;
+            while (total_read < max_bytes) {
+                const chunk = file_read(handle, ptr[total_read..max_bytes]);
+                if (chunk <= 0) break;
+                total_read += @intCast(chunk);
+            }
+            if (total_read > 1024) {
+                if (TrueTypeFace.init(ptr[0..total_read])) |face| {
+                    static_fira_face = face;
+                    active_mono_font = &static_fira_face;
+                } else |_| {}
+            }
+        }
+    }
+
+    return active_ui_font != null;
+}
+
+pub fn draw_alpha_mask(win_id: u32, x: i32, y: i32, w: usize, h: usize, alpha: []const u8, fg_rgb: u32) void {
+    for (0..h) |row| {
+        const dy = y + @as(i32, @intCast(row));
+        if (dy < 0) continue;
+        const udy: u32 = @intCast(dy);
+
+        var col: usize = 0;
+        while (col < w) {
+            const a = alpha[row * w + col];
+            if (a < 96) {
+                col += 1;
+                continue;
+            }
+            const start_col = col;
+            while (col < w and alpha[row * w + col] >= 96) : (col += 1) {}
+            const dx = x + @as(i32, @intCast(start_col));
+            if (dx >= 0) {
+                const udx: u32 = @intCast(dx);
+                const span_len: u32 = @intCast(col - start_col);
+                win_fill_batched(win_id, udx, udy, span_len, 1, fg_rgb);
+            }
+        }
+    }
+}
+
+pub fn measure_text(text: []const u8) u32 {
+    if (active_ui_font) |face| {
+        var w: u32 = 0;
+        for (text) |ch| {
+            if (active_ui_cache.get_or_render(face, ch, 14)) |entry| {
+                w += entry.advance_width;
+            } else {
+                w += 8;
+            }
+        }
+        return w;
+    }
+    return @as(u32, @intCast(text.len)) * 8;
+}
+
+pub fn measure_text_mono(text: []const u8) u32 {
+    if (active_mono_font) |face| {
+        var w: u32 = 0;
+        for (text) |ch| {
+            if (active_mono_cache.get_or_render(face, ch, 13)) |entry| {
+                w += entry.advance_width;
+            } else {
+                w += 8;
+            }
+        }
+        return w;
+    }
+    return @as(u32, @intCast(text.len)) * 8;
+}
+
 pub fn draw_char(win_id: u32, ch: u8, x: u32, y: u32, fg_rgb: u32) void {
+    if (active_ui_font) |face| {
+        if (active_ui_cache.get_or_render(face, ch, 14)) |entry| {
+            const alpha = active_ui_cache.glyph_alpha(entry);
+            const gx = @as(i32, @intCast(x)) + entry.bearing_x;
+            const gy = @as(i32, @intCast(y)) + (10 - entry.bearing_y);
+            draw_alpha_mask(win_id, gx, gy, entry.width, entry.height, alpha, fg_rgb);
+            return;
+        }
+    }
+
     if (ch < 0x20 or ch > 0x7e) return;
     const glyph = font8x8.glyphs[ch - 0x20];
     var row_idx: usize = 0;
     while (row_idx < 8) : (row_idx += 1) {
         const row_byte = glyph[row_idx];
-        // Emit one span per contiguous run of set pixels instead of one
-        // 1×1 fill per pixel (WMS9, issue #629). Same pixels, fewer syscalls.
         var col_idx: usize = 0;
         while (col_idx < 8) {
             if (!font8x8.row_pixel(row_byte, col_idx)) {
@@ -1136,8 +1268,61 @@ pub fn draw_char(win_id: u32, ch: u8, x: u32, y: u32, fg_rgb: u32) void {
     }
 }
 
+pub fn draw_char_mono(win_id: u32, ch: u8, x: u32, y: u32, fg_rgb: u32) void {
+    if (active_mono_font) |face| {
+        if (active_mono_cache.get_or_render(face, ch, 13)) |entry| {
+            const alpha = active_mono_cache.glyph_alpha(entry);
+            const gx = @as(i32, @intCast(x)) + entry.bearing_x;
+            const gy = @as(i32, @intCast(y)) + (10 - entry.bearing_y);
+            draw_alpha_mask(win_id, gx, gy, entry.width, entry.height, alpha, fg_rgb);
+            return;
+        }
+    }
+    draw_char(win_id, ch, x, y, fg_rgb);
+}
+
 pub fn draw_text(win_id: u32, text: []const u8, x: u32, y: u32, fg_rgb: u32) void {
     var cur_x = x;
+    if (active_ui_font) |face| {
+        for (text) |ch| {
+            if (active_ui_cache.get_or_render(face, ch, 14)) |entry| {
+                const alpha = active_ui_cache.glyph_alpha(entry);
+                const gx = @as(i32, @intCast(cur_x)) + entry.bearing_x;
+                const gy = @as(i32, @intCast(y)) + (10 - entry.bearing_y);
+                draw_alpha_mask(win_id, gx, gy, entry.width, entry.height, alpha, fg_rgb);
+                cur_x += entry.advance_width;
+            } else {
+                draw_char(win_id, ch, cur_x, y, fg_rgb);
+                cur_x += 8;
+            }
+        }
+        return;
+    }
+
+    for (text) |ch| {
+        draw_char(win_id, ch, cur_x, y, fg_rgb);
+        cur_x += 8;
+    }
+}
+
+pub fn draw_text_mono(win_id: u32, text: []const u8, x: u32, y: u32, fg_rgb: u32) void {
+    var cur_x = x;
+    if (active_mono_font) |face| {
+        for (text) |ch| {
+            if (active_mono_cache.get_or_render(face, ch, 13)) |entry| {
+                const alpha = active_mono_cache.glyph_alpha(entry);
+                const gx = @as(i32, @intCast(cur_x)) + entry.bearing_x;
+                const gy = @as(i32, @intCast(y)) + (10 - entry.bearing_y);
+                draw_alpha_mask(win_id, gx, gy, entry.width, entry.height, alpha, fg_rgb);
+                cur_x += entry.advance_width;
+            } else {
+                draw_char(win_id, ch, cur_x, y, fg_rgb);
+                cur_x += 8;
+            }
+        }
+        return;
+    }
+
     for (text) |ch| {
         draw_char(win_id, ch, cur_x, y, fg_rgb);
         cur_x += 8;
@@ -1145,7 +1330,7 @@ pub fn draw_text(win_id: u32, text: []const u8, x: u32, y: u32, fg_rgb: u32) voi
 }
 
 pub fn draw_text_centered(win_id: u32, text: []const u8, rect: Rect, fg_rgb: u32) void {
-    const text_w = @as(u32, @intCast(text.len)) * 8;
+    const text_w = measure_text(text);
     const text_h: u32 = 8;
     const x = if (rect.w > text_w) rect.x + (rect.w - text_w) / 2 else rect.x;
     const y = if (rect.h > text_h) rect.y + (rect.h - text_h) / 2 else rect.y;
