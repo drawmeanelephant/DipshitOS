@@ -6,7 +6,7 @@
 - **Touches:** docs/claims/6562-dq2-tab-chrome-render.md, docs/logs/agent-t3code-dq2-tab-chrome.md, docs/march-m37-desktop-quality.md, kernel/src/wnd_core.zig, kernel/src/driving_award.zig, kernel/src/syscall.zig, user/src/wnd.zig, user/src/tabhold.zig, build.zig, tools/verify-live-tabstrip.sh
 - **Depends on:** DQ1-stable (god-menu fns settled — merged)
 - **Heartbeat:** 2026-09-03
-- **Status:** 🔄 agent/t3code/dq2-tab-chrome
+- **Status:** ✅ agent/t3code/dq2-tab-chrome (merged PR #847; card #840 stays open pending pixel proof)
 
 ## Notes
 
