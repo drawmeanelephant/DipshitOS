@@ -29,6 +29,7 @@ const std = @import("std");
 const xhci = @import("xhci.zig"); // I1/I2: the XHCI transport + enumerated HID devices
 const app_events = @import("events.zig"); // Milestone 9 (claim 7206): application event queues
 const driving_award = @import("driving_award.zig"); // Milestone six G5: window focus query for event routing
+const svclock = @import("svclock.zig"); // claim 9498 follow-on: the keyboard decode interleaves WIN + EV state
 
 pub const max_fifo: usize = 64;
 
@@ -382,6 +383,15 @@ pub fn hid_modifiers_to_flags(mods: u8) u16 {
 /// events are pushed to the owning process's event queue.
 pub fn decode_keyboard_report(rep: []const u8) void {
     if (rep.len < 8) return;
+    // Per-domain locks (claim 9498 follow-on): the decode interleaves WIN
+    // state (driving_award focus/wm-ownership reads, the wm_key_hook) with
+    // EV pushes (app_events) — take win+ev in canonical order for the whole
+    // decode. acquire_missing: a nested call (input.drain under the idle
+    // loop's own win+ev hold) takes nothing; a fresh entry (the custom-
+    // virtio input hook, IRQ-masked) spins only against a completing
+    // holder, which the IRQ-masking lock guarantees.
+    const took = svclock.acquire_missing(svclock.dom_bit(.win) | svclock.dom_bit(.ev));
+    defer svclock.release_set(took);
     const mods = rep[0];
     const flags = hid_modifiers_to_flags(mods);
     const shift = (flags & app_events.MOD_SHIFT) != 0;

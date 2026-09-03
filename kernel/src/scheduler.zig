@@ -64,7 +64,7 @@ const shared_mmap = @import("shared_mmap.zig"); // M33 SB2 (claim 8878): shared-
 // + exit status). One-way import: process.zig knows nothing about this
 // module.
 const process = @import("process.zig");
-const usergate = @import("usergate.zig"); // claim 9498: unpinned user tasks on any core — gate before sched_lock, everywhere
+const svclock = @import("svclock.zig"); // claim 9498 follow-on: per-service-domain locks — canonical file < net < win < ev < kernel, then sched_lock
 // Card 3f (claim 5965): the per-process IPC mailbox — the pool reset
 // clears it and the boot payload's process registration resets its ring.
 const mailbox = @import("mailbox.zig");
@@ -257,6 +257,12 @@ const Task = struct {
     /// not the program, owns process lifetime. Reset by the slot's reap
     /// (`.{ }` clears it).
     kill_pending: bool = false,
+    /// The reserved status the kill conversion exits with when
+    /// `kill_pending` converts (claim 9498 follow-on: the CPU-limit
+    /// arming rides 141, request_kill the 137 default). Reset to the
+    /// default by the conversion and by the slot's reap (`.{ }` clears
+    /// it).
+    kill_pending_status: u64 = reserved_kill_status,
     /// SMP lift (claim 8477 follow-up): may this task run on a secondary
     /// core? Only console-free kernel tasks (the worker) and explicitly
     /// pinned user tasks today — ordinary user tasks print through the
@@ -826,12 +832,13 @@ fn stage_selected(c: usize, next: usize) void {
         // When a syscall on another core is mid-flight, stage the task
         // one more quantum instead: kill_pending stays set, so the next
         // selection converts it.
-        const already_held = usergate.held();
-        const acquired = !already_held and usergate.try_acquire();
-        if (already_held or acquired) {
-            defer if (acquired) usergate.release();
+        const taken = svclock.try_take(svclock.all_bits);
+        if (taken != null) {
+            defer svclock.release_set(taken.?);
             tasks[next].kill_pending = false;
-            _ = exit_current_locked(reserved_kill_status);
+            const status = tasks[next].kill_pending_status;
+            tasks[next].kill_pending_status = reserved_kill_status; // back to the request_kill default
+            _ = exit_current_locked(status);
             return;
         }
     }
@@ -1148,12 +1155,19 @@ pub fn on_tick() void {
     // when no WM is registered (zero-regression: shim mode unchanged).
     wm_server.on_tick();
     // Arc5 issue #246: per-process CPU limit enforcement. Increment the
-    // current process's tick counter; if the limit is exceeded, terminate
-    // the process with status 141 (distinct from guard-page 139).
+    // current process's tick counter; if the limit is exceeded, arm the
+    // ring's kill conversion with status 141 (distinct from guard-page
+    // 139). Claim 9498 follow-on: on_tick holds only the EV + kernel
+    // subset, while the exit teardown needs the FULL domain set — exiting
+    // synchronously here would require acquiring file/net/win out of
+    // canonical order (a deadlock risk against a teardown holding them),
+    // so the task converts at its next ring selection instead, one
+    // quantum later.
     if (current[c] != idle_id and tasks[current[c]].state == .running) {
         if (process.find_by_task(current[c])) |pid| {
             if (process.inc_cpu_ticks(pid)) {
-                _ = exit_current_locked(reserved_cpu_limit_status); // tick already holds sched_lock
+                tasks[current[c]].kill_pending = true;
+                tasks[current[c]].kill_pending_status = reserved_cpu_limit_status;
             }
         }
     }
@@ -1169,14 +1183,14 @@ pub fn on_tick() void {
 /// safe — a main-context holder (the idle reaper) is never starved because
 /// its own preempting ticks `try_lock` and skip.
 pub fn exit_current(status: u64) bool {
-    // Userspace-service gate (claim 9498): the teardown below (window
-    // close, shared-surface revoke, file/event/timer reset) mutates the
-    // same state user syscalls hold the gate over — gate FIRST so the
-    // order is gate -> sched_lock everywhere. The syscall path already
-    // holds the gate (dispatch); the fault path does not.
-    const gated = !usergate.held();
-    if (gated) usergate.acquire();
-    defer if (gated) usergate.release();
+    // Service-domain locks (claim 9498 follow-on): the teardown below
+    // (window close, shared-surface revoke, file/event/timer reset)
+    // touches EVERY service domain — take the full set in canonical
+    // order, FIRST, before sched_lock, everywhere. The sys_exit dispatch
+    // already holds the full set (acquire_missing returns nothing); the
+    // fault path does not.
+    const taken = svclock.acquire_missing(svclock.all_bits);
+    defer svclock.release_set(taken);
     sched_lock_acquire();
     defer sched_lock_release();
     return exit_current_locked(status);
@@ -1327,11 +1341,12 @@ fn queue_exit_report(name: []const u8, status: u64) void {
 /// exited descriptor (name, status, stack VA) stays in the `procs` table
 /// for the claim-3848 exit record, but the memory is recycled immediately.
 pub fn reap(id: usize) bool {
-    // Gate first (claim 9498): release_pages_on_reap zeroes the exited
-    // process's registry rows, which sys_procs reads under the gate.
-    const gated = !usergate.held();
-    if (gated) usergate.acquire();
-    defer if (gated) usergate.release();
+    // Kernel lock first (claim 9498 follow-on): release_pages_on_reap
+    // zeroes the exited process's registry rows, which sys_procs and the
+    // registry syscalls read under the kernel lock.
+    const gated = !svclock.kernel.held();
+    if (gated) svclock.kernel.acquire();
+    defer if (gated) svclock.kernel.release();
     sched_lock_acquire();
     defer sched_lock_release();
     if (id >= max_tasks or tasks[id].state != .zombie) return false;
@@ -1444,15 +1459,23 @@ pub fn tick() void {
     // teardowns need it). The held() check is a defensive bound: if a
     // same-core holder ever IS paused under us, do not rotate (any task
     // we switched to would spin on a gate only this core can release).
-    const gated = usergate.try_acquire();
-    defer if (gated) usergate.release();
-    if (!gated and usergate.held()) return;
+    // Service-domain locks (claim 9498 follow-on): on_tick's registry
+    // work (app timers, WM pacing, CPU-limit arming) mutates EV + kernel
+    // state — its canonical subset. try_take NEVER spins (we hold
+    // sched_lock): a same-domain syscall elsewhere defers only this work
+    // while the rotation below proceeds (the claim-9498 ring-progress
+    // fix). try_take also skips bits this core already holds — but svclock
+    // holders mask IRQs, so no tick can ever preempt a same-core hold.
+    const evk = svclock.dom_bit(.ev) | svclock.dom_bit(.kernel);
+    const evk_taken = svclock.try_take(evk);
+    defer if (evk_taken) |t| svclock.release_set(t);
     // Global timekeeping + registries (tick_count, wake_expired, app
     // timers, WM pacing, CPU limits) stay on the core-0 authority; a
     // secondary core runs ONLY the switch machinery on its own per-core
-    // staging (claim 8477 follow-up lift). Skipped when the gate is
-    // contended (one 1 s cadence loss — the pre-existing skip semantic).
-    if (c == 0 and gated) on_tick();
+    // staging (claim 8477 follow-up lift). Skipped when a same-domain
+    // syscall is mid-flight (one 1 s cadence loss — the pre-existing
+    // skip semantic).
+    if (c == 0 and evk_taken != null) on_tick();
     var elr: u64 = 0;
     var spsr: u64 = 0;
     asm volatile ("mrs %[v], elr_el1"
@@ -1484,12 +1507,19 @@ pub fn tick() void {
     // A kill_pending must still convert even without a successor to
     // switch to — request_kill on a lone core-1 task would otherwise
     // stall until it blocks (claim 9498). The conversion runs the exit
-    // teardown, so it needs the gate; when a syscall elsewhere holds it,
-    // the task runs one more quantum and the next beat converts it.
-    if (c != 0 and current[c] != idle_id and tasks[current[c]].kill_pending and gated) {
-        tasks[current[c]].kill_pending = false;
-        _ = exit_current_locked(reserved_kill_status); // tick holds the gate + sched_lock
-        return;
+    // teardown — EVERY service domain — so it try-takes the missing
+    // file/net/win bits now (ev+kernel already held above). When any is
+    // contended the task runs one more quantum and the next beat
+    // converts it (the outer defer releases ev+kernel).
+    if (c != 0 and current[c] != idle_id and tasks[current[c]].kill_pending and evk_taken != null) {
+        if (svclock.try_take(svclock.all_bits)) |more| {
+            defer svclock.release_set(more);
+            tasks[current[c]].kill_pending = false;
+            const status = tasks[current[c]].kill_pending_status;
+            tasks[current[c]].kill_pending_status = reserved_kill_status; // back to the request_kill default
+            _ = exit_current_locked(status); // tick holds all five + sched_lock
+            return;
+        }
     }
     if (c != 0 and next_runnable_for(current[c], c) == null) return;
     timer_switch_context(exceptions.resume_frame[c], elr, spsr, exceptions.resume_sp_el0[c]);

@@ -59,7 +59,7 @@ const exceptions = @import("exceptions.zig");
 const mailbox = @import("mailbox.zig"); // claim 5965: per-process rings
 const process = @import("process.zig"); // claim 5965: target/current-process lookup
 const scheduler = @import("scheduler.zig");
-const usergate = @import("usergate.zig"); // claim 9498: unpinned user tasks on any core — one gate over shared service state
+const svclock = @import("svclock.zig"); // claim 9498 follow-on: per-service-domain locks — syscalls contend only within their domain
 const arp = @import("arp.zig"); // M26 N2 (issue #400): the ARP table for the net-stats snapshot
 const dhcp = @import("dhcp.zig"); // M26 N2 (issue #400): DHCP lease state for the net-stats snapshot
 const udp = @import("udp.zig"); // claim 1384 (card N6): the milestone-five UDP layer
@@ -317,7 +317,7 @@ pub const EntryInfo = struct {
 
 var table_storage: [slot_count]Entry = undefined;
 var table_ready = false;
-var call_counts: [slot_count]u64 = [_]u64{0} ** slot_count;
+var call_counts: [svclock.cores][slot_count]u64 = [_][slot_count]u64{[_]u64{0} ** slot_count} ** svclock.cores;
 var write_fn: ?Writer = null;
 /// M22 D5 (issue #328): when set, dispatch() prints one line per syscall
 /// issued by that pid. Armed by the monitor's `strace` command around an
@@ -343,7 +343,7 @@ var clipboard_staging: [clipboard.capacity]u8 = undefined;
 /// base.
 pub fn init(writer: Writer) void {
     write_fn = writer;
-    @memset(&call_counts, 0);
+    for (0..svclock.cores) |c| @memset(&call_counts[c], 0);
     uaccess.init();
     clipboard.init();
     _ = ensure_table();
@@ -444,12 +444,42 @@ pub fn entry_info(number: u64) ?EntryInfo {
     if (number >= slot_count) return null;
     const entry = ensure_table()[number];
     if (entry.handler == null) return null;
-    return .{ .number = number, .name = entry.name, .calls = call_counts[number] };
+    var total: u64 = 0;
+    for (0..svclock.cores) |c| total +%= call_counts[c][number];
+    return .{ .number = number, .name = entry.name, .calls = total };
 }
 
 pub fn call_count(number: u64) u64 {
     if (number >= slot_count) return 0;
-    return call_counts[number];
+    var total: u64 = 0;
+    for (0..svclock.cores) |c| total +%= call_counts[c][number];
+    return total;
+}
+
+/// The service-domain locks a syscall must hold, as an svclock bitmask
+/// (claim 9498 follow-on). FILE/NET/WIN/EV syscalls take exactly their
+/// own domain lock and contend only with same-domain work; the kernel
+/// lock covers the registry/misc syscalls; sys_exit takes the full set so
+/// its teardown runs under every lock it touches; sys_exec loads files
+/// (FILE) AND registers a process (KERNEL). Syscalls with no shared
+/// service state (ping/write/yield/sleep — console and scheduler locks
+/// cover them) take nothing.
+fn doms_of(number: u64) u5 {
+    const f: u5 = svclock.dom_bit(.file);
+    const n: u5 = svclock.dom_bit(.net);
+    const w: u5 = svclock.dom_bit(.win);
+    const e: u5 = svclock.dom_bit(.ev);
+    const k: u5 = svclock.dom_bit(.kernel);
+    return switch (number) {
+        sys_udp_listen, sys_udp_send, sys_udp_recv, sys_tcp_connect, sys_tcp_send, sys_tcp_recv, sys_tcp_close, sys_ping_send, sys_ping_poll, sys_net_stats => n,
+        sys_file_open, sys_file_read, sys_file_write, sys_file_close, sys_dir_list, sys_file_delete, sys_file_rename, sys_file_truncate, sys_file_free => f,
+        sys_exec => f | k,
+        sys_win_open, sys_win_fill, sys_win_present, sys_win_close, sys_win_move, sys_win_raise, sys_win_get, sys_win_query, sys_win_set_visible, sys_win_fill_batch, sys_win_resize, 48, sys_win_raise_front, sys_win_lower_back, 52, sys_win_set_unsaved, sys_win_set_title, sys_drag_read, sys_font_size => w,
+        sys_ipc_send, sys_ipc_recv, sys_poll_event, sys_wait_event, sys_timer_set, sys_timer_cancel, sys_notify, sys_wmctl => e,
+        sys_procs, sys_wait, sys_kill, sys_clipboard_set, sys_clipboard_get, sys_audio_info, sys_audio_play, sys_audio_volume, sys_audio_mute, sys_pipe_read, sys_pipe_write, 54, sys_mmap, sys_munmap => k,
+        sys_exit => svclock.all_bits,
+        else => 0,
+    };
 }
 
 /// Dispatch one already-decoded syscall. In-range reserved slots are counted
@@ -457,17 +487,20 @@ pub fn call_count(number: u64) u64 {
 /// indexing the table. The caller writes this result into saved x0.
 pub fn dispatch(number: u64, args: Args, frame: *exceptions.VectorFrame) u64 {
     if (number >= slot_count) return error_result(.enosys);
-    // Userspace-service gate (claim 9498): every user syscall on EVERY
-    // core serializes here — the file/window/network/events/registry state
-    // the handlers touch is single-core-written. The hold is IRQ-masked
-    // and released on this return (a blocking syscall still unwinds here:
-    // the scheduler staged another task's frame, and the stub's eret goes
-    // to that frame after dispatch returns). Reentrancy (a handler that
-    // internally re-dispatches) never happens — handle_svc is the only
-    // production caller.
-    usergate.acquire();
-    defer usergate.release();
-    call_counts[number] +%= 1;
+    // Service-domain locks (claim 9498 follow-on): take exactly the locks
+    // of the subsystems this syscall touches, in canonical order (kernel
+    // last). IRQ-masked holders always run to completion, so SVC context
+    // may spin; the release lands on this return (a blocking syscall
+    // still unwinds here: the scheduler staged another task's frame, and
+    // the stub's eret goes to that frame after dispatch returns).
+    // Reentrancy (a handler that internally re-dispatches) never happens
+    // — handle_svc is the only production caller.
+    const doms = doms_of(number);
+    if (doms != 0) {
+        svclock.acquire_set(doms);
+        defer svclock.release_set(doms);
+    }
+    call_counts[svclock.core_id()][number] +%= 1;
     const handler = ensure_table()[number].handler orelse return error_result(.enosys);
     // M22 D5: sys_exit never returns from its handler (the scheduler
     // stages another task), so its trace line must be printed BEFORE the
