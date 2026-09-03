@@ -10,7 +10,9 @@
 # locally or in CI, and filterable with
 # `gh issue list --label claim --label claim:stale`. Staleness is
 # bot-aware (the sweep's own comments never reset the clock) and a claim is
-# flagged only once per stale period.
+# flagged only once per stale period. It runs ONLY on the weekly schedule
+# and manual workflow_dispatch (a job-level `if:` keeps it off the
+# event-driven triggers, which exist solely to drive unlabel-fresh).
 #
 # Job 2 (`unlabel-fresh`, event-driven) removes `claim:stale` in REAL TIME
 # when a claim sees human activity (comment, edit, or reopen) — so the
@@ -46,6 +48,12 @@ permissions:
 jobs:
   sweep:
     name: Warn on stale claim issues
+    # Only the weekly schedule and manual dispatch run the sweep — the
+    # issue_comment / issues triggers fire on every comment or edit and
+    # exist solely to drive unlabel-fresh, which removes claim:stale in
+    # real time. Without this gate, each of those events also runs a full
+    # (needless) weekly pass.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
