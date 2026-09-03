@@ -19,10 +19,20 @@ SKIPPED on every PR and push — wired but not enforcing.
 ## Security note
 
 This repository is public. A self-hosted runner executes whatever the
-workflow tells it to, so it must never be exposed to fork PRs. The `VZ
-hardware gates` workflow deliberately triggers only on same-repo pushes,
-PRs, and manual dispatch — do not add `pull_request_target`, and do not
-reuse this runner label for workflows that run untrusted code.
+workflow tells it to, so it must never be exposed to fork PRs. Two
+controls enforce that:
+
+- **Repository policy (the hard control):** Settings → Actions → General
+  → "Approval for running fork pull request workflows from contributors"
+  must stay at its strictest setting so a fork PR's workflow (including
+  a fork-modified `vz-gates.yml`) cannot run without an explicit
+  maintainer approval. Anyone who can approve a fork run is approving
+  arbitrary code execution on the runner host.
+- **In-workflow guard (defense in depth):** `vz-gates.yml` skips
+  (SKIPPED marker, exit 0) any `pull_request` whose head repository
+  differs from this one, so honest forks never reach the runner at all.
+  Do not remove that guard, do not add `pull_request_target`, and do not
+  reuse this runner label for workflows that run untrusted code.
 
 ## Steps
 
@@ -30,9 +40,14 @@ reuse this runner label for workflows that run untrusted code.
    27+, e.g. a dev machine), create a runner:
    GitHub → repo Settings → Actions → Runners → New self-hosted runner
    → macOS ARM64, then follow the download/config commands it shows.
-2. Install it as a service so it survives reboots and picks work while
-   you're away (the config output prints the exact `./svc.sh install`
-   commands; they need sudo).
+   The runner registered for this repository is named `vz-macos27-m4`
+   with the custom label `vz-macos27`; keep the label if you re-create
+   it, and give any replacement runner the same custom label.
+2. For unattended enforcement install it as a service so it survives
+   reboots and picks work while you're away (the config output prints
+   the exact `./svc.sh install` commands; they need sudo). Running
+   `./run.sh` in a terminal instead works, but the runner only picks up
+   jobs while that process stays alive.
 3. Note the labels you gave it at config time (e.g. `self-hosted`,
    `ARM64`, `macos-27`) — or add a custom label like `vz-macos27` for
    clarity.
@@ -40,7 +55,8 @@ reuse this runner label for workflows that run untrusted code.
    Settings → Secrets and variables → Actions → Variables →
    New repository variable: name `VZ_RUNNER_LABEL`, value = the label
    from step 3 (a custom label is safest; never rely only on shared
-   default labels).
+   default labels). For the registered runner that value is
+   `vz-macos27`.
 5. Re-run any recent `VZ hardware gates` workflow from the Actions tab
    and confirm shards land on your machine and go green end to end.
 

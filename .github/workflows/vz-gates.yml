@@ -15,7 +15,11 @@
 # variable is what turns this from "wired but skipped" into enforcement.
 #
 # Security note: self-hosted runners must never execute untrusted fork-PR
-# code. The trigger list below deliberately excludes pull_request_target;
+# code. The trigger list below deliberately excludes pull_request_target,
+# and an early step skips fork pull requests outright (VZ_SKIPPED) so a
+# fork's workflow never reaches a self-hosted runner. The repository's
+# fork-PR workflow approval policy (Settings -> Actions -> General) is the
+# hard control behind that guard and must stay at its strictest setting;
 # fork PRs run only the portable class-A set in ci.yml.
 
 name: VZ hardware gates
@@ -50,6 +54,20 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # Fork-PR guard. The runs-on label above may already have resolved to
+      # the self-hosted runner, but no fork-controlled workflow code may
+      # execute on it. When the triggering PR's head is a different
+      # repository, exit 0 with the honest SKIPPED marker (the same
+      # machinery the capability gate uses) so every later step is skipped.
+      # Defense in depth behind the repo's fork-PR workflow approval
+      # policy; do not remove this guard, and never add pull_request_target.
+      - name: Skip fork pull requests (self-hosted runner policy)
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+        shell: bash
+        run: |
+          echo "::notice title=VZ gates skipped::Fork pull requests never run class-B gates on the self-hosted runner."
+          echo "VZ_SKIPPED=1" >> "$GITHUB_ENV"
+
       # Capability gate. On a non-macOS or pre-macOS-27 machine the shard
       # exits 0 with a visible SKIPPED marker rather than pretending to
       # have proven anything.
@@ -69,6 +87,19 @@ jobs:
             exit 1
           fi
           echo "Runner: $(sw_vers -productVersion) arm64 — VZ gates will run."
+
+      # Self-hosted runners get a minimal PATH (a launchd service even more
+      # so), while the gate scripts and repo tooling expect Homebrew's
+      # modern bash/sed builds (tools/env-check.sh). Put the Homebrew
+      # toolchain on PATH for the remaining steps so CI matches the
+      # dev-shell environment the class-B gates are verified under.
+      # setup-zig below adds zig itself; swift/codesign live in /usr/bin.
+      - name: Put Homebrew toolchain on PATH
+        if: env.VZ_SKIPPED != '1'
+        shell: bash
+        run: |
+          echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
+          echo "/opt/homebrew/opt/gnu-sed/libexec/gnubin" >> "$GITHUB_PATH"
 
       - name: Setup Zig 0.16.0
         if: env.VZ_SKIPPED != '1'
