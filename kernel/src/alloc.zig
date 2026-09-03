@@ -41,6 +41,7 @@
 
 const std = @import("std");
 const memmap = @import("memmap.zig");
+const spinlock = @import("spinlock.zig"); // claim 9498: cross-core alloc/free (user tasks on any core)
 
 pub const page_size: u64 = memmap.page_size; // 4096
 
@@ -346,19 +347,35 @@ fn is_poolable(kind: memmap.MemoryType) bool {
 
 var state: State = .{};
 
+/// Physical-page allocator lock (claim 9498): with user tasks on any core,
+/// exec/mmap syscalls (SVC), reaps (main) and demand-paging faults
+/// (exception context) allocate concurrently. IRQ-masking so a holder is
+/// never preempted mid-critical-section; every allocation context is
+/// IRQ-masked anyway, so spinners always find the holder running. Nested
+/// allocs on one core cannot happen (alloc never allocates).
+var pool_lock = spinlock.IrqSaveSpinlock{};
+
 pub fn init(view: memmap.MapView, exclusions: []const Exclusion) bool {
+    const daif = pool_lock.lock();
+    defer pool_lock.unlock(daif);
     return state.init(view, exclusions);
 }
 
 pub fn alloc_pages(n: u64) ?u64 {
+    const daif = pool_lock.lock();
+    defer pool_lock.unlock(daif);
     return state.alloc_pages(n);
 }
 
 pub fn free_pages(base: u64, n: u64) bool {
+    const daif = pool_lock.lock();
+    defer pool_lock.unlock(daif);
     return state.free_pages(base, n);
 }
 
 pub fn reserve(base: u64, n: u64) bool {
+    const daif = pool_lock.lock();
+    defer pool_lock.unlock(daif);
     return state.reserve(base, n);
 }
 

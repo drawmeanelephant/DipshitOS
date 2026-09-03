@@ -263,6 +263,9 @@ pub const tab_attach_marker: []const u8 = "wnd: tab-attach";
 pub const tab_detach_marker: []const u8 = "wnd: tab-detach";
 pub const tab_activate_marker: []const u8 = "wnd: tab-activate";
 pub const tab_cycle_marker: []const u8 = "wnd: tab-cycle";
+/// M37 DQ3 (issue #839): press-dragged past the threshold — disambiguates
+/// drag-detach from ×-detach in the gate (both end in `wnd: tab-detach`).
+pub const tab_drag_marker: []const u8 = "wnd: tab-drag";
 // S1/S5 Action registry seam (Milestone 19, issues #701, #705)
 pub const action_reg_marker: []const u8 = "wnd: action-registered";
 pub const action_inv_marker: []const u8 = "wnd: action-invoked";
@@ -867,6 +870,91 @@ pub fn parse_id_suffix(verb: []const u8, prefix: []const u8) ?u8 {
     return @intCast(id);
 }
 
+// ---------------------------------------------------------------------------
+// M37 DQ3 (issue #839) — tab-strip mouse interaction. Hit-testing is pure
+// over the mirrors (host-testable); dispatch rides the existing
+// activate_tab / detach_tab fns. The shared wnd_core geometry (the SAME
+// rule the kernel paints) keeps pixels and clicks from drifting.
+// ---------------------------------------------------------------------------
+
+/// A pressed tab cell: which tab, and whether the press landed on ×.
+pub const TabHit = struct {
+    container_id: u8,
+    tab_id: u8,
+    on_close: bool,
+};
+
+/// Hit-test a point against every visible tab strip, top-down (reverse id
+/// order == top of the stack, mirroring the close-button scan). A strip
+/// exists ONLY on containers (tab_parent == 0) with ≥1 attached child —
+/// plain windows keep every client click. Returns null on miss.
+pub fn tab_hit_at(px: u32, py: u32) ?TabHit {
+    var si: usize = max_user_windows;
+    while (si > 0) {
+        si -= 1;
+        const m = &mirrors[si];
+        if (!m.valid or !m.visible or m.tab_parent != 0) continue;
+        // Attached children?
+        var has_child = false;
+        for (&mirrors) |*c| {
+            if (c.valid and c.tab_parent == m.id) {
+                has_child = true;
+                break;
+            }
+        }
+        if (!has_child) continue;
+        const strip = wnd_core.tab_strip_rect(m.x, m.y, m.w);
+        if (!wnd_core.tab_rect_contains(strip, px, py)) continue;
+        // Rebuild the group (container first, then children in order) and
+        // find the pressed cell.
+        var group: [max_user_windows + 1]u8 = undefined;
+        var gcount: usize = 0;
+        group[0] = m.id;
+        gcount = 1;
+        for (&mirrors) |*c| {
+            if (c.valid and c.tab_parent == m.id and gcount < group.len) {
+                group[gcount] = c.id;
+                gcount += 1;
+            }
+        }
+        var gi: usize = 0;
+        while (gi < gcount) : (gi += 1) {
+            const cell = wnd_core.tab_item_rect(strip.x, strip.y, strip.w, gi, gcount);
+            if (cell.w == 0) continue;
+            if (!wnd_core.tab_rect_contains(cell, px, py)) continue;
+            const cb = wnd_core.tab_close_rect(cell);
+            return TabHit{
+                .container_id = m.id,
+                .tab_id = group[gi],
+                .on_close = wnd_core.tab_rect_contains(cb, px, py),
+            };
+        }
+        return null; // inside the strip but past the last cell (narrow clip)
+    }
+    return null;
+}
+
+/// Drag threshold (Chebyshev > 12px) — press becomes a detach-drag. Pure.
+pub fn tab_drag_exceeded(x0: u32, y0: u32, x1: u32, y1: u32) bool {
+    const dx = if (x1 > x0) x1 - x0 else x0 - x1;
+    const dy = if (y1 > y0) y1 - y0 else y0 - y1;
+    return @max(dx, dy) > 12;
+}
+
+// Press state (a strip press in progress). Cleared on release and whenever
+// the god menu opens (modal capture would strand it).
+var tab_press_id: ?u8 = null;
+var tab_press_close: bool = false;
+var tab_press_x: u32 = 0;
+var tab_press_y: u32 = 0;
+var tab_dragging: bool = false;
+
+fn tab_press_clear() void {
+    tab_press_id = null;
+    tab_press_close = false;
+    tab_dragging = false;
+}
+
 pub fn init_god_menu_if_needed() void {
     if (!god_menu_initialized) {
         god_menu = SexiburgerMenu.init(Rect.make(0, 0, god_menu_w, god_menu_h));
@@ -1063,6 +1151,8 @@ pub fn toggle_god_menu() void {
         }
     } else {
         god_menu_prev_focus = if (focused_mirror()) |fm| fm.id else 0;
+        // M37 DQ3: modal capture would strand a tab press — clear it.
+        tab_press_clear();
         populate_god_menu();
         const menu_x = if (fb_w > god_menu_w) (fb_w - god_menu_w) / 2 else 0;
         const menu_y = if (fb_h > god_menu_h) (fb_h - god_menu_h) / 2 else 0;
@@ -1989,6 +2079,34 @@ fn main() noreturn {
                     continue;
                 }
 
+                // M37 DQ3 (issue #839): a tab-strip press in progress owns
+                // the button until release (click / × / detach-drag).
+                if (tab_press_id) |tid| {
+                    if (!left) {
+                        if (tab_dragging) {
+                            // Detach-drag: drop with top-left at the cursor.
+                            if (mirror(tid)) |tm| {
+                                const tw = tm.w;
+                                const th = tm.h;
+                                if (detach_tab(tid)) {
+                                    set_window_rect(tid, @intCast(px), @intCast(py), tw, th);
+                                }
+                            }
+                        } else if (tab_press_close) {
+                            _ = detach_tab(tid);
+                        } else {
+                            _ = activate_tab(tid);
+                        }
+                        tab_press_clear();
+                    } else if (!tab_dragging and tab_drag_exceeded(tab_press_x, tab_press_y, @intCast(px), @intCast(py))) {
+                        tab_dragging = true;
+                        var dbuf: [32]u8 = undefined;
+                        const dmsg = std.fmt.bufPrint(&dbuf, "{s} id={d}\n", .{ tab_drag_marker, tid }) catch "wnd: tab-drag\n";
+                        write_marker(dmsg);
+                    }
+                    prev_btn = btn;
+                    continue;
+                }
                 if (grabbing) {
                     if (left) {
                         // While held: MOVE via SET_WINDOW rect (the kernel
@@ -2074,9 +2192,24 @@ fn main() noreturn {
                                 }
                             }
                         }
+                        // M37 DQ3 (issue #839): a tab-strip press consumes
+                        // the edge (cells switch, × detaches, press+drag
+                        // detaches at drop). Checked before the title grab;
+                        // strip rows never overlap the title band, but the
+                        // consumed edge keeps the two grabs exclusive.
+                        if (!down_handled) {
+                            if (tab_hit_at(@intCast(px), @intCast(py))) |hit| {
+                                tab_press_id = hit.tab_id;
+                                tab_press_close = hit.on_close;
+                                tab_press_x = @intCast(px);
+                                tab_press_y = @intCast(py);
+                                tab_dragging = false;
+                                down_handled = true;
+                            }
+                        }
                         // WMS5: a title-bar grab starts a drag — only when the
-                        // DOWN EDGE was not consumed above (the dialog or a
-                        // close button already took it).
+                        // DOWN EDGE was not consumed above (the dialog, a
+                        // close button, or a tab-strip press already took it).
                         if (!down_handled) {
                             const fm = focused_mirror();
                             if (fm) |m| {
@@ -2190,6 +2323,8 @@ test "wnd: the marker/tuning shapes are pinned (live-gate grep targets)" {
     try std.testing.expectEqualStrings("wnd: god-menu close\n", god_menu_close_marker);
     try std.testing.expectEqualStrings("wnd: god-menu exec", god_menu_exec_marker);
     try std.testing.expectEqual(@as(u8, 0x2c), usage_space);
+    // M37 DQ3 (issue #839): the tab-drag transition marker.
+    try std.testing.expectEqualStrings("wnd: tab-drag", tab_drag_marker);
     // WMS6 Gate B (issue #626): the notification-center markers + subcommands.
     try std.testing.expectEqualStrings("wnd: notif-open\n", notif_open_marker);
     try std.testing.expectEqualStrings("wnd: notif-close\n", notif_close_marker);
@@ -2460,6 +2595,51 @@ test "wnd: dq1 windows+tabs populate from mirrors with tab entries" {
         if (std.mem.eql(u8, c.verb, "tab-next")) saw_next = true;
     }
     try std.testing.expect(saw_win and saw_tab and saw_next);
+}
+
+test "wnd: dq3 tab hit-testing over mirrors (cells, close, misses)" {
+    mirrors[0] = .{ .id = 2, .x = 56, .y = 56, .w = 512, .h = 384, .valid = true, .visible = true, .focused = true };
+    mirrors[1] = .{ .id = 3, .x = 56, .y = 56, .w = 512, .h = 384, .valid = true, .visible = true, .tab_parent = 2, .tab_active = false };
+    defer {
+        mirrors[0] = .{};
+        mirrors[1] = .{};
+        tab_press_clear();
+    }
+    // Strip rows are 72..93 (title band 56..71 above, client below).
+    const c0 = tab_hit_at(100, 80).?;
+    try std.testing.expectEqual(@as(u8, 2), c0.container_id);
+    try std.testing.expectEqual(@as(u8, 2), c0.tab_id);
+    try std.testing.expect(!c0.on_close);
+    const c1 = tab_hit_at(400, 80).?;
+    try std.testing.expectEqual(@as(u8, 3), c1.tab_id);
+    try std.testing.expect(!c1.on_close);
+    // × boxes: cell0 right end + cell1 right end.
+    const x0 = tab_hit_at(305, 80).?;
+    try std.testing.expectEqual(@as(u8, 2), x0.tab_id);
+    try std.testing.expect(x0.on_close);
+    const x1 = tab_hit_at(560, 80).?;
+    try std.testing.expectEqual(@as(u8, 3), x1.tab_id);
+    try std.testing.expect(x1.on_close);
+    // Misses: title rows, client area, outside.
+    try std.testing.expect(tab_hit_at(56, 60) == null);
+    try std.testing.expect(tab_hit_at(100, 200) == null);
+    try std.testing.expect(tab_hit_at(10, 10) == null);
+    // Plain window (child detached): no strip anywhere.
+    mirrors[1].tab_parent = 0;
+    try std.testing.expect(tab_hit_at(100, 80) == null);
+    mirrors[1].tab_parent = 2;
+    // Hidden container: no strip.
+    mirrors[0].visible = false;
+    try std.testing.expect(tab_hit_at(100, 80) == null);
+    mirrors[0].visible = true;
+}
+
+test "wnd: dq3 drag threshold (Chebyshev > 12px)" {
+    try std.testing.expect(!tab_drag_exceeded(100, 100, 105, 105));
+    try std.testing.expect(!tab_drag_exceeded(100, 100, 112, 100));
+    try std.testing.expect(tab_drag_exceeded(100, 100, 113, 100));
+    try std.testing.expect(tab_drag_exceeded(100, 100, 100, 113));
+    try std.testing.expect(tab_drag_exceeded(400, 80, 400, 200));
 }
 
 test "wnd: god menu init, 6-section population, and type-to-filter" {

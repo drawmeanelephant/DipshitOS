@@ -45,6 +45,7 @@ const clipboard = @import("clipboard.zig"); // M18 T2 (issue #405): shared clipb
 // when the file channel is armed (ESP fallback otherwise — dual path
 // until HF6).
 const virtio_file = @import("virtio_file.zig");
+const svclock = @import("svclock.zig"); // claim 9498 follow-on: the idle loop's service-state brackets (NET/WIN+EV/FILE)
 
 /// M18 T4: path for persistent shell history file.
 const history_path = "HISTORY.TXT";
@@ -3516,6 +3517,12 @@ fn park_body(mon: *monitor.Monitor) callconv(.c) void {
             // Hz generic timer before the drain — a renewal ACK processed
             // below restarts the lease from the CURRENT instant (honest
             // wall-clock seconds, the same clock `net dhcp` uses).
+            // Claim 9498 follow-on: the polled drain + lease engine below
+            // mutate virtio_net's shared transport state, which net-domain
+            // syscalls on other cores hold the NET lock for — bracket the
+            // whole drain (spinning is safe: holders run IRQ-masked to
+            // completion, and no parked task holds a domain lock).
+            svclock.net.acquire();
             virtio_net.dhcp.now_ticks = timer.ticks;
             // Card N10 (claim 7026): stamp the TCP connect clock the same
             // way — a SYN-ACK processed below starts the connection from
@@ -3534,6 +3541,7 @@ fn park_body(mon: *monitor.Monitor) callconv(.c) void {
             // surfaces the diagnostic). The re-DISCOVER after expiry
             // stays command-triggered.
             monitor.net_dhcp_autonomous(mon);
+            svclock.net.release();
             // Claim 6050 (milestone seven I3): drain the keyboard/pointer
             // event FIFO — poll the XHCI interrupt-IN endpoints, decode the
             // HID reports, and push decoded bytes for the NEXT shell poll
@@ -3541,6 +3549,11 @@ fn park_body(mon: *monitor.Monitor) callconv(.c) void {
             // input path is unarmed (default VM). Drains BEFORE the Road
             // Pops present so a report is never starved behind a slow
             // full-frame present.
+            // Claim 9498 follow-on: the drain + dui block below read/mutate
+            // driving_award (WIN) and push app events (EV) — take win+ev in
+            // canonical order for the whole span (input.drain's keyboard
+            // decode self-gates with acquire_missing and takes nothing).
+            svclock.acquire_set(svclock.dom_bit(.win) | svclock.dom_bit(.ev));
             input.drain();
             // M15 C2 (Alt+Tab overlay, #225): hold-Alt+Tab shows preview.
             // Card U4/U5 (claims 4993/0935, ADR 0008 D4): the pointer tick
@@ -3639,6 +3652,7 @@ fn park_body(mon: *monitor.Monitor) callconv(.c) void {
             if (wm_server.take_fallback_report()) {
                 mon.console.print_line("wm: unregistered, shim resumed");
             }
+            svclock.release_set(svclock.dom_bit(.win) | svclock.dom_bit(.ev));
             // Card N11 (claim 5357): the bounded retransmission timer —
             // polled here (the idle loop is the time engine — the
             // card-N9 clock pattern). AFTER the drain, so an ACK the
@@ -3648,6 +3662,10 @@ fn park_body(mon: *monitor.Monitor) callconv(.c) void {
             // the pending SYN/data/FIN byte-exact (counted, printed); the
             // exhausted bound (10) aborts the connection honestly
             // (counted, printed). Bare ACKs are never pending.
+            // Claim 9498 follow-on: poll_rto + the retransmit/abort paths
+            // mutate virtio_net's TCP state — the same NET-domain bracket
+            // as the RX drain above.
+            svclock.net.acquire();
             switch (virtio_net.tcp.poll_rto()) {
                 .none => {},
                 .retransmit => {
@@ -3676,8 +3694,14 @@ fn park_body(mon: *monitor.Monitor) callconv(.c) void {
                     mon.console.puts(") — connection aborted\n");
                 },
             }
+            svclock.net.release();
             // M21 W11: save window state every ~300 idle cycles.
+            // Claim 9498 follow-on: serialize_state reads WIN state and the
+            // WINDOWS.SAV write hits the FILE transport — both locked
+            // (canonical file < win; a no-op when nothing changed).
+            svclock.acquire_set(svclock.dom_bit(.file) | svclock.dom_bit(.win));
             persist_window_state_tick();
+            svclock.release_set(svclock.dom_bit(.file) | svclock.dom_bit(.win));
             idle_wait_rx();
         }
     }

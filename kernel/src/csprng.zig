@@ -24,6 +24,7 @@
 //! No libc, no POSIX, no allocation.
 
 const std = @import("std");
+const spinlock = @import("spinlock.zig"); // claim 9498 follow-on: cross-core random_bytes/seed
 
 pub const key_len: usize = 32;
 pub const nonce_len: usize = 12;
@@ -102,6 +103,12 @@ pub fn chacha20_block(key: *const [key_len]u8, counter: u32, nonce: *const [nonc
 // Stream state (module-level BSS — one global CSPRNG, no allocation)
 // ---------------------------------------------------------------------------
 
+/// Serializes stream mutation across cores: exec's ASLR stack placement,
+/// DNS/connect transaction ids, and the monitor `random` command can all
+/// run on secondary cores under the per-domain lock regime, so the
+/// keystream state is no longer behind one coarse gate.
+var stream_lock = spinlock.IrqSaveSpinlock{};
+
 var stream_key: [key_len]u8 = undefined;
 var stream_nonce: [nonce_len]u8 = undefined;
 var stream_counter: u32 = 0;
@@ -131,6 +138,8 @@ fn init_state(seed_bytes: *const [seed_len]u8) void {
 /// Key the CSPRNG from 64 bytes of entropy (the virtio device seed). Marks
 /// the module as genuinely seeded.
 pub fn seed(seed_bytes: *const [seed_len]u8) void {
+    const daif = stream_lock.lock();
+    defer stream_lock.unlock(daif);
     init_state(seed_bytes);
     seeded_flag = true;
 }
@@ -139,6 +148,8 @@ pub fn seed(seed_bytes: *const [seed_len]u8) void {
 /// unseeded builds behave identically across boots. `seeded()` stays
 /// false — this is honest, not a substitute for the real path.
 pub fn seed_fallback() void {
+    const daif = stream_lock.lock();
+    defer stream_lock.unlock(daif);
     var fb: [seed_len]u8 = [_]u8{0} ** seed_len;
     const tag = "VIRELAIOS-ENTROPY-FALLBACK";
     @memcpy(fb[0..tag.len], tag);
@@ -150,6 +161,8 @@ pub fn seed_fallback() void {
 /// never allocates. Safe to call while unseeded (the fallback key is
 /// deterministic); consumers should check `seeded()` for honesty.
 pub fn random_bytes(out: []u8) void {
+    const daif = stream_lock.lock();
+    defer stream_lock.unlock(daif);
     stream_bytes(out);
 }
 

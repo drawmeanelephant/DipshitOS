@@ -17,7 +17,7 @@
 //!   * The scheduler therefore only saves/restores per task: the
 //!     vector-frame pointer (sp), ELR_EL1 (interrupted PC) and SPSR_EL1
 //!     (interrupted PSTATE). The frame pointer reaches the tick through
-//!     `exceptions.resume_frame` (staged by `exc_dispatch` at IRQ entry);
+//!     `exceptions.resume_frame[c]` (staged by `exc_dispatch` at IRQ entry);
 //!     the tick rewrites that global to the NEXT task's frame and programs
 //!     ELR/SPSR, and the stub's `mov sp, x0` + register restore + `eret`
 //!     lands in the next task exactly as if IT had been interrupted.
@@ -64,6 +64,7 @@ const shared_mmap = @import("shared_mmap.zig"); // M33 SB2 (claim 8878): shared-
 // + exit status). One-way import: process.zig knows nothing about this
 // module.
 const process = @import("process.zig");
+const svclock = @import("svclock.zig"); // claim 9498 follow-on: per-service-domain locks — canonical file < net < win < ev < kernel, then sched_lock
 // Card 3f (claim 5965): the per-process IPC mailbox — the pool reset
 // clears it and the boot payload's process registration resets its ring.
 const mailbox = @import("mailbox.zig");
@@ -256,17 +257,76 @@ const Task = struct {
     /// not the program, owns process lifetime. Reset by the slot's reap
     /// (`.{ }` clears it).
     kill_pending: bool = false,
+    /// The reserved status the kill conversion exits with when
+    /// `kill_pending` converts (claim 9498 follow-on: the CPU-limit
+    /// arming rides 141, request_kill the 137 default). Reset to the
+    /// default by the conversion and by the slot's reap (`.{ }` clears
+    /// it).
+    kill_pending_status: u64 = reserved_kill_status,
+    /// SMP lift (claim 8477 follow-up): may this task run on a secondary
+    /// core? Only console-free kernel tasks (the worker) and explicitly
+    /// pinned user tasks today — ordinary user tasks print through the
+    /// polled virtio TX and must stay on core 0 (their other syscalls
+    /// touch unlocked core-0 state).
+    secondary_ok: bool = false,
+    /// SMP user tasks (claim 2369): the ONLY core this task may run on
+    /// (0 = any core). Core 0's pick skips a pinned candidate outright;
+    /// a secondary core's pick requires pin_core == its own id (plus
+    /// `secondary_ok`). `exec -c<core>` sets this via `pin_task`.
+    pin_core: usize = 0,
 };
 
 var tasks: [max_tasks]Task = [_]Task{.{}} ** max_tasks;
 var task_count: usize = 0;
-pub var current: usize = 0;
-pub var current_by_core: [smp.max_cores]usize = [_]usize{ 0, idle_id, idle_id, idle_id };
+/// The running task per core. Core 0 owns the task ring today
+/// (irq_dispatch gates tick to PE 0 — claim 7339); cores 1-3 sit in
+/// `idle_id` until the tick gate, ring locking, and task migration land.
+/// The old `current_by_core` vestige folded into this array.
+pub var current: [smp.max_cores]usize = [_]usize{ 0, idle_id, idle_id, idle_id };
 pub var sched_lock = spinlock.Spinlock.init();
+/// The core that currently holds `sched_lock` (smp.max_cores = nobody).
+/// Lets ring callbacks (the events.push hook) detect same-core reentry —
+/// `exit_current`/`tick` hold the lock when they push window-close events,
+/// and the hook wakes waiters by mutating the same ring.
+var sched_lock_holder: usize = smp.max_cores;
+
+fn sched_lock_acquire() void {
+    sched_lock.lock();
+    sched_lock_holder = smp.core_id();
+}
+
+fn sched_lock_release() void {
+    sched_lock_holder = smp.max_cores;
+    sched_lock.unlock();
+}
 var enabled_flag: bool = false;
 var switches: u64 = 0;
 var cooperative_yields: u64 = 0;
 var exits: u64 = 0;
+/// SMP lift (claim 8477 follow-up) evidence: how many times a secondary
+/// core staged a real task (WFE->task jump or secondary preemption).
+/// Printed once per change from the shell idle loop (main context).
+var secondary_runs: u64 = 0;
+var secondary_runs_printed: u64 = 0;
+/// The names of the most recent tasks a secondary core staged (the
+/// evidence line's `task=`; a process name when one exists), one ring
+/// slot per run so the drain can print EVERY run — a worker run between
+/// two user runs would otherwise mask the user name (the drain only sees
+/// the latest value).
+var secondary_last_task: []const u8 = "";
+const secondary_run_name_cap = 16;
+var secondary_run_names: [secondary_run_name_cap][]const u8 = undefined;
+var secondary_run_names_count: usize = 0;
+/// Secondary-core WFE-park capture (claim 2369): the location of the WFE
+/// loop's saved frame on the secondary stack + its ELR/SPSR, captured by
+/// `tick` the moment it starts a task from the parked state. A running
+/// task uses its OWN kstack (the eret into it moved SP_EL1 there), so
+/// the WFE frame bytes stay pristine on the secondary stack; a core-1
+/// task that exits with no eligible successor erets back to them instead
+/// of rolling the exit back (the old core-0-only orelse).
+var park_sp: [smp.max_cores]u64 = [_]u64{ 0, 0, 0, 0 };
+var park_elr: [smp.max_cores]u64 = [_]u64{ 0, 0, 0, 0 };
+var park_spsr: [smp.max_cores]u64 = [_]u64{ 0, 0, 0, 0 };
 /// Claim 0635: scheduler tick counter — advanced once per timer tick by
 /// `tick`/`on_tick`; the clock `sys_sleep` deadlines are measured against.
 /// Distinct from `timer.ticks` (timer deliveries, including polls) because
@@ -274,13 +334,16 @@ var exits: u64 = 0;
 /// contract is in SCHEDULER ticks.
 var tick_count: u64 = 0;
 
-/// Restored-context staging: written by `switch_context` (the pure core),
-/// applied by `tick` (the aarch64 wrapper: msr ELR/SPSR + resume_frame).
-var pending_sp: u64 = 0;
-var pending_elr: u64 = 0;
-var pending_spsr: u64 = 0;
-var pending_sp_el0: u64 = 0;
-var pending_ttbr0: u64 = 0;
+/// Restored-context staging, PER-CORE: written by `switch_context`/
+/// `stage_current` (SVC context) and applied by `tick`/`apply_pending`
+/// (IRQ context) on the SAME core — staging and apply never cross cores,
+/// so indexing both by the running core keeps a switch atomic against that
+/// core's own ticks. Cores 1-3 hold idle staging until they run tasks.
+var pending_sp: [smp.max_cores]u64 = [_]u64{0} ** smp.max_cores;
+var pending_elr: [smp.max_cores]u64 = [_]u64{0} ** smp.max_cores;
+var pending_spsr: [smp.max_cores]u64 = [_]u64{0} ** smp.max_cores;
+var pending_sp_el0: [smp.max_cores]u64 = [_]u64{0} ** smp.max_cores;
+var pending_ttbr0: [smp.max_cores]u64 = [_]u64{0} ** smp.max_cores;
 
 /// Task reports (main-context console discipline, claim 9187): a task
 /// marks ITS OWN report slot pending (claim 6729: one slot per pool entry,
@@ -349,7 +412,7 @@ var spawn_demo_armed: bool = false;
 /// Returns the task id (0).
 pub fn init() usize {
     task_count = 0;
-    current = 0;
+    current[0] = 0; // the shell boots on core 0
     switches = 0;
     cooperative_yields = 0;
     exits = 0;
@@ -395,6 +458,8 @@ pub fn init() usize {
 /// caller supplies the name, runtime entry address, SPSR mode, TTBR0 root,
 /// and SP_EL0 (0 for EL1h tasks). The new task starts `ready`.
 pub fn spawn(name: []const u8, entry: u64, spsr: u64, stack: []u8, ttbr0: u64, sp_el0: u64) ?usize {
+    sched_lock_acquire();
+    defer sched_lock_release();
     var id: usize = 0;
     while (id < max_tasks) : (id += 1) {
         if (tasks[id].state == .free) break;
@@ -417,7 +482,12 @@ pub fn spawn(name: []const u8, entry: u64, spsr: u64, stack: []u8, ttbr0: u64, s
 /// counter each quantum). `entry` is a runtime-computed function address
 /// (the caller takes `@intFromPtr(&task_fn)`).
 pub fn register_worker(entry: u64) ?usize {
-    return spawn("worker", entry, spsr_el1h_irqs, &worker_stack, mmu.kernel_root_phys(), 0);
+    const id = spawn("worker", entry, spsr_el1h_irqs, &worker_stack, mmu.kernel_root_phys(), 0) orelse return null;
+    // The worker is console-free (note_advance + request_report + spin),
+    // so it is the one task safe on a secondary core (the polled virtio
+    // TX has no lock — anything that prints must stay on core 0).
+    tasks[id].secondary_ok = true;
+    return id;
 }
 
 /// Register the first real lower-privilege task. Its saved register frame
@@ -465,6 +535,11 @@ pub fn register_exec_user_auxv(
 ) ?usize {
     const sp_el0 = stack_va + stack_len;
     const id = spawn("user-exec", entry_va, spsr_el0t_irqs, kstack, root_phys, sp_el0) orelse return null;
+    // Claim 9498: unpinned user tasks may run on ANY core (the console TX
+    // is locked — claim 2369 — and the userspace-service gate serializes
+    // their syscalls). `exec -c<core>` / the WM registration pin after
+    // this via `pin_task`.
+    tasks[id].secondary_ok = true;
     tasks[id].regions = .{
         .text = .{ .base = userspace.text_va, .len = text_len },
         .stack = .{ .base = stack_va, .len = stack_len },
@@ -477,6 +552,20 @@ pub fn register_exec_user_auxv(
     _ = exceptions.frame_write(frame, 1, argv_va);
     _ = exceptions.frame_write(frame, 2, auxv_va);
     return id;
+}
+
+/// Restrict task `id` to a single core (claim 9498: a RESTRICTION over
+/// the any-core default every user task now spawns with). `core > 0`
+/// pins to that secondary core (secondary_ok on, so that core's pick can
+/// take it); `core = 0` pins to CORE 0 only (secondary_ok off) — used by
+/// the registered WM, whose COMPOSITE_TICK pacing is core-0-tick-driven.
+/// Used by `exec -c<core>` and the WM registration; must be called right
+/// after the task is spawned (before it can be picked).
+pub fn pin_task(id: usize, core: usize) bool {
+    if (id >= max_tasks or tasks[id].state == .free) return false;
+    tasks[id].pin_core = core;
+    tasks[id].secondary_ok = (core != 0);
+    return true;
 }
 
 pub fn add_task_read_region(id: usize, reg: userspace.Region) void {
@@ -530,6 +619,8 @@ pub const KillResult = enum {
 /// TCB write, safe from the monitor's main context. Returns the exact
 /// refusal for unknown/already-exited/scheduler-owned targets.
 pub fn request_kill(id: usize) KillResult {
+    sched_lock_acquire();
+    defer sched_lock_release();
     if (id >= max_tasks or tasks[id].state == .free) return .not_found;
     if (tasks[id].state == .zombie) return .already_exited;
     // The shell (id 0) owns the console and the idle task is
@@ -550,13 +641,14 @@ pub fn request_kill(id: usize) KillResult {
 /// runs in (no console, no allocation).
 pub fn fault_current(esr: u64, far: u64, pc: u64) void {
     if (task_count == 0) return;
+    const c = smp.core_id(); // per-core current
     // Prefer the PROCESS name (e.g. "GUARD.BIN") over the generic task name
     // ("user-exec") — the process name is a stable name_buf slice, so the
     // pointer is a safe FIFO snapshot (same rule as the exit reports).
-    const name: []const u8 = if (process.find_by_task(current)) |pid|
+    const name: []const u8 = if (process.find_by_task(current[c])) |pid|
         process.info(pid).?.name
     else
-        tasks[current].name;
+        tasks[current[c]].name;
     const ec = (esr >> 26) & 0x3f;
     if (fault_report_count == fault_report_max) {
         fault_report_head = (fault_report_head + 1) % fault_report_max;
@@ -567,7 +659,7 @@ pub fn fault_current(esr: u64, far: u64, pc: u64) void {
     fault_report_count += 1;
     // Arc5 issue #246: if the process has a memory limit and it's exceeded,
     // use status 140 (mem_limit) instead of 139 (guard page).
-    const fault_status = if (process.find_by_task(current)) |pid|
+    const fault_status = if (process.find_by_task(current[c])) |pid|
         if (process.check_mem_limit(pid)) reserved_mem_limit_status else reserved_fault_status
     else
         reserved_fault_status;
@@ -578,7 +670,7 @@ pub fn fault_current(esr: u64, far: u64, pc: u64) void {
 /// zero for EL1h tasks). The syscall layer arms these into uaccess at SVC
 /// entry so `sys_write` bounds always follow the task that issued the call.
 pub fn current_user_regions() UserRegions {
-    return tasks[current].regions;
+    return tasks[current[smp.core_id()]].regions;
 }
 
 /// Physical address of the static user stack pages (claim 6783: the boot
@@ -601,6 +693,7 @@ pub fn register_user(entry: u64, image_base: u64) ?usize {
     const text = userspace.text_va_region();
     const stack = userspace.stack_va_region();
     const id = spawn("user-el0", entry_va, spsr_el0t_irqs, &user_kernel_stack, mmu.user_root_phys(), sp_el0) orelse return null;
+    tasks[id].secondary_ok = true; // claim 9498: user tasks may run on any core
     // Claim 0826: the boot payload carries its static apertures in the TCB
     // so the syscall layer can arm them at SVC entry like any user task.
     tasks[id].regions = .{ .text = text, .stack = stack };
@@ -693,86 +786,136 @@ fn park() noreturn {
 /// the next task's frame pointer + ELR/SPSR for `tick` to apply. No asm,
 /// no SP manipulation: the actual register restore happens in the
 /// claim-9746 stub (`mov sp, x0` + pop + `eret`) using the staged frame.
-fn next_runnable(after: usize) ?usize {
+/// Pick the next runnable task after `after` on behalf of core `cid`
+/// (the shared ring; callers hold `sched_lock`). Core 0 may pick any
+/// ready task; secondary cores may pick only `secondary_ok` tasks — never
+/// the shell (console owner) and never the shared idle slot (core 0's
+/// reaper — one frame, one owner).
+fn next_runnable_for(after: usize, cid: usize) ?usize {
     if (task_count == 0) return null;
-    const cid = smp.core_id();
     var offset: usize = 1;
     while (offset <= max_tasks) : (offset += 1) {
         const candidate = (after + offset) % max_tasks;
-        if (tasks[candidate].state == .ready) {
-            if (cid != 0 and candidate == 0) continue;
-            return candidate;
-        }
+        if (tasks[candidate].state != .ready) continue;
+        // A pinned task is visible only to its own core.
+        if (tasks[candidate].pin_core != 0 and tasks[candidate].pin_core != cid) continue;
+        if (cid != 0 and (candidate == 0 or candidate == idle_id or !tasks[candidate].secondary_ok)) continue;
+        return candidate;
     }
     return null;
 }
 
-fn stage_current() void {
+fn next_runnable(after: usize) ?usize {
+    return next_runnable_for(after, smp.core_id());
+}
+
+fn stage_selected(c: usize, next: usize) void {
     // Card 3c (claim 7786): a selected task with a pending kill is NOT
     // resumed — the ring converts its selection into the existing exit
     // path with the reserved status (the OS owns process lifetime). The
     // task's saved frame is abandoned; `exit_current` stages the next
-    // task, so the killed task never executes again. `current` is the
+    // task, so the killed task never executes again. `next` is the
     // selected task and its state is `ready` (exactly what exit_current
     // accepts), so this is the real exit/reap/pages-return lifecycle, not
     // a special teardown. No switching-core change: the same frame/ELR/
     // SPSR/TTBR0 machinery that follows any exit is used.
     // Claim 9094 (#810): validate `current` before the kill_pending read
     // (Task+0x178 — the exact byte read that faulted in run-11 boot 2).
-    audit.slot(current, .tick);
-    if (tasks[current].kill_pending) {
-        tasks[current].kill_pending = false;
-        _ = exit_current(reserved_kill_status);
-        return;
+    audit.slot(next, .tick);
+    if (tasks[next].kill_pending) {
+        // Kill conversion runs the full exit teardown (window close,
+        // shared-surface revoke, file/event/timer reset) — userspace-gate
+        // state. SVC/exit callers already hold the gate (reentrant); the
+        // IRQ tick's ungated rotation (claim 9498: rotation runs on
+        // sched_lock alone so gate contention never stalls the ring)
+        // try-acquires it here — never spins, since we hold sched_lock.
+        // When a syscall on another core is mid-flight, stage the task
+        // one more quantum instead: kill_pending stays set, so the next
+        // selection converts it.
+        const taken = svclock.try_take(svclock.all_bits);
+        if (taken != null) {
+            defer svclock.release_set(taken.?);
+            tasks[next].kill_pending = false;
+            const status = tasks[next].kill_pending_status;
+            tasks[next].kill_pending_status = reserved_kill_status; // back to the request_kill default
+            _ = exit_current_locked(status);
+            return;
+        }
     }
-    pending_sp = tasks[current].sp;
-    pending_elr = tasks[current].elr;
-    pending_spsr = tasks[current].spsr;
-    pending_sp_el0 = tasks[current].sp_el0;
-    pending_ttbr0 = tasks[current].ttbr0;
+    pending_sp[c] = tasks[next].sp;
+    pending_elr[c] = tasks[next].elr;
+    pending_spsr[c] = tasks[next].spsr;
+    pending_sp_el0[c] = tasks[next].sp_el0;
+    pending_ttbr0[c] = tasks[next].ttbr0;
     // Claim 6729: the selected task is now the one that will execute.
-    tasks[current].state = .running;
-    tasks[current].resumes += 1;
+    tasks[next].state = .running;
+    tasks[next].resumes += 1;
     switches += 1;
+    if (c != 0) {
+        secondary_runs +%= 1; // SMP lift evidence: a secondary core took a task
+        // Remember WHICH task for the evidence line (the process name when
+        // there is one — the exec'd file name — else the task name). A
+        // bounded ring keeps the name for every unprinted run (the drain
+        // prints each one; a full ring drops the oldest — runs are per
+        // tick, so 16 covers any real drain gap).
+        if (process.find_by_task(next)) |pid|
+            secondary_last_task = process.info(pid).?.name
+        else
+            secondary_last_task = tasks[next].name;
+        if (secondary_run_names_count < secondary_run_names.len) {
+            secondary_run_names[secondary_run_names_count] = secondary_last_task;
+            secondary_run_names_count += 1;
+        } else {
+            std.mem.copyForwards([]const u8, secondary_run_names[0 .. secondary_run_names.len - 1], secondary_run_names[1..]);
+            secondary_run_names[secondary_run_names.len - 1] = secondary_last_task;
+        }
+    }
+}
+
+fn stage_current() void {
+    const c = smp.core_id(); // per-core staging
+    stage_selected(c, current[c]);
 }
 
 pub fn switch_context(frame_sp: u64, elr: u64, spsr: u64, sp_el0: u64) void {
     if (task_count == 0) return;
-    tasks[current].sp = frame_sp;
-    tasks[current].elr = elr;
-    tasks[current].spsr = spsr;
-    tasks[current].sp_el0 = sp_el0;
-    tasks[current].saves += 1;
+    const c = smp.core_id(); // per-core current
+    tasks[current[c]].sp = frame_sp;
+    tasks[current[c]].elr = elr;
+    tasks[current[c]].spsr = spsr;
+    tasks[current[c]].sp_el0 = sp_el0;
+    tasks[current[c]].saves += 1;
     // The preempted task is runnable again; only a zombie is removed from
     // the ring (claim 6729).
-    if (tasks[current].state == .running) tasks[current].state = .ready;
-    current = next_runnable(current) orelse return;
+    if (tasks[current[c]].state == .running) tasks[current[c]].state = .ready;
+    current[c] = next_runnable(current[c]) orelse return;
     stage_current();
 }
 
 fn apply_pending() void {
-    const cid = smp.core_id();
-    exceptions.resume_frame[cid] = pending_sp;
-    exceptions.resume_sp_el0[cid] = pending_sp_el0;
+    const c = smp.core_id(); // per-core staging: the core that staged it
+    exceptions.resume_frame[c] = pending_sp[c];
+    exceptions.resume_sp_el0[c] = pending_sp_el0[c];
     if (comptime builtin.is_test or builtin.cpu.arch != .aarch64) return;
     // Claim 5804: install the selected task's TTBR0 (with a full TLB
     // invalidation) before restoring its ELR/SPSR, so the eret to EL0 (or
     // the resumed EL1h instruction stream) sees the task's own user space.
-    mmu.set_ttbr0(pending_ttbr0);
+    mmu.set_ttbr0(pending_ttbr0[c]);
     asm volatile ("msr elr_el1, %[v]"
         :
-        : [v] "r" (pending_elr),
+        : [v] "r" (pending_elr[c]),
     );
     asm volatile ("msr spsr_el1, %[v]"
         :
-        : [v] "r" (pending_spsr),
+        : [v] "r" (pending_spsr[c]),
     );
     asm volatile ("isb");
 }
 
 fn current_exception_pc() struct { elr: u64, spsr: u64 } {
+    const c = smp.core_id(); // per-core current
     if (comptime builtin.is_test or builtin.cpu.arch != .aarch64) {
-        return .{ .elr = tasks[current].elr, .spsr = tasks[current].spsr };
+        return .{ .elr = tasks[current[c]].elr, .spsr = tasks[current[c]].spsr };
     }
     var elr: u64 = 0;
     var spsr: u64 = 0;
@@ -789,9 +932,11 @@ fn current_exception_pc() struct { elr: u64, spsr: u64 } {
 /// an IRQ frame would be, then another runnable task is staged for `eret`.
 pub fn yield_current() bool {
     if (!scheduling_active()) return false;
+    sched_lock_acquire();
+    defer sched_lock_release();
+    const c = smp.core_id(); // per-core current
     const pc = current_exception_pc();
-    const cid = smp.core_id();
-    switch_context(exceptions.resume_frame[cid], pc.elr, pc.spsr, exceptions.resume_sp_el0[cid]);
+    switch_context(exceptions.resume_frame[c], pc.elr, pc.spsr, exceptions.resume_sp_el0[c]);
     cooperative_yields +%= 1;
     apply_pending();
     return true;
@@ -806,26 +951,31 @@ pub fn yield_current() bool {
 /// tick, matching the 1 s timer period). Returns false (EINVAL) for the
 /// idle task or an inactive/rolled-back pool.
 pub fn sleep_current(ticks: u64) bool {
-    if (!scheduling_active() or task_count == 0 or current == idle_id) return false;
-    if (tasks[current].state != .ready and tasks[current].state != .running) return false;
+    sched_lock_acquire();
+    defer sched_lock_release();
+    const c = smp.core_id(); // per-core current
+    if (!scheduling_active() or task_count == 0 or current[c] == idle_id) return false;
+    if (tasks[current[c]].state != .ready and tasks[current[c]].state != .running) return false;
     const duration = if (ticks == 0) 1 else ticks;
     const deadline = std.math.add(u64, tick_count, duration) catch return false;
-    const sleeping = current;
+    const sleeping = current[c];
     const name = tasks[sleeping].name;
     // Save the calling task's context (frame SP + ELR/SPSR + SP_EL0), the
     // same seam yield_current uses — the task MUST find its saved SVC frame
     // intact when wake_expired flips it back to ready and the ring resumes
     // it. Unlike exit_current, which never resumes the saved context.
     const pc = current_exception_pc();
-    const cid = smp.core_id();
-    tasks[sleeping].sp = exceptions.resume_frame[cid];
+    tasks[sleeping].sp = exceptions.resume_frame[c];
     tasks[sleeping].elr = pc.elr;
     tasks[sleeping].spsr = pc.spsr;
-    tasks[sleeping].sp_el0 = exceptions.resume_sp_el0[cid];
+    tasks[sleeping].sp_el0 = exceptions.resume_sp_el0[c];
     tasks[sleeping].saves += 1;
     tasks[sleeping].state = .blocked;
     tasks[sleeping].wakeup_tick = deadline;
     const next = next_runnable(sleeping) orelse {
+        // A secondary core with no eligible successor parks on its WFE
+        // loop; the sleeping task stays blocked for core 0's tick to wake.
+        if (stage_secondary_park(c)) return true;
         // No successor: roll back (the always-ready idle task makes this
         // unreachable in a normal boot; kept as a defensive bound).
         tasks[sleeping].state = .ready;
@@ -836,7 +986,7 @@ pub fn sleep_current(ticks: u64) bool {
     sleep_report_pending = true;
     sleep_report_name = name;
     sleep_report_ticks = duration;
-    current = next;
+    current[c] = next;
     stage_current();
     apply_pending();
     return true;
@@ -852,22 +1002,27 @@ pub fn sleep_current(ticks: u64) bool {
 /// status when the caller resumes. Returns false (EINVAL) for the idle
 /// task or an inactive/rolled-back pool.
 pub fn wait_current(target_pid: usize) bool {
-    if (!scheduling_active() or task_count == 0 or current == idle_id) return false;
-    if (tasks[current].state != .ready and tasks[current].state != .running) return false;
-    const waiting = current;
+    sched_lock_acquire();
+    defer sched_lock_release();
+    const c = smp.core_id(); // per-core current
+    if (!scheduling_active() or task_count == 0 or current[c] == idle_id) return false;
+    if (tasks[current[c]].state != .ready and tasks[current[c]].state != .running) return false;
+    const waiting = current[c];
     const pc = current_exception_pc();
-    const cid = smp.core_id();
     // Save the calling task's context (frame SP + ELR/SPSR + SP_EL0), the
     // same seam yield_current/sleep_current use — the task MUST find its
     // saved SVC frame intact when the target exits and the ring resumes it.
-    tasks[waiting].sp = exceptions.resume_frame[cid];
+    tasks[waiting].sp = exceptions.resume_frame[c];
     tasks[waiting].elr = pc.elr;
     tasks[waiting].spsr = pc.spsr;
-    tasks[waiting].sp_el0 = exceptions.resume_sp_el0[cid];
+    tasks[waiting].sp_el0 = exceptions.resume_sp_el0[c];
     tasks[waiting].saves += 1;
     tasks[waiting].state = .blocked;
     tasks[waiting].wait_pid = target_pid;
     const next = next_runnable(waiting) orelse {
+        // A secondary core with no eligible successor parks on its WFE
+        // loop; the waiting task stays blocked until the target exits.
+        if (stage_secondary_park(c)) return true;
         // No successor: roll back (the always-ready idle task makes this
         // unreachable in a normal boot; kept as a defensive bound).
         tasks[waiting].state = .ready;
@@ -875,7 +1030,7 @@ pub fn wait_current(target_pid: usize) bool {
         tasks[waiting].saves -%= 1;
         return false;
     };
-    current = next;
+    current[c] = next;
     stage_current();
     apply_pending();
     return true;
@@ -885,15 +1040,17 @@ pub fn wait_current(target_pid: usize) bool {
 /// arrives for process `pid`, then stage its successor. Rewinds ELR by 4
 /// so when the task wakes up, it re-executes `svc #0` under its own context.
 pub fn wait_event_current(pid: usize) bool {
-    if (!scheduling_active() or task_count == 0 or current == idle_id) return false;
-    if (tasks[current].state != .ready and tasks[current].state != .running) return false;
-    const waiting = current;
+    sched_lock_acquire();
+    defer sched_lock_release();
+    const c = smp.core_id(); // per-core current
+    if (!scheduling_active() or task_count == 0 or current[c] == idle_id) return false;
+    if (tasks[current[c]].state != .ready and tasks[current[c]].state != .running) return false;
+    const waiting = current[c];
     const pc = current_exception_pc();
-    const cid = smp.core_id();
-    tasks[waiting].sp = exceptions.resume_frame[cid];
+    tasks[waiting].sp = exceptions.resume_frame[c];
     tasks[waiting].elr = if (pc.elr >= 4) pc.elr - 4 else pc.elr;
     tasks[waiting].spsr = pc.spsr;
-    tasks[waiting].sp_el0 = exceptions.resume_sp_el0[cid];
+    tasks[waiting].sp_el0 = exceptions.resume_sp_el0[c];
     tasks[waiting].saves += 1;
     tasks[waiting].state = .blocked;
     tasks[waiting].wait_event_pid = pid;
@@ -902,16 +1059,19 @@ pub fn wait_event_current(pid: usize) bool {
     // the blocking result (0) into the saved frame's x0 — the elr-4
     // re-execution must see the original x0, or the wake's copy_out
     // targets address 0 (EFAULT) and every blocking GUI event loop dies.
-    const saved_frame: *const exceptions.VectorFrame = @ptrFromInt(exceptions.resume_frame[cid]);
+    const saved_frame: *const exceptions.VectorFrame = @ptrFromInt(exceptions.resume_frame[c]);
     tasks[waiting].wait_event_buf = exceptions.frame_read(saved_frame, 0);
     const next = next_runnable(waiting) orelse {
+        // A secondary core with no eligible successor parks on its WFE
+        // loop; the waiting task stays blocked until the event arrives.
+        if (stage_secondary_park(c)) return true;
         tasks[waiting].state = .ready;
         tasks[waiting].wait_event_pid = null;
         tasks[waiting].wait_event_buf = 0;
         tasks[waiting].saves -%= 1;
         return false;
     };
-    current = next;
+    current[c] = next;
     stage_current();
     apply_pending();
     return true;
@@ -919,6 +1079,12 @@ pub fn wait_event_current(pid: usize) bool {
 
 /// Milestone 9 (claim 1016): wake any task blocked in `sys_wait_event` for `pid`.
 pub fn wake_event_waiters(pid: usize) void {
+    // The events.push hook fires from SVC contexts AND from inside
+    // sched_lock-held teardown (exit_current's close_owner pushes
+    // WIN_CLOSE events) — same-core reentry must not re-lock.
+    const already_held = sched_lock_holder == smp.core_id();
+    if (!already_held) sched_lock_acquire();
+    defer if (!already_held) sched_lock_release();
     var i: usize = 0;
     while (i < max_tasks) : (i += 1) {
         if (tasks[i].state != .blocked) continue;
@@ -976,6 +1142,7 @@ fn wake_expired() void {
 /// counter and run the timer-driven wakeups. Called by the real `tick`
 /// before preemption; host tests call it directly to drive sleepers.
 pub fn on_tick() void {
+    const c = smp.core_id(); // per-core current
     tick_count +%= 1;
     wake_expired();
     // Milestone 14 (claim 7323): count every armed app timer down and fire
@@ -988,12 +1155,19 @@ pub fn on_tick() void {
     // when no WM is registered (zero-regression: shim mode unchanged).
     wm_server.on_tick();
     // Arc5 issue #246: per-process CPU limit enforcement. Increment the
-    // current process's tick counter; if the limit is exceeded, terminate
-    // the process with status 141 (distinct from guard-page 139).
-    if (current != idle_id and tasks[current].state == .running) {
-        if (process.find_by_task(current)) |pid| {
+    // current process's tick counter; if the limit is exceeded, arm the
+    // ring's kill conversion with status 141 (distinct from guard-page
+    // 139). Claim 9498 follow-on: on_tick holds only the EV + kernel
+    // subset, while the exit teardown needs the FULL domain set — exiting
+    // synchronously here would require acquiring file/net/win out of
+    // canonical order (a deadlock risk against a teardown holding them),
+    // so the task converts at its next ring selection instead, one
+    // quantum later.
+    if (current[c] != idle_id and tasks[current[c]].state == .running) {
+        if (process.find_by_task(current[c])) |pid| {
             if (process.inc_cpu_ticks(pid)) {
-                _ = exit_current(reserved_cpu_limit_status);
+                tasks[current[c]].kill_pending = true;
+                tasks[current[c]].kill_pending_status = reserved_cpu_limit_status;
             }
         }
     }
@@ -1004,10 +1178,32 @@ pub fn on_tick() void {
 /// never resumes after `sys_exit`. Claim 6729: the exiting task becomes a
 /// ZOMBIE (its status is preserved for `terminated_status`); the idle task
 /// reaps it later. The idle task itself can never be exited.
+/// Ring-exit entry (sys_exit / fault / kill): lock, then exit the calling
+/// task. Exception context is IRQ-masked, so spinning on `sched_lock` is
+/// safe — a main-context holder (the idle reaper) is never starved because
+/// its own preempting ticks `try_lock` and skip.
 pub fn exit_current(status: u64) bool {
-    if (task_count == 0 or current == idle_id) return false;
-    if (tasks[current].state != .ready and tasks[current].state != .running) return false;
-    const exiting = current;
+    // Service-domain locks (claim 9498 follow-on): the teardown below
+    // (window close, shared-surface revoke, file/event/timer reset)
+    // touches EVERY service domain — take the full set in canonical
+    // order, FIRST, before sched_lock, everywhere. The sys_exit dispatch
+    // already holds the full set (acquire_missing returns nothing); the
+    // fault path does not.
+    const taken = svclock.acquire_missing(svclock.all_bits);
+    defer svclock.release_set(taken);
+    sched_lock_acquire();
+    defer sched_lock_release();
+    return exit_current_locked(status);
+}
+
+/// Ring-exit core: mark the calling task zombie and stage its successor.
+/// Callers hold `sched_lock` (exit_current, stage_selected's kill path,
+/// on_tick's CPU-limit enforcement).
+fn exit_current_locked(status: u64) bool {
+    const c = smp.core_id(); // per-core current
+    if (task_count == 0 or current[c] == idle_id) return false;
+    if (tasks[current[c]].state != .ready and tasks[current[c]].state != .running) return false;
+    const exiting = current[c];
     const name = tasks[exiting].name;
     tasks[exiting].state = .zombie;
     tasks[exiting].exit_status = status;
@@ -1082,14 +1278,52 @@ pub fn exit_current(status: u64) bool {
         _ = wm_server.unregister(pid);
     }
     const next = next_runnable(exiting) orelse {
-        // No successor: roll back (the always-ready idle task makes this
-        // unreachable in a normal boot; kept as a defensive bound).
+        // No successor. Core 0 is unreachable here (the always-ready idle
+        // task); a SECONDARY core parks back on its WFE loop instead of
+        // rolling the exit back — the exiting task stays a zombie for core
+        // 0's reaper (claim 2369).
+        if (stage_secondary_park(c)) {
+            queue_exit_report(name, status);
+            exits +%= 1;
+            return true;
+        }
+        // No successor (defensive rollback — the always-ready idle task
+        // makes this unreachable in a normal boot; kept as a bound).
         tasks[exiting].state = .ready;
         tasks[exiting].exit_status = 0;
         return false;
     };
-    // Card 3d (claim 1014): EVERY exit is queued (a full ring drops the
-    // oldest) — N exits in one window print N lines in order.
+    queue_exit_report(name, status);
+    exits +%= 1;
+    current[c] = next;
+    stage_current();
+    apply_pending();
+    return true;
+}
+
+/// Card 3d (claim 1014): EVERY exit is queued (a full ring drops the
+/// oldest) — N exits in one window print N lines in order. Callers hold
+/// `sched_lock`.
+/// Secondary-core park (claim 2369): stage the WFE frame captured when
+/// this core started its task, so an SVC that must give up the CPU
+/// (sleep/wait/wait_event/exit) with no eligible successor returns the
+/// core to its WFE loop instead of rolling back. The parked task stays in
+/// its new state (blocked/zombie) for core 0's tick/reaper to service;
+/// a later tick picks it up again when it is ready (pin_core routes it
+/// back to this core). Callers hold `sched_lock` and run on core `c`.
+fn stage_secondary_park(c: usize) bool {
+    if (c == 0 or park_sp[c] == 0) return false;
+    current[c] = idle_id;
+    pending_sp[c] = park_sp[c];
+    pending_elr[c] = park_elr[c];
+    pending_spsr[c] = park_spsr[c];
+    pending_sp_el0[c] = 0;
+    pending_ttbr0[c] = mmu.kernel_root_phys();
+    apply_pending();
+    return true;
+}
+
+fn queue_exit_report(name: []const u8, status: u64) void {
     if (exit_report_count == exit_report_max) {
         exit_report_head = (exit_report_head + 1) % exit_report_max;
         exit_report_count -= 1;
@@ -1097,11 +1331,6 @@ pub fn exit_current(status: u64) bool {
     const report_index = (exit_report_head + exit_report_count) % exit_report_max;
     exit_reports[report_index] = .{ .name = name, .status = status };
     exit_report_count += 1;
-    exits +%= 1;
-    current = next;
-    stage_current();
-    apply_pending();
-    return true;
 }
 
 /// Claim 6729: reap a zombie — free its pool slot. Only a zombie may be
@@ -1112,6 +1341,14 @@ pub fn exit_current(status: u64) bool {
 /// exited descriptor (name, status, stack VA) stays in the `procs` table
 /// for the claim-3848 exit record, but the memory is recycled immediately.
 pub fn reap(id: usize) bool {
+    // Kernel lock first (claim 9498 follow-on): release_pages_on_reap
+    // zeroes the exited process's registry rows, which sys_procs and the
+    // registry syscalls read under the kernel lock.
+    const gated = !svclock.kernel.held();
+    if (gated) svclock.kernel.acquire();
+    defer if (gated) svclock.kernel.release();
+    sched_lock_acquire();
+    defer sched_lock_release();
     if (id >= max_tasks or tasks[id].state != .zombie) return false;
     _ = process.release_pages_on_reap(id);
     tasks[id] = .{};
@@ -1194,12 +1431,51 @@ fn spawn_demo_entry() void {
 /// IRQ-context tick (called from the kernel's irq_dispatch right after
 /// timer.handle re-armed the comparator): preempt the current task and
 /// round-robin to the next. The interrupted task's vector frame is on the
-/// stack (`exceptions.resume_frame`); ELR_EL1/SPSR_EL1 still hold the
+/// stack (`exceptions.resume_frame[c]`); ELR_EL1/SPSR_EL1 still hold the
 /// interrupted PC/PSTATE. The switch itself only programs ELR/SPSR and the
 /// stub's restore frame — the stub does the register pop and eret.
 pub fn tick() void {
     if (comptime builtin.cpu.arch != .aarch64) return;
     if (!scheduling_active()) return;
+    // Ring lock FIRST (held briefly): the preemption rotation (save,
+    // pick, stage) touches only per-core staging and ready<->running
+    // flips, which need no userspace gate. It must NOT be held hostage
+    // to the gate — a syscall on another core holds it for its WHOLE
+    // duration, and a tick that skipped on that would stall the ring
+    // (the idle reaper never runs, zombies pile up — the claim-9498
+    // live flake). Gate-protected work below (timekeeping + kill
+    // conversions) try-acquires it and defers only THAT work.
+    if (!sched_lock.try_lock()) return; // ring busy (idle reaping etc.) — skip this beat
+    sched_lock_holder = smp.core_id();
+    defer sched_lock_release();
+    const c = smp.core_id(); // per-core staging
+    smp.core_ticks[c] +%= 1;
+    // Userspace-service gate: on_tick's registries (app timers, WM
+    // pacing, CPU-limit exits) mutate the same state user syscalls hold
+    // the gate over. Every gate hold masks IRQs, so a same-core holder
+    // can never be paused under a tick — contention here is always a
+    // syscall mid-flight on ANOTHER core, and the rotation below is safe
+    // without the gate (only on_tick's registry work + the exit
+    // teardowns need it). The held() check is a defensive bound: if a
+    // same-core holder ever IS paused under us, do not rotate (any task
+    // we switched to would spin on a gate only this core can release).
+    // Service-domain locks (claim 9498 follow-on): on_tick's registry
+    // work (app timers, WM pacing, CPU-limit arming) mutates EV + kernel
+    // state — its canonical subset. try_take NEVER spins (we hold
+    // sched_lock): a same-domain syscall elsewhere defers only this work
+    // while the rotation below proceeds (the claim-9498 ring-progress
+    // fix). try_take also skips bits this core already holds — but svclock
+    // holders mask IRQs, so no tick can ever preempt a same-core hold.
+    const evk = svclock.dom_bit(.ev) | svclock.dom_bit(.kernel);
+    const evk_taken = svclock.try_take(evk);
+    defer if (evk_taken) |t| svclock.release_set(t);
+    // Global timekeeping + registries (tick_count, wake_expired, app
+    // timers, WM pacing, CPU limits) stay on the core-0 authority; a
+    // secondary core runs ONLY the switch machinery on its own per-core
+    // staging (claim 8477 follow-up lift). Skipped when a same-domain
+    // syscall is mid-flight (one 1 s cadence loss — the pre-existing
+    // skip semantic).
+    if (c == 0 and evk_taken != null) on_tick();
     var elr: u64 = 0;
     var spsr: u64 = 0;
     asm volatile ("mrs %[v], elr_el1"
@@ -1208,9 +1484,45 @@ pub fn tick() void {
     asm volatile ("mrs %[v], spsr_el1"
         : [v] "=r" (spsr),
     );
-    on_tick();
-    const cid = smp.core_id();
-    timer_switch_context(exceptions.resume_frame[cid], elr, spsr, exceptions.resume_sp_el0[cid]);
+    if (c != 0 and current[c] == idle_id) {
+        // The secondary core's WFE loop owns no ring slot — jump straight
+        // to an eligible task (nothing to save). If none is runnable, the
+        // stub restores the WFE frame and the core keeps spinning.
+        // Capture the WFE frame FIRST (claim 2369): `resume_frame[c]` is
+        // the tick IRQ frame on the secondary stack, and `elr`/`spsr` the
+        // interrupted loop's — a task staged from here runs on its own
+        // kstack, so these bytes survive intact until the task exits, when
+        // exit_current erets back to them (park) if no successor exists.
+        park_sp[c] = exceptions.resume_frame[c];
+        park_elr[c] = elr;
+        park_spsr[c] = spsr;
+        const next = next_runnable_for(idle_id, c) orelse return;
+        current[c] = next;
+        stage_selected(c, next);
+        apply_pending();
+        return;
+    }
+    // A lone secondary-eligible task keeps running (the shared idle
+    // fallback is core 0's, so there is no always-ready successor here).
+    // A kill_pending must still convert even without a successor to
+    // switch to — request_kill on a lone core-1 task would otherwise
+    // stall until it blocks (claim 9498). The conversion runs the exit
+    // teardown — EVERY service domain — so it try-takes the missing
+    // file/net/win bits now (ev+kernel already held above). When any is
+    // contended the task runs one more quantum and the next beat
+    // converts it (the outer defer releases ev+kernel).
+    if (c != 0 and current[c] != idle_id and tasks[current[c]].kill_pending and evk_taken != null) {
+        if (svclock.try_take(svclock.all_bits)) |more| {
+            defer svclock.release_set(more);
+            tasks[current[c]].kill_pending = false;
+            const status = tasks[current[c]].kill_pending_status;
+            tasks[current[c]].kill_pending_status = reserved_kill_status; // back to the request_kill default
+            _ = exit_current_locked(status); // tick holds all five + sched_lock
+            return;
+        }
+    }
+    if (c != 0 and next_runnable_for(current[c], c) == null) return;
+    timer_switch_context(exceptions.resume_frame[c], elr, spsr, exceptions.resume_sp_el0[c]);
     apply_pending();
 }
 
@@ -1448,7 +1760,8 @@ pub const audit = struct {
 /// this in its main-context loop).
 pub fn note_advance() void {
     if (task_count == 0) return;
-    tasks[current].advances += 1;
+    const c = smp.core_id(); // per-core current
+    tasks[current[c]].advances += 1;
 }
 
 /// Task-side: ask the shell idle loop to print the current task's advance
@@ -1458,9 +1771,10 @@ pub fn note_advance() void {
 /// reports cannot starve another's (the worker requests every 64
 /// iterations; the spawn-demo task every 16).
 pub fn request_report() void {
-    if (task_count == 0 or report_pending[current]) return;
-    report_pending[current] = true;
-    report_advances[current] = tasks[current].advances;
+    const c = smp.core_id(); // per-core current
+    if (task_count == 0 or report_pending[current[c]]) return;
+    report_pending[current[c]] = true;
+    report_advances[current[c]] = tasks[current[c]].advances;
 }
 
 /// Shell-side (main context, next to timer.maybe_heartbeat): print every
@@ -1470,6 +1784,20 @@ pub fn maybe_report(con: *console.Console) void {
     // process audit — main context, console-safe (claim 9187). Nothing
     // prints on healthy boots beyond the one-per-boot armed line.
     audit.drain(con);
+    // SMP lift evidence (claim 8477 follow-up): one line per secondary
+    // RUN (not per drain check), printed from the shell idle loop (main
+    // context). The ring preserves the per-run name, so a user run
+    // sandwiched between worker runs still gets its own line.
+    while (secondary_runs_printed < secondary_runs) {
+        secondary_runs_printed += 1;
+        const index = secondary_runs_printed - 1;
+        const name = if (index < secondary_run_names_count) secondary_run_names[index] else secondary_last_task;
+        con.puts("smp: secondary runs=");
+        con.print_u64(secondary_runs_printed);
+        con.puts(" task=");
+        con.puts(name);
+        con.puts("\n");
+    }
     var i: usize = 0;
     while (i < max_tasks) : (i += 1) {
         if (!report_pending[i]) continue;
@@ -1551,6 +1879,9 @@ pub const TaskInfo = struct {
     saves: u64,
     resumes: u64,
     advances: u64,
+    /// SMP user tasks (claim 2369): the only core this task may run on
+    /// (0 = any core). Set by `pin_task` via `exec -c<core>`.
+    pin_core: usize,
 };
 
 pub const Stats = struct {
@@ -1570,7 +1901,7 @@ pub fn stats() Stats {
     }
     return .{
         .enabled = enabled_flag,
-        .current = current,
+        .current = current[smp.core_id()],
         .switches = switches,
         .count = task_count,
         .zombies = zombies,
@@ -1585,18 +1916,16 @@ pub fn task_info(id: usize) ?TaskInfo {
         .saves = tasks[id].saves,
         .resumes = tasks[id].resumes,
         .advances = tasks[id].advances,
+        .pin_core = tasks[id].pin_core,
     };
 }
 
 pub fn current_id() usize {
-    return current;
+    return current[smp.core_id()];
 }
 
 pub fn current_task_for_core(cid: usize) usize {
-    if (cid == 0) return current;
-    if (cid < smp.max_cores) {
-        return current_by_core[cid];
-    }
+    if (cid < smp.max_cores) return current[cid];
     return 0;
 }
 
@@ -1688,6 +2017,60 @@ test "scheduler: register_worker builds a valid synthetic frame" {
     try std.testing.expect(!has_free_slot());
 }
 
+test "scheduler: user tasks are any-core and the shell/idle stay on core 0" {
+    // Claim 9498: the console TX is locked (2369) and the userspace gate
+    // serializes syscalls, so USER tasks default to ANY core. The shell
+    // (console owner / command runner) and the shared idle slot (core 0's
+    // reaper — one frame, one owner) stay core-0.
+    _ = init();
+    const worker = register_worker(0x1111).?; // secondary_ok = true
+    try std.testing.expectEqual(@as(usize, 1), worker);
+    try std.testing.expect(tasks[worker].secondary_ok);
+    try std.testing.expect(!tasks[0].secondary_ok); // shell stays on core 0
+    try std.testing.expect(!tasks[idle_id].secondary_ok); // idle is core-0's reaper
+    const user = register_user(0x2222, 0).?;
+    try std.testing.expectEqual(@as(usize, 2), user);
+    try std.testing.expect(tasks[user].secondary_ok); // any-core default
+    try std.testing.expectEqual(@as(usize, 0), tasks[user].pin_core);
+    // Core 1 walking from the shell finds the worker first (slot order).
+    try std.testing.expectEqual(@as(?usize, worker), next_runnable_for(0, 1));
+    // Core 1 from the worker finds the user task (now eligible) ahead of
+    // the wrap.
+    try std.testing.expectEqual(@as(?usize, user), next_runnable_for(worker, 1));
+    // Core 0 picks the user task normally too.
+    try std.testing.expectEqual(@as(?usize, user), next_runnable_for(worker, 0));
+}
+
+test "scheduler: pin_task restricts a user task to exactly one core" {
+    // SMP user tasks (claim 2369 + 9498): `exec -c<core>` pins a spawned
+    // task; `pin_task(.., 0)` pins back to CORE 0 only (the any-core
+    // default is a RESTRICTION removed by pinning, never re-added).
+    _ = init();
+    const worker = register_worker(0x1111).?;
+    const user = register_user(0x2222, 0).?;
+    try std.testing.expect(tasks[user].secondary_ok); // any-core default
+    try std.testing.expect(pin_task(user, 1));
+    try std.testing.expectEqual(@as(usize, 1), tasks[user].pin_core);
+    try std.testing.expect(tasks[user].secondary_ok); // pinned off core 0
+    // Core 1 from the worker finds the pinned user task (it is eligible
+    // AND ahead of the worker in the wrap order).
+    try std.testing.expectEqual(@as(?usize, user), next_runnable_for(worker, 1));
+    // Core 0 skips the pinned task entirely — from the worker it wraps
+    // straight to the idle fallback, never to the user task.
+    try std.testing.expectEqual(@as(?usize, idle_id), next_runnable_for(worker, 0));
+    // Core 1 may also still pick the worker (any-core, secondary_ok).
+    try std.testing.expectEqual(@as(?usize, worker), next_runnable_for(user, 1));
+    // Pinning to core 0 (the WM registration) makes the task core-0-ONLY:
+    // core 1 skips it again and core 0 picks it again.
+    try std.testing.expect(pin_task(user, 0));
+    try std.testing.expectEqual(@as(usize, 0), tasks[user].pin_core);
+    try std.testing.expect(!tasks[user].secondary_ok);
+    try std.testing.expectEqual(@as(?usize, worker), next_runnable_for(worker, 1));
+    try std.testing.expectEqual(@as(?usize, user), next_runnable_for(worker, 0));
+    // Unknown ids are refused.
+    try std.testing.expect(!pin_task(max_tasks + 4, 1));
+}
+
 test "scheduler: register_user separates EL1 exception and EL0 stacks" {
     _ = init();
     _ = register_worker(0x2000).?;
@@ -1733,46 +2116,46 @@ test "scheduler: round-robin alternates and round-trips saved context" {
     // First switch: the shell is preempted at pc 0x1000; the worker is
     // restored to its synthetic frame.
     switch_context(0x1000, 0x1000, 0x5, 0xaaaa);
-    try std.testing.expectEqual(@as(usize, 1), current);
+    try std.testing.expectEqual(@as(usize, 1), current[0]);
     try std.testing.expectEqual(@as(u64, 1), switches);
     try std.testing.expectEqual(@as(u64, 1), tasks[0].saves);
     try std.testing.expectEqual(@as(u64, 0), tasks[0].resumes);
     try std.testing.expectEqual(@as(u64, 1), tasks[1].resumes);
     try std.testing.expectEqual(@as(u64, 0), tasks[1].saves);
-    try std.testing.expectEqual(tasks[1].sp, pending_sp);
-    try std.testing.expectEqual(worker_entry, pending_elr);
-    try std.testing.expectEqual(spsr_el1h_irqs, pending_spsr);
+    try std.testing.expectEqual(tasks[1].sp, pending_sp[0]);
+    try std.testing.expectEqual(worker_entry, pending_elr[0]);
+    try std.testing.expectEqual(spsr_el1h_irqs, pending_spsr[0]);
     // Second switch: the worker is preempted; the user task is restored to
     // its synthetic EL0t frame.
     switch_context(0x2000, 0x2000, 0x5, 0xbbbb);
-    try std.testing.expectEqual(@as(usize, 2), current);
+    try std.testing.expectEqual(@as(usize, 2), current[0]);
     try std.testing.expectEqual(@as(u64, 2), switches);
     try std.testing.expectEqual(@as(u64, 1), tasks[1].saves);
     try std.testing.expectEqual(@as(u64, 1), tasks[1].resumes);
-    try std.testing.expectEqual(tasks[2].sp, pending_sp);
-    try std.testing.expectEqual(@as(u64, 0x3000), pending_elr);
-    try std.testing.expectEqual(spsr_el0t_irqs, pending_spsr);
+    try std.testing.expectEqual(tasks[2].sp, pending_sp[0]);
+    try std.testing.expectEqual(@as(u64, 0x3000), pending_elr[0]);
+    try std.testing.expectEqual(spsr_el0t_irqs, pending_spsr[0]);
     // Third switch: the user is preempted; the idle task is restored.
     switch_context(0x3000, 0x3000, 0x0, 0xcccc);
-    try std.testing.expectEqual(@as(usize, idle_id), current);
+    try std.testing.expectEqual(@as(usize, idle_id), current[0]);
     try std.testing.expectEqual(@as(u64, 3), switches);
     try std.testing.expectEqual(@as(u64, 1), tasks[2].saves);
     try std.testing.expectEqual(@as(u64, 1), tasks[idle_id].resumes);
-    try std.testing.expectEqual(tasks[idle_id].sp, pending_sp);
+    try std.testing.expectEqual(tasks[idle_id].sp, pending_sp[0]);
     // Fourth switch: the idle task is preempted; the shell is restored to
     // its exact saved context (the round-trip).
     switch_context(0x4000, 0x4000, 0x5, 0xdddd);
-    try std.testing.expectEqual(@as(usize, 0), current);
+    try std.testing.expectEqual(@as(usize, 0), current[0]);
     try std.testing.expectEqual(@as(u64, 4), switches);
     try std.testing.expectEqual(@as(u64, 1), tasks[idle_id].saves);
     try std.testing.expectEqual(@as(u64, 1), tasks[0].resumes);
-    try std.testing.expectEqual(@as(u64, 0x1000), pending_sp);
-    try std.testing.expectEqual(@as(u64, 0x1000), pending_elr);
-    try std.testing.expectEqual(@as(u64, 0x5), pending_spsr);
-    try std.testing.expectEqual(@as(u64, 0xaaaa), pending_sp_el0);
+    try std.testing.expectEqual(@as(u64, 0x1000), pending_sp[0]);
+    try std.testing.expectEqual(@as(u64, 0x1000), pending_elr[0]);
+    try std.testing.expectEqual(@as(u64, 0x5), pending_spsr[0]);
+    try std.testing.expectEqual(@as(u64, 0xaaaa), pending_sp_el0[0]);
     // Fifth switch returns to the worker's saved context (the round-trip).
     switch_context(0x1000, 0x1001, 0x5, 0xaaaa);
-    try std.testing.expectEqual(@as(usize, 1), current);
+    try std.testing.expectEqual(@as(usize, 1), current[0]);
     try std.testing.expectEqual(@as(u64, 5), switches);
     try std.testing.expectEqual(@as(u64, 2), tasks[0].saves);
     try std.testing.expectEqual(@as(u64, 1), tasks[0].resumes);
@@ -1788,28 +2171,28 @@ test "scheduler: mixed EL1h and EL0t round-robin restores SP_EL0" {
     const initial_user_sp = tasks[2].sp_el0;
 
     switch_context(0x1000, 0x1000, spsr_el1h_irqs, 0xaaaa); // shell -> worker
-    try std.testing.expectEqual(@as(usize, 1), current);
+    try std.testing.expectEqual(@as(usize, 1), current[0]);
     switch_context(0x2000, 0x2000, spsr_el1h_irqs, 0xbbbb); // worker -> user
-    try std.testing.expectEqual(@as(usize, 2), current);
-    try std.testing.expectEqual(spsr_el0t_irqs, pending_spsr);
-    try std.testing.expectEqual(initial_user_sp, pending_sp_el0);
+    try std.testing.expectEqual(@as(usize, 2), current[0]);
+    try std.testing.expectEqual(spsr_el0t_irqs, pending_spsr[0]);
+    try std.testing.expectEqual(initial_user_sp, pending_sp_el0[0]);
 
     const preempted_user_sp: u64 = initial_user_sp - 16;
     // Claim 6729: the preempted EL0 task's successor is the idle task
     // (sp_el0 = 0 for an EL1h task), then the shell on the next switch.
     switch_context(0x3000, 0x3004, spsr_el0t_irqs, preempted_user_sp); // user -> idle
-    try std.testing.expectEqual(@as(usize, idle_id), current);
-    try std.testing.expectEqual(@as(u64, 0), pending_sp_el0);
+    try std.testing.expectEqual(@as(usize, idle_id), current[0]);
+    try std.testing.expectEqual(@as(u64, 0), pending_sp_el0[0]);
     try std.testing.expectEqual(preempted_user_sp, tasks[2].sp_el0);
     switch_context(0x4000, 0x4000, spsr_el1h_irqs, 0xcccc); // idle -> shell
-    try std.testing.expectEqual(@as(usize, 0), current);
-    try std.testing.expectEqual(@as(u64, 0xaaaa), pending_sp_el0);
+    try std.testing.expectEqual(@as(usize, 0), current[0]);
+    try std.testing.expectEqual(@as(u64, 0xaaaa), pending_sp_el0[0]);
 
     switch_context(0x1000, 0x1004, spsr_el1h_irqs, 0xaaaa);
     switch_context(0x2000, 0x2004, spsr_el1h_irqs, 0xbbbb);
-    try std.testing.expectEqual(@as(usize, 2), current);
-    try std.testing.expectEqual(preempted_user_sp, pending_sp_el0);
-    try std.testing.expectEqual(@as(u64, 0x3004), pending_elr);
+    try std.testing.expectEqual(@as(usize, 2), current[0]);
+    try std.testing.expectEqual(preempted_user_sp, pending_sp_el0[0]);
+    try std.testing.expectEqual(@as(u64, 0x3004), pending_elr[0]);
 }
 
 test "scheduler: only a tick preemption publishes the EL0 witness" {
@@ -1834,7 +2217,7 @@ test "scheduler: only a tick preemption publishes the EL0 witness" {
 test "scheduler: the worker's advance counter belongs to its own task" {
     _ = init();
     _ = register_worker(0x2000).?;
-    current = 1; // pretend the worker is running
+    current[0] = 1; // pretend the worker is running
     note_advance();
     note_advance();
     note_advance();
@@ -1845,7 +2228,7 @@ test "scheduler: the worker's advance counter belongs to its own task" {
 test "scheduler: worker report snapshots once and prints from the shell side" {
     _ = init();
     _ = register_worker(0x2000).?;
-    current = 1; // pretend the worker is running
+    current[0] = 1; // pretend the worker is running
     note_advance();
     note_advance();
     request_report();
@@ -1919,14 +2302,14 @@ test "scheduler: sleep_current blocks, wakes on the deadline tick, and rolls bac
     try std.testing.expect(sleep_current(2));
     try std.testing.expect(is_blocked(0));
     try std.testing.expectEqual(@as(u64, 2), tasks[0].wakeup_tick);
-    try std.testing.expectEqual(@as(usize, 1), current);
+    try std.testing.expectEqual(@as(usize, 1), current[0]);
     // The blocked task drops out of the ring: worker -> user -> idle -> worker.
     try std.testing.expect(yield_current());
-    try std.testing.expectEqual(@as(usize, 2), current);
+    try std.testing.expectEqual(@as(usize, 2), current[0]);
     try std.testing.expect(yield_current());
-    try std.testing.expectEqual(@as(usize, idle_id), current);
+    try std.testing.expectEqual(@as(usize, idle_id), current[0]);
     try std.testing.expect(yield_current());
-    try std.testing.expectEqual(@as(usize, 1), current);
+    try std.testing.expectEqual(@as(usize, 1), current[0]);
     // Tick 1: deadline (tick_count 0 + 2) not reached yet.
     on_tick();
     try std.testing.expect(is_blocked(0));
@@ -1938,10 +2321,10 @@ test "scheduler: sleep_current blocks, wakes on the deadline tick, and rolls bac
     try std.testing.expectEqual(@as(u64, 0), tasks[0].wakeup_tick);
     // The ring reaches the woken shell again.
     try std.testing.expect(yield_current()); // worker -> user
-    try std.testing.expectEqual(@as(usize, 2), current);
+    try std.testing.expectEqual(@as(usize, 2), current[0]);
     try std.testing.expect(yield_current()); // user -> idle
     try std.testing.expect(yield_current()); // idle -> shell
-    try std.testing.expectEqual(@as(usize, 0), current);
+    try std.testing.expectEqual(@as(usize, 0), current[0]);
 }
 
 test "scheduler: sleep guards — zero clamps to one tick, idle and inactive fail" {
@@ -1955,12 +2338,12 @@ test "scheduler: sleep guards — zero clamps to one tick, idle and inactive fai
     try std.testing.expect(sleep_current(0));
     try std.testing.expectEqual(@as(u64, 1), tasks[0].wakeup_tick);
     // The idle task cannot sleep (it is the ring's fallback).
-    current = idle_id;
+    current[0] = idle_id;
     try std.testing.expect(!sleep_current(1));
     try std.testing.expect(!is_blocked(idle_id));
     // A zombie cannot sleep either.
     tasks[1].state = .zombie;
-    current = 1;
+    current[0] = 1;
     try std.testing.expect(!sleep_current(1));
 }
 
@@ -2022,18 +2405,18 @@ test "scheduler: two live user tasks coexist with their own roots and regions" {
     try std.testing.expectEqual(root_b, task_ttbr0(user_b));
     // The current-task regions follow the ring: put A current and read its
     // regions, then B.
-    current = user_a;
+    current[0] = user_a;
     const ra = current_user_regions();
     try std.testing.expectEqual(userspace.text_va, ra.text.base);
     try std.testing.expectEqual(userspace.stack_va, ra.stack.base);
-    current = user_b;
+    current[0] = user_b;
     const rb = current_user_regions();
     try std.testing.expectEqual(userspace.text_va, rb.text.base);
     try std.testing.expectEqual(@as(u64, 0x1a400000), rb.stack.base);
     try std.testing.expectEqual(@as(u64, 8192), rb.stack.len);
     // Restore the ring position before the round-robin exercise (the region
     // checks above moved `current` for readability).
-    current = 0;
+    current[0] = 0;
     // Both run in the ring (round-robin reaches each).
     start();
     try std.testing.expect(yield_current()); // shell -> worker

@@ -1800,6 +1800,11 @@ func finish(success: Bool) {
     let wantNvram = nvramConsolePath != nil
     runner.queue.async {
         runner.vm.stop { _ in
+            // Claim 2188: the VM is stopped, so every guest byte VZ will
+            // deliver is already in the pipe — let the tee flush it into the
+            // log before the NVRAM reads and exit() below (which would
+            // otherwise race the tee thread and cut the tail mid-write).
+            drainTeeBeforeExit("finish(success:\(success))")
             // Exit code: the serial evidence `success` is the default; each
             // NVRAM-gated channel (marker ladder, nvram console) flips it to
             // true when its bytes are found. With no such flag the original
@@ -2176,18 +2181,70 @@ func fireSnapshotsIfMarker(_ text: String) {
 // Console mode: streaming tee, stdin forwarding, signal-safe exit.
 // ---------------------------------------------------------------------------
 
+// Claim 2188: teardown serial drain. Exit paths used to sleep a fixed
+// 0.4–0.5 s and hope the guest-output tee finished writing the pipe before
+// exit() cut it off; the sleeps could not wait for pipe EOF because VZ
+// keeps its copy of the write end open until process exit (observed).
+// Instead the tee now runs a poll loop and stops on REQUEST: after the VM
+// stops (every guest byte VZ will deliver is already in the pipe), the
+// drain sets the stop flag and waits on `teeGroup` until the tee has
+// flushed the pipe to empty and synchronized the log — so the LAST guest
+// bytes always land before exit(). `teeRunning` is false in evidence mode
+// (no duplex pipe there — VZ writes the serial log directly), so the drain
+// is a structural no-op for evidence runs.
+let teeGroup = DispatchGroup()
+var teeRunning = false
+
+// Claim 2188: the tee's poll loop checks this flag instead of waiting for
+// pipe EOF — VZ keeps its copy of the pipe's write end open until process
+// exit, so EOF never arrives at stop time. The flag is set only AFTER the
+// VM has stopped, when every guest byte VZ will deliver is already in the
+// pipe; the tee then drains the pipe to empty and signals `teeGroup`.
+let teeStopLock = NSLock()
+var teeStopRequested = false
+
+func requestTeeStop() {
+    teeStopLock.lock()
+    teeStopRequested = true
+    teeStopLock.unlock()
+}
+
+func teeStopIsRequested() -> Bool {
+    teeStopLock.lock()
+    defer { teeStopLock.unlock() }
+    return teeStopRequested
+}
+
+/// Bounded wait for the guest-output tee to drain the pipe and flush the
+/// serial log. Call AFTER the VM has stopped (or its serial attachment
+/// closed): the tee then flushes the pipe to empty and signals the group.
+/// No-op when no tee is running (evidence mode — VZ writes the log
+/// directly).
+func drainTeeBeforeExit(_ context: String, timeout: TimeInterval = 3.0) {
+    guard teeRunning else { return }
+    requestTeeStop()
+    if teeGroup.wait(timeout: .now() + timeout) == .timedOut {
+        FileHandle.standardError.write(Data("WARNING: \(context): guest-output tee did not drain within \(Int(timeout))s — some tail bytes may be missing from the serial log\n".utf8))
+    }
+}
+
 func startGuestOutputTee() {
     // Guest output → terminal + serial log. Streaming tee: each chunk is
     // written as it arrives; the log is never reloaded to show new bytes.
     let teeQueue = DispatchQueue(label: "virelaios.tee")
     var logWriteWarned = false
+    teeRunning = true
+    teeGroup.enter()
     teeQueue.async {
-        let fd = consoleOutputPipe.fileHandleForReading.fileDescriptor
+        defer { teeGroup.leave() } // the stopping drain finished — the exit path can proceed
+        let fh = consoleOutputPipe.fileHandleForReading
+        let fd = fh.fileDescriptor
+        // Non-blocking reads: the stopping drain empties the pipe without
+        // ever blocking on a writer (VZ) that stays open until exit.
+        let flags = fcntl(fd, F_GETFL)
+        _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
         var buf = [UInt8](repeating: 0, count: 4096)
-        while true {
-            var n: Int
-            repeat { n = read(fd, &buf, buf.count) } while n < 0 && errno == EINTR
-            if n <= 0 { break } // guest serial closed
+        func emit(_ n: Int) {
             let data = Data(bytes: buf, count: n)
             try? FileHandle.standardOutput.write(contentsOf: data)
             do {
@@ -2196,6 +2253,40 @@ func startGuestOutputTee() {
                 if !logWriteWarned {
                     logWriteWarned = true
                     FileHandle.standardError.write(Data("WARNING: could not write guest output to \(serialLogPath): \(error)\n".utf8))
+                }
+            }
+        }
+        // Read everything currently in the pipe (non-blocking) and emit it.
+        // Returns when the pipe is empty (EAGAIN), EOF, or on error.
+        func drainPipe() {
+            while true {
+                var n: Int
+                repeat { n = read(fd, &buf, buf.count) } while n < 0 && errno == EINTR
+                if n > 0 {
+                    emit(n)
+                    continue
+                }
+                break // 0 = EOF, < 0 = EAGAIN or error — pipe drained
+            }
+        }
+        while true {
+            if teeStopIsRequested() {
+                // Claim 2188: the VM has stopped — every guest byte VZ will
+                // deliver is already in the pipe. Flush it to empty, then
+                // end so drainTeeBeforeExit returns with the true tail.
+                drainPipe()
+                break
+            }
+            var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            let pr = poll(&pfd, 1, 200)
+            if pr < 0, errno == EINTR { continue }
+            if pr > 0 {
+                if (pfd.revents & Int16(POLLIN)) != 0 {
+                    drainPipe()
+                }
+                if (pfd.revents & Int16(POLLHUP | POLLERR)) != 0 {
+                    drainPipe() // write end closed — flush and finish
+                    break
                 }
             }
         }
@@ -3738,16 +3829,51 @@ func scriptPoll(matchedAt: Date? = nil) {
 
 var signalSources: [DispatchSourceSignal] = []
 
+// Claim 2188: single-teardown guard for the console exit paths. All of
+// them run on the main queue (the poll recursion and the signal sources
+// both dispatch there), so a plain flag serializes them: the first path
+// wins, later ones (a second signal, or a signal racing the timeout)
+// return without double-stopping the VM or double-exiting.
+var consoleExitStarted = false
+
+/// Claim 2188: stop the VM if it is still running (every guest byte VZ
+/// will deliver then lands in the pipe), then let the tee flush the
+/// remaining bytes into the serial log before the process exits.
+func stopAndDrainForExit(_ context: String) {
+    runner.queue.async {
+        runner.vm.stop { _ in
+            drainTeeBeforeExit(context)
+            exitWithTerminalRestore(consoleExitCode)
+        }
+    }
+}
+
+var consoleExitCode: Int32 = 0
+
+func beginConsoleExit(_ context: String, code: Int32, restore: Bool = false) {
+    guard !consoleExitStarted else { return }
+    consoleExitStarted = true
+    consoleExitCode = code
+    if restore {
+        restoreTerminal()
+        FileHandle.standardError.write(Data("console: \(context) — terminal restored, draining guest output, exiting\n".utf8))
+    } else {
+        print("console: \(context) — ending session")
+    }
+    stopAndDrainForExit(context)
+}
+
 func installSignalHandlers() {
     guard consoleMode else { return }
     for sig: Int32 in [SIGINT, SIGTERM, SIGHUP] {
         signal(sig, SIG_IGN) // suppress default termination; the source below handles it
         let src = DispatchSource.makeSignalSource(signal: sig, queue: .main)
         src.setEventHandler {
-            restoreTerminal()
-            FileHandle.standardError.write(Data("console: caught signal \(sig) — terminal restored, exiting\n".utf8))
-            Thread.sleep(forTimeInterval: 0.4) // let the tee thread drain guest output into the log
-            exit(128 + sig)
+            // Claim 2188: stop the VM (closes the serial pipe) and wait for
+            // the tee to flush, instead of the old fixed 0.4 s sleep that
+            // could still race the tee thread's final write. `restore:` is
+            // true — the terminal is raw while the console session runs.
+            beginConsoleExit("caught signal \(sig)", code: 128 + sig, restore: true)
         }
         src.resume()
         signalSources.append(src)
@@ -3757,14 +3883,14 @@ func installSignalHandlers() {
 func consolePoll() {
     let state = runner.vm.state
     if vmDidStart && (state == .stopped || state == .error) {
-        print("console: VM ended (state=\(state.rawValue)) — ending session")
-        Thread.sleep(forTimeInterval: 0.5) // let the tee drain before exit
-        exitWithTerminalRestore(0)
+        // The VM already ended, so VZ closed the serial pipe — the tee is
+        // draining on its own; wait for it instead of the fixed 0.5 s sleep.
+        beginConsoleExit("VM ended (state=\(state.rawValue))", code: 0)
+        return
     }
     if consoleTimeout > 0, Date() > consoleDeadline {
-        print("console: session timed out after \(Int(consoleTimeout))s (VM state=\(state.rawValue)) — ending session")
-        Thread.sleep(forTimeInterval: 0.5)
-        exitWithTerminalRestore(0)
+        beginConsoleExit("session timed out after \(Int(consoleTimeout))s (VM state=\(state.rawValue))", code: 0)
+        return
     }
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { consolePoll() }
 }

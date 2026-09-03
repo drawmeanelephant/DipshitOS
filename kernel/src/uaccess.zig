@@ -33,6 +33,20 @@ const std = @import("std");
 const builtin = @import("builtin");
 const mmu = @import("mmu.zig");
 
+/// CPU count (matches smp.max_cores / svclock.cores); literal to dodge
+/// import cycles — uaccess is imported by exceptions.
+const cores: usize = 4;
+
+fn core_index() usize {
+    if (comptime builtin.is_test or builtin.cpu.arch != .aarch64) return 0;
+    var mpidr: u64 = 0;
+    asm volatile ("mrs %[v], mpidr_el1"
+        : [v] "=r" (mpidr),
+    );
+    const aff0: usize = @intCast(mpidr & 0xFF);
+    return if (aff0 < cores) aff0 else 0;
+}
+
 /// Result of a bounded transfer. `ok` means the whole range was copied;
 /// `fault` means the pointer was bad (validation or a recovered fault) and
 /// the syscall layer returns EFAULT.
@@ -51,14 +65,20 @@ pub const efault: u64 = @bitCast(@as(i64, -3));
 /// active. Revisit if the blanket or BAR placement ever grows.
 pub const diagnostic_unmapped: u64 = 0x1_2000_0000;
 
+// Claim 9498 follow-on: domain syscalls run CONCURRENTLY on different
+// cores, and every SVC entry re-arms the apertures from ITS OWN core's
+// current task — so all of this per-syscall state is per-core (a shared
+// copy would let one core's arming race another's validation, and a
+// shared window latch would let one core's fault consume another core's
+// window).
 /// EL0-readable regions (copy-in sources): user text (RX) + user stack (RW) + dynamic segments.
-var read_regions: [8]Region = [_]Region{.{ .base = 0, .len = 0 }} ** 8;
-var read_region_count: usize = 0;
+var read_regions: [cores][8]Region = [_][8]Region{[_]Region{.{ .base = 0, .len = 0 }} ** 8} ** cores;
+var read_region_count: [cores]usize = [_]usize{0} ** cores;
 /// EL0-writable regions (copy-out destinations): the user stack only — the
 /// text aperture is read-only at EL0, so copying into it is a permission
 /// fault (rejected at validation).
-var write_regions: [8]Region = [_]Region{.{ .base = 0, .len = 0 }} ** 8;
-var write_region_count: usize = 0;
+var write_regions: [cores][8]Region = [_][8]Region{[_]Region{.{ .base = 0, .len = 0 }} ** 8} ** cores;
+var write_region_count: [cores]usize = [_]usize{0} ** cores;
 
 /// The window state is VOLATILE on purpose. `window_active` has no reader
 /// inside the copy loop, so without volatile semantics the optimizer
@@ -73,28 +93,32 @@ var write_region_count: usize = 0;
 ///
 /// True while a bounded copy is executing. The claim-9746 synchronous path
 /// checks this before converting a data abort into EFAULT.
-var window_active: bool = false;
+var window_active: [cores]bool = [_]bool{false} ** cores;
 /// Set by `try_recover` when a data abort inside the window was consumed.
 /// The copy loop breaks on it and returns `.fault`.
-var fault_latch: bool = false;
+var fault_latch: [cores]bool = [_]bool{false} ** cores;
 /// DAIF to restore when the window closes (main-context monitor diagnostic;
 /// SVC context already entered with IRQs masked and restores the same value).
-var saved_daif: u64 = 0;
+var saved_daif: [cores]u64 = [_]u64{0} ** cores;
 
 fn window_active_read() bool {
-    return @as(*volatile bool, &window_active).*;
+    const c = core_index();
+    return @as(*volatile bool, &window_active[c]).*;
 }
 
 fn set_window_active(value: bool) void {
-    @as(*volatile bool, &window_active).* = value;
+    const c = core_index();
+    @as(*volatile bool, &window_active[c]).* = value;
 }
 
 fn latch_read() bool {
-    return @as(*volatile bool, &fault_latch).*;
+    const c = core_index();
+    return @as(*volatile bool, &fault_latch[c]).*;
 }
 
 fn set_latch(value: bool) void {
-    @as(*volatile bool, &fault_latch).* = value;
+    const c = core_index();
+    @as(*volatile bool, &fault_latch[c]).* = value;
 }
 
 /// Compiler barrier: no memory operation may move across it. Pins the
@@ -104,9 +128,9 @@ fn compiler_barrier() void {
     asm volatile ("" ::: .{ .memory = true });
 }
 
-var copies_value: u64 = 0;
-var validation_faults_value: u64 = 0;
-var recoveries_value: u64 = 0;
+var copies_value: [cores]u64 = [_]u64{0} ** cores;
+var validation_faults_value: [cores]u64 = [_]u64{0} ** cores;
+var recoveries_value: [cores]u64 = [_]u64{0} ** cores;
 
 pub const Stats = struct {
     copies: u64,
@@ -117,56 +141,61 @@ pub const Stats = struct {
 /// Reset module state (kernel boot / host tests). Regions are re-configured
 /// with `set_regions` immediately after.
 pub fn init() void {
-    read_regions = [_]Region{.{ .base = 0, .len = 0 }} ** 8;
-    write_regions = [_]Region{.{ .base = 0, .len = 0 }} ** 8;
-    read_region_count = 0;
-    write_region_count = 0;
+    const c = core_index();
+    read_regions[c] = [_]Region{.{ .base = 0, .len = 0 }} ** 8;
+    write_regions[c] = [_]Region{.{ .base = 0, .len = 0 }} ** 8;
+    read_region_count[c] = 0;
+    write_region_count[c] = 0;
     set_window_active(false);
     set_latch(false);
-    saved_daif = 0;
-    copies_value = 0;
-    validation_faults_value = 0;
-    recoveries_value = 0;
+    saved_daif[c] = 0;
+    copies_value[c] = 0;
+    validation_faults_value[c] = 0;
+    recoveries_value[c] = 0;
 }
 
 /// Configure the claim-8215 EL0 apertures (text readable, stack read-write).
 /// The syscall layer delegates its `set_user_regions` here.
 pub fn set_regions(text: Region, stack: Region) void {
-    read_regions = [_]Region{.{ .base = 0, .len = 0 }} ** 8;
-    write_regions = [_]Region{.{ .base = 0, .len = 0 }} ** 8;
-    read_regions[0] = text;
-    read_regions[1] = stack;
-    read_region_count = 2;
-    write_regions[0] = stack;
-    write_region_count = 1;
+    const c = core_index();
+    read_regions[c] = [_]Region{.{ .base = 0, .len = 0 }} ** 8;
+    write_regions[c] = [_]Region{.{ .base = 0, .len = 0 }} ** 8;
+    read_regions[c][0] = text;
+    read_regions[c][1] = stack;
+    read_region_count[c] = 2;
+    write_regions[c][0] = stack;
+    write_region_count[c] = 1;
 }
 
 /// Add an additional readable EL0 aperture (e.g. interpreter text, dynamic segments, shared libs).
 pub fn add_read_region(reg: Region) void {
     if (reg.len == 0) return;
-    if (read_region_count < read_regions.len) {
-        read_regions[read_region_count] = reg;
-        read_region_count += 1;
+    const c = core_index();
+    if (read_region_count[c] < read_regions[c].len) {
+        read_regions[c][read_region_count[c]] = reg;
+        read_region_count[c] += 1;
     }
 }
 
 /// Add an additional writable EL0 aperture (e.g. data segment, heap).
 pub fn add_write_region(reg: Region) void {
     if (reg.len == 0) return;
-    if (write_region_count < write_regions.len) {
-        write_regions[write_region_count] = reg;
-        write_region_count += 1;
+    const c = core_index();
+    if (write_region_count[c] < write_regions[c].len) {
+        write_regions[c][write_region_count[c]] = reg;
+        write_region_count[c] += 1;
     }
 }
 
 /// Remove a dynamic EL0 aperture by base and len.
 pub fn remove_region(base: u64, len: u64) void {
-    for (&read_regions) |*r| {
+    const c = core_index();
+    for (&read_regions[c]) |*r| {
         if (r.base == base and (len == 0 or r.len == len)) {
             r.* = .{ .base = 0, .len = 0 };
         }
     }
-    for (&write_regions) |*r| {
+    for (&write_regions[c]) |*r| {
         if (r.base == base and (len == 0 or r.len == len)) {
             r.* = .{ .base = 0, .len = 0 };
         }
@@ -174,10 +203,16 @@ pub fn remove_region(base: u64, len: u64) void {
 }
 
 pub fn stats() Stats {
+    var copies: u64 = 0;
+    var vfaults: u64 = 0;
+    var recovers: u64 = 0;
+    for (copies_value) |v| copies +%= v;
+    for (validation_faults_value) |v| vfaults +%= v;
+    for (recoveries_value) |v| recovers +%= v;
     return .{
-        .copies = copies_value,
-        .validation_faults = validation_faults_value,
-        .recoveries = recoveries_value,
+        .copies = copies,
+        .validation_faults = vfaults,
+        .recoveries = recovers,
     };
 }
 
@@ -209,14 +244,15 @@ fn range_ok(regions: []const Region, address: u64, len: u64) bool {
 pub fn copy_in(dst: []u8, address: u64, len: usize) Outcome {
     if (len == 0) return .ok;
     if (len > dst.len) return .fault; // caller bug: bounded by the buffer
-    if (!range_ok(read_regions[0..read_region_count], address, @intCast(len))) {
-        validation_faults_value +%= 1;
+    const c = core_index();
+    if (!range_ok(read_regions[c][0..read_region_count[c]], address, @intCast(len))) {
+        validation_faults_value[c] +%= 1;
         return .fault;
     }
     open_window();
     const result = copy_in_window(dst[0..len], address, len);
     close_window();
-    copies_value +%= 1;
+    copies_value[c] +%= 1;
     return result;
 }
 
@@ -226,14 +262,15 @@ pub fn copy_in(dst: []u8, address: u64, len: usize) Outcome {
 pub fn copy_out(address: u64, src: []const u8, len: usize) Outcome {
     if (len == 0) return .ok;
     if (len > src.len) return .fault; // caller bug: bounded by the buffer
-    if (!range_ok(write_regions[0..write_region_count], address, @intCast(len))) {
-        validation_faults_value +%= 1;
+    const c = core_index();
+    if (!range_ok(write_regions[c][0..write_region_count[c]], address, @intCast(len))) {
+        validation_faults_value[c] +%= 1;
         return .fault;
     }
     open_window();
     const result = copy_out_window(address, src[0..len], len);
     close_window();
-    copies_value +%= 1;
+    copies_value[c] +%= 1;
     return result;
 }
 
@@ -251,7 +288,7 @@ pub fn raw_copy_in(dst: []u8, address: u64, len: usize) Outcome {
     open_window();
     const result = copy_in_window(dst[0..len], address, len);
     close_window();
-    copies_value +%= 1;
+    copies_value[core_index()] +%= 1;
     return result;
 }
 
@@ -290,7 +327,7 @@ fn copy_out_window(address: u64, src: []const u8, len: usize) Outcome {
 /// context (the monitor diagnostic) this keeps the window free of scheduler
 /// preemption so no unrelated task can fault while `window_active` is set.
 fn open_window() void {
-    saved_daif = mask_irqs();
+    saved_daif[core_index()] = mask_irqs();
     set_window_active(true);
     set_latch(false);
     compiler_barrier();
@@ -299,7 +336,7 @@ fn open_window() void {
 fn close_window() void {
     compiler_barrier();
     set_window_active(false);
-    restore_daif(saved_daif);
+    restore_daif(saved_daif[core_index()]);
 }
 
 fn mask_irqs() u64 {
@@ -333,7 +370,7 @@ pub fn try_recover(esr: u64, elr: u64) bool {
     const ec: u64 = (esr >> 26) & 0x3f;
     if (ec != 0x24 and ec != 0x25) return false; // data-abort-lower / -same
     set_latch(true);
-    recoveries_value +%= 1;
+    recoveries_value[core_index()] +%= 1;
     if (comptime !builtin.is_test and builtin.cpu.arch == .aarch64) {
         asm volatile ("msr elr_el1, %[v]"
             :
@@ -374,14 +411,15 @@ pub fn diag() DiagResult {
     const prev_ttbr0 = mmu.current_ttbr0();
     mmu.set_ttbr0(mmu.user_root_phys());
     defer mmu.set_ttbr0(prev_ttbr0);
-    const valid = copy_in(&buf, read_regions[0].base, 8) == .ok;
+    const valid = copy_in(&buf, read_regions[core_index()][0].base, 8) == .ok;
     const fault = raw_copy_in(&buf, diagnostic_unmapped, 8) == .fault;
+    const totals = stats();
     return .{
         .valid_copy = valid,
         .fault_copy = fault,
-        .recoveries = recoveries_value,
-        .copies = copies_value,
-        .validation_faults = validation_faults_value,
+        .recoveries = totals.recoveries,
+        .copies = totals.copies,
+        .validation_faults = totals.validation_faults,
     };
 }
 
@@ -520,16 +558,16 @@ test "uaccess: try_recover consumes only data aborts inside the window" {
     open_window();
     // Data abort from the same EL (the copy runs at EL1h): consumed.
     try std.testing.expect(try_recover(0x25 << 26, 0x4000));
-    try std.testing.expectEqual(@as(u64, 1), recoveries_value);
+    try std.testing.expectEqual(@as(u64, 1), stats().recoveries);
     // Data abort from a lower EL: also consumed while the window is active.
     try std.testing.expect(try_recover(0x24 << 26, 0x4004));
-    try std.testing.expectEqual(@as(u64, 2), recoveries_value);
+    try std.testing.expectEqual(@as(u64, 2), stats().recoveries);
     // A non-data-abort (SVC) inside the window is NOT ours.
     try std.testing.expect(!try_recover(0x15 << 26, 0x4008));
     close_window();
     // Outside the window nothing is consumed.
     try std.testing.expect(!try_recover(0x25 << 26, 0x400c));
-    try std.testing.expectEqual(@as(u64, 2), recoveries_value);
+    try std.testing.expectEqual(@as(u64, 2), stats().recoveries);
 }
 
 test "uaccess: raw_copy_in is host-gated and diag is honest off-hardware" {

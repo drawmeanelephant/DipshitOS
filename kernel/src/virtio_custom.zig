@@ -101,6 +101,7 @@
 //! these are harmless defensive code (claim 0016).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const mmio = @import("mmio.zig");
 const mmu = @import("mmu.zig");
 const pci = @import("pci.zig");
@@ -434,22 +435,41 @@ pub fn reply_len() usize {
 }
 /// Non-timer IRQs acked since `reset_irq_observation` (recorded by
 /// main.zig's irq_dispatch, IRQ context — increments only, console-free).
-pub var irq_count: u32 = 0;
-/// First non-timer INTID acked (0xffffffff = none yet).
-pub var irq_first: u32 = 0xffffffff;
+/// Issue #810-family audit (claim 7339): PER-CORE, defensively — SPIs are
+/// IROUTER-pinned to PE 0 today (gic.arm_spi_window), so core 0 is the
+/// only writer, but the irq_dispatch path is reachable on every core and a
+/// shared counter would silently lose increments if SPI routing ever
+/// becomes any-core. Core count literal (4), the gic/exceptions idiom.
+pub const cpu_cores: usize = 4;
+pub var irq_count: [cpu_cores]u32 = [_]u32{0} ** cpu_cores;
+/// First non-timer INTID acked per core (0xffffffff = none yet).
+pub var irq_first: [cpu_cores]u32 = [_]u32{0xffffffff} ** cpu_cores;
+
+/// This core's index into the per-core counters (MPIDR_EL1.Aff0; 0 on
+/// host tests / non-aarch64 — the exceptions.resume_core idiom).
+fn core_index() usize {
+    if (comptime builtin.is_test or builtin.cpu.arch != .aarch64) return 0;
+    var mpidr: u64 = 0;
+    asm volatile ("mrs %[v], mpidr_el1"
+        : [v] "=r" (mpidr),
+    );
+    const aff0: usize = @intCast(mpidr & 0xff);
+    return if (aff0 < cpu_cores) aff0 else 0;
+}
 
 /// Called from irq_dispatch for every non-spurious, non-timer INTID.
 /// MUST stay console-free (runs in IRQ context with a frame on the stack).
 pub fn note_irq(intid: u32) void {
-    irq_count += 1;
-    if (irq_first == 0xffffffff) irq_first = intid;
+    const cidx = core_index(); // claim 7339: per-core counters
+    irq_count[cidx] += 1;
+    if (irq_first[cidx] == 0xffffffff) irq_first[cidx] = intid;
 }
 
 /// Reset the observation window (call right before the first kick so only
 /// IRQs delivered after the first element was submitted are attributed).
 pub fn reset_irq_observation() void {
-    irq_count = 0;
-    irq_first = 0xffffffff;
+    for (&irq_count) |*v| v.* = 0;
+    for (&irq_first) |*v| v.* = 0xffffffff;
 }
 
 // ---------------------------------------------------------------------------
@@ -1572,8 +1592,8 @@ test "virtio_custom: fresh transport reports no-device honestly" {
     try std.testing.expect(!input_armed);
     poll_input(); // honest no-op on an unarmed transport
     reset_irq_observation();
-    try std.testing.expectEqual(@as(u32, 0), irq_count);
-    try std.testing.expectEqual(@as(u32, 0xffffffff), irq_first);
+    try std.testing.expectEqual(@as(u32, 0), irq_count[0]);
+    try std.testing.expectEqual(@as(u32, 0xffffffff), irq_first[0]);
     try std.testing.expectEqual(@as(u32, 0), used_len);
     try std.testing.expectEqual(@as(usize, 0), reply_len());
 }
@@ -1582,8 +1602,8 @@ test "virtio_custom: note_irq records the first INTID and count" {
     reset_irq_observation();
     note_irq(69);
     note_irq(69);
-    try std.testing.expectEqual(@as(u32, 2), irq_count);
-    try std.testing.expectEqual(@as(u32, 69), irq_first);
+    try std.testing.expectEqual(@as(u32, 2), irq_count[0]);
+    try std.testing.expectEqual(@as(u32, 69), irq_first[0]);
 }
 
 test "virtio_custom: push-echo shapes (claim 3141) — queue index, buffer sizes" {

@@ -1,48 +1,48 @@
 const zc = @import("zc");
 
-const Color = enum {
+const Color = enum(u8) {
     red,
     green,
     blue,
 };
 
-const Status = enum(u32) {
-    ok = 10,
-    pending = 20,
-    err = 30,
+const Mode = enum(u8) {
+    idle = 3,
+    busy,
+    done,
 };
 
-fn color_weight(c: Color) u64 {
+fn tag_of(c: Color) u8 {
+    return @intFromEnum(c);
+}
+
+fn color_name(c: Color) []const u8 {
     return switch (c) {
-        .red => 10,
-        .green => 20,
-        .blue => 30,
+        Color.red => "red",
+        Color.green => "green",
+        Color.blue => "blue",
     };
 }
 
-fn is_terminal(s: Status) u64 {
-    return switch (s) {
-        Status.ok, Status.err => 1,
-        Status.pending => 0,
-    };
+fn mode_stage(m: Mode) u64 {
+    var v: u64 = 0;
+    switch (m) {
+        Mode.idle => { v = 1; },
+        Mode.busy => { v = 2; },
+        Mode.done => { v = 3; },
+    }
+    return v;
 }
 
 pub fn main() void {
-    const c: Color = .green;
-    const ci: u64 = @intFromEnum(c);
-    if (ci == 1) {
-        const c2: Color = @enumFromInt(2);
-        if (c2 == Color.blue) {
-            if (color_weight(c) == 20) {
-                var st: Status = Status.pending;
-                if (@intFromEnum(st) == 20) {
-                    if (is_terminal(st) == 0) {
-                        st = .ok;
-                        if (is_terminal(st) == 1) {
-                            zc.print("ok\n");
-                            zc.exit(72);
-                        }
-                    }
+    const c: Color = @enumFromInt(1);
+    if (tag_of(c) == 1) {
+        const s: []const u8 = color_name(c);
+        zc.print(s);
+        if (s[0] == 103) {
+            if (mode_stage(Mode.done) == 3) {
+                if (@intFromEnum(Mode.busy) == 4) {
+                    zc.exit(72);
                 }
             }
         }
