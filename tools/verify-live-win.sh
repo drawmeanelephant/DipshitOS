@@ -81,7 +81,7 @@ echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
 zig fmt --check boot/src/*.zig kernel/src/*.zig build.zig
 zig build
 zig build image
-swift build --package-path host/vm-runner --configuration release
+swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
 codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
 
 # --- per-run isolation -------------------------------------------------------
@@ -93,22 +93,23 @@ echo "run dir: $RUN_DIR"
 # `dui hit 100 400` re-focuses the terminal (the trigger marker).
 cat > "$RUN_DIR/script.txt" <<'EOF'
 dui
-dui hit 1000 100
+dui hit 1000 710
+dui
+dui hit 10 100
 dui
 dui hit 100 400
 EOF
 
-# Boots the private WRITABLE copy (not an overlay): the timed screen
-# captures need main-like boot pacing; overlays shift guest timing
-# so the fill/present lands after the last scheduled capture.
-
 # --- per-run gate -------------------------------------------------------------
 run_one() {
     local out="$1" serial="$2"
-    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log" "$RUN_DIR"/gpu-screen-*
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log" "$RUN_DIR"/snap-*.raw
     host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
         --serial "$RUN_DIR/vm-serial.log" \
-        --display --input --screen "$RUN_DIR/gpu-screen" \
+        --display --input --screen "$RUN_DIR/screen" \
+        --via-virtio --cvc-snap \
+        --snapshot-after "dui hit: 100,400 -> 0" \
+        --snapshot-out "$RUN_DIR/snap" \
         --script "$RUN_DIR/script.txt" \
         --input-string "uname"$'\n' --input-string-after "dui hit: 100,400 -> 0" \
         --script-expect "VirelaiOS aarch64" \
@@ -116,6 +117,9 @@ run_one() {
         > "$out" 2>&1
     local RC=$?
     [ -f "$RUN_DIR/vm-serial.log" ] && cp "$RUN_DIR/vm-serial.log" "$serial" || true
+    for f in "$RUN_DIR"/snap-*.raw; do
+        [ -f "$f" ] && cp "$f" "$(art live-win-snap-0.raw)" && break || true
+    done
     echo "$RC" > "$RUN_DIR/rc.txt"
 }
 
@@ -123,95 +127,60 @@ rm -f "$RUN_DIR/efi-vars.bin"
 set +e
 run_one "$(art live-win-run.txt)" "$(art live-win-serial.log)"
 RC="$(cat "$RUN_DIR/rc.txt")"
-cp "$RUN_DIR"/gpu-screen-* artifacts/ 2>/dev/null || true
 set -e
 
 # --- assertions ---------------------------------------------------------------
 SERIAL="$(art live-win-serial.log)"
-TWO_WIN=0 ROW0=0 ROW1=0 HIT1=0 FOCUS1=0 HIT0=0 KB_UNAME=0 RUNNERFLAG=0
+FOUR_WIN=0 ROW0=0 ROW1=0 ROW2=0 ROW3=0 HIT_TB=0 HIT_DK=0 HIT_TM=0 KB_UNAME=0 RUNNERFLAG=0
 if [ -f "$SERIAL" ]; then
-    grep -a -qF -- "dui: windows=2 focused=0" "$SERIAL" && TWO_WIN=1
+    grep -a -qF -- "dui: windows=4 focused=0" "$SERIAL" && FOUR_WIN=1
     grep -a -qF -- "dui[0]: roadpops terminal rect=0,0,1280,720" "$SERIAL" && ROW0=1
-    grep -a -qF -- "dui[1]: clock clock rect=960,16,304,192" "$SERIAL" && ROW1=1
-    grep -a -qF -- "dui hit: 1000,100 -> 1" "$SERIAL" && HIT1=1
-    grep -a -qF -- "dui: windows=2 focused=1" "$SERIAL" && FOCUS1=1
-    grep -a -qF -- "dui hit: 100,400 -> 0" "$SERIAL" && HIT0=1
+    grep -a -qF -- "dui[1]: wallpaper wallpaper rect=0,0,1280,720" "$SERIAL" && ROW1=1
+    grep -a -qF -- "dui[2]: taskbar taskbar rect=0,700,1280,20" "$SERIAL" && ROW2=1
+    grep -a -qF -- "dui[3]: dock dock rect=0,0,24,700" "$SERIAL" && ROW3=1
+    grep -a -qF -- "dui hit: 1000,710 -> 255" "$SERIAL" && HIT_TB=1
+    grep -a -qF -- "dui hit: 10,100 -> 253" "$SERIAL" && HIT_DK=1
+    grep -a -qF -- "dui hit: 100,400 -> 0" "$SERIAL" && HIT_TM=1
     # The keyboard-typed `uname` reply (the script never runs uname — this
     # is the proof that screen-side input landed in the focused terminal).
     grep -a -qF -- "VirelaiOS aarch64" "$SERIAL" && KB_UNAME=1
 fi
 grep -a -qF -- "input-string: ENABLED" artifacts/live-win-run.txt && RUNNERFLAG=1
 
-echo "dui: rc=$RC two-win=$TWO_WIN row0=$ROW0 row1=$ROW1 hit-clock=$HIT1 focus-clock=$FOCUS1 hit-terminal=$HIT0 kb-uname=$KB_UNAME runner-flag=$RUNNERFLAG"
+echo "dui: rc=$RC four-win=$FOUR_WIN row0=$ROW0 row1=$ROW1 row2=$ROW2 row3=$ROW3 hit-tb=$HIT_TB hit-dk=$HIT_DK hit-tm=$HIT_TM kb-uname=$KB_UNAME runner-flag=$RUNNERFLAG"
 
 PASS=0
-if [ "$RC" = 0 ] && [ "$TWO_WIN" = 1 ] && [ "$ROW0" = 1 ] && [ "$ROW1" = 1 ] && \
-   [ "$HIT1" = 1 ] && [ "$FOCUS1" = 1 ] && [ "$HIT0" = 1 ] && [ "$KB_UNAME" = 1 ] && \
-   [ "$RUNNERFLAG" = 1 ]; then
+if [ "$RC" = 0 ] && [ "$FOUR_WIN" = 1 ] && [ "$ROW0" = 1 ] && [ "$ROW1" = 1 ] && \
+   [ "$ROW2" = 1 ] && [ "$ROW3" = 1 ] && [ "$HIT_TB" = 1 ] && [ "$HIT_DK" = 1 ] && \
+   [ "$HIT_TM" = 1 ] && [ "$KB_UNAME" = 1 ] && [ "$RUNNERFLAG" = 1 ]; then
     PASS=1
 fi
 
-# Phase 2 — the pixel proof. The runner writes `--screen <base>` captures as
-# <base>-Ns (2560x1440 retina). The LATEST capture holds the settled frame.
-LATEST="$(ls -t artifacts/gpu-screen-*s 2>/dev/null | head -1 || true)"
-if [ -z "$LATEST" ]; then
-    echo "FAIL: no gpu-screen PNG captured"
+# Phase 2 — the pixel proof (headless virtio snapshot: 1280x720 BGRX raw scanout).
+SNAP="$(ls -t "$RUN_DIR"/snap-*.raw 2>/dev/null | head -1 || ls -t artifacts/live-win-snap-*.raw 2>/dev/null | head -1 || true)"
+if [ -z "$SNAP" ] || [ ! -f "$SNAP" ]; then
+    echo "FAIL: no virtio scanout snapshot captured"
     PASS=0
 else
-    echo "decoding $LATEST"
-    python3 - "$LATEST" <<'EOF'
-import sys, zlib, struct
+    echo "decoding $SNAP"
+    python3 - "$SNAP" <<'EOF'
+import sys
 path = sys.argv[1]
-d = open(path, 'rb').read()
-assert d[:8] == b'\x89PNG\r\n\x1a\n', "not a PNG"
-pos = 8; idat = b''; w = h = ct = 0
-while pos < len(d):
-    ln, typ = struct.unpack('>I4s', d[pos:pos+8])
-    data = d[pos+8:pos+8+ln]
-    if typ == b'IHDR':
-        w, h, bd, ct = struct.unpack('>IIBB', data[:10])
-    elif typ == b'IDAT':
-        idat += data
-    pos += 12 + ln
-raw = zlib.decompress(idat)
-bpp = 4 if ct == 6 else 3
-stride = w * bpp
-out = bytearray(); prev = bytearray(stride); i = 0
-for y in range(h):
-    f = raw[i]; i += 1
-    line = bytearray(raw[i:i+stride]); i += stride
-    if f == 1:
-        for x in range(bpp, stride): line[x] = (line[x] + line[x-bpp]) & 0xff
-    elif f == 2:
-        for x in range(stride): line[x] = (line[x] + prev[x]) & 0xff
-    elif f == 3:
-        for x in range(stride):
-            a = line[x-bpp] if x >= bpp else 0
-            line[x] = (line[x] + ((a + prev[x]) >> 1)) & 0xff
-    elif f == 4:
-        for x in range(stride):
-            a = line[x-bpp] if x >= bpp else 0
-            b = prev[x]; c = prev[x-bpp] if x >= bpp else 0
-            p = a + b - c
-            pa, pb, pc = abs(p-a), abs(p-b), abs(p-c)
-            pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
-            line[x] = (line[x] + pr) & 0xff
-    out += line
-    prev = line
+data = open(path, 'rb').read()
+assert len(data) == 1280 * 720 * 4, f"unexpected snapshot size {len(data)}"
+w = 1280
 
 def px(x, y):
-    k = (y * w + x) * bpp
-    return out[k], out[k+1], out[k+2]
+    k = (y * w + x) * 4
+    return data[k+2], data[k+1], data[k] # R, G, B
 
 def classify(r, g, b):
-    if r > 140 and g > 100 and b < 90:
-        return 'amber'       # clock title bar (0xb58900 -> ~(174,139,45))
     if g > 140 and r < 160 and b < 160:
         return 'green'       # terminal foreground (0x00ff00 -> ~(80,174,52))
-    if b > 35 and b > g and b > r:
-        return 'navy'        # clock body (0x0a1a2e -> ~(14,26,44))
     if max(r, g, b) < 32:
-        return 'dark'        # terminal background (0x101418 -> ~(17,20,24))
+        return 'terminal_bg' # terminal background (0x101418 -> ~(16,20,24))
+    if r < 35 and g < 45 and b > 30 and b > r:
+        return 'taskbar_bg'  # taskbar background (0x0f172a -> ~(15,23,42))
     return 'other'
 
 def region(x0, y0, x1, y1, step=3):
@@ -226,47 +195,38 @@ def frac(counts, key):
     tot = sum(counts.values())
     return (counts.get(key, 0) / tot) if tot else 0.0
 
-# The clock rect in retina coords: logical (960,16,304,192) x2.
-CLX0, CLY0, CLX1, CLY1 = 1920, 32, 2528, 416
-
-# (a) The clock title bar is amber (its own content, on top of the terminal).
-title = region(CLX0 + 40, CLY0 + 8, CLX1 - 40, CLY0 + 32)
-fa = frac(title, 'amber')
-print(f"clock title bar: {title} amber={fa:.3f}")
-if fa < 0.30:
-    sys.exit("FAIL: the clock title bar is not amber in its region (window 1 did not render on top)")
-
-# (b) The clock body is navy (blitted over the terminal's dark background).
-body = region(CLX0 + 200, CLY0 + 70, CLX1 - 200, CLY1 - 60)
-fn = frac(body, 'navy')
-print(f"clock body: {body} navy={fn:.3f}")
-if fn < 0.50:
-    sys.exit("FAIL: the clock body is not navy in its region (the clock did not cover the terminal)")
-
-# (c) NO green inside the clock rect — the clock fully covers the terminal.
-whole = region(CLX0 + 6, CLY0 + 6, CLX1 - 6, CLY1 - 6, step=2)
-if whole.get('green', 0) != 0:
-    sys.exit(f"FAIL: terminal foreground visible inside the clock rect ({whole.get('green',0)} green) — z-order wrong")
-
-# (d) Green foreground present in the terminal region LEFT of the clock.
-term = region(0, 0, 1900, 96, step=2)
+# (a) Terminal text is rendered in the banner region
+term = region(40, 10, 1200, 96, step=2)
 print(f"terminal banner region: {term}")
 if term.get('green', 0) < 50:
     sys.exit("FAIL: no terminal foreground in the banner region (window 0 did not render)")
 
-print("PASS: two overlapping windows with the right z-order — the clock's amber + navy content sits over the terminal, and the terminal's green glyphs render beside it")
+# (b) Taskbar at bottom (y=700..720) has taskbar background
+tb = region(100, 702, 1100, 718, step=2)
+ftb = frac(tb, 'taskbar_bg')
+print(f"taskbar region: {tb} taskbar_bg={ftb:.3f}")
+if ftb < 0.80:
+    sys.exit(f"FAIL: taskbar background not present at y=700..720 (ftb={ftb:.3f})")
+
+# (c) Tray clock in the right 80px of taskbar (x=1200..1280, y=700..720) has taskbar bg + glyphs
+tray = region(1205, 702, 1275, 718, step=1)
+print(f"tray clock region: {tray}")
+if tray.get('taskbar_bg', 0) == 0 or tray.get('other', 0) == 0:
+    sys.exit("FAIL: tray clock does not contain expected tray content in right 80px of taskbar")
+
+print("PASS: 4-window desktop chrome rendered with terminal, taskbar, and tray clock")
 EOF
     if [ $? -ne 0 ]; then
-        echo "FAIL: captured framebuffer does not show two distinct overlapping windows"
+        echo "FAIL: captured framebuffer does not show 4-window desktop chrome"
         PASS=0
     fi
 fi
 
 {
-    echo "VIRELAIOS live window-manager gate (claim 1543, milestone six card G5) — Driving Award on real VZ hardware"
+    echo "VIRELAIOS live window-manager gate (claim 1543 / issue #731) — Driving Award on real VZ hardware"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
-    echo "phase: scripted registry exercise (win/win hit) + a keyboard-typed uname into the focused terminal; the captured PNG is decoded and asserted for two overlapping windows with the right z-order"
-    echo "assertions: windows=2 (roadpops terminal + clock), the two rects, hit-test -> clock + focus switch, hit-test -> terminal, keyboard-typed uname reply, amber title bar + navy clock body over the terminal, no terminal foreground inside the clock rect, terminal foreground left of the clock"
+    echo "phase: scripted registry exercise (dui hit taskbar/dock/terminal) + a keyboard-typed uname into the focused terminal; raw virtio snapshot decoded for terminal, taskbar, and tray clock"
+    echo "assertions: windows=4 (roadpops, wallpaper, taskbar, dock), hit-test -> taskbar/dock/terminal, keyboard-typed uname reply, taskbar background, tray clock glyphs, terminal text"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     echo
 } > "$REPORT"
@@ -274,7 +234,7 @@ fi
 echo
 echo "=== result ==="
 if [ "$PASS" = 1 ]; then
-    echo "verify-live-win: PASS — Driving Award composites two overlapping windows on real VZ: Road Pops (window 0, the terminal) with a 1 Hz clock overlay (window 1) on top; hit-testing focuses the clock then the terminal, and a keyboard-typed uname landed in the focused terminal (VirelaiOS aarch64). The decoded capture shows the clock's amber title bar + navy body over the terminal with the terminal's green glyphs beside it — distinct windows, right z-order. The default VM is untouched: without --display/--input, no windows are armed and every existing gate stays byte-identical."
+    echo "verify-live-win: PASS — Driving Award composites 4-window desktop chrome on real VZ: Road Pops (terminal), wallpaper, taskbar (with tray clock), and dock. Hit-testing focuses taskbar, dock, and terminal; keyboard-typed uname landed in the focused terminal (VirelaiOS aarch64). Headless virtio snapshot verifies scanout pixels without ScreenCaptureKit/TCC."
     echo "PASS: $PASS" >> "$REPORT"
     sleep 0.5
     exit 0

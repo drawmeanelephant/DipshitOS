@@ -96,7 +96,7 @@ run_one() {
     host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
         --serial "$RUN_DIR/vm-serial.log" \
         --display \
-        --script artifacts/live-win-close-script.txt \
+        --script "$RUN_DIR/script.txt" \
         --script2 "$RUN_DIR/script2.txt" --script2-after "procs WINCLOSE.BIN exited status=88" \
         --script-expect "timer heartbeat ticks=20 irq=20 poll=0" \
         --timeout 60 \
@@ -126,13 +126,13 @@ if [ -f "$SERIAL" ]; then
     # Both programs exited with the distinct 'X'=88 status.
     [ "$(grep -a -c -F -- "procs WINCLOSE.BIN exited status=88" "$SERIAL")" = 2 ] && EXIT2=1
     # After the first close, the kernel's own `dui` report shows the user
-    # window is GONE (terminal + clock only), and no `dui[2]:` row ever
-    # appears (the window is closed before any observation).
-    [ "$(grep -a -c -F -- "dui: windows=2" "$SERIAL")" -ge 1 ] && WINGONE=1
-    [ "$(grep -a -c -F -- "dui[2]:" "$SERIAL")" = 0 ] && NOROW2=1
+    # window is GONE (terminal, wallpaper, taskbar, dock only = 4 windows),
+    # and no `.user` window row appears in the snapshot before re-exec.
+    [ "$(grep -a -c -F -- "dui: windows=4" "$SERIAL")" -ge 1 ] && WINGONE=1
+    [ "$(grep -a -c -F -- "user user" "$SERIAL")" = 0 ] && NOROW2=1
     # The script2 `syscalls` snapshot (after the first close, before the
     # re-exec) shows the new slot 15 implemented and exactly one open+close.
-    grep -a -q -F -- "syscalls: slots=64 implemented=46" "$SERIAL" && IMPL=1
+    grep -a -q -F -- "syscalls: slots=64 implemented=66" "$SERIAL" && IMPL=1
     grep -a -q -F -- "  12 sys_win_open calls=1" "$SERIAL" && \
         grep -a -q -F -- "  15 sys_win_close calls=1" "$SERIAL" && CALLS1=1
 fi

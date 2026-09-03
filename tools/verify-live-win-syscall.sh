@@ -103,6 +103,7 @@ dui
 syscalls
 dui list 2
 dui list 0
+echo win-syscall-settled
 EOF
 
 # Boots the private WRITABLE copy (not an overlay): the timed screen
@@ -112,11 +113,14 @@ EOF
 # --- per-run gate -------------------------------------------------------------
 run_one() {
     local out="$1" serial="$2"
-    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log" "$RUN_DIR"/gpu-screen-*
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log" "$RUN_DIR"/snap-*.raw
     host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
         --serial "$RUN_DIR/vm-serial.log" \
-        --display --screen "$RUN_DIR/gpu-screen" \
-        --script artifacts/live-win-syscall-script.txt \
+        --display --screen "$RUN_DIR/screen" \
+        --via-virtio --cvc-snap \
+        --snapshot-after "win-syscall-settled" \
+        --snapshot-out "$RUN_DIR/snap" \
+        --script "$RUN_DIR/script.txt" \
         --script2 "$RUN_DIR/script2.txt" --script2-after "procs WIN.BIN exited status=87" \
         --script3 "$RUN_DIR/script3.txt" --script3-after "winloop: loop ok" \
         --script-expect "timer heartbeat ticks=20 irq=20 poll=0" \
@@ -124,6 +128,9 @@ run_one() {
         > "$out" 2>&1
     local RC=$?
     [ -f "$RUN_DIR/vm-serial.log" ] && cp "$RUN_DIR/vm-serial.log" "$serial" || true
+    for f in "$RUN_DIR"/snap-*.raw; do
+        [ -f "$f" ] && cp "$f" "$(art live-win-syscall-snap-0.raw)" && break || true
+    done
     echo "$RC" > "$RUN_DIR/rc.txt"
 }
 
@@ -131,7 +138,6 @@ rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log"
 set +e
 run_one "$(art live-win-syscall-run.txt)" "$(art live-win-syscall-serial.log)"
 RC="$(cat "$RUN_DIR/rc.txt")"
-cp "$RUN_DIR"/gpu-screen-* artifacts/ 2>/dev/null || true
 set -e
 
 # --- assertions ---------------------------------------------------------------
@@ -142,20 +148,20 @@ if [ -f "$SERIAL" ]; then
     grep -a -q -F -- "win: fill ok" "$SERIAL" && \
         grep -a -q -F -- "win: present ok" "$SERIAL" && MARK=1
     grep -a -q -F -- "procs WIN.BIN exited status=87" "$SERIAL" && EXIT87=1
-    # AUTO-CLOSE: after WIN.BIN exits, `dui` reads windows=2 (terminal +
-    # clock only — the user window was released by the exit path, NOT an
-    # explicit close).
-    grep -a -q -F -- "dui: windows=2" "$SERIAL" && AUTO2=1
+    # AUTO-CLOSE: after WIN.BIN exits, `dui` reads windows=4 (terminal,
+    # wallpaper, taskbar, dock — the user window was released by the exit path,
+    # NOT an explicit close).
+    grep -a -q -F -- "dui: windows=4" "$SERIAL" && AUTO2=1
     # WINLOOP's persistent window marker + the post-open observation.
     grep -a -q -F -- "winloop: loop ok" "$SERIAL" && LOOP=1
-    grep -a -q -F -- "dui: windows=3" "$SERIAL" && WIN3=1
-    grep -a -q -F -- "dui[2]: user user rect=64,64,256,192" "$SERIAL" && ROW2=1
-    grep -a -q -F -- "syscalls: slots=64 implemented=46" "$SERIAL" && IMPL=1
+    grep -a -q -F -- "dui: windows=5" "$SERIAL" && WIN3=1
+    grep -a -q -F -- "dui[4]: user user rect=64,64,512,384" "$SERIAL" && ROW2=1
+    grep -a -q -F -- "syscalls: slots=64 implemented=66" "$SERIAL" && IMPL=1
     # The owner column (runtime visibility of per-process ownership): the
     # user window shows its owning pid (2), the fixed windows show `-`.
-    grep -a -E -q 'dui\[2\]: user user rect=64,64,256,192 .* owner=2' "$SERIAL" && OWNERU=1
+    grep -a -E -q 'dui\[4\]: user user rect=64,64,512,384 .* owner=2' "$SERIAL" && OWNERU=1
     grep -a -E -q 'dui\[0\]: roadpops terminal .* owner=-' "$SERIAL" && \
-        grep -a -E -q 'dui\[1\]: clock clock .* owner=-' "$SERIAL" && OWNERF=1
+        grep -a -E -q 'dui\[2\]: taskbar taskbar .* owner=-' "$SERIAL" && OWNERF=1
     # `dui list <pid>`: the filter returns WINLOOP's window for its pid (2)
     # and nothing for a non-owner (0).
     grep -a -q -F -- "dui list: pid=2 matches=1" "$SERIAL" && LIST2=1
@@ -181,69 +187,33 @@ if [ "$RC" = 0 ] && [ "$MARK" = 1 ] && [ "$EXIT87" = 1 ] && [ "$AUTO2" = 1 ] && 
     PASS=1
 fi
 
-# Phase 2 — the pixel proof. The runner writes `--screen <base>` captures as
-# <base>-Ns (2560x1440 retina). The LATEST capture (mtime) holds the settled
-# frame (the 15s capture — the runner stays alive until the tick-20 expect,
-# and WINLOOP's window persists).
-LATEST="$(ls -t artifacts/gpu-screen-*s 2>/dev/null | head -1 || true)"
-if [ -z "$LATEST" ]; then
-    echo "FAIL: no gpu-screen PNG captured"
+# Phase 2 — the pixel proof (headless virtio snapshot: 1280x720 BGRX raw scanout).
+SNAP="$(ls -t "$RUN_DIR"/snap-*.raw 2>/dev/null | head -1 || ls -t artifacts/live-win-syscall-snap-*.raw 2>/dev/null | head -1 || true)"
+if [ -z "$SNAP" ] || [ ! -f "$SNAP" ]; then
+    echo "FAIL: no virtio scanout snapshot captured"
     PASS=0
 else
-    echo "decoding $LATEST"
-    python3 - "$LATEST" <<'EOF'
-import sys, zlib, struct
+    echo "decoding $SNAP"
+    python3 - "$SNAP" <<'EOF'
+import sys
 path = sys.argv[1]
-d = open(path, 'rb').read()
-assert d[:8] == b'\x89PNG\r\n\x1a\n', "not a PNG"
-pos = 8; idat = b''; w = h = ct = 0
-while pos < len(d):
-    ln, typ = struct.unpack('>I4s', d[pos:pos+8])
-    data = d[pos+8:pos+8+ln]
-    if typ == b'IHDR':
-        w, h, bd, ct = struct.unpack('>IIBB', data[:10])
-    elif typ == b'IDAT':
-        idat += data
-    pos += 12 + ln
-raw = zlib.decompress(idat)
-bpp = 4 if ct == 6 else 3
-stride = w * bpp
-out = bytearray(); prev = bytearray(stride); i = 0
-for y in range(h):
-    f = raw[i]; i += 1
-    line = bytearray(raw[i:i+stride]); i += stride
-    if f == 1:
-        for x in range(bpp, stride): line[x] = (line[x] + line[x-bpp]) & 0xff
-    elif f == 2:
-        for x in range(stride): line[x] = (line[x] + prev[x]) & 0xff
-    elif f == 3:
-        for x in range(stride):
-            a = line[x-bpp] if x >= bpp else 0
-            line[x] = (line[x] + ((a + prev[x]) >> 1)) & 0xff
-    elif f == 4:
-        for x in range(stride):
-            a = line[x-bpp] if x >= bpp else 0
-            b = prev[x]; c = prev[x-bpp] if x >= bpp else 0
-            p = a + b - c
-            pa, pb, pc = abs(p-a), abs(p-b), abs(p-c)
-            pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
-            line[x] = (line[x] + pr) & 0xff
-    out += line
-    prev = line
+data = open(path, 'rb').read()
+assert len(data) == 1280 * 720 * 4, f"unexpected snapshot size {len(data)}"
+w = 1280
 
 def px(x, y):
-    k = (y * w + x) * bpp
-    return out[k], out[k+1], out[k+2]
+    k = (y * w + x) * 4
+    return (data[k+2], data[k+1], data[k]) # R, G, B
 
 def classify(r, g, b):
     if r > 220 and g > 220 and b > 220:
         return 'white'       # 0xffffff -> (255,255,255)
     if g > 200 and b > 200 and r < 170:
-        return 'cyan'        # 0x00ffff -> (117,251,253)
+        return 'cyan'        # 0x00ffff -> (0,255,255)
     if r > 180 and g < 110 and b < 110:
-        return 'red'         # 0xff0000 -> (234,51,35)
+        return 'red'         # 0xff0000 -> (255,0,0)
     if b > r and b > g and max(r, g, b) < 110:
-        return 'darkblue'    # 0x1a2b3c -> (30,43,59)
+        return 'darkblue'    # 0x1a2b3c -> (26,43,60)
     if g > 140 and r < 160 and b < 160:
         return 'green'       # terminal foreground (0x00ff00 -> ~(80,174,52))
     return 'other'
@@ -260,14 +230,14 @@ def frac(counts, key):
     tot = sum(counts.values())
     return (counts.get(key, 0) / tot) if tot else 0.0
 
-# The user window rect in retina coords: logical (64,64,256,192) x2.
-UX0, UY0, UX1, UY1 = 128, 128, 512, 384
+# The user window rect: logical (64,64,512,384).
+UX0, UY0, UX1, UY1 = 64, 64, 576, 448
 
-# (a) The three filled blocks sit at their expected spots (window-local
-# (8,8), (64,8), (120,8) 48x48 -> retina (192,192), (304,192), (416,192)).
-red = classify(*px(192, 192))
-cyan = classify(*px(304, 192))
-white = classify(*px(416, 192))
+# (a) The three filled blocks sit at their expected spots:
+# local (8,8), (64,8), (120,8) of size 48x48 -> centers (96,96), (152,96), (208,96).
+red = classify(*px(96, 96))
+cyan = classify(*px(152, 96))
+white = classify(*px(208, 96))
 print(f"blocks: red={red} cyan={cyan} white={white}")
 if red != 'red':
     sys.exit(f"FAIL: the red block is not red at its spot ({red}) — the fill did not land")
@@ -276,16 +246,16 @@ if cyan != 'cyan':
 if white != 'white':
     sys.exit(f"FAIL: the white block is not white at its spot ({white}) — the fill did not land")
 
-# (b) The background is the dark-blue fill (0x1a2b3c), dominant in the rect.
+# (b) The background is the dark-blue fill (0x1a2b3c), dominant in the client rect.
 body = region(UX0 + 8, UY0 + 64, UX1 - 8, UY1 - 8)
 fb = frac(body, 'darkblue')
 print(f"user window body: {body} darkblue={fb:.3f}")
 if fb < 0.60:
     sys.exit("FAIL: the user window background is not the dark-blue fill (the window did not render)")
 
-# (c) NO green (terminal foreground) inside the user window rect — the
+# (c) NO green (terminal foreground) inside the user window client area — the
 # opaque back-buffer covers the terminal beneath it (z-order proof).
-whole = region(UX0 + 4, UY0 + 4, UX1 - 4, UY1 - 4, step=2)
+whole = region(UX0 + 8, UY0 + 20, UX1 - 8, UY1 - 8, step=2)
 if whole.get('green', 0) != 0:
     sys.exit(f"FAIL: terminal foreground visible inside the user window rect ({whole.get('green',0)} green) — the window did not cover the terminal")
 
@@ -298,10 +268,10 @@ EOF
 fi
 
 {
-    echo "VIRELAIOS live draw/window-syscall gate (claim 0487, milestone six card G6) — EL0 graphics + ownership on real VZ hardware"
+    echo "VIRELAIOS live draw/window-syscall gate (claim 0487 / issue #731) — EL0 graphics + ownership on real VZ hardware"
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
-    echo "phase: scripted exec of WIN.BIN (open/fill/present/exit -> AUTO-CLOSE on exit), then win + syscalls on the same kernel state, then exec of WINLOOP.BIN (the persistent window) with win + syscalls observation + the decoded capture"
-    echo "assertions: win: fill ok / present ok + procs WIN.BIN exited status=87, dui: windows=2 after the exit (auto-close, close=0), winloop: loop ok, dui: windows=3 + dui[2]: user user rect=64,64,256,192 owner=2 (fixed windows owner=-), dui list 2 -> matches=1 + dui list 0 -> matches=0, syscalls implemented=46 with open=1/close=0 (pre-WINLOOP) + open=2/fill=8/present=2 (post-WINLOOP), red + cyan + white blocks at their spots, dark-blue background dominant, no terminal foreground inside the window rect"
+    echo "phase: scripted exec of WIN.BIN (open/fill/present/exit -> AUTO-CLOSE on exit), then win + syscalls on the same kernel state, then exec of WINLOOP.BIN (the persistent window) with win + syscalls observation + the decoded virtio capture"
+    echo "assertions: win: fill ok / present ok + procs WIN.BIN exited status=87, dui: windows=4 after the exit (auto-close, close=0), winloop: loop ok, dui: windows=5 + dui[4]: user user rect=64,64,512,384 owner=2 (fixed windows owner=-), dui list 2 -> matches=1 + dui list 0 -> matches=0, syscalls implemented=66 with open=1/close=0 (pre-WINLOOP) + open=2/fill=8/present=2 (post-WINLOOP), red + cyan + white blocks at their spots, dark-blue background dominant, no terminal foreground inside the window rect"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     echo
 } > "$REPORT"
@@ -309,7 +279,7 @@ fi
 echo
 echo "=== result ==="
 if [ "$PASS" = 1 ]; then
-    echo "verify-live-win-syscall: PASS — WIN.BIN opened a user window, filled it (dark-blue background + red/cyan/white blocks), presented it, and exited 87 — and the window AUTO-CLOSED on exit (dui: windows=2, sys_win_close calls=0). WINLOOP.BIN then kept its own window alive so the decoded capture shows an EL0-rendered window on the scanout (the window's own content over the terminal, no terminal foreground showing through), with syscalls reporting implemented=46 and open=2/fill=8/present=2 — and the dui report's owner column shows WINLOOP's pid (2, fixed windows owner=-) with 'dui list 2' -> matches=1 and a non-owner 'dui list 0' -> matches=0. The default VM is untouched: without --display, the window manager is unarmed and sys_win_open returns EINVAL — every existing gate stays byte-identical."
+    echo "verify-live-win-syscall: PASS — WIN.BIN opened a user window, filled it (dark-blue background + red/cyan/white blocks), presented it, and exited 87 — and the window AUTO-CLOSED on exit (dui: windows=4, sys_win_close calls=0). WINLOOP.BIN then kept its own window alive so the decoded capture shows an EL0-rendered window on the scanout (the window's own content over the terminal, no terminal foreground showing through), with syscalls reporting implemented=66 and open=2/fill=8/present=2 — and the dui report's owner column shows WINLOOP's pid (2, fixed windows owner=-) with 'dui list 2' -> matches=1 and a non-owner 'dui list 0' -> matches=0. The default VM is untouched: without --display, the window manager is unarmed and sys_win_open returns EINVAL — every existing gate stays byte-identical."
     echo "PASS: $PASS" >> "$REPORT"
     sleep 0.5
     exit 0
