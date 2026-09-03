@@ -48,9 +48,15 @@ tracking, WM compose-N, perf payoff — GH milestone 17 closed); **M34
 (FAT-free storage — the host file channel, issue #727) done 2026-09-02 —
 GH milestone 21 closed 8/8** (HF1–HF7, PRs #745/#747/#749/#792/#806/#816,
 including the HF7 CLONE COW dedup work); M35 (WASM core) done 2026-09-02
-(6/6, GH milestone 22). The open flake tracked: #810 (boot-probe S1PTW
-walk window; self-decoding instrumentation + claim 9094). For the
-canonical, always-current answer to "where are we, and what's next", read
+(6/6, GH milestone 22). The #810 flake family (boot-probe EL0 hang /
+post-exec EL1h data aborts) was root-caused as a broken exception
+resume seam — same-EL IRQ nesting + SMP race on the single global
+`resume_frame` (tasks resuming with the GIC/timer handler's register
+image, x23=0x1e/x26=0x10040080 at two fault sites) — and FIXED in PR
+#852 / issue #850 (mask IRQ at vector entry + per-core resume state;
+claim 9094 flipped ✅; verified 19/19 live VZ gates; #810/#814/#850 all
+CLOSED 2026-09-03). For the canonical, always-current answer to "where
+are we, and what's next", read
 `docs/status.md`.
 
 ## Milestone scope rules
