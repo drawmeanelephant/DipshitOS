@@ -146,3 +146,46 @@ gate_end() {
     RUN_DIR=""
     SHARE=""
 }
+
+# --- shared build bootstrap + serial-echo conventions ------------------------
+# Every class-B gate used to carry its own copy of the fmt/swift/codesign
+# preamble and the colored-prompt echo pattern; a toolchain or prompt change
+# had to land in 167 files and silently drifted (issues #895/#896 — the first
+# real CI run caught two gates whose echo expectations no longer matched the
+# boot transcript). Centralize the parts that are truly identical; gates keep
+# their per-gate differences (fmt file lists, -DSPIKE, special images) as
+# ordinary calls around these helpers.
+
+# gate_fmt_check -- zig fmt --check the given paths (one canonical invocation).
+gate_fmt_check() {
+    zig fmt --check "$@"
+}
+
+# gate_build_runner -- build + ad-hoc-codesign the release VMRunner with the
+# VZ entitlements. Optional extra swift flags pass through (e.g.
+# -Xswiftc -DSPIKE for the custom-virtio spike build).
+gate_build_runner() {
+    swift build --package-path host/vm-runner --configuration release "$@"
+    codesign --force --sign - --entitlements host/vm-runner/entitlements.plist \
+        host/vm-runner/.build/release/VMRunner
+}
+
+# gate_serial_has_echo -- did the guest console echo the given command in the
+# serial log? Accepts BOTH observed echo forms:
+#   colored (interactive shell):  \x1b[32mvirelai> \x1b[0m<cmd>\r
+#   plain (pre-prompt race):      <cmd>\r on its own line
+# The plain form is what the scripted first keystroke produces when it lands
+# while the boot-log tail is still colliding with the first prompt render
+# (first CI census, issues #895/#896): the guest executed the command, but the
+# shell never redrew the colored prompt for it. The machine-level effect is
+# the gate's real evidence; this matcher only proves the keystrokes reached
+# the console.
+gate_serial_has_echo() {
+    local ser="$1" cmd="$2"
+    grep -a -qF -- $'\x1b[32mvirelai> \x1b[0m'"$cmd" "$ser" 2>/dev/null && return 0
+    # Plain form: the command at the START of a serial line (the guest echoed
+    # it before the shell redrew the prompt). Line-based via awk (literal
+    # index(), not a regex) so \n, \r and \r\n endings all work.
+    awk -v c="$cmd" 'index($0, c) == 1 { f = 1 } END { exit !f }' "$ser" 2>/dev/null && return 0
+    return 1
+}

@@ -70,11 +70,10 @@ DIRTY="$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
 echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
 
 # --- build gates ------------------------------------------------------------
-zig fmt --check boot/src/*.zig kernel/src/*.zig build.zig
+gate_fmt_check boot/src/*.zig kernel/src/*.zig build.zig
 zig build
 zig build image
-swift build --package-path host/vm-runner --configuration release
-codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
+gate_build_runner
 
 # --- per-run isolation -------------------------------------------------------
 gate_begin live-transcript
@@ -109,12 +108,15 @@ run_one() {
     [ -f "$SER" ] || { SERIAL_BYTES=0; }
     if [ -f "$SER" ]; then
         grep -qF -- "VirelaiOS kernel has seized control." "$SER" && BANNER=1
-        # OBSERVED TODAY (2026-08-24, claim 5069): M18 T5 (claim 0163) made
-        # the shell prompt ANSI-colored — the echo line's serial bytes are
-        # `\x1b[32mvirelai> \x1b[0mhelp\r`, so the historical "virelai>
-        # help" can never match again. Match the observed colored form
-        # (prompt + the first echoed keystroke).
-        grep -qF $'\x1b[32mvirelai> \x1b[0mhelp' "$SER" && PROMPT=1
+        # PROMPT: the interactive shell rendered AND echoed a typed command.
+        # Anchored on `version` (the SECOND scripted command): the first
+        # command (`help`) can legitimately echo plain when it lands while
+        # the boot-log tail collides with the first prompt render (first CI
+        # census, issue #896), and the colored echo form only exists once the
+        # shell has settled. gate_serial_has_echo accepts both the colored
+        # and plain forms; the help/version/mem/echo OUTPUT checks below
+        # prove live RX independently.
+        gate_serial_has_echo "$SER" version && PROMPT=1
         grep -qF -- "available commands:" "$SER" && HELP=1
         grep -qF -- "virelai-kernel" "$SER" && VERSION=1
         grep -qF -- "mem: descriptors=" "$SER" && MEM=1

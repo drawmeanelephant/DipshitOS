@@ -7,6 +7,7 @@ devices. Used by image/make-image.sh and tools/inspect.sh.
 Modes:
   create:  mkfat32.py [--size-mb 0] IMAGE EFI_FILE KERNEL_FILE
   list:    mkfat32.py --list IMAGE
+  cat:     mkfat32.py --cat-file /PATH IMAGE
 
 M34 HF6 (issue #740): the image is a BOOT VOLUME ONLY. It contains
 exactly two files -- EFI/BOOT/BOOTAA64.EFI and KERNEL.BIN -- parsed by
@@ -446,6 +447,104 @@ def list_image(path):
     return 0
 
 
+def cat_file(path, wanted):
+    """Dump the raw bytes of the file at /PATH inside the image's ESP to
+    stdout (exit 0), or exit 1 if the file is absent.
+
+    The M34 HF6 image is a boot volume whose loader writes pre-exit evidence
+    (\\BOOTED.TXT, \\MEMMAP.TXT, \\LOADER.TXT, \\RC.TXT) through the UEFI
+    Simple File System protocol. --list shows those files; this mode reads
+    their contents back out. verify-bad-handoff.sh asserts the kernel's
+    non-zero rc in \\RC.TXT after a corrupted-magic boot, which is the
+    original --cat-file consumer (HF6 slimmed the tool to create/list and
+    the gate's read path went stale with it)."""
+    wanted = wanted.lstrip("/").upper()
+    with open(path, "rb") as f:
+        data = f.read()
+    bps = BYTES_PER_SECTOR
+    if data[512:520] != b"EFI PART":
+        return 1
+
+    # Find the ESP partition entry (type ESP_GUID) in the primary GPT.
+    entries_lba = struct.unpack_from("<Q", data, 512 + 72)[0]
+    first_lba = None
+    for i in range(128):
+        e = data[entries_lba * bps + i * 128: entries_lba * bps + (i + 1) * 128]
+        if len(e) < 128:
+            break
+        if e[0:16] == ESP_GUID:
+            first_lba = struct.unpack_from("<Q", e, 32)[0]
+            break
+    if first_lba is None:
+        return 1
+
+    base = first_lba * bps
+    if data[base + 510:base + 512] != b"\x55\xaa" or data[base + 82:base + 90] != b"FAT32   ":
+        return 1
+    reserved = struct.unpack_from("<H", data, base + 14)[0]
+    fat_sectors = struct.unpack_from("<I", data, base + 36)[0]
+    root_cluster = struct.unpack_from("<I", data, base + 44)[0]
+    spc = data[base + 13]
+    data_start = first_lba + reserved + 2 * fat_sectors
+
+    def cluster_sector(cluster):
+        return data_start + (cluster - root_cluster) * spc
+
+    def read_cluster_entries(cluster):
+        sec = cluster_sector(cluster)
+        blob = data[sec * bps:(sec + 1) * bps]
+        return [blob[i * 32:(i + 1) * 32] for i in range(bps // 32)]
+
+    def fat_next(cluster):
+        off = (first_lba + reserved) * bps + cluster * 4
+        return struct.unpack_from("<I", data, off)[0] & 0x0FFFFFFF
+
+    # Walk the tree tracking each file's /-separated path; a directory's
+    # 0x00 end marker terminates that walk (no entries can follow it).
+    def walk(cluster, prefix):
+        seen = set()
+        while cluster not in (FAT_EOC, FAT_BAD) and cluster not in seen:
+            seen.add(cluster)
+            for e in read_cluster_entries(cluster):
+                if e[0] == 0x00:
+                    return None
+                if e[0] == 0xE5:
+                    continue
+                attr = e[11]
+                if attr & 0x08:  # volume label
+                    continue
+                name = decode_83(e)
+                if name in (".", ".."):
+                    continue
+                cl = (struct.unpack_from("<H", e, 20)[0] << 16) | struct.unpack_from("<H", e, 26)[0]
+                size = struct.unpack_from("<I", e, 28)[0]
+                full = (prefix + "/" if prefix else "") + name
+                if attr & 0x10:
+                    found = walk(cl, full)
+                    if found is not None:
+                        return found
+                elif full == wanted:
+                    # Follow the cluster chain, emitting exactly size bytes.
+                    out = bytearray()
+                    cur = cl
+                    chain = set()
+                    while size and cur not in (FAT_EOC, FAT_BAD) and cur not in chain:
+                        chain.add(cur)
+                        chunk = data[cluster_sector(cur) * bps:(cluster_sector(cur) + spc) * bps]
+                        take = min(len(chunk), size)
+                        out += chunk[:take]
+                        size -= take
+                        if not size:
+                            break
+                        cur = fat_next(cur)
+                    sys.stdout.buffer.write(bytes(out))
+                    return True
+            cluster = fat_next(cluster)
+        return None
+
+    return 0 if walk(root_cluster, "") is not None else 1
+
+
 # --------------------------------------------------------------------------
 # main
 # --------------------------------------------------------------------------
@@ -457,6 +556,8 @@ def main():
                     help="image size in MiB (0 = the FAT32 floor, default)")
     ap.add_argument("--list", action="store_true",
                     help="list the image's partitions and files instead of creating")
+    ap.add_argument("--cat-file", metavar="PATH",
+                    help="dump the ESP file at /PATH to stdout (exit 1 if absent)")
     ap.add_argument("args", nargs="*")
     opts = ap.parse_args()
 
@@ -465,6 +566,11 @@ def main():
             ap.error("--list takes exactly one IMAGE argument")
         list_image(opts.args[0])
         return
+
+    if opts.cat_file:
+        if len(opts.args) != 1:
+            ap.error("--cat-file takes exactly one IMAGE argument")
+        sys.exit(cat_file(opts.args[0], opts.cat_file))
 
     if len(opts.args) != 3:
         ap.error("create mode takes IMAGE EFI_FILE KERNEL_FILE "

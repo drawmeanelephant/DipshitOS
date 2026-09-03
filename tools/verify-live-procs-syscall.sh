@@ -152,14 +152,29 @@ run_one() {
         fi
 
         # The IPC flow still works after the snapshot read (the peer
-        # entered its recv loop): sends echo back byte-exact.
+        # entered its recv loop): sends echo back as "peer: got ping N".
+        # Since M28 SMP the counter prints its send marker as TWO sys_write
+        # calls ("ipc: ping " then "<d>\n" — counter.zig) and, with the
+        # worker-advances flood on the second core, another print can land
+        # between them: a tiny fraction (~0.1%) of send markers are
+        # unreconstructable in the serial even though the mailbox delivery
+        # and the peer's echo are intact (an echo of N proves the send of N
+        # — the counter's sequence is contiguous and monotonic). The
+        # assertion is therefore semantic: the flow is live in both
+        # directions (>= 2 distinct each), echo volume tracks send volume
+        # (>= 90% — a mailbox drop collapses this ratio; observed ~99.97%),
+        # and no echo invents a ping beyond the last observed send.
         local sends echoes
         sends="$(grep -aoE -- "ipc: ping [0-9]+" "$SER" | sed -E 's/.*ping //' | sort -n -u || true)"
         echoes="$(grep -aoE -- "peer: got ping [0-9]+" "$SER" | sed -E 's/.*ping //' | sort -n -u || true)"
-        local nsends nechoes
+        local nsends nechoes max_send max_echo
         nsends="$(printf '%s\n' "$sends" | grep -c . || true)"
         nechoes="$(printf '%s\n' "$echoes" | grep -c . || true)"
-        [ -n "$sends" ] && [ -n "$echoes" ] && [ "$nechoes" -ge 2 ] && [ -z "$(comm -23 <(printf '%s\n' "$echoes") <(printf '%s\n' "$sends") || true)" ] && flow=1 || true
+        max_send="$(printf '%s\n' "$sends" | tail -1)"
+        max_echo="$(printf '%s\n' "$echoes" | tail -1)"
+        [ -n "$sends" ] && [ -n "$echoes" ] && [ "$nechoes" -ge 2 ] && \
+            [ "$((nechoes * 10))" -ge "$((nsends * 9))" ] && \
+            [ "$max_echo" -le "$max_send" ] && flow=1 || true
 
         # Both processes still running at the final procs, neither exits.
         local peer_final counter_final

@@ -94,11 +94,10 @@ DIRTY="$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
 echo "revision: $REVISION branch=$BRANCH boots=$BOOTS dirty-files=$DIRTY"
 
 # --- build gates ------------------------------------------------------------
-zig fmt --check boot/src/*.zig kernel/src/*.zig build.zig
+gate_fmt_check boot/src/*.zig kernel/src/*.zig build.zig
 zig build
 zig build image
-swift build --package-path host/vm-runner --configuration release
-codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/vm-runner/.build/release/VMRunner
+gate_build_runner
 
 # --- per-run isolation -------------------------------------------------------------
 # Private scratch dir + pristine-boot overlay for EVERY boot.
@@ -134,11 +133,14 @@ run_one() {
     SERIAL_BYTES=$(wc -c < "$SER" 2>/dev/null | tr -d ' ' || echo 0)
     BANNERS=$(grep -a -c -- "kernel has seized control" "$SER" 2>/dev/null || echo 0)
     KEYS=$(grep -a -o -- "key=0x[0-9a-f]*" "$SER" 2>/dev/null | sort -u | wc -l | tr -d ' ')
-    # OBSERVED TODAY (2026-08-24, claim 5069): M18 T5 (claim 0163) colors
-    # the prompt — the echo line's serial bytes are
-    # `\x1b[32mvirelai> \x1b[0m<cmd>\r`, so the historical "virelai> <cmd>"
-    # can never match again.
-    if grep -a -qF -- $'\x1b[32mvirelai> \x1b[0m'"$cmd" "$SER" 2>/dev/null; then ECHOED=1; else ECHOED=0; fi
+    # Echo form (see gate_serial_has_echo in tools/lib/gate-run.sh): the
+    # interactive shell colors the prompt — `\x1b[32mvirelai> \x1b[0m<cmd>\r`
+    # — but when the scripted keystroke lands while the boot-log tail is
+    # still colliding with the first prompt render (first CI census, issue
+    # #895), the guest echoes it PLAIN (`<cmd>\r`). Both prove the keystrokes
+    # reached the console; the machine-level effect (banners/keys/stopped
+    # below) is the gate's real evidence.
+    if gate_serial_has_echo "$SER" "$cmd"; then ECHOED=1; else ECHOED=0; fi
     if grep -a -qF -- "VM ended before the expected transcript appeared" "$(art live-reboot-run-$tag.txt)"; then STOPPED=1; else STOPPED=0; fi
     # Claim-0011 M2_RST! marker in the EFI variable store (REPORTED, not a
     # pass criterion -- best-effort channel; see header). The store is the
