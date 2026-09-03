@@ -26,8 +26,9 @@ verify-portable:
     zig build inspect
     swift build --package-path host/vm-runner
     zig build context
-    bash tools/verify-coordination.sh
+    bash tools/status/verify-issue-coordination.sh
     bash tools/status/test-coordination.sh
+    bash tools/lint-workflows.sh
     bash tools/verify-mmu-debt.sh
     bash tools/verify-glyph-raster.sh
     bash tools/verify-mutations.sh
@@ -193,24 +194,37 @@ verify-mmu-debt:
 verify-bss-budget:
     bash tools/verify-bss-budget.sh
 
-# Verify the multiagent coordination surface (class A — claims/logs files + generated indexes)
+# Verify the multiagent coordination surface (class A — claims are GitHub issues labeled `claim`; the gate reads open issues via gh and fails on Touches overlaps between different branches)
 verify-coordination:
-    bash tools/verify-coordination.sh
+    bash tools/status/verify-issue-coordination.sh
 
-# Test the coordination tooling itself (class A — escaped cells, deterministic claim IDs, structural validation)
+# Lint the GitHub Actions workflows (class A — actionlint, pinned; self-bootstraps into .build/ when not on PATH)
+lint-workflows:
+    bash tools/lint-workflows.sh
+
+# Test the coordination tooling itself (class A — offline fixtures for the issue gate + staleness sweep + real-time unlabel guard)
 test-coordination:
     bash tools/status/test-coordination.sh
 
-# Preview the claim/log index tables (developer tooling, not a gate — CI regenerates the tables on main after merge; do not commit branch output)
-refresh-indexes:
-    bash tools/status/refresh-indexes.sh
+# Rehearse the real-time claim:stale removal path end to end (live: creates + closes a throwaway claim issue; REHEARSAL_MODE=local forces the in-process guard run)
+rehearse-unlabel:
+    bash tools/status/rehearse-unlabel.sh
+
+# Preview which open claim issues the weekly staleness sweep would warn on (live dry-run)
+sweep-stale-claims:
+    bash tools/status/sweep-stale-claims.sh --dry-run
+
+# File a claim as a GitHub issue (label `claim`; docs/claims/ is gone — claims live on the tracker)
+claim TITLE:
+    bash tools/status/new-claim.sh --title "{{TITLE}}"
 
 # Create an isolated per-agent checkout (issue #523 item 1; claim 4928):
 #   just new-agent buffy m18-t16-scripting
 # → worktree at ../virelaios-<name>, branch agent/<name>/<slug> off origin/main.
 # Each worktree has its own .build/ and artifacts/, so concurrent agents
-# never contend for build caches or live VM gate files. Claim your work
-# INSIDE the new worktree (docs/claims/TEMPLATE.md), not from the main one.
+# never contend for build caches or live VM gate files. File your claim
+# issue from inside the new worktree (gh issue create --label claim, or
+# just claim "<title>"), not from the main one.
 new-agent NAME SLUG:
     @test ! -e "../virelaios-{{NAME}}" \
         || { echo "error: ../virelaios-{{NAME}} already exists (just resume-agent {{NAME}} <branch>?)"; exit 1; }

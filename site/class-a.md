@@ -22,8 +22,9 @@ zig build image
 zig build inspect
 swift build --package-path host/vm-runner
 zig build context
-bash tools/verify-coordination.sh
+bash tools/status/verify-issue-coordination.sh
 bash tools/status/test-coordination.sh
+bash tools/lint-workflows.sh
 bash tools/verify-mmu-debt.sh
 python3 tools/decode-screen-glyphs.py --self-test
 ```
@@ -42,8 +43,13 @@ The `just verify-portable` alias runs the same set locally.
   in the banner or prompt fails deterministically.
 - **build / image / inspect** — the EFI binary, the GPT+FAT32 image, and the
   inspection stages.
-- **`verify-coordination.sh`** — the docs indexes (claims, logs) must be in
-  sync with the files on disk.
+- **`verify-issue-coordination.sh`** — claims are GitHub issues labeled
+  `claim`; the gate reads the open ones via `gh` and fails when two of them
+  from different branches declare overlapping file touches.
+- **`lint-workflows.sh`** — actionlint (pinned) over `.github/workflows/`:
+  trigger/expression typos fail in CI instead of only surfacing when a
+  workflow runs for real. Runner-label allowance in `.github/actionlint.yaml`.
+  Self-bootstraps into `.build/` when actionlint isn't on PATH.
 - **`verify-mmu-debt.sh`** — the ADR 0006 MMU contract (T0SZ=16 + TLBI
   comments) stays enforced.
 - **glyph self-test** — the mirror-tripwire decoder renders the clock window

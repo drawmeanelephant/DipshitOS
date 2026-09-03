@@ -132,12 +132,12 @@ non-Desktop/non-Net user programs.
 | `tools/decode-screen-glyphs.py` | glyph screenshot decoder |
 | `tools/ragshit/` | context engine (dev tooling) |
 | `docs/status.md` | living status |
+| GitHub issues (label `claim`) | active-work claims |
 | `docs/testing.md` | testing policy |
 | `docs/gate-inventory.md` | gate classification |
 | `docs/roadmap.md` | milestone plan |
 | `docs/agent-concurrency-plan.md` | lane assignments |
 | `docs/TEAMS.md` | this file |
-| `docs/CLAIMS.md` | active work table |
 
 **Owns:** Host tooling, CI, gate infrastructure, docs (except ADRs owned
 by the relevant team).
@@ -170,6 +170,10 @@ is the coordination surface.
 
 ## Active work tracking
 
-See [`docs/CLAIMS.md`](CLAIMS.md) for the single-table active-work tracker.
-No claim IDs, no index regeneration, no coordination verification scripts.
-Just a table. Update it when you start and when you finish.
+Claims are **GitHub issues labeled `claim`** (see `AGENTS.md`): file one
+before starting non-trivial work, comment progress on it, close it when
+done. The coordination gate
+(`bash tools/status/verify-issue-coordination.sh`) fails when two open
+claim issues from different branches declare overlapping file touches.
+The old `docs/claims/` + `docs/logs/` file tracker and its generated
+indexes were deleted 2026-09-03.

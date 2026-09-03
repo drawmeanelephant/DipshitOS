@@ -226,7 +226,7 @@ var displayMode = false
 // host controller — PCI VID=0x106b DID=0x1a06 CLS=0x0c0330, two MMIO
 // BARs (0x50001000 + 0x50000000) — with the keyboard/pointer as USB HID
 // devices behind it. So screen-side input needs a USB XHCI + HID stack,
-// not a virtio-input transport. See docs/claims/3868-virtio-input.md.
+// not a virtio-input transport. See claim 3868 (historical — in git history).
 var inputMode = false
 // Milestone fifteen card A1 (claim 6140): `--sound` attaches the
 // virtio-snd device (VZVirtioSoundDeviceConfiguration with one output
@@ -2704,7 +2704,7 @@ func pmo(_ s: String) {
 /// "drag" (moves as leftMouseDragged). All of them hit the same
 /// activation wall: VZ only translates for its KEY window, and macOS 14+
 /// refuses programmatic focus-stealing from a background process — see
-/// docs/claims/4769-vz-pointer-root-cause.md.
+/// claim 4769 (historical — in git history).
 func deliverPointerEvent(_ view: VZVirtualMachineView, _ e: NSEvent) {
     switch pointerRoute {
     case "direct":

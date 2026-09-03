@@ -1,0 +1,52 @@
+# Claim staleness rehearsal: end-to-end proof of the real-time unlabel path.
+#
+# Manual workflow (workflow_dispatch). Creates a throwaway `claim` issue,
+# marks it `claim:stale`, then produces a REAL issue_comment event so the
+# `unlabel-fresh` job in claim-staleness.yml fires against it — proving the
+# production path (webhook delivery, the job's `if:` prefilter, the
+# tools/status/unlabel-guard.sh decision, and the issues: write permission
+# to remove the label) — then verifies the label is gone and cleans up
+# (labels stripped, issue closed) so the tracker is not polluted.
+#
+# Events created with the repository GITHUB_TOKEN do not spawn further
+# workflow runs, and bot comments are (correctly) ignored by the guard — the
+# HUMAN path can only be triggered by a human-scoped actor. Set the
+# repository secret CLAIM_REHEARSAL_TOKEN to a PAT (repo scope) owned by a
+# user with write access to this repository, and cascade mode runs. Without
+# the secret the rehearsal degrades to guard-local mode: the guard's live
+# branch runs in-process against the throwaway issue (guard logic + real
+# token permissions), which rehearses everything except event delivery and
+# the job prefilter. Run locally as a collaborator (`just rehearse-unlabel`)
+# and your own gh login provides the human actor — full cascade, no secret
+# needed. See tools/status/rehearse-unlabel.sh for the details.
+
+name: Claim staleness rehearsal
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  rehearse:
+    name: Rehearse real-time claim:stale removal
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Ensure labels exist
+        run: |
+          gh label create "claim" --description "Claimed piece of parallel work (AGENTS.md coordination rules); open = active, close when done" --color 5319E7 2>/dev/null || true
+          gh label create "claim:stale" --description "Claim idle 14+ days (staleness sweep); removed on the next human update" --color FBCA04 2>/dev/null || true
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Run the rehearsal
+        run: bash tools/status/rehearse-unlabel.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REHEARSAL_TOKEN: ${{ secrets.CLAIM_REHEARSAL_TOKEN }}

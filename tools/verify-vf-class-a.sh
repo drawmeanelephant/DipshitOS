@@ -109,8 +109,8 @@ EOF
 step "verify-bss-budget.sh"
 bash tools/verify-bss-budget.sh
 
-step "verify-coordination.sh"
-bash tools/verify-coordination.sh
+step "verify-issue-coordination.sh"
+bash tools/status/verify-issue-coordination.sh
 
 echo
 echo "verify-vf-class-a: PASS — wire parity locked on both sides, budgets green."

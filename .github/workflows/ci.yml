@@ -1,7 +1,7 @@
 # CI proves ONLY the portable/build gate set — class A in
 # docs/gate-inventory.md: formatting, unit tests, transcript mock test,
-# guest/image builds, inspect, Swift runner build, context generation, and
-# the coordination gates. It does NOT run the Apple-silicon
+# guest/image builds, inspect, Swift runner build, context generation,
+# GitHub-Actions workflow lint, and the coordination gates. It does NOT run the Apple-silicon
 # Virtualization.framework hardware gates (class B) — those live in the
 # dedicated `vz-gates` workflow (.github/workflows/vz-gates.yml), which
 # runs them on a self-hosted macOS 27+ Apple silicon runner once the
@@ -29,6 +29,12 @@ jobs:
   build-and-test-macos:
     name: Build (macOS + Swift Launcher)
     runs-on: macos-latest
+    # The coordination gate reads open `claim` issues from the GitHub API
+    # (gh issue list); the job-level token needs issues: read for that.
+    permissions:
+      contents: read
+      issues: read
+      actions: write  # upload-artifact
 
     steps:
       - name: Checkout repository
@@ -65,11 +71,16 @@ jobs:
       - name: Verify project context generator (class A)
         run: zig build context
 
-      - name: Verify multiagent coordination indexes (class A)
-        run: bash tools/verify-coordination.sh
+      - name: Verify multiagent coordination gate (claims as GitHub issues, class A)
+        run: bash tools/status/verify-issue-coordination.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: Test multiagent coordination tooling (class A)
         run: bash tools/status/test-coordination.sh
+
+      - name: Lint GitHub Actions workflows (class A — actionlint, pinned; runner-label allowance in .github/actionlint.yaml)
+        run: bash tools/lint-workflows.sh
 
       - name: Verify MMU takeover contract (class A — ADR 0006 supersession, T0SZ=16 + TLBI comments)
         run: bash tools/verify-mmu-debt.sh

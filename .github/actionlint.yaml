@@ -1,0 +1,11 @@
+# actionlint configuration — see
+# https://github.com/rhysd/actionlint/blob/v1.7.12/docs/config.md
+#
+# ci.yml's macOS-27-SDK job runs on GitHub's `xcode-27` public-preview
+# runner (announced 2026-07-16; see the ci.yml header). actionlint's
+# built-in hosted-runner list does not know that label yet, so it is
+# declared here to keep the workflow lint clean. This is not a
+# self-hosted runner — the label is only listed so actionlint accepts it.
+self-hosted-runner:
+  labels:
+    - xcode-27
