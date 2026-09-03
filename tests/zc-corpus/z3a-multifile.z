@@ -1,0 +1,19 @@
+// Z3a (issue #758): multi-file compile — this file calls functions defined
+// in z3a-lib.z. `zc a.z b.z out.elf` compiles both; the cross-file calls
+// resolve through the shared function table and patch lists. The gate
+// asserts the markers in order and the exit status 72.
+const zc = @import("zc");
+
+fn main() void {
+    zc.print("z3a-start\n");
+    const a: u64 = lib_triple(7);
+    const b: u64 = lib_combo(4);
+    if (a == 21) {
+        if (b == 20) {
+            zc.print("z3a-cross-ok\n");
+            zc.print("z3a-lib-ok\n");
+            zc.exit(72);
+        }
+    }
+    zc.exit(1);
+}
