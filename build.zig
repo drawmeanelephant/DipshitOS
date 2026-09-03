@@ -296,6 +296,35 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_smp1.step);
 
     // ------------------------------------------------------------------
+    // Guest: the sched-ring stress program (claim 881, #856 slice 4) —
+    // SCHEDRING.BIN, the per-core ready-ring proof. The live gate runs
+    // TWO copies: one pinned to core 1 (home ring 1) and one floating
+    // (home ring 0, stolen onto core 1 by the idle-branch steal view).
+    // Each runs 4 × sys_sleep(1) then 32 × sys_yield in a tight loop,
+    // writes exact-count markers (`slept=4` / `yielded=32` / `done`),
+    // and exits 0 — a lost wakeup, a duplicate staging, or a corrupt
+    // save/restore breaks the exact-count greps and fails the gate.
+    // ------------------------------------------------------------------
+    const schedring = b.addExecutable(.{
+        .name = "user-schedring",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/schedring.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    schedring.linker_script = b.path("user/linker.ld");
+    const schedring_step = b.step("schedring", "Build the sched-ring stress user program (zig-out/bin/SCHEDRING.BIN; class A tooling, no VM)");
+    const schedring_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    schedring_elf2bin.addFileArg(schedring.getEmittedBin());
+    const schedring_bin = schedring_elf2bin.addOutputFileArg("SCHEDRING.BIN");
+    schedring_elf2bin.has_side_effects = true;
+    schedring_elf2bin.stdio = .inherit;
+    schedring_step.dependOn(&schedring_elf2bin.step);
+    const install_schedring = b.addInstallFileWithDir(schedring_bin, .bin, "SCHEDRING.BIN");
+    b.getInstallStep().dependOn(&install_schedring.step);
+
+    // ------------------------------------------------------------------
     // Guest: fifth ESP user program (milestone five, card N6 — claim
     // 1384) — the UDP syscall proof UDP.BIN. Same freestanding target,
     // linker script, elf2bin conversion, and ESP embedding as USER.BIN /
