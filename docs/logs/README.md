@@ -65,6 +65,7 @@ meaningful — on main.
 |--------|----------|
 | `freebuff/m22-lane-d-wave2` | [`0720-m22-lane-d-wave2.md`](0720-m22-lane-d-wave2.md) |
 | agent/antigravity/desktop-quality-821 | [`agent-antigravity-desktop-quality-821.md`](agent-antigravity-desktop-quality-821.md) |
+| agent/antigravity/img4-wallpaper | [`agent-antigravity-img4-wallpaper.md`](agent-antigravity-img4-wallpaper.md) |
 | agent/antigravity/in-guest-compiler | [`agent-antigravity-in-guest-compiler.md`](agent-antigravity-in-guest-compiler.md) |
 | agent/antigravity/raster-graphics-ui | [`agent-antigravity-raster-graphics-ui.md`](agent-antigravity-raster-graphics-ui.md) |
 | agent/antigravity/sexiburger | [`agent-antigravity-sexiburger.md`](agent-antigravity-sexiburger.md) |
@@ -93,6 +94,7 @@ meaningful — on main.
 | glyph raster convention gate (claim 9100) | [`agent-buffy-glyph-raster-gate.md`](agent-buffy-glyph-raster-gate.md) |
 | history recall persistence (claim 6344) | [`agent-buffy-history-recall-persistence.md`](agent-buffy-history-recall-persistence.md) |
 | `agent/buffy/hygiene-archive-m5-m6-prompts` | [`agent-buffy-hygiene-archive-m5-m6-prompts.md`](agent-buffy-hygiene-archive-m5-m6-prompts.md) |
+| `agent/buffy/img5-view` | [`agent-buffy-img5-view.md`](agent-buffy-img5-view.md) |
 | agent/buffy/input-poll-563 | [`agent-buffy-input-poll-563.md`](agent-buffy-input-poll-563.md) |
 | agent/buffy/issue-613-tcp-connect-spin | [`agent-buffy-issue-613-tcp-connect-spin.md`](agent-buffy-issue-613-tcp-connect-spin.md) |
 | milestone ten userland filesystem & storage ABI (claim 0662) | [`agent-buffy-m10-fs.md`](agent-buffy-m10-fs.md) |
@@ -238,6 +240,7 @@ meaningful — on main.
 | `lane-c/m20-text-rendering` | [`lane-c-m20-text-rendering.md`](lane-c-m20-text-rendering.md) |
 | `lane-d/m22-dev-tools` | [`lane-d-m22-dev-tools.md`](lane-d-m22-dev-tools.md) |
 | t3code/1145c9b5 (W1a import contract freeze) | [`t3code-1145c9b5.md`](t3code-1145c9b5.md) |
+| agent/t3code/729-desktop-manifest-21 | [`t3code-20260902-1.md`](t3code-20260902-1.md) |
 | t3code/b2feefd3 | [`t3code-b2feefd3.md`](t3code-b2feefd3.md) |
 | t3code/b5bdb1b1 | [`t3code-b5bdb1b1.md`](t3code-b5bdb1b1.md) |
 | t3code concurrent-agents merge conflicts | [`t3code-concurrent-agents-merge-conflicts.md`](t3code-concurrent-agents-merge-conflicts.md) |
