@@ -158,6 +158,52 @@ are the open end.
   already rejects overlapping ACTIVE claims, but plan Z work strictly
   one-at-a-time (Z1e+Z1f may pair) so claims never trip it.
 
+### The dialect boundary (Z4a, #760 — what the corpus may use)
+
+The corpus contract: every `tests/zc-corpus/*.z` fixture (and the stdz
+library modules `user/src/lib/stdz/*.zig` it compiles with) must parse +
+type-check under host `zig 0.16` AND compile + run in-guest with `zc`
+(compile-only for the vl6 GUI fixture — its run parity needs a
+window/pixel-observing gate, not a serial log). `tools/verify-zc-corpus.sh`
+is the mechanical half: one case per compile unit, per-case pinned exit
+status, ordered markers, and byte-exact + sha256 file pins where the
+fixture does file IO. This is the *shared subset* today, in one place:
+
+**In the subset** (each rung's fixture is the living example):
+
+- Scalar `fn`s with typed params/returns; typed `const`/`var`; `if`/`else`
+  with braced bodies; `while`; `for (0..n)` and array iteration; `switch`
+  as value/range/multi-prong cond-chains with `else`.
+- Strings as `(addr,len)` pairs (string literals and `[]const u8`
+  *returns* — e.g. the z1e/z1f name-mapping fns).
+- Arrays, structs (including `[*]T` pointer fields), enums with
+  `@enumFromInt`/`@intFromEnum`, `@intCast` (identity on words — needed so
+  dual-dialect sources type-check under host Zig's u8 stores).
+- Pointers: `&x`, `x.*`, `[*]u8`/`*T` params, struct-field access through
+  pointer params. **Not** slices as *params* (call sites pass one register;
+  stdz uses explicit `[*]u8` + `u64` buffer pairs — the z2a/z1d pattern).
+- `defer` (scope-exit cleanups: LIFO at block fallthrough, inline on
+  `return`; bodies restricted to expression or simple-assignment
+  statements), `*const fn(...)` function pointers with `&fn` + `blr`.
+- The `zc.*` magic seam (`@import("zc")` — print/write/exit/mmap/file
+  ops), multi-file flat-namespace compile (Z3a), and the stdz modules
+  (fmt/string builder/ring — Z3b) compiled in from source.
+
+**Non-goals** (host Zig parses them; `zc` does not — compile errors, and
+the fixture corpus must not use them): `comptime`, `std`, error sets,
+`break`/`continue`, compound assignment (`+=` etc. — write `i = i + 1`),
+`%` (emulate as `x - (x / 10) * 10`), `else if` (nest ifs), method-call
+syntax, any `@import` other than the magic `"zc"` name (the multi-file
+namespace is flat by design). Dialect-internal caps the gate enforces:
+every source ≤ 2048 B (the kernel's single-`file_read` cap — a larger
+source silently truncates in-guest) and ≤ 6 sources per compile
+(`MAX_FILES`). When a ladder step wants to lift a non-goal, it ships a
+fixture that uses it and this list shrinks — the corpus and this boundary
+move together. The corpus gate's first in-guest sweep caught one drift:
+`z1b-arrays.z` used `+=` (never in the dialect — its zc.zig unit twin
+always used `i = i + 1`), which the Z0.5-era host checks could not see
+(host Zig accepts `+=`); fixed to the supported form in Z4a.
+
 **Suggested sequencing:** land **#749 (Z0.5)** first — it's the dialect
 unlock and the host-shim contract is pinned in its body — then **#708 (VL6)**
 rides right after (or paired with it, per the ladder note). Then claim Z1a
