@@ -31,6 +31,7 @@ verify-portable:
     bash tools/lint-workflows.sh
     bash tools/verify-mmu-debt.sh
     bash tools/verify-glyph-raster.sh
+    bash tools/verify-ttf-fonts.sh
     bash tools/verify-mutations.sh
     bash tools/verify-bss-budget.sh
     bash tools/verify-vf-class-a.sh
