@@ -65,8 +65,9 @@ if [ -z "$OWNER" ]; then
 fi
 
 if [ -n "$TOUCHES" ]; then
-    # Keep the field machine-parseable: one line, comma separated.
-    TOUCHES="$(printf '%s\n' "$TOUCHES" | tr -s ' ' | tr ' ' ',')"
+    # Keep the field machine-parseable: one line, comma separated (accept
+    # space- or comma-separated input, normalize to single commas).
+    TOUCHES="$(printf '%s\n' "$TOUCHES" | tr ',' ' ' | tr -s ' ' | tr ' ' ',')"
 fi
 
 [ -n "$SCOPE" ] || SCOPE="—"

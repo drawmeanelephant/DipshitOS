@@ -35,8 +35,10 @@
 # gate asserts the DISCOVER went out AND the real-network lease bound
 # (dynamic ip, fixed server 192.168.64.1, ack=1). The guest-is-not-
 # stranded proof stays: the static fallback still reaches the NAT
-# gateway (net ip 192.168.64.5 + net arp x2 + net ping 192.168.64.1 ->
-# pong=1 seq=1, the N7-proven story).
+# gateway (net ip 192.168.64.5 + net arp x2 + net ping 192.168.64.1 in
+# EACH script — the two scripted pings accumulate on the shared icmp
+# counters, so the last report reads req=2 — the pong>=1 round trip is
+# the N7-proven story; issue #733).
 #
 # The FULL 35-gate verify-vz aggregate must stay green (re-run
 # separately) — proof the N8 changes left the default VM byte-identical;
@@ -263,8 +265,15 @@ if [ -f "$S2" ]; then
     grep -a -q -- "dhcp=bound,ip=192\\.168\\.64\\.[0-9]*," <<< "$(grep -a 'dhcp=bound' "$S2" | tail -1)" && \
         grep -a -qE -- "dhcp=bound,ip=192\\.168\\.64\\.[0-9]+,mask=[0-9.]+,gw=[0-9.]*,server=192\\.168\\.64\\.1,lease=3600,discover=1,offer=1,request=1,ack=1,nack=0,timeout=0,mal=0" "$S2" && NATBOUND=1
     # The guest is NOT stranded: the static fallback still reaches the
-    # NAT gateway (the N7-proven gateway round trip, pong=1 seq=1).
-    grep -a -qF -- " icmp=req=1,repl=0,pong=1,drop=0,fail=0,seq=1" "$S2" && NATPONG=1
+    # NAT gateway (the N7-proven gateway round trip). #733 (2026-09-03):
+    # the phase-2 session scripts TWO pings (script-nat-1 and
+    # script-nat-2) and the icmp counters are per-boot cumulative, so the
+    # exact req=1 fixture could never fire (observed: req=2, pong=1,
+    # seq=1 — and pong=2/seq=2 the day NAT answers both echoes). Anchor
+    # on the COMPLETED round trip of the LAST icmp report instead:
+    # pong>=1 with the counters intact (repl=0, drop=0, fail=0).
+    LAST_ICMP="$(grep -a ' icmp=req=' "$S2" | tail -1 || true)"
+    grep -a -qE -- " icmp=req=[0-9]+,repl=0,pong=[1-9][0-9]*,drop=0,fail=0,seq=[1-9][0-9]*" <<<"$LAST_ICMP" && NATPONG=1
     grep -a -qF -- "net-dhcp-nat-ok" "$S2" && OK2=1
 fi
 RUN2=0 RUNNERFLAG2=0
@@ -292,8 +301,8 @@ fi
     echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
     echo "phase 1 (deterministic file-handle): --net + --net-dhcp-respond 10.0.0.2 — net dhcp -> DISCOVER (286 B, byte-exact in the capture) -> OFFER -> REQUEST -> ACK -> BOUND"
     echo "assertions: runner rc, DISCOVER-sent line, the bound lease (ip=10.0.0.2 mask=255.255.255.0 gw=10.0.0.1 server=10.0.0.2 lease=3600), the report counters (discover=1,offer=1,request=1,ack=1,nack=0,timeout=0,mal=0), the host's NET-DHCP OFFER + ACK lines, the 584-byte capture (the 286-B DISCOVER + the 298-B REQUEST, both byte-exact at the load-bearing offsets: dst ff*6, src 02:00:00:00:00:01, ethertype 0x0800, 68->67, op 1, cookie 0x63825363, option 53 = 1 then 3, the SAME xid), the gate echo, the runner's net-dhcp-respond flag"
-    echo "phase 2 (real NAT, rides --net-nat): CLAIM-TIME OBSERVATION UPDATED 2026-08-24 (claim 2259) — the VZ NAT gateway SERVES DHCP on this host today (original observation: none); the handshake bound a dynamic lease (ip=192.168.64.4 today) from server 192.168.64.1; the static fallback still reaches the NAT gateway (pong=1 seq=1)"
-    echo "assertions: runner rc, the NAT DISCOVER-sent line, the bound report (dhcp=bound,ip=192.168.64.N,...,server=192.168.64.1,lease=3600,discover=1,offer=1,request=1,ack=1,...), the gateway ping pong=1 seq=1, the gate echo, the runner's net-nat flag"
+    echo "phase 2 (real NAT, rides --net-nat): CLAIM-TIME OBSERVATION UPDATED 2026-08-24 (claim 2259) — the VZ NAT gateway SERVES DHCP on this host today (original observation: none); the handshake bound a dynamic lease (ip=192.168.64.4 today) from server 192.168.64.1; the static fallback still reaches the NAT gateway (issue #733: two scripted pings, icmp counters cumulative — asserted as pong>=1 on the last report)"
+    echo "assertions: runner rc, the NAT DISCOVER-sent line, the bound report (dhcp=bound,ip=192.168.64.N,...,server=192.168.64.1,lease=3600,discover=1,offer=1,request=1,ack=1,...), the gateway ping round trip (last icmp report: pong>=1, seq>=1, repl=0 drop=0 fail=0 — req is cumulative across the two scripted pings, #733), the gate echo, the runner's net-nat flag"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     echo
 } >> "$REPORT"
@@ -301,7 +310,7 @@ fi
 echo
 echo "=== result ==="
 if [ "$PASS" = 1 ]; then
-    echo "verify-live-net-dhcp: PASS — phase 1 (deterministic): the guest ran the full RFC 2131 handshake against the host's crafted server — DISCOVER (286 B, byte-exact in the capture) -> OFFER -> REQUEST -> ACK -> BOUND with the fixed lease ip=10.0.0.2 mask=255.255.255.0 gw=10.0.0.1 server=10.0.0.2 lease=3600, the report counters discover=1,offer=1,request=1,ack=1,nack=0,timeout=0,mal=0, and the host's NET-DHCP OFFER/ACK lines. Phase 2 (real NAT): the claim-time observation UPDATED honestly (2026-08-24, claim 2259) — the VZ NAT gateway serves DHCP on this host today, and the client BOUND a dynamic lease from server 192.168.64.1 (never faked; the original no-DHCP observation remains in git history and docs/hardware-contract.md history), and the guest is NOT stranded: the static fallback still pings the NAT gateway (pong=1 seq=1)."
+    echo "verify-live-net-dhcp: PASS — phase 1 (deterministic): the guest ran the full RFC 2131 handshake against the host's crafted server — DISCOVER (286 B, byte-exact in the capture) -> OFFER -> REQUEST -> ACK -> BOUND with the fixed lease ip=10.0.0.2 mask=255.255.255.0 gw=10.0.0.1 server=10.0.0.2 lease=3600, the report counters discover=1,offer=1,request=1,ack=1,nack=0,timeout=0,mal=0, and the host's NET-DHCP OFFER/ACK lines. Phase 2 (real NAT): the claim-time observation UPDATED honestly (2026-08-24, claim 2259) — the VZ NAT gateway serves DHCP on this host today, and the client BOUND a dynamic lease from server 192.168.64.1 (never faked; the original no-DHCP observation remains in git history and docs/hardware-contract.md history), and the guest is NOT stranded: the static fallback still pings the NAT gateway (the two scripted pings accumulate req=2 on the shared counters; the last report's pong>=1 round trip proves the gateway is reachable — issue #733)."
     echo "PASS: $PASS" >> "$REPORT"
     sleep 0.5
     exit 0
