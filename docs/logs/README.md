@@ -214,6 +214,7 @@ meaningful — on main.
 | `agent/oxalpha/archive-march-m4-m5` | [`agent-oxalpha-archive-march-m4-m5.md`](agent-oxalpha-archive-march-m4-m5.md) |
 | `agent/oxalpha/m20-text-unicode` | [`agent-oxalpha-m20-text-unicode.md`](agent-oxalpha-m20-text-unicode.md) |
 | t3code/c259b00a (cvc-echo host-push spike) | [`agent-t3code-c259b00a-cvc-echo.md`](agent-t3code-c259b00a-cvc-echo.md) |
+| agent/t3code/dq1-godmenu | [`agent-t3code-dq1-godmenu.md`](agent-t3code-dq1-godmenu.md) |
 | agent/t3code/m27-doc-sync | [`agent-t3code-m27-doc-sync.md`](agent-t3code-m27-doc-sync.md) |
 | agent/virtio virtio-input-channel | [`agent-virtio-virtio-input-channel.md`](agent-virtio-virtio-input-channel.md) |
 | agent/zcode/m26-net-offline-preflight | [`agent-zcode-m26-net-offline-preflight.md`](agent-zcode-m26-net-offline-preflight.md) |
