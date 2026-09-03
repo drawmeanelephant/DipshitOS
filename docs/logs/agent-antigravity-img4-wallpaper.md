@@ -1,7 +1,0 @@
-# Log — agent/antigravity/img4-wallpaper
-
-- **2026-09-02** — *antigravity (agent/antigravity/img4-wallpaper)*: claim 0194 opened → M33 raster graphics (IMG4 issue #825: toolkit draw_image alpha blit & WND.BIN desktop wallpaper) and issue #730 (WND.BIN data abort far=0x88, ec=0x24 when window opens under registered WM). 🔄 in progress.
-- **2026-09-02** — *antigravity (agent/antigravity/img4-wallpaper)*: claim 0194 complete → implemented `WindowBacking` and Porter-Duff source-over alpha blitting in `user/src/lib/ui.zig` (`draw_image`, `draw_image_clipped`, `draw_image_scaled`); implemented desktop wallpaper probing, decoding, scaling, and scanout compositing in `user/src/wnd.zig`; resolved #730 uninitialized mirror window state; added Class-B live hardware verification gate `tools/verify-live-wallpaper.sh` (375/375 pixel hits PASS on VZ); verified `tools/verify-live-wnd4-chrome.sh` PASS (2/2 boots).
-- **2026-09-02** — *antigravity (agent/antigravity/img4-wallpaper)*: mascot integration & default wallpaper → added master mascot transparent PNG to `assets/mascot.png`; rendered official 1280×720 dark slate `#1E1E2E` desktop wallpaper to `assets/wallpaper.png` and pre-encoded `image/WALLPAPER.QOI` (53 KiB); updated `tools/lib/gate-run.sh` to seed `WALLPAPER.QOI` automatically in `gate_seed_share`; added chunked file read loop in `user/src/wnd.zig`; verified live on Apple Silicon Virtualization.framework (`tools/verify-live-wallpaper.sh` PASS with 200/200 background theme pixel hits and metallic blade pixel hits matched). ✅ done.
-
-
