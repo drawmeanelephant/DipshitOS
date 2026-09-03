@@ -49,6 +49,23 @@ pub const SysmonState = struct {
     btn_procs: Button = Button.init(Rect.make(108, 10, 90, 22), "Processes"),
     btn_storage: Button = Button.init(Rect.make(204, 10, 110, 22), "Storage & Net"),
     btn_refresh: Button = Button.init(Rect.make(438, 10, 88, 22), "Refresh"),
+    cursor_kind: ui.CursorKind = .arrow, // M37 DQ4: per-region cursor state
+
+    /// M37 DQ4: pointer over the tab/refresh buttons, arrow elsewhere.
+    /// Emits `sysmon: cursor=<name>` on change (serial-observable).
+    pub fn update_cursor(self: *SysmonState, x: u32, y: u32) void {
+        const over_clickable = self.btn_overview.rect.contains(x, y) or
+            self.btn_procs.rect.contains(x, y) or
+            self.btn_storage.rect.contains(x, y) or
+            self.btn_refresh.rect.contains(x, y);
+        const kind = ui.cursor_for_region(false, over_clickable, false);
+        if (kind != self.cursor_kind) {
+            self.cursor_kind = kind;
+            var buf: [48]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "sysmon: cursor={s}\n", .{kind.name()}) catch return;
+            ui.write_console(msg);
+        }
+    }
 
     pub fn init() SysmonState {
         var s = SysmonState{};
@@ -87,6 +104,8 @@ pub const SysmonState = struct {
                 return false;
             },
             ui.MOUSE_DOWN, ui.MOUSE_MOVE, ui.MOUSE_UP => {
+                // M37 DQ4: per-region cursor tracking.
+                if (ev.kind == ui.MOUSE_MOVE) self.update_cursor(ev.arg0, ev.arg1);
                 if (self.btn_overview.handle_event(ev)) {
                     self.tab = .overview;
                     return true;
@@ -120,7 +139,7 @@ pub const SysmonState = struct {
 
         // Header tab bar
         ui.draw_rect(win, Rect.make(0, 0, window_w, 40), ui.theme_surface());
-        ui.draw_rect_outline(win, Rect.make(0, 0, window_w, 40), 1, ui.theme_border());
+        ui.draw_rect_outline(win, Rect.make(0, 0, window_w, 40), ui.border_w, ui.theme_border());
 
         // Highlight active tab button
         var bo = self.btn_overview;
@@ -146,7 +165,7 @@ pub const SysmonState = struct {
 
     fn draw_overview(self: *const SysmonState, win: u32, r: Rect) void {
         ui.draw_rect(win, r, ui.theme_surface());
-        ui.draw_rect_outline(win, r, 1, ui.theme_border());
+        ui.draw_rect_outline(win, r, ui.border_w, ui.theme_border());
 
         ui.draw_text(win, "VirelaiOS System Summary", r.x + 16, r.y + 16, ui.theme_accent());
 
@@ -183,7 +202,7 @@ pub const SysmonState = struct {
 
     fn draw_processes(self: *const SysmonState, win: u32, r: Rect) void {
         ui.draw_rect(win, r, ui.theme_surface());
-        ui.draw_rect_outline(win, r, 1, ui.theme_border());
+        ui.draw_rect_outline(win, r, ui.border_w, ui.theme_border());
 
         // Header row
         ui.draw_rect(win, Rect.make(r.x + 1, r.y + 1, r.w - 2, 22), ui.theme_btn_idle());
@@ -201,7 +220,7 @@ pub const SysmonState = struct {
         var i: usize = 0;
         while (i < self.proc_count and i < 12) : (i += 1) {
             const p = self.procs[i];
-            const row_rect = Rect.make(r.x + 2, y - 2, r.w - 4, 18);
+            const row_rect = Rect.make(r.x + ui.pad_xs, y - ui.pad_xs, r.w - ui.pad_sm, 18);
             if (i % 2 == 1) {
                 ui.win_fill(win, row_rect.x, row_rect.y, row_rect.w, row_rect.h, ui.theme_btn_idle());
             }
@@ -232,7 +251,7 @@ pub const SysmonState = struct {
     fn draw_storage_net(self: *const SysmonState, win: u32, r: Rect) void {
         _ = self;
         ui.draw_rect(win, r, ui.theme_surface());
-        ui.draw_rect_outline(win, r, 1, ui.theme_border());
+        ui.draw_rect_outline(win, r, ui.border_w, ui.theme_border());
 
         var y = r.y + 14;
         ui.draw_text(win, "Storage Subsystem (ESP boot volume + host share)", r.x + 16, y, ui.theme_accent());
@@ -259,6 +278,8 @@ pub const SysmonState = struct {
 pub export fn _start() callconv(.c) noreturn {
     var state = SysmonState.init();
 
+    // M37 DQ4: follow the desktop theme first.
+    _ = ui.sync_theme_from_host();
     const win_res = ui.win_open(window_x, window_y, window_w, window_h);
     if (win_res < 0) {
         ui.write_console("sysmon: failed to open window\n");
@@ -269,6 +290,7 @@ pub export fn _start() callconv(.c) noreturn {
 
     state.draw(win);
     ui.win_present(win);
+    ui.emit_tokens_marker("sysmon");
     ui.write_console("sysmon: ready\n");
 
     _ = ui.timer_set(refresh_ticks);
