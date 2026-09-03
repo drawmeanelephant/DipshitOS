@@ -58,6 +58,10 @@ echo "run dir: $RUN_DIR"
 run_boot() {
     local tag="$1"; shift
     rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log"
+    # Claim 6392 (issue #839): each boot starts from a clean window slate —
+    # boot A's M21 W11 WINDOWS.SAV must not leak into boots B/C sharing this
+    # share (restore would shift TABHOLD's id and fill window slots).
+    gate_reset_share_state
     set +e
     host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
         --serial "$RUN_DIR/vm-serial-$tag.log" \
