@@ -1,7 +1,10 @@
 //! The in-guest compiler (zc): compiles a Zig subset to AArch64 ELF32.
 //! Bounded: <=32 functions, <=512 lines, zero heap.
 //!
-//! Usage: exec ZC.BIN <source.z> [<output.elf>]
+//! Usage: exec ZC.BIN [<source.z>...] [<output.elf>] — since Z3a (issue
+//! #758) the last argv word is the output and every word before it is a
+//! source (multi-file, flat cross-file symbol table); no args compiles
+//! /host/MAIN.Z to /host/MAIN.ELF.
 
 const std = @import("std");
 const asmenc = @import("lib/asmenc.zig");
@@ -1641,9 +1644,23 @@ fn parsePrimary(p: *Parser) anyerror!void {
                     emit(enc_add_imm(31, 31, 16));
                     emit(enc_blr(16));
                 } else if (direct_idx) |idx| {
-                    const target = functions[idx].address;
-                    const rel = @as(i32, @intCast(target)) - @as(i32, @intCast(code_len));
-                    emit(enc_bl(rel));
+                    if (functions[idx].address != 0) {
+                        // The callee's body already compiled: direct BL.
+                        const target = functions[idx].address;
+                        const rel = @as(i32, @intCast(target)) - @as(i32, @intCast(code_len));
+                        emit(enc_bl(rel));
+                    } else {
+                        // Z3a: forward reference — the callee is registered
+                        // (pass 1, possibly in a LATER source file) but its
+                        // body has not compiled yet, so its address is still
+                        // 0. A direct BL here would jump to offset 0; record
+                        // a call patch resolved once every address is known.
+                        // (Also fixes the same-file forward-call case.)
+                        if (call_patches_count >= call_patches.len) return error.CompileError;
+                        call_patches[call_patches_count] = CallPatch{ .caller_pc = @intCast(code_len), .target_func_idx = idx };
+                        call_patches_count += 1;
+                        emit(0);
+                    }
                 } else {
                     const f_idx = try registerForwardFunc(t.text);
                     if (call_patches_count >= call_patches.len) return error.CompileError;
@@ -2461,15 +2478,37 @@ fn compileStatement(p: *Parser) anyerror!void {
 // ---------------------------------------------------------------------------
 // Compiler Main Driver
 // ---------------------------------------------------------------------------
+// Z3a (issue #758): at most this many source files per compile. Bounded by
+// the argv block's 8-slot cap in practice; the per-file buffers below are
+// sized to match.
+const MAX_FILES: usize = 4;
+
 pub fn compile(src: []const u8) !usize {
-    var tokenizer = Tokenizer{ .src = src };
+    return compileFiles(&.{src});
+}
+
+// Z3a (issue #758): multi-file compile. Every source is tokenized into one
+// shared stream (each file's trailing eof is dropped except the last), and
+// pass 1 / pass 2 walk the combined stream: the function table, struct/enum
+// tables, and the call / &fn / string patch lists are all global, so a call
+// in one file resolves to a definition in another through the same machinery
+// as a same-file forward call. Files are a flat namespace: no @import
+// semantics (scope-out per the ladder; Z3b's stdz rides this table).
+pub fn compileFiles(sources: []const []const u8) !usize {
     tokens_count = 0;
-    while (true) {
-        const t = tokenizer.next();
-        if (tokens_count >= tokens_buf.len) return error.TooManyTokens;
-        tokens_buf[tokens_count] = t;
-        tokens_count += 1;
-        if (t.kind == .eof) break;
+    for (sources, 0..) |src, f| {
+        var tokenizer = Tokenizer{ .src = src };
+        while (true) {
+            const t = tokenizer.next();
+            if (tokens_count >= tokens_buf.len) return error.TooManyTokens;
+            tokens_buf[tokens_count] = t;
+            tokens_count += 1;
+            if (t.kind == .eof) break;
+        }
+        // Drop this file's eof; the next file's tokens follow directly (a
+        // file boundary sits between a top-level `;`/`}` and the next decl,
+        // so no separator token is needed). The LAST file keeps its eof.
+        if (f + 1 < sources.len) tokens_count -= 1;
     }
     const tokens = tokens_buf[0..tokens_count];
 
@@ -2505,6 +2544,13 @@ pub fn compile(src: []const u8) !usize {
                 if (k == .r_brace) brace_depth -= 1;
             }
             if (functions_count >= functions.len) return error.TooManyFunctions;
+            // Z3a: the cross-file symbol table is a flat namespace — a
+            // duplicate function name (same file or across files) is a
+            // diagnostic, not a silent first-wins.
+            if (lookupFunc(name_tok.text) != null) {
+                print_err("duplicate function", name_tok.line, name_tok.text);
+                return error.CompileError;
+            }
             functions[functions_count] = Function{ .name = name_tok.text, .address = 0, .param_count = param_count };
             functions_count += 1;
         } else if (p1.peek() == .keyword_const) {
@@ -2531,6 +2577,10 @@ pub fn compile(src: []const u8) !usize {
                         _ = try p1.expect(.r_brace);
                         sd.size = off;
                         if (structs_count >= structs.len) return error.CompileError;
+                        if (lookupStruct(name_tok.text) != null) {
+                            print_err("duplicate struct", name_tok.line, name_tok.text);
+                            return error.CompileError;
+                        }
                         structs[structs_count] = sd;
                         structs_count += 1;
                         _ = p1.accept(.semicolon);
@@ -2559,6 +2609,10 @@ pub fn compile(src: []const u8) !usize {
                         }
                         _ = try p1.expect(.r_brace);
                         if (enums_count >= enums.len) return error.CompileError;
+                        if (lookupEnum(name_tok.text) != null) {
+                            print_err("duplicate enum", name_tok.line, name_tok.text);
+                            return error.CompileError;
+                        }
                         enums[enums_count] = ed;
                         enums_count += 1;
                         _ = p1.accept(.semicolon);
@@ -2690,7 +2744,12 @@ pub fn compile(src: []const u8) !usize {
     // Resolve patches
     for (call_patches[0..call_patches_count]) |patch| {
         const target_addr = functions[patch.target_func_idx].address;
-        if (target_addr == 0) return error.CompileError;
+        if (target_addr == 0) {
+            // Z3a: a call whose target never got a body (never defined in any
+            // source) is a missing-symbol diagnostic, not a bare error.
+            print_err("undefined function", 0, functions[patch.target_func_idx].name);
+            return error.CompileError;
+        }
         const rel = @as(i32, @intCast(target_addr)) - @as(i32, @intCast(patch.caller_pc));
         std.mem.writeInt(u32, code[patch.caller_pc..][0..4], enc_bl(rel), .little);
     }
@@ -2699,7 +2758,10 @@ pub fn compile(src: []const u8) !usize {
     // target function's buffer address is known now that every body compiled.
     for (fn_addr_patches[0..fn_addr_patches_count]) |patch| {
         const target_addr = functions[patch.func_idx].address;
-        if (target_addr == 0) return error.CompileError;
+        if (target_addr == 0) {
+            print_err("undefined function", 0, functions[patch.func_idx].name);
+            return error.CompileError;
+        }
         const rel_bytes = @as(i32, @intCast(target_addr)) - @as(i32, @intCast(patch.code_pc));
         std.mem.writeInt(u32, code[patch.code_pc..][0..4], enc_adr(0, rel_bytes), .little);
     }
@@ -2711,7 +2773,11 @@ pub fn compile(src: []const u8) !usize {
         std.mem.writeInt(u32, code[patch.code_pc..][0..4], enc_adr(patch.rd, rel_bytes), .little);
     }
 
-    const main_idx = lookupFunc("main") orelse return error.CompileError;
+    const main_idx = lookupFunc("main") orelse {
+        // Z3a: across N files there must be exactly one `main`.
+        print_err("no main function", 0, "");
+        return error.CompileError;
+    };
     const main_addr = functions[main_idx].address;
     std.mem.writeInt(u32, code[0..4], enc_bl(@intCast(main_addr)), .little);
 
@@ -2721,25 +2787,42 @@ pub fn compile(src: []const u8) !usize {
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
+// Z3a (issue #758): multi-file CLI — `zc a.z b.z out.elf`. The LAST argv
+// word is the output; every word before it is a source (up to MAX_FILES).
+// Backward compatible: `zc a.z` compiles one source to the default output,
+// and no args compiles /host/MAIN.Z -> /host/MAIN.ELF.
 pub export fn _start(argc: usize, argv: ?[*]const [32]u8) callconv(.c) noreturn {
-    var src_path_buf: [40]u8 = [_]u8{0} ** 40;
+    var src_path_bufs: [MAX_FILES][40]u8 = [_][40]u8{[_]u8{0} ** 40} ** MAX_FILES;
+    var src_lens: [MAX_FILES]usize = [_]usize{0} ** MAX_FILES;
+    var src_paths: [MAX_FILES][]const u8 = undefined;
+    var out_path_buf: [40]u8 = [_]u8{0} ** 40;
     // M34 HF6 (issue #740): the host share is the only store — the
     // defaults route to /host/ (the old /esp prefix would resolve to a
     // literal "esp/" subdirectory on the share and fail to write).
-    @memcpy(src_path_buf[0..12], "/host/MAIN.Z");
-    var out_path_buf: [40]u8 = [_]u8{0} ** 40;
+    @memcpy(src_path_bufs[0][0..12], "/host/MAIN.Z");
+    src_lens[0] = 12;
     @memcpy(out_path_buf[0..14], "/host/MAIN.ELF");
-    var src_len: usize = 12;
     var out_len: usize = 14;
+    var src_count: usize = 1;
 
     if (argc >= 1) {
-        if (argv) |slots| copy_arg(&src_path_buf, &src_len, slots[0]);
+        if (argv) |slots| {
+            if (argc == 1) {
+                copy_arg(&src_path_bufs[0], &src_lens[0], slots[0]);
+                src_count = 1;
+            } else {
+                src_count = @min(argc - 1, MAX_FILES);
+                var i: usize = 0;
+                while (i < src_count) : (i += 1) {
+                    copy_arg(&src_path_bufs[i], &src_lens[i], slots[i]);
+                }
+                copy_arg(&out_path_buf, &out_len, slots[argc - 1]);
+            }
+        }
     }
-    if (argc >= 2) {
-        if (argv) |slots| copy_arg(&out_path_buf, &out_len, slots[1]);
-    }
+    for (0..src_count) |i| src_paths[i] = src_path_bufs[i][0..src_lens[i]];
 
-    run(src_path_buf[0..src_len], out_path_buf[0..out_len]);
+    run(src_paths[0..src_count], out_path_buf[0..out_len]);
 }
 
 fn copy_arg(dst: *[40]u8, len: *usize, slot: [32]u8) void {
@@ -2750,23 +2833,27 @@ fn copy_arg(dst: *[40]u8, len: *usize, slot: [32]u8) void {
 }
 
 const source_cap: usize = 8192;
-var source_buf: [source_cap]u8 = undefined;
+var source_bufs: [MAX_FILES][source_cap]u8 = undefined;
 var image_buf: [elf_code_offset + 32768]u8 = undefined;
 
-fn run(src_path: []const u8, out_path: []const u8) noreturn {
-    const fd = file_open(src_path, MODE_READ);
-    if (fd < 0) {
-        console_puts("zc: cannot open source\n");
-        sys_exit(1);
-    }
-    const n = file_read(@intCast(fd), &source_buf);
-    file_close(@intCast(fd));
-    if (n <= 0) {
-        console_puts("zc: empty or unreadable source\n");
-        sys_exit(2);
+fn run(src_paths: []const []const u8, out_path: []const u8) noreturn {
+    var sources: [MAX_FILES][]const u8 = undefined;
+    for (src_paths, 0..) |src_path, i| {
+        const fd = file_open(src_path, MODE_READ);
+        if (fd < 0) {
+            console_puts("zc: cannot open source\n");
+            sys_exit(1);
+        }
+        const n = file_read(@intCast(fd), &source_bufs[i]);
+        file_close(@intCast(fd));
+        if (n <= 0) {
+            console_puts("zc: empty or unreadable source\n");
+            sys_exit(2);
+        }
+        sources[i] = source_bufs[i][0..@intCast(n)];
     }
 
-    const bytes = compile(source_buf[0..@intCast(n)]) catch {
+    const bytes = compileFiles(sources[0..src_paths.len]) catch {
         console_puts("zc: compile failed\n");
         sys_exit(3);
     };
@@ -3556,6 +3643,94 @@ test "zc: Z2a chunked bump build and drain loops compile" {
         \\    zc.file_close(out_fd);
         \\    zc.print("heap-ok\n");
         \\    zc.exit(72);
+        \\}
+    ;
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
+}
+
+test "zc: Z3a cross-file call — caller in file 2, callee in file 1" {
+    const src_a = "fn greet(x: u64) u64 { return x + 5; }";
+    const src_b =
+        \\const zc = @import("zc");
+        \\fn main() void {
+        \\    let r = greet(3);
+        \\    zc.print("z3a-lib-ok\n");
+        \\    return;
+        \\}
+    ;
+    const bytes = try compileFiles(&.{ src_a, src_b });
+    try testing.expect(bytes > 0);
+    // Both files' functions share one table, both got a real body address.
+    try testing.expectEqual(@as(usize, 2), functions_count);
+    const greet_idx = lookupFunc("greet").?;
+    const main_idx = lookupFunc("main").?;
+    try testing.expect(functions[greet_idx].address > 0);
+    try testing.expect(functions[main_idx].address > 0);
+    // The startup shim's BL to main patched in.
+    try testing.expect(std.mem.readInt(u32, code[0..4], .little) != 0);
+}
+
+test "zc: Z3a forward cross-file call — caller in file 1, callee in file 2" {
+    const src_a =
+        \\const zc = @import("zc");
+        \\fn main() void {
+        \\    let r = later(10);
+        \\    zc.print("z3a-fwd\n");
+        \\    return;
+        \\}
+    ;
+    const src_b = "fn later(x: u64) u64 { return x * 2; }";
+    const bytes = try compileFiles(&.{ src_a, src_b });
+    try testing.expect(bytes > 0);
+    try testing.expectEqual(@as(usize, 2), functions_count);
+    try testing.expect(functions[lookupFunc("later").?].address > 0);
+    // The cross-file call went through a real patch, not a same-file BL.
+    try testing.expect(call_patches_count >= 1);
+}
+
+test "zc: Z3a main may live in any file" {
+    const src_a = "fn helper() u64 { return 7; }";
+    const src_b =
+        \\const zc = @import("zc");
+        \\fn main() void {
+        \\    let r = helper();
+        \\    zc.print("z3a-main2\n");
+        \\    return;
+        \\}
+    ;
+    const bytes = try compileFiles(&.{ src_a, src_b });
+    try testing.expect(bytes > 0);
+    try testing.expectEqual(@as(usize, 2), functions_count);
+}
+
+test "zc: Z3a duplicate function across files is a diagnostic" {
+    const src_a = "fn dup() u64 { return 1; }";
+    const src_b = "fn dup() u64 { return 2; } fn main() void { return; }";
+    try testing.expectError(error.CompileError, compileFiles(&.{ src_a, src_b }));
+}
+
+test "zc: Z3a duplicate main across files is a diagnostic" {
+    const src_a = "fn main() void { return; }";
+    const src_b = "fn main() void { return; }";
+    try testing.expectError(error.CompileError, compileFiles(&.{ src_a, src_b }));
+}
+
+test "zc: Z3a missing function is a diagnostic, not a silent patch" {
+    const src =
+        \\const zc = @import("zc");
+        \\fn main() void {
+        \\    zc.exit(ghost());
+        \\}
+    ;
+    try testing.expectError(error.CompileError, compileFiles(&.{src}));
+}
+
+test "zc: Z3a single-file compile still works through the wrapper" {
+    const src =
+        \\const zc = @import("zc");
+        \\fn main() void {
+        \\    zc.print("z3a-single\n");
         \\}
     ;
     const bytes = try compile(src);
