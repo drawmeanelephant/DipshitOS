@@ -114,6 +114,18 @@ gate_seed_share() {
     echo "gate-run: share seeded at $SHARE ($(find "$SHARE" -maxdepth 1 -type f | wc -l | tr -d ' ') files, $(grep -cE '^[A-Z]' "$SHARE/APPS.TXT" 2>/dev/null || echo 0) APPS.TXT entries)"
 }
 
+# gate_reset_share_state -- delete per-boot guest persistence from the
+# private share so each boot of a multi-boot gate starts from a clean
+# slate. M37 DQ3 (issue #839, claim 6392): M21 W11 saves WINDOWS.SAV to
+# the host share ~1/s on change and restores it at shell init, so boots
+# B/C sharing one $RUN_DIR/share resurrect prior-boot windows (TABHOLD
+# id drift → slot ENOSPC). HISTORY.TXT is deliberately kept —
+# append-ordered shell history, benign across boots.
+gate_reset_share_state() {
+    [ -n "$RUN_DIR" ] || { echo "gate-run: gate_reset_share_state called before gate_begin" >&2; exit 1; }
+    rm -f "$SHARE/WINDOWS.SAV"
+}
+
 gate_end() {
     [ -n "$RUN_DIR" ] || return 0
     if [ "${VIRELAI_KEEP_RUN:-0}" = "1" ]; then
