@@ -12,7 +12,7 @@
 - **Touches:** host/vm-runner/Sources/VMRunner/main.swift
 - **Depends on:** —
 - **Heartbeat:** 2026-09-03 — update while Status is 🔄 so staleness checks see life
-- **Status:** 🔄 agent/buffy/vm-teardown-tail
+- **Status:** ✅
 
 ## Notes
 
@@ -50,10 +50,14 @@ it.
 
 ### Verification
 
-- Class A: `swift build` the runner; argument/default plumbing is host
-  Swift only.
-- Class B: re-run the exposed live gates on VZ — `verify-live-crash-viewer`
-  (expect marker precedes the reaped `status=139` line) and
-  `verify-live-image-viewer` (regression; expect IS the reap line) — and
-  confirm the serial tail (reap lines after the expect marker) is present
-  in the copied serial logs.
+- Class A: `swift build --package-path host/vm-runner --configuration
+  release -Xswiftc -DSPIKE` — clean.
+- Class B (real VZ, done 2026-09-03): `verify-live-crash-viewer` PASS (the
+  run file shows `script-expect: transcript 'rx-crashview-ok' observed —
+  holding the VM for the 1.5s tail window`); `verify-live-image-viewer`
+  PASS twice (4/4 boots) with `SUCCESS: ... (claim-4912 tail window 1.5s
+  elapsed; post-marker output captured)` on every boot and the serial log
+  ending in the FULL tail — `tasks user-exec exited status=43`,
+  `procs VIEW.BIN exited status=43`, `tasks user-exec reaped` — where the
+  final `reaped` line (printed on the idle tick AFTER the expect marker)
+  used to be cut by the teardown race.

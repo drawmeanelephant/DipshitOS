@@ -1,4 +1,4 @@
-# Log: agent/buffy/vm-teardown-tail
+# Log — `agent/buffy/vm-teardown-tail`
 
 - **2026-09-03** — *buffy (agent/buffy/vm-teardown-tail)*: Claimed 4912
   (issue from the IMG5/IMG5-PNG live-gate flakes): `--script-expect`
@@ -12,3 +12,15 @@
   transcript first matches, hold the VM through a configurable
   `--script-expect-tail` window (default 1.5 s, 0 = legacy immediate
   stop), then finish. No kernel or gate changes.
+
+- **2026-09-03** — *buffy*: Implemented. `scriptPoll(matchedAt:)` now keeps
+  polling with the VM running after the first match until
+  `--script-expect-tail` (default 1.5 s, flag parsed, `0` = legacy
+  immediate stop) elapses; an early VM stop or a deadline mid-window still
+  passes once the transcript was observed. Class-A: release SPIKE build
+  clean. Class-B on real VZ: `verify-live-crash-viewer` PASS;
+  `verify-live-image-viewer` PASS 2/2 twice (4/4 boots) — serial logs now
+  end in the full post-marker tail `tasks user-exec exited status=43` /
+  `procs VIEW.BIN exited status=43` / `tasks user-exec reaped` (the last
+  line prints on the idle tick AFTER the expect marker and was the line
+  the teardown race cut). Artifacts: `artifacts/live-{crash,image}-viewer-*`.
