@@ -2,10 +2,14 @@
 #
 # verify-live-zc.sh -- M32 Lane 2 class-B gate (issue #620): the
 # on-machine Zig subset compiler produces an ELF the on-machine loader runs.
-# Since Z2a (issue #756) the staged program is the heap fixture: MAIN.Z is
-# seeded host-side (no shell line-length cap), the program calls zc.mmap for a
-# bounded bump arena, reads DATA.TXT into heap in chunks, and writes OUT.TXT
-# back byte-exact.
+# Since Z2b (issue #757) the staged program is the defer + function-pointer
+# fixture (tests/zc-corpus/z2b-defer-fnptr.z): MAIN.Z is seeded host-side (no
+# shell line-length cap, and kept under the 2048-byte single file_read cap).
+# The compiled program registers scope-exit defers (an if-body block scope and
+# the return path, in LIFO order), calls a function through a fn-pointer local
+# AND through a fn-pointer parameter (blr dispatch), prints deterministic
+# markers, and sys_exits with status 72. The gate asserts every marker and
+# their exact order in the serial log.
 #
 # ZC.BIN runs under `strace exec` (M22 D5) so the serial log carries
 # per-syscall evidence of the compile (sys_file_open/read of the full
@@ -23,15 +27,17 @@
 # push_exit_report / take_exit_report) vs the shell idle drain is a real race.
 #
 # The chain, asserted in vm-serial.log plus a host-side file compare:
-#   1. MAIN.Z + DATA.TXT are seeded on the host share.
+#   1. MAIN.Z (the z2b fixture) is seeded on the host share.
 #   2. `strace exec ZC.BIN` — ZC.BIN reads /host/MAIN.Z, compiles it in-guest,
-#      and writes a minimal AArch64 ELF32 executable (asserted:
-#      sys_file_read = 0x72e for the full 1838-byte source — this also guards
-#      the 2048-byte single-read truncation regression).
-#   3. `exec MAIN.ELF` — the loader maps and runs the compiled ELF: it
-#      sys_mmaps a 16 KiB heap, reads DATA.TXT into it in chunks, writes
-#      OUT.TXT back byte-exact, prints heap-ok, and sys_exits with status 72.
-#   4. The host compares OUT.TXT against DATA.TXT byte-for-byte.
+#      and writes a minimal AArch64 ELF32 executable (asserted: sys_file_read
+#      of the full source — this also guards the 2048-byte single-read
+#      truncation regression).
+#   3. `exec MAIN.ELF` — the loader maps and runs the compiled ELF: the z2b
+#      marker sequence (start → fnptr-ok → in-if → defer-if → after-if →
+#      defer-a → defer-b → ret-ok) is printed in order, and the program
+#      sys_exits with status 72.
+#   4. The host asserts every marker's presence and their exact order in the
+#      serial log (the LIFO + return-path defer proof).
 
 set -euo pipefail
 
@@ -44,6 +50,7 @@ SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 
 GATE_LOG="$(art m32-zc-live.txt)"
+Z2B="tests/zc-corpus/z2b-defer-fnptr.z"
 exec > >(tee "$GATE_LOG") 2>&1
 trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
 
@@ -76,26 +83,13 @@ gate_seed_share
 echo "run dir: $RUN_DIR"
 SCRIPT="$RUN_DIR/script.txt"
 
-# Stage the heap fixture host-side: MAIN.Z is the z2a corpus source (seeded
+# Stage the Z2b fixture host-side: MAIN.Z is the z2b corpus source (seeded
 # directly, so it is not limited by the shell's 256-byte write line cap) and
-# DATA.TXT is a >2 KiB patterned file, so the chunked read/write loops in the
-# fixture actually run. Keep MAIN.Z under 2048 bytes: ZC.BIN reads its source
-# with a single file_read (kernel cap 2048 B/call), so a longer source is
-# silently truncated and the in-guest compile fails mid-file (observed: the
-# 2366-byte landing-zone fixture died at line 52, byte 2049). OUT.TXT is
-# removed per boot so a stale longer file cannot break the byte compare.
-cp tests/zc-corpus/z2a-heap.z "$SHARE/MAIN.Z"
-python3 - "$SHARE/DATA.TXT" <<'PY'
-import sys
-path = sys.argv[1]
-out = bytearray()
-i = 0
-while len(out) < 2500:
-    out += ("z2a-heap-line-%05d\n" % i).encode()
-    i += 1
-open(path, "wb").write(bytes(out[:2500]))
-PY
-echo "staged MAIN.Z ($(wc -c < "$SHARE/MAIN.Z" | tr -d ' ') bytes) + DATA.TXT ($(wc -c < "$SHARE/DATA.TXT" | tr -d ' ') bytes)"
+# stays under 2048 bytes: ZC.BIN reads its source with a single file_read
+# (kernel cap 2048 B/call), so a longer source is silently truncated and the
+# in-guest compile fails mid-file.
+cp "$Z2B" "$SHARE/MAIN.Z"
+echo "staged MAIN.Z ($(wc -c < "$SHARE/MAIN.Z" | tr -d ' ') bytes) from $Z2B"
 printf 'ls\nstrace exec ZC.BIN\n' > "$SCRIPT"
 printf 'ls\nexec MAIN.ELF\necho rx-zc-ok\n' > "$SCRIPT2"
 
@@ -146,13 +140,18 @@ cp tests/zc-corpus/z2a-heap.z "$CORPUS_HEAP_TMP"
 zig build-obj -target aarch64-freestanding --dep zc -Mroot="$CORPUS_HEAP_TMP" -Mzc=user/src/lib/zc.zig -femit-bin="$RUN_DIR/corpus_heap.o"
 rm -f "$CORPUS_HEAP_TMP" "$RUN_DIR/corpus_heap.o"
 
-echo "host compile check: ok (z05-dialect.z + vl6-gui.z + z1a-strings.z + z1b-arrays.z + z1c-structs.z + z1d-pointers.z + z1e-control.z + z1f-enums.z + z2a-heap.z valid Zig 0.16)"
+CORPUS_DEFER_TMP="$RUN_DIR/corpus_defer.zig"
+cp tests/zc-corpus/z2b-defer-fnptr.z "$CORPUS_DEFER_TMP"
+zig build-obj -target aarch64-freestanding --dep zc -Mroot="$CORPUS_DEFER_TMP" -Mzc=user/src/lib/zc.zig -femit-bin="$RUN_DIR/corpus_defer.o"
+rm -f "$CORPUS_DEFER_TMP" "$RUN_DIR/corpus_defer.o"
+
+echo "host compile check: ok (z05-dialect.z + vl6-gui.z + z1a-strings.z + z1b-arrays.z + z1c-structs.z + z1d-pointers.z + z1e-control.z + z1f-enums.z + z2a-heap.z + z2b-defer-fnptr.z valid Zig 0.16)"
 
 run_one() {
     local tag="$1"
     local run_log="$(art live-zc-run-$tag.txt)"
     local serial_copy="$(art live-zc-serial-$tag.log)"
-    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log" "$SHARE/OUT.TXT"
+    rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log"
 
     set +e
     host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
@@ -165,14 +164,39 @@ run_one() {
     [ -f "$RUN_DIR/vm-serial-$tag.log" ] && cp "$RUN_DIR/vm-serial-$tag.log" "$(art live-zc-serial-$tag.log)" || true
     local SER="$serial_copy"
 
-    local bytes=0 banner=0 listed=0 compiled=0 loaded=0 printed=0 exit72=0 reaped=0 echo_ok=0 fileeq=0 secondary=0 fatal=0
+    local markers=("z2b-start" "z2b-fnptr-ok" "z2b-in-if" "z2b-defer-if" "z2b-after-if" "z2b-defer-a" "z2b-defer-b" "z2b-ret-ok")
+    local bytes=0 banner=0 listed=0 compiled=0 loaded=0 markers_ok=0 exit72=0 reaped=0 echo_ok=0 ordered=0 secondary=0 fatal=0
     if [ -f "$SER" ]; then
         bytes="$(wc -c < "$SER" | tr -d ' ')"
         [ "$(grep -aFxc -- "VirelaiOS kernel has seized control." "$SER" || true)" = 1 ] && banner=1
         [ "$(grep -aFc -- "MAIN.Z" "$SER" || true)" -ge 1 ] && listed=1
         [ "$(grep -aFc -- "zc: successfully compiled in-guest" "$SER" || true)" = 1 ] && compiled=1
         [ "$(grep -aFc -- "exec: loaded MAIN.ELF size=" "$SER" || true)" = 1 ] && loaded=1
-        [ "$(grep -aFc -- "heap-ok" "$SER" || true)" -ge 1 ] && printed=1
+        local present=0
+        local m=""
+        for m in "${markers[@]}"; do
+            [ "$(grep -aFc -- "$m" "$SER" || true)" -ge 1 ] && present=$((present + 1))
+        done
+        [ "$present" = "${#markers[@]}" ] && markers_ok=1
+        # Order proof: the first occurrence of each marker must ascend in the
+        # serial log — defer-if runs at the if-body's fallthrough end; on
+        # finish()'s return path defer-a then defer-b run inline (LIFO over
+        # the two registered fn-scope defers).
+        if python3 - "$SER" "${markers[@]}" <<'PY' 2>/dev/null; then
+import sys
+path = sys.argv[1]
+names = sys.argv[2:]
+data = open(path, "rb").read()
+last = -1
+for name in names:
+    idx = data.find(name.encode())
+    if idx < 0 or idx < last:
+        sys.exit(1)
+    last = idx
+sys.exit(0)
+PY
+            ordered=1
+        fi
         [ "$(grep -aFxc -- "$EXIT_LINE" "$SER" || true)" -ge 1 ] && exit72=1
         [ "$(grep -aFc -- "$REAP_LINE" "$SER" || true)" -ge 2 ] && reaped=1
         [ "$(grep -aFxc -- "rx-zc-ok" "$SER" || true)" = 1 ] && echo_ok=1
@@ -181,16 +205,10 @@ run_one() {
         [ "$(grep -aFc -- "smp: secondary runs=" "$SER" || true)" -ge 1 ] && secondary=1
         grep -qF -- "[EXC] parking:" "$SER" && fatal=1 || true
     fi
-    # Z2a: byte-exact round trip — the guest wrote OUT.TXT from mmap'd heap.
-    # Keep OUT.TXT as evidence (gate_end may delete the share dir).
-    if [ -f "$SHARE/OUT.TXT" ]; then
-        cp -f "$SHARE/OUT.TXT" "$(art live-zc-out-$tag.txt)"
-        cmp -s "$SHARE/DATA.TXT" "$SHARE/OUT.TXT" && fileeq=1
-    fi
-    echo "$tag: runner-rc=$rc serial-bytes=$bytes banner=$banner listed=$listed compiled=$compiled loaded=$loaded printed=$printed exit72=$exit72 reaped=$reaped echo=$echo_ok fileeq=$fileeq secondary=$secondary fatal=$fatal" | tee -a "$REPORT"
+    echo "$tag: runner-rc=$rc serial-bytes=$bytes banner=$banner listed=$listed compiled=$compiled loaded=$loaded markers=$markers_ok exit72=$exit72 reaped=$reaped echo=$echo_ok ordered=$ordered secondary=$secondary fatal=$fatal" | tee -a "$REPORT"
     [ "$rc" = 0 ] && [ "$banner" = 1 ] && [ "$listed" = 1 ] && \
-        [ "$compiled" = 1 ] && [ "$loaded" = 1 ] && [ "$printed" = 1 ] && [ "$exit72" = 1 ] && \
-        [ "$reaped" = 1 ] && [ "$echo_ok" = 1 ] && [ "$fileeq" = 1 ] && [ "$secondary" = 1 ] && [ "$fatal" = 0 ]
+        [ "$compiled" = 1 ] && [ "$loaded" = 1 ] && [ "$markers_ok" = 1 ] && [ "$exit72" = 1 ] && \
+        [ "$reaped" = 1 ] && [ "$echo_ok" = 1 ] && [ "$ordered" = 1 ] && [ "$secondary" = 1 ] && [ "$fatal" = 0 ]
 }
 
 : > "$REPORT"
@@ -214,7 +232,7 @@ done
 echo
 echo "=== result ==="
 if [ "$pass" = "$BOOTS" ]; then
-    echo "verify-live-zc: PASS — ZC.BIN compiled the heap fixture in-guest (traced: full 1838-byte source read), MAIN.ELF ran it (heap-ok, exit status 72 observed), and OUT.TXT matched DATA.TXT byte-exact ($pass/$BOOTS boot(s))."
+    echo "verify-live-zc: PASS — ZC.BIN compiled the defer + function-pointer fixture in-guest (traced full source read), MAIN.ELF ran it (all 8 markers present in order — block-scope defer at fallthrough, fn-scope defers LIFO on the return path, indirect calls through a fn-pointer local AND through a fn-pointer param — exit status 72 observed) ($pass/$BOOTS boot(s))."
     echo "PASS: $pass/$BOOTS" >> "$REPORT"
     exit 0
 fi

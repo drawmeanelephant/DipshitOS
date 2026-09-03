@@ -1,0 +1,59 @@
+const zc = @import("zc");
+
+// Z2b corpus fixture (issue #757): defer + function pointers, in the honest
+// dialect — this file parses under host `zig 0.16` (the gate build-objs it
+// against user/src/lib/zc.zig) AND compiles in-guest with ZC.BIN.
+//
+// Dialect contract for defers: a defer body is an expression or simple
+// assignment statement (no declarations, no control flow, no nested defer),
+// and a defer registered before an exit point of its scope runs on that exit
+// (fallthrough end of the scope, in reverse registration order, or inline on
+// a `return` that unwinds the scope). LIFO ordering + the return path are
+// exercised below.
+//
+// Deterministic serial markers (asserted in order by verify-live-zc.sh):
+//   z2b-start → z2b-fnptr-ok → z2b-in-if → z2b-defer-if → z2b-after-if
+//   → z2b-defer-a → z2b-defer-b → z2b-ret-ok, then exit status 72.
+
+fn add(a: u64, b: u64) u64 {
+    return a + b;
+}
+
+fn run_op(f: *const fn(u64, u64) u64, x: u64, y: u64) u64 {
+    return f(x, y);
+}
+
+fn finish() u64 {
+    // LIFO: the last-registered defer (defer-a) runs first on the return
+    // path that unwinds this function scope.
+    defer zc.print("z2b-defer-b\n");
+    defer zc.print("z2b-defer-a\n");
+    return 7;
+}
+
+pub fn main() void {
+    const fp: *const fn(u64, u64) u64 = &add;
+    zc.print("z2b-start\n");
+    // Indirect call through a function-pointer PARAM.
+    if (run_op(fp, 40, 2) == 42) {
+        zc.print("z2b-fnptr-ok\n");
+    } else {
+        zc.exit(1);
+    }
+    // Indirect call through the function-pointer LOCAL (blr dispatch).
+    if (fp(6, 7) != 13) {
+        zc.exit(1);
+    }
+    // If-body block scope: defer runs at the body's fallthrough end.
+    if (1 == 1) {
+        defer zc.print("z2b-defer-if\n");
+        zc.print("z2b-in-if\n");
+    }
+    zc.print("z2b-after-if\n");
+    const r: u64 = finish();
+    if (r == 7) {
+        zc.print("z2b-ret-ok\n");
+        zc.exit(72);
+    }
+    zc.exit(1);
+}
