@@ -243,6 +243,7 @@ meaningful — on main.
 | agent/t3code/729-desktop-manifest-21 | [`t3code-20260902-1.md`](t3code-20260902-1.md) |
 | t3code/b2feefd3 | [`t3code-b2feefd3.md`](t3code-b2feefd3.md) |
 | t3code/b5bdb1b1 | [`t3code-b5bdb1b1.md`](t3code-b5bdb1b1.md) |
+| t3code/bfd813db | [`t3code-bfd813db.md`](t3code-bfd813db.md) |
 | t3code concurrent-agents merge conflicts | [`t3code-concurrent-agents-merge-conflicts.md`](t3code-concurrent-agents-merge-conflicts.md) |
 | `t3code/fetch-issue-264-details` | [`t3code-fetch-issue-264-details.md`](t3code-fetch-issue-264-details.md) |
 | t3code/finish-523-console-snapshots | [`t3code-finish-523-console-snapshots.md`](t3code-finish-523-console-snapshots.md) |
