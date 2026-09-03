@@ -246,6 +246,25 @@ pub const btn_left: u8 = 0x01;
 pub const grab_marker: []const u8 = "wnd: grab\n";
 pub const drag_marker: []const u8 = "wnd: drag\n";
 pub const drop_marker: []const u8 = "wnd: drop\n";
+/// M37 DQ5 (issue #837): the snap-preview decision marker prefix. The WM
+/// prints the zone + bounds after it (`wnd: snap-preview zone=left
+/// x=0 y=0 w=640 h=700`) so the live gate can prove the WM previewed the
+/// exact rect the release then commits through the unchanged WMS5 path.
+pub const snap_preview_marker: []const u8 = "wnd: snap-preview";
+/// M37 DQ5 (issue #837): printed on every composite tick that redraws the
+/// outline while a drag is held (at most ~1 Hz, bounded by the drag) — the
+/// per-tick restore that keeps the outline on screen past repaints, and the
+/// clock the settled marker counts.
+pub const snap_tick_marker: []const u8 = "wnd: snap-tick\n";
+/// M37 DQ5 (issue #837): printed once after eight continuous tick-restores
+/// in the same zone (~8 s of held preview). The move's own SET_WINDOW
+/// damage repaints the desktop over the move-time outline within
+/// milliseconds, and shell output (e.g. a later `dui`) re-dirties it again —
+/// so the gate snapshots after THIS marker (the clean window: restored and
+/// stable), never right after the drag marker.
+pub const snap_settled_marker: []const u8 = "wnd: snap-settled\n";
+/// Ticks of continuous restore before the settled marker fires.
+pub const snap_settled_ticks: u32 = 8;
 
 // WMS5 Gate 2 (issue #625, claim 4278): the policy markers — one per
 // geometry decision the WM issues over the seam. The live gate greps these
@@ -1393,6 +1412,93 @@ fn snap_window_to(id: u8, px: u32, py: u32) void {
 }
 
 // ---------------------------------------------------------------------------
+// M37 DQ5 (issue #837) — the snap-preview outline. Preview-only: while a
+// title-bar drag is in progress and the pointer nears a scanout edge, the
+// WM draws the target zone's outline into the shared scanout (the M33
+// seam-B surface, same mapping the wallpaper path uses) so the user sees
+// the snap before it happens. Release commits through the UNCHANGED
+// snap_window_to above — the preview never issues SET_WINDOW itself.
+// Cleanup is automatic: the kernel's per-tick paint_scene repaints the
+// desktop gradient over the scribble within a tick of the drag ending, and
+// while held the outline is redrawn every composite tick (after the
+// kernel's paint, before the flush) so a compose can never leave it stale.
+// ---------------------------------------------------------------------------
+
+/// Outline thickness (px) — the DQ4 focus-outline token (DQ4 wins ties).
+pub const snap_preview_thick: u32 = ui.focus_w;
+
+/// The preview rect for a pointer position: the snap zone's bounds from the
+/// shared wnd_core rules (20 px threshold, corners first). Null = free
+/// (no zone under the pointer — draw nothing). Pure (host-testable).
+pub const SnapPreview = struct {
+    zone: wnd_core.SnapZone,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+};
+
+pub fn snap_preview_for_point(px: u32, py: u32) ?SnapPreview {
+    const zone = wnd_core.snap_zone_for_point(px, py, fb_w, fb_h);
+    if (zone == .none) return null;
+    const zb = wnd_core.snap_zone_bounds(zone, fb_w, fb_h, taskbar_h) orelse return null;
+    return .{ .zone = zone, .x = zb.x, .y = zb.y, .w = zb.w, .h = zb.h };
+}
+
+/// Print the preview decision with its zone + bounds (the live gate greps
+/// the pinned prefix + the values).
+fn write_snap_preview_marker(p: SnapPreview) void {
+    var buf: [64]u8 = undefined;
+    const s = std.fmt.bufPrint(&buf, "{s} zone={s} x={d} y={d} w={d} h={d}\n", .{
+        snap_preview_marker, @tagName(p.zone), p.x, p.y, p.w, p.h,
+    }) catch "wnd: snap-preview\n";
+    write_marker(s);
+}
+
+/// Map the shared scanout surface when the wallpaper path has not already
+/// done so (no /host/WALLPAPER file in the gate share). Same syscall shape
+/// as init_wallpaper_if_present; no-op on host (syscall4 stubs to 0, so
+/// scanout stays unmapped and draws are skipped in tests).
+fn ensure_scanout_mapped() bool {
+    if (scanout_mapped) return true;
+    const fb_len: u64 = @as(u64, fb_w) * fb_h * 4;
+    const scan_va = ui.syscall4(ui.sys_mmap_num, m33_surf_scan_tag, fb_len, prot_rw, map_anonymous | m33_map_shared);
+    if (scan_va > 0) {
+        scanout_ptr = @ptrFromInt(@as(usize, @intCast(scan_va)));
+        scanout_mapped = true;
+        return true;
+    }
+    return false;
+}
+
+/// Blit the preview outline: a snap_preview_thick band in the DQ4 accent
+/// token around the zone bounds (solid, not translucent — a 50% blend
+/// would deny the gate its exact-hex probes; subtlety comes from the thin
+/// 2 px band, not alpha). Unconditional overdraw (no occlusion skip): any
+/// pixels landing on a window heal at the next kernel paint, and the gate
+/// probes desktop-area border pixels.
+fn draw_snap_preview(p: SnapPreview) void {
+    const scan = scanout_ptr orelse return;
+    const accent = ui.theme_accent();
+    const r: u32 = (accent >> 16) & 0xff;
+    const g: u32 = (accent >> 8) & 0xff;
+    const b: u32 = accent & 0xff;
+    const pxv: u32 = 0xff000000 | (r << 16) | (g << 8) | b; // B8G8R8X8
+    const t = snap_preview_thick;
+    const xe = @min(p.x + p.w, fb_w);
+    const ye = @min(p.y + p.h, fb_h);
+    var y: u32 = p.y;
+    while (y < ye) : (y += 1) {
+        const on_h = (y < p.y + t) or (y + t >= ye);
+        var x: u32 = p.x;
+        while (x < xe) : (x += 1) {
+            const on_v = (x < p.x + t) or (x + t >= xe);
+            if (on_h or on_v) scan[@as(usize, y) * fb_w + x] = pxv;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // S6 Tab model (Milestone 19, issue #782) — WM registry tabs.
 // ---------------------------------------------------------------------------
 
@@ -1951,6 +2057,15 @@ fn main() noreturn {
     var grab_dx: u32 = 0;
     var grab_dy: u32 = 0;
     var prev_btn: u8 = 0;
+    // M37 DQ5 (issue #837): the snap-preview outline state — the last zone
+    // previewed (.none = no outline on screen) + the last pointer position
+    // (the tick redraw needs it; pointer events stop while held still).
+    var snap_zone: wnd_core.SnapZone = .none;
+    var snap_px: u32 = 0;
+    var snap_py: u32 = 0;
+    // M37 DQ5 (issue #837): continuous tick-restores in the current zone
+    // (drives the settled marker; reset on zone change/drop/grab).
+    var snap_tick_count: u32 = 0;
     var notif_open: bool = false;
     // WMS6 Gate E (issue #626): the tray widget-content state the WM owns.
     var tray_state: TrayState = .{};
@@ -1980,6 +2095,22 @@ fn main() noreturn {
                 if (wallpaper_loaded and scanout_mapped) {
                     render_wallpaper_root();
                     write_marker(wallpaper_present_marker);
+                }
+                // M37 DQ5 (issue #837): redraw the snap outline while held —
+                // the kernel's paint ran before this tick was delivered and
+                // the move's own SET_WINDOW damage may have repainted the
+                // desktop over the move-time outline since.
+                if (grabbing and snap_zone != .none) {
+                    if (snap_preview_for_point(snap_px, snap_py)) |prev| {
+                        if (scanout_mapped) {
+                            draw_snap_preview(prev);
+                            write_marker(snap_tick_marker);
+                            snap_tick_count +%= 1;
+                            if (snap_tick_count == snap_settled_ticks) {
+                                write_marker(snap_settled_marker);
+                            }
+                        }
+                    }
                 }
                 if (ticks % present_every == 0) {
                     _ = syscall6(sys_wmctl, wmctl_request_present, 0, 0, 0, 0, 0);
@@ -2120,11 +2251,30 @@ fn main() noreturn {
                             m.x = nx;
                             m.y = ny;
                             write_marker(drag_marker);
+                            // M37 DQ5 (issue #837): preview the snap target
+                            // while held — render-only, never SET_WINDOW.
+                            snap_px = px;
+                            snap_py = py;
+                            if (snap_preview_for_point(px, py)) |prev| {
+                                if (ensure_scanout_mapped()) draw_snap_preview(prev);
+                                if (snap_zone != prev.zone) {
+                                    snap_zone = prev.zone;
+                                    snap_tick_count = 0;
+                                    write_snap_preview_marker(prev);
+                                }
+                            } else {
+                                snap_zone = .none;
+                                snap_tick_count = 0;
+                            }
                         }
                     } else {
                         // Released: DROP. Snap if the drop point is near a
                         // scanout edge (M15 C3).
                         grabbing = false;
+                        // M37 DQ5: the outline dies with the drag — the next
+                        // kernel paint covers the scribble; stop redrawing.
+                        snap_zone = .none;
+                        snap_tick_count = 0;
                         const fm = focused_mirror();
                         if (fm) |m| {
                             snap_window_to(m.id, px, py);
@@ -2227,6 +2377,11 @@ fn main() noreturn {
                                     grabbing = true;
                                     grab_dx = px -% m.x;
                                     grab_dy = py -% m.y;
+                                    // M37 DQ5: a fresh drag previews nothing yet.
+                                    snap_zone = .none;
+                                    snap_tick_count = 0;
+                                    snap_px = px;
+                                    snap_py = py;
                                     write_marker(grab_marker);
                                 }
                             }
@@ -2484,6 +2639,71 @@ test "wnd: the WMS5 Gate 2 policy issues the SAME rects as the kernel shim (drif
     try std.testing.expectEqual(wnd_core.fb_w, fb_w);
     try std.testing.expectEqual(wnd_core.taskbar_h, taskbar_h);
     try std.testing.expectEqual(wnd_core.dock_w, dock_w);
+}
+
+test "wnd: dq5 snap preview maps the pointer to zone bounds (8 zones + none)" {
+    // M37 DQ5 (issue #837): the preview rect IS the snap zone's bounds
+    // (1280x720 scanout, 20 px taskbar excluded from bottom zones).
+    const l = snap_preview_for_point(5, 360).?;
+    try std.testing.expectEqual(wnd_core.SnapZone.left, l.zone);
+    try std.testing.expectEqual([4]u32{ 0, 0, 640, 700 }, [4]u32{ l.x, l.y, l.w, l.h });
+    const r = snap_preview_for_point(fb_w - 5, 360).?;
+    try std.testing.expectEqual(wnd_core.SnapZone.right, r.zone);
+    try std.testing.expectEqual([4]u32{ 640, 0, 640, 700 }, [4]u32{ r.x, r.y, r.w, r.h });
+    const t = snap_preview_for_point(640, 5).?;
+    try std.testing.expectEqual(wnd_core.SnapZone.top, t.zone);
+    try std.testing.expectEqual([4]u32{ 0, 0, 1280, 350 }, [4]u32{ t.x, t.y, t.w, t.h });
+    const b = snap_preview_for_point(640, fb_h - 5).?;
+    try std.testing.expectEqual(wnd_core.SnapZone.bottom, b.zone);
+    try std.testing.expectEqual([4]u32{ 0, 350, 1280, 350 }, [4]u32{ b.x, b.y, b.w, b.h });
+    const tl = snap_preview_for_point(5, 5).?;
+    try std.testing.expectEqual(wnd_core.SnapZone.top_left, tl.zone);
+    try std.testing.expectEqual([4]u32{ 0, 0, 640, 350 }, [4]u32{ tl.x, tl.y, tl.w, tl.h });
+    const tr = snap_preview_for_point(fb_w - 5, 5).?;
+    try std.testing.expectEqual(wnd_core.SnapZone.top_right, tr.zone);
+    try std.testing.expectEqual([4]u32{ 640, 0, 640, 350 }, [4]u32{ tr.x, tr.y, tr.w, tr.h });
+    const bl = snap_preview_for_point(5, fb_h - 5).?;
+    try std.testing.expectEqual(wnd_core.SnapZone.bottom_left, bl.zone);
+    try std.testing.expectEqual([4]u32{ 0, 350, 640, 350 }, [4]u32{ bl.x, bl.y, bl.w, bl.h });
+    const br = snap_preview_for_point(fb_w - 5, fb_h - 5).?;
+    try std.testing.expectEqual(wnd_core.SnapZone.bottom_right, br.zone);
+    try std.testing.expectEqual([4]u32{ 640, 350, 640, 350 }, [4]u32{ br.x, br.y, br.w, br.h });
+    // Center = free (no preview while dragging mid-screen).
+    try std.testing.expect(snap_preview_for_point(640, 360) == null);
+}
+
+test "wnd: dq5 snap preview threshold edges (20 px, corners first)" {
+    // Horizontal edges: near_left is x < 20; near_right is x + 20 >= 1280.
+    try std.testing.expectEqual(wnd_core.SnapZone.left, snap_preview_for_point(19, 360).?.zone);
+    try std.testing.expect(snap_preview_for_point(20, 360) == null);
+    try std.testing.expect(snap_preview_for_point(1259, 360) == null);
+    try std.testing.expectEqual(wnd_core.SnapZone.right, snap_preview_for_point(1260, 360).?.zone);
+    // Vertical edges: near_top is y < 20; near_bottom is y + 20 >= 720.
+    try std.testing.expectEqual(wnd_core.SnapZone.top, snap_preview_for_point(640, 19).?.zone);
+    try std.testing.expect(snap_preview_for_point(640, 20) == null);
+    try std.testing.expect(snap_preview_for_point(640, 699) == null);
+    try std.testing.expectEqual(wnd_core.SnapZone.bottom, snap_preview_for_point(640, 700).?.zone);
+    // Corners take precedence over edges at every corner.
+    try std.testing.expectEqual(wnd_core.SnapZone.top_left, snap_preview_for_point(0, 0).?.zone);
+    try std.testing.expectEqual(wnd_core.SnapZone.top_right, snap_preview_for_point(1279, 0).?.zone);
+    try std.testing.expectEqual(wnd_core.SnapZone.bottom_left, snap_preview_for_point(0, 719).?.zone);
+    try std.testing.expectEqual(wnd_core.SnapZone.bottom_right, snap_preview_for_point(1279, 719).?.zone);
+}
+
+test "wnd: dq5 snap preview styling defers to DQ4 tokens" {
+    // The outline band is the DQ4 focus-outline metric, in the DQ4 accent.
+    try std.testing.expectEqual(ui.focus_w, snap_preview_thick);
+    try std.testing.expectEqual(@as(u32, 2), snap_preview_thick);
+    _ = ui.set_theme("dark");
+    try std.testing.expectEqual(@as(u32, 0x3b82f6), ui.theme_accent());
+    // The decision marker prefix is pinned (the live gate greps it).
+    try std.testing.expectEqualStrings("wnd: snap-preview", snap_preview_marker);
+    // The tick-redraw marker is pinned (per-tick restore proof).
+    try std.testing.expectEqualStrings("wnd: snap-tick\n", snap_tick_marker);
+    // The settled marker + count are pinned (the live gate snapshots after
+    // it — the clean window, ~8 s of continuous restore).
+    try std.testing.expectEqualStrings("wnd: snap-settled\n", snap_settled_marker);
+    try std.testing.expectEqual(@as(u32, 8), snap_settled_ticks);
 }
 
 test "wnd: hid_to_ascii maps keyboard usages accurately" {
