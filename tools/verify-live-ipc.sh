@@ -113,12 +113,10 @@ codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/
 
 # --- per-run isolation -------------------------------------------------------------
 # Private scratch dir for EVERY boot. See tools/lib/gate-run.sh.
-# THIS gate boots the private WRITABLE copy ($RUN_DIR/disk-base.img) instead
-# of a throwaway overlay: observed 2026-08-24 (claim 5069), the overlay's
-# extra I/O layer shifts guest timing enough to flip scheduler-interleaving
-# assertions (pool-full refusal fires on unmodified main but not under the
-# overlay — reproducible). The writable copy keeps main's exact runner code
-# path while still isolating concurrent gates.
+# THIS gate boots the canonical read-only artifacts/disk.img via
+# gate_begin's --overlay-base + per-run ASIF overlay (M34 HF6, issue
+# #740), keeping main's exact runner code path while still isolating
+# concurrent gates.
 gate_begin live-ipc
 gate_seed_share
 echo "run dir: $RUN_DIR"
@@ -141,7 +139,7 @@ run_one() {
     set +e
     # No --script-expect: capture the full window (the runner exits 0 on
     # timeout when no expect is configured).
-    host/vm-runner/.build/release/VMRunner "$RUN_DIR/disk-base.img" \
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
         --serial "$RUN_DIR/vm-serial-$tag.log" \
         --script "$SCRIPT1" --script-after "$STATIC_EXIT_LINE" \
         --script2 "$SCRIPT2" --script2-after "$FLOW_MARKER" \
@@ -183,7 +181,7 @@ run_one() {
         # peer's byte-exact echoes.
         sends="$(grep -aoE -- "ipc: ping [0-9]+" "$SER" | sed -E 's/.*ping //' | sort -n -u || true)"
         echoes="$(grep -aoE -- "peer: got ping [0-9]+" "$SER" | sed -E 's/.*ping //' | sort -n -u || true)"
-        local nsends nechoes
+        local nsends=0 nechoes=0
         nsends="$(printf '%s\n' "$sends" | grep -c . || true)"
         nechoes="$(printf '%s\n' "$echoes" | grep -c . || true)"
         # Every echo was actually sent (echoes track sends).

@@ -3011,7 +3011,7 @@ test "syscall: yield returns zero and exit removes the current task" {
     try std.testing.expect(scheduler.is_terminated(2));
     try std.testing.expectEqual(@as(?u64, 7), scheduler.terminated_status(2));
     try std.testing.expectEqual(@as(u64, 1), scheduler.exit_count());
-    try std.testing.expect(exceptions.resume_frame != @intFromPtr(&frame));
+    try std.testing.expect(exceptions.resume_frame[0] != @intFromPtr(&frame));
 }
 
 test "syscall: sleep blocks the current task and returns zero on wake" {
@@ -3055,10 +3055,10 @@ test "syscall: handle_svc writes yield result into the suspended caller frame" {
     var caller = fresh_frame();
     try std.testing.expect(exceptions.frame_write(&caller, 0, 0xdead));
     try std.testing.expect(exceptions.frame_write(&caller, 8, sys_yield));
-    exceptions.resume_frame = @intFromPtr(&caller);
+    exceptions.resume_frame[0] = @intFromPtr(&caller);
     try std.testing.expect(handle_svc(&caller, svc_immediate));
     try std.testing.expectEqual(@as(u64, 0), exceptions.frame_read(&caller, 0));
-    try std.testing.expect(exceptions.resume_frame != @intFromPtr(&caller));
+    try std.testing.expect(exceptions.resume_frame[0] != @intFromPtr(&caller));
     try std.testing.expectEqual(@as(usize, 1), scheduler.current_id());
 }
 
@@ -3450,7 +3450,7 @@ test "syscall: wait blocks the caller and the target's exit wakes it with the st
     var caller = fresh_frame();
     try std.testing.expect(exceptions.frame_write(&caller, 8, sys_wait));
     try std.testing.expect(exceptions.frame_write(&caller, 0, target_pid));
-    exceptions.resume_frame = @intFromPtr(&caller);
+    exceptions.resume_frame[0] = @intFromPtr(&caller);
     try std.testing.expect(handle_svc(&caller, svc_immediate));
     try std.testing.expectEqual(@as(u64, 1), call_count(sys_wait));
     try std.testing.expect(scheduler.is_blocked(2));
@@ -4864,7 +4864,7 @@ test "syscall: wait_event block+wake preserves the event buffer across the svc r
     var caller = fresh_frame();
     try std.testing.expect(exceptions.frame_write(&caller, 8, sys_wait_event));
     try std.testing.expect(exceptions.frame_write(&caller, 0, buf_addr));
-    exceptions.resume_frame = @intFromPtr(&caller);
+    exceptions.resume_frame[0] = @intFromPtr(&caller);
 
     // 1. Empty queue: handle_svc blocks the caller. The blocking result
     // (0) is written into the SAVED frame's x0, clobbering the buffer

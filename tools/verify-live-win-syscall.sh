@@ -113,7 +113,7 @@ EOF
 run_one() {
     local out="$1" serial="$2"
     rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log" "$RUN_DIR"/gpu-screen-*
-    host/vm-runner/.build/release/VMRunner "$RUN_DIR/disk-base.img" \
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
         --serial "$RUN_DIR/vm-serial.log" \
         --display --screen "$RUN_DIR/gpu-screen" \
         --script artifacts/live-win-syscall-script.txt \

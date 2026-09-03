@@ -98,27 +98,35 @@
   verification only.
 - **Depends on:** — (flake observed on main-era builds; #808's
   instrumentation is already in tree)
-- **Heartbeat:** 2026-09-02
-- **Status:** 🔄 in progress — claim 9094 (id via `bash tools/status/claim-id.sh`);
-  instrumentation v2 landed + run-11 hang boots decoded (see Findings);
-  the corrupting WRITER is not yet named. Run 13 CAUGHT the flake with
-  the audit live: **zero ring violations + S1PTW walk fault on a
-  transient user-root window** (see Findings) — the corruption theory
-  is now mostly ruled out and the fix hunt moves to the root-switch /
-  surface translation discipline (TLBI/ISB ordering), with the vf era
-  as the coinciding context. The audit + v2 dump remain armed for the
-  next catch. **Writer-hunt instrument ADDED 2026-09-02:**
-  `scheduler.audit` — a task-ring + process-registry INVARIANT audit
-  (instrumentation only, zero behavior change): every virtio_file
-  queue-5 exchange arms at entry / checks at exit; `reap_one_zombie`
-  and the tick's ring-select validate the slot before reading it; the
-  idle loop drains violations. Rules are strict supersets of observed
-  legal values (kernel pointers ∈ [0x1000, 0x80000000), the 256 MiB @
-  0x70000000 class ceiling; user VAs like sp_el0 are legal and
-  excluded; spsr allows only known-condition-bit shapes; raw enum
-  reads so a rogue byte can't UB the audit itself). Run 12 will show
-  the one-per-boot `[AUDIT] armed` evidence line; a corruption caught
-  prints slot/field/value/tag/tick BEFORE the faulting read.
+- **Heartbeat:** 2026-09-03
+- **Status:** ✅ done — RESOLVED by the #850 fix (same branch, 2026-09-03):
+  the family is NOT a translation race — it is the exception resume seam.
+  Fresh deterministic repro (`verify-live-exec`, 2/2) + claim-9094 run-13
+  carry the IDENTICAL register image (x21=0x2008011e, x23=0x1e timer PPI,
+  x26=0x10040080 GICR, x19=0x10030000 GICD, x25=0x40000000, far=0x20080296)
+  at TWO different elr sites (kernel+0x37b7c `ldrb [x21,#0x178]` with
+  x21=madd(x20,x26,x23) from corrupted base/stride, and run-13's kernel
+  +0x768) — a task resumes holding the GIC/timer HANDLER's register image.
+  Root cause (issue #850): (a) same-EL IRQ NESTING — AArch64 same-EL
+  exception entry leaves PSTATE.DAIF unchanged and the vector stubs never
+  masked IRQ, so a timer IRQ inside the tick handler overwrote the single
+  global `resume_frame` with the nested mid-handler frame; (b) SMP — core 1
+  (2 vCPU VM) unconditionally writes the same global at every exception
+  entry, clobbering core 0's staged frame mid-handler. The audit's ZERO
+  violations are explained: the corruption is register-level, invisible to
+  memory audits (the run-13 "transient root window" theory was the S1PTW
+  symptom, not the cause). Fix: `msr daifset, #2` at the top of
+  `exc_fp_common` + per-core `resume_frame`/`resume_sp_el0` arrays
+  (exceptions.zig, scheduler.zig; host-test index in syscall.zig).
+  Verified: class-A green + transcript byte-identical; **19/19 live VZ
+  boots across 9 gates** incl. exec (2/2 → 5/5), vf (8/24 → 3/3), zc,
+  procs, lifecycle, concurrent, long-lived, ipc, scale. Also migrated 12
+  stale live-gate scripts (args/ipc/m21-*/scale/win*) from the removed
+  `$RUN_DIR/disk-base.img` writable-copy path to `GATE_RUNNER_ARGS`
+  (broken since the M34 HF6 overlay refactor, issue #740). The audit +
+  v2 dump stay in tree armed for any future writer.
+  Instrumentation history (kept for the record): v2 dump + scheduler.audit
+  landed as committed instrument; resolution in issue #850.
 
 ## Notes
 
