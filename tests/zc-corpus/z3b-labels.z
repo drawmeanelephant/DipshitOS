@@ -1,0 +1,30 @@
+// Z3b (#759): app glue for z3b-stdz.z — put_label appends a fixed label
+// (up to 6 chars, n used) to the stdz builder; build_report assembles the
+// one-per-line report. Split from the app so every source stays under the
+// 2048 B in-guest file_read cap; same flat namespace (Z3a).
+fn put_label(b: *Builder, c0: u64, c1: u64, c2: u64, c3: u64, c4: u64, c5: u64, n: u64) u64 {
+    var lbl: [6]u8 = undefined;
+    lbl[0] = @intCast(c0);
+    lbl[1] = @intCast(c1);
+    lbl[2] = @intCast(c2);
+    lbl[3] = @intCast(c3);
+    lbl[4] = @intCast(c4);
+    lbl[5] = @intCast(c5);
+    return sb_append(b, &lbl, n);
+}
+
+fn build_report(b: *Builder, total: u64, lines: u64, words: u64) u64 {
+    _ = put_label(b, 98, 121, 116, 101, 115, 61, 6);
+    _ = sb_u64(b, total);
+    _ = put_label(b, 10, 0, 0, 0, 0, 0, 1);
+    _ = put_label(b, 108, 105, 110, 101, 115, 61, 6);
+    _ = sb_u64(b, lines);
+    _ = put_label(b, 10, 0, 0, 0, 0, 0, 1);
+    _ = put_label(b, 119, 111, 114, 100, 115, 61, 6);
+    _ = sb_u64(b, words);
+    _ = put_label(b, 10, 0, 0, 0, 0, 0, 1);
+    _ = put_label(b, 104, 101, 120, 61, 0, 0, 4);
+    _ = sb_hex(b, total);
+    _ = put_label(b, 10, 0, 0, 0, 0, 0, 1);
+    return sb_len(b);
+}
