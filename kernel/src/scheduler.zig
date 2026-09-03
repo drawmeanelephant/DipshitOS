@@ -275,8 +275,179 @@ const Task = struct {
     /// `secondary_ok`). `exec -c<core>` sets this via `pin_task`.
     pin_core: usize = 0,
 };
-
 var tasks: [max_tasks]Task = [_]Task{.{}} ** max_tasks;
+
+// ---------------------------------------------------------------------------
+// Per-core ready rings (claim 881 / issue #856)
+// ---------------------------------------------------------------------------
+//
+// The ready ring of core `c` is the set of tasks core `c` will run next:
+// a task with state `.ready` sits on EXACTLY ONE core's ring (its "home").
+// Selection pops the ring head, so two cores can never both select the
+// same ready task — single-owner by construction, not by lock. This slice
+// (claim 881 slice 1) introduces the structure, its ops, and the seeding
+// seams (init/spawn/pin/reap) with an invariant checker; the rotation
+// paths (tick/switch/yield/sleep/wait/exit) convert to ring pop/push in
+// slice 2, at which point the ring becomes the scheduler's ONLY notion of
+// "ready" and the shared scan disappears.
+//
+// Ring-home rules (frozen in the claim): spawns join ring 0 unless
+// `pin_core` is set (then that ring — a pinned task never leaves it); a
+// preempted/self-yielded task joins the ring of the core it ran on; a
+// blocked task leaves its ring and wakes onto ring 0 (or its pin ring);
+// an idle secondary core steals from ring 0 only at the WFE->run seam
+// (the exact place the old shared scan let it grab work). Capacity is the
+// whole pool: every task could be ready at once.
+const ReadyRing = struct {
+    /// Fixed-order membership array, walked FIFO: `head` is the next pop,
+    /// `(head + count) % max_tasks` the next push slot. Indexing by
+    /// `(head + i) % max_tasks` keeps `get(i)` the i-th in run order.
+    members: [max_tasks]usize = undefined,
+    head: usize = 0,
+    count: usize = 0,
+
+    fn len(self: *const ReadyRing) usize {
+        return self.count;
+    }
+
+    fn empty(self: *const ReadyRing) bool {
+        return self.count == 0;
+    }
+
+    /// The i-th member in run order (head first).
+    fn get(self: *const ReadyRing, i: usize) usize {
+        std.debug.assert(i < self.count);
+        return self.members[(self.head + i) % max_tasks];
+    }
+
+    fn contains(self: *const ReadyRing, id: usize) bool {
+        var i: usize = 0;
+        while (i < self.count) : (i += 1) {
+            if (self.get(i) == id) return true;
+        }
+        return false;
+    }
+
+    /// Append at the tail. Single-home invariant: a task already on this
+    /// (or any) ring must not be pushed again — the assert is the
+    /// double-pick guard.
+    fn push(self: *ReadyRing, id: usize) void {
+        std.debug.assert(self.count < max_tasks);
+        std.debug.assert(!self.contains(id));
+        self.members[(self.head + self.count) % max_tasks] = id;
+        self.count += 1;
+    }
+
+    /// Pop the head (FIFO run order).
+    fn pop(self: *ReadyRing) ?usize {
+        if (self.count == 0) return null;
+        const id = self.members[self.head];
+        self.head = (self.head + 1) % max_tasks;
+        self.count -= 1;
+        return id;
+    }
+
+    /// Remove `id` wherever it sits, compacting the tail down one slot so
+    /// run order is preserved. Returns false when it is not a member.
+    fn remove(self: *ReadyRing, id: usize) bool {
+        var i: usize = 0;
+        while (i < self.count) : (i += 1) {
+            if (self.get(i) != id) continue;
+            var j = i;
+            while (j + 1 < self.count) : (j += 1) {
+                self.members[(self.head + j) % max_tasks] = self.members[(self.head + j + 1) % max_tasks];
+            }
+            self.count -= 1;
+            return true;
+        }
+        return false;
+    }
+};
+
+var ready_rings: [smp.max_cores]ReadyRing = [_]ReadyRing{.{}} ** smp.max_cores;
+
+/// The ring a task's `ready` membership lives on: its pin core when
+/// pinned, else ring 0 (the any-core default home).
+fn home_ring_of(id: usize) usize {
+    return if (tasks[id].pin_core != 0) tasks[id].pin_core else 0;
+}
+
+/// Drop `id` from whichever ring holds it (cross-ring remove — the
+/// exit/reap and pin re-home seams). Returns true when it was a member.
+fn ring_remove_anywhere(id: usize) bool {
+    var c: usize = 0;
+    while (c < smp.max_cores) : (c += 1) {
+        if (ready_rings[c].remove(id)) return true;
+    }
+    return false;
+}
+
+/// The ready-membership invariant, asserted at the slice-1 seeding seams
+/// (init/spawn/pin/reap) — and by the host tests after every seam. In
+/// slice 1 the rotation paths are not yet ring-wired, so a task whose
+/// state the ROTATION paths changed (.ready after a preempt, .zombie
+/// after an exit) may sit in a stale ring position until slice 2; call
+/// the checker only where no rotation has happened since the last seeded
+/// seam. Rules (all hold by construction once slice 2 lands everywhere):
+///   1. every member of every ring is a `.ready` task, on no other ring,
+///      and not any core's `current` (executing tasks are off-ring);
+///   2. every `.ready` task is on exactly one ring, unless it is a core's
+///      `current` (executing off-ring — the boot shell / a
+///      rollback-resumed task);
+///   3. the idle reaper sits on ring 0 exactly (core-0-owned);
+///   4. no non-`.ready` task is on any ring.
+fn check_ready_membership() void {
+    var c: usize = 0;
+    while (c < smp.max_cores) : (c += 1) {
+        const ring = &ready_rings[c];
+        var i: usize = 0;
+        while (i < ring.len()) : (i += 1) {
+            const m = ring.get(i);
+            std.debug.assert(m < max_tasks);
+            std.debug.assert(tasks[m].state == .ready);
+            var other: usize = 0;
+            while (other < smp.max_cores) : (other += 1) {
+                if (other == c) continue;
+                std.debug.assert(!ready_rings[other].contains(m));
+            }
+            // A core never executes a task that sits on ITS OWN ring (the
+            // double-run guard). Cross-core equality is legal: parked
+            // secondary cores hold `current = idle_id` while the idle
+            // reaper is ring 0's member.
+            std.debug.assert(current[c] != m);
+        }
+    }
+    var id: usize = 0;
+    while (id < max_tasks) : (id += 1) {
+        if (tasks[id].state == .ready) {
+            var on: usize = 0;
+            var ring_c: usize = 0;
+            while (ring_c < smp.max_cores) : (ring_c += 1) {
+                if (ready_rings[ring_c].contains(id)) on += 1;
+            }
+            std.debug.assert(on <= 1);
+            if (on == 1) continue;
+            var is_current: bool = false;
+            var cur_c: usize = 0;
+            while (cur_c < smp.max_cores) : (cur_c += 1) {
+                if (current[cur_c] == id) is_current = true;
+            }
+            std.debug.assert(is_current); // .ready, off-ring => executing
+        } else {
+            var ring_c: usize = 0;
+            while (ring_c < smp.max_cores) : (ring_c += 1) {
+                std.debug.assert(!ready_rings[ring_c].contains(id));
+            }
+        }
+    }
+    std.debug.assert(tasks[idle_id].state == .ready);
+    std.debug.assert(ready_rings[0].contains(idle_id));
+    var ring_c: usize = 1;
+    while (ring_c < smp.max_cores) : (ring_c += 1) {
+        std.debug.assert(!ready_rings[ring_c].contains(idle_id));
+    }
+}
+
 var task_count: usize = 0;
 /// The running task per core. Core 0 owns the task ring today
 /// (irq_dispatch gates tick to PE 0 — claim 7339); cores 1-3 sit in
@@ -448,6 +619,12 @@ pub fn init() usize {
         .spsr = spsr_el1h_irqs,
         .ttbr0 = mmu.kernel_root_phys(),
     };
+    // Claim 881 slice 1: every test reset also clears the per-core ready
+    // rings, then the always-ready idle reaper takes its ring-0 seat (the
+    // shell is `current[0]` and executing — off-ring until its first real
+    // preemption joins it to ring 0 in the slice-2 rotation wiring).
+    for (&ready_rings) |*r| r.* = .{};
+    ready_rings[0].push(idle_id);
     task_count = 2;
     return 0;
 }
@@ -474,6 +651,9 @@ pub fn spawn(name: []const u8, entry: u64, spsr: u64, stack: []u8, ttbr0: u64, s
         .ttbr0 = ttbr0,
         .state = .ready,
     };
+    // Claim 881 slice 1: the new task joins its home ring (ring 0 for the
+    // any-core default; `pin_task` re-homes it when `exec -c<core>` pins).
+    ready_rings[home_ring_of(id)].push(id);
     task_count += 1;
     return id;
 }
@@ -565,6 +745,15 @@ pub fn pin_task(id: usize, core: usize) bool {
     if (id >= max_tasks or tasks[id].state == .free) return false;
     tasks[id].pin_core = core;
     tasks[id].secondary_ok = (core != 0);
+    // Claim 881 slice 1: a still-`ready` task re-homes to its pin ring so
+    // the membership invariant holds (a task pinned after spawn must leave
+    // ring 0; a task pinned back to 0 returns home). A task that is
+    // already running/blocked/zombie is off-ring by construction — its
+    // fields are set and the next preemption/wake places it per the pin.
+    if (tasks[id].state == .ready) {
+        _ = ring_remove_anywhere(id);
+        ready_rings[home_ring_of(id)].push(id);
+    }
     return true;
 }
 
@@ -1351,6 +1540,10 @@ pub fn reap(id: usize) bool {
     defer sched_lock_release();
     if (id >= max_tasks or tasks[id].state != .zombie) return false;
     _ = process.release_pages_on_reap(id);
+    // Claim 881 slice 1: the freed slot leaves its ring BEFORE the reset
+    // (the exit path's ring removal lands with the slice-2 rotation
+    // wiring, so a zombie can still hold its spawn seat until the reap).
+    _ = ring_remove_anywhere(id);
     tasks[id] = .{};
     task_count -%= 1;
     return true;
@@ -2656,4 +2849,114 @@ test "scheduler: a killed sleeping task is terminated at its wake-selection" {
     try std.testing.expectEqual(@as(usize, 2), current_id());
     try std.testing.expect(is_terminated(1));
     try std.testing.expectEqual(@as(?u64, reserved_kill_status), terminated_status(1));
+}
+
+// ---------------------------------------------------------------------------
+// Claim 881 slice 1 — per-core ready rings
+// ---------------------------------------------------------------------------
+
+test "scheduler: ready rings — FIFO push/pop order, contains, remove, wrap" {
+    var r: ReadyRing = .{};
+    try std.testing.expect(r.empty());
+    try std.testing.expectEqual(@as(usize, 0), r.len());
+    try std.testing.expectEqual(@as(?usize, null), r.pop());
+
+    r.push(3);
+    r.push(1);
+    r.push(2);
+    try std.testing.expectEqual(@as(usize, 3), r.len());
+    try std.testing.expect(r.contains(1));
+    try std.testing.expect(!r.contains(9));
+    try std.testing.expectEqual(@as(usize, 3), r.get(0));
+    try std.testing.expectEqual(@as(usize, 1), r.get(1));
+    try std.testing.expectEqual(@as(usize, 2), r.get(2));
+
+    // FIFO: pop order = push order.
+    try std.testing.expectEqual(@as(?usize, 3), r.pop());
+    try std.testing.expectEqual(@as(?usize, 1), r.pop());
+    try std.testing.expectEqual(@as(?usize, 2), r.pop());
+    try std.testing.expect(r.empty());
+
+    // remove compacts while keeping order (middle, head, tail).
+    r.push(5);
+    r.push(6);
+    r.push(7);
+    try std.testing.expect(r.remove(6));
+    try std.testing.expect(!r.remove(99));
+    try std.testing.expectEqual(@as(?usize, 5), r.pop());
+    try std.testing.expectEqual(@as(?usize, 7), r.pop());
+    r.push(8);
+    r.push(9);
+    r.push(10);
+    try std.testing.expect(r.remove(8));
+    try std.testing.expect(r.remove(10));
+    try std.testing.expectEqual(@as(?usize, 9), r.pop());
+
+    // Wrap-around: the head advances past the array end and push/pop
+    // still behave FIFO (head = (head + 1) % max_tasks).
+    r.push(1);
+    r.push(2);
+    r.push(3);
+    _ = r.pop();
+    _ = r.pop();
+    r.push(4);
+    r.push(5);
+    try std.testing.expectEqual(@as(?usize, 3), r.pop());
+    try std.testing.expectEqual(@as(?usize, 4), r.pop());
+    try std.testing.expectEqual(@as(?usize, 5), r.pop());
+    try std.testing.expect(r.empty());
+}
+
+test "scheduler: ready rings — seeded membership at init/spawn/pin with the invariant" {
+    // Slice-1 seeding seams (no rotation yet — the checker's call
+    // precondition; rotation paths wire into the rings in slice 2).
+    _ = init();
+    // init: the idle reaper is ring 0's only member; the shell is
+    // current[0] and executing (off-ring).
+    try std.testing.expectEqual(@as(usize, 1), ready_rings[0].len());
+    try std.testing.expect(ready_rings[0].contains(idle_id));
+    check_ready_membership();
+
+    // spawn: new ready tasks join ring 0 in spawn order.
+    const worker = register_worker(0x1111).?;
+    try std.testing.expectEqual(@as(usize, 2), ready_rings[0].len());
+    try std.testing.expect(ready_rings[0].contains(worker));
+    const user = register_user(0x2222, 0).?;
+    try std.testing.expect(ready_rings[0].contains(user));
+    try std.testing.expectEqual(@as(usize, 1), ready_rings[0].get(1)); // spawn order = run order
+    try std.testing.expectEqual(@as(usize, 2), ready_rings[0].get(2));
+    check_ready_membership();
+
+    // pin re-homes a still-ready task: ring 0 -> ring 1, and back.
+    try std.testing.expect(pin_task(user, 1));
+    try std.testing.expect(!ready_rings[0].contains(user));
+    try std.testing.expect(ready_rings[1].contains(user));
+    check_ready_membership();
+    try std.testing.expect(pin_task(user, 0));
+    try std.testing.expect(ready_rings[0].contains(user));
+    try std.testing.expect(!ready_rings[1].contains(user));
+    check_ready_membership();
+}
+
+test "scheduler: ready rings — reap drops the slot's ring membership" {
+    _ = init();
+    const t = spawn("ring-test", 0x6000, spsr_el1h_irqs, &worker_stack, 0, 0).?;
+    try std.testing.expect(ready_rings[0].contains(t));
+    // Exit it (state -> zombie) and reap. The exit path does NOT touch the
+    // rings until the slice-2 rotation wiring — the zombie keeps its spawn
+    // seat — so the checker is deliberately not called between exit and
+    // reap; the reap itself drops the membership.
+    current[0] = t;
+    try std.testing.expect(exit_current(7));
+    try std.testing.expect(ready_rings[0].contains(t));
+    try std.testing.expect(reap(t));
+    try std.testing.expect(!ready_rings[0].contains(t));
+    // The freed slot is spawnable again and re-joins ring 0 exactly once.
+    const again = spawn("ring-test-2", 0x6001, spsr_el1h_irqs, &worker_stack, 0, 0).?;
+    try std.testing.expectEqual(@as(usize, t), again);
+    var on: usize = 0;
+    for (&ready_rings) |*r| {
+        if (r.contains(again)) on += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), on);
 }
