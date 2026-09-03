@@ -2259,21 +2259,23 @@ pub fn maybe_report(con: *console.Console) void {
         secondary_runs_printed += 1;
         const index = secondary_runs_printed - 1;
         const name = if (index < secondary_run_names_count) secondary_run_names[index] else secondary_last_task;
-        con.puts("smp: secondary runs=");
-        con.print_u64(secondary_runs_printed);
-        con.puts(" task=");
-        con.puts(name);
-        con.puts("\n");
+        // ONE write per line (claim 881 slice 4): a secondary-core
+        // sys_write can land between the vtable writes of a multi-put
+        // line, splitting it (observed: `smp: secondary runs=` / `111` /
+        // ` task=SCHEDRING.BIN` around a core-1 write) and breaking the
+        // live gates' byte-exact greps. Every drain line below is built
+        // into one buffer and written once.
+        var buf: [160]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "smp: secondary runs={d} task={s}\n", .{ secondary_runs_printed, name }) catch continue;
+        con.puts(line);
     }
     var i: usize = 0;
     while (i < max_tasks) : (i += 1) {
         if (!report_pending[i]) continue;
         report_pending[i] = false;
-        con.puts("tasks ");
-        con.puts(tasks[i].name);
-        con.puts(" advances=");
-        con.print_u64(report_advances[i]);
-        con.puts("\n");
+        var buf: [160]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "tasks {s} advances={d}\n", .{ tasks[i].name, report_advances[i] }) catch continue;
+        con.puts(line);
     }
     // Milestone sixteen C2 (claim 8403): drain the EL0 fault FIFO IN ORDER
     // before the exit reports, so a `fault:` line precedes its
@@ -2282,13 +2284,9 @@ pub fn maybe_report(con: *console.Console) void {
         const entry = fault_reports[fault_report_head];
         fault_report_head = (fault_report_head + 1) % fault_report_max;
         fault_report_count -= 1;
-        con.puts("fault: ");
-        con.puts(entry.name);
-        con.puts(" far=");
-        con.print_hex(entry.far);
-        con.puts(" ec=");
-        con.print_hex_min(entry.ec);
-        con.puts("\n");
+        var buf: [160]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "fault: {s} far=0x{x:0>16} ec=0x{x}\n", .{ entry.name, entry.far, entry.ec }) catch continue;
+        con.puts(line);
     }
     // Card 3d (claim 1014): drain the task exit report FIFO IN ORDER — N
     // exits in one window print N `tasks <name> exited status=<n>` lines.
@@ -2296,21 +2294,17 @@ pub fn maybe_report(con: *console.Console) void {
         const entry = exit_reports[exit_report_head];
         exit_report_head = (exit_report_head + 1) % exit_report_max;
         exit_report_count -= 1;
-        con.puts("tasks ");
-        con.puts(entry.name);
-        con.puts(" exited status=");
-        con.print_u64(entry.status);
-        con.puts("\n");
+        var buf: [160]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "tasks {s} exited status={d}\n", .{ entry.name, entry.status }) catch continue;
+        con.puts(line);
     }
     // Claim 3848: the process-level exit reports — printed from the same
     // shell idle loop, one per process exit IN ORDER, so the host sees
     // every program's exit status even after the task slots are reaped.
     while (process.take_exit_report()) |r| {
-        con.puts("procs ");
-        con.puts(r.name);
-        con.puts(" exited status=");
-        con.print_u64(r.status);
-        con.puts("\n");
+        var buf: [160]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "procs {s} exited status={d}\n", .{ r.name, r.status }) catch continue;
+        con.puts(line);
     }
     // Claim 6729: the idle task reaped zombies; the names were snapshotted
     // at reap time because the freed slots' own names are zeroed. Card 3d:
@@ -2319,20 +2313,18 @@ pub fn maybe_report(con: *console.Console) void {
         const entry = reap_reports[reap_report_head];
         reap_report_head = (reap_report_head + 1) % exit_report_max;
         reap_report_count -= 1;
-        con.puts("tasks ");
-        con.puts(entry.name);
-        con.puts(" reaped\n");
+        var buf: [160]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "tasks {s} reaped\n", .{entry.name}) catch continue;
+        con.puts(line);
     }
     // Claim 0635: a task blocked itself with sys_sleep; the name + duration
     // were snapshotted at block time (the task is not running now, but the
     // report is the shell's window into the transition).
     if (sleep_report_pending) {
         sleep_report_pending = false;
-        con.puts("tasks ");
-        con.puts(sleep_report_name);
-        con.puts(" sleeping ");
-        con.print_u64(sleep_report_ticks);
-        con.puts(" ticks\n");
+        var buf: [160]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "tasks {s} sleeping {d} ticks\n", .{ sleep_report_name, sleep_report_ticks }) catch return;
+        con.puts(line);
     }
 }
 
