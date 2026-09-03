@@ -6,7 +6,7 @@
 - **Touches:** docs/claims/5514-dq1-godmenu-completion.md, docs/logs/agent-t3code-dq1-godmenu.md, docs/march-m37-desktop-quality.md, user/src/wnd.zig, user/src/lib/sexiburger.zig, host/vm-runner/Sources/VMRunner/main.swift, tools/verify-live-godmenu-summon.sh
 - **Depends on:** Phase 1 (claim 7154) — landed
 - **Heartbeat:** 2026-09-03
-- **Status:** 🔄 agent/t3code/dq1-godmenu
+- **Status:** ✅ agent/t3code/dq1-godmenu (merged PR #844, issue #836 closed)
 
 ## Notes
 

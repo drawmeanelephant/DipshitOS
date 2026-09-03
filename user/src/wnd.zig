@@ -439,7 +439,7 @@ pub fn hid_to_ascii(usage: u8, shift: bool) ?u8 {
 // WMS4 (issue #624): the EXACT values the chrome-descriptor blob embeds.
 // Pinned against the shared wnd_core parity policy below, so the EL0 blob
 // cannot drift from the kernel's expectation without a test failure.
-pub const policy_kind: u32 = 0x3f;
+pub const policy_kind: u32 = 0x7f;
 pub const policy_flags: u32 = 0x01;
 pub const policy_border_rgb: u32 = 0x0c1826;
 pub const policy_border_unfocus_rgb: u32 = 0x475569;
@@ -897,8 +897,16 @@ pub fn populate_god_menu() void {
     _ = god_menu.registry.register_command(.system, "Power Off", "", "shutdown", null) catch {};
 
     // 2. Apps — dynamic APPS.TXT catalog (DQ1 #836); the hardcoded four
-    // survive only as the fallback (host tests, missing manifest).
-    if (load_god_menu_apps() > 0) {
+    // survive only as the fallback (host tests, missing manifest). Loaded
+    // per summon, never at startup: the file channel is not reentrant
+    // across tasks, so boot-time reads race app startup (issue #846).
+    const app_count = load_god_menu_apps();
+    {
+        var abuf: [32]u8 = undefined;
+        const amsg = std.fmt.bufPrint(&abuf, "wnd: god-menu apps={d}\n", .{app_count}) catch "wnd: god-menu apps\n";
+        write_marker(amsg);
+    }
+    if (app_count > 0) {
         var ai: usize = 0;
         while (ai < god_menu_app_count) : (ai += 1) {
             _ = god_menu.registry.register_command(
@@ -1844,16 +1852,6 @@ fn main() noreturn {
     // window created later inherits it (the kernel's draw-time fallback).
     const desc = wnd_core.chrome_parity_policy();
     _ = syscall6(sys_wmctl, wmctl_set_window, 0xFFFF_FFFF, 0, 0, @intFromPtr(&desc), wnd_core.chrome_desc_bytes);
-
-    // M37 DQ1 (issue #836): preload the God Menu apps catalog from APPS.TXT
-    // at startup (refreshed on every summon) + pin the count for the live
-    // gate (`wnd: god-menu apps=N`, N=0 when the manifest is absent).
-    {
-        const pre_apps = load_god_menu_apps();
-        var abuf: [32]u8 = undefined;
-        const amsg = std.fmt.bufPrint(&abuf, "wnd: god-menu apps={d}\n", .{pre_apps}) catch "wnd: god-menu apps\n";
-        write_marker(amsg);
-    }
 
     // WMS5 mirror + drag + policy state.
     var ev: Event = undefined;

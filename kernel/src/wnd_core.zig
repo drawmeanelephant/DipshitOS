@@ -402,9 +402,15 @@ pub const chrome_close: u32 = 0x04;
 pub const chrome_minimize: u32 = 0x08;
 pub const chrome_pin: u32 = 0x10;
 pub const chrome_ring: u32 = 0x20;
+/// M37 DQ2 (issue #840): the tab-strip element — a tab bar row below the
+/// title bar on windows with attached tabs (titles + active highlight +
+/// hover + per-tab close geometry; clicks are DQ3). Colors reuse the
+/// frozen descriptor fields (no struct change): trough = unfocus, cell =
+/// title_bg, active underline = ring, text = title_fg, close = close.
+pub const chrome_tab_bar: u32 = 0x40;
 /// Every element bit that exists (the mask valid kinds are checked
 /// against; reserved bits are refused).
-pub const chrome_kind_all: u32 = 0x3f;
+pub const chrome_kind_all: u32 = 0x7f;
 
 /// Per-window flag bits.
 pub const chrome_flag_focus_accent: u32 = 0x01;
@@ -438,7 +444,7 @@ pub fn chrome_valid(d: ChromeDesc) bool {
 /// against.
 pub fn chrome_parity_policy() ChromeDesc {
     return .{
-        .kind = chrome_border | chrome_title | chrome_close | chrome_minimize | chrome_pin | chrome_ring,
+        .kind = chrome_border | chrome_title | chrome_close | chrome_minimize | chrome_pin | chrome_ring | chrome_tab_bar,
         .flags = chrome_flag_focus_accent,
         .border_rgb = 0x0c1826,
         .border_unfocus_rgb = 0x475569,
@@ -503,7 +509,10 @@ pub fn tab_item_rect(win_x: u32, win_y: u32, win_w: u32, tab_idx: usize, total_t
     return .{
         .x = tab_x,
         .y = win_y,
-        .w = @min(tab_w, win_x + win_w - tab_x),
+        // DQ2: saturating tail — narrow windows with many tabs clip the
+        // last cells to zero instead of underflowing (this rule was dead
+        // until the strip paint called it; the old plain subtract trapped).
+        .w = @min(tab_w, (win_x + win_w) -| tab_x),
         .h = tab_bar_height,
     };
 }
@@ -531,6 +540,57 @@ pub fn cycle_next_tab(tabs: []const TabItem, current_window_id: u8) ?u8 {
         }
     }
     return first_id;
+}
+
+// ---------------------------------------------------------------------------
+// M37 DQ2 (issue #840) — tab-strip chrome geometry. The strip is one
+// tab_bar_height row directly BELOW the title band (which owns
+// w.y..w.y+title_bar_h; apps already keep client content below it), so the
+// strip extends the chrome zone instead of moving the title. Paint lives in
+// driving_award.draw_chrome (kernel blits WM-decided chrome); hit-testing
+// in DQ3 routes through tab_item_rect + tab_rect_contains.
+/// Strip rect for a window at (win_x, win_y) of width win_w.
+pub fn tab_strip_rect(win_x: u32, win_y: u32, win_w: u32) TabRect {
+    return .{ .x = win_x, .y = win_y + title_bar_h, .w = win_w, .h = tab_bar_height };
+}
+
+/// Per-tab title layout inside a cell of width tab_w: same truncation
+/// shape as chrome_title_layout, reserving the per-tab close glyph + pads
+/// instead of the title-bar buttons.
+pub fn tab_title_layout(tab_w: usize, label_len: usize) TitleLayout {
+    const close_reserve: usize = 14;
+    const min_pad: usize = 4;
+    const usable = if (tab_w > close_reserve + min_pad) tab_w - close_reserve else tab_w;
+    const max_chars = usable / 8;
+    var draw_len = label_len;
+    var truncated = false;
+    if (draw_len > max_chars and max_chars >= 4) {
+        draw_len = max_chars - 3;
+        truncated = true;
+    } else if (draw_len > max_chars) {
+        draw_len = max_chars;
+        truncated = true;
+    }
+    return .{ .x_off = min_pad, .draw_len = draw_len, .truncated = truncated };
+}
+
+/// Close-box rect at the right end of a tab cell (12×12, vertically
+/// centered) — geometry now, clicks in DQ3.
+pub fn tab_close_rect(tab: TabRect) TabRect {
+    const s: u32 = 12;
+    const w = @min(s, tab.w);
+    const h = @min(s, tab.h);
+    return .{
+        .x = tab.x + tab.w - w,
+        .y = tab.y + (tab.h - h) / 2,
+        .w = w,
+        .h = h,
+    };
+}
+
+/// Point-in-rect for strip hit-testing (DQ3's click routing proves it).
+pub fn tab_rect_contains(r: TabRect, x: u32, y: u32) bool {
+    return x >= r.x and x < r.x + r.w and y >= r.y and y < r.y + r.h;
 }
 
 // ---------------------------------------------------------------------------
@@ -642,9 +702,9 @@ test "wnd_core: chrome descriptor validity refuses unknown kind/flags and zero k
     var d = p;
     d.kind = 0;
     try std.testing.expect(!chrome_valid(d));
-    // Reserved kind bit (0x40) is refused.
+    // Reserved kind bit (0x80) is refused (0x40 is the DQ2 tab bar).
     d = p;
-    d.kind = chrome_kind_all | 0x40;
+    d.kind = chrome_kind_all | 0x80;
     try std.testing.expect(!chrome_kind_valid(d.kind));
     try std.testing.expect(!chrome_valid(d));
     // Reserved flag bit (0x2) is refused.
@@ -665,6 +725,8 @@ test "wnd_core: chrome descriptor validity refuses unknown kind/flags and zero k
     d.kind = chrome_pin;
     try std.testing.expect(chrome_valid(d));
     d.kind = chrome_ring;
+    try std.testing.expect(chrome_valid(d));
+    d.kind = chrome_tab_bar;
     try std.testing.expect(chrome_valid(d));
 }
 
@@ -774,4 +836,49 @@ test "wnd_core: tab item layout and cycle rules" {
     try std.testing.expectEqual(@as(?u8, 2), cycle_next_tab(&tabs, 4));
     // Non-tabbed window
     try std.testing.expectEqual(@as(?u8, null), cycle_next_tab(&tabs, 5));
+}
+
+test "wnd_core: DQ2 tab-strip chrome geometry (strip row, title truncation, close box, hit-test)" {
+    // Strip sits exactly one title band below the window top, full width.
+    const strip = tab_strip_rect(100, 200, 400);
+    try std.testing.expectEqual(@as(u32, 100), strip.x);
+    try std.testing.expectEqual(@as(u32, 200 + title_bar_h), strip.y);
+    try std.testing.expectEqual(@as(u32, 400), strip.w);
+    try std.testing.expectEqual(@as(u32, tab_bar_height), strip.h);
+
+    // Cells tile the strip via the shared tab_item_rect (strip origin).
+    const c0 = tab_item_rect(strip.x, strip.y, strip.w, 0, 2);
+    const c1 = tab_item_rect(strip.x, strip.y, strip.w, 1, 2);
+    try std.testing.expectEqual(@as(u32, 100), c0.x);
+    try std.testing.expectEqual(@as(u32, 300), c1.x);
+    try std.testing.expectEqual(@as(u32, 200), c0.w);
+    try std.testing.expectEqual(@as(u32, 216), c0.y); // 200 + title_bar_h(16)
+
+    // Narrow window: cells clamp to 48px min and clip at the right edge.
+    const n0 = tab_item_rect(0, 16, 100, 0, 4);
+    const n3 = tab_item_rect(0, 16, 100, 3, 4);
+    try std.testing.expectEqual(@as(u32, 48), n0.w);
+    try std.testing.expectEqual(@as(u32, 0), n3.w); // saturating tail clip
+
+    // Title truncation reserves the close glyph: wide fits, narrow clips.
+    const wt = tab_title_layout(200, 10);
+    try std.testing.expect(!wt.truncated);
+    try std.testing.expectEqual(@as(usize, 10), wt.draw_len);
+    const nt = tab_title_layout(60, 20);
+    try std.testing.expect(nt.truncated);
+    try std.testing.expect(nt.draw_len < 20);
+
+    // Close box: right-aligned inside the cell, 12x12.
+    const cb = tab_close_rect(c0);
+    try std.testing.expectEqual(@as(u32, 12), cb.w);
+    try std.testing.expectEqual(@as(u32, 12), cb.h);
+    try std.testing.expectEqual(c0.x + c0.w - 12, cb.x);
+    try std.testing.expect(cb.y >= c0.y and cb.y + cb.h <= c0.y + c0.h);
+
+    // Hit-test: edges exclusive on the far side, inclusive on the near.
+    try std.testing.expect(tab_rect_contains(c0, 100, 216));
+    try std.testing.expect(tab_rect_contains(c0, 299, 237));
+    try std.testing.expect(!tab_rect_contains(c0, 300, 216)); // next cell
+    try std.testing.expect(!tab_rect_contains(c0, 100, 238)); // below strip
+    try std.testing.expect(!tab_rect_contains(c0, 99, 216)); // left of strip
 }

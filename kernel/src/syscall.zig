@@ -2760,6 +2760,9 @@ fn handle_wmctl(args: Args, _: *exceptions.VectorFrame) u64 {
             if (child_id > 0xff or parent_id > 0xff or child_id == parent_id) return error_result(.einval);
             if (child_id == wnd_core.chrome_window_all or parent_id == wnd_core.chrome_window_all) return error_result(.einval);
             wm_server.note_tab_attach();
+            // M37 DQ2 (issue #840): mirror the validated grouping fact for
+            // the strip paint (facts, not policy — the WM still decides).
+            driving_award.note_tab_attach(@truncate(child_id), @truncate(parent_id));
             return 0;
         },
         wm_server.wmctl_detach_tab => {
@@ -2769,6 +2772,8 @@ fn handle_wmctl(args: Args, _: *exceptions.VectorFrame) u64 {
             const child_id = args[1];
             if (child_id > 0xff or child_id == wnd_core.chrome_window_all) return error_result(.einval);
             wm_server.note_tab_detach();
+            // M37 DQ2 (issue #840): mirror the detach (see attach above).
+            driving_award.note_tab_detach(@truncate(child_id));
             return 0;
         },
         wm_server.wmctl_activate_tab => {
@@ -4378,7 +4383,7 @@ test "syscall: sys_wmctl (slot 65) enforces the render-server register contract"
     // Broadcast (ALL): accepted, the policy is stored, submissions counted.
     try std.testing.expectEqual(@as(u64, 0), dispatch(sys_wmctl, .{ wm_server.wmctl_set_window, wnd_core.chrome_window_all, 0, 0, desc_ptr, wnd_core.chrome_desc_bytes }, &frame));
     try std.testing.expectEqual(@as(u64, 1), wm_server.info().set_window_count);
-    try std.testing.expectEqual(@as(u32, 0x3f), driving_award.wm_chrome_policy_kind());
+    try std.testing.expectEqual(@as(u32, 0x7f), driving_award.wm_chrome_policy_kind());
     // Per-window id with no such window -> EINVAL (the broadcast always
     // succeeds; a specific id must exist).
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_wmctl, .{ wm_server.wmctl_set_window, 7, 0, 0, desc_ptr, wnd_core.chrome_desc_bytes }, &frame));
@@ -4388,7 +4393,7 @@ test "syscall: sys_wmctl (slot 65) enforces the render-server register contract"
     // rect on the broadcast -> EINVAL (geometry is per-window).
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_wmctl, .{ wm_server.wmctl_set_window, wnd_core.chrome_window_all, 1, 0, desc_ptr, wnd_core.chrome_desc_bytes }, &frame));
     // Unknown kind bit -> EINVAL (the single wnd_core refusal rule).
-    const bad = wnd_core.ChromeDesc{ .kind = wnd_core.chrome_kind_all | 0x40, .flags = 0, .border_rgb = 0, .border_unfocus_rgb = 0, .title_bg_rgb = 0, .title_fg_rgb = 0, .ring_rgb = 0, .close_rgb = 0, .min_rgb = 0, .pin_rgb = 0 };
+    const bad = wnd_core.ChromeDesc{ .kind = wnd_core.chrome_kind_all | 0x80, .flags = 0, .border_rgb = 0, .border_unfocus_rgb = 0, .title_bg_rgb = 0, .title_fg_rgb = 0, .ring_rgb = 0, .close_rgb = 0, .min_rgb = 0, .pin_rgb = 0 };
     const bad_ptr = @intFromPtr(&bad);
     set_user_regions(.{ .base = bad_ptr, .len = wnd_core.chrome_desc_bytes }, .{ .base = 0, .len = 0 });
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_wmctl, .{ wm_server.wmctl_set_window, wnd_core.chrome_window_all, 0, 0, bad_ptr, wnd_core.chrome_desc_bytes }, &frame));
@@ -4818,6 +4823,12 @@ test "syscall: sys_wmctl tab subcommands (cmd 18/19/20, issue #782) validate IDs
     // Valid detach: tab 2
     try std.testing.expectEqual(@as(u64, 0), dispatch(sys_wmctl, .{ wm_server.wmctl_detach_tab, 2, 0, 0, 0, 0 }, &frame));
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_wmctl, .{ wm_server.wmctl_detach_tab, 0x100, 0, 0, 0, 0 }, &frame));
+
+    // M37 DQ2 (issue #840): the recording hooks mirror validated calls
+    // into driving_award without changing validation — unknown ids are
+    // defensive no-ops (no phantom grouping state).
+    try std.testing.expectEqual(@as(u8, 0), driving_award.tab_parent_of(2));
+    try std.testing.expectEqual(@as(u8, 0), driving_award.tab_parent_of(3));
 
     // Teardown
     try std.testing.expect(wm_server.unregister(0));
