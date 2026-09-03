@@ -221,6 +221,13 @@ pub const Window = struct {
     /// filename.txt (*)" plus room.
     title_buf: [64]u8 = [_]u8{0} ** 64,
     title_len: u8 = 0,
+    /// M37 DQ2 (issue #840): tab-group fact mirrored from the WM's
+    /// validated ATTACH_TAB/DETACH_TAB calls (the WM owns grouping and
+    /// layout; the kernel records which container a window is attached to
+    /// so draw_chrome can paint the strip — facts, not policy, exactly
+    /// like the tooltip text the WM pushes for the kernel to blit).
+    /// 0 = standalone/container. Orphans reset here on close.
+    tab_parent: u8 = 0,
     /// M32 WMS4 (issue #624): the WM server's chrome descriptor for THIS
     /// window (a per-window SET_WINDOW override). When invalid, the draw
     /// path falls back to the broadcast policy, then to the shim's own
@@ -1746,6 +1753,12 @@ fn remove_user_at(idx: usize) void {
     var j = idx;
     while (j + 1 < win_count) : (j += 1) windows[j] = windows[j + 1];
     win_count -= 1;
+    // M37 DQ2 (issue #840): a closed container orphans its tabs — attached
+    // children become standalone rather than pointing at a dead parent.
+    var k: usize = 0;
+    while (k < win_count) : (k += 1) {
+        if (windows[k].tab_parent == removed_id) windows[k].tab_parent = 0;
+    }
     if (focused_id == removed_id) {
         focused_id = 0; // fall back to the terminal
     }
@@ -3577,6 +3590,54 @@ pub fn wm_chrome_kind(id: u8) u32 {
 /// effective last chrome kind (its override, else the policy, else 0).
 pub const ChromeRow = struct { id: u8, kind: u32 };
 
+// ---------------------------------------------------------------------------
+// M37 DQ2 (issue #840) — tab-group facts for the strip paint. The WM
+// decides grouping via validated ATTACH_TAB/DETACH_TAB; the kernel mirrors
+// the facts here (parent id per window) so draw_chrome can paint the
+// strip. Unknown ids are no-ops (the syscall layer validated already).
+// ---------------------------------------------------------------------------
+
+/// Record a validated attach (child → parent). Pure registry write.
+pub fn note_tab_attach(child_id: u8, parent_id: u8) void {
+    if (find_user_window(child_id)) |cm| cm.tab_parent = parent_id;
+}
+
+/// Record a validated detach (child → standalone). Pure registry write.
+pub fn note_tab_detach(child_id: u8) void {
+    if (find_user_window(child_id)) |cm| cm.tab_parent = 0;
+}
+
+/// The recorded parent of a window (0 = standalone / unknown). Pure.
+pub fn tab_parent_of(id: u8) u8 {
+    if (find_user_window(id)) |w| return w.tab_parent;
+    return 0;
+}
+
+/// Count windows attached to `parent_id`. Pure over the registry.
+pub fn tab_group_count(parent_id: u8) usize {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < win_count) : (i += 1) {
+        if (windows[i].kind != .user) continue;
+        if (windows[i].tab_parent == parent_id) n += 1;
+    }
+    return n;
+}
+
+/// Fill `out` with the ids attached to `parent_id`, in registry order.
+/// Returns the count written. Pure over the registry.
+pub fn tab_group_members(parent_id: u8, out: []u8) usize {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < win_count and n < out.len) : (i += 1) {
+        if (windows[i].kind != .user) continue;
+        if (windows[i].tab_parent != parent_id) continue;
+        out[n] = windows[i].id;
+        n += 1;
+    }
+    return n;
+}
+
 /// Fill `rows` with one ChromeRow per user window in registry order.
 /// Returns the count written. Pure over the registry.
 pub fn wm_chrome_rows(rows: *[max_windows]ChromeRow) usize {
@@ -3590,6 +3651,132 @@ pub fn wm_chrome_rows(rows: *[max_windows]ChromeRow) usize {
         n += 1;
     }
     return n;
+}
+
+// ---------------------------------------------------------------------------
+// M37 DQ2 (issue #840) — tab-strip paint. Called from draw_chrome for a
+// container window with attached tabs when its chrome enables
+// chrome_tab_bar. Trough + cells from the shared tab_item_rect geometry
+// (the SAME rule DQ3 hit-tests, so pixels and clicks cannot drift).
+// Titles from window title_buf with the title-bar "dui{id}" fallback;
+// active = focused member (fallback: visible member); hover = cursor
+// geometry (no policy). All fills clamped to the scanout (put_px has no
+// bounds check); text/glyphs guarded per-cell.
+// ---------------------------------------------------------------------------
+
+/// Scanout-clamped fill (put_px writes blind — every strip fill routes here).
+fn strip_fill(fb: [*]u8, stride: usize, x: u32, y: u32, w: u32, h: u32, rgb: u32, wspan: usize, hspan: usize) void {
+    if (w == 0 or h == 0) return;
+    if (x >= wspan or y >= hspan) return;
+    const cw: usize = @min(@as(usize, w), wspan - x);
+    const chh: usize = @min(@as(usize, h), hspan - y);
+    fill_rect(fb, stride, x, y, cw, chh, rgb);
+}
+
+/// Guarded 8x16 text draw (drops glyphs that would leave the scanout).
+fn strip_text(fb: [*]u8, stride: usize, x: u32, y: u32, s: []const u8, rgb: u32, wspan: usize, hspan: usize) void {
+    if (y + 16 > hspan) return;
+    for (s, 0..) |c, i| {
+        const gx = x + @as(u32, @intCast(i)) * 8;
+        if (gx + 8 > wspan) break;
+        draw_glyph_16(fb, stride, gx, y, c, rgb);
+    }
+}
+
+/// Guarded 8x8 glyph draw.
+fn strip_glyph(fb: [*]u8, stride: usize, x: u32, y: u32, c: u8, rgb: u32, wspan: usize, hspan: usize) void {
+    if (x + 8 > wspan or y + 8 > hspan) return;
+    draw_glyph(fb, stride, x, y, c, rgb);
+}
+
+fn paint_tab_strip(fb: [*]u8, stride: usize, w: *const Window, ch: *const geom.ChromeDesc, wspan: usize, hspan: usize) void {
+    // Collect the group: container first, then attached children in order.
+    var members: [max_windows]u8 = undefined;
+    var mcount: usize = 0;
+    members[0] = w.id;
+    mcount = 1;
+    var mbuf: [max_windows]u8 = undefined;
+    const cn = tab_group_members(w.id, &mbuf);
+    var ci: usize = 0;
+    while (ci < cn and mcount < members.len) : (ci += 1) {
+        members[mcount] = mbuf[ci];
+        mcount += 1;
+    }
+    if (mcount < 2) return; // no attached tabs — nothing to paint
+
+    const strip = geom.tab_strip_rect(w.x, w.y, w.w);
+    strip_fill(fb, stride, strip.x, strip.y, strip.w, strip.h, ch.border_unfocus_rgb, wspan, hspan);
+
+    // Active member: the focused one; fallback: the first visible one.
+    var active_id: u8 = 0xff;
+    var mi: usize = 0;
+    while (mi < mcount) : (mi += 1) {
+        if (members[mi] == focused_id) {
+            active_id = members[mi];
+            break;
+        }
+    }
+    if (active_id == 0xff) {
+        mi = 0;
+        while (mi < mcount) : (mi += 1) {
+            if (find_user_window(members[mi])) |mw| {
+                if (mw.visible) {
+                    active_id = members[mi];
+                    break;
+                }
+            }
+        }
+    }
+
+    mi = 0;
+    while (mi < mcount) : (mi += 1) {
+        const id = members[mi];
+        const cell = geom.tab_item_rect(strip.x, strip.y, strip.w, mi, mcount);
+        if (cell.w == 0) continue;
+        const is_active = id == active_id;
+        // Cell interior leaves a 1px trough divider on its left (the
+        // shared rect still tiles fully — DQ3 hit-tests the full cell).
+        if (cell.w > 1) strip_fill(fb, stride, cell.x + 1, cell.y, cell.w - 1, cell.h, ch.title_bg_rgb, wspan, hspan);
+        if (is_active) {
+            // Active underline: 2px accent at the cell bottom.
+            if (cell.h >= 2) strip_fill(fb, stride, cell.x, cell.y + cell.h - 2, cell.w, 2, ch.ring_rgb, wspan, hspan);
+        } else if (cursor_shown and geom.tab_rect_contains(cell, cursor_x, cursor_y)) {
+            // Hover outline: 1px border on the cell edges.
+            strip_fill(fb, stride, cell.x, cell.y, cell.w, 1, ch.border_rgb, wspan, hspan);
+            if (cell.h >= 1) strip_fill(fb, stride, cell.x, cell.y + cell.h - 1, cell.w, 1, ch.border_rgb, wspan, hspan);
+            strip_fill(fb, stride, cell.x, cell.y, 1, cell.h, ch.border_rgb, wspan, hspan);
+            if (cell.w >= 1) strip_fill(fb, stride, cell.x + cell.w - 1, cell.y, 1, cell.h, ch.border_rgb, wspan, hspan);
+        }
+        // Title: window title_buf, else the title-bar "dui{id}" fallback.
+        var tb: [24]u8 = undefined;
+        var n: usize = 0;
+        if (find_user_window(id)) |mw| {
+            if (mw.title_len > 0) {
+                n = @min(@as(usize, mw.title_len), tb.len);
+                @memcpy(tb[0..n], mw.title_buf[0..n]);
+            }
+        }
+        if (n == 0) {
+            @memcpy(tb[0..3], "dui");
+            n = 3;
+            const idstr = fmt_decimal(tb[n..], id);
+            n += idstr.len;
+        }
+        const lay = geom.tab_title_layout(@as(usize, cell.w), n);
+        const tx = cell.x + @as(u32, @intCast(lay.x_off));
+        const ty = cell.y + 3;
+        if (!lay.truncated) {
+            strip_text(fb, stride, tx, ty, tb[0..lay.draw_len], ch.title_fg_rgb, wspan, hspan);
+        } else {
+            var tt: [24]u8 = undefined;
+            @memcpy(tt[0..lay.draw_len], tb[0..lay.draw_len]);
+            @memcpy(tt[lay.draw_len..][0..3], "...");
+            strip_text(fb, stride, tx, ty, tt[0 .. lay.draw_len + 3], ch.title_fg_rgb, wspan, hspan);
+        }
+        // Per-tab close glyph (geometry only — DQ3 wires the click).
+        const cb = geom.tab_close_rect(cell);
+        strip_glyph(fb, stride, cb.x + 2, cb.y + 2, 'x', ch.close_rgb, wspan, hspan);
+    }
 }
 
 /// The chrome decision for a window: its per-window override, else the
@@ -3691,6 +3878,12 @@ fn draw_chrome() void {
         // M21 W8: pin indicator for always-on-top windows ("*" — cyan glyph left of minimize).
         if (ch.kind & geom.chrome_pin != 0 and w.always_on_top and w.w >= 50) {
             draw_glyph(fb, stride, w.x + w.w - 38, w.y + 4, '*', ch.pin_rgb);
+        }
+        // M37 DQ2 (issue #840): tab strip on containers with attached tabs.
+        // Containers only (children paint no strip of their own); hidden
+        // groups never reach here (invisible windows skip above).
+        if (ch.kind & geom.chrome_tab_bar != 0 and w.tab_parent == 0 and tab_group_count(w.id) > 0) {
+            paint_tab_strip(fb, stride, w, &ch, wspan, hspan);
         }
     }
     // The focus ring: on the focused window's rect (D4 — focus is always
@@ -4213,6 +4406,37 @@ test "driving_award: asymmetric C glyph is LSB-first" {
     try std.testing.expectEqual(@as(u8, 0x00), buf[(2 * W + 7) * 4]);
 }
 
+test "driving_award: DQ2 tab-group facts (attach/detach/collect/orphan-clear)" {
+    arm();
+    const o2 = user_open(64, 64, 512, 384, 7);
+    const o3 = user_open(700, 64, 320, 240, 7);
+    try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, o2);
+    try std.testing.expectEqual(UserOpenResult{ .opened = 3 }, o3);
+    // Standalone by default.
+    try std.testing.expectEqual(@as(u8, 0), tab_parent_of(2));
+    try std.testing.expectEqual(@as(usize, 0), tab_group_count(2));
+    // Unknown ids are no-ops, never traps.
+    note_tab_attach(99, 2);
+    note_tab_detach(99);
+    try std.testing.expectEqual(@as(u8, 0), tab_parent_of(99));
+    // Attach + collect.
+    note_tab_attach(3, 2);
+    try std.testing.expectEqual(@as(u8, 2), tab_parent_of(3));
+    try std.testing.expectEqual(@as(u8, 0), tab_parent_of(2));
+    try std.testing.expectEqual(@as(usize, 1), tab_group_count(2));
+    var members: [max_windows]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 1), tab_group_members(2, &members));
+    try std.testing.expectEqual(@as(u8, 3), members[0]);
+    // Detach back to standalone.
+    note_tab_detach(3);
+    try std.testing.expectEqual(@as(u8, 0), tab_parent_of(3));
+    try std.testing.expectEqual(@as(usize, 0), tab_group_count(2));
+    // Closing the container orphans children to standalone.
+    note_tab_attach(3, 2);
+    try std.testing.expect(user_close(2));
+    try std.testing.expectEqual(@as(u8, 0), tab_parent_of(3));
+}
+
 test "driving_award: the full 95-glyph table rasters LSB-first through draw_glyph (issue 125)" {
     // Render EVERY printable glyph through the window-manager raster into
     // an 8x8 buffer and assert all 64 pixels against the RAW table byte
@@ -4422,8 +4646,8 @@ test "driving_award: WMS4 SET_WINDOW chrome policy + per-window overrides (issue
     // Broadcast policy (a0 = ALL): every window falls back to it.
     const p = geom.chrome_parity_policy();
     try std.testing.expect(set_window_chrome(geom.chrome_window_all, p));
-    try std.testing.expectEqual(@as(u32, 0x3f), wm_chrome_policy_kind());
-    try std.testing.expectEqual(@as(u32, 0x3f), wm_chrome_kind(2));
+    try std.testing.expectEqual(@as(u32, 0x7f), wm_chrome_policy_kind());
+    try std.testing.expectEqual(@as(u32, 0x7f), wm_chrome_kind(2));
     // Per-window override: a custom kind for window 2 only.
     var custom = p;
     custom.kind = geom.chrome_border | geom.chrome_title; // minimal chrome

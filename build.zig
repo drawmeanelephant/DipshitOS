@@ -1844,6 +1844,32 @@ pub fn build(b: *std.Build) void {
     sexitest_step.dependOn(&install_sexitest.step);
     b.getInstallStep().dependOn(&install_sexitest.step);
 
+    // TABHOLD.BIN. M37 DQ2 (issue #840) tab-strip live-gate holder: opens a
+    // window, attaches it as a tab of window 2, and parks holding the
+    // attachment so the gate can snapshot the painted strip (rides
+    // zig-out/bin into the gate share; no image change).
+    const tabhold_mod = b.createModule(.{
+        .root_source_file = b.path("user/src/tabhold.zig"),
+        .target = kernel_target,
+        .optimize = .ReleaseSmall,
+    });
+    tabhold_mod.addAnonymousImport("wnd_core", .{ .root_source_file = b.path("kernel/src/wnd_core.zig") });
+    const tabhold_prog = b.addExecutable(.{
+        .name = "user-tabhold",
+        .root_module = tabhold_mod,
+    });
+    tabhold_prog.linker_script = b.path("user/linker.ld");
+    const tabhold_step = b.step("tabhold", "Build the DQ2 tab-strip holder program (zig-out/bin/TABHOLD.BIN)");
+    const tabhold_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    tabhold_elf2bin.addFileArg(tabhold_prog.getEmittedBin());
+    const tabhold_bin = tabhold_elf2bin.addOutputFileArg("TABHOLD.BIN");
+    tabhold_elf2bin.has_side_effects = true;
+    tabhold_elf2bin.stdio = .inherit;
+    tabhold_step.dependOn(&tabhold_elf2bin.step);
+    const install_tabhold = b.addInstallFileWithDir(tabhold_bin, .bin, "TABHOLD.BIN");
+    tabhold_step.dependOn(&install_tabhold.step);
+    b.getInstallStep().dependOn(&install_tabhold.step);
+
     // ------------------------------------------------------------------
     // Top-level steps. System-command steps are marked as having side
     // effects (and inherit stdio) so they always execute instead of being
