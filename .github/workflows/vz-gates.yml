@@ -161,7 +161,12 @@ jobs:
             pid=$!
             ( sleep "$GATE_TIMEOUT_SECS" && kill -9 "$pid" 2>/dev/null ) &
             wd=$!
-            wait "$pid"; rc=$?
+            # The runner wraps `shell: bash` steps with an implicit -e, so a
+            # bare `wait "$pid"` aborts the whole step the moment a gate exits
+            # nonzero (rc is never captured, no FAIL line, later gates in the
+            # shard never run). Guard it: capture the gate's rc instead.
+            rc=0
+            wait "$pid" || rc=$?
             kill -9 "$wd" 2>/dev/null || true
             wait "$wd" 2>/dev/null || true
             secs=$((SECONDS - start))
