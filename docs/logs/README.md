@@ -83,17 +83,20 @@ meaningful — on main.
 | agent/buffy/audit-followup-1-gates-docs | [`agent-buffy-audit-followup-1-gates-docs.md`](agent-buffy-audit-followup-1-gates-docs.md) |
 | agent/buffy/audit-followup-2-input-depth | [`agent-buffy-audit-followup-2-input-depth.md`](agent-buffy-audit-followup-2-input-depth.md) |
 | agent/buffy/audit-followup-3-dhcp-autonomy | [`agent-buffy-audit-followup-3-dhcp-autonomy.md`](agent-buffy-audit-followup-3-dhcp-autonomy.md) |
+| agent/buffy/audit-percore-counters | [`agent-buffy-audit-percore-counters.md`](agent-buffy-audit-percore-counters.md) |
 | agent/buffy/docs-pass | [`agent-buffy-docs-pass.md`](agent-buffy-docs-pass.md) |
 | `agent/buffy/fix-728-esp-create-disk-full` | [`agent-buffy-fix-728-esp-create-disk-full.md`](agent-buffy-fix-728-esp-create-disk-full.md) |
 | fix verify-live-args console fresh-line split | [`agent-buffy-fix-args-console-split.md`](agent-buffy-fix-args-console-split.md) |
 | `agent/buffy/fix-boot-fat-geometry` | [`agent-buffy-fix-boot-fat-geometry.md`](agent-buffy-fix-boot-fat-geometry.md) |
 | fix stale desktop manifest-count gate needles | [`agent-buffy-fix-desktop-manifest-count.md`](agent-buffy-fix-desktop-manifest-count.md) |
+| `agent/buffy/flake814-shell-park-stack` | [`agent-buffy-flake814-shell-park-stack.md`](agent-buffy-flake814-shell-park-stack.md) |
 | full-table glyph goldens (issue 125 hardening) | [`agent-buffy-full-table-glyph-goldens.md`](agent-buffy-full-table-glyph-goldens.md) |
 | generalized bit-order mutation gate (claim 1027) | [`agent-buffy-generalized-mutations.md`](agent-buffy-generalized-mutations.md) |
 | issue 125 follow-on: refresh the public site screenshot | [`agent-buffy-glyph-mirror-fix.md`](agent-buffy-glyph-mirror-fix.md) |
 | glyph raster convention gate (claim 9100) | [`agent-buffy-glyph-raster-gate.md`](agent-buffy-glyph-raster-gate.md) |
 | history recall persistence (claim 6344) | [`agent-buffy-history-recall-persistence.md`](agent-buffy-history-recall-persistence.md) |
 | `agent/buffy/hygiene-archive-m5-m6-prompts` | [`agent-buffy-hygiene-archive-m5-m6-prompts.md`](agent-buffy-hygiene-archive-m5-m6-prompts.md) |
+| `agent/buffy/img5-png` | [`agent-buffy-img5-png.md`](agent-buffy-img5-png.md) |
 | `agent/buffy/img5-view` | [`agent-buffy-img5-view.md`](agent-buffy-img5-view.md) |
 | agent/buffy/input-poll-563 | [`agent-buffy-input-poll-563.md`](agent-buffy-input-poll-563.md) |
 | agent/buffy/issue-613-tcp-connect-spin | [`agent-buffy-issue-613-tcp-connect-spin.md`](agent-buffy-issue-613-tcp-connect-spin.md) |
@@ -164,15 +167,19 @@ meaningful — on main.
 | `agent/buffy/fix-810-boot-probe-flake` | [`agent-buffy-m34-hf7-clone-dedup.md`](agent-buffy-m34-hf7-clone-dedup.md) |
 | milestone nine interactive application events (claim 7463) | [`agent-buffy-m9-events.md`](agent-buffy-m9-events.md) |
 | milestone nine tracker (claim 8234) | [`agent-buffy-m9-tracker.md`](agent-buffy-m9-tracker.md) |
+| agent/buffy/percore-scheduler-state | [`agent-buffy-percore-scheduler-state.md`](agent-buffy-percore-scheduler-state.md) |
 | Roadmap refinement (claim 4951) | [`agent-buffy-roadmap-refinement.md`](agent-buffy-roadmap-refinement.md) |
+| agent/buffy/serial-lock-smp-user | [`agent-buffy-serial-lock-smp-user.md`](agent-buffy-serial-lock-smp-user.md) |
 | `agent/buffy/status-compress` | [`agent-buffy-status-compress.md`](agent-buffy-status-compress.md) |
 | agent/buffy/strace-marker-freshline | [`agent-buffy-strace-marker-freshline.md`](agent-buffy-strace-marker-freshline.md) |
+| `agent/buffy/tee-drain-exit` | [`agent-buffy-tee-drain-exit.md`](agent-buffy-tee-drain-exit.md) |
 | agent/buffy/toolchain-env-check | [`agent-buffy-toolchain-env-check.md`](agent-buffy-toolchain-env-check.md) |
 | U4 CG-pointer route follow-on (claim 3692) | [`agent-buffy-u4-pointer-cg.md`](agent-buffy-u4-pointer-cg.md) |
 | U4 real-mouse pointer follow-on (claim 9015) | [`agent-buffy-u4-pointer-classc.md`](agent-buffy-u4-pointer-classc.md) |
 | First-boot experience (claim 8323) | [`agent-buffy-u6-first-boot.md`](agent-buffy-u6-first-boot.md) |
 | sysinfo support snapshot (claim 2990) | [`agent-buffy-u7-sysinfo.md`](agent-buffy-u7-sysinfo.md) |
 | persistent settings (claim 2649) | [`agent-buffy-u8-persistent-settings.md`](agent-buffy-u8-persistent-settings.md) |
+| `agent/buffy/vm-teardown-tail` | [`agent-buffy-vm-teardown-tail.md`](agent-buffy-vm-teardown-tail.md) |
 | `agent/buffy/vz-gates-in-ci` | [`agent-buffy-vz-gates-in-ci.md`](agent-buffy-vz-gates-in-ci.md) |
 | agent/buffy/wms10-split-adr | [`agent-buffy-wms10-split-adr.md`](agent-buffy-wms10-split-adr.md) |
 | agent/buffy/wms2-wmctl-register | [`agent-buffy-wms2-wmctl-register.md`](agent-buffy-wms2-wmctl-register.md) |
@@ -197,6 +204,8 @@ meaningful — on main.
 | `agent/buffy/wms8-unsaved-drain` | [`agent-buffy-wms8-unsaved-drain.md`](agent-buffy-wms8-unsaved-drain.md) |
 | agent/buffy/wms9-dsk1-drawing-apps (WMS9/DSK1 drawing-app fix) | [`agent-buffy-wms9-dsk1-drawing-apps.md`](agent-buffy-wms9-dsk1-drawing-apps.md) |
 | agent/buffy/wms9-surface-seam-perf | [`agent-buffy-wms9-surface-seam-perf.md`](agent-buffy-wms9-surface-seam-perf.md) |
+| agent/buffy/z1f-enums | [`agent-buffy-z1f-enums.md`](agent-buffy-z1f-enums.md) |
+| agent/buffy/z2a-heap | [`agent-buffy-z2a-heap.md`](agent-buffy-z2a-heap.md) |
 | m35-rust-author-proof: cross-language author proof (virelai.zig shim + rustc nl app) | [`agent-buffy2-m35-rust-author-proof.md`](agent-buffy2-m35-rust-author-proof.md) |
 | M35 W4 core completeness: f32/f64, sign-extension proof, bulk-memory gated (issue #765) | [`agent-buffy2-m35-w4-core-completeness.md`](agent-buffy2-m35-w4-core-completeness.md) |
 | M35 W5 — the ecosystem capstone: wc (issue #766) | [`agent-buffy2-m35-w5-wc-capstone.md`](agent-buffy2-m35-w5-wc-capstone.md) |
@@ -215,6 +224,8 @@ meaningful — on main.
 | `agent/oxalpha/m20-text-unicode` | [`agent-oxalpha-m20-text-unicode.md`](agent-oxalpha-m20-text-unicode.md) |
 | t3code/c259b00a (cvc-echo host-push spike) | [`agent-t3code-c259b00a-cvc-echo.md`](agent-t3code-c259b00a-cvc-echo.md) |
 | agent/t3code/dq1-godmenu | [`agent-t3code-dq1-godmenu.md`](agent-t3code-dq1-godmenu.md) |
+| agent/t3code/dq2-tab-chrome | [`agent-t3code-dq2-tab-chrome.md`](agent-t3code-dq2-tab-chrome.md) |
+| agent/t3code/dq3-tab-interact | [`agent-t3code-dq3-tab-interact.md`](agent-t3code-dq3-tab-interact.md) |
 | agent/t3code/m27-doc-sync | [`agent-t3code-m27-doc-sync.md`](agent-t3code-m27-doc-sync.md) |
 | agent/virtio virtio-input-channel | [`agent-virtio-virtio-input-channel.md`](agent-virtio-virtio-input-channel.md) |
 | agent/zcode/m26-net-offline-preflight | [`agent-zcode-m26-net-offline-preflight.md`](agent-zcode-m26-net-offline-preflight.md) |
