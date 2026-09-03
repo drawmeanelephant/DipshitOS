@@ -15,7 +15,7 @@
 - **Depends on:** claim 4912 (the script-expect tail window) — this branch
   is off origin/main, which includes it.
 - **Heartbeat:** 2026-09-03 — update while Status is 🔄 so staleness checks see life
-- **Status:** 🔄 agent/buffy/tee-drain-exit
+- **Status:** ✅
 
 ## Notes
 
@@ -34,25 +34,49 @@ log before teardown, but the process exit itself still races the tee:
   pipe write end never closes and the tee never sees EOF — the sleep is
   the only thing between the tee and `exit()`.
 
-### Fix
+### Fix (final design)
 
-- `startGuestOutputTee()` enters a `DispatchGroup` (`teeGroup`) and leaves
-  it when the pipe read hits EOF (after `synchronize()`), i.e. exactly
-  when the tee has flushed everything it received.
-- `drainTeeBeforeExit(_:timeout:)` — bounded (3 s) wait on the group; no-op
-  in evidence mode (no duplex pipe: VZ writes the serial log directly).
+**Observed during verification:** pipe EOF never arrives at stop time — VZ
+keeps its copy of the pipe's write end open until the process exits, so a
+wait-for-EOF drain can only time out (every first-draft run warned). The
+tee therefore stops on a REQUEST, not on EOF:
+
+- `startGuestOutputTee()` runs a `poll()` loop (200 ms cadence) with
+  `O_NONBLOCK` reads; entering the tee `enter()`s a `DispatchGroup`.
+- `drainTeeBeforeExit(_:timeout:)` — called only AFTER `vm.stop` has
+  completed (so every guest byte VZ will deliver is already in the pipe):
+  it sets the stop-request flag (NSLock-guarded), then waits on the group
+  (3 s bound). The tee notices the flag within one poll cycle, drains the
+  pipe to empty, `synchronize()`s the log, and leaves the group.
 - `finish()` drains inside the `vm.stop` completion, before the NVRAM reads
   and `exit()`.
 - Console exits are unified behind `beginConsoleExit` / `stopAndDrainForExit`
   (single-teardown flag so a second signal or a signal-vs-timeout race
-  cannot double-stop or double-exit): every path stops the VM if needed
-  (closing the serial pipe), then drains the tee, then restores the
-  terminal and exits. The fixed 0.4/0.5 s sleeps are gone.
+  cannot double-stop or double-exit): every path stops the VM if needed,
+  then drains the tee, then restores the terminal and exits. The fixed
+  0.4/0.5 s sleeps are gone. The signal branch is explicit (`restore:`
+  parameter — a `hasPrefix("signal")` check never matched
+  "caught signal N" and was caught in verification).
+
+Evidence mode (no duplex pipe — VZ writes the serial log directly) has no
+tee, so the drain is a structural no-op there; `finish()` still calls it
+uniformly.
 
 ### Verification
 
 - Class A: `swift build --package-path host/vm-runner --configuration
   release -Xswiftc -DSPIKE` clean.
-- Class B: re-run `verify-live-crash-viewer` and
-  `verify-live-image-viewer` on real VZ (script-mode `finish()` path with a
-  live tee) and confirm rc=0 and full serial tails.
+- Class B (real VZ, 2026-09-03):
+  - Console timeout path (`--console --timeout 45`, stdin `/dev/null`):
+    RC=0, exit message + device-stop, **zero** drain warnings.
+  - Console SIGTERM path (group-delivered like the CI teardown):
+    `console: caught signal 15 — terminal restored, draining guest
+    output, exiting` → device stop → drain clean (zero warnings) → exit.
+    (SIGINT to a bash-backgrounded child is born-ignored — a harness
+    artifact of Dispatch signal sources, unchanged from the pre-existing
+    handler.)
+  - `verify-live-crash-viewer` PASS rc=0 and `verify-live-image-viewer`
+    PASS 2/2 — and the claim-2188 drain warnings that every run printed
+    with the first-draft EOF design are gone (0 in all gate run logs;
+    the tee now drains on request instead of waiting for an EOF that
+    never comes).
