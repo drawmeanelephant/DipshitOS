@@ -159,18 +159,44 @@ pub fn is_from_el0(spsr: u64) bool {
     return (spsr & 0xf) == 0;
 }
 
+/// Per-core count for the staged resume seam. Mirrors `smp.max_cores`; a
+/// direct import would cycle (smp.zig imports this module for
+/// `install`/`irq_unmask`).
+pub const max_resume_cores: usize = 4;
+
+/// Local core index for the per-core resume seam (0 on host tests;
+/// clamped like `smp.core_id`).
+fn resume_core() usize {
+    if (comptime builtin.is_test or builtin.cpu.arch != .aarch64) return 0;
+    var mpidr: u64 = 0;
+    asm volatile ("mrs %[v], mpidr_el1"
+        : [v] "=r" (mpidr),
+    );
+    const aff0: usize = @intCast(mpidr & 0xff);
+    return if (aff0 < max_resume_cores) aff0 else 0;
+}
+
 /// The vector-frame pointer the IRQ stub must restore from when the
-/// dispatcher chain returns (claim 5275). Set to the interrupted task's
-/// frame at IRQ entry; the scheduler may rewrite it to the next task's
-/// frame, and the stub's `mov sp, x0` + register restore + `eret` then
-/// lands in that task as if IT had been interrupted. Meaningful only in
-/// IRQ context.
-pub var resume_frame: u64 = 0;
+/// dispatcher chain returns (claim 5275). PER-CORE (issue #820 family):
+/// set to the interrupted task's frame at IRQ entry on the local core; the
+/// scheduler may rewrite it to the next task's frame, and the stub's
+/// `mov sp, x0` + register restore + `eret` then lands in that task as if
+/// IT had been interrupted. A single global was corrupted two ways: (a)
+/// same-EL IRQ nesting — AArch64 same-EL exception entry leaves
+/// PSTATE.DAIF unchanged and the vector stubs never masked IRQ, so a timer
+/// IRQ taken inside the tick handler overwrote the outer frame and the
+/// outer handler saved/restored the nested mid-handler frame (a task
+/// resumed holding the GIC/timer handler's register image — the
+/// x23=0x1e/x26=0x10040080 crash family); (b) on SMP, core 1's exception
+/// entry unconditionally overwrote core 0's staged frame mid-handler.
+/// Meaningful only in IRQ context, on the local core.
+pub var resume_frame: [max_resume_cores]u64 = [_]u64{0} ** max_resume_cores;
 
 /// SP_EL0 to install before the vector stub restores registers and `eret`s.
 /// EL1h tasks do not consume it, but an EL0t task must regain its separate
-/// userspace stack when scheduled after an EL1 task.
-pub var resume_sp_el0: u64 = 0;
+/// userspace stack when scheduled after an EL1 task. Per-core like
+/// `resume_frame`.
+pub var resume_sp_el0: [max_resume_cores]u64 = [_]u64{0} ** max_resume_cores;
 
 /// Unmask IRQs (clear DAIF.I). The caller arms the GIC + timer first so no
 /// interrupt can arrive before the chain is ready. No-op on non-aarch64
@@ -793,8 +819,9 @@ export fn exc_dispatch(
     kind: u64,
 ) callconv(.c) Resume {
     handled_count_value += 1;
-    resume_frame = @intFromPtr(frame);
-    resume_sp_el0 = source_sp_el0(frame, spsr);
+    const cid = resume_core();
+    resume_frame[cid] = @intFromPtr(frame);
+    resume_sp_el0[cid] = source_sp_el0(frame, spsr);
     // Claim 7948: taken IRQs route to the registered dispatcher (GIC ack
     // -> timer handle -> scheduler tick -> GIC eoi); the stub restores the
     // frame and erets. IRQs were masked until the whole chain was armed,
@@ -806,7 +833,7 @@ export fn exc_dispatch(
     if (kind == kind_irq) {
         if (irq_dispatcher) |d| {
             d();
-            return .{ .frame = resume_frame, .sp_el0 = resume_sp_el0 };
+            return .{ .frame = resume_frame[cid], .sp_el0 = resume_sp_el0[cid] };
         }
     }
     if (is_svc64_from_el0(kind, esr, spsr)) {
@@ -817,7 +844,7 @@ export fn exc_dispatch(
                 // Cooperative yield/exit may instead stage another runnable
                 // task through the scheduler; honor the same return-frame
                 // seam the IRQ path already uses.
-                return .{ .frame = resume_frame, .sp_el0 = resume_sp_el0 };
+                return .{ .frame = resume_frame[cid], .sp_el0 = resume_sp_el0[cid] };
             }
         }
     }
@@ -828,7 +855,7 @@ export fn exc_dispatch(
     // EFAULT, so the shell/user task survives. Any other synchronous
     // exception falls through to the normal report/park path.
     if (kind == kind_sync and uaccess.try_recover(esr, elr)) {
-        return .{ .frame = @intFromPtr(frame), .sp_el0 = resume_sp_el0 };
+        return .{ .frame = @intFromPtr(frame), .sp_el0 = resume_sp_el0[cid] };
     }
     // Milestone sixteen C2 (claim 8403): a synchronous exception from EL0
     // that is not an SVC and not a recoverable uaccess fault is checked for
@@ -837,13 +864,13 @@ export fn exc_dispatch(
     // If not, the fault dispatcher reaps the faulting process safely.
     if (kind == kind_sync and is_from_el0(spsr)) {
         if (try_handle_page_fault(esr, far)) {
-            return .{ .frame = @intFromPtr(frame), .sp_el0 = resume_sp_el0 };
+            return .{ .frame = @intFromPtr(frame), .sp_el0 = resume_sp_el0[cid] };
         }
         if (fault_dispatcher) |d| {
             // M22 D3 (issue #326): ELR rides along — BRK faults carry a
             // meaningless FAR but their PC names the crashing function.
             d(esr, far, elr);
-            return .{ .frame = resume_frame, .sp_el0 = resume_sp_el0 };
+            return .{ .frame = resume_frame[cid], .sp_el0 = resume_sp_el0[cid] };
         }
     }
     const will_resume = should_resume(kind, resume_armed);
@@ -859,7 +886,7 @@ export fn exc_dispatch(
         handled_count_value,
         frame_read(frame, 0),
         frame_read(frame, 30),
-        resume_sp_el0,
+        resume_sp_el0[cid],
         frame_read(frame, 1),
         frame_read(frame, 2),
         frame_read(frame, 29),
@@ -914,9 +941,9 @@ export fn exc_dispatch(
             : [v] "r" (elr + 4),
         );
         asm volatile ("isb");
-        return .{ .frame = @intFromPtr(frame), .sp_el0 = resume_sp_el0 };
+        return .{ .frame = @intFromPtr(frame), .sp_el0 = resume_sp_el0[cid] };
     }
-    return .{ .frame = 0, .sp_el0 = resume_sp_el0 };
+    return .{ .frame = 0, .sp_el0 = resume_sp_el0[cid] };
 }
 
 // ---------------------------------------------------------------------------
@@ -1301,6 +1328,17 @@ fn exception_vectors() align(2048) callconv(.naked) void {
         \\b exc_fp_common
         \\.balign 128
         \\exc_fp_common:
+        \\// Issue #820 family (same-EL IRQ nesting): AArch64 exception
+        \\// entry to the SAME EL leaves PSTATE.DAIF unchanged, so an IRQ
+        \\// taken while already inside an EL1 handler would nest — the
+        \\// nested exc_dispatch overwrites the staged resume frame and a
+        \\// task resumes holding the nested handler's register image
+        \\// (observed: GIC/timer values at two different crash sites). Mask
+        \\// IRQ for the whole handler; `eret` restores PSTATE from
+        \\// SPSR_EL1 (saved at entry), so the resumed task gets its own
+        \\// DAIF back. A no-op for the lower-EL entries, where hardware
+        \\// already masks on EL0 -> EL1.
+        \\msr daifset, #2
         \\stp q0, q1, [sp, #-32]!
         \\stp q2, q3, [sp, #-32]!
         \\stp q4, q5, [sp, #-32]!
@@ -1360,7 +1398,7 @@ var test_svc_resume_frame: ?*VectorFrame = null;
 fn test_svc_handler(frame: *VectorFrame, immediate: u16) bool {
     test_svc_immediate = immediate;
     _ = frame_write(frame, 0, frame_read(frame, 0) + 1);
-    if (test_svc_resume_frame) |selected| resume_frame = @intFromPtr(selected);
+    if (test_svc_resume_frame) |selected| resume_frame[0] = @intFromPtr(selected);
     return true;
 }
 
@@ -1372,7 +1410,7 @@ fn test_fault_handler(esr: u64, far: u64, pc: u64) void {
     _ = pc; // M22 D3: the PC rides along for symbol resolution; tests ignore it
     test_fault_esr = esr;
     test_fault_far = far;
-    if (test_fault_resume_frame) |selected| resume_frame = @intFromPtr(selected);
+    if (test_fault_resume_frame) |selected| resume_frame[0] = @intFromPtr(selected);
 }
 
 test "exceptions: ec_name decodes known and unknown classes" {

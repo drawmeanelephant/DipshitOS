@@ -751,8 +751,9 @@ pub fn switch_context(frame_sp: u64, elr: u64, spsr: u64, sp_el0: u64) void {
 }
 
 fn apply_pending() void {
-    exceptions.resume_frame = pending_sp;
-    exceptions.resume_sp_el0 = pending_sp_el0;
+    const cid = smp.core_id();
+    exceptions.resume_frame[cid] = pending_sp;
+    exceptions.resume_sp_el0[cid] = pending_sp_el0;
     if (comptime builtin.is_test or builtin.cpu.arch != .aarch64) return;
     // Claim 5804: install the selected task's TTBR0 (with a full TLB
     // invalidation) before restoring its ELR/SPSR, so the eret to EL0 (or
@@ -789,7 +790,8 @@ fn current_exception_pc() struct { elr: u64, spsr: u64 } {
 pub fn yield_current() bool {
     if (!scheduling_active()) return false;
     const pc = current_exception_pc();
-    switch_context(exceptions.resume_frame, pc.elr, pc.spsr, exceptions.resume_sp_el0);
+    const cid = smp.core_id();
+    switch_context(exceptions.resume_frame[cid], pc.elr, pc.spsr, exceptions.resume_sp_el0[cid]);
     cooperative_yields +%= 1;
     apply_pending();
     return true;
@@ -815,10 +817,11 @@ pub fn sleep_current(ticks: u64) bool {
     // intact when wake_expired flips it back to ready and the ring resumes
     // it. Unlike exit_current, which never resumes the saved context.
     const pc = current_exception_pc();
-    tasks[sleeping].sp = exceptions.resume_frame;
+    const cid = smp.core_id();
+    tasks[sleeping].sp = exceptions.resume_frame[cid];
     tasks[sleeping].elr = pc.elr;
     tasks[sleeping].spsr = pc.spsr;
-    tasks[sleeping].sp_el0 = exceptions.resume_sp_el0;
+    tasks[sleeping].sp_el0 = exceptions.resume_sp_el0[cid];
     tasks[sleeping].saves += 1;
     tasks[sleeping].state = .blocked;
     tasks[sleeping].wakeup_tick = deadline;
@@ -853,13 +856,14 @@ pub fn wait_current(target_pid: usize) bool {
     if (tasks[current].state != .ready and tasks[current].state != .running) return false;
     const waiting = current;
     const pc = current_exception_pc();
+    const cid = smp.core_id();
     // Save the calling task's context (frame SP + ELR/SPSR + SP_EL0), the
     // same seam yield_current/sleep_current use — the task MUST find its
     // saved SVC frame intact when the target exits and the ring resumes it.
-    tasks[waiting].sp = exceptions.resume_frame;
+    tasks[waiting].sp = exceptions.resume_frame[cid];
     tasks[waiting].elr = pc.elr;
     tasks[waiting].spsr = pc.spsr;
-    tasks[waiting].sp_el0 = exceptions.resume_sp_el0;
+    tasks[waiting].sp_el0 = exceptions.resume_sp_el0[cid];
     tasks[waiting].saves += 1;
     tasks[waiting].state = .blocked;
     tasks[waiting].wait_pid = target_pid;
@@ -885,10 +889,11 @@ pub fn wait_event_current(pid: usize) bool {
     if (tasks[current].state != .ready and tasks[current].state != .running) return false;
     const waiting = current;
     const pc = current_exception_pc();
-    tasks[waiting].sp = exceptions.resume_frame;
+    const cid = smp.core_id();
+    tasks[waiting].sp = exceptions.resume_frame[cid];
     tasks[waiting].elr = if (pc.elr >= 4) pc.elr - 4 else pc.elr;
     tasks[waiting].spsr = pc.spsr;
-    tasks[waiting].sp_el0 = exceptions.resume_sp_el0;
+    tasks[waiting].sp_el0 = exceptions.resume_sp_el0[cid];
     tasks[waiting].saves += 1;
     tasks[waiting].state = .blocked;
     tasks[waiting].wait_event_pid = pid;
@@ -897,7 +902,7 @@ pub fn wait_event_current(pid: usize) bool {
     // the blocking result (0) into the saved frame's x0 — the elr-4
     // re-execution must see the original x0, or the wake's copy_out
     // targets address 0 (EFAULT) and every blocking GUI event loop dies.
-    const saved_frame: *const exceptions.VectorFrame = @ptrFromInt(exceptions.resume_frame);
+    const saved_frame: *const exceptions.VectorFrame = @ptrFromInt(exceptions.resume_frame[cid]);
     tasks[waiting].wait_event_buf = exceptions.frame_read(saved_frame, 0);
     const next = next_runnable(waiting) orelse {
         tasks[waiting].state = .ready;
@@ -1204,7 +1209,8 @@ pub fn tick() void {
         : [v] "=r" (spsr),
     );
     on_tick();
-    timer_switch_context(exceptions.resume_frame, elr, spsr, exceptions.resume_sp_el0);
+    const cid = smp.core_id();
+    timer_switch_context(exceptions.resume_frame[cid], elr, spsr, exceptions.resume_sp_el0[cid]);
     apply_pending();
 }
 
