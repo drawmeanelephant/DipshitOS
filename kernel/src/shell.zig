@@ -593,6 +593,272 @@ fn ensure_scrollback_vtable() *const console.Console.VTable {
     return &scrollback_vtable;
 }
 
+// ---------------------------------------------------------------------------
+// Shell tab completion (Self-hosting #20, issue #783)
+// ---------------------------------------------------------------------------
+
+pub const max_completion_candidates: usize = 32;
+var completion_names: [max_completion_candidates][64]u8 = undefined;
+var completion_lens: [max_completion_candidates]u8 = undefined;
+var completion_count: usize = 0;
+
+fn completion_reset() void {
+    completion_count = 0;
+}
+
+fn completion_add(name: []const u8) void {
+    if (completion_count >= max_completion_candidates) return;
+    if (name.len == 0 or name.len > 64) return;
+    for (0..completion_count) |i| {
+        if (std.mem.eql(u8, completion_names[i][0..completion_lens[i]], name)) return;
+    }
+    @memcpy(completion_names[completion_count][0..name.len], name);
+    completion_lens[completion_count] = @intCast(name.len);
+    completion_count += 1;
+}
+
+fn completion_match(prefix: []const u8, name: []const u8) void {
+    if (name.len < prefix.len) return;
+    if (std.mem.startsWith(u8, name, prefix)) {
+        completion_add(name);
+        return;
+    }
+    if (std.ascii.startsWithIgnoreCase(name, prefix)) {
+        completion_add(name);
+        return;
+    }
+}
+
+fn completion_sort() void {
+    if (completion_count <= 1) return;
+    var i: usize = 1;
+    while (i < completion_count) : (i += 1) {
+        var j = i;
+        while (j > 0) : (j -= 1) {
+            const a = completion_names[j - 1][0..completion_lens[j - 1]];
+            const b = completion_names[j][0..completion_lens[j]];
+            if (std.mem.order(u8, a, b) == .gt) {
+                var tmp_name: [64]u8 = undefined;
+                @memcpy(tmp_name[0..a.len], a);
+                const tmp_len = completion_lens[j - 1];
+
+                @memcpy(completion_names[j - 1][0..b.len], b);
+                completion_lens[j - 1] = completion_lens[j];
+
+                @memcpy(completion_names[j][0..tmp_len], tmp_name[0..tmp_len]);
+                completion_lens[j] = tmp_len;
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+pub fn shell_complete(line: []const u8, cursor: usize, index: usize) ?lineedit.CompletionMatch {
+    if (cursor > line.len) return null;
+
+    var start = cursor;
+    while (start > 0 and line[start - 1] != ' ' and line[start - 1] != '\t') start -= 1;
+    const prefix = line[start..cursor];
+
+    var is_cmd = true;
+    var j = start;
+    while (j > 0) : (j -= 1) {
+        const c = line[j - 1];
+        if (c == ';' or c == '|' or c == '&') break;
+        if (c != ' ' and c != '\t') {
+            is_cmd = false;
+            break;
+        }
+    }
+
+    completion_reset();
+
+    if (is_cmd) {
+        if (prefix.len == 0) return null;
+
+        inline for (&.{
+            "alias",    "break",  "continue", "env", "exit", "export",
+            "false",    "fg",     "fn",       "for", "if",   "jobs",
+            "printenv", "prompt", "set",      "sh",  "true", "type",
+            "unalias",  "unset",  "while",
+        }) |b| completion_match(prefix, b);
+
+        inline for (&.{
+            "about",  "addrspaces", "beans",    "beep",       "calc",    "cat",       "clear",
+            "clip",   "color",      "compose",  "crash",      "dmesg",   "du",        "dui",
+            "echo",   "elephant",   "exec",     "fault",      "find",    "font",      "handoff",
+            "help",   "hex",        "input",    "inventory",  "kill",    "ls",        "mbox",
+            "mem",    "mktemp",     "mount",    "net",        "netsend", "pages",     "pci",
+            "procs",  "ps",         "random",   "reboot",     "repeat",  "resources", "roadpops",
+            "screen", "screenshot", "settings", "sexiburger", "sh",      "shortcuts", "shutdown",
+            "smp",    "sound",      "spawn",    "stat",       "strace",  "sym",       "syscalls",
+            "tasks",  "text",       "time",     "timer",      "tour",    "type",      "uaccess",
+            "uname",  "usb",        "version",  "vf",         "welcome", "which",     "wm",
+            "wnd",    "write",
+        }) |cmd_name| completion_match(prefix, cmd_name);
+
+        var fi: usize = 0;
+        while (fi < func_count) : (fi += 1) {
+            completion_match(prefix, func_table[fi].name[0..func_table[fi].name_len]);
+        }
+
+        var ei: usize = 0;
+        while (ei < env_count) : (ei += 1) {
+            completion_match(prefix, env_table[ei].name[0..env_table[ei].name_len]);
+        }
+
+        var list_res: virtio_file.ListResult = .{};
+        if (virtio_file.list("", &list_res) == virtio_file.st_ok) {
+            for (list_res.entries[0..list_res.count]) |e| {
+                const ename = e.name[0..e.name_len];
+                completion_match(prefix, ename);
+                if (std.mem.endsWith(u8, ename, ".ELF") or std.mem.endsWith(u8, ename, ".BIN")) {
+                    const base = ename[0 .. ename.len - 4];
+                    completion_match(prefix, base);
+                }
+            }
+        }
+    } else {
+        var seg_start: usize = 0;
+        var s = start;
+        while (s > 0) : (s -= 1) {
+            const c = line[s - 1];
+            if (c == ';' or c == '|' or c == '&') {
+                seg_start = s;
+                break;
+            }
+        }
+        while (seg_start < line.len and (line[seg_start] == ' ' or line[seg_start] == '\t')) seg_start += 1;
+        var cmd_end = seg_start;
+        while (cmd_end < line.len and line[cmd_end] != ' ' and line[cmd_end] != '\t') cmd_end += 1;
+        const verb = if (cmd_end > seg_start) line[seg_start..cmd_end] else "";
+
+        var arg_idx: usize = 0;
+        var scan = cmd_end;
+        while (scan < start) {
+            while (scan < start and (line[scan] == ' ' or line[scan] == '\t')) scan += 1;
+            if (scan >= start) break;
+            arg_idx += 1;
+            while (scan < start and line[scan] != ' ' and line[scan] != '\t') scan += 1;
+        }
+
+        if (std.mem.eql(u8, verb, "exec")) {
+            var list_res: virtio_file.ListResult = .{};
+            if (virtio_file.list("", &list_res) == virtio_file.st_ok) {
+                for (list_res.entries[0..list_res.count]) |e| {
+                    const ename = e.name[0..e.name_len];
+                    completion_match(prefix, ename);
+                }
+            }
+        } else if (std.mem.eql(u8, verb, "which")) {
+            inline for (&.{
+                "alias",    "break",  "continue", "env", "exit", "export",
+                "false",    "fg",     "fn",       "for", "if",   "jobs",
+                "printenv", "prompt", "set",      "sh",  "true", "type",
+                "unalias",  "unset",  "while",
+            }) |b| completion_match(prefix, b);
+            inline for (&.{
+                "about",  "addrspaces", "beans",    "beep",       "calc",    "cat",       "clear",
+                "clip",   "color",      "compose",  "crash",      "dmesg",   "du",        "dui",
+                "echo",   "elephant",   "exec",     "fault",      "find",    "font",      "handoff",
+                "help",   "hex",        "input",    "inventory",  "kill",    "ls",        "mbox",
+                "mem",    "mktemp",     "mount",    "net",        "netsend", "pages",     "pci",
+                "procs",  "ps",         "random",   "reboot",     "repeat",  "resources", "roadpops",
+                "screen", "screenshot", "settings", "sexiburger", "sh",      "shortcuts", "shutdown",
+                "smp",    "sound",      "spawn",    "stat",       "strace",  "sym",       "syscalls",
+                "tasks",  "text",       "time",     "timer",      "tour",    "type",      "uaccess",
+                "uname",  "usb",        "version",  "vf",         "welcome", "which",     "wm",
+                "wnd",    "write",
+            }) |cmd_name| completion_match(prefix, cmd_name);
+            var list_res: virtio_file.ListResult = .{};
+            if (virtio_file.list("", &list_res) == virtio_file.st_ok) {
+                for (list_res.entries[0..list_res.count]) |e| {
+                    completion_match(prefix, e.name[0..e.name_len]);
+                }
+            }
+        } else if (std.mem.eql(u8, verb, "help")) {
+            inline for (&.{
+                "about",  "addrspaces", "beans",    "beep",       "calc",    "cat",       "clear",
+                "clip",   "color",      "compose",  "crash",      "dmesg",   "du",        "dui",
+                "echo",   "elephant",   "exec",     "fault",      "find",    "font",      "handoff",
+                "help",   "hex",        "input",    "inventory",  "kill",    "ls",        "mbox",
+                "mem",    "mktemp",     "mount",    "net",        "netsend", "pages",     "pci",
+                "procs",  "ps",         "random",   "reboot",     "repeat",  "resources", "roadpops",
+                "screen", "screenshot", "settings", "sexiburger", "sh",      "shortcuts", "shutdown",
+                "smp",    "sound",      "spawn",    "stat",       "strace",  "sym",       "syscalls",
+                "tasks",  "text",       "time",     "timer",      "tour",    "type",      "uaccess",
+                "uname",  "usb",        "version",  "vf",         "welcome", "which",     "wm",
+                "wnd",    "write",
+            }) |cmd_name| completion_match(prefix, cmd_name);
+            inline for (&.{
+                "system",  "memory_state", "tasks_processes",  "graphics_input",
+                "storage", "networking",   "machine_identity", "syscalls",
+            }) |t| completion_match(prefix, t);
+        } else if (std.mem.eql(u8, verb, "color")) {
+            completion_match(prefix, "on");
+            completion_match(prefix, "off");
+        } else if (std.mem.eql(u8, verb, "font")) {
+            completion_match(prefix, "small");
+            completion_match(prefix, "medium");
+            completion_match(prefix, "large");
+        } else if (std.mem.eql(u8, verb, "settings")) {
+            completion_match(prefix, "list");
+            completion_match(prefix, "get");
+            completion_match(prefix, "set");
+            completion_match(prefix, "reset");
+        } else if (std.mem.eql(u8, verb, "vf")) {
+            if (arg_idx == 0) {
+                inline for (&.{
+                    "ls", "cat", "mkdir", "rm", "mv", "open", "close", "write", "truncate", "fsync",
+                }) |sv| completion_match(prefix, sv);
+            } else {
+                var list_res: virtio_file.ListResult = .{};
+                if (virtio_file.list("", &list_res) == virtio_file.st_ok) {
+                    for (list_res.entries[0..list_res.count]) |e| {
+                        completion_match(prefix, e.name[0..e.name_len]);
+                    }
+                }
+            }
+        } else if (std.mem.eql(u8, verb, "dui")) {
+            inline for (&.{
+                "focus", "raise", "lower", "move", "close", "list", "hit", "cycle", "tile", "master",
+            }) |sv| completion_match(prefix, sv);
+        } else if (std.mem.eql(u8, verb, "net")) {
+            inline for (&.{
+                "recv", "ip", "arp", "ping", "udp", "dhcp", "tcp", "dns",
+            }) |sv| completion_match(prefix, sv);
+        } else if (std.mem.eql(u8, verb, "usb")) {
+            completion_match(prefix, "devices");
+            completion_match(prefix, "report");
+        } else if (std.mem.eql(u8, verb, "screen")) {
+            completion_match(prefix, "fill");
+        } else if (std.mem.eql(u8, verb, "cat") or std.mem.eql(u8, verb, "write") or
+            std.mem.eql(u8, verb, "sh") or std.mem.eql(u8, verb, "stat") or
+            std.mem.eql(u8, verb, "du") or std.mem.eql(u8, verb, "ls"))
+        {
+            var list_res: virtio_file.ListResult = .{};
+            if (virtio_file.list("", &list_res) == virtio_file.st_ok) {
+                for (list_res.entries[0..list_res.count]) |e| {
+                    completion_match(prefix, e.name[0..e.name_len]);
+                }
+            }
+        }
+    }
+
+    completion_sort();
+
+    if (completion_count == 0) return null;
+    const idx = index % completion_count;
+    const cand = completion_names[idx][0..completion_lens[idx]];
+    return lineedit.CompletionMatch{
+        .replace_start = start,
+        .text = cand,
+        .match_count = completion_count,
+        .has_trailing_space = false,
+    };
+}
+
 pub const Shell = struct {
     mon: monitor.Monitor,
     editor: lineedit.LineEditor = .{},
@@ -637,7 +903,8 @@ pub const Shell = struct {
             .scroll_offset = 0,
         };
         shell.scrollback.reset();
-        // ADR 0008 D2: tab completion over the command registry + sub-verbs.
+        // Self-hosting #20 (issue #783): command + argument completion with Tab cycling.
+        shell.editor.completer = shell_complete;
         shell.editor.completion = monitor.complete;
         return shell;
     }
@@ -3868,6 +4135,57 @@ test "shell: tab completion completes a command name (ADR 0008 D2)" {
     while (shell.poll() != .idle) {}
     const out = mock.contents();
     try std.testing.expect(std.mem.indexOf(u8, out, "version\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "virelai-kernel\n") != null);
+}
+
+test "shell: tab completion cycles command candidates (issue #783)" {
+    var mock = console.MockConsole(2048){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    // "ca" + Tab gives "calc", another Tab cycles to "cat", then Enter executes "cat"
+    mock.feed("ca\t\t\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "usage: cat <file|path>") != null);
+}
+
+test "shell: tab completion completes arguments and subverbs (issue #783)" {
+    var mock = console.MockConsole(2048){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    // "color o" + Tab gives "color off", Tab cycles to "color on", Enter runs "color on"
+    mock.feed("color o\t\t\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "color: on") != null);
+}
+
+test "shell: tab completion completes file arguments from host share (issue #783)" {
+    var test_files = [_]virtio_file.TestFile{
+        .{ .name = "TEST_FOO.TXT", .data = "hello foo\n" },
+        .{ .name = "TEST_BAR.TXT", .data = "hello bar\n" },
+    };
+    virtio_file.set_test_share(&test_files);
+    defer virtio_file.set_test_share(null);
+
+    var mock = console.MockConsole(2048){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    // "cat TEST_F" + Tab completes to "cat TEST_FOO.TXT"
+    mock.feed("cat TEST_F\t\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "hello foo") != null);
+}
+
+test "shell: tab completion completes command after semicolon (issue #783)" {
+    var mock = console.MockConsole(2048){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    mock.feed("echo first; ver\t\n");
+    while (shell.poll() != .idle) {}
+    const out = mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, out, "first\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "virelai-kernel\n") != null);
 }
 

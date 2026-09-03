@@ -6,7 +6,7 @@
 - **Touches:** kernel/src/shell.zig kernel/src/lineedit.zig tools/verify-live-scripting.sh docs/claims/1012-shell-completion.md docs/logs/agent-antigravity-783-shell-completion.md
 - **Depends on:** —
 - **Heartbeat:** 2026-09-03
-- **Status:** 🔄 agent/antigravity/783-shell-completion
+- **Status:** ✅ done
 
 ## Notes
 
