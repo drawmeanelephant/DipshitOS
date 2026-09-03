@@ -165,6 +165,7 @@ loudly if the generator or a table is broken.
 | [5424-m19-p5-quoting-p6-globbing](5424-m19-p5-quoting-p6-globbing.md) | ox-alpha (`agent/ox-alpha/m19-p5p6-quoting-globbing`) | ✅ done (2026-08-23) |
 | [5487-z1c-structs](5487-z1c-structs.md) | t3code (`t3code/z1c-structs`) | ✅ t3code/z1c-structs |
 | [5512-archive-march-m4-m5-trackers](5512-archive-march-m4-m5-trackers.md) | oxalpha (`agent/oxalpha/archive-march-m4-m5`) | ✅ done |
+| [5514-dq1-godmenu-completion](5514-dq1-godmenu-completion.md) | t3code (`agent/t3code/dq1-godmenu`) | 🔄 agent/t3code/dq1-godmenu |
 | [5725-z1d-pointers](5725-z1d-pointers.md) | antigravity (`agent/antigravity/z1d-pointers`) | ✅ done |
 | [5759-m19-p3-chaining-p4-exit-status](5759-m19-p3-chaining-p4-exit-status.md) | ox-alpha (`agent/ox-alpha/m19-p3p4-chaining-exit-status`) | ✅ done (2026-08-23) |
 | [5815-audioinfo-comment-fix](5815-audioinfo-comment-fix.md) | buffy (`freebuff/okay-shower-thoughts-here-we-re-using-fat32-for-so-b0ce3067-2b04-4b81-984d-9fd76bfcf123`) | ✅ done |
