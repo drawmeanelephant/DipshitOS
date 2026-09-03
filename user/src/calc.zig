@@ -318,6 +318,7 @@ pub const AppState = struct {
 
     // K2: 4-slot memory
     mem_slots: [4]i64 = [_]i64{0} ** 4,
+    cursor_kind: ui.CursorKind = .arrow, // M37 DQ4: per-region cursor state
     mem_active_slot: usize = 0,
     mem_any_nonzero: bool = false,
 
@@ -448,6 +449,8 @@ pub const AppState = struct {
 
     pub fn init() AppState {
         var s = AppState{};
+        // M37 DQ4: frozen aliases on purpose — Button.draw resolves them
+        // live via ui.live_color(), so buttons follow the desktop theme.
         s.btn_eq.bg_color = ui.COLOR_ACCENT;
         s.btn_c.bg_color = ui.COLOR_DANGER;
         // Load history from FAT (K5)
@@ -892,8 +895,8 @@ pub const AppState = struct {
 
     /// Click y within history_area → settings row (null when outside).
     fn cfg_row_at(y: u32) ?usize {
-        if (y < history_area.y + 4) return null;
-        const rel = y - (history_area.y + 4);
+        if (y < history_area.y + ui.pad_sm) return null;
+        const rel = y - (history_area.y + ui.pad_sm);
         const row = rel / 16;
         if (row > 2) return null;
         return row;
@@ -1035,8 +1038,8 @@ pub const AppState = struct {
 
     /// Row index under a history-area click, or null.
     fn history_row_at(y: u32) ?usize {
-        if (y < history_area.y + 4) return null;
-        const rel = y - (history_area.y + 4);
+        if (y < history_area.y + ui.pad_sm) return null;
+        const rel = y - (history_area.y + ui.pad_sm);
         const row = rel / 10;
         if (row >= history_visible) return null;
         return row;
@@ -1047,7 +1050,7 @@ pub const AppState = struct {
     // -------------------------------------------------------------------
 
     pub fn draw(self: *const AppState, win: u32) void {
-        ui.draw_rect(win, Rect.make(0, 0, window_w, window_h), ui.COLOR_BG);
+        ui.draw_rect(win, Rect.make(0, 0, window_w, window_h), ui.theme_bg());
 
         if (self.prog_mode.active) {
             self.draw_programmer(win);
@@ -1058,40 +1061,40 @@ pub const AppState = struct {
 
     fn draw_standard(self: *const AppState, win: u32) void {
         // History area
-        ui.draw_rect(win, history_area, ui.COLOR_SURFACE);
-        ui.draw_rect_outline(win, history_area, 1, ui.COLOR_BORDER);
+        ui.draw_rect(win, history_area, ui.theme_surface());
+        ui.draw_rect_outline(win, history_area, ui.border_w, ui.theme_border());
         var h_row: usize = 0;
         var h_idx = self.history_scroll;
         while (h_idx < self.hist.len and h_row < history_visible) : (h_idx += 1) {
             const entry = self.hist.get(h_idx);
             var buf: [40]u8 = undefined;
             const txt = HistoryRing.format_entry(entry, &buf);
-            const y = history_area.y + 4 + @as(u32, @intCast(h_row)) * 10;
+            const y = history_area.y + ui.pad_sm + @as(u32, @intCast(h_row)) * 10;
             const is_cursor = if (self.history_cursor) |c| c == h_idx else false;
-            const col = if (is_cursor) ui.COLOR_ACCENT else ui.COLOR_TEXT_MUTED;
+            const col = if (is_cursor) ui.theme_accent() else ui.theme_text_muted();
             const cap = @min(txt.len, 60);
-            ui.draw_text(win, txt[0..cap], history_area.x + 4, y, col);
+            ui.draw_text(win, txt[0..cap], history_area.x + ui.pad_sm, y, col);
             h_row += 1;
         }
         if (self.hist.len > history_visible) {
             if (self.history_scroll > 0)
-                ui.draw_text(win, "^", history_area.x + history_area.w - 10, history_area.y + 4, ui.COLOR_TEXT_MUTED);
+                ui.draw_text(win, "^", history_area.x + history_area.w - 10, history_area.y + ui.pad_sm, ui.theme_text_muted());
             if (self.history_scroll + history_visible < self.hist.len)
-                ui.draw_text(win, "v", history_area.x + history_area.w - 10, history_area.y + history_area.h - 10, ui.COLOR_TEXT_MUTED);
+                ui.draw_text(win, "v", history_area.x + history_area.w - 10, history_area.y + history_area.h - 10, ui.theme_text_muted());
         }
 
         // Display box
-        ui.draw_rect(win, display_rect, ui.COLOR_SURFACE);
-        ui.draw_rect_outline(win, display_rect, 1, ui.COLOR_BORDER);
+        ui.draw_rect(win, display_rect, ui.theme_surface());
+        ui.draw_rect_outline(win, display_rect, ui.border_w, ui.theme_border());
         var disp_buf: [32]u8 = undefined;
         const disp_text = self.display_text(&disp_buf);
         const text_w = @as(u32, @intCast(disp_text.len)) * 8;
         const text_x = if (display_rect.w > text_w + 16) display_rect.x + display_rect.w - text_w - 8 else display_rect.x + 16;
         const text_y = display_rect.y + (display_rect.h - 8) / 2;
-        ui.draw_text(win, disp_text, text_x, text_y, ui.COLOR_TEXT_PRIMARY);
+        ui.draw_text(win, disp_text, text_x, text_y, ui.theme_text_primary());
 
         // Memory indicator (K2)
-        self.draw_mem_indicator(win, display_rect.x + 4, text_y);
+        self.draw_mem_indicator(win, display_rect.x + ui.pad_sm, text_y);
 
         // Buttons — standard mode
         self.btn_m_store.draw(win);
@@ -1172,22 +1175,22 @@ pub const AppState = struct {
     }
 
     fn draw_stats_bar(self: *const AppState, win: u32) void {
-        ui.draw_rect(win, history_area, ui.COLOR_SURFACE);
-        ui.draw_rect_outline(win, history_area, 1, ui.COLOR_ACCENT);
+        ui.draw_rect(win, history_area, ui.theme_surface());
+        ui.draw_rect_outline(win, history_area, ui.border_w, ui.theme_accent());
 
         var line0: [128]u8 = undefined;
         const prompt = "1,2,3 > ";
         @memcpy(line0[0..prompt.len], prompt);
         const dl = @min(self.stats_len, line0.len - prompt.len - 4);
         @memcpy(line0[prompt.len .. prompt.len + dl], self.stats_input[0..dl]);
-        ui.draw_text(win, line0[0 .. prompt.len + dl], history_area.x + 4, history_area.y + 4, ui.COLOR_TEXT_PRIMARY);
+        ui.draw_text(win, line0[0 .. prompt.len + dl], history_area.x + ui.pad_sm, history_area.y + ui.pad_sm, ui.theme_text_primary());
 
         if (self.stats_result_len > 0) {
             const rl = @min(self.stats_result_len, 60);
-            ui.draw_text(win, self.stats_result[0..rl], history_area.x + 4, history_area.y + 20, ui.COLOR_ACCENT);
+            ui.draw_text(win, self.stats_result[0..rl], history_area.x + ui.pad_sm, history_area.y + 20, ui.theme_accent());
         } else {
             const hint = "comma-separated values, Enter computes";
-            ui.draw_text(win, hint, history_area.x + 4, history_area.y + 20, ui.COLOR_TEXT_MUTED);
+            ui.draw_text(win, hint, history_area.x + ui.pad_sm, history_area.y + 20, ui.theme_text_muted());
         }
     }
 
@@ -1229,8 +1232,8 @@ pub const AppState = struct {
     }
 
     fn draw_date_bar(self: *const AppState, win: u32) void {
-        ui.draw_rect(win, history_area, ui.COLOR_SURFACE);
-        ui.draw_rect_outline(win, history_area, 1, ui.COLOR_ACCENT);
+        ui.draw_rect(win, history_area, ui.theme_surface());
+        ui.draw_rect_outline(win, history_area, ui.border_w, ui.theme_accent());
 
         // Row 0: the command line
         var line0: [56]u8 = undefined;
@@ -1238,15 +1241,15 @@ pub const AppState = struct {
         @memcpy(line0[0..prompt.len], prompt);
         const dl = @min(self.date_len, line0.len - prompt.len - 4);
         @memcpy(line0[prompt.len .. prompt.len + dl], self.date_buf[0..dl]);
-        ui.draw_text(win, line0[0 .. prompt.len + dl], history_area.x + 4, history_area.y + 4, ui.COLOR_TEXT_PRIMARY);
+        ui.draw_text(win, line0[0 .. prompt.len + dl], history_area.x + ui.pad_sm, history_area.y + ui.pad_sm, ui.theme_text_primary());
 
         // Row 1: result of the last operation (or usage hint)
         if (self.date_result_len > 0) {
             const rl = @min(self.date_result_len, 60);
-            ui.draw_text(win, self.date_result[0..rl], history_area.x + 4, history_area.y + 20, ui.COLOR_ACCENT);
+            ui.draw_text(win, self.date_result[0..rl], history_area.x + ui.pad_sm, history_area.y + 20, ui.theme_accent());
         } else {
             const hint = "d1 - d2 | d + N | now";
-            ui.draw_text(win, hint, history_area.x + 4, history_area.y + 20, ui.COLOR_TEXT_MUTED);
+            ui.draw_text(win, hint, history_area.x + ui.pad_sm, history_area.y + 20, ui.theme_text_muted());
         }
     }
 
@@ -1333,8 +1336,8 @@ pub const AppState = struct {
     }
 
     fn draw_cfg_bar(self: *const AppState, win: u32) void {
-        ui.draw_rect(win, history_area, ui.COLOR_SURFACE);
-        ui.draw_rect_outline(win, history_area, 1, ui.COLOR_ACCENT);
+        ui.draw_rect(win, history_area, ui.theme_surface());
+        ui.draw_rect_outline(win, history_area, ui.border_w, ui.theme_accent());
 
         var row_buf: [48]u8 = undefined;
         const rows = [_][]const u8{
@@ -1343,22 +1346,22 @@ pub const AppState = struct {
             if (self.hex_leading_zeros) "HEX PAD      ON" else "HEX PAD      OFF",
         };
         for (rows, 0..) |row_text, ri| {
-            const y = history_area.y + 4 + @as(u32, @intCast(ri)) * 16;
-            const col = if (ri == self.cfg_row) ui.COLOR_TEXT_PRIMARY else ui.COLOR_TEXT_MUTED;
-            ui.draw_text(win, row_text[0..@min(row_text.len, 60)], history_area.x + 4, y, col);
+            const y = history_area.y + ui.pad_sm + @as(u32, @intCast(ri)) * 16;
+            const col = if (ri == self.cfg_row) ui.theme_text_primary() else ui.theme_text_muted();
+            ui.draw_text(win, row_text[0..@min(row_text.len, 60)], history_area.x + ui.pad_sm, y, col);
         }
     }
 
     fn draw_programmer(self: *const AppState, win: u32) void {
         // Triple-line display (hex / dec / oct) — replaces history + single display
-        ui.draw_rect(win, hex_display_rect, ui.COLOR_SURFACE);
-        ui.draw_rect_outline(win, hex_display_rect, 1, ui.COLOR_BORDER);
-        ui.draw_rect(win, dec_display_rect, ui.COLOR_SURFACE);
-        ui.draw_rect_outline(win, dec_display_rect, 1, ui.COLOR_BORDER);
-        ui.draw_rect(win, oct_display_rect, ui.COLOR_SURFACE);
-        ui.draw_rect_outline(win, oct_display_rect, 1, ui.COLOR_BORDER);
-        ui.draw_rect(win, reg_display_rect, ui.COLOR_SURFACE);
-        ui.draw_rect_outline(win, reg_display_rect, 1, ui.COLOR_BORDER);
+        ui.draw_rect(win, hex_display_rect, ui.theme_surface());
+        ui.draw_rect_outline(win, hex_display_rect, ui.border_w, ui.theme_border());
+        ui.draw_rect(win, dec_display_rect, ui.theme_surface());
+        ui.draw_rect_outline(win, dec_display_rect, ui.border_w, ui.theme_border());
+        ui.draw_rect(win, oct_display_rect, ui.theme_surface());
+        ui.draw_rect_outline(win, oct_display_rect, ui.border_w, ui.theme_border());
+        ui.draw_rect(win, reg_display_rect, ui.theme_surface());
+        ui.draw_rect_outline(win, reg_display_rect, ui.border_w, ui.theme_border());
 
         const val = self.engine.current_val;
 
@@ -1381,12 +1384,12 @@ pub const AppState = struct {
         const hc = @min(hex_str.len, hex_label.len - hpos);
         @memcpy(hex_label[hpos .. hpos + hc], hex_str[0..hc]);
         hpos += hc;
-        ui.draw_text(win, hex_label[0..hpos], hex_display_rect.x + 4, hex_display_rect.y + 5, ui.COLOR_TEXT_PRIMARY);
+        ui.draw_text(win, hex_label[0..hpos], hex_display_rect.x + ui.pad_sm, hex_display_rect.y + 5, ui.theme_text_primary());
 
         // Dec
         var dec_buf: [24]u8 = undefined;
         const dec_str = prog.format_dec(val, &dec_buf);
-        ui.draw_text(win, dec_str, dec_display_rect.x + 4, dec_display_rect.y + 5, ui.COLOR_TEXT_PRIMARY);
+        ui.draw_text(win, dec_str, dec_display_rect.x + ui.pad_sm, dec_display_rect.y + 5, ui.theme_text_primary());
 
         // Oct
         var oct_buf: [24]u8 = undefined;
@@ -1399,7 +1402,7 @@ pub const AppState = struct {
         const oc = @min(oct_str.len, oct_label.len - opos);
         @memcpy(oct_label[opos .. opos + oc], oct_str[0..oc]);
         opos += oc;
-        ui.draw_text(win, oct_label[0..opos], oct_display_rect.x + 4, oct_display_rect.y + 5, ui.COLOR_TEXT_MUTED);
+        ui.draw_text(win, oct_label[0..opos], oct_display_rect.x + ui.pad_sm, oct_display_rect.y + 5, ui.theme_text_muted());
 
         // Register display (R0–R7)
         var reg_buf: [32]u8 = undefined;
@@ -1422,12 +1425,12 @@ pub const AppState = struct {
         rpos += 2;
         @memcpy(reg_buf[rpos .. rpos + rvc], rval_str[0..rvc]);
         rpos += rvc;
-        ui.draw_text(win, reg_buf[0..rpos], reg_display_rect.x + 4, reg_display_rect.y + 5, ui.COLOR_TEXT_MUTED);
+        ui.draw_text(win, reg_buf[0..rpos], reg_display_rect.x + ui.pad_sm, reg_display_rect.y + 5, ui.theme_text_muted());
 
         // Memory indicator (K2)
         // Small indicator at right of reg display
         if (self.mem_any_nonzero) {
-            ui.draw_text(win, "M", reg_display_rect.x + reg_display_rect.w - 12, reg_display_rect.y + 5, ui.COLOR_TEXT_MUTED);
+            ui.draw_text(win, "M", reg_display_rect.x + reg_display_rect.w - 12, reg_display_rect.y + 5, ui.theme_text_muted());
         }
 
         // Buttons — programmer mode
@@ -1480,26 +1483,26 @@ pub const AppState = struct {
             label[1] = @as(u8, @intCast(self.mem_active_slot)) + '0';
             const slot_val = self.mem_slots[self.mem_active_slot];
             if (slot_val != 0) {
-                ui.draw_text(win, label[0..2], x, y, ui.COLOR_TEXT_MUTED);
+                ui.draw_text(win, label[0..2], x, y, ui.theme_text_muted());
             } else {
                 // Show just the slot number even if empty, dimmer
-                ui.draw_text(win, label[0..2], x, y, ui.COLOR_BG);
+                ui.draw_text(win, label[0..2], x, y, ui.theme_bg());
             }
         }
     }
 
     fn draw_convert_bar(self: *const AppState, win: u32) void {
         // Conversion bar overlays the history area when active
-        ui.draw_rect(win, history_area, ui.COLOR_SURFACE);
-        ui.draw_rect_outline(win, history_area, 1, ui.COLOR_ACCENT);
+        ui.draw_rect(win, history_area, ui.theme_surface());
+        ui.draw_rect_outline(win, history_area, ui.border_w, ui.theme_accent());
 
         // Category buttons
         const cats = [_][]const u8{ "Temp", "Length", "Weight" };
-        var cat_x: u32 = history_area.x + 4;
+        var cat_x: u32 = history_area.x + ui.pad_sm;
         for (cats, 0..) |cat_name, ci| {
             const is_active = ci == self.convert_category;
-            const col = if (is_active) ui.COLOR_ACCENT else ui.COLOR_TEXT_MUTED;
-            ui.draw_text(win, cat_name, cat_x, history_area.y + 4, col);
+            const col = if (is_active) ui.theme_accent() else ui.theme_text_muted();
+            ui.draw_text(win, cat_name, cat_x, history_area.y + ui.pad_sm, col);
             cat_x += @as(u32, @intCast(cat_name.len)) * 8 + 12;
         }
 
@@ -1522,7 +1525,7 @@ pub const AppState = struct {
         lpos += 1;
         @memcpy(label_buf[lpos .. lpos + to_name.len], to_name);
         lpos += to_name.len;
-        ui.draw_text(win, label_buf[0..lpos], history_area.x + 4, history_area.y + 16, ui.COLOR_TEXT_PRIMARY);
+        ui.draw_text(win, label_buf[0..lpos], history_area.x + ui.pad_sm, history_area.y + 16, ui.theme_text_primary());
 
         // Conversion result — K12: dec_places formats the fractional part
         var res_buf: [32]u8 = undefined;
@@ -1536,16 +1539,38 @@ pub const AppState = struct {
         const rc = @min(result_str.len, full_buf.len - fpos);
         @memcpy(full_buf[fpos .. fpos + rc], result_str[0..rc]);
         fpos += rc;
-        ui.draw_text(win, full_buf[0..fpos], history_area.x + 4, history_area.y + 28, ui.COLOR_ACCENT);
+        ui.draw_text(win, full_buf[0..fpos], history_area.x + ui.pad_sm, history_area.y + 28, ui.theme_accent());
     }
 
     // -------------------------------------------------------------------
     // Mouse events
     // -------------------------------------------------------------------
 
+    /// M37 DQ4: cursor kind from the pointer position. Emits
+    /// `calc: cursor=<name>` on change (serial-observable).
+    pub fn update_cursor(self: *AppState, x: u32, y: u32) void {
+        _ = x;
+        const over_clickable = y >= display_rect.y + display_rect.h + 2;
+        const kind = ui.cursor_for_region(false, over_clickable, false);
+        if (kind != self.cursor_kind) {
+            self.cursor_kind = kind;
+            var buf: [48]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "calc: cursor={s}\n", .{kind.name()}) catch return;
+            ui.write_console(msg);
+        }
+    }
+
     pub fn handle_mouse_events(self: *AppState, ev: *const Event) bool {
         var changed = false;
 
+        // M37 DQ4: pointer over the interactive band (below the main
+        // display/history every mode puts buttons, settings rows, or the
+        // convert bar; the programmer-mode readout rows are the known
+        // exception and keep the arrow), arrow over read-only displays.
+        if (ev.kind == ui.MOUSE_MOVE) self.update_cursor(ev.arg0, ev.arg1);
+
+        // (update_cursor lives beside the mouse dispatch: Zig forbids
+        // decls between struct fields.)
         if (self.prog_mode.active) {
             changed = self.handle_mouse_programmer(ev) or changed;
         } else {
@@ -2319,6 +2344,8 @@ fn cli_main(argc: usize, argv_va: u64) noreturn {
 fn gui_main() noreturn {
     var app = AppState.init();
 
+    // M37 DQ4: follow the desktop theme first.
+    _ = ui.sync_theme_from_host();
     const win_res = ui.win_open(window_x, window_y, window_w, window_h);
     if (win_res < 0) {
         ui.write_console("calc: failed to open window\n");
@@ -2330,7 +2357,12 @@ fn gui_main() noreturn {
 
     app.draw(win);
     ui.win_present(win);
+    ui.emit_tokens_marker("calc");
     ui.write_console("calc: ready\n");
+    // M37 DQ4 gate: let the compositor settle (several ticks) so the
+    // kind-4 snapshot captures the presented frame, not a stale one.
+    ui.sleep_ticks(50);
+    ui.write_console("calc: settled\n");
 
     var ev: Event = undefined;
     while (true) {

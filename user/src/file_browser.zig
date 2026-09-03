@@ -432,34 +432,36 @@ fn draw_list_row(win: u32, row: usize, name: []const u8, entry: *const DirEntry,
     const row_y = list_area.y + header_h + @as(u32, @intCast(row)) * list_row_h;
     const row_rect = Rect.make(list_area.x, row_y, list_area.w, list_row_h);
     const bg = if (is_sel)
-        ui.COLOR_ACCENT
+        ui.theme_accent()
     else if (is_multi)
-        0x1e3a8a // dark blue selection highlight (F1)
+        ui.theme_multi_select() // multi-select highlight (was dark-blue F1)
     else if (entry.is_dir != 0)
-        ui.COLOR_BTN_IDLE
+        ui.theme_btn_idle()
     else if (row % 2 == 0)
-        ui.COLOR_SURFACE
+        ui.theme_surface()
     else
-        ui.COLOR_BG;
+        ui.theme_bg();
     ui.draw_rect(win, row_rect, bg);
     // Step 12: colored type indicator (8x8 square before filename).
+    // M37 DQ4: file-type accents from tokens (dark values equal the
+    // pre-DQ4 hardcoded colors).
     const icon_color: u32 = if (entry.is_dir != 0)
-        0x3b82f6 // blue for directories
+        ui.theme_file_dir()
     else if (is_txt_file(name))
-        0x22c55e // green for .TXT
+        ui.theme_file_txt()
     else if (is_bin_file(name))
-        0xf59e0b // amber for .BIN
+        ui.theme_file_bin()
     else
-        0x64748b; // gray for unknown
-    ui.draw_rect(win, Rect.make(row_rect.x + 4, row_rect.y + 4, 8, 8), icon_color);
+        ui.theme_file_unknown();
+    ui.draw_rect(win, Rect.make(row_rect.x + ui.pad_sm, row_rect.y + ui.pad_sm, 8, 8), icon_color);
     if (is_multi) {
-        ui.draw_text(win, "*", row_rect.x + 14, row_rect.y + (list_row_h - 8) / 2, ui.COLOR_WARNING);
+        ui.draw_text(win, "*", row_rect.x + 14, row_rect.y + (list_row_h - 8) / 2, ui.theme_warning());
     }
     // Cap the drawn name to the row width (240 - 16 padding - 12 icon = 212px = 26 glyphs).
     const cap = @min(name.len, 24);
     const text_x = row_rect.x + 20;
     const text_y = row_rect.y + (list_row_h - 8) / 2;
-    ui.draw_text(win, name[0..cap], text_x, text_y, ui.COLOR_TEXT_PRIMARY);
+    ui.draw_text(win, name[0..cap], text_x, text_y, ui.theme_text_primary());
     // M20-U3: highlight the searched substring inside the filename when
     // the filter bar narrowed the listing (accent cell + white glyph,
     // the same treatment notepad gives find matches).
@@ -468,8 +470,8 @@ fn draw_list_row(win: u32, row: usize, name: []const u8, entry: *const DirEntry,
         var k: usize = 0;
         while (k < hlen) : (k += 1) {
             const cx = text_x + @as(u32, @intCast(hl_at + k)) * glyph_w;
-            ui.draw_rect(win, Rect.make(cx, text_y, glyph_w, 8), ui.COLOR_ACCENT);
-            ui.draw_char(win, name[hl_at + k], cx, text_y, 0xffffff);
+            ui.draw_rect(win, Rect.make(cx, text_y, glyph_w, 8), ui.theme_accent());
+            ui.draw_char(win, name[hl_at + k], cx, text_y, ui.theme_on_accent());
         }
     }
 }
@@ -594,6 +596,28 @@ pub const AppState = struct {
     btn_rename: Button = Button.init(btn_rename_rect, "Rename"),
     btn_delete: Button = Button.init(btn_delete_rect, "Delete"),
     btn_back: Button = Button.init(btn_back_rect, "Back"),
+    cursor_kind: ui.CursorKind = .arrow, // M37 DQ4: per-region cursor state
+
+    /// M37 DQ4: per-region cursor kind (pointer over rows/buttons,
+    /// ibeam while a text-entry dialog is open). Emits
+    /// `file: cursor=<name>` on change (serial-observable).
+    pub fn update_cursor(self: *AppState, x: u32, y: u32) void {
+        const over_clickable = list_area.contains(x, y) or
+            self.btn_open.rect.contains(x, y) or
+            self.btn_rename.rect.contains(x, y) or
+            self.btn_delete.rect.contains(x, y) or
+            self.btn_back.rect.contains(x, y);
+        const in_dialog = self.delete_dialog.is_open() or
+            self.move_dialog.is_open() or
+            self.batch_rename_dialog.is_open();
+        const kind = ui.cursor_for_region(false, over_clickable and !in_dialog, in_dialog);
+        if (kind != self.cursor_kind) {
+            self.cursor_kind = kind;
+            var buf: [48]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "file: cursor={s}\n", .{kind.name()}) catch return;
+            ui.write_console(msg);
+        }
+    }
 
     pub fn init() AppState {
         var s = AppState{};
@@ -601,6 +625,8 @@ pub const AppState = struct {
         const p = "/host";
         @memcpy(s.current_path[0..p.len], p);
         s.current_path_len = p.len;
+        // M37 DQ4: frozen aliases on purpose — Button.draw resolves them
+        // live via ui.live_color(), so buttons follow the desktop theme.
         s.btn_open.bg_color = ui.COLOR_ACCENT;
         s.btn_rename.bg_color = ui.COLOR_WARNING;
         s.btn_delete.bg_color = ui.COLOR_DANGER;
@@ -1797,16 +1823,16 @@ pub const AppState = struct {
     }
 
     pub fn draw(self: *const AppState, win: u32) void {
-        ui.draw_rect(win, Rect.make(0, 0, window_w, window_h), ui.COLOR_BG);
+        ui.draw_rect(win, Rect.make(0, 0, window_w, window_h), ui.theme_bg());
 
         // Title bar.
-        ui.draw_rect(win, title_rect, ui.COLOR_SURFACE);
-        ui.draw_rect_outline(win, title_rect, 1, ui.COLOR_BORDER);
+        ui.draw_rect(win, title_rect, ui.theme_surface());
+        ui.draw_rect_outline(win, title_rect, ui.border_w, ui.theme_border());
         if (self.view_mode) {
-            ui.draw_text(win, "View", 8, 8, ui.COLOR_TEXT_PRIMARY);
-            ui.draw_text(win, self.view_name[0..self.view_name_len], 56, 8, ui.COLOR_ACCENT);
+            ui.draw_text(win, "View", 8, 8, ui.theme_text_primary());
+            ui.draw_text(win, self.view_name[0..self.view_name_len], 56, 8, ui.theme_accent());
         } else {
-            ui.draw_text(win, "Files:", 8, 8, ui.COLOR_TEXT_PRIMARY);
+            ui.draw_text(win, "Files:", 8, 8, ui.theme_text_primary());
             // Breadcrumb bar at y=4 (inside title), 8x8 muted per spec.
             // Lane B (claim 2539): in RECENT pseudo-listing mode show a
             // synthetic last segment instead of the (unchanged) path.
@@ -1814,9 +1840,9 @@ pub const AppState = struct {
             var si: usize = 0;
             var idx: usize = 0;
             if (self.recent_mode) {
-                ui.draw_text(win, ">", bx, 8, ui.COLOR_TEXT_MUTED);
+                ui.draw_text(win, ">", bx, 8, ui.theme_text_muted());
                 bx += 16;
-                ui.draw_text(win, recent_virtual_name, bx, 8, ui.COLOR_ACCENT);
+                ui.draw_text(win, recent_virtual_name, bx, 8, ui.theme_accent());
                 bx += @as(u32, @intCast(recent_virtual_name.len)) * glyph_w + 4;
             } else {
                 // Iterate over path segments for drawing.
@@ -1827,11 +1853,11 @@ pub const AppState = struct {
                     while (idx < self.current_path_len and self.current_path[idx] != '/') : (idx += 1) {}
                     const seg = self.current_path[start..idx];
                     if (si > 0) {
-                        ui.draw_text(win, ">", bx, 8, ui.COLOR_TEXT_MUTED);
+                        ui.draw_text(win, ">", bx, 8, ui.theme_text_muted());
                         bx += 16; // " > " is 3*8 but we draw ">" centered in 16px
                     }
                     const is_last = idx >= self.current_path_len;
-                    const col = if (is_last) ui.COLOR_ACCENT else ui.COLOR_TEXT_MUTED;
+                    const col = if (is_last) ui.theme_accent() else ui.theme_text_muted();
                     ui.draw_text(win, seg, bx, 8, col);
                     bx += @as(u32, @intCast(seg.len)) * glyph_w + 4;
                     si += 1;
@@ -1846,30 +1872,30 @@ pub const AppState = struct {
                 tp = append_str(&tb, tp, fmt_u64(tb[tp..], self.dir_total_bytes));
                 tp = append_str(&tb, tp, " B)");
                 if (bx + @as(u32, @intCast(tp)) * glyph_w < title_rect.w - 120) {
-                    ui.draw_text(win, tb[0..tp], bx, 8, ui.COLOR_TEXT_MUTED);
+                    ui.draw_text(win, tb[0..tp], bx, 8, ui.theme_text_muted());
                 }
             }
         }
 
         // Status strip (title-bar right) — shift right to avoid breadcrumb overlap.
-        ui.draw_text(win, self.status_msg[0..self.status_len], 380, 8, ui.COLOR_TEXT_MUTED);
+        ui.draw_text(win, self.status_msg[0..self.status_len], 380, 8, ui.theme_text_muted());
 
         // M20-U8: the find bar sits between breadcrumbs and the listing.
         if (!self.view_mode and self.filter_active) {
             const fb = Rect.make(list_area.x, list_area.y, list_area.w, 14);
-            ui.draw_rect(win, fb, ui.COLOR_SURFACE);
-            ui.draw_rect_outline(win, fb, 1, ui.COLOR_ACCENT);
-            ui.draw_text(win, "Find:", fb.x + 4, fb.y + 3, ui.COLOR_TEXT_MUTED);
-            ui.draw_text(win, self.filter_buf[0..self.filter_len], fb.x + 40, fb.y + 3, ui.COLOR_TEXT_PRIMARY);
+            ui.draw_rect(win, fb, ui.theme_surface());
+            ui.draw_rect_outline(win, fb, ui.border_w, ui.theme_accent());
+            ui.draw_text(win, "Find:", fb.x + ui.pad_sm, fb.y + 3, ui.theme_text_muted());
+            ui.draw_text(win, self.filter_buf[0..self.filter_len], fb.x + 40, fb.y + 3, ui.theme_text_primary());
         }
 
         // F3: Directory creation overlay input
         if (!self.view_mode and self.create_dir_active) {
             const cb = Rect.make(list_area.x, list_area.y, list_area.w, 14);
-            ui.draw_rect(win, cb, ui.COLOR_SURFACE);
-            ui.draw_rect_outline(win, cb, 1, ui.COLOR_WARNING);
-            ui.draw_text(win, "Mkdir:", cb.x + 4, cb.y + 3, ui.COLOR_WARNING);
-            ui.draw_text(win, self.create_dir_buf[0..self.create_dir_len], cb.x + 48, cb.y + 3, ui.COLOR_TEXT_PRIMARY);
+            ui.draw_rect(win, cb, ui.theme_surface());
+            ui.draw_rect_outline(win, cb, ui.border_w, ui.theme_warning());
+            ui.draw_text(win, "Mkdir:", cb.x + ui.pad_sm, cb.y + 3, ui.theme_warning());
+            ui.draw_text(win, self.create_dir_buf[0..self.create_dir_len], cb.x + 48, cb.y + 3, ui.theme_text_primary());
         }
 
         if (self.view_mode) {
@@ -1903,20 +1929,20 @@ pub const AppState = struct {
         // F9: Bookmarks list overlay (GH #389)
         if (self.bookmarks_active) {
             const b_rect = Rect.make(6, 26, 220, 180);
-            ui.draw_rect(win, b_rect, ui.COLOR_SURFACE);
-            ui.draw_rect_outline(win, b_rect, 1, ui.COLOR_ACCENT);
-            ui.draw_text(win, "Bookmarks (Enter=Jump):", b_rect.x + 6, b_rect.y + 6, ui.COLOR_ACCENT);
+            ui.draw_rect(win, b_rect, ui.theme_surface());
+            ui.draw_rect_outline(win, b_rect, ui.border_w, ui.theme_accent());
+            ui.draw_text(win, "Bookmarks (Enter=Jump):", b_rect.x + 6, b_rect.y + 6, ui.theme_accent());
             if (self.bookmark_count == 0) {
-                ui.draw_text(win, "(No bookmarks)", b_rect.x + 6, b_rect.y + 24, ui.COLOR_TEXT_MUTED);
+                ui.draw_text(win, "(No bookmarks)", b_rect.x + 6, b_rect.y + 24, ui.theme_text_muted());
             } else {
                 for (0..self.bookmark_count) |bi| {
                     const by = b_rect.y + 24 + @as(u32, @intCast(bi)) * 14;
                     const is_bm_sel = bi == self.bookmarks_selected;
                     if (is_bm_sel) {
-                        ui.draw_rect(win, Rect.make(b_rect.x + 2, by - 2, b_rect.w - 4, 14), ui.COLOR_BTN_IDLE);
+                        ui.draw_rect(win, Rect.make(b_rect.x + 2, by - 2, b_rect.w - 4, 14), ui.theme_btn_idle());
                     }
                     const bp = self.bookmarks[bi][0..self.bookmark_lens[bi]];
-                    const bcol = if (is_bm_sel) ui.COLOR_ACCENT else ui.COLOR_TEXT_PRIMARY;
+                    const bcol = if (is_bm_sel) ui.theme_accent() else ui.theme_text_primary();
                     ui.draw_text(win, bp, b_rect.x + 6, by, bcol);
                 }
             }
@@ -1927,25 +1953,25 @@ pub const AppState = struct {
     }
 
     fn draw_list(self: *const AppState, win: u32) void {
-        ui.draw_rect(win, list_area, ui.COLOR_SURFACE);
-        ui.draw_rect_outline(win, list_area, 1, ui.COLOR_BORDER);
+        ui.draw_rect(win, list_area, ui.theme_surface());
+        ui.draw_rect_outline(win, list_area, ui.border_w, ui.theme_border());
 
         // F11: draw column headers at the top of the list area.
         const hdr_rect = Rect.make(list_area.x, list_area.y, list_area.w, header_h);
-        ui.draw_rect(win, hdr_rect, ui.COLOR_BTN_IDLE);
-        ui.draw_rect_outline(win, hdr_rect, 1, ui.COLOR_BORDER);
+        ui.draw_rect(win, hdr_rect, ui.theme_btn_idle());
+        ui.draw_rect_outline(win, hdr_rect, ui.border_w, ui.theme_border());
 
         const ind: []const u8 = if (self.sort_asc) " ^" else " v";
-        ui.draw_text(win, "Name", col_name_x, list_area.y + 3, ui.COLOR_TEXT_PRIMARY);
-        ui.draw_text(win, "Size", col_size_x, list_area.y + 3, ui.COLOR_TEXT_PRIMARY);
-        ui.draw_text(win, "Type", col_type_x, list_area.y + 3, ui.COLOR_TEXT_PRIMARY);
+        ui.draw_text(win, "Name", col_name_x, list_area.y + 3, ui.theme_text_primary());
+        ui.draw_text(win, "Size", col_size_x, list_area.y + 3, ui.theme_text_primary());
+        ui.draw_text(win, "Type", col_type_x, list_area.y + 3, ui.theme_text_primary());
         // Draw sort indicator next to the active column.
         const ind_x: u32 = switch (self.sort_column) {
             .name => col_name_x + 4 * glyph_w,
             .size => col_size_x + 4 * glyph_w,
             .col_type => col_type_x + 4 * glyph_w,
         };
-        ui.draw_text(win, ind, ind_x, list_area.y + 3, ui.COLOR_ACCENT);
+        ui.draw_text(win, ind, ind_x, list_area.y + 3, ui.theme_accent());
 
         // Draw file rows below the header.
         const vis = self.list.visible_rows();
@@ -1977,11 +2003,11 @@ pub const AppState = struct {
     }
 
     fn draw_details(self: *const AppState, win: u32) void {
-        ui.draw_rect(win, details_area, ui.COLOR_SURFACE);
-        ui.draw_rect_outline(win, details_area, 1, ui.COLOR_BORDER);
+        ui.draw_rect(win, details_area, ui.theme_surface());
+        ui.draw_rect_outline(win, details_area, ui.border_w, ui.theme_border());
 
         const sel = self.list.selected orelse {
-            ui.draw_text(win, "(empty)", details_area.x + 6, details_area.y + 8, ui.COLOR_TEXT_MUTED);
+            ui.draw_text(win, "(empty)", details_area.x + 6, details_area.y + 8, ui.theme_text_muted());
             return;
         };
         if (sel >= self.entry_count) return;
@@ -1990,63 +2016,63 @@ pub const AppState = struct {
 
         // F2: Properties inspector mode
         if (self.properties_mode) {
-            ui.draw_text(win, "Properties:", details_area.x + 6, details_area.y + 6, ui.COLOR_ACCENT);
-            ui.draw_text(win, "Path:", details_area.x + 6, details_area.y + 22, ui.COLOR_TEXT_MUTED);
+            ui.draw_text(win, "Properties:", details_area.x + 6, details_area.y + 6, ui.theme_accent());
+            ui.draw_text(win, "Path:", details_area.x + 6, details_area.y + 22, ui.theme_text_muted());
             var pbuf: [64]u8 = undefined;
             const full_p = build_path(self.current_path_slice(), name, &pbuf);
             const pcap = @min(full_p.len, 28);
-            ui.draw_text(win, full_p[0..pcap], details_area.x + 6, details_area.y + 34, ui.COLOR_TEXT_PRIMARY);
+            ui.draw_text(win, full_p[0..pcap], details_area.x + 6, details_area.y + 34, ui.theme_text_primary());
 
-            ui.draw_text(win, "Size:", details_area.x + 6, details_area.y + 50, ui.COLOR_TEXT_MUTED);
+            ui.draw_text(win, "Size:", details_area.x + 6, details_area.y + 50, ui.theme_text_muted());
             var sbuf2: [24]u8 = undefined;
             var spos2: usize = 0;
             spos2 = append_str(&sbuf2, spos2, fmt_u64(sbuf2[spos2..], entry.size));
             spos2 = append_str(&sbuf2, spos2, " B");
-            ui.draw_text(win, sbuf2[0..spos2], details_area.x + 6, details_area.y + 62, ui.COLOR_TEXT_PRIMARY);
+            ui.draw_text(win, sbuf2[0..spos2], details_area.x + 6, details_area.y + 62, ui.theme_text_primary());
 
-            ui.draw_text(win, "Dir Total:", details_area.x + 6, details_area.y + 78, ui.COLOR_TEXT_MUTED);
+            ui.draw_text(win, "Dir Total:", details_area.x + 6, details_area.y + 78, ui.theme_text_muted());
             var dbuf: [24]u8 = undefined;
             var dpos: usize = 0;
             dpos = append_str(&dbuf, dpos, fmt_u64(dbuf[dpos..], self.total_dir_bytes()));
             dpos = append_str(&dbuf, dpos, " B");
-            ui.draw_text(win, dbuf[0..dpos], details_area.x + 6, details_area.y + 90, ui.COLOR_TEXT_PRIMARY);
+            ui.draw_text(win, dbuf[0..dpos], details_area.x + 6, details_area.y + 90, ui.theme_text_primary());
 
-            ui.draw_text(win, "Format:", details_area.x + 6, details_area.y + 106, ui.COLOR_TEXT_MUTED);
-            ui.draw_text(win, "Host Share 8.3", details_area.x + 6, details_area.y + 118, ui.COLOR_TEXT_PRIMARY);
+            ui.draw_text(win, "Format:", details_area.x + 6, details_area.y + 106, ui.theme_text_muted());
+            ui.draw_text(win, "Host Share 8.3", details_area.x + 6, details_area.y + 118, ui.theme_text_primary());
 
-            ui.draw_text(win, "Timestamp:", details_area.x + 6, details_area.y + 134, ui.COLOR_TEXT_MUTED);
-            ui.draw_text(win, "N/A (host)", details_area.x + 6, details_area.y + 146, ui.COLOR_TEXT_MUTED);
+            ui.draw_text(win, "Timestamp:", details_area.x + 6, details_area.y + 134, ui.theme_text_muted());
+            ui.draw_text(win, "N/A (host)", details_area.x + 6, details_area.y + 146, ui.theme_text_muted());
             return;
         }
 
-        ui.draw_text(win, "Size", details_area.x + 6, details_area.y + 6, ui.COLOR_TEXT_MUTED);
+        ui.draw_text(win, "Size", details_area.x + 6, details_area.y + 6, ui.theme_text_muted());
         var sbuf: [24]u8 = undefined;
         var spos: usize = 0;
         spos = append_str(&sbuf, spos, fmt_u64(sbuf[spos..], entry.size));
         spos = append_str(&sbuf, spos, " B");
-        ui.draw_text(win, sbuf[0..spos], details_area.x + 6, details_area.y + 20, ui.COLOR_TEXT_PRIMARY);
+        ui.draw_text(win, sbuf[0..spos], details_area.x + 6, details_area.y + 20, ui.theme_text_primary());
 
-        ui.draw_text(win, "Type", details_area.x + 6, details_area.y + 44, ui.COLOR_TEXT_MUTED);
+        ui.draw_text(win, "Type", details_area.x + 6, details_area.y + 44, ui.theme_text_muted());
         const type_label: []const u8 = if (entry.is_dir != 0) "DIR" else "FILE";
-        ui.draw_text(win, type_label, details_area.x + 6, details_area.y + 58, if (entry.is_dir != 0) ui.COLOR_WARNING else ui.COLOR_SUCCESS);
+        ui.draw_text(win, type_label, details_area.x + 6, details_area.y + 58, if (entry.is_dir != 0) ui.theme_warning() else ui.theme_success());
 
-        ui.draw_text(win, "Name", details_area.x + 6, details_area.y + 82, ui.COLOR_TEXT_MUTED);
+        ui.draw_text(win, "Name", details_area.x + 6, details_area.y + 82, ui.theme_text_muted());
         const cap = @min(name.len, 18);
-        ui.draw_text(win, name[0..cap], details_area.x + 6, details_area.y + 96, ui.COLOR_ACCENT);
+        ui.draw_text(win, name[0..cap], details_area.x + 6, details_area.y + 96, ui.theme_accent());
 
         // C7 inline preview (below metadata, first 15 lines, binary placeholder).
         const preview_y = details_area.y + 115;
-        ui.draw_text(win, "Preview", details_area.x + 6, preview_y, ui.COLOR_TEXT_MUTED);
+        ui.draw_text(win, "Preview", details_area.x + 6, preview_y, ui.theme_text_muted());
         if (entry.is_dir != 0) {
-            ui.draw_text(win, "(directory)", details_area.x + 6, preview_y + 14, ui.COLOR_TEXT_MUTED);
+            ui.draw_text(win, "(directory)", details_area.x + 6, preview_y + 14, ui.theme_text_muted());
             return;
         }
         if (!self.preview_loaded) {
-            ui.draw_text(win, "(no preview)", details_area.x + 6, preview_y + 14, ui.COLOR_TEXT_MUTED);
+            ui.draw_text(win, "(no preview)", details_area.x + 6, preview_y + 14, ui.theme_text_muted());
             return;
         }
         if (self.preview_is_binary) {
-            ui.draw_text(win, "(binary)", details_area.x + 6, preview_y + 14, ui.COLOR_TEXT_MUTED);
+            ui.draw_text(win, "(binary)", details_area.x + 6, preview_y + 14, ui.theme_text_muted());
             return;
         }
         const slice = self.preview_content[0..self.preview_len];
@@ -2073,7 +2099,7 @@ pub const AppState = struct {
             if (row >= preview_rows) break;
             // Only draw printable, skip others (already filtered binary)
             if (ch >= 0x20 and ch <= 0x7e) {
-                ui.draw_char(win, ch, px, py, ui.COLOR_TEXT_PRIMARY);
+                ui.draw_char(win, ch, px, py, ui.theme_text_primary());
             }
             px += glyph_w;
             col += 1;
@@ -2082,8 +2108,8 @@ pub const AppState = struct {
 
     fn draw_view(self: *const AppState, win: u32) void {
         const body = Rect.make(6, 26, 244, 130);
-        ui.draw_rect(win, body, ui.COLOR_SURFACE);
-        ui.draw_rect_outline(win, body, 1, ui.COLOR_BORDER);
+        ui.draw_rect(win, body, ui.theme_surface());
+        ui.draw_rect_outline(win, body, ui.border_w, ui.theme_border());
 
         const slice = self.content[0..self.content_len];
         // Render the first `view_rows` display rows with the same wrap rule
@@ -2103,12 +2129,14 @@ pub const AppState = struct {
             if (row >= view_rows) break;
             const x = view_text_x + @as(u32, @intCast(col)) * glyph_w;
             const y = view_text_y + @as(u32, @intCast(row)) * line_h;
-            ui.draw_char(win, ch, x, y, ui.COLOR_TEXT_PRIMARY);
+            ui.draw_char(win, ch, x, y, ui.theme_text_primary());
             col += 1;
         }
     }
 
     pub fn handle_mouse_events(self: *AppState, ev: *const Event) bool {
+        // M37 DQ4: per-region cursor tracking.
+        if (ev.kind == ui.MOUSE_MOVE) self.update_cursor(ev.arg0, ev.arg1);
         // Modal dialogs intercept all mouse events when open
         if (self.delete_dialog.is_open()) {
             _ = self.delete_dialog.handle_event(ev);
@@ -2545,6 +2573,8 @@ pub fn make_bak_name(name: []const u8, buf: []u8) []const u8 {
 pub export fn _start() callconv(.c) noreturn {
     var app = AppState.init();
 
+    // M37 DQ4: follow the desktop theme first.
+    _ = ui.sync_theme_from_host();
     const win_res = ui.win_open(window_x, window_y, window_w, window_h);
     if (win_res < 0) {
         ui.write_console("file: failed to open window\n");
@@ -2556,7 +2586,12 @@ pub export fn _start() callconv(.c) noreturn {
     app.list_directory();
     app.draw(win);
     ui.win_present(win);
+    ui.emit_tokens_marker("file");
     ui.write_console("file: ready\n");
+    // M37 DQ4 gate: let the compositor settle (several ticks) so the
+    // kind-4 snapshot captures the presented frame, not a stale one.
+    ui.sleep_ticks(50);
+    ui.write_console("file: settled\n");
 
     var ev: Event = undefined;
     while (true) {

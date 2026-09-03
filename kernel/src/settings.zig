@@ -38,6 +38,7 @@
 //!   theme      string  "dark"        "dark"|"light"|"amber", UI color accent
 //!   scrollback string  "1000"        positive integer, terminal scrollback lines
 //!   color      string  "on"          "on"|"off", ANSI terminal colors in shell
+//!   shadow     string  "off"         "on"|"off", M37 DQ4 compositor drop-shadow
 
 const std = @import("std");
 // M34 HF5 (issue #739): the host-share persistence path; HF6 (issue
@@ -79,6 +80,7 @@ pub fn init() void {
     _ = set_internal("prompt", "virelai> ");
     _ = set_internal("theme", "dark");
     _ = set_internal("scrollback", "1000");
+    _ = set_internal("shadow", "off"); // M37 DQ4 (issue #838): compositor drop-shadow, default off
     _ = set_internal("focus_follows_mouse", "off");
     initialized = true;
 }
@@ -139,6 +141,13 @@ pub fn get_color() bool {
 /// M27 G13 (#456): whether focus follows mouse pointer.
 pub fn get_focus_follows_mouse() bool {
     const val = get("focus_follows_mouse") orelse return false;
+    return std.mem.eql(u8, val, "on") or std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true");
+}
+
+/// M37 DQ4 (issue #838): whether the compositor draws drop-shadows.
+/// Default off — every pre-DQ4 pixel gate stays byte-identical.
+pub fn get_shadow() bool {
+    const val = get("shadow") orelse return false;
     return std.mem.eql(u8, val, "on") or std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true");
 }
 
@@ -538,6 +547,20 @@ test "settings: theme colors and IDs (M27 G20)" {
 
     set_theme_id(0); // Reset to dark
     try std.testing.expectEqual(@as(u8, 0), get_theme_id());
+}
+
+test "settings: drop-shadow flag (M37 DQ4)" {
+    init();
+    try std.testing.expect(!get_shadow());
+    try std.testing.expectEqualStrings("off", get("shadow").?);
+    _ = set("shadow", "on");
+    try std.testing.expect(get_shadow());
+    _ = set("shadow", "off");
+    try std.testing.expect(!get_shadow());
+    // Serialized round-trip: the flag persists to the share.
+    var buf: [2048]u8 = undefined;
+    const len = serialize(&buf);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..len], "shadow=off") != null);
 }
 
 test "settings: font size getters and setters (M27 G21)" {

@@ -779,6 +779,22 @@ pub fn user_border_unfocused() u32 {
         else => 0x475569, // dark: muted blue-gray
     };
 }
+
+/// M37 DQ4 (issue #838): compositor drop-shadow offset (px) — right +
+/// bottom bands outside the window rect. Mirrors `user/src/lib/ui.zig`
+/// (`shadow_off`); pinned equal by the dq4 shadow-parity host test.
+/// Gated by `settings set shadow on` (default off) so every pre-DQ4
+/// pixel gate stays byte-identical.
+pub const chrome_shadow_off: usize = 4;
+
+/// M37 DQ4: theme color for the drop-shadow bands.
+pub fn shadow_color() u32 {
+    return switch (theme_id) {
+        1 => 0x94a3b8, // light: slate (visible on light wallpaper)
+        2 => 0x000000, // amber: black
+        else => 0x000000, // dark: black
+    };
+}
 /// M20-U9 layout helper: where the centered title text starts and how
 /// many bytes of it to draw, given a window width and label length.
 /// Leaves room for the minimize+close buttons on the right; labels too
@@ -3838,6 +3854,35 @@ fn draw_chrome() void {
             fill_rect(fb, stride, w.x, w.y, bw, wh, b); // left
             if (ww > bw) fill_rect(fb, stride, w.x + ww - bw, w.y, bw, wh, b); // right
         }
+        // M37 DQ4: drop-shadow bands OUTSIDE the window rect (right +
+        // bottom + corner), drawn back-to-front per window so a front
+        // window covers the shadow of the one beneath. Flag-gated
+        // (`settings set shadow on`, default off): put_px does no
+        // clipping, so every band is clamped to the scanout here.
+        if (settings.get_shadow()) {
+            const sc = shadow_color();
+            const so = chrome_shadow_off;
+            const ww: usize = if (w.w > wspan) wspan else w.w;
+            const wh: usize = if (w.h > hspan) hspan else w.h;
+            const zx0 = w.x + ww;
+            const zy0 = w.y + so;
+            const zy1 = @min(w.y + wh, hspan);
+            if (zx0 < wspan and zy1 > zy0) {
+                const zx1 = @min(zx0 + so, wspan);
+                fill_rect(fb, stride, zx0, zy0, zx1 - zx0, zy1 - zy0, sc); // right
+            }
+            const bx0 = w.x + so;
+            const by0 = w.y + wh;
+            if (by0 < hspan and bx0 < wspan) {
+                const bx1 = @min(bx0 + ww -| so, wspan);
+                const by1 = @min(by0 + so, hspan);
+                if (bx1 > bx0) fill_rect(fb, stride, bx0, by0, bx1 - bx0, by1 - by0, sc); // bottom
+                if (zx0 < wspan and by1 > by0) {
+                    const cx1 = @min(zx0 + so, wspan);
+                    fill_rect(fb, stride, zx0, by0, cx1 - zx0, by1 - by0, sc); // corner
+                }
+            }
+        }
         // Title bar: "dui<id> pid=<pid>" (the owning pid when known),
         // CENTERED with "..." truncation when it does not fit (M20-U9). The
         // label is DATA (kernel-owned); its colors are the WM's.
@@ -4381,6 +4426,22 @@ test "driving_award: the border is two pixels on every theme (M20-U9)" {
     theme_id = 1;
     _ = user_border();
     try std.testing.expectEqual(@as(usize, 2), chrome_border_w);
+}
+
+test "driving_award: DQ4 drop-shadow color per theme + offset parity (issue #838)" {
+    const saved = theme_id;
+    defer theme_id = saved;
+    theme_id = 0;
+    try std.testing.expectEqual(@as(u32, 0x000000), shadow_color());
+    theme_id = 1;
+    try std.testing.expectEqual(@as(u32, 0x94a3b8), shadow_color());
+    theme_id = 2;
+    try std.testing.expectEqual(@as(u32, 0x000000), shadow_color());
+    // Offset parity with user/src/lib/ui.zig shadow_off (both pinned 4;
+    // the two literals are the contract — see the dq4 metric test).
+    try std.testing.expectEqual(@as(usize, 4), chrome_shadow_off);
+    // Flag defaults off: pre-DQ4 pixel gates stay byte-identical.
+    try std.testing.expect(!settings.get_shadow());
 }
 
 test "driving_award: fmt_decimal formats unsigned values without leading zeros" {

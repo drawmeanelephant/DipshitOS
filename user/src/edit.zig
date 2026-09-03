@@ -50,7 +50,12 @@ const delta_text_cap: usize = 64;
 // E17: crash recovery
 pub const recovery_path: []const u8 = "/host/EDIT_REC.TXT"; // M34 HF5 (#739): user data lives in the host folder
 
-// E19: Editor Themes
+// E19: Editor Themes. M37 DQ4: the SYNTAX palette (bg/surface/text/
+// muted/accent/warning/success) stays EDIT-owned (green-terminal dark
+// identity); the CHROME fields below are SUPERSEDED — draw code reads
+// ui.theme_gutter_bg/selection_bg/caret() so the editor follows the
+// desktop tokens. The table keeps them as documentation of the values
+// the tokens were pinned from.
 pub const Theme = struct {
     name: []const u8,
     bg: u32,
@@ -1865,6 +1870,27 @@ pub const AppState = struct {
         return &themes[self.theme_idx % themes.len];
     }
 
+    /// M37 DQ4: cycle the syntax theme and keep the shared widget theme in
+    /// lockstep (table order Dark/Light/Amber matches ui theme names, so
+    /// buttons/dialogs/palette follow the editor).
+    pub fn cycle_theme(self: *AppState) void {
+        self.theme_idx = (self.theme_idx + 1) % themes.len;
+        const name: []const u8 = switch (self.theme_idx % themes.len) {
+            1 => "light",
+            2 => "amber",
+            else => "dark",
+        };
+        _ = ui.set_theme(name);
+    }
+
+    /// M37 DQ4: adopt the desktop theme at startup (ui theme names map to
+    /// the table order Dark/Light/Amber).
+    pub fn adopt_host_theme(self: *AppState) void {
+        _ = ui.sync_theme_from_host();
+        const tn = ui.theme_name();
+        if (std.mem.eql(u8, tn, "light")) self.theme_idx = 1 else if (std.mem.eql(u8, tn, "amber")) self.theme_idx = 2 else self.theme_idx = 0;
+    }
+
     pub fn set_status(self: *AppState, msg: []const u8) void {
         const n = @min(msg.len, self.status.len);
         @memcpy(self.status[0..n], msg[0..n]);
@@ -1966,7 +1992,7 @@ pub const AppState = struct {
         ui.draw_text(win, "^P:Cmd ^S:Save ^F:Find ^B:Bmk", @intCast(window_w - 320), 3, t.muted);
 
         // Divider
-        ui.draw_rect(win, Rect.make(0, 16, window_w, 1), t.gutter_bg);
+        ui.draw_rect(win, Rect.make(0, 16, window_w, 1), ui.theme_gutter_bg());
 
         // Tab bar
         self.draw_tab_bar(win);
@@ -2009,7 +2035,7 @@ pub const AppState = struct {
             const bg = if (is_active) t.surface else t.bg;
             ui.draw_rect(win, Rect.make(tab_x, tab_y, tab_w, tab_bar_h), bg);
 
-            ui.draw_rect(win, Rect.make(tab_x + tab_w, tab_y, 1, tab_bar_h), t.gutter_bg);
+            ui.draw_rect(win, Rect.make(tab_x + tab_w, tab_y, 1, tab_bar_h), ui.theme_gutter_bg());
 
             const text_color = if (is_active) t.text else t.muted;
             ui.draw_text(win, name[0..name_len], tab_x + 4, tab_y + 3, text_color);
@@ -2021,7 +2047,7 @@ pub const AppState = struct {
             tab_x += tab_w + 1;
         }
 
-        ui.draw_rect(win, Rect.make(0, tab_y + tab_bar_h, window_w, 1), t.gutter_bg);
+        ui.draw_rect(win, Rect.make(0, tab_y + tab_bar_h, window_w, 1), ui.theme_gutter_bg());
     }
 
     fn editor_top(self: *const AppState) u32 {
@@ -2048,7 +2074,7 @@ pub const AppState = struct {
         // E24: File tree sidebar
         if (self.file_sidebar.active) {
             const sb_w: u32 = 96;
-            ui.draw_rect(win, Rect.make(0, top, sb_w, avail), t.gutter_bg);
+            ui.draw_rect(win, Rect.make(0, top, sb_w, avail), ui.theme_gutter_bg());
             ui.draw_text(win, "FILES", 4, top + 2, t.accent);
 
             var sbi: usize = 0;
@@ -2059,7 +2085,7 @@ pub const AppState = struct {
                 while (name_len < 32 and ent.name[name_len] != 0) : (name_len += 1) {}
                 const is_sel = (sbi == self.file_sidebar.selected);
                 if (is_sel) {
-                    ui.draw_rect(win, Rect.make(0, sby, sb_w, line_h), t.selection_bg);
+                    ui.draw_rect(win, Rect.make(0, sby, sb_w, line_h), ui.theme_selection_bg());
                 }
                 const col = if (is_sel) t.text else t.muted;
                 const take = @min(name_len, 10);
@@ -2075,7 +2101,7 @@ pub const AppState = struct {
         const gw: u32 = if (self.show_line_numbers) gutter_w else 0;
         const x0: u32 = edit_x + gw + 4;
         if (self.show_line_numbers) {
-            ui.draw_rect(win, Rect.make(edit_x, top, gutter_w, avail), t.gutter_bg);
+            ui.draw_rect(win, Rect.make(edit_x, top, gutter_w, avail), ui.theme_gutter_bg());
         }
 
         const fb_ptr = &self.tabs.tabs[self.tabs.active].fb;
@@ -2100,7 +2126,7 @@ pub const AppState = struct {
                 ui.draw_text(win, "1", edit_x + 2, gy, t.muted);
             }
             if (self.insert_mode) {
-                ui.draw_rect(win, Rect.make(x0, top + 2, glyph_w, line_h), t.cursor);
+                ui.draw_rect(win, Rect.make(x0, top + 2, glyph_w, line_h), ui.theme_caret());
             }
             ln = 1;
         }
@@ -2142,7 +2168,7 @@ pub const AppState = struct {
                     if (sel_max_c >= sel_min_c) {
                         const sel_x = x0 + @as(u32, @intCast(sel_min_c -| 1)) * glyph_w;
                         const sel_w = @as(u32, @intCast(sel_max_c - sel_min_c + 1)) * glyph_w;
-                        ui.draw_rect(win, Rect.make(sel_x, gy - 1, sel_w, line_h), t.selection_bg);
+                        ui.draw_rect(win, Rect.make(sel_x, gy - 1, sel_w, line_h), ui.theme_selection_bg());
                     }
                 }
 
@@ -2155,7 +2181,7 @@ pub const AppState = struct {
                             const col_offset = p - c_start;
                             const mx = x0 + @as(u32, @intCast(col_offset)) * glyph_w;
                             const mw = @as(u32, @intCast(needle.len)) * glyph_w;
-                            ui.draw_rect(win, Rect.make(mx, gy - 1, mw, line_h), t.selection_bg);
+                            ui.draw_rect(win, Rect.make(mx, gy - 1, mw, line_h), ui.theme_selection_bg());
                         }
                     }
                 }
@@ -2172,7 +2198,7 @@ pub const AppState = struct {
                     if (bm >= c_start and bm < c_end) {
                         const col_offset = bm - c_start;
                         const bx = x0 + @as(u32, @intCast(col_offset)) * glyph_w;
-                        ui.draw_rect_outline(win, Rect.make(bx, gy - 1, glyph_w, line_h), 1, t.accent);
+                        ui.draw_rect_outline(win, Rect.make(bx, gy - 1, glyph_w, line_h), ui.border_w, t.accent);
                     }
                 }
 
@@ -2185,7 +2211,7 @@ pub const AppState = struct {
                     if (is_cur_in_chunk) {
                         const cx = x0 + @as(u32, @intCast(fb_ptr.cursor - c_start)) * glyph_w;
                         const cy = top + 2 + @as(u32, @intCast(ln)) * line_h;
-                        ui.draw_rect(win, Rect.make(cx, cy, glyph_w, line_h), t.cursor);
+                        ui.draw_rect(win, Rect.make(cx, cy, glyph_w, line_h), ui.theme_caret());
                     }
 
                     // Secondary Cursors
@@ -2199,7 +2225,7 @@ pub const AppState = struct {
                         if (is_ecur_in_chunk) {
                             const ecx = x0 + @as(u32, @intCast(epos - c_start)) * glyph_w;
                             const ecy = top + 2 + @as(u32, @intCast(ln)) * line_h;
-                            ui.draw_rect_outline(win, Rect.make(ecx, ecy, glyph_w, line_h), 1, t.warning);
+                            ui.draw_rect_outline(win, Rect.make(ecx, ecy, glyph_w, line_h), ui.border_w, t.warning);
                         }
                     }
                 }
@@ -2222,7 +2248,7 @@ pub const AppState = struct {
         const gw: u32 = if (self.show_line_numbers) gutter_w else 0;
         const x0: u32 = gw + 4;
         if (self.show_line_numbers) {
-            ui.draw_rect(win, Rect.make(0, top, gutter_w, edit_h), t.gutter_bg);
+            ui.draw_rect(win, Rect.make(0, top, gutter_w, edit_h), ui.theme_gutter_bg());
         }
 
         const fb_ptr = &self.tabs.tabs[self.tabs.active].fb;
@@ -2259,7 +2285,7 @@ pub const AppState = struct {
             if (ln > 0 and cl <= ln) {
                 const cx = x0 + @as(u32, @intCast(cc - 1)) * glyph_w;
                 const cy = top + 2 + @as(u32, @intCast(cl - 1)) * line_h;
-                ui.draw_rect(win, Rect.make(cx, cy, glyph_w, line_h), t.cursor);
+                ui.draw_rect(win, Rect.make(cx, cy, glyph_w, line_h), ui.theme_caret());
             }
         }
 
@@ -2269,12 +2295,12 @@ pub const AppState = struct {
             if (ln > 0 and cl <= ln) {
                 const cx = x0 + @as(u32, @intCast(cc - 1)) * glyph_w;
                 const cy = top + 2 + @as(u32, @intCast(cl - 1)) * line_h;
-                ui.draw_rect(win, Rect.make(cx, cy, glyph_w, line_h), t.cursor);
+                ui.draw_rect(win, Rect.make(cx, cy, glyph_w, line_h), ui.theme_caret());
             }
         }
 
         const div_y = top + edit_h;
-        ui.draw_rect(win, Rect.make(0, div_y, window_w, 1), t.gutter_bg);
+        ui.draw_rect(win, Rect.make(0, div_y, window_w, 1), ui.theme_gutter_bg());
 
         const con_y = div_y + 1;
         const con_h = console_split_h - 1;
@@ -2310,7 +2336,7 @@ pub const AppState = struct {
         const bar_h: u32 = 20;
         const bar_y = window_h - bar_h;
         ui.draw_rect(win, Rect.make(0, bar_y, window_w, bar_h), t.surface);
-        ui.draw_rect_outline(win, Rect.make(0, bar_y, window_w, bar_h), 1, t.accent);
+        ui.draw_rect_outline(win, Rect.make(0, bar_y, window_w, bar_h), ui.border_w, t.accent);
 
         ui.draw_text(win, "Goto line:", 6, bar_y + 5, t.accent);
 
@@ -2331,7 +2357,7 @@ pub const AppState = struct {
         const bar_h: u32 = if (self.find_prompt.is_replace) 36 else 20;
         const bar_y = window_h - bar_h;
         ui.draw_rect(win, Rect.make(0, bar_y, window_w, bar_h), t.surface);
-        ui.draw_rect_outline(win, Rect.make(0, bar_y, window_w, bar_h), 1, t.accent);
+        ui.draw_rect_outline(win, Rect.make(0, bar_y, window_w, bar_h), ui.border_w, t.accent);
 
         ui.draw_text(win, "Find:", 6, bar_y + 5, t.accent);
         const ftext = self.find_prompt.get_find();
@@ -2367,7 +2393,7 @@ pub const AppState = struct {
         const pal_y: u32 = 40;
 
         ui.draw_rect(win, Rect.make(pal_x, pal_y, pal_w, pal_h), t.surface);
-        ui.draw_rect_outline(win, Rect.make(pal_x, pal_y, pal_w, pal_h), 1, t.accent);
+        ui.draw_rect_outline(win, Rect.make(pal_x, pal_y, pal_w, pal_h), ui.border_w, t.accent);
 
         ui.draw_text(win, ">", pal_x + 8, pal_y + 8, t.accent);
         const q = self.cmd_palette.query[0..self.cmd_palette.query_len];
@@ -2377,7 +2403,7 @@ pub const AppState = struct {
         const qcx = pal_x + 20 + @as(u32, @intCast(q.len)) * glyph_w;
         ui.draw_rect(win, Rect.make(qcx, pal_y + 7, glyph_w, 10), t.accent);
 
-        ui.draw_rect(win, Rect.make(pal_x, pal_y + 24, pal_w, 1), t.gutter_bg);
+        ui.draw_rect(win, Rect.make(pal_x, pal_y + 24, pal_w, 1), ui.theme_gutter_bg());
 
         var row: usize = 0;
         var match_idx: usize = 0;
@@ -2387,7 +2413,7 @@ pub const AppState = struct {
                     const ry = pal_y + 28 + @as(u32, @intCast(row)) * 14;
                     const is_sel = (match_idx == self.cmd_palette.selected);
                     if (is_sel) {
-                        ui.draw_rect(win, Rect.make(pal_x + 2, ry - 1, pal_w - 4, 13), t.selection_bg);
+                        ui.draw_rect(win, Rect.make(pal_x + 2, ry - 1, pal_w - 4, 13), ui.theme_selection_bg());
                     }
                     const ccolor = if (is_sel) t.text else t.muted;
                     ui.draw_text(win, cmd.name, pal_x + 8, ry, ccolor);
@@ -2407,16 +2433,16 @@ pub const AppState = struct {
         const rl_y: u32 = 50;
 
         ui.draw_rect(win, Rect.make(rl_x, rl_y, rl_w, rl_h), t.surface);
-        ui.draw_rect_outline(win, Rect.make(rl_x, rl_y, rl_w, rl_h), 1, t.accent);
+        ui.draw_rect_outline(win, Rect.make(rl_x, rl_y, rl_w, rl_h), ui.border_w, t.accent);
         ui.draw_text(win, "Recent Files", rl_x + 8, rl_y + 6, t.accent);
-        ui.draw_rect(win, Rect.make(rl_x, rl_y + 20, rl_w, 1), t.gutter_bg);
+        ui.draw_rect(win, Rect.make(rl_x, rl_y + 20, rl_w, 1), ui.theme_gutter_bg());
 
         var i: usize = 0;
         while (i < self.recent_list.count and i < 8) : (i += 1) {
             const ry = rl_y + 24 + @as(u32, @intCast(i)) * 14;
             const is_sel = (i == self.recent_list.selected);
             if (is_sel) {
-                ui.draw_rect(win, Rect.make(rl_x + 2, ry - 1, rl_w - 4, 13), t.selection_bg);
+                ui.draw_rect(win, Rect.make(rl_x + 2, ry - 1, rl_w - 4, 13), ui.theme_selection_bg());
             }
             const col = if (is_sel) t.text else t.muted;
             const fname = self.recent_list.files[i][0..self.recent_list.lens[i]];
@@ -2450,6 +2476,9 @@ var g_app: AppState = .{};
 pub export fn _start(argc: usize, argv: ?[*]const [32]u8) callconv(.c) noreturn {
     AppState.init(&g_app);
 
+    // M37 DQ4: follow the desktop theme (also sets the syntax variant).
+    g_app.adopt_host_theme();
+
     _ = argc;
     _ = argv;
 
@@ -2465,7 +2494,12 @@ pub export fn _start(argc: usize, argv: ?[*]const [32]u8) callconv(.c) noreturn 
 
     g_app.draw(win);
     ui.win_present(win);
+    ui.emit_tokens_marker("edit");
     ui.write_console("edit: ready\n");
+    // M37 DQ4 gate: let the compositor settle (several ticks) so the
+    // kind-4 snapshot captures the presented frame, not a stale one.
+    ui.sleep_ticks(50);
+    ui.write_console("edit: settled\n");
 
     var ev: Event = undefined;
     while (true) {
@@ -2600,7 +2634,7 @@ pub fn handle_key(app: *AppState, ev: *const Event) bool {
 
     // Ctrl+Shift+T: Cycle Themes (E19)
     if ((ev.flags & ui.MOD_CTRL) != 0 and (ev.flags & ui.MOD_SHIFT) != 0 and keycode == 0x17) { // T
-        app.theme_idx = (app.theme_idx + 1) % themes.len;
+        app.cycle_theme();
         var nbuf: [32]u8 = undefined;
         const msg = std.fmt.bufPrint(&nbuf, "Theme: {s}", .{app.cur_theme().name}) catch "Theme";
         app.set_info(msg);
@@ -2871,7 +2905,7 @@ pub fn execute_key_action(app: *AppState, action: KeyAction) bool {
             return false;
         },
         .cycle_theme => {
-            app.theme_idx = (app.theme_idx + 1) % themes.len;
+            app.cycle_theme();
             var nbuf: [32]u8 = undefined;
             const msg = std.fmt.bufPrint(&nbuf, "Theme: {s}", .{app.cur_theme().name}) catch "Theme";
             app.set_info(msg);
@@ -4392,6 +4426,9 @@ test "edit: execute_key_action dispatches commands cleanly" {
     try std.testing.expectEqual(@as(usize, 0), app.theme_idx);
     try std.testing.expect(execute_key_action(&app, .cycle_theme));
     try std.testing.expectEqual(@as(usize, 1), app.theme_idx);
+    // M37 DQ4: the widget theme followed in lockstep.
+    try std.testing.expectEqualStrings("light", ui.theme_name());
+    _ = ui.set_theme("dark");
 
     // Toggle bookmark
     try std.testing.expect(execute_key_action(&app, .toggle_bookmark));

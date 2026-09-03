@@ -390,6 +390,298 @@ pub const COLOR_DANGER: u32 = THEME_DARK.danger;
 pub const COLOR_WARNING: u32 = THEME_DARK.warning;
 
 // ---------------------------------------------------------------------------
+// M37 DQ4 design tokens (issue #838): one look.
+//
+// The Theme struct above owns the base palette; this section centralizes
+// everything else every first-party app must agree on: spacing/border
+// metrics, the extended chrome colors (selection, caret, editor gutter,
+// file-type accents, text-over-accent, compositor shadow), the window/
+// panel frame + focus-outline helpers, the app-side cursor-kind tokens,
+// and the host-share theme sync that makes light/dark real per app.
+//
+// Rules: token VALUES are pinned by the `dq4:` host tests below — change
+// a value and the tests fail loudly. Dark-theme values are chosen to be
+// byte-identical to the pre-DQ4 rendering (frozen COLOR_* / hardcoded app
+// colors), so the migration is a no-op on dark and a fix on light.
+// ---------------------------------------------------------------------------
+
+/// Spacing scale (px). Apps pad with these, never with bare literals.
+pub const pad_xs: u32 = 2;
+pub const pad_sm: u32 = 4;
+pub const pad_md: u32 = 8;
+pub const pad_lg: u32 = 16;
+
+/// Border + outline metrics (px).
+pub const border_w: u32 = 1;
+pub const focus_w: u32 = 2;
+
+/// Text caret metrics (px): the I-beam bar drawn in focused text fields.
+pub const caret_w: u32 = 2;
+pub const caret_h: u32 = 8;
+
+/// Compositor drop-shadow offset (px): right + bottom bands outside the
+/// window rect, in the theme shadow color. Mirrors
+/// `kernel/src/driving_award.zig` (`chrome_shadow_off`) — the two values
+/// are pinned equal by the dq4 shadow-parity test.
+pub const shadow_off: u32 = 4;
+
+/// Extended per-theme chrome colors. Stored beside Theme (not inside it)
+/// so the frozen Theme struct layout is untouched; selected by the same
+/// `current_theme` identity the theme_*() accessors read.
+pub const ChromeColors = struct {
+    selection_bg: u32,
+    caret: u32,
+    gutter_bg: u32,
+    line_highlight: u32,
+    file_dir: u32,
+    file_txt: u32,
+    file_bin: u32,
+    file_unknown: u32,
+    multi_select: u32,
+    on_accent: u32,
+    shadow: u32,
+};
+
+pub const CHROME_DARK: ChromeColors = .{
+    .selection_bg = 0x2a4460,
+    .caret = 0x3b82f6,
+    .gutter_bg = 0x0b0e11,
+    .line_highlight = 0x22303a,
+    .file_dir = 0x3b82f6,
+    .file_txt = 0x22c55e,
+    .file_bin = 0xf59e0b,
+    .file_unknown = 0x64748b,
+    .multi_select = 0x1e3a8a,
+    .on_accent = 0xffffff,
+    .shadow = 0x000000,
+};
+
+pub const CHROME_LIGHT: ChromeColors = .{
+    .selection_bg = 0xbfdbfe,
+    .caret = 0x2563eb,
+    .gutter_bg = 0xe5e7eb,
+    .line_highlight = 0xe0e7ff,
+    .file_dir = 0x2563eb,
+    .file_txt = 0x16a34a,
+    .file_bin = 0xd97706,
+    .file_unknown = 0x64748b,
+    .multi_select = 0x93c5fd,
+    .on_accent = 0xffffff,
+    .shadow = 0x94a3b8,
+};
+
+pub const CHROME_AMBER: ChromeColors = .{
+    .selection_bg = 0x4d3300,
+    .caret = 0xff8800,
+    .gutter_bg = 0x120c00,
+    .line_highlight = 0x332200,
+    .file_dir = 0xffcc33,
+    .file_txt = 0x88cc00,
+    .file_bin = 0xff8800,
+    .file_unknown = 0x997700,
+    .multi_select = 0x664400,
+    .on_accent = 0x1a1000,
+    .shadow = 0x000000,
+};
+
+fn active_chrome() *const ChromeColors {
+    if (current_theme.bg == THEME_LIGHT.bg and current_theme.accent == THEME_LIGHT.accent) return &CHROME_LIGHT;
+    if (current_theme.bg == THEME_AMBER.bg and current_theme.accent == THEME_AMBER.accent) return &CHROME_AMBER;
+    return &CHROME_DARK;
+}
+
+pub fn theme_selection_bg() u32 {
+    return active_chrome().selection_bg;
+}
+pub fn theme_caret() u32 {
+    return active_chrome().caret;
+}
+pub fn theme_gutter_bg() u32 {
+    return active_chrome().gutter_bg;
+}
+pub fn theme_line_highlight() u32 {
+    return active_chrome().line_highlight;
+}
+pub fn theme_file_dir() u32 {
+    return active_chrome().file_dir;
+}
+pub fn theme_file_txt() u32 {
+    return active_chrome().file_txt;
+}
+pub fn theme_file_bin() u32 {
+    return active_chrome().file_bin;
+}
+pub fn theme_file_unknown() u32 {
+    return active_chrome().file_unknown;
+}
+pub fn theme_multi_select() u32 {
+    return active_chrome().multi_select;
+}
+pub fn theme_on_accent() u32 {
+    return active_chrome().on_accent;
+}
+pub fn theme_shadow() u32 {
+    return active_chrome().shadow;
+}
+
+/// Resolve a possibly-legacy frozen COLOR_* value to the live theme.
+/// Dark renders byte-identical (aliases equal the dark theme); light/amber
+/// map to the matching theme color. Unknown customs pass through.
+pub fn live_color(c: u32) u32 {
+    if (c == COLOR_BG) return theme_bg();
+    if (c == COLOR_SURFACE) return theme_surface();
+    if (c == COLOR_BORDER) return theme_border();
+    if (c == COLOR_TEXT_PRIMARY) return theme_text_primary();
+    if (c == COLOR_TEXT_MUTED) return theme_text_muted();
+    if (c == COLOR_ACCENT) return theme_accent();
+    if (c == COLOR_BTN_IDLE) return theme_btn_idle();
+    if (c == COLOR_BTN_HOVER) return theme_btn_hover();
+    if (c == COLOR_BTN_PRESSED) return theme_btn_pressed();
+    if (c == COLOR_SUCCESS) return theme_success();
+    if (c == COLOR_DANGER) return theme_danger();
+    if (c == COLOR_WARNING) return theme_warning();
+    return c;
+}
+
+/// Relative luminance of a 0xRRGGBB color (WCAG 2.x linearization).
+pub fn luminance(rgb: u32) f64 {
+    const r: f64 = @as(f64, @floatFromInt((rgb >> 16) & 0xff)) / 255.0;
+    const g: f64 = @as(f64, @floatFromInt((rgb >> 8) & 0xff)) / 255.0;
+    const b: f64 = @as(f64, @floatFromInt(rgb & 0xff)) / 255.0;
+    const lin = struct {
+        fn f(c: f64) f64 {
+            return if (c <= 0.03928) c / 12.92 else std.math.pow(f64, (c + 0.055) / 1.055, 2.4);
+        }
+    }.f;
+    return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+}
+
+/// WCAG contrast ratio between two 0xRRGGBB colors (1.0 .. 21.0).
+pub fn contrast_ratio(a: u32, b: u32) f64 {
+    const la = luminance(a);
+    const lb = luminance(b);
+    const hi = if (la > lb) la else lb;
+    const lo = if (la > lb) lb else la;
+    return (hi + 0.05) / (lo + 0.05);
+}
+
+/// Border color for a frame: accent when focused, plain border otherwise.
+pub fn frame_border(focused: bool) u32 {
+    return if (focused) theme_accent() else theme_border();
+}
+
+/// Draw a 1px panel frame inside `rect` (in-app panels, dialogs, editors
+/// — the compositor owns the OUTER window border). Uses token metrics.
+pub fn draw_panel_frame(win_id: u32, rect: Rect, focused: bool) void {
+    draw_rect_outline(win_id, rect, border_w, frame_border(focused));
+}
+
+/// Draw the focus outline OUTSIDE `rect` (focus_w band in accent).
+/// Callers must leave focus_w px of clear space around the control.
+pub fn draw_focus_outline(win_id: u32, rect: Rect) void {
+    const outer = Rect.make(
+        if (rect.x >= focus_w) rect.x - focus_w else 0,
+        if (rect.y >= focus_w) rect.y - focus_w else 0,
+        rect.w + focus_w * 2,
+        rect.h + focus_w * 2,
+    );
+    draw_rect_outline(win_id, outer, focus_w, theme_accent());
+    draw_rect_outline(win_id, rect, border_w, theme_border());
+}
+
+// ---------------------------------------------------------------------------
+// Cursor-kind tokens. The compositor owns the hardware glyph (still the
+// fixed magenta quad — switching it needs a new ABI, out of DQ4 scope);
+// apps own the per-region KIND: which glyph SHOULD show over each region.
+// Apps track it in their MOUSE_MOVE path and emit `cursor=<name>` markers
+// (observable in the serial log); text carets draw with caret_w/caret_h.
+// ---------------------------------------------------------------------------
+
+pub const CursorKind = enum {
+    arrow,
+    ibeam,
+    pointer,
+    resize_h,
+    resize_v,
+    resize_diag,
+    crosshair,
+
+    pub fn name(self: CursorKind) []const u8 {
+        return switch (self) {
+            .arrow => "arrow",
+            .ibeam => "ibeam",
+            .pointer => "pointer",
+            .resize_h => "resize_h",
+            .resize_v => "resize_v",
+            .resize_diag => "resize_diag",
+            .crosshair => "crosshair",
+        };
+    }
+};
+
+/// Pure region → cursor mapping, unit-pinned. Priority: resize borders
+/// first (they overlap content edges), then clickables, then text.
+pub fn cursor_for_region(on_resize_border: bool, over_clickable: bool, over_text: bool) CursorKind {
+    if (on_resize_border) return .resize_diag;
+    if (over_clickable) return .pointer;
+    if (over_text) return .ibeam;
+    return .arrow;
+}
+
+/// Parse `theme=<dark|light|amber>` out of a SETTINGS.TXT payload.
+/// Pure + host-testable; sync_theme_from_host() feeds it the share file.
+pub fn parse_theme_setting(buf: []const u8) ?[]const u8 {
+    var i: usize = 0;
+    while (i < buf.len) {
+        var eol = i;
+        while (eol < buf.len and buf[eol] != '\n') : (eol += 1) {}
+        const line = buf[i..eol];
+        if (line.len > 6 and eql(line[0..6], "theme=")) {
+            const val = line[6..];
+            if (eql(val, "dark") or eql(val, "light") or eql(val, "amber")) return val;
+            return null;
+        }
+        i = if (eol < buf.len) eol + 1 else eol;
+    }
+    return null;
+}
+
+/// Current theme name (for markers + gates).
+pub fn theme_name() []const u8 {
+    if (current_theme.bg == THEME_LIGHT.bg and current_theme.accent == THEME_LIGHT.accent) return "light";
+    if (current_theme.bg == THEME_AMBER.bg and current_theme.accent == THEME_AMBER.accent) return "amber";
+    return "dark";
+}
+
+/// Sync `current_theme` from `/host/SETTINGS.TXT` (the kernel persists
+/// `settings set theme <name>` there). Returns true when a theme was
+/// applied. Host no-op (returns false) — EL0 file syscalls trap off-guest.
+/// Apps call this once at startup so `settings set theme light` + relaunch
+/// follows the desktop (DQ1 owns the toggle; DQ4 consumes it).
+pub fn sync_theme_from_host() bool {
+    if (@import("builtin").os.tag != .freestanding) return false;
+    const fd = file_open("/host/SETTINGS.TXT", MODE_READ);
+    if (fd < 0) return false;
+    var buf: [256]u8 = [_]u8{0} ** 256;
+    const n = file_read(@as(u32, @intCast(fd)), buf[0..]);
+    file_close(@as(u32, @intCast(fd)));
+    if (n <= 0) return false;
+    const end: usize = @min(@as(usize, @intCast(n)), buf.len);
+    if (parse_theme_setting(buf[0..end]) == null) return false;
+    return set_theme(parse_theme_setting(buf[0..end]).?);
+}
+
+/// Emit the per-app token marker the DQ4 gate greps:
+/// `<tag>: tokens theme=<name> bg=0x… surface=… border=… accent=…`.
+pub fn emit_tokens_marker(tag: []const u8) void {
+    var buf: [128]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{s}: tokens theme={s} bg=0x{x:0>6} surface=0x{x:0>6} border=0x{x:0>6} accent=0x{x:0>6}\n", .{
+        tag, theme_name(), theme_bg(), theme_surface(), theme_border(), theme_accent(),
+    }) catch return;
+    write_console(msg);
+}
+
+// ---------------------------------------------------------------------------
 // Syscall Invocation Helpers (AArch64 inline assembly / host fallback)
 // ---------------------------------------------------------------------------
 
@@ -1490,10 +1782,12 @@ pub const Button = struct {
 
     pub fn draw(self: *const Button, win_id: u32) void {
         const ws = self.state.to_widget_state();
+        // M37 DQ4: legacy frozen COLOR_* resolve live so every app follows
+        // the desktop theme with no per-app button churn.
         const bg = if (self.is_active)
             theme_accent()
         else if (self.bg_color) |c|
-            c
+            live_color(c)
         else
             widget_bg(ws);
 
@@ -1502,13 +1796,22 @@ pub const Button = struct {
         else
             widget_border(ws);
 
-        const text_col = if (self.state == .disabled)
+        // Default text follows the surface it sits on: text-over-accent on
+        // accent fills, theme text otherwise. An explicitly pinned color
+        // (anything but the legacy white default) always wins.
+        const on_accent_bg = self.is_active or
+            (if (self.bg_color) |c| live_color(c) == theme_accent() else false);
+        const text_col = if (self.text_color != COLOR_TEXT_PRIMARY)
+            self.text_color
+        else if (self.state == .disabled)
             widget_text(ws)
+        else if (on_accent_bg)
+            theme_on_accent()
         else
-            self.text_color;
+            widget_text(ws);
 
         draw_rect(win_id, self.rect, bg);
-        draw_rect_outline(win_id, self.rect, 1, border);
+        draw_rect_outline(win_id, self.rect, border_w, border);
         draw_text_centered(win_id, self.label, self.rect, text_col);
     }
 };
@@ -1531,10 +1834,12 @@ pub const Label = struct {
     }
 
     pub fn draw(self: *const Label, win_id: u32) void {
+        // M37 DQ4: the legacy white default resolves live (dark identical).
+        const col = if (self.color == COLOR_TEXT_PRIMARY) theme_text_primary() else self.color;
         if (self.align_center) {
-            draw_text_centered(win_id, self.text, self.rect, self.color);
+            draw_text_centered(win_id, self.text, self.rect, col);
         } else {
-            draw_text(win_id, self.text, self.rect.x, self.rect.y + (self.rect.h - 8) / 2, self.color);
+            draw_text(win_id, self.text, self.rect.x, self.rect.y + (self.rect.h - 8) / 2, col);
         }
     }
 };
@@ -1618,17 +1923,17 @@ pub const TextInput = struct {
 
     pub fn draw(self: *const TextInput, win_id: u32) void {
         draw_rect(win_id, self.rect, theme_surface());
-        draw_rect_outline(win_id, self.rect, 1, if (self.focused) theme_accent() else theme_border());
+        draw_rect_outline(win_id, self.rect, border_w, if (self.focused) theme_accent() else theme_border());
 
         const text_y = self.rect.y + (self.rect.h - 8) / 2;
-        const text_x = self.rect.x + 4;
+        const text_x = self.rect.x + pad_sm;
         draw_text(win_id, self.get_text(), text_x, text_y, theme_text_primary());
 
-        // Draw cursor bar if focused
+        // M37 DQ4: caret bar from tokens (I-beam state, observable pixels).
         if (self.focused) {
             const cursor_x = text_x + @as(u32, @intCast(self.cursor)) * 8;
-            if (cursor_x + 2 <= self.rect.x + self.rect.w) {
-                win_fill(win_id, cursor_x, text_y, 2, 8, theme_text_primary());
+            if (cursor_x + caret_w <= self.rect.x + self.rect.w) {
+                win_fill(win_id, cursor_x, text_y, caret_w, caret_h, theme_caret());
             }
         }
     }
@@ -4257,4 +4562,141 @@ test "ui: direct backing buffer draw_image_scaled" {
     // Check quadrant 2 (top-right: (4..5, 2..3)) is green
     try std.testing.expectEqual(@as(u32, 0xFF00FF00), buf[2 * 8 + 4]);
     try std.testing.expectEqual(@as(u32, 0xFF00FF00), buf[3 * 8 + 5]);
+}
+
+// ---------------------------------------------------------------------------
+// M37 DQ4 design-token tests (issue #838). Token VALUES are pinned here:
+// change a metric/color and these fail. Dark values equal the pre-DQ4
+// rendering (frozen COLOR_* / hardcoded app colors) so the migration is a
+// dark no-op; each test restores the dark theme via defer.
+// ---------------------------------------------------------------------------
+
+test "dq4: metric values pinned" {
+    try std.testing.expectEqual(@as(u32, 2), pad_xs);
+    try std.testing.expectEqual(@as(u32, 4), pad_sm);
+    try std.testing.expectEqual(@as(u32, 8), pad_md);
+    try std.testing.expectEqual(@as(u32, 16), pad_lg);
+    try std.testing.expectEqual(@as(u32, 1), border_w);
+    try std.testing.expectEqual(@as(u32, 2), focus_w);
+    try std.testing.expectEqual(@as(u32, 2), caret_w);
+    try std.testing.expectEqual(@as(u32, 8), caret_h);
+    try std.testing.expectEqual(@as(u32, 4), shadow_off);
+}
+
+test "dq4: dark chrome values equal pre-DQ4 rendering" {
+    defer current_theme = THEME_DARK;
+    current_theme = THEME_DARK;
+    try std.testing.expectEqual(@as(u32, 0x2a4460), theme_selection_bg());
+    try std.testing.expectEqual(@as(u32, 0x3b82f6), theme_caret());
+    try std.testing.expectEqual(@as(u32, 0x0b0e11), theme_gutter_bg());
+    try std.testing.expectEqual(@as(u32, 0x22303a), theme_line_highlight());
+    try std.testing.expectEqual(@as(u32, 0x3b82f6), theme_file_dir());
+    try std.testing.expectEqual(@as(u32, 0x22c55e), theme_file_txt());
+    try std.testing.expectEqual(@as(u32, 0xf59e0b), theme_file_bin());
+    try std.testing.expectEqual(@as(u32, 0x64748b), theme_file_unknown());
+    try std.testing.expectEqual(@as(u32, 0x1e3a8a), theme_multi_select());
+    try std.testing.expectEqual(@as(u32, 0xffffff), theme_on_accent());
+    try std.testing.expectEqual(@as(u32, 0x000000), theme_shadow());
+}
+
+test "dq4: light chrome values" {
+    defer current_theme = THEME_DARK;
+    current_theme = THEME_LIGHT;
+    try std.testing.expectEqualStrings("light", theme_name());
+    try std.testing.expectEqual(@as(u32, 0xbfdbfe), theme_selection_bg());
+    try std.testing.expectEqual(@as(u32, 0x2563eb), theme_caret());
+    try std.testing.expectEqual(@as(u32, 0xe5e7eb), theme_gutter_bg());
+    try std.testing.expectEqual(@as(u32, 0xe0e7ff), theme_line_highlight());
+    try std.testing.expectEqual(@as(u32, 0x2563eb), theme_file_dir());
+    try std.testing.expectEqual(@as(u32, 0x16a34a), theme_file_txt());
+    try std.testing.expectEqual(@as(u32, 0xd97706), theme_file_bin());
+    try std.testing.expectEqual(@as(u32, 0x64748b), theme_file_unknown());
+    try std.testing.expectEqual(@as(u32, 0x93c5fd), theme_multi_select());
+    try std.testing.expectEqual(@as(u32, 0xffffff), theme_on_accent());
+    try std.testing.expectEqual(@as(u32, 0x94a3b8), theme_shadow());
+}
+
+test "dq4: amber chrome values" {
+    defer current_theme = THEME_DARK;
+    current_theme = THEME_AMBER;
+    try std.testing.expectEqualStrings("amber", theme_name());
+    try std.testing.expectEqual(@as(u32, 0x1a1000), theme_on_accent());
+    try std.testing.expectEqual(@as(u32, 0x000000), theme_shadow());
+}
+
+test "dq4: live_color is identity on dark" {
+    defer current_theme = THEME_DARK;
+    current_theme = THEME_DARK;
+    try std.testing.expectEqual(COLOR_BG, live_color(COLOR_BG));
+    try std.testing.expectEqual(COLOR_SURFACE, live_color(COLOR_SURFACE));
+    try std.testing.expectEqual(COLOR_BORDER, live_color(COLOR_BORDER));
+    try std.testing.expectEqual(COLOR_TEXT_PRIMARY, live_color(COLOR_TEXT_PRIMARY));
+    try std.testing.expectEqual(COLOR_ACCENT, live_color(COLOR_ACCENT));
+    try std.testing.expectEqual(COLOR_DANGER, live_color(COLOR_DANGER));
+    // Customs pass through untouched.
+    try std.testing.expectEqual(@as(u32, 0x8b5cf6), live_color(0x8b5cf6));
+}
+
+test "dq4: live_color maps frozen aliases on light" {
+    defer current_theme = THEME_DARK;
+    current_theme = THEME_LIGHT;
+    try std.testing.expectEqual(THEME_LIGHT.bg, live_color(COLOR_BG));
+    try std.testing.expectEqual(THEME_LIGHT.surface, live_color(COLOR_SURFACE));
+    try std.testing.expectEqual(THEME_LIGHT.border, live_color(COLOR_BORDER));
+    try std.testing.expectEqual(THEME_LIGHT.text_primary, live_color(COLOR_TEXT_PRIMARY));
+    try std.testing.expectEqual(THEME_LIGHT.accent, live_color(COLOR_ACCENT));
+    try std.testing.expectEqual(THEME_LIGHT.danger, live_color(COLOR_DANGER));
+    try std.testing.expectEqual(@as(u32, 0x8b5cf6), live_color(0x8b5cf6));
+}
+
+test "dq4: text contrast spot-checks clear 3.0 on all themes" {
+    const themes = [_]Theme{ THEME_DARK, THEME_LIGHT, THEME_AMBER };
+    for (themes) |t| {
+        defer current_theme = THEME_DARK;
+        current_theme = t;
+        try std.testing.expect(contrast_ratio(theme_text_primary(), theme_bg()) >= 3.0);
+        try std.testing.expect(contrast_ratio(theme_text_muted(), theme_bg()) >= 3.0);
+        try std.testing.expect(contrast_ratio(theme_on_accent(), theme_accent()) >= 2.5);
+        try std.testing.expect(contrast_ratio(theme_text_primary(), theme_surface()) >= 3.0);
+    }
+}
+
+test "dq4: cursor region mapping" {
+    try std.testing.expectEqual(CursorKind.resize_diag, cursor_for_region(true, true, true));
+    try std.testing.expectEqual(CursorKind.pointer, cursor_for_region(false, true, true));
+    try std.testing.expectEqual(CursorKind.pointer, cursor_for_region(false, true, false));
+    try std.testing.expectEqual(CursorKind.ibeam, cursor_for_region(false, false, true));
+    try std.testing.expectEqual(CursorKind.arrow, cursor_for_region(false, false, false));
+    try std.testing.expectEqualStrings("ibeam", CursorKind.ibeam.name());
+    try std.testing.expectEqualStrings("resize_diag", CursorKind.resize_diag.name());
+}
+
+test "dq4: frame_border follows focus" {
+    defer current_theme = THEME_DARK;
+    current_theme = THEME_DARK;
+    try std.testing.expectEqual(theme_accent(), frame_border(true));
+    try std.testing.expectEqual(theme_border(), frame_border(false));
+    current_theme = THEME_LIGHT;
+    try std.testing.expectEqual(THEME_LIGHT.accent, frame_border(true));
+    try std.testing.expectEqual(THEME_LIGHT.border, frame_border(false));
+}
+
+test "dq4: parse_theme_setting" {
+    try std.testing.expectEqualStrings("dark", parse_theme_setting("theme=dark\n").?);
+    try std.testing.expectEqualStrings("light", parse_theme_setting("#v1\ntheme=light\nprompt=x\n").?);
+    try std.testing.expectEqualStrings("amber", parse_theme_setting("hostname=v\ntheme=amber").?);
+    try std.testing.expect(parse_theme_setting("theme=neon\n") == null);
+    try std.testing.expect(parse_theme_setting("prompt=virelai> \n") == null);
+    try std.testing.expect(parse_theme_setting("") == null);
+}
+
+test "dq4: set_theme + theme_name round-trip" {
+    defer current_theme = THEME_DARK;
+    try std.testing.expect(set_theme("light"));
+    try std.testing.expectEqualStrings("light", theme_name());
+    try std.testing.expect(set_theme("amber"));
+    try std.testing.expectEqualStrings("amber", theme_name());
+    try std.testing.expect(set_theme("dark"));
+    try std.testing.expectEqualStrings("dark", theme_name());
+    try std.testing.expect(!set_theme("neon"));
 }
