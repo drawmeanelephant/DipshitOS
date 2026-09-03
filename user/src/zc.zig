@@ -1117,11 +1117,19 @@ fn parsePrimary(p: *Parser) anyerror!void {
             _ = try p.expect(.l_paren);
             try compileExpr(p);
             _ = try p.expect(.r_paren);
-            if (!std.mem.eql(u8, builtin_tok.text, "intFromEnum") and !std.mem.eql(u8, builtin_tok.text, "enumFromInt")) {
+            // Z3b (issue #759): the stdz subset is dual-dialect (valid Zig
+            // 0.16 AND the zc dialect) so the same sources host-parse; host
+            // Zig type-checks u8 stores, which forces @intCast at byte
+            // boundaries. In zc every value is a word, so intCast — like the
+            // enum casts — is an identity op.
+            if (!std.mem.eql(u8, builtin_tok.text, "intFromEnum") and
+                !std.mem.eql(u8, builtin_tok.text, "enumFromInt") and
+                !std.mem.eql(u8, builtin_tok.text, "intCast"))
+            {
                 print_err("unknown zc builtin", builtin_tok.line, builtin_tok.text);
                 return error.CompileError;
             }
-            // Enum tags are their integer values in zc, so both casts are identity ops.
+            // All three casts are identity ops in zc.
         },
         .keyword_switch => {
             p.idx -= 1;
@@ -2478,10 +2486,11 @@ fn compileStatement(p: *Parser) anyerror!void {
 // ---------------------------------------------------------------------------
 // Compiler Main Driver
 // ---------------------------------------------------------------------------
-// Z3a (issue #758): at most this many source files per compile. Bounded by
-// the argv block's 8-slot cap in practice; the per-file buffers below are
-// sized to match.
-const MAX_FILES: usize = 4;
+// Z3a (issue #758) / Z3b (issue #759): at most this many source files per
+// compile. Z3b's stdz app is app + fmt + builder + ring = 4 sources; the
+// headroom covers a growing stdz. Bounded by the argv block's 8-slot cap in
+// practice; the per-file buffers below are sized to match.
+const MAX_FILES: usize = 6;
 
 pub fn compile(src: []const u8) !usize {
     return compileFiles(&.{src});
@@ -2566,12 +2575,23 @@ pub fn compileFiles(sources: []const []const u8) !usize {
                         while (p1.peek() != .r_brace and p1.peek() != .eof) {
                             const fname = try p1.expect(.ident);
                             _ = try p1.expect(.colon);
-                            const tname = try p1.expect(.ident);
-                            const sz = typeSize(tname.text) orelse return error.CompileError;
+                            // Z3b: struct fields may be [*]T pointers (the
+                            // stdz Builder/Ring hold a [*]u8 buffer) — an
+                            // 8-byte field.
+                            var fsz: usize = 0;
+                            if (p1.accept(.l_bracket)) {
+                                _ = try p1.expect(.star);
+                                _ = try p1.expect(.r_bracket);
+                                _ = try p1.expect(.ident); // element type name
+                                fsz = 8;
+                            } else {
+                                const tname = try p1.expect(.ident);
+                                fsz = typeSize(tname.text) orelse return error.CompileError;
+                            }
                             if (sd.field_count >= sd.fields.len) return error.CompileError;
-                            sd.fields[sd.field_count] = Field{ .name = fname.text, .offset = off, .size = sz };
+                            sd.fields[sd.field_count] = Field{ .name = fname.text, .offset = off, .size = fsz };
                             sd.field_count += 1;
-                            off += sz;
+                            off += fsz;
                             _ = p1.accept(.comma);
                         }
                         _ = try p1.expect(.r_brace);
@@ -2832,7 +2852,12 @@ fn copy_arg(dst: *[40]u8, len: *usize, slot: [32]u8) void {
     len.* = take;
 }
 
-const source_cap: usize = 8192;
+// Per-source staging buffer. The kernel caps a single file_read at 2048 B
+// (syscall.zig), and run() reads each source once, so 4096 is generous —
+// keeping this small matters: ZC.BIN's text + bss + the 256-byte argv block
+// must stay under the loader's 256 KiB exec_program_max (exec.zig), and
+// every byte of source_cap multiplies by MAX_FILES.
+const source_cap: usize = 4096;
 var source_bufs: [MAX_FILES][source_cap]u8 = undefined;
 var image_buf: [elf_code_offset + 32768]u8 = undefined;
 
@@ -2868,7 +2893,15 @@ fn run(src_paths: []const []const u8, out_path: []const u8) noreturn {
         console_puts("zc: cannot create output\n");
         sys_exit(5);
     }
-    _ = file_write(@intCast(ofd), image_buf[0..total]);
+    // The kernel refuses a single file_write > 2048 B (syscall.zig; the z2a
+    // heap fixture learned this), and the generated ELF now exceeds that
+    // (the stdz app + library compile to ~7 KiB), so drain it in chunks.
+    var w: usize = 0;
+    while (w < total) {
+        const take = @min(total - w, 2048);
+        _ = file_write(@intCast(ofd), image_buf[w .. w + take]);
+        w += take;
+    }
     file_close(@intCast(ofd));
 
     console_puts("zc: successfully compiled in-guest\n");
@@ -3735,4 +3768,115 @@ test "zc: Z3a single-file compile still works through the wrapper" {
     ;
     const bytes = try compile(src);
     try testing.expect(bytes > 0);
+}
+
+test "zc: Z3b intCast compiles as an identity cast" {
+    const src =
+        \\const zc = @import("zc");
+        \\fn main() void {
+        \\    var buf: [4]u8 = undefined;
+        \\    buf[0] = @intCast(48 + 7);
+        \\    if (buf[0] == 55) {
+        \\        zc.exit(72);
+        \\    }
+        \\}
+    ;
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
+}
+
+test "zc: Z3b stdz-shaped multi-file compile — fmt + builder + ring + app" {
+    // Abbreviated stand-ins for the real stdz modules (same dialect surface:
+    // @intCast identity casts, explicit [*]u8 + u64 buffers, flat namespace).
+    const fmt_src =
+        \\fn fmt_dec(v: u64, out: [*]u8) u64 {
+        \\    var buf: [20]u8 = undefined;
+        \\    var i: u64 = 0;
+        \\    var x: u64 = v;
+        \\    while (x >= 10) {
+        \\        buf[i] = @intCast(48 + (x - (x / 10) * 10));
+        \\        i = i + 1;
+        \\        x = x / 10;
+        \\    }
+        \\    buf[i] = @intCast(48 + x);
+        \\    i = i + 1;
+        \\    var n: u64 = 0;
+        \\    while (n < i) {
+        \\        out[n] = buf[i - 1 - n];
+        \\        n = n + 1;
+        \\    }
+        \\    return i;
+        \\}
+    ;
+    const builder_src =
+        \\const Builder = struct {
+        \\    buf: [*]u8,
+        \\    cap: u64,
+        \\    len: u64,
+        \\};
+        \\fn sb_append(b: *Builder, src: [*]u8, n: u64) u64 {
+        \\    if (b.len + n > b.cap) {
+        \\        return b.len;
+        \\    }
+        \\    var i: u64 = 0;
+        \\    const bp: [*]u8 = b.buf;
+        \\    while (i < n) {
+        \\        bp[b.len + i] = src[i];
+        \\        i = i + 1;
+        \\    }
+        \\    b.len = b.len + n;
+        \\    return b.len;
+        \\}
+        \\fn sb_u64(b: *Builder, v: u64) u64 {
+        \\    var tmp: [20]u8 = undefined;
+        \\    const n: u64 = fmt_dec(v, &tmp);
+        \\    return sb_append(b, &tmp, n);
+        \\}
+    ;
+    const ring_src =
+        \\const Ring = struct {
+        \\    buf: [*]u8,
+        \\    cap: u64,
+        \\    head: u64,
+        \\    tail: u64,
+        \\    count: u64,
+        \\};
+        \\fn ring_put(r: *Ring, byte: u64) u64 {
+        \\    if (r.count == r.cap) {
+        \\        return 0;
+        \\    }
+        \\    const bp: [*]u8 = r.buf;
+        \\    bp[r.head] = @intCast(byte);
+        \\    r.head = r.head + 1;
+        \\    if (r.head == r.cap) {
+        \\        r.head = 0;
+        \\    }
+        \\    r.count = r.count + 1;
+        \\    return 1;
+        \\}
+    ;
+    const app_src =
+        \\const zc = @import("zc");
+        \\fn main() void {
+        \\    const heap: [*]u8 = zc.mmap(32768);
+        \\    var b: Builder = undefined;
+        \\    b.len = 0;
+        \\    var r: Ring = undefined;
+        \\    r.cap = 64;
+        \\    _ = sb_u64(&b, fmt_dec(12345, heap));
+        \\    _ = ring_put(&r, @intCast(heap[0]));
+        \\    zc.print("z3b-ok\n");
+        \\}
+    ;
+    const bytes = try compileFiles(&.{ app_src, fmt_src, builder_src, ring_src });
+    try testing.expect(bytes > 0);
+    // app(1) + fmt(1) + builder(2) + ring(1) = 5 functions across 4 files.
+    try testing.expectEqual(@as(usize, 5), functions_count);
+    // Cross-file calls resolved through real patches (fmt_dec/sb_u64 into
+    // the app, fmt_dec into builder, sb_append into sb_u64).
+    try testing.expect(call_patches_count >= 3);
+    try testing.expect(functions[lookupFunc("fmt_dec").?].address > 0);
+    try testing.expect(functions[lookupFunc("sb_u64").?].address > 0);
+    try testing.expect(functions[lookupFunc("ring_put").?].address > 0);
+    try testing.expect(functions[lookupFunc("main").?].address > 0);
 }

@@ -1,0 +1,54 @@
+// Z3b (#759): wc-shaped app over stdz (fmt + builder + ring), compiled
+// in-guest with the library via Z3a multi-file. Reads DATA.TXT through the
+// ring, counts bytes/lines/words, writes OUT.TXT, exits 72. put_label and
+// build_report live in z3b-labels.z (same flat namespace).
+const zc = @import("zc");
+
+fn main() void {
+    zc.print("z3b-start\n");
+    const heap: [*]u8 = zc.mmap(32768);
+    const in_fd: u64 = zc.file_open("/host/DATA.TXT", 1);
+    const out_fd: u64 = zc.file_open("/host/OUT.TXT", 6);
+    var b: Builder = undefined;
+    sb_init(&b, heap, 16000);
+    var ring: Ring = undefined;
+    ring_init(&ring, heap + 16000, 2048);
+    const ld: [*]u8 = heap + 18048;
+    var total: u64 = 0;
+    var lines: u64 = 0;
+    var words: u64 = 0;
+    var iw: u64 = 0;
+    var n: u64 = zc.file_read(in_fd, ld, 2048);
+    while (n != 0) {
+        var i: u64 = 0;
+        while (i < n) {
+            _ = ring_put(&ring, @intCast(ld[i]));
+            const byte: u64 = ring_get(&ring);
+            total = total + 1;
+            if (byte == 10) {
+                if (iw == 1) {
+                    words = words + 1;
+                    iw = 0;
+                }
+                lines = lines + 1;
+            } else {
+                if (byte == 32) {
+                    if (iw == 1) {
+                        words = words + 1;
+                        iw = 0;
+                    }
+                } else {
+                    iw = 1;
+                }
+            }
+            i = i + 1;
+        }
+        n = zc.file_read(in_fd, ld, 2048);
+    }
+    zc.file_close(in_fd);
+    const out_len: u64 = build_report(&b, total, lines, words);
+    _ = zc.file_write(out_fd, heap, out_len);
+    zc.file_close(out_fd);
+    zc.print("z3b-ok\n");
+    zc.exit(72);
+}
