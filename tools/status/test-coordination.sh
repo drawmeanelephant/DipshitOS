@@ -1,340 +1,315 @@
 #!/usr/bin/env bash
 #
-# test-coordination.sh -- self-contained tests for the coordination tooling
-# (refresh-indexes.sh, claim-id.sh, verify-coordination.sh), run against a
-# throwaway sandbox copy so the real repo is never modified.
+# test-coordination.sh -- test suite for the GitHub-issue coordination gate
+# (tools/status/verify-issue-coordination.sh, claim filing via
+# tools/status/new-claim.sh) and the claim-staleness machinery. Claims live
+# on the GitHub tracker as issues labeled `claim`; this suite exercises the
+# gate's parsing/overlap/staleness logic, the weekly sweep's label decisions,
+# and the real-time unlabel guard (tools/status/unlabel-guard.sh) OFFLINE via
+# fixtures, so it needs no network and no gh.
 #
-# Positive cases:
-#   1. claim-id.sh is deterministic, maps into [0024, 9999], and rejects
-#      non-kebab slugs.
-#   2. A claim whose Status contains '|' and '\' is escaped in the generated
-#      index table: the table stays structurally valid and both --check and
-#      verify-coordination pass.
-#   3. A claim numbered with claim-id.sh passes verify-coordination.
-# Negative cases:
-#   4. A raw '|' in a table row (exactly what a broken, unescaping generator
-#      emits) fails refresh-indexes.sh --check via structural validation.
-#   5. A hand-sequenced claim number (0024) fails verify-coordination with
-#      the deterministic-ID error.
-#   6. Another agent's UNTRACKED claim+log staging files in a shared
-#      checkout do NOT fail --check or verify-coordination (the tooling
-#      judges tracked files only; regression for PR #524 / claim 2564).
-#   7. A STALE committed index does NOT fail verify-coordination (branches
-#      never commit table churn; CI regenerates on main — claim 2599), but
-#      --check still fails on it (the bot's contract).
-#
-# Usage: bash tools/status/test-coordination.sh
-# (also `just test-coordination` and CI)
+# Two fixture shapes are used:
+#   * gh issue list --json number,title,url,body,updatedAt,labels — for the
+#     gate and the weekly sweep (issue-list records).
+#   * GitHub webhook payloads in the shape of the issue_comment / issues
+#     events — for the unlabel-fresh guard (webhook_event() below).
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+GATE="$ROOT/tools/status/verify-issue-coordination.sh"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 pass=0
-fail=0
-ok()   { echo "ok:   $1"; pass=$((pass + 1)); }
-nope() { echo "FAIL: $1"; fail=$((fail + 1)); }
+failn=0
 
-# --- sandbox ----------------------------------------------------------------
-mkdir -p "$TMP/tools/status" "$TMP/docs/claims" "$TMP/docs/logs"
-cp "$ROOT/tools/status/refresh-indexes.sh" "$TMP/tools/status/"
-cp "$ROOT/tools/status/claim-id.sh"         "$TMP/tools/status/"
-cp "$ROOT/tools/verify-coordination.sh"     "$TMP/tools/"
-# verify-coordination.sh requires these files to exist
-: > "$TMP/docs/status.md"
-: > "$TMP/docs/march-m3.md"
-
-cat > "$TMP/docs/claims/README.md" <<'EOF'
-# Active claims (sandbox fixture)
-<!-- CLAIMS_INDEX:START -->
-<!-- CLAIMS_INDEX:END -->
-EOF
-
-cat > "$TMP/docs/logs/README.md" <<'EOF'
-# Coordination logs (sandbox fixture)
-<!-- LOGS_INDEX:START -->
-<!-- LOGS_INDEX:END -->
-EOF
-
-# legacy (grandfathered, <= 0023) claim whose Status contains a pipe + backslash
-cat > "$TMP/docs/claims/0001-fixture.md" <<'EOF'
-# Claim: fixture
-
-- **Owner:** test-agent (`branch/one`)
-- **Status:** 🔄 in progress — see `x|y` and `a\b`
-- **Depends on:** —
-EOF
-
-# log whose title contains a pipe
-cat > "$TMP/docs/logs/branch-one.md" <<'EOF'
-# Log — Fixture | branch one
-
-- **2026-08-08** — *test-agent*: fixture entry.
-EOF
-
-# The coordination tooling judges git-tracked files only, so the sandbox
-# must be a repo with every fixture staged (mirrors a real branch state).
-git -C "$TMP" init -q
-git -C "$TMP" add -A
-git -C "$TMP" -c user.email=coord@test -c user.name=coord commit -qm "sandbox fixture"
-
-run() { ( cd "$TMP" && "$@" ); }
-
-# --- 1. claim-id.sh determinism / range / slug validation -------------------
-id1="$(bash "$TMP/tools/status/claim-id.sh" 'branch/one' 'some-slug')"
-id2="$(bash "$TMP/tools/status/claim-id.sh" 'branch/one' 'some-slug')"
-if [ "$id1" = "$id2" ]; then
-    ok "claim-id.sh is deterministic ($id1)"
-else
-    nope "claim-id.sh not deterministic: $id1 vs $id2"
-fi
-
-id3="$(bash "$TMP/tools/status/claim-id.sh" 'branch/two' 'some-slug')"
-if [ "$id1" != "$id3" ]; then
-    ok "claim-id.sh differs across branches ($id1 vs $id3)"
-else
-    nope "claim-id.sh gives the same ID for different branches"
-fi
-
-id4="$(bash "$TMP/tools/status/claim-id.sh" 'branch/one' 'other-slug')"
-if [ "$id1" != "$id4" ]; then
-    ok "claim-id.sh differs across slugs ($id1 vs $id4)"
-else
-    nope "claim-id.sh gives the same ID for different slugs"
-fi
-
-for id in "$id1" "$id3"; do
-    n=$((10#$id))
-    if [ "$n" -ge 24 ] && [ "$n" -le 9999 ]; then
-        ok "claim-id.sh maps into [0024, 9999] ($id)"
+# run_case NAME EXPECT_RC -- runs the gate on a fixture; EXPECT_RC=0 pass, 1 fail
+run_case() {
+    local name="$1" expect="$2" rc=0 out=""
+    out="$(bash "$GATE" --issues-json "$TMP/fixture.json" 2>&1)" || rc=$?
+    if [ "$rc" -eq "$expect" ]; then
+        pass=$((pass + 1))
+        printf 'ok   %s\n' "$name"
     else
-        nope "claim-id.sh out of range: $id"
+        failn=$((failn + 1))
+        printf 'FAIL %s (rc=%d, expected %d)\n' "$name" "$rc" "$expect" >&2
+        printf '%s\n' "$out" | sed 's/^/     /' >&2
     fi
-done
+}
 
-if bash "$TMP/tools/status/claim-id.sh" 'branch/one' 'Bad Slug!' >/dev/null 2>&1; then
-    nope "claim-id.sh accepted a non-kebab slug"
+# claim_json NUMBER BRANCH UPDATED_AT TOUCHES [STATUS [LABELS]]
+claim_json() {
+    local num="$1" branch="$2" upd="$3" touches="$4" status="${5:-}" labels="${6:-}"
+    local status_line="" labels_json="[]"
+    [ -z "$status" ] || status_line="- **Status:** $status"
+    if [ -n "$labels" ]; then
+        labels_json="$(printf '%s\n' "$labels" | tr ',' '\n' \
+            | jq -R 'select(length > 0) | {name: .}' | jq -s '.')"
+    fi
+    jq -n \
+        --argjson n "$num" \
+        --arg title "claim fixture $num" \
+        --arg url "https://github.com/x/y/issues/$num" \
+        --arg upd "$upd" \
+        --argjson labels "$labels_json" \
+        --arg body "$(printf '%s\n' \
+            "## Claim" \
+            "" \
+            "- **Owner:** agent (\`$branch\`)" \
+            "- **Touches:** $touches" \
+            "$status_line" \
+            "" \
+            "- **Notes:** fixture")" \
+        '{number: $n, title: $title, url: $url, updatedAt: $upd, labels: $labels, body: $body}'
+}
+
+# --- case 1: disjoint touches, no overlap -> PASS ---------------------------
+
+jq -s '.' \
+    <(claim_json 101 "agent/a/one" "2026-09-02T00:00:00Z" "kernel/src/a.zig, user/src/b.zig") \
+    <(claim_json 102 "agent/b/two" "2026-09-02T00:00:00Z" "kernel/src/c.zig, tools/x.sh") \
+    > "$TMP/fixture.json"
+run_case "disjoint claims pass" 0
+
+# --- case 2: overlapping touch, different branches -> FAIL ------------------
+
+jq -s '.' \
+    <(claim_json 201 "agent/a/one" "2026-09-02T00:00:00Z" "kernel/src/monitor.zig, user/src/a.zig") \
+    <(claim_json 202 "agent/b/two" "2026-09-02T00:00:00Z" "kernel/src/monitor.zig") \
+    > "$TMP/fixture.json"
+out="$(bash "$GATE" --issues-json "$TMP/fixture.json" 2>&1 || true)"
+if printf '%s' "$out" | grep -qE "claims #20[12] .* and #20[12] .* both declare 'kernel/src/monitor.zig'"; then
+    pass=$((pass + 1)); printf 'ok   overlap across branches fails (names both issues)\n'
 else
-    ok "claim-id.sh rejects a non-kebab slug"
+    failn=$((failn + 1)); printf 'FAIL overlap message names both issues: %s\n' "$out" >&2
 fi
 
-# --- 2. positive: pipes/backslashes in claim status must not break the index
-run bash tools/status/refresh-indexes.sh >/dev/null
+# --- case 3: overlap but one claim is blocked (⛔) -> PASS -------------------
 
-if grep -Fq 'see `x\|y` and `a\\b`' "$TMP/docs/claims/README.md"; then
-    ok "claim status '|' and '\' escaped in the index table"
+jq -s '.' \
+    <(claim_json 301 "agent/a/one" "2026-09-02T00:00:00Z" "kernel/src/monitor.zig") \
+    <(claim_json 302 "agent/b/two" "2026-09-02T00:00:00Z" "kernel/src/monitor.zig" "⛔ blocked") \
+    > "$TMP/fixture.json"
+run_case "blocked claim excluded from overlap" 0
+
+# --- case 4: overlapping touch, SAME branch -> PASS -------------------------
+
+jq -s '.' \
+    <(claim_json 401 "agent/a/one" "2026-09-02T00:00:00Z" "kernel/src/monitor.zig") \
+    <(claim_json 402 "agent/a/one" "2026-09-02T00:00:00Z" "kernel/src/monitor.zig") \
+    > "$TMP/fixture.json"
+run_case "same-branch overlap allowed (one editor)" 0
+
+# --- case 5: prefix-glob overlap -> FAIL ------------------------------------
+
+jq -s '.' \
+    <(claim_json 501 "agent/a/one" "2026-09-02T00:00:00Z" "kernel/src/*.zig") \
+    <(claim_json 502 "agent/b/two" "2026-09-02T00:00:00Z" "kernel/src/monitor.zig") \
+    > "$TMP/fixture.json"
+run_case "prefix-glob overlap fails" 1
+
+# --- case 6: missing Owner branch -> FAIL -----------------------------------
+
+printf '%s' '[
+  {"number": 601, "title": "bad owner", "url": "https://github.com/x/y/issues/601",
+   "updatedAt": "2026-09-02T00:00:00Z",
+   "body": "## Claim\n\n- **Owner:** buffy\n- **Touches:** kernel/src/a.zig\n"}
+]' > "$TMP/fixture.json"
+run_case "missing backticked branch fails" 1
+
+# --- case 7: stale claim (no update 20 days) -> warning, still PASS ---------
+
+stale="$(date -u -v-20d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '20 days ago' +%Y-%m-%dT%H:%M:%SZ)"
+jq -s '.' \
+    <(claim_json 701 "agent/a/one" "$stale" "kernel/src/a.zig") \
+    > "$TMP/fixture.json"
+out="$(bash "$GATE" --issues-json "$TMP/fixture.json" 2>&1 || true)"
+if printf '%s' "$out" | grep -q "warn: claim #701"; then
+    pass=$((pass + 1)); printf 'ok   stale claim warns\n'
 else
-    nope "claim status not escaped in the index table"
-fi
-if grep -Fq 'Fixture \| branch one' "$TMP/docs/logs/README.md"; then
-    ok "log title '|' escaped in the log index table"
-else
-    nope "log title not escaped in the log index table"
-fi
-
-if run bash tools/status/refresh-indexes.sh --check >/dev/null 2>&1; then
-    ok "--check passes with escaped pipes/backslashes"
-else
-    nope "--check failed after refresh with escaped content"
-fi
-if run bash tools/verify-coordination.sh >/dev/null 2>&1; then
-    ok "verify-coordination passes with escaped pipes/backslashes"
-else
-    nope "verify-coordination failed with escaped pipes/backslashes"
-fi
-
-# --- 3. positive: a claim numbered with claim-id.sh passes the gate ---------
-derived="$(bash "$TMP/tools/status/claim-id.sh" 'branch/one' 'derived-fixture')"
-cat > "$TMP/docs/claims/${derived}-derived-fixture.md" <<EOF
-# Claim: derived fixture
-
-- **Owner:** test-agent (\`branch/one\`)
-- **Status:** ✅ done
-- **Depends on:** —
-EOF
-run bash tools/status/refresh-indexes.sh >/dev/null
-if run bash tools/verify-coordination.sh >/dev/null 2>&1; then
-    ok "derived-numbered claim ${derived} passes verify-coordination"
-else
-    nope "derived-numbered claim ${derived} failed verify-coordination"
-fi
-
-# --- 3.5 positive: foreign UNTRACKED staging files cannot fail the gate ------
-# What a shared checkout looks like in practice: another agent stages m25
-# claim/log files here untracked (PR #524, commit 42d1078). The committed
-# index has no rows for them; the gate must not care.
-utid="$(bash "$TMP/tools/status/claim-id.sh" 'branch/other-agent' 'untracked-fixture')"
-cat > "$TMP/docs/claims/${utid}-untracked-fixture.md" <<EOF
-# Claim: untracked fixture
-
-- **Owner:** other-agent (\`branch/other-agent\`)
-- **Status:** 🔄 \`branch/other-agent\`
-- **Depends on:** —
-EOF
-cat > "$TMP/docs/logs/branch-other-agent.md" <<'EOF'
-# Log — Untracked fixture
-
-- **2026-08-23** — *other-agent*: staging entry, deliberately never committed here.
-EOF
-if run bash tools/status/refresh-indexes.sh --check >/dev/null 2>&1 \
-    && run bash tools/verify-coordination.sh >/dev/null 2>&1; then
-    ok "untracked foreign claim+log do not fail --check or verify-coordination"
-else
-    nope "untracked foreign staging files leaked into the gate or indexes"
-fi
-rm -f "$TMP/docs/claims/${utid}-untracked-fixture.md" "$TMP/docs/logs/branch-other-agent.md"
-
-# --- 4. negative: a raw '|' in a table row fails structural validation ------
-# What a broken (unescaping) generator emits: a pipe straight into a cell.
-sed 's/see `x\\|y`/see `x|y`/' "$TMP/docs/claims/README.md" > "$TMP/docs/claims/README.md.new"
-mv "$TMP/docs/claims/README.md.new" "$TMP/docs/claims/README.md"
-
-out="$(run bash tools/status/refresh-indexes.sh --check 2>&1 || true)"
-case "$out" in
-    *"structurally malformed"*)
-        ok "--check fails on a table row with a raw '|' (structural validation)" ;;
-    *)
-        nope "--check did not report the raw '|' row: $out" ;;
-esac
-if run bash tools/verify-coordination.sh >/dev/null 2>&1; then
-    nope "verify-coordination accepted a table with a raw '|'"
-else
-    ok "verify-coordination fails on a table with a raw '|'"
+    failn=$((failn + 1)); printf 'FAIL stale warning not emitted: %s\n' "$out" >&2
 fi
 
-# --- 5. negative: a hand-sequenced 0024+ claim fails the deterministic-ID gate
-hs="$(bash "$TMP/tools/status/claim-id.sh" 'branch/one' 'hand-sequenced')"
-if [ "$hs" = "0024" ]; then
-    echo "skip: slug 'hand-sequenced' happens to derive to 0024; pick another" >&2
-else
-    run bash tools/status/refresh-indexes.sh >/dev/null   # restore the clean table
-    cat > "$TMP/docs/claims/0024-hand-sequenced.md" <<'EOF'
-# Claim: hand sequenced
+# --- case 8: empty tracker (no open claims) -> PASS -------------------------
 
-- **Owner:** test-agent (`branch/one`)
-- **Status:** ✅ done
-- **Depends on:** —
-EOF
-    run git add -A   # untracked files are invisible to the gate by design
-    run bash tools/status/refresh-indexes.sh >/dev/null
-    out="$(run bash tools/verify-coordination.sh 2>&1 || true)"
-    case "$out" in
-        *"does not match the deterministic ID"*)
-            ok "hand-sequenced 0024 claim fails the deterministic-ID gate" ;;
-        *)
-            nope "hand-sequenced 0024 claim was not rejected: $out" ;;
-    esac
-    rm -f "$TMP/docs/claims/0024-hand-sequenced.md"
-    run git add -A
+printf '[]' > "$TMP/fixture.json"
+run_case "empty tracker passes" 0
+
+# --- staleness sweep (tools/status/sweep-stale-claims.sh) -------------------
+
+SWEEP="$ROOT/tools/status/sweep-stale-claims.sh"
+
+# case 9: fresh claims -> nothing flagged
+
+jq -s '.' \
+    <(claim_json 901 "agent/a/one" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "kernel/src/a.zig") \
+    > "$TMP/fixture.json"
+out="$(bash "$SWEEP" --issues-json "$TMP/fixture.json" 2>&1 || true)"
+if printf '%s' "$out" | grep -qE '0 newly stale'; then
+    pass=$((pass + 1)); printf 'ok   sweep: fresh claims not flagged\n'
+else
+    failn=$((failn + 1)); printf 'FAIL sweep flagged a fresh claim: %s\n' "$out" >&2
 fi
 
-# --- 6. negative: two ACTIVE claims from different branches declaring the
-# same Touches path fail the gate ---------------------------------------------
-ta="$(bash "$TMP/tools/status/claim-id.sh" 'branch/one' 'touches-a')"
-tb="$(bash "$TMP/tools/status/claim-id.sh" 'branch/two' 'touches-b')"
-cat > "$TMP/docs/claims/${ta}-touches-a.md" <<EOF
-# Claim: touches a
+# case 10: stale claim (no update 20 days) -> flagged with the claim number
 
-- **Owner:** test-agent (\`branch/one\`)
-- **Touches:** kernel/src/shell.zig, kernel/src/pipe.zig
-- **Status:** 🔄 \`branch/one\`
-- **Depends on:** —
-EOF
-cat > "$TMP/docs/claims/${tb}-touches-b.md" <<EOF
-# Claim: touches b
-
-- **Owner:** other-agent (\`branch/two\`)
-- **Touches:** kernel/src/text.zig kernel/src/shell.zig
-- **Status:** 🔄 \`branch/two\`
-- **Depends on:** —
-EOF
-run git add -A
-out="$(run bash tools/verify-coordination.sh 2>&1 || true)"
-case "$out" in
-    *"both declare"*)
-        ok "overlapping Touches between ACTIVE claims fail the gate" ;;
-    *)
-        nope "overlapping Touches were not rejected: $out" ;;
-esac
-
-# --- 7. positive: disjoint Touches from different branches pass --------------
-# Flip b's touch away from shell.zig; both claims stay ACTIVE.
-sed 's|kernel/src/text.zig kernel/src/shell.zig|kernel/src/text.zig|' \
-    "$TMP/docs/claims/${tb}-touches-b.md" > "$TMP/docs/claims/${tb}.new"
-mv "$TMP/docs/claims/${tb}.new" "$TMP/docs/claims/${tb}-touches-b.md"
-run git add -A
-run bash tools/status/refresh-indexes.sh >/dev/null
-if run bash tools/verify-coordination.sh >/dev/null 2>&1; then
-    ok "disjoint Touches between ACTIVE claims pass the gate"
+stale="$(date -u -v-20d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '20 days ago' +%Y-%m-%dT%H:%M:%SZ)"
+jq -s '.' \
+    <(claim_json 902 "agent/a/one" "$stale" "kernel/src/a.zig") \
+    <(claim_json 903 "agent/b/two" "$stale" "kernel/src/b.zig") \
+    > "$TMP/fixture.json"
+out="$(bash "$SWEEP" --issues-json "$TMP/fixture.json" 2>&1 || true)"
+if printf '%s' "$out" | grep -q '2 newly stale' \
+    && printf '%s' "$out" | grep -q 'claim #902' \
+    && printf '%s' "$out" | grep -q 'claim #903'; then
+    pass=$((pass + 1)); printf 'ok   sweep: stale claims flagged (names both)\n'
 else
-    nope "disjoint Touches failed the gate"
+    failn=$((failn + 1)); printf 'FAIL sweep missed a stale claim: %s\n' "$out" >&2
 fi
 
-# --- 8. warning only: a stale 🔄 claim does not fail the gate -----------------
-ts="$(bash "$TMP/tools/status/claim-id.sh" 'branch/one' 'stale-fixture')"
-cat > "$TMP/docs/claims/${ts}-stale-fixture.md" <<EOF
-# Claim: stale fixture
+# case 11: stale claim already carrying claim:stale -> not re-flagged
 
-- **Owner:** test-agent (\`branch/one\`)
-- **Heartbeat:** 2000-01-01
-- **Status:** 🔄 \`branch/one\`
-- **Depends on:** —
-EOF
-run git add -A
-run bash tools/status/refresh-indexes.sh >/dev/null
-run env GIT_AUTHOR_DATE="2026-01-01T00:00:00Z" GIT_COMMITTER_DATE="2026-01-01T00:00:00Z" \
-    git -c user.email=coord@test -c user.name=coord commit -qm "stale fixture"
-out="$(run bash tools/verify-coordination.sh 2>&1)" && rc=0 || rc=$?
-if [ "$rc" -ne 0 ]; then
-    nope "staleness escalated to an error: $out"
-elif printf '%s' "$out" | grep -q '^warn: .* for .* days'; then
-    ok "stale 🔄 claim warns without failing the gate"
+jq -s '.' \
+    <(claim_json 911 "agent/a/one" "$stale" "kernel/src/a.zig" "" "claim:stale") \
+    > "$TMP/fixture.json"
+out="$(bash "$SWEEP" --issues-json "$TMP/fixture.json" 2>&1 || true)"
+if printf '%s' "$out" | grep -q 'skip claim #911' \
+    && printf '%s' "$out" | grep -q '1 still flagged'; then
+    pass=$((pass + 1)); printf 'ok   sweep: already-flagged stale claim skipped\n'
 else
-    nope "stale claim produced no warning: $out"
+    failn=$((failn + 1)); printf 'FAIL sweep re-flagged a labeled claim: %s\n' "$out" >&2
 fi
 
-# --- 9. positive: a STALE committed index does not fail the gate (claim 2599)
-# Branches no longer regenerate or commit the index tables — CI regenerates
-# them on main after merge — so a branch's committed indexes are stale by
-# design. The PR-side gate must tolerate that drift; --check must still fail
-# on it (the bot's contract).
-dt="$(bash "$TMP/tools/status/claim-id.sh" 'branch/one' 'drift-tolerated')"
-cat > "$TMP/docs/claims/${dt}-drift-tolerated.md" <<EOF
-# Claim: drift tolerated
+# case 12: fresh claim carrying claim:stale -> label removed
 
-- **Owner:** test-agent (\`branch/one\`)
-- **Status:** ✅ done 2026-08-24
-- **Depends on:** —
-EOF
-run git add -A   # tracked, but the index tables are deliberately NOT refreshed
-out="$(run bash tools/status/refresh-indexes.sh --check 2>&1 || true)"
-case "$out" in
-    *"out of sync"*)
-        ok "--check still fails on a stale index (bot contract on main)" ;;
-    *)
-        nope "--check did not report index drift: $out" ;;
-esac
-if run bash tools/verify-coordination.sh >/dev/null 2>&1; then
-    ok "verify-coordination tolerates a stale committed index (branches never commit table churn)"
+jq -s '.' \
+    <(claim_json 912 "agent/a/one" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "kernel/src/a.zig" "" "claim:stale") \
+    > "$TMP/fixture.json"
+out="$(bash "$SWEEP" --issues-json "$TMP/fixture.json" 2>&1 || true)"
+if printf '%s' "$out" | grep -q 'unlabel claim #912' \
+    && printf '%s' "$out" | grep -q '1 unlabeled'; then
+    pass=$((pass + 1)); printf 'ok   sweep: updated claim unlabeled\n'
 else
-    out="$(run bash tools/verify-coordination.sh 2>&1 || true)"
-    nope "verify-coordination failed on index drift (should be bot-only): $out"
+    failn=$((failn + 1)); printf 'FAIL sweep kept the stale label on an updated claim: %s\n' "$out" >&2
 fi
 
-# --- final: clean sandbox passes -------------------------------------------
-run bash tools/status/refresh-indexes.sh >/dev/null
-if run bash tools/verify-coordination.sh >/dev/null 2>&1; then
-    ok "final clean sandbox passes verify-coordination"
+# case 13: fresh claim with no label -> nothing happens
+
+jq -s '.' \
+    <(claim_json 913 "agent/a/one" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "kernel/src/a.zig") \
+    > "$TMP/fixture.json"
+out="$(bash "$SWEEP" --issues-json "$TMP/fixture.json" 2>&1 || true)"
+if printf '%s' "$out" | grep -qE '0 newly stale.*0 unlabeled.*0 still flagged'; then
+    pass=$((pass + 1)); printf 'ok   sweep: fresh unlabeled claim untouched\n'
 else
-    nope "final clean sandbox failed verify-coordination"
+    failn=$((failn + 1)); printf 'FAIL sweep acted on a fresh unlabeled claim: %s\n' "$out" >&2
 fi
+
+# --- real-time unlabel guard (tools/status/unlabel-guard.sh) ----------------
+#
+# The unlabel-fresh job in .github/workflows/claim-staleness.yml runs this
+# guard on every issue_comment / issues event. These cases feed it webhook
+# payloads (issue_comment = .issue + .comment.user + .comment.body; issues =
+# .issue + .sender) and assert the bot-vs-human decision, so the real-time
+# path is proven offline before it can fire in production.
+
+GUARD="$ROOT/tools/status/unlabel-guard.sh"
+
+# webhook_event EVENT NUM STATE LABELED LOGIN TYPE [BODY] -- a webhook
+# payload in the issue_comment / issues shape. LABELED=1 gives the issue the
+# claim + claim:stale labels; for issues events the comment key is omitted.
+webhook_event() {
+    local event="$1" num="$2" state="$3" labeled="$4" login="$5" type="$6" body="${7:-}"
+    jq -n \
+        --arg event "$event" \
+        --argjson num "$num" \
+        --arg state "$state" \
+        --arg labeled "$labeled" \
+        --arg login "$login" \
+        --arg type "$type" \
+        --arg body "$body" \
+        '{ issue: { number: $num, state: $state,
+                    labels: (if $labeled == "1" then
+                                 [{name: "claim"}, {name: "claim:stale"}]
+                             else [] end) } }
+         | if $event == "issue_comment" then
+               .comment = { user: { login: $login, type: $type }, body: $body }
+           else . end
+         | .sender = { login: $login, type: $type }'
+}
+
+# guard_case NAME EVENT PAYLOAD_FILE EXPECTED_SUBSTRING
+#   runs the guard offline and asserts the decision text.
+guard_case() {
+    local name="$1" event="$2" payload="$3" want="$4" out=""
+    out="$(bash "$GUARD" --payload "$payload" --event "$event" 2>&1 || true)"
+    if printf '%s' "$out" | grep -qF "$want"; then
+        pass=$((pass + 1)); printf 'ok   guard: %s\n' "$name"
+    else
+        failn=$((failn + 1)); printf 'FAIL guard: %s — wanted %q, got: %s\n' "$name" "$want" "$out" >&2
+    fi
+}
+
+# case 14: human comment on an open labeled claim -> unlabel
+
+webhook_event issue_comment 1401 open 1 alice User "progress update on the fix" > "$TMP/payload.json"
+guard_case "human comment unlabels a stale claim" issue_comment "$TMP/payload.json" \
+    "unlabel: human activity on stale-flagged claim #1401"
+
+# case 15: the sweep's own warning (github-actions[bot]) -> skip
+
+webhook_event issue_comment 1501 open 1 github-actions[bot] Bot "**Automated staleness check** — post a progress update" > "$TMP/payload.json"
+guard_case "sweep warning (bot author) does not unlabel" issue_comment "$TMP/payload.json" \
+    "skip: comment on #1501 is from bot 'github-actions[bot]'"
+
+# case 16: sweep warning run under a LOCAL token (human author + marker) -> skip
+
+webhook_event issue_comment 1601 open 1 alice User "**Automated staleness check** — post a progress update. <!-- claim-staleness-bot -->" > "$TMP/payload.json"
+guard_case "local-token sweep warning (marker) does not unlabel" issue_comment "$TMP/payload.json" \
+    "skip: comment on #1601 is the sweep's own warning (marker present)"
+
+# case 17: some other bot's comment (type Bot, no marker) -> skip
+
+webhook_event issue_comment 1701 open 1 dependabot[bot] Bot "bump dependencies" > "$TMP/payload.json"
+guard_case "third-party bot comment does not unlabel" issue_comment "$TMP/payload.json" \
+    "skip: comment on #1701 is from bot 'dependabot[bot]'"
+
+# case 18: issues event (edit) from a human -> unlabel
+
+webhook_event issues 1801 open 1 alice User "" > "$TMP/payload.json"
+guard_case "human issues edit unlabels a stale claim" issues "$TMP/payload.json" \
+    "unlabel: human activity on stale-flagged claim #1801"
+
+# case 19: issues event driven by github-actions[bot] -> skip
+
+webhook_event issues 1901 open 1 github-actions[bot] Bot "" > "$TMP/payload.json"
+guard_case "bot-driven issues event does not unlabel" issues "$TMP/payload.json" \
+    "skip: bot-driven issue event on #1901"
+
+# case 20: issues event driven by another bot (type Bot) -> skip
+
+webhook_event issues 2001 open 1 renovate[bot] Bot "" > "$TMP/payload.json"
+guard_case "third-party bot issues event does not unlabel" issues "$TMP/payload.json" \
+    "skip: bot-driven issue event on #2001"
+
+# case 21: human comment on an open issue NOT carrying claim:stale -> skip
+
+webhook_event issue_comment 2101 open 0 alice User "hello" > "$TMP/payload.json"
+guard_case "unlabeled claim left alone" issue_comment "$TMP/payload.json" \
+    "skip: issue #2101 does not carry the 'claim:stale' label"
+
+# case 22: human comment on a CLOSED labeled issue -> skip
+
+webhook_event issue_comment 2201 closed 1 alice User "wrapping this up" > "$TMP/payload.json"
+guard_case "closed claim left alone" issue_comment "$TMP/payload.json" \
+    "skip: issue #2201 is 'closed', not open"
 
 echo
-if [ "$fail" -eq 0 ]; then
-    echo "test-coordination: all $pass tests passed"
+if [ "$failn" -eq 0 ]; then
+    echo "test-coordination: $pass/$((pass + failn)) PASS"
+    exit 0
 else
-    echo "test-coordination: $fail of $((pass + fail)) tests FAILED" >&2
+    echo "test-coordination: FAILED ($failn failing)" >&2
     exit 1
 fi

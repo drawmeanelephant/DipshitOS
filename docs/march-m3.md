@@ -6,8 +6,8 @@
 > facts, current gates, and what comes next. This file holds only
 > milestone-three's per-card detail and collision-free agent split, following
 > the same status/tracker boundary as the archived [`docs/march-m15.md`](archive/march-m15.md).
-> Claim work first (`docs/claims/`), append to the branch log (`docs/logs/`),
-> and link saved evidence before changing a row to `✅`.
+> File a claim issue (label `claim`) before starting a card, comment progress
+> on the issue, and link saved evidence before changing a row to `✅`.
 
 The allocator, exception-vector, timer-interrupt, and first kernel-task cards
 precede this tracker and are complete. The march below starts at the EL0/SVC

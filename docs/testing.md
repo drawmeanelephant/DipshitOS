@@ -108,24 +108,39 @@ Every verification command belongs to exactly one class (canonical inventory:
 > and therefore CI — fails immediately.
 16. Generate the project snapshot: `zig build context` →
     `artifacts/context.md`.
-17. Verify the multiagent coordination surface:
-    `bash tools/verify-coordination.sh` (also `just verify-coordination`
-    and CI). Fails if a claim/log file is malformed, if a claim numbered
-    `0024+` does not carry its deterministic ID (computed from the owner
-    branch + filename slug by `tools/status/claim-id.sh`; `0001–0023` are
-    grandfathered), or if the generated claim/log index tables in
-    `docs/claims/README.md` / `docs/logs/README.md` are structurally
-    malformed (every row must have the exact expected column count, so an
-    unescaped `|` in a claim status cannot corrupt a table). Index *sync*
-    is not checked on PRs: since claim 2599 branches do not regenerate or
-    commit the tables — `.github/workflows/indexes.yml` opens an auto-merge
-    regeneration PR against main after every merge, so a branch's committed
-    indexes are stale by design.
+17. Verify the multiagent coordination surface (claims as GitHub issues):
+    `bash tools/status/verify-issue-coordination.sh` (also `just
+    verify-coordination` and CI). Fetches the open issues labeled `claim`
+    via `gh` and fails when two of them from different branches declare
+    overlapping `- **Touches:**` files (one editor per file), or when an
+    open claim has no Owner line with a backticked branch; claims with no
+    comment/edit for 14+ days draw a warning. The old file-based tracker
+    (`docs/claims/` + `docs/logs/`, deterministic IDs, generated indexes,
+    the indexes-bot workflow) was deleted 2026-09-03.
 18. Test the coordination tooling itself: `bash
     tools/status/test-coordination.sh` (also `just test-coordination` and
-    CI) — positive/negative cases for cell escaping, structural table
-    validation, drift tolerance, and deterministic claim IDs, run in a
-    throwaway sandbox.
+    CI) — positive/negative offline fixtures for the issue gate's parsing,
+    overlap detection (exact + prefix-glob), blocked-claim exclusion,
+    staleness warnings, the empty-tracker case, the weekly staleness sweep
+    (`tools/status/sweep-stale-claims.sh` — detection plus its `claim:stale`
+    label decisions: flag once per stale period, skip already-flagged
+    claims, unlabel on fresh updates), and the real-time unlabel guard
+    (`tools/status/unlabel-guard.sh` — the bot-vs-human decision the
+    event-driven `unlabel-fresh` job runs, exercised against issue_comment /
+    issues webhook payloads: human comments/edits unlabel, while the sweep's
+    own warning comments and bot-driven events never do). All fixtures run
+    in a throwaway sandbox with no network. The GitHub Actions workflow
+    files are also linted with actionlint (`bash tools/lint-workflows.sh`,
+    class A) so trigger/expression typos fail in CI instead of only
+    surfacing when a workflow runs for real. The real-time path can
+    additionally be rehearsed LIVE (manual): `just rehearse-unlabel`, or
+    the `workflow_dispatch` of `.github/workflows/claim-rehearsal.yml`,
+    creates a throwaway claim issue, marks it `claim:stale`, and verifies a
+    real event removes the label before cleaning up. The full event cascade
+    needs a human-scoped actor (a local collaborator's gh login, or the
+    `CLAIM_REHEARSAL_TOKEN` PAT secret in CI — GITHUB_TOKEN events do not
+    spawn further runs); without one the guard's live branch is exercised
+    in-process against the throwaway issue.
 19. Run the live RX / transcript gate (class B, claim 6684):
     `bash tools/verify-live-transcript.sh` (also `just
     verify-live-transcript`) — boots the production image, forwards

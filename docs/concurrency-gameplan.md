@@ -1,8 +1,8 @@
 # Multi-agent concurrency gameplan — who touches what, and when
 
 Date: 2026-09-01 · Sources: open board (milestones #19/#20/#21/#22), the
-Touches declarations in `docs/claims/*`, and the coordination rules
-(`AGENTS.md`). The goal: push several agents on several projects at once
+Touches declarations in open `claim` issues on the GitHub tracker, and the
+coordination rules (`AGENTS.md`). The goal: push several agents on several projects at once
 without the merge-time asshole — i.e. without two PRs fighting over the same
 file. **The coordination gate already enforces this mechanically** (two
 ACTIVE claims declaring overlapping Touches fail CI); this doc is the plan

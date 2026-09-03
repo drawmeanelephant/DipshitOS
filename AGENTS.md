@@ -124,63 +124,57 @@ idempotent — run it from your login/agent startup once per session.
 
 ## Multiagent coordination rules
 
-Multiple agents and humans develop this repo, sometimes in parallel. The
-full coordination setup (per-claim files, per-branch logs, conventions)
-lives under `docs/claims/`, `docs/logs/`, and `docs/status.md`; the binding
-rules are:
+Multiple agents and humans develop this repo in parallel. Claims are GitHub
+issues — **no coordination files live in the repository**. The
+`docs/claims/` + `docs/logs/` file system and its index/gate machinery were
+deleted 2026-09-03; old four-digit claim numbers cited in prose (e.g.
+"claim 9094") are git-history references, and the five claims active at
+migration time became issues #859–#863. The binding rules:
 
 - **One worktree per agent.** Concurrent agents never share a checkout.
   Create yours with `just new-agent <name> <slug>` (worktree at
   `../virelaios-<name>`, branch `agent/<name>/<slug>` off `origin/main`),
   reattach later with `just resume-agent`, clean up with `just drop-agent`.
   Each worktree has its own `.build/` and `artifacts/`, so builds and
-  class-B VM gates cannot collide. Claim and log from inside your own
-  worktree. Shared-checkout staging leaks caused PR #524's false
-  coordination failure; claim 2564 made the gate immune to it, worktrees
-  remove the entire class.
-- **Claim before you start.** Non-trivial work gets a claim file under
-  `docs/claims/` (copy `docs/claims/TEMPLATE.md`) and a log entry in
-  `docs/logs/<branch>.md` before code is written. Claimed work is not
-  duplicated by other agents. Declare the files you will edit in
-  `- **Touches:**` and bump `- **Heartbeat:**` while 🔄: the gate fails
-  when two ACTIVE claims from different branches declare overlapping
-  files, and warns when a 🔄 claim has had no commit for 14+ days (past
-  ~21 days, anyone may flip it ⛔ via their own branch log entry).
+  class-B VM gates cannot collide. File claims and comments from inside
+  your own worktree.
+- **Claim before you start.** Non-trivial work gets one GitHub issue
+  labeled `claim` before code is written — `just claim "<short title>"` or
+  `bash tools/status/new-claim.sh` (flags in the script header), or the web
+  form at `.github/ISSUE_TEMPLATE/claim.md`. The issue body carries the
+  machine-read fields: an `Owner` bullet naming the agent and its backticked
+  branch, a `Touches` bullet of comma-separated paths/globs you will edit,
+  and an optional `Status: ⛔` when blocked. An OPEN `claim` issue is an
+  ACTIVE claim — another agent will not duplicate it, and claimed work is
+  not fair game.
 - **One editor per file at a time.** If two agents need the same file, the
   second waits or merges through the integration branch — never edit the
-  same file (e.g. `kernel/src/main.zig`) concurrently.
-- **The changelog is append-only, one file per branch.** Logs live under
-  `docs/logs/` so parallel appends cannot collide. Never rewrite or delete
-  entries; corrections are new entries referencing the old one.
-- **Indexes are generated at merge time — never by your branch.** The
-  claim and log index tables in `docs/claims/README.md` and
-  `docs/logs/README.md` are generated from the git-tracked claim/log files,
-  but since claim 2599 **branches do not regenerate or commit them**:
-  `.github/workflows/indexes.yml` owns both tables after merge (the single
-  serialized writer of a shared
-  derived artifact). Committing table churn from a branch is what made
-  those two files collide on nearly every near-simultaneous merge; don't
-  reintroduce it. Branch protection forbids direct pushes, so after every
-  merge the workflow opens (or updates) one **auto-merge regeneration PR**
-  (`indexes/bot-regenerate`) instead of pushing to main — tables land a few
-  minutes later, through the normal required checks. A local `bash tools/status/refresh-indexes.sh` (`just
-  refresh-indexes`) is an optional preview of what the table will look
-  like — do not commit its output. The coordination gate judges tracked
-  files only, so other agents' untracked staging files in a shared checkout
-  cannot fail your PR. Run `bash tools/verify-coordination.sh`
-  (`just verify-coordination`, also CI) before opening a PR; it fails on
-  malformed claim/log files and structurally broken tables, not on index
-  drift (a branch's committed indexes are stale by design).
-- **Index-region merge conflicts: resolve by regeneration.** If you hit a
-  textual conflict inside a generated index region (legacy branches,
-  rebases onto old mains), do not hand-resolve rows: take either side
-  wholesale (`git checkout --ours/--theirs <file>`), optionally run
-  `bash tools/status/refresh-indexes.sh` to preview correctness, and
-  commit — or simply drop the hunk entirely; the bot regenerates the truth
-  on main after merge.
-- **Update on completion and on blockers.** Flip your claim file's status
-  and append a log entry when done; append one when blocked so the next
-  agent does not repeat the attempt.
+  same file (e.g. `kernel/src/main.zig`) concurrently. The gate fails when
+  two ACTIVE claims from different branches declare overlapping `Touches`.
+- **Progress and completion live on the issue.** Append progress as issue
+  comments (never rewrite earlier comments); edit the body when fields
+  change. When the work lands, close the issue with a final evidence
+  comment and reference `Closes #<n>` from the PR. Blocked = comment and
+  set `Status: ⛔` (or close); a closed claim tells the next agent not to
+  repeat the attempt.
+- **Heartbeats.** Any comment or edit keeps a claim alive. A `claim` issue
+  with no update for 14+ days draws a gate warning, and a weekly automated
+  sweep (`.github/workflows/claim-staleness.yml`) comments a warning on it
+  and applies the `claim:stale` label even when nobody runs the gate —
+  filter with `gh issue list --label claim --label claim:stale`. The label
+  is removed automatically the moment the claim is updated again — an
+  event-driven job in the staleness workflow unlabels on human comments,
+  edits, or reopens (the sweep's own comments never reset the staleness
+  clock). That job's bot-vs-human guard is the fixture-tested script
+  `tools/status/unlabel-guard.sh`. Past ~21 days anyone may close it with a
+  comment (reopen or file a fresh issue to pick it up).
+- **The gate.** Run `bash tools/status/verify-issue-coordination.sh`
+  (`just verify-coordination`, also CI) before opening a PR: it reads the
+  open `claim` issues from GitHub via `gh` (GH_TOKEN in CI), fails on
+  Touches overlaps between different branches, and warns on stale claims.
+  `bash tools/status/test-coordination.sh` (`just test-coordination`)
+  tests the tooling offline.
 - **Doc edits go through `docs/status.md`.** Milestone-level status prose
   lives there; other docs link to it. Prefer pointer-level changes to other
-  docs; claims and logs live in their own sharded files.
+  docs. Per-claim records live on the GitHub issue tracker, never in repo
+  files.

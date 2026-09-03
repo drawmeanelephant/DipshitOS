@@ -1,0 +1,85 @@
+# Claim staleness: weekly sweep + real-time label removal.
+#
+# Claims are GitHub issues: an OPEN `claim` issue is ACTIVE work and any
+# comment or edit keeps it alive (AGENTS.md coordination rules).
+#
+# Job 1 (`sweep`, scheduled + manual) runs
+# tools/status/sweep-stale-claims.sh once a week and, for every open claim
+# with no update for 14+ days, comments a warning and applies the
+# `claim:stale` label — flagged even when nobody runs the coordination gate
+# locally or in CI, and filterable with
+# `gh issue list --label claim --label claim:stale`. Staleness is
+# bot-aware (the sweep's own comments never reset the clock) and a claim is
+# flagged only once per stale period.
+#
+# Job 2 (`unlabel-fresh`, event-driven) removes `claim:stale` in REAL TIME
+# when a claim sees human activity (comment, edit, or reopen) — so the
+# stale filter is accurate the moment a claim comes back to life instead of
+# waiting for the next weekly pass. It skips the sweep's own warning
+# comments (github-actions[bot], or any comment carrying the marker) and
+# bot-driven issue events, so only human updates clear the label. The
+# bot-vs-human decision lives in tools/status/unlabel-guard.sh, which this
+# job runs against the full event payload ($GITHUB_EVENT_PATH); that script
+# is fixture-tested offline by tools/status/test-coordination.sh, so the
+# real-time path is proven before it fires in production.
+#
+# Commenting/labeling needs issues: write, which the GITHUB_TOKEN gets from
+# the explicit permissions below. Both jobs check out the repository so
+# their script paths are stable and the runs auditable.
+
+name: Claim staleness
+
+on:
+  schedule:
+    # Weekly: Monday 04:17 UTC.
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+  issue_comment:
+    types: [created, edited]
+  issues:
+    types: [edited, reopened, transferred]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  sweep:
+    name: Warn on stale claim issues
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Ensure the claim:stale label exists
+        run: gh label create "claim:stale" --description "Claim idle 14+ days (staleness sweep); removed on the next human update" --color FBCA04 2>/dev/null || true
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Sweep stale claim issues
+        run: bash tools/status/sweep-stale-claims.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  unlabel-fresh:
+    name: Drop claim:stale on human activity
+    # Cheap dispatch prefilter only (an open issue that currently carries
+    # the label; never for the scheduled sweep, which fires on
+    # schedule/workflow_dispatch events). The real bot-vs-human decision is
+    # made by tools/status/unlabel-guard.sh in the step below, against the
+    # full event payload.
+    if: >-
+      (github.event_name == 'issue_comment' || github.event_name == 'issues') &&
+      github.event.issue.state == 'open' &&
+      contains(github.event.issue.labels.*.name, 'claim:stale')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Remove claim:stale if this is human activity
+        run: bash tools/status/unlabel-guard.sh
+        env:
+          GH_TOKEN: ${{ github.token }}

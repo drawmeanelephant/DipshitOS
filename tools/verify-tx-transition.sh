@@ -233,6 +233,6 @@ for idx in 0 1 2 3; do
 done
 echo
 echo "  The FIRST phase that failed (HUNG or no bytes) names the transition that destroys console access;"
-echo "  see docs/claims/0020-tx-transition-matrix.md for the interpretation table."
+echo "  see claim 0020 (historical — in git history) for the interpretation table."
 echo
 echo "Evidence saved under artifacts/ (transition-gate.txt, transition-report.txt, transition-matrix.txt, transition-run-*, transition-marker-*, transition-serial-*)."

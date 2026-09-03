@@ -24,12 +24,14 @@ short version.
 
 Work lands as a **claim**:
 
-1. Create a claim file in `docs/claims/` with an id and a scope.
+1. File one GitHub issue labeled `claim` (`just claim "<title>"`) with the
+   owner branch and the files it will touch in the body.
 2. Implement on a branch, with host tests.
 3. Where hardware is involved, add a class B gate and save evidence under
    `artifacts/`.
-4. Run `bash tools/verify-coordination.sh` before opening a PR. Do not
-   regenerate or commit the index tables — CI owns them after every merge.
+4. Comment progress on the claim issue; close it (with an evidence
+   comment) when the work lands. Run
+   `bash tools/status/verify-issue-coordination.sh` before opening a PR.
 
 The ceremony is not optional — it is how the project keeps "observed" honest.
 
@@ -38,7 +40,8 @@ The ceremony is not optional — it is how the project keeps "observed" honest.
 - **Class A** on CI (deterministic — the `verify-portable` set).
 - **Class B** on Apple silicon, for anything touching hardware behavior
   (CI cannot run these; the PR documents the run).
-- The docs-coordination gate (indexes in sync).
+- The coordination gate (open `claim` issues don't declare overlapping
+  file touches — read from the GitHub tracker via `gh`).
 - For site changes: the **docs gate** (`boris validate`) — broken links,
   escaping URLs, or a failing theme contract block the merge.
 

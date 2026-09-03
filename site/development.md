@@ -41,7 +41,8 @@ GitHub rather than duplicating them.
 
 - `docs/decisions/` — ADRs 0001–0007 (the binding decisions: kernel proper,
   runtime function tables, MMU debt boundary, the syscall ABI).
-- `docs/claims/` — per-claim scope and evidence.
+- GitHub issues labeled `claim` — per-claim scope and evidence (claims
+  live on the tracker, not in repo files).
 - `docs/hardware-contract.md` — observed vs inferred hardware facts.
 - `docs/gate-inventory.md` — the lean gate table; full historical detail in
   `docs/archive/gate-inventory-detail.md`.

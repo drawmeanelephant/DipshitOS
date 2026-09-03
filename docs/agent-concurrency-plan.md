@@ -259,7 +259,7 @@ for script in tools/verify-live-*.sh; do bash "$script"; done
 ```
 
 Update `docs/status.md` with completed card evidence. Run coordination
-verification: `bash tools/verify-coordination.sh`.
+verification: `bash tools/status/verify-issue-coordination.sh`.
 
 ---
 
@@ -460,9 +460,9 @@ via the integration branch.
 
 ### Rule 2: Claim before you start
 
-Per AGENTS.md: non-trivial work gets a claim file under `docs/claims/`
-and a log entry in `docs/logs/<branch>.md` before code is written.
-This prevents two agents from claiming the same issue.
+Per AGENTS.md: non-trivial work gets a GitHub issue labeled `claim`
+(open = active, progress in comments) before code is written. This
+prevents two agents from claiming the same issue.
 
 ### Rule 3: New files are free
 
@@ -486,8 +486,9 @@ merges through `main` after the first lane's PR lands.
 
 ### Rule 6: Update on blockers
 
-If you're blocked (dependency not ready, test failing), append a log entry
-to `docs/logs/<branch>.md` so the next agent doesn't repeat the attempt.
+If you're blocked (dependency not ready, test failing), comment on your
+claim issue (set `Status: ⛔` or close it) so the next agent doesn't repeat
+the attempt.
 
 ---
 
@@ -609,13 +610,13 @@ When spinning up a new agent session:
    the lane.
 2. **Check the timeline.** Is the lane's dependency met? (e.g., Lane C
    can't start until Lane A finishes M19.)
-3. **Claim the work.** Create `docs/claims/<NNNN>-<slug>.md` and append to
-   `docs/logs/<branch>.md`.
+3. **Claim the work.** File a GitHub issue labeled `claim` (`just claim
+   "<title>"`) with the owner branch and Touches filled in.
 4. **Give the agent the march file.** Point it at `docs/march-m<N>.md`
    for card detail and gate scripts.
 5. **Give the agent the issue list.** The issues for that lane are in
    Section 6 of this document.
 6. **Give the agent the architecture.** Point it at `docs/architecture.md`
    and `docs/decisions/0007-syscall-abi.md` if it needs ABI context.
-7. **Verify on completion.** Run `bash tools/verify-coordination.sh` and
-   the lane's gate scripts.
+7. **Verify on completion.** Run `bash tools/status/verify-issue-coordination.sh`
+   and the lane's gate scripts.

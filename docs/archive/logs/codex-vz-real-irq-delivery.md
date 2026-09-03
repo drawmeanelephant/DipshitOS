@@ -1,6 +1,0 @@
-# Log — `codex/vz-real-irq-delivery`
-
-Append-only. See [`README.md`](README.md) for the convention.
-
-- **2026-08-09** — *Codex*: claim 9187 filed at `a3644cf`; scope is the current-SDK VZ interrupt premise plus materially distinct CNTV/GICv2/virtio signaling experiments. Existing claim 5746 work in the checkout is preserved and remains out of this claim's implementation scope. · 🔄 in progress
-- **2026-08-09** — *Codex*: claim 9187 complete — invalidated claim 7948's VZ blocker conclusion by fixing the delivery-blocking GICv3 redistributor SGI-frame offset; also corrected MADT GIC type/version decoding and ICFGR trigger-bit programming for specification compliance. A real level-triggered CNTP PPI 30 now enters the EL1 IRQ vector, is acknowledged/handled/EOI’d and re-armed. Removed the racing production poll after the first mixed run; strict `tools/verify-live-timer.sh` requires `ticks=5 irq=5 poll=0` and passes 3/3 with the shell alive. Full class A green; Xcode 27 audit confirms no public VZ injection API and independently confirms the corrected offsets through Hypervisor.framework. Evidence: `artifacts/live-timer-*`, `artifacts/vz-irq-api-audit.txt`, `artifacts/verify-portable-9187.txt`. · ✅ done

@@ -103,9 +103,9 @@ EOF
 ```
 
 Interim mitigation (already practiced): merge-prep claims re-verify the
-branch after folding origin/main in (see claim 2259), and
-`tools/verify-coordination.sh` blocks overlapping active lanes before CI
-ever sees them.
+branch after folding origin/main in (see claim 2259, historical), and the
+coordination gate (`tools/status/verify-issue-coordination.sh`) blocks
+overlapping active claim issues before CI ever sees them.
 
 ---
 
@@ -133,7 +133,8 @@ When operating multiple AI agents in parallel (e.g. across worktrees `calm-lavoi
    zig build inspect
    swift build --package-path host/vm-runner
    zig build context
-   bash tools/verify-coordination.sh
+   bash tools/status/verify-issue-coordination.sh
+   bash tools/lint-workflows.sh
    ```
 
 3. **Submitting Work**:

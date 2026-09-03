@@ -7,32 +7,38 @@ tags: [evidence, claims]
 
 # Claims & evidence philosophy
 
-The repository runs on **claims**: a claim is a filed unit of work with an id,
-a scope, and a gate, and it only flips to observed when the gate passes.
+The repository runs on **claims**: a claim is a filed unit of work with a
+scope and a gate, and it only flips to observed when the gate passes.
+Claims are **GitHub issues labeled `claim`** on the project tracker — they
+are not files in the repository (the old `docs/claims/` + `docs/logs/`
+file system was deleted 2026-09-03).
 
 ## How a claim works
 
-1. A claim file lands in `docs/claims/` (e.g. `docs/claims/6053-…`).
-2. The work lands on a branch with host tests and, where hardware is involved,
-   a class B gate.
+1. A claim issue is filed **before** work starts — one issue per piece of
+   work, titled `claim: <title>`, with the owner branch and the files it
+   will touch (`- **Touches:**`) in the body.
+2. The work lands on a branch with host tests and, where hardware is
+   involved, a class B gate.
 3. Evidence is saved under `artifacts/` (gitignored — no evidence, no
    "observed").
-4. The claim closes when the gate passes; the claim file records what was
-   **observed** versus **inferred**.
+4. Progress is commented on the issue; the claim **closes** (the issue
+   closes, with a final evidence comment) when the gate passes, recording
+   what was **observed** versus **inferred**.
 
-The canonical index is
-[`docs/claims/README.md`](https://github.com/drawmeanelephant/DipshitOS/blob/main/docs/claims/README.md),
-regenerated after every merge by
-`.github/workflows/indexes.yml` via one auto-merge PR; branches never
-commit table churn, and the coordination gate checks table structure (not
-drift) on pull requests.
+Open claim issues are the canonical index:
+`gh issue list --label claim --state open`. The coordination gate
+(`bash tools/status/verify-issue-coordination.sh`, also CI) fetches the
+open claims and fails when two of them from different branches declare
+overlapping file touches (one editor per file), and warns when a claim
+goes 14+ days without a comment or edit.
 
 ## Why this matters to you
 
 When a page here says a feature is **live-gated**, that is a pointer to a
 named claim and a named gate — not marketing. You can:
 
-- read the claim to see the exact scope and honest bounds;
+- open the claim issue to see the exact scope and honest bounds;
 - run the gate on Apple silicon to reproduce it;
 - read the saved evidence to see the actual serial report or capture.
 

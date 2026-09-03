@@ -83,17 +83,9 @@ section() { printf '\n## %s\n\n' "$1"; }
     section "docs/march-m3.md (milestone-three per-step tracker)"
     fence docs/march-m3.md
 
-    section "docs/logs (per-branch changelogs)"
-    for f in docs/logs/*.md; do
-        [ -e "$f" ] || continue
-        fence "$f"
-    done
-
-    section "docs/claims (per-claim files)"
-    for f in docs/claims/*.md; do
-        [ -e "$f" ] || continue
-        fence "$f"
-    done
+    # Claims and per-branch logs are GitHub issues/comments since 2026-09-03
+    # (label `claim`) — there are no docs/claims or docs/logs files to fence.
+    # Open claims: gh issue list --label claim --state open
 
     section "docs/decisions/0001-arm64-uefi-zig.md"
     fence docs/decisions/0001-arm64-uefi-zig.md

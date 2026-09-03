@@ -45,8 +45,9 @@ card's close-out and graduate to the archive when their milestone closes.
 | `swift-runner-build` | A | `swift build --package-path host/vm-runner` | ✅ pass | every CI push |
 | `swift-spike-build` | A | `swift build --package-path host/vm-runner -Xswiftc -DSPIKE` | ✅ pass | every CI push |
 | `context` | A | `zig build context` | ✅ pass | every CI push |
-| `coordination` | A | `bash tools/verify-coordination.sh` | ✅ pass | every CI push |
+| `coordination` | A | `bash tools/status/verify-issue-coordination.sh` | ✅ pass | every CI push |
 | `coordination-tooling` | A | `bash tools/status/test-coordination.sh` | ✅ pass | every CI push |
+| `workflow-lint` | A | `bash tools/lint-workflows.sh` | ✅ pass | every CI push |
 | `mmu-debt` | A | `bash tools/verify-mmu-debt.sh` | ✅ pass | every CI push |
 | `bss-budget` | A | `bash tools/verify-bss-budget.sh` | ✅ pass | every CI push |
 | `verify-portable` | A | `just verify-portable` (aggregate — the full class-A set) | aggregate | every CI push |
@@ -142,8 +143,7 @@ Notes:
 - Raw build steps (`zig build marker`, `nvram-console`, `preexit-tx`,
   `tx-diag`, `bad-handoff`) are classed with their verify script (B or D);
   `zig build kernel` builds artifacts only and is class-A tooling, not a gate.
-- Developer tooling (`ragshit`, `just impact`, `just refresh-indexes`) is not
-  a verification gate.
+- Developer tooling (`ragshit`, `just impact`) is not a verification gate.
 - `swift-spike-build` runs on GitHub's `xcode-27` public-preview arm64 runner
   (macOS 27 SDK, claim 5844); it compiles the spike, boots nothing, so it
   stays class A.

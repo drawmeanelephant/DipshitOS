@@ -75,9 +75,8 @@
 
 > The canonical, always-current answer to "where are we" is
 > [`docs/status.md`](status.md); active per-card detail lives in the march
-> trackers and the generated claim index
-> ([`docs/claims/README.md`](claims/README.md)). This section stays
-> pointer-level so it cannot go stale.
+> trackers and in open `claim` issues on the GitHub tracker (label
+> `claim`). This section stays pointer-level so it cannot go stale.
 
 - **M17 — desktop completeness** (issues #212–#228; arcs 1/2 of the M14-era
   grooming): completable widgets (Checkbox/Toggle, ProgressBar,

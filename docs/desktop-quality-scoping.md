@@ -93,5 +93,6 @@ DQ2 before DQ4/DQ5 (look and rect math must be pinned first). DQ1 independent
 - Per-card Class-B live VZ slice; the umbrella gate is #821's own plan:
   global `Ctrl+Space` summon + exec, mouse tab switch — split across
   DQ1 (keyboard/exec) and DQ3 (pointer).
-- `verify-bss-budget.sh` + `verify-coordination.sh` per card (god-menu
-  BSS, mascot pixels, and per-app growth all count).
+- `verify-bss-budget.sh` + `bash tools/status/verify-issue-coordination.sh`
+  (`just verify-coordination`) per card (god-menu BSS, mascot pixels, and
+  per-app growth all count).
