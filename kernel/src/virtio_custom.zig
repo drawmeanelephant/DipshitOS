@@ -1053,6 +1053,80 @@ pub fn free_chain_q(qidx: u16, handle: u16) void {
     free_chain(&cv_rings[qidx], handle);
 }
 
+/// A queue's kick without a new submit — an explicit notify so the device
+/// rescans the avail ring. The file channel uses it on a wait timeout: the
+/// element is still posted, and a host-side callback that ran too early
+/// (or whose notification was dropped) will serve it on the re-scan.
+pub fn kick_q(qidx: u16) void {
+    if (!cv_ready) return;
+    if (qidx >= armed_queues) return;
+    kick(qidx);
+}
+
+// ---------------------------------------------------------------------------
+// Parked-chain discipline (claim #899 — the z2a zc-leg OUT.TXT flake).
+//
+// When an exchange's wait times out, the host may STILL hold the element
+// (its reply arrives later — the host was slow, not dead). Freeing the
+// chain immediately lets the next submit REUSE the same head while the
+// element is still queued on the host side; the host then serves the
+// recycled chain with the NEW exchange's descriptors/content (the observed
+// "request length mismatch" refusals and mis-served elements) or its late
+// reply is matched by the next exchange (wrong data for the right op).
+// Instead: a timed-out chain is PARKED — never returned to the free list,
+// so its head is never reallocated — until its used-ring entry is observed
+// (reap_parked), at which point the reply is known to have arrived and the
+// chain is freed for good. Parked heads can therefore never be misattrib-
+// uted; the only cost is a descriptor held out of the pool while the host
+// is slow (the ring self-throttles; 32 descriptors, a handful of parked
+// heads is nothing). The file channel (queue 5) is the only user.
+// ---------------------------------------------------------------------------
+pub var parked_heads: [8]u16 = undefined;
+pub var parked_count: u16 = 0;
+
+/// Park chain `head` (queue 5) after a wait timeout. The chain stays out
+/// of the free list until its reply is observed by reap_parked. If the
+/// park list is full the head is simply leaked (never freed, never
+/// recycled) — the same corruption-free invariant, one descriptor lost to
+/// a pathological host.
+pub fn park_chain(head: u16) void {
+    if (parked_count < parked_heads.len) {
+        parked_heads[parked_count] = head;
+        parked_count += 1;
+    }
+}
+
+/// Reap parked chains whose used-ring entry has now appeared (the host's
+/// late reply arrived). Called after every completed exchange while the
+/// caller still holds the file-channel lock, so it never races. Consumes
+/// used entries in order; a parked head that shows up is freed; any other
+/// outstanding entry is impossible by the invariant (the previous wait
+/// consumed the current exchange's reply, and every stale reply is a
+/// parked head), so non-parked entries are just advanced past.
+pub fn reap_parked() void {
+    if (parked_count == 0) return;
+    if (!cv_ready) return;
+    const r = &cv_rings[file_qidx];
+    if (!r.armed) return;
+    var scanned: usize = 0;
+    while (parked_count > 0 and scanned < parked_heads.len) : (scanned += 1) {
+        if (comptime !builtin.is_test) {
+            mmu.invalidate_dcache_range(@intFromPtr(&r.used), @sizeOf(VirtqUsed));
+        }
+        if (r.used.idx == r.last_used) break;
+        const elem = r.used.ring[r.last_used % queue_size];
+        r.last_used +%= 1;
+        for (&parked_heads, 0..) |*h, idx| {
+            if (h.* == elem.id) {
+                free_chain(r, @intCast(elem.id));
+                parked_count -= 1;
+                parked_heads[idx] = parked_heads[parked_count];
+                break;
+            }
+        }
+    }
+}
+
 /// Poll the used ring until the element with head index `handle` returns
 /// (the host's returnToQueue) or the budget runs out. Entries are matched
 /// by id, so out-of-order completion across in-flight elements is handled.
@@ -1555,6 +1629,48 @@ test "virtio_custom: scan_used matches by id, handles out-of-order completion, w
     r.used.idx = 0;
     const n3 = scan_used(&r, 4, 100, reply_buf[0..]).?;
     try std.testing.expectEqual(@as(u32, 7), n3);
+}
+
+test "virtio_custom: park_chain keeps a timed-out head out of the free list until reap_parked sees its reply" {
+    parked_count = 0;
+    // Real-flow balance: two chains were ALLOCATED from the file ring
+    // (free_count dropped), then their exchanges timed out and parked
+    // them (never freed back).
+    cv_ready = true;
+    const rr = &cv_rings[file_qidx];
+    ring_init(rr);
+    rr.armed = true;
+    const p1 = alloc_chain(rr, 1).?;
+    const p2 = alloc_chain(rr, 1).?;
+    park_chain(p1);
+    park_chain(p2);
+    try std.testing.expectEqual(@as(u16, 2), parked_count);
+    // Parked heads are out of the free pool: the next allocation returns a
+    // DIFFERENT head — the host's late reply can never be misattributed.
+    const fresh = alloc_chain(rr, 1).?;
+    try std.testing.expect(fresh != p1 and fresh != p2);
+    // The host's late replies arrive: used ring gains entries p1 then p2.
+    rr.used.ring[0] = .{ .id = p1, .len = 3 };
+    rr.used.ring[1] = .{ .id = p2, .len = 3 };
+    rr.used.idx = 2;
+    const free_before = rr.free_count;
+    reap_parked();
+    // Both parked heads reaped: freed back into the pool, list empty,
+    // last_used consumed both entries (and nothing else).
+    try std.testing.expectEqual(@as(u16, 0), parked_count);
+    try std.testing.expectEqual(@as(u16, 2), rr.last_used);
+    try std.testing.expectEqual(free_before + 2, rr.free_count);
+    // An empty parked list is a no-op; a full list degrades to a leak
+    // (never freed, never recycled — corruption-free either way).
+    parked_count = 0;
+    reap_parked();
+    try std.testing.expectEqual(@as(u16, 0), parked_count);
+    for (&parked_heads) |*h| h.* = 1;
+    parked_count = parked_heads.len;
+    park_chain(99);
+    try std.testing.expectEqual(parked_heads.len, parked_count);
+    parked_count = 0;
+    cv_ready = false;
 }
 
 test "virtio_custom: the reply read is length-driven, clamped to the buffer" {

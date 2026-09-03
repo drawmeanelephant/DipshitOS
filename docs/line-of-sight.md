@@ -154,15 +154,27 @@ are the open end.
   "how realistic is 0.16" is now: dialect parity AND run parity for the
   corpus, on a host-side link contract — no kernel seam.
 
-  **One honest flake, observed 2026-09-03:** the z2a *zc-leg* (the
-  in-guest-compiled heap fixture) intermittently (~2/7 boots across a
-  sweep) exits 72 with `heap-ok` while its OUT.TXT round trip comes back
-  missing or wrong — the zc-compiled binary's file-channel write is
-  unreliable, while the Z4b host-built z2a image does the identical round
-  trip byte-exact 7/7. Not a Z4b regression (fixture and ZC.BIN are
-  unchanged since Z4a); looks like the live-gate's documented
-  exit-drain/file-channel race family. Worth its own card before the
-  corpus gate is trusted for unattended CI.
+  **The z2a zc-leg OUT.TXT flake was ROOT-CAUSED and FIXED 2026-09-03**
+  (claim #899): the zc-compiled z2a fixture intermittently (~2/7 boots
+  across a sweep) exited 72 with `heap-ok` while its OUT.TXT round trip
+  came back missing or wrong, while the Z4b host-built z2a image did the
+  identical round trip byte-exact. Root cause: an SMP data race in the
+  guest file channel — the virtio_file request ASSEMBLY into the
+  module-global `vf_req_buf`/`vf_write_buf` ran OUTSIDE the spinlock
+  (only submit/wait/free was locked), so two cores (the app on the
+  secondary, the shell's history save / exec reads on the primary)
+  spliced encodes into one request — the host's `request length
+  mismatch` refusals — and the app's silently-ignored failures left
+  OUT.TXT empty/missing while it still exited 72. Fix: the lock now
+  covers encode+exchange in `exchange()`/`write()`; timed-out chains are
+  PARKED (never recycled until their reply is observed —
+  `virtio_custom.park_chain`/`reap_parked`); timeouts re-kick and retry
+  once; the wait budget grew 32M→320M (~155 ms → ~1.5-2 s measured).
+  Verified on VZ: z2a zc leg 12/12 consecutive PASS with zero length
+  mismatches (7 of the 12 ran the app on the secondary core — the
+  previously risky condition), full corpus sweep 12/12 cases × both
+  legs, `verify-live-zc.sh` PASS. Evidence under `artifacts/claim-899/`;
+  the corpus gate is now trustworthy for unattended CI.
 - **VL6 (the GUI consumer, #708) pairs with Z0.5 (#749).** It's svc-builtin
   work (win_open/fill/present) — no new language features. Land the dialect
   re-shape and the win builtins together, so the first GUI app is written

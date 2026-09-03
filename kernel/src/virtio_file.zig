@@ -41,6 +41,7 @@
 //! the shared class-A fixture `tests/vf-pattern-32k.bin` (sha256-pinned).
 
 const virtio_custom = @import("virtio_custom.zig");
+const spinlock = @import("spinlock.zig");
 /// Claim 9094 (#810 writer hunt): the task-ring audit is a LIVE-gate
 /// instrument only — the scheduler import is comptime-conditional so
 /// host-test binaries never pull in scheduler's whole import tree (its
@@ -245,7 +246,13 @@ pub fn build_read_payload(path: []const u8, offset: u64, out: []u8) ?usize {
 
 /// The bounded wait budget for ONE file-channel exchange (polled — no IRQ
 /// dependency; the 32 KiB reply needs a generous spin budget).
-pub const exchange_budget: usize = 32_000_000;
+/// One exchange's poll budget. Measured natively at ~5 ns/iteration, 32M
+/// was only ~155 ms — shorter than a host-side serving stall under serial
+/// flood, so the z2a zc leg timed out, silently failed its file ops, and
+/// recycled chains under the host (claim #899). 320M ≈ 1.5-2 s: timeouts
+/// become vanishingly rare, and the retry + parked-chain path makes even
+/// that case honest (fail fast, never corrupt).
+pub const exchange_budget: usize = 320_000_000;
 
 /// BSS staging — the flat kernel does not relocate, so every buffer the
 /// device touches must hold a runtime-correct address (claim 0015: no
@@ -300,13 +307,33 @@ pub fn available() bool {
     return virtio_custom.cv_ready and virtio_custom.has_file_queue;
 }
 
-/// One bounded exchange on queue 5: submit an ALREADY-ENCODED request
-/// (`req`), poll-wait for the host's reply, free the chain. Returns the
+/// Cross-core serialization for the file queue (claim #899 — the z2a
+/// zc-leg OUT.TXT flake). Every queue-5 exchange assembles into the
+/// module-global request/reply buffers (vf_req_buf / vf_write_buf /
+/// vf_reply_buf / vf_scatter) and mutates the ring's shared state
+/// (avail/used idx, last_used, the free list). M28 SMP means the shell
+/// on one core can be running a file op (history save, exec read) while
+/// the app on another does its own — the two race the buffers and a
+/// request reaches the host with a corrupted length field (the host's
+/// "request length mismatch" refusal), and the op silently fails (the
+/// z2a fixture ignores write errors, so OUT.TXT came back empty while
+/// the app still exited 72). One lock at this choke point covers every
+/// file op (probe, list, read, stat, open/close/write/truncate/fsync,
+/// rename/mkdir/delete/clone all funnel through exchange_raw). IRQs are
+/// masked at vector entry for syscalls already; IrqSaveSpinlock makes
+/// monitor-task callers safe too. The wait is POLLED (no IRQ dependency
+/// — the used ring is observed directly), so the holder always completes
+/// and a spinner finds it running and releasing promptly.
+var vf_lock = spinlock.IrqSaveSpinlock{};
+
 /// used-ring length (bytes the host wrote), or null on transport
 /// failure/timeout. Claim 9094 (#810 writer hunt): EVERY exchange arms
 /// the scheduler task-ring + process audit at entry and closes it at
 /// exit (covers the probe spike, read, write, list and clone — the
 /// vf-output era is where the corrupted-pointer faults were caught).
+/// The caller (exchange / write) holds `vf_lock` for the WHOLE operation
+/// — encode/assemble AND the exchange — because the request buffers are
+/// module-global (see `vf_lock`).
 fn exchange_raw(req: []const u8, reply_buf: []u8) ?u32 {
     if (!available()) return null;
     scheduler.audit.arm(.vf);
@@ -319,11 +346,28 @@ fn exchange_raw_inner(req: []const u8, reply_buf: []u8) ?u32 {
     vf_scatter[0] = req;
     const handle = virtio_custom.submit_ex(virtio_custom.file_qidx, &vf_scatter, reply_buf, false) orelse return null;
     const n = virtio_custom.wait(virtio_custom.file_qidx, handle, exchange_budget, reply_buf) orelse {
-        // claim-0680 discipline: a polled send MUST free its descriptor
-        // chain even on timeout — the ring never leaks.
-        virtio_custom.free_chain_q(virtio_custom.file_qidx, handle);
+        // Claim #899 discipline: a timed-out exchange means the host is
+        // SLOW, not dead — the element is still posted. Re-kick so a
+        // callback that ran too early (or a dropped notification) rescans
+        // and serves it, then wait one more budget. If it STILL times out,
+        // park the chain instead of freeing it: recycling now would let
+        // the next submit reuse the same head while the element is still
+        // queued on the host side, and the host's late reply (or its
+        // re-read of the recycled descriptors) would corrupt the next
+        // exchange (the "request length mismatch" refusals). A parked
+        // chain stays out of the free list until reap_parked observes its
+        // reply — the ring never leaks AND never misattributes.
+        virtio_custom.kick_q(virtio_custom.file_qidx);
+        if (virtio_custom.wait(virtio_custom.file_qidx, handle, exchange_budget, reply_buf)) |n2| {
+            virtio_custom.reap_parked();
+            virtio_custom.free_chain_q(virtio_custom.file_qidx, handle);
+            return n2;
+        }
+        virtio_custom.park_chain(handle);
+        virtio_custom.reap_parked();
         return null;
     };
+    virtio_custom.reap_parked();
     virtio_custom.free_chain_q(virtio_custom.file_qidx, handle);
     return n;
 }
@@ -331,6 +375,12 @@ fn exchange_raw_inner(req: []const u8, reply_buf: []u8) ?u32 {
 /// One bounded exchange on queue 5: encode the request into the shared
 /// small request buffer, then exchange_raw.
 fn exchange(op: u8, flags: u8, payload: []const u8, reply_buf: []u8) ?u32 {
+    // The lock covers the ENCODE too: vf_req_buf is module-global, and two
+    // cores assembling different ops into it simultaneously produce a
+    // request whose len field and content belong to different ops — the
+    // host's "request length mismatch" refusals (claim #899).
+    const saved_daif = vf_lock.lock();
+    defer vf_lock.unlock(saved_daif);
     const req_len = encode_request(op, flags, payload, &vf_req_buf) orelse return null;
     return exchange_raw(vf_req_buf[0..req_len], reply_buf);
 }
@@ -577,6 +627,11 @@ pub fn write(handle: u16, data: []const u8, out_written: *u64) u8 {
     out_written.* = 0;
     if (!available()) return st_host_error;
     if (data.len > write_chunk_max) return st_host_error;
+    // The lock covers the ASSEMBLY too — vf_write_buf is module-global and
+    // a concurrent (other-core) assembly would splice two requests (claim
+    // #899: the "request length mismatch" refusals).
+    const saved_daif = vf_lock.lock();
+    defer vf_lock.unlock(saved_daif);
     // Assemble the full request in one buffer without any self-overlap:
     // header fields at the head, body ([handle][data]) after them.
     const body_len = handle_len + data.len;
