@@ -253,7 +253,7 @@ var inputStringAfter: String?
 // Milestone eight card U2 (claim 1809): the scripted CHORD surface for the
 // line-editor live gate. `--input-chords <csv>` types a comma-separated list
 // of keystrokes — a printable char, or a named chord (return/up/down/left/
-// right/home/end/delete/tab, or ctrl-a..ctrl-z) — keyDown + keyUp per chord
+// right/home/end/delete/tab, ctrl-a..ctrl-z, ctrl-space, ctrl-comma) — keyDown + keyUp per chord
 // after `--input-chords-after <marker>` (default: the boot self-test line),
 // so arrows and Ctrl chords reach the I3 keymap over a real VZ keyboard.
 //
@@ -2397,6 +2397,7 @@ func macChord(_ token: String) -> (UInt16, NSEvent.ModifierFlags, String)? {
     case "space": return (0x31, [], " ")
     case "comma": return (0x2B, [], ",") // K12/K16: the CSV token separator cannot carry a literal comma
     case "ctrl-comma": return (0x2B, [.control], ",")
+    case "ctrl-space": return (0x31, [.control], " ") // M37 DQ1: the God Menu summon chord
     case "tab": return (0x30, [], "\t")
     case "alt-tab": return (0x30, [.option], "\t") // WMS6 Gate A: Option+Tab
     case "up": return (0x7E, [], "\u{F700}")
@@ -3884,6 +3885,7 @@ enum CustomVirtioSpike {
         case "space": return (0, 0x2C)
         case "comma": return (0, 0x36) // K12/K16: the CSV token separator cannot carry a literal comma
         case "ctrl-comma": return (hidModCtrl, 0x36)
+        case "ctrl-space": return (hidModCtrl, 0x2C) // M37 DQ1: the God Menu summon chord
         case "tab": return (0, 0x2B)
         // WMS6 Gate A (issue #626): a real Alt+Tab chord over the HID channel
         // (LAlt modifier + Tab usage) — the WM's alt-tab policy hook.

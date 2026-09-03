@@ -698,6 +698,175 @@ var god_menu_mascot_loaded: bool = false;
 var god_menu_prev_focus: u8 = 0;
 const mascot_qoi_bytes = @embedFile("lib/fixtures/qoi/mascot_24x24.qoi");
 
+// ---------------------------------------------------------------------------
+// M37 DQ1 (issue #836): dynamic apps section from the APPS.TXT manifest
+// ---------------------------------------------------------------------------
+// Same wire format `desktop.zig:parse_manifest` reads (M34/HF4 share,
+// `NAME.BIN | Display Name | ...`); parsed by the menu-owned
+// `sexiburger.parse_apps_manifest`. Registry commands borrow slices of
+// these static buffers, which outlive every populate (the registry is
+// rebuilt from them each summon). Lengths mirror action_registry caps
+// (label 32 / verb 24); bin names cap at 16 (`NOTEPAD.BIN` is 11).
+pub const god_menu_manifest_max: usize = 1024;
+
+var god_menu_manifest_buf: [god_menu_manifest_max]u8 = undefined;
+var god_menu_app_verbs: [sexiburger.menu_apps_max][24]u8 = [_][24]u8{[_]u8{0} ** 24} ** sexiburger.menu_apps_max;
+var god_menu_app_verb_lens: [sexiburger.menu_apps_max]usize = [_]usize{0} ** sexiburger.menu_apps_max;
+var god_menu_app_bins: [sexiburger.menu_apps_max][16]u8 = [_][16]u8{[_]u8{0} ** 16} ** sexiburger.menu_apps_max;
+var god_menu_app_bin_lens: [sexiburger.menu_apps_max]usize = [_]usize{0} ** sexiburger.menu_apps_max;
+var god_menu_app_labels: [sexiburger.menu_apps_max][32]u8 = [_][32]u8{[_]u8{0} ** 32} ** sexiburger.menu_apps_max;
+var god_menu_app_label_lens: [sexiburger.menu_apps_max]usize = [_]usize{0} ** sexiburger.menu_apps_max;
+var god_menu_app_count: usize = 0;
+
+/// Lowercase stem of `NOTEPAD.BIN` → `notepad`: the verb shape Phase 1
+/// pinned (the `calc` filter test). Stops at `.`, truncates to `out.len`.
+pub fn app_verb_for(name: []const u8, out: []u8) usize {
+    var n: usize = 0;
+    for (name) |c| {
+        if (c == '.') break;
+        if (n >= out.len) break;
+        out[n] = std.ascii.toLower(c);
+        n += 1;
+    }
+    return n;
+}
+
+/// Bin filename behind an app verb (`calc` → `CALC.BIN`), or null when the
+/// manifest yielded nothing (host tests) or the verb is unknown.
+pub fn god_menu_bin_for(verb: []const u8) ?[]const u8 {
+    var i: usize = 0;
+    while (i < god_menu_app_count) : (i += 1) {
+        if (std.mem.eql(u8, verb, god_menu_app_verbs[i][0..god_menu_app_verb_lens[i]])) {
+            return god_menu_app_bins[i][0..god_menu_app_bin_lens[i]];
+        }
+    }
+    return null;
+}
+
+/// (Re)load the apps catalog from `APPS.TXT` (M34/HF4 share manifest —
+/// same path `desktop.zig:load_manifest` reads). Freestanding-only: host
+/// unit tests keep the hardcoded fallback. Dock entries first (most
+/// relevant), then manifest order, capped at `menu_apps_max`; duplicate
+/// stems dropped (first wins). Returns the loaded count — 0 means the
+/// caller falls back to the hardcoded four.
+pub fn load_god_menu_apps() usize {
+    god_menu_app_count = 0;
+    if (@import("builtin").os.tag != .freestanding) return 0;
+    const fd = ui.file_open("APPS.TXT", ui.MODE_READ);
+    if (fd < 0) return 0;
+    defer ui.file_close(@intCast(fd));
+    const n = ui.file_read(@intCast(fd), &god_menu_manifest_buf);
+    if (n <= 0) return 0;
+    // Parse room for the whole manifest (desktop's manifest_max_apps): the
+    // registry cap (menu_apps_max) applies at SELECTION (dock-first below),
+    // not at parse — capping the parse would silently drop dock entries
+    // past the cutoff (observed live: apps=14 with a 22-entry manifest).
+    var parsed: [24]sexiburger.MenuApp = undefined;
+    const parsed_n = sexiburger.parse_apps_manifest(god_menu_manifest_buf[0..@intCast(n)], &parsed);
+    return select_god_menu_apps(parsed[0..parsed_n]);
+}
+
+/// Select up to `menu_apps_max` entries from a parsed manifest into the
+/// static verb/bin/label tables (dock-first, duplicate stems dropped).
+/// Pure over its input — host-testable; the file read stays in the caller.
+pub fn select_god_menu_apps(parsed: []const sexiburger.MenuApp) usize {
+    god_menu_app_count = 0;
+    var pass: usize = 0;
+    while (pass < 2) : (pass += 1) {
+        var i: usize = 0;
+        while (i < parsed.len and god_menu_app_count < sexiburger.menu_apps_max) : (i += 1) {
+            if (parsed[i].dock != (pass == 0)) continue;
+            var stem: [24]u8 = undefined;
+            const stem_len = app_verb_for(parsed[i].name, &stem);
+            if (stem_len == 0) continue;
+            if (god_menu_bin_for(stem[0..stem_len]) != null) continue;
+            const idx = god_menu_app_count;
+            @memcpy(god_menu_app_verbs[idx][0..stem_len], stem[0..stem_len]);
+            const bin_len = @min(parsed[i].name.len, god_menu_app_bins[idx].len);
+            @memcpy(god_menu_app_bins[idx][0..bin_len], parsed[i].name[0..bin_len]);
+            const label_len = @min(parsed[i].desc.len, god_menu_app_labels[idx].len);
+            @memcpy(god_menu_app_labels[idx][0..label_len], parsed[i].desc[0..label_len]);
+            god_menu_app_verb_lens[idx] = stem_len;
+            god_menu_app_bin_lens[idx] = bin_len;
+            god_menu_app_label_lens[idx] = label_len;
+            god_menu_app_count += 1;
+        }
+    }
+    return god_menu_app_count;
+}
+
+// ---------------------------------------------------------------------------
+// M37 DQ1 slices 2–3 (issue #836): real theme toggle + full win/tab entries
+// ---------------------------------------------------------------------------
+// Theme: WND owns the desktop mode flag (default dark = ui.current_theme's
+// default) and flips `ui.set_theme` so every widget drawn after the toggle
+// reads the new tokens. Windows/tabs: per-mirror entries borrowed from
+// static buffers (the old loop-local `wbuf`/`vbuf` slices dangled past
+// their iteration — these outlive every populate).
+
+var god_menu_dark: bool = true;
+
+var god_menu_win_labels: [max_user_windows][32]u8 = [_][32]u8{[_]u8{0} ** 32} ** max_user_windows;
+var god_menu_win_label_lens: [max_user_windows]usize = [_]usize{0} ** max_user_windows;
+var god_menu_win_verbs: [max_user_windows][8]u8 = [_][8]u8{[_]u8{0} ** 8} ** max_user_windows;
+var god_menu_win_verb_lens: [max_user_windows]usize = [_]usize{0} ** max_user_windows;
+
+/// Flip the desktop theme; returns the new mode name. The `set_theme` call
+/// + repaint are freestanding-only (host tests assert the flag flip).
+pub fn toggle_god_menu_theme() []const u8 {
+    god_menu_dark = !god_menu_dark;
+    if (@import("builtin").os.tag == .freestanding) {
+        _ = ui.set_theme(if (god_menu_dark) "dark" else "light");
+        redraw_god_menu();
+    }
+    return if (god_menu_dark) "dark" else "light";
+}
+
+/// Hand-rolled label builders for win/tab entries (static buffers, no
+/// stack formatting — the slices must outlive populate).
+fn append_win_text(buf: []u8, pos: usize, s: []const u8) usize {
+    const n = @min(s.len, buf.len -| pos);
+    @memcpy(buf[pos .. pos + n], s[0..n]);
+    return pos + n;
+}
+
+fn append_win_num(buf: []u8, pos: usize, v: u8) usize {
+    var tmp: [3]u8 = undefined;
+    var len: usize = 0;
+    var x = v;
+    if (x == 0) {
+        tmp[0] = '0';
+        len = 1;
+    } else {
+        var rev: [3]u8 = undefined;
+        var rlen: usize = 0;
+        while (x > 0) : (rlen += 1) {
+            rev[rlen] = '0' + (x % 10);
+            x /= 10;
+        }
+        while (rlen > 0) : (rlen -= 1) {
+            tmp[len] = rev[rlen - 1];
+            len += 1;
+        }
+    }
+    return append_win_text(buf, pos, tmp[0..len]);
+}
+
+/// Decimal id after a `win-`/`tab-` prefix, range-checked to mirror ids
+/// 2..5. Pure and host-testable.
+pub fn parse_id_suffix(verb: []const u8, prefix: []const u8) ?u8 {
+    if (!std.mem.startsWith(u8, verb, prefix)) return null;
+    const digits = verb[prefix.len..];
+    if (digits.len == 0 or digits.len > 3) return null;
+    var id: u16 = 0;
+    for (digits) |c| {
+        if (c < '0' or c > '9') return null;
+        id = id * 10 + (c - '0');
+    }
+    if (id < 2 or id > 5) return null;
+    return @intCast(id);
+}
+
 pub fn init_god_menu_if_needed() void {
     if (!god_menu_initialized) {
         god_menu = SexiburgerMenu.init(Rect.make(0, 0, god_menu_w, god_menu_h));
@@ -727,11 +896,25 @@ pub fn populate_god_menu() void {
     _ = god_menu.registry.register_command(.system, "Reboot System", "", "reboot", null) catch {};
     _ = god_menu.registry.register_command(.system, "Power Off", "", "shutdown", null) catch {};
 
-    // 2. Apps (Lettuce) - Launchable applications
-    _ = god_menu.registry.register_command(.apps, "Text Editor", "Ctrl+Alt+E", "notepad", null) catch {};
-    _ = god_menu.registry.register_command(.apps, "Calculator", "Ctrl+Alt+C", "calc", null) catch {};
-    _ = god_menu.registry.register_command(.apps, "File Browser", "Ctrl+Alt+F", "file", null) catch {};
-    _ = god_menu.registry.register_command(.apps, "Terminal (Road Pops)", "Ctrl+Alt+T", "devcons", null) catch {};
+    // 2. Apps — dynamic APPS.TXT catalog (DQ1 #836); the hardcoded four
+    // survive only as the fallback (host tests, missing manifest).
+    if (load_god_menu_apps() > 0) {
+        var ai: usize = 0;
+        while (ai < god_menu_app_count) : (ai += 1) {
+            _ = god_menu.registry.register_command(
+                .apps,
+                god_menu_app_labels[ai][0..god_menu_app_label_lens[ai]],
+                "",
+                god_menu_app_verbs[ai][0..god_menu_app_verb_lens[ai]],
+                null,
+            ) catch {};
+        }
+    } else {
+        _ = god_menu.registry.register_command(.apps, "Text Editor", "Ctrl+Alt+E", "notepad", null) catch {};
+        _ = god_menu.registry.register_command(.apps, "Calculator", "Ctrl+Alt+C", "calc", null) catch {};
+        _ = god_menu.registry.register_command(.apps, "File Browser", "Ctrl+Alt+F", "file", null) catch {};
+        _ = god_menu.registry.register_command(.apps, "Terminal (Road Pops)", "Ctrl+Alt+T", "devcons", null) catch {};
+    }
 
     // 3. Active App (Tomato) - Live actions from focused app via mailbox seam
     var active_count: usize = 0;
@@ -752,22 +935,45 @@ pub fn populate_god_menu() void {
         _ = god_menu.registry.register_command(.active_app, "Find in Document", "Ctrl+F", "find", null) catch {};
     }
 
-    // 4. Windows & tabs (Cheese) - Dynamic list of open windows from mirrors
+    // 4. Windows & tabs — one entry per visible mirror (DQ1 #836):
+    // standalone windows focus via `win-N`, attached tabs activate via
+    // `tab-N` (parent shown). Tab verbs always registered — they now work.
     var win_count_added: usize = 0;
-    for (mirrors) |m| {
-        if (m.valid and m.visible) {
-            var wbuf: [32]u8 = undefined;
-            const wlabel = std.fmt.bufPrint(&wbuf, "Window {d} (Active)", .{m.id}) catch "Window";
-            var vbuf: [24]u8 = undefined;
-            const wverb = std.fmt.bufPrint(&vbuf, "win-{d}", .{m.id}) catch "win";
-            _ = god_menu.registry.register_command(.windows_tabs, wlabel, "", wverb, null) catch {};
-            win_count_added += 1;
+    for (mirrors, 0..) |m, slot| {
+        if (!m.valid or !m.visible) continue;
+        var lpos: usize = 0;
+        var vpos: usize = 0;
+        if (m.tab_parent == 0) {
+            lpos = append_win_text(&god_menu_win_labels[slot], lpos, "Window ");
+            lpos = append_win_num(&god_menu_win_labels[slot], lpos, m.id);
+            if (m.focused) lpos = append_win_text(&god_menu_win_labels[slot], lpos, " *");
+            vpos = append_win_text(&god_menu_win_verbs[slot], vpos, "win-");
+            vpos = append_win_num(&god_menu_win_verbs[slot], vpos, m.id);
+        } else {
+            lpos = append_win_text(&god_menu_win_labels[slot], lpos, "Tab ");
+            lpos = append_win_num(&god_menu_win_labels[slot], lpos, m.id);
+            lpos = append_win_text(&god_menu_win_labels[slot], lpos, " (in ");
+            lpos = append_win_num(&god_menu_win_labels[slot], lpos, m.tab_parent);
+            lpos = append_win_text(&god_menu_win_labels[slot], lpos, ")");
+            if (m.tab_active) lpos = append_win_text(&god_menu_win_labels[slot], lpos, " *");
+            vpos = append_win_text(&god_menu_win_verbs[slot], vpos, "tab-");
+            vpos = append_win_num(&god_menu_win_verbs[slot], vpos, m.id);
         }
+        god_menu_win_label_lens[slot] = lpos;
+        god_menu_win_verb_lens[slot] = vpos;
+        _ = god_menu.registry.register_command(
+            .windows_tabs,
+            god_menu_win_labels[slot][0..lpos],
+            "",
+            god_menu_win_verbs[slot][0..vpos],
+            null,
+        ) catch {};
+        win_count_added += 1;
     }
+    _ = god_menu.registry.register_command(.windows_tabs, "Next Tab", "Ctrl+Tab", "tab-next", null) catch {};
+    _ = god_menu.registry.register_command(.windows_tabs, "Close Tab", "Ctrl+W", "tab-close", null) catch {};
     if (win_count_added == 0) {
         _ = god_menu.registry.register_command(.windows_tabs, "New Tab", "Ctrl+T", "tab-new", null) catch {};
-        _ = god_menu.registry.register_command(.windows_tabs, "Close Tab", "Ctrl+W", "tab-close", null) catch {};
-        _ = god_menu.registry.register_command(.windows_tabs, "Next Tab", "Ctrl+Tab", "tab-next", null) catch {};
     }
 
     // 5. Services (Patty) - Quick tools / services
@@ -797,7 +1003,13 @@ pub fn execute_god_menu_command(cmd: Command) void {
     if (std.mem.eql(u8, cmd.verb, "about")) {
         toggle_about();
     } else if (std.mem.eql(u8, cmd.verb, "theme")) {
-        write_marker("wnd: theme toggled\n");
+        const mode = toggle_god_menu_theme();
+        var tbuf: [40]u8 = undefined;
+        const tmsg = std.fmt.bufPrint(&tbuf, "wnd: theme toggled {s}\n", .{mode}) catch "wnd: theme toggled\n";
+        write_marker(tmsg);
+    } else if (god_menu_bin_for(cmd.verb)) |bin| {
+        // DQ1 dynamic app (or a fallback verb matching a loaded entry).
+        _ = ui.exec_program(bin);
     } else if (std.mem.eql(u8, cmd.verb, "notepad")) {
         _ = ui.exec_program("NOTEPAD.BIN");
     } else if (std.mem.eql(u8, cmd.verb, "calc")) {
@@ -810,14 +1022,18 @@ pub fn execute_god_menu_command(cmd: Command) void {
         _ = ui.exec_program("DEVCONS.BIN");
     } else if (std.mem.eql(u8, cmd.verb, "notify")) {
         _ = syscall6(sys_wmctl, wmctl_notif_center, notif_open_act, 0, 0, 0, 0);
-    } else if (std.mem.startsWith(u8, cmd.verb, "win-")) {
-        if (cmd.verb.len > 4) {
-            const wid_char = cmd.verb[4];
-            if (wid_char >= '2' and wid_char <= '5') {
-                const wid: u8 = wid_char - '0';
-                _ = syscall6(sys_wmctl, wmctl_alt_tab, wid, alt_tab_commit, 0, 0, 0);
+    } else if (std.mem.eql(u8, cmd.verb, "tab-next")) {
+        cycle_tabs();
+    } else if (std.mem.eql(u8, cmd.verb, "tab-close")) {
+        if (focused_mirror()) |fm| {
+            if (!detach_tab(fm.id)) {
+                write_marker("wnd: tab-close idle (focused window has no tab)\n");
             }
         }
+    } else if (parse_id_suffix(cmd.verb, "tab-")) |tid| {
+        _ = activate_tab(tid);
+    } else if (parse_id_suffix(cmd.verb, "win-")) |wid| {
+        _ = syscall6(sys_wmctl, wmctl_alt_tab, wid, alt_tab_commit, 0, 0, 0);
     } else if (cmd.section == .active_app) {
         var inv_buf: [80]u8 = undefined;
         const inv_msg = std.fmt.bufPrint(&inv_buf, "{s} label={s}\n", .{ action_inv_marker, cmd.label }) catch "wnd: action-invoked\n";
@@ -1629,6 +1845,16 @@ fn main() noreturn {
     const desc = wnd_core.chrome_parity_policy();
     _ = syscall6(sys_wmctl, wmctl_set_window, 0xFFFF_FFFF, 0, 0, @intFromPtr(&desc), wnd_core.chrome_desc_bytes);
 
+    // M37 DQ1 (issue #836): preload the God Menu apps catalog from APPS.TXT
+    // at startup (refreshed on every summon) + pin the count for the live
+    // gate (`wnd: god-menu apps=N`, N=0 when the manifest is absent).
+    {
+        const pre_apps = load_god_menu_apps();
+        var abuf: [32]u8 = undefined;
+        const amsg = std.fmt.bufPrint(&abuf, "wnd: god-menu apps={d}\n", .{pre_apps}) catch "wnd: god-menu apps\n";
+        write_marker(amsg);
+    }
+
     // WMS5 mirror + drag + policy state.
     var ev: Event = undefined;
     var ticks: u64 = 0;
@@ -1961,6 +2187,11 @@ test "wnd: the marker/tuning shapes are pinned (live-gate grep targets)" {
     try std.testing.expectEqual(@as(u8, 0x2b), usage_tab);
     try std.testing.expectEqual(@as(u64, 5), wmctl_alt_tab);
     try std.testing.expectEqual(@as(u64, 3), alt_tab_commit);
+    // M37 DQ1 (issue #836): the god-menu markers + Ctrl+Space chord.
+    try std.testing.expectEqualStrings("wnd: god-menu open\n", god_menu_open_marker);
+    try std.testing.expectEqualStrings("wnd: god-menu close\n", god_menu_close_marker);
+    try std.testing.expectEqualStrings("wnd: god-menu exec", god_menu_exec_marker);
+    try std.testing.expectEqual(@as(u8, 0x2c), usage_space);
     // WMS6 Gate B (issue #626): the notification-center markers + subcommands.
     try std.testing.expectEqualStrings("wnd: notif-open\n", notif_open_marker);
     try std.testing.expectEqualStrings("wnd: notif-close\n", notif_close_marker);
@@ -2133,6 +2364,104 @@ test "wnd: hid_to_ascii maps keyboard usages accurately" {
     try std.testing.expectEqual(@as(?u8, '\n'), hid_to_ascii(0x28, false));
     try std.testing.expectEqual(@as(?u8, 0x08), hid_to_ascii(0x2a, false));
     try std.testing.expectEqual(@as(?u8, null), hid_to_ascii(0x29, false)); // Escape
+}
+
+test "wnd: dq1 app verb stems and bin lookup" {
+    var vbuf: [24]u8 = undefined;
+    var n = app_verb_for("NOTEPAD.BIN", &vbuf);
+    try std.testing.expectEqualStrings("notepad", vbuf[0..n]);
+    n = app_verb_for("CALC.BIN", &vbuf);
+    try std.testing.expectEqualStrings("calc", vbuf[0..n]);
+    n = app_verb_for("FILE", &vbuf);
+    try std.testing.expectEqualStrings("file", vbuf[0..n]);
+    n = app_verb_for("", &vbuf);
+    try std.testing.expectEqual(@as(usize, 0), n);
+    n = app_verb_for("DEVCONS.BIN", vbuf[0..4]);
+    try std.testing.expectEqualStrings("devc", vbuf[0..n]);
+
+    // Empty table (host: manifest never loads) resolves nothing.
+    god_menu_app_count = 0;
+    try std.testing.expect(god_menu_bin_for("calc") == null);
+
+    // A loaded entry resolves verb → bin.
+    @memcpy(god_menu_app_verbs[0][0..4], "calc");
+    god_menu_app_verb_lens[0] = 4;
+    @memcpy(god_menu_app_bins[0][0..8], "CALC.BIN");
+    god_menu_app_bin_lens[0] = 8;
+    god_menu_app_count = 1;
+    const bin = god_menu_bin_for("calc").?;
+    try std.testing.expectEqualStrings("CALC.BIN", bin);
+    try std.testing.expect(god_menu_bin_for("nope") == null);
+    god_menu_app_count = 0;
+}
+
+test "wnd: dq1 selection over a 22-entry manifest caps at 16, dock-first" {
+    // Mirror image/apps.txt shape: 8 dock + dup stems past the cutoff.
+    var parsed: [22]sexiburger.MenuApp = undefined;
+    const names = [_][]const u8{ "CALC.BIN", "NOTEPAD.BIN", "TOP.BIN", "KEYTEST.BIN", "TYPE.BIN", "DIR.BIN", "FETCH.BIN", "CHAT.BIN", "FILE.BIN", "SETTINGS.BIN", "EDIT.BIN", "SYSMON.BIN", "HTTPD.BIN", "DYNAPP.ELF", "CALC.ELF", "NOTEPAD.ELF", "FILE.ELF", "DESKTOP.ELF", "ZC.BIN", "SEXIBURG.BIN", "VIEW.BIN", "SEXITEST.BIN" };
+    const descs = [_][]const u8{ "Calc", "Editor", "Tasks", "Keys", "Type", "Dir", "Fetch", "Chat", "Files", "Settings", "Edit", "Sysmon", "Http", "Dyn", "Calc2", "Edit2", "Files2", "Desk", "Zc", "Sexi", "View", "Stest" };
+    for (names, 0..) |nm, i| {
+        parsed[i] = .{ .name = nm, .desc = descs[i], .dock = i == 0 or i == 1 or i == 2 or i == 8 or i == 9 or i == 11 or i == 13 or i == 19 };
+    }
+    const count = select_god_menu_apps(&parsed);
+    try std.testing.expectEqual(@as(usize, 16), count);
+    // All 8 dock entries survive (incl. SEXIBURG past the old cutoff).
+    for ([_][]const u8{ "calc", "notepad", "top", "file", "settings", "sysmon", "dynapp", "sexiburg" }) |verb| {
+        try std.testing.expect(god_menu_bin_for(verb) != null);
+    }
+    // Duplicate stems resolve to the FIRST (BIN) entry.
+    try std.testing.expectEqualStrings("CALC.BIN", god_menu_bin_for("calc").?);
+    try std.testing.expectEqualStrings("NOTEPAD.BIN", god_menu_bin_for("notepad").?);
+    // Nondock tail fills the rest; entries past the cap are absent.
+    try std.testing.expect(god_menu_bin_for("desktop") != null);
+    try std.testing.expect(god_menu_bin_for("view") == null);
+    try std.testing.expect(god_menu_bin_for("stest") == null);
+    god_menu_app_count = 0;
+}
+
+test "wnd: dq1 theme toggle flips mode (host: flag only)" {
+    god_menu_dark = true;
+    try std.testing.expectEqualStrings("light", toggle_god_menu_theme());
+    try std.testing.expectEqualStrings("dark", toggle_god_menu_theme());
+}
+
+test "wnd: dq1 id-suffix parse accepts 2..5, rejects the rest" {
+    try std.testing.expectEqual(@as(?u8, 2), parse_id_suffix("win-2", "win-"));
+    try std.testing.expectEqual(@as(?u8, 5), parse_id_suffix("tab-5", "tab-"));
+    try std.testing.expect(parse_id_suffix("win-1", "win-") == null);
+    try std.testing.expect(parse_id_suffix("win-6", "win-") == null);
+    try std.testing.expect(parse_id_suffix("win-", "win-") == null);
+    try std.testing.expect(parse_id_suffix("win-x", "win-") == null);
+    try std.testing.expect(parse_id_suffix("tab-3", "win-") == null);
+    try std.testing.expect(parse_id_suffix("win-22", "win-") == null);
+}
+
+test "wnd: dq1 windows+tabs populate from mirrors with tab entries" {
+    mirrors[0] = .{ .id = 2, .valid = true, .visible = true, .focused = true };
+    mirrors[1] = .{ .id = 3, .valid = true, .visible = true, .tab_parent = 2, .tab_active = false };
+    defer {
+        mirrors[0] = .{};
+        mirrors[1] = .{};
+    }
+    populate_god_menu();
+    var cmds: [16]Command = undefined;
+    const n = god_menu.registry.get_section_commands(.windows_tabs, &cmds);
+    try std.testing.expect(n >= 4); // win + tab + next + close
+    var saw_win = false;
+    var saw_tab = false;
+    var saw_next = false;
+    for (cmds[0..n]) |c| {
+        if (std.mem.eql(u8, c.verb, "win-2")) {
+            saw_win = true;
+            try std.testing.expectEqualStrings("Window 2 *", c.label);
+        }
+        if (std.mem.eql(u8, c.verb, "tab-3")) {
+            saw_tab = true;
+            try std.testing.expectEqualStrings("Tab 3 (in 2)", c.label);
+        }
+        if (std.mem.eql(u8, c.verb, "tab-next")) saw_next = true;
+    }
+    try std.testing.expect(saw_win and saw_tab and saw_next);
 }
 
 test "wnd: god menu init, 6-section population, and type-to-filter" {

@@ -23,7 +23,7 @@ the tab/visual/snap halves have pure-rule foundations in
 
 | DQ# | Card | Phase | Depends on | Status | Touches | Notes |
 |----:|------|:------|------------|--------|---------|-------|
-| DQ1 | **God Menu completion** (#836) — dynamic APPS.TXT, live active-app actions, real theme/exec, full win/tab entries | close-out | — | ⬜ unclaimed | `user/src/wnd.zig` god-menu fns, `user/src/lib/sexiburger.zig` | **Gate: unit + Class-B Ctrl+Space → filter → Enter executes.** Umbrella #821 §1. |
+| DQ1 | **God Menu completion** (#836) — dynamic APPS.TXT, live active-app actions, real theme/exec, full win/tab entries | close-out | — | ✅ claim 5514 | `user/src/wnd.zig` god-menu fns, `user/src/lib/sexiburger.zig` | **DONE 2026-09-03: unit wnd 103/103 + sexiburger 86/86; new Class-B `verify-live-godmenu-summon.sh` PASS 2/2** (`apps=16`, open, `exec verb=calc` → CALC `id=2` ready, close); M19 gate 8/8 once, flaky after (issue #843, incl. baseline-tree stall). Runner `ctrl-space` token added (additive). Umbrella #821 §1. |
 | DQ2 | **Tab-bar chrome render** (#840) — WM strip, truncation, active/hover/× | render | DQ1-stable | ⬜ unclaimed | `kernel/src/wnd_core.zig`, WND blit half | **Gate: unit (layout/hit-test) + Class-B strip visible.** Umbrella #821 §2 (render half). |
 | DQ3 | **Tab mouse interaction** (#839) — click switch, × close, drag-detach | interact | DQ2 | ⬜ unclaimed | WND input half `user/src/wnd.zig` | **Gate: unit + Class-B pointer injection.** Umbrella #821 §2 (input half). Strictly after DQ2. |
 | DQ4 | **Design tokens & cohesion** (#838) — ui.zig metrics, borders/shadows, cursors, 6-app rollout | polish | DQ2 | ⬜ unclaimed | `user/src/lib/ui.zig` + per-app sites | **Gate: unit + Class-B light/dark.** Umbrella #821 §3. One app per commit. |
