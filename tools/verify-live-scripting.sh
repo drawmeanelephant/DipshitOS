@@ -81,8 +81,21 @@ write INNER.TXT echo t16-inner-ran
 write NESTED.TXT sh INNER.TXT
 sh NESTED.TXT
 sh MISSING.TXT
+write COMPL.TXT echo t16-compl-file-ok
 echo t16-scripting-ok
 EOF
+
+# Phase 2: Tab completion (issue #783)
+# 1. Command completion: "ver" + Tab completes to "version", Enter runs it
+printf 'ver\t\n' >> "$SCRIPT"
+# 2. Command candidate cycling: "ca" + Tab gives "calc", Tab cycles to "cat", Enter runs "cat"
+printf 'ca\t\t\n' >> "$SCRIPT"
+# 3. Argument/subverb completion: "color o" + Tab gives "off", Tab cycles to "on", Enter runs "color on"
+printf 'color o\t\t\n' >> "$SCRIPT"
+# 4. Host share file completion: "cat COMP" + Tab completes to "cat COMPL.TXT", Enter runs it
+printf 'cat COMP\t\n' >> "$SCRIPT"
+# Final marker
+printf 'echo t16-completion-ok\n' >> "$SCRIPT"
 
 run_one() {
     local tag="$1"
@@ -94,7 +107,7 @@ run_one() {
     # writable disk.
     host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
         --serial "$RUN_DIR/vm-serial-$tag.log" \
-        --script "$SCRIPT" --script-expect "t16-scripting-ok" --timeout 30 \
+        --script "$SCRIPT" --script-expect "t16-completion-ok" --timeout 30 \
         > "$(art live-scripting-run-$tag.txt)" 2>&1
     local RC=$?
     set -e
@@ -102,6 +115,7 @@ run_one() {
     local SER="$(art live-scripting-serial-$tag.log)"
 
     local SERIAL_BYTES BANNER=0 RAN=0 NESTED=0 NOINNER=0 MISSING=0 DONE=0
+    local COMP_CMD=0 COMP_CYCLE=0 COMP_ARG=0 COMP_FILE=0
     SERIAL_BYTES=$(wc -c < "$SER" 2>/dev/null | tr -d ' ')
     if [ -f "$SER" ]; then
         grep -qF "VirelaiOS kernel" "$SER" && BANNER=1
@@ -115,10 +129,14 @@ run_one() {
         # output would add a second occurrence.
         [ "$(grep -oF -- 't16-inner-ran' "$SER" | wc -l | tr -d ' ')" = 1 ] && NOINNER=1
         grep -qF "sh: MISSING.TXT: not found (no such file on the host share)" "$SER" && MISSING=1
-        grep -qF "t16-scripting-ok" "$SER" && DONE=1
+        grep -qF "virelai-kernel" "$SER" && COMP_CMD=1
+        grep -qF "usage: cat <file|path>" "$SER" && COMP_CYCLE=1
+        grep -qF "color: on" "$SER" && COMP_ARG=1
+        grep -qF "t16-compl-file-ok" "$SER" && COMP_FILE=1
+        grep -qF "t16-completion-ok" "$SER" && DONE=1
     fi
-    echo "$tag: rc=$RC bytes=$SERIAL_BYTES banner=$BANNER ran=$RAN nested=$NESTED noinner=$NOINNER missing=$MISSING done=$DONE"
-    [ "$RC" = 0 ] && [ "$BANNER" = 1 ] && [ "$RAN" = 1 ] && [ "$NESTED" = 1 ] && [ "$NOINNER" = 1 ] && [ "$MISSING" = 1 ] && [ "$DONE" = 1 ]
+    echo "$tag: rc=$RC bytes=$SERIAL_BYTES banner=$BANNER ran=$RAN nested=$NESTED noinner=$NOINNER missing=$MISSING comp_cmd=$COMP_CMD comp_cycle=$COMP_CYCLE comp_arg=$COMP_ARG comp_file=$COMP_FILE done=$DONE"
+    [ "$RC" = 0 ] && [ "$BANNER" = 1 ] && [ "$RAN" = 1 ] && [ "$NESTED" = 1 ] && [ "$NOINNER" = 1 ] && [ "$MISSING" = 1 ] && [ "$COMP_CMD" = 1 ] && [ "$COMP_CYCLE" = 1 ] && [ "$COMP_ARG" = 1 ] && [ "$COMP_FILE" = 1 ] && [ "$DONE" = 1 ]
 }
 
 PASS=0

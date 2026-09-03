@@ -58,6 +58,15 @@ pub const LineResult = enum {
     repaint,
 };
 
+pub const CompletionMatch = struct {
+    replace_start: usize,
+    text: []const u8,
+    match_count: usize = 1,
+    has_trailing_space: bool = false,
+};
+
+pub const CompleterFn = *const fn (line: []const u8, cursor: usize, index: usize) ?CompletionMatch;
+
 pub const LineEditor = struct {
     buffer: [max_line]u8 = undefined,
     len: usize = 0,
@@ -100,6 +109,16 @@ pub const LineEditor = struct {
     /// insert (a long-lived slice), or null on no/ambiguous completion.
     completion: ?*const fn (line: []const u8, cursor: usize) ?[]const u8 = null,
 
+    /// Extended Tab-completion source supporting candidate cycling (issue #783).
+    completer: ?CompleterFn = null,
+    completing: bool = false,
+    complete_replace_start: usize = 0,
+    complete_orig_token: [max_line]u8 = undefined,
+    complete_orig_token_len: usize = 0,
+    complete_cur_token_len: usize = 0,
+    complete_index: usize = 0,
+    complete_match_count: usize = 0,
+
     /// Full reset: empty line, clear flags, the CRLF swallow window, and
     /// any in-progress recall.
     pub fn reset(self: *LineEditor) void {
@@ -109,6 +128,7 @@ pub const LineEditor = struct {
         self.submitted_cr = false;
         self.esc_state = 0;
         self.hist_cursor = 0;
+        self.completing = false;
     }
 
     /// Prepare for the next line after a submit. Keeps the CRLF swallow
@@ -120,6 +140,7 @@ pub const LineEditor = struct {
         self.rejected = false;
         self.esc_state = 0;
         self.hist_cursor = 0;
+        self.completing = false;
     }
 
     /// Abandon any in-progress CSI decode. The shell consumes the final
@@ -130,6 +151,7 @@ pub const LineEditor = struct {
     pub fn csi_reset(self: *LineEditor) void {
         self.esc_state = 0;
         self.esc_param = 0;
+        self.completing = false;
     }
 
     /// Reprint the current line after a screen clear (Ctrl-L): the shell
@@ -151,6 +173,9 @@ pub const LineEditor = struct {
         }
         // Any other real byte closes the CRLF swallow window.
         self.submitted_cr = false;
+        if (byte != '\t') {
+            self.completing = false;
+        }
         // `ESC [ <final>` sequence decode: input.zig's encoding of the
         // special keys. The escape bytes are never echoed — they become
         // cursor/recall actions that emit the dumb-terminal protocol.
@@ -377,6 +402,9 @@ pub const LineEditor = struct {
     }
 
     fn complete(self: *LineEditor, con: console.Console) LineResult {
+        if (self.completer) |completer_fn| {
+            return self.complete_cycle(con, completer_fn);
+        }
         const complete_fn = self.completion orelse {
             con.putc(0x07); // no completion source wired
             return .none;
@@ -390,6 +418,123 @@ pub const LineEditor = struct {
             return .none;
         }
         return self.insert_bytes(con, suffix);
+    }
+
+    fn complete_cycle(self: *LineEditor, con: console.Console, completer_fn: CompleterFn) LineResult {
+        const old_len = self.len;
+        const old_cursor = self.cursor;
+
+        if (!self.completing) {
+            const m = completer_fn(self.buffer[0..self.len], self.cursor, 0) orelse {
+                con.putc(0x07);
+                return .none;
+            };
+            if (m.match_count == 0 or m.replace_start > self.cursor) {
+                con.putc(0x07);
+                return .none;
+            }
+
+            const orig_token = self.buffer[m.replace_start..self.cursor];
+            if (orig_token.len > max_line) {
+                con.putc(0x07);
+                return .none;
+            }
+            @memcpy(self.complete_orig_token[0..orig_token.len], orig_token);
+            self.complete_orig_token_len = orig_token.len;
+            self.complete_replace_start = m.replace_start;
+
+            const add_space = (m.match_count == 1 and m.has_trailing_space);
+            const extra_space: usize = if (add_space) 1 else 0;
+            const new_token_len = m.text.len + extra_space;
+            const tail_len = self.len - self.cursor;
+
+            if (m.replace_start + new_token_len + tail_len > max_line) {
+                con.putc(0x07);
+                return .none;
+            }
+
+            if (m.replace_start + new_token_len > self.cursor) {
+                const shift = (m.replace_start + new_token_len) - self.cursor;
+                var i = self.len;
+                while (i > self.cursor) : (i -= 1) {
+                    self.buffer[i - 1 + shift] = self.buffer[i - 1];
+                }
+            } else if (m.replace_start + new_token_len < self.cursor) {
+                const shift = self.cursor - (m.replace_start + new_token_len);
+                var i = self.cursor;
+                while (i < self.len) : (i += 1) {
+                    self.buffer[i - shift] = self.buffer[i];
+                }
+            }
+
+            @memcpy(self.buffer[m.replace_start .. m.replace_start + m.text.len], m.text);
+            if (add_space) {
+                self.buffer[m.replace_start + m.text.len] = ' ';
+            }
+
+            self.cursor = m.replace_start + new_token_len;
+            self.len = m.replace_start + new_token_len + tail_len;
+            self.redraw(con, old_len, old_cursor);
+
+            if (m.match_count > 1) {
+                self.completing = true;
+                self.complete_cur_token_len = m.text.len;
+                self.complete_index = 0;
+                self.complete_match_count = m.match_count;
+            } else {
+                self.completing = false;
+            }
+            return .none;
+        } else {
+            self.complete_index = (self.complete_index + 1) % self.complete_match_count;
+
+            const rep_start = self.complete_replace_start;
+            const orig_len = self.complete_orig_token_len;
+            const cur_token_len = self.complete_cur_token_len;
+            const tail_len = self.len - self.cursor;
+
+            var temp_buf: [max_line]u8 = undefined;
+            @memcpy(temp_buf[0..rep_start], self.buffer[0..rep_start]);
+            @memcpy(temp_buf[rep_start .. rep_start + orig_len], self.complete_orig_token[0..orig_len]);
+            const temp_cursor = rep_start + orig_len;
+            @memcpy(temp_buf[temp_cursor .. temp_cursor + tail_len], self.buffer[self.cursor .. self.cursor + tail_len]);
+            const temp_len = temp_cursor + tail_len;
+
+            const m = completer_fn(temp_buf[0..temp_len], temp_cursor, self.complete_index) orelse {
+                con.putc(0x07);
+                self.completing = false;
+                return .none;
+            };
+
+            const old_token_end = rep_start + cur_token_len;
+            const new_token_end = rep_start + m.text.len;
+            if (new_token_end + tail_len > max_line) {
+                con.putc(0x07);
+                self.completing = false;
+                return .none;
+            }
+
+            if (new_token_end > old_token_end) {
+                const shift = new_token_end - old_token_end;
+                var i = self.len;
+                while (i > old_token_end) : (i -= 1) {
+                    self.buffer[i - 1 + shift] = self.buffer[i - 1];
+                }
+            } else if (new_token_end < old_token_end) {
+                const shift = old_token_end - new_token_end;
+                var i = old_token_end;
+                while (i < self.len) : (i += 1) {
+                    self.buffer[i - shift] = self.buffer[i];
+                }
+            }
+
+            @memcpy(self.buffer[rep_start..new_token_end], m.text);
+            self.complete_cur_token_len = m.text.len;
+            self.cursor = new_token_end;
+            self.len = new_token_end + tail_len;
+            self.redraw(con, old_len, old_cursor);
+            return .none;
+        }
     }
 
     fn insert_bytes(self: *LineEditor, con: console.Console, bytes: []const u8) LineResult {
@@ -874,4 +1019,81 @@ test "lineedit: ctrl-l clears the screen and requests a repaint" {
     editor.cursor = 2;
     editor.reprint(mock.console());
     try std.testing.expectEqualStrings("hello\x08\x08\x08", mock.contents());
+}
+
+fn testCycleCompleter(line: []const u8, cursor: usize, index: usize) ?CompletionMatch {
+    var start = cursor;
+    while (start > 0 and line[start - 1] != ' ') start -= 1;
+    const prefix = line[start..cursor];
+    if (std.mem.eql(u8, prefix, "ca")) {
+        const candidates = [_][]const u8{ "calc", "cat" };
+        return CompletionMatch{
+            .replace_start = start,
+            .text = candidates[index % candidates.len],
+            .match_count = candidates.len,
+            .has_trailing_space = false,
+        };
+    } else if (std.mem.eql(u8, prefix, "un")) {
+        return CompletionMatch{
+            .replace_start = start,
+            .text = "unique",
+            .match_count = 1,
+            .has_trailing_space = true,
+        };
+    }
+    return null;
+}
+
+test "lineedit: completer single match inserts text and trailing space" {
+    var mock = console.MockConsole(64){};
+    var editor = LineEditor{ .completer = testCycleCompleter };
+    for ("un") |c| _ = editor.feed(mock.console(), c);
+    _ = editor.feed(mock.console(), '\t');
+    try std.testing.expectEqualStrings("unique ", editor.buffer[0..editor.len]);
+    try std.testing.expectEqual(@as(usize, 7), editor.cursor);
+    try std.testing.expect(!editor.completing);
+}
+
+test "lineedit: completer multi-match cycles candidates on repeated tab" {
+    var mock = console.MockConsole(64){};
+    var editor = LineEditor{ .completer = testCycleCompleter };
+    for ("ca") |c| _ = editor.feed(mock.console(), c);
+    _ = editor.feed(mock.console(), '\t');
+    // First Tab -> "calc"
+    try std.testing.expectEqualStrings("calc", editor.buffer[0..editor.len]);
+    try std.testing.expectEqual(@as(usize, 4), editor.cursor);
+    try std.testing.expect(editor.completing);
+
+    // Second Tab -> "cat"
+    _ = editor.feed(mock.console(), '\t');
+    try std.testing.expectEqualStrings("cat", editor.buffer[0..editor.len]);
+    try std.testing.expectEqual(@as(usize, 3), editor.cursor);
+    try std.testing.expect(editor.completing);
+
+    // Third Tab -> cycles back to "calc"
+    _ = editor.feed(mock.console(), '\t');
+    try std.testing.expectEqualStrings("calc", editor.buffer[0..editor.len]);
+    try std.testing.expectEqual(@as(usize, 4), editor.cursor);
+    try std.testing.expect(editor.completing);
+
+    // Typing non-tab breaks cycling
+    _ = editor.feed(mock.console(), ' ');
+    try std.testing.expect(!editor.completing);
+    try std.testing.expectEqualStrings("calc ", editor.buffer[0..editor.len]);
+}
+
+test "lineedit: completer mid-line preserves tail and shifts correctly" {
+    var mock = console.MockConsole(64){};
+    var editor = LineEditor{ .completer = testCycleCompleter };
+    for ("ca world") |c| _ = editor.feed(mock.console(), c);
+    // Move cursor left to right after "ca" (cursor = 2)
+    editor.cursor = 2;
+    _ = editor.feed(mock.console(), '\t');
+    try std.testing.expectEqualStrings("calc world", editor.buffer[0..editor.len]);
+    try std.testing.expectEqual(@as(usize, 4), editor.cursor);
+
+    // Cycle to "cat"
+    _ = editor.feed(mock.console(), '\t');
+    try std.testing.expectEqualStrings("cat world", editor.buffer[0..editor.len]);
+    try std.testing.expectEqual(@as(usize, 3), editor.cursor);
 }
