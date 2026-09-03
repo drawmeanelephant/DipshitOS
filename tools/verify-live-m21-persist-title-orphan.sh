@@ -51,11 +51,11 @@ out="$(art "live-m21-titleorphan-run.txt")"
 serial="$(art "live-m21-titleorphan-serial.log")"
 screenbase="$RUN_DIR/gpu-screen"
 
-cp -f "$ROOT/artifacts/disk.img" "$RUN_DIR/disk-base.img"
+cp -f "$ROOT/artifacts/disk.img" "${GATE_RUNNER_ARGS[@]}"
 rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial.log" "$screenbase"-*
 
 set +e
-host/vm-runner/.build/release/VMRunner "$RUN_DIR/disk-base.img" \
+host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
     --serial "$RUN_DIR/vm-serial.log" \
     --display --screen "$screenbase" \
     --screenshot-after "$MARK_CAPTURE" \

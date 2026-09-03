@@ -94,12 +94,10 @@ codesign --force --sign - --entitlements host/vm-runner/entitlements.plist host/
 
 # --- per-run isolation -------------------------------------------------------------
 # Private scratch dir for EVERY boot. See tools/lib/gate-run.sh.
-# THIS gate boots the private WRITABLE copy ($RUN_DIR/disk-base.img) instead
-# of a throwaway overlay: observed 2026-08-24 (claim 5069), the overlay's
-# extra I/O layer shifts guest timing enough to flip scheduler-interleaving
-# assertions (pool-full refusal fires on unmodified main but not under the
-# overlay — reproducible). The writable copy keeps main's exact runner code
-# path while still isolating concurrent gates.
+# This gate boots the canonical read-only artifacts/disk.img via
+# gate_begin's --overlay-base + per-run ASIF overlay (M34 HF6, issue
+# #740), keeping main's exact runner code path while still isolating
+# concurrent gates.
 gate_begin live-scale
 gate_seed_share
 echo "run dir: $RUN_DIR"
@@ -119,7 +117,7 @@ run_one() {
     set +e
     # No --script-expect: capture the full window (the runner exits 0 on
     # timeout when no expect is configured).
-    host/vm-runner/.build/release/VMRunner "$RUN_DIR/disk-base.img" \
+    host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
         --serial "$RUN_DIR/vm-serial-$tag.log" \
         --script "$SCRIPT" --script-after "$STATIC_EXIT_LINE" \
         --timeout 60 > "$run_log" 2>&1
