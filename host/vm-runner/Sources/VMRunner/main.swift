@@ -4136,6 +4136,11 @@ enum CustomVirtioSpike {
         case "delete": return (0, 0x4C)
         case "pageup": return (0, 0x4B)
         case "pagedown": return (0, 0x4E)
+        // WM2 mission-control overview (Self-hosting Lane 1, issue #707
+        // card 2): the overview hotkey — LCtrl modifier + USB HID F12
+        // usage (0x45). The guest kind-21 stream carries raw HID usages,
+        // so WND.BIN matches 0x45 for the overview chord.
+        case "ctrl-f12": return (hidModCtrl, 0x45)
         default: break
         }
         if token.hasPrefix("ctrl-shift-"), token.count == 12 {

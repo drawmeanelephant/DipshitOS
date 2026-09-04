@@ -2873,6 +2873,40 @@ fn handle_wmctl(args: Args, _: *exceptions.VectorFrame) u64 {
             wm_server.note_tab_activate();
             return 0;
         },
+        wm_server.wmctl_overview => {
+            // WM2 mission-control overview (Self-hosting Lane 1, issue #707
+            // card 2): the WM's grid-policy decisions. a0 = action
+            // (0 enter, 1 exit, 2 focus with a1 = id, 3 move with a1 = id
+            // and a2 = workspace); the kernel applies the SAME clamped
+            // primitives the shim runs and repaints. Enter returns the card
+            // count; focus/move return the id. Zero new syscall slots.
+            if (!wm_server.registered()) return error_result(.enosys);
+            if (wm_server.registered_pid() != pid) return error_result(.eacces);
+            const action = args[1];
+            if (action == wm_server.overview_enter_action) {
+                const n = driving_award.overview_enter();
+                wm_server.note_overview();
+                return n;
+            } else if (action == wm_server.overview_exit_action) {
+                driving_award.overview_exit();
+                wm_server.note_overview();
+                return 0;
+            } else if (action == wm_server.overview_focus_action) {
+                const id = args[2];
+                if (id > 0xff or id == wnd_core.chrome_window_all) return error_result(.einval);
+                if (!driving_award.overview_focus(@truncate(id))) return error_result(.einval);
+                wm_server.note_overview();
+                return id;
+            } else if (action == wm_server.overview_move_action) {
+                const id = args[2];
+                const ws = args[3];
+                if (id > 0xff or id == wnd_core.chrome_window_all) return error_result(.einval);
+                if (ws >= driving_award.workspace_max) return error_result(.einval);
+                if (!driving_award.overview_move(@truncate(id), @truncate(ws))) return error_result(.einval);
+                wm_server.note_overview();
+                return id;
+            } else return error_result(.einval);
+        },
         else => return error_result(.einval), // unknown / zero cmd
     }
 }

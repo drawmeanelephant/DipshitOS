@@ -131,6 +131,15 @@ const wmctl_taskbar: u64 = 12;
 const wmctl_attach_tab: u64 = 18;
 const wmctl_detach_tab: u64 = 19;
 const wmctl_activate_tab: u64 = 20;
+// WM2 mission-control overview (Self-hosting Lane 1, issue #707 card 2):
+// OVERVIEW (cmd 21) a0 = action (0 enter, 1 exit, 2 focus with a1 = id,
+// 3 move with a1 = id and a2 = workspace). The WM decides grid policy from
+// its kind-19/21 streams; the kernel applies + repaints. Zero new slots.
+const wmctl_overview: u64 = 21;
+const overview_enter_act: u64 = 0;
+const overview_exit_act: u64 = 1;
+const overview_focus_act: u64 = 2;
+const overview_move_act: u64 = 3;
 /// sys_clipboard_get (slot 39) — the WM probes the clipboard each tray
 /// refresh (filled = return length != 0) to decide the indicator state.
 const sys_clipboard_get: u64 = 39;
@@ -308,6 +317,17 @@ pub const god_menu_exec_marker: []const u8 = "wnd: god-menu exec";
 // can prove the WM — not the kernel — picked the window that gets focus.
 pub const alt_tab_marker: []const u8 = "wnd: alt-tab";
 
+// WM2 mission-control overview (Self-hosting Lane 1, issue #707 card 2):
+// the grid decision markers. The WM prints the card count after enter
+// (`wnd: overview-enter n=N`), the target id after focus (`wnd:
+// overview-focus id=N`), and id + workspace after a strip move (`wnd:
+// overview-move id=N ws=M`); the live gate greps `wnd: overview-*` to
+// prove the WM — not the kernel — made the grid decisions.
+pub const overview_enter_marker: []const u8 = "wnd: overview-enter";
+pub const overview_exit_marker: []const u8 = "wnd: overview-exit\n";
+pub const overview_focus_marker: []const u8 = "wnd: overview-focus";
+pub const overview_move_marker: []const u8 = "wnd: overview-move";
+
 // WMS6 Gate B (issue #626): the notification-center decision markers — the
 // WM opens/closes/clears/dismisses via NOTIF_CENTER/NOTIF_DISMISS. The live
 // gate greps `wnd: notif` to prove the WM — not the kernel — decided.
@@ -429,7 +449,9 @@ pub const mod_alt: u16 = 0x0004;
 // HID keyboard usages for the chords the WM owns (must match the usages
 // input.zig decodes: Ctrl+T tile, Ctrl+M master-swap, Ctrl+N minimize,
 // Ctrl+Shift+M maximize, Ctrl+Shift+T always-on-top, Ctrl+F1-3 workspace
-// switch, Alt+` workspace cycle, F11 fullscreen).
+// switch, Alt+` workspace cycle, F11 fullscreen, Ctrl+F12 overview).
+// NOTE (WM2): kind-21 carries the RAW USB HID usage byte (input.zig fans
+// rep[2..8] untranslated), so F12 is the HID value 0x45.
 pub const usage_t: u8 = 0x17;
 pub const usage_m: u8 = 0x10;
 pub const usage_n: u8 = 0x11;
@@ -438,6 +460,8 @@ pub const usage_f2: u8 = 0x59;
 pub const usage_f3: u8 = 0x5a;
 pub const usage_backtick: u8 = 0x35;
 pub const usage_f11: u8 = 0x5c;
+pub const usage_f12: u8 = 0x45; // WM2 (issue #707 card 2): USB HID F12 — the overview hotkey with Ctrl
+pub const usage_esc: u8 = 0x29; // WM2: Esc exits the overview grid
 pub const usage_tab: u8 = 0x2b;
 pub const usage_w: u8 = 0x1a; // S6 Tab model: Ctrl+W closes/detaches tab
 pub const usage_a: u8 = 0x04; // M27 G2 / WMS8 Gate 2: Ctrl+Shift+A toggles the about dialog
@@ -493,8 +517,10 @@ pub const policy_pin_rgb: u32 = 0x38bdf8;
 
 /// The one mirrored user window the WM tracks (the live gates open exactly
 /// one window — NOTEPAD — so the WMS5 asm kept one slot; policy extends it
-/// to the full user-window range 2..5 with a per-id table).
-const max_user_windows: usize = 4;
+/// to the full user-window range 2..9 with a per-id table).
+/// WM2 (issue #707 card 2): the kernel ceiling is 8 (WM1, PR #922), so the
+/// WM-side policy sees all eight kernel windows.
+const max_user_windows: usize = 8;
 
 const MirrorWin = struct {
     id: u8 = 0,
@@ -530,7 +556,7 @@ const MirrorWin = struct {
     snap_valid: bool = false,
 };
 
-/// The mirror table (id 2..5 -> slots 0..3).
+/// The mirror table (id 2..9 -> slots 0..7).
 var mirrors: [max_user_windows]MirrorWin = [_]MirrorWin{.{}} ** max_user_windows;
 // WMS8 Gate 4 (issue #628): the unsaved-changes dialog open state the WM
 // tracks to route dialog-button clicks (the kernel's open state is the
@@ -543,7 +569,7 @@ var tile_stack_id: u8 = 0xff;
 var tile_master_side: bool = true;
 
 fn mirror_slot(id: u8) ?usize {
-    if (id < 2 or id > 5) return null;
+    if (id < 2 or id > 9) return null;
     return id - 2;
 }
 
@@ -894,7 +920,7 @@ fn append_win_num(buf: []u8, pos: usize, v: u8) usize {
 }
 
 /// Decimal id after a `win-`/`tab-` prefix, range-checked to mirror ids
-/// 2..5. Pure and host-testable.
+/// 2..9. Pure and host-testable.
 pub fn parse_id_suffix(verb: []const u8, prefix: []const u8) ?u8 {
     if (!std.mem.startsWith(u8, verb, prefix)) return null;
     const digits = verb[prefix.len..];
@@ -904,7 +930,7 @@ pub fn parse_id_suffix(verb: []const u8, prefix: []const u8) ?u8 {
         if (c < '0' or c > '9') return null;
         id = id * 10 + (c - '0');
     }
-    if (id < 2 or id > 5) return null;
+    if (id < 2 or id > 9) return null;
     return @intCast(id);
 }
 
@@ -1183,7 +1209,7 @@ pub fn toggle_god_menu() void {
         god_menu_open = false;
         god_menu.open = false;
         write_marker(god_menu_close_marker);
-        if (god_menu_prev_focus >= 2 and god_menu_prev_focus <= 5) {
+        if (god_menu_prev_focus >= 2 and god_menu_prev_focus <= 9) {
             _ = syscall6(sys_wmctl, wmctl_alt_tab, god_menu_prev_focus, alt_tab_commit, 0, 0, 0);
         }
     } else {
@@ -1682,6 +1708,143 @@ fn handle_alt_tab() void {
 }
 
 // ---------------------------------------------------------------------------
+// WM2 mission-control overview (Self-hosting Lane 1, issue #707 card 2).
+// The grid POLICY: the WM hit-tests its kind-19 pointer stream against the
+// SHARED wnd_core grid rules (the same rects the kernel paints) and issues
+// OVERVIEW (cmd 21) decisions — the kernel applies + repaints. The card
+// order is ascending id on both sides (mirror slot order here, the sorted
+// kernel snapshot there), so card index i names the same window everywhere.
+// ---------------------------------------------------------------------------
+
+/// The grid input state (open = the kernel grid is on screen; press_id =
+/// the card pressed at the down-edge, 0 = none).
+var overview_open: bool = false;
+var overview_press_id: u8 = 0;
+
+/// The WM's card list: valid + visible mirrors on the current workspace in
+/// ascending id order — the same membership rule AND order as the kernel's
+/// overview snapshot (which filters on its own visible/workspace fields and
+/// sorts ascending). Pure over the mirrors (host-testable via the real
+/// table — tests set up mirrors directly).
+fn overview_card_list() struct { ids: [max_user_windows]u8, n: usize } {
+    var out: [max_user_windows]u8 = [_]u8{0} ** max_user_windows;
+    var n: usize = 0;
+    for (&mirrors) |*m| {
+        if (!m.valid or m.id < 2) continue;
+        if (!m.visible) continue;
+        if (m.workspace != current_workspace) continue;
+        if (n < max_user_windows) {
+            out[n] = m.id;
+            n += 1;
+        }
+    }
+    return .{ .ids = out, .n = n };
+}
+
+/// Print the enter decision with its card count (the gate greps the pinned
+/// prefix + the value).
+fn write_overview_enter_marker(n: usize) void {
+    var buf: [48]u8 = undefined;
+    const s = std.fmt.bufPrint(&buf, "{s} n={d}\n", .{ overview_enter_marker, n }) catch "wnd: overview-enter n=0\n";
+    write_marker(s);
+}
+
+/// Print the focus decision with its target id.
+fn write_overview_focus_marker(id: u8) void {
+    var buf: [48]u8 = undefined;
+    const s = std.fmt.bufPrint(&buf, "{s} id={d}\n", .{ overview_focus_marker, id }) catch "wnd: overview-focus id=0\n";
+    write_marker(s);
+}
+
+/// Print the move decision with its target id + workspace.
+fn write_overview_move_marker(id: u8, ws: u8) void {
+    var buf: [48]u8 = undefined;
+    const s = std.fmt.bufPrint(&buf, "{s} id={d} ws={d}\n", .{ overview_move_marker, id, ws }) catch "wnd: overview-move id=0 ws=0\n";
+    write_marker(s);
+}
+
+/// Enter the grid: issue OVERVIEW enter, mirror the open state, report the
+/// card count the kernel returned.
+fn overview_enter_grid() void {
+    if (overview_open) return;
+    const rc = syscall6(sys_wmctl, wmctl_overview, overview_enter_act, 0, 0, 0, 0);
+    overview_open = true;
+    overview_press_id = 0;
+    write_overview_enter_marker(if (rc >= 0) @as(usize, @intCast(rc)) else 0);
+}
+
+/// Exit the grid without touching focus.
+fn overview_exit_grid() void {
+    if (!overview_open) return;
+    _ = syscall6(sys_wmctl, wmctl_overview, overview_exit_act, 0, 0, 0, 0);
+    overview_open = false;
+    overview_press_id = 0;
+    write_marker(overview_exit_marker);
+}
+
+/// Toggle the grid (the Ctrl+F12 hotkey + re-press path).
+fn overview_toggle_grid() void {
+    if (overview_open) overview_exit_grid() else overview_enter_grid();
+}
+
+/// Click decision: card `id` gains focus+raise and the grid closes.
+fn overview_focus_card(id: u8) void {
+    _ = syscall6(sys_wmctl, wmctl_overview, overview_focus_act, id, 0, 0, 0);
+    overview_open = false;
+    overview_press_id = 0;
+    write_overview_focus_marker(id);
+}
+
+/// Drag decision: card `id` moves to workspace `ws` and the desktop follows.
+fn overview_move_card(id: u8, ws: u8) void {
+    _ = syscall6(sys_wmctl, wmctl_overview, overview_move_act, id, ws, 0, 0);
+    current_workspace = ws;
+    overview_open = false;
+    overview_press_id = 0;
+    write_overview_move_marker(id, ws);
+}
+
+/// Route one pointer sample while the grid is open. Down-edge on a card
+/// arms the press; up-edge on a workspace-strip button moves the pressed
+/// card there; up-edge on a card focuses that card; anything else cancels
+/// the press but leaves the grid open (Esc / hotkey / a decision exits).
+/// Returns true when the sample was consumed (the caller skips the normal
+/// pointer dispatch). Pure hit-testing over the shared grid rules.
+fn overview_pointer(px: u32, py: u32, left: bool, prev_left: bool) bool {
+    if (!overview_open) return false;
+    const cards = overview_card_list();
+    const g = wnd_core.overview_grid(cards.n, fb_w, fb_h, taskbar_h, dock_w);
+    const down_edge = left and !prev_left;
+    const up_edge = !left and prev_left;
+    if (down_edge) {
+        if (wnd_core.overview_card_at(g, px, py)) |idx| {
+            if (idx < cards.n) overview_press_id = cards.ids[idx];
+        } else {
+            overview_press_id = 0;
+        }
+        return true;
+    }
+    if (up_edge) {
+        const pressed = overview_press_id;
+        overview_press_id = 0;
+        if (pressed != 0) {
+            if (wnd_core.overview_ws_button_at(g, fb_w, dock_w, px, py)) |ws| {
+                overview_move_card(pressed, ws);
+                return true;
+            }
+            if (wnd_core.overview_card_at(g, px, py)) |idx| {
+                if (idx < cards.n) {
+                    overview_focus_card(cards.ids[idx]);
+                    return true;
+                }
+            }
+        }
+        return true;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // WMS6 Gate D — the dock policy (icon clicks + hover labels).
 // ---------------------------------------------------------------------------
 
@@ -1971,6 +2134,18 @@ fn handle_wm_key(usage: u8, flags: u16) void {
     // Issue #821 Phase 1: Ctrl+Space toggles the Global Sexiburger God Menu.
     if (ctrl and usage == usage_space) {
         toggle_god_menu();
+        return;
+    }
+
+    // WM2 (issue #707 card 2): the overview hotkey works everywhere —
+    // Ctrl+F12 toggles the grid even over the god menu; Esc exits it.
+    if (ctrl and usage == usage_f12) {
+        if (god_menu_open) toggle_god_menu();
+        overview_toggle_grid();
+        return;
+    }
+    if (usage == usage_esc and overview_open and !god_menu_open) {
+        overview_exit_grid();
         return;
     }
 
@@ -2277,6 +2452,15 @@ fn main() noreturn {
                 const btn: u8 = @intCast(ev.flags & 0xff);
                 const left = (btn & btn_left) != 0;
                 const prev_left = (prev_btn & btn_left) != 0;
+
+                // WM2 (issue #707 card 2): the overview grid captures
+                // pointer input while open — the god menu, when open,
+                // sits above it (Ctrl+F12 closes the menu first).
+                if (overview_open and !god_menu_open) {
+                    _ = overview_pointer(px, py, left, prev_left);
+                    prev_btn = btn;
+                    continue;
+                }
 
                 // Issue #821 Phase 1: God Menu modal pointer capture
                 if (god_menu_open) {
@@ -2948,11 +3132,12 @@ test "wnd: dq1 theme toggle flips mode (host: flag only)" {
     try std.testing.expectEqualStrings("dark", toggle_god_menu_theme());
 }
 
-test "wnd: dq1 id-suffix parse accepts 2..5, rejects the rest" {
+test "wnd: dq1 id-suffix parse accepts 2..9, rejects the rest" {
     try std.testing.expectEqual(@as(?u8, 2), parse_id_suffix("win-2", "win-"));
     try std.testing.expectEqual(@as(?u8, 5), parse_id_suffix("tab-5", "tab-"));
+    try std.testing.expectEqual(@as(?u8, 9), parse_id_suffix("win-9", "win-"));
     try std.testing.expect(parse_id_suffix("win-1", "win-") == null);
-    try std.testing.expect(parse_id_suffix("win-6", "win-") == null);
+    try std.testing.expect(parse_id_suffix("win-10", "win-") == null);
     try std.testing.expect(parse_id_suffix("win-", "win-") == null);
     try std.testing.expect(parse_id_suffix("win-x", "win-") == null);
     try std.testing.expect(parse_id_suffix("tab-3", "win-") == null);
@@ -3109,4 +3294,75 @@ test "wnd: wallpaper render occlusion and blit logic" {
 
     // Taskbar area (y >= fb_h - taskbar_h) should remain unpainted (0xFF000000)
     try std.testing.expectEqual(@as(u32, 0xFF000000), fake_scan[(fb_h - 10) * fb_w + 50]);
+}
+
+test "wnd: wm2 mirror covers ids 2..9 (the WM1 kernel ceiling)" {
+    try std.testing.expectEqual(@as(?usize, 0), mirror_slot(2));
+    try std.testing.expectEqual(@as(?usize, 3), mirror_slot(5));
+    try std.testing.expectEqual(@as(?usize, 7), mirror_slot(9));
+    try std.testing.expect(mirror_slot(1) == null);
+    try std.testing.expect(mirror_slot(10) == null);
+    try std.testing.expect(mirror_slot(0xff) == null);
+}
+
+test "wnd: wm2 card list is ascending over visible current-workspace mirrors" {
+    const saved_ws = current_workspace;
+    current_workspace = 0;
+    mirrors[0] = .{ .id = 2, .valid = true, .visible = true, .workspace = 0 };
+    mirrors[2] = .{ .id = 4, .valid = true, .visible = true, .workspace = 1 }; // other ws: skipped
+    mirrors[3] = .{ .id = 5, .valid = true, .visible = false, .workspace = 0 }; // hidden: skipped
+    mirrors[5] = .{ .id = 7, .valid = true, .visible = true, .workspace = 0 };
+    defer {
+        mirrors[0] = .{};
+        mirrors[2] = .{};
+        mirrors[3] = .{};
+        mirrors[5] = .{};
+        current_workspace = saved_ws;
+    }
+    const cards = overview_card_list();
+    try std.testing.expectEqual(@as(usize, 2), cards.n);
+    try std.testing.expectEqual(@as(u8, 2), cards.ids[0]);
+    try std.testing.expectEqual(@as(u8, 7), cards.ids[1]);
+}
+
+test "wnd: wm2 grid click focuses the card under the cursor" {
+    const saved_ws = current_workspace;
+    current_workspace = 0;
+    mirrors[0] = .{ .id = 2, .valid = true, .visible = true, .workspace = 0 };
+    mirrors[1] = .{ .id = 3, .valid = true, .visible = true, .workspace = 0 };
+    defer {
+        mirrors[0] = .{};
+        mirrors[1] = .{};
+        current_workspace = saved_ws;
+        overview_open = false;
+        overview_press_id = 0;
+    }
+    // Two cards: grid is 2x1; card 1 spans x 648..1264, y 8..664.
+    overview_open = true;
+    try std.testing.expect(overview_pointer(900, 100, true, false)); // down on card 1
+    try std.testing.expectEqual(@as(u8, 3), overview_press_id);
+    try std.testing.expect(overview_pointer(900, 100, false, true)); // up: focus card 1
+    try std.testing.expect(!overview_open); // a decision exits the grid
+    // Move path: press card 0, release on workspace-1 strip button.
+    overview_open = true;
+    try std.testing.expect(overview_pointer(100, 100, true, false)); // down on card 0
+    try std.testing.expectEqual(@as(u8, 2), overview_press_id);
+    try std.testing.expect(overview_pointer(640, 690, false, true)); // up on WS 1 button
+    try std.testing.expect(!overview_open);
+    try std.testing.expectEqual(@as(u8, 1), current_workspace);
+    current_workspace = saved_ws;
+}
+
+test "wnd: wm2 hotkey toggles the grid, Esc exits" {
+    const saved_open = overview_open;
+    defer overview_open = saved_open;
+    overview_open = false;
+    handle_wm_key(usage_f12, mod_ctrl); // Ctrl+F12 enters
+    try std.testing.expect(overview_open);
+    handle_wm_key(usage_f12, mod_ctrl); // re-press exits
+    try std.testing.expect(!overview_open);
+    handle_wm_key(usage_f12, mod_ctrl);
+    try std.testing.expect(overview_open);
+    handle_wm_key(usage_esc, 0); // Esc exits
+    try std.testing.expect(!overview_open);
 }

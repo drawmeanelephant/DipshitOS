@@ -6865,6 +6865,12 @@ fn cmd_wm(m: *Monitor, args: []const []const u8) ExecError {
         // `taskbar=`).
         m.console.puts(" taskbar=");
         m.console.print_u64(info.taskbar_count);
+        // WM2 mission-control overview (Self-hosting Lane 1, issue #707
+        // card 2): the overview observability — OVERVIEW (cmd 21) grid
+        // decisions (enter/exit/focus/move) applied (the gate greps
+        // `overview=`).
+        m.console.puts(" overview=");
+        m.console.print_u64(info.overview_count);
         m.console.puts("\n");
         var rows: [driving_award.max_windows]driving_award.ChromeRow = undefined;
         const n = driving_award.wm_chrome_rows(&rows);

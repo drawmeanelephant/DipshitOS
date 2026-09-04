@@ -1116,6 +1116,9 @@ pub fn arm() void {
     overlay_active = false;
     overlay_count = 0;
     overlay_selected = 0;
+    // WM2: the overview grid never survives a registry reset.
+    overview_open = false;
+    overview_n = 0;
 }
 
 pub fn armed() bool {
@@ -2170,6 +2173,218 @@ pub fn alt_tab_wm_commit(id: u8) bool {
     _ = raise(id);
     _ = mark_dirty(0);
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// WM2 mission-control overview (Self-hosting Lane 1, issue #707 card 2).
+// A hotkey-summoned grid of the current workspace's user windows: click a
+// card to focus+raise it, drag a card onto a workspace-strip button to move
+// it there (and switch to it), Esc/hotkey to exit. The GRID GEOMETRY is the
+// shared wnd_core rule (geom.overview_grid / card_rect / ws_button_rect) —
+// the kernel renders these rects and the WM hit-tests the SAME rects, so
+// the two cannot disagree. Policy (which card was clicked) arrives over
+// slot-65 OVERVIEW (cmd 21); the kernel only applies + repaints.
+// ---------------------------------------------------------------------------
+
+/// True while the overview grid is on screen.
+pub var overview_open: bool = false;
+/// Snapshot of current-workspace user-window ids taken at enter.
+pub var overview_ids: [user_windows_max]u8 = [_]u8{0} ** user_windows_max;
+/// Live entries in `overview_ids`.
+pub var overview_n: usize = 0;
+
+pub fn overview_is_open() bool {
+    return overview_open;
+}
+
+/// Live card count (0 when closed).
+pub fn overview_window_count() usize {
+    if (!overview_open) return 0;
+    return overview_n;
+}
+
+/// Snapshot the current workspace's user windows (visible ones on the
+/// current workspace) and open the grid. The snapshot sorts ids ASCENDING
+/// so card index i names the same window on both sides of the seam: the WM
+/// rebuilds the identical order from its mirrors (slot order == id order)
+/// using only mirrored fields (valid/visible/workspace), so the card-index
+/// mapping cannot drift. Returns the card count (0 with the grid still open
+/// but empty — honest, not a refusal).
+pub fn overview_enter() usize {
+    var cnt: usize = 0;
+    var i: usize = 0;
+    while (i < win_count) : (i += 1) {
+        const w = &windows[i];
+        if (!w.visible) continue;
+        if (w.kind != .user) continue;
+        if (!workspace_visible(w)) continue;
+        if (cnt < user_windows_max) {
+            overview_ids[cnt] = w.id;
+            cnt += 1;
+        }
+    }
+    // Ascending-id insertion sort (<= 8 entries — the shared card order).
+    var a: usize = 1;
+    while (a < cnt) : (a += 1) {
+        const key = overview_ids[a];
+        var b: usize = a;
+        while (b > 0 and overview_ids[b - 1] > key) : (b -= 1) {
+            overview_ids[b] = overview_ids[b - 1];
+        }
+        overview_ids[b] = key;
+    }
+    overview_n = cnt;
+    overview_open = true;
+    _ = mark_dirty(0);
+    return cnt;
+}
+
+/// Close the grid without touching focus.
+pub fn overview_exit() void {
+    if (!overview_open) return;
+    overview_open = false;
+    overview_n = 0;
+    _ = mark_dirty(0);
+}
+
+/// The WM's click decision: card `id` gains focus+raise and the grid
+/// closes. Returns false when closed or `id` is not a live card (the
+/// handler maps that to EINVAL).
+pub fn overview_focus(id: u8) bool {
+    if (!overview_open) return false;
+    var k: usize = 0;
+    while (k < overview_n) : (k += 1) {
+        if (overview_ids[k] == id) {
+            overview_open = false;
+            overview_n = 0;
+            _ = focus(id);
+            _ = raise(id);
+            _ = mark_dirty(0);
+            return true;
+        }
+    }
+    return false;
+}
+
+/// The WM's drag decision: card `id` moves to workspace `ws` and the grid
+/// closes onto that workspace. Returns false when closed, `id` is not a
+/// live card, or `ws` is out of range.
+pub fn overview_move(id: u8, ws: u8) bool {
+    if (!overview_open) return false;
+    if (ws >= workspace_max) return false;
+    var k: usize = 0;
+    while (k < overview_n) : (k += 1) {
+        if (overview_ids[k] == id) {
+            overview_open = false;
+            overview_n = 0;
+            _ = user_move_to_workspace(id, ws);
+            switch_workspace(ws);
+            _ = mark_dirty(0);
+            return true;
+        }
+    }
+    return false;
+}
+
+/// WM2: nearest-neighbor scale blit — a source image (a user window's own
+/// back-buffer or shared surface, never the scanout, so source and
+/// destination cannot overlap) scaled into a destination rect. Pure BSS
+/// math, no allocation. Zero-size rects are honest no-ops.
+pub fn blit_scaled(
+    dst: [*]u8,
+    dst_stride: usize,
+    src: [*]const u8,
+    src_w: usize,
+    src_h: usize,
+    src_stride: usize,
+    dx: usize,
+    dy: usize,
+    dw: usize,
+    dh: usize,
+) void {
+    if (dw == 0 or dh == 0 or src_w == 0 or src_h == 0) return;
+    var y: usize = 0;
+    while (y < dh) : (y += 1) {
+        const src_y = y * src_h / dh;
+        var x: usize = 0;
+        while (x < dw) : (x += 1) {
+            const src_x = x * src_w / dw;
+            const s = src + src_y * src_stride + src_x * 4;
+            const d = dst + (dy + y) * dst_stride + (dx + x) * 4;
+            d[0] = s[0];
+            d[1] = s[1];
+            d[2] = s[2];
+            d[3] = 0xff;
+        }
+    }
+}
+
+/// WM2: paint the overview grid (called from the overlay section when
+/// `overview_open`). Dim backdrop + one card per snapshot window (title
+/// band + live scaled content) + the workspace strip with one button per
+/// workspace. Card/strip rects are the shared geom rules — the same ones
+/// the WM hit-tests.
+pub fn paint_overview(fb: [*]u8, stride: usize, wspan: usize, hspan: usize) void {
+    if (!overview_open) return;
+    const sw: u32 = @intCast(@min(wspan, 0xffff));
+    const sh: u32 = @intCast(@min(hspan, 0xffff));
+    // Dim backdrop over the whole scanout.
+    fill_rect(fb, stride, 0, 0, wspan, hspan, 0x0f0f1a);
+    const g = geom.overview_grid(overview_n, sw, sh, geom.taskbar_h, geom.dock_w);
+    draw_string(fb, stride, @as(usize, g.x0), 0, "Overview - click focuses, drag to a workspace, Esc exits", 0x94a3b8);
+    var idx: usize = 0;
+    while (idx < overview_n) : (idx += 1) {
+        const id = overview_ids[idx];
+        const card = geom.overview_card_rect(g, idx);
+        const cx: usize = card.x;
+        const cy: usize = card.y;
+        const cw: usize = card.w;
+        const ch: usize = card.h;
+        // Card surface + border (accent when focused).
+        fill_rect(fb, stride, cx, cy, cw, ch, 0x1e293b);
+        const border = if (id == focused_id) focus_ring() else 0x64748b;
+        fill_rect(fb, stride, cx, cy, cw, 2, border);
+        fill_rect(fb, stride, cx, cy + ch - 2, cw, 2, border);
+        fill_rect(fb, stride, cx, cy, 2, ch, border);
+        fill_rect(fb, stride, cx + cw - 2, cy, 2, ch, border);
+        // Title band: first bytes of the window title.
+        if (find_user_window(id)) |win| {
+            const max_chars = if (cw > 8) (cw - 8) / 8 else 0;
+            const n = @min(win.title.len, max_chars);
+            if (n > 0) draw_string(fb, stride, cx + 4, cy + 4, win.title[0..n], 0xffffff);
+            // Live content scaled into the card below the title band.
+            const thumb_y = cy + @as(usize, geom.title_bar_h);
+            const thumb_h = ch -| (@as(usize, geom.title_bar_h) + 2);
+            const thumb_w = cw -| 4;
+            if (thumb_w > 0 and thumb_h > 0) {
+                var src: ?[*]const u8 = null;
+                var src_w: usize = 0;
+                var src_h: usize = 0;
+                var src_stride: usize = 0;
+                if (user_surface(id)) |sf| {
+                    src = @as([*]const u8, @ptrFromInt(sf.pa_base));
+                    src_w = win.w;
+                    src_h = win.h;
+                    src_stride = @as(usize, win.w) * 4;
+                } else if (win.kbuf_pa != 0) {
+                    src = kbuf_ptr(win);
+                    src_w = win.w;
+                    src_h = win.h;
+                    src_stride = @as(usize, win.w) * 4;
+                }
+                if (src) |s| blit_scaled(fb, stride, s, src_w, src_h, src_stride, cx + 2, thumb_y, thumb_w, thumb_h);
+            }
+        }
+    }
+    // Workspace strip: one button per workspace, current highlighted.
+    var ws: u8 = 0;
+    while (ws < geom.overview_ws_count) : (ws += 1) {
+        const b = geom.overview_ws_button_rect(ws, sw, geom.dock_w, g.strip_y);
+        const bg = if (ws == current_workspace) taskbar_entry_active() else 0x0f172a;
+        fill_rect(fb, stride, @as(usize, b.x), @as(usize, b.y), @as(usize, b.w), @as(usize, b.h), bg);
+        var label: [4]u8 = .{ 'W', 'S', ' ', '0' + ws };
+        draw_string(fb, stride, @as(usize, b.x) + 6, @as(usize, b.y) + 10, &label, 0xffffff);
+    }
 }
 
 // M32 WMS8 Gate 6 (issue #628): the kernel's drag-snap applied primitives
@@ -4337,6 +4552,11 @@ pub fn draw_chrome() void {
             fill_rect(fb, stride, pv_x + pv_w - 1, pv_y, 1, pv_h, 0x64748b);
         }
     }
+    // WM2 mission-control overview (issue #707 card 2): the grid paints
+    // above the alt-tab overlay (both cannot be open at once in practice —
+    // the WM exits overview before other chords — but a deterministic order
+    // keeps the scanout honest if they ever coincide).
+    if (overview_open) paint_overview(fb, stride, wspan, hspan);
     // M32 WMS8 Gate 6 (issue #628): the kernel snap-preview render (dragging
     // near an edge highlighted the zone) is DELETED — the WM owns snap-on-
     // drop; with a WM registered pointer_tick never reaches this drag path.
