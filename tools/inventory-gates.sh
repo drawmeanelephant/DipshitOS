@@ -115,7 +115,7 @@ EOF
         echo "> \`--check\` mode fails when the tracked file drifts from a fresh"
         echo "> render, so every new script under \`tools/\` must arrive with a"
         echo "> regenerated report. Subdirectory tooling (\`lib/\`, \`status/\`,"
-        echo "> \`context/\`, \`ragshit/\`) is summarized below, not rowed."
+        echo "> \`context/\`, \`gate/\`, \`ragshit/\`) is summarized below, not rowed."
         echo
         echo "## Summary"
         echo
@@ -137,12 +137,13 @@ EOF
         echo
         echo "| dir | files | role |"
         echo "|---|---|---|"
-        for d in lib status context ragshit; do
+        for d in lib status context ragshit gate; do
             n="$(find "tools/$d" -type f 2>/dev/null | wc -l | tr -d ' ')"
             case "$d" in
                 lib) r="per-run isolation for live gates (\`gate-run.sh\`)" ;;
                 status) r="multiagent coordination gate + claim tooling (class A)" ;;
                 context) r="context snapshot helpers" ;;
+                gate) r="M40 vgate harness + specs (GF2+)" ;;
                 ragshit) r="host-side context engine (developer tooling, not guest software)" ;;
             esac
             echo "| \`tools/$d/\` | $n | $r |"
