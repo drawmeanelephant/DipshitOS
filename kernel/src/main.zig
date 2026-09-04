@@ -41,6 +41,10 @@ const virtio_net = @import("virtio_net.zig");
 // `--screenshot`) — the graphics keystone. Pre-exit discovery, post-MMU
 // re-arm, the control-queue 2D command path to a fixed BSS framebuffer.
 const virtio_gpu = @import("virtio_gpu.zig");
+// Issue #990 (claim #997): the kernel's serial-log seam — leaf hook module
+// armed HERE so modules below main.zig (driving_award) can emit one
+// greppable line without an import cycle.
+const klog = @import("klog.zig");
 // Milestone fifteen card A1 (claim 6140): virtio-snd transport (the
 // runner's VZVirtioSoundDeviceConfiguration under `--sound`) — the audio
 // keystone. Pre-exit discovery, post-MMU re-arm; DID 0x1059 expected
@@ -562,6 +566,7 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // Claim 0020 phase D: TX at the normal final location — the same site
     // where the production banner transmits. Same payload as phases A/B/C.
     if (comptime tx_transition_d) virtio_console.transition_tx_experiment(st, .d);
+    klog.line_hook = uart_puts; // #990: arm the klog seam (first banner line goes direct)
     uart_puts("VirelaiOS kernel has seized control.\n");
     // Claim 0013: after the first TX, record whether the TX path returned
     // (bytes may still be dropped by the device; the serial log is the gate,
