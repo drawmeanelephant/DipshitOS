@@ -2852,30 +2852,58 @@ fn copy_arg(dst: *[40]u8, len: *usize, slot: [32]u8) void {
     len.* = take;
 }
 
-// Per-source staging buffer. The kernel caps a single file_read at 2048 B
-// (syscall.zig), and run() reads each source once, so 4096 is generous —
-// keeping this small matters: ZC.BIN's text + bss + the 256-byte argv block
-// must stay under the loader's 256 KiB exec_program_max (exec.zig), and
-// every byte of source_cap multiplies by MAX_FILES.
-const source_cap: usize = 4096;
-var source_bufs: [MAX_FILES][source_cap]u8 = undefined;
+// Shared source arena. The kernel caps a SINGLE file_read at 2048 B
+// (syscall.zig take_count), so run() drains each source with a chunked
+// read-until-EOF loop into this arena — a one-shot read would silently
+// truncate any source above 2048 B in-guest (the old per-file staging
+// buffer had exactly that bug for 2048..4096 B files). Sources are
+// arena-bounded: the whole compile group must fit, and the load fails
+// loudly instead of truncating when it does not. Keeping the arena small
+// matters: ZC.BIN's text + bss + the 256-byte argv block must stay under
+// the loader's 256 KiB exec_program_max (exec.zig). 24576 -> 32768 B
+// (+8 KiB bss over the old [MAX_FILES][4096] staging).
+const source_arena_cap: usize = 32768;
+var source_arena: [source_arena_cap]u8 = undefined;
 var image_buf: [elf_code_offset + 32768]u8 = undefined;
 
 fn run(src_paths: []const []const u8, out_path: []const u8) noreturn {
     var sources: [MAX_FILES][]const u8 = undefined;
+    var arena_off: usize = 0;
     for (src_paths, 0..) |src_path, i| {
         const fd = file_open(src_path, MODE_READ);
         if (fd < 0) {
             console_puts("zc: cannot open source\n");
             sys_exit(1);
         }
-        const n = file_read(@intCast(fd), &source_bufs[i]);
+        var total: usize = 0;
+        while (true) {
+            const room = source_arena_cap - (arena_off + total);
+            if (room == 0) {
+                // Arena exactly full: probe one byte (into a stack var, not
+                // the arena) to tell "the file ends exactly here" from "the
+                // file continues past the arena" — never truncate silently.
+                var probe: u8 = 0;
+                if (file_read(@intCast(fd), (&probe)[0..1]) > 0) {
+                    console_puts("zc: source group exceeds arena\n");
+                    sys_exit(6);
+                }
+                break;
+            }
+            const n = file_read(@intCast(fd), source_arena[arena_off + total ..]);
+            if (n < 0) {
+                console_puts("zc: source read error\n");
+                sys_exit(6);
+            }
+            if (n == 0) break;
+            total += @intCast(n);
+        }
         file_close(@intCast(fd));
-        if (n <= 0) {
+        if (total == 0) {
             console_puts("zc: empty or unreadable source\n");
             sys_exit(2);
         }
-        sources[i] = source_bufs[i][0..@intCast(n)];
+        sources[i] = source_arena[arena_off .. arena_off + total];
+        arena_off += total;
     }
 
     const bytes = compileFiles(sources[0..src_paths.len]) catch {

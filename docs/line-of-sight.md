@@ -251,13 +251,16 @@ the fixture corpus must not use them): `comptime`, `std`, error sets,
 `%` (emulate as `x - (x / 10) * 10`), `else if` (nest ifs), method-call
 syntax, any `@import` other than the magic `"zc"` name (the multi-file
 namespace is flat by design). Dialect-internal caps the gate enforces:
-every source ≤ 2048 B (the kernel's single-`file_read` cap — a larger
-source silently truncates in-guest), ≤ 6 sources per compile
-(`MAX_FILES`), ≤ 8 struct fields, and — surfaced by the snake, claim
-#978 — a ~512 B stack-frame budget per function (frame bytes accumulate
-across the body, so a `[120]u64` local array refuses to compile; size
-large locals to the budget) and braced-only `if` bodies (a
-single-statement `if (c) return 1;` without `{ }` is a parse error). When a ladder step wants to lift a non-goal, it ships a
+every source fits the shared source arena — 32768 B per compile group
+(zc's `source_arena_cap`; `run()` drains each source with chunked
+`file_read`s until EOF, so the kernel's 2048-B single-read clamp no
+longer truncates — a group that overflows the arena fails loudly, never
+silently; claim #992), ≤ 6 sources per compile (`MAX_FILES`), ≤ 8 struct
+fields, and — surfaced by the snake, claim #988 — a ~512 B stack-frame
+budget per function (frame bytes accumulate across the body, so a
+`[120]u64` local array refuses to compile; size large locals to the
+budget) and braced-only `if` bodies (a single-statement
+`if (c) return 1;` without `{ }` is a parse error). When a ladder step wants to lift a non-goal, it ships a
 fixture that uses it and this list shrinks — the corpus and this boundary
 move together. The corpus gate's first in-guest sweep caught one drift:
 `z1b-arrays.z` used `+=` (never in the dialect — its zc.zig unit twin
@@ -269,7 +272,8 @@ unlock with the host-shim contract pinned in its body — #708 (VL6) rode
 with it, and the snake (claim #988) supplied the missing run consumer.
 The Z1a–Z4b ladder then landed its fixtures; the corpus was already
 accumulating from
-Z0.5 (each step ships its fixture), so it's warm when it lands. Lane 0's
+Z0.5 (each step ships its fixture), so it was warm when Z4a/Z4b landed.
+Lane 0's
 four cards (#773–#776) are independent and claimable in parallel with any
 of the above.
 

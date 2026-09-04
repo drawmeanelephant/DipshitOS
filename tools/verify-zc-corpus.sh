@@ -49,6 +49,11 @@
 #   z3a  multi-file pair (2 sources)        3 markers, ORDERED, exit 72
 #   z3b  stdz app + glue + 3 lib modules    2 markers, ORDERED, exit 72,
 #        OUT.TXT must equal REPORT.EXP byte-exact (sha256)
+#   big  ONE source file >2048 B (the snake in a single file; the
+#        multi-read proof for zc's source arena) — 4 markers, ORDERED,
+#        exit 72; every marker string lives past byte 2048 of the source,
+#        so a compiler stuck on one 2048-B file_read could not produce
+#        them (claim #992)
 #
 # The exit status is the strong pin on every run case (each fixture
 # self-checks its feature and exits 1 on ANY failure); markers/needles add
@@ -123,6 +128,7 @@ case_def() {
         z2b) echo "z2b|run|72|z2b-start z2b-fnptr-ok z2b-in-if z2b-defer-if z2b-after-if z2b-defer-a z2b-defer-b z2b-ret-ok|" ;;
         z3a) echo "z3a|run|72|z3a-start z3a-cross-ok z3a-lib-ok|" ;;
         z3b) echo "z3b|run|72|z3b-start z3b-ok|" ;;
+        big) echo "big|run|72|snake-up snake-wait snake-move snake-over|snake-up|snake-wait|snake-move|snake-over" ;;
         *) echo "" ;;
     esac
 }
@@ -142,10 +148,11 @@ case_sources() {
         z2b) echo "Z2B.Z tests/zc-corpus/z2b-defer-fnptr.z" ;;
         z3a) echo "Z3AM.Z tests/zc-corpus/z3a-multifile.z"; echo "Z3AL.Z tests/zc-corpus/z3a-lib.z" ;;
         z3b) echo "APP.Z tests/zc-corpus/z3b-stdz.z"; echo "LABELS.Z tests/zc-corpus/z3b-labels.z"; echo "FMT.Z user/src/lib/stdz/fmt.zig"; echo "BUILDER.Z user/src/lib/stdz/string_builder.zig"; echo "RING.Z user/src/lib/stdz/ring.zig" ;;
+        big) echo "BIG.Z tests/zc-corpus/big-snake.z" ;;
     esac
 }
 
-ALL_CASES="$(for c in z05 vl6 z1a z1b z1c z1d z1e z1f z2a z2b z3a z3b snk; do echo "$c"; done)"
+ALL_CASES="$(for c in z05 vl6 z1a z1b z1c z1d z1e z1f z2a z2b z3a z3b snk big; do echo "$c"; done)"
 
 # Which cases to run: all, or the CASES/argv filter (validated against the table).
 cases_selected() {
@@ -178,22 +185,25 @@ SELECTED="$(cases_selected)"
 # analysis of every fixture body. The emitted ELF (artifacts/zc-host-<case>.
 # elf) is ALSO the host side of the dual-run: the class-B host boot execs it
 # in-guest and asserts byte-equivalent behavior against the zc-compiled run.
-# Every source must stay under the in-guest 2048-B single-read cap.
+# Every source must stay under the in-guest source-arena cap (32768 B —
+# zc's shared arena; run() drains each source with chunked file_reads until
+# EOF, so the old 2048-B single-read cap no longer truncates large sources;
+# see user/src/zc.zig source_arena_cap, claim #992).
 # Used standalone (--host), by verify-live-zc.sh, and as the fast-fail front
 # half of the full class-B run.
 host_check() {
     local npass=0 nfail=0 total=0
     for name in $(cases_selected); do
         total=$((total + 1))
-        # size + existence guard (the in-guest file_read caps a read at
-        # 2048 B; a larger source would silently truncate in-guest)
+        # size + existence guard (sources larger than the shared arena would
+        # overflow it in-guest; run() fails loudly, never truncates)
         local ok=1 paths=""
         while read -r _ path; do
             if [ ! -f "$path" ]; then
                 echo "$name: MISSING source $path" >&2
                 ok=0
-            elif [ "$(wc -c < "$path" | tr -d ' ')" -gt 2048 ]; then
-                echo "$name: source $path is >2048 B (in-guest single-read cap)" >&2
+            elif [ "$(wc -c < "$path" | tr -d ' ')" -gt 32768 ]; then
+                echo "$name: source $path is >32768 B (in-guest source-arena cap)" >&2
                 ok=0
             fi
             paths="$paths $path"

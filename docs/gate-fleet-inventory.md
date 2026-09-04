@@ -256,4 +256,4 @@ Columns: `just` = justfile recipe of the same name; `inv` = named in
 | `verify-unit-tests.sh` | 24 | A | n | y | y | n | Run the VirelaiOS unit test suites. |
 | `verify-vf-class-a.sh` | 118 | A | y | n | n | n | verify-vf-class-a.sh -- M34 HF1–HF4 (issues #735/#736/#737/#738) class-A |
 | `verify-virelai-probe.py` | 88 | tooling | n | n | n | n | verify-virelai-probe.py — class-A check for the W3 shim acceptance item. |
-| `verify-zc-corpus.sh` | 565 | B | n | y | n | y | verify-zc-corpus.sh -- M20 Z4a + Z4b (issues #760 + #761): the corpus |
+| `verify-zc-corpus.sh` | 575 | B | n | y | n | y | verify-zc-corpus.sh -- M20 Z4a + Z4b (issues #760 + #761): the corpus |
