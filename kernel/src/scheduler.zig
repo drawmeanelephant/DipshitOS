@@ -300,8 +300,10 @@ var tasks: [max_tasks]Task = [_]Task{.{}} ** max_tasks;
 // `pin_core` is set (then that ring — a pinned task never leaves it); a
 // preempted/self-yielded task joins the ring of the core it ran on; a
 // blocked task leaves its ring and wakes onto ring 0 (or its pin ring);
-// an idle secondary core steals from ring 0 only at the WFE->run seam
-// (the exact place the old shared scan let it grab work). Capacity is the
+// an idle core steals from ANY other ring at the WFE->run seam and on
+// every rotation path (issue #857 — the generalized steal: a ready task
+// parked on another core's ring migrates to the core that needs work,
+// unless it is pinned there). Capacity is the
 // whole pool: every task could be ready at once.
 const ReadyRing = struct {
     /// Sorted compact membership list (ascending slot index), `members[0..
@@ -390,8 +392,9 @@ fn home_ring_of(id: usize) usize {
 /// Drop `id` from whichever ring holds it (cross-ring remove — the
 /// exit/reap and pin re-home seams). Returns true when it was a member.
 /// Claim 881 slice 3: takes each ring's lock in turn (never two at
-/// once — a rotation holding ring 0 + its own ring cannot deadlock
-/// against this scan). Callers may hold sched_lock / a svclock domain
+/// once — a rotation holding every ring cannot deadlock against this
+/// scan: the scan never holds a lock the rotation waits on while holding
+/// another). Callers may hold sched_lock / a svclock domain
 /// (ring locks are the innermost — the frozen lock-order rule).
 fn ring_remove_anywhere(id: usize) bool {
     var c: usize = 0;
@@ -418,24 +421,33 @@ fn ring_remove_anywhere(id: usize) bool {
 /// locks — a ring lock may be taken while holding sched_lock or a
 /// svclock domain (the wake/scan paths), but NEVER held across taking
 /// another lock (the kill conversions release ring locks before their
-/// svclock/sched_lock takes). A secondary core's rotation holds ring 0
-/// + its own ring, always acquired 0-then-c, so no cycle is possible.
+/// svclock/sched_lock takes). A rotation holds EVERY ring's lock,
+/// always acquired in ascending index order, so no cycle is possible.
 var ring_locks: [smp.max_cores]spinlock.IrqSaveSpinlock = [_]spinlock.IrqSaveSpinlock{.{}} ** smp.max_cores;
 
-const RingLockPair = struct { c: usize, d0: u64, dc: u64 };
+const RingLockPair = struct { c: usize, saved: [smp.max_cores]u64 };
 
-/// The rotation's ring-lock pair: ring 0 then ring `c` (consistent
-/// order; core 0 takes only ring 0).
+/// The rotation's ring-lock set: EVERY ring, acquired in ascending index
+/// order (consistent order; the frozen no-cycle rule). The generalized
+/// steal (issue #857) scans all rings, so scan+remove must be atomic
+/// against every ring's claim — removal under a ring's own lock is still
+/// the single-owner claim, but the slot-order snapshot needs all locks
+/// held, or two cores could claim the same task off two rings' views.
 fn rotation_lock(c: usize) RingLockPair {
-    const d0 = ring_locks[0].lock();
-    if (c == 0) return .{ .c = c, .d0 = d0, .dc = 0 };
-    const dc = ring_locks[c].lock();
-    return .{ .c = c, .d0 = d0, .dc = dc };
+    var saved: [smp.max_cores]u64 = undefined;
+    var r: usize = 0;
+    while (r < smp.max_cores) : (r += 1) {
+        saved[r] = ring_locks[r].lock();
+    }
+    return .{ .c = c, .saved = saved };
 }
 
 fn rotation_unlock(lk: RingLockPair) void {
-    if (lk.c != 0) ring_locks[lk.c].unlock(lk.dc);
-    ring_locks[0].unlock(lk.d0);
+    var r: usize = smp.max_cores;
+    while (r > 0) {
+        r -= 1;
+        ring_locks[r].unlock(lk.saved[r]);
+    }
 }
 
 /// Push `id` onto its home ring under that ring's lock (the wake/scan
@@ -571,6 +583,20 @@ var secondary_last_task: []const u8 = "";
 const secondary_run_name_cap = 16;
 var secondary_run_names: [secondary_run_name_cap][]const u8 = undefined;
 var secondary_run_names_count: usize = 0;
+/// Cross-core migration evidence (issue #857): how many times a rotation
+/// claimed a task off ANOTHER core's ring (the generalized steal — core 0
+/// pulling ring-1..3 work, or a secondary pulling from ring 0 or a
+/// sibling secondary). Own-ring claims are not counted. Printed once per
+/// change from the shell idle loop (main context), with the task name and
+/// the source ring — the live proof that migration happened.
+var steal_runs: u64 = 0;
+var steal_runs_printed: u64 = 0;
+var steal_last_task: []const u8 = "";
+var steal_last_from: usize = 0;
+const steal_run_name_cap = 16;
+var steal_run_names: [steal_run_name_cap][]const u8 = undefined;
+var steal_run_froms: [steal_run_name_cap]usize = undefined;
+var steal_run_names_count: usize = 0;
 /// Secondary-core WFE-park capture (claim 2369): the location of the WFE
 /// loop's saved frame on the secondary stack + its ELR/SPSR, captured by
 /// `tick` the moment it starts a task from the parked state. A running
@@ -680,6 +706,9 @@ pub fn init() usize {
     fault_report_count = 0;
     sleep_report_pending = false;
     spawn_demo_armed = false;
+    steal_runs = 0;
+    steal_runs_printed = 0;
+    steal_run_names_count = 0;
     user_timer_preemptions = 0;
     tick_count = 0;
     for (&tasks) |*task| task.* = .{};
@@ -1065,15 +1094,16 @@ fn park() noreturn {
 /// the next task's frame pointer + ELR/SPSR for `tick` to apply. No asm,
 /// no SP manipulation: the actual register restore happens in the
 /// claim-9746 stub (`mov sp, x0` + pop + `eret`) using the staged frame.
-/// Pick the next runnable task after `after` on behalf of core `cid`
-/// (the shared ring; callers hold `sched_lock`). Core 0 may pick any
-/// ready task; secondary cores may pick only `secondary_ok` tasks — never
+/// Pick the next runnable task after `after` on behalf of core `cid`.
+/// Core 0 may pick any ready task on its own ring and any steal-eligible
+/// task parked on another ring (issue #857); secondary cores may pick
+/// only `secondary_ok` tasks off foreign rings — never
 /// the shell (console owner) and never the shared idle slot (core 0's
 /// reaper — one frame, one owner).
-/// May secondary core `c` pull `cand` off ring 0 (the any-core pool)? The
-/// same filters the old shared scan applied for `cid != 0`: never the
-/// shell or the core-0 idle reaper, only `secondary_ok` tasks, and never
-/// a task pinned to another core.
+/// May core `c` pull `cand` off a FOREIGN ring (another core's parked
+/// work)? The same filters the old shared scan applied for `cid != 0` on
+/// ring 0: never the shell or the core-0 idle reaper, only
+/// `secondary_ok` tasks, and never a task pinned to another core.
 fn steal_eligible(c: usize, cand: usize) bool {
     if (cand == 0 or cand == idle_id) return false;
     if (!tasks[cand].secondary_ok) return false;
@@ -1084,39 +1114,36 @@ fn steal_eligible(c: usize, cand: usize) bool {
 const MergedPick = struct { id: usize, from: usize };
 
 /// The successor after slot `after` on core `c`, over the SLOT-MERGED
-/// view of ring `c` and (for a secondary core) ring 0. Every `.ready`
-/// task the old shared scan could see lives on exactly one of those
-/// rings, so merging them in slot order reproduces the pre-ring
-/// round-robin exactly (the 508 host tests pin that order — e.g. a
-/// pinned task at slot 2 sits between a worker at slot 1 and the idle
-/// fallback at slot 10, whichever ring holds it). Ring-`c` members are
-/// eligible for core `c` by construction; ring-0 members are filtered by
-/// `steal_eligible` for a secondary core. The scan is cyclic: members at
+/// view of EVERY core's ring. Every `.ready` task the old shared scan
+/// could see lives on exactly one ring, so merging all rings in slot
+/// order reproduces the pre-ring round-robin exactly (the host tests pin
+/// that order — e.g. a pinned task at slot 2 sits between a worker at
+/// slot 1 and the idle fallback at slot 10, whichever ring holds it).
+/// Own-ring (`from == c`) members are eligible for core `c` by
+/// construction; FOREIGN-ring members pass `steal_eligible` — never the
+/// shell or the core-0 idle reaper, only `secondary_ok` tasks, never a
+/// task pinned to another core. That filter is what makes the migration
+/// safe: core 0 can now pull a task preempted onto ring 1..3, and a
+/// secondary can pull from another secondary's ring, while pinned tasks
+/// never leave their ring (issue #857). The scan is cyclic: members at
 /// or before `after` are reached only at the wrap (the old scan's
 /// re-pick of the preempted task itself).
 fn merged_next(c: usize, after: usize) ?MergedPick {
-    const r0 = &ready_rings[0];
-    if (c == 0) {
-        if (r0.count == 0) return null;
-        var begin: usize = 0;
-        while (begin < r0.count and r0.members[begin] <= after) begin += 1;
-        return .{ .id = r0.members[begin % r0.count], .from = 0 };
-    }
-    const rc = &ready_rings[c];
-    if (r0.count + rc.count == 0) return null;
-    // Two sorted lists, n <= 22: collect + insertion sort by slot.
-    var merged: [2 * max_tasks]MergedPick = undefined;
+    // All rings, n <= max_cores * max_tasks: collect + insertion sort by
+    // slot. Rings of offline cores are always empty, so they contribute
+    // nothing — no online-gating needed.
+    var merged: [smp.max_cores * max_tasks]MergedPick = undefined;
     var n: usize = 0;
-    var j: usize = 0;
-    while (j < r0.count) : (j += 1) {
-        merged[n] = .{ .id = r0.members[j], .from = 0 };
-        n += 1;
+    var r: usize = 0;
+    while (r < smp.max_cores) : (r += 1) {
+        const ring = &ready_rings[r];
+        var j: usize = 0;
+        while (j < ring.count) : (j += 1) {
+            merged[n] = .{ .id = ring.members[j], .from = r };
+            n += 1;
+        }
     }
-    j = 0;
-    while (j < rc.count) : (j += 1) {
-        merged[n] = .{ .id = rc.members[j], .from = c };
-        n += 1;
-    }
+    if (n == 0) return null;
     var i: usize = 1;
     while (i < n) : (i += 1) {
         const key = merged[i];
@@ -1129,7 +1156,7 @@ fn merged_next(c: usize, after: usize) ?MergedPick {
     var s: usize = 0;
     while (s < n) : (s += 1) {
         const cand = merged[(begin + s) % n];
-        if (cand.from == 0 and !steal_eligible(c, cand.id)) continue;
+        if (cand.from != c and !steal_eligible(c, cand.id)) continue;
         return cand;
     }
     return null;
@@ -1143,6 +1170,26 @@ fn merged_next(c: usize, after: usize) ?MergedPick {
 fn ring_claim(c: usize, after: usize) ?usize {
     const p = merged_next(c, after) orelse return null;
     _ = ready_rings[p.from].remove(p.id);
+    if (p.from != c) {
+        // Issue #857 evidence: core c migrated a ready task off another
+        // core's ring. BSS counters only (IRQ/svc safe — the same
+        // discipline as `secondary_runs` in stage_selected); the shell
+        // idle loop drains the lines in maybe_report.
+        steal_runs +%= 1;
+        const name = if (process.find_by_task(p.id)) |pid| process.info(pid).?.name else tasks[p.id].name;
+        steal_last_task = name;
+        steal_last_from = p.from;
+        if (steal_run_names_count < steal_run_names.len) {
+            steal_run_names[steal_run_names_count] = name;
+            steal_run_froms[steal_run_names_count] = p.from;
+            steal_run_names_count += 1;
+        } else {
+            std.mem.copyForwards([]const u8, steal_run_names[0 .. steal_run_names.len - 1], steal_run_names[1..]);
+            steal_run_names[steal_run_names.len - 1] = name;
+            std.mem.copyForwards(usize, steal_run_froms[0 .. steal_run_froms.len - 1], steal_run_froms[1..]);
+            steal_run_froms[steal_run_froms.len - 1] = p.from;
+        }
+    }
     return p.id;
 }
 
@@ -1251,10 +1298,11 @@ fn convert_kill(c: usize, lk: RingLockPair, next: usize) void {
 pub fn switch_context(frame_sp: u64, elr: u64, spsr: u64, sp_el0: u64) void {
     if (task_count == 0) return;
     const c = smp.core_id(); // per-core current
-    // Claim 881 slice 3: the rotation holds ONLY the ring locks (0 + c).
-    // No sched_lock — a core-1 exit teardown or reap on another core can
-    // never stall this save/pick/stage (the claim-9498 live flake this
-    // slice fixes).
+    // Claim 881 slice 3: the rotation holds ONLY the ring locks (all of
+    // them, ascending — the issue-857 generalized steal scans every
+    // ring). No sched_lock — a core-1 exit teardown or reap on another
+    // core can never stall this save/pick/stage (the claim-9498 live
+    // flake this slice fixes).
     const lk = rotation_lock(c);
     tasks[current[c]].sp = frame_sp;
     tasks[current[c]].elr = elr;
@@ -1267,7 +1315,8 @@ pub fn switch_context(frame_sp: u64, elr: u64, spsr: u64, sp_el0: u64) void {
     // — its first real preemption joins it like any other task.
     if (tasks[current[c]].state == .running) tasks[current[c]].state = .ready;
     ready_rings[c].push(current[c]);
-    // Pick the successor (steal view first, then own ring). After the push
+    // Pick the successor over the slot-merged view of every ring (the
+    // issue-857 steal: foreign-ring work migrates here). After the push
     // the own ring is never empty — the preempted task itself is reached
     // at the wrap, preserving the old lone-task self-rotation (saves /
     // resumes / switches all advance, `secondary_runs` included).
@@ -1962,10 +2011,11 @@ pub fn tick() void {
         park_sp[c] = exceptions.resume_frame[c];
         park_elr[c] = elr;
         park_spsr[c] = spsr;
-        // Claim 881 slice 2/3: claim the successor — the steal view first
-        // (a parked secondary core pulls ring-0 work — the old shared
-        // scan's WFE grab), then its own ring (a woken pin-core task) —
-        // under the ring locks only, inside claim_and_stage.
+        // Claim 881 slice 2/3, generalized by issue #857: claim the
+        // successor over every ring — a parked core pulls any eligible
+        // foreign-ring work (a woken pin-core task on its own ring is
+        // reached the same way) — under the ring locks only, inside
+        // claim_and_stage.
         if (claim_and_stage(c, idle_id)) apply_pending();
         return;
     }
@@ -2269,6 +2319,17 @@ pub fn maybe_report(con: *console.Console) void {
         const line = std.fmt.bufPrint(&buf, "smp: secondary runs={d} task={s}\n", .{ secondary_runs_printed, name }) catch continue;
         con.puts(line);
     }
+    // Issue #857 evidence: one line per cross-core migration (not per
+    // drain check). Same one-buffer single-write rule as above.
+    while (steal_runs_printed < steal_runs) {
+        steal_runs_printed += 1;
+        const index = steal_runs_printed - 1;
+        const sname = if (index < steal_run_names_count) steal_run_names[index] else steal_last_task;
+        const sfrom = if (index < steal_run_names_count) steal_run_froms[index] else steal_last_from;
+        var buf: [160]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "smp: steal runs={d} task={s} from={d}\n", .{ steal_runs_printed, sname, sfrom }) catch continue;
+        con.puts(line);
+    }
     var i: usize = 0;
     while (i < max_tasks) : (i += 1) {
         if (!report_pending[i]) continue;
@@ -2528,6 +2589,82 @@ test "scheduler: pin_task restricts a user task to exactly one core" {
     try std.testing.expectEqual(@as(?usize, user), next_runnable_for(worker, 0));
     // Unknown ids are refused.
     try std.testing.expect(!pin_task(max_tasks + 4, 1));
+}
+
+test "scheduler: core 0 steals an unpinned ready task parked on ring 1 (#857)" {
+    // The issue-857 gap: a task preempted on core 1 sits on ring 1 while
+    // core 0 needs work. Core 0's rotation must pull it in slot order,
+    // and the claim must drop it off ring 1 (single owner — no other
+    // core can select it afterwards).
+    _ = init();
+    const worker = register_worker(0x1111).?; // slot 1
+    const user = register_user(0x2222, 0).?; // slot 2, any-core
+    // Simulate a preemption on core 1: the user parks on ring 1.
+    try std.testing.expect(ready_rings[0].remove(user));
+    ready_rings[1].push(user);
+    check_ready_membership();
+    // Core 0 walking from the worker steals the ring-1 user (slot 2)
+    // ahead of the idle fallback (slot 10).
+    try std.testing.expectEqual(@as(?usize, user), next_runnable_for(worker, 0));
+    // The claim removes it from ring 1.
+    try std.testing.expectEqual(@as(?usize, user), ring_claim(0, worker));
+    try std.testing.expect(!ready_rings[1].contains(user));
+    try std.testing.expect(!ready_rings[0].contains(user));
+}
+
+test "scheduler: core-0 yield steals ring-1 work synchronously (#857)" {
+    // End to end through the real rotation: the steal happens AT the
+    // block/yield point — no tick, no park — which is the issue-857
+    // success criterion on two cores.
+    _ = init();
+    _ = register_worker(0x2000).?; // slot 1
+    _ = register_user(0x3000, 0).?; // slot 2
+    start();
+    try std.testing.expect(yield_current()); // shell -> worker
+    try std.testing.expectEqual(@as(usize, 1), current[0]);
+    // The user is preempted on core 1: parked on ring 1 while core 1 is
+    // busy elsewhere.
+    try std.testing.expect(ready_rings[0].remove(2));
+    ready_rings[1].push(2);
+    // Core 0 yields: the worker rejoins ring 0 and the rotation steals
+    // the ring-1 user immediately.
+    try std.testing.expect(yield_current()); // worker -> user (stolen)
+    try std.testing.expectEqual(@as(usize, 2), current[0]);
+    try std.testing.expect(!ready_rings[1].contains(2));
+    check_ready_membership();
+}
+
+test "scheduler: secondaries steal from each other's rings; pins stay home (#857)" {
+    // The four-core shape (max_cores = 4): a secondary's rotation sees
+    // every ring, not just ring 0 + its own. Pinned tasks are still
+    // never stolen — the pin ring keeps them.
+    _ = init();
+    const worker = register_worker(0x1111).?; // slot 1, any-core
+    const user = register_user(0x2222, 0).?; // slot 2, any-core
+    const pinned = register_user(0x3333, 0).?; // slot 3, pinned to core 2
+    try std.testing.expect(pin_task(pinned, 2));
+    // Park the any-core tasks on ring 2 (as if preempted there).
+    try std.testing.expect(ready_rings[0].remove(worker));
+    try std.testing.expect(ready_rings[0].remove(user));
+    ready_rings[2].push(worker);
+    ready_rings[2].push(user);
+    check_ready_membership();
+    // Core 1 steals across in slot order: worker, then user. The
+    // core-2-pinned task is skipped, and with everything eligible gone
+    // the scan finds nothing (idle is never stealable).
+    try std.testing.expectEqual(@as(?usize, worker), next_runnable_for(0, 1));
+    try std.testing.expectEqual(@as(?usize, worker), ring_claim(1, 0));
+    try std.testing.expectEqual(@as(?usize, user), next_runnable_for(worker, 1));
+    try std.testing.expectEqual(@as(?usize, user), ring_claim(1, worker));
+    try std.testing.expect(next_runnable_for(user, 1) == null);
+    // Core 0 steals from ring 2 the same way, then falls back to idle.
+    _ = init();
+    const w2 = register_worker(0x1111).?;
+    const u_two = register_user(0x2222, 0).?;
+    try std.testing.expect(ready_rings[0].remove(u_two));
+    ready_rings[2].push(u_two);
+    try std.testing.expectEqual(@as(?usize, w2), next_runnable_for(0, 0));
+    try std.testing.expectEqual(@as(?usize, u_two), next_runnable_for(w2, 0));
 }
 
 test "scheduler: register_user separates EL1 exception and EL0 stacks" {
@@ -3319,22 +3456,20 @@ test "scheduler: rotation paths release every ring lock" {
     check_ready_membership();
 }
 
-test "scheduler: rotation_lock holds ring 0 then the core ring; unlock releases both" {
-    // Claim 881 slice 3: the secondary rotation's pair is acquired 0
-    // then c (the frozen order that makes cycles impossible). Verify the
-    // helper's lock/unlock choreography directly.
+test "scheduler: rotation_lock holds every ring ascending; unlock releases all" {
+    // Issue #857: the generalized steal scans every ring, so the
+    // rotation's set is ALL rings acquired in ascending index order (the
+    // frozen no-cycle rule). Verify the helper's lock/unlock
+    // choreography directly.
     _ = init();
     const lk0 = rotation_lock(0);
-    try std.testing.expect(ring_locks[0].lock_impl.is_locked());
-    try std.testing.expect(!ring_locks[1].lock_impl.is_locked());
+    for (&ring_locks) |*l| try std.testing.expect(l.lock_impl.is_locked());
     rotation_unlock(lk0);
-    try std.testing.expect(!ring_locks[0].lock_impl.is_locked());
+    for (&ring_locks) |*l| try std.testing.expect(!l.lock_impl.is_locked());
     const lk1 = rotation_lock(1);
-    try std.testing.expect(ring_locks[0].lock_impl.is_locked());
-    try std.testing.expect(ring_locks[1].lock_impl.is_locked());
+    for (&ring_locks) |*l| try std.testing.expect(l.lock_impl.is_locked());
     rotation_unlock(lk1);
-    try std.testing.expect(!ring_locks[0].lock_impl.is_locked());
-    try std.testing.expect(!ring_locks[1].lock_impl.is_locked());
+    for (&ring_locks) |*l| try std.testing.expect(!l.lock_impl.is_locked());
 }
 
 test "scheduler: teardown_pending gates the reaper off a mid-teardown zombie" {
