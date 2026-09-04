@@ -297,6 +297,80 @@ pub fn fullscreen_rect(sw: u32, sh: u32) struct { x: u32, y: u32, w: u32, h: u32
 pub const TitleLayout = struct { x_off: usize, draw_len: usize, truncated: bool };
 
 // ---------------------------------------------------------------------------
+// WM3 (issue #707 card 3): taskbar ENTRY layout — single-sourced so the
+// kernel render (window 255's `.taskbar` branch) and the registered WM's
+// hit-test cannot disagree about which rect belongs to which entry.
+// Entries enumerate CURRENT-WORKSPACE user windows in ID-ASCENDING order
+// (the kernel loops the user-window id range; the WM loops its mirror
+// slots, which are keyed by the same ids). Both sides call these same
+// pure functions — the drift-guard pattern of the snap/tile rules above.
+// ---------------------------------------------------------------------------
+
+/// The workspace switcher geometry (the bar's left edge): `ws_count`
+/// cells of `taskbar_ws_cell` px spaced `taskbar_ws_stride` apart,
+/// starting at `taskbar_ws_x0`. The kernel's `.taskbar` render and the
+/// WM's entry math share these numbers.
+pub const taskbar_ws_x0: u32 = 4;
+pub const taskbar_ws_cell: u32 = 20;
+pub const taskbar_ws_stride: u32 = 24;
+
+/// One taskbar entry: `taskbar_entry_w` px wide with `taskbar_entry_gap`
+/// px between entries; the title draws `taskbar_entry_pad` px inside at
+/// the 8 px monospace advance, so `taskbar_entry_max_chars` bytes fit.
+/// The slice is clipped to 8 (not the geometric 9) so the minimized
+/// indicator dot at the entry's right edge never overlaps the text.
+pub const taskbar_entry_w: u32 = 80;
+pub const taskbar_entry_gap: u32 = 4;
+pub const taskbar_entry_pad: u32 = 4;
+pub const taskbar_entry_char_w: u32 = 8;
+pub const taskbar_entry_max_chars: usize = 8;
+
+/// The 2 px focused-entry underline (the active indicator), inset
+/// `taskbar_indicator_inset` px from the entry's left/right edges.
+pub const taskbar_indicator_h: u32 = 2;
+pub const taskbar_indicator_inset: u32 = 4;
+
+/// The taskbar entry rect (the same shape `SnapBounds` uses — a flat
+/// number struct BOTH sides return).
+pub const TaskbarRect = struct { x: u32, y: u32, w: u32, h: u32 };
+
+/// The x where entry 0 starts (right of the switcher + one gap).
+pub fn taskbar_entries_x0(ws_count: u32) u32 {
+    return taskbar_ws_x0 + ws_count * taskbar_ws_stride + taskbar_entry_gap;
+}
+
+/// The rect of taskbar entry `i` (the i-th current-workspace user window,
+/// id-ascending), or null once an entry would reach the tray — the bar's
+/// right `tray_w` px belong to the tray widgets, never to entries. Pure:
+/// the kernel render walks i = 0.. until null; the WM hit-tests the same
+/// rects.
+pub fn taskbar_entry_rect(i: u32, ws_count: u32, sw: u32, sh: u32, tray_w: u32) ?TaskbarRect {
+    const x = taskbar_entries_x0(ws_count) + i * (taskbar_entry_w + taskbar_entry_gap);
+    if (x + taskbar_entry_w > sw - tray_w) return null;
+    return .{ .x = x, .y = sh - taskbar_h + 2, .w = taskbar_entry_w, .h = taskbar_h - 4 };
+}
+
+/// The taskbar-entry hit-test: which entry index (if any) sits under
+/// (px, py). Pure — the WM calls this on a kind-19 DOWN EDGE with the
+/// SAME ws_count/sw/sh/tray_w the kernel rendered with; the kernel never
+/// hit-tests (the entry click decision is the WM's, like the dock's).
+pub fn taskbar_entry_at(ws_count: u32, sw: u32, sh: u32, tray_w: u32, px: u32, py: u32) ?u32 {
+    if (py < sh - taskbar_h or py >= sh) return null;
+    var i: u32 = 0;
+    while (taskbar_entry_rect(i, ws_count, sw, sh, tray_w)) |r| : (i += 1) {
+        if (px >= r.x and px < r.x + r.w) return i;
+    }
+    return null;
+}
+
+/// The taskbar title slice: at most `taskbar_entry_max_chars` bytes of
+/// the 8 px-advance monospace fit inside an entry (the kernel render and
+/// the WM's own taskbar notion clip identically).
+pub fn taskbar_title_slice(title: []const u8) []const u8 {
+    return title[0..@min(title.len, taskbar_entry_max_chars)];
+}
+
+// ---------------------------------------------------------------------------
 // WMS4 (issue #624) — the SET_WINDOW chrome descriptor ABI (ADR 0007
 // amendment). The single source of the chrome LOOK: element kinds, per-
 // window flags, and the theme colors. The WM server (userland) computes
@@ -881,4 +955,35 @@ test "wnd_core: DQ2 tab-strip chrome geometry (strip row, title truncation, clos
     try std.testing.expect(!tab_rect_contains(c0, 300, 216)); // next cell
     try std.testing.expect(!tab_rect_contains(c0, 100, 238)); // below strip
     try std.testing.expect(!tab_rect_contains(c0, 99, 216)); // left of strip
+}
+
+test "wnd_core: WM3 taskbar entry layout — rects, hit-test, tray clamp, title slice" {
+    // Entries start right of the 3-cell switcher (4 + 3*24 + 4 = 80).
+    try std.testing.expectEqual(@as(u32, 80), taskbar_entries_x0(3));
+    // Entry 0: the bar's inner band (720-20+2 .. 720-2), 80px wide.
+    const r0 = taskbar_entry_rect(0, 3, fb_w, fb_h, 80).?;
+    try std.testing.expectEqual(@as(u32, 80), r0.x);
+    try std.testing.expectEqual(@as(u32, 702), r0.y);
+    try std.testing.expectEqual(@as(u32, 80), r0.w);
+    try std.testing.expectEqual(@as(u32, 16), r0.h);
+    // Entry 1 strides by width+gap; the tray clamp: 12 entries fit left of
+    // the tray (the bar's right 80px), the 13th would reach it — refused.
+    const r1 = taskbar_entry_rect(1, 3, fb_w, fb_h, 80).?;
+    try std.testing.expectEqual(@as(u32, 164), r1.x);
+    try std.testing.expect(taskbar_entry_rect(12, 3, fb_w, fb_h, 80) != null);
+    try std.testing.expect(taskbar_entry_rect(13, 3, fb_w, fb_h, 80) == null);
+    // The tray clamp tracks the scanout: at the taskbar's top edge the
+    // band is empty; py inside is required.
+    try std.testing.expect(taskbar_entry_at(3, fb_w, fb_h, 80, 100, fb_h - taskbar_h - 1) == null);
+    try std.testing.expect(taskbar_entry_at(3, fb_w, fb_h, 80, 100, fb_h) == null);
+    try std.testing.expectEqual(@as(u32, 0), taskbar_entry_at(3, fb_w, fb_h, 80, 100, fb_h - 10).?);
+    try std.testing.expectEqual(@as(u32, 1), taskbar_entry_at(3, fb_w, fb_h, 80, 168, fb_h - 10).?);
+    // Edges exclusive on the far side; past the last entry (tray clamp) null.
+    try std.testing.expectEqual(@as(u32, 0), taskbar_entry_at(3, fb_w, fb_h, 80, 80, fb_h - 10).?);
+    try std.testing.expect(taskbar_entry_at(3, fb_w, fb_h, 80, 160, fb_h - 10) == null);
+    try std.testing.expect(taskbar_entry_at(3, fb_w, fb_h, 80, fb_w - 40, fb_h - 10) == null);
+    // Title slice: short titles pass through, long ones clip to 8 chars.
+    try std.testing.expectEqualStrings("Calc", taskbar_title_slice("Calc"));
+    try std.testing.expectEqualStrings("NOTEPAD1", taskbar_title_slice("NOTEPAD12345"));
+    try std.testing.expectEqual(@as(usize, 8), taskbar_entry_max_chars);
 }

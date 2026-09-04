@@ -904,6 +904,26 @@ pub fn taskbar_entry_dimmed() u32 {
     };
 }
 
+/// WM3 (issue #707 card 3): theme color for a MINIMIZED entry (darker than
+/// the plain dimmed fill — the entry is a restore target, not a task).
+pub fn taskbar_entry_minimized() u32 {
+    return switch (theme_id) {
+        1 => 0xb0bccd, // light: dimmer border
+        2 => 0x0b1220, // amber: darker than dimmed
+        else => 0x0b1220, // dark: darker than dimmed
+    };
+}
+
+/// WM3: the focused entry's active-indicator underline ink (white —
+/// visible on the active fill in every theme).
+pub const taskbar_indicator_rgb: u32 = 0xffffff;
+
+/// WM3: the minimized entry's indicator dot ink (the restore affordance).
+pub const taskbar_min_dot_rgb: u32 = 0x94a3b8;
+
+/// WM3: the minimized entry's title ink (muted gray).
+pub const taskbar_min_title_rgb: u32 = 0x94a3b8;
+
 /// Theme color for the desktop wallpaper top.
 pub fn wallpaper_top() u32 {
     return switch (theme_id) {
@@ -2259,6 +2279,10 @@ pub fn minimize_window(id: u8) bool {
     w.visible = false;
     w.dirty = true;
     _ = mark_dirty(0); // reveal whatever sat under
+    // WM3 (issue #707 card 3): the WM's mirror must follow a minimize —
+    // it is a visibility change (the WMS5 rule) and the WM's taskbar
+    // restore bit is derived from the hidden mirror. No-op in shim mode.
+    wm_mirror(id);
     // Fall focus back to terminal or next window.
     if (focused_id == id) {
         focused_id = 0;
@@ -2327,6 +2351,49 @@ pub fn dock_icon_click(idx: u32) bool {
         }
     }
     _ = mark_dirty(0);
+    return true;
+}
+
+/// WM3 (issue #707 card 3): the taskbar ENTRY enumeration snapshot — the
+/// id-ascending current-workspace filter the `.taskbar` render walks.
+/// The render iterates THIS (single source); `dui taskbar` reports it so
+/// a live gate can grep the exact entries the bar draws.
+pub const TaskbarEntry = struct { id: u8, focused: bool, minimized: bool };
+
+pub fn taskbar_entries(buf: *[user_windows_max]TaskbarEntry) usize {
+    var n: usize = 0;
+    var id_i: usize = 0;
+    while (id_i < user_windows_max) : (id_i += 1) {
+        const ww = find_user_window(user_window_id_base + @as(u8, @intCast(id_i))) orelse continue;
+        if (ww.workspace != current_workspace) continue;
+        buf[n] = .{
+            .id = ww.id,
+            .focused = focused_id == ww.id,
+            .minimized = ww.minimized and !ww.visible,
+        };
+        n += 1;
+    }
+    return n;
+}
+
+/// WM3 (issue #707 card 3): the taskbar-entry click ACTION — restore a
+/// minimized entry, else focus + raise a visible one — applied by the
+/// registered WM via TASKBAR (slot-65 cmd 12). The WM — not the kernel —
+/// decides WHICH entry the click hit (it hit-tests the shared wnd_core
+/// entry rects); the kernel clamps (the id must name a live user window)
+/// and applies the SAME chain a shim click would run, so a WM decision
+/// and a click on the same window are identical actions. Mirrors the
+/// window back (the WM's mirror must see the restored/focused state).
+pub fn taskbar_click(id: u8) bool {
+    const win = find_user_window(id) orelse return false;
+    if (win.minimized and !win.visible) {
+        if (!restore_from_dock(id)) return false;
+    } else {
+        _ = focus(id);
+        _ = raise(id);
+    }
+    _ = mark_dirty(0);
+    wm_mirror(id);
     return true;
 }
 
@@ -3438,27 +3505,43 @@ pub fn paint(w: *Window) void {
             const stride = virtio_gpu.fb_width * 4;
             fill_rect(fb, stride, 0, taskbar_y, virtio_gpu.fb_width, taskbar_h, taskbar_bg());
             // Arc4 #241: workspace switcher [1][2][3] on the left side.
-            var ws_x: u32 = 4;
+            // WM3: the cell geometry is the shared wnd_core rule.
             var ws_idx: u8 = 0;
             while (ws_idx < workspace_max) : (ws_idx += 1) {
+                const ws_x = geom.taskbar_ws_x0 + @as(u32, ws_idx) * geom.taskbar_ws_stride;
                 const is_cur = ws_idx == current_workspace;
                 const ws_bg = if (is_cur) taskbar_entry_active() else taskbar_entry_dimmed();
-                fill_rect(fb, stride, ws_x, taskbar_y + 2, 20, taskbar_h - 4, ws_bg);
+                fill_rect(fb, stride, ws_x, taskbar_y + 2, geom.taskbar_ws_cell, taskbar_h - 4, ws_bg);
                 const label: [1]u8 = .{'1' + ws_idx};
                 draw_string(fb, stride, ws_x + 6, taskbar_y + 6, label[0..1], 0xffffff);
-                ws_x += 24;
             }
-            // Render entries for each open user window.
-            var entry_x: u32 = ws_x + 4;
-            var wi: usize = 0;
-            while (wi < win_count) : (wi += 1) {
-                const ww = &windows[wi];
-                if (ww.kind != .user) continue;
-                const entry_w: u32 = 80;
-                const entry_bg = if (focused_id == ww.id) taskbar_entry_active() else taskbar_entry_dimmed();
-                fill_rect(fb, stride, entry_x, taskbar_y + 2, entry_w, taskbar_h - 4, entry_bg);
-                draw_string(fb, stride, entry_x + 4, taskbar_y + 6, ww.title, 0xffffff);
-                entry_x += entry_w + 4;
+            // WM3 (issue #707 card 3): entries for the CURRENT workspace
+            // only, enumerated ID-ASCENDING by the shared wnd_core rule —
+            // the same enumeration the registered WM hit-tests with (the
+            // drift guard: kernel render and WM hit-test cannot disagree).
+            // The focused entry carries the active fill + the 2px
+            // underline indicator; a minimized entry carries the darker
+            // fill + restore dot (the taskbar is the restore target).
+            var tb: [user_windows_max]TaskbarEntry = undefined;
+            const tn = taskbar_entries(&tb);
+            var ei: u32 = 0;
+            while (ei < tn) : (ei += 1) {
+                const r = geom.taskbar_entry_rect(ei, workspace_max, virtio_gpu.fb_width, virtio_gpu.fb_height, tray_w) orelse break;
+                const is_focused = tb[ei].focused;
+                const is_min = tb[ei].minimized;
+                const ww = find_user_window(tb[ei].id).?;
+                const entry_bg = if (is_focused) taskbar_entry_active() else if (is_min) taskbar_entry_minimized() else taskbar_entry_dimmed();
+                fill_rect(fb, stride, r.x, r.y, r.w, r.h, entry_bg);
+                const entry_title = geom.taskbar_title_slice(ww.title);
+                const title_ink: u32 = if (is_min) taskbar_min_title_rgb else 0xffffff;
+                draw_string(fb, stride, r.x + geom.taskbar_entry_pad, taskbar_y + 6, entry_title, title_ink);
+                if (is_focused) {
+                    // Active indicator: a 2px underline across the entry.
+                    fill_rect(fb, stride, r.x + geom.taskbar_indicator_inset, r.y + r.h - geom.taskbar_indicator_h, r.w - 2 * geom.taskbar_indicator_inset, geom.taskbar_indicator_h, taskbar_indicator_rgb);
+                } else if (is_min) {
+                    // Restore affordance: a 4x4 dot in the entry's tail.
+                    fill_rect(fb, stride, r.x + r.w - 9, r.y + 5, 4, 4, taskbar_min_dot_rgb);
+                }
             }
             // Arc2 W3: tray in right 80px — HH:MM, D/L/A, clipboard rect.
             // HH:MM from tray_tick (tick-derived, 1 Hz). M32 WMS6 Gate E:

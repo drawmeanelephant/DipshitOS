@@ -181,6 +181,9 @@ const tab_parent_of = driving_award.tab_parent_of;
 const taskbar_bg = driving_award.taskbar_bg;
 const taskbar_bg_rgb = driving_award.taskbar_bg_rgb;
 const taskbar_entry_active = driving_award.taskbar_entry_active;
+const taskbar_click = driving_award.taskbar_click;
+const taskbar_entries = driving_award.taskbar_entries;
+const TaskbarEntry = driving_award.TaskbarEntry;
 const taskbar_entry_active_rgb = driving_award.taskbar_entry_active_rgb;
 const taskbar_entry_dimmed = driving_award.taskbar_entry_dimmed;
 const taskbar_entry_dimmed_rgb = driving_award.taskbar_entry_dimmed_rgb;
@@ -1071,6 +1074,46 @@ test "driving_award: user_query reports the full window state (z-order + focus +
     q = user_query(2).?;
     try std.testing.expectEqual(@as(u32, 5), q.z);
     try std.testing.expectEqual(@as(u32, 0), q.focused);
+}
+
+test "driving_award: WM3 taskbar_click restores a minimized entry, focuses a visible one" {
+    arm();
+    try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 512, 384, 7));
+    try std.testing.expectEqual(UserOpenResult{ .opened = 3 }, user_open(320, 64, 512, 384, 7));
+    // Focus followed the open (id 3 is on top) — a taskbar click on the
+    // OTHER visible entry (id 2) refocuses + raises it.
+    try std.testing.expectEqual(@as(u8, 3), driving_award.focused_id);
+    try std.testing.expect(taskbar_click(2));
+    try std.testing.expectEqual(@as(u8, 2), driving_award.focused_id);
+    // Minimize id 3; a taskbar click on it RESTORES it (visible + focused).
+    try std.testing.expect(minimize_window(3));
+    try std.testing.expectEqual(@as(u32, 0), user_query(3).?.visible);
+    try std.testing.expect(taskbar_click(3));
+    try std.testing.expectEqual(@as(u32, 1), user_query(3).?.visible);
+    try std.testing.expectEqual(@as(u8, 3), driving_award.focused_id);
+    // Unknown / non-user ids are honestly refused.
+    try std.testing.expect(!taskbar_click(9));
+    try std.testing.expect(!taskbar_click(0));
+    // The enumeration snapshot: two entries, id-ascending, focused=3,
+    // none minimized (the click above restored id 3).
+    var tb: [8]TaskbarEntry = undefined;
+    const tn = taskbar_entries(&tb);
+    try std.testing.expectEqual(@as(usize, 2), tn);
+    try std.testing.expectEqual(@as(u8, 2), tb[0].id);
+    try std.testing.expectEqual(@as(u8, 3), tb[1].id);
+    try std.testing.expect(!tb[0].focused);
+    try std.testing.expect(tb[1].focused);
+    try std.testing.expect(!tb[1].minimized);
+    // Minimize id 2: the snapshot marks it minimized (the restore dot).
+    try std.testing.expect(minimize_window(2));
+    const tn2 = taskbar_entries(&tb);
+    try std.testing.expectEqual(@as(usize, 2), tn2);
+    try std.testing.expect(tb[0].minimized);
+    // A window on another workspace drops out of the enumeration.
+    try std.testing.expect(driving_award.user_move_to_workspace(3, 1));
+    const tn3 = taskbar_entries(&tb);
+    try std.testing.expectEqual(@as(usize, 1), tn3);
+    try std.testing.expectEqual(@as(u8, 2), tb[0].id);
 }
 
 test "driving_award: user_set_visible hides and shows a user window (fixed windows refused)" {

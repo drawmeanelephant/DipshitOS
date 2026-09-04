@@ -87,6 +87,14 @@ pub const wmctl_tray: u64 = 10;
 /// 0 close, 1 open, 2 toggle. A WM decision and a shim chord are identical
 /// kernel actions (parity by construction).
 pub const wmctl_dialog: u64 = 11;
+/// WM3 (issue #707 card 3): TASKBAR — a taskbar-entry click decision. The
+/// WM — not the kernel — hit-tests the entry rects (the shared wnd_core
+/// layout rule) and decides WHICH entry a click landed on; a0 = the
+/// entry's window id. The kernel clamps (the id must name a live user
+/// window) and applies the SAME chain a shim click would run
+/// (restore-if-minimized, else focus + raise) — a WM decision and a click
+/// on the same window are identical actions.
+pub const wmctl_taskbar: u64 = 12;
 /// S6 Tab model (Milestone 19, issue #782): ATTACH_TAB (cmd 18), DETACH_TAB
 /// (cmd 19), ACTIVATE_TAB (cmd 20). The WM — not the kernel — owns tab
 /// grouping and layout; the kernel tracks the calls and validates IDs.
@@ -128,6 +136,9 @@ var tray_count: u64 = 0;
 /// WM's keyboard-driven modal-dialog decisions (about open/close/toggle)
 /// applied by the kernel.
 var dialog_count: u64 = 0;
+/// WM3 (issue #707 card 3): TASKBAR (cmd 12) submissions accepted — the
+/// taskbar-entry click decisions the WM made (restore/focus), applied.
+var taskbar_count: u64 = 0;
 /// S6 Tab model (Milestone 19, issue #782): counters for tab operations.
 var tab_attach_count: u64 = 0;
 var tab_detach_count: u64 = 0;
@@ -396,6 +407,7 @@ pub const WmInfo = struct {
     dock_count: u64,
     tray_count: u64,
     dialog_count: u64,
+    taskbar_count: u64,
     pointer_fan_count: u64,
     window_mirror_count: u64,
     key_fan_count: u64,
@@ -416,6 +428,7 @@ pub fn info() WmInfo {
         .dock_count = dock_count,
         .tray_count = tray_count,
         .dialog_count = dialog_count,
+        .taskbar_count = taskbar_count,
         .pointer_fan_count = pointer_fan_count,
         .window_mirror_count = window_mirror_count,
         .key_fan_count = key_fan_count,
@@ -541,6 +554,12 @@ pub fn note_tray() void {
 /// Note a DIALOG (cmd 11) submission — the WM's modal-dialog decision.
 pub fn note_dialog() void {
     dialog_count +%= 1;
+}
+
+/// WM3 (issue #707 card 3): note a TASKBAR (cmd 12) submission — the WM's
+/// taskbar-entry click decision (restore/focus), applied by the kernel.
+pub fn note_taskbar() void {
+    taskbar_count +%= 1;
 }
 
 /// S6 Tab model (Milestone 19, issue #782): notes for tab operations.
