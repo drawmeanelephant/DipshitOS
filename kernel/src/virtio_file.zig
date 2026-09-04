@@ -292,7 +292,16 @@ pub fn set_test_share(files: ?[]const TestFile) void {
     test_share = files;
 }
 
-fn test_lookup(name: []const u8) ?[]const u8 {
+/// Strip leading slashes to conform to the root-relative wire contract
+/// (e.g. "/" -> "", "/EFI" -> "EFI", "/KERNEL.BIN" -> "KERNEL.BIN").
+pub fn clean_path(raw: []const u8) []const u8 {
+    var p = raw;
+    while (p.len > 0 and p[0] == '/') p = p[1..];
+    return p;
+}
+
+fn test_lookup(raw_name: []const u8) ?[]const u8 {
+    const name = clean_path(raw_name);
     const files = test_share orelse return null;
     for (files) |f| if (std.mem.eql(u8, f.name, name)) return f.data;
     return null;
@@ -454,7 +463,8 @@ pub const ListResult = struct {
 /// Returns the reply status; rows land in `out`. Test override: serve
 /// the in-memory share table (flat root — every seeded name is a file
 /// at the root; nested paths return st_not_found).
-pub fn list(path: []const u8, out: *ListResult) u8 {
+pub fn list(raw_path: []const u8, out: *ListResult) u8 {
+    const path = clean_path(raw_path);
     out.* = .{};
     if (!available()) return st_host_error;
     // Test override: serve the fixture map (root only).
@@ -494,7 +504,8 @@ pub const StatResult = struct {
     is_dir: bool = false,
 };
 
-pub fn stat(path: []const u8, out: *StatResult) u8 {
+pub fn stat(raw_path: []const u8, out: *StatResult) u8 {
+    const path = clean_path(raw_path);
     out.* = .{};
     if (!available()) return st_host_error;
     // Test override: serve the fixture map.
@@ -531,7 +542,8 @@ pub const ReadResult = struct {
     data: []const u8 = "",
 };
 
-pub fn read(path: []const u8, offset: u64) ReadResult {
+pub fn read(raw_path: []const u8, offset: u64) ReadResult {
+    const path = clean_path(raw_path);
     if (!available()) return .{ .status = st_host_error, .data = "" };
     // Test override: serve the fixture map (single-chunk reads — the
     // hardware chunk loop is exercised live by the vf gate).
@@ -561,7 +573,8 @@ pub const ReadChunkResult = struct {
 /// The module's shared `vf_reply_buf` is never read outside the lock,
 /// preventing concurrent tasks or cores from clobbering in-flight replies
 /// before or during the copy.
-pub fn read_chunk(path: []const u8, offset: u64, out: []u8) ReadChunkResult {
+pub fn read_chunk(raw_path: []const u8, offset: u64, out: []u8) ReadChunkResult {
+    const path = clean_path(raw_path);
     if (!available()) return .{ .status = st_host_error, .bytes = 0 };
     if (out.len == 0) return .{ .status = st_ok, .bytes = 0 };
     if (builtin.is_test and test_share != null) {
@@ -630,7 +643,8 @@ pub fn read_whole(path: []const u8, out: []u8) ?usize {
 /// open_flag_append (create-if-missing makes the gate's "write a new
 /// file" story one verb). On ok, `out_handle` receives the host handle
 /// (cursor 0, or EOF when append — the host's table owns the cursor).
-pub fn open(path: []const u8, flags: u8, out_handle: *u16) u8 {
+pub fn open(raw_path: []const u8, flags: u8, out_handle: *u16) u8 {
+    const path = clean_path(raw_path);
     out_handle.* = 0;
     if (!available()) return st_host_error;
     const n = exchange(op_open, flags, path, &vf_reply_buf) orelse return st_host_error;
@@ -702,7 +716,9 @@ pub fn truncate(handle: u16, size: u64) u8 {
 
 /// RENAME/overwrite `from` → `to` on the host share (stateless).
 /// NUL-separated payload (paths are NUL-free by construction).
-pub fn rename(from: []const u8, to: []const u8) u8 {
+pub fn rename(raw_from: []const u8, raw_to: []const u8) u8 {
+    const from = clean_path(raw_from);
+    const to = clean_path(raw_to);
     if (!available()) return st_host_error;
     if (from.len == 0 or to.len == 0 or from.len > path_max or to.len > path_max) return st_host_error;
     var payload: [path_max * 2 + 1]u8 = undefined;
@@ -731,7 +747,9 @@ pub fn mkdir(path: []const u8) u8 {
 /// Like RENAME, the combined `[from][0x00][to]` frame must fit the
 /// channel's bounded request buffer; beyond that the guest refuses
 /// honestly with st_host_error (the monitor's short paths never hit it).
-pub fn clone(from: []const u8, to: []const u8) u8 {
+pub fn clone(raw_from: []const u8, raw_to: []const u8) u8 {
+    const from = clean_path(raw_from);
+    const to = clean_path(raw_to);
     if (!available()) return st_host_error;
     if (from.len == 0 or to.len == 0 or from.len > path_max or to.len > path_max) return st_host_error;
     if (std.mem.indexOfScalar(u8, from, 0) != null or std.mem.indexOfScalar(u8, to, 0) != null) return st_host_error;
@@ -750,7 +768,8 @@ pub fn delete(path: []const u8) u8 {
     return exchange_path(op_delete, path);
 }
 
-fn exchange_path(op: u8, path: []const u8) u8 {
+fn exchange_path(op: u8, raw_path: []const u8) u8 {
+    const path = clean_path(raw_path);
     if (!available()) return st_host_error;
     if (path.len > path_max) return st_host_error;
     const n = exchange(op, 0, path, &vf_reply_buf) orelse return st_host_error;
@@ -1145,4 +1164,13 @@ test "virtio_file: read_chunk and read_into copy-out under test_share" {
     try testing.expect(n != null);
     try testing.expectEqual(@as(usize, 38), n.?);
     try testing.expectEqualStrings("Hello, world of safe concurrent reads!", whole[0..n.?]);
+}
+
+test "virtio_file: clean_path strips leading slashes" {
+    try testing.expectEqualStrings("", clean_path(""));
+    try testing.expectEqualStrings("", clean_path("/"));
+    try testing.expectEqualStrings("", clean_path("///"));
+    try testing.expectEqualStrings("EFI", clean_path("/EFI"));
+    try testing.expectEqualStrings("EFI/BOOT", clean_path("///EFI/BOOT"));
+    try testing.expectEqualStrings("KERNEL.BIN", clean_path("KERNEL.BIN"));
 }
