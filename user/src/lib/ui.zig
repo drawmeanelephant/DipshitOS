@@ -1,3617 +1,345 @@
-//! VirelaiOS Micro-Widget Toolkit & Runtime (ADR 0011, Milestone 11).
+//! VirelaiOS Micro-Widget Toolkit & Runtime (ADR 0011, Milestone 11, M39 UI1).
 //!
 //! Reusable, lightweight GUI primitives with ZERO heap allocation.
-//! All widget structures are pure value types operating over static BSS
-//! or stack buffers.
+//! Decomposed into modular submodules under `user/src/lib/ui/` with a facade
+//! preserving 100% backward compatibility for all userland applications and LIBUI.SO:
+//!   - abi.zig: Syscall numbers, raw syscall invocations, Event, WmRpc, ProcessRow
+//!   - theme.zig: Theme, ThemeColors, ChromeColors, DQ4 tokens, WidgetState, CursorKind
+//!   - draw.zig: Rect, Point, fill_rect, draw_text (Inter TTF), FillBatcher, WindowBacking
+//!   - widgets.zig: Button, Label, TextInput, ListView, DropDown, Menu, ScrollView, Dialog, etc.
 
 const std = @import("std");
+
 pub const font8x8 = @import("font8x8.zig");
 pub const font_ttf = @import("font_ttf.zig");
 pub const TrueTypeFace = font_ttf.TrueTypeFace;
 pub const image = @import("image.zig");
 pub const Image = image.Image;
 
-// ---------------------------------------------------------------------------
-// M32 WMS7 Gate B (issue #627): the app↔WM mailbox protocol (WM_RPC) wire.
-// This toolkit is compiled into 28 app modules whose module paths cannot
-// reach `kernel/src/`, so the wire mirror below is frozen HERE and the
-// live gate's byte-level round-trip (ui frame → WND.BIN parse → ack) is the
-// integration drift guard: if this ever drifts from `wnd_core.WmRpc`, the
-// WM's `wnd: mail` serve + the `wmrpc: *-ack` markers stop matching and the
-// gate fails loudly. Layout is byte-identical to kernel/src/wnd_core.zig.
-// ---------------------------------------------------------------------------
-pub const WmRpc = extern struct {
-    kind: u8,
-    id: u8,
-    seq: u8,
-    reply_to: u8,
-    applied: u8,
-    pad: u8,
-    x: u16,
-    y: u16,
-    w: u16,
-    h: u16,
-    title: [wm_rpc_title_max]u8,
-};
-pub const wm_rpc_title_max: usize = 24;
-pub const wm_rpc_kind_raise: u8 = 1;
-pub const wm_rpc_kind_config: u8 = 2;
-pub const wm_rpc_kind_register_action: u8 = 3;
-pub const wm_rpc_kind_invoke_action: u8 = 4;
-pub const wm_rpc_kind_attach_tab: u8 = 5;
-pub const wm_rpc_kind_detach_tab: u8 = 6;
-pub const wm_rpc_kind_cycle_tab: u8 = 7;
-pub const wm_rpc_reply_flag: u8 = 0x80;
-pub const wm_rpc_max: usize = 64;
-
-// ---------------------------------------------------------------------------
-// Syscall Numbers & ABI Constants (ADR 0007 / ADR 0009 / ADR 0010)
-// ---------------------------------------------------------------------------
-
-pub const sys_write_num: u64 = 1;
-pub const sys_yield_num: u64 = 2;
-pub const sys_exit_num: u64 = 3;
-pub const sys_sleep_num: u64 = 4;
-pub const sys_procs_num: u64 = 7;
-pub const sys_win_open_num: u64 = 12;
-pub const sys_win_fill_num: u64 = 13;
-pub const sys_win_present_num: u64 = 14;
-pub const sys_win_close_num: u64 = 15;
-pub const sys_win_move_num: u64 = 16;
-pub const sys_ipc_send_num: u64 = 5;
-pub const sys_ipc_recv_num: u64 = 6;
-pub const sys_win_raise_num: u64 = 17;
-pub const sys_win_get_num: u64 = 18;
-pub const sys_win_query_num: u64 = 19;
-pub const sys_win_set_visible_num: u64 = 20;
-pub const sys_poll_event_num: u64 = 21;
-pub const sys_wait_event_num: u64 = 22;
-pub const sys_file_open_num: u64 = 23;
-pub const sys_file_read_num: u64 = 24;
-pub const sys_file_write_num: u64 = 25;
-pub const sys_file_close_num: u64 = 26;
-pub const sys_dir_list_num: u64 = 27;
-pub const sys_exec_num: u64 = 28;
-pub const sys_kill_num: u64 = 29;
-pub const sys_tcp_connect_num: u64 = 30;
-pub const sys_tcp_send_num: u64 = 31;
-pub const sys_tcp_recv_num: u64 = 32;
-pub const sys_tcp_close_num: u64 = 33;
-pub const sys_file_delete_num: u64 = 34;
-pub const sys_file_rename_num: u64 = 35;
-pub const sys_file_truncate_num: u64 = 36;
-pub const sys_file_free_num: u64 = 37;
-pub const sys_clipboard_set_num: u64 = 38;
-pub const sys_clipboard_get_num: u64 = 39;
-pub const clipboard_capacity: usize = 512;
-pub const sys_timer_set_num: u64 = 40;
-pub const sys_audio_info_num: u64 = 42;
-pub const sys_audio_play_num: u64 = 43;
-pub const sys_audio_volume_num: u64 = 44;
-pub const sys_audio_mute_num: u64 = 45;
-pub const sys_win_fill_batch_num: u64 = 46;
-pub const sys_win_raise_front_num: u64 = 49;
-pub const sys_win_lower_back_num: u64 = 50;
-pub const sys_notify_num: u64 = 51;
-pub const sys_drag_start_num: u64 = 48;
-pub const sys_drag_read_num: u64 = 55;
-pub const sys_win_move_to_workspace_num: u64 = 52;
-pub const sys_win_set_unsaved_num: u64 = 53;
-pub const sys_timer_cancel_num: u64 = 41;
-pub const sys_udp_listen_num: u64 = 9;
-pub const sys_udp_send_num: u64 = 10;
-pub const sys_udp_recv_num: u64 = 11;
-pub const sys_mmap_num: u64 = 63;
-pub const sys_munmap_num: u64 = 64;
-pub const PROT_READ: u64 = 1;
-pub const PROT_WRITE: u64 = 2;
-pub const PROT_EXEC: u64 = 4;
-pub const MAP_PRIVATE: u64 = 0x02;
-pub const MAP_ANONYMOUS: u64 = 0x20;
-pub const MAP_POPULATE: u64 = 0x8000;
-pub const datagram_max: usize = 72;
-pub const payload_max: usize = 64;
-
-// ---------------------------------------------------------------------------
-// Event Kinds & Modifier Masks (ADR 0009)
-// ---------------------------------------------------------------------------
-
-pub const KEY_DOWN: u16 = 1;
-pub const KEY_UP: u16 = 2;
-pub const MOUSE_DOWN: u16 = 3;
-pub const MOUSE_UP: u16 = 4;
-pub const MOUSE_MOVE: u16 = 5;
-pub const WIN_FOCUS: u16 = 6;
-pub const WIN_BLUR: u16 = 7;
-pub const WIN_CLOSE: u16 = 8;
-pub const EVENT_TIMER: u16 = 9;
-pub const WIN_RESIZE: u16 = 10;
-pub const MOUSE_RIGHT_DOWN: u16 = 11;
-pub const MOUSE_RIGHT_UP: u16 = 13;
-/// Arc4 #242 (ADR 0013 D2): unsaved-changes warning from compositor.
-/// arg0 = 0 (save), 1 (don't save), 2 (cancel).
-pub const WIN_UNSAVED: u16 = 17;
-/// ADR 0015 (M32 WMS1, claim 1484): composite/present cadence tick for the
-/// registered WM server; reserved until the WMS2 kernel push path exists
-/// (kernel mirror: kernel/src/events.zig).
-pub const COMPOSITE_TICK: u16 = 18;
-
-pub const MOD_SHIFT: u16 = 0x0001;
-pub const MOD_CTRL: u16 = 0x0002;
-pub const MOD_ALT: u16 = 0x0004;
-pub const MOD_CMD: u16 = 0x0008;
-
-pub const BTN_LEFT: u16 = 0x0100;
-pub const BTN_RIGHT: u16 = 0x0200;
-pub const BTN_MIDDLE: u16 = 0x0400;
-
-pub const Event = extern struct {
-    kind: u16,
-    flags: u16,
-    seq: u32,
-    arg0: u32,
-    arg1: u32,
-};
-
-// ---------------------------------------------------------------------------
-// Storage Access Modes & Directory Entry (ADR 0010)
-// ---------------------------------------------------------------------------
-
-pub const MODE_READ: u32 = 0x0001;
-pub const MODE_WRITE: u32 = 0x0002;
-pub const MODE_CREATE: u32 = 0x0004;
-pub const MODE_APPEND: u32 = 0x0008;
-/// M25 Lane B (claim 2539): with MODE_CREATE|MODE_WRITE, open() creates a
-/// real FAT32 directory (kernel-side cluster + dot entries) instead of an
-/// empty file. Zero new syscall slots — the slot 23 flag contract extends.
-pub const MODE_DIR: u32 = 0x0010;
-
-pub const DirEntry = extern struct {
-    name: [32]u8,
-    size: u32,
-    is_dir: u8,
-    reserved: [3]u8,
-};
-
-// ---------------------------------------------------------------------------
-// Process Descriptor Snapshot (ADR 0007 / slot 7)
-// ---------------------------------------------------------------------------
-
-pub const ProcessRow = extern struct {
-    pid: u64,
-    state: u64,
-    exit_status: u64,
-    name: [16]u8,
-};
-
-// ---------------------------------------------------------------------------
-// Theme System (ADR 0008 & ADR 0011, Issue #207)
-// ---------------------------------------------------------------------------
-
-pub const Theme = struct {
-    bg: u32,
-    surface: u32,
-    border: u32,
-    text_primary: u32,
-    text_muted: u32,
-    accent: u32,
-    btn_idle: u32,
-    btn_hover: u32,
-    btn_pressed: u32,
-    success: u32,
-    danger: u32,
-    warning: u32,
-};
-
-pub const THEME_DARK: Theme = .{
-    .bg = 0x182026,
-    .surface = 0x222d35,
-    .border = 0x334155,
-    .text_primary = 0xffffff,
-    .text_muted = 0x94a3b8,
-    .accent = 0x3b82f6,
-    .btn_idle = 0x2d3748,
-    .btn_hover = 0x4a5568,
-    .btn_pressed = 0x1a202c,
-    .success = 0x22c55e,
-    .danger = 0xef4444,
-    .warning = 0xf59e0b,
-};
-
-pub const THEME_LIGHT: Theme = .{
-    .bg = 0xf1f5f9,
-    .surface = 0xffffff,
-    .border = 0xcbd5e1,
-    .text_primary = 0x0f172a,
-    .text_muted = 0x64748b,
-    .accent = 0x2563eb,
-    .btn_idle = 0xe2e8f0,
-    .btn_hover = 0xcbd5e1,
-    .btn_pressed = 0x94a3b8,
-    .success = 0x16a34a,
-    .danger = 0xdc2626,
-    .warning = 0xd97706,
-};
-
-pub const THEME_AMBER: Theme = .{
-    .bg = 0x1a1000,
-    .surface = 0x2a1a00,
-    .border = 0x5a4000,
-    .text_primary = 0xffcc00,
-    .text_muted = 0x997700,
-    .accent = 0xff8800,
-    .btn_idle = 0x3a2800,
-    .btn_hover = 0x5a4000,
-    .btn_pressed = 0x1a1000,
-    .success = 0x88cc00,
-    .danger = 0xff4444,
-    .warning = 0xffaa00,
-};
-
-pub var current_theme: Theme = THEME_DARK;
-
-pub const ThemeColors = struct {
-    bg: u32,
-    fg: u32,
-    accent: u32,
-    border: u32,
-    title_bg: u32,
-    title_fg: u32,
-    @"error": u32,
-    success: u32,
-};
-
-/// Get active theme colors palette struct.
-pub fn get_theme_colors() ThemeColors {
-    return .{
-        .bg = current_theme.bg,
-        .fg = current_theme.text_primary,
-        .accent = current_theme.accent,
-        .border = current_theme.border,
-        .title_bg = current_theme.surface,
-        .title_fg = current_theme.text_primary,
-        .@"error" = current_theme.danger,
-        .success = current_theme.success,
-    };
-}
-
-/// Select a theme by name. Returns true if found and applied.
-pub fn set_theme(name: []const u8) bool {
-    if (eql(name, "dark")) {
-        current_theme = THEME_DARK;
-        return true;
-    } else if (eql(name, "light")) {
-        current_theme = THEME_LIGHT;
-        return true;
-    } else if (eql(name, "amber")) {
-        current_theme = THEME_AMBER;
-        return true;
-    }
-    return false;
-}
-
-fn eql(a: []const u8, b: []const u8) bool {
-    if (a.len != b.len) return false;
-    for (a, b) |ca, cb| {
-        if (ca != cb) return false;
-    }
-    return true;
-}
-
-// Theme color accessors — widget draw functions read from current_theme.
-pub fn theme_bg() u32 {
-    return current_theme.bg;
-}
-pub fn theme_surface() u32 {
-    return current_theme.surface;
-}
-pub fn theme_border() u32 {
-    return current_theme.border;
-}
-pub fn theme_text_primary() u32 {
-    return current_theme.text_primary;
-}
-pub fn theme_text_muted() u32 {
-    return current_theme.text_muted;
-}
-pub fn theme_accent() u32 {
-    return current_theme.accent;
-}
-pub fn theme_btn_idle() u32 {
-    return current_theme.btn_idle;
-}
-pub fn theme_btn_hover() u32 {
-    return current_theme.btn_hover;
-}
-pub fn theme_btn_pressed() u32 {
-    return current_theme.btn_pressed;
-}
-pub fn theme_success() u32 {
-    return current_theme.success;
-}
-pub fn theme_danger() u32 {
-    return current_theme.danger;
-}
-pub fn theme_warning() u32 {
-    return current_theme.warning;
-}
-
-// ---------------------------------------------------------------------------
-// Widget State & Styling Accessors (M27 G14 #457)
-// ---------------------------------------------------------------------------
-
-pub const WidgetState = enum {
-    normal,
-    hover,
-    pressed,
-    disabled,
-    focused,
-};
-
-pub fn widget_bg(state: WidgetState) u32 {
-    return switch (state) {
-        .normal => theme_btn_idle(),
-        .hover => theme_btn_hover(),
-        .pressed => theme_btn_pressed(),
-        .disabled => theme_surface(),
-        .focused => theme_btn_hover(),
-    };
-}
-
-pub fn widget_border(state: WidgetState) u32 {
-    return switch (state) {
-        .normal => theme_border(),
-        .hover => theme_accent(),
-        .pressed => theme_accent(),
-        .disabled => theme_border(),
-        .focused => theme_accent(),
-    };
-}
-
-pub fn widget_text(state: WidgetState) u32 {
-    return switch (state) {
-        .normal, .hover, .pressed, .focused => theme_text_primary(),
-        .disabled => theme_text_muted(),
-    };
-}
-
-// Backward-compatible pub const aliases for app code that references
-// ui.COLOR_*. These match the default (dark) theme. The widget draw
-// functions use theme_*() for dynamic theming.
-pub const COLOR_BG: u32 = THEME_DARK.bg;
-pub const COLOR_SURFACE: u32 = THEME_DARK.surface;
-pub const COLOR_BORDER: u32 = THEME_DARK.border;
-pub const COLOR_TEXT_PRIMARY: u32 = THEME_DARK.text_primary;
-pub const COLOR_TEXT_MUTED: u32 = THEME_DARK.text_muted;
-pub const COLOR_ACCENT: u32 = THEME_DARK.accent;
-pub const COLOR_BTN_IDLE: u32 = THEME_DARK.btn_idle;
-pub const COLOR_BTN_HOVER: u32 = THEME_DARK.btn_hover;
-pub const COLOR_BTN_PRESSED: u32 = THEME_DARK.btn_pressed;
-pub const COLOR_SUCCESS: u32 = THEME_DARK.success;
-pub const COLOR_DANGER: u32 = THEME_DARK.danger;
-pub const COLOR_WARNING: u32 = THEME_DARK.warning;
-
-// ---------------------------------------------------------------------------
-// M37 DQ4 design tokens (issue #838): one look.
-//
-// The Theme struct above owns the base palette; this section centralizes
-// everything else every first-party app must agree on: spacing/border
-// metrics, the extended chrome colors (selection, caret, editor gutter,
-// file-type accents, text-over-accent, compositor shadow), the window/
-// panel frame + focus-outline helpers, the app-side cursor-kind tokens,
-// and the host-share theme sync that makes light/dark real per app.
-//
-// Rules: token VALUES are pinned by the `dq4:` host tests below — change
-// a value and the tests fail loudly. Dark-theme values are chosen to be
-// byte-identical to the pre-DQ4 rendering (frozen COLOR_* / hardcoded app
-// colors), so the migration is a no-op on dark and a fix on light.
-// ---------------------------------------------------------------------------
-
-/// Spacing scale (px). Apps pad with these, never with bare literals.
-pub const pad_xs: u32 = 2;
-pub const pad_sm: u32 = 4;
-pub const pad_md: u32 = 8;
-pub const pad_lg: u32 = 16;
-
-/// Border + outline metrics (px).
-pub const border_w: u32 = 1;
-pub const focus_w: u32 = 2;
-
-/// Text caret metrics (px): the I-beam bar drawn in focused text fields.
-pub const caret_w: u32 = 2;
-pub const caret_h: u32 = 8;
-
-/// Compositor drop-shadow offset (px): right + bottom bands outside the
-/// window rect, in the theme shadow color. Mirrors
-/// `kernel/src/driving_award.zig` (`chrome_shadow_off`) — the two values
-/// are pinned equal by the dq4 shadow-parity test.
-pub const shadow_off: u32 = 4;
-
-/// Extended per-theme chrome colors. Stored beside Theme (not inside it)
-/// so the frozen Theme struct layout is untouched; selected by the same
-/// `current_theme` identity the theme_*() accessors read.
-pub const ChromeColors = struct {
-    selection_bg: u32,
-    caret: u32,
-    gutter_bg: u32,
-    line_highlight: u32,
-    file_dir: u32,
-    file_txt: u32,
-    file_bin: u32,
-    file_unknown: u32,
-    multi_select: u32,
-    on_accent: u32,
-    shadow: u32,
-};
-
-pub const CHROME_DARK: ChromeColors = .{
-    .selection_bg = 0x2a4460,
-    .caret = 0x3b82f6,
-    .gutter_bg = 0x0b0e11,
-    .line_highlight = 0x22303a,
-    .file_dir = 0x3b82f6,
-    .file_txt = 0x22c55e,
-    .file_bin = 0xf59e0b,
-    .file_unknown = 0x64748b,
-    .multi_select = 0x1e3a8a,
-    .on_accent = 0xffffff,
-    .shadow = 0x000000,
-};
-
-pub const CHROME_LIGHT: ChromeColors = .{
-    .selection_bg = 0xbfdbfe,
-    .caret = 0x2563eb,
-    .gutter_bg = 0xe5e7eb,
-    .line_highlight = 0xe0e7ff,
-    .file_dir = 0x2563eb,
-    .file_txt = 0x16a34a,
-    .file_bin = 0xd97706,
-    .file_unknown = 0x64748b,
-    .multi_select = 0x93c5fd,
-    .on_accent = 0xffffff,
-    .shadow = 0x94a3b8,
-};
-
-pub const CHROME_AMBER: ChromeColors = .{
-    .selection_bg = 0x4d3300,
-    .caret = 0xff8800,
-    .gutter_bg = 0x120c00,
-    .line_highlight = 0x332200,
-    .file_dir = 0xffcc33,
-    .file_txt = 0x88cc00,
-    .file_bin = 0xff8800,
-    .file_unknown = 0x997700,
-    .multi_select = 0x664400,
-    .on_accent = 0x1a1000,
-    .shadow = 0x000000,
-};
-
-fn active_chrome() *const ChromeColors {
-    if (current_theme.bg == THEME_LIGHT.bg and current_theme.accent == THEME_LIGHT.accent) return &CHROME_LIGHT;
-    if (current_theme.bg == THEME_AMBER.bg and current_theme.accent == THEME_AMBER.accent) return &CHROME_AMBER;
-    return &CHROME_DARK;
-}
-
-pub fn theme_selection_bg() u32 {
-    return active_chrome().selection_bg;
-}
-pub fn theme_caret() u32 {
-    return active_chrome().caret;
-}
-pub fn theme_gutter_bg() u32 {
-    return active_chrome().gutter_bg;
-}
-pub fn theme_line_highlight() u32 {
-    return active_chrome().line_highlight;
-}
-pub fn theme_file_dir() u32 {
-    return active_chrome().file_dir;
-}
-pub fn theme_file_txt() u32 {
-    return active_chrome().file_txt;
-}
-pub fn theme_file_bin() u32 {
-    return active_chrome().file_bin;
-}
-pub fn theme_file_unknown() u32 {
-    return active_chrome().file_unknown;
-}
-pub fn theme_multi_select() u32 {
-    return active_chrome().multi_select;
-}
-pub fn theme_on_accent() u32 {
-    return active_chrome().on_accent;
-}
-pub fn theme_shadow() u32 {
-    return active_chrome().shadow;
-}
-
-/// Resolve a possibly-legacy frozen COLOR_* value to the live theme.
-/// Dark renders byte-identical (aliases equal the dark theme); light/amber
-/// map to the matching theme color. Unknown customs pass through.
-pub fn live_color(c: u32) u32 {
-    if (c == COLOR_BG) return theme_bg();
-    if (c == COLOR_SURFACE) return theme_surface();
-    if (c == COLOR_BORDER) return theme_border();
-    if (c == COLOR_TEXT_PRIMARY) return theme_text_primary();
-    if (c == COLOR_TEXT_MUTED) return theme_text_muted();
-    if (c == COLOR_ACCENT) return theme_accent();
-    if (c == COLOR_BTN_IDLE) return theme_btn_idle();
-    if (c == COLOR_BTN_HOVER) return theme_btn_hover();
-    if (c == COLOR_BTN_PRESSED) return theme_btn_pressed();
-    if (c == COLOR_SUCCESS) return theme_success();
-    if (c == COLOR_DANGER) return theme_danger();
-    if (c == COLOR_WARNING) return theme_warning();
-    return c;
-}
-
-/// Relative luminance of a 0xRRGGBB color (WCAG 2.x linearization).
-pub fn luminance(rgb: u32) f64 {
-    const r: f64 = @as(f64, @floatFromInt((rgb >> 16) & 0xff)) / 255.0;
-    const g: f64 = @as(f64, @floatFromInt((rgb >> 8) & 0xff)) / 255.0;
-    const b: f64 = @as(f64, @floatFromInt(rgb & 0xff)) / 255.0;
-    const lin = struct {
-        fn f(c: f64) f64 {
-            return if (c <= 0.03928) c / 12.92 else std.math.pow(f64, (c + 0.055) / 1.055, 2.4);
-        }
-    }.f;
-    return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
-}
-
-/// WCAG contrast ratio between two 0xRRGGBB colors (1.0 .. 21.0).
-pub fn contrast_ratio(a: u32, b: u32) f64 {
-    const la = luminance(a);
-    const lb = luminance(b);
-    const hi = if (la > lb) la else lb;
-    const lo = if (la > lb) lb else la;
-    return (hi + 0.05) / (lo + 0.05);
-}
-
-/// Border color for a frame: accent when focused, plain border otherwise.
-pub fn frame_border(focused: bool) u32 {
-    return if (focused) theme_accent() else theme_border();
-}
-
-/// Draw a 1px panel frame inside `rect` (in-app panels, dialogs, editors
-/// — the compositor owns the OUTER window border). Uses token metrics.
-pub fn draw_panel_frame(win_id: u32, rect: Rect, focused: bool) void {
-    draw_rect_outline(win_id, rect, border_w, frame_border(focused));
-}
-
-/// Draw the focus outline OUTSIDE `rect` (focus_w band in accent).
-/// Callers must leave focus_w px of clear space around the control.
-pub fn draw_focus_outline(win_id: u32, rect: Rect) void {
-    const outer = Rect.make(
-        if (rect.x >= focus_w) rect.x - focus_w else 0,
-        if (rect.y >= focus_w) rect.y - focus_w else 0,
-        rect.w + focus_w * 2,
-        rect.h + focus_w * 2,
-    );
-    draw_rect_outline(win_id, outer, focus_w, theme_accent());
-    draw_rect_outline(win_id, rect, border_w, theme_border());
-}
-
-// ---------------------------------------------------------------------------
-// Cursor-kind tokens. The compositor owns the hardware glyph (still the
-// fixed magenta quad — switching it needs a new ABI, out of DQ4 scope);
-// apps own the per-region KIND: which glyph SHOULD show over each region.
-// Apps track it in their MOUSE_MOVE path and emit `cursor=<name>` markers
-// (observable in the serial log); text carets draw with caret_w/caret_h.
-// ---------------------------------------------------------------------------
-
-pub const CursorKind = enum {
-    arrow,
-    ibeam,
-    pointer,
-    resize_h,
-    resize_v,
-    resize_diag,
-    crosshair,
-
-    pub fn name(self: CursorKind) []const u8 {
-        return switch (self) {
-            .arrow => "arrow",
-            .ibeam => "ibeam",
-            .pointer => "pointer",
-            .resize_h => "resize_h",
-            .resize_v => "resize_v",
-            .resize_diag => "resize_diag",
-            .crosshair => "crosshair",
-        };
-    }
-};
-
-/// Pure region → cursor mapping, unit-pinned. Priority: resize borders
-/// first (they overlap content edges), then clickables, then text.
-pub fn cursor_for_region(on_resize_border: bool, over_clickable: bool, over_text: bool) CursorKind {
-    if (on_resize_border) return .resize_diag;
-    if (over_clickable) return .pointer;
-    if (over_text) return .ibeam;
-    return .arrow;
-}
-
-/// Parse `theme=<dark|light|amber>` out of a SETTINGS.TXT payload.
-/// Pure + host-testable; sync_theme_from_host() feeds it the share file.
-pub fn parse_theme_setting(buf: []const u8) ?[]const u8 {
-    var i: usize = 0;
-    while (i < buf.len) {
-        var eol = i;
-        while (eol < buf.len and buf[eol] != '\n') : (eol += 1) {}
-        const line = buf[i..eol];
-        if (line.len > 6 and eql(line[0..6], "theme=")) {
-            const val = line[6..];
-            if (eql(val, "dark") or eql(val, "light") or eql(val, "amber")) return val;
-            return null;
-        }
-        i = if (eol < buf.len) eol + 1 else eol;
-    }
-    return null;
-}
-
-/// Current theme name (for markers + gates).
-pub fn theme_name() []const u8 {
-    if (current_theme.bg == THEME_LIGHT.bg and current_theme.accent == THEME_LIGHT.accent) return "light";
-    if (current_theme.bg == THEME_AMBER.bg and current_theme.accent == THEME_AMBER.accent) return "amber";
-    return "dark";
-}
-
-/// Sync `current_theme` from `/host/SETTINGS.TXT` (the kernel persists
-/// `settings set theme <name>` there). Returns true when a theme was
-/// applied. Host no-op (returns false) — EL0 file syscalls trap off-guest.
-/// Apps call this once at startup so `settings set theme light` + relaunch
-/// follows the desktop (DQ1 owns the toggle; DQ4 consumes it).
-pub fn sync_theme_from_host() bool {
-    if (@import("builtin").os.tag != .freestanding) return false;
-    const fd = file_open("/host/SETTINGS.TXT", MODE_READ);
-    if (fd < 0) return false;
-    var buf: [256]u8 = [_]u8{0} ** 256;
-    const n = file_read(@as(u32, @intCast(fd)), buf[0..]);
-    file_close(@as(u32, @intCast(fd)));
-    if (n <= 0) return false;
-    const end: usize = @min(@as(usize, @intCast(n)), buf.len);
-    if (parse_theme_setting(buf[0..end]) == null) return false;
-    return set_theme(parse_theme_setting(buf[0..end]).?);
-}
-
-/// Emit the per-app token marker the DQ4 gate greps:
-/// `<tag>: tokens theme=<name> bg=0x… surface=… border=… accent=…`.
-pub fn emit_tokens_marker(tag: []const u8) void {
-    var buf: [128]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, "{s}: tokens theme={s} bg=0x{x:0>6} surface=0x{x:0>6} border=0x{x:0>6} accent=0x{x:0>6}\n", .{
-        tag, theme_name(), theme_bg(), theme_surface(), theme_border(), theme_accent(),
-    }) catch return;
-    write_console(msg);
-}
-
-// ---------------------------------------------------------------------------
-// Syscall Invocation Helpers (AArch64 inline assembly / host fallback)
-// ---------------------------------------------------------------------------
-
-pub fn syscall0(num: u64) i64 {
-    if (@import("builtin").os.tag != .freestanding) return 0;
-    var res: i64 = undefined;
-    asm volatile ("svc #0"
-        : [res] "={x0}" (res),
-        : [num] "{x8}" (num),
-        : .{ .memory = true });
-    return res;
-}
-
-pub fn syscall1(num: u64, arg0: u64) i64 {
-    if (@import("builtin").os.tag != .freestanding) return 0;
-    var res: i64 = undefined;
-    asm volatile ("svc #0"
-        : [res] "={x0}" (res),
-        : [num] "{x8}" (num),
-          [arg0] "{x0}" (arg0),
-        : .{ .memory = true });
-    return res;
-}
-
-pub fn syscall2(num: u64, arg0: u64, arg1: u64) i64 {
-    if (@import("builtin").os.tag != .freestanding) return 0;
-    var res: i64 = undefined;
-    asm volatile ("svc #0"
-        : [res] "={x0}" (res),
-        : [num] "{x8}" (num),
-          [arg0] "{x0}" (arg0),
-          [arg1] "{x1}" (arg1),
-        : .{ .memory = true });
-    return res;
-}
-
-pub fn syscall3(num: u64, arg0: u64, arg1: u64, arg2: u64) i64 {
-    if (@import("builtin").os.tag != .freestanding) return 0;
-    var res: i64 = undefined;
-    asm volatile ("svc #0"
-        : [res] "={x0}" (res),
-        : [num] "{x8}" (num),
-          [arg0] "{x0}" (arg0),
-          [arg1] "{x1}" (arg1),
-          [arg2] "{x2}" (arg2),
-        : .{ .memory = true });
-    return res;
-}
-
-pub fn syscall4(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) i64 {
-    if (@import("builtin").os.tag != .freestanding) return 0;
-    var res: i64 = undefined;
-    asm volatile ("svc #0"
-        : [res] "={x0}" (res),
-        : [num] "{x8}" (num),
-          [arg0] "{x0}" (arg0),
-          [arg1] "{x1}" (arg1),
-          [arg2] "{x2}" (arg2),
-          [arg3] "{x3}" (arg3),
-        : .{ .memory = true });
-    return res;
-}
-
-pub fn syscall6(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64) i64 {
-    if (@import("builtin").os.tag != .freestanding) return 0;
-    var res: i64 = undefined;
-    asm volatile ("svc #0"
-        : [res] "={x0}" (res),
-        : [num] "{x8}" (num),
-          [arg0] "{x0}" (arg0),
-          [arg1] "{x1}" (arg1),
-          [arg2] "{x2}" (arg2),
-          [arg3] "{x3}" (arg3),
-          [arg4] "{x4}" (arg4),
-          [arg5] "{x5}" (arg5),
-        : .{ .memory = true });
-    return res;
-}
-
-pub fn write_console(msg: []const u8) void {
-    if (msg.len == 0) return;
-    _ = syscall3(sys_write_num, 1, @intFromPtr(msg.ptr), msg.len);
-}
-
-pub fn yield_task() void {
-    _ = syscall0(sys_yield_num);
-}
-
-pub fn exit_process(status: u64) noreturn {
-    _ = syscall1(sys_exit_num, status);
-    while (true) {
-        yield_task();
-    }
-}
-
-pub fn sleep_ticks(ticks: u64) void {
-    _ = syscall1(sys_sleep_num, ticks);
-}
-
-pub fn win_open(x: u32, y: u32, w: u32, h: u32) i64 {
-    _ = init_fonts();
-    return syscall4(sys_win_open_num, x, y, w, h);
-}
-
-pub fn win_fill(id: u32, x: u32, y: u32, w: u32, h: u32, rgb: u32) void {
-    _ = syscall6(sys_win_fill_num, id, x, y, w, h, rgb);
-}
-
-// ---------------------------------------------------------------------------
-// M32 WMS9 (issue #629): batched fills on the surface seam.
-//
-// Instead of one syscall per glyph pixel, drawing primitives accumulate fill
-// rects in a static `FillBatcher` and flush them through slot 46
-// `sys_win_fill_batch` (one SVC per up-to-32 rects). Zero heap allocation:
-// the batch lives in static BSS. Output is pixel-identical to per-pixel
-// fills; only the syscall count collapses.
-// ---------------------------------------------------------------------------
-
-/// One packed rect in a slot-46 batch: 24 bytes, matching the kernel's
-/// handle_win_fill_batch layout {id: u8, _pad: [3]u8, x, y, w, h: u32, rgb: u32}.
-const FILL_RECT_SIZE: usize = 24;
-const FILL_BATCH_MAX: usize = 32;
-
-/// Accumulates fill rects and flushes them through slot 46 in chunks of 32.
-/// Zero heap allocation: the buffer lives in static BSS. Batches are keyed
-/// per window id — flushing automatically whenever the window id changes,
-/// so callers never need to think about it.
-pub const FillBatcher = struct {
-    buf: [FILL_BATCH_MAX * FILL_RECT_SIZE]u8 align(8) = undefined,
-    len: usize = 0,
-    cur_id: u32 = 0,
-
-    pub fn reset(self: *FillBatcher) void {
-        self.len = 0;
-    }
-
-    fn push(self: *FillBatcher, id: u32, x: u32, y: u32, w: u32, h: u32, rgb: u32) void {
-        if (self.len >= FILL_BATCH_MAX * FILL_RECT_SIZE) {
-            self.flush();
-        }
-        const off = self.len;
-        self.buf[off] = @intCast(id & 0xff);
-        self.buf[off + 1] = 0;
-        self.buf[off + 2] = 0;
-        self.buf[off + 3] = 0;
-        std.mem.writeInt(u32, self.buf[off + 4 ..][0..4], x, .little);
-        std.mem.writeInt(u32, self.buf[off + 8 ..][0..4], y, .little);
-        std.mem.writeInt(u32, self.buf[off + 12 ..][0..4], w, .little);
-        std.mem.writeInt(u32, self.buf[off + 16 ..][0..4], h, .little);
-        std.mem.writeInt(u32, self.buf[off + 20 ..][0..4], rgb, .little);
-        self.len += FILL_RECT_SIZE;
-    }
-
-    /// Send all buffered rects through slot 46 in one SVC per 32 rects.
-    pub fn flush(self: *FillBatcher) void {
-        if (self.len == 0) return;
-        _ = syscall2(sys_win_fill_batch_num, @intFromPtr(&self.buf), self.len);
-        self.reset();
-    }
-};
-
-/// The toolkit-wide fill batcher (static BSS, zero heap allocation).
-pub var fill_batcher = FillBatcher{};
-
-/// Queue a fill rect into the batcher. Flushes automatically on window-id
-/// change or when the 32-rect batch is full, so ordering across windows is
-/// preserved and callers never need to flush manually.
-pub fn win_fill_batched(id: u32, x: u32, y: u32, w: u32, h: u32, rgb: u32) void {
-    if (fill_batcher.len > 0 and fill_batcher.cur_id != id) {
-        fill_batcher.flush();
-    }
-    fill_batcher.cur_id = id;
-    fill_batcher.push(id, x, y, w, h, rgb);
-}
-
-/// Flush any pending batched fills (call before win_present / frame end).
-pub fn flush_fills() void {
-    fill_batcher.flush();
-}
-
-pub fn win_present(id: u32) void {
-    flush_fills();
-    _ = syscall1(sys_win_present_num, id);
-}
-
-pub fn win_close(id: u32) void {
-    _ = syscall1(sys_win_close_num, id);
-}
-
-/// Arc4 #238: raise the window to the top of the z-order — the frozen-syscall
-/// path (slot 49). WMS7 Gate B: `wm_raise_front` below is how the toolkit
-/// "asks the WM"; this syscall path is the shim-mode / no-WM fallback and
-/// stays intact for the frozen render-state ABI.
-pub fn win_raise_front(id: u32) bool {
-    return syscall1(sys_win_raise_front_num, id) == 0;
-}
-
-/// Arc4 #238: lower the window to the bottom of the z-order.
-pub fn win_lower_back(id: u32) bool {
-    return syscall1(sys_win_lower_back_num, id) == 0;
-}
-
-// ---------------------------------------------------------------------------
-// M32 WMS7 Gate B (issue #627): the toolkit WM_RPC client.
-//
-// Apps "ask the WM" instead of "syscall the desktop": these helpers build a
-// `WmRpc` frame (single-sourced in wnd_core), send it to the registered WM's
-// mailbox (sys_ipc_send, slot 5) and await its ack reply in OUR OWN inbox
-// (sys_ipc_recv, slot 6 — recv always reads the caller's own ring, so the
-// toolkit needs no separate self-pid). If no WM is registered (the shim
-// desktop), they fall back to the frozen syscalls — byte-identical behavior,
-// additive back-compat.
-//
-// The API is synchronized-shaped (send + bounded poll on the reply), the
-// issue's "async inversion" note answered explicitly: the WM serves at its
-// 1 Hz kind-18 wake, so a mail op takes ≤ 1 s; app code stays a plain call.
-// ---------------------------------------------------------------------------
-
-/// The registered WM server's process name (the WMS3 `wnd start` bootstrap
-/// execs WND.BIN; a future WM keeps the same name via ADR 0015).
-pub const wm_proc_name: []const u8 = "WND.BIN";
-/// The proc-snapshot buffer bound (16 rows × 40 B — plenty for any fleet).
-pub const wm_procs_buf: usize = 16 * 40;
-/// The mailbox slot bound the WM_RPC frame must fit (the frozen 64 B).
-pub const wm_rpc_slot_bytes: usize = wm_rpc_max;
-
-/// Scan `sys_procs` for a RUNNING process whose 16-byte name equals `want`
-/// (the claim-5799 snapshot row: u64 pid / u64 state / u64 exit / 16-byte
-/// NUL-padded name). Returns its pid, or 0 if absent. `sys_procs` returns the
-/// ROW COUNT, not bytes (the claim-5799 contract).
-pub fn wm_find_pid(want: []const u8) u64 {
-    var rows: [wm_procs_buf]u8 align(8) = undefined;
-    const row_count = get_procs(&rows);
-    if (row_count <= 0) return 0;
-    var infos: [16]ProcInfo = undefined;
-    const n = parse_procs(&rows, @intCast(row_count), &infos);
-    for (infos[0..n]) |p| {
-        if (p.state != .running) continue;
-        if (std.mem.eql(u8, p.name[0..p.name_len], want)) return p.pid;
-    }
-    return 0;
-}
-
-/// Resolve the WM's pid and the caller-specified self pid in ONE sys_procs
-/// scan — the WM acks to `reply_to`, so the requester must supply its own
-/// pid (resolved by its own process name, the WMRPC pattern). Returns
-/// (wm_pid, self_pid); a zero wm_pid means shim mode / no WM.
-pub fn wm_peers(self_name: []const u8) struct { wm: u64, self: u64 } {
-    var rows: [wm_procs_buf]u8 align(8) = undefined;
-    const row_count = get_procs(&rows);
-    var wm: u64 = 0;
-    var self_pid: u64 = 0;
-    if (row_count > 0) {
-        var infos: [16]ProcInfo = undefined;
-        const n = parse_procs(&rows, @intCast(row_count), &infos);
-        for (infos[0..n]) |p| {
-            if (p.state != .running) continue;
-            const nm = p.name[0..p.name_len];
-            if (std.mem.eql(u8, nm, wm_proc_name)) wm = p.pid;
-            if (self_name.len != 0 and std.mem.eql(u8, nm, self_name)) self_pid = p.pid;
-        }
-    }
-    return .{ .wm = wm, .self = self_pid };
-}
-
-/// Discover the registered WM's pid (0 = none / shim mode).
-pub fn wm_available() u64 {
-    return wm_find_pid(wm_proc_name);
-}
-
-/// Send one WM_RPC request and await its ack in our own inbox. Returns
-/// whether the WM applied it. `self_name` identifies THIS process so the
-/// WM's ack routes back through `sys_ipc_send(reply_to)`; recv then reads
-/// our own ring. With the WM's 1 Hz serve cadence the bounded poll is far
-/// more than enough; a timeout returns false (honest — the gate would then
-/// fail rather than fake it). No WM reachable → false (caller falls back to
-/// the frozen syscall).
-pub fn wm_mail_request(kind: u8, id: u32, x: u16, y: u16, w: u16, h: u16, title: []const u8, self_name: []const u8, seq: u8) bool {
-    const peers = wm_peers(self_name);
-    if (peers.wm == 0 or peers.self == 0) return false;
-    var req: WmRpc = .{
-        .kind = kind,
-        .id = @intCast(id & 0xff),
-        .seq = seq,
-        .reply_to = @intCast(peers.self & 0xff),
-        .applied = 0,
-        .pad = 0,
-        .x = x,
-        .y = y,
-        .w = w,
-        .h = h,
-        .title = [_]u8{0} ** wm_rpc_title_max,
-    };
-    const take = @min(title.len, wm_rpc_title_max);
-    @memcpy(req.title[0..take], title[0..take]);
-    const req_bytes = std.mem.asBytes(&req);
-    _ = syscall3(sys_ipc_send_num, peers.wm, @intFromPtr(req_bytes.ptr), req_bytes.len);
-    // Await our own inbox for the ack (recv reads the CALLER's ring, so no
-    // self-pid needed): a bounded poll over a sleep+yield.
-    var tries: u32 = 0;
-    while (tries < 200_000) : (tries += 1) {
-        var raw: [wm_rpc_slot_bytes]u8 = undefined;
-        const got = syscall2(sys_ipc_recv_num, @intFromPtr(&raw), raw.len);
-        if (got >= @sizeOf(WmRpc)) {
-            var rep: WmRpc = undefined;
-            @memcpy(std.mem.asBytes(&rep), raw[0..@sizeOf(WmRpc)]);
-            if (rep.kind & wm_rpc_reply_flag != 0 and rep.seq == req.seq) {
-                return rep.applied != 0;
-            }
-        }
-        _ = syscall0(sys_yield_num);
-    }
-    return false; // timeout
-}
-
-/// Ask the WM to raise window `id` (WIN_RAISE, kind 1) — the toolkit's
-/// "ask the WM" raise. `self_name` is THIS process's own name (its pid is
-/// resolved for the ack's `reply_to`). Falls back to the frozen
-/// `sys_win_raise_front` when no WM is registered (shim mode), so behavior
-/// is identical either way.
-pub fn wm_raise_front(id: u32, self_name: []const u8) bool {
-    if (wm_mail_request(wm_rpc_kind_raise, id, 0, 0, 0, 0, "", self_name, 1)) return true;
-    return win_raise_front(id); // fallback
-}
-
-/// Ask the WM to move/resize window `id` to `x,y,w,h` (WIN_CONFIG, kind 2).
-/// `self_name` is THIS process's own name (ack routing). Falls back to the
-/// frozen `sys_win_move` when no WM is registered.
-pub fn wm_config(id: u32, x: u32, y: u32, w: u32, h: u32, self_name: []const u8) bool {
-    if (wm_mail_request(wm_rpc_kind_config, id, @intCast(x), @intCast(y), @intCast(w), @intCast(h), "", self_name, 1)) return true;
-    // Fallback: `sys_win_move(id, x, y)` takes x and y as SEPARATE args
-    // (slot 16 — clamp+move, owner-restricted); there is no syscall resize
-    // here, so the byte-identical frozen behavior is the move (static size
-    // keeps the shim path honest; a caller wanting resize still uses
-    // sys_win_resize when no WM is present).
-    return syscall3(sys_win_move_num, id, x, y) == 0;
-}
-
-/// S1/S5 Action registry seam: register an action into section `section_id` for window `window_id`.
-pub fn wm_register_action(window_id: u32, section_id: u16, action_id: u16, label: []const u8, self_name: []const u8) bool {
-    return wm_mail_request(wm_rpc_kind_register_action, window_id, section_id, action_id, 0, 0, label, self_name, 1);
-}
-
-/// S5 Action registry seam: invoke a registered action.
-pub fn wm_invoke_action(label: []const u8, self_name: []const u8) bool {
-    return wm_mail_request(wm_rpc_kind_invoke_action, 0, 0, 0, 0, 0, label, self_name, 2);
-}
-
-/// S6 Tab model: attach window `child_id` as a tab of `parent_id`.
-pub fn wm_attach_tab(child_id: u32, parent_id: u32, self_name: []const u8) bool {
-    return wm_mail_request(wm_rpc_kind_attach_tab, child_id, @intCast(parent_id), 0, 0, 0, "", self_name, 3);
-}
-
-/// S6 Tab model: cycle active tab in the focused group.
-pub fn wm_cycle_tab(self_name: []const u8) bool {
-    return wm_mail_request(wm_rpc_kind_cycle_tab, 0, 0, 0, 0, 0, "", self_name, 4);
-}
-
-/// S6 Tab model: detach tab window `child_id` back to standalone.
-pub fn wm_detach_tab(child_id: u32, self_name: []const u8) bool {
-    return wm_mail_request(wm_rpc_kind_detach_tab, child_id, 0, 0, 0, 0, "", self_name, 5);
-}
-
-test "WMS7 Gate B: the toolkit WM_RPC wire mirror matches the frozen wnd_core ABI" {
-    // The toolkit's mirror (user/src/lib/ui.zig) must stay byte-identical to
-    // kernel/src/wnd_core.zig's WmRpc (the WM server parses this exact
-    // layout). The live gate is the integration drift guard, but this host
-    // test locks the layout/consts to the frozen ADR-0015 values so a drift
-    // is caught WITHOUT a VM.
-    try std.testing.expectEqual(@as(u8, 1), wm_rpc_kind_raise);
-    try std.testing.expectEqual(@as(u8, 2), wm_rpc_kind_config);
-    try std.testing.expectEqual(@as(u8, 3), wm_rpc_kind_register_action);
-    try std.testing.expectEqual(@as(u8, 4), wm_rpc_kind_invoke_action);
-    try std.testing.expectEqual(@as(u8, 5), wm_rpc_kind_attach_tab);
-    try std.testing.expectEqual(@as(u8, 6), wm_rpc_kind_detach_tab);
-    try std.testing.expectEqual(@as(u8, 7), wm_rpc_kind_cycle_tab);
-    try std.testing.expectEqual(@as(u8, 0x80), wm_rpc_reply_flag);
-    try std.testing.expectEqual(@as(u8, 24), wm_rpc_title_max);
-    try std.testing.expectEqual(@as(usize, 64), wm_rpc_max);
-    // The frozen little-endian layout: kind/id/seq/reply/applied/pad (6 B),
-    // x/y/w/h (8 B), 24-byte title = 38 total; the frame fits the 64-B slot.
-    try std.testing.expectEqual(@as(usize, 0), @offsetOf(WmRpc, "kind"));
-    try std.testing.expectEqual(@as(usize, 6), @offsetOf(WmRpc, "x"));
-    try std.testing.expectEqual(@as(usize, 14), @offsetOf(WmRpc, "title"));
-    try std.testing.expectEqual(@as(usize, 38), @sizeOf(WmRpc));
-    try std.testing.expect(@sizeOf(WmRpc) <= wm_rpc_max);
-}
-
-/// Arc4 #240: post a desktop notification toast. level: 0=info, 1=warn, 2=error.
-pub fn notify(text: []const u8, level: u32) bool {
-    return syscall3(sys_notify_num, @intFromPtr(text.ptr), text.len, level) == 0;
-}
-
-/// Arc4 #237: start a drag with a payload (up to 512B).
-pub fn drag_start(payload: []const u8) bool {
-    return syscall2(sys_drag_start_num, @intFromPtr(payload.ptr), payload.len) == 0;
-}
-
-/// Arc4 #237: read the drag payload after receiving a DROP event.
-pub fn drag_read(buf: []u8) usize {
-    return @intCast(syscall2(sys_drag_read_num, @intFromPtr(buf.ptr), buf.len));
-}
-
-/// Arc4 #241: move the window to a different workspace (0..2).
-pub fn win_move_to_workspace(id: u32, ws: u32) bool {
-    return syscall2(sys_win_move_to_workspace_num, id, ws) == 0;
-}
-
-/// Arc4 #242: mark or clear the unsaved-changes flag on a user window.
-/// When set, clicking the close button shows a Save/Don't Save/Cancel dialog.
-pub fn win_set_unsaved(id: u32, flag: bool) bool {
-    return syscall2(sys_win_set_unsaved_num, id, if (flag) 1 else 0) == 0;
-}
-
-pub fn wait_event(ev: *Event) i64 {
-    return syscall1(sys_wait_event_num, @intFromPtr(ev));
-}
-
-pub fn poll_event(ev: *Event) i64 {
-    return syscall1(sys_poll_event_num, @intFromPtr(ev));
-}
-
-pub fn file_open(path: []const u8, flags: u32) i64 {
-    return syscall3(sys_file_open_num, @intFromPtr(path.ptr), path.len, flags);
-}
-
-/// M25 Lane B (claim 2539): create a directory by `/`-path through the
-/// slot 23 MODE_DIR flag extension. Returns the fd (close it), or a
-/// negative error: -8 name too long, -9 exists, -5 disk full, -6 bad
-/// path / no disk. The handle rejects read/write — creation only.
-pub fn file_mkdir(path: []const u8) i64 {
-    const fd = syscall3(sys_file_open_num, @intFromPtr(path.ptr), path.len, MODE_WRITE | MODE_CREATE | MODE_DIR);
-    if (fd >= 0) file_close(@intCast(fd));
-    return fd;
-}
-
-pub fn file_read(handle: u32, buf: []u8) i64 {
-    return syscall3(sys_file_read_num, handle, @intFromPtr(buf.ptr), buf.len);
-}
-
-pub fn file_write(handle: u32, data: []const u8) i64 {
-    return syscall3(sys_file_write_num, handle, @intFromPtr(data.ptr), data.len);
-}
-
-pub fn file_close(handle: u32) void {
-    _ = syscall1(sys_file_close_num, handle);
-}
-
-/// Claim 3570 (ADR 0010 slot 27): enumerate the entries of a directory
-/// ("" or "/data" — the DATA partition; "/esp" — the ESP) into `buf`.
-/// Returns the entry count written, or a negative ADR 0007 error. Each
-/// `DirEntry` is 40 bytes (`name[32]` NUL-padded + `size` + `is_dir`).
-pub fn dir_list(path: []const u8, buf: []DirEntry) i64 {
-    return syscall4(sys_dir_list_num, @intFromPtr(path.ptr), path.len, @intFromPtr(buf.ptr), buf.len);
-}
-
-/// Claim 5801 (ADR 0007 slot 34): delete a file by path. 0 on success;
-/// negative error otherwise (EINVAL bad path, ENOENT absent).
-pub fn file_delete(path: []const u8) i64 {
-    return syscall2(sys_file_delete_num, @intFromPtr(path.ptr), path.len);
-}
-
-/// Claim 5801 (ADR 0007 slot 35): rename a file (same directory). 0 on
-/// success; negative error otherwise.
-pub fn file_rename(old_path: []const u8, new_path: []const u8) i64 {
-    return syscall4(sys_file_rename_num, @intFromPtr(old_path.ptr), old_path.len, @intFromPtr(new_path.ptr), new_path.len);
-}
-
-/// Claim 5801 (ADR 0007 slot 36): resize an OPEN handle to `size` bytes.
-pub fn file_truncate(handle: u32, size: u32) i64 {
-    return syscall2(sys_file_truncate_num, handle, size);
-}
-
-/// Claim 5801 (ADR 0007 slot 37): free bytes on a volume (0 = DATA, 1 = ESP).
-pub fn file_free(volume: u32) i64 {
-    return syscall1(sys_file_free_num, volume);
-}
-
-/// Claim 0169 (ADR 0007 slot 38): store text in the SHARED kernel clipboard
-/// (truncated at 512 bytes). Returns the stored length; negative error
-/// otherwise (EINVAL non-process caller, EFAULT bad pointer).
-pub fn clipboard_set(data: []const u8) i64 {
-    return syscall2(sys_clipboard_set_num, @intFromPtr(data.ptr), data.len);
-}
-
-/// Claim 0169 (ADR 0007 slot 39): read the SHARED kernel clipboard into
-/// `buf` (non-destructive — the clipboard is not consumed). Returns the
-/// copied length; 0 when empty; negative error otherwise.
-pub fn clipboard_get(buf: []u8) i64 {
-    return syscall2(sys_clipboard_get_num, @intFromPtr(buf.ptr), buf.len);
-}
-
-/// The negotiated playback state `sys_audio_info` copies out (ADR 0007
-/// slot 42). 16 bytes, fixed layout.
-pub const AudioInfo = extern struct {
-    ready: u32,
-    format: u8, // negotiated FMT_* (0xff = none)
-    rate: u8, // negotiated RATE_* (0xff = none)
-    channels: u8,
-    padding: u8,
-    period_bytes: u32,
-    max_len: u32,
-};
-
-/// Claim 7636 (ADR 0007 slot 42): learn the device's negotiated playback
-/// state. Returns 0; negative error otherwise (ENXIO when no sound device
-/// is attached — the default VM).
-pub fn audio_info(out: *AudioInfo) i64 {
-    return syscall1(sys_audio_info_num, @intFromPtr(out));
-}
-
-/// Claim 7636 (ADR 0007 slot 43): play `data` bytes of PCM samples in the
-/// negotiated format (the app synthesizes what `audio_info` reported).
-/// Returns the bytes played; negative error otherwise (ENXIO no device,
-/// ENAMETOOLONG over the kernel bound, EFAULT bad pointer).
-pub fn audio_play(data: []const u8) i64 {
-    return syscall2(sys_audio_play_num, @intFromPtr(data.ptr), data.len);
-}
-
-/// Claim 9297 (ADR 0007 slot 44): set the bounded kernel-side stream
-/// volume (0..100 percent). Returns the volume on success; negative error
-/// otherwise (EINVAL for a non-process caller or an out-of-range value —
-/// no silent clamping).
-pub fn audio_volume(vol: u8) i64 {
-    return syscall1(sys_audio_volume_num, vol);
-}
-
-/// Claim 9297 (ADR 0007 slot 45): set the kernel-side mute state (1 =
-/// silent). Returns 0 on success; negative error otherwise (EINVAL for a
-/// non-process caller or a value that is not 0/1).
-pub fn audio_mute(muted: u8) i64 {
-    return syscall1(sys_audio_mute_num, muted);
-}
-
-/// Claim 7323 (ADR 0007 slot 40): arm the CALLING process's app timer to
-/// fire ONE `EVENT_TIMER` event into its ADR 0009 queue after `delay_ticks`
-/// scheduler ticks (0 clamps to 1; over-long truncates at the kernel bound;
-/// re-arming replaces a pending timer). Returns 0; negative error otherwise
-/// (EINVAL non-process caller).
-pub fn timer_set(delay_ticks: u64) i64 {
-    return syscall1(sys_timer_set_num, delay_ticks);
-}
-
-/// Claim 7323 (ADR 0007 slot 41): disarm the CALLING process's app timer.
-/// Returns 1 if a pending timer was canceled, 0 if none was armed; negative
-/// error otherwise (EINVAL non-process caller).
-pub fn timer_cancel() i64 {
-    return syscall0(sys_timer_cancel_num);
-}
-
-pub fn udp_listen(port: u16) i64 {
-    return syscall1(sys_udp_listen_num, port);
-}
-
-pub fn udp_send(dst_ip: u32, dst_port: u16, payload: []const u8) i64 {
-    return syscall4(sys_udp_send_num, dst_ip, dst_port, @intFromPtr(payload.ptr), payload.len);
-}
-
-pub fn udp_recv(port: u16, buf: []u8) i64 {
-    return syscall3(sys_udp_recv_num, port, @intFromPtr(buf.ptr), buf.len);
-}
-
-pub fn tcp_listen(port: u16) i64 {
-    return syscall2(sys_tcp_connect_num, 0, port);
-}
-
-pub fn tcp_connect(ip: u32, port: u16) i64 {
-    return syscall2(sys_tcp_connect_num, ip, port);
-}
-
-pub fn tcp_send(data: []const u8) i64 {
-    return syscall2(sys_tcp_send_num, @intFromPtr(data.ptr), data.len);
-}
-
-pub fn tcp_recv(buf: []u8) i64 {
-    return syscall2(sys_tcp_recv_num, @intFromPtr(buf.ptr), buf.len);
-}
-
-pub fn tcp_close() i64 {
-    return syscall0(sys_tcp_close_num);
-}
-
-/// M29 (issue #598): sys_mmap wrapper — allocate anonymous user memory.
-pub fn mmap(addr: u64, len: u64, prot: u64, flags: u64) i64 {
-    return syscall4(sys_mmap_num, addr, len, prot, flags);
-}
-
-/// M29 (issue #598): sys_munmap wrapper — free anonymous user memory.
-pub fn munmap(addr: u64, len: u64) i64 {
-    return syscall2(sys_munmap_num, addr, len);
-}
-
-pub const sys_ping_send_num: u64 = 59;
-pub const sys_ping_poll_num: u64 = 60;
-pub const sys_net_stats_num: u64 = 62;
-
-pub fn ping_send(ip: u32) i64 {
-    return syscall1(sys_ping_send_num, ip);
-}
-
-pub fn ping_poll() i64 {
-    return syscall0(sys_ping_poll_num);
-}
-
-pub const ProcState = enum(u64) {
-    created = 1,
-    running = 2,
-    exited = 3,
-    _,
-};
-
-/// Claim 6359 (ADR 0007 slot 28): load a `.BIN` from the ESP into a fresh
-/// process slot from EL0 — the launcher half of the exec seam (the EL1h
-/// monitor's `exec` is the privileged equivalent). Returns the new
-/// process's pid on success; negative ADR 0007 error otherwise (EINVAL
-/// bad path/loader refusal, EFAULT bad pointer, ENOENT not on the ESP,
-/// ENOSPC capacity).
-pub fn exec_program(name: []const u8) i64 {
-    if (name.len == 0) return -1;
-    return syscall2(sys_exec_num, @intFromPtr(name.ptr), name.len);
-}
-
-/// Claim 7604 (ADR 0007 slot 29): arm the target process for termination
-/// from EL0 — the kill half of the process-control seam (the EL1h
-/// monitor's `kill` is the privileged equivalent). The target exits with
-/// the reserved status 137 at its next ring selection. Returns 0 once
-/// armed; EINVAL for an out-of-range/free/exited/scheduler-owned target or
-/// a non-process caller.
-pub fn kill_process(pid: u64) i64 {
-    return syscall1(sys_kill_num, pid);
-}
-
-pub const ProcInfo = struct {
-    pid: u64,
-    state: ProcState,
-    exit_status: u64,
-    name: [16]u8,
-    name_len: usize,
-};
-
-pub fn get_procs(buf: []u8) i64 {
-    return syscall2(sys_procs_num, @intFromPtr(buf.ptr), buf.len);
-}
-
-pub fn parse_procs(raw: []const u8, row_count: usize, out: []ProcInfo) usize {
-    const row_size: usize = 40;
-    const max_rows = @min(row_count, @min(raw.len / row_size, out.len));
-    var i: usize = 0;
-    while (i < max_rows) : (i += 1) {
-        const off = i * row_size;
-        const pid = std.mem.readInt(u64, raw[off .. off + 8][0..8], .little);
-        const state_raw = std.mem.readInt(u64, raw[off + 8 .. off + 16][0..8], .little);
-        const exit_status = std.mem.readInt(u64, raw[off + 16 .. off + 24][0..8], .little);
-        var name: [16]u8 = [_]u8{0} ** 16;
-        @memcpy(&name, raw[off + 24 .. off + 40]);
-
-        var name_len: usize = 0;
-        while (name_len < 16 and name[name_len] != 0) : (name_len += 1) {}
-
-        out[i] = .{
-            .pid = pid,
-            .state = @enumFromInt(state_raw),
-            .exit_status = exit_status,
-            .name = name,
-            .name_len = name_len,
-        };
-    }
-    return max_rows;
-}
-
-// ---------------------------------------------------------------------------
-// Geometry Primitives
-// ---------------------------------------------------------------------------
-
-pub const Rect = struct {
-    x: u32,
-    y: u32,
-    w: u32,
-    h: u32,
-
-    pub fn make(x: u32, y: u32, w: u32, h: u32) Rect {
-        return .{ .x = x, .y = y, .w = w, .h = h };
-    }
-
-    pub fn contains(self: Rect, px: u32, py: u32) bool {
-        return px >= self.x and px < self.x + self.w and
-            py >= self.y and py < self.y + self.h;
-    }
-
-    pub fn inset(self: Rect, dx: u32, dy: u32) Rect {
-        const double_dx = dx * 2;
-        const double_dy = dy * 2;
-        return .{
-            .x = self.x + dx,
-            .y = self.y + dy,
-            .w = if (self.w > double_dx) self.w - double_dx else 0,
-            .h = if (self.h > double_dy) self.h - double_dy else 0,
-        };
-    }
-};
-
-// ---------------------------------------------------------------------------
-// Drawing Primitives
-// ---------------------------------------------------------------------------
-
-pub fn draw_rect(win_id: u32, rect: Rect, rgb: u32) void {
-    if (rect.w == 0 or rect.h == 0) return;
-    win_fill_batched(win_id, rect.x, rect.y, rect.w, rect.h, rgb);
-}
-
-pub fn draw_rect_outline(win_id: u32, rect: Rect, thickness: u32, rgb: u32) void {
-    if (rect.w == 0 or rect.h == 0 or thickness == 0) return;
-    // Top
-    win_fill_batched(win_id, rect.x, rect.y, rect.w, thickness, rgb);
-    // Bottom
-    if (rect.h > thickness) {
-        win_fill_batched(win_id, rect.x, rect.y + rect.h - thickness, rect.w, thickness, rgb);
-    }
-    // Left
-    win_fill_batched(win_id, rect.x, rect.y, thickness, rect.h, rgb);
-    // Right
-    if (rect.w > thickness) {
-        win_fill_batched(win_id, rect.x + rect.w - thickness, rect.y, thickness, rect.h, rgb);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Typography & Font Engine (Inter for UI, Fira Code for Monospace)
-// ---------------------------------------------------------------------------
-
-pub var active_ui_font: ?*const TrueTypeFace = null;
-pub var active_mono_font: ?*const TrueTypeFace = null;
-pub var active_ui_cache: TrueTypeFace.GlyphCache = .{};
-pub var active_mono_cache: TrueTypeFace.GlyphCache = .{};
-var static_inter_face: TrueTypeFace = undefined;
-var static_fira_face: TrueTypeFace = undefined;
-
-pub var fonts_initialized: bool = false;
-
-pub fn init_fonts() bool {
-    if (fonts_initialized) return active_ui_font != null;
-    fonts_initialized = true;
-
-    // Probe /host/INTER.TTF
-    const fd_inter = file_open("/host/INTER.TTF", MODE_READ);
-    if (fd_inter >= 0) {
-        const handle: u32 = @intCast(fd_inter);
-        defer file_close(handle);
-
-        const max_bytes: u64 = 1024 * 1024;
-        const va = mmap(0, max_bytes, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE | MAP_POPULATE);
-        if (va > 0) {
-            const ptr: [*]u8 = @ptrFromInt(@as(usize, @intCast(va)));
-            var total_read: usize = 0;
-            while (total_read < max_bytes) {
-                const chunk = file_read(handle, ptr[total_read..max_bytes]);
-                if (chunk <= 0) break;
-                total_read += @intCast(chunk);
-            }
-            if (total_read > 1024) {
-                if (TrueTypeFace.init(ptr[0..total_read])) |face| {
-                    static_inter_face = face;
-                    active_ui_font = &static_inter_face;
-                } else |_| {}
-            }
-        }
-    }
-
-    // Probe /host/FIRACODE.TTF
-    const fd_fira = file_open("/host/FIRACODE.TTF", MODE_READ);
-    if (fd_fira >= 0) {
-        const handle: u32 = @intCast(fd_fira);
-        defer file_close(handle);
-
-        const max_bytes: u64 = 1024 * 1024;
-        const va = mmap(0, max_bytes, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE | MAP_POPULATE);
-        if (va > 0) {
-            const ptr: [*]u8 = @ptrFromInt(@as(usize, @intCast(va)));
-            var total_read: usize = 0;
-            while (total_read < max_bytes) {
-                const chunk = file_read(handle, ptr[total_read..max_bytes]);
-                if (chunk <= 0) break;
-                total_read += @intCast(chunk);
-            }
-            if (total_read > 1024) {
-                if (TrueTypeFace.init(ptr[0..total_read])) |face| {
-                    static_fira_face = face;
-                    active_mono_font = &static_fira_face;
-                } else |_| {}
-            }
-        }
-    }
-
-    if (active_ui_font != null) {
-        write_console("typography: Inter TrueType font loaded\n");
-    }
-    if (active_mono_font != null) {
-        write_console("typography: Fira Code TrueType font loaded\n");
-    }
-
-    return active_ui_font != null;
-}
-
-pub fn draw_alpha_mask(win_id: u32, x: i32, y: i32, w: usize, h: usize, alpha: []const u8, fg_rgb: u32) void {
-    if (win_get_backing(win_id)) |backing| {
-        TrueTypeFace.blend_glyph_bgra(
-            backing.pixels[0 .. @as(usize, @intCast(backing.width)) * @as(usize, @intCast(backing.height))],
-            backing.width,
-            backing.width,
-            backing.height,
-            x,
-            y,
-            w,
-            h,
-            alpha,
-            fg_rgb,
-        );
-        return;
-    }
-
-    for (0..h) |row| {
-        const dy = y + @as(i32, @intCast(row));
-        if (dy < 0) continue;
-        const udy: u32 = @intCast(dy);
-
-        var col: usize = 0;
-        while (col < w) {
-            const a = alpha[row * w + col];
-            if (a < 96) {
-                col += 1;
-                continue;
-            }
-            const start_col = col;
-            while (col < w and alpha[row * w + col] >= 96) : (col += 1) {}
-            const dx = x + @as(i32, @intCast(start_col));
-            if (dx >= 0) {
-                const udx: u32 = @intCast(dx);
-                const span_len: u32 = @intCast(col - start_col);
-                win_fill_batched(win_id, udx, udy, span_len, 1, fg_rgb);
-            }
-        }
-    }
-}
-
-pub fn measure_text(text: []const u8) u32 {
-    if (active_ui_font) |face| {
-        var w: u32 = 0;
-        for (text) |ch| {
-            if (active_ui_cache.get_or_render(face, ch, 14)) |entry| {
-                w += entry.advance_width;
-            } else {
-                w += 8;
-            }
-        }
-        return w;
-    }
-    return @as(u32, @intCast(text.len)) * 8;
-}
-
-pub fn measure_text_mono(text: []const u8) u32 {
-    if (active_mono_font) |face| {
-        var w: u32 = 0;
-        for (text) |ch| {
-            if (active_mono_cache.get_or_render(face, ch, 13)) |entry| {
-                w += entry.advance_width;
-            } else {
-                w += 8;
-            }
-        }
-        return w;
-    }
-    return @as(u32, @intCast(text.len)) * 8;
-}
-
-pub fn draw_char(win_id: u32, ch: u8, x: u32, y: u32, fg_rgb: u32) void {
-    if (active_ui_font) |face| {
-        if (active_ui_cache.get_or_render(face, ch, 14)) |entry| {
-            const alpha = active_ui_cache.glyph_alpha(entry);
-            const gx = @as(i32, @intCast(x)) + entry.bearing_x;
-            const gy = @as(i32, @intCast(y)) + (10 - entry.bearing_y);
-            draw_alpha_mask(win_id, gx, gy, entry.width, entry.height, alpha, fg_rgb);
-            return;
-        }
-    }
-
-    if (ch < 0x20 or ch > 0x7e) return;
-    const glyph = font8x8.glyphs[ch - 0x20];
-    var row_idx: usize = 0;
-    while (row_idx < 8) : (row_idx += 1) {
-        const row_byte = glyph[row_idx];
-        var col_idx: usize = 0;
-        while (col_idx < 8) {
-            if (!font8x8.row_pixel(row_byte, col_idx)) {
-                col_idx += 1;
-                continue;
-            }
-            const start_col = col_idx;
-            while (col_idx < 8 and font8x8.row_pixel(row_byte, col_idx)) : (col_idx += 1) {}
-            win_fill_batched(win_id, x + @as(u32, @intCast(start_col)), y + @as(u32, @intCast(row_idx)), @as(u32, @intCast(col_idx - start_col)), 1, fg_rgb);
-        }
-    }
-}
-
-pub fn draw_char_mono(win_id: u32, ch: u8, x: u32, y: u32, fg_rgb: u32) void {
-    if (active_mono_font) |face| {
-        if (active_mono_cache.get_or_render(face, ch, 13)) |entry| {
-            const alpha = active_mono_cache.glyph_alpha(entry);
-            const gx = @as(i32, @intCast(x)) + entry.bearing_x;
-            const gy = @as(i32, @intCast(y)) + (10 - entry.bearing_y);
-            draw_alpha_mask(win_id, gx, gy, entry.width, entry.height, alpha, fg_rgb);
-            return;
-        }
-    }
-    draw_char(win_id, ch, x, y, fg_rgb);
-}
-
-pub fn draw_text(win_id: u32, text: []const u8, x: u32, y: u32, fg_rgb: u32) void {
-    var cur_x = x;
-    if (active_ui_font) |face| {
-        for (text) |ch| {
-            if (active_ui_cache.get_or_render(face, ch, 14)) |entry| {
-                const alpha = active_ui_cache.glyph_alpha(entry);
-                const gx = @as(i32, @intCast(cur_x)) + entry.bearing_x;
-                const gy = @as(i32, @intCast(y)) + (10 - entry.bearing_y);
-                draw_alpha_mask(win_id, gx, gy, entry.width, entry.height, alpha, fg_rgb);
-                cur_x += entry.advance_width;
-            } else {
-                draw_char(win_id, ch, cur_x, y, fg_rgb);
-                cur_x += 8;
-            }
-        }
-        return;
-    }
-
-    for (text) |ch| {
-        draw_char(win_id, ch, cur_x, y, fg_rgb);
-        cur_x += 8;
-    }
-}
-
-pub fn draw_text_mono(win_id: u32, text: []const u8, x: u32, y: u32, fg_rgb: u32) void {
-    var cur_x = x;
-    if (active_mono_font) |face| {
-        for (text) |ch| {
-            if (active_mono_cache.get_or_render(face, ch, 13)) |entry| {
-                const alpha = active_mono_cache.glyph_alpha(entry);
-                const gx = @as(i32, @intCast(cur_x)) + entry.bearing_x;
-                const gy = @as(i32, @intCast(y)) + (10 - entry.bearing_y);
-                draw_alpha_mask(win_id, gx, gy, entry.width, entry.height, alpha, fg_rgb);
-                cur_x += entry.advance_width;
-            } else {
-                draw_char(win_id, ch, cur_x, y, fg_rgb);
-                cur_x += 8;
-            }
-        }
-        return;
-    }
-
-    for (text) |ch| {
-        draw_char(win_id, ch, cur_x, y, fg_rgb);
-        cur_x += 8;
-    }
-}
-
-pub fn draw_text_centered(win_id: u32, text: []const u8, rect: Rect, fg_rgb: u32) void {
-    const text_w = measure_text(text);
-    const text_h: u32 = if (active_ui_font != null) 12 else 8;
-    const x = if (rect.w > text_w) rect.x + (rect.w - text_w) / 2 else rect.x;
-    const y = if (rect.h > text_h) rect.y + (rect.h - text_h) / 2 else rect.y;
-    draw_text(win_id, text, x, y, fg_rgb);
-}
-
-// ---------------------------------------------------------------------------
-// Step 6 (Issue #206): 8×16 font helpers for titles and headings.
-// Uses the kernel's 2×-stretched glyph table via a runtime pixel walk.
-// ---------------------------------------------------------------------------
-
-pub fn draw_char_16(win_id: u32, ch: u8, x: u32, y: u32, fg_rgb: u32) void {
-    if (ch < 0x20 or ch > 0x7e) return;
-    // The 8×16 glyph is the 8×8 glyph with each row doubled.
-    // We re-derive the stretch at render time to stay in sync with
-    // font8x8.zig's glyphs_16 table (same data, user-side copy).
-    const glyph = font8x8.glyphs[ch - 0x20];
-    var row_idx: usize = 0;
-    while (row_idx < 8) : (row_idx += 1) {
-        const row_byte = glyph[row_idx];
-        var col_idx: usize = 0;
-        while (col_idx < 8) {
-            if (!font8x8.row_pixel(row_byte, col_idx)) {
-                col_idx += 1;
-                continue;
-            }
-            const start_col = col_idx;
-            while (col_idx < 8 and font8x8.row_pixel(row_byte, col_idx)) : (col_idx += 1) {}
-            // One 2px-tall span per contiguous run (2× vertical stretch) —
-            // replaces two 1×1 fills per pixel (WMS9, issue #629).
-            win_fill_batched(win_id, x + @as(u32, @intCast(start_col)), y + @as(u32, @intCast(row_idx * 2)), @as(u32, @intCast(col_idx - start_col)), 2, fg_rgb);
-        }
-    }
-}
-
-pub fn draw_text_large(win_id: u32, text: []const u8, x: u32, y: u32, fg_rgb: u32) void {
-    var cur_x = x;
-    for (text) |ch| {
-        draw_char_16(win_id, ch, cur_x, y, fg_rgb);
-        cur_x += 8;
-    }
-}
-
-pub fn draw_text_centered_large(win_id: u32, text: []const u8, rect: Rect, fg_rgb: u32) void {
-    const text_w = @as(u32, @intCast(text.len)) * 8;
-    const text_h: u32 = 16;
-    const x = if (rect.w > text_w) rect.x + (rect.w - text_w) / 2 else rect.x;
-    const y = if (rect.h > text_h) rect.y + (rect.h - text_h) / 2 else rect.y;
-    draw_text_large(win_id, text, x, y, fg_rgb);
-}
-
-// ---------------------------------------------------------------------------
-// Window Backing Buffer Support & Raster Blitting
-// ---------------------------------------------------------------------------
-
-pub const WindowBacking = struct {
-    pixels: [*]u32,
-    width: u32,
-    height: u32,
-};
-
-const max_backing_windows: usize = 16;
-var window_backings: [max_backing_windows]?WindowBacking = [_]?WindowBacking{null} ** max_backing_windows;
-
-/// Associate a direct 32-bpp RGBA/RGBX backing buffer with a window ID.
-pub fn win_set_backing(win_id: u32, pixels: [*]u32, width: u32, height: u32) void {
-    if (win_id >= max_backing_windows) return;
-    window_backings[win_id] = .{
-        .pixels = pixels,
-        .width = width,
-        .height = height,
-    };
-}
-
-/// Disassociate any registered backing buffer for a window ID.
-pub fn win_clear_backing(win_id: u32) void {
-    if (win_id >= max_backing_windows) return;
-    window_backings[win_id] = null;
-}
-
-/// Retrieve the registered backing buffer for a window ID, if any.
-pub fn win_get_backing(win_id: u32) ?WindowBacking {
-    if (win_id >= max_backing_windows) return null;
-    return window_backings[win_id];
-}
-
-/// Standard Porter-Duff source-over alpha blending for 32-bpp 0xAARRGGBB pixels.
-pub fn blend_source_over(dst: u32, src: u32) u32 {
-    const src_a: u32 = (src >> 24) & 0xFF;
-    if (src_a == 0) return dst;
-    if (src_a == 255) return src;
-
-    const inv_a: u32 = 255 - src_a;
-    const src_r: u32 = (src >> 16) & 0xFF;
-    const src_g: u32 = (src >> 8) & 0xFF;
-    const src_b: u32 = src & 0xFF;
-
-    const dst_a: u32 = (dst >> 24) & 0xFF;
-    const dst_r: u32 = (dst >> 16) & 0xFF;
-    const dst_g: u32 = (dst >> 8) & 0xFF;
-    const dst_b: u32 = dst & 0xFF;
-
-    const out_r = (src_r * src_a + dst_r * inv_a) / 255;
-    const out_g = (src_g * src_a + dst_g * inv_a) / 255;
-    const out_b = (src_b * src_a + dst_b * inv_a) / 255;
-    const out_a = src_a + (dst_a * inv_a) / 255;
-
-    return (out_a << 24) | (out_r << 16) | (out_g << 8) | out_b;
-}
-
-/// Blit raster image pixels to a window backing surface.
-/// If a backing buffer is registered via win_set_backing, blends pixels directly
-/// with source-over alpha blending and boundary clipping.
-/// Otherwise, falls back to win_fill_batched span emission.
-pub fn draw_image(win_id: u32, x: u32, y: u32, img: image.Image) void {
-    if (img.width == 0 or img.height == 0) return;
-    if (win_get_backing(win_id)) |backing| {
-        if (x >= backing.width or y >= backing.height) return;
-        const max_w = @min(img.width, backing.width - x);
-        const max_h = @min(img.height, backing.height - y);
-        var sy: u32 = 0;
-        while (sy < max_h) : (sy += 1) {
-            const dst_row = (y + sy) * backing.width + x;
-            var sx: u32 = 0;
-            while (sx < max_w) : (sx += 1) {
-                const px_ptr = img.pixel_at(sx, sy) orelse continue;
-                const src_px = px_ptr.*;
-                if (((src_px >> 24) & 0xFF) == 0) continue;
-                const dst_idx = dst_row + sx;
-                backing.pixels[dst_idx] = blend_source_over(backing.pixels[dst_idx], src_px);
-            }
-        }
-        return;
-    }
-
-    var sy: u32 = 0;
-    while (sy < img.height) : (sy += 1) {
-        var sx: u32 = 0;
-        while (sx < img.width) {
-            const px_ptr = img.pixel_at(sx, sy) orelse break;
-            const px = px_ptr.*;
-            const a = (px >> 24) & 0xFF;
-            if (a == 0) {
-                sx += 1;
-                continue;
-            }
-            const rgb = px & 0x00FFFFFF;
-            const start_x = sx;
-            sx += 1;
-            while (sx < img.width) {
-                const next_ptr = img.pixel_at(sx, sy) orelse break;
-                const next_px = next_ptr.*;
-                if (((next_px >> 24) & 0xFF) == 0 or (next_px & 0x00FFFFFF) != rgb) break;
-                sx += 1;
-            }
-            win_fill_batched(win_id, x + start_x, y + sy, sx - start_x, 1, rgb);
-        }
-    }
-}
-
-/// Draw a clipped raster image to a window, rendering only pixels that fall within clip.
-/// Uses direct backing buffer alpha blending when registered, otherwise batched fills.
-pub fn draw_image_clipped(win_id: u32, x: u32, y: u32, img: image.Image, clip: Rect) void {
-    if (img.width == 0 or img.height == 0 or clip.w == 0 or clip.h == 0) return;
-    if (win_get_backing(win_id)) |backing| {
-        const clip_x0 = clip.x;
-        const clip_y0 = clip.y;
-        const clip_x1 = @min(clip.x + clip.w, backing.width);
-        const clip_y1 = @min(clip.y + clip.h, backing.height);
-        if (clip_x0 >= clip_x1 or clip_y0 >= clip_y1) return;
-
-        var sy: u32 = 0;
-        while (sy < img.height) : (sy += 1) {
-            const py = y + sy;
-            if (py < clip_y0 or py >= clip_y1) continue;
-            var sx: u32 = 0;
-            while (sx < img.width) : (sx += 1) {
-                const px_pos = x + sx;
-                if (px_pos < clip_x0 or px_pos >= clip_x1) continue;
-                const px_ptr = img.pixel_at(sx, sy) orelse continue;
-                const src_px = px_ptr.*;
-                if (((src_px >> 24) & 0xFF) == 0) continue;
-                const dst_idx = py * backing.width + px_pos;
-                backing.pixels[dst_idx] = blend_source_over(backing.pixels[dst_idx], src_px);
-            }
-        }
-        return;
-    }
-
-    var sy: u32 = 0;
-    while (sy < img.height) : (sy += 1) {
-        const py = y + sy;
-        if (py < clip.y or py >= clip.y + clip.h) continue;
-
-        var sx: u32 = 0;
-        while (sx < img.width) {
-            const px_ptr = img.pixel_at(sx, sy) orelse break;
-            const px = px_ptr.*;
-            const a = (px >> 24) & 0xFF;
-            const cur_x = x + sx;
-            if (a == 0 or cur_x < clip.x or cur_x >= clip.x + clip.w) {
-                sx += 1;
-                continue;
-            }
-            const rgb = px & 0x00FFFFFF;
-            const start_x = sx;
-            sx += 1;
-            while (sx < img.width) {
-                const next_x = x + sx;
-                if (next_x >= clip.x + clip.w) break;
-                const next_ptr = img.pixel_at(sx, sy) orelse break;
-                const next_px = next_ptr.*;
-                if (((next_px >> 24) & 0xFF) == 0 or (next_px & 0x00FFFFFF) != rgb) break;
-                sx += 1;
-            }
-            win_fill_batched(win_id, x + start_x, py, sx - start_x, 1, rgb);
-        }
-    }
-}
-
-/// Nearest-neighbor scaled image blitting into target destination rectangle.
-/// Uses direct backing buffer alpha blending when registered, otherwise batched fills.
-pub fn draw_image_scaled(win_id: u32, dest: Rect, img: image.Image) void {
-    if (dest.w == 0 or dest.h == 0 or img.width == 0 or img.height == 0) return;
-    if (win_get_backing(win_id)) |backing| {
-        if (dest.x >= backing.width or dest.y >= backing.height) return;
-        const max_w = @min(dest.w, backing.width - dest.x);
-        const max_h = @min(dest.h, backing.height - dest.y);
-        var dy: u32 = 0;
-        while (dy < max_h) : (dy += 1) {
-            const sy = (dy * img.height) / dest.h;
-            const dst_row = (dest.y + dy) * backing.width + dest.x;
-            var dx: u32 = 0;
-            while (dx < max_w) : (dx += 1) {
-                const sx = (dx * img.width) / dest.w;
-                const px_ptr = img.pixel_at(sx, sy) orelse continue;
-                const src_px = px_ptr.*;
-                if (((src_px >> 24) & 0xFF) == 0) continue;
-                const dst_idx = dst_row + dx;
-                backing.pixels[dst_idx] = blend_source_over(backing.pixels[dst_idx], src_px);
-            }
-        }
-        return;
-    }
-
-    var dy: u32 = 0;
-    while (dy < dest.h) : (dy += 1) {
-        const sy = (dy * img.height) / dest.h;
-        var dx: u32 = 0;
-        while (dx < dest.w) {
-            const sx = (dx * img.width) / dest.w;
-            const px_ptr = img.pixel_at(sx, sy) orelse break;
-            const px = px_ptr.*;
-            const a = (px >> 24) & 0xFF;
-            if (a == 0) {
-                dx += 1;
-                continue;
-            }
-            const rgb = px & 0x00FFFFFF;
-            const start_dx = dx;
-            dx += 1;
-            while (dx < dest.w) {
-                const next_sx = (dx * img.width) / dest.w;
-                const next_ptr = img.pixel_at(next_sx, sy) orelse break;
-                const next_px = next_ptr.*;
-                if (((next_px >> 24) & 0xFF) == 0 or (next_px & 0x00FFFFFF) != rgb) break;
-                dx += 1;
-            }
-            win_fill_batched(win_id, dest.x + start_dx, dest.y + dy, dx - start_dx, 1, rgb);
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Component: Button
-// ---------------------------------------------------------------------------
-
-pub const ButtonState = enum {
-    idle,
-    hover,
-    pressed,
-    disabled,
-    focused,
-    normal,
-    hovered,
-
-    pub fn to_widget_state(self: ButtonState) WidgetState {
-        return switch (self) {
-            .idle, .normal => .normal,
-            .hover, .hovered => .hover,
-            .pressed => .pressed,
-            .disabled => .disabled,
-            .focused => .focused,
-        };
-    }
-};
-
-pub const Button = struct {
-    rect: Rect,
-    label: []const u8,
-    state: ButtonState = .idle,
-    bg_color: ?u32 = null,
-    text_color: u32 = 0xffffff,
-    is_active: bool = false,
-
-    pub fn init(rect: Rect, label: []const u8) Button {
-        return .{
-            .rect = rect,
-            .label = label,
-        };
-    }
-
-    pub fn handle_event(self: *Button, ev: *const Event) bool {
-        switch (ev.kind) {
-            MOUSE_MOVE => {
-                const inside = self.rect.contains(ev.arg0, ev.arg1);
-                if (inside) {
-                    if (self.state == .idle) self.state = .hover;
-                } else {
-                    self.state = .idle;
-                }
-                return false;
-            },
-            MOUSE_DOWN => {
-                const inside = self.rect.contains(ev.arg0, ev.arg1);
-                if (inside) {
-                    self.state = .pressed;
-                } else {
-                    self.state = .idle;
-                }
-                return false;
-            },
-            MOUSE_UP => {
-                const was_pressed = (self.state == .pressed);
-                const inside = self.rect.contains(ev.arg0, ev.arg1);
-                self.state = if (inside) .hover else .idle;
-                return was_pressed and inside;
-            },
-            else => return false,
-        }
-    }
-
-    pub fn draw(self: *const Button, win_id: u32) void {
-        const ws = self.state.to_widget_state();
-        // M37 DQ4: legacy frozen COLOR_* resolve live so every app follows
-        // the desktop theme with no per-app button churn.
-        const bg = if (self.is_active)
-            theme_accent()
-        else if (self.bg_color) |c|
-            live_color(c)
-        else
-            widget_bg(ws);
-
-        const border = if (self.is_active)
-            theme_text_primary()
-        else
-            widget_border(ws);
-
-        // Default text follows the surface it sits on: text-over-accent on
-        // accent fills, theme text otherwise. An explicitly pinned color
-        // (anything but the legacy white default) always wins.
-        const on_accent_bg = self.is_active or
-            (if (self.bg_color) |c| live_color(c) == theme_accent() else false);
-        const text_col = if (self.text_color != COLOR_TEXT_PRIMARY)
-            self.text_color
-        else if (self.state == .disabled)
-            widget_text(ws)
-        else if (on_accent_bg)
-            theme_on_accent()
-        else
-            widget_text(ws);
-
-        draw_rect(win_id, self.rect, bg);
-        draw_rect_outline(win_id, self.rect, border_w, border);
-        draw_text_centered(win_id, self.label, self.rect, text_col);
-    }
-};
-
-// ---------------------------------------------------------------------------
-// Component: Label
-// ---------------------------------------------------------------------------
-
-pub const Label = struct {
-    rect: Rect,
-    text: []const u8,
-    color: u32 = 0xffffff,
-    align_center: bool = false,
-
-    pub fn init(rect: Rect, text: []const u8) Label {
-        return .{
-            .rect = rect,
-            .text = text,
-        };
-    }
-
-    pub fn draw(self: *const Label, win_id: u32) void {
-        // M37 DQ4: the legacy white default resolves live (dark identical).
-        const col = if (self.color == COLOR_TEXT_PRIMARY) theme_text_primary() else self.color;
-        if (self.align_center) {
-            draw_text_centered(win_id, self.text, self.rect, col);
-        } else {
-            draw_text(win_id, self.text, self.rect.x, self.rect.y + (self.rect.h - 8) / 2, col);
-        }
-    }
-};
-
-// ---------------------------------------------------------------------------
-// Component: TextInput
-// ---------------------------------------------------------------------------
-
-pub const TextInput = struct {
-    rect: Rect,
-    buf: [128]u8 = [_]u8{0} ** 128,
-    len: usize = 0,
-    cursor: usize = 0,
-    focused: bool = false,
-
-    pub fn init(rect: Rect) TextInput {
-        return .{ .rect = rect };
-    }
-
-    pub fn get_text(self: *const TextInput) []const u8 {
-        return self.buf[0..self.len];
-    }
-
-    pub fn set_text(self: *TextInput, text: []const u8) void {
-        const copy_len = @min(text.len, self.buf.len);
-        @memcpy(self.buf[0..copy_len], text[0..copy_len]);
-        self.len = copy_len;
-        self.cursor = copy_len;
-    }
-
-    pub fn clear(self: *TextInput) void {
-        self.len = 0;
-        self.cursor = 0;
-    }
-
-    pub fn handle_event(self: *TextInput, ev: *const Event) bool {
-        switch (ev.kind) {
-            MOUSE_DOWN => {
-                const inside = self.rect.contains(ev.arg0, ev.arg1);
-                const prev = self.focused;
-                self.focused = inside;
-                if (inside) {
-                    const click_x = ev.arg0;
-                    const text_x = self.rect.x + pad_sm;
-                    if (click_x <= text_x) {
-                        self.cursor = 0;
-                    } else {
-                        const rel_x = click_x - text_x;
-                        const text = self.get_text();
-                        var best_cursor: usize = 0;
-                        var cur_w: u32 = 0;
-                        while (best_cursor < text.len) {
-                            const next_w = measure_text(text[0 .. best_cursor + 1]);
-                            if (next_w > rel_x) {
-                                if (rel_x - cur_w < next_w - rel_x) {
-                                    break;
-                                } else {
-                                    best_cursor += 1;
-                                    break;
-                                }
-                            }
-                            cur_w = next_w;
-                            best_cursor += 1;
-                        }
-                        self.cursor = best_cursor;
-                    }
-                }
-                return prev != self.focused;
-            },
-            KEY_DOWN => {
-                if (!self.focused) return false;
-                const keycode = ev.arg0;
-                const ascii_char = @as(u8, @truncate(ev.arg1));
-
-                // Backspace (ASCII 0x08 or keycode 0x2a)
-                if (ascii_char == 0x08 or keycode == 0x2a) {
-                    if (self.cursor > 0 and self.len > 0) {
-                        var i = self.cursor - 1;
-                        while (i < self.len - 1) : (i += 1) {
-                            self.buf[i] = self.buf[i + 1];
-                        }
-                        self.len -= 1;
-                        self.cursor -= 1;
-                        return true;
-                    }
-                    return false;
-                }
-
-                // Printable character insertion
-                if (ascii_char >= 0x20 and ascii_char <= 0x7e) {
-                    if (self.len < self.buf.len) {
-                        var i = self.len;
-                        while (i > self.cursor) : (i -= 1) {
-                            self.buf[i] = self.buf[i - 1];
-                        }
-                        self.buf[self.cursor] = ascii_char;
-                        self.len += 1;
-                        self.cursor += 1;
-                        return true;
-                    }
-                }
-                return false;
-            },
-            else => return false,
-        }
-    }
-
-    pub fn draw(self: *const TextInput, win_id: u32) void {
-        draw_rect(win_id, self.rect, theme_surface());
-        draw_rect_outline(win_id, self.rect, border_w, if (self.focused) theme_accent() else theme_border());
-
-        const text_y = self.rect.y + (self.rect.h - 8) / 2;
-        const text_x = self.rect.x + pad_sm;
-        draw_text(win_id, self.get_text(), text_x, text_y, theme_text_primary());
-
-        // M37 DQ4 / M38 TT2: caret bar from tokens (proportional metrics aware).
-        if (self.focused) {
-            const prefix = self.get_text()[0..self.cursor];
-            const cursor_x = text_x + measure_text(prefix);
-            if (cursor_x + caret_w <= self.rect.x + self.rect.w) {
-                win_fill(win_id, cursor_x, text_y, caret_w, caret_h, theme_caret());
-            }
-        }
-    }
-};
-
-// ---------------------------------------------------------------------------
-// Component: ListView
-// ---------------------------------------------------------------------------
-
-pub const ListView = struct {
-    rect: Rect,
-    row_height: u32 = 14,
-    selected_idx: ?usize = null,
-    item_count: usize = 0,
-
-    pub fn init(rect: Rect, row_height: u32) ListView {
-        return .{
-            .rect = rect,
-            .row_height = row_height,
-        };
-    }
-
-    pub fn handle_event(self: *ListView, ev: *const Event) bool {
-        switch (ev.kind) {
-            MOUSE_DOWN => {
-                if (self.rect.contains(ev.arg0, ev.arg1)) {
-                    const rel_y = ev.arg1 - self.rect.y;
-                    const clicked_row = rel_y / self.row_height;
-                    if (clicked_row < self.item_count) {
-                        const prev = self.selected_idx;
-                        self.selected_idx = clicked_row;
-                        return prev != self.selected_idx;
-                    }
-                }
-                return false;
-            },
-            KEY_DOWN => {
-                const keycode = ev.arg0;
-                // Up arrow (keycode 0x52)
-                if (keycode == 0x52) {
-                    if (self.selected_idx) |idx| {
-                        if (idx > 0) {
-                            self.selected_idx = idx - 1;
-                            return true;
-                        }
-                    } else if (self.item_count > 0) {
-                        self.selected_idx = 0;
-                        return true;
-                    }
-                }
-                // Down arrow (keycode 0x51)
-                if (keycode == 0x51) {
-                    if (self.selected_idx) |idx| {
-                        if (idx + 1 < self.item_count) {
-                            self.selected_idx = idx + 1;
-                            return true;
-                        }
-                    } else if (self.item_count > 0) {
-                        self.selected_idx = 0;
-                        return true;
-                    }
-                }
-                return false;
-            },
-            else => return false,
-        }
-    }
-
-    pub fn draw_row(self: *const ListView, win_id: u32, row: usize, text: []const u8, is_selected: bool) void {
-        const row_y = self.rect.y + @as(u32, @intCast(row)) * self.row_height;
-        if (row_y + self.row_height > self.rect.y + self.rect.h) return;
-
-        const row_rect = Rect.make(self.rect.x, row_y, self.rect.w, self.row_height);
-        const bg = if (is_selected)
-            theme_accent()
-        else if (row % 2 == 0)
-            theme_surface()
-        else
-            theme_bg();
-
-        draw_rect(win_id, row_rect, bg);
-        const text_y = row_rect.y + (if (self.row_height > 12) (self.row_height - 12) / 2 else 0);
-        draw_text(win_id, text, row_rect.x + 4, text_y, if (is_selected) theme_on_accent() else theme_text_primary());
-    }
-};
-
-// ---------------------------------------------------------------------------
-// Component: DropDown
-// ---------------------------------------------------------------------------
-
-pub const DropDown = struct {
-    rect: Rect,
-    options: []const []const u8,
-    selected: usize = 0,
-    open: bool = false,
-    hover_idx: ?usize = null,
-    row_height: u32 = 16,
-    max_visible: u32 = 6,
-
-    pub fn init(rect: Rect, options: []const []const u8) DropDown {
-        return .{ .rect = rect, .options = options };
-    }
-
-    pub fn selected_text(self: *const DropDown) []const u8 {
-        if (self.selected < self.options.len) return self.options[self.selected];
-        return "";
-    }
-
-    pub fn set_selected_by_name(self: *DropDown, name: []const u8) void {
-        for (self.options, 0..) |opt, i| {
-            if (eql_str(opt, name)) {
-                self.selected = i;
-                return;
-            }
-        }
-    }
-
-    fn eql_str(a: []const u8, b: []const u8) bool {
-        if (a.len != b.len) return false;
-        for (a, b) |ca, cb| {
-            if (ca != cb) return false;
-        }
-        return true;
-    }
-
-    fn overlay_rect(self: *const DropDown) Rect {
-        const visible = @min(@as(u32, @intCast(self.options.len)), self.max_visible);
-        return Rect.make(self.rect.x, self.rect.y + self.rect.h, self.rect.w, visible * self.row_height);
-    }
-
-    fn hit_test_overlay(self: *const DropDown, px: u32, py: u32) ?usize {
-        if (!self.open) return null;
-        const ov = self.overlay_rect();
-        if (!ov.contains(px, py)) return null;
-        const rel_y = py - ov.y;
-        const idx = rel_y / self.row_height;
-        if (idx < self.options.len) return idx;
-        return null;
-    }
-
-    pub fn handle_event(self: *DropDown, ev: *const Event) bool {
-        switch (ev.kind) {
-            MOUSE_DOWN => {
-                if (self.open) {
-                    if (self.hit_test_overlay(ev.arg0, ev.arg1)) |idx| {
-                        self.selected = idx;
-                        self.open = false;
-                        self.hover_idx = null;
-                        return true;
-                    }
-                    self.open = false;
-                    self.hover_idx = null;
-                }
-                if (self.rect.contains(ev.arg0, ev.arg1)) {
-                    self.open = true;
-                    return false;
-                }
-                return false;
-            },
-            MOUSE_MOVE => {
-                if (self.open) {
-                    self.hover_idx = self.hit_test_overlay(ev.arg0, ev.arg1);
-                }
-                return false;
-            },
-            KEY_DOWN => {
-                if (!self.open) return false;
-                const keycode = ev.arg0;
-                // Up arrow (0x52)
-                if (keycode == 0x52) {
-                    if (self.selected > 0) {
-                        self.selected -= 1;
-                        return true;
-                    }
-                }
-                // Down arrow (0x51)
-                if (keycode == 0x51) {
-                    if (self.selected + 1 < self.options.len) {
-                        self.selected += 1;
-                        return true;
-                    }
-                }
-                // Enter (0x28) or Escape (0x29)
-                if (keycode == 0x28 or keycode == 0x29) {
-                    self.open = false;
-                    self.hover_idx = null;
-                    return false;
-                }
-                return false;
-            },
-            else => return false,
-        }
-    }
-
-    pub fn draw(self: *const DropDown, win_id: u32) void {
-        // Button body.
-        const bg = if (self.open) theme_btn_pressed() else theme_btn_idle();
-        draw_rect(win_id, self.rect, bg);
-        draw_rect_outline(win_id, self.rect, 1, if (self.open) theme_accent() else theme_border());
-        draw_text(win_id, self.selected_text(), self.rect.x + 4, self.rect.y + (self.rect.h - 8) / 2, theme_text_primary());
-        // Down arrow indicator.
-        const ax = self.rect.x + self.rect.w - 12;
-        const ay = self.rect.y + (self.rect.h - 4) / 2;
-        win_fill(win_id, ax, ay, 6, 2, theme_text_muted());
-        win_fill(win_id, ax + 1, ay + 2, 4, 2, theme_text_muted());
-        win_fill(win_id, ax + 2, ay + 4, 2, 2, theme_text_muted());
-
-        // Dropdown overlay.
-        if (self.open) {
-            const ov = self.overlay_rect();
-            draw_rect(win_id, ov, theme_surface());
-            draw_rect_outline(win_id, ov, 1, theme_border());
-            var i: u32 = 0;
-            while (i < self.options.len and i < self.max_visible) : (i += 1) {
-                const row_y = ov.y + i * self.row_height;
-                const row_bg = if (self.hover_idx != null and self.hover_idx.? == i)
-                    theme_btn_hover()
-                else if (i == self.selected)
-                    theme_accent()
-                else
-                    theme_surface();
-                win_fill(win_id, ov.x + 1, row_y, ov.w - 2, self.row_height, row_bg);
-                draw_text(win_id, self.options[i], ov.x + 4, row_y + (self.row_height - 8) / 2, theme_text_primary());
-            }
-        }
-    }
-};
-
-// ---------------------------------------------------------------------------
-// Component: ContextMenu & Menu Builder (GH #228, Arc2 W2, M27 G9 #452)
-// ---------------------------------------------------------------------------
-
-pub const CanonicalMenuCategory = enum {
-    file,
-    edit,
-    view,
-    help,
-};
-
-pub const canonical_menu_bar = [_][]const u8{ "File", "Edit", "View", "Help" };
-
-pub const StandardShortcut = struct {
-    pub const save = "Ctrl+S";
-    pub const open = "Ctrl+O";
-    pub const quit = "Ctrl+Q";
-    pub const undo = "Ctrl+Z";
-    pub const redo = "Ctrl+Y";
-    pub const find = "Ctrl+F";
-    pub const help = "Ctrl+H";
-    pub const cut = "Ctrl+X";
-    pub const copy = "Ctrl+C";
-    pub const paste = "Ctrl+V";
-    pub const select_all = "Ctrl+A";
-    pub const new_file = "Ctrl+N";
-};
-
-pub const MenuItemKind = enum {
-    action,
-    separator,
-    header,
-};
-
-pub const MenuItemSpec = struct {
-    label: []const u8 = "",
-    shortcut: []const u8 = "",
-    kind: MenuItemKind = .action,
-    disabled: bool = false,
-    action: ?*const fn () void = null,
-};
-
-pub const MenuSection = struct {
-    title: []const u8 = "",
-    items: []const MenuItemSpec = &[_]MenuItemSpec{},
-};
-
-pub const MenuBuilder = struct {
-    items: [16]MenuItemSpec = [_]MenuItemSpec{.{}} ** 16,
-    count: usize = 0,
-
-    pub fn init() MenuBuilder {
-        return .{};
-    }
-
-    pub fn add_item(self: *MenuBuilder, label: []const u8, shortcut: []const u8) *MenuBuilder {
-        if (self.count < self.items.len) {
-            self.items[self.count] = .{ .label = label, .shortcut = shortcut, .kind = .action };
-            self.count += 1;
-        }
-        return self;
-    }
-
-    pub fn add_action(self: *MenuBuilder, label: []const u8, shortcut: []const u8, action_fn: ?*const fn () void) *MenuBuilder {
-        if (self.count < self.items.len) {
-            self.items[self.count] = .{ .label = label, .shortcut = shortcut, .kind = .action, .action = action_fn };
-            self.count += 1;
-        }
-        return self;
-    }
-
-    pub fn add_separator(self: *MenuBuilder) *MenuBuilder {
-        if (self.count < self.items.len) {
-            self.items[self.count] = .{ .kind = .separator };
-            self.count += 1;
-        }
-        return self;
-    }
-
-    pub fn add_header(self: *MenuBuilder, title: []const u8) *MenuBuilder {
-        if (self.count < self.items.len) {
-            self.items[self.count] = .{ .label = title, .kind = .header };
-            self.count += 1;
-        }
-        return self;
-    }
-
-    pub fn slice(self: *const MenuBuilder) []const MenuItemSpec {
-        return self.items[0..self.count];
-    }
-};
-
-/// Build a standardized ContextMenu from a slice of MenuItemSpecs (M27 G9).
-pub fn menu_build(specs: []const MenuItemSpec) ContextMenu {
-    return ContextMenu.initWithSpecs(specs);
-}
-
-pub const ContextMenuItem = struct {
-    label: []const u8,
-    // Optional callback — not used in host tests, reserved for app wiring.
-    action: ?*const fn () void = null,
-};
-
-pub const ContextMenu = struct {
-    items: []const ContextMenuItem = &[_]ContextMenuItem{},
-    specs: []const MenuItemSpec = &[_]MenuItemSpec{},
-    x: u32 = 0,
-    y: u32 = 0,
-    width: u32 = 120,
-    row_h: u32 = 16,
-    open: bool = false,
-    hover_idx: ?usize = null,
-    selected_idx: ?usize = null,
-
-    pub fn init(items: []const ContextMenuItem) ContextMenu {
-        return .{ .items = items, .specs = &[_]MenuItemSpec{} };
-    }
-
-    pub fn initWithSpecs(specs: []const MenuItemSpec) ContextMenu {
-        return .{ .items = &[_]ContextMenuItem{}, .specs = specs };
-    }
-
-    pub fn show(self: *ContextMenu, x: u32, y: u32) void {
-        self.x = x;
-        self.y = y;
-        self.open = true;
-        self.hover_idx = null;
-        self.selected_idx = null;
-    }
-
-    pub fn dismiss(self: *ContextMenu) void {
-        self.open = false;
-        self.hover_idx = null;
-    }
-
-    pub fn is_open(self: *const ContextMenu) bool {
-        return self.open;
-    }
-
-    pub fn count(self: *const ContextMenu) usize {
-        return if (self.specs.len > 0) self.specs.len else self.items.len;
-    }
-
-    pub fn bounds(self: *const ContextMenu) Rect {
-        return Rect.make(self.x, self.y, self.width, @as(u32, @intCast(self.count())) * self.row_h);
-    }
-
-    fn is_item_selectable(self: *const ContextMenu, idx: usize) bool {
-        if (self.specs.len > 0) {
-            if (idx >= self.specs.len) return false;
-            return self.specs[idx].kind == .action and !self.specs[idx].disabled;
-        }
-        return idx < self.items.len;
-    }
-
-    fn hit_test(self: *const ContextMenu, px: u32, py: u32) ?usize {
-        if (!self.open) return null;
-        const b = self.bounds();
-        if (!b.contains(px, py)) return null;
-        const rel_y = py - b.y;
-        const idx = rel_y / self.row_h;
-        if (idx < self.count()) return idx;
-        return null;
-    }
-
-    pub fn handle_event(self: *ContextMenu, ev: *const Event) bool {
-        switch (ev.kind) {
-            KEY_DOWN => {
-                if (!self.open) return false;
-                const kc = ev.arg0;
-                const total = self.count();
-                if (total == 0) return false;
-                if (kc == 0x52) { // Up arrow
-                    var cur = if (self.hover_idx) |h| h else 0;
-                    var tries: usize = 0;
-                    while (tries < total) : (tries += 1) {
-                        cur = if (cur == 0) total - 1 else cur - 1;
-                        if (self.is_item_selectable(cur)) {
-                            self.hover_idx = cur;
-                            return true;
-                        }
-                    }
-                    return true;
-                } else if (kc == 0x51) { // Down arrow
-                    var cur = if (self.hover_idx) |h| h else total - 1;
-                    var tries: usize = 0;
-                    while (tries < total) : (tries += 1) {
-                        cur = if (cur + 1 >= total) 0 else cur + 1;
-                        if (self.is_item_selectable(cur)) {
-                            self.hover_idx = cur;
-                            return true;
-                        }
-                    }
-                    return true;
-                } else if (kc == 0x28) { // Enter
-                    if (self.hover_idx) |idx| {
-                        if (self.is_item_selectable(idx)) {
-                            self.selected_idx = idx;
-                            self.open = false;
-                            if (self.specs.len > 0) {
-                                if (self.specs[idx].action) |act| act();
-                            } else if (self.items.len > 0) {
-                                if (self.items[idx].action) |act| act();
-                            }
-                            return true;
-                        }
-                    }
-                    return false;
-                } else if (kc == 0x29) { // Escape
-                    self.dismiss();
-                    return true;
-                }
-                return false;
-            },
-            MOUSE_RIGHT_DOWN => {
-                self.show(ev.arg0, ev.arg1);
-                return true;
-            },
-            MOUSE_DOWN => {
-                if (!self.open) return false;
-                if (self.hit_test(ev.arg0, ev.arg1)) |idx| {
-                    if (self.is_item_selectable(idx)) {
-                        self.selected_idx = idx;
-                        self.open = false;
-                        self.hover_idx = null;
-                        if (self.specs.len > 0) {
-                            if (self.specs[idx].action) |act| act();
-                        } else if (self.items.len > 0) {
-                            if (self.items[idx].action) |act| act();
-                        }
-                        return true;
-                    }
-                    return true;
-                }
-                self.dismiss();
-                return false;
-            },
-            MOUSE_MOVE => {
-                if (!self.open) return false;
-                const hit = self.hit_test(ev.arg0, ev.arg1);
-                if (hit) |idx| {
-                    if (self.is_item_selectable(idx)) {
-                        self.hover_idx = idx;
-                    } else {
-                        self.hover_idx = null;
-                    }
-                } else {
-                    self.hover_idx = null;
-                }
-                return false;
-            },
-            MOUSE_RIGHT_UP => {
-                if (self.open) return true;
-                return false;
-            },
-            else => return false,
-        }
-    }
-
-    pub fn draw(self: *const ContextMenu, win_id: u32) void {
-        if (!self.open) return;
-        const b = self.bounds();
-        draw_rect(win_id, b, theme_surface());
-        draw_rect_outline(win_id, b, 1, theme_border());
-        const total = self.count();
-        var i: usize = 0;
-        while (i < total) : (i += 1) {
-            const row_y = b.y + @as(u32, @intCast(i)) * self.row_h;
-            const row_rect = Rect.make(b.x + 1, row_y, b.w - 2, self.row_h);
-
-            if (self.specs.len > 0) {
-                const spec = self.specs[i];
-                if (spec.kind == .separator) {
-                    const mid_y = row_y + self.row_h / 2;
-                    draw_rect(win_id, Rect.make(b.x + 4, mid_y, if (b.w > 8) b.w - 8 else 0, 1), theme_border());
-                    continue;
-                }
-                const bg = if (self.hover_idx != null and self.hover_idx.? == i and !spec.disabled)
-                    theme_btn_hover()
-                else
-                    theme_surface();
-                win_fill(win_id, row_rect.x, row_rect.y, row_rect.w, row_rect.h, bg);
-                const text_col = if (spec.disabled) theme_text_muted() else theme_text_primary();
-                draw_text(win_id, spec.label, row_rect.x + 6, row_rect.y + (self.row_h - 8) / 2, text_col);
-                if (spec.shortcut.len > 0) {
-                    const sc_w = @as(u32, @intCast(spec.shortcut.len)) * 8;
-                    const sc_x = if (row_rect.w > sc_w + 6) row_rect.x + row_rect.w - sc_w - 6 else row_rect.x;
-                    draw_text(win_id, spec.shortcut, sc_x, row_rect.y + (self.row_h - 8) / 2, theme_text_muted());
-                }
-            } else {
-                const bg = if (self.hover_idx != null and self.hover_idx.? == i)
-                    theme_btn_hover()
-                else
-                    theme_surface();
-                win_fill(win_id, row_rect.x, row_rect.y, row_rect.w, row_rect.h, bg);
-                draw_text(win_id, self.items[i].label, row_rect.x + 6, row_rect.y + (self.row_h - 8) / 2, theme_text_primary());
-            }
-        }
-    }
-};
-
-// ---------------------------------------------------------------------------
-// Component: ScrollView — vertical scroll container (GH #218, Arc1)
-// ---------------------------------------------------------------------------
-
-pub const MOUSE_SCROLL: u16 = 12;
-
-pub const ScrollView = struct {
-    rect: Rect,
-    content_h: u32,
-    offset: u32 = 0,
-    dragging: bool = false,
-    drag_start_y: u32 = 0,
-    drag_start_offset: u32 = 0,
-
-    const scrollbar_w: u32 = 6;
-    const thumb_min_h: u32 = 16;
-
-    pub fn init(rect: Rect, content_h: u32) ScrollView {
-        var sv = ScrollView{ .rect = rect, .content_h = content_h };
-        sv.clamp_offset();
-        return sv;
-    }
-
-    pub fn set_content_height(self: *ScrollView, h: u32) void {
-        self.content_h = h;
-        self.clamp_offset();
-    }
-
-    pub fn max_offset(self: *const ScrollView) u32 {
-        if (self.content_h <= self.rect.h) return 0;
-        return self.content_h - self.rect.h;
-    }
-
-    fn clamp_offset(self: *ScrollView) void {
-        const m = self.max_offset();
-        if (self.offset > m) self.offset = m;
-    }
-
-    pub fn thumb_h(self: *const ScrollView) u32 {
-        if (self.content_h <= self.rect.h) return self.rect.h;
-        const visible = self.rect.h;
-        const content = self.content_h;
-        const proportional = visible * visible / content;
-        return @max(thumb_min_h, proportional);
-    }
-
-    pub fn thumb_y(self: *const ScrollView) u32 {
-        const m = self.max_offset();
-        if (m == 0) return self.rect.y;
-        const th = self.thumb_h();
-        const track_h = self.rect.h - th;
-        // offset * track_h / max_offset, rounded down
-        return self.rect.y + (self.offset * track_h / m);
-    }
-
-    pub fn thumb_rect(self: *const ScrollView) Rect {
-        if (self.content_h <= self.rect.h) return self.rect;
-        const th = self.thumb_h();
-        const ty = self.thumb_y();
-        return Rect.make(self.rect.x + self.rect.w - scrollbar_w, ty, scrollbar_w, th);
-    }
-
-    fn track_contains(self: *const ScrollView, px: u32, py: u32) bool {
-        const track = Rect.make(self.rect.x + self.rect.w - scrollbar_w, self.rect.y, scrollbar_w, self.rect.h);
-        return track.contains(px, py);
-    }
-
-    pub fn scroll_by(self: *ScrollView, delta: i32) void {
-        const m: i32 = @intCast(self.max_offset());
-        var off: i32 = @intCast(self.offset);
-        off += delta;
-        if (off < 0) off = 0;
-        if (off > m) off = m;
-        self.offset = @intCast(off);
-    }
-
-    pub fn handle_event(self: *ScrollView, ev: *const Event) bool {
-        if (self.content_h <= self.rect.h) return false;
-        switch (ev.kind) {
-            MOUSE_DOWN => {
-                const px = ev.arg0;
-                const py = ev.arg1;
-                if (!self.rect.contains(px, py)) return false;
-                const tr = self.thumb_rect();
-                if (tr.contains(px, py)) {
-                    self.dragging = true;
-                    self.drag_start_y = py;
-                    self.drag_start_offset = self.offset;
-                    return true;
-                }
-                if (self.track_contains(px, py)) {
-                    // Click on track outside thumb — page up/down
-                    const ty = self.thumb_y();
-                    if (py < ty) {
-                        self.scroll_by(-@as(i32, @intCast(self.rect.h)));
-                    } else {
-                        self.scroll_by(@as(i32, @intCast(self.rect.h)));
-                    }
-                    return true;
-                }
-                return false;
-            },
-            MOUSE_MOVE => {
-                if (!self.dragging) return false;
-                const py: i32 = @intCast(ev.arg1);
-                const start_y: i32 = @intCast(self.drag_start_y);
-                const delta: i32 = py - start_y;
-                const m = self.max_offset();
-                if (m == 0) return false;
-                const th = self.thumb_h();
-                const track_h: i32 = @intCast(self.rect.h - th);
-                if (track_h <= 0) return false;
-                // Scale thumb drag to content offset: delta * max_offset / track_h
-                const scaled = @divTrunc(delta * @as(i32, @intCast(m)), track_h);
-                var new_off: i32 = @as(i32, @intCast(self.drag_start_offset)) + scaled;
-                if (new_off < 0) new_off = 0;
-                if (new_off > @as(i32, @intCast(m))) new_off = @intCast(m);
-                self.offset = @intCast(new_off);
-                return true;
-            },
-            MOUSE_UP => {
-                if (self.dragging) {
-                    self.dragging = false;
-                    return true;
-                }
-                return false;
-            },
-            KEY_DOWN => {
-                const keycode = ev.arg0;
-                // PageUp 0x4b, PageDown 0x4e (from notepad.zig), also handle wheel if present
-                if (keycode == 0x4b) { // PageUp
-                    self.scroll_by(-@as(i32, @intCast(self.rect.h)));
-                    return true;
-                }
-                if (keycode == 0x4e) { // PageDown
-                    self.scroll_by(@as(i32, @intCast(self.rect.h)));
-                    return true;
-                }
-                return false;
-            },
-            MOUSE_SCROLL => {
-                // Arc4 #236: arg0 packed per ADR 0013 D2.
-                // bits 0–13 = magnitude, bit 14 = horizontal, bit 15 = sign.
-                const raw = ev.arg0;
-                const horizontal = (raw & 0x4000) != 0;
-                if (horizontal) return false; // vertical-only ScrollView
-                const magnitude: i32 = @intCast(raw & 0x1fff);
-                if (magnitude == 0) return false;
-                const sign: i32 = if ((raw & 0x8000) != 0) 1 else -1;
-                const step = sign * magnitude * 16;
-                self.scroll_by(step);
-                return true;
-            },
-            else => return false,
-        }
-    }
-
-    pub fn draw(self: *const ScrollView, win_id: u32) void {
-        if (self.content_h <= self.rect.h) return;
-        // Track
-        const track_x = self.rect.x + self.rect.w - scrollbar_w;
-        draw_rect(win_id, Rect.make(track_x, self.rect.y, scrollbar_w, self.rect.h), theme_border());
-        // Thumb
-        const tr = self.thumb_rect();
-        // Thumb as accent, with 1px inset for rounded feel
-        win_fill(win_id, tr.x, tr.y, tr.w, tr.h, theme_accent());
-    }
-};
-
-// ---------------------------------------------------------------------------
-// Component: Checkbox — 12×12 boolean (GH #219, Arc1)
-// ---------------------------------------------------------------------------
-
-pub const Checkbox = struct {
-    rect: Rect,
-    checked: *bool,
-
-    pub fn init(rect: Rect, checked: *bool) Checkbox {
-        return .{ .rect = rect, .checked = checked };
-    }
-
-    pub fn handle_event(self: *Checkbox, ev: *const Event) bool {
-        if (ev.kind != MOUSE_DOWN) return false;
-        if ((ev.flags & BTN_LEFT) == 0) return false;
-        if (!self.rect.contains(ev.arg0, ev.arg1)) return false;
-        self.checked.* = !self.checked.*;
-        return true;
-    }
-
-    pub fn draw(self: *const Checkbox, win_id: u32) void {
-        // Box outline
-        draw_rect(win_id, self.rect, theme_surface());
-        draw_rect_outline(win_id, self.rect, 1, theme_border());
-        if (self.checked.*) {
-            // Filled inner square (inset 3) in accent
-            const inner = self.rect.inset(3, 3);
-            // Clamp to at least 6×6 for 12×12 box -> 6×6 inner
-            win_fill(win_id, inner.x, inner.y, inner.w, inner.h, theme_accent());
-        }
-    }
-};
-
-// ---------------------------------------------------------------------------
-// Component: Toggle — 48×20 pill boolean (GH #219, Arc1)
-// ---------------------------------------------------------------------------
-
-pub const Toggle = struct {
-    rect: Rect,
-    enabled: *bool,
-
-    pub fn init(rect: Rect, enabled: *bool) Toggle {
-        return .{ .rect = rect, .enabled = enabled };
-    }
-
-    pub fn handle_event(self: *Toggle, ev: *const Event) bool {
-        if (ev.kind != MOUSE_DOWN) return false;
-        if ((ev.flags & BTN_LEFT) == 0) return false;
-        if (!self.rect.contains(ev.arg0, ev.arg1)) return false;
-        self.enabled.* = !self.enabled.*;
-        return true;
-    }
-
-    pub fn draw(self: *const Toggle, win_id: u32) void {
-        // Pill background
-        const bg = if (self.enabled.*) theme_accent() else theme_border();
-        draw_rect(win_id, self.rect, bg);
-        // Knob: 16×16 circle approximated as square, inset 2, left or right
-        const knob_w: u32 = 16;
-        const knob_h: u32 = 16;
-        const knob_y = self.rect.y + (self.rect.h - knob_h) / 2;
-        const knob_x = if (self.enabled.*)
-            self.rect.x + self.rect.w - knob_w - 2
-        else
-            self.rect.x + 2;
-        // Knob in surface (contrasts with accent/border bg)
-        win_fill(win_id, knob_x, knob_y, knob_w, knob_h, theme_surface());
-        draw_rect_outline(win_id, Rect.make(knob_x, knob_y, knob_w, knob_h), 1, theme_border());
-    }
-};
-
-// ---------------------------------------------------------------------------
-// Component: ProgressBar — determinate + indeterminate (GH #220, Arc1)
-// ---------------------------------------------------------------------------
-
-pub const ProgressBar = struct {
-    rect: Rect,
-    value: f32 = 0.0,
-    label: []const u8 = "",
-    indeterminate: bool = false,
-    offset: i32 = 0,
-    dir: i32 = 1,
-
-    pub const indeterminate_width: u32 = 20;
-    pub const indeterminate_step: i32 = 4;
-
-    pub fn init(rect: Rect) ProgressBar {
-        return .{ .rect = rect };
-    }
-
-    pub fn initWithValue(rect: Rect, value: f32) ProgressBar {
-        var pb = ProgressBar.init(rect);
-        pb.set_value(value);
-        return pb;
-    }
-
-    pub fn set_value(self: *ProgressBar, v: f32) void {
-        if (std.math.isNan(v) or std.math.isInf(v)) {
-            self.value = if (v > 0 and std.math.isInf(v)) 1.0 else 0.0;
-            if (std.math.isNan(v)) self.value = 0.0;
-            return;
-        }
-        if (v < 0.0) {
-            self.value = 0.0;
-        } else if (v > 1.0) {
-            self.value = 1.0;
-        } else {
-            self.value = v;
-        }
-    }
-
-    pub fn set_label(self: *ProgressBar, text: []const u8) void {
-        self.label = text;
-    }
-
-    pub fn set_indeterminate(self: *ProgressBar, enabled: bool) void {
-        self.indeterminate = enabled;
-        if (enabled) {
-            self.offset = 0;
-            self.dir = 1;
-        }
-    }
-
-    fn inner_rect(self: *const ProgressBar) Rect {
-        if (self.rect.w <= 2 or self.rect.h <= 2) return Rect.make(self.rect.x, self.rect.y, 0, 0);
-        return Rect.make(self.rect.x + 1, self.rect.y + 1, self.rect.w - 2, self.rect.h - 2);
-    }
-
-    pub fn fill_width(self: *const ProgressBar) u32 {
-        const inner = self.inner_rect();
-        if (inner.w == 0) return 0;
-        const clamped = if (self.value < 0.0) @as(f32, 0.0) else if (self.value > 1.0) @as(f32, 1.0) else self.value;
-        const fw: f32 = @as(f32, @floatFromInt(inner.w)) * clamped;
-        return @as(u32, @intFromFloat(@floor(fw)));
-    }
-
-    /// Max offset for the sliding block inside inner rect (inner_w - block_w).
-    pub fn max_offset(self: *const ProgressBar) i32 {
-        const inner = self.inner_rect();
-        if (inner.w <= indeterminate_width) return 0;
-        return @as(i32, @intCast(inner.w - indeterminate_width));
-    }
-
-    /// Advance indeterminate animation by one TIMER tick. Returns true if moved.
-    pub fn tick(self: *ProgressBar) bool {
-        if (!self.indeterminate) return false;
-        const max = self.max_offset();
-        if (max == 0) return false;
-        self.offset += self.dir * indeterminate_step;
-        if (self.offset >= max) {
-            self.offset = max;
-            self.dir = -1;
-        } else if (self.offset <= 0) {
-            self.offset = 0;
-            self.dir = 1;
-        }
-        return true;
-    }
-
-    pub fn handle_event(self: *ProgressBar, ev: *const Event) bool {
-        if (!self.indeterminate) return false;
-        if (ev.kind != EVENT_TIMER) return false;
-        return self.tick();
-    }
-
-    /// Test helper: is the i-th label character centered over the fill/block?
-    pub fn is_label_char_over_fill(self: *const ProgressBar, char_idx: usize) bool {
-        if (self.label.len == 0 or char_idx >= self.label.len) return false;
-        const inner = self.inner_rect();
-        const text_w = @as(u32, @intCast(self.label.len)) * 8;
-        const label_x = if (self.rect.w > text_w) self.rect.x + (self.rect.w - text_w) / 2 else self.rect.x;
-        const char_x = label_x + @as(u32, @intCast(char_idx)) * 8;
-        const char_center = char_x + 4;
-        if (self.indeterminate) {
-            const block_x = @as(i32, @intCast(inner.x)) + self.offset;
-            const block_x_u: u32 = if (block_x < 0) 0 else @as(u32, @intCast(block_x));
-            return char_center >= block_x_u and char_center < block_x_u + indeterminate_width;
-        } else {
-            const fw = self.fill_width();
-            if (fw == 0) return false;
-            const fill_end = inner.x + fw;
-            return char_center < fill_end;
-        }
-    }
-
-    pub fn draw(self: *const ProgressBar, win_id: u32) void {
-        // Background + border
-        draw_rect(win_id, self.rect, theme_surface());
-        draw_rect_outline(win_id, self.rect, 1, theme_border());
-        const inner = self.inner_rect();
-        if (inner.w == 0 or inner.h == 0) return;
-
-        if (self.indeterminate) {
-            const block_x_i: i32 = @as(i32, @intCast(inner.x)) + self.offset;
-            const block_x: u32 = if (block_x_i < 0) inner.x else @as(u32, @intCast(block_x_i));
-            // Clamp block inside inner
-            const clamped_x = @min(block_x, inner.x + inner.w - indeterminate_width);
-            const block_rect = Rect.make(clamped_x, inner.y, indeterminate_width, inner.h);
-            draw_rect(win_id, block_rect, theme_accent());
-        } else {
-            const fw = self.fill_width();
-            if (fw > 0) {
-                const fill_rect = Rect.make(inner.x, inner.y, fw, inner.h);
-                draw_rect(win_id, fill_rect, theme_accent());
-            }
-        }
-
-        // Centered label with contrast inversion per character.
-        if (self.label.len > 0) {
-            const text_w = @as(u32, @intCast(self.label.len)) * 8;
-            const text_h: u32 = 8;
-            const lx = if (self.rect.w > text_w) self.rect.x + (self.rect.w - text_w) / 2 else self.rect.x;
-            const ly = if (self.rect.h > text_h) self.rect.y + (self.rect.h - text_h) / 2 else self.rect.y;
-            var i: usize = 0;
-            while (i < self.label.len) : (i += 1) {
-                const ch = self.label[i];
-                const char_x = lx + @as(u32, @intCast(i)) * 8;
-                const over_fill = self.is_label_char_over_fill(i);
-                // Over fill/block: white for high contrast on accent; over bg: theme text primary.
-                const fg: u32 = if (over_fill) 0xffffff else theme_text_primary();
-                draw_char(win_id, ch, char_x, ly, fg);
-            }
-        }
-    }
-};
-
-// ---------------------------------------------------------------------------
-// Component: Dialog — modal child window helper (GH #221, Arc1)
-// ---------------------------------------------------------------------------
-
-pub const DialogResult = enum {
-    none,
-    ok,
-    cancel,
-    button_0,
-    button_1,
-    button_2,
-
-    pub fn is_ok(self: DialogResult) bool {
-        return self == .ok or self == .button_0;
-    }
-
-    pub fn is_cancel(self: DialogResult) bool {
-        return self == .cancel or self == .button_1;
-    }
-};
-
-pub const Dialog = struct {
-    parent_rect: Rect,
-    rect: Rect,
-    title: []const u8 = "",
-    message: []const u8 = "",
-    has_input: bool = false,
-    input: TextInput,
-    ok_button: Button,
-    cancel_button: Button,
-    result: DialogResult = .none,
-    open: bool = false,
-
-    pub const width: u32 = 300;
-    pub const height: u32 = 150;
-
-    fn centered_rect(parent: Rect) Rect {
-        const w = width;
-        const h = height;
-        const cw = @min(w, parent.w);
-        const ch = @min(h, parent.h);
-        const x = if (parent.w > w) parent.x + (parent.w - w) / 2 else parent.x;
-        const y = if (parent.h > h) parent.y + (parent.h - h) / 2 else parent.y;
-        return Rect.make(x, y, cw, ch);
-    }
-
-    pub fn init(parent_rect: Rect, message: []const u8, has_input: bool) Dialog {
-        const r = centered_rect(parent_rect);
-        var dlg = Dialog{
-            .parent_rect = parent_rect,
-            .rect = r,
-            .title = "",
-            .message = message,
-            .has_input = has_input,
-            .input = TextInput.init(Rect.make(r.x + 10, r.y + 60, if (r.w > 20) r.w - 20 else 0, 20)),
-            .ok_button = Button.init(Rect.make(if (r.w > 140) r.x + r.w - 140 else r.x, r.y + r.h - 30, 60, 20), "OK"),
-            .cancel_button = Button.init(Rect.make(if (r.w > 70) r.x + r.w - 70 else r.x, r.y + r.h - 30, 60, 20), "Cancel"),
-            .result = .none,
-            .open = false,
-        };
-        dlg.input.focused = has_input;
-        return dlg;
-    }
-
-    pub fn initWithButtons(parent_rect: Rect, title: []const u8, message: []const u8, buttons: []const []const u8) Dialog {
-        const r = centered_rect(parent_rect);
-        const btn0 = if (buttons.len > 0) buttons[0] else "OK";
-        const btn1 = if (buttons.len > 1) buttons[1] else "Cancel";
-        const dlg = Dialog{
-            .parent_rect = parent_rect,
-            .rect = r,
-            .title = title,
-            .message = message,
-            .has_input = false,
-            .input = TextInput.init(Rect.make(r.x + 10, r.y + 60, if (r.w > 20) r.w - 20 else 0, 20)),
-            .ok_button = Button.init(Rect.make(if (r.w > 140) r.x + r.w - 140 else r.x, r.y + r.h - 30, 60, 20), btn0),
-            .cancel_button = Button.init(Rect.make(if (r.w > 70) r.x + r.w - 70 else r.x, r.y + r.h - 30, 60, 20), btn1),
-            .result = .none,
-            .open = false,
-        };
-        return dlg;
-    }
-
-    pub fn show(self: *Dialog) void {
-        self.open = true;
-        self.result = .none;
-        self.input.clear();
-        self.input.focused = self.has_input;
-        // Reset button states
-        self.ok_button.state = .idle;
-        self.cancel_button.state = .idle;
-    }
-
-    pub fn dismiss(self: *Dialog, res: DialogResult) void {
-        self.open = false;
-        self.result = res;
-    }
-
-    pub fn is_open(self: *const Dialog) bool {
-        return self.open;
-    }
-
-    pub fn needs_dim(self: *const Dialog) bool {
-        return self.open;
-    }
-
-    pub fn get_result(self: *const Dialog) DialogResult {
-        return self.result;
-    }
-
-    pub fn handle_event(self: *Dialog, ev: *const Event) bool {
-        if (!self.open) return false;
-        switch (ev.kind) {
-            KEY_DOWN => {
-                const kc = ev.arg0;
-                if (kc == 0x28) { // Enter → OK
-                    self.result = .ok;
-                    self.open = false;
-                    return true;
-                }
-                if (kc == 0x29) { // Escape → Cancel
-                    self.result = .cancel;
-                    self.open = false;
-                    return true;
-                }
-                if (self.has_input) {
-                    // Delegate typing to TextInput (preserves Enter/Escape handling above)
-                    return self.input.handle_event(ev);
-                }
-                return false;
-            },
-            MOUSE_DOWN, MOUSE_MOVE, MOUSE_UP => {
-                // Forward to buttons to maintain hover/pressed visuals and detect clicks.
-                const ok_clicked = self.ok_button.handle_event(ev);
-                const cancel_clicked = self.cancel_button.handle_event(ev);
-                if (ok_clicked) {
-                    self.result = .ok;
-                    self.open = false;
-                    return true;
-                }
-                if (cancel_clicked) {
-                    self.result = .cancel;
-                    self.open = false;
-                    return true;
-                }
-                if (self.has_input and ev.kind == MOUSE_DOWN) {
-                    // Give input focus on click inside its rect; also handle click outside to blur.
-                    const inside_input = self.input.rect.contains(ev.arg0, ev.arg1);
-                    // Let TextInput update its focused flag
-                    const changed = self.input.handle_event(ev);
-                    if (inside_input or changed) return true;
-                }
-                // Modal exclusive focus: any click inside dialog consumes, outside also consumes
-                // to prevent parent interaction while open (dim overlay).
-                if (ev.kind == MOUSE_DOWN and self.rect.contains(ev.arg0, ev.arg1)) return true;
-                if (ev.kind == MOUSE_DOWN) {
-                    // Click outside dialog but while open → consume (modal) but no dismiss
-                    // (unless desired to dismiss on outside click — we keep modal strict)
-                    return true;
-                }
-                if (ev.kind == MOUSE_MOVE and self.rect.contains(ev.arg0, ev.arg1)) return true;
-                return false;
-            },
-            else => return false,
-        }
-    }
-
-    pub fn draw_dim_overlay(self: *const Dialog, parent_win_id: u32) void {
-        if (!self.open) return;
-        // Dim parent with a muted overlay — fill parent rect with border color at 50% illusion
-        // (solid fill with theme_border, parent content underneath will be dimmed visually).
-        draw_rect(parent_win_id, self.parent_rect, 0x000000);
-        // Use a semi-transparent illusion: overdraw with theme_surface at reduced intensity
-        // For host test, just verify no panic — actual dim is visual.
-        draw_rect(parent_win_id, self.parent_rect, theme_border());
-    }
-
-    pub fn draw(self: *const Dialog, win_id: u32) void {
-        if (!self.open) return;
-        // Dialog window background + border
-        draw_rect(win_id, self.rect, theme_surface());
-        draw_rect_outline(win_id, self.rect, 1, theme_border());
-        // Title bar accent strip (8px)
-        draw_rect(win_id, Rect.make(self.rect.x, self.rect.y, self.rect.w, 12), theme_accent());
-        // Message — support up to 3 lines split by '\n', wrap at ~35 chars.
-        var line_y = self.rect.y + 18;
-        var msg_start: usize = 0;
-        var line_idx: usize = 0;
-        while (msg_start < self.message.len and line_idx < 3) : (line_idx += 1) {
-            var line_end = msg_start;
-            while (line_end < self.message.len and self.message[line_end] != '\n' and line_end - msg_start < 35) : (line_end += 1) {}
-            // If we stopped mid-word, try to break at space (optional)
-            const line = self.message[msg_start..line_end];
-            draw_text(win_id, line, self.rect.x + 10, line_y, theme_text_primary());
-            line_y += 10;
-            if (line_end < self.message.len and self.message[line_end] == '\n') line_end += 1;
-            msg_start = line_end;
-            if (msg_start >= self.message.len) break;
-        }
-        // Optional TextInput
-        if (self.has_input) {
-            self.input.draw(win_id);
-        }
-        // Buttons
-        self.ok_button.draw(win_id);
-        self.cancel_button.draw(win_id);
-    }
-};
-
-// ---------------------------------------------------------------------------
-// Standard Dialog Helper (M27 G10 #453)
-// ---------------------------------------------------------------------------
-
-pub const DialogSeverity = enum {
-    info,
-    warning,
-    error_type,
-    question,
-};
-
-pub const DialogButtons = enum {
-    ok,
-    ok_cancel,
-    yes_no,
-    yes_no_cancel,
-    save_dont_cancel,
-};
-
-/// Helper to configure and present a standardized modal dialog.
-pub fn show_dialog(dlg: *Dialog, message: []const u8, has_input: bool) void {
-    dlg.message = message;
-    dlg.has_input = has_input;
-    dlg.show();
-}
-
-// ---------------------------------------------------------------------------
-// Empty State Presenter (M27 G22 #465)
-// ---------------------------------------------------------------------------
-
-/// Draw an empty-state message inside `rect` when a view/list has no items.
-pub fn draw_empty_state(win_id: u32, rect: Rect, title: []const u8, subtitle: []const u8) void {
-    if (rect.w == 0 or rect.h == 0) return;
-    draw_rect(win_id, rect, theme_surface());
-    draw_rect_outline(win_id, rect, 1, theme_border());
-
-    const center_y = rect.y + rect.h / 2;
-    const title_w = @as(u32, @intCast(title.len)) * 8;
-    const title_x = if (rect.w > title_w) rect.x + (rect.w - title_w) / 2 else rect.x + 4;
-    const title_y = if (center_y >= 14) center_y - 14 else rect.y + 4;
-
-    draw_text(win_id, title, title_x, title_y, theme_text_primary());
-
-    if (subtitle.len > 0) {
-        const sub_w = @as(u32, @intCast(subtitle.len)) * 8;
-        const sub_x = if (rect.w > sub_w) rect.x + (rect.w - sub_w) / 2 else rect.x + 4;
-        draw_text(win_id, subtitle, sub_x, title_y + 14, theme_text_muted());
-    }
-}
-
-/// Draw an empty-state message with an icon character (M27 G22 #465).
-pub fn draw_empty_state_icon(win_id: u32, rect: Rect, message: []const u8, icon_char: u8) void {
-    if (rect.w == 0 or rect.h == 0) return;
-    draw_rect(win_id, rect, theme_surface());
-    draw_rect_outline(win_id, rect, 1, theme_border());
-
-    const center_y = rect.y + rect.h / 2;
-    const icon_x = if (rect.w >= 8) rect.x + (rect.w - 8) / 2 else rect.x + 4;
-    const icon_y = if (center_y >= 20) center_y - 16 else rect.y + 4;
-    if (icon_char >= 0x20 and icon_char <= 0x7e) {
-        draw_char(win_id, icon_char, icon_x, icon_y, theme_text_muted());
-    }
-
-    const msg_w = @as(u32, @intCast(message.len)) * 8;
-    const msg_x = if (rect.w > msg_w) rect.x + (rect.w - msg_w) / 2 else rect.x + 4;
-    const msg_y = icon_y + 14;
-    draw_text(win_id, message, msg_x, msg_y, theme_text_muted());
-}
-
-// ---------------------------------------------------------------------------
-// Error Display Consistency (M27 G23 #466)
-// ---------------------------------------------------------------------------
-
-/// Format standard OS error code into a user-friendly message.
-pub fn format_error(code: i64, buf: []u8) []const u8 {
-    const msg: []const u8 = switch (code) {
-        -1 => "Operation not permitted",
-        -2 => "File or directory not found",
-        -3 => "No such process",
-        -4 => "Interrupted system call",
-        -5 => "Input/output error",
-        -6 => "No such device or address",
-        -7 => "Argument list too long",
-        -8 => "Exec format error",
-        -9 => "Bad file descriptor",
-        -12 => "Out of memory",
-        -13 => "Permission denied",
-        -14 => "Bad memory address",
-        -16 => "Device or resource busy",
-        -17 => "File already exists",
-        -19 => "No such device",
-        -20 => "Not a directory",
-        -21 => "Is a directory",
-        -22 => "Invalid argument",
-        -24 => "Too many open files",
-        -27 => "File too large",
-        -28 => "No space left on device",
-        -30 => "Read-only file system",
-        -38 => "Function not implemented",
-        -110 => "Connection timed out",
-        -111 => "Connection refused",
-        else => "",
-    };
-    if (msg.len > 0) {
-        const n = @min(msg.len, buf.len);
-        @memcpy(buf[0..n], msg[0..n]);
-        return buf[0..n];
-    }
-    return std.fmt.bufPrint(buf, "System error ({d})", .{code}) catch "System error";
-}
-
-/// Format error with optional context prefix (e.g. "Save failed: File or directory not found").
-pub fn format_error_ctx(buf: []u8, code: i64, context: []const u8) []const u8 {
-    var raw_buf: [128]u8 = undefined;
-    const err_str = format_error(code, &raw_buf);
-    if (context.len == 0) {
-        const n = @min(err_str.len, buf.len);
-        @memcpy(buf[0..n], err_str[0..n]);
-        return buf[0..n];
-    }
-    return std.fmt.bufPrint(buf, "{s}: {s}", .{ context, err_str }) catch err_str;
-}
-
-pub const format_error_with_context = format_error_ctx;
-
-// ---------------------------------------------------------------------------
-// Component: HScrollBar — horizontal scroll track (GH #222, Arc1)
-// ---------------------------------------------------------------------------
-
-pub const HScrollBar = struct {
-    rect: Rect,
-    content_w: u32,
-    viewport_w: u32,
-    offset: u32 = 0,
-    dragging: bool = false,
-    drag_start_x: u32 = 0,
-    drag_start_offset: u32 = 0,
-
-    pub const track_h: u32 = 8;
-    pub const thumb_min_w: u32 = 16;
-
-    pub fn init(rect: Rect, content_w: u32, viewport_w: u32) HScrollBar {
-        var hb = HScrollBar{ .rect = rect, .content_w = content_w, .viewport_w = viewport_w };
-        hb.clamp_offset();
-        return hb;
-    }
-
-    pub fn set_content_width(self: *HScrollBar, w: u32) void {
-        self.content_w = w;
-        self.clamp_offset();
-    }
-
-    pub fn set_viewport_width(self: *HScrollBar, w: u32) void {
-        self.viewport_w = w;
-        self.clamp_offset();
-    }
-
-    pub fn max_offset(self: *const HScrollBar) u32 {
-        if (self.content_w <= self.viewport_w) return 0;
-        return self.content_w - self.viewport_w;
-    }
-
-    fn clamp_offset(self: *HScrollBar) void {
-        const m = self.max_offset();
-        if (self.offset > m) self.offset = m;
-    }
-
-    pub fn thumb_w(self: *const HScrollBar) u32 {
-        if (self.content_w <= self.viewport_w) return self.rect.w;
-        const visible = self.viewport_w;
-        const content = self.content_w;
-        const proportional = self.rect.w * visible / content;
-        return @max(thumb_min_w, proportional);
-    }
-
-    pub fn thumb_x(self: *const HScrollBar) u32 {
-        const m = self.max_offset();
-        if (m == 0) return self.rect.x;
-        const tw = self.thumb_w();
-        const track_w = self.rect.w - tw;
-        return self.rect.x + (self.offset * track_w / m);
-    }
-
-    pub fn thumb_rect(self: *const HScrollBar) Rect {
-        if (self.content_w <= self.viewport_w) return self.rect;
-        const tw = self.thumb_w();
-        const tx = self.thumb_x();
-        return Rect.make(tx, self.rect.y, tw, self.rect.h);
-    }
-
-    fn track_contains(self: *const HScrollBar, px: u32, py: u32) bool {
-        return self.rect.contains(px, py);
-    }
-
-    pub fn scroll_by(self: *HScrollBar, delta: i32) void {
-        const m: i32 = @intCast(self.max_offset());
-        var off: i32 = @intCast(self.offset);
-        off += delta;
-        if (off < 0) off = 0;
-        if (off > m) off = m;
-        self.offset = @intCast(off);
-    }
-
-    pub fn handle_event(self: *HScrollBar, ev: *const Event) bool {
-        if (self.content_w <= self.viewport_w) return false;
-        switch (ev.kind) {
-            MOUSE_DOWN => {
-                const px = ev.arg0;
-                const py = ev.arg1;
-                if (!self.rect.contains(px, py)) return false;
-                const tr = self.thumb_rect();
-                if (tr.contains(px, py)) {
-                    self.dragging = true;
-                    self.drag_start_x = px;
-                    self.drag_start_offset = self.offset;
-                    return true;
-                }
-                if (self.track_contains(px, py)) {
-                    const tx = self.thumb_x();
-                    if (px < tx) {
-                        self.scroll_by(-@as(i32, @intCast(self.viewport_w)));
-                    } else {
-                        self.scroll_by(@as(i32, @intCast(self.viewport_w)));
-                    }
-                    return true;
-                }
-                return false;
-            },
-            MOUSE_MOVE => {
-                if (!self.dragging) return false;
-                const px: i32 = @intCast(ev.arg0);
-                const start_x: i32 = @intCast(self.drag_start_x);
-                const delta: i32 = px - start_x;
-                const m = self.max_offset();
-                if (m == 0) return false;
-                const tw = self.thumb_w();
-                const track_w: i32 = @intCast(self.rect.w - tw);
-                if (track_w <= 0) return false;
-                const scaled = @divTrunc(delta * @as(i32, @intCast(m)), track_w);
-                var new_off: i32 = @as(i32, @intCast(self.drag_start_offset)) + scaled;
-                if (new_off < 0) new_off = 0;
-                if (new_off > @as(i32, @intCast(m))) new_off = @intCast(m);
-                self.offset = @intCast(new_off);
-                return true;
-            },
-            MOUSE_UP => {
-                if (self.dragging) {
-                    self.dragging = false;
-                    return true;
-                }
-                return false;
-            },
-            KEY_DOWN => {
-                const keycode = ev.arg0;
-                // Left 0x50, Right 0x4f, Home 0x4a, End 0x4d
-                if (keycode == 0x50) {
-                    self.scroll_by(-16);
-                    return true;
-                }
-                if (keycode == 0x4f) {
-                    self.scroll_by(16);
-                    return true;
-                }
-                if (keycode == 0x4a) {
-                    self.offset = 0;
-                    return true;
-                }
-                if (keycode == 0x4d) {
-                    self.offset = self.max_offset();
-                    return true;
-                }
-                return false;
-            },
-            MOUSE_SCROLL => {
-                // Horizontal via Shift (MOD_SHIFT) or packed horizontal bit.
-                const is_shift = (ev.flags & MOD_SHIFT) != 0;
-                const packed_horizontal = (ev.arg0 & 0x4000) != 0 and (ev.arg0 & 0xffff0000) == 0;
-                const is_horizontal = is_shift or packed_horizontal;
-                if (!is_horizontal) return false;
-                var delta: i32 = 0;
-                // Arc4 #236: arg0 packed per ADR 0013 D2.
-                // bits 0–13 = magnitude, bit 14 = horizontal, bit 15 = sign.
-                // Shift+scroll overrides horizontal flag.
-                const raw = ev.arg0;
-                const magnitude: i32 = @intCast(raw & 0x1fff);
-                if (magnitude == 0) return false;
-                const horiz = is_shift or (raw & 0x4000) != 0;
-                if (!horiz) return false; // HScrollBar only consumes horizontal
-                const sign: i32 = if ((raw & 0x8000) != 0) 1 else -1;
-                delta = sign * magnitude * 16;
-                self.scroll_by(delta);
-                return true;
-            },
-            else => return false,
-        }
-    }
-
-    pub fn draw(self: *const HScrollBar, win_id: u32) void {
-        if (self.content_w <= self.viewport_w) return;
-        // Track
-        draw_rect(win_id, self.rect, theme_border());
-        // Thumb
-        const tr = self.thumb_rect();
-        win_fill(win_id, tr.x, tr.y, tr.w, tr.h, theme_accent());
-    }
-};
+pub const abi = @import("ui/abi.zig");
+pub const theme = @import("ui/theme.zig");
+pub const draw = @import("ui/draw.zig");
+pub const widgets = @import("ui/widgets.zig");
+
+// Re-exports for 100% backward compatibility:
+pub const AudioInfo = abi.AudioInfo;
+pub const BTN_LEFT = abi.BTN_LEFT;
+pub const BTN_MIDDLE = abi.BTN_MIDDLE;
+pub const BTN_RIGHT = abi.BTN_RIGHT;
+pub const COMPOSITE_TICK = abi.COMPOSITE_TICK;
+pub const DirEntry = abi.DirEntry;
+pub const EVENT_TIMER = abi.EVENT_TIMER;
+pub const Event = abi.Event;
+pub const KEY_DOWN = abi.KEY_DOWN;
+pub const KEY_UP = abi.KEY_UP;
+pub const MAP_ANONYMOUS = abi.MAP_ANONYMOUS;
+pub const MAP_POPULATE = abi.MAP_POPULATE;
+pub const MAP_PRIVATE = abi.MAP_PRIVATE;
+pub const MODE_APPEND = abi.MODE_APPEND;
+pub const MODE_CREATE = abi.MODE_CREATE;
+pub const MODE_DIR = abi.MODE_DIR;
+pub const MODE_READ = abi.MODE_READ;
+pub const MODE_WRITE = abi.MODE_WRITE;
+pub const MOD_ALT = abi.MOD_ALT;
+pub const MOD_CMD = abi.MOD_CMD;
+pub const MOD_CTRL = abi.MOD_CTRL;
+pub const MOD_SHIFT = abi.MOD_SHIFT;
+pub const MOUSE_DOWN = abi.MOUSE_DOWN;
+pub const MOUSE_MOVE = abi.MOUSE_MOVE;
+pub const MOUSE_RIGHT_DOWN = abi.MOUSE_RIGHT_DOWN;
+pub const MOUSE_RIGHT_UP = abi.MOUSE_RIGHT_UP;
+pub const MOUSE_UP = abi.MOUSE_UP;
+pub const PROT_EXEC = abi.PROT_EXEC;
+pub const PROT_READ = abi.PROT_READ;
+pub const PROT_WRITE = abi.PROT_WRITE;
+pub const ProcInfo = abi.ProcInfo;
+pub const ProcState = abi.ProcState;
+pub const ProcessRow = abi.ProcessRow;
+pub const WIN_BLUR = abi.WIN_BLUR;
+pub const WIN_CLOSE = abi.WIN_CLOSE;
+pub const WIN_FOCUS = abi.WIN_FOCUS;
+pub const WIN_RESIZE = abi.WIN_RESIZE;
+pub const WIN_UNSAVED = abi.WIN_UNSAVED;
+pub const WmRpc = abi.WmRpc;
+pub const audio_info = abi.audio_info;
+pub const audio_mute = abi.audio_mute;
+pub const audio_play = abi.audio_play;
+pub const audio_volume = abi.audio_volume;
+pub const clipboard_capacity = abi.clipboard_capacity;
+pub const clipboard_get = abi.clipboard_get;
+pub const clipboard_set = abi.clipboard_set;
+pub const datagram_max = abi.datagram_max;
+pub const dir_list = abi.dir_list;
+pub const drag_read = abi.drag_read;
+pub const drag_start = abi.drag_start;
+pub const exec_program = abi.exec_program;
+pub const exit_process = abi.exit_process;
+pub const file_close = abi.file_close;
+pub const file_delete = abi.file_delete;
+pub const file_free = abi.file_free;
+pub const file_mkdir = abi.file_mkdir;
+pub const file_open = abi.file_open;
+pub const file_read = abi.file_read;
+pub const file_rename = abi.file_rename;
+pub const file_truncate = abi.file_truncate;
+pub const file_write = abi.file_write;
+pub const get_procs = abi.get_procs;
+pub const kill_process = abi.kill_process;
+pub const mmap = abi.mmap;
+pub const munmap = abi.munmap;
+pub const notify = abi.notify;
+pub const parse_procs = abi.parse_procs;
+pub const payload_max = abi.payload_max;
+pub const ping_poll = abi.ping_poll;
+pub const ping_send = abi.ping_send;
+pub const poll_event = abi.poll_event;
+pub const sleep_ticks = abi.sleep_ticks;
+pub const sys_audio_info_num = abi.sys_audio_info_num;
+pub const sys_audio_mute_num = abi.sys_audio_mute_num;
+pub const sys_audio_play_num = abi.sys_audio_play_num;
+pub const sys_audio_volume_num = abi.sys_audio_volume_num;
+pub const sys_clipboard_get_num = abi.sys_clipboard_get_num;
+pub const sys_clipboard_set_num = abi.sys_clipboard_set_num;
+pub const sys_dir_list_num = abi.sys_dir_list_num;
+pub const sys_drag_read_num = abi.sys_drag_read_num;
+pub const sys_drag_start_num = abi.sys_drag_start_num;
+pub const sys_exec_num = abi.sys_exec_num;
+pub const sys_exit_num = abi.sys_exit_num;
+pub const sys_file_close_num = abi.sys_file_close_num;
+pub const sys_file_delete_num = abi.sys_file_delete_num;
+pub const sys_file_free_num = abi.sys_file_free_num;
+pub const sys_file_open_num = abi.sys_file_open_num;
+pub const sys_file_read_num = abi.sys_file_read_num;
+pub const sys_file_rename_num = abi.sys_file_rename_num;
+pub const sys_file_truncate_num = abi.sys_file_truncate_num;
+pub const sys_file_write_num = abi.sys_file_write_num;
+pub const sys_ipc_recv_num = abi.sys_ipc_recv_num;
+pub const sys_ipc_send_num = abi.sys_ipc_send_num;
+pub const sys_kill_num = abi.sys_kill_num;
+pub const sys_mmap_num = abi.sys_mmap_num;
+pub const sys_munmap_num = abi.sys_munmap_num;
+pub const sys_net_stats_num = abi.sys_net_stats_num;
+pub const sys_notify_num = abi.sys_notify_num;
+pub const sys_ping_poll_num = abi.sys_ping_poll_num;
+pub const sys_ping_send_num = abi.sys_ping_send_num;
+pub const sys_poll_event_num = abi.sys_poll_event_num;
+pub const sys_procs_num = abi.sys_procs_num;
+pub const sys_sleep_num = abi.sys_sleep_num;
+pub const sys_tcp_close_num = abi.sys_tcp_close_num;
+pub const sys_tcp_connect_num = abi.sys_tcp_connect_num;
+pub const sys_tcp_recv_num = abi.sys_tcp_recv_num;
+pub const sys_tcp_send_num = abi.sys_tcp_send_num;
+pub const sys_timer_cancel_num = abi.sys_timer_cancel_num;
+pub const sys_timer_set_num = abi.sys_timer_set_num;
+pub const sys_udp_listen_num = abi.sys_udp_listen_num;
+pub const sys_udp_recv_num = abi.sys_udp_recv_num;
+pub const sys_udp_send_num = abi.sys_udp_send_num;
+pub const sys_wait_event_num = abi.sys_wait_event_num;
+pub const sys_win_close_num = abi.sys_win_close_num;
+pub const sys_win_fill_batch_num = abi.sys_win_fill_batch_num;
+pub const sys_win_fill_num = abi.sys_win_fill_num;
+pub const sys_win_get_num = abi.sys_win_get_num;
+pub const sys_win_lower_back_num = abi.sys_win_lower_back_num;
+pub const sys_win_move_num = abi.sys_win_move_num;
+pub const sys_win_move_to_workspace_num = abi.sys_win_move_to_workspace_num;
+pub const sys_win_open_num = abi.sys_win_open_num;
+pub const sys_win_present_num = abi.sys_win_present_num;
+pub const sys_win_query_num = abi.sys_win_query_num;
+pub const sys_win_raise_front_num = abi.sys_win_raise_front_num;
+pub const sys_win_raise_num = abi.sys_win_raise_num;
+pub const sys_win_set_unsaved_num = abi.sys_win_set_unsaved_num;
+pub const sys_win_set_visible_num = abi.sys_win_set_visible_num;
+pub const sys_write_num = abi.sys_write_num;
+pub const sys_yield_num = abi.sys_yield_num;
+pub const syscall0 = abi.syscall0;
+pub const syscall1 = abi.syscall1;
+pub const syscall2 = abi.syscall2;
+pub const syscall3 = abi.syscall3;
+pub const syscall4 = abi.syscall4;
+pub const syscall6 = abi.syscall6;
+pub const tcp_close = abi.tcp_close;
+pub const tcp_connect = abi.tcp_connect;
+pub const tcp_listen = abi.tcp_listen;
+pub const tcp_recv = abi.tcp_recv;
+pub const tcp_send = abi.tcp_send;
+pub const timer_cancel = abi.timer_cancel;
+pub const timer_set = abi.timer_set;
+pub const udp_listen = abi.udp_listen;
+pub const udp_recv = abi.udp_recv;
+pub const udp_send = abi.udp_send;
+pub const wait_event = abi.wait_event;
+pub const win_close = abi.win_close;
+pub const win_fill = abi.win_fill;
+pub const win_lower_back = abi.win_lower_back;
+pub const win_move_to_workspace = abi.win_move_to_workspace;
+pub const win_open = abi.win_open;
+pub const win_present = abi.win_present;
+pub const win_raise_front = abi.win_raise_front;
+pub const win_set_unsaved = abi.win_set_unsaved;
+pub const wm_attach_tab = abi.wm_attach_tab;
+pub const wm_available = abi.wm_available;
+pub const wm_config = abi.wm_config;
+pub const wm_cycle_tab = abi.wm_cycle_tab;
+pub const wm_detach_tab = abi.wm_detach_tab;
+pub const wm_find_pid = abi.wm_find_pid;
+pub const wm_invoke_action = abi.wm_invoke_action;
+pub const wm_mail_request = abi.wm_mail_request;
+pub const wm_peers = abi.wm_peers;
+pub const wm_proc_name = abi.wm_proc_name;
+pub const wm_procs_buf = abi.wm_procs_buf;
+pub const wm_raise_front = abi.wm_raise_front;
+pub const wm_register_action = abi.wm_register_action;
+pub const wm_rpc_kind_attach_tab = abi.wm_rpc_kind_attach_tab;
+pub const wm_rpc_kind_config = abi.wm_rpc_kind_config;
+pub const wm_rpc_kind_cycle_tab = abi.wm_rpc_kind_cycle_tab;
+pub const wm_rpc_kind_detach_tab = abi.wm_rpc_kind_detach_tab;
+pub const wm_rpc_kind_invoke_action = abi.wm_rpc_kind_invoke_action;
+pub const wm_rpc_kind_raise = abi.wm_rpc_kind_raise;
+pub const wm_rpc_kind_register_action = abi.wm_rpc_kind_register_action;
+pub const wm_rpc_max = abi.wm_rpc_max;
+pub const wm_rpc_reply_flag = abi.wm_rpc_reply_flag;
+pub const wm_rpc_slot_bytes = abi.wm_rpc_slot_bytes;
+pub const wm_rpc_title_max = abi.wm_rpc_title_max;
+pub const write_console = abi.write_console;
+pub const yield_task = abi.yield_task;
+pub const CHROME_AMBER = theme.CHROME_AMBER;
+pub const CHROME_DARK = theme.CHROME_DARK;
+pub const CHROME_LIGHT = theme.CHROME_LIGHT;
+pub const COLOR_ACCENT = theme.COLOR_ACCENT;
+pub const COLOR_BG = theme.COLOR_BG;
+pub const COLOR_BORDER = theme.COLOR_BORDER;
+pub const COLOR_BTN_HOVER = theme.COLOR_BTN_HOVER;
+pub const COLOR_BTN_IDLE = theme.COLOR_BTN_IDLE;
+pub const COLOR_BTN_PRESSED = theme.COLOR_BTN_PRESSED;
+pub const COLOR_DANGER = theme.COLOR_DANGER;
+pub const COLOR_SUCCESS = theme.COLOR_SUCCESS;
+pub const COLOR_SURFACE = theme.COLOR_SURFACE;
+pub const COLOR_TEXT_MUTED = theme.COLOR_TEXT_MUTED;
+pub const COLOR_TEXT_PRIMARY = theme.COLOR_TEXT_PRIMARY;
+pub const COLOR_WARNING = theme.COLOR_WARNING;
+pub const ChromeColors = theme.ChromeColors;
+pub const CursorKind = theme.CursorKind;
+pub const THEME_AMBER = theme.THEME_AMBER;
+pub const THEME_DARK = theme.THEME_DARK;
+pub const THEME_LIGHT = theme.THEME_LIGHT;
+pub const Theme = theme.Theme;
+pub const ThemeColors = theme.ThemeColors;
+pub const WidgetState = theme.WidgetState;
+pub const border_w = theme.border_w;
+pub const caret_h = theme.caret_h;
+pub const caret_w = theme.caret_w;
+pub const contrast_ratio = theme.contrast_ratio;
+pub const current_theme = &theme.current_theme;
+pub const cursor_for_region = theme.cursor_for_region;
+pub const emit_tokens_marker = theme.emit_tokens_marker;
+pub const focus_w = theme.focus_w;
+pub const frame_border = theme.frame_border;
+pub const get_theme_colors = theme.get_theme_colors;
+pub const live_color = theme.live_color;
+pub const luminance = theme.luminance;
+pub const pad_lg = theme.pad_lg;
+pub const pad_md = theme.pad_md;
+pub const pad_sm = theme.pad_sm;
+pub const pad_xs = theme.pad_xs;
+pub const parse_theme_setting = theme.parse_theme_setting;
+pub const set_theme = theme.set_theme;
+pub const shadow_off = theme.shadow_off;
+pub const sync_theme_from_host = theme.sync_theme_from_host;
+pub const theme_accent = theme.theme_accent;
+pub const theme_bg = theme.theme_bg;
+pub const theme_border = theme.theme_border;
+pub const theme_btn_hover = theme.theme_btn_hover;
+pub const theme_btn_idle = theme.theme_btn_idle;
+pub const theme_btn_pressed = theme.theme_btn_pressed;
+pub const theme_caret = theme.theme_caret;
+pub const theme_danger = theme.theme_danger;
+pub const theme_file_bin = theme.theme_file_bin;
+pub const theme_file_dir = theme.theme_file_dir;
+pub const theme_file_txt = theme.theme_file_txt;
+pub const theme_file_unknown = theme.theme_file_unknown;
+pub const theme_gutter_bg = theme.theme_gutter_bg;
+pub const theme_line_highlight = theme.theme_line_highlight;
+pub const theme_multi_select = theme.theme_multi_select;
+pub const theme_name = theme.theme_name;
+pub const theme_on_accent = theme.theme_on_accent;
+pub const theme_selection_bg = theme.theme_selection_bg;
+pub const theme_shadow = theme.theme_shadow;
+pub const theme_success = theme.theme_success;
+pub const theme_surface = theme.theme_surface;
+pub const theme_text_muted = theme.theme_text_muted;
+pub const theme_text_primary = theme.theme_text_primary;
+pub const theme_warning = theme.theme_warning;
+pub const widget_bg = theme.widget_bg;
+pub const widget_border = theme.widget_border;
+pub const widget_text = theme.widget_text;
+pub const FILL_BATCH_MAX = draw.FILL_BATCH_MAX;
+pub const FILL_RECT_SIZE = draw.FILL_RECT_SIZE;
+pub const FillBatcher = draw.FillBatcher;
+pub const Rect = draw.Rect;
+pub const WindowBacking = draw.WindowBacking;
+pub const active_mono_cache = &draw.active_mono_cache;
+pub const active_mono_font = &draw.active_mono_font;
+pub const active_ui_cache = &draw.active_ui_cache;
+pub const active_ui_font = &draw.active_ui_font;
+pub const blend_source_over = draw.blend_source_over;
+pub const draw_alpha_mask = draw.draw_alpha_mask;
+pub const draw_char = draw.draw_char;
+pub const draw_char_16 = draw.draw_char_16;
+pub const draw_char_mono = draw.draw_char_mono;
+pub const draw_focus_outline = draw.draw_focus_outline;
+pub const draw_image = draw.draw_image;
+pub const draw_image_clipped = draw.draw_image_clipped;
+pub const draw_image_scaled = draw.draw_image_scaled;
+pub const draw_panel_frame = draw.draw_panel_frame;
+pub const draw_rect = draw.draw_rect;
+pub const draw_rect_outline = draw.draw_rect_outline;
+pub const draw_text = draw.draw_text;
+pub const draw_text_centered = draw.draw_text_centered;
+pub const draw_text_centered_large = draw.draw_text_centered_large;
+pub const draw_text_large = draw.draw_text_large;
+pub const draw_text_mono = draw.draw_text_mono;
+pub const fill_batcher = &draw.fill_batcher;
+pub const flush_fills = draw.flush_fills;
+pub const fonts_initialized = &draw.fonts_initialized;
+pub const init_fonts = draw.init_fonts;
+pub const measure_text = draw.measure_text;
+pub const measure_text_mono = draw.measure_text_mono;
+pub const win_clear_backing = draw.win_clear_backing;
+pub const win_fill_batched = draw.win_fill_batched;
+pub const win_get_backing = draw.win_get_backing;
+pub const win_set_backing = draw.win_set_backing;
+pub const Button = widgets.Button;
+pub const ButtonState = widgets.ButtonState;
+pub const CanonicalMenuCategory = widgets.CanonicalMenuCategory;
+pub const Checkbox = widgets.Checkbox;
+pub const ContextMenu = widgets.ContextMenu;
+pub const ContextMenuItem = widgets.ContextMenuItem;
+pub const Dialog = widgets.Dialog;
+pub const DialogButtons = widgets.DialogButtons;
+pub const DialogResult = widgets.DialogResult;
+pub const DialogSeverity = widgets.DialogSeverity;
+pub const DropDown = widgets.DropDown;
+pub const HScrollBar = widgets.HScrollBar;
+pub const Label = widgets.Label;
+pub const ListView = widgets.ListView;
+pub const MOUSE_SCROLL = widgets.MOUSE_SCROLL;
+pub const MenuBuilder = widgets.MenuBuilder;
+pub const MenuItemKind = widgets.MenuItemKind;
+pub const MenuItemSpec = widgets.MenuItemSpec;
+pub const MenuSection = widgets.MenuSection;
+pub const ProgressBar = widgets.ProgressBar;
+pub const ScrollView = widgets.ScrollView;
+pub const StandardShortcut = widgets.StandardShortcut;
+pub const TextInput = widgets.TextInput;
+pub const Toggle = widgets.Toggle;
+pub const canonical_menu_bar = widgets.canonical_menu_bar;
+pub const draw_empty_state = widgets.draw_empty_state;
+pub const draw_empty_state_icon = widgets.draw_empty_state_icon;
+pub const format_error = widgets.format_error;
+pub const format_error_ctx = widgets.format_error_ctx;
+pub const format_error_with_context = widgets.format_error_with_context;
+pub const menu_build = widgets.menu_build;
+pub const show_dialog = widgets.show_dialog;
 
 // ---------------------------------------------------------------------------
 // Unit Tests (Class A Host Validation)
@@ -4824,8 +1552,8 @@ test "dq4: metric values pinned" {
 }
 
 test "dq4: dark chrome values equal pre-DQ4 rendering" {
-    defer current_theme = THEME_DARK;
-    current_theme = THEME_DARK;
+    defer theme.current_theme = THEME_DARK;
+    theme.current_theme = THEME_DARK;
     try std.testing.expectEqual(@as(u32, 0x2a4460), theme_selection_bg());
     try std.testing.expectEqual(@as(u32, 0x3b82f6), theme_caret());
     try std.testing.expectEqual(@as(u32, 0x0b0e11), theme_gutter_bg());
@@ -4840,8 +1568,8 @@ test "dq4: dark chrome values equal pre-DQ4 rendering" {
 }
 
 test "dq4: light chrome values" {
-    defer current_theme = THEME_DARK;
-    current_theme = THEME_LIGHT;
+    defer theme.current_theme = THEME_DARK;
+    theme.current_theme = THEME_LIGHT;
     try std.testing.expectEqualStrings("light", theme_name());
     try std.testing.expectEqual(@as(u32, 0xbfdbfe), theme_selection_bg());
     try std.testing.expectEqual(@as(u32, 0x2563eb), theme_caret());
@@ -4857,16 +1585,16 @@ test "dq4: light chrome values" {
 }
 
 test "dq4: amber chrome values" {
-    defer current_theme = THEME_DARK;
-    current_theme = THEME_AMBER;
+    defer theme.current_theme = THEME_DARK;
+    theme.current_theme = THEME_AMBER;
     try std.testing.expectEqualStrings("amber", theme_name());
     try std.testing.expectEqual(@as(u32, 0x1a1000), theme_on_accent());
     try std.testing.expectEqual(@as(u32, 0x000000), theme_shadow());
 }
 
 test "dq4: live_color is identity on dark" {
-    defer current_theme = THEME_DARK;
-    current_theme = THEME_DARK;
+    defer theme.current_theme = THEME_DARK;
+    theme.current_theme = THEME_DARK;
     try std.testing.expectEqual(COLOR_BG, live_color(COLOR_BG));
     try std.testing.expectEqual(COLOR_SURFACE, live_color(COLOR_SURFACE));
     try std.testing.expectEqual(COLOR_BORDER, live_color(COLOR_BORDER));
@@ -4878,8 +1606,8 @@ test "dq4: live_color is identity on dark" {
 }
 
 test "dq4: live_color maps frozen aliases on light" {
-    defer current_theme = THEME_DARK;
-    current_theme = THEME_LIGHT;
+    defer theme.current_theme = THEME_DARK;
+    theme.current_theme = THEME_LIGHT;
     try std.testing.expectEqual(THEME_LIGHT.bg, live_color(COLOR_BG));
     try std.testing.expectEqual(THEME_LIGHT.surface, live_color(COLOR_SURFACE));
     try std.testing.expectEqual(THEME_LIGHT.border, live_color(COLOR_BORDER));
@@ -4892,8 +1620,8 @@ test "dq4: live_color maps frozen aliases on light" {
 test "dq4: text contrast spot-checks clear 3.0 on all themes" {
     const themes = [_]Theme{ THEME_DARK, THEME_LIGHT, THEME_AMBER };
     for (themes) |t| {
-        defer current_theme = THEME_DARK;
-        current_theme = t;
+        defer theme.current_theme = THEME_DARK;
+        theme.current_theme = t;
         try std.testing.expect(contrast_ratio(theme_text_primary(), theme_bg()) >= 3.0);
         try std.testing.expect(contrast_ratio(theme_text_muted(), theme_bg()) >= 3.0);
         try std.testing.expect(contrast_ratio(theme_on_accent(), theme_accent()) >= 2.5);
@@ -4912,11 +1640,11 @@ test "dq4: cursor region mapping" {
 }
 
 test "dq4: frame_border follows focus" {
-    defer current_theme = THEME_DARK;
-    current_theme = THEME_DARK;
+    defer theme.current_theme = THEME_DARK;
+    theme.current_theme = THEME_DARK;
     try std.testing.expectEqual(theme_accent(), frame_border(true));
     try std.testing.expectEqual(theme_border(), frame_border(false));
-    current_theme = THEME_LIGHT;
+    theme.current_theme = THEME_LIGHT;
     try std.testing.expectEqual(THEME_LIGHT.accent, frame_border(true));
     try std.testing.expectEqual(THEME_LIGHT.border, frame_border(false));
 }
@@ -4931,7 +1659,7 @@ test "dq4: parse_theme_setting" {
 }
 
 test "dq4: set_theme + theme_name round-trip" {
-    defer current_theme = THEME_DARK;
+    defer theme.current_theme = THEME_DARK;
     try std.testing.expect(set_theme("light"));
     try std.testing.expectEqualStrings("light", theme_name());
     try std.testing.expect(set_theme("amber"));
