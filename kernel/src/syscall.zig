@@ -39,8 +39,9 @@
 //!
 //! Card G6 (claim 0487): slots 12/13/14 — `sys_win_open` / `sys_win_fill` /
 //! `sys_win_present` — expose the G5 window manager's user-window surface
-//! to EL0: open a bounded kernel-owned window (id 2..5, fixed BSS
-//! back-buffer), fill rects in its back-buffer, and present it (mark dirty
+//! to EL0: open a pool-backed kernel-owned window (id 2..9, WM1 #707 —
+//! per-window back-buffer carved from the page pool at open, freed at
+//! close), fill rects in its back-buffer, and present it (mark dirty
 //! for the shell idle loop's compositor). Follow-ons add slot 15
 //! `sys_win_close` (teardown), per-process ownership (auto-close on exit +
 //! owner-restricted fill/present/close), and slots 16/17 `sys_win_move` /
@@ -139,7 +140,7 @@ pub const sys_udp_recv: u64 = 11;
 /// Card G6 (claim 0487): the draw/window syscall seam — slots 12/13/14, the
 /// card's ONE ABI change (the ipc slots-5/6, slots-7/8, and udp slots-9/10/11
 /// precedents; every existing syscall number 0–11 stays frozen).
-/// `sys_win_open(x, y, w, h)` opens a kernel-owned user window (id 2..5) in
+/// `sys_win_open(x, y, w, h)` opens a kernel-owned user window (id 2..9) in
 /// the G5 window registry; `sys_win_fill(id, x, y, w, h, rgb)` fills a rect
 /// in its back-buffer; `sys_win_present(id)` marks it dirty for the
 /// compositor. Plain numbers only — no uaccess; the kernel owns the buffers.
@@ -908,15 +909,16 @@ fn handle_udp_recv(args: Args, _: *exceptions.VectorFrame) u64 {
 // ---------------------------------------------------------------------------
 
 /// `sys_win_open(x, y, w, h)`: open a user window (the G5 window registry)
-/// at screen position (x, y) with a back-buffer w×h (≤
-/// `driving_award.user_buf_w` × `user_buf_h`), OWNED by the calling
-/// process. Returns the window id (2..5); `EINVAL` for a coordinate/word-
-/// size outside u32, geometry outside the back-buffer/scanout bounds, an
-/// unarmed manager (no gpu — the default VM), or a non-process caller (the
-/// syscall is only reachable from an EL0 program); `ENOSPC` (-5) when all
-/// four user slots are already open. The window auto-closes when the owning
-/// process exits (the scheduler's exit path calls `driving_award.close_owner`).
-/// No uaccess: plain numbers.
+/// at screen position (x, y) with a pool-backed back-buffer exactly w×h
+/// (WM1 #707: carved from the kernel page pool, freed at close), OWNED by
+/// the calling process. Returns the window id (2..9); `EINVAL` for a
+/// coordinate/word-size outside u32, geometry outside the scanout bounds,
+/// an unarmed manager (no gpu — the default VM), or a non-process caller
+/// (the syscall is only reachable from an EL0 program); `ENOSPC` (-5)
+/// when all eight user slots are already open; `ENOMEM` (-10) when the
+/// pool has no contiguous run for the buffer. The window auto-closes
+/// when the owning process exits (the scheduler's exit path calls
+/// `driving_award.close_owner`). No uaccess: plain numbers.
 fn handle_win_open(args: Args, _: *exceptions.VectorFrame) u64 {
     if (args[0] > std.math.maxInt(u32) or args[1] > std.math.maxInt(u32) or args[2] > std.math.maxInt(u32) or args[3] > std.math.maxInt(u32)) {
         return error_result(.einval);
@@ -926,6 +928,7 @@ fn handle_win_open(args: Args, _: *exceptions.VectorFrame) u64 {
         .opened => |id| id,
         .invalid => error_result(.einval),
         .full => error_result(.enospc),
+        .nomem => error_result(.enomem),
     };
 }
 
@@ -3736,26 +3739,32 @@ test "syscall: win open/fill/present/close round-trips with per-process ownershi
     try std.testing.expectEqual(@as(usize, 4), driving_award.count());
     // A second close of the freed id is EINVAL (no such user window).
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_close, .{ 2, 0, 0, 0, 0, 0 }, &frame));
-    // Re-open (id 2 reused), then open the remaining slots (ids 3..5): the
-    // full-registry ENOSPC split now holds at the 4-slot bound, and the
-    // caller owns all four.
+    // Re-open (id 2 reused), then open the remaining slots (ids 3..9):
+    // the full-registry ENOSPC split now holds at the 8-slot WM1 bound,
+    // and the caller owns all eight.
     try std.testing.expectEqual(@as(u64, 2), dispatch(sys_win_open, .{ 64, 64, 256, 192, 0, 0 }, &frame));
     try std.testing.expectEqual(@as(u64, 3), dispatch(sys_win_open, .{ 320, 64, 256, 192, 0, 0 }, &frame));
     try std.testing.expectEqual(@as(u64, 4), dispatch(sys_win_open, .{ 576, 64, 256, 192, 0, 0 }, &frame));
     try std.testing.expectEqual(@as(u64, 5), dispatch(sys_win_open, .{ 64, 288, 256, 192, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 6), dispatch(sys_win_open, .{ 576, 288, 256, 192, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 7), dispatch(sys_win_open, .{ 832, 64, 256, 192, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 8), dispatch(sys_win_open, .{ 832, 288, 256, 192, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 9), dispatch(sys_win_open, .{ 320, 288, 256, 192, 0, 0 }, &frame));
     try std.testing.expectEqual(error_result(.enospc), dispatch(sys_win_open, .{ 0, 0, 10, 10, 0, 0 }, &frame));
     try std.testing.expectEqual(@as(?usize, win_pid), driving_award.user_owner(2));
     try std.testing.expectEqual(@as(?usize, win_pid), driving_award.user_owner(3));
     try std.testing.expectEqual(@as(?usize, win_pid), driving_award.user_owner(4));
     try std.testing.expectEqual(@as(?usize, win_pid), driving_award.user_owner(5));
+    try std.testing.expectEqual(@as(?usize, win_pid), driving_award.user_owner(9));
     // Error mapping in the OWNING context: invalid geometry, out-of-bounds
-    // rects, unknown ids, and the fixed windows are all EINVAL.
+    // rects, unknown ids, and the fixed windows are all EINVAL. WM1: the
+    // 512×424 buffer cap is gone — 425-tall and 385-tall both fit the
+    // scanout now, so with the full registry they map to ENOSPC (geometry
+    // is no longer EINVAL); past-scanout sizes stay EINVAL.
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_open, .{ 0, 0, 0, 10, 0, 0 }, &frame));
-    // 425 exceeds the user back-buffer height (user_buf_h=424, grown for
-    // CALC.BIN's M24 424-tall window); 385 now fits the buffer, so with
-    // the full registry it maps to ENOSPC (geometry is no longer EINVAL).
-    try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_open, .{ 0, 0, 10, 425, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.enospc), dispatch(sys_win_open, .{ 0, 0, 10, 425, 0, 0 }, &frame));
     try std.testing.expectEqual(error_result(.enospc), dispatch(sys_win_open, .{ 0, 0, 10, 385, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_open, .{ 0, 0, 10, 721, 0, 0 }, &frame));
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_fill, .{ 99, 0, 0, 10, 10, 0 }, &frame));
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_fill, .{ 2, 255, 191, 2, 2, 0 }, &frame));
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_present, .{ 99, 0, 0, 0, 0, 0 }, &frame));
@@ -3775,7 +3784,7 @@ test "syscall: win open/fill/present/close round-trips with per-process ownershi
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_move, .{ 2, 0, 0, 0, 0, 0 }, &frame));
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_win_raise, .{ 2, 0, 0, 0, 0, 0 }, &frame));
     // AUTO-CLOSE on exit: drive back to WIN.BIN (task 3) and exit it —
-    // all four of its windows (ids 2..5) are released with NO sys_win_close
+    // all eight of its windows (ids 2..9) are released with NO sys_win_close
     // call.
     try std.testing.expect(scheduler.yield_current()); // user -> WIN.BIN (3)
     try std.testing.expectEqual(@as(usize, 3), scheduler.current_id());
@@ -3789,6 +3798,32 @@ test "syscall: win open/fill/present/close round-trips with per-process ownershi
     // success + the two refusals above): the exit-path teardown is NOT a
     // syscall (it rides close_owner, never handle_win_close).
     try std.testing.expectEqual(@as(u64, 3), call_count(sys_win_close));
+}
+
+test "syscall: win open maps pool exhaustion to ENOMEM (WM1, claim 919)" {
+    init(test_writer);
+    driving_award.arm();
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    var kstack: [scheduler.task_stack_size]u8 align(16) = undefined;
+    const win_pid = process.create("WIN.BIN", .{ .entry_va = 0x400000, .content_len = 64 }, .{}, .{}).?;
+    const win_task = scheduler.register_exec_user(userspace.text_va, 0x4000_0000, 100, 0x8000_0000, 8192, &kstack, 0, 0).?;
+    _ = process.bind(win_pid, win_task);
+    scheduler.start();
+    var frame = fresh_frame();
+    // Drive to the exec'd WIN.BIN (task 3).
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+    try std.testing.expect(scheduler.yield_current()); // user -> WIN.BIN (3)
+    // Shrink the pool to a single page: a 256×192 window needs 12.
+    var desc = [_]memmap.MemoryDescriptor{
+        .{ .type = .conventional_memory, .physical_start = 0x100000, .virtual_start = 0, .number_of_pages = 1, .attribute = 0 },
+    };
+    const view = memmap.MapView.init(std.mem.asBytes(&desc), @sizeOf(memmap.MemoryDescriptor), desc.len);
+    _ = alloc.init(view, &.{});
+    // Geometry fits the scanout, slots are free — the failure is the pool.
+    try std.testing.expectEqual(error_result(.enomem), dispatch(sys_win_open, .{ 64, 64, 256, 192, 0, 0 }, &frame));
 }
 
 test "syscall: win get copies the clamped rect back through uaccess and enforces ownership" {

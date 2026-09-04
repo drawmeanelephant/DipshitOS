@@ -39,6 +39,9 @@
 //! repaint-from-lowest-dirty plan, the clock rendering, and the blit.
 
 const std = @import("std");
+const builtin = @import("builtin");
+const alloc = @import("alloc.zig"); // WM1 (#707, claim 919): pool-backed user back-buffers
+const memmap = @import("memmap.zig"); // WM1: the test-pool descriptor (is_test only)
 const font = @import("font8x8.zig");
 const input = @import("input.zig"); // card U4 (claim 4993): the pointer reports
 const virtio_gpu = @import("virtio_gpu.zig");
@@ -54,8 +57,9 @@ pub var focus_follows_mouse: bool = false;
 pub var previous_focus: ?u8 = null;
 // ---------------------------------------------------------------------------
 
-/// Bounded window registry size (fixed BSS, M15 C4 dock adds one fixed window).
-pub const max_windows: usize = 9;
+/// Bounded window registry size (fixed BSS: 4 fixed windows + the WM1
+/// user ceiling of 8 + one spare, mirroring the pre-WM1 4+4+1 sizing).
+pub const max_windows: usize = 13;
 
 /// The clock window: an overlay in the terminal's top-right corner. 304x192
 /// at (960,16) — inside the 1280x720 scanout, overlapping the terminal.
@@ -90,21 +94,23 @@ pub const cursor_rgb: u32 = 0xff00ff;
 pub const cursor_w: usize = 8;
 pub const cursor_h: usize = 8;
 
-/// Card G6 (claim 0487): user windows — the draw/window syscall seam.
-/// Bounded: TWO user windows (ids 2 and 3, `user_window_id_base`), each a
-/// fixed BSS back-buffer `user_buf_w` × `user_buf_h` B8G8R8X8 that the
-/// kernel owns and an EL0 program renders into through `sys_win_open` /
-/// `sys_win_fill` / `sys_win_present`. The buffers never outgrow this
-/// bound (no heap, no allocation).
+/// Card G6 (claim 0487) + WM1 (#707, claim 919): user windows — the
+/// draw/window syscall seam. EIGHT user windows (ids 2..9,
+/// `user_window_id_base`), each with a per-window B8G8R8X8 back-buffer
+/// exactly win.w × win.h, carved from the kernel page pool at
+/// `sys_win_open` and freed at close/`close_owner` (near-zero standing
+/// BSS — the fixed `user_bufs` BSS is gone). An EL0 program renders into
+/// its buffer through `sys_win_fill` / `sys_win_present`; the kernel owns
+/// the pages. Zero new slots.
 pub const user_window_id_base: u8 = 2;
-pub const user_windows_max: usize = 4;
-pub const user_buf_w: u32 = geom.user_buf_w;
-/// 424 (not 384): M24 (commit 595bc71) grew CALC.BIN's window to 424
-/// tall for the statistics mode rows — the back-buffer must fit the
-/// tallest app window or `sys_win_open` rejects it (the M11 desktop gate
-/// surfaced this as `calc: failed to open window` once the exec ENOENT
-/// was fixed). 424 is the tallest window across the app fleet.
-pub const user_buf_h: u32 = geom.user_buf_h;
+pub const user_windows_max: usize = 8;
+/// WM1: the absolute per-window geometry cap is the scanout itself (a
+/// window must fit on screen anyway — `user_open` enforces x+w/y+h). The
+/// binding memory constraint is pool availability (`.nomem`), not BSS.
+/// (The 512×424 cap died with the fixed BSS buffers; the WM-side mirror
+/// `wnd_core.user_buf_w/h` proposal clamp is WM2/WM3 follow-up.)
+pub const user_win_max_w: u32 = virtio_gpu.fb_width;
+pub const user_win_max_h: u32 = virtio_gpu.fb_height;
 
 /// Step 8 (Issue #211): the system taskbar at the bottom of the scanout.
 /// M32 WMS5 Gate 2 (claim 4278): single-sourced with the WM server —
@@ -247,6 +253,20 @@ pub const Window = struct {
     surface_pa: u64 = 0,
     /// Page count of the shared surface (for composite's source bounds).
     surface_pages: u32 = 0,
+    /// WM1 (#707, claim 919): the pool-backed kernel back-buffer, exactly
+    /// win.w × win.h B8G8R8X8. `kbuf_pa` is the pool physical base (the
+    /// kernel is identity-mapped, so it is directly dereferenceable on
+    /// device); `kbuf_pages` is the accounted span for the free path.
+    /// pa == 0 means no buffer (fixed windows, or a `.user` between struct
+    /// init and `user_open` storing the allocation — never observable).
+    kbuf_pa: u64 = 0,
+    kbuf_pages: u32 = 0,
+    /// WM1 host-test seam: `zig test` cannot dereference pool physical
+    /// addresses, so the CPU-visible bytes live in the test-arena bump
+    /// allocation instead (freed implicitly by the per-test reset in
+    /// arm()). Production builds never read it; `kbuf_ptr` selects.
+    /// 8 B × 13 windows of BSS — noise against the removed 3.3 MB.
+    kbuf_test: ?[*]u8 = null,
 };
 
 /// Arc4 #239: fade-in constants. The window is at 25% opacity for
@@ -344,8 +364,42 @@ pub fn workspace_visible(w: *const Window) bool {
 /// The clock's back-buffer (fixed BSS, contiguous B8G8R8X8). The
 /// compositor blits it over the terminal.
 var clock_buf: [clock_w * clock_h * 4]u8 = undefined;
-/// Card G6 (claim 0487): the user windows' back-buffers (fixed BSS).
-var user_bufs: [user_windows_max][user_buf_w * user_buf_h * 4]u8 = undefined;
+/// Card G6 (claim 0487): the user windows' back-buffers are WM1
+/// pool-backed (see the `kbuf_*` Window fields) — no fixed BSS here.
+/// WM1 host-test arena (compiled out on device): `zig test` cannot
+/// dereference pool physical addresses, so the CPU-visible window bytes
+/// live here instead. A bump allocator — free is a no-op and `arm()`
+/// resets it per test, so cross-test leaks are impossible by
+/// construction (std.testing.allocator would panic on free-after-leak-
+/// report, verified empirically). 16 MB fits the hungriest single test
+/// (8 windows + a fullscreen one ≈ 7 MB). Pool ACCOUNTING stays real —
+/// alloc_pages/free_pages run in both builds and the close tests assert
+/// the free-count round-trips.
+const test_arena = if (builtin.is_test) struct {
+    var buf: [16 * 1024 * 1024]u8 = undefined;
+    var fba: std.heap.FixedBufferAllocator = undefined;
+    var ready: bool = false;
+} else struct {};
+
+/// WM1: the CPU-visible base of a `.user` window's kernel back-buffer —
+/// the pool pages (the kernel identity-maps physical RAM, so `kbuf_pa`
+/// dereferences directly) on device, the test-arena bytes on host. All
+/// readers (fill, composite, preview) go through this so the host tests
+/// prove the same pixel path the device executes.
+fn kbuf_ptr(win: *const Window) [*]u8 {
+    if (builtin.is_test) return win.kbuf_test orelse unreachable;
+    return @as([*]u8, @ptrFromInt(win.kbuf_pa));
+}
+
+/// WM1: the byte length of a window's kernel back-buffer (w×h×4).
+fn kbuf_bytes(w: u32, h: u32) usize {
+    return @as(usize, w) * @as(usize, h) * 4;
+}
+
+/// WM1: pages spanned by `nbytes` (round up to the 4 KiB page).
+fn kbuf_pages_for(nbytes: usize) u32 {
+    return @intCast((nbytes + alloc.page_size - 1) / alloc.page_size);
+}
 /// The clock's displayed tick (so it only repaints when the second changes).
 var clock_shown_tick: u64 = 0;
 var clock_has_tick: bool = false;
@@ -950,6 +1004,25 @@ pub fn tray_has_clock() bool {
 /// (Kind.clock id 1) is migrated to the taskbar tray (Arc2 W3) — no duplicate
 /// window. Focus the terminal, mark dirty so first composite paints the scene.
 pub fn arm() void {
+    // WM1 (#707, claim 919) host-test scaffolding (compiled out on
+    // device — production arm() runs once at boot on a fresh pool):
+    // reset the test arena (bump allocator — frees are no-ops, so every
+    // test starts with a full arena and cross-test leaks are impossible),
+    // then re-arm a generous fake pool (host writes never touch these
+    // phys addresses — `kbuf_test` carries the CPU-visible bytes — so the
+    // span costs nothing; 65536 pages covers 8 fullscreen windows).
+    if (builtin.is_test) {
+        if (!test_arena.ready) {
+            test_arena.fba = std.heap.FixedBufferAllocator.init(&test_arena.buf);
+            test_arena.ready = true;
+        }
+        test_arena.fba.reset();
+        var desc = [_]memmap.MemoryDescriptor{
+            .{ .type = .conventional_memory, .physical_start = 0x100000, .virtual_start = 0, .number_of_pages = 65536, .attribute = 0 },
+        };
+        const view = memmap.MapView.init(std.mem.asBytes(&desc), @sizeOf(memmap.MemoryDescriptor), desc.len);
+        _ = alloc.init(view, &.{});
+    }
     win_count = 0;
     windows[win_count] = .{
         .id = 0,
@@ -1305,6 +1378,8 @@ pub const UserOpenResult = union(enum) {
     opened: u8,
     invalid: void,
     full: void,
+    /// WM1: geometry fit but the pool had no contiguous run for w×h×4.
+    nomem: void,
 };
 
 /// Find a user window by id (only `.user` kinds — the terminal/clock ids
@@ -1324,17 +1399,20 @@ fn find_user_window_index(id: u8) ?usize {
 }
 
 /// Open a kernel-owned user window at screen position (x, y) with a
-/// back-buffer w×h (≤ `user_buf_w` × `user_buf_h`), OWNED by the process
-/// `owner` (the syscall layer records the caller's pid here). The window
-/// is appended at the top of the z-order and focused. Returns `.opened`
-/// with the id (2..5), `.invalid` for geometry outside the
-/// back-buffer/scanout bounds (or when the manager is unarmed — no gpu),
-/// and `.full` when all four user slots are already open. The window is
-/// OWNED by `owner` — it auto-closes when that process exits (the
-/// scheduler's exit path calls `close_owner`).
+/// pool-backed back-buffer exactly w×h (WM1: carved from the kernel page
+/// pool here, freed at close/`close_owner`), OWNED by the process `owner`
+/// (the syscall layer records the caller's pid here). The window is
+/// appended at the top of the z-order and focused. Returns `.opened`
+/// with the id (2..9), `.invalid` for geometry outside the scanout
+/// bounds (or when the manager is unarmed — no gpu), `.full` when all
+/// eight user slots are already open, and `.nomem` when the pool has no
+/// contiguous run for the buffer. The window is OWNED by `owner` — it
+/// auto-closes when that process exits (the scheduler's exit path calls
+/// `close_owner`, which frees the pages — the allocator is a lock-free
+/// bitmap, so the exception-context contract holds).
 pub fn user_open(x: u32, y: u32, w: u32, h: u32, owner: usize) UserOpenResult {
     if (!armed_global) return .invalid;
-    if (w == 0 or h == 0 or w > user_buf_w or h > user_buf_h) return .invalid;
+    if (w == 0 or h == 0 or w > user_win_max_w or h > user_win_max_h) return .invalid;
     if (x >= virtio_gpu.fb_width or y >= virtio_gpu.fb_height) return .invalid;
     if (w > virtio_gpu.fb_width - x or h > virtio_gpu.fb_height - y) return .invalid;
     var i: usize = 0;
@@ -1349,7 +1427,28 @@ pub fn user_open(x: u32, y: u32, w: u32, h: u32, owner: usize) UserOpenResult {
             }
         }
         if (used) continue;
-        @memset(&user_bufs[i], 0);
+        const nbytes = kbuf_bytes(w, h);
+        const npages = kbuf_pages_for(nbytes);
+        const pa = alloc.alloc_pages(npages) orelse return .nomem;
+        // Host tests cannot dereference pool phys: the CPU-visible bytes
+        // live in the test arena (bump allocator — freed implicitly by
+        // the per-test reset in arm()). On device this branch is out.
+        var test_ptr: ?[*]u8 = null;
+        if (builtin.is_test) {
+            const backing = test_arena.fba.allocator().alloc(u8, nbytes) catch {
+                _ = alloc.free_pages(pa, npages);
+                return .nomem;
+            };
+            test_ptr = backing.ptr;
+        }
+        // The buffer starts cleared (the old BSS semantic — a fresh window
+        // reads back zeros). Host tests cannot dereference pool phys, so
+        // the CPU-visible bytes live in the test allocation instead.
+        if (builtin.is_test) {
+            @memset(test_ptr.?[0..nbytes], 0);
+        } else {
+            @memset(@as([*]u8, @ptrFromInt(pa))[0..nbytes], 0);
+        }
         windows[win_count] = .{
             .id = id,
             .title = "user",
@@ -1364,6 +1463,9 @@ pub fn user_open(x: u32, y: u32, w: u32, h: u32, owner: usize) UserOpenResult {
             .fade_phase = 1, // Arc4 #239: start fade-in
             .fade_tick = 0,
             .workspace = current_workspace, // Arc4 #241: assign to current workspace
+            .kbuf_pa = pa,
+            .kbuf_pages = npages,
+            .kbuf_test = test_ptr,
         };
         win_count += 1;
         _ = focus(id);
@@ -1372,6 +1474,58 @@ pub fn user_open(x: u32, y: u32, w: u32, h: u32, owner: usize) UserOpenResult {
         return .{ .opened = id };
     }
     return .full;
+}
+
+/// WM1 (#707, claim 919): set a user window's rect, reallocating the
+/// pool back-buffer when the size changes (the overlap is preserved row
+/// by row — the static-buffer semantic that a resize reframes bytes
+/// rather than discarding them; grown area reads back zero). Geometry +
+/// buffer change atomically: on pool exhaustion returns false with the
+/// window entirely unchanged. Same-size is a position-only fast path.
+/// Callers: every post-open size writer (user_resize, wm_apply_rect,
+/// tile/maximize/fullscreen/keyboard/restore) routes here so the buffer
+/// can never disagree with win.w×win.h.
+fn reflow(win: *Window, x: u32, y: u32, w: u32, h: u32) bool {
+    if (w == 0 or h == 0) return false;
+    if (w == win.w and h == win.h) {
+        win.x = x;
+        win.y = y;
+        return true;
+    }
+    const nbytes = kbuf_bytes(w, h);
+    const npages = kbuf_pages_for(nbytes);
+    const pa = alloc.alloc_pages(npages) orelse return false;
+    var test_ptr: ?[*]u8 = null;
+    if (builtin.is_test) {
+        const backing = test_arena.fba.allocator().alloc(u8, nbytes) catch {
+            _ = alloc.free_pages(pa, npages);
+            return false;
+        };
+        @memset(backing, 0);
+        test_ptr = backing.ptr;
+    } else {
+        @memset(@as([*]u8, @ptrFromInt(pa))[0..nbytes], 0);
+    }
+    const copy_w: usize = @min(win.w, w);
+    const copy_h: usize = @min(win.h, h);
+    const old_stride: usize = @as(usize, win.w) * 4;
+    const new_stride: usize = @as(usize, w) * 4;
+    const old_ptr = kbuf_ptr(win);
+    const new_ptr: [*]u8 = if (builtin.is_test) test_ptr.? else @as([*]u8, @ptrFromInt(pa));
+    var row: usize = 0;
+    while (row < copy_h) : (row += 1) {
+        @memcpy(new_ptr[row * new_stride ..][0 .. copy_w * 4], old_ptr[row * old_stride ..][0 .. copy_w * 4]);
+    }
+    if (win.kbuf_pa != 0) _ = alloc.free_pages(win.kbuf_pa, win.kbuf_pages);
+    // The host-test arena needs no per-window free (per-test reset).
+    win.x = x;
+    win.y = y;
+    win.w = w;
+    win.h = h;
+    win.kbuf_pa = pa;
+    win.kbuf_pages = npages;
+    win.kbuf_test = test_ptr;
+    return true;
 }
 
 /// Fill a rect in the user window's back-buffer (local coordinates,
@@ -1383,7 +1537,7 @@ pub fn user_fill(id: u8, x: u32, y: u32, w: u32, h: u32, rgb: u32) bool {
     if (x >= win.w or y >= win.h) return false;
     if (w > win.w - x or h > win.h - y) return false;
     // M33 SB3 (claim 9361): a surface-backed window FILLS ITS OWN SHARED
-    // PAGES, not the kernel user_bufs copy — the frozen slot hands off to the
+    // PAGES, not the kernel pool buffer — the frozen slot hands off to the
     // surface. fill_rect writes the same B8G8R8X8 bytes into the region the
     // WM mirrors RO, so parity between the migrated fill and the legacy path
     // is exact (identical pixel encoding). An unmigrated window is unchanged.
@@ -1391,9 +1545,7 @@ pub fn user_fill(id: u8, x: u32, y: u32, w: u32, h: u32, rgb: u32) bool {
     if (surface) |sf| {
         fill_rect(@as([*]u8, @ptrFromInt(sf.pa_base)), win.w * 4, x, y, w, h, rgb);
     } else {
-        const idx = id - user_window_id_base;
-        if (idx >= user_windows_max) return false;
-        fill_rect(@ptrCast(&user_bufs[idx]), user_buf_w * 4, x, y, w, h, rgb);
+        fill_rect(kbuf_ptr(win), win.w * 4, x, y, w, h, rgb);
     }
     // M33 SB4 (claim 2382): record the EXACT written rect as the surface's
     // damage, so composite (and, via COMPOSITE_TICK, the WM) repaints only
@@ -1525,8 +1677,8 @@ pub fn user_move_to_workspace(id: u8, ws: u8) bool {
 /// terminal when the closed window held it, and mark the fixed windows
 /// (terminal + clock) dirty so the next composite repaints over the
 /// released window's pixels. Returns false for an unknown id or a non-user
-/// window (the terminal + clock are fixed and never closable). The
-/// back-buffer slot is freed for the next `user_open` (which re-clears it).
+/// window (the terminal + clock are fixed and never closable). The pool
+/// back-buffer is freed for the next `user_open` (which re-clears it).
 /// This is the PRIVILEGED release path (the monitor's `dui close <n>`); the
 /// EL0 `sys_win_close` enforces ownership on top of it.
 pub fn user_close(id: u8) bool {
@@ -1643,30 +1795,34 @@ pub fn is_resize_hit(win: Window, px: u32, py: u32) bool {
     return px >= rx and px < win.x + win.w and py >= ry and py < win.y + win.h;
 }
 
-/// Clamp helpers — pure, host-testable. Buffer bounds 128×64..512×424 plus
+/// Clamp helpers — pure, host-testable. Buffer bounds 128×64..scanout
+/// (WM1: the pool buffer follows the window up to the scanout) plus
 /// on-scanout containment (so a resize never writes beyond the framebuffer).
 pub fn clamp_resize_w(req_w: i32, win_x: u32) u32 {
     // Delegated to the shared wnd_core clamp rule (single source with the
     // WM server).
-    return geom.clamp_resize_w(req_w, win_x, virtio_gpu.fb_width, resize_min_w, user_buf_w);
+    return geom.clamp_resize_w(req_w, win_x, virtio_gpu.fb_width, resize_min_w, user_win_max_w);
 }
 
 pub fn clamp_resize_h(req_h: i32, win_y: u32) u32 {
     // Delegated to the shared wnd_core clamp rule.
-    return geom.clamp_resize_h(req_h, win_y, virtio_gpu.fb_height, resize_min_h, user_buf_h);
+    return geom.clamp_resize_h(req_h, win_y, virtio_gpu.fb_height, resize_min_h, user_win_max_h);
 }
 
-/// Resize a user window to (w, h), clamped to 128×64..512×424 and on-scanout.
-/// Marks the window dirty + the terminal dirty (reveal old rect + chrome repaint
-/// on next `composite()`), and emits `WIN_RESIZE` to the owning pid. Returns
-/// false for an unknown id / non-user window. The EL0 `sys_win_resize` enforces
-/// ownership on top of this; the compositor's pointer_tick calls it directly.
+/// Resize a user window to (w, h), clamped to 128×64..scanout and
+/// on-scanout, reallocating the pool buffer to the clamped size (WM1 —
+/// content overlap preserved). Marks the window dirty + the terminal
+/// dirty (reveal old rect + chrome repaint on next `composite()`), and
+/// emits `WIN_RESIZE` to the owning pid. Returns false for an unknown
+/// id / non-user window, or when the pool cannot satisfy the new size
+/// (the window keeps its old rect). The EL0 `sys_win_resize` enforces
+/// ownership on top of this; the compositor's pointer_tick calls it
+/// directly.
 pub fn user_resize(id: u8, w: u32, h: u32) bool {
     const win = find_user_window(id) orelse return false;
     const clamped_w = clamp_resize_w(@intCast(w), win.x);
     const clamped_h = clamp_resize_h(@intCast(h), win.y);
-    win.w = clamped_w;
-    win.h = clamped_h;
+    if (!reflow(win, win.x, win.y, clamped_w, clamped_h)) return false;
     win.dirty = true;
     _ = mark_dirty(0);
     _ = mark_dirty(1);
@@ -1706,10 +1862,9 @@ pub fn wm_apply_rect(id: u8, x: u32, y: u32, w: u32, h: u32) bool {
     const ny = @min(y, max_y);
     const cw = geom.clamp_resize_w(@intCast(w), nx, virtio_gpu.fb_width, resize_min_w, virtio_gpu.fb_width);
     const ch = geom.clamp_resize_h(@intCast(h), ny, virtio_gpu.fb_height, resize_min_h, virtio_gpu.fb_height);
-    win.x = nx;
-    win.y = ny;
-    win.w = cw;
-    win.h = ch;
+    // WM1: the pool buffer follows the layout size (content overlap
+    // preserved); on pool exhaustion the window keeps its old rect.
+    if (!reflow(win, nx, ny, cw, ch)) return false;
     win.dirty = true;
     _ = mark_dirty(0);
     _ = mark_dirty(1);
@@ -1757,6 +1912,14 @@ pub fn close_owner(owner: usize) usize {
 fn remove_user_at(idx: usize) void {
     const removed_win = windows[idx];
     const removed_id = removed_win.id;
+    // WM1 (#707, claim 919): return the pool back-buffer to the allocator.
+    // Runs in the exit path via close_owner — free_pages is a lock-free
+    // bitmap op, so the exception-context contract holds. Unconditional: a
+    // zero pa frees nothing (free_pages reports false). The host-test
+    // arena needs no free (per-test reset in arm()).
+    if (removed_win.kbuf_pa != 0) {
+        _ = alloc.free_pages(removed_win.kbuf_pa, removed_win.kbuf_pages);
+    }
     if (removed_win.kind == .user and removed_win.owner != null) {
         events.push(removed_win.owner.?, .{
             .kind = events.WIN_CLOSE,
@@ -2061,14 +2224,10 @@ fn apply_tile_layout() void {
     // Master window.
     if (tile_master_id) |mid| {
         if (find_user_window(mid)) |w| {
-            if (tile_master_side) {
-                w.x = tile_x_start;
-            } else {
-                w.x = tile_x_start + detail_w;
-            }
-            w.y = tile_y_start;
-            w.w = master_w;
-            w.h = usable_h;
+            const nx = if (tile_master_side) tile_x_start else tile_x_start + detail_w;
+            // WM1: buffer follows the tile size; on pool exhaustion the
+            // window keeps its old size at the new position.
+            _ = reflow(w, nx, tile_y_start, master_w, usable_h);
             w.dirty = true;
             _ = mark_dirty(0); // terminal repaint behind old rect
         }
@@ -2076,14 +2235,8 @@ fn apply_tile_layout() void {
     // Detail (stack) window.
     if (tile_stack_id) |sid| {
         if (find_user_window(sid)) |w| {
-            if (tile_master_side) {
-                w.x = tile_x_start + master_w;
-            } else {
-                w.x = tile_x_start;
-            }
-            w.y = tile_y_start;
-            w.w = detail_w;
-            w.h = usable_h;
+            const nx = if (tile_master_side) tile_x_start + master_w else tile_x_start;
+            _ = reflow(w, nx, tile_y_start, detail_w, usable_h);
             w.dirty = true;
             _ = mark_dirty(0);
         }
@@ -2119,12 +2272,10 @@ pub fn restore_from_dock(id: u8) bool {
     const s = user_window_slot(id) orelse return false;
     const w = find_user_window(id) orelse return false;
     if (!w.minimized) return false;
-    // Restore saved rect.
+    // Restore saved rect (same size the buffer already holds — WM1
+    // reflow is a position-only fast path here).
     if (minimize_prev_valid[s]) {
-        w.x = minimize_prev_x[s];
-        w.y = minimize_prev_y[s];
-        w.w = minimize_prev_w[s];
-        w.h = minimize_prev_h[s];
+        if (!reflow(w, minimize_prev_x[s], minimize_prev_y[s], minimize_prev_w[s], minimize_prev_h[s])) return false;
         minimize_prev_valid[s] = false;
     }
     w.minimized = false;
@@ -2190,12 +2341,9 @@ pub fn toggle_maximize(id: u8) bool {
     const s = user_window_slot(id) orelse return false;
     const w = find_user_window(id) orelse return false;
     if (w.maximized) {
-        // Restore from maximize.
+        // Restore from maximize (WM1: buffer follows back down).
         if (pre_max_valid[s]) {
-            w.x = pre_max_x[s];
-            w.y = pre_max_y[s];
-            w.w = pre_max_w[s];
-            w.h = pre_max_h[s];
+            if (!reflow(w, pre_max_x[s], pre_max_y[s], pre_max_w[s], pre_max_h[s])) return false;
             pre_max_valid[s] = false;
         }
         w.maximized = false;
@@ -2206,10 +2354,9 @@ pub fn toggle_maximize(id: u8) bool {
         pre_max_w[s] = w.w;
         pre_max_h[s] = w.h;
         pre_max_valid[s] = true;
-        w.x = dock_w;
-        w.y = 0;
-        w.w = virtio_gpu.fb_width - dock_w;
-        w.h = virtio_gpu.fb_height - taskbar_h;
+        // WM1: the pool buffer grows to the workspace area (content
+        // overlap preserved); on pool exhaustion the window stays put.
+        if (!reflow(w, dock_w, 0, virtio_gpu.fb_width - dock_w, virtio_gpu.fb_height - taskbar_h)) return false;
         w.maximized = true;
         // W6 edge case: tiled wins — clear tile state.
         if (tile_master_id) |mid| {
@@ -2241,13 +2388,10 @@ pub fn toggle_maximize(id: u8) bool {
 pub fn toggle_fullscreen(id: u8) bool {
     const w = find_user_window(id) orelse return false;
     if (fullscreen_active and fullscreen_window_id == id) {
-        // Exit fullscreen — restore saved rect.
+        // Exit fullscreen — restore saved rect (WM1: buffer follows).
         const s = user_window_slot(id) orelse return false;
         if (pre_max_valid[s]) {
-            w.x = pre_max_x[s];
-            w.y = pre_max_y[s];
-            w.w = pre_max_w[s];
-            w.h = pre_max_h[s];
+            if (!reflow(w, pre_max_x[s], pre_max_y[s], pre_max_w[s], pre_max_h[s])) return false;
             pre_max_valid[s] = false;
         }
         fullscreen_active = false;
@@ -2268,10 +2412,9 @@ pub fn toggle_fullscreen(id: u8) bool {
         pre_max_w[s] = w.w;
         pre_max_h[s] = w.h;
         pre_max_valid[s] = true;
-        w.x = 0;
-        w.y = 0;
-        w.w = virtio_gpu.fb_width;
-        w.h = virtio_gpu.fb_height;
+        // WM1: the pool buffer grows to the full framebuffer (content
+        // overlap preserved); on pool exhaustion the window stays put.
+        if (!reflow(w, 0, 0, virtio_gpu.fb_width, virtio_gpu.fb_height)) return false;
         fullscreen_active = true;
         fullscreen_window_id = id;
         // Hide taskbar and dock.
@@ -2438,8 +2581,9 @@ pub fn resize_window_keyboard(id: u8, dw: i32, dh: i32) bool {
     const new_h: i32 = @as(i32, @intCast(w.h)) + dh;
     const clamped_w: u32 = if (new_w < @as(i32, @intCast(min_w))) min_w else @min(@as(u32, @intCast(new_w)), max_w);
     const clamped_h: u32 = if (new_h < @as(i32, @intCast(min_h))) min_h else @min(@as(u32, @intCast(new_h)), max_h);
-    w.w = clamped_w;
-    w.h = clamped_h;
+    // WM1: the pool buffer follows (content overlap preserved); on pool
+    // exhaustion the window keeps its old size.
+    if (!reflow(w, w.x, w.y, clamped_w, clamped_h)) return false;
     w.dirty = true;
     _ = mark_dirty(0);
     return true;
@@ -2596,8 +2740,13 @@ pub fn about_dialog_toggle() void {
 }
 
 /// M27 G3: scale a window's framebuffer content into the preview buffer
-/// using nearest-neighbor sampling. For user windows, reads from user_bufs;
-/// for the terminal, reads from the scanout framebuffer.
+/// using nearest-neighbor sampling. For user windows, reads the live
+/// bytes — the shared surface when migrated (WM1 follows the SB3
+/// surface-first convention; the old code read the frozen `user_bufs`
+/// copy, which a migrated window never fills), else the pool back-buffer
+/// at the window's own w×h (WM1: no more 512×424 full-buffer scale, so a
+/// small window's thumbnail shows its content, not zero padding); for
+/// the terminal, reads from the scanout framebuffer.
 pub fn render_preview(id: u8) void {
     @memset(&preview_buf, 0);
     // Find the window and its source buffer.
@@ -2606,12 +2755,16 @@ pub fn render_preview(id: u8) void {
     var src_h: u32 = 0;
     var src_stride: usize = 0;
     if (id >= user_window_id_base) {
-        const idx = id - user_window_id_base;
-        if (idx >= user_windows_max) return;
-        src = @ptrCast(&user_bufs[idx]);
-        src_w = user_buf_w;
-        src_h = user_buf_h;
-        src_stride = user_buf_w * 4;
+        const win = find_user_window(id) orelse return;
+        if (win.kbuf_pa == 0 and user_surface(id) == null) return;
+        if (user_surface(id)) |sf| {
+            src = @as([*]const u8, @ptrFromInt(sf.pa_base));
+        } else {
+            src = kbuf_ptr(win);
+        }
+        src_w = win.w;
+        src_h = win.h;
+        src_stride = @as(usize, win.w) * 4;
     } else if (id == 0) {
         // Terminal — read from scanout framebuffer.
         src = @ptrCast(&virtio_gpu.gpu_fb);
@@ -3193,28 +3346,25 @@ fn paint(w: *Window) void {
             );
         },
         .user => {
-            const idx = w.id - user_window_id_base;
-            if (idx >= user_windows_max) return;
             // M33 SB3 (claim 9361): a SURFACE-BACKED window's rendering lives
             // in its shared-anonymous pages (mapped into the owner's root and
-            // mirrored RO into the registered WM), NOT the kernel user_bufs
-            // copy. The kernel root identity-maps the low physical space, so
+            // mirrored RO into the registered WM), NOT the kernel pool
+            // buffer. The kernel root identity-maps the low physical space, so
             // composite() blits directly from the surface's OWN pages — the
             // on-scanout bytes are the app's plain stores, byte-identical to
             // what the old fill path produced (parity). An unmigrated window
-            // keeps the frozen user_bufs path exactly as before.
+            // blits from its pool back-buffer (WM1), sized exactly win.w×h.
             const surface = user_surface(w.id);
             const src_ptr: [*]const u8 = if (surface) |sf|
                 @as([*]const u8, @ptrFromInt(sf.pa_base))
             else
-                @ptrCast(&user_bufs[idx]);
-            const src_stride: usize = if (surface != null) w.w * 4 else user_buf_w * 4;
-            // The source is the window's own back-buffer (surface is sized
-            // exactly win.w × win.h); clamp SOURCE dims for the legacy rect
-            // overflow (M21 tiling) on the unmigrated path, and to the
-            // window/surface size on the migrated path.
-            const bw = @min(w.w, user_buf_w);
-            const bh = @min(w.h, user_buf_h);
+                kbuf_ptr(w);
+            const src_stride: usize = @as(usize, w.w) * 4;
+            // The source is the window's own back-buffer (surface and pool
+            // buffer are both sized exactly win.w × win.h); clamp SOURCE
+            // dims for the legacy rect overflow (M21 tiling) defensively.
+            const bw = w.w;
+            const bh = w.h;
             // M33 SB4 (claim 2382): rect-granular repaint — when this window
             // carries a partial damage rect, blit ONLY that region (from its
             // back-buffer origin to the scanout origin), not the whole window.
@@ -4580,14 +4730,19 @@ test "driving_award: user_open/fill/present round-trips a bounded user window" {
     try std.testing.expectEqual(@as(u8, 2), focused_id);
     try std.testing.expect(!terminal_focused());
     try std.testing.expectEqual(@as(?u8, 2), hit_test(64 + 10, 64 + 10));
-    // Fill a rect: the back-buffer pixel carries the B8G8R8X8 rgb.
+    // Fill a rect: the pool back-buffer pixel carries the B8G8R8X8 rgb
+    // (WM1: the buffer is exactly win.w×win.h — stride is win.w*4).
     try std.testing.expect(user_fill(2, 8, 8, 48, 48, 0xff0000));
-    try std.testing.expectEqual(@as(u8, 0x00), user_bufs[0][(8 * user_buf_w + 8) * 4 + 0]); // B
-    try std.testing.expectEqual(@as(u8, 0x00), user_bufs[0][(8 * user_buf_w + 8) * 4 + 1]); // G
-    try std.testing.expectEqual(@as(u8, 0xff), user_bufs[0][(8 * user_buf_w + 8) * 4 + 2]); // R
-    try std.testing.expectEqual(@as(u8, 0xff), user_bufs[0][(8 * user_buf_w + 8) * 4 + 3]); // opaque
+    const win2 = find_user_window(2).?;
+    try std.testing.expect(win2.kbuf_pa != 0); // pool-backed, not BSS
+    try std.testing.expectEqual(kbuf_pages_for(512 * 384 * 4), win2.kbuf_pages);
+    const base = kbuf_ptr(win2);
+    try std.testing.expectEqual(@as(u8, 0x00), base[(8 * 512 + 8) * 4 + 0]); // B
+    try std.testing.expectEqual(@as(u8, 0x00), base[(8 * 512 + 8) * 4 + 1]); // G
+    try std.testing.expectEqual(@as(u8, 0xff), base[(8 * 512 + 8) * 4 + 2]); // R
+    try std.testing.expectEqual(@as(u8, 0xff), base[(8 * 512 + 8) * 4 + 3]); // opaque
     // The unfilled corner is zero (the back-buffer starts cleared).
-    try std.testing.expectEqual(@as(u8, 0), user_bufs[0][(100 * user_buf_w + 200) * 4 + 0]);
+    try std.testing.expectEqual(@as(u8, 0), base[(100 * 512 + 200) * 4 + 0]);
     try std.testing.expect(user_present(2));
     try std.testing.expect(windows[4].dirty);
 }
@@ -4840,27 +4995,92 @@ test "driving_award: WMS5 input ownership gates kernel geometry consumption (iss
     _ = user_close(3);
 }
 
-test "driving_award: user_open bounds and the four slots fill the registry" {
+test "driving_award: user_open bounds and the eight slots fill the registry" {
     arm();
-    // Invalid geometry: zero size, oversize back-buffer, off-scanout.
+    // Invalid geometry: zero size, past the scanout cap, off-scanout.
+    // WM1: the 512×424 buffer cap is gone — 513-wide and 425-tall now
+    // open (they fit the 1280×720 scanout); the cap is the scanout.
     try std.testing.expectEqual(UserOpenResult.invalid, user_open(0, 0, 0, 10, 7));
-    try std.testing.expectEqual(UserOpenResult.invalid, user_open(0, 0, 513, 10, 7));
-    // 425 exceeds the back-buffer height (user_buf_h=424, grown for
-    // CALC.BIN's M24 424-tall window); 385 now fits.
-    try std.testing.expectEqual(UserOpenResult.invalid, user_open(0, 0, 10, 425, 7));
+    try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(0, 0, 513, 10, 7));
+    try std.testing.expect(user_close(2));
+    try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(0, 0, 10, 425, 7));
+    try std.testing.expect(user_close(2));
+    try std.testing.expectEqual(UserOpenResult.invalid, user_open(0, 0, 1281, 10, 7));
+    try std.testing.expectEqual(UserOpenResult.invalid, user_open(0, 0, 10, 721, 7));
     try std.testing.expectEqual(UserOpenResult.invalid, user_open(virtio_gpu.fb_width, 0, 10, 10, 7));
     try std.testing.expectEqual(UserOpenResult.invalid, user_open(virtio_gpu.fb_width - 4, 0, 10, 10, 7));
-    // Four opens fill all slots (ids 2..5); the fifth is ENOSPC-shaped (.full).
+    // A fullscreen window opens (the scanout cap, not the old 512×424).
+    try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(0, 0, 1280, 720, 7));
+    try std.testing.expect(user_close(2));
+    // Eight opens fill all slots (ids 2..9); the ninth is .full.
     try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 512, 384, 7));
     try std.testing.expectEqual(UserOpenResult{ .opened = 3 }, user_open(320, 64, 512, 384, 8));
     try std.testing.expectEqual(UserOpenResult{ .opened = 4 }, user_open(576, 64, 512, 384, 9));
     try std.testing.expectEqual(UserOpenResult{ .opened = 5 }, user_open(64, 288, 512, 384, 10));
-    try std.testing.expectEqual(UserOpenResult.full, user_open(0, 0, 10, 10, 11));
-    try std.testing.expectEqual(@as(usize, 8), win_count);
+    try std.testing.expectEqual(UserOpenResult{ .opened = 6 }, user_open(576, 288, 256, 192, 11));
+    try std.testing.expectEqual(UserOpenResult{ .opened = 7 }, user_open(832, 64, 256, 192, 12));
+    try std.testing.expectEqual(UserOpenResult{ .opened = 8 }, user_open(832, 288, 256, 192, 13));
+    try std.testing.expectEqual(UserOpenResult{ .opened = 9 }, user_open(320, 288, 256, 192, 14));
+    try std.testing.expectEqual(UserOpenResult.full, user_open(0, 0, 10, 10, 15));
+    try std.testing.expectEqual(@as(usize, 12), win_count);
     try std.testing.expectEqual(@as(?usize, 7), user_owner(2));
     try std.testing.expectEqual(@as(?usize, 8), user_owner(3));
     try std.testing.expectEqual(@as(?usize, 9), user_owner(4));
     try std.testing.expectEqual(@as(?usize, 10), user_owner(5));
+    try std.testing.expectEqual(@as(?usize, 14), user_owner(9));
+}
+
+test "driving_award: WM1 pool exhaustion reports .nomem without consuming the pool (claim 919)" {
+    arm();
+    // Shrink the pool to a single page: a 200×100 window needs 20.
+    var desc = [_]memmap.MemoryDescriptor{
+        .{ .type = .conventional_memory, .physical_start = 0x100000, .virtual_start = 0, .number_of_pages = 1, .attribute = 0 },
+    };
+    const view = memmap.MapView.init(std.mem.asBytes(&desc), @sizeOf(memmap.MemoryDescriptor), desc.len);
+    _ = alloc.init(view, &.{});
+    try std.testing.expectEqual(@as(u64, 1), alloc.stats().free_pages);
+    try std.testing.expectEqual(UserOpenResult.nomem, user_open(64, 64, 200, 100, 7));
+    // Failed open consumes nothing and registers nothing.
+    try std.testing.expectEqual(@as(u64, 1), alloc.stats().free_pages);
+    try std.testing.expectEqual(@as(usize, 4), win_count);
+    // The next test's arm() re-arms the generous pool.
+}
+
+test "driving_award: WM1 resize reallocates preserving the overlap and zeroing growth (claim 919)" {
+    arm();
+    try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 200, 100, 7));
+    try std.testing.expect(user_fill(2, 8, 8, 48, 48, 0xff0000));
+    const p0 = kbuf_ptr(find_user_window(2).?);
+    try std.testing.expectEqual(@as(u8, 0xff), p0[(8 * 200 + 8) * 4 + 2]); // R of the fill
+    // Grow: overlap preserved under the new stride, grown area zero.
+    try std.testing.expect(user_resize(2, 400, 300));
+    const w1 = find_user_window(2).?;
+    try std.testing.expectEqual(kbuf_pages_for(400 * 300 * 4), w1.kbuf_pages);
+    const p1 = kbuf_ptr(w1);
+    try std.testing.expectEqual(@as(u8, 0xff), p1[(8 * 400 + 8) * 4 + 2]);
+    try std.testing.expectEqual(@as(u8, 0), p1[(250 * 400 + 350) * 4 + 0]);
+    // Shrink (clamped to the 128×64 min): overlap preserved.
+    try std.testing.expect(user_resize(2, 100, 50));
+    const w2 = find_user_window(2).?;
+    try std.testing.expectEqual(@as(u32, 128), w2.w);
+    try std.testing.expectEqual(@as(u32, 64), w2.h);
+    try std.testing.expectEqual(kbuf_pages_for(128 * 64 * 4), w2.kbuf_pages);
+    const p2 = kbuf_ptr(w2);
+    try std.testing.expectEqual(@as(u8, 0xff), p2[(8 * 128 + 8) * 4 + 2]);
+    try std.testing.expect(user_close(2));
+}
+
+test "driving_award: WM1 close returns pool pages — free-count round-trips (claim 919)" {
+    arm();
+    const before = alloc.stats().free_pages;
+    try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 512, 384, 7));
+    try std.testing.expect(alloc.stats().free_pages < before);
+    try std.testing.expect(user_close(2));
+    try std.testing.expectEqual(before, alloc.stats().free_pages);
+    // The close_owner path (scheduler exit) frees too.
+    try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 512, 384, 7));
+    try std.testing.expectEqual(@as(usize, 1), close_owner(7));
+    try std.testing.expectEqual(before, alloc.stats().free_pages);
 }
 
 test "driving_award: user_fill refuses unknown ids and out-of-bounds rects" {
@@ -5335,15 +5555,18 @@ test "driving_award: Arc2 W1 — clamp_resize_w/h clamp to 128×64..512×384 and
     try std.testing.expectEqual(@as(u32, 128), clamp_resize_w(128, 0));
     try std.testing.expectEqual(@as(u32, 200), clamp_resize_w(200, 0));
     try std.testing.expectEqual(@as(u32, 512), clamp_resize_w(512, 0));
-    try std.testing.expectEqual(@as(u32, 512), clamp_resize_w(600, 0));
-    try std.testing.expectEqual(@as(u32, 512), clamp_resize_w(1000, 0));
+    // WM1: no 512 cap — the bound is the scanout (1280).
+    try std.testing.expectEqual(@as(u32, 600), clamp_resize_w(600, 0));
+    try std.testing.expectEqual(@as(u32, 1000), clamp_resize_w(1000, 0));
+    try std.testing.expectEqual(@as(u32, 1280), clamp_resize_w(99999, 0));
     try std.testing.expectEqual(@as(u32, 64), clamp_resize_h(10, 0));
     try std.testing.expectEqual(@as(u32, 64), clamp_resize_h(64, 0));
     try std.testing.expectEqual(@as(u32, 100), clamp_resize_h(100, 0));
-    // Buffer bound is user_buf_h=424 (grown for CALC.BIN's M24 424-tall
-    // window); 500 clamps to it.
+    // WM1: no 424 cap — 500 and 700 clamp to the scanout, not the buffer.
     try std.testing.expectEqual(@as(u32, 424), clamp_resize_h(424, 0));
-    try std.testing.expectEqual(@as(u32, 424), clamp_resize_h(500, 0));
+    try std.testing.expectEqual(@as(u32, 500), clamp_resize_h(500, 0));
+    try std.testing.expectEqual(@as(u32, 700), clamp_resize_h(700, 0));
+    try std.testing.expectEqual(@as(u32, 720), clamp_resize_h(99999, 0));
     // Screen containment: fb is 1280×720.
     try std.testing.expectEqual(@as(u32, 280), clamp_resize_w(512, 1000)); // 1280-1000=280
     try std.testing.expectEqual(@as(u32, 128), clamp_resize_w(128, 1152)); // 1280-1152=128 exactly min
@@ -5383,15 +5606,17 @@ test "driving_award: Arc2 W1 — user_resize clamps and emits WIN_RESIZE" {
     try std.testing.expectEqual(events.WIN_RESIZE, ev.kind);
     try std.testing.expectEqual(@as(u32, 128), ev.arg0);
     try std.testing.expectEqual(@as(u32, 64), ev.arg1);
-    // Above max clamps to 512×user_buf_h (424 — grown for CALC.BIN's M24
-    // 424-tall window).
+    // Above the old 512×424 cap no longer clamps (WM1: the pool buffer
+    // follows up to the scanout) — 800×500 lands exactly, and the pool
+    // pages grow with it.
     try std.testing.expect(user_resize(2, 800, 500));
-    try std.testing.expectEqual(@as(u32, 512), find_user_window(2).?.w);
-    try std.testing.expectEqual(@as(u32, 424), find_user_window(2).?.h);
+    try std.testing.expectEqual(@as(u32, 800), find_user_window(2).?.w);
+    try std.testing.expectEqual(@as(u32, 500), find_user_window(2).?.h);
+    try std.testing.expectEqual(kbuf_pages_for(800 * 500 * 4), find_user_window(2).?.kbuf_pages);
     ev = events.pop(9).?;
     try std.testing.expectEqual(events.WIN_RESIZE, ev.kind);
-    try std.testing.expectEqual(@as(u32, 512), ev.arg0);
-    try std.testing.expectEqual(@as(u32, 424), ev.arg1);
+    try std.testing.expectEqual(@as(u32, 800), ev.arg0);
+    try std.testing.expectEqual(@as(u32, 500), ev.arg1);
     // Chrome dirty + terminal dirty for repaint.
     try std.testing.expect(find_user_window(2).?.dirty);
     try std.testing.expect(windows[0].dirty);
