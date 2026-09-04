@@ -11,17 +11,17 @@
 
 | metric | count |
 |---|---|
-| top-level scripts (`tools/*.sh` + `tools/*.py`) | 156 |
+| top-level scripts (`tools/*.sh` + `tools/*.py`) | 143 |
 | class A (portable / CI) | 9 |
-| class B (VZ hardware gate) | 124 (of which `verify-live-*`: 117) |
+| class B (VZ hardware gate) | 111 (of which `verify-live-*`: 104) |
 | class C (interactive) | 1 |
 | class D (diagnostic) | 9 |
 | tooling (not gates) | 13 |
 | with a just recipe | 22 |
-| named in gate-inventory.md or the archive GATE block | 53 |
-| CI-sharded (archive GATE block `cmd=`) | 47 |
-| named in docs/status.md | 22 |
-| **orphans (gate-class, registered nowhere)** | **76** |
+| named in gate-inventory.md or the archive GATE block | 52 |
+| CI-sharded (archive GATE block `cmd=`) | 46 |
+| named in docs/status.md | 23 |
+| **orphans (gate-class, registered nowhere)** | **63** |
 
 ## Subdirectory tooling (not gates)
 
@@ -31,7 +31,7 @@
 | `tools/status/` | 6 | multiagent coordination gate + claim tooling (class A) |
 | `tools/context/` | 2 | context snapshot helpers |
 | `tools/ragshit/` | 84 | host-side context engine (developer tooling, not guest software) |
-| `tools/gate/` | 61 | M40 vgate harness + specs (GF2+) |
+| `tools/gate/` | 73 | M40 vgate harness + specs (GF2+) |
 
 ## Orphans
 
@@ -42,22 +42,16 @@ this list only needs to shrink):
 - `check-zc-host-contract.py`
 - `probe-pointer-routes.sh`
 - `test-unicode-torture.sh`
-- `verify-live-asm.sh`
 - `verify-live-calc-depth.sh`
 - `verify-live-calc-prog.sh`
 - `verify-live-chain.sh`
 - `verify-live-chrome.sh`
 - `verify-live-clipboard.sh`
 - `verify-live-color.sh`
-- `verify-live-crash-viewer.sh`
 - `verify-live-desktop-typing.sh`
-- `verify-live-devcons.sh`
-- `verify-live-disas.sh`
-- `verify-live-dmesg.sh`
 - `verify-live-dynamic-ecosystem.sh`
 - `verify-live-dynamic-linking.sh`
 - `verify-live-editor.sh`
-- `verify-live-elf.sh`
 - `verify-live-file-browser.sh`
 - `verify-live-filemanager-bulk.sh`
 - `verify-live-filemanager-du.sh`
@@ -67,7 +61,6 @@ this list only needs to shrink):
 - `verify-live-godmenu-summon.sh`
 - `verify-live-hardening.sh`
 - `verify-live-image-viewer.sh`
-- `verify-live-inventory.sh`
 - `verify-live-m14-composition.sh`
 - `verify-live-m15-composition.sh`
 - `verify-live-m21-max-fullscreen-aot.sh`
@@ -75,8 +68,6 @@ this list only needs to shrink):
 - `verify-live-m21-notif-dialog-transient.sh`
 - `verify-live-m21-persist-title-orphan.sh`
 - `verify-live-m21-tile-master.sh`
-- `verify-live-ps.sh`
-- `verify-live-resmon.sh`
 - `verify-live-sb2-shared-anon.sh`
 - `verify-live-sched-ring.sh`
 - `verify-live-scrollback.sh`
@@ -92,9 +83,6 @@ this list only needs to shrink):
 - `verify-live-sound-device.sh`
 - `verify-live-sound-playback.sh`
 - `verify-live-stat-find.sh`
-- `verify-live-strace.sh`
-- `verify-live-symbols.sh`
-- `verify-live-sysinfo.sh`
 - `verify-live-tabclick.sh`
 - `verify-live-tabs.sh`
 - `verify-live-tabstrip.sh`
@@ -108,7 +96,6 @@ this list only needs to shrink):
 - `verify-live-wasm.sh`
 - `verify-live-wm-ipc.sh`
 - `verify-live-wm1.sh`
-- `verify-live-wm3-taskbar.sh`
 - `verify-live-wm7-gateb.sh`
 - `verify-live-wnd8-dialog-drain.sh`
 - `verify-live-wnd8-geom-kbd-delete.sh`
@@ -148,24 +135,18 @@ Columns: `just` = justfile recipe of the same name; `inv` = named in
 | `verify-fw-mmu-capture.sh` | 94 | D | n | y | y | n | verify-fw-mmu-capture.sh -- claim 0021 gate: capture the firmware's MMU |
 | `verify-glyph-raster.sh` | 67 | A | n | y | y | n | verify-glyph-raster.sh -- class A: the font8x8 LSB-first glyph raster |
 | `verify-host-console.sh` | 149 | B | y | y | y | n | M1.5 agent A gate: host-side interactive serial plumbing (host-only). |
-| `verify-live-asm.sh` | 161 | B | n | n | n | n | verify-live-asm.sh -- M22 D2 class-B gate (issue #325, claim 9815): the |
 | `verify-live-calc-depth.sh` | 287 | B | n | n | n | n | verify-live-calc-depth.sh -- milestone-twenty-four depth gate (claims |
 | `verify-live-calc-prog.sh` | 159 | B | n | n | n | n | verify-live-calc-prog.sh -- milestone-twenty-four card K1 class-B gate: |
 | `verify-live-chain.sh` | 132 | B | n | n | n | n | verify-live-chain.sh -- milestone-nineteen cards P3+P4 class-B gate |
 | `verify-live-chrome.sh` | 235 | B | n | n | n | n | verify-live-chrome.sh -- milestone-twenty card U4 class-B gate |
 | `verify-live-clipboard.sh` | 164 | B | n | n | n | n | verify-live-clipboard.sh -- milestone-fourteen card S1 class-B gate (claim |
 | `verify-live-color.sh` | 106 | B | n | n | n | n | verify-live-color.sh -- M18 T5 class-B gate (issue #408): ANSI terminal |
-| `verify-live-crash-viewer.sh` | 115 | B | n | n | n | n | verify-live-crash-viewer.sh -- M22 D11 (issue #334) class-B gate: |
 | `verify-live-desktop-typing.sh` | 244 | B | n | n | n | n | verify-live-desktop-typing.sh -- issue #563 class-B regression gate: |
 | `verify-live-desktop.sh` | 210 | B | n | y | y | n | verify-live-desktop.sh -- claim 2427 (Milestone 11, Card A5) class-B |
-| `verify-live-devcons.sh` | 226 | B | n | n | n | n | verify-live-devcons.sh -- M22 D14 (issue #337) class-B gate: |
-| `verify-live-disas.sh` | 148 | B | n | n | n | n | verify-live-disas.sh -- M22 D4 class-B gate (issue #327, claim 9815): |
-| `verify-live-dmesg.sh` | 106 | B | n | n | n | n | verify-live-dmesg.sh -- M22 D12 (issue #335) class-B gate: |
 | `verify-live-dynamic-ecosystem.sh` | 130 | B | n | n | n | n | verify-live-dynamic-ecosystem.sh -- Milestone 31 Class-B Gate (claim 4001): |
 | `verify-live-dynamic-linking.sh` | 106 | B | n | n | n | n | verify-live-dynamic-linking.sh -- Milestone 30 Class-B Gate (issue #599, claim 7921): |
 | `verify-live-editing.sh` | 205 | B | y | y | y | n | verify-live-editing.sh -- milestone-eight card U2 class-B gate (claim 1809): |
 | `verify-live-editor.sh` | 171 | B | n | n | n | n | verify-live-editor.sh -- M23 E2-E5 class-B gate: |
-| `verify-live-elf.sh` | 142 | B | n | n | n | n | verify-live-elf.sh -- M22 D1 class-B gate (issue #324, claim 9815): the |
 | `verify-live-events.sh` | 162 | B | n | y | y | n | verify-live-events.sh -- claim 9328 (milestone nine, card E6) class-B |
 | `verify-live-file-browser.sh` | 284 | B | n | n | n | n | verify-live-file-browser.sh -- claim 4046 (Milestone 13, Card B4) class-B |
 | `verify-live-filemanager-bulk.sh` | 165 | B | n | n | n | n | verify-live-filemanager-bulk.sh -- M25 Lane A (claim 0434) class-B gate: |
@@ -179,7 +160,6 @@ Columns: `just` = justfile recipe of the same name; `inv` = named in
 | `verify-live-image-viewer.sh` | 155 | B | n | n | n | n | verify-live-image-viewer.sh — M36 IMG5 class-B live gate (issue #826): the |
 | `verify-live-input-depth.sh` | 189 | B | n | y | y | n | verify-live-input-depth.sh -- audit follow-up (issue #117) class-B gate: |
 | `verify-live-input.sh` | 359 | B | y | y | y | y | verify-live-input.sh -- claim 6050 (milestone seven, card I3) class-B |
-| `verify-live-inventory.sh` | 120 | B | n | n | n | n | verify-live-inventory.sh -- M22 D16 (issue #339) class-B gate: |
 | `verify-live-m14-composition.sh` | 252 | B | n | n | n | n | verify-live-m14-composition.sh -- claim 3289 (Milestone 14, Card S3) |
 | `verify-live-m15-composition.sh` | 242 | B | n | n | n | n | verify-live-m15-composition.sh -- claim 3206 (Milestone 15, Card A4) |
 | `verify-live-m16-composition.sh` | 229 | B | n | y | y | n | verify-live-m16-composition.sh -- claim 2714 (Milestone 16, Card C4) |
@@ -193,8 +173,6 @@ Columns: `just` = justfile recipe of the same name; `inv` = named in
 | `verify-live-m21-tile-master.sh` | 391 | B | n | n | n | n | verify-live-m21-tile-master.sh -- claim 8777 (milestone twenty-one, cards |
 | `verify-live-pointer-cg.sh` | 271 | B | n | y | y | n | verify-live-pointer-cg.sh -- milestone eight card U4 (claim 4993) CG |
 | `verify-live-pointer-virtio.sh` | 223 | B | n | y | n | y | verify-live-pointer-virtio.sh -- claim 9367 (issue #523 item 3 |
-| `verify-live-ps.sh` | 128 | B | n | n | n | n | verify-live-ps.sh -- M22 D6 class-B gate (issue #329, claim 9815): the |
-| `verify-live-resmon.sh` | 109 | B | n | n | n | n | verify-live-resmon.sh -- M22 D10 (issue #333) class-B gate: |
 | `verify-live-roadpops.sh` | 261 | B | n | y | y | n | verify-live-roadpops.sh -- claim 1574 (milestone six, card G3) class-B |
 | `verify-live-sb2-shared-anon.sh` | 131 | B | n | n | n | n | verify-live-sb2-shared-anon.sh -- M33 SB2 (claim 8878) class-B gate: the |
 | `verify-live-sb3-surface-handoff.sh` | 132 | B | n | y | y | n | verify-live-sb3-surface-handoff.sh -- M33 SB3 (claim 3633) class-B gate: |
@@ -218,10 +196,6 @@ Columns: `just` = justfile recipe of the same name; `inv` = named in
 | `verify-live-sound-device.sh` | 177 | B | n | n | n | n | verify-live-sound-device.sh -- claim 6140 (Milestone 15, Card A1) |
 | `verify-live-sound-playback.sh` | 198 | B | n | n | n | n | verify-live-sound-playback.sh -- claim 5877 (Milestone 15, Card A2) |
 | `verify-live-stat-find.sh` | 121 | B | n | n | n | n | verify-live-stat-find.sh -- M22 D8 (issue #331) class-B gate: |
-| `verify-live-strace.sh` | 136 | B | n | n | n | n | verify-live-strace.sh -- M22 D5 class-B gate (issue #328, claim 9815): |
-| `verify-live-symbols.sh` | 138 | B | n | n | n | n | verify-live-symbols.sh -- M22 D3 class-B gate (issue #326, claim 9815): |
-| `verify-live-sys-kill.sh` | 167 | B | n | y | y | n | verify-live-sys-kill.sh -- claim 7604 (ADR 0007 slot 29) class-B gate: |
-| `verify-live-sysinfo.sh` | 124 | B | n | n | n | n | verify-live-sysinfo.sh -- M22 D9 (issue #332) class-B gate: |
 | `verify-live-tabclick.sh` | 154 | B | n | n | n | n | verify-live-tabclick.sh — M37 DQ3 tab mouse interaction live proof (issue #839) |
 | `verify-live-tabs.sh` | 181 | B | n | n | n | n | verify-live-tabs.sh -- milestone-twenty card U5 class-B gate |
 | `verify-live-tabstrip.sh` | 169 | B | n | n | n | n | verify-live-tabstrip.sh — M37 DQ2 tab-strip chrome live proof (issue #840) |
@@ -247,7 +221,7 @@ Columns: `just` = justfile recipe of the same name; `inv` = named in
 | `verify-live-win.sh` | 246 | B | y | y | y | n | verify-live-win.sh -- claim 1543 (milestone six, card G5) class-B gate: |
 | `verify-live-wm-ipc.sh` | 206 | B | n | n | n | n | verify-live-wm-ipc.sh — M32 WMS7 Gate A (issue #627) class-B gate: the |
 | `verify-live-wm1.sh` | 179 | B | n | n | n | n | verify-live-wm1.sh -- Lane 1 WM1 (#707, claim 919) class-B gate: eight |
-| `verify-live-wm3-taskbar.sh` | 265 | B | n | n | n | n | verify-live-wm3-taskbar.sh — WM3 (issue #707 card 3) class-B gate: the |
+| `verify-live-wm3-taskbar.sh` | 265 | B | n | n | n | y | verify-live-wm3-taskbar.sh — WM3 (issue #707 card 3) class-B gate: the |
 | `verify-live-wm7-gateb.sh` | 179 | B | n | n | n | n | verify-live-wm7-gateb.sh — M32 WMS7 Gate B live gate (issue #627). |
 | `verify-live-wmctl-register.sh` | 173 | B | n | n | n | y | verify-live-wmctl-register.sh -- M32 WMS2 (issue #622) class-B gate: the |
 | `verify-live-wnd-server.sh` | 178 | B | n | n | n | y | verify-live-wnd-server.sh -- M32 WMS3 (issue #623) class-B gate: the |
