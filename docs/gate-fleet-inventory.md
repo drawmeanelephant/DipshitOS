@@ -11,17 +11,17 @@
 
 | metric | count |
 |---|---|
-| top-level scripts (`tools/*.sh` + `tools/*.py`) | 145 |
+| top-level scripts (`tools/*.sh` + `tools/*.py`) | 139 |
 | class A (portable / CI) | 9 |
-| class B (VZ hardware gate) | 113 (of which `verify-live-*`: 106) |
+| class B (VZ hardware gate) | 107 (of which `verify-live-*`: 100) |
 | class C (interactive) | 1 |
 | class D (diagnostic) | 9 |
 | tooling (not gates) | 13 |
 | with a just recipe | 23 |
-| named in gate-inventory.md or the archive GATE block | 53 |
-| CI-sharded (archive GATE block `cmd=`) | 46 |
-| named in docs/status.md | 26 |
-| **orphans (gate-class, registered nowhere)** | **63** |
+| named in gate-inventory.md or the archive GATE block | 52 |
+| CI-sharded (archive GATE block `cmd=`) | 45 |
+| named in docs/status.md | 29 |
+| **orphans (gate-class, registered nowhere)** | **55** |
 
 ## Subdirectory tooling (not gates)
 
@@ -31,7 +31,7 @@
 | `tools/status/` | 6 | multiagent coordination gate + claim tooling (class A) |
 | `tools/context/` | 2 | context snapshot helpers |
 | `tools/ragshit/` | 84 | host-side context engine (developer tooling, not guest software) |
-| `tools/gate/` | 73 | M40 vgate harness + specs (GF2+) |
+| `tools/gate/` | 80 | M40 vgate harness + specs (GF2+) |
 
 ## Orphans
 
@@ -52,13 +52,7 @@ this list only needs to shrink):
 - `verify-live-dynamic-ecosystem.sh`
 - `verify-live-dynamic-linking.sh`
 - `verify-live-editor.sh`
-- `verify-live-file-browser.sh`
-- `verify-live-filemanager-bulk.sh`
-- `verify-live-filemanager-du.sh`
-- `verify-live-filemanager-props.sh`
-- `verify-live-filemanager-recent.sh`
 - `verify-live-font-sizes.sh`
-- `verify-live-godmenu-summon.sh`
 - `verify-live-hardening.sh`
 - `verify-live-image-viewer.sh`
 - `verify-live-m14-composition.sh`
@@ -73,7 +67,6 @@ this list only needs to shrink):
 - `verify-live-scrollback.sh`
 - `verify-live-search.sh`
 - `verify-live-selection.sh`
-- `verify-live-sexiburger-actions.sh`
 - `verify-live-sexiburger.sh`
 - `verify-live-smp-stress.sh`
 - `verify-live-smp1.sh`
@@ -82,7 +75,6 @@ this list only needs to shrink):
 - `verify-live-sound-control.sh`
 - `verify-live-sound-device.sh`
 - `verify-live-sound-playback.sh`
-- `verify-live-stat-find.sh`
 - `verify-live-tabclick.sh`
 - `verify-live-tabs.sh`
 - `verify-live-tabstrip.sh`
@@ -148,14 +140,9 @@ Columns: `just` = justfile recipe of the same name; `inv` = named in
 | `verify-live-editing.sh` | 205 | B | y | y | y | n | verify-live-editing.sh -- milestone-eight card U2 class-B gate (claim 1809): |
 | `verify-live-editor.sh` | 171 | B | n | n | n | n | verify-live-editor.sh -- M23 E2-E5 class-B gate: |
 | `verify-live-events.sh` | 162 | B | n | y | y | n | verify-live-events.sh -- claim 9328 (milestone nine, card E6) class-B |
-| `verify-live-file-browser.sh` | 284 | B | n | n | n | n | verify-live-file-browser.sh -- claim 4046 (Milestone 13, Card B4) class-B |
-| `verify-live-filemanager-bulk.sh` | 165 | B | n | n | n | n | verify-live-filemanager-bulk.sh -- M25 Lane A (claim 0434) class-B gate: |
-| `verify-live-filemanager-du.sh` | 98 | B | n | n | n | n | verify-live-filemanager-du.sh -- M25 (claim 4379) class-B gate: |
-| `verify-live-filemanager-props.sh` | 127 | B | n | n | n | n | verify-live-filemanager-props.sh -- M25 Lane A (claim 0434) class-B gate: |
-| `verify-live-filemanager-recent.sh` | 133 | B | n | n | n | n | verify-live-filemanager-recent.sh -- M25 Lane B (claim 2539) class-B gate: |
 | `verify-live-font-sizes.sh` | 117 | B | n | n | n | n | verify-live-font-sizes.sh -- milestone-twenty card U1 class-B gate |
 | `verify-live-glyphs.sh` | 253 | B | n | y | y | n | verify-live-glyphs.sh -- the MIRROR-REGRESSION TRIPWIRE (follow-on to the |
-| `verify-live-godmenu-summon.sh` | 131 | B | n | n | n | n | verify-live-godmenu-summon.sh — M37 DQ1 God Menu live proof (issue #836) |
+| `verify-live-godmenu-summon.sh` | 131 | B | n | n | n | y | verify-live-godmenu-summon.sh — M37 DQ1 God Menu live proof (issue #836) |
 | `verify-live-hardening.sh` | 204 | B | n | n | n | n | verify-live-hardening.sh -- claim 4482 (Milestone 14, Card S4) |
 | `verify-live-image-viewer.sh` | 155 | B | n | n | n | n | verify-live-image-viewer.sh — M36 IMG5 class-B live gate (issue #826): the |
 | `verify-live-input-depth.sh` | 189 | B | n | y | y | n | verify-live-input-depth.sh -- audit follow-up (issue #117) class-B gate: |
@@ -185,7 +172,7 @@ Columns: `just` = justfile recipe of the same name; `inv` = named in
 | `verify-live-search.sh` | 179 | B | n | n | n | n | verify-live-search.sh -- milestone-eighteen card T3 class-B gate (issue #406): |
 | `verify-live-selection.sh` | 199 | B | n | n | n | n | verify-live-selection.sh -- milestone-eighteen card T2 class-B gate (issue #405): |
 | `verify-live-settings.sh` | 198 | B | n | y | y | n | verify-live-settings.sh -- claim 2649 (milestone-eight card U8) class-B gate: |
-| `verify-live-sexiburger-actions.sh` | 141 | B | n | n | n | n | verify-live-sexiburger-actions.sh — Milestone 19 Sexiburger Action Registry & Tab Model |
+| `verify-live-sexiburger-actions.sh` | 141 | B | n | n | n | y | verify-live-sexiburger-actions.sh — Milestone 19 Sexiburger Action Registry & Tab Model |
 | `verify-live-sexiburger.sh` | 108 | B | n | n | n | n | verify-live-sexiburger.sh — Milestone 19 class-B live gate: Sexiburger God Menu on real VZ. |
 | `verify-live-smp-stress.sh` | 215 | B | n | n | n | n | verify-live-smp-stress.sh -- claim 907 / issue #858 class-B gate: the |
 | `verify-live-smp.sh` | 79 | B | y | n | n | n | verify-live-smp.sh -- Milestone 28 (claim 6438) class-B gate: |
@@ -196,10 +183,10 @@ Columns: `just` = justfile recipe of the same name; `inv` = named in
 | `verify-live-sound-control.sh` | 256 | B | n | n | n | n | verify-live-sound-control.sh -- claim 9297 (M15 follow-up) |
 | `verify-live-sound-device.sh` | 177 | B | n | n | n | n | verify-live-sound-device.sh -- claim 6140 (Milestone 15, Card A1) |
 | `verify-live-sound-playback.sh` | 198 | B | n | n | n | n | verify-live-sound-playback.sh -- claim 5877 (Milestone 15, Card A2) |
-| `verify-live-stat-find.sh` | 121 | B | n | n | n | n | verify-live-stat-find.sh -- M22 D8 (issue #331) class-B gate: |
 | `verify-live-tabclick.sh` | 154 | B | n | n | n | n | verify-live-tabclick.sh — M37 DQ3 tab mouse interaction live proof (issue #839) |
 | `verify-live-tabs.sh` | 181 | B | n | n | n | n | verify-live-tabs.sh -- milestone-twenty card U5 class-B gate |
 | `verify-live-tabstrip.sh` | 169 | B | n | n | n | n | verify-live-tabstrip.sh — M37 DQ2 tab-strip chrome live proof (issue #840) |
+| `verify-live-tabwm-fullscreen.sh` | 209 | B | n | n | n | y | verify-live-tabwm-fullscreen.sh -- M42 SX5 (issue #986) class-B gate: the |
 | `verify-live-tabwm.sh` | 153 | B | n | n | n | y | verify-live-tabwm.sh -- M39 TWM3 (issue #930) class-B gate: the browser-style |
 | `verify-live-text-search.sh` | 152 | B | n | n | n | n | verify-live-text-search.sh -- milestone-twenty card U3 class-B gate |
 | `verify-live-text.sh` | 256 | B | n | y | y | n | verify-live-text.sh -- claim 3194 (milestone six, card G2) class-B gate: |
@@ -209,7 +196,6 @@ Columns: `just` = justfile recipe of the same name; `inv` = named in
 | `verify-live-typography.sh` | 145 | B | n | n | n | y | verify-live-typography.sh — M38 Live TrueType Typography Verification |
 | `verify-live-unicode.sh` | 128 | B | n | n | n | n | verify-live-unicode.sh -- milestone-twenty cards U2/U3/U11 class-B gate |
 | `verify-live-usb.sh` | 201 | B | y | y | y | n | verify-live-usb.sh -- claim 4116 (milestone seven, card I2) class-B gate: |
-| `verify-live-user-fs.sh` | 220 | B | n | y | y | n | verify-live-user-fs.sh -- claim 0510 (milestone 10 card F4) class-B gate: |
 | `verify-live-vf.sh` | 739 | B | y | n | n | n | verify-live-vf.sh -- M34 HF1+HF2+HF3+HF4+HF7 (issues #735-#738/#741) |
 | `verify-live-virtio-e2e.sh` | 256 | B | n | y | n | y | verify-live-virtio-e2e.sh -- claim 0680 (issue #523 item 3 capstone, the |
 | `verify-live-vm-depth.sh` | 139 | B | n | n | n | n | verify-live-vm-depth.sh -- Milestone 29 (Issue #598, Claim 8247) Class-B gate: |
@@ -253,7 +239,7 @@ Columns: `just` = justfile recipe of the same name; `inv` = named in
 | `verify-ttf-fonts.sh` | 62 | A | n | n | n | n | verify-ttf-fonts.sh -- class A: TrueType font engine verification for |
 | `verify-tx-diag.sh` | 263 | D | y | y | y | n | verify-tx-diag.sh -- claim 0018 gate: bisect the FIRST post-exit virtio TX |
 | `verify-tx-transition.sh` | 238 | D | n | y | y | n | verify-tx-transition.sh -- claim 0020 gate: which transition destroys |
-| `verify-unit-tests.sh` | 24 | A | n | y | y | n | Run the VirelaiOS unit test suites. |
+| `verify-unit-tests.sh` | 36 | A | n | y | y | n | Run the VirelaiOS unit test suites. |
 | `verify-vf-class-a.sh` | 118 | A | y | n | n | n | verify-vf-class-a.sh -- M34 HF1–HF4 (issues #735/#736/#737/#738) class-A |
 | `verify-virelai-probe.py` | 88 | tooling | n | n | n | n | verify-virelai-probe.py — class-A check for the W3 shim acceptance item. |
 | `verify-zc-corpus.sh` | 575 | B | n | y | n | y | verify-zc-corpus.sh -- M20 Z4a + Z4b (issues #760 + #761): the corpus |
