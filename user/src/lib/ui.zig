@@ -784,6 +784,7 @@ pub fn sleep_ticks(ticks: u64) void {
 }
 
 pub fn win_open(x: u32, y: u32, w: u32, h: u32) i64 {
+    _ = init_fonts();
     return syscall4(sys_win_open_num, x, y, w, h);
 }
 
@@ -1420,8 +1421,11 @@ pub var active_mono_cache: TrueTypeFace.GlyphCache = .{};
 var static_inter_face: TrueTypeFace = undefined;
 var static_fira_face: TrueTypeFace = undefined;
 
+pub var fonts_initialized: bool = false;
+
 pub fn init_fonts() bool {
-    if (active_ui_font != null) return true;
+    if (fonts_initialized) return active_ui_font != null;
+    fonts_initialized = true;
 
     // Probe /host/INTER.TTF
     const fd_inter = file_open("/host/INTER.TTF", MODE_READ);
@@ -1430,7 +1434,7 @@ pub fn init_fonts() bool {
         defer file_close(handle);
 
         const max_bytes: u64 = 1024 * 1024;
-        const va = mmap(0, max_bytes, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE);
+        const va = mmap(0, max_bytes, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE | MAP_POPULATE);
         if (va > 0) {
             const ptr: [*]u8 = @ptrFromInt(@as(usize, @intCast(va)));
             var total_read: usize = 0;
@@ -1455,7 +1459,7 @@ pub fn init_fonts() bool {
         defer file_close(handle);
 
         const max_bytes: u64 = 1024 * 1024;
-        const va = mmap(0, max_bytes, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE);
+        const va = mmap(0, max_bytes, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE | MAP_POPULATE);
         if (va > 0) {
             const ptr: [*]u8 = @ptrFromInt(@as(usize, @intCast(va)));
             var total_read: usize = 0;
@@ -1473,10 +1477,33 @@ pub fn init_fonts() bool {
         }
     }
 
+    if (active_ui_font != null) {
+        write_console("typography: Inter TrueType font loaded\n");
+    }
+    if (active_mono_font != null) {
+        write_console("typography: Fira Code TrueType font loaded\n");
+    }
+
     return active_ui_font != null;
 }
 
 pub fn draw_alpha_mask(win_id: u32, x: i32, y: i32, w: usize, h: usize, alpha: []const u8, fg_rgb: u32) void {
+    if (win_get_backing(win_id)) |backing| {
+        TrueTypeFace.blend_glyph_bgra(
+            backing.pixels[0 .. @as(usize, @intCast(backing.width)) * @as(usize, @intCast(backing.height))],
+            backing.width,
+            backing.width,
+            backing.height,
+            x,
+            y,
+            w,
+            h,
+            alpha,
+            fg_rgb,
+        );
+        return;
+    }
+
     for (0..h) |row| {
         const dy = y + @as(i32, @intCast(row));
         if (dy < 0) continue;
@@ -1623,7 +1650,7 @@ pub fn draw_text_mono(win_id: u32, text: []const u8, x: u32, y: u32, fg_rgb: u32
 
 pub fn draw_text_centered(win_id: u32, text: []const u8, rect: Rect, fg_rgb: u32) void {
     const text_w = measure_text(text);
-    const text_h: u32 = 8;
+    const text_h: u32 = if (active_ui_font != null) 12 else 8;
     const x = if (rect.w > text_w) rect.x + (rect.w - text_w) / 2 else rect.x;
     const y = if (rect.h > text_h) rect.y + (rect.h - text_h) / 2 else rect.y;
     draw_text(win_id, text, x, y, fg_rgb);
@@ -2066,6 +2093,32 @@ pub const TextInput = struct {
                 const inside = self.rect.contains(ev.arg0, ev.arg1);
                 const prev = self.focused;
                 self.focused = inside;
+                if (inside) {
+                    const click_x = ev.arg0;
+                    const text_x = self.rect.x + pad_sm;
+                    if (click_x <= text_x) {
+                        self.cursor = 0;
+                    } else {
+                        const rel_x = click_x - text_x;
+                        const text = self.get_text();
+                        var best_cursor: usize = 0;
+                        var cur_w: u32 = 0;
+                        while (best_cursor < text.len) {
+                            const next_w = measure_text(text[0 .. best_cursor + 1]);
+                            if (next_w > rel_x) {
+                                if (rel_x - cur_w < next_w - rel_x) {
+                                    break;
+                                } else {
+                                    best_cursor += 1;
+                                    break;
+                                }
+                            }
+                            cur_w = next_w;
+                            best_cursor += 1;
+                        }
+                        self.cursor = best_cursor;
+                    }
+                }
                 return prev != self.focused;
             },
             KEY_DOWN => {
@@ -2114,9 +2167,10 @@ pub const TextInput = struct {
         const text_x = self.rect.x + pad_sm;
         draw_text(win_id, self.get_text(), text_x, text_y, theme_text_primary());
 
-        // M37 DQ4: caret bar from tokens (I-beam state, observable pixels).
+        // M37 DQ4 / M38 TT2: caret bar from tokens (proportional metrics aware).
         if (self.focused) {
-            const cursor_x = text_x + @as(u32, @intCast(self.cursor)) * 8;
+            const prefix = self.get_text()[0..self.cursor];
+            const cursor_x = text_x + measure_text(prefix);
             if (cursor_x + caret_w <= self.rect.x + self.rect.w) {
                 win_fill(win_id, cursor_x, text_y, caret_w, caret_h, theme_caret());
             }
@@ -2200,7 +2254,8 @@ pub const ListView = struct {
             theme_bg();
 
         draw_rect(win_id, row_rect, bg);
-        draw_text(win_id, text, row_rect.x + 4, row_rect.y + (self.row_height - 8) / 2, theme_text_primary());
+        const text_y = row_rect.y + (if (self.row_height > 12) (self.row_height - 12) / 2 else 0);
+        draw_text(win_id, text, row_rect.x + 4, text_y, if (is_selected) theme_on_accent() else theme_text_primary());
     }
 };
 
@@ -4884,4 +4939,55 @@ test "dq4: set_theme + theme_name round-trip" {
     try std.testing.expect(set_theme("dark"));
     try std.testing.expectEqualStrings("dark", theme_name());
     try std.testing.expect(!set_theme("neon"));
+}
+
+test "m38: direct backing buffer draw_alpha_mask blends anti-aliased font glyphs" {
+    var pixels = [_]u32{0xFF101418} ** 400; // 20x20 buffer
+    win_set_backing(9, &pixels, 20, 20);
+    defer win_clear_backing(9);
+
+    const mask = [_]u8{
+        0,   64,
+        128, 255,
+    };
+
+    draw_alpha_mask(9, 5, 5, 2, 2, &mask, 0x00FF00);
+
+    // Pixel at (5, 5) had alpha=0: should remain unchanged background
+    try std.testing.expectEqual(@as(u32, 0xFF101418), pixels[5 * 20 + 5]);
+
+    // Pixel at (6, 5) had alpha=64: should be blended between bg and green
+    const p_64 = pixels[5 * 20 + 6];
+    const g_64 = (p_64 >> 8) & 0xFF;
+    try std.testing.expect(g_64 > 0x14 and g_64 < 0xFF);
+
+    // Pixel at (5, 6) had alpha=128: should be strongly blended
+    const p_128 = pixels[6 * 20 + 5];
+    const g_128 = (p_128 >> 8) & 0xFF;
+    try std.testing.expect(g_128 > g_64 and g_128 < 0xFF);
+
+    // Pixel at (6, 6) had alpha=255: should be pure green with full alpha
+    try std.testing.expectEqual(@as(u32, 0xFF00FF00), pixels[6 * 20 + 6]);
+}
+
+test "m38: TextInput proportional cursor calculation and click placement" {
+    var input = TextInput.init(Rect.make(10, 10, 150, 24));
+    input.set_text("Hello World");
+    input.focused = true;
+
+    // Mouse click before text start (x <= rect.x + pad_sm) should place cursor at 0
+    var ev_start = Event{ .kind = MOUSE_DOWN, .flags = 0, .seq = 1, .arg0 = 12, .arg1 = 15 };
+    _ = input.handle_event(&ev_start);
+    try std.testing.expectEqual(@as(usize, 0), input.cursor);
+
+    // Mouse click near character 3
+    const x_for_3 = 10 + pad_sm + measure_text("Hel");
+    var ev_mid = Event{ .kind = MOUSE_DOWN, .flags = 0, .seq = 2, .arg0 = x_for_3, .arg1 = 15 };
+    _ = input.handle_event(&ev_mid);
+    try std.testing.expectEqual(@as(usize, 3), input.cursor);
+
+    // Mouse click far to the right should place cursor at end
+    var ev_end = Event{ .kind = MOUSE_DOWN, .flags = 0, .seq = 3, .arg0 = 150, .arg1 = 15 };
+    _ = input.handle_event(&ev_end);
+    try std.testing.expectEqual(@as(usize, 11), input.cursor);
 }
