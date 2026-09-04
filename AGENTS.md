@@ -133,8 +133,11 @@ migration time became issues #859–#863. The binding rules:
 
 - **One worktree per agent.** Concurrent agents never share a checkout.
   Create yours with `just new-agent <name> <slug>` (worktree at
-  `../virelaios-<name>`, branch `agent/<name>/<slug>` off `origin/main`),
-  reattach later with `just resume-agent`, clean up with `just drop-agent`.
+  `../<clone-dir>-<name>` — e.g. `../dos-fb-games-buffy` — namespaced by the
+  clone's own directory name so separate clones in the same parent never
+  collide on one path; branch `agent/<name>/<slug>` off `origin/main`),
+  reattach later with `just resume-agent`, clean up with `just drop-agent`
+  (which still removes pre-namespace `../virelaios-<name>` worktrees).
   Each worktree has its own `.build/` and `artifacts/`, so builds and
   class-B VM gates cannot collide. File claims and comments from inside
   your own worktree.

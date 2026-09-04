@@ -228,33 +228,67 @@ claim TITLE:
 
 # Create an isolated per-agent checkout (issue #523 item 1; claim 4928):
 #   just new-agent buffy m18-t16-scripting
-# → worktree at ../virelaios-<name>, branch agent/<name>/<slug> off origin/main.
+# → worktree at ../<clone-dir>-<name> (e.g. ../dos-fb-games-buffy), branch
+#   agent/<name>/<slug> off origin/main. The worktree path is namespaced by
+#   the clone's own directory name, so two clones of this repo in the same
+#   parent (e.g. dos-fb-games and fb-dos-zig) never collide on one
+#   ../virelaios-<name> path.
 # Each worktree has its own .build/ and artifacts/, so concurrent agents
 # never contend for build caches or live VM gate files. File your claim
 # issue from inside the new worktree (gh issue create --label claim, or
 # just claim "<title>"), not from the main one.
+[script]
 new-agent NAME SLUG:
-    @test ! -e "../virelaios-{{NAME}}" \
-        || { echo "error: ../virelaios-{{NAME}} already exists (just resume-agent {{NAME}} <branch>?)"; exit 1; }
+    set -euo pipefail
+    ROOT="$(git rev-parse --show-toplevel)"
+    WT="../$(basename "$ROOT")-{{NAME}}"
+    if [ -e "$WT" ]; then
+        echo "error: $WT already exists (just resume-agent {{NAME}} <branch>? or drop-agent {{NAME}} if stale)" >&2
+        exit 1
+    fi
     git fetch -q origin
-    @git show-ref --verify -q "refs/heads/agent/{{NAME}}/{{SLUG}}" \
-        && { echo "error: branch agent/{{NAME}}/{{SLUG}} already exists — use: just resume-agent {{NAME}} agent/{{NAME}}/{{SLUG}}"; exit 1; } || true
-    git worktree add "../virelaios-{{NAME}}" -b "agent/{{NAME}}/{{SLUG}}" origin/main
-    @echo "→ cd ../virelaios-{{NAME}}"
+    if git show-ref --verify -q "refs/heads/agent/{{NAME}}/{{SLUG}}"; then
+        echo "error: branch agent/{{NAME}}/{{SLUG}} already exists — use: just resume-agent {{NAME}} agent/{{NAME}}/{{SLUG}}" >&2
+        exit 1
+    fi
+    git worktree add "$WT" -b "agent/{{NAME}}/{{SLUG}}" origin/main
+    echo "→ cd $WT"
 
 # Reattach an existing branch into its own worktree:
 #   just resume-agent buffy agent/buffy/m18-t16-scripting
+[script]
 resume-agent NAME BRANCH:
-    @test ! -e "../virelaios-{{NAME}}" \
-        || { echo "error: ../virelaios-{{NAME}} already exists"; exit 1; }
-    @git show-ref --verify -q "refs/heads/{{BRANCH}}" \
-        || { echo "error: no local branch {{BRANCH}} (git fetch + retry?)"; exit 1; }
-    git worktree add "../virelaios-{{NAME}}" "{{BRANCH}}"
-    @echo "→ cd ../virelaios-{{NAME}}"
+    set -euo pipefail
+    ROOT="$(git rev-parse --show-toplevel)"
+    WT="../$(basename "$ROOT")-{{NAME}}"
+    if [ -e "$WT" ]; then
+        echo "error: $WT already exists" >&2
+        exit 1
+    fi
+    if ! git show-ref --verify -q "refs/heads/{{BRANCH}}"; then
+        echo "error: no local branch {{BRANCH}} (git fetch + retry?)" >&2
+        exit 1
+    fi
+    git worktree add "$WT" "{{BRANCH}}"
+    echo "→ cd $WT"
 
-# Remove an agent worktree when its work is merged (branch kept until you delete it)
+# Remove an agent worktree when its work is merged (branch kept until you delete it).
+# Legacy ../virelaios-<name> worktrees (pre-namespace scheme) are removed via
+# the fallback path.
+[script]
 drop-agent NAME:
-    git worktree remove "../virelaios-{{NAME}}"
+    set -euo pipefail
+    ROOT="$(git rev-parse --show-toplevel)"
+    WT="../$(basename "$ROOT")-{{NAME}}"
+    LEGACY="../virelaios-{{NAME}}"
+    if [ -e "$WT" ]; then
+        git worktree remove "$WT"
+    elif [ -e "$LEGACY" ]; then
+        git worktree remove "$LEGACY"
+    else
+        echo "error: neither $WT nor $LEGACY exists" >&2
+        exit 1
+    fi
 
 # Show every checkout/worktree and its branch
 list-agents:
