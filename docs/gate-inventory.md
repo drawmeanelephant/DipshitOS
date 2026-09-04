@@ -113,7 +113,7 @@ card's close-out and graduate to the archive when their milestone closes.
 | `live-settings` | B | `bash tools/verify-live-settings.sh` | ✅ pass | 2026-08-15* |
 | `live-events` | B | `bash tools/verify-live-events.sh` | ✅ pass | 2026-08-15* |
 | `live-user-fs` | B | `bash tools/verify-live-user-fs.sh` | ✅ pass | 2026-08-15* |
-| `live-desktop` | B | `bash tools/verify-live-desktop.sh` | 🔴 pre-existing red — CALC window 512x424 > back-buffer cap 384 (595bc71 vs 19a6335); migration itself landed | 2026-08-24* |
+| `live-desktop` | B | `bash tools/verify-live-desktop.sh` | ✅ pass — the 384 cap was grown to 424 for CALC's M24 window (PR #579); re-verified PASS at HEAD (claim #912, #773) | 2026-09-04 |
 | `live-sys-kill` | B | `bash tools/verify-live-sys-kill.sh` | ✅ pass | 2026-08-24* |
 | `live-m16-image` | B | `bash tools/verify-live-m16-image.sh` | ✅ pass | 2026-08-24* |
 | `live-m16-guards` | B | `bash tools/verify-live-m16-guards.sh` | ✅ pass | 2026-08-24* |
@@ -181,7 +181,11 @@ the three rot classes from issue #528. Per-gate status after migration:
   (19a6335) — sys_win_open returns invalid for CALC on any boot since
   2026-08-22 (`calc: failed to open window`; newer main surfaces it as
   `desktop: launch CALC.BIN err=6`). Kernel/user constants out of the
-  migration's scope; left for the owner. `verify-live-user-fs` (builder
+  migration's scope; left for the owner. `live-desktop` CLOSED 2026-08-26
+  by PR #579 (commit 27940eb: `user_buf_h` 384→424 so the tallest app
+  window fits) and re-verified PASS at HEAD 2026-09-04 (claim #912 for
+  #773 — `calc: ready`, `desktop: launch CALC.BIN pid=4`, manifest
+  apps=22, `28 sys_exec calls=1`). `verify-live-user-fs` (builder
   subset), `live-net-nat` unchanged.
 - **Environment-blocked on this agent session** (TCC): `live-screen`,
   `live-text`, `live-glyphs`, `live-roadpops` (Screen Recording),
