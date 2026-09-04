@@ -152,7 +152,10 @@ vg_assert_one() {
             [ "$n" -ge "$a2" ] && ok=1
             detail="serial-count [$a1]=$n (min $a2) ok=$ok" ;;
         serial-exact)
-            local n; n="$(grep -a -cF -- "$a1" "$VG_SER" 2>/dev/null || true)"
+            # Whole-line match, mirroring grep -aFxc in the legacy scripts:
+            # a command echo (prompt prefix) and its output are different
+            # lines, so substring counting would double-count typed markers.
+            local n; n="$(grep -a -cFx -- "$a1" "$VG_SER" 2>/dev/null || true)"
             [ -n "$n" ] || n=0
             [ "$n" = "$a2" ] && ok=1
             detail="serial-exact [$a1]=$n (want $a2) ok=$ok" ;;

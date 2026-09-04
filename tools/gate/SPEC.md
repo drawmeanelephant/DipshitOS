@@ -34,7 +34,7 @@ Assert KINDs (serial = the run's `vm-serial.log` copy; output = runner stdout):
 | `serial-contains` | STR | STR occurs in serial (fixed-string) |
 | `serial-contains-file` | FILE | contents of `$RUN_DIR/FILE` occur in serial (generated fixtures) |
 | `serial-count` | STR MIN | STR occurs ≥ MIN times |
-| `serial-exact` | STR N | STR occurs exactly N times |
+| `serial-exact` | STR N | STR matches exactly N whole lines (mirrors `grep -aFxc`; a command echo and its output are different lines) |
 | `serial-absent` | STR | STR never occurs (e.g. `[EXC] parking:`) |
 | `serial-echo` | CMD | `gate_serial_has_echo` accepts CMD (colored-or-plain prompt echo) |
 | `output-contains` | STR | STR occurs in runner stdout (e.g. `input-string: ENABLED`) |
@@ -61,5 +61,8 @@ Rules:
   `artifacts/NAME-run-TAG.txt`, `artifacts/NAME-report.txt`, referenced
   captures/snapshots, all `VIRELAI_GATE_SUFFIX`-aware.
 - `VGATE_NO_BUILD=1` skips the build preamble (dev iteration only).
+  It is only valid when the already-built runner matches the spec's
+  `vgate_runner_flags` (plain vs `-DSPIKE`): a stale-variant binary fails
+  with the runner's SPIKE error, not a gate failure.
 - Extending this file (new KINDs, new commands) is a spec-format change:
   it needs its own issue and a pilot proving it. GF3/GF4 add specs only.
