@@ -199,6 +199,13 @@ verify-bss-budget:
 verify-coordination:
     bash tools/status/verify-issue-coordination.sh
 
+# Regenerate (default) or verify (--check: fail on drift) the machine-generated
+# gate fleet inventory (M40 GF1, issue #934 — docs/gate-fleet-inventory.md).
+# The check is the registration guard: every added/removed/renamed script
+# under tools/ must ship with a regenerated report.
+inventory-gates *ARGS:
+    bash tools/inventory-gates.sh {{ARGS}}
+
 # Lint the GitHub Actions workflows (class A — actionlint, pinned; self-bootstraps into .build/ when not on PATH)
 lint-workflows:
     bash tools/lint-workflows.sh
