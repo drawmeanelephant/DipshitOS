@@ -11,17 +11,17 @@
 
 | metric | count |
 |---|---|
-| top-level scripts (`tools/*.sh` + `tools/*.py`) | 185 |
+| top-level scripts (`tools/*.sh` + `tools/*.py`) | 173 |
 | class A (portable / CI) | 9 |
-| class B (VZ hardware gate) | 153 (of which `verify-live-*`: 146) |
+| class B (VZ hardware gate) | 141 (of which `verify-live-*`: 134) |
 | class C (interactive) | 1 |
 | class D (diagnostic) | 9 |
 | tooling (not gates) | 13 |
 | with a just recipe | 31 |
-| named in gate-inventory.md or the archive GATE block | 69 |
-| CI-sharded (archive GATE block `cmd=`) | 62 |
+| named in gate-inventory.md or the archive GATE block | 67 |
+| CI-sharded (archive GATE block `cmd=`) | 61 |
 | named in docs/status.md | 28 |
-| **orphans (gate-class, registered nowhere)** | **89** |
+| **orphans (gate-class, registered nowhere)** | **79** |
 
 ## Subdirectory tooling (not gates)
 
@@ -31,7 +31,7 @@
 | `tools/status/` | 6 | multiagent coordination gate + claim tooling (class A) |
 | `tools/context/` | 2 | context snapshot helpers |
 | `tools/ragshit/` | 84 | host-side context engine (developer tooling, not guest software) |
-| `tools/gate/` | 33 | M40 vgate harness + specs (GF2+) |
+| `tools/gate/` | 45 | M40 vgate harness + specs (GF2+) |
 
 ## Orphans
 
@@ -58,7 +58,6 @@ this list only needs to shrink):
 - `verify-live-dynamic-linking.sh`
 - `verify-live-editor.sh`
 - `verify-live-elf.sh`
-- `verify-live-fetch.sh`
 - `verify-live-file-browser.sh`
 - `verify-live-filemanager-bulk.sh`
 - `verify-live-filemanager-du.sh`
@@ -69,7 +68,6 @@ this list only needs to shrink):
 - `verify-live-godmenu-summon.sh`
 - `verify-live-hardening.sh`
 - `verify-live-history.sh`
-- `verify-live-httpd.sh`
 - `verify-live-image-viewer.sh`
 - `verify-live-inventory.sh`
 - `verify-live-ls-l.sh`
@@ -80,14 +78,6 @@ this list only needs to shrink):
 - `verify-live-m21-notif-dialog-transient.sh`
 - `verify-live-m21-persist-title-orphan.sh`
 - `verify-live-m21-tile-master.sh`
-- `verify-live-n1-ping.sh`
-- `verify-live-n11-download.sh`
-- `verify-live-n12-netprof.sh`
-- `verify-live-n4-top-net.sh`
-- `verify-live-n5-dns.sh`
-- `verify-live-n7-traceroute.sh`
-- `verify-live-net-tcp-syscall.sh`
-- `verify-live-netstat.sh`
 - `verify-live-ps.sh`
 - `verify-live-resmon.sh`
 - `verify-live-sb2-shared-anon.sh`
@@ -182,7 +172,6 @@ Columns: `just` = justfile recipe of the same name; `inv` = named in
 | `verify-live-elf.sh` | 142 | B | n | n | n | n | verify-live-elf.sh -- M22 D1 class-B gate (issue #324, claim 9815): the |
 | `verify-live-entropy.sh` | 203 | B | y | y | y | n | verify-live-entropy.sh -- claim 2665 class-B gate: the kernel's `random` |
 | `verify-live-events.sh` | 162 | B | n | y | y | n | verify-live-events.sh -- claim 9328 (milestone nine, card E6) class-B |
-| `verify-live-fetch.sh` | 152 | B | n | n | n | n | verify-live-fetch.sh -- claim 5416 (milestone twelve, card N3, Issue #150) |
 | `verify-live-file-browser.sh` | 284 | B | n | n | n | n | verify-live-file-browser.sh -- claim 4046 (Milestone 13, Card B4) class-B |
 | `verify-live-filemanager-bulk.sh` | 165 | B | n | n | n | n | verify-live-filemanager-bulk.sh -- M25 Lane A (claim 0434) class-B gate: |
 | `verify-live-filemanager-du.sh` | 98 | B | n | n | n | n | verify-live-filemanager-du.sh -- M25 (claim 4379) class-B gate: |
@@ -196,7 +185,6 @@ Columns: `just` = justfile recipe of the same name; `inv` = named in
 | `verify-live-godmenu-summon.sh` | 131 | B | n | n | n | n | verify-live-godmenu-summon.sh — M37 DQ1 God Menu live proof (issue #836) |
 | `verify-live-hardening.sh` | 204 | B | n | n | n | n | verify-live-hardening.sh -- claim 4482 (Milestone 14, Card S4) |
 | `verify-live-history.sh` | 228 | B | n | n | n | n | verify-live-history.sh -- milestone-eighteen card T4 class-B gate (issue #407): |
-| `verify-live-httpd.sh` | 110 | B | n | n | n | n | verify-live-httpd.sh -- Claim 0750 |
 | `verify-live-image-viewer.sh` | 155 | B | n | n | n | n | verify-live-image-viewer.sh — M36 IMG5 class-B live gate (issue #826): the |
 | `verify-live-input-depth.sh` | 189 | B | n | y | y | n | verify-live-input-depth.sh -- audit follow-up (issue #117) class-B gate: |
 | `verify-live-input.sh` | 359 | B | y | y | y | y | verify-live-input.sh -- claim 6050 (milestone seven, card I3) class-B |
@@ -216,17 +204,7 @@ Columns: `just` = justfile recipe of the same name; `inv` = named in
 | `verify-live-m21-notif-dialog-transient.sh` | 196 | B | n | n | n | n | tools/verify-live-m21-notif-dialog-transient.sh — class-B live acceptance gate for M21 |
 | `verify-live-m21-persist-title-orphan.sh` | 166 | B | n | n | n | n | tools/verify-live-m21-persist-title-orphan.sh — class-B live acceptance gate for M21 |
 | `verify-live-m21-tile-master.sh` | 391 | B | n | n | n | n | verify-live-m21-tile-master.sh -- claim 8777 (milestone twenty-one, cards |
-| `verify-live-n1-ping.sh` | 141 | B | n | n | n | n | verify-live-n1-ping.sh -- M26 N1 (issue #399, claim 0640) class-B gate: |
-| `verify-live-n11-download.sh` | 167 | B | n | n | n | n | verify-live-n11-download.sh -- M26 N11 (issue #438, claim 0640) class-B gate: |
-| `verify-live-n12-netprof.sh` | 131 | B | n | n | n | n | verify-live-n12-netprof.sh -- M26 N12 (issue #439, claim 7635) class-B gate: |
-| `verify-live-n4-top-net.sh` | 138 | B | n | n | n | n | verify-live-n4-top-net.sh -- M26 N4 (issue #402, claim 0640) class-B gate: |
-| `verify-live-n5-dns.sh` | 128 | B | n | n | n | n | verify-live-n5-dns.sh -- M26 N5 (issue #403, claim 0640) class-B gate: |
-| `verify-live-n7-traceroute.sh` | 134 | B | n | n | n | n | verify-live-n7-traceroute.sh -- M26 N7 (issue #434, claim 7635) class-B gate: |
 | `verify-live-net-arp.sh` | 348 | B | n | y | y | y | verify-live-arp.sh -- claim 7293 (milestone five, card N3) class-B gate: |
-| `verify-live-net-dhcp-autonomous.sh` | 220 | B | n | y | y | n | verify-live-net-dhcp-autonomous.sh -- issue #119 (audit follow-up 3) |
-| `verify-live-net-offline.sh` | 255 | B | n | y | n | n | verify-live-net-offline.sh -- M26 N13+N14 (march-m26, claim 8852) |
-| `verify-live-net-tcp-syscall.sh` | 168 | B | n | n | n | n | verify-live-net-tcp-syscall.sh -- claim 7483 (milestone twelve, card N1, Issue #148) |
-| `verify-live-netstat.sh` | 123 | B | n | n | n | n | verify-live-netstat.sh -- M26 N2 (issue #400) class-B gate: |
 | `verify-live-pointer-cg.sh` | 271 | B | n | y | y | n | verify-live-pointer-cg.sh -- milestone eight card U4 (claim 4993) CG |
 | `verify-live-pointer-virtio.sh` | 223 | B | n | y | n | y | verify-live-pointer-virtio.sh -- claim 9367 (issue #523 item 3 |
 | `verify-live-procs-syscall.sh` | 227 | B | y | y | y | n | verify-live-procs-syscall.sh -- claim 5799 (milestone-four follow-on 4, |
