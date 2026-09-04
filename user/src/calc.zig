@@ -2513,7 +2513,11 @@ fn gui_main() noreturn {
     var ta = win_res;
 
     ui.write_console("calc: open id=2\n");
-    if (ta.tab_aware) ui.write_console("calc: tab-aware (full-viewport)\n");
+    if (ta.tab_aware) {
+        ui.write_console("calc: tab-aware (full-viewport)\n");
+    } else {
+        ui.write_console("calc: not-tab-aware (shim or WND desktop)\n");
+    }
 
     app.draw(ta.win);
     ta.present();
@@ -2525,6 +2529,7 @@ fn gui_main() noreturn {
     ui.write_console("calc: settled\n");
 
     var ev: Event = undefined;
+
     while (true) {
         const wait_rc = ui.wait_event(&ev);
         if (wait_rc < 0) break;
@@ -2560,6 +2565,7 @@ fn gui_main() noreturn {
                     ta.close_and_exit(exit_status);
                 },
                 .resized => {
+                    ui.write_console("calc: resize relayout\n");
                     app.layout(ta.w, ta.h);
                     dirty = true;
                 },

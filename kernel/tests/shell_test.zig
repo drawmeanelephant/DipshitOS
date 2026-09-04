@@ -2600,3 +2600,34 @@ test "shell: M19 P7 reaper announces a real exited child with its status" {
     try std.testing.expect(std.mem.indexOf(u8, out, "[1] Done: QUICK.BIN (exit=7)\n") != null);
     try std.testing.expect(bg_job_latest() == null);
 }
+
+test "shell: wm autostart once — settings-driven, default shim (M42 SX5)" {
+    var mock = console.MockConsole(4096){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    defer settings.reset();
+    // Default (no `wm` key): the seam flips its once-flag and stays shim —
+    // no output, no exec attempt.
+    shell_mod.wm_autostart_attempted = false;
+    shell_mod.wm_autostart_once(&shell.mon);
+    try std.testing.expect(shell_mod.wm_autostart_attempted);
+    try std.testing.expect(std.mem.indexOf(u8, mock.contents(), "wm: autostart tabwm") == null);
+    // settings wm=tabwm with no file channel: the ONE attempt reports the
+    // failure honestly (exec_file → no_disk on host).
+    _ = settings.set("wm", "tabwm");
+    mock.reset();
+    shell_mod.wm_autostart_attempted = false;
+    shell_mod.wm_autostart_once(&shell.mon);
+    try std.testing.expect(std.mem.indexOf(u8, mock.contents(), "wm: autostart tabwm failed") != null);
+    // The once-flag holds: a second call is silent.
+    const before = mock.contents().len;
+    shell_mod.wm_autostart_once(&shell.mon);
+    try std.testing.expectEqual(before, mock.contents().len);
+    // A non-tabwm value is refused without an exec attempt.
+    _ = settings.set("wm", "wnd");
+    mock.reset();
+    shell_mod.wm_autostart_attempted = false;
+    shell_mod.wm_autostart_once(&shell.mon);
+    try std.testing.expect(shell_mod.wm_autostart_attempted);
+    try std.testing.expectEqual(@as(usize, 0), mock.contents().len);
+}

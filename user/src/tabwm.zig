@@ -27,6 +27,7 @@
 
 const std = @import("std");
 pub const ui = @import("lib/ui.zig");
+const sexiburger_menu = @import("lib/sexiburger.zig");
 const Rect = ui.Rect;
 const Event = ui.Event;
 
@@ -88,6 +89,8 @@ pub const sidebar_render_marker: []const u8 = "tabwm: sidebar-rendered\n";
 pub const tab_switch_marker: []const u8 = "tabwm: tab-switch";
 pub const tab_close_marker: []const u8 = "tabwm: win-close";
 pub const god_menu_marker: []const u8 = "tabwm: god-menu\n";
+/// M42 SX5 (issue #986): the god-menu overlay launched an app into a new tab.
+pub const launch_marker_prefix: []const u8 = "tabwm: launch ";
 
 // Geometry constants
 pub const fb_w: u32 = 1280;
@@ -463,6 +466,218 @@ pub fn close_tab(idx: usize) void {
 }
 
 // ---------------------------------------------------------------------------
+// Sexiburger god-menu overlay (M42 SX5, issue #986)
+// ---------------------------------------------------------------------------
+// Ctrl+Space or a click on the Sexiburger button summons the command
+// palette directly on the scanout (TABWM composes; it has no window
+// backing): type-to-filter over the APPS.TXT manifest (the M37 DQ1 wire
+// format, parsed by lib/sexiburger.zig), arrows move the selection, Enter
+// launches the selected app into a NEW TAB (sys_exec; the kernel's
+// WM_WINDOW stream delivers the window and the tab manager picks it up),
+// Esc dismisses. TABWM.BIN itself is filtered out (the WM seat is taken).
+
+pub const overlay_max_apps: usize = 16;
+pub const overlay_panel_w: u32 = 480;
+pub const overlay_panel_h: u32 = 470;
+pub const overlay_row_h: u32 = 22;
+pub const overlay_manifest_max: usize = 1024;
+
+var overlay_open: bool = false;
+var overlay_loaded: bool = false;
+var overlay_manifest_buf: [overlay_manifest_max]u8 = undefined;
+var overlay_bins: [overlay_max_apps][24]u8 = [_][24]u8{[_]u8{0} ** 24} ** overlay_max_apps;
+var overlay_bin_lens: [overlay_max_apps]usize = [_]usize{0} ** overlay_max_apps;
+var overlay_labels: [overlay_max_apps][32]u8 = [_][32]u8{[_]u8{0} ** 32} ** overlay_max_apps;
+var overlay_label_lens: [overlay_max_apps]usize = [_]usize{0} ** overlay_max_apps;
+var overlay_count: usize = 0;
+var overlay_filter: [24]u8 = [_]u8{0} ** 24;
+var overlay_filter_len: usize = 0;
+var overlay_filtered: [overlay_max_apps]usize = undefined;
+var overlay_filtered_count: usize = 0;
+var overlay_sel: usize = 0;
+
+/// Read + parse APPS.TXT into the static catalog. Manifest order, capped;
+/// TABWM.BIN skipped (the WM seat is taken). Returns the entry count.
+pub fn overlay_load_manifest() usize {
+    overlay_count = 0;
+    if (@import("builtin").os.tag != .freestanding) return 0;
+    const fd = ui.file_open("APPS.TXT", ui.MODE_READ);
+    if (fd < 0) return 0;
+    defer ui.file_close(@intCast(fd));
+    const n = ui.file_read(@intCast(fd), &overlay_manifest_buf);
+    if (n <= 0) return 0;
+    var parsed: [24]sexiburger_menu.MenuApp = undefined;
+    const parsed_n = sexiburger_menu.parse_apps_manifest(overlay_manifest_buf[0..@intCast(n)], &parsed);
+    for (parsed[0..parsed_n]) |app| {
+        if (overlay_count >= overlay_max_apps) break;
+        if (std.mem.eql(u8, app.name, "TABWM.BIN")) continue;
+        const bin_len = @min(app.name.len, 24);
+        @memcpy(overlay_bins[overlay_count][0..bin_len], app.name[0..bin_len]);
+        overlay_bin_lens[overlay_count] = bin_len;
+        const label_len = @min(app.desc.len, 32);
+        @memcpy(overlay_labels[overlay_count][0..label_len], app.desc[0..label_len]);
+        overlay_label_lens[overlay_count] = label_len;
+        overlay_count += 1;
+    }
+    overlay_loaded = true;
+    overlay_refresh_filter();
+    return overlay_count;
+}
+
+/// Rebuild the filtered index (case-insensitive substring over label+bin).
+pub fn overlay_refresh_filter() void {
+    overlay_filtered_count = 0;
+    overlay_sel = 0;
+    const q = overlay_filter[0..overlay_filter_len];
+    for (0..overlay_count) |i| {
+        if (q.len == 0) {
+            overlay_filtered[overlay_filtered_count] = i;
+            overlay_filtered_count += 1;
+            continue;
+        }
+        var hay: [64]u8 = undefined;
+        const label = overlay_labels[i][0..overlay_label_lens[i]];
+        const bin = overlay_bins[i][0..overlay_bin_lens[i]];
+        if (label.len + 1 + bin.len > hay.len) continue;
+        @memcpy(hay[0..label.len], label);
+        hay[label.len] = ' ';
+        @memcpy(hay[label.len + 1 .. label.len + 1 + bin.len], bin);
+        const needle_len = @min(q.len, 32);
+        var needle: [32]u8 = undefined;
+        for (q[0..needle_len], 0..) |c, k| needle[k] = std.ascii.toLower(c);
+        var hit = false;
+        var start: usize = 0;
+        while (start + needle_len <= label.len + 1 + bin.len) : (start += 1) {
+            var k: usize = 0;
+            while (k < needle_len and std.ascii.toLower(hay[start + k]) == needle[k]) : (k += 1) {}
+            if (k == needle_len) {
+                hit = true;
+                break;
+            }
+        }
+        if (hit) {
+            overlay_filtered[overlay_filtered_count] = i;
+            overlay_filtered_count += 1;
+        }
+    }
+}
+
+pub fn overlay_summon() void {
+    if (!overlay_loaded) _ = overlay_load_manifest();
+    overlay_open = true;
+    write_marker(god_menu_marker);
+}
+
+pub fn overlay_dismiss() void {
+    overlay_open = false;
+    overlay_filter_len = 0;
+    overlay_refresh_filter();
+}
+
+/// Launch the selected app into a new tab (the kernel's WM_WINDOW stream
+/// delivers the window; the tab manager adds and activates it). Returns
+/// false when the overlay is empty.
+pub fn overlay_launch_selected() bool {
+    if (overlay_filtered_count == 0) return false;
+    const entry = overlay_filtered[overlay_sel];
+    const bin = overlay_bins[entry][0..overlay_bin_lens[entry]];
+    var buf: [40]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{s}{s}\n", .{ launch_marker_prefix, bin }) catch launch_marker_prefix;
+    write_marker(msg);
+    _ = ui.exec_program(bin);
+    overlay_dismiss();
+    return true;
+}
+
+/// Handle one key while the overlay is open (the raw WM_KEY stream).
+/// Returns true when consumed.
+pub fn overlay_key(usage: u8) bool {
+    if (!overlay_open) return false;
+    switch (usage) {
+        0x29 => { // Escape: dismiss
+            overlay_dismiss();
+            return true;
+        },
+        0x28 => { // Enter: launch selected
+            _ = overlay_launch_selected();
+            return true;
+        },
+        0x2a => { // Backspace: trim the filter
+            if (overlay_filter_len > 0) {
+                overlay_filter_len -= 1;
+                overlay_refresh_filter();
+            }
+            return true;
+        },
+        0x52 => { // Up
+            if (overlay_sel > 0) overlay_sel -= 1;
+            return true;
+        },
+        0x51 => { // Down
+            if (overlay_sel + 1 < overlay_filtered_count) overlay_sel += 1;
+            return true;
+        },
+        else => {},
+    }
+    // Letters a..z, digits 1..0, space, minus, period: extend the filter.
+    const printable = (usage >= 0x04 and usage <= 0x1d) or (usage >= 0x1e and usage <= 0x27) or
+        usage == 0x2c or usage == 0x2d or usage == 0x37;
+    if (printable and overlay_filter_len < overlay_filter.len) {
+        const c: u8 = if (usage == 0x2c) ' ' else if (usage == 0x2d) '-' else if (usage == 0x37) '.' else if (usage <= 0x1d) @intCast(usage - 0x04 + 'a') else @intCast(usage - 0x1e + '1');
+        overlay_filter[overlay_filter_len] = c;
+        overlay_filter_len += 1;
+        overlay_refresh_filter();
+        return true;
+    }
+    return false;
+}
+
+/// Draw the overlay panel centered over the content viewport (call after
+/// draw_sidebar; the dim + panel overwrite the canvas only).
+pub fn draw_overlay(pixels: []u32) void {
+    if (!overlay_open) return;
+    const px = viewport_x + (viewport_w - overlay_panel_w) / 2;
+    const py: u32 = 80;
+    // Dim the viewport behind the panel (source-over alpha).
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(viewport_x, 0, viewport_w, fb_h), 0, 0xB0000000);
+    // Panel
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(px, py, overlay_panel_w, overlay_panel_h), 8, ui.sidebar_active_pill());
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(px, py, overlay_panel_w, 44), 8, ui.sidebar_hover_pill());
+    // Emblem + title
+    if (mascot_image()) |img| {
+        ui.draw_image_buf(pixels, fb_w, px + 10, py + 8, img);
+    }
+    ui.draw_text_sized(0, "SEXIBURGER", px + 46, py + 15, ui.font_size_tab_title, ui.sidebar_text_active());
+    // Filter line
+    ui.draw_text_sized(0, ">", px + 12, py + 52, ui.font_size_badge, ui.theme_accent());
+    if (overlay_filter_len > 0) {
+        ui.draw_text_sized(0, overlay_filter[0..overlay_filter_len], px + 24, py + 52, ui.font_size_badge, ui.sidebar_text_active());
+    } else {
+        ui.draw_text_sized(0, "type to filter, enter launches", px + 24, py + 52, ui.font_size_badge, ui.sidebar_text_inactive());
+    }
+    // App rows
+    var row: u32 = 0;
+    while (row < overlay_filtered_count and row < 17) : (row += 1) {
+        const entry = overlay_filtered[row];
+        const ry = py + 70 + row * overlay_row_h;
+        const is_sel = (row == overlay_sel);
+        if (is_sel) {
+            ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(px + 8, ry - 3, overlay_panel_w - 16, overlay_row_h - 2), 4, ui.theme_accent());
+        }
+        const label = overlay_labels[entry][0..overlay_label_lens[entry]];
+        const bin = overlay_bins[entry][0..overlay_bin_lens[entry]];
+        var line_buf: [64]u8 = undefined;
+        const line = std.fmt.bufPrint(&line_buf, "{s} — {s}", .{ label, bin }) catch label;
+        ui.draw_text_sized(0, line[0..@min(line.len, 56)], px + 14, ry + 1, ui.font_size_badge, if (is_sel) 0x000000 else ui.sidebar_text_active());
+    }
+    if (overlay_filtered_count == 0) {
+        ui.draw_text_sized(0, "no matching apps", px + 14, py + 74, ui.font_size_badge, ui.sidebar_text_inactive());
+    }
+    // Footer
+    ui.draw_text_sized(0, "esc dismiss", px + 12, py + overlay_panel_h - 20, ui.font_size_badge, ui.sidebar_text_inactive());
+}
+
+// ---------------------------------------------------------------------------
 // Canvas & Left Sidebar Drawing
 // ---------------------------------------------------------------------------
 
@@ -593,8 +808,7 @@ pub fn draw_sidebar(scan: [*]u32) void {
         }
     }
 
-    // 5. Bottom Status / Tray Area (y = 660 .. 720)
-    // Separator line at y = 660
+    // 5. Bottom Status / Tray Area (y = 660 .. 720)    // Separator line at y = 660
     var bx: u32 = 8;
     while (bx < 172) : (bx += 1) {
         pixels[660 * fb_w + bx] = 0xFF000000 | border_c;
@@ -617,6 +831,10 @@ pub fn draw_sidebar(scan: [*]u32) void {
     const clip_bg = if (hover_clip) ui.sidebar_hover_pill() else ui.sidebar_bg();
     ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, clip_rect, 4, clip_bg);
     ui.draw_text_sized(0, "CB", 144, 676, ui.font_size_badge, ui.theme_accent());
+
+    // M42 SX5: the Sexiburger god-menu overlay renders last (over the
+    // canvas + sidebar dim).
+    draw_overlay(pixels);
 }
 
 /// Proper Sexiburger mascot emblem (M42 SX1, issue #982): the real 🐙+🍔
@@ -708,7 +926,7 @@ pub fn handle_pointer(px: u32, py: u32, clicked: bool) void {
     // Sexiburger header hit test (y = 8..48)
     hover_sexiburger = (px >= 8 and px < 172 and py >= 8 and py < 48);
     if (hover_sexiburger and clicked) {
-        write_marker(god_menu_marker);
+        overlay_summon(); // emits `tabwm: god-menu` (M42 SX5)
     }
 
     // Theme toggle hit test (y = 672..696, x = 96..128)
@@ -780,9 +998,9 @@ pub fn handle_wm_key(usage: u8, flags: u16) void {
             return;
         }
 
-        // Ctrl+Space: summon God Menu overlay
+        // Ctrl+Space: summon the Sexiburger god-menu overlay (M42 SX5)
         if (usage == usage_space) {
-            write_marker(god_menu_marker);
+            overlay_summon();
             return;
         }
     }
@@ -913,6 +1131,9 @@ fn main() noreturn {
     _ = ui.init_fonts();
     _ = ui.sync_theme_from_host();
 
+    // M42 SX5: load the APPS.TXT catalog for the god-menu overlay
+    _ = overlay_load_manifest();
+
     var ev: Event = undefined;
 
     while (true) {
@@ -971,7 +1192,10 @@ fn main() noreturn {
             },
             wm_key_kind => {
                 const usage: u8 = @intCast(ev.arg0 & 0xff);
-                handle_wm_key(usage, ev.flags);
+                // M42 SX5: the god-menu overlay consumes the stream first.
+                if (!overlay_key(usage)) {
+                    handle_wm_key(usage, ev.flags);
+                }
             },
             else => {},
         }
@@ -1438,4 +1662,96 @@ test "tabwm: declare_fullscreen on an inactive tab defers the proposal (M42 SX2)
     try std.testing.expectEqual(@as(?usize, 0), manager.active_idx);
     // ...and the active tab's applied viewport is untouched.
     try std.testing.expectEqual(before, manager.tabs[0].applied_vp);
+}
+
+// ---------------------------------------------------------------------------
+// Unit Tests (M42 SX5 — the god-menu overlay)
+// ---------------------------------------------------------------------------
+fn overlay_seed_catalog() void {
+    overlay_count = 3;
+    const seeds = [_]struct { bin: []const u8, label: []const u8 }{
+        .{ .bin = "CALC.BIN", .label = "64-bit Calc" },
+        .{ .bin = "NOTEPAD.BIN", .label = "Text Editor" },
+        .{ .bin = "TOP.BIN", .label = "Task Manager" },
+    };
+    for (seeds, 0..) |s, i| {
+        @memcpy(overlay_bins[i][0..s.bin.len], s.bin);
+        overlay_bin_lens[i] = s.bin.len;
+        @memcpy(overlay_labels[i][0..s.label.len], s.label);
+        overlay_label_lens[i] = s.label.len;
+    }
+    overlay_filter_len = 0;
+    overlay_refresh_filter();
+}
+
+test "tabwm: god-menu overlay filters the manifest (M42 SX5)" {
+    overlay_seed_catalog();
+    try std.testing.expectEqual(@as(usize, 3), overlay_filtered_count);
+    // Case-insensitive substring over label + bin.
+    overlay_filter_len = 4;
+    @memcpy(overlay_filter[0..4], "calc");
+    overlay_refresh_filter();
+    try std.testing.expectEqual(@as(usize, 1), overlay_filtered_count);
+    try std.testing.expectEqual(@as(usize, 0), overlay_sel);
+    // No hits: the empty state renders, launch refuses.
+    overlay_filter_len = 3;
+    @memcpy(overlay_filter[0..3], "zzz");
+    overlay_refresh_filter();
+    try std.testing.expectEqual(@as(usize, 0), overlay_filtered_count);
+    overlay_open = true;
+    try std.testing.expect(!overlay_launch_selected());
+    overlay_dismiss();
+}
+
+test "tabwm: god-menu overlay keys — filter, select, launch, dismiss (M42 SX5)" {
+    overlay_seed_catalog();
+    overlay_open = true;
+    // 'e' extends the filter ("e" hits "64-bit Calc"? no — label+bin
+    // contains 'e' in "Text Editor"/"Task Manager"/"...Calc"? Calc has no
+    // 'e'... "64-bit Calc" + "CALC.BIN" has none; Editor + Manager do.
+    _ = overlay_key(0x08); // 'e'
+    try std.testing.expectEqual(@as(usize, 2), overlay_filtered_count);
+    // Backspace clears back to 3 hits.
+    _ = overlay_key(0x2a);
+    try std.testing.expectEqual(@as(usize, 3), overlay_filtered_count);
+    // Down moves the selection.
+    _ = overlay_key(0x51);
+    try std.testing.expectEqual(@as(usize, 1), overlay_sel);
+    // Up moves it back.
+    _ = overlay_key(0x52);
+    try std.testing.expectEqual(@as(usize, 0), overlay_sel);
+    // Enter launches the selected app (host: exec no-ops) and dismisses.
+    try std.testing.expect(overlay_launch_selected());
+    try std.testing.expect(!overlay_open);
+    try std.testing.expectEqual(@as(usize, 0), overlay_filter_len);
+    // Escape dismisses cleanly.
+    overlay_open = true;
+    try std.testing.expect(overlay_key(0x29));
+    try std.testing.expect(!overlay_open);
+}
+
+test "tabwm: overlay keys are consumed only while open (M42 SX5)" {
+    overlay_open = false;
+    // With the overlay closed, letter keys fall through (not consumed).
+    try std.testing.expect(!overlay_key(0x04));
+}
+
+test "tabwm: god-menu overlay accepts digits, minus, period in the filter (M42 SX5)" {
+    overlay_seed_catalog();
+    overlay_open = true;
+    // "64-bit": digits 6,4 (usages 0x23,0x21), minus (0x2d), b,i,t.
+    _ = overlay_key(0x23);
+    _ = overlay_key(0x21);
+    try std.testing.expectEqual(@as(usize, 2), overlay_filter_len);
+    _ = overlay_key(0x2d);
+    try std.testing.expectEqual(@as(usize, 3), overlay_filter_len);
+    try std.testing.expectEqual(@as(u8, '-'), overlay_filter[2]);
+    _ = overlay_key(0x05); // b
+    _ = overlay_key(0x0c); // i
+    _ = overlay_key(0x17); // t
+    try std.testing.expectEqual(@as(usize, 6), overlay_filter_len);
+    overlay_refresh_filter();
+    // Exactly one hit: "64-bit Calc" (CALC.BIN).
+    try std.testing.expectEqual(@as(usize, 1), overlay_filtered_count);
+    overlay_dismiss();
 }

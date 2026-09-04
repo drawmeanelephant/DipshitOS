@@ -206,6 +206,32 @@ pub fn bg_job_free(n: usize) void {
 /// The reaper: print `[N] Done: NAME (exit=CODE)` once per finished job.
 /// Called from the shell idle path. A vanished descriptor (registry
 /// recycled under us) reports `(gone)` — honest about what was observed.
+/// M42 SX5 (issue #986): the default-manager seam state — the shell idle
+/// attempts the settings-driven WM boot at most ONCE per session.
+pub var wm_autostart_attempted: bool = false;
+
+/// The persisted-default WM boot: when `settings set wm tabwm` is set and
+/// no WM server is registered yet, launch TABWM.BIN from the shell idle
+/// (the same `tabwm start` exec path). No key, any other value, an already
+/// seated WM, or a re-entry after a failed attempt → nothing (the default
+/// VM stays shim-only; the gate fleet is untouched).
+pub fn wm_autostart_once(m: *monitor.Monitor) void {
+    if (wm_autostart_attempted) return;
+    wm_autostart_attempted = true;
+    if (wm_server.registered()) return;
+    settings.ensure_init();
+    const val = settings.get("wm") orelse return;
+    if (!std.mem.eql(u8, val, "tabwm")) return;
+    switch (exec_mod.exec_file("TABWM.BIN", &.{})) {
+        .ok => {
+            m.console.puts("wm: autostart tabwm (settings wm=tabwm)\n");
+        },
+        else => {
+            m.console.print_line("wm: autostart tabwm failed (TABWM.BIN not found?)");
+        },
+    }
+}
+
 pub fn bg_reap(mon: *monitor.Monitor) void {
     for (&bg_jobs, 0..) |*job, i| {
         const jpid = job.pid orelse continue;
@@ -3703,6 +3729,13 @@ fn park_body(mon: *monitor.Monitor) callconv(.c) void {
                 mon.console.print_line("wm: unregistered, shim resumed");
             }
             svclock.release_set(svclock.dom_bit(.win) | svclock.dom_bit(.ev));
+            // M42 SX5 (issue #986): the default-manager seam. A persisted
+            // `settings set wm tabwm` boots the tabbed desktop ONCE per
+            // session from the shell idle (after the input drain so the
+            // boot keystrokes have settled). The DEFAULT VM — no `wm` key —
+            // stays shim-only (the load-bearing gate invariant); gates opt
+            // in explicitly as before.
+            wm_autostart_once(mon);
             // Card N11 (claim 5357): the bounded retransmission timer —
             // polled here (the idle loop is the time engine — the
             // card-N9 clock pattern). AFTER the drain, so an ACK the
