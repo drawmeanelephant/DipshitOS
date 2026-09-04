@@ -751,7 +751,15 @@ pub fn register_worker(entry: u64) ?usize {
     const id = spawn("worker", entry, spsr_el1h_irqs, &worker_stack, mmu.kernel_root_phys(), 0) orelse return null;
     // The worker is console-free (note_advance + request_report + spin),
     // so it is the one task safe on a secondary core (the polled virtio
-    // TX has no lock — anything that prints must stay on core 0).
+    // TX has no lock — anything that prints must stay on core 0). Claim
+    // 907 regression lesson (sb4): with the worker core-0-only, a
+    // secondary core's empty-ring claim picks a floating USER task
+    // instead, and a yield-looping user task on an AP floods the shell's
+    // unbounded secondary-runs drain, starving heartbeat/dui. The worker
+    // on an AP spins quietly (EL1h lone-task rule: no successor, no
+    // preemption churn), and any pinned task on that core preempts it at
+    // the next tick (successor exists), so the claim-907 starve hazard
+    // does not materialize.
     tasks[id].secondary_ok = true;
     return id;
 }
@@ -1988,7 +1996,21 @@ pub fn tick() void {
             return;
         }
     }
-    if (c != 0 and next_runnable_for(current[c], c) == null) return;
+    // A lone task on a secondary core keeps running with no successor
+    // (claim 9498: no always-ready idle fallback there, so parking would
+    // stall it). But an EL0 USER task must still witness each timer
+    // quantum: core 0 always preempts (its idle fallback) while a lone
+    // EL0t task on a secondary core would otherwise run forever with NO
+    // preemption at all — the boot payload's EL0-visible timer-preemption
+    // witness (claim 8215, spun on at `userspace.entry` 4:) only fires on
+    // a REAL preemption, so on multi-AP boots the payload can hang before
+    // its exit (the #810 family, near-deterministic once 2+ APs can each
+    // claim a ring-0 member and leave the payload alone on another core).
+    // Fall through to switch_context for EL0t: its wrap self-rotation
+    // (push + re-claim at the ring wrap) preempts the task once per
+    // quantum — witness included — at the cost of one save/restore per
+    // second. EL1h kernel tasks (the worker) keep the no-churn bail-out.
+    if (c != 0 and next_runnable_for(current[c], c) == null and (spsr & 0xf) != spsr_el0t_irqs) return;
     timer_switch_context(exceptions.resume_frame[c], elr, spsr, exceptions.resume_sp_el0[c]);
     apply_pending();
 }
@@ -2341,6 +2363,9 @@ pub const TaskInfo = struct {
     /// SMP user tasks (claim 2369): the only core this task may run on
     /// (0 = any core). Set by `pin_task` via `exec -c<core>`.
     pin_core: usize,
+    /// May a secondary core steal this task off ring 0 (claim 9498)? False
+    /// for a task pinned to CORE 0 (`exec -c0`, claim 907) and the shell.
+    secondary_ok: bool,
 };
 
 pub const Stats = struct {
@@ -2376,6 +2401,7 @@ pub fn task_info(id: usize) ?TaskInfo {
         .resumes = tasks[id].resumes,
         .advances = tasks[id].advances,
         .pin_core = tasks[id].pin_core,
+        .secondary_ok = tasks[id].secondary_ok,
     };
 }
 

@@ -120,16 +120,26 @@ export fn secondary_entry_asm() align(16) callconv(.naked) void {
     }
 }
 
-/// Boot all available secondary cores using PSCI CPU_ON.
+/// Boot every secondary core the hypervisor exposes (claim 907 / issue
+/// #858: the four-core four-domain stress gate boots all 4 VCPUs).
+/// Each mpidr (Aff0 = core id) is powered on via PSCI CPU_ON; the first
+/// failure (PSCI_NOT_PRESENT — no VCPU at that affinity — or any other
+/// non-success) ends the sweep. `num_cores` counts the cores that came
+/// up: 1 (BSP only) on a 1-VCPU VM, 2/3/4 as the hypervisor provides.
 pub fn boot_secondary_cores() void {
     if (comptime builtin.is_test or builtin.cpu.arch != .aarch64) return;
-    // On Virtualization.framework, 2 CPUs are configured (Affinity 0 and Affinity 1)
-    const target_mpidr: u64 = 0x1;
+    // On Virtualization.framework each configured VCPU is one Aff0
+    // (mpidr 0..cpuCount-1); VZ's virtual PSCI answers PSCI_NOT_PRESENT
+    // for affinities beyond the configured count, which ends the sweep.
     const entry_pa = @intFromPtr(&secondary_entry_asm);
-
-    const res = psci.cpu_on(target_mpidr, entry_pa, 0);
-    if (res == .success or res == .already_on or res == .on_pending) {
-        num_cores = 2;
+    var target: u64 = 1;
+    while (target < max_cores) : (target += 1) {
+        const res = psci.cpu_on(target, entry_pa, 0);
+        if (res == .success or res == .already_on or res == .on_pending) {
+            num_cores = @intCast(target + 1);
+        } else {
+            break;
+        }
     }
 }
 
