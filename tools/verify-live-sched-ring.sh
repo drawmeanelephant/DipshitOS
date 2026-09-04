@@ -3,19 +3,24 @@
 # verify-live-sched-ring.sh -- claim 881 / issue #856 class-B gate: the
 # per-core ready rings proven on real VZ hardware — TWO user programs
 # doing tight-loop yield/sleep on/around core 1, with EXACT counts.
+# Extended by issue #857 (claim 910): the generalized cross-core steal —
+# every migration prints `smp: steal runs=N task=NAME from=RING`, and the
+# gate asserts steals in BOTH directions.
 #
 # The #856 success criterion: two cores running tight-loop yield/sleep
 # user tasks — no lost wakeups, no duplicate staging, resumes consistent
 # with the ring's switches. The gate choreography:
 #
 #   1. `exec -c1 SCHEDRING.BIN` — the monitor flag pins the spawned task
-#      to core 1 (home ring 1; core 0's ring-0-only view skips it).
+#      to core 1 (home ring 1; never stolen — `steal_eligible` keeps
+#      pinned tasks home).
 #   2. `exec SCHEDRING.BIN` — a SECOND copy, unpinned (home ring 0): it
-#      is stolen onto core 1 by the idle-branch steal view whenever core
-#      1 parks, and is also claimable by core 0 — so BOTH cores rotate
-#      over the pair, and every ring transition (ring 0 <-> ring 1,
-#      steal, park, wake, exit) is exercised while both programs are
-#      mid-flight.
+#      migrates between the cores in both directions (ring 0 -> core 1
+#      via the WFE/tick steal, ring 1 -> core 0 via the issue-857
+#      generalized steal when it is preempted onto ring 1) — so BOTH
+#      cores rotate over the pair, and every ring transition (ring 0 <->
+#      ring 1, steal, park, wake, exit) is exercised while both programs
+#      are mid-flight.
 #   3. Each program runs `sleep_count` x sys_sleep(1) then
 #      `yield_count` x sys_yield in a tight loop, writes its exact-count
 #      markers, and exits 0. The proof semantics:
@@ -28,7 +33,12 @@
 #      The markers must land EXACTLY TWICE each (once per process),
 #      together with TWO exit/reap report pairs.
 #   4. The shell auto-prints `smp: secondary runs=N task=SCHEDRING.BIN`
-#      — the name-based proof that a SCHEDRING copy ran on core 1.
+#      — the name-based proof that a SCHEDRING copy ran on core 1 — AND
+#      `smp: steal runs=N task=SCHEDRING.BIN from=R` lines for every
+#      cross-core migration. The gate asserts at least one steal FROM
+#      ring 0 (core 1 pulled the floating copy) and at least one FROM
+#      ring 1 (core 0 pulled it back — the issue-857 direction, impossible
+#      under the old ring-0-only core-0 view).
 #
 # Evidence saved under artifacts/: live-sched-ring-gate.txt,
 # live-sched-ring-report.txt, live-sched-ring-run-<NN>.txt,
@@ -100,7 +110,7 @@ run_one() {
     local SER="$serial_copy"
 
     local bytes=0 banner=0 listed=0 loaded=0 two_running=0 slept=0 yielded=0 \
-        done=0 exited=0 procs_exited=0 reaped=0 secondary=0 echo_ok=0 fatal=0
+        done=0 exited=0 procs_exited=0 reaped=0 secondary=0 steal0=0 steal1=0 echo_ok=0 fatal=0
     if [ -f "$SER" ]; then
         bytes="$(wc -c < "$SER" | tr -d ' ')"
         [ "$(grep -aFxc -- "VirelaiOS kernel has seized control." "$SER" || true)" = 1 ] && banner=1
@@ -132,14 +142,19 @@ run_one() {
         # core (the evidence line prints the process name of the last
         # secondary-core run).
         grep -aEq -- "smp: secondary runs=[0-9]+ task=SCHEDRING.BIN" "$SER" && secondary=1 || true
+        # Issue #857: migration in BOTH directions — at least one steal
+        # of the floating copy FROM ring 0 (core 1 pulled it) and at
+        # least one FROM ring 1 (core 0 pulled it back).
+        grep -aEq -- "smp: steal runs=[0-9]+ task=SCHEDRING.BIN from=0" "$SER" && steal0=1 || true
+        grep -aEq -- "smp: steal runs=[0-9]+ task=SCHEDRING.BIN from=1" "$SER" && steal1=1 || true
         [ "$(grep -aFxc -- "rx-schedring-ok" "$SER" || true)" = 1 ] && echo_ok=1
         grep -qF -- "[EXC] parking:" "$SER" && fatal=1 || true
     fi
-    echo "$tag: runner-rc=$rc serial-bytes=$bytes banner=$banner listed=$listed loaded=$loaded two-running=$two_running slept=$slept yielded=$yielded done=$done exited=$exited procs-exited=$procs_exited reaped=$reaped secondary=$secondary echo=$echo_ok fatal=$fatal" | tee -a "$REPORT"
+    echo "$tag: runner-rc=$rc serial-bytes=$bytes banner=$banner listed=$listed loaded=$loaded two-running=$two_running slept=$slept yielded=$yielded done=$done exited=$exited procs-exited=$procs_exited reaped=$reaped secondary=$secondary steal0=$steal0 steal1=$steal1 echo=$echo_ok fatal=$fatal" | tee -a "$REPORT"
     [ "$rc" = 0 ] && [ "$banner" = 1 ] && [ "$listed" = 1 ] && [ "$loaded" = 2 ] && \
         [ "$two_running" = 1 ] && [ "$slept" = 1 ] && [ "$yielded" = 1 ] && [ "$done" = 1 ] && \
         [ "$exited" = 1 ] && [ "$procs_exited" = 1 ] && [ "$reaped" = 1 ] && \
-        [ "$secondary" = 1 ] && [ "$echo_ok" = 1 ] && [ "$fatal" = 0 ]
+        [ "$secondary" = 1 ] && [ "$steal0" = 1 ] && [ "$steal1" = 1 ] && [ "$echo_ok" = 1 ] && [ "$fatal" = 0 ]
 }
 
 : > "$REPORT"
@@ -149,11 +164,13 @@ run_one() {
     echo "script: $(cat "$SCRIPT" | tr '\n' '|')"
     echo "date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     echo
-    echo "One SCHEDRING.BIN is pinned to core 1 (home ring 1), one floats"
-    echo "(home ring 0, stolen onto core 1 by the idle-branch steal view);"
+    echo "One SCHEDRING.BIN is pinned to core 1 (home ring 1, never"
+    echo "stolen), one floats (home ring 0, migrating both directions);"
     echo "each runs 4 x sys_sleep(1) + 32 x sys_yield and prints exact-count"
     echo "markers. A lost wakeup hangs before 'slept=4', a duplicate staging"
     echo "or corrupt save/restore breaks the exact counts or faults the VM."
+    echo "At least one 'smp: steal ... from=0' AND one 'from=1' line prove"
+    echo "the issue-857 bidirectional migration."
     echo
 } | tee -a "$REPORT"
 
@@ -169,7 +186,7 @@ done
 
 echo
 if [ "$pass" = "$BOOTS" ]; then
-    echo "verify-live-sched-ring: PASS — per-core ready rings hold under two yield/sleep programs (exact sleep/yield counts, clean exits + reaps, secondary evidence) ($pass/$BOOTS boot(s))."
+    echo "verify-live-sched-ring: PASS — per-core ready rings hold under two yield/sleep programs (exact sleep/yield counts, clean exits + reaps, secondary evidence, bidirectional steal) ($pass/$BOOTS boot(s))."
     exit 0
 else
     echo "verify-live-sched-ring: FAIL — $pass/$BOOTS boot(s) passed; see artifacts/live-sched-ring-report.txt and artifacts/live-sched-ring-serial-*.log"
