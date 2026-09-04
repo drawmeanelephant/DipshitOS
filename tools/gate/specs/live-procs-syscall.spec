@@ -1,0 +1,85 @@
+# live-procs-syscall.spec -- the process table read FROM EL0 via
+# sys_procs (slot 7): PEER.BIN's snapshot names the counter running,
+# itself running, and the exited boot payload; the monitor agrees;
+# the IPC flow stays live both ways (>= 2 each, echoes >= 90% of
+# sends, no echo beyond the last send); both stay running, never
+# exit. No --script-expect (the full window must elapse).
+# Mirrors tools/verify-live-procs-syscall.sh (claim 5799).
+
+vgate_name live-procs-syscall "EL0 process-table snapshot via sys_procs on VZ"
+vgate_share seed
+vgate_runner_flags -Xswiftc -DSPIKE
+vgate_repeat 1 BOOTS
+
+vgate_file script.txt <<'EOF'
+ls
+exec PEER.BIN
+exec COUNTER.BIN 1
+procs
+echo rx-procs-syscall-ok
+EOF
+
+vgate_file script2.txt <<'EOF'
+procs
+echo rx-procs-syscall-ok2
+EOF
+
+vgate_run 01 -- --script '$RUN_DIR/script.txt' --script-after 'tasks user-el0 exited status=7' --script2 '$RUN_DIR/script2.txt' --script2-after 'peer: got ping 1' --timeout 60
+
+vgate_assert 01 serial-exact 'VirelaiOS kernel has seized control.' 1
+vgate_assert 01 serial-count 'PEER.BIN' 2
+vgate_assert 01 serial-count 'exec: loaded PEER.BIN size=' 1
+vgate_assert 01 serial-count 'exec: loaded COUNTER.BIN size=' 1
+vgate_assert 01 serial-exact 'rx-procs-syscall-ok' 1
+vgate_assert 01 serial-exact 'rx-procs-syscall-ok2' 1
+vgate_assert 01 serial-absent '[EXC] parking:'
+vgate_assert 01 python <<'PY'
+import os, re, sys
+ser = open(os.environ["VG_SER"], errors="replace").read()
+lines = ser.splitlines()
+# Legacy -E: the EL0 snapshot rows (honest table: the counter
+# running, the peer itself running, the exited boot payload, and a
+# state word on some row).
+for p in (r"peer: sees [0-9]+ COUNTER.BIN running",
+          r"peer: sees [0-9]+ PEER.BIN running",
+          r"peer: sees [0-9]+ user-el0 exited",
+          r"peer: sees [0-9]+ [^ ]+ (created|running|exited)"):
+    if not re.search(p, ser):
+        sys.exit("FAIL: ERE absent: %s" % p)
+# Monitor's own read: both running, distinct tasks + stacks.
+def first_row(name):
+    for l in lines:
+        if re.search(r"procs: id=[0-9]+ name=%s state=running" % name, l):
+            return l
+    return None
+pr, cr = first_row("PEER.BIN"), first_row("COUNTER.BIN")
+if pr is None or cr is None:
+    sys.exit("FAIL: monitor running rows absent")
+pt = re.search(r".*task=([0-9]+).*", pr)
+ct = re.search(r".*task=([0-9]+).*", cr)
+ps = re.search(r".*stack=0x([0-9a-f]{16}).*", pr)
+cs = re.search(r".*stack=0x([0-9a-f]{16}).*", cr)
+if not pt or not ct or pt.group(1) == ct.group(1):
+    sys.exit("FAIL: task ids not distinct")
+if not ps or not cs or ps.group(1) == cs.group(1):
+    sys.exit("FAIL: stack VAs not distinct")
+# Flow semantic: live both ways (>= 2 distinct each), echoes >= 90%
+# of sends (M28 SMP split-marker note), no echo beyond the last send.
+sends = sorted({int(m.group(1)) for m in
+                (re.search(r"ipc: ping ([0-9]+)", l) for l in lines) if m})
+echoes = sorted({int(m.group(1)) for m in
+                 (re.search(r"peer: got ping ([0-9]+)", l) for l in lines) if m})
+if not sends or not echoes or len(echoes) < 2:
+    sys.exit("FAIL: flow too thin sends=%d echoes=%d" % (len(sends), len(echoes)))
+if len(echoes) * 10 < len(sends) * 9:
+    sys.exit("FAIL: echo ratio off echoes=%d sends=%d" % (len(echoes), len(sends)))
+if echoes[-1] > sends[-1]:
+    sys.exit("FAIL: echo beyond last send")
+# Both STILL running; neither ever exited (exact-zero counts).
+if first_row("PEER.BIN") is None or first_row("COUNTER.BIN") is None:
+    sys.exit("FAIL: final running rows absent")
+if (sum(1 for l in lines if "name=PEER.BIN state=exited" in l) != 0 or
+        sum(1 for l in lines if "name=COUNTER.BIN state=exited" in l) != 0):
+    sys.exit("FAIL: a party exited")
+print("procs-syscall snapshot + flow ok")
+PY
