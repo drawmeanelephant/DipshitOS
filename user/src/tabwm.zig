@@ -1,4 +1,4 @@
-//! VirelaiOS M39 TWM1 — TABWM.BIN, the browser-style tabbed window manager server (issue #928).
+//! VirelaiOS M39 TWM2 — TABWM.BIN, the browser-style tabbed window manager server (issue #929).
 //!
 //! Replaces the 1990s floating overlapping window model with a sleek, browser-like
 //! tabbed desktop environment:
@@ -9,6 +9,17 @@
 //!                 proportional 14pt Inter titles, and close buttons.
 //!       * Bottom: Status tray (13pt Inter clock, theme toggle [D]/[L], clipboard badge).
 //!   - Content Viewport: unbroken full 720px vertical scanout height, 1100px wide (x=180..1280, y=0..720).
+//!       * Active tab receives full viewport (180, 0, 1100, 720).
+//!       * Inactive tabs are hidden (sys_wmctl(set_state)).
+//!   - Mouse Routing:
+//!       * Clicking tab pill activates tab.
+//!       * Clicking 'x' sends WIN_CLOSE and closes tab.
+//!       * Clicking Sexiburger summons God Menu command palette.
+//!   - Keyboard Shortcuts:
+//!       * Ctrl+Tab / Ctrl+Shift+Tab: Cycle active tabs forward / backward.
+//!       * Ctrl+1..9: Jump directly to tab index 1..9.
+//!       * Ctrl+W: Close active tab.
+//!       * Ctrl+Space: Summon Sexiburger command palette overlay.
 //!   - Zero Heap Allocation: all tab mirrors, state, and rendering operate strictly in static BSS and stack.
 //!   - Direct Scanout Ownership: maps the 1280x720 framebuffer via M33 Seam B (`sys_mmap` with
 //!     `m33_surf_scan_tag`) for sub-millisecond anti-aliased composition.
@@ -24,6 +35,8 @@ const Event = ui.Event;
 // ---------------------------------------------------------------------------
 const sys_write: u64 = 1;
 const sys_yield_num: u64 = 2;
+const sys_ipc_send: u64 = 5;
+const sys_ipc_recv: u64 = 6;
 const sys_wait_event_num: u64 = 22;
 const sys_clipboard_get: u64 = 39;
 const sys_mmap: u64 = 63;
@@ -34,6 +47,8 @@ const wmctl_register: u64 = 1;
 const wmctl_set_window: u64 = 2;
 const wmctl_request_present: u64 = 3;
 const wmctl_set_state: u64 = 4;
+const wmctl_alt_tab: u64 = 5;
+const alt_tab_commit: u64 = 3;
 const wmctl_tray: u64 = 10;
 const wmctl_dialog: u64 = 11;
 
@@ -51,12 +66,28 @@ pub const wm_key_kind: u16 = 21;
 
 pub const btn_left: u8 = 0x01;
 
-// Pinned markers
+// HID keyboard usage constants (USB HID Usage Tables §10 Keyboard/Keypad Page)
+pub const usage_a: u8 = 0x04;
+pub const usage_w: u8 = 0x1a;
+pub const usage_1: u8 = 0x1e;
+pub const usage_2: u8 = 0x1f;
+pub const usage_3: u8 = 0x20;
+pub const usage_4: u8 = 0x21;
+pub const usage_5: u8 = 0x22;
+pub const usage_6: u8 = 0x23;
+pub const usage_7: u8 = 0x24;
+pub const usage_8: u8 = 0x25;
+pub const usage_9: u8 = 0x26;
+pub const usage_tab: u8 = 0x2b;
+pub const usage_space: u8 = 0x2c;
+
+// Pinned markers (grepped by class-B live gates and tests)
 pub const registered_marker: []const u8 = "tabwm: registered\n";
 pub const present_marker: []const u8 = "tabwm: present\n";
 pub const sidebar_render_marker: []const u8 = "tabwm: sidebar-rendered\n";
 pub const tab_switch_marker: []const u8 = "tabwm: tab-switch";
-pub const god_menu_marker: []const u8 = "tabwm: god-menu";
+pub const tab_close_marker: []const u8 = "tabwm: win-close";
+pub const god_menu_marker: []const u8 = "tabwm: god-menu\n";
 
 // Geometry constants
 pub const fb_w: u32 = 1280;
@@ -96,6 +127,19 @@ fn syscall2(num: u64, a0: u64, a1: u64) i64 {
     return res;
 }
 
+fn syscall3(num: u64, a0: u64, a1: u64, a2: u64) i64 {
+    if (@import("builtin").os.tag != .freestanding) return 0;
+    var res: i64 = undefined;
+    asm volatile ("svc #0"
+        : [res] "={x0}" (res),
+        : [num] "{x8}" (num),
+          [a0] "{x0}" (a0),
+          [a1] "{x1}" (a1),
+          [a2] "{x2}" (a2),
+        : .{ .memory = true });
+    return res;
+}
+
 fn syscall4(num: u64, a0: u64, a1: u64, a2: u64, a3: u64) i64 {
     if (@import("builtin").os.tag != .freestanding) return 0;
     var res: i64 = undefined;
@@ -130,19 +174,6 @@ fn write_marker(msg: []const u8) void {
     _ = syscall3(sys_write, 1, @intFromPtr(msg.ptr), msg.len);
 }
 
-fn syscall3(num: u64, a0: u64, a1: u64, a2: u64) i64 {
-    if (@import("builtin").os.tag != .freestanding) return 0;
-    var res: i64 = undefined;
-    asm volatile ("svc #0"
-        : [res] "={x0}" (res),
-        : [num] "{x8}" (num),
-          [a0] "{x0}" (a0),
-          [a1] "{x1}" (a1),
-          [a2] "{x2}" (a2),
-        : .{ .memory = true });
-    return res;
-}
-
 // ---------------------------------------------------------------------------
 // Tab & Window Mirror Models
 // ---------------------------------------------------------------------------
@@ -173,7 +204,7 @@ pub const TabManager = struct {
         return .{};
     }
 
-    pub fn find_by_id(self: *TabManager, id: u32) ?usize {
+    pub fn find_by_id(self: *const TabManager, id: u32) ?usize {
         for (0..self.tab_count) |i| {
             if (self.tabs[i].valid and self.tabs[i].id == id) return i;
         }
@@ -218,7 +249,9 @@ pub const TabManager = struct {
         if (self.tab_count == 0) {
             self.active_idx = null;
         } else if (self.active_idx) |cur| {
-            if (cur >= self.tab_count) {
+            if (cur > idx) {
+                self.active_idx = cur - 1;
+            } else if (cur >= self.tab_count) {
                 self.active_idx = self.tab_count - 1;
             }
         }
@@ -239,19 +272,41 @@ pub const TabManager = struct {
             self.active_idx = 0;
         }
     }
+
+    pub fn cycle_tab_backward(self: *TabManager) void {
+        if (self.tab_count <= 1) return;
+        if (self.active_idx) |cur| {
+            if (cur == 0) {
+                self.active_idx = self.tab_count - 1;
+            } else {
+                self.active_idx = cur - 1;
+            }
+        } else {
+            self.active_idx = self.tab_count - 1;
+        }
+    }
+
+    pub fn get_active_id(self: *const TabManager) ?u32 {
+        if (self.active_idx) |idx| {
+            if (idx < self.tab_count and self.tabs[idx].valid) {
+                return self.tabs[idx].id;
+            }
+        }
+        return null;
+    }
 };
 
 // ---------------------------------------------------------------------------
 // Global Server State (Static BSS)
 // ---------------------------------------------------------------------------
-var manager: TabManager = TabManager{};
+pub var manager: TabManager = TabManager{};
 var scanout_ptr: ?[*]u32 = null;
 var scanout_mapped: bool = false;
 
-var hover_tab: ?usize = null;
-var hover_sexiburger: bool = false;
-var hover_theme_toggle: bool = false;
-var hover_clip: bool = false;
+pub var hover_tab: ?usize = null;
+pub var hover_sexiburger: bool = false;
+pub var hover_theme_toggle: bool = false;
+pub var hover_clip: bool = false;
 
 var ticks_count: u64 = 0;
 var present_count: u64 = 0;
@@ -272,6 +327,80 @@ fn ensure_scanout_mapped() bool {
         return true;
     }
     return false;
+}
+
+// ---------------------------------------------------------------------------
+// Viewport & Window State Management (M39 TWM2)
+// ---------------------------------------------------------------------------
+
+/// Set window position and dimensions via slot-65 SET_WINDOW.
+pub fn set_window_rect(id: u32, x: u32, y: u32, w: u32, h: u32) void {
+    _ = syscall6(sys_wmctl, wmctl_set_window, id, x | (y << 16), w | (h << 16), 0, 0);
+}
+
+/// Set window visibility via slot-65 SET_STATE (1 = show, 0 = hide).
+pub fn set_state(id: u32, visible: bool) void {
+    const st: u64 = if (visible) 1 else 0;
+    _ = syscall6(sys_wmctl, wmctl_set_state, id, st, 0, 0, 0);
+}
+
+/// Raise and commit focus to a window via slot-65 ALT_TAB commit.
+pub fn focus_window(id: u32) void {
+    _ = syscall6(sys_wmctl, wmctl_alt_tab, id, alt_tab_commit, 0, 0, 0);
+}
+
+/// Activate tab by index:
+/// 1. Sizes active application to full 1100x720 viewport (x=180, y=0).
+/// 2. Sets active window visible and focuses it.
+/// 3. Hides all inactive tabs (set_state(0)).
+/// 4. Emits `tabwm: tab-switch` evidence marker.
+pub fn activate_tab(idx: usize) void {
+    if (!manager.activate_tab(idx)) return;
+    const active_id = manager.tabs[idx].id;
+
+    // Viewport Allocation: allocate full content viewport (180, 0, 1100, 720)
+    set_window_rect(active_id, viewport_x, viewport_y, viewport_w, viewport_h);
+
+    // Show and focus active window
+    set_state(active_id, true);
+    focus_window(active_id);
+
+    // Hide all inactive windows
+    for (0..manager.tab_count) |i| {
+        if (i != idx and manager.tabs[i].valid) {
+            set_state(manager.tabs[i].id, false);
+        }
+    }
+
+    var buf: [64]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{s} idx={d} id={d}\n", .{ tab_switch_marker, idx, active_id }) catch "tabwm: tab-switch\n";
+    write_marker(msg);
+}
+
+/// Close tab by index:
+/// 1. Hides the window.
+/// 2. Emits `tabwm: win-close` evidence marker.
+/// 3. Removes the tab from manager.
+/// 4. Automatically activates the new active tab if any remain.
+pub fn close_tab(idx: usize) void {
+    if (idx >= manager.tab_count or !manager.tabs[idx].valid) return;
+    const closed_id = manager.tabs[idx].id;
+
+    // 1. Hide the window
+    set_state(closed_id, false);
+
+    // 2. Emit WIN_CLOSE marker
+    var buf: [64]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{s} id={d}\n", .{ tab_close_marker, closed_id }) catch "tabwm: win-close\n";
+    write_marker(msg);
+
+    // 3. Remove tab from manager
+    _ = manager.remove_tab(closed_id);
+
+    // 4. Activate new active tab if any
+    if (manager.active_idx) |new_idx| {
+        activate_tab(new_idx);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -406,7 +535,7 @@ fn draw_mini_mascot(scan: [*]u32, x: u32, y: u32) void {
 }
 
 // ---------------------------------------------------------------------------
-// Pointer & Hit Testing
+// Pointer & Hit Testing (M39 TWM2)
 // ---------------------------------------------------------------------------
 pub fn handle_pointer(px: u32, py: u32, clicked: bool) void {
     if (px >= sidebar_w) {
@@ -417,13 +546,13 @@ pub fn handle_pointer(px: u32, py: u32, clicked: bool) void {
         return;
     }
 
-    // Sexiburger header hit test
+    // Sexiburger header hit test (y = 8..48)
     hover_sexiburger = (px >= 8 and px < 172 and py >= 8 and py < 48);
     if (hover_sexiburger and clicked) {
-        write_marker("tabwm: god-menu\n");
+        write_marker(god_menu_marker);
     }
 
-    // Theme toggle hit test
+    // Theme toggle hit test (y = 672..696, x = 96..128)
     hover_theme_toggle = (px >= 96 and px < 128 and py >= 672 and py < 696);
     if (hover_theme_toggle and clicked) {
         if (std.mem.eql(u8, ui.theme_name(), "dark")) {
@@ -433,28 +562,146 @@ pub fn handle_pointer(px: u32, py: u32, clicked: bool) void {
         }
     }
 
-    // Clipboard hit test
+    // Clipboard hit test (y = 672..696, x = 134..170)
     hover_clip = (px >= 134 and px < 170 and py >= 672 and py < 696);
 
-    // Tab items hit test
+    // Tab items hit test (y = 58..650)
     hover_tab = null;
     if (py >= 58 and py < 650) {
         const idx = (py - 58) / tab_row_h;
         if (idx < manager.tab_count) {
             hover_tab = idx;
             if (clicked) {
-                // Check if clicked close box 'x' at x >= 148
+                // Check if clicked close box 'x' at x = 148..168
                 if (px >= 148 and px < 168) {
-                    const closed_id = manager.tabs[idx].id;
-                    _ = manager.remove_tab(closed_id);
+                    close_tab(idx);
                 } else {
-                    _ = manager.activate_tab(idx);
-                    var buf: [64]u8 = undefined;
-                    const msg = std.fmt.bufPrint(&buf, "{s} idx={d} id={d}\n", .{ tab_switch_marker, idx, manager.tabs[idx].id }) catch "tabwm: tab-switch\n";
-                    write_marker(msg);
+                    activate_tab(idx);
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Keyboard Shortcuts Decoder (M39 TWM2)
+// ---------------------------------------------------------------------------
+pub fn handle_wm_key(usage: u8, flags: u16) void {
+    const ctrl = (flags & ui.MOD_CTRL != 0);
+    const shift = (flags & ui.MOD_SHIFT != 0);
+
+    if (ctrl) {
+        // Ctrl+Tab / Ctrl+Shift+Tab: cycle tabs
+        if (usage == usage_tab) {
+            if (shift) {
+                manager.cycle_tab_backward();
+            } else {
+                manager.cycle_tab();
+            }
+            if (manager.active_idx) |idx| {
+                activate_tab(idx);
+            }
+            return;
+        }
+
+        // Ctrl+1..9: jump directly to tab index 0..8
+        if (usage >= usage_1 and usage <= usage_9) {
+            const target_idx: usize = @as(usize, usage - usage_1);
+            if (target_idx < manager.tab_count) {
+                activate_tab(target_idx);
+            }
+            return;
+        }
+
+        // Ctrl+W: close active tab
+        if (usage == usage_w) {
+            if (manager.active_idx) |cur| {
+                close_tab(cur);
+            }
+            return;
+        }
+
+        // Ctrl+Space: summon God Menu overlay
+        if (usage == usage_space) {
+            write_marker(god_menu_marker);
+            return;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WM_RPC Mailbox Communication Loop
+// ---------------------------------------------------------------------------
+fn wnd_mail_reply(reply_to: u8, req: *const ui.WmRpc, applied: bool) void {
+    var rep: ui.WmRpc = .{
+        .kind = req.kind | ui.wm_rpc_reply_flag,
+        .id = req.id,
+        .seq = req.seq,
+        .reply_to = reply_to,
+        .applied = if (applied) 1 else 0,
+        .pad = 0,
+        .x = 0,
+        .y = 0,
+        .w = 0,
+        .h = 0,
+        .title = [_]u8{0} ** ui.wm_rpc_title_max,
+    };
+    const rep_bytes = std.mem.asBytes(&rep);
+    _ = syscall3(sys_ipc_send, reply_to, @intFromPtr(rep_bytes.ptr), rep_bytes.len);
+}
+
+pub fn wnd_mail_apply(req: *const ui.WmRpc) bool {
+    switch (req.kind & 0x7f) {
+        ui.wm_rpc_kind_raise => {
+            if (manager.find_by_id(req.id)) |idx| {
+                activate_tab(idx);
+                return true;
+            }
+            return false;
+        },
+        ui.wm_rpc_kind_register_action, ui.wm_rpc_kind_config => {
+            var label_slice: []const u8 = req.title[0..];
+            for (req.title, 0..) |c, i| {
+                if (c == 0) {
+                    label_slice = req.title[0..i];
+                    break;
+                }
+            }
+            if (label_slice.len > 0) {
+                _ = manager.add_or_update_tab(req.id, label_slice);
+                return true;
+            }
+            return false;
+        },
+        ui.wm_rpc_kind_cycle_tab => {
+            manager.cycle_tab();
+            if (manager.active_idx) |idx| {
+                activate_tab(idx);
+            }
+            return true;
+        },
+        ui.wm_rpc_kind_detach_tab => {
+            if (manager.find_by_id(req.id)) |idx| {
+                close_tab(idx);
+                return true;
+            }
+            return false;
+        },
+        else => return false,
+    }
+}
+
+pub fn wnd_mail_loop() void {
+    var raw: [128]u8 = undefined;
+    while (true) {
+        const got = syscall2(sys_ipc_recv, @intFromPtr(&raw), raw.len);
+        if (got <= 0) return;
+        if (got < @sizeOf(ui.WmRpc)) continue;
+        var req: ui.WmRpc = undefined;
+        @memcpy(std.mem.asBytes(&req), raw[0..@sizeOf(ui.WmRpc)]);
+        if (req.kind & ui.wm_rpc_reply_flag != 0) continue;
+        const applied = wnd_mail_apply(&req);
+        wnd_mail_reply(req.reply_to, &req, applied);
     }
 }
 
@@ -494,6 +741,9 @@ fn main() noreturn {
             composite_tick_kind => {
                 ticks_count += 1;
 
+                // Drain app mailbox requests
+                wnd_mail_loop();
+
                 // Update clock
                 clock_minutes = @intCast((ticks_count / 60) % 60);
                 clock_hours = @intCast(12 + (ticks_count / 3600) % 12);
@@ -512,29 +762,26 @@ fn main() noreturn {
                 }
             },
             wm_pointer_kind => {
-                const px = ev.arg0;
-                const py = ev.arg1;
+                const px = ev.arg0 & 0xffff;
+                const py = ev.arg0 >> 16;
                 const clicked = (ev.flags & btn_left != 0);
                 handle_pointer(px, py, clicked);
             },
             wm_window_kind => {
-                // Window opened, closed, or title updated
-                const wid = ev.arg0;
-                _ = manager.add_or_update_tab(wid, "Application");
+                // Window opened or registered by an app (id >= 2)
+                const wid: u32 = ev.flags & 0xff;
+                if (wid >= 2) {
+                    if (manager.find_by_id(wid) == null) {
+                        var title_buf: [32]u8 = undefined;
+                        const default_title = std.fmt.bufPrint(&title_buf, "App {d}", .{wid}) catch "App";
+                        const idx = manager.add_or_update_tab(wid, default_title);
+                        activate_tab(idx);
+                    }
+                }
             },
             wm_key_kind => {
                 const usage: u8 = @intCast(ev.arg0 & 0xff);
-                const flags = ev.flags;
-                const ctrl = (flags & ui.MOD_CTRL != 0);
-
-                // Ctrl+Tab: cycle tabs
-                if (ctrl and usage == 0x2b) { // Tab key
-                    manager.cycle_tab();
-                }
-                // Ctrl+Space: God menu
-                if (ctrl and usage == 0x2c) { // Space key
-                    write_marker("tabwm: god-menu\n");
-                }
+                handle_wm_key(usage, ev.flags);
             },
             else => {},
         }
@@ -542,7 +789,7 @@ fn main() noreturn {
 }
 
 // ---------------------------------------------------------------------------
-// Unit Tests
+// Unit Tests (M39 TWM1 + TWM2)
 // ---------------------------------------------------------------------------
 test "tabwm: tab manager allocation and lifecycle" {
     var mgr = TabManager.init();
@@ -565,6 +812,7 @@ test "tabwm: tab manager allocation and lifecycle" {
     // Switch active tab
     try std.testing.expect(mgr.activate_tab(1));
     try std.testing.expectEqual(@as(?usize, 1), mgr.active_idx);
+    try std.testing.expectEqual(@as(?u32, 2), mgr.get_active_id());
 
     // Cycle tab
     mgr.cycle_tab();
@@ -574,6 +822,206 @@ test "tabwm: tab manager allocation and lifecycle" {
     try std.testing.expect(mgr.remove_tab(1));
     try std.testing.expectEqual(@as(usize, 1), mgr.tab_count);
     try std.testing.expectEqualStrings("Notes", mgr.tabs[0].get_title());
+}
+
+test "tabwm: tab manager active index adjustment on removal" {
+    var mgr = TabManager.init();
+    _ = mgr.add_or_update_tab(10, "Tab 0");
+    _ = mgr.add_or_update_tab(20, "Tab 1");
+    _ = mgr.add_or_update_tab(30, "Tab 2");
+    _ = mgr.add_or_update_tab(40, "Tab 3");
+    try std.testing.expectEqual(@as(usize, 4), mgr.tab_count);
+
+    // Set active index to 2 (Tab 2, id 30)
+    try std.testing.expect(mgr.activate_tab(2));
+    try std.testing.expectEqual(@as(?usize, 2), mgr.active_idx);
+    try std.testing.expectEqual(@as(?u32, 30), mgr.get_active_id());
+
+    // Remove Tab 0 (index 0 < cur 2) -> cur should decrement to 1 (still Tab 2, id 30)
+    try std.testing.expect(mgr.remove_tab(10));
+    try std.testing.expectEqual(@as(usize, 3), mgr.tab_count);
+    try std.testing.expectEqual(@as(?usize, 1), mgr.active_idx);
+    try std.testing.expectEqual(@as(?u32, 30), mgr.get_active_id());
+
+    // Remove Tab 3 (tail, index 2 > cur 1) -> cur stays 1
+    try std.testing.expect(mgr.remove_tab(40));
+    try std.testing.expectEqual(@as(usize, 2), mgr.tab_count);
+    try std.testing.expectEqual(@as(?usize, 1), mgr.active_idx);
+    try std.testing.expectEqual(@as(?u32, 30), mgr.get_active_id());
+
+    // Remove Tab 2 (currently active at index 1) -> cur clamps to 0 (Tab 1, id 20)
+    try std.testing.expect(mgr.remove_tab(30));
+    try std.testing.expectEqual(@as(usize, 1), mgr.tab_count);
+    try std.testing.expectEqual(@as(?usize, 0), mgr.active_idx);
+    try std.testing.expectEqual(@as(?u32, 20), mgr.get_active_id());
+
+    // Remove final tab -> active_idx becomes null
+    try std.testing.expect(mgr.remove_tab(20));
+    try std.testing.expectEqual(@as(usize, 0), mgr.tab_count);
+    try std.testing.expectEqual(@as(?usize, null), mgr.active_idx);
+    try std.testing.expectEqual(@as(?u32, null), mgr.get_active_id());
+}
+
+test "tabwm: tab cycle forward and backward" {
+    var mgr = TabManager.init();
+    _ = mgr.add_or_update_tab(1, "A");
+    _ = mgr.add_or_update_tab(2, "B");
+    _ = mgr.add_or_update_tab(3, "C");
+    try std.testing.expectEqual(@as(?usize, 0), mgr.active_idx);
+
+    // Forward cycle: 0 -> 1 -> 2 -> 0
+    mgr.cycle_tab();
+    try std.testing.expectEqual(@as(?usize, 1), mgr.active_idx);
+    mgr.cycle_tab();
+    try std.testing.expectEqual(@as(?usize, 2), mgr.active_idx);
+    mgr.cycle_tab();
+    try std.testing.expectEqual(@as(?usize, 0), mgr.active_idx);
+
+    // Backward cycle: 0 -> 2 -> 1 -> 0
+    mgr.cycle_tab_backward();
+    try std.testing.expectEqual(@as(?usize, 2), mgr.active_idx);
+    mgr.cycle_tab_backward();
+    try std.testing.expectEqual(@as(?usize, 1), mgr.active_idx);
+    mgr.cycle_tab_backward();
+    try std.testing.expectEqual(@as(?usize, 0), mgr.active_idx);
+}
+
+test "tabwm: keyboard shortcuts routing" {
+    manager = TabManager.init();
+    _ = manager.add_or_update_tab(101, "Browser");
+    _ = manager.add_or_update_tab(102, "Terminal");
+    _ = manager.add_or_update_tab(103, "Editor");
+    activate_tab(0);
+    try std.testing.expectEqual(@as(?usize, 0), manager.active_idx);
+
+    // 1. Ctrl+Tab -> cycles to Tab 1
+    handle_wm_key(usage_tab, ui.MOD_CTRL);
+    try std.testing.expectEqual(@as(?usize, 1), manager.active_idx);
+    try std.testing.expectEqual(@as(?u32, 102), manager.get_active_id());
+
+    // 2. Ctrl+Shift+Tab -> cycles back to Tab 0
+    handle_wm_key(usage_tab, ui.MOD_CTRL | ui.MOD_SHIFT);
+    try std.testing.expectEqual(@as(?usize, 0), manager.active_idx);
+
+    // 3. Ctrl+3 (usage_3 = 0x20) -> jumps directly to Tab 2
+    handle_wm_key(usage_3, ui.MOD_CTRL);
+    try std.testing.expectEqual(@as(?usize, 2), manager.active_idx);
+    try std.testing.expectEqual(@as(?u32, 103), manager.get_active_id());
+
+    // 4. Ctrl+1 (usage_1 = 0x1e) -> jumps directly to Tab 0
+    handle_wm_key(usage_1, ui.MOD_CTRL);
+    try std.testing.expectEqual(@as(?usize, 0), manager.active_idx);
+
+    // 5. Ctrl+W -> closes active Tab 0
+    handle_wm_key(usage_w, ui.MOD_CTRL);
+    try std.testing.expectEqual(@as(usize, 2), manager.tab_count);
+    try std.testing.expectEqual(@as(?usize, 0), manager.active_idx);
+    try std.testing.expectEqual(@as(?u32, 102), manager.get_active_id());
+
+    // 6. Ctrl+Space -> triggers god menu
+    handle_wm_key(usage_space, ui.MOD_CTRL);
+}
+
+test "tabwm: pointer hit testing and tab selection / close button" {
+    manager = TabManager.init();
+    _ = manager.add_or_update_tab(201, "Calc");
+    _ = manager.add_or_update_tab(202, "Files");
+    activate_tab(0);
+
+    // Hover over Tab 1 (y = 58 + 38 = 96)
+    handle_pointer(50, 100, false);
+    try std.testing.expectEqual(@as(?usize, 1), hover_tab);
+
+    // Click Tab 1 body (x = 50, y = 100) -> activates Tab 1
+    handle_pointer(50, 100, true);
+    try std.testing.expectEqual(@as(?usize, 1), manager.active_idx);
+    try std.testing.expectEqual(@as(?u32, 202), manager.get_active_id());
+
+    // Click Tab 1 close button 'x' (x = 156, y = 100) -> closes Tab 1
+    handle_pointer(156, 100, true);
+    try std.testing.expectEqual(@as(usize, 1), manager.tab_count);
+    try std.testing.expectEqual(@as(?usize, 0), manager.active_idx);
+    try std.testing.expectEqual(@as(?u32, 201), manager.get_active_id());
+
+    // Click Sexiburger header (x = 20, y = 20)
+    handle_pointer(20, 20, true);
+    try std.testing.expect(hover_sexiburger);
+}
+
+test "tabwm: wnd_mail_apply RPC commands" {
+    manager = TabManager.init();
+    _ = manager.add_or_update_tab(31, "Old Title");
+    _ = manager.add_or_update_tab(32, "Other");
+    activate_tab(0);
+
+    // 1. Rename tab via config RPC
+    var req_config = ui.WmRpc{
+        .kind = ui.wm_rpc_kind_config,
+        .id = 31,
+        .seq = 1,
+        .reply_to = 5,
+        .applied = 0,
+        .pad = 0,
+        .x = 0,
+        .y = 0,
+        .w = 0,
+        .h = 0,
+        .title = [_]u8{0} ** ui.wm_rpc_title_max,
+    };
+    @memcpy(req_config.title[0..9], "New Title");
+    try std.testing.expect(wnd_mail_apply(&req_config));
+    try std.testing.expectEqualStrings("New Title", manager.tabs[0].get_title());
+
+    // 2. Raise tab via raise RPC
+    var req_raise = ui.WmRpc{
+        .kind = ui.wm_rpc_kind_raise,
+        .id = 32,
+        .seq = 2,
+        .reply_to = 5,
+        .applied = 0,
+        .pad = 0,
+        .x = 0,
+        .y = 0,
+        .w = 0,
+        .h = 0,
+        .title = [_]u8{0} ** ui.wm_rpc_title_max,
+    };
+    try std.testing.expect(wnd_mail_apply(&req_raise));
+    try std.testing.expectEqual(@as(?usize, 1), manager.active_idx);
+
+    // 3. Cycle tab via cycle RPC
+    var req_cycle = ui.WmRpc{
+        .kind = ui.wm_rpc_kind_cycle_tab,
+        .id = 0,
+        .seq = 3,
+        .reply_to = 5,
+        .applied = 0,
+        .pad = 0,
+        .x = 0,
+        .y = 0,
+        .w = 0,
+        .h = 0,
+        .title = [_]u8{0} ** ui.wm_rpc_title_max,
+    };
+    try std.testing.expect(wnd_mail_apply(&req_cycle));
+    try std.testing.expectEqual(@as(?usize, 0), manager.active_idx);
+
+    // 4. Detach / close tab via detach RPC
+    var req_detach = ui.WmRpc{
+        .kind = ui.wm_rpc_kind_detach_tab,
+        .id = 32,
+        .seq = 4,
+        .reply_to = 5,
+        .applied = 0,
+        .pad = 0,
+        .x = 0,
+        .y = 0,
+        .w = 0,
+        .h = 0,
+        .title = [_]u8{0} ** ui.wm_rpc_title_max,
+    };
+    try std.testing.expect(wnd_mail_apply(&req_detach));
+    try std.testing.expectEqual(@as(usize, 1), manager.tab_count);
 }
 
 test "tabwm: geometry constants respect M39 tokens" {
