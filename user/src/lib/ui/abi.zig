@@ -328,6 +328,12 @@ pub fn win_lower_back(id: u32) bool {
 /// The registered WM server's process name (the WMS3 `wnd start` bootstrap
 /// execs WND.BIN; a future WM keeps the same name via ADR 0015).
 pub const wm_proc_name: []const u8 = "WND.BIN";
+/// M42 SX3 (issue #984): TABWM.BIN — the tabbed desktop's WM server — is the
+/// second seat the toolkit's app↔WM RPC client resolves. At most ONE WM seat
+/// exists (sys_wmctl REGISTER is one-seat), so matching either name is safe;
+/// the ack routing is by pid, not by name.
+pub const wm_proc_name_tab: []const u8 = "TABWM.BIN";
+pub const wm_proc_names: [2][]const u8 = .{ wm_proc_name, wm_proc_name_tab };
 /// The proc-snapshot buffer bound (16 rows × 40 B — plenty for any fleet).
 pub const wm_procs_buf: usize = 16 * 40;
 /// The mailbox slot bound the WM_RPC frame must fit (the frozen 64 B).
@@ -350,6 +356,15 @@ pub fn wm_find_pid(want: []const u8) u64 {
     return 0;
 }
 
+/// True when `nm` names a WM server seat (either the floating-WM WND.BIN or
+/// the tabbed TABWM.BIN — M42 SX3).
+pub fn is_wm_name(nm: []const u8) bool {
+    for (wm_proc_names) |known| {
+        if (std.mem.eql(u8, nm, known)) return true;
+    }
+    return false;
+}
+
 /// Resolve the WM's pid and the caller-specified self pid in ONE sys_procs
 /// scan — the WM acks to `reply_to`, so the requester must supply its own
 /// pid (resolved by its own process name, the WMRPC pattern). Returns
@@ -365,16 +380,22 @@ pub fn wm_peers(self_name: []const u8) struct { wm: u64, self: u64 } {
         for (infos[0..n]) |p| {
             if (p.state != .running) continue;
             const nm = p.name[0..p.name_len];
-            if (std.mem.eql(u8, nm, wm_proc_name)) wm = p.pid;
+            // M42 SX3: either WM server seat resolves (WND.BIN or TABWM.BIN).
+            if (is_wm_name(nm)) wm = p.pid;
             if (self_name.len != 0 and std.mem.eql(u8, nm, self_name)) self_pid = p.pid;
         }
     }
     return .{ .wm = wm, .self = self_pid };
 }
 
-/// Discover the registered WM's pid (0 = none / shim mode).
+/// Discover the registered WM's pid (0 = none / shim mode). M42 SX3: either
+/// seat counts — whichever WM server process is running.
 pub fn wm_available() u64 {
-    return wm_find_pid(wm_proc_name);
+    for (wm_proc_names) |known| {
+        const pid = wm_find_pid(known);
+        if (pid != 0) return pid;
+    }
+    return 0;
 }
 
 /// Send one WM_RPC request and await its ack in our own inbox. Returns

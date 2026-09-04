@@ -28,6 +28,7 @@ zig build test --summary all
 # result_failed_command "may be populated even if the step succeeded").
 # Direct runs keep the coverage without the noise. (M42 SX1, issue #982)
 echo "=== verify-unit-tests: app-level test roots (direct zig test) ==="
+zig test user/src/lib/tabapp.zig
 zig test user/src/tabwm.zig
 zig test user/src/sexiburger.zig
 

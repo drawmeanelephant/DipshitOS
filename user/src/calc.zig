@@ -30,6 +30,7 @@
 
 const std = @import("std");
 const ui = @import("lib/ui.zig");
+const tabapp = @import("lib/tabapp.zig");
 const Rect = ui.Rect;
 const Button = ui.Button;
 const Event = ui.Event;
@@ -221,18 +222,77 @@ pub const window_h: u32 = 424;
 
 pub const exit_status: u32 = 42;
 
+// M42 SX3: the NATIVE button rects (the 512x424 layout the fixed grid
+// was designed at). `layout` scales copies of these into the current canvas;
+// the field initializers reference them so the identity mapping is the
+// shipped layout.
+pub const native_btn_m_store = Rect.make(8, 104, 56, 20);
+pub const native_btn_m_recall = Rect.make(69, 104, 56, 20);
+pub const native_btn_m_clear = Rect.make(130, 104, 56, 20);
+pub const native_btn_prog = Rect.make(191, 104, 56, 20);
+pub const native_btn_c = Rect.make(8, 130, 56, 20);
+pub const native_btn_sign = Rect.make(69, 130, 56, 20);
+pub const native_btn_mod = Rect.make(130, 130, 56, 20);
+pub const native_btn_div = Rect.make(191, 130, 56, 20);
+pub const native_btn_7 = Rect.make(8, 156, 56, 20);
+pub const native_btn_8 = Rect.make(69, 156, 56, 20);
+pub const native_btn_9 = Rect.make(130, 156, 56, 20);
+pub const native_btn_mul = Rect.make(191, 156, 56, 20);
+pub const native_btn_4 = Rect.make(8, 182, 56, 20);
+pub const native_btn_5 = Rect.make(69, 182, 56, 20);
+pub const native_btn_6 = Rect.make(130, 182, 56, 20);
+pub const native_btn_sub = Rect.make(191, 182, 56, 20);
+pub const native_btn_1 = Rect.make(8, 208, 56, 20);
+pub const native_btn_2 = Rect.make(69, 208, 56, 20);
+pub const native_btn_3 = Rect.make(130, 208, 56, 20);
+pub const native_btn_add = Rect.make(191, 208, 56, 20);
+pub const native_btn_0 = Rect.make(8, 234, 117, 20);
+pub const native_btn_ce = Rect.make(130, 234, 56, 20);
+pub const native_btn_eq = Rect.make(191, 234, 56, 20);
+pub const native_btn_st = Rect.make(8, 104, 56, 20);
+pub const native_btn_clr_mem = Rect.make(130, 104, 56, 20);
+pub const native_btn_not = Rect.make(8, 130, 56, 20);
+pub const native_btn_shl = Rect.make(69, 130, 56, 20);
+pub const native_btn_shr = Rect.make(130, 130, 56, 20);
+pub const native_btn_and = Rect.make(8, 156, 56, 20);
+pub const native_btn_or = Rect.make(69, 156, 56, 20);
+pub const native_btn_xor = Rect.make(130, 156, 56, 20);
+pub const native_btn_hex = Rect.make(8, 182, 56, 20);
+pub const native_btn_dec = Rect.make(69, 182, 56, 20);
+pub const native_btn_oct = Rect.make(130, 182, 56, 20);
+pub const native_btn_pi = Rect.make(260, 104, 56, 20);
+pub const native_btn_euler = Rect.make(321, 104, 56, 20);
+pub const native_btn_sqrt2 = Rect.make(382, 104, 56, 20);
+pub const native_btn_phi = Rect.make(443, 104, 56, 20);
+pub const native_btn_sin = Rect.make(8, 286, 56, 20);
+pub const native_btn_cos = Rect.make(69, 286, 56, 20);
+pub const native_btn_tan = Rect.make(130, 286, 56, 20);
+pub const native_btn_deg_rad = Rect.make(191, 286, 56, 20);
+pub const native_btn_asin = Rect.make(8, 312, 56, 20);
+pub const native_btn_acos = Rect.make(69, 312, 56, 20);
+pub const native_btn_atan = Rect.make(130, 312, 56, 20);
+pub const native_btn_ln = Rect.make(8, 338, 56, 20);
+pub const native_btn_log = Rect.make(69, 338, 56, 20);
+pub const native_btn_exp = Rect.make(130, 338, 56, 20);
+pub const native_btn_pow = Rect.make(191, 338, 56, 20);
+pub const native_btn_sqrt = Rect.make(8, 364, 56, 20);
+pub const native_btn_abs = Rect.make(69, 364, 56, 20);
+pub const native_btn_sci = Rect.make(8, 260, 56, 20);
+pub const native_btn_expr = Rect.make(69, 260, 56, 20);
+pub const native_btn_rand = Rect.make(130, 260, 56, 20);
+
 // Layout rects — standard mode
-const history_area = Rect.make(8, 8, 496, 60);
-const display_rect = Rect.make(8, 72, 496, 28);
+pub const native_history_area = Rect.make(8, 8, 496, 60);
+pub const native_display_rect = Rect.make(8, 72, 496, 28);
 
 // Layout rects — programmer mode (triple display)
-const hex_display_rect = Rect.make(8, 72, 496, 18);
-const dec_display_rect = Rect.make(8, 92, 496, 18);
-const oct_display_rect = Rect.make(8, 112, 496, 18);
-const reg_display_rect = Rect.make(8, 132, 496, 18);
+pub const native_hex_display_rect = Rect.make(8, 72, 496, 18);
+pub const native_dec_display_rect = Rect.make(8, 92, 496, 18);
+pub const native_oct_display_rect = Rect.make(8, 112, 496, 18);
+pub const native_reg_display_rect = Rect.make(8, 132, 496, 18);
 
 // Layout rect — unit conversion bar (K3)
-const convert_rect = Rect.make(8, 72, 496, 28);
+pub const native_convert_rect = Rect.make(8, 72, 496, 28);
 
 // ---------------------------------------------------------------------------
 // Unit conversion (K3)
@@ -307,6 +367,18 @@ fn weight_from_base(unit: WeightUnit, grams: f64) f64 {
 // App State
 // ---------------------------------------------------------------------------
 
+/// M42 SX3: the per-state copies of the layout rects (draw AND hit-testing
+/// read these, so scaled geometry and scaled hit tests cannot drift).
+pub const LayoutRects = struct {
+    history_area: Rect,
+    display_rect: Rect,
+    hex_display_rect: Rect,
+    dec_display_rect: Rect,
+    oct_display_rect: Rect,
+    reg_display_rect: Rect,
+    convert_rect: Rect,
+};
+
 pub const AppState = struct {
     engine: CalcEngine = .{},
     hist: HistoryRing = HistoryRing.init(),
@@ -371,81 +443,159 @@ pub const AppState = struct {
     stats_result: [64]u8 = [_]u8{0} ** 64,
 
     // ---- Standard mode buttons ----
-    btn_m_store: Button = Button.init(Rect.make(8, 104, 56, 20), "MS"),
-    btn_m_recall: Button = Button.init(Rect.make(69, 104, 56, 20), "MR"),
-    btn_m_clear: Button = Button.init(Rect.make(130, 104, 56, 20), "MC"),
-    btn_prog: Button = Button.init(Rect.make(191, 104, 56, 20), "PROG"),
+    btn_m_store: Button = Button.init(native_btn_m_store, "MS"),
+    btn_m_recall: Button = Button.init(native_btn_m_recall, "MR"),
+    btn_m_clear: Button = Button.init(native_btn_m_clear, "MC"),
+    btn_prog: Button = Button.init(native_btn_prog, "PROG"),
 
-    btn_c: Button = Button.init(Rect.make(8, 130, 56, 20), "C"),
-    btn_sign: Button = Button.init(Rect.make(69, 130, 56, 20), "+/-"),
-    btn_mod: Button = Button.init(Rect.make(130, 130, 56, 20), "%"),
-    btn_div: Button = Button.init(Rect.make(191, 130, 56, 20), "/"),
+    btn_c: Button = Button.init(native_btn_c, "C"),
+    btn_sign: Button = Button.init(native_btn_sign, "+/-"),
+    btn_mod: Button = Button.init(native_btn_mod, "%"),
+    btn_div: Button = Button.init(native_btn_div, "/"),
 
-    btn_7: Button = Button.init(Rect.make(8, 156, 56, 20), "7"),
-    btn_8: Button = Button.init(Rect.make(69, 156, 56, 20), "8"),
-    btn_9: Button = Button.init(Rect.make(130, 156, 56, 20), "9"),
-    btn_mul: Button = Button.init(Rect.make(191, 156, 56, 20), "*"),
+    btn_7: Button = Button.init(native_btn_7, "7"),
+    btn_8: Button = Button.init(native_btn_8, "8"),
+    btn_9: Button = Button.init(native_btn_9, "9"),
+    btn_mul: Button = Button.init(native_btn_mul, "*"),
 
-    btn_4: Button = Button.init(Rect.make(8, 182, 56, 20), "4"),
-    btn_5: Button = Button.init(Rect.make(69, 182, 56, 20), "5"),
-    btn_6: Button = Button.init(Rect.make(130, 182, 56, 20), "6"),
-    btn_sub: Button = Button.init(Rect.make(191, 182, 56, 20), "-"),
+    btn_4: Button = Button.init(native_btn_4, "4"),
+    btn_5: Button = Button.init(native_btn_5, "5"),
+    btn_6: Button = Button.init(native_btn_6, "6"),
+    btn_sub: Button = Button.init(native_btn_sub, "-"),
 
-    btn_1: Button = Button.init(Rect.make(8, 208, 56, 20), "1"),
-    btn_2: Button = Button.init(Rect.make(69, 208, 56, 20), "2"),
-    btn_3: Button = Button.init(Rect.make(130, 208, 56, 20), "3"),
-    btn_add: Button = Button.init(Rect.make(191, 208, 56, 20), "+"),
+    btn_1: Button = Button.init(native_btn_1, "1"),
+    btn_2: Button = Button.init(native_btn_2, "2"),
+    btn_3: Button = Button.init(native_btn_3, "3"),
+    btn_add: Button = Button.init(native_btn_add, "+"),
 
-    btn_0: Button = Button.init(Rect.make(8, 234, 117, 20), "0"),
-    btn_ce: Button = Button.init(Rect.make(130, 234, 56, 20), "CE"),
-    btn_eq: Button = Button.init(Rect.make(191, 234, 56, 20), "="),
+    btn_0: Button = Button.init(native_btn_0, "0"),
+    btn_ce: Button = Button.init(native_btn_ce, "CE"),
+    btn_eq: Button = Button.init(native_btn_eq, "="),
 
     // ---- Programmer mode buttons (K1) ----
-    btn_st: Button = Button.init(Rect.make(8, 104, 56, 20), "ST"),
-    btn_clr_mem: Button = Button.init(Rect.make(130, 104, 56, 20), "CLR"),
+    btn_st: Button = Button.init(native_btn_st, "ST"),
+    btn_clr_mem: Button = Button.init(native_btn_clr_mem, "CLR"),
 
-    btn_not: Button = Button.init(Rect.make(8, 130, 56, 20), "NOT"),
-    btn_shl: Button = Button.init(Rect.make(69, 130, 56, 20), "SHL"),
-    btn_shr: Button = Button.init(Rect.make(130, 130, 56, 20), "SHR"),
+    btn_not: Button = Button.init(native_btn_not, "NOT"),
+    btn_shl: Button = Button.init(native_btn_shl, "SHL"),
+    btn_shr: Button = Button.init(native_btn_shr, "SHR"),
 
-    btn_and: Button = Button.init(Rect.make(8, 156, 56, 20), "AND"),
-    btn_or: Button = Button.init(Rect.make(69, 156, 56, 20), "OR"),
-    btn_xor: Button = Button.init(Rect.make(130, 156, 56, 20), "XOR"),
+    btn_and: Button = Button.init(native_btn_and, "AND"),
+    btn_or: Button = Button.init(native_btn_or, "OR"),
+    btn_xor: Button = Button.init(native_btn_xor, "XOR"),
 
-    btn_hex: Button = Button.init(Rect.make(8, 182, 56, 20), "HEX"),
-    btn_dec: Button = Button.init(Rect.make(69, 182, 56, 20), "DEC"),
-    btn_oct: Button = Button.init(Rect.make(130, 182, 56, 20), "OCT"),
+    btn_hex: Button = Button.init(native_btn_hex, "HEX"),
+    btn_dec: Button = Button.init(native_btn_dec, "DEC"),
+    btn_oct: Button = Button.init(native_btn_oct, "OCT"),
 
     // ---- K4 constant buttons (standard mode only) ----
-    btn_pi: Button = Button.init(Rect.make(260, 104, 56, 20), "PI"),
-    btn_euler: Button = Button.init(Rect.make(321, 104, 56, 20), "e"),
-    btn_sqrt2: Button = Button.init(Rect.make(382, 104, 56, 20), "sqrt2"),
-    btn_phi: Button = Button.init(Rect.make(443, 104, 56, 20), "phi"),
+    btn_pi: Button = Button.init(native_btn_pi, "PI"),
+    btn_euler: Button = Button.init(native_btn_euler, "e"),
+    btn_sqrt2: Button = Button.init(native_btn_sqrt2, "sqrt2"),
+    btn_phi: Button = Button.init(native_btn_phi, "phi"),
 
     // ---- K7 trig buttons (standard mode, below keypad) ----
-    btn_sin: Button = Button.init(Rect.make(8, 286, 56, 20), "SIN"),
-    btn_cos: Button = Button.init(Rect.make(69, 286, 56, 20), "COS"),
-    btn_tan: Button = Button.init(Rect.make(130, 286, 56, 20), "TAN"),
-    btn_deg_rad: Button = Button.init(Rect.make(191, 286, 56, 20), "RAD"),
-    btn_asin: Button = Button.init(Rect.make(8, 312, 56, 20), "ASIN"),
-    btn_acos: Button = Button.init(Rect.make(69, 312, 56, 20), "ACOS"),
-    btn_atan: Button = Button.init(Rect.make(130, 312, 56, 20), "ATAN"),
+    btn_sin: Button = Button.init(native_btn_sin, "SIN"),
+    btn_cos: Button = Button.init(native_btn_cos, "COS"),
+    btn_tan: Button = Button.init(native_btn_tan, "TAN"),
+    btn_deg_rad: Button = Button.init(native_btn_deg_rad, "RAD"),
+    btn_asin: Button = Button.init(native_btn_asin, "ASIN"),
+    btn_acos: Button = Button.init(native_btn_acos, "ACOS"),
+    btn_atan: Button = Button.init(native_btn_atan, "ATAN"),
 
     // ---- K8 log/exp buttons (standard mode, below the trig rows) ----
-    btn_ln: Button = Button.init(Rect.make(8, 338, 56, 20), "LN"),
-    btn_log: Button = Button.init(Rect.make(69, 338, 56, 20), "LOG"),
-    btn_exp: Button = Button.init(Rect.make(130, 338, 56, 20), "EXP"),
-    btn_pow: Button = Button.init(Rect.make(191, 338, 56, 20), "POW"),
-    btn_sqrt: Button = Button.init(Rect.make(8, 364, 56, 20), "SQRT"),
-    btn_abs: Button = Button.init(Rect.make(69, 364, 56, 20), "ABS"),
+    btn_ln: Button = Button.init(native_btn_ln, "LN"),
+    btn_log: Button = Button.init(native_btn_log, "LOG"),
+    btn_exp: Button = Button.init(native_btn_exp, "EXP"),
+    btn_pow: Button = Button.init(native_btn_pow, "POW"),
+    btn_sqrt: Button = Button.init(native_btn_sqrt, "SQRT"),
+    btn_abs: Button = Button.init(native_btn_abs, "ABS"),
     // ---- K6 scientific notation toggle (standard mode, below keypad) ----
-    btn_sci: Button = Button.init(Rect.make(8, 260, 56, 20), "SCI"),
+    btn_sci: Button = Button.init(native_btn_sci, "SCI"),
 
     // ---- K9 expression editor toggle (standard mode, next to SCI) ----
-    btn_expr: Button = Button.init(Rect.make(69, 260, 56, 20), "EXPR"),
+    btn_expr: Button = Button.init(native_btn_expr, "EXPR"),
 
     // ---- K14 random button (standard mode, same row as SCI/EXPR) ----
-    btn_rand: Button = Button.init(Rect.make(130, 260, 56, 20), "RAND"),
+    btn_rand: Button = Button.init(native_btn_rand, "RAND"),
+
+    /// M42 SX3 (issue #984): the tab-aware canvas. The app opens at the
+    /// native 512x424; when the tabbed WM activates its tab the kernel's
+    /// WIN_RESIZE seam delivers the full 1100x720 content viewport and
+    /// `layout` maps the fixed grid into it (proportional on both axes).
+    /// Without a resize (shim/WND desktop) every rect maps to itself — the
+    /// legacy rendering is the fixed point.
+    canvas_w: u32 = window_w,
+    canvas_h: u32 = window_h,
+    rects: LayoutRects = .{ .history_area = native_history_area, .display_rect = native_display_rect, .hex_display_rect = native_hex_display_rect, .dec_display_rect = native_dec_display_rect, .oct_display_rect = native_oct_display_rect, .reg_display_rect = native_reg_display_rect, .convert_rect = native_convert_rect },
+
+    pub fn layout(self: *AppState, w: u32, h: u32) void {
+        self.canvas_w = w;
+        self.canvas_h = h;
+        // Area rects (proportional on both axes)
+        self.rects.history_area = tabapp.scale(native_history_area, window_w, window_h, w, h);
+        self.rects.display_rect = tabapp.scale(native_display_rect, window_w, window_h, w, h);
+        self.rects.hex_display_rect = tabapp.scale(native_hex_display_rect, window_w, window_h, w, h);
+        self.rects.dec_display_rect = tabapp.scale(native_dec_display_rect, window_w, window_h, w, h);
+        self.rects.oct_display_rect = tabapp.scale(native_oct_display_rect, window_w, window_h, w, h);
+        self.rects.reg_display_rect = tabapp.scale(native_reg_display_rect, window_w, window_h, w, h);
+        self.rects.convert_rect = tabapp.scale(native_convert_rect, window_w, window_h, w, h);
+        // Button grid
+        self.btn_m_store.rect = tabapp.scale(native_btn_m_store, window_w, window_h, w, h);
+        self.btn_m_recall.rect = tabapp.scale(native_btn_m_recall, window_w, window_h, w, h);
+        self.btn_m_clear.rect = tabapp.scale(native_btn_m_clear, window_w, window_h, w, h);
+        self.btn_prog.rect = tabapp.scale(native_btn_prog, window_w, window_h, w, h);
+        self.btn_c.rect = tabapp.scale(native_btn_c, window_w, window_h, w, h);
+        self.btn_sign.rect = tabapp.scale(native_btn_sign, window_w, window_h, w, h);
+        self.btn_mod.rect = tabapp.scale(native_btn_mod, window_w, window_h, w, h);
+        self.btn_div.rect = tabapp.scale(native_btn_div, window_w, window_h, w, h);
+        self.btn_7.rect = tabapp.scale(native_btn_7, window_w, window_h, w, h);
+        self.btn_8.rect = tabapp.scale(native_btn_8, window_w, window_h, w, h);
+        self.btn_9.rect = tabapp.scale(native_btn_9, window_w, window_h, w, h);
+        self.btn_mul.rect = tabapp.scale(native_btn_mul, window_w, window_h, w, h);
+        self.btn_4.rect = tabapp.scale(native_btn_4, window_w, window_h, w, h);
+        self.btn_5.rect = tabapp.scale(native_btn_5, window_w, window_h, w, h);
+        self.btn_6.rect = tabapp.scale(native_btn_6, window_w, window_h, w, h);
+        self.btn_sub.rect = tabapp.scale(native_btn_sub, window_w, window_h, w, h);
+        self.btn_1.rect = tabapp.scale(native_btn_1, window_w, window_h, w, h);
+        self.btn_2.rect = tabapp.scale(native_btn_2, window_w, window_h, w, h);
+        self.btn_3.rect = tabapp.scale(native_btn_3, window_w, window_h, w, h);
+        self.btn_add.rect = tabapp.scale(native_btn_add, window_w, window_h, w, h);
+        self.btn_0.rect = tabapp.scale(native_btn_0, window_w, window_h, w, h);
+        self.btn_ce.rect = tabapp.scale(native_btn_ce, window_w, window_h, w, h);
+        self.btn_eq.rect = tabapp.scale(native_btn_eq, window_w, window_h, w, h);
+        self.btn_st.rect = tabapp.scale(native_btn_st, window_w, window_h, w, h);
+        self.btn_clr_mem.rect = tabapp.scale(native_btn_clr_mem, window_w, window_h, w, h);
+        self.btn_not.rect = tabapp.scale(native_btn_not, window_w, window_h, w, h);
+        self.btn_shl.rect = tabapp.scale(native_btn_shl, window_w, window_h, w, h);
+        self.btn_shr.rect = tabapp.scale(native_btn_shr, window_w, window_h, w, h);
+        self.btn_and.rect = tabapp.scale(native_btn_and, window_w, window_h, w, h);
+        self.btn_or.rect = tabapp.scale(native_btn_or, window_w, window_h, w, h);
+        self.btn_xor.rect = tabapp.scale(native_btn_xor, window_w, window_h, w, h);
+        self.btn_hex.rect = tabapp.scale(native_btn_hex, window_w, window_h, w, h);
+        self.btn_dec.rect = tabapp.scale(native_btn_dec, window_w, window_h, w, h);
+        self.btn_oct.rect = tabapp.scale(native_btn_oct, window_w, window_h, w, h);
+        self.btn_pi.rect = tabapp.scale(native_btn_pi, window_w, window_h, w, h);
+        self.btn_euler.rect = tabapp.scale(native_btn_euler, window_w, window_h, w, h);
+        self.btn_sqrt2.rect = tabapp.scale(native_btn_sqrt2, window_w, window_h, w, h);
+        self.btn_phi.rect = tabapp.scale(native_btn_phi, window_w, window_h, w, h);
+        self.btn_sin.rect = tabapp.scale(native_btn_sin, window_w, window_h, w, h);
+        self.btn_cos.rect = tabapp.scale(native_btn_cos, window_w, window_h, w, h);
+        self.btn_tan.rect = tabapp.scale(native_btn_tan, window_w, window_h, w, h);
+        self.btn_deg_rad.rect = tabapp.scale(native_btn_deg_rad, window_w, window_h, w, h);
+        self.btn_asin.rect = tabapp.scale(native_btn_asin, window_w, window_h, w, h);
+        self.btn_acos.rect = tabapp.scale(native_btn_acos, window_w, window_h, w, h);
+        self.btn_atan.rect = tabapp.scale(native_btn_atan, window_w, window_h, w, h);
+        self.btn_ln.rect = tabapp.scale(native_btn_ln, window_w, window_h, w, h);
+        self.btn_log.rect = tabapp.scale(native_btn_log, window_w, window_h, w, h);
+        self.btn_exp.rect = tabapp.scale(native_btn_exp, window_w, window_h, w, h);
+        self.btn_pow.rect = tabapp.scale(native_btn_pow, window_w, window_h, w, h);
+        self.btn_sqrt.rect = tabapp.scale(native_btn_sqrt, window_w, window_h, w, h);
+        self.btn_abs.rect = tabapp.scale(native_btn_abs, window_w, window_h, w, h);
+        self.btn_sci.rect = tabapp.scale(native_btn_sci, window_w, window_h, w, h);
+        self.btn_expr.rect = tabapp.scale(native_btn_expr, window_w, window_h, w, h);
+        self.btn_rand.rect = tabapp.scale(native_btn_rand, window_w, window_h, w, h);
+    }
 
     pub fn init() AppState {
         var s = AppState{};
@@ -894,9 +1044,9 @@ pub const AppState = struct {
     }
 
     /// Click y within history_area → settings row (null when outside).
-    fn cfg_row_at(y: u32) ?usize {
-        if (y < history_area.y + ui.pad_sm) return null;
-        const rel = y - (history_area.y + ui.pad_sm);
+    fn cfg_row_at(self: *const AppState, y: u32) ?usize {
+        if (y < self.rects.history_area.y + ui.pad_sm) return null;
+        const rel = y - (self.rects.history_area.y + ui.pad_sm);
         const row = rel / 16;
         if (row > 2) return null;
         return row;
@@ -1037,9 +1187,9 @@ pub const AppState = struct {
     }
 
     /// Row index under a history-area click, or null.
-    fn history_row_at(y: u32) ?usize {
-        if (y < history_area.y + ui.pad_sm) return null;
-        const rel = y - (history_area.y + ui.pad_sm);
+    fn history_row_at(self: *const AppState, y: u32) ?usize {
+        if (y < self.rects.history_area.y + ui.pad_sm) return null;
+        const rel = y - (self.rects.history_area.y + ui.pad_sm);
         const row = rel / 10;
         if (row >= history_visible) return null;
         return row;
@@ -1050,7 +1200,7 @@ pub const AppState = struct {
     // -------------------------------------------------------------------
 
     pub fn draw(self: *const AppState, win: u32) void {
-        ui.draw_rect(win, Rect.make(0, 0, window_w, window_h), ui.theme_bg());
+        ui.draw_rect(win, Rect.make(0, 0, self.canvas_w, self.canvas_h), ui.theme_bg());
 
         if (self.prog_mode.active) {
             self.draw_programmer(win);
@@ -1061,40 +1211,40 @@ pub const AppState = struct {
 
     fn draw_standard(self: *const AppState, win: u32) void {
         // History area
-        ui.draw_rect(win, history_area, ui.theme_surface());
-        ui.draw_rect_outline(win, history_area, ui.border_w, ui.theme_border());
+        ui.draw_rect(win, self.rects.history_area, ui.theme_surface());
+        ui.draw_rect_outline(win, self.rects.history_area, ui.border_w, ui.theme_border());
         var h_row: usize = 0;
         var h_idx = self.history_scroll;
         while (h_idx < self.hist.len and h_row < history_visible) : (h_idx += 1) {
             const entry = self.hist.get(h_idx);
             var buf: [40]u8 = undefined;
             const txt = HistoryRing.format_entry(entry, &buf);
-            const y = history_area.y + ui.pad_sm + @as(u32, @intCast(h_row)) * 10;
+            const y = self.rects.history_area.y + ui.pad_sm + @as(u32, @intCast(h_row)) * 10;
             const is_cursor = if (self.history_cursor) |c| c == h_idx else false;
             const col = if (is_cursor) ui.theme_accent() else ui.theme_text_muted();
             const cap = @min(txt.len, 60);
-            ui.draw_text(win, txt[0..cap], history_area.x + ui.pad_sm, y, col);
+            ui.draw_text(win, txt[0..cap], self.rects.history_area.x + ui.pad_sm, y, col);
             h_row += 1;
         }
         if (self.hist.len > history_visible) {
             if (self.history_scroll > 0)
-                ui.draw_text(win, "^", history_area.x + history_area.w - 10, history_area.y + ui.pad_sm, ui.theme_text_muted());
+                ui.draw_text(win, "^", self.rects.history_area.x + self.rects.history_area.w - 10, self.rects.history_area.y + ui.pad_sm, ui.theme_text_muted());
             if (self.history_scroll + history_visible < self.hist.len)
-                ui.draw_text(win, "v", history_area.x + history_area.w - 10, history_area.y + history_area.h - 10, ui.theme_text_muted());
+                ui.draw_text(win, "v", self.rects.history_area.x + self.rects.history_area.w - 10, self.rects.history_area.y + self.rects.history_area.h - 10, ui.theme_text_muted());
         }
 
         // Display box
-        ui.draw_rect(win, display_rect, ui.theme_surface());
-        ui.draw_rect_outline(win, display_rect, ui.border_w, ui.theme_border());
+        ui.draw_rect(win, self.rects.display_rect, ui.theme_surface());
+        ui.draw_rect_outline(win, self.rects.display_rect, ui.border_w, ui.theme_border());
         var disp_buf: [32]u8 = undefined;
         const disp_text = self.display_text(&disp_buf);
         const text_w = ui.measure_text(disp_text);
-        const text_x = if (display_rect.w > text_w + 16) display_rect.x + display_rect.w - text_w - 8 else display_rect.x + 16;
-        const text_y = display_rect.y + (if (display_rect.h > 12) (display_rect.h - 12) / 2 else 0);
+        const text_x = if (self.rects.display_rect.w > text_w + 16) self.rects.display_rect.x + self.rects.display_rect.w - text_w - 8 else self.rects.display_rect.x + 16;
+        const text_y = self.rects.display_rect.y + (if (self.rects.display_rect.h > 12) (self.rects.display_rect.h - 12) / 2 else 0);
         ui.draw_text(win, disp_text, text_x, text_y, ui.theme_text_primary());
 
         // Memory indicator (K2)
-        self.draw_mem_indicator(win, display_rect.x + ui.pad_sm, text_y);
+        self.draw_mem_indicator(win, self.rects.display_rect.x + ui.pad_sm, text_y);
 
         // Buttons — standard mode
         self.btn_m_store.draw(win);
@@ -1175,22 +1325,22 @@ pub const AppState = struct {
     }
 
     fn draw_stats_bar(self: *const AppState, win: u32) void {
-        ui.draw_rect(win, history_area, ui.theme_surface());
-        ui.draw_rect_outline(win, history_area, ui.border_w, ui.theme_accent());
+        ui.draw_rect(win, self.rects.history_area, ui.theme_surface());
+        ui.draw_rect_outline(win, self.rects.history_area, ui.border_w, ui.theme_accent());
 
         var line0: [128]u8 = undefined;
         const prompt = "1,2,3 > ";
         @memcpy(line0[0..prompt.len], prompt);
         const dl = @min(self.stats_len, line0.len - prompt.len - 4);
         @memcpy(line0[prompt.len .. prompt.len + dl], self.stats_input[0..dl]);
-        ui.draw_text(win, line0[0 .. prompt.len + dl], history_area.x + ui.pad_sm, history_area.y + ui.pad_sm, ui.theme_text_primary());
+        ui.draw_text(win, line0[0 .. prompt.len + dl], self.rects.history_area.x + ui.pad_sm, self.rects.history_area.y + ui.pad_sm, ui.theme_text_primary());
 
         if (self.stats_result_len > 0) {
             const rl = @min(self.stats_result_len, 60);
-            ui.draw_text(win, self.stats_result[0..rl], history_area.x + ui.pad_sm, history_area.y + 20, ui.theme_accent());
+            ui.draw_text(win, self.stats_result[0..rl], self.rects.history_area.x + ui.pad_sm, self.rects.history_area.y + 20, ui.theme_accent());
         } else {
             const hint = "comma-separated values, Enter computes";
-            ui.draw_text(win, hint, history_area.x + ui.pad_sm, history_area.y + 20, ui.theme_text_muted());
+            ui.draw_text(win, hint, self.rects.history_area.x + ui.pad_sm, self.rects.history_area.y + 20, ui.theme_text_muted());
         }
     }
 
@@ -1232,8 +1382,8 @@ pub const AppState = struct {
     }
 
     fn draw_date_bar(self: *const AppState, win: u32) void {
-        ui.draw_rect(win, history_area, ui.theme_surface());
-        ui.draw_rect_outline(win, history_area, ui.border_w, ui.theme_accent());
+        ui.draw_rect(win, self.rects.history_area, ui.theme_surface());
+        ui.draw_rect_outline(win, self.rects.history_area, ui.border_w, ui.theme_accent());
 
         // Row 0: the command line
         var line0: [56]u8 = undefined;
@@ -1241,15 +1391,15 @@ pub const AppState = struct {
         @memcpy(line0[0..prompt.len], prompt);
         const dl = @min(self.date_len, line0.len - prompt.len - 4);
         @memcpy(line0[prompt.len .. prompt.len + dl], self.date_buf[0..dl]);
-        ui.draw_text(win, line0[0 .. prompt.len + dl], history_area.x + ui.pad_sm, history_area.y + ui.pad_sm, ui.theme_text_primary());
+        ui.draw_text(win, line0[0 .. prompt.len + dl], self.rects.history_area.x + ui.pad_sm, self.rects.history_area.y + ui.pad_sm, ui.theme_text_primary());
 
         // Row 1: result of the last operation (or usage hint)
         if (self.date_result_len > 0) {
             const rl = @min(self.date_result_len, 60);
-            ui.draw_text(win, self.date_result[0..rl], history_area.x + ui.pad_sm, history_area.y + 20, ui.theme_accent());
+            ui.draw_text(win, self.date_result[0..rl], self.rects.history_area.x + ui.pad_sm, self.rects.history_area.y + 20, ui.theme_accent());
         } else {
             const hint = "d1 - d2 | d + N | now";
-            ui.draw_text(win, hint, history_area.x + ui.pad_sm, history_area.y + 20, ui.theme_text_muted());
+            ui.draw_text(win, hint, self.rects.history_area.x + ui.pad_sm, self.rects.history_area.y + 20, ui.theme_text_muted());
         }
     }
 
@@ -1336,8 +1486,8 @@ pub const AppState = struct {
     }
 
     fn draw_cfg_bar(self: *const AppState, win: u32) void {
-        ui.draw_rect(win, history_area, ui.theme_surface());
-        ui.draw_rect_outline(win, history_area, ui.border_w, ui.theme_accent());
+        ui.draw_rect(win, self.rects.history_area, ui.theme_surface());
+        ui.draw_rect_outline(win, self.rects.history_area, ui.border_w, ui.theme_accent());
 
         var row_buf: [48]u8 = undefined;
         const rows = [_][]const u8{
@@ -1346,22 +1496,22 @@ pub const AppState = struct {
             if (self.hex_leading_zeros) "HEX PAD      ON" else "HEX PAD      OFF",
         };
         for (rows, 0..) |row_text, ri| {
-            const y = history_area.y + ui.pad_sm + @as(u32, @intCast(ri)) * 16;
+            const y = self.rects.history_area.y + ui.pad_sm + @as(u32, @intCast(ri)) * 16;
             const col = if (ri == self.cfg_row) ui.theme_text_primary() else ui.theme_text_muted();
-            ui.draw_text(win, row_text[0..@min(row_text.len, 60)], history_area.x + ui.pad_sm, y, col);
+            ui.draw_text(win, row_text[0..@min(row_text.len, 60)], self.rects.history_area.x + ui.pad_sm, y, col);
         }
     }
 
     fn draw_programmer(self: *const AppState, win: u32) void {
         // Triple-line display (hex / dec / oct) — replaces history + single display
-        ui.draw_rect(win, hex_display_rect, ui.theme_surface());
-        ui.draw_rect_outline(win, hex_display_rect, ui.border_w, ui.theme_border());
-        ui.draw_rect(win, dec_display_rect, ui.theme_surface());
-        ui.draw_rect_outline(win, dec_display_rect, ui.border_w, ui.theme_border());
-        ui.draw_rect(win, oct_display_rect, ui.theme_surface());
-        ui.draw_rect_outline(win, oct_display_rect, ui.border_w, ui.theme_border());
-        ui.draw_rect(win, reg_display_rect, ui.theme_surface());
-        ui.draw_rect_outline(win, reg_display_rect, ui.border_w, ui.theme_border());
+        ui.draw_rect(win, self.rects.hex_display_rect, ui.theme_surface());
+        ui.draw_rect_outline(win, self.rects.hex_display_rect, ui.border_w, ui.theme_border());
+        ui.draw_rect(win, self.rects.dec_display_rect, ui.theme_surface());
+        ui.draw_rect_outline(win, self.rects.dec_display_rect, ui.border_w, ui.theme_border());
+        ui.draw_rect(win, self.rects.oct_display_rect, ui.theme_surface());
+        ui.draw_rect_outline(win, self.rects.oct_display_rect, ui.border_w, ui.theme_border());
+        ui.draw_rect(win, self.rects.reg_display_rect, ui.theme_surface());
+        ui.draw_rect_outline(win, self.rects.reg_display_rect, ui.border_w, ui.theme_border());
 
         const val = self.engine.current_val;
 
@@ -1384,12 +1534,12 @@ pub const AppState = struct {
         const hc = @min(hex_str.len, hex_label.len - hpos);
         @memcpy(hex_label[hpos .. hpos + hc], hex_str[0..hc]);
         hpos += hc;
-        ui.draw_text(win, hex_label[0..hpos], hex_display_rect.x + ui.pad_sm, hex_display_rect.y + 5, ui.theme_text_primary());
+        ui.draw_text(win, hex_label[0..hpos], self.rects.hex_display_rect.x + ui.pad_sm, self.rects.hex_display_rect.y + 5, ui.theme_text_primary());
 
         // Dec
         var dec_buf: [24]u8 = undefined;
         const dec_str = prog.format_dec(val, &dec_buf);
-        ui.draw_text(win, dec_str, dec_display_rect.x + ui.pad_sm, dec_display_rect.y + 5, ui.theme_text_primary());
+        ui.draw_text(win, dec_str, self.rects.dec_display_rect.x + ui.pad_sm, self.rects.dec_display_rect.y + 5, ui.theme_text_primary());
 
         // Oct
         var oct_buf: [24]u8 = undefined;
@@ -1402,7 +1552,7 @@ pub const AppState = struct {
         const oc = @min(oct_str.len, oct_label.len - opos);
         @memcpy(oct_label[opos .. opos + oc], oct_str[0..oc]);
         opos += oc;
-        ui.draw_text(win, oct_label[0..opos], oct_display_rect.x + ui.pad_sm, oct_display_rect.y + 5, ui.theme_text_muted());
+        ui.draw_text(win, oct_label[0..opos], self.rects.oct_display_rect.x + ui.pad_sm, self.rects.oct_display_rect.y + 5, ui.theme_text_muted());
 
         // Register display (R0–R7)
         var reg_buf: [32]u8 = undefined;
@@ -1425,12 +1575,12 @@ pub const AppState = struct {
         rpos += 2;
         @memcpy(reg_buf[rpos .. rpos + rvc], rval_str[0..rvc]);
         rpos += rvc;
-        ui.draw_text(win, reg_buf[0..rpos], reg_display_rect.x + ui.pad_sm, reg_display_rect.y + 5, ui.theme_text_muted());
+        ui.draw_text(win, reg_buf[0..rpos], self.rects.reg_display_rect.x + ui.pad_sm, self.rects.reg_display_rect.y + 5, ui.theme_text_muted());
 
         // Memory indicator (K2)
         // Small indicator at right of reg display
         if (self.mem_any_nonzero) {
-            ui.draw_text(win, "M", reg_display_rect.x + reg_display_rect.w - 12, reg_display_rect.y + 5, ui.theme_text_muted());
+            ui.draw_text(win, "M", self.rects.reg_display_rect.x + self.rects.reg_display_rect.w - 12, self.rects.reg_display_rect.y + 5, ui.theme_text_muted());
         }
 
         // Buttons — programmer mode
@@ -1493,16 +1643,16 @@ pub const AppState = struct {
 
     fn draw_convert_bar(self: *const AppState, win: u32) void {
         // Conversion bar overlays the history area when active
-        ui.draw_rect(win, history_area, ui.theme_surface());
-        ui.draw_rect_outline(win, history_area, ui.border_w, ui.theme_accent());
+        ui.draw_rect(win, self.rects.history_area, ui.theme_surface());
+        ui.draw_rect_outline(win, self.rects.history_area, ui.border_w, ui.theme_accent());
 
         // Category buttons
         const cats = [_][]const u8{ "Temp", "Length", "Weight" };
-        var cat_x: u32 = history_area.x + ui.pad_sm;
+        var cat_x: u32 = self.rects.history_area.x + ui.pad_sm;
         for (cats, 0..) |cat_name, ci| {
             const is_active = ci == self.convert_category;
             const col = if (is_active) ui.theme_accent() else ui.theme_text_muted();
-            ui.draw_text(win, cat_name, cat_x, history_area.y + ui.pad_sm, col);
+            ui.draw_text(win, cat_name, cat_x, self.rects.history_area.y + ui.pad_sm, col);
             cat_x += @as(u32, @intCast(cat_name.len)) * 8 + 12;
         }
 
@@ -1525,7 +1675,7 @@ pub const AppState = struct {
         lpos += 1;
         @memcpy(label_buf[lpos .. lpos + to_name.len], to_name);
         lpos += to_name.len;
-        ui.draw_text(win, label_buf[0..lpos], history_area.x + ui.pad_sm, history_area.y + 16, ui.theme_text_primary());
+        ui.draw_text(win, label_buf[0..lpos], self.rects.history_area.x + ui.pad_sm, self.rects.history_area.y + 16, ui.theme_text_primary());
 
         // Conversion result — K12: dec_places formats the fractional part
         var res_buf: [32]u8 = undefined;
@@ -1539,7 +1689,7 @@ pub const AppState = struct {
         const rc = @min(result_str.len, full_buf.len - fpos);
         @memcpy(full_buf[fpos .. fpos + rc], result_str[0..rc]);
         fpos += rc;
-        ui.draw_text(win, full_buf[0..fpos], history_area.x + ui.pad_sm, history_area.y + 28, ui.theme_accent());
+        ui.draw_text(win, full_buf[0..fpos], self.rects.history_area.x + ui.pad_sm, self.rects.history_area.y + 28, ui.theme_accent());
     }
 
     // -------------------------------------------------------------------
@@ -1550,7 +1700,7 @@ pub const AppState = struct {
     /// `calc: cursor=<name>` on change (serial-observable).
     pub fn update_cursor(self: *AppState, x: u32, y: u32) void {
         _ = x;
-        const over_clickable = y >= display_rect.y + display_rect.h + 2;
+        const over_clickable = y >= self.rects.display_rect.y + self.rects.display_rect.h + 2;
         const kind = ui.cursor_for_region(false, over_clickable, false);
         if (kind != self.cursor_kind) {
             self.cursor_kind = kind;
@@ -1588,10 +1738,10 @@ pub const AppState = struct {
         if (self.cfg_active and ev.kind == ui.MOUSE_UP) {
             const x = ev.arg0;
             const y = ev.arg1;
-            const inside = x >= history_area.x and x < history_area.x + history_area.w and
-                y >= history_area.y and y < history_area.y + history_area.h;
+            const inside = x >= self.rects.history_area.x and x < self.rects.history_area.x + self.rects.history_area.w and
+                y >= self.rects.history_area.y and y < self.rects.history_area.y + self.rects.history_area.h;
             if (inside) {
-                if (cfg_row_at(y)) |row| {
+                if (self.cfg_row_at(y)) |row| {
                     self.cfg_row = @intCast(row);
                     self.cfg_adjust(1);
                 }
@@ -1798,10 +1948,10 @@ pub const AppState = struct {
         if (!changed and (ev.kind == ui.MOUSE_DOWN or ev.kind == ui.MOUSE_UP)) {
             const x = ev.arg0;
             const y = ev.arg1;
-            const inside_x = x >= history_area.x and x < history_area.x + history_area.w;
-            const inside_y = y >= history_area.y and y < history_area.y + history_area.h;
+            const inside_x = x >= self.rects.history_area.x and x < self.rects.history_area.x + self.rects.history_area.w;
+            const inside_y = y >= self.rects.history_area.y and y < self.rects.history_area.y + self.rects.history_area.h;
             if (inside_x and inside_y) {
-                if (history_row_at(y)) |row| {
+                if (self.history_row_at(y)) |row| {
                     const logical = self.history_scroll + row;
                     if (logical < self.hist.len) {
                         self.expr_load_from_history(logical);
@@ -2344,19 +2494,29 @@ fn cli_main(argc: usize, argv_va: u64) noreturn {
 fn gui_main() noreturn {
     var app = AppState.init();
 
-    // M37 DQ4: follow the desktop theme first.
-    _ = ui.sync_theme_from_host();
-    const win_res = ui.win_open(window_x, window_y, window_w, window_h);
-    if (win_res < 0) {
+    // M42 SX3: the tab-aware open. The window opens at the native 512x424
+    // (the legacy shim/WND presentation is unchanged); under TABWM.BIN the
+    // declaration is accepted and activation delivers the full 1100x720
+    // content viewport via the kernel's WIN_RESIZE seam, which `layout`
+    // maps the fixed grid into.
+    const win_res = tabapp.TabApp.init(.{
+        .name = "CALC.BIN",
+        .title = "Calc",
+        .x = window_x,
+        .y = window_y,
+        .w = window_w,
+        .h = window_h,
+    }) orelse {
         ui.write_console("calc: failed to open window\n");
         ui.exit_process(1);
-    }
-    const win = @as(u32, @intCast(win_res));
+    };
+    var ta = win_res;
 
     ui.write_console("calc: open id=2\n");
+    if (ta.tab_aware) ui.write_console("calc: tab-aware (full-viewport)\n");
 
-    app.draw(win);
-    ui.win_present(win);
+    app.draw(ta.win);
+    ta.present();
     ui.emit_tokens_marker("calc");
     ui.write_console("calc: ready\n");
     // M37 DQ4 gate: let the compositor settle (several ticks) so the
@@ -2376,34 +2536,51 @@ fn gui_main() noreturn {
             break;
         }
 
-        if (ev.kind == ui.MOUSE_DOWN or ev.kind == ui.MOUSE_UP or ev.kind == ui.MOUSE_MOVE) {
-            dirty = app.handle_mouse_events(&ev) or dirty;
-        } else if (ev.kind == ui.KEY_DOWN) {
-            dirty = app.handle_keyboard_event(&ev) or dirty;
+        // M42 SX3: WM-lifecycle events (resize -> relayout) first.
+        switch (ta.dispatch(&ev)) {
+            .closed => break,
+            .resized => {
+                ui.write_console("calc: resize relayout\n");
+                app.layout(ta.w, ta.h);
+                dirty = true;
+            },
+            .none => {
+                if (ev.kind == ui.MOUSE_DOWN or ev.kind == ui.MOUSE_UP or ev.kind == ui.MOUSE_MOVE) {
+                    dirty = app.handle_mouse_events(&ev) or dirty;
+                } else if (ev.kind == ui.KEY_DOWN) {
+                    dirty = app.handle_keyboard_event(&ev) or dirty;
+                }
+            },
         }
 
         while (ui.poll_event(&ev) > 0) {
-            if (ev.kind == ui.WIN_CLOSE) {
-                ui.write_console("calc: win_close\n");
-                ui.win_close(win);
-                ui.exit_process(exit_status);
-            }
-            if (ev.kind == ui.MOUSE_DOWN or ev.kind == ui.MOUSE_UP or ev.kind == ui.MOUSE_MOVE) {
-                dirty = app.handle_mouse_events(&ev) or dirty;
-            } else if (ev.kind == ui.KEY_DOWN) {
-                dirty = app.handle_keyboard_event(&ev) or dirty;
+            switch (ta.dispatch(&ev)) {
+                .closed => {
+                    ui.write_console("calc: win_close\n");
+                    ta.close_and_exit(exit_status);
+                },
+                .resized => {
+                    app.layout(ta.w, ta.h);
+                    dirty = true;
+                },
+                .none => {
+                    if (ev.kind == ui.MOUSE_DOWN or ev.kind == ui.MOUSE_UP or ev.kind == ui.MOUSE_MOVE) {
+                        dirty = app.handle_mouse_events(&ev) or dirty;
+                    } else if (ev.kind == ui.KEY_DOWN) {
+                        dirty = app.handle_keyboard_event(&ev) or dirty;
+                    }
+                },
             }
         }
 
         if (dirty) {
-            app.draw(win);
-            ui.win_present(win);
+            app.draw(ta.win);
+            ta.present();
         }
     }
 
     ui.write_console("calc: exiting 43\n");
-    ui.win_close(win);
-    ui.exit_process(exit_status);
+    ta.close_and_exit(exit_status);
 }
 
 /// K11 entry contract: the kernel's exec passes argc in x0 and the argv
@@ -3205,4 +3382,60 @@ test "calc K16: plain s stays memory-store while stats closed" {
     _ = app.handle_keyboard_event(&ev);
     try std.testing.expect(!app.stats_active);
     try std.testing.expectEqual(@as(i64, 42), app.mem_slots[0]);
+}
+
+// ---------------------------------------------------------------------------
+// Tests (M42 SX3/SX4 — the tab-aware layout)
+// ---------------------------------------------------------------------------
+test "calc layout: native canvas is the identity (zero-regression fixed point)" {
+    var app = AppState.init();
+    app.layout(window_w, window_h);
+    // Area rects map to themselves exactly.
+    try std.testing.expectEqual(native_history_area, app.rects.history_area);
+    try std.testing.expectEqual(native_display_rect, app.rects.display_rect);
+    // Every button maps to itself exactly (the shipped layout).
+    try std.testing.expectEqual(native_btn_7.x, app.btn_7.rect.x);
+    try std.testing.expectEqual(native_btn_7.y, app.btn_7.rect.y);
+    try std.testing.expectEqual(native_btn_7.w, app.btn_7.rect.w);
+    try std.testing.expectEqual(native_btn_7.h, app.btn_7.rect.h);
+    try std.testing.expectEqual(native_btn_eq.x, app.btn_eq.rect.x);
+    // Hit-test helpers agree with the identity geometry.
+    try std.testing.expect(app.history_row_at(native_history_area.y + ui.pad_sm) != null);
+}
+
+test "calc layout: full viewport maps the grid inside 1100x720" {
+    var app = AppState.init();
+    app.layout(1100, 720);
+    try std.testing.expectEqual(@as(u32, 1100), app.canvas_w);
+    try std.testing.expectEqual(@as(u32, 720), app.canvas_h);
+
+    // Every area rect stays inside the viewport.
+    const areas = [_]Rect{ app.rects.history_area, app.rects.display_rect, app.rects.convert_rect };
+    for (areas) |r| {
+        try std.testing.expect(r.x + r.w <= 1100);
+        try std.testing.expect(r.y + r.h <= 720);
+    }
+
+    // Every button rect stays inside the viewport and grows with it.
+    const btns = [_]*const Button{ &app.btn_7, &app.btn_8, &app.btn_0, &app.btn_eq, &app.btn_c, &app.btn_m_store, &app.btn_pi, &app.btn_sin, &app.btn_rand };
+    for (btns) |b| {
+        try std.testing.expect(b.rect.x + b.rect.w <= 1100);
+        try std.testing.expect(b.rect.y + b.rect.h <= 720);
+        try std.testing.expect(b.rect.w >= native_btn_7.w); // proportional growth
+    }
+
+    // The eq button's native position maps proportionally.
+    try std.testing.expectEqual(native_btn_eq.x * 1100 / 512, app.btn_eq.rect.x);
+}
+
+test "calc layout: hit-test helpers follow the scaled geometry" {
+    var app = AppState.init();
+    app.layout(1100, 720);
+    // history_row_at is relative to the SCALED area: a click just inside
+    // the scaled history area maps to a settings/row index, a click in the
+    // viewport's far bottom-right (outside the scaled area) maps to null
+    // for the row helpers.
+    const inside_y = app.rects.history_area.y + ui.pad_sm;
+    try std.testing.expect(app.history_row_at(inside_y) != null);
+    try std.testing.expect(app.history_row_at(650) == null);
 }
