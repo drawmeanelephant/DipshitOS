@@ -66,6 +66,13 @@ echo "run dir: $RUN_DIR"
 run_boot() {
     # $1 = tag; remaining args passed through to VMRunner.
     local tag="$1"; shift
+    # M21 W11 isolation (#990, claim #997): the shell persists window state
+    # to WINDOWS.SAV on the share every ~300 idle cycles — boot A's demo
+    # windows leaked into boots B/C/D as PHANTOM boot-time restores
+    # (synthetic owner=99), which is what the overview's n=2-vs-n=3 flake
+    # actually was. Each boot starts from the seeded share, not the
+    # previous boot's session.
+    rm -f "$RUN_DIR/share/WINDOWS.SAV"
     rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log"
     set +e
     host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \

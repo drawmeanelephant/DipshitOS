@@ -26,6 +26,7 @@ const mmio = @import("mmio.zig");
 const mmu = @import("mmu.zig");
 const pci = @import("pci.zig");
 const evidence = @import("evidence.zig");
+const spinlock = @import("spinlock.zig");
 
 // Claim 0020: TX-transition matrix phases. Each option is default off; a
 // default build is byte-identical. A diagnostic build enables exactly ONE
@@ -494,9 +495,25 @@ pub fn virtio_pci_init(st: *const SystemTable) bool {
 /// tx-transition, t0sz16 all analyze only the first/transition flush).
 var vp_first_flush: bool = true;
 
+/// WM2 (#707 card 2 port, claim #980): the TX critical section runs on BOTH
+/// cores (core 0's shell/WM prints and the secondary's app prints), with NO
+/// synchronization — two concurrent flushes raced the 1-deep TX ring: one
+/// saw `outstanding >= queue_size` and DROPPED the line, so an EL0 app's
+/// console writes intermittently never reached the serial (the WM2 gate
+/// keys its script phases on the demo's prints and lost ~50% of WM-mode
+/// boots to it). Serialize flushes with an IRQ-save spinlock, and give the
+/// full-guard a bounded retry (8 re-polls of the used ring) before the
+/// honest drop — a truly stuck device still drops, a contended one now
+/// gets through. Default-build byte-difference: only lines that were
+/// previously DROPPED can now appear; no existing line changes shape.
+var vp_tx_lock = spinlock.IrqSaveSpinlock{};
+
 pub fn virtio_pci_flush() void {
     if (!vp_ready or vp_tx_len == 0) return;
     const st = st_tx;
+    // WM2 (claim #980): serialize concurrent flushers (see vp_tx_lock above).
+    const daif = vp_tx_lock.lock();
+    defer vp_tx_lock.unlock(daif);
     // Claim 0018 (build-gated -Dtx-diag): ten ordered 8-byte NVRAM markers
     // bracket each potentially fatal operation of the (first) post-exit
     // transmission — the ladder's last marker names the smallest confirmed
@@ -513,15 +530,26 @@ pub fn virtio_pci_flush() void {
     // new entry would overwrite a ring slot the device has not yet consumed.
     // Re-read used.idx fresh (the device writes it; invalidate its line
     // first). If the ring is still full — the previous buffer was never
-    // consumed (e.g. the notify or the used-poll timed out) — drop this line
-    // without touching the rings: the device is stuck, and dropping stays
-    // honest without corrupting the ring.
-    mmu.invalidate_dcache_range(@intFromPtr(&virtio_used), @sizeOf(VirtqUsed));
-    asm volatile ("dmb ishld" ::: .{ .memory = true });
-    const outstanding = virtio_avail.idx -% virtio_used.idx;
-    if (outstanding >= virtio_queue_size) {
-        vp_tx_len = 0;
-        return;
+    // consumed (e.g. the notify or the used-poll timed out) — retry a
+    // bounded number of times (the used-ring poll below normally frees the
+    // slot within microseconds; the old instant drop lost concurrent
+    // cores' lines), then drop without touching the rings: a stuck device
+    // still drops, and dropping stays honest without corrupting the ring.
+    var full_polls: usize = 0;
+    while (full_polls < 8) : (full_polls += 1) {
+        mmu.invalidate_dcache_range(@intFromPtr(&virtio_used), @sizeOf(VirtqUsed));
+        asm volatile ("dmb ishld" ::: .{ .memory = true });
+        const outstanding = virtio_avail.idx -% virtio_used.idx;
+        if (outstanding < virtio_queue_size) break;
+    }
+    {
+        mmu.invalidate_dcache_range(@intFromPtr(&virtio_used), @sizeOf(VirtqUsed));
+        asm volatile ("dmb ishld" ::: .{ .memory = true });
+        const outstanding = virtio_avail.idx -% virtio_used.idx;
+        if (outstanding >= virtio_queue_size) {
+            vp_tx_len = 0;
+            return;
+        }
     }
     virtio_desc[0] = .{ .addr = mmu.to_phys(@intFromPtr(&virtio_tx)), .len = @intCast(vp_tx_len), .flags = 0, .next = 0 };
     virtio_avail.ring[0] = 0; // descriptor index 0

@@ -107,6 +107,7 @@ const mmu = @import("mmu.zig");
 const pci = @import("pci.zig");
 const evidence = @import("evidence.zig");
 const virtio_gpu = @import("virtio_gpu.zig");
+const spinlock = @import("spinlock.zig"); // #990 (claim #997): the console tee's TX lock
 
 const VirtqDesc = extern struct {
     addr: u64,
@@ -1252,6 +1253,17 @@ fn console_tee_set_enabled(enable: bool) void {
 
 /// Accumulate one console byte; flush on newline or when the staging
 /// buffer is full. Called from uart_putc — MUST stay cheap when disarmed.
+/// #990 (claim #997): the console tee's TX runs on BOTH cores (core 0's
+/// shell/WM prints, the secondary's app prints) with NO synchronization —
+/// concurrent tee_flush/tee_send_line raced the CVC chain allocator and
+/// the queue-1 rings, and a failed submit DROPPED the line (an EL0 app's
+/// stdout intermittently never reached the serial; the WM2 gate keys its
+/// script phases on the demo's prints and lost ~50% of WM-mode boots to
+/// it). Serialize the flush+send with an IRQ-save spinlock, and give the
+/// send a bounded retry (4 attempts) — a contended queue now gets through;
+/// a stuck one still drops honestly (tee_drop_count).
+var tee_tx_lock = spinlock.IrqSaveSpinlock{};
+
 pub fn console_tee_putc(byte: u8) void {
     if (!tee_enabled or !cv_ready) return;
     if (tee_line_len >= tee_line_cap) tee_flush(false);
@@ -1281,6 +1293,8 @@ fn tee_flush(terminated: bool) void {
     const n = tee_line_len;
     tee_line_len = 0;
     if (n == 0) return;
+    const daif = tee_tx_lock.lock();
+    defer tee_tx_lock.unlock(daif);
     if (!tee_send_line(tee_line_buf[0..n])) tee_drop_count += 1;
 }
 
@@ -1288,19 +1302,25 @@ fn tee_flush(terminated: bool) void {
 /// poll-wait for the host's ACK:<len>, validate. False = dropped (counted
 /// by the caller). Self-contained — deliberately NOT cvlog_puts, whose
 /// 64-byte report buffer would split long kernel lines mid-token.
-fn tee_send_line(line: []const u8) bool {
+fn tee_send_line(line_bytes: []const u8) bool {
     if (!cv_ready) return false;
     if (cv_rings[1].armed == false) return false;
-    if (line.len == 0 or line.len > tee_tx_buf.len) return false;
-    @memcpy(tee_tx_buf[0..line.len], line);
-    cv_scatter[0] = tee_tx_buf[0..line.len];
-    const h = submit_ex(1, cv_scatter[0..1], tee_ack_buf[0..], false) orelse return false;
-    defer free_chain_q(1, h); // claim 0680: never leak a polled send's chain
-    const n = wait(1, h, tee_budget, tee_ack_buf[0..]) orelse return false;
-    if (n < 4) return false;
-    if (!std.mem.eql(u8, tee_ack_buf[0..3], "OK" ++ ":")) return false;
-    tee_sent_count += 1;
-    return true;
+    if (line_bytes.len == 0 or line_bytes.len > tee_tx_buf.len) return false;
+    // #990: bounded retry — the idle-seam pump reclaims chains between
+    // attempts; a contended queue gets through, a stuck one still fails.
+    var attempt: usize = 0;
+    while (attempt < 4) : (attempt += 1) {
+        @memcpy(tee_tx_buf[0..line_bytes.len], line_bytes);
+        cv_scatter[0] = tee_tx_buf[0..line_bytes.len];
+        const h = submit_ex(1, cv_scatter[0..1], tee_ack_buf[0..], false) orelse continue;
+        defer free_chain_q(1, h); // claim 0680: never leak a polled send's chain
+        const n = wait(1, h, tee_budget, tee_ack_buf[0..]) orelse continue;
+        if (n < 4) continue;
+        if (!std.mem.eql(u8, tee_ack_buf[0..3], "OK" ++ ":")) continue;
+        tee_sent_count += 1;
+        return true;
+    }
+    return false;
 }
 
 /// The tee's own TX staging (BSS — runtime address discipline, claim 0015).
