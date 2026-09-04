@@ -382,15 +382,30 @@ fn env_unset(name: []const u8) bool {
     return false;
 }
 
+/// Safe file-channel lock helpers for in-kernel shell tasks (issue #846):
+/// bracket EL1 file access with svclock so shell reads/writes serialize
+/// cleanly with EL0 file syscalls on secondary cores.
+fn acquire_file_lock() u5 {
+    return svclock.acquire_missing(svclock.dom_bit(.file));
+}
+
+fn release_file_lock(taken: u5) void {
+    svclock.release_set(taken);
+}
+
 /// M19 P3: persist the full env table (one NAME=VAL per line) to the HOST
 /// SHARE. M34 HF6 (issue #740): the ESP fallback is gone — the share is
 /// the only file store; without a channel the read is an honest 0.
 fn env_read_existing(buf: []u8) usize {
+    const taken = acquire_file_lock();
+    defer release_file_lock(taken);
     return virtio_file.read_whole(env_path, buf) orelse 0;
 }
 
 /// HF5/HF6: write the whole env file to the share.
 fn env_write_all(bytes: []const u8) void {
+    const taken = acquire_file_lock();
+    defer release_file_lock(taken);
     _ = virtio_file.write_whole(env_path, bytes);
 }
 
@@ -674,6 +689,8 @@ pub fn shell_complete(line: []const u8, cursor: usize, index: usize) ?lineedit.C
     }
 
     completion_reset();
+    const taken = acquire_file_lock();
+    defer release_file_lock(taken);
 
     if (is_cmd) {
         if (prefix.len == 0) return null;
@@ -1451,11 +1468,15 @@ pub const Shell = struct {
 /// HF5/HF6: read the existing history file from the HOST SHARE into
 /// `buf`. Returns the byte count (0 = absent/empty / no channel).
 fn history_read_existing(buf: []u8) usize {
+    const taken = acquire_file_lock();
+    defer release_file_lock(taken);
     return virtio_file.read_whole(history_path, buf) orelse 0;
 }
 
 /// HF5/HF6: write the whole history file to the share.
 fn history_write_all(bytes: []const u8) void {
+    const taken = acquire_file_lock();
+    defer release_file_lock(taken);
     _ = virtio_file.write_whole(history_path, bytes);
 }
 
@@ -1535,6 +1556,8 @@ fn load_history(editor: *lineedit.LineEditor) void {
 /// staging bound). Prints the honest refusal and returns null on any
 /// miss. M34 HF6 (issue #740): the ESP/FAT read paths are gone.
 fn script_load(mon: *monitor.Monitor, name: []const u8) ?[]const u8 {
+    const taken = acquire_file_lock();
+    defer release_file_lock(taken);
     var st = virtio_file.StatResult{};
     if (virtio_file.stat(name, &st) != virtio_file.st_ok or st.is_dir) {
         mon.console.puts("sh: ");
@@ -2183,7 +2206,12 @@ fn glob_expand_argv(
         // M34 HF6 (issue #740): globbing enumerates the HOST SHARE root
         // (the ESP window is gone).
         var lr = virtio_file.ListResult{};
-        if (virtio_file.list("", &lr) != virtio_file.st_ok) {
+        const list_st = blk: {
+            const taken = acquire_file_lock();
+            defer release_file_lock(taken);
+            break :blk virtio_file.list("", &lr);
+        };
+        if (list_st != virtio_file.st_ok) {
             out[count] = arg; // no channel: literal passthrough
             count += 1;
             continue;
@@ -3479,7 +3507,12 @@ fn park_body(mon: *monitor.Monitor) callconv(.c) void {
     // M18 T14: run startup file (.virelairc) if present on the host
     // share (HF6: the ESP window is gone).
     var rc_buf: [2048]u8 = undefined;
-    if (virtio_file.read_whole(".virelairc", &rc_buf)) |rc_len| {
+    const rc_len_opt = blk: {
+        const taken = acquire_file_lock();
+        defer release_file_lock(taken);
+        break :blk virtio_file.read_whole(".virelairc", &rc_buf);
+    };
+    if (rc_len_opt) |rc_len| {
         const rc = rc_buf[0..rc_len];
         var start: usize = 0;
         var i: usize = 0;
@@ -3796,7 +3829,12 @@ fn save_windows() void {
 /// exists). HF6: the ESP window is gone.
 fn restore_windows() void {
     var content: [driving_award.persist_max_bytes]u8 = undefined;
-    const n = virtio_file.read_whole("WINDOWS.SAV", &content) orelse return;
+    const n_opt = blk: {
+        const taken = acquire_file_lock();
+        defer release_file_lock(taken);
+        break :blk virtio_file.read_whole("WINDOWS.SAV", &content);
+    };
+    const n = n_opt orelse return;
     if (n == 0) return;
     _ = driving_award.restore_state(content[0..n], 99);
 }

@@ -523,7 +523,9 @@ pub fn stat(path: []const u8, out: *StatResult) u8 {
 
 /// READ a file at `offset`. Returns the reply status; on ok the data
 /// slice points into the module's reply buffer and is valid only until the
-/// NEXT exchange on queue 5 (callers print/checksum immediately).
+/// NEXT exchange on queue 5. NOTE: Callers that copy data into their own
+/// buffer across tasks/cores MUST use `read_chunk` to copy under `vf_lock`
+/// (issue #846).
 pub const ReadResult = struct {
     status: u8 = st_host_error,
     data: []const u8 = "",
@@ -547,6 +549,45 @@ pub fn read(path: []const u8, offset: u64) ReadResult {
     return .{ .status = st_ok, .data = rep.data };
 }
 
+/// The result of `read_chunk`: reply status + byte count copied into destination.
+pub const ReadChunkResult = struct {
+    status: u8 = st_host_error,
+    bytes: usize = 0,
+};
+
+/// READ a chunk at `offset` directly into caller's `out` buffer.
+/// Unlike `read`, the request encode, queue 5 exchange, reply decode, and
+/// the copy into `out` happen entirely under `vf_lock` (issue #846).
+/// The module's shared `vf_reply_buf` is never read outside the lock,
+/// preventing concurrent tasks or cores from clobbering in-flight replies
+/// before or during the copy.
+pub fn read_chunk(path: []const u8, offset: u64, out: []u8) ReadChunkResult {
+    if (!available()) return .{ .status = st_host_error, .bytes = 0 };
+    if (out.len == 0) return .{ .status = st_ok, .bytes = 0 };
+    if (builtin.is_test and test_share != null) {
+        const data = test_lookup(path) orelse return .{ .status = st_not_found, .bytes = 0 };
+        if (offset >= data.len) return .{ .status = st_ok, .bytes = 0 };
+        const src = data[@intCast(offset)..];
+        const take = @min(src.len, out.len);
+        @memcpy(out[0..take], src[0..take]);
+        return .{ .status = st_ok, .bytes = take };
+    }
+    var payload: [path_max + read_offset_len]u8 = undefined;
+    const plen = build_read_payload(path, offset, &payload) orelse return .{ .status = st_host_error, .bytes = 0 };
+
+    const saved_daif = vf_lock.lock();
+    defer vf_lock.unlock(saved_daif);
+
+    const req_len = encode_request(op_read, 0, payload[0..plen], &vf_req_buf) orelse return .{ .status = st_host_error, .bytes = 0 };
+    const n = exchange_raw(vf_req_buf[0..req_len], &vf_reply_buf) orelse return .{ .status = st_host_error, .bytes = 0 };
+    const rep = decode_reply(vf_reply_buf[0..n]);
+    if (rep.status != st_ok) return .{ .status = rep.status, .bytes = 0 };
+    if (rep.clamped) return .{ .status = st_truncated, .bytes = 0 };
+    const take = @min(rep.data.len, out.len);
+    @memcpy(out[0..take], rep.data[0..take]);
+    return .{ .status = st_ok, .bytes = take };
+}
+
 /// Stream a whole file into `out` across READ round trips (each reply
 /// carries ≤ `reply_cap - reply_hdr_len` data bytes, so a >32 KiB file
 /// needs multiple exchanges). `size` from a prior STAT bounds the loop; a
@@ -561,11 +602,10 @@ pub fn read_into(path: []const u8, size: u64, out: []u8) ?usize {
     var offset: u64 = 0;
     var total: usize = 0;
     while (total < size) {
-        const r = read(path, offset);
-        if (r.status != st_ok or r.data.len == 0) return null;
-        @memcpy(out[total..][0..r.data.len], r.data);
-        total += r.data.len;
-        offset += r.data.len;
+        const rc = read_chunk(path, offset, out[total..]);
+        if (rc.status != st_ok or rc.bytes == 0) return null;
+        total += rc.bytes;
+        offset += rc.bytes;
     }
     return total;
 }
@@ -1080,4 +1120,29 @@ test "virtio_file: G13 — HF7 clone op: 0x0c, NUL frame, bounds, honest refusal
     try testing.expectEqual(st_exists, decode_reply(&rep).status);
     rep[0] = st_not_found;
     try testing.expectEqual(st_not_found, decode_reply(&rep).status);
+}
+
+test "virtio_file: read_chunk and read_into copy-out under test_share" {
+    const fixture = [_]TestFile{
+        .{ .name = "TEST.TXT", .data = "Hello, world of safe concurrent reads!" },
+    };
+    set_test_share(&fixture);
+    defer set_test_share(null);
+
+    var chunk_buf: [13]u8 = undefined;
+    const rc1 = read_chunk("TEST.TXT", 0, &chunk_buf);
+    try testing.expectEqual(st_ok, rc1.status);
+    try testing.expectEqual(@as(usize, 13), rc1.bytes);
+    try testing.expectEqualStrings("Hello, world ", &chunk_buf);
+
+    const rc2 = read_chunk("TEST.TXT", 13, &chunk_buf);
+    try testing.expectEqual(st_ok, rc2.status);
+    try testing.expectEqual(@as(usize, 13), rc2.bytes);
+    try testing.expectEqualStrings("of safe concu", &chunk_buf);
+
+    var whole: [64]u8 = undefined;
+    const n = read_into("TEST.TXT", 38, &whole);
+    try testing.expect(n != null);
+    try testing.expectEqual(@as(usize, 38), n.?);
+    try testing.expectEqualStrings("Hello, world of safe concurrent reads!", whole[0..n.?]);
 }

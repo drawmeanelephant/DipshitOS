@@ -324,21 +324,15 @@ pub fn read(pid: u64, fd: u64, out_buf: []u8) i64 {
 
     // M34 HF4: the host share is stateless — each chunk is one vf READ
     // round trip at the handle's cursor (a handle is path + size here).
+    // Issue #846: read_chunk copies directly into out_buf under vf_lock,
+    // eliminating reply-buffer races across concurrent tasks and cores.
     const subpath = h.path[0..h.path_len];
     var total: usize = 0;
     while (total < out_buf.len and h.cursor < h.size) {
-        const r = virtio_file.read(subpath, h.cursor);
-        if (r.status != virtio_file.st_ok or r.data.len == 0) break;
-        // W3 gate finding (claim 3456): a vf READ reply carries the whole
-        // remaining file (up to the 32 KiB reply window), not a capped
-        // chunk — the naive copy therefore overran out_buf.len, smashed
-        // the caller's staging, and returned a count BEYOND the caller's
-        // cap. Clamp to what the buffer holds; the next read resumes at
-        // the consistent cursor (the share is stateless per round trip).
-        const take = @min(r.data.len, out_buf.len - total);
-        @memcpy(out_buf[total..][0..take], r.data[0..take]);
-        total += take;
-        h.cursor += @intCast(take);
+        const rc = virtio_file.read_chunk(subpath, h.cursor, out_buf[total..]);
+        if (rc.status != virtio_file.st_ok or rc.bytes == 0) break;
+        total += rc.bytes;
+        h.cursor += @intCast(rc.bytes);
     }
     return @intCast(total);
 }
