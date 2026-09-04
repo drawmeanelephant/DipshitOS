@@ -2141,6 +2141,8 @@ pub fn build(b: *std.Build) void {
         "kernel/src/xhci.zig",
         "user/src/lib/ui.zig",
         "user/tests/ui/ui_test.zig",
+        "kernel/tests/scheduler_test.zig",
+        "kernel/tests/syscall_test.zig",
         "test/helpers/helpers.zig",
     };
 
@@ -2151,6 +2153,27 @@ pub fn build(b: *std.Build) void {
     });
     ui_mod.addOptions("build_options", kernel_options);
 
+    const helpers_mod = b.createModule(.{
+        .root_source_file = b.path("test/helpers/helpers.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    helpers_mod.addOptions("build_options", kernel_options);
+
+    const scheduler_mod = b.createModule(.{
+        .root_source_file = b.path("kernel/src/scheduler.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    scheduler_mod.addOptions("build_options", kernel_options);
+
+    const syscall_mod = b.createModule(.{
+        .root_source_file = b.path("kernel/src/syscall.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    syscall_mod.addOptions("build_options", kernel_options);
+
     for (unit_test_sources) |src_path| {
         const test_mod = b.createModule(.{
             .root_source_file = b.path(src_path),
@@ -2159,6 +2182,9 @@ pub fn build(b: *std.Build) void {
         });
         test_mod.addOptions("build_options", kernel_options);
         test_mod.addImport("ui", ui_mod);
+        test_mod.addImport("helpers", helpers_mod);
+        test_mod.addImport("scheduler", scheduler_mod);
+        test_mod.addImport("syscall", syscall_mod);
         const t = b.addTest(.{
             .root_module = test_mod,
         });
