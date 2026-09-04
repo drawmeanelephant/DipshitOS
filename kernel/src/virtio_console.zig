@@ -108,10 +108,10 @@ const VirtqUsed = extern struct {
     idx: u16,
     ring: [1]VirtqUsedElem,
 };
-pub var virtio_desc: [1]VirtqDesc align(16) = undefined;
-pub var virtio_avail: VirtqAvail align(2) = undefined;
-pub var virtio_used: VirtqUsed align(4) = undefined;
-pub var virtio_tx: [128]u8 align(16) = undefined;
+pub var virtio_desc: [1]VirtqDesc align(64) = undefined;
+pub var virtio_avail: VirtqAvail align(64) = undefined;
+pub var virtio_used: VirtqUsed align(64) = undefined;
+pub var virtio_tx: [128]u8 align(64) = undefined;
 var virtio_last_used: u16 = 0;
 // Split-ring size (must be a power of 2, Virtio 1.3 §4.1.4.3): one
 // descriptor, no chaining. The number of outstanding buffers
@@ -138,10 +138,14 @@ pub var st_tx: ?*const SystemTable = null; // for post-exit flush stage markers
 // buffers on queue 0 (virtio-console spec: queue 0 = receive, queue 1 =
 // transmit). One 256-byte WRITE descriptor; the used ring names returned
 // buffers, which are drained into a bounded FIFO for readByte.
-pub var virtio_rx_desc: [1]VirtqDesc align(16) = undefined;
-pub var virtio_rx_avail: VirtqAvail align(2) = undefined;
-pub var virtio_rx_used: VirtqUsed align(4) = undefined;
-pub var virtio_rx_buf: [256]u8 align(16) = undefined;
+// Issue #843 (Shape A): virtqueue descriptors, rings, and buffers are aligned
+// to 64 bytes (the AArch64 D-cache line size) so device DMA writes and CPU
+// cache invalidations (dc ivac) never share a cache line with CPU-written
+// variables or avail rings.
+pub var virtio_rx_desc: [1]VirtqDesc align(64) = undefined;
+pub var virtio_rx_avail: VirtqAvail align(64) = undefined;
+pub var virtio_rx_used: VirtqUsed align(64) = undefined;
+pub var virtio_rx_buf: [256]u8 align(64) = undefined;
 var virtio_rx_last_used: u16 = 0;
 var virtio_rx_queue_notify_off: u16 = 0;
 var virtio_rx_fifo: [512]u8 = undefined;
@@ -513,6 +517,7 @@ pub fn virtio_pci_flush() void {
     // without touching the rings: the device is stuck, and dropping stays
     // honest without corrupting the ring.
     mmu.invalidate_dcache_range(@intFromPtr(&virtio_used), @sizeOf(VirtqUsed));
+    asm volatile ("dmb ishld" ::: .{ .memory = true });
     const outstanding = virtio_avail.idx -% virtio_used.idx;
     if (outstanding >= virtio_queue_size) {
         vp_tx_len = 0;
@@ -520,6 +525,7 @@ pub fn virtio_pci_flush() void {
     }
     virtio_desc[0] = .{ .addr = mmu.to_phys(@intFromPtr(&virtio_tx)), .len = @intCast(vp_tx_len), .flags = 0, .next = 0 };
     virtio_avail.ring[0] = 0; // descriptor index 0
+    asm volatile ("dmb ishst" ::: .{ .memory = true });
     virtio_avail.idx +%= 1;
     if (comptime build_options.tx_diag) {
         if (st != null) evidence.write_marker_var(st.?, marker_txda); // 2 descriptor/avail buffers prepared
@@ -580,6 +586,7 @@ pub fn virtio_pci_flush() void {
     while (spins < 2_000_000) : (spins += 1) {
         mmu.invalidate_dcache_range(@intFromPtr(&virtio_used), @sizeOf(VirtqUsed));
         if (virtio_used.idx != virtio_last_used) {
+            asm volatile ("dmb ishld" ::: .{ .memory = true });
             if (comptime build_options.tx_diag) {
                 if (st != null) evidence.write_marker_var(st.?, marker_txuc); // 9 device changed used.idx
             }
@@ -622,6 +629,8 @@ pub fn virtio_read_byte() ?u8 {
     // Poll the used ring (device-written RAM; invalidate its line first).
     mmu.invalidate_dcache_range(@intFromPtr(&virtio_rx_used), @sizeOf(VirtqUsed));
     if (virtio_rx_used.idx == virtio_rx_last_used) return null;
+    // VirtIO 1.3 §2.7.8: memory barrier after reading used.idx before reading descriptor entry.
+    asm volatile ("dmb ishld" ::: .{ .memory = true });
     // The device returned the buffer: read what it wrote, cache-correct.
     const elem = virtio_rx_used.ring[0];
     const n = @min(elem.len, virtio_rx_buf.len);
@@ -636,10 +645,14 @@ pub fn virtio_read_byte() ?u8 {
     // Re-supply the buffer: the descriptor is unchanged, but the avail ring
     // gained an entry — clean the rings, then kick queue 0 again.
     virtio_rx_avail.ring[0] = 0;
+    asm volatile ("dmb ishst" ::: .{ .memory = true });
     virtio_rx_avail.idx +%= 1;
     mmu.clean_dcache_range(@intFromPtr(&virtio_rx_desc), @sizeOf(VirtqDesc));
     mmu.clean_dcache_range(@intFromPtr(&virtio_rx_avail), @sizeOf(VirtqAvail));
     mmio.mmio_write16(vp_notify + @as(u64, virtio_rx_queue_notify_off) * vp_notify_mult, 0);
+    // Issue #843 Shape A underflow guard: if the completion had len=0 and the FIFO
+    // was empty, rx_fifo_pop() must not be called (it guarantees non-empty FIFO).
+    if (virtio_rx_fifo_len == 0) return null;
     return rx_fifo_pop();
 }
 
