@@ -68,7 +68,8 @@ pub const virtio_net = @import("virtio_net.zig"); // claim 1384 (card N6): net_u
 pub const uaccess = @import("uaccess.zig"); // claim 6120: fault-safe copy-in
 pub const userspace = @import("userspace.zig");
 pub const driving_award = @import("driving_award.zig"); // claim 1543/0487 (cards G5/G6): the window manager this seam renders into
-pub const wnd_core = @import("wnd_core.zig"); // M32 WMS4 (issue #624): the SET_WINDOW chrome-descriptor ABI (single source with the WM server)
+pub const wnd_core = @import("wnd_core.zig");
+const klog = @import("klog.zig"); // #990: serial-log seam (hook armed by main.zig) // M32 WMS4 (issue #624): the SET_WINDOW chrome-descriptor ABI (single source with the WM server)
 pub const virtio_gpu = @import("virtio_gpu.zig"); // M32 WMS2 (issue #622): the G1 gpu-armed signal for the REGISTER ENXIO check
 pub const wm_server = @import("wm_server.zig"); // M32 WMS2 (issue #622): the render-server register backing slot 65
 pub const events = @import("events.zig"); // Milestone 9 (claim 1016): application event queues
@@ -2902,7 +2903,16 @@ fn handle_wmctl(args: Args, _: *exceptions.VectorFrame) u64 {
                 const ws = args[3];
                 if (id > 0xff or id == wnd_core.chrome_window_all) return error_result(.einval);
                 if (ws >= driving_award.workspace_max) return error_result(.einval);
-                if (!driving_award.overview_move(@truncate(id), @truncate(ws))) return error_result(.einval);
+                // #990 (claim #997): the WM prints its decision marker
+                // unconditionally, so a refused move looked "applied" — name
+                // the refusal site honestly on the serial.
+                if (!driving_award.overview_move(@truncate(id), @truncate(ws))) {
+                    var kbuf: [64]u8 = undefined;
+                    const why = driving_award.overview_move_refusal(@truncate(id), @truncate(ws));
+                    const s = std.fmt.bufPrint(&kbuf, "overview: move refused id={d} ws={d} why={s}\n", .{ id, ws, why }) catch "overview: move refused\n";
+                    klog.line(s);
+                    return error_result(.einval);
+                }
                 wm_server.note_overview();
                 return id;
             } else return error_result(.einval);

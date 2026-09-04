@@ -2298,6 +2298,18 @@ pub fn overview_move(id: u8, ws: u8) bool {
     return false;
 }
 
+/// #990 (claim #997): WHY overview_move would refuse (id, ws) — the same
+/// predicate the move runs, as a name for the serial. Pure.
+pub fn overview_move_refusal(id: u8, ws: u8) []const u8 {
+    if (!overview_open) return "closed";
+    if (ws >= workspace_max) return "ws-range";
+    var k: usize = 0;
+    while (k < overview_n) : (k += 1) {
+        if (overview_ids[k] == id) return "none";
+    }
+    return "not-a-card";
+}
+
 /// WM2: nearest-neighbor scale blit — a source image (a user window's own
 /// back-buffer or shared surface, never the scanout, so source and
 /// destination cannot overlap) scaled into a destination rect. Pure BSS
