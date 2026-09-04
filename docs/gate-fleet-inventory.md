@@ -11,16 +11,16 @@
 
 | metric | count |
 |---|---|
-| top-level scripts (`tools/*.sh` + `tools/*.py`) | 161 |
+| top-level scripts (`tools/*.sh` + `tools/*.py`) | 159 |
 | class A (portable / CI) | 9 |
-| class B (VZ hardware gate) | 129 (of which `verify-live-*`: 122) |
+| class B (VZ hardware gate) | 127 (of which `verify-live-*`: 120) |
 | class C (interactive) | 1 |
 | class D (diagnostic) | 9 |
 | tooling (not gates) | 13 |
-| with a just recipe | 24 |
-| named in gate-inventory.md or the archive GATE block | 57 |
-| CI-sharded (archive GATE block `cmd=`) | 51 |
-| named in docs/status.md | 26 |
+| with a just recipe | 23 |
+| named in gate-inventory.md or the archive GATE block | 55 |
+| CI-sharded (archive GATE block `cmd=`) | 49 |
+| named in docs/status.md | 24 |
 | **orphans (gate-class, registered nowhere)** | **77** |
 
 ## Subdirectory tooling (not gates)
@@ -195,7 +195,6 @@ Columns: `just` = justfile recipe of the same name; `inv` = named in
 | `verify-live-m21-notif-dialog-transient.sh` | 196 | B | n | n | n | n | tools/verify-live-m21-notif-dialog-transient.sh — class-B live acceptance gate for M21 |
 | `verify-live-m21-persist-title-orphan.sh` | 166 | B | n | n | n | n | tools/verify-live-m21-persist-title-orphan.sh — class-B live acceptance gate for M21 |
 | `verify-live-m21-tile-master.sh` | 391 | B | n | n | n | n | verify-live-m21-tile-master.sh -- claim 8777 (milestone twenty-one, cards |
-| `verify-live-net-arp.sh` | 348 | B | n | y | y | y | verify-live-arp.sh -- claim 7293 (milestone five, card N3) class-B gate: |
 | `verify-live-pointer-cg.sh` | 271 | B | n | y | y | n | verify-live-pointer-cg.sh -- milestone eight card U4 (claim 4993) CG |
 | `verify-live-pointer-virtio.sh` | 223 | B | n | y | n | y | verify-live-pointer-virtio.sh -- claim 9367 (issue #523 item 3 |
 | `verify-live-ps.sh` | 128 | B | n | n | n | n | verify-live-ps.sh -- M22 D6 class-B gate (issue #329, claim 9815): the |
@@ -237,7 +236,6 @@ Columns: `just` = justfile recipe of the same name; `inv` = named in
 | `verify-live-time.sh` | 108 | B | n | n | n | n | verify-live-time.sh -- M22 D13 (issue #336) class-B gate: |
 | `verify-live-timers.sh` | 192 | B | n | n | n | n | verify-live-timers.sh -- claim 7323 (Milestone 14, Card S2) class-B gate: |
 | `verify-live-tokens.sh` | 258 | B | n | n | n | n | verify-live-tokens.sh — M37 DQ4 design-token live proof (issue #838) |
-| `verify-live-transcript.sh` | 166 | B | y | y | y | y | verify-live-transcript.sh -- claim 6684 class-B gate: live RX. Host |
 | `verify-live-typography.sh` | 145 | B | n | n | n | y | verify-live-typography.sh — M38 Live TrueType Typography Verification |
 | `verify-live-unicode.sh` | 128 | B | n | n | n | n | verify-live-unicode.sh -- milestone-twenty cards U2/U3/U11 class-B gate |
 | `verify-live-usb.sh` | 201 | B | y | y | y | n | verify-live-usb.sh -- claim 4116 (milestone seven, card I2) class-B gate: |
