@@ -2082,6 +2082,81 @@ pub fn build(b: *std.Build) void {
     // diffs byte-for-byte against the canonical fixture
     // tests/transcript-console.txt. The live vm-serial.log assertion stays
     // gated on the VZ serial gate (claim 0002).
+    // ------------------------------------------------------------------
+    // Host: Unified Unit Tests (M41 TS1, issue #952)
+    // ------------------------------------------------------------------
+    const test_step = b.step("test", "Run host-side unit tests in parallel (M41 TS1)");
+
+    const unit_test_sources = [_][]const u8{
+        "kernel/src/alloc.zig",
+        "kernel/src/app_timers.zig",
+        "kernel/src/arp.zig",
+        "kernel/src/console.zig",
+        "kernel/src/csprng.zig",
+        "kernel/src/dhcp.zig",
+        "kernel/src/dns.zig",
+        "kernel/src/driving_award.zig",
+        "kernel/src/events.zig",
+        "kernel/src/exec.zig",
+        "kernel/src/exceptions.zig",
+        "kernel/src/font8x8.zig",
+        "kernel/src/gic.zig",
+        "kernel/src/handoff.zig",
+        "kernel/src/input.zig",
+        "kernel/src/ipv4.zig",
+        "kernel/src/lineedit.zig",
+        "kernel/src/machine.zig",
+        "kernel/src/mailbox.zig",
+        "kernel/src/memmap.zig",
+        "kernel/src/mmu.zig",
+        "kernel/src/monitor.zig",
+        "kernel/src/nvram_console.zig",
+        "kernel/src/process.zig",
+        "kernel/src/psci.zig",
+        "kernel/src/redirect.zig",
+        "kernel/src/road_pops.zig",
+        "kernel/src/scheduler.zig",
+        "kernel/src/scrollback.zig",
+        "kernel/src/settings.zig",
+        "kernel/src/shared_region.zig",
+        "kernel/src/shell.zig",
+        "kernel/src/smp.zig",
+        "kernel/src/spinlock.zig",
+        "kernel/src/svclock.zig",
+        "kernel/src/syscall.zig",
+        "kernel/src/tcp.zig",
+        "kernel/src/text.zig",
+        "kernel/src/timer.zig",
+        "kernel/src/tokenizer.zig",
+        "kernel/src/uaccess.zig",
+        "kernel/src/udp.zig",
+        "kernel/src/userspace.zig",
+        "kernel/src/virtio_custom.zig",
+        "kernel/src/virtio_entropy.zig",
+        "kernel/src/virtio_file.zig",
+        "kernel/src/virtio_gpu.zig",
+        "kernel/src/virtio_net.zig",
+        "kernel/src/wm_server.zig",
+        "kernel/src/wnd_core.zig",
+        "kernel/src/xhci.zig",
+        "user/src/lib/ui.zig",
+        "test/helpers/helpers.zig",
+    };
+
+    for (unit_test_sources) |src_path| {
+        const test_mod = b.createModule(.{
+            .root_source_file = b.path(src_path),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        });
+        test_mod.addOptions("build_options", kernel_options);
+        const t = b.addTest(.{
+            .root_module = test_mod,
+        });
+        const run_t = b.addRunArtifact(t);
+        test_step.dependOn(&run_t.step);
+    }
+
     const test_console_step = b.step("test-console", "Run the automated 'virelai>' transcript test (M1.5 march step 19; class A — mock console, no VM)");
     const test_console = b.addSystemCommand(&.{ "bash", "tools/verify-transcript.sh" });
     test_console.has_side_effects = true;
