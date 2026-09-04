@@ -1,0 +1,189 @@
+// BIG-SNAKE.Z — the snake game in ONE source file (>2048 B): the
+// multi-read proof for zc's source arena (claim #992). Same code as the
+// 4-file snk group, concatenated helpers-first as an auto-play variant:
+// the input drain (zc.svc(21, &buf)) is omitted — it needs the host
+// shim's anytype svc from PR #989, and headless corpus behavior is
+// identical without it. Every marker string lives past byte 2048, so a
+// compiler stuck on one 2048-B file_read could not print them.
+// Compile: zc BIG-SNAKE.Z BIG.ELF
+const zc = @import("zc");
+
+fn pack(x: u64, y: u64) u64 {
+    return (x << 8) | y;
+}
+
+fn px(v: u64) u64 {
+    return v >> 8;
+}
+
+fn py(v: u64) u64 {
+    return v & 255;
+}
+
+fn rng_next(s: u64) u64 {
+    var t: u64 = s;
+    t = t ^ (t << 13);
+    t = t ^ (t >> 7);
+    t = t ^ (t << 17);
+    return t;
+}
+
+fn on_snake(segs: [*]u64, len: u64, v: u64) u64 {
+    var i: u64 = 0;
+    while (i < len) {
+        if (segs[i] == v) {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn place_food(segs: [*]u64, len: u64, w: u64, h: u64, seed: u64) u64 {
+    var s: u64 = seed;
+    var tries: u64 = 0;
+    while (tries < 64) {
+        s = rng_next(s);
+        var x: u64 = s >> 32;
+        var y: u64 = s >> 16;
+        x = x - (x / w) * w;
+        y = y - (y / h) * h;
+        const v: u64 = pack(x, y);
+        if (on_snake(segs, len, v) == 0) {
+            return v;
+        }
+        tries = tries + 1;
+    }
+    return 0xFFFF;
+}
+
+fn shift_body(segs: [*]u64, len: u64) void {
+    var i: u64 = len;
+    while (i > 1) {
+        i = i - 1;
+        segs[i] = segs[i - 1];
+    }
+}
+
+fn next_head(dir: u64, hx: u64, hy: u64, gw: u64, gh: u64) u64 {
+    var tx: u64 = hx;
+    var ty: u64 = hy;
+    if (dir == 0) {
+        if (ty == 0) {
+            return 0xFFFF;
+        }
+        ty = ty - 1;
+    }
+    if (dir == 1) {
+        ty = ty + 1;
+    }
+    if (dir == 2) {
+        if (tx == 0) {
+            return 0xFFFF;
+        }
+        tx = tx - 1;
+    }
+    if (dir == 3) {
+        tx = tx + 1;
+    }
+    if (tx >= gw) {
+        return 0xFFFF;
+    }
+    if (ty >= gh) {
+        return 0xFFFF;
+    }
+    return pack(tx, ty);
+}
+
+fn hit_self(segs: [*]u64, len: u64) u64 {
+    var j: u64 = 1;
+    while (j < len) {
+        if (segs[j] == segs[0]) {
+            return 1;
+        }
+        j = j + 1;
+    }
+    return 0;
+}
+fn step(st: *State, segs: [*]u64, wid: u64, gw: u64, gh: u64, cell: u64) u64 {
+    st.fr = st.fr + 1;
+    if (st.st < 2) {
+        if (st.fr > 8) {
+            st.st = 2;
+        }
+    }
+    if (st.st >= 1) {
+        const tv: u64 = next_head(st.d, st.hx, st.hy, gw, gh);
+        if (tv == 0xFFFF) {
+            st.ov = 1;
+        }
+        if (st.ov == 0) {
+            if (tv == st.fd) {
+                if (st.n < 40) {
+                    st.n = st.n + 1;
+                }
+            }
+            shift_body(segs, st.n);
+            segs[0] = tv;
+            st.hx = px(tv);
+            st.hy = py(tv);
+            if (hit_self(segs, st.n) == 1) {
+                st.ov = 1;
+            }
+            if (st.ov == 0) {
+                if (tv == st.fd) {
+                    st.fd = place_food(segs, st.n, gw, gh, st.fr * 31 + st.n * 7919);
+                }
+            }
+        }
+    }
+    _ = zc.win_fill(wid, 0, 0, gw * cell, gh * cell, 0x0B1220);
+    if (st.fd != 0xFFFF) {
+        _ = zc.win_fill(wid, px(st.fd) * cell, py(st.fd) * cell, cell, cell, 0xF43F5E);
+    }
+    var b: u64 = st.n;
+    while (b > 1) {
+        b = b - 1;
+        _ = zc.win_fill(wid, px(segs[b]) * cell, py(segs[b]) * cell, cell, cell, 0x34D399);
+    }
+    _ = zc.win_fill(wid, px(segs[0]) * cell, py(segs[0]) * cell, cell, cell, 0xA7F3D0);
+    _ = zc.win_present(wid);
+    if (st.st == 3) { return 3; }
+    if (st.st == 4) { return 4; }
+    if (st.st == 2) { st.st = 3; return 2; }
+    return 0;
+}
+
+const State = struct {
+    hx: u64,
+    hy: u64,
+    d: u64,
+    n: u64,
+    ov: u64,
+    fd: u64,
+    st: u64,
+    fr: u64,
+};
+
+pub fn main() void {
+    const cell: u64 = 8;
+    const gw: u64 = 26;
+    const gh: u64 = 19;
+    const wid: u64 = zc.win_open(536, 284, gw * cell, gh * cell);
+    var segs: [40]u64 = undefined;
+    var s: State = undefined;
+    s.hx = 12; s.hy = 9; s.d = 3; s.n = 1; s.ov = 0; s.st = 0; s.fr = 0;
+    s.fd = place_food(&segs, 1, gw, gh, 1);
+    segs[0] = pack(s.hx, s.hy);
+    zc.print("snake-up\n");
+    while (s.ov == 0) {
+        const pc: u64 = step(&s, &segs, wid, gw, gh, cell);
+        if (pc == 2) { zc.print("snake-move\n"); _ = zc.yield(); }
+        if (pc == 3) { _ = zc.yield(); }
+        if (pc == 4) { zc.sleep(1); }
+        if (pc == 0) { zc.sleep(1); }
+        if (s.fr == 2) { zc.print("snake-wait\n"); }
+    }
+    zc.print("snake-over\n");
+    zc.exit(72);
+}
