@@ -11,16 +11,16 @@
 
 | metric | count |
 |---|---|
-| top-level scripts (`tools/*.sh` + `tools/*.py`) | 206 |
+| top-level scripts (`tools/*.sh` + `tools/*.py`) | 202 |
 | class A (portable / CI) | 9 |
-| class B (VZ hardware gate) | 174 (of which `verify-live-*`: 167) |
+| class B (VZ hardware gate) | 170 (of which `verify-live-*`: 163) |
 | class C (interactive) | 1 |
 | class D (diagnostic) | 9 |
 | tooling (not gates) | 13 |
 | with a just recipe | 33 |
-| named in gate-inventory.md or the archive GATE block | 85 |
-| CI-sharded (archive GATE block `cmd=`) | 78 |
-| named in docs/status.md | 39 |
+| named in gate-inventory.md or the archive GATE block | 81 |
+| CI-sharded (archive GATE block `cmd=`) | 74 |
+| named in docs/status.md | 35 |
 | **orphans (gate-class, registered nowhere)** | **94** |
 
 ## Subdirectory tooling (not gates)
@@ -31,7 +31,7 @@
 | `tools/status/` | 6 | multiagent coordination gate + claim tooling (class A) |
 | `tools/context/` | 2 | context snapshot helpers |
 | `tools/ragshit/` | 84 | host-side context engine (developer tooling, not guest software) |
-| `tools/gate/` | 12 | M40 vgate harness + specs (GF2+) |
+| `tools/gate/` | 16 | M40 vgate harness + specs (GF2+) |
 
 ## Orphans
 
@@ -239,16 +239,12 @@ Columns: `just` = justfile recipe of the same name; `inv` = named in
 | `verify-live-net-dhcp-renew.sh` | 340 | B | n | y | y | y | verify-live-net-dhcp-renew.sh -- claim 9489 (milestone five, card N9) |
 | `verify-live-net-dhcp.sh` | 332 | B | n | y | y | y | verify-live-net-dhcp.sh -- claim 0351 (milestone five, card N8) class-B |
 | `verify-live-net-dns.sh` | 132 | B | n | n | n | n | verify-live-net-dns.sh -- claim 7566 (milestone twelve, card N2, Issue #149) |
-| `verify-live-net-icmp.sh` | 427 | B | n | y | y | y | verify-live-net-icmp.sh -- claim 0148 (milestone five, card N4) class-B |
 | `verify-live-net-nat.sh` | 241 | B | n | y | y | y | verify-live-net-nat.sh -- claim 4678 (milestone five, card N7) class-B |
 | `verify-live-net-offline.sh` | 255 | B | n | y | n | n | verify-live-net-offline.sh -- M26 N13+N14 (march-m26, claim 8852) |
-| `verify-live-net-rx.sh` | 280 | B | n | y | y | y | verify-live-net-rx.sh -- claim 6076 (milestone five, card N2) class-B |
 | `verify-live-net-tcp-rto.sh` | 494 | B | n | y | y | y | verify-live-net-tcp-rto.sh -- claim 5357 (milestone five, card N11) |
 | `verify-live-net-tcp-syscall.sh` | 168 | B | n | n | n | n | verify-live-net-tcp-syscall.sh -- claim 7483 (milestone twelve, card N1, Issue #148) |
 | `verify-live-net-tcp.sh` | 456 | B | n | y | y | y | verify-live-net-tcp.sh -- claim 7026 (milestone five, card N10) |
-| `verify-live-net-tx.sh` | 233 | B | n | y | y | y | verify-live-net-tx.sh -- claim 1373 (milestone five, card N1) class-B |
 | `verify-live-net-udp-syscall.sh` | 320 | B | n | y | y | y | verify-live-net-udp-syscall.sh -- claim 1384 (milestone five, card N6) |
-| `verify-live-net-udp.sh` | 436 | B | n | y | y | y | verify-live-net-udp.sh -- claim 8552 (milestone five, card N5) class-B |
 | `verify-live-netstat.sh` | 123 | B | n | n | n | n | verify-live-netstat.sh -- M26 N2 (issue #400) class-B gate: |
 | `verify-live-pipe.sh` | 126 | B | n | n | n | n | verify-live-pipe.sh -- milestone-nineteen card P1 class-B gate |
 | `verify-live-pointer-cg.sh` | 271 | B | n | y | y | n | verify-live-pointer-cg.sh -- milestone eight card U4 (claim 4993) CG |
