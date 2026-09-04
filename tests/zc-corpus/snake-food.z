@@ -1,0 +1,99 @@
+// FOOD.Z — board helpers. Cell=(x<<8)|y; 0xFFFF=none.
+
+fn pack(x: u64, y: u64) u64 {
+    return (x << 8) | y;
+}
+
+fn px(v: u64) u64 {
+    return v >> 8;
+}
+
+fn py(v: u64) u64 {
+    return v & 255;
+}
+
+fn rng_next(s: u64) u64 {
+    var t: u64 = s;
+    t = t ^ (t << 13);
+    t = t ^ (t >> 7);
+    t = t ^ (t << 17);
+    return t;
+}
+
+fn on_snake(segs: [*]u64, len: u64, v: u64) u64 {
+    var i: u64 = 0;
+    while (i < len) {
+        if (segs[i] == v) {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn place_food(segs: [*]u64, len: u64, w: u64, h: u64, seed: u64) u64 {
+    var s: u64 = seed;
+    var tries: u64 = 0;
+    while (tries < 64) {
+        s = rng_next(s);
+        var x: u64 = s >> 32;
+        var y: u64 = s >> 16;
+        x = x - (x / w) * w;
+        y = y - (y / h) * h;
+        const v: u64 = pack(x, y);
+        if (on_snake(segs, len, v) == 0) {
+            return v;
+        }
+        tries = tries + 1;
+    }
+    return 0xFFFF;
+}
+
+fn shift_body(segs: [*]u64, len: u64) void {
+    var i: u64 = len;
+    while (i > 1) {
+        i = i - 1;
+        segs[i] = segs[i - 1];
+    }
+}
+
+fn next_head(dir: u64, hx: u64, hy: u64, gw: u64, gh: u64) u64 {
+    var tx: u64 = hx;
+    var ty: u64 = hy;
+    if (dir == 0) {
+        if (ty == 0) {
+            return 0xFFFF;
+        }
+        ty = ty - 1;
+    }
+    if (dir == 1) {
+        ty = ty + 1;
+    }
+    if (dir == 2) {
+        if (tx == 0) {
+            return 0xFFFF;
+        }
+        tx = tx - 1;
+    }
+    if (dir == 3) {
+        tx = tx + 1;
+    }
+    if (tx >= gw) {
+        return 0xFFFF;
+    }
+    if (ty >= gh) {
+        return 0xFFFF;
+    }
+    return pack(tx, ty);
+}
+
+fn hit_self(segs: [*]u64, len: u64) u64 {
+    var j: u64 = 1;
+    while (j < len) {
+        if (segs[j] == segs[0]) {
+            return 1;
+        }
+        j = j + 1;
+    }
+    return 0;
+}

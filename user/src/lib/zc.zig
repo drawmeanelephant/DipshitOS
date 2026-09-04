@@ -158,10 +158,18 @@ pub fn win_close(wid: u64) void {
     );
 }
 
-pub fn svc(comptime num: u16, arg0: u64) i64 {
+/// The raw syscall escape hatch (`zc.svc(<literal>, ...)`): `num` is the
+/// ADR 0007 slot, `arg0` a bare u64 OR a pointer to a buffer the syscall
+/// reads/writes (e.g. `zc.svc(21, &ev)` polls the ADR 0009 event queue
+/// into a struct — the VL6 snake demo). The in-guest compiler emits the
+/// argument address directly and never reads this file; the arg is widened
+/// to `anytype` so host zig 0.16 type-checks both shapes (the Z4b corpus
+/// host build analyzes every fixture body against this shim).
+pub fn svc(comptime num: u16, arg0: anytype) i64 {
+    const a0: u64 = if (@TypeOf(arg0) == u64) arg0 else @intFromPtr(arg0);
     return asm volatile ("svc #0"
         : [ret] "={x0}" (-> i64),
         : [num] "{x8}" (@as(u64, num)),
-          [a0] "{x0}" (arg0),
+          [a0] "{x0}" (a0),
     );
 }

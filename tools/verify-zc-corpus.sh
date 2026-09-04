@@ -30,6 +30,12 @@
 #   vl6  VL6 GUI consumer — COMPILE-ONLY (win syscalls draw a window; a
 #        serial log cannot pin pixels, so run parity is a display-backed
 #        concern, not this gate's)
+#   snk  the VL6 snake game (4 files) — RUN case: compiles in-guest, then
+#        the ELF auto-plays (5 s idle auto-start at 1 s/tick, then steers
+#        itself into the right wall) and exits 0 with the ordered needles
+#        snake-up → snake-move → snake-over. Headless, sys_win_open is
+#        EINVAL (no gpu — the game ignores the return), so rendering is
+#        display-backed; the pixel proof is verify-live-snake.sh
 #   z1a  strings: zc.print + zc.write       exit 0, prints two lines
 #   z1b  arrays: fill + print + checksum    exit 0, prints A..H
 #   z1c  structs: field store + read        exit 0 (2-byte raw print not
@@ -106,6 +112,7 @@ case_def() {
     case "$1" in
         z05) echo "z05|run|72||" ;;
         vl6) echo "vl6|compile|||" ;;
+        snk) echo "snk|run|72|snake-up snake-wait snake-move snake-over|snake-up|snake-wait|snake-move|snake-over" ;;
         z1a) echo "z1a|run|0||Hello from zc strings!|Second line" ;;
         z1b) echo "z1b|run|0||ABCDEFGH" ;;
         z1c) echo "z1c|run|0||" ;;
@@ -124,6 +131,7 @@ case_sources() {
     case "$1" in
         z05) echo "Z05.Z tests/zc-corpus/z05-dialect.z" ;;
         vl6) echo "VL6.Z tests/zc-corpus/vl6-gui.z" ;;
+        snk) echo "SNAKE.Z tests/zc-corpus/snake-main.z"; echo "SLIB.Z tests/zc-corpus/snake-lib.z"; echo "EV.Z tests/zc-corpus/snake-events.z"; echo "FOOD.Z tests/zc-corpus/snake-food.z" ;;
         z1a) echo "Z1A.Z tests/zc-corpus/z1a-strings.z" ;;
         z1b) echo "Z1B.Z tests/zc-corpus/z1b-arrays.z" ;;
         z1c) echo "Z1C.Z tests/zc-corpus/z1c-structs.z" ;;
@@ -137,7 +145,7 @@ case_sources() {
     esac
 }
 
-ALL_CASES="$(for c in z05 vl6 z1a z1b z1c z1d z1e z1f z2a z2b z3a z3b; do echo "$c"; done)"
+ALL_CASES="$(for c in z05 vl6 z1a z1b z1c z1d z1e z1f z2a z2b z3a z3b snk; do echo "$c"; done)"
 
 # Which cases to run: all, or the CASES/argv filter (validated against the table).
 cases_selected() {
@@ -298,7 +306,7 @@ run_one() {
         --serial "$ser" \
         --script "$script" --script-after "$STATIC_EXIT_LINE" \
         "${extra[@]}" \
-        --script-expect "$exp_line" --timeout 90 > "$run_log" 2>&1
+        --script-expect "$exp_line" --script-expect-tail 2 --timeout 90 > "$run_log" 2>&1
     local rc=$?
     set -e
     [ -f "$ser" ] && cp "$ser" "$serial_copy" || true
@@ -415,7 +423,7 @@ run_one_host() {
     host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
         --serial "$ser" \
         --script "$script" --script-after "$STATIC_EXIT_LINE" \
-        --script-expect "$exp_line" --timeout 90 > "$run_log" 2>&1
+        --script-expect "$exp_line" --script-expect-tail 2 --timeout 90 > "$run_log" 2>&1
     local rc=$?
     set -e
     [ -f "$ser" ] && cp "$ser" "$serial_copy" || true

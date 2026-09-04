@@ -11,16 +11,16 @@
 
 | metric | count |
 |---|---|
-| top-level scripts (`tools/*.sh` + `tools/*.py`) | 143 |
+| top-level scripts (`tools/*.sh` + `tools/*.py`) | 145 |
 | class A (portable / CI) | 9 |
-| class B (VZ hardware gate) | 111 (of which `verify-live-*`: 104) |
+| class B (VZ hardware gate) | 113 (of which `verify-live-*`: 106) |
 | class C (interactive) | 1 |
 | class D (diagnostic) | 9 |
 | tooling (not gates) | 13 |
-| with a just recipe | 22 |
-| named in gate-inventory.md or the archive GATE block | 52 |
+| with a just recipe | 23 |
+| named in gate-inventory.md or the archive GATE block | 53 |
 | CI-sharded (archive GATE block `cmd=`) | 46 |
-| named in docs/status.md | 23 |
+| named in docs/status.md | 26 |
 | **orphans (gate-class, registered nowhere)** | **63** |
 
 ## Subdirectory tooling (not gates)
@@ -190,6 +190,7 @@ Columns: `just` = justfile recipe of the same name; `inv` = named in
 | `verify-live-smp-stress.sh` | 215 | B | n | n | n | n | verify-live-smp-stress.sh -- claim 907 / issue #858 class-B gate: the |
 | `verify-live-smp.sh` | 79 | B | y | n | n | n | verify-live-smp.sh -- Milestone 28 (claim 6438) class-B gate: |
 | `verify-live-smp1.sh` | 158 | B | n | n | n | n | verify-live-smp1.sh -- claim 2369 class-B gate: a USER program runs on a |
+| `verify-live-snake.sh` | 328 | B | y | y | n | y | verify-live-snake.sh -- class-B gate: the VL6 snake game (tests/zc-corpus/ |
 | `verify-live-snap-guides.sh` | 239 | B | n | n | n | n | verify-live-snap-guides.sh — M37 DQ5 window snap guides live proof (issue #837) |
 | `verify-live-sound-app.sh` | 217 | B | n | n | n | n | verify-live-sound-app.sh -- claim 7636 (Milestone 15, Card A3) |
 | `verify-live-sound-control.sh` | 256 | B | n | n | n | n | verify-live-sound-control.sh -- claim 9297 (M15 follow-up) |
@@ -222,6 +223,7 @@ Columns: `just` = justfile recipe of the same name; `inv` = named in
 | `verify-live-wm-ipc.sh` | 206 | B | n | n | n | n | verify-live-wm-ipc.sh — M32 WMS7 Gate A (issue #627) class-B gate: the |
 | `verify-live-wm1.sh` | 179 | B | n | n | n | n | verify-live-wm1.sh -- Lane 1 WM1 (#707, claim 919) class-B gate: eight |
 | `verify-live-wm3-taskbar.sh` | 265 | B | n | n | n | y | verify-live-wm3-taskbar.sh — WM3 (issue #707 card 3) class-B gate: the |
+| `verify-live-wm4-paint.sh` | 229 | B | n | n | n | y | verify-live-wm4-paint.sh — WM4 (issue #707 card 4, claim #976) class-B |
 | `verify-live-wm7-gateb.sh` | 179 | B | n | n | n | n | verify-live-wm7-gateb.sh — M32 WMS7 Gate B live gate (issue #627). |
 | `verify-live-wmctl-register.sh` | 173 | B | n | n | n | y | verify-live-wmctl-register.sh -- M32 WMS2 (issue #622) class-B gate: the |
 | `verify-live-wnd-server.sh` | 178 | B | n | n | n | y | verify-live-wnd-server.sh -- M32 WMS3 (issue #623) class-B gate: the |
@@ -254,4 +256,4 @@ Columns: `just` = justfile recipe of the same name; `inv` = named in
 | `verify-unit-tests.sh` | 24 | A | n | y | y | n | Run the VirelaiOS unit test suites. |
 | `verify-vf-class-a.sh` | 118 | A | y | n | n | n | verify-vf-class-a.sh -- M34 HF1–HF4 (issues #735/#736/#737/#738) class-A |
 | `verify-virelai-probe.py` | 88 | tooling | n | n | n | n | verify-virelai-probe.py — class-A check for the W3 shim acceptance item. |
-| `verify-zc-corpus.sh` | 557 | B | n | y | n | n | verify-zc-corpus.sh -- M20 Z4a + Z4b (issues #760 + #761): the corpus |
+| `verify-zc-corpus.sh` | 565 | B | n | y | n | y | verify-zc-corpus.sh -- M20 Z4a + Z4b (issues #760 + #761): the corpus |
