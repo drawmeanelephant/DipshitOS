@@ -27,6 +27,7 @@
 
 const std = @import("std");
 pub const ui = @import("lib/ui.zig");
+const sexiburger_menu = @import("lib/sexiburger.zig");
 const Rect = ui.Rect;
 const Event = ui.Event;
 
@@ -88,6 +89,8 @@ pub const sidebar_render_marker: []const u8 = "tabwm: sidebar-rendered\n";
 pub const tab_switch_marker: []const u8 = "tabwm: tab-switch";
 pub const tab_close_marker: []const u8 = "tabwm: win-close";
 pub const god_menu_marker: []const u8 = "tabwm: god-menu\n";
+/// M42 SX5 (issue #986): the god-menu overlay launched an app into a new tab.
+pub const launch_marker_prefix: []const u8 = "tabwm: launch ";
 
 // Geometry constants
 pub const fb_w: u32 = 1280;
@@ -186,6 +189,16 @@ pub const Tab = struct {
     orig_w: u32 = 0,
     orig_h: u32 = 0,
     resizable: bool = false,
+    /// M42 SX2 (issue #983): the app declared itself tab-aware (the
+    /// `wm_rpc_kind_declare_fullscreen` RPC from lib/tabapp.zig) — when its
+    /// tab is active it receives the FULL 1100x720 content viewport instead
+    /// of the centered native-size presentation, and the kernel's
+    /// SET_WINDOW seam tells it with WIN_RESIZE.
+    tab_aware: bool = false,
+    /// The viewport rect last applied via SET_WINDOW (activation idempotence:
+    /// re-activating an already-fullscreen tab issues no repeat proposal, so
+    /// the app gets no repeat WIN_RESIZE).
+    applied_vp: ?Rect = null,
 
     pub fn set_title(self: *Tab, text: []const u8) void {
         const len = @min(text.len, self.title.len);
@@ -363,10 +376,14 @@ pub fn focus_window(id: u32) void {
 }
 
 /// Computes content viewport allocation for a tab:
-/// - Resizable apps or full-bleed apps take the entire 1100x720 content area at x=180, y=0.
+/// - Tab-aware apps (SX2 opt-in) take the entire 1100x720 content area at
+///   x=180, y=0 whenever their tab is active — the WM proposes the full
+///   viewport and the kernel's WIN_RESIZE seam (SX2 kernel half) tells the
+///   app to relayout.
+/// - Other resizable or full-bleed apps take the entire 1100x720 content area at x=180, y=0.
 /// - Fixed-dimension apps (e.g. 512x384 or 260x340) are cleanly centered inside the 1100x720 viewport.
 pub fn compute_tab_viewport(tab: *const Tab) Rect {
-    if (tab.resizable or tab.orig_w == 0 or tab.orig_w >= viewport_w or tab.orig_h >= viewport_h) {
+    if (tab.tab_aware or tab.resizable or tab.orig_w == 0 or tab.orig_w >= viewport_w or tab.orig_h >= viewport_h) {
         return Rect.make(viewport_x, viewport_y, viewport_w, viewport_h);
     }
     const w = tab.orig_w;
@@ -376,9 +393,21 @@ pub fn compute_tab_viewport(tab: *const Tab) Rect {
     return Rect.make(x, y, w, h);
 }
 
+/// True when `vp` differs from the rect last applied to `tab` (M42 SX2):
+/// the activation path must issue SET_WINDOW. Idempotent re-activations of
+/// an already-sized tab return false — no repeat proposal, no repeat
+/// WIN_RESIZE at the app.
+pub fn viewport_change_needed(tab: *const Tab, vp: Rect) bool {
+    const prev = tab.applied_vp orelse return true;
+    return prev.x != vp.x or prev.y != vp.y or prev.w != vp.w or prev.h != vp.h;
+}
+
 /// Activate tab by index:
-/// 1. Computes viewport: centered for fixed apps, full 1100x720 for resizable apps.
-/// 2. Sets window rect via set_window_rect.
+/// 1. Computes viewport: full 1100x720 for tab-aware/resizable apps, centered
+///    for fixed apps (M42 SX2 opt-in).
+/// 2. Sets window rect via set_window_rect — ONLY when the rect changed since
+///    the last activation (idempotence; the kernel's SX2 seam answers a
+///    size-changing proposal with one WIN_RESIZE to the app).
 /// 3. Sets active window visible and focuses it.
 /// 4. Hides all inactive tabs (set_state(0)).
 /// 5. Emits `tabwm: tab-switch` evidence marker.
@@ -389,7 +418,10 @@ pub fn activate_tab(idx: usize) void {
 
     // Viewport Allocation: allocate full or centered content viewport
     const vp = compute_tab_viewport(tab);
-    set_window_rect(active_id, vp.x, vp.y, vp.w, vp.h);
+    if (viewport_change_needed(tab, vp)) {
+        set_window_rect(active_id, vp.x, vp.y, vp.w, vp.h);
+        tab.applied_vp = vp;
+    }
 
     // Show and focus active window
     set_state(active_id, true);
@@ -431,6 +463,218 @@ pub fn close_tab(idx: usize) void {
     if (manager.active_idx) |new_idx| {
         activate_tab(new_idx);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Sexiburger god-menu overlay (M42 SX5, issue #986)
+// ---------------------------------------------------------------------------
+// Ctrl+Space or a click on the Sexiburger button summons the command
+// palette directly on the scanout (TABWM composes; it has no window
+// backing): type-to-filter over the APPS.TXT manifest (the M37 DQ1 wire
+// format, parsed by lib/sexiburger.zig), arrows move the selection, Enter
+// launches the selected app into a NEW TAB (sys_exec; the kernel's
+// WM_WINDOW stream delivers the window and the tab manager picks it up),
+// Esc dismisses. TABWM.BIN itself is filtered out (the WM seat is taken).
+
+pub const overlay_max_apps: usize = 16;
+pub const overlay_panel_w: u32 = 480;
+pub const overlay_panel_h: u32 = 470;
+pub const overlay_row_h: u32 = 22;
+pub const overlay_manifest_max: usize = 1024;
+
+var overlay_open: bool = false;
+var overlay_loaded: bool = false;
+var overlay_manifest_buf: [overlay_manifest_max]u8 = undefined;
+var overlay_bins: [overlay_max_apps][24]u8 = [_][24]u8{[_]u8{0} ** 24} ** overlay_max_apps;
+var overlay_bin_lens: [overlay_max_apps]usize = [_]usize{0} ** overlay_max_apps;
+var overlay_labels: [overlay_max_apps][32]u8 = [_][32]u8{[_]u8{0} ** 32} ** overlay_max_apps;
+var overlay_label_lens: [overlay_max_apps]usize = [_]usize{0} ** overlay_max_apps;
+var overlay_count: usize = 0;
+var overlay_filter: [24]u8 = [_]u8{0} ** 24;
+var overlay_filter_len: usize = 0;
+var overlay_filtered: [overlay_max_apps]usize = undefined;
+var overlay_filtered_count: usize = 0;
+var overlay_sel: usize = 0;
+
+/// Read + parse APPS.TXT into the static catalog. Manifest order, capped;
+/// TABWM.BIN skipped (the WM seat is taken). Returns the entry count.
+pub fn overlay_load_manifest() usize {
+    overlay_count = 0;
+    if (@import("builtin").os.tag != .freestanding) return 0;
+    const fd = ui.file_open("APPS.TXT", ui.MODE_READ);
+    if (fd < 0) return 0;
+    defer ui.file_close(@intCast(fd));
+    const n = ui.file_read(@intCast(fd), &overlay_manifest_buf);
+    if (n <= 0) return 0;
+    var parsed: [24]sexiburger_menu.MenuApp = undefined;
+    const parsed_n = sexiburger_menu.parse_apps_manifest(overlay_manifest_buf[0..@intCast(n)], &parsed);
+    for (parsed[0..parsed_n]) |app| {
+        if (overlay_count >= overlay_max_apps) break;
+        if (std.mem.eql(u8, app.name, "TABWM.BIN")) continue;
+        const bin_len = @min(app.name.len, 24);
+        @memcpy(overlay_bins[overlay_count][0..bin_len], app.name[0..bin_len]);
+        overlay_bin_lens[overlay_count] = bin_len;
+        const label_len = @min(app.desc.len, 32);
+        @memcpy(overlay_labels[overlay_count][0..label_len], app.desc[0..label_len]);
+        overlay_label_lens[overlay_count] = label_len;
+        overlay_count += 1;
+    }
+    overlay_loaded = true;
+    overlay_refresh_filter();
+    return overlay_count;
+}
+
+/// Rebuild the filtered index (case-insensitive substring over label+bin).
+pub fn overlay_refresh_filter() void {
+    overlay_filtered_count = 0;
+    overlay_sel = 0;
+    const q = overlay_filter[0..overlay_filter_len];
+    for (0..overlay_count) |i| {
+        if (q.len == 0) {
+            overlay_filtered[overlay_filtered_count] = i;
+            overlay_filtered_count += 1;
+            continue;
+        }
+        var hay: [64]u8 = undefined;
+        const label = overlay_labels[i][0..overlay_label_lens[i]];
+        const bin = overlay_bins[i][0..overlay_bin_lens[i]];
+        if (label.len + 1 + bin.len > hay.len) continue;
+        @memcpy(hay[0..label.len], label);
+        hay[label.len] = ' ';
+        @memcpy(hay[label.len + 1 .. label.len + 1 + bin.len], bin);
+        const needle_len = @min(q.len, 32);
+        var needle: [32]u8 = undefined;
+        for (q[0..needle_len], 0..) |c, k| needle[k] = std.ascii.toLower(c);
+        var hit = false;
+        var start: usize = 0;
+        while (start + needle_len <= label.len + 1 + bin.len) : (start += 1) {
+            var k: usize = 0;
+            while (k < needle_len and std.ascii.toLower(hay[start + k]) == needle[k]) : (k += 1) {}
+            if (k == needle_len) {
+                hit = true;
+                break;
+            }
+        }
+        if (hit) {
+            overlay_filtered[overlay_filtered_count] = i;
+            overlay_filtered_count += 1;
+        }
+    }
+}
+
+pub fn overlay_summon() void {
+    if (!overlay_loaded) _ = overlay_load_manifest();
+    overlay_open = true;
+    write_marker(god_menu_marker);
+}
+
+pub fn overlay_dismiss() void {
+    overlay_open = false;
+    overlay_filter_len = 0;
+    overlay_refresh_filter();
+}
+
+/// Launch the selected app into a new tab (the kernel's WM_WINDOW stream
+/// delivers the window; the tab manager adds and activates it). Returns
+/// false when the overlay is empty.
+pub fn overlay_launch_selected() bool {
+    if (overlay_filtered_count == 0) return false;
+    const entry = overlay_filtered[overlay_sel];
+    const bin = overlay_bins[entry][0..overlay_bin_lens[entry]];
+    var buf: [40]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{s}{s}\n", .{ launch_marker_prefix, bin }) catch launch_marker_prefix;
+    write_marker(msg);
+    _ = ui.exec_program(bin);
+    overlay_dismiss();
+    return true;
+}
+
+/// Handle one key while the overlay is open (the raw WM_KEY stream).
+/// Returns true when consumed.
+pub fn overlay_key(usage: u8) bool {
+    if (!overlay_open) return false;
+    switch (usage) {
+        0x29 => { // Escape: dismiss
+            overlay_dismiss();
+            return true;
+        },
+        0x28 => { // Enter: launch selected
+            _ = overlay_launch_selected();
+            return true;
+        },
+        0x2a => { // Backspace: trim the filter
+            if (overlay_filter_len > 0) {
+                overlay_filter_len -= 1;
+                overlay_refresh_filter();
+            }
+            return true;
+        },
+        0x52 => { // Up
+            if (overlay_sel > 0) overlay_sel -= 1;
+            return true;
+        },
+        0x51 => { // Down
+            if (overlay_sel + 1 < overlay_filtered_count) overlay_sel += 1;
+            return true;
+        },
+        else => {},
+    }
+    // Letters a..z, digits 1..0, space, minus, period: extend the filter.
+    const printable = (usage >= 0x04 and usage <= 0x1d) or (usage >= 0x1e and usage <= 0x27) or
+        usage == 0x2c or usage == 0x2d or usage == 0x37;
+    if (printable and overlay_filter_len < overlay_filter.len) {
+        const c: u8 = if (usage == 0x2c) ' ' else if (usage == 0x2d) '-' else if (usage == 0x37) '.' else if (usage <= 0x1d) @intCast(usage - 0x04 + 'a') else @intCast(usage - 0x1e + '1');
+        overlay_filter[overlay_filter_len] = c;
+        overlay_filter_len += 1;
+        overlay_refresh_filter();
+        return true;
+    }
+    return false;
+}
+
+/// Draw the overlay panel centered over the content viewport (call after
+/// draw_sidebar; the dim + panel overwrite the canvas only).
+pub fn draw_overlay(pixels: []u32) void {
+    if (!overlay_open) return;
+    const px = viewport_x + (viewport_w - overlay_panel_w) / 2;
+    const py: u32 = 80;
+    // Dim the viewport behind the panel (source-over alpha).
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(viewport_x, 0, viewport_w, fb_h), 0, 0xB0000000);
+    // Panel
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(px, py, overlay_panel_w, overlay_panel_h), 8, ui.sidebar_active_pill());
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(px, py, overlay_panel_w, 44), 8, ui.sidebar_hover_pill());
+    // Emblem + title
+    if (mascot_image()) |img| {
+        ui.draw_image_buf(pixels, fb_w, px + 10, py + 8, img);
+    }
+    ui.draw_text_sized(0, "SEXIBURGER", px + 46, py + 15, ui.font_size_tab_title, ui.sidebar_text_active());
+    // Filter line
+    ui.draw_text_sized(0, ">", px + 12, py + 52, ui.font_size_badge, ui.theme_accent());
+    if (overlay_filter_len > 0) {
+        ui.draw_text_sized(0, overlay_filter[0..overlay_filter_len], px + 24, py + 52, ui.font_size_badge, ui.sidebar_text_active());
+    } else {
+        ui.draw_text_sized(0, "type to filter, enter launches", px + 24, py + 52, ui.font_size_badge, ui.sidebar_text_inactive());
+    }
+    // App rows
+    var row: u32 = 0;
+    while (row < overlay_filtered_count and row < 17) : (row += 1) {
+        const entry = overlay_filtered[row];
+        const ry = py + 70 + row * overlay_row_h;
+        const is_sel = (row == overlay_sel);
+        if (is_sel) {
+            ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(px + 8, ry - 3, overlay_panel_w - 16, overlay_row_h - 2), 4, ui.theme_accent());
+        }
+        const label = overlay_labels[entry][0..overlay_label_lens[entry]];
+        const bin = overlay_bins[entry][0..overlay_bin_lens[entry]];
+        var line_buf: [64]u8 = undefined;
+        const line = std.fmt.bufPrint(&line_buf, "{s} — {s}", .{ label, bin }) catch label;
+        ui.draw_text_sized(0, line[0..@min(line.len, 56)], px + 14, ry + 1, ui.font_size_badge, if (is_sel) 0x000000 else ui.sidebar_text_active());
+    }
+    if (overlay_filtered_count == 0) {
+        ui.draw_text_sized(0, "no matching apps", px + 14, py + 74, ui.font_size_badge, ui.sidebar_text_inactive());
+    }
+    // Footer
+    ui.draw_text_sized(0, "esc dismiss", px + 12, py + overlay_panel_h - 20, ui.font_size_badge, ui.sidebar_text_inactive());
 }
 
 // ---------------------------------------------------------------------------
@@ -514,8 +758,8 @@ pub fn draw_sidebar(scan: [*]u32) void {
         ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, sexiburg_rect, 6, ui.sidebar_hover_pill());
     }
 
-    // Mini Sexiburger mascot icon at (16, 17)
-    draw_mini_mascot(scan, 16, 17);
+    // Proper Sexiburger mascot emblem (the real 🐙+🍔 raster, M42 SX1) at (12, 13)
+    draw_mascot_emblem(pixels, 12, 13);
 
     // Header label: "Virelai" in 14pt Inter
     ui.draw_text_sized(0, "Virelai", 48, 20, ui.font_size_tab_title, ui.sidebar_text_active());
@@ -564,8 +808,7 @@ pub fn draw_sidebar(scan: [*]u32) void {
         }
     }
 
-    // 5. Bottom Status / Tray Area (y = 660 .. 720)
-    // Separator line at y = 660
+    // 5. Bottom Status / Tray Area (y = 660 .. 720)    // Separator line at y = 660
     var bx: u32 = 8;
     while (bx < 172) : (bx += 1) {
         pixels[660 * fb_w + bx] = 0xFF000000 | border_c;
@@ -588,11 +831,56 @@ pub fn draw_sidebar(scan: [*]u32) void {
     const clip_bg = if (hover_clip) ui.sidebar_hover_pill() else ui.sidebar_bg();
     ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, clip_rect, 4, clip_bg);
     ui.draw_text_sized(0, "CB", 144, 676, ui.font_size_badge, ui.theme_accent());
+
+    // M42 SX5: the Sexiburger god-menu overlay renders last (over the
+    // canvas + sidebar dim).
+    draw_overlay(pixels);
 }
 
-/// Mini Sexiburger mascot: 6 burger layers + tentacles (18x18 px).
-fn draw_mini_mascot(scan: [*]u32, x: u32, y: u32) void {
-    const pixels = scan[0 .. @as(usize, fb_w) * fb_h];
+/// Proper Sexiburger mascot emblem (M42 SX1, issue #982): the real 🐙+🍔
+/// artwork — an octopus holding the six-layer burger — downscaled from
+/// `assets/sexiburger.png` (534x534, the canonical emoji export) to 28x28
+/// and embedded as a QOI fixture (`mascot_28x28.qoi`; regenerate with the
+/// premultiplied-Lanczos pass documented in `docs/march-m42-sexiburger-desktop.md`).
+/// Decoded ONCE into static BSS (the wnd.zig god-menu fixture pattern) and
+/// alpha-blended straight into the scanout via `ui.draw_image_buf`. The
+/// rect-drawn fallback emblem stays available in `lib/sexiburger.zig` for
+/// the no-asset path.
+pub const mascot_size: u32 = 28;
+
+const mascot_qoi_bytes = @embedFile("lib/fixtures/qoi/mascot_28x28.qoi");
+var mascot_pixels: [mascot_size * mascot_size]u32 = undefined;
+var mascot_loaded: bool = false;
+
+pub fn mascot_image() ?ui.Image {
+    if (mascot_loaded) {
+        return ui.Image{
+            .width = mascot_size,
+            .height = mascot_size,
+            .pixels = &mascot_pixels,
+        };
+    }
+    const decoded = ui.image.qoi.decode(mascot_qoi_bytes, &mascot_pixels) catch return null;
+    if (decoded.width != mascot_size or decoded.height != mascot_size) return null;
+    mascot_loaded = true;
+    return ui.Image{
+        .width = mascot_size,
+        .height = mascot_size,
+        .pixels = &mascot_pixels,
+    };
+}
+
+fn draw_mascot_emblem(pixels: []u32, x: u32, y: u32) void {
+    if (mascot_image()) |img| {
+        ui.draw_image_buf(pixels, fb_w, x, y, img);
+        return;
+    }
+    // Asset unavailable (decode failed): the legacy hand-drawn mini mascot.
+    draw_mini_mascot(pixels, x, y);
+}
+
+/// Legacy mini Sexiburger mascot fallback: 6 burger layers + tentacles (18x18 px).
+fn draw_mini_mascot(pixels: []u32, x: u32, y: u32) void {
     const tentacle: u32 = 0xFFF57C00;
 
     // Tentacles left
@@ -638,7 +926,7 @@ pub fn handle_pointer(px: u32, py: u32, clicked: bool) void {
     // Sexiburger header hit test (y = 8..48)
     hover_sexiburger = (px >= 8 and px < 172 and py >= 8 and py < 48);
     if (hover_sexiburger and clicked) {
-        write_marker(god_menu_marker);
+        overlay_summon(); // emits `tabwm: god-menu` (M42 SX5)
     }
 
     // Theme toggle hit test (y = 672..696, x = 96..128)
@@ -710,9 +998,9 @@ pub fn handle_wm_key(usage: u8, flags: u16) void {
             return;
         }
 
-        // Ctrl+Space: summon God Menu overlay
+        // Ctrl+Space: summon the Sexiburger god-menu overlay (M42 SX5)
         if (usage == usage_space) {
-            write_marker(god_menu_marker);
+            overlay_summon();
             return;
         }
     }
@@ -761,6 +1049,32 @@ pub fn wnd_mail_apply(req: *const ui.WmRpc) bool {
                 return true;
             }
             return false;
+        },
+        ui.wm_rpc_kind_declare_fullscreen => {
+            // M42 SX2: the app (via lib/tabapp.zig) declares itself
+            // tab-aware — full-viewport eligible. Registers/renames the tab
+            // from the payload title and, when the tab is ALREADY active,
+            // immediately proposes the full viewport (the next activation
+            // would otherwise wait for a tab switch).
+            var label_slice: []const u8 = req.title[0..];
+            for (req.title, 0..) |c, i| {
+                if (c == 0) {
+                    label_slice = req.title[0..i];
+                    break;
+                }
+            }
+            var idx: usize = undefined;
+            if (manager.find_by_id(req.id)) |found| {
+                idx = found;
+            } else {
+                idx = manager.add_or_update_tab(req.id, if (label_slice.len > 0) label_slice else "App");
+            }
+            manager.tabs[idx].tab_aware = true;
+            if (label_slice.len > 0) manager.tabs[idx].set_title(label_slice);
+            if (manager.active_idx != null and manager.active_idx.? == idx) {
+                activate_tab(idx);
+            }
+            return true;
         },
         ui.wm_rpc_kind_cycle_tab => {
             manager.cycle_tab();
@@ -816,6 +1130,9 @@ fn main() noreturn {
     // 3. Initialize TrueType fonts and desktop theme
     _ = ui.init_fonts();
     _ = ui.sync_theme_from_host();
+
+    // M42 SX5: load the APPS.TXT catalog for the god-menu overlay
+    _ = overlay_load_manifest();
 
     var ev: Event = undefined;
 
@@ -875,7 +1192,10 @@ fn main() noreturn {
             },
             wm_key_kind => {
                 const usage: u8 = @intCast(ev.arg0 & 0xff);
-                handle_wm_key(usage, ev.flags);
+                // M42 SX5: the god-menu overlay consumes the stream first.
+                if (!overlay_key(usage)) {
+                    handle_wm_key(usage, ev.flags);
+                }
             },
             else => {},
         }
@@ -1203,4 +1523,235 @@ test "tabwm: draw_viewport_backdrop writes canvas outside window" {
     try std.testing.expectEqual(@as(u32, 0xFF14161B), fb[101 * fb_w + 201]);
     // Viewport dot node (x%24 == 0 and y%24 == 0, e.g. x=240, y=120) should be dot color 0xFF252934
     try std.testing.expectEqual(@as(u32, 0xFF252934), fb[120 * fb_w + 240]);
+}
+
+// ---------------------------------------------------------------------------
+// Unit Tests (M42 SX1 — the proper mascot emblem)
+// ---------------------------------------------------------------------------
+test "tabwm: proper mascot emblem decodes at 28x28 (M42 SX1)" {
+    const img = mascot_image() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, 28), img.width);
+    try std.testing.expectEqual(@as(u32, 28), img.height);
+    // The artwork's center pixel is the burger's cheese layer (warm yellow);
+    // the rect-drawn mini mascot never had a center like this.
+    const c = img.pixels[14 * 28 + 14];
+    const r = (c >> 16) & 0xFF;
+    const g = (c >> 8) & 0xFF;
+    const b = c & 0xFF;
+    try std.testing.expect(r > 200 and g > 150 and b < 160);
+    // The artwork's background is transparent (alpha 0 at the corner)
+    try std.testing.expectEqual(@as(u32, 0), (img.pixels[0] >> 24) & 0xFF);
+}
+
+test "tabwm: draw_sidebar blits the raster emblem into the scanout (M42 SX1)" {
+    var fb: [fb_w * fb_h]u32 = undefined;
+    @memset(&fb, 0);
+    manager = TabManager.init();
+    hover_sexiburger = false; // earlier pointer tests may have left hover state
+    mascot_loaded = false; // force a fresh decode for this test run
+    draw_sidebar(&fb);
+    const img = mascot_image() orelse return error.TestUnexpectedResult;
+    // The icon's opaque center is exactly the fixture's cheese pixel
+    // (alpha 255 -> blend_source_over is an overwrite)
+    const center = fb[(13 + 14) * fb_w + (12 + 14)];
+    try std.testing.expectEqual(img.pixels[14 * 28 + 14], center);
+    // A fully transparent source pixel leaves the painted sidebar bg (not
+    // the emblem) — the emblem's alpha respected the destination
+    const corner = fb[13 * fb_w + 12];
+    try std.testing.expectEqual(ui.sidebar_bg(), corner & 0x00FFFFFF);
+}
+
+// ---------------------------------------------------------------------------
+// Unit Tests (M42 SX2 — the full-screen viewport seam)
+// ---------------------------------------------------------------------------
+test "tabwm: tab-aware fixed app takes the full viewport (M42 SX2)" {
+    var tab = Tab{
+        .id = 3,
+        .orig_w = 512,
+        .orig_h = 384,
+        .resizable = false,
+        .tab_aware = false,
+        .valid = true,
+    };
+    // Without the declaration: the M39 TWM3 centered presentation.
+    const centered = compute_tab_viewport(&tab);
+    try std.testing.expectEqual(@as(u32, 474), centered.x);
+    try std.testing.expectEqual(@as(u32, 168), centered.y);
+    try std.testing.expectEqual(@as(u32, 512), centered.w);
+    try std.testing.expectEqual(@as(u32, 384), centered.h);
+
+    // With the tab-aware declaration: the FULL content viewport.
+    tab.tab_aware = true;
+    const full = compute_tab_viewport(&tab);
+    try std.testing.expectEqual(@as(u32, 180), full.x);
+    try std.testing.expectEqual(@as(u32, 0), full.y);
+    try std.testing.expectEqual(@as(u32, 1100), full.w);
+    try std.testing.expectEqual(@as(u32, 720), full.h);
+}
+
+test "tabwm: viewport_change_needed idempotence (M42 SX2)" {
+    var tab = Tab{ .id = 1, .valid = true };
+    const full = Rect.make(viewport_x, viewport_y, viewport_w, viewport_h);
+    // First activation always proposes.
+    try std.testing.expect(viewport_change_needed(&tab, full));
+    tab.applied_vp = full;
+    // Same rect: no repeat proposal (no repeat WIN_RESIZE at the app).
+    try std.testing.expect(!viewport_change_needed(&tab, full));
+    // Any change re-proposes.
+    try std.testing.expect(viewport_change_needed(&tab, Rect.make(474, 168, 512, 384)));
+}
+
+test "tabwm: declare_fullscreen RPC registers and applies the full viewport (M42 SX2)" {
+    manager = TabManager.init();
+    // Unknown window id: the declaration creates the tab.
+    var req = ui.WmRpc{
+        .kind = ui.wm_rpc_kind_declare_fullscreen,
+        .id = 42,
+        .seq = 1,
+        .reply_to = 5,
+        .applied = 0,
+        .pad = 0,
+        .x = 0,
+        .y = 0,
+        .w = 0,
+        .h = 0,
+        .title = [_]u8{0} ** ui.wm_rpc_title_max,
+    };
+    @memcpy(req.title[0..4], "CALC");
+    try std.testing.expect(wnd_mail_apply(&req));
+    try std.testing.expectEqual(@as(usize, 1), manager.tab_count);
+    try std.testing.expect(manager.tabs[0].tab_aware);
+    try std.testing.expectEqualStrings("CALC", manager.tabs[0].get_title());
+
+    // Activate: the full-viewport proposal is applied and recorded.
+    activate_tab(0);
+    try std.testing.expect(manager.tabs[0].applied_vp != null);
+    try std.testing.expectEqual(@as(u32, 1100), manager.tabs[0].applied_vp.?.w);
+
+    // Re-declaration while already active: idempotent re-activation keeps
+    // the same applied rect (the app gets no repeat WIN_RESIZE).
+    try std.testing.expect(wnd_mail_apply(&req));
+    try std.testing.expectEqual(@as(u32, 1100), manager.tabs[0].applied_vp.?.w);
+    try std.testing.expectEqual(@as(u32, 180), manager.tabs[0].applied_vp.?.x);
+}
+
+test "tabwm: declare_fullscreen on an inactive tab defers the proposal (M42 SX2)" {
+    manager = TabManager.init();
+    _ = manager.add_or_update_tab(31, "Existing");
+    activate_tab(0);
+    const before = manager.tabs[0].applied_vp;
+
+    var req = ui.WmRpc{
+        .kind = ui.wm_rpc_kind_declare_fullscreen,
+        .id = 32,
+        .seq = 2,
+        .reply_to = 5,
+        .applied = 0,
+        .pad = 0,
+        .x = 0,
+        .y = 0,
+        .w = 0,
+        .h = 0,
+        .title = [_]u8{0} ** ui.wm_rpc_title_max,
+    };
+    @memcpy(req.title[0..5], "FILES");
+    try std.testing.expect(wnd_mail_apply(&req));
+    try std.testing.expectEqual(@as(usize, 2), manager.tab_count);
+    try std.testing.expect(manager.tabs[1].tab_aware);
+    // The inactive declaration did not steal activation...
+    try std.testing.expectEqual(@as(?usize, 0), manager.active_idx);
+    // ...and the active tab's applied viewport is untouched.
+    try std.testing.expectEqual(before, manager.tabs[0].applied_vp);
+}
+
+// ---------------------------------------------------------------------------
+// Unit Tests (M42 SX5 — the god-menu overlay)
+// ---------------------------------------------------------------------------
+fn overlay_seed_catalog() void {
+    overlay_count = 3;
+    const seeds = [_]struct { bin: []const u8, label: []const u8 }{
+        .{ .bin = "CALC.BIN", .label = "64-bit Calc" },
+        .{ .bin = "NOTEPAD.BIN", .label = "Text Editor" },
+        .{ .bin = "TOP.BIN", .label = "Task Manager" },
+    };
+    for (seeds, 0..) |s, i| {
+        @memcpy(overlay_bins[i][0..s.bin.len], s.bin);
+        overlay_bin_lens[i] = s.bin.len;
+        @memcpy(overlay_labels[i][0..s.label.len], s.label);
+        overlay_label_lens[i] = s.label.len;
+    }
+    overlay_filter_len = 0;
+    overlay_refresh_filter();
+}
+
+test "tabwm: god-menu overlay filters the manifest (M42 SX5)" {
+    overlay_seed_catalog();
+    try std.testing.expectEqual(@as(usize, 3), overlay_filtered_count);
+    // Case-insensitive substring over label + bin.
+    overlay_filter_len = 4;
+    @memcpy(overlay_filter[0..4], "calc");
+    overlay_refresh_filter();
+    try std.testing.expectEqual(@as(usize, 1), overlay_filtered_count);
+    try std.testing.expectEqual(@as(usize, 0), overlay_sel);
+    // No hits: the empty state renders, launch refuses.
+    overlay_filter_len = 3;
+    @memcpy(overlay_filter[0..3], "zzz");
+    overlay_refresh_filter();
+    try std.testing.expectEqual(@as(usize, 0), overlay_filtered_count);
+    overlay_open = true;
+    try std.testing.expect(!overlay_launch_selected());
+    overlay_dismiss();
+}
+
+test "tabwm: god-menu overlay keys — filter, select, launch, dismiss (M42 SX5)" {
+    overlay_seed_catalog();
+    overlay_open = true;
+    // 'e' extends the filter ("e" hits "64-bit Calc"? no — label+bin
+    // contains 'e' in "Text Editor"/"Task Manager"/"...Calc"? Calc has no
+    // 'e'... "64-bit Calc" + "CALC.BIN" has none; Editor + Manager do.
+    _ = overlay_key(0x08); // 'e'
+    try std.testing.expectEqual(@as(usize, 2), overlay_filtered_count);
+    // Backspace clears back to 3 hits.
+    _ = overlay_key(0x2a);
+    try std.testing.expectEqual(@as(usize, 3), overlay_filtered_count);
+    // Down moves the selection.
+    _ = overlay_key(0x51);
+    try std.testing.expectEqual(@as(usize, 1), overlay_sel);
+    // Up moves it back.
+    _ = overlay_key(0x52);
+    try std.testing.expectEqual(@as(usize, 0), overlay_sel);
+    // Enter launches the selected app (host: exec no-ops) and dismisses.
+    try std.testing.expect(overlay_launch_selected());
+    try std.testing.expect(!overlay_open);
+    try std.testing.expectEqual(@as(usize, 0), overlay_filter_len);
+    // Escape dismisses cleanly.
+    overlay_open = true;
+    try std.testing.expect(overlay_key(0x29));
+    try std.testing.expect(!overlay_open);
+}
+
+test "tabwm: overlay keys are consumed only while open (M42 SX5)" {
+    overlay_open = false;
+    // With the overlay closed, letter keys fall through (not consumed).
+    try std.testing.expect(!overlay_key(0x04));
+}
+
+test "tabwm: god-menu overlay accepts digits, minus, period in the filter (M42 SX5)" {
+    overlay_seed_catalog();
+    overlay_open = true;
+    // "64-bit": digits 6,4 (usages 0x23,0x21), minus (0x2d), b,i,t.
+    _ = overlay_key(0x23);
+    _ = overlay_key(0x21);
+    try std.testing.expectEqual(@as(usize, 2), overlay_filter_len);
+    _ = overlay_key(0x2d);
+    try std.testing.expectEqual(@as(usize, 3), overlay_filter_len);
+    try std.testing.expectEqual(@as(u8, '-'), overlay_filter[2]);
+    _ = overlay_key(0x05); // b
+    _ = overlay_key(0x0c); // i
+    _ = overlay_key(0x17); // t
+    try std.testing.expectEqual(@as(usize, 6), overlay_filter_len);
+    overlay_refresh_filter();
+    // Exactly one hit: "64-bit Calc" (CALC.BIN).
+    try std.testing.expectEqual(@as(usize, 1), overlay_filtered_count);
+    overlay_dismiss();
 }

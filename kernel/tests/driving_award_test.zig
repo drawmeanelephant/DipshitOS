@@ -1019,6 +1019,39 @@ test "driving_award: wm_apply_rect uses LAYOUT semantics (WMS5 Gate 2, claim 427
     try std.testing.expect(!wm_apply_rect(0, 0, 0, 100, 100));
 }
 
+test "driving_award: wm_apply_rect emits WIN_RESIZE to the owner on size change (M42 SX2)" {
+    events.init();
+    arm();
+    try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 512, 384, 7));
+    // Consume the WIN_FOCUS from open so the queue starts empty.
+    _ = events.pop(7);
+    try std.testing.expectEqual(@as(usize, 0), events.pending(7));
+
+    // Size change (512x384 -> 837x700): the owner is told its new canvas.
+    try std.testing.expect(wm_apply_rect(2, 24, 0, 837, 700));
+    const ev = events.pop(7).?;
+    try std.testing.expectEqual(events.WIN_RESIZE, ev.kind);
+    try std.testing.expectEqual(@as(u32, 837), ev.arg0);
+    try std.testing.expectEqual(@as(u32, 700), ev.arg1);
+    try std.testing.expectEqual(@as(usize, 0), events.pending(7));
+
+    // Pure move (same size): no event — the WM repositioning a window must
+    // not spam the app with resize notifications.
+    try std.testing.expect(wm_apply_rect(2, 100, 50, 837, 700));
+    try std.testing.expectEqual(@as(usize, 0), events.pending(7));
+
+    // Idempotent re-apply of the same rect: still no event.
+    try std.testing.expect(wm_apply_rect(2, 100, 50, 837, 700));
+    try std.testing.expectEqual(@as(usize, 0), events.pending(7));
+
+    // A shrinking layout notifies too (the clamped size differs).
+    try std.testing.expect(wm_apply_rect(2, 100, 50, 300, 200));
+    const ev2 = events.pop(7).?;
+    try std.testing.expectEqual(events.WIN_RESIZE, ev2.kind);
+    try std.testing.expectEqual(@as(u32, 300), ev2.arg0);
+    try std.testing.expectEqual(@as(u32, 200), ev2.arg1);
+}
+
 test "driving_award: user_rect reads back the clamped geometry (the sys_win_get seam)" {
     arm();
     _ = user_open(64, 64, 512, 384, 7);

@@ -713,6 +713,34 @@ pub fn draw_image_scaled(win_id: u32, dest: Rect, img: image.Image) void {
     }
 }
 
+/// Blit a raster image directly into a raw pixel buffer (M42 SX1, issue #982)
+/// — the WM-server seam: TABWM composes straight into the M33 scanout, which
+/// has no window backing, so `draw_image`'s backing path does not apply.
+/// `stride` is in PIXELS; the buffer is `pixels.len` pixels tall-strided
+/// (row `y` starts at `y * stride`). Source-over alpha blending with
+/// boundary clipping on both the buffer and the image. Pure buffer math —
+/// host-testable, zero syscalls, zero allocation.
+pub fn draw_image_buf(pixels: []u32, stride: u32, x: u32, y: u32, img: image.Image) void {
+    if (img.width == 0 or img.height == 0 or stride == 0 or pixels.len == 0) return;
+    const buf_h: u32 = @intCast(pixels.len / stride);
+    if (x >= stride or y >= buf_h) return;
+
+    const max_w = @min(img.width, stride - x);
+    const max_h = @min(img.height, buf_h - y);
+    var sy: u32 = 0;
+    while (sy < max_h) : (sy += 1) {
+        const dst_row = (y + sy) * stride + x;
+        var sx: u32 = 0;
+        while (sx < max_w) : (sx += 1) {
+            const px_ptr = img.pixel_at(sx, sy) orelse continue;
+            const src_px = px_ptr.*;
+            if (((src_px >> 24) & 0xFF) == 0) continue;
+            const dst_idx = dst_row + sx;
+            pixels[dst_idx] = blend_source_over(pixels[dst_idx], src_px);
+        }
+    }
+}
+
 /// Draw a 1px panel frame inside `rect` (in-app panels, dialogs, editors
 /// — the compositor owns the OUTER window border). Uses token metrics.
 pub fn draw_panel_frame(win_id: u32, rect: Rect, focused: bool) void {
@@ -923,4 +951,57 @@ pub fn fill_pill(win_id: u32, rect: Rect, color: u32) void {
 pub fn fill_pill_buf(pixels: []u32, buf_w: u32, buf_h: u32, rect: Rect, color: u32) void {
     const r = @min(rect.w, rect.h) / 2;
     fill_rounded_rect_buf(pixels, buf_w, buf_h, rect, r, color);
+}
+
+// ---------------------------------------------------------------------------
+// Tests — draw_image_buf (M42 SX1, issue #982): the WM-server scanout blit.
+// ---------------------------------------------------------------------------
+
+test "draw: draw_image_buf source-over into a raw buffer" {
+    var buf: [16]u32 = [_]u32{0xFF202020} ** 16; // opaque dark gray, 4x4
+    var src_px: [9]u32 = undefined;
+    const src = Image{ .width = 3, .height = 3, .pixels = &src_px };
+
+    // Row 0: transparent, opaque, 50% red
+    src_px[0] = 0x00FFFFFF;
+    src_px[1] = 0xFFFF0000;
+    src_px[2] = 0x80FF0000;
+    // Row 1: opaque green
+    src_px[3] = 0xFF00FF00;
+    src_px[4] = 0xFF00FF00;
+    src_px[5] = 0xFF00FF00;
+    // Row 2: transparent
+    src_px[6] = 0x00000000;
+    src_px[7] = 0x00000000;
+    src_px[8] = 0x00000000;
+
+    draw_image_buf(&buf, 4, 1, 1, src);
+
+    // Transparent pixels leave the destination untouched
+    try std.testing.expectEqual(@as(u32, 0xFF202020), buf[1 * 4 + 1]);
+    try std.testing.expectEqual(@as(u32, 0xFF202020), buf[3 * 4 + 1]);
+    // Opaque overwrite
+    try std.testing.expectEqual(@as(u32, 0xFFFF0000), buf[1 * 4 + 2]);
+    try std.testing.expectEqual(@as(u32, 0xFF00FF00), buf[2 * 4 + 1]);
+    // 50% red over dark gray 0x20: out = (255*128 + 32*127)/255 = 143 (0x8F)
+    const blended = buf[1 * 4 + 3];
+    const r = (blended >> 16) & 0xFF;
+    try std.testing.expect(r >= 142 and r <= 144);
+}
+
+test "draw: draw_image_buf clips to buffer and stride" {
+    var buf: [9]u32 = [_]u32{0xFF101010} ** 9; // 3x3
+    var src_px: [4]u32 = [_]u32{0xFFFFFFFF} ** 4;
+    const src = Image{ .width = 2, .height = 2, .pixels = &src_px };
+
+    // Blit at the bottom-right corner: only the (2,2) pixel fits
+    draw_image_buf(&buf, 3, 2, 2, src);
+    try std.testing.expectEqual(@as(u32, 0xFFFFFFFF), buf[8]);
+    try std.testing.expectEqual(@as(u32, 0xFF101010), buf[5]);
+
+    // Fully outside: no-op, no OOB
+    draw_image_buf(&buf, 3, 3, 0, src);
+    draw_image_buf(&buf, 3, 0, 3, src);
+    try std.testing.expectEqual(@as(u32, 0xFF101010), buf[2]);
+    try std.testing.expectEqual(@as(u32, 0xFF101010), buf[6]);
 }

@@ -20,5 +20,17 @@ fi
 echo "=== verify-unit-tests: running unified parallel test suite (zig build test) ==="
 zig build test --summary all
 
+# App-level test roots (TABWM.BIN / SEXIBURG.BIN) run as direct `zig test`
+# invocations rather than `zig build test` targets: their transitive
+# lib/font_ttf glyph-rasterization tests print to stderr, and the Zig 0.16
+# build runner relays a stale "failed command:" line for a SUCCESSFUL
+# run step whenever the child had stderr output (the Step docs' own note:
+# result_failed_command "may be populated even if the step succeeded").
+# Direct runs keep the coverage without the noise. (M42 SX1, issue #982)
+echo "=== verify-unit-tests: app-level test roots (direct zig test) ==="
+zig test user/src/lib/tabapp.zig
+zig test user/src/tabwm.zig
+zig test user/src/sexiburger.zig
+
 echo "verify-unit-tests: all unit tests passed"
 exit 0

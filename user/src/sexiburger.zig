@@ -26,6 +26,42 @@ pub const window_w: u32 = 512;
 pub const window_h: u32 = 384;
 pub const exit_status: u32 = 43;
 
+/// Proper Sexiburger mascot rasters (M42 SX1, issue #982): the real 🐙+🍔
+/// artwork — an octopus holding the six-layer burger — decoded ONCE into
+/// static BSS. Source: `assets/sexiburger.png` (the canonical emoji export,
+/// 534x534) downscaled with a premultiplied-alpha Lanczos pass to the 24x24
+/// (top bar) and 64x64 (diagnostic splash) QOI fixtures. The rect-drawn
+/// `draw_sexiburger_emblem` stays as the decode-failure fallback.
+pub const mascot_small_size: u32 = 24;
+pub const mascot_large_size: u32 = 64;
+
+const mascot_small_qoi = @embedFile("lib/fixtures/qoi/mascot_24x24.qoi");
+const mascot_large_qoi = @embedFile("lib/fixtures/qoi/mascot_64x64.qoi");
+var mascot_small_pixels: [mascot_small_size * mascot_small_size]u32 = undefined;
+var mascot_large_pixels: [mascot_large_size * mascot_large_size]u32 = undefined;
+var mascot_small_loaded: bool = false;
+var mascot_large_loaded: bool = false;
+
+pub fn mascot_small() ?ui.Image {
+    if (mascot_small_loaded) {
+        return ui.Image{ .width = mascot_small_size, .height = mascot_small_size, .pixels = &mascot_small_pixels };
+    }
+    const hdr = ui.image.qoi.decode(mascot_small_qoi, &mascot_small_pixels) catch return null;
+    if (hdr.width != mascot_small_size or hdr.height != mascot_small_size) return null;
+    mascot_small_loaded = true;
+    return ui.Image{ .width = mascot_small_size, .height = mascot_small_size, .pixels = &mascot_small_pixels };
+}
+
+pub fn mascot_large() ?ui.Image {
+    if (mascot_large_loaded) {
+        return ui.Image{ .width = mascot_large_size, .height = mascot_large_size, .pixels = &mascot_large_pixels };
+    }
+    const hdr = ui.image.qoi.decode(mascot_large_qoi, &mascot_large_pixels) catch return null;
+    if (hdr.width != mascot_large_size or hdr.height != mascot_large_size) return null;
+    mascot_large_loaded = true;
+    return ui.Image{ .width = mascot_large_size, .height = mascot_large_size, .pixels = &mascot_large_pixels };
+}
+
 pub const AppState = struct {
     menu: SexiburgerMenu,
     btn_trigger: Button,
@@ -98,8 +134,12 @@ pub const AppState = struct {
         ui.draw_rect(win, bar_rect, ui.theme_surface());
         ui.draw_rect(win, Rect.make(0, 35, window_w, 1), ui.theme_border());
 
-        // Mascot mini-emblem in top bar
-        sexiburger.draw_sexiburger_emblem(win, 16, 8);
+        // Proper Sexiburger mascot emblem in the top bar (M42 SX1, issue #982)
+        if (mascot_small()) |img| {
+            ui.draw_image(win, 14, 6, img);
+        } else {
+            sexiburger.draw_sexiburger_emblem(win, 16, 8);
+        }
 
         // Buttons
         self.btn_trigger.draw(win);
@@ -113,12 +153,17 @@ pub const AppState = struct {
         ui.draw_rect(win, canvas_rect, ui.theme_surface());
         ui.draw_rect_outline(win, canvas_rect, 1, ui.theme_border());
 
-        // Large Mascot Diagnostic Display in center
-        sexiburger.draw_sexiburger_emblem(win, 48, 80);
-        ui.draw_text(win, "VIRELAIOS GOD MENU: THE SEXIBURGER", 84, 80, ui.theme_accent());
-        ui.draw_text(win, "Mascot: Sexipus (6 tentacles, 3/side) wearing a 6-layer burger.", 84, 96, ui.theme_text_primary());
-        ui.draw_text(win, "1. System (Crown)  2. Apps (Lettuce)  3. Active App (Tomato)", 84, 112, ui.theme_text_muted());
-        ui.draw_text(win, "4. Windows/Tabs (Cheese)  5. Services (Patty)  6. Power (Heel)", 84, 126, ui.theme_text_muted());
+        // Large Mascot Diagnostic Display in center: the proper 64x64
+        // 🐙+🍔 raster (M42 SX1); text column moves right of it.
+        if (mascot_large()) |img| {
+            ui.draw_image(win, 48, 80, img);
+        } else {
+            sexiburger.draw_sexiburger_emblem(win, 48, 80);
+        }
+        ui.draw_text(win, "VIRELAIOS GOD MENU: THE SEXIBURGER", 124, 80, ui.theme_accent());
+        ui.draw_text(win, "Mascot: Sexipus (6 tentacles, 3/side) wearing a 6-layer burger.", 124, 96, ui.theme_text_primary());
+        ui.draw_text(win, "1. System (Crown)  2. Apps (Lettuce)  3. Active App (Tomato)", 124, 112, ui.theme_text_muted());
+        ui.draw_text(win, "4. Windows/Tabs (Cheese)  5. Services (Patty)  6. Power (Heel)", 124, 126, ui.theme_text_muted());
 
         // Mascot ASCII diagnostic block
         const ascii_lines = action_reg.sexiburger_ascii_lines();
@@ -267,4 +312,34 @@ test "sexiburger app: command invocation updates last action" {
     try std.testing.expect(!app.menu.is_open());
     try std.testing.expectEqual(@as(u32, 1), app.action_counter);
     try std.testing.expect(std.mem.indexOf(u8, app.get_last_action(), "Reboot System") != null);
+}
+
+// ---------------------------------------------------------------------------
+// Tests (M42 SX1 — the proper mascot rasters)
+// ---------------------------------------------------------------------------
+test "sexiburger app: proper 24x24 and 64x64 mascot rasters decode" {
+    const small = mascot_small() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(mascot_small_size, small.width);
+    try std.testing.expectEqual(mascot_small_size, small.height);
+    const c = small.pixels[(small.height / 2) * small.width + small.width / 2];
+    // Cheese-yellow burger core (the real artwork's center)
+    const r = (c >> 16) & 0xFF;
+    const g = (c >> 8) & 0xFF;
+    const b = c & 0xFF;
+    try std.testing.expect(r > 200 and g > 150 and b < 160);
+
+    const large = mascot_large() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(mascot_large_size, large.width);
+    try std.testing.expectEqual(mascot_large_size, large.height);
+    // Transparent artwork background (corner)
+    try std.testing.expectEqual(@as(u32, 0), (large.pixels[0] >> 24) & 0xFF);
+    // Tentacle orange present in the raster (the artwork's dominant hue)
+    var orange: usize = 0;
+    for (large.pixels) |px| {
+        const pr = (px >> 16) & 0xFF;
+        const pg = (px >> 8) & 0xFF;
+        const pb = px & 0xFF;
+        if (((px >> 24) & 0xFF) > 200 and pr > 180 and pr < 255 and pg > 100 and pg < 200 and pb < 110) orange += 1;
+    }
+    try std.testing.expect(orange > 200);
 }
