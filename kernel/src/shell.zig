@@ -145,6 +145,10 @@ const glob_max_matches: usize = 64;
 var glob_argv_storage: [tokenizer.max_tokens + glob_max_matches][]const u8 = undefined;
 /// M19 P6: scratch for one wildcard argument's sorted matches.
 var glob_match_storage: [glob_max_matches][]const u8 = undefined;
+/// M19 P6 / #965: BSS storage for matching glob entry names so argv slices
+/// remain valid across dispatch (single-active-dispatch invariant).
+var glob_name_storage: [glob_max_matches][32]u8 = undefined;
+var glob_list_res: virtio_file.ListResult = .{};
 
 // ---------------------------------------------------------------------------
 // M19 P7 (issue #296): foreground/background jobs.
@@ -2195,6 +2199,30 @@ fn glob_expand_argv(
     wild: []const bool,
     out: [][]const u8,
 ) ?usize {
+    var any_wild = false;
+    for (wild) |w| {
+        if (w) {
+            any_wild = true;
+            break;
+        }
+    }
+    if (!any_wild) {
+        for (argv, 0..) |arg, i| out[i] = arg;
+        return argv.len;
+    }
+
+    // M34 HF6 (issue #740) / #965: globbing enumerates the HOST SHARE root.
+    // Enumerate once into module-level BSS storage if any wildcard is present.
+    const list_st = blk: {
+        const taken = acquire_file_lock();
+        defer release_file_lock(taken);
+        break :blk virtio_file.list("", &glob_list_res);
+    };
+    if (list_st != virtio_file.st_ok) {
+        for (argv, 0..) |arg, i| out[i] = arg;
+        return argv.len;
+    }
+
     var count: usize = 0;
     var total_matched: usize = 0;
     for (argv, wild) |arg, is_wild| {
@@ -2203,21 +2231,8 @@ fn glob_expand_argv(
             count += 1;
             continue;
         }
-        // M34 HF6 (issue #740): globbing enumerates the HOST SHARE root
-        // (the ESP window is gone).
-        var lr = virtio_file.ListResult{};
-        const list_st = blk: {
-            const taken = acquire_file_lock();
-            defer release_file_lock(taken);
-            break :blk virtio_file.list("", &lr);
-        };
-        if (list_st != virtio_file.st_ok) {
-            out[count] = arg; // no channel: literal passthrough
-            count += 1;
-            continue;
-        }
         var m: usize = 0;
-        for (lr.entries[0..lr.count]) |e| {
+        for (glob_list_res.entries[0..glob_list_res.count]) |*e| {
             const ename = e.name[0..e.name_len];
             if (!glob_match(arg, ename)) continue;
             // Insertion sort by name (byte-wise ascending).
@@ -2239,8 +2254,10 @@ fn glob_expand_argv(
             count += 1;
             continue;
         }
-        for (glob_match_storage[0..m]) |name| {
-            out[count] = name;
+        for (glob_match_storage[0..m], 0..) |name, mi| {
+            const dst = &glob_name_storage[total_matched + mi];
+            @memcpy(dst[0..name.len], name);
+            out[count] = dst[0..name.len];
             count += 1;
         }
         total_matched += m;
