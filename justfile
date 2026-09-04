@@ -386,6 +386,10 @@ verify-live-kill:
 verify-live-smp:
     bash tools/verify-live-smp.sh
 
+# Verify the in-guest-compiled snake demo (class B — display-backed VZ boot: ZC.BIN compiles the 4-file snake group in-guest, SNAKE.ELF runs windowed (ordered snake-up→snake-wait→snake-move→snake-over, exit 72), and framebuffer captures prove the game's pixels — first live RUN consumer of the VL6 GUI surface + zc.svc(21) event poll; Apple silicon only)
+verify-live-snake:
+    bash tools/verify-live-snake.sh
+
 # Verify the M1.5 host-side interactive serial plumbing (class B — boots VZ VMs; Apple silicon only)
 verify-host-console:
     bash tools/verify-host-console.sh

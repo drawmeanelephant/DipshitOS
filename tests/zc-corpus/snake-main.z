@@ -1,0 +1,64 @@
+// SNAKE.Z — zc SNAKE.Z SLIB.Z EV.Z FOOD.Z S.ELF
+const zc = @import("zc");
+
+// State (8-field): hx hy d n ov fd st fr.
+const State = struct {
+    hx: u64,
+    hy: u64,
+    d: u64,
+    n: u64,
+    ov: u64,
+    fd: u64,
+    st: u64,
+    fr: u64,
+};
+
+pub fn main() void {
+    const cell: u64 = 8;
+    const gw: u64 = 26;
+    const gh: u64 = 19;
+    const wid: u64 = zc.win_open(536, 284, gw * cell, gh * cell);
+    var segs: [40]u64 = undefined;
+    var s: State = undefined;
+    s.hx = 12; s.hy = 9; s.d = 3; s.n = 1; s.ov = 0; s.st = 0; s.fr = 0;
+    s.fd = place_food(&segs, 1, gw, gh, 1);
+    segs[0] = pack(s.hx, s.hy);
+    var buf: [16]u8 = undefined;
+    zc.print("snake-up\n");
+    while (s.ov == 0) {
+        var drain: u64 = 1;
+        while (drain == 1) {
+            const r: i64 = zc.svc(21, &buf);
+            if (r == 1) {
+                const kind: u64 = ev_kind(&buf);
+                if (kind == 1) {
+                    const nd: u64 = dir_for(ev_arg0(&buf), ev_arg1(&buf));
+                    if (nd < 4) {
+                        if (blocked(nd, s.d) == 0) {
+                            s.d = nd;
+                            s.st = 4;
+                        }
+                    }
+                }
+                if (kind == 6) {
+                    if (s.st == 0) {
+                        s.st = 1;
+                    }
+                }
+                if (kind == 8) {
+                    s.ov = 1;
+                }
+            } else {
+                drain = 0;
+            }
+        }
+        const pc: u64 = step(&s, &segs, wid, gw, gh, cell);
+        if (pc == 2) { zc.print("snake-move\n"); _ = zc.yield(); }
+        if (pc == 3) { _ = zc.yield(); }
+        if (pc == 4) { zc.sleep(1); }
+        if (pc == 0) { zc.sleep(1); }
+        if (s.fr == 2) { zc.print("snake-wait\n"); }
+    }
+    zc.print("snake-over\n");
+    zc.exit(72);
+}

@@ -57,8 +57,9 @@ and truncated-name behaviors quietly become permanent.
 
 ## Code processing / in-guest Zig compiler (self-hosting lane 2, #708)
 
-The "keep progressing" thread. Core landed; the issue and the GUI consumer
-are the open end.
+The "keep progressing" thread. Core landed (Z0–Z4b closed); VL6's run
+consumer landed with the snake (claim #988) — the open end is the Lane 0
+hygiene cards + the #706/#707 umbrellas below.
 
 - **Landed (claim 0098, antigravity):** `user/src/lib/asmenc.zig` (encoder
   extraction, VL1), widened assembler set (VL2), `user/src/zc.zig` tokenizer
@@ -68,13 +69,23 @@ are the open end.
   while, return, calls, block scoping, int/bitwise/compare/logical exprs,
   `svc` builtins for write/exit/file ops. Bounded: ≤32 functions, ≤512
   lines, zero heap.
-- **Open (issue #708, milestone #20): re-scoped 2026-09-01.** VL1–VL5 are
-  closed out with evidence (claim 0098); #708 now carries **VL6 (GUI
-  consumer) only** — the win/draw svc builtins (win_open/fill/present) —
-  and **depends on #749 (Z0.5, the dialect contract)**: the first GUI app is
-  written in the honest dialect, so VL6 lands right after (or paired with)
-  Z0.5. The future of Lane 2 beyond that is the ladder: Z1a–Z4b filed as
-  #750–#761.
+- **VL6 (issue #708): the GUI surface is built AND has its first live RUN
+  consumer (claim #988, 2026-09-04).** The win/draw svc builtins
+  (win_open/fill/present) shipped with Z0.5; the open end was run parity —
+  the corpus vl6 fixture was compile-only because proving pixels needs a
+  window/pixel-observing gate, not a serial log. Claim #978 closed that:
+  an in-guest-compiled Snake (`tests/zc-corpus/snake-*.z`, corpus case
+  `snk`) is the first live consumer of the VL6 surface AND of the raw
+  `zc.svc(<literal>, …)` escape hatch — its per-frame loop polls the ADR
+  0009 event queue with `zc.svc(21, &buf)` and renders with
+  win_open/fill/present. Proof is display-backed: `verify-live-snake.sh`
+  boots VZ with the GPU attached, compiles the group in-guest under
+  `strace exec`, runs SNAKE.ELF windowed (ordered markers, exit 72), and
+  asserts the game's pixels (dark board + green head + pink food) in host
+  framebuffer captures. The corpus `snk` case is dual-run (host zig +
+  in-guest zc, byte-equivalent behavior). The rest of the ladder below
+  (Z1a–Z4b) is fully landed with its corpus fixtures — dual-run in
+  `verify-zc-corpus.sh`.
 - **Sibling lanes (milestone #20):** #706 Lane 0 hygiene — **split 2026-09-01
   into four parallel cards**: #773 (re-verify live-desktop + gate-inventory),
   #774 (live-asm/disas fixture drift), #775 (M20 tabs probe-decode red),
@@ -175,10 +186,12 @@ are the open end.
   previously risky condition), full corpus sweep 12/12 cases × both
   legs, `verify-live-zc.sh` PASS. Evidence under `artifacts/claim-899/`;
   the corpus gate is now trustworthy for unattended CI.
-- **VL6 (the GUI consumer, #708) pairs with Z0.5 (#749).** It's svc-builtin
-  work (win_open/fill/present) — no new language features. Land the dialect
-  re-shape and the win builtins together, so the first GUI app is written
-  in the honest dialect instead of the keyword dialect.
+- **VL6 (the GUI consumer, #708): shipped with Z0.5; live run parity landed
+  with the snake (claim #988).** The win builtins are svc-builtin work
+  (win_open/fill/present) — no new language features. The first GUI app in
+  the honest dialect is the Snake fixture (`tests/zc-corpus/snake-*.z`),
+  proven windowed on a display-backed boot (`verify-live-snake.sh`), not
+  just compile-only like the vl6 fixture.
 - **Z1e and Z1f can pair** in one claim if reviewers prefer — they're both
   statement-lowering; the split is for single-agent sizing.
 - **The corpus accumulates from day one.** Every Z step ships its
@@ -193,7 +206,8 @@ are the open end.
 The corpus contract: every `tests/zc-corpus/*.z` fixture (and the stdz
 library modules `user/src/lib/stdz/*.zig` it compiles with) must build
 STRICT-valid under host `zig 0.16` AND compile + run in-guest with `zc`
-(compile-only for the vl6 GUI fixture — its run parity needs a
+(compile-only for the vl6 GUI fixture — its window surface's run parity
+is carried by the snake fixture + `verify-live-snake.sh`, the
 window/pixel-observing gate, not a serial log). Strict matters: the Z4a-era
 `zig build-obj` check analyzed lazily, so a fixture whose `main` body used
 `i += 1` or implicit u64→u8 stores passed; the Z4b host build
@@ -224,8 +238,12 @@ pins, so behavior is byte-equivalent across the two compilers. This is the
   `return`; bodies restricted to expression or simple-assignment
   statements), `*const fn(...)` function pointers with `&fn` + `blr`.
 - The `zc.*` magic seam (`@import("zc")` — print/write/exit/mmap/file
-  ops), multi-file flat-namespace compile (Z3a), and the stdz modules
-  (fmt/string builder/ring — Z3b) compiled in from source.
+  ops, the win builtins win_open/fill/present, and the raw
+  `zc.svc(<literal>, …)` escape hatch for any ADR 0007 syscall — e.g.
+  `zc.svc(21, &buf)` polls the event queue; the host shim's `svc` is
+  `anytype`-widened so pointer args type-check under host Zig), multi-file
+  flat-namespace compile (Z3a), and the stdz modules (fmt/string
+  builder/ring — Z3b) compiled in from source.
 
 **Non-goals** (host Zig parses them; `zc` does not — compile errors, and
 the fixture corpus must not use them): `comptime`, `std`, error sets,
@@ -234,18 +252,23 @@ the fixture corpus must not use them): `comptime`, `std`, error sets,
 syntax, any `@import` other than the magic `"zc"` name (the multi-file
 namespace is flat by design). Dialect-internal caps the gate enforces:
 every source ≤ 2048 B (the kernel's single-`file_read` cap — a larger
-source silently truncates in-guest) and ≤ 6 sources per compile
-(`MAX_FILES`). When a ladder step wants to lift a non-goal, it ships a
+source silently truncates in-guest), ≤ 6 sources per compile
+(`MAX_FILES`), ≤ 8 struct fields, and — surfaced by the snake, claim
+#978 — a ~512 B stack-frame budget per function (frame bytes accumulate
+across the body, so a `[120]u64` local array refuses to compile; size
+large locals to the budget) and braced-only `if` bodies (a
+single-statement `if (c) return 1;` without `{ }` is a parse error). When a ladder step wants to lift a non-goal, it ships a
 fixture that uses it and this list shrinks — the corpus and this boundary
 move together. The corpus gate's first in-guest sweep caught one drift:
 `z1b-arrays.z` used `+=` (never in the dialect — its zc.zig unit twin
 always used `i = i + 1`), which the Z0.5-era host checks could not see
 (host Zig accepts `+=`); fixed to the supported form in Z4a.
 
-**Suggested sequencing:** land **#749 (Z0.5)** first — it's the dialect
-unlock and the host-shim contract is pinned in its body — then **#708 (VL6)**
-rides right after (or paired with it, per the ladder note). Then claim Z1a
-(#750) and on down the ladder; the Z4a corpus is already accumulating from
+**Sequencing note (historical):** #749 (Z0.5) landed first — the dialect
+unlock with the host-shim contract pinned in its body — #708 (VL6) rode
+with it, and the snake (claim #988) supplied the missing run consumer.
+The Z1a–Z4b ladder then landed its fixtures; the corpus was already
+accumulating from
 Z0.5 (each step ships its fixture), so it's warm when it lands. Lane 0's
 four cards (#773–#776) are independent and claimable in parallel with any
 of the above.

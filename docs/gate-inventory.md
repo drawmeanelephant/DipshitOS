@@ -121,6 +121,7 @@ card's close-out and graduate to the archive when their milestone closes.
 | `live-m16-composition` | B | `bash tools/verify-live-m16-composition.sh` | ✅ pass | 2026-08-24* |
 | `live-net-offline` | B | `bash tools/verify-live-net-offline.sh` | ✅ pass — M26 N13+N14: offline/no-route fast-exit preflight in PING.BIN/FETCH.BIN (claim 8852); 24/24 across offline boot, no-route boot, online control | 2026-08-28 |
 | `cvc-echo` | B | `bash tools/verify-cvc-echo.sh` | ✅ pass | 2026-08-24 |
+| `live-snake` | B | `bash tools/verify-live-snake.sh` | ✅ pass — first live RUN consumer of the VL6 GUI surface: ZC.BIN compiles the 4-file snake group in-guest, SNAKE.ELF runs windowed (ordered snake-up→snake-wait→snake-move→snake-over, exit 72), framebuffer captures prove the game's pixels (claim #988) | 2026-09-04 |
 | `verify-vz` | B | `just verify-vz` (aggregate — every class-B gate above) | aggregate | 2026-08-19 |
 
 \* A bare date is the gate's own recorded PASS date; `date*` is the closing
