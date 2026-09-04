@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const ui = @import("lib/ui.zig");
+const tabapp = @import("lib/tabapp.zig");
 const Rect = ui.Rect;
 const Button = ui.Button;
 const Label = ui.Label;
@@ -26,6 +27,22 @@ pub const window_y: u32 = 60;
 pub const window_w: u32 = 512;
 pub const window_h: u32 = 380;
 pub const exit_status: u32 = 0;
+
+// M42 SX4 (issue #985): the NATIVE layout rects (the 512x380 design).
+// `layout` scales copies of these into the current canvas.
+pub const native_btn_overview = Rect.make(12, 10, 90, 22);
+pub const native_btn_procs = Rect.make(108, 10, 90, 22);
+pub const native_btn_storage = Rect.make(204, 10, 110, 22);
+pub const native_btn_refresh = Rect.make(416, 10, 88, 22);
+pub const native_header = Rect.make(0, 0, 512, 40);
+pub const native_content = Rect.make(12, 50, 488, 318);
+
+/// Visible process rows for a content rect (20 px per row, 30 px chrome).
+pub fn rows_for_content_h(h: u32) usize {
+    if (h <= 30) return 1;
+    const rows = (h - 30) / 20;
+    return @min(rows, max_procs);
+}
 
 pub const Tab = enum {
     overview,
@@ -48,11 +65,29 @@ pub const SysmonState = struct {
     proc_count: usize = 0,
     uptime_secs: u64 = 0,
     refresh_count: u64 = 0,
-    btn_overview: Button = Button.init(Rect.make(12, 10, 90, 22), "Overview"),
-    btn_procs: Button = Button.init(Rect.make(108, 10, 90, 22), "Processes"),
-    btn_storage: Button = Button.init(Rect.make(204, 10, 110, 22), "Storage & Net"),
-    btn_refresh: Button = Button.init(Rect.make(416, 10, 88, 22), "Refresh"),
+    btn_overview: Button = Button.init(native_btn_overview, "Overview"),
+    btn_procs: Button = Button.init(native_btn_procs, "Processes"),
+    btn_storage: Button = Button.init(native_btn_storage, "Storage & Net"),
+    btn_refresh: Button = Button.init(native_btn_refresh, "Refresh"),
     cursor_kind: ui.CursorKind = .arrow, // M37 DQ4: per-region cursor state
+
+    /// M42 SX4: the tab-aware canvas + scaled layout rects (draw AND
+    /// hit-testing read these, so scaled geometry cannot drift).
+    canvas_w: u32 = window_w,
+    canvas_h: u32 = window_h,
+    header_rect: Rect = native_header,
+    content_rect: Rect = native_content,
+
+    pub fn layout(self: *SysmonState, w: u32, h: u32) void {
+        self.canvas_w = w;
+        self.canvas_h = h;
+        self.header_rect = tabapp.scale(native_header, window_w, window_h, w, h);
+        self.content_rect = tabapp.scale(native_content, window_w, window_h, w, h);
+        self.btn_overview.rect = tabapp.scale(native_btn_overview, window_w, window_h, w, h);
+        self.btn_procs.rect = tabapp.scale(native_btn_procs, window_w, window_h, w, h);
+        self.btn_storage.rect = tabapp.scale(native_btn_storage, window_w, window_h, w, h);
+        self.btn_refresh.rect = tabapp.scale(native_btn_refresh, window_w, window_h, w, h);
+    }
 
     /// M37 DQ4: pointer over the tab/refresh buttons, arrow elsewhere.
     /// Emits `sysmon: cursor=<name>` on change (serial-observable).
@@ -138,11 +173,11 @@ pub const SysmonState = struct {
 
     pub fn draw(self: *const SysmonState, win: u32) void {
         // Clear background
-        ui.win_fill(win, 0, 0, window_w, window_h, ui.theme_bg());
+        ui.win_fill(win, 0, 0, self.canvas_w, self.canvas_h, ui.theme_bg());
 
         // Header tab bar
-        ui.draw_rect(win, Rect.make(0, 0, window_w, 40), ui.theme_surface());
-        ui.draw_rect_outline(win, Rect.make(0, 0, window_w, 40), ui.border_w, ui.theme_border());
+        ui.draw_rect(win, self.header_rect, ui.theme_surface());
+        ui.draw_rect_outline(win, self.header_rect, ui.border_w, ui.theme_border());
 
         // Highlight active tab button
         var bo = self.btn_overview;
@@ -158,11 +193,10 @@ pub const SysmonState = struct {
         self.btn_refresh.draw(win);
 
         // Content area
-        const content_rect = Rect.make(12, 50, window_w - 24, window_h - 62);
         switch (self.tab) {
-            .overview => self.draw_overview(win, content_rect),
-            .processes => self.draw_processes(win, content_rect),
-            .storage_net => self.draw_storage_net(win, content_rect),
+            .overview => self.draw_overview(win, self.content_rect),
+            .processes => self.draw_processes(win, self.content_rect),
+            .storage_net => self.draw_storage_net(win, self.content_rect),
         }
     }
 
@@ -221,7 +255,8 @@ pub const SysmonState = struct {
 
         var y = r.y + 28;
         var i: usize = 0;
-        while (i < self.proc_count and i < 12) : (i += 1) {
+        const max_rows = rows_for_content_h(r.h);
+        while (i < self.proc_count and i < max_rows) : (i += 1) {
             const p = self.procs[i];
             const row_rect = Rect.make(r.x + ui.pad_xs, y - ui.pad_xs, r.w - ui.pad_sm, 18);
             if (i % 2 == 1) {
@@ -281,18 +316,31 @@ pub const SysmonState = struct {
 pub export fn _start() callconv(.c) noreturn {
     var state = SysmonState.init();
 
-    // M37 DQ4: follow the desktop theme first.
-    _ = ui.sync_theme_from_host();
-    const win_res = ui.win_open(window_x, window_y, window_w, window_h);
-    if (win_res < 0) {
+    // M42 SX4: the tab-aware open. Native 512x380 when the viewport
+    // proposal is absent (shim/WND); full 1100x720 under TABWM.BIN.
+    const ta_res = tabapp.TabApp.init(.{
+        .name = "SYSMON.BIN",
+        .title = "SysMon",
+        .x = window_x,
+        .y = window_y,
+        .w = window_w,
+        .h = window_h,
+    }) orelse {
         ui.write_console("sysmon: failed to open window\n");
         ui.exit_process(1);
-    }
-    const win = @as(u32, @intCast(win_res));
+    };
+    var ta = ta_res;
+    state.layout(ta.w, ta.h);
+    const win = ta.win;
     ui.write_console("sysmon: open id=8\n");
+    if (ta.tab_aware) {
+        ui.write_console("sysmon: tab-aware (full-viewport)\n");
+    } else {
+        ui.write_console("sysmon: not-tab-aware (shim or WND desktop)\n");
+    }
 
     state.draw(win);
-    ui.win_present(win);
+    ta.present();
     ui.emit_tokens_marker("sysmon");
     ui.write_console("sysmon: ready\n");
     // M37 DQ4 gate: let the compositor settle (several ticks) so the
@@ -309,31 +357,52 @@ pub export fn _start() callconv(.c) noreturn {
 
         var dirty = false;
 
-        if (ev.kind == ui.WIN_CLOSE or (ev.kind == ui.KEY_DOWN and (ev.arg0 == 0x29 or ev.arg0 == 0x14))) { // Esc / Q
-            ui.write_console("sysmon: close\n");
-            break;
+        // M42 SX4: WM-lifecycle events (resize -> relayout) first.
+        switch (ta.dispatch(&ev)) {
+            .closed => break,
+            .resized => {
+                ui.write_console("sysmon: resize relayout\n");
+                state.layout(ta.w, ta.h);
+                dirty = true;
+            },
+            .none => {
+                if (ev.kind == ui.WIN_CLOSE or (ev.kind == ui.KEY_DOWN and (ev.arg0 == 0x29 or ev.arg0 == 0x14))) { // Esc / Q
+                    ui.write_console("sysmon: close\n");
+                    break;
+                }
+                dirty = state.handle_event(&ev) or dirty;
+            },
         }
 
-        dirty = state.handle_event(&ev) or dirty;
-
         while (ui.poll_event(&ev) > 0) {
+            switch (ta.dispatch(&ev)) {
+                .closed => {
+                    ui.write_console("sysmon: close\n");
+                    ta.close_and_exit(exit_status);
+                },
+                .resized => {
+                    ui.write_console("sysmon: resize relayout\n");
+                    state.layout(ta.w, ta.h);
+                    dirty = true;
+                    continue;
+                },
+                .none => {},
+            }
             if (ev.kind == ui.WIN_CLOSE or (ev.kind == ui.KEY_DOWN and (ev.arg0 == 0x29 or ev.arg0 == 0x14))) {
                 ui.write_console("sysmon: close\n");
-                ui.win_close(win);
-                ui.exit_process(exit_status);
+                ta.close_and_exit(exit_status);
             }
             dirty = state.handle_event(&ev) or dirty;
         }
 
         if (dirty) {
             state.draw(win);
-            ui.win_present(win);
+            ta.present();
         }
     }
 
     ui.write_console("sysmon: exiting\n");
-    ui.win_close(win);
-    ui.exit_process(exit_status);
+    ta.close_and_exit(exit_status);
 }
 
 test "sysmon: state init and tab cycling" {
@@ -349,4 +418,29 @@ test "sysmon: state init and tab cycling" {
 
     _ = state.handle_event(&ev_tab);
     try std.testing.expectEqual(Tab.overview, state.tab);
+}
+
+test "sysmon layout: native canvas is the identity (zero-regression fixed point)" {
+    var state = SysmonState.init();
+    state.layout(window_w, window_h);
+    try std.testing.expectEqual(window_w, state.canvas_w);
+    try std.testing.expectEqual(window_h, state.canvas_h);
+    try std.testing.expectEqual(native_header, state.header_rect);
+    try std.testing.expectEqual(native_content, state.content_rect);
+    try std.testing.expectEqual(native_btn_overview.x, state.btn_overview.rect.x);
+    try std.testing.expectEqual(native_btn_refresh.x, state.btn_refresh.rect.x);
+}
+
+test "sysmon layout: full viewport stretches the content area" {
+    var state = SysmonState.init();
+    state.layout(1100, 720);
+    try std.testing.expectEqual(@as(u32, 1100), state.canvas_w);
+    try std.testing.expectEqual(@as(u32, 720), state.canvas_h);
+    try std.testing.expect(state.content_rect.x + state.content_rect.w <= 1100);
+    try std.testing.expect(state.content_rect.y + state.content_rect.h <= 720);
+    try std.testing.expect(state.content_rect.w > native_content.w);
+    try std.testing.expect(state.content_rect.h > native_content.h);
+    // The process table grows with the viewport (capped by storage).
+    try std.testing.expect(rows_for_content_h(state.content_rect.h) >= rows_for_content_h(native_content.h));
+    try std.testing.expect(rows_for_content_h(state.content_rect.h) <= max_procs);
 }

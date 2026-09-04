@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const ui = @import("lib/ui.zig");
+const tabapp = @import("lib/tabapp.zig");
 const netstats = @import("lib/netstats.zig");
 const Rect = ui.Rect;
 const Button = ui.Button;
@@ -29,6 +30,23 @@ pub const exit_status: u32 = 43;
 pub const max_display_procs: usize = 16;
 pub const history_len: usize = 48;
 pub const auto_refresh_ticks: u64 = 12;
+
+// M42 SX4 (issue #985): the NATIVE toolbar rects (the 512x384 design).
+pub const native_btn_refresh = Rect.make(6, 6, 54, 20);
+pub const native_btn_kill = Rect.make(64, 6, 38, 20);
+pub const native_btn_auto = Rect.make(106, 6, 42, 20);
+pub const native_btn_tab_procs = Rect.make(152, 6, 44, 20);
+pub const native_btn_tab_net = Rect.make(200, 6, 38, 20);
+pub const native_filter_input = Rect.make(296, 6, 80, 20);
+pub const native_header_rect = Rect.make(6, 52, 500, 16);
+pub const native_row_y0: u32 = 70;
+pub const native_row_h: u32 = 16;
+
+/// Visible table rows for a canvas height (16 px rows from y=70).
+pub fn rows_for_canvas_h(h: u32) usize {
+    if (h <= 70 + 44) return 1;
+    return @min((h - 44 - 70) / 16, max_display_procs);
+}
 
 // ---------------------------------------------------------------------------
 // Process Table Model
@@ -193,11 +211,11 @@ pub fn name_contains(haystack: []const u8, needle: []const u8) bool {
 
 pub const AppState = struct {
     table: ProcessTable = .{},
-    btn_refresh: Button = Button.init(Rect.make(6, 6, 54, 20), "Refresh"),
-    btn_kill: Button = Button.init(Rect.make(64, 6, 38, 20), "Kill"),
-    btn_auto: Button = Button.init(Rect.make(106, 6, 42, 20), "Auto"),
-    btn_tab_procs: Button = Button.init(Rect.make(152, 6, 44, 20), "Procs"),
-    btn_tab_net: Button = Button.init(Rect.make(200, 6, 38, 20), "Net"),
+    btn_refresh: Button = Button.init(native_btn_refresh, "Refresh"),
+    btn_kill: Button = Button.init(native_btn_kill, "Kill"),
+    btn_auto: Button = Button.init(native_btn_auto, "Auto"),
+    btn_tab_procs: Button = Button.init(native_btn_tab_procs, "Procs"),
+    btn_tab_net: Button = Button.init(native_btn_tab_net, "Net"),
     auto_mode: bool = false,
     tab: ActiveTab = .procs,
     proc_history: [history_len]u16 = [_]u16{0} ** history_len,
@@ -213,9 +231,36 @@ pub const AppState = struct {
     // C8 sorting / filtering
     sort_column: SortColumn = .pid,
     sort_asc: bool = true,
-    filter_input: ui.TextInput = ui.TextInput.init(Rect.make(296, 6, 80, 20)),
+    filter_input: ui.TextInput = ui.TextInput.init(native_filter_input),
     display_indices: [max_display_procs]usize = [_]usize{0} ** max_display_procs,
     display_count: usize = 0,
+
+    /// M42 SX4: the tab-aware canvas (draw AND hit-testing read this).
+    canvas_w: u32 = window_w,
+    canvas_h: u32 = window_h,
+    header_rect: Rect = native_header_rect,
+
+    pub fn layout(self: *AppState, w: u32, h: u32) void {
+        self.canvas_w = w;
+        self.canvas_h = h;
+        self.btn_refresh.rect = tabapp.scale(native_btn_refresh, window_w, window_h, w, h);
+        self.btn_kill.rect = tabapp.scale(native_btn_kill, window_w, window_h, w, h);
+        self.btn_auto.rect = tabapp.scale(native_btn_auto, window_w, window_h, w, h);
+        self.btn_tab_procs.rect = tabapp.scale(native_btn_tab_procs, window_w, window_h, w, h);
+        self.btn_tab_net.rect = tabapp.scale(native_btn_tab_net, window_w, window_h, w, h);
+        self.filter_input.rect = tabapp.scale(native_filter_input, window_w, window_h, w, h);
+        self.header_rect = tabapp.scale(native_header_rect, window_w, window_h, w, h);
+    }
+
+    /// First table-row y for the current canvas (below the scaled header).
+    pub fn row_y0(self: *const AppState) u32 {
+        return self.header_rect.y + self.header_rect.h + 2;
+    }
+
+    /// Column threshold scaled into the current canvas (native 512 design).
+    pub fn col_thresh(self: *const AppState, native_x: u32) u32 {
+        return (native_x * self.canvas_w) / window_w;
+    }
 
     pub fn init() AppState {
         var s = AppState{};
@@ -381,7 +426,7 @@ pub const AppState = struct {
     fn draw_cpu_bar(self: *const AppState, win: u32) void {
         const bar_x: u32 = 6;
         const bar_y: u32 = 30;
-        const bar_w: u32 = window_w - 12;
+        const bar_w: u32 = self.canvas_w - 12;
         const bar_h: u32 = 14;
 
         // Background
@@ -406,8 +451,8 @@ pub const AppState = struct {
 
     fn draw_sparkline(self: *const AppState, win: u32) void {
         const sp_x: u32 = 6;
-        const sp_y: u32 = window_h - 40;
-        const sp_w: u32 = window_w - 12;
+        const sp_y: u32 = self.canvas_h - 40;
+        const sp_w: u32 = self.canvas_w - 12;
         const sp_h: u32 = 16;
 
         // Background
@@ -445,10 +490,10 @@ pub const AppState = struct {
 
     fn draw_network_tab(self: *const AppState, win: u32) void {
         // Divider line below toolbar
-        ui.draw_rect(win, Rect.make(0, 32, window_w, 1), ui.COLOR_BORDER);
+        ui.draw_rect(win, Rect.make(0, 32, self.canvas_w, 1), ui.COLOR_BORDER);
 
         // Section 1: Interface & Protocols (y=38..106)
-        const s1_rect = Rect.make(6, 38, window_w - 12, 68);
+        const s1_rect = Rect.make(6, 38, self.canvas_w - 12, 68);
         ui.draw_rect(win, s1_rect, ui.COLOR_SURFACE);
         ui.draw_rect_outline(win, s1_rect, 1, ui.COLOR_BORDER);
         ui.draw_text(win, "NETWORK INTERFACE & PROTOCOLS", s1_rect.x + 6, s1_rect.y + 4, ui.COLOR_ACCENT);
@@ -479,7 +524,7 @@ pub const AppState = struct {
         ui.draw_text(win, line3, s1_rect.x + 6, s1_rect.y + 52, ui.COLOR_TEXT_MUTED);
 
         // Section 2: Traffic Statistics (y=112..192)
-        const s2_rect = Rect.make(6, 112, window_w - 12, 80);
+        const s2_rect = Rect.make(6, 112, self.canvas_w - 12, 80);
         ui.draw_rect(win, s2_rect, ui.COLOR_SURFACE);
         ui.draw_rect_outline(win, s2_rect, 1, ui.COLOR_BORDER);
         ui.draw_text(win, "TRAFFIC & ACTIVITY", s2_rect.x + 6, s2_rect.y + 4, ui.COLOR_ACCENT);
@@ -503,8 +548,8 @@ pub const AppState = struct {
         // Section 3: Bandwidth Graph (y=198..376)
         const sp_x: u32 = 6;
         const sp_y: u32 = 198;
-        const sp_w: u32 = window_w - 12;
-        const sp_h: u32 = window_h - sp_y - 8;
+        const sp_w: u32 = self.canvas_w - 12;
+        const sp_h: u32 = self.canvas_h - sp_y - 8;
 
         ui.draw_rect(win, Rect.make(sp_x, sp_y, sp_w, sp_h), ui.COLOR_SURFACE);
         ui.draw_rect_outline(win, Rect.make(sp_x, sp_y, sp_w, sp_h), 1, ui.COLOR_BORDER);
@@ -542,7 +587,7 @@ pub const AppState = struct {
 
     pub fn draw(self: *const AppState, win: u32) void {
         // Window background
-        ui.draw_rect(win, Rect.make(0, 0, window_w, window_h), ui.COLOR_BG);
+        ui.draw_rect(win, Rect.make(0, 0, self.canvas_w, self.canvas_h), ui.COLOR_BG);
 
         // Toolbar
         self.btn_refresh.draw(win);
@@ -566,10 +611,10 @@ pub const AppState = struct {
             self.draw_cpu_bar(win);
 
             // Divider line
-            ui.draw_rect(win, Rect.make(0, 48, window_w, 1), ui.COLOR_BORDER);
+            ui.draw_rect(win, Rect.make(0, 48, self.canvas_w, 1), ui.COLOR_BORDER);
 
             // Table Header — clickable sortable columns (C8)
-            const header_rect = Rect.make(6, 52, window_w - 12, 16);
+            const header_rect = self.header_rect;
             ui.draw_rect(win, header_rect, ui.COLOR_SURFACE);
             ui.draw_rect_outline(win, header_rect, 1, ui.COLOR_BORDER);
             const pid_active = self.sort_column == .pid;
@@ -592,13 +637,13 @@ pub const AppState = struct {
 
             // Table Rows — filtered + sorted view (C8)
             const row_h: u32 = 16;
-            var row_y: u32 = 70;
+            var row_y: u32 = self.row_y0();
             var i: usize = 0;
-            while (i < self.display_count and row_y + row_h <= window_h - 44) : (i += 1) {
+            while (i < self.display_count and row_y + row_h <= self.canvas_h - 44) : (i += 1) {
                 const abs = self.display_indices[i];
                 const proc = &self.table.procs[abs];
                 const is_selected = if (self.table.selected_row) |sel| sel == i else false;
-                const row_rect = Rect.make(6, row_y, window_w - 12, row_h);
+                const row_rect = Rect.make(6, row_y, self.canvas_w - 12, row_h);
 
                 // Row background
                 if (is_selected) {
@@ -693,21 +738,23 @@ pub const AppState = struct {
         } else if (self.tab == .procs and ev.kind == ui.MOUSE_DOWN and (ev.flags & ui.BTN_LEFT) != 0) {
             const click_x = ev.arg0;
             const click_y = ev.arg1;
-            // Header click → sort (C8).
-            if (click_y >= 52 and click_y < 68 and click_x >= 6 and click_x < window_w - 6) {
-                if (click_x < 32) {
+            // Header click → sort (C8). Thresholds scale with the canvas
+            // so scaled geometry and scaled hit tests cannot drift.
+            const hr = self.header_rect;
+            if (click_y >= hr.y and click_y < hr.y + hr.h and click_x >= hr.x and click_x < hr.x + hr.w) {
+                if (click_x < self.col_thresh(32)) {
                     self.click_column(.pid);
-                } else if (click_x < 130) {
+                } else if (click_x < self.col_thresh(130)) {
                     self.click_column(.name);
-                } else if (click_x < 196) {
+                } else if (click_x < self.col_thresh(196)) {
                     self.click_column(.state);
                 } else {
                     self.click_column(.exit);
                 }
                 return true;
             }
-            if (click_x >= 6 and click_x < window_w - 6 and click_y >= 70) {
-                const row_idx = (click_y - 70) / 16;
+            if (click_x >= hr.x and click_x < hr.x + hr.w and click_y >= self.row_y0()) {
+                const row_idx = (click_y - self.row_y0()) / 16;
                 if (row_idx < self.display_count) {
                     self.table.selected_row = row_idx;
                     changed = true;
@@ -846,19 +893,33 @@ pub const AppState = struct {
 pub export fn _start() callconv(.c) noreturn {
     var app = AppState.init();
 
-    // 1. Open Window
-    const win_res = ui.win_open(window_x, window_y, window_w, window_h);
-    if (win_res < 0) {
+    // M42 SX4: the tab-aware open. Native 512x384 when the viewport
+    // proposal is absent (shim/WND); full 1100x720 under TABWM.BIN.
+    const ta_res = tabapp.TabApp.init(.{
+        .name = "TOP.BIN",
+        .title = "Top",
+        .x = window_x,
+        .y = window_y,
+        .w = window_w,
+        .h = window_h,
+    }) orelse {
         ui.write_console("top: failed to open window\n");
         ui.exit_process(1);
-    }
-    const win = @as(u32, @intCast(win_res));
+    };
+    var ta = ta_res;
+    app.layout(ta.w, ta.h);
+    const win = ta.win;
 
     ui.write_console("top: open id=3\n");
+    if (ta.tab_aware) {
+        ui.write_console("top: tab-aware (full-viewport)\n");
+    } else {
+        ui.write_console("top: not-tab-aware (shim or WND desktop)\n");
+    }
 
     // 2. Initial Draw & Present
     app.draw(win);
-    ui.win_present(win);
+    ta.present();
     ui.write_console("top: ready\n");
 
     // 3. Event Loop
@@ -869,25 +930,40 @@ pub export fn _start() callconv(.c) noreturn {
 
         var dirty = false;
 
-        if (ev.kind == ui.WIN_CLOSE) {
-            ui.write_console("top: win_close\n");
-            break;
-        }
-
-        if (ev.kind == ui.EVENT_TIMER) {
-            dirty = app.handle_timer();
-        } else if (ev.kind == ui.MOUSE_DOWN or ev.kind == ui.MOUSE_UP or ev.kind == ui.MOUSE_MOVE) {
-            dirty = app.handle_mouse_events(&ev) or dirty;
-        } else if (ev.kind == ui.KEY_DOWN) {
-            dirty = app.handle_keyboard_event(&ev) or dirty;
+        // M42 SX4: WM-lifecycle events (resize -> relayout) first.
+        switch (ta.dispatch(&ev)) {
+            .closed => break,
+            .resized => {
+                ui.write_console("top: resize relayout\n");
+                app.layout(ta.w, ta.h);
+                dirty = true;
+            },
+            .none => {
+                if (ev.kind == ui.EVENT_TIMER) {
+                    dirty = app.handle_timer();
+                } else if (ev.kind == ui.MOUSE_DOWN or ev.kind == ui.MOUSE_UP or ev.kind == ui.MOUSE_MOVE) {
+                    dirty = app.handle_mouse_events(&ev) or dirty;
+                } else if (ev.kind == ui.KEY_DOWN) {
+                    dirty = app.handle_keyboard_event(&ev) or dirty;
+                }
+            },
         }
 
         // Drain pending queue
         while (ui.poll_event(&ev) > 0) {
-            if (ev.kind == ui.WIN_CLOSE) {
-                ui.write_console("top: win_close\n");
-                ui.win_close(win);
-                ui.exit_process(exit_status);
+            switch (ta.dispatch(&ev)) {
+                .closed => {
+                    ui.write_console("top: win_close\n");
+                    if (app.auto_mode) _ = ui.timer_cancel();
+                    ta.close_and_exit(exit_status);
+                },
+                .resized => {
+                    ui.write_console("top: resize relayout\n");
+                    app.layout(ta.w, ta.h);
+                    dirty = true;
+                    continue;
+                },
+                .none => {},
             }
             if (ev.kind == ui.EVENT_TIMER) {
                 dirty = app.handle_timer();
@@ -900,7 +976,7 @@ pub export fn _start() callconv(.c) noreturn {
 
         if (dirty) {
             app.draw(win);
-            ui.win_present(win);
+            ta.present();
         }
     }
 
@@ -910,8 +986,7 @@ pub export fn _start() callconv(.c) noreturn {
     }
 
     ui.write_console("top: exiting 43\n");
-    ui.win_close(win);
-    ui.exit_process(exit_status);
+    ta.close_and_exit(exit_status);
 }
 
 // ---------------------------------------------------------------------------
@@ -1192,4 +1267,32 @@ test "top: network stats delta rate calculation" {
 test "top: AppState fits EL0 stack (C8, <4 KiB)" {
     try std.testing.expect(@sizeOf(AppState) < 4 * 1024);
     std.debug.print("TOP AppState size: {d}\n", .{@sizeOf(AppState)});
+}
+
+test "top layout: native canvas is the identity (zero-regression fixed point)" {
+    var app = AppState.init();
+    app.layout(window_w, window_h);
+    try std.testing.expectEqual(window_w, app.canvas_w);
+    try std.testing.expectEqual(window_h, app.canvas_h);
+    try std.testing.expectEqual(native_header_rect, app.header_rect);
+    try std.testing.expectEqual(native_btn_refresh.x, app.btn_refresh.rect.x);
+    try std.testing.expectEqual(native_filter_input.x, app.filter_input.rect.x);
+    try std.testing.expectEqual(native_row_y0, app.row_y0());
+}
+
+test "top layout: full viewport stretches the table and graphs" {
+    var app = AppState.init();
+    app.layout(1100, 720);
+    try std.testing.expectEqual(@as(u32, 1100), app.canvas_w);
+    try std.testing.expectEqual(@as(u32, 720), app.canvas_h);
+    try std.testing.expect(app.header_rect.x + app.header_rect.w <= 1100);
+    try std.testing.expect(app.header_rect.y + app.header_rect.h <= 720);
+    try std.testing.expect(app.header_rect.w > native_header_rect.w);
+    // The table cap is storage-bound (16): native already fits it, so the
+    // taller viewport holds AT LEAST as many rows while graphs stretch.
+    try std.testing.expect(rows_for_canvas_h(720) >= rows_for_canvas_h(window_h));
+    try std.testing.expect(rows_for_canvas_h(720) <= max_display_procs);
+    // Hit-test helpers follow the scaled geometry.
+    try std.testing.expect(app.row_y0() == app.header_rect.y + app.header_rect.h + 2);
+    try std.testing.expect(app.col_thresh(32) == 32 * 1100 / 512);
 }

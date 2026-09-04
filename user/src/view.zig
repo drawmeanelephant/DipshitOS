@@ -19,6 +19,7 @@
 
 const std = @import("std");
 const ui = @import("lib/ui.zig");
+const tabapp = @import("lib/tabapp.zig");
 // Decode dispatch is by MAGIC (not extension): QOI via lib/qoi.zig, PNG via
 // lib/png.zig's stream-chunked workspace path (claim 7317) — `png.scan`
 // sizes exact IDAT + scanline workspaces from the file, and the viewer
@@ -739,15 +740,29 @@ pub export fn _start(argc: usize, argv: ?[*]const [32]u8) callconv(.c) noreturn 
     }
 
     // Open the window sized from the sniffed header (default size otherwise).
+    // M42 SX4: the tab-aware open — native size when the viewport proposal
+    // is absent (shim/WND); full 1100x720 under TABWM.BIN via WIN_RESIZE.
     const win_size = header_size_or_default();
-    const win_res = ui.win_open(window_x, window_y, win_size.w, win_size.h);
-    if (win_res < 0) {
+    const ta_res = tabapp.TabApp.init(.{
+        .name = "VIEW.BIN",
+        .title = "View",
+        .x = window_x,
+        .y = window_y,
+        .w = win_size.w,
+        .h = win_size.h,
+    }) orelse {
         ui.write_console("view: failed to open window\n");
         ui.exit_process(1);
+    };
+    const ta = ta_res;
+    st.win_id = ta.win;
+    st.win_w = ta.w;
+    st.win_h = ta.h;
+    if (ta.tab_aware) {
+        ui.write_console("view: tab-aware (full-viewport)\n");
+    } else {
+        ui.write_console("view: not-tab-aware (shim or WND desktop)\n");
     }
-    st.win_id = @intCast(win_res);
-    st.win_w = win_size.w;
-    st.win_h = win_size.h;
     var obuf: [40]u8 = undefined;
     const oline = std.fmt.bufPrint(&obuf, "view: open id={d} {d}x{d}\n", .{ st.win_id, st.win_w, st.win_h }) catch "view: open\n";
     ui.write_console(oline);
@@ -800,6 +815,17 @@ fn handle_event(ev: *const Event, dirty: *bool) void {
             ui.write_console("view: win_close\n");
             ui.win_close(st.win_id);
             ui.exit_process(exit_status);
+        },
+        ui.WIN_RESIZE => {
+            // M42 SX4: the TABWM full-viewport proposal — the image
+            // centers/scales in the new viewport (recenter + redraw).
+            st.win_w = ev.arg0;
+            st.win_h = ev.arg1;
+            recenter_clamp();
+            ui.write_console("view: resize relayout\n");
+            draw(st.win_id);
+            ui.win_present(st.win_id);
+            dirty.* = true;
         },
         ui.KEY_DOWN => handle_key(ev.arg0, ev.arg1, dirty),
         ui.MOUSE_SCROLL => {
@@ -1058,4 +1084,23 @@ test "view: the live-gate fixture decodes and pans through the full stack" {
     try std.testing.expectEqual(max_ox, ox);
     ox = apply_delta(ox, -100000, max_ox);
     try std.testing.expectEqual(@as(u32, 0), ox);
+}
+
+test "view layout: full viewport centers the image (tab-aware relayout)" {
+    // A 160x120 image at 100% in the 1100x720 TABWM viewport: the
+    // viewport rect spans the window minus title/status bands, and the
+    // destination layout centers the smaller image inside it.
+    const vp = viewport_rect(1100, 720);
+    try std.testing.expectEqual(@as(u32, 1100), vp.w);
+    try std.testing.expectEqual(@as(u32, 720 - title_band_h - status_h), vp.h);
+    const disp = displayed_size(160, 120, 100);
+    const dest = dest_layout(vp, disp.w, disp.h);
+    try std.testing.expectEqual(disp.w, dest.w);
+    try std.testing.expectEqual(disp.h, dest.h);
+    // Centered: equal margins on both axes.
+    try std.testing.expectEqual((vp.w - disp.w) / 2, dest.x - vp.x);
+    try std.testing.expectEqual((vp.h - disp.h) / 2, dest.y - vp.y);
+    // Native-size viewport keeps the legacy geometry (zero-regression).
+    const vp_native = viewport_rect(320, 240);
+    try std.testing.expectEqual(@as(u32, 240 - title_band_h - status_h), vp_native.h);
 }

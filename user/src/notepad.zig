@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const ui = @import("lib/ui.zig");
+const tabapp = @import("lib/tabapp.zig");
 const Rect = ui.Rect;
 const Button = ui.Button;
 const Label = ui.Label;
@@ -34,6 +35,14 @@ pub const glyph_w: u32 = 8;
 pub const line_h: u32 = 12;
 pub const text_x0: u32 = text_area.x + 6;
 pub const text_y0: u32 = text_area.y + 6;
+
+// M42 SX4 (issue #985): the NATIVE toolbar rects (the 512x384 design).
+pub const native_btn_load = Rect.make(6, 6, 44, 20);
+pub const native_btn_save = Rect.make(54, 6, 44, 20);
+pub const native_btn_clear = Rect.make(102, 6, 48, 20);
+pub const native_btn_find_next = Rect.make(200, 6, 44, 20);
+pub const native_btn_replace = Rect.make(248, 6, 56, 20);
+pub const native_btn_replace_all = Rect.make(308, 6, 70, 20);
 
 // ---------------------------------------------------------------------------
 // Text Editor Buffer Model
@@ -407,12 +416,41 @@ pub const AppState = struct {
     win_id: u32 = 0, // set after win_open in _start
     cursor_kind: ui.CursorKind = .arrow, // M37 DQ4: per-region cursor state
 
-    btn_load: Button = Button.init(Rect.make(6, 6, 44, 20), "Load"),
-    btn_save: Button = Button.init(Rect.make(54, 6, 44, 20), "Save"),
-    btn_clear: Button = Button.init(Rect.make(102, 6, 48, 20), "Clear"),
-    btn_find_next: Button = Button.init(Rect.make(200, 6, 44, 20), "Find"),
-    btn_replace: Button = Button.init(Rect.make(248, 6, 56, 20), "Replace"),
-    btn_replace_all: Button = Button.init(Rect.make(308, 6, 70, 20), "Replace All"),
+    btn_load: Button = Button.init(native_btn_load, "Load"),
+    btn_save: Button = Button.init(native_btn_save, "Save"),
+    btn_clear: Button = Button.init(native_btn_clear, "Clear"),
+    btn_find_next: Button = Button.init(native_btn_find_next, "Find"),
+    btn_replace: Button = Button.init(native_btn_replace, "Replace"),
+    btn_replace_all: Button = Button.init(native_btn_replace_all, "Replace All"),
+
+    /// M42 SX4: the tab-aware canvas + scaled editor surface (draw AND
+    /// hit-testing read these, so scaled geometry cannot drift).
+    canvas_w: u32 = window_w,
+    canvas_h: u32 = window_h,
+    area: Rect = text_area,
+
+    pub fn text_x0_cur(self: *const AppState) u32 {
+        return self.area.x + 6;
+    }
+
+    pub fn text_y0_cur(self: *const AppState) u32 {
+        return self.area.y + 6;
+    }
+
+    /// Map the fixed 512x384 layout into a `w x h` canvas. At the native
+    /// size every rect maps to itself (the zero-regression fixed point).
+    /// (Named `relayout`: the `layout` field is the TextLayout viewport.)
+    pub fn relayout(self: *AppState, w: u32, h: u32) void {
+        self.canvas_w = w;
+        self.canvas_h = h;
+        self.area = tabapp.scale(text_area, window_w, window_h, w, h);
+        self.btn_load.rect = tabapp.scale(native_btn_load, window_w, window_h, w, h);
+        self.btn_save.rect = tabapp.scale(native_btn_save, window_w, window_h, w, h);
+        self.btn_clear.rect = tabapp.scale(native_btn_clear, window_w, window_h, w, h);
+        self.btn_find_next.rect = tabapp.scale(native_btn_find_next, window_w, window_h, w, h);
+        self.btn_replace.rect = tabapp.scale(native_btn_replace, window_w, window_h, w, h);
+        self.btn_replace_all.rect = tabapp.scale(native_btn_replace_all, window_w, window_h, w, h);
+    }
 
     pub fn init() AppState {
         var s = AppState{};
@@ -752,8 +790,15 @@ pub const AppState = struct {
     }
 
     pub fn draw(self: *const AppState, win: u32) void {
+        // M42 SX4: the scaled editor surface into the viewport (distinct
+        // local names — Zig forbids shadowing the native consts).
+        const area = self.area;
+        const tx0 = self.text_x0_cur();
+        const ty0 = self.text_y0_cur();
+        const cw = self.canvas_w;
+        const chh = self.canvas_h;
         // Window background
-        ui.draw_rect(win, Rect.make(0, 0, window_w, window_h), ui.theme_bg());
+        ui.draw_rect(win, Rect.make(0, 0, cw, chh), ui.theme_bg());
 
         // Toolbar buttons
         self.btn_load.draw(win);
@@ -768,19 +813,19 @@ pub const AppState = struct {
         ui.draw_text(win, self.status_msg[0..self.status_len], status_rect.x + 8, status_rect.y + 6, ui.theme_text_muted());
 
         // Divider line
-        ui.draw_rect(win, Rect.make(0, 30, window_w, 1), ui.theme_border());
+        ui.draw_rect(win, Rect.make(0, 30, cw, 1), ui.theme_border());
 
         // Text editor box
-        ui.draw_rect(win, text_area, ui.theme_surface());
-        ui.draw_rect_outline(win, text_area, ui.border_w, ui.theme_border());
+        ui.draw_rect(win, area, ui.theme_surface());
+        ui.draw_rect_outline(win, area, ui.border_w, ui.theme_border());
 
         const slice = self.buffer.get_slice();
 
-        // M15 C5: gutter with display-row numbers (1-based) at left of text_area.
+        // M15 C5: gutter with display-row numbers (1-based) at left of area.
         var grow: usize = self.layout.scroll;
         while (grow < self.layout.scroll + TextLayout.visible_rows) : (grow += 1) {
             if (grow >= TextLayout.total_rows(slice)) break;
-            const gy = text_y0 + @as(u32, @intCast(grow - self.layout.scroll)) * line_h;
+            const gy = ty0 + @as(u32, @intCast(grow - self.layout.scroll)) * line_h;
             var nbuf: [8]u8 = undefined;
             var nlen: usize = 0;
             var v = grow + 1;
@@ -803,7 +848,7 @@ pub const AppState = struct {
             }
             @memcpy(nbuf[0..ti], tmp[0..ti]);
             nlen = ti;
-            ui.draw_text(win, nbuf[0..nlen], text_area.x + ui.pad_xs, gy, ui.theme_text_muted());
+            ui.draw_text(win, nbuf[0..nlen], area.x + ui.pad_xs, gy, ui.theme_text_muted());
         }
 
         // M15 C5+C6: render visible rows with soft-wrap and substring highlight for find matches.
@@ -832,8 +877,8 @@ pub const AppState = struct {
                 }
             }
             if (srow >= self.layout.scroll and srow < self.layout.scroll + TextLayout.visible_rows) {
-                const x = text_x0 + @as(u32, @intCast(scol)) * glyph_w;
-                const y = text_y0 + @as(u32, @intCast(srow - self.layout.scroll)) * line_h;
+                const x = tx0 + @as(u32, @intCast(scol)) * glyph_w;
+                const y = ty0 + @as(u32, @intCast(srow - self.layout.scroll)) * line_h;
                 // Highlight if this byte is inside the current find match (substring, not whole row).
                 var hl = false;
                 if (self.find_match_start) |ms| {
@@ -892,45 +937,45 @@ pub const AppState = struct {
                 stbuf[stpos] = r2[k - 1];
                 stpos += 1;
             }
-            ui.draw_text(win, stbuf[0..stpos], 6, window_h - 12, ui.theme_text_muted());
+            ui.draw_text(win, stbuf[0..stpos], 6, chh - 12, ui.theme_text_muted());
         }
 
-        // M20-U3: goto-line bar at the bottom of text_area when active
+        // M20-U3: goto-line bar at the bottom of area when active
         // (same zone the find bar uses; the two are mutually exclusive).
         if (self.goto_active) {
-            const bar_y = text_area.y + text_area.h - 18;
-            ui.draw_rect(win, Rect.make(text_area.x, bar_y, text_area.w, 18), ui.theme_surface());
-            ui.draw_rect_outline(win, Rect.make(text_area.x, bar_y, text_area.w, 18), 1, ui.theme_accent());
-            ui.draw_text(win, "Goto:", text_area.x + 4, bar_y + 5, ui.theme_text_muted());
-            ui.draw_text(win, self.goto_buf[0..self.goto_len], text_area.x + 40, bar_y + 5, ui.theme_text_primary());
+            const bar_y = area.y + area.h - 18;
+            ui.draw_rect(win, Rect.make(area.x, bar_y, area.w, 18), ui.theme_surface());
+            ui.draw_rect_outline(win, Rect.make(area.x, bar_y, area.w, 18), 1, ui.theme_accent());
+            ui.draw_text(win, "Goto:", area.x + 4, bar_y + 5, ui.theme_text_muted());
+            ui.draw_text(win, self.goto_buf[0..self.goto_len], area.x + 40, bar_y + 5, ui.theme_text_primary());
         }
 
-        // M15 C6: find bar at bottom of text_area when active.
+        // M15 C6: find bar at bottom of area when active.
         if (self.find_active) {
-            const bar_y = text_area.y + text_area.h - 18;
-            ui.draw_rect(win, Rect.make(text_area.x, bar_y, text_area.w, 18), ui.theme_surface());
-            ui.draw_rect_outline(win, Rect.make(text_area.x, bar_y, text_area.w, 18), 1, ui.theme_accent());
-            ui.draw_text(win, "Find:", text_area.x + 4, bar_y + 5, ui.theme_text_muted());
-            ui.draw_text(win, self.find_buf[0..self.find_len], text_area.x + 40, bar_y + 5, ui.theme_text_primary());
+            const bar_y = area.y + area.h - 18;
+            ui.draw_rect(win, Rect.make(area.x, bar_y, area.w, 18), ui.theme_surface());
+            ui.draw_rect_outline(win, Rect.make(area.x, bar_y, area.w, 18), 1, ui.theme_accent());
+            ui.draw_text(win, "Find:", area.x + 4, bar_y + 5, ui.theme_text_muted());
+            ui.draw_text(win, self.find_buf[0..self.find_len], area.x + 40, bar_y + 5, ui.theme_text_primary());
             if (self.find_match_start != null) {
                 // M20-U8: real "Match N of M".
                 const cur = self.find_current_ordinal().? + 1;
                 const tot = self.find_all_count();
                 var mbuf: [24]u8 = undefined;
                 const mline = std.fmt.bufPrint(&mbuf, "{d} of {d}", .{ cur, tot }) catch "of";
-                ui.draw_text(win, mline, text_area.x + text_area.w - 60, bar_y + 5, ui.theme_text_muted());
+                ui.draw_text(win, mline, area.x + area.w - 60, bar_y + 5, ui.theme_text_muted());
             }
             // Case-sensitivity chip: lit when matching is case-sensitive.
             {
-                const chip_x = text_area.x + 40 + @as(u32, @intCast(self.find_len)) * 6 + 8;
-                if (chip_x + 24 < text_area.x + text_area.w - 70) {
+                const chip_x = area.x + 40 + @as(u32, @intCast(self.find_len)) * 6 + 8;
+                if (chip_x + 24 < area.x + area.w - 70) {
                     ui.draw_rect_outline(win, Rect.make(chip_x, bar_y + 3, 22, 12), 1, if (self.find_case_sensitive) ui.theme_accent() else ui.theme_text_muted());
                     ui.draw_text(win, "Aa", chip_x + 4, bar_y + 5, if (self.find_case_sensitive) ui.theme_accent() else ui.theme_text_muted());
                 }
             }
             if (self.find_replace_active) {
-                ui.draw_text(win, "Replace:", text_area.x + 140, bar_y + 5, ui.theme_text_muted());
-                ui.draw_text(win, self.replace_buf[0..self.replace_len], text_area.x + 200, bar_y + 5, ui.theme_text_primary());
+                ui.draw_text(win, "Replace:", area.x + 140, bar_y + 5, ui.theme_text_muted());
+                ui.draw_text(win, self.replace_buf[0..self.replace_len], area.x + 200, bar_y + 5, ui.theme_text_primary());
             }
         }
 
@@ -939,9 +984,9 @@ pub const AppState = struct {
         // cursor is drawn only on the "on" half of the blink.
         const cpos = TextLayout.position_at(slice, self.buffer.cursor);
         if (self.cursor_visible and cpos.row >= self.layout.scroll and cpos.row < self.layout.scroll + TextLayout.visible_rows) {
-            const x = text_x0 + @as(u32, @intCast(cpos.col)) * glyph_w;
-            const y = text_y0 + @as(u32, @intCast(cpos.row - self.layout.scroll)) * line_h;
-            if (x + 2 <= text_area.x + text_area.w) {
+            const x = tx0 + @as(u32, @intCast(cpos.col)) * glyph_w;
+            const y = ty0 + @as(u32, @intCast(cpos.row - self.layout.scroll)) * line_h;
+            if (x + 2 <= area.x + area.w) {
                 ui.win_fill(win, x, y, ui.caret_w, ui.caret_h, ui.theme_caret());
             }
         }
@@ -949,9 +994,9 @@ pub const AppState = struct {
         // Scrollbar thumb when the content overflows the viewport.
         const total = TextLayout.total_rows(slice);
         if (total > TextLayout.visible_rows) {
-            const sb_x = text_area.x + text_area.w - 5;
-            const sb_y = text_area.y + 2;
-            const sb_h = text_area.h - 4;
+            const sb_x = area.x + area.w - 5;
+            const sb_y = area.y + 2;
+            const sb_h = area.h - 4;
             ui.draw_rect(win, Rect.make(sb_x, sb_y, 2, sb_h), ui.theme_border());
             const thumb_h: u32 = @max(10, sb_h * @as(u32, @intCast(TextLayout.visible_rows)) / @as(u32, @intCast(total)));
             const ms: u32 = @intCast(TextLayout.max_scroll(slice));
@@ -970,7 +1015,7 @@ pub const AppState = struct {
             self.btn_find_next.rect.contains(x, y) or
             self.btn_replace.rect.contains(x, y) or
             self.btn_replace_all.rect.contains(x, y);
-        const kind = ui.cursor_for_region(false, over_clickable, text_area.contains(x, y));
+        const kind = ui.cursor_for_region(false, over_clickable, self.area.contains(x, y));
         if (kind != self.cursor_kind) {
             self.cursor_kind = kind;
             var buf: [48]u8 = undefined;
@@ -1024,13 +1069,17 @@ pub const AppState = struct {
             changed = true;
         } else if (ev.kind == ui.MOUSE_DOWN and (ev.flags & ui.BTN_LEFT) != 0) {
             // Claim 1771: click in the editor places the cursor.
+            // M42 SX4: the click maps through the SCALED surface.
             const x = ev.arg0;
             const y = ev.arg1;
-            if (x >= text_area.x and x < text_area.x + text_area.w and
-                y >= text_area.y and y < text_area.y + text_area.h)
+            const area = self.area;
+            const tx0 = self.text_x0_cur();
+            const ty0 = self.text_y0_cur();
+            if (x >= area.x and x < area.x + area.w and
+                y >= area.y and y < area.y + area.h)
             {
-                const row = (y - text_y0) / line_h + self.layout.scroll;
-                const col = (x - text_x0) / glyph_w;
+                const row = (y - ty0) / line_h + self.layout.scroll;
+                const col = (x - tx0) / glyph_w;
                 self.buffer.cursor = TextLayout.offset_at(self.buffer.get_slice(), row, col);
                 _ = self.layout.ensure_visible(self.buffer.get_slice(), self.buffer.cursor);
                 changed = true;
@@ -1422,21 +1471,34 @@ pub export fn _start(argc: usize, argv: ?[*]const [32]u8) callconv(.c) noreturn 
         }
     }
 
-    // 1. Open Window (M37 DQ4: follow the desktop theme first).
-    _ = ui.sync_theme_from_host();
-    const win_res = ui.win_open(window_x, window_y, window_w, window_h);
-    if (win_res < 0) {
+    // 1. Open Window (M42 SX4: the tab-aware open — native 512x384 when
+    // the viewport proposal is absent; full 1100x720 under TABWM.BIN).
+    const ta_res = tabapp.TabApp.init(.{
+        .name = "NOTEPAD.BIN",
+        .title = "Notepad",
+        .x = window_x,
+        .y = window_y,
+        .w = window_w,
+        .h = window_h,
+    }) orelse {
         ui.write_console("notepad: failed to open window\n");
         ui.exit_process(1);
-    }
-    const win = @as(u32, @intCast(win_res));
+    };
+    var ta = ta_res;
+    app.relayout(ta.w, ta.h);
+    const win = ta.win;
     app.win_id = win;
 
     ui.write_console("notepad: open id=2\n");
+    if (ta.tab_aware) {
+        ui.write_console("notepad: tab-aware (full-viewport)\n");
+    } else {
+        ui.write_console("notepad: not-tab-aware (shim or WND desktop)\n");
+    }
 
     // 2. Initial Draw & Present
     app.draw(win);
-    ui.win_present(win);
+    ta.present();
     ui.emit_tokens_marker("notepad");
     ui.write_console("notepad: ready\n");
     // M37 DQ4 gate: let the compositor settle (several ticks) so the
@@ -1460,12 +1522,17 @@ pub export fn _start(argc: usize, argv: ?[*]const [32]u8) callconv(.c) noreturn 
             break;
         }
 
-        // Arc4 #242: unsaved-changes dialog response from compositor.
-        if (ev.kind == ui.WIN_UNSAVED) {
+        // M42 SX4: the TABWM full-viewport proposal.
+        if (ta.dispatch(&ev) == .resized) {
+            ui.write_console("notepad: resize relayout\n");
+            app.relayout(ta.w, ta.h);
+            dirty = true;
+        } else if (ev.kind == ui.WIN_UNSAVED) {
+            // Arc4 #242: unsaved-changes dialog response from compositor.
             if (ev.arg0 == 0) { // save
                 app.save_notes();
                 app.draw(win);
-                ui.win_present(win);
+                ta.present();
             }
             // arg0=1 (don't save) or arg0=2 (cancel after save) — just close.
             ui.write_console("notepad: win_unsaved\n");
@@ -1499,8 +1566,7 @@ pub export fn _start(argc: usize, argv: ?[*]const [32]u8) callconv(.c) noreturn 
         while (ui.poll_event(&ev) > 0) {
             if (ev.kind == ui.WIN_CLOSE) {
                 ui.write_console("notepad: win_close\n");
-                ui.win_close(win);
-                ui.exit_process(exit_status);
+                ta.close_and_exit(exit_status);
             }
             // Arc4 #242: unsaved-changes dialog response (drain path).
             if (ev.kind == ui.WIN_UNSAVED) {
@@ -1508,8 +1574,14 @@ pub export fn _start(argc: usize, argv: ?[*]const [32]u8) callconv(.c) noreturn 
                     app.save_notes();
                 }
                 ui.write_console("notepad: win_unsaved\n");
-                ui.win_close(win);
-                ui.exit_process(exit_status);
+                ta.close_and_exit(exit_status);
+            }
+            // M42 SX4: the TABWM full-viewport proposal (drain path).
+            if (ta.dispatch(&ev) == .resized) {
+                ui.write_console("notepad: resize relayout\n");
+                app.relayout(ta.w, ta.h);
+                dirty = true;
+                continue;
             }
             if (ev.kind == ui.EVENT_TIMER) {
                 dirty = app.handle_timer_event() or dirty;
@@ -1522,8 +1594,7 @@ pub export fn _start(argc: usize, argv: ?[*]const [32]u8) callconv(.c) noreturn 
                     if (selfdemo and app.blink_count >= selfdemo_blinks) {
                         app.stop_blink();
                         ui.write_console("notepad: selfdemo done\n");
-                        ui.win_close(win);
-                        ui.exit_process(exit_status);
+                        ta.close_and_exit(exit_status);
                     }
                 }
             } else if (ev.kind == ui.MOUSE_DOWN or ev.kind == ui.MOUSE_UP or ev.kind == ui.MOUSE_MOVE) {
@@ -1535,13 +1606,12 @@ pub export fn _start(argc: usize, argv: ?[*]const [32]u8) callconv(.c) noreturn 
 
         if (dirty) {
             app.draw(win);
-            ui.win_present(win);
+            ta.present();
         }
     }
 
     ui.write_console("notepad: exiting 43\n");
-    ui.win_close(win);
-    ui.exit_process(exit_status);
+    ta.close_and_exit(exit_status);
 }
 
 // ---------------------------------------------------------------------------
@@ -2087,4 +2157,33 @@ test "notepad: M20-U3 — find Enter reports hit ordinal / no-match markers" {
     miss.find_active = true;
     try std.testing.expect(miss.handle_keyboard_event(&enter));
     try std.testing.expectEqual(@as(?usize, null), miss.find_current_ordinal());
+}
+
+test "notepad layout: native canvas is the identity (zero-regression fixed point)" {
+    var app = AppState.init();
+    app.relayout(window_w, window_h);
+    try std.testing.expectEqual(window_w, app.canvas_w);
+    try std.testing.expectEqual(window_h, app.canvas_h);
+    try std.testing.expectEqual(text_area, app.area);
+    try std.testing.expectEqual(native_btn_load, app.btn_load.rect);
+    try std.testing.expectEqual(native_btn_replace_all, app.btn_replace_all.rect);
+    try std.testing.expectEqual(text_x0, app.text_x0_cur());
+    try std.testing.expectEqual(text_y0, app.text_y0_cur());
+}
+
+test "notepad layout: full viewport grows the editing surface" {
+    var app = AppState.init();
+    app.relayout(1100, 720);
+    try std.testing.expectEqual(@as(u32, 1100), app.canvas_w);
+    try std.testing.expectEqual(@as(u32, 720), app.canvas_h);
+    try std.testing.expect(app.area.x + app.area.w <= 1100);
+    try std.testing.expect(app.area.y + app.area.h <= 720);
+    try std.testing.expect(app.area.w > text_area.w);
+    try std.testing.expect(app.area.h > text_area.h);
+    // Click mapping follows the scaled surface: a click just inside the
+    // scaled area's top-left maps to row 0, and the area contains the
+    // scaled text origin.
+    try std.testing.expect(app.area.contains(app.text_x0_cur(), app.text_y0_cur()));
+    const row = (app.text_y0_cur() - app.text_y0_cur()) / line_h + app.layout.scroll;
+    try std.testing.expectEqual(@as(u32, 0), row);
 }
