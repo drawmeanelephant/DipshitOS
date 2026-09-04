@@ -23,8 +23,10 @@ PY
 vgate_run TAG -- FLAGS...          # one boot; FLAGS pass through verbatim
                                    # to VMRunner after the harness-owned
                                    # --serial/--overlay-base/--vars/--cvc-file
+vgate_allow_rc TAG RC...           # allowed VMRunner exit codes for TAG (default 0;
+                                   # e.g. 1 for death-asserting gates like reboot)
 vgate_assert TAG KIND [args]       # all asserts of a TAG must hold, plus
-                                   # runner rc==0; failing assert = failed run
+                                   # runner rc in allowed set; failing assert = failed run
 ```
 
 Assert KINDs (serial = the run's `vm-serial.log` copy; output = runner stdout):

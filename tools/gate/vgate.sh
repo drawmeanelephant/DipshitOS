@@ -34,7 +34,7 @@ VGATE_NAME="" VGATE_DESC="(no description)" VGATE_SHARE="none"
 VGATE_FMT="boot/src/*.zig kernel/src/*.zig user/src/*.zig build.zig"
 VGATE_RUNNER_FLAGS="" VGATE_REPEAT=1 VGATE_REPEAT_ENV=""
 VGATE_NOTES=() VGATE_FILE_NAMES=() VGATE_FILE_BODIES=()
-VGATE_SETUP_PY=() VGATE_RUN_TAGS=() VGATE_RUN_FLAGS=() VGATE_ASSERTS=()
+VGATE_SETUP_PY=() VGATE_RUN_TAGS=() VGATE_RUN_FLAGS=() VGATE_ALLOW_RC=() VGATE_ASSERTS=()
 
 # --- DSL (the only commands a spec may use) ----------------------------------
 vgate_name() { VGATE_NAME="$1"; VGATE_DESC="${2:-$VGATE_DESC}"; }
@@ -59,6 +59,11 @@ vgate_run() {
     shift
     VGATE_RUN_TAGS+=("$tag")
     VGATE_RUN_FLAGS+=("$(printf '%q ' "$@")")
+}
+vgate_allow_rc() {
+    # vgate_allow_rc TAG RC... -- allow specific runner exit code(s) for a tag (default: 0)
+    local tag="$1"; shift
+    VGATE_ALLOW_RC+=("${tag}"$'\x1f'"$*")
 }
 vgate_assert() {
     # vgate_assert TAG KIND [args...] -- kinds: serial-contains STR
@@ -245,7 +250,15 @@ while [ "$n" -lt "$REPEAT" ]; do
         [ -f "$VG_SER" ] && cp "$VG_SER" "$(art "$VGATE_NAME-serial-$tag.log")" || true
         cp "$VG_OUT" "$(art "$VGATE_NAME-run-$tag.txt")"
         run_ok=1
-        [ "$RC" = 0 ] || run_ok=0
+        allowed_rc="0"
+        for arc in "${VGATE_ALLOW_RC[@]}"; do
+            [ "${arc%%$'\x1f'*}" = "$base" ] && allowed_rc="${arc#*$'\x1f'}"
+        done
+        rc_matched=0
+        for code in $allowed_rc; do
+            [ "$RC" = "$code" ] && { rc_matched=1; break; }
+        done
+        [ "$rc_matched" = 1 ] || { run_ok=0; echo "  runner-rc $RC not in allowed set ($allowed_rc)" | tee -a "$REPORT"; }
         echo "$tag: runner-rc=$RC" | tee -a "$REPORT"
         for a in "${VGATE_ASSERTS[@]}"; do
             atag="${a%%$'\x1f'*}"; rest="${a#*$'\x1f'}"
