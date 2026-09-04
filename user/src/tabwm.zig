@@ -186,6 +186,16 @@ pub const Tab = struct {
     orig_w: u32 = 0,
     orig_h: u32 = 0,
     resizable: bool = false,
+    /// M42 SX2 (issue #983): the app declared itself tab-aware (the
+    /// `wm_rpc_kind_declare_fullscreen` RPC from lib/tabapp.zig) — when its
+    /// tab is active it receives the FULL 1100x720 content viewport instead
+    /// of the centered native-size presentation, and the kernel's
+    /// SET_WINDOW seam tells it with WIN_RESIZE.
+    tab_aware: bool = false,
+    /// The viewport rect last applied via SET_WINDOW (activation idempotence:
+    /// re-activating an already-fullscreen tab issues no repeat proposal, so
+    /// the app gets no repeat WIN_RESIZE).
+    applied_vp: ?Rect = null,
 
     pub fn set_title(self: *Tab, text: []const u8) void {
         const len = @min(text.len, self.title.len);
@@ -363,10 +373,14 @@ pub fn focus_window(id: u32) void {
 }
 
 /// Computes content viewport allocation for a tab:
-/// - Resizable apps or full-bleed apps take the entire 1100x720 content area at x=180, y=0.
+/// - Tab-aware apps (SX2 opt-in) take the entire 1100x720 content area at
+///   x=180, y=0 whenever their tab is active — the WM proposes the full
+///   viewport and the kernel's WIN_RESIZE seam (SX2 kernel half) tells the
+///   app to relayout.
+/// - Other resizable or full-bleed apps take the entire 1100x720 content area at x=180, y=0.
 /// - Fixed-dimension apps (e.g. 512x384 or 260x340) are cleanly centered inside the 1100x720 viewport.
 pub fn compute_tab_viewport(tab: *const Tab) Rect {
-    if (tab.resizable or tab.orig_w == 0 or tab.orig_w >= viewport_w or tab.orig_h >= viewport_h) {
+    if (tab.tab_aware or tab.resizable or tab.orig_w == 0 or tab.orig_w >= viewport_w or tab.orig_h >= viewport_h) {
         return Rect.make(viewport_x, viewport_y, viewport_w, viewport_h);
     }
     const w = tab.orig_w;
@@ -376,9 +390,21 @@ pub fn compute_tab_viewport(tab: *const Tab) Rect {
     return Rect.make(x, y, w, h);
 }
 
+/// True when `vp` differs from the rect last applied to `tab` (M42 SX2):
+/// the activation path must issue SET_WINDOW. Idempotent re-activations of
+/// an already-sized tab return false — no repeat proposal, no repeat
+/// WIN_RESIZE at the app.
+pub fn viewport_change_needed(tab: *const Tab, vp: Rect) bool {
+    const prev = tab.applied_vp orelse return true;
+    return prev.x != vp.x or prev.y != vp.y or prev.w != vp.w or prev.h != vp.h;
+}
+
 /// Activate tab by index:
-/// 1. Computes viewport: centered for fixed apps, full 1100x720 for resizable apps.
-/// 2. Sets window rect via set_window_rect.
+/// 1. Computes viewport: full 1100x720 for tab-aware/resizable apps, centered
+///    for fixed apps (M42 SX2 opt-in).
+/// 2. Sets window rect via set_window_rect — ONLY when the rect changed since
+///    the last activation (idempotence; the kernel's SX2 seam answers a
+///    size-changing proposal with one WIN_RESIZE to the app).
 /// 3. Sets active window visible and focuses it.
 /// 4. Hides all inactive tabs (set_state(0)).
 /// 5. Emits `tabwm: tab-switch` evidence marker.
@@ -389,7 +415,10 @@ pub fn activate_tab(idx: usize) void {
 
     // Viewport Allocation: allocate full or centered content viewport
     const vp = compute_tab_viewport(tab);
-    set_window_rect(active_id, vp.x, vp.y, vp.w, vp.h);
+    if (viewport_change_needed(tab, vp)) {
+        set_window_rect(active_id, vp.x, vp.y, vp.w, vp.h);
+        tab.applied_vp = vp;
+    }
 
     // Show and focus active window
     set_state(active_id, true);
@@ -802,6 +831,32 @@ pub fn wnd_mail_apply(req: *const ui.WmRpc) bool {
                 return true;
             }
             return false;
+        },
+        ui.wm_rpc_kind_declare_fullscreen => {
+            // M42 SX2: the app (via lib/tabapp.zig) declares itself
+            // tab-aware — full-viewport eligible. Registers/renames the tab
+            // from the payload title and, when the tab is ALREADY active,
+            // immediately proposes the full viewport (the next activation
+            // would otherwise wait for a tab switch).
+            var label_slice: []const u8 = req.title[0..];
+            for (req.title, 0..) |c, i| {
+                if (c == 0) {
+                    label_slice = req.title[0..i];
+                    break;
+                }
+            }
+            var idx: usize = undefined;
+            if (manager.find_by_id(req.id)) |found| {
+                idx = found;
+            } else {
+                idx = manager.add_or_update_tab(req.id, if (label_slice.len > 0) label_slice else "App");
+            }
+            manager.tabs[idx].tab_aware = true;
+            if (label_slice.len > 0) manager.tabs[idx].set_title(label_slice);
+            if (manager.active_idx != null and manager.active_idx.? == idx) {
+                activate_tab(idx);
+            }
+            return true;
         },
         ui.wm_rpc_kind_cycle_tab => {
             manager.cycle_tab();
@@ -1280,4 +1335,107 @@ test "tabwm: draw_sidebar blits the raster emblem into the scanout (M42 SX1)" {
     // the emblem) — the emblem's alpha respected the destination
     const corner = fb[13 * fb_w + 12];
     try std.testing.expectEqual(ui.sidebar_bg(), corner & 0x00FFFFFF);
+}
+
+// ---------------------------------------------------------------------------
+// Unit Tests (M42 SX2 — the full-screen viewport seam)
+// ---------------------------------------------------------------------------
+test "tabwm: tab-aware fixed app takes the full viewport (M42 SX2)" {
+    var tab = Tab{
+        .id = 3,
+        .orig_w = 512,
+        .orig_h = 384,
+        .resizable = false,
+        .tab_aware = false,
+        .valid = true,
+    };
+    // Without the declaration: the M39 TWM3 centered presentation.
+    const centered = compute_tab_viewport(&tab);
+    try std.testing.expectEqual(@as(u32, 474), centered.x);
+    try std.testing.expectEqual(@as(u32, 168), centered.y);
+    try std.testing.expectEqual(@as(u32, 512), centered.w);
+    try std.testing.expectEqual(@as(u32, 384), centered.h);
+
+    // With the tab-aware declaration: the FULL content viewport.
+    tab.tab_aware = true;
+    const full = compute_tab_viewport(&tab);
+    try std.testing.expectEqual(@as(u32, 180), full.x);
+    try std.testing.expectEqual(@as(u32, 0), full.y);
+    try std.testing.expectEqual(@as(u32, 1100), full.w);
+    try std.testing.expectEqual(@as(u32, 720), full.h);
+}
+
+test "tabwm: viewport_change_needed idempotence (M42 SX2)" {
+    var tab = Tab{ .id = 1, .valid = true };
+    const full = Rect.make(viewport_x, viewport_y, viewport_w, viewport_h);
+    // First activation always proposes.
+    try std.testing.expect(viewport_change_needed(&tab, full));
+    tab.applied_vp = full;
+    // Same rect: no repeat proposal (no repeat WIN_RESIZE at the app).
+    try std.testing.expect(!viewport_change_needed(&tab, full));
+    // Any change re-proposes.
+    try std.testing.expect(viewport_change_needed(&tab, Rect.make(474, 168, 512, 384)));
+}
+
+test "tabwm: declare_fullscreen RPC registers and applies the full viewport (M42 SX2)" {
+    manager = TabManager.init();
+    // Unknown window id: the declaration creates the tab.
+    var req = ui.WmRpc{
+        .kind = ui.wm_rpc_kind_declare_fullscreen,
+        .id = 42,
+        .seq = 1,
+        .reply_to = 5,
+        .applied = 0,
+        .pad = 0,
+        .x = 0,
+        .y = 0,
+        .w = 0,
+        .h = 0,
+        .title = [_]u8{0} ** ui.wm_rpc_title_max,
+    };
+    @memcpy(req.title[0..4], "CALC");
+    try std.testing.expect(wnd_mail_apply(&req));
+    try std.testing.expectEqual(@as(usize, 1), manager.tab_count);
+    try std.testing.expect(manager.tabs[0].tab_aware);
+    try std.testing.expectEqualStrings("CALC", manager.tabs[0].get_title());
+
+    // Activate: the full-viewport proposal is applied and recorded.
+    activate_tab(0);
+    try std.testing.expect(manager.tabs[0].applied_vp != null);
+    try std.testing.expectEqual(@as(u32, 1100), manager.tabs[0].applied_vp.?.w);
+
+    // Re-declaration while already active: idempotent re-activation keeps
+    // the same applied rect (the app gets no repeat WIN_RESIZE).
+    try std.testing.expect(wnd_mail_apply(&req));
+    try std.testing.expectEqual(@as(u32, 1100), manager.tabs[0].applied_vp.?.w);
+    try std.testing.expectEqual(@as(u32, 180), manager.tabs[0].applied_vp.?.x);
+}
+
+test "tabwm: declare_fullscreen on an inactive tab defers the proposal (M42 SX2)" {
+    manager = TabManager.init();
+    _ = manager.add_or_update_tab(31, "Existing");
+    activate_tab(0);
+    const before = manager.tabs[0].applied_vp;
+
+    var req = ui.WmRpc{
+        .kind = ui.wm_rpc_kind_declare_fullscreen,
+        .id = 32,
+        .seq = 2,
+        .reply_to = 5,
+        .applied = 0,
+        .pad = 0,
+        .x = 0,
+        .y = 0,
+        .w = 0,
+        .h = 0,
+        .title = [_]u8{0} ** ui.wm_rpc_title_max,
+    };
+    @memcpy(req.title[0..5], "FILES");
+    try std.testing.expect(wnd_mail_apply(&req));
+    try std.testing.expectEqual(@as(usize, 2), manager.tab_count);
+    try std.testing.expect(manager.tabs[1].tab_aware);
+    // The inactive declaration did not steal activation...
+    try std.testing.expectEqual(@as(?usize, 0), manager.active_idx);
+    // ...and the active tab's applied viewport is untouched.
+    try std.testing.expectEqual(before, manager.tabs[0].applied_vp);
 }

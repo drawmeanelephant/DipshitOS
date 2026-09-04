@@ -32,6 +32,9 @@ pub const wm_rpc_kind_invoke_action: u8 = 4;
 pub const wm_rpc_kind_attach_tab: u8 = 5;
 pub const wm_rpc_kind_detach_tab: u8 = 6;
 pub const wm_rpc_kind_cycle_tab: u8 = 7;
+/// M42 SX2 (issue #983): the app declares itself tab-aware — additive kind
+/// mirrored from wnd_core (the drift guard test pins the pair).
+pub const wm_rpc_kind_declare_fullscreen: u8 = 8;
 pub const wm_rpc_reply_flag: u8 = 0x80;
 pub const wm_rpc_max: usize = 64;
 

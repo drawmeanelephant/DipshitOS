@@ -192,6 +192,7 @@ pub const wm_register_action = abi.wm_register_action;
 pub const wm_rpc_kind_attach_tab = abi.wm_rpc_kind_attach_tab;
 pub const wm_rpc_kind_config = abi.wm_rpc_kind_config;
 pub const wm_rpc_kind_cycle_tab = abi.wm_rpc_kind_cycle_tab;
+pub const wm_rpc_kind_declare_fullscreen = abi.wm_rpc_kind_declare_fullscreen;
 pub const wm_rpc_kind_detach_tab = abi.wm_rpc_kind_detach_tab;
 pub const wm_rpc_kind_invoke_action = abi.wm_rpc_kind_invoke_action;
 pub const wm_rpc_kind_raise = abi.wm_rpc_kind_raise;

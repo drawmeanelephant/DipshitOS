@@ -260,6 +260,8 @@ test "wmrpc: the WM_RPC request fits the frozen 64-byte mailbox slot" {
     try std.testing.expectEqual(@as(u8, wnd_core.wm_rpc_kind_raise), ui.wm_rpc_kind_raise);
     try std.testing.expectEqual(@as(u8, wnd_core.wm_rpc_kind_config), ui.wm_rpc_kind_config);
     try std.testing.expectEqual(@as(u8, wnd_core.wm_rpc_reply_flag), ui.wm_rpc_reply_flag);
+    // M42 SX2: the additive tab-aware declaration kind mirrors too.
+    try std.testing.expectEqual(@as(u8, wnd_core.wm_rpc_kind_declare_fullscreen), ui.wm_rpc_kind_declare_fullscreen);
     try std.testing.expectEqual(@as(usize, wnd_core.wm_rpc_max), ui.wm_rpc_max);
     try std.testing.expectEqual(@as(usize, @sizeOf(wnd_core.WmRpc)), @sizeOf(ui.WmRpc));
     // The procs row layout + running code (must match process.State order).

@@ -1881,6 +1881,12 @@ pub fn user_resize(id: u8, w: u32, h: u32) bool {
 /// WM proposes, kernel clamps to the scanout, mirror follows.
 pub fn wm_apply_rect(id: u8, x: u32, y: u32, w: u32, h: u32) bool {
     const win = find_user_window(id) orelse return false;
+    // M42 SX2 (issue #983): remember the pre-layout size so the owner can be
+    // told when the WM's LAYOUT decision grew/shrank its canvas — the seam
+    // TABWM's full-viewport proposal rides. Pure moves emit nothing (no
+    // event spam; parity with `user_resize`, which notifies on resize only).
+    const old_w = win.w;
+    const old_h = win.h;
     // Move FIRST so the size clamp sees the final position (the shim's
     // user_move-then-user_resize order, per the WMS4 comment). The max is
     // the SCANOUT, not the app's back buffer: the shim's own
@@ -1900,6 +1906,20 @@ pub fn wm_apply_rect(id: u8, x: u32, y: u32, w: u32, h: u32) bool {
     _ = mark_dirty(0);
     _ = mark_dirty(1);
     wm_mirror(id); // M32 WMS5: the WM's mirror follows the clamped layout
+    // M42 SX2: the owner learns its new canvas when the clamped size differs
+    // from the old one (same payload shape as `user_resize`: w in arg0,
+    // h in arg1) — TABWM's full-viewport proposals reach the app.
+    if (win.w != old_w or win.h != old_h) {
+        if (win.owner) |owner| {
+            events.push(owner, .{
+                .kind = events.WIN_RESIZE,
+                .flags = 0,
+                .seq = 0,
+                .arg0 = win.w,
+                .arg1 = win.h,
+            });
+        }
+    }
     return true;
 }
 
