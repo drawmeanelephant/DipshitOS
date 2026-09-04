@@ -2892,6 +2892,37 @@ fn cmd_dui(m: *Monitor, args: []const []const u8) ExecError {
             m.console.puts("\n");
             return .none;
         }
+        if (std.mem.eql(u8, args[0], "taskbar")) {
+            // WM3 (issue #707 card 3): report the taskbar ENTRY enumeration
+            // — the exact id-ascending current-workspace list the `.taskbar`
+            // render walks (the render iterates the SAME taskbar_entries()
+            // snapshot), so a live gate can grep what the bar draws.
+            if (args.len != 1) {
+                print_usage(m, lookup("dui").?);
+                return .usage;
+            }
+            _ = driving_award.composite();
+            var tb: [driving_award.user_windows_max]driving_award.TaskbarEntry = undefined;
+            const tn = driving_award.taskbar_entries(&tb);
+            m.console.puts("dui taskbar: ws=");
+            m.console.print_u64(driving_award.current_workspace);
+            m.console.puts(" entries=");
+            m.console.print_u64(tn);
+            m.console.puts("\n");
+            var ti: usize = 0;
+            while (ti < tn) : (ti += 1) {
+                m.console.puts("dui taskbar: entry=");
+                m.console.print_u64(ti);
+                m.console.puts(" id=");
+                m.console.print_u64(tb[ti].id);
+                m.console.puts(" focused=");
+                m.console.print_u64(@intFromBool(tb[ti].focused));
+                m.console.puts(" minimized=");
+                m.console.print_u64(@intFromBool(tb[ti].minimized));
+                m.console.puts("\n");
+            }
+            return .none;
+        }
         if (std.mem.eql(u8, args[0], "unsaved")) {
             if (args.len != 3) {
                 print_usage(m, lookup("dui").?);
@@ -6829,6 +6860,11 @@ fn cmd_wm(m: *Monitor, args: []const []const u8) ExecError {
         // (cmd 11) modal-dialog decisions (about open/close/toggle) applied.
         m.console.puts(" dialog=");
         m.console.print_u64(info.dialog_count);
+        // WM3 (issue #707 card 3): the taskbar observability — TASKBAR
+        // (cmd 12) entry-click decisions applied (the gate greps
+        // `taskbar=`).
+        m.console.puts(" taskbar=");
+        m.console.print_u64(info.taskbar_count);
         m.console.puts("\n");
         var rows: [driving_award.max_windows]driving_award.ChromeRow = undefined;
         const n = driving_award.wm_chrome_rows(&rows);

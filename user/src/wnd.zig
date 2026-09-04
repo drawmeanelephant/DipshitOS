@@ -117,6 +117,12 @@ const dialog_unsaved_show: u64 = 3;
 const dialog_unsaved_save: u64 = 4;
 const dialog_unsaved_dont_save: u64 = 5;
 const dialog_unsaved_cancel: u64 = 6;
+// WM3 (issue #707 card 3): the taskbar decision channel. TASKBAR (cmd 12)
+// a0 = the entry's window id — the WM hit-tests the shared wnd_core entry
+// rects and decides which entry a click landed on; the kernel applies the
+// same clamped chain a shim click would run (restore-if-minimized, else
+// focus + raise).
+const wmctl_taskbar: u64 = 12;
 // S6 Tab model (Milestone 19, issue #782)
 const wmctl_attach_tab: u64 = 18;
 const wmctl_detach_tab: u64 = 19;
@@ -325,6 +331,11 @@ pub const tray_tooltip_text: []const u8 = "Clock";
 // glyphs are c n t b s — Calc, Notes, Terminal, Browser, Settings).
 pub const dock_marker: []const u8 = "wnd: dock";
 pub const dock_labels = [_][]const u8{ "Calc", "Notes", "Terminal", "Browser", "Settings" };
+
+// WM3 (issue #707 card 3): the taskbar-entry decision marker (the live
+// gate greps `wnd: taskbar` to prove the WM — not the kernel — hit-tested
+// the entry and decided restore vs focus).
+pub const taskbar_marker: []const u8 = "wnd: taskbar";
 
 // WMS8 Gate 2 (issue #628): the about-dialog decision marker (the live gate
 // greps `wnd: about` to prove the WM — not the kernel — decided Ctrl+Shift+A).
@@ -550,6 +561,10 @@ const fb_w = wnd_core.fb_w;
 const fb_h = wnd_core.fb_h;
 const taskbar_h = wnd_core.taskbar_h;
 const dock_w = wnd_core.dock_w;
+/// WM3 (issue #707 card 3): the workspace count the taskbar entry layout
+/// enumerates against (the kernel's `workspace_max` — mirrored here since
+/// the WM computes the entry rects from the shared wnd_core rule).
+const taskbar_ws_count: u32 = 3;
 
 // ---------------------------------------------------------------------------
 // Issue #825 (IMG4): Desktop Wallpaper via Scanout Compositing
@@ -1656,6 +1671,46 @@ fn handle_dock_click(idx: u8) void {
     write_dock_marker(idx);
 }
 
+/// WM3 (issue #707 card 3): the taskbar entry enumeration — the
+/// CURRENT-workspace windows in ID-ASCENDING order (mirror slot order ==
+/// id order), the same order the kernel's `.taskbar` render walks (the
+/// shared wnd_core drift guard), so entry i on both sides is the same
+/// window. Returns the count written into `out`.
+fn taskbar_entry_ids(out: *[max_user_windows]u8) usize {
+    var n: usize = 0;
+    var si: usize = 0;
+    while (si < max_user_windows) : (si += 1) {
+        const m = &mirrors[si];
+        if (!m.valid) continue;
+        if (m.workspace != current_workspace) continue;
+        out[n] = m.id;
+        n += 1;
+    }
+    return n;
+}
+
+/// The taskbar-entry hit-test: which WINDOW id (if any) sits under
+/// (px, py) — the entry index from the shared wnd_core rule, mapped
+/// through the id-ascending enumeration.
+fn taskbar_window_at(px: u32, py: u32) ?u8 {
+    const ei = wnd_core.taskbar_entry_at(taskbar_ws_count, fb_w, fb_h, tray_w, px, py) orelse return null;
+    var ids: [max_user_windows]u8 = undefined;
+    const n = taskbar_entry_ids(&ids);
+    if (ei >= n) return null;
+    return ids[ei];
+}
+
+/// The taskbar click decision: issue TASKBAR <id> (cmd 12) — the kernel
+/// applies the restore/focus chain. `restore` = the WM's own view that
+/// the entry is minimized (hidden mirror); marker-only (the kernel
+/// re-derives the truth from its registry).
+fn handle_taskbar_click(id: u8, restore: bool) void {
+    _ = syscall6(sys_wmctl, wmctl_taskbar, id, 0, 0, 0, 0);
+    var buf: [40]u8 = undefined;
+    const s = std.fmt.bufPrint(&buf, "{s} id={d} restore={d}\n", .{ taskbar_marker, id, @intFromBool(restore) }) catch "wnd: taskbar id=0 restore=0\n";
+    write_marker(s);
+}
+
 /// The dock hover-label decision: entering an icon (or moving to a new one)
 /// shows the icon's label via the Gate-C TOOLTIP seam; leaving hides it.
 fn handle_dock_hover(prev: ?u8, cur: ?u8) void {
@@ -2307,6 +2362,19 @@ fn main() noreturn {
                         if (dock_icon_at(px, py)) |didx| {
                             handle_dock_click(didx);
                         }
+                        // WM3 (issue #707 card 3): a left-button DOWN EDGE on a
+                        // taskbar ENTRY issues TASKBAR — the WM, not the kernel,
+                        // decides which entry (the entry rects are the shared
+                        // wnd_core rule, parity by construction). The restore bit
+                        // is the WM's own view (hidden mirror); the kernel
+                        // re-derives the truth from its registry.
+                        var tb_clicked = false;
+                        if (taskbar_window_at(px, py)) |tbid| {
+                            const tm = mirror(tbid);
+                            const restore = tm != null and !tm.?.visible;
+                            handle_taskbar_click(tbid, restore);
+                            tb_clicked = true;
+                        }
                         // WMS8 Gate 4 (issue #628): the unsaved-changes dialog —
                         // the WM, not the kernel, decides. While the dialog is
                         // open, a click routes to its buttons (the shared
@@ -2320,6 +2388,9 @@ fn main() noreturn {
                         // must not also start a title-bar grab (the close rect
                         // sits inside the title band).
                         var down_handled = false;
+                        // WM3: a taskbar-entry click consumes the edge — the
+                        // entry band is kernel chrome, never a title bar.
+                        if (tb_clicked) down_handled = true;
                         if (unsaved_dialog_open) {
                             apply_unsaved_choice(wnd_core.unsaved_dialog_choice_at(fb_w, fb_h, px, py));
                             down_handled = true;
@@ -2506,6 +2577,13 @@ test "wnd: the marker/tuning shapes are pinned (live-gate grep targets)" {
     try std.testing.expectEqualStrings("Browser", dock_labels[3]);
     try std.testing.expectEqualStrings("Settings", dock_labels[4]);
     try std.testing.expectEqual(@as(u64, 9), wmctl_dock);
+    // WM3 (issue #707 card 3): the taskbar marker + subcommand + shared rule.
+    try std.testing.expectEqualStrings("wnd: taskbar", taskbar_marker);
+    try std.testing.expectEqual(@as(u64, 12), wmctl_taskbar);
+    try std.testing.expectEqual(@as(u32, 3), taskbar_ws_count);
+    try std.testing.expectEqual(@as(u32, 80), wnd_core.taskbar_entries_x0(taskbar_ws_count));
+    try std.testing.expectEqual(@as(u32, 0), wnd_core.taskbar_entry_at(taskbar_ws_count, fb_w, fb_h, tray_w, 100, fb_h - 10).?);
+    try std.testing.expect(wnd_core.taskbar_entry_at(taskbar_ws_count, fb_w, fb_h, tray_w, fb_w - 40, fb_h - 10) == null);
     // WMS6 Gate E (issue #626): the tray marker + policy constants.
     try std.testing.expectEqualStrings("wnd: tray", tray_marker);
     try std.testing.expectEqual(@as(u8, 'D'), tray_theme_letter);
@@ -2559,6 +2637,37 @@ test "wnd: the WMS6 tray policy formats HH:MM and issues TRAY on change only" {
     // A clipboard change re-issues.
     try std.testing.expect(tray_tick_policy(61, true, &st));
     try std.testing.expect(!tray_tick_policy(62, true, &st));
+}
+
+test "wnd: WM3 taskbar enumeration is id-ascending and workspace-filtered" {
+    mirrors = [_]MirrorWin{.{}} ** max_user_windows;
+    current_workspace = 0;
+    // Slot order == id order (mirrors[si] is id 2+si): id 2 (ws 0),
+    // id 3 (ws 1 — filtered), id 4 (ws 0), id 5 (invalid — filtered).
+    mirrors[0] = .{ .id = 2, .valid = true, .workspace = 0 };
+    mirrors[1] = .{ .id = 3, .valid = true, .workspace = 1 };
+    mirrors[2] = .{ .id = 4, .valid = true, .workspace = 0 };
+    var ids: [max_user_windows]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 2), taskbar_entry_ids(&ids));
+    try std.testing.expectEqual(@as(u8, 2), ids[0]);
+    try std.testing.expectEqual(@as(u8, 4), ids[1]);
+    // The hit-test maps entry rects to ids: entry 0 -> id 2, entry 1 -> id 4.
+    try std.testing.expectEqual(@as(u8, 2), taskbar_window_at(100, fb_h - 10).?);
+    try std.testing.expectEqual(@as(u8, 4), taskbar_window_at(180, fb_h - 10).?);
+    // A switcher click (x < entries x0) and a tray click are not entries.
+    try std.testing.expect(taskbar_window_at(14, fb_h - 10) == null);
+    try std.testing.expect(taskbar_window_at(fb_w - 40, fb_h - 10) == null);
+    // A third current-workspace window takes entry 2 (all three rects fit
+    // left of the tray at this ws_count — the kernel clamps past that).
+    mirrors[3] = .{ .id = 5, .valid = true, .workspace = 0 };
+    try std.testing.expectEqual(@as(usize, 3), taskbar_entry_ids(&ids));
+    try std.testing.expectEqual(@as(u8, 5), taskbar_window_at(260, fb_h - 10).?);
+    // Other-workspace mirrors are invisible to the enumeration.
+    current_workspace = 1;
+    try std.testing.expectEqual(@as(usize, 1), taskbar_entry_ids(&ids));
+    try std.testing.expectEqual(@as(u8, 3), ids[0]);
+    mirrors = [_]MirrorWin{.{}} ** max_user_windows;
+    current_workspace = 0;
 }
 
 test "wnd: the WMS5 drag-grab rule matches the shared title-bar rule (drift guard)" {

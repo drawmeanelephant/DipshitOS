@@ -2753,6 +2753,23 @@ fn handle_wmctl(args: Args, _: *exceptions.VectorFrame) u64 {
             wm_server.note_tray();
             return 0;
         },
+        wm_server.wmctl_taskbar => {
+            // WM3 (issue #707 card 3): the WM — not the kernel — decides
+            // which taskbar entry a click hit (the raw DOWN EDGE already
+            // fanned to it as kind 19; the entry rects are the shared
+            // wnd_core rule). a0 = the entry's window id; the kernel
+            // clamps (the id must name a live user window) and applies the
+            // SAME chain a shim click would run (restore-if-minimized,
+            // else focus + raise), so a WM decision and a click on the
+            // same window are identical actions.
+            if (!wm_server.registered()) return error_result(.enosys);
+            if (wm_server.registered_pid() != pid) return error_result(.eacces);
+            const window_id = args[1];
+            if (window_id > 0xff) return error_result(.einval);
+            if (!driving_award.taskbar_click(@intCast(window_id))) return error_result(.einval); // bad id
+            wm_server.note_taskbar();
+            return 0;
+        },
         wm_server.wmctl_dialog => {
             // M32 WMS8 Gate 2 (issue #628): the WM — not the kernel — owns
             // the keyboard-driven modal-dialog decision (M27 G2 about,
