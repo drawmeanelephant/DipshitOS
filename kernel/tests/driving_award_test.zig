@@ -182,6 +182,7 @@ const taskbar_bg = driving_award.taskbar_bg;
 const taskbar_bg_rgb = driving_award.taskbar_bg_rgb;
 const taskbar_entry_active = driving_award.taskbar_entry_active;
 const taskbar_click = driving_award.taskbar_click;
+const wm_rest_alpha = driving_award.wm_rest_alpha;
 const taskbar_entries = driving_award.taskbar_entries;
 const TaskbarEntry = driving_award.TaskbarEntry;
 const taskbar_entry_active_rgb = driving_award.taskbar_entry_active_rgb;
@@ -1074,6 +1075,70 @@ test "driving_award: user_query reports the full window state (z-order + focus +
     q = user_query(2).?;
     try std.testing.expectEqual(@as(u32, 5), q.z);
     try std.testing.expectEqual(@as(u32, 0), q.focused);
+}
+
+test "driving_award: WM4 rest alpha — policy fallback, override, v1 default, composite blend" {
+    arm();
+    clear_wm_chrome();
+    try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 512, 384, 7));
+    try std.testing.expectEqual(UserOpenResult{ .opened = 3 }, user_open(320, 64, 512, 384, 8));
+    try std.testing.expect(user_fill(2, 0, 0, 512, 384, 0x00ff00));
+    try std.testing.expect(user_fill(3, 0, 0, 512, 384, 0x00ff00));
+    // No policy / no override: the v1 default (opaque).
+    try std.testing.expectEqual(@as(u32, 256), wm_rest_alpha(2));
+    try std.testing.expectEqual(@as(u32, 256), wm_rest_alpha(3));
+    // A v2 broadcast policy carries the rest alpha to every user window.
+    var pol = geom.chrome_parity_policy();
+    pol.rest_alpha = 240;
+    try std.testing.expect(driving_award.set_window_chrome(geom.chrome_window_all, pol));
+    try std.testing.expectEqual(@as(u32, 240), wm_rest_alpha(2));
+    try std.testing.expectEqual(@as(u32, 240), wm_rest_alpha(3));
+    // A per-window override wins over the policy.
+    var ovr = pol;
+    ovr.rest_alpha = 200;
+    try std.testing.expect(driving_award.set_window_chrome(2, ovr));
+    try std.testing.expectEqual(@as(u32, 200), wm_rest_alpha(2));
+    try std.testing.expectEqual(@as(u32, 240), wm_rest_alpha(3));
+    // The v1 zero-extension semantics: rest_alpha = 0 normalizes to 256.
+    ovr.rest_alpha = 0;
+    try std.testing.expect(driving_award.set_window_chrome(2, ovr));
+    try std.testing.expectEqual(@as(u32, 256), wm_rest_alpha(2));
+    clear_wm_chrome();
+    // The COMPOSITE blend: window 3 is focused — its client stays pure
+    // green even under a rest policy; window 2 (unfocused, at rest) blends
+    // with whatever is beneath (the gradient/terminal) — visibly not the
+    // source color, still green-dominant.
+    var p240 = geom.chrome_parity_policy();
+    p240.rest_alpha = 240;
+    try std.testing.expect(driving_award.set_window_chrome(geom.chrome_window_all, p240));
+    // The fade-in must be complete (at rest) for the rest-alpha path —
+    // the test opens leave fade_phase 1 / tick 0 (25% blend).
+    find_user_window(2).?.fade_phase = 0;
+    find_user_window(3).?.fade_phase = 0;
+    try std.testing.expect(user_present(3));
+    try std.testing.expect(user_present(2));
+    _ = composite();
+    const stride = virtio_gpu.fb_width * 4;
+    const fb: [*]u8 = @ptrCast(&virtio_gpu.gpu_fb);
+    const px = struct {
+        fn at(f: [*]u8, st: usize, x: usize, y: usize) u32 {
+            const o = y * st + x * 4;
+            return @as(u32, f[o + 2]) << 16 | @as(u32, f[o + 1]) << 8 | f[o];
+        }
+    };
+    const w3 = find_user_window(3).?;
+    try std.testing.expectEqual(@as(u32, 0x00ff00), px.at(fb, stride, w3.x + 100, w3.y + 100));
+    const w2 = find_user_window(2).?;
+    const blended = px.at(fb, stride, w2.x + 100, w2.y + 100);
+    try std.testing.expect(blended != 0x00ff00);
+    try std.testing.expect((blended >> 8) & 0xff > (blended >> 16) & 0xff); // green-dominant
+    try std.testing.expect((blended >> 8) & 0xff > (blended & 0xff));
+    // With the policy cleared, the same pixel is the pure source color.
+    clear_wm_chrome();
+    find_user_window(2).?.fade_phase = 0;
+    try std.testing.expect(user_present(2));
+    _ = composite();
+    try std.testing.expectEqual(@as(u32, 0x00ff00), px.at(fb, stride, w2.x + 100, w2.y + 100));
 }
 
 test "driving_award: WM3 taskbar_click restores a minimized entry, focuses a visible one" {

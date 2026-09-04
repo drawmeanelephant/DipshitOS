@@ -2544,17 +2544,25 @@ fn handle_wmctl(args: Args, _: *exceptions.VectorFrame) u64 {
                 // WM proposes, kernel clamps to the scanout, mirror follows.
                 if (!driving_award.wm_apply_rect(@intCast(window_id), x, y, w, h)) return error_result(.einval); // bad id
             }
-            // Chrome: len 40 = descriptor (WMS4, unchanged); len 0 = chrome
-            // left as-is (a pure geometry call). Any other length is refused.
-            if (args[5] != 0 and args[5] != wnd_core.chrome_desc_bytes) return error_result(.einval); // frozen length
-            if (args[5] == wnd_core.chrome_desc_bytes) {
+            // Chrome: len 40 = the frozen v1 descriptor (WMS4, unchanged —
+            // zero-extended, rest_alpha reads 0 = the v1 opaque default);
+            // len 48 = the WM4 v2 descriptor (rest-opacity tail); len 0 =
+            // chrome left as-is (a pure geometry call). Any other length is
+            // refused.
+            if (args[5] != 0 and args[5] != wnd_core.chrome_desc_bytes and args[5] != wnd_core.chrome_desc_bytes_v2) return error_result(.einval); // frozen lengths
+            if (args[5] != 0) {
+                const len: usize = @intCast(args[5]);
                 var desc: wnd_core.ChromeDesc = undefined;
-                const desc_bytes: *[wnd_core.chrome_desc_bytes]u8 = @ptrCast(&desc);
-                if (uaccess.copy_in(desc_bytes, args[4], wnd_core.chrome_desc_bytes) != .ok) {
+                const desc_bytes: [*]u8 = @ptrCast(&desc);
+                // v1 (40) zero-extends: the rest_alpha tail reads 0, which
+                // normalizes to 256 (the v1 behavior, byte-identical).
+                @memset(desc_bytes[0..wnd_core.chrome_desc_bytes_v2], 0);
+                if (uaccess.copy_in(desc_bytes[0..len], args[4], len) != .ok) {
                     return error_result(.efault); // bad descriptor pointer
                 }
                 // The one validation rule (single source in wnd_core): unknown
-                // kind/flag bits and a zero kind are refused with EINVAL.
+                // kind/flag bits, a zero kind, and an out-of-range rest alpha
+                // are refused with EINVAL.
                 if (!wnd_core.chrome_valid(desc)) return error_result(.einval);
                 if (!driving_award.set_window_chrome(window_id, desc)) return error_result(.einval); // bad id
             }

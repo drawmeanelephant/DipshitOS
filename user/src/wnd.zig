@@ -68,6 +68,10 @@ const sys_wmctl: u64 = 65;
 // WMS4 (cmd 2 chrome) and WMS5 Gate 2 (cmd 4 SET_STATE)).
 const wmctl_register: u64 = 1;
 const wmctl_set_window: u64 = 2;
+/// WM4 (issue #707 card 4): the REST-OPACITY policy the WM submits in its
+/// v2 chrome descriptor (an unfocused at-rest window's CLIENT area blends
+/// at this alpha; chrome stays opaque; 256 = the v1 no-op).
+const wm_rest_alpha_policy: u32 = 240;
 const wmctl_request_present: u64 = 3;
 const wmctl_set_state: u64 = 4;
 const wmctl_alt_tab: u64 = 5;
@@ -1440,6 +1444,10 @@ fn snap_window_to(id: u8, px: u32, py: u32) void {
 
 /// Outline thickness (px) — the DQ4 focus-outline token (DQ4 wins ties).
 pub const snap_preview_thick: u32 = ui.focus_w;
+/// WM4 (issue #707 card 4): the snap-preview corner-bracket polish —
+/// 16 px arms inset 8 px from each zone corner (the same solid accent).
+pub const snap_preview_tick: u32 = 16;
+pub const snap_preview_gap: u32 = 8;
 
 /// The preview rect for a pointer position: the snap zone's bounds from the
 /// shared wnd_core rules (20 px threshold, corners first). Null = free
@@ -1491,6 +1499,11 @@ fn ensure_scanout_mapped() bool {
 /// 2 px band, not alpha). Unconditional overdraw (no occlusion skip): any
 /// pixels landing on a window heal at the next kernel paint, and the gate
 /// probes desktop-area border pixels.
+/// WM4 (issue #707 card 4) polish: 16 px CORNER BRACKETS (L marks, same
+/// solid accent, inset 8 px from each corner, one band thick) reaching
+/// into the zone interior — the drop target reads at a glance even over
+/// busy content. The snap-guides gate probes only edge/center pixels, so
+/// the brackets are an additive change.
 fn draw_snap_preview(p: SnapPreview) void {
     const scan = scanout_ptr orelse return;
     const accent = ui.theme_accent();
@@ -1499,6 +1512,8 @@ fn draw_snap_preview(p: SnapPreview) void {
     const b: u32 = accent & 0xff;
     const pxv: u32 = 0xff000000 | (r << 16) | (g << 8) | b; // B8G8R8X8
     const t = snap_preview_thick;
+    const tick = snap_preview_tick;
+    const gap = snap_preview_gap;
     const xe = @min(p.x + p.w, fb_w);
     const ye = @min(p.y + p.h, fb_h);
     var y: u32 = p.y;
@@ -1508,6 +1523,33 @@ fn draw_snap_preview(p: SnapPreview) void {
         while (x < xe) : (x += 1) {
             const on_v = (x < p.x + t) or (x + t >= xe);
             if (on_h or on_v) scan[@as(usize, y) * fb_w + x] = pxv;
+        }
+    }
+    // WM4 corner brackets: at each of the 4 corners, an L of two
+    // snap_preview_tick-long arms (one band thick), inset `gap` px from
+    // the corner, pointing into the zone interior.
+    var c: u32 = 0;
+    while (c < 4) : (c += 1) {
+        const left = (c & 1) == 0;
+        const top = c < 2;
+        const cx: u32 = if (left) p.x + gap else xe - gap - tick;
+        const cy_h: u32 = if (top) p.y + gap else ye - gap - t;
+        const cy_v: u32 = if (top) p.y + gap else ye - gap - tick;
+        // Horizontal arm (t px tall, tick px long).
+        var ty: u32 = cy_h;
+        while (ty < cy_h + t and ty < ye) : (ty += 1) {
+            var tx: u32 = cx;
+            while (tx < cx + tick and tx < xe) : (tx += 1) {
+                scan[@as(usize, ty) * fb_w + tx] = pxv;
+            }
+        }
+        // Vertical arm (t px wide, tick px tall).
+        var vy: u32 = cy_v;
+        while (vy < cy_v + tick and vy < ye) : (vy += 1) {
+            var vx: u32 = cx;
+            while (vx < cx + t and vx < xe) : (vx += 1) {
+                scan[@as(usize, vy) * fb_w + vx] = pxv;
+            }
         }
     }
 }
@@ -2099,13 +2141,23 @@ fn main() noreturn {
     _ = load_god_menu_apps();
 
     // WMS4 (issue #624): submit the chrome POLICY — one
-    // sys_wmctl(SET_WINDOW, a0=ALL, a1=0, a2=0, ptr=desc, len=40). The WM
+    // sys_wmctl(SET_WINDOW, a0=ALL, a1=0, a2=0, ptr=desc, len=48). The WM
     // becomes the theme owner: the kernel blits chrome from this descriptor
     // (dark-theme values, byte-equal to the shim's own constants — parity by
     // value). Issued right after REGISTER, before any window exists, so every
     // window created later inherits it (the kernel's draw-time fallback).
-    const desc = wnd_core.chrome_parity_policy();
-    _ = syscall6(sys_wmctl, wmctl_set_window, 0xFFFF_FFFF, 0, 0, @intFromPtr(&desc), wnd_core.chrome_desc_bytes);
+    // WM4 (issue #707 card 4): the v2 descriptor adds the REST-OPACITY
+    // policy — an unfocused at-rest window's CLIENT area blends at
+    // wm_rest_alpha (the chrome stays opaque; the WMS4 chrome parity gate
+    // is untouched). 256 would be the v1 no-op; the WM opts in below.
+    var desc = wnd_core.chrome_parity_policy();
+    desc.rest_alpha = wm_rest_alpha_policy;
+    _ = syscall6(sys_wmctl, wmctl_set_window, 0xFFFF_FFFF, 0, 0, @intFromPtr(&desc), wnd_core.chrome_desc_bytes_v2);
+    {
+        var rbuf: [32]u8 = undefined;
+        const rs = std.fmt.bufPrint(&rbuf, "wnd: rest-alpha={d}\n", .{wm_rest_alpha_policy}) catch "wnd: rest-alpha=240\n";
+        write_marker(rs);
+    }
 
     // WMS5 mirror + drag + policy state.
     var ev: Event = undefined;
@@ -2584,6 +2636,12 @@ test "wnd: the marker/tuning shapes are pinned (live-gate grep targets)" {
     try std.testing.expectEqual(@as(u32, 80), wnd_core.taskbar_entries_x0(taskbar_ws_count));
     try std.testing.expectEqual(@as(u32, 0), wnd_core.taskbar_entry_at(taskbar_ws_count, fb_w, fb_h, tray_w, 100, fb_h - 10).?);
     try std.testing.expect(wnd_core.taskbar_entry_at(taskbar_ws_count, fb_w, fb_h, tray_w, fb_w - 40, fb_h - 10) == null);
+    // WM4 (issue #707 card 4): the rest-opacity policy is a real blend
+    // (below 256) and the snap-bracket polish constants are pinned.
+    try std.testing.expectEqual(@as(u32, 240), wm_rest_alpha_policy);
+    try std.testing.expect(wm_rest_alpha_policy > 0 and wm_rest_alpha_policy < 256);
+    try std.testing.expectEqual(@as(u32, 16), snap_preview_tick);
+    try std.testing.expectEqual(@as(u32, 8), snap_preview_gap);
     // WMS6 Gate E (issue #626): the tray marker + policy constants.
     try std.testing.expectEqualStrings("wnd: tray", tray_marker);
     try std.testing.expectEqual(@as(u8, 'D'), tray_theme_letter);

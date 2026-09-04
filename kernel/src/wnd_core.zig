@@ -407,11 +407,25 @@ pub const ChromeDesc = extern struct {
     min_rgb: u32,
     /// Pin glyph ("*", always-on-top windows).
     pin_rgb: u32,
+    /// WM4 (issue #707 card 4, ABI v2 — BACKWARD COMPATIBLE): the rest
+    /// opacity for the window's CLIENT area. 0 = none (normalized to 256
+    /// — the v1 zero-extension semantics), 1..255 = the at-rest alpha,
+    /// 256 = fully opaque (the v1 default). Applied by the kernel ONLY
+    /// to the client blit of an AT-REST (fade complete) UNFOCUSED window;
+    /// the chrome (border/title/ring) never fades, so the WMS4
+    /// pixel-exact chrome parity gate is untouched. The frozen 40-byte
+    /// v1 wire ABI grows to 44 with a DEFAULT field: every existing
+    /// descriptor site compiles unchanged and every 40-byte SET_WINDOW
+    /// submitter is still accepted (zero-extended → rest_alpha = 0 = the
+    /// v1 behavior).
+    rest_alpha: u32 = 256,
 };
 
-/// Descriptor byte size — the frozen `len` for SET_WINDOW (the kernel
-/// refuses any other length with EINVAL).
+/// Descriptor byte size — the frozen v1 `len` for SET_WINDOW (the kernel
+/// refuses any other length with EINVAL). WM4 ABI v2: `chrome_desc_bytes_v2`
+/// is ALSO accepted (the v1 10 u32s + the rest_alpha tail = 11 u32s).
 pub const chrome_desc_bytes: usize = 40;
+pub const chrome_desc_bytes_v2: usize = 44;
 
 /// Window-id broadcast: SET_WINDOW with a0 = ALL sets the WM's chrome
 /// POLICY — applied to every user window and inherited by windows created
@@ -502,10 +516,17 @@ pub fn chrome_flags_valid(flags: u32) bool {
     return (flags & ~chrome_flags_all) == 0;
 }
 
-/// Full descriptor validity (kind + flags). Pure — the kernel's refusal
-/// predicate and the WM's own self-check share this one rule.
+/// Full descriptor validity (kind + flags + the WM4 rest-alpha bound).
+/// Pure — the kernel's refusal predicate and the WM's own self-check
+/// share this one rule.
 pub fn chrome_valid(d: ChromeDesc) bool {
-    return chrome_kind_valid(d.kind) and chrome_flags_valid(d.flags);
+    return chrome_kind_valid(d.kind) and chrome_flags_valid(d.flags) and d.rest_alpha <= 256;
+}
+
+/// WM4: the normalized rest alpha (0 = "none" → 256, the v1 default;
+/// > 256 can't pass chrome_valid but is normalized defensively too).
+pub fn chrome_rest_alpha_normalized(d: ChromeDesc) u32 {
+    return if (d.rest_alpha == 0 or d.rest_alpha > 256) 256 else d.rest_alpha;
 }
 
 /// The WMS4 parity policy: the chrome descriptor WND.BIN issues at
@@ -868,12 +889,13 @@ test "wnd_core: WMS5 Gate 2 geometry rules are pinned (tile/snap/max — the WM'
     try std.testing.expectEqual(UnsavedChoice.none, unsaved_dialog_choice_at(fb_w, fb_h, dx + 195, dy + 80)); // past the 30px Cancel (review fix 7639)
 }
 
-test "wnd_core: chrome descriptor is a flat 40-byte number struct (the frozen ABI)" {
+test "wnd_core: chrome descriptor is a flat number struct (the frozen ABI, v2 backward-compatible)" {
     try std.testing.expectEqual(@as(usize, 40), chrome_desc_bytes);
-    try std.testing.expectEqual(@as(usize, 40), @sizeOf(ChromeDesc));
-    // extern struct: no padding beyond the 10 u32s — the byte layout the
+    try std.testing.expectEqual(@as(usize, 44), chrome_desc_bytes_v2);
+    try std.testing.expectEqual(@as(usize, 44), @sizeOf(ChromeDesc));
+    // extern struct: no padding beyond the 11 u32s — the byte layout the
     // EL0 blob and the kernel both compile from.
-    try std.testing.expectEqual(@as(usize, 10 * 4), @sizeOf(ChromeDesc));
+    try std.testing.expectEqual(@as(usize, 11 * 4), @sizeOf(ChromeDesc));
     const p = chrome_parity_policy();
     // The broadcast id is the frozen "all windows" target.
     try std.testing.expectEqual(@as(u64, 0xFFFF_FFFF), chrome_window_all);
@@ -886,6 +908,22 @@ test "wnd_core: chrome descriptor is a flat 40-byte number struct (the frozen AB
     try std.testing.expectEqual(@as(u32, 0xef4444), p.close_rgb);
     try std.testing.expectEqual(@as(u32, 0x94a3b8), p.min_rgb);
     try std.testing.expectEqual(@as(u32, 0x38bdf8), p.pin_rgb);
+    // WM4 ABI v2: the rest-alpha tail defaults to opaque (256) — a v1
+    // (40-byte) descriptor zero-extends to rest_alpha = 0, which
+    // normalizes to 256, so the v1 behavior is byte-identical.
+    try std.testing.expectEqual(@as(u32, 256), p.rest_alpha);
+    try std.testing.expectEqual(@as(u32, 256), chrome_rest_alpha_normalized(p));
+    var v1 = p;
+    v1.rest_alpha = 0;
+    try std.testing.expectEqual(@as(u32, 256), chrome_rest_alpha_normalized(v1));
+    try std.testing.expect(chrome_valid(v1));
+    // A real rest policy: below-256 alpha validates; above does not.
+    var v2 = p;
+    v2.rest_alpha = 240;
+    try std.testing.expect(chrome_valid(v2));
+    try std.testing.expectEqual(@as(u32, 240), chrome_rest_alpha_normalized(v2));
+    v2.rest_alpha = 257;
+    try std.testing.expect(!chrome_valid(v2));
 }
 
 test "wnd_core: tab item layout and cycle rules" {

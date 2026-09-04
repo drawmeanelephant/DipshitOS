@@ -1220,6 +1220,17 @@ pub fn focus(id: u8) bool {
                 }
                 // M32 WMS5: the old window's focused bit cleared — mirror it.
                 if (find_user_window(old_id)) |old_win| wm_mirror(old_win.id);
+                // WM4 (issue #707 card 4): a focus change flips the
+                // rest-alpha state of BOTH windows (the focused one is
+                // exempt, the unfocused one blends). When either side
+                // carries a rest policy, mark both dirty so the next
+                // composite re-blits their CLIENTS at the new alpha (the
+                // chrome repaints every composite anyway). No policy = 256
+                // = no churn (the v1 behavior is untouched).
+                if (wm_rest_alpha(old_id) < 256 or wm_rest_alpha(id) < 256) {
+                    if (find_user_window(old_id)) |ow| ow.dirty = true;
+                    if (find_user_window(id)) |nw| nw.dirty = true;
+                }
                 _ = mark_dirty(0);
             }
             // Step 7 (Issue #210): auto-show a hidden window on focus.
@@ -3454,12 +3465,20 @@ pub fn paint(w: *Window) void {
             const src_ptr2: [*]const u8 = src_ptr + src_off;
             // Arc4 #239: during fade-in, blend with alpha over the
             // background (wallpaper/terminal already composited below).
+            // WM4 (issue #707 card 4): at REST — fade complete — an
+            // UNFOCUSED window with a rest-alpha policy blends its CLIENT
+            // area at that alpha (the chrome is drawn opaque afterwards,
+            // so the WMS4 chrome pixel parity is untouched). No policy /
+            // no WM / focused = 256, byte-identical to v1.
             const alpha: u16 = if (w.fade_phase == 1)
                 if (w.fade_tick < fade_half_frames) 64 // 25%
                 else if (w.fade_tick < fade_half_frames * 2) 128 // 50%
                 else 256 // fully opaque (fade complete)
-            else
-                256;
+            else blk: {
+                const rest = wm_rest_alpha(w.id);
+                if (w.id != focused_id and rest < 256) break :blk @intCast(rest);
+                break :blk 256;
+            };
             if (alpha < 256) {
                 blit_rect_alpha(
                     @ptrCast(&virtio_gpu.gpu_fb),
@@ -3801,7 +3820,20 @@ pub fn clear_wm_chrome() void {
 
 pub fn set_window_chrome(id_in: u64, desc: geom.ChromeDesc) bool {
     if (id_in == geom.chrome_window_all) {
+        // WM4 (issue #707 card 4): a policy change can flip the effective
+        // rest alpha of windows already painted under the old policy —
+        // snapshot the old effective alphas, swap the policy, and mark
+        // every user window whose alpha changed dirty so the next
+        // composite re-blits its client (chrome repaints anyway).
+        var before: [max_windows]u32 = undefined;
+        var i: usize = 0;
+        while (i < win_count) : (i += 1) before[i] = wm_rest_alpha(windows[i].id);
         wm_chrome_policy = desc;
+        i = 0;
+        while (i < win_count) : (i += 1) {
+            if (windows[i].kind != .user) continue;
+            if (before[i] != wm_rest_alpha(windows[i].id)) windows[i].dirty = true;
+        }
         return true;
     }
     if (id_in > 0xff) return false;
@@ -3835,9 +3867,9 @@ pub fn wm_chrome_kind(id: u8) u32 {
     return 0; // no such window
 }
 
-/// One observability row for the `wm` report: a user window's id and its
-/// effective last chrome kind (its override, else the policy, else 0).
-pub const ChromeRow = struct { id: u8, kind: u32 };
+/// One observability row for the `wm` report: a user window's id, its
+/// effective last chrome kind, and its effective WM4 rest alpha.
+pub const ChromeRow = struct { id: u8, kind: u32, rest_alpha: u32 };
 
 // ---------------------------------------------------------------------------
 // M37 DQ2 (issue #840) — tab-group facts for the strip paint. The WM
@@ -3896,10 +3928,25 @@ pub fn wm_chrome_rows(rows: *[max_windows]ChromeRow) usize {
         const w = &windows[i];
         if (w.kind != .user) continue;
         if (n >= rows.len) break;
-        rows[n] = .{ .id = w.id, .kind = wm_chrome_kind(w.id) };
+        rows[n] = .{ .id = w.id, .kind = wm_chrome_kind(w.id), .rest_alpha = wm_rest_alpha(w.id) };
         n += 1;
     }
     return n;
+}
+
+/// WM4 (issue #707 card 4): the effective REST alpha for window `id` —
+/// its chrome override's rest_alpha, else the broadcast policy's, else
+/// 256 (opaque; no WM / no policy = byte-identical v1 behavior).
+/// Normalized through wnd_core (0 = none → 256). Pure over the registry.
+pub fn wm_rest_alpha(id: u8) u32 {
+    var i: usize = 0;
+    while (i < win_count) : (i += 1) {
+        if (windows[i].id != id) continue;
+        if (windows[i].chrome_valid) return geom.chrome_rest_alpha_normalized(windows[i].chrome);
+        if (wm_chrome_policy) |p| return geom.chrome_rest_alpha_normalized(p);
+        return 256;
+    }
+    return 256; // no such window
 }
 
 // ---------------------------------------------------------------------------

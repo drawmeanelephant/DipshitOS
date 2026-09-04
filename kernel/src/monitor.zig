@@ -6874,6 +6874,11 @@ fn cmd_wm(m: *Monitor, args: []const []const u8) ExecError {
             m.console.print_u64(rows[i].id);
             m.console.puts(" kind=");
             m.console.print_hex_min(rows[i].kind);
+            // WM4 (issue #707 card 4): the effective rest alpha (256 =
+            // opaque; below = the at-rest unfocused client blend) — the
+            // gate greps `rest=` for the policy proof.
+            m.console.puts(" rest=");
+            m.console.print_u64(rows[i].rest_alpha);
             m.console.puts("\n");
         }
     } else {
