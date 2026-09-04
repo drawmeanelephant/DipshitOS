@@ -54,16 +54,16 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const console = @import("console.zig");
-const exceptions = @import("exceptions.zig");
-const mmu = @import("mmu.zig"); // claim 5804: per-task TTBR0 roots
-const userspace = @import("userspace.zig"); // claim 5804: user-VA layout
+pub const console = @import("console.zig");
+pub const exceptions = @import("exceptions.zig");
+pub const mmu = @import("mmu.zig"); // claim 5804: per-task TTBR0 roots
+pub const userspace = @import("userspace.zig"); // claim 5804: user-VA layout
 const shared_mmap = @import("shared_mmap.zig"); // M33 SB2 (claim 8878): shared-anon revoke-on-exit (ADR 0016 D2)
 // Milestone four (claim 3848): the process registry — the task pool is the
 // executor, the process owns the program (image + address space + lifecycle
 // + exit status). One-way import: process.zig knows nothing about this
 // module.
-const process = @import("process.zig");
+pub const process = @import("process.zig");
 const svclock = @import("svclock.zig"); // claim 9498 follow-on: per-service-domain locks — canonical file < net < win < ev < kernel, then sched_lock (brief), ring locks innermost (claim 881 slice 3)
 // Card 3f (claim 5965): the per-process IPC mailbox — the pool reset
 // clears it and the boot payload's process registration resets its ring.
@@ -157,7 +157,7 @@ pub const reserved_cpu_limit_status: u64 = 141;
 /// context switch safe for compiled tasks (a preempted task's live
 /// x19..x28 survive the tick and are restored on resume — claim 6729
 /// bisect).
-const frame_bytes: usize = 32 * 8;
+pub const frame_bytes: usize = 32 * 8;
 
 /// Explicit task lifecycle state (claim 6729). A slot's state is the ONLY
 /// ownership signal: `free` slots are spawnable, `zombie` slots hold an
@@ -280,7 +280,7 @@ const Task = struct {
     /// `secondary_ok`). `exec -c<core>` sets this via `pin_task`.
     pin_core: usize = 0,
 };
-var tasks: [max_tasks]Task = [_]Task{.{}} ** max_tasks;
+pub var tasks: [max_tasks]Task = [_]Task{.{}} ** max_tasks;
 
 // ---------------------------------------------------------------------------
 // Per-core ready rings (claim 881 / issue #856)
@@ -305,7 +305,7 @@ var tasks: [max_tasks]Task = [_]Task{.{}} ** max_tasks;
 // parked on another core's ring migrates to the core that needs work,
 // unless it is pinned there). Capacity is the
 // whole pool: every task could be ready at once.
-const ReadyRing = struct {
+pub const ReadyRing = struct {
     /// Sorted compact membership list (ascending slot index), `members[0..
     /// count)`. Sorted order is what preserves the pre-ring round-robin:
     /// the old `next_runnable_for` scanned SLOT order from `after + 1`
@@ -318,21 +318,21 @@ const ReadyRing = struct {
     members: [max_tasks]usize = undefined,
     count: usize = 0,
 
-    fn len(self: *const ReadyRing) usize {
+    pub fn len(self: *const ReadyRing) usize {
         return self.count;
     }
 
-    fn empty(self: *const ReadyRing) bool {
+    pub fn empty(self: *const ReadyRing) bool {
         return self.count == 0;
     }
 
     /// The i-th member in run order (smallest slot first).
-    fn get(self: *const ReadyRing, i: usize) usize {
+    pub fn get(self: *const ReadyRing, i: usize) usize {
         std.debug.assert(i < self.count);
         return self.members[i];
     }
 
-    fn contains(self: *const ReadyRing, id: usize) bool {
+    pub fn contains(self: *const ReadyRing, id: usize) bool {
         var i: usize = 0;
         while (i < self.count) : (i += 1) {
             if (self.members[i] == id) return true;
@@ -343,7 +343,7 @@ const ReadyRing = struct {
     /// Insert keeping sorted (ascending slot) order. Single-home
     /// invariant: a task already on this (or any) ring must not be pushed
     /// again — the assert is the double-pick guard.
-    fn push(self: *ReadyRing, id: usize) void {
+    pub fn push(self: *ReadyRing, id: usize) void {
         std.debug.assert(self.count < max_tasks);
         std.debug.assert(!self.contains(id));
         var i = self.count;
@@ -356,7 +356,7 @@ const ReadyRing = struct {
 
     /// Remove `id`, compacting the tail down one slot. Returns false when
     /// it is not a member.
-    fn remove(self: *ReadyRing, id: usize) bool {
+    pub fn remove(self: *ReadyRing, id: usize) bool {
         var i: usize = 0;
         while (i < self.count) : (i += 1) {
             if (self.members[i] != id) continue;
@@ -369,7 +369,7 @@ const ReadyRing = struct {
     /// Remove and return the member at `i`, compacting the tail down one
     /// slot. Removal IS the single-owner claim: a task taken out of its
     /// ring cannot be selected by any other core.
-    fn remove_at(self: *ReadyRing, i: usize) usize {
+    pub fn remove_at(self: *ReadyRing, i: usize) usize {
         std.debug.assert(i < self.count);
         const id = self.members[i];
         var j = i;
@@ -381,7 +381,7 @@ const ReadyRing = struct {
     }
 };
 
-var ready_rings: [smp.max_cores]ReadyRing = [_]ReadyRing{.{}} ** smp.max_cores;
+pub var ready_rings: [smp.max_cores]ReadyRing = [_]ReadyRing{.{}} ** smp.max_cores;
 
 /// The ring a task's `ready` membership lives on: its pin core when
 /// pinned, else ring 0 (the any-core default home).
@@ -423,9 +423,9 @@ fn ring_remove_anywhere(id: usize) bool {
 /// another lock (the kill conversions release ring locks before their
 /// svclock/sched_lock takes). A rotation holds EVERY ring's lock,
 /// always acquired in ascending index order, so no cycle is possible.
-var ring_locks: [smp.max_cores]spinlock.IrqSaveSpinlock = [_]spinlock.IrqSaveSpinlock{.{}} ** smp.max_cores;
+pub var ring_locks: [smp.max_cores]spinlock.IrqSaveSpinlock = [_]spinlock.IrqSaveSpinlock{.{}} ** smp.max_cores;
 
-const RingLockPair = struct { c: usize, saved: [smp.max_cores]u64 };
+pub const RingLockPair = struct { c: usize, saved: [smp.max_cores]u64 };
 
 /// The rotation's ring-lock set: EVERY ring, acquired in ascending index
 /// order (consistent order; the frozen no-cycle rule). The generalized
@@ -433,7 +433,7 @@ const RingLockPair = struct { c: usize, saved: [smp.max_cores]u64 };
 /// against every ring's claim — removal under a ring's own lock is still
 /// the single-owner claim, but the slot-order snapshot needs all locks
 /// held, or two cores could claim the same task off two rings' views.
-fn rotation_lock(c: usize) RingLockPair {
+pub fn rotation_lock(c: usize) RingLockPair {
     var saved: [smp.max_cores]u64 = undefined;
     var r: usize = 0;
     while (r < smp.max_cores) : (r += 1) {
@@ -442,7 +442,7 @@ fn rotation_lock(c: usize) RingLockPair {
     return .{ .c = c, .saved = saved };
 }
 
-fn rotation_unlock(lk: RingLockPair) void {
+pub fn rotation_unlock(lk: RingLockPair) void {
     var r: usize = smp.max_cores;
     while (r > 0) {
         r -= 1;
@@ -470,7 +470,7 @@ fn push_home_locked(id: usize) void {
 ///      rollback-resumed task);
 ///   3. the idle reaper sits on ring 0 exactly (core-0-owned);
 ///   4. no non-`.ready` task is on any ring.
-fn check_ready_membership() void {
+pub fn check_ready_membership() void {
     var c: usize = 0;
     while (c < smp.max_cores) : (c += 1) {
         const ring = &ready_rings[c];
@@ -536,7 +536,7 @@ fn check_ready_membership() void {
     }
 }
 
-var task_count: usize = 0;
+pub var task_count: usize = 0;
 /// The running task per core. Core 0 owns the task ring today
 /// (irq_dispatch gates tick to PE 0 — claim 7339); cores 1-3 sit in
 /// `idle_id` until the tick gate, ring locking, and task migration land.
@@ -566,9 +566,9 @@ fn sched_lock_release() void {
     sched_lock.unlock();
 }
 var enabled_flag: bool = false;
-var switches: u64 = 0;
+pub var switches: u64 = 0;
 var cooperative_yields: u64 = 0;
-var exits: u64 = 0;
+pub var exits: u64 = 0;
 /// SMP lift (claim 8477 follow-up) evidence: how many times a secondary
 /// core staged a real task (WFE->task jump or secondary preemption).
 /// Printed once per change from the shell idle loop (main context).
@@ -612,17 +612,17 @@ var park_spsr: [smp.max_cores]u64 = [_]u64{ 0, 0, 0, 0 };
 /// Distinct from `timer.ticks` (timer deliveries, including polls) because
 /// the scheduler may be inactive or the timer path may change; the sleep
 /// contract is in SCHEDULER ticks.
-var tick_count: u64 = 0;
+pub var tick_count: u64 = 0;
 
 /// Restored-context staging, PER-CORE: written by `switch_context`/
 /// `stage_selected` (rotation context) and applied by `apply_pending`
 /// (IRQ context) on the SAME core — staging and apply never cross cores,
 /// so indexing both by the running core keeps a switch atomic against that
 /// core's own ticks. Cores 1-3 hold idle staging until they run tasks.
-var pending_sp: [smp.max_cores]u64 = [_]u64{0} ** smp.max_cores;
-var pending_elr: [smp.max_cores]u64 = [_]u64{0} ** smp.max_cores;
-var pending_spsr: [smp.max_cores]u64 = [_]u64{0} ** smp.max_cores;
-var pending_sp_el0: [smp.max_cores]u64 = [_]u64{0} ** smp.max_cores;
+pub var pending_sp: [smp.max_cores]u64 = [_]u64{0} ** smp.max_cores;
+pub var pending_elr: [smp.max_cores]u64 = [_]u64{0} ** smp.max_cores;
+pub var pending_spsr: [smp.max_cores]u64 = [_]u64{0} ** smp.max_cores;
+pub var pending_sp_el0: [smp.max_cores]u64 = [_]u64{0} ** smp.max_cores;
 var pending_ttbr0: [smp.max_cores]u64 = [_]u64{0} ** smp.max_cores;
 
 /// Task reports (main-context console discipline, claim 9187): a task
@@ -663,18 +663,18 @@ var sleep_report_name: []const u8 = "";
 var sleep_report_ticks: u64 = 0;
 
 /// The demo worker's static stack.
-var worker_stack: [task_stack_size]u8 align(16) = undefined;
+pub var worker_stack: [task_stack_size]u8 align(16) = undefined;
 /// EL1 exception stack used while the EL0 task is in an SVC or timer vector.
-var user_kernel_stack: [task_stack_size]u8 align(16) = undefined;
+pub var user_kernel_stack: [task_stack_size]u8 align(16) = undefined;
 /// Stack visible to the EL0 task itself through SP_EL0. Its dedicated linker
 /// section is page-aligned so the MMU can grant this page range EL0 RW+XN
 /// without exposing adjacent kernel BSS.
-var user_stack: [task_stack_size]u8 align(4096) linksection(user_stack_section) = undefined;
+pub var user_stack: [task_stack_size]u8 align(4096) linksection(user_stack_section) = undefined;
 /// EL0-visible, scheduler-written witness. The initial user frame receives its
 /// address in x9; the payload waits for a non-zero value before invoking
 /// sys_yield. It lives in the already-mapped user BSS aperture and exposes no
 /// privileged state beyond the fact that this task was preempted by a tick.
-var user_timer_preemptions: u64 align(8) linksection(user_stack_section) = 0;
+pub var user_timer_preemptions: u64 align(8) linksection(user_stack_section) = 0;
 /// The idle task's static stack (BSS, like every other kernel global).
 var idle_stack: [task_stack_size]u8 align(16) = undefined;
 /// The monitor `spawn` command's dedicated demo stack; one spawn only, so
@@ -1069,7 +1069,7 @@ pub fn scheduling_active() bool {
 /// reserved and zeroed beneath it, so the restore macro's `sub sp, x0,
 /// #fp_save_bytes` + FP pops land in valid zeros when a fresh task is
 /// first scheduled.
-fn build_initial_frame(stack: []u8, entry: u64) u64 {
+pub fn build_initial_frame(stack: []u8, entry: u64) u64 {
     _ = entry; // ELR carries the entry; the frame only needs x30 = park
     const frame = stack[stack.len - frame_bytes ..];
     @memset(frame, 0);
@@ -1083,7 +1083,7 @@ fn build_initial_frame(stack: []u8, entry: u64) u64 {
 /// What a task's entry `ret`s to if it ever returns: park forever. Also
 /// the x30 slot of every synthetic initial frame (belt and suspenders —
 /// the worker never returns). WFE on aarch64, nop elsewhere (host tests).
-fn park() noreturn {
+pub fn park() noreturn {
     while (true) {
         if (comptime builtin.cpu.arch == .aarch64) {
             asm volatile ("wfe");
@@ -1175,7 +1175,7 @@ fn merged_next(c: usize, after: usize) ?MergedPick {
 /// its ring, so no other core can ever select it. After a preemption
 /// push the merged view is never empty (the preempted task itself is
 /// reached at the wrap, preserving the old lone-task self-rotation).
-fn ring_claim(c: usize, after: usize) ?usize {
+pub fn ring_claim(c: usize, after: usize) ?usize {
     const p = merged_next(c, after) orelse return null;
     _ = ready_rings[p.from].remove(p.id);
     if (p.from != c) {
@@ -1203,7 +1203,7 @@ fn ring_claim(c: usize, after: usize) ?usize {
 
 /// The test-facing / pre-check probe: what would `ring_claim` pick on
 /// core `cid` after slot `after`, WITHOUT claiming it.
-fn next_runnable_for(after: usize, cid: usize) ?usize {
+pub fn next_runnable_for(after: usize, cid: usize) ?usize {
     if (task_count == 0) return null;
     const p = merged_next(cid, after) orelse return null;
     return p.id;
@@ -1899,7 +1899,7 @@ pub fn reap(id: usize) bool {
 /// exited process's allocator-backed pages, so a permanent occupant
 /// (COUNTER.BIN) coexists with a steady exec → exit → reap → re-exec
 /// cycle without leaking.
-fn reap_one_zombie() void {
+pub fn reap_one_zombie() void {
     var i: usize = 0;
     while (i < max_tasks) : (i += 1) {
         // Claim 9094 (#810): validate the slot BEFORE reading its state —
@@ -1929,7 +1929,7 @@ fn reap_one_zombie() void {
 /// in a main-context loop sleeps until the next interrupt and can stall the
 /// polled-RX loop on VZ (claim 6684), so the idle task uses the same
 /// proven bounded delay between reap passes.
-fn idle_entry() void {
+pub fn idle_entry() void {
     while (true) {
         reap_one_zombie();
         if (comptime builtin.cpu.arch == .aarch64) {
@@ -2068,7 +2068,7 @@ pub fn tick() void {
 /// Tick-only wrapper around the pure switch core. Keeping the source of the
 /// switch explicit prevents a cooperative yield from masquerading as the
 /// timer-preemption witness inherited from claim 8215.
-fn timer_switch_context(frame_sp: u64, elr: u64, spsr: u64, sp_el0: u64) void {
+pub fn timer_switch_context(frame_sp: u64, elr: u64, spsr: u64, sp_el0: u64) void {
     if ((spsr & 0xf) == spsr_el0t_irqs) user_timer_preemptions +%= 1;
     switch_context(frame_sp, elr, spsr, sp_el0);
 }
@@ -2502,1026 +2502,4 @@ pub fn is_blocked(id: usize) bool {
 pub fn terminated_status(id: usize) ?u64 {
     if (!is_terminated(id)) return null;
     return tasks[id].exit_status;
-}
-
-// ---------------------------------------------------------------------------
-// Tests (host-side; the asm tick is proven on real VZ hardware by the
-// class B gate tools/verify-live-tasks.sh)
-// ---------------------------------------------------------------------------
-
-test "scheduler: init registers the shell and idle tasks; start flips enabled" {
-    try std.testing.expectEqual(@as(usize, 0), init());
-    // Claim 6729: the pool starts as shell + the scheduler-owned idle task
-    // (the idle task's synthetic frame targets `idle_entry`).
-    try std.testing.expectEqual(@as(usize, 2), task_count);
-    try std.testing.expectEqualStrings("shell", tasks[0].name);
-    try std.testing.expectEqualStrings("idle", tasks[idle_id].name);
-    try std.testing.expectEqual(State.ready, tasks[idle_id].state);
-    try std.testing.expectEqual(@intFromPtr(&idle_entry), tasks[idle_id].elr);
-    try std.testing.expect(!enabled());
-    try std.testing.expect(!scheduling_active());
-    start();
-    try std.testing.expect(enabled());
-    // Two runnable tasks (shell + idle) are enough for the tick to switch.
-    try std.testing.expect(scheduling_active());
-    // Claim 0826: shell + idle leave three free slots (the capacity gate).
-    try std.testing.expect(has_free_slot());
-}
-
-test "scheduler: register_worker builds a valid synthetic frame" {
-    _ = init();
-    const entry: u64 = 0x1234_5678_9abc_def0;
-    try std.testing.expectEqual(@as(usize, 1), register_worker(entry).?);
-    try std.testing.expectEqual(@as(usize, 3), task_count); // shell + idle + worker
-    const t = &tasks[1];
-    try std.testing.expectEqual(entry, t.elr);
-    try std.testing.expectEqual(spsr_el1h_irqs, t.spsr);
-    try std.testing.expectEqual(State.ready, t.state);
-    // Frame: 160 bytes below the stack top; the x30 slot holds the park
-    // address; every other slot is zeroed (the stub pops them as x0..x17).
-    const stack_top = @intFromPtr(&worker_stack) + worker_stack.len;
-    try std.testing.expectEqual(stack_top - frame_bytes, t.sp);
-    try std.testing.expectEqual(@intFromPtr(&park), std.mem.readInt(u64, @as(*const [8]u8, @ptrFromInt(t.sp)), .little));
-    var i: usize = 8;
-    while (i < frame_bytes) : (i += 8) {
-        try std.testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, @as(*const [8]u8, @ptrFromInt(t.sp + i)), .little));
-    }
-    // Milestone sixteen C3 (claim 0339): the pool is shell + idle +
-    // worker + EIGHT user slots (eight live programs at the 11/11 budget);
-    // a registration beyond the 11-slot budget fails (bounded).
-    try std.testing.expectEqual(@as(usize, 2), register_user(0x3333, 0).?);
-    try std.testing.expectEqual(@as(usize, 3), register_worker(0).?);
-    try std.testing.expectEqual(@as(usize, 4), register_worker(0).?);
-    try std.testing.expectEqual(@as(usize, 5), register_worker(0).?);
-    try std.testing.expectEqual(@as(usize, 6), register_worker(0).?);
-    try std.testing.expectEqual(@as(usize, 7), register_worker(0).?);
-    try std.testing.expectEqual(@as(usize, 8), register_worker(0).?);
-    try std.testing.expectEqual(@as(usize, 9), register_worker(0).?);
-    try std.testing.expectEqual(@as(usize, 11), task_count);
-    try std.testing.expect(register_worker(0) == null);
-    // Claim 0826: capacity is observable — the full pool has no free slot.
-    try std.testing.expect(!has_free_slot());
-}
-
-test "scheduler: user tasks are any-core and the shell/idle stay on core 0" {
-    // Claim 9498: the console TX is locked (2369) and the userspace gate
-    // serializes syscalls, so USER tasks default to ANY core. The shell
-    // (console owner / command runner) and the shared idle slot (core 0's
-    // reaper — one frame, one owner) stay core-0.
-    _ = init();
-    const worker = register_worker(0x1111).?; // secondary_ok = true
-    try std.testing.expectEqual(@as(usize, 1), worker);
-    try std.testing.expect(tasks[worker].secondary_ok);
-    try std.testing.expect(!tasks[0].secondary_ok); // shell stays on core 0
-    try std.testing.expect(!tasks[idle_id].secondary_ok); // idle is core-0's reaper
-    const user = register_user(0x2222, 0).?;
-    try std.testing.expectEqual(@as(usize, 2), user);
-    try std.testing.expect(tasks[user].secondary_ok); // any-core default
-    try std.testing.expectEqual(@as(usize, 0), tasks[user].pin_core);
-    // Core 1 walking from the shell finds the worker first (slot order).
-    try std.testing.expectEqual(@as(?usize, worker), next_runnable_for(0, 1));
-    // Core 1 from the worker finds the user task (now eligible) ahead of
-    // the wrap.
-    try std.testing.expectEqual(@as(?usize, user), next_runnable_for(worker, 1));
-    // Core 0 picks the user task normally too.
-    try std.testing.expectEqual(@as(?usize, user), next_runnable_for(worker, 0));
-}
-
-test "scheduler: pin_task restricts a user task to exactly one core" {
-    // SMP user tasks (claim 2369 + 9498): `exec -c<core>` pins a spawned
-    // task; `pin_task(.., 0)` pins back to CORE 0 only (the any-core
-    // default is a RESTRICTION removed by pinning, never re-added).
-    _ = init();
-    const worker = register_worker(0x1111).?;
-    const user = register_user(0x2222, 0).?;
-    try std.testing.expect(tasks[user].secondary_ok); // any-core default
-    try std.testing.expect(pin_task(user, 1));
-    try std.testing.expectEqual(@as(usize, 1), tasks[user].pin_core);
-    try std.testing.expect(tasks[user].secondary_ok); // pinned off core 0
-    // Core 1 from the worker finds the pinned user task (it is eligible
-    // AND ahead of the worker in the wrap order).
-    try std.testing.expectEqual(@as(?usize, user), next_runnable_for(worker, 1));
-    // Core 0 skips the pinned task entirely — from the worker it wraps
-    // straight to the idle fallback, never to the user task.
-    try std.testing.expectEqual(@as(?usize, idle_id), next_runnable_for(worker, 0));
-    // Core 1 may also still pick the worker (any-core, secondary_ok).
-    try std.testing.expectEqual(@as(?usize, worker), next_runnable_for(user, 1));
-    // Pinning to core 0 (the WM registration) makes the task core-0-ONLY:
-    // core 1 skips it again and core 0 picks it again.
-    try std.testing.expect(pin_task(user, 0));
-    try std.testing.expectEqual(@as(usize, 0), tasks[user].pin_core);
-    try std.testing.expect(!tasks[user].secondary_ok);
-    try std.testing.expectEqual(@as(?usize, worker), next_runnable_for(worker, 1));
-    try std.testing.expectEqual(@as(?usize, user), next_runnable_for(worker, 0));
-    // Unknown ids are refused.
-    try std.testing.expect(!pin_task(max_tasks + 4, 1));
-}
-
-test "scheduler: core 0 steals an unpinned ready task parked on ring 1 (#857)" {
-    // The issue-857 gap: a task preempted on core 1 sits on ring 1 while
-    // core 0 needs work. Core 0's rotation must pull it in slot order,
-    // and the claim must drop it off ring 1 (single owner — no other
-    // core can select it afterwards).
-    _ = init();
-    const worker = register_worker(0x1111).?; // slot 1
-    const user = register_user(0x2222, 0).?; // slot 2, any-core
-    // Simulate a preemption on core 1: the user parks on ring 1.
-    try std.testing.expect(ready_rings[0].remove(user));
-    ready_rings[1].push(user);
-    check_ready_membership();
-    // Core 0 walking from the worker steals the ring-1 user (slot 2)
-    // ahead of the idle fallback (slot 10).
-    try std.testing.expectEqual(@as(?usize, user), next_runnable_for(worker, 0));
-    // The claim removes it from ring 1.
-    try std.testing.expectEqual(@as(?usize, user), ring_claim(0, worker));
-    try std.testing.expect(!ready_rings[1].contains(user));
-    try std.testing.expect(!ready_rings[0].contains(user));
-}
-
-test "scheduler: core-0 yield steals ring-1 work synchronously (#857)" {
-    // End to end through the real rotation: the steal happens AT the
-    // block/yield point — no tick, no park — which is the issue-857
-    // success criterion on two cores.
-    _ = init();
-    _ = register_worker(0x2000).?; // slot 1
-    _ = register_user(0x3000, 0).?; // slot 2
-    start();
-    try std.testing.expect(yield_current()); // shell -> worker
-    try std.testing.expectEqual(@as(usize, 1), current[0]);
-    // The user is preempted on core 1: parked on ring 1 while core 1 is
-    // busy elsewhere.
-    try std.testing.expect(ready_rings[0].remove(2));
-    ready_rings[1].push(2);
-    // Core 0 yields: the worker rejoins ring 0 and the rotation steals
-    // the ring-1 user immediately.
-    try std.testing.expect(yield_current()); // worker -> user (stolen)
-    try std.testing.expectEqual(@as(usize, 2), current[0]);
-    try std.testing.expect(!ready_rings[1].contains(2));
-    check_ready_membership();
-}
-
-test "scheduler: secondaries steal from each other's rings; pins stay home (#857)" {
-    // The four-core shape (max_cores = 4): a secondary's rotation sees
-    // every ring, not just ring 0 + its own. Pinned tasks are still
-    // never stolen — the pin ring keeps them.
-    _ = init();
-    const worker = register_worker(0x1111).?; // slot 1, any-core
-    const user = register_user(0x2222, 0).?; // slot 2, any-core
-    const pinned = register_user(0x3333, 0).?; // slot 3, pinned to core 2
-    try std.testing.expect(pin_task(pinned, 2));
-    // Park the any-core tasks on ring 2 (as if preempted there).
-    try std.testing.expect(ready_rings[0].remove(worker));
-    try std.testing.expect(ready_rings[0].remove(user));
-    ready_rings[2].push(worker);
-    ready_rings[2].push(user);
-    check_ready_membership();
-    // Core 1 steals across in slot order: worker, then user. The
-    // core-2-pinned task is skipped, and with everything eligible gone
-    // the scan finds nothing (idle is never stealable).
-    try std.testing.expectEqual(@as(?usize, worker), next_runnable_for(0, 1));
-    try std.testing.expectEqual(@as(?usize, worker), ring_claim(1, 0));
-    try std.testing.expectEqual(@as(?usize, user), next_runnable_for(worker, 1));
-    try std.testing.expectEqual(@as(?usize, user), ring_claim(1, worker));
-    try std.testing.expect(next_runnable_for(user, 1) == null);
-    // Core 0 steals from ring 2 the same way, then falls back to idle.
-    _ = init();
-    const w2 = register_worker(0x1111).?;
-    const u_two = register_user(0x2222, 0).?;
-    try std.testing.expect(ready_rings[0].remove(u_two));
-    ready_rings[2].push(u_two);
-    try std.testing.expectEqual(@as(?usize, w2), next_runnable_for(0, 0));
-    try std.testing.expectEqual(@as(?usize, u_two), next_runnable_for(w2, 0));
-}
-
-test "scheduler: register_user separates EL1 exception and EL0 stacks" {
-    _ = init();
-    _ = register_worker(0x2000).?;
-    const entry: u64 = 0x3000;
-    try std.testing.expectEqual(@as(usize, 2), register_user(entry, 0).?);
-    const task = &tasks[2];
-    try std.testing.expectEqualStrings("user-el0", task.name);
-    try std.testing.expectEqual(entry, task.elr);
-    try std.testing.expectEqual(spsr_el0t_irqs, task.spsr);
-    try std.testing.expectEqual(@intFromPtr(&user_kernel_stack) + user_kernel_stack.len - frame_bytes, task.sp);
-    try std.testing.expectEqual(@intFromPtr(&user_stack) + user_stack.len, task.sp_el0);
-    try std.testing.expect(task.sp + frame_bytes != task.sp_el0);
-    const frame: *exceptions.VectorFrame = @ptrFromInt(task.sp);
-    try std.testing.expectEqual(@intFromPtr(&user_timer_preemptions), exceptions.frame_read(frame, 9));
-}
-
-test "scheduler: register_exec_user passes argc and argv VA through the x0/x1 frame slots" {
-    // Card 3e (claim 4636): the entry-contract extension — the exec'd
-    // program's `_start` receives argc in x0 and the argv block VA in x1.
-    // `build_initial_frame` zeroes the frame, so `register_exec_user`
-    // writes the two slots (the same seam `register_user` uses for the
-    // timer-witness VA in slot x9). A no-args exec passes 0/0: identical
-    // to the zeroed frame, so earlier cards' no-args behavior is unchanged.
-    _ = init();
-    _ = register_worker(0x2000).?;
-    var kstack: [task_stack_size]u8 align(16) = undefined;
-    const id = register_exec_user(userspace.text_va, 0x4000_0000, 100, 0x8000_0000, 8192, &kstack, 2, 0x4000_0064).?;
-    const frame: *exceptions.VectorFrame = @ptrFromInt(tasks[id].sp);
-    try std.testing.expectEqual(@as(u64, 2), exceptions.frame_read(frame, 0));
-    try std.testing.expectEqual(@as(u64, 0x4000_0064), exceptions.frame_read(frame, 1));
-    const id2 = register_exec_user(userspace.text_va, 0x4000_0000, 100, 0x8000_0000, 8192, &kstack, 0, 0).?;
-    const frame2: *exceptions.VectorFrame = @ptrFromInt(tasks[id2].sp);
-    try std.testing.expectEqual(@as(u64, 0), exceptions.frame_read(frame2, 0));
-    try std.testing.expectEqual(@as(u64, 0), exceptions.frame_read(frame2, 1));
-}
-
-test "scheduler: round-robin alternates and round-trips saved context" {
-    _ = init();
-    const worker_entry: u64 = 0x2000;
-    _ = register_worker(worker_entry).?;
-    _ = register_user(0x3000, 0).?;
-    start();
-    // First switch: the shell is preempted at pc 0x1000; the worker is
-    // restored to its synthetic frame.
-    switch_context(0x1000, 0x1000, 0x5, 0xaaaa);
-    try std.testing.expectEqual(@as(usize, 1), current[0]);
-    try std.testing.expectEqual(@as(u64, 1), switches);
-    try std.testing.expectEqual(@as(u64, 1), tasks[0].saves);
-    try std.testing.expectEqual(@as(u64, 0), tasks[0].resumes);
-    try std.testing.expectEqual(@as(u64, 1), tasks[1].resumes);
-    try std.testing.expectEqual(@as(u64, 0), tasks[1].saves);
-    try std.testing.expectEqual(tasks[1].sp, pending_sp[0]);
-    try std.testing.expectEqual(worker_entry, pending_elr[0]);
-    try std.testing.expectEqual(spsr_el1h_irqs, pending_spsr[0]);
-    // Second switch: the worker is preempted; the user task is restored to
-    // its synthetic EL0t frame.
-    switch_context(0x2000, 0x2000, 0x5, 0xbbbb);
-    try std.testing.expectEqual(@as(usize, 2), current[0]);
-    try std.testing.expectEqual(@as(u64, 2), switches);
-    try std.testing.expectEqual(@as(u64, 1), tasks[1].saves);
-    try std.testing.expectEqual(@as(u64, 1), tasks[1].resumes);
-    try std.testing.expectEqual(tasks[2].sp, pending_sp[0]);
-    try std.testing.expectEqual(@as(u64, 0x3000), pending_elr[0]);
-    try std.testing.expectEqual(spsr_el0t_irqs, pending_spsr[0]);
-    // Third switch: the user is preempted; the idle task is restored.
-    switch_context(0x3000, 0x3000, 0x0, 0xcccc);
-    try std.testing.expectEqual(@as(usize, idle_id), current[0]);
-    try std.testing.expectEqual(@as(u64, 3), switches);
-    try std.testing.expectEqual(@as(u64, 1), tasks[2].saves);
-    try std.testing.expectEqual(@as(u64, 1), tasks[idle_id].resumes);
-    try std.testing.expectEqual(tasks[idle_id].sp, pending_sp[0]);
-    // Fourth switch: the idle task is preempted; the shell is restored to
-    // its exact saved context (the round-trip).
-    switch_context(0x4000, 0x4000, 0x5, 0xdddd);
-    try std.testing.expectEqual(@as(usize, 0), current[0]);
-    try std.testing.expectEqual(@as(u64, 4), switches);
-    try std.testing.expectEqual(@as(u64, 1), tasks[idle_id].saves);
-    try std.testing.expectEqual(@as(u64, 1), tasks[0].resumes);
-    try std.testing.expectEqual(@as(u64, 0x1000), pending_sp[0]);
-    try std.testing.expectEqual(@as(u64, 0x1000), pending_elr[0]);
-    try std.testing.expectEqual(@as(u64, 0x5), pending_spsr[0]);
-    try std.testing.expectEqual(@as(u64, 0xaaaa), pending_sp_el0[0]);
-    // Fifth switch returns to the worker's saved context (the round-trip).
-    switch_context(0x1000, 0x1001, 0x5, 0xaaaa);
-    try std.testing.expectEqual(@as(usize, 1), current[0]);
-    try std.testing.expectEqual(@as(u64, 5), switches);
-    try std.testing.expectEqual(@as(u64, 2), tasks[0].saves);
-    try std.testing.expectEqual(@as(u64, 1), tasks[0].resumes);
-    try std.testing.expectEqual(@as(u64, 1), tasks[1].saves);
-    try std.testing.expectEqual(@as(u64, 2), tasks[1].resumes);
-}
-
-test "scheduler: mixed EL1h and EL0t round-robin restores SP_EL0" {
-    _ = init();
-    _ = register_worker(0x2000).?;
-    _ = register_user(0x3000, 0).?;
-    start();
-    const initial_user_sp = tasks[2].sp_el0;
-
-    switch_context(0x1000, 0x1000, spsr_el1h_irqs, 0xaaaa); // shell -> worker
-    try std.testing.expectEqual(@as(usize, 1), current[0]);
-    switch_context(0x2000, 0x2000, spsr_el1h_irqs, 0xbbbb); // worker -> user
-    try std.testing.expectEqual(@as(usize, 2), current[0]);
-    try std.testing.expectEqual(spsr_el0t_irqs, pending_spsr[0]);
-    try std.testing.expectEqual(initial_user_sp, pending_sp_el0[0]);
-
-    const preempted_user_sp: u64 = initial_user_sp - 16;
-    // Claim 6729: the preempted EL0 task's successor is the idle task
-    // (sp_el0 = 0 for an EL1h task), then the shell on the next switch.
-    switch_context(0x3000, 0x3004, spsr_el0t_irqs, preempted_user_sp); // user -> idle
-    try std.testing.expectEqual(@as(usize, idle_id), current[0]);
-    try std.testing.expectEqual(@as(u64, 0), pending_sp_el0[0]);
-    try std.testing.expectEqual(preempted_user_sp, tasks[2].sp_el0);
-    switch_context(0x4000, 0x4000, spsr_el1h_irqs, 0xcccc); // idle -> shell
-    try std.testing.expectEqual(@as(usize, 0), current[0]);
-    try std.testing.expectEqual(@as(u64, 0xaaaa), pending_sp_el0[0]);
-
-    switch_context(0x1000, 0x1004, spsr_el1h_irqs, 0xaaaa);
-    switch_context(0x2000, 0x2004, spsr_el1h_irqs, 0xbbbb);
-    try std.testing.expectEqual(@as(usize, 2), current[0]);
-    try std.testing.expectEqual(preempted_user_sp, pending_sp_el0[0]);
-    try std.testing.expectEqual(@as(u64, 0x3004), pending_elr[0]);
-}
-
-test "scheduler: only a tick preemption publishes the EL0 witness" {
-    _ = init();
-    _ = register_worker(0x2000).?;
-    _ = register_user(0x3000, 0).?;
-    start();
-    switch_context(0x1000, 0x1000, spsr_el1h_irqs, 0xaaaa); // shell -> worker
-    switch_context(0x2000, 0x2000, spsr_el1h_irqs, 0xbbbb); // worker -> user
-    try std.testing.expectEqual(@as(u64, 0), user_timer_preemption_count());
-    // Cooperative switching cannot satisfy the claim-8215 witness. The
-    // user's successor is the idle task (claim 6729), then the shell.
-    try std.testing.expect(yield_current()); // user -> idle
-    try std.testing.expectEqual(@as(u64, 0), user_timer_preemption_count());
-    switch_context(0x4000, 0x4000, spsr_el1h_irqs, 0xcccc); // idle -> shell
-    switch_context(0x1004, 0x1004, spsr_el1h_irqs, 0xaaaa); // shell -> worker
-    switch_context(0x2004, 0x2004, spsr_el1h_irqs, 0xbbbb); // worker -> user
-    timer_switch_context(0x3000, 0x3004, spsr_el0t_irqs, tasks[2].sp_el0);
-    try std.testing.expectEqual(@as(u64, 1), user_timer_preemption_count());
-}
-
-test "scheduler: the worker's advance counter belongs to its own task" {
-    _ = init();
-    _ = register_worker(0x2000).?;
-    current[0] = 1; // pretend the worker is running
-    note_advance();
-    note_advance();
-    note_advance();
-    try std.testing.expectEqual(@as(u64, 3), tasks[1].advances);
-    try std.testing.expectEqual(@as(u64, 0), tasks[0].advances);
-}
-
-test "scheduler: worker report snapshots once and prints from the shell side" {
-    _ = init();
-    _ = register_worker(0x2000).?;
-    current[0] = 1; // pretend the worker is running
-    note_advance();
-    note_advance();
-    request_report();
-    request_report(); // second request while pending: keeps the first snapshot
-    var mock = console.MockConsole(256){};
-    var con = mock.console();
-    maybe_report(&con);
-    try std.testing.expectEqualStrings("tasks worker advances=2\n", mock.contents());
-    // The flag is consumed: a second print emits nothing.
-    mock.reset();
-    maybe_report(&con);
-    try std.testing.expectEqual(@as(usize, 0), mock.contents().len);
-}
-
-test "scheduler: stats and task_info report deterministic state" {
-    _ = init();
-    _ = register_worker(0x2000).?;
-    start();
-    const s = stats();
-    try std.testing.expect(s.enabled);
-    try std.testing.expectEqual(@as(usize, 3), s.count); // shell + idle + worker
-    try std.testing.expectEqual(@as(usize, 0), s.zombies);
-    try std.testing.expectEqual(@as(usize, 0), s.current);
-    try std.testing.expectEqual(@as(u64, 0), s.switches);
-    const shell = task_info(0).?;
-    try std.testing.expectEqualStrings("shell", shell.name);
-    try std.testing.expectEqual(State.ready, shell.state);
-    try std.testing.expectEqual(@as(u64, 0), shell.saves);
-    try std.testing.expectEqual(@as(u64, 0), shell.advances);
-    const worker = task_info(1).?;
-    try std.testing.expectEqualStrings("worker", worker.name);
-    try std.testing.expect(task_info(2) == null);
-    const idle = task_info(idle_id).?;
-    try std.testing.expectEqualStrings("idle", idle.name);
-    try std.testing.expectEqual(State.ready, idle.state);
-}
-
-test "scheduler: cooperative exit is non-runnable and reports from shell" {
-    _ = init();
-    _ = register_worker(0x2000).?;
-    _ = register_user(0x3000, 0).?;
-    start();
-    try std.testing.expect(yield_current()); // shell -> worker
-    try std.testing.expect(yield_current()); // worker -> user
-    try std.testing.expectEqual(@as(usize, 2), current_id());
-    try std.testing.expect(exit_current(7)); // user -> idle (the ring's fallback)
-    try std.testing.expectEqual(@as(usize, idle_id), current_id());
-    try std.testing.expect(is_terminated(2));
-    try std.testing.expectEqual(@as(?u64, 7), terminated_status(2));
-    // The next switches skip the zombie user: idle -> shell -> worker -> idle.
-    try std.testing.expect(yield_current());
-    try std.testing.expectEqual(@as(usize, 0), current_id());
-    try std.testing.expect(yield_current());
-    try std.testing.expectEqual(@as(usize, 1), current_id());
-    try std.testing.expect(yield_current());
-    try std.testing.expectEqual(@as(usize, idle_id), current_id());
-    var mock = console.MockConsole(128){};
-    var con = mock.console();
-    maybe_report(&con);
-    // Claim 3848: the same exit also produced the PROCESS-level report
-    // (the exited user-el0 process keeps its status past the task reap).
-    try std.testing.expectEqualStrings("tasks user-el0 exited status=7\nprocs user-el0 exited status=7\n", mock.contents());
-}
-
-test "scheduler: sleep_current blocks, wakes on the deadline tick, and rolls back" {
-    _ = init();
-    _ = register_worker(0x2000).?;
-    _ = register_user(0x3000, 0).?;
-    start();
-    // current is shell (0). Sleep 2 ticks: shell -> blocked, worker next.
-    try std.testing.expect(sleep_current(2));
-    try std.testing.expect(is_blocked(0));
-    try std.testing.expectEqual(@as(u64, 2), tasks[0].wakeup_tick);
-    try std.testing.expectEqual(@as(usize, 1), current[0]);
-    // The blocked task drops out of the ring: worker -> user -> idle -> worker.
-    try std.testing.expect(yield_current());
-    try std.testing.expectEqual(@as(usize, 2), current[0]);
-    try std.testing.expect(yield_current());
-    try std.testing.expectEqual(@as(usize, idle_id), current[0]);
-    try std.testing.expect(yield_current());
-    try std.testing.expectEqual(@as(usize, 1), current[0]);
-    // Tick 1: deadline (tick_count 0 + 2) not reached yet.
-    on_tick();
-    try std.testing.expect(is_blocked(0));
-    try std.testing.expectEqual(@as(u64, 1), tick_count);
-    // Tick 2: the timer-driven wakeup flips the sleeper back to ready.
-    on_tick();
-    try std.testing.expect(!is_blocked(0));
-    try std.testing.expectEqual(State.ready, tasks[0].state);
-    try std.testing.expectEqual(@as(u64, 0), tasks[0].wakeup_tick);
-    // The ring reaches the woken shell again.
-    try std.testing.expect(yield_current()); // worker -> user
-    try std.testing.expectEqual(@as(usize, 2), current[0]);
-    try std.testing.expect(yield_current()); // user -> idle
-    try std.testing.expect(yield_current()); // idle -> shell
-    try std.testing.expectEqual(@as(usize, 0), current[0]);
-}
-
-test "scheduler: sleep guards — zero clamps to one tick, idle and inactive fail" {
-    _ = init();
-    _ = register_worker(0x2000).?;
-    _ = register_user(0x3000, 0).?;
-    // Inactive pool: no switching.
-    try std.testing.expect(!sleep_current(1));
-    start();
-    // sleep(0) clamps to one tick and still blocks.
-    try std.testing.expect(sleep_current(0));
-    try std.testing.expectEqual(@as(u64, 1), tasks[0].wakeup_tick);
-    // The idle task cannot sleep (it is the ring's fallback).
-    current[0] = idle_id;
-    try std.testing.expect(!sleep_current(1));
-    try std.testing.expect(!is_blocked(idle_id));
-    // A zombie cannot sleep either.
-    tasks[1].state = .zombie;
-    current[0] = 1;
-    try std.testing.expect(!sleep_current(1));
-}
-
-test "scheduler: two live user tasks coexist with their own roots and regions" {
-    // Claim 0826: the exec gate is gone — a second user program loads and
-    // runs while the first is alive. Give each a DISTINCT user root and
-    // user stack (per-process address spaces), and pin the per-task
-    // syscall regions that follow the TCB at SVC entry.
-    _ = init();
-    _ = register_worker(0x2000).?;
-    // Build A's root FIRST (the boot payload registers against the current
-    // global root, like the real boot), then B's own root for the second
-    // live program.
-    const root_a = (mmu.build_user_root(userspace.text_va, 0x1000, 64, userspace.stack_va, 0x2000, 8192) orelse return error.TestUnexpectedResult);
-    // Pin the boot payload's stack placement explicitly: the module-global
-    // current_stack_va can be left at a rebuilt (ASLR) placement by earlier
-    // exec-path tests in the same process, and register_user derives the
-    // payload's stack region from it. This test pins the per-task regions
-    // mechanism, not the ASLR default.
-    userspace.set_stack_va(userspace.stack_va);
-    const user_a = register_user(0x3000, 0).?;
-    try std.testing.expectEqual(@as(usize, 2), user_a);
-    const root_b = (mmu.build_user_root(userspace.text_va, 0x1000, 64, 0x1a400000, 0x3000, 8192) orelse return error.TestUnexpectedResult);
-    var kstack_b_bytes: [task_stack_size]u8 align(16) = undefined;
-    const kstack_b = kstack_b_bytes[0..];
-    const user_b = register_exec_user(0x4000, root_b, 64, 0x1a400000, 8192, kstack_b, 0, 0).?;
-    try std.testing.expectEqual(@as(usize, 3), user_b);
-    // Card 3g (claim 5795): the 7-slot pool holds FOUR user tasks. Fill
-    // the remaining two slots so the capacity gate is observable at the
-    // new budget.
-    var kstack_c_bytes: [task_stack_size]u8 align(16) = undefined;
-    const kstack_c = kstack_c_bytes[0..];
-    const user_c = register_exec_user(0x5000, root_b, 64, 0x1b400000, 8192, kstack_c, 0, 0).?;
-    try std.testing.expectEqual(@as(usize, 4), user_c);
-    var kstack_d_bytes: [task_stack_size]u8 align(16) = undefined;
-    const kstack_d = kstack_d_bytes[0..];
-    const user_d = register_exec_user(0x6000, root_b, 64, 0x1c400000, 8192, kstack_d, 0, 0).?;
-    try std.testing.expectEqual(@as(usize, 5), user_d);
-    // Milestone sixteen C3 (claim 0339): the 11-slot pool holds EIGHT user
-    // tasks. Fill the remaining four slots so the capacity gate is
-    // observable at the new budget.
-    var kstack_e_bytes: [task_stack_size]u8 align(16) = undefined;
-    const kstack_e = kstack_e_bytes[0..];
-    _ = register_exec_user(0x7000, root_b, 64, 0x1d400000, 8192, kstack_e, 0, 0).?;
-    var kstack_f_bytes: [task_stack_size]u8 align(16) = undefined;
-    const kstack_f = kstack_f_bytes[0..];
-    _ = register_exec_user(0x8000, root_b, 64, 0x1e400000, 8192, kstack_f, 0, 0).?;
-    var kstack_g_bytes: [task_stack_size]u8 align(16) = undefined;
-    const kstack_g = kstack_g_bytes[0..];
-    _ = register_exec_user(0x9000, root_b, 64, 0x1f400000, 8192, kstack_g, 0, 0).?;
-    var kstack_h_bytes: [task_stack_size]u8 align(16) = undefined;
-    const kstack_h = kstack_h_bytes[0..];
-    _ = register_exec_user(0xa000, root_b, 64, 0x20400000, 8192, kstack_h, 0, 0).?;
-    try std.testing.expectEqual(@as(usize, 11), task_count); // shell + worker + A..H + idle
-    try std.testing.expect(!has_free_slot());
-    // Each task carries ITS OWN root and apertures.
-    try std.testing.expect(task_ttbr0(user_a) != task_ttbr0(user_b));
-    try std.testing.expectEqual(root_a, task_ttbr0(user_a));
-    try std.testing.expectEqual(root_b, task_ttbr0(user_b));
-    // The current-task regions follow the ring: put A current and read its
-    // regions, then B.
-    current[0] = user_a;
-    const ra = current_user_regions();
-    try std.testing.expectEqual(userspace.text_va, ra.text.base);
-    try std.testing.expectEqual(userspace.stack_va, ra.stack.base);
-    current[0] = user_b;
-    const rb = current_user_regions();
-    try std.testing.expectEqual(userspace.text_va, rb.text.base);
-    try std.testing.expectEqual(@as(u64, 0x1a400000), rb.stack.base);
-    try std.testing.expectEqual(@as(u64, 8192), rb.stack.len);
-    // Restore the ring position before the round-robin exercise (the region
-    // checks above moved `current` for readability).
-    current[0] = 0;
-    // Both run in the ring (round-robin reaches each).
-    start();
-    try std.testing.expect(yield_current()); // shell -> worker
-    try std.testing.expect(yield_current()); // worker -> user A
-    try std.testing.expectEqual(@as(usize, user_a), current_id());
-    try std.testing.expect(yield_current()); // A -> B
-    try std.testing.expectEqual(@as(usize, user_b), current_id());
-    // A ninth user program cannot load: the pool is the capacity gate.
-    try std.testing.expect(register_exec_user(0x5000, root_a, 64, 0x2a400000, 8192, kstack_b, 0, 0) == null);
-}
-
-test "scheduler: lifecycle — spawn, exit to zombie, idle reaps back to free" {
-    _ = init();
-    _ = register_worker(0x2000).?;
-    _ = register_user(0x3000, 0).?;
-    start();
-    // The pool is shell + worker + user + idle; the spare slot is the
-    // monitor demo spawn (claim 6729). One spawn per boot, bounded.
-    try std.testing.expectEqual(@as(usize, 3), spawn_demo().?);
-    try std.testing.expect(spawn_demo() == null);
-    try std.testing.expectEqual(@as(usize, 5), stats().count);
-    try std.testing.expectEqualStrings("spawn-demo", task_info(3).?.name);
-    try std.testing.expectEqual(State.ready, task_info(3).?.state);
-    // user exits -> zombie at slot 2; the ring's next ready task is the
-    // spawn-demo task (slot 3).
-    try std.testing.expect(yield_current()); // shell -> worker
-    try std.testing.expect(yield_current()); // worker -> user
-    try std.testing.expectEqual(@as(usize, 2), current_id());
-    try std.testing.expect(exit_current(7)); // user -> spawn-demo
-    try std.testing.expectEqual(@as(usize, 3), current_id());
-    try std.testing.expectEqual(@as(usize, 1), stats().zombies);
-    try std.testing.expect(is_terminated(2));
-    try std.testing.expectEqual(@as(?u64, 7), terminated_status(2));
-    // The idle task reaps one zombie per iteration; the slot returns free.
-    reap_one_zombie();
-    try std.testing.expect(!is_terminated(2));
-    try std.testing.expectEqual(@as(usize, 0), stats().zombies);
-    try std.testing.expectEqual(@as(usize, 4), stats().count);
-    try std.testing.expect(task_info(2) == null);
-    // The freed slot is spawnable again (the lifecycle is a closed loop).
-    try std.testing.expectEqual(@as(usize, 2), spawn("revived", 0x5000, spsr_el1h_irqs, &worker_stack, 0, 0).?);
-    try std.testing.expectEqual(@as(usize, 5), stats().count);
-    // The shell loop prints the exit, the process-level exit report
-    // (claim 3848: the exited process keeps its status past the reap) and
-    // the reap, in order.
-    var mock = console.MockConsole(256){};
-    var con = mock.console();
-    maybe_report(&con);
-    try std.testing.expectEqualStrings("tasks user-el0 exited status=7\nprocs user-el0 exited status=7\ntasks user-el0 reaped\n", mock.contents());
-}
-
-test "scheduler: two exits in one window report BOTH lines in order" {
-    // Card 3d (claim 1014): the exit/reap reports are FIFOs, not single
-    // first-wins flags — two exits in one idle-loop window print two
-    // `tasks <name> exited status=` lines (and two process reports) in
-    // exit order, and a second drain prints nothing (no double-print).
-    _ = init();
-    _ = register_worker(0x2000).?;
-    _ = register_user(0x3000, 0).?;
-    start();
-    // Exit the user (slot 2, status 43), then the worker (slot 1, status
-    // 9), WITHOUT draining between them.
-    try std.testing.expect(yield_current()); // shell -> worker
-    try std.testing.expect(yield_current()); // worker -> user
-    try std.testing.expectEqual(@as(usize, 2), current_id());
-    try std.testing.expect(exit_current(43)); // user -> idle
-    try std.testing.expectEqual(@as(usize, idle_id), current_id());
-    try std.testing.expect(yield_current()); // idle -> shell
-    try std.testing.expect(yield_current()); // shell -> worker
-    try std.testing.expectEqual(@as(usize, 1), current_id());
-    try std.testing.expect(exit_current(9)); // worker -> idle
-    try std.testing.expectEqual(@as(usize, idle_id), current_id());
-    // One drain prints BOTH exits in order, then nothing more.
-    var mock = console.MockConsole(256){};
-    var con = mock.console();
-    maybe_report(&con);
-    // The task-exit FIFO drains first (both lines, in exit order), then
-    // the process FIFO (the user-el0 process's report), then the reap
-    // FIFO. Every exit printed exactly once, in order, no collapse.
-    try std.testing.expectEqualStrings(
-        "tasks user-el0 exited status=43\n" ++
-            "tasks worker exited status=9\n" ++
-            "procs user-el0 exited status=43\n",
-        mock.contents(),
-    );
-    mock.reset();
-    maybe_report(&con);
-    try std.testing.expectEqual(@as(usize, 0), mock.contents().len);
-}
-
-test "scheduler: two reaps in one window report BOTH reap lines in order" {
-    // Card 3d: the reap report is a FIFO too — two zombies reaped before
-    // the shell drains print two `tasks <name> reaped` lines.
-    _ = init();
-    _ = register_worker(0x2000).?;
-    _ = register_user(0x3000, 0).?;
-    start();
-    try std.testing.expect(yield_current()); // shell -> worker
-    try std.testing.expect(yield_current()); // worker -> user
-    try std.testing.expect(exit_current(43)); // user -> idle
-    try std.testing.expect(yield_current()); // idle -> shell
-    try std.testing.expect(yield_current()); // shell -> worker
-    try std.testing.expect(exit_current(9)); // worker -> idle
-    // Reap BOTH zombies before the shell drains (the idle task's
-    // one-per-iteration reaper makes this the normal window).
-    reap_one_zombie();
-    reap_one_zombie();
-    var mock = console.MockConsole(256){};
-    var con = mock.console();
-    maybe_report(&con);
-    // Reaps scan slots lowest-first, so the worker (slot 1) is reaped
-    // before the user (slot 2) — the FIFO preserves THAT order.
-    try std.testing.expectEqualStrings(
-        "tasks user-el0 exited status=43\n" ++
-            "tasks worker exited status=9\n" ++
-            "procs user-el0 exited status=43\n" ++
-            "tasks worker reaped\n" ++
-            "tasks user-el0 reaped\n",
-        mock.contents(),
-    );
-}
-
-test "scheduler: request_kill refuses unknown, exited, and scheduler-owned targets" {
-    // Card 3c (claim 7786): the kill ARMS a target; the refusals are the
-    // monitor command's exact error strings.
-    _ = init();
-    _ = register_worker(0x2000).?;
-    _ = register_user(0x3000, 0).?;
-    // The shell (0) owns the console and the idle task is scheduler-owned:
-    // neither may be force-terminated.
-    try std.testing.expectEqual(KillResult.refused, request_kill(0));
-    try std.testing.expectEqual(KillResult.refused, request_kill(idle_id));
-    // A free slot and an out-of-range id are not_found.
-    try std.testing.expectEqual(KillResult.not_found, request_kill(3)); // free spare slot
-    try std.testing.expectEqual(KillResult.not_found, request_kill(max_tasks));
-    // Drive the user to a zombie: an exited task is already_exited.
-    start();
-    try std.testing.expect(yield_current()); // shell -> worker
-    try std.testing.expect(yield_current()); // worker -> user
-    try std.testing.expectEqual(@as(usize, 2), current_id());
-    try std.testing.expect(exit_current(43)); // user -> idle
-    try std.testing.expectEqual(KillResult.already_exited, request_kill(2));
-}
-
-test "scheduler: a killed task exits with the reserved status at its next selection" {
-    // Card 3c: `kill` arms the target's TCB (main context); the ring's
-    // next selection of that task converts the selection into the EXISTING
-    // exit path with the reserved status 137 — the killed task never
-    // resumes, and the exit report + reap carry the reserved status.
-    _ = init();
-    _ = register_worker(0x2000).?;
-    _ = register_user(0x3000, 0).?;
-    start();
-    // The shell arms the kill on the user task (slot 2).
-    try std.testing.expectEqual(KillResult.ok, request_kill(2));
-    // The next switches walk the ring; when the ring SELECTS the user, the
-    // kill branch converts the selection into exit_current(137).
-    try std.testing.expect(yield_current()); // shell -> worker
-    try std.testing.expectEqual(@as(usize, 1), current_id());
-    try std.testing.expect(yield_current()); // worker -> user -> killed -> idle
-    try std.testing.expectEqual(@as(usize, idle_id), current_id());
-    try std.testing.expect(is_terminated(2));
-    try std.testing.expectEqual(@as(?u64, reserved_kill_status), terminated_status(2));
-    try std.testing.expectEqual(@as(u64, 1), exit_count());
-    // The process bound to the killed task reports the reserved status.
-    const pinfo = process.info(0).?;
-    try std.testing.expectEqual(process.State.exited, pinfo.state);
-    try std.testing.expectEqual(@as(u64, reserved_kill_status), pinfo.exit_status);
-    // The exit report carries 137, drained in order by the shell loop.
-    var mock = console.MockConsole(128){};
-    var con = mock.console();
-    maybe_report(&con);
-    try std.testing.expectEqualStrings("tasks user-el0 exited status=137\nprocs user-el0 exited status=137\n", mock.contents());
-    // The slot reaps back to free and is spawnable again (the kill flows
-    // through the real lifecycle, not a special teardown).
-    try std.testing.expect(reap(2));
-    try std.testing.expect(task_info(2) == null);
-    try std.testing.expect(has_free_slot());
-    try std.testing.expectEqual(KillResult.not_found, request_kill(2)); // the freed slot is not_found
-}
-
-test "scheduler: an EL0 fault reaps the task with status 139 and reports it" {
-    // Milestone sixteen C2 (claim 8403): a synchronous EL0 fault (here an
-    // EC-0x24 data abort at a guard-page FAR) reaches fault_current, which
-    // snapshots the fault report AND reaps the task through the existing
-    // exit path with reserved_fault_status. The shell drains `fault:` before
-    // the exit report.
-    _ = init();
-    _ = register_worker(0x2000).?;
-    _ = register_user(0x3000, 0).?;
-    start();
-    try std.testing.expect(yield_current()); // shell -> worker
-    try std.testing.expect(yield_current()); // worker -> user
-    try std.testing.expectEqual(@as(usize, 2), current_id());
-    fault_current(0x24 << 26, 0x7fff_f000, 0x4000); // user -> idle
-    try std.testing.expectEqual(@as(usize, idle_id), current_id());
-    try std.testing.expect(is_terminated(2));
-    try std.testing.expectEqual(@as(?u64, reserved_fault_status), terminated_status(2));
-    var mock = console.MockConsole(128){};
-    var con = mock.console();
-    maybe_report(&con);
-    try std.testing.expectEqualStrings(
-        "fault: user-el0 far=0x000000007ffff000 ec=0x24\n" ++
-            "tasks user-el0 exited status=139\n" ++
-            "procs user-el0 exited status=139\n",
-        mock.contents(),
-    );
-    try std.testing.expect(reap(2));
-    try std.testing.expect(task_info(2) == null);
-}
-
-test "scheduler: a killed sleeping task is terminated at its wake-selection" {
-    // Card 3c: a task parked by sys_sleep has NO scheduled quantum while
-    // blocked; the kill takes effect when its wake flips it to ready and
-    // the ring selects it — the same stage_current kill branch.
-    _ = init();
-    _ = register_worker(0x2000).?;
-    _ = register_user(0x3000, 0).?;
-    start();
-    // The worker sleeps 4 ticks (current = worker, slot 1).
-    try std.testing.expect(yield_current()); // shell -> worker
-    try std.testing.expect(sleep_current(4)); // worker -> user
-    try std.testing.expectEqual(@as(usize, 2), current_id());
-    // Arm the kill on the sleeping worker.
-    try std.testing.expectEqual(KillResult.ok, request_kill(1));
-    // Walk the ring (user -> idle -> shell -> ...); the blocked worker is
-    // skipped until its wake. Wake it, then the next selection kills it.
-    try std.testing.expect(yield_current()); // user -> idle
-    on_tick();
-    on_tick();
-    on_tick();
-    on_tick(); // tick 4: the worker's deadline passes -> ready
-    try std.testing.expect(!is_blocked(1));
-    // The ring reaches the woken worker's selection: killed -> 137.
-    try std.testing.expect(yield_current()); // idle -> shell
-    try std.testing.expect(yield_current()); // shell -> worker -> killed -> user
-    try std.testing.expectEqual(@as(usize, 2), current_id());
-    try std.testing.expect(is_terminated(1));
-    try std.testing.expectEqual(@as(?u64, reserved_kill_status), terminated_status(1));
-}
-
-// ---------------------------------------------------------------------------
-// Claim 881 slice 1 — per-core ready rings
-// ---------------------------------------------------------------------------
-
-test "scheduler: ready rings — sorted membership, contains, remove, remove_at" {
-    var r: ReadyRing = .{};
-    try std.testing.expect(r.empty());
-    try std.testing.expectEqual(@as(usize, 0), r.len());
-
-    // push keeps ascending-slot order (the pre-ring round-robin scanned
-    // slot order from `after + 1`, and the 508 tests pin that order).
-    r.push(3);
-    r.push(1);
-    r.push(2);
-    try std.testing.expectEqual(@as(usize, 3), r.len());
-    try std.testing.expect(r.contains(1));
-    try std.testing.expect(!r.contains(9));
-    try std.testing.expectEqual(@as(usize, 1), r.get(0));
-    try std.testing.expectEqual(@as(usize, 2), r.get(1));
-    try std.testing.expectEqual(@as(usize, 3), r.get(2));
-
-    // remove compacts while keeping order (middle, head, tail).
-    try std.testing.expect(r.remove(2));
-    try std.testing.expect(!r.remove(99));
-    try std.testing.expectEqual(@as(usize, 1), r.get(0));
-    try std.testing.expectEqual(@as(usize, 3), r.get(1));
-    r.push(4);
-    try std.testing.expect(r.remove(1));
-    try std.testing.expect(r.remove(4));
-    try std.testing.expectEqual(@as(usize, 1), r.len());
-
-    // remove_at returns the removed member and compacts (the claim).
-    try std.testing.expectEqual(@as(usize, 3), r.remove_at(0));
-    try std.testing.expect(r.empty());
-    r.push(7);
-    r.push(5);
-    r.push(6);
-    try std.testing.expectEqual(@as(usize, 5), r.remove_at(0));
-    try std.testing.expectEqual(@as(usize, 7), r.remove_at(1));
-    try std.testing.expectEqual(@as(usize, 6), r.remove_at(0));
-    try std.testing.expect(r.empty());
-}
-
-test "scheduler: ready rings — seeded membership at init/spawn/pin with the invariant" {
-    // Slice-1 seeding seams (no rotation yet — the checker's call
-    // precondition; rotation paths wire into the rings in slice 2).
-    _ = init();
-    // init: the idle reaper is ring 0's only member; the shell is
-    // current[0] and executing (off-ring).
-    try std.testing.expectEqual(@as(usize, 1), ready_rings[0].len());
-    try std.testing.expect(ready_rings[0].contains(idle_id));
-    check_ready_membership();
-
-    // spawn: new ready tasks join ring 0 in spawn order.
-    const worker = register_worker(0x1111).?;
-    try std.testing.expectEqual(@as(usize, 2), ready_rings[0].len());
-    try std.testing.expect(ready_rings[0].contains(worker));
-    const user = register_user(0x2222, 0).?;
-    try std.testing.expect(ready_rings[0].contains(user));
-    // Slot-sorted run order: worker, user, idle (the old scan's order).
-    try std.testing.expectEqual(@as(usize, 1), ready_rings[0].get(0));
-    try std.testing.expectEqual(@as(usize, 2), ready_rings[0].get(1));
-    try std.testing.expectEqual(@as(usize, idle_id), ready_rings[0].get(2));
-    check_ready_membership();
-
-    // pin re-homes a still-ready task: ring 0 -> ring 1, and back.
-    try std.testing.expect(pin_task(user, 1));
-    try std.testing.expect(!ready_rings[0].contains(user));
-    try std.testing.expect(ready_rings[1].contains(user));
-    check_ready_membership();
-    try std.testing.expect(pin_task(user, 0));
-    try std.testing.expect(ready_rings[0].contains(user));
-    try std.testing.expect(!ready_rings[1].contains(user));
-    check_ready_membership();
-}
-
-test "scheduler: ready rings — reap drops the slot's ring membership" {
-    _ = init();
-    const t = spawn("ring-test", 0x6000, spsr_el1h_irqs, &worker_stack, 0, 0).?;
-    try std.testing.expect(ready_rings[0].contains(t));
-    // Exit it (state -> zombie) and reap. Slice 2: the exit path itself
-    // drops the membership (the task was current/off-ring — the remove is
-    // defensive), so the checker is valid again right after the exit.
-    current[0] = t;
-    try std.testing.expect(exit_current(7));
-    try std.testing.expect(!ready_rings[0].contains(t));
-    check_ready_membership();
-    try std.testing.expect(reap(t));
-    try std.testing.expect(!ready_rings[0].contains(t));
-    // The freed slot is spawnable again and re-joins ring 0 exactly once.
-    const again = spawn("ring-test-2", 0x6001, spsr_el1h_irqs, &worker_stack, 0, 0).?;
-    try std.testing.expectEqual(@as(usize, t), again);
-    var on: usize = 0;
-    for (&ready_rings) |*r| {
-        if (r.contains(again)) on += 1;
-    }
-    try std.testing.expectEqual(@as(usize, 1), on);
-}
-
-test "scheduler: ready rings — rotation, block, wake, exit keep the invariant" {
-    // Claim 881 slice 2: every rotation path claims from / pushes onto the
-    // per-core rings, so the ready-membership invariant holds after every
-    // transition — asserted with the checker at each phase.
-    _ = init();
-    _ = register_worker(0x2000).?;
-    _ = register_user(0x3000, 0).?;
-    start();
-    check_ready_membership();
-
-    // shell -> worker: the shell joins ring 0 on its first real
-    // preemption; the worker is claimed off it.
-    try std.testing.expect(yield_current());
-    try std.testing.expectEqual(@as(usize, 1), current[0]);
-    try std.testing.expect(ready_rings[0].contains(0));
-    try std.testing.expect(!ready_rings[0].contains(1));
-    check_ready_membership();
-
-    // worker -> user.
-    try std.testing.expect(yield_current());
-    try std.testing.expectEqual(@as(usize, 2), current[0]);
-    check_ready_membership();
-
-    // The user sleeps: blocked, off-ring; the successor is the idle
-    // reaper (ring 0's always-ready seat).
-    try std.testing.expect(sleep_current(1));
-    try std.testing.expectEqual(@as(usize, idle_id), current[0]);
-    try std.testing.expect(!ready_rings[0].contains(2));
-    check_ready_membership();
-
-    // Deadline passes: the user wakes onto its home ring (ring 0).
-    on_tick();
-    try std.testing.expect(!is_blocked(2));
-    try std.testing.expect(ready_rings[0].contains(2));
-    check_ready_membership();
-
-    // idle -> shell -> worker -> user: the woken user runs again.
-    try std.testing.expect(yield_current());
-    try std.testing.expectEqual(@as(usize, 0), current[0]);
-    try std.testing.expect(yield_current());
-    try std.testing.expect(yield_current());
-    try std.testing.expectEqual(@as(usize, 2), current[0]);
-    check_ready_membership();
-
-    // The user exits: zombie off-ring (the exit path drops membership), a
-    // successor claimed from the ring.
-    try std.testing.expect(exit_current(43));
-    try std.testing.expectEqual(@as(usize, idle_id), current[0]);
-    try std.testing.expect(!ready_rings[0].contains(2));
-    check_ready_membership();
-
-    // The idle reaper reaps; the slot stays off every ring.
-    reap_one_zombie();
-    try std.testing.expect(!ready_rings[0].contains(2));
-    check_ready_membership();
-}
-
-// ---------------------------------------------------------------------------
-// Claim 881 slice 3 — per-ring locks; exit teardown out of sched_lock
-// ---------------------------------------------------------------------------
-
-test "scheduler: rotation paths release every ring lock" {
-    // Claim 881 slice 3: the rotation (yield/switch, block, exit) holds
-    // the per-ring locks only for the claim/push/flip critical section —
-    // an accidentally-held ring lock would stall every other core's
-    // rotation forever (and a held-then-released pair is the easiest way
-    // for this single-threaded suite to catch the choreography).
-    _ = init();
-    _ = register_worker(0x2000).?;
-    _ = register_user(0x3000, 0).?;
-    start();
-    const rings_clear = struct {
-        fn all_clear() bool {
-            for (&ring_locks) |*l| {
-                if (l.lock_impl.is_locked()) return false;
-            }
-            return true;
-        }
-    }.all_clear;
-    try std.testing.expect(rings_clear());
-    try std.testing.expect(yield_current()); // shell -> worker
-    try std.testing.expect(rings_clear());
-    try std.testing.expect(yield_current()); // worker -> user
-    try std.testing.expect(rings_clear());
-    try std.testing.expect(sleep_current(3)); // user -> idle (its successor)
-    try std.testing.expect(rings_clear());
-    try std.testing.expect(yield_current()); // idle -> shell
-    try std.testing.expect(rings_clear());
-    try std.testing.expect(yield_current()); // shell -> worker
-    try std.testing.expect(rings_clear());
-    try std.testing.expect(exit_current(43)); // worker -> idle (zombie)
-    try std.testing.expect(rings_clear());
-    // The kill conversion path releases the ring locks BEFORE the exit
-    // teardown (the frozen lock-order rule) — drive it via a killed
-    // selection and re-check.
-    const worker2 = register_worker(0x2000).?; // a fresh worker (slot 3)
-    try std.testing.expectEqual(KillResult.ok, request_kill(worker2));
-    try std.testing.expect(yield_current()); // idle -> shell
-    try std.testing.expect(yield_current()); // shell -> worker2 -> killed -> idle
-    try std.testing.expect(rings_clear());
-    check_ready_membership();
-}
-
-test "scheduler: rotation_lock holds every ring ascending; unlock releases all" {
-    // Issue #857: the generalized steal scans every ring, so the
-    // rotation's set is ALL rings acquired in ascending index order (the
-    // frozen no-cycle rule). Verify the helper's lock/unlock
-    // choreography directly.
-    _ = init();
-    const lk0 = rotation_lock(0);
-    for (&ring_locks) |*l| try std.testing.expect(l.lock_impl.is_locked());
-    rotation_unlock(lk0);
-    for (&ring_locks) |*l| try std.testing.expect(!l.lock_impl.is_locked());
-    const lk1 = rotation_lock(1);
-    for (&ring_locks) |*l| try std.testing.expect(l.lock_impl.is_locked());
-    rotation_unlock(lk1);
-    for (&ring_locks) |*l| try std.testing.expect(!l.lock_impl.is_locked());
-}
-
-test "scheduler: teardown_pending gates the reaper off a mid-teardown zombie" {
-    // Claim 881 slice 3: the exit teardown runs OUTSIDE sched_lock; the
-    // zombie mark + teardown_pending flag (under sched_lock) keep the
-    // idle reaper off the slot until the teardown completes. Simulate
-    // the mid-teardown window and verify reap refuses, then clears.
-    _ = init();
-    _ = register_worker(0x2000).?; // slot 1 — the user then lands at slot 2
-    _ = register_user(0x3000, 0).?;
-    start();
-    try std.testing.expect(yield_current()); // shell -> worker
-    try std.testing.expect(yield_current()); // worker -> user
-    try std.testing.expect(exit_current(43)); // user -> shell (zombie)
-    try std.testing.expect(is_terminated(2));
-    // Mid-teardown: the slot is a zombie but the reaper must not touch it.
-    tasks[2].teardown_pending = true;
-    try std.testing.expect(!reap(2));
-    try std.testing.expect(!reap(2)); // still gated
-    try std.testing.expect(task_info(2) != null);
-    // Teardown completes: the reaper may free the slot.
-    tasks[2].teardown_pending = false;
-    try std.testing.expect(reap(2));
-    try std.testing.expect(task_info(2) == null);
-    // A reaped slot's flag is cleared by the reset; a fresh exit -> reap
-    // cycle never sees a stale gate.
-    try std.testing.expectEqual(@as(usize, 2), register_user(0x3000, 0).?);
-    try std.testing.expect(!tasks[2].teardown_pending);
 }

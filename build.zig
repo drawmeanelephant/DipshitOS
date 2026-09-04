@@ -2082,6 +2082,170 @@ pub fn build(b: *std.Build) void {
     // diffs byte-for-byte against the canonical fixture
     // tests/transcript-console.txt. The live vm-serial.log assertion stays
     // gated on the VZ serial gate (claim 0002).
+    // ------------------------------------------------------------------
+    // Host: Unified Unit Tests (M41 TS1, issue #952)
+    // ------------------------------------------------------------------
+    const test_step = b.step("test", "Run host-side unit tests in parallel (M41 TS1)");
+
+    const unit_test_sources = [_][]const u8{
+        "kernel/src/alloc.zig",
+        "kernel/src/app_timers.zig",
+        "kernel/src/arp.zig",
+        "kernel/src/console.zig",
+        "kernel/src/csprng.zig",
+        "kernel/src/dhcp.zig",
+        "kernel/src/dns.zig",
+        "kernel/src/driving_award.zig",
+        "kernel/src/events.zig",
+        "kernel/src/exec.zig",
+        "kernel/src/exceptions.zig",
+        "kernel/src/font8x8.zig",
+        "kernel/src/gic.zig",
+        "kernel/src/handoff.zig",
+        "kernel/src/input.zig",
+        "kernel/src/ipv4.zig",
+        "kernel/src/lineedit.zig",
+        "kernel/src/machine.zig",
+        "kernel/src/mailbox.zig",
+        "kernel/src/memmap.zig",
+        "kernel/src/mmu.zig",
+        "kernel/src/monitor.zig",
+        "kernel/src/nvram_console.zig",
+        "kernel/src/process.zig",
+        "kernel/src/psci.zig",
+        "kernel/src/redirect.zig",
+        "kernel/src/road_pops.zig",
+        "kernel/src/scheduler.zig",
+        "kernel/src/scrollback.zig",
+        "kernel/src/settings.zig",
+        "kernel/src/shared_region.zig",
+        "kernel/src/shell.zig",
+        "kernel/src/smp.zig",
+        "kernel/src/spinlock.zig",
+        "kernel/src/svclock.zig",
+        "kernel/src/syscall.zig",
+        "kernel/src/tcp.zig",
+        "kernel/src/text.zig",
+        "kernel/src/timer.zig",
+        "kernel/src/tokenizer.zig",
+        "kernel/src/uaccess.zig",
+        "kernel/src/udp.zig",
+        "kernel/src/userspace.zig",
+        "kernel/src/virtio_custom.zig",
+        "kernel/src/virtio_entropy.zig",
+        "kernel/src/virtio_file.zig",
+        "kernel/src/virtio_gpu.zig",
+        "kernel/src/virtio_net.zig",
+        "kernel/src/wm_server.zig",
+        "kernel/src/wnd_core.zig",
+        "kernel/src/xhci.zig",
+        "user/src/lib/ui.zig",
+        "user/tests/ui/ui_test.zig",
+        "kernel/tests/scheduler_test.zig",
+        "kernel/tests/syscall_test.zig",
+        "kernel/tests/monitor_test.zig",
+        "kernel/tests/shell_test.zig",
+        "kernel/tests/alloc_test.zig",
+        "kernel/tests/net/tcp_test.zig",
+        "kernel/tests/net/dhcp_test.zig",
+        "kernel/tests/driving_award_test.zig",
+        "test/helpers/helpers.zig",
+    };
+
+    const ui_mod = b.createModule(.{
+        .root_source_file = b.path("user/src/lib/ui.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    ui_mod.addOptions("build_options", kernel_options);
+
+    const helpers_mod = b.createModule(.{
+        .root_source_file = b.path("test/helpers/helpers.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    helpers_mod.addOptions("build_options", kernel_options);
+
+    const scheduler_mod = b.createModule(.{
+        .root_source_file = b.path("kernel/src/scheduler.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    scheduler_mod.addOptions("build_options", kernel_options);
+
+    const syscall_mod = b.createModule(.{
+        .root_source_file = b.path("kernel/src/syscall.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    syscall_mod.addOptions("build_options", kernel_options);
+
+    const monitor_mod = b.createModule(.{
+        .root_source_file = b.path("kernel/src/monitor.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    monitor_mod.addOptions("build_options", kernel_options);
+
+    const shell_mod = b.createModule(.{
+        .root_source_file = b.path("kernel/src/shell.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    shell_mod.addOptions("build_options", kernel_options);
+
+    const alloc_mod = b.createModule(.{
+        .root_source_file = b.path("kernel/src/alloc.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    alloc_mod.addOptions("build_options", kernel_options);
+
+    const tcp_mod = b.createModule(.{
+        .root_source_file = b.path("kernel/src/tcp.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    tcp_mod.addOptions("build_options", kernel_options);
+
+    const dhcp_mod = b.createModule(.{
+        .root_source_file = b.path("kernel/src/dhcp.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    dhcp_mod.addOptions("build_options", kernel_options);
+
+    const driving_award_mod = b.createModule(.{
+        .root_source_file = b.path("kernel/src/driving_award.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    driving_award_mod.addOptions("build_options", kernel_options);
+
+    for (unit_test_sources) |src_path| {
+        const test_mod = b.createModule(.{
+            .root_source_file = b.path(src_path),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        });
+        test_mod.addOptions("build_options", kernel_options);
+        test_mod.addImport("ui", ui_mod);
+        test_mod.addImport("helpers", helpers_mod);
+        test_mod.addImport("scheduler", scheduler_mod);
+        test_mod.addImport("syscall", syscall_mod);
+        test_mod.addImport("monitor", monitor_mod);
+        test_mod.addImport("shell", shell_mod);
+        test_mod.addImport("alloc", alloc_mod);
+        test_mod.addImport("tcp", tcp_mod);
+        test_mod.addImport("dhcp", dhcp_mod);
+        test_mod.addImport("driving_award", driving_award_mod);
+        const t = b.addTest(.{
+            .root_module = test_mod,
+        });
+        const run_t = b.addRunArtifact(t);
+        test_step.dependOn(&run_t.step);
+    }
+
     const test_console_step = b.step("test-console", "Run the automated 'virelai>' transcript test (M1.5 march step 19; class A — mock console, no VM)");
     const test_console = b.addSystemCommand(&.{ "bash", "tools/verify-transcript.sh" });
     test_console.has_side_effects = true;

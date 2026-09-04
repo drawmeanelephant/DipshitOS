@@ -1,0 +1,507 @@
+//! Decoupled TCP protocol unit test suite (M41 TS5, #956).
+//!
+//! Extracted from kernel/src/tcp.zig.
+
+const std = @import("std");
+const tcp = @import("tcp");
+const arp = tcp.arp;
+
+// Symbols from tcp
+const protocol_tcp = tcp.protocol_tcp;
+const eth_hdr_len = tcp.eth_hdr_len;
+const ipv4_hdr_len = tcp.ipv4_hdr_len;
+const tcp_hdr_len = tcp.tcp_hdr_len;
+const default_src_port = tcp.default_src_port;
+const payload_max = tcp.payload_max;
+const segment_max = tcp.segment_max;
+const frame_max = tcp.frame_max;
+const frame_min = tcp.frame_min;
+const window = tcp.window;
+const connect_timeout = tcp.connect_timeout;
+const rto_ticks = tcp.rto_ticks;
+const retx_max = tcp.retx_max;
+
+const flag_fin = tcp.flag_fin;
+const flag_syn = tcp.flag_syn;
+const flag_rst = tcp.flag_rst;
+const flag_ack = tcp.flag_ack;
+
+const State = tcp.State;
+const Event = tcp.Event;
+const RtoEvent = tcp.RtoEvent;
+
+const checksum_tcp = tcp.checksum_tcp;
+const build_segment = tcp.build_segment;
+const build_frame = tcp.build_frame;
+const handle_rx = tcp.handle_rx;
+const reset = tcp.reset;
+const start = tcp.start;
+const advance_snd = tcp.advance_snd;
+const build_fin_msg = tcp.build_fin_msg;
+const build_data_msg = tcp.build_data_msg;
+const take_rx = tcp.take_rx;
+const record_pending = tcp.record_pending;
+const poll_rto = tcp.poll_rto;
+const listen = tcp.listen;
+const release_conn = tcp.release_conn;
+const abort_timeout = tcp.abort_timeout;
+const elapsed = tcp.elapsed;
+const connect_timed_out = tcp.connect_timed_out;
+const sum_words = tcp.sum_words;
+const fold = tcp.fold;
+
+// ---------------------------------------------------------------------------
+// Host tests — pure logic, byte-exact against the fixtures
+// ---------------------------------------------------------------------------
+
+const test_mac = [6]u8{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 }; // the host-set guest MAC
+const host_mac = [6]u8{ 0x02, 0x00, 0x00, 0x00, 0x00, 0x02 }; // the host-side MAC
+const ip_guest = [4]u8{ 10, 0, 0, 1 };
+const ip_host = [4]u8{ 10, 0, 0, 2 };
+
+/// Craft a full TCP frame the way the host responder does (the guest's
+/// `build_frame` with a pre-built segment — the fixture shape).
+fn craft_frame(own: [4]u8, own_m: [6]u8, peer: [4]u8, peer_m: [6]u8, src_port: u16, dst_port: u16, seq: u32, ack: u32, flags: u8, payload: []const u8) [frame_max]u8 {
+    var frame: [frame_max]u8 = undefined;
+    var seg: [segment_max]u8 = undefined;
+    const seg_len = build_segment(&seg, own, peer, src_port, dst_port, seq, ack, flags, payload);
+    const flen = build_frame(&frame, &own_m, own, peer_m, peer, seg[0..seg_len]);
+    std.debug.assert(flen <= frame_max);
+    return frame;
+}
+
+test "tcp: build_segment is byte-exact — the SYN fixture (54-byte frame, 20-byte header)" {
+    var seg: [segment_max]u8 = undefined;
+    const n = build_segment(&seg, ip_guest, ip_host, default_src_port, 9999, 0x12345678, 0, flag_syn, &.{});
+    try std.testing.expectEqual(@as(usize, 20), n);
+    try std.testing.expectEqual(@as(u16, 8000), (@as(u16, seg[0]) << 8) | seg[1]);
+    try std.testing.expectEqual(@as(u16, 9999), (@as(u16, seg[2]) << 8) | seg[3]);
+    // seq = the ISN, big-endian (bytes 4..8).
+    try std.testing.expectEqualSlices(u8, &.{ 0x12, 0x34, 0x56, 0x78 }, seg[4..8]);
+    // ack = 0 (no ACK in the SYN).
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0 }, seg[8..12]);
+    try std.testing.expectEqual(@as(u8, 0x50), seg[12]); // data offset 5 (no options)
+    try std.testing.expectEqual(@as(u8, flag_syn), seg[13]); // flags SYN
+    try std.testing.expectEqual(@as(u8, 0x10), seg[14]); // window 4096 high
+    try std.testing.expectEqual(@as(u8, 0x00), seg[15]);
+    // Urgent pointer (18..20) = 0.
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0 }, seg[18..20]);
+    // The checksum field is NOT zero (computed always — RFC 1071).
+    try std.testing.expect(seg[16] != 0 or seg[17] != 0);
+    // The checksum verifies (folds to 0x0000) and binds the pseudo-header
+    // (a different dst IP yields a different checksum — the sum is
+    // commutative in src/dst, so the swap is NOT the binding test).
+    try std.testing.expectEqual(@as(u16, 0x0000), checksum_tcp(ip_guest, ip_host, seg[0..n]));
+    try std.testing.expect(checksum_tcp(ip_guest, .{ 10, 0, 0, 99 }, seg[0..n]) != 0x0000);
+}
+
+test "tcp: build_frame is byte-exact — the full 54-byte SYN frame" {
+    var seg: [segment_max]u8 = undefined;
+    const seg_len = build_segment(&seg, ip_guest, ip_host, default_src_port, 9999, 0x12345678, 0, flag_syn, &.{});
+    var frame: [frame_max]u8 = undefined;
+    const n = build_frame(&frame, &test_mac, ip_guest, host_mac, ip_host, seg[0..seg_len]);
+    try std.testing.expectEqual(@as(usize, 54), n);
+    try std.testing.expectEqualSlices(u8, &host_mac, frame[0..6]); // dst
+    try std.testing.expectEqualSlices(u8, &test_mac, frame[6..12]); // src
+    try std.testing.expectEqualSlices(u8, &.{ 0x08, 0x00 }, frame[12..14]); // ethertype IPv4
+    try std.testing.expectEqual(@as(u8, 0x45), frame[14]); // version 4, IHL 5
+    try std.testing.expectEqual(@as(u8, 40), frame[17]); // total length 20 + 20
+    try std.testing.expectEqual(@as(u8, 64), frame[22]); // TTL
+    try std.testing.expectEqual(@as(u8, 6), frame[23]); // protocol TCP
+    try std.testing.expectEqualSlices(u8, &ip_guest, frame[26..30]);
+    try std.testing.expectEqualSlices(u8, &ip_host, frame[30..34]);
+    // The IPv4 header checksum verifies (folds to 0x0000).
+    try std.testing.expectEqual(@as(u16, 0x0000), fold(sum_words(frame[14..34])));
+    // The segment rides at 34..54.
+    try std.testing.expectEqualSlices(u8, seg[0..seg_len], frame[34 .. 34 + seg_len]);
+}
+
+test "tcp: the four-segment lifecycle — SYN -> SYN-ACK -> ACK -> data -> FIN -> FIN-ACK" {
+    arp.own_ip = ip_guest;
+    defer arp.own_ip = .{ 0, 0, 0, 0 };
+    reset();
+    defer reset();
+
+    // IDLE -> SYN_SENT: the SYN is built into tcp.msg (seq = the ISN).
+    start(ip_host, 9999, 0x12345678, host_mac);
+    try std.testing.expectEqual(State.syn_sent, tcp.state);
+    try std.testing.expectEqual(@as(usize, 20), tcp.msg_len);
+    try std.testing.expectEqual(@as(u8, flag_syn), tcp.msg[13]);
+    // The caller transmits + advances tcp.snd_una by 1 (the SYN consumes one).
+    advance_snd(1);
+    try std.testing.expectEqual(@as(u32, 0x12345679), tcp.snd_una);
+
+    // The server's SYN-ACK: seq = its ISN, ack = our ISN+1.
+    const sa = craft_frame(ip_host, host_mac, ip_guest, test_mac, 9999, default_src_port, 0xabcdef01, 0x12345679, flag_syn | flag_ack, &.{});
+    try std.testing.expectEqual(Event.synack_recv, handle_rx(&sa));
+    try std.testing.expectEqual(State.established, tcp.state);
+    try std.testing.expectEqual(@as(u32, 0xabcdef01), tcp.srv_isn);
+    try std.testing.expectEqual(@as(u32, 0xabcdef02), tcp.rcv_nxt);
+    try std.testing.expectEqual(@as(u64, 1), tcp.synack_recv);
+    // The handshake ACK is built: seq = our ISN+1, ack = tcp.rcv_nxt, flags ACK.
+    try std.testing.expect(tcp.ack_pending);
+    try std.testing.expectEqual(@as(u8, flag_ack), tcp.msg[13]);
+    try std.testing.expectEqualSlices(u8, &.{ 0x12, 0x34, 0x56, 0x79 }, tcp.msg[4..8]); // seq
+    try std.testing.expectEqualSlices(u8, &.{ 0xab, 0xcd, 0xef, 0x02 }, tcp.msg[8..12]); // ack
+
+    // The server's data echo: seq = its ISN+1, ack = our ISN+2 (it acked
+    // our handshake ACK), payload "hi".
+    const echo = craft_frame(ip_host, host_mac, ip_guest, test_mac, 9999, default_src_port, 0xabcdef02, 0x1234567a, flag_ack, "hi");
+    try std.testing.expectEqual(Event.data_recv, handle_rx(&echo));
+    try std.testing.expectEqual(@as(u64, 1), tcp.data_recv);
+    try std.testing.expect(tcp.rx_pending);
+    try std.testing.expectEqualSlices(u8, "hi", tcp.rx_payload[0..tcp.rx_len]);
+    try std.testing.expectEqual(@as(u32, 0xabcdef04), tcp.rcv_nxt); // +2 for the payload
+    // The ACK for the echo is built (ack = tcp.rcv_nxt).
+    try std.testing.expect(tcp.ack_pending);
+    try std.testing.expectEqualSlices(u8, &.{ 0xab, 0xcd, 0xef, 0x04 }, tcp.msg[8..12]);
+    // The caller reads it.
+    try std.testing.expectEqualSlices(u8, "hi", take_rx());
+    try std.testing.expect(!tcp.rx_pending);
+
+    // The client's close: FIN (seq = tcp.snd_una, ack = tcp.rcv_nxt). The
+    // monitor transmits it and moves to FIN_SENT (the tcp.state machine
+    // only builds).
+    build_fin_msg();
+    try std.testing.expectEqual(@as(u8, flag_ack | flag_fin), tcp.msg[13]);
+    advance_snd(1); // the FIN consumes one sequence number
+    tcp.state = .fin_sent;
+
+    // The server's FIN-ACK: seq = tcp.rcv_nxt (its next), ack = our FIN seq+1.
+    const fa = craft_frame(ip_host, host_mac, ip_guest, test_mac, 9999, default_src_port, 0xabcdef04, 0x1234567b, flag_ack | flag_fin, &.{});
+    try std.testing.expectEqual(Event.finack_recv, handle_rx(&fa));
+    try std.testing.expectEqual(State.closed, tcp.state);
+    try std.testing.expectEqual(@as(u64, 1), tcp.finack_recv);
+    try std.testing.expectEqual(@as(u32, 0xabcdef05), tcp.rcv_nxt); // the FIN consumes one
+    // The final ACK is built (ack = tcp.rcv_nxt after the server's FIN).
+    try std.testing.expect(tcp.ack_pending);
+    try std.testing.expectEqualSlices(u8, &.{ 0xab, 0xcd, 0xef, 0x05 }, tcp.msg[8..12]);
+}
+
+test "tcp: malformed + unexpected segments are counted, never assumed away" {
+    arp.own_ip = ip_guest;
+    defer arp.own_ip = .{ 0, 0, 0, 0 };
+    reset();
+    defer reset();
+    start(ip_host, 9999, 0x11111111, host_mac);
+
+    // A bad checksum -> tcp.dropped_badsum.
+    var bad = craft_frame(ip_host, host_mac, ip_guest, test_mac, 9999, default_src_port, 0x22222222, 0x11111112, flag_syn | flag_ack, &.{});
+    bad[40] ^= 0xff; // corrupt the segment (the ack field)
+    try std.testing.expectEqual(Event.none, handle_rx(&bad));
+    try std.testing.expectEqual(@as(u64, 1), tcp.dropped_badsum);
+
+    // A SYN-ACK that does NOT acknowledge our SYN -> tcp.dropped_malformed.
+    const wrong_ack = craft_frame(ip_host, host_mac, ip_guest, test_mac, 9999, default_src_port, 0x22222222, 0x99999999, flag_syn | flag_ack, &.{});
+    try std.testing.expectEqual(Event.none, handle_rx(&wrong_ack));
+    try std.testing.expectEqual(@as(u64, 1), tcp.dropped_malformed);
+
+    // A segment from the WRONG src port -> tcp.dropped_malformed.
+    const wrong_port = craft_frame(ip_host, host_mac, ip_guest, test_mac, 9998, default_src_port, 0x22222222, 0x11111112, flag_syn | flag_ack, &.{});
+    try std.testing.expectEqual(Event.none, handle_rx(&wrong_port));
+    try std.testing.expectEqual(@as(u64, 2), tcp.dropped_malformed);
+
+    // A segment with options (data offset 6) -> tcp.dropped_malformed.
+    var opts = craft_frame(ip_host, host_mac, ip_guest, test_mac, 9999, default_src_port, 0x22222222, 0x11111112, flag_syn | flag_ack, &.{});
+    opts[46] = 0x60; // data offset 6 — must also fix the checksum to land in malformed
+    opts[50] = 0;
+    opts[51] = 0; // zero the checksum field during the recompute (RFC 1071)
+    {
+        const seg = opts[34..54];
+        const c = checksum_tcp(ip_host, ip_guest, seg);
+        opts[50] = @truncate(c >> 8);
+        opts[51] = @truncate(c);
+    }
+    try std.testing.expectEqual(Event.none, handle_rx(&opts));
+    try std.testing.expectEqual(@as(u64, 3), tcp.dropped_malformed);
+
+    // An oversize payload (65 bytes > payload_max) -> tcp.dropped_malformed.
+    const big: [65]u8 = .{0x41} ** 65;
+    const over = craft_frame(ip_host, host_mac, ip_guest, test_mac, 9999, default_src_port, 0x22222222, 0x11111112, flag_syn | flag_ack, &big);
+    try std.testing.expectEqual(Event.none, handle_rx(&over));
+    try std.testing.expectEqual(@as(u64, 4), tcp.dropped_malformed);
+    try std.testing.expectEqual(State.syn_sent, tcp.state); // unchanged
+
+    // A RST kills the connection.
+    const rst = craft_frame(ip_host, host_mac, ip_guest, test_mac, 9999, default_src_port, 0x22222222, 0x11111112, flag_ack | flag_rst, &.{});
+    try std.testing.expectEqual(Event.rst_recv, handle_rx(&rst));
+    try std.testing.expectEqual(@as(u64, 1), tcp.rst_recv);
+    try std.testing.expectEqual(State.closed, tcp.state);
+}
+
+test "tcp: the RX buffer holds ONE segment — a second unread segment is dropped" {
+    arp.own_ip = ip_guest;
+    defer arp.own_ip = .{ 0, 0, 0, 0 };
+    reset();
+    defer reset();
+    start(ip_host, 9999, 1, host_mac);
+    // Fast-forward to ESTABLISHED.
+    const sa = craft_frame(ip_host, host_mac, ip_guest, test_mac, 9999, default_src_port, 0xaaaa0000, 2, flag_syn | flag_ack, &.{});
+    try std.testing.expectEqual(Event.synack_recv, handle_rx(&sa));
+
+    const d1 = craft_frame(ip_host, host_mac, ip_guest, test_mac, 9999, default_src_port, 0xaaaa0001, 3, flag_ack, "one");
+    try std.testing.expectEqual(Event.data_recv, handle_rx(&d1));
+    try std.testing.expectEqual(@as(u64, 1), tcp.data_recv);
+    // The second segment arrives BEFORE `net tcp recv` — dropped (counted).
+    const d2 = craft_frame(ip_host, host_mac, ip_guest, test_mac, 9999, default_src_port, 0xaaaa0005, 3, flag_ack, "two");
+    try std.testing.expectEqual(Event.none, handle_rx(&d2));
+    try std.testing.expectEqual(@as(u64, 1), tcp.dropped_malformed);
+    try std.testing.expectEqualSlices(u8, "one", tcp.rx_payload[0..tcp.rx_len]); // unchanged
+}
+
+test "tcp: the bounded connect timeout — 30 s then an honest refuse" {
+    arp.own_ip = ip_guest;
+    defer arp.own_ip = .{ 0, 0, 0, 0 };
+    reset();
+    defer reset();
+    start(ip_host, 9999, 0x01020304, host_mac);
+    try std.testing.expectEqual(State.syn_sent, tcp.state);
+    // The clock: tcp.syn_ticks stamped at start; elapsed is wall-clock seconds.
+    tcp.syn_ticks = 100;
+    tcp.now_ticks = 105;
+    try std.testing.expectEqual(@as(u64, 5), elapsed());
+    try std.testing.expect(!connect_timed_out());
+    tcp.now_ticks = 130;
+    try std.testing.expectEqual(@as(u64, 30), elapsed());
+    try std.testing.expect(connect_timed_out());
+    // The honest refuse: back to IDLE, connection tcp.state released, counted.
+    abort_timeout();
+    try std.testing.expectEqual(State.idle, tcp.state);
+    try std.testing.expectEqual(@as(u64, 1), tcp.timed_out);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0 }, &tcp.peer_ip);
+    try std.testing.expect(!tcp.ack_pending);
+    // The next connect is a fresh attempt.
+    start(ip_host, 9999, 0x0a0b0c0d, host_mac);
+    try std.testing.expectEqual(State.syn_sent, tcp.state);
+}
+
+test "tcp: a server FIN+ACK in ESTABLISHED is ACKed; the caller closes" {
+    arp.own_ip = ip_guest;
+    defer arp.own_ip = .{ 0, 0, 0, 0 };
+    reset();
+    defer reset();
+    start(ip_host, 9999, 1, host_mac);
+    const sa = craft_frame(ip_host, host_mac, ip_guest, test_mac, 9999, default_src_port, 0xbbbb0000, 2, flag_syn | flag_ack, &.{});
+    try std.testing.expectEqual(Event.synack_recv, handle_rx(&sa));
+
+    // The server closes first: FIN+ACK, no payload.
+    const fin = craft_frame(ip_host, host_mac, ip_guest, test_mac, 9999, default_src_port, 0xbbbb0001, 3, flag_ack | flag_fin, &.{});
+    try std.testing.expectEqual(Event.finack_recv, handle_rx(&fin));
+    try std.testing.expectEqual(@as(u64, 1), tcp.finack_recv);
+    try std.testing.expectEqual(@as(u32, 0xbbbb0002), tcp.rcv_nxt);
+    try std.testing.expectEqual(State.established, tcp.state); // the client still closes
+    try std.testing.expect(tcp.ack_pending); // the ACK for the FIN is built
+    // The caller's `net tcp close` completes the close.
+    build_fin_msg();
+    try std.testing.expectEqual(@as(u8, flag_ack | flag_fin), tcp.msg[13]);
+}
+
+test "tcp: a bare SYN (no ACK) in SYN_SENT is malformed" {
+    arp.own_ip = ip_guest;
+    defer arp.own_ip = .{ 0, 0, 0, 0 };
+    reset();
+    defer reset();
+    start(ip_host, 9999, 7, host_mac);
+    const syn = craft_frame(ip_host, host_mac, ip_guest, test_mac, 9999, default_src_port, 0xcccc0000, 0, flag_syn, &.{});
+    try std.testing.expectEqual(Event.none, handle_rx(&syn));
+    try std.testing.expectEqual(@as(u64, 1), tcp.dropped_malformed);
+    try std.testing.expectEqual(State.syn_sent, tcp.state);
+}
+
+test "tcp: card N11 — the RTO retransmits the pending SYN byte-exact; the SYN-ACK stops the timer" {
+    arp.own_ip = ip_guest;
+    defer arp.own_ip = .{ 0, 0, 0, 0 };
+    reset();
+    defer reset();
+    tcp.now_ticks = 100;
+    start(ip_host, 9999, 0x12345678, host_mac);
+    // The caller transmits the SYN and records it pending.
+    record_pending();
+    try std.testing.expect(tcp.tx_pending);
+    try std.testing.expectEqual(@as(u64, 0), tcp.retx_count);
+    const syn0 = tcp.msg[0..tcp.msg_len];
+    // The RTO (3 s) has NOT expired.
+    tcp.now_ticks = 102;
+    try std.testing.expectEqual(RtoEvent.none, poll_rto());
+    // At 3 s the RTO fires: the SAME bytes (seq, flags, checksum) rebuild.
+    tcp.now_ticks = 103;
+    try std.testing.expectEqual(RtoEvent.retransmit, poll_rto());
+    try std.testing.expectEqual(@as(u64, 1), tcp.retransmitted);
+    try std.testing.expectEqual(@as(u64, 1), tcp.retx_count);
+    try std.testing.expectEqualSlices(u8, syn0, tcp.msg[0..tcp.msg_len]);
+    // A second retransmission, byte-identical again.
+    tcp.now_ticks = 106;
+    try std.testing.expectEqual(RtoEvent.retransmit, poll_rto());
+    try std.testing.expectEqual(@as(u64, 2), tcp.retransmitted);
+    try std.testing.expectEqualSlices(u8, syn0, tcp.msg[0..tcp.msg_len]);
+    // The SYN-ACK then lands — it acknowledges our SYN, the timer stops.
+    const sa = craft_frame(ip_host, host_mac, ip_guest, test_mac, 9999, default_src_port, 0xabcdef01, 0x12345679, flag_syn | flag_ack, &.{});
+    try std.testing.expectEqual(Event.synack_recv, handle_rx(&sa));
+    try std.testing.expect(!tcp.tx_pending);
+    tcp.now_ticks = 200; // long past the RTO — nothing fires
+    try std.testing.expectEqual(RtoEvent.none, poll_rto());
+    try std.testing.expectEqual(@as(u64, 2), tcp.retransmitted); // unchanged
+}
+
+test "tcp: card N11 — a peer ACK covering snd_una clears the pending data; no retransmission" {
+    arp.own_ip = ip_guest;
+    defer arp.own_ip = .{ 0, 0, 0, 0 };
+    reset();
+    defer reset();
+    tcp.now_ticks = 100;
+    start(ip_host, 9999, 0x11111111, host_mac);
+    advance_snd(1); // the SYN was transmitted
+    const sa = craft_frame(ip_host, host_mac, ip_guest, test_mac, 9999, default_src_port, 0xaaaa0000, 0x11111112, flag_syn | flag_ack, &.{});
+    try std.testing.expectEqual(Event.synack_recv, handle_rx(&sa));
+    // The caller sends 2 data bytes: build + transmit + advance + record.
+    build_data_msg("hi");
+    advance_snd(2);
+    record_pending();
+    try std.testing.expect(tcp.tx_pending);
+    // The peer's ACK covers tcp.snd_una (0x11111114) — the pending clears.
+    const ack = craft_frame(ip_host, host_mac, ip_guest, test_mac, 9999, default_src_port, 0xaaaa0001, 0x11111114, flag_ack, &.{});
+    try std.testing.expectEqual(Event.none, handle_rx(&ack));
+    try std.testing.expect(!tcp.tx_pending);
+    tcp.now_ticks = 500; // long past the RTO — no retransmission
+    try std.testing.expectEqual(RtoEvent.none, poll_rto());
+    try std.testing.expectEqual(@as(u64, 0), tcp.retransmitted);
+}
+
+test "tcp: card N11 — an ACK that does NOT cover snd_una leaves the pending data armed" {
+    arp.own_ip = ip_guest;
+    defer arp.own_ip = .{ 0, 0, 0, 0 };
+    reset();
+    defer reset();
+    tcp.now_ticks = 100;
+    start(ip_host, 9999, 0x22222222, host_mac);
+    advance_snd(1);
+    const sa = craft_frame(ip_host, host_mac, ip_guest, test_mac, 9999, default_src_port, 0xbbbb0000, 0x22222223, flag_syn | flag_ack, &.{});
+    try std.testing.expectEqual(Event.synack_recv, handle_rx(&sa));
+    build_data_msg("hello");
+    advance_snd(5);
+    record_pending();
+    // The peer ACKs only up to our ISN+1 (it has NOT seen the data).
+    const ack = craft_frame(ip_host, host_mac, ip_guest, test_mac, 9999, default_src_port, 0xbbbb0001, 0x22222223, flag_ack, &.{});
+    try std.testing.expectEqual(Event.none, handle_rx(&ack));
+    try std.testing.expect(tcp.tx_pending); // still armed
+    // The RTO fires — the pending data is tcp.retransmitted byte-exact.
+    const data0 = tcp.msg[0..tcp.msg_len];
+    tcp.now_ticks = 103;
+    try std.testing.expectEqual(RtoEvent.retransmit, poll_rto());
+    try std.testing.expectEqualSlices(u8, data0, tcp.msg[0..tcp.msg_len]);
+    try std.testing.expectEqual(@as(u64, 1), tcp.retransmitted);
+}
+
+test "tcp: card N11 — the retransmission bound aborts the connection honestly" {
+    arp.own_ip = ip_guest;
+    defer arp.own_ip = .{ 0, 0, 0, 0 };
+    reset();
+    defer reset();
+    tcp.now_ticks = 100;
+    start(ip_host, 9999, 0x33333333, host_mac);
+    advance_snd(1);
+    const sa = craft_frame(ip_host, host_mac, ip_guest, test_mac, 9999, default_src_port, 0xcccc0000, 0x33333334, flag_syn | flag_ack, &.{});
+    try std.testing.expectEqual(Event.synack_recv, handle_rx(&sa));
+    build_data_msg("x");
+    advance_snd(1);
+    record_pending();
+    // retx_max retransmissions, one per RTO period.
+    var i: u64 = 0;
+    while (i < retx_max) : (i += 1) {
+        tcp.now_ticks += rto_ticks;
+        try std.testing.expectEqual(RtoEvent.retransmit, poll_rto());
+    }
+    try std.testing.expectEqual(@as(u64, retx_max), tcp.retransmitted);
+    try std.testing.expectEqual(@as(u64, 0), tcp.retx_aborted);
+    try std.testing.expectEqual(State.established, tcp.state); // still alive
+    // The NEXT RTO period sees the bound exhausted — the honest abort:
+    // the connection is released (no RST, no TX), counted, the peer gone.
+    tcp.now_ticks += rto_ticks;
+    try std.testing.expectEqual(RtoEvent.abort, poll_rto());
+    try std.testing.expectEqual(@as(u64, 1), tcp.retx_aborted);
+    try std.testing.expectEqual(State.idle, tcp.state);
+    try std.testing.expect(!tcp.tx_pending);
+    try std.testing.expect(!tcp.ack_pending);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0 }, &tcp.peer_ip);
+    try std.testing.expectEqual(@as(u16, 0), tcp.peer_port);
+    // The timer stays off.
+    tcp.now_ticks += rto_ticks;
+    try std.testing.expectEqual(RtoEvent.none, poll_rto());
+}
+
+test "tcp: card N11 — the pending FIN is retransmitted in FIN_SENT" {
+    arp.own_ip = ip_guest;
+    defer arp.own_ip = .{ 0, 0, 0, 0 };
+    reset();
+    defer reset();
+    tcp.now_ticks = 100;
+    start(ip_host, 9999, 0x44444444, host_mac);
+    advance_snd(1);
+    const sa = craft_frame(ip_host, host_mac, ip_guest, test_mac, 9999, default_src_port, 0xdddd0000, 0x44444445, flag_syn | flag_ack, &.{});
+    try std.testing.expectEqual(Event.synack_recv, handle_rx(&sa));
+    // The caller closes: build the FIN, transmit, advance, record.
+    build_fin_msg();
+    advance_snd(1);
+    tcp.state = .fin_sent;
+    record_pending();
+    const fin0 = tcp.msg[0..tcp.msg_len];
+    try std.testing.expectEqual(@as(u8, flag_ack | flag_fin), tcp.msg[13]);
+    // The RTO fires — the FIN is tcp.retransmitted byte-exact.
+    tcp.now_ticks = 103;
+    try std.testing.expectEqual(RtoEvent.retransmit, poll_rto());
+    try std.testing.expectEqual(@as(u64, 1), tcp.retransmitted);
+    try std.testing.expectEqualSlices(u8, fin0, tcp.msg[0..tcp.msg_len]);
+    // The FIN-ACK then lands — it acknowledges our FIN, the timer stops.
+    const fa = craft_frame(ip_host, host_mac, ip_guest, test_mac, 9999, default_src_port, 0xdddd0001, 0x44444446, flag_ack | flag_fin, &.{});
+    try std.testing.expectEqual(Event.finack_recv, handle_rx(&fa));
+    try std.testing.expect(!tcp.tx_pending);
+    tcp.now_ticks = 200;
+    try std.testing.expectEqual(RtoEvent.none, poll_rto());
+}
+
+test "tcp: passive open and server handshake (listen -> syn_received -> established -> data -> close)" {
+    arp.own_ip = ip_guest;
+    defer arp.own_ip = .{ 0, 0, 0, 0 };
+    reset();
+    defer reset();
+
+    // 1. Enter LISTEN on port 8080
+    listen(8080);
+    try std.testing.expectEqual(State.listen, tcp.state);
+    try std.testing.expect(tcp.is_server);
+    try std.testing.expectEqual(@as(u16, 8080), tcp.listen_port);
+
+    // 2. Incoming client SYN from host 10.0.0.2:54321
+    const syn_frame = craft_frame(ip_host, host_mac, ip_guest, test_mac, 54321, 8080, 0x10000000, 0, flag_syn, &.{});
+    const ev1 = handle_rx(&syn_frame);
+    try std.testing.expectEqual(Event.synack_recv, ev1);
+    try std.testing.expectEqual(State.syn_received, tcp.state);
+    try std.testing.expect(tcp.ack_pending);
+    try std.testing.expectEqualSlices(u8, &ip_host, &tcp.peer_ip);
+    try std.testing.expectEqual(@as(u16, 54321), tcp.peer_port);
+    try std.testing.expectEqualSlices(u8, &host_mac, &tcp.peer_mac);
+    try std.testing.expectEqual(@as(u32, 0x10000001), tcp.rcv_nxt);
+
+    // Verify SYN-ACK outbound segment built
+    try std.testing.expectEqual(@as(u8, flag_syn | flag_ack), tcp.msg[13]);
+    try std.testing.expectEqualSlices(u8, &.{ 0x10, 0x00, 0x00, 0x01 }, tcp.msg[8..12]); // ack = client ISN+1
+
+    // 3. Client sends ACK for our SYN-ACK
+    const ack_frame = craft_frame(ip_host, host_mac, ip_guest, test_mac, 54321, 8080, 0x10000001, tcp.snd_una, flag_ack, &.{});
+    const ev2 = handle_rx(&ack_frame);
+    try std.testing.expectEqual(Event.none, ev2);
+    try std.testing.expectEqual(State.established, tcp.state);
+
+    // 4. Client sends HTTP GET request payload
+    const get_payload = "GET / HTTP/1.1\r\n\r\n";
+    const data_frame = craft_frame(ip_host, host_mac, ip_guest, test_mac, 54321, 8080, 0x10000001, tcp.snd_una, flag_ack, get_payload);
+    const ev3 = handle_rx(&data_frame);
+    try std.testing.expectEqual(Event.data_recv, ev3);
+    try std.testing.expect(tcp.rx_pending);
+    try std.testing.expectEqualStrings(get_payload, take_rx());
+
+    // 5. Server sends response and releases connection back to LISTEN
+    release_conn();
+    try std.testing.expectEqual(State.listen, tcp.state);
+    try std.testing.expectEqual(@as(u16, 0), tcp.peer_port);
+}
