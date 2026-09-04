@@ -2140,8 +2140,16 @@ pub fn build(b: *std.Build) void {
         "kernel/src/wnd_core.zig",
         "kernel/src/xhci.zig",
         "user/src/lib/ui.zig",
+        "user/tests/ui/ui_test.zig",
         "test/helpers/helpers.zig",
     };
+
+    const ui_mod = b.createModule(.{
+        .root_source_file = b.path("user/src/lib/ui.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    ui_mod.addOptions("build_options", kernel_options);
 
     for (unit_test_sources) |src_path| {
         const test_mod = b.createModule(.{
@@ -2150,6 +2158,7 @@ pub fn build(b: *std.Build) void {
             .optimize = .Debug,
         });
         test_mod.addOptions("build_options", kernel_options);
+        test_mod.addImport("ui", ui_mod);
         const t = b.addTest(.{
             .root_module = test_mod,
         });
