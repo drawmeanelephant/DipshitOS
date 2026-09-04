@@ -1004,9 +1004,8 @@ pub fn populate_god_menu() void {
     _ = god_menu.registry.register_command(.system, "Power Off", "", "shutdown", null) catch {};
 
     // 2. Apps — dynamic APPS.TXT catalog (DQ1 #836); the hardcoded four
-    // survive only as the fallback (host tests, missing manifest). Loaded
-    // per summon, never at startup: the file channel is not reentrant
-    // across tasks, so boot-time reads race app startup (issue #846).
+    // survive only as the fallback (host tests, missing manifest).
+    // Preloaded at startup and refreshed per summon (issue #846).
     const app_count = load_god_menu_apps();
     {
         var abuf: [32]u8 = undefined;
@@ -2039,6 +2038,10 @@ fn main() noreturn {
 
     // Issue #825: probe for desktop wallpaper (/host/WALLPAPER.QOI or .PNG)
     init_wallpaper_if_present();
+
+    // Issue #846: preload god-menu dynamic apps catalog from APPS.TXT at startup.
+    // Safe across tasks and concurrent boot bursts with locked file-channel reads.
+    _ = load_god_menu_apps();
 
     // WMS4 (issue #624): submit the chrome POLICY — one
     // sys_wmctl(SET_WINDOW, a0=ALL, a1=0, a2=0, ptr=desc, len=40). The WM
