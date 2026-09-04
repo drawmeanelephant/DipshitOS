@@ -1030,7 +1030,7 @@ fn draw_line_colored(win: u32, text: []const u8, x: u32, y: u32, theme: *const T
         var ws: usize = 0;
         while (pos + ws < text.len and (text[pos + ws] == ' ' or text[pos + ws] == '\t')) : (ws += 1) {}
         if (ws > 0) {
-            ui.draw_text(win, text[pos..][0..ws], cur_x, y, theme.text);
+            ui.draw_text_mono(win, text[pos..][0..ws], cur_x, y, theme.text);
             cur_x += @as(u32, @intCast(ws)) * glyph_w;
             pos += ws;
         }
@@ -1044,7 +1044,7 @@ fn draw_line_colored(win: u32, text: []const u8, x: u32, y: u32, theme: *const T
             .comment => theme.warning,
         };
         if (result.len == 0) break;
-        ui.draw_text(win, text[pos..][0..result.len], cur_x, y, color);
+        ui.draw_text_mono(win, text[pos..][0..result.len], cur_x, y, color);
         cur_x += @as(u32, @intCast(result.len)) * glyph_w;
         pos += result.len;
     }
@@ -2190,7 +2190,7 @@ pub const AppState = struct {
                     if (use_syntax) {
                         draw_line_colored(win, slice[c_start..c_end], x0, gy, t);
                     } else {
-                        ui.draw_text(win, slice[c_start..c_end], x0, gy, t.text);
+                        ui.draw_text_mono(win, slice[c_start..c_end], x0, gy, t.text);
                     }
                 }
 
@@ -2275,7 +2275,7 @@ pub const AppState = struct {
             if (use_syntax) {
                 draw_line_colored(win, slice[line_start..][0..take], x0, gy, t);
             } else {
-                ui.draw_text(win, slice[line_start..][0..take], x0, gy, t.text);
+                ui.draw_text_mono(win, slice[line_start..][0..take], x0, gy, t.text);
             }
         }
 

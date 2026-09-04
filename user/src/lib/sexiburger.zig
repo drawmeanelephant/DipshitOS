@@ -434,8 +434,8 @@ pub const SexiburgerMenu = struct {
         if (q.len > 0) {
             ui.draw_text(win_id, q, text_x, text_y, ui.theme_text_primary());
             // Cursor
-            const cursor_x = text_x + @as(u32, @intCast(q.len)) * 8;
-            ui.draw_rect(win_id, Rect.make(cursor_x, text_y, 2, 8), ui.theme_accent());
+            const cursor_x = text_x + ui.measure_text(q);
+            ui.draw_rect(win_id, Rect.make(cursor_x, text_y, 2, 10), ui.theme_accent());
         } else {
             ui.draw_text(win_id, "Filter commands / verbs (e.g. sysinfo, save, new-tab)...", text_x, text_y, ui.theme_text_muted());
         }
@@ -483,11 +483,11 @@ pub const SexiburgerMenu = struct {
 
                 // Shortcut or verb on right
                 if (cmd.shortcut.len > 0) {
-                    const sc_w = @as(u32, @intCast(cmd.shortcut.len)) * 8;
+                    const sc_w = ui.measure_text(cmd.shortcut);
                     const sc_x = if (srect.w > sc_w + 10) srect.x + srect.w - sc_w - 6 else srect.x + 120;
                     ui.draw_text(win_id, cmd.shortcut, sc_x, item_y + 2, ui.theme_text_muted());
                 } else if (cmd.verb.len > 0) {
-                    const vb_w = @as(u32, @intCast(cmd.verb.len)) * 8;
+                    const vb_w = ui.measure_text(cmd.verb);
                     const vb_x = if (srect.w > vb_w + 10) srect.x + srect.w - vb_w - 6 else srect.x + 120;
                     ui.draw_text(win_id, cmd.verb, vb_x, item_y + 2, ui.theme_text_muted());
                 }
@@ -543,7 +543,7 @@ pub const SexiburgerMenu = struct {
 
             // Shortcut
             if (item.command.shortcut.len > 0) {
-                const sc_w = @as(u32, @intCast(item.command.shortcut.len)) * 8;
+                const sc_w = ui.measure_text(item.command.shortcut);
                 const sc_x = if (list_w > sc_w + 12) list_x + list_w - sc_w - 8 else list_x + 380;
                 ui.draw_text(win_id, item.command.shortcut, sc_x, cur_y + 4, ui.theme_text_muted());
             }
@@ -559,7 +559,10 @@ pub const SexiburgerMenu = struct {
         ui.draw_rect(win_id, Rect.make(self.rect.x, foot_y, self.rect.w, 1), ui.theme_border());
 
         ui.draw_text(win_id, "6 Sections * 6 Tentacles (Covenant of Six)", self.rect.x + 12, foot_y + 6, ui.theme_text_muted());
-        ui.draw_text(win_id, "Esc: Close  Enter: Run  Up/Down: Navigate", self.rect.x + self.rect.w - 280, foot_y + 6, ui.theme_text_muted());
+        const help_txt = "Esc: Close  Enter: Run  Up/Down: Navigate";
+        const help_w = ui.measure_text(help_txt);
+        const help_x = if (self.rect.w > help_w + 16) self.rect.x + self.rect.w - help_w - 12 else self.rect.x + 200;
+        ui.draw_text(win_id, help_txt, help_x, foot_y + 6, ui.theme_text_muted());
     }
 };
 

@@ -1088,9 +1088,9 @@ pub const AppState = struct {
         ui.draw_rect_outline(win, display_rect, ui.border_w, ui.theme_border());
         var disp_buf: [32]u8 = undefined;
         const disp_text = self.display_text(&disp_buf);
-        const text_w = @as(u32, @intCast(disp_text.len)) * 8;
+        const text_w = ui.measure_text(disp_text);
         const text_x = if (display_rect.w > text_w + 16) display_rect.x + display_rect.w - text_w - 8 else display_rect.x + 16;
-        const text_y = display_rect.y + (display_rect.h - 8) / 2;
+        const text_y = display_rect.y + (if (display_rect.h > 12) (display_rect.h - 12) / 2 else 0);
         ui.draw_text(win, disp_text, text_x, text_y, ui.theme_text_primary());
 
         // Memory indicator (K2)

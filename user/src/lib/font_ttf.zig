@@ -53,6 +53,15 @@ pub const TrueTypeFace = struct {
     cmap_subtable_offset: u32,
     cmap_format: u16,
 
+    // Static scratch buffers to eliminate stack pressure in 8 KiB userland threads
+    pub var scratch_pts: [512]Point = undefined;
+    pub var scratch_ends: [32]u16 = undefined;
+    pub var scratch_segs: [1024]LineSegment = undefined;
+    pub var scratch_scaled_segs: [1024]LineSegment = undefined;
+    pub var scratch_sub_accum: [2048]u16 = undefined;
+    pub var scratch_comp_pts: [256]Point = undefined;
+    pub var scratch_comp_ends: [16]u16 = undefined;
+
     pub fn init(data: []const u8) Error!TrueTypeFace {
         if (data.len < 12) return error.InvalidFontFormat;
 
@@ -450,9 +459,7 @@ pub const TrueTypeFace = struct {
                     stream_idx += 8;
                 }
 
-                var comp_pts: [512]Point = undefined;
-                var comp_ends: [16]u16 = undefined;
-                const comp_outline = try self.load_glyph_outline(component_glyph_idx, &comp_pts, &comp_ends);
+                const comp_outline = try self.load_glyph_outline(component_glyph_idx, &scratch_comp_pts, &scratch_comp_ends);
 
                 const pts_base = total_pts;
                 for (comp_outline.points) |p| {
@@ -788,7 +795,7 @@ pub const TrueTypeFace = struct {
         const y_max_base: i64 = outline.y_max;
 
         // Scale segments to 4x subpixel coordinate space
-        var scaled_segs: [1024]LineSegment = undefined;
+        const scaled_segs = &scratch_scaled_segs;
         const seg_count = @min(segments.len, scaled_segs.len);
 
         for (0..seg_count) |s| {
@@ -805,9 +812,10 @@ pub const TrueTypeFace = struct {
         }
 
         // Initialize subpixel coverage accumulator
-        var sub_accum: [2048]u16 = [_]u16{0} ** 2048;
         const total_pixels = @as(usize, w_px) * @as(usize, h_px);
-        if (total_pixels > sub_accum.len) return error.BufferTooSmall;
+        if (total_pixels > scratch_sub_accum.len) return error.BufferTooSmall;
+        const sub_accum = &scratch_sub_accum;
+        @memset(sub_accum[0..total_pixels], 0);
 
         const sub_h = @as(i32, @intCast(h_px)) * 4;
         const sub_w = @as(i32, @intCast(w_px)) * 4;
@@ -924,10 +932,7 @@ pub const TrueTypeFace = struct {
 
                 // Render on demand
                 const g_idx = face.glyph_index(cp);
-                var pts: [512]Point = undefined;
-                var ends: [16]u16 = undefined;
-                var segs: [1024]LineSegment = undefined;
-                const outline = face.load_glyph_outline(g_idx, &pts, &ends) catch return null;
+                const outline = face.load_glyph_outline(g_idx, &scratch_pts, &scratch_ends) catch return null;
 
                 const remaining = self.alpha_storage.len - self.storage_used;
                 if (remaining == 0) return null;
@@ -937,7 +942,7 @@ pub const TrueTypeFace = struct {
                     g_idx,
                     pixel_size,
                     self.alpha_storage[self.storage_used..],
-                    &segs,
+                    &scratch_segs,
                 ) catch return null;
 
                 const entry = CachedGlyph{

@@ -163,7 +163,7 @@ fn refresh(win: u32) void {
         const len = log_lens[idx];
         if (len > 0) {
             const start = idx * 128;
-            ui.draw_text(win, log_buf[start..][0..len], ui.pad_md, y, ui.theme_text_primary());
+            ui.draw_text_mono(win, log_buf[start..][0..len], ui.pad_md, y, ui.theme_text_primary());
         }
         y += log_line_h;
         if (y + log_line_h > prompt_y - 4) break;
