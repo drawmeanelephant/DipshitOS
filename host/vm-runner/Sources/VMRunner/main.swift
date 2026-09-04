@@ -3099,6 +3099,13 @@ func startKeyStringInject() {
 /// Forward `path` into the serial attachment exactly once, after `after`
 /// appears in the serial log (default: the kernel terminal state). Shared
 /// by the primary script (claim 6684) and the second phase (claim 4613).
+///
+/// Issue #843 (Shape A): every forward step is logged distinctly so a
+/// script-phase delivery stall self-diagnoses at the host — "marker seen"
+/// is logged SEPARATELY from "bytes written", and a post-write pipe
+/// residual check distinguishes "VZ never consumed the bytes" (residual
+/// bytes still queued in the serial input pipe) from "bytes left the pipe"
+/// (delivered to VZ/guest — a guest RX or shell-processing stall).
 func forwardScriptOnce(path: String, after: String?, label: String, settle: Double) {
     let q = DispatchQueue(label: "virelaios.\(label)")
     q.async {
@@ -3125,19 +3132,50 @@ func forwardScriptOnce(path: String, after: String?, label: String, settle: Doub
         // longer timeout than the old fixed floor.
         let waitSeconds = max(max(40, settle + 60), timeout)
         let waitDeadline = Date().addingTimeInterval(waitSeconds)
+        let started = Date()
+        FileHandle.standardOutput.write(Data("\(label): waiting for marker \"\(marker)\" (script \(scriptData.count) bytes, settle \(settle)s, deadline \(Int(waitSeconds))s)\n".utf8))
         var sent = false
+        var readFailures = 0
         while Date() < waitDeadline {
-            if let text = try? String(contentsOf: serialURL, encoding: .utf8),
-               text.contains(marker) {
-                Thread.sleep(forTimeInterval: settle)
-                do { try consoleInputPipe.fileHandleForWriting.write(contentsOf: scriptData) }
-                catch {
-                    FileHandle.standardError.write(Data("ERROR: could not forward script to the guest serial attachment: \(error)\n".utf8))
+            if let text = try? String(contentsOf: serialURL, encoding: .utf8) {
+                if text.contains(marker) {
+                    FileHandle.standardOutput.write(Data("\(label): marker \"\(marker)\" seen at t=\(String(format: "%.1f", Date().timeIntervalSince(started)))s (serial log \(text.count) bytes) — settle \(settle)s, then forward\n".utf8))
+                    Thread.sleep(forTimeInterval: settle)
+                    let writeStart = Date()
+                    do { try consoleInputPipe.fileHandleForWriting.write(contentsOf: scriptData) }
+                    catch {
+                        FileHandle.standardError.write(Data("ERROR: could not forward script to the guest serial attachment: \(error)\n".utf8))
+                    }
+                    let writeSecs = Date().timeIntervalSince(writeStart)
+                    FileHandle.standardOutput.write(Data("\(label): forwarded \(scriptData.count) bytes to the serial attachment (write took \(String(format: "%.3f", writeSecs))s)\n".utf8))
+                    if writeSecs > 1.0 {
+                        FileHandle.standardError.write(Data("WARNING: \(label): serial-input write blocked \(String(format: "%.3f", writeSecs))s — the pipe was backed up (VZ not draining the serial attachment fast enough)\n".utf8))
+                    }
+                    // Issue #843 Shape A: after a grace period, check whether
+                    // the forwarded bytes are STILL queued in the serial input
+                    // pipe (unread by VZ's serial attachment). poll() on the
+                    // READ end: POLLIN set = data pending = VZ never consumed
+                    // it — the host→guest delivery itself stalled. POLLIN
+                    // clear = the bytes left the pipe and any stall is in VZ's
+                    // delivery or the guest's RX/shell path, not this write.
+                    Thread.sleep(forTimeInterval: 2.0)
+                    var pfd = pollfd(fd: consoleInputPipe.fileHandleForReading.fileDescriptor, events: Int16(POLLIN), revents: 0)
+                    let pr = poll(&pfd, 1, 0)
+                    if pr > 0 && (pfd.revents & Int16(POLLIN)) != 0 {
+                        FileHandle.standardError.write(Data("WARNING: \(label): \(scriptData.count) forwarded bytes STILL queued in the serial input pipe 2s after the write — the VZ serial attachment did not consume them (host→guest RX stall)\n".utf8))
+                    } else {
+                        FileHandle.standardOutput.write(Data("\(label): serial input pipe drained (bytes left the host pipe — any stall is VZ delivery or guest RX)\n".utf8))
+                    }
+                    sent = true
+                    break
                 }
-                sent = true
-                break
+            } else {
+                readFailures += 1
             }
             Thread.sleep(forTimeInterval: 0.5)
+        }
+        if readFailures > 0 {
+            FileHandle.standardError.write(Data("WARNING: \(label): \(readFailures) serial-log read(s) failed while polling for the marker\n".utf8))
         }
         if !sent {
             FileHandle.standardError.write(Data("ERROR: guest did not emit \(label)-after marker '\(marker)' within \(Int(waitSeconds))s; script input not sent\n".utf8))
