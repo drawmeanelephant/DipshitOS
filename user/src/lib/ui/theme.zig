@@ -488,3 +488,81 @@ pub fn emit_tokens_marker(tag: []const u8) void {
     }) catch return;
     write_console(msg);
 }
+
+// ---------------------------------------------------------------------------
+// M39 UI2 Sidebar Design Tokens & Tab Styling (Issue #927)
+// ---------------------------------------------------------------------------
+
+/// Sidebar layout metrics (px).
+pub const sidebar_w: u32 = 180;
+pub const tab_row_h: u32 = 38;
+pub const tab_pill_inset_x: u32 = 8;
+pub const tab_pill_inset_y: u32 = 2;
+pub const tab_pill_radius: u32 = 6;
+
+/// Typography metrics for sidebar elements (pt / px).
+pub const font_size_tab_title: u32 = 14;
+pub const font_size_clock: u32 = 13;
+pub const font_size_badge: u32 = 11;
+
+/// Sidebar color palette struct.
+pub const SidebarColors = struct {
+    bg: u32,
+    border: u32,
+    active_pill: u32,
+    hover_pill: u32,
+    text_active: u32,
+    text_inactive: u32,
+};
+
+pub const SIDEBAR_DARK: SidebarColors = .{
+    .bg = 0x13191f,
+    .border = 0x242f38,
+    .active_pill = 0x263340,
+    .hover_pill = 0x1c252d,
+    .text_active = 0xffffff,
+    .text_inactive = 0x94a3b8,
+};
+
+pub const SIDEBAR_LIGHT: SidebarColors = .{
+    .bg = 0xe2e8f0,
+    .border = 0xcbd5e1,
+    .active_pill = 0xffffff,
+    .hover_pill = 0xedf2f7,
+    .text_active = 0x0f172a,
+    .text_inactive = 0x64748b,
+};
+
+pub const SIDEBAR_AMBER: SidebarColors = .{
+    .bg = 0x120a00,
+    .border = 0x3a2800,
+    .active_pill = 0x3a2800,
+    .hover_pill = 0x251800,
+    .text_active = 0xffcc00,
+    .text_inactive = 0x997700,
+};
+
+pub fn active_sidebar() *const SidebarColors {
+    if (current_theme.bg == THEME_LIGHT.bg and current_theme.accent == THEME_LIGHT.accent) return &SIDEBAR_LIGHT;
+    if (current_theme.bg == THEME_AMBER.bg and current_theme.accent == THEME_AMBER.accent) return &SIDEBAR_AMBER;
+    return &SIDEBAR_DARK;
+}
+
+pub fn sidebar_bg() u32 {
+    return active_sidebar().bg;
+}
+pub fn sidebar_border() u32 {
+    return active_sidebar().border;
+}
+pub fn sidebar_active_pill() u32 {
+    return active_sidebar().active_pill;
+}
+pub fn sidebar_hover_pill() u32 {
+    return active_sidebar().hover_pill;
+}
+pub fn sidebar_text_active() u32 {
+    return active_sidebar().text_active;
+}
+pub fn sidebar_text_inactive() u32 {
+    return active_sidebar().text_inactive;
+}

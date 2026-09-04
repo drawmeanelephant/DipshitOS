@@ -272,8 +272,35 @@ pub const theme_warning = theme.theme_warning;
 pub const widget_bg = theme.widget_bg;
 pub const widget_border = theme.widget_border;
 pub const widget_text = theme.widget_text;
+pub const sidebar_w = theme.sidebar_w;
+pub const tab_row_h = theme.tab_row_h;
+pub const tab_pill_inset_x = theme.tab_pill_inset_x;
+pub const tab_pill_inset_y = theme.tab_pill_inset_y;
+pub const tab_pill_radius = theme.tab_pill_radius;
+pub const font_size_tab_title = theme.font_size_tab_title;
+pub const font_size_clock = theme.font_size_clock;
+pub const font_size_badge = theme.font_size_badge;
+pub const SidebarColors = theme.SidebarColors;
+pub const SIDEBAR_DARK = theme.SIDEBAR_DARK;
+pub const SIDEBAR_LIGHT = theme.SIDEBAR_LIGHT;
+pub const SIDEBAR_AMBER = theme.SIDEBAR_AMBER;
+pub const sidebar_bg = theme.sidebar_bg;
+pub const sidebar_border = theme.sidebar_border;
+pub const sidebar_active_pill = theme.sidebar_active_pill;
+pub const sidebar_hover_pill = theme.sidebar_hover_pill;
+pub const sidebar_text_active = theme.sidebar_text_active;
+pub const sidebar_text_inactive = theme.sidebar_text_inactive;
+pub const isqrt = draw.isqrt;
+pub const fill_rounded_rect_buf = draw.fill_rounded_rect_buf;
+pub const fill_rounded_rect = draw.fill_rounded_rect;
+pub const draw_rounded_rect = draw.draw_rounded_rect;
+pub const fill_pill = draw.fill_pill;
+pub const fill_pill_buf = draw.fill_pill_buf;
+pub const draw_text_sized = draw.draw_text_sized;
+pub const measure_text_sized = draw.measure_text_sized;
 pub const FILL_BATCH_MAX = draw.FILL_BATCH_MAX;
 pub const FILL_RECT_SIZE = draw.FILL_RECT_SIZE;
+
 pub const FillBatcher = draw.FillBatcher;
 pub const Rect = draw.Rect;
 pub const WindowBacking = draw.WindowBacking;
@@ -1718,4 +1745,79 @@ test "m38: TextInput proportional cursor calculation and click placement" {
     var ev_end = Event{ .kind = MOUSE_DOWN, .flags = 0, .seq = 3, .arg0 = 150, .arg1 = 15 };
     _ = input.handle_event(&ev_end);
     try std.testing.expectEqual(@as(usize, 11), input.cursor);
+}
+
+test "m39 ui2: isqrt integer square root" {
+    try std.testing.expectEqual(@as(u32, 0), isqrt(0));
+    try std.testing.expectEqual(@as(u32, 1), isqrt(1));
+    try std.testing.expectEqual(@as(u32, 2), isqrt(4));
+    try std.testing.expectEqual(@as(u32, 3), isqrt(9));
+    try std.testing.expectEqual(@as(u32, 4), isqrt(16));
+    try std.testing.expectEqual(@as(u32, 5), isqrt(25));
+    try std.testing.expectEqual(@as(u32, 10), isqrt(100));
+    try std.testing.expectEqual(@as(u32, 128), isqrt(16384));
+    try std.testing.expectEqual(@as(u32, 169), isqrt(28800));
+}
+
+test "m39 ui2: fill_rounded_rect_buf anti-aliased geometry and symmetry" {
+    var pixels = [_]u32{0xFF000000} ** (24 * 24);
+    fill_rounded_rect_buf(&pixels, 24, 24, Rect.make(0, 0, 24, 24), 8, 0xFFFFFFFF);
+
+    // 1. Center must be pure white
+    try std.testing.expectEqual(@as(u32, 0xFFFFFFFF), pixels[12 * 24 + 12]);
+
+    // 2. Outer corners (0,0), (23,0), (0,23), (23,23) must be outside the radius and completely untouched
+    try std.testing.expectEqual(@as(u32, 0xFF000000), pixels[0 * 24 + 0]);
+    try std.testing.expectEqual(@as(u32, 0xFF000000), pixels[0 * 24 + 23]);
+    try std.testing.expectEqual(@as(u32, 0xFF000000), pixels[23 * 24 + 0]);
+    try std.testing.expectEqual(@as(u32, 0xFF000000), pixels[23 * 24 + 23]);
+
+    // 3. Corner edge pixel (2, 2) must be anti-aliased: blended between black and white
+    const p_corner = pixels[2 * 24 + 2];
+    const r_corner = p_corner & 0xFF;
+    try std.testing.expect(r_corner > 0 and r_corner < 255);
+
+    // 4. 4-way quarter-circle symmetry
+    try std.testing.expectEqual(pixels[2 * 24 + 2], pixels[2 * 24 + 21]);
+    try std.testing.expectEqual(pixels[2 * 24 + 2], pixels[21 * 24 + 2]);
+    try std.testing.expectEqual(pixels[2 * 24 + 2], pixels[21 * 24 + 21]);
+}
+
+test "m39 ui2: fill_pill_buf clamps radius to half height" {
+    var pixels = [_]u32{0xFF111111} ** (32 * 16);
+    fill_pill_buf(&pixels, 32, 16, Rect.make(0, 0, 32, 16), 0xFF3B82F6);
+
+    // Outer corner untouched
+    try std.testing.expectEqual(@as(u32, 0xFF111111), pixels[0 * 32 + 0]);
+    try std.testing.expectEqual(@as(u32, 0xFF111111), pixels[0 * 32 + 31]);
+
+    // Center filled with solid blue
+    try std.testing.expectEqual(@as(u32, 0xFF3B82F6), pixels[8 * 32 + 16]);
+}
+
+test "m39 ui2: sidebar design tokens and theme reactivity" {
+    try std.testing.expectEqual(@as(u32, 180), sidebar_w);
+    try std.testing.expectEqual(@as(u32, 38), tab_row_h);
+    try std.testing.expectEqual(@as(u32, 6), tab_pill_radius);
+    try std.testing.expectEqual(@as(u32, 14), font_size_tab_title);
+    try std.testing.expectEqual(@as(u32, 13), font_size_clock);
+    try std.testing.expectEqual(@as(u32, 11), font_size_badge);
+
+    // Dark theme values
+    defer theme.current_theme = THEME_DARK;
+    theme.current_theme = THEME_DARK;
+    try std.testing.expectEqual(SIDEBAR_DARK.bg, sidebar_bg());
+    try std.testing.expectEqual(SIDEBAR_DARK.active_pill, sidebar_active_pill());
+    try std.testing.expectEqual(SIDEBAR_DARK.hover_pill, sidebar_hover_pill());
+
+    // Light theme values
+    theme.current_theme = THEME_LIGHT;
+    try std.testing.expectEqual(SIDEBAR_LIGHT.bg, sidebar_bg());
+    try std.testing.expectEqual(SIDEBAR_LIGHT.active_pill, sidebar_active_pill());
+    try std.testing.expectEqual(SIDEBAR_LIGHT.hover_pill, sidebar_hover_pill());
+}
+
+test "m39 ui2: measure_text_sized returns sensible metrics" {
+    const w = measure_text_sized("Virelai", 14);
+    try std.testing.expect(w > 20);
 }

@@ -406,6 +406,46 @@ pub fn draw_text_centered(win_id: u32, text: []const u8, rect: Rect, fg_rgb: u32
     draw_text(win_id, text, x, y, fg_rgb);
 }
 
+pub fn measure_text_sized(text: []const u8, size: u32) u32 {
+    if (active_ui_font) |face| {
+        var w: u32 = 0;
+        for (text) |ch| {
+            if (active_ui_cache.get_or_render(face, ch, size)) |entry| {
+                w += entry.advance_width;
+            } else {
+                w += 8;
+            }
+        }
+        return w;
+    }
+    return @as(u32, @intCast(text.len)) * 8;
+}
+
+pub fn draw_text_sized(win_id: u32, text: []const u8, x: u32, y: u32, size: u32, fg_rgb: u32) void {
+    var cur_x = x;
+    if (active_ui_font) |face| {
+        const base_y: i32 = @intCast((size * 10) / 14);
+        for (text) |ch| {
+            if (active_ui_cache.get_or_render(face, ch, size)) |entry| {
+                const alpha = active_ui_cache.glyph_alpha(entry);
+                const gx = @as(i32, @intCast(cur_x)) + entry.bearing_x;
+                const gy = @as(i32, @intCast(y)) + (base_y - entry.bearing_y);
+                draw_alpha_mask(win_id, gx, gy, entry.width, entry.height, alpha, fg_rgb);
+                cur_x += entry.advance_width;
+            } else {
+                draw_char(win_id, ch, cur_x, y, fg_rgb);
+                cur_x += 8;
+            }
+        }
+        return;
+    }
+
+    for (text) |ch| {
+        draw_char(win_id, ch, cur_x, y, fg_rgb);
+        cur_x += 8;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Step 6 (Issue #206): 8×16 font helpers for titles and headings.
 // Uses the kernel's 2×-stretched glyph table via a runtime pixel walk.
@@ -690,4 +730,197 @@ pub fn draw_focus_outline(win_id: u32, rect: Rect) void {
     );
     draw_rect_outline(win_id, outer, focus_w, theme_accent());
     draw_rect_outline(win_id, rect, border_w, theme_border());
+}
+
+// ---------------------------------------------------------------------------
+// M39 UI2 Anti-Aliased Rounded Rectangles & Pills (Issue #927)
+// ---------------------------------------------------------------------------
+
+/// Integer square root via Newton-Raphson approximation.
+pub fn isqrt(val: u64) u32 {
+    if (val == 0) return 0;
+    var x0: u64 = val;
+    var x1: u64 = (x0 + 1) / 2;
+    while (x1 < x0) {
+        x0 = x1;
+        x1 = (x0 + val / x0) / 2;
+    }
+    return @intCast(x0);
+}
+
+/// Anti-aliased rounded rectangle fill directly into a 32-bpp BGRA/RGBA pixel buffer.
+/// Renders with 4-way subpixel quarter-circle anti-aliasing on the corners and
+/// optimal non-overlapping solid spans for the interior.
+pub fn fill_rounded_rect_buf(pixels: []u32, buf_w: u32, buf_h: u32, rect: Rect, radius: u32, color: u32) void {
+    if (rect.w == 0 or rect.h == 0 or buf_w == 0 or buf_h == 0) return;
+    if (rect.x >= buf_w or rect.y >= buf_h) return;
+
+    const max_w = @min(rect.w, buf_w - rect.x);
+    const max_h = @min(rect.h, buf_h - rect.y);
+    const x0 = rect.x;
+    const y0 = rect.y;
+    const x1 = x0 + max_w;
+    const y1 = y0 + max_h;
+
+    const r = @min(radius, @min(max_w / 2, max_h / 2));
+    const src_a: u32 = (color >> 24) & 0xFF;
+    const base_a: u32 = if (src_a == 0) 255 else src_a;
+    const rgb: u32 = color & 0x00FFFFFF;
+
+    if (r == 0) {
+        // Plain rectangular fill
+        var py = y0;
+        while (py < y1) : (py += 1) {
+            const row_off = py * buf_w;
+            var px = x0;
+            while (px < x1) : (px += 1) {
+                const idx = row_off + px;
+                pixels[idx] = blend_source_over(pixels[idx], (base_a << 24) | rgb);
+            }
+        }
+        return;
+    }
+
+    // 1. Center column (from x0 + r to x1 - r, full height y0 .. y1)
+    if (x1 > x0 + 2 * r) {
+        var py = y0;
+        while (py < y1) : (py += 1) {
+            const row_off = py * buf_w;
+            var px = x0 + r;
+            const end_x = x1 - r;
+            while (px < end_x) : (px += 1) {
+                const idx = row_off + px;
+                pixels[idx] = blend_source_over(pixels[idx], (base_a << 24) | rgb);
+            }
+        }
+    }
+
+    // 2. Left and right waists (between top and bottom corners)
+    if (y1 > y0 + 2 * r) {
+        var py = y0 + r;
+        const end_y = y1 - r;
+        while (py < end_y) : (py += 1) {
+            const row_off = py * buf_w;
+            // Left waist
+            var px_l = x0;
+            const end_l = x0 + r;
+            while (px_l < end_l) : (px_l += 1) {
+                const idx = row_off + px_l;
+                pixels[idx] = blend_source_over(pixels[idx], (base_a << 24) | rgb);
+            }
+            // Right waist
+            var px_r = x1 - r;
+            while (px_r < x1) : (px_r += 1) {
+                const idx = row_off + px_r;
+                pixels[idx] = blend_source_over(pixels[idx], (base_a << 24) | rgb);
+            }
+        }
+    }
+
+    // 3. 4 Anti-aliased corners (4-way quarter-circle symmetry)
+    const R: u32 = r * 16;
+    var iy: u32 = 0;
+    while (iy < r) : (iy += 1) {
+        // Vertical distance from corner center in 16x units
+        const dy: i32 = @as(i32, @intCast((r - iy) * 16)) - 8;
+        var ix: u32 = 0;
+        while (ix < r) : (ix += 1) {
+            // Horizontal distance from corner center in 16x units
+            const dx: i32 = @as(i32, @intCast((r - ix) * 16)) - 8;
+            const dist_sq: u64 = @intCast(dx * dx + dy * dy);
+            const dist = isqrt(dist_sq);
+
+            if (dist >= R + 8) continue; // Completely outside circle
+
+            const coverage: u32 = if (dist + 8 <= R)
+                255
+            else
+                ((R + 8 - dist) * 255) / 16;
+
+            const eff_a = (base_a * coverage) / 255;
+            if (eff_a == 0) continue;
+            const src_px = (eff_a << 24) | rgb;
+
+            // TL corner: (x0 + ix, y0 + iy)
+            const tl_idx = (y0 + iy) * buf_w + (x0 + ix);
+            pixels[tl_idx] = blend_source_over(pixels[tl_idx], src_px);
+
+            // TR corner: (x1 - 1 - ix, y0 + iy)
+            const tr_idx = (y0 + iy) * buf_w + (x1 - 1 - ix);
+            pixels[tr_idx] = blend_source_over(pixels[tr_idx], src_px);
+
+            // BL corner: (x0 + ix, y1 - 1 - iy)
+            const bl_idx = (y1 - 1 - iy) * buf_w + (x0 + ix);
+            pixels[bl_idx] = blend_source_over(pixels[bl_idx], src_px);
+
+            // BR corner: (x1 - 1 - ix, y1 - 1 - iy)
+            const br_idx = (y1 - 1 - iy) * buf_w + (x1 - 1 - ix);
+            pixels[br_idx] = blend_source_over(pixels[br_idx], src_px);
+        }
+    }
+}
+
+/// Draw a filled rounded rectangle with corner radius r.
+/// Uses subpixel anti-aliased blending if a backing buffer is registered,
+/// otherwise falls back to batched span fills.
+pub fn fill_rounded_rect(win_id: u32, rect: Rect, radius: u32, color: u32) void {
+    if (rect.w == 0 or rect.h == 0) return;
+    if (win_get_backing(win_id)) |backing| {
+        fill_rounded_rect_buf(
+            backing.pixels[0 .. @as(usize, backing.width) * backing.height],
+            backing.width,
+            backing.height,
+            rect,
+            radius,
+            color,
+        );
+        return;
+    }
+
+    const r = @min(radius, @min(rect.w / 2, rect.h / 2));
+    if (r == 0) {
+        draw_rect(win_id, rect, color);
+        return;
+    }
+
+    // Batched fill fallback
+    // Center column
+    if (rect.w > 2 * r) {
+        win_fill_batched(win_id, rect.x + r, rect.y, rect.w - 2 * r, rect.h, color);
+    }
+
+    // Left and right waists
+    if (rect.h > 2 * r) {
+        win_fill_batched(win_id, rect.x, rect.y + r, r, rect.h - 2 * r, color);
+        win_fill_batched(win_id, rect.x + rect.w - r, rect.y + r, r, rect.h - 2 * r, color);
+    }
+
+    // Corner spans
+    var iy: u32 = 0;
+    while (iy < r) : (iy += 1) {
+        const dy = r - iy;
+        const dx = isqrt(r * r - dy * dy);
+        if (dx > 0) {
+            // TL & TR
+            win_fill_batched(win_id, rect.x + r - dx, rect.y + iy, dx, 1, color);
+            win_fill_batched(win_id, rect.x + rect.w - r, rect.y + iy, dx, 1, color);
+            // BL & BR
+            win_fill_batched(win_id, rect.x + r - dx, rect.y + rect.h - 1 - iy, dx, 1, color);
+            win_fill_batched(win_id, rect.x + rect.w - r, rect.y + rect.h - 1 - iy, dx, 1, color);
+        }
+    }
+}
+
+pub const draw_rounded_rect = fill_rounded_rect;
+
+/// Fill a pill-shaped button or tab highlight (radius = min(w, h) / 2).
+pub fn fill_pill(win_id: u32, rect: Rect, color: u32) void {
+    const r = @min(rect.w, rect.h) / 2;
+    fill_rounded_rect(win_id, rect, r, color);
+}
+
+/// Fill a pill-shaped button or tab highlight in a raw pixel buffer.
+pub fn fill_pill_buf(pixels: []u32, buf_w: u32, buf_h: u32, rect: Rect, color: u32) void {
+    const r = @min(rect.w, rect.h) / 2;
+    fill_rounded_rect_buf(pixels, buf_w, buf_h, rect, r, color);
 }
