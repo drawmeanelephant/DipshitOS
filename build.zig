@@ -1544,6 +1544,32 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_wnd.step);
 
     // ------------------------------------------------------------------
+    // Guest: M39 TWM1 tabbed window manager (issue #928)
+    // TABWM.BIN — the tabbed desktop EL0 WM server: registers (slot 65),
+    // renders Left Sidebar with Sexiburger, tabs, and clock/tray.
+    // ------------------------------------------------------------------
+    const tabwm_mod = b.createModule(.{
+        .root_source_file = b.path("user/src/tabwm.zig"),
+        .target = kernel_target,
+        .optimize = .ReleaseSmall,
+    });
+    tabwm_mod.addAnonymousImport("wnd_core", .{ .root_source_file = b.path("kernel/src/wnd_core.zig") });
+    const tabwm_prog = b.addExecutable(.{
+        .name = "user-tabwm",
+        .root_module = tabwm_mod,
+    });
+    tabwm_prog.linker_script = b.path("user/linker-segmented.ld");
+    const tabwm_step = b.step("tabwm", "Build the tabbed desktop WM server (zig-out/bin/TABWM.BIN)");
+    const tabwm_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
+    tabwm_elf2bin.addFileArg(tabwm_prog.getEmittedBin());
+    const tabwm_bin = tabwm_elf2bin.addOutputFileArg("TABWM.BIN");
+    tabwm_elf2bin.has_side_effects = true;
+    tabwm_elf2bin.stdio = .inherit;
+    tabwm_step.dependOn(&tabwm_elf2bin.step);
+    const install_tabwm = b.addInstallFileWithDir(tabwm_bin, .bin, "TABWM.BIN");
+    b.getInstallStep().dependOn(&install_tabwm.step);
+
+    // ------------------------------------------------------------------
     // Guest: forty-ninth ESP user program (M32 WMS7 Gate A, issue #627)
     // WMRPC.BIN — the app↔WM mailbox-protocol test app behind the live
     // verify-live-wm-ipc.sh gate: reads sys_procs (slot 7) to find the WM,
