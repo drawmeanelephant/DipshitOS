@@ -2145,6 +2145,10 @@ pub fn build(b: *std.Build) void {
         "kernel/tests/syscall_test.zig",
         "kernel/tests/monitor_test.zig",
         "kernel/tests/shell_test.zig",
+        "kernel/tests/alloc_test.zig",
+        "kernel/tests/net/tcp_test.zig",
+        "kernel/tests/net/dhcp_test.zig",
+        "kernel/tests/driving_award_test.zig",
         "test/helpers/helpers.zig",
     };
 
@@ -2190,6 +2194,34 @@ pub fn build(b: *std.Build) void {
     });
     shell_mod.addOptions("build_options", kernel_options);
 
+    const alloc_mod = b.createModule(.{
+        .root_source_file = b.path("kernel/src/alloc.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    alloc_mod.addOptions("build_options", kernel_options);
+
+    const tcp_mod = b.createModule(.{
+        .root_source_file = b.path("kernel/src/tcp.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    tcp_mod.addOptions("build_options", kernel_options);
+
+    const dhcp_mod = b.createModule(.{
+        .root_source_file = b.path("kernel/src/dhcp.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    dhcp_mod.addOptions("build_options", kernel_options);
+
+    const driving_award_mod = b.createModule(.{
+        .root_source_file = b.path("kernel/src/driving_award.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    driving_award_mod.addOptions("build_options", kernel_options);
+
     for (unit_test_sources) |src_path| {
         const test_mod = b.createModule(.{
             .root_source_file = b.path(src_path),
@@ -2203,6 +2235,10 @@ pub fn build(b: *std.Build) void {
         test_mod.addImport("syscall", syscall_mod);
         test_mod.addImport("monitor", monitor_mod);
         test_mod.addImport("shell", shell_mod);
+        test_mod.addImport("alloc", alloc_mod);
+        test_mod.addImport("tcp", tcp_mod);
+        test_mod.addImport("dhcp", dhcp_mod);
+        test_mod.addImport("driving_award", driving_award_mod);
         const t = b.addTest(.{
             .root_module = test_mod,
         });
