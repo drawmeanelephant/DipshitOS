@@ -33,7 +33,7 @@ exec USER.BIN
 echo rx-ipc-ok
 EOF
 
-vgate_run 01 -- --script '$RUN_DIR/script1.txt' --script-after 'tasks user-el0 exited status=7' --script2 '$RUN_DIR/script2.txt' --script2-after 'peer: got ping 1' --timeout 60
+vgate_run 01 -- --cpus 1 --script '$RUN_DIR/script1.txt' --script-after 'tasks user-el0 exited status=7' --script2 '$RUN_DIR/script2.txt' --script2-after 'peer: got ping 1' --timeout 60
 
 vgate_assert 01 serial-exact 'VirelaiOS kernel has seized control.' 1
 vgate_assert 01 serial-count 'PEER.BIN' 2
