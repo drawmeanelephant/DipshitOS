@@ -6,6 +6,8 @@
 //  throwaway ASIF overlay per run; positional <disk-image> is then ignored.
 //  --vars <path>: per-run EFI variable store.)
 //         [--timeout <s>] [--expect <line>] [--terminal-marker <line>]
+//         [--cpus <n>] (claim 907: VCPU count, default 2 — the four-core
+//          four-domain stress gate boots 4)
 //         [--console] [--debug-input] [--dump-marker <file>]
 //         [--nvram-console <file>] [--script <file>]
 //         [--script-after <text>] [--script-expect <text>]
@@ -322,6 +324,7 @@ var pointerRoute: String = "window"
 // first and reports `PTR-TRUST: untrusted` instead of silently dropping
 // the post (the claim-4993 observation).
 var pointerRequestTrust = false
+var cpuCount = 2
 var timeout: TimeInterval = 30
 var timeoutExplicit = false
 var expectLine = "firmware has agreed to cooperate"
@@ -614,6 +617,12 @@ while idx < arguments.count {
     } else if arg == "--pointer-request-trust" {
         pointerRequestTrust = true
         idx += 1
+    } else if arg == "--cpus", idx + 1 < arguments.count {
+        guard let n = Int(arguments[idx + 1]), n >= 1, n <= 8 else {
+            fail("--cpus requires a count in 1...8, got '\(arguments[idx + 1])'.")
+        }
+        cpuCount = n
+        idx += 2
     } else if arg == "--timeout", idx + 1 < arguments.count {
         timeout = TimeInterval(arguments[idx + 1]) ?? 30
         timeoutExplicit = true
@@ -985,7 +994,7 @@ bootLoader.variableStore = variableStore
 let config = VZVirtualMachineConfiguration()
 config.bootLoader = bootLoader
 config.memorySize = 256 * 1024 * 1024
-config.cpuCount = 2
+config.cpuCount = cpuCount
 
 do {
     if let base = overlayBasePath {
@@ -1456,7 +1465,7 @@ let terminalDwell: TimeInterval = 2
 print("VIRELAIOS VM runner")
 print("  host: arm64 (Apple silicon), macOS \(osVersion.majorVersion).\(osVersion.minorVersion)")
 print("  disk: \(diskImagePath)")
-print("  memory: 256 MiB, cpus: 2")
+print("  memory: 256 MiB, cpus: \(cpuCount)")
 if consoleMode {
     print("  mode: interactive console")
     print("  serial log: \(serialLogPath)  (guest output teed to terminal + log)")

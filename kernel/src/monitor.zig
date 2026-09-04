@@ -6397,8 +6397,13 @@ fn cmd_spawn(m: *Monitor, args: []const []const u8) ExecError {
 /// is refused honestly. Every failure mode is reported honestly.
 fn cmd_exec(m: *Monitor, args: []const []const u8) ExecError {
     // SMP user tasks (claim 2369): `exec -c<core> <file>` pins the spawned
-    // task to a secondary core (console TX is locked, so a pinned program
-    // may print from there). Any other leading token is the file name.
+    // task to one core (console TX is locked, so a pinned program may print
+    // from there). Claim 907 (#858): `-c0` is now legal too — an explicit
+    // pin to CORE 0 (secondary_ok off), so a fourth task can be pinned to
+    // core 0 alongside the shell for the four-core four-domain gate. The
+    // unpinned default (no flag) stays distinct: `pinned` tracks the flag's
+    // presence because `pin == 0` is now a VALID explicit pin.
+    var pinned = false;
     var pin: usize = 0;
     var rest = args;
     if (args.len >= 1 and args[0].len > 2 and args[0][0] == '-' and args[0][1] == 'c') {
@@ -6411,19 +6416,20 @@ fn cmd_exec(m: *Monitor, args: []const []const u8) ExecError {
             }
             value = value * 10 + (ch - '0');
         }
-        if (value == 0 or value >= smp.max_cores) {
+        if (value >= smp.max_cores) {
             err_prefix(m);
-            m.console.puts("-c<core>: core must be in 1..");
+            m.console.puts("-c<core>: core must be in 0..");
             m.console.print_u64(smp.max_cores - 1);
             m.console.puts("\n");
             return .invalid_argument;
         }
+        pinned = true;
         pin = value;
         rest = args[1..];
     }
     const name = if (rest.len >= 1) rest[0] else esp_exec.default_name;
     const prog_args = if (rest.len >= 2) rest[1..] else &.{};
-    const result = if (pin != 0) esp_exec.exec_file_pinned(name, prog_args, pin) else esp_exec.exec_file(name, prog_args);
+    const result = if (pinned) esp_exec.exec_file_pinned(name, prog_args, pin) else esp_exec.exec_file(name, prog_args);
     switch (result) {
         .ok => {
             const info = esp_exec.loaded().?;

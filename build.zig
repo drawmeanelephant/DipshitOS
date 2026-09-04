@@ -325,6 +325,44 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_schedring.step);
 
     // ------------------------------------------------------------------
+    // Guest: the four-core four-domain stress hammers (claim 907 / issue
+    // #858) — SMPFILE.BIN / SMPNET.BIN / SMPWIN.BIN / SMPEV.BIN, each a
+    // REAL Zig program (the calc/notepad shape, so they import the tiny
+    // lib/smpst.zig syscall shim and keep counters in Zig). The live
+    // gate boots 4 VCPUs and execs each pinned to its own core
+    // (`exec -c1 SMPFILE.BIN` / `-c2 SMPNET.BIN` / `-c3 SMPWIN.BIN` /
+    // `-c0 SMPEV.BIN`), each hammering a DIFFERENT service domain (FILE /
+    // NET / WIN / EV) concurrently — the no-cross-domain-contention
+    // payoff gate for the per-service-domain locks (claim 2792).
+    // ------------------------------------------------------------------
+    const smpst_hammers = [_]struct { src: []const u8, bin: []const u8, tag: []const u8 }{
+        .{ .src = "user/src/smpst_file.zig", .bin = "SMPFILE.BIN", .tag = "file" },
+        .{ .src = "user/src/smpst_net.zig", .bin = "SMPNET.BIN", .tag = "net" },
+        .{ .src = "user/src/smpst_win.zig", .bin = "SMPWIN.BIN", .tag = "win" },
+        .{ .src = "user/src/smpst_ev.zig", .bin = "SMPEV.BIN", .tag = "ev" },
+    };
+    for (smpst_hammers) |h| {
+        const hammer = b.addExecutable(.{
+            .name = b.fmt("user-smpst-{s}", .{h.tag}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(h.src),
+                .target = kernel_target,
+                .optimize = .ReleaseSmall,
+            }),
+        });
+        hammer.linker_script = b.path("user/linker-segmented.ld");
+        const hammer_step = b.step(b.fmt("smpst-{s}", .{h.tag}), b.fmt("Build the four-core stress {s} hammer (zig-out/bin/{s}; class A tooling, no VM)", .{ h.tag, h.bin }));
+        const hammer_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
+        hammer_elf2bin.addFileArg(hammer.getEmittedBin());
+        const hammer_bin = hammer_elf2bin.addOutputFileArg(h.bin);
+        hammer_elf2bin.has_side_effects = true;
+        hammer_elf2bin.stdio = .inherit;
+        hammer_step.dependOn(&hammer_elf2bin.step);
+        const install_hammer = b.addInstallFileWithDir(hammer_bin, .bin, h.bin);
+        b.getInstallStep().dependOn(&install_hammer.step);
+    }
+
+    // ------------------------------------------------------------------
     // Guest: fifth ESP user program (milestone five, card N6 — claim
     // 1384) — the UDP syscall proof UDP.BIN. Same freestanding target,
     // linker script, elf2bin conversion, and ESP embedding as USER.BIN /
