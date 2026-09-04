@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const ui = @import("lib/ui.zig");
+const tabapp = @import("lib/tabapp.zig");
 const Rect = ui.Rect;
 const Button = ui.Button;
 const TextInput = ui.TextInput;
@@ -27,6 +28,15 @@ pub const label_x: u32 = 16;
 pub const input_x: u32 = 120;
 pub const input_w: u32 = 340;
 pub const input_h: u32 = 22;
+
+// M42 SX4 (issue #985): the NATIVE widget rects (the 512x384 design).
+pub const native_input_hostname = Rect.make(120, 40, 340, 22);
+pub const native_dropdown_theme = Rect.make(120, 72, 340, 22);
+pub const native_input_prompt = Rect.make(120, 104, 340, 22);
+pub const native_btn_save = Rect.make(16, 152, 70, 24);
+pub const native_btn_reset = Rect.make(96, 152, 70, 24);
+pub const native_btn_defaults = Rect.make(176, 152, 85, 24);
+pub const native_btn_wizard = Rect.make(271, 152, 75, 24);
 
 // Theme options for the dropdown.
 pub const theme_options = [_][]const u8{ "dark", "light", "amber" };
@@ -145,15 +155,20 @@ pub const AppState = struct {
     status_msg: [32]u8 = [_]u8{0} ** 32,
     status_len: usize = 0,
 
+    /// M42 SX4: the tab-aware canvas (draw AND hit-testing read the
+    /// scaled widget rects, so they cannot drift).
+    canvas_w: u32 = window_w,
+    canvas_h: u32 = window_h,
+
     pub fn init() AppState {
         return .{
-            .input_hostname = TextInput.init(Rect.make(input_x, row_y0, input_w, input_h)),
-            .dropdown_theme = DropDown.init(Rect.make(input_x, row_y0 + row_h, input_w, input_h), &theme_options),
-            .input_prompt = TextInput.init(Rect.make(input_x, row_y0 + row_h * 2, input_w, input_h)),
-            .btn_save = Button.init(Rect.make(16, row_y0 + row_h * 3 + 16, 70, 24), "Save"),
-            .btn_reset = Button.init(Rect.make(96, row_y0 + row_h * 3 + 16, 70, 24), "Reset"),
-            .btn_defaults = Button.init(Rect.make(176, row_y0 + row_h * 3 + 16, 85, 24), "Defaults"),
-            .btn_wizard = Button.init(Rect.make(271, row_y0 + row_h * 3 + 16, 75, 24), "Wizard"),
+            .input_hostname = TextInput.init(native_input_hostname),
+            .dropdown_theme = DropDown.init(native_dropdown_theme, &theme_options),
+            .input_prompt = TextInput.init(native_input_prompt),
+            .btn_save = Button.init(native_btn_save, "Save"),
+            .btn_reset = Button.init(native_btn_reset, "Reset"),
+            .btn_defaults = Button.init(native_btn_defaults, "Defaults"),
+            .btn_wizard = Button.init(native_btn_wizard, "Wizard"),
             .btn_wizard_back = Button.init(Rect.make(input_x, row_y0 + row_h * 3 + 16, 75, 24), "< Back"),
             .btn_wizard_next = Button.init(Rect.make(input_x + 90, row_y0 + row_h * 3 + 16, 75, 24), "Next >"),
             .btn_wizard_finish = Button.init(Rect.make(input_x + 90, row_y0 + row_h * 3 + 16, 75, 24), "Finish"),
@@ -161,16 +176,34 @@ pub const AppState = struct {
         };
     }
 
+    /// M42 SX4: map the fixed 512x384 layout into a `w x h` canvas.
+    /// At the native size every rect maps to itself (zero-regression).
+    pub fn layout(self: *AppState, w: u32, h: u32) void {
+        self.canvas_w = w;
+        self.canvas_h = h;
+        self.update_widget_layout();
+    }
+
     pub fn update_widget_layout(self: *AppState) void {
+        const w = self.canvas_w;
+        const h = self.canvas_h;
         if (self.wizard_mode) {
-            self.input_hostname.rect = Rect.make(input_x, row_y0 + 16, input_w, input_h);
-            self.dropdown_theme.rect = Rect.make(input_x, row_y0 + 16, input_w, input_h);
-            self.input_prompt.rect = Rect.make(input_x, row_y0 + 16, input_w, input_h);
+            self.input_hostname.rect = tabapp.scale(Rect.make(input_x, row_y0 + 16, input_w, input_h), window_w, window_h, w, h);
+            self.dropdown_theme.rect = tabapp.scale(Rect.make(input_x, row_y0 + 16, input_w, input_h), window_w, window_h, w, h);
+            self.input_prompt.rect = tabapp.scale(Rect.make(input_x, row_y0 + 16, input_w, input_h), window_w, window_h, w, h);
         } else {
-            self.input_hostname.rect = Rect.make(input_x, row_y0, input_w, input_h);
-            self.dropdown_theme.rect = Rect.make(input_x, row_y0 + row_h, input_w, input_h);
-            self.input_prompt.rect = Rect.make(input_x, row_y0 + row_h * 2, input_w, input_h);
+            self.input_hostname.rect = tabapp.scale(native_input_hostname, window_w, window_h, w, h);
+            self.dropdown_theme.rect = tabapp.scale(native_dropdown_theme, window_w, window_h, w, h);
+            self.input_prompt.rect = tabapp.scale(native_input_prompt, window_w, window_h, w, h);
         }
+        self.btn_save.rect = tabapp.scale(native_btn_save, window_w, window_h, w, h);
+        self.btn_reset.rect = tabapp.scale(Rect.make(96, row_y0 + row_h * 3 + 16, 70, 24), window_w, window_h, w, h);
+        self.btn_defaults.rect = tabapp.scale(Rect.make(176, row_y0 + row_h * 3 + 16, 85, 24), window_w, window_h, w, h);
+        self.btn_wizard.rect = tabapp.scale(native_btn_wizard, window_w, window_h, w, h);
+        self.btn_wizard_back.rect = tabapp.scale(Rect.make(input_x, row_y0 + row_h * 3 + 16, 75, 24), window_w, window_h, w, h);
+        self.btn_wizard_next.rect = tabapp.scale(Rect.make(input_x + 90, row_y0 + row_h * 3 + 16, 75, 24), window_w, window_h, w, h);
+        self.btn_wizard_finish.rect = tabapp.scale(Rect.make(input_x + 90, row_y0 + row_h * 3 + 16, 75, 24), window_w, window_h, w, h);
+        self.btn_wizard_skip.rect = tabapp.scale(Rect.make(16, row_y0 + row_h * 3 + 16, 65, 24), window_w, window_h, w, h);
     }
 
     pub fn load(self: *AppState) void {
@@ -379,17 +412,17 @@ pub const AppState = struct {
 
     pub fn draw(self: *const AppState, win: u32) void {
         // Background.
-        ui.draw_rect(win, Rect.make(0, 0, window_w, window_h), ui.theme_bg());
+        ui.draw_rect(win, Rect.make(0, 0, self.canvas_w, self.canvas_h), ui.theme_bg());
 
         // Title bar.
-        ui.draw_rect(win, Rect.make(0, 0, window_w, 28), ui.theme_surface());
-        ui.draw_rect_outline(win, Rect.make(0, 0, window_w, 28), 1, ui.theme_border());
+        ui.draw_rect(win, Rect.make(0, 0, self.canvas_w, 28), ui.theme_surface());
+        ui.draw_rect_outline(win, Rect.make(0, 0, self.canvas_w, 28), 1, ui.theme_border());
 
         if (self.wizard_mode) {
             ui.draw_text_large(win, "Setup Wizard", 16, 6, ui.theme_text_primary());
             var step_hdr: [32]u8 = undefined;
             const step_txt = std.fmt.bufPrint(&step_hdr, "Step {d} of 3", .{self.wizard_step}) catch "Step 1/3";
-            ui.draw_text(win, step_txt, window_w - 100, 8, ui.theme_accent());
+            ui.draw_text(win, step_txt, self.canvas_w - 100, 8, ui.theme_accent());
 
             if (self.wizard_step == 1) {
                 ui.draw_text(win, "Welcome! Set your system hostname:", label_x, row_y0 - 8, ui.theme_text_primary());
@@ -429,9 +462,9 @@ pub const AppState = struct {
         }
 
         // Status bar.
-        ui.draw_rect(win, Rect.make(0, window_h - 20, window_w, 20), ui.theme_surface());
+        ui.draw_rect(win, Rect.make(0, self.canvas_h - 20, self.canvas_w, 20), ui.theme_surface());
         if (self.status_len > 0) {
-            ui.draw_text(win, self.status_msg[0..self.status_len], 8, window_h - 16, ui.theme_text_muted());
+            ui.draw_text(win, self.status_msg[0..self.status_len], 8, self.canvas_h - 16, ui.theme_text_muted());
         }
     }
 };
@@ -443,17 +476,33 @@ pub const AppState = struct {
 pub export fn _start() callconv(.c) noreturn {
     var app = AppState.init();
 
-    const win_res = ui.win_open(window_x, window_y, window_w, window_h);
-    if (win_res < 0) {
+    // M42 SX4: the tab-aware open. Native 512x384 when the viewport
+    // proposal is absent (shim/WND); full 1100x720 under TABWM.BIN.
+    const ta_res = tabapp.TabApp.init(.{
+        .name = "SETTINGS.BIN",
+        .title = "Settings",
+        .x = window_x,
+        .y = window_y,
+        .w = window_w,
+        .h = window_h,
+    }) orelse {
         ui.write_console("settings: failed to open window\n");
         ui.exit_process(1);
-    }
-    const win = @as(u32, @intCast(win_res));
+    };
+    var ta = ta_res;
+    app.layout(ta.w, ta.h);
+    const win = ta.win;
     ui.write_console("settings: open id=6\n");
+    if (ta.tab_aware) {
+        ui.write_console("settings: tab-aware (full-viewport)\n");
+    } else {
+        ui.write_console("settings: not-tab-aware (shim or WND desktop)\n");
+    }
 
     app.load();
+    app.layout(ta.w, ta.h);
     app.draw(win);
-    ui.win_present(win);
+    ta.present();
     ui.write_console("settings: ready\n");
 
     var ev: Event = undefined;
@@ -463,22 +512,36 @@ pub export fn _start() callconv(.c) noreturn {
 
         var dirty = false;
 
-        if (ev.kind == ui.WIN_CLOSE) {
-            ui.write_console("settings: close\n");
-            break;
-        }
-
-        if (ev.kind == ui.MOUSE_DOWN or ev.kind == ui.MOUSE_UP or ev.kind == ui.MOUSE_MOVE) {
-            dirty = app.handle_mouse(&ev) or dirty;
-        } else if (ev.kind == ui.KEY_DOWN) {
-            dirty = app.handle_key(&ev) or dirty;
+        // M42 SX4: WM-lifecycle events (resize -> relayout) first.
+        switch (ta.dispatch(&ev)) {
+            .closed => break,
+            .resized => {
+                ui.write_console("settings: resize relayout\n");
+                app.layout(ta.w, ta.h);
+                dirty = true;
+            },
+            .none => {
+                if (ev.kind == ui.MOUSE_DOWN or ev.kind == ui.MOUSE_UP or ev.kind == ui.MOUSE_MOVE) {
+                    dirty = app.handle_mouse(&ev) or dirty;
+                } else if (ev.kind == ui.KEY_DOWN) {
+                    dirty = app.handle_key(&ev) or dirty;
+                }
+            },
         }
 
         while (ui.poll_event(&ev) > 0) {
-            if (ev.kind == ui.WIN_CLOSE) {
-                ui.write_console("settings: close\n");
-                ui.win_close(win);
-                ui.exit_process(exit_status);
+            switch (ta.dispatch(&ev)) {
+                .closed => {
+                    ui.write_console("settings: close\n");
+                    ta.close_and_exit(exit_status);
+                },
+                .resized => {
+                    ui.write_console("settings: resize relayout\n");
+                    app.layout(ta.w, ta.h);
+                    dirty = true;
+                    continue;
+                },
+                .none => {},
             }
             if (ev.kind == ui.MOUSE_DOWN or ev.kind == ui.MOUSE_UP or ev.kind == ui.MOUSE_MOVE) {
                 dirty = app.handle_mouse(&ev) or dirty;
@@ -489,13 +552,12 @@ pub export fn _start() callconv(.c) noreturn {
 
         if (dirty) {
             app.draw(win);
-            ui.win_present(win);
+            ta.present();
         }
     }
 
     ui.write_console("settings: exiting\n");
-    ui.win_close(win);
-    ui.exit_process(exit_status);
+    ta.close_and_exit(exit_status);
 }
 
 test "settings: AppState wizard flow and reset_defaults" {
@@ -548,4 +610,25 @@ test "settings: AppState wizard flow and reset_defaults" {
     try std.testing.expectEqualStrings("virelaios", app.input_hostname.get_text());
     try std.testing.expectEqualStrings("dark", app.dropdown_theme.selected_text());
     try std.testing.expectEqualStrings("$ ", app.input_prompt.get_text());
+}
+
+test "settings layout: native canvas is the identity (zero-regression fixed point)" {
+    var app = AppState.init();
+    app.layout(window_w, window_h);
+    try std.testing.expectEqual(window_w, app.canvas_w);
+    try std.testing.expectEqual(window_h, app.canvas_h);
+    try std.testing.expectEqual(native_input_hostname, app.input_hostname.rect);
+    try std.testing.expectEqual(native_dropdown_theme, app.dropdown_theme.rect);
+    try std.testing.expectEqual(native_btn_save, app.btn_save.rect);
+}
+
+test "settings layout: full viewport stretches the form" {
+    var app = AppState.init();
+    app.layout(1100, 720);
+    try std.testing.expectEqual(@as(u32, 1100), app.canvas_w);
+    try std.testing.expectEqual(@as(u32, 720), app.canvas_h);
+    try std.testing.expect(app.input_hostname.rect.x + app.input_hostname.rect.w <= 1100);
+    try std.testing.expect(app.input_hostname.rect.y + app.input_hostname.rect.h <= 720);
+    try std.testing.expect(app.input_hostname.rect.w > native_input_hostname.w);
+    try std.testing.expect(app.btn_save.rect.x + app.btn_save.rect.w <= 1100);
 }

@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const ui = @import("lib/ui.zig");
+const tabapp = @import("lib/tabapp.zig");
 const Rect = ui.Rect;
 const Button = ui.Button;
 const Event = ui.Event;
@@ -50,6 +51,10 @@ pub const preview_rows: usize = 15;
 pub const preview_cols: usize = 30; // (details_area.w - 12) / 8
 pub const breadcrumb_rect = Rect.make(60, 6, 440, 12);
 pub const path_max: usize = 64;
+// M42 SX4 (issue #985): the NATIVE progress-bar + dialog-parent rects (the
+// 512x384 design; layout() scales them into the tab viewport).
+pub const progress_rect = Rect.make(6, 350, 500, 16);
+pub const dialog_parent_rect = Rect.make(0, 0, window_w, window_h);
 
 // F11: column header geometry (inside the list area, 14px tall).
 pub const header_h: u32 = 14;
@@ -428,9 +433,11 @@ pub const FileList = struct {
 // ---------------------------------------------------------------------------
 
 /// Render one list row (shared by AppState.draw_list).
-fn draw_list_row(win: u32, row: usize, name: []const u8, entry: *const DirEntry, is_sel: bool, is_multi: bool, hl_at: usize, hl_len: usize) void {
-    const row_y = list_area.y + header_h + @as(u32, @intCast(row)) * list_row_h;
-    const row_rect = Rect.make(list_area.x, row_y, list_area.w, list_row_h);
+/// M42 SX4 (issue #985): the list area is a parameter (the SCALED rect —
+/// draw and hit-test share one geometry). Pixel math is otherwise identical.
+fn draw_list_row(win: u32, area: Rect, row: usize, name: []const u8, entry: *const DirEntry, is_sel: bool, is_multi: bool, hl_at: usize, hl_len: usize) void {
+    const row_y = area.y + header_h + @as(u32, @intCast(row)) * list_row_h;
+    const row_rect = Rect.make(area.x, row_y, area.w, list_row_h);
     const bg = if (is_sel)
         ui.theme_accent()
     else if (is_multi)
@@ -474,6 +481,27 @@ fn draw_list_row(win: u32, row: usize, name: []const u8, entry: *const DirEntry,
             ui.draw_char(win, name[hl_at + k], cx, text_y, ui.theme_on_accent());
         }
     }
+}
+
+/// M42 SX4 (issue #985): re-home a modal dialog in a `w x h` canvas.
+/// The parent overlay scales to the full canvas (identity at native) and
+/// the fixed 300x150 dialog recenters in it with its input/buttons
+/// re-derived exactly like Dialog.init — open/result/message/input text
+/// are preserved, so a resize never dismisses a dialog.
+fn scale_dialog_in(dlg: *ui.Dialog, w: u32, h: u32) void {
+    const parent = tabapp.scale(dialog_parent_rect, window_w, window_h, w, h);
+    dlg.parent_rect = parent;
+    const dw = ui.Dialog.width;
+    const dh = ui.Dialog.height;
+    const cw = @min(dw, parent.w);
+    const ch = @min(dh, parent.h);
+    const dx = if (parent.w > dw) parent.x + (parent.w - dw) / 2 else parent.x;
+    const dy = if (parent.h > dh) parent.y + (parent.h - dh) / 2 else parent.y;
+    dlg.rect = Rect.make(dx, dy, cw, ch);
+    const r = dlg.rect;
+    dlg.input.rect = Rect.make(r.x + 10, r.y + 60, if (r.w > 20) r.w - 20 else 0, 20);
+    dlg.ok_button.rect = Rect.make(if (r.w > 140) r.x + r.w - 140 else r.x, r.y + r.h - 30, 60, 20);
+    dlg.cancel_button.rect = Rect.make(if (r.w > 70) r.x + r.w - 70 else r.x, r.y + r.h - 30, 60, 20);
 }
 
 pub const AppState = struct {
@@ -560,10 +588,10 @@ pub const AppState = struct {
     shadow_count: usize = 0,
 
     // F1 / F7 / F18: Modal Confirmation Dialogs & Progress Bar (GH #381, #387, #398)
-    delete_dialog: ui.Dialog = ui.Dialog.init(Rect.make(0, 0, window_w, window_h), "Delete selected files?", false),
-    move_dialog: ui.Dialog = ui.Dialog.init(Rect.make(0, 0, window_w, window_h), "Move to dir (e.g. /host/docs):", true),
-    batch_rename_dialog: ui.Dialog = ui.Dialog.init(Rect.make(0, 0, window_w, window_h), "Batch rename prefix (e.g. bak_):", true),
-    progress_bar: ui.ProgressBar = ui.ProgressBar.init(Rect.make(6, 350, 500, 16)),
+    delete_dialog: ui.Dialog = ui.Dialog.init(dialog_parent_rect, "Delete selected files?", false),
+    move_dialog: ui.Dialog = ui.Dialog.init(dialog_parent_rect, "Move to dir (e.g. /host/docs):", true),
+    batch_rename_dialog: ui.Dialog = ui.Dialog.init(dialog_parent_rect, "Batch rename prefix (e.g. bak_):", true),
+    progress_bar: ui.ProgressBar = ui.ProgressBar.init(progress_rect),
     progress_active: bool = false,
 
     // Lane A (claim 0434): stepwise batch machinery — one unit per
@@ -598,11 +626,73 @@ pub const AppState = struct {
     btn_back: Button = Button.init(btn_back_rect, "Back"),
     cursor_kind: ui.CursorKind = .arrow, // M37 DQ4: per-region cursor state
 
+    /// M42 SX4 (issue #985): the tab-aware canvas + scaled layout rects
+    /// (draw AND hit-testing read these, so scaled geometry and scaled hit
+    /// tests cannot drift). Without a resize every rect maps to itself —
+    /// the legacy 512x384 rendering is the fixed point.
+    canvas_w: u32 = window_w,
+    canvas_h: u32 = window_h,
+    list_rect: Rect = list_area,
+    details_rect: Rect = details_area,
+
+    /// M42 SX4: column geometry derived from the SCALED list rect (the
+    /// global col_* consts are the 512x384 natives — identical here at
+    /// native). The 16px icon column stays fixed; the text columns grow
+    /// with the viewport width.
+    pub fn col_name_x_cur(self: *const AppState) u32 {
+        return self.list_rect.x + 16;
+    }
+
+    pub fn col_name_w_cur(self: *const AppState) u32 {
+        return col_name_w * self.list_rect.w / list_area.w;
+    }
+
+    pub fn col_size_x_cur(self: *const AppState) u32 {
+        return self.col_name_x_cur() + self.col_name_w_cur();
+    }
+
+    pub fn col_size_w_cur(self: *const AppState) u32 {
+        return col_size_w * self.list_rect.w / list_area.w;
+    }
+
+    pub fn col_type_x_cur(self: *const AppState) u32 {
+        return self.col_size_x_cur() + self.col_size_w_cur();
+    }
+
+    /// M42 SX4: inline-preview wrap width grows with the details pane
+    /// ((254-12)/8 = 30 at native — the legacy preview_cols exactly).
+    pub fn preview_cols_cur(self: *const AppState) usize {
+        if (self.details_rect.w <= 12) return preview_cols;
+        return @intCast((self.details_rect.w - 12) / glyph_w);
+    }
+
+    /// Map the fixed 512x384 layout into a `w x h` canvas. At the native
+    /// size every rect maps to itself (the zero-regression fixed point).
+    pub fn layout(self: *AppState, w: u32, h: u32) void {
+        self.canvas_w = w;
+        self.canvas_h = h;
+        self.list_rect = tabapp.scale(list_area, window_w, window_h, w, h);
+        self.details_rect = tabapp.scale(details_area, window_w, window_h, w, h);
+        self.btn_open.rect = tabapp.scale(btn_open_rect, window_w, window_h, w, h);
+        self.btn_rename.rect = tabapp.scale(btn_rename_rect, window_w, window_h, w, h);
+        self.btn_delete.rect = tabapp.scale(btn_delete_rect, window_w, window_h, w, h);
+        self.btn_back.rect = tabapp.scale(btn_back_rect, window_w, window_h, w, h);
+        self.progress_bar.rect = tabapp.scale(progress_rect, window_w, window_h, w, h);
+        scale_dialog_in(&self.delete_dialog, w, h);
+        scale_dialog_in(&self.move_dialog, w, h);
+        scale_dialog_in(&self.batch_rename_dialog, w, h);
+        // FileList.visible_rows derives from rect.h, so pointing the model
+        // at the scaled rect is what grows the viewport row count.
+        self.list.rect = self.list_rect;
+        self.sync_scroll_view();
+    }
+
     /// M37 DQ4: per-region cursor kind (pointer over rows/buttons,
     /// ibeam while a text-entry dialog is open). Emits
     /// `file: cursor=<name>` on change (serial-observable).
     pub fn update_cursor(self: *AppState, x: u32, y: u32) void {
-        const over_clickable = list_area.contains(x, y) or
+        // M42 SX4: the hit-test reads the SCALED list rect.
+        const over_clickable = self.list_rect.contains(x, y) or
             self.btn_open.rect.contains(x, y) or
             self.btn_rename.rect.contains(x, y) or
             self.btn_delete.rect.contains(x, y) or
@@ -1480,7 +1570,8 @@ pub const AppState = struct {
     // F11: the scrollable area starts below the 14px column header.
     pub fn sync_scroll_view(self: *AppState) void {
         // Recalculate the scroll rect to exclude the column header.
-        self.scroll_view.rect = Rect.make(list_area.x, list_area.y + header_h, list_area.w, list_area.h - header_h);
+        // M42 SX4: the scroll rect tracks the SCALED list rect.
+        self.scroll_view.rect = Rect.make(self.list_rect.x, self.list_rect.y + header_h, self.list_rect.w, self.list_rect.h - header_h);
         const content_h: u32 = @as(u32, @intCast(self.entry_count)) * list_row_h;
         self.scroll_view.set_content_height(content_h);
         const target: u32 = @as(u32, @intCast(self.list.scroll)) * list_row_h;
@@ -1823,7 +1914,8 @@ pub const AppState = struct {
     }
 
     pub fn draw(self: *const AppState, win: u32) void {
-        ui.draw_rect(win, Rect.make(0, 0, window_w, window_h), ui.theme_bg());
+        // M42 SX4: the background fills the tab-aware canvas.
+        ui.draw_rect(win, Rect.make(0, 0, self.canvas_w, self.canvas_h), ui.theme_bg());
 
         // Title bar.
         ui.draw_rect(win, title_rect, ui.theme_surface());
@@ -1881,8 +1973,9 @@ pub const AppState = struct {
         ui.draw_text(win, self.status_msg[0..self.status_len], 380, 8, ui.theme_text_muted());
 
         // M20-U8: the find bar sits between breadcrumbs and the listing.
+        // M42 SX4: it spans the SCALED list rect.
         if (!self.view_mode and self.filter_active) {
-            const fb = Rect.make(list_area.x, list_area.y, list_area.w, 14);
+            const fb = Rect.make(self.list_rect.x, self.list_rect.y, self.list_rect.w, 14);
             ui.draw_rect(win, fb, ui.theme_surface());
             ui.draw_rect_outline(win, fb, ui.border_w, ui.theme_accent());
             ui.draw_text(win, "Find:", fb.x + ui.pad_sm, fb.y + 3, ui.theme_text_muted());
@@ -1890,8 +1983,9 @@ pub const AppState = struct {
         }
 
         // F3: Directory creation overlay input
+        // M42 SX4: it spans the SCALED list rect.
         if (!self.view_mode and self.create_dir_active) {
-            const cb = Rect.make(list_area.x, list_area.y, list_area.w, 14);
+            const cb = Rect.make(self.list_rect.x, self.list_rect.y, self.list_rect.w, 14);
             ui.draw_rect(win, cb, ui.theme_surface());
             ui.draw_rect_outline(win, cb, ui.border_w, ui.theme_warning());
             ui.draw_text(win, "Mkdir:", cb.x + ui.pad_sm, cb.y + 3, ui.theme_warning());
@@ -1953,25 +2047,31 @@ pub const AppState = struct {
     }
 
     fn draw_list(self: *const AppState, win: u32) void {
-        ui.draw_rect(win, list_area, ui.theme_surface());
-        ui.draw_rect_outline(win, list_area, ui.border_w, ui.theme_border());
+        // M42 SX4: the scaled list surface (distinct local name — Zig
+        // forbids shadowing the list_area native const).
+        const area = self.list_rect;
+        const name_x = self.col_name_x_cur();
+        const size_x = self.col_size_x_cur();
+        const type_x = self.col_type_x_cur();
+        ui.draw_rect(win, area, ui.theme_surface());
+        ui.draw_rect_outline(win, area, ui.border_w, ui.theme_border());
 
         // F11: draw column headers at the top of the list area.
-        const hdr_rect = Rect.make(list_area.x, list_area.y, list_area.w, header_h);
+        const hdr_rect = Rect.make(area.x, area.y, area.w, header_h);
         ui.draw_rect(win, hdr_rect, ui.theme_btn_idle());
         ui.draw_rect_outline(win, hdr_rect, ui.border_w, ui.theme_border());
 
         const ind: []const u8 = if (self.sort_asc) " ^" else " v";
-        ui.draw_text(win, "Name", col_name_x, list_area.y + 3, ui.theme_text_primary());
-        ui.draw_text(win, "Size", col_size_x, list_area.y + 3, ui.theme_text_primary());
-        ui.draw_text(win, "Type", col_type_x, list_area.y + 3, ui.theme_text_primary());
+        ui.draw_text(win, "Name", name_x, area.y + 3, ui.theme_text_primary());
+        ui.draw_text(win, "Size", size_x, area.y + 3, ui.theme_text_primary());
+        ui.draw_text(win, "Type", type_x, area.y + 3, ui.theme_text_primary());
         // Draw sort indicator next to the active column.
         const ind_x: u32 = switch (self.sort_column) {
-            .name => col_name_x + 4 * glyph_w,
-            .size => col_size_x + 4 * glyph_w,
-            .col_type => col_type_x + 4 * glyph_w,
+            .name => name_x + 4 * glyph_w,
+            .size => size_x + 4 * glyph_w,
+            .col_type => type_x + 4 * glyph_w,
         };
-        ui.draw_text(win, ind, ind_x, list_area.y + 3, ui.theme_accent());
+        ui.draw_text(win, ind, ind_x, area.y + 3, ui.theme_accent());
 
         // Draw file rows below the header.
         const vis = self.list.visible_rows();
@@ -1996,18 +2096,23 @@ pub const AppState = struct {
                 }
             }
             const is_multi = self.is_selected(i);
-            draw_list_row(win, row, name, entry, is_sel, is_multi, hl_at, hl_len);
+            draw_list_row(win, area, row, name, entry, is_sel, is_multi, hl_at, hl_len);
         }
         // GH #218: ScrollView thumb for the file list (proportional, draggable)
         self.scroll_view.draw(win);
     }
 
     fn draw_details(self: *const AppState, win: u32) void {
-        ui.draw_rect(win, details_area, ui.theme_surface());
-        ui.draw_rect_outline(win, details_area, ui.border_w, ui.theme_border());
+        // M42 SX4: the scaled details surface + viewport-grown preview
+        // width (distinct local names — Zig forbids shadowing the
+        // details_area / preview_cols native consts).
+        const area = self.details_rect;
+        const pcols = self.preview_cols_cur();
+        ui.draw_rect(win, area, ui.theme_surface());
+        ui.draw_rect_outline(win, area, ui.border_w, ui.theme_border());
 
         const sel = self.list.selected orelse {
-            ui.draw_text(win, "(empty)", details_area.x + 6, details_area.y + 8, ui.theme_text_muted());
+            ui.draw_text(win, "(empty)", area.x + 6, area.y + 8, ui.theme_text_muted());
             return;
         };
         if (sel >= self.entry_count) return;
@@ -2016,69 +2121,69 @@ pub const AppState = struct {
 
         // F2: Properties inspector mode
         if (self.properties_mode) {
-            ui.draw_text(win, "Properties:", details_area.x + 6, details_area.y + 6, ui.theme_accent());
-            ui.draw_text(win, "Path:", details_area.x + 6, details_area.y + 22, ui.theme_text_muted());
+            ui.draw_text(win, "Properties:", area.x + 6, area.y + 6, ui.theme_accent());
+            ui.draw_text(win, "Path:", area.x + 6, area.y + 22, ui.theme_text_muted());
             var pbuf: [64]u8 = undefined;
             const full_p = build_path(self.current_path_slice(), name, &pbuf);
             const pcap = @min(full_p.len, 28);
-            ui.draw_text(win, full_p[0..pcap], details_area.x + 6, details_area.y + 34, ui.theme_text_primary());
+            ui.draw_text(win, full_p[0..pcap], area.x + 6, area.y + 34, ui.theme_text_primary());
 
-            ui.draw_text(win, "Size:", details_area.x + 6, details_area.y + 50, ui.theme_text_muted());
+            ui.draw_text(win, "Size:", area.x + 6, area.y + 50, ui.theme_text_muted());
             var sbuf2: [24]u8 = undefined;
             var spos2: usize = 0;
             spos2 = append_str(&sbuf2, spos2, fmt_u64(sbuf2[spos2..], entry.size));
             spos2 = append_str(&sbuf2, spos2, " B");
-            ui.draw_text(win, sbuf2[0..spos2], details_area.x + 6, details_area.y + 62, ui.theme_text_primary());
+            ui.draw_text(win, sbuf2[0..spos2], area.x + 6, area.y + 62, ui.theme_text_primary());
 
-            ui.draw_text(win, "Dir Total:", details_area.x + 6, details_area.y + 78, ui.theme_text_muted());
+            ui.draw_text(win, "Dir Total:", area.x + 6, area.y + 78, ui.theme_text_muted());
             var dbuf: [24]u8 = undefined;
             var dpos: usize = 0;
             dpos = append_str(&dbuf, dpos, fmt_u64(dbuf[dpos..], self.total_dir_bytes()));
             dpos = append_str(&dbuf, dpos, " B");
-            ui.draw_text(win, dbuf[0..dpos], details_area.x + 6, details_area.y + 90, ui.theme_text_primary());
+            ui.draw_text(win, dbuf[0..dpos], area.x + 6, area.y + 90, ui.theme_text_primary());
 
-            ui.draw_text(win, "Format:", details_area.x + 6, details_area.y + 106, ui.theme_text_muted());
-            ui.draw_text(win, "Host Share 8.3", details_area.x + 6, details_area.y + 118, ui.theme_text_primary());
+            ui.draw_text(win, "Format:", area.x + 6, area.y + 106, ui.theme_text_muted());
+            ui.draw_text(win, "Host Share 8.3", area.x + 6, area.y + 118, ui.theme_text_primary());
 
-            ui.draw_text(win, "Timestamp:", details_area.x + 6, details_area.y + 134, ui.theme_text_muted());
-            ui.draw_text(win, "N/A (host)", details_area.x + 6, details_area.y + 146, ui.theme_text_muted());
+            ui.draw_text(win, "Timestamp:", area.x + 6, area.y + 134, ui.theme_text_muted());
+            ui.draw_text(win, "N/A (host)", area.x + 6, area.y + 146, ui.theme_text_muted());
             return;
         }
 
-        ui.draw_text(win, "Size", details_area.x + 6, details_area.y + 6, ui.theme_text_muted());
+        ui.draw_text(win, "Size", area.x + 6, area.y + 6, ui.theme_text_muted());
         var sbuf: [24]u8 = undefined;
         var spos: usize = 0;
         spos = append_str(&sbuf, spos, fmt_u64(sbuf[spos..], entry.size));
         spos = append_str(&sbuf, spos, " B");
-        ui.draw_text(win, sbuf[0..spos], details_area.x + 6, details_area.y + 20, ui.theme_text_primary());
+        ui.draw_text(win, sbuf[0..spos], area.x + 6, area.y + 20, ui.theme_text_primary());
 
-        ui.draw_text(win, "Type", details_area.x + 6, details_area.y + 44, ui.theme_text_muted());
+        ui.draw_text(win, "Type", area.x + 6, area.y + 44, ui.theme_text_muted());
         const type_label: []const u8 = if (entry.is_dir != 0) "DIR" else "FILE";
-        ui.draw_text(win, type_label, details_area.x + 6, details_area.y + 58, if (entry.is_dir != 0) ui.theme_warning() else ui.theme_success());
+        ui.draw_text(win, type_label, area.x + 6, area.y + 58, if (entry.is_dir != 0) ui.theme_warning() else ui.theme_success());
 
-        ui.draw_text(win, "Name", details_area.x + 6, details_area.y + 82, ui.theme_text_muted());
+        ui.draw_text(win, "Name", area.x + 6, area.y + 82, ui.theme_text_muted());
         const cap = @min(name.len, 18);
-        ui.draw_text(win, name[0..cap], details_area.x + 6, details_area.y + 96, ui.theme_accent());
+        ui.draw_text(win, name[0..cap], area.x + 6, area.y + 96, ui.theme_accent());
 
         // C7 inline preview (below metadata, first 15 lines, binary placeholder).
-        const preview_y = details_area.y + 115;
-        ui.draw_text(win, "Preview", details_area.x + 6, preview_y, ui.theme_text_muted());
+        const preview_y = area.y + 115;
+        ui.draw_text(win, "Preview", area.x + 6, preview_y, ui.theme_text_muted());
         if (entry.is_dir != 0) {
-            ui.draw_text(win, "(directory)", details_area.x + 6, preview_y + 14, ui.theme_text_muted());
+            ui.draw_text(win, "(directory)", area.x + 6, preview_y + 14, ui.theme_text_muted());
             return;
         }
         if (!self.preview_loaded) {
-            ui.draw_text(win, "(no preview)", details_area.x + 6, preview_y + 14, ui.theme_text_muted());
+            ui.draw_text(win, "(no preview)", area.x + 6, preview_y + 14, ui.theme_text_muted());
             return;
         }
         if (self.preview_is_binary) {
-            ui.draw_text(win, "(binary)", details_area.x + 6, preview_y + 14, ui.theme_text_muted());
+            ui.draw_text(win, "(binary)", area.x + 6, preview_y + 14, ui.theme_text_muted());
             return;
         }
         const slice = self.preview_content[0..self.preview_len];
         var row: usize = 0;
         var col: usize = 0;
-        var px = details_area.x + 6;
+        var px = area.x + 6;
         var py = preview_y + 14;
         for (slice) |ch| {
             if (ch == '\n') {
@@ -2086,15 +2191,15 @@ pub const AppState = struct {
                 col = 0;
                 if (row >= preview_rows) break;
                 py += line_h;
-                px = details_area.x + 6;
+                px = area.x + 6;
                 continue;
             }
-            if (col >= preview_cols) {
+            if (col >= pcols) {
                 row += 1;
                 col = 0;
                 if (row >= preview_rows) break;
                 py += line_h;
-                px = details_area.x + 6;
+                px = area.x + 6;
             }
             if (row >= preview_rows) break;
             // Only draw printable, skip others (already filtered binary)
@@ -2185,10 +2290,11 @@ pub const AppState = struct {
             }
             return true;
         }
-        if (ev.kind == ui.MOUSE_RIGHT_DOWN and list_area.contains(ev.arg0, ev.arg1) and !self.recent_mode) {
+        // M42 SX4: right-click row math follows the SCALED list rect.
+        if (ev.kind == ui.MOUSE_RIGHT_DOWN and self.list_rect.contains(ev.arg0, ev.arg1) and !self.recent_mode) {
             // Select the row under the cursor before showing the menu.
-            if (ev.arg1 >= list_area.y + header_h) {
-                const row = (ev.arg1 - (list_area.y + header_h)) / list_row_h;
+            if (ev.arg1 >= self.list_rect.y + header_h) {
+                const row = (ev.arg1 - (self.list_rect.y + header_h)) / list_row_h;
                 const target_idx = self.list.scroll + row;
                 if (target_idx < self.entry_count) {
                     self.list.select(target_idx, self.entry_count);
@@ -2219,7 +2325,7 @@ pub const AppState = struct {
         if (ev.kind == ui.MOUSE_DOWN and (ev.flags & ui.BTN_LEFT) != 0) {
             // F1: Ctrl+click toggles selection of individual entry
             if ((ev.flags & ui.MOD_CTRL) != 0 and self.list.rect.contains(ev.arg0, ev.arg1)) {
-                const row = (ev.arg1 - (list_area.y + header_h)) / list_row_h;
+                const row = (ev.arg1 - (self.list_rect.y + header_h)) / list_row_h;
                 const target_idx = self.list.scroll + row;
                 if (target_idx < self.entry_count) {
                     self.toggle_select(target_idx);
@@ -2238,15 +2344,22 @@ pub const AppState = struct {
                 return false;
             }
             // F11: column header click sorts by that column.
-            const hdr_y = list_area.y;
+            // M42 SX4: the header hit-test follows the SCALED list rect
+            // and the derived column geometry (never the native consts).
+            const hdr_y = self.list_rect.y;
+            const hdr_name_x = self.col_name_x_cur();
+            const hdr_name_w = self.col_name_w_cur();
+            const hdr_size_x = self.col_size_x_cur();
+            const hdr_size_w = self.col_size_w_cur();
+            const hdr_type_x = self.col_type_x_cur();
             if (ev.arg1 >= hdr_y and ev.arg1 < hdr_y + header_h and
-                ev.arg0 >= list_area.x and ev.arg0 < list_area.x + list_area.w)
+                ev.arg0 >= self.list_rect.x and ev.arg0 < self.list_rect.x + self.list_rect.w)
             {
-                if (ev.arg0 >= col_name_x and ev.arg0 < col_name_x + col_name_w) {
+                if (ev.arg0 >= hdr_name_x and ev.arg0 < hdr_name_x + hdr_name_w) {
                     self.click_column(.name);
-                } else if (ev.arg0 >= col_size_x and ev.arg0 < col_size_x + col_size_w) {
+                } else if (ev.arg0 >= hdr_size_x and ev.arg0 < hdr_size_x + hdr_size_w) {
                     self.click_column(.size);
-                } else if (ev.arg0 >= col_type_x) {
+                } else if (ev.arg0 >= hdr_type_x) {
                     self.click_column(.col_type);
                 }
                 self.list.select(0, self.entry_count);
@@ -2573,19 +2686,35 @@ pub fn make_bak_name(name: []const u8, buf: []u8) []const u8 {
 pub export fn _start() callconv(.c) noreturn {
     var app = AppState.init();
 
-    // M37 DQ4: follow the desktop theme first.
-    _ = ui.sync_theme_from_host();
-    const win_res = ui.win_open(window_x, window_y, window_w, window_h);
-    if (win_res < 0) {
+    // M42 SX4 (issue #985): the tab-aware open. The window opens at the
+    // native 512x384 (the legacy shim/WND presentation is unchanged);
+    // under TABWM.BIN the declaration is accepted and activation delivers
+    // the full 1100x720 content viewport via the kernel's WIN_RESIZE seam,
+    // which `layout` maps the fixed grid into.
+    const ta_res = tabapp.TabApp.init(.{
+        .name = "FILE.BIN",
+        .title = "Files",
+        .x = window_x,
+        .y = window_y,
+        .w = window_w,
+        .h = window_h,
+    }) orelse {
         ui.write_console("file: failed to open window\n");
         ui.exit_process(1);
-    }
-    const win = @as(u32, @intCast(win_res));
+    };
+    var ta = ta_res;
+    app.layout(ta.w, ta.h);
+    const win = ta.win;
     ui.write_console("file: open id=5\n");
+    if (ta.tab_aware) {
+        ui.write_console("file: tab-aware (full-viewport)\n");
+    } else {
+        ui.write_console("file: not-tab-aware (shim or WND desktop)\n");
+    }
 
     app.list_directory();
     app.draw(win);
-    ui.win_present(win);
+    ta.present();
     ui.emit_tokens_marker("file");
     ui.write_console("file: ready\n");
     // M37 DQ4 gate: let the compositor settle (several ticks) so the
@@ -2602,14 +2731,14 @@ pub export fn _start() callconv(.c) noreturn {
         if (app.progress_active) {
             _ = app.batch_step();
             app.draw(win);
-            ui.win_present(win);
+            ta.present();
             if (ui.poll_event(&ev) <= 0) continue;
         } else {
             if (app.pending_refresh) {
                 app.pending_refresh = false;
                 app.refresh();
                 app.draw(win);
-                ui.win_present(win);
+                ta.present();
             }
             const wait_rc = ui.wait_event(&ev);
             if (wait_rc < 0) break;
@@ -2622,17 +2751,36 @@ pub export fn _start() callconv(.c) noreturn {
             break;
         }
 
-        if (ev.kind == ui.MOUSE_DOWN or ev.kind == ui.MOUSE_UP or ev.kind == ui.MOUSE_MOVE or ev.kind == ui.MOUSE_SCROLL) {
-            dirty = app.handle_mouse_events(&ev) or dirty;
-        } else if (ev.kind == ui.KEY_DOWN) {
-            dirty = app.handle_keyboard_event(&ev) or dirty;
+        // M42 SX4: WM-lifecycle events (resize -> relayout) first.
+        switch (ta.dispatch(&ev)) {
+            .closed => break,
+            .resized => {
+                ui.write_console("file: resize relayout\n");
+                app.layout(ta.w, ta.h);
+                dirty = true;
+            },
+            .none => {
+                if (ev.kind == ui.MOUSE_DOWN or ev.kind == ui.MOUSE_UP or ev.kind == ui.MOUSE_MOVE or ev.kind == ui.MOUSE_SCROLL) {
+                    dirty = app.handle_mouse_events(&ev) or dirty;
+                } else if (ev.kind == ui.KEY_DOWN) {
+                    dirty = app.handle_keyboard_event(&ev) or dirty;
+                }
+            },
         }
 
         while (ui.poll_event(&ev) > 0) {
-            if (ev.kind == ui.WIN_CLOSE) {
-                ui.write_console("file: close\n");
-                ui.win_close(win);
-                ui.exit_process(exit_status);
+            switch (ta.dispatch(&ev)) {
+                .closed => {
+                    ui.write_console("file: close\n");
+                    ta.close_and_exit(exit_status);
+                },
+                .resized => {
+                    ui.write_console("file: resize relayout\n");
+                    app.layout(ta.w, ta.h);
+                    dirty = true;
+                    continue;
+                },
+                .none => {},
             }
             if (ev.kind == ui.MOUSE_DOWN or ev.kind == ui.MOUSE_UP or ev.kind == ui.MOUSE_MOVE or ev.kind == ui.MOUSE_SCROLL) {
                 dirty = app.handle_mouse_events(&ev) or dirty;
@@ -2643,13 +2791,12 @@ pub export fn _start() callconv(.c) noreturn {
 
         if (dirty) {
             app.draw(win);
-            ui.win_present(win);
+            ta.present();
         }
     }
 
     ui.write_console("file: exiting 43\n");
-    ui.win_close(win);
-    ui.exit_process(exit_status);
+    ta.close_and_exit(exit_status);
 }
 
 // ---------------------------------------------------------------------------
@@ -3524,4 +3671,93 @@ test "file: fmt_i64 formats error codes for serial markers" {
     try std.testing.expectEqualStrings("-9", fmt_i64(&buf, -9));
     try std.testing.expectEqualStrings("0", fmt_i64(&buf, 0));
     try std.testing.expectEqualStrings("-64", fmt_i64(&buf, -64));
+}
+
+// ---------------------------------------------------------------------------
+// M42 SX4 (issue #985) — the tab-aware layout
+// ---------------------------------------------------------------------------
+
+test "file layout: native canvas is the identity (zero-regression fixed point)" {
+    var app = AppState.init();
+    const dlg_before = app.delete_dialog.rect;
+    app.layout(window_w, window_h);
+    try std.testing.expectEqual(window_w, app.canvas_w);
+    try std.testing.expectEqual(window_h, app.canvas_h);
+    try std.testing.expectEqual(list_area, app.list_rect);
+    try std.testing.expectEqual(details_area, app.details_rect);
+    try std.testing.expectEqual(btn_open_rect, app.btn_open.rect);
+    try std.testing.expectEqual(btn_rename_rect, app.btn_rename.rect);
+    try std.testing.expectEqual(btn_delete_rect, app.btn_delete.rect);
+    try std.testing.expectEqual(btn_back_rect, app.btn_back.rect);
+    try std.testing.expectEqual(progress_rect, app.progress_bar.rect);
+    try std.testing.expectEqual(dialog_parent_rect, app.delete_dialog.parent_rect);
+    try std.testing.expectEqual(dlg_before, app.delete_dialog.rect);
+    // The scaled column helpers land exactly on the native consts.
+    try std.testing.expectEqual(col_name_x, app.col_name_x_cur());
+    try std.testing.expectEqual(col_size_x, app.col_size_x_cur());
+    try std.testing.expectEqual(col_type_x, app.col_type_x_cur());
+    try std.testing.expectEqual(preview_cols, app.preview_cols_cur());
+    // FileList + ScrollView track the native list area (header excluded).
+    try std.testing.expectEqual(list_area, app.list.rect);
+    try std.testing.expectEqual(list_area.x, app.scroll_view.rect.x);
+    try std.testing.expectEqual(list_area.y + header_h, app.scroll_view.rect.y);
+    try std.testing.expectEqual(list_area.w, app.scroll_view.rect.w);
+    try std.testing.expectEqual(list_area.h - header_h, app.scroll_view.rect.h);
+}
+
+test "file layout: full 1100x720 viewport stays inside and grows" {
+    var app = AppState.init();
+    const native_rows = app.list.visible_rows();
+    app.layout(1100, 720);
+    try std.testing.expectEqual(@as(u32, 1100), app.canvas_w);
+    try std.testing.expectEqual(@as(u32, 720), app.canvas_h);
+    // List + details stay inside the viewport and grow on both axes.
+    const areas = [_]Rect{ app.list_rect, app.details_rect };
+    for (areas) |r| {
+        try std.testing.expect(r.x + r.w <= 1100);
+        try std.testing.expect(r.y + r.h <= 720);
+    }
+    try std.testing.expect(app.list_rect.w > list_area.w);
+    try std.testing.expect(app.list_rect.h > list_area.h);
+    try std.testing.expect(app.details_rect.w > details_area.w);
+    try std.testing.expect(app.details_rect.h > details_area.h);
+    // Buttons + progress bar stay inside the viewport.
+    const btns = [_]*const Button{ &app.btn_open, &app.btn_rename, &app.btn_delete, &app.btn_back };
+    for (btns) |b| {
+        try std.testing.expect(b.rect.x + b.rect.w <= 1100);
+        try std.testing.expect(b.rect.y + b.rect.h <= 720);
+    }
+    try std.testing.expect(app.progress_bar.rect.x + app.progress_bar.rect.w <= 1100);
+    try std.testing.expect(app.progress_bar.rect.y + app.progress_bar.rect.h <= 720);
+    // Visible rows + preview columns grow with the viewport, and the
+    // scroll view tracks the scaled list (header excluded).
+    try std.testing.expect(app.list.visible_rows() > native_rows);
+    try std.testing.expect(app.preview_cols_cur() > preview_cols);
+    try std.testing.expectEqual(app.list_rect.x, app.scroll_view.rect.x);
+    try std.testing.expectEqual(app.list_rect.y + header_h, app.scroll_view.rect.y);
+    try std.testing.expectEqual(app.list_rect.w, app.scroll_view.rect.w);
+    try std.testing.expectEqual(app.list_rect.h - header_h, app.scroll_view.rect.h);
+}
+
+test "file layout: hit-test agreement follows the scaled list rect" {
+    var app = AppState.init();
+    app.layout(1100, 720);
+    app.entry_count = 5;
+    app.list.select(0, 5);
+    // Right-click row math uses the SCALED list rect: a click just inside
+    // the scaled data area targets row 0 and selects it before the menu.
+    const rx = app.list_rect.x + 40;
+    const ry = app.list_rect.y + header_h + 4;
+    try std.testing.expect(app.list_rect.contains(rx, ry));
+    try std.testing.expectEqual(@as(u32, 0), (ry - (app.list_rect.y + header_h)) / list_row_h);
+    const ev_rc = Event{ .kind = ui.MOUSE_RIGHT_DOWN, .flags = ui.BTN_RIGHT, .seq = 1, .arg0 = rx, .arg1 = ry };
+    _ = app.handle_mouse_events(&ev_rc);
+    try std.testing.expect(app.ctx_menu.is_open());
+    try std.testing.expectEqual(@as(?usize, 0), app.list.selected);
+    // The scaled column helpers agree with the header hit-test: a header
+    // click over the scaled Size column sorts by size.
+    app.ctx_menu.dismiss();
+    const ev_hdr = Event{ .kind = ui.MOUSE_DOWN, .flags = ui.BTN_LEFT, .seq = 2, .arg0 = app.col_size_x_cur() + 2, .arg1 = app.list_rect.y + 2 };
+    _ = app.handle_mouse_events(&ev_hdr);
+    try std.testing.expectEqual(SortColumn.size, app.sort_column);
 }

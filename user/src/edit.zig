@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const ui = @import("lib/ui.zig");
+const tabapp = @import("lib/tabapp.zig");
 const Rect = ui.Rect;
 const Event = ui.Event;
 const DirEntry = ui.DirEntry;
@@ -42,6 +43,44 @@ pub const filename_cap: usize = 32;
 pub const split_ratio: u32 = 2; // editor gets 60%, console 40%
 pub const console_split_h: u32 = text_area_h * 2 / 5; // bottom 40%
 pub const console_rows: usize = 10;
+
+// M42 SX4 (issue #985): the NATIVE layout rects (the 512x384 design).
+// `layout` scales copies of these into the current canvas; glyph metrics
+// (gutter_w/glyph_w/line_h) and the file-sidebar width stay fixed so text
+// keeps its metrics and the viewport shows MORE rows/columns instead.
+pub const native_top_bar = Rect.make(0, 0, 512, 16);
+pub const native_top_div = Rect.make(0, 16, 512, 1);
+pub const native_tab_bar = Rect.make(0, 17, 512, 16);
+pub const native_tab_div = Rect.make(0, 33, 512, 1);
+pub const native_edit_full = Rect.make(0, 34, 512, 294); // no-shell editor pane
+pub const native_edit_split = Rect.make(0, 34, 512, 168); // shell-mode editor pane
+pub const native_split_div = Rect.make(0, 202, 512, 1);
+pub const native_console = Rect.make(0, 203, 512, 123); // console_split_h - 1
+pub const native_goto_bar = Rect.make(0, 364, 512, 20); // window_h - 20
+pub const native_find_bar = Rect.make(0, 364, 512, 20); // single-line variant
+pub const native_find_bar_replace = Rect.make(0, 348, 512, 36); // window_h - 36
+pub const native_cmd_palette = Rect.make(76, 40, 360, 180); // (512-360)/2
+pub const native_recent_list = Rect.make(96, 50, 320, 160); // (512-320)/2
+pub const native_close_dialog = Rect.make(116, 147, 280, 90); // centered both axes
+
+/// M42 SX4 (issue #985): the per-state copies of the layout rects (draw
+/// reads these, so scaled geometry cannot drift from the layout).
+pub const LayoutRects = struct {
+    top_bar: Rect,
+    top_div: Rect,
+    tab_bar: Rect,
+    tab_div: Rect,
+    edit_full: Rect,
+    edit_split: Rect,
+    split_div: Rect,
+    console: Rect,
+    goto_bar: Rect,
+    find_bar: Rect,
+    find_bar_replace: Rect,
+    cmd_palette: Rect,
+    recent_list: Rect,
+    close_dialog: Rect,
+};
 
 // E2 + E7 + E22: undo/redo
 const undo_cap: usize = 50;
@@ -1840,6 +1879,65 @@ pub const AppState = struct {
     has_recovery: bool = false,
     recovery_len: usize = 0,
 
+    /// M42 SX4 (issue #985): the tab-aware canvas. The app opens at the
+    /// native 512x384; when the tabbed WM activates its tab the kernel's
+    /// WIN_RESIZE seam delivers the full 1100x720 content viewport and
+    /// `layout` maps the fixed chrome into it (proportional on both axes).
+    /// Without a resize (shim/WND desktop) every rect maps to itself — the
+    /// legacy rendering is the fixed point.
+    canvas_w: u32 = window_w,
+    canvas_h: u32 = window_h,
+    rects: LayoutRects = .{
+        .top_bar = native_top_bar,
+        .top_div = native_top_div,
+        .tab_bar = native_tab_bar,
+        .tab_div = native_tab_div,
+        .edit_full = native_edit_full,
+        .edit_split = native_edit_split,
+        .split_div = native_split_div,
+        .console = native_console,
+        .goto_bar = native_goto_bar,
+        .find_bar = native_find_bar,
+        .find_bar_replace = native_find_bar_replace,
+        .cmd_palette = native_cmd_palette,
+        .recent_list = native_recent_list,
+        .close_dialog = native_close_dialog,
+    },
+
+    /// Map the fixed 512x384 layout into a `w x h` canvas. At the native
+    /// size every rect maps to itself (the zero-regression fixed point).
+    /// (No `layout` field collision on AppState, so — unlike NOTEPAD — the
+    /// method keeps the fleet-standard `layout` name.)
+    pub fn layout(self: *AppState, w: u32, h: u32) void {
+        self.canvas_w = w;
+        self.canvas_h = h;
+        self.rects.top_bar = tabapp.scale(native_top_bar, window_w, window_h, w, h);
+        self.rects.top_div = tabapp.scale(native_top_div, window_w, window_h, w, h);
+        self.rects.tab_bar = tabapp.scale(native_tab_bar, window_w, window_h, w, h);
+        self.rects.tab_div = tabapp.scale(native_tab_div, window_w, window_h, w, h);
+        self.rects.edit_full = tabapp.scale(native_edit_full, window_w, window_h, w, h);
+        self.rects.edit_split = tabapp.scale(native_edit_split, window_w, window_h, w, h);
+        self.rects.split_div = tabapp.scale(native_split_div, window_w, window_h, w, h);
+        self.rects.console = tabapp.scale(native_console, window_w, window_h, w, h);
+        self.rects.goto_bar = tabapp.scale(native_goto_bar, window_w, window_h, w, h);
+        self.rects.find_bar = tabapp.scale(native_find_bar, window_w, window_h, w, h);
+        self.rects.find_bar_replace = tabapp.scale(native_find_bar_replace, window_w, window_h, w, h);
+        self.rects.cmd_palette = tabapp.scale(native_cmd_palette, window_w, window_h, w, h);
+        self.rects.recent_list = tabapp.scale(native_recent_list, window_w, window_h, w, h);
+        self.rects.close_dialog = tabapp.scale(native_close_dialog, window_w, window_h, w, h);
+    }
+
+    /// M42 SX4: map a click y to a visible editor row (null outside the
+    /// pane). Draw places row `ln` at `top + 3 + ln*line_h`, so this and the
+    /// renderer agree by construction; host-testable. EDIT.BIN has no mouse
+    /// path (keyboard-only), so this is the layout-agreement probe.
+    pub fn editor_row_at(self: *const AppState, y: u32) ?usize {
+        const top = self.editor_top();
+        const avail = self.editor_available_h();
+        if (y < top or y >= top + avail) return null;
+        return @intCast((y - top) / line_h);
+    }
+
     pub fn init(self: *AppState) void {
         self.show_shell = false;
         self.insert_mode = true;
@@ -1973,26 +2071,27 @@ pub const AppState = struct {
 
     pub fn draw(self: *const AppState, win: u32) void {
         const t = self.cur_theme();
+        const cw = self.canvas_w;
 
         // Background
-        ui.draw_rect(win, Rect.make(0, 0, window_w, window_h), t.bg);
+        ui.draw_rect(win, Rect.make(0, 0, cw, self.canvas_h), t.bg);
 
         // Status bar at top
-        ui.draw_rect(win, Rect.make(0, 0, window_w, 16), t.surface);
+        ui.draw_rect(win, self.rects.top_bar, t.surface);
         ui.draw_text(win, self.status[0..self.status_len], 6, 3, t.muted);
 
-        // Mode & Wrap indicator
+        // Mode & Wrap indicator (M42 SX4: right-anchored into the canvas)
         const mode = if (self.insert_mode) "INS" else "OVR";
-        ui.draw_text(win, mode, @intCast(window_w - 30), 3, t.accent);
+        ui.draw_text(win, mode, @intCast(cw - 30), 3, t.accent);
         if (self.word_wrap) {
-            ui.draw_text(win, "WRAP", @intCast(window_w - 65), 3, t.warning);
+            ui.draw_text(win, "WRAP", @intCast(cw - 65), 3, t.warning);
         }
 
         // Key hints
-        ui.draw_text(win, "^P:Cmd ^S:Save ^F:Find ^B:Bmk", @intCast(window_w - 320), 3, t.muted);
+        ui.draw_text(win, "^P:Cmd ^S:Save ^F:Find ^B:Bmk", @intCast(cw - 320), 3, t.muted);
 
         // Divider
-        ui.draw_rect(win, Rect.make(0, 16, window_w, 1), ui.theme_gutter_bg());
+        ui.draw_rect(win, self.rects.top_div, ui.theme_gutter_bg());
 
         // Tab bar
         self.draw_tab_bar(win);
@@ -2020,8 +2119,9 @@ pub const AppState = struct {
 
     fn draw_tab_bar(self: *const AppState, win: u32) void {
         const t = self.cur_theme();
-        const tab_y: u32 = 17;
-        ui.draw_rect(win, Rect.make(0, tab_y, window_w, tab_bar_h), t.bg);
+        // M42 SX4: the scaled tab bar (native y=17, h=tab_bar_h).
+        const bar = self.rects.tab_bar;
+        ui.draw_rect(win, bar, t.bg);
 
         var tab_x: u32 = 0;
         var i: usize = 0;
@@ -2033,33 +2133,35 @@ pub const AppState = struct {
 
             const is_active = (i == self.tabs.active);
             const bg = if (is_active) t.surface else t.bg;
-            ui.draw_rect(win, Rect.make(tab_x, tab_y, tab_w, tab_bar_h), bg);
+            ui.draw_rect(win, Rect.make(tab_x, bar.y, tab_w, bar.h), bg);
 
-            ui.draw_rect(win, Rect.make(tab_x + tab_w, tab_y, 1, tab_bar_h), ui.theme_gutter_bg());
+            ui.draw_rect(win, Rect.make(tab_x + tab_w, bar.y, 1, bar.h), ui.theme_gutter_bg());
 
             const text_color = if (is_active) t.text else t.muted;
-            ui.draw_text(win, name[0..name_len], tab_x + 4, tab_y + 3, text_color);
+            ui.draw_text(win, name[0..name_len], tab_x + 4, bar.y + 3, text_color);
 
             if (self.tabs.tabs[i].dirty) {
-                ui.draw_text(win, "*", tab_x + 4 + name_len * glyph_w + 2, tab_y + 3, t.warning);
+                ui.draw_text(win, "*", tab_x + 4 + name_len * glyph_w + 2, bar.y + 3, t.warning);
             }
 
             tab_x += tab_w + 1;
         }
 
-        ui.draw_rect(win, Rect.make(0, tab_y + tab_bar_h, window_w, 1), ui.theme_gutter_bg());
+        ui.draw_rect(win, self.rects.tab_div, ui.theme_gutter_bg());
     }
 
     fn editor_top(self: *const AppState) u32 {
-        _ = self;
-        return 17 + tab_bar_h + 1;
+        // M42 SX4: the scaled tab chrome bottom (native 17 + 16 + 1 = 34).
+        return self.rects.edit_full.y;
     }
 
     fn editor_available_h(self: *const AppState) u32 {
+        // M42 SX4: the scaled edit/console split heights (native 294 full,
+        // 168 split) grow with the viewport.
         return if (self.show_shell)
-            text_area_h - console_split_h - 2 - tab_bar_h
+            self.rects.edit_split.h
         else
-            text_area_h - tab_bar_h;
+            self.rects.edit_full.h;
     }
 
     fn draw_editor_full(self: *const AppState, win: u32) void {
@@ -2069,7 +2171,8 @@ pub const AppState = struct {
         const vis_rows = @max(avail / line_h + 1, 2);
 
         var edit_x: u32 = 0;
-        var edit_w: u32 = window_w;
+        // M42 SX4: the edit surface spans the canvas width (sidebar narrows it).
+        var edit_w: u32 = self.canvas_w;
 
         // E24: File tree sidebar
         if (self.file_sidebar.active) {
@@ -2093,7 +2196,7 @@ pub const AppState = struct {
             }
             ui.draw_rect(win, Rect.make(sb_w, top, 1, avail), t.surface);
             edit_x = sb_w + 1;
-            edit_w = window_w - edit_x;
+            edit_w = self.canvas_w - edit_x;
         }
 
         ui.draw_rect(win, Rect.make(edit_x, top, edit_w, avail), t.surface);
@@ -2244,7 +2347,8 @@ pub const AppState = struct {
         const edit_h = self.editor_available_h();
         const vis_rows = @max(edit_h / line_h + 1, 1);
 
-        ui.draw_rect(win, Rect.make(0, top, window_w, edit_h), t.surface);
+        // M42 SX4: the scaled edit pane into the canvas.
+        ui.draw_rect(win, Rect.make(0, top, self.canvas_w, edit_h), t.surface);
         const gw: u32 = if (self.show_line_numbers) gutter_w else 0;
         const x0: u32 = gw + 4;
         if (self.show_line_numbers) {
@@ -2299,12 +2403,13 @@ pub const AppState = struct {
             }
         }
 
-        const div_y = top + edit_h;
-        ui.draw_rect(win, Rect.make(0, div_y, window_w, 1), ui.theme_gutter_bg());
+        // M42 SX4: the scaled split divider + console rects.
+        ui.draw_rect(win, self.rects.split_div, ui.theme_gutter_bg());
 
-        const con_y = div_y + 1;
-        const con_h = console_split_h - 1;
-        ui.draw_rect(win, Rect.make(0, con_y, window_w, con_h), t.surface);
+        const con = self.rects.console;
+        const con_y = con.y;
+        const con_h = con.h;
+        ui.draw_rect(win, con, t.surface);
 
         ui.draw_text(win, ">", 4, con_y + 4, t.accent);
 
@@ -2315,7 +2420,9 @@ pub const AppState = struct {
         const cx2: u32 = 16 + @as(u32, @intCast(self.shell.cursor)) * glyph_w;
         ui.draw_rect(win, Rect.make(cx2, con_y + 3, glyph_w, 1), t.accent);
 
-        const out_lines = console_rows;
+        // M42 SX4: the console shows as many rows as the scaled height fits
+        // (native 123/12 = 10 = console_rows, so the legacy count is kept).
+        const out_lines: usize = @intCast(@max(con_h / line_h, 1));
         const out_slice = self.shell.output[0..self.shell.output_len];
         var ol: usize = 0;
         var op: usize = 0;
@@ -2333,10 +2440,11 @@ pub const AppState = struct {
 
     fn draw_goto_prompt(self: *const AppState, win: u32) void {
         const t = self.cur_theme();
-        const bar_h: u32 = 20;
-        const bar_y = window_h - bar_h;
-        ui.draw_rect(win, Rect.make(0, bar_y, window_w, bar_h), t.surface);
-        ui.draw_rect_outline(win, Rect.make(0, bar_y, window_w, bar_h), ui.border_w, t.accent);
+        // M42 SX4: the scaled bottom bar (native h=20 at window_h - 20).
+        const bar = self.rects.goto_bar;
+        const bar_y = bar.y;
+        ui.draw_rect(win, bar, t.surface);
+        ui.draw_rect_outline(win, bar, ui.border_w, t.accent);
 
         ui.draw_text(win, "Goto line:", 6, bar_y + 5, t.accent);
 
@@ -2349,15 +2457,16 @@ pub const AppState = struct {
         const cx = input_x + @as(u32, @intCast(self.goto_prompt.len)) * glyph_w;
         ui.draw_rect(win, Rect.make(cx, bar_y + 4, glyph_w, 10), t.accent);
 
-        ui.draw_text(win, "Enter=Go Esc=Cancel", window_w - 160, bar_y + 5, t.muted);
+        ui.draw_text(win, "Enter=Go Esc=Cancel", self.canvas_w - 160, bar_y + 5, t.muted);
     }
 
     fn draw_find_prompt(self: *const AppState, win: u32) void {
         const t = self.cur_theme();
-        const bar_h: u32 = if (self.find_prompt.is_replace) 36 else 20;
-        const bar_y = window_h - bar_h;
-        ui.draw_rect(win, Rect.make(0, bar_y, window_w, bar_h), t.surface);
-        ui.draw_rect_outline(win, Rect.make(0, bar_y, window_w, bar_h), ui.border_w, t.accent);
+        // M42 SX4: the scaled bottom bar (single 20px / replace 36px variant).
+        const bar = if (self.find_prompt.is_replace) self.rects.find_bar_replace else self.rects.find_bar;
+        const bar_y = bar.y;
+        ui.draw_rect(win, bar, t.surface);
+        ui.draw_rect_outline(win, bar, ui.border_w, t.accent);
 
         ui.draw_text(win, "Find:", 6, bar_y + 5, t.accent);
         const ftext = self.find_prompt.get_find();
@@ -2379,21 +2488,22 @@ pub const AppState = struct {
                 const rcx = 50 + @as(u32, @intCast(self.find_prompt.replace_len)) * glyph_w;
                 ui.draw_rect(win, Rect.make(rcx, bar_y + 19, glyph_w, 10), t.accent);
             }
-            ui.draw_text(win, "Enter:Next Tab:Field ^A:All Esc:Close", window_w - 240, bar_y + 20, t.muted);
+            ui.draw_text(win, "Enter:Next Tab:Field ^A:All Esc:Close", self.canvas_w - 240, bar_y + 20, t.muted);
         } else {
-            ui.draw_text(win, "Enter:Next Up:Prev Esc:Close", window_w - 200, bar_y + 5, t.muted);
+            ui.draw_text(win, "Enter:Next Up:Prev Esc:Close", self.canvas_w - 200, bar_y + 5, t.muted);
         }
     }
 
     fn draw_cmd_palette(self: *const AppState, win: u32) void {
         const t = self.cur_theme();
-        const pal_w: u32 = 360;
-        const pal_h: u32 = 180;
-        const pal_x: u32 = (window_w - pal_w) / 2;
-        const pal_y: u32 = 40;
+        // M42 SX4: the scaled palette, centered in the canvas (not native).
+        const pal = self.rects.cmd_palette;
+        const pal_x = pal.x;
+        const pal_y = pal.y;
+        const pal_w = pal.w;
 
-        ui.draw_rect(win, Rect.make(pal_x, pal_y, pal_w, pal_h), t.surface);
-        ui.draw_rect_outline(win, Rect.make(pal_x, pal_y, pal_w, pal_h), ui.border_w, t.accent);
+        ui.draw_rect(win, pal, t.surface);
+        ui.draw_rect_outline(win, pal, ui.border_w, t.accent);
 
         ui.draw_text(win, ">", pal_x + 8, pal_y + 8, t.accent);
         const q = self.cmd_palette.query[0..self.cmd_palette.query_len];
@@ -2427,13 +2537,14 @@ pub const AppState = struct {
 
     fn draw_recent_list(self: *const AppState, win: u32) void {
         const t = self.cur_theme();
-        const rl_w: u32 = 320;
-        const rl_h: u32 = 160;
-        const rl_x: u32 = (window_w - rl_w) / 2;
-        const rl_y: u32 = 50;
+        // M42 SX4: the scaled recent list, centered in the canvas (not native).
+        const rl = self.rects.recent_list;
+        const rl_x = rl.x;
+        const rl_y = rl.y;
+        const rl_w = rl.w;
 
-        ui.draw_rect(win, Rect.make(rl_x, rl_y, rl_w, rl_h), t.surface);
-        ui.draw_rect_outline(win, Rect.make(rl_x, rl_y, rl_w, rl_h), ui.border_w, t.accent);
+        ui.draw_rect(win, rl, t.surface);
+        ui.draw_rect_outline(win, rl, ui.border_w, t.accent);
         ui.draw_text(win, "Recent Files", rl_x + 8, rl_y + 6, t.accent);
         ui.draw_rect(win, Rect.make(rl_x, rl_y + 20, rl_w, 1), ui.theme_gutter_bg());
 
@@ -2452,13 +2563,13 @@ pub const AppState = struct {
 
     fn draw_close_confirm(self: *const AppState, win: u32) void {
         const t = self.cur_theme();
-        const dlg_w: u32 = 280;
-        const dlg_h: u32 = 90;
-        const dlg_x: u32 = (window_w - dlg_w) / 2;
-        const dlg_y: u32 = (window_h - dlg_h) / 2;
+        // M42 SX4: the scaled close dialog, centered in the canvas (not native).
+        const dlg = self.rects.close_dialog;
+        const dlg_x = dlg.x;
+        const dlg_y = dlg.y;
 
-        ui.draw_rect(win, Rect.make(dlg_x, dlg_y, dlg_w, dlg_h), t.surface);
-        ui.draw_rect_outline(win, Rect.make(dlg_x, dlg_y, dlg_w, dlg_h), 2, t.warning);
+        ui.draw_rect(win, dlg, t.surface);
+        ui.draw_rect_outline(win, dlg, 2, t.warning);
 
         ui.draw_text(win, "Save changes before closing?", dlg_x + 12, dlg_y + 16, t.text);
         ui.draw_text(win, "Y: Save & Close", dlg_x + 16, dlg_y + 42, t.accent);
@@ -2482,18 +2593,34 @@ pub export fn _start(argc: usize, argv: ?[*]const [32]u8) callconv(.c) noreturn 
     _ = argc;
     _ = argv;
 
-    const win_res = ui.win_open(window_x, window_y, window_w, window_h);
-    if (win_res < 0) {
+    // M42 SX4: the tab-aware open. Native 512x384 when the viewport
+    // proposal is absent (shim/WND); full 1100x720 under TABWM.BIN.
+    const ta_res = tabapp.TabApp.init(.{
+        .name = "EDIT.BIN",
+        .title = "Edit",
+        .x = window_x,
+        .y = window_y,
+        .w = window_w,
+        .h = window_h,
+    }) orelse {
         ui.write_console("edit: failed to open window\n");
         ui.exit_process(1);
-    }
-    const win = @as(u32, @intCast(win_res));
+    };
+    var ta = ta_res;
+    // M42 SX4: g_app is global — set the canvas via the layout method.
+    g_app.layout(ta.w, ta.h);
+    const win = ta.win;
     g_app.win_id = win;
+    if (ta.tab_aware) {
+        ui.write_console("edit: tab-aware (full-viewport)\n");
+    } else {
+        ui.write_console("edit: not-tab-aware (shim or WND desktop)\n");
+    }
 
     g_app.check_crash_recovery();
 
     g_app.draw(win);
-    ui.win_present(win);
+    ta.present();
     ui.emit_tokens_marker("edit");
     ui.write_console("edit: ready\n");
     // M37 DQ4 gate: let the compositor settle (several ticks) so the
@@ -2508,17 +2635,34 @@ pub export fn _start(argc: usize, argv: ?[*]const [32]u8) callconv(.c) noreturn 
 
         var dirty = false;
 
-        if (ev.kind == ui.WIN_CLOSE) break;
-
-        if (ev.kind == ui.KEY_DOWN) {
-            dirty = handle_key(&g_app, &ev) or dirty;
+        // M42 SX4: WM-lifecycle events (resize -> relayout) first.
+        switch (ta.dispatch(&ev)) {
+            .closed => break,
+            .resized => {
+                ui.write_console("edit: resize relayout\n");
+                g_app.layout(ta.w, ta.h);
+                dirty = true;
+            },
+            .none => {
+                if (ev.kind == ui.WIN_CLOSE) break;
+                if (ev.kind == ui.KEY_DOWN) {
+                    dirty = handle_key(&g_app, &ev) or dirty;
+                }
+            },
         }
 
         while (ui.poll_event(&ev) > 0) {
-            if (ev.kind == ui.WIN_CLOSE) {
-                ui.win_close(win);
-                ui.exit_process(exit_status);
+            switch (ta.dispatch(&ev)) {
+                .closed => ta.close_and_exit(exit_status),
+                .resized => {
+                    ui.write_console("edit: resize relayout\n");
+                    g_app.layout(ta.w, ta.h);
+                    dirty = true;
+                    continue;
+                },
+                .none => {},
             }
+            if (ev.kind == ui.WIN_CLOSE) ta.close_and_exit(exit_status);
             if (ev.kind == ui.KEY_DOWN) {
                 dirty = handle_key(&g_app, &ev) or dirty;
             }
@@ -2529,13 +2673,12 @@ pub export fn _start(argc: usize, argv: ?[*]const [32]u8) callconv(.c) noreturn 
                 g_app.save_recovery_backup();
             }
             g_app.draw(win);
-            ui.win_present(win);
+            ta.present();
         }
     }
 
     ui.write_console("edit: exiting 44\n");
-    ui.win_close(win);
-    ui.exit_process(exit_status);
+    ta.close_and_exit(exit_status);
 }
 
 /// Top-level key dispatch.
@@ -4473,4 +4616,72 @@ test "edit: key chord dispatch for palette, recents, wrap, theme, bookmark, and 
     var ev_jump = Event{ .kind = ui.KEY_DOWN, .flags = ui.MOD_CTRL, .seq = 0, .arg0 = 0x30, .arg1 = ']' };
     try std.testing.expect(handle_key(&app, &ev_jump));
     try std.testing.expectEqual(@as(usize, 0), app.fb().cursor);
+}
+
+test "edit layout: native canvas is the identity (zero-regression fixed point)" {
+    var app = AppState{};
+    app.init();
+    app.layout(window_w, window_h);
+    try std.testing.expectEqual(window_w, app.canvas_w);
+    try std.testing.expectEqual(window_h, app.canvas_h);
+    try std.testing.expectEqual(native_top_bar, app.rects.top_bar);
+    try std.testing.expectEqual(native_tab_bar, app.rects.tab_bar);
+    try std.testing.expectEqual(native_edit_full, app.rects.edit_full);
+    try std.testing.expectEqual(native_console, app.rects.console);
+    try std.testing.expectEqual(native_goto_bar, app.rects.goto_bar);
+    try std.testing.expectEqual(native_cmd_palette, app.rects.cmd_palette);
+    try std.testing.expectEqual(native_close_dialog, app.rects.close_dialog);
+    // The derived split geometry is the legacy arithmetic exactly.
+    try std.testing.expectEqual(@as(u32, 34), app.editor_top());
+    try std.testing.expectEqual(native_edit_full.h, app.editor_available_h());
+    app.show_shell = true;
+    try std.testing.expectEqual(native_edit_split.h, app.editor_available_h());
+}
+
+test "edit layout: full viewport grows the edit surface and centers dialogs" {
+    var app = AppState{};
+    app.init();
+    app.layout(1100, 720);
+    try std.testing.expectEqual(@as(u32, 1100), app.canvas_w);
+    try std.testing.expectEqual(@as(u32, 720), app.canvas_h);
+    // The edit surface grows with the viewport and stays inside it.
+    const er = app.rects.edit_full;
+    try std.testing.expect(er.x + er.w <= 1100);
+    try std.testing.expect(er.y + er.h <= 720);
+    try std.testing.expect(er.h > native_edit_full.h);
+    // The console split grows too and stays inside the canvas.
+    const cr = app.rects.console;
+    try std.testing.expect(cr.x + cr.w <= 1100);
+    try std.testing.expect(cr.y + cr.h <= 720);
+    try std.testing.expect(cr.h > native_console.h);
+    // Dialogs stay centered in the canvas, not at native offsets: the left
+    // and right (top and bottom) margins agree up to integer floor rounding.
+    const pal = app.rects.cmd_palette;
+    try std.testing.expect(pal.x + pal.w <= 1100);
+    try std.testing.expect(pal.x > native_cmd_palette.x); // moved right of native
+    try std.testing.expect(@abs(@as(i32, @intCast(pal.x)) - @as(i32, @intCast(1100 - pal.x - pal.w))) <= 2);
+    const dlg = app.rects.close_dialog;
+    try std.testing.expect(dlg.x + dlg.w <= 1100);
+    try std.testing.expect(dlg.y + dlg.h <= 720);
+    try std.testing.expect(@abs(@as(i32, @intCast(dlg.x)) - @as(i32, @intCast(1100 - dlg.x - dlg.w))) <= 2);
+    try std.testing.expect(@abs(@as(i32, @intCast(dlg.y)) - @as(i32, @intCast(720 - dlg.y - dlg.h))) <= 2);
+}
+
+test "edit layout: row mapping follows the scaled geometry (hit-test agreement)" {
+    var app = AppState{};
+    app.init();
+    // EDIT.BIN has no mouse path (keyboard-only), so editor_row_at is the
+    // layout-agreement probe: draw places row ln at top + 3 + ln*line_h.
+    app.layout(window_w, window_h);
+    try std.testing.expectEqual(@as(?usize, 0), app.editor_row_at(app.editor_top()));
+    try std.testing.expect(app.editor_row_at(app.editor_top() - 1) == null);
+    try std.testing.expect(app.editor_row_at(app.editor_top() + app.editor_available_h()) == null);
+    try std.testing.expectEqual(@as(?usize, 3), app.editor_row_at(app.editor_top() + 3 * line_h));
+    const native_rows = app.editor_available_h() / line_h;
+    // Full viewport: the mapping follows the scaled pane and fits more rows.
+    app.layout(1100, 720);
+    try std.testing.expectEqual(@as(?usize, 0), app.editor_row_at(app.editor_top()));
+    try std.testing.expect(app.editor_row_at(app.editor_top() - 1) == null);
+    try std.testing.expectEqual(@as(?usize, 3), app.editor_row_at(app.editor_top() + 3 * line_h));
+    try std.testing.expect(app.editor_available_h() / line_h > native_rows);
 }

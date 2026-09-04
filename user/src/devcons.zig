@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const ui = @import("lib/ui.zig");
+const tabapp = @import("lib/tabapp.zig");
 
 const win_x: u32 = 260;
 const win_y: u32 = 24;
@@ -19,8 +20,33 @@ const win_h: u32 = 300;
 
 const log_lines: usize = 20;
 const log_line_h: u32 = 12;
-const prompt_y: u32 = 250;
+const native_prompt_y: u32 = 250;
 const input_max: usize = 64;
+
+// M42 SX4 (issue #985): the tab-aware canvas. The window opens at the
+// native 400x300 (the legacy shim/WND presentation is unchanged); under
+// TABWM.BIN the declaration is accepted and activation delivers the full
+// 1100x720 viewport via the kernel's WIN_RESIZE seam, which `layout`
+// maps into (prompt row + log pane stretch proportionally).
+var canvas_w: u32 = win_w;
+var canvas_h: u32 = win_h;
+var prompt_y: u32 = native_prompt_y;
+
+/// Map the fixed 400x300 layout into a `w x h` canvas. At the native
+/// size every rect maps to itself (the zero-regression fixed point).
+pub fn layout(w: u32, h: u32) void {
+    canvas_w = w;
+    canvas_h = h;
+    prompt_y = tabapp.scale(ui.Rect.make(0, native_prompt_y, 1, 1), win_w, win_h, w, h).y;
+}
+
+/// Visible log rows for the current canvas (storage caps at log_lines;
+// the pane itself stretches to fill the viewport).
+pub fn visible_rows() usize {
+    if (prompt_y <= 26) return 1;
+    const rows = (prompt_y - 22) / log_line_h;
+    return @min(rows, log_lines);
+}
 
 var log_buf: [log_lines * 128]u8 = undefined;
 var log_lens: [log_lines]u16 = undefined;
@@ -42,14 +68,27 @@ fn update_cursor(x: u32, y: u32) void {
 }
 
 pub export fn _start() callconv(.c) noreturn {
-    // M37 DQ4: follow the desktop theme first.
-    _ = ui.sync_theme_from_host();
-    const win_res = ui.win_open(win_x, win_y, win_w, win_h);
-    if (win_res < 0) {
+    // M42 SX4: the tab-aware open. Native 400x300 when the viewport
+    // proposal is absent (shim/WND); full 1100x720 under TABWM.BIN.
+    const ta_res = tabapp.TabApp.init(.{
+        .name = "DEVCONS.BIN",
+        .title = "DevCons",
+        .x = win_x,
+        .y = win_y,
+        .w = win_w,
+        .h = win_h,
+    }) orelse {
         ui.write_console("devcons: failed to open window\n");
         ui.exit_process(1);
+    };
+    var ta = ta_res;
+    layout(ta.w, ta.h);
+    const win = ta.win;
+    if (ta.tab_aware) {
+        ui.write_console("devcons: tab-aware (full-viewport)\n");
+    } else {
+        ui.write_console("devcons: not-tab-aware (shim or WND desktop)\n");
     }
-    const win: u32 = @intCast(win_res);
     ui.write_console("devcons: open\n");
 
     log_append("VirelaiOS Developer Console (M22 D14)");
@@ -69,9 +108,23 @@ pub export fn _start() callconv(.c) noreturn {
 
     while (true) {
         if (ui.wait_event(&ev) < 0) break;
+        // M42 SX4: WM-lifecycle events (resize -> relayout) first.
+        switch (ta.dispatch(&ev)) {
+            .closed => {
+                ta.close();
+                ui.exit_process(0);
+            },
+            .resized => {
+                ui.write_console("devcons: resize relayout\n");
+                layout(ta.w, ta.h);
+                refresh(ta.win);
+                continue;
+            },
+            .none => {},
+        }
         switch (ev.kind) {
             ui.WIN_CLOSE => {
-                ui.win_close(win);
+                ta.close();
                 ui.exit_process(0);
             },
             ui.MOUSE_MOVE => {
@@ -93,21 +146,37 @@ pub export fn _start() callconv(.c) noreturn {
                         execute_command(input_buf[0..input_len]);
                         input_len = 0;
                     }
-                    refresh(win);
+                    refresh(ta.win);
                 } else if (usage == 0x2a) {
                     // Backspace
                     if (input_len > 0) input_len -= 1;
-                    refresh(win);
+                    refresh(ta.win);
                 } else if (ascii >= 0x20 and ascii < 0x7f and input_len < input_max) {
                     input_buf[input_len] = @intCast(ascii);
                     input_len += 1;
-                    refresh(win);
+                    refresh(ta.win);
                 }
             },
             else => {},
         }
+        while (ui.poll_event(&ev) > 0) {
+            switch (ta.dispatch(&ev)) {
+                .closed => {
+                    ta.close();
+                    ui.exit_process(0);
+                },
+                .resized => {
+                    ui.write_console("devcons: resize relayout\n");
+                    layout(ta.w, ta.h);
+                    refresh(ta.win);
+                    continue;
+                },
+                .none => {},
+            }
+            if (ev.kind == ui.MOUSE_MOVE) update_cursor(ev.arg0, ev.arg1);
+        }
     }
-    ui.exit_process(0);
+    ta.close_and_exit(0);
 }
 
 fn log_append(msg: []const u8) void {
@@ -149,13 +218,13 @@ fn execute_command(cmd: []const u8) void {
 
 fn refresh(win: u32) void {
     // Background
-    ui.win_fill(win, 0, 0, win_w, win_h, ui.theme_bg());
+    ui.win_fill(win, 0, 0, canvas_w, canvas_h, ui.theme_bg());
     // Title bar
-    ui.win_fill(win, 0, 0, win_w, 6, ui.theme_surface());
+    ui.win_fill(win, 0, 0, canvas_w, 6, ui.theme_surface());
     ui.draw_text(win, "Developer Console", ui.pad_md, 8, ui.theme_text_muted());
 
     // Log pane (top section) — M37 DQ4: unified surface (was 0x1a1a2e).
-    ui.win_fill(win, 0, 18, win_w, prompt_y - 18, ui.theme_surface());
+    ui.win_fill(win, 0, 18, canvas_w, prompt_y - 18, ui.theme_surface());
     var y: u32 = 22;
     var i: usize = 0;
     while (i < log_count and i < log_lines) : (i += 1) {
@@ -170,7 +239,7 @@ fn refresh(win: u32) void {
     }
 
     // Separator
-    ui.win_fill(win, 0, prompt_y - 2, win_w, ui.border_w, ui.theme_text_muted());
+    ui.win_fill(win, 0, prompt_y - 2, canvas_w, ui.border_w, ui.theme_text_muted());
 
     // Prompt area
     ui.draw_text(win, "$ ", ui.pad_sm, prompt_y + 4, ui.theme_success());
@@ -179,4 +248,28 @@ fn refresh(win: u32) void {
     ui.draw_text(win, "(output on serial console)", 80, prompt_y + 4, ui.theme_text_muted());
 
     ui.win_present(win);
+}
+
+// ---------------------------------------------------------------------------
+// Host unit tests (M42 SX4 — the tab-aware layout)
+// ---------------------------------------------------------------------------
+
+test "devcons layout: native canvas is the identity (zero-regression fixed point)" {
+    layout(win_w, win_h);
+    try std.testing.expectEqual(win_w, canvas_w);
+    try std.testing.expectEqual(win_h, canvas_h);
+    try std.testing.expectEqual(native_prompt_y, prompt_y);
+    // Native geometry holds 19 rows ((250-22)/12), storage caps at 20.
+    try std.testing.expectEqual(@as(usize, 19), visible_rows());
+}
+
+test "devcons layout: full viewport stretches the console rows" {
+    layout(1100, 720);
+    try std.testing.expectEqual(@as(u32, 1100), canvas_w);
+    try std.testing.expectEqual(@as(u32, 720), canvas_h);
+    // Prompt row maps proportionally: 250 * 720 / 300 = 600.
+    try std.testing.expectEqual(@as(u32, 600), prompt_y);
+    // The pane grows with the viewport (storage still caps the ring).
+    try std.testing.expectEqual(log_lines, visible_rows());
+    try std.testing.expect(prompt_y + 4 < canvas_h);
 }
