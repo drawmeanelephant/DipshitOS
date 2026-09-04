@@ -8,6 +8,11 @@ workflow header), so these gates run on a **self-hosted Apple silicon
 macOS 27+ runner**. Until one is registered, the workflow reports
 SKIPPED on every PR and push — wired but not enforcing.
 
+> **Status (2026-09-03):** the `vz-macos27-m4` runner was intentionally
+> decommissioned and the `VZ_RUNNER_LABEL` variable unset — the workflow
+> honestly reports SKIPPED until a runner is re-registered using the
+> steps below.
+
 ## Why self-hosted
 
 - Gates must observe real VZ hardware behavior; the project's evidence
