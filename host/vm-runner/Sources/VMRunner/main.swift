@@ -2561,7 +2561,13 @@ func startChordInject() {
     let q = DispatchQueue(label: "virelaios.chords")
     q.async {
         let marker = inputChordsAfter ?? "userspace: el0=1"
-        let waitDeadline = Date().addingTimeInterval(60)
+        // #990 (claim #997): the marker deadline was a hardcoded 60 s — the
+        // WM2 gate's choreography (loop-ok + 20 s settle) lands chord-go at
+        // ~88 s, so the chords were NEVER typed ("guest did not emit
+        // chord-seq marker ... within 60s") and every WM boot failed its
+        // checks with key_fan=0. Key the watcher to the run deadline like
+        // every other marker watcher.
+        let waitDeadline = deadline
         var sent = false
         while Date() < waitDeadline {
             if let log = try? String(contentsOf: serialURL, encoding: .utf8), log.contains(marker) {
@@ -2649,7 +2655,7 @@ func startChordInject() {
             Thread.sleep(forTimeInterval: 0.1)
         }
         if !sent {
-            FileHandle.standardError.write(Data("ERROR: guest did not emit chord-seq marker '\(marker)' within 60s; chords not typed\n".utf8))
+            FileHandle.standardError.write(Data("ERROR: guest did not emit chord-seq marker '\(marker)' before the run deadline; chords not typed\n".utf8))
         }
     }
 }
@@ -2838,7 +2844,7 @@ func startPointerInject() {
     let q = DispatchQueue(label: "virelaios.ptrseq")
     q.async {
         let marker = pointerAfter ?? "tasks user-el0 reaped"
-        let waitDeadline = Date().addingTimeInterval(120)
+        let waitDeadline = deadline // #990: was a hardcoded 120 s (same late-marker class)
         var sent = false
         while Date() < waitDeadline {
             if let log = try? String(contentsOf: serialURL, encoding: .utf8), log.contains(marker) {
@@ -2936,7 +2942,7 @@ func startPointerVirtioInject() {
     let q = DispatchQueue(label: "virelaios.ptrcv")
     q.async {
         let marker = pointerVirtioAfter ?? "winloop: present ok"
-        let waitDeadline = Date().addingTimeInterval(120)
+        let waitDeadline = deadline // #990: was a hardcoded 120 s (same late-marker class)
         var sent = false
         while Date() < waitDeadline {
             if let log = try? String(contentsOf: serialURL, encoding: .utf8), log.contains(marker) {
@@ -4141,6 +4147,12 @@ enum CustomVirtioSpike {
         case "delete": return (0, 0x4C)
         case "pageup": return (0, 0x4B)
         case "pagedown": return (0, 0x4E)
+        // WM2 mission-control overview (Self-hosting Lane 1, issue #707
+        // card 2, port of the #971 exploration): the overview hotkey —
+        // LCtrl modifier + USB HID F12 usage (0x45). The guest kind-21
+        // stream carries raw HID usages, so WND.BIN matches 0x45 for the
+        // overview chord.
+        case "ctrl-f12": return (hidModCtrl, 0x45)
         default: break
         }
         if token.hasPrefix("ctrl-shift-"), token.count == 12 {
