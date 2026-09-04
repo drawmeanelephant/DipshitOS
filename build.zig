@@ -2143,6 +2143,8 @@ pub fn build(b: *std.Build) void {
         "user/tests/ui/ui_test.zig",
         "kernel/tests/scheduler_test.zig",
         "kernel/tests/syscall_test.zig",
+        "kernel/tests/monitor_test.zig",
+        "kernel/tests/shell_test.zig",
         "test/helpers/helpers.zig",
     };
 
@@ -2174,6 +2176,20 @@ pub fn build(b: *std.Build) void {
     });
     syscall_mod.addOptions("build_options", kernel_options);
 
+    const monitor_mod = b.createModule(.{
+        .root_source_file = b.path("kernel/src/monitor.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    monitor_mod.addOptions("build_options", kernel_options);
+
+    const shell_mod = b.createModule(.{
+        .root_source_file = b.path("kernel/src/shell.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    shell_mod.addOptions("build_options", kernel_options);
+
     for (unit_test_sources) |src_path| {
         const test_mod = b.createModule(.{
             .root_source_file = b.path(src_path),
@@ -2185,6 +2201,8 @@ pub fn build(b: *std.Build) void {
         test_mod.addImport("helpers", helpers_mod);
         test_mod.addImport("scheduler", scheduler_mod);
         test_mod.addImport("syscall", syscall_mod);
+        test_mod.addImport("monitor", monitor_mod);
+        test_mod.addImport("shell", shell_mod);
         const t = b.addTest(.{
             .root_module = test_mod,
         });
