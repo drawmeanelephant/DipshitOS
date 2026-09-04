@@ -165,6 +165,22 @@ Every verification command belongs to exactly one class (canonical inventory:
 > run individually per claim. See
 > [`docs/gate-inventory.md`](gate-inventory.md).
 
+## Gate freeze (M40 GF1, issue #934)
+
+- **No new `tools/verify-*.sh` files.** New gates arrive as vgate specs (GF2
+  defines the format; until it lands, new gates wait or extend an existing
+  script). One-off per-gate boot scripts are rejected in review.
+- **The fleet inventory is generated, not written:**
+  `bash tools/inventory-gates.sh` rewrites `docs/gate-fleet-inventory.md`
+  (also `just inventory-gates`); `just inventory-gates --check` fails when
+  the tracked report drifts from a fresh render, so every added, removed,
+  or renamed script under `tools/` must ship with a regenerated report.
+  CI enforcement of `--check` lands in GF5; until then run the check target.
+- Ground truth lives in `docs/gate-fleet-inventory.md` (counts, per-script
+  registration, orphan list). `docs/gate-inventory.md` stays the
+  class-A/B/C/D definition; per-gate prose there is frozen until GF5
+  generates it from the spec list.
+
 ## Evidence artifacts
 
 | Artifact | Produced by | Contains |
