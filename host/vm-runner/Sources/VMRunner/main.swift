@@ -3805,6 +3805,22 @@ func buildIcmpEchoReply(_ reply: inout [UInt8], _ req: [UInt8], _ n: Int, _ host
 // Claim 6684: script-mode lifecycle. Polls the serial log for the expected
 // transcript; success (exit 0) once it appears and the claim-4912 tail
 // window has elapsed, failure on timeout or an early VM stop.
+// Issue #990 (claim #997): three robustness fixes for the silent-death
+// flake (the run ended rc=1 with NO verdict while the guest had completed
+// the whole flow byte-clean):
+//   1. LOSSY decode — `String(decoding:as:)` never returns nil, so a
+//      transient/partial multi-byte sequence at a poll instant can no
+//      longer stall matching (the old `String(data:encoding:.utf8)`+
+//      `try?` pair silently skipped EVERY match check for that poll and,
+//      if the tail byte was permanently dangling, forever).
+//   2. UNBUFFERED verdicts — the SUCCESS/FAILURE lines go through
+//      FileHandle.standardOutput (direct write), so a killed/exited
+//      process can no longer lose the verdict to stdio buffering.
+//   3. Poll heartbeat — an unbuffered stderr line every 30 s proves the
+//      poll recursion is alive; its absence in evidence localizes the
+//      death to a specific window instead of "no verdict at all".
+var scriptPollLastBeat: Date = Date()
+
 func scriptPoll(matchedAt: Date? = nil) {
     var matchedAt = matchedAt
     // An early VM stop ends the run: pass when the expected transcript was
@@ -3814,66 +3830,55 @@ func scriptPoll(matchedAt: Date? = nil) {
         if matchedAt != nil {
             finish(success: true)
         } else {
-            print("FAILURE: VM ended before the expected transcript appeared (state=\(runner.vm.state.rawValue)).")
+            FileHandle.standardError.write(Data("FAILURE: VM ended before the expected transcript appeared (state=\(runner.vm.state.rawValue)).\n".utf8))
             finish(success: false)
         }
         return
     }
-    if let data = try? Data(contentsOf: serialURL), let text = String(data: data, encoding: .utf8) {
-        if !text.isEmpty { lastText = text }
-        if matchedAt == nil, let expect = scriptExpect, text.contains(expect) {
-            // Claim 4912: the kernel prints the exec reap/report lines
-            // (`tasks` / `procs <name> exited status=N`) from the shell idle
-            // loop, which only wakes on the 1 Hz EL1 timer tick — up to ~1 s
-            // AFTER the program's own last marker lands in this log. Tearing
-            // down on the first match (the pre-4912 behavior) stopped the VM
-            // inside that window and dropped the tail, flaking the live
-            // gates. Hold the VM through `scriptExpectTail` so the tail
-            // reaches the log, then finish. 0 = legacy immediate stop.
-            if scriptExpectTail > 0 {
-                FileHandle.standardOutput.write(Data("script-expect: transcript '\(expect)' observed — holding the VM for the \(scriptExpectTail)s tail window so post-marker kernel output (reap lines) reaches the serial log\n".utf8))
-                matchedAt = Date()
-            } else {
-                print("SUCCESS: expected transcript '\(expect)' observed in the serial log.")
-                print("----- captured serial console -----")
-                print(text)
-                print("-----------------------------------")
-                finish(success: true)
-                return
-            }
+    // Lossy decode (fix 1): invalid bytes become U+FFFD, never nil.
+    let text = String(decoding: (try? Data(contentsOf: serialURL)) ?? Data(), as: UTF8.self)
+    if !text.isEmpty { lastText = text }
+    if matchedAt == nil, let expect = scriptExpect, text.contains(expect) {
+        // Claim 4912: the kernel prints the exec reap/report lines
+        // (`tasks` / `procs <name> exited status=N`) from the shell idle
+        // loop, which only wakes on the 1 Hz EL1 timer tick — up to ~1 s
+        // AFTER the program's own last marker lands in this log. Tearing
+        // down on the first match (the pre-4912 behavior) stopped the VM
+        // inside that window and dropped the tail, flaking the live
+        // gates. Hold the VM through `scriptExpectTail` so the tail
+        // reaches the log, then finish. 0 = legacy immediate stop.
+        if scriptExpectTail > 0 {
+            FileHandle.standardOutput.write(Data("script-expect: transcript '\(expect)' observed — holding the VM for the \(scriptExpectTail)s tail window so post-marker kernel output (reap lines) reaches the serial log\n".utf8))
+            matchedAt = Date()
+        } else {
+            FileHandle.standardOutput.write(Data("SUCCESS: expected transcript '\(expect)' observed in the serial log.\n".utf8))
+            finish(success: true)
+            return
         }
     }
     if let m = matchedAt, Date().timeIntervalSince(m) >= scriptExpectTail {
         let expect = scriptExpect ?? "<none>"
-        print("SUCCESS: expected transcript '\(expect)' observed in the serial log (claim-4912 tail window \(scriptExpectTail)s elapsed; post-marker output captured).")
-        print("----- captured serial console -----")
-        print(lastText)
-        print("-----------------------------------")
+        FileHandle.standardOutput.write(Data("SUCCESS: expected transcript '\(expect)' observed in the serial log (claim-4912 tail window \(scriptExpectTail)s elapsed; post-marker output captured).\n".utf8))
         finish(success: true)
         return
     }
     captureScreenshotIfDue()
     captureScreenshotIfMarker(lastText)
     fireSnapshotsIfMarker(lastText)
+    // Fix 3: the liveness heartbeat — unbuffered stderr every 30 s.
+    if Date().timeIntervalSince(scriptPollLastBeat) >= 30 {
+        scriptPollLastBeat = Date()
+        FileHandle.standardError.write(Data("scriptPoll: alive (log=\(text.count) bytes, expect=\(scriptExpect ?? "<none>"), matched=\(matchedAt != nil))\n".utf8))
+    }
     if Date() > deadline {
         if matchedAt != nil {
             // The transcript appeared but --timeout cut the tail window
             // short — the gate's evidence is already in the log; pass.
-            print("SUCCESS: expected transcript '\(scriptExpect ?? "<none>")' observed before the deadline (claim-4912 tail window cut short by --timeout).")
-            if !lastText.isEmpty {
-                print("----- captured serial console -----")
-                print(lastText)
-                print("-----------------------------------")
-            }
+            FileHandle.standardOutput.write(Data("SUCCESS: expected transcript '\(scriptExpect ?? "<none>")' observed before the deadline (claim-4912 tail window cut short by --timeout).\n".utf8))
             finish(success: true)
             return
         }
-        print("FAILURE: expected transcript '\(scriptExpect ?? "<none>")' not observed within \(Int(timeout))s.")
-        if !lastText.isEmpty {
-            print("----- captured serial console (partial) -----")
-            print(lastText)
-            print("---------------------------------------------")
-        }
+        FileHandle.standardOutput.write(Data("FAILURE: expected transcript '\(scriptExpect ?? "<none>")' not observed within \(Int(timeout))s (log=\(text.count) bytes).\n".utf8))
         finish(success: scriptExpect == nil)
         return
     }

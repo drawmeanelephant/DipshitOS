@@ -50,6 +50,7 @@ pub const events = @import("events.zig"); // Milestone 9 (claim 9228): applicati
 pub const clipboard = @import("clipboard.zig"); // Arc2 W3 (claim 1264): tray clipboard indicator
 pub const virtio_snd = @import("virtio_snd.zig"); // M27 G5 (#448): action sound feedback
 pub const settings = @import("settings.zig");
+pub const klog = @import("klog.zig"); // issue #990 (claim #997): the serial-log seam (hook armed by main.zig)
 pub const geom = @import("wnd_core.zig"); // M32 WMS3 (issue #623): the shared pure rules (hit-test / workspace / clamps / title-layout) — compiled by the kernel AND the WM server so they cannot drift
 
 /// M27 G13: Focus-follows-mouse configuration and dialog previous-focus tracking
@@ -1502,6 +1503,17 @@ pub fn user_open(x: u32, y: u32, w: u32, h: u32, owner: usize) UserOpenResult {
             .kbuf_test = test_ptr,
         };
         win_count += 1;
+        // Issue #990 (claim #997): the open-attribution marker — the
+        // WM2 gate's overview counted a PHANTOM third window (n=3 vs the
+        // pinned n=2) with exec forwarded exactly once; this line names
+        // every kernel-side open (id/owner/rect) so the serial log can
+        // attribute it. One line per real open, klog-gated (silent in
+        // host tests / pre-boot).
+        {
+            var kbuf: [80]u8 = undefined;
+            const s = std.fmt.bufPrint(&kbuf, "open: id={d} owner={d} rect={d},{d} {d}x{d} ws={d}\n", .{ id, owner, x, y, w, h, current_workspace }) catch "open: ?\n";
+            klog.line(s);
+        }
         _ = focus(id);
         // M32 WMS5: the registered WM must see the new window to hit-test it.
         wm_mirror(id);
