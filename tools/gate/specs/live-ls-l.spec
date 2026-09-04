@@ -15,6 +15,11 @@ vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 vgate_repeat 1 BOOTS
 
+vgate_setup_python <<'PY'
+import os
+os.makedirs(os.path.join(os.environ["RUN_DIR"], "share", "EFI"), exist_ok=True)
+PY
+
 vgate_file script.txt <<'EOF'
 ls -l
 ls -l
