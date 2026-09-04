@@ -514,8 +514,8 @@ pub fn draw_sidebar(scan: [*]u32) void {
         ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, sexiburg_rect, 6, ui.sidebar_hover_pill());
     }
 
-    // Mini Sexiburger mascot icon at (16, 17)
-    draw_mini_mascot(scan, 16, 17);
+    // Proper Sexiburger mascot emblem (the real 🐙+🍔 raster, M42 SX1) at (12, 13)
+    draw_mascot_emblem(pixels, 12, 13);
 
     // Header label: "Virelai" in 14pt Inter
     ui.draw_text_sized(0, "Virelai", 48, 20, ui.font_size_tab_title, ui.sidebar_text_active());
@@ -590,9 +590,50 @@ pub fn draw_sidebar(scan: [*]u32) void {
     ui.draw_text_sized(0, "CB", 144, 676, ui.font_size_badge, ui.theme_accent());
 }
 
-/// Mini Sexiburger mascot: 6 burger layers + tentacles (18x18 px).
-fn draw_mini_mascot(scan: [*]u32, x: u32, y: u32) void {
-    const pixels = scan[0 .. @as(usize, fb_w) * fb_h];
+/// Proper Sexiburger mascot emblem (M42 SX1, issue #982): the real 🐙+🍔
+/// artwork — an octopus holding the six-layer burger — downscaled from
+/// `assets/sexiburger.png` (534x534, the canonical emoji export) to 28x28
+/// and embedded as a QOI fixture (`mascot_28x28.qoi`; regenerate with the
+/// premultiplied-Lanczos pass documented in `docs/march-m42-sexiburger-desktop.md`).
+/// Decoded ONCE into static BSS (the wnd.zig god-menu fixture pattern) and
+/// alpha-blended straight into the scanout via `ui.draw_image_buf`. The
+/// rect-drawn fallback emblem stays available in `lib/sexiburger.zig` for
+/// the no-asset path.
+pub const mascot_size: u32 = 28;
+
+const mascot_qoi_bytes = @embedFile("lib/fixtures/qoi/mascot_28x28.qoi");
+var mascot_pixels: [mascot_size * mascot_size]u32 = undefined;
+var mascot_loaded: bool = false;
+
+pub fn mascot_image() ?ui.Image {
+    if (mascot_loaded) {
+        return ui.Image{
+            .width = mascot_size,
+            .height = mascot_size,
+            .pixels = &mascot_pixels,
+        };
+    }
+    const decoded = ui.image.qoi.decode(mascot_qoi_bytes, &mascot_pixels) catch return null;
+    if (decoded.width != mascot_size or decoded.height != mascot_size) return null;
+    mascot_loaded = true;
+    return ui.Image{
+        .width = mascot_size,
+        .height = mascot_size,
+        .pixels = &mascot_pixels,
+    };
+}
+
+fn draw_mascot_emblem(pixels: []u32, x: u32, y: u32) void {
+    if (mascot_image()) |img| {
+        ui.draw_image_buf(pixels, fb_w, x, y, img);
+        return;
+    }
+    // Asset unavailable (decode failed): the legacy hand-drawn mini mascot.
+    draw_mini_mascot(pixels, x, y);
+}
+
+/// Legacy mini Sexiburger mascot fallback: 6 burger layers + tentacles (18x18 px).
+fn draw_mini_mascot(pixels: []u32, x: u32, y: u32) void {
     const tentacle: u32 = 0xFFF57C00;
 
     // Tentacles left
@@ -1203,4 +1244,40 @@ test "tabwm: draw_viewport_backdrop writes canvas outside window" {
     try std.testing.expectEqual(@as(u32, 0xFF14161B), fb[101 * fb_w + 201]);
     // Viewport dot node (x%24 == 0 and y%24 == 0, e.g. x=240, y=120) should be dot color 0xFF252934
     try std.testing.expectEqual(@as(u32, 0xFF252934), fb[120 * fb_w + 240]);
+}
+
+// ---------------------------------------------------------------------------
+// Unit Tests (M42 SX1 — the proper mascot emblem)
+// ---------------------------------------------------------------------------
+test "tabwm: proper mascot emblem decodes at 28x28 (M42 SX1)" {
+    const img = mascot_image() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, 28), img.width);
+    try std.testing.expectEqual(@as(u32, 28), img.height);
+    // The artwork's center pixel is the burger's cheese layer (warm yellow);
+    // the rect-drawn mini mascot never had a center like this.
+    const c = img.pixels[14 * 28 + 14];
+    const r = (c >> 16) & 0xFF;
+    const g = (c >> 8) & 0xFF;
+    const b = c & 0xFF;
+    try std.testing.expect(r > 200 and g > 150 and b < 160);
+    // The artwork's background is transparent (alpha 0 at the corner)
+    try std.testing.expectEqual(@as(u32, 0), (img.pixels[0] >> 24) & 0xFF);
+}
+
+test "tabwm: draw_sidebar blits the raster emblem into the scanout (M42 SX1)" {
+    var fb: [fb_w * fb_h]u32 = undefined;
+    @memset(&fb, 0);
+    manager = TabManager.init();
+    hover_sexiburger = false; // earlier pointer tests may have left hover state
+    mascot_loaded = false; // force a fresh decode for this test run
+    draw_sidebar(&fb);
+    const img = mascot_image() orelse return error.TestUnexpectedResult;
+    // The icon's opaque center is exactly the fixture's cheese pixel
+    // (alpha 255 -> blend_source_over is an overwrite)
+    const center = fb[(13 + 14) * fb_w + (12 + 14)];
+    try std.testing.expectEqual(img.pixels[14 * 28 + 14], center);
+    // A fully transparent source pixel leaves the painted sidebar bg (not
+    // the emblem) — the emblem's alpha respected the destination
+    const corner = fb[13 * fb_w + 12];
+    try std.testing.expectEqual(ui.sidebar_bg(), corner & 0x00FFFFFF);
 }

@@ -315,6 +315,7 @@ pub const draw_char_16 = draw.draw_char_16;
 pub const draw_char_mono = draw.draw_char_mono;
 pub const draw_focus_outline = draw.draw_focus_outline;
 pub const draw_image = draw.draw_image;
+pub const draw_image_buf = draw.draw_image_buf;
 pub const draw_image_clipped = draw.draw_image_clipped;
 pub const draw_image_scaled = draw.draw_image_scaled;
 pub const draw_panel_frame = draw.draw_panel_frame;
