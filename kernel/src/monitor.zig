@@ -290,7 +290,7 @@ pub const Command = struct {
 /// grows it 54 -> 55 (`sym`). Milestone twenty-two D5 (issue #328)
 /// grows it 55 -> 56 (`strace`). Milestone twenty-two D6 (issue #329)
 /// grows it 56 -> 57 (`ps`).
-pub const registry_count: usize = 73; // 51 + sh/calc + `font` (M20 U1) + sym/strace/ps (M22 D3/D5/D6) + `type` (M19 P1) + `mktemp` (M19 P16) + stat/find/dmesg/time/which/inventory (M22 D8/D12/D13/D16) + du (M25 F4) + screenshot/shortcuts (M27 G27/G29) + smp (M28) + `wm` (M32 WMS2, issue #622) + `wnd` (M32 WMS3, issue #623) + `vf` (M34 HF1+HF2, issues #735/#736) + `sexiburger` (Milestone 19, issue #677)
+pub const registry_count: usize = 74; // 51 + sh/calc + `font` (M20 U1) + sym/strace/ps (M22 D3/D5/D6) + `type` (M19 P1) + `mktemp` (M19 P16) + stat/find/dmesg/time/which/inventory (M22 D8/D12/D13/D16) + du (M25 F4) + screenshot/shortcuts (M27 G27/G29) + smp (M28) + `wm` (M32 WMS2, issue #622) + `wnd` (M32 WMS3, issue #623) + `vf` (M34 HF1+HF2, issues #735/#736) + `sexiburger` (Milestone 19, issue #677) + `tabwm` (M39 TWM1, issue #928)
 
 /// `sym <file>` reads at most this many bytes for on-disk symtab inspection
 /// (M22 D3). ELF symbol tables live near the file tail; 64 KiB covers every
@@ -363,6 +363,7 @@ fn ensure_registry() []const Command {
             .{ .name = "syscalls", .help = "numbered syscall table and counters", .usage = "syscalls", .category = .tasks_processes, .handler = cmd_syscalls },
             .{ .name = "wm", .dom = svclock.dom_bit(.win) | svclock.dom_bit(.ev), .help = "M32 WMS2/WMS4/WMS5 render-server register: the registered WM server pid, present-sequence counter, presents, COMPOSITE_TICK count, SET_WINDOW chrome submissions + SET_STATE visibility/workspace calls, and the WMS5 input-seam fan-out counters (ptr_fan = raw pointer samples, win_mirror = registry mirrors, key_fan = raw keyboard samples; 'wm none' means the shell idle shim is compositing)", .usage = "wm", .category = .graphics_input, .handler = cmd_wm },
             .{ .name = "wnd", .dom = svclock.dom_bit(.file) | svclock.dom_bit(.ev), .help = "M32 WMS3 WM server: 'wnd' reports the registered WM server (pid, present seq/count, tick count; 'wnd: none' = shell-shim compositing); 'wnd start' launches the long-lived EL0 WND.BIN server (infrastructure — not in APPS.TXT; the default VM stays shim-only)", .usage = "wnd [start]", .category = .graphics_input, .max_args = 1, .handler = cmd_wnd },
+            .{ .name = "tabwm", .dom = svclock.dom_bit(.file) | svclock.dom_bit(.ev), .help = "M39 TWM1 WM server: 'tabwm' reports the registered WM server; 'tabwm start' launches the long-lived EL0 TABWM.BIN server (left-sidebar browser-style window manager)", .usage = "tabwm [start]", .category = .graphics_input, .max_args = 1, .handler = cmd_tabwm },
             .{ .name = "tasks", .help = "tick-driven task scheduler status", .usage = "tasks", .category = .tasks_processes, .handler = cmd_tasks },
             .{ .name = "smp", .help = "multiprocessor topology, online CPU cores, and per-core task state", .usage = "smp", .category = .tasks_processes, .handler = cmd_smp },
             .{ .name = "type", .help = "echo stdin (the pipe source) to stdout — the right half of `a | type`", .usage = "type", .category = .system, .handler = cmd_type },
@@ -6899,6 +6900,52 @@ fn cmd_wnd(m: *Monitor, args: []const []const u8) ExecError {
         m.console.puts("\n");
     } else {
         m.console.print_line("wnd: none (shim compositing)");
+    }
+    return .none;
+}
+
+/// M39 TWM1 tabbed window manager server command (issue #928).
+/// 'tabwm' reports the current WM server; 'tabwm start' launches TABWM.BIN.
+fn cmd_tabwm(m: *Monitor, args: []const []const u8) ExecError {
+    if (args.len >= 1 and std.mem.eql(u8, args[0], "start")) {
+        switch (esp_exec.exec_file("TABWM.BIN", &.{})) {
+            .ok => {
+                m.console.puts("tabwm: starting ");
+                const info = esp_exec.loaded().?;
+                m.console.puts(info.name);
+                m.console.puts("\n");
+                return .none;
+            },
+            .no_disk => {
+                err_prefix(m);
+                m.console.print_line("no disk (ESP FAT volume unavailable)");
+                return .not_implemented;
+            },
+            .not_found => {
+                err_prefix(m);
+                m.console.print_line("TABWM.BIN not found on the ESP (must be a DSK1 flat image)");
+                return .invalid_argument;
+            },
+            else => {
+                err_prefix(m);
+                m.console.print_line("TABWM.BIN failed to load (see `exec TABWM.BIN` for the full diagnosis)");
+                return .invalid_argument;
+            },
+        }
+    }
+    const info = wm_server.info();
+    if (info.pid) |pid| {
+        m.console.puts("tabwm: registered pid=");
+        m.console.print_u64(pid);
+        m.console.puts(" present_seq=");
+        m.console.print_u64(info.present_seq);
+        m.console.puts(" presents=");
+        m.console.print_u64(info.present_count);
+        m.console.puts(" ticks=");
+        m.console.print_u64(info.tick_count);
+        m.console.puts("\n");
+    } else {
+        m.console.print_line("tabwm: none (shim compositing)");
     }
     return .none;
 }

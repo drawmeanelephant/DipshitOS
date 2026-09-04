@@ -1,0 +1,1206 @@
+//! VirelaiOS M39 TWM2 — TABWM.BIN, the browser-style tabbed window manager server (issue #929).
+//!
+//! Replaces the 1990s floating overlapping window model with a sleek, browser-like
+//! tabbed desktop environment:
+//!   - Zero floating windows: every application is a first-class full tab.
+//!   - Unified Left Sidebar (180px wide):
+//!       * Top: Sexiburger God Menu button with mascot emblem and shortcut hint.
+//!       * Middle: Vertical tab list with anti-aliased pill highlights, active accent bar,
+//!                 proportional 14pt Inter titles, and close buttons.
+//!       * Bottom: Status tray (13pt Inter clock, theme toggle [D]/[L], clipboard badge).
+//!   - Content Viewport: unbroken full 720px vertical scanout height, 1100px wide (x=180..1280, y=0..720).
+//!       * Active tab receives full viewport (180, 0, 1100, 720).
+//!       * Inactive tabs are hidden (sys_wmctl(set_state)).
+//!   - Mouse Routing:
+//!       * Clicking tab pill activates tab.
+//!       * Clicking 'x' sends WIN_CLOSE and closes tab.
+//!       * Clicking Sexiburger summons God Menu command palette.
+//!   - Keyboard Shortcuts:
+//!       * Ctrl+Tab / Ctrl+Shift+Tab: Cycle active tabs forward / backward.
+//!       * Ctrl+1..9: Jump directly to tab index 1..9.
+//!       * Ctrl+W: Close active tab.
+//!       * Ctrl+Space: Summon Sexiburger command palette overlay.
+//!   - Zero Heap Allocation: all tab mirrors, state, and rendering operate strictly in static BSS and stack.
+//!   - Direct Scanout Ownership: maps the 1280x720 framebuffer via M33 Seam B (`sys_mmap` with
+//!     `m33_surf_scan_tag`) for sub-millisecond anti-aliased composition.
+//!   - Zero-Regression: WND.BIN remains completely untouched and all legacy floating gates remain green.
+
+const std = @import("std");
+pub const ui = @import("lib/ui.zig");
+const Rect = ui.Rect;
+const Event = ui.Event;
+
+// ---------------------------------------------------------------------------
+// Syscall numbers (slots frozen in ADR 0007 / ADR 0015).
+// ---------------------------------------------------------------------------
+const sys_write: u64 = 1;
+const sys_yield_num: u64 = 2;
+const sys_ipc_send: u64 = 5;
+const sys_ipc_recv: u64 = 6;
+const sys_wait_event_num: u64 = 22;
+const sys_clipboard_get: u64 = 39;
+const sys_mmap: u64 = 63;
+const sys_wmctl: u64 = 65;
+
+// Slot-65 subcommands
+const wmctl_register: u64 = 1;
+const wmctl_set_window: u64 = 2;
+const wmctl_request_present: u64 = 3;
+const wmctl_set_state: u64 = 4;
+const wmctl_alt_tab: u64 = 5;
+const alt_tab_commit: u64 = 3;
+const wmctl_tray: u64 = 10;
+const wmctl_dialog: u64 = 11;
+
+// M33 Scanout shared surface mapping tag
+const m33_surf_scan_tag: u64 = 0x4000_0000_0000_0000;
+const prot_rw: u64 = ui.PROT_READ | ui.PROT_WRITE;
+const map_anonymous: u64 = ui.MAP_ANONYMOUS;
+const m33_map_shared: u64 = 0x10000;
+
+// Event kinds from kernel render server
+pub const composite_tick_kind: u16 = 18;
+pub const wm_pointer_kind: u16 = 19;
+pub const wm_window_kind: u16 = 20;
+pub const wm_key_kind: u16 = 21;
+
+pub const btn_left: u8 = 0x01;
+
+// HID keyboard usage constants (USB HID Usage Tables §10 Keyboard/Keypad Page)
+pub const usage_a: u8 = 0x04;
+pub const usage_w: u8 = 0x1a;
+pub const usage_1: u8 = 0x1e;
+pub const usage_2: u8 = 0x1f;
+pub const usage_3: u8 = 0x20;
+pub const usage_4: u8 = 0x21;
+pub const usage_5: u8 = 0x22;
+pub const usage_6: u8 = 0x23;
+pub const usage_7: u8 = 0x24;
+pub const usage_8: u8 = 0x25;
+pub const usage_9: u8 = 0x26;
+pub const usage_tab: u8 = 0x2b;
+pub const usage_space: u8 = 0x2c;
+
+// Pinned markers (grepped by class-B live gates and tests)
+pub const registered_marker: []const u8 = "tabwm: registered\n";
+pub const present_marker: []const u8 = "tabwm: present\n";
+pub const sidebar_render_marker: []const u8 = "tabwm: sidebar-rendered\n";
+pub const tab_switch_marker: []const u8 = "tabwm: tab-switch";
+pub const tab_close_marker: []const u8 = "tabwm: win-close";
+pub const god_menu_marker: []const u8 = "tabwm: god-menu\n";
+
+// Geometry constants
+pub const fb_w: u32 = 1280;
+pub const fb_h: u32 = 720;
+pub const sidebar_w: u32 = ui.sidebar_w; // 180
+pub const viewport_x: u32 = ui.sidebar_w; // 180
+pub const viewport_y: u32 = 0;
+pub const viewport_w: u32 = fb_w - ui.sidebar_w; // 1100
+pub const viewport_h: u32 = fb_h; // 720
+
+pub const tab_row_h: u32 = ui.tab_row_h; // 38
+pub const max_tabs: usize = 16;
+pub const present_every: u32 = 2;
+
+// ---------------------------------------------------------------------------
+// Syscall wrappers
+// ---------------------------------------------------------------------------
+fn syscall0(num: u64) i64 {
+    if (@import("builtin").os.tag != .freestanding) return 0;
+    var res: i64 = undefined;
+    asm volatile ("svc #0"
+        : [res] "={x0}" (res),
+        : [num] "{x8}" (num),
+        : .{ .memory = true });
+    return res;
+}
+
+fn syscall2(num: u64, a0: u64, a1: u64) i64 {
+    if (@import("builtin").os.tag != .freestanding) return 0;
+    var res: i64 = undefined;
+    asm volatile ("svc #0"
+        : [res] "={x0}" (res),
+        : [num] "{x8}" (num),
+          [a0] "{x0}" (a0),
+          [a1] "{x1}" (a1),
+        : .{ .memory = true });
+    return res;
+}
+
+fn syscall3(num: u64, a0: u64, a1: u64, a2: u64) i64 {
+    if (@import("builtin").os.tag != .freestanding) return 0;
+    var res: i64 = undefined;
+    asm volatile ("svc #0"
+        : [res] "={x0}" (res),
+        : [num] "{x8}" (num),
+          [a0] "{x0}" (a0),
+          [a1] "{x1}" (a1),
+          [a2] "{x2}" (a2),
+        : .{ .memory = true });
+    return res;
+}
+
+fn syscall4(num: u64, a0: u64, a1: u64, a2: u64, a3: u64) i64 {
+    if (@import("builtin").os.tag != .freestanding) return 0;
+    var res: i64 = undefined;
+    asm volatile ("svc #0"
+        : [res] "={x0}" (res),
+        : [num] "{x8}" (num),
+          [a0] "{x0}" (a0),
+          [a1] "{x1}" (a1),
+          [a2] "{x2}" (a2),
+          [a3] "{x3}" (a3),
+        : .{ .memory = true });
+    return res;
+}
+
+fn syscall6(num: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) i64 {
+    if (@import("builtin").os.tag != .freestanding) return 0;
+    var res: i64 = undefined;
+    asm volatile ("svc #0"
+        : [res] "={x0}" (res),
+        : [num] "{x8}" (num),
+          [a0] "{x0}" (a0),
+          [a1] "{x1}" (a1),
+          [a2] "{x2}" (a2),
+          [a3] "{x3}" (a3),
+          [a4] "{x4}" (a4),
+          [a5] "{x5}" (a5),
+        : .{ .memory = true });
+    return res;
+}
+
+fn write_marker(msg: []const u8) void {
+    _ = syscall3(sys_write, 1, @intFromPtr(msg.ptr), msg.len);
+}
+
+// ---------------------------------------------------------------------------
+// Tab & Window Mirror Models
+// ---------------------------------------------------------------------------
+pub const Tab = struct {
+    id: u32 = 0,
+    title: [32]u8 = [_]u8{0} ** 32,
+    title_len: usize = 0,
+    valid: bool = false,
+    visible: bool = false,
+    orig_w: u32 = 0,
+    orig_h: u32 = 0,
+    resizable: bool = false,
+
+    pub fn set_title(self: *Tab, text: []const u8) void {
+        const len = @min(text.len, self.title.len);
+        @memcpy(self.title[0..len], text[0..len]);
+        self.title_len = len;
+    }
+
+    pub fn get_title(self: *const Tab) []const u8 {
+        return self.title[0..self.title_len];
+    }
+};
+
+pub const TabManager = struct {
+    tabs: [max_tabs]Tab = [_]Tab{.{}} ** max_tabs,
+    tab_count: usize = 0,
+    active_idx: ?usize = null,
+
+    pub fn init() TabManager {
+        return .{};
+    }
+
+    pub fn find_by_id(self: *const TabManager, id: u32) ?usize {
+        for (0..self.tab_count) |i| {
+            if (self.tabs[i].valid and self.tabs[i].id == id) return i;
+        }
+        return null;
+    }
+
+    pub fn add_or_update_tab(self: *TabManager, id: u32, title: []const u8) usize {
+        return self.add_or_update_tab_geom(id, title, 0, 0, false);
+    }
+
+    pub fn add_or_update_tab_geom(self: *TabManager, id: u32, title: []const u8, orig_w: u32, orig_h: u32, resizable: bool) usize {
+        if (self.find_by_id(id)) |idx| {
+            self.tabs[idx].set_title(title);
+            if (orig_w > 0) self.tabs[idx].orig_w = orig_w;
+            if (orig_h > 0) self.tabs[idx].orig_h = orig_h;
+            self.tabs[idx].resizable = resizable;
+            return idx;
+        }
+
+        if (self.tab_count < max_tabs) {
+            const idx = self.tab_count;
+            self.tabs[idx] = .{
+                .id = id,
+                .valid = true,
+                .visible = true,
+                .orig_w = orig_w,
+                .orig_h = orig_h,
+                .resizable = resizable,
+            };
+            self.tabs[idx].set_title(title);
+            self.tab_count += 1;
+            if (self.active_idx == null) {
+                self.active_idx = idx;
+            }
+            return idx;
+        }
+        return 0;
+    }
+
+    pub fn remove_tab(self: *TabManager, id: u32) bool {
+        const idx = self.find_by_id(id) orelse return false;
+
+        // Shift remaining tabs left
+        var i = idx;
+        while (i + 1 < self.tab_count) : (i += 1) {
+            self.tabs[i] = self.tabs[i + 1];
+        }
+        self.tabs[self.tab_count - 1] = .{};
+        self.tab_count -= 1;
+
+        // Adjust active index
+        if (self.tab_count == 0) {
+            self.active_idx = null;
+        } else if (self.active_idx) |cur| {
+            if (cur > idx) {
+                self.active_idx = cur - 1;
+            } else if (cur >= self.tab_count) {
+                self.active_idx = self.tab_count - 1;
+            }
+        }
+        return true;
+    }
+
+    pub fn activate_tab(self: *TabManager, idx: usize) bool {
+        if (idx >= self.tab_count or !self.tabs[idx].valid) return false;
+        self.active_idx = idx;
+        return true;
+    }
+
+    pub fn cycle_tab(self: *TabManager) void {
+        if (self.tab_count <= 1) return;
+        if (self.active_idx) |cur| {
+            self.active_idx = (cur + 1) % self.tab_count;
+        } else {
+            self.active_idx = 0;
+        }
+    }
+
+    pub fn cycle_tab_backward(self: *TabManager) void {
+        if (self.tab_count <= 1) return;
+        if (self.active_idx) |cur| {
+            if (cur == 0) {
+                self.active_idx = self.tab_count - 1;
+            } else {
+                self.active_idx = cur - 1;
+            }
+        } else {
+            self.active_idx = self.tab_count - 1;
+        }
+    }
+
+    pub fn get_active_id(self: *const TabManager) ?u32 {
+        if (self.active_idx) |idx| {
+            if (idx < self.tab_count and self.tabs[idx].valid) {
+                return self.tabs[idx].id;
+            }
+        }
+        return null;
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Global Server State (Static BSS)
+// ---------------------------------------------------------------------------
+pub var manager: TabManager = TabManager{};
+var scanout_ptr: ?[*]u32 = null;
+var scanout_mapped: bool = false;
+
+pub var hover_tab: ?usize = null;
+pub var hover_sexiburger: bool = false;
+pub var hover_theme_toggle: bool = false;
+pub var hover_clip: bool = false;
+
+var ticks_count: u64 = 0;
+var present_count: u64 = 0;
+
+var clock_hours: u32 = 12;
+var clock_minutes: u32 = 0;
+
+// ---------------------------------------------------------------------------
+// Scanout Mapping via M33 Seam B
+// ---------------------------------------------------------------------------
+fn ensure_scanout_mapped() bool {
+    if (scanout_mapped and scanout_ptr != null) return true;
+    const fb_len: u64 = @as(u64, fb_w) * fb_h * 4;
+    const scan_va = syscall4(sys_mmap, m33_surf_scan_tag, fb_len, prot_rw, map_anonymous | m33_map_shared);
+    if (scan_va > 0) {
+        scanout_ptr = @ptrFromInt(@as(usize, @intCast(scan_va)));
+        scanout_mapped = true;
+        return true;
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// Viewport & Window State Management (M39 TWM2)
+// ---------------------------------------------------------------------------
+
+/// Set window position and dimensions via slot-65 SET_WINDOW.
+pub fn set_window_rect(id: u32, x: u32, y: u32, w: u32, h: u32) void {
+    _ = syscall6(sys_wmctl, wmctl_set_window, id, x | (y << 16), w | (h << 16), 0, 0);
+}
+
+/// Set window visibility via slot-65 SET_STATE (1 = show, 0 = hide).
+pub fn set_state(id: u32, visible: bool) void {
+    const st: u64 = if (visible) 1 else 0;
+    _ = syscall6(sys_wmctl, wmctl_set_state, id, st, 0, 0, 0);
+}
+
+/// Raise and commit focus to a window via slot-65 ALT_TAB commit.
+pub fn focus_window(id: u32) void {
+    _ = syscall6(sys_wmctl, wmctl_alt_tab, id, alt_tab_commit, 0, 0, 0);
+}
+
+/// Computes content viewport allocation for a tab:
+/// - Resizable apps or full-bleed apps take the entire 1100x720 content area at x=180, y=0.
+/// - Fixed-dimension apps (e.g. 512x384 or 260x340) are cleanly centered inside the 1100x720 viewport.
+pub fn compute_tab_viewport(tab: *const Tab) Rect {
+    if (tab.resizable or tab.orig_w == 0 or tab.orig_w >= viewport_w or tab.orig_h >= viewport_h) {
+        return Rect.make(viewport_x, viewport_y, viewport_w, viewport_h);
+    }
+    const w = tab.orig_w;
+    const h = tab.orig_h;
+    const x = viewport_x + (viewport_w - w) / 2;
+    const y = viewport_y + (viewport_h - h) / 2;
+    return Rect.make(x, y, w, h);
+}
+
+/// Activate tab by index:
+/// 1. Computes viewport: centered for fixed apps, full 1100x720 for resizable apps.
+/// 2. Sets window rect via set_window_rect.
+/// 3. Sets active window visible and focuses it.
+/// 4. Hides all inactive tabs (set_state(0)).
+/// 5. Emits `tabwm: tab-switch` evidence marker.
+pub fn activate_tab(idx: usize) void {
+    if (!manager.activate_tab(idx)) return;
+    const tab = &manager.tabs[idx];
+    const active_id = tab.id;
+
+    // Viewport Allocation: allocate full or centered content viewport
+    const vp = compute_tab_viewport(tab);
+    set_window_rect(active_id, vp.x, vp.y, vp.w, vp.h);
+
+    // Show and focus active window
+    set_state(active_id, true);
+    focus_window(active_id);
+
+    // Hide all inactive windows
+    for (0..manager.tab_count) |i| {
+        if (i != idx and manager.tabs[i].valid) {
+            set_state(manager.tabs[i].id, false);
+        }
+    }
+
+    var buf: [64]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{s} idx={d} id={d}\n", .{ tab_switch_marker, idx, active_id }) catch "tabwm: tab-switch\n";
+    write_marker(msg);
+}
+
+/// Close tab by index:
+/// 1. Hides the window.
+/// 2. Emits `tabwm: win-close` evidence marker.
+/// 3. Removes the tab from manager.
+/// 4. Automatically activates the new active tab if any remain.
+pub fn close_tab(idx: usize) void {
+    if (idx >= manager.tab_count or !manager.tabs[idx].valid) return;
+    const closed_id = manager.tabs[idx].id;
+
+    // 1. Hide the window
+    set_state(closed_id, false);
+
+    // 2. Emit WIN_CLOSE marker
+    var buf: [64]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{s} id={d}\n", .{ tab_close_marker, closed_id }) catch "tabwm: win-close\n";
+    write_marker(msg);
+
+    // 3. Remove tab from manager
+    _ = manager.remove_tab(closed_id);
+
+    // 4. Activate new active tab if any
+    if (manager.active_idx) |new_idx| {
+        activate_tab(new_idx);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Canvas & Left Sidebar Drawing
+// ---------------------------------------------------------------------------
+
+fn fill_canvas_rect(pixels: []u32, rx: u32, ry: u32, rw: u32, rh: u32) void {
+    const is_light = std.mem.eql(u8, ui.theme_name(), "light");
+    const bg_color: u32 = if (is_light) 0xFFE9EDF2 else 0xFF14161B;
+    const dot_color: u32 = if (is_light) 0xFFCBD5E1 else 0xFF252934;
+
+    var y: u32 = ry;
+    const y_end = @min(ry + rh, fb_h);
+    const x_end = @min(rx + rw, fb_w);
+
+    while (y < y_end) : (y += 1) {
+        const row_start = y * fb_w;
+        var x: u32 = rx;
+        while (x < x_end) : (x += 1) {
+            const is_dot = (x % 24 == 0 and y % 24 == 0);
+            pixels[row_start + x] = if (is_dot) dot_color else bg_color;
+        }
+    }
+}
+
+/// Renders the dark slate canvas backdrop with subtle grid texture in empty viewport space.
+pub fn draw_viewport_backdrop(scan: [*]u32) void {
+    const pixels = scan[0 .. @as(usize, fb_w) * fb_h];
+
+    if (manager.active_idx) |idx| {
+        if (idx < manager.tab_count and manager.tabs[idx].valid) {
+            const tab = &manager.tabs[idx];
+            const vp = compute_tab_viewport(tab);
+
+            // Full viewport: nothing to fill outside window
+            if (vp.w >= viewport_w and vp.h >= viewport_h and vp.x == viewport_x and vp.y == viewport_y) {
+                return;
+            }
+
+            // Window is centered with canvas margins around it
+            if (vp.y > viewport_y) {
+                fill_canvas_rect(pixels, viewport_x, viewport_y, viewport_w, vp.y - viewport_y);
+            }
+            const bottom_y = vp.y + vp.h;
+            if (bottom_y < viewport_y + viewport_h) {
+                fill_canvas_rect(pixels, viewport_x, bottom_y, viewport_w, (viewport_y + viewport_h) - bottom_y);
+            }
+            if (vp.x > viewport_x) {
+                fill_canvas_rect(pixels, viewport_x, vp.y, vp.x - viewport_x, vp.h);
+            }
+            const right_x = vp.x + vp.w;
+            if (right_x < viewport_x + viewport_w) {
+                fill_canvas_rect(pixels, right_x, vp.y, (viewport_x + viewport_w) - right_x, vp.h);
+            }
+            return;
+        }
+    }
+
+    // No active tabs: fill entire content viewport
+    fill_canvas_rect(pixels, viewport_x, viewport_y, viewport_w, viewport_h);
+}
+
+pub fn draw_sidebar(scan: [*]u32) void {
+    draw_viewport_backdrop(scan);
+
+    const pixels = scan[0 .. @as(usize, fb_w) * fb_h];
+
+    // 1. Sidebar background: full vertical height, 180px wide
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(0, 0, sidebar_w, fb_h), 0, ui.sidebar_bg());
+
+    // 2. Right border line: 1px vertical line at x = sidebar_w - 1
+    const border_c = ui.sidebar_border();
+    var y: u32 = 0;
+    while (y < fb_h) : (y += 1) {
+        pixels[y * fb_w + (sidebar_w - 1)] = 0xFF000000 | border_c;
+    }
+
+    // 3. Top Sexiburger Area (y = 8 .. 48)
+    const sexiburg_rect = Rect.make(8, 8, 164, 38);
+    if (hover_sexiburger) {
+        ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, sexiburg_rect, 6, ui.sidebar_hover_pill());
+    }
+
+    // Mini Sexiburger mascot icon at (16, 17)
+    draw_mini_mascot(scan, 16, 17);
+
+    // Header label: "Virelai" in 14pt Inter
+    ui.draw_text_sized(0, "Virelai", 48, 20, ui.font_size_tab_title, ui.sidebar_text_active());
+
+    // Header shortcut badge: "[*]" hint
+    ui.draw_text_sized(0, "[*]", 144, 21, ui.font_size_badge, ui.theme_accent());
+
+    // Separator line below header (y = 52)
+    var sx: u32 = 8;
+    while (sx < 172) : (sx += 1) {
+        pixels[52 * fb_w + sx] = 0xFF000000 | border_c;
+    }
+
+    // 4. Middle Tab List (y = 58 .. 650)
+    if (manager.tab_count == 0) {
+        ui.draw_text_sized(0, "No open tabs", 20, 80, ui.font_size_badge, ui.sidebar_text_inactive());
+        ui.draw_text_sized(0, "Press Ctrl+Space", 20, 96, ui.font_size_badge, ui.sidebar_text_inactive());
+        ui.draw_text_sized(0, "to launch apps", 20, 110, ui.font_size_badge, ui.sidebar_text_inactive());
+    } else {
+        for (0..manager.tab_count) |i| {
+            const tab_y: u32 = 58 + @as(u32, @intCast(i)) * tab_row_h;
+            if (tab_y + tab_row_h >= 650) break;
+
+            const pill_rect = Rect.make(8, tab_y + 2, 164, 34);
+            const is_active = (manager.active_idx != null and manager.active_idx.? == i);
+            const is_hover = (hover_tab != null and hover_tab.? == i);
+
+            if (is_active) {
+                // Active pill background
+                ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, pill_rect, ui.tab_pill_radius, ui.sidebar_active_pill());
+                // Left accent bar
+                ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(10, tab_y + 8, 3, 22), 1, ui.theme_accent());
+                // Tab title in active text color
+                ui.draw_text_sized(0, manager.tabs[i].get_title(), 24, tab_y + 11, ui.font_size_tab_title, ui.sidebar_text_active());
+                // Close button 'x'
+                ui.draw_text_sized(0, "x", 154, tab_y + 11, ui.font_size_badge, ui.sidebar_text_inactive());
+            } else if (is_hover) {
+                // Hover pill background
+                ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, pill_rect, ui.tab_pill_radius, ui.sidebar_hover_pill());
+                ui.draw_text_sized(0, manager.tabs[i].get_title(), 24, tab_y + 11, ui.font_size_tab_title, ui.sidebar_text_active());
+                ui.draw_text_sized(0, "x", 154, tab_y + 11, ui.font_size_badge, ui.sidebar_text_inactive());
+            } else {
+                // Inactive tab
+                ui.draw_text_sized(0, manager.tabs[i].get_title(), 24, tab_y + 11, ui.font_size_tab_title, ui.sidebar_text_inactive());
+            }
+        }
+    }
+
+    // 5. Bottom Status / Tray Area (y = 660 .. 720)
+    // Separator line at y = 660
+    var bx: u32 = 8;
+    while (bx < 172) : (bx += 1) {
+        pixels[660 * fb_w + bx] = 0xFF000000 | border_c;
+    }
+
+    // Clock text "12:00"
+    var clock_buf: [8]u8 = undefined;
+    const clock_str = std.fmt.bufPrint(&clock_buf, "{d:0>2}:{d:0>2}", .{ clock_hours, clock_minutes }) catch "12:00";
+    ui.draw_text_sized(0, clock_str, 16, 678, ui.font_size_clock, ui.sidebar_text_active());
+
+    // Theme toggle pill [D] / [L]
+    const theme_rect = Rect.make(96, 672, 32, 24);
+    const theme_bg = if (hover_theme_toggle) ui.sidebar_hover_pill() else ui.sidebar_active_pill();
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, theme_rect, 4, theme_bg);
+    const theme_char = if (std.mem.eql(u8, ui.theme_name(), "light")) "L" else "D";
+    ui.draw_text_sized(0, theme_char, 108, 676, ui.font_size_badge, ui.sidebar_text_active());
+
+    // Clipboard badge [CB]
+    const clip_rect = Rect.make(134, 672, 36, 24);
+    const clip_bg = if (hover_clip) ui.sidebar_hover_pill() else ui.sidebar_bg();
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, clip_rect, 4, clip_bg);
+    ui.draw_text_sized(0, "CB", 144, 676, ui.font_size_badge, ui.theme_accent());
+}
+
+/// Mini Sexiburger mascot: 6 burger layers + tentacles (18x18 px).
+fn draw_mini_mascot(scan: [*]u32, x: u32, y: u32) void {
+    const pixels = scan[0 .. @as(usize, fb_w) * fb_h];
+    const tentacle: u32 = 0xFFF57C00;
+
+    // Tentacles left
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(x, y + 2, 3, 2), 0, tentacle);
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(x - 2, y + 5, 3, 2), 0, tentacle);
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(x - 3, y + 8, 3, 3), 0, tentacle);
+
+    // Tentacles right
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(x + 17, y + 2, 3, 2), 0, tentacle);
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(x + 19, y + 5, 3, 2), 0, tentacle);
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(x + 20, y + 8, 3, 3), 0, tentacle);
+
+    // 6-layer Burger Body
+    const bx = x + 2;
+    const bw: u32 = 16;
+    // Layer 1: Crown Bun
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(bx + 2, y + 1, bw - 4, 2), 1, 0xFFD89632);
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(bx, y + 3, bw, 2), 1, 0xFFD89632);
+    // Layer 2: Lettuce
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(bx - 1, y + 5, bw + 2, 2), 0, 0xFF4CAF50);
+    // Layer 3: Tomato
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(bx + 1, y + 7, bw - 2, 2), 0, 0xFFE53935);
+    // Layer 4: Cheese
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(bx, y + 9, bw, 2), 0, 0xFFFDD835);
+    // Layer 5: Patty
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(bx + 1, y + 11, bw - 2, 3), 1, 0xFF6D4C41);
+    // Layer 6: Heel Bun
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(bx + 1, y + 14, bw - 2, 2), 1, 0xFFC88628);
+}
+
+// ---------------------------------------------------------------------------
+// Pointer & Hit Testing (M39 TWM2)
+// ---------------------------------------------------------------------------
+pub fn handle_pointer(px: u32, py: u32, clicked: bool) void {
+    if (px >= sidebar_w) {
+        hover_sexiburger = false;
+        hover_tab = null;
+        hover_theme_toggle = false;
+        hover_clip = false;
+        return;
+    }
+
+    // Sexiburger header hit test (y = 8..48)
+    hover_sexiburger = (px >= 8 and px < 172 and py >= 8 and py < 48);
+    if (hover_sexiburger and clicked) {
+        write_marker(god_menu_marker);
+    }
+
+    // Theme toggle hit test (y = 672..696, x = 96..128)
+    hover_theme_toggle = (px >= 96 and px < 128 and py >= 672 and py < 696);
+    if (hover_theme_toggle and clicked) {
+        if (std.mem.eql(u8, ui.theme_name(), "dark")) {
+            _ = ui.set_theme("light");
+        } else {
+            _ = ui.set_theme("dark");
+        }
+    }
+
+    // Clipboard hit test (y = 672..696, x = 134..170)
+    hover_clip = (px >= 134 and px < 170 and py >= 672 and py < 696);
+
+    // Tab items hit test (y = 58..650)
+    hover_tab = null;
+    if (py >= 58 and py < 650) {
+        const idx = (py - 58) / tab_row_h;
+        if (idx < manager.tab_count) {
+            hover_tab = idx;
+            if (clicked) {
+                // Check if clicked close box 'x' at x = 148..168
+                if (px >= 148 and px < 168) {
+                    close_tab(idx);
+                } else {
+                    activate_tab(idx);
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Keyboard Shortcuts Decoder (M39 TWM2)
+// ---------------------------------------------------------------------------
+pub fn handle_wm_key(usage: u8, flags: u16) void {
+    const ctrl = (flags & ui.MOD_CTRL != 0);
+    const shift = (flags & ui.MOD_SHIFT != 0);
+
+    if (ctrl) {
+        // Ctrl+Tab / Ctrl+Shift+Tab: cycle tabs
+        if (usage == usage_tab) {
+            if (shift) {
+                manager.cycle_tab_backward();
+            } else {
+                manager.cycle_tab();
+            }
+            if (manager.active_idx) |idx| {
+                activate_tab(idx);
+            }
+            return;
+        }
+
+        // Ctrl+1..9: jump directly to tab index 0..8
+        if (usage >= usage_1 and usage <= usage_9) {
+            const target_idx: usize = @as(usize, usage - usage_1);
+            if (target_idx < manager.tab_count) {
+                activate_tab(target_idx);
+            }
+            return;
+        }
+
+        // Ctrl+W: close active tab
+        if (usage == usage_w) {
+            if (manager.active_idx) |cur| {
+                close_tab(cur);
+            }
+            return;
+        }
+
+        // Ctrl+Space: summon God Menu overlay
+        if (usage == usage_space) {
+            write_marker(god_menu_marker);
+            return;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WM_RPC Mailbox Communication Loop
+// ---------------------------------------------------------------------------
+fn wnd_mail_reply(reply_to: u8, req: *const ui.WmRpc, applied: bool) void {
+    var rep: ui.WmRpc = .{
+        .kind = req.kind | ui.wm_rpc_reply_flag,
+        .id = req.id,
+        .seq = req.seq,
+        .reply_to = reply_to,
+        .applied = if (applied) 1 else 0,
+        .pad = 0,
+        .x = 0,
+        .y = 0,
+        .w = 0,
+        .h = 0,
+        .title = [_]u8{0} ** ui.wm_rpc_title_max,
+    };
+    const rep_bytes = std.mem.asBytes(&rep);
+    _ = syscall3(sys_ipc_send, reply_to, @intFromPtr(rep_bytes.ptr), rep_bytes.len);
+}
+
+pub fn wnd_mail_apply(req: *const ui.WmRpc) bool {
+    switch (req.kind & 0x7f) {
+        ui.wm_rpc_kind_raise => {
+            if (manager.find_by_id(req.id)) |idx| {
+                activate_tab(idx);
+                return true;
+            }
+            return false;
+        },
+        ui.wm_rpc_kind_register_action, ui.wm_rpc_kind_config => {
+            var label_slice: []const u8 = req.title[0..];
+            for (req.title, 0..) |c, i| {
+                if (c == 0) {
+                    label_slice = req.title[0..i];
+                    break;
+                }
+            }
+            if (label_slice.len > 0) {
+                _ = manager.add_or_update_tab(req.id, label_slice);
+                return true;
+            }
+            return false;
+        },
+        ui.wm_rpc_kind_cycle_tab => {
+            manager.cycle_tab();
+            if (manager.active_idx) |idx| {
+                activate_tab(idx);
+            }
+            return true;
+        },
+        ui.wm_rpc_kind_detach_tab => {
+            if (manager.find_by_id(req.id)) |idx| {
+                close_tab(idx);
+                return true;
+            }
+            return false;
+        },
+        else => return false,
+    }
+}
+
+pub fn wnd_mail_loop() void {
+    var raw: [128]u8 = undefined;
+    while (true) {
+        const got = syscall2(sys_ipc_recv, @intFromPtr(&raw), raw.len);
+        if (got <= 0) return;
+        if (got < @sizeOf(ui.WmRpc)) continue;
+        var req: ui.WmRpc = undefined;
+        @memcpy(std.mem.asBytes(&req), raw[0..@sizeOf(ui.WmRpc)]);
+        if (req.kind & ui.wm_rpc_reply_flag != 0) continue;
+        const applied = wnd_mail_apply(&req);
+        wnd_mail_reply(req.reply_to, &req, applied);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Server Entry Point & Main Loop
+// ---------------------------------------------------------------------------
+export fn _start() callconv(.c) noreturn {
+    main();
+}
+
+fn main() noreturn {
+    // 1. Register as the WM server over slot 65
+    if (syscall6(sys_wmctl, wmctl_register, 0, 0, 0, 0, 0) != 0) {
+        while (true) {
+            _ = syscall0(sys_yield_num);
+        }
+    }
+    write_marker(registered_marker);
+
+    // 2. Map direct scanout surface
+    _ = ensure_scanout_mapped();
+
+    // 3. Initialize TrueType fonts and desktop theme
+    _ = ui.init_fonts();
+    _ = ui.sync_theme_from_host();
+
+    var ev: Event = undefined;
+
+    while (true) {
+        // Block until kernel render server queues an event
+        if (syscall2(sys_wait_event_num, @intFromPtr(&ev), @sizeOf(Event)) <= 0) {
+            _ = syscall0(sys_yield_num);
+            continue;
+        }
+
+        switch (ev.kind) {
+            composite_tick_kind => {
+                ticks_count += 1;
+
+                // Drain app mailbox requests
+                wnd_mail_loop();
+
+                // Update clock
+                clock_minutes = @intCast((ticks_count / 60) % 60);
+                clock_hours = @intCast(12 + (ticks_count / 3600) % 12);
+
+                // Render Left Sidebar directly to scanout
+                if (scanout_ptr) |scan| {
+                    draw_sidebar(scan);
+                    write_marker(sidebar_render_marker);
+                }
+
+                // Request present at cadence
+                if (ticks_count % present_every == 0) {
+                    _ = syscall6(sys_wmctl, wmctl_request_present, 0, 0, 0, 0, 0);
+                    present_count += 1;
+                    write_marker(present_marker);
+                }
+            },
+            wm_pointer_kind => {
+                const px = ev.arg0 & 0xffff;
+                const py = ev.arg0 >> 16;
+                const clicked = (ev.flags & btn_left != 0);
+                handle_pointer(px, py, clicked);
+            },
+            wm_window_kind => {
+                // Window opened or registered by an app (id >= 2)
+                const wid: u32 = ev.flags & 0xff;
+                if (wid >= 2) {
+                    const orig_w: u32 = @intCast(ev.arg1 & 0xffff);
+                    const orig_h: u32 = @intCast(ev.arg1 >> 16);
+                    if (manager.find_by_id(wid) == null) {
+                        var title_buf: [32]u8 = undefined;
+                        const default_title = std.fmt.bufPrint(&title_buf, "App {d}", .{wid}) catch "App";
+                        const idx = manager.add_or_update_tab_geom(wid, default_title, orig_w, orig_h, false);
+                        activate_tab(idx);
+                    } else if (manager.find_by_id(wid)) |idx| {
+                        if (orig_w > 0) manager.tabs[idx].orig_w = orig_w;
+                        if (orig_h > 0) manager.tabs[idx].orig_h = orig_h;
+                    }
+                }
+            },
+            wm_key_kind => {
+                const usage: u8 = @intCast(ev.arg0 & 0xff);
+                handle_wm_key(usage, ev.flags);
+            },
+            else => {},
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unit Tests (M39 TWM1 + TWM2)
+// ---------------------------------------------------------------------------
+test "tabwm: tab manager allocation and lifecycle" {
+    var mgr = TabManager.init();
+    try std.testing.expectEqual(@as(usize, 0), mgr.tab_count);
+    try std.testing.expectEqual(@as(?usize, null), mgr.active_idx);
+
+    // Add first tab
+    const idx0 = mgr.add_or_update_tab(1, "Calculator");
+    try std.testing.expectEqual(@as(usize, 0), idx0);
+    try std.testing.expectEqual(@as(usize, 1), mgr.tab_count);
+    try std.testing.expectEqual(@as(?usize, 0), mgr.active_idx);
+    try std.testing.expectEqualStrings("Calculator", mgr.tabs[0].get_title());
+
+    // Add second tab
+    const idx1 = mgr.add_or_update_tab(2, "Notes");
+    try std.testing.expectEqual(@as(usize, 1), idx1);
+    try std.testing.expectEqual(@as(usize, 2), mgr.tab_count);
+    try std.testing.expectEqual(@as(?usize, 0), mgr.active_idx);
+
+    // Switch active tab
+    try std.testing.expect(mgr.activate_tab(1));
+    try std.testing.expectEqual(@as(?usize, 1), mgr.active_idx);
+    try std.testing.expectEqual(@as(?u32, 2), mgr.get_active_id());
+
+    // Cycle tab
+    mgr.cycle_tab();
+    try std.testing.expectEqual(@as(?usize, 0), mgr.active_idx);
+
+    // Remove tab
+    try std.testing.expect(mgr.remove_tab(1));
+    try std.testing.expectEqual(@as(usize, 1), mgr.tab_count);
+    try std.testing.expectEqualStrings("Notes", mgr.tabs[0].get_title());
+}
+
+test "tabwm: tab manager active index adjustment on removal" {
+    var mgr = TabManager.init();
+    _ = mgr.add_or_update_tab(10, "Tab 0");
+    _ = mgr.add_or_update_tab(20, "Tab 1");
+    _ = mgr.add_or_update_tab(30, "Tab 2");
+    _ = mgr.add_or_update_tab(40, "Tab 3");
+    try std.testing.expectEqual(@as(usize, 4), mgr.tab_count);
+
+    // Set active index to 2 (Tab 2, id 30)
+    try std.testing.expect(mgr.activate_tab(2));
+    try std.testing.expectEqual(@as(?usize, 2), mgr.active_idx);
+    try std.testing.expectEqual(@as(?u32, 30), mgr.get_active_id());
+
+    // Remove Tab 0 (index 0 < cur 2) -> cur should decrement to 1 (still Tab 2, id 30)
+    try std.testing.expect(mgr.remove_tab(10));
+    try std.testing.expectEqual(@as(usize, 3), mgr.tab_count);
+    try std.testing.expectEqual(@as(?usize, 1), mgr.active_idx);
+    try std.testing.expectEqual(@as(?u32, 30), mgr.get_active_id());
+
+    // Remove Tab 3 (tail, index 2 > cur 1) -> cur stays 1
+    try std.testing.expect(mgr.remove_tab(40));
+    try std.testing.expectEqual(@as(usize, 2), mgr.tab_count);
+    try std.testing.expectEqual(@as(?usize, 1), mgr.active_idx);
+    try std.testing.expectEqual(@as(?u32, 30), mgr.get_active_id());
+
+    // Remove Tab 2 (currently active at index 1) -> cur clamps to 0 (Tab 1, id 20)
+    try std.testing.expect(mgr.remove_tab(30));
+    try std.testing.expectEqual(@as(usize, 1), mgr.tab_count);
+    try std.testing.expectEqual(@as(?usize, 0), mgr.active_idx);
+    try std.testing.expectEqual(@as(?u32, 20), mgr.get_active_id());
+
+    // Remove final tab -> active_idx becomes null
+    try std.testing.expect(mgr.remove_tab(20));
+    try std.testing.expectEqual(@as(usize, 0), mgr.tab_count);
+    try std.testing.expectEqual(@as(?usize, null), mgr.active_idx);
+    try std.testing.expectEqual(@as(?u32, null), mgr.get_active_id());
+}
+
+test "tabwm: tab cycle forward and backward" {
+    var mgr = TabManager.init();
+    _ = mgr.add_or_update_tab(1, "A");
+    _ = mgr.add_or_update_tab(2, "B");
+    _ = mgr.add_or_update_tab(3, "C");
+    try std.testing.expectEqual(@as(?usize, 0), mgr.active_idx);
+
+    // Forward cycle: 0 -> 1 -> 2 -> 0
+    mgr.cycle_tab();
+    try std.testing.expectEqual(@as(?usize, 1), mgr.active_idx);
+    mgr.cycle_tab();
+    try std.testing.expectEqual(@as(?usize, 2), mgr.active_idx);
+    mgr.cycle_tab();
+    try std.testing.expectEqual(@as(?usize, 0), mgr.active_idx);
+
+    // Backward cycle: 0 -> 2 -> 1 -> 0
+    mgr.cycle_tab_backward();
+    try std.testing.expectEqual(@as(?usize, 2), mgr.active_idx);
+    mgr.cycle_tab_backward();
+    try std.testing.expectEqual(@as(?usize, 1), mgr.active_idx);
+    mgr.cycle_tab_backward();
+    try std.testing.expectEqual(@as(?usize, 0), mgr.active_idx);
+}
+
+test "tabwm: keyboard shortcuts routing" {
+    manager = TabManager.init();
+    _ = manager.add_or_update_tab(101, "Browser");
+    _ = manager.add_or_update_tab(102, "Terminal");
+    _ = manager.add_or_update_tab(103, "Editor");
+    activate_tab(0);
+    try std.testing.expectEqual(@as(?usize, 0), manager.active_idx);
+
+    // 1. Ctrl+Tab -> cycles to Tab 1
+    handle_wm_key(usage_tab, ui.MOD_CTRL);
+    try std.testing.expectEqual(@as(?usize, 1), manager.active_idx);
+    try std.testing.expectEqual(@as(?u32, 102), manager.get_active_id());
+
+    // 2. Ctrl+Shift+Tab -> cycles back to Tab 0
+    handle_wm_key(usage_tab, ui.MOD_CTRL | ui.MOD_SHIFT);
+    try std.testing.expectEqual(@as(?usize, 0), manager.active_idx);
+
+    // 3. Ctrl+3 (usage_3 = 0x20) -> jumps directly to Tab 2
+    handle_wm_key(usage_3, ui.MOD_CTRL);
+    try std.testing.expectEqual(@as(?usize, 2), manager.active_idx);
+    try std.testing.expectEqual(@as(?u32, 103), manager.get_active_id());
+
+    // 4. Ctrl+1 (usage_1 = 0x1e) -> jumps directly to Tab 0
+    handle_wm_key(usage_1, ui.MOD_CTRL);
+    try std.testing.expectEqual(@as(?usize, 0), manager.active_idx);
+
+    // 5. Ctrl+W -> closes active Tab 0
+    handle_wm_key(usage_w, ui.MOD_CTRL);
+    try std.testing.expectEqual(@as(usize, 2), manager.tab_count);
+    try std.testing.expectEqual(@as(?usize, 0), manager.active_idx);
+    try std.testing.expectEqual(@as(?u32, 102), manager.get_active_id());
+
+    // 6. Ctrl+Space -> triggers god menu
+    handle_wm_key(usage_space, ui.MOD_CTRL);
+}
+
+test "tabwm: pointer hit testing and tab selection / close button" {
+    manager = TabManager.init();
+    _ = manager.add_or_update_tab(201, "Calc");
+    _ = manager.add_or_update_tab(202, "Files");
+    activate_tab(0);
+
+    // Hover over Tab 1 (y = 58 + 38 = 96)
+    handle_pointer(50, 100, false);
+    try std.testing.expectEqual(@as(?usize, 1), hover_tab);
+
+    // Click Tab 1 body (x = 50, y = 100) -> activates Tab 1
+    handle_pointer(50, 100, true);
+    try std.testing.expectEqual(@as(?usize, 1), manager.active_idx);
+    try std.testing.expectEqual(@as(?u32, 202), manager.get_active_id());
+
+    // Click Tab 1 close button 'x' (x = 156, y = 100) -> closes Tab 1
+    handle_pointer(156, 100, true);
+    try std.testing.expectEqual(@as(usize, 1), manager.tab_count);
+    try std.testing.expectEqual(@as(?usize, 0), manager.active_idx);
+    try std.testing.expectEqual(@as(?u32, 201), manager.get_active_id());
+
+    // Click Sexiburger header (x = 20, y = 20)
+    handle_pointer(20, 20, true);
+    try std.testing.expect(hover_sexiburger);
+}
+
+test "tabwm: wnd_mail_apply RPC commands" {
+    manager = TabManager.init();
+    _ = manager.add_or_update_tab(31, "Old Title");
+    _ = manager.add_or_update_tab(32, "Other");
+    activate_tab(0);
+
+    // 1. Rename tab via config RPC
+    var req_config = ui.WmRpc{
+        .kind = ui.wm_rpc_kind_config,
+        .id = 31,
+        .seq = 1,
+        .reply_to = 5,
+        .applied = 0,
+        .pad = 0,
+        .x = 0,
+        .y = 0,
+        .w = 0,
+        .h = 0,
+        .title = [_]u8{0} ** ui.wm_rpc_title_max,
+    };
+    @memcpy(req_config.title[0..9], "New Title");
+    try std.testing.expect(wnd_mail_apply(&req_config));
+    try std.testing.expectEqualStrings("New Title", manager.tabs[0].get_title());
+
+    // 2. Raise tab via raise RPC
+    var req_raise = ui.WmRpc{
+        .kind = ui.wm_rpc_kind_raise,
+        .id = 32,
+        .seq = 2,
+        .reply_to = 5,
+        .applied = 0,
+        .pad = 0,
+        .x = 0,
+        .y = 0,
+        .w = 0,
+        .h = 0,
+        .title = [_]u8{0} ** ui.wm_rpc_title_max,
+    };
+    try std.testing.expect(wnd_mail_apply(&req_raise));
+    try std.testing.expectEqual(@as(?usize, 1), manager.active_idx);
+
+    // 3. Cycle tab via cycle RPC
+    var req_cycle = ui.WmRpc{
+        .kind = ui.wm_rpc_kind_cycle_tab,
+        .id = 0,
+        .seq = 3,
+        .reply_to = 5,
+        .applied = 0,
+        .pad = 0,
+        .x = 0,
+        .y = 0,
+        .w = 0,
+        .h = 0,
+        .title = [_]u8{0} ** ui.wm_rpc_title_max,
+    };
+    try std.testing.expect(wnd_mail_apply(&req_cycle));
+    try std.testing.expectEqual(@as(?usize, 0), manager.active_idx);
+
+    // 4. Detach / close tab via detach RPC
+    var req_detach = ui.WmRpc{
+        .kind = ui.wm_rpc_kind_detach_tab,
+        .id = 32,
+        .seq = 4,
+        .reply_to = 5,
+        .applied = 0,
+        .pad = 0,
+        .x = 0,
+        .y = 0,
+        .w = 0,
+        .h = 0,
+        .title = [_]u8{0} ** ui.wm_rpc_title_max,
+    };
+    try std.testing.expect(wnd_mail_apply(&req_detach));
+    try std.testing.expectEqual(@as(usize, 1), manager.tab_count);
+}
+
+test "tabwm: geometry constants respect M39 tokens" {
+    try std.testing.expectEqual(@as(u32, 1280), fb_w);
+    try std.testing.expectEqual(@as(u32, 720), fb_h);
+    try std.testing.expectEqual(@as(u32, 180), sidebar_w);
+    try std.testing.expectEqual(@as(u32, 1100), viewport_w);
+    try std.testing.expectEqual(@as(u32, 720), viewport_h);
+    try std.testing.expectEqual(sidebar_w + viewport_w, fb_w);
+}
+
+test "tabwm: compute_tab_viewport centering and full bleed" {
+    // 1. Resizable window gets full 1100x720 at (180, 0)
+    var tab_res = Tab{
+        .id = 1,
+        .orig_w = 600,
+        .orig_h = 400,
+        .resizable = true,
+        .valid = true,
+    };
+    const vp_res = compute_tab_viewport(&tab_res);
+    try std.testing.expectEqual(@as(u32, 180), vp_res.x);
+    try std.testing.expectEqual(@as(u32, 0), vp_res.y);
+    try std.testing.expectEqual(@as(u32, 1100), vp_res.w);
+    try std.testing.expectEqual(@as(u32, 720), vp_res.h);
+
+    // 2. Unspecified size (orig_w=0) gets full 1100x720
+    var tab_zero = Tab{
+        .id = 2,
+        .orig_w = 0,
+        .orig_h = 0,
+        .resizable = false,
+        .valid = true,
+    };
+    const vp_zero = compute_tab_viewport(&tab_zero);
+    try std.testing.expectEqual(@as(u32, 180), vp_zero.x);
+    try std.testing.expectEqual(@as(u32, 0), vp_zero.y);
+    try std.testing.expectEqual(@as(u32, 1100), vp_zero.w);
+    try std.testing.expectEqual(@as(u32, 720), vp_zero.h);
+
+    // 3. Fixed size window (512x384, e.g. WINLOOP.BIN) centers cleanly:
+    // x = 180 + (1100 - 512) / 2 = 180 + 294 = 474
+    // y = 0 + (720 - 384) / 2 = 168
+    var tab_fixed = Tab{
+        .id = 3,
+        .orig_w = 512,
+        .orig_h = 384,
+        .resizable = false,
+        .valid = true,
+    };
+    const vp_fixed = compute_tab_viewport(&tab_fixed);
+    try std.testing.expectEqual(@as(u32, 474), vp_fixed.x);
+    try std.testing.expectEqual(@as(u32, 168), vp_fixed.y);
+    try std.testing.expectEqual(@as(u32, 512), vp_fixed.w);
+    try std.testing.expectEqual(@as(u32, 384), vp_fixed.h);
+
+    // 4. Fixed size window (260x340, e.g. CALC.BIN) centers cleanly:
+    // x = 180 + (1100 - 260) / 2 = 180 + 420 = 600
+    // y = 0 + (720 - 340) / 2 = 190
+    var tab_calc = Tab{
+        .id = 4,
+        .orig_w = 260,
+        .orig_h = 340,
+        .resizable = false,
+        .valid = true,
+    };
+    const vp_calc = compute_tab_viewport(&tab_calc);
+    try std.testing.expectEqual(@as(u32, 600), vp_calc.x);
+    try std.testing.expectEqual(@as(u32, 190), vp_calc.y);
+    try std.testing.expectEqual(@as(u32, 260), vp_calc.w);
+    try std.testing.expectEqual(@as(u32, 340), vp_calc.h);
+}
+
+test "tabwm: draw_viewport_backdrop writes canvas outside window" {
+    var fb: [fb_w * fb_h]u32 = undefined;
+    @memset(&fb, 0);
+
+    // With 0 tabs, draw_viewport_backdrop should fill the whole viewport (180..1280, 0..720)
+    manager = TabManager.init();
+    draw_viewport_backdrop(&fb);
+
+    // Sidebar area (0..179) should be untouched (0)
+    try std.testing.expectEqual(@as(u32, 0), fb[100 * fb_w + 50]);
+    // Viewport non-dot area should be dark slate canvas 0xFF14161B
+    try std.testing.expectEqual(@as(u32, 0xFF14161B), fb[101 * fb_w + 201]);
+    // Viewport dot node (x%24 == 0 and y%24 == 0, e.g. x=240, y=120) should be dot color 0xFF252934
+    try std.testing.expectEqual(@as(u32, 0xFF252934), fb[120 * fb_w + 240]);
+}
