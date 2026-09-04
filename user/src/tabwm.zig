@@ -56,7 +56,7 @@ const wmctl_dialog: u64 = 11;
 const m33_surf_scan_tag: u64 = 0x4000_0000_0000_0000;
 const prot_rw: u64 = ui.PROT_READ | ui.PROT_WRITE;
 const map_anonymous: u64 = ui.MAP_ANONYMOUS;
-const m33_map_shared: u64 = 0x10;
+const m33_map_shared: u64 = 0x10000;
 
 // Event kinds from kernel render server
 pub const composite_tick_kind: u16 = 18;
@@ -183,6 +183,9 @@ pub const Tab = struct {
     title_len: usize = 0,
     valid: bool = false,
     visible: bool = false,
+    orig_w: u32 = 0,
+    orig_h: u32 = 0,
+    resizable: bool = false,
 
     pub fn set_title(self: *Tab, text: []const u8) void {
         const len = @min(text.len, self.title.len);
@@ -212,8 +215,15 @@ pub const TabManager = struct {
     }
 
     pub fn add_or_update_tab(self: *TabManager, id: u32, title: []const u8) usize {
+        return self.add_or_update_tab_geom(id, title, 0, 0, false);
+    }
+
+    pub fn add_or_update_tab_geom(self: *TabManager, id: u32, title: []const u8, orig_w: u32, orig_h: u32, resizable: bool) usize {
         if (self.find_by_id(id)) |idx| {
             self.tabs[idx].set_title(title);
+            if (orig_w > 0) self.tabs[idx].orig_w = orig_w;
+            if (orig_h > 0) self.tabs[idx].orig_h = orig_h;
+            self.tabs[idx].resizable = resizable;
             return idx;
         }
 
@@ -223,6 +233,9 @@ pub const TabManager = struct {
                 .id = id,
                 .valid = true,
                 .visible = true,
+                .orig_w = orig_w,
+                .orig_h = orig_h,
+                .resizable = resizable,
             };
             self.tabs[idx].set_title(title);
             self.tab_count += 1;
@@ -349,17 +362,34 @@ pub fn focus_window(id: u32) void {
     _ = syscall6(sys_wmctl, wmctl_alt_tab, id, alt_tab_commit, 0, 0, 0);
 }
 
+/// Computes content viewport allocation for a tab:
+/// - Resizable apps or full-bleed apps take the entire 1100x720 content area at x=180, y=0.
+/// - Fixed-dimension apps (e.g. 512x384 or 260x340) are cleanly centered inside the 1100x720 viewport.
+pub fn compute_tab_viewport(tab: *const Tab) Rect {
+    if (tab.resizable or tab.orig_w == 0 or tab.orig_w >= viewport_w or tab.orig_h >= viewport_h) {
+        return Rect.make(viewport_x, viewport_y, viewport_w, viewport_h);
+    }
+    const w = tab.orig_w;
+    const h = tab.orig_h;
+    const x = viewport_x + (viewport_w - w) / 2;
+    const y = viewport_y + (viewport_h - h) / 2;
+    return Rect.make(x, y, w, h);
+}
+
 /// Activate tab by index:
-/// 1. Sizes active application to full 1100x720 viewport (x=180, y=0).
-/// 2. Sets active window visible and focuses it.
-/// 3. Hides all inactive tabs (set_state(0)).
-/// 4. Emits `tabwm: tab-switch` evidence marker.
+/// 1. Computes viewport: centered for fixed apps, full 1100x720 for resizable apps.
+/// 2. Sets window rect via set_window_rect.
+/// 3. Sets active window visible and focuses it.
+/// 4. Hides all inactive tabs (set_state(0)).
+/// 5. Emits `tabwm: tab-switch` evidence marker.
 pub fn activate_tab(idx: usize) void {
     if (!manager.activate_tab(idx)) return;
-    const active_id = manager.tabs[idx].id;
+    const tab = &manager.tabs[idx];
+    const active_id = tab.id;
 
-    // Viewport Allocation: allocate full content viewport (180, 0, 1100, 720)
-    set_window_rect(active_id, viewport_x, viewport_y, viewport_w, viewport_h);
+    // Viewport Allocation: allocate full or centered content viewport
+    const vp = compute_tab_viewport(tab);
+    set_window_rect(active_id, vp.x, vp.y, vp.w, vp.h);
 
     // Show and focus active window
     set_state(active_id, true);
@@ -404,9 +434,68 @@ pub fn close_tab(idx: usize) void {
 }
 
 // ---------------------------------------------------------------------------
-// Left Sidebar Drawing
+// Canvas & Left Sidebar Drawing
 // ---------------------------------------------------------------------------
+
+fn fill_canvas_rect(pixels: []u32, rx: u32, ry: u32, rw: u32, rh: u32) void {
+    const is_light = std.mem.eql(u8, ui.theme_name(), "light");
+    const bg_color: u32 = if (is_light) 0xFFE9EDF2 else 0xFF14161B;
+    const dot_color: u32 = if (is_light) 0xFFCBD5E1 else 0xFF252934;
+
+    var y: u32 = ry;
+    const y_end = @min(ry + rh, fb_h);
+    const x_end = @min(rx + rw, fb_w);
+
+    while (y < y_end) : (y += 1) {
+        const row_start = y * fb_w;
+        var x: u32 = rx;
+        while (x < x_end) : (x += 1) {
+            const is_dot = (x % 24 == 0 and y % 24 == 0);
+            pixels[row_start + x] = if (is_dot) dot_color else bg_color;
+        }
+    }
+}
+
+/// Renders the dark slate canvas backdrop with subtle grid texture in empty viewport space.
+pub fn draw_viewport_backdrop(scan: [*]u32) void {
+    const pixels = scan[0 .. @as(usize, fb_w) * fb_h];
+
+    if (manager.active_idx) |idx| {
+        if (idx < manager.tab_count and manager.tabs[idx].valid) {
+            const tab = &manager.tabs[idx];
+            const vp = compute_tab_viewport(tab);
+
+            // Full viewport: nothing to fill outside window
+            if (vp.w >= viewport_w and vp.h >= viewport_h and vp.x == viewport_x and vp.y == viewport_y) {
+                return;
+            }
+
+            // Window is centered with canvas margins around it
+            if (vp.y > viewport_y) {
+                fill_canvas_rect(pixels, viewport_x, viewport_y, viewport_w, vp.y - viewport_y);
+            }
+            const bottom_y = vp.y + vp.h;
+            if (bottom_y < viewport_y + viewport_h) {
+                fill_canvas_rect(pixels, viewport_x, bottom_y, viewport_w, (viewport_y + viewport_h) - bottom_y);
+            }
+            if (vp.x > viewport_x) {
+                fill_canvas_rect(pixels, viewport_x, vp.y, vp.x - viewport_x, vp.h);
+            }
+            const right_x = vp.x + vp.w;
+            if (right_x < viewport_x + viewport_w) {
+                fill_canvas_rect(pixels, right_x, vp.y, (viewport_x + viewport_w) - right_x, vp.h);
+            }
+            return;
+        }
+    }
+
+    // No active tabs: fill entire content viewport
+    fill_canvas_rect(pixels, viewport_x, viewport_y, viewport_w, viewport_h);
+}
+
 pub fn draw_sidebar(scan: [*]u32) void {
+    draw_viewport_backdrop(scan);
+
     const pixels = scan[0 .. @as(usize, fb_w) * fb_h];
 
     // 1. Sidebar background: full vertical height, 180px wide
@@ -771,11 +860,16 @@ fn main() noreturn {
                 // Window opened or registered by an app (id >= 2)
                 const wid: u32 = ev.flags & 0xff;
                 if (wid >= 2) {
+                    const orig_w: u32 = @intCast(ev.arg1 & 0xffff);
+                    const orig_h: u32 = @intCast(ev.arg1 >> 16);
                     if (manager.find_by_id(wid) == null) {
                         var title_buf: [32]u8 = undefined;
                         const default_title = std.fmt.bufPrint(&title_buf, "App {d}", .{wid}) catch "App";
-                        const idx = manager.add_or_update_tab(wid, default_title);
+                        const idx = manager.add_or_update_tab_geom(wid, default_title, orig_w, orig_h, false);
                         activate_tab(idx);
+                    } else if (manager.find_by_id(wid)) |idx| {
+                        if (orig_w > 0) manager.tabs[idx].orig_w = orig_w;
+                        if (orig_h > 0) manager.tabs[idx].orig_h = orig_h;
                     }
                 }
             },
@@ -1031,4 +1125,82 @@ test "tabwm: geometry constants respect M39 tokens" {
     try std.testing.expectEqual(@as(u32, 1100), viewport_w);
     try std.testing.expectEqual(@as(u32, 720), viewport_h);
     try std.testing.expectEqual(sidebar_w + viewport_w, fb_w);
+}
+
+test "tabwm: compute_tab_viewport centering and full bleed" {
+    // 1. Resizable window gets full 1100x720 at (180, 0)
+    var tab_res = Tab{
+        .id = 1,
+        .orig_w = 600,
+        .orig_h = 400,
+        .resizable = true,
+        .valid = true,
+    };
+    const vp_res = compute_tab_viewport(&tab_res);
+    try std.testing.expectEqual(@as(u32, 180), vp_res.x);
+    try std.testing.expectEqual(@as(u32, 0), vp_res.y);
+    try std.testing.expectEqual(@as(u32, 1100), vp_res.w);
+    try std.testing.expectEqual(@as(u32, 720), vp_res.h);
+
+    // 2. Unspecified size (orig_w=0) gets full 1100x720
+    var tab_zero = Tab{
+        .id = 2,
+        .orig_w = 0,
+        .orig_h = 0,
+        .resizable = false,
+        .valid = true,
+    };
+    const vp_zero = compute_tab_viewport(&tab_zero);
+    try std.testing.expectEqual(@as(u32, 180), vp_zero.x);
+    try std.testing.expectEqual(@as(u32, 0), vp_zero.y);
+    try std.testing.expectEqual(@as(u32, 1100), vp_zero.w);
+    try std.testing.expectEqual(@as(u32, 720), vp_zero.h);
+
+    // 3. Fixed size window (512x384, e.g. WINLOOP.BIN) centers cleanly:
+    // x = 180 + (1100 - 512) / 2 = 180 + 294 = 474
+    // y = 0 + (720 - 384) / 2 = 168
+    var tab_fixed = Tab{
+        .id = 3,
+        .orig_w = 512,
+        .orig_h = 384,
+        .resizable = false,
+        .valid = true,
+    };
+    const vp_fixed = compute_tab_viewport(&tab_fixed);
+    try std.testing.expectEqual(@as(u32, 474), vp_fixed.x);
+    try std.testing.expectEqual(@as(u32, 168), vp_fixed.y);
+    try std.testing.expectEqual(@as(u32, 512), vp_fixed.w);
+    try std.testing.expectEqual(@as(u32, 384), vp_fixed.h);
+
+    // 4. Fixed size window (260x340, e.g. CALC.BIN) centers cleanly:
+    // x = 180 + (1100 - 260) / 2 = 180 + 420 = 600
+    // y = 0 + (720 - 340) / 2 = 190
+    var tab_calc = Tab{
+        .id = 4,
+        .orig_w = 260,
+        .orig_h = 340,
+        .resizable = false,
+        .valid = true,
+    };
+    const vp_calc = compute_tab_viewport(&tab_calc);
+    try std.testing.expectEqual(@as(u32, 600), vp_calc.x);
+    try std.testing.expectEqual(@as(u32, 190), vp_calc.y);
+    try std.testing.expectEqual(@as(u32, 260), vp_calc.w);
+    try std.testing.expectEqual(@as(u32, 340), vp_calc.h);
+}
+
+test "tabwm: draw_viewport_backdrop writes canvas outside window" {
+    var fb: [fb_w * fb_h]u32 = undefined;
+    @memset(&fb, 0);
+
+    // With 0 tabs, draw_viewport_backdrop should fill the whole viewport (180..1280, 0..720)
+    manager = TabManager.init();
+    draw_viewport_backdrop(&fb);
+
+    // Sidebar area (0..179) should be untouched (0)
+    try std.testing.expectEqual(@as(u32, 0), fb[100 * fb_w + 50]);
+    // Viewport non-dot area should be dark slate canvas 0xFF14161B
+    try std.testing.expectEqual(@as(u32, 0xFF14161B), fb[101 * fb_w + 201]);
+    // Viewport dot node (x%24 == 0 and y%24 == 0, e.g. x=240, y=120) should be dot color 0xFF252934
+    try std.testing.expectEqual(@as(u32, 0xFF252934), fb[120 * fb_w + 240]);
 }
