@@ -85,7 +85,8 @@ run_boot() {
     # for the kind-4 stream (claim 0680): paint first, THEN three staged
     # markers each 25 s apart —
     #   probe marker (serial, right after putraw)
-    #   -> --script2 parks 25 s past it, then types "<probe>-settled"
+    #   -> --script2 parks 25 s past it, then types "text clear" + the SAME
+    #      putraw (a REPAINT) + "<probe>-settled"
     #      -> "<probe>-settled" fires the SNAPSHOT REQUEST (the scanout
     #         is long-since composited; OBSERVED: a request keyed on the
     #         probe marker itself streamed a frame from BEFORE the paint
@@ -94,12 +95,26 @@ run_boot() {
     #         lag the paint by construction)
     #   -> --script3 parks 25 s past settled (>= the ~113-chunk stream),
     #      then types "<probe>-done", which --script-expect waits on.
+    # SCROLLOVER SEAM (claim 915, #775 — the M20 tabs probe-decode red):
+    # the request must ALSO lead the paint by less than one screenful of
+    # worker spam. The shell idle loop prints `tasks worker advances=N`
+    # every 64 worker advances (~15 lines/s with SMP secondaries running
+    # ticks), so the 90-row text region turns over every ~6 s; the first
+    # paint is ~27 s stale at request time (795 spam lines per boot —
+    # observed: neither decoded frame contains any probe ink, so the old
+    # "decoder grid alignment" hypothesis is wrong). The script2 REPAINT
+    # re-establishes paint->request order with sub-second lag, and the
+    # `text clear` puts the probe row at the TOP of the frame — the kind-4
+    # stream reads gpu_fb top-band-first with no staging copy, so the top
+    # rows are captured before the spam can scroll them off. Separation by
+    # construction is preserved in both directions: request strictly after
+    # the (re)paint, paint strictly fresh at the request.
     local tag="$1" arg="$2" marker="$3"
     local script="$RUN_DIR/input-$tag.txt"
     local script2="$RUN_DIR/settle-$tag.txt"
     local script3="$RUN_DIR/done-$tag.txt"
     printf 'text clear\ntext putraw %s\necho %s\n' "$arg" "$marker" > "$script"
-    echo "echo $marker-settled" > "$script2"
+    printf 'text clear\ntext putraw %s\necho %s-settled\n' "$arg" "$marker" > "$script2"
     echo "echo $marker-done" > "$script3"
     rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log" "$RUN_DIR"/snap-$tag-*.raw
     set +e
