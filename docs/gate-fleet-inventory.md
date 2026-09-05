@@ -11,9 +11,9 @@
 
 | metric | count |
 |---|---|
-| top-level scripts (`tools/*.sh` + `tools/*.py`) | 139 |
+| top-level scripts (`tools/*.sh` + `tools/*.py`) | 136 |
 | class A (portable / CI) | 9 |
-| class B (VZ hardware gate) | 107 (of which `verify-live-*`: 100) |
+| class B (VZ hardware gate) | 104 (of which `verify-live-*`: 97) |
 | class C (interactive) | 1 |
 | class D (diagnostic) | 9 |
 | tooling (not gates) | 13 |
@@ -21,7 +21,7 @@
 | named in gate-inventory.md or the archive GATE block | 52 |
 | CI-sharded (archive GATE block `cmd=`) | 45 |
 | named in docs/status.md | 29 |
-| **orphans (gate-class, registered nowhere)** | **55** |
+| **orphans (gate-class, registered nowhere)** | **52** |
 
 ## Subdirectory tooling (not gates)
 
@@ -31,7 +31,7 @@
 | `tools/status/` | 6 | multiagent coordination gate + claim tooling (class A) |
 | `tools/context/` | 2 | context snapshot helpers |
 | `tools/ragshit/` | 84 | host-side context engine (developer tooling, not guest software) |
-| `tools/gate/` | 80 | M40 vgate harness + specs (GF2+) |
+| `tools/gate/` | 84 | M40 vgate harness + specs (GF2+) |
 
 ## Orphans
 
@@ -71,10 +71,6 @@ this list only needs to shrink):
 - `verify-live-smp-stress.sh`
 - `verify-live-smp1.sh`
 - `verify-live-snap-guides.sh`
-- `verify-live-sound-app.sh`
-- `verify-live-sound-control.sh`
-- `verify-live-sound-device.sh`
-- `verify-live-sound-playback.sh`
 - `verify-live-tabclick.sh`
 - `verify-live-tabs.sh`
 - `verify-live-tabstrip.sh`
@@ -89,6 +85,7 @@ this list only needs to shrink):
 - `verify-live-wm-ipc.sh`
 - `verify-live-wm1.sh`
 - `verify-live-wm7-gateb.sh`
+- `verify-live-wnd2-mission-control.sh`
 - `verify-live-wnd8-dialog-drain.sh`
 - `verify-live-wnd8-geom-kbd-delete.sh`
 - `verify-live-wnd8-ptr-drag-delete.sh`
@@ -179,10 +176,6 @@ Columns: `just` = justfile recipe of the same name; `inv` = named in
 | `verify-live-smp1.sh` | 158 | B | n | n | n | n | verify-live-smp1.sh -- claim 2369 class-B gate: a USER program runs on a |
 | `verify-live-snake.sh` | 328 | B | y | y | n | y | verify-live-snake.sh -- class-B gate: the VL6 snake game (tests/zc-corpus/ |
 | `verify-live-snap-guides.sh` | 239 | B | n | n | n | n | verify-live-snap-guides.sh — M37 DQ5 window snap guides live proof (issue #837) |
-| `verify-live-sound-app.sh` | 217 | B | n | n | n | n | verify-live-sound-app.sh -- claim 7636 (Milestone 15, Card A3) |
-| `verify-live-sound-control.sh` | 256 | B | n | n | n | n | verify-live-sound-control.sh -- claim 9297 (M15 follow-up) |
-| `verify-live-sound-device.sh` | 177 | B | n | n | n | n | verify-live-sound-device.sh -- claim 6140 (Milestone 15, Card A1) |
-| `verify-live-sound-playback.sh` | 198 | B | n | n | n | n | verify-live-sound-playback.sh -- claim 5877 (Milestone 15, Card A2) |
 | `verify-live-tabclick.sh` | 154 | B | n | n | n | n | verify-live-tabclick.sh — M37 DQ3 tab mouse interaction live proof (issue #839) |
 | `verify-live-tabs.sh` | 181 | B | n | n | n | n | verify-live-tabs.sh -- milestone-twenty card U5 class-B gate |
 | `verify-live-tabstrip.sh` | 169 | B | n | n | n | n | verify-live-tabstrip.sh — M37 DQ2 tab-strip chrome live proof (issue #840) |
@@ -213,6 +206,7 @@ Columns: `just` = justfile recipe of the same name; `inv` = named in
 | `verify-live-wm7-gateb.sh` | 179 | B | n | n | n | n | verify-live-wm7-gateb.sh — M32 WMS7 Gate B live gate (issue #627). |
 | `verify-live-wmctl-register.sh` | 173 | B | n | n | n | y | verify-live-wmctl-register.sh -- M32 WMS2 (issue #622) class-B gate: the |
 | `verify-live-wnd-server.sh` | 178 | B | n | n | n | y | verify-live-wnd-server.sh -- M32 WMS3 (issue #623) class-B gate: the |
+| `verify-live-wnd2-mission-control.sh` | 257 | B | n | n | n | n | verify-live-wnd2-mission-control.sh -- WM2 mission-control overview |
 | `verify-live-wnd4-chrome.sh` | 238 | B | n | n | n | y | verify-live-wnd4-chrome.sh -- M32 WMS4 (issue #624) class-B gate: the |
 | `verify-live-wnd5-gate2-policy.sh` | 238 | B | n | n | n | y | verify-live-wnd5-gate2-policy.sh -- M32 WMS5 Gate 2 (issue #625, claim |
 | `verify-live-wnd5-geometry.sh` | 179 | B | n | n | n | y | verify-live-wnd5-geometry.sh -- M32 WMS5 (issue #625) class-B gate: the |
