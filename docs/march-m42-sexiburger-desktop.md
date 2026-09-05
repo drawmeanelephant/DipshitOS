@@ -97,3 +97,60 @@ host-side scaling. Sizes: 28 (TABWM sidebar button), 24 (God Menu header),
    only, the M39 rule).
 5. **One event per real change**: the kernel answers a size-changing
    SET_WINDOW with exactly one WIN_RESIZE; TABWM never repeats a proposal.
+
+## UX hardening (2026-09-05)
+
+A four-fix user-friendliness tranche on the TABWM area (claim issue #1008;
+ADR 0018 documents the ABI seam):
+
+1. **Real tab-close semantics** (`user/src/tabwm.zig` + `kernel/src/`):
+   `close_tab` now closes the window through the kernel's own release
+   primitive via the new slot-65 `WMCTL_WIN_CLOSE` (cmd 13, WM-seat-only,
+   ADR 0018 D2) — the kernel applies `user_close`, which pushes the REAL
+   `WIN_CLOSE` event to the owning process (lib/tabapp.zig dispatches it
+   to a clean exit) and fans the released mirror back (fix 2). An EL0
+   process cannot write another process's event queue and the IPC
+   mailbox is a separate FIFO no tabapp drains, so the WM-owned close
+   MUST ride the kernel. A refused seam falls back to hide-only, marked
+   honestly in the marker line (`tabwm: win-close id=N closed=0|1`).
+2. **Released-window mirror** (`kernel/src/driving_award.zig` +
+   `kernel/src/wm_server.zig`): `wm_window_hook`/`fan_window` gained an
+   additive `released: bool` parameter, encoded as kind-20 flags **bit 13**
+   (every existing bit unchanged; WND.BIN's decoder reads only bits
+   8/9/10-11/12). `remove_user_at` — the shared release primitive behind
+   `user_close` and the exit path's `close_owner` — fans ONE
+   `visible=false, released=true` mirror from the already-copied
+   `removed_win` state; the pre-removal fan in `user_close` is deleted, so
+   every release path informs the WM exactly once. `user/src/wnd.zig` is
+   untouched.
+3. **Mirror-synced tab lifecycle** (`user/src/tabwm.zig`): the inline
+   `wm_window_kind` handler in `main()` is extracted into the testable
+   `handle_window_mirror` — released removes the tab (no WIN_CLOSE echo,
+   no set_state of our own; the next tab activates if the removed one was
+   active), plain hides are ignored (the tab list is ours), visible upserts
+   geometry, and a 17th window is ignored instead of hijacking tab 0.
+4. **Discoverability**: a "+ New tab" pill renders directly below the last
+   tab (and in the empty state), clickable with hover, firing the new
+   pinned `tabwm: new-tab` marker and summoning the Sexiburger launcher;
+   Ctrl+T (HID 0x17) fires the same path. The pill is hit-tested BEFORE the
+   generic tab-row mapping. The overlay now distinguishes "no apps
+   installed" (empty manifest) from "no matching apps" (filter with no
+   hits), and the sidebar empty state names both Ctrl+Space and '+'.
+
+Class-A evidence: `zig build`, `zig build test`, and
+`bash tools/verify-unit-tests.sh` all green (exit 0), including 8 new
+tabwm "M42 UX" tests and the wm_server/driving_award released-mirror
+tests (`artifacts/2026-09-05-tabwm-ux-hardening/`).
+
+Class-B evidence (2026-09-05, this worktree): NEW gate
+`tools/gate/specs/live-tabwm-close.spec` — **PASS 1/1** on VZ. One
+headless boot: TABWM start → CALC.BIN (tab-aware full viewport) → an
+injected pointer click on the active tab's close box →
+`tabwm: win-close id=2 closed=1` (the KERNEL applied the close) →
+`calc: win_close` + `calc: exiting 43` (the app received the real
+WIN_CLOSE and exited) → `dui: windows=4` with no user-kind row (the
+kernel registry released the window). Live regressions on the same
+tree: `live-tabwm` PASS 1/1, `live-tabwm-fullscreen` PASS 2/2.
+
+The default-manager flip (`settings set wm tabwm`) remains opt-in —
+the documented human decision.
