@@ -106,3 +106,75 @@ real hardware: injected close-box click → `tabwm: win-close id=2
 closed=1` (the kernel applied cmd 13) → `calc: win_close` →
 `calc: exiting 43` → `dui: windows=4` (registry released). Live
 regressions: `live-tabwm` PASS 1/1, `live-tabwm-fullscreen` PASS 2/2.
+
+## Addendum — TABWM unsaved-state honesty + close feedback + Alt-Tab parity (2026-09-05, round 2, claim #1011)
+
+Round 2 of the M42 UX-hardening tranche closes three remaining TABWM
+honesty gaps WITHOUT ANY NEW KERNEL SURFACE: everything rides the
+existing seams — the slot-65 DIALOG (cmd 11) unsaved actions 3–6 (the
+WMS8 Gate 4 primitives WND.BIN already issues), the slot-65 ALT_TAB
+(cmd 5) commit (the WMS6 Gate A seam), and the kind-20 mirror's unsaved
+bit (flags bit 12, already fanned by `user_set_unsaved` and
+`wm_server.fan_window` — TABWM simply decoded it, both upsert paths of
+`handle_window_mirror`). `user/src/wnd.zig` and `user/src/tabapp.zig`
+remain untouched; kernel files untouched this round.
+
+- **Unsaved-state honesty.** Every TABWM close entry point (close-'x'
+  pointer click, Ctrl+W, the detach RPC) routes through one decision
+  function, `request_close_tab`: a clean tab closes exactly as before;
+  a dirty tab (mirror bit 12) instead opens the unsaved-changes dialog
+  (DIALOG action 3, a2 = the tab's window id) and waits. While the
+  dialog is open it is MODAL in TABWM: pointer clicks hit-test the
+  shared `wnd_core.unsaved_dialog_choice_at` rects FIRST and are
+  consumed (parity by construction with the kernel's own
+  `unsaved_dialog_click`), Escape = cancel / Enter = save, every other
+  key is swallowed so no chord can mutate the tab list while a close
+  decision is pending, and the Sexiburger overlay refuses to summon.
+- **TABWM self-paints the dialog.** TABWM composes the FULL scanout
+  every tick (sidebar + canvas backdrop), so its compose overdraws the
+  kernel's own dialog blit from `driving_award.paint_scene` — the
+  kernel-painted modal would never be visible under TABWM. TABWM
+  therefore paints the dialog itself with the SAME 200x100 centered
+  geometry and palette (0x1e293b surface, 0xf59e0b 2px border,
+  0x10b981/0xef4444/0x64748b buttons — the shared `wnd_core` rect
+  constants), so what the user sees matches WND's dialog exactly while
+  the kernel still applies the decisions.
+- **The discard-vs-save asymmetry.** `apply_unsaved_choice` is
+  deliberately asymmetric, matching what each choice actually does
+  kernel-side: DISCARD relies on the kernel's `user_close` INSIDE
+  DIALOG action 5 — the owner gets the real WIN_CLOSE and exits, and
+  the released kind-20 mirror echo (D1) removes the tab and activates
+  the next; TABWM runs no local close. SAVE closes the tab via
+  `close_tab`'s WMCTL_WIN_CLOSE (cmd 13, D2) after DIALOG action 4.
+  Observed owner behavior (2026-09-05 hardware, NOTEPAD): the app
+  treats WIN_UNSAVED as save-and-exit — it saves and exits 43 by
+  itself, so cmd 13 lands while the window is still registered (honest
+  `closed=1`) and the kernel's WIN_CLOSE push goes unconsumed. Either
+  owner behavior converges: an app that kept running after its save
+  would be closed by the WIN_CLOSE, and the released mirror echo is
+  absorbed as a no-op (the tab is already removed). Cancel clears the
+  dialog; the tab stays.
+- **Close feedback.** `close_tab` records the ROW SLOT the closed tab
+  occupied (position, not id — rows shift) plus an ~18-composite-tick
+  countdown; `draw_sidebar` overlays an accent band on that slot while
+  it is live (muted when the kernel refused the close and only a hide
+  ran — the `closed=0` case). Pure helper `close_flash_active` keeps
+  it unit-testable without a framebuffer.
+- **Alt-Tab parity.** The kind-21 stream carries raw chords while the
+  WM owns input, so TABWM now handles Alt+Tab / Alt+Shift+Tab (MOD_ALT
+  + Tab) with WND's WMS6 Gate A semantics: the WM proposes the target
+  through the pure `alt_tab_next` policy helper (the tab-list mirror of
+  WND's `next_alt_tab_target` — next after the active row, wrapping,
+  null under two tabs, shift inverts) and the kernel applies focus +
+  raise via the ALT_TAB commit; `focus` auto-show re-reveals the
+  TABWM-hidden target. TABWM does NOT call `activate_tab` on this path
+  (the commit is the kernel-side truth; the target keeps its applied
+  viewport) — it updates the local active row and emits the additive
+  `tabwm: alt-tab id=N` marker. Ctrl+Tab / Ctrl+Shift+Tab are
+  refactored through the SAME helper, so the two chords agree by
+  construction.
+- **Additive markers** (all pinned by class-A tests, grepped by the new
+  class-B specs): `tabwm: unsaved-dialog id=N`, `tabwm: unsaved-save`,
+  `tabwm: unsaved-discard`, `tabwm: unsaved-cancel`,
+  `tabwm: alt-tab id=N`. The seven round-1 `tabwm:` markers are
+  byte-identical.

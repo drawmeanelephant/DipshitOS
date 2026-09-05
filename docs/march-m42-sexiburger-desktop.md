@@ -154,3 +154,78 @@ tree: `live-tabwm` PASS 1/1, `live-tabwm-fullscreen` PASS 2/2.
 
 The default-manager flip (`settings set wm tabwm`) remains opt-in —
 the documented human decision.
+
+## UX hardening round 2 (2026-09-05)
+
+A three-feature honesty tranche on the TABWM area (claim issue #1011;
+ADR 0018 addendum documents the design). NO new kernel surface — the
+slot-65 DIALOG (cmd 11) actions 3–6, the slot-65 ALT_TAB (cmd 5)
+commit, and the kind-20 mirror's unsaved bit (flags bit 12) are all
+reused; `wnd.zig`/`tabapp.zig`/kernel files untouched:
+
+1. **Unsaved-state honesty** (`user/src/tabwm.zig`): TABWM decodes the
+   kernel's unsaved bit into a per-tab dirty flag (both mirror upsert
+   paths) and renders a 4x4 accent dot on dirty tab pills (active,
+   hover, and inactive branches). EVERY close entry point — the
+   close-'x' click, Ctrl+W, the detach RPC — routes through one
+   decision function (`request_close_tab`): clean tabs close exactly as
+   in round 1; dirty tabs open the unsaved-changes dialog (DIALOG
+   action 3, target = the tab's window id) instead. The dialog is
+   modal: clicks hit-test the shared `wnd_core.unsaved_dialog_choice_at`
+   rects first and are consumed, Escape = cancel / Enter = save, other
+   keys are swallowed, and the Sexiburger overlay refuses to summon
+   over it. TABWM self-paints the dialog (its full-scanout compose
+   overdraws the kernel's own blit) with the kernel's exact 200x100
+   geometry + palette. The save/discard paths are deliberately
+   asymmetric (ADR 0018 addendum): save closes the tab via
+   WMCTL_WIN_CLOSE after DIALOG 4 (observed owner behavior: NOTEPAD
+   treats WIN_UNSAVED as save-and-exit, so cmd 13 lands while the
+   window is still registered and the WIN_CLOSE push goes unconsumed);
+   discard relies on the kernel's `user_close` inside
+   DIALOG 5 and lets the released mirror echo remove the tab.
+2. **Close-feedback flash** (`user/src/tabwm.zig`): `close_tab` records
+   the closed tab's ROW SLOT + an 18-composite-tick countdown;
+   `draw_sidebar` overlays an accent band on that slot while live
+   (muted when the kernel refused the close — the `closed=0` case).
+   Pure helper `close_flash_active` is unit-tested without a
+   framebuffer.
+3. **Alt-Tab parity** (`user/src/tabwm.zig`): Alt+Tab / Alt+Shift+Tab
+   (kind-21 raw chords, MOD_ALT + Tab) propose the target via the pure
+   `alt_tab_next` policy helper — the SAME helper Ctrl+Tab /
+   Ctrl+Shift+Tab now route through — and commit through the kernel's
+   ALT_TAB seam (focus + raise; focus auto-show re-reveals the hidden
+   target). Additive marker `tabwm: alt-tab id=N`.
+
+Class-A evidence (2026-09-05, this worktree): `zig build` exit 0
+(TABWM.BIN builds with the new wnd_core import);
+`zig build test --summary all` exit 0;
+`zig test --dep wnd_core -Mroot=user/src/tabwm.zig
+-Mwnd_core=kernel/src/wnd_core.zig` exit 0 — **75/75 tests passed**
+(11 new `M42 UX r2` tests: bit-12 mirror set/clear/release, dirty-close
+dialog intercept, save/cancel/discard choice semantics incl. the
+discard mirror echo, wnd_core button hit-test parity, alt_tab_next
+policy, Alt+Tab chord handling, close_flash_active, dialog modal keys,
+dialog modal pointer, overlay-summon modal guard, marker pins);
+`bash tools/verify-unit-tests.sh` exit 0;
+`zig fmt --check user/src/tabwm.zig` PASS. Full log:
+`artifacts/2026-09-05-tabwm-unsaved-alttab/`.
+
+Class-B evidence (2026-09-05, live VZ, this worktree): NEW gates
+`tools/gate/specs/live-tabwm-unsaved.spec` — **PASS 2/2** (save boot +
+discard boot: `dui unsaved 2 1` dirties NOTEPAD headless; the injected
+close-box click is INTERCEPTED — `tabwm: unsaved-dialog id=2`, no
+close; the Save click drives `tabwm: unsaved-save` → `notepad: saved
+ok` → `tabwm: win-close id=2 closed=1` → `notepad: win_unsaved` →
+`notepad: exiting 43` — observed save-path semantics: NOTEPAD treats
+WIN_UNSAVED as save-and-exit, so the kernel's WIN_CLOSE push goes
+unconsumed and `notepad: win_close` belongs to the discard path; the
+Don't Save click drives `tabwm: unsaved-discard` → `notepad: win_close`
+→ `notepad: exiting 43` with `dui: windows=4` (registry released) and
+NO save marker) and `tools/gate/specs/live-tabwm-alttab.spec` —
+**PASS 1/1** (one boot, CALC+NOTEPAD tabs, one real `alt-tab` chord →
+`tabwm: alt-tab id=2`, kernel ` alt_tab=` counter moved, `dui:
+windows=6 focused=2` — CALC holds kernel focus after the commit;
+`notepad: open id=3` is asserted via the kernel's `open: id=3
+owner=3` + TABWM's `tabwm: tab-switch idx=1 id=3` because NOTEPAD's
+own open marker hardcodes id=2). Class A 75/75; logs:
+`artifacts/2026-09-05-tabwm-unsaved-alttab/` + `artifacts/live-tabwm-{unsaved,alttab}-*`.
