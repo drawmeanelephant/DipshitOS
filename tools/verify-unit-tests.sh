@@ -29,7 +29,9 @@ zig build test --summary all
 # Direct runs keep the coverage without the noise. (M42 SX1, issue #982)
 echo "=== verify-unit-tests: app-level test roots (direct zig test) ==="
 zig test user/src/lib/tabapp.zig
-zig test user/src/tabwm.zig
+# M42 UX r2 (claim #1011): TABWM imports the shared wnd_core dialog rule,
+# so the direct run needs the module mapping.
+zig test --dep wnd_core -Mroot=user/src/tabwm.zig -Mwnd_core=kernel/src/wnd_core.zig
 zig test user/src/sexiburger.zig
 
 echo "verify-unit-tests: all unit tests passed"
