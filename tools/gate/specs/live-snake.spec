@@ -13,6 +13,22 @@ vgate_share arm
 vgate_runner_flags -Xswiftc -DSPIKE
 vgate_repeat 1 BOOTS
 
+# Legacy staged the compiler + corpus into the (empty) share before boot:
+# exec resolves against /host (the cvc-file channel), so without this the
+# compile refused with ENOENT ("strace: exec refused (2)").
+vgate_setup_python <<'PYEOF'
+import os, shutil
+share = os.path.join(os.environ["RUN_DIR"], "share")
+shutil.copy("zig-out/bin/ZC.BIN", os.path.join(share, "ZC.BIN"))
+for dst, src in [
+    ("SNAKE.Z", "tests/zc-corpus/snake-main.z"),
+    ("SLIB.Z", "tests/zc-corpus/snake-lib.z"),
+    ("EV.Z", "tests/zc-corpus/snake-events.z"),
+    ("FOOD.Z", "tests/zc-corpus/snake-food.z"),
+]:
+    shutil.copy(src, os.path.join(share, dst))
+PYEOF
+
 vgate_file script.txt <<'EOF'
 ls
 strace exec ZC.BIN SNAKE.Z SLIB.Z EV.Z FOOD.Z SNAKE.ELF

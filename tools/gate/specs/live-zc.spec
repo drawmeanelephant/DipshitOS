@@ -5,9 +5,10 @@ vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 vgate_repeat 1 BOOTS
 
-vgate_setup_py <<'PY'
+vgate_setup_python <<'PY'
 import os, shutil
-share = os.environ["VG_SHARE"]
+# Setup hooks get RUN_DIR (not VG_SHARE); the seeded share lives there.
+share = os.path.join(os.environ["RUN_DIR"], "share")
 shutil.copy("tests/zc-corpus/z3b-stdz.z", os.path.join(share, "APP.Z"))
 shutil.copy("tests/zc-corpus/z3b-labels.z", os.path.join(share, "LABELS.Z"))
 shutil.copy("user/src/lib/stdz/fmt.zig", os.path.join(share, "FMT.Z"))

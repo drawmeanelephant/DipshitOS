@@ -12,6 +12,13 @@ vgate_name live-typography "live-typography"
 vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 
+# Legacy created this script (exec NOTEPAD.BIN) at runtime; the port
+# referenced it but never declared it, so the runner died at startup
+# ("could not read script file").
+vgate_file script.txt <<'EOF'
+exec NOTEPAD.BIN
+EOF
+
 vgate_run 01 -- --screen '$RUN_DIR/screen' --via-virtio --cvc-snap --snapshot-out '$RUN_DIR/snap' --script '$RUN_DIR/script.txt' --snapshot-after "notepad: settled" --script-expect "notepad: settled" --script-expect-tail 2 --timeout 120
 
 vgate_assert 01 serial-contains 'typography: Inter TrueType font loaded'

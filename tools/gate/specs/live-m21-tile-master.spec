@@ -50,7 +50,7 @@ assert re.search(r'dui\[[0-9]+\]: user user rect=24,0,837,700 ', ser), "master r
 assert re.search(r'dui\[[0-9]+\]: user user rect=861,0,419,700 ', ser), "detail rect missing"
 PY
 
-vgate_assert A snapshot 'gpu-screen-A-after*' <<'PY'
+vgate_assert A snapshot 'gpu-screen-after*' <<'PY'
 import sys, zlib, struct
 path = sys.argv[1]
 d = open(path, 'rb').read()
@@ -144,7 +144,7 @@ assert re.search(r'dui\[[0-9]+\]: user user rect=24,0,419,700 ', ser), "detail r
 assert re.search(r'dui\[[0-9]+\]: user user rect=443,0,837,700 ', ser), "master rect missing"
 PY
 
-vgate_assert B snapshot 'gpu-screen-B-after*' <<'PY'
+vgate_assert B snapshot 'gpu-screen-after*' <<'PY'
 import sys, zlib, struct
 path = sys.argv[1]
 d = open(path, 'rb').read()
