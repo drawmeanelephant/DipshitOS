@@ -11,17 +11,17 @@
 
 | metric | count |
 |---|---|
-| top-level scripts (`tools/*.sh` + `tools/*.py`) | 85 |
+| top-level scripts (`tools/*.sh` + `tools/*.py`) | 39 |
 | class A (portable / CI) | 9 |
-| class B (VZ hardware gate) | 53 (of which `verify-live-*`: 46) |
+| class B (VZ hardware gate) | 7 (of which `verify-live-*`: 0) |
 | class C (interactive) | 1 |
 | class D (diagnostic) | 9 |
 | tooling (not gates) | 13 |
-| with a just recipe | 16 |
-| named in gate-inventory.md or the archive GATE block | 37 |
-| CI-sharded (archive GATE block `cmd=`) | 31 |
-| named in docs/status.md | 13 |
-| **orphans (gate-class, registered nowhere)** | **32** |
+| with a just recipe | 11 |
+| named in gate-inventory.md or the archive GATE block | 22 |
+| CI-sharded (archive GATE block `cmd=`) | 19 |
+| named in docs/status.md | 7 |
+| **orphans (gate-class, registered nowhere)** | **4** |
 
 ## Subdirectory tooling (not gates)
 
@@ -31,7 +31,7 @@
 | `tools/status/` | 6 | multiagent coordination gate + claim tooling (class A) |
 | `tools/context/` | 2 | context snapshot helpers |
 | `tools/ragshit/` | 84 | host-side context engine (developer tooling, not guest software) |
-| `tools/gate/` | 188 | M40 vgate harness + specs (GF2+) |
+| `tools/gate/` | 180 | M40 vgate harness + specs (GF2+) |
 
 ## Orphans
 
@@ -42,34 +42,6 @@ this list only needs to shrink):
 - `check-zc-host-contract.py`
 - `probe-pointer-routes.sh`
 - `test-unicode-torture.sh`
-- `verify-live-hardening.sh`
-- `verify-live-image-viewer.sh`
-- `verify-live-m14-composition.sh`
-- `verify-live-m15-composition.sh`
-- `verify-live-m21-max-fullscreen-aot.sh`
-- `verify-live-m21-minimize-ws.sh`
-- `verify-live-m21-notif-dialog-transient.sh`
-- `verify-live-m21-persist-title-orphan.sh`
-- `verify-live-m21-tile-master.sh`
-- `verify-live-sched-ring.sh`
-- `verify-live-scrollback.sh`
-- `verify-live-search.sh`
-- `verify-live-selection.sh`
-- `verify-live-sexiburger.sh`
-- `verify-live-smp-stress.sh`
-- `verify-live-smp1.sh`
-- `verify-live-snap-guides.sh`
-- `verify-live-tabclick.sh`
-- `verify-live-tabs.sh`
-- `verify-live-tabstrip.sh`
-- `verify-live-text-search.sh`
-- `verify-live-time.sh`
-- `verify-live-timers.sh`
-- `verify-live-tokens.sh`
-- `verify-live-unicode.sh`
-- `verify-live-vm-depth.sh`
-- `verify-live-wallpaper.sh`
-- `verify-live-wasm.sh`
 - `verify-ttf-fonts.sh`
 
 ## All top-level scripts
@@ -104,52 +76,6 @@ Columns: `just` = justfile recipe of the same name; `inv` = named in
 | `verify-fw-mmu-capture.sh` | 94 | D | n | y | y | n | verify-fw-mmu-capture.sh -- claim 0021 gate: capture the firmware's MMU |
 | `verify-glyph-raster.sh` | 67 | A | n | y | y | n | verify-glyph-raster.sh -- class A: the font8x8 LSB-first glyph raster |
 | `verify-host-console.sh` | 149 | B | y | y | y | n | M1.5 agent A gate: host-side interactive serial plumbing (host-only). |
-| `verify-live-hardening.sh` | 204 | B | n | n | n | n | verify-live-hardening.sh -- claim 4482 (Milestone 14, Card S4) |
-| `verify-live-image-viewer.sh` | 155 | B | n | n | n | n | verify-live-image-viewer.sh — M36 IMG5 class-B live gate (issue #826): the |
-| `verify-live-input-depth.sh` | 189 | B | n | y | y | n | verify-live-input-depth.sh -- audit follow-up (issue #117) class-B gate: |
-| `verify-live-input.sh` | 359 | B | y | y | y | y | verify-live-input.sh -- claim 6050 (milestone seven, card I3) class-B |
-| `verify-live-m14-composition.sh` | 252 | B | n | n | n | n | verify-live-m14-composition.sh -- claim 3289 (Milestone 14, Card S3) |
-| `verify-live-m15-composition.sh` | 242 | B | n | n | n | n | verify-live-m15-composition.sh -- claim 3206 (Milestone 15, Card A4) |
-| `verify-live-m16-composition.sh` | 229 | B | n | y | y | n | verify-live-m16-composition.sh -- claim 2714 (Milestone 16, Card C4) |
-| `verify-live-m16-guards.sh` | 179 | B | n | y | y | n | verify-live-m16-guards.sh -- claim 8403 (Milestone 16, Card C2) class-B gate: |
-| `verify-live-m16-image.sh` | 157 | B | n | y | y | n | verify-live-m16-image.sh -- claim 3805 (Milestone 16, Card C1) class-B gate: |
-| `verify-live-m16-resources.sh` | 232 | B | n | y | y | n | verify-live-m16-resources.sh -- milestone sixteen card C3 (claim 0339) |
-| `verify-live-m21-max-fullscreen-aot.sh` | 198 | B | n | n | n | n | tools/verify-live-m21-max-fullscreen-aot.sh — class-B live acceptance gate for M21 |
-| `verify-live-m21-minimize-ws.sh` | 187 | B | n | n | n | n | tools/verify-live-m21-minimize-ws.sh — class-B live acceptance gate for M21 |
-| `verify-live-m21-notif-dialog-transient.sh` | 196 | B | n | n | n | n | tools/verify-live-m21-notif-dialog-transient.sh — class-B live acceptance gate for M21 |
-| `verify-live-m21-persist-title-orphan.sh` | 166 | B | n | n | n | n | tools/verify-live-m21-persist-title-orphan.sh — class-B live acceptance gate for M21 |
-| `verify-live-m21-tile-master.sh` | 391 | B | n | n | n | n | verify-live-m21-tile-master.sh -- claim 8777 (milestone twenty-one, cards |
-| `verify-live-roadpops.sh` | 261 | B | n | y | y | n | verify-live-roadpops.sh -- claim 1574 (milestone six, card G3) class-B |
-| `verify-live-sched-ring.sh` | 193 | B | n | n | n | n | verify-live-sched-ring.sh -- claim 881 / issue #856 class-B gate: the |
-| `verify-live-screen.sh` | 240 | B | n | y | y | n | verify-live-screen.sh -- claim 6053 (milestone six, card G1) class-B |
-| `verify-live-scrollback.sh` | 203 | B | n | n | n | n | verify-live-scrollback.sh -- milestone-eighteen card T1 class-B gate (issue #404): |
-| `verify-live-search.sh` | 179 | B | n | n | n | n | verify-live-search.sh -- milestone-eighteen card T3 class-B gate (issue #406): |
-| `verify-live-selection.sh` | 199 | B | n | n | n | n | verify-live-selection.sh -- milestone-eighteen card T2 class-B gate (issue #405): |
-| `verify-live-settings.sh` | 198 | B | n | y | y | n | verify-live-settings.sh -- claim 2649 (milestone-eight card U8) class-B gate: |
-| `verify-live-sexiburger-actions.sh` | 141 | B | n | n | n | y | verify-live-sexiburger-actions.sh — Milestone 19 Sexiburger Action Registry & Tab Model |
-| `verify-live-sexiburger.sh` | 108 | B | n | n | n | n | verify-live-sexiburger.sh — Milestone 19 class-B live gate: Sexiburger God Menu on real VZ. |
-| `verify-live-smp-stress.sh` | 215 | B | n | n | n | n | verify-live-smp-stress.sh -- claim 907 / issue #858 class-B gate: the |
-| `verify-live-smp.sh` | 79 | B | y | n | n | n | verify-live-smp.sh -- Milestone 28 (claim 6438) class-B gate: |
-| `verify-live-smp1.sh` | 158 | B | n | n | n | n | verify-live-smp1.sh -- claim 2369 class-B gate: a USER program runs on a |
-| `verify-live-snake.sh` | 328 | B | y | y | n | y | verify-live-snake.sh -- class-B gate: the VL6 snake game (tests/zc-corpus/ |
-| `verify-live-snap-guides.sh` | 239 | B | n | n | n | n | verify-live-snap-guides.sh — M37 DQ5 window snap guides live proof (issue #837) |
-| `verify-live-tabclick.sh` | 154 | B | n | n | n | n | verify-live-tabclick.sh — M37 DQ3 tab mouse interaction live proof (issue #839) |
-| `verify-live-tabs.sh` | 181 | B | n | n | n | n | verify-live-tabs.sh -- milestone-twenty card U5 class-B gate |
-| `verify-live-tabstrip.sh` | 169 | B | n | n | n | n | verify-live-tabstrip.sh — M37 DQ2 tab-strip chrome live proof (issue #840) |
-| `verify-live-text-search.sh` | 152 | B | n | n | n | n | verify-live-text-search.sh -- milestone-twenty card U3 class-B gate |
-| `verify-live-text.sh` | 256 | B | n | y | y | n | verify-live-text.sh -- claim 3194 (milestone six, card G2) class-B gate: |
-| `verify-live-time.sh` | 108 | B | n | n | n | n | verify-live-time.sh -- M22 D13 (issue #336) class-B gate: |
-| `verify-live-timers.sh` | 192 | B | n | n | n | n | verify-live-timers.sh -- claim 7323 (Milestone 14, Card S2) class-B gate: |
-| `verify-live-tokens.sh` | 258 | B | n | n | n | n | verify-live-tokens.sh — M37 DQ4 design-token live proof (issue #838) |
-| `verify-live-typography.sh` | 145 | B | n | n | n | y | verify-live-typography.sh — M38 Live TrueType Typography Verification |
-| `verify-live-unicode.sh` | 128 | B | n | n | n | n | verify-live-unicode.sh -- milestone-twenty cards U2/U3/U11 class-B gate |
-| `verify-live-usb.sh` | 201 | B | y | y | y | n | verify-live-usb.sh -- claim 4116 (milestone seven, card I2) class-B gate: |
-| `verify-live-virtio-e2e.sh` | 256 | B | n | y | n | y | verify-live-virtio-e2e.sh -- claim 0680 (issue #523 item 3 capstone, the |
-| `verify-live-vm-depth.sh` | 139 | B | n | n | n | n | verify-live-vm-depth.sh -- Milestone 29 (Issue #598, Claim 8247) Class-B gate: |
-| `verify-live-wallpaper.sh` | 155 | B | n | n | n | n | tools/verify-live-wallpaper.sh — Class-B live hardware gate for Issue #825: |
-| `verify-live-wasm.sh` | 480 | B | n | n | n | n | verify-live-wasm.sh — M35 class-B gates: the wasm interpreter on real VZ. |
-| `verify-live-xhci.sh` | 208 | B | y | y | y | n | verify-live-xhci.sh -- claim 4272 (milestone seven, card I1) class-B |
-| `verify-live-zc.sh` | 233 | B | n | y | n | y | verify-live-zc.sh -- M32 Lane 2 class-B gate (issue #620): the |
 | `verify-marker.sh` | 111 | B | y | y | y | y | verify-marker.sh -- ADR 0004 D4 fixed-memory-marker fallback gate |
 | `verify-mmu-debt.sh` | 104 | A | y | y | y | n | verify-mmu-debt.sh -- claim 1517 gate: the MMU takeover contract is |
 | `verify-mutations.sh` | 117 | A | n | y | y | n | verify-mutations.sh -- class A: the MUTATION CHECK, generalized (claim |

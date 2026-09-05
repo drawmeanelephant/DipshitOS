@@ -50,5 +50,5 @@ vgate_run 01 -- --input --display --script '$RUN_DIR/script.txt' --input-chords 
 vgate_assert 01 serial-contains 'VirelaiOS kernel has seized control.'
 vgate_assert 01 serial-contains 'scrollback-fill-ready'
 vgate_assert 01 serial-contains 'scroll keys ok'
-vgate_assert 01 serial-absent 'input: armed=1 fifo=0/64 dropped=0 events=33'
+vgate_assert 01 serial-contains 'input: armed=1 fifo=0/64 dropped=0 events=33'
 vgate_assert 01 serial-absent '[EXC] parking:'

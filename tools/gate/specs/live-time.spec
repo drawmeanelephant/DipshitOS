@@ -22,9 +22,13 @@ vgate_assert 01 serial-contains 'VirelaiOS kernel has seized control.'
 vgate_assert 01 python <<'PY'
 import os, re, sys
 ser = open(os.environ["VG_SER"]).read()
+# The timer is 1 Hz (M40+): a synchronous monitor command (~250 ms for
+# sysinfo) cannot cross a tick boundary, so `ticks 0` is the expected
+# modern shape — the elapsed-time proof is the `real` line, and the
+# `ticks` line must merely be present (the D13 wrapper always prints it).
 if not re.search(r'(?m)^real\s+[0-9]+m[0-9]+s', ser):
     print("real time line missing", file=sys.stderr); sys.exit(1)
-if not re.search(r'(?m)^ticks\s+[1-9][0-9]*', ser):
+if not re.search(r'(?m)^ticks\s+[0-9]+', ser):
     print("ticks line missing", file=sys.stderr); sys.exit(1)
 PY
 vgate_assert 01 serial-contains 'rx-time-ok'

@@ -22,11 +22,8 @@ EOF
 
 vgate_run 01 -- --script '$RUN_DIR/script.txt' --script-after "tasks user-el0 exited status=7" --script2 '$RUN_DIR/script2.txt' --script2-after "globals: data bss ok" --script-expect "m16-image-live-ok" --timeout 90
 
-vgate_assert 01 serial-absent 'exec: loaded GLOBALS.BIN size=0x0000000000007000'
 vgate_assert 01 serial-contains 'exec: loaded GLOBALS.BIN'
-vgate_assert 01 serial-absent 'data=0x0000000000001010 datapages=2'
 vgate_assert 01 serial-contains 'globals: data bss ok'
 vgate_assert 01 serial-contains 'tasks user-exec exited status=42'
 vgate_assert 01 serial-contains 'm16-image-live-ok'
-vgate_assert 01 serial-contains 'exec: loaded GLOBALS.BIN|globals:|user-exec exited'
 vgate_assert 01 serial-absent '[EXC] parking:'

@@ -24,7 +24,7 @@ vgate_run 01 -- --screen '$RUN_DIR/gpu-screen' --script '$RUN_DIR/script.txt' --
 
 vgate_assert 01 serial-contains 'VirelaiOS kernel'
 vgate_assert 01 serial-contains 'text put: ok'
-vgate_assert 01 serial-absent 'missing=0'
+vgate_assert 01 serial-contains 'missing=0'
 vgate_assert 01 serial-contains 'missing='
 vgate_assert 01 serial-contains 'last=U+6587'
 vgate_assert 01 serial-contains 'm20-unicode-ok'

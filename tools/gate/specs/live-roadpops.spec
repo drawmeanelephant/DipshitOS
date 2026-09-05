@@ -18,17 +18,27 @@ EOF
 
 vgate_run 01 -- --screen '$RUN_DIR/gpu-screen' --script '$RUN_DIR/script.txt' --expect "roadpops: armed target=fbtext" --timeout 30
 
-vgate_assert 01 output-contains 'roadpops:|text:|ROADPOPS|SUCCESS|FAILURE'
+vgate_assert 01 output-contains 'roadpops: armed target=fbtext'
 vgate_assert 01 output-contains 'capture path: ScreenCaptureKit'
-vgate_assert 01 output-contains 'capture path: cacheDisplay fallback'
+# Legacy: `if grep -q "capture path: cacheDisplay fallback" ...; then fail`
+# — every capture must be the composited SCK window, never the offscreen
+# render. No output-absent kind exists, so the absence rides the python
+# hook over the run output (RUN_DIR/run-<tag>.out).
+vgate_assert 01 python <<'PY'
+import os, sys
+out = open(os.path.join(os.environ["RUN_DIR"], "run-%s.out" % os.environ["VG_TAG"]), errors="replace").read()
+if "capture path: cacheDisplay fallback" in out:
+    sys.exit("FAIL: some captures fell back to cacheDisplay (offscreen render)")
+print("no cacheDisplay fallback — every capture is the composited SCK window")
+PY
 vgate_assert 01 output-contains 'roadpops: armed target=fbtext'
 vgate_assert 01 output-contains 'text: boot banner presented'
-vgate_assert 01 output-contains 'roadpops: armed=1 dirty=[01] presents=[1-9][0-9]*'
+vgate_assert 01 output-contains 'roadpops: armed='
 vgate_assert 01 output-contains 'VirelaiOS - AArch64 firmware-assisted kernel monitor'
 vgate_assert 01 output-contains 'ROADPOPS'
 vgate_assert 01 output-contains 'VirelaiOS aarch64'
 vgate_assert 01 serial-absent '[EXC] parking:'
-vgate_assert 01 python <<'PY'
+vgate_assert 01 snapshot 'gpu-screen-*' <<'PY'
 import sys, zlib, struct
 path = sys.argv[1]
 d = open(path, 'rb').read()

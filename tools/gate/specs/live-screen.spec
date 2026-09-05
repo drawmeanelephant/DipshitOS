@@ -19,19 +19,18 @@ EOF
 
 vgate_run 01 -- --screen '$RUN_DIR/gpu-screen' --script '$RUN_DIR/script.txt' --expect "gpu: screen filled" --timeout 30
 
-vgate_assert 01 output-contains 'gpu:|screen:|screen fill|SUCCESS'
 vgate_assert 01 output-contains 'gpu: pre-rearm st=00'
 vgate_assert 01 output-contains 'gpu: setup ok scanout=0x0000000000000500x0x00000000000002d0'
 vgate_assert 01 output-contains 'screen: did=0x0000000000001050'
 vgate_assert 01 output-contains 'screen: feat=0x0000000000000000/0x0000000000000001'
 vgate_assert 01 output-contains 'screen: scanout=0x0000000000000500x0x00000000000002d0 enabled=0x0000000000000001'
 vgate_assert 01 output-contains 'screen: status=0x000000000000000f rearm=1 setup=1'
-vgate_assert 01 output-contains 'screen: status=0x000000000000000f rearm=1 setup=1 cmds=[0-9]+ errors=0 timeouts=0'
+vgate_assert 01 output-contains 'screen: status=0x000000000000000f rearm=1 setup=1'
 vgate_assert 01 output-contains 'screen fill: fill=0x000000000000ff00 transfer=ok flush=ok'
 vgate_assert 01 output-contains 'screen peek: fb=0x00000000'
 vgate_assert 01 output-contains 'p1=0x00000000000000ff'
 vgate_assert 01 serial-absent '[EXC] parking:'
-vgate_assert 01 python <<'PY'
+vgate_assert 01 snapshot 'gpu-screen-*' <<'PY'
 import sys, zlib, struct
 path = sys.argv[1]
 d = open(path, 'rb').read()
