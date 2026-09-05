@@ -2779,6 +2779,22 @@ fn handle_wmctl(args: Args, _: *exceptions.VectorFrame) u64 {
             wm_server.note_taskbar();
             return 0;
         },
+        wm_server.wmctl_win_close => {
+            // M42 UX (2026-09-05, TABWM tab-close seam): the WM — not the
+            // kernel — decides WHEN a window closes (the tab 'x' click);
+            // the kernel applies its OWN release primitive
+            // (`driving_award.user_close`, the shim/dui-close path) so the
+            // owner gets the real WIN_CLOSE event push and the WM gets the
+            // released kind-20 mirror. a0 = window id; EINVAL for an
+            // unknown id / non-user window. WM-seat-only like every cmd.
+            if (!wm_server.registered()) return error_result(.enosys);
+            if (wm_server.registered_pid() != pid) return error_result(.eacces);
+            const window_id = args[1];
+            if (window_id > 0xff) return error_result(.einval);
+            if (!driving_award.user_close(@intCast(window_id))) return error_result(.einval); // bad id
+            wm_server.note_win_close();
+            return 0;
+        },
         wm_server.wmctl_dialog => {
             // M32 WMS8 Gate 2 (issue #628): the WM — not the kernel — owns
             // the keyboard-driven modal-dialog decision (M27 G2 about,

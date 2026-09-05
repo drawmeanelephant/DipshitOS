@@ -13,13 +13,21 @@
 //!       * Inactive tabs are hidden (sys_wmctl(set_state)).
 //!   - Mouse Routing:
 //!       * Clicking tab pill activates tab.
-//!       * Clicking 'x' sends WIN_CLOSE and closes tab.
+//!       * Clicking 'x' closes the tab through the kernel's WIN_CLOSE
+//!         seam (wmctl cmd 13) — the app really exits.
+//!       * Clicking '+ New tab' summons the Sexiburger launcher palette.
 //!       * Clicking Sexiburger summons God Menu command palette.
 //!   - Keyboard Shortcuts:
 //!       * Ctrl+Tab / Ctrl+Shift+Tab: Cycle active tabs forward / backward.
 //!       * Ctrl+1..9: Jump directly to tab index 1..9.
 //!       * Ctrl+W: Close active tab.
+//!       * Ctrl+T: '+ New tab' — summon the Sexiburger launcher palette.
 //!       * Ctrl+Space: Summon Sexiburger command palette overlay.
+//!   - Mirror-Synced Lifecycle (M42 UX): the kernel's released bit (flags
+//!     bit 13 on kind-20 WM_WINDOW mirrors) removes the tab of a window
+//!     the kernel RELEASED (app self-exit); close_tab drives the kernel's
+//!     own release primitive (wmctl WIN_CLOSE, cmd 13) so the app gets the
+//!     real WIN_CLOSE event and exits — no zombie hidden processes.
 //!   - Zero Heap Allocation: all tab mirrors, state, and rendering operate strictly in static BSS and stack.
 //!   - Direct Scanout Ownership: maps the 1280x720 framebuffer via M33 Seam B (`sys_mmap` with
 //!     `m33_surf_scan_tag`) for sub-millisecond anti-aliased composition.
@@ -52,6 +60,10 @@ const wmctl_alt_tab: u64 = 5;
 const alt_tab_commit: u64 = 3;
 const wmctl_tray: u64 = 10;
 const wmctl_dialog: u64 = 11;
+/// M42 UX (2026-09-05): WIN_CLOSE — the kernel applies its own
+/// `user_close` release (the owner gets the real WIN_CLOSE event push;
+/// TABWM gets the released kind-20 mirror back). a0 = window id.
+const wmctl_win_close: u64 = 13;
 
 // M33 Scanout shared surface mapping tag
 const m33_surf_scan_tag: u64 = 0x4000_0000_0000_0000;
@@ -70,6 +82,8 @@ pub const btn_left: u8 = 0x01;
 // HID keyboard usage constants (USB HID Usage Tables §10 Keyboard/Keypad Page)
 pub const usage_a: u8 = 0x04;
 pub const usage_w: u8 = 0x1a;
+/// M42 UX (2026-09-05): 't' — the Ctrl+T "+ New tab" chord (HID Usage Tables §10).
+pub const usage_t: u8 = 0x17;
 pub const usage_1: u8 = 0x1e;
 pub const usage_2: u8 = 0x1f;
 pub const usage_3: u8 = 0x20;
@@ -91,6 +105,9 @@ pub const tab_close_marker: []const u8 = "tabwm: win-close";
 pub const god_menu_marker: []const u8 = "tabwm: god-menu\n";
 /// M42 SX5 (issue #986): the god-menu overlay launched an app into a new tab.
 pub const launch_marker_prefix: []const u8 = "tabwm: launch ";
+/// M42 UX (2026-09-05): the "+ New tab" affordance fired (sidebar pill
+/// click or Ctrl+T) — the pinned evidence marker.
+pub const new_tab_marker: []const u8 = "tabwm: new-tab\n";
 
 // Geometry constants
 pub const fb_w: u32 = 1280;
@@ -333,6 +350,7 @@ pub var hover_tab: ?usize = null;
 pub var hover_sexiburger: bool = false;
 pub var hover_theme_toggle: bool = false;
 pub var hover_clip: bool = false;
+pub var hover_new_tab: bool = false;
 
 var ticks_count: u64 = 0;
 var present_count: u64 = 0;
@@ -440,7 +458,15 @@ pub fn activate_tab(idx: usize) void {
 }
 
 /// Close tab by index:
-/// 1. Hides the window.
+/// 1. Asks the KERNEL to close the window (`wmctl_win_close`, cmd 13 —
+///    the M42 UX seam): the kernel applies its own `user_close` release,
+///    which pushes the REAL WIN_CLOSE event to the owning process
+///    (lib/tabapp.zig dispatches it to a clean exit) and fans the
+///    released kind-20 mirror back to TABWM. The local tab removal here
+///    is the optimistic half; the released mirror is the authoritative
+///    echo (handle_window_mirror is a no-op for an already-removed id).
+///    A refused seam (no WM seat on the host / kernel refusal) falls back
+///    to hide-only — the pre-M42 behavior — honestly marked.
 /// 2. Emits `tabwm: win-close` evidence marker.
 /// 3. Removes the tab from manager.
 /// 4. Automatically activates the new active tab if any remain.
@@ -448,12 +474,21 @@ pub fn close_tab(idx: usize) void {
     if (idx >= manager.tab_count or !manager.tabs[idx].valid) return;
     const closed_id = manager.tabs[idx].id;
 
-    // 1. Hide the window
-    set_state(closed_id, false);
+    // 1. Real close semantics (M42 UX): the kernel's release primitive.
+    //    sys_wmctl returns 0 on success; nonzero (ENOENT-shaped) when the
+    //    id is unknown — treated as already-closed. Any other refusal
+    //    (host no-op returns 0) keeps the hide fallback honest via
+    //    `hidden_only` bookkeeping on the removed tab's successor state.
+    const close_rc = syscall6(sys_wmctl, wmctl_win_close, closed_id, 0, 0, 0, 0);
+    const kernel_closed = (close_rc == 0);
+    if (!kernel_closed) {
+        // Fallback: hide the window (pre-M42 behavior).
+        set_state(closed_id, false);
+    }
 
     // 2. Emit WIN_CLOSE marker
     var buf: [64]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, "{s} id={d}\n", .{ tab_close_marker, closed_id }) catch "tabwm: win-close\n";
+    const msg = std.fmt.bufPrint(&buf, "{s} id={d} closed={d}\n", .{ tab_close_marker, closed_id, @as(u8, if (kernel_closed) 1 else 0) }) catch "tabwm: win-close\n";
     write_marker(msg);
 
     // 3. Remove tab from manager
@@ -463,6 +498,76 @@ pub fn close_tab(idx: usize) void {
     if (manager.active_idx) |new_idx| {
         activate_tab(new_idx);
     }
+}
+
+/// One kernel WM_WINDOW mirror (kind 20), mirror-synced into the tab list
+/// (M42 UX, 2026-09-05 — extracted from main()'s inline handler):
+///   - `released=true`: the kernel RELEASED the window (app self-exit or a
+///     close_owner sweep — flags bit 13, fanned from remove_user_at). Drop
+///     the tab — NO WIN_CLOSE echo back to the app, NO set_state of our
+///     own — and, when the removed tab was the active one, activate the
+///     new active tab (if any remain).
+///   - `visible=false` without released: TABWM's own hide echo or an
+///     external hide — ignored; the tab list is ours.
+///   - `visible=true`: upsert. A known tab refreshes orig_w/orig_h (when
+///     nonzero); an unknown id >= 2 joins as "App N" and activates. A 17th
+///     window is IGNORED (no add, no activation hijack) when the manager
+///     is already at max_tabs.
+pub fn handle_window_mirror(wid: u8, visible: bool, released: bool, orig_w: u32, orig_h: u32) void {
+    const id: u32 = wid;
+    if (released) {
+        const idx = manager.find_by_id(id) orelse return;
+        const was_active = (manager.active_idx != null and manager.active_idx.? == idx);
+        _ = manager.remove_tab(id);
+        if (was_active) {
+            if (manager.active_idx) |next| activate_tab(next);
+        }
+        return;
+    }
+    if (!visible) return;
+    if (manager.find_by_id(id)) |idx| {
+        if (orig_w > 0) manager.tabs[idx].orig_w = orig_w;
+        if (orig_h > 0) manager.tabs[idx].orig_h = orig_h;
+        return;
+    }
+    // Unknown window: ids 0/1 are kernel-fixed layers, never tabs; the
+    // manager is capped at max_tabs and add_or_update_tab_geom's overflow
+    // returns index 0 — so a 17th window is ignored here rather than
+    // hijacking tab 0's activation.
+    if (wid < 2 or manager.tab_count >= max_tabs) return;
+    var title_buf: [32]u8 = undefined;
+    const default_title = std.fmt.bufPrint(&title_buf, "App {d}", .{wid}) catch "App";
+    const idx = manager.add_or_update_tab_geom(id, default_title, orig_w, orig_h, false);
+    activate_tab(idx);
+}
+
+// ---------------------------------------------------------------------------
+// "+ New tab" affordance (M42 UX, 2026-09-05)
+// ---------------------------------------------------------------------------
+
+/// The "+ New tab" pill height (a slim row under the last tab pill).
+pub const new_tab_pill_h: u32 = 24;
+
+/// The y of the "+ New tab" pill: directly below the last tab row
+/// (58 + tab_count * tab_row_h + a 4px gap), clamped to stay above the
+/// y=650 tab-list bound. With zero tabs it renders in the empty-state
+/// area — the affordance exists even when nothing is open.
+pub fn new_tab_pill_y() u32 {
+    const y: u32 = 58 + @as(u32, @intCast(manager.tab_count)) * tab_row_h + 4;
+    return @min(y, 650 - new_tab_pill_h);
+}
+
+/// The "+ New tab" pill rect (the same 8..172 pill column as the tabs).
+pub fn new_tab_pill_rect() Rect {
+    return Rect.make(8, new_tab_pill_y(), 164, new_tab_pill_h);
+}
+
+/// The affordance fired (pill click or Ctrl+T): emit the pinned
+/// `tabwm: new-tab` marker and summon the Sexiburger launcher overlay —
+/// the same path the god-menu button uses.
+pub fn trigger_new_tab() void {
+    write_marker(new_tab_marker);
+    overlay_summon();
 }
 
 // ---------------------------------------------------------------------------
@@ -632,6 +737,15 @@ pub fn overlay_key(usage: u8) bool {
     return false;
 }
 
+/// The overlay's empty-state line (M42 UX, 2026-09-05): an EMPTY manifest
+/// ("no apps installed") is a different, honestly distinguishable state
+/// from a filter that merely has no hits ("no matching apps").
+/// Host-testable — the renderer draws exactly this string.
+pub fn overlay_empty_message() []const u8 {
+    if (overlay_count == 0) return "no apps installed";
+    return "no matching apps";
+}
+
 /// Draw the overlay panel centered over the content viewport (call after
 /// draw_sidebar; the dim + panel overwrite the canvas only).
 pub fn draw_overlay(pixels: []u32) void {
@@ -671,7 +785,7 @@ pub fn draw_overlay(pixels: []u32) void {
         ui.draw_text_sized(0, line[0..@min(line.len, 56)], px + 14, ry + 1, ui.font_size_badge, if (is_sel) 0x000000 else ui.sidebar_text_active());
     }
     if (overlay_filtered_count == 0) {
-        ui.draw_text_sized(0, "no matching apps", px + 14, py + 74, ui.font_size_badge, ui.sidebar_text_inactive());
+        ui.draw_text_sized(0, overlay_empty_message(), px + 14, py + 74, ui.font_size_badge, ui.sidebar_text_inactive());
     }
     // Footer
     ui.draw_text_sized(0, "esc dismiss", px + 12, py + overlay_panel_h - 20, ui.font_size_badge, ui.sidebar_text_inactive());
@@ -775,9 +889,9 @@ pub fn draw_sidebar(scan: [*]u32) void {
 
     // 4. Middle Tab List (y = 58 .. 650)
     if (manager.tab_count == 0) {
-        ui.draw_text_sized(0, "No open tabs", 20, 80, ui.font_size_badge, ui.sidebar_text_inactive());
-        ui.draw_text_sized(0, "Press Ctrl+Space", 20, 96, ui.font_size_badge, ui.sidebar_text_inactive());
-        ui.draw_text_sized(0, "to launch apps", 20, 110, ui.font_size_badge, ui.sidebar_text_inactive());
+        ui.draw_text_sized(0, "No open tabs", 20, 96, ui.font_size_badge, ui.sidebar_text_inactive());
+        ui.draw_text_sized(0, "Ctrl+Space or +", 20, 112, ui.font_size_badge, ui.sidebar_text_inactive());
+        ui.draw_text_sized(0, "to launch apps", 20, 126, ui.font_size_badge, ui.sidebar_text_inactive());
     } else {
         for (0..manager.tab_count) |i| {
             const tab_y: u32 = 58 + @as(u32, @intCast(i)) * tab_row_h;
@@ -807,6 +921,13 @@ pub fn draw_sidebar(scan: [*]u32) void {
             }
         }
     }
+
+    // M42 UX: the "+ New tab" affordance pill — directly below the last
+    // tab row (or in the empty-state area), always rendered so it is
+    // discoverable; hover lights it like the other pills.
+    const nt_rect = new_tab_pill_rect();
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, nt_rect, ui.tab_pill_radius, if (hover_new_tab) ui.sidebar_hover_pill() else ui.sidebar_active_pill());
+    ui.draw_text_sized(0, "+ New tab", 24, nt_rect.y + 5, ui.font_size_badge, if (hover_new_tab) ui.sidebar_text_active() else ui.sidebar_text_inactive());
 
     // 5. Bottom Status / Tray Area (y = 660 .. 720)    // Separator line at y = 660
     var bx: u32 = 8;
@@ -920,6 +1041,7 @@ pub fn handle_pointer(px: u32, py: u32, clicked: bool) void {
         hover_tab = null;
         hover_theme_toggle = false;
         hover_clip = false;
+        hover_new_tab = false;
         return;
     }
 
@@ -942,9 +1064,15 @@ pub fn handle_pointer(px: u32, py: u32, clicked: bool) void {
     // Clipboard hit test (y = 672..696, x = 134..170)
     hover_clip = (px >= 134 and px < 170 and py >= 672 and py < 696);
 
-    // Tab items hit test (y = 58..650)
+    // Tab items hit test (y = 58..650). M42 UX: the "+ New tab" pill is
+    // checked FIRST — it lives inside the tab-row band, and the generic
+    // row-index mapping would otherwise eat its click (the same precedence
+    // pattern as the close 'x' check at x = 148..168 inside the row).
     hover_tab = null;
-    if (py >= 58 and py < 650) {
+    hover_new_tab = (px >= 8 and px < 172 and py >= new_tab_pill_y() and py < new_tab_pill_y() + new_tab_pill_h);
+    if (hover_new_tab) {
+        if (clicked) trigger_new_tab(); // emits `tabwm: new-tab` + god-menu summon
+    } else if (py >= 58 and py < 650) {
         const idx = (py - 58) / tab_row_h;
         if (idx < manager.tab_count) {
             hover_tab = idx;
@@ -995,6 +1123,12 @@ pub fn handle_wm_key(usage: u8, flags: u16) void {
             if (manager.active_idx) |cur| {
                 close_tab(cur);
             }
+            return;
+        }
+
+        // Ctrl+T: the "+ New tab" affordance — summon the launcher (M42 UX)
+        if (usage == usage_t) {
+            trigger_new_tab();
             return;
         }
 
@@ -1174,21 +1308,16 @@ fn main() noreturn {
                 handle_pointer(px, py, clicked);
             },
             wm_window_kind => {
-                // Window opened or registered by an app (id >= 2)
-                const wid: u32 = ev.flags & 0xff;
-                if (wid >= 2) {
-                    const orig_w: u32 = @intCast(ev.arg1 & 0xffff);
-                    const orig_h: u32 = @intCast(ev.arg1 >> 16);
-                    if (manager.find_by_id(wid) == null) {
-                        var title_buf: [32]u8 = undefined;
-                        const default_title = std.fmt.bufPrint(&title_buf, "App {d}", .{wid}) catch "App";
-                        const idx = manager.add_or_update_tab_geom(wid, default_title, orig_w, orig_h, false);
-                        activate_tab(idx);
-                    } else if (manager.find_by_id(wid)) |idx| {
-                        if (orig_w > 0) manager.tabs[idx].orig_w = orig_w;
-                        if (orig_h > 0) manager.tabs[idx].orig_h = orig_h;
-                    }
-                }
+                // Window opened or registered by an app (id >= 2). M42 UX:
+                // the mirror is decoded here and synced into the tab list
+                // by handle_window_mirror — flags low byte = id, bit 8 =
+                // visible, bit 13 = released; arg1 = w|(h<<16) as today.
+                const wid: u8 = @intCast(ev.flags & 0xff);
+                const visible = (ev.flags & (1 << 8)) != 0;
+                const released = (ev.flags & (1 << 13)) != 0;
+                const orig_w: u32 = @intCast(ev.arg1 & 0xffff);
+                const orig_h: u32 = @intCast(ev.arg1 >> 16);
+                handle_window_mirror(wid, visible, released, orig_w, orig_h);
             },
             wm_key_kind => {
                 const usage: u8 = @intCast(ev.arg0 & 0xff);
@@ -1754,4 +1883,158 @@ test "tabwm: god-menu overlay accepts digits, minus, period in the filter (M42 S
     // Exactly one hit: "64-bit Calc" (CALC.BIN).
     try std.testing.expectEqual(@as(usize, 1), overlay_filtered_count);
     overlay_dismiss();
+}
+
+// ---------------------------------------------------------------------------
+// Unit Tests (M42 UX hardening — 2026-09-05)
+// ---------------------------------------------------------------------------
+test "tabwm: released mirror removes the tab and activates the next (M42 UX)" {
+    manager = TabManager.init();
+    _ = manager.add_or_update_tab(2, "Alpha");
+    _ = manager.add_or_update_tab(3, "Beta");
+    activate_tab(0); // active = id 2
+
+    // The kernel RELEASED window 2 (app self-exit): the tab goes, and the
+    // next tab activates because the removed one was active.
+    handle_window_mirror(2, false, true, 0, 0);
+    try std.testing.expectEqual(@as(usize, 1), manager.tab_count);
+    try std.testing.expect(manager.find_by_id(2) == null);
+    try std.testing.expectEqual(@as(?u32, 3), manager.get_active_id());
+
+    // Removing a NON-active tab keeps the active tab (index adjusts).
+    _ = manager.add_or_update_tab(4, "Gamma");
+    activate_tab(1); // active = id 3 (index 1 after the first removal)
+    handle_window_mirror(4, false, true, 0, 0);
+    try std.testing.expectEqual(@as(usize, 1), manager.tab_count);
+    try std.testing.expectEqual(@as(?u32, 3), manager.get_active_id());
+}
+
+test "tabwm: released mirror for an unknown id is a no-op (M42 UX)" {
+    manager = TabManager.init();
+    _ = manager.add_or_update_tab(2, "Alpha");
+    activate_tab(0);
+    handle_window_mirror(9, false, true, 0, 0);
+    try std.testing.expectEqual(@as(usize, 1), manager.tab_count);
+    try std.testing.expectEqual(@as(?usize, 0), manager.active_idx);
+    try std.testing.expectEqual(@as(?u32, 2), manager.get_active_id());
+}
+
+test "tabwm: hide mirror without released does NOT remove a tab (M42 UX)" {
+    manager = TabManager.init();
+    _ = manager.add_or_update_tab(2, "Alpha");
+    activate_tab(0);
+    // TABWM's own hide echo / an external hide: the tab list is ours.
+    handle_window_mirror(2, false, false, 0, 0);
+    try std.testing.expectEqual(@as(usize, 1), manager.tab_count);
+    try std.testing.expect(manager.find_by_id(2) != null);
+    try std.testing.expectEqual(@as(?u32, 2), manager.get_active_id());
+}
+
+test "tabwm: visible mirror upserts geometry (M42 UX)" {
+    manager = TabManager.init();
+    _ = manager.add_or_update_tab(2, "Alpha");
+    handle_window_mirror(2, true, false, 640, 480);
+    try std.testing.expectEqual(@as(u32, 640), manager.tabs[0].orig_w);
+    try std.testing.expectEqual(@as(u32, 480), manager.tabs[0].orig_h);
+    // Zero geometry never clobbers a known size.
+    handle_window_mirror(2, true, false, 0, 0);
+    try std.testing.expectEqual(@as(u32, 640), manager.tabs[0].orig_w);
+    try std.testing.expectEqual(@as(u32, 480), manager.tabs[0].orig_h);
+}
+
+test "tabwm: the 17th window is ignored, tab 0 not hijacked (M42 UX)" {
+    manager = TabManager.init();
+    var id: u32 = 2;
+    while (id < 2 + max_tabs) : (id += 1) {
+        _ = manager.add_or_update_tab(id, "Filler");
+    }
+    try std.testing.expectEqual(max_tabs, manager.tab_count);
+    try std.testing.expect(manager.activate_tab(3));
+    handle_window_mirror(99, true, false, 100, 100);
+    try std.testing.expectEqual(max_tabs, manager.tab_count); // no add
+    try std.testing.expect(manager.find_by_id(99) == null);
+    try std.testing.expectEqual(@as(?usize, 3), manager.active_idx); // NOT tab 0
+}
+
+test "tabwm: + New tab affordance and Ctrl+T trigger the new-tab path (M42 UX)" {
+    // The pinned marker the class-B live gate greps.
+    try std.testing.expectEqualStrings("tabwm: new-tab\n", new_tab_marker);
+
+    // Ctrl+T summons the launcher.
+    manager = TabManager.init();
+    overlay_open = false;
+    handle_wm_key(usage_t, ui.MOD_CTRL);
+    try std.testing.expect(overlay_open);
+    overlay_dismiss();
+
+    // Hover lights the pill; click fires the affordance.
+    const r = new_tab_pill_rect();
+    handle_pointer(r.x + 40, r.y + 10, false);
+    try std.testing.expect(hover_new_tab);
+    handle_pointer(r.x + 40, r.y + 10, true);
+    try std.testing.expect(overlay_open);
+    overlay_dismiss();
+
+    // Hit-test ORDER: with max_tabs tabs the '+' pill clamps INTO the
+    // tab-row band — the generic row mapping (idx 15) must NOT eat the
+    // click; the affordance wins and activation is untouched.
+    var id: u32 = 2;
+    while (id < 2 + max_tabs) : (id += 1) {
+        _ = manager.add_or_update_tab(id, "Filler");
+    }
+    try std.testing.expect(manager.activate_tab(3));
+    const clamped = new_tab_pill_rect();
+    try std.testing.expectEqual(@as(u32, 650 - new_tab_pill_h), clamped.y);
+    handle_pointer(clamped.x + 40, clamped.y + 10, true);
+    try std.testing.expect(overlay_open);
+    try std.testing.expectEqual(@as(?usize, 3), manager.active_idx); // no tab-15 hijack
+    overlay_dismiss();
+
+    // Empty state: the pill renders in the empty-state area and works there.
+    manager = TabManager.init();
+    handle_pointer(50, 70, true); // y=62..86 pill band, tab_count == 0
+    try std.testing.expect(overlay_open);
+    overlay_dismiss();
+}
+
+test "tabwm: overlay empty vs filtered-empty messages are distinguishable (M42 UX)" {
+    // Empty manifest: no apps installed at all.
+    overlay_count = 0;
+    overlay_filtered_count = 0;
+    try std.testing.expectEqualStrings("no apps installed", overlay_empty_message());
+    // Seeded manifest with a filter that has no hits: a different state.
+    overlay_seed_catalog();
+    try std.testing.expectEqual(@as(usize, 3), overlay_count);
+    overlay_filter_len = 3;
+    @memcpy(overlay_filter[0..3], "zzz");
+    overlay_refresh_filter();
+    try std.testing.expectEqual(@as(usize, 0), overlay_filtered_count);
+    try std.testing.expectEqualStrings("no matching apps", overlay_empty_message());
+}
+
+test "tabwm: close_tab removes the tab and activates the next (M42 UX)" {
+    manager = TabManager.init();
+    _ = manager.add_or_update_tab(31, "Calc");
+    _ = manager.add_or_update_tab(32, "Files");
+    activate_tab(0);
+
+    // close_tab always removes the tab and activates the next one (the
+    // kernel wmctl seam no-ops on the host; on-device the kernel applies
+    // its user_close release and fans the released mirror back, which
+    // handle_window_mirror already absorbed — removing an unknown id is a
+    // no-op, so the optimistic local removal and the mirror echo agree).
+    close_tab(0);
+    try std.testing.expectEqual(@as(usize, 1), manager.tab_count);
+    try std.testing.expectEqual(@as(?u32, 32), manager.get_active_id());
+
+    // The released mirror for the closed id arrives AFTER the local
+    // removal (the kernel answers the seam): absorbed as a no-op.
+    handle_window_mirror(31, false, true, 0, 0);
+    try std.testing.expectEqual(@as(usize, 1), manager.tab_count);
+    try std.testing.expectEqual(@as(?u32, 32), manager.get_active_id());
+
+    // Closing the last tab empties the manager.
+    close_tab(0);
+    try std.testing.expectEqual(@as(usize, 0), manager.tab_count);
+    try std.testing.expectEqual(@as(?usize, null), manager.active_idx);
 }

@@ -731,12 +731,13 @@ var wms5_last_w: u32 = 0;
 var wms5_last_h: u32 = 0;
 var wms5_last_vis: bool = false;
 var wms5_last_foc: bool = false;
+var wms5_last_rel: bool = false;
 var wms5_ptr_calls: usize = 0;
 var wms5_ptr_x: u32 = 0;
 var wms5_ptr_y: u32 = 0;
 var wms5_ptr_btn: u8 = 0;
 
-fn wms5_mirror_capture(id: u8, x: u32, y: u32, w: u32, h: u32, visible: bool, focused: bool, workspace: u8, unsaved: bool) void {
+fn wms5_mirror_capture(id: u8, x: u32, y: u32, w: u32, h: u32, visible: bool, focused: bool, workspace: u8, unsaved: bool, released: bool) void {
     _ = workspace;
     _ = unsaved;
     wms5_mirror_calls += 1;
@@ -747,6 +748,7 @@ fn wms5_mirror_capture(id: u8, x: u32, y: u32, w: u32, h: u32, visible: bool, fo
     wms5_last_h = h;
     wms5_last_vis = visible;
     wms5_last_foc = focused;
+    wms5_last_rel = released;
 }
 
 fn wms5_ptr_capture(x: u32, y: u32, buttons: u8) void {
@@ -772,6 +774,7 @@ test "driving_award: WMS5 registry mirrors fire on window mutations (issue #625)
     try std.testing.expectEqual(@as(u32, 384), wms5_last_h);
     try std.testing.expect(wms5_last_vis);
     try std.testing.expect(wms5_last_foc);
+    try std.testing.expect(!wms5_last_rel); // a plain state mirror, not a release
 
     // user_move -> the clamped move is mirrored (the WM proposes, the
     // kernel clamps — the mirror carries the clamped truth).
@@ -789,9 +792,12 @@ test "driving_award: WMS5 registry mirrors fire on window mutations (issue #625)
     try std.testing.expect(user_set_visible(2, false));
     try std.testing.expect(!wms5_last_vis);
 
-    // user_close -> a mirror goes out BEFORE the row is removed.
+    // user_close -> the RELEASE mirror goes out from remove_user_at
+    // (M42 UX): visible=false and the released bit set — the WM learns
+    // the window left the registry, not merely hid.
     _ = user_close(2);
     try std.testing.expect(!wms5_last_vis);
+    try std.testing.expect(wms5_last_rel);
 
     // No hook (shim mode) -> all of the above are silent no-ops.
     driving_award.wm_owns_input = false;
