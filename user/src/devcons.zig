@@ -132,33 +132,18 @@ pub export fn _start() callconv(.c) noreturn {
                 update_cursor(ev.arg0, ev.arg1);
             },
             ui.KEY_DOWN => {
-                // ADR 0009 event convention (as EDIT.BIN consumes it): arg0 is
-                // the raw HID usage (Enter 0x28, Backspace 0x2a), arg1 is the
-                // ASCII byte for printable keys. Comparing arg0 against ASCII
-                // ranges rejects every printable key (usage 0x07 for 'd'), so
-                // the typed-input gate (issue #553) caught this live: the
-                // prompt buffered nothing and Enter executed nothing.
-                const usage = ev.arg0;
-                const ascii = ev.arg1;
-                if (usage == 0x28) {
-                    // Enter: execute command
-                    if (input_len > 0) {
-                        execute_command(input_buf[0..input_len]);
-                        input_len = 0;
-                    }
-                    refresh(ta.win);
-                } else if (usage == 0x2a) {
-                    // Backspace
-                    if (input_len > 0) input_len -= 1;
-                    refresh(ta.win);
-                } else if (ascii >= 0x20 and ascii < 0x7f and input_len < input_max) {
-                    input_buf[input_len] = @intCast(ascii);
-                    input_len += 1;
-                    refresh(ta.win);
-                }
+                handle_key_down(ta.win, &ev, &input_buf, &input_len);
             },
             else => {},
         }
+        // Drain pending queue. The drain MUST consume KEY_DOWN with the
+        // same handler as the wait path — the custom-virtio input channel
+        // delivers key reports in batches (one shell-idle pass drains
+        // several enqueued reports), so a `dir.bin\n` typed as 8 strokes
+        // queues as multiple events at once. The M42 SX4 port (179276c)
+        // drained with MOUSE_MOVE-only handling, silently dropping every
+        // KEY_DOWN behind the first in each batch — the typed-input gate
+        // (issue #553) regressed with no error, just dead keys.
         while (ui.poll_event(&ev) > 0) {
             switch (ta.dispatch(&ev)) {
                 .closed => {
@@ -173,10 +158,48 @@ pub export fn _start() callconv(.c) noreturn {
                 },
                 .none => {},
             }
-            if (ev.kind == ui.MOUSE_MOVE) update_cursor(ev.arg0, ev.arg1);
+            switch (ev.kind) {
+                ui.WIN_CLOSE => {
+                    ta.close();
+                    ui.exit_process(0);
+                },
+                ui.MOUSE_MOVE => {
+                    update_cursor(ev.arg0, ev.arg1);
+                },
+                ui.KEY_DOWN => {
+                    handle_key_down(ta.win, &ev, &input_buf, &input_len);
+                },
+                else => {},
+            }
         }
     }
     ta.close_and_exit(0);
+}
+
+/// The DEVCONS prompt's KEY_DOWN handling — shared by the wait path and the
+/// poll drain so no queued keystroke is lost (see the drain-loop note
+/// above). ADR 0009 event convention (as EDIT.BIN consumes it): arg0 is the
+/// raw HID usage (Enter 0x28, Backspace 0x2a), arg1 is the ASCII byte for
+/// printable keys.
+fn handle_key_down(win: u32, ev: *const ui.Event, input_buf: *[input_max]u8, input_len: *usize) void {
+    const usage = ev.arg0;
+    const ascii = ev.arg1;
+    if (usage == 0x28) {
+        // Enter: execute command
+        if (input_len.* > 0) {
+            execute_command(input_buf.*[0..input_len.*]);
+            input_len.* = 0;
+        }
+        refresh(win);
+    } else if (usage == 0x2a) {
+        // Backspace
+        if (input_len.* > 0) input_len.* -= 1;
+        refresh(win);
+    } else if (ascii >= 0x20 and ascii < 0x7f and input_len.* < input_max) {
+        input_buf.*[input_len.*] = @intCast(ascii);
+        input_len.* += 1;
+        refresh(win);
+    }
 }
 
 fn log_append(msg: []const u8) void {
