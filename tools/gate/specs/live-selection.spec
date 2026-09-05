@@ -35,11 +35,22 @@ echo line-20
 echo fill-ready
 EOF
 
-vgate_run 01 -- --input --display --script '$RUN_DIR/script.txt' --input-chords "pageup,up" --input-chords-after "fill-ready" --input-chords-delay 2.0 --script2 artifacts/live-selection-keys.txt --script2-after "fill-ready" --script2-delay 12 --script-expect "selection-live-ok" --timeout 60
+# The modifier chords (Ctrl+C = 0x03, Ctrl+V = 0x16) cannot be typed
+# through VZ's synthesized keyboard — the legacy gate wrote them to
+# artifacts/live-selection-keys.txt at runtime; the spec carries the same
+# bytes as a hermetic $RUN_DIR fixture (the claim-6684 script2 channel).
+vgate_file keys.txt <<'EOF'
+echo 
+
+input
+echo selection-live-ok
+EOF
+
+vgate_run 01 -- --input --display --script '$RUN_DIR/script.txt' --input-chords "pageup,up" --input-chords-after "fill-ready" --input-chords-delay 2.0 --script2 '$RUN_DIR/keys.txt' --script2-after "fill-ready" --script2-delay 12 --script-expect "selection-live-ok" --timeout 60
 
 vgate_assert 01 serial-contains 'VirelaiOS kernel has seized control.'
 vgate_assert 01 serial-contains 'fill-ready'
 vgate_assert 01 serial-contains 'copied'
-vgate_assert 01 serial-absent 'input: armed=1 fifo=0/64 dropped=0 events=2'
+vgate_assert 01 serial-contains 'input: armed=1 fifo=0/64 dropped=0 events=2'
 vgate_assert 01 serial-contains 'selection-live-ok'
 vgate_assert 01 serial-absent '[EXC] parking:'

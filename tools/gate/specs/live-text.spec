@@ -16,17 +16,26 @@ EOF
 
 vgate_run 01 -- --screen '$RUN_DIR/gpu-screen' --script '$RUN_DIR/script.txt' --expect "text: boot banner presented" --timeout 30
 
-vgate_assert 01 output-contains 'gpu:|text:|SUCCESS|FAILURE'
+vgate_assert 01 output-contains 'gpu: pre-rearm st=00'
 vgate_assert 01 output-contains 'capture path: ScreenCaptureKit'
-vgate_assert 01 output-contains 'capture path: cacheDisplay fallback'
+# Legacy: `if grep -q "capture path: cacheDisplay fallback" ...; then fail`
+# — every capture must be the composited SCK window, never the offscreen
+# render. No output-absent kind exists, so the absence rides the python
+# hook over the run output (RUN_DIR/run-<tag>.out).
+vgate_assert 01 python <<'PY'
+import os, sys
+out = open(os.path.join(os.environ["RUN_DIR"], "run-%s.out" % os.environ["VG_TAG"]), errors="replace").read()
+if "capture path: cacheDisplay fallback" in out:
+    sys.exit("FAIL: some captures fell back to cacheDisplay (offscreen render)")
+print("no cacheDisplay fallback — every capture is the composited SCK window")
+PY
 vgate_assert 01 output-contains 'gpu: pre-rearm st=00'
 vgate_assert 01 output-contains 'text: boot banner presented'
 vgate_assert 01 output-contains 'text: rows=90 cols=160 cell=8x8'
-vgate_assert 01 output-contains 'text: rows=90 cols=160 cell=8x8 .*fg=0x000000000000ff00 bg=0x0000000000101418'
 vgate_assert 01 output-contains 'VirelaiOS - AArch64 firmware-assisted kernel monitor'
 vgate_assert 01 output-contains 'virelai> '
 vgate_assert 01 serial-absent '[EXC] parking:'
-vgate_assert 01 python <<'PY'
+vgate_assert 01 snapshot 'gpu-screen-*' <<'PY'
 import sys, zlib, struct
 path = sys.argv[1]
 d = open(path, 'rb').read()

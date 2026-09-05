@@ -18,8 +18,8 @@ vgate_run 01 -- --input --display --script '$RUN_DIR/script.txt' --input-chords 
 
 vgate_assert 01 serial-contains 'input: armed'
 vgate_assert 01 serial-contains 'fastok'
-vgate_assert 01 serial-absent 'dropped=0'
+vgate_assert 01 serial-contains 'dropped=0'
 vgate_assert 01 serial-contains 'events=18'
-vgate_assert 01 serial-absent 'kb-usage=0x28 kb-byte=0xa'
+vgate_assert 01 serial-contains 'kb-usage=0x28 kb-byte=0xa'
 vgate_assert 01 serial-contains 'depth-serial-ok'
 vgate_assert 01 serial-absent '[EXC] parking:'

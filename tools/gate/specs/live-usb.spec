@@ -19,11 +19,11 @@ EOF
 
 vgate_run 01 -- --input --display --input-key 0 --input-key-after "usb devices: count=" --script '$RUN_DIR/script.txt' --script-expect "usb-gate-ok" --timeout 40
 
-vgate_assert 01 serial-absent 'usb: enumerated=0x0000000000000002 ok'
+vgate_assert 01 serial-contains 'usb: enumerated=0x0000000000000002 ok'
 vgate_assert 01 serial-contains 'usb devices: count=2'
-vgate_assert 01 serial-absent 'usb dev0: slot=1 port=9 speed=1 vid=0x5ac pid=0x8105 class=0 protocol=1 epin=1 maxpkt=8 interval=8 boot=1'
-vgate_assert 01 serial-absent 'usb dev1: slot=2 port=10 speed=1 vid=0x5ac pid=0x8106 class=0 protocol=0 epin=1 maxpkt=10 interval=8 boot=0'
-vgate_assert 01 serial-absent 'usb report: dev0 seq=0 len=8 bytes=0x0 0x0 0x4 0x0 0x0 0x0 0x0 0x0'
-vgate_assert 01 serial-absent 'usb report: kb mod=0x0 keys=0x4'
+vgate_assert 01 serial-contains 'usb dev0: slot=1 port=9 speed=1 vid=0x5ac pid=0x8105 class=0 protocol=1 epin=1 maxpkt=8 interval=8 boot=1'
+vgate_assert 01 serial-contains 'usb dev1: slot=2 port=10 speed=1 vid=0x5ac pid=0x8106 class=0 protocol=0 epin=1 maxpkt=10 interval=8 boot=0'
+vgate_assert 01 serial-contains 'usb report: dev0 seq=0 len=8 bytes=0x0 0x0 0x4 0x0 0x0 0x0 0x0 0x0'
+vgate_assert 01 serial-contains 'usb report: kb mod=0x0 keys=0x4'
 vgate_assert 01 serial-contains 'usb-gate-ok'
 vgate_assert 01 serial-absent '[EXC] parking:'

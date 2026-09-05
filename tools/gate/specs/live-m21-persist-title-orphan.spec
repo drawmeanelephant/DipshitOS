@@ -29,7 +29,7 @@ vgate_assert 01 serial-contains 'dui title: id=2 title=CustomTitleW12'
 vgate_assert 01 serial-contains 'tasks user-el0 exited status=7'
 vgate_assert 01 serial-contains 'tasks user-el0 reaped'
 vgate_assert 01 serial-absent '[EXC] parking:'
-vgate_assert 01 python <<'PY'
+vgate_assert 01 snapshot 'gpu-screen-after' <<'PY'
 import sys, zlib, struct
 path = sys.argv[1]
 d = open(path, 'rb').read()
