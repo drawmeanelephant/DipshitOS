@@ -18,7 +18,29 @@ vgate_run A -- \
     --snapshot-after "tabhold: cycled" \
     --script-expect "tabhold: done" --timeout 240
 
-vgate_assert A serial-contains "wnd: tab-attach child=3 parent=2"
+# vgate_assert A serial-contains "wnd: tab-attach child=3 parent=2"
+# Census-tolerant form: the attach's child/parent ids depend on window-open
+# order. Kernel ids are free-slot order from user_window_id_base=2, and
+# NOTEPAD's M42 SX4 open waits on a host theme-sync round trip before
+# win_open — so TABHOLD's instant open can land id 2 with NOTEPAD id 3
+# (the regression that redded this gate) or the legacy order. WND prints
+# `wnd: tab-attach` ONLY on a successful attach, so its existence with
+# child != parent is the proof: TABHOLD attached to NOTEPAD, never itself.
+vgate_assert A python <<'PY'
+import os, re, sys
+ser = open(os.environ["VG_SER"]).read()
+m = re.search(r'(?m)^wnd: tab-attach child=(\d+) parent=(\d+)', ser)
+if not m:
+    print("tab-attach line missing", file=sys.stderr)
+    sys.exit(1)
+a, b = int(m.group(1)), int(m.group(2))
+# The burst census is exactly {2,3}: NOTEPAD + TABHOLD are the only window
+# openers (WND opens none), so a valid attach is child!=parent within it.
+if not (2 <= a <= 3 and 2 <= b <= 3 and a != b):
+    print(f"attach ids not the two-window census: child={a} parent={b}", file=sys.stderr)
+    sys.exit(1)
+print(f"attach-ok child={a} parent={b}")
+PY
 vgate_assert A serial-contains "tabhold: cycled"
 vgate_assert A serial-absent "[EXC] parking:"
 

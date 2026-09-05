@@ -1,11 +1,17 @@
 //! VirelaiOS M37 DQ2 tab-strip live-gate holder (TABHOLD.BIN, issue #840).
 //!
-//! Opens a user window, attaches it as a tab of window 2 (NOTEPAD — the
-//! gate boots NOTEPAD first), prints `tabhold: attached parent=2`, then
-//! parks in a yield loop HOLDING the attachment so the gate can snapshot
-//! the kernel-painted strip. SEXITEST.BIN stays untouched as the M19
-//! fixture (it attaches, cycles, and detaches immediately — no hold),
-//! and the holder reuses DQ3's future click target for free.
+//! Opens a user window, attaches it as a tab of the OTHER window in the
+//! fixture (NOTEPAD), then parks in a yield loop HOLDING the attachment so
+//! the gate can snapshot the kernel-painted strip. SEXITEST.BIN stays
+//! untouched as the M19 fixture (it attaches, cycles, and detaches
+//! immediately — no hold), and the holder reuses DQ3's click target.
+//!
+//! Census note: window ids are free-slot order from user_window_id_base
+//! (2), and the M42 SX4 TabApp open (NOTEPAD) waits on a host theme-sync
+//! round trip BEFORE win_open — so NOTEPAD's window can land as id 2 or id
+//! 3 relative to this holder's own id, whichever opens first. The attach
+//! target is therefore derived from own_id (SEXITEST's M19 precedent), not
+//! hardcoded: the burst census is exactly {2,3} (WND opens no window).
 
 const std = @import("std");
 const wnd_core = @import("wnd_core");
@@ -15,7 +21,7 @@ const sys_write: u64 = 1;
 const sys_win_open: u64 = 12;
 
 pub const ready_marker: []const u8 = "tabhold: ready\n";
-pub const attached_marker: []const u8 = "tabhold: attached parent=2\n";
+pub const attached_marker: []const u8 = "tabhold: attached parent="; // + "{d}\n" at the print site
 pub const cycled_marker: []const u8 = "tabhold: cycled\n";
 pub const done_marker: []const u8 = "tabhold: done\n";
 pub const no_wm_marker: []const u8 = "tabhold: no-wm\n";
@@ -84,14 +90,20 @@ fn main(argc: usize, argv_va: u64) noreturn {
     if (own_id < 0) park();
 
     // Self-driving: the gate execs us in the boot burst alongside NOTEPAD,
-    // so window 2 / the WM may not exist yet. Retry attach until it lands
-    // (bounded: 40 × 2s ≈ 80s — NOTEPAD opens in ~15-30s). No script-phase
-    // triggers needed, which dodges the phase-2 delivery flake (issue #843).
+    // so the WM / NOTEPAD's window may not exist yet. Retry attach until it
+    // lands (bounded: 40 × 2s ≈ 80s — NOTEPAD opens in ~15-30s). No
+    // script-phase triggers needed, which dodges the phase-2 delivery flake
+    // (issue #843). Target the fixture's OTHER window whatever the census
+    // (see the header): NOTEPAD's M42 SX4 theme-sync delay lets our own
+    // instant open win id 2, in which case hardcoding parent=2 would be a
+    // self-attach that WND honestly refuses (regression that redded the
+    // DQ2/DQ3 gates after the SX4 port).
+    const target_parent: u32 = if (own_id == 2) 3 else 2;
     var attached = false;
     var tries: usize = 0;
     while (!attached and tries < 40) : (tries += 1) {
         if (ui.wm_find_pid("WND.BIN") != 0) {
-            attached = ui.wm_attach_tab(@intCast(own_id), 2, "TABHOLD.BIN");
+            attached = ui.wm_attach_tab(@intCast(own_id), target_parent, "TABHOLD.BIN");
         }
         if (!attached) ui.sleep_ticks(2);
     }
@@ -99,11 +111,14 @@ fn main(argc: usize, argv_va: u64) noreturn {
         write_marker(attach_fail_marker);
         park();
     }
-    write_marker(attached_marker);
-    // Cycle twice (2→3→2): the group ends on NOTEPAD visible+focused with
-    // this window attached-but-hidden — the canonical tabbed state the
-    // strip paint reads. Either cycle failing leaves a held-but-unfocused
-    // group; the gate snapshots whatever is, honestly.
+    var abuf: [48]u8 = undefined;
+    const amsg = std.fmt.bufPrint(&abuf, "{s}{d}\n", .{ attached_marker, target_parent }) catch "tabhold: attached parent=?\n";
+    write_marker(amsg);
+    // Cycle twice (container→child→container, ids census-dependent): the
+    // group ends on NOTEPAD visible+focused with this window
+    // attached-but-hidden — the canonical tabbed state the strip paint
+    // reads. Either cycle failing leaves a held-but-unfocused group; the
+    // gate snapshots whatever is, honestly.
     if (!ui.wm_cycle_tab("TABHOLD.BIN") or !ui.wm_cycle_tab("TABHOLD.BIN")) {
         write_marker(cycle_fail_marker);
         park();
