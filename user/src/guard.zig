@@ -11,9 +11,13 @@
 //! gate failure).
 //!
 //! Naked asm with the fixed register ABI (sys_write = slot 1, sys_exit =
-//! slot 3). The exec'd stack is 16 KiB (`scheduler.task_stack_size`), sp_el0
-//! starts at `stack_va + 16384`; stepping `#0x5000` (20 KiB) lands exactly
-//! 4 KiB below the stack bottom — the guard page.
+//! slot 3). The exec'd stack is 32 KiB (`scheduler.task_stack_size`, grown
+//! from 16 KiB in 4cb442c, 2026-08-25), sp_el0 starts at
+//! `stack_va + 32768`; stepping `#0x9000` (36 KiB) lands exactly 4 KiB
+//! below the stack bottom — the guard page. (The old `#0x5000` step only
+//! cleared 20 KiB of a 32 KiB stack, so the store landed in mapped stack
+//! and the exit-1 branch fired — the closed-guard-gap regression behind
+//! the m16 live-gate reds.)
 
 const std = @import("std");
 
@@ -30,11 +34,11 @@ export fn _start() callconv(.naked) noreturn {
         \\mov x2, #20
         \\mov x8, #1
         \\svc #0
-        \\// Step 20 KiB below the stack top: sp_el0 = stack_va + 16 KiB, so
+        \\// Step 36 KiB below the stack top: sp_el0 = stack_va + 32 KiB, so
         \\// this lands at stack_va - 4 KiB — the guard page just below the
         \\// stack bottom. The store faults (data abort) and the kernel reaps
         \\// this process with status 139.
-        \\sub sp, sp, #0x5000
+        \\sub sp, sp, #0x9000
         \\mov x0, #0xdead
         \\str x0, [sp]
         \\// Unreachable unless the guard page was mistakenly mapped: exit 1
