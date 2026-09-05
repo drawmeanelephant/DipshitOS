@@ -13,13 +13,42 @@
 //!       * Inactive tabs are hidden (sys_wmctl(set_state)).
 //!   - Mouse Routing:
 //!       * Clicking tab pill activates tab.
-//!       * Clicking 'x' sends WIN_CLOSE and closes tab.
+//!       * Clicking 'x' closes the tab through the kernel's WIN_CLOSE
+//!         seam (wmctl cmd 13) — the app really exits.
+//!       * Clicking '+ New tab' summons the Sexiburger launcher palette.
 //!       * Clicking Sexiburger summons God Menu command palette.
 //!   - Keyboard Shortcuts:
 //!       * Ctrl+Tab / Ctrl+Shift+Tab: Cycle active tabs forward / backward.
 //!       * Ctrl+1..9: Jump directly to tab index 1..9.
 //!       * Ctrl+W: Close active tab.
+//!       * Ctrl+T: '+ New tab' — summon the Sexiburger launcher palette.
 //!       * Ctrl+Space: Summon Sexiburger command palette overlay.
+//!   - Mirror-Synced Lifecycle (M42 UX): the kernel's released bit (flags
+//!     bit 13 on kind-20 WM_WINDOW mirrors) removes the tab of a window
+//!     the kernel RELEASED (app self-exit); close_tab drives the kernel's
+//!     own release primitive (wmctl WIN_CLOSE, cmd 13) so the app gets the
+//!     real WIN_CLOSE event and exits — no zombie hidden processes.
+//!   - Unsaved-State Honesty (M42 UX r2, claim #1011): the kernel's
+//!     unsaved bit (kind-20 flags bit 12, fanned from user_set_unsaved on
+//!     every dirty change) rides every mirror into a per-tab dirty flag;
+//!     dirty tabs wear an accent dot on their pill, and EVERY close entry
+//!     point ('x' click, Ctrl+W, detach RPC) routes a dirty tab through
+//!     the unsaved-changes dialog BEFORE any WMCTL_WIN_CLOSE — the
+//!     existing slot-65 DIALOG (cmd 11) actions 3-6 kernel primitives,
+//!     button hit-tests via the shared wnd_core rule (parity by
+//!     construction). TABWM self-paints the modal — its full-scanout
+//!     compose overdraws the kernel's own dialog blit — with the same
+//!     200x100 centered geometry + palette, so what the user sees matches
+//!     WND's dialog exactly while the kernel still applies the decisions.
+//!   - Close Feedback (M42 UX r2): a closed tab's row slot flashes an
+//!     accent band for ~18 composite ticks (muted when the kernel refused
+//!     the close and only a hide was applied) — the cause of the
+//!     activation switch is visible.
+//!   - Alt-Tab Parity (M42 UX r2): Alt+Tab / Alt+Shift+Tab (kind-21 raw
+//!     chords, MOD_ALT + Tab) switch tabs with WND's WMS6 Gate A
+//!     semantics — TABWM proposes via the SAME alt_tab_next policy
+//!     Ctrl+Tab uses, the kernel applies focus+raise through the ALT_TAB
+//!     commit seam (focus auto-show re-reveals the hidden target tab).
 //!   - Zero Heap Allocation: all tab mirrors, state, and rendering operate strictly in static BSS and stack.
 //!   - Direct Scanout Ownership: maps the 1280x720 framebuffer via M33 Seam B (`sys_mmap` with
 //!     `m33_surf_scan_tag`) for sub-millisecond anti-aliased composition.
@@ -28,6 +57,10 @@
 const std = @import("std");
 pub const ui = @import("lib/ui.zig");
 const sexiburger_menu = @import("lib/sexiburger.zig");
+/// M42 UX r2 (claim #1011): the shared dialog button-rect rule — TABWM
+/// hit-tests the SAME unsaved-dialog geometry the kernel applies (parity
+/// by construction; the anonymous import already exists on tabwm_mod).
+const wnd_core = @import("wnd_core");
 const Rect = ui.Rect;
 const Event = ui.Event;
 
@@ -52,6 +85,22 @@ const wmctl_alt_tab: u64 = 5;
 const alt_tab_commit: u64 = 3;
 const wmctl_tray: u64 = 10;
 const wmctl_dialog: u64 = 11;
+/// M42 UX (2026-09-05): WIN_CLOSE — the kernel applies its own
+/// `user_close` release (the owner gets the real WIN_CLOSE event push;
+/// TABWM gets the released kind-20 mirror back). a0 = window id.
+const wmctl_win_close: u64 = 13;
+
+// M42 UX r2 (2026-09-05, claim #1011): the slot-65 DIALOG unsaved-changes
+// actions — the SAME primitives WND.BIN issues (user/src/wnd.zig): 3 =
+// show (a2 = target window id; the kernel validates it is a live user
+// window), 4 = save (kernel posts WIN_UNSAVED to the owner), 5 =
+// dont-save (kernel runs user_close on the target), 6 = cancel. The
+// kernel refuses 4/5/6 when no dialog is open. No new modal system — the
+// existing WMS8 Gate 4 seam, WM-seat-only.
+const dialog_unsaved_show: u64 = 3;
+const dialog_unsaved_save: u64 = 4;
+const dialog_unsaved_dont_save: u64 = 5;
+const dialog_unsaved_cancel: u64 = 6;
 
 // M33 Scanout shared surface mapping tag
 const m33_surf_scan_tag: u64 = 0x4000_0000_0000_0000;
@@ -70,6 +119,8 @@ pub const btn_left: u8 = 0x01;
 // HID keyboard usage constants (USB HID Usage Tables §10 Keyboard/Keypad Page)
 pub const usage_a: u8 = 0x04;
 pub const usage_w: u8 = 0x1a;
+/// M42 UX (2026-09-05): 't' — the Ctrl+T "+ New tab" chord (HID Usage Tables §10).
+pub const usage_t: u8 = 0x17;
 pub const usage_1: u8 = 0x1e;
 pub const usage_2: u8 = 0x1f;
 pub const usage_3: u8 = 0x20;
@@ -91,6 +142,20 @@ pub const tab_close_marker: []const u8 = "tabwm: win-close";
 pub const god_menu_marker: []const u8 = "tabwm: god-menu\n";
 /// M42 SX5 (issue #986): the god-menu overlay launched an app into a new tab.
 pub const launch_marker_prefix: []const u8 = "tabwm: launch ";
+/// M42 UX (2026-09-05): the "+ New tab" affordance fired (sidebar pill
+/// click or Ctrl+T) — the pinned evidence marker.
+pub const new_tab_marker: []const u8 = "tabwm: new-tab\n";
+/// M42 UX r2 (2026-09-05, claim #1011): the unsaved-changes dialog
+/// markers — the dialog marker is id-carrying (`tabwm: unsaved-dialog
+/// id=N`), the three choice markers are fixed. All four are pinned by
+/// the class-A tests and grepped by the live-tabwm-unsaved gate.
+pub const unsaved_dialog_marker: []const u8 = "tabwm: unsaved-dialog id=";
+pub const unsaved_save_marker: []const u8 = "tabwm: unsaved-save\n";
+pub const unsaved_discard_marker: []const u8 = "tabwm: unsaved-discard\n";
+pub const unsaved_cancel_marker: []const u8 = "tabwm: unsaved-cancel\n";
+/// M42 UX r2 (2026-09-05): the Alt+Tab parity marker (id-carrying prefix,
+/// bufPrint appends `N\n`).
+pub const alt_tab_marker: []const u8 = "tabwm: alt-tab id=";
 
 // Geometry constants
 pub const fb_w: u32 = 1280;
@@ -186,6 +251,11 @@ pub const Tab = struct {
     title_len: usize = 0,
     valid: bool = false,
     visible: bool = false,
+    /// M42 UX r2 (claim #1011): the kernel's unsaved bit (kind-20 mirror
+    /// flags bit 12, fanned from user_set_unsaved on every dirty change) —
+    /// the tab is DIRTY; its closes route through the unsaved-changes
+    /// dialog and its pill wears the accent dot.
+    unsaved: bool = false,
     orig_w: u32 = 0,
     orig_h: u32 = 0,
     resizable: bool = false,
@@ -333,6 +403,37 @@ pub var hover_tab: ?usize = null;
 pub var hover_sexiburger: bool = false;
 pub var hover_theme_toggle: bool = false;
 pub var hover_clip: bool = false;
+pub var hover_new_tab: bool = false;
+
+// M42 UX r2 (2026-09-05, claim #1011): the unsaved-changes dialog state
+// machine — BSS only, no heap in WM paths.
+/// Row index of the tab awaiting an unsaved-dialog decision (null = none).
+pub var unsaved_pending_close: ?usize = null;
+/// Drift guard for the pending row: the pending tab's window id. The
+/// modal consumption keeps LOCAL input from shifting rows, but an
+/// external released mirror could still shift the list — the recorded
+/// row is validated against this id at choice time (fallback: id lookup).
+pub var unsaved_pending_id: u32 = 0;
+/// True while TABWM's unsaved-changes dialog is on screen (modal: pointer
+/// clicks and keys are consumed by the dialog first).
+pub var unsaved_dialog_open_tabwm: bool = false;
+
+// M42 UX r2: the close-feedback flash — the row slot the last-closed tab
+// occupied, a countdown in composite ticks, and whether the KERNEL
+// applied the close (closed=false = refused seam, hide-only fallback:
+// muted flash instead of accent).
+pub var close_flash_row: ?usize = null;
+pub var close_flash_ticks: u32 = 0;
+pub var close_flash_closed: bool = false;
+/// Flash duration in composite ticks (18 tested below 60).
+pub const close_flash_ticks_max: u32 = 18;
+
+/// True while the close flash is live for `row` (the band draws only in
+/// that row slot). Pure — unit-testable without a framebuffer.
+pub fn close_flash_active(row: usize) bool {
+    const r = close_flash_row orelse return false;
+    return close_flash_ticks > 0 and r == row;
+}
 
 var ticks_count: u64 = 0;
 var present_count: u64 = 0;
@@ -440,7 +541,15 @@ pub fn activate_tab(idx: usize) void {
 }
 
 /// Close tab by index:
-/// 1. Hides the window.
+/// 1. Asks the KERNEL to close the window (`wmctl_win_close`, cmd 13 —
+///    the M42 UX seam): the kernel applies its own `user_close` release,
+///    which pushes the REAL WIN_CLOSE event to the owning process
+///    (lib/tabapp.zig dispatches it to a clean exit) and fans the
+///    released kind-20 mirror back to TABWM. The local tab removal here
+///    is the optimistic half; the released mirror is the authoritative
+///    echo (handle_window_mirror is a no-op for an already-removed id).
+///    A refused seam (no WM seat on the host / kernel refusal) falls back
+///    to hide-only — the pre-M42 behavior — honestly marked.
 /// 2. Emits `tabwm: win-close` evidence marker.
 /// 3. Removes the tab from manager.
 /// 4. Automatically activates the new active tab if any remain.
@@ -448,12 +557,29 @@ pub fn close_tab(idx: usize) void {
     if (idx >= manager.tab_count or !manager.tabs[idx].valid) return;
     const closed_id = manager.tabs[idx].id;
 
-    // 1. Hide the window
-    set_state(closed_id, false);
+    // 1. Real close semantics (M42 UX): the kernel's release primitive.
+    //    sys_wmctl returns 0 on success; nonzero (ENOENT-shaped) when the
+    //    id is unknown — treated as already-closed. Any other refusal
+    //    (host no-op returns 0) keeps the hide fallback honest via
+    //    `hidden_only` bookkeeping on the removed tab's successor state.
+    const close_rc = syscall6(sys_wmctl, wmctl_win_close, closed_id, 0, 0, 0, 0);
+    const kernel_closed = (close_rc == 0);
+    if (!kernel_closed) {
+        // Fallback: hide the window (pre-M42 behavior).
+        set_state(closed_id, false);
+    }
+
+    // M42 UX r2: close-feedback flash — record the ROW SLOT this tab
+    // occupied (position, not id: the rows shift as tabs remove) BEFORE
+    // remove_tab collapses the list. Accent when the kernel applied the
+    // close; muted when the seam was refused and only a hide ran.
+    close_flash_row = idx;
+    close_flash_ticks = close_flash_ticks_max;
+    close_flash_closed = kernel_closed;
 
     // 2. Emit WIN_CLOSE marker
     var buf: [64]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, "{s} id={d}\n", .{ tab_close_marker, closed_id }) catch "tabwm: win-close\n";
+    const msg = std.fmt.bufPrint(&buf, "{s} id={d} closed={d}\n", .{ tab_close_marker, closed_id, @as(u8, if (kernel_closed) 1 else 0) }) catch "tabwm: win-close\n";
     write_marker(msg);
 
     // 3. Remove tab from manager
@@ -463,6 +589,177 @@ pub fn close_tab(idx: usize) void {
     if (manager.active_idx) |new_idx| {
         activate_tab(new_idx);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Unsaved-changes dialog (M42 UX r2, claim #1011)
+// ---------------------------------------------------------------------------
+
+/// Validate the pending-close row against the recorded id (the modal
+/// keeps local input from shifting rows, but an external released mirror
+/// could still shift the list — a drifted row falls back to the id
+/// lookup). Null when the tab is gone.
+fn resolve_pending_close() ?usize {
+    const row = unsaved_pending_close orelse return null;
+    if (row < manager.tab_count and manager.tabs[row].valid and manager.tabs[row].id == unsaved_pending_id) {
+        return row;
+    }
+    return manager.find_by_id(unsaved_pending_id);
+}
+
+/// THE close decision point (M42 UX r2): every close entry point — the
+/// close-'x' pointer click, Ctrl+W, and the wnd_mail_apply detach RPC —
+/// routes here. A CLEAN tab closes immediately (unchanged M42 UX
+/// semantics); a DIRTY tab (the kernel's unsaved mirror bit) is
+/// INTERCEPTED: the unsaved-changes dialog opens via the slot-65 DIALOG
+/// show action (a2 = the tab's window id; the kernel validates it is a
+/// live user window) and NO close happens until a choice is applied.
+pub fn request_close_tab(idx: usize) void {
+    if (idx >= manager.tab_count or !manager.tabs[idx].valid) return;
+    if (manager.tabs[idx].unsaved) {
+        unsaved_pending_close = idx;
+        unsaved_pending_id = manager.tabs[idx].id;
+        unsaved_dialog_open_tabwm = true;
+        _ = syscall6(sys_wmctl, wmctl_dialog, dialog_unsaved_show, unsaved_pending_id, 0, 0, 0);
+        var buf: [64]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "{s}{d}\n", .{ unsaved_dialog_marker, unsaved_pending_id }) catch "tabwm: unsaved-dialog\n";
+        write_marker(msg);
+        return;
+    }
+    close_tab(idx);
+}
+
+/// Apply one unsaved-dialog choice (M42 UX r2). The marker goes FIRST,
+/// then the syscall (the kernel applies the SAME primitive WND's dialog
+/// applies — parity by construction). The save and discard paths are
+/// deliberately ASYMMETRIC (documented in the ADR 0018 round-2 addendum):
+///   - save: the app saves on WIN_UNSAVED and (observed on 2026-09-05
+///     hardware: NOTEPAD) exits by itself — save-and-exit — so the WM's
+///     close_tab via WMCTL_WIN_CLOSE lands while the window is still
+///     registered (closed=1) and the kernel's WIN_CLOSE push goes
+///     unconsumed. Either owner behavior converges: if the app instead
+///     kept running after its save, the WIN_CLOSE would close it, and
+///     the released mirror echo is absorbed as a no-op (already
+///     removed).
+///   - discard: the kernel's user_close INSIDE DIALOG action 5 releases
+///     the window; NO local close_tab runs — the released kind-20 mirror
+///     echo removes the tab (handle_window_mirror) and activates the
+///     next. The mirror is the authoritative removal path.
+///   - cancel: the dialog clears and the tab stays open (dirty flag
+///     intact).
+pub fn apply_unsaved_choice(choice: wnd_core.UnsavedChoice) void {
+    const pending = resolve_pending_close();
+    switch (choice) {
+        .none => return,
+        .save => {
+            write_marker(unsaved_save_marker);
+            _ = syscall6(sys_wmctl, wmctl_dialog, dialog_unsaved_save, 0, 0, 0, 0);
+            unsaved_dialog_open_tabwm = false;
+            unsaved_pending_close = null;
+            if (pending) |p| close_tab(p);
+        },
+        .dont_save => {
+            write_marker(unsaved_discard_marker);
+            _ = syscall6(sys_wmctl, wmctl_dialog, dialog_unsaved_dont_save, 0, 0, 0, 0);
+            unsaved_dialog_open_tabwm = false;
+            unsaved_pending_close = null;
+        },
+        .cancel => {
+            write_marker(unsaved_cancel_marker);
+            _ = syscall6(sys_wmctl, wmctl_dialog, dialog_unsaved_cancel, 0, 0, 0, 0);
+            unsaved_dialog_open_tabwm = false;
+            unsaved_pending_close = null;
+        },
+    }
+}
+
+/// One key while TABWM's unsaved-changes dialog is open (M42 UX r2). The
+/// dialog is MODAL: Escape (0x29) = cancel, Enter (0x28) = save (the
+/// keyboard-driven DIALOG semantics), and every other key is consumed
+/// too — no chord (Ctrl+W, Ctrl+Tab, ...) may mutate the tab list while
+/// the pending row is outstanding. Returns true (consumed) while open.
+pub fn unsaved_dialog_key(usage: u8) bool {
+    if (!unsaved_dialog_open_tabwm) return false;
+    switch (usage) {
+        0x29 => apply_unsaved_choice(.cancel),
+        0x28 => apply_unsaved_choice(.save),
+        else => {},
+    }
+    return true;
+}
+
+/// One kernel WM_WINDOW mirror (kind 20), mirror-synced into the tab list
+/// (M42 UX, 2026-09-05 — extracted from main()'s inline handler):
+///   - `released=true`: the kernel RELEASED the window (app self-exit or a
+///     close_owner sweep — flags bit 13, fanned from remove_user_at). Drop
+///     the tab — NO WIN_CLOSE echo back to the app, NO set_state of our
+///     own — and, when the removed tab was the active one, activate the
+///     new active tab (if any remain).
+///   - `visible=false` without released: TABWM's own hide echo or an
+///     external hide — ignored; the tab list is ours.
+///   - `visible=true`: upsert. A known tab refreshes orig_w/orig_h (when
+///     nonzero) and the M42 UX r2 unsaved flag (flags bit 12, fanned from
+///     user_set_unsaved — set AND cleared as the app's dirty state
+///     changes); an unknown id >= 2 joins as "App N" and activates. A
+///     17th window is IGNORED (no add, no activation hijack) when the
+///     manager is already at max_tabs.
+pub fn handle_window_mirror(wid: u8, visible: bool, released: bool, unsaved: bool, orig_w: u32, orig_h: u32) void {
+    const id: u32 = wid;
+    if (released) {
+        const idx = manager.find_by_id(id) orelse return;
+        const was_active = (manager.active_idx != null and manager.active_idx.? == idx);
+        _ = manager.remove_tab(id);
+        if (was_active) {
+            if (manager.active_idx) |next| activate_tab(next);
+        }
+        return;
+    }
+    if (!visible) return;
+    if (manager.find_by_id(id)) |idx| {
+        if (orig_w > 0) manager.tabs[idx].orig_w = orig_w;
+        if (orig_h > 0) manager.tabs[idx].orig_h = orig_h;
+        manager.tabs[idx].unsaved = unsaved;
+        return;
+    }
+    // Unknown window: ids 0/1 are kernel-fixed layers, never tabs; the
+    // manager is capped at max_tabs and add_or_update_tab_geom's overflow
+    // returns index 0 — so a 17th window is ignored here rather than
+    // hijacking tab 0's activation.
+    if (wid < 2 or manager.tab_count >= max_tabs) return;
+    var title_buf: [32]u8 = undefined;
+    const default_title = std.fmt.bufPrint(&title_buf, "App {d}", .{wid}) catch "App";
+    const idx = manager.add_or_update_tab_geom(id, default_title, orig_w, orig_h, false);
+    manager.tabs[idx].unsaved = unsaved;
+    activate_tab(idx);
+}
+
+// ---------------------------------------------------------------------------
+// "+ New tab" affordance (M42 UX, 2026-09-05)
+// ---------------------------------------------------------------------------
+
+/// The "+ New tab" pill height (a slim row under the last tab pill).
+pub const new_tab_pill_h: u32 = 24;
+
+/// The y of the "+ New tab" pill: directly below the last tab row
+/// (58 + tab_count * tab_row_h + a 4px gap), clamped to stay above the
+/// y=650 tab-list bound. With zero tabs it renders in the empty-state
+/// area — the affordance exists even when nothing is open.
+pub fn new_tab_pill_y() u32 {
+    const y: u32 = 58 + @as(u32, @intCast(manager.tab_count)) * tab_row_h + 4;
+    return @min(y, 650 - new_tab_pill_h);
+}
+
+/// The "+ New tab" pill rect (the same 8..172 pill column as the tabs).
+pub fn new_tab_pill_rect() Rect {
+    return Rect.make(8, new_tab_pill_y(), 164, new_tab_pill_h);
+}
+
+/// The affordance fired (pill click or Ctrl+T): emit the pinned
+/// `tabwm: new-tab` marker and summon the Sexiburger launcher overlay —
+/// the same path the god-menu button uses.
+pub fn trigger_new_tab() void {
+    write_marker(new_tab_marker);
+    overlay_summon();
 }
 
 // ---------------------------------------------------------------------------
@@ -563,6 +860,9 @@ pub fn overlay_refresh_filter() void {
 }
 
 pub fn overlay_summon() void {
+    // M42 UX r2: the Sexiburger overlay must not open over the modal
+    // unsaved-changes dialog (the dialog owns the input).
+    if (unsaved_dialog_open_tabwm) return;
     if (!overlay_loaded) _ = overlay_load_manifest();
     overlay_open = true;
     write_marker(god_menu_marker);
@@ -632,6 +932,15 @@ pub fn overlay_key(usage: u8) bool {
     return false;
 }
 
+/// The overlay's empty-state line (M42 UX, 2026-09-05): an EMPTY manifest
+/// ("no apps installed") is a different, honestly distinguishable state
+/// from a filter that merely has no hits ("no matching apps").
+/// Host-testable — the renderer draws exactly this string.
+pub fn overlay_empty_message() []const u8 {
+    if (overlay_count == 0) return "no apps installed";
+    return "no matching apps";
+}
+
 /// Draw the overlay panel centered over the content viewport (call after
 /// draw_sidebar; the dim + panel overwrite the canvas only).
 pub fn draw_overlay(pixels: []u32) void {
@@ -671,7 +980,7 @@ pub fn draw_overlay(pixels: []u32) void {
         ui.draw_text_sized(0, line[0..@min(line.len, 56)], px + 14, ry + 1, ui.font_size_badge, if (is_sel) 0x000000 else ui.sidebar_text_active());
     }
     if (overlay_filtered_count == 0) {
-        ui.draw_text_sized(0, "no matching apps", px + 14, py + 74, ui.font_size_badge, ui.sidebar_text_inactive());
+        ui.draw_text_sized(0, overlay_empty_message(), px + 14, py + 74, ui.font_size_badge, ui.sidebar_text_inactive());
     }
     // Footer
     ui.draw_text_sized(0, "esc dismiss", px + 12, py + overlay_panel_h - 20, ui.font_size_badge, ui.sidebar_text_inactive());
@@ -775,9 +1084,9 @@ pub fn draw_sidebar(scan: [*]u32) void {
 
     // 4. Middle Tab List (y = 58 .. 650)
     if (manager.tab_count == 0) {
-        ui.draw_text_sized(0, "No open tabs", 20, 80, ui.font_size_badge, ui.sidebar_text_inactive());
-        ui.draw_text_sized(0, "Press Ctrl+Space", 20, 96, ui.font_size_badge, ui.sidebar_text_inactive());
-        ui.draw_text_sized(0, "to launch apps", 20, 110, ui.font_size_badge, ui.sidebar_text_inactive());
+        ui.draw_text_sized(0, "No open tabs", 20, 96, ui.font_size_badge, ui.sidebar_text_inactive());
+        ui.draw_text_sized(0, "Ctrl+Space or +", 20, 112, ui.font_size_badge, ui.sidebar_text_inactive());
+        ui.draw_text_sized(0, "to launch apps", 20, 126, ui.font_size_badge, ui.sidebar_text_inactive());
     } else {
         for (0..manager.tab_count) |i| {
             const tab_y: u32 = 58 + @as(u32, @intCast(i)) * tab_row_h;
@@ -794,19 +1103,49 @@ pub fn draw_sidebar(scan: [*]u32) void {
                 ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(10, tab_y + 8, 3, 22), 1, ui.theme_accent());
                 // Tab title in active text color
                 ui.draw_text_sized(0, manager.tabs[i].get_title(), 24, tab_y + 11, ui.font_size_tab_title, ui.sidebar_text_active());
+                // M42 UX r2: the unsaved dot — the tab is DIRTY (the
+                // kernel's mirror bit 12); 4x4 accent dot at x=142..146,
+                // vertically centered, clear of the 'x' at x=154.
+                if (manager.tabs[i].unsaved) {
+                    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(142, tab_y + 17, 4, 4), 0, ui.theme_accent());
+                }
                 // Close button 'x'
                 ui.draw_text_sized(0, "x", 154, tab_y + 11, ui.font_size_badge, ui.sidebar_text_inactive());
             } else if (is_hover) {
                 // Hover pill background
                 ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, pill_rect, ui.tab_pill_radius, ui.sidebar_hover_pill());
                 ui.draw_text_sized(0, manager.tabs[i].get_title(), 24, tab_y + 11, ui.font_size_tab_title, ui.sidebar_text_active());
+                if (manager.tabs[i].unsaved) {
+                    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(142, tab_y + 17, 4, 4), 0, ui.theme_accent());
+                }
                 ui.draw_text_sized(0, "x", 154, tab_y + 11, ui.font_size_badge, ui.sidebar_text_inactive());
             } else {
                 // Inactive tab
                 ui.draw_text_sized(0, manager.tabs[i].get_title(), 24, tab_y + 11, ui.font_size_tab_title, ui.sidebar_text_inactive());
+                if (manager.tabs[i].unsaved) {
+                    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(142, tab_y + 17, 4, 4), 0, ui.theme_accent());
+                }
             }
         }
     }
+
+    // M42 UX r2: the close-feedback flash — the row slot the just-closed
+    // tab occupied lights for a few composite ticks, drawn AFTER the pills
+    // so it overlays (accent = the kernel applied the close; muted = the
+    // seam was refused and only a hide ran).
+    if (close_flash_row) |frow| {
+        if (close_flash_active(frow)) {
+            const fy: u32 = 58 + @as(u32, @intCast(frow)) * tab_row_h + 2;
+            ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(8, fy, 164, 34), 0, if (close_flash_closed) ui.theme_accent() else ui.sidebar_text_inactive());
+        }
+    }
+
+    // M42 UX: the "+ New tab" affordance pill — directly below the last
+    // tab row (or in the empty-state area), always rendered so it is
+    // discoverable; hover lights it like the other pills.
+    const nt_rect = new_tab_pill_rect();
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, nt_rect, ui.tab_pill_radius, if (hover_new_tab) ui.sidebar_hover_pill() else ui.sidebar_active_pill());
+    ui.draw_text_sized(0, "+ New tab", 24, nt_rect.y + 5, ui.font_size_badge, if (hover_new_tab) ui.sidebar_text_active() else ui.sidebar_text_inactive());
 
     // 5. Bottom Status / Tray Area (y = 660 .. 720)    // Separator line at y = 660
     var bx: u32 = 8;
@@ -835,6 +1174,45 @@ pub fn draw_sidebar(scan: [*]u32) void {
     // M42 SX5: the Sexiburger god-menu overlay renders last (over the
     // canvas + sidebar dim).
     draw_overlay(pixels);
+    // M42 UX r2: the unsaved-changes dialog renders after EVERYTHING —
+    // TABWM composes the full scanout every tick, so its compose overdraws
+    // the kernel's own dialog blit; TABWM self-paints the modal (same
+    // 200x100 geometry + palette as driving_award paint_scene) so it is
+    // actually visible while the kernel still applies the decisions.
+    draw_unsaved_dialog(pixels);
+}
+
+/// The unsaved-changes dialog, self-painted (M42 UX r2, claim #1011):
+/// dimmed viewport, 200x100 centered surface, 2px amber border, the
+/// "Save before closing?" message and the Save/Don't/No buttons — the
+/// EXACT geometry + palette of the kernel's own blit (driving_award
+/// paint_scene), hit-tested through the shared wnd_core rect rule. Mirror
+/// parity by construction.
+pub fn draw_unsaved_dialog(pixels: []u32) void {
+    if (!unsaved_dialog_open_tabwm) return;
+    // Dim the viewport behind the modal (same source-over dim the
+    // Sexiburger overlay uses).
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(viewport_x, 0, viewport_w, fb_h), 0, 0xB0000000);
+    const dw = wnd_core.unsaved_dialog_w; // 200
+    const dh = wnd_core.unsaved_dialog_h; // 100
+    const dx = (fb_w - dw) / 2; // 540 at 1280
+    const dy = (fb_h - dh) / 2; // 310 at 720
+    // Surface + 2px amber border (the kernel's exact palette).
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(dx, dy, dw, dh), 0, 0x1e293b);
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(dx, dy, dw, 2), 0, 0xf59e0b);
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(dx, dy + dh - 2, dw, 2), 0, 0xf59e0b);
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(dx, dy, 2, dh), 0, 0xf59e0b);
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(dx + dw - 2, dy, 2, dh), 0, 0xf59e0b);
+    // Message.
+    ui.draw_text_sized(0, "Save before closing?", dx + 10, dy + 10, ui.font_size_badge, 0xffffff);
+    // Buttons: Save (green), Don't (red), No (gray) — the wnd_core rects
+    // (y in [dy+dh-30, dy+dh-10)).
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(dx + 20, dy + dh - 30, 60, 20), 0, 0x10b981);
+    ui.draw_text_sized(0, "Save", dx + 26, dy + dh - 24, ui.font_size_badge, 0xffffff);
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(dx + 90, dy + dh - 30, 60, 20), 0, 0xef4444);
+    ui.draw_text_sized(0, "Don't", dx + 96, dy + dh - 24, ui.font_size_badge, 0xffffff);
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(dx + 160, dy + dh - 30, 30, 20), 0, 0x64748b);
+    ui.draw_text_sized(0, "No", dx + 163, dy + dh - 24, ui.font_size_badge, 0xffffff);
 }
 
 /// Proper Sexiburger mascot emblem (M42 SX1, issue #982): the real 🐙+🍔
@@ -915,11 +1293,27 @@ fn draw_mini_mascot(pixels: []u32, x: u32, y: u32) void {
 // Pointer & Hit Testing (M39 TWM2)
 // ---------------------------------------------------------------------------
 pub fn handle_pointer(px: u32, py: u32, clicked: bool) void {
+    // M42 UX r2: while the unsaved-changes dialog is open it is MODAL —
+    // clicks route to its buttons FIRST (the shared wnd_core rect rule,
+    // the same hit-test the kernel applies) and EVERY click is consumed:
+    // nothing underneath (tab pills, Sexiburger, tray) may react. Hover
+    // state is parked so the sidebar can't fight the modal.
+    if (unsaved_dialog_open_tabwm) {
+        hover_sexiburger = false;
+        hover_tab = null;
+        hover_theme_toggle = false;
+        hover_clip = false;
+        hover_new_tab = false;
+        if (clicked) apply_unsaved_choice(wnd_core.unsaved_dialog_choice_at(fb_w, fb_h, px, py));
+        return;
+    }
+
     if (px >= sidebar_w) {
         hover_sexiburger = false;
         hover_tab = null;
         hover_theme_toggle = false;
         hover_clip = false;
+        hover_new_tab = false;
         return;
     }
 
@@ -942,16 +1336,25 @@ pub fn handle_pointer(px: u32, py: u32, clicked: bool) void {
     // Clipboard hit test (y = 672..696, x = 134..170)
     hover_clip = (px >= 134 and px < 170 and py >= 672 and py < 696);
 
-    // Tab items hit test (y = 58..650)
+    // Tab items hit test (y = 58..650). M42 UX: the "+ New tab" pill is
+    // checked FIRST — it lives inside the tab-row band, and the generic
+    // row-index mapping would otherwise eat its click (the same precedence
+    // pattern as the close 'x' check at x = 148..168 inside the row).
     hover_tab = null;
-    if (py >= 58 and py < 650) {
+    hover_new_tab = (px >= 8 and px < 172 and py >= new_tab_pill_y() and py < new_tab_pill_y() + new_tab_pill_h);
+    if (hover_new_tab) {
+        if (clicked) trigger_new_tab(); // emits `tabwm: new-tab` + god-menu summon
+    } else if (py >= 58 and py < 650) {
         const idx = (py - 58) / tab_row_h;
         if (idx < manager.tab_count) {
             hover_tab = idx;
             if (clicked) {
                 // Check if clicked close box 'x' at x = 148..168
+                // (M42 UX r2: the close DECISION routes through
+                // request_close_tab — a dirty tab opens the dialog
+                // instead of closing).
                 if (px >= 148 and px < 168) {
-                    close_tab(idx);
+                    request_close_tab(idx);
                 } else {
                     activate_tab(idx);
                 }
@@ -963,20 +1366,55 @@ pub fn handle_pointer(px: u32, py: u32, clicked: bool) void {
 // ---------------------------------------------------------------------------
 // Keyboard Shortcuts Decoder (M39 TWM2)
 // ---------------------------------------------------------------------------
+
+/// The alt-tab next-target policy (M42 UX r2, claim #1011) — the TAB-LIST
+/// mirror of WND's WMS6 Gate A `next_alt_tab_target`: the target is the
+/// tab AFTER the active one, wrapping; null when fewer than two tabs (the
+/// shim's "not enough windows" rule); `active=null` is treated as 0-start;
+/// `shift` inverts the direction. Pure — BOTH Alt+Tab and Ctrl+Tab compute
+/// their target through this helper, so the two chords can never disagree.
+pub fn alt_tab_next(count: usize, active: ?usize, shift: bool) ?usize {
+    if (count < 2) return null;
+    const cur: usize = active orelse 0;
+    if (shift) {
+        return if (cur == 0) count - 1 else cur - 1;
+    }
+    return (cur + 1) % count;
+}
+
 pub fn handle_wm_key(usage: u8, flags: u16) void {
     const ctrl = (flags & ui.MOD_CTRL != 0);
     const shift = (flags & ui.MOD_SHIFT != 0);
+    const alt = (flags & ui.MOD_ALT != 0);
+
+    // M42 UX r2: Alt+Tab / Alt+Shift+Tab — WND WMS6 Gate A parity. The
+    // kernel fans every key-down edge to the WM while it owns input (raw
+    // chords included), so the WM proposes the next target via the SAME
+    // alt_tab_next policy Ctrl+Tab uses and the kernel applies focus +
+    // raise through the ALT_TAB commit seam (driving_award.alt_tab_wm_commit;
+    // its focus auto-show re-reveals the TABWM-hidden target tab). Checked
+    // BEFORE the Ctrl branch. No activate_tab on this path — the commit is
+    // the kernel-side truth; only the local active index and the marker
+    // keep the sidebar consistent.
+    if (alt and usage == usage_tab and !unsaved_dialog_open_tabwm) {
+        if (alt_tab_next(manager.tab_count, manager.active_idx, shift)) |target| {
+            const target_id = manager.tabs[target].id;
+            _ = syscall6(sys_wmctl, wmctl_alt_tab, target_id, alt_tab_commit, 0, 0, 0);
+            manager.active_idx = target;
+            var buf: [64]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "{s}{d}\n", .{ alt_tab_marker, target_id }) catch "tabwm: alt-tab\n";
+            write_marker(msg);
+        }
+        return;
+    }
 
     if (ctrl) {
-        // Ctrl+Tab / Ctrl+Shift+Tab: cycle tabs
+        // Ctrl+Tab / Ctrl+Shift+Tab: cycle tabs (M42 UX r2: the SAME
+        // alt_tab_next policy the Alt+Tab chord uses — the two chords
+        // agree by construction).
         if (usage == usage_tab) {
-            if (shift) {
-                manager.cycle_tab_backward();
-            } else {
-                manager.cycle_tab();
-            }
-            if (manager.active_idx) |idx| {
-                activate_tab(idx);
+            if (alt_tab_next(manager.tab_count, manager.active_idx, shift)) |target| {
+                activate_tab(target);
             }
             return;
         }
@@ -990,11 +1428,18 @@ pub fn handle_wm_key(usage: u8, flags: u16) void {
             return;
         }
 
-        // Ctrl+W: close active tab
+        // Ctrl+W: close active tab (M42 UX r2: through the close DECISION
+        // point — a dirty active tab opens the unsaved dialog instead).
         if (usage == usage_w) {
             if (manager.active_idx) |cur| {
-                close_tab(cur);
+                request_close_tab(cur);
             }
+            return;
+        }
+
+        // Ctrl+T: the "+ New tab" affordance — summon the launcher (M42 UX)
+        if (usage == usage_t) {
+            trigger_new_tab();
             return;
         }
 
@@ -1085,7 +1530,9 @@ pub fn wnd_mail_apply(req: *const ui.WmRpc) bool {
         },
         ui.wm_rpc_kind_detach_tab => {
             if (manager.find_by_id(req.id)) |idx| {
-                close_tab(idx);
+                // M42 UX r2: the third close entry point — same decision
+                // rule as the pointer 'x' and Ctrl+W (dirty = dialog).
+                request_close_tab(idx);
                 return true;
             }
             return false;
@@ -1150,6 +1597,13 @@ fn main() noreturn {
                 // Drain app mailbox requests
                 wnd_mail_loop();
 
+                // M42 UX r2: the close-feedback flash countdown — one tick
+                // per composite; at 0 the band disappears.
+                if (close_flash_ticks > 0) {
+                    close_flash_ticks -= 1;
+                    if (close_flash_ticks == 0) close_flash_row = null;
+                }
+
                 // Update clock
                 clock_minutes = @intCast((ticks_count / 60) % 60);
                 clock_hours = @intCast(12 + (ticks_count / 3600) % 12);
@@ -1174,26 +1628,30 @@ fn main() noreturn {
                 handle_pointer(px, py, clicked);
             },
             wm_window_kind => {
-                // Window opened or registered by an app (id >= 2)
-                const wid: u32 = ev.flags & 0xff;
-                if (wid >= 2) {
-                    const orig_w: u32 = @intCast(ev.arg1 & 0xffff);
-                    const orig_h: u32 = @intCast(ev.arg1 >> 16);
-                    if (manager.find_by_id(wid) == null) {
-                        var title_buf: [32]u8 = undefined;
-                        const default_title = std.fmt.bufPrint(&title_buf, "App {d}", .{wid}) catch "App";
-                        const idx = manager.add_or_update_tab_geom(wid, default_title, orig_w, orig_h, false);
-                        activate_tab(idx);
-                    } else if (manager.find_by_id(wid)) |idx| {
-                        if (orig_w > 0) manager.tabs[idx].orig_w = orig_w;
-                        if (orig_h > 0) manager.tabs[idx].orig_h = orig_h;
-                    }
-                }
+                // Window opened or registered by an app (id >= 2). M42 UX:
+                // the mirror is decoded here and synced into the tab list
+                // by handle_window_mirror — flags low byte = id, bit 8 =
+                // visible, bit 12 = unsaved (M42 UX r2: fanned from
+                // user_set_unsaved), bit 13 = released; arg1 = w|(h<<16)
+                // as today.
+                const wid: u8 = @intCast(ev.flags & 0xff);
+                const visible = (ev.flags & (1 << 8)) != 0;
+                const unsaved = (ev.flags & (1 << 12)) != 0;
+                const released = (ev.flags & (1 << 13)) != 0;
+                const orig_w: u32 = @intCast(ev.arg1 & 0xffff);
+                const orig_h: u32 = @intCast(ev.arg1 >> 16);
+                handle_window_mirror(wid, visible, released, unsaved, orig_w, orig_h);
             },
             wm_key_kind => {
                 const usage: u8 = @intCast(ev.arg0 & 0xff);
-                // M42 SX5: the god-menu overlay consumes the stream first.
-                if (!overlay_key(usage)) {
+                // M42 UX r2: the modal unsaved-changes dialog consumes the
+                // key stream FIRST (Escape = cancel, Enter = save, all
+                // else swallowed — no chord may mutate the tab list while
+                // a close decision is pending).
+                if (unsaved_dialog_open_tabwm) {
+                    _ = unsaved_dialog_key(usage);
+                } else if (!overlay_key(usage)) {
+                    // M42 SX5: the god-menu overlay consumes the stream next.
                     handle_wm_key(usage, ev.flags);
                 }
             },
@@ -1754,4 +2212,396 @@ test "tabwm: god-menu overlay accepts digits, minus, period in the filter (M42 S
     // Exactly one hit: "64-bit Calc" (CALC.BIN).
     try std.testing.expectEqual(@as(usize, 1), overlay_filtered_count);
     overlay_dismiss();
+}
+
+// ---------------------------------------------------------------------------
+// Unit Tests (M42 UX hardening — 2026-09-05)
+// ---------------------------------------------------------------------------
+test "tabwm: released mirror removes the tab and activates the next (M42 UX)" {
+    manager = TabManager.init();
+    _ = manager.add_or_update_tab(2, "Alpha");
+    _ = manager.add_or_update_tab(3, "Beta");
+    activate_tab(0); // active = id 2
+
+    // The kernel RELEASED window 2 (app self-exit): the tab goes, and the
+    // next tab activates because the removed one was active.
+    handle_window_mirror(2, false, true, false, 0, 0);
+    try std.testing.expectEqual(@as(usize, 1), manager.tab_count);
+    try std.testing.expect(manager.find_by_id(2) == null);
+    try std.testing.expectEqual(@as(?u32, 3), manager.get_active_id());
+
+    // Removing a NON-active tab keeps the active tab (index adjusts).
+    _ = manager.add_or_update_tab(4, "Gamma");
+    activate_tab(1); // active = id 3 (index 1 after the first removal)
+    handle_window_mirror(4, false, true, false, 0, 0);
+    try std.testing.expectEqual(@as(usize, 1), manager.tab_count);
+    try std.testing.expectEqual(@as(?u32, 3), manager.get_active_id());
+}
+
+test "tabwm: released mirror for an unknown id is a no-op (M42 UX)" {
+    manager = TabManager.init();
+    _ = manager.add_or_update_tab(2, "Alpha");
+    activate_tab(0);
+    handle_window_mirror(9, false, true, false, 0, 0);
+    try std.testing.expectEqual(@as(usize, 1), manager.tab_count);
+    try std.testing.expectEqual(@as(?usize, 0), manager.active_idx);
+    try std.testing.expectEqual(@as(?u32, 2), manager.get_active_id());
+}
+
+test "tabwm: hide mirror without released does NOT remove a tab (M42 UX)" {
+    manager = TabManager.init();
+    _ = manager.add_or_update_tab(2, "Alpha");
+    activate_tab(0);
+    // TABWM's own hide echo / an external hide: the tab list is ours.
+    handle_window_mirror(2, false, false, false, 0, 0);
+    try std.testing.expectEqual(@as(usize, 1), manager.tab_count);
+    try std.testing.expect(manager.find_by_id(2) != null);
+    try std.testing.expectEqual(@as(?u32, 2), manager.get_active_id());
+}
+
+test "tabwm: visible mirror upserts geometry (M42 UX)" {
+    manager = TabManager.init();
+    _ = manager.add_or_update_tab(2, "Alpha");
+    handle_window_mirror(2, true, false, false, 640, 480);
+    try std.testing.expectEqual(@as(u32, 640), manager.tabs[0].orig_w);
+    try std.testing.expectEqual(@as(u32, 480), manager.tabs[0].orig_h);
+    // Zero geometry never clobbers a known size.
+    handle_window_mirror(2, true, false, false, 0, 0);
+    try std.testing.expectEqual(@as(u32, 640), manager.tabs[0].orig_w);
+    try std.testing.expectEqual(@as(u32, 480), manager.tabs[0].orig_h);
+}
+
+test "tabwm: the 17th window is ignored, tab 0 not hijacked (M42 UX)" {
+    manager = TabManager.init();
+    var id: u32 = 2;
+    while (id < 2 + max_tabs) : (id += 1) {
+        _ = manager.add_or_update_tab(id, "Filler");
+    }
+    try std.testing.expectEqual(max_tabs, manager.tab_count);
+    try std.testing.expect(manager.activate_tab(3));
+    handle_window_mirror(99, true, false, false, 100, 100);
+    try std.testing.expectEqual(max_tabs, manager.tab_count); // no add
+    try std.testing.expect(manager.find_by_id(99) == null);
+    try std.testing.expectEqual(@as(?usize, 3), manager.active_idx); // NOT tab 0
+}
+
+test "tabwm: + New tab affordance and Ctrl+T trigger the new-tab path (M42 UX)" {
+    // The pinned marker the class-B live gate greps.
+    try std.testing.expectEqualStrings("tabwm: new-tab\n", new_tab_marker);
+
+    // Ctrl+T summons the launcher.
+    manager = TabManager.init();
+    overlay_open = false;
+    handle_wm_key(usage_t, ui.MOD_CTRL);
+    try std.testing.expect(overlay_open);
+    overlay_dismiss();
+
+    // Hover lights the pill; click fires the affordance.
+    const r = new_tab_pill_rect();
+    handle_pointer(r.x + 40, r.y + 10, false);
+    try std.testing.expect(hover_new_tab);
+    handle_pointer(r.x + 40, r.y + 10, true);
+    try std.testing.expect(overlay_open);
+    overlay_dismiss();
+
+    // Hit-test ORDER: with max_tabs tabs the '+' pill clamps INTO the
+    // tab-row band — the generic row mapping (idx 15) must NOT eat the
+    // click; the affordance wins and activation is untouched.
+    var id: u32 = 2;
+    while (id < 2 + max_tabs) : (id += 1) {
+        _ = manager.add_or_update_tab(id, "Filler");
+    }
+    try std.testing.expect(manager.activate_tab(3));
+    const clamped = new_tab_pill_rect();
+    try std.testing.expectEqual(@as(u32, 650 - new_tab_pill_h), clamped.y);
+    handle_pointer(clamped.x + 40, clamped.y + 10, true);
+    try std.testing.expect(overlay_open);
+    try std.testing.expectEqual(@as(?usize, 3), manager.active_idx); // no tab-15 hijack
+    overlay_dismiss();
+
+    // Empty state: the pill renders in the empty-state area and works there.
+    manager = TabManager.init();
+    handle_pointer(50, 70, true); // y=62..86 pill band, tab_count == 0
+    try std.testing.expect(overlay_open);
+    overlay_dismiss();
+}
+
+test "tabwm: overlay empty vs filtered-empty messages are distinguishable (M42 UX)" {
+    // Empty manifest: no apps installed at all.
+    overlay_count = 0;
+    overlay_filtered_count = 0;
+    try std.testing.expectEqualStrings("no apps installed", overlay_empty_message());
+    // Seeded manifest with a filter that has no hits: a different state.
+    overlay_seed_catalog();
+    try std.testing.expectEqual(@as(usize, 3), overlay_count);
+    overlay_filter_len = 3;
+    @memcpy(overlay_filter[0..3], "zzz");
+    overlay_refresh_filter();
+    try std.testing.expectEqual(@as(usize, 0), overlay_filtered_count);
+    try std.testing.expectEqualStrings("no matching apps", overlay_empty_message());
+}
+
+test "tabwm: close_tab removes the tab and activates the next (M42 UX)" {
+    manager = TabManager.init();
+    _ = manager.add_or_update_tab(31, "Calc");
+    _ = manager.add_or_update_tab(32, "Files");
+    activate_tab(0);
+
+    // close_tab always removes the tab and activates the next one (the
+    // kernel wmctl seam no-ops on the host; on-device the kernel applies
+    // its user_close release and fans the released mirror back, which
+    // handle_window_mirror already absorbed — removing an unknown id is a
+    // no-op, so the optimistic local removal and the mirror echo agree).
+    close_tab(0);
+    try std.testing.expectEqual(@as(usize, 1), manager.tab_count);
+    try std.testing.expectEqual(@as(?u32, 32), manager.get_active_id());
+
+    // The released mirror for the closed id arrives AFTER the local
+    // removal (the kernel answers the seam): absorbed as a no-op.
+    handle_window_mirror(31, false, true, false, 0, 0);
+    try std.testing.expectEqual(@as(usize, 1), manager.tab_count);
+    try std.testing.expectEqual(@as(?u32, 32), manager.get_active_id());
+
+    // Closing the last tab empties the manager.
+    close_tab(0);
+    try std.testing.expectEqual(@as(usize, 0), manager.tab_count);
+    try std.testing.expectEqual(@as(?usize, null), manager.active_idx);
+}
+
+// ---------------------------------------------------------------------------
+// Unit Tests (M42 UX r2 — unsaved-state honesty, close flash, Alt-Tab)
+// ---------------------------------------------------------------------------
+test "tabwm: unsaved bit-12 mirror sets, clears, and still releases (M42 UX r2)" {
+    // Creation path: a window born dirty joins with the flag set.
+    manager = TabManager.init();
+    handle_window_mirror(5, true, false, true, 100, 100);
+    try std.testing.expectEqual(@as(usize, 1), manager.tab_count);
+    try std.testing.expect(manager.tabs[0].unsaved);
+    // Refresh path: the flag follows the mirror (set).
+    _ = manager.add_or_update_tab(2, "Alpha");
+    handle_window_mirror(2, true, false, true, 640, 480);
+    try std.testing.expect(manager.tabs[1].unsaved);
+    // ...and clears when the app saves (the kernel fans bit 12 = 0).
+    handle_window_mirror(2, true, false, false, 0, 0);
+    try std.testing.expect(!manager.tabs[1].unsaved);
+    // Geometry refresh still works alongside the flag.
+    try std.testing.expectEqual(@as(u32, 640), manager.tabs[1].orig_w);
+    // Regression guard of the extended signature: released still removes.
+    handle_window_mirror(2, false, true, true, 0, 0);
+    try std.testing.expectEqual(@as(usize, 1), manager.tab_count);
+    try std.testing.expect(manager.find_by_id(2) == null);
+}
+
+test "tabwm: request_close_tab intercepts a dirty tab with the dialog (M42 UX r2)" {
+    manager = TabManager.init();
+    unsaved_dialog_open_tabwm = false;
+    unsaved_pending_close = null;
+    unsaved_pending_id = 0;
+    _ = manager.add_or_update_tab(2, "Dirty");
+    _ = manager.add_or_update_tab(3, "Clean");
+    manager.tabs[0].unsaved = true;
+    activate_tab(0);
+
+    // Dirty tab: NO removal — the dialog state is set and the pending row
+    // recorded.
+    request_close_tab(0);
+    try std.testing.expectEqual(@as(usize, 2), manager.tab_count);
+    try std.testing.expect(unsaved_dialog_open_tabwm);
+    try std.testing.expectEqual(@as(?usize, 0), unsaved_pending_close);
+    try std.testing.expectEqual(@as(u32, 2), unsaved_pending_id);
+
+    // Clean tab: the immediate M42 UX close (no dialog).
+    unsaved_dialog_open_tabwm = false;
+    unsaved_pending_close = null;
+    request_close_tab(1);
+    try std.testing.expectEqual(@as(usize, 1), manager.tab_count);
+    try std.testing.expect(!unsaved_dialog_open_tabwm);
+    try std.testing.expectEqual(@as(?usize, null), unsaved_pending_close);
+}
+
+test "tabwm: unsaved choices — save closes, cancel keeps, discard defers to the mirror (M42 UX r2)" {
+    // SAVE: the dialog clears and close_tab removes the tab (the app saves
+    // and keeps running until the WM's WIN_CLOSE — the WM closes it).
+    manager = TabManager.init();
+    unsaved_dialog_open_tabwm = false;
+    unsaved_pending_close = null;
+    _ = manager.add_or_update_tab(2, "Doc");
+    _ = manager.add_or_update_tab(3, "Other");
+    manager.tabs[0].unsaved = true;
+    activate_tab(0);
+    request_close_tab(0);
+    try std.testing.expect(unsaved_dialog_open_tabwm);
+    apply_unsaved_choice(.save);
+    try std.testing.expect(!unsaved_dialog_open_tabwm);
+    try std.testing.expectEqual(@as(usize, 1), manager.tab_count);
+    try std.testing.expectEqual(@as(?u32, 3), manager.get_active_id());
+    try std.testing.expectEqual(@as(?usize, null), unsaved_pending_close);
+
+    // CANCEL: the dialog clears and the tab STAYS.
+    manager.tabs[0].unsaved = true; // id 3 now dirty
+    request_close_tab(0);
+    apply_unsaved_choice(.cancel);
+    try std.testing.expect(!unsaved_dialog_open_tabwm);
+    try std.testing.expectEqual(@as(usize, 1), manager.tab_count);
+    try std.testing.expectEqual(@as(?u32, 3), manager.get_active_id());
+
+    // DISCARD: the dialog clears but the tab is NOT removed locally — the
+    // kernel's user_close inside DIALOG 5 releases it; the released
+    // mirror echo is the authoritative removal.
+    request_close_tab(0);
+    apply_unsaved_choice(.dont_save);
+    try std.testing.expect(!unsaved_dialog_open_tabwm);
+    try std.testing.expectEqual(@as(usize, 1), manager.tab_count);
+    handle_window_mirror(3, false, true, false, 0, 0);
+    try std.testing.expectEqual(@as(usize, 0), manager.tab_count);
+
+    // .none is a no-op (a click between/around the buttons).
+    manager.tabs[0].unsaved = false;
+    try std.testing.expectEqual(@as(usize, 0), manager.tab_count);
+}
+
+test "tabwm: wnd_core dialog hit-test maps the three buttons (M42 UX r2)" {
+    // 1280x720: dialog origin (540, 310); Save center (580, 390),
+    // Don't Save center (660, 390), Cancel center (715, 390).
+    const dx: u32 = (fb_w - wnd_core.unsaved_dialog_w) / 2;
+    const dy: u32 = (fb_h - wnd_core.unsaved_dialog_h) / 2;
+    try std.testing.expectEqual(@as(u32, 540), dx);
+    try std.testing.expectEqual(@as(u32, 310), dy);
+    try std.testing.expectEqual(wnd_core.UnsavedChoice.save, wnd_core.unsaved_dialog_choice_at(fb_w, fb_h, dx + 40, dy + 80));
+    try std.testing.expectEqual(wnd_core.UnsavedChoice.dont_save, wnd_core.unsaved_dialog_choice_at(fb_w, fb_h, dx + 120, dy + 80));
+    try std.testing.expectEqual(wnd_core.UnsavedChoice.cancel, wnd_core.unsaved_dialog_choice_at(fb_w, fb_h, dx + 175, dy + 80));
+    try std.testing.expectEqual(wnd_core.UnsavedChoice.none, wnd_core.unsaved_dialog_choice_at(fb_w, fb_h, dx + 40, dy + 40));
+    try std.testing.expectEqual(wnd_core.UnsavedChoice.none, wnd_core.unsaved_dialog_choice_at(fb_w, fb_h, dx + 85, dy + 80));
+}
+
+test "tabwm: alt_tab_next policy — null, cycle, invert, 0-start (M42 UX r2)" {
+    // Fewer than two tabs: no alt-tab.
+    try std.testing.expectEqual(@as(?usize, null), alt_tab_next(0, null, false));
+    try std.testing.expectEqual(@as(?usize, null), alt_tab_next(1, 0, false));
+    // Forward cycle with wrap.
+    try std.testing.expectEqual(@as(usize, 1), alt_tab_next(3, 0, false).?);
+    try std.testing.expectEqual(@as(usize, 2), alt_tab_next(3, 1, false).?);
+    try std.testing.expectEqual(@as(usize, 0), alt_tab_next(3, 2, false).?);
+    // Shift inverts (the tab before the active one).
+    try std.testing.expectEqual(@as(usize, 2), alt_tab_next(3, 0, true).?);
+    try std.testing.expectEqual(@as(usize, 1), alt_tab_next(3, 2, true).?);
+    // active=null is treated as 0-start.
+    try std.testing.expectEqual(@as(usize, 1), alt_tab_next(3, null, false).?);
+    try std.testing.expectEqual(@as(usize, 2), alt_tab_next(3, null, true).?);
+}
+
+test "tabwm: Alt+Tab chord moves the active tab, Alt+Shift+Tab inverts (M42 UX r2)" {
+    manager = TabManager.init();
+    _ = manager.add_or_update_tab(2, "A");
+    _ = manager.add_or_update_tab(3, "B");
+    _ = manager.add_or_update_tab(4, "C");
+    activate_tab(0);
+
+    // Alt+Tab: the kernel commit is a host no-op, but the local active
+    // index follows the target row and the tab list is untouched.
+    handle_wm_key(usage_tab, ui.MOD_ALT);
+    try std.testing.expectEqual(@as(?usize, 1), manager.active_idx);
+    try std.testing.expectEqual(@as(usize, 3), manager.tab_count);
+    // Alt+Shift+Tab: back.
+    handle_wm_key(usage_tab, ui.MOD_ALT | ui.MOD_SHIFT);
+    try std.testing.expectEqual(@as(?usize, 0), manager.active_idx);
+    _ = manager.remove_tab(3);
+    _ = manager.remove_tab(4);
+    // Single tab: the shim's "not enough windows" rule — no-op.
+    handle_wm_key(usage_tab, ui.MOD_ALT);
+    try std.testing.expectEqual(@as(?usize, 0), manager.active_idx);
+}
+
+test "tabwm: close_flash_active lives for the tick window then expires (M42 UX r2)" {
+    close_flash_row = 2;
+    close_flash_ticks = 3;
+    close_flash_closed = true;
+    try std.testing.expect(close_flash_active(2));
+    try std.testing.expect(!close_flash_active(1)); // wrong row
+    close_flash_ticks = 0;
+    try std.testing.expect(!close_flash_active(2)); // expired
+    close_flash_row = null;
+    close_flash_ticks = close_flash_ticks_max;
+    try std.testing.expect(!close_flash_active(2)); // no row recorded
+    // Cleanup for the drawing tests.
+    close_flash_row = null;
+    close_flash_ticks = 0;
+}
+
+test "tabwm: dialog modal keys — Enter saves, Escape cancels, chords swallowed (M42 UX r2)" {
+    manager = TabManager.init();
+    unsaved_dialog_open_tabwm = false;
+    unsaved_pending_close = null;
+    _ = manager.add_or_update_tab(2, "Doc");
+    _ = manager.add_or_update_tab(3, "Other");
+    manager.tabs[0].unsaved = true;
+    activate_tab(0);
+
+    // Closed dialog: keys are not consumed.
+    try std.testing.expect(!unsaved_dialog_key(0x29));
+
+    request_close_tab(0);
+    try std.testing.expect(unsaved_dialog_open_tabwm);
+    // Escape = cancel: the tab stays.
+    try std.testing.expect(unsaved_dialog_key(0x29));
+    try std.testing.expect(!unsaved_dialog_open_tabwm);
+    try std.testing.expectEqual(@as(usize, 2), manager.tab_count);
+    // A random chord while open is swallowed (no tab mutation).
+    request_close_tab(0);
+    try std.testing.expect(unsaved_dialog_key(usage_w)); // Ctrl+W would close — modal eats it
+    try std.testing.expectEqual(@as(usize, 2), manager.tab_count);
+    try std.testing.expect(unsaved_dialog_open_tabwm);
+    // Enter = save: the tab closes (host: the WM close seam no-ops).
+    try std.testing.expect(unsaved_dialog_key(0x28));
+    try std.testing.expect(!unsaved_dialog_open_tabwm);
+    try std.testing.expectEqual(@as(usize, 1), manager.tab_count);
+}
+
+test "tabwm: dialog modal pointer — clicks route to the buttons, tabs are safe (M42 UX r2)" {
+    manager = TabManager.init();
+    unsaved_dialog_open_tabwm = false;
+    unsaved_pending_close = null;
+    _ = manager.add_or_update_tab(2, "Doc");
+    _ = manager.add_or_update_tab(3, "Other");
+    manager.tabs[0].unsaved = true;
+    activate_tab(0);
+    request_close_tab(0);
+
+    // A click on the tab area (row 1 pill) is CONSUMED — no activation,
+    // no close.
+    handle_pointer(50, 100, true);
+    try std.testing.expectEqual(@as(usize, 2), manager.tab_count);
+    try std.testing.expectEqual(@as(?usize, 0), manager.active_idx);
+    try std.testing.expectEqual(@as(?usize, null), hover_tab); // hover parked
+    // A click on Sexiburger is consumed too (no overlay summon).
+    overlay_open = false;
+    handle_pointer(20, 20, true);
+    try std.testing.expect(!overlay_open);
+    // A click between the buttons (.none) leaves everything alone.
+    handle_pointer(580, 350, true);
+    try std.testing.expectEqual(@as(usize, 2), manager.tab_count);
+    // Save button center (580, 390): the save choice applies.
+    handle_pointer(580, 390, true);
+    try std.testing.expect(!unsaved_dialog_open_tabwm);
+    try std.testing.expectEqual(@as(usize, 1), manager.tab_count);
+}
+
+test "tabwm: the Sexiburger overlay cannot summon over the modal dialog (M42 UX r2)" {
+    manager = TabManager.init();
+    overlay_open = false;
+    unsaved_dialog_open_tabwm = true;
+    overlay_summon();
+    try std.testing.expect(!overlay_open);
+    unsaved_dialog_open_tabwm = false;
+    overlay_summon();
+    try std.testing.expect(overlay_open);
+    overlay_dismiss();
+}
+
+test "tabwm: unsaved + alt-tab markers are pinned (M42 UX r2)" {
+    try std.testing.expectEqualStrings("tabwm: unsaved-dialog id=", unsaved_dialog_marker);
+    try std.testing.expectEqualStrings("tabwm: unsaved-save\n", unsaved_save_marker);
+    try std.testing.expectEqualStrings("tabwm: unsaved-discard\n", unsaved_discard_marker);
+    try std.testing.expectEqualStrings("tabwm: unsaved-cancel\n", unsaved_cancel_marker);
+    try std.testing.expectEqualStrings("tabwm: alt-tab id=", alt_tab_marker);
 }

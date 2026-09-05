@@ -110,6 +110,16 @@ pub const wmctl_activate_tab: u64 = 20;
 /// `overview_open` state. a0 = action: 0 enter, 1 exit, 2 focus (a1 = id),
 /// 3 move (a1 = id, a2 = workspace). Zero new syscall slots (slot 65).
 pub const wmctl_overview: u64 = 21;
+/// M42 UX (2026-09-05, TABWM tab-close seam): WIN_CLOSE — a0 = window id.
+/// The registered WM closes a live user window through the kernel's OWN
+/// release primitive (`driving_award.user_close`) — the same path a shim
+/// close or `dui close <n>` runs — so the owner receives the kernel's
+/// real `WIN_CLOSE` event (the remove_user_at push) and the WM receives
+/// the released kind-20 mirror (flags bit 13). An EL0 process cannot
+/// write another process's event queue and the IPC mailbox is a separate
+/// FIFO no tabapp drains — this syscall is the seam that makes
+/// "click the tab 'x' -> the app actually exits" true end to end.
+pub const wmctl_win_close: u64 = 13;
 /// OVERVIEW actions (a0).
 pub const overview_enter_action: u64 = 0;
 pub const overview_exit_action: u64 = 1;
@@ -153,6 +163,8 @@ var dialog_count: u64 = 0;
 /// WM3 (issue #707 card 3): TASKBAR (cmd 12) submissions accepted — the
 /// taskbar-entry click decisions the WM made (restore/focus), applied.
 var taskbar_count: u64 = 0;
+/// M42 UX (2026-09-05): WIN_CLOSE (cmd 13) closes applied by the kernel.
+var win_close_count: u64 = 0;
 /// S6 Tab model (Milestone 19, issue #782): counters for tab operations.
 var tab_attach_count: u64 = 0;
 var tab_detach_count: u64 = 0;
@@ -426,6 +438,7 @@ pub const WmInfo = struct {
     tray_count: u64,
     dialog_count: u64,
     taskbar_count: u64,
+    win_close_count: u64,
     overview_count: u64,
     pointer_fan_count: u64,
     window_mirror_count: u64,
@@ -448,6 +461,7 @@ pub fn info() WmInfo {
         .tray_count = tray_count,
         .dialog_count = dialog_count,
         .taskbar_count = taskbar_count,
+        .win_close_count = win_close_count,
         .overview_count = overview_count,
         .pointer_fan_count = pointer_fan_count,
         .window_mirror_count = window_mirror_count,
@@ -499,9 +513,12 @@ pub fn fan_pointer(x: u32, y: u32, buttons: u8) void {
 
 /// Fan ONE window-registry mirror to the registered WM (so it can
 /// hit-test): kind 20, `flags` = id | visible<<8 | focused<<9 |
-/// workspace<<10 | unsaved<<12, `arg0` = x|(y<<16), `arg1` = w|(h<<16).
-/// No-op when no WM is registered.
-pub fn fan_window(id: u8, x: u32, y: u32, w: u32, h: u32, visible: bool, focused: bool, workspace: u8, unsaved: bool) void {
+/// workspace<<10 | unsaved<<12 | released<<13, `arg0` = x|(y<<16),
+/// `arg1` = w|(h<<16). `released` (M42 UX, 2026-09-05, additive bit 13)
+/// marks the RELEASE mirror fanned from `driving_award.remove_user_at` —
+/// the window left the registry (app self-exit / close_owner / user_close),
+/// as opposed to a plain state mirror. No-op when no WM is registered.
+pub fn fan_window(id: u8, x: u32, y: u32, w: u32, h: u32, visible: bool, focused: bool, workspace: u8, unsaved: bool, released: bool) void {
     const pid = wm_pid orelse return;
     window_mirror_count +%= 1;
     var flags: u16 = id;
@@ -509,6 +526,7 @@ pub fn fan_window(id: u8, x: u32, y: u32, w: u32, h: u32, visible: bool, focused
     if (focused) flags |= 1 << 9;
     flags |= @as(u16, workspace & 0x3) << 10;
     if (unsaved) flags |= 1 << 12;
+    if (released) flags |= 1 << 13;
     events.push(pid, .{
         .kind = events.WM_WINDOW,
         .flags = flags,
@@ -580,6 +598,12 @@ pub fn note_dialog() void {
 /// taskbar-entry click decision (restore/focus), applied by the kernel.
 pub fn note_taskbar() void {
     taskbar_count +%= 1;
+}
+
+/// M42 UX (2026-09-05): note one WIN_CLOSE (cmd 13) close — the WM's
+/// close decision, applied by the kernel through `user_close`.
+pub fn note_win_close() void {
+    win_close_count +%= 1;
 }
 
 /// S6 Tab model (Milestone 19, issue #782): notes for tab operations.
@@ -656,7 +680,7 @@ test "wm_server: WMS5 raw-pointer and window-mirror fan-out is WM-only (kind 19/
 
     // No WM: fan-outs are no-ops (nothing is generated, nothing changes).
     fan_pointer(100, 200, 0x01);
-    fan_window(2, 10, 20, 30, 40, true, true, 0, false);
+    fan_window(2, 10, 20, 30, 40, true, true, 0, false, false);
     fan_key(0x17, events.MOD_CTRL); // Gate 2: Ctrl+T usage
     try std.testing.expectEqual(@as(u64, 0), info().pointer_fan_count);
     try std.testing.expectEqual(@as(u64, 0), info().window_mirror_count);
@@ -665,7 +689,7 @@ test "wm_server: WMS5 raw-pointer and window-mirror fan-out is WM-only (kind 19/
     // Register pid 3: the fan-outs deliver kind 19/20/21 ONLY to the WM.
     try std.testing.expect(register(3));
     fan_pointer(100, 200, 0x01);
-    fan_window(2, 10, 20, 30, 40, true, true, 0, false);
+    fan_window(2, 10, 20, 30, 40, true, true, 0, false, false);
     fan_key(0x17, events.MOD_CTRL); // Gate 2: Ctrl+T usage
     try std.testing.expectEqual(@as(u64, 1), info().pointer_fan_count);
     try std.testing.expectEqual(@as(u64, 1), info().window_mirror_count);
@@ -692,7 +716,7 @@ test "wm_server: WMS5 raw-pointer and window-mirror fan-out is WM-only (kind 19/
     // WMS8 Gate 4 (issue #628): the unsaved bit (12) rides the mirror —
     // the WM's dirty-window decision input (pushed after the key so the
     // FIFO pops in order).
-    fan_window(2, 10, 20, 30, 40, true, true, 0, true);
+    fan_window(2, 10, 20, 30, 40, true, true, 0, true, false);
     const wu = events.pop(3).?;
     try std.testing.expectEqual(events.WM_WINDOW, wu.kind);
     try std.testing.expectEqual(@as(u16, 2 | (1 << 8) | (1 << 9) | (1 << 12)), wu.flags); // + unsaved
@@ -709,6 +733,60 @@ test "wm_server: WMS5 raw-pointer and window-mirror fan-out is WM-only (kind 19/
     fan_key(0x17, events.MOD_CTRL);
     try std.testing.expectEqual(@as(u64, 1), info().pointer_fan_count); // unchanged
     try std.testing.expectEqual(@as(u64, 1), info().key_fan_count); // unchanged
+}
+
+test "wm_server: remove_user_at fans a RELEASED mirror to the WM (M42 UX, flags bit 13)" {
+    events.init();
+    init();
+    events.on_event_pushed = null;
+    driving_award.arm();
+    try std.testing.expect(register(4));
+
+    // user_open fans the plain open mirror TWICE — focus() mirrors the
+    // newly focused window (WMS5) and user_open mirrors the opened one.
+    // Both are open-shaped: visible set, bit 13 CLEAR.
+    const first = switch (driving_award.user_open(10, 10, 100, 80, 9)) {
+        .opened => |id| id,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(u8, 2), first);
+    const open_m = events.pop(4).?;
+    try std.testing.expectEqual(events.WM_WINDOW, open_m.kind);
+    try std.testing.expect((open_m.flags & (1 << 8)) != 0); // visible
+    try std.testing.expect((open_m.flags & (1 << 13)) == 0); // NOT released
+    const open_m2 = events.pop(4).?;
+    try std.testing.expectEqual(events.WM_WINDOW, open_m2.kind);
+    try std.testing.expect((open_m2.flags & (1 << 8)) != 0);
+    try std.testing.expect((open_m2.flags & (1 << 13)) == 0);
+
+    // user_close -> remove_user_at fans exactly ONE mirror: visible=false,
+    // focused (the window held focus), RELEASED (bit 13) — the WM learns
+    // the window LEFT the registry, not merely hid.
+    try std.testing.expect(driving_award.user_close(2));
+    const rel = events.pop(4).?;
+    try std.testing.expectEqual(events.WM_WINDOW, rel.kind);
+    try std.testing.expectEqual(@as(u16, 2 | (1 << 9) | (1 << 13)), rel.flags);
+    try std.testing.expectEqual(@as(u32, 10 | (10 << 16)), rel.arg0);
+    try std.testing.expectEqual(@as(u32, 100 | (80 << 16)), rel.arg1);
+    try std.testing.expect(events.pop(4) == null); // exactly ONE mirror per release
+
+    // The app self-exit path fans the same mirror: close_owner (the exit
+    // path's teardown seam) releases the owner's remaining window.
+    const second = switch (driving_award.user_open(20, 20, 64, 64, 9)) {
+        .opened => |id| id,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(u8, 2), second); // the released slot is reused
+    _ = events.pop(4).?; // drain the two plain open mirrors
+    _ = events.pop(4).?;
+    try std.testing.expectEqual(@as(usize, 1), driving_award.close_owner(9));
+    const rel2 = events.pop(4).?;
+    try std.testing.expectEqual(events.WM_WINDOW, rel2.kind);
+    try std.testing.expectEqual(@as(u16, 2 | (1 << 9) | (1 << 13)), rel2.flags);
+    try std.testing.expect(events.pop(4) == null); // exactly ONE mirror per release
+
+    // Teardown: the WM seat and hooks are clean for later tests.
+    try std.testing.expect(unregister(4));
 }
 
 test "wm_server: SET_STATE counter + keyboard fan-out (claim 4278, WMS5 Gate 2)" {

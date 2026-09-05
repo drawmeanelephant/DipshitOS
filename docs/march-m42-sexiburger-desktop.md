@@ -97,3 +97,135 @@ host-side scaling. Sizes: 28 (TABWM sidebar button), 24 (God Menu header),
    only, the M39 rule).
 5. **One event per real change**: the kernel answers a size-changing
    SET_WINDOW with exactly one WIN_RESIZE; TABWM never repeats a proposal.
+
+## UX hardening (2026-09-05)
+
+A four-fix user-friendliness tranche on the TABWM area (claim issue #1008;
+ADR 0018 documents the ABI seam):
+
+1. **Real tab-close semantics** (`user/src/tabwm.zig` + `kernel/src/`):
+   `close_tab` now closes the window through the kernel's own release
+   primitive via the new slot-65 `WMCTL_WIN_CLOSE` (cmd 13, WM-seat-only,
+   ADR 0018 D2) — the kernel applies `user_close`, which pushes the REAL
+   `WIN_CLOSE` event to the owning process (lib/tabapp.zig dispatches it
+   to a clean exit) and fans the released mirror back (fix 2). An EL0
+   process cannot write another process's event queue and the IPC
+   mailbox is a separate FIFO no tabapp drains, so the WM-owned close
+   MUST ride the kernel. A refused seam falls back to hide-only, marked
+   honestly in the marker line (`tabwm: win-close id=N closed=0|1`).
+2. **Released-window mirror** (`kernel/src/driving_award.zig` +
+   `kernel/src/wm_server.zig`): `wm_window_hook`/`fan_window` gained an
+   additive `released: bool` parameter, encoded as kind-20 flags **bit 13**
+   (every existing bit unchanged; WND.BIN's decoder reads only bits
+   8/9/10-11/12). `remove_user_at` — the shared release primitive behind
+   `user_close` and the exit path's `close_owner` — fans ONE
+   `visible=false, released=true` mirror from the already-copied
+   `removed_win` state; the pre-removal fan in `user_close` is deleted, so
+   every release path informs the WM exactly once. `user/src/wnd.zig` is
+   untouched.
+3. **Mirror-synced tab lifecycle** (`user/src/tabwm.zig`): the inline
+   `wm_window_kind` handler in `main()` is extracted into the testable
+   `handle_window_mirror` — released removes the tab (no WIN_CLOSE echo,
+   no set_state of our own; the next tab activates if the removed one was
+   active), plain hides are ignored (the tab list is ours), visible upserts
+   geometry, and a 17th window is ignored instead of hijacking tab 0.
+4. **Discoverability**: a "+ New tab" pill renders directly below the last
+   tab (and in the empty state), clickable with hover, firing the new
+   pinned `tabwm: new-tab` marker and summoning the Sexiburger launcher;
+   Ctrl+T (HID 0x17) fires the same path. The pill is hit-tested BEFORE the
+   generic tab-row mapping. The overlay now distinguishes "no apps
+   installed" (empty manifest) from "no matching apps" (filter with no
+   hits), and the sidebar empty state names both Ctrl+Space and '+'.
+
+Class-A evidence: `zig build`, `zig build test`, and
+`bash tools/verify-unit-tests.sh` all green (exit 0), including 8 new
+tabwm "M42 UX" tests and the wm_server/driving_award released-mirror
+tests (`artifacts/2026-09-05-tabwm-ux-hardening/`).
+
+Class-B evidence (2026-09-05, this worktree): NEW gate
+`tools/gate/specs/live-tabwm-close.spec` — **PASS 1/1** on VZ. One
+headless boot: TABWM start → CALC.BIN (tab-aware full viewport) → an
+injected pointer click on the active tab's close box →
+`tabwm: win-close id=2 closed=1` (the KERNEL applied the close) →
+`calc: win_close` + `calc: exiting 43` (the app received the real
+WIN_CLOSE and exited) → `dui: windows=4` with no user-kind row (the
+kernel registry released the window). Live regressions on the same
+tree: `live-tabwm` PASS 1/1, `live-tabwm-fullscreen` PASS 2/2.
+
+The default-manager flip (`settings set wm tabwm`) remains opt-in —
+the documented human decision.
+
+## UX hardening round 2 (2026-09-05)
+
+A three-feature honesty tranche on the TABWM area (claim issue #1011;
+ADR 0018 addendum documents the design). NO new kernel surface — the
+slot-65 DIALOG (cmd 11) actions 3–6, the slot-65 ALT_TAB (cmd 5)
+commit, and the kind-20 mirror's unsaved bit (flags bit 12) are all
+reused; `wnd.zig`/`tabapp.zig`/kernel files untouched:
+
+1. **Unsaved-state honesty** (`user/src/tabwm.zig`): TABWM decodes the
+   kernel's unsaved bit into a per-tab dirty flag (both mirror upsert
+   paths) and renders a 4x4 accent dot on dirty tab pills (active,
+   hover, and inactive branches). EVERY close entry point — the
+   close-'x' click, Ctrl+W, the detach RPC — routes through one
+   decision function (`request_close_tab`): clean tabs close exactly as
+   in round 1; dirty tabs open the unsaved-changes dialog (DIALOG
+   action 3, target = the tab's window id) instead. The dialog is
+   modal: clicks hit-test the shared `wnd_core.unsaved_dialog_choice_at`
+   rects first and are consumed, Escape = cancel / Enter = save, other
+   keys are swallowed, and the Sexiburger overlay refuses to summon
+   over it. TABWM self-paints the dialog (its full-scanout compose
+   overdraws the kernel's own blit) with the kernel's exact 200x100
+   geometry + palette. The save/discard paths are deliberately
+   asymmetric (ADR 0018 addendum): save closes the tab via
+   WMCTL_WIN_CLOSE after DIALOG 4 (observed owner behavior: NOTEPAD
+   treats WIN_UNSAVED as save-and-exit, so cmd 13 lands while the
+   window is still registered and the WIN_CLOSE push goes unconsumed);
+   discard relies on the kernel's `user_close` inside
+   DIALOG 5 and lets the released mirror echo remove the tab.
+2. **Close-feedback flash** (`user/src/tabwm.zig`): `close_tab` records
+   the closed tab's ROW SLOT + an 18-composite-tick countdown;
+   `draw_sidebar` overlays an accent band on that slot while live
+   (muted when the kernel refused the close — the `closed=0` case).
+   Pure helper `close_flash_active` is unit-tested without a
+   framebuffer.
+3. **Alt-Tab parity** (`user/src/tabwm.zig`): Alt+Tab / Alt+Shift+Tab
+   (kind-21 raw chords, MOD_ALT + Tab) propose the target via the pure
+   `alt_tab_next` policy helper — the SAME helper Ctrl+Tab /
+   Ctrl+Shift+Tab now route through — and commit through the kernel's
+   ALT_TAB seam (focus + raise; focus auto-show re-reveals the hidden
+   target). Additive marker `tabwm: alt-tab id=N`.
+
+Class-A evidence (2026-09-05, this worktree): `zig build` exit 0
+(TABWM.BIN builds with the new wnd_core import);
+`zig build test --summary all` exit 0;
+`zig test --dep wnd_core -Mroot=user/src/tabwm.zig
+-Mwnd_core=kernel/src/wnd_core.zig` exit 0 — **75/75 tests passed**
+(11 new `M42 UX r2` tests: bit-12 mirror set/clear/release, dirty-close
+dialog intercept, save/cancel/discard choice semantics incl. the
+discard mirror echo, wnd_core button hit-test parity, alt_tab_next
+policy, Alt+Tab chord handling, close_flash_active, dialog modal keys,
+dialog modal pointer, overlay-summon modal guard, marker pins);
+`bash tools/verify-unit-tests.sh` exit 0;
+`zig fmt --check user/src/tabwm.zig` PASS. Full log:
+`artifacts/2026-09-05-tabwm-unsaved-alttab/`.
+
+Class-B evidence (2026-09-05, live VZ, this worktree): NEW gates
+`tools/gate/specs/live-tabwm-unsaved.spec` — **PASS 2/2** (save boot +
+discard boot: `dui unsaved 2 1` dirties NOTEPAD headless; the injected
+close-box click is INTERCEPTED — `tabwm: unsaved-dialog id=2`, no
+close; the Save click drives `tabwm: unsaved-save` → `notepad: saved
+ok` → `tabwm: win-close id=2 closed=1` → `notepad: win_unsaved` →
+`notepad: exiting 43` — observed save-path semantics: NOTEPAD treats
+WIN_UNSAVED as save-and-exit, so the kernel's WIN_CLOSE push goes
+unconsumed and `notepad: win_close` belongs to the discard path; the
+Don't Save click drives `tabwm: unsaved-discard` → `notepad: win_close`
+→ `notepad: exiting 43` with `dui: windows=4` (registry released) and
+NO save marker) and `tools/gate/specs/live-tabwm-alttab.spec` —
+**PASS 1/1** (one boot, CALC+NOTEPAD tabs, one real `alt-tab` chord →
+`tabwm: alt-tab id=2`, kernel ` alt_tab=` counter moved, `dui:
+windows=6 focused=2` — CALC holds kernel focus after the commit;
+`notepad: open id=3` is asserted via the kernel's `open: id=3
+owner=3` + TABWM's `tabwm: tab-switch idx=1 id=3` because NOTEPAD's
+own open marker hardcodes id=2). Class A 75/75; logs:
+`artifacts/2026-09-05-tabwm-unsaved-alttab/` + `artifacts/live-tabwm-{unsaved,alttab}-*`.

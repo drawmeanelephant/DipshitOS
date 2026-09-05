@@ -311,7 +311,11 @@ pub var wm_pointer_hook: ?*const fn (x: u32, y: u32, buttons: u8) void = null;
 /// The window-registry mirror fan-out (set by wm_server at REGISTER time;
 /// null when no WM). Callback gets the id + full rect + state; wm_server
 /// packs kind 20 WM_WINDOW. Called from the user-window mutation points.
-pub var wm_window_hook: ?*const fn (id: u8, x: u32, y: u32, w: u32, h: u32, visible: bool, focused: bool, workspace: u8, unsaved: bool) void = null;
+/// M42 UX (2026-09-05): `released` marks a RELEASE mirror — the window has
+/// left the registry (app self-exit / close_owner / user_close), not a
+/// mere visibility change; wm_server encodes it as flags bit 13 (additive;
+/// every existing bit is unchanged).
+pub var wm_window_hook: ?*const fn (id: u8, x: u32, y: u32, w: u32, h: u32, visible: bool, focused: bool, workspace: u8, unsaved: bool, released: bool) void = null;
 /// WMS5 Gate 2 (claim 4278): the raw-keyboard fan-out (set by wm_server at
 /// REGISTER time; null when no WM — the hook style of the pointer/window
 /// hooks). Callback gets the raw HID keyboard usage byte + the ADR 0009
@@ -1726,16 +1730,11 @@ pub fn user_move_to_workspace(id: u8, ws: u8) bool {
 /// window (the terminal + clock are fixed and never closable). The pool
 /// back-buffer is freed for the next `user_open` (which re-clears it).
 /// This is the PRIVILEGED release path (the monitor's `dui close <n>`); the
-/// EL0 `sys_win_close` enforces ownership on top of it.
+/// EL0 `sys_win_close` enforces ownership on top of it. The WM mirror goes
+/// out from `remove_user_at` (the shared release primitive) — every release
+/// path informs the WM exactly once.
 pub fn user_close(id: u8) bool {
     const idx = find_user_window_index(id) orelse return false;
-    // M32 WMS5: tell the registered WM BEFORE the row is removed (the
-    // mirror reads live state). The mirror goes out with visible=false so
-    // the WM drops its hit-test target.
-    if (wm_window_hook) |hook| {
-        const w = &windows[idx];
-        hook(w.id, w.x, w.y, w.w, w.h, false, w.id == focused_id, w.workspace, w.unsaved);
-    }
     remove_user_at(idx);
     return true;
 }
@@ -1775,7 +1774,7 @@ pub fn user_rect(id: u8) ?WinRect {
 pub fn wm_mirror(id: u8) void {
     const hook = wm_window_hook orelse return;
     const win = find_user_window(id) orelse return;
-    hook(id, win.x, win.y, win.w, win.h, win.visible, win.id == focused_id, win.workspace, win.unsaved);
+    hook(id, win.x, win.y, win.w, win.h, win.visible, win.id == focused_id, win.workspace, win.unsaved, false);
 }
 
 /// Card G6 (claim 0487) follow-on (slot 19): the FULL state of a user
@@ -1975,9 +1974,22 @@ pub fn close_owner(owner: usize) usize {
 /// and mark the fixed windows dirty so the next composite repaints over
 /// the released window's pixels.
 /// Card E4 (claim 0293): emits WIN_CLOSE to the user window owner.
+/// M42 UX (2026-09-05): fans ONE "released" mirror to the registered WM
+/// from the already-copied `removed_win` state (visible=false, released —
+/// flags bit 13), so EVERY release path (user_close, close_owner/app
+/// self-exit) informs the WM exactly once that the window left the
+/// registry — not merely hid. Pure BSS writes (allocation-free), so the
+/// exit/exception context contract of the WIN_CLOSE push holds for the
+/// fan equally.
 pub fn remove_user_at(idx: usize) void {
     const removed_win = windows[idx];
     const removed_id = removed_win.id;
+    // M42 UX: the released mirror goes out FIRST (the pre-removal fan the
+    // old user_close owned) — focused_id still holds the pre-removal truth
+    // here, and the WM drops its hit-test target before anything mutates.
+    if (wm_window_hook) |hook| {
+        hook(removed_win.id, removed_win.x, removed_win.y, removed_win.w, removed_win.h, false, removed_win.id == focused_id, removed_win.workspace, removed_win.unsaved, true);
+    }
     // WM1 (#707, claim 919): return the pool back-buffer to the allocator.
     // Runs in the exit path via close_owner — free_pages is a lock-free
     // bitmap op, so the exception-context contract holds. Unconditional: a
