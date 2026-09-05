@@ -94,7 +94,7 @@ const symbol = @import("symbol.zig");
 /// this from the original 16 KiB bound — the M15 JINGLE draft was 33 KB and
 /// would not load (claim 7636) — so programs can grow. 256 KiB = 8× the old
 /// bound and comfortably fits the first big program (`GLOBALS.BIN`).
-pub const exec_program_max: usize = 256 * 1024;
+pub const exec_program_max: usize = 512 * 1024;
 /// Card 3e (claim 4636): the bounded argv block — at most 8 args, each in
 /// a 32-byte slot (31 chars + NUL terminator), 256 bytes total. Packed into
 /// the process's OWN text page right after the loaded content (the text
