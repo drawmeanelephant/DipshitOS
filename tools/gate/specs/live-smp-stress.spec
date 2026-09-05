@@ -7,12 +7,24 @@ vgate_runner_flags -Xswiftc -DSPIKE
 vgate_repeat 1 BOOTS
 
 vgate_file script.txt <<'EOF'
+smp
+net ip 10.0.0.1
 exec -c1 SMPFILE.BIN
 exec -c2 SMPNET.BIN
 exec -c3 SMPWIN.BIN
-exec SMPEV.BIN
+exec -c0 SMPEV.BIN
 echo rx-smpst-ok
 EOF
+
+# The FILE hammer's fixture (the READ side of its round trips): legacy
+# planted it in the share with no trailing newline (40 bytes) — the
+# hammer's read-length assertion; see user/src/smpst_file.zig `fixture`.
+vgate_setup_python <<'PYEOF'
+import os
+share = os.path.join(os.environ["RUN_DIR"], "share")
+with open(os.path.join(share, "STRESS.TXT"), "wb") as f:
+    f.write(b"smpst stress fixture 0123456789abcdefghi")
+PYEOF
 
 vgate_run 01 -- --cpus 4 --screen '$RUN_DIR/screen' --net '$RUN_DIR/cap.bin' --script '$RUN_DIR/script.txt' --script-after "tasks user-el0 exited status=7" --timeout 60
 
