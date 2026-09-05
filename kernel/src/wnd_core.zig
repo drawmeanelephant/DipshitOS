@@ -693,6 +693,118 @@ pub fn tab_rect_contains(r: TabRect, x: u32, y: u32) bool {
 }
 
 // ---------------------------------------------------------------------------
+// WM2 mission-control overview (Self-hosting Lane 1, issue #707 card 2).
+// The shared grid layout + hit-test rules (the drift guard): the kernel
+// compositor renders the overview cards from these rects and WND.BIN
+// hit-tests pointer clicks against the SAME rects, so the two cannot
+// disagree about which card (or workspace button) a click landed on.
+// ---------------------------------------------------------------------------
+
+/// Maximum windows the overview grid lays out (the WM1 ceiling).
+pub const overview_max_windows: usize = 8;
+/// Workspace strip: one row at the bottom of the usable area holding one
+/// button per workspace (drag a card onto a button to move it there).
+pub const overview_strip_h: u32 = 28;
+/// Number of workspace buttons in the strip (workspaces 0..2).
+pub const overview_ws_count: u8 = 3;
+/// Gap between cards and around the grid edge.
+pub const overview_gap: u32 = 8;
+
+/// The computed grid for `n` overview cards on the scanout. Cards fill the
+/// usable area (scanout minus dock, taskbar, and the workspace strip);
+/// `cols`/`rows` are the smallest near-square tiling holding `n`.
+pub const OverviewGrid = struct {
+    n: usize,
+    cols: u32,
+    rows: u32,
+    card_w: u32,
+    card_h: u32,
+    x0: u32,
+    y0: u32,
+    strip_y: u32,
+};
+
+/// Compute the overview grid for `n` cards (`n` clamps to
+/// `overview_max_windows`). Pure.
+pub fn overview_grid(n: usize, sw: u32, sh: u32, tb_h: u32, dk_w: u32) OverviewGrid {
+    const count = @min(n, overview_max_windows);
+    const strip_y = sh -| tb_h -| overview_strip_h;
+    if (count == 0) {
+        return .{ .n = 0, .cols = 0, .rows = 0, .card_w = 0, .card_h = 0, .x0 = dk_w, .y0 = 0, .strip_y = strip_y };
+    }
+    // Smallest cols with cols*cols >= count (near-square, fills row-major).
+    var cols: u32 = 1;
+    while (@as(usize, cols) * @as(usize, cols) < count) : (cols += 1) {}
+    const rows: u32 = @as(u32, @intCast((count + @as(usize, cols) - 1) / @as(usize, cols)));
+    const usable_w = sw -| dk_w;
+    const usable_h = strip_y;
+    const card_w = (usable_w -| overview_gap * (cols + 1)) / cols;
+    const card_h = (usable_h -| overview_gap * (rows + 1)) / rows;
+    return .{
+        .n = count,
+        .cols = cols,
+        .rows = rows,
+        .card_w = card_w,
+        .card_h = card_h,
+        .x0 = dk_w + overview_gap,
+        .y0 = overview_gap,
+        .strip_y = strip_y,
+    };
+}
+
+/// One card's rect (named so BOTH sides return the SAME type).
+pub const OverviewCardRect = struct { x: u32, y: u32, w: u32, h: u32 };
+
+/// Card `idx`'s rect within the grid (row-major). Pure.
+pub fn overview_card_rect(g: OverviewGrid, idx: usize) OverviewCardRect {
+    const c: u32 = @as(u32, @intCast(idx)) % g.cols;
+    const r: u32 = @as(u32, @intCast(idx)) / g.cols;
+    return .{
+        .x = g.x0 + c * (g.card_w + overview_gap),
+        .y = g.y0 + r * (g.card_h + overview_gap),
+        .w = g.card_w,
+        .h = g.card_h,
+    };
+}
+
+/// Point-in-rect for card hit-testing (left-inclusive, right-exclusive —
+/// the compositor convention).
+pub fn overview_rect_contains(r: OverviewCardRect, x: u32, y: u32) bool {
+    return x >= r.x and x < r.x + r.w and y >= r.y and y < r.y + r.h;
+}
+
+/// The card index containing (x, y), or null (gaps, strip, chrome all
+/// miss). The kernel render and the WM hit-test both call this. Pure.
+pub fn overview_card_at(g: OverviewGrid, x: u32, y: u32) ?usize {
+    var idx: usize = 0;
+    while (idx < g.n) : (idx += 1) {
+        if (overview_rect_contains(overview_card_rect(g, idx), x, y)) return idx;
+    }
+    return null;
+}
+
+/// Workspace button `ws`'s rect: the strip split into `overview_ws_count`
+/// equal parts across the usable width (the last button takes the
+/// remainder). Pure.
+pub fn overview_ws_button_rect(ws: u8, sw: u32, dk_w: u32, strip_y: u32) OverviewCardRect {
+    const usable_w = sw -| dk_w;
+    const btn_w = usable_w / overview_ws_count;
+    const x = dk_w + @as(u32, ws) * btn_w;
+    const w = if (ws + 1 == overview_ws_count) (sw -| x) else btn_w;
+    return .{ .x = x, .y = strip_y, .w = w, .h = overview_strip_h };
+}
+
+/// The workspace button containing (x, y), or null (outside the strip).
+/// Pure.
+pub fn overview_ws_button_at(g: OverviewGrid, sw: u32, dk_w: u32, x: u32, y: u32) ?u8 {
+    var ws: u8 = 0;
+    while (ws < overview_ws_count) : (ws += 1) {
+        if (overview_rect_contains(overview_ws_button_rect(ws, sw, dk_w, g.strip_y), x, y)) return ws;
+    }
+    return null;
+}
+
+// ---------------------------------------------------------------------------
 // Host tests (Class A) — pin the RULES so the shim and the WM server provably
 // share identical decision logic (the drift guard's machine check).
 // ---------------------------------------------------------------------------
@@ -1028,4 +1140,81 @@ test "wnd_core: WM3 taskbar entry layout — rects, hit-test, tray clamp, title 
     try std.testing.expectEqualStrings("Calc", taskbar_title_slice("Calc"));
     try std.testing.expectEqualStrings("NOTEPAD1", taskbar_title_slice("NOTEPAD12345"));
     try std.testing.expectEqual(@as(usize, 8), taskbar_entry_max_chars);
+}
+
+test "wnd_core: WM2 overview grid layout is pinned (shared kernel/WM rule)" {
+    // 1280x720 scanout: usable = 1256 wide (minus dock), strip at y=672.
+    const g4 = overview_grid(4, fb_w, fb_h, taskbar_h, dock_w);
+    try std.testing.expectEqual(@as(u32, 2), g4.cols);
+    try std.testing.expectEqual(@as(u32, 2), g4.rows);
+    try std.testing.expectEqual(@as(u32, 616), g4.card_w); // (1256-24)/2
+    try std.testing.expectEqual(@as(u32, 324), g4.card_h); // (672-24)/2
+    try std.testing.expectEqual(@as(u32, 32), g4.x0); // dock + gap
+    try std.testing.expectEqual(@as(u32, 8), g4.y0);
+    try std.testing.expectEqual(@as(u32, 672), g4.strip_y); // 720-20-28
+
+    // Card rects tile row-major with 8px gaps.
+    const c0 = overview_card_rect(g4, 0);
+    try std.testing.expectEqual(@as(u32, 32), c0.x);
+    try std.testing.expectEqual(@as(u32, 8), c0.y);
+    const c1 = overview_card_rect(g4, 1);
+    try std.testing.expectEqual(@as(u32, 656), c1.x); // 32+616+8
+    try std.testing.expectEqual(@as(u32, 8), c1.y);
+    const c3 = overview_card_rect(g4, 3);
+    try std.testing.expectEqual(@as(u32, 656), c3.x);
+    try std.testing.expectEqual(@as(u32, 340), c3.y); // 8+324+8
+
+    // 8 windows: 3x3 grid.
+    const g8 = overview_grid(8, fb_w, fb_h, taskbar_h, dock_w);
+    try std.testing.expectEqual(@as(u32, 3), g8.cols);
+    try std.testing.expectEqual(@as(u32, 3), g8.rows);
+    try std.testing.expectEqual(@as(u32, 408), g8.card_w); // (1256-32)/3
+    try std.testing.expectEqual(@as(u32, 213), g8.card_h); // (672-32)/3
+
+    // 1 window: one near-full-area card.
+    const g1 = overview_grid(1, fb_w, fb_h, taskbar_h, dock_w);
+    try std.testing.expectEqual(@as(u32, 1), g1.cols);
+    try std.testing.expectEqual(@as(u32, 1), g1.rows);
+    try std.testing.expectEqual(@as(u32, 1240), g1.card_w);
+    try std.testing.expectEqual(@as(u32, 656), g1.card_h);
+
+    // 0 windows: empty grid, strip still placed.
+    const g0 = overview_grid(0, fb_w, fb_h, taskbar_h, dock_w);
+    try std.testing.expectEqual(@as(usize, 0), g0.n);
+    try std.testing.expectEqual(@as(u32, 672), g0.strip_y);
+
+    // Over-ceiling clamps to 8.
+    const g9 = overview_grid(9, fb_w, fb_h, taskbar_h, dock_w);
+    try std.testing.expectEqual(@as(usize, 8), g9.n);
+    try std.testing.expectEqual(@as(u32, 3), g9.cols);
+}
+
+test "wnd_core: WM2 overview hit-testing (cards + workspace buttons)" {
+    const g4 = overview_grid(4, fb_w, fb_h, taskbar_h, dock_w);
+    // Card centers hit their index.
+    try std.testing.expectEqual(@as(?usize, 0), overview_card_at(g4, 100, 100));
+    try std.testing.expectEqual(@as(?usize, 1), overview_card_at(g4, 900, 100));
+    try std.testing.expectEqual(@as(?usize, 2), overview_card_at(g4, 100, 500));
+    try std.testing.expectEqual(@as(?usize, 3), overview_card_at(g4, 900, 500));
+    // Gaps miss (between card 0 and card 1: x 648..656).
+    try std.testing.expectEqual(@as(?usize, null), overview_card_at(g4, 650, 100));
+    // The strip is not a card.
+    try std.testing.expectEqual(@as(?usize, null), overview_card_at(g4, 640, 690));
+    // Card edges: near-inclusive, far-exclusive.
+    try std.testing.expectEqual(@as(?usize, 0), overview_card_at(g4, 32, 8));
+    try std.testing.expectEqual(@as(?usize, null), overview_card_at(g4, 648, 8));
+
+    // Workspace buttons: three equal parts of the usable width.
+    try std.testing.expectEqual(@as(?u8, 0), overview_ws_button_at(g4, fb_w, dock_w, 100, 690));
+    try std.testing.expectEqual(@as(?u8, 1), overview_ws_button_at(g4, fb_w, dock_w, 640, 690));
+    try std.testing.expectEqual(@as(?u8, 2), overview_ws_button_at(g4, fb_w, dock_w, 1100, 690));
+    // Above the strip (cards) and below it (taskbar) miss.
+    try std.testing.expectEqual(@as(?u8, null), overview_ws_button_at(g4, fb_w, dock_w, 640, 660));
+    try std.testing.expectEqual(@as(?u8, null), overview_ws_button_at(g4, fb_w, dock_w, 640, 710));
+    // Button rects: 418px thirds starting past the dock.
+    const b0 = overview_ws_button_rect(0, fb_w, dock_w, g4.strip_y);
+    try std.testing.expectEqual(@as(u32, 24), b0.x);
+    try std.testing.expectEqual(@as(u32, 418), b0.w);
+    try std.testing.expectEqual(@as(u32, 672), b0.y);
+    try std.testing.expectEqual(@as(u32, 28), b0.h);
 }

@@ -101,6 +101,20 @@ pub const wmctl_taskbar: u64 = 12;
 pub const wmctl_attach_tab: u64 = 18;
 pub const wmctl_detach_tab: u64 = 19;
 pub const wmctl_activate_tab: u64 = 20;
+/// WM2 mission-control overview (Self-hosting Lane 1, issue #707 card 2):
+/// OVERVIEW (cmd 21). The WM — not the kernel — decides overview policy
+/// from its kind-19/21 input streams (which card was clicked, which
+/// workspace a drag targets); the kernel applies the SAME clamped
+/// primitives the shim runs (snapshot/enter, focus+raise, move-to-
+/// workspace + switch, exit) and blits the grid from its own
+/// `overview_open` state. a0 = action: 0 enter, 1 exit, 2 focus (a1 = id),
+/// 3 move (a1 = id, a2 = workspace). Zero new syscall slots (slot 65).
+pub const wmctl_overview: u64 = 21;
+/// OVERVIEW actions (a0).
+pub const overview_enter_action: u64 = 0;
+pub const overview_exit_action: u64 = 1;
+pub const overview_focus_action: u64 = 2;
+pub const overview_move_action: u64 = 3;
 
 /// The single registered WM server process id; null = no WM registered
 /// (shim mode, the default — every pre-M32 gate runs in this state).
@@ -143,6 +157,9 @@ var taskbar_count: u64 = 0;
 var tab_attach_count: u64 = 0;
 var tab_detach_count: u64 = 0;
 var tab_activate_count: u64 = 0;
+/// WM2 mission-control overview (issue #707 card 2): OVERVIEW (cmd 21)
+/// submissions accepted — the WM's grid-policy decisions applied.
+var overview_count: u64 = 0;
 /// Set when the registered WM exits (teardown) — the shell idle loop drains
 /// this into the `wm: unregistered, shim resumed` report (the exit path is
 /// IRQ context and console-free, so the report is drained like the process
@@ -176,6 +193,7 @@ pub fn init() void {
     tab_attach_count = 0;
     tab_detach_count = 0;
     tab_activate_count = 0;
+    overview_count = 0;
     pointer_fan_count = 0;
     window_mirror_count = 0;
     key_fan_count = 0;
@@ -408,6 +426,7 @@ pub const WmInfo = struct {
     tray_count: u64,
     dialog_count: u64,
     taskbar_count: u64,
+    overview_count: u64,
     pointer_fan_count: u64,
     window_mirror_count: u64,
     key_fan_count: u64,
@@ -429,6 +448,7 @@ pub fn info() WmInfo {
         .tray_count = tray_count,
         .dialog_count = dialog_count,
         .taskbar_count = taskbar_count,
+        .overview_count = overview_count,
         .pointer_fan_count = pointer_fan_count,
         .window_mirror_count = window_mirror_count,
         .key_fan_count = key_fan_count,
@@ -573,6 +593,12 @@ pub fn note_tab_activate() void {
     tab_activate_count +%= 1;
 }
 
+/// WM2 mission-control overview (issue #707 card 2): note one accepted
+/// OVERVIEW submission — the WM's grid-policy decision applied.
+pub fn note_overview() void {
+    overview_count +%= 1;
+}
+
 // ---------------------------------------------------------------------------
 // Host tests (Class A) — the pure register/teardown/tick/present contracts
 // ---------------------------------------------------------------------------
@@ -698,6 +724,18 @@ test "wm_server: SET_STATE counter + keyboard fan-out (claim 4278, WMS5 Gate 2)"
     // Fan-out of a raw key with NO WM registered is a silent no-op (shim).
     fan_key(0x17, events.MOD_CTRL);
     try std.testing.expectEqual(@as(u64, 0), info().key_fan_count);
+}
+
+test "wm_server: OVERVIEW counter + opcode freeze (WM2, issue #707 card 2)" {
+    init();
+    // The opcode is frozen at 21 (slot 65, zero new slots).
+    try std.testing.expectEqual(@as(u64, 21), wmctl_overview);
+    try std.testing.expectEqual(@as(u64, 0), info().overview_count);
+    note_overview();
+    note_overview();
+    try std.testing.expectEqual(@as(u64, 2), info().overview_count);
+    init();
+    try std.testing.expectEqual(@as(u64, 0), info().overview_count);
 }
 
 test "wm_server: COMPOSITE_TICK is delivered only to the registered WM with the present sequence" {
