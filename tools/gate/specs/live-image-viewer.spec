@@ -6,7 +6,10 @@ vgate_runner_flags -Xswiftc -DSPIKE
 
 vgate_setup_python <<'PYEOF'
 import os, shutil
-share = os.environ["SHARE"]
+# The harness exports RUN_DIR (not SHARE) to setup hooks; the seeded
+# host file channel lives at $RUN_DIR/share (gate_seed_share runs before
+# the setup hooks).
+share = os.path.join(os.environ["RUN_DIR"], "share")
 shutil.copy("tests/fixtures/qoi/viewer_160x120.qoi", os.path.join(share, "TEST.QOI"))
 shutil.copy("tests/fixtures/png/viewer_160x120.png", os.path.join(share, "TEST.PNG"))
 PYEOF
@@ -46,7 +49,7 @@ vgate_assert QOI python <<'PY'
 import os, re
 ser = open(os.environ["VG_SER"]).read()
 assert re.search(r"view: open id=[0-9]+ 328x264", ser), "open dimension check failed"
-assert re.search(r"view: loaded TEST\.qoi 160x120 QOI bytes=340", ser), "loaded check failed"
+assert re.search(r"view: loaded TEST\.QOI 160x120 QOI bytes=340", ser), "loaded check failed"
 assert re.search(r"view: pan ox=[1-9]", ser), "pan x check failed"
 assert re.search(r"view: pan ox=[0-9]+ oy=[1-9]", ser), "pan y check failed"
 assert re.search(r"sys_win_set_title calls=[0-9]+", ser), "title syscall check failed"
@@ -75,7 +78,7 @@ vgate_assert PNG python <<'PY'
 import os, re
 ser = open(os.environ["VG_SER"]).read()
 assert re.search(r"view: open id=[0-9]+ 328x264", ser), "open dimension check failed"
-assert re.search(r"view: loaded TEST\.png 160x120 PNG bytes=420", ser), "loaded check failed"
+assert re.search(r"view: loaded TEST\.PNG 160x120 PNG bytes=420", ser), "loaded check failed"
 assert re.search(r"view: pan ox=[1-9]", ser), "pan x check failed"
 assert re.search(r"view: pan ox=[0-9]+ oy=[1-9]", ser), "pan y check failed"
 assert re.search(r"sys_win_set_title calls=[0-9]+", ser), "title syscall check failed"

@@ -9,15 +9,11 @@ vgate_repeat 1 BOOTS
 
 vgate_file script1.txt <<'EOF'
 exec GLOBALS.BIN
-procs
-echo rx-globals-done
 EOF
 
 vgate_file script2.txt <<'EOF'
 exec COUNTER.BIN
 exec GUARD.BIN
-procs
-echo rx-guard-dispatched
 EOF
 
 vgate_file script3.txt <<'EOF'

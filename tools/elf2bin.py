@@ -64,7 +64,7 @@ def _parse_loads(data):
     return loads
 
 
-def build(input_path, output_path, segments=False):
+def build(input_path, output_path, segments=False, allow_writable=False):
     with open(input_path, "rb") as f:
         data = f.read()
 
@@ -99,6 +99,28 @@ def build(input_path, output_path, segments=False):
     if segments:
         return _build_segmented(input_path, output_path, data, e_entry,
                                 loads, base, blob)
+    # A flat (DSK1) image is mapped read-only by the kernel `exec` path, so
+    # any writable .data/.bss content would fault on the FIRST store — the
+    # exact failure VICTIM.BIN hit (data abort at 0x400a50, its .bss tail
+    # inside the read-only text region) and NOTEPAD before its DSK3
+    # conversion. Refuse unless the caller exempts the image with
+    # --allow-writable (ONLY for a flat image whose loader maps RW itself,
+    # i.e. the kernel — never for an exec'd user program).
+    if not allow_writable:
+        writable = [load for load in loads if load[4] & PF_W and load[3] > 0]
+        if writable:
+            print(
+                "elf2bin: %s: writable PT_LOAD segment(s) in a flat image "
+                "(no --segments). DSK1 maps the whole file read-only under "
+                "kernel `exec`, so the first store to .data/.bss would fault. "
+                "Build it segmented instead: user/linker-segmented.ld + "
+                "elf2bin.py --segments." % input_path,
+                file=sys.stderr,
+            )
+            for vaddr, _poff, fsz, memsz, fl in writable:
+                print("  writable PT_LOAD: vaddr=0x%x filesz=%d memsz=%d "
+                      "flags=0x%x" % (vaddr, fsz, memsz, fl), file=sys.stderr)
+            return 2
     return _build_flat(input_path, output_path, e_entry, base, blob, loads)
 
 
@@ -203,14 +225,20 @@ def main(argv):
         return 0
 
     segments = False
+    allow_writable = False
     if argv and argv[0] == "--segments":
         segments = True
         argv = argv[1:]
+    if argv and argv[0] == "--allow-writable":
+        allow_writable = True
+        argv = argv[1:]
     if len(argv) != 2:
-        print("usage: elf2bin.py [--segments] INPUT.elf OUTPUT.bin | "
-              "elf2bin.py --info FILE.bin", file=sys.stderr)
+        print("usage: elf2bin.py [--segments] [--allow-writable] "
+              "INPUT.elf OUTPUT.bin | elf2bin.py --info FILE.bin",
+              file=sys.stderr)
         return 2
-    return build(argv[0], argv[1], segments=segments)
+    return build(argv[0], argv[1], segments=segments,
+                 allow_writable=allow_writable)
 
 
 if __name__ == "__main__":

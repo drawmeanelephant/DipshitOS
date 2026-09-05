@@ -142,7 +142,11 @@ pub fn build(b: *std.Build) void {
     // format v1 (magic "DSK1", entry offset, size; see docs/decisions/
     // 0002-kernel-handoff.md). The loader on the ESP reads KERNEL.BIN.
     const kernel_step = b.step("kernel", "Extract the flat kernel image (zig-out/bin/KERNEL.BIN) from the freestanding ELF (class A tooling, no VM)");
-    const elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    // The kernel maps itself RW (its .data/.bss is live), so it is the one
+    // flat image exempt from elf2bin's writable-segment guard
+    // (--allow-writable); every exec'd user program must stay pure-code flat
+    // or go DSK3 segmented (user/linker-segmented.ld + --segments).
+    const elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--allow-writable" });
     elf2bin.addFileArg(kernel.getEmittedBin());
     const kernel_bin = elf2bin.addOutputFileArg("KERNEL.BIN");
     elf2bin.has_side_effects = true;
@@ -851,6 +855,11 @@ pub fn build(b: *std.Build) void {
     // ------------------------------------------------------------------
     // Guest: twenty-fourth ESP user program (milestone fourteen, card S4 — claim 4482)
     // VICTIM.BIN. The hostile-proof's VICTIM: owns a window, loops forever.
+    // DSK3 segmented (writable .data/.bss — the ui toolkit's window-state
+    // globals need the RW data+bss aperture; observed live: VICTIM
+    // data-aborted at 0x400a50 on the flat DSK1 mapping the moment ui.win_*
+    // wrote its first global — same failure class as NOTEPAD before its
+    // segmented conversion).
     // ------------------------------------------------------------------
     const victim_prog = b.addExecutable(.{
         .name = "user-hardening-victim",
@@ -860,9 +869,9 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseSmall,
         }),
     });
-    victim_prog.linker_script = b.path("user/linker.ld");
-    const victim_step = b.step("hardening-victim", "Build the twenty-fourth ESP user program (zig-out/bin/VICTIM.BIN)");
-    const victim_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    victim_prog.linker_script = b.path("user/linker-segmented.ld");
+    const victim_step = b.step("hardening-victim", "Build the twenty-fourth ESP user program (zig-out/bin/VICTIM.BIN) — DSK3 segmented (writable .data/.bss)");
+    const victim_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
     victim_elf2bin.addFileArg(victim_prog.getEmittedBin());
     const victim_bin = victim_elf2bin.addOutputFileArg("VICTIM.BIN");
     victim_elf2bin.has_side_effects = true;
