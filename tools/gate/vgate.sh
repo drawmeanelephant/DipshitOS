@@ -231,6 +231,7 @@ while [ "$n" -lt "$REPEAT" ]; do
         TOTAL=$((TOTAL + 1))
         echo; echo "=== $VGATE_NAME run $tag ==="
         rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log"
+        [ -n "${SHARE:-}" ] && rm -f "$SHARE/WINDOWS.SAV"
         set +e
         eval "set -- ${VGATE_RUN_FLAGS[$i]}"
         # Specs name $RUN_DIR files in flags; expand the literal token now

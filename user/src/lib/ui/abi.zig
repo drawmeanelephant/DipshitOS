@@ -428,7 +428,7 @@ pub fn wm_mail_request(kind: u8, id: u32, x: u16, y: u16, w: u16, h: u16, title:
     // Await our own inbox for the ack (recv reads the CALLER's ring, so no
     // self-pid needed): a bounded poll over a sleep+yield.
     var tries: u32 = 0;
-    while (tries < 200_000) : (tries += 1) {
+    while (tries < 2_000_000) : (tries += 1) {
         var raw: [wm_rpc_slot_bytes]u8 = undefined;
         const got = syscall2(sys_ipc_recv_num, @intFromPtr(&raw), raw.len);
         if (got >= @sizeOf(WmRpc)) {

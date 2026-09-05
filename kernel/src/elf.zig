@@ -142,7 +142,7 @@ pub const Elf64Sym = struct {
 pub const text_base: u64 = 0x0040_0000;
 /// Total load bound — mirrors `exec.exec_program_max` (the shared staging
 /// buffer). A program whose PT_LOAD memory exceeds this is rejected.
-pub const load_max: usize = 256 * 1024;
+pub const load_max: usize = 512 * 1024;
 /// At most two PT_LOAD segments (text + optional data).
 pub const max_segments: usize = 2;
 
