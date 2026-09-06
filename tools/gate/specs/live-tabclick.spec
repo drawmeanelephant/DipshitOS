@@ -22,7 +22,27 @@ vgate_run A -- \
     --pointer-virtio "440,82,c" --pointer-virtio-after "tabhold: cycled" \
     --script-expect "tabhold: done" --timeout 240
 
-vgate_assert A serial-contains "wnd: tab-activate id=3"
+# The click targets cell 1, which the strip always paints as the child
+# (container first — see paint_tab_strip), so it must activate the ATTACHED
+# window. Its id varies with open census (TABHOLD can be 2 or 3 — see
+# live-tabstrip.spec), so parse the child from THIS boot's attach line and
+# require the click activated exactly that id.
+vgate_assert A python <<'PY'
+import os, re, sys
+ser = open(os.environ["VG_SER"]).read()
+m = re.search(r'(?m)^wnd: tab-attach child=(\d+) parent=(\d+)', ser)
+if not m:
+    print("tab-attach line missing", file=sys.stderr)
+    sys.exit(1)
+child, parent = m.group(1), m.group(2)
+if child == parent:
+    print(f"self-attach child==parent={child}", file=sys.stderr)
+    sys.exit(1)
+if not re.search(rf'(?m)^wnd: tab-activate id={child}$', ser):
+    print(f"click did not activate the attached child id={child}", file=sys.stderr)
+    sys.exit(1)
+print(f"activate-ok child={child}")
+PY
 vgate_assert A python <<'PY'
 import os
 # Reset share state between boots
@@ -38,7 +58,24 @@ vgate_run B -- \
     --pointer-virtio "561,82,c" --pointer-virtio-after "tabhold: cycled" \
     --script-expect "tabhold: done" --timeout 240
 
-vgate_assert B serial-contains "wnd: tab-detach child=3"
+# Same census tolerance as boot A: the × click must detach the attached
+# child (TABHOLD), whose id comes from this boot's attach line.
+vgate_assert B python <<'PY'
+import os, re, sys
+ser = open(os.environ["VG_SER"]).read()
+m = re.search(r'(?m)^wnd: tab-attach child=(\d+) parent=(\d+)', ser)
+if not m:
+    print("tab-attach line missing", file=sys.stderr)
+    sys.exit(1)
+child, parent = m.group(1), m.group(2)
+if child == parent:
+    print(f"self-attach child==parent={child}", file=sys.stderr)
+    sys.exit(1)
+if not re.search(rf'(?m)^wnd: tab-detach child={child}$', ser):
+    print(f"× click did not detach child id={child}", file=sys.stderr)
+    sys.exit(1)
+print(f"detach-ok child={child}")
+PY
 vgate_assert B serial-absent "wnd: tab-drag"
 vgate_assert B python <<'PY'
 import os
@@ -55,4 +92,21 @@ vgate_run C -- \
     --script-expect "tabhold: done" --timeout 240
 
 vgate_assert C serial-contains "wnd: tab-drag"
-vgate_assert C serial-contains "wnd: tab-detach child=3"
+# Census-tolerant (see boot A): the drag-out must detach the attached
+# child (TABHOLD), whose id comes from this boot's attach line.
+vgate_assert C python <<'PY'
+import os, re, sys
+ser = open(os.environ["VG_SER"]).read()
+m = re.search(r'(?m)^wnd: tab-attach child=(\d+) parent=(\d+)', ser)
+if not m:
+    print("tab-attach line missing", file=sys.stderr)
+    sys.exit(1)
+child, parent = m.group(1), m.group(2)
+if child == parent:
+    print(f"self-attach child==parent={child}", file=sys.stderr)
+    sys.exit(1)
+if not re.search(rf'(?m)^wnd: tab-detach child={child}$', ser):
+    print(f"drag-out did not detach child id={child}", file=sys.stderr)
+    sys.exit(1)
+print(f"drag-detach-ok child={child}")
+PY
