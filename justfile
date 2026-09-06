@@ -29,6 +29,7 @@ verify-portable:
     zig build context
     bash tools/status/verify-issue-coordination.sh
     bash tools/status/test-coordination.sh
+    bash tools/inventory-gates.sh --check
     bash tools/lint-workflows.sh
     bash tools/verify-mmu-debt.sh
     bash tools/verify-glyph-raster.sh
