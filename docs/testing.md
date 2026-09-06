@@ -170,6 +170,12 @@ Every verification command belongs to exactly one class (canonical inventory:
 > [`docs/gate-fleet-inventory.md`](gate-fleet-inventory.md) for the full
 > per-member table.
 >
+> **Permanent rule (M40 GF6, issue #931):** new gates are specs under
+> `tools/gate/specs/` — never new `tools/verify-*.sh` scripts (rejected in
+> review); the generated inventory fails CI (`--check`) on any unregistered
+> gate. Full-fleet reference wall time: 10,052 s serial (185 members, M40
+> GF6 reference host, 2026-09-06).
+>
 > **Dev-shell PATH note (the one canonical paragraph):** fleet members and
 > CI need the modern Homebrew toolchain — `/opt/homebrew/bin` FIRST and
 > `/opt/homebrew/opt/gnu-sed/libexec/gnubin` for GNU sed, byte-for-byte

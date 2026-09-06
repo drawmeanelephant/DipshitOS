@@ -120,12 +120,25 @@ fleet_run_one() {
     esac
 }
 
+fleet_select() {
+    # One arg -> matching member ids. An arg that IS an exact member id
+    # selects exactly itself; anything else goes through prefix matching.
+    # (M40 GF6 fix: verify-vz passes full ids; routing them through the
+    # prefix matcher re-expanded short ids like live-win into every
+    # live-win-* member and ran 24 gates twice.)
+    local want="$1" id
+    while IFS= read -r id; do
+        [ "$id" = "$want" ] && { echo "$want"; return 0; }
+    done < <(fleet_ids)
+    fleet_match "$want"
+}
+
 fleet_run() {
     # Run the given ids/patterns sequentially; continue past failures;
     # summary at the end; nonzero rc iff anything failed.
     local sel=() arg id
     for arg in "$@"; do
-        while IFS= read -r id; do sel+=("$id"); done < <(fleet_match "$arg")
+        while IFS= read -r id; do sel+=("$id"); done < <(fleet_select "$arg")
     done
     local total=${#sel[@]}
     [ "$total" -gt 0 ] || { echo "fleet: nothing selected" >&2; return 2; }

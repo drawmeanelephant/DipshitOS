@@ -1,6 +1,9 @@
 # live-desktop.spec -- claim 2427 (Milestone 11, Card A5) Desktop Platform & GUI Apps (ADR 0011)
 vgate_name live-desktop "Milestone 11 Desktop Platform & GUI Apps"
 vgate_share seed
+# GF6 closeout (issue #1020): seed arms the host file channel, whose
+# --cvc-file implies the full custom-virtio device shape — SPIKE-only.
+vgate_runner_flags -Xswiftc -DSPIKE
 
 vgate_file script.txt <<'EOF'
 exec NOTEPAD.BIN
