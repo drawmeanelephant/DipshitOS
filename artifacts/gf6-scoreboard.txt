@@ -1,0 +1,13 @@
+M40 GF6 closeout scoreboard (issue #931) — reference host 2026-09-06
+baseline = 3ca83cd~1 (e17e916, GF1 parent) | after = gf6-closeout branch
+
+1. Script count        before 203 tools/*.sh (212 .sh total)  ->  after 31 tools/*.sh (42 .sh total)
+2. Gate shell lines    before 38,036 lines in 194 tools/verify-*.sh ->  0; shared infra: 896 lines (gate/vgate.sh + gate/fleet.sh + lib/gate-run.sh + inventory-gates.sh)
+3. Just-recipe coverage  before 40 verify-* recipes / 203 scripts (~20%)  ->  3 recipes (gate/gates/verify-vz) covering all 185 fleet members
+4. Inventory coverage  before ~80 of 200+ hand-listed in docs/gate-inventory.md (drifted; frozen)  ->  100% generated: 185 rows in gate-fleet-inventory.md, CI --check enforced
+5. verify-vz wall time before (legacy 56-gate recipe) not recorded -> measured sample at baseline e17e916: live-timer 20s, live-win-move 39s (2 others flaked at their own green-era commit: live-args 97s, live-desktop-typing 57s) ≈ 29-48s avg
+                       after (spec fleet, full run): 10,052s wall / 209 runs (185 unique; +24 from the fleet_select bug fixed on this branch) = ~54s per gate boot
+   rerun after fixes: 729s for the 13-gate red set -> 11/13 green (live-wasm deterministic, tracked #1020)
+
+Fleet evidence: artifacts/gf6-verify-portable.log (class-A, 114s, rc=0)
+                artifacts/gf6-verify-vz.log (full fleet raw), artifacts/gf6-verify-vz-rerun.log (fixed rerun)

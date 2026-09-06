@@ -2,6 +2,9 @@
 
 vgate_name live-wnd-server "M32 WMS3: long-lived EL0 WM server on VZ"
 vgate_share seed
+# GF6 closeout (issue #1020): seed arms the host file channel, whose
+# --cvc-file implies the full custom-virtio device shape — SPIKE-only.
+vgate_runner_flags -Xswiftc -DSPIKE
 
 vgate_file script.txt <<'EOF'
 wm

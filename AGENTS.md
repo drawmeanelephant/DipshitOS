@@ -102,6 +102,15 @@ are we, and what's next", read
   deterministic LLM-context bundles, no network calls). It is developer
   tooling, not guest software, and counts toward no milestone.
 
+## Gate rules (permanent, M40 GF6)
+
+- New verification gates are declarative specs under `tools/gate/specs/`
+  (`tools/gate/SPEC.md` format) — never a new `tools/verify-*.sh` script;
+  one-off shell gate scripts are rejected in review.
+- The fleet is discovered, not listed (`tools/gate/fleet.sh`); the generated
+  `docs/gate-fleet-inventory.md` fails CI (`--check`) on any unregistered
+  gate.
+
 ## Host toolchain sanity check (source me first)
 
 This repo's build + gate scripts assume the **modern Homebrew builds** of the

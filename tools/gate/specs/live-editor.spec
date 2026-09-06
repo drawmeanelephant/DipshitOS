@@ -17,7 +17,7 @@ vgate_file script.txt <<'EOF'
 exec EDIT.BIN
 EOF
 
-vgate_run 01 -- --display --screen "$(art editor-screen)" --via-virtio --script '$RUN_DIR/script.txt' --input-chords "f,n,space,m,a,i,n,space,m,a,i,n,ctrl-d,X,Y,ctrl-z,ctrl-l,ctrl-f,escape,ctrl-h,escape,ctrl-shift-d,ctrl-shift-p,escape,ctrl-r,escape,ctrl-shift-t,ctrl-b,ctrl-shift-f,return,ctrl-s,ctrl-t,ctrl-g" --input-chords-after "edit: ready" --script-expect "edit: goto-open" --timeout 45
+vgate_run 01 -- --display --screen '$RUN_DIR/editor-screen' --via-virtio --script '$RUN_DIR/script.txt' --input-chords "f,n,space,m,a,i,n,space,m,a,i,n,ctrl-d,X,Y,ctrl-z,ctrl-l,ctrl-f,escape,ctrl-h,escape,ctrl-shift-d,ctrl-shift-p,escape,ctrl-r,escape,ctrl-shift-t,ctrl-b,ctrl-shift-f,return,ctrl-s,ctrl-t,ctrl-g" --input-chords-after "edit: ready" --script-expect "edit: goto-open" --timeout 45
 
 vgate_assert 01 serial-contains 'VirelaiOS kernel has seized control.'
 vgate_assert 01 serial-contains 'edit: ready'
