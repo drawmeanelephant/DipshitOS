@@ -654,7 +654,10 @@ var reap_report_count: usize = 0;
 /// ESR_EL1 EC are snapshotted in exception context, then the shell idle
 /// loop prints `fault: <name> far=0x... ec=0x...` IN ORDER. The name
 /// pointer is a safe snapshot (task names are static string literals).
-pub const fault_report_max: usize = 4;
+/// 8 (was 4, #1020 rot-class audit 2026-09-06): same drop-oldest discipline
+/// as the exit-report rings — a busy drain window could silently lose the
+/// oldest `fault:` line while `live-exceptions` asserts specific ones.
+pub const fault_report_max: usize = 8;
 const FaultEntry = struct { name: []const u8, far: u64, ec: u64, pc: u64 = 0 };
 var fault_reports: [fault_report_max]FaultEntry = [_]FaultEntry{.{ .name = "", .far = 0, .ec = 0 }} ** fault_report_max;
 var fault_report_head: usize = 0;
