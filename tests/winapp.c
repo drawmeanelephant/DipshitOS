@@ -21,18 +21,26 @@ void _start(void) {
     if (v_win_set_visible(id, 2) != -1) v_exit(28); /* EINVAL proof */
     if (v_win_present(id) < 0) v_exit(29);
     v_write(1, "w3: win ok\n", 11);
-    /* Hold the window open ~10-15s of interpreted wasm so the live gate's
-       `dui` snapshots, the post-raise composite (`dui raise 2` blits the
-       window into the scanout — post-WMS the kernel no longer composites
-       user windows unprompted), and the screen captures all observe it
-       (z-order row + blits counter + the 0xFF0000 fill on the scanout
-       prove the pixel path end to end). The monitor stays responsive —
-       this process merely burns its own time slice. Pure i32 compute,
-       clang keeps the volatile accumulator live. 15M iterations measured
-       ~10-15s on the gate host (120M never finished inside the runner's
-       120s window — claim 3456 review round). */
-    volatile long acc = 0;
-    for (long i = 0; i < 15000000L; i++) acc += (i * i) | 1;
-    if (acc == 123456789L) v_write(1, "w3: unreachable\n", 16);
+    /* Hold the window open until the LIVE GATE closes it, so the `dui`
+       snapshots, the post-raise composite (`dui raise 2` blits the window
+       into the scanout — post-WMS the kernel no longer composites user
+       windows unprompted), and the screen captures all observe it (z-order
+       row + blits counter + the 0xFF0000 fill on the scanout prove the
+       pixel path end to end). The hold POLLS v_win_query: the syscall
+       returns -1 (EINVAL) the moment the window leaves the registry, and
+       the gate's script3 `dui close <id>` releases it — a hold measured in
+       GATE CHOREOGRAPHY, not interpreter speed. (The old 15M-iteration spin
+       was calibrated "~10-15s"; the interpreter since outgrew it — the hold
+       collapsed to milliseconds and the window died before script2, the
+       live-wasm red of issue #1020.) Bounded: 1e7 polls → exit 30 so a
+       wedged gate can never hang the boot. */
+    {
+        unsigned long q[8];
+        long i;
+        for (i = 0; i < 10000000L; i++) {
+            if (v_win_query(id, q) == -1) break; /* window released */
+        }
+        if (i >= 10000000L) v_exit(30); /* gate never closed it */
+    }
     v_exit(21);
 }

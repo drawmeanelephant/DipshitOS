@@ -636,7 +636,11 @@ var report_advances: [max_tasks]u64 = [_]u64{0} ** max_tasks;
 /// window print N lines IN ORDER instead of collapsing to one. Task names
 /// are static string literals, so the name POINTER is a safe snapshot.
 /// Overflow (a full ring) drops the OLDEST entry (documented + host-tested).
-pub const exit_report_max: usize = 4;
+/// depth of the TASK-level exit-report ring (`tasks <name> exited status=`).
+/// 8 (was 4, issue #1020): five sequential wasm execs now exit inside one
+/// idle-loop drain window (the interpreter outgrew the old pacing), and a
+/// full ring DROPS THE OLDEST — floatapp's exit-590 line was lost that way.
+pub const exit_report_max: usize = 8;
 const ExitEntry = struct { name: []const u8, status: u64 };
 const ReapEntry = struct { name: []const u8 };
 var exit_reports: [exit_report_max]ExitEntry = [_]ExitEntry{.{ .name = "", .status = 0 }} ** exit_report_max;
