@@ -1,9 +1,13 @@
 #
 # vz-gates.yml -- class-B Apple-silicon VZ hardware gates as a required CI
-# check. The 66 class-B gates from the GATE_INVENTORY block
-# (docs/archive/gate-inventory-detail.md) are sharded across a matrix and
-# run on REAL Virtualization.framework hardware: each one boots the
-# production image and asserts observed guest behavior.
+# check. The gate fleet is DISCOVERED from the spec dir (M40 GF5, issue
+# #940): every tools/gate/specs/*.spec plus the four legacy class-B
+# scripts, as listed by `bash tools/gate/fleet.sh list`, sharded across a
+# matrix and run on REAL Virtualization.framework hardware: each one boots
+# the production image and asserts observed guest behavior. Adding a spec
+# adds it to these shards with zero workflow edits. The interactive
+# serial-takeover gate (`zig build run`) is not part of the automated
+# fleet (it needs a TTY); run `just run`.
 #
 # Runner selection -- GitHub-hosted macOS images top out at macOS 26 and
 # VirelaiOS requires macOS 27+ at runtime (docs/hardware-contract.md), so
@@ -127,30 +131,26 @@ jobs:
           set -uo pipefail
           mkdir -p artifacts/vz-ci
 
-          # Machine-readable gate list: class-B entries only, comment stripped.
-          sed -n '/^<!-- GATE_INVENTORY:START -->$/,/^<!-- GATE_INVENTORY:END -->$/p' \
-            docs/archive/gate-inventory-detail.md \
-            | grep ' class=B ' \
-            | sed -E 's/ +$//' > /tmp/all-gates.txt
-
-          # Interactive-only gates cannot run headless; documented exclusions.
-          #   serial-takeover: `zig build run` console takeover expects a TTY.
-          grep -v ' id=serial-takeover ' /tmp/all-gates.txt > /tmp/shard-gates.txt || true
-
-          total=$(wc -l < /tmp/all-gates.txt)
-          echo "Class-B gates in inventory: $total; exclusions applied."
+          # The fleet, discovered from the spec dir (tools/gate/fleet.sh):
+          # one "kind<TAB>id" line per member, LC_ALL=C sorted.
+          bash tools/gate/fleet.sh list > /tmp/fleet.tsv
+          total=$(wc -l < /tmp/fleet.tsv)
+          echo "Class-B fleet members: $total (specs + legacy class-B scripts)."
 
           failed_ids=""
           ran=0
-          while IFS= read -r line; do
-            [ -n "$line" ] || continue
-            id="$(echo "$line" | sed -E 's/^GATE id=([^ ]+).*/\1/')"
-            cmd="$(echo "$line" | sed -E 's/^.*cmd=//' | sed -E 's/ +#.*$//' | sed -E 's/ +$//')"
-            # Shard assignment by stable line order.
-            idx=$(grep -n "^GATE id=$id " /tmp/all-gates.txt | head -1 | cut -d: -f1)
+          while IFS=$'\t' read -r kind id; do
+            [ -n "$id" ] || continue
+            # Shard assignment by stable sorted line order.
+            idx=$(awk -F'\t' -v k="$kind" -v i="$id" '$1==k && $2==i {print NR; exit}' /tmp/fleet.tsv)
             if [ $(( (idx - 1) % SHARD_COUNT )) -ne "${{ matrix.shard }}" ]; then
               continue
             fi
+            case "$kind" in
+              spec)   cmd="bash tools/gate/vgate.sh tools/gate/specs/$id.spec" ;;
+              script) cmd="bash tools/$id.sh" ;;
+              *) echo "::error::unknown fleet kind: $kind"; exit 1 ;;
+            esac
             ran=$((ran + 1))
             log="artifacts/vz-ci/$id.log"
             start=$SECONDS

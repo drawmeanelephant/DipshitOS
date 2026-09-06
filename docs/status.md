@@ -100,6 +100,9 @@ byte-perfect and gated by `zig build run`).
 > Full re-verification history (57 lines of per-candidate close-out notes for M3–M16) is archived in git
 > (`docs/status.md` @ `aa4f111`, `artifacts/gates-reverify-*.txt`). The live gate table below is the contract;
 > `docs/gate-inventory.md` defines classes (A portable, B VZ, C interactive, D diagnostic).
+> Since M40 GF5 (issue #940) the class-B fleet is **discovered from
+> `tools/gate/specs/`** via `tools/gate/fleet.sh` (just + CI sharding), and
+> the single generated inventory is [`gate-fleet-inventory.md`](gate-fleet-inventory.md).
 
 | Gate | Command | Result | Last evidence |
 |------|---------|--------|---------------|
@@ -633,6 +636,7 @@ migration time became issues #859–#863).
 - [`hardware-contract.md`](hardware-contract.md) — hardware `[observed]`/`[inferred]`.
 - [`architecture.md`](architecture.md) — components & data flow.
 - [`gate-inventory.md`](gate-inventory.md) — gate classes (A/B/C/D).
+- [`gate-fleet-inventory.md`](gate-fleet-inventory.md) — the generated gate fleet inventory (M40 GF1/GF5; `just inventory-gates`, `--check` in CI).
 - [`archive/`](archive/) — archived one-shots + `status-m*-detail.md` per closed milestone (M3–M16) + frozen designs.
 - GitHub issue tracker — claims (label `claim`): `gh issue list --label claim --state open`.
 - [`../AGENTS.md`](../AGENTS.md) — project rules (incl. multiagent coordination).

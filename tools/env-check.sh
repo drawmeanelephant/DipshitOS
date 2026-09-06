@@ -141,7 +141,7 @@ check_sed() {
         /bin/*|/usr/bin/*)
             _ENV_OK=0
             rant sed "$cur ($(sed --version 2>&1 | head -1)) — GNU sed NOT detected" \
-                "brew install gnu-sed and ensure you are on gsed/sed from /opt/homebrew/bin"
+                "brew install gnu-sed; env-check puts /opt/homebrew/opt/gnu-sed/libexec/gnubin on PATH (the same dir CI uses) — re-source if you skipped that"
             ;;
         *) : ;; # unknown platform, don't nag
     esac
@@ -197,10 +197,25 @@ env_check_all() {
     fi
 
     if [ -n "$bb" ]; then
-        # defensively put Homebrew first if we can already see it on PATH
+        # defensively put the Homebrew bin dir FIRST on PATH: a PATH that
+        # merely contains it after /bin or /usr/bin still resolves the
+        # 2007-era system bash/sed (the exact failure mode this file exists
+        # to catch), so dedupe it out and re-prepend.
+        local _newpath="" _d _ifs_save="$IFS"
+        IFS=":"; for _d in $PATH; do
+            [ "$_d" = "$bb" ] && continue
+            if [ -n "$_newpath" ]; then _newpath="$_newpath:$_d"; else _newpath="$_d"; fi
+        done
+        IFS="$_ifs_save"
+        PATH="$bb:$_newpath"; export PATH
+        # Same second entry CI puts on PATH (.github/workflows/vz-gates.yml
+        # and ci.yml "Put Homebrew toolchain on PATH"): brew's GNU sed is
+        # keg-only and lives in libexec/gnubin, never in the bin dir, so a
+        # freshly installed gnu-sed is invisible until this is on PATH too.
+        _ENV_GNUBIN="${bb%/bin}/opt/gnu-sed/libexec/gnubin"
         case ":$PATH:" in
-            *":$bb:"*) : ;;
-            *) PATH="$bb:$PATH"; export PATH ;;
+            *":$_ENV_GNUBIN:"*) : ;;
+            *) [ -d "$_ENV_GNUBIN" ] && { PATH="$_ENV_GNUBIN:$PATH"; export PATH; } ;;
         esac
     else
         env_warn ""

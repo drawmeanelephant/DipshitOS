@@ -2,8 +2,10 @@
 
 > For the current state of each verification gate (pass/fail/blocked), see
 > [`docs/status.md`](status.md). This file is the sequence and policy. The
-> canonical A/B/C/D classification of every verification command is
-> [`docs/gate-inventory.md`](gate-inventory.md).
+> A/B/C/D classification is defined in
+> [`docs/gate-inventory.md`](gate-inventory.md); the single generated
+> inventory of every gate is
+> [`docs/gate-fleet-inventory.md`](gate-fleet-inventory.md).
 
 ## Verification classes
 
@@ -151,35 +153,50 @@ Every verification command belongs to exactly one class (canonical inventory:
     byte-identical transcripts; evidence `artifacts/live-transcript-*`).
 
 > The full class-A (portable, no-VM) gate set runs as `just verify-portable`
-> (legacy alias `just verify`) and in CI (`.github/workflows/ci.yml`): fmt →
-> unit tests → transcript gate → `zig build` → image → inspect → Swift
-> runner build → context → coordination → coordination tooling tests.
+> (legacy alias `just verify`) and in CI (`.github/workflows/ci.yml`).
 > **CI proves only this class** — a green badge says nothing about the
-> Apple-silicon VZ hardware gates (class B). Those run as `just verify-vz`
-> (serial takeover `zig build run`, bad-handoff, marker, NVRAM console,
-> host-console, live transcript/RX `verify-live-transcript.sh`, live fs
-> `verify-live-fs.sh`, live exceptions, live timer, live reboot/shutdown
-> `verify-live-reboot.sh` — Apple silicon only); the class-D diagnostics
-> (preexit-tx, tx-diag,
-> tx-transition, fw-mmu-capture, t0sz25, walk-probe, t0sz16-walkprobe)
-> run individually per claim. See
-> [`docs/gate-inventory.md`](gate-inventory.md).
+> Apple-silicon VZ hardware gates (class B).
+>
+> The class-B fleet is **discovered, not listed** (M40 GF5, issue #940):
+> every `tools/gate/specs/*.spec` plus the four legacy class-B scripts
+> (`bad-handoff`, `marker`, `nvram-console`, `host-console`), exactly as
+> `bash tools/gate/fleet.sh list` prints. Run one with `just gate <id>`, a
+> pattern group with `just gates <pattern>`, the whole fleet with
+> `just verify-vz` (Apple silicon only — each member boots VZ VMs; the
+> interactive serial-takeover gate `zig build run` needs a TTY and is run
+> with `just run`). The same list shards
+> `.github/workflows/vz-gates.yml` on a registered macOS 27+ Apple silicon
+> runner. The class-D diagnostics run individually per claim. See
+> [`docs/gate-fleet-inventory.md`](gate-fleet-inventory.md) for the full
+> per-member table.
+>
+> **Dev-shell PATH note (the one canonical paragraph):** fleet members and
+> CI need the modern Homebrew toolchain — `/opt/homebrew/bin` FIRST and
+> `/opt/homebrew/opt/gnu-sed/libexec/gnubin` for GNU sed, byte-for-byte
+> what both workflows set up. Locally, `source tools/env-check.sh` (or
+> `just check-env`) verifies the same thing and complains loudly when the
+> 2007-era system bash/sed win instead.
 
-## Gate freeze (M40 GF1, issue #934)
+## Gate fleet (M40 GF1–GF5, issues #934–#940)
 
-- **No new `tools/verify-*.sh` files.** New gates arrive as vgate specs (GF2
-  defines the format; until it lands, new gates wait or extend an existing
-  script). One-off per-gate boot scripts are rejected in review.
+- **No new `tools/verify-*.sh` files.** New gates arrive as vgate specs
+  (`tools/gate/SPEC.md`); one-off per-gate boot scripts are rejected in
+  review.
+- **The spec dir is the single source of truth.** `tools/gate/fleet.sh`
+  discovers the class-B fleet (specs + the four legacy class-B scripts);
+  the `just gate`/`just gates`/`just verify-vz` recipes, the
+  `vz-gates.yml` CI shards, and the fleet section of
+  `docs/gate-fleet-inventory.md` are all derived from that discovery —
+  adding a spec registers it everywhere with zero list edits.
 - **The fleet inventory is generated, not written:**
   `bash tools/inventory-gates.sh` rewrites `docs/gate-fleet-inventory.md`
   (also `just inventory-gates`); `just inventory-gates --check` fails when
-  the tracked report drifts from a fresh render, so every added, removed,
-  or renamed script under `tools/` must ship with a regenerated report.
-  CI enforcement of `--check` lands in GF5; until then run the check target.
-- Ground truth lives in `docs/gate-fleet-inventory.md` (counts, per-script
-  registration, orphan list). `docs/gate-inventory.md` stays the
-  class-A/B/C/D definition; per-gate prose there is frozen until GF5
-  generates it from the spec list.
+  the tracked report drifts from a fresh render, and CI runs that check
+  (GF5) — every added, removed, or renamed spec or script under `tools/`
+  must ship with a regenerated report.
+- `docs/gate-inventory.md` defines the class A/B/C/D policy only; the
+  archive detail file (`docs/archive/gate-inventory-detail.md`) is frozen
+  historical evidence — nothing reads its `GATE_INVENTORY` block anymore.
 
 ## Evidence artifacts
 

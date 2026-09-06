@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 #
 # inventory-gates.sh -- regenerate (or --check) the machine-generated gate
-# fleet inventory (M40 GF1, issue #934).
+# fleet inventory (M40 GF1, issue #934; fleet section M40 GF5, issue #940).
 #
 # Every executable script directly under tools/ gets one row: line count,
 # class (A/B/C/D/tooling -- explicit exceptions below, prefix defaults
-# otherwise), registration status (just recipe? gate-inventory row?
-# CI-sharded via the archive GATE block? status.md row?), and a one-line
-# purpose scraped from its own header comment. A gate-class script
-# registered nowhere is listed as an ORPHAN.
+# otherwise), registration status (just recipe? in the spec-dir class-B
+# fleet? status.md row?), and a one-line purpose scraped from its own
+# header comment. A gate-class script registered nowhere is listed as an
+# ORPHAN. Since GF5 the class-B fleet itself is discovered from
+# tools/gate/specs/ via tools/gate/fleet.sh and rendered as its own
+# section -- the same list the vz-gates.yml CI shards consume.
 #
 # Usage:
 #   bash tools/inventory-gates.sh          # rewrite docs/gate-fleet-inventory.md
@@ -72,9 +74,15 @@ has_just() {
 
 render_to() {
     local out="$1"
-    local total=0 live=0 orphans=0
+    local total=0 orphans=0
     local orphan_list="" rows=""
-    local nA=0 nB=0 nC=0 nD=0 nT=0 just_yes=0 inv_yes=0 ci_yes=0 st_yes=0
+    local nA=0 nB=0 nC=0 nD=0 nT=0 just_yes=0 flt_yes=0 ci_yes=0 st_yes=0
+
+    # The class-B fleet, discovered from the spec dir (GF5). One
+    # "kind<TAB>id" line per member; consumed for the fleet section and
+    # the per-script fleet column.
+    local fleet_tsv="$(mktemp "${TMPDIR:-/tmp}/fleet-tsv.XXXXXX")"
+    bash "$ROOT/tools/gate/fleet.sh" list > "$fleet_tsv"
 
     while IFS= read -r f; do
         base="$(basename "$f")"
@@ -85,24 +93,22 @@ render_to() {
             A) nA=$((nA+1)) ;; B) nB=$((nB+1)) ;; C) nC=$((nC+1)) ;;
             D) nD=$((nD+1)) ;; *) nT=$((nT+1)) ;;
         esac
-        case "$cls" in
-            B) if [ "${base%.sh}" != "${base}" ] && [ "${base#verify-live-}" != "$base" ]; then live=$((live+1)); fi ;;
-        esac
         if has_just "$base"; then j="y"; just_yes=$((just_yes+1)); else j="n"; fi
-        if grep -qF "$base" docs/gate-inventory.md docs/archive/gate-inventory-detail.md 2>/dev/null; then
-            v="y"; inv_yes=$((inv_yes+1)); else v="n"; fi
-        if grep -qF "tools/$base" docs/archive/gate-inventory-detail.md 2>/dev/null; then
+        if awk -F'\t' -v id="${base%.sh}" -v py="${base%.py}" \
+                '$2==id || $2==py { found=1 } END { exit !found }' "$fleet_tsv"; then
+            fl="y"; flt_yes=$((flt_yes+1)); else fl="n"; fi
+        if grep -qF "tools/$base" .github/workflows/*.yml 2>/dev/null; then
             c="y"; ci_yes=$((ci_yes+1)); else c="n"; fi
         if grep -qF "$base" docs/status.md 2>/dev/null; then
             s="y"; st_yes=$((st_yes+1)); else s="n"; fi
         pur="$(purpose_of "$f")"
         [ -n "$pur" ] || pur="(no header line)"
         if { [ "$cls" = "A" ] || [ "$cls" = "B" ] || [ "$cls" = "C" ] || [ "$cls" = "D" ]; } \
-            && [ "$j" = "n" ] && [ "$v" = "n" ] && [ "$s" = "n" ]; then
+            && [ "$j" = "n" ] && [ "$fl" = "n" ] && [ "$c" = "n" ] && [ "$s" = "n" ]; then
             orphans=$((orphans+1))
             orphan_list="${orphan_list}${base}"$'\n'
         fi
-        rows="${rows}| \`$base\` | $lines | $cls | $j | $v | $c | $s | $pur |"$'\n'
+        rows="${rows}| \`$base\` | $lines | $cls | $j | $fl | $c | $s | $pur |"$'\n'
     done <<EOF
 $(LC_ALL=C ls tools/*.sh tools/*.py 2>/dev/null | LC_ALL=C sort)
 EOF
@@ -123,13 +129,13 @@ EOF
         echo "|---|---|"
         echo "| top-level scripts (\`tools/*.sh\` + \`tools/*.py\`) | $total |"
         echo "| class A (portable / CI) | $nA |"
-        echo "| class B (VZ hardware gate) | $nB (of which \`verify-live-*\`: $live) |"
+        echo "| class B (VZ hardware gate) | $nB |"
         echo "| class C (interactive) | $nC |"
         echo "| class D (diagnostic) | $nD |"
         echo "| tooling (not gates) | $nT |"
         echo "| with a just recipe | $just_yes |"
-        echo "| named in gate-inventory.md or the archive GATE block | $inv_yes |"
-        echo "| CI-sharded (archive GATE block \`cmd=\`) | $ci_yes |"
+        echo "| in the class-B fleet (spec dir / legacy script) | $flt_yes |"
+        echo "| named in a GitHub workflow | $ci_yes |"
         echo "| named in docs/status.md | $st_yes |"
         echo "| **orphans (gate-class, registered nowhere)** | **$orphans** |"
         echo
@@ -149,29 +155,59 @@ EOF
             echo "| \`tools/$d/\` | $n | $r |"
         done
         echo
+        echo "## Class-B fleet (discovered from the spec dir)"
+        echo
+        echo "> M40 GF5 (issue #940): this section IS the fleet inventory -- the"
+        echo "> exact list \`bash tools/gate/fleet.sh list\` produces and the"
+        echo "> vz-gates.yml CI shards consume. A spec added under"
+        echo "> tools/gate/specs/ appears here (and in just + CI) with zero list"
+        echo "> edits; the --check mode fails until the report is regenerated."
+        echo
+        echo "Members: every \`tools/gate/specs/*.spec\` (run through"
+        echo "\`tools/gate/vgate.sh\`) plus the four legacy class-B scripts. The"
+        echo "interactive serial-takeover gate (\`zig build run\`, needs a TTY) is"
+        echo "deliberately not part of the automated fleet. Run one with"
+        echo "\`just gate <id>\`, a pattern group with \`just gates <pattern>\`, all"
+        echo "of them with \`just verify-vz\`."
+        echo
+        echo "| kind | id | runs / asserts | spec header |"
+        echo "|---|---|---|---|"
+        while IFS=$'\t' read -r k id; do
+            if [ "$k" = spec ]; then
+                spec="$ROOT/tools/gate/specs/$id.spec"
+                na="$(grep -c '^vgate_assert ' "$spec" || true)"
+                nr="$(grep -c '^vgate_run ' "$spec" || true)"
+                hdr="$(grep -m1 '^# ' "$spec" | sed 's/^# //' | cut -c1-100 | sed 's/|/\\|/g; s/[[:space:]]*$//')"
+                [ -n "$hdr" ] || hdr="(no header comment)"
+                echo "| spec | \`$id\` | ${nr:-0} run / ${na:-0} assert | $hdr |"
+            else
+                echo "| script | \`$id\` | (legacy script) | \`tools/$id.sh\` |"
+            fi
+        done < "$fleet_tsv"
+        echo
         echo "## Orphans"
         echo
         if [ "$orphans" -eq 0 ]; then
             echo "None -- every gate-class script is registered somewhere."
         else
-            echo "Gate-class scripts with no just recipe, no inventory row, and no"
-            echo "status.md row (migration order for GF3/GF4 is biggest-family first;"
-            echo "this list only needs to shrink):"
+            echo "Gate-class scripts with no just recipe, no fleet membership, and no"
+            echo "status.md row:"
             echo
             printf '%s' "$orphan_list" | sed 's/^/- `/' | sed 's/$/`/'
         fi
         echo
         echo "## All top-level scripts"
         echo
-        echo "Columns: \`just\` = justfile recipe of the same name; \`inv\` = named in"
-        echo "\`docs/gate-inventory.md\` or \`docs/archive/gate-inventory-detail.md\`;"
-        echo "\`ci\` = \`cmd=\` in the archive GATE block (what vz-gates.yml shards);"
-        echo "\`st\` = named in \`docs/status.md\` (\`y\` = yes, \`n\` = no throughout)."
+        echo "Columns: \`just\` = justfile recipe of the same name; \`fleet\` = in"
+        echo "the spec-dir class-B fleet (\`tools/gate/fleet.sh list\`); \`ci\` ="
+        echo "named in \`.github/workflows/*.yml\`; \`st\` = named in"
+        echo "\`docs/status.md\` (\`y\` = yes, \`n\` = no throughout)."
         echo
-        echo "| script | lines | class | just | inv | ci | st | purpose |"
+        echo "| script | lines | class | just | fleet | ci | st | purpose |"
         echo "|---|---|---|---|---|---|---|---|"
         printf '%s' "$rows"
     } > "$out"
+    rm -f "${fleet_tsv:-}"
 }
 
 if [ "$CHECK" -eq 1 ]; then

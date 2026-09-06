@@ -11,17 +11,17 @@
 
 | metric | count |
 |---|---|
-| top-level scripts (`tools/*.sh` + `tools/*.py`) | 39 |
+| top-level scripts (`tools/*.sh` + `tools/*.py`) | 38 |
 | class A (portable / CI) | 9 |
-| class B (VZ hardware gate) | 7 (of which `verify-live-*`: 0) |
+| class B (VZ hardware gate) | 7 |
 | class C (interactive) | 1 |
 | class D (diagnostic) | 9 |
-| tooling (not gates) | 13 |
+| tooling (not gates) | 12 |
 | with a just recipe | 11 |
-| named in gate-inventory.md or the archive GATE block | 22 |
-| CI-sharded (archive GATE block `cmd=`) | 19 |
+| in the class-B fleet (spec dir / legacy script) | 4 |
+| named in a GitHub workflow | 7 |
 | named in docs/status.md | 7 |
-| **orphans (gate-class, registered nowhere)** | **4** |
+| **orphans (gate-class, registered nowhere)** | **11** |
 
 ## Subdirectory tooling (not gates)
 
@@ -31,64 +31,272 @@
 | `tools/status/` | 6 | multiagent coordination gate + claim tooling (class A) |
 | `tools/context/` | 2 | context snapshot helpers |
 | `tools/ragshit/` | 84 | host-side context engine (developer tooling, not guest software) |
-| `tools/gate/` | 180 | M40 vgate harness + specs (GF2+) |
+| `tools/gate/` | 184 | M40 vgate harness + specs (GF2+) |
+
+## Class-B fleet (discovered from the spec dir)
+
+> M40 GF5 (issue #940): this section IS the fleet inventory -- the
+> exact list `bash tools/gate/fleet.sh list` produces and the
+> vz-gates.yml CI shards consume. A spec added under
+> tools/gate/specs/ appears here (and in just + CI) with zero list
+> edits; the --check mode fails until the report is regenerated.
+
+Members: every `tools/gate/specs/*.spec` (run through
+`tools/gate/vgate.sh`) plus the four legacy class-B scripts. The
+interactive serial-takeover gate (`zig build run`, needs a TTY) is
+deliberately not part of the automated fleet. Run one with
+`just gate <id>`, a pattern group with `just gates <pattern>`, all
+of them with `just verify-vz`.
+
+| kind | id | runs / asserts | spec header |
+|---|---|---|---|
+| spec | `live-addrspaces` | 1 run / 11 assert | live-addrspaces.spec -- per-task user address spaces on VZ hardware: |
+| spec | `live-args` | 1 run / 6 assert | live-args.spec -- exec arguments reach EL0: the same USER.BIN exec'd |
+| spec | `live-asm` | 1 run / 9 assert | live-asm.spec -- M22 D2: on-machine assembler produces an ELF the on-machine loader runs. |
+| spec | `live-calc-depth` | 1 run / 24 assert | live-calc-depth.spec -- milestone-twenty-four depth gate (claims |
+| spec | `live-calc-prog` | 1 run / 6 assert | live-calc-prog.spec -- milestone-twenty-four card K1 class-B gate: |
+| spec | `live-chain` | 1 run / 10 assert | live-chain.spec -- milestone-nineteen cards P3+P4 class-B gate |
+| spec | `live-chrome` | 3 run / 7 assert | live-chrome.spec -- M20 U4 window chrome metrics + close click on VZ |
+| spec | `live-clipboard` | 1 run / 11 assert | live-clipboard.spec -- milestone-fourteen card S1 class-B gate (claim |
+| spec | `live-color` | 1 run / 6 assert | live-color.spec -- M18 T5 class-B gate (issue #408): ANSI terminal |
+| spec | `live-concurrent` | 1 run / 5 assert | live-concurrent.spec -- two USER.BIN programs live at once: both |
+| spec | `live-crash-viewer` | 1 run / 7 assert | live-crash-viewer.spec -- M22 D11: crash report viewer on VZ. |
+| spec | `live-desktop` | 1 run / 10 assert | live-desktop.spec -- claim 2427 (Milestone 11, Card A5) Desktop Platform & GUI Apps (ADR 0011) |
+| spec | `live-desktop-typing` | 1 run / 8 assert | live-desktop-typing.spec -- issue #563: keys reach desktop-launched GUI app on VZ |
+| spec | `live-devcons` | 1 run / 10 assert | live-devcons.spec -- M22 D14: DEVCONS.BIN developer console on VZ. |
+| spec | `live-disas` | 1 run / 9 assert | live-disas.spec -- M22 D4: disassemble assembler output on the machine. |
+| spec | `live-dmesg` | 1 run / 4 assert | live-dmesg.spec -- M22 D12: dmesg system log viewer on VZ. |
+| spec | `live-dynamic-ecosystem` | 5 run / 35 assert | live-dynamic-ecosystem.spec -- Milestone 31 Class-B Gate (claim 4001): |
+| spec | `live-dynamic-linking` | 1 run / 9 assert | live-dynamic-linking.spec -- Milestone 30 Class-B Gate (issue #599, claim 7921): |
+| spec | `live-editing` | 1 run / 13 assert | live-editing.spec -- milestone-eight card U2 class-B gate (claim 1809): |
+| spec | `live-editor` | 1 run / 18 assert | live-editor.spec -- M23 E2-E5 class-B gate: |
+| spec | `live-elf` | 1 run / 8 assert | live-elf.spec -- M22 D1: load and execute ELF32 from the ESP at EL0. |
+| spec | `live-entropy` | 2 run / 15 assert | live-entropy.spec -- REAL virtio entropy (DID 0x1044) seeds the |
+| spec | `live-events` | 1 run / 8 assert | live-events.spec -- claim 9328 (milestone nine, card E6) class-B |
+| spec | `live-exceptions` | 1 run / 8 assert | live-exceptions.spec -- exception vectors live on VZ. Mirrors |
+| spec | `live-exec` | 1 run / 6 assert | live-exec.spec -- a real user program (USER.BIN) loaded from the ESP |
+| spec | `live-fetch` | 1 run / 15 assert | live-fetch.spec -- FETCH.BIN (exec'd) performs the HTTP/1.0 fetch |
+| spec | `live-file-browser` | 1 run / 12 assert | live-file-browser.spec -- claim 4046 (Milestone 13 B4): desktop composition on VZ. |
+| spec | `live-filemanager-bulk` | 1 run / 11 assert | live-filemanager-bulk.spec -- M25 Lane A F1: multi-select + batch delete on VZ. |
+| spec | `live-filemanager-du` | 1 run / 5 assert | live-filemanager-du.spec -- M25 F4: recursive disk usage (`du`) on VZ. |
+| spec | `live-filemanager-props` | 1 run / 5 assert | live-filemanager-props.spec -- M25 Lane A F2: properties inspector on VZ. |
+| spec | `live-filemanager-recent` | 1 run / 7 assert | live-filemanager-recent.spec -- M25 Lane B F5: recent ring on VZ. |
+| spec | `live-font-sizes` | 1 run / 6 assert | live-font-sizes.spec -- milestone-twenty card U1 class-B gate |
+| spec | `live-fs` | 2 run / 12 assert | live-fs.spec -- host-share storage (M34 HF6): run A writes |
+| spec | `live-gfs` | 2 run / 10 assert | live-gfs.spec -- the general store IS the host share: `mount` |
+| spec | `live-glob` | 1 run / 6 assert | live-glob.spec -- shell globbing: *, ?, and [...] all expand to |
+| spec | `live-glyphs` | 1 run / 6 assert | live-glyphs.spec -- the MIRROR-REGRESSION TRIPWIRE (follow-on to the |
+| spec | `live-godmenu-summon` | 1 run / 5 assert | live-godmenu-summon.spec -- M37 DQ1 God Menu summon + dynamic apps (issue #836) |
+| spec | `live-hardening` | 1 run / 11 assert | live-hardening.spec -- claim 4482 (Milestone 14, Card S4) |
+| spec | `live-help` | 1 run / 13 assert | live-help.spec -- the ADR 0008 discovery surface live: grouped |
+| spec | `live-history` | 2 run / 6 assert | live-history.spec -- persistent shell history across reboots: boot |
+| spec | `live-httpd` | 1 run / 7 assert | live-httpd.spec -- HTTPD.BIN (exec'd) passively opens port 8080: |
+| spec | `live-image-viewer` | 2 run / 20 assert | live-image-viewer.spec -- M36 IMG5 VIEW.BIN on VZ |
+| spec | `live-input` | 2 run / 7 assert | live-input.spec -- USB XHCI keyboard input on VZ (classic synthesized + custom-virtio) |
+| spec | `live-input-depth` | 1 run / 7 assert | live-input-depth.spec -- audit follow-up (issue #117) class-B gate: |
+| spec | `live-inventory` | 1 run / 8 assert | live-inventory.spec -- M22 D16: which + inventory on VZ. |
+| spec | `live-ipc` | 1 run / 8 assert | live-ipc.spec -- the 8-slot kernel mailbox: PEER.BIN echoes |
+| spec | `live-jobs` | 1 run / 4 assert | live-jobs.spec -- foreground/background jobs: `exec ... &` launch |
+| spec | `live-kill` | 1 run / 10 assert | live-kill.spec -- the kernel owns process lifetime: the |
+| spec | `live-lifecycle` | 1 run / 5 assert | live-lifecycle.spec -- user task lifecycle on VZ hardware: EL0 exit to |
+| spec | `live-long-lived` | 1 run / 5 assert | live-long-lived.spec -- a never-exiting COUNTER.BIN among live |
+| spec | `live-ls-l` | 1 run / 4 assert | live-ls-l.spec -- long listing: permission bits, owner, sizes |
+| spec | `live-m14-composition` | 1 run / 13 assert | live-m14-composition.spec -- claim 3289 (Milestone 14, Card S3) |
+| spec | `live-m15-composition` | 1 run / 19 assert | live-m15-composition.spec -- claim 3206 (Milestone 15, Card A4) |
+| spec | `live-m16-composition` | 1 run / 15 assert | live-m16-composition.spec -- milestone-sixteen composition class-B gate |
+| spec | `live-m16-guards` | 1 run / 8 assert | live-m16-guards.spec -- claim 8403 (Milestone 16, Card C2) class-B gate: |
+| spec | `live-m16-image` | 1 run / 5 assert | live-m16-image.spec -- claim 3805 (Milestone 16, Card C1) class-B gate: |
+| spec | `live-m16-resources` | 1 run / 12 assert | live-m16-resources.spec -- milestone-sixteen card K3 (claim 2259) |
+| spec | `live-m21-max-fullscreen-aot` | 1 run / 12 assert | live-m21-max-fullscreen-aot.spec -- M21 W6 max + W7 fullscreen + W8 always-on-top + W10 kmove |
+| spec | `live-m21-minimize-ws` | 1 run / 10 assert | live-m21-minimize-ws.spec -- M21 W3 minimize/restore + W4 workspace switching |
+| spec | `live-m21-notif-dialog-transient` | 1 run / 16 assert | live-m21-notif-dialog-transient.spec -- M21 W5 notif + W13 dialog + W15 modal + W16 transient |
+| spec | `live-m21-persist-title-orphan` | 1 run / 7 assert | live-m21-persist-title-orphan.spec -- tools/verify-live-m21-persist-title-orphan.sh — class-B live |
+| spec | `live-m21-tile-master` | 2 run / 18 assert | live-m21-tile-master.spec -- claim 8777: M21 W1 tiling + W2 master swap |
+| spec | `live-n1-ping` | 1 run / 10 assert | live-n1-ping.spec -- PING.BIN (exec'd) pings the host responder 3x |
+| spec | `live-n11-download` | 1 run / 10 assert | live-n11-download.spec -- DOWNLOAD.BIN (exec'd) fetches the HTTP |
+| spec | `live-n12-netprof` | 1 run / 9 assert | live-n12-netprof.spec -- NETPROF.BIN (exec'd) lists/loads network |
+| spec | `live-n4-top-net` | 1 run / 8 assert | live-n4-top-net.spec -- TOP.BIN opens on the network tab, refreshes |
+| spec | `live-n5-dns` | 1 run / 6 assert | live-n5-dns.spec -- DNS.BIN (exec'd) resolves example.com through |
+| spec | `live-n7-traceroute` | 1 run / 7 assert | live-n7-traceroute.spec -- TRACEROU.BIN (exec'd) traces the host |
+| spec | `live-n8-netstatus` | 1 run / 9 assert | live-n8-netstatus.spec -- net status summary (N8), route inspection |
+| spec | `live-net-arp` | 3 run / 20 assert | live-net-arp.spec -- vgate pilot (multi-phase net + generated fixtures): |
+| spec | `live-net-dhcp` | 2 run / 12 assert | live-net-dhcp.spec -- the bounded RFC 2131 client: P1 runs the full |
+| spec | `live-net-dhcp-autonomous` | 1 run / 8 assert | live-net-dhcp-autonomous.spec -- the lease lifecycle advances from |
+| spec | `live-net-dhcp-renew` | 2 run / 13 assert | live-net-dhcp-renew.spec -- the RFC 2131 S4.4.5 lease lifecycle: |
+| spec | `live-net-dns` | 1 run / 7 assert | live-net-dns.spec -- the bounded DNS client live: two A-record |
+| spec | `live-net-icmp` | 3 run / 19 assert | live-net-icmp.spec -- IPv4/ICMP live on VZ. Mirrors |
+| spec | `live-net-nat` | 1 run / 10 assert | live-net-nat.spec -- outbound connectivity through the VZ NAT |
+| spec | `live-net-offline` | 3 run / 20 assert | live-net-offline.spec -- the offline preflight (N13/N14): Run A |
+| spec | `live-net-rx` | 3 run / 18 assert | live-net-rx.spec -- virtio-net RX: armed queue, injection, drain, |
+| spec | `live-net-tcp` | 3 run / 23 assert | live-net-tcp.spec -- the bounded RFC 793 client: Run A the full |
+| spec | `live-net-tcp-rto` | 3 run / 23 assert | live-net-tcp-rto.spec -- the bounded retransmission + timer: Run A |
+| spec | `live-net-tcp-syscall` | 1 run / 12 assert | live-net-tcp-syscall.spec -- TCP.BIN (exec'd) drives the TCP |
+| spec | `live-net-tx` | 2 run / 17 assert | live-net-tx.spec -- virtio-net transport + TX byte-exact on the host. |
+| spec | `live-net-udp` | 4 run / 28 assert | live-net-udp.spec -- UDP live on VZ. Mirrors |
+| spec | `live-net-udp-syscall` | 1 run / 15 assert | live-net-udp-syscall.spec -- the UDP syscall seam from EL0: UDP.BIN |
+| spec | `live-netstat` | 1 run / 8 assert | live-netstat.spec -- NETSTAT.BIN dashboard sections live: iface, |
+| spec | `live-pipe` | 1 run / 5 assert | live-pipe.spec -- the pipe operator: left-echo output travels through |
+| spec | `live-pointer-cg` | 0 run / 0 assert | live-pointer-cg.spec -- milestone eight card U4 (claim 4993) CG |
+| spec | `live-pointer-virtio` | 1 run / 9 assert | live-pointer-virtio.spec -- claim 9367 (issue #523 item 3 |
+| spec | `live-procs` | 1 run / 8 assert | live-procs.spec -- the PROCESS abstraction above the task pool: the |
+| spec | `live-procs-syscall` | 1 run / 8 assert | live-procs-syscall.spec -- the process table read FROM EL0 via |
+| spec | `live-ps` | 1 run / 6 assert | live-ps.spec -- vgate pilot (seeded share + display/input + repeat): |
+| spec | `live-quote` | 1 run / 7 assert | live-quote.spec -- quoting & escaping: single-quote grouping, |
+| spec | `live-reboot` | 2 run / 7 assert | live-reboot.spec -- live reboot and shutdown from the shell. |
+| spec | `live-resmon` | 1 run / 5 assert | live-resmon.spec -- M22 D10: RESMON.BIN resource monitor on VZ. |
+| spec | `live-roadpops` | 1 run / 11 assert | live-roadpops.spec -- claim 1574 (milestone six, card G3) class-B |
+| spec | `live-sb2-shared-anon` | 1 run / 8 assert | live-sb2-shared-anon.spec -- M33 SB2 (claim 8878) class-B gate: the |
+| spec | `live-sb3-surface-handoff` | 1 run / 8 assert | live-sb3-surface-handoff.spec -- M33 SB3 (claim 3633) class-B gate: |
+| spec | `live-sb4-damage-tracking` | 1 run / 5 assert | live-sb4-damage-tracking.spec -- M33 SB4 (claim 2382) class-B gate: |
+| spec | `live-sb5-wm-compose-n` | 1 run / 18 assert | live-sb5-wm-compose-n.spec -- M33 SB5 (claim 7397) class-B gate: |
+| spec | `live-sb6-perf-payoff` | 1 run / 24 assert | live-sb6-perf-payoff.spec -- M33 SB6 (claim 6864) class-B gate: |
+| spec | `live-scale` | 1 run / 4 assert | live-scale.spec -- pool scale at the 11-slot budget: counter + up |
+| spec | `live-sched-ring` | 1 run / 13 assert | live-sched-ring.spec -- M28 SMP card 10 (claim 1163) class-B gate: |
+| spec | `live-screen` | 1 run / 12 assert | live-screen.spec -- claim 6053 (milestone six, card G1) class-B |
+| spec | `live-scripting` | 1 run / 9 assert | live-scripting.spec -- scripting + tab completion: `sh` runs a |
+| spec | `live-scrollback` | 1 run / 5 assert | live-scrollback.spec -- milestone-eighteen card T1 class-B gate (issue #404): |
+| spec | `live-search` | 1 run / 6 assert | live-search.spec -- milestone-eighteen card T3 class-B gate (issue #406): |
+| spec | `live-selection` | 1 run / 6 assert | live-selection.spec -- milestone-eighteen card T2 class-B gate (issue #405): |
+| spec | `live-settings` | 2 run / 8 assert | live-settings.spec -- claim 2649: persistent settings on host share across reboot |
+| spec | `live-sexiburger` | 1 run / 4 assert | live-sexiburger.spec -- Milestone 19 Sexiburger God Menu on VZ |
+| spec | `live-sexiburger-actions` | 1 run / 12 assert | live-sexiburger-actions.spec -- M19 Sexiburger Action Registry & Tab Model |
+| spec | `live-sleep` | 1 run / 6 assert | live-sleep.spec -- blocking syscalls: USER.BIN yields, sleeps 2 |
+| spec | `live-smp` | 1 run / 1 assert | live-smp.spec -- Milestone 28 (claim 6438) class-B gate: |
+| spec | `live-smp-stress` | 1 run / 23 assert | live-smp-stress.spec -- M28 SMP card 11 (claim 0697) class-B gate: |
+| spec | `live-smp1` | 1 run / 12 assert | live-smp1.spec -- claim 2369 class-B gate: a USER program runs on a |
+| spec | `live-snake` | 1 run / 16 assert | live-snake.spec -- class-B gate: the VL6 snake game (tests/zc-corpus/ |
+| spec | `live-snap-guides` | 3 run / 10 assert | live-snap-guides.spec -- M37 DQ5 window snap guides (issue #837) |
+| spec | `live-sound-app` | 1 run / 7 assert | live-sound-app.spec -- claim 7636 (Milestone 15 Card A3): EL0 audio seam on VZ. |
+| spec | `live-sound-control` | 1 run / 18 assert | live-sound-control.spec -- claim 9297 (M15 follow-up): stream-state control on VZ. |
+| spec | `live-sound-device` | 1 run / 9 assert | live-sound-device.spec -- claim 6140 (Milestone 15 Card A1): virtio-snd transport on VZ. |
+| spec | `live-sound-playback` | 1 run / 13 assert | live-sound-playback.spec -- claim 5877 (Milestone 15 Card A2): PCM playback on VZ. |
+| spec | `live-stat-find` | 1 run / 8 assert | live-stat-find.spec -- M22 D8: stat + find filesystem inspection on VZ. |
+| spec | `live-strace` | 1 run / 9 assert | live-strace.spec -- M22 D5: per-syscall tracing. |
+| spec | `live-svc` | 1 run / 11 assert | live-svc.spec -- numbered syscall table dispatched through real EL0 |
+| spec | `live-symbols` | 1 run / 8 assert | live-symbols.spec -- M22 D3: symbolized crash reports. |
+| spec | `live-sys-kill` | 1 run / 6 assert | live-sys-kill.spec -- claim 7604 (slot 29 sys_kill): EL0 process termination. |
+| spec | `live-sysinfo` | 1 run / 12 assert | live-sysinfo.spec -- M22 D9: sysinfo information dashboard on VZ. |
+| spec | `live-tabclick` | 3 run / 7 assert | live-tabclick.spec -- M37 DQ3 tab mouse interaction (issue #839) |
+| spec | `live-tabs` | 2 run / 2 assert | live-tabs.spec -- M20 U5: tab stops in guest-streamed pixels on VZ |
+| spec | `live-tabstrip` | 1 run / 4 assert | live-tabstrip.spec -- M37 DQ2 tab-strip chrome (issue #840) |
+| spec | `live-tabwm` | 1 run / 12 assert | live-tabwm.spec -- M39 TWM3 (issue #930) class-B gate: the browser-style |
+| spec | `live-tabwm-alttab` | 1 run / 12 assert | live-tabwm-alttab.spec -- M42 UX hardening round 2 (2026-09-05, claim #1011, ADR 0018 addendum) |
+| spec | `live-tabwm-close` | 1 run / 16 assert | live-tabwm-close.spec -- M42 UX hardening (2026-09-05, claim #1008 / ADR 0018 D2) |
+| spec | `live-tabwm-fullscreen` | 2 run / 25 assert | live-tabwm-fullscreen.spec -- M42 SX5 (issue #986) class-B gate: Sexiburger tabbed desktop as PRIMAR |
+| spec | `live-tabwm-unsaved` | 2 run / 16 assert | live-tabwm-unsaved.spec -- M42 UX hardening round 2 (2026-09-05, claim #1011, ADR 0018 addendum) |
+| spec | `live-tasks` | 1 run / 5 assert | live-tasks.spec -- tick-driven round-robin: the worker demonstrably |
+| spec | `live-text` | 1 run / 10 assert | live-text.spec -- claim 3194 (milestone six, card G2) class-B gate: |
+| spec | `live-text-search` | 2 run / 9 assert | live-text-search.spec -- milestone-twenty card U3 class-B gate (text search in apps) |
+| spec | `live-time` | 1 run / 4 assert | live-time.spec -- M22 D13 (issue #336) class-B gate: |
+| spec | `live-timer` | 1 run / 6 assert | live-timer.spec -- real CNTP PPI delivery through the EL1 IRQ vector. |
+| spec | `live-timers` | 1 run / 13 assert | live-timers.spec -- claim 7323 (Milestone 14, Card S2) class-B gate: |
+| spec | `live-tokens` | 12 run / 36 assert | live-tokens.spec -- M37 DQ4 design tokens & cohesion |
+| spec | `live-transcript` | 1 run / 6 assert | live-transcript.spec -- vgate pilot (serial-only + repeat): live RX. |
+| spec | `live-typography` | 1 run / 5 assert | live-typography.spec -- live-typography |
+| spec | `live-uaccess` | 1 run / 9 assert | live-uaccess.spec -- fault-safe uaccess: EL0 observes EFAULT on a bad |
+| spec | `live-unicode` | 1 run / 7 assert | live-unicode.spec -- milestone-twenty cards U2/U3/U11 class-B gate |
+| spec | `live-usb` | 1 run / 8 assert | live-usb.spec -- claim 4116 (milestone seven, card I2) class-B gate: |
+| spec | `live-user-fs` | 2 run / 10 assert | live-user-fs.spec -- claim 0510 (Milestone 10 F4): userland storage ABI & utilities on VZ. |
+| spec | `live-userspace` | 1 run / 6 assert | live-userspace.spec -- first EL0 task: SVC round-trip plus timer |
+| spec | `live-vf` | 6 run / 105 assert | live-vf.spec -- M34 HF1+HF2+HF3+HF4+HF7 (issues #735-#738/#741) |
+| spec | `live-virtio-e2e` | 1 run / 8 assert | live-virtio-e2e.spec -- claim 0680 (issue #523 item 3 capstone, the |
+| spec | `live-vm-depth` | 1 run / 9 assert | live-vm-depth.spec -- Milestone 29 (Issue #598, Claim 8247) Class-B gate: |
+| spec | `live-wait` | 1 run / 15 assert | live-wait.spec -- sys_wait (slot 8): COUNTER.BIN blocks on |
+| spec | `live-wallpaper` | 1 run / 4 assert | live-wallpaper.spec -- M33 IMG4: WND.BIN desktop wallpaper (issue #825) |
+| spec | `live-wasm` | 1 run / 37 assert | live-wasm.spec -- M35 W2+W3+W4+W5 + rustc cross-language app in-guest |
+| spec | `live-win` | 1 run / 11 assert | live-win.spec -- vgate pilot (SPIKE runner + snapshot pixel proof): |
+| spec | `live-win-close` | 1 run / 9 assert | live-win-close.spec -- EL0 window release on real VZ hardware (milestone six card G6) |
+| spec | `live-win-hig` | 1 run / 6 assert | live-win-hig.spec -- milestone eight card U5: window chrome visible and moves with focus |
+| spec | `live-win-move` | 1 run / 26 assert | live-win-move.spec -- claim 0487 (milestone six, card G6 move/raise |
+| spec | `live-win-syscall` | 1 run / 18 assert | live-win-syscall.spec -- claim 0487 (milestone six, card G6) class-B |
+| spec | `live-wm-ipc` | 2 run / 9 assert | live-wm-ipc.spec -- M32 WMS7 (issue #627) app<->WM mailbox protocol (WM_RPC) on VZ |
+| spec | `live-wm1` | 1 run / 13 assert | live-wm1.spec -- Lane 1 WM1 (#707, claim 919) class-B gate: eight concurrent user windows |
+| spec | `live-wm3-taskbar` | 3 run / 13 assert | live-wm3-taskbar.spec -- M32 WM3 (Lane 1, #707): taskbar shows per-window entries, workspace-aware |
+| spec | `live-wm4-paint` | 2 run / 4 assert | live-wm4-paint.spec -- M32 WM4 (Lane 1, #707): WM rest policy blends unfocused, focused pure |
+| spec | `live-wm7-gateb` | 2 run / 11 assert | live-wm7-gateb.spec -- WMS7 Gate B (issue #627): toolkit round-trip and no-wm fallback |
+| spec | `live-wmctl-register` | 1 run / 11 assert | live-wmctl-register.spec -- M32 WMS2: kernel render-server register on VZ |
+| spec | `live-wnd-server` | 1 run / 10 assert | live-wnd-server.spec -- M32 WMS3: long-lived EL0 WM server (WND.BIN) on VZ |
+| spec | `live-wnd2-mission-control` | 4 run / 17 assert | live-wnd2-mission-control.spec -- WM2 mission-control overview (Lane 1, #707) |
+| spec | `live-wnd4-chrome` | 2 run / 7 assert | live-wnd4-chrome.spec -- WMS4 Chrome parity (issue #624) |
+| spec | `live-wnd5-gate2-policy` | 2 run / 15 assert | live-wnd5-gate2-policy.spec -- WMS5 Gate 2: registered-WM W1–W16 matrix & WM-driven Ctrl+T policy |
+| spec | `live-wnd5-geometry` | 1 run / 6 assert | live-wnd5-geometry.spec -- WMS5 Geometry: title-bar drag moved via SET_WINDOW |
+| spec | `live-wnd6-altab-drain` | 2 run / 7 assert | live-wnd6-altab-drain.spec -- WMS6 Gate A: shim self-cycles Alt+Tab and WM-driven Alt+Tab |
+| spec | `live-wnd6-dock-drain` | 2 run / 9 assert | live-wnd6-dock-drain.spec -- WMS6 Gate D: shim and WM-driven dock click |
+| spec | `live-wnd6-notif-drain` | 2 run / 8 assert | live-wnd6-notif-drain.spec -- WMS6 Gate B: shim and WM-driven notification center |
+| spec | `live-wnd6-tooltip-drain` | 2 run / 8 assert | live-wnd6-tooltip-drain.spec -- WMS6 Gate C: dormant shim and WM-driven tooltip |
+| spec | `live-wnd6-tray-drain` | 2 run / 5 assert | live-wnd6-tray-drain.spec -- WMS6 Gate E: kernel-derived tray clock and WM-driven tray |
+| spec | `live-wnd8-dialog-drain` | 2 run / 7 assert | live-wnd8-dialog-drain.spec -- WMS8 Gates 2+3: about dialog drains into WND.BIN and kernel decision |
+| spec | `live-wnd8-geom-kbd-delete` | 2 run / 11 assert | live-wnd8-geom-kbd-delete.spec -- WMS8: kernel geometry keyboard decision deleted |
+| spec | `live-wnd8-ptr-drag-delete` | 2 run / 8 assert | live-wnd8-ptr-drag-delete.spec -- WMS8 Gate 6: kernel title-bar drag decision deleted |
+| spec | `live-wnd8-unsaved-drain` | 2 run / 12 assert | live-wnd8-unsaved-drain.spec -- WMS8 Gate 4: unsaved-changes dialog drains into WND.BIN |
+| spec | `live-xhci` | 1 run / 13 assert | live-xhci.spec -- claim 4272 (milestone seven, card I1) class-B |
+| spec | `live-zc` | 1 run / 13 assert | live-zc.spec -- M32 Lane 2: on-machine Zig subset compiler produces ELF loader runs |
+| script | `verify-bad-handoff` | (legacy script) | `tools/verify-bad-handoff.sh` |
+| script | `verify-host-console` | (legacy script) | `tools/verify-host-console.sh` |
+| script | `verify-marker` | (legacy script) | `tools/verify-marker.sh` |
+| script | `verify-nvram-console` | (legacy script) | `tools/verify-nvram-console.sh` |
 
 ## Orphans
 
-Gate-class scripts with no just recipe, no inventory row, and no
-status.md row (migration order for GF3/GF4 is biggest-family first;
-this list only needs to shrink):
+Gate-class scripts with no just recipe, no fleet membership, and no
+status.md row:
 
+- `audit-vz-irq-api.sh`
 - `check-zc-host-contract.py`
 - `probe-pointer-routes.sh`
 - `test-unicode-torture.sh`
+- `verify-fw-mmu-capture.sh`
+- `verify-pointer-manual.sh`
+- `verify-t0sz16-walkprobe.sh`
+- `verify-t0sz16.sh`
+- `verify-transcript.sh`
 - `verify-ttf-fonts.sh`
+- `verify-tx-transition.sh`
 
 ## All top-level scripts
 
-Columns: `just` = justfile recipe of the same name; `inv` = named in
-`docs/gate-inventory.md` or `docs/archive/gate-inventory-detail.md`;
-`ci` = `cmd=` in the archive GATE block (what vz-gates.yml shards);
-`st` = named in `docs/status.md` (`y` = yes, `n` = no throughout).
+Columns: `just` = justfile recipe of the same name; `fleet` = in
+the spec-dir class-B fleet (`tools/gate/fleet.sh list`); `ci` =
+named in `.github/workflows/*.yml`; `st` = named in
+`docs/status.md` (`y` = yes, `n` = no throughout).
 
-| script | lines | class | just | inv | ci | st | purpose |
+| script | lines | class | just | fleet | ci | st | purpose |
 |---|---|---|---|---|---|---|---|
 | `_va-scripting.sh` | 133 | tooling | n | n | n | n | verify-live-scripting.sh -- milestone-eighteen card T16 class-B gate |
-| `audit-vz-irq-api.sh` | 46 | D | n | y | y | n | Record the selected Xcode/macOS SDK's public host interrupt surface. |
+| `audit-vz-irq-api.sh` | 46 | D | n | n | n | n | Record the selected Xcode/macOS SDK's public host interrupt surface. |
 | `build-zc-host.sh` | 81 | tooling | n | n | n | n | build-zc-host.sh -- Z4b (issue #761) host link contract: the target recipe. |
 | `check-zc-host-contract.py` | 112 | A | n | n | n | n | Z4b (issue #761): check an ELF against the VirelaiOS static-loader contract. |
-| `decode-screen-glyphs.py` | 538 | tooling | n | y | y | n | decode-screen-glyphs.py -- decode a captured framebuffer PNG against the |
-| `elf2bin.py` | 217 | tooling | n | n | n | n | Convert a Zig aarch64-freestanding ELF executable into the VirelaiOS flat |
-| `env-check.sh` | 244 | tooling | n | n | n | n | tools/env-check.sh -- source me at the start of every agent session. |
+| `decode-screen-glyphs.py` | 538 | tooling | n | n | n | n | decode-screen-glyphs.py -- decode a captured framebuffer PNG against the |
+| `elf2bin.py` | 245 | tooling | n | n | n | n | Convert a Zig aarch64-freestanding ELF executable into the VirelaiOS flat |
+| `env-check.sh` | 259 | tooling | n | n | y | n | tools/env-check.sh -- source me at the start of every agent session. |
 | `inspect.sh` | 93 | tooling | y | n | n | n | inspect.sh -- report useful facts about the generated EFI binary and the |
-| `inventory-gates.sh` | 191 | tooling | n | n | n | n | inventory-gates.sh -- regenerate (or --check) the machine-generated gate |
-| `lint-workflows.sh` | 62 | tooling | y | y | n | n | lint-workflows.sh -- lint the GitHub Actions workflows (class A). |
+| `inventory-gates.sh` | 227 | tooling | n | n | n | n | inventory-gates.sh -- regenerate (or --check) the machine-generated gate |
+| `lint-workflows.sh` | 62 | tooling | y | n | y | n | lint-workflows.sh -- lint the GitHub Actions workflows (class A). |
 | `mkdyn-elf.py` | 1090 | tooling | n | n | n | y | Generate freestanding dynamic ELF binaries for VirelaiOS. |
 | `mkhello-elf.py` | 205 | tooling | n | n | n | n | Emit a minimal statically linked AArch64 ELF32 executable (M22 D1, issue #324). |
 | `png2qoi.py` | 94 | tooling | n | n | n | n | Convert standard images (PNG, JPG) to Quite OK Image (QOI) format. |
 | `probe-pointer-routes.sh` | 53 | D | n | n | n | n | Probe: sweep pointer routes against the same guest session, comparing |
-| `sweep-vz.sh` | 36 | tooling | n | n | n | n | verify-vz aggregate sweep (the justfile recipe, since `just` may not be |
 | `test-unicode-torture.sh` | 18 | D | n | n | n | n | M20-U14: the Unicode torture gate. |
-| `verify-bad-handoff.sh` | 24 | B | y | y | y | y | (no header line) |
-| `verify-bss-budget.sh` | 165 | A | y | y | y | n | verify-bss-budget.sh -- ADR 0013 D3.1 CI gate: enforce a hard .bss ceiling |
+| `verify-bad-handoff.sh` | 24 | B | y | y | n | y | (no header line) |
+| `verify-bss-budget.sh` | 165 | A | y | n | y | n | verify-bss-budget.sh -- ADR 0013 D3.1 CI gate: enforce a hard .bss ceiling |
 | `verify-custom-virtio.sh` | 213 | B | n | n | n | y | verify-custom-virtio.sh -- claims 0828/4374/9492/9737/4837 class-B gate: |
-| `verify-cvc-echo.sh` | 182 | B | n | y | n | y | verify-cvc-echo.sh -- claim 3141 class-B gate (issue #523 item 3, first |
-| `verify-fw-mmu-capture.sh` | 94 | D | n | y | y | n | verify-fw-mmu-capture.sh -- claim 0021 gate: capture the firmware's MMU |
-| `verify-glyph-raster.sh` | 67 | A | n | y | y | n | verify-glyph-raster.sh -- class A: the font8x8 LSB-first glyph raster |
-| `verify-host-console.sh` | 149 | B | y | y | y | n | M1.5 agent A gate: host-side interactive serial plumbing (host-only). |
-| `verify-marker.sh` | 111 | B | y | y | y | y | verify-marker.sh -- ADR 0004 D4 fixed-memory-marker fallback gate |
-| `verify-mmu-debt.sh` | 104 | A | y | y | y | n | verify-mmu-debt.sh -- claim 1517 gate: the MMU takeover contract is |
-| `verify-mutations.sh` | 117 | A | n | y | y | n | verify-mutations.sh -- class A: the MUTATION CHECK, generalized (claim |
-| `verify-nvram-console.sh` | 132 | B | y | y | y | y | verify-nvram-console.sh -- claim 0015 gate: post-exit console bytes via |
-| `verify-pointer-manual.sh` | 231 | C | n | y | y | n | verify-pointer-manual.sh -- milestone eight card U4 (claim 4993, ADR 0008 |
-| `verify-preexit-tx.sh` | 151 | D | y | y | y | n | verify-preexit-tx.sh -- claim 0017 diagnostic gate: can the CURRENT |
-| `verify-t0sz16-walkprobe.sh` | 220 | D | n | y | y | n | verify-t0sz16-walkprobe.sh -- claim 1517 (claims 6460/7896 follow-up) |
-| `verify-t0sz16.sh` | 276 | D | n | y | y | n | verify-t0sz16.sh -- claim 1517 (claims 6460/7896 follow-up) class-D |
-| `verify-transcript.sh` | 32 | A | n | y | y | n | M1.5 march step 19 gate: the automated `virelai>` transcript test. |
+| `verify-cvc-echo.sh` | 182 | B | n | n | n | y | verify-cvc-echo.sh -- claim 3141 class-B gate (issue #523 item 3, first |
+| `verify-fw-mmu-capture.sh` | 94 | D | n | n | n | n | verify-fw-mmu-capture.sh -- claim 0021 gate: capture the firmware's MMU |
+| `verify-glyph-raster.sh` | 67 | A | n | n | y | n | verify-glyph-raster.sh -- class A: the font8x8 LSB-first glyph raster |
+| `verify-host-console.sh` | 149 | B | y | y | n | n | M1.5 agent A gate: host-side interactive serial plumbing (host-only). |
+| `verify-marker.sh` | 111 | B | y | y | n | y | verify-marker.sh -- ADR 0004 D4 fixed-memory-marker fallback gate |
+| `verify-mmu-debt.sh` | 104 | A | y | n | y | n | verify-mmu-debt.sh -- claim 1517 gate: the MMU takeover contract is |
+| `verify-mutations.sh` | 117 | A | n | n | y | n | verify-mutations.sh -- class A: the MUTATION CHECK, generalized (claim |
+| `verify-nvram-console.sh` | 132 | B | y | y | n | y | verify-nvram-console.sh -- claim 0015 gate: post-exit console bytes via |
+| `verify-pointer-manual.sh` | 231 | C | n | n | n | n | verify-pointer-manual.sh -- milestone eight card U4 (claim 4993, ADR 0008 |
+| `verify-preexit-tx.sh` | 151 | D | y | n | n | n | verify-preexit-tx.sh -- claim 0017 diagnostic gate: can the CURRENT |
+| `verify-t0sz16-walkprobe.sh` | 220 | D | n | n | n | n | verify-t0sz16-walkprobe.sh -- claim 1517 (claims 6460/7896 follow-up) |
+| `verify-t0sz16.sh` | 276 | D | n | n | n | n | verify-t0sz16.sh -- claim 1517 (claims 6460/7896 follow-up) class-D |
+| `verify-transcript.sh` | 32 | A | n | n | n | n | M1.5 march step 19 gate: the automated `virelai>` transcript test. |
 | `verify-ttf-fonts.sh` | 62 | A | n | n | n | n | verify-ttf-fonts.sh -- class A: TrueType font engine verification for |
-| `verify-tx-diag.sh` | 263 | D | y | y | y | n | verify-tx-diag.sh -- claim 0018 gate: bisect the FIRST post-exit virtio TX |
-| `verify-tx-transition.sh` | 238 | D | n | y | y | n | verify-tx-transition.sh -- claim 0020 gate: which transition destroys |
-| `verify-unit-tests.sh` | 36 | A | n | y | y | n | Run the VirelaiOS unit test suites. |
+| `verify-tx-diag.sh` | 263 | D | y | n | n | n | verify-tx-diag.sh -- claim 0018 gate: bisect the FIRST post-exit virtio TX |
+| `verify-tx-transition.sh` | 238 | D | n | n | n | n | verify-tx-transition.sh -- claim 0020 gate: which transition destroys |
+| `verify-unit-tests.sh` | 38 | A | n | n | y | n | Run the VirelaiOS unit test suites. |
 | `verify-vf-class-a.sh` | 118 | A | y | n | n | n | verify-vf-class-a.sh -- M34 HF1–HF4 (issues #735/#736/#737/#738) class-A |
 | `verify-virelai-probe.py` | 88 | tooling | n | n | n | n | verify-virelai-probe.py — class-A check for the W3 shim acceptance item. |
-| `verify-zc-corpus.sh` | 575 | B | n | y | n | y | verify-zc-corpus.sh -- M20 Z4a + Z4b (issues #760 + #761): the corpus |
+| `verify-zc-corpus.sh` | 575 | B | n | n | n | y | verify-zc-corpus.sh -- M20 Z4a + Z4b (issues #760 + #761): the corpus |
