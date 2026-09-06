@@ -48,6 +48,8 @@ echo rx-wasm-ok
 EOF
 
 vgate_file script3.txt <<'EOF'
+dui close 2
+echo rx-w3-closed
 exec WASM.BIN NL.WASM
 echo rx-rust-nl
 EOF
@@ -84,7 +86,7 @@ with open(os.path.join(share, "FILE.TXT"), "wb") as f:
     f.write(b"w3-filerocks!!!\n" * 32)
 PY
 
-vgate_run 01 -- --display --screen '$RUN_DIR/gpu-screen' --script '$RUN_DIR/script1.txt' --script-after "tasks user-el0 exited status=7" --script2 '$RUN_DIR/script2.txt' --script2-after "w3: win ok" --script3 '$RUN_DIR/script3.txt' --script3-after "tasks user-exec exited status=21" --screenshot-after "rx-wasm-ok" --timeout 120
+vgate_run 01 -- --display --screen '$RUN_DIR/gpu-screen' --script '$RUN_DIR/script1.txt' --script-after "tasks user-el0 exited status=7" --script2 '$RUN_DIR/script2.txt' --script2-after "w3: win ok" --script3 '$RUN_DIR/script3.txt' --script3-after "rx-wasm-ok" --screenshot-after "rx-wasm-ok" --timeout 120
 
 vgate_assert 01 serial-contains 'VirelaiOS kernel has seized control.'
 vgate_assert 01 serial-contains 'hello, wasm!'
@@ -92,6 +94,14 @@ vgate_assert 01 serial-contains 'tasks user-exec exited status=55'
 vgate_assert 01 serial-contains 'rx-wasm-hello'
 vgate_assert 01 serial-contains 'w3: win open='
 vgate_assert 01 serial-contains 'w3: win ok'
+# The winapp now holds its window open (polling win_query) until script3's
+# `dui close 2` releases it (issue #1020: the old spin-count hold collapsed
+# to milliseconds once the interpreter outgrew its calibration, so the
+# window died before script2 ever ran). The dui row assert pins the FULL
+# live row — comma-form rect (the dui dump form), registry index 4 after
+# the four fixed surfaces, owner NOT pinned (pid varies with the burst).
+vgate_assert 01 serial-contains 'dui[4]: user user rect=100,100,96,48'
+vgate_assert 01 serial-contains 'dui close: closed=2'
 vgate_assert 01 serial-contains 'tasks user-exec exited status=21'
 vgate_assert 01 serial-contains 'rect=100,100,96,48'
 vgate_assert 01 serial-contains 'tasks user-exec exited status=512'

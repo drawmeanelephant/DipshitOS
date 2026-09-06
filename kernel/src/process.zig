@@ -181,7 +181,11 @@ var current_id: ?usize = null;
 /// one. The name is snapshotted at exit (the descriptor may be recycled
 /// before the shell prints it). Overflow (a full ring) drops the OLDEST
 /// entry to admit the newest — documented and host-tested.
-pub const exit_report_max: usize = 4;
+/// depth of the PROCESS-level exit-report ring (`procs <name> exited
+/// status=`) — kept in lockstep with the scheduler's task-level ring (8,
+/// was 4, issue #1020): five wasm execs exit inside one drain window and a
+/// full ring drops the oldest (floatapp's 590 was lost).
+pub const exit_report_max: usize = 8;
 var exit_report_names: [exit_report_max][name_max]u8 = [_][name_max]u8{[_]u8{0} ** name_max} ** exit_report_max;
 var exit_report_lens: [exit_report_max]usize = [_]usize{0} ** exit_report_max;
 var exit_report_statuses: [exit_report_max]u64 = [_]u64{0} ** exit_report_max;
