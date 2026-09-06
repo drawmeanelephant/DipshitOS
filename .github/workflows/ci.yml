@@ -102,11 +102,10 @@ jobs:
           echo "Class-B VZ hardware gates run in the separate 'VZ hardware gates' workflow"
           echo "(skipped until VZ_RUNNER_LABEL names a registered macOS 27+ runner)."
           echo "NOT proven by THIS workflow — see also just verify-vz:"
-          # The machine-readable GATE_INVENTORY block lives in
-          # docs/archive/gate-inventory-detail.md (issue #265).
-          sed -n '/^<!-- GATE_INVENTORY:START -->$/,/^<!-- GATE_INVENTORY:END -->$/p' docs/archive/gate-inventory-detail.md \
-            | grep ' class=B ' \
-            | sed -E 's/^GATE id=([^ ]+) .*cmd=(.*)$/  - \1: \2/'
+          # The class-B fleet is discovered from the spec dir (M40 GF5,
+          # issue #940): tools/gate/fleet.sh list is the machine-readable
+          # source the vz-gates.yml shards consume.
+          bash tools/gate/fleet.sh list | awk -F'\t' '{printf "  - [%s] %s\n", $1, $2}'
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4

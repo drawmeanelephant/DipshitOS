@@ -2,7 +2,8 @@
 # Requires: just (https://github.com/casey/just)
 # All recipes simply delegate to the Zig build system.
 #
-# Verification classes (canonical inventory: docs/gate-inventory.md):
+# Verification classes (definitions: docs/gate-inventory.md; the generated
+# fleet inventory: docs/gate-fleet-inventory.md — M40 GF5):
 #   A — portable / build CI. Deterministic, no Apple silicon, no VZ VM.
 #       This is exactly what GitHub CI proves. `just verify-portable` runs
 #       the same set locally (`just verify` is a legacy alias).
@@ -36,76 +37,29 @@ verify-portable:
     bash tools/verify-bss-budget.sh
     bash tools/verify-vf-class-a.sh
 
-# Run the Apple-silicon VZ hardware gates (class B): serial takeover
-# (zig build run, claim 1517), bad-handoff, marker, NVRAM console,
-# host-console PTY, the live-transcript RX gate (claim 6684), the
-# live timer IRQ-delivery gate (claim 9187), the live tasks scheduler
-# gate (claim 5275), the EL0/SVC gate (claim 8215), the numbered syscall
-# gate (claim 3594), the fault-safe uaccess gate (claim 6120), the
-# per-task address-space gate (claim 5804), the live entropy gate
-# (claim 2665), the live reboot/shutdown gate (claim 0527), the live
-# IPC mailbox gate (claim 5965), and the virtio-net TX (claim 1373), RX
-# (claim 6076), ARP (claim 7293), ICMP (claim 0148), UDP (claim 8552),
-# the UDP syscall seam (claim 1384) + the NAT outbound gate (claim 4678)
-# gates. Apple silicon only — each boots VZ VMs.
+# The class-B fleet is DISCOVERED, not listed (M40 GF5): every spec in
+# tools/gate/specs/ plus the four legacy class-B scripts (bad-handoff,
+# marker, nvram-console, host-console) run via tools/gate/fleet.sh.
+# Adding a spec file adds it to verify-vz / gate / gates / the CI shards
+# with zero list edits. The serial-takeover gate (`zig build run`) is an
+# interactive console takeover (needs a TTY) and is deliberately not part
+# of the automated fleet — run `just run`. Apple silicon only.
 verify-vz:
-    zig build run
-    bash tools/verify-bad-handoff.sh
-    bash tools/verify-marker.sh
-    bash tools/verify-nvram-console.sh
-    bash tools/verify-host-console.sh
-    bash tools/verify-live-transcript.sh
-    bash tools/verify-live-help.sh
-    bash tools/verify-live-exceptions.sh
-    bash tools/verify-live-fs.sh
-    bash tools/verify-live-gfs.sh
-    bash tools/verify-live-timer.sh
-    bash tools/verify-live-tasks.sh
-    bash tools/verify-live-userspace.sh
-    bash tools/verify-live-svc.sh
-    bash tools/verify-live-uaccess.sh
-    bash tools/verify-live-addrspaces.sh
-    bash tools/verify-live-lifecycle.sh
-    bash tools/verify-live-exec.sh
-    bash tools/verify-live-args.sh
-    bash tools/verify-live-procs.sh
-    bash tools/verify-live-concurrent.sh
-    bash tools/verify-live-long-lived.sh
-    bash tools/verify-live-kill.sh
-    bash tools/verify-live-sleep.sh
-    bash tools/verify-live-entropy.sh
-    bash tools/verify-live-reboot.sh
-    bash tools/verify-live-ipc.sh
-    bash tools/verify-live-procs-syscall.sh
-    bash tools/verify-live-scale.sh
-    bash tools/verify-live-wait.sh
-    bash tools/verify-live-net-tx.sh
-    bash tools/verify-live-net-rx.sh
-    bash tools/verify-live-net-arp.sh
-    bash tools/verify-live-net-icmp.sh
-    bash tools/verify-live-net-udp.sh
-    bash tools/verify-live-net-udp-syscall.sh
-    bash tools/verify-live-net-nat.sh
-    bash tools/verify-live-net-dhcp.sh
-    bash tools/verify-live-net-dhcp-renew.sh
-    bash tools/verify-live-net-dhcp-autonomous.sh
-    bash tools/verify-live-net-tcp.sh
-    bash tools/verify-live-net-tcp-rto.sh
-    bash tools/verify-live-screen.sh
-    bash tools/verify-live-text.sh
-    bash tools/verify-live-roadpops.sh
-    bash tools/verify-live-glyphs.sh
-    bash tools/verify-live-xhci.sh
-    bash tools/verify-live-usb.sh
-    bash tools/verify-live-input.sh
-    bash tools/verify-live-input-depth.sh
-    bash tools/verify-live-editing.sh
-    bash tools/verify-live-win-hig.sh
-    bash tools/verify-live-win.sh
-    bash tools/verify-live-win-syscall.sh
-    bash tools/verify-live-win-close.sh
-    bash tools/verify-live-win-move.sh
-    bash tools/verify-live-smp.sh
+    bash tools/gate/fleet.sh verify-vz
+
+# Run one fleet member by exact id or unique prefix (spec or legacy script):
+#   just gate live-args            just gate bad-handoff
+gate ID:
+    bash tools/gate/fleet.sh run "{{ID}}"
+
+# Run every fleet member whose id contains the pattern (substring match):
+#   just gates net-arp             just gates wnd6
+gates PATTERN:
+    bash tools/gate/fleet.sh run "{{PATTERN}}"
+
+# List the class-B fleet (kind<TAB>id — the same list the CI shards consume)
+gate-list:
+    bash tools/gate/fleet.sh list
 
 # Compile the AArch64 UEFI application and kernel image (class A — zig build)
 build:
@@ -264,131 +218,11 @@ list-agents:
 verify-bad-handoff:
     bash tools/verify-bad-handoff.sh
 
-# Verify the live RX path + live virelai> transcript (class B — boots a VZ VM; host scripted keystrokes reach the kernel end to end; claim 6684; Apple silicon only)
-verify-live-transcript:
-    bash tools/verify-live-transcript.sh
-
-# Verify the ADR 0008 help walk (class B — boots a VZ VM; scripted `help`/`help net`/`help <topic>`/`help syscalls` keystrokes assert the grouped catalog, the per-command detail, and the topic pages in vm-serial.log; milestone-eight card U1, claim 3275; Apple silicon only)
-verify-live-help:
-    bash tools/verify-live-help.sh
-
-# Verify the live exception-vector gate (class B — boots a VZ VM; drives `fault`, asserts the [EXC] sync report + resume in vm-serial.log; claim 9746; Apple silicon only)
-verify-live-exceptions:
-    bash tools/verify-live-exceptions.sh
-
-# Verify real timer IRQ delivery (class B — boots a VZ VM; drives `timer`, then requires five CNTP PPIs through the EL1 IRQ vector with irq=5/poll=0; claim 9187; Apple silicon only)
-verify-live-timer:
-    bash tools/verify-live-timer.sh
-
-# Verify the live tick-driven task scheduler (class B — boots a VZ VM; proves the shell + worker both advance across real timer-tick context switches; claim 5275; Apple silicon only)
-verify-live-tasks:
-    bash tools/verify-live-tasks.sh
-
-# Verify the user task lifecycle (class B — boots a VZ VM; spawn / exit / reap with explicit task states and the idle task; claim 6729; Apple silicon only)
-verify-live-lifecycle:
-    bash tools/verify-live-lifecycle.sh
-
-# Verify the first real EL0 task and SVC boundary (class B — two sequenced SVC entries prove return to EL0; timer preemption returns to the EL1h shell; claim 8215)
-verify-live-userspace:
-    bash tools/verify-live-userspace.sh
-
-# Verify the frozen syscall ABI and runtime dispatch table (class B — staged input waits for EL0 write/yield/exit, then asserts counters + a responsive shell; claim 3594)
-verify-live-svc:
-    bash tools/verify-live-svc.sh
-
-# Verify the fault-safe uaccess layer (class B — EL0 observes EFAULT for a bad pointer and survives; the monitor command recovers a real data abort; claim 6120)
-verify-live-uaccess:
-    bash tools/verify-live-uaccess.sh
-
-# Verify the live ESP file window (class B — boots VZ VMs; ls/cat from the pre-exit ESP snapshot + write persisted to EFI NVRAM and read back across a reboot; claim 3475, hard gate 5; Apple silicon only)
-verify-live-fs:
-    bash tools/verify-live-fs.sh
-
-# Verify the live general (non-ESP) filesystem (class B — boots VZ VMs; the DATA partition on the same disk is mounted by GUID, listed/read/written, and persists across a reboot; claim 3678; Apple silicon only)
-verify-live-gfs:
-    bash tools/verify-live-gfs.sh
-
-# Verify the live reboot/shutdown observation (class B — boots VZ VMs; a real EFI ResetSystem from a live virelai> shell: reboot resets the machine, shutdown powers it off; claim 0527, hard gate 6; Apple silicon only)
-verify-live-reboot:
-    bash tools/verify-live-reboot.sh
-
-# Verify the live XHCI host-controller transport (class B — boots a VZ VM; the runner's --input attaches the keyboard/pointer; the guest drives the Apple XHCI controller DID 0x1a06 — MMIO + command/event rings + NO-OP + port status; claim 4272; Apple silicon only)
-verify-live-xhci:
-    bash tools/verify-live-xhci.sh
-
-# Verify live USB enumeration + HID over the XHCI transport (class B — boots a VZ VM; the guest enumerates the keyboard + pointing device (port reset -> Enable Slot -> Address Device -> descriptors -> Set Configuration -> interrupt-IN armed) and a synthesized host keyDown produces the observed HID boot report; claim 4116; Apple silicon only)
-verify-live-usb:
-    bash tools/verify-live-usb.sh
-
-# Verify scripted keystrokes drive Road Pops (class B — boots a VZ VM; the runner's --input-string synthesizes one NSEvent per keyDown/keyUp (2 s spacing) into the VZVirtualMachineView, the guest's input FIFO + keycode decode feeds the line editor, and the typed `input` command reports events=6 dropped=0; claim 6050; Apple silicon only)
-verify-live-input:
-    bash tools/verify-live-input.sh
-
-# Verify the line editor's history + cursor editing (class B — boots a VZ VM; the runner's --input-chords synthesizes one NSEvent per chord (printable chars + Up/Left arrows) into the VZVirtualMachineView, the I3 keymap decodes the arrows to ESC sequences, and the editor recalls + mid-line-edits them: Up re-runs 'echo u2r' and Left+'c' turns 'echo ab' into 'echo acb'; claim 1809; Apple silicon only)
-verify-live-editing:
-    bash tools/verify-live-editing.sh
-
-# Milestone eight card U5 (claim 0935): the focus ring + title bars, live + pixel
-verify-live-win-hig:
-    bash tools/verify-live-win-hig.sh
-
-# Verify the Driving Award window manager (class B — boots a VZ VM; Road Pops is window 0, a 1 Hz clock overlay is window 1; `win`/`win focus`/`win hit` exercise the registry + focus + hit-test, a keyboard-typed uname lands in the focused terminal, and the decoded capture shows two overlapping windows with the right z-order; claim 1543; Apple silicon only)
-verify-live-win:
-    bash tools/verify-live-win.sh
-
-# Verify the draw/window syscall seam (class B — boots a VZ VM; WIN.BIN opens a user window, fills it, and presents it through the ADR 0007 slots 12/13/14 entirely from EL0; `win`/`syscalls` observe the window + implemented=21 on the same kernel state, and the decoded capture shows the window's red/cyan/white blocks + dark-blue background over the terminal; claim 0487; Apple silicon only)
-verify-live-win-syscall:
-    bash tools/verify-live-win-syscall.sh
-
-# Verify the draw/window RELEASE proof (class B — boots a VZ VM; WINCLOSE.BIN opens/fills/presents/CLOSES a user window through ADR 0007 slot 15 entirely from EL0, twice; `win` shows windows=2 after the close (window gone, no win[2]: row) and the re-exec re-opens id 2 (the freed slot reused, never id 3); claim 0487 teardown follow-on; Apple silicon only)
-verify-live-win-close:
-    bash tools/verify-live-win-close.sh
-
-# Verify the draw/window MOVE/RESTACK + HIDE/SHOW proof (class B — boots a VZ VM; WINMOVE.BIN opens/fills/presents/moves (the second move clamps to the scanout corner)/raises/reads-back (sys_win_get, slot 18, printing winmove: get 1024,528,256,192)/queries (sys_win_query, slot 19, printing winmove: query 1024,528,256,192 z=2 focused=1 visible=1 dirty=1)/hides-then-shows (sys_win_set_visible, slot 20, printing winmove: hide ok + winmove: show ok) through ADR 0007 slots 16/17/18/19/20 entirely from EL0, then yield-loops forever; `win` shows win[2] at the clamped rect visible=1, `syscalls` reports implemented=21 with move=2/raise=1/get=1/query=1/set_visible=2, the marker-driven capture (--screenshot-after "winmove: hide ok") shows the pixel GONE, and the LATEST decoded capture shows the window's colors BACK at the NEW position with the terminal where it used to be; claim 0487 move/raise read-back/query/visibility follow-on; Apple silicon only)
-verify-live-win-move:
-    bash tools/verify-live-win-move.sh
-
-# Verify the live pool-scale capstone (class B — boots VZ VMs; FOUR live user programs at the 7-slot budget: counter + 3 USER.BINs with distinct tasks/stacks, a FIFTH exec pool_full, and the tables=NN/256 headroom; claim 5795; Apple silicon only)
-verify-live-scale:
-    bash tools/verify-live-scale.sh
-
-# Verify the live procs-syscall gate (class B — boots VZ VMs; PEER.BIN reads the process table FROM EL0 via sys_procs (slot 7) and prints peer: sees rows, distinct from the monitor's procs read; claim 5799; Apple silicon only)
-verify-live-procs-syscall:
-    bash tools/verify-live-procs-syscall.sh
-
-# Verify the live wait gate (class B — boots VZ VMs; STATUS43.BIN exits status 43 and COUNTER.BIN, blocked in sys_wait (slot 8) while the target was still running, wakes and reads the propagated status back from EL0; claim 9946; Apple silicon only)
-verify-live-wait:
-    bash tools/verify-live-wait.sh
-    bash tools/verify-live-vf.sh
-
 # Verify the M34 host file channel wire parity (class A — pure host-side:
 # virtio_file G1–G6, VFWire S1–S4, fixture sha256 pins, BSS budget;
 # issues #735/#736, claim 4515)
 verify-vf-class-a:
     bash tools/verify-vf-class-a.sh
-
-# Verify the M34 host file channel live on VZ (class B — boots VZ VMs with
-# --cvc-file <share>: the VF_PROBE 32 KiB device-write spike + vf ls / vf
-# cat streaming a >32 KiB fixture byte-exactly across >= 2 round trips;
-# issues #735/#736, claim 4515; Apple silicon only)
-verify-live-vf:
-    bash tools/verify-live-vf.sh
-
-# Verify the REAL virtio entropy -> CSPRNG seed -> random command path (class B — boots VZ VMs; asserts `entropy: seeded n=64`, `random 32` hex, a responsive shell, and DIFFERENT output across two boots; claim 2665)
-verify-live-entropy:
-    bash tools/verify-live-entropy.sh
-
-# Verify the live kill gate (class B — boots VZ VMs; the kernel force-terminates a never-exiting COUNTER.BIN with the reserved status 137, pages return, the slot is re-exec'd; claim 7786; Apple silicon only)
-verify-live-kill:
-    bash tools/verify-live-kill.sh
-
-# Verify Milestone 28 SMP multi-core bringup (class B — boots VZ VMs with 2 CPUs; asserts secondary core wake, GICv3 redistributor, timer, and smp command; claim 6438; Apple silicon only)
-verify-live-smp:
-    bash tools/verify-live-smp.sh
-
-# Verify the in-guest-compiled snake demo (class B — display-backed VZ boot: ZC.BIN compiles the 4-file snake group in-guest, SNAKE.ELF runs windowed (ordered snake-up→snake-wait→snake-move→snake-over, exit 72), and framebuffer captures prove the game's pixels — first live RUN consumer of the VL6 GUI surface + zc.svc(21) event poll; Apple silicon only)
-verify-live-snake:
-    bash tools/verify-live-snake.sh
 
 # Verify the M1.5 host-side interactive serial plumbing (class B — boots VZ VMs; Apple silicon only)
 verify-host-console:

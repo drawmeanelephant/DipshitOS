@@ -1,5 +1,15 @@
 # DipshitOS verification gate inventory — full historical detail (ARCHIVED)
 
+> **FROZEN at M40 GF5 (issue #940, 2026-09-06).** Until GF5 this file's
+> `GATE_INVENTORY` block was the machine source the `vz-gates.yml` CI
+> shards parsed; it had drifted (96 hand-edited records vs the 185-member
+> spec-dir fleet, one stale `tools/verify-coordination.sh` path). CI now
+> discovers the fleet from `tools/gate/specs/` via `tools/gate/fleet.sh`
+> and the single inventory is the generated
+> [`gate-fleet-inventory.md`](../gate-fleet-inventory.md). Nothing below
+> this banner is maintained or consulted by tooling — it is historical
+> evidence only. Do not extend it.
+>
 > Archived 2026-08-21 (issue #265): this is the verbatim pre-trim
 > `docs/gate-inventory.md` — per-gate evidence paragraphs, claim numbers,
 > phase-by-phase assertions, and the machine-readable `GATE_INVENTORY` block
