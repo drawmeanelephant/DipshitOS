@@ -23,7 +23,12 @@ dui move 2 768 336
 dui raise 2
 EOF
 
-vgate_run 01 -- --display --screen '$RUN_DIR/gpu-screen' --screenshot-after "winmove: hide ok" --script '$RUN_DIR/script.txt' --script2 '$RUN_DIR/script2.txt' --script2-after "winmove: loop ok" --script-expect "timer heartbeat ticks=20 irq=20 poll=0" --timeout 60
+# Issue #1024: the expect marker is the kernel's 1 Hz heartbeat tick 20 —
+# GUEST virtual time — against a wall-clock --timeout. Under host load VZ
+# virtual time dilates and tick 20 can arrive late; 60 s raced that dilation
+# and failed fully-green runs (rc=1, every assert green). 120 s leaves 2x
+# headroom; the marker itself gates the verdict, so the tail is bounded.
+vgate_run 01 -- --display --screen '$RUN_DIR/gpu-screen' --screenshot-after "winmove: hide ok" --script '$RUN_DIR/script.txt' --script2 '$RUN_DIR/script2.txt' --script2-after "winmove: loop ok" --script-expect "timer heartbeat ticks=20 irq=20 poll=0" --timeout 120
 
 vgate_assert 01 serial-contains 'winmove: open id=2'
 vgate_assert 01 serial-contains 'winmove: fill ok'

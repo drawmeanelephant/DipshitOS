@@ -3827,6 +3827,18 @@ func scriptPoll(matchedAt: Date? = nil) {
     // already observed (the tail window simply cannot capture more output),
     // otherwise fail.
     if vmDidStart && (runner.vm.state == .stopped || runner.vm.state == .error) {
+        // Issue #1024: the state was sampled BEFORE this tick's log read —
+        // a VM that stops in the gap after the previous read makes this
+        // branch see "stopped" while the transcript already sits in the
+        // file from that same gap. Re-observe the log before judging: the
+        // old order failed fully-green runs (rc=1, all asserts green) when
+        // the stop landed in the inter-poll window.
+        let textAtStop = String(decoding: (try? Data(contentsOf: serialURL)) ?? Data(), as: UTF8.self)
+        if matchedAt == nil, let expect = scriptExpect, textAtStop.contains(expect) {
+            FileHandle.standardOutput.write(Data("SUCCESS: expected transcript '\(expect)' observed in the serial log (VM ended; log re-read at verdict time, issue #1024).\n".utf8))
+            finish(success: true)
+            return
+        }
         if matchedAt != nil {
             finish(success: true)
         } else {
@@ -3879,6 +3891,21 @@ func scriptPoll(matchedAt: Date? = nil) {
             return
         }
         FileHandle.standardOutput.write(Data("FAILURE: expected transcript '\(scriptExpect ?? "<none>")' not observed within \(Int(timeout))s (log=\(text.count) bytes).\n".utf8))
+        // Issue #1024: re-read the serial log NOW — the log we just measured
+        // against was read at the TOP of this poll tick, and the VM has run
+        // for another 0.5 s since. Under host load VZ virtual time dilates
+        // (the 1 Hz kernel heartbeat can land arbitrarily late on the wall
+        // clock), and a marker that appeared in that gap made this path
+        // exit 1 on a run whose gate evidence was fully intact (observed:
+        // live-win-move rc=1 with all 25 asserts + both snapshots green).
+        // A stale-read failure verdict is an observation bug, not gate
+        // evidence; the log is the record either way.
+        let finalText = String(decoding: (try? Data(contentsOf: serialURL)) ?? Data(), as: UTF8.self)
+        if scriptExpect != nil, finalText.contains(scriptExpect!) {
+            FileHandle.standardOutput.write(Data("SUCCESS: expected transcript '\(scriptExpect!)' observed in the serial log (raced the deadline — log re-read at verdict time, issue #1024).\n".utf8))
+            finish(success: true)
+            return
+        }
         finish(success: scriptExpect == nil)
         return
     }
