@@ -101,14 +101,18 @@ pub const InputControlContext = extern struct {
     reserved: [6]u32 = [_]u32{0} ** 6,
 };
 
-/// Device Context = Slot Context + the endpoint contexts a keyboard/pointer
-/// needs: EP0 (bidirectional, one context), EP1 OUT (unused), EP1 IN
-/// (interrupt). Context offsets are slot=0, EP0=1, EP1OUT=2, EP1IN=3.
+/// Device Context = Slot Context + the endpoint contexts M7 (HID) and U1
+/// (bulk) need: EP0 (control), EP1 OUT/IN, EP2 OUT/IN. Context offsets are
+/// slot=0, EP0=1, EP1OUT=2, EP1IN=3, EP2OUT=4, EP2IN=5. [observed, U1 probe:
+/// VZ's emulated mass-storage device presents bulk EP2 OUT + EP1 IN — the
+/// EP2 pair is load-bearing, not optional depth.]
 pub const DeviceContext = extern struct {
     slot: SlotContext,
     ep0: EpContext,
     ep1_out: EpContext,
     ep1_in: EpContext,
+    ep2_out: EpContext,
+    ep2_in: EpContext,
 };
 
 /// Input Context = Input Control + Slot + the same endpoint contexts (the
@@ -119,6 +123,8 @@ pub const InputContext = extern struct {
     ep0: EpContext,
     ep1_out: EpContext,
     ep1_in: EpContext,
+    ep2_out: EpContext,
+    ep2_in: EpContext,
 };
 
 /// TRB type field (control bits 15:10).
@@ -156,6 +162,8 @@ const tx_data_in: u32 = 3;
 /// Endpoint types (ep_info2 bits 5:3).
 const ep_ctrl: u32 = 4;
 const ep_int_in: u32 = 7;
+const ep_bulk_out: u32 = 2; // U1: bulk OUT (firmware downloads, MSC CBWs)
+const ep_bulk_in: u32 = 6; // U1: bulk IN (MSC data + CSW)
 
 /// Command Completion Event completion code (status bits 31:24).
 const cc_success: u32 = 1;
@@ -357,6 +365,13 @@ pub const EnumDevice = struct {
     hid_boot: bool = false, // Set_Protocol(boot) succeeded
     last_report_len: u8 = 0,
     report_seq: u32 = 0,
+    // U1 (M43 card U1): the bulk endpoint pair — set only for non-HID
+    // devices whose config exposes an EP1 OUT/EP1 IN bulk pair (a USB mass
+    // storage device). HID devices never carry these.
+    bulk_ready: bool = false,
+    bulk_maxpkt: u16 = 0,
+    bulk_out_num: u8 = 0,
+    bulk_in_num: u8 = 0,
 };
 pub var enum_devs: [EnumMax]EnumDevice = [_]EnumDevice{.{}} ** EnumMax;
 pub var enum_count: usize = 0;
@@ -369,6 +384,75 @@ pub var hid_kind: [EnumMax]HidKind = [_]HidKind{.unknown} ** EnumMax;
 /// Enumeration result (for the boot log + `usb devices`).
 pub var enum_done: bool = false;
 pub var enum_fail: []const u8 = "";
+
+// ---------------------------------------------------------------------------
+// U1 — bulk endpoint state (M43 card U1: the bulk-transfer engine)
+// ---------------------------------------------------------------------------
+
+/// Per-slot bulk rings, `[slot][dir]` — dir 0 = EP1 OUT, dir 1 = EP1 IN.
+/// Same geometry + Link-TRB wrap rules as the EP0/intr rings.
+const bulk_dirs: usize = 2;
+
+var bulk_ring: [max_enumerated][bulk_dirs][tr_ring_len]Trb align(64) = undefined;
+var bulk_enq: [max_enumerated][bulk_dirs]usize = [_][bulk_dirs]usize{[_]usize{0} ** bulk_dirs} ** max_enumerated;
+var bulk_deq: [max_enumerated][bulk_dirs]usize = [_][bulk_dirs]usize{[_]usize{0} ** bulk_dirs} ** max_enumerated;
+var bulk_cycle: [max_enumerated][bulk_dirs]u1 = [_][bulk_dirs]u1{[_]u1{1} ** bulk_dirs} ** max_enumerated;
+/// OUT: queued-but-not-yet-completed TRBs (one send at a time in U1 — the
+/// count is 0 or 1). IN: armed TRBs (the intr rule: keep depth small, one
+/// probe transfer at a time in U1).
+var bulk_armed: [max_enumerated][bulk_dirs]usize = [_][bulk_dirs]usize{[_]usize{0} ** bulk_dirs} ** max_enumerated;
+var bulk_maxpkt: [max_enumerated]u16 = [_]u16{0} ** max_enumerated;
+/// U1: the doorbell DCI per direction — EP number + 1 (the xHCI DCI rule:
+/// DCI = 2*EP_NUM + DIR, so EP1 IN = 3, EP2 OUT = 4). Captured at
+/// enumeration; 0 = not configured. [observed, U1 run-01: the VZ MSC is
+/// EP2 OUT → DCI 4, EP1 IN → DCI 3 — NOT the EP1 pair the engine first
+/// assumed; ringing the wrong DCI is a silent no-op.]
+var bulk_out_num_dci: [max_enumerated]u8 = [_]u8{0} ** max_enumerated;
+var bulk_in_num_dci: [max_enumerated]u8 = [_]u8{0} ** max_enumerated;
+
+/// The bulk data buffers, one per ring slot per direction (the intr_slots
+/// pattern: a completed TRB's payload is read from the slot it occupies).
+/// U1 bounds transfers to this size — the probe card's contract; U2 (MSC)
+/// sizes real SCSI blocks against the device's observed maxpkt + burst.
+pub const bulk_buf_len: usize = 128;
+var bulk_slots: [max_enumerated][bulk_dirs][tr_usable][bulk_buf_len]u8 align(64) = undefined;
+
+/// The last completed bulk IN payload (the `usb bulk recv` evidence view).
+var bulk_recv: [max_enumerated][bulk_buf_len]u8 align(64) = undefined;
+pub var bulk_recv_len: [max_enumerated]usize = [_]usize{0} ** max_enumerated;
+
+/// U1: read access to the last completed bulk IN payload of device index
+/// `dev_idx` (the `usb bulk` report). The buffer stays owned by xhci.
+pub fn bulk_last_in(dev_idx: usize) *const [bulk_buf_len]u8 {
+    return &bulk_recv[dev_idx];
+}
+
+/// The ring position a bulk TRB enqueued at `enq` occupies (the
+/// intr_slot_index rule: the Link TRB at tr_usable wraps the enqueue
+/// pointer to 0 BEFORE the Normal TRB is placed). Pure — host-testable.
+fn bulk_slot_index(enq: usize) usize {
+    return if (enq == tr_usable) 0 else enq;
+}
+
+/// True when at least one enumerated device is HID keyboard/mouse (the
+/// input FIFO drain has something to drain). The main boot path arms input
+/// only on this — a bulk-only boot (the U1 probe: `--usb-msd` without
+/// `--input`) must not arm an empty interrupt path. Pure — host-testable.
+pub fn enum_has_hid() bool {
+    for (hid_kind) |k| {
+        if (k == .keyboard or k == .mouse) return true;
+    }
+    return false;
+}
+
+/// The slot id of the first bulk-capable device, or 0 (the `usb bulk` verb's
+/// target selection — the U1 probe boot has exactly one device).
+pub fn usb_bulk_dev() u8 {
+    for (enum_devs) |d| {
+        if (d.present and d.bulk_ready) return d.slot_id;
+    }
+    return 0;
+}
 
 /// Physical (== virtual here, the identity map) address of a DMA ring.
 fn ring_phys(ptr: anytype) u64 {
@@ -755,6 +839,9 @@ fn xhci_init_transfer_rings() void {
         intr_slots[i] = [_][max_report_bytes]u8{[_]u8{0} ** max_report_bytes} ** tr_usable;
         mmu.clean_dcache_range(@intFromPtr(ring), @sizeOf(@TypeOf(ring.*)));
     }
+    // U1: reset the per-slot bulk rings + state (fresh Link TRB at the wrap
+    // boundary, empty armed/dequeue state).
+    xhci_init_bulk_rings();
     enum_count = 0;
     enum_devs = [_]EnumDevice{.{}} ** EnumMax;
     hid_kind = [_]HidKind{.unknown} ** EnumMax;
@@ -835,6 +922,39 @@ fn wait_command(cmd_trb_phys: u64) CmdResult {
 
 const TransferResult = struct { cc: u32, remaining: u32 };
 
+/// U1: true when `trb` is a fresh Transfer Event completing the OLDEST
+/// armed interrupt-IN TRB of some present device; performs that device's
+/// full report-completion bookkeeping (the poll_nb logic: payload into the
+/// report buffer, seq bump, dequeue advance, re-arm) inline. The bulk
+/// engine's wait_transfer calls this so a HID report completing mid-wait is
+/// DELIVERED rather than silently consumed — eating it would desynchronize
+/// the input FIFO's armed ring (the completion the FIFO waits for would
+/// never be seen again). The caller has already matched the cycle bit.
+fn intr_complete_from_event(trb: Trb) bool {
+    for (0..max_enumerated) |i| {
+        const d = &enum_devs[i];
+        if (!d.present or d.ep_in_num == 0) continue;
+        if (intr_armed[i] == 0) continue;
+        if (trb.param != ring_phys(&intr_ring[i][intr_deq[i]])) continue;
+        const cc = (trb.status >> 24) & 0xff;
+        const remaining = trb.status & 0xffffff;
+        evt_advance();
+        if (cc != cc_success) return true;
+        const dq = intr_deq[i];
+        mmu.invalidate_dcache_range(@intFromPtr(&intr_slots[i][dq]), max_report_bytes);
+        const total: u32 = intr_trb_len(intr_maxpkt[i]);
+        const got: u32 = if (remaining <= total) total - remaining else 0;
+        intr_report[i] = intr_slots[i][dq];
+        d.last_report_len = @intCast(got);
+        d.report_seq += 1;
+        intr_deq_advance(i);
+        if (intr_armed[i] > 0) intr_armed[i] -= 1;
+        xhci_arm_intr(d.slot_id);
+        return true;
+    }
+    return false;
+}
+
 /// Poll the event ring for the Transfer Event whose `param` (the completed
 /// TRB's address) matches `trb_phys`. cc=0 means the poll exhausted.
 fn wait_transfer(trb_phys: u64) TransferResult {
@@ -850,6 +970,10 @@ fn wait_transfer(trb_phys: u64) TransferResult {
             evt_advance();
             return .{ .cc = cc, .remaining = remaining };
         }
+        // U1: a foreign TRANSFER event for an armed interrupt-IN endpoint is
+        // a live HID report — complete it inline (intr_complete_from_event
+        // already advanced the ring) and keep waiting for OUR completion.
+        if (ty == trb_transfer_event and intr_complete_from_event(trb)) continue;
         evt_advance();
     }
     return .{ .cc = 0, .remaining = 0 };
@@ -946,18 +1070,54 @@ fn xhci_address_device(slot_id: u8, port: u8, speed: u8) bool {
     return true;
 }
 
-/// Configure Endpoint: add the interrupt-IN endpoint (compressed index 2 =
-/// EP1 IN) to device `dev_idx`'s slot. The slot context is copied from the
-/// current output context (with LAST_CTX bumped to 3).
-fn xhci_configure_endpoint(slot_id: u8, maxpkt: u16, interval: u8) bool {
+/// Configure Endpoint (generalized in U1): add ONE endpoint context to
+/// device `slot_id`'s input context and issue the command. `which` selects
+/// the context: 0 = EP1 OUT (device-context index 2), 1 = EP1 IN (index 3).
+/// `ep_type` is the xHCI endpoint type (ep_bulk_out / ep_bulk_in /
+/// ep_int_in); `ring` is the transfer ring the context's dequeue points at
+/// (the interrupt-IN ring for HID, the bulk rings for U1). The flag-bit
+/// rule is the spec's: bit i+1 = endpoint context i, so EP1 OUT adds bit 2
+/// and EP1 IN adds bit 3 — the ORIGINAL M7 encoding ("EP1 IN = bit 3").
+fn xhci_configure_endpoint(slot_id: u8, maxpkt: u16, interval: u8, ep_type: u32, which: u8, ring: anytype) bool {
+    // which → device-context index: 0 = EP1 OUT (2), 1 = EP1 IN (3),
+    // 2 = EP2 OUT (4), 3 = EP2 IN (5). [observed, U1: the MSC device's bulk
+    // pair is EP2 OUT + EP1 IN — both mappings are live.]
+    const ctx: usize = switch (which) {
+        0 => 2,
+        1 => 3,
+        2 => 4,
+        3 => 5,
+        else => return false,
+    };
     input_ctx = std.mem.zeroes(InputContext);
-    input_ctx.control.add_flags = 1 << (2 + 1); // EP1 IN = bit 3
+    input_ctx.control.add_flags = @as(u32, 1) << @intCast(ctx);
     input_ctx.slot = dev_ctx[slot_id - 1].slot;
-    input_ctx.slot.dev_info = (dev_ctx[slot_id - 1].slot.dev_info & ~last_ctx_mask) | (3 << 27);
-    input_ctx.ep1_in.ep_info = @as(u32, interval) << 16;
-    input_ctx.ep1_in.ep_info2 = (ep_int_in << 3) | (3 << 1) | (@as(u32, maxpkt) << 16);
-    input_ctx.ep1_in.deq = ring_phys(&intr_ring[slot_id - 1]) | 1; // DCS = 1
-    input_ctx.ep1_in.tx_info = maxpkt; // avg TRB length
+    // Context Entries (bits 31:27) = the HIGHEST configured endpoint index,
+    // so a second configure must not clobber the first (bulk OUT ctx 4 must
+    // survive the bulk IN ctx 3 call).
+    const prev_entries: u32 = (dev_ctx[slot_id - 1].slot.dev_info & last_ctx_mask) >> 27;
+    const new_entries: u32 = @max(prev_entries, @as(u32, @intCast(ctx)));
+    input_ctx.slot.dev_info = (dev_ctx[slot_id - 1].slot.dev_info & ~last_ctx_mask) | (new_entries << 27);
+    // U1: compute the EP context as base + compile-time offset. A switch over
+    // 4 field addresses made LLVM emit a link-time ABSOLUTE pointer table
+    // (base 0) that the loader never relocates — the first 2-case switch was
+    // inlined as PC-relative ADRP+ADD and masked this. [observed, U1 run: the
+    // ep pointer printed as the image-relative offset (0x836b60) while
+    // &input_ctx printed the loaded address (0x7e55bac0, base 0x7dd25000);
+    // the store to the unrelocated address kills the guest.] @offsetOf is a
+    // compile-time integer — no relocatable constant involved.
+    const ep_off: usize = switch (which) {
+        0 => @offsetOf(InputContext, "ep1_out"),
+        1 => @offsetOf(InputContext, "ep1_in"),
+        2 => @offsetOf(InputContext, "ep2_out"),
+        3 => @offsetOf(InputContext, "ep2_in"),
+        else => return false,
+    };
+    const ep: *EpContext = @ptrFromInt(@intFromPtr(&input_ctx) + ep_off);
+    ep.ep_info = @as(u32, interval) << 16;
+    ep.ep_info2 = (ep_type << 3) | (3 << 1) | (@as(u32, maxpkt) << 16);
+    ep.deq = ring_phys(ring) | 1; // DCS = 1
+    ep.tx_info = maxpkt; // avg TRB length
     mmu.clean_dcache_range(@intFromPtr(&input_ctx), @sizeOf(InputContext));
 
     const trb = Trb{
@@ -1300,6 +1460,12 @@ fn xhci_enumerate_port(port: u8) bool {
     var ep_in_maxpkt: u16 = 0;
     var ep_in_interval: u8 = 0;
     var iface_protocol: u8 = 0; // bInterfaceProtocol (1=kbd, 2=mouse)
+    // U1: bulk endpoint capture (attributes 2 = bulk; direction from the
+    // address bit 7). Set only on non-HID devices (mass storage).
+    var bulk_out_num: u8 = 0;
+    var bulk_out_maxpkt: u16 = 0;
+    var bulk_in_num: u8 = 0;
+    var bulk_in_maxpkt: u16 = 0;
     {
         var i: usize = 9;
         while (i + 2 <= cfg_len) {
@@ -1318,20 +1484,48 @@ fn xhci_enumerate_port(port: u8) bool {
                     ep_in_num = epaddr & 0xf;
                     ep_in_maxpkt = maxp;
                     ep_in_interval = interval;
+                } else if ((epaddr & 0x80) == 0 and (attrs & 0x3) == 2) {
+                    // U1: bulk OUT endpoint capture.
+                    bulk_out_num = epaddr & 0xf;
+                    bulk_out_maxpkt = maxp;
+                } else if ((epaddr & 0x80) != 0 and (attrs & 0x3) == 2) {
+                    // U1: bulk IN endpoint capture.
+                    bulk_in_num = epaddr & 0xf;
+                    bulk_in_maxpkt = maxp;
                 }
             }
             i += dlen;
         }
     }
 
+    // U1: bulk eligibility — a non-HID device with BOTH a bulk OUT and a
+    // bulk IN endpoint (a USB mass storage device). An HID device never
+    // qualifies even if descriptors surprise us: the contexts are fixed to
+    // the EP1 pair and the interrupt-IN path owns them there. Computed
+    // AFTER the walk (the capture above).
+    const bulk_eligible = bclass != 0x03 and bulk_out_num != 0 and bulk_in_num != 0;
+    const bulk_maxpkt_obs: u16 = if (bulk_eligible) @max(bulk_out_maxpkt, bulk_in_maxpkt) else 0;
+    const bulk_ready = bulk_eligible;
+
     if (!xhci_set_configuration(slot_id, 1)) {
         enum_fail = "Set Configuration failed";
         return false;
     }
-    const boot = xhci_set_protocol_boot(slot_id, 0);
+    dbg("xhci: step setcfg ok\n");
 
+    // U1: only HID devices carry the HID class request. A bulk-only device
+    // (mass storage) refuses Set_Protocol(boot) — skip it rather than log a
+    // spurious failure (observed on the U1 probe boot).
     var kind: HidKind = .unknown;
-    if (iface_protocol == 1) kind = .keyboard else if (iface_protocol == 2) kind = .mouse;
+    var hid_boot_ok = false;
+    if (ep_in_num != 0) {
+        hid_boot_ok = xhci_set_protocol_boot(slot_id, 0);
+        if (iface_protocol == 1) {
+            kind = .keyboard;
+        } else if (iface_protocol == 2) {
+            kind = .mouse;
+        }
+    }
 
     const slot_idx = slot_id - 1;
     enum_devs[slot_idx] = .{
@@ -1347,16 +1541,59 @@ fn xhci_enumerate_port(port: u8) bool {
         .ep_in_num = ep_in_num,
         .ep_in_maxpkt = ep_in_maxpkt,
         .ep_in_interval = ep_in_interval,
-        .hid_boot = boot,
+        .hid_boot = hid_boot_ok,
+        .bulk_ready = bulk_ready,
+        .bulk_maxpkt = bulk_maxpkt_obs,
+        .bulk_out_num = bulk_out_num,
+        .bulk_in_num = bulk_in_num,
     };
     hid_kind[slot_idx] = kind;
     intr_maxpkt[slot_idx] = ep_in_maxpkt;
-
+    // U1: configure the bulk pair on a bulk-capable device. The `which`
+    // values select the DEVICE-CONTEXT index (not the EP number):
+    // 0 = EP1 OUT (ctx 2), 1 = EP1 IN (ctx 3), 2 = EP2 OUT (ctx 4),
+    // 3 = EP2 IN (ctx 5). [observed, U1 run-01: the VZ MSC presents
+    // EP2 OUT + EP1 IN — the OUT member selects ctx 4.]
+    if (bulk_ready) {
+        const out_which: u8 = if (bulk_out_num == 2) 2 else 0;
+        const in_which: u8 = if (bulk_in_num == 2) 3 else 1;
+        dbg("xhci: step cfgout start which=");
+        dbg_hex(out_which);
+        dbg("\n");
+        if (!xhci_configure_endpoint(slot_id, bulk_out_maxpkt, 0, ep_bulk_out, out_which, &bulk_ring[slot_id - 1][0])) {
+            enum_fail = "Configure Endpoint (bulk OUT) failed";
+            return false;
+        }
+        dbg("xhci: step cfgout ok\n");
+        dbg("xhci: step cfgin start which=");
+        dbg_hex(in_which);
+        dbg("\n");
+        if (!xhci_configure_endpoint(slot_id, bulk_in_maxpkt, 0, ep_bulk_in, in_which, &bulk_ring[slot_id - 1][1])) {
+            enum_fail = "Configure Endpoint (bulk IN) failed";
+            return false;
+        }
+        dbg("xhci: step cfgin ok\n");
+        bulk_out_num_dci[slot_idx] = bulk_out_num * 2; // DCI = 2n+0 for OUT (EP2 → 4)
+        bulk_in_num_dci[slot_idx] = bulk_in_num * 2 + 1; // DCI = 2n+1 for IN (EP1 → 3)
+        // No doorbell yet: OUT transfers are software-initiated (the first
+        // xhci_bulk_transfer enqueues + doorbells); IN is armed per transfer
+        // by the same one-at-a-time shape. The arm-ONE-TRB lesson applies
+        // per transfer, not per boot.
+        dbg("xhci: bulk cfg out ep=");
+        dbg_hex(bulk_out_num);
+        dbg(" in ep=");
+        dbg_hex(bulk_in_num);
+        dbg(" maxpkt=");
+        dbg_hex(bulk_maxpkt_obs);
+        dbg("\n");
+    }
     if (ep_in_num != 0) {
-        if (!xhci_configure_endpoint(slot_id, ep_in_maxpkt, hid_interval(speed, ep_in_interval))) {
+        dbg("xhci: step hidcfg start\n");
+        if (!xhci_configure_endpoint(slot_id, ep_in_maxpkt, hid_interval(speed, ep_in_interval), ep_int_in, 1, &intr_ring[slot_id - 1])) {
             enum_fail = "Configure Endpoint failed";
             return false;
         }
+        dbg("xhci: step hidcfg ok\n");
         xhci_arm_intr(slot_id);
         dbg("xhci: armed ep");
         dbg_hex(ep_in_num);
@@ -1375,11 +1612,103 @@ pub fn xhci_report(slot_id: u8) struct { len: u8, bytes: [max_report_bytes]u8 } 
     if (slot_id == 0 or slot_id > max_enumerated) return .{ .len = 0, .bytes = [_]u8{0} ** max_report_bytes };
     const slot_idx = slot_id - 1;
     return .{ .len = enum_devs[slot_idx].last_report_len, .bytes = intr_report[slot_idx] };
+} // -----------------------------------------------------------------------
+// U1 — the bulk-transfer engine (M43 card U1)
+// -----------------------------------------------------------------------
+
+/// Initialize the per-slot bulk rings (Link TRB at the wrap boundary) and
+/// clear the bulk state. Called from xhci_init_transfer_rings.
+fn xhci_init_bulk_rings() void {
+    for (0..max_enumerated) |i| {
+        for (0..bulk_dirs) |dir| {
+            const ring = &bulk_ring[i][dir];
+            ring.* = [_]Trb{.{}} ** tr_ring_len;
+            ring[tr_usable] = .{
+                .param = ring_phys(ring),
+                .status = 0,
+                .control = (trb_link << 10) | trb_link_toggle | trb_cycle,
+            };
+            bulk_enq[i][dir] = 0;
+            bulk_deq[i][dir] = 0;
+            bulk_cycle[i][dir] = 1;
+            bulk_armed[i][dir] = 0;
+            bulk_maxpkt[i] = 0;
+        }
+        bulk_recv[i] = [_]u8{0} ** bulk_buf_len;
+        bulk_recv_len[i] = 0;
+    }
+    mmu.clean_dcache_range(@intFromPtr(&bulk_ring), @sizeOf(@TypeOf(bulk_ring)));
 }
 
-// ---------------------------------------------------------------------------
-// Host tests — the pieces that need no device
-// ---------------------------------------------------------------------------
+/// The U1 shape: one bulk transfer in flight per direction at a time —
+/// enqueue one Normal TRB on the ring, ring the endpoint doorbell, then
+/// wait_transfer for its completion. Returns the completion code + the
+/// transferred byte count. Reusable verbatim by U2's BOT driver.
+pub fn xhci_bulk_transfer(slot_id: u8, dir_in: bool, buf: [*]u8, len: u32) TransferResult {
+    if (slot_id == 0 or slot_id > max_enumerated) return .{ .cc = 0, .remaining = 0 };
+    const slot_idx = slot_id - 1;
+    if (!enum_devs[slot_idx].present or !enum_devs[slot_idx].bulk_ready) return .{ .cc = 0, .remaining = 0 };
+    if (len > bulk_buf_len) return .{ .cc = 0, .remaining = 0 }; // U1 bound
+    const dir: usize = if (dir_in) 1 else 0;
+    if (bulk_armed[slot_idx][dir] != 0) return .{ .cc = 0, .remaining = 0 }; // one at a time
+    // Doorbell DCI from the DEVICE'S OWN endpoint numbers (captured during
+    // enumeration — not an assumed EP1 pair). [observed, U1 run-01: VZ's
+    // emulated MSC presents EP2 OUT + EP1 IN; ringing any other DCI is a
+    // silent no-op (cc=0 timeout on both directions).]
+    const dci: u8 = if (dir_in) bulk_in_num_dci[slot_idx] else bulk_out_num_dci[slot_idx];
+    if (dci == 0) return .{ .cc = 0, .remaining = 0 }; // not configured
+    const idx = bulk_slot_index(bulk_enq[slot_idx][dir]);
+    const trb_phys = ring_phys(&bulk_ring[slot_idx][dir]) + idx * @sizeOf(Trb);
+    if (dir_in) {
+        tr_enqueue_bulk(slot_idx, dir, .{
+            .param = ring_phys(&bulk_slots[slot_idx][dir][idx]),
+            .status = len,
+            .control = (trb_normal << 10) | trb_ioc,
+        });
+    } else {
+        @memcpy(bulk_slots[slot_idx][dir][idx][0..len], buf[0..len]);
+        mmu.clean_dcache_range(@intFromPtr(&bulk_slots[slot_idx][dir][idx]), len);
+        tr_enqueue_bulk(slot_idx, dir, .{
+            .param = ring_phys(&bulk_slots[slot_idx][dir][idx]),
+            .status = len,
+            .control = (trb_normal << 10) | trb_ioc,
+        });
+    }
+    bulk_armed[slot_idx][dir] += 1;
+    ring_ep_doorbell(slot_id, dci - 1); // ring_ep_doorbell takes the compressed index (DCI - 1)
+    const r = wait_transfer(trb_phys);
+    bulk_armed[slot_idx][dir] -= 1;
+    if (r.cc == cc_success and dir_in) {
+        const got: usize = if (r.remaining <= len) len - r.remaining else 0;
+        mmu.invalidate_dcache_range(@intFromPtr(&bulk_slots[slot_idx][dir][idx]), got);
+        @memcpy(buf[0..got], bulk_slots[slot_idx][dir][idx][0..got]);
+        bulk_recv[slot_idx] = bulk_slots[slot_idx][dir][idx];
+        bulk_recv_len[slot_idx] = got;
+    }
+    return r;
+}
+
+/// Enqueue a TRB on slot `slot_idx`'s bulk ring `dir` (Link TRB wrap —
+/// the shared tr_enqueue rule).
+fn tr_enqueue_bulk(slot_idx: usize, dir: usize, trb_in: Trb) void {
+    const ring = &bulk_ring[slot_idx][dir];
+    const enq = &bulk_enq[slot_idx][dir];
+    const cyc = &bulk_cycle[slot_idx][dir];
+    if (enq.* == tr_usable) {
+        ring[tr_usable] = .{
+            .param = ring_phys(ring),
+            .status = 0,
+            .control = (trb_link << 10) | trb_link_toggle | @as(u32, cyc.*),
+        };
+        enq.* = 0;
+        cyc.* ^= 1;
+    }
+    var t = trb_in;
+    t.control = (t.control & ~trb_cycle) | @as(u32, cyc.*);
+    ring[enq.*] = t;
+    mmu.clean_dcache_range(@intFromPtr(&ring[enq.*]), @sizeOf(Trb));
+    enq.* += 1;
+}
 
 test "xhci: HCSPARAMS1/HCCPARAMS1 field accessors" {
     try std.testing.expectEqual(@as(u8, 0xab), hcsparams1_max_slots(0x12ab));
@@ -1489,27 +1818,35 @@ test "xhci: ring geometry — the link TRB holds the wrap boundary" {
 
 test "xhci: I2 context wire layouts are the spec shapes" {
     // Slot/EP contexts are 32 bytes; a device context (slot + EP0 + EP1OUT +
-    // EP1IN) is 128; an input context (control + slot + 3 EPs) is 160.
+    // EP1IN + EP2OUT + EP2IN) is 192; an input context (control + slot + 5
+    // EPs) is 224. U1 grew the fixed table: the VZ MSC presents EP2 OUT +
+    // EP1 IN, so the EP2 pair is load-bearing (not optional depth).
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(SlotContext));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(EpContext));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(InputControlContext));
-    try std.testing.expectEqual(@as(usize, 128), @sizeOf(DeviceContext));
-    try std.testing.expectEqual(@as(usize, 160), @sizeOf(InputContext));
+    try std.testing.expectEqual(@as(usize, 192), @sizeOf(DeviceContext));
+    try std.testing.expectEqual(@as(usize, 224), @sizeOf(InputContext));
     // The EP0 context sits at context offset 1 (32 bytes in) in the device
     // context and at offset 2 (64 bytes in) in the input context (the input
-    // control context shifts everything by one slot).
+    // control context shifts everything by one slot). The EP2 pair lands at
+    // context offsets 4/5 (the U1 mapping).
     var dc: DeviceContext = undefined;
     const dc_base = @intFromPtr(&dc);
     try std.testing.expectEqual(dc_base + 32, @intFromPtr(&dc.ep0));
     try std.testing.expectEqual(dc_base + 96, @intFromPtr(&dc.ep1_in));
+    try std.testing.expectEqual(dc_base + 128, @intFromPtr(&dc.ep2_out));
+    try std.testing.expectEqual(dc_base + 160, @intFromPtr(&dc.ep2_in));
     var ic: InputContext = undefined;
     const ic_base = @intFromPtr(&ic);
     try std.testing.expectEqual(ic_base + 64, @intFromPtr(&ic.ep0));
     try std.testing.expectEqual(ic_base + 128, @intFromPtr(&ic.ep1_in));
+    try std.testing.expectEqual(ic_base + 160, @intFromPtr(&ic.ep2_out));
+    try std.testing.expectEqual(ic_base + 192, @intFromPtr(&ic.ep2_in));
     // The input-control add/drop flags: bit 0 = slot, bit i+1 = EP context i.
     try std.testing.expectEqual(@as(u32, 1), slot_flag);
     try std.testing.expectEqual(@as(u32, 2), ep0_flag);
     try std.testing.expectEqual(@as(u32, 8), 1 << (2 + 1)); // EP1 IN
+    try std.testing.expectEqual(@as(u32, 16), 1 << (2 + 2)); // EP2 OUT (U1)
 }
 
 test "xhci: hid_interval converts bInterval to the xHCI interval field" {

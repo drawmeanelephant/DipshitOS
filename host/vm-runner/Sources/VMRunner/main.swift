@@ -238,6 +238,16 @@ var inputMode = false
 // device, negotiates, and arms the control queue; the PCM playback path
 // (the audible beep) is card A2.
 var soundMode = false
+// M43 card U6 (issue #1037, claim #1040): `--usb-msd <disk.img>` attaches a
+// USB mass storage device (VZUSBMassStorageDeviceConfiguration wrapping a
+// VZDiskImageStorageDeviceAttachment) on an EXPLICIT VZXHCIControllerConfiguration
+// (macOS 15+ API) — the first third USB device class the runner can present.
+// OFF by default — without the flag config.usbControllers stays [] exactly as
+// before (the M7 keyboard/pointer attachments ride their own config surface
+// and are untouched), so every existing gate stays byte-identical. The U1
+// bulk probe is the first consumer: the guest enumerates the MSD as a third
+// XHCI device (bulk EP1 OUT/IN pair) and `usb bulk` reads the engine state.
+var usbMsdPath: String? = nil
 // Milestone seven card I2 (claim 4116): the minimal synthesized-key seam.
 // `--input-key <mac-keycode>` posts one keyDown (no keyUp) into the
 // VZVirtualMachineView after `--input-key-after <marker>` (default: the
@@ -574,6 +584,9 @@ while idx < arguments.count {
     } else if arg == "--sound" {
         soundMode = true
         idx += 1
+    } else if arg == "--usb-msd", idx + 1 < arguments.count {
+        usbMsdPath = arguments[idx + 1]
+        idx += 2
     } else if arg == "--input-key", idx + 1 < arguments.count {
         guard let kc = UInt16(arguments[idx + 1]) else {
             fail("--input-key requires a numeric macOS virtual keycode, got '\(arguments[idx + 1])'.")
@@ -1120,6 +1133,24 @@ if inputMode {
     config.keyboards = []
     config.pointingDevices = []
 }
+// M43 card U6: the USB mass storage device rides an explicit XHCI controller
+// configuration (the macOS 15+ usbControllers surface). Purely additive —
+// without --usb-msd the array stays empty and the boot is byte-identical.
+if let usbMsdPath {
+    let usbMsdURL = URL(fileURLWithPath: usbMsdPath)
+    guard FileManager.default.fileExists(atPath: usbMsdURL.path) else {
+        fail("--usb-msd: disk image not found: \(usbMsdPath)")
+    }
+    do {
+        let msdAttachment = try VZDiskImageStorageDeviceAttachment(url: usbMsdURL, readOnly: false)
+        let msd = VZUSBMassStorageDeviceConfiguration(attachment: msdAttachment)
+        let xhciController = VZXHCIControllerConfiguration()
+        xhciController.usbDevices = [msd]
+        config.usbControllers = [xhciController]
+    } catch {
+        fail("--usb-msd: could not attach disk image \(usbMsdPath): \(error)")
+    }
+}
 // Milestone five card N1 (claim 1373): the virtio-net device, attached only
 // under `--net <capture-file>`. VZFileHandleNetworkDeviceAttachment transmits
 // raw data-link frames over ONE connected datagram socket: VZ holds one end
@@ -1509,6 +1540,9 @@ if displayMode {
 }
 if inputMode {
     print("  input: ENABLED (milestone seven card I1, claim 4272) — keyboard + pointing devices attached (VZUSBKeyboardConfiguration + VZUSBScreenCoordinatePointingDeviceConfiguration); the guest-side device is the Apple XHCI USB controller (DID 0x1a06) with the HID devices behind it")
+}
+if let usbMsdPath {
+    print("  usb-msd: ENABLED (M43 card U6, issue #1037) — USB mass storage attached on an explicit VZXHCIControllerConfiguration (\(usbMsdPath)); the guest enumerates it as a bulk device behind the XHCI controller (the U1 bulk probe consumes it)")
 }
 if let kc = inputKeyCode {
     if viaVirtioEnabled {

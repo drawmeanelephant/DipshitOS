@@ -370,7 +370,7 @@ pub fn ensure_registry() []const Command {
             .{ .name = "timer", .help = "interrupt controller + timer status", .usage = "timer", .category = .memory_state, .handler = cmd_timer },
             .{ .name = "tour", .help = "guided tour of the system for new users", .usage = "tour", .category = .machine_identity, .handler = cmd_welcome },
             .{ .name = "uaccess", .help = "user-memory copy diagnostics (valid, fault, recovery)", .usage = "uaccess", .category = .memory_state, .handler = cmd_uaccess },
-            .{ .name = "usb", .help = "XHCI host controller: `usb` transport report, `usb devices` enumerated HID devices, `usb report` last HID report", .usage = "usb [devices|report]", .category = .graphics_input, .handler = cmd_usb },
+            .{ .name = "usb", .help = "XHCI host controller: `usb` transport report, `usb devices` enumerated devices, `usb report` last HID report, `usb bulk [probe ...]` bulk engine (U1)", .usage = "usb [devices|report|bulk [probe ...]]", .category = .graphics_input, .handler = cmd_usb },
             .{ .name = "uname", .help = "compact system identity", .usage = "uname", .category = .machine_identity, .handler = cmd_uname },
             .{ .name = "version", .help = "display build information", .usage = "version", .category = .machine_identity, .handler = cmd_version },
             .{ .name = "vf", .dom = svclock.dom_bit(.file), .help = "host file channel (M34): 'vf ls/cat/mkdir/rm/mv <path>' read + mutate a macOS share over custom-virtio queue 5; 'vf open/close/write/truncate/fsync <h>' manage write handles (8-slot host cursor table)", .usage = "vf [ls [<path>]|cat <path>|mkdir <path>|rm <path>|mv <from> <to>|open <path> [append]|close <h>|write <h> <n>|truncate <h> <n>|fsync <h>]", .category = .storage, .max_args = 4, .handler = cmd_vf },
@@ -3125,6 +3125,7 @@ fn cmd_input(m: *Monitor, args: []const []const u8) ExecError {
 fn cmd_usb(m: *Monitor, args: []const []const u8) ExecError {
     if (args.len > 0 and std.mem.eql(u8, args[0], "devices")) return cmd_usb_devices(m);
     if (args.len > 0 and std.mem.eql(u8, args[0], "report")) return cmd_usb_report(m, args);
+    if (args.len > 0 and std.mem.eql(u8, args[0], "bulk")) return cmd_usb_bulk(m, args);
     if (!xhci.xhci_ready) {
         m.console.puts("usb: no XHCI device (");
         m.console.puts(if (xhci.xhci_fail.len > 0) xhci.xhci_fail else "DID 0x1a06 not found on bus 0");
@@ -3321,6 +3322,102 @@ fn cmd_usb_report(m: *Monitor, args: []const []const u8) ExecError {
         m.console.puts(" y=");
         m.console.print_u64(rep.bytes[2]);
         m.console.puts("\n");
+    }
+    return .none;
+}
+
+/// `usb bulk` — the U1 bulk-engine report: the bulk endpoint state of every
+/// enumerated device + the last completed bulk IN payload. The U1 probe's
+/// evidence verb (no protocol above the engine — the bytes on the wire are
+/// the ground truth).
+fn cmd_usb_bulk(m: *Monitor, args: []const []const u8) ExecError {
+    if (!xhci.xhci_ready) {
+        m.console.puts("usb bulk: no XHCI device\n");
+        return .none;
+    }
+    // Optional subcommand `probe <hex byte> ...`: one bulk OUT with the
+    // given payload followed by one bulk IN, printed raw. U1 stays BELOW
+    // the protocol level — the probe's job is to observe what the device
+    // does with arbitrary bulk bytes (the raw evidence for the contract).
+    if (args.len > 1 and std.mem.eql(u8, args[1], "probe")) {
+        const slot_id = xhci.usb_bulk_dev();
+        if (slot_id == 0) {
+            m.console.puts("usb bulk probe: no bulk-capable device\n");
+            return .none;
+        }
+        var payload: [xhci.bulk_buf_len]u8 = undefined;
+        var plen: usize = 0;
+        var i: usize = 2;
+        while (i < args.len and plen < xhci.bulk_buf_len) : (i += 1) {
+            const v = std.fmt.parseInt(u16, args[i], 0) catch continue;
+            if (v > 0xff) continue;
+            payload[plen] = @intCast(v);
+            plen += 1;
+        }
+        if (plen == 0) {
+            m.console.puts("usb bulk probe: usage: usb bulk probe <hex byte> ...\n");
+            return .none;
+        }
+        const out = xhci.xhci_bulk_transfer(slot_id, false, &payload, @intCast(plen));
+        m.console.puts("usb bulk probe: OUT cc=");
+        m.console.print_hex(out.cc);
+        m.console.puts(" sent=");
+        m.console.print_u64(if (out.remaining <= plen) plen - out.remaining else 0);
+        m.console.puts("\n");
+        var inbuf: [xhci.bulk_buf_len]u8 = undefined;
+        const rin = xhci.xhci_bulk_transfer(slot_id, true, &inbuf, xhci.bulk_buf_len);
+        m.console.puts("usb bulk probe: IN cc=");
+        m.console.print_hex(rin.cc);
+        m.console.puts(" got=");
+        const got: usize = if (rin.remaining <= xhci.bulk_buf_len) xhci.bulk_buf_len - rin.remaining else 0;
+        m.console.print_u64(got);
+        m.console.puts(" bytes=");
+        var k: usize = 0;
+        while (k < got) : (k += 1) {
+            if (k > 0) m.console.puts(" ");
+            m.console.print_hex_min(inbuf[k]);
+        }
+        m.console.puts("\n");
+        return .none;
+    }
+    // The state report: one line per enumerated device.
+    m.console.puts("usb bulk: devices=");
+    m.console.print_u64(xhci.enum_count);
+    m.console.puts("\n");
+    var di: usize = 0;
+    while (di < xhci.EnumMax) : (di += 1) {
+        const d = xhci.enum_devs[di];
+        if (!d.present) continue;
+        m.console.puts("usb bulk: dev");
+        m.console.print_u64(di);
+        m.console.puts(" slot=");
+        m.console.print_u64(d.slot_id);
+        m.console.puts(" vid=");
+        m.console.print_hex(d.vid);
+        m.console.puts(" pid=");
+        m.console.print_hex(d.pid);
+        m.console.puts(" class=");
+        m.console.print_hex(d.class);
+        m.console.puts(" bulk=");
+        m.console.puts(if (d.bulk_ready) "yes" else "no");
+        m.console.puts(" maxpkt=");
+        m.console.print_u64(d.bulk_maxpkt);
+        m.console.puts(" out_ep=");
+        m.console.print_u64(d.bulk_out_num);
+        m.console.puts(" in_ep=");
+        m.console.print_u64(d.bulk_in_num);
+        m.console.puts("\n");
+        if (d.bulk_ready and xhci.bulk_recv_len[di] > 0) {
+            m.console.puts("usb bulk: last-in len=");
+            m.console.print_u64(xhci.bulk_recv_len[di]);
+            m.console.puts(" bytes=");
+            var k: usize = 0;
+            while (k < xhci.bulk_recv_len[di]) : (k += 1) {
+                if (k > 0) m.console.puts(" ");
+                m.console.print_hex_min(xhci.bulk_last_in(di)[k]);
+            }
+            m.console.puts("\n");
+        }
     }
     return .none;
 }

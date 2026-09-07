@@ -879,6 +879,7 @@ pub fn shell_complete(line: []const u8, cursor: usize, index: usize) ?lineedit.C
         } else if (std.mem.eql(u8, verb, "usb")) {
             completion_match(prefix, "devices");
             completion_match(prefix, "report");
+            completion_match(prefix, "bulk");
         } else if (std.mem.eql(u8, verb, "screen")) {
             completion_match(prefix, "fill");
         } else if (std.mem.eql(u8, verb, "cat") or std.mem.eql(u8, verb, "write") or
@@ -4052,7 +4053,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  wm          M32 WMS2/WMS4/WMS5 render-server register: the registered WM server pid, present-sequence counter, presents, COMPOSITE_TICK count, SET_WINDOW chrome submissions + SET_STATE visibility/workspace calls, and the WMS5 input-seam fan-out counters (ptr_fan = raw pointer samples, win_mirror = registry mirrors, key_fan = raw keyboard samples; 'wm none' means the shell idle shim is compositing)\n" ++
         "  wnd         M32 WMS3 WM server: 'wnd' reports the registered WM server (pid, present seq/count, tick count; 'wnd: none' = shell-shim compositing); 'wnd start' launches the long-lived EL0 WND.BIN server (infrastructure — not in APPS.TXT; the default VM stays shim-only)\n" ++
         "  tabwm       M39 TWM1 WM server: 'tabwm' reports the registered WM server; 'tabwm start' launches the long-lived EL0 TABWM.BIN server (left-sidebar browser-style window manager)\n" ++
-        "  usb         XHCI host controller: `usb` transport report, `usb devices` enumerated HID devices, `usb report` last HID report\n" ++
+        "  usb         XHCI host controller: `usb` transport report, `usb devices` enumerated devices, `usb report` last HID report, `usb bulk [probe ...]` bulk engine (U1)\n" ++
         "  dui         Driving Award window manager: registry (with owner pids), z-order, focus, hit-testing ('dui focus <n>' focuses; 'dui raise <n>' raises; 'dui lower <n>' lowers to back; 'dui move <n> <x> <y>' moves a user window; 'dui close <n>' releases a user window; 'dui list <pid>' filters by owner; 'dui hit <x> <y>' hit-tests; 'dui cycle' cycles focus like Alt+Tab; 'dui tile <n>' toggles a user window floating/tiled (M21 W1); 'dui master' swaps master/detail (M21 W2))\n" ++
         "system\n" ++
         "  beep        synthesize + play a sine through the virtio-snd PCM path ('beep <freq> <ms>' — reports the full control flow + submit/drain accounting)\n" ++
