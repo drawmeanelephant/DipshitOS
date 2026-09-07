@@ -31,7 +31,7 @@
 | `tools/status/` | 6 | multiagent coordination gate + claim tooling (class A) |
 | `tools/context/` | 2 | context snapshot helpers |
 | `tools/ragshit/` | 84 | host-side context engine (developer tooling, not guest software) |
-| `tools/gate/` | 184 | M40 vgate harness + specs (GF2+) |
+| `tools/gate/` | 185 | M40 vgate harness + specs (GF2+) |
 
 ## Class-B fleet (discovered from the spec dir)
 
@@ -196,6 +196,7 @@ of them with `just verify-vz`.
 | spec | `live-uaccess` | 1 run / 9 assert | live-uaccess.spec -- fault-safe uaccess: EL0 observes EFAULT on a bad |
 | spec | `live-unicode` | 1 run / 7 assert | live-unicode.spec -- milestone-twenty cards U2/U3/U11 class-B gate |
 | spec | `live-usb` | 1 run / 8 assert | live-usb.spec -- claim 4116 (milestone seven, card I2) class-B gate: |
+| spec | `live-usb-bulk` | 2 run / 16 assert | live-usb-bulk.spec -- M43 U1+U6: XHCI bulk engine + runner --usb-msd flag |
 | spec | `live-user-fs` | 2 run / 10 assert | live-user-fs.spec -- claim 0510 (Milestone 10 F4): userland storage ABI & utilities on VZ. |
 | spec | `live-userspace` | 1 run / 6 assert | live-userspace.spec -- first EL0 task: SVC round-trip plus timer |
 | spec | `live-vf` | 6 run / 105 assert | live-vf.spec -- M34 HF1+HF2+HF3+HF4+HF7 (issues #735-#738/#741) |

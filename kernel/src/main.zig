@@ -891,7 +891,10 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
             // armed them). The `input: armed` line is the runner's
             // key-injection marker; until it prints the FIFO drain is a
             // no-op, so no key event can be lost.
-            if (xhci.enum_done) {
+            // U1 (M43): only when a HID device is present — a bulk-only
+            // boot (the `--usb-msd` probe without `--input`) must not arm
+            // an empty interrupt path (byte-identical HID boots otherwise).
+            if (xhci.enum_done and xhci.enum_has_hid()) {
                 input.arm();
                 input.debug = uart_puts;
                 input.debug_hex = uart_hex;
