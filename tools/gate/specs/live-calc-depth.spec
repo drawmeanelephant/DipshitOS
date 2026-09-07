@@ -21,7 +21,16 @@ vgate_file script2.txt <<'EOF'
 echo calc-depth-live-ok
 EOF
 
-vgate_run 01 -- --display --screen '$RUN_DIR/gpu-screen' --via-virtio --script '$RUN_DIR/script.txt' --input-chords "ctrl-s,1,comma,2,comma,3,return,escape,ctrl-d,2,0,2,6,-,0,1,-,0,1,space,-,space,2,0,2,6,-,0,1,-,1,0,return,escape,ctrl-comma,escape,r,5,s,m,ctrl-2,ctrl-u,ctrl-u,ctrl-c" --input-chords-after "calc: ready" --pointer-virtio "336,162,c;267,344,c;267,344,c;84,318,c;84,318,c;145,318,c;145,318,c" --pointer-virtio-after "calc: clip-copy" --screenshot-after "calc: deg-mode" --script2 '$RUN_DIR/script2.txt' --script2-after "calc: expr-off" --script-expect "calc-depth-live-ok" --timeout 180
+# Issue #1027: the capture marker must be the LAST UI-changing event of
+# the choreography. `deg-mode` (mid-sequence) raced the composite: the
+# capture lands on a poll tick up to ~0.5 s after the marker, by which
+# time rad-mode/sci-on/sci-off/expr-on had already repainted the display
+# region the sampler measures (observed: raced capture decoded with 0
+# white-glyph samples, ~1/3 of boots under host load). `expr-off` is the
+# final event; the UI is static afterward (nothing repaints that rect for
+# the rest of the boot), so the capture is deterministic. Probe-verified:
+# the expr-off capture decodes with 21 white-glyph samples (>= 10).
+vgate_run 01 -- --display --screen '$RUN_DIR/gpu-screen' --via-virtio --script '$RUN_DIR/script.txt' --input-chords "ctrl-s,1,comma,2,comma,3,return,escape,ctrl-d,2,0,2,6,-,0,1,-,0,1,space,-,space,2,0,2,6,-,0,1,-,1,0,return,escape,ctrl-comma,escape,r,5,s,m,ctrl-2,ctrl-u,ctrl-u,ctrl-c" --input-chords-after "calc: ready" --pointer-virtio "336,162,c;267,344,c;267,344,c;84,318,c;84,318,c;145,318,c;145,318,c" --pointer-virtio-after "calc: clip-copy" --screenshot-after "calc: expr-off" --script2 '$RUN_DIR/script2.txt' --script2-after "calc: expr-off" --script-expect "calc-depth-live-ok" --timeout 180
 
 vgate_assert 01 serial-contains 'VirelaiOS kernel has seized control.'
 vgate_assert 01 serial-contains 'calc: ready'
