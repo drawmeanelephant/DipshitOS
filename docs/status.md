@@ -71,6 +71,7 @@
 | Thirty-nine — tabbed desktop & modular UI | Modularize ui.zig (UI1), rounded rect primitives (UI2), TABWM.BIN server scaffold & left sidebar (TWM1), tab lifecycle (TWM2), viewport presentation & desktop integration (TWM3) | 🔄 in progress (umbrella #925, [GH milestone 26](https://github.com/drawmeanelephant/DipshitOS/milestone/26), cards UI1–TWM3) — [`docs/march-m39-tabbed-desktop.md`](march-m39-tabbed-desktop.md) |
 | Forty-one — test separation & de-monolithization | Unified parallel `zig build test`, shared test mocks (`uaccess_mock`, `task_mock`, `event_mock`, `fb_mock`), decoupled tests from oversized source files | ✅ **done 2026-09-04 — Milestone #28 6/6** (umbrella #951, [GH milestone 28](https://github.com/drawmeanelephant/DipshitOS/milestone/28), cards TS1–TS6) — [`docs/march-m41-test-separation.md`](march-m41-test-separation.md) |
 | Forty-two — the Sexiburger desktop | The proper 🐙+🍔 mascot raster everywhere (TABWM sidebar, God Menu, SEXIBURG.BIN); the WM→app resize seam (`wm_apply_rect` emits `WIN_RESIZE`); TABWM full-viewport opt-in (`declare_fullscreen` RPC, idempotent proposals); `lib/tabapp.zig` (the tab-aware app library + either-seat WM discovery); CALC as the ported full-screen exemplar; the TABWM Sexiburger overlay (APPS.TXT palette, launch into a new tab); the settings-driven default-manager seam; the `verify-live-tabwm-fullscreen.sh` Class-B gate | 🔄 **tranches 1+2 landed 2026-09-04** (SX1 #982, SX2 #983, SX3 #984, SX5 overlay+seam+gate #986, CALC exemplar of #985; umbrella #981, [GH milestone 29](https://github.com/drawmeanelephant/DipshitOS/milestone/29), claims #987/#996; SX4 fleet rollout #985 code-landed — all eight apps tab-aware, class A green — with the ≥3-app live gate + the human-session default flip open) — [`docs/march-m42-sexiburger-desktop.md`](march-m42-sexiburger-desktop.md) |
+| Forty-three — device depth: USB beyond HID | The "USB-everything" distant mountain: XHCI bulk transfer engine (U1), USB mass storage probe — BOT + minimal SCSI with `[observed]` contract rows (U2), the block-device userland seam + a real consumer (U3), honest device lifecycle (U4), USB serial CDC-ACM probe-first (U5), runner `--usb-msd`/`--usb-serial` flags (U6) | 🔄 **scoped 2026-09-06** (claim #1038; umbrella #1031, [GH milestone 30](https://github.com/drawmeanelephant/DipshitOS/milestone/30), cards U1–U6 = issues #1032–#1037; theme chosen by the user from the post-arc5 distant mountains; no card started) — [`docs/march-m43-device-depth.md`](march-m43-device-depth.md) |
 
 > **Narratives for M3–M16** are archived per milestone under `docs/archive/status-m{N}-detail.md` (issue #262).
 > Each archive preserves the verbatim pre-compression table row plus march/claim pointers; the live table above is the one-line summary.
@@ -154,7 +155,7 @@ byte-perfect and gated by `zig build run`).
 
 ## The march tracker (per milestone)
 
-> Per-milestone card detail lives in `docs/march-m*.md` (M3, M6–M31);
+> Per-milestone card detail lives in `docs/march-m*.md` (M3, M6–M43);
 > completed-milestone trackers are archived — `docs/archive/march-m4.md` (M4),
 > `docs/archive/march-m5.md` (M5), and `docs/archive/march-m15.md` (M1.5, closed 2026-08-09).
 > `docs/status.md` holds only milestone-level facts; update a card's row in its march file, never here.
