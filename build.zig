@@ -138,15 +138,24 @@ pub fn build(b: *std.Build) void {
     // Dense layout from address 0 (kernel/linker.ld): without this, lld's
     // 64 KiB max-page-size padding would inflate the flat image ~100x.
     kernel.linker_script = b.path("kernel/linker.ld");
+    // Issue #1042: keep lld's relocation records in the linked ELF so
+    // elf2bin can emit the KRN2 absolute-relocation table the loader applies
+    // at any base. lld forbids --emit-relocs together with --strip-all, so
+    // the kernel ELF keeps its (non-PT_LOAD, image-irrelevant) symbols; every
+    // absolute relocation in loadable content must be representable or
+    // elf2bin fails the build — a pointer table can never silently ship.
+    kernel.link_emit_relocs = true;
+    kernel.root_module.strip = false;
     // tools/elf2bin.py converts the linked ELF into the flat kernel image
-    // format v1 (magic "DSK1", entry offset, size; see docs/decisions/
-    // 0002-kernel-handoff.md). The loader on the ESP reads KERNEL.BIN.
+    // format (magic "KRN2", entry offset, size, absolute-reloc table; see
+    // docs/decisions/0019-kernel-absolute-relocation-table.md). The loader on
+    // the ESP reads KERNEL.BIN.
     const kernel_step = b.step("kernel", "Extract the flat kernel image (zig-out/bin/KERNEL.BIN) from the freestanding ELF (class A tooling, no VM)");
     // The kernel maps itself RW (its .data/.bss is live), so it is the one
     // flat image exempt from elf2bin's writable-segment guard
     // (--allow-writable); every exec'd user program must stay pure-code flat
     // or go DSK3 segmented (user/linker-segmented.ld + --segments).
-    const elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--allow-writable" });
+    const elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--allow-writable", "--relocs" });
     elf2bin.addFileArg(kernel.getEmittedBin());
     const kernel_bin = elf2bin.addOutputFileArg("KERNEL.BIN");
     elf2bin.has_side_effects = true;

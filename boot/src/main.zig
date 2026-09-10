@@ -7,9 +7,11 @@
 //! the separate kernel image `\KERNEL.BIN` from the ESP via the UEFI Simple
 //! File System protocol, allocates memory with Boot Services
 //! (AllocatePages, EfiLoaderCode so the pages are executable), copies the
-//! image CONTENT there -- the 24-byte DSK1 header is parsed but NOT loaded
-//! into RAM, so the kernel's content sits at base+0 where its PC-relative
-//! addressing (ADR and ADRP) resolves correctly; see ADR 0002 -- flushes
+//! image CONTENT there -- the format header is parsed but NOT loaded into
+//! RAM, so the kernel's content sits at base+0 where its PC-relative
+//! addressing (ADR and ADRP) resolves correctly; see ADR 0002. A KRN2 image
+//! (issue #1042) also carries an absolute-relocation table that is applied
+//! before the jump. Then it flushes
 //! the data cache and invalidates the instruction cache (the same
 //! maintenance the firmware's LoadImage performs), and jumps to the
 //! kernel's entry point. The kernel writes its own evidence
@@ -60,13 +62,21 @@ const loader_trace_path = utf16z("\\LOADER.TXT");
 const memmap_path = utf16z("\\MEMMAP.TXT");
 const rc_path = utf16z("\\RC.TXT");
 
-// Kernel image format v1 (docs/decisions/0002-kernel-handoff.md):
-//   u32 magic = 0x314B5344 ("DSK1"), u32 flags = 0,
-//   u64 entry_offset (from image base), u64 image_size (total file size),
-//   then loadable content.
+// Kernel image format (docs/decisions/0002-kernel-handoff.md):
+//   v1 "DSK1": u32 magic = 0x314B5344, u32 flags = 0,
+//              u64 entry_offset (file-relative), u64 image_size, content.
+//   v2 "KRN2" (issue #1042): the v1 fields, then
+//              u64 reloc_offset, u64 reloc_count, content, then
+//              reloc_count × { u64 offset, u64 value, u32 width, u32 pad }.
+//              The loader writes (value + base) as `width` bytes at content
+//              offset `offset` before the cache flush — the absolute
+//              (base-0) references PC-relative codegen cannot fix.
 const kernel_path = utf16z("\\KERNEL.BIN");
 const kernel_magic: u32 = 0x314B5344;
+const kernel_magic_reloc: u32 = 0x324E524B;
 const kernel_header_size: usize = 24;
+const kernel_header_size_reloc: usize = 40;
+const kernel_reloc_entry_size: usize = 24;
 const kernel_max_size: u64 = 16 * 1024 * 1024; // sanity cap for this milestone
 
 /// Handoff contract v2 (ADR 0004 D5). The stub allocates this record in a
@@ -150,19 +160,29 @@ fn load_and_enter_kernel(st: *const uefi.tables.SystemTable) void {
     const kernel_file = root.open(&kernel_path, .read, .{}) catch return;
     defer kernel_file.close() catch {};
 
-    // 1. Read the 24-byte format header from the start of the file.
-    var header: [kernel_header_size]u8 = undefined;
+    // 1. Read the format header (a KRN2-sized buffer; only the fields the
+    //    magic implies are used). See the constants block for the layout.
+    var header: [kernel_header_size_reloc]u8 = undefined;
     if (kernel_file.read(&header) catch return < kernel_header_size) return;
 
     const magic = std.mem.readInt(u32, header[0..4], .little);
+    const is_reloc = magic == kernel_magic_reloc;
+    if (magic != kernel_magic and !is_reloc) return;
+    const header_size: usize = if (is_reloc) kernel_header_size_reloc else kernel_header_size;
     const entry_offset = std.mem.readInt(u64, header[8..16], .little);
     const image_size = std.mem.readInt(u64, header[16..24], .little);
-    if (magic != kernel_magic) return;
-    if (image_size < kernel_header_size or image_size > kernel_max_size) return;
+    const reloc_offset: u64 = if (is_reloc) std.mem.readInt(u64, header[24..32], .little) else 0;
+    const reloc_count: u64 = if (is_reloc) std.mem.readInt(u64, header[32..40], .little) else 0;
+    if (image_size < header_size or image_size > kernel_max_size) return;
     // The entry is file-relative (includes the header) and must land inside
     // the loadable content; anything else means a malformed image.
-    if (entry_offset < kernel_header_size) return;
+    if (entry_offset < header_size) return;
     if (entry_offset >= image_size) return;
+    // Content runs from the end of the header to the relocation table (KRN2)
+    // or the end of the file (DSK1).
+    const content_end: u64 = if (is_reloc) reloc_offset else image_size;
+    if (content_end <= header_size or content_end > image_size) return;
+    const content_size: usize = @intCast(content_end - header_size);
 
     // 2. Allocate exactly enough pages (Boot Services, any free region).
     //    AllocatePages returns 4K-aligned pages -- the base alignment that
@@ -175,19 +195,16 @@ fn load_and_enter_kernel(st: *const uefi.tables.SystemTable) void {
     const dst: [*]u8 = @ptrCast(pages.ptr);
     const base: u64 = @intFromPtr(dst);
 
-    // 3. Read the CONTENT (image_size - 24 header bytes) into the allocation
-    //    at offset 0. The 24-byte DSK1 header is parsed but NOT loaded into
-    //    RAM: the kernel is linked with VMA 0 == content start, so placing
-    //    the content at base+0 makes every PC-relative reference (both ADR
-    //    and ADRP+ADD) resolve to the right byte. Loading the file verbatim
-    //    (content at base+24) is what caused the KERNEL.TXT scramble: ADR
-    //    refs stayed correct because the +24 rides inside the PC, but
-    //    ADRP+ADD refs compute (PC page) + VMA offset and silently drop the
-    //    +24, reading the kernel's own .rodata 24 bytes early (see ADR
-    //    0002, known issue [resolved]).
-    if (image_size <= kernel_header_size) return; // no loadable content
-    const content_size: usize = @intCast(image_size - kernel_header_size);
-    kernel_file.setPosition(kernel_header_size) catch return;
+    // 3. Read the CONTENT into the allocation at offset 0. The header is
+    //    parsed but NOT loaded into RAM: the kernel is linked with VMA 0 ==
+    //    content start, so placing the content at base+0 makes every
+    //    PC-relative reference (both ADR and ADRP+ADD) resolve to the right
+    //    byte. Loading the file verbatim (content at base+header_size) is
+    //    what caused the KERNEL.TXT scramble: ADR refs stayed correct
+    //    because the header rides inside the PC, but ADRP+ADD refs compute
+    //    (PC page) + VMA offset and silently drop the header, reading the
+    //    kernel's own .rodata early (see ADR 0002, known issue [resolved]).
+    kernel_file.setPosition(header_size) catch return;
     const dst_slice = dst[0..content_size];
     var filled: usize = 0;
     while (filled < content_size) {
@@ -196,13 +213,22 @@ fn load_and_enter_kernel(st: *const uefi.tables.SystemTable) void {
         filled += got;
     }
 
+    // 3a. KRN2: apply the absolute-relocation table. LLVM emits base-0
+    //     pointer tables (jump tables, outlined-function pointer tables) that
+    //     PC-relative addressing cannot fix; each entry writes
+    //     (value + kernel_base) into the content. See issue #1042 and ADR
+    //     0019. A malformed table aborts the handoff (the loader returns).
+    if (is_reloc) {
+        if (!apply_relocations(kernel_file, dst_slice, base, reloc_offset, reloc_count)) return;
+    }
+
     if (st.con_out) |con_out| {
         _ = con_out.outputString(&line_loading) catch {};
         _ = con_out.outputString(&line_jumping) catch {};
     }
 
     // 3b. Loader trace: record base/size/entry on the ESP before the jump.
-    write_loader_trace(root, &header, dst, base, image_size, entry_offset);
+    write_loader_trace(root, &header, dst, base, image_size, entry_offset, reloc_count);
 
     // 3c. The content bytes were written by data accesses; make the
     //     instruction stream see them (clean D-cache to PoU, invalidate
@@ -231,15 +257,15 @@ fn load_and_enter_kernel(st: *const uefi.tables.SystemTable) void {
         .flags = 0,
     };
 
-    // 5. Jump. entry_offset is file-relative (includes the 24-byte header);
-    //    with content at base+0 the in-RAM entry is base + (entry_offset - 24).
+    // 5. Jump. entry_offset is file-relative (includes the header); with
+    //    content at base+0 the in-RAM entry is base + (entry_offset - header_size).
     const EntryFn = *const fn (
         base: u64,
         size: u64,
         st: *const uefi.tables.SystemTable,
         handoff_ptr: *HandoffV2,
     ) callconv(.c) u64;
-    const entry: EntryFn = @ptrFromInt(base + (entry_offset - kernel_header_size));
+    const entry: EntryFn = @ptrFromInt(base + (entry_offset - header_size));
     const rc = entry(base, image_size, st, handoff);
     write_rc(root, rc);
 
@@ -309,12 +335,43 @@ fn dump_memory_map(st: *const uefi.tables.SystemTable) void {
     f.flush() catch {};
 }
 
+/// Apply a KRN2 absolute-relocation table (issue #1042): for each 24-byte
+/// entry { u64 offset, u64 value, u32 width, u32 _ }, write (value + base) as
+/// `width` bytes at content offset `offset`. Returns false on a malformed or
+/// out-of-bounds entry so the caller aborts the handoff rather than jumping
+/// into a half-patched image.
+fn apply_relocations(file: *uefi.protocol.File, content: []u8, base: u64, reloc_offset: u64, reloc_count: u64) bool {
+    file.setPosition(reloc_offset) catch return false;
+    var i: u64 = 0;
+    while (i < reloc_count) : (i += 1) {
+        var entry: [kernel_reloc_entry_size]u8 = undefined;
+        if ((file.read(&entry) catch return false) < kernel_reloc_entry_size) return false;
+        const offset = std.mem.readInt(u64, entry[0..8], .little);
+        const value = std.mem.readInt(u64, entry[8..16], .little);
+        const width = std.mem.readInt(u32, entry[16..20], .little);
+        const target = base +% value;
+        switch (width) {
+            8 => {
+                if (offset + 8 > content.len) return false;
+                std.mem.writeInt(u64, content[@intCast(offset)..][0..8], target, .little);
+            },
+            4 => {
+                if (offset + 4 > content.len) return false;
+                std.mem.writeInt(u32, content[@intCast(offset)..][0..4], @truncate(target), .little);
+            },
+            else => return false,
+        }
+    }
+    return true;
+}
+
 /// Write \LOADER.TXT: loader-observed kernel placement (base, size, entry
-/// offset), the DSK1 header fields as read from the file (first8/second8),
-/// and the first 8 bytes that landed at the image base in RAM (ram_first8;
-/// with the content at base+0 these are the kernel's first instructions).
-/// Best effort, like the other marker writes.
-fn write_loader_trace(root: *uefi.protocol.File, header: *const [kernel_header_size]u8, dst: [*]const u8, base: u64, size: u64, entry_offset: u64) void {
+/// offset), the header fields as read from the file (first8/second8), the
+/// applied absolute-relocation count (KRN2), and the first 8 bytes that
+/// landed at the image base in RAM (ram_first8; with the content at base+0
+/// these are the kernel's first instructions). Best effort, like the other
+/// marker writes.
+fn write_loader_trace(root: *uefi.protocol.File, header: *const [kernel_header_size_reloc]u8, dst: [*]const u8, base: u64, size: u64, entry_offset: u64, reloc_count: u64) void {
     const trace = root.open(&loader_trace_path, .read_write_create, .{}) catch return;
     defer trace.close() catch {};
 
@@ -332,6 +389,8 @@ fn write_loader_trace(root: *uefi.protocol.File, header: *const [kernel_header_s
     n += append_hex(content[n..], std.mem.readInt(u64, header[0..8], .little));
     n += copy_into(content[n..], " second8=");
     n += append_hex(content[n..], std.mem.readInt(u64, header[8..16], .little));
+    n += copy_into(content[n..], " relocs=");
+    n += append_hex(content[n..], reloc_count);
     n += copy_into(content[n..], " ram_first8=");
     n += append_hex(content[n..], std.mem.readInt(u64, dst[0..8], .little));
     n += copy_into(content[n..], "\n");

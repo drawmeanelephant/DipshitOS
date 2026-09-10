@@ -16,12 +16,36 @@ Format v1 (see docs/decisions/0002-kernel-handoff.md):
              stays valid when the loader places the image at any 4K-aligned
              base; memsz > filesz regions are zero-filled for BSS)
 
-The input ELF must be statically linked with no dynamic relocations: every
-internal reference is PC-relative within the image (verified by
-disassembling the kernel before each release).
+Format v2 ("KRN2", the kernel only; issue #1042) adds a relocation table so
+the loader can place the image at any base even when the compiler emitted
+absolute (base-0) references that PC-relative addressing cannot fix — LLVM
+jump tables and outlined-function pointer tables are the observed cases:
+
+  offset 0:  u32 magic        = 0x324E524B ("KRN2")
+  offset 4:  u32 flags        = 0
+  offset 8:  u64 entry_offset  (file-relative; includes the 40-byte header)
+  offset 16: u64 image_size    (total file size, header + content + relocs)
+  offset 24: u64 reloc_offset  (file offset of the relocation table)
+  offset 32: u64 reloc_count   (number of 24-byte entries)
+  offset 40: loadable content
+  after content: reloc_count × { u64 offset, u64 value, u32 width, u32 _ }
+             the loader writes (value + kernel_base) at content offset
+             `offset`, as `width` (8 or 4) bytes.
+
+The relocation records come from an ELF linked with lld `--emit-relocs`; the
+input must keep its symbol/reloc sections (build.zig sets
+`link_emit_relocs` and clears `strip`). Every absolute relocation
+(R_AARCH64_ABS64/ABS32) whose target lies in a PT_LOAD segment is captured;
+an unexpected absolute type in loadable content is a hard build failure, so
+an unrelocated pointer table can never silently ship again.
+
+The still-valid v1 contract: any reference the linker resolves PC-relatively
+(adr/adrp) needs no relocation table entry — the loader places content at
+base+0 preserving the linker's exact relative layout.
 
 Usage:
   elf2bin.py INPUT.elf OUTPUT.bin     # build the flat kernel image
+  elf2bin.py --relocs INPUT.elf OUT   # kernel image + absolute-reloc table
   elf2bin.py --info FILE.bin          # print the header fields
 """
 
@@ -32,8 +56,17 @@ PT_LOAD = 1
 EM_AARCH64 = 183
 MAGIC = 0x314B5344  # "DSK1"
 MAGIC_SEGMENTS = 0x334B5344  # "DSK3" — segmented user image (milestone 16 C1)
+MAGIC_RELOC = 0x324E524B  # "KRN2" — kernel image with absolute-reloc table
 HEADER_SIZE = 24
 HEADER_SIZE_SEGMENTS = 48
+HEADER_SIZE_RELOC = 40
+RELOC_ENTRY_SIZE = 24
+
+SHT_RELA = 4
+SHT_NOBITS = 8
+SHF_ALLOC = 0x2
+R_AARCH64_ABS64 = 257
+R_AARCH64_ABS32 = 258
 
 PF_X = 1
 PF_W = 2
@@ -41,8 +74,12 @@ PF_W = 2
 
 def read_header(data):
     magic, flags, entry_offset, image_size = struct.unpack_from("<IIQQ", data, 0)
-    return {"magic": magic, "flags": flags,
-            "entry_offset": entry_offset, "image_size": image_size}
+    h = {"magic": magic, "flags": flags,
+         "entry_offset": entry_offset, "image_size": image_size,
+         "reloc_offset": None, "reloc_count": 0}
+    if magic == MAGIC_RELOC and len(data) >= HEADER_SIZE_RELOC:
+        h["reloc_offset"], h["reloc_count"] = struct.unpack_from("<QQ", data, 24)
+    return h
 
 
 def _parse_loads(data):
@@ -64,7 +101,93 @@ def _parse_loads(data):
     return loads
 
 
-def build(input_path, output_path, segments=False, allow_writable=False):
+def _parse_sections(data):
+    """Return the ELF section headers as dicts (empty list if stripped)."""
+    e_shoff = struct.unpack_from("<Q", data, 40)[0]
+    e_shentsize, e_shnum = struct.unpack_from("<HH", data, 58)
+    secs = []
+    for i in range(e_shnum):
+        off = e_shoff + i * e_shentsize
+        (name, typ, flags, addr, soff, size, link, info,
+         align, entsize) = struct.unpack_from("<IIQQQQIIQQ", data, off)
+        secs.append({"name": name, "typ": typ, "flags": flags, "addr": addr,
+                     "off": soff, "size": size, "link": link, "info": info,
+                     "align": align, "entsize": entsize})
+    return secs
+
+
+def _collect_abs_relocs(data, base, loads):
+    """Return [(blob_offset, value, width)] for every absolute relocation
+    (R_AARCH64_ABS64/ABS32) whose target sits in a PT_LOAD segment. The
+    linked bytes at each site already hold the final base-0 absolute value
+    (lld resolves symbol+addend in place), so the loader adds `base` to the
+    value verbatim. An unexpected absolute type in loadable content is a
+    hard error: it would need relocating but has no table entry."""
+    spans = [(v, v + m) for v, _, _, m, _ in loads]
+    secs = _parse_sections(data)
+
+    def loaded(vaddr):
+        return any(lo <= vaddr < hi for lo, hi in spans)
+
+    out = []
+    for s in secs:
+        if s["typ"] != SHT_RELA or s["info"] >= len(secs):
+            continue
+        tgt = secs[s["info"]]
+        if not (tgt["flags"] & SHF_ALLOC) or tgt["typ"] == SHT_NOBITS:
+            continue
+        if not loaded(tgt["addr"]):
+            continue
+        entsize = s["entsize"] or 24
+        for k in range(s["size"] // entsize):
+            o = s["off"] + k * entsize
+            r_offset, r_info, _r_addend = struct.unpack_from("<QQq", data, o)
+            r_type = r_info & 0xFFFFFFFF
+            if r_type not in (R_AARCH64_ABS64, R_AARCH64_ABS32):
+                if 257 <= r_type <= 260:
+                    raise ValueError(
+                        "unhandled absolute relocation type %d in %s@0x%x "
+                        "(no loader support)" % (r_type, "loaded section",
+                                                 tgt["addr"] + r_offset))
+                continue  # PC-relative / instruction fixup, already applied
+            width = 8 if r_type == R_AARCH64_ABS64 else 4
+            vaddr = tgt["addr"] + r_offset
+            if not loaded(vaddr):
+                continue
+            loc = tgt["off"] + r_offset
+            value = struct.unpack_from("<Q" if width == 8 else "<I", data, loc)[0]
+            out.append((vaddr - base, value, width))
+    out.sort()
+    return out
+
+
+def _build_flat_reloc(input_path, output_path, e_entry, base, blob, loads, data):
+    """Emit the "KRN2" kernel image: v1 flat content plus the absolute-reloc
+    table the loader applies before the cache flush (issue #1042)."""
+    relocs = _collect_abs_relocs(data, base, loads)
+    entry_offset = HEADER_SIZE_RELOC + e_entry - base
+    if entry_offset < HEADER_SIZE_RELOC or entry_offset >= HEADER_SIZE_RELOC + len(blob):
+        print("elf2bin: entry offset %#x outside loadable content" % entry_offset,
+              file=sys.stderr)
+        return 1
+    reloc_offset = HEADER_SIZE_RELOC + len(blob)
+    image_size = reloc_offset + len(relocs) * RELOC_ENTRY_SIZE
+    header = struct.pack("<IIQQQQ", MAGIC_RELOC, 0, entry_offset, image_size,
+                         reloc_offset, len(relocs))
+    with open(output_path, "wb") as f:
+        f.write(header)
+        f.write(bytes(blob))
+        for off, value, width in relocs:
+            f.write(struct.pack("<QQII", off, value, width, 0))
+    print("elf2bin: %s -> %s: entry_offset=0x%x image_size=%d "
+          "(%d PT_LOAD segment(s), %d absolute reloc(s))"
+          % (input_path, output_path, entry_offset, image_size,
+             len(loads), len(relocs)))
+    return 0
+
+
+def build(input_path, output_path, segments=False, allow_writable=False,
+          relocs=False):
     with open(input_path, "rb") as f:
         data = f.read()
 
@@ -96,6 +219,13 @@ def build(input_path, output_path, segments=False, allow_writable=False):
         blob[rel:rel + fsz] = data[poff:poff + fsz]
         # (memsz > fsz tail stays zero: BSS)
 
+    if relocs:
+        if segments:
+            print("elf2bin: --relocs and --segments are mutually exclusive",
+                  file=sys.stderr)
+            return 2
+        return _build_flat_reloc(input_path, output_path, e_entry, base, blob,
+                                 loads, data)
     if segments:
         return _build_segmented(input_path, output_path, data, e_entry,
                                 loads, base, blob)
@@ -215,10 +345,14 @@ def main(argv):
                   file=sys.stderr)
             return 1
         h = read_header(data)
+        extra = ""
+        if h["reloc_offset"] is not None:
+            extra = " reloc_offset=0x%x reloc_count=%d" % (
+                h["reloc_offset"], h["reloc_count"])
         print("kernel image %s: magic=0x%08x flags=%d entry_offset=0x%x "
-              "image_size=%d" % (argv[1], h["magic"], h["flags"],
-                                 h["entry_offset"], h["image_size"]))
-        if h["magic"] not in (MAGIC, MAGIC_SEGMENTS):
+              "image_size=%d%s" % (argv[1], h["magic"], h["flags"],
+                                   h["entry_offset"], h["image_size"], extra))
+        if h["magic"] not in (MAGIC, MAGIC_SEGMENTS, MAGIC_RELOC):
             print("elf2bin: WARNING: magic mismatch (not a VirelaiOS kernel "
                   "image?)", file=sys.stderr)
             return 1
@@ -226,19 +360,22 @@ def main(argv):
 
     segments = False
     allow_writable = False
-    if argv and argv[0] == "--segments":
-        segments = True
-        argv = argv[1:]
-    if argv and argv[0] == "--allow-writable":
-        allow_writable = True
+    relocs = False
+    while argv and argv[0] in ("--segments", "--allow-writable", "--relocs"):
+        if argv[0] == "--segments":
+            segments = True
+        elif argv[0] == "--allow-writable":
+            allow_writable = True
+        else:
+            relocs = True
         argv = argv[1:]
     if len(argv) != 2:
-        print("usage: elf2bin.py [--segments] [--allow-writable] "
+        print("usage: elf2bin.py [--segments] [--allow-writable] [--relocs] "
               "INPUT.elf OUTPUT.bin | elf2bin.py --info FILE.bin",
               file=sys.stderr)
         return 2
     return build(argv[0], argv[1], segments=segments,
-                 allow_writable=allow_writable)
+                 allow_writable=allow_writable, relocs=relocs)
 
 
 if __name__ == "__main__":

@@ -110,7 +110,7 @@ of them with `just verify-vz`.
 | spec | `live-m21-max-fullscreen-aot` | 1 run / 12 assert | live-m21-max-fullscreen-aot.spec -- M21 W6 max + W7 fullscreen + W8 always-on-top + W10 kmove |
 | spec | `live-m21-minimize-ws` | 1 run / 10 assert | live-m21-minimize-ws.spec -- M21 W3 minimize/restore + W4 workspace switching |
 | spec | `live-m21-notif-dialog-transient` | 1 run / 16 assert | live-m21-notif-dialog-transient.spec -- M21 W5 notif + W13 dialog + W15 modal + W16 transient |
-| spec | `live-m21-persist-title-orphan` | 1 run / 7 assert | live-m21-persist-title-orphan.spec -- tools/verify-live-m21-persist-title-orphan.sh — class-B live |
+| spec | `live-m21-persist-title-orphan` | 1 run / 7 assert | live-m21-persist-title-orphan.spec -- tools/verify-live-m21-persist-title-orphan.sh — class-B live a |
 | spec | `live-m21-tile-master` | 2 run / 18 assert | live-m21-tile-master.spec -- claim 8777: M21 W1 tiling + W2 master swap |
 | spec | `live-n1-ping` | 1 run / 10 assert | live-n1-ping.spec -- PING.BIN (exec'd) pings the host responder 3x |
 | spec | `live-n11-download` | 1 run / 10 assert | live-n11-download.spec -- DOWNLOAD.BIN (exec'd) fetches the HTTP |
@@ -196,7 +196,7 @@ of them with `just verify-vz`.
 | spec | `live-uaccess` | 1 run / 9 assert | live-uaccess.spec -- fault-safe uaccess: EL0 observes EFAULT on a bad |
 | spec | `live-unicode` | 1 run / 7 assert | live-unicode.spec -- milestone-twenty cards U2/U3/U11 class-B gate |
 | spec | `live-usb` | 1 run / 8 assert | live-usb.spec -- claim 4116 (milestone seven, card I2) class-B gate: |
-| spec | `live-usb-bulk` | 2 run / 16 assert | live-usb-bulk.spec -- M43 U1+U6: XHCI bulk engine + runner --usb-msd flag |
+| spec | `live-usb-bulk` | 2 run / 15 assert | live-usb-bulk.spec -- M43 U1+U6: XHCI bulk engine + runner --usb-msd flag |
 | spec | `live-user-fs` | 2 run / 10 assert | live-user-fs.spec -- claim 0510 (Milestone 10 F4): userland storage ABI & utilities on VZ. |
 | spec | `live-userspace` | 1 run / 6 assert | live-userspace.spec -- first EL0 task: SVC round-trip plus timer |
 | spec | `live-vf` | 6 run / 105 assert | live-vf.spec -- M34 HF1+HF2+HF3+HF4+HF7 (issues #735-#738/#741) |
@@ -268,7 +268,7 @@ named in `.github/workflows/*.yml`; `st` = named in
 | `build-zc-host.sh` | 81 | tooling | n | n | n | n | build-zc-host.sh -- Z4b (issue #761) host link contract: the target recipe. |
 | `check-zc-host-contract.py` | 112 | A | n | n | n | n | Z4b (issue #761): check an ELF against the VirelaiOS static-loader contract. |
 | `decode-screen-glyphs.py` | 538 | tooling | n | n | n | n | decode-screen-glyphs.py -- decode a captured framebuffer PNG against the |
-| `elf2bin.py` | 245 | tooling | n | n | n | n | Convert a Zig aarch64-freestanding ELF executable into the VirelaiOS flat |
+| `elf2bin.py` | 382 | tooling | n | n | n | n | Convert a Zig aarch64-freestanding ELF executable into the VirelaiOS flat |
 | `env-check.sh` | 259 | tooling | n | n | y | n | tools/env-check.sh -- source me at the start of every agent session. |
 | `inspect.sh` | 93 | tooling | y | n | n | n | inspect.sh -- report useful facts about the generated EFI binary and the |
 | `inventory-gates.sh` | 227 | tooling | n | n | n | n | inventory-gates.sh -- regenerate (or --check) the machine-generated gate |
