@@ -11,13 +11,13 @@
 
 | metric | count |
 |---|---|
-| top-level scripts (`tools/*.sh` + `tools/*.py`) | 38 |
+| top-level scripts (`tools/*.sh` + `tools/*.py`) | 39 |
 | class A (portable / CI) | 9 |
 | class B (VZ hardware gate) | 7 |
 | class C (interactive) | 1 |
 | class D (diagnostic) | 9 |
-| tooling (not gates) | 12 |
-| with a just recipe | 11 |
+| tooling (not gates) | 13 |
+| with a just recipe | 12 |
 | in the class-B fleet (spec dir / legacy script) | 4 |
 | named in a GitHub workflow | 7 |
 | named in docs/status.md | 7 |
@@ -280,6 +280,7 @@ named in `.github/workflows/*.yml`; `st` = named in
 | `mkhello-elf.py` | 205 | tooling | n | n | n | n | Emit a minimal statically linked AArch64 ELF32 executable (M22 D1, issue #324). |
 | `png2qoi.py` | 94 | tooling | n | n | n | n | Convert standard images (PNG, JPG) to Quite OK Image (QOI) format. |
 | `probe-pointer-routes.sh` | 53 | D | n | n | n | n | Probe: sweep pointer routes against the same guest session, comparing |
+| `session.sh` | 144 | tooling | y | n | n | n | session.sh -- boot an INTERACTIVE, WINDOWED VirelaiOS desktop. |
 | `test-unicode-torture.sh` | 18 | D | n | n | n | n | M20-U14: the Unicode torture gate. |
 | `verify-bad-handoff.sh` | 24 | B | y | y | n | y | (no header line) |
 | `verify-bss-budget.sh` | 165 | A | y | n | y | n | verify-bss-budget.sh -- ADR 0013 D3.1 CI gate: enforce a hard .bss ceiling |

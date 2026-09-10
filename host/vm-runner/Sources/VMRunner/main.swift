@@ -5,7 +5,7 @@
 // (--overlay-base: macOS 27 DiskImageKit stacked image — read-only base +
 //  throwaway ASIF overlay per run; positional <disk-image> is then ignored.
 //  --vars <path>: per-run EFI variable store.)
-//         [--timeout <s>] [--expect <line>] [--terminal-marker <line>]
+//         [--timeout <s|0>] (0 = run until Ctrl-C) [--expect <line>] [--terminal-marker <line>]
 //         [--cpus <n>] (claim 907: VCPU count, default 2 — the four-core
 //          four-domain stress gate boots 4)
 //         [--console] [--debug-input] [--dump-marker <file>]
@@ -2153,7 +2153,10 @@ func poll() {
 
     captureScreenshotIfDue()
 
-    if Date() > deadline {
+    // `--timeout 0` = no deadline (an interactive session runs until the
+    // operator interrupts it); every existing invocation passes a positive
+    // timeout, so this guard is behavior-preserving for the gate fleet.
+    if timeout > 0 && Date() > deadline {
         if screenshotSaved && terminalMarker == nil {
             print("Timed out waiting for serial output, but a framebuffer screenshot was captured.")
             finish(success: true)
@@ -3916,7 +3919,8 @@ func scriptPoll(matchedAt: Date? = nil) {
         scriptPollLastBeat = Date()
         FileHandle.standardError.write(Data("scriptPoll: alive (log=\(text.count) bytes, expect=\(scriptExpect ?? "<none>"), matched=\(matchedAt != nil))\n".utf8))
     }
-    if Date() > deadline {
+    // `--timeout 0` = no deadline (shared with the evidence path above).
+    if timeout > 0 && Date() > deadline {
         if matchedAt != nil {
             // The transcript appeared but --timeout cut the tail window
             // short — the gate's evidence is already in the log; pass.

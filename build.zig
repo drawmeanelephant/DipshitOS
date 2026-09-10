@@ -2098,6 +2098,18 @@ pub fn build(b: *std.Build) void {
     console.stdio = .inherit;
     console_step.dependOn(&console.step);
 
+    // Interactive desktop session (class C — a human at the keyboard): the
+    // windowed GPU + USB-input front door. Seeds the persistent host share
+    // (M34 HF6 removed the apps from the image), attaches GPU + keyboard +
+    // pointer, and autostarts TABWM via /host/.virelairc. Apple silicon +
+    // macOS 27 only; never run in CI (tools/session.sh owns the detail).
+    const session_step = b.step("session", "Boot an interactive windowed VirelaiOS desktop (class C — human session; Apple silicon + macOS 27 only)");
+    const session = b.addSystemCommand(&.{ "bash", "tools/session.sh" });
+    session.step.dependOn(&image.step);
+    session.has_side_effects = true;
+    session.stdio = .inherit;
+    session_step.dependOn(&session.step);
+
     const context_step = b.step("context", "Regenerate artifacts/context.md (deterministic project snapshot; class A gate)");
     const context = b.addSystemCommand(&.{ "bash", "tools/context/build-context.sh" });
     context.has_side_effects = true;
