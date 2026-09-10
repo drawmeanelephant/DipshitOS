@@ -58,6 +58,23 @@ structured console + framebuffer snapshots (kinds 3/4 and queue 4, below).
 Feature-bit-driven capabilities remain future work; queue-count stays the
 capability signal.
 
+USB device classes (host configuration surface) — **[observed]** claim #1046,
+2026-09-10. The M43 U5 probe (USB serial / CDC-ACM) **could not be
+constructed: Virtualization.framework exposes no USB serial device
+configuration class.** The complete `VZUSB*` header set at the tested SDK is
+`VZUSBController` + `VZUSBControllerConfiguration`, `VZUSBDevice`,
+`VZUSBDeviceConfiguration`, `VZUSBKeyboardConfiguration`,
+`VZUSBScreenCoordinatePointingDeviceConfiguration`,
+`VZUSBMassStorageDeviceConfiguration`, and
+`VZUSBPassthroughDeviceConfiguration` (plus the device handles). The
+attachable USB classes are therefore keyboard, pointing device, mass
+storage, and **host USB passthrough** — and passthrough needs a physical USB
+device present on the host
+(`VZUSBPassthroughDeviceConfiguration`), which is outside M43's
+no-new-hardware scope. There is no emulated serial class to probe, so U5
+closes as a **recorded negative**, not a fake probe. The only serial surface
+VZ offers remains the virtio-console device (row above).
+
 ## Input channel over the custom virtio device
 
 Claim 9588 (issue #523 item 3): queue 3 of the custom virtio device carries

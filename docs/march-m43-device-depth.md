@@ -68,7 +68,7 @@ spec (the M40 GF rule) and `[observed]` hardware-contract rows.
 | **U2** | [#1033](https://github.com/drawmeanelephant/DipshitOS/issues/1033) **USB MSC probe: BOT + minimal SCSI** | kernel | U1 | 🟢 landed (claim #1044) | `kernel/src/usb_msc.zig`, `kernel/src/xhci.zig`, `kernel/src/monitor.zig`, `tools/gate/specs/live-usb-msc.spec` | Bulk-Only Transport (CBW → data → CSW) + TEST UNIT READY / INQUIRY / READ CAPACITY(10) / READ(10) / WRITE(10), behind `usb msc probe [lba]`. `live-usb-msc` 1/1: TUR passes, INQUIRY `Apple`/`Virtual Disk` rev `1`, capacity **last_lba=16383 / block_len=512** (one LUN), **512-byte sector write/read-back byte-exact (diff=0) — WRITE(10) accepted**. `bulk_buf_len` 128→512 so one sector rides one U1 transfer. Host tests for CBW/CSW/CDB/parsers; `[observed]` contract rows added. `live-usb-bulk` 2/2 zero-regression. |
 | **U3** | [#1034](https://github.com/drawmeanelephant/DipshitOS/issues/1034) **Block-device userland seam + a real consumer** | kernel+user | U2 | ⬜ open | `kernel/src/file_table.zig`, consumer module, one spec | The USB disk reaches EL0 through the per-process handle family. Consumer chosen by evidence: (a) bounded read-only FAT32 reader (8.3 names, revivable from the claim-6420 lineage) or (b) a raw-block consumer. Composition test: host-staged content observed by the guest. |
 | **U4** | [#1035](https://github.com/drawmeanelephant/DipshitOS/issues/1035) **Honest device lifecycle** | kernel | U2 | ⬜ open | `kernel/src/xhci.zig`, `kernel/src/input.zig`, one monitor verb, one spec | Rescan/attach/detach with observability; removal fails gracefully (clean errors, no registry ghosting — the close_owner lesson). Port-change interrupts only if polled rescan proves insufficient. If full teardown is unbounded, scope to the honest error path and record the limitation. |
-| **U5** | [#1036](https://github.com/drawmeanelephant/DipshitOS/issues/1036) **USB serial (CDC-ACM), probe-first** | kernel | U1 | ⬜ open | `kernel/src/xhci.zig`, possible `kernel/src/usb_serial.zig`, contract doc | **Premise UNVERIFIED at scoping time** — the card opens with the probe (attach, class/interface descriptors, what VZ actually emulates). If emulated: a two-way char device with a round-trip gate. If not: the observation lands in the hardware contract and the card closes as an honest negative. |
+| **U5** | [#1036](https://github.com/drawmeanelephant/DipshitOS/issues/1036) **USB serial (CDC-ACM), probe-first** | kernel | U1 | ⬛ **closed negative** (claim #1046) | `docs/hardware-contract.md` | **Probed and recorded negative 2026-09-10.** Virtualization.framework exposes **no USB serial/CDC-ACM device configuration** — the attachable USB classes are keyboard, pointing, mass storage, and host-USB passthrough (physical hardware, out of scope). With no emulated serial class there is nothing to attach, so the card closes per its own acceptance clause: the absence is a `[observed]` hardware-contract row, no fake probe. The virtio-console device remains the only serial surface. |
 
 ## Scoping-time ground truth (so no card re-derives it)
 
@@ -117,7 +117,9 @@ spec (the M40 GF rule) and `[observed]` hardware-contract rows.
 2. ~~U2 next, on the same device: BOT/SCSI probe-and-record~~ — **done
    2026-09-10** (claim #1044, `live-usb-msc` 1/1; VZ's MSD is a writable
    single-LUN `Apple Virtual Disk`, 16 384 × 512 B sectors).
-3. U5's probe can run in parallel with U2 (one boot, one flag, an honest
-   contract row either way).
+3. ~~U5's probe can run in parallel with U2 (one boot, one flag, an honest
+   contract row either way)~~ — **done 2026-09-10, recorded negative** (claim
+   #1046): no USB serial class exists to probe (contract row above).
 4. U3's consumer decision (FAT reader vs raw-block) is made **on U2's
-   evidence**, not before.
+   evidence**, not before — U2 landed 2026-09-10 (writable single-LUN
+   `Apple Virtual Disk`, 16 384 × 512 B sectors), so the decision is live.
