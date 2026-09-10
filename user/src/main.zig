@@ -40,31 +40,36 @@ export fn _start() callconv(.naked) noreturn {
         \\10:
         \\cmp x9, x10
         \\b.hs 9f
-        \\mov x0, #1
-        \\adr x1, 11f
-        \\mov x2, #10 // "user: arg=" prefix (10 chars; the arg and its newline follow)
-        \\mov x8, #1
-        \\svc #0
         \\lsl x12, x9, #5 // slot = argv_va + i*32
         \\add x12, x11, x12
+        \\// Build "user: arg=<n>\n" in a 64-byte stack scratch and emit it
+        \\// in ONE sys_write: three separate writes (prefix, arg, newline)
+        \\// let a timer preemption split a logical line, which made the
+        \\// live-args gate assert-fail on interleaved output (issue #1042).
+        \\sub sp, sp, #64
+        \\adr x15, 11f
+        \\ldr x16, [x15] // "user: ar"
+        \\str x16, [sp]
+        \\ldrh w16, [x15, #8] // "g="
+        \\strh w16, [sp, #8]
+        \\add x15, sp, #10 // arg destination (after the 10-byte prefix)
         \\mov x13, xzr // len = strlen(slot), bounded by the 32-byte slot
         \\12:
         \\ldrb w14, [x12, x13]
-        \\cbz x14, 13f
+        \\cbz w14, 13f
+        \\strb w14, [x15, x13]
         \\add x13, x13, #1
         \\cmp x13, #31
         \\b.lo 12b
         \\13:
+        \\mov w14, #10 // terminating newline
+        \\strb w14, [x15, x13]
+        \\add x2, x13, #11 // 10 prefix + arg + 1 newline
         \\mov x0, #1
-        \\mov x1, x12
-        \\mov x2, x13
+        \\mov x1, sp
         \\mov x8, #1
         \\svc #0
-        \\mov x0, #1
-        \\adr x1, 14f
-        \\mov x2, #1 // terminating newline
-        \\mov x8, #1
-        \\svc #0
+        \\add sp, sp, #64
         \\add x9, x9, #1
         \\b 10b
         \\9:

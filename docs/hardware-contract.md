@@ -379,11 +379,24 @@ Non-PCI platform facts:
 - The loader cleans D-cache + invalidates I-cache over the image
   (`dc cvau` / `ic ivau` / `dsb` / `isb`) before the jump — without it the
   kernel never executes. **[observed]**
-- **Image content sits at `base+0`** (the loader parses the DSK1 header but
+- **Image content sits at `base+0`** (the loader parses the header but
   does not load it into RAM): ELF VMA `V` lives at RAM `base+V`. This is the
   addressing invariant the kernel's PC-relative references depend on
   (`adr` rides the content offset inside the PC; `adrp`+`add` resolves only
   with content at `base+0`). ADR 0002. **[observed]**
+- **PC-relative addressing alone does NOT cover every reference.** The
+  toolchain (Zig 0.16 / lld) still emits **absolute, base-0 pointer tables**
+  in initialized data for some code shapes — LLVM jump tables and
+  outlined-function pointer arrays. Observed on the M43 U1 kernel
+  (`--emit-relocs`, 2026-09-10): **70 `R_AARCH64_ABS64` in `.rodata` + 44 in
+  `.data` = 114** absolute slots, with **0** in `.text` (all code refs are
+  `ADR_PREL`/`ADD_ABS_LO12`/`CALL26`). Before issue #1042 the loader applied
+  no relocations, so those slots were live base-0 values that faulted only
+  when a path actually branched through them (the U1 silent death). The
+  **KRN2** image now carries the loader-applied relocation table (see ADR
+  0002); the build fails if an absolute relocation in loadable content
+  cannot be represented. `--usb-msd` U1: `live-usb-bulk` 2/2. **[observed]**
+  issue #1042.
 - From milestone two on, the boot stub **never exits** (it keeps UEFI Boot
   Services forever) while the kernel proper calls `ExitBootServices` and may
   then touch MMU and device MMIO (ADR 0004). **[observed]**

@@ -19,6 +19,17 @@ mass-storage device class is already attachable
 (`VZUSBMassStorageDeviceConfiguration`, macOS 13.0+; existence verified at
 scoping time against Apple's documentation).
 
+**U1 + U6 landed 2026-09-07** (PR #1041, claim #1040): the runner
+`--usb-msd` flag and the XHCI bulk transfer engine (`live-usb-bulk`
+PASS 2/2, issues #1032/#1037/#1040 closed). That work exposed a
+kernel-wide hazard — an LLVM-emitted base-0 pointer table the flat loader
+never relocated — which became issue **#1042**; the **loader-side
+absolute-relocation pass landed 2026-09-10** (claim #1042, **ADR 0019**):
+the kernel image is now **KRN2**, carrying a 114-entry absolute-relocation
+table (`elf2bin --relocs` + `lld --emit-relocs`) that `BOOTAA64.EFI`
+applies before the jump. `live-usb-bulk` 2/2 and `live-args` 1/1 green.
+U2–U5 are open.
+
 What exists today (the honest starting line):
 
 - **`kernel/src/xhci.zig` (1,536 lines)** — the M7 driver: probe, init,
@@ -53,7 +64,7 @@ spec (the M40 GF rule) and `[observed]` hardware-contract rows.
 | Card | Issue | Phase | Depends on | Status | Touches | Notes |
 |:-----|:------|:------|:-----------|:-------|:--------|:------|
 | **U6** | [#1037](https://github.com/drawmeanelephant/DipshitOS/issues/1037) **Runner `--usb-msd` / `--usb-serial` flags** | host | — | 🟡 `--usb-msd` landed (U1's PR); `--usb-serial` pending U5 | `host/vm-runner/Sources/VMRunner/main.swift` | `--usb-msd` landed: `VZUSBMassStorageDeviceConfiguration(attachment:)` inside `VZXHCIControllerConfiguration.usbDevices` on `config.usbControllers` (macOS 15+ API). Flag-gated, OFF by default — the default VM byte-identical (the M9/N7 rule). [observed]: the MSD gets its OWN controller; VZ's sniffer needs parseable disk structure. |
-| **U1** | [#1032](https://github.com/drawmeanelephant/DipshitOS/issues/1032) **XHCI bulk transfer engine** | kernel | U6 (evidence) | 🟢 landed (U1+U6 PR) | `kernel/src/xhci.zig`, `kernel/src/input.zig`, one spec | Bulk endpoint capture at enumeration (EP2 OUT + EP1 IN on the VZ MSC, maxpkt 1024), per-slot bulk rings, doorbells by honest DCI (2×EP+dir), Configure Endpoint with Context Entries=max, one-transfer-at-a-time per direction. Proven by `live-usb-bulk` 2/2: raw probe gets real device completions (cc=6 Stall on non-CBW traffic — the wire's honest answer). Zero HID regression: run 02. [observed, debugging]: a 4-case switch over field addresses made LLVM emit an UNRELOCATED base-0 pointer table — computed `@ptrFromInt(base + @offsetOf)` instead; see the code comment in `xhci_configure_endpoint`. |
+| **U1** | [#1032](https://github.com/drawmeanelephant/DipshitOS/issues/1032) **XHCI bulk transfer engine** | kernel | U6 (evidence) | 🟢 landed (U1+U6 PR) | `kernel/src/xhci.zig`, `kernel/src/input.zig`, one spec | Bulk endpoint capture at enumeration (EP2 OUT + EP1 IN on the VZ MSC, maxpkt 1024), per-slot bulk rings, doorbells by honest DCI (2×EP+dir), Configure Endpoint with Context Entries=max, one-transfer-at-a-time per direction. Proven by `live-usb-bulk` 2/2: raw probe gets real device completions (cc=6 Stall on non-CBW traffic — the wire's honest answer). Zero HID regression: run 02. [observed, debugging]: a 4-case switch over field addresses made LLVM emit an UNRELOCATED base-0 pointer table — computed `@ptrFromInt(base + @offsetOf)` instead; see the code comment in `xhci_configure_endpoint`. The **kernel-wide** hazard this exposed is fixed by **#1042 / ADR 0019** (KRN2 loader relocation table; 114 absolute slots relocated at load). |
 | **U2** | [#1033](https://github.com/drawmeanelephant/DipshitOS/issues/1033) **USB MSC probe: BOT + minimal SCSI** | kernel | U1 | ⬜ open | new `kernel/src/usb_msc.zig`, `kernel/src/xhci.zig`, `docs/hardware-contract.md` | Bulk-Only Transport (CBW → data → CSW) + INQUIRY / READ CAPACITY(10) / TEST UNIT READY / READ(10) / WRITE(10). Sector write/read byte-exact. **Probe-and-record card**: LUNs, INQUIRY string, quirks → `[observed]` contract rows before anything builds on them (the N5 exploration pattern). |
 | **U3** | [#1034](https://github.com/drawmeanelephant/DipshitOS/issues/1034) **Block-device userland seam + a real consumer** | kernel+user | U2 | ⬜ open | `kernel/src/file_table.zig`, consumer module, one spec | The USB disk reaches EL0 through the per-process handle family. Consumer chosen by evidence: (a) bounded read-only FAT32 reader (8.3 names, revivable from the claim-6420 lineage) or (b) a raw-block consumer. Composition test: host-staged content observed by the guest. |
 | **U4** | [#1035](https://github.com/drawmeanelephant/DipshitOS/issues/1035) **Honest device lifecycle** | kernel | U2 | ⬜ open | `kernel/src/xhci.zig`, `kernel/src/input.zig`, one monitor verb, one spec | Rescan/attach/detach with observability; removal fails gracefully (clean errors, no registry ghosting — the close_owner lesson). Port-change interrupts only if polled rescan proves insufficient. If full teardown is unbounded, scope to the honest error path and record the limitation. |
@@ -98,11 +109,12 @@ spec (the M40 GF rule) and `[observed]` hardware-contract rows.
 - Rewriting the HID paths — U1 generalizes the transport without touching
   the HID consumers' behavior.
 
-## Next actions (when M43 opens)
+## Next actions
 
-1. U6 + U1 together: the flag lands with a raw-bulk probe spec — the first
-   `[observed]` rows for a third USB device class.
-2. U2 immediately after, on the same device: BOT/SCSI probe-and-record.
+1. ~~U6 + U1 together: the flag lands with a raw-bulk probe spec~~ — **done
+   2026-09-07** (PR #1041); the kernel-wide pointer-table hazard it exposed
+   is fixed by **#1042 / ADR 0019** (2026-09-10).
+2. U2 next, on the same device: BOT/SCSI probe-and-record.
 3. U5's probe can run in parallel with U2 (one boot, one flag, an honest
    contract row either way).
 4. U3's consumer decision (FAT reader vs raw-block) is made **on U2's

@@ -45,8 +45,9 @@ if [ "$(head -c 2 "$EFI_BIN")" != "MZ" ]; then
     fail "'$EFI_BIN' does not look like a PE/COFF image (missing MZ header)."
 fi
 [ -f "$KERNEL_BIN" ] || fail "kernel image not found at '$KERNEL_BIN' -- run 'zig build' first (it produces zig-out/bin/KERNEL.BIN)."
-if [ "$(head -c 4 "$KERNEL_BIN")" != "DSK1" ]; then
-    fail "'$KERNEL_BIN' does not start with the 'DSK1' kernel-image magic -- run 'zig build' first."
+KERNEL_MAGIC="$(head -c 4 "$KERNEL_BIN")"
+if [ "$KERNEL_MAGIC" != "DSK1" ] && [ "$KERNEL_MAGIC" != "KRN2" ]; then
+    fail "'$KERNEL_BIN' does not start with a known kernel-image magic ('DSK1'/'KRN2') -- run 'zig build' first."
 fi
 
 # 3. Builder script.
