@@ -412,9 +412,9 @@ var bulk_in_num_dci: [max_enumerated]u8 = [_]u8{0} ** max_enumerated;
 
 /// The bulk data buffers, one per ring slot per direction (the intr_slots
 /// pattern: a completed TRB's payload is read from the slot it occupies).
-/// U1 bounds transfers to this size — the probe card's contract; U2 (MSC)
-/// sizes real SCSI blocks against the device's observed maxpkt + burst.
-pub const bulk_buf_len: usize = 128;
+/// U1 sized this for raw probes; U2 (MSC) needs a full 512-byte logical
+/// sector in one transfer, so the bound is the sector size.
+pub const bulk_buf_len: usize = 512;
 var bulk_slots: [max_enumerated][bulk_dirs][tr_usable][bulk_buf_len]u8 align(64) = undefined;
 
 /// The last completed bulk IN payload (the `usb bulk recv` evidence view).

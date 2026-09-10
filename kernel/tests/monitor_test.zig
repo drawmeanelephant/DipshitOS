@@ -563,7 +563,7 @@ test "monitor: usb reports no device honestly when the XHCI transport is absent"
     try std.testing.expectEqualStrings("usb: no XHCI device (DID 0x1a06 not found on bus 0)\n", env.mock.contents());
     // `usb` is registered (the registry-row shape).
     try std.testing.expect(lookup("usb") != null);
-    try std.testing.expectEqualStrings("XHCI host controller: `usb` transport report, `usb devices` enumerated devices, `usb report` last HID report, `usb bulk [probe ...]` bulk engine (U1)", lookup("usb").?.help);
+    try std.testing.expectEqualStrings("XHCI host controller: `usb` transport report, `usb devices` enumerated devices, `usb report` last HID report, `usb bulk [probe ...]` bulk engine (U1), `usb msc [probe] [lba]` mass-storage BOT/SCSI probe (U2)", lookup("usb").?.help);
 }
 
 test "monitor: net report shape with an armed transport" {
