@@ -66,6 +66,28 @@ var heartbeat_irq: u64 = 0;
 var heartbeat_poll: u64 = 0;
 var irq_report_irq: u64 = 0;
 
+// ---------------------------------------------------------------------------
+// Wall clock (#1056 item 1)
+// ---------------------------------------------------------------------------
+/// Boot-time LOCAL seconds since midnight, captured from the handoff
+/// (EFI RuntimeServices.GetTime in the loader), or `std.math.maxInt(u64)`
+/// when the firmware gave none.
+pub var boot_time_of_day: u64 = std.math.maxInt(u64);
+
+/// Record the handoff's boot clock once at kernel entry.
+pub fn set_boot_time_of_day(v: u64) void {
+    boot_time_of_day = v;
+}
+
+/// Current LOCAL seconds since midnight: the boot clock advanced by the
+/// elapsed 1 Hz ticks, wrapping at 24h. Null when no firmware clock was
+/// captured (the honest uptime fallback). Reads two module globals; no
+/// hardware, so it is host-testable via `on_tick`.
+pub fn wall_time_of_day() ?u64 {
+    if (boot_time_of_day == std.math.maxInt(u64)) return null;
+    return (boot_time_of_day + ticks) % 86400;
+}
+
 /// True once `init` armed the timer on real hardware.
 pub fn armed() bool {
     return armed_flag;
@@ -331,4 +353,30 @@ test "timer: ppi matching is exact" {
 test "timer: period math for a 1 s tick" {
     try std.testing.expectEqual(@as(u64, 24_000_000), 24_000_000 * period_ns / 1_000_000_000);
     try std.testing.expectEqual(@as(u64, 100_000_000), 100_000_000 * period_ns / 1_000_000_000);
+}
+
+test "timer: wall_time_of_day tracks the boot clock and wraps at midnight (#1056)" {
+    const saved_tod = boot_time_of_day;
+    const saved_ticks = ticks;
+    defer {
+        boot_time_of_day = saved_tod;
+        ticks = saved_ticks;
+    }
+
+    // No firmware clock captured: the honest null (uptime fallback).
+    set_boot_time_of_day(std.math.maxInt(u64));
+    ticks = 0;
+    try std.testing.expectEqual(@as(?u64, null), wall_time_of_day());
+
+    // Boot clock + elapsed seconds.
+    set_boot_time_of_day(23 * 3600 + 59 * 60 + 50);
+    ticks = 0;
+    try std.testing.expectEqual(@as(?u64, 23 * 3600 + 59 * 60 + 50), wall_time_of_day());
+    // 23:59:50 + 20 s wraps to 00:00:10 the next day.
+    ticks = 20;
+    try std.testing.expectEqual(@as(?u64, 10), wall_time_of_day());
+    // A full day later is the same face (boot at midnight + 8:15:00).
+    set_boot_time_of_day(0);
+    ticks = 86400 + 8 * 3600 + 15 * 60;
+    try std.testing.expectEqual(@as(?u64, 8 * 3600 + 15 * 60), wall_time_of_day());
 }

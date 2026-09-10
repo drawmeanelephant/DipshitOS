@@ -262,6 +262,14 @@ via `AllocatePages`), owned by the kernel after exit:
 | 40     | u64  | `stack_base` — 4K-aligned, `EfiLoaderData` |
 | 48     | u64  | `stack_size` — 16 KiB for this milestone |
 | 56     | u64  | `flags` (0) |
+| 64     | u64  | `boot_time_of_day` — **additive** (#1056, 2026-09-10): LOCAL seconds since midnight from `RuntimeServices.GetTime`, or `0xFFFF_FFFF_FFFF_FFFF` (`no_boot_time`) when the firmware has no RTC |
+
+The `boot_time_of_day` field is a strictly additive tail: the frozen v2
+fields keep offsets 0..64 byte-for-byte, so a v2 reader that ignores offset
+64 is unaffected, and the version stays 2. It carries the firmware clock to
+the kernel so userspace has a real time-of-day epoch with or without a host
+share (the loader reads `GetTime` before the kernel's `ExitBootServices`);
+the sentinel preserves the honest uptime fallback when unavailable.
 
 The stub additionally allocates the kernel stack (16 KiB, `EfiLoaderData`,
 4K-aligned) and records its bounds in the struct. The kernel validates

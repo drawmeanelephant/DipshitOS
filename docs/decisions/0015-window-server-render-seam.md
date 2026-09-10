@@ -148,8 +148,18 @@ it (the render server already separates policy from blit).
   (the draft's `EPERM` does not exist in the frozen `ErrorCode` enum; see claim
   1484), seat-taken also `EACCES` (EL1h force-unregister escapes), no-GPU
   `REGISTER` → `ENXIO` (-9), `COMPOSITE_TICK` on the scheduler tick seam; the
-  ADR 0007 amendment writes the honest `reserved 66–127` tail (`slot_count` is
-  128). The `SET_WINDOW` chrome-descriptor layout remains open (WMS4).
+   ADR 0007 amendment writes the honest `reserved 66–127` tail (`slot_count` is
+   128). The `SET_WINDOW` chrome-descriptor layout remains open (WMS4).
+- 2026-09-10 — issue #1056: **additive WMCTL subcommands 14/15** (seat-gated
+  like every other subcommand; no existing opcode or arg layout changes).
+  `WINDOW_NAME` (`wmctl(cmd=14, id, buf_ptr, len, 0, 0)`) copies a window's
+  display name — the app-set title, else the owning process's executable name
+  — OUT through uaccess and returns the byte count, so a WM whose kind-20
+  mirror carries no title bytes can still name non-tabapp windows.
+  `CLOCK` (`wmctl(cmd=15, 0, 0, 0, 0, 0)`) returns the current LOCAL seconds
+  since midnight (the boot `EFI GetTime` capture of ADR 0004 D5 advanced by
+  1 Hz uptime, wrapped at 24h), or `ENOSYS` when the firmware gave no clock.
+  Both back the TABWM polish in issue #1056 (window titles, real tray clock).
 
 ## Open issues (left to implementing claims)
 

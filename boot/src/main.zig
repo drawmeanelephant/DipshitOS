@@ -91,10 +91,27 @@ const HandoffV2 = extern struct {
     stack_base: u64,
     stack_size: u64,
     flags: u64,
+    boot_time_of_day: u64,
 };
 const handoff_magic: u32 = 0x324B5344; // "DSK2"
 const handoff_version: u32 = 2;
+/// #1056 item 1: sentinel for "no wall-clock time from firmware".
+const no_boot_time: u64 = std.math.maxInt(u64);
 const kernel_stack_size: usize = 16 * 1024;
+
+/// #1056 item 1: read the firmware clock through EFI RuntimeServices.GetTime
+/// and return the LOCAL time-of-day as seconds since midnight, or null when
+/// the platform refuses / reports an out-of-range face. GetTime yields the
+/// platform's local broken-down time, so the guest has an epoch with or
+/// without a host share. Best effort — a failure leaves the kernel's
+/// honest uptime fallback in place.
+fn read_boot_time_of_day(st: *const uefi.tables.SystemTable) ?u64 {
+    const got = st.runtime_services.getTime() catch return null;
+    const t = got[0];
+    if (t.year < 1900 or t.month < 1 or t.month > 12 or t.day < 1 or t.day > 31) return null;
+    if (t.hour > 23 or t.minute > 59 or t.second > 59) return null;
+    return @as(u64, t.hour) * 3600 + @as(u64, t.minute) * 60 + @as(u64, t.second);
+}
 
 pub fn main() void {
     const st = uefi.system_table;
@@ -255,6 +272,7 @@ fn load_and_enter_kernel(st: *const uefi.tables.SystemTable) void {
         .stack_base = stack_base,
         .stack_size = kernel_stack_size,
         .flags = 0,
+        .boot_time_of_day = read_boot_time_of_day(st) orelse no_boot_time,
     };
 
     // 5. Jump. entry_offset is file-relative (includes the header); with

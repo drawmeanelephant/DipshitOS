@@ -2795,6 +2795,34 @@ fn handle_wmctl(args: Args, _: *exceptions.VectorFrame) u64 {
             wm_server.note_win_close();
             return 0;
         },
+        wm_server.wmctl_window_name => {
+            // #1056 item 2: the WM resolves a window's display name — the
+            // app-set title if any, else the OWNING process's executable
+            // name (driving_award.user_display_name). a1 = window id,
+            // a2 = destination buffer, a3 = length. Copies the name OUT and
+            // returns its byte count (0 bytes is a valid empty name); EINVAL
+            // for an unknown/non-user window, EFAULT for a bad buffer.
+            // Seat-gated like every other WMCTL command.
+            if (!wm_server.registered()) return error_result(.enosys);
+            if (wm_server.registered_pid() != pid) return error_result(.eacces);
+            if (args[1] > std.math.maxInt(u8)) return error_result(.einval);
+            const name = driving_award.user_display_name(@intCast(args[1])) orelse return error_result(.einval);
+            const cap: usize = @intCast(@min(args[3], 64));
+            const n = @min(name.len, cap);
+            if (n > 0 and uaccess.copy_out(args[2], name[0..n], n) != .ok) return error_result(.efault);
+            return n;
+        },
+        wm_server.wmctl_clock => {
+            // #1056 item 1: the WM reads the real system clock — the boot
+            // EFI GetTime capture advanced by 1 Hz uptime (timer.wall_time_of_day),
+            // wrapped at 24h. Returns LOCAL seconds since midnight; ENOSYS
+            // when the firmware provided no clock (the WM's uptime fallback).
+            // Seat-gated like every other WMCTL command.
+            if (!wm_server.registered()) return error_result(.enosys);
+            if (wm_server.registered_pid() != pid) return error_result(.eacces);
+            const tod = timer.wall_time_of_day() orelse return error_result(.enosys);
+            return tod;
+        },
         wm_server.wmctl_dialog => {
             // M32 WMS8 Gate 2 (issue #628): the WM — not the kernel — owns
             // the keyboard-driven modal-dialog decision (M27 G2 about,

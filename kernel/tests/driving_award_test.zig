@@ -1966,3 +1966,22 @@ test "driving_award: WM2 blit_scaled maps source corners onto the card" {
     blit_scaled(&dst, 8 * 4, &src, 4, 4, 4 * 4, 0, 0, 0, 8);
     blit_scaled(&dst, 8 * 4, &src, 0, 4, 4 * 4, 0, 0, 8, 8);
 }
+
+test "driving_award: user_display_name prefers the title, else the owner process name (#1056)" {
+    arm();
+    // A named owner process, then a user window owned by it.
+    const pid = driving_award.process.create("WINLOOP.BIN", .{}, .{}, .{}).?;
+    const r = user_open(64, 64, 512, 384, pid);
+    try std.testing.expectEqual(@as(u8, 2), r.opened);
+
+    // No app title yet: the owner process's executable name is the label.
+    try std.testing.expectEqualStrings("WINLOOP.BIN", driving_award.user_display_name(2).?);
+
+    // An app-set title wins over the process name.
+    try std.testing.expect(set_window_title(2, "Road Pops"));
+    try std.testing.expectEqualStrings("Road Pops", driving_award.user_display_name(2).?);
+
+    // Unknown id and a fixed (non-user) window are null.
+    try std.testing.expectEqual(@as(?[]const u8, null), driving_award.user_display_name(250));
+    try std.testing.expectEqual(@as(?[]const u8, null), driving_award.user_display_name(0));
+}

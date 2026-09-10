@@ -238,6 +238,12 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // writes are never called.
     nvram_console.init(st.runtime_services);
 
+    // #1056 item 1: adopt the boot loader's EFI GetTime wall-clock capture
+    // (local seconds since midnight) so userspace has a real time-of-day
+    // epoch with or without a host share. `no_boot_time` keeps the honest
+    // uptime fallback.
+    timer.set_boot_time_of_day(handoff_rec.boot_time_of_day);
+
     print_pre_exit_error(st, "VirelaiOS: kernel entered\r\n");
     evidence.set_marker(marker_entry);
     evidence.write_marker_var(st, marker_entry);
