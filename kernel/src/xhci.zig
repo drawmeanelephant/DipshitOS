@@ -454,6 +454,123 @@ pub fn usb_bulk_dev() u8 {
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+// U4 — honest device lifecycle (M43 card U4, issue #1035): polled rescan +
+// administrative detach with a clean error path.
+// ---------------------------------------------------------------------------
+//
+// The runner attaches USB devices statically at boot (no host-side hotplug
+// choreography exists in the flag set), so lifecycle honesty is a guest-side
+// contract:
+//
+// - `xhci_rescan` reuses the boot enumeration path post-boot: ports whose
+//   PORTSC CCS is set but have no registry entry are enumerated with the
+//   same `xhci_enumerate_port` the boot path uses; ports whose CCS cleared
+//   while their registry entry is still present are quiesced (present=false)
+//   so every consumer fails cleanly instead of ghosting.
+// - `xhci_detach_slot` / `xhci_detach_bulk` are the administrative detach:
+//   the registry entry is quiesced (present=false, live count decremented)
+//   while the HC slot, endpoint contexts, and rings stay allocated. A later
+//   rescan with CCS still set reattaches the SAME entry logically
+//   (present=true) — no new slot, no re-enumeration — because the device
+//   never left the bus. A physically swapped device behind the same port
+//   would revive the stale identity: recorded limitation, not silent
+//   correctness (a full Disable-Slot + re-enumerate teardown is future work).
+// - The error path needs no new code: `xhci_bulk_transfer` already refuses
+//   `!present or !bulk_ready` (cc=0), `usb_bulk_dev` skips absent devices
+//   (so BOT returns stage=cbw/cc=0 and `usb msc probe` prints its honest
+//   `no bulk-capable device` line), the file-table `.usb` open sees a null
+//   capacity (ENOENT), and `input.drain` skips `!present` endpoints (HID
+//   unaffected). Detach from the single-threaded monitor path can never
+//   catch a transfer in flight (U1 is synchronous, one at a time), so no
+//   ring teardown races: recorded, not assumed.
+//
+// Polled rescan is the chosen mechanism (no port-change-event IRQ driver):
+// the event ring already surfaces port-status-change events, but nothing
+// consumes them as interrupts anywhere in the kernel (all XHCI event
+// handling is polled), so an interrupt-driven rescan would be new
+// machinery for no observed need.
+
+/// How many polled rescans have run (the `usb rescan` observability row).
+pub var rescan_count: u32 = 0;
+
+/// One rescan's delta (all fields are counts of registry entries).
+pub const Rescan = struct {
+    added: usize = 0,
+    removed: usize = 0,
+    reattached: usize = 0,
+    count: usize = 0,
+};
+
+/// Quiesce slot `slot_id`: the device's resources stay allocated but every
+/// consumer observes absence (bulk refuses, BOT fails clean, `.usb` is
+/// ENOENT, HID drain skips). Returns true when a present device detached.
+pub fn xhci_detach_slot(slot_id: u8) bool {
+    if (slot_id == 0 or slot_id > max_enumerated) return false;
+    const idx: usize = slot_id - 1;
+    if (!enum_devs[idx].present or enum_devs[idx].slot_id != slot_id) return false;
+    enum_devs[idx].present = false;
+    if (enum_count > 0) enum_count -= 1;
+    return true;
+}
+
+/// Detach the first bulk-capable device (the lifecycle spec's subject).
+/// Returns its slot id, or 0 when no bulk device is present.
+pub fn xhci_detach_bulk() u8 {
+    const slot = usb_bulk_dev();
+    if (slot == 0) return 0;
+    return if (xhci_detach_slot(slot)) slot else 0;
+}
+
+/// Polled rescan: diff PORTSC CCS against the registry, enumerate arrivals
+/// with the boot path, quiesce removals, reattach quiesced entries whose
+/// port still reports connected. Pure registry work except the arrival
+/// enumeration (which touches hardware like boot does).
+pub fn xhci_rescan() Rescan {
+    var r = Rescan{};
+    rescan_count +%= 1;
+    if (!xhci_ready or xhci_op_base == 0) {
+        r.count = enum_count;
+        return r;
+    }
+    const max_ports = hcsparams1_max_ports(xhci_hcsparams1);
+    var port: u8 = 1;
+    while (port <= max_ports) : (port += 1) {
+        const psc = xhci_port_status(port);
+        const ccs = (psc & portsc_ccs) != 0;
+        var found: ?usize = null;
+        for (0..max_enumerated) |i| {
+            if (enum_devs[i].slot_id != 0 and enum_devs[i].port == port) {
+                found = i;
+                break;
+            }
+        }
+        if (ccs) {
+            if (found) |i| {
+                if (!enum_devs[i].present) {
+                    enum_devs[i].present = true;
+                    enum_count += 1;
+                    r.reattached += 1;
+                    if (enum_devs[i].ep_in_num != 0) xhci_arm_intr(enum_devs[i].slot_id);
+                }
+            } else {
+                if (enum_count >= EnumMax) continue;
+                if (xhci_enumerate_port(port)) r.added += 1;
+            }
+        } else {
+            if (found) |i| {
+                if (enum_devs[i].present) {
+                    enum_devs[i].present = false;
+                    if (enum_count > 0) enum_count -= 1;
+                    r.removed += 1;
+                }
+            }
+        }
+    }
+    r.count = enum_count;
+    return r;
+}
+
 /// Physical (== virtual here, the identity map) address of a DMA ring.
 fn ring_phys(ptr: anytype) u64 {
     return mmu.to_phys(@intFromPtr(ptr));
@@ -1870,4 +1987,53 @@ test "xhci: control-transfer TRB control fields pack to the spec encodings" {
     try std.testing.expectEqual(@as(u32, 4), (status_ctl >> 10) & 0x3f);
     try std.testing.expect(status_ctl & trb_ioc != 0);
     try std.testing.expect(status_ctl & trb_dir_in != 0);
+}
+
+test "xhci: U4 detach quiesces the registry so every consumer fails clean" {
+    // Save + restore: these globals are the live enumeration table.
+    const save_devs = enum_devs;
+    const save_count = enum_count;
+    defer {
+        enum_devs = save_devs;
+        enum_count = save_count;
+    }
+    enum_devs = [_]EnumDevice{.{}} ** EnumMax;
+    enum_devs[0] = .{ .present = true, .slot_id = 1, .port = 1, .bulk_ready = true, .bulk_maxpkt = 1024, .bulk_out_num = 2, .bulk_in_num = 1 };
+    enum_count = 1;
+    try std.testing.expectEqual(@as(u8, 1), usb_bulk_dev());
+    try std.testing.expect(xhci_detach_slot(1));
+    try std.testing.expect(!enum_devs[0].present);
+    // The identity survives for rescan reattach; the live count does not.
+    try std.testing.expectEqual(@as(u8, 1), enum_devs[0].slot_id);
+    try std.testing.expect(enum_devs[0].bulk_ready);
+    try std.testing.expectEqual(@as(usize, 0), enum_count);
+    // Absence is total: no bulk device, bulk transfers refuse, detach is
+    // idempotent, and out-of-range slots refuse.
+    try std.testing.expectEqual(@as(u8, 0), usb_bulk_dev());
+    var scratch: [8]u8 = undefined;
+    try std.testing.expectEqual(@as(u32, 0), xhci_bulk_transfer(1, true, &scratch, 0).cc);
+    try std.testing.expect(!xhci_detach_slot(1));
+    try std.testing.expect(!xhci_detach_slot(0));
+    try std.testing.expect(!xhci_detach_slot(9));
+    try std.testing.expectEqual(@as(u8, 0), xhci_detach_bulk());
+}
+
+test "xhci: U4 rescan without a controller is a counted no-op" {
+    const save_ready = xhci_ready;
+    const save_base = xhci_op_base;
+    const save_count = enum_count;
+    const save_n = rescan_count;
+    defer {
+        xhci_ready = save_ready;
+        xhci_op_base = save_base;
+        rescan_count = save_n;
+    }
+    xhci_ready = false;
+    xhci_op_base = 0;
+    const r = xhci_rescan();
+    try std.testing.expectEqual(@as(usize, 0), r.added);
+    try std.testing.expectEqual(@as(usize, 0), r.removed);
+    try std.testing.expectEqual(@as(usize, 0), r.reattached);
+    try std.testing.expectEqual(save_count, r.count);
+    try std.testing.expectEqual(save_n +% 1, rescan_count);
 }
