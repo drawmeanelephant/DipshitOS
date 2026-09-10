@@ -46,6 +46,7 @@ pub const road_pops = @import("road_pops.zig"); // milestone six card G3 (claim 
 pub const fbtext = @import("text.zig"); // milestone six card G2 (claim 3194): framebuffer text rendering behind `text`
 pub const xhci = @import("xhci.zig"); // milestone seven card I1 (claim 4272): the XHCI host-controller transport behind `usb`
 pub const input = @import("input.zig"); // milestone seven card I3 (claim 6050): the keyboard/pointer event FIFO behind `input`
+pub const usb_msc = @import("usb_msc.zig"); // M43 card U2 (issue #1033): BOT + minimal SCSI over the U1 bulk engine (`usb msc`)
 pub const driving_award = @import("driving_award.zig"); // milestone six card G5 (claim 1543): Driving Award, the window manager behind `dui`
 pub const wm_server = @import("wm_server.zig"); // M32 WMS2 (issue #622): the render-server register behind `wm`
 pub const settings = @import("settings.zig"); // milestone eight card U8 (claim 2649): persistent settings engine
@@ -370,7 +371,7 @@ pub fn ensure_registry() []const Command {
             .{ .name = "timer", .help = "interrupt controller + timer status", .usage = "timer", .category = .memory_state, .handler = cmd_timer },
             .{ .name = "tour", .help = "guided tour of the system for new users", .usage = "tour", .category = .machine_identity, .handler = cmd_welcome },
             .{ .name = "uaccess", .help = "user-memory copy diagnostics (valid, fault, recovery)", .usage = "uaccess", .category = .memory_state, .handler = cmd_uaccess },
-            .{ .name = "usb", .help = "XHCI host controller: `usb` transport report, `usb devices` enumerated devices, `usb report` last HID report, `usb bulk [probe ...]` bulk engine (U1)", .usage = "usb [devices|report|bulk [probe ...]]", .category = .graphics_input, .handler = cmd_usb },
+            .{ .name = "usb", .help = "XHCI host controller: `usb` transport report, `usb devices` enumerated devices, `usb report` last HID report, `usb bulk [probe ...]` bulk engine (U1), `usb msc [probe] [lba]` mass-storage BOT/SCSI probe (U2)", .usage = "usb [devices|report|bulk [probe ...]|msc [probe] [lba]]", .category = .graphics_input, .handler = cmd_usb },
             .{ .name = "uname", .help = "compact system identity", .usage = "uname", .category = .machine_identity, .handler = cmd_uname },
             .{ .name = "version", .help = "display build information", .usage = "version", .category = .machine_identity, .handler = cmd_version },
             .{ .name = "vf", .dom = svclock.dom_bit(.file), .help = "host file channel (M34): 'vf ls/cat/mkdir/rm/mv <path>' read + mutate a macOS share over custom-virtio queue 5; 'vf open/close/write/truncate/fsync <h>' manage write handles (8-slot host cursor table)", .usage = "vf [ls [<path>]|cat <path>|mkdir <path>|rm <path>|mv <from> <to>|open <path> [append]|close <h>|write <h> <n>|truncate <h> <n>|fsync <h>]", .category = .storage, .max_args = 4, .handler = cmd_vf },
@@ -3126,6 +3127,7 @@ fn cmd_usb(m: *Monitor, args: []const []const u8) ExecError {
     if (args.len > 0 and std.mem.eql(u8, args[0], "devices")) return cmd_usb_devices(m);
     if (args.len > 0 and std.mem.eql(u8, args[0], "report")) return cmd_usb_report(m, args);
     if (args.len > 0 and std.mem.eql(u8, args[0], "bulk")) return cmd_usb_bulk(m, args);
+    if (args.len > 0 and std.mem.eql(u8, args[0], "msc")) return cmd_usb_msc(m, args);
     if (!xhci.xhci_ready) {
         m.console.puts("usb: no XHCI device (");
         m.console.puts(if (xhci.xhci_fail.len > 0) xhci.xhci_fail else "DID 0x1a06 not found on bus 0");
@@ -3420,6 +3422,82 @@ fn cmd_usb_bulk(m: *Monitor, args: []const []const u8) ExecError {
         }
     }
     return .none;
+}
+
+/// `usb msc` — the U2 (M43 card U2) probe-and-record verb: TEST UNIT READY,
+/// INQUIRY, READ CAPACITY(10), then a deterministic 512-byte sector
+/// write/read-back. Every field is the wire's honest answer (the [observed]
+/// rows for docs/hardware-contract.md) — a refused write is recorded, not
+/// faked. Optional LBA: `usb msc probe <lba>` (default 100, a gap sector).
+fn cmd_usb_msc(m: *Monitor, args: []const []const u8) ExecError {
+    if (!xhci.xhci_ready) {
+        m.console.puts("usb msc: no XHCI device\n");
+        return .none;
+    }
+    var lba: u32 = usb_msc.probe_default_lba;
+    for (args[1..]) |a| {
+        if (std.mem.eql(u8, a, "probe")) continue;
+        lba = std.fmt.parseInt(u32, a, 0) catch lba;
+    }
+    const info = usb_msc.probe(lba);
+    if (!info.present) {
+        m.console.puts("usb msc: no bulk-capable device\n");
+        return .none;
+    }
+    m.console.puts("usb msc: dev slot=");
+    m.console.print_u64(info.slot);
+    m.console.puts(" tur_status=");
+    m.console.print_u64(info.tur.status);
+    m.console.puts(" tur_ok=");
+    m.console.print_u64(if (info.tur.ok) 1 else 0);
+    m.console.puts(" tur_stage=");
+    m.console.puts(botStageName(info.tur.stage));
+    m.console.puts("\n");
+    m.console.puts("usb msc: inquiry ok=");
+    m.console.print_u64(if (info.inquiry_ok) 1 else 0);
+    m.console.puts(" vendor=");
+    m.console.puts(&info.inquiry.vendor);
+    m.console.puts(" product=");
+    m.console.puts(&info.inquiry.product);
+    m.console.puts(" rev=");
+    m.console.puts(&info.inquiry.rev);
+    m.console.puts("\n");
+    m.console.puts("usb msc: capacity ok=");
+    m.console.print_u64(if (info.capacity_ok) 1 else 0);
+    m.console.puts(" last_lba=");
+    m.console.print_u64(info.capacity.last_lba);
+    m.console.puts(" block_len=");
+    m.console.print_u64(info.capacity.block_len);
+    m.console.puts("\n");
+    m.console.puts("usb msc: rw lba=");
+    m.console.print_u64(info.rw_lba);
+    m.console.puts(" byte=");
+    m.console.print_hex_min(info.rw_byte);
+    m.console.puts(" write_ok=");
+    m.console.print_u64(if (info.rw_write.ok) 1 else 0);
+    m.console.puts(" read_ok=");
+    m.console.print_u64(if (info.rw_read.ok) 1 else 0);
+    m.console.puts(" diff=");
+    m.console.print_u64(info.rw_diff);
+    m.console.puts(" ok=");
+    m.console.print_u64(if (info.rw_ok) 1 else 0);
+    m.console.puts(" write_stage=");
+    m.console.puts(botStageName(info.rw_write.stage));
+    m.console.puts(" read_stage=");
+    m.console.puts(botStageName(info.rw_read.stage));
+    m.console.puts("\n");
+    return .none;
+}
+
+fn botStageName(s: usb_msc.Stage) []const u8 {
+    return switch (s) {
+        .none => "none",
+        .cbw => "cbw",
+        .data => "data",
+        .csw => "csw",
+        .csw_signature => "csw_sig",
+        .csw_tag => "csw_tag",
+    };
 }
 
 fn cmd_repeat(m: *Monitor, args: []const []const u8) ExecError {
