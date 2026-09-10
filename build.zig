@@ -621,6 +621,30 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_dir.step);
 
     // ------------------------------------------------------------------
+    // Guest: M43 U3 EL0 consumer (issue #1034 — claim #1048) BLKD.BIN.
+    // Reads the raw USB mass-storage disk through the file-table `.usb`
+    // volume (slots 23/24/26) and prints the host-staged marker bytes.
+    // ------------------------------------------------------------------
+    const blkd_prog = b.addExecutable(.{
+        .name = "user-blkd",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/blkd.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    blkd_prog.linker_script = b.path("user/linker.ld");
+    const blkd_step = b.step("blkd", "Build the M43 U3 block-device consumer (zig-out/bin/BLKD.BIN)");
+    const blkd_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    blkd_elf2bin.addFileArg(blkd_prog.getEmittedBin());
+    const blkd_bin = blkd_elf2bin.addOutputFileArg("BLKD.BIN");
+    blkd_elf2bin.has_side_effects = true;
+    blkd_elf2bin.stdio = .inherit;
+    blkd_step.dependOn(&blkd_elf2bin.step);
+    const install_blkd = b.addInstallFileWithDir(blkd_bin, .bin, "BLKD.BIN");
+    b.getInstallStep().dependOn(&install_blkd.step);
+
+    // ------------------------------------------------------------------
     // Guest: fourteenth ESP user program (milestone eleven, card A2 — claim 8401)
     // CALC.BIN. Interactive graphical calculator with 64-bit engine.
     // DSK3 segmented (writable .data/.bss — the WMS9 fill-batcher global needs

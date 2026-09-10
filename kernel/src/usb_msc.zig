@@ -267,6 +267,38 @@ pub fn probe(lba: u32) Info {
     return info;
 }
 
+// --- The consumer seam: block access used by the file table (U3) -----------
+
+/// True when a bulk-capable device (the emulated MSC) is enumerated.
+pub fn present() bool {
+    return xhci.usb_bulk_dev() != 0;
+}
+
+/// Query READ CAPACITY(10) on the first bulk device. Returns null when no
+/// device is present or the command fails. A fresh BOT round trip per call —
+/// open is infrequent, and a removable device's geometry is not cached.
+pub fn capacity() ?Capacity {
+    const slot = xhci.usb_bulk_dev();
+    if (slot == 0) return null;
+    var cbuf: [8]u8 = [_]u8{0} ** 8;
+    const cap = cdbReadCapacity10();
+    const cr = transfer(slot, &cap, true, cbuf[0..8], 8);
+    if (!cr.ok) return null;
+    const got: usize = 8 - @min(cr.residue, 8);
+    if (got < 8) return null;
+    return parseCapacity(cbuf[0..got]);
+}
+
+/// Read one 512-byte logical sector at `lba` into `buf` (must hold
+/// `block_len` bytes). The U3 consumer's primitive.
+pub fn read_sector(lba: u32, buf: []u8) BotResult {
+    if (buf.len < block_len) return .{ .stage = .data, .cc = 0 };
+    const slot = xhci.usb_bulk_dev();
+    if (slot == 0) return .{ .stage = .cbw, .cc = 0 };
+    const cdb = cdbRead10(lba, 1);
+    return transfer(slot, &cdb, true, buf[0..block_len], @intCast(block_len));
+}
+
 // --- Host tests (pure encode/decode; no hardware) --------------------------
 
 test "usb_msc: CBW encodes signature/tag/len/dir/lun/cdb" {
