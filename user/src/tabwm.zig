@@ -171,6 +171,42 @@ pub const max_tabs: usize = 16;
 pub const present_every: u32 = 2;
 
 // ---------------------------------------------------------------------------
+// Tab-list geometry (the ONE rule draw and hit-test both read)
+// ---------------------------------------------------------------------------
+// Pre-fix, the renderer stopped drawing rows at the y=650 list bound while
+// the pointer hit-test mapped ANY py < 650 to a row index, so with more
+// than ~15 tabs a click could activate a tab that was never drawn. These
+// helpers are the shared source of truth: the render loop, the hit-test,
+// and the "+ New tab" placement all derive from the same functions.
+pub const tab_list_top: u32 = 58;
+pub const tab_list_bottom: u32 = 650;
+pub const tab_pill_x: u32 = 8;
+pub const tab_pill_w: u32 = 164;
+
+/// The y of tab row `i` (the top of its 38px band).
+pub fn tab_row_y(i: usize) u32 {
+    return tab_list_top + @as(u32, @intCast(i)) * tab_row_h;
+}
+
+/// True when row `i`'s band fits strictly above the list bound (the same
+/// rule the renderer breaks on). Rows are contiguous, so `!row_fits(i)`
+/// means every later row also fails.
+pub fn tab_row_fits(i: usize) bool {
+    return tab_row_y(i) + tab_row_h < tab_list_bottom;
+}
+
+/// The row index under `py`, or null when `py` is outside the band, past
+/// the last row that FITS, or beyond the current tab count. The single
+/// gate the pointer handler uses — a click can only ever reach a drawn tab.
+pub fn tab_index_at(py: u32) ?usize {
+    if (py < tab_list_top or py >= tab_list_bottom) return null;
+    const idx = (py - tab_list_top) / tab_row_h;
+    if (idx >= manager.tab_count) return null;
+    if (!tab_row_fits(idx)) return null;
+    return idx;
+}
+
+// ---------------------------------------------------------------------------
 // Syscall wrappers
 // ---------------------------------------------------------------------------
 fn syscall0(num: u64) i64 {
@@ -295,6 +331,15 @@ pub const TabManager = struct {
             if (self.tabs[i].valid and self.tabs[i].id == id) return i;
         }
         return null;
+    }
+
+    /// True when `id` is unknown AND the manager is full, i.e. an upsert
+    /// of `id` cannot land. `add_or_update_tab_geom` returns index 0 on
+    /// overflow, which is a VALID slot — so callers that accepted that 0
+    /// as success silently aliased a new window onto tab 0. The RPC
+    /// upsert paths use this predicate to REFUSE honestly instead.
+    pub fn at_capacity(self: *const TabManager, id: u32) bool {
+        return self.find_by_id(id) == null and self.tab_count >= max_tabs;
     }
 
     pub fn add_or_update_tab(self: *TabManager, id: u32, title: []const u8) usize {
@@ -438,8 +483,85 @@ pub fn close_flash_active(row: usize) bool {
 var ticks_count: u64 = 0;
 var present_count: u64 = 0;
 
-var clock_hours: u32 = 12;
+var clock_hours: u32 = 0;
 var clock_minutes: u32 = 0;
+var clock_seconds: u32 = 0;
+
+// ---------------------------------------------------------------------------
+// The real clock (#1055)
+// ---------------------------------------------------------------------------
+// TABWM has no RTC: VZ exposes none to the guest and the kernel has no
+// time-of-day source (its `timer.ticks` is seconds since the timer armed).
+// But the COMPOSITE_TICK cadence IS the core-0 timer at 1 Hz, so TABWM has
+// an accurate elapsed-seconds counter. To turn that into wall time, the
+// session launcher writes `.clock` into the host share — the host's LOCAL
+// time at boot as seconds since midnight. TABWM advances it with the tick.
+// Without the file (gate boots, or a share-less run) the clock honestly
+// falls back to session UPTIME from 00:00.
+pub const clock_epoch_file: []const u8 = ".clock";
+
+/// Parse a decimal seconds-since-midnight value (0..86399). Tolerates
+/// surrounding whitespace; rejects junk, an empty value, and anything at or
+/// past 24h. Pure — host-testable.
+pub fn parse_clock_epoch(text: []const u8) ?u32 {
+    var i: usize = 0;
+    while (i < text.len and is_clock_ws(text[i])) i += 1;
+    var val: u32 = 0;
+    var digits: usize = 0;
+    while (i < text.len and text[i] >= '0' and text[i] <= '9') : (i += 1) {
+        if (digits >= 6) return null; // more than 999999 is not a valid value
+        val = val * 10 + (text[i] - '0');
+        digits += 1;
+    }
+    if (digits == 0) return null;
+    while (i < text.len) : (i += 1) {
+        if (!is_clock_ws(text[i])) return null;
+    }
+    if (val >= 86400) return null;
+    return val;
+}
+
+fn is_clock_ws(c: u8) bool {
+    return c == ' ' or c == '\t' or c == '\n' or c == '\r';
+}
+
+/// A clock face.
+pub const Hms = struct { h: u32, m: u32, s: u32 };
+
+/// The face at `elapsed` seconds into the session. With an `epoch`
+/// (seconds since local midnight) it shows time-of-day, wrapping at 24h.
+/// Without one it shows uptime (hours keep counting past 24). Pure.
+pub fn clock_hms(elapsed: u64, epoch: ?u32) Hms {
+    var total: u64 = elapsed;
+    if (epoch) |e| total = (@as(u64, e) + elapsed) % 86400;
+    const h: u64 = if (epoch != null) (total / 3600) % 24 else total / 3600;
+    return .{
+        .h = @intCast(h),
+        .m = @intCast((total / 60) % 60),
+        .s = @intCast(total % 60),
+    };
+}
+
+/// The boot wall-time from the host share, or null (uptime fallback).
+pub var clock_epoch: ?u32 = null;
+
+/// Read + parse `.clock` from the host share once at startup. A no-op on
+/// the host and when the share/file is absent (the honest fallback).
+pub fn load_clock_epoch() void {
+    if (@import("builtin").os.tag != .freestanding) return;
+    var buf: [32]u8 = undefined;
+    const fd = ui.file_open(clock_epoch_file, ui.MODE_READ);
+    if (fd < 0) return;
+    defer ui.file_close(@intCast(fd));
+    const n = ui.file_read(@intCast(fd), &buf);
+    if (n <= 0) return;
+    clock_epoch = parse_clock_epoch(buf[0..@intCast(n)]);
+    if (clock_epoch) |e| {
+        var b: [48]u8 = undefined;
+        const msg = std.fmt.bufPrint(&b, "tabwm: clock epoch={d}\n", .{e}) catch "tabwm: clock epoch\n";
+        write_marker(msg);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Scanout Mapping via M33 Seam B
@@ -745,13 +867,13 @@ pub const new_tab_pill_h: u32 = 24;
 /// y=650 tab-list bound. With zero tabs it renders in the empty-state
 /// area — the affordance exists even when nothing is open.
 pub fn new_tab_pill_y() u32 {
-    const y: u32 = 58 + @as(u32, @intCast(manager.tab_count)) * tab_row_h + 4;
-    return @min(y, 650 - new_tab_pill_h);
+    const y: u32 = tab_row_y(manager.tab_count) + 4;
+    return @min(y, tab_list_bottom - new_tab_pill_h);
 }
 
-/// The "+ New tab" pill rect (the same 8..172 pill column as the tabs).
+/// The "+ New tab" pill rect (the same pill column as the tabs).
 pub fn new_tab_pill_rect() Rect {
-    return Rect.make(8, new_tab_pill_y(), 164, new_tab_pill_h);
+    return Rect.make(tab_pill_x, new_tab_pill_y(), tab_pill_w, new_tab_pill_h);
 }
 
 /// The affordance fired (pill click or Ctrl+T): emit the pinned
@@ -966,7 +1088,7 @@ pub fn draw_overlay(pixels: []u32) void {
     }
     // App rows
     var row: u32 = 0;
-    while (row < overlay_filtered_count and row < 17) : (row += 1) {
+    while (row < overlay_filtered_count and row < overlay_max_apps) : (row += 1) {
         const entry = overlay_filtered[row];
         const ry = py + 70 + row * overlay_row_h;
         const is_sel = (row == overlay_sel);
@@ -1089,10 +1211,10 @@ pub fn draw_sidebar(scan: [*]u32) void {
         ui.draw_text_sized(0, "to launch apps", 20, 126, ui.font_size_badge, ui.sidebar_text_inactive());
     } else {
         for (0..manager.tab_count) |i| {
-            const tab_y: u32 = 58 + @as(u32, @intCast(i)) * tab_row_h;
-            if (tab_y + tab_row_h >= 650) break;
+            if (!tab_row_fits(i)) break;
+            const tab_y: u32 = tab_row_y(i);
 
-            const pill_rect = Rect.make(8, tab_y + 2, 164, 34);
+            const pill_rect = Rect.make(tab_pill_x, tab_y + 2, tab_pill_w, 34);
             const is_active = (manager.active_idx != null and manager.active_idx.? == i);
             const is_hover = (hover_tab != null and hover_tab.? == i);
 
@@ -1135,8 +1257,8 @@ pub fn draw_sidebar(scan: [*]u32) void {
     // seam was refused and only a hide ran).
     if (close_flash_row) |frow| {
         if (close_flash_active(frow)) {
-            const fy: u32 = 58 + @as(u32, @intCast(frow)) * tab_row_h + 2;
-            ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(8, fy, 164, 34), 0, if (close_flash_closed) ui.theme_accent() else ui.sidebar_text_inactive());
+            const fy: u32 = tab_row_y(frow) + 2;
+            ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(tab_pill_x, fy, tab_pill_w, 34), 0, if (close_flash_closed) ui.theme_accent() else ui.sidebar_text_inactive());
         }
     }
 
@@ -1154,8 +1276,8 @@ pub fn draw_sidebar(scan: [*]u32) void {
     }
 
     // Clock text "12:00"
-    var clock_buf: [8]u8 = undefined;
-    const clock_str = std.fmt.bufPrint(&clock_buf, "{d:0>2}:{d:0>2}", .{ clock_hours, clock_minutes }) catch "12:00";
+    var clock_buf: [12]u8 = undefined;
+    const clock_str = std.fmt.bufPrint(&clock_buf, "{d:0>2}:{d:0>2}:{d:0>2}", .{ clock_hours, clock_minutes, clock_seconds }) catch "00:00:00";
     ui.draw_text_sized(0, clock_str, 16, 678, ui.font_size_clock, ui.sidebar_text_active());
 
     // Theme toggle pill [D] / [L]
@@ -1344,20 +1466,17 @@ pub fn handle_pointer(px: u32, py: u32, clicked: bool) void {
     hover_new_tab = (px >= 8 and px < 172 and py >= new_tab_pill_y() and py < new_tab_pill_y() + new_tab_pill_h);
     if (hover_new_tab) {
         if (clicked) trigger_new_tab(); // emits `tabwm: new-tab` + god-menu summon
-    } else if (py >= 58 and py < 650) {
-        const idx = (py - 58) / tab_row_h;
-        if (idx < manager.tab_count) {
-            hover_tab = idx;
-            if (clicked) {
-                // Check if clicked close box 'x' at x = 148..168
-                // (M42 UX r2: the close DECISION routes through
-                // request_close_tab — a dirty tab opens the dialog
-                // instead of closing).
-                if (px >= 148 and px < 168) {
-                    request_close_tab(idx);
-                } else {
-                    activate_tab(idx);
-                }
+    } else if (tab_index_at(py)) |idx| {
+        hover_tab = idx;
+        if (clicked) {
+            // Check if clicked close box 'x' at x = 148..168
+            // (M42 UX r2: the close DECISION routes through
+            // request_close_tab — a dirty tab opens the dialog
+            // instead of closing).
+            if (px >= 148 and px < 168) {
+                request_close_tab(idx);
+            } else {
+                activate_tab(idx);
             }
         }
     }
@@ -1490,6 +1609,7 @@ pub fn wnd_mail_apply(req: *const ui.WmRpc) bool {
                 }
             }
             if (label_slice.len > 0) {
+                if (manager.at_capacity(req.id)) return false;
                 _ = manager.add_or_update_tab(req.id, label_slice);
                 return true;
             }
@@ -1512,6 +1632,9 @@ pub fn wnd_mail_apply(req: *const ui.WmRpc) bool {
             if (manager.find_by_id(req.id)) |found| {
                 idx = found;
             } else {
+                // A full manager cannot accept the new window: refuse
+                // honestly (applied=0) rather than aliasing it onto tab 0.
+                if (manager.at_capacity(req.id)) return false;
                 idx = manager.add_or_update_tab(req.id, if (label_slice.len > 0) label_slice else "App");
             }
             manager.tabs[idx].tab_aware = true;
@@ -1581,6 +1704,10 @@ fn main() noreturn {
     // M42 SX5: load the APPS.TXT catalog for the god-menu overlay
     _ = overlay_load_manifest();
 
+    // #1055: the real clock — read the session's boot wall-time (local
+    // seconds since midnight) from the host share, if present.
+    load_clock_epoch();
+
     var ev: Event = undefined;
 
     while (true) {
@@ -1604,9 +1731,12 @@ fn main() noreturn {
                     if (close_flash_ticks == 0) close_flash_row = null;
                 }
 
-                // Update clock
-                clock_minutes = @intCast((ticks_count / 60) % 60);
-                clock_hours = @intCast(12 + (ticks_count / 3600) % 12);
+                // Update the real clock (host wall-time epoch + 1 Hz session
+                // elapsed; session uptime when no `.clock` was present).
+                const hms = clock_hms(ticks_count, clock_epoch);
+                clock_hours = hms.h;
+                clock_minutes = hms.m;
+                clock_seconds = hms.s;
 
                 // Render Left Sidebar directly to scanout
                 if (scanout_ptr) |scan| {
@@ -2604,4 +2734,129 @@ test "tabwm: unsaved + alt-tab markers are pinned (M42 UX r2)" {
     try std.testing.expectEqualStrings("tabwm: unsaved-discard\n", unsaved_discard_marker);
     try std.testing.expectEqualStrings("tabwm: unsaved-cancel\n", unsaved_cancel_marker);
     try std.testing.expectEqualStrings("tabwm: alt-tab id=", alt_tab_marker);
+}
+
+// ---------------------------------------------------------------------------
+// Unit Tests (front-door hardening — shared row geometry + capacity refusal)
+// ---------------------------------------------------------------------------
+
+test "tabwm: tab_index_at only reaches DRAWN rows (the shared row rule)" {
+    // Row geometry is one rule the renderer and the hit-test both read.
+    try std.testing.expectEqual(@as(u32, 58), tab_row_y(0));
+    try std.testing.expectEqual(@as(u32, 96), tab_row_y(1));
+    try std.testing.expectEqual(Rect.make(tab_pill_x, tab_row_y(0) + 2, tab_pill_w, 34), Rect.make(8, 60, 164, 34));
+
+    // The first row whose band spills past the list bound is not hittable.
+    var first_unfit: usize = 0;
+    while (tab_row_fits(first_unfit)) : (first_unfit += 1) {}
+    try std.testing.expect(!tab_row_fits(first_unfit));
+    try std.testing.expect(tab_row_fits(first_unfit - 1));
+
+    // Fill the manager to the cap: row `first_unfit` exists (idx < count)
+    // but was never drawn — the pre-fix handler still activated it.
+    manager = TabManager.init();
+    overlay_open = false;
+    var id: u32 = 2;
+    while (id < 2 + max_tabs) : (id += 1) {
+        _ = manager.add_or_update_tab(id, "Filler");
+    }
+    try std.testing.expectEqual(max_tabs, manager.tab_count);
+    const y_unfit = tab_row_y(first_unfit) + 4;
+    try std.testing.expect(y_unfit < tab_list_bottom);
+    try std.testing.expectEqual(@as(?usize, null), tab_index_at(y_unfit));
+
+    // The pointer path must not select it. px=176 sits inside the sidebar
+    // but right of the "+ New tab" pill column, so only the row rule decides.
+    try std.testing.expect(manager.activate_tab(3));
+    handle_pointer(176, y_unfit, true);
+    try std.testing.expectEqual(@as(?usize, 3), manager.active_idx);
+    try std.testing.expectEqual(@as(?usize, null), hover_tab);
+
+    // A DRAWN row still resolves and activates.
+    try std.testing.expectEqual(@as(?usize, 0), tab_index_at(tab_row_y(0) + 4));
+    handle_pointer(50, tab_row_y(0) + 4, true);
+    try std.testing.expectEqual(@as(?usize, 0), manager.active_idx);
+}
+
+test "tabwm: RPC upserts refuse a full manager instead of aliasing tab 0" {
+    manager = TabManager.init();
+    var id: u32 = 2;
+    while (id < 2 + max_tabs) : (id += 1) {
+        _ = manager.add_or_update_tab(id, "Filler");
+    }
+    try std.testing.expectEqual(max_tabs, manager.tab_count);
+    const overflow_id: u32 = 99;
+    try std.testing.expect(manager.at_capacity(overflow_id));
+    // A KNOWN id is never at capacity (it upserts in place).
+    try std.testing.expect(!manager.at_capacity(2));
+
+    // config/register RPC for an unknown id is REFUSED (was: silently
+    // aliased onto tab 0 — tab 0's own id/title clobbered).
+    var req = ui.WmRpc{
+        .kind = ui.wm_rpc_kind_config,
+        .id = overflow_id,
+        .seq = 1,
+        .reply_to = 5,
+        .applied = 0,
+        .pad = 0,
+        .x = 0,
+        .y = 0,
+        .w = 0,
+        .h = 0,
+        .title = [_]u8{0} ** ui.wm_rpc_title_max,
+    };
+    @memcpy(req.title[0..8], "Overflow");
+    try std.testing.expect(!wnd_mail_apply(&req));
+    try std.testing.expectEqual(max_tabs, manager.tab_count);
+    try std.testing.expect(manager.find_by_id(overflow_id) == null);
+    try std.testing.expectEqual(@as(u32, 2), manager.tabs[0].id);
+    try std.testing.expectEqualStrings("Filler", manager.tabs[0].get_title());
+
+    // declare_fullscreen for an unknown id is refused too.
+    req.kind = ui.wm_rpc_kind_declare_fullscreen;
+    @memcpy(req.title[0..6], "NewWin");
+    try std.testing.expect(!wnd_mail_apply(&req));
+    try std.testing.expectEqual(max_tabs, manager.tab_count);
+    try std.testing.expect(!manager.tabs[0].tab_aware);
+
+    // A known id still upserts in place at the cap.
+    req.id = 2;
+    req.kind = ui.wm_rpc_kind_config;
+    req.title = [_]u8{0} ** ui.wm_rpc_title_max;
+    @memcpy(req.title[0..7], "Renamed");
+    try std.testing.expect(wnd_mail_apply(&req));
+    try std.testing.expectEqualStrings("Renamed", manager.tabs[0].get_title());
+}
+
+// ---------------------------------------------------------------------------
+// Unit Tests (#1055 — the real clock)
+// ---------------------------------------------------------------------------
+
+test "tabwm: parse_clock_epoch accepts seconds-since-midnight, rejects junk" {
+    try std.testing.expectEqual(@as(?u32, 0), parse_clock_epoch("0"));
+    try std.testing.expectEqual(@as(?u32, 3661), parse_clock_epoch("3661"));
+    try std.testing.expectEqual(@as(?u32, 86399), parse_clock_epoch(" 86399\n"));
+    try std.testing.expectEqual(@as(?u32, 59), parse_clock_epoch("59\r\n"));
+    // 24h or more is not a time of day.
+    try std.testing.expectEqual(@as(?u32, null), parse_clock_epoch("86400"));
+    try std.testing.expectEqual(@as(?u32, null), parse_clock_epoch("999999"));
+    // Empty / junk / trailing junk / too many digits.
+    try std.testing.expectEqual(@as(?u32, null), parse_clock_epoch(""));
+    try std.testing.expectEqual(@as(?u32, null), parse_clock_epoch("abc"));
+    try std.testing.expectEqual(@as(?u32, null), parse_clock_epoch("12x"));
+    try std.testing.expectEqual(@as(?u32, null), parse_clock_epoch("1234567"));
+}
+
+test "tabwm: clock_hms shows wall time with an epoch, uptime without" {
+    // No epoch: honest uptime from 00:00:00; hours do not wrap at 24.
+    try std.testing.expectEqual(Hms{ .h = 0, .m = 0, .s = 0 }, clock_hms(0, null));
+    try std.testing.expectEqual(Hms{ .h = 1, .m = 1, .s = 1 }, clock_hms(3661, null));
+    try std.testing.expectEqual(Hms{ .h = 25, .m = 0, .s = 0 }, clock_hms(90000, null));
+
+    // With an epoch: time-of-day, wrapping at midnight.
+    try std.testing.expectEqual(Hms{ .h = 12, .m = 34, .s = 56 }, clock_hms(0, 12 * 3600 + 34 * 60 + 56));
+    // 23:59:50 + 20 s = 00:00:10 the next day.
+    try std.testing.expectEqual(Hms{ .h = 0, .m = 0, .s = 10 }, clock_hms(20, 23 * 3600 + 59 * 60 + 50));
+    // A full day later wraps to the same face.
+    try std.testing.expectEqual(Hms{ .h = 8, .m = 15, .s = 0 }, clock_hms(86400, 8 * 3600 + 15 * 60));
 }
