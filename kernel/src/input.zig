@@ -654,6 +654,12 @@ pub fn decode_pointer_report(rep: []const u8) void {
 /// The shell-idle-loop drain: poll each enumerated device's interrupt-IN
 /// endpoint for a completed report, decode it, and (for the keyboard) push
 /// the decoded bytes. No-op when unarmed (default VM / host tests).
+/// U4 (M43 card U4, issue #1035): the `!d.present` skip is the detach half
+/// of the lifecycle contract — a quiesced HID device contributes no reports,
+/// no FIFO bytes, and no pointer motion, while the surviving devices drain
+/// exactly as before. No new code: the guard predates lifecycle and already
+/// reads the registry every pass, so a mid-run detach takes effect on the
+/// next idle loop without disturbing armed state.
 pub fn drain() void {
     if (!armed_global) return;
     var i: usize = 0;

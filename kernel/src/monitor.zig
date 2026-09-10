@@ -371,7 +371,7 @@ pub fn ensure_registry() []const Command {
             .{ .name = "timer", .help = "interrupt controller + timer status", .usage = "timer", .category = .memory_state, .handler = cmd_timer },
             .{ .name = "tour", .help = "guided tour of the system for new users", .usage = "tour", .category = .machine_identity, .handler = cmd_welcome },
             .{ .name = "uaccess", .help = "user-memory copy diagnostics (valid, fault, recovery)", .usage = "uaccess", .category = .memory_state, .handler = cmd_uaccess },
-            .{ .name = "usb", .help = "XHCI host controller: `usb` transport report, `usb devices` enumerated devices, `usb report` last HID report, `usb bulk [probe ...]` bulk engine (U1), `usb msc [probe] [lba]` mass-storage BOT/SCSI probe (U2)", .usage = "usb [devices|report|bulk [probe ...]|msc [probe] [lba]]", .category = .graphics_input, .handler = cmd_usb },
+            .{ .name = "usb", .help = "XHCI host controller: `usb` transport report, `usb devices` enumerated devices, `usb report` last HID report, `usb bulk [probe ...]` bulk engine (U1), `usb msc [probe] [lba]` mass-storage BOT/SCSI probe (U2), `usb rescan` polled lifecycle rescan (U4), `usb detach [slot]` administrative detach (U4)", .usage = "usb [devices|report|bulk [probe ...]|msc [probe] [lba]|rescan|detach [slot]]", .category = .graphics_input, .handler = cmd_usb },
             .{ .name = "uname", .help = "compact system identity", .usage = "uname", .category = .machine_identity, .handler = cmd_uname },
             .{ .name = "version", .help = "display build information", .usage = "version", .category = .machine_identity, .handler = cmd_version },
             .{ .name = "vf", .dom = svclock.dom_bit(.file), .help = "host file channel (M34): 'vf ls/cat/mkdir/rm/mv <path>' read + mutate a macOS share over custom-virtio queue 5; 'vf open/close/write/truncate/fsync <h>' manage write handles (8-slot host cursor table)", .usage = "vf [ls [<path>]|cat <path>|mkdir <path>|rm <path>|mv <from> <to>|open <path> [append]|close <h>|write <h> <n>|truncate <h> <n>|fsync <h>]", .category = .storage, .max_args = 4, .handler = cmd_vf },
@@ -3128,6 +3128,8 @@ fn cmd_usb(m: *Monitor, args: []const []const u8) ExecError {
     if (args.len > 0 and std.mem.eql(u8, args[0], "report")) return cmd_usb_report(m, args);
     if (args.len > 0 and std.mem.eql(u8, args[0], "bulk")) return cmd_usb_bulk(m, args);
     if (args.len > 0 and std.mem.eql(u8, args[0], "msc")) return cmd_usb_msc(m, args);
+    if (args.len > 0 and std.mem.eql(u8, args[0], "rescan")) return cmd_usb_rescan(m);
+    if (args.len > 0 and std.mem.eql(u8, args[0], "detach")) return cmd_usb_detach(m, args);
     if (!xhci.xhci_ready) {
         m.console.puts("usb: no XHCI device (");
         m.console.puts(if (xhci.xhci_fail.len > 0) xhci.xhci_fail else "DID 0x1a06 not found on bus 0");
@@ -3498,6 +3500,81 @@ fn botStageName(s: usb_msc.Stage) []const u8 {
         .csw_signature => "csw_sig",
         .csw_tag => "csw_tag",
     };
+}
+
+/// `usb rescan` — the U4 (M43 card U4) polled lifecycle rescan: diff PORTSC
+/// CCS against the registry, enumerate arrivals with the boot path, quiesce
+/// removals, reattach quiesced entries whose port still reports connected.
+/// One observability row; the arrival path touches hardware like boot does.
+fn cmd_usb_rescan(m: *Monitor) ExecError {
+    if (!xhci.xhci_ready) {
+        m.console.puts("usb rescan: no XHCI device\n");
+        return .none;
+    }
+    const r = xhci.xhci_rescan();
+    m.console.puts("usb rescan: added=");
+    m.console.print_u64(r.added);
+    m.console.puts(" removed=");
+    m.console.print_u64(r.removed);
+    m.console.puts(" reattached=");
+    m.console.print_u64(r.reattached);
+    m.console.puts(" count=");
+    m.console.print_u64(r.count);
+    m.console.puts(" rescans=");
+    m.console.print_u64(xhci.rescan_count);
+    m.console.puts("\n");
+    return .none;
+}
+
+/// `usb detach [slot]` — the U4 administrative detach: quiesce the device so
+/// every consumer fails cleanly (bulk refuses, BOT fails stage=cbw, `.usb`
+/// is ENOENT, HID drain skips) instead of ghosting. No argument detaches the
+/// bulk device (the lifecycle spec's subject); a numeric argument names the
+/// slot. The HC slot, contexts, and rings stay allocated — a later `usb
+/// rescan` with the port still connected reattaches the same entry.
+fn cmd_usb_detach(m: *Monitor, args: []const []const u8) ExecError {
+    if (!xhci.xhci_ready) {
+        m.console.puts("usb detach: no XHCI device\n");
+        return .none;
+    }
+    if (args.len > 1) {
+        const slot: u8 = std.fmt.parseInt(u8, args[1], 0) catch {
+            m.console.puts("usb detach: usage: usb detach [slot]\n");
+            return .none;
+        };
+        if (slot == 0 or slot > xhci.EnumMax) {
+            m.console.puts("usb detach: slot=");
+            m.console.print_u64(slot);
+            m.console.puts(" not present\n");
+            return .none;
+        }
+        const idx: usize = slot - 1;
+        const port = xhci.enum_devs[idx].port;
+        if (!xhci.xhci_detach_slot(slot)) {
+            m.console.puts("usb detach: slot=");
+            m.console.print_u64(slot);
+            m.console.puts(" not present\n");
+            return .none;
+        }
+        m.console.puts("usb detach: slot=");
+        m.console.print_u64(slot);
+        m.console.puts(" port=");
+        m.console.print_u64(port);
+        m.console.puts(" ok=1\n");
+        return .none;
+    }
+    const slot = xhci.xhci_detach_bulk();
+    if (slot == 0) {
+        m.console.puts("usb detach: no bulk-capable device\n");
+        return .none;
+    }
+    const port = xhci.enum_devs[slot - 1].port;
+    m.console.puts("usb detach: slot=");
+    m.console.print_u64(slot);
+    m.console.puts(" port=");
+    m.console.print_u64(port);
+    m.console.puts(" ok=1\n");
+    return .none;
 }
 
 fn cmd_repeat(m: *Monitor, args: []const []const u8) ExecError {
