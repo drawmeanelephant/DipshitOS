@@ -28,7 +28,29 @@ absolute-relocation pass landed 2026-09-10** (claim #1042, **ADR 0019**):
 the kernel image is now **KRN2**, carrying a 114-entry absolute-relocation
 table (`elf2bin --relocs` + `lld --emit-relocs`) that `BOOTAA64.EFI`
 applies before the jump. `live-usb-bulk` 2/2 and `live-args` 1/1 green.
-U2–U5 are open.
+
+**U2 landed 2026-09-10** (claim #1044, issue #1033): BOT + minimal SCSI
+(`kernel/src/usb_msc.zig`, `usb msc probe`) — TUR passes, INQUIRY
+`Apple`/`Virtual Disk`, capacity last_lba=16383/block_len=512, 512-byte
+sector write/read-back byte-exact (`live-usb-msc` 1/1).
+
+**U5 recorded negative 2026-09-10** (claim #1046, issue #1036):
+Virtualization.framework exposes no USB serial/CDC-ACM device class, so
+the card closed per its own acceptance clause with an `[observed]`
+contract row — and the U6 `--usb-serial` flag died with it (the runner
+flag surface stays `--usb-msd` only).
+
+**U3 landed 2026-09-10** (claim #1048, issue #1034): the file-table `.usb`
+read-only raw-block volume + the EL0 `BLKD.BIN` consumer
+(`live-usb-block` 1/1, host-staged LBA-1 marker byte-exact).
+
+**U4 landed 2026-09-10** (claim #1051, issue #1035, PR #1052): polled
+`usb rescan` + administrative `usb detach` with the clean error path
+(`live-usb-lifecycle` 2/2; zero-regression across the whole USB fleet).
+
+**M43 is done 2026-09-10** (closeout claim #1053): all six cards closed,
+the USB fleet re-verified 7/7 at HEAD, umbrella #1031 closed, GH
+milestone 30 closed.
 
 What exists today (the honest starting line):
 
@@ -63,7 +85,7 @@ spec (the M40 GF rule) and `[observed]` hardware-contract rows.
 
 | Card | Issue | Phase | Depends on | Status | Touches | Notes |
 |:-----|:------|:------|:-----------|:-------|:--------|:------|
-| **U6** | [#1037](https://github.com/drawmeanelephant/DipshitOS/issues/1037) **Runner `--usb-msd` / `--usb-serial` flags** | host | — | 🟡 `--usb-msd` landed (U1's PR); `--usb-serial` pending U5 | `host/vm-runner/Sources/VMRunner/main.swift` | `--usb-msd` landed: `VZUSBMassStorageDeviceConfiguration(attachment:)` inside `VZXHCIControllerConfiguration.usbDevices` on `config.usbControllers` (macOS 15+ API). Flag-gated, OFF by default — the default VM byte-identical (the M9/N7 rule). [observed]: the MSD gets its OWN controller; VZ's sniffer needs parseable disk structure. |
+| **U6** | [#1037](https://github.com/drawmeanelephant/DipshitOS/issues/1037) **Runner `--usb-msd` / `--usb-serial` flags** | host | — | 🟢 `--usb-msd` landed (U1's PR); `--usb-serial` will never land — U5 closed negative (no CDC-ACM class exists), so the flag surface stays `--usb-msd` only | `host/vm-runner/Sources/VMRunner/main.swift` | `--usb-msd` landed: `VZUSBMassStorageDeviceConfiguration(attachment:)` inside `VZXHCIControllerConfiguration.usbDevices` on `config.usbControllers` (macOS 15+ API). Flag-gated, OFF by default — the default VM byte-identical (the M9/N7 rule). [observed]: the MSD gets its OWN controller; VZ's sniffer needs parseable disk structure. |
 | **U1** | [#1032](https://github.com/drawmeanelephant/DipshitOS/issues/1032) **XHCI bulk transfer engine** | kernel | U6 (evidence) | 🟢 landed (U1+U6 PR) | `kernel/src/xhci.zig`, `kernel/src/input.zig`, one spec | Bulk endpoint capture at enumeration (EP2 OUT + EP1 IN on the VZ MSC, maxpkt 1024), per-slot bulk rings, doorbells by honest DCI (2×EP+dir), Configure Endpoint with Context Entries=max, one-transfer-at-a-time per direction. Proven by `live-usb-bulk` 2/2: raw probe gets real device completions (cc=6 Stall on non-CBW traffic — the wire's honest answer). Zero HID regression: run 02. [observed, debugging]: a 4-case switch over field addresses made LLVM emit an UNRELOCATED base-0 pointer table — computed `@ptrFromInt(base + @offsetOf)` instead; see the code comment in `xhci_configure_endpoint`. The **kernel-wide** hazard this exposed is fixed by **#1042 / ADR 0019** (KRN2 loader relocation table; 114 absolute slots relocated at load). |
 | **U2** | [#1033](https://github.com/drawmeanelephant/DipshitOS/issues/1033) **USB MSC probe: BOT + minimal SCSI** | kernel | U1 | 🟢 landed (claim #1044) | `kernel/src/usb_msc.zig`, `kernel/src/xhci.zig`, `kernel/src/monitor.zig`, `tools/gate/specs/live-usb-msc.spec` | Bulk-Only Transport (CBW → data → CSW) + TEST UNIT READY / INQUIRY / READ CAPACITY(10) / READ(10) / WRITE(10), behind `usb msc probe [lba]`. `live-usb-msc` 1/1: TUR passes, INQUIRY `Apple`/`Virtual Disk` rev `1`, capacity **last_lba=16383 / block_len=512** (one LUN), **512-byte sector write/read-back byte-exact (diff=0) — WRITE(10) accepted**. `bulk_buf_len` 128→512 so one sector rides one U1 transfer. Host tests for CBW/CSW/CDB/parsers; `[observed]` contract rows added. `live-usb-bulk` 2/2 zero-regression. |
 | **U3** | [#1034](https://github.com/drawmeanelephant/DipshitOS/issues/1034) **Block-device userland seam + a real consumer** | kernel+user | U2 | 🟢 landed (claim #1048) | `kernel/src/file_table.zig`, `kernel/src/usb_msc.zig`, `user/src/blkd.zig`, one spec | Consumer chosen by U2's evidence: **(b) raw-block** — the guest has had no FAT stack since M34, and the bounded first consumer is a read-only seam. `file_table` gains the `.usb` volume (`usb`/`/usb`/`usb:`, READ-ONLY, EINVAL on write, ENOENT without a device); reads are sequential 512-byte SCSI sectors from `usb_msc` at the handle cursor. EL0 consumer `BLKD.BIN` opens `usb`, reads 1024 B (LBA 0+1), and prints the host-staged LBA-1 marker. `live-usb-block` 1/1: `blkd: pattern=M43USBMSDPROBE` byte-exact. Host tests: routing + read-only refusal + ENOENT. |
@@ -124,6 +146,11 @@ spec (the M40 GF rule) and `[observed]` hardware-contract rows.
    (claim #1048): **(b) raw-block**, a read-only `.usb` file-table volume +
    the EL0 `BLKD.BIN` consumer; `live-usb-block` 1/1 reads the host-staged
    marker byte-exact. FAT revival stays out until a card needs it.
-5. **U4** (device lifecycle) is the last open card: rescan/attach/detach
-   with the honest error path. — **done 2026-09-10** (claim #1051):
-   `live-usb-lifecycle` 2/2; all cards except the negative U5 now landed.
+5. ~~**U4** (device lifecycle): rescan/attach/detach with the honest error
+   path~~ — **done 2026-09-10** (claim #1051, PR #1052):
+   `live-usb-lifecycle` 2/2; polled rescan + administrative detach, HID
+   zero-regression.
+6. ~~Closeout~~ — **done 2026-09-10** (claim #1053): USB fleet re-verified
+   7/7 at HEAD (`live-usb` 1/1, `live-usb-bulk` 2/2, `live-usb-msc` 1/1,
+   `live-usb-block` 1/1, `live-usb-lifecycle` 2/2); umbrella #1031 closed;
+   GH milestone 30 closed. M43 is done.
