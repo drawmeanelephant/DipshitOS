@@ -25,6 +25,10 @@ const process = @import("process.zig");
 // cursor), writes ride the host's handle-table cursor (vf OPEN/WRITE/
 // TRUNCATE/CLOSE).
 const virtio_file = @import("virtio_file.zig");
+// M43 U3 (issue #1034): the `.usb` partition is the raw USB mass-storage
+// disk behind the U2 BOT/SCSI driver — a READ-ONLY block device for now
+// (the card's bounded first consumer).
+const usb_msc = @import("usb_msc.zig");
 
 pub const max_handles_per_process: usize = 8;
 pub const max_path_len: usize = 64;
@@ -47,15 +51,18 @@ pub const DirEntry = extern struct {
     reserved: [3]u8 = [_]u8{0} ** 3,
 };
 
-/// The single partition: the host share (`--cvc-file`), served by the
-/// queue-5 file channel. M34 HF6 (issue #740) deleted the ESP/DATA
-/// partitions — the enum is kept so `FileHandle`/`ParsedPath` keep their
-/// routed shape and the partition is explicit at every handle site.
+/// The file partitions. M34 HF6 (issue #740) deleted the ESP/DATA
+/// partitions; M43 U3 (issue #1034) adds `.usb`, the raw USB mass-storage
+/// disk behind the U2 BOT/SCSI driver (read-only).
 pub const Partition = enum {
     /// M34 HF4 (issue #738): the host share (`--cvc-file`), served by
     /// the queue-5 file channel. HF5 made it READ-WRITE; HF6 made it the
-    /// ONLY partition.
+    /// other partition.
     host,
+    /// M43 U3 (issue #1034): the USB mass-storage disk (`usb`, `/usb`,
+    /// `usb:`), a READ-ONLY raw block device. Reads are 512-byte SCSI
+    /// sectors through `usb_msc`; there is no directory or metadata layer.
+    usb,
 };
 
 pub const FileHandle = struct {
@@ -95,6 +102,10 @@ pub const ParsedPath = struct {
 
 var handles: [process.max_processes][max_handles_per_process]FileHandle = [_][max_handles_per_process]FileHandle{[_]FileHandle{.{}} ** max_handles_per_process} ** process.max_processes;
 var initialized = false;
+
+/// M43 U3: one sector scratch for `.usb` reads (BOT is one transfer at a
+/// time; a sub-sector read still pulls a whole 512-byte sector here).
+var usb_sector: [usb_msc.block_len]u8 align(64) = undefined;
 
 pub fn init() void {
     for (&handles) |*proc_handles| {
@@ -162,6 +173,16 @@ pub fn parse_path(raw: []const u8) ?ParsedPath {
         subpath = subpath[5..];
     } else if (subpath.len == 4 and std.ascii.eqlIgnoreCase(subpath[0..4], "host")) {
         partition = .host;
+        subpath = "";
+    } else if (subpath.len >= 4 and std.ascii.eqlIgnoreCase(subpath[0..4], "usb/")) {
+        // M43 U3 (issue #1034): the raw USB mass-storage block device.
+        partition = .usb;
+        subpath = subpath[4..];
+    } else if (subpath.len >= 4 and std.ascii.eqlIgnoreCase(subpath[0..4], "usb:")) {
+        partition = .usb;
+        subpath = subpath[4..];
+    } else if (subpath.len == 3 and std.ascii.eqlIgnoreCase(subpath[0..3], "usb")) {
+        partition = .usb;
         subpath = "";
     }
 
@@ -231,6 +252,29 @@ pub fn open(pid: u64, path_bytes: []const u8, flags: u32) i64 {
         }
     }
     const slot = free_slot orelse return -5; // ENOSPC (table full)
+
+    // M43 U3 (issue #1034): the `.usb` raw block device. READ-ONLY: any
+    // write-ish flag is EINVAL; no device or no capacity is ENOENT. The
+    // handle's size is the disk's byte length (clamped to the frozen u32
+    // ABI); reads are sequential 512-byte sectors at the cursor.
+    if (parsed.partition == .usb) {
+        if ((flags & (MODE_WRITE | MODE_CREATE | MODE_APPEND | MODE_DIR)) != 0) return -1;
+        const cap = usb_msc.capacity() orelse return -6;
+        if (cap.block_len != usb_msc.block_len) return -6; // only 512-B sectors
+        const sectors: u64 = @as(u64, cap.last_lba) + 1;
+        const bytes: u64 = sectors * cap.block_len;
+        handles[pid][slot] = .{
+            .in_use = true,
+            .partition = .usb,
+            .flags = flags,
+            .cursor = 0,
+            .size = @intCast(@min(bytes, std.math.maxInt(u32))),
+            .path = parsed.path,
+            .path_len = parsed.path_len,
+            .is_dir = false,
+        };
+        return @intCast(slot);
+    }
 
     if (!virtio_file.available()) return -6; // ENOENT (no host file channel)
 
@@ -319,6 +363,25 @@ pub fn read(pid: u64, fd: u64, out_buf: []u8) i64 {
 
     if (out_buf.len == 0) return 0;
     if (h.cursor >= h.size) return 0; // EOF
+
+    // M43 U3 (issue #1034): `.usb` reads are sequential 512-byte SCSI
+    // sectors at the byte cursor. A multi-sector request loops; a partial
+    // first/last sector is served from the sector scratch. A failed BOT
+    // transfer stops the read honestly (bytes so far, 0 on the first).
+    if (h.partition == .usb) {
+        var total: usize = 0;
+        while (total < out_buf.len and h.cursor < h.size) {
+            const lba: u32 = h.cursor / @as(u32, usb_msc.block_len);
+            const off: usize = h.cursor % usb_msc.block_len;
+            const r = usb_msc.read_sector(lba, &usb_sector);
+            if (!r.ok) break;
+            const n = @min(usb_msc.block_len - off, out_buf.len - total);
+            @memcpy(out_buf[total..][0..n], usb_sector[off..][0..n]);
+            total += n;
+            h.cursor += @intCast(n);
+        }
+        return @intCast(total);
+    }
 
     if (!virtio_file.available()) return -6;
 
@@ -508,11 +571,40 @@ test "file_table: path parsing and volume routing" {
     try std.testing.expectEqual(Partition.host, ph3.partition);
     try std.testing.expectEqual(ph3.path_len, 0);
 
+    // M43 U3 (issue #1034): `usb`, `/usb`, and `usb:` all route to the raw
+    // block device. `usbxyz` stays a host file (prefix match is boundary-
+    // delimited, like the host prefixes).
+    const pu1 = parse_path("usb").?;
+    try std.testing.expectEqual(Partition.usb, pu1.partition);
+    try std.testing.expectEqual(pu1.path_len, 0);
+    const pu2 = parse_path("/usb").?;
+    try std.testing.expectEqual(Partition.usb, pu2.partition);
+    const pu3 = parse_path("usb:").?;
+    try std.testing.expectEqual(Partition.usb, pu3.partition);
+    const pu4 = parse_path("USB/").?;
+    try std.testing.expectEqual(Partition.usb, pu4.partition);
+    const ph4 = parse_path("usbx.txt").?;
+    try std.testing.expectEqual(Partition.host, ph4.partition);
+
     // Traversal defense: rejection of '..'
     try std.testing.expect(parse_path("../secret.txt") == null);
     try std.testing.expect(parse_path("/host/../secret.txt") == null);
     try std.testing.expect(parse_path("dir/../../file") == null);
     try std.testing.expect(parse_path("..") == null);
+}
+
+test "file_table: the usb volume is read-only and absent without a device" {
+    init();
+    // Write-ish flags on `.usb` are refused (EINVAL) before any device
+    // probe, so this is deterministic on the host.
+    try std.testing.expectEqual(@as(i64, -1), open(0, "usb", MODE_WRITE));
+    try std.testing.expectEqual(@as(i64, -1), open(0, "usb", MODE_READ | MODE_CREATE));
+    try std.testing.expectEqual(@as(i64, -1), open(0, "usb", MODE_READ | MODE_DIR | MODE_WRITE | MODE_CREATE));
+    // A read-open with no MSC enumerated is an honest ENOENT (the host has
+    // no USB device table populated).
+    try std.testing.expectEqual(@as(i64, -6), open(0, "usb", MODE_READ));
+    // A host handle still opens exactly as before (regression guard).
+    try std.testing.expectEqual(@as(i64, -6), open(0, "hello.txt", MODE_READ)); // no host channel on the host
 }
 
 test "file_table: handle allocation, bounds, and lifecycle reset" {
