@@ -8,7 +8,7 @@
 //         [--timeout <s|0>] (0 = run until Ctrl-C) [--expect <line>] [--terminal-marker <line>]
 //         [--cpus <n>] (claim 907: VCPU count, default 2 — the four-core
 //          four-domain stress gate boots 4)
-//         [--console] [--debug-input] [--dump-marker <file>]
+//         [--console] [--console-tcp [host:]port] [--debug-input] [--dump-marker <file>]
 //         [--nvram-console <file>] [--script <file>]
 //         [--script-after <text>] [--script-expect <text>]
 //         [--script-expect-tail <s>] (claim 4912: hold the VM this long
@@ -340,6 +340,15 @@ var timeoutExplicit = false
 var expectLine = "firmware has agreed to cooperate"
 var terminalMarker: String?
 var consoleMode = false
+// #1066 Stage 0 (issue #1066): a host-side remote console. `--console-tcp
+// [host:]port` listens on host:port and bridges the socket to the SAME guest
+// serial console the `--console` plumbing uses (client bytes -> the serial
+// input attachment; guest output -> every connected client). It turns the
+// console session into something you can `nc localhost 2222` (or reach from
+// another machine with `0.0.0.0:<port>`). Plaintext, single client at a
+// time — the trusted-LAN MVP before any guest crypto/SSH.
+var consoleTCPPort: UInt16?
+var consoleTCPBind: String = "127.0.0.1"
 var debugInput = false
 var markerDumpPath: String?
 var nvramConsolePath: String?
@@ -649,6 +658,21 @@ while idx < arguments.count {
     } else if arg == "--console" {
         consoleMode = true
         idx += 1
+    } else if arg == "--console-tcp", idx + 1 < arguments.count {
+        // #1066 Stage 0: `[host:]port` — bind host (default 127.0.0.1) and
+        // serve the guest console over TCP. Implies console mode (duplex
+        // serial attachment + guest-output tee).
+        let spec = arguments[idx + 1]
+        if let colon = spec.lastIndex(of: ":") {
+            consoleTCPBind = String(spec[spec.startIndex..<colon])
+            consoleTCPPort = UInt16(spec[spec.index(after: colon)...])
+        } else {
+            consoleTCPPort = UInt16(spec)
+        }
+        guard consoleTCPPort != nil else { fail("--console-tcp: invalid port in '\(spec)' (want [host:]port)") }
+        if consoleTCPBind.isEmpty { consoleTCPBind = "127.0.0.1" }
+        consoleMode = true
+        idx += 2
     } else if arg == "--debug-input" {
         debugInput = true
         idx += 1
@@ -1501,6 +1525,9 @@ if consoleMode {
     print("  mode: interactive console")
     print("  serial log: \(serialLogPath)  (guest output teed to terminal + log)")
     print("  interactive input: enabled — stdin → serial attachment (fileHandleForReading non-nil)")
+    if let port = consoleTCPPort {
+        print("  console-tcp: \(consoleTCPBind):\(port) — remote console bridge (plaintext; #1066 Stage 0)")
+    }
     print("  NOTE: guest RX is the polled virtio receive queue (claim 6684) — host bytes reach the kernel via the serial attachment")
     print("  controls: Ctrl-C ends the session and restores the terminal; Backspace/Enter are forwarded raw (no host line editing)")
 } else if scriptMode {
@@ -2293,6 +2320,7 @@ func startGuestOutputTee() {
         func emit(_ n: Int) {
             let data = Data(bytes: buf, count: n)
             try? FileHandle.standardOutput.write(contentsOf: data)
+            consoleTCPEmit(data)
             do {
                 try serialLogHandle?.write(contentsOf: data)
             } catch {
@@ -2363,7 +2391,94 @@ func startStdinForwarding() {
 
 func startConsoleStreams() {
     startGuestOutputTee()
-    startStdinForwarding()
+    // The stdin forwarder CLOSES the shared serial-input pipe's write end on
+    // EOF, which would break a TCP client that connects later. When the TCP
+    // console bridge owns input, stdin forwarding stays off.
+    if consoleTCPPort == nil {
+        startStdinForwarding()
+    } else {
+        startTCPConsoleBridge(port: consoleTCPPort!, bindHost: consoleTCPBind)
+    }
+}
+
+// #1066 Stage 0 (issue #1066): the TCP console bridge. One client at a
+// time; the listen loop accepts a connection, forwards its bytes into the
+// guest serial input pipe, and re-accepts after the client leaves. Guest
+// output reaches every connected client through `consoleTCPEmit` (called
+// from the output tee).
+var tcpClientFD: Int32 = -1
+let tcpClientLock = NSLock()
+
+func consoleTCPEmit(_ data: Data) {
+    tcpClientLock.lock()
+    let fd = tcpClientFD
+    tcpClientLock.unlock()
+    guard fd >= 0 else { return }
+    data.withUnsafeBytes { raw in
+        guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return }
+        var off = 0
+        while off < data.count {
+            let w = write(fd, base + off, data.count - off)
+            if w <= 0 { break }
+            off += w
+        }
+    }
+}
+
+func startTCPConsoleBridge(port: UInt16, bindHost: String) {
+    let listenQueue = DispatchQueue(label: "virelaios.console-tcp")
+    listenQueue.async {
+        let s = socket(AF_INET, SOCK_STREAM, 0)
+        guard s >= 0 else {
+            FileHandle.standardError.write(Data("WARNING: --console-tcp: socket() failed (errno=\(errno))\n".utf8))
+            return
+        }
+        var reuse: Int32 = 1
+        _ = setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = port.bigEndian
+        if inet_pton(AF_INET, bindHost, &addr.sin_addr) != 1 {
+            addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        }
+        let bindRC = withUnsafePointer(to: &addr) { p in
+            p.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(s, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+        }
+        guard bindRC == 0 else {
+            FileHandle.standardError.write(Data("WARNING: --console-tcp: bind \(bindHost):\(port) failed (errno=\(errno))\n".utf8))
+            close(s)
+            return
+        }
+        guard listen(s, 1) == 0 else {
+            FileHandle.standardError.write(Data("WARNING: --console-tcp: listen failed (errno=\(errno))\n".utf8))
+            close(s)
+            return
+        }
+        print("  console-tcp: listening on \(bindHost):\(port) — connect with `nc \(bindHost) \(port)`")
+        FileHandle.standardOutput.synchronizeFile()
+        while true {
+            var caddr = sockaddr()
+            var clen = socklen_t(MemoryLayout<sockaddr>.size)
+            let c = accept(s, &caddr, &clen)
+            if c < 0 { if errno == EINTR { continue }; break }
+            tcpClientLock.lock(); tcpClientFD = c; tcpClientLock.unlock()
+            print("  console-tcp: client connected")
+            FileHandle.standardOutput.synchronizeFile()
+            var buf = [UInt8](repeating: 0, count: 1024)
+            while true {
+                var n: Int
+                repeat { n = read(c, &buf, buf.count) } while n < 0 && errno == EINTR
+                if n <= 0 { break }
+                let data = Data(bytes: buf, count: n)
+                do { try consoleInputPipe.fileHandleForWriting.write(contentsOf: data) } catch { break }
+            }
+            tcpClientLock.lock(); if tcpClientFD == c { tcpClientFD = -1 }; tcpClientLock.unlock()
+            close(c)
+            print("  console-tcp: client disconnected (still listening)")
+            FileHandle.standardOutput.synchronizeFile()
+        }
+        close(s)
+    }
 }
 
 // Claim 6684: scripted-input mode. Waits until the guest has reached the
