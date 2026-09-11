@@ -31,7 +31,7 @@
 | `tools/status/` | 6 | multiagent coordination gate + claim tooling (class A) |
 | `tools/context/` | 2 | context snapshot helpers |
 | `tools/ragshit/` | 84 | host-side context engine (developer tooling, not guest software) |
-| `tools/gate/` | 201 | M40 vgate harness + specs (GF2+) |
+| `tools/gate/` | 202 | M40 vgate harness + specs (GF2+) |
 
 ## Class-B fleet (discovered from the spec dir)
 
@@ -190,6 +190,7 @@ of them with `just verify-vz`.
 | spec | `live-tabstrip` | 1 run / 4 assert | live-tabstrip.spec -- M37 DQ2 tab-strip chrome (issue #840) |
 | spec | `live-tabwm` | 1 run / 12 assert | live-tabwm.spec -- M39 TWM3 (issue #930) class-B gate: the browser-style |
 | spec | `live-tabwm-alttab` | 1 run / 12 assert | live-tabwm-alttab.spec -- M42 UX hardening round 2 (2026-09-05, claim #1011, ADR 0018 addendum) |
+| spec | `live-tabwm-bt` | 1 run / 12 assert | live-tabwm-bt.spec -- M48 BT1-BT6 (umbrella #1120) class-B gate: the |
 | spec | `live-tabwm-close` | 1 run / 16 assert | live-tabwm-close.spec -- M42 UX hardening (2026-09-05, claim #1008 / ADR 0018 D2) |
 | spec | `live-tabwm-fullscreen` | 2 run / 25 assert | live-tabwm-fullscreen.spec -- M42 SX5 (issue #986) class-B gate: Sexiburger tabbed desktop as PRIMAR |
 | spec | `live-tabwm-unsaved` | 2 run / 16 assert | live-tabwm-unsaved.spec -- M42 UX hardening round 2 (2026-09-05, claim #1011, ADR 0018 addendum) |
