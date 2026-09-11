@@ -48,9 +48,57 @@
 //! surface.
 
 const std = @import("std");
+const builtin = @import("builtin");
 pub const ui = @import("ui.zig");
 const Rect = ui.Rect;
 const Event = ui.Event;
+
+// ---------------------------------------------------------------------------
+// M48/BT5: app-declared navigation (the browser-history analogue)
+// ---------------------------------------------------------------------------
+// The toolkit declares navigation events to the WM (a FILE.BIN directory
+// change, an EDIT.BIN file open) and polls for back/forward targets the user
+// picked on the rail. The WM_RPC kinds are additive app-side extensions: the
+// kernel routes WM_RPC frames to the registered WM seat without interpreting
+// `kind`, so these need no frozen-ABI change. The client lives HERE (not in
+// lib/ui/abi.zig) because it is only used by tab-aware apps.
+const wm_rpc_kind_nav_declare: u8 = 9;
+const wm_rpc_kind_nav_poll: u8 = 10;
+
+fn syscall0(num: u64) i64 {
+    if (builtin.os.tag != .freestanding) return 0;
+    var res: i64 = undefined;
+    asm volatile ("svc #0"
+        : [res] "={x0}" (res),
+        : [num] "{x8}" (num),
+        : .{ .memory = true });
+    return res;
+}
+
+fn syscall2(num: u64, a0: u64, a1: u64) i64 {
+    if (builtin.os.tag != .freestanding) return 0;
+    var res: i64 = undefined;
+    asm volatile ("svc #0"
+        : [res] "={x0}" (res),
+        : [num] "{x8}" (num),
+          [a0] "{x0}" (a0),
+          [a1] "{x1}" (a1),
+        : .{ .memory = true });
+    return res;
+}
+
+fn syscall3(num: u64, a0: u64, a1: u64, a2: u64) i64 {
+    if (builtin.os.tag != .freestanding) return 0;
+    var res: i64 = undefined;
+    asm volatile ("svc #0"
+        : [res] "={x0}" (res),
+        : [num] "{x8}" (num),
+          [a0] "{x0}" (a0),
+          [a1] "{x1}" (a1),
+          [a2] "{x2}" (a2),
+        : .{ .memory = true });
+    return res;
+}
 
 // ---------------------------------------------------------------------------
 // The app-facing type
@@ -79,6 +127,10 @@ pub const Action = enum {
 
 pub const TabApp = struct {
     win: u32 = 0,
+    /// This process's own executable name (for WM_RPC ack routing on the
+    /// M48/BT5 navigation channel). Copied from Config.name.
+    name: [24]u8 = [_]u8{0} ** 24,
+    name_len: usize = 0,
     /// CURRENT canvas size — starts at the open rect, follows every
     /// WIN_RESIZE (the WM's SET_WINDOW seam, SX2). Apps lay out against
     /// these, never against compile-time constants, once tab-aware.
@@ -102,6 +154,9 @@ pub const TabApp = struct {
             .h = cfg.h,
             .open_ok = true,
         };
+        const nlen = @min(cfg.name.len, self.name.len);
+        @memcpy(self.name[0..nlen], cfg.name[0..nlen]);
+        self.name_len = nlen;
         // The declaration is best-effort: TABWM accepts it (tab becomes
         // full-viewport eligible), WND/shim refuse it and the app keeps the
         // legacy fixed presentation. One blocking RPC at startup is fine.
@@ -136,6 +191,61 @@ pub const TabApp = struct {
     /// Present the current frame (the app draws first).
     pub fn present(self: *const TabApp) void {
         ui.win_present(self.win);
+    }
+
+    // -----------------------------------------------------------------------
+    // M48/BT5: app-declared navigation (FILE.BIN dirs, EDIT.BIN files)
+    // -----------------------------------------------------------------------
+
+    /// Tell the WM this tab navigated to `path` (a directory or file). The WM
+    /// records it in the tab's bounded history. Best-effort (no WM seat =
+    /// no-op). Call it when the app's "location" changes.
+    pub fn declare_nav(self: *const TabApp, path: []const u8) void {
+        if (self.name_len == 0 or path.len == 0) return;
+        _ = ui.wm_mail_request(wm_rpc_kind_nav_declare, self.win, 0, 0, 0, 0, path, self.name[0..self.name_len], 6);
+    }
+
+    /// Poll the WM for a back/forward target the user picked on the rail.
+    /// Returns the target path (copied into `buf`), or null when none is
+    /// queued. Call it on each loop iteration; when non-null, navigate the
+    /// app to that path. Best-effort (no WM seat = null).
+    pub fn poll_nav(self: *const TabApp, buf: []u8) ?[]const u8 {
+        if (self.name_len == 0) return null;
+        const peers = ui.wm_peers(self.name[0..self.name_len]);
+        if (peers.wm == 0 or peers.self == 0) return null;
+        var req: ui.WmRpc = .{
+            .kind = wm_rpc_kind_nav_poll,
+            .id = @intCast(self.win & 0xff),
+            .seq = 7,
+            .reply_to = @intCast(peers.self & 0xff),
+            .applied = 0,
+            .pad = 0,
+            .x = 0,
+            .y = 0,
+            .w = 0,
+            .h = 0,
+            .title = [_]u8{0} ** ui.wm_rpc_title_max,
+        };
+        const req_bytes = std.mem.asBytes(&req);
+        _ = syscall3(ui.sys_ipc_send_num, peers.wm, @intFromPtr(req_bytes.ptr), req_bytes.len);
+        var tries: u32 = 0;
+        while (tries < 2_000_000) : (tries += 1) {
+            var raw: [ui.wm_rpc_max]u8 = undefined;
+            const got = syscall2(ui.sys_ipc_recv_num, @intFromPtr(&raw), raw.len);
+            if (got >= @sizeOf(ui.WmRpc)) {
+                var rep: ui.WmRpc = undefined;
+                @memcpy(std.mem.asBytes(&rep), raw[0..@sizeOf(ui.WmRpc)]);
+                if (rep.kind & ui.wm_rpc_reply_flag != 0 and rep.seq == req.seq and rep.applied != 0) {
+                    var len: usize = 0;
+                    while (len < rep.title.len and rep.title[len] != 0) : (len += 1) {}
+                    const n = @min(len, buf.len);
+                    @memcpy(buf[0..n], rep.title[0..n]);
+                    return buf[0..n];
+                }
+            }
+            _ = syscall0(ui.sys_yield_num);
+        }
+        return null;
     }
 
     /// Close the window (the exit itself stays the app's `ui.exit_process`).
@@ -224,4 +334,15 @@ test "tabapp: scale never produces zero-size rects" {
     // Degenerate source canvas is passed through untouched.
     const degenerate = scale(tiny, 0, 0, 1100, 720);
     try std.testing.expectEqual(tiny, degenerate);
+}
+
+test "tabapp: nav declare/poll are best-effort with no WM seat (M48/BT5)" {
+    var ta = TabApp{ .win = 2, .w = 100, .h = 100 };
+    const nm = "FILE.BIN";
+    @memcpy(ta.name[0..nm.len], nm);
+    ta.name_len = nm.len;
+    // Host: no WM seat -> both calls are honest no-ops, never a trap.
+    ta.declare_nav("/host");
+    var buf: [ui.wm_rpc_max]u8 = undefined;
+    try std.testing.expect(ta.poll_nav(&buf) == null);
 }
