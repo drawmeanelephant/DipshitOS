@@ -17,9 +17,10 @@ ABI), ADR 0020 (terminal seam, for the demo's console), and
 One freestanding, allocation-free, host-tested crypto library
 (`user/src/lib/crypto/`) gives the guest the four primitives SSH/TLS are
 built from — SHA-256/512 + HMAC, ChaCha20-Poly1305, X25519, Ed25519 — each
-proven by the published vectors as class-A tests, with the kernel's existing
-ChaCha20 re-homed into the same file so there is exactly one cipher in the
-tree. SSH/TLS are out of scope; this is the prerequisite.
+proven by the published vectors as class-A tests. The kernel's existing
+ChaCha20 stays kernel-local (ADR 0023 D2) and is drift-guarded against the
+new cipher by identical RFC 7539 vectors. SSH/TLS are out of scope; this is
+the prerequisite.
 
 ## Why now, and why this shape
 
@@ -46,7 +47,7 @@ user/src/lib/crypto/ct.zig         ct_eq/ct_select/ct_swap/wipe
 user/src/lib/crypto/sha256.zig     Sha256 streaming, hmacSha256
 user/src/lib/crypto/sha512.zig     Sha512 streaming
 user/src/lib/crypto/hmac.zig       generic Hmac(Hash) over a descriptor
-user/src/lib/crypto/chacha20.zig   block + xor stream  (shared with kernel)
+user/src/lib/crypto/chacha20.zig   block + xor stream  (userland AEAD core)
 user/src/lib/crypto/poly1305.zig   streaming Poly1305
 user/src/lib/crypto/aead.zig       ChaCha20-Poly1305 seal/open
 user/src/lib/crypto/curve25519.zig field arithmetic + scalar helpers
@@ -66,7 +67,7 @@ the whole suite.
 |---|---|---|
 | **CP0** (#1114) | ADR 0023 + this document, docs-only PR. **Landed first.** | docs review; no code in the PR |
 | **CP1** (#1115) | `ct.zig`, `sha256.zig`, `sha512.zig`, `hmac.zig`; streaming contexts | FIPS 180-4 ("abc", 2-block, 1M-'a' where practical) + RFC 4231 cases 1–7; `zig build test` |
-| **CP2** (#1116) | `chacha20.zig`, `poly1305.zig`, `aead.zig`; `csprng.zig` re-homed onto the shared core | RFC 7539 §2.3.2/§2.4.2 block+ciphertext; RFC 8439 §2.5.2 Poly1305, §2.8.2 AEAD; `csprng` tests stay green |
+| **CP2** (#1116) | `chacha20.zig`, `poly1305.zig`, `aead.zig`; `csprng.zig` stays kernel-local, drift-guarded by the same RFC 7539 vectors | RFC 7539 §2.3.2/§2.4.2 block+ciphertext; RFC 8439 §2.5.2 Poly1305, §2.8.2 AEAD; `csprng` tests stay green |
 | **CP3** (#1117) | `curve25519.zig`, `x25519.zig` | RFC 7748 §5.2 single + §5.2 iterative (1, 1000 iterations), §6.1 Diffie-Hellman |
 | **CP4** (#1118) | `ed25519.zig` | RFC 8032 §7.1 TEST 1–3 + SHA(abc) vector; sign byte-equality **and** verify accept/reject |
 | **CP5** (#1119) | `CRYPTOD.BIN`, `live-crypto.spec`, `build.zig` wiring, gate-inventory regen | class-B `just gate live-crypto` PASS: guest digest/HMAC == host KAT |
@@ -87,7 +88,8 @@ pub const Sha256 = struct {
 pub fn sha256(out: *[32]u8, bytes: []const u8) void;
 pub fn hmacSha256(out: *[32]u8, key: []const u8, msg: []const u8) void;
 
-// chacha20.zig (shared with kernel/src/csprng.zig)
+// chacha20.zig (the userland AEAD core; the kernel keeps its own RFC 7539
+// cipher in kernel/src/csprng.zig, drift-guarded by the same vectors)
 pub const key_len = 32; pub const nonce_len = 12; pub const block_len = 64;
 pub fn quarterRound(state: *[16]u32, a: usize, b: usize, c: usize, d: usize) void;
 pub fn block(key: *const [32]u8, counter: u32, nonce: *const [12]u8, out: *[64]u8) void;
@@ -193,12 +195,13 @@ host's bytes on the same input. It does **not** prove SSH/TLS.
 - **Field arithmetic performance.** The u256/u512 Mod-p approach (ADR 0023)
   is chosen for provable reduction, not speed; the in-guest demo does not
   run curve ops. A limb rewrite is safe behind the same API.
-- **Cross-directory import (resolved).** Zig rejects a relative import that
-  escapes the importing file's module path, so `build.zig` exposes the
-  shared `crypto/chacha20.zig` as the named module `crypto_chacha` to the
-  freestanding kernel module and to the host test modules. `zig build
-  kernel` and `zig build test` both compile it; no kernel copy exists to
-  drift.
+- **Cross-directory sharing (decided against).** Zig rejects a relative
+  import that escapes the importing file's module path, and several class-A
+  gates run `zig test kernel/src/<module>.zig` directly (no build-provided
+  modules), so a shared translation unit is not viable without rewriting
+  unrelated gate scripts. The kernel keeps its vector-pinned cipher and the
+  userland library carries its own; identical RFC 7539 vectors in both test
+  roots are the drift guard (ADR 0023 D2).
 - **`iterative` X25519 test cost.** 1,000 iterations of scalarmult is fine
   on the host; the test may be gated to a smaller count in CI if needed,
   but the RFC value is asserted exactly when it runs.

@@ -44,7 +44,7 @@ crypto/ct.zig     constant-time helpers (ct_eq, ct_select, ct_swap, wipe)
 crypto/sha256.zig SHA-256 streaming + HMAC-SHA256
 crypto/sha512.zig SHA-512 streaming
 crypto/hmac.zig   generic HMAC over a hash descriptor
-crypto/chacha20.zig RFC 7539/8439 ChaCha20 block + XOR stream  (shared)
+crypto/chacha20.zig RFC 7539/8439 ChaCha20 block + XOR stream  (userland AEAD core)
 crypto/poly1305.zig RFC 8439 Poly1305 (streaming)
 crypto/aead.zig   RFC 8439 ChaCha20-Poly1305 AEAD (seal/open)
 crypto/curve25519.zig field/pow/scalar helpers (shared by X25519/Ed25519)
@@ -58,22 +58,35 @@ target. Userland apps consume it by relative import today
 (`@import("lib/crypto.zig")`) and can link it as a `.SO` later; no syscall,
 no kernel dependency, no I/O.
 
-### D2. The kernel imports the shared ChaCha20 core — no mirror
-`kernel/src/csprng.zig`'s `chacha20_block`/`quarter_round` are **re-homed**
-into `crypto/chacha20.zig`; `csprng.zig` obtains it through the build-system
-**named module `crypto_chacha`** and keeps only what is kernel policy: the
-entropy-device seeding, the spinlock, the stream state, the ASLR placement,
-and the honest `seeded()` flag. There is **one** ChaCha20 implementation in
-the tree, proven by the same RFC vectors in both test roots. A duplicate
-"kernel mirror" is rejected: it is the exact drift risk this ADR exists to
-prevent.
+### D2. The kernel's ChaCha20 stays kernel-local, drift-guarded by shared vectors
+We evaluated **re-homing** `kernel/src/csprng.zig`'s
+`chacha20_block`/`quarter_round` into `crypto/chacha20.zig` so exactly one
+ChaCha20 exists in the tree. Two hard constraints block a shared translation
+unit:
 
-Zig rejects a relative import that escapes the importing file's module path
-(`error: import of file outside module path`), so `build.zig` roots a module
-at `user/src/lib/crypto/chacha20.zig` and adds it as `crypto_chacha` to both
-the freestanding kernel module and the host test modules; the source file is
-unchanged and shared. The shared file is already freestanding, so the
-`kernel/`–`user/` directory boundary costs nothing at compile time.
+1. Zig rejects a relative import that escapes the importing file's module
+   path (`error: import of file outside module path`), so the kernel cannot
+   `@import` the `user/` file.
+2. Several class-A gates run `zig test kernel/src/<module>.zig` **directly**
+   (`tools/verify-transcript.sh`, `tools/verify-glyph-raster.sh`,
+   `tools/verify-mutations.sh`), with no build-provided module imports, so
+   the kernel tree must remain self-contained.
+
+A build-system **named module** (`crypto_chacha`, rooted at the shared file
+and added to the kernel module) does compile the kernel and the host test
+roots, but it breaks those direct-test gates; rewiring every one of them
+through the build harness is more churn than the duplication it removes, and
+would spread the claim across unrelated gate scripts.
+
+**Decision:** `kernel/src/csprng.zig` keeps its own RFC 7539 block function
+(seeded, locked, ASLR-policy-bearing), and the userland
+`crypto/chacha20.zig` carries the complete RFC 7539/8439 cipher that the AEAD
+is built on. The two are tied by the **same RFC 7539 vectors pinned in both
+test roots** — the §2.2.1 quarter-round state vector, the §2.3.2 block
+vector, and the §2.4.2 114-byte ciphertext vector. If either implementation
+drifts from the standard, its own class-A test fails, so the duplication is
+drift-guarded rather than untracked. Each file documents its twin. This is a
+deliberate, recorded trade-off.
 
 ### D3. Constant-time discipline (bounded, honest)
 Secret-dependent **branches, memory indices, and early exits are forbidden**;
@@ -140,8 +153,9 @@ primitive layer means the KAT surface stays pure.
 - SSH/TLS become assembly work on proven primitives instead of a crypto
   project; the client-vs-server decision (goal #1066 Stage 3) is deferred
   and unaffected.
-- The kernel's cipher and the userland AEAD cannot drift — same file, same
-  tests.
+- The kernel's cipher and the userland AEAD are separate files but cannot
+  drift: both pin the same RFC 7539 vectors, so either straying from the
+  standard fails its own class-A test.
 - The u256/u512 field arithmetic in `curve25519.zig` favors clarity and
   provable reduction over micro-optimization; it is host/KAT-exercised, and
   the in-guest demo is hash/MAC only, so curve performance is not on the
