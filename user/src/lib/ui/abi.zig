@@ -752,6 +752,14 @@ pub fn tty_attach_net(port: u64) i64 {
     return syscall2(sys_tty_attach_num, 3, port);
 }
 
+/// M46 RC3 (#1111, ADR 0022 D3/D4): attach the net front-end with v1 auth —
+/// `secret` (the session's first line must match; empty = open) and an
+/// optional source-IP allowlist (`allow_ip` as a big-endian IPv4 u32; 0 =
+/// any). Selector 3 args: port, secret_ptr, secret_len, allow_ip.
+pub fn tty_attach_net_auth(port: u64, secret_ptr: u64, secret_len: u64, allow_ip: u64) i64 {
+    return syscall6(sys_tty_attach_num, 3, port, secret_ptr, secret_len, allow_ip, 0);
+}
+
 /// ADR 0007 slot 8 `sys_wait(target)`: block the calling process until the
 /// process with id `target` exits, then return its exit status. The SH2
 /// shell uses it to run external commands in the foreground and propagate

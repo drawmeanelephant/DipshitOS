@@ -148,6 +148,15 @@ pub const usage_up: u8 = 0x52;
 /// #1064: Left/Right — Ctrl+Shift+Left/Right reorders the active tab.
 pub const usage_right: u8 = 0x4f;
 pub const usage_left: u8 = 0x50;
+/// M48/BT1: 'd' — Ctrl+Shift+D duplicates the active tab.
+pub const usage_d: u8 = 0x07;
+/// M48/BT3: 'p' — Ctrl+Shift+P toggles the pinned bit.
+pub const usage_p: u8 = 0x13;
+/// M48/BT6: 'f' — Ctrl+Shift+F toggles the frozen badge.
+pub const usage_f: u8 = 0x09;
+/// M48/BT5: '[' / ']' — Ctrl+Shift+[ / ] step the per-tab history.
+pub const usage_left_bracket: u8 = 0x2f;
+pub const usage_right_bracket: u8 = 0x30;
 
 // Pinned markers (grepped by class-B live gates and tests)
 pub const registered_marker: []const u8 = "tabwm: registered\n";
@@ -424,6 +433,389 @@ pub fn handle_middle_click(px: u32, py: u32) void {
 }
 
 // ---------------------------------------------------------------------------
+// M48 — browser-style tab depth (umbrella #1120, goal #1064). Rail-native:
+// no top strip, behavioural only. BT1 reopen/duplicate, BT2 reorder, BT3
+// pinned/groups, BT4 start surface, BT5 per-tab history, BT6 preview/badge/
+// tab search. Every mutation routes through the existing close/persist seams.
+// ---------------------------------------------------------------------------
+
+// --- BT1: duplicate the active tab ---------------------------------------
+/// The duplicate affordance re-exec'd the active tab's executable.
+pub const duplicate_marker: []const u8 = "tabwm: duplicate ";
+
+/// Ctrl+Shift+D: clone the ACTIVE tab by re-exec'ing the executable the WM
+/// launched it from. A tab the WM did not spawn has no recorded bin and is an
+/// honest no-op (like reopen). The spawned window joins as a new tab and
+/// adopts the bin through the same `pending_launch_bin` handshake the launch
+/// overlay uses, so the clone is itself reopenable/duplicable. Returns true
+/// when an exec was issued.
+pub fn duplicate_active_tab() bool {
+    const idx = manager.active_idx orelse return false;
+    if (idx >= manager.tab_count) return false;
+    const bin = manager.tabs[idx].get_bin();
+    if (bin.len == 0) return false;
+    const blen = @min(bin.len, pending_launch_bin.len);
+    @memcpy(pending_launch_bin[0..blen], bin[0..blen]);
+    pending_launch_bin_len = blen;
+    var buf: [64]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{s}{s}\n", .{ duplicate_marker, bin }) catch "tabwm: duplicate\n";
+    write_marker(msg);
+    _ = ui.exec_program(bin);
+    return true;
+}
+
+// --- BT2: drag-to-reorder + keyboard move --------------------------------
+/// The active tab was reordered by pointer drag (from->to).
+pub const tab_reorder_marker: []const u8 = "tabwm: tab-reorder ";
+
+/// Pointer-drag source row (null = no drag in flight). The kernel fans the
+/// raw held-button state, so press begins a drag and release commits it.
+pub var drag_from: ?usize = null;
+
+/// A left-press landed on the tab at `idx`: if no drag is already in flight,
+/// remember it as the drag source. (A plain click releases over the same row
+/// and reorder_tab(from, from) is a no-op.)
+pub fn begin_tab_drag(idx: usize) void {
+    if (unsaved_dialog_open_tabwm) return;
+    if (drag_from != null) return;
+    if (idx < manager.tab_count) drag_from = idx;
+}
+
+/// Release at `py`: if a drag was in flight and the pointer landed on a
+/// different drawn row, move the tab there and persist the new order.
+pub fn end_tab_drag(py: u32) bool {
+    const from = drag_from orelse return false;
+    drag_from = null;
+    const to = tab_index_at(py) orelse return false;
+    return reorder_tab(from, to);
+}
+
+/// Move the tab at `from` to `to`, keeping the same tab active, emitting the
+/// reorder marker, and persisting the new order to `.tabs` (BT2).
+pub fn reorder_tab(from: usize, to: usize) bool {
+    if (from >= manager.tab_count or to >= manager.tab_count or from == to) return false;
+    const active_id = manager.get_active_id();
+    if (!manager.move_tab(from, to)) return false;
+    if (active_id) |id| manager.active_idx = manager.find_by_id(id);
+    var buf: [64]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{s}{d}->{d}\n", .{ tab_reorder_marker, from, to }) catch "tabwm: tab-reorder\n";
+    write_marker(msg);
+    save_tabs();
+    return true;
+}
+
+// --- BT3: pinned tabs / manifest groups ----------------------------------
+/// A tab was pinned or unpinned.
+pub const pin_marker: []const u8 = "tabwm: tab-pin ";
+/// A manifest group label was adopted by a tab (id-carrying).
+pub const group_marker: []const u8 = "tabwm: tab-group ";
+
+/// Ctrl+Shift+P: flip the pinned bit on `idx`, stable-partition pinned tabs
+/// to the front, and persist. Returns true when the bit changed.
+pub fn pin_toggle(idx: usize) bool {
+    if (idx >= manager.tab_count) return false;
+    const id = manager.tabs[idx].id;
+    const on = !manager.tabs[idx].pinned;
+    manager.tabs[idx].pinned = on;
+    _ = manager.normalize_pinned();
+    if (nav_sel) |sel| {
+        if (sel == idx) nav_sel = manager.find_by_id(id);
+    }
+    var buf: [64]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{s}{d} {s}\n", .{ pin_marker, id, if (on) "on" else "off" }) catch "tabwm: tab-pin\n";
+    write_marker(msg);
+    save_tabs();
+    return true;
+}
+
+/// Adopt a manifest group label on the tab owning window `id` (the launch
+/// overlay hands the label over with the bin). A no-op when the tab or label
+/// is absent. Emits the group marker.
+pub fn adopt_tab_group(id: u32, label: []const u8) bool {
+    const idx = manager.find_by_id(id) orelse return false;
+    if (label.len == 0) return false;
+    const n = @min(label.len, manager.tabs[idx].group.len);
+    @memcpy(manager.tabs[idx].group[0..n], label[0..n]);
+    manager.tabs[idx].group_len = n;
+    var buf: [64]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{s}{d} {s}\n", .{ group_marker, id, label }) catch "tabwm: tab-group\n";
+    write_marker(msg);
+    return true;
+}
+
+// --- BT4: the new-tab START surface --------------------------------------
+/// The START surface was summoned (`+ New tab` pill or Ctrl+T).
+pub const start_marker: []const u8 = "tabwm: start-surface\n";
+/// The START surface is on screen (rail-native apps grid).
+pub var start_open: bool = false;
+
+/// Summon the START surface. Ctrl+T and the `+ New tab` pill open THIS (the
+/// browser mental model: a new tab is a start page), while Ctrl+Space keeps
+/// the Sexiburger command palette. The catalog filtering state is shared with
+/// the command palette; the two are mutually exclusive.
+pub fn start_summon() void {
+    if (unsaved_dialog_open_tabwm) return;
+    if (!overlay_loaded) _ = overlay_load_manifest();
+    overlay_open = false;
+    start_open = true;
+    overlay_filter_len = 0;
+    overlay_refresh_filter();
+    write_marker(start_marker);
+    write_marker(new_tab_marker);
+}
+
+pub fn start_dismiss() void {
+    start_open = false;
+    overlay_filter_len = 0;
+    overlay_refresh_filter();
+}
+
+/// Close whichever catalog surface is open (START page or Sexiburger).
+fn dismiss_active_catalog() void {
+    if (start_open) start_dismiss();
+    overlay_dismiss();
+}
+
+// --- BT5: per-tab back/forward over app-declared navigation --------------
+/// The app-declared navigation RPC kind. The kernel does not interpret WM_RPC
+/// kinds (it routes the frame to the registered WM seat), so this additive
+/// kind lives beside its handler rather than in the frozen wire mirror.
+pub const wm_rpc_kind_nav_declare: u8 = 9;
+pub const wm_rpc_kind_nav_poll: u8 = 10;
+
+/// An app declared a navigation event (id-carrying; the target path follows).
+pub const nav_decl_marker: []const u8 = "tabwm: nav-decl ";
+/// The user stepped a tab's history backward (id-carrying + target).
+pub const nav_back_marker: []const u8 = "tabwm: nav-back ";
+/// The user stepped a tab's history forward (id-carrying + target).
+pub const nav_forward_marker: []const u8 = "tabwm: nav-forward ";
+
+/// The next navigation target an app should move to, queued by back/forward
+/// and drained by that app's `nav_poll` RPC. Keyed by window id (id 0 = none).
+pub var pending_nav_id: u32 = 0;
+pub var pending_nav_path: [hist_path_max]u8 = [_]u8{0} ** hist_path_max;
+pub var pending_nav_len: usize = 0;
+
+fn set_pending_nav(id: u32, path: []const u8) void {
+    pending_nav_id = id;
+    const n = @min(path.len, pending_nav_path.len);
+    @memcpy(pending_nav_path[0..n], path[0..n]);
+    pending_nav_len = n;
+}
+
+/// Handle an app-declared navigation event (BT5): record it in the owning
+/// tab's history. Returns true when the tab exists (the nav was accepted).
+pub fn nav_declare(id: u32, path: []const u8) bool {
+    const idx = manager.find_by_id(id) orelse return false;
+    if (!manager.tabs[idx].nav_record(path)) return true;
+    var buf: [64]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{s}{d} {s}\n", .{ nav_decl_marker, id, path }) catch "tabwm: nav-decl\n";
+    write_marker(msg);
+    return true;
+}
+
+/// Step the ACTIVE tab's history backward and queue the target for its app.
+pub fn nav_back_active() bool {
+    const idx = manager.active_idx orelse return false;
+    if (idx >= manager.tab_count) return false;
+    const target = manager.tabs[idx].nav_back() orelse return false;
+    const id = manager.tabs[idx].id;
+    set_pending_nav(id, target);
+    var buf: [64]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{s}{d} {s}\n", .{ nav_back_marker, id, target }) catch "tabwm: nav-back\n";
+    write_marker(msg);
+    return true;
+}
+
+/// Step the ACTIVE tab's history forward and queue the target for its app.
+pub fn nav_forward_active() bool {
+    const idx = manager.active_idx orelse return false;
+    if (idx >= manager.tab_count) return false;
+    const target = manager.tabs[idx].nav_forward() orelse return false;
+    const id = manager.tabs[idx].id;
+    set_pending_nav(id, target);
+    var buf: [64]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{s}{d} {s}\n", .{ nav_forward_marker, id, target }) catch "tabwm: nav-forward\n";
+    write_marker(msg);
+    return true;
+}
+
+/// Drain the pending navigation target for `id` into `buf`. Returns the
+/// target slice, or null when none is queued for this window. Clears the slot
+/// (poll-once).
+pub fn nav_poll(id: u32, buf: []u8) ?[]const u8 {
+    if (pending_nav_id != id or id == 0) return null;
+    const n = @min(pending_nav_len, buf.len);
+    @memcpy(buf[0..n], pending_nav_path[0..n]);
+    pending_nav_id = 0;
+    pending_nav_len = 0;
+    return buf[0..n];
+}
+
+// --- BT6: frozen badge, hover preview, tab search ------------------------
+/// The frozen badge was toggled (id-carrying).
+pub const freeze_marker: []const u8 = "tabwm: tab-freeze ";
+/// The tab-search overlay was summoned.
+pub const tab_search_marker: []const u8 = "tabwm: tab-search\n";
+/// A tab-search selection was activated (id-carrying).
+pub const tab_search_pick_marker: []const u8 = "tabwm: tab-search-pick ";
+
+/// Ctrl+Shift+F: flip the FROZEN badge on `idx` (a suspended background tab).
+pub fn freeze_toggle(idx: usize) bool {
+    if (idx >= manager.tab_count) return false;
+    manager.tabs[idx].frozen = !manager.tabs[idx].frozen;
+    var buf: [48]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{s}{d} {s}\n", .{ freeze_marker, manager.tabs[idx].id, if (manager.tabs[idx].frozen) "on" else "off" }) catch "tabwm: tab-freeze\n";
+    write_marker(msg);
+    return true;
+}
+
+/// Hover-preview dwell: how many composite ticks the pointer must rest on a
+/// tab before the preview card appears.
+pub const hover_preview_delay: u32 = 2;
+pub var hover_preview_ticks: u32 = 0;
+pub var hover_preview_target: ?usize = null;
+
+/// True when the preview card should draw for `row` (the pointer has dwelt on
+/// it long enough).
+pub fn hover_preview_visible(row: usize) bool {
+    const t = hover_preview_target orelse return false;
+    return t == row and hover_preview_ticks >= hover_preview_delay;
+}
+
+/// One composite tick of hover dwell bookkeeping. Returns true when the
+/// preview target changed (so a caller could redraw).
+pub fn hover_tick() bool {
+    const cur = hover_tab;
+    if (cur == hover_preview_target) {
+        if (cur != null) hover_preview_ticks +|= 1;
+        return false;
+    }
+    hover_preview_target = cur;
+    hover_preview_ticks = 0;
+    return true;
+}
+
+/// Tab-search overlay state (independent of the catalog surfaces).
+pub var tab_search_open: bool = false;
+var tab_search_filter: [16]u8 = [_]u8{0} ** 16;
+var tab_search_filter_len: usize = 0;
+var tab_search_results: [max_tabs]usize = [_]usize{0} ** max_tabs;
+var tab_search_count: usize = 0;
+var tab_search_sel: usize = 0;
+
+pub fn tab_search_is_open() bool {
+    return tab_search_open;
+}
+
+/// Rebuild the tab-search result list (case-insensitive substring over the
+/// tab titles). Pure over `manager`; host-testable.
+pub fn tab_search_refresh() void {
+    tab_search_count = 0;
+    tab_search_sel = 0;
+    const q = tab_search_filter[0..tab_search_filter_len];
+    var needle: [16]u8 = undefined;
+    const nl = @min(q.len, needle.len);
+    for (q[0..nl], 0..) |c, k| needle[k] = std.ascii.toLower(c);
+    for (0..manager.tab_count) |i| {
+        const title = manager.tabs[i].get_title();
+        if (nl == 0) {
+            tab_search_results[tab_search_count] = i;
+            tab_search_count += 1;
+            continue;
+        }
+        if (title.len < nl) continue;
+        var start: usize = 0;
+        while (start + nl <= title.len) : (start += 1) {
+            var k: usize = 0;
+            while (k < nl and std.ascii.toLower(title[start + k]) == needle[k]) : (k += 1) {}
+            if (k == nl) {
+                tab_search_results[tab_search_count] = i;
+                tab_search_count += 1;
+                break;
+            }
+        }
+    }
+}
+
+/// How many tabs match the current search query (host-testable).
+pub fn tab_search_match_count() usize {
+    return tab_search_count;
+}
+
+pub fn tab_search_summon() void {
+    if (unsaved_dialog_open_tabwm) return;
+    start_open = false;
+    overlay_dismiss();
+    tab_search_open = true;
+    tab_search_filter_len = 0;
+    tab_search_refresh();
+    write_marker(tab_search_marker);
+}
+
+pub fn tab_search_dismiss() void {
+    tab_search_open = false;
+    tab_search_filter_len = 0;
+    tab_search_refresh();
+}
+
+/// Activate the selected search result and dismiss the overlay.
+pub fn tab_search_activate() bool {
+    if (tab_search_count == 0) return false;
+    const idx = tab_search_results[tab_search_sel];
+    tab_search_dismiss();
+    if (idx < manager.tab_count) {
+        activate_tab(idx);
+        var buf: [48]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "{s}{d}\n", .{ tab_search_pick_marker, manager.tabs[idx].id }) catch "tabwm: tab-search-pick\n";
+        write_marker(msg);
+        return true;
+    }
+    return false;
+}
+
+/// One key while the tab-search overlay is open. Returns true when consumed.
+pub fn tab_search_key(usage: u8) bool {
+    if (!tab_search_open) return false;
+    switch (usage) {
+        0x29 => { // Escape
+            tab_search_dismiss();
+            return true;
+        },
+        0x28 => { // Enter
+            _ = tab_search_activate();
+            return true;
+        },
+        0x2a => { // Backspace
+            if (tab_search_filter_len > 0) {
+                tab_search_filter_len -= 1;
+                tab_search_refresh();
+            }
+            return true;
+        },
+        0x52 => { // Up
+            if (tab_search_sel > 0) tab_search_sel -= 1;
+            return true;
+        },
+        0x51 => { // Down
+            if (tab_search_sel + 1 < tab_search_count) tab_search_sel += 1;
+            return true;
+        },
+        else => {},
+    }
+    const printable = (usage >= 0x04 and usage <= 0x1d) or (usage >= 0x1e and usage <= 0x27) or
+        usage == 0x2c or usage == 0x2d or usage == 0x37;
+    if (printable and tab_search_filter_len < tab_search_filter.len) {
+        const c: u8 = if (usage == 0x2c) ' ' else if (usage == 0x2d) '-' else if (usage == 0x37) '.' else if (usage <= 0x1d) @intCast(usage - 0x04 + 'a') else @intCast(usage - 0x1e + '1');
+        tab_search_filter[tab_search_filter_len] = c;
+        tab_search_filter_len += 1;
+        tab_search_refresh();
+        return true;
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
 // Syscall wrappers
 // ---------------------------------------------------------------------------
 fn syscall0(num: u64) i64 {
@@ -498,6 +890,29 @@ fn write_marker(msg: []const u8) void {
 // ---------------------------------------------------------------------------
 // Tab & Window Mirror Models
 // ---------------------------------------------------------------------------
+// M48/BT5: the per-tab navigation history is bounded to this many entries.
+// Whole-app navigation events are short strings (a directory or file path),
+// so the cap keeps the static BSS footprint tiny while covering a normal
+// browsing session.
+pub const hist_max: usize = 8;
+pub const hist_path_max: usize = 24;
+
+/// One recorded navigation target for a tab.
+pub const HistEntry = struct {
+    path: [hist_path_max]u8 = [_]u8{0} ** hist_path_max,
+    path_len: usize = 0,
+
+    pub fn get(self: *const HistEntry) []const u8 {
+        return self.path[0..self.path_len];
+    }
+
+    pub fn set(self: *HistEntry, text: []const u8) void {
+        const len = @min(text.len, self.path.len);
+        @memcpy(self.path[0..len], text[0..len]);
+        self.path_len = len;
+    }
+};
+
 pub const Tab = struct {
     id: u32 = 0,
     title: [32]u8 = [_]u8{0} ** 32,
@@ -528,6 +943,25 @@ pub const Tab = struct {
     bin: [24]u8 = [_]u8{0} ** 24,
     bin_len: usize = 0,
 
+    /// M48/BT3: the tab is PINNED — it sorts ahead of unpinned tabs and
+    /// carries a pin glyph. The pin is seeded from the APPS.TXT `dock=true`
+    /// flag (via the launch overlay) and toggled by Ctrl+Shift+P.
+    pinned: bool = false,
+    /// M48/BT3: the manifest group label (`group=NAME`), or empty. Rendered
+    /// as a small header over the pinned block; never changes tab identity.
+    group: [12]u8 = [_]u8{0} ** 12,
+    group_len: usize = 0,
+    /// M48/BT6: the tab is FROZEN — a background tab the user suspended.
+    /// Purely presentational state for now (badge + status); pairs with the
+    /// future demand-paging freeze. Toggled by Ctrl+Shift+F.
+    frozen: bool = false,
+    /// M48/BT5: the bounded per-tab navigation history (the browser-history
+    /// analogue for whole apps). `hist_pos` is the current entry; entries at
+    /// (`hist_pos`, `hist_count`) are the forward stack.
+    hist: [hist_max]HistEntry = [_]HistEntry{.{}} ** hist_max,
+    hist_count: usize = 0,
+    hist_pos: usize = 0,
+
     pub fn set_title(self: *Tab, text: []const u8) void {
         const len = @min(text.len, self.title.len);
         @memcpy(self.title[0..len], text[0..len]);
@@ -546,6 +980,64 @@ pub const Tab = struct {
 
     pub fn get_bin(self: *const Tab) []const u8 {
         return self.bin[0..self.bin_len];
+    }
+
+    // -----------------------------------------------------------------------
+    // M48/BT5: the per-tab navigation history (pure; host-testable)
+    // -----------------------------------------------------------------------
+
+    /// The current history entry, or null when the tab has no history.
+    pub fn current_nav(self: *const Tab) ?[]const u8 {
+        if (self.hist_count == 0) return null;
+        return self.hist[self.hist_pos].get();
+    }
+
+    /// Record a navigation to `path`. Consecutive duplicates are a no-op;
+    /// navigating after a back() truncates the forward stack (the browser
+    /// rule). At the cap the oldest entry is dropped. Returns true when the
+    /// history changed.
+    pub fn nav_record(self: *Tab, path: []const u8) bool {
+        if (path.len == 0) return false;
+        if (self.hist_count > 0 and std.mem.eql(u8, self.hist[self.hist_pos].get(), path)) return false;
+        // Drop the forward stack (the entry after `hist_pos` is the next
+        // append slot). The empty-history case keeps the slot at 0.
+        self.hist_count = if (self.hist_count == 0) 0 else self.hist_pos + 1;
+        // At the cap, drop the oldest entry to make room.
+        if (self.hist_count == hist_max) {
+            var i: usize = 1;
+            while (i < hist_max) : (i += 1) self.hist[i - 1] = self.hist[i];
+            self.hist_count = hist_max - 1;
+        }
+        self.hist[self.hist_count].set(path);
+        self.hist_count += 1;
+        self.hist_pos = self.hist_count - 1;
+        return true;
+    }
+
+    /// True when a back step is available.
+    pub fn can_nav_back(self: *const Tab) bool {
+        return self.hist_count > 0 and self.hist_pos > 0;
+    }
+
+    /// True when a forward step is available.
+    pub fn can_nav_forward(self: *const Tab) bool {
+        return self.hist_count > 0 and self.hist_pos + 1 < self.hist_count;
+    }
+
+    /// Step the cursor back one entry. Returns the new current path, or null
+    /// when already at the start.
+    pub fn nav_back(self: *Tab) ?[]const u8 {
+        if (!self.can_nav_back()) return null;
+        self.hist_pos -= 1;
+        return self.hist[self.hist_pos].get();
+    }
+
+    /// Step the cursor forward one entry. Returns the new current path, or
+    /// null when already at the newest entry.
+    pub fn nav_forward(self: *Tab) ?[]const u8 {
+        if (!self.can_nav_forward()) return null;
+        self.hist_pos += 1;
+        return self.hist[self.hist_pos].get();
     }
 };
 
@@ -677,6 +1169,70 @@ pub const TabManager = struct {
         self.tabs[b] = tmp;
         return true;
     }
+
+    /// Move the tab at `from` to index `to`, shifting the tabs between them
+    /// (M48/BT2 drag-to-reorder). The active index follows the moved tab and
+    /// the intermediate tabs shift by one. Returns true on a real move.
+    pub fn move_tab(self: *TabManager, from: usize, to: usize) bool {
+        if (from >= self.tab_count or to >= self.tab_count or from == to) return false;
+        const moved = self.tabs[from];
+        if (from < to) {
+            var i = from;
+            while (i < to) : (i += 1) self.tabs[i] = self.tabs[i + 1];
+        } else {
+            var i = from;
+            while (i > to) : (i -= 1) self.tabs[i] = self.tabs[i - 1];
+        }
+        self.tabs[to] = moved;
+        if (self.active_idx) |a| {
+            if (a == from) {
+                self.active_idx = to;
+            } else if (from < to and a > from and a <= to) {
+                self.active_idx = a - 1;
+            } else if (from > to and a >= to and a < from) {
+                self.active_idx = a + 1;
+            }
+        }
+        return true;
+    }
+
+    /// Count the pinned tabs at the FRONT of the list (they are kept sorted
+    /// ahead of unpinned tabs — M48/BT3).
+    pub fn front_pinned_count(self: *const TabManager) usize {
+        var n: usize = 0;
+        while (n < self.tab_count and self.tabs[n].pinned) : (n += 1) {}
+        return n;
+    }
+
+    /// Stable-partition pinned tabs to the front, preserving the relative
+    /// order of both halves, and keep the ACTIVE tab on the same tab (by
+    /// id). Returns true when the order changed.
+    pub fn normalize_pinned(self: *TabManager) bool {
+        var reordered: [max_tabs]Tab = [_]Tab{.{}} ** max_tabs;
+        const active_id = self.get_active_id();
+        var n: usize = 0;
+        for (0..self.tab_count) |i| {
+            if (self.tabs[i].pinned) {
+                reordered[n] = self.tabs[i];
+                n += 1;
+            }
+        }
+        for (0..self.tab_count) |i| {
+            if (!self.tabs[i].pinned) {
+                reordered[n] = self.tabs[i];
+                n += 1;
+            }
+        }
+        var changed = false;
+        for (0..self.tab_count) |i| {
+            if (reordered[i].id != self.tabs[i].id) changed = true;
+        }
+        if (!changed) return false;
+        self.tabs = reordered;
+        self.tab_count = n;
+        if (active_id) |id| self.active_idx = self.find_by_id(id);
+        return true;
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -719,6 +1275,13 @@ pub var closed_count: usize = 0;
 /// tab (the kernel fans the window mirror after the exec). Empty = none.
 pub var pending_launch_bin: [24]u8 = [_]u8{0} ** 24;
 pub var pending_launch_bin_len: usize = 0;
+
+/// M48/BT3: the manifest group label of the app just launched, consumed with
+/// the bin by the next new tab (empty = none).
+pub var pending_launch_group: [12]u8 = [_]u8{0} ** 12;
+pub var pending_launch_group_len: usize = 0;
+/// M48/BT3: the launched app declared `dock=true` — the new tab starts pinned.
+pub var pending_launch_pinned: bool = false;
 
 // M42 UX r2 (2026-09-05, claim #1011): the unsaved-changes dialog state
 // machine — BSS only, no heap in WM paths.
@@ -1380,12 +1943,23 @@ pub fn handle_window_mirror(wid: u8, visible: bool, released: bool, unsaved: boo
         manager.tabs[idx].set_bin(pending_launch_bin[0..pending_launch_bin_len]);
         pending_launch_bin_len = 0;
     }
+    // M48/BT3: adopt the launched app's manifest group + dock-pin signal.
+    if (pending_launch_group_len > 0) {
+        const n = @min(pending_launch_group_len, manager.tabs[idx].group.len);
+        @memcpy(manager.tabs[idx].group[0..n], pending_launch_group[0..n]);
+        manager.tabs[idx].group_len = n;
+        pending_launch_group_len = 0;
+    }
+    manager.tabs[idx].pinned = manager.tabs[idx].pinned or pending_launch_pinned;
+    pending_launch_pinned = false;
     activate_tab(idx);
     // #1056 item 3c: if this registration completes the restored window set,
     // reorder to the persisted tab order and re-activate the saved tab.
     if (maybe_apply_persisted_tabs()) {
         if (manager.active_idx) |a| activate_tab(a);
     }
+    // M48/BT3: keep pinned tabs ahead of the (possibly restored) order.
+    _ = manager.normalize_pinned();
 }
 
 // ---------------------------------------------------------------------------
@@ -1414,11 +1988,11 @@ pub fn new_tab_pill_rect() Rect {
 }
 
 /// The affordance fired (pill click or Ctrl+T): emit the pinned
-/// `tabwm: new-tab` marker and summon the Sexiburger launcher overlay —
-/// the same path the god-menu button uses.
+/// `tabwm: new-tab` marker and open the M48 START surface — a new tab is a
+/// start page in the browser model. (Ctrl+Space still summons the Sexiburger
+/// command palette.)
 pub fn trigger_new_tab() void {
-    write_marker(new_tab_marker);
-    overlay_summon();
+    start_summon();
 }
 
 // ---------------------------------------------------------------------------
@@ -1445,12 +2019,71 @@ var overlay_bins: [overlay_max_apps][24]u8 = [_][24]u8{[_]u8{0} ** 24} ** overla
 var overlay_bin_lens: [overlay_max_apps]usize = [_]usize{0} ** overlay_max_apps;
 var overlay_labels: [overlay_max_apps][32]u8 = [_][32]u8{[_]u8{0} ** 32} ** overlay_max_apps;
 var overlay_label_lens: [overlay_max_apps]usize = [_]usize{0} ** overlay_max_apps;
+/// M48/BT3: the manifest group label (`group=NAME`, optional 5th+ field) and
+/// the `dock=true` pin signal, per catalog entry.
+var overlay_groups: [overlay_max_apps][12]u8 = [_][12]u8{[_]u8{0} ** 12} ** overlay_max_apps;
+var overlay_group_lens: [overlay_max_apps]usize = [_]usize{0} ** overlay_max_apps;
+var overlay_dock: [overlay_max_apps]bool = [_]bool{false} ** overlay_max_apps;
 var overlay_count: usize = 0;
 var overlay_filter: [24]u8 = [_]u8{0} ** 24;
 var overlay_filter_len: usize = 0;
 var overlay_filtered: [overlay_max_apps]usize = undefined;
 var overlay_filtered_count: usize = 0;
 var overlay_sel: usize = 0;
+
+/// Extract the `group=NAME` field for the manifest line whose executable is
+/// `bin_name` (the manifest has one line per app). Returns an empty slice when
+/// the app or the field is absent. Pure and host-testable.
+pub fn manifest_group_for(text: []const u8, bin_name: []const u8) []const u8 {
+    var line_start: usize = 0;
+    while (line_start <= text.len) {
+        var line_end = line_start;
+        while (line_end < text.len and text[line_end] != '\n') : (line_end += 1) {}
+        const line = text[line_start..line_end];
+        if (manifest_line_name(line)) |name| {
+            if (std.mem.eql(u8, name, bin_name)) return manifest_field_prefix(line, "group=");
+        }
+        if (line_end == text.len) break;
+        line_start = line_end + 1;
+    }
+    return "";
+}
+
+fn manifest_trim(s: []const u8) []const u8 {
+    var a: usize = 0;
+    while (a < s.len and (s[a] == ' ' or s[a] == '\t' or s[a] == '\r')) : (a += 1) {}
+    var b = s.len;
+    while (b > a and (s[b - 1] == ' ' or s[b - 1] == '\t' or s[b - 1] == '\r')) : (b -= 1) {}
+    return s[a..b];
+}
+
+fn manifest_line_name(line: []const u8) ?[]const u8 {
+    const t = manifest_trim(line);
+    if (t.len == 0 or t[0] == '#') return null;
+    var i: usize = 0;
+    while (i < t.len and t[i] != '|') : (i += 1) {}
+    const name = manifest_trim(t[0..i]);
+    if (name.len == 0) return null;
+    return name;
+}
+
+fn manifest_field_prefix(line: []const u8, prefix: []const u8) []const u8 {
+    const t = line;
+    var fields: usize = 0;
+    var fstart: usize = 0;
+    var i: usize = 0;
+    while (i <= t.len) : (i += 1) {
+        if (i == t.len or t[i] == '|') {
+            fields += 1;
+            if (fields >= 3) {
+                const field = manifest_trim(t[fstart..i]);
+                if (std.mem.startsWith(u8, field, prefix)) return field[prefix.len..];
+            }
+            fstart = i + 1;
+        }
+    }
+    return "";
+}
 
 /// Read + parse APPS.TXT into the static catalog. Manifest order, capped;
 /// TABWM.BIN skipped (the WM seat is taken). Returns the entry count.
@@ -1462,8 +2095,9 @@ pub fn overlay_load_manifest() usize {
     defer ui.file_close(@intCast(fd));
     const n = ui.file_read(@intCast(fd), &overlay_manifest_buf);
     if (n <= 0) return 0;
+    const text = overlay_manifest_buf[0..@intCast(n)];
     var parsed: [24]sexiburger_menu.MenuApp = undefined;
-    const parsed_n = sexiburger_menu.parse_apps_manifest(overlay_manifest_buf[0..@intCast(n)], &parsed);
+    const parsed_n = sexiburger_menu.parse_apps_manifest(text, &parsed);
     for (parsed[0..parsed_n]) |app| {
         if (overlay_count >= overlay_max_apps) break;
         if (std.mem.eql(u8, app.name, "TABWM.BIN")) continue;
@@ -1473,6 +2107,12 @@ pub fn overlay_load_manifest() usize {
         const label_len = @min(app.desc.len, 32);
         @memcpy(overlay_labels[overlay_count][0..label_len], app.desc[0..label_len]);
         overlay_label_lens[overlay_count] = label_len;
+        // M48/BT3: the dock flag pins the spawned tab; `group=` labels it.
+        overlay_dock[overlay_count] = app.dock;
+        const group = manifest_group_for(text, app.name);
+        const glen = @min(group.len, overlay_groups[overlay_count].len);
+        @memcpy(overlay_groups[overlay_count][0..glen], group[0..glen]);
+        overlay_group_lens[overlay_count] = glen;
         overlay_count += 1;
     }
     overlay_loaded = true;
@@ -1522,6 +2162,10 @@ pub fn overlay_summon() void {
     // M42 UX r2: the Sexiburger overlay must not open over the modal
     // unsaved-changes dialog (the dialog owns the input).
     if (unsaved_dialog_open_tabwm) return;
+    // M48: the catalog surfaces are mutually exclusive (they share the
+    // filter/selection state).
+    start_open = false;
+    tab_search_open = false;
     if (!overlay_loaded) _ = overlay_load_manifest();
     overlay_open = true;
     write_marker(god_menu_marker);
@@ -1547,18 +2191,25 @@ pub fn overlay_launch_selected() bool {
     const blen = @min(bin.len, pending_launch_bin.len);
     @memcpy(pending_launch_bin[0..blen], bin[0..blen]);
     pending_launch_bin_len = blen;
+    // M48/BT3: carry the manifest group label to the new tab.
+    const group = overlay_groups[entry][0..overlay_group_lens[entry]];
+    const glen = @min(group.len, pending_launch_group.len);
+    @memcpy(pending_launch_group[0..glen], group[0..glen]);
+    pending_launch_group_len = glen;
+    pending_launch_pinned = overlay_dock[entry];
     _ = ui.exec_program(bin);
-    overlay_dismiss();
+    dismiss_active_catalog();
     return true;
 }
 
-/// Handle one key while the overlay is open (the raw WM_KEY stream).
-/// Returns true when consumed.
+/// Handle one key while a catalog surface is open (the raw WM_KEY stream).
+/// Returns true when consumed. Shared by the Sexiburger palette and the M48
+/// START page (they share the filter/selection state).
 pub fn overlay_key(usage: u8) bool {
-    if (!overlay_open) return false;
+    if (!overlay_open and !start_open) return false;
     switch (usage) {
         0x29 => { // Escape: dismiss
-            overlay_dismiss();
+            dismiss_active_catalog();
             return true;
         },
         0x28 => { // Enter: launch selected
@@ -1813,6 +2464,35 @@ pub fn draw_sidebar(scan: [*]u32) void {
         }
     }
 
+    // M48/BT3+BT6: the per-row status badges (a second pass so active,
+    // hover, and inactive pills all carry them): a pin dot at the left
+    // (clear of the active accent bar) and a frozen '~' at x=132.
+    if (manager.tab_count > 0) {
+        const vis_rows = visible_tab_rows();
+        var brel: usize = 0;
+        while (brel < vis_rows) : (brel += 1) {
+            const bi = tab_scroll + brel;
+            if (bi >= manager.tab_count) break;
+            const by = tab_row_y(brel);
+            if (manager.tabs[bi].pinned) {
+                ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(16, by + 17, 4, 4), 0, ui.theme_accent());
+            }
+            if (manager.tabs[bi].frozen) {
+                ui.draw_text_sized(0, "~", 132, by + 11, ui.font_size_badge, ui.sidebar_text_inactive());
+            }
+        }
+    }
+
+    // M48/BT5: the ACTIVE tab's back/forward affordances in the header row
+    // (accent when a step is available, dim otherwise).
+    if (manager.active_idx) |ai| {
+        if (ai < manager.tab_count) {
+            const at = &manager.tabs[ai];
+            ui.draw_text_sized(0, "<", 118, 40, ui.font_size_badge, if (at.can_nav_back()) ui.theme_accent() else ui.sidebar_text_inactive());
+            ui.draw_text_sized(0, ">", 128, 40, ui.font_size_badge, if (at.can_nav_forward()) ui.theme_accent() else ui.sidebar_text_inactive());
+        }
+    }
+
     // M42 UX r2: the close-feedback flash — the row slot the just-closed
     // tab occupied lights for a few composite ticks, drawn AFTER the pills
     // so it overlays (accent = the kernel applied the close; muted = the
@@ -1859,12 +2539,123 @@ pub fn draw_sidebar(scan: [*]u32) void {
     // M42 SX5: the Sexiburger god-menu overlay renders last (over the
     // canvas + sidebar dim).
     draw_overlay(pixels);
+    // M48/BT4: the START surface (the browser new-tab page).
+    draw_start_surface(pixels);
+    // M48/BT6: the tab-search overlay and the hover preview card.
+    draw_tab_search(pixels);
+    draw_hover_preview(pixels);
     // M42 UX r2: the unsaved-changes dialog renders after EVERYTHING —
     // TABWM composes the full scanout every tick, so its compose overdraws
     // the kernel's own dialog blit; TABWM self-paints the modal (same
     // 200x100 geometry + palette as driving_award paint_scene) so it is
     // actually visible while the kernel still applies the decisions.
     draw_unsaved_dialog(pixels);
+}
+
+/// The M48/BT4 START surface — a rail-native new-tab page. A dark dim over
+/// the content viewport, a titled panel, the SAME type-to-filter line the
+/// command palette uses, and a two-column apps grid. Rendering only; the
+/// filtering/selection state is shared with the catalog (`overlay_*`), so
+/// draw and key-handling can never disagree.
+pub fn draw_start_surface(pixels: []u32) void {
+    if (!start_open) return;
+    const pw: u32 = 560;
+    const ph: u32 = 420;
+    const px = viewport_x + (viewport_w - pw) / 2;
+    const py: u32 = 80;
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(viewport_x, 0, viewport_w, fb_h), 0, 0xB0000000);
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(px, py, pw, ph), 10, ui.sidebar_active_pill());
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(px, py, pw, 44), 10, ui.sidebar_hover_pill());
+    ui.draw_text_sized(0, "NEW TAB", px + 16, py + 15, ui.font_size_tab_title, ui.sidebar_text_active());
+    ui.draw_text_sized(0, "Ctrl+T  •  esc dismiss", px + pw - 200, py + 16, ui.font_size_badge, ui.sidebar_text_inactive());
+    ui.draw_text_sized(0, ">", px + 12, py + 54, ui.font_size_badge, ui.theme_accent());
+    if (overlay_filter_len > 0) {
+        ui.draw_text_sized(0, overlay_filter[0..overlay_filter_len], px + 24, py + 54, ui.font_size_badge, ui.sidebar_text_active());
+    } else {
+        ui.draw_text_sized(0, "search apps", px + 24, py + 54, ui.font_size_badge, ui.sidebar_text_inactive());
+    }
+    const col_w: u32 = (pw - 36) / 2;
+    var row: u32 = 0;
+    while (row < overlay_filtered_count and row < overlay_max_apps) : (row += 1) {
+        const entry = overlay_filtered[row];
+        const gx = px + 12 + (row % 2) * (col_w + 6);
+        const gy = py + 82 + (row / 2) * 34;
+        if (gy + 30 > py + ph - 20) break;
+        const is_sel = (row == overlay_sel);
+        ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(gx, gy, col_w, 30), 6, if (is_sel) ui.theme_accent() else ui.sidebar_hover_pill());
+        const label = overlay_labels[entry][0..overlay_label_lens[entry]];
+        ui.draw_text_sized(0, label[0..@min(label.len, 22)], gx + 8, gy + 9, ui.font_size_badge, if (is_sel) 0x000000 else ui.sidebar_text_active());
+    }
+    if (overlay_filtered_count == 0) {
+        ui.draw_text_sized(0, overlay_empty_message(), px + 16, py + 86, ui.font_size_badge, ui.sidebar_text_inactive());
+    }
+}
+
+/// The M48/BT6 tab-search overlay: a centered panel listing the tabs that
+/// match the typed query. Enter activates the selected tab.
+pub fn draw_tab_search(pixels: []u32) void {
+    if (!tab_search_open) return;
+    const pw: u32 = 380;
+    const ph: u32 = 320;
+    const px = viewport_x + (viewport_w - pw) / 2;
+    const py: u32 = 120;
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(viewport_x, 0, viewport_w, fb_h), 0, 0xB0000000);
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(px, py, pw, ph), 10, ui.sidebar_active_pill());
+    ui.draw_text_sized(0, "TABS", px + 14, py + 12, ui.font_size_tab_title, ui.sidebar_text_active());
+    ui.draw_text_sized(0, "Ctrl+Shift+A", px + pw - 110, py + 14, ui.font_size_badge, ui.sidebar_text_inactive());
+    ui.draw_text_sized(0, ">", px + 12, py + 44, ui.font_size_badge, ui.theme_accent());
+    if (tab_search_filter_len > 0) {
+        ui.draw_text_sized(0, tab_search_filter[0..tab_search_filter_len], px + 24, py + 44, ui.font_size_badge, ui.sidebar_text_active());
+    } else {
+        ui.draw_text_sized(0, "search tabs", px + 24, py + 44, ui.font_size_badge, ui.sidebar_text_inactive());
+    }
+    var r: u32 = 0;
+    while (r < tab_search_count and r < 12) : (r += 1) {
+        const ti = tab_search_results[r];
+        const ry = py + 72 + r * 20;
+        const is_sel = (r == tab_search_sel);
+        if (is_sel) {
+            ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(px + 8, ry - 2, pw - 16, 18), 4, ui.theme_accent());
+        }
+        const t = manager.tabs[ti].get_title();
+        ui.draw_text_sized(0, t[0..@min(t.len, 40)], px + 14, ry, ui.font_size_badge, if (is_sel) 0x000000 else ui.sidebar_text_active());
+    }
+    if (tab_search_count == 0) {
+        ui.draw_text_sized(0, "no matching tabs", px + 14, py + 76, ui.font_size_badge, ui.sidebar_text_inactive());
+    }
+}
+
+/// The M48/BT6 hover preview card: after the pointer rests on a tab, a small
+/// card appears beside the rail with the title, executable, group, and
+/// unsaved/frozen/pinned status. The thumbnail area is a neutral placeholder
+/// (per-window pixels are not exposed across the WM boundary).
+pub fn draw_hover_preview(pixels: []u32) void {
+    const row = hover_tab orelse return;
+    if (row >= manager.tab_count) return;
+    if (!hover_preview_visible(row)) return;
+    const t = &manager.tabs[row];
+    const pw: u32 = 240;
+    const ph: u32 = 132;
+    const rel = if (row >= tab_scroll) row - tab_scroll else 0;
+    var py: u32 = tab_row_y(rel);
+    if (py + ph > tab_list_bottom) py = tab_list_bottom - ph;
+    const px: u32 = sidebar_w + 8;
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(px, py, pw, ph), 8, ui.sidebar_active_pill());
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(px + 8, py + 8, pw - 16, 54), 6, ui.sidebar_hover_pill());
+    ui.draw_text_sized(0, "[preview]", px + 14, py + 26, ui.font_size_badge, ui.sidebar_text_inactive());
+    const title = t.get_title();
+    ui.draw_text_sized(0, title[0..@min(title.len, 30)], px + 10, py + 72, ui.font_size_badge, ui.sidebar_text_active());
+    const bin = t.get_bin();
+    var sub: [48]u8 = undefined;
+    const sub_str = if (bin.len > 0)
+        (std.fmt.bufPrint(&sub, "{s}{s}", .{ if (t.pinned) "*" else "", bin }) catch bin)
+    else if (t.group_len > 0)
+        (std.fmt.bufPrint(&sub, "group: {s}", .{t.group[0..t.group_len]}) catch "group")
+    else
+        "app tab";
+    ui.draw_text_sized(0, sub_str, px + 10, py + 88, ui.font_size_badge, ui.sidebar_text_inactive());
+    const status: []const u8 = if (t.frozen) "frozen" else if (t.unsaved) "unsaved" else "active";
+    ui.draw_text_sized(0, status, px + 10, py + 104, ui.font_size_badge, ui.theme_accent());
 }
 
 /// The unsaved-changes dialog, self-painted (M42 UX r2, claim #1011):
@@ -2043,6 +2834,10 @@ pub fn handle_pointer(px: u32, py: u32, clicked: bool) void {
                 request_close_tab(idx);
             } else {
                 activate_tab(idx);
+                // M48/BT2: a press on the row body arms a drag; release over
+                // a different row commits the reorder (a plain click is a
+                // same-row no-op).
+                begin_tab_drag(idx);
             }
         }
     }
@@ -2142,6 +2937,45 @@ pub fn handle_wm_key(usage: u8, flags: u16) void {
                 _ = move_active_tab(1);
                 return;
             }
+            // M48/BT2: Ctrl+Shift+PgUp/PgDn are the browser keyboard-move
+            // chords (alongside Ctrl+Shift+Left/Right).
+            if (usage == usage_pageup) {
+                _ = move_active_tab(-1);
+                return;
+            }
+            if (usage == usage_pagedown) {
+                _ = move_active_tab(1);
+                return;
+            }
+            // M48/BT1: duplicate the active tab.
+            if (usage == usage_d) {
+                _ = duplicate_active_tab();
+                return;
+            }
+            // M48/BT3: pin/unpin the active tab.
+            if (usage == usage_p) {
+                if (manager.active_idx) |cur| _ = pin_toggle(cur);
+                return;
+            }
+            // M48/BT6: freeze/unfreeze the active tab's badge.
+            if (usage == usage_f) {
+                if (manager.active_idx) |cur| _ = freeze_toggle(cur);
+                return;
+            }
+            // M48/BT6: tab search.
+            if (usage == usage_a) {
+                tab_search_summon();
+                return;
+            }
+            // M48/BT5: per-tab history back/forward (Ctrl+Shift+[ / ]).
+            if (usage == usage_left_bracket) {
+                _ = nav_back_active();
+                return;
+            }
+            if (usage == usage_right_bracket) {
+                _ = nav_forward_active();
+                return;
+            }
         }
 
         // Ctrl+Tab / Ctrl+Shift+Tab: cycle tabs (M42 UX r2: the SAME
@@ -2189,6 +3023,12 @@ pub fn handle_wm_key(usage: u8, flags: u16) void {
 // ---------------------------------------------------------------------------
 // WM_RPC Mailbox Communication Loop
 // ---------------------------------------------------------------------------
+/// M48/BT5: a reply payload set by `wnd_mail_apply` and copied into the ack's
+/// `title` field by `wnd_mail_reply` (the nav-poll channel: the WM hands the
+/// app the target path it must navigate to). Zero length = no payload.
+var rpc_reply_payload: [ui.wm_rpc_title_max]u8 = [_]u8{0} ** ui.wm_rpc_title_max;
+var rpc_reply_payload_len: usize = 0;
+
 fn wnd_mail_reply(reply_to: u8, req: *const ui.WmRpc, applied: bool) void {
     var rep: ui.WmRpc = .{
         .kind = req.kind | ui.wm_rpc_reply_flag,
@@ -2203,8 +3043,18 @@ fn wnd_mail_reply(reply_to: u8, req: *const ui.WmRpc, applied: bool) void {
         .h = 0,
         .title = [_]u8{0} ** ui.wm_rpc_title_max,
     };
+    if (rpc_reply_payload_len > 0) {
+        @memcpy(rep.title[0..rpc_reply_payload_len], rpc_reply_payload[0..rpc_reply_payload_len]);
+        rpc_reply_payload_len = 0;
+    }
     const rep_bytes = std.mem.asBytes(&rep);
     _ = syscall3(sys_ipc_send, reply_to, @intFromPtr(rep_bytes.ptr), rep_bytes.len);
+}
+
+fn set_reply_payload(payload: []const u8) void {
+    const n = @min(payload.len, rpc_reply_payload.len);
+    @memcpy(rpc_reply_payload[0..n], payload[0..n]);
+    rpc_reply_payload_len = n;
 }
 
 pub fn wnd_mail_apply(req: *const ui.WmRpc) bool {
@@ -2272,6 +3122,28 @@ pub fn wnd_mail_apply(req: *const ui.WmRpc) bool {
                 // M42 UX r2: the third close entry point — same decision
                 // rule as the pointer 'x' and Ctrl+W (dirty = dialog).
                 request_close_tab(idx);
+                return true;
+            }
+            return false;
+        },
+        // M48/BT5: an app declared a navigation event (FILE.BIN directory,
+        // EDIT.BIN file). The path rides the `title` field.
+        wm_rpc_kind_nav_declare => {
+            var path: []const u8 = req.title[0..];
+            for (req.title, 0..) |c, i| {
+                if (c == 0) {
+                    path = req.title[0..i];
+                    break;
+                }
+            }
+            return nav_declare(req.id, path);
+        },
+        // M48/BT5: an app polls for the target back/forward queued for it.
+        // The reply `title` carries the path (id and applied still set).
+        wm_rpc_kind_nav_poll => {
+            var buf: [hist_path_max]u8 = undefined;
+            if (nav_poll(req.id, &buf)) |target| {
+                set_reply_payload(target);
                 return true;
             }
             return false;
@@ -2351,6 +3223,9 @@ fn main() noreturn {
                     if (close_flash_ticks == 0) close_flash_row = null;
                 }
 
+                // M48/BT6: advance the hover-preview dwell.
+                _ = hover_tick();
+
                 // #1056 item 1: the real clock — the session host epoch when
                 // `.clock` is present, else the kernel's firmware clock
                 // (boot EFI GetTime + uptime), else honest uptime.
@@ -2377,7 +3252,10 @@ fn main() noreturn {
                 const py = ev.arg0 >> 16;
                 const buttons: u8 = @intCast(ev.flags & 0xff);
                 const clicked = (buttons & btn_left) != 0;
+                const left_released = (prev_buttons & btn_left) != 0 and (buttons & btn_left) == 0;
                 handle_pointer(px, py, clicked);
+                // M48/BT2: a left release commits an in-flight tab drag.
+                if (left_released) _ = end_tab_drag(py);
                 // #1064: middle-click a tab to close it (edge-detected — the
                 // kernel fans the held-button state on every sample).
                 if ((buttons & btn_middle) != 0 and (prev_buttons & btn_middle) == 0) {
@@ -2408,8 +3286,10 @@ fn main() noreturn {
                 // a close decision is pending).
                 if (unsaved_dialog_open_tabwm) {
                     _ = unsaved_dialog_key(usage);
-                } else if (!overlay_key(usage)) {
-                    // M42 SX5: the god-menu overlay consumes the stream next.
+                } else if (!overlay_key(usage) and !tab_search_key(usage)) {
+                    // M42 SX5: the god-menu overlay (and the M48 START page)
+                    // consume the stream next; the M48 tab-search overlay
+                    // follows, then the tab chords.
                     handle_wm_key(usage, ev.flags);
                 }
             },
@@ -2457,6 +3337,21 @@ pub fn resetForTest() void {
     prev_buttons = 0;
     closed_count = 0;
     pending_launch_bin_len = 0;
+
+    // M48 state (BT1–BT6).
+    pending_launch_group_len = 0;
+    pending_launch_pinned = false;
+    drag_from = null;
+    start_open = false;
+    pending_nav_id = 0;
+    pending_nav_len = 0;
+    hover_preview_ticks = 0;
+    hover_preview_target = null;
+    tab_search_open = false;
+    tab_search_filter_len = 0;
+    tab_search_count = 0;
+    tab_search_sel = 0;
+    rpc_reply_payload_len = 0;
 
     overlay_open = false;
     overlay_loaded = false;
@@ -3122,20 +4017,23 @@ test "tabwm: + New tab affordance and Ctrl+T trigger the new-tab path (M42 UX)" 
     // The pinned marker the class-B live gate greps.
     try std.testing.expectEqualStrings("tabwm: new-tab\n", new_tab_marker);
 
-    // Ctrl+T summons the launcher.
+    // M48/BT4: Ctrl+T summons the START surface (the browser new-tab page),
+    // not the Sexiburger command palette.
     manager = TabManager.init();
+    start_open = false;
     overlay_open = false;
     handle_wm_key(usage_t, ui.MOD_CTRL);
-    try std.testing.expect(overlay_open);
-    overlay_dismiss();
+    try std.testing.expect(start_open);
+    try std.testing.expect(!overlay_open);
+    start_dismiss();
 
     // Hover lights the pill; click fires the affordance.
     const r = new_tab_pill_rect();
     handle_pointer(r.x + 40, r.y + 10, false);
     try std.testing.expect(hover_new_tab);
     handle_pointer(r.x + 40, r.y + 10, true);
-    try std.testing.expect(overlay_open);
-    overlay_dismiss();
+    try std.testing.expect(start_open);
+    start_dismiss();
 
     // Hit-test ORDER: with max_tabs tabs the '+' pill clamps INTO the
     // tab-row band — the generic row mapping (idx 15) must NOT eat the
@@ -3148,14 +4046,21 @@ test "tabwm: + New tab affordance and Ctrl+T trigger the new-tab path (M42 UX)" 
     const clamped = new_tab_pill_rect();
     try std.testing.expectEqual(@as(u32, 650 - new_tab_pill_h), clamped.y);
     handle_pointer(clamped.x + 40, clamped.y + 10, true);
-    try std.testing.expect(overlay_open);
+    try std.testing.expect(start_open);
     try std.testing.expectEqual(@as(?usize, 3), manager.active_idx); // no tab-15 hijack
-    overlay_dismiss();
+    start_dismiss();
 
     // Empty state: the pill renders in the empty-state area and works there.
     manager = TabManager.init();
     handle_pointer(50, 70, true); // y=62..86 pill band, tab_count == 0
+    try std.testing.expect(start_open);
+    start_dismiss();
+
+    // Ctrl+Space still summons the Sexiburger command palette (unchanged),
+    // and the two catalog surfaces are mutually exclusive.
+    handle_wm_key(usage_space, ui.MOD_CTRL);
     try std.testing.expect(overlay_open);
+    try std.testing.expect(!start_open);
     overlay_dismiss();
 }
 
@@ -3896,4 +4801,260 @@ test "tabwm: reopen-closed re-execs a TABWM-launched app (#1064)" {
     try std.testing.expectEqual(@as(usize, 1), closed_count);
     try std.testing.expect(!reopen_last_closed());
     try std.testing.expectEqual(@as(usize, 0), closed_count);
+}
+
+// ---------------------------------------------------------------------------
+// Unit Tests (M48 — browser-style tab depth, umbrella #1120)
+// ---------------------------------------------------------------------------
+
+test "tabwm: M48 markers are pinned (BT1–BT6)" {
+    try std.testing.expectEqualStrings("tabwm: duplicate ", duplicate_marker);
+    try std.testing.expectEqualStrings("tabwm: tab-reorder ", tab_reorder_marker);
+    try std.testing.expectEqualStrings("tabwm: tab-pin ", pin_marker);
+    try std.testing.expectEqualStrings("tabwm: start-surface\n", start_marker);
+    try std.testing.expectEqualStrings("tabwm: nav-decl ", nav_decl_marker);
+    try std.testing.expectEqualStrings("tabwm: nav-back ", nav_back_marker);
+    try std.testing.expectEqualStrings("tabwm: nav-forward ", nav_forward_marker);
+    try std.testing.expectEqualStrings("tabwm: tab-freeze ", freeze_marker);
+    try std.testing.expectEqualStrings("tabwm: tab-search\n", tab_search_marker);
+}
+
+test "tabwm: duplicate active tab re-execs its recorded bin (M48/BT1)" {
+    resetForTest();
+    _ = manager.add_or_update_tab(2, "Calc");
+    manager.tabs[0].set_bin("CALC.BIN");
+    activate_tab(0);
+    try std.testing.expect(duplicate_active_tab());
+    try std.testing.expectEqualStrings("CALC.BIN", pending_launch_bin[0..pending_launch_bin_len]);
+
+    // No recorded bin (a self-opened window) -> honest no-op.
+    _ = manager.add_or_update_tab(3, "Mystery");
+    activate_tab(1);
+    try std.testing.expect(!duplicate_active_tab());
+}
+
+test "tabwm: move_tab shifts, keeps active, and reorder persists (M48/BT2)" {
+    resetForTest();
+    _ = manager.add_or_update_tab(2, "A");
+    _ = manager.add_or_update_tab(3, "B");
+    _ = manager.add_or_update_tab(4, "C");
+    activate_tab(1); // B is active
+
+    // Move C to the front; B keeps the active focus by id.
+    try std.testing.expect(reorder_tab(2, 0));
+    try std.testing.expectEqualStrings("C", manager.tabs[0].get_title());
+    try std.testing.expectEqualStrings("A", manager.tabs[1].get_title());
+    try std.testing.expectEqualStrings("B", manager.tabs[2].get_title());
+    try std.testing.expectEqual(@as(?usize, 2), manager.active_idx);
+    try std.testing.expectEqual(@as(?u32, 3), manager.get_active_id());
+
+    // The persisted order reflects the move.
+    var buf: [tabs_state_max_bytes]u8 = undefined;
+    const n = serialize_tabs(&buf);
+    var st: TabsState = .{};
+    try std.testing.expect(parse_tabs(buf[0..n], &st));
+    try std.testing.expectEqualStrings("C", st.titles[0][0..st.title_lens[0]]);
+
+    // Same-row and out-of-range moves are no-ops.
+    try std.testing.expect(!reorder_tab(1, 1));
+    try std.testing.expect(!reorder_tab(0, 9));
+}
+
+test "tabwm: pointer drag reorders tabs (M48/BT2)" {
+    resetForTest();
+    _ = manager.add_or_update_tab(2, "A");
+    _ = manager.add_or_update_tab(3, "B");
+    _ = manager.add_or_update_tab(4, "C");
+    activate_tab(0);
+
+    // Press row 0 (A), release over row 2: A moves to the end.
+    handle_pointer(50, tab_row_y(0) + 4, true);
+    try std.testing.expectEqual(@as(?usize, 0), drag_from);
+    try std.testing.expect(end_tab_drag(tab_row_y(2) + 4));
+    try std.testing.expectEqualStrings("B", manager.tabs[0].get_title());
+    try std.testing.expectEqualStrings("C", manager.tabs[1].get_title());
+    try std.testing.expectEqualStrings("A", manager.tabs[2].get_title());
+    try std.testing.expect(drag_from == null);
+
+    // A plain click (release over the same row) does not reorder.
+    handle_pointer(50, tab_row_y(0) + 4, true);
+    try std.testing.expect(!end_tab_drag(tab_row_y(0) + 4));
+
+    // Keyboard move (Ctrl+Shift+PgDn) routes through the same reorder.
+    activate_tab(0);
+    handle_wm_key(usage_pagedown, ui.MOD_CTRL | ui.MOD_SHIFT);
+    try std.testing.expectEqual(@as(?usize, 1), manager.active_idx);
+}
+
+test "tabwm: pinning sorts pinned tabs first (M48/BT3)" {
+    resetForTest();
+    _ = manager.add_or_update_tab(2, "A");
+    _ = manager.add_or_update_tab(3, "B");
+    _ = manager.add_or_update_tab(4, "C");
+    activate_tab(2); // C active
+
+    try std.testing.expect(pin_toggle(2)); // pin C
+    try std.testing.expectEqualStrings("C", manager.tabs[0].get_title());
+    try std.testing.expectEqual(@as(usize, 1), manager.front_pinned_count());
+    // Active follows the tab by id.
+    try std.testing.expectEqual(@as(?u32, 4), manager.get_active_id());
+
+    // Unpin restores the unpinned order.
+    try std.testing.expect(pin_toggle(0));
+    try std.testing.expectEqual(@as(usize, 0), manager.front_pinned_count());
+}
+
+test "tabwm: manifest group parsing + dock pin adoption (M48/BT3)" {
+    resetForTest();
+    const text = "# c\nCALC.BIN | Calc | c | dock=true | group=System\nNOTEPAD.BIN | Editor | n | group=Office\n";
+    try std.testing.expectEqualStrings("System", manifest_group_for(text, "CALC.BIN"));
+    try std.testing.expectEqualStrings("Office", manifest_group_for(text, "NOTEPAD.BIN"));
+    try std.testing.expectEqualStrings("", manifest_group_for(text, "MISSING.BIN"));
+
+    // The launch handshake carries bin + group + dock-pin; the mirror adopts
+    // them onto the new tab.
+    pending_launch_bin_len = 8;
+    @memcpy(pending_launch_bin[0..8], "CALC.BIN");
+    pending_launch_group_len = 6;
+    @memcpy(pending_launch_group[0..6], "System");
+    pending_launch_pinned = true;
+    handle_window_mirror(2, true, false, false, 0, 0);
+    try std.testing.expectEqualStrings("System", manager.tabs[0].group[0..manager.tabs[0].group_len]);
+    try std.testing.expect(manager.tabs[0].pinned);
+    try std.testing.expectEqual(@as(usize, 1), manager.front_pinned_count());
+}
+
+test "tabwm: START surface summons, shares the catalog, and launches (M48/BT4)" {
+    resetForTest();
+    overlay_seed_catalog();
+    overlay_loaded = true; // catalog seeded; skip the (host no-op) load
+
+    start_summon();
+    try std.testing.expect(start_open);
+    try std.testing.expect(!overlay_open);
+    try std.testing.expectEqual(@as(usize, 3), overlay_filtered_count);
+
+    // Enter launches the selected entry and dismisses the START page.
+    overlay_sel = 0;
+    try std.testing.expect(overlay_launch_selected());
+    try std.testing.expect(!start_open);
+    try std.testing.expectEqualStrings("CALC.BIN", pending_launch_bin[0..pending_launch_bin_len]);
+
+    // Escape dismisses; the two catalog surfaces are mutually exclusive.
+    start_summon();
+    try std.testing.expect(overlay_key(0x29));
+    try std.testing.expect(!start_open);
+    overlay_summon();
+    start_summon();
+    try std.testing.expect(start_open);
+    try std.testing.expect(!overlay_open);
+    start_dismiss();
+}
+
+test "tabwm: per-tab navigation history records, dedupes, truncates, bounds (M48/BT5)" {
+    resetForTest();
+    var t = Tab{};
+    try std.testing.expect(t.nav_record("/a"));
+    try std.testing.expect(t.nav_record("/b"));
+    try std.testing.expect(!t.nav_record("/b")); // consecutive duplicate
+    try std.testing.expectEqualStrings("/b", t.current_nav().?);
+    try std.testing.expect(t.can_nav_back());
+    try std.testing.expect(!t.can_nav_forward());
+
+    try std.testing.expectEqualStrings("/a", t.nav_back().?);
+    try std.testing.expect(t.can_nav_forward());
+    try std.testing.expectEqualStrings("/a", t.current_nav().?);
+
+    // Navigating after a back truncates the forward stack.
+    try std.testing.expect(t.nav_record("/c"));
+    try std.testing.expect(!t.can_nav_forward());
+    try std.testing.expectEqual(@as(usize, 2), t.hist_count);
+
+    // Bound: past hist_max, the oldest entry is dropped.
+    var i: usize = 0;
+    while (i < hist_max + 3) : (i += 1) {
+        var b: [8]u8 = undefined;
+        const p = std.fmt.bufPrint(&b, "/p{d}", .{i}) catch "/p";
+        _ = t.nav_record(p);
+    }
+    try std.testing.expectEqual(hist_max, t.hist_count);
+}
+
+test "tabwm: back/forward queue the target for the owning app (M48/BT5)" {
+    resetForTest();
+    _ = manager.add_or_update_tab(2, "Files");
+    activate_tab(0);
+    try std.testing.expect(nav_declare(2, "/host"));
+    try std.testing.expect(nav_declare(2, "/host/docs"));
+    try std.testing.expectEqualStrings("/host/docs", manager.tabs[0].current_nav().?);
+
+    try std.testing.expect(nav_back_active());
+    try std.testing.expectEqual(@as(u32, 2), pending_nav_id);
+    var buf: [hist_path_max]u8 = undefined;
+    try std.testing.expectEqualStrings("/host", nav_poll(2, &buf).?);
+    try std.testing.expect(nav_poll(2, &buf) == null); // poll-once
+
+    try std.testing.expect(nav_forward_active());
+    try std.testing.expectEqualStrings("/host/docs", nav_poll(2, &buf).?);
+    try std.testing.expect(!nav_forward_active()); // already at the newest entry
+
+    // The same path through the mailbox RPC (the app-facing seam).
+    var req = ui.WmRpc{
+        .kind = wm_rpc_kind_nav_declare,
+        .id = 2,
+        .seq = 1,
+        .reply_to = 5,
+        .applied = 0,
+        .pad = 0,
+        .x = 0,
+        .y = 0,
+        .w = 0,
+        .h = 0,
+        .title = [_]u8{0} ** ui.wm_rpc_title_max,
+    };
+    @memcpy(req.title[0..6], "/etc/x");
+    try std.testing.expect(wnd_mail_apply(&req));
+    try std.testing.expectEqualStrings("/etc/x", manager.tabs[0].current_nav().?);
+}
+
+test "tabwm: hover preview dwell, frozen badge, and tab search (M48/BT6)" {
+    resetForTest();
+    _ = manager.add_or_update_tab(2, "Calculator");
+    _ = manager.add_or_update_tab(3, "Notepad");
+    _ = manager.add_or_update_tab(4, "Terminal");
+    activate_tab(0);
+
+    // Hover dwell: the preview appears only after the delay.
+    hover_tab = 0;
+    _ = hover_tick(); // target change, ticks = 0
+    try std.testing.expect(!hover_preview_visible(0));
+    _ = hover_tick(); // ticks = 1
+    try std.testing.expect(!hover_preview_visible(0));
+    _ = hover_tick(); // ticks = 2
+    try std.testing.expect(hover_preview_visible(0));
+    try std.testing.expect(!hover_preview_visible(1));
+
+    // Moving the pointer resets the dwell.
+    hover_tab = 1;
+    _ = hover_tick();
+    try std.testing.expect(!hover_preview_visible(0));
+    try std.testing.expect(!hover_preview_visible(1));
+
+    // Frozen badge toggles.
+    try std.testing.expect(freeze_toggle(0));
+    try std.testing.expect(manager.tabs[0].frozen);
+    try std.testing.expect(freeze_toggle(0));
+    try std.testing.expect(!manager.tabs[0].frozen);
+
+    // Tab search: case-insensitive substring, activate picks the tab.
+    tab_search_summon();
+    try std.testing.expect(tab_search_is_open());
+    try std.testing.expectEqual(@as(usize, 3), tab_search_match_count());
+    tab_search_filter_len = 4;
+    @memcpy(tab_search_filter[0..4], "note");
+    tab_search_refresh();
+    try std.testing.expectEqual(@as(usize, 1), tab_search_match_count());
+    try std.testing.expect(tab_search_activate());
+    try std.testing.expect(!tab_search_is_open());
+    try std.testing.expectEqual(@as(?u32, 3), manager.get_active_id());
 }

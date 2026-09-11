@@ -229,3 +229,15 @@ windows=6 focused=2` — CALC holds kernel focus after the commit;
 owner=3` + TABWM's `tabwm: tab-switch idx=1 id=3` because NOTEPAD's
 own open marker hardcodes id=2). Class A 75/75; logs:
 `artifacts/2026-09-05-tabwm-unsaved-alttab/` + `artifacts/live-tabwm-{unsaved,alttab}-*`.
+
+## M48 — browser-style tab depth (rail-native) continuation
+
+The post-M42 browser-tab arc (goal #1064) landed as M48 (umbrella #1120),
+still on the LEFT RAIL: reopen/duplicate, drag + keyboard reorder, pinned
+tabs / APPS.TXT groups, a rail-native START surface on Ctrl+T (Ctrl+Space
+keeps the Sexiburger palette), per-tab back/forward over app-declared
+navigation, and hover preview / status badge / tab search. The full card
+table and the observed class-A + class-B (VZ) evidence live in
+`docs/march-m39-tabbed-desktop.md` § "M48 — browser-style tab depth,
+rail-native"; the app-facing navigation seam is
+`user/src/lib/tabapp.zig` (`declare_nav` / `poll_nav`).

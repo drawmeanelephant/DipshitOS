@@ -27,11 +27,11 @@
 
 | dir | files | role |
 |---|---|---|
-| `tools/lib/` | 1 | per-run isolation for live gates (`gate-run.sh`) |
+| `tools/lib/` | 2 | per-run isolation for live gates (`gate-run.sh`) |
 | `tools/status/` | 6 | multiagent coordination gate + claim tooling (class A) |
 | `tools/context/` | 2 | context snapshot helpers |
 | `tools/ragshit/` | 84 | host-side context engine (developer tooling, not guest software) |
-| `tools/gate/` | 198 | M40 vgate harness + specs (GF2+) |
+| `tools/gate/` | 203 | M40 vgate harness + specs (GF2+) |
 
 ## Class-B fleet (discovered from the spec dir)
 
@@ -60,6 +60,7 @@ of them with `just verify-vz`.
 | spec | `live-clipboard` | 1 run / 11 assert | live-clipboard.spec -- milestone-fourteen card S1 class-B gate (claim |
 | spec | `live-color` | 1 run / 6 assert | live-color.spec -- M18 T5 class-B gate (issue #408): ANSI terminal |
 | spec | `live-concurrent` | 1 run / 5 assert | live-concurrent.spec -- two USER.BIN programs live at once: both |
+| spec | `live-console-tcp` | 2 run / 6 assert | live-console-tcp.spec -- M46 RC2 pilot (issue #1069): the declarative |
 | spec | `live-crash-viewer` | 1 run / 7 assert | live-crash-viewer.spec -- M22 D11: crash report viewer on VZ. |
 | spec | `live-crypto` | 1 run / 9 assert | live-crypto.spec -- M47 CP5 (issue #1119): the guest-class-B proof that |
 | spec | `live-desktop` | 1 run / 10 assert | live-desktop.spec -- claim 2427 (Milestone 11, Card A5) Desktop Platform & GUI Apps (ADR 0011) |
@@ -145,6 +146,8 @@ of them with `just verify-vz`.
 | spec | `live-quote` | 1 run / 7 assert | live-quote.spec -- quoting & escaping: single-quote grouping, |
 | spec | `live-reboot` | 2 run / 7 assert | live-reboot.spec -- live reboot and shutdown from the shell. |
 | spec | `live-remote` | 1 run / 10 assert | live-remote.spec -- M45 card SH7 class-B gate (issue #1083, ADR 0020 B). |
+| spec | `live-remote-auth` | 2 run / 9 assert | live-remote-auth.spec -- M46 RC3 class-B gate (issue #1111, ADR 0022 D3). |
+| spec | `live-remote-console` | 2 run / 7 assert | live-remote-console.spec -- M46 RC4 class-B gate (issue #1112, ADR 0022). |
 | spec | `live-resmon` | 1 run / 5 assert | live-resmon.spec -- M22 D10: RESMON.BIN resource monitor on VZ. |
 | spec | `live-roadpops` | 1 run / 11 assert | live-roadpops.spec -- claim 1574 (milestone six, card G3) class-B |
 | spec | `live-sb2-shared-anon` | 1 run / 8 assert | live-sb2-shared-anon.spec -- M33 SB2 (claim 8878) class-B gate: the |
@@ -188,11 +191,13 @@ of them with `just verify-vz`.
 | spec | `live-tabstrip` | 1 run / 4 assert | live-tabstrip.spec -- M37 DQ2 tab-strip chrome (issue #840) |
 | spec | `live-tabwm` | 1 run / 12 assert | live-tabwm.spec -- M39 TWM3 (issue #930) class-B gate: the browser-style |
 | spec | `live-tabwm-alttab` | 1 run / 12 assert | live-tabwm-alttab.spec -- M42 UX hardening round 2 (2026-09-05, claim #1011, ADR 0018 addendum) |
+| spec | `live-tabwm-bt` | 1 run / 12 assert | live-tabwm-bt.spec -- M48 BT1-BT6 (umbrella #1120) class-B gate: the |
 | spec | `live-tabwm-close` | 1 run / 16 assert | live-tabwm-close.spec -- M42 UX hardening (2026-09-05, claim #1008 / ADR 0018 D2) |
 | spec | `live-tabwm-fullscreen` | 2 run / 25 assert | live-tabwm-fullscreen.spec -- M42 SX5 (issue #986) class-B gate: Sexiburger tabbed desktop as PRIMAR |
 | spec | `live-tabwm-unsaved` | 2 run / 16 assert | live-tabwm-unsaved.spec -- M42 UX hardening round 2 (2026-09-05, claim #1011, ADR 0018 addendum) |
 | spec | `live-tasks` | 1 run / 5 assert | live-tasks.spec -- tick-driven round-robin: the worker demonstrably |
 | spec | `live-term` | 1 run / 8 assert | live-term.spec -- M45 card SH6 class-B gate (issue #1082, ADR 0020 A). |
+| spec | `live-term-net` | 1 run / 5 assert | live-term-net.spec -- M46 RC3b class-B gate (issue #1104, ADR 0020 B6). |
 | spec | `live-text` | 1 run / 10 assert | live-text.spec -- claim 3194 (milestone six, card G2) class-B gate: |
 | spec | `live-text-search` | 2 run / 9 assert | live-text-search.spec -- milestone-twenty card U3 class-B gate (text search in apps) |
 | spec | `live-time` | 1 run / 4 assert | live-time.spec -- M22 D13 (issue #336) class-B gate: |

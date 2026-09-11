@@ -505,3 +505,53 @@ test "tcp: passive open and server handshake (listen -> syn_received -> establis
     try std.testing.expectEqual(State.listen, tcp.state);
     try std.testing.expectEqual(@as(u16, 0), tcp.peer_port);
 }
+
+test "tcp: M46 RC3 — the allowlist refuses a non-listed SYN with RST and still accepts the listed host" {
+    arp.own_ip = ip_guest;
+    defer arp.own_ip = .{ 0, 0, 0, 0 };
+    reset();
+    defer reset();
+    listen(8080);
+    tcp.allow_ip = .{ 10, 0, 0, 3 };
+    tcp.allow_ip_set = true;
+
+    // A SYN from 10.0.0.2 (not allowlisted): RST+ACK, counted, stay LISTEN.
+    const bad = craft_frame(ip_host, host_mac, ip_guest, test_mac, 54321, 8080, 0x10000000, 0, flag_syn, &.{});
+    try std.testing.expectEqual(Event.none, handle_rx(&bad));
+    try std.testing.expectEqual(State.listen, tcp.state);
+    try std.testing.expectEqual(@as(u64, 1), tcp.auth_rejected);
+    try std.testing.expectEqual(@as(u64, 1), tcp.rst_sent);
+    try std.testing.expect(tcp.ack_pending);
+    try std.testing.expectEqual(@as(u8, flag_rst | flag_ack), tcp.msg[13]);
+    try std.testing.expectEqualSlices(u8, &.{ 0x10, 0x00, 0x00, 0x01 }, tcp.msg[8..12]); // ack = client ISN+1
+
+    // A SYN from the allowlisted 10.0.0.3 completes the handshake as usual.
+    const good = craft_frame([4]u8{ 10, 0, 0, 3 }, host_mac, ip_guest, test_mac, 55555, 8080, 0x20000000, 0, flag_syn, &.{});
+    try std.testing.expectEqual(Event.synack_recv, handle_rx(&good));
+    try std.testing.expectEqual(State.syn_received, tcp.state);
+    try std.testing.expectEqualSlices(u8, &.{ 10, 0, 0, 3 }, &tcp.peer_ip);
+}
+
+test "tcp: M46 #1105 — a half-open server accept aborts on the SYN-ACK retransmission bound" {
+    arp.own_ip = ip_guest;
+    defer arp.own_ip = .{ 0, 0, 0, 0 };
+    reset();
+    defer reset();
+    tcp.now_ticks = 0;
+    listen(8080);
+    const syn = craft_frame(ip_host, host_mac, ip_guest, test_mac, 54321, 8080, 0x10000000, 0, flag_syn, &.{});
+    try std.testing.expectEqual(Event.synack_recv, handle_rx(&syn));
+    try std.testing.expectEqual(State.syn_received, tcp.state);
+    try std.testing.expect(tcp.tx_pending);
+    var i: u64 = 0;
+    while (i < retx_max) : (i += 1) {
+        tcp.now_ticks += rto_ticks;
+        try std.testing.expectEqual(RtoEvent.retransmit, poll_rto());
+    }
+    try std.testing.expect(!tcp.accept_aborted);
+    tcp.now_ticks += rto_ticks;
+    try std.testing.expectEqual(RtoEvent.abort, poll_rto());
+    try std.testing.expect(tcp.accept_aborted);
+    try std.testing.expectEqual(State.listen, tcp.state); // the listener survives
+    try std.testing.expectEqual(@as(u64, 1), tcp.retx_aborted);
+}
