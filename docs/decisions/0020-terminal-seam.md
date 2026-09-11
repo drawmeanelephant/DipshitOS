@@ -1,12 +1,13 @@
 # ADR 0020: The terminal (vt) seam — a userland-ownable console
 
-Status: **PROPOSED** · Date: 2026-09-10 · Milestone: M44 (next focus) ·
-Issue **#1072** · Claim **#1073**
+Status: **ACCEPTED** · Date: 2026-09-10 · Milestone: M44 (next focus) ·
+Issue **#1072** · Claims **#1073** (object + ABI) and **#1075** (pump + pilot)
 
-> The design direction is fixed here and the pure object lands with this claim
-> (`kernel/src/terminal.zig`, class-A tested). The ABI wiring (the `/dev/tty`
-> device-fd routing in `kernel/src/file_table.zig`) and the EL0 pilot are the
-> next tranche; this ADR is the contract both build against.
+> The object (`kernel/src/terminal.zig`), the `/dev/tty` device-fd routing
+> (`kernel/src/file_table.zig`), the serial front-end pump, and the EL0 pilot
+> (`TTYECHO.BIN`, class-B `live-ttyecho`) all landed under #1073/#1075. Boot
+> default is unchanged: nothing attaches until a process calls
+> `sys_tty_attach`.
 
 ## Context
 
@@ -69,10 +70,14 @@ kind routed to the terminal object — **no new syscall slot** for terminal I/O.
 
 Rationale: the fd shape is the least-clawback one. Every future channel
 (remote session, SSH channel, extra shells) is another fd, not another
-syscall; and the frozen ADR 0007 ABI is reused rather than extended. Front-end
-attach/detach starts as kernel/boot policy (the monitor hands over the serial
-console); a dedicated `sys_tty_*` slot is added **only if** that policy proves
-insufficient — a deliberate, later decision.
+syscall; and the frozen ADR 0007 ABI is reused rather than extended.
+
+**Update (claim #1075):** front-end attach/detach landed as **ADR 0007 slot 67
+`sys_tty_attach(front_end)`** (`0` = detach, `1` = serial console; window/net
+reserved `ENOSYS`) rather than boot policy — the decision was deferred to the
+wiring tranche and a single explicit slot proved cleaner and testable than a
+boot setting, while terminal I/O still consumes no slot. Boot policy can still
+drive the attach from a startup file later; the slot is the mechanism.
 
 ### D4. Boot default is unchanged
 The kernel monitor keeps the raw serial console. A terminal attaches the
@@ -97,12 +102,15 @@ returning data (the `sys_procs` model), never a command passthrough.
 - The kernel monitor survives as the boot/recovery/diagnostic console (the
   UEFI-shell/BIOS-setup role) — a healthy split, not a migration to delete.
 
-## Open issues (left to the wiring tranche and later)
+## Open issues (left to later)
 
-- Multi-terminal allocation (`/dev/ttyN`), ownership transfer, and cleanup on
-  process death.
-- Whether boot policy alone can hand the console over, or a `sys_tty_*` attach
-  slot is needed.
+- ~~Whether boot policy alone can hand the console over, or a `sys_tty_*` attach
+  slot is needed.~~ — **resolved by claim #1075**: slot 67 `sys_tty_attach`.
+- ~~The EL0 serial-attached pilot + its class-B gate.~~ — **landed by claim
+  #1075**: `TTYECHO.BIN` + `live-ttyecho.spec` (opens `/dev/tty`, attaches the
+  serial console, echoes a scripted line into the serial log).
+- Multi-terminal allocation (`/dev/ttyN`), ownership transfer, and cleanup
+  policy when multiple processes want a terminal.
 - Raw/cooked mode and kernel-side echo (only if a front-end wants them).
-- The EL0 serial-attached pilot + its class-B gate (the wiring tranche's exit
-  bar).
+- The window (TERM.BIN) and net (remote/SSH) front-end implementations (the
+  attach selectors are reserved and return `ENOSYS`).

@@ -1247,6 +1247,29 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_ps.step);
 
     // ------------------------------------------------------------------
+    // Guest: terminal-seam pilot (#1072, ADR 0020) — TTYECHO.BIN.
+    // EL0 owns /dev/tty, attaches the serial console front-end, and echoes.
+    // ------------------------------------------------------------------
+    const ttyecho_prog = b.addExecutable(.{
+        .name = "user-ttyecho",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/ttyecho.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    ttyecho_prog.linker_script = b.path("user/linker.ld");
+    const ttyecho_step = b.step("ttyecho", "Build the terminal-seam pilot (zig-out/bin/TTYECHO.BIN; #1072)");
+    const ttyecho_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    ttyecho_elf2bin.addFileArg(ttyecho_prog.getEmittedBin());
+    const ttyecho_bin = ttyecho_elf2bin.addOutputFileArg("TTYECHO.BIN");
+    ttyecho_elf2bin.has_side_effects = true;
+    ttyecho_elf2bin.stdio = .inherit;
+    ttyecho_step.dependOn(&ttyecho_elf2bin.step);
+    const install_ttyecho = b.addInstallFileWithDir(ttyecho_bin, .bin, "TTYECHO.BIN");
+    b.getInstallStep().dependOn(&install_ttyecho.step);
+
+    // ------------------------------------------------------------------
     // Guest: thirty-fourth ESP user program (M26 N1 — issue #399) PING.BIN.
     // Headless ICMP ping: sends echo requests, shows RTT + loss stats.
     // Uses existing ICMP path (net ping) when available; falls back to

@@ -27,6 +27,7 @@ pub const pipe = @import("pipe.zig"); // M19 P1 (issue #290): the bounded pipe b
 pub const redirect = @import("redirect.zig"); // M19 P2 (issue #291): capture/feed adapters behind `>`, `>>`, `<`
 pub const monitor = @import("monitor.zig");
 pub const exec_mod = @import("exec.zig"); // M19 P7 (issue #296): last_exec_pid for job tracking
+pub const terminal = @import("terminal.zig"); // #1072 (ADR 0020): console handover guard
 pub const process = @import("process.zig"); // M19 P7 (issue #296): live job state + real exit statuses
 pub const handoff = @import("handoff.zig");
 pub const memmap = @import("memmap.zig");
@@ -987,6 +988,10 @@ pub const Shell = struct {
     /// per line (on the poll that starts it). Returns `.idle` when no byte
     /// is available — callers park between polls; tests drive until idle.
     pub fn poll(self: *Shell) PollResult {
+        // #1072 (ADR 0020 D4): while a process owns the serial console via an
+        // attached terminal, the kernel shell must not steal its input. The
+        // console's RX FIFO buffers keys for the terminal's next read.
+        if (terminal.attachedSerial() != null) return .idle;
         if (!self.prompt_shown) {
             self.puts_colored_prompt();
             self.prompt_shown = true;

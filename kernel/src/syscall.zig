@@ -81,6 +81,7 @@ pub const timer = @import("timer.zig"); // Hardware cycle counter + ticks for TC
 pub const csprng = @import("csprng.zig"); // ISN generation for TCP connect
 pub const clipboard = @import("clipboard.zig"); // Milestone 14 (claim 0169): the shared kernel clipboard
 pub const pipe = @import("pipe.zig"); // M19 P1 (issue #290): the bounded pipe buffer behind slots 56/57
+pub const terminal = @import("terminal.zig"); // #1072 (ADR 0020): the terminal seam + sys_tty_attach
 pub const app_timers = @import("app_timers.zig"); // Milestone 14 (claim 7323): the per-process app timer facility
 pub const virtio_snd = @import("virtio_snd.zig"); // Milestone 15 (claim 7636): the virtio-snd playback path behind sys_audio_*
 pub const fbtext = @import("text.zig"); // M20-U1 (claim 5127): sys_font_size's terminal font state
@@ -101,7 +102,7 @@ pub const slot_count: usize = 128;
 /// M26 N2 (issue #400): slot 62 is the net-stats snapshot.
 /// M29 (issue #598): slots 63/64 are sys_mmap/sys_munmap.
 /// M32 WMS2 (issue #622): slot 65 is sys_wmctl (ADR 0015).
-pub const implemented_count: usize = 67;
+pub const implemented_count: usize = 68;
 /// Card G6 (claim 0487) follow-on (slot 18): the fixed `sys_win_get` shape —
 /// four u32 LE words (x, y, w, h), 16 bytes, marshaled per call and copy_out'd
 /// through uaccess (the procs snapshot pattern).
@@ -289,6 +290,11 @@ pub const sys_wmctl: u64 = 65;
 /// ENOSYS when the firmware gave no epoch (the caller's uptime fallback).
 /// The first post-WM ADR 0007 slot; the ABI shape is otherwise unchanged.
 pub const sys_time: u64 = 66;
+/// #1072 (ADR 0020): `sys_tty_attach(front_end)` — attach (or detach) the
+/// CALLING process's controlling terminal (`/dev/tty`) to a front-end.
+/// a0: 0 = detach, 1 = the serial console. The terminal seam's only new
+/// slot; terminal I/O itself reuses `sys_file_*`.
+pub const sys_tty_attach: u64 = 67;
 
 pub const ErrorCode = enum(i64) {
     einval = -1,
@@ -444,6 +450,8 @@ pub fn ensure_table() *const [slot_count]Entry {
         table_storage[sys_wmctl] = .{ .name = "sys_wmctl", .handler = handle_wmctl };
         // #1058: slot 66 — sys_time (the boot EFI GetTime wall clock).
         table_storage[sys_time] = .{ .name = "sys_time", .handler = handle_time };
+        // #1072 (ADR 0020): slot 67 — sys_tty_attach (terminal front-end).
+        table_storage[sys_tty_attach] = .{ .name = "sys_tty_attach", .handler = handle_tty_attach };
         table_ready = true;
     }
     return &table_storage;
@@ -485,7 +493,7 @@ fn doms_of(number: u64) u5 {
         sys_exec => f | k,
         sys_win_open, sys_win_fill, sys_win_present, sys_win_close, sys_win_move, sys_win_raise, sys_win_get, sys_win_query, sys_win_set_visible, sys_win_fill_batch, sys_win_resize, 48, sys_win_raise_front, sys_win_lower_back, 52, sys_win_set_unsaved, sys_win_set_title, sys_drag_read, sys_font_size => w,
         sys_ipc_send, sys_ipc_recv, sys_poll_event, sys_wait_event, sys_timer_set, sys_timer_cancel, sys_notify, sys_wmctl => e,
-        sys_procs, sys_wait, sys_kill, sys_clipboard_set, sys_clipboard_get, sys_audio_info, sys_audio_play, sys_audio_volume, sys_audio_mute, sys_pipe_read, sys_pipe_write, 54, sys_mmap, sys_munmap, sys_time => k,
+        sys_procs, sys_wait, sys_kill, sys_clipboard_set, sys_clipboard_get, sys_audio_info, sys_audio_play, sys_audio_volume, sys_audio_mute, sys_pipe_read, sys_pipe_write, 54, sys_mmap, sys_munmap, sys_time, sys_tty_attach => k,
         sys_exit => svclock.all_bits,
         else => 0,
     };
@@ -1672,6 +1680,33 @@ fn handle_clipboard_get(args: Args, _: *exceptions.VectorFrame) u64 {
 /// honestly (TABWM's host `.clock` or uptime). No uaccess, no hardware.
 fn handle_time(_: Args, _: *exceptions.VectorFrame) u64 {
     return timer.wall_epoch() orelse error_result(.enosys);
+}
+
+/// `sys_tty_attach(front_end)` (slot 67, #1072/ADR 0020): attach (or detach)
+/// the CALLING process's controlling terminal — opened as `/dev/tty` — to a
+/// front-end. a0: 0 = detach, 1 = the serial console (the kernel console).
+/// Window/net front-ends are reserved (ENOSYS) until they land. The process
+/// must have opened `/dev/tty` (else EINVAL); the console can be held by only
+/// one terminal at a time (busy -> EACCES). Returns 0.
+fn handle_tty_attach(args: Args, _: *exceptions.VectorFrame) u64 {
+    const pid = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    const th = file_table.controlling_terminal(pid) orelse return error_result(.einval);
+    const t = terminal.get(th) orelse return error_result(.einval);
+    switch (args[0]) {
+        0 => {
+            t.detach();
+            return 0;
+        },
+        1 => {
+            if (terminal.attachedSerial()) |cur| {
+                if (cur != t) return error_result(.eacces); // console already held
+            }
+            if (!t.attach(.serial)) return error_result(.eacces);
+            return 0;
+        },
+        2, 3 => return error_result(.enosys), // window/net front-ends not implemented yet
+        else => return error_result(.einval),
+    }
 }
 
 /// Milestone 14 (claim 7323): slot 40 — sys_timer_set(delay_ticks)
