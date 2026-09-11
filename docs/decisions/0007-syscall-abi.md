@@ -874,3 +874,19 @@ TABWM tray's face — and the full value is monotonic + date-correct for
 timestamping. Verified class-A by `boot/src/efi_time.zig` (days-from-civil
 against known dates) and the timer/syscall unit tests; class-B by the live
 TABWM boot reporting `tabwm: clock-source kernel`.
+
+### Amendment (2026-09-11, #1072 — slot 67 `sys_tty_attach`, the terminal seam)
+
+The terminal seam (ADR 0020) adds exactly one slot: **67** =
+`sys_tty_attach(front_end)`. `a0`: `0` = detach the CALLING process's
+controlling terminal, `1` = attach it to the serial console (the kernel
+console) as a front-end; `2`/`3` (window/net front-ends) return `ENOSYS`
+until they land. The process must have opened `/dev/tty` (else `EINVAL`); the
+console is held by at most one terminal (busy ⇒ `EACCES`); a bad selector is
+`EINVAL`. Terminal I/O itself adds **no** slot — it reuses the frozen
+`sys_file_open`/`sys_file_read`/`sys_file_write` (23/24/25) against the
+`/dev/tty` virtual device. `implemented_count` becomes **68** (rows 0–67;
+reserved 68–127). No existing number, argument, result, or error code changes.
+Verified class-A (terminal/seam/syscall host tests) and class-B
+(`live-ttyecho`: an EL0 pilot opens `/dev/tty`, attaches the console, and
+echoes a scripted line back through the serial log).

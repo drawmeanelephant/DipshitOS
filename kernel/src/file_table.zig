@@ -127,6 +127,13 @@ pub fn is_tty_path(name: []const u8) bool {
         std.mem.eql(u8, name, "tty0");
 }
 
+/// #1072: the process's controlling terminal (a `terminal.zig` index), or
+/// null when it has not opened `/dev/tty`. Used by the attach syscall.
+pub fn controlling_terminal(pid: u64) ?usize {
+    if (pid >= process.max_processes) return null;
+    return process_terminal[pid];
+}
+
 /// M43 U3: one sector scratch for `.usb` reads (BOT is one transfer at a
 /// time; a sub-sector read still pulls a whole 512-byte sector here).
 var usb_sector: [usb_msc.block_len]u8 align(64) = undefined;
@@ -414,9 +421,11 @@ pub fn read(pid: u64, fd: u64, out_buf: []u8) i64 {
     if (h.is_dir) return 0; // M25 Lane B: a dir handle reads as empty
 
     // #1072 (ADR 0020): a `.tty` handle drains the terminal's input queue
-    // (front-end keys). Empty input returns 0 — a non-blocking read.
+    // (front-end keys). Empty input returns 0 — a non-blocking read. The
+    // serial front-end is pumped first so freshly-typed keys are visible.
     if (h.partition == .tty) {
         const t = terminal.get(h.term_handle) orelse return -2;
+        _ = terminal.pumpRuntimeInput();
         return @intCast(t.readInput(out_buf));
     }
 
@@ -469,10 +478,12 @@ pub fn write(pid: u64, fd: u64, in_buf: []const u8) i64 {
     if (h.is_dir) return -7; // M25 Lane B: never write through a dir handle
 
     // #1072 (ADR 0020): a `.tty` handle appends to the terminal's output
-    // ring (the attached front-end drains it). Always accepts every byte.
+    // ring; the pump immediately drains it to the serial front-end.
     if (h.partition == .tty) {
         const t = terminal.get(h.term_handle) orelse return -2;
-        return @intCast(t.write(in_buf));
+        const n = t.write(in_buf);
+        _ = terminal.pumpRuntimeOutput();
+        return @intCast(n);
     }
 
     // M34 HF5 (issue #739): host writes ride the host handle's cursor

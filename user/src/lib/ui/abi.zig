@@ -101,6 +101,10 @@ pub const sys_munmap_num: u64 = 64;
 /// EFI GetTime epoch + uptime); negative (ENOSYS) when the firmware gave no
 /// epoch.
 pub const sys_time_num: u64 = 66;
+/// #1072 (ADR 0020): slot 67 `sys_tty_attach(front_end)` — attach (0 =
+/// detach, 1 = serial console) the calling process's controlling terminal
+/// (opened as `/dev/tty`).
+pub const sys_tty_attach_num: u64 = 67;
 pub const PROT_READ: u64 = 1;
 pub const PROT_WRITE: u64 = 2;
 pub const PROT_EXEC: u64 = 4;
@@ -728,6 +732,12 @@ pub fn munmap(addr: u64, len: u64) i64 {
 /// uptime), or a negative error when the firmware gave no epoch.
 pub fn sys_time() i64 {
     return syscall0(sys_time_num);
+}
+
+/// #1072 (ADR 0020): attach/detach the caller's controlling terminal to a
+/// front-end. `front_end`: 0 = detach, 1 = the serial console.
+pub fn tty_attach(front_end: u64) i64 {
+    return syscall1(sys_tty_attach_num, front_end);
 }
 
 pub const sys_ping_send_num: u64 = 59;

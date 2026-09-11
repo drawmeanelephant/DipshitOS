@@ -22,6 +22,7 @@ const alloc = @import("alloc.zig");
 const memmap = @import("memmap.zig");
 const monitor = @import("monitor.zig");
 const shell = @import("shell.zig");
+const terminal = @import("terminal.zig"); // #1072 (ADR 0020): the terminal seam
 // Claim 3475: ESP file window. Claim 6420: now FAT-backed (live ESP via
 // the virtio-blk transport), replacing the NVRAM persistence medium.
 
@@ -962,6 +963,10 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
         },
         machine.control(),
     );
+    // #1072 (ADR 0020): give the terminal seam the kernel console as its
+    // serial front-end. Nothing is attached by default, so the boot path is
+    // unchanged until a process calls sys_tty_attach (D4).
+    terminal.setRuntimeConsole(mon.console);
     // Claim 0015 diagnostic: mark the seam entry so a missing shell banner
     // is attributable to the seam setup vs. the shell write path.
     if (comptime build_options.nvram_console) {

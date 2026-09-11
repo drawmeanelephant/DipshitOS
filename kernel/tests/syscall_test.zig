@@ -105,6 +105,8 @@ const sys_win_set_unsaved = syscall.sys_win_set_unsaved;
 const sys_win_set_visible = syscall.sys_win_set_visible;
 const sys_wmctl = syscall.sys_wmctl;
 const sys_time = syscall.sys_time;
+const sys_tty_attach = syscall.sys_tty_attach;
+const terminal = syscall.terminal;
 const sys_write = syscall.sys_write;
 const sys_yield = syscall.sys_yield;
 const tcp = syscall.tcp;
@@ -139,7 +141,7 @@ fn capture_marshaled_args(args: Args, _: *exceptions.VectorFrame) u64 {
     return 0xcafe;
 }
 
-test "syscall: runtime table has 128 slots and sixty-seven unique implemented rows" {
+test "syscall: runtime table has 128 slots and sixty-eight unique implemented rows" {
     init(test_writer);
     const table = ensure_table();
     try std.testing.expectEqual(@as(usize, 128), table.len);
@@ -152,7 +154,7 @@ test "syscall: runtime table has 128 slots and sixty-seven unique implemented ro
             implemented += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 67), implemented);
+    try std.testing.expectEqual(@as(usize, 68), implemented);
     try std.testing.expectEqualStrings("sys_pipe_read", entry_info(sys_pipe_read).?.name);
     try std.testing.expectEqualStrings("sys_pipe_write", entry_info(sys_pipe_write).?.name);
     try std.testing.expectEqualStrings("sys_font_size", entry_info(sys_font_size).?.name);
@@ -225,15 +227,14 @@ test "syscall: adapter decodes x8 and x0-x5 and unknown numbers return ENOSYS" {
     try std.testing.expectEqual(@as(u64, 41), exceptions.frame_read(&frame, 0));
     try std.testing.expectEqual(@as(u64, 1), call_count(sys_ping));
 
-    // Unimplemented in-range slots still return ENOSYS (previously this
-    // example used 65; that slot is now sys_wmctl, M32 WMS2 — use 67/66,
-    // which remain genuinely unregistered).
-    try std.testing.expect(exceptions.frame_write(&frame, 8, 67));
+    // Unimplemented in-range slots still return ENOSYS (65/66/67 are now
+    // sys_wmctl/sys_time/sys_tty_attach — use 68/69, still unregistered).
+    try std.testing.expect(exceptions.frame_write(&frame, 8, 68));
     try std.testing.expect(handle_svc(&frame, svc_immediate));
     try std.testing.expectEqual(error_result(.enosys), exceptions.frame_read(&frame, 0));
-    try std.testing.expectEqual(@as(u64, 1), call_count(67));
+    try std.testing.expectEqual(@as(u64, 1), call_count(68));
 
-    try std.testing.expect(exceptions.frame_write(&frame, 8, 66));
+    try std.testing.expect(exceptions.frame_write(&frame, 8, 69));
     try std.testing.expect(handle_svc(&frame, svc_immediate));
     try std.testing.expectEqual(error_result(.enosys), exceptions.frame_read(&frame, 0));
 }
@@ -1225,7 +1226,7 @@ test "syscall: counters are monotonic and report is deterministic" {
     var con = mock.console();
     report(&con);
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=67\n" ++
+        "syscalls: slots=64 implemented=68\n" ++
             "  0 sys_ping calls=2\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -1292,7 +1293,8 @@ test "syscall: counters are monotonic and report is deterministic" {
             "  63 sys_mmap calls=0\n" ++
             "  64 sys_munmap calls=0\n" ++
             "  65 sys_wmctl calls=0\n" ++
-            "  66 sys_time calls=0\n",
+            "  66 sys_time calls=0\n" ++
+            "  67 sys_tty_attach calls=0\n",
         mock.contents(),
     );
 }
@@ -3038,7 +3040,7 @@ test "syscall: SYS_TIME (slot 66, #1058) returns the firmware wall-clock epoch" 
 
     // The slot is registered and named in the table.
     try std.testing.expectEqualStrings("sys_time", entry_info(sys_time).?.name);
-    try std.testing.expectEqual(@as(usize, 67), syscall.implemented_count);
+    try std.testing.expectEqual(@as(usize, 68), syscall.implemented_count);
 
     const saved_epoch = timer.boot_epoch_secs;
     const saved_ticks = timer.ticks;
@@ -3055,4 +3057,38 @@ test "syscall: SYS_TIME (slot 66, #1058) returns the firmware wall-clock epoch" 
     timer.boot_epoch_secs = 1_789_043_696; // 2026-09-10 12:34:56 wall-clock
     timer.ticks = 3;
     try std.testing.expectEqual(@as(u64, 1_789_043_699), dispatch(sys_time, .{ 0, 0, 0, 0, 0, 0 }, &frame));
+}
+
+test "syscall: SYS_TTY_ATTACH (slot 67, #1072) attaches the caller's terminal" {
+    userspace.init();
+    init(test_writer);
+    wm_server.init();
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0
+    scheduler.start();
+    var frame = fresh_frame();
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expect(scheduler.yield_current());
+
+    for (&terminal.terminals) |*t| t.reset();
+    file_table.reset_process(0);
+
+    // Without opening /dev/tty there is no controlling terminal: EINVAL.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_tty_attach, .{ 1, 0, 0, 0, 0, 0 }, &frame));
+
+    // Open the controlling terminal for process 0, then attach serial.
+    const fd = file_table.open(0, "/dev/tty", file_table.MODE_READ | file_table.MODE_WRITE);
+    try std.testing.expect(fd >= 0);
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_tty_attach, .{ 1, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expect(terminal.attachedSerial() != null);
+    // Idempotent re-attach; detach clears it.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_tty_attach, .{ 1, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_tty_attach, .{ 0, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expect(terminal.attachedSerial() == null);
+    // Reserved window/net front-ends -> ENOSYS; a bad selector -> EINVAL.
+    try std.testing.expectEqual(error_result(.enosys), dispatch(sys_tty_attach, .{ 2, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_tty_attach, .{ 9, 0, 0, 0, 0, 0 }, &frame));
+
+    file_table.reset_process(0);
 }

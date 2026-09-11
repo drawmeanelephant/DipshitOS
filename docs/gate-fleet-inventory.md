@@ -31,7 +31,7 @@
 | `tools/status/` | 6 | multiagent coordination gate + claim tooling (class A) |
 | `tools/context/` | 2 | context snapshot helpers |
 | `tools/ragshit/` | 84 | host-side context engine (developer tooling, not guest software) |
-| `tools/gate/` | 188 | M40 vgate harness + specs (GF2+) |
+| `tools/gate/` | 189 | M40 vgate harness + specs (GF2+) |
 
 ## Class-B fleet (discovered from the spec dir)
 
@@ -192,6 +192,7 @@ of them with `just verify-vz`.
 | spec | `live-timers` | 1 run / 13 assert | live-timers.spec -- claim 7323 (Milestone 14, Card S2) class-B gate: |
 | spec | `live-tokens` | 12 run / 36 assert | live-tokens.spec -- M37 DQ4 design tokens & cohesion |
 | spec | `live-transcript` | 1 run / 6 assert | live-transcript.spec -- vgate pilot (serial-only + repeat): live RX. |
+| spec | `live-ttyecho` | 1 run / 6 assert | live-ttyecho.spec -- #1072 terminal (vt) seam pilot (class B, ADR 0020). |
 | spec | `live-typography` | 1 run / 5 assert | live-typography.spec -- live-typography |
 | spec | `live-uaccess` | 1 run / 9 assert | live-uaccess.spec -- fault-safe uaccess: EL0 observes EFAULT on a bad |
 | spec | `live-unicode` | 1 run / 7 assert | live-unicode.spec -- milestone-twenty cards U2/U3/U11 class-B gate |
