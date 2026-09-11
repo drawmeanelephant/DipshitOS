@@ -662,7 +662,8 @@ then). Proof program and live gate ride the WMS2 claim
 (`tools/verify-live-wmctl-register.sh`).
 
 As with slots 63/64, this is the milestone-32 set's ABI amendment; the ABI —
-x8 number, x0–x5 arguments, x0 result, reserved 66–127, error codes — is
+x8 number, x0–x5 arguments, x0 result, reserved 66–127 (later 67–127 after
+#1058), error codes — is
 otherwise unchanged. (`slot_count` is already 128, so "reserved 66–127" is
 the true remaining space — the 128-wide table has been live since M16; this
 amendment writes the honest bound.)
@@ -805,7 +806,7 @@ and dies with the owner); reads are counted; owner teardown (`win_close` /
 `sys_exit`) revokes EVERY peer RO leaf and frees the descriptor at refcount 0 —
 a stale WM mirror cannot retain access past that point.
 
-The ABI — x8 number, x0–x5 arguments, x0 result, reserved 66–127, error codes —
+The ABI — x8 number, x0–x5 arguments, x0 result, reserved 67–127, error codes —
 is otherwise unchanged. No dispatch-table row is added; this amendment only
 resolves how seam B attaches to the frozen `sys_mmap` row.
 
@@ -834,7 +835,7 @@ The M33 seam-B shared-anonymous flag is now **implemented**, not just reserved.
   `verify-live-sb3-surface-handoff.sh` PASS (headless VZ): a migrated app stored
   `0xAB` with a plain write and the registered WM read it RO.
 
-The dispatch table stays 128 rows; all numbers 0–65 and the error codes are
+The dispatch table stays 128 rows; all numbers 0–66 and the error codes are
 unchanged.
 
 **M33 SB4 (claim 2382, 2026-08-31):** the COMPOSITE_TICK (kind 18) event is
@@ -855,3 +856,21 @@ present: REQUEST_PRESENT (slot 65 cmd 3) is now FLUSH ONLY — the kernel paints
 its layer at COMPOSITE_TICK time (`paint_scene`), the WM's compose-N stores
 land after, and the present flushes (the kernel never re-paints over the WM's
 stores). No dispatch-table row changes; no new slots.
+
+### Amendment (2026-09-10, #1058 — slot 66 `sys_time`, the boot wall clock)
+
+The first post-M32 slot: **66** = `sys_time()`, no arguments, returning the
+current Unix wall-clock seconds as `u64` (the boot loader's EFI
+`RuntimeServices.GetTime` epoch, carried in the v3 handoff, advanced by the
+1 Hz timer ticks), or `ENOSYS` (`-4`) when the firmware provided no clock.
+The choice of a real syscall over piggybacking the `sys_wmctl` query seam is
+deliberate: the epoch is general-purpose (any app may timestamp), not a WM
+concern, and `implemented_count` becomes **67** (rows 0–66; reserved
+67–127). No existing number, argument, result, or error code changes; the
+bad-handoff/handoff unit tests and ADR 0004 D5 carry the v3 handoff shape.
+The wire epoch is a *wall-clock* epoch (the EFI broken-down fields treated
+as written), so `sys_time() % 86400` is local seconds since midnight — the
+TABWM tray's face — and the full value is monotonic + date-correct for
+timestamping. Verified class-A by `boot/src/efi_time.zig` (days-from-civil
+against known dates) and the timer/syscall unit tests; class-B by the live
+TABWM boot reporting `tabwm: clock-source kernel`.

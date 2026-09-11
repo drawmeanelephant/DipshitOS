@@ -127,11 +127,6 @@ pub const wmctl_win_close: u64 = 13;
 /// carry title bytes can still name non-tabapp windows. Seat-gated
 /// (registered WM only), like every other WMCTL command.
 pub const wmctl_window_name: u64 = 14;
-/// #1056 item 1: the WM asks the kernel for the current LOCAL time of day
-/// (boot EFI GetTime capture + 1 Hz uptime, wrapped at 24h) so the tray
-/// clock is the real system clock, not a session counter. Returns seconds
-/// since midnight; ENOSYS when the firmware gave no clock. Seat-gated.
-pub const wmctl_clock: u64 = 15;
 /// OVERVIEW actions (a0).
 pub const overview_enter_action: u64 = 0;
 pub const overview_exit_action: u64 = 1;

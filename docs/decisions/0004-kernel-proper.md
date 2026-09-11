@@ -237,7 +237,7 @@ DipshitOS kernel has seized control.
 (the success line defined by the milestone-one prompt), followed by a hex
 print of the kernel's own memory-map view as secondary evidence.
 
-### D5. Handoff contract v2 (boot stub → kernel proper)
+### D5. Handoff contract (v2 → v3) (boot stub → kernel proper)
 
 Registers keep ADR 0002's ABI where it still means something:
 
@@ -254,7 +254,7 @@ via `AllocatePages`), owned by the kernel after exit:
 | offset | size | field |
 |--------|------|-------|
 | 0      | u32  | magic `0x324B5344` ("DSK2") |
-| 4      | u32  | version (2) |
+| 4      | u32  | version (3) |
 | 8      | u64  | `kernel_base` (mirror of x0) |
 | 16     | u64  | `kernel_size` (mirror of x1) |
 | 24     | u64  | `system_table` (mirror of x2) |
@@ -262,14 +262,18 @@ via `AllocatePages`), owned by the kernel after exit:
 | 40     | u64  | `stack_base` — 4K-aligned, `EfiLoaderData` |
 | 48     | u64  | `stack_size` — 16 KiB for this milestone |
 | 56     | u64  | `flags` (0) |
-| 64     | u64  | `boot_time_of_day` — **additive** (#1056, 2026-09-10): LOCAL seconds since midnight from `RuntimeServices.GetTime`, or `0xFFFF_FFFF_FFFF_FFFF` (`no_boot_time`) when the firmware has no RTC |
+| 64     | u64  | `boot_epoch_secs` — **v3** (#1058, 2026-09-10): Unix wall-clock seconds from `RuntimeServices.GetTime` (days-from-civil over the broken-down face), or `0xFFFF_FFFF_FFFF_FFFF` (`no_boot_epoch`) when the firmware has no clock |
 
-The `boot_time_of_day` field is a strictly additive tail: the frozen v2
-fields keep offsets 0..64 byte-for-byte, so a v2 reader that ignores offset
-64 is unaffected, and the version stays 2. It carries the firmware clock to
-the kernel so userspace has a real time-of-day epoch with or without a host
-share (the loader reads `GetTime` before the kernel's `ExitBootServices`);
-the sentinel preserves the honest uptime fallback when unavailable.
+The `boot_epoch_secs` field is a v3 addition: the **version bumps to 3** so
+the widening is explicit and non-silent — the frozen 0..64 bytes
+(magic/version/kernel_base/kernel_size/system_table/image_handle/stack_base/
+stack_size/flags) keep their exact offsets, but a v2 reader that
+misinterprets offset 64 is now guarded by the version check rather than
+being trusted. It carries the firmware epoch to the kernel so userspace has
+a real system clock with or without a host share (the loader reads `GetTime`
+before the kernel's `ExitBootServices`); the sentinel preserves the honest
+uptime fallback when unavailable. `boot/src/main.zig`, `kernel/src/handoff.zig`,
+and this ADR move together.
 
 The stub additionally allocates the kernel stack (16 KiB, `EfiLoaderData`,
 4K-aligned) and records its bounds in the struct. The kernel validates

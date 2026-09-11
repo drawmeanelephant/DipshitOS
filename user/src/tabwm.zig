@@ -93,10 +93,6 @@ const wmctl_win_close: u64 = 13;
 /// any, else the owning process's executable name. a1 = window id,
 /// a2 = buffer pointer, a3 = buffer length; returns the byte count.
 const wmctl_window_name: u64 = 14;
-/// #1056 item 1: the real system clock — the kernel returns the current
-/// LOCAL seconds since midnight (boot EFI GetTime capture + uptime), so the
-/// tray shows the actual time even without the session's `.clock` share.
-const wmctl_clock: u64 = 15;
 
 // M42 UX r2 (2026-09-05, claim #1011): the slot-65 DIALOG unsaved-changes
 // actions — the SAME primitives WND.BIN issues (user/src/wnd.zig): 3 =
@@ -688,39 +684,43 @@ pub fn clock_hms(elapsed: u64, epoch: ?u32) Hms {
 /// The boot wall-time from the host share, or null (uptime fallback).
 pub var clock_epoch: ?u32 = null;
 
-/// #1056 item 1: emit the clock-source marker once (host epoch / kernel
-/// firmware clock / uptime) so a live gate can tell which path won.
+/// #1058 / #1056: emit the clock-source marker once (kernel firmware epoch /
+/// host `.clock` / uptime) so a live gate can tell which path won.
 pub var clock_source_logged: bool = false;
 
-/// #1056 item 1: ask the kernel for the real wall clock — the boot EFI
-/// GetTime capture advanced by 1 Hz uptime. Returns LOCAL seconds since
-/// midnight, or null on the host / when the firmware provided no clock (the
-/// honest uptime fallback). The value already includes elapsed time, so it
-/// is authoritative on every tick.
-pub fn query_clock() ?u32 {
+/// #1058: ask the kernel for the real system clock — the boot EFI GetTime
+/// epoch advanced by 1 Hz uptime (`sys_time`, slot 66). Returns Unix
+/// wall-clock seconds, or null on the host / when the firmware provided no
+/// epoch (the honest fallback). The value already includes elapsed time, so
+/// it is authoritative on every tick.
+pub fn query_epoch() ?u64 {
     if (@import("builtin").os.tag != .freestanding) return null;
-    const v = syscall6(sys_wmctl, wmctl_clock, 0, 0, 0, 0, 0);
-    if (v < 0 or v >= 86400) return null;
+    const v = ui.sys_time();
+    if (v <= 0) return null;
     return @intCast(v);
 }
 
-/// One clock face for this tick: the host epoch advance if the session
-/// seeded `.clock`, else the kernel's firmware clock, else uptime. Also
-/// emits the one-shot source marker. Pure formatting lives in `clock_hms`.
+/// One clock face for this tick: the kernel's firmware epoch first (the
+/// true system clock), then the session host `.clock` (seconds since
+/// midnight), then uptime. Emits the one-shot source marker. Pure
+/// formatting lives in `clock_hms`.
 pub fn tick_clock_face(ticks: u64) Hms {
+    if (query_epoch()) |epoch| {
+        const tod = epoch % 86_400;
+        if (!clock_source_logged) {
+            var b: [80]u8 = undefined;
+            const msg = std.fmt.bufPrint(&b, "tabwm: clock-source kernel epoch={d} tod={d:0>2}:{d:0>2}:{d:0>2}\n", .{ epoch, tod / 3600, (tod / 60) % 60, tod % 60 }) catch "tabwm: clock-source kernel\n";
+            write_marker(msg);
+            clock_source_logged = true;
+        }
+        return .{ .h = @intCast(tod / 3600), .m = @intCast((tod / 60) % 60), .s = @intCast(tod % 60) };
+    }
     if (clock_epoch != null) {
         if (!clock_source_logged) {
             write_marker("tabwm: clock-source host\n");
             clock_source_logged = true;
         }
         return clock_hms(ticks, clock_epoch);
-    }
-    if (query_clock()) |secs| {
-        if (!clock_source_logged) {
-            write_marker("tabwm: clock-source kernel\n");
-            clock_source_logged = true;
-        }
-        return .{ .h = secs / 3600, .m = (secs / 60) % 60, .s = secs % 60 };
     }
     if (!clock_source_logged) {
         write_marker("tabwm: clock-source uptime\n");
@@ -3633,11 +3633,11 @@ test "tabwm: new-tab pill tracks the visible window" {
 
 test "tabwm: tick_clock_face prefers the host epoch, else uptime on the host" {
     resetForTest();
-    // Host test: query_clock() is null (no kernel), no `.clock` -> uptime.
-    try std.testing.expectEqual(@as(?u32, null), query_clock());
+    // Host test: query_epoch() is null (no kernel), no `.clock` -> uptime.
+    try std.testing.expectEqual(@as(?u64, null), query_epoch());
     try std.testing.expectEqual(Hms{ .h = 1, .m = 1, .s = 1 }, tick_clock_face(3661));
 
-    // The session `.clock` epoch wins and advances with the tick.
+    // The session `.clock` epoch wins when there is no kernel epoch.
     clock_epoch = 12 * 3600 + 34 * 60 + 56;
     try std.testing.expectEqual(Hms{ .h = 12, .m = 34, .s = 57 }, tick_clock_face(1));
     // 23:59:59 + 1 s wraps to midnight.

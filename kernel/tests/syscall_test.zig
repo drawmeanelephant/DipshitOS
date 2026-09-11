@@ -104,6 +104,7 @@ const sys_win_set_title = syscall.sys_win_set_title;
 const sys_win_set_unsaved = syscall.sys_win_set_unsaved;
 const sys_win_set_visible = syscall.sys_win_set_visible;
 const sys_wmctl = syscall.sys_wmctl;
+const sys_time = syscall.sys_time;
 const sys_write = syscall.sys_write;
 const sys_yield = syscall.sys_yield;
 const tcp = syscall.tcp;
@@ -138,7 +139,7 @@ fn capture_marshaled_args(args: Args, _: *exceptions.VectorFrame) u64 {
     return 0xcafe;
 }
 
-test "syscall: runtime table has 128 slots and sixty-six unique implemented rows" {
+test "syscall: runtime table has 128 slots and sixty-seven unique implemented rows" {
     init(test_writer);
     const table = ensure_table();
     try std.testing.expectEqual(@as(usize, 128), table.len);
@@ -151,7 +152,7 @@ test "syscall: runtime table has 128 slots and sixty-six unique implemented rows
             implemented += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 66), implemented);
+    try std.testing.expectEqual(@as(usize, 67), implemented);
     try std.testing.expectEqualStrings("sys_pipe_read", entry_info(sys_pipe_read).?.name);
     try std.testing.expectEqualStrings("sys_pipe_write", entry_info(sys_pipe_write).?.name);
     try std.testing.expectEqualStrings("sys_font_size", entry_info(sys_font_size).?.name);
@@ -1224,7 +1225,7 @@ test "syscall: counters are monotonic and report is deterministic" {
     var con = mock.console();
     report(&con);
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=66\n" ++
+        "syscalls: slots=64 implemented=67\n" ++
             "  0 sys_ping calls=2\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -1290,7 +1291,8 @@ test "syscall: counters are monotonic and report is deterministic" {
             "  62 sys_net_stats calls=0\n" ++
             "  63 sys_mmap calls=0\n" ++
             "  64 sys_munmap calls=0\n" ++
-            "  65 sys_wmctl calls=0\n",
+            "  65 sys_wmctl calls=0\n" ++
+            "  66 sys_time calls=0\n",
         mock.contents(),
     );
 }
@@ -3030,39 +3032,27 @@ test "syscall: WMCTL WINDOW_NAME (cmd 14, #1056) resolves a window's display nam
     _ = driving_award.user_close(2);
 }
 
-test "syscall: WMCTL CLOCK (cmd 15, #1056) returns the firmware wall clock" {
-    userspace.init();
+test "syscall: SYS_TIME (slot 66, #1058) returns the firmware wall-clock epoch" {
     init(test_writer);
-    wm_server.init();
-    _ = scheduler.init();
-    _ = scheduler.register_worker(0x2000);
-    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (the WM seat)
-    scheduler.start();
     var frame = fresh_frame();
-    try std.testing.expect(scheduler.yield_current()); // shell -> worker
-    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
 
-    // No WM registered -> ENOSYS (the ADR 0007 "no WM" case).
-    try std.testing.expectEqual(error_result(.enosys), dispatch(sys_wmctl, .{ wm_server.wmctl_clock, 0, 0, 0, 0, 0 }, &frame));
+    // The slot is registered and named in the table.
+    try std.testing.expectEqualStrings("sys_time", entry_info(sys_time).?.name);
+    try std.testing.expectEqual(@as(usize, 67), syscall.implemented_count);
 
-    try std.testing.expect(wm_server.register(0));
-
-    const saved_tod = timer.boot_time_of_day;
+    const saved_epoch = timer.boot_epoch_secs;
     const saved_ticks = timer.ticks;
     defer {
-        timer.boot_time_of_day = saved_tod;
+        timer.boot_epoch_secs = saved_epoch;
         timer.ticks = saved_ticks;
     }
 
-    // No firmware clock captured -> ENOSYS (the WM's uptime fallback).
-    timer.boot_time_of_day = std.math.maxInt(u64);
-    try std.testing.expectEqual(error_result(.enosys), dispatch(sys_wmctl, .{ wm_server.wmctl_clock, 0, 0, 0, 0, 0 }, &frame));
+    // No firmware epoch captured -> ENOSYS (the honest uptime fallback).
+    timer.boot_epoch_secs = std.math.maxInt(u64);
+    try std.testing.expectEqual(error_result(.enosys), dispatch(sys_time, .{ 0, 0, 0, 0, 0, 0 }, &frame));
 
-    // Boot capture 12:34:56 + 3 s of 1 Hz uptime -> 12:34:59 as seconds.
-    timer.boot_time_of_day = 12 * 3600 + 34 * 60 + 56;
+    // Boot epoch + 3 s of 1 Hz uptime: the current wall-clock seconds.
+    timer.boot_epoch_secs = 1_789_043_696; // 2026-09-10 12:34:56 wall-clock
     timer.ticks = 3;
-    try std.testing.expectEqual(@as(u64, 12 * 3600 + 34 * 60 + 59), dispatch(sys_wmctl, .{ wm_server.wmctl_clock, 0, 0, 0, 0, 0 }, &frame));
-
-    // Teardown: no leaked seats into the aggregated binary.
-    try std.testing.expect(wm_server.unregister(0));
+    try std.testing.expectEqual(@as(u64, 1_789_043_699), dispatch(sys_time, .{ 0, 0, 0, 0, 0, 0 }, &frame));
 }

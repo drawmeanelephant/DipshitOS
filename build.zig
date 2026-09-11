@@ -2142,6 +2142,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run host-side unit tests in parallel (M41 TS1)");
 
     const unit_test_sources = [_][]const u8{
+        "boot/src/efi_time.zig",
         "kernel/src/alloc.zig",
         "kernel/src/app_timers.zig",
         "kernel/src/arp.zig",

@@ -97,6 +97,10 @@ pub const sys_udp_send_num: u64 = 10;
 pub const sys_udp_recv_num: u64 = 11;
 pub const sys_mmap_num: u64 = 63;
 pub const sys_munmap_num: u64 = 64;
+/// #1058: slot 66 `sys_time()` — current Unix wall-clock seconds (the boot
+/// EFI GetTime epoch + uptime); negative (ENOSYS) when the firmware gave no
+/// epoch.
+pub const sys_time_num: u64 = 66;
 pub const PROT_READ: u64 = 1;
 pub const PROT_WRITE: u64 = 2;
 pub const PROT_EXEC: u64 = 4;
@@ -718,6 +722,12 @@ pub fn mmap(addr: u64, len: u64, prot: u64, flags: u64) i64 {
 /// M29 (issue #598): sys_munmap wrapper — free anonymous user memory.
 pub fn munmap(addr: u64, len: u64) i64 {
     return syscall2(sys_munmap_num, addr, len);
+}
+
+/// #1058: the current Unix wall-clock seconds (boot EFI GetTime epoch +
+/// uptime), or a negative error when the firmware gave no epoch.
+pub fn sys_time() i64 {
+    return syscall0(sys_time_num);
 }
 
 pub const sys_ping_send_num: u64 = 59;

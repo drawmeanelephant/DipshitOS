@@ -150,16 +150,17 @@ it (the render server already separates policy from blit).
   `REGISTER` → `ENXIO` (-9), `COMPOSITE_TICK` on the scheduler tick seam; the
    ADR 0007 amendment writes the honest `reserved 66–127` tail (`slot_count` is
    128). The `SET_WINDOW` chrome-descriptor layout remains open (WMS4).
-- 2026-09-10 — issue #1056: **additive WMCTL subcommands 14/15** (seat-gated
+- 2026-09-10 — issue #1056: **additive WMCTL subcommand 14** (seat-gated
   like every other subcommand; no existing opcode or arg layout changes).
   `WINDOW_NAME` (`wmctl(cmd=14, id, buf_ptr, len, 0, 0)`) copies a window's
   display name — the app-set title, else the owning process's executable name
   — OUT through uaccess and returns the byte count, so a WM whose kind-20
-  mirror carries no title bytes can still name non-tabapp windows.
-  `CLOCK` (`wmctl(cmd=15, 0, 0, 0, 0, 0)`) returns the current LOCAL seconds
-  since midnight (the boot `EFI GetTime` capture of ADR 0004 D5 advanced by
-  1 Hz uptime, wrapped at 24h), or `ENOSYS` when the firmware gave no clock.
-  Both back the TABWM polish in issue #1056 (window titles, real tray clock).
+  mirror carries no title bytes can still name non-tabapp windows. This backs
+  the TABWM window-title polish in issue #1056.
+  (The tray clock that #1056 first exposed as WMCTL cmd 15 is superseded by
+  the **ADR 0007 slot 66 `sys_time`** in #1058 — a general-purpose epoch read
+  is not a WM concern, so the WMCTL clock subcommand was dropped before
+  either PR merged.)
 
 ## Open issues (left to implementing claims)
 
