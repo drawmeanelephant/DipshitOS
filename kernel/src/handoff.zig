@@ -15,7 +15,12 @@ pub const magic: u32 = 0x324b5344; // "DSK2"
 pub const version: u32 = 2;
 pub const expected_stack_size: u64 = 16 * 1024; // 16 KiB, ADR 0004 D5
 
-/// Exact ADR 0004 D5 layout, offsets 0..56.
+/// Sentinel for "the firmware gave no wall-clock time" (no RTC, or
+/// RuntimeServices.GetTime refused). Used by the additive `boot_time_of_day`
+/// field (#1056 item 1).
+pub const no_boot_time: u64 = std.math.maxInt(u64);
+
+/// ADR 0004 D5 layout (offsets 0..64) plus the additive boot-clock field.
 pub const HandoffV2 = extern struct {
     magic: u32,
     version: u32,
@@ -26,6 +31,11 @@ pub const HandoffV2 = extern struct {
     stack_base: u64,
     stack_size: u64,
     flags: u64,
+    /// Additive (#1056 item 1): LOCAL seconds since midnight captured from
+    /// EFI RuntimeServices.GetTime at boot, or `no_boot_time`. The frozen
+    /// ADR 0004 D5 fields keep offsets 0..64; this field lives at 64, so a
+    /// v2 reader that ignores it sees the byte-identical old layout.
+    boot_time_of_day: u64 = no_boot_time,
 };
 
 pub const ValidateError = enum {
@@ -152,4 +162,19 @@ test "handoff: error_name returns deterministic strings" {
     try std.testing.expectEqualStrings("bad magic", error_name(.bad_magic));
     try std.testing.expectEqualStrings("bad version", error_name(.bad_version));
     try std.testing.expectEqualStrings("unaligned stack base", error_name(.unaligned_stack_base));
+}
+
+test "handoff: the additive boot clock sits after the frozen layout (#1056)" {
+    // The frozen ADR 0004 D5 fields keep their exact offsets...
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(HandoffV2, "magic"));
+    try std.testing.expectEqual(@as(usize, 56), @offsetOf(HandoffV2, "flags"));
+    // ...and the additive field follows, so a v2 reader ignores it safely.
+    try std.testing.expectEqual(@as(usize, 64), @offsetOf(HandoffV2, "boot_time_of_day"));
+    try std.testing.expectEqual(@as(usize, 72), @sizeOf(HandoffV2));
+
+    var h = valid_fixture();
+    try std.testing.expectEqual(h.boot_time_of_day, no_boot_time);
+    h.boot_time_of_day = 12 * 3600 + 34 * 60 + 56;
+    // The additive field is not part of the frozen validation contract.
+    try std.testing.expectEqual(ValidateError.none, validate(&h));
 }

@@ -2990,3 +2990,79 @@ test "syscall: M33 SB5 — the scanout grant is WM-only, full-frame, writable, i
     // The user layer ownership went back to the kernel shim.
     try std.testing.expect(!driving_award.wm_owns_user_layer);
 }
+
+test "syscall: WMCTL WINDOW_NAME (cmd 14, #1056) resolves a window's display name" {
+    userspace.init();
+    init(test_writer);
+    wm_server.init();
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (the WM seat)
+    scheduler.start();
+    var frame = fresh_frame();
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+
+    // No WM registered -> ENOSYS (the ADR 0007 "no WM" case).
+    try std.testing.expectEqual(error_result(.enosys), dispatch(sys_wmctl, .{ wm_server.wmctl_window_name, 2, 0, 0, 0, 0 }, &frame));
+
+    try std.testing.expect(wm_server.register(0));
+    const o = driving_award.user_open(64, 64, 256, 192, 0);
+    try std.testing.expectEqual(@as(u8, 2), o.opened);
+
+    // Unknown id / the fixed terminal window -> EINVAL.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_wmctl, .{ wm_server.wmctl_window_name, 9, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_wmctl, .{ wm_server.wmctl_window_name, 0, 0, 0, 0, 0 }, &frame));
+
+    // App-set title: copied OUT and the handler returns its byte count.
+    try std.testing.expect(driving_award.set_window_title(2, "Calc"));
+    var out: [16]u8 = [_]u8{0} ** 16;
+    set_user_regions(.{ .base = 0, .len = 0 }, .{ .base = @intFromPtr(&out), .len = out.len });
+    try std.testing.expectEqual(@as(u64, 4), dispatch(sys_wmctl, .{ wm_server.wmctl_window_name, 2, @intFromPtr(&out), out.len, 0, 0 }, &frame));
+    try std.testing.expectEqualStrings("Calc", out[0..4]);
+
+    // An unwritable destination -> EFAULT.
+    set_user_regions(.{ .base = 0, .len = 0 }, .{ .base = 0, .len = 0 });
+    try std.testing.expectEqual(error_result(.efault), dispatch(sys_wmctl, .{ wm_server.wmctl_window_name, 2, uaccess.diagnostic_unmapped, 8, 0, 0 }, &frame));
+
+    // Teardown: no leaked seats or windows into the aggregated binary.
+    try std.testing.expect(wm_server.unregister(0));
+    _ = driving_award.user_close(2);
+}
+
+test "syscall: WMCTL CLOCK (cmd 15, #1056) returns the firmware wall clock" {
+    userspace.init();
+    init(test_writer);
+    wm_server.init();
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (the WM seat)
+    scheduler.start();
+    var frame = fresh_frame();
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+
+    // No WM registered -> ENOSYS (the ADR 0007 "no WM" case).
+    try std.testing.expectEqual(error_result(.enosys), dispatch(sys_wmctl, .{ wm_server.wmctl_clock, 0, 0, 0, 0, 0 }, &frame));
+
+    try std.testing.expect(wm_server.register(0));
+
+    const saved_tod = timer.boot_time_of_day;
+    const saved_ticks = timer.ticks;
+    defer {
+        timer.boot_time_of_day = saved_tod;
+        timer.ticks = saved_ticks;
+    }
+
+    // No firmware clock captured -> ENOSYS (the WM's uptime fallback).
+    timer.boot_time_of_day = std.math.maxInt(u64);
+    try std.testing.expectEqual(error_result(.enosys), dispatch(sys_wmctl, .{ wm_server.wmctl_clock, 0, 0, 0, 0, 0 }, &frame));
+
+    // Boot capture 12:34:56 + 3 s of 1 Hz uptime -> 12:34:59 as seconds.
+    timer.boot_time_of_day = 12 * 3600 + 34 * 60 + 56;
+    timer.ticks = 3;
+    try std.testing.expectEqual(@as(u64, 12 * 3600 + 34 * 60 + 59), dispatch(sys_wmctl, .{ wm_server.wmctl_clock, 0, 0, 0, 0, 0 }, &frame));
+
+    // Teardown: no leaked seats into the aggregated binary.
+    try std.testing.expect(wm_server.unregister(0));
+}

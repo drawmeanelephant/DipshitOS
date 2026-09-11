@@ -52,6 +52,7 @@ pub const virtio_snd = @import("virtio_snd.zig"); // M27 G5 (#448): action sound
 pub const settings = @import("settings.zig");
 pub const klog = @import("klog.zig"); // issue #990 (claim #997): the serial-log seam (hook armed by main.zig)
 pub const geom = @import("wnd_core.zig"); // M32 WMS3 (issue #623): the shared pure rules (hit-test / workspace / clamps / title-layout) — compiled by the kernel AND the WM server so they cannot drift
+pub const process = @import("process.zig"); // #1056 item 2: resolve a window's owning process name (the non-tabapp tab-title fallback)
 
 /// M27 G13: Focus-follows-mouse configuration and dialog previous-focus tracking
 pub var focus_follows_mouse: bool = false;
@@ -1763,6 +1764,21 @@ pub const WinRect = struct {
 pub fn user_rect(id: u8) ?WinRect {
     const win = find_user_window(id) orelse return null;
     return .{ .x = win.x, .y = win.y, .w = win.w, .h = win.h };
+}
+
+/// #1056 item 2: the best human-readable name for a user window — its
+/// app-set title when one exists (sys_win_set_title / the tabapp declare
+/// RPC), otherwise the OWNING PROCESS's name (the FAT executable name, e.g.
+/// "WINLOOP.BIN"). This names the tabs of apps that never set a title, so
+/// the WM's kind-20 mirror (which carries no title bytes) can resolve a
+/// label. Null for a non-user window / unknown id / nameless owner.
+pub fn user_display_name(id: u8) ?[]const u8 {
+    const win = find_user_window(id) orelse return null;
+    if (win.title_len > 0) return win.title_buf[0..win.title_len];
+    const owner = win.owner orelse return null;
+    const pinfo = process.info(owner) orelse return null;
+    if (pinfo.name.len == 0) return null;
+    return pinfo.name;
 }
 
 /// M32 WMS5 (issue #625): push ONE registry mirror (kind 20 WM_WINDOW)

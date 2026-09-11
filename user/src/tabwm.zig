@@ -89,6 +89,14 @@ const wmctl_dialog: u64 = 11;
 /// `user_close` release (the owner gets the real WIN_CLOSE event push;
 /// TABWM gets the released kind-20 mirror back). a0 = window id.
 const wmctl_win_close: u64 = 13;
+/// #1056 item 2: resolve a window's display name — the app-set title if
+/// any, else the owning process's executable name. a1 = window id,
+/// a2 = buffer pointer, a3 = buffer length; returns the byte count.
+const wmctl_window_name: u64 = 14;
+/// #1056 item 1: the real system clock — the kernel returns the current
+/// LOCAL seconds since midnight (boot EFI GetTime capture + uptime), so the
+/// tray shows the actual time even without the session's `.clock` share.
+const wmctl_clock: u64 = 15;
 
 // M42 UX r2 (2026-09-05, claim #1011): the slot-65 DIALOG unsaved-changes
 // actions — the SAME primitives WND.BIN issues (user/src/wnd.zig): 3 =
@@ -132,6 +140,13 @@ pub const usage_8: u8 = 0x25;
 pub const usage_9: u8 = 0x26;
 pub const usage_tab: u8 = 0x2b;
 pub const usage_space: u8 = 0x2c;
+/// #1056 item 3: sidebar keyboard navigation — Enter activates the
+/// selection, Up/Down move it, PageUp/PageDown scroll the list window.
+pub const usage_enter: u8 = 0x28;
+pub const usage_pageup: u8 = 0x4b;
+pub const usage_pagedown: u8 = 0x4e;
+pub const usage_down: u8 = 0x51;
+pub const usage_up: u8 = 0x52;
 
 // Pinned markers (grepped by class-B live gates and tests)
 pub const registered_marker: []const u8 = "tabwm: registered\n";
@@ -156,6 +171,11 @@ pub const unsaved_cancel_marker: []const u8 = "tabwm: unsaved-cancel\n";
 /// M42 UX r2 (2026-09-05): the Alt+Tab parity marker (id-carrying prefix,
 /// bufPrint appends `N\n`).
 pub const alt_tab_marker: []const u8 = "tabwm: alt-tab id=";
+/// #1056 item 3: the sidebar keyboard selection moved (id-carrying prefix,
+/// bufPrint appends the absolute tab index + `\n`).
+pub const nav_marker: []const u8 = "tabwm: nav ";
+/// #1056 item 3: the tab-list overflow scroll offset changed.
+pub const tab_scroll_marker: []const u8 = "tabwm: tab-scroll ";
 
 // Geometry constants
 pub const fb_w: u32 = 1280;
@@ -198,12 +218,135 @@ pub fn tab_row_fits(i: usize) bool {
 /// The row index under `py`, or null when `py` is outside the band, past
 /// the last row that FITS, or beyond the current tab count. The single
 /// gate the pointer handler uses — a click can only ever reach a drawn tab.
+/// #1056 item 3: the lookup is RELATIVE to the overflow scroll offset, so
+/// a scrolled-into-view row resolves to its absolute index.
 pub fn tab_index_at(py: u32) ?usize {
     if (py < tab_list_top or py >= tab_list_bottom) return null;
-    const idx = (py - tab_list_top) / tab_row_h;
+    const rel = (py - tab_list_top) / tab_row_h;
+    if (!tab_row_fits(@intCast(rel))) return null;
+    const idx = tab_scroll + @as(usize, @intCast(rel));
     if (idx >= manager.tab_count) return null;
-    if (!tab_row_fits(idx)) return null;
     return idx;
+}
+
+// ---------------------------------------------------------------------------
+// Tab-list navigation & overflow (#1056 item 3)
+// ---------------------------------------------------------------------------
+// The list is a scrolling window over the tabs. `tab_scroll` is the first
+// drawn row; `nav_sel` is the keyboard cursor (independent of the ACTIVE
+// tab). The renderer, the hit-test, and the "+ New tab" placement all read
+// `tab_scroll`, so a click, a key, and a redraw can never disagree about
+// which tab is where. All three fit-test the SAME `tab_row_fits` predicate.
+
+/// The first tab row drawn in the list band (overflow scroll offset).
+pub var tab_scroll: usize = 0;
+
+/// The keyboard sidebar selection (an absolute tab index), or null when the
+/// user has not started keyboard navigation. Up/Down move it; Enter
+/// activates it — distinct from `hover_tab` (pointer) and `active_idx`
+/// (the shown tab).
+pub var nav_sel: ?usize = null;
+
+/// How many tab rows fit in the list band (the renderer's hard limit).
+pub fn visible_tab_rows() usize {
+    var n: usize = 0;
+    while (tab_row_fits(n)) : (n += 1) {}
+    return n;
+}
+
+/// The largest valid `tab_scroll` for the current tab count (0 when every
+/// tab fits — no overflow).
+pub fn tab_scroll_max() usize {
+    const vis = visible_tab_rows();
+    return if (manager.tab_count > vis) manager.tab_count - vis else 0;
+}
+
+fn clamp_tab_scroll() void {
+    const maxs = tab_scroll_max();
+    if (tab_scroll > maxs) tab_scroll = maxs;
+}
+
+fn write_nav_marker() void {
+    var buf: [48]u8 = undefined;
+    const sel: u32 = @intCast(nav_sel orelse 0);
+    const msg = std.fmt.bufPrint(&buf, "{s}{d}\n", .{ nav_marker, sel }) catch "tabwm: nav\n";
+    write_marker(msg);
+}
+
+fn write_scroll_marker() void {
+    var buf: [48]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{s}{d}\n", .{ tab_scroll_marker, tab_scroll }) catch "tabwm: tab-scroll\n";
+    write_marker(msg);
+}
+
+/// Scroll the tab window by `delta` rows (clamped to the list).
+pub fn scroll_tabs(delta: i32) void {
+    const cur: i32 = @intCast(tab_scroll);
+    const maxs: i32 = @intCast(tab_scroll_max());
+    var next = cur + delta;
+    if (next < 0) next = 0;
+    if (next > maxs) next = maxs;
+    if (next == cur) return;
+    tab_scroll = @intCast(next);
+    write_scroll_marker();
+}
+
+/// Slide the scroll window so the keyboard selection stays on screen.
+pub fn ensure_nav_visible() void {
+    const sel = nav_sel orelse return;
+    const vis = visible_tab_rows();
+    if (vis == 0) return;
+    if (sel < tab_scroll) {
+        tab_scroll = sel;
+    } else if (sel >= tab_scroll + vis) {
+        tab_scroll = sel - vis + 1;
+    }
+    clamp_tab_scroll();
+}
+
+/// Move the keyboard selection by `delta` rows (clamped to the list) and
+/// keep it visible. A no-op with no tabs.
+pub fn nav_move(delta: i32) void {
+    if (manager.tab_count == 0) return;
+    const start: usize = nav_sel orelse manager.active_idx orelse 0;
+    const last: i32 = @intCast(manager.tab_count - 1);
+    var next: i32 = @as(i32, @intCast(start)) + delta;
+    if (next < 0) next = 0;
+    if (next > last) next = last;
+    nav_sel = @intCast(next);
+    ensure_nav_visible();
+    write_nav_marker();
+}
+
+/// Activate the keyboard selection (Enter). A no-op when there is none.
+pub fn nav_activate() void {
+    if (nav_sel) |sel| {
+        if (sel < manager.tab_count) activate_tab(sel);
+    }
+}
+
+/// Drop a selection that no longer names a live tab (after closes) and
+/// re-clamp the scroll window.
+pub fn clamp_nav_selection() void {
+    if (nav_sel) |sel| {
+        if (sel >= manager.tab_count) {
+            nav_sel = if (manager.tab_count == 0) null else manager.tab_count - 1;
+        }
+    }
+    clamp_tab_scroll();
+}
+
+/// Format the overflow indicator (`"^2-16/18v"`; empty when everything
+/// fits). The `^`/`v` show whether rows are hidden above/below. Pure —
+/// host-testable with no framebuffer.
+pub fn overflow_label(buf: []u8) []const u8 {
+    if (tab_scroll_max() == 0) return "";
+    const vis = visible_tab_rows();
+    const start = tab_scroll + 1;
+    const end = @min(tab_scroll + vis, manager.tab_count);
+    const up: []const u8 = if (tab_scroll > 0) "^" else "";
+    const down: []const u8 = if (tab_scroll < tab_scroll_max()) "v" else "";
+    return std.fmt.bufPrint(buf, "{s}{d}-{d}/{d}{s}", .{ up, start, end, manager.tab_count, down }) catch "more";
 }
 
 // ---------------------------------------------------------------------------
@@ -545,6 +688,47 @@ pub fn clock_hms(elapsed: u64, epoch: ?u32) Hms {
 /// The boot wall-time from the host share, or null (uptime fallback).
 pub var clock_epoch: ?u32 = null;
 
+/// #1056 item 1: emit the clock-source marker once (host epoch / kernel
+/// firmware clock / uptime) so a live gate can tell which path won.
+pub var clock_source_logged: bool = false;
+
+/// #1056 item 1: ask the kernel for the real wall clock — the boot EFI
+/// GetTime capture advanced by 1 Hz uptime. Returns LOCAL seconds since
+/// midnight, or null on the host / when the firmware provided no clock (the
+/// honest uptime fallback). The value already includes elapsed time, so it
+/// is authoritative on every tick.
+pub fn query_clock() ?u32 {
+    if (@import("builtin").os.tag != .freestanding) return null;
+    const v = syscall6(sys_wmctl, wmctl_clock, 0, 0, 0, 0, 0);
+    if (v < 0 or v >= 86400) return null;
+    return @intCast(v);
+}
+
+/// One clock face for this tick: the host epoch advance if the session
+/// seeded `.clock`, else the kernel's firmware clock, else uptime. Also
+/// emits the one-shot source marker. Pure formatting lives in `clock_hms`.
+pub fn tick_clock_face(ticks: u64) Hms {
+    if (clock_epoch != null) {
+        if (!clock_source_logged) {
+            write_marker("tabwm: clock-source host\n");
+            clock_source_logged = true;
+        }
+        return clock_hms(ticks, clock_epoch);
+    }
+    if (query_clock()) |secs| {
+        if (!clock_source_logged) {
+            write_marker("tabwm: clock-source kernel\n");
+            clock_source_logged = true;
+        }
+        return .{ .h = secs / 3600, .m = (secs / 60) % 60, .s = secs % 60 };
+    }
+    if (!clock_source_logged) {
+        write_marker("tabwm: clock-source uptime\n");
+        clock_source_logged = true;
+    }
+    return clock_hms(ticks, null);
+}
+
 /// Read + parse `.clock` from the host share once at startup. A no-op on
 /// the host and when the share/file is absent (the honest fallback).
 pub fn load_clock_epoch() void {
@@ -561,6 +745,168 @@ pub fn load_clock_epoch() void {
         const msg = std.fmt.bufPrint(&b, "tabwm: clock epoch={d}\n", .{e}) catch "tabwm: clock epoch\n";
         write_marker(msg);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Tab-list persistence (#1056 item 3c)
+// ---------------------------------------------------------------------------
+// The tab list is memory-only, so a reboot loses the user's tab order and
+// active tab. The kernel already persists window state to the host share's
+// WINDOWS.SAV (M21 W11, shell.zig); TABWM writes its own `.tabs` beside it
+// and re-applies the ORDER + ACTIVE selection as the restored windows
+// reappear. Native window ids are NOT stable across a reboot (restore
+// allocates fresh ids), so records match by TITLE. A partial restore that
+// never reaches the saved count simply keeps arrival order.
+pub const tabs_state_file: []const u8 = ".tabs";
+pub const tabs_state_version: u8 = 1;
+/// One title slot per record; matches `Tab.title`'s capacity.
+pub const persist_title_max: usize = 32;
+/// version + active+1 + count.
+pub const tabs_header_bytes: usize = 3;
+pub const tabs_state_max_bytes: usize = tabs_header_bytes + max_tabs * persist_title_max;
+
+/// A decoded `.tabs` file: the tab order (by title) + the active index.
+pub const TabsState = struct {
+    active: ?usize = null,
+    count: usize = 0,
+    titles: [max_tabs][persist_title_max]u8 = [_][persist_title_max]u8{[_]u8{0} ** persist_title_max} ** max_tabs,
+    title_lens: [max_tabs]usize = [_]usize{0} ** max_tabs,
+};
+
+/// Encode the live tab list as `[version, active+1, count, titles...]`.
+/// Returns the byte count, or 0 when `buf` is too small. Pure.
+pub fn serialize_tabs(buf: []u8) usize {
+    if (buf.len < tabs_state_max_bytes) return 0;
+    buf[0] = tabs_state_version;
+    buf[1] = if (manager.active_idx) |a| @as(u8, @intCast(a)) + 1 else 0;
+    buf[2] = @intCast(manager.tab_count);
+    var off: usize = tabs_header_bytes;
+    for (0..manager.tab_count) |i| {
+        const t = manager.tabs[i].get_title();
+        const n = @min(t.len, persist_title_max);
+        @memcpy(buf[off .. off + n], t[0..n]);
+        @memset(buf[off + n .. off + persist_title_max], 0);
+        off += persist_title_max;
+    }
+    return off;
+}
+
+/// Decode a `.tabs` buffer into `out`. False on a version mismatch, a bad
+/// count, an out-of-range active index, or a truncated record. Pure.
+pub fn parse_tabs(buf: []const u8, out: *TabsState) bool {
+    if (buf.len < tabs_header_bytes) return false;
+    if (buf[0] != tabs_state_version) return false;
+    const act_plus1 = buf[1];
+    const count: usize = buf[2];
+    if (count > max_tabs) return false;
+    if (buf.len < tabs_header_bytes + count * persist_title_max) return false;
+    var st = TabsState{};
+    st.count = count;
+    st.active = if (act_plus1 == 0) null else @as(usize, act_plus1 - 1);
+    if (st.active) |a| {
+        if (a >= count) return false;
+    }
+    var off: usize = tabs_header_bytes;
+    for (0..count) |i| {
+        var len: usize = 0;
+        while (len < persist_title_max and buf[off + len] != 0) : (len += 1) {}
+        @memcpy(st.titles[i][0..len], buf[off .. off + len]);
+        st.title_lens[i] = len;
+        off += persist_title_max;
+    }
+    out.* = st;
+    return true;
+}
+
+/// The persisted state loaded at boot, pending application.
+pub var persisted_tabs: ?TabsState = null;
+
+var last_saved_tabs: [tabs_state_max_bytes]u8 = undefined;
+var last_saved_tabs_len: usize = 0;
+var have_last_saved_tabs: bool = false;
+
+/// Read `.tabs` from the host share once at startup. A no-op on the host
+/// and when the file is absent (the honest no-persistence fallback).
+pub fn load_tabs() void {
+    if (@import("builtin").os.tag != .freestanding) return;
+    var buf: [tabs_state_max_bytes]u8 = undefined;
+    const fd = ui.file_open(tabs_state_file, ui.MODE_READ);
+    if (fd < 0) return;
+    defer ui.file_close(@intCast(fd));
+    const n = ui.file_read(@intCast(fd), &buf);
+    if (n <= 0) return;
+    var st: TabsState = .{};
+    if (parse_tabs(buf[0..@intCast(n)], &st)) {
+        persisted_tabs = st;
+        var b: [48]u8 = undefined;
+        const msg = std.fmt.bufPrint(&b, "tabwm: tabs-restored count={d}\n", .{st.count}) catch "tabwm: tabs-restored\n";
+        write_marker(msg);
+    }
+}
+
+/// Write the current tab list to `.tabs` when it differs from the last
+/// write (the kernel's WINDOWS.SAV dedup discipline — a stable desktop
+/// must not hammer the transport). A no-op on the host.
+pub fn save_tabs() void {
+    if (@import("builtin").os.tag != .freestanding) return;
+    var buf: [tabs_state_max_bytes]u8 = undefined;
+    const n = serialize_tabs(&buf);
+    if (n == 0) return;
+    if (have_last_saved_tabs and last_saved_tabs_len == n and std.mem.eql(u8, last_saved_tabs[0..n], buf[0..n])) return;
+    const fd_trunc = ui.file_open(tabs_state_file, ui.MODE_WRITE);
+    if (fd_trunc >= 0) {
+        _ = ui.file_truncate(@as(u32, @intCast(fd_trunc)), 0);
+        ui.file_close(@as(u32, @intCast(fd_trunc)));
+    }
+    const fd = ui.file_open(tabs_state_file, ui.MODE_WRITE | ui.MODE_CREATE);
+    if (fd < 0) return;
+    const handle = @as(u32, @intCast(fd));
+    const written = ui.file_write(handle, buf[0..n]);
+    ui.file_close(handle);
+    if (written >= 0) {
+        @memcpy(last_saved_tabs[0..n], buf[0..n]);
+        last_saved_tabs_len = n;
+        have_last_saved_tabs = true;
+    }
+}
+
+/// Re-apply the persisted order + active tab once the restored window set is
+/// complete (the live tab count first reaches the saved count). Matches by
+/// title; unknown titles append in arrival order. Applies once; returns true
+/// when it ran (so the caller can re-activate the restored active tab).
+pub fn maybe_apply_persisted_tabs() bool {
+    const st = persisted_tabs orelse return false;
+    if (manager.tab_count != st.count) return false;
+    var reordered: [max_tabs]Tab = [_]Tab{.{}} ** max_tabs;
+    var used = [_]bool{false} ** max_tabs;
+    var n: usize = 0;
+    for (0..st.count) |pi| {
+        const want = st.titles[pi][0..st.title_lens[pi]];
+        for (0..manager.tab_count) |ti| {
+            if (used[ti]) continue;
+            if (std.mem.eql(u8, manager.tabs[ti].get_title(), want)) {
+                reordered[n] = manager.tabs[ti];
+                used[ti] = true;
+                n += 1;
+                break;
+            }
+        }
+    }
+    for (0..manager.tab_count) |ti| {
+        if (!used[ti]) {
+            reordered[n] = manager.tabs[ti];
+            n += 1;
+        }
+    }
+    const old_active_id = manager.get_active_id();
+    manager.tabs = reordered;
+    manager.tab_count = n;
+    if (old_active_id) |id| manager.active_idx = manager.find_by_id(id);
+    if (st.active) |pa| {
+        if (pa < manager.tab_count) manager.active_idx = pa;
+    }
+    persisted_tabs = null; // apply exactly once
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -660,6 +1006,9 @@ pub fn activate_tab(idx: usize) void {
     var buf: [64]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, "{s} idx={d} id={d}\n", .{ tab_switch_marker, idx, active_id }) catch "tabwm: tab-switch\n";
     write_marker(msg);
+
+    // #1056 item 3c: the active tab changed — persist the order + selection.
+    save_tabs();
 }
 
 /// Close tab by index:
@@ -711,6 +1060,10 @@ pub fn close_tab(idx: usize) void {
     if (manager.active_idx) |new_idx| {
         activate_tab(new_idx);
     }
+
+    // #1056 item 3: the list shrank — re-clamp the cursor/scroll and persist.
+    clamp_nav_selection();
+    save_tabs();
 }
 
 // ---------------------------------------------------------------------------
@@ -825,6 +1178,26 @@ pub fn unsaved_dialog_key(usage: u8) bool {
 ///     changes); an unknown id >= 2 joins as "App N" and activates. A
 ///     17th window is IGNORED (no add, no activation hijack) when the
 ///     manager is already at max_tabs.
+/// #1056 item 2: resolve a window's display name through the WMCTL
+/// WINDOW_NAME query (the kernel returns the app-set title or the owner
+/// process's executable name). Returns a slice into `buf`, or null when the
+/// window is unknown / the query is refused (e.g. host tests, no kernel).
+fn query_window_name(id: u32, buf: []u8) ?[]const u8 {
+    const n = syscall6(sys_wmctl, wmctl_window_name, id, @intFromPtr(buf.ptr), buf.len, 0, 0);
+    if (n <= 0) return null;
+    const len: usize = @intCast(@min(@as(u64, @intCast(n)), buf.len));
+    if (len == 0) return null;
+    return buf[0..len];
+}
+
+/// True when `title` is the "App N" placeholder a mirror-created tab
+/// starts with (an empty title counts too) — i.e. the tab is still
+/// eligible to be renamed from the kernel's process name.
+fn is_placeholder_title(title: []const u8) bool {
+    if (title.len == 0) return true;
+    return std.mem.startsWith(u8, title, "App ");
+}
+
 pub fn handle_window_mirror(wid: u8, visible: bool, released: bool, unsaved: bool, orig_w: u32, orig_h: u32) void {
     const id: u32 = wid;
     if (released) {
@@ -834,6 +1207,8 @@ pub fn handle_window_mirror(wid: u8, visible: bool, released: bool, unsaved: boo
         if (was_active) {
             if (manager.active_idx) |next| activate_tab(next);
         }
+        clamp_nav_selection();
+        save_tabs();
         return;
     }
     if (!visible) return;
@@ -841,6 +1216,14 @@ pub fn handle_window_mirror(wid: u8, visible: bool, released: bool, unsaved: boo
         if (orig_w > 0) manager.tabs[idx].orig_w = orig_w;
         if (orig_h > 0) manager.tabs[idx].orig_h = orig_h;
         manager.tabs[idx].unsaved = unsaved;
+        // #1056 item 2: a placeholder tab (opened before the process name
+        // was resolvable) upgrades to the kernel's name on a later mirror.
+        if (is_placeholder_title(manager.tabs[idx].get_title())) {
+            var name_buf: [32]u8 = undefined;
+            if (query_window_name(id, &name_buf)) |name| {
+                manager.tabs[idx].set_title(name);
+            }
+        }
         return;
     }
     // Unknown window: ids 0/1 are kernel-fixed layers, never tabs; the
@@ -848,11 +1231,20 @@ pub fn handle_window_mirror(wid: u8, visible: bool, released: bool, unsaved: boo
     // returns index 0 — so a 17th window is ignored here rather than
     // hijacking tab 0's activation.
     if (wid < 2 or manager.tab_count >= max_tabs) return;
+    // #1056 item 2: prefer the kernel-resolved name (app title or owner
+    // process name); fall back to the "App N" placeholder when no kernel
+    // answers (host tests, or a nameless owner).
+    var name_buf: [32]u8 = undefined;
     var title_buf: [32]u8 = undefined;
-    const default_title = std.fmt.bufPrint(&title_buf, "App {d}", .{wid}) catch "App";
-    const idx = manager.add_or_update_tab_geom(id, default_title, orig_w, orig_h, false);
+    const title = query_window_name(id, &name_buf) orelse (std.fmt.bufPrint(&title_buf, "App {d}", .{wid}) catch "App");
+    const idx = manager.add_or_update_tab_geom(id, title, orig_w, orig_h, false);
     manager.tabs[idx].unsaved = unsaved;
     activate_tab(idx);
+    // #1056 item 3c: if this registration completes the restored window set,
+    // reorder to the persisted tab order and re-activate the saved tab.
+    if (maybe_apply_persisted_tabs()) {
+        if (manager.active_idx) |a| activate_tab(a);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -862,12 +1254,16 @@ pub fn handle_window_mirror(wid: u8, visible: bool, released: bool, unsaved: boo
 /// The "+ New tab" pill height (a slim row under the last tab pill).
 pub const new_tab_pill_h: u32 = 24;
 
-/// The y of the "+ New tab" pill: directly below the last tab row
-/// (58 + tab_count * tab_row_h + a 4px gap), clamped to stay above the
-/// y=650 tab-list bound. With zero tabs it renders in the empty-state
-/// area — the affordance exists even when nothing is open.
+/// The y of the "+ New tab" pill: directly below the last DRAWN tab row
+/// (58 + drawn * tab_row_h + a 4px gap), clamped to stay above the y=650
+/// tab-list bound. With zero tabs it renders in the empty-state area — the
+/// affordance exists even when nothing is open. #1056: `drawn` counts from
+/// the overflow scroll offset, so the pill tracks the visible window.
 pub fn new_tab_pill_y() u32 {
-    const y: u32 = tab_row_y(manager.tab_count) + 4;
+    const vis = visible_tab_rows();
+    const visible_count = @min(manager.tab_count -| tab_scroll, vis);
+    const base = if (visible_count == 0) 0 else visible_count;
+    const y: u32 = tab_row_y(base) + 4;
     return @min(y, tab_list_bottom - new_tab_pill_h);
 }
 
@@ -1204,19 +1600,40 @@ pub fn draw_sidebar(scan: [*]u32) void {
         pixels[52 * fb_w + sx] = 0xFF000000 | border_c;
     }
 
+    // #1056 item 3: the overflow indicator — when more tabs exist than fit,
+    // the header shows the visible window (`^2-16/18v`) and the arrows mark
+    // rows hidden above/below. The list itself scrolls with the keyboard
+    // (Up/Down move the selection, PageUp/PageDown scroll a page).
+    if (tab_scroll_max() > 0) {
+        var obuf: [24]u8 = undefined;
+        ui.draw_text_sized(0, overflow_label(&obuf), 92, 40, ui.font_size_badge, ui.sidebar_text_inactive());
+    }
+
     // 4. Middle Tab List (y = 58 .. 650)
     if (manager.tab_count == 0) {
         ui.draw_text_sized(0, "No open tabs", 20, 96, ui.font_size_badge, ui.sidebar_text_inactive());
         ui.draw_text_sized(0, "Ctrl+Space or +", 20, 112, ui.font_size_badge, ui.sidebar_text_inactive());
         ui.draw_text_sized(0, "to launch apps", 20, 126, ui.font_size_badge, ui.sidebar_text_inactive());
     } else {
-        for (0..manager.tab_count) |i| {
-            if (!tab_row_fits(i)) break;
-            const tab_y: u32 = tab_row_y(i);
+        const vis_rows = visible_tab_rows();
+        var rel: usize = 0;
+        while (rel < vis_rows) : (rel += 1) {
+            const i = tab_scroll + rel;
+            if (i >= manager.tab_count) break;
+            const tab_y: u32 = tab_row_y(rel);
 
             const pill_rect = Rect.make(tab_pill_x, tab_y + 2, tab_pill_w, 34);
             const is_active = (manager.active_idx != null and manager.active_idx.? == i);
             const is_hover = (hover_tab != null and hover_tab.? == i);
+            const is_nav = (nav_sel != null and nav_sel.? == i);
+
+            // #1056 item 3: the keyboard-selection ring — a 2px accent
+            // outline drawn UNDER the pill fill, so only the ring survives
+            // around active/hover/inactive rows and the keyboard cursor is
+            // always visible.
+            if (is_nav) {
+                ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(pill_rect.x - 2, pill_rect.y - 2, pill_rect.w + 4, pill_rect.h + 4), ui.tab_pill_radius + 2, ui.theme_accent());
+            }
 
             if (is_active) {
                 // Active pill background
@@ -1254,10 +1671,11 @@ pub fn draw_sidebar(scan: [*]u32) void {
     // M42 UX r2: the close-feedback flash — the row slot the just-closed
     // tab occupied lights for a few composite ticks, drawn AFTER the pills
     // so it overlays (accent = the kernel applied the close; muted = the
-    // seam was refused and only a hide ran).
+    // seam was refused and only a hide ran). #1056: the slot is relative to
+    // the scroll window and skipped when scrolled out of view.
     if (close_flash_row) |frow| {
-        if (close_flash_active(frow)) {
-            const fy: u32 = tab_row_y(frow) + 2;
+        if (close_flash_active(frow) and frow >= tab_scroll and (frow - tab_scroll) < visible_tab_rows()) {
+            const fy: u32 = tab_row_y(frow - tab_scroll) + 2;
             ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(tab_pill_x, fy, tab_pill_w, 34), 0, if (close_flash_closed) ui.theme_accent() else ui.sidebar_text_inactive());
         }
     }
@@ -1469,6 +1887,9 @@ pub fn handle_pointer(px: u32, py: u32, clicked: bool) void {
     } else if (tab_index_at(py)) |idx| {
         hover_tab = idx;
         if (clicked) {
+            // #1056 item 3: a click seeds the keyboard selection, so Up/Down
+            // continue from the tab the user just pointed at.
+            nav_sel = idx;
             // Check if clicked close box 'x' at x = 148..168
             // (M42 UX r2: the close DECISION routes through
             // request_close_tab — a dirty tab opens the dialog
@@ -1525,6 +1946,38 @@ pub fn handle_wm_key(usage: u8, flags: u16) void {
             write_marker(msg);
         }
         return;
+    }
+
+    // #1056 item 3: plain sidebar navigation. Up/Down move the keyboard
+    // selection (the list scrolls to keep it visible), Enter activates it,
+    // PageUp/PageDown scroll a page. Only unmodified chords are claimed, so
+    // Ctrl/Alt+arrow stay free for the kernel's window geometry chords.
+    if (!ctrl and !alt) {
+        switch (usage) {
+            usage_up => {
+                nav_move(-1);
+                return;
+            },
+            usage_down => {
+                nav_move(1);
+                return;
+            },
+            usage_enter => {
+                if (nav_sel != null) {
+                    nav_activate();
+                    return;
+                }
+            },
+            usage_pageup => {
+                scroll_tabs(-@as(i32, @intCast(visible_tab_rows())));
+                return;
+            },
+            usage_pagedown => {
+                scroll_tabs(@as(i32, @intCast(visible_tab_rows())));
+                return;
+            },
+            else => {},
+        }
     }
 
     if (ctrl) {
@@ -1708,6 +2161,10 @@ fn main() noreturn {
     // seconds since midnight) from the host share, if present.
     load_clock_epoch();
 
+    // #1056 item 3c: the tab order/active selection from the last session
+    // (applied as the restored windows reappear).
+    load_tabs();
+
     var ev: Event = undefined;
 
     while (true) {
@@ -1731,9 +2188,10 @@ fn main() noreturn {
                     if (close_flash_ticks == 0) close_flash_row = null;
                 }
 
-                // Update the real clock (host wall-time epoch + 1 Hz session
-                // elapsed; session uptime when no `.clock` was present).
-                const hms = clock_hms(ticks_count, clock_epoch);
+                // #1056 item 1: the real clock — the session host epoch when
+                // `.clock` is present, else the kernel's firmware clock
+                // (boot EFI GetTime + uptime), else honest uptime.
+                const hms = tick_clock_face(ticks_count);
                 clock_hours = hms.h;
                 clock_minutes = hms.m;
                 clock_seconds = hms.s;
@@ -1790,10 +2248,56 @@ fn main() noreturn {
     }
 }
 
+/// Restore every file-global TABWM mutates to its cold-boot value, so a
+/// test's outcome never depends on which tests ran before it (#1056 item 4).
+/// Tests call this FIRST; it is not part of the server path.
+pub fn resetForTest() void {
+    manager = TabManager.init();
+
+    hover_tab = null;
+    hover_sexiburger = false;
+    hover_theme_toggle = false;
+    hover_clip = false;
+    hover_new_tab = false;
+
+    unsaved_pending_close = null;
+    unsaved_pending_id = 0;
+    unsaved_dialog_open_tabwm = false;
+
+    close_flash_row = null;
+    close_flash_ticks = 0;
+    close_flash_closed = false;
+
+    clock_hours = 0;
+    clock_minutes = 0;
+    clock_seconds = 0;
+    clock_epoch = null;
+    clock_source_logged = false;
+    ticks_count = 0;
+    present_count = 0;
+
+    // #1056 item 3: the list window, keyboard cursor, and persistence state.
+    tab_scroll = 0;
+    nav_sel = null;
+    persisted_tabs = null;
+    have_last_saved_tabs = false;
+    last_saved_tabs_len = 0;
+
+    overlay_open = false;
+    overlay_loaded = false;
+    overlay_count = 0;
+    overlay_filter_len = 0;
+    overlay_filtered_count = 0;
+    overlay_sel = 0;
+
+    mascot_loaded = false;
+}
+
 // ---------------------------------------------------------------------------
 // Unit Tests (M39 TWM1 + TWM2)
 // ---------------------------------------------------------------------------
 test "tabwm: tab manager allocation and lifecycle" {
+    resetForTest();
     var mgr = TabManager.init();
     try std.testing.expectEqual(@as(usize, 0), mgr.tab_count);
     try std.testing.expectEqual(@as(?usize, null), mgr.active_idx);
@@ -1827,6 +2331,7 @@ test "tabwm: tab manager allocation and lifecycle" {
 }
 
 test "tabwm: tab manager active index adjustment on removal" {
+    resetForTest();
     var mgr = TabManager.init();
     _ = mgr.add_or_update_tab(10, "Tab 0");
     _ = mgr.add_or_update_tab(20, "Tab 1");
@@ -1865,6 +2370,7 @@ test "tabwm: tab manager active index adjustment on removal" {
 }
 
 test "tabwm: tab cycle forward and backward" {
+    resetForTest();
     var mgr = TabManager.init();
     _ = mgr.add_or_update_tab(1, "A");
     _ = mgr.add_or_update_tab(2, "B");
@@ -1889,6 +2395,7 @@ test "tabwm: tab cycle forward and backward" {
 }
 
 test "tabwm: keyboard shortcuts routing" {
+    resetForTest();
     manager = TabManager.init();
     _ = manager.add_or_update_tab(101, "Browser");
     _ = manager.add_or_update_tab(102, "Terminal");
@@ -1925,6 +2432,7 @@ test "tabwm: keyboard shortcuts routing" {
 }
 
 test "tabwm: pointer hit testing and tab selection / close button" {
+    resetForTest();
     manager = TabManager.init();
     _ = manager.add_or_update_tab(201, "Calc");
     _ = manager.add_or_update_tab(202, "Files");
@@ -1951,6 +2459,7 @@ test "tabwm: pointer hit testing and tab selection / close button" {
 }
 
 test "tabwm: wnd_mail_apply RPC commands" {
+    resetForTest();
     manager = TabManager.init();
     _ = manager.add_or_update_tab(31, "Old Title");
     _ = manager.add_or_update_tab(32, "Other");
@@ -2027,6 +2536,7 @@ test "tabwm: wnd_mail_apply RPC commands" {
 }
 
 test "tabwm: geometry constants respect M39 tokens" {
+    resetForTest();
     try std.testing.expectEqual(@as(u32, 1280), fb_w);
     try std.testing.expectEqual(@as(u32, 720), fb_h);
     try std.testing.expectEqual(@as(u32, 180), sidebar_w);
@@ -2036,6 +2546,7 @@ test "tabwm: geometry constants respect M39 tokens" {
 }
 
 test "tabwm: compute_tab_viewport centering and full bleed" {
+    resetForTest();
     // 1. Resizable window gets full 1100x720 at (180, 0)
     var tab_res = Tab{
         .id = 1,
@@ -2098,6 +2609,7 @@ test "tabwm: compute_tab_viewport centering and full bleed" {
 }
 
 test "tabwm: draw_viewport_backdrop writes canvas outside window" {
+    resetForTest();
     var fb: [fb_w * fb_h]u32 = undefined;
     @memset(&fb, 0);
 
@@ -2117,6 +2629,7 @@ test "tabwm: draw_viewport_backdrop writes canvas outside window" {
 // Unit Tests (M42 SX1 — the proper mascot emblem)
 // ---------------------------------------------------------------------------
 test "tabwm: proper mascot emblem decodes at 28x28 (M42 SX1)" {
+    resetForTest();
     const img = mascot_image() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u32, 28), img.width);
     try std.testing.expectEqual(@as(u32, 28), img.height);
@@ -2132,6 +2645,7 @@ test "tabwm: proper mascot emblem decodes at 28x28 (M42 SX1)" {
 }
 
 test "tabwm: draw_sidebar blits the raster emblem into the scanout (M42 SX1)" {
+    resetForTest();
     var fb: [fb_w * fb_h]u32 = undefined;
     @memset(&fb, 0);
     manager = TabManager.init();
@@ -2153,6 +2667,7 @@ test "tabwm: draw_sidebar blits the raster emblem into the scanout (M42 SX1)" {
 // Unit Tests (M42 SX2 — the full-screen viewport seam)
 // ---------------------------------------------------------------------------
 test "tabwm: tab-aware fixed app takes the full viewport (M42 SX2)" {
+    resetForTest();
     var tab = Tab{
         .id = 3,
         .orig_w = 512,
@@ -2178,6 +2693,7 @@ test "tabwm: tab-aware fixed app takes the full viewport (M42 SX2)" {
 }
 
 test "tabwm: viewport_change_needed idempotence (M42 SX2)" {
+    resetForTest();
     var tab = Tab{ .id = 1, .valid = true };
     const full = Rect.make(viewport_x, viewport_y, viewport_w, viewport_h);
     // First activation always proposes.
@@ -2190,6 +2706,7 @@ test "tabwm: viewport_change_needed idempotence (M42 SX2)" {
 }
 
 test "tabwm: declare_fullscreen RPC registers and applies the full viewport (M42 SX2)" {
+    resetForTest();
     manager = TabManager.init();
     // Unknown window id: the declaration creates the tab.
     var req = ui.WmRpc{
@@ -2224,6 +2741,7 @@ test "tabwm: declare_fullscreen RPC registers and applies the full viewport (M42
 }
 
 test "tabwm: declare_fullscreen on an inactive tab defers the proposal (M42 SX2)" {
+    resetForTest();
     manager = TabManager.init();
     _ = manager.add_or_update_tab(31, "Existing");
     activate_tab(0);
@@ -2273,6 +2791,7 @@ fn overlay_seed_catalog() void {
 }
 
 test "tabwm: god-menu overlay filters the manifest (M42 SX5)" {
+    resetForTest();
     overlay_seed_catalog();
     try std.testing.expectEqual(@as(usize, 3), overlay_filtered_count);
     // Case-insensitive substring over label + bin.
@@ -2292,6 +2811,7 @@ test "tabwm: god-menu overlay filters the manifest (M42 SX5)" {
 }
 
 test "tabwm: god-menu overlay keys — filter, select, launch, dismiss (M42 SX5)" {
+    resetForTest();
     overlay_seed_catalog();
     overlay_open = true;
     // 'e' extends the filter ("e" hits "64-bit Calc"? no — label+bin
@@ -2319,12 +2839,14 @@ test "tabwm: god-menu overlay keys — filter, select, launch, dismiss (M42 SX5)
 }
 
 test "tabwm: overlay keys are consumed only while open (M42 SX5)" {
+    resetForTest();
     overlay_open = false;
     // With the overlay closed, letter keys fall through (not consumed).
     try std.testing.expect(!overlay_key(0x04));
 }
 
 test "tabwm: god-menu overlay accepts digits, minus, period in the filter (M42 SX5)" {
+    resetForTest();
     overlay_seed_catalog();
     overlay_open = true;
     // "64-bit": digits 6,4 (usages 0x23,0x21), minus (0x2d), b,i,t.
@@ -2348,6 +2870,7 @@ test "tabwm: god-menu overlay accepts digits, minus, period in the filter (M42 S
 // Unit Tests (M42 UX hardening — 2026-09-05)
 // ---------------------------------------------------------------------------
 test "tabwm: released mirror removes the tab and activates the next (M42 UX)" {
+    resetForTest();
     manager = TabManager.init();
     _ = manager.add_or_update_tab(2, "Alpha");
     _ = manager.add_or_update_tab(3, "Beta");
@@ -2369,6 +2892,7 @@ test "tabwm: released mirror removes the tab and activates the next (M42 UX)" {
 }
 
 test "tabwm: released mirror for an unknown id is a no-op (M42 UX)" {
+    resetForTest();
     manager = TabManager.init();
     _ = manager.add_or_update_tab(2, "Alpha");
     activate_tab(0);
@@ -2379,6 +2903,7 @@ test "tabwm: released mirror for an unknown id is a no-op (M42 UX)" {
 }
 
 test "tabwm: hide mirror without released does NOT remove a tab (M42 UX)" {
+    resetForTest();
     manager = TabManager.init();
     _ = manager.add_or_update_tab(2, "Alpha");
     activate_tab(0);
@@ -2390,6 +2915,7 @@ test "tabwm: hide mirror without released does NOT remove a tab (M42 UX)" {
 }
 
 test "tabwm: visible mirror upserts geometry (M42 UX)" {
+    resetForTest();
     manager = TabManager.init();
     _ = manager.add_or_update_tab(2, "Alpha");
     handle_window_mirror(2, true, false, false, 640, 480);
@@ -2402,6 +2928,7 @@ test "tabwm: visible mirror upserts geometry (M42 UX)" {
 }
 
 test "tabwm: the 17th window is ignored, tab 0 not hijacked (M42 UX)" {
+    resetForTest();
     manager = TabManager.init();
     var id: u32 = 2;
     while (id < 2 + max_tabs) : (id += 1) {
@@ -2416,6 +2943,7 @@ test "tabwm: the 17th window is ignored, tab 0 not hijacked (M42 UX)" {
 }
 
 test "tabwm: + New tab affordance and Ctrl+T trigger the new-tab path (M42 UX)" {
+    resetForTest();
     // The pinned marker the class-B live gate greps.
     try std.testing.expectEqualStrings("tabwm: new-tab\n", new_tab_marker);
 
@@ -2457,6 +2985,7 @@ test "tabwm: + New tab affordance and Ctrl+T trigger the new-tab path (M42 UX)" 
 }
 
 test "tabwm: overlay empty vs filtered-empty messages are distinguishable (M42 UX)" {
+    resetForTest();
     // Empty manifest: no apps installed at all.
     overlay_count = 0;
     overlay_filtered_count = 0;
@@ -2472,6 +3001,7 @@ test "tabwm: overlay empty vs filtered-empty messages are distinguishable (M42 U
 }
 
 test "tabwm: close_tab removes the tab and activates the next (M42 UX)" {
+    resetForTest();
     manager = TabManager.init();
     _ = manager.add_or_update_tab(31, "Calc");
     _ = manager.add_or_update_tab(32, "Files");
@@ -2502,6 +3032,7 @@ test "tabwm: close_tab removes the tab and activates the next (M42 UX)" {
 // Unit Tests (M42 UX r2 — unsaved-state honesty, close flash, Alt-Tab)
 // ---------------------------------------------------------------------------
 test "tabwm: unsaved bit-12 mirror sets, clears, and still releases (M42 UX r2)" {
+    resetForTest();
     // Creation path: a window born dirty joins with the flag set.
     manager = TabManager.init();
     handle_window_mirror(5, true, false, true, 100, 100);
@@ -2523,6 +3054,7 @@ test "tabwm: unsaved bit-12 mirror sets, clears, and still releases (M42 UX r2)"
 }
 
 test "tabwm: request_close_tab intercepts a dirty tab with the dialog (M42 UX r2)" {
+    resetForTest();
     manager = TabManager.init();
     unsaved_dialog_open_tabwm = false;
     unsaved_pending_close = null;
@@ -2550,6 +3082,7 @@ test "tabwm: request_close_tab intercepts a dirty tab with the dialog (M42 UX r2
 }
 
 test "tabwm: unsaved choices — save closes, cancel keeps, discard defers to the mirror (M42 UX r2)" {
+    resetForTest();
     // SAVE: the dialog clears and close_tab removes the tab (the app saves
     // and keeps running until the WM's WIN_CLOSE — the WM closes it).
     manager = TabManager.init();
@@ -2591,6 +3124,7 @@ test "tabwm: unsaved choices — save closes, cancel keeps, discard defers to th
 }
 
 test "tabwm: wnd_core dialog hit-test maps the three buttons (M42 UX r2)" {
+    resetForTest();
     // 1280x720: dialog origin (540, 310); Save center (580, 390),
     // Don't Save center (660, 390), Cancel center (715, 390).
     const dx: u32 = (fb_w - wnd_core.unsaved_dialog_w) / 2;
@@ -2605,6 +3139,7 @@ test "tabwm: wnd_core dialog hit-test maps the three buttons (M42 UX r2)" {
 }
 
 test "tabwm: alt_tab_next policy — null, cycle, invert, 0-start (M42 UX r2)" {
+    resetForTest();
     // Fewer than two tabs: no alt-tab.
     try std.testing.expectEqual(@as(?usize, null), alt_tab_next(0, null, false));
     try std.testing.expectEqual(@as(?usize, null), alt_tab_next(1, 0, false));
@@ -2621,6 +3156,7 @@ test "tabwm: alt_tab_next policy — null, cycle, invert, 0-start (M42 UX r2)" {
 }
 
 test "tabwm: Alt+Tab chord moves the active tab, Alt+Shift+Tab inverts (M42 UX r2)" {
+    resetForTest();
     manager = TabManager.init();
     _ = manager.add_or_update_tab(2, "A");
     _ = manager.add_or_update_tab(3, "B");
@@ -2643,6 +3179,7 @@ test "tabwm: Alt+Tab chord moves the active tab, Alt+Shift+Tab inverts (M42 UX r
 }
 
 test "tabwm: close_flash_active lives for the tick window then expires (M42 UX r2)" {
+    resetForTest();
     close_flash_row = 2;
     close_flash_ticks = 3;
     close_flash_closed = true;
@@ -2659,6 +3196,7 @@ test "tabwm: close_flash_active lives for the tick window then expires (M42 UX r
 }
 
 test "tabwm: dialog modal keys — Enter saves, Escape cancels, chords swallowed (M42 UX r2)" {
+    resetForTest();
     manager = TabManager.init();
     unsaved_dialog_open_tabwm = false;
     unsaved_pending_close = null;
@@ -2688,6 +3226,7 @@ test "tabwm: dialog modal keys — Enter saves, Escape cancels, chords swallowed
 }
 
 test "tabwm: dialog modal pointer — clicks route to the buttons, tabs are safe (M42 UX r2)" {
+    resetForTest();
     manager = TabManager.init();
     unsaved_dialog_open_tabwm = false;
     unsaved_pending_close = null;
@@ -2717,6 +3256,7 @@ test "tabwm: dialog modal pointer — clicks route to the buttons, tabs are safe
 }
 
 test "tabwm: the Sexiburger overlay cannot summon over the modal dialog (M42 UX r2)" {
+    resetForTest();
     manager = TabManager.init();
     overlay_open = false;
     unsaved_dialog_open_tabwm = true;
@@ -2729,6 +3269,7 @@ test "tabwm: the Sexiburger overlay cannot summon over the modal dialog (M42 UX 
 }
 
 test "tabwm: unsaved + alt-tab markers are pinned (M42 UX r2)" {
+    resetForTest();
     try std.testing.expectEqualStrings("tabwm: unsaved-dialog id=", unsaved_dialog_marker);
     try std.testing.expectEqualStrings("tabwm: unsaved-save\n", unsaved_save_marker);
     try std.testing.expectEqualStrings("tabwm: unsaved-discard\n", unsaved_discard_marker);
@@ -2741,6 +3282,7 @@ test "tabwm: unsaved + alt-tab markers are pinned (M42 UX r2)" {
 // ---------------------------------------------------------------------------
 
 test "tabwm: tab_index_at only reaches DRAWN rows (the shared row rule)" {
+    resetForTest();
     // Row geometry is one rule the renderer and the hit-test both read.
     try std.testing.expectEqual(@as(u32, 58), tab_row_y(0));
     try std.testing.expectEqual(@as(u32, 96), tab_row_y(1));
@@ -2779,6 +3321,7 @@ test "tabwm: tab_index_at only reaches DRAWN rows (the shared row rule)" {
 }
 
 test "tabwm: RPC upserts refuse a full manager instead of aliasing tab 0" {
+    resetForTest();
     manager = TabManager.init();
     var id: u32 = 2;
     while (id < 2 + max_tabs) : (id += 1) {
@@ -2833,6 +3376,7 @@ test "tabwm: RPC upserts refuse a full manager instead of aliasing tab 0" {
 // ---------------------------------------------------------------------------
 
 test "tabwm: parse_clock_epoch accepts seconds-since-midnight, rejects junk" {
+    resetForTest();
     try std.testing.expectEqual(@as(?u32, 0), parse_clock_epoch("0"));
     try std.testing.expectEqual(@as(?u32, 3661), parse_clock_epoch("3661"));
     try std.testing.expectEqual(@as(?u32, 86399), parse_clock_epoch(" 86399\n"));
@@ -2848,6 +3392,7 @@ test "tabwm: parse_clock_epoch accepts seconds-since-midnight, rejects junk" {
 }
 
 test "tabwm: clock_hms shows wall time with an epoch, uptime without" {
+    resetForTest();
     // No epoch: honest uptime from 00:00:00; hours do not wrap at 24.
     try std.testing.expectEqual(Hms{ .h = 0, .m = 0, .s = 0 }, clock_hms(0, null));
     try std.testing.expectEqual(Hms{ .h = 1, .m = 1, .s = 1 }, clock_hms(3661, null));
@@ -2859,4 +3404,243 @@ test "tabwm: clock_hms shows wall time with an epoch, uptime without" {
     try std.testing.expectEqual(Hms{ .h = 0, .m = 0, .s = 10 }, clock_hms(20, 23 * 3600 + 59 * 60 + 50));
     // A full day later wraps to the same face.
     try std.testing.expectEqual(Hms{ .h = 8, .m = 15, .s = 0 }, clock_hms(86400, 8 * 3600 + 15 * 60));
+}
+
+// ---------------------------------------------------------------------------
+// Unit Tests (#1056 item 4 — the test-state reset)
+// ---------------------------------------------------------------------------
+
+test "tabwm: resetForTest restores every mutated global to cold-boot" {
+    resetForTest();
+    // Dirty each global the suite touches.
+    _ = manager.add_or_update_tab(2, "Dirty");
+    hover_tab = 1;
+    hover_sexiburger = true;
+    hover_theme_toggle = true;
+    hover_clip = true;
+    hover_new_tab = true;
+    unsaved_pending_close = 0;
+    unsaved_pending_id = 2;
+    unsaved_dialog_open_tabwm = true;
+    close_flash_row = 1;
+    close_flash_ticks = 5;
+    close_flash_closed = true;
+    clock_hours = 9;
+    clock_minutes = 8;
+    clock_seconds = 7;
+    clock_epoch = 12;
+    overlay_open = true;
+    overlay_loaded = true;
+    overlay_count = 3;
+    overlay_filter_len = 2;
+    overlay_filtered_count = 2;
+    overlay_sel = 1;
+    mascot_loaded = true;
+
+    resetForTest();
+
+    try std.testing.expectEqual(@as(usize, 0), manager.tab_count);
+    try std.testing.expectEqual(@as(?usize, null), manager.active_idx);
+    try std.testing.expectEqual(@as(?usize, null), hover_tab);
+    try std.testing.expect(!hover_sexiburger);
+    try std.testing.expect(!hover_theme_toggle);
+    try std.testing.expect(!hover_clip);
+    try std.testing.expect(!hover_new_tab);
+    try std.testing.expectEqual(@as(?usize, null), unsaved_pending_close);
+    try std.testing.expectEqual(@as(u32, 0), unsaved_pending_id);
+    try std.testing.expect(!unsaved_dialog_open_tabwm);
+    try std.testing.expectEqual(@as(?usize, null), close_flash_row);
+    try std.testing.expectEqual(@as(u32, 0), close_flash_ticks);
+    try std.testing.expect(!close_flash_closed);
+    try std.testing.expectEqual(@as(u32, 0), clock_hours);
+    try std.testing.expectEqual(@as(u32, 0), clock_minutes);
+    try std.testing.expectEqual(@as(u32, 0), clock_seconds);
+    try std.testing.expectEqual(@as(?u32, null), clock_epoch);
+    try std.testing.expect(!overlay_open);
+    try std.testing.expect(!overlay_loaded);
+    try std.testing.expectEqual(@as(usize, 0), overlay_count);
+    try std.testing.expectEqual(@as(usize, 0), overlay_filter_len);
+    try std.testing.expectEqual(@as(usize, 0), overlay_filtered_count);
+    try std.testing.expectEqual(@as(usize, 0), overlay_sel);
+    try std.testing.expect(!mascot_loaded);
+}
+
+// ---------------------------------------------------------------------------
+// Unit Tests (#1056 item 3 — tab navigation, overflow, persistence)
+// ---------------------------------------------------------------------------
+
+test "tabwm: overflow scroll moves the list window and the hit-test follows" {
+    resetForTest();
+    var id: u32 = 2;
+    while (id < 2 + max_tabs) : (id += 1) _ = manager.add_or_update_tab(id, "Filler");
+    try std.testing.expectEqual(max_tabs, manager.tab_count);
+
+    const vis = visible_tab_rows();
+    try std.testing.expectEqual(@as(usize, 15), vis);
+    try std.testing.expectEqual(max_tabs - vis, tab_scroll_max());
+
+    // The 16th row is off-screen at scroll 0 and unreachable...
+    try std.testing.expectEqual(@as(?usize, null), tab_index_at(632));
+    // ...then reachable once the window slides one row.
+    scroll_tabs(1);
+    try std.testing.expectEqual(@as(usize, 1), tab_scroll);
+    try std.testing.expectEqual(@as(?usize, max_tabs - 1), tab_index_at(tab_row_y(14) + 4));
+
+    // Clamps at both ends.
+    scroll_tabs(100);
+    try std.testing.expectEqual(tab_scroll_max(), tab_scroll);
+    scroll_tabs(-100);
+    try std.testing.expectEqual(@as(usize, 0), tab_scroll);
+
+    // Keyboard selection auto-scrolls to reach the last tab.
+    nav_sel = max_tabs - 1;
+    ensure_nav_visible();
+    try std.testing.expectEqual(@as(usize, 1), tab_scroll);
+}
+
+test "tabwm: overflow_label reports the visible window with arrows" {
+    resetForTest();
+    var buf: [24]u8 = undefined;
+    // Everything fits: no indicator.
+    try std.testing.expectEqualStrings("", overflow_label(&buf));
+
+    var id: u32 = 2;
+    while (id < 2 + max_tabs) : (id += 1) _ = manager.add_or_update_tab(id, "F");
+    try std.testing.expectEqualStrings("1-15/16v", overflow_label(&buf));
+    scroll_tabs(1);
+    try std.testing.expectEqualStrings("^2-16/16", overflow_label(&buf));
+
+    // A draw smoke test: the scrolled list plus the selection ring render.
+    nav_sel = max_tabs - 1;
+    ensure_nav_visible();
+    var fb: [fb_w * fb_h]u32 = undefined;
+    @memset(&fb, 0);
+    draw_sidebar(&fb);
+    try std.testing.expectEqual(@as(usize, 1), tab_scroll);
+}
+
+test "tabwm: keyboard nav moves the selection, scrolls, and activates" {
+    resetForTest();
+    _ = manager.add_or_update_tab(2, "A");
+    _ = manager.add_or_update_tab(3, "B");
+    _ = manager.add_or_update_tab(4, "C");
+    activate_tab(0);
+
+    // Down starts from the active tab; Up/Down are both clamped.
+    handle_wm_key(usage_down, 0);
+    try std.testing.expectEqual(@as(?usize, 1), nav_sel);
+    handle_wm_key(usage_up, 0);
+    handle_wm_key(usage_up, 0);
+    try std.testing.expectEqual(@as(?usize, 0), nav_sel);
+    handle_wm_key(usage_down, 0);
+    handle_wm_key(usage_down, 0);
+    handle_wm_key(usage_down, 0);
+    try std.testing.expectEqual(@as(?usize, 2), nav_sel);
+
+    // Enter activates the SELECTION, not the previously active tab.
+    handle_wm_key(usage_enter, 0);
+    try std.testing.expectEqual(@as(?usize, 2), manager.active_idx);
+    try std.testing.expectEqual(@as(?u32, 4), manager.get_active_id());
+
+    // A Ctrl chord is not plain navigation (the kernel owns Ctrl+arrow).
+    handle_wm_key(usage_down, ui.MOD_CTRL);
+    try std.testing.expectEqual(@as(?usize, 2), nav_sel);
+
+    // PageDown/PageUp scroll (clamped; no overflow here so a no-op).
+    const before = tab_scroll;
+    handle_wm_key(usage_pagedown, 0);
+    try std.testing.expectEqual(before, tab_scroll);
+}
+
+test "tabwm: serialize_tabs/parse_tabs round-trip order and active" {
+    resetForTest();
+    _ = manager.add_or_update_tab(2, "Calculator");
+    _ = manager.add_or_update_tab(3, "Notes");
+    _ = manager.add_or_update_tab(4, "Files");
+    activate_tab(1);
+
+    var buf: [tabs_state_max_bytes]u8 = undefined;
+    const n = serialize_tabs(&buf);
+    try std.testing.expectEqual(tabs_header_bytes + 3 * persist_title_max, n);
+
+    var st: TabsState = .{};
+    try std.testing.expect(parse_tabs(buf[0..n], &st));
+    try std.testing.expectEqual(@as(usize, 3), st.count);
+    try std.testing.expectEqual(@as(?usize, 1), st.active);
+    try std.testing.expectEqualStrings("Calculator", st.titles[0][0..st.title_lens[0]]);
+    try std.testing.expectEqualStrings("Notes", st.titles[1][0..st.title_lens[1]]);
+    try std.testing.expectEqualStrings("Files", st.titles[2][0..st.title_lens[2]]);
+
+    // Corrupt inputs are rejected, never half-applied.
+    var bad = buf;
+    bad[0] = 99;
+    try std.testing.expect(!parse_tabs(bad[0..n], &st));
+    bad[0] = tabs_state_version;
+    bad[2] = max_tabs + 1;
+    try std.testing.expect(!parse_tabs(bad[0..n], &st));
+    bad[2] = 3;
+    try std.testing.expect(!parse_tabs(bad[0 .. n - 1], &st));
+    bad[1] = 4; // active 3 is out of range for count 3
+    try std.testing.expect(!parse_tabs(bad[0..n], &st));
+    try std.testing.expect(!parse_tabs(buf[0..2], &st));
+}
+
+test "tabwm: persisted order re-applies by title and sets the active tab" {
+    resetForTest();
+    var st = TabsState{};
+    st.count = 3;
+    st.active = 2;
+    @memcpy(st.titles[0][0..4], "Beta");
+    st.title_lens[0] = 4;
+    @memcpy(st.titles[1][0..5], "Gamma");
+    st.title_lens[1] = 5;
+    @memcpy(st.titles[2][0..5], "Alpha");
+    st.title_lens[2] = 5;
+    persisted_tabs = st;
+
+    // Arrival order (Alpha, Beta, Gamma) differs from the saved order.
+    _ = manager.add_or_update_tab(2, "Alpha");
+    _ = manager.add_or_update_tab(3, "Beta");
+    try std.testing.expect(!maybe_apply_persisted_tabs()); // not complete yet
+    _ = manager.add_or_update_tab(4, "Gamma");
+    try std.testing.expect(maybe_apply_persisted_tabs());
+
+    try std.testing.expectEqualStrings("Beta", manager.tabs[0].get_title());
+    try std.testing.expectEqualStrings("Gamma", manager.tabs[1].get_title());
+    try std.testing.expectEqualStrings("Alpha", manager.tabs[2].get_title());
+    try std.testing.expectEqual(@as(?usize, 2), manager.active_idx);
+    try std.testing.expectEqual(@as(?u32, 2), manager.get_active_id()); // Alpha (id 2)
+
+    // Applies exactly once — no reordering churn afterwards.
+    try std.testing.expect(!maybe_apply_persisted_tabs());
+}
+
+test "tabwm: new-tab pill tracks the visible window" {
+    resetForTest();
+    // Empty state: the pill renders in the empty-state area.
+    try std.testing.expectEqual(tab_row_y(0) + 4, new_tab_pill_y());
+    _ = manager.add_or_update_tab(2, "A");
+    _ = manager.add_or_update_tab(3, "B");
+    try std.testing.expectEqual(tab_row_y(2) + 4, new_tab_pill_y());
+    var id: u32 = 4;
+    while (id < 2 + max_tabs) : (id += 1) _ = manager.add_or_update_tab(id, "Filler");
+    try std.testing.expectEqual(tab_list_bottom - new_tab_pill_h, new_tab_pill_y());
+}
+
+// ---------------------------------------------------------------------------
+// Unit Tests (#1056 item 1 — the firmware wall clock)
+// ---------------------------------------------------------------------------
+
+test "tabwm: tick_clock_face prefers the host epoch, else uptime on the host" {
+    resetForTest();
+    // Host test: query_clock() is null (no kernel), no `.clock` -> uptime.
+    try std.testing.expectEqual(@as(?u32, null), query_clock());
+    try std.testing.expectEqual(Hms{ .h = 1, .m = 1, .s = 1 }, tick_clock_face(3661));
+
+    // The session `.clock` epoch wins and advances with the tick.
+    clock_epoch = 12 * 3600 + 34 * 60 + 56;
+    try std.testing.expectEqual(Hms{ .h = 12, .m = 34, .s = 57 }, tick_clock_face(1));
+    // 23:59:59 + 1 s wraps to midnight.
+    clock_epoch = 23 * 3600 + 59 * 60 + 59;
+    try std.testing.expectEqual(Hms{ .h = 0, .m = 0, .s = 0 }, tick_clock_face(1));
 }
