@@ -31,7 +31,7 @@
 | `tools/status/` | 6 | multiagent coordination gate + claim tooling (class A) |
 | `tools/context/` | 2 | context snapshot helpers |
 | `tools/ragshit/` | 84 | host-side context engine (developer tooling, not guest software) |
-| `tools/gate/` | 206 | M40 vgate harness + specs (GF2+) |
+| `tools/gate/` | 207 | M40 vgate harness + specs (GF2+) |
 
 ## Class-B fleet (discovered from the spec dir)
 
@@ -62,6 +62,7 @@ of them with `just verify-vz`.
 | spec | `live-concurrent` | 1 run / 5 assert | live-concurrent.spec -- two USER.BIN programs live at once: both |
 | spec | `live-console-tcp` | 2 run / 6 assert | live-console-tcp.spec -- M46 RC2 pilot (issue #1069): the declarative |
 | spec | `live-crash-viewer` | 1 run / 7 assert | live-crash-viewer.spec -- M22 D11: crash report viewer on VZ. |
+| spec | `live-crypto` | 1 run / 9 assert | live-crypto.spec -- M47 CP5 (issue #1119): the guest-class-B proof that |
 | spec | `live-desktop` | 1 run / 10 assert | live-desktop.spec -- claim 2427 (Milestone 11, Card A5) Desktop Platform & GUI Apps (ADR 0011) |
 | spec | `live-desktop-typing` | 1 run / 8 assert | live-desktop-typing.spec -- issue #563: keys reach desktop-launched GUI app on VZ |
 | spec | `live-devcons` | 1 run / 10 assert | live-devcons.spec -- M22 D14: DEVCONS.BIN developer console on VZ. |

@@ -21,6 +21,14 @@
 //! (le32(bytes[44..48]) & 0x7fffffff)` (the `| 1` guarantees a nonzero
 //! counter so a zero-heavy device read still yields a fresh stream).
 //!
+//! M47 (ADR 0023 D2): the userland crypto library
+//! (`user/src/lib/crypto/chacha20.zig`) carries the same RFC 7539 cipher
+//! for the AEAD. Zig forbids a relative import across the `kernel/`-`user/`
+//! module boundary and several class-A gates run `zig test` directly on
+//! kernel modules with no build-provided imports, so the two files stay
+//! separate; they are held together by the SAME RFC 7539 vectors pinned in
+//! both test roots (a drift guard), not by a shared translation unit.
+//!
 //! No libc, no POSIX, no allocation.
 
 const std = @import("std");
