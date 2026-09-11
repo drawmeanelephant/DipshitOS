@@ -22,12 +22,18 @@ const tty = @import("lib/tty.zig");
 const shell_mod = @import("lib/shell.zig");
 // M46 RC3b (#1104): the shared `net [port] [secret] [allow-ip]` parser.
 const netargs = @import("lib/netargs.zig");
+// M49 SD2 (#1129): the shared startup order (STARTUP.SH then PROFILE.SH).
+const startup = @import("lib/startup.zig");
+// M49 SD3 (#1130): the shared built-in tool multicall.
+const toolbox = @import("lib/toolbox.zig");
 
 pub const ready_marker: []const u8 = "term: ready\n";
 pub const attached_marker: []const u8 = "term: attached\n";
 pub const line_marker: []const u8 = "term: line ";
 pub const done_marker: []const u8 = "term: done";
 pub const bye_marker: []const u8 = "term: bye\n";
+/// M49 SD1 (#1128): the window presentation's `monitor` escape marker.
+pub const monitor_marker: []const u8 = "term: monitor\n";
 pub const exit_status: u64 = 71;
 
 /// The terminal window's geometry (a bounded, centred, scanout-safe rect).
@@ -95,6 +101,15 @@ fn bye(session: *tty.Session, status: u8) noreturn {
     ui.exit_process(status);
 }
 
+/// M49 SD1 (#1128): `monitor` from the window shell releases the terminal
+/// and closes the window process (the kernel auto-detaches on owner exit).
+fn exitToMonitor(session: *tty.Session) noreturn {
+    session.detach();
+    session.close();
+    ui.write_console(monitor_marker);
+    ui.exit_process(0);
+}
+
 fn runSource(session: *tty.Session, path: []const u8, depth: u32) void {
     if (depth > 4) return;
     const opened = abi.file_open(path, abi.MODE_READ);
@@ -149,7 +164,120 @@ fn runLine(session: *tty.Session, raw: []const u8, depth: u32) void {
             while (i < f.body_count) : (i += 1) runLine(session, f.command(i), depth + 1);
         },
         .exit => |status| bye(session, status),
+        .monitor => exitToMonitor(session),
+        .set_editor => |m| {
+            // M49 SD4 (#1131): the same keymap selection as SH.BIN.
+            g_editor.mode = if (m == .vi) .vi else .emacs;
+            g_editor.vi_state = .insert;
+        },
+        .tool => |req| {
+            // M49 SD3 (#1130): tools run through the same capture path.
+            _ = runTool(req);
+            session.write(g_shell.outSlice());
+        },
     }
+}
+
+// ---------------------------------------------------------------------------
+// M49 SD3 (#1130): the tool multicall over the host share (window glue).
+// ---------------------------------------------------------------------------
+
+var g_tool_in: []const u8 = &.{};
+var g_tool_pos: usize = 0;
+
+fn toolStdinRead(ctx: ?*anyopaque, buf: []u8) usize {
+    _ = ctx;
+    if (g_tool_pos >= g_tool_in.len) return 0;
+    const n = @min(buf.len, g_tool_in.len - g_tool_pos);
+    @memcpy(buf[0..n], g_tool_in[g_tool_pos..][0..n]);
+    g_tool_pos += n;
+    return n;
+}
+
+fn toolWrite(ctx: ?*anyopaque, bytes: []const u8) void {
+    _ = ctx;
+    g_shell.appendOut(bytes);
+}
+
+fn toolOpen(ctx: ?*anyopaque, name: []const u8) u64 {
+    _ = ctx;
+    const r = abi.file_open(name, abi.MODE_READ);
+    if (r < 0) return 0;
+    // Handles are encoded +1 so a valid fd 0 is not mistaken for "absent".
+    return @intCast(r + 1);
+}
+
+fn toolRead(ctx: ?*anyopaque, handle: u64, buf: []u8) usize {
+    _ = ctx;
+    const n = abi.file_read(@intCast(handle - 1), buf);
+    if (n <= 0) return 0;
+    return @intCast(n);
+}
+
+fn toolClose(ctx: ?*anyopaque, handle: u64) void {
+    _ = ctx;
+    abi.file_close(@intCast(handle - 1));
+}
+
+fn toolStat(ctx: ?*anyopaque, name: []const u8) u8 {
+    _ = ctx;
+    const r = abi.file_open(name, abi.MODE_READ);
+    if (r < 0) return 0;
+    abi.file_close(@intCast(r));
+    return 1;
+}
+
+fn runTool(req: shell_mod.ToolRequest) u8 {
+    g_tool_in = g_shell.stdin;
+    g_tool_pos = 0;
+    var ptrs: [shell_mod.tool_arg_max][]const u8 = undefined;
+    const n = @min(req.count, shell_mod.tool_arg_max);
+    var i: usize = 0;
+    while (i < n) : (i += 1) ptrs[i] = req.at(i);
+    const host = toolbox.Host{
+        .open_fn = toolOpen,
+        .read_fn = toolRead,
+        .close_fn = toolClose,
+        .stat_fn = toolStat,
+    };
+    const out = toolbox.Writer{ .write_fn = toolWrite };
+    const stdin = toolbox.Stream{ .read_fn = toolStdinRead };
+    return toolbox.run(req.tool, ptrs[0..n], stdin, host, out);
+}
+
+/// M49 SD2 (#1129): the SAME startup order as `SH.BIN` — `STARTUP.SH` then
+/// the optional host-share `PROFILE.SH` — so the serial and window
+/// presentations cannot drift. The prompt stays presentation-local
+/// (`term> `), overridden by `STARTUP.SH`/`PROFILE.SH` like any `prompt`
+/// call.
+fn runStartup(session: *tty.Session) void {
+    startup.runAll(startupFiles(), session, startupLine);
+}
+
+fn startupLine(ctx: ?*anyopaque, line: []const u8) void {
+    const session: *tty.Session = @ptrCast(@alignCast(ctx.?));
+    runLine(session, line, 0);
+}
+
+fn startupFiles() startup.Files {
+    return .{ .open_fn = startupOpen, .read_fn = startupRead, .close_fn = startupClose };
+}
+
+fn startupOpen(ctx: ?*anyopaque, path: []const u8) i64 {
+    _ = ctx;
+    const r = abi.file_open(path, abi.MODE_READ);
+    if (r < 0) return -1;
+    return @intCast(r);
+}
+
+fn startupRead(ctx: ?*anyopaque, handle: u32, buf: []u8) i64 {
+    _ = ctx;
+    return abi.file_read(handle, buf);
+}
+
+fn startupClose(ctx: ?*anyopaque, handle: u32) void {
+    _ = ctx;
+    abi.file_close(handle);
 }
 
 pub export fn _start(argc: u64, argv_va: u64) callconv(.c) noreturn {
@@ -196,6 +324,13 @@ pub export fn _start(argc: u64, argv_va: u64) callconv(.c) noreturn {
     }
 
     const out = session.output();
+    // M49 SD4 (#1131): the window grid has a bounded scrollback, so Ctrl-L
+    // clears it too (`ESC [ 3 J`); request bracketed paste from the WM
+    // input seam.
+    g_editor.clear_scrollback = true;
+    session.write(tty.paste_enable);
+    // M49 SD2 (#1129): unified startup before the first prompt.
+    runStartup(&session);
     session.write(g_shell.promptSlice());
 
     var buf: [64]u8 = undefined;
@@ -228,6 +363,7 @@ pub export fn _start(argc: u64, argv_va: u64) callconv(.c) noreturn {
                     session.write(g_shell.promptSlice());
                     g_editor.reprint(out);
                 },
+                .continued => {},
                 .eof => bye(&session, @intCast(exit_status)),
                 .none => {},
             }

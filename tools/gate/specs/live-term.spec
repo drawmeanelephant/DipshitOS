@@ -31,7 +31,7 @@ vgate_run 01 -- --display --input --via-virtio --screen '$RUN_DIR/screen' \
     --cvc-snap --snapshot-after 'term: done' --snapshot-out '$RUN_DIR/snap' \
     --script2 '$RUN_DIR/script2.txt' \
     --script2-after 'term: done' \
-    --script-expect 'term: done' \
+    --script-expect 'dui: windows=' \
     --timeout 120
 
 vgate_assert 01 serial-contains 'term: ready'

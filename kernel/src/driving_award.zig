@@ -417,6 +417,32 @@ pub var cursor_x: u32 = 0;
 pub var cursor_y: u32 = 0;
 pub var cursor_shown: bool = false;
 pub var prev_ptr_buttons: u8 = 0;
+/// M49 SD5 (#1132): a terminal selection drag is in progress (pointer held
+/// inside a terminal window's client area).
+var term_sel_dragging: bool = false;
+
+/// M49 SD5 (#1132): the terminal window under the pointer and the grid cell
+/// (absolute line + column) it maps to, or null. Searches topmost first.
+const TermHit = struct { win_id: u8, line: usize, col: usize };
+
+fn terminalHitAt(px: u32, py: u32) ?TermHit {
+    var wi: usize = win_count;
+    while (wi > 0) {
+        wi -= 1;
+        const w = &windows[wi];
+        if (w.kind != .user or !w.visible) continue;
+        const top_y = w.y + @as(u32, @intCast(user_title_h));
+        if (px < w.x or px >= w.x + w.w) continue;
+        if (py < top_y or py >= w.y + w.h) continue;
+        const scr = terminal.screenForWindow(w.id) orelse continue;
+        const rows_visible: usize = if (w.h > user_title_h) ((w.h - user_title_h) / 8) else 1;
+        const first: usize = if (scr.used > scr.view + rows_visible) scr.used - scr.view - rows_visible else 0;
+        const row: usize = (py - top_y) / 8;
+        const col: usize = (px - w.x) / 8;
+        return .{ .win_id = w.id, .line = first + row, .col = col };
+    }
+    return null;
+}
 
 /// M32 WMS8 Gate 6 (issue #628): title-bar drag + snap-on-drop state is
 /// DELETED — WMS5 proved the WM owns pointer GEOMETRY: while registered it
@@ -3241,6 +3267,64 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
         const right_pressed = (!prev_right and cur_right);
         const right_released = (prev_right and !cur_right);
 
+        // M49 SD5 (#1132): pointer text selection in a terminal-bound
+        // window's client area. Selection is model-only here (terminal.zig);
+        // Ctrl+Shift+C copies it (input.zig). The click below still focuses
+        // the window. The press latch survives a whole injected drag being
+        // drained in one pass (last-write-wins state would lose the down).
+        var press_handled = false;
+        if (input.take_press()) |p| {
+            const px = map_pointer_axis(p.x, virtio_gpu.fb_width);
+            const py = map_pointer_axis(p.y, virtio_gpu.fb_height);
+            if (terminalHitAt(px, py)) |hit| {
+                if (terminal.screenForWindow(hit.win_id)) |scr| {
+                    scr.beginSelection(hit.line, hit.col);
+                    press_handled = true;
+                    if (cur_left) {
+                        // A held drag: keep extending on later samples.
+                        term_sel_dragging = true;
+                        if (terminalHitAt(cursor_x, cursor_y)) |end| {
+                            if (end.win_id == hit.win_id) scr.extendSelection(end.line, end.col);
+                        }
+                        klog.line("dui: term sel begin\n");
+                    } else {
+                        // The whole injected drag drained in one pass: the
+                        // current sample IS the end.
+                        if (terminalHitAt(cursor_x, cursor_y)) |end| {
+                            if (end.win_id == hit.win_id) scr.extendSelection(end.line, end.col);
+                        }
+                        klog.line("dui: term sel end\n");
+                    }
+                }
+            }
+        }
+        if (left_pressed and !press_handled) {
+            if (terminalHitAt(cursor_x, cursor_y)) |hit| {
+                if (terminal.screenForWindow(hit.win_id)) |scr| {
+                    scr.beginSelection(hit.line, hit.col);
+                    term_sel_dragging = true;
+                    klog.line("dui: term sel begin\n");
+                }
+            }
+        } else if (cur_left and term_sel_dragging) {
+            if (terminalHitAt(cursor_x, cursor_y)) |hit| {
+                if (terminal.screenForWindow(hit.win_id)) |scr| {
+                    scr.extendSelection(hit.line, hit.col);
+                }
+            }
+        }
+        if (left_released and term_sel_dragging) {
+            // Land the final endpoint on the release position, then close
+            // the selection (the gate's copy chord waits for this line).
+            if (terminalHitAt(cursor_x, cursor_y)) |hit| {
+                if (terminal.screenForWindow(hit.win_id)) |scr| {
+                    scr.extendSelection(hit.line, hit.col);
+                }
+            }
+            term_sel_dragging = false;
+            klog.line("dui: term sel end\n");
+        }
+
         // Step 5/6/7: drag + close + minimize handling on MOUSE_DOWN (left only).
         // M15 C4: dock handling must precede user windows — dock is at 0,0,24,700.
         if (left_pressed) {
@@ -3700,25 +3784,36 @@ pub fn render_terminal_screen(dst: [*]u8, w: *const Window, scr: *const terminal
     const hu: usize = @intCast(w.h);
     const stride = wu * 4;
     fill_rect(dst, stride, 0, 0, wu, hu, fbtext.bg_rgb);
-    const cols = @min(terminal.grid_cols, wu / 8);
+    const cols = @min(scr.columns(), wu / 8);
     // The compositor draws the title bar over the top `title_bar_h` rows, so
     // the grid's first line starts below it (client-area origin).
     const y0: usize = @intCast(geom.title_bar_h);
     const rows = if (hu > y0) (hu - y0) / 8 else 0;
     if (cols == 0 or rows == 0) return;
     const total = scr.lineCount();
-    const first = if (total > rows) total - rows else 0;
+    // M49 SD5 (#1132): the scrollback view shifts the first visible line
+    // back by `view` lines (0 = follow the tail).
+    const view = scr.viewOffset();
+    const bottom = if (total > view) total - view else 0;
+    const first = if (bottom > rows) bottom - rows else 0;
     var r: usize = 0;
     while (r < rows) : (r += 1) {
         const line = scr.line(first + r);
         var c: usize = 0;
         while (c < cols and c < line.len) : (c += 1) {
-            draw_glyph(dst, stride, c * 8, y0 + r * 8, line[c], fbtext.fg_rgb);
+            // M49 SD5: selected cells invert (fg on bg).
+            if (scr.inSelection(first + r, c)) {
+                fill_rect(dst, stride, c * 8, y0 + r * 8, 8, 8, fbtext.fg_rgb);
+                draw_glyph(dst, stride, c * 8, y0 + r * 8, line[c], fbtext.bg_rgb);
+            } else {
+                draw_glyph(dst, stride, c * 8, y0 + r * 8, line[c], fbtext.fg_rgb);
+            }
         }
     }
-    // The block cursor: invert the cell the shell's line editor is at.
+    // The block cursor: invert the cell the shell's line editor is at —
+    // only while following the tail (a scrolled-back view has no cursor).
     const cl = scr.cursorLine();
-    if (cl >= first and cl - first < rows) {
+    if (view == 0 and cl >= first and cl - first < rows) {
         const cc = scr.cursorCol();
         if (cc < cols) {
             const cy = y0 + (cl - first) * 8;
@@ -3773,6 +3868,9 @@ pub fn paint(w: *Window) void {
             // into the back-buffer from the kernel's presentation state; the
             // blit below then shows it. The full-grid render means the whole
             // window is repainted, so the partial-damage path is skipped.
+            // M49 SD5 (#1132): sync the grid to the window's width first so
+            // a resize reflows before this frame paints.
+            terminal.syncWindowCols(w.id, w.w);
             const term_screen = terminal.screenOf(w.id);
             if (term_screen) |scr| {
                 render_terminal_screen(@constCast(src_ptr), w, scr);

@@ -17,6 +17,7 @@
 const std = @import("std");
 const pipe = @import("pipe.zig");
 const script = @import("script.zig");
+const toolbox = @import("toolbox.zig");
 
 pub const max_args: usize = 16;
 pub const line_max: usize = 256;
@@ -525,6 +526,8 @@ pub const Builtin = enum {
     source,
     jobs,
     fg,
+    monitor_,
+    read_,
     break_,
     continue_,
 };
@@ -543,7 +546,8 @@ pub fn classify(verb: []const u8) ?Builtin {
         .{ "true", Builtin.true_ },         .{ "false", Builtin.false_ },
         .{ "help", Builtin.help },          .{ "source", Builtin.source },
         .{ ".", Builtin.source },           .{ "jobs", Builtin.jobs },
-        .{ "fg", Builtin.fg },              .{ "break", Builtin.break_ },
+        .{ "fg", Builtin.fg },              .{ "monitor", Builtin.monitor_ },
+        .{ "read", Builtin.read_ },         .{ "break", Builtin.break_ },
         .{ "continue", Builtin.continue_ },
     };
     inline for (table) |row| {
@@ -555,11 +559,12 @@ pub fn classify(verb: []const u8) ?Builtin {
 /// The builtin verbs, in the order `help` advertises them. Public so the
 /// completion source can offer them without duplicating the list.
 pub const builtin_names = [_][]const u8{
-    "alias", "break",   "cat",    "cd",       "continue", "echo",
-    "env",   "exit",    "export", "false",    "fg",       "fn",
-    "help",  "history", "jobs",   "printenv", "prompt",   "pwd",
-    "set",   "source",  "true",   "type",     "unalias",  "unset",
-    "which",
+    "alias",  "break", "cat",     "cd",      "continue", "cut",      "echo",
+    "env",    "exit",  "export",  "false",   "fg",       "fn",       "grep",
+    "head",   "help",  "history", "jobs",    "monitor",  "printenv", "printf",
+    "prompt", "pwd",   "read",    "set",     "sort",     "source",   "tail",
+    "test",   "true",  "type",    "unalias", "unset",    "wc",       "which",
+    "[",
 };
 
 pub const completion_max: usize = 32;
@@ -611,17 +616,34 @@ fn sortCompletion(out: *CompletionSet) void {
 
 /// Collect completion candidates for `prefix`: in command position the
 /// builtins, aliases, and share apps (with `.BIN`/`.ELF`/`.SO` basenames);
-/// in argument position the share files. Case-insensitive, de-duplicated,
-/// sorted.
+/// in argument position the share files. A `$`-prefixed prefix completes
+/// environment variable names (M49 SD4: `$PA` -> `$PATH`). Case-insensitive,
+/// de-duplicated, sorted.
 pub fn complete(
     prefix: []const u8,
     is_cmd: bool,
     aliases: *const AliasTable,
+    env: ?*const Env,
     listing: []const []const u8,
     out: *CompletionSet,
 ) usize {
     out.count = 0;
     if (prefix.len == 0) return 0;
+    if (prefix[0] == '$') {
+        // `$NAME` completion: candidates carry the sigil so the replacement
+        // is the whole token.
+        if (env) |e| {
+            for (e.entries[0..e.count]) |*entry| {
+                var buf: [env_name_max + 1]u8 = undefined;
+                buf[0] = '$';
+                const n = @min(entry.name.len, env_name_max);
+                @memcpy(buf[1..][0..n], entry.name.slice()[0..n]);
+                addCompletion(prefix, buf[0 .. n + 1], out);
+            }
+        }
+        sortCompletion(out);
+        return out.count;
+    }
     if (is_cmd) {
         for (builtin_names) |b| addCompletion(prefix, b, out);
         for (aliases.names[0..aliases.count]) |*n| addCompletion(prefix, n.slice(), out);
@@ -648,8 +670,31 @@ pub const RunRequest = struct {
     }
 };
 
+/// M49 SD3 (#1130): a tool invocation carried to the glue. The argv is
+/// copied into fixed buffers (the shell's BSS), so the glue can build the
+/// `[]const []const u8` slice after the `Action` value lands.
+pub const tool_arg_max: usize = 12;
+pub const tool_arg_bytes: usize = 64;
+
+pub const ToolRequest = struct {
+    tool: toolbox.Tool,
+    args: [tool_arg_max]Buf(tool_arg_bytes) = [_]Buf(tool_arg_bytes){.{}} ** tool_arg_max,
+    count: usize = 0,
+
+    pub fn at(self: *const ToolRequest, i: usize) []const u8 {
+        return self.args[i].slice();
+    }
+};
+
 pub const SourceRequest = struct {
     path: Path = .{},
+};
+
+/// M49 SD4 (#1131): the line-editor keymap the shell can select
+/// (`set -o vi` / `set +o vi`; emacs is the default).
+pub const EditorMode = enum {
+    emacs,
+    vi,
 };
 
 pub const Action = union(enum) {
@@ -666,6 +711,16 @@ pub const Action = union(enum) {
     call: usize,
     /// Leave the shell with this status.
     exit: u8,
+    /// M49 SD1 (#1128, ADR 0021 D1): release the terminal and hand the raw
+    /// console back to the kernel monitor. Unlike `exit`, the glue detaches
+    /// first, so a `shell=sh` login boot is not a one-way door.
+    monitor,
+    /// M49 SD4 (#1131): switch the shared line editor's keymap.
+    set_editor: EditorMode,
+    /// M49 SD3 (#1130): run a built-in tool from `lib/toolbox.zig` (head,
+    /// tail, wc, grep, sort, cut, test/[, printf). The glue supplies the
+    /// file/stream seams.
+    tool: ToolRequest,
 };
 
 pub const Shell = struct {
@@ -684,6 +739,9 @@ pub const Shell = struct {
     /// clears them between iterations and reads them after each body.
     loop_break: bool = false,
     loop_continue: bool = false,
+    /// M49 SD4 (#1131): the currently selected editor keymap (the glue
+    /// mirrors it onto the shared `lib/tty.zig` editor).
+    editor_mode: EditorMode = .emacs,
 
     expand_buf: [line_max * 2]u8 = undefined,
     arith_buf: [line_max * 2]u8 = undefined,
@@ -700,6 +758,12 @@ pub const Shell = struct {
 
     pub fn outSlice(self: *const Shell) []const u8 {
         return self.out.slice();
+    }
+
+    /// M49 SD3 (#1130): append externally-produced bytes (a tool writing
+    /// through the glue's `Writer`) to the current capture.
+    pub fn appendOut(self: *Shell, bytes: []const u8) void {
+        self.emit(bytes);
     }
 
     pub fn promptSlice(self: *const Shell) []const u8 {
@@ -783,6 +847,10 @@ pub const Shell = struct {
         };
 
         if (classify(argv[0])) |b| return self.runBuiltin(b, argv, listing);
+        // M49 SD3 (#1130): the built-in tool multicall (head, tail, wc,
+        // grep, sort, cut, test, [, printf). It runs before function/external
+        // resolution so pipes and redirection capture its output.
+        if (toolbox.lookup(argv[0])) |tool| return self.runTool(tool, argv);
         if (self.funcs.find(argv[0])) |idx| {
             self.bindFuncArgs(idx, argv);
             return .{ .call = idx };
@@ -894,6 +962,17 @@ pub const Shell = struct {
         return .{ .run = req };
     }
 
+    /// M49 SD3 (#1130): copy the invocation into the bounded tool request.
+    fn runTool(self: *Shell, tool: toolbox.Tool, argv: []const []const u8) Action {
+        _ = self;
+        var req = ToolRequest{ .tool = tool };
+        const n = @min(argv.len, tool_arg_max);
+        var i: usize = 0;
+        while (i < n) : (i += 1) req.args[i].set(argv[i]);
+        req.count = n;
+        return .{ .tool = req };
+    }
+
     fn runBuiltin(self: *Shell, b: Builtin, argv: []const []const u8, listing: []const []const u8) Action {
         switch (b) {
             .echo => {
@@ -941,6 +1020,32 @@ pub const Shell = struct {
                 return .{ .exit = status };
             },
             .env, .printenv, .set, .export_ => {
+                // M49 SD4 (#1131): `set -o vi` / `set +o vi` / `set -o` are
+                // the keymap controls; `set` with no argument keeps listing
+                // the environment (the M19 shape).
+                if (b == .set and argv.len >= 2 and
+                    (std.mem.eql(u8, argv[1], "-o") or std.mem.eql(u8, argv[1], "+o")))
+                {
+                    const enable = argv[1][0] == '-';
+                    if (argv.len < 3) {
+                        self.emitLine(if (self.editor_mode == .vi) "vi" else "emacs");
+                        self.last_status = 0;
+                        return .print;
+                    }
+                    if (std.mem.eql(u8, argv[2], "vi")) {
+                        self.editor_mode = if (enable) .vi else .emacs;
+                        self.last_status = 0;
+                        return .{ .set_editor = self.editor_mode };
+                    }
+                    if (std.mem.eql(u8, argv[2], "emacs")) {
+                        self.editor_mode = .emacs;
+                        self.last_status = 0;
+                        return .{ .set_editor = .emacs };
+                    }
+                    self.emitLine("set: usage: set -o vi | set +o vi | set -o");
+                    self.last_status = 1;
+                    return .print;
+                }
                 // `set`/`export` with no argument list (that is the M19
                 // shape); a NAME=VALUE argument mutates the table.
                 if (argv.len >= 2 and (b == .set or b == .export_)) {
@@ -1056,7 +1161,7 @@ pub const Shell = struct {
                     return .print;
                 }
                 const name = argv[1];
-                if (classify(name)) |_| {
+                if (classify(name) != null or toolbox.lookup(name) != null) {
                     self.emit(name);
                     self.emitLine(": shell builtin");
                     self.last_status = 0;
@@ -1085,7 +1190,8 @@ pub const Shell = struct {
                 return .none;
             },
             .help => {
-                self.emitLine("builtins: echo pwd cd exit env set unset export printenv alias unalias history prompt type which true false help source jobs fg");
+                self.emitLine("builtins: echo pwd cd exit env set unset export printenv alias unalias history prompt type which true false help source jobs fg monitor read");
+                self.emitLine("tools: head tail wc grep sort cut test [ printf");
                 self.last_status = 0;
                 return .print;
             },
@@ -1108,6 +1214,36 @@ pub const Shell = struct {
                 self.emitLine("fg: no background jobs");
                 self.last_status = 1;
                 return .print;
+            },
+            .monitor_ => {
+                // M49 SD1 (#1128): the escape hatch back to the kernel
+                // monitor. The glue owns the detach+exit (it holds the
+                // terminal session).
+                self.last_status = 0;
+                return .monitor;
+            },
+            .read_ => {
+                // M49 SD3 (#1130): `read VAR` takes one line from the bound
+                // input (a pipe or `<` redirect). Interactive line input
+                // stays the editor's job.
+                if (argv.len < 2) {
+                    self.emitLine("read: usage: read VAR");
+                    self.last_status = 1;
+                    return .print;
+                }
+                if (self.stdin.len == 0) {
+                    self.emitLine("read: no input (use `read VAR < FILE` or a pipe)");
+                    self.last_status = 1;
+                    return .print;
+                }
+                var end: usize = 0;
+                while (end < self.stdin.len and self.stdin[end] != '\n') end += 1;
+                var val = self.stdin[0..end];
+                if (val.len > 0 and val[val.len - 1] == '\r') val = val[0 .. val.len - 1];
+                self.stdin = if (end < self.stdin.len) self.stdin[end + 1 ..] else self.stdin[end..];
+                _ = self.env.set(argv[1], val);
+                self.last_status = 0;
+                return .none;
             },
             .break_ => {
                 self.loop_break = true;
@@ -1245,6 +1381,7 @@ test "shell: classify maps the builtin boundary" {
     try std.testing.expectEqual(Builtin.export_, classify("export").?);
     try std.testing.expectEqual(Builtin.true_, classify("true").?);
     try std.testing.expectEqual(Builtin.source, classify(".").?);
+    try std.testing.expectEqual(Builtin.monitor_, classify("monitor").?);
     try std.testing.expect(classify("PS.BIN") == null);
     try std.testing.expect(classify("status43") == null);
 }
@@ -1318,6 +1455,49 @@ test "shell: true/false set the exit status and exit carries it" {
     try std.testing.expectEqualStrings("1\n", s.outSlice());
 }
 
+test "shell: monitor is a distinct escape action (M49 SD1)" {
+    var s = Shell.init();
+    const a = execLine(&s, "monitor");
+    try std.testing.expect(a == .monitor);
+    try std.testing.expectEqual(@as(u8, 0), s.last_status);
+    // It is advertised by help and offered by completion.
+    _ = execLine(&s, "help");
+    try std.testing.expect(std.mem.indexOf(u8, s.outSlice(), "monitor") != null);
+    try std.testing.expect(classify("monitor") != null);
+    try std.testing.expect(classify("mon") == null);
+}
+
+test "shell: tool verbs dispatch to the toolbox action (M49 SD3)" {
+    var s = Shell.init();
+    const a = execLine(&s, "wc -l FILE.TXT");
+    try std.testing.expect(a == .tool);
+    try std.testing.expectEqual(toolbox.Tool.wc, a.tool.tool);
+    try std.testing.expectEqual(@as(usize, 3), a.tool.count);
+    try std.testing.expectEqualStrings("wc", a.tool.at(0));
+    try std.testing.expectEqualStrings("FILE.TXT", a.tool.at(2));
+    // Tools are not plain builtins, but `type` reports them as builtins.
+    try std.testing.expect(classify("wc") == null);
+    _ = execLine(&s, "type wc");
+    try std.testing.expect(std.mem.indexOf(u8, s.outSlice(), "shell builtin") != null);
+    // `[` and `printf` route too.
+    const b = execLine(&s, "printf %s hi");
+    try std.testing.expect(b == .tool);
+    try std.testing.expectEqual(toolbox.Tool.printf, b.tool.tool);
+}
+
+test "shell: read consumes the bound stdin line (M49 SD3)" {
+    var s = Shell.init();
+    s.setStdin("hello\nworld\n");
+    const a = execLine(&s, "read FIRST");
+    try std.testing.expect(a == .none);
+    try std.testing.expectEqualStrings("hello", s.env.get("FIRST").?);
+    _ = execLine(&s, "read SECOND");
+    try std.testing.expectEqualStrings("world", s.env.get("SECOND").?);
+    const b = execLine(&s, "read THIRD");
+    try std.testing.expect(b == .print);
+    try std.testing.expectEqual(@as(u8, 1), s.last_status);
+}
+
 test "shell: prompt/type/help report their builtin state" {
     var s = Shell.init();
     _ = execLine(&s, "prompt 'sh# '");
@@ -1381,22 +1561,52 @@ test "shell: complete offers builtins, aliases and share apps (basenames strippe
     var aliases = AliasTable{};
     _ = aliases.set("hello", "echo hi");
     var set: CompletionSet = undefined;
-    // Command position: alias + builtin, sorted.
-    try std.testing.expectEqual(@as(usize, 2), complete("he", true, &aliases, &.{}, &set));
-    try std.testing.expectEqualStrings("hello", set.at(0));
-    try std.testing.expectEqualStrings("help", set.at(1));
+    // Command position: alias + builtins (the M49 tool verbs are offered
+    // too), sorted.
+    try std.testing.expectEqual(@as(usize, 3), complete("he", true, &aliases, null, &.{}, &set));
+    try std.testing.expectEqualStrings("head", set.at(0));
+    try std.testing.expectEqualStrings("hello", set.at(1));
+    try std.testing.expectEqualStrings("help", set.at(2));
     // Share app: the full name and the extension-stripped basename.
     const listing = [_][]const u8{ "STATUS43.BIN", "PS.BIN" };
-    try std.testing.expectEqual(@as(usize, 2), complete("stat", true, &aliases, &listing, &set));
+    try std.testing.expectEqual(@as(usize, 2), complete("stat", true, &aliases, null, &listing, &set));
     try std.testing.expectEqualStrings("STATUS43", set.at(0));
     try std.testing.expectEqualStrings("STATUS43.BIN", set.at(1));
     // Argument position: share files only (no builtins).
-    try std.testing.expectEqual(@as(usize, 2), complete("ps", false, &aliases, &listing, &set));
+    try std.testing.expectEqual(@as(usize, 2), complete("ps", false, &aliases, null, &listing, &set));
     try std.testing.expectEqualStrings("PS", set.at(0));
     try std.testing.expectEqualStrings("PS.BIN", set.at(1));
     // No match and empty prefix yield nothing.
-    try std.testing.expectEqual(@as(usize, 0), complete("zzz", true, &aliases, &listing, &set));
-    try std.testing.expectEqual(@as(usize, 0), complete("", true, &aliases, &listing, &set));
+    try std.testing.expectEqual(@as(usize, 0), complete("zzz", true, &aliases, null, &listing, &set));
+    try std.testing.expectEqual(@as(usize, 0), complete("", true, &aliases, null, &listing, &set));
+}
+
+test "shell: $VAR completion offers environment names (M49 SD4)" {
+    var s = Shell.init();
+    _ = execLine(&s, "export PATH=/data");
+    var set: CompletionSet = undefined;
+    const n = complete("$PA", true, &s.aliases, &s.env, &.{}, &set);
+    try std.testing.expect(n >= 1);
+    try std.testing.expectEqualStrings("$PATH", set.at(0));
+    // `$?`-style non-names yield nothing.
+    try std.testing.expectEqual(@as(usize, 0), complete("$?", true, &s.aliases, &s.env, &.{}, &set));
+}
+
+test "shell: set -o selects the editor keymap (M49 SD4)" {
+    var s = Shell.init();
+    const a = execLine(&s, "set -o vi");
+    try std.testing.expect(a == .set_editor);
+    try std.testing.expectEqual(EditorMode.vi, a.set_editor);
+    try std.testing.expectEqual(EditorMode.vi, s.editor_mode);
+    _ = execLine(&s, "set -o");
+    try std.testing.expectEqualStrings("vi\n", s.outSlice());
+    const b = execLine(&s, "set +o vi");
+    try std.testing.expect(b == .set_editor);
+    try std.testing.expectEqual(EditorMode.emacs, b.set_editor);
+    try std.testing.expectEqual(EditorMode.emacs, s.editor_mode);
+    const c = execLine(&s, "set -o bogus");
+    try std.testing.expect(c == .print);
+    try std.testing.expectEqual(@as(u8, 1), s.last_status);
 }
 
 test "shell: glob expansion sorts matches and passes unmatched literals through" {

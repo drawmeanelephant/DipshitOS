@@ -16,6 +16,9 @@
 //! redirection capture BUILTIN output (externals write fd 1 directly); globs
 //! expand against the share listing. No control flow or command substitution
 //! yet (SH5).
+//!
+//! M49 SD2 (#1129): startup is the shared `lib/startup.zig` order —
+//! `STARTUP.SH` then the optional `PROFILE.SH` from the host share.
 
 const std = @import("std");
 const ui = @import("lib/ui.zig");
@@ -25,18 +28,25 @@ const shell_mod = @import("lib/shell.zig");
 const pipe = @import("lib/pipe.zig");
 const script = @import("lib/script.zig");
 const netargs = @import("lib/netargs.zig");
+const startup = @import("lib/startup.zig");
+const toolbox = @import("lib/toolbox.zig");
 
 pub const ready_marker: []const u8 = "sh: ready\n";
 pub const attached_marker: []const u8 = "sh: attached\n";
 pub const bye_marker: []const u8 = "sh: bye\n";
+/// M49 SD1 (#1128): the `monitor` escape hands the raw console back to the
+/// kernel monitor — distinct from `exit` so a class-B gate can observe it.
+pub const monitor_marker: []const u8 = "sh: monitor\n";
 pub const exit_status: u64 = 70;
 /// SH7 (#1083): the default TCP port when `exec SH.BIN net` gives no port.
 pub const default_net_port: u16 = netargs.default_port;
 /// M46 RC3 (#1111): the shared `net [port] [secret] [allow-ip]` parser.
 pub const NetArgs = netargs.Args;
 pub const parseNetArgs = netargs.parse;
-/// SH8 (#1084): the login startup script run once before the first prompt.
-pub const startup_path: []const u8 = "STARTUP.SH";
+/// M49 SD2 (#1129): the unified shell startup files (`STARTUP.SH` then the
+/// optional host-share `PROFILE.SH`), shared with `TERM.BIN`.
+pub const startup_path: []const u8 = startup.startup_path;
+pub const profile_path: []const u8 = startup.profile_path;
 /// SH8: the kernel settings file (for the `prompt` key).
 pub const settings_path: []const u8 = "SETTINGS.TXT";
 
@@ -82,7 +92,7 @@ fn shellComplete(line: []const u8, cursor: usize, index: usize) ?tty.CompletionM
             break;
         }
     }
-    const n = shell_mod.complete(prefix, is_cmd, &g_shell.aliases, refreshListing(), &g_complete);
+    const n = shell_mod.complete(prefix, is_cmd, &g_shell.aliases, &g_shell.env, refreshListing(), &g_complete);
     if (n == 0) return null;
     return .{
         .replace_start = start,
@@ -134,6 +144,17 @@ fn exitShell(status: u8) noreturn {
     ui.exit_process(status);
 }
 
+/// M49 SD1 (#1128, ADR 0021 D1): `monitor` releases the terminal — detach
+/// the serial front-end, close `/dev/tty`, exit — so the kernel monitor's
+/// `login_console_relinquished` observes the detach and takes the raw
+/// console back. `shell=sh` is not a one-way door.
+fn exitToMonitor() noreturn {
+    g_session.detach();
+    g_session.close();
+    ui.write_console(monitor_marker);
+    ui.exit_process(0);
+}
+
 /// Perform one core action.
 fn performAction(action: shell_mod.Action, depth: u32) void {
     switch (action) {
@@ -143,6 +164,19 @@ fn performAction(action: shell_mod.Action, depth: u32) void {
         .source => |req| runSource(req.path.slice(), depth),
         .call => |idx| runFunction(idx, depth),
         .exit => |status| exitShell(status),
+        .monitor => exitToMonitor(),
+        .set_editor => |m| {
+            // M49 SD4 (#1131): mirror the shell's keymap selection onto the
+            // shared editor.
+            g_editor.mode = if (m == .vi) .vi else .emacs;
+            g_editor.vi_state = .insert;
+        },
+        .tool => |req| {
+            // M49 SD3 (#1130): run then flush the captured output (the
+            // pipeline/redirect `capture` path reads the same buffer).
+            g_shell.last_status = runTool(req);
+            g_session.write(g_shell.outSlice());
+        },
     }
 }
 
@@ -181,6 +215,16 @@ fn capture(line: []const u8, depth: u32) []const u8 {
             return &.{};
         },
         .exit => |status| exitShell(status),
+        .monitor => exitToMonitor(),
+        .set_editor => |m| {
+            g_editor.mode = if (m == .vi) .vi else .emacs;
+            g_editor.vi_state = .insert;
+            return &.{};
+        },
+        .tool => |req| {
+            _ = runTool(req);
+            return g_shell.outSlice();
+        },
     }
 }
 
@@ -190,6 +234,93 @@ fn drainPipe() void {
         const n = abi.pipe_read(&tmp);
         if (n <= 0) break;
     }
+}
+
+// ---------------------------------------------------------------------------
+// M49 SD3 (#1130): the built-in tool multicall (lib/toolbox.zig) over the
+// host share. Output goes through the shell's capture buffer, so pipes and
+// redirection see tool output exactly like builtin `print` output.
+// ---------------------------------------------------------------------------
+
+/// The tool stdin cursor (the shell's bound stdin slice for this call).
+var g_tool_in: []const u8 = &.{};
+var g_tool_pos: usize = 0;
+
+fn toolStdinRead(ctx: ?*anyopaque, buf: []u8) usize {
+    _ = ctx;
+    if (g_tool_pos >= g_tool_in.len) return 0;
+    const n = @min(buf.len, g_tool_in.len - g_tool_pos);
+    @memcpy(buf[0..n], g_tool_in[g_tool_pos..][0..n]);
+    g_tool_pos += n;
+    return n;
+}
+
+fn toolWrite(ctx: ?*anyopaque, bytes: []const u8) void {
+    _ = ctx;
+    g_shell.appendOut(bytes);
+}
+
+fn toolOpen(ctx: ?*anyopaque, name: []const u8) u64 {
+    _ = ctx;
+    const r = abi.file_open(name, abi.MODE_READ);
+    if (r < 0) return 0;
+    // Handles are encoded +1 so a valid fd 0 is not mistaken for "absent".
+    return @intCast(r + 1);
+}
+
+fn toolRead(ctx: ?*anyopaque, handle: u64, buf: []u8) usize {
+    _ = ctx;
+    const n = abi.file_read(@intCast(handle - 1), buf);
+    if (n <= 0) return 0;
+    return @intCast(n);
+}
+
+fn toolClose(ctx: ?*anyopaque, handle: u64) void {
+    _ = ctx;
+    abi.file_close(@intCast(handle - 1));
+}
+
+fn toolStat(ctx: ?*anyopaque, name: []const u8) u8 {
+    _ = ctx;
+    // The file ABI exposes no directory bit, so `-f`/`-e` treat an
+    // openable name as a regular file (documented bound).
+    const r = abi.file_open(name, abi.MODE_READ);
+    if (r < 0) return 0;
+    abi.file_close(@intCast(r));
+    return 1;
+}
+
+fn runTool(req: shell_mod.ToolRequest) u8 {
+    g_tool_in = g_shell.stdin;
+    g_tool_pos = 0;
+    var ptrs: [shell_mod.tool_arg_max][]const u8 = undefined;
+    const n = @min(req.count, shell_mod.tool_arg_max);
+    var i: usize = 0;
+    while (i < n) : (i += 1) ptrs[i] = req.at(i);
+    const host = toolbox.Host{
+        .open_fn = toolOpen,
+        .read_fn = toolRead,
+        .close_fn = toolClose,
+        .stat_fn = toolStat,
+    };
+    const out = toolbox.Writer{ .write_fn = toolWrite };
+    const stdin = toolbox.Stream{ .read_fn = toolStdinRead };
+    return toolbox.run(req.tool, ptrs[0..n], stdin, host, out);
+}
+
+/// M49 SD3 (#1130): run one bounded `case` arm (the first pattern that
+/// matches wins; no arm is a success).
+fn runCase(c: script.Case, depth: u32) void {
+    var subj_buf: [shell_mod.line_max]u8 = undefined;
+    const subject = shell_mod.expandVars(c.subject, &subj_buf, &g_shell.env, g_shell.last_status);
+    var i: usize = 0;
+    while (i < c.count) : (i += 1) {
+        if (script.caseMatch(c.arms[i].pattern, subject)) {
+            _ = runBody(c.arms[i].body, depth);
+            return;
+        }
+    }
+    g_shell.last_status = 0;
 }
 
 /// `left | right`: capture the left command's output (SH4 bound: builtins),
@@ -398,6 +529,10 @@ fn runLine(raw: []const u8, depth: u32) void {
         runWhile(w, depth);
         return;
     }
+    if (script.parseCase(substituted)) |c| {
+        runCase(c, depth);
+        return;
+    }
     switch (script.chainSplit(substituted)) {
         .too_many => {
             g_session.write("sh: chain too long\n");
@@ -459,12 +594,38 @@ fn applyPromptFromSettings() void {
     }
 }
 
-/// SH8 (#1084): run the login startup script once, if present.
+/// M49 SD2 (#1129): run the unified startup order (`STARTUP.SH`, then the
+/// optional host-share `PROFILE.SH`) once before the first prompt. The file
+/// seam is the existing read-only file ABI; the order/scope lives in the
+/// pure, host-tested `lib/startup.zig`.
 fn runStartup() void {
-    const opened = abi.file_open(startup_path, abi.MODE_READ);
-    if (opened < 0) return; // absent: silent (the common case)
-    abi.file_close(@intCast(opened));
-    runSource(startup_path, 0);
+    startup.runAll(startupFiles(), null, startupLine);
+}
+
+fn startupLine(ctx: ?*anyopaque, line: []const u8) void {
+    _ = ctx;
+    runLine(line, 0);
+}
+
+fn startupFiles() startup.Files {
+    return .{ .open_fn = startupOpen, .read_fn = startupRead, .close_fn = startupClose };
+}
+
+fn startupOpen(ctx: ?*anyopaque, path: []const u8) i64 {
+    _ = ctx;
+    const r = abi.file_open(path, abi.MODE_READ);
+    if (r < 0) return -1;
+    return @intCast(r);
+}
+
+fn startupRead(ctx: ?*anyopaque, handle: u32, buf: []u8) i64 {
+    _ = ctx;
+    return abi.file_read(handle, buf);
+}
+
+fn startupClose(ctx: ?*anyopaque, handle: u32) void {
+    _ = ctx;
+    abi.file_close(handle);
 }
 
 pub export fn _start(argc: u64, argv_va: u64) callconv(.c) noreturn {
@@ -505,6 +666,9 @@ pub export fn _start(argc: u64, argv_va: u64) callconv(.c) noreturn {
     }
 
     const out = g_session.output();
+    // M49 SD4 (#1131): request bracketed paste from the front-end; the
+    // serial byte seam ignores it, remote/future front-ends can honor it.
+    g_session.write(tty.paste_enable);
     // SH8 (#1084): run the login startup script once, before the prompt.
     runStartup();
     g_session.write(g_shell.promptSlice());
@@ -530,6 +694,7 @@ pub export fn _start(argc: u64, argv_va: u64) callconv(.c) noreturn {
                     g_session.write(g_shell.promptSlice());
                     g_editor.reprint(out);
                 },
+                .continued => {},
                 .eof => {
                     g_session.detach();
                     g_session.close();

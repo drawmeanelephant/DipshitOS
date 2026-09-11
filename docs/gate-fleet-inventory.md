@@ -31,7 +31,7 @@
 | `tools/status/` | 6 | multiagent coordination gate + claim tooling (class A) |
 | `tools/context/` | 2 | context snapshot helpers |
 | `tools/ragshit/` | 84 | host-side context engine (developer tooling, not guest software) |
-| `tools/gate/` | 203 | M40 vgate harness + specs (GF2+) |
+| `tools/gate/` | 207 | M40 vgate harness + specs (GF2+) |
 
 ## Class-B fleet (discovered from the spec dir)
 
@@ -167,6 +167,9 @@ of them with `just verify-vz`.
 | spec | `live-sexiburger-actions` | 1 run / 12 assert | live-sexiburger-actions.spec -- M19 Sexiburger Action Registry & Tab Model |
 | spec | `live-sh` | 1 run / 9 assert | live-sh.spec -- M45 card SH2 class-B gate (issue #1078, ADR 0021 D2/D3). |
 | spec | `live-sh-complete` | 1 run / 9 assert | live-sh-complete.spec -- M45 card SH3 class-B gate (issue #1079, ADR 0021 D6). |
+| spec | `live-sh-monitor` | 1 run / 9 assert | live-sh-monitor.spec -- M49 card SD1 class-B gate (issue #1128, ADR 0021 D1). |
+| spec | `live-sh-profile` | 1 run / 9 assert | live-sh-profile.spec -- M49 card SD2 class-B gate (issue #1129). |
+| spec | `live-sh-tools` | 1 run / 16 assert | live-sh-tools.spec -- M49 card SD3 class-B gate (issue #1130). |
 | spec | `live-sh4` | 1 run / 7 assert | live-sh4.spec -- M45 card SH4 class-B gate (issue #1080, ADR 0021 D6). |
 | spec | `live-sh5` | 1 run / 16 assert | live-sh5.spec -- M45 card SH5 class-B gate (issue #1081, ADR 0021 D4/D6). |
 | spec | `live-shell-default` | 1 run / 10 assert | live-shell-default.spec -- M45 card SH8 class-B gate (issue #1084, ADR 0021 D5). |
@@ -197,6 +200,7 @@ of them with `just verify-vz`.
 | spec | `live-tabwm-unsaved` | 2 run / 16 assert | live-tabwm-unsaved.spec -- M42 UX hardening round 2 (2026-09-05, claim #1011, ADR 0018 addendum) |
 | spec | `live-tasks` | 1 run / 5 assert | live-tasks.spec -- tick-driven round-robin: the worker demonstrably |
 | spec | `live-term` | 1 run / 8 assert | live-term.spec -- M45 card SH6 class-B gate (issue #1082, ADR 0020 A). |
+| spec | `live-term-depth` | 1 run / 9 assert | live-term-depth.spec -- M49 card SD5 class-B gate (issue #1132). |
 | spec | `live-term-net` | 1 run / 5 assert | live-term-net.spec -- M46 RC3b class-B gate (issue #1104, ADR 0020 B6). |
 | spec | `live-text` | 1 run / 10 assert | live-text.spec -- claim 3194 (milestone six, card G2) class-B gate: |
 | spec | `live-text-search` | 2 run / 9 assert | live-text-search.spec -- milestone-twenty card U3 class-B gate (text search in apps) |

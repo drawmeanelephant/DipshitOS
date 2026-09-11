@@ -68,6 +68,7 @@ pub export fn _start() callconv(.c) noreturn {
                     out.write(prompt);
                     editor.reprint(out);
                 },
+                .continued => {},
                 .eof => {
                     session.detach();
                     session.close();

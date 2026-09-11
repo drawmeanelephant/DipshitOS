@@ -3546,6 +3546,30 @@ var park_stack: [64 * 1024]u8 align(16) = undefined;
 // ---------------------------------------------------------------------------
 var login_relinquished = false;
 var login_was_attached = false;
+/// M49 SD1 (#1128): the login shell's pid, so the monitor can reclaim the
+/// console if it dies before ever attaching serial.
+var login_pid: ?usize = null;
+
+/// M49 SD1 (#1128): the ownerless-console decision, split pure for host
+/// tests. The monitor resumes reading the console when the login shell has
+/// detached after having attached (`was_attached`), or when its process is
+/// gone without having attached at all (the fallback — otherwise the
+/// console has no reader). While attached, or while a not-yet-attached
+/// login shell is still alive, the monitor stays off the RX.
+pub fn login_should_resume(attached_now: bool, was_attached: bool, owner_alive: bool) bool {
+    if (attached_now) return false;
+    if (was_attached) return true;
+    return !owner_alive;
+}
+
+/// True when `pid` still names a live `SH.BIN` in the process registry. The
+/// name check guards against slot reuse by an unrelated program while the
+/// console is relinquished.
+fn login_owner_alive(pid: usize) bool {
+    const info = process.info(pid) orelse return false;
+    if (info.state == .exited) return false;
+    return std.mem.eql(u8, info.name, "SH.BIN");
+}
 
 /// The pending boot login. Called once, after `.virelairc`, before the loop.
 fn login_handoff(mon: *monitor.Monitor) void {
@@ -3554,6 +3578,7 @@ fn login_handoff(mon: *monitor.Monitor) void {
         .ok => {
             login_relinquished = true;
             login_was_attached = false;
+            login_pid = exec_mod.last_exec_pid();
             mon.console.puts("login: shell=sh -> SH.BIN\n");
         },
         else => {
@@ -3565,15 +3590,23 @@ fn login_handoff(mon: *monitor.Monitor) void {
 }
 
 /// True while the monitor must not read the console (the login shell owns
-/// it). Resumes the monitor once the login shell has detached.
-fn login_console_relinquished() bool {
+/// it). Resumes the monitor once the login shell has detached, or when it
+/// died before attaching and would otherwise leave the console ownerless.
+fn login_console_relinquished(mon: *monitor.Monitor) bool {
     if (!login_relinquished) return false;
-    if (terminal.attachedSerial() != null) {
+    const attached_now = terminal.attachedSerial() != null;
+    if (attached_now) {
         login_was_attached = true;
-    } else if (login_was_attached) {
-        // The login shell exited/detached: take the console back.
+        return true;
+    }
+    const alive = if (login_pid) |p| login_owner_alive(p) else false;
+    if (login_should_resume(false, login_was_attached, alive)) {
+        if (!login_was_attached) {
+            mon.console.puts("login: shell died before attaching; monitor resumed\n");
+        }
         login_relinquished = false;
         login_was_attached = false;
+        login_pid = null;
     }
     return login_relinquished;
 }
@@ -3620,7 +3653,7 @@ fn park_body(mon: *monitor.Monitor) callconv(.c) void {
     while (true) {
         // While the login shell owns the serial console, the monitor must
         // NOT read it (the terminal pump feeds SH.BIN's /dev/tty instead).
-        if (login_console_relinquished() or shell.poll() == .idle) {
+        if (login_console_relinquished(mon) or shell.poll() == .idle) {
             // Claim 9187: the timer is serviced only through the IRQ path.
             // Claim 7948's main-loop comparator poll raced real delivery
             // after the GICR frame fix, double-consuming some periods.
