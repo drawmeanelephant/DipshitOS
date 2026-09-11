@@ -895,7 +895,8 @@ echoes a scripted line back through the serial log).
 
 M50 TS1 (ADR 0024 D2/D10) adds the trust milestone's first slot: **68** =
 `sys_principal(buf)`, copying the CALLING process's principal
-`{ u32 uid, u32 caps }` (8 bytes, little-endian) OUT through uaccess. It is
+`{ u32 uid, u32 caps }` (8 bytes, little-endian) OUT through uaccess and
+returning `principal_bytes` = **8** on success. It is
 strictly **read-only**: the kernel assigns a process's uid/caps at
 `process.create` (default `uid_user = 1000`, no caps), `exec` preserves them,
 and there is no syscall that can set or raise either (ADR 0024 D2/D5).

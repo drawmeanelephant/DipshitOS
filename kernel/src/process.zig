@@ -544,8 +544,9 @@ pub const ProcessInfo = struct {
     id: usize,
     name: []const u8,
     /// M50 TS1 (#1135): the process principal (uid + caps). Reported by the
-    /// monitor; NOT part of the 40-byte `sys_procs` snapshot row.
-    uid: u32 = 0,
+    /// monitor; NOT part of the 40-byte `sys_procs` snapshot row. The uid
+    /// default matches `Process.uid` (`uid_user`), never `uid_system`.
+    uid: u32 = uid_user,
     caps: u32 = 0,
     state: State,
     task_id: ?usize,
