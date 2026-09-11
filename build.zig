@@ -1270,6 +1270,32 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_ttyecho.step);
 
     // ------------------------------------------------------------------
+    // Guest: TTYED.BIN (M45 SH1 — issue #1077, ADR 0021 D6). The live smoke
+    // for `user/src/lib/tty.zig`: opens /dev/tty, attaches the serial
+    // front-end, drives the line editor (insert/delete, Home/End, Up/Down
+    // history) from the raw input queue, and prints `ttyed: line <text>` per
+    // submitted line.
+    // ------------------------------------------------------------------
+    const ttyed_prog = b.addExecutable(.{
+        .name = "user-ttyed",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/ttyed.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    ttyed_prog.linker_script = b.path("user/linker.ld");
+    const ttyed_step = b.step("ttyed", "Build the M45 SH1 terminal-library smoke (zig-out/bin/TTYED.BIN; #1077)");
+    const ttyed_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    ttyed_elf2bin.addFileArg(ttyed_prog.getEmittedBin());
+    const ttyed_bin = ttyed_elf2bin.addOutputFileArg("TTYED.BIN");
+    ttyed_elf2bin.has_side_effects = true;
+    ttyed_elf2bin.stdio = .inherit;
+    ttyed_step.dependOn(&ttyed_elf2bin.step);
+    const install_ttyed = b.addInstallFileWithDir(ttyed_bin, .bin, "TTYED.BIN");
+    b.getInstallStep().dependOn(&install_ttyed.step);
+
+    // ------------------------------------------------------------------
     // Guest: thirty-fourth ESP user program (M26 N1 — issue #399) PING.BIN.
     // Headless ICMP ping: sends echo requests, shows RTT + loss stats.
     // Uses existing ICMP path (net ping) when available; falls back to
@@ -2219,6 +2245,7 @@ pub fn build(b: *std.Build) void {
         "kernel/src/wnd_core.zig",
         "kernel/src/xhci.zig",
         "user/src/lib/ui.zig",
+        "user/src/lib/tty.zig",
         "user/tests/ui/ui_test.zig",
         "kernel/tests/scheduler_test.zig",
         "kernel/tests/syscall_test.zig",

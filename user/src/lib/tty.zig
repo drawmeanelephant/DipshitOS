@@ -1,0 +1,857 @@
+//! VirelaiOS userland terminal library (M45 card SH1 — ADR 0021 D6,
+//! issue #1077).
+//!
+//! One terminal library shared by `SH.BIN` and every front-end so behaviour
+//! cannot drift between the serial, window, and remote presentations. It sits
+//! directly on the terminal seam (ADR 0020): open `/dev/tty` through the
+//! existing file syscalls, attach a front-end through `sys_tty_attach`
+//! (slot 67), and read/write raw bytes through the fd.
+//!
+//! The split is deliberate: the **line editor**, **key decoder**, and
+//! **bounded history ring** are pure logic over a small `Output` sink with
+//! no syscalls, so the whole interaction surface is host-testable. The
+//! `Session` at the bottom is the thin syscall glue (open/attach/read/write/
+//! close) and carries no editing policy.
+//!
+//! The editor echoes a deliberately dumb-terminal protocol (backspace,
+//! reprint, trailing-space clear) inherited from the kernel M19 editor
+//! (`kernel/src/lineedit.zig`) so the serial console and the framebuffer
+//! text layer render it identically. No ANSI is emitted except Ctrl-L's
+//! screen clear.
+
+const std = @import("std");
+const abi = @import("ui/abi.zig");
+
+/// The terminal device path (ADR 0020 D3).
+pub const tty_path = "/dev/tty";
+/// Fixed line capacity in bytes. `max_line` bytes fit; the next is refused.
+pub const max_line: usize = 256;
+/// Bounded session history: the most recent N submitted lines (fixed BSS).
+pub const hist_capacity: usize = 16;
+
+/// The front-end selectors `sys_tty_attach` accepts (mirrors
+/// `kernel/src/terminal.zig` `FrontEnd`; `window`/`net` are reserved until
+/// their implementations land — SH6/SH7).
+pub const FrontEnd = enum(u64) {
+    detach = 0,
+    serial = 1,
+    window = 2,
+    net = 3,
+};
+
+/// A byte sink. The editor writes its echo protocol here; the session backs
+/// it with the `/dev/tty` fd, and host tests back it with a capture buffer.
+pub const Output = struct {
+    ctx: ?*anyopaque = null,
+    write_fn: *const fn (ctx: ?*anyopaque, bytes: []const u8) void,
+
+    pub fn write(self: Output, bytes: []const u8) void {
+        if (bytes.len == 0) return;
+        self.write_fn(self.ctx, bytes);
+    }
+
+    pub fn byte(self: Output, b: u8) void {
+        const one = [1]u8{b};
+        self.write_fn(self.ctx, &one);
+    }
+};
+
+/// One decoded keystroke. The decoder turns the raw byte (and its
+/// `ESC [ <params> <final>` sequences) into this hardware-free vocabulary.
+pub const Key = union(enum) {
+    /// A printable byte (including UTF-8 lead/continuation bytes >= 0x80).
+    text: u8,
+    enter,
+    backspace,
+    delete,
+    left,
+    right,
+    home,
+    end,
+    up,
+    down,
+    ctrl_a,
+    ctrl_e,
+    ctrl_k,
+    ctrl_u,
+    ctrl_l,
+    ctrl_c,
+    tab,
+    /// Ctrl-D — the demo uses it as end-of-session.
+    eof,
+    /// A byte that produced no action (escape-sequence filler, unknown
+    /// control codes).
+    ignored,
+};
+
+/// The `ESC [ <params> <final>` state machine. Special keys arrive as CSI
+/// sequences; the editor never echoes the escape bytes — it turns them into
+/// editing actions. A sequence whose final is not one we act on is swallowed
+/// WHOLE (the tilde of `ESC [ <n> ~` must not reach the line as text).
+pub const KeyDecoder = struct {
+    /// 0 = normal, 1 = ESC, 2 = ESC [, 3 = collecting parameter bytes.
+    esc_state: u8 = 0,
+    /// The first numeric parameter (the `3` of Delete's `ESC [ 3 ~`),
+    /// saturating so a longer parameter can only fail to match.
+    esc_param: u32 = 0,
+
+    pub fn reset(self: *KeyDecoder) void {
+        self.esc_state = 0;
+        self.esc_param = 0;
+    }
+
+    pub fn feed(self: *KeyDecoder, byte: u8) Key {
+        switch (self.esc_state) {
+            0 => {},
+            1 => {
+                self.esc_state = 0;
+                if (byte == '[') {
+                    self.esc_state = 2;
+                    return .ignored;
+                }
+                // A lone ESC followed by anything else is not a sequence:
+                // reprocess the byte as a real keystroke.
+                return self.feed(byte);
+            },
+            2 => {
+                self.esc_state = 0;
+                switch (byte) {
+                    'A' => return .up,
+                    'B' => return .down,
+                    'C' => return .right,
+                    'D' => return .left,
+                    'H' => return .home,
+                    'F' => return .end,
+                    '0'...'9' => {
+                        self.esc_param = byte - '0';
+                        self.esc_state = 3;
+                        return .ignored;
+                    },
+                    else => return .ignored,
+                }
+            },
+            3 => {
+                if (byte >= '0' and byte <= '9') {
+                    const scaled = @mulWithOverflow(self.esc_param, 10);
+                    const added = @addWithOverflow(scaled[0], byte - '0');
+                    self.esc_param = if (scaled[1] == 1 or added[1] == 1) 255 else added[0];
+                    return .ignored;
+                }
+                if (byte >= 0x3a and byte <= 0x3f) return .ignored; // ';' and friends
+                self.esc_state = 0;
+                if (byte == '~' and self.esc_param == 3) return .delete;
+                return .ignored;
+            },
+            else => {},
+        }
+        if (byte == 0x1b) {
+            self.esc_state = 1;
+            return .ignored;
+        }
+        if (byte == '\r' or byte == '\n') return .enter;
+        if (byte == 0x08 or byte == 0x7f) return .backspace;
+        if (byte == 0x03) return .ctrl_c;
+        if (byte == 0x01) return .ctrl_a;
+        if (byte == 0x05) return .ctrl_e;
+        if (byte == 0x0b) return .ctrl_k;
+        if (byte == 0x15) return .ctrl_u;
+        if (byte == 0x0c) return .ctrl_l;
+        if (byte == 0x04) return .eof;
+        if (byte == '\t') return .tab;
+        if (byte >= 0x20 and byte != 0x7f) return .{ .text = byte };
+        // Other control bytes are ignored: not echoed, not appended.
+        return .ignored;
+    }
+};
+
+pub const LineResult = enum {
+    /// Byte consumed; the line is still being edited.
+    none,
+    /// A complete line is in `buffer[0..len]` (terminated by CR or LF).
+    submitted,
+    /// Ctrl-C cleared the line; the buffer is empty again.
+    cancelled,
+    /// Ctrl-L cleared the screen; the caller reprints the prompt and calls
+    /// `reprint` to restore the line.
+    repaint,
+    /// Ctrl-D — the caller should end the session.
+    eof,
+};
+
+/// A bounded, allocation-free line editor with session history. Feed it raw
+/// bytes (or decoded keys) one at a time; it echoes editing to `out` and
+/// reports when a line is ready. Input beyond `max_line` is refused (bell +
+/// `rejected`), never silently truncated mid-word.
+pub const LineEditor = struct {
+    buffer: [max_line]u8 = undefined,
+    len: usize = 0,
+    /// Insertion point (0..len).
+    cursor: usize = 0,
+    /// True when at least one byte was refused because the line was full.
+    rejected: bool = false,
+    /// Set when the last submitted line ended in CR; the LF half of a CRLF
+    /// pair is swallowed so one Enter produces one line.
+    submitted_cr: bool = false,
+
+    // Bounded session history (index 0 = most recent).
+    history: [hist_capacity][max_line]u8 = undefined,
+    hist_len: [hist_capacity]usize = undefined,
+    hist_count: usize = 0,
+    /// Recall position: 0 = editing a fresh line; 1..=hist_count = the
+    /// recalled entry (1 = newest). `hist_draft` saves the pre-recall line
+    /// so Down past the newest returns to it.
+    hist_cursor: usize = 0,
+    hist_draft: [max_line]u8 = undefined,
+    hist_draft_len: usize = 0,
+
+    decoder: KeyDecoder = .{},
+
+    /// Full reset: empty line, clear flags, and any in-progress recall.
+    pub fn reset(self: *LineEditor) void {
+        self.len = 0;
+        self.cursor = 0;
+        self.rejected = false;
+        self.submitted_cr = false;
+        self.decoder.reset();
+        self.hist_cursor = 0;
+    }
+
+    /// Prepare for the next line after a submit. Keeps the CRLF swallow
+    /// window open and keeps the history (it is session-scoped).
+    pub fn next_line(self: *LineEditor) void {
+        self.len = 0;
+        self.cursor = 0;
+        self.rejected = false;
+        self.decoder.reset();
+        self.hist_cursor = 0;
+    }
+
+    /// Feed one raw byte. Echoes editing onto `out` as it goes.
+    pub fn feed(self: *LineEditor, out: Output, byte: u8) LineResult {
+        // The LF half of a CRLF pair is swallowed (one Enter = one line).
+        if (self.submitted_cr and byte == '\n') {
+            self.submitted_cr = false;
+            return .none;
+        }
+        self.submitted_cr = false;
+        const key = self.decoder.feed(byte);
+        const result = self.feedKey(out, key);
+        if (result == .submitted) self.submitted_cr = (byte == '\r');
+        return result;
+    }
+
+    /// Apply one already-decoded key.
+    pub fn feedKey(self: *LineEditor, out: Output, key: Key) LineResult {
+        switch (key) {
+            .ignored => return .none,
+            .text => |b| return self.insert(out, b),
+            .enter => {
+                out.write("\r\n");
+                self.remember_line();
+                return .submitted;
+            },
+            .backspace => return self.backspace(out),
+            .delete => return self.delete_forward(out),
+            .left => return self.cursor_left(out),
+            .right => return self.cursor_right(out),
+            .home, .ctrl_a => return self.cursor_home(out),
+            .end, .ctrl_e => return self.cursor_end(out),
+            .up => return self.recall_older(out),
+            .down => return self.recall_newer(out),
+            .ctrl_k => return self.kill_to_end(out),
+            .ctrl_u => return self.kill_to_start(out),
+            .ctrl_l => {
+                out.write("\x1b[2J\x1b[H");
+                return .repaint;
+            },
+            .ctrl_c => {
+                out.write("^C\r\n");
+                self.reset();
+                return .cancelled;
+            },
+            .tab => {
+                // Completion is card SH3; until then Tab is a bell.
+                out.byte(0x07);
+                return .none;
+            },
+            .eof => return .eof,
+        }
+    }
+
+    /// Reprint the current line after a screen clear (Ctrl-L): the caller
+    /// prints the prompt, then this emits the content and repositions the
+    /// cursor (the editor does not own the prompt).
+    pub fn reprint(self: *const LineEditor, out: Output) void {
+        out.write(self.buffer[0..self.len]);
+        var i: usize = self.cursor;
+        while (i < self.len) : (i += 1) out.byte(0x08);
+    }
+
+    /// The current line's bytes.
+    pub fn line(self: *const LineEditor) []const u8 {
+        return self.buffer[0..self.len];
+    }
+
+    // -- editing primitives ------------------------------------------------
+
+    fn backspace(self: *LineEditor, out: Output) LineResult {
+        if (self.len == 0 or self.cursor == 0) {
+            out.byte(0x07); // nothing to delete: bell
+            return .none;
+        }
+        if (self.cursor == self.len) {
+            // Fast path (byte seam): classic erase pair, no redraw.
+            self.len -= 1;
+            self.cursor -= 1;
+            out.write("\x08 \x08");
+            return .none;
+        }
+        const old_len = self.len;
+        const old_cursor = self.cursor;
+        var i = self.cursor;
+        while (i < self.len) : (i += 1) self.buffer[i - 1] = self.buffer[i];
+        self.len -= 1;
+        self.cursor -= 1;
+        self.redraw(out, old_len, old_cursor);
+        return .none;
+    }
+
+    fn delete_forward(self: *LineEditor, out: Output) LineResult {
+        if (self.cursor >= self.len) {
+            out.byte(0x07);
+            return .none;
+        }
+        const old_len = self.len;
+        const old_cursor = self.cursor;
+        var i = self.cursor;
+        while (i + 1 < self.len) : (i += 1) self.buffer[i] = self.buffer[i + 1];
+        self.len -= 1;
+        self.redraw(out, old_len, old_cursor);
+        return .none;
+    }
+
+    fn insert(self: *LineEditor, out: Output, byte: u8) LineResult {
+        if (self.len >= max_line) {
+            self.rejected = true;
+            out.byte(0x07);
+            return .none;
+        }
+        if (self.cursor == self.len) {
+            // Fast path: append + echo, no redraw.
+            self.buffer[self.len] = byte;
+            self.len += 1;
+            self.cursor += 1;
+            out.byte(byte);
+            return .none;
+        }
+        const old_len = self.len;
+        const old_cursor = self.cursor;
+        var i = self.len;
+        while (i > self.cursor) : (i -= 1) self.buffer[i] = self.buffer[i - 1];
+        self.buffer[self.cursor] = byte;
+        self.len += 1;
+        self.cursor += 1;
+        self.redraw(out, old_len, old_cursor);
+        return .none;
+    }
+
+    fn cursor_left(self: *LineEditor, out: Output) LineResult {
+        if (self.cursor > 0) {
+            self.cursor -= 1;
+            out.byte(0x08);
+        } else {
+            out.byte(0x07);
+        }
+        return .none;
+    }
+
+    fn cursor_right(self: *LineEditor, out: Output) LineResult {
+        if (self.cursor < self.len) {
+            self.cursor += 1;
+            self.redraw(out, self.len, self.cursor - 1);
+        } else {
+            out.byte(0x07);
+        }
+        return .none;
+    }
+
+    fn cursor_home(self: *LineEditor, out: Output) LineResult {
+        if (self.cursor == 0) return .none;
+        var i = self.cursor;
+        while (i > 0) : (i -= 1) out.byte(0x08);
+        self.cursor = 0;
+        return .none;
+    }
+
+    fn cursor_end(self: *LineEditor, out: Output) LineResult {
+        if (self.cursor == self.len) return .none;
+        const old_cursor = self.cursor;
+        self.cursor = self.len;
+        self.redraw(out, self.len, old_cursor);
+        return .none;
+    }
+
+    fn kill_to_end(self: *LineEditor, out: Output) LineResult {
+        if (self.cursor >= self.len) return .none;
+        const old_len = self.len;
+        const old_cursor = self.cursor;
+        self.len = self.cursor;
+        self.redraw(out, old_len, old_cursor);
+        return .none;
+    }
+
+    fn kill_to_start(self: *LineEditor, out: Output) LineResult {
+        if (self.cursor == 0) return .none;
+        const old_len = self.len;
+        const old_cursor = self.cursor;
+        const tail = self.len - self.cursor;
+        var i: usize = 0;
+        while (i < tail) : (i += 1) self.buffer[i] = self.buffer[self.cursor + i];
+        self.len = tail;
+        self.cursor = 0;
+        self.redraw(out, old_len, old_cursor);
+        return .none;
+    }
+
+    // -- history -----------------------------------------------------------
+
+    /// Store the just-submitted line (non-empty; consecutive duplicates are
+    /// collapsed). The oldest entry falls off when the ring is full.
+    fn remember_line(self: *LineEditor) void {
+        const entry = self.buffer[0..self.len];
+        if (entry.len == 0) return;
+        if (self.hist_count > 0 and std.mem.eql(u8, entry, self.history[0][0..self.hist_len[0]])) return;
+        const keep: usize = @min(self.hist_count, hist_capacity - 1);
+        var i = keep;
+        while (i > 0) : (i -= 1) {
+            @memcpy(self.history[i][0..self.hist_len[i - 1]], self.history[i - 1][0..self.hist_len[i - 1]]);
+            self.hist_len[i] = self.hist_len[i - 1];
+        }
+        @memcpy(self.history[0][0..entry.len], entry);
+        self.hist_len[0] = entry.len;
+        self.hist_count = keep + 1;
+    }
+
+    fn load_line(self: *LineEditor, out: Output, entry: []const u8) void {
+        const old_cursor = self.cursor;
+        const old_len = self.len;
+        @memcpy(self.buffer[0..entry.len], entry);
+        self.len = entry.len;
+        self.cursor = entry.len;
+        self.redraw(out, old_len, old_cursor);
+    }
+
+    fn recall_older(self: *LineEditor, out: Output) LineResult {
+        if (self.hist_count == 0 or self.hist_cursor >= self.hist_count) {
+            out.byte(0x07);
+            return .none;
+        }
+        if (self.hist_cursor == 0) {
+            @memcpy(self.hist_draft[0..self.len], self.buffer[0..self.len]);
+            self.hist_draft_len = self.len;
+        }
+        self.hist_cursor += 1;
+        self.load_line(out, self.history[self.hist_cursor - 1][0..self.hist_len[self.hist_cursor - 1]]);
+        return .none;
+    }
+
+    fn recall_newer(self: *LineEditor, out: Output) LineResult {
+        if (self.hist_cursor == 0) {
+            out.byte(0x07);
+            return .none;
+        }
+        self.hist_cursor -= 1;
+        if (self.hist_cursor == 0) {
+            self.load_line(out, self.hist_draft[0..self.hist_draft_len]);
+        } else {
+            self.load_line(out, self.history[self.hist_cursor - 1][0..self.hist_len[self.hist_cursor - 1]]);
+        }
+        return .none;
+    }
+
+    // -- dumb-terminal redraw ----------------------------------------------
+
+    /// Redraw the line content. The terminal cursor is at prompt_len +
+    /// `old_cursor` on entry and prompt_len + `self.cursor` on exit. Emits
+    /// only `\b`, the reprint, and trailing spaces. Approximate across a
+    /// wrapped line (the documented honest bound).
+    fn redraw(self: *LineEditor, out: Output, old_len: usize, old_cursor: usize) void {
+        var i: usize = 0;
+        while (i < old_cursor) : (i += 1) out.byte(0x08);
+        out.write(self.buffer[0..self.len]);
+        i = self.len;
+        while (i < old_len) : (i += 1) out.byte(' ');
+        const end_col = @max(self.len, old_len);
+        i = self.cursor;
+        while (i < end_col) : (i += 1) out.byte(0x08);
+    }
+};
+
+// ---------------------------------------------------------------------------
+// The syscall glue: one `/dev/tty` session (open / attach / raw bytes).
+// ---------------------------------------------------------------------------
+
+/// A `/dev/tty` session. Thin by design — the editing policy lives above.
+pub const Session = struct {
+    handle: u32 = 0,
+    valid: bool = false,
+    attached: bool = false,
+
+    /// Open the controlling terminal (`/dev/tty`). Null when the open fails.
+    pub fn open() ?Session {
+        const r = abi.file_open(tty_path, abi.MODE_READ | abi.MODE_WRITE);
+        if (r < 0) return null;
+        return .{ .handle = @intCast(r), .valid = true };
+    }
+
+    /// Attach a front-end (`sys_tty_attach`, slot 67). `detach` is the
+    /// explicit selector 0; any other selector is an attach.
+    pub fn attach(self: *Session, front_end: FrontEnd) bool {
+        const ok = abi.tty_attach(@intFromEnum(front_end)) == 0;
+        if (ok and front_end != .detach) self.attached = true;
+        if (ok and front_end == .detach) self.attached = false;
+        return ok;
+    }
+
+    pub fn detach(self: *Session) void {
+        _ = abi.tty_attach(0);
+        self.attached = false;
+    }
+
+    /// Non-blocking read of the terminal input queue: >0 bytes, 0 when
+    /// nothing is pending, <0 on error.
+    pub fn read(self: *Session, buf: []u8) i64 {
+        if (!self.valid) return -1;
+        return abi.file_read(self.handle, buf);
+    }
+
+    /// Write raw bytes to the terminal output ring.
+    pub fn write(self: *Session, bytes: []const u8) void {
+        if (!self.valid) return;
+        _ = abi.file_write(self.handle, bytes);
+    }
+
+    pub fn close(self: *Session) void {
+        if (self.valid) abi.file_close(self.handle);
+        self.valid = false;
+        self.attached = false;
+    }
+
+    /// An `Output` sink backed by this session's terminal fd. The returned
+    /// sink borrows `self`, so the session must outlive it.
+    pub fn output(self: *Session) Output {
+        return .{ .ctx = self, .write_fn = sessionWrite };
+    }
+};
+
+fn sessionWrite(ctx: ?*anyopaque, bytes: []const u8) void {
+    const session: *Session = @ptrCast(@alignCast(ctx.?));
+    session.write(bytes);
+}
+
+// ---------------------------------------------------------------------------
+// Host tests (pure; no hardware, no syscalls executed)
+// ---------------------------------------------------------------------------
+
+const Capture = struct {
+    buf: [4096]u8 = undefined,
+    len: usize = 0,
+
+    fn sink(ctx: ?*anyopaque, bytes: []const u8) void {
+        const self: *Capture = @ptrCast(@alignCast(ctx.?));
+        const n = @min(bytes.len, self.buf.len - self.len);
+        @memcpy(self.buf[self.len..][0..n], bytes[0..n]);
+        self.len += n;
+    }
+
+    fn out(self: *Capture) Output {
+        return .{ .ctx = self, .write_fn = sink };
+    }
+
+    fn contents(self: *const Capture) []const u8 {
+        return self.buf[0..self.len];
+    }
+
+    fn reset(self: *Capture) void {
+        self.len = 0;
+    }
+};
+
+test "tty: ABI constants mirror the terminal seam (drift guard)" {
+    try std.testing.expectEqualStrings("/dev/tty", tty_path);
+    try std.testing.expectEqual(@as(u64, 0), @intFromEnum(FrontEnd.detach));
+    try std.testing.expectEqual(@as(u64, 1), @intFromEnum(FrontEnd.serial));
+    try std.testing.expectEqual(@as(u64, 2), @intFromEnum(FrontEnd.window));
+    try std.testing.expectEqual(@as(u64, 3), @intFromEnum(FrontEnd.net));
+    try std.testing.expectEqual(@as(u64, 67), abi.sys_tty_attach_num);
+}
+
+test "tty: KeyDecoder turns CSI sequences into keys and swallows the rest" {
+    var d = KeyDecoder{};
+    try std.testing.expectEqual(Key.ignored, d.feed(0x1b));
+    try std.testing.expectEqual(Key.ignored, d.feed('['));
+    try std.testing.expectEqual(Key.up, d.feed('A'));
+    // Re-init for a clean sequence walk per key.
+    d.reset();
+    _ = d.feed(0x1b);
+    _ = d.feed('[');
+    try std.testing.expectEqual(Key.down, d.feed('B'));
+    d.reset();
+    _ = d.feed(0x1b);
+    _ = d.feed('[');
+    try std.testing.expectEqual(Key.right, d.feed('C'));
+    d.reset();
+    _ = d.feed(0x1b);
+    _ = d.feed('[');
+    try std.testing.expectEqual(Key.left, d.feed('D'));
+    d.reset();
+    _ = d.feed(0x1b);
+    _ = d.feed('[');
+    try std.testing.expectEqual(Key.home, d.feed('H'));
+    d.reset();
+    _ = d.feed(0x1b);
+    _ = d.feed('[');
+    try std.testing.expectEqual(Key.end, d.feed('F'));
+    // Delete: ESC [ 3 ~.
+    d.reset();
+    _ = d.feed(0x1b);
+    _ = d.feed('[');
+    _ = d.feed('3');
+    try std.testing.expectEqual(Key.delete, d.feed('~'));
+    // An unhandled CSI key is swallowed whole (no stray '~').
+    d.reset();
+    for ("\x1b[15~") |c| try std.testing.expectEqual(Key.ignored, d.feed(c));
+    // A multi-parameter sequence is swallowed too.
+    d.reset();
+    for ("\x1b[1;2D") |c| try std.testing.expectEqual(Key.ignored, d.feed(c));
+}
+
+test "tty: KeyDecoder handles printable, control, and lone-ESC bytes" {
+    var d = KeyDecoder{};
+    try std.testing.expectEqual(@as(u8, 'a'), d.feed('a').text);
+    try std.testing.expectEqual(@as(u8, 0xc3), d.feed(0xc3).text); // UTF-8 lead
+    try std.testing.expectEqual(Key.enter, d.feed('\r'));
+    try std.testing.expectEqual(Key.enter, d.feed('\n'));
+    try std.testing.expectEqual(Key.backspace, d.feed(0x08));
+    try std.testing.expectEqual(Key.backspace, d.feed(0x7f));
+    try std.testing.expectEqual(Key.ctrl_c, d.feed(0x03));
+    try std.testing.expectEqual(Key.ctrl_a, d.feed(0x01));
+    try std.testing.expectEqual(Key.ctrl_e, d.feed(0x05));
+    try std.testing.expectEqual(Key.ctrl_k, d.feed(0x0b));
+    try std.testing.expectEqual(Key.ctrl_u, d.feed(0x15));
+    try std.testing.expectEqual(Key.ctrl_l, d.feed(0x0c));
+    try std.testing.expectEqual(Key.eof, d.feed(0x04));
+    try std.testing.expectEqual(Key.tab, d.feed('\t'));
+    // A lone ESC does not eat the next keystroke.
+    try std.testing.expectEqual(Key.ignored, d.feed(0x1b));
+    try std.testing.expectEqual(@as(u8, 'x'), d.feed('x').text);
+}
+
+test "tty: insert and backspace echo through the byte seam" {
+    var cap = Capture{};
+    const out = cap.out();
+    var ed = LineEditor{};
+    _ = ed.feed(out, 'a');
+    _ = ed.feed(out, 'b');
+    try std.testing.expectEqualStrings("ab", ed.line());
+    try std.testing.expectEqualStrings("ab", cap.contents());
+    _ = ed.feed(out, 0x08);
+    try std.testing.expectEqualStrings("a", ed.line());
+    try std.testing.expectEqualStrings("ab\x08 \x08", cap.contents());
+    // Backspace at the start is refused with a bell.
+    _ = ed.feed(out, 0x01); // home
+    cap.reset();
+    _ = ed.feed(out, 0x7f);
+    try std.testing.expectEqualStrings("\x07", cap.contents());
+    try std.testing.expectEqual(@as(usize, 1), ed.len);
+}
+
+test "tty: mid-line insert/delete and Home/End track the cursor" {
+    var cap = Capture{};
+    const out = cap.out();
+    var ed = LineEditor{};
+    for ("ac") |c| _ = ed.feed(out, c);
+    _ = ed.feedKey(out, .home);
+    _ = ed.feedKey(out, .right); // cursor 1
+    cap.reset();
+    _ = ed.feed(out, 'b');
+    try std.testing.expectEqualStrings("abc", ed.line());
+    try std.testing.expectEqual(@as(usize, 2), ed.cursor);
+    try std.testing.expectEqualStrings("\x08abc\x08", cap.contents());
+    // Home then Delete: remove the leading 'a' -> "bc".
+    _ = ed.feedKey(out, .home);
+    cap.reset();
+    _ = ed.feedKey(out, .delete);
+    try std.testing.expectEqualStrings("bc", ed.line());
+    try std.testing.expectEqual(@as(usize, 0), ed.cursor);
+    try std.testing.expectEqualStrings("bc \x08\x08\x08", cap.contents());
+    // End moves to the tail.
+    _ = ed.feedKey(out, .end);
+    try std.testing.expectEqual(@as(usize, 2), ed.cursor);
+    // Right at the tail bells.
+    cap.reset();
+    _ = ed.feedKey(out, .right);
+    try std.testing.expectEqualStrings("\x07", cap.contents());
+}
+
+test "tty: submit echoes CRLF, remembers history, and swallows the CRLF LF" {
+    var cap = Capture{};
+    const out = cap.out();
+    var ed = LineEditor{};
+    for ("hi") |c| _ = ed.feed(out, c);
+    try std.testing.expectEqual(LineResult.submitted, ed.feed(out, '\r'));
+    try std.testing.expectEqualStrings("hi\r\n", cap.contents());
+    try std.testing.expectEqual(@as(usize, 1), ed.hist_count);
+    // The LF half of the same pair must not start an empty line.
+    ed.next_line();
+    try std.testing.expectEqual(LineResult.none, ed.feed(out, '\n'));
+    try std.testing.expectEqual(@as(usize, 0), ed.len);
+    // An empty line is not stored in history.
+    try std.testing.expectEqual(LineResult.submitted, ed.feed(out, '\n'));
+    try std.testing.expectEqual(@as(usize, 1), ed.hist_count);
+}
+
+test "tty: the 257th char is refused, never truncated mid-word" {
+    var cap = Capture{};
+    const out = cap.out();
+    var ed = LineEditor{};
+    var i: usize = 0;
+    while (i < max_line) : (i += 1) try std.testing.expectEqual(LineResult.none, ed.feed(out, 'c'));
+    try std.testing.expect(!ed.rejected);
+    try std.testing.expectEqual(LineResult.none, ed.feed(out, 'c'));
+    try std.testing.expectEqual(@as(usize, max_line), ed.len);
+    try std.testing.expect(ed.rejected);
+    // The line still submits with what fit.
+    try std.testing.expectEqual(LineResult.submitted, ed.feed(out, '\n'));
+}
+
+test "tty: Ctrl-C cancels and Ctrl-L requests a repaint" {
+    var cap = Capture{};
+    const out = cap.out();
+    var ed = LineEditor{};
+    for ("xy") |c| _ = ed.feed(out, c);
+    try std.testing.expectEqual(LineResult.cancelled, ed.feed(out, 0x03));
+    try std.testing.expectEqualStrings("xy^C\r\n", cap.contents());
+    try std.testing.expectEqual(@as(usize, 0), ed.len);
+    try std.testing.expect(!ed.rejected);
+    // Ctrl-L clears the screen; the line is intact for the caller to reprint.
+    for ("hello") |c| _ = ed.feed(out, c);
+    cap.reset();
+    try std.testing.expectEqual(LineResult.repaint, ed.feed(out, 0x0c));
+    try std.testing.expectEqualStrings("\x1b[2J\x1b[H", cap.contents());
+    try std.testing.expectEqualStrings("hello", ed.line());
+    cap.reset();
+    ed.cursor = 2;
+    ed.reprint(out);
+    try std.testing.expectEqualStrings("hello\x08\x08\x08", cap.contents());
+}
+
+test "tty: Up/Down history walks entries and returns to the draft" {
+    var cap = Capture{};
+    const out = cap.out();
+    var ed = LineEditor{};
+    for ("alpha") |c| _ = ed.feed(out, c);
+    _ = ed.feed(out, '\n');
+    ed.next_line();
+    for ("beta") |c| _ = ed.feed(out, c);
+    _ = ed.feed(out, '\n');
+    ed.next_line();
+    // Up recalls "beta", Up again "alpha".
+    _ = ed.feedKey(out, .up);
+    try std.testing.expectEqualStrings("beta", ed.line());
+    _ = ed.feedKey(out, .up);
+    try std.testing.expectEqualStrings("alpha", ed.line());
+    // Down returns to "beta", Down again to the (empty) draft.
+    _ = ed.feedKey(out, .down);
+    try std.testing.expectEqualStrings("beta", ed.line());
+    _ = ed.feedKey(out, .down);
+    try std.testing.expectEqual(@as(usize, 0), ed.len);
+    // A typed draft is preserved across an Up/Down round trip.
+    for ("draft") |c| _ = ed.feed(out, c);
+    _ = ed.feedKey(out, .up);
+    try std.testing.expectEqualStrings("beta", ed.line());
+    _ = ed.feedKey(out, .down);
+    try std.testing.expectEqualStrings("draft", ed.line());
+    // Up at the oldest / Down at the newest bell instead of wrapping.
+    _ = ed.feedKey(out, .up);
+    _ = ed.feedKey(out, .up);
+    cap.reset();
+    _ = ed.feedKey(out, .up);
+    try std.testing.expectEqualStrings("\x07", cap.contents());
+}
+
+test "tty: consecutive duplicate submissions are collapsed in history" {
+    var cap = Capture{};
+    const out = cap.out();
+    var ed = LineEditor{};
+    for ("echo") |c| _ = ed.feed(out, c);
+    _ = ed.feed(out, '\n');
+    ed.next_line();
+    for ("echo") |c| _ = ed.feed(out, c);
+    _ = ed.feed(out, '\n');
+    ed.next_line();
+    try std.testing.expectEqual(@as(usize, 1), ed.hist_count);
+}
+
+test "tty: history ring never overflows and keeps the newest entries" {
+    var cap = Capture{};
+    const out = cap.out();
+    var ed = LineEditor{};
+    var i: usize = 0;
+    while (i < hist_capacity + 8) : (i += 1) {
+        var line_buf: [16]u8 = undefined;
+        const n = std.fmt.bufPrint(&line_buf, "line{d}", .{i}) catch unreachable;
+        for (n) |c| _ = ed.feed(out, c);
+        _ = ed.feed(out, '\n');
+        ed.next_line();
+    }
+    try std.testing.expectEqual(hist_capacity, ed.hist_count);
+    try std.testing.expectEqualStrings("line23", ed.history[0][0..ed.hist_len[0]]);
+    try std.testing.expectEqualStrings("line8", ed.history[hist_capacity - 1][0..ed.hist_len[hist_capacity - 1]]);
+    // Recall walks the whole ring without touching garbage lengths.
+    var steps: usize = 0;
+    while (steps < hist_capacity) : (steps += 1) _ = ed.feedKey(out, .up);
+    try std.testing.expectEqual(@as(usize, hist_capacity), ed.hist_cursor);
+    try std.testing.expectEqualStrings("line8", ed.line());
+}
+
+test "tty: kill chords truncate toward the cursor" {
+    var cap = Capture{};
+    const out = cap.out();
+    var ed = LineEditor{};
+    for ("hello world") |c| _ = ed.feed(out, c);
+    _ = ed.feedKey(out, .home);
+    _ = ed.feedKey(out, .ctrl_k);
+    try std.testing.expectEqual(@as(usize, 0), ed.len);
+    for ("world") |c| _ = ed.feed(out, c);
+    _ = ed.feedKey(out, .home);
+    _ = ed.feedKey(out, .right);
+    _ = ed.feedKey(out, .right);
+    _ = ed.feedKey(out, .ctrl_u);
+    try std.testing.expectEqualStrings("rld", ed.line());
+    try std.testing.expectEqual(@as(usize, 0), ed.cursor);
+}
+
+test "tty: Tab bells (completion is SH3) and Ctrl-D reports eof" {
+    var cap = Capture{};
+    const out = cap.out();
+    var ed = LineEditor{};
+    try std.testing.expectEqual(LineResult.none, ed.feed(out, '\t'));
+    try std.testing.expectEqualStrings("\x07", cap.contents());
+    try std.testing.expectEqual(@as(usize, 0), ed.len);
+    try std.testing.expectEqual(LineResult.eof, ed.feed(out, 0x04));
+}
+
+test "tty: Session.open is a thin facade (no syscall executes on host)" {
+    // On the host the syscall helpers are compile-time no-ops, so the open
+    // succeeds with a zero handle; the point is that the glue type-checks and
+    // the pure layer never calls it.
+    var session = Session.open().?;
+    try std.testing.expect(session.valid);
+    const sink = session.output();
+    sink.write("x"); // host no-op
+    session.detach();
+    try std.testing.expect(!session.attached);
+    session.close();
+    try std.testing.expect(!session.valid);
+}
