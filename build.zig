@@ -2180,6 +2180,7 @@ pub fn build(b: *std.Build) void {
         "kernel/src/svclock.zig",
         "kernel/src/syscall.zig",
         "kernel/src/tcp.zig",
+        "kernel/src/terminal.zig",
         "kernel/src/text.zig",
         "kernel/src/timer.zig",
         "kernel/src/tokenizer.zig",

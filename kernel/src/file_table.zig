@@ -29,6 +29,10 @@ const virtio_file = @import("virtio_file.zig");
 // disk behind the U2 BOT/SCSI driver — a READ-ONLY block device for now
 // (the card's bounded first consumer).
 const usb_msc = @import("usb_msc.zig");
+// #1072 (ADR 0020): the terminal seam. `/dev/tty` is a virtual device handle
+// routed to this process's controlling terminal (open/read/write reuse the
+// frozen file ABI — no new syscall slot).
+const terminal = @import("terminal.zig");
 
 pub const max_handles_per_process: usize = 8;
 pub const max_path_len: usize = 64;
@@ -63,6 +67,10 @@ pub const Partition = enum {
     /// `usb:`), a READ-ONLY raw block device. Reads are 512-byte SCSI
     /// sectors through `usb_msc`; there is no directory or metadata layer.
     usb,
+    /// #1072 (ADR 0020): the virtual terminal device (`/dev/tty`) — a
+    /// process's controlling terminal, backed by `terminal.zig`. Not a
+    /// path on any filesystem; `open` special-cases the name.
+    tty,
 };
 
 pub const FileHandle = struct {
@@ -84,6 +92,9 @@ pub const FileHandle = struct {
     /// here by the confirmed byte count. Freed on close / process reset.
     host_handle: u16 = 0,
     host_handle_valid: bool = false,
+    /// #1072 (ADR 0020): for a `.tty` handle, the `terminal.zig` registry
+    /// index this fd reads/writes.
+    term_handle: u8 = 0,
 };
 
 pub const ParsedPath = struct {
@@ -103,6 +114,19 @@ pub const ParsedPath = struct {
 var handles: [process.max_processes][max_handles_per_process]FileHandle = [_][max_handles_per_process]FileHandle{[_]FileHandle{.{}} ** max_handles_per_process} ** process.max_processes;
 var initialized = false;
 
+/// #1072 (ADR 0020): each process's controlling terminal (a `terminal.zig`
+/// registry index), created on the first `/dev/tty` open and released when
+/// the process is reset. Null = no terminal opened yet.
+var process_terminal: [process.max_processes]?usize = [_]?usize{null} ** process.max_processes;
+
+/// #1072: the terminal device names. Exact match only (no path traversal).
+pub fn is_tty_path(name: []const u8) bool {
+    return std.mem.eql(u8, name, "/dev/tty") or
+        std.mem.eql(u8, name, "tty") or
+        std.mem.eql(u8, name, "/dev/tty0") or
+        std.mem.eql(u8, name, "tty0");
+}
+
 /// M43 U3: one sector scratch for `.usb` reads (BOT is one transfer at a
 /// time; a sub-sector read still pulls a whole 512-byte sector here).
 var usb_sector: [usb_msc.block_len]u8 align(64) = undefined;
@@ -112,6 +136,10 @@ pub fn init() void {
         for (proc_handles) |*h| {
             h.* = .{};
         }
+    }
+    for (&process_terminal) |*t| {
+        if (t.*) |h| terminal.release(h);
+        t.* = null;
     }
     initialized = true;
 }
@@ -125,6 +153,11 @@ pub fn reset_process(pid: u64) void {
             _ = virtio_file.close(h.host_handle);
         }
         h.* = .{};
+    }
+    // #1072: a dead process's controlling terminal is released.
+    if (process_terminal[pid]) |th| {
+        terminal.release(th);
+        process_terminal[pid] = null;
     }
 }
 
@@ -241,7 +274,6 @@ pub fn open(pid: u64, path_bytes: []const u8, flags: u32) i64 {
     if ((flags & MODE_DIR) != 0 and (flags & (MODE_CREATE | MODE_WRITE)) != (MODE_CREATE | MODE_WRITE)) return -1;
 
     if (path_bytes.len > max_path_len) return -8;
-    const parsed = parse_path(path_bytes) orelse return -1;
 
     // Find free handle slot for calling process
     var free_slot: ?usize = null;
@@ -252,6 +284,26 @@ pub fn open(pid: u64, path_bytes: []const u8, flags: u32) i64 {
         }
     }
     const slot = free_slot orelse return -5; // ENOSPC (table full)
+
+    // #1072 (ADR 0020): `/dev/tty` is the process's controlling terminal —
+    // a virtual device, not a filesystem path. Created lazily on the first
+    // open and reused for the process's lifetime.
+    if (is_tty_path(path_bytes)) {
+        const th = process_terminal[pid] orelse blk: {
+            const h = terminal.create(pid) orelse return -5;
+            process_terminal[pid] = h;
+            break :blk h;
+        };
+        handles[pid][slot] = .{
+            .in_use = true,
+            .partition = .tty,
+            .flags = flags,
+            .term_handle = @intCast(th),
+        };
+        return @intCast(slot);
+    }
+
+    const parsed = parse_path(path_bytes) orelse return -1;
 
     // M43 U3 (issue #1034): the `.usb` raw block device. READ-ONLY: any
     // write-ish flag is EINVAL; no device or no capacity is ENOENT. The
@@ -361,6 +413,13 @@ pub fn read(pid: u64, fd: u64, out_buf: []u8) i64 {
     if ((h.flags & MODE_READ) == 0) return -7; // EACCES
     if (h.is_dir) return 0; // M25 Lane B: a dir handle reads as empty
 
+    // #1072 (ADR 0020): a `.tty` handle drains the terminal's input queue
+    // (front-end keys). Empty input returns 0 — a non-blocking read.
+    if (h.partition == .tty) {
+        const t = terminal.get(h.term_handle) orelse return -2;
+        return @intCast(t.readInput(out_buf));
+    }
+
     if (out_buf.len == 0) return 0;
     if (h.cursor >= h.size) return 0; // EOF
 
@@ -408,6 +467,13 @@ pub fn write(pid: u64, fd: u64, in_buf: []const u8) i64 {
     if (!h.in_use) return -2; // EBADF
     if ((h.flags & MODE_WRITE) == 0) return -7; // EACCES
     if (h.is_dir) return -7; // M25 Lane B: never write through a dir handle
+
+    // #1072 (ADR 0020): a `.tty` handle appends to the terminal's output
+    // ring (the attached front-end drains it). Always accepts every byte.
+    if (h.partition == .tty) {
+        const t = terminal.get(h.term_handle) orelse return -2;
+        return @intCast(t.write(in_buf));
+    }
 
     // M34 HF5 (issue #739): host writes ride the host handle's cursor
     // (chunked across WRITE round trips; the host returns the confirmed
@@ -643,4 +709,40 @@ test "file_table: mutating ops validate pids, paths, and volumes (claim 5801)" {
     // Truncate on an unopened handle is EBADF.
     init();
     try std.testing.expectEqual(@as(i64, -2), truncate(1, 0, 4));
+}
+
+test "file_table: /dev/tty routes to the process's terminal device (#1072)" {
+    init();
+    const pid: u64 = 3;
+    reset_process(pid);
+
+    // Open the controlling terminal: a valid fd on the `.tty` partition
+    // (works with no host file channel — it is a virtual device).
+    const fd = open(pid, "/dev/tty", MODE_READ | MODE_WRITE);
+    try std.testing.expect(fd >= 0);
+    const h = &handles[pid][@intCast(fd)];
+    try std.testing.expectEqual(Partition.tty, h.partition);
+
+    // Writing appends to the terminal's output ring (front-end drains it).
+    const th = h.term_handle;
+    const t = terminal.get(th).?;
+    try std.testing.expectEqual(@as(i64, 5), write(pid, @intCast(fd), "hello"));
+    var out: [8]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 5), t.readOut(&out));
+    try std.testing.expectEqualStrings("hello", out[0..5]);
+
+    // A front-end pushes input; the fd's read drains it.
+    _ = t.pushInput("key");
+    var in: [8]u8 = undefined;
+    try std.testing.expectEqual(@as(i64, 3), read(pid, @intCast(fd), &in));
+    try std.testing.expectEqualStrings("key", in[0..3]);
+
+    // A second open reuses the SAME controlling terminal.
+    const fd2 = open(pid, "tty", MODE_READ | MODE_WRITE);
+    try std.testing.expect(fd2 >= 0);
+    try std.testing.expectEqual(th, handles[pid][@intCast(fd2)].term_handle);
+
+    // Process reset releases the terminal (owner death).
+    reset_process(pid);
+    try std.testing.expectEqual(@as(?*terminal.Terminal, null), terminal.get(th));
 }
