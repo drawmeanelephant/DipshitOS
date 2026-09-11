@@ -31,7 +31,7 @@
 | `tools/status/` | 6 | multiagent coordination gate + claim tooling (class A) |
 | `tools/context/` | 2 | context snapshot helpers |
 | `tools/ragshit/` | 84 | host-side context engine (developer tooling, not guest software) |
-| `tools/gate/` | 192 | M40 vgate harness + specs (GF2+) |
+| `tools/gate/` | 193 | M40 vgate harness + specs (GF2+) |
 
 ## Class-B fleet (discovered from the spec dir)
 
@@ -162,6 +162,7 @@ of them with `just verify-vz`.
 | spec | `live-sexiburger-actions` | 1 run / 12 assert | live-sexiburger-actions.spec -- M19 Sexiburger Action Registry & Tab Model |
 | spec | `live-sh` | 1 run / 9 assert | live-sh.spec -- M45 card SH2 class-B gate (issue #1078, ADR 0021 D2/D3). |
 | spec | `live-sh-complete` | 1 run / 9 assert | live-sh-complete.spec -- M45 card SH3 class-B gate (issue #1079, ADR 0021 D6). |
+| spec | `live-sh4` | 1 run / 7 assert | live-sh4.spec -- M45 card SH4 class-B gate (issue #1080, ADR 0021 D6). |
 | spec | `live-sleep` | 1 run / 6 assert | live-sleep.spec -- blocking syscalls: USER.BIN yields, sleeps 2 |
 | spec | `live-smp` | 1 run / 1 assert | live-smp.spec -- Milestone 28 (claim 6438) class-B gate: |
 | spec | `live-smp-stress` | 1 run / 23 assert | live-smp-stress.spec -- M28 SMP card 11 (claim 0697) class-B gate: |
