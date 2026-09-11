@@ -2308,6 +2308,7 @@ pub fn build(b: *std.Build) void {
         "user/src/lib/shell.zig",
         "user/src/lib/pipe.zig",
         "user/src/lib/script.zig",
+        "user/src/lib/crypto.zig",
         "user/tests/ui/ui_test.zig",
         "kernel/tests/scheduler_test.zig",
         "kernel/tests/syscall_test.zig",
