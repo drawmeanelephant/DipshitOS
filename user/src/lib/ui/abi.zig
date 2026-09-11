@@ -750,6 +750,19 @@ pub fn wait_process(pid: u64) i64 {
     return syscall1(sys_wait_num, pid);
 }
 
+/// M19 P1 (ADR 0007 slots 56/57): the bounded kernel pipe behind the `|`
+/// operator — `sys_pipe_write` appends, `sys_pipe_read` drains oldest-first.
+pub const sys_pipe_read_num: u64 = 56;
+pub const sys_pipe_write_num: u64 = 57;
+
+pub fn pipe_write(data: []const u8) i64 {
+    return syscall2(sys_pipe_write_num, @intFromPtr(data.ptr), data.len);
+}
+
+pub fn pipe_read(buf: []u8) i64 {
+    return syscall2(sys_pipe_read_num, @intFromPtr(buf.ptr), buf.len);
+}
+
 pub const sys_ping_send_num: u64 = 59;
 pub const sys_ping_poll_num: u64 = 60;
 pub const sys_net_stats_num: u64 = 62;

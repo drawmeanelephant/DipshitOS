@@ -11,14 +11,18 @@
 //! in the FOREGROUND with `sys_wait`, so `$?` gets the child's status.
 //! Markers are emitted in single writes (SMP-heartbeat safe).
 //!
-//! Scope is SH2: no pipes/redirection/globs (SH4), no control flow or
-//! command substitution (SH5), no completion/Ctrl-R (SH3).
+//! SH3 adds Tab completion + Ctrl+R reverse-i-search; SH4 adds `|`, `>`,
+//! `>>`, `<` and glob expansion. The execution bound for SH4: pipes and
+//! redirection capture BUILTIN output (externals write fd 1 directly); globs
+//! expand against the share listing. No control flow or command substitution
+//! yet (SH5).
 
 const std = @import("std");
 const ui = @import("lib/ui.zig");
 const abi = @import("lib/ui/abi.zig");
 const tty = @import("lib/tty.zig");
 const shell_mod = @import("lib/shell.zig");
+const pipe = @import("lib/pipe.zig");
 
 pub const ready_marker: []const u8 = "sh: ready\n";
 pub const attached_marker: []const u8 = "sh: attached\n";
@@ -33,6 +37,8 @@ var g_session: tty.Session = undefined;
 var g_entries: [16]abi.DirEntry = undefined;
 var g_listing: [16][]const u8 = undefined;
 var g_complete: shell_mod.CompletionSet = undefined;
+/// Scratch for a pipeline's stdin / a `<` redirect's file contents.
+var g_io_buf: [4096]u8 = undefined;
 
 fn historyCount(ctx: ?*anyopaque) usize {
     _ = ctx;
@@ -108,19 +114,149 @@ fn runExternal(req: *const shell_mod.RunRequest) u8 {
     return 127;
 }
 
-fn dispatch(line: []const u8, depth: u32) void {
-    switch (g_shell.execute(line, refreshListing())) {
+fn exitShell(status: u8) noreturn {
+    g_session.detach();
+    g_session.close();
+    ui.write_console(bye_marker);
+    ui.exit_process(status);
+}
+
+/// Perform one core action.
+fn perform(action: shell_mod.Action, depth: u32) void {
+    switch (action) {
         .none => {},
         .print => g_session.write(g_shell.outSlice()),
         .run => |req| g_shell.last_status = runExternal(&req),
         .source => |req| runSource(req.path.slice(), depth),
-        .exit => |status| {
-            g_session.detach();
-            g_session.close();
-            ui.write_console(bye_marker);
-            ui.exit_process(status);
-        },
+        .exit => |status| exitShell(status),
     }
+}
+
+fn runSimple(line: []const u8, stdin: []const u8, depth: u32) void {
+    g_shell.setStdin(stdin);
+    perform(g_shell.execute(line, refreshListing()), depth);
+}
+
+/// Run a command with its stdout captured (a builtin `print`). External
+/// apps write fd 1 directly and cannot be captured yet — they run through
+/// with a bound notice. Returns a slice into `g_shell.out` valid until the
+/// next execute.
+fn capture(line: []const u8, depth: u32) []const u8 {
+    g_shell.setStdin(&.{});
+    switch (g_shell.execute(line, refreshListing())) {
+        .print => return g_shell.outSlice(),
+        .none => return &.{},
+        .run => |req| {
+            g_shell.last_status = runExternal(&req);
+            g_session.write("sh: cannot capture an external app's output yet\n");
+            return &.{};
+        },
+        .source => |req| {
+            runSource(req.path.slice(), depth);
+            return &.{};
+        },
+        .exit => |status| exitShell(status),
+    }
+}
+
+fn drainPipe() void {
+    var tmp: [64]u8 = undefined;
+    while (true) {
+        const n = abi.pipe_read(&tmp);
+        if (n <= 0) break;
+    }
+}
+
+/// `left | right`: capture the left command's output (SH4 bound: builtins),
+/// push it through the kernel pipe (slots 56/57), then run the right command
+/// with that content as its stdin.
+fn runPipeline(left: []const u8, right: []const u8, depth: u32) void {
+    drainPipe();
+    const captured = capture(left, depth);
+    var off: usize = 0;
+    while (off < captured.len) {
+        const n = abi.pipe_write(captured[off..]);
+        if (n <= 0) break;
+        off += @intCast(n);
+    }
+    var total: usize = 0;
+    while (total < g_io_buf.len) {
+        const n = abi.pipe_read(g_io_buf[total..]);
+        if (n <= 0) break;
+        total += @intCast(n);
+    }
+    runSimple(right, g_io_buf[0..total], depth);
+    g_shell.setStdin(&.{});
+}
+
+/// `cmd > file` / `cmd >> file`: capture the command's output and write it
+/// to the share (append rides MODE_APPEND, the host-owned cursor).
+fn runRedirectOut(left: []const u8, file: []const u8, op: pipe.RedirectOp, depth: u32) void {
+    const captured = capture(left, depth);
+    const flags: u32 = abi.MODE_WRITE | abi.MODE_CREATE |
+        (if (op == .stdout_append) abi.MODE_APPEND else 0);
+    const opened = abi.file_open(file, flags);
+    if (opened < 0) {
+        g_session.write("sh: cannot open ");
+        g_session.write(file);
+        g_session.write("\n");
+        g_shell.last_status = 1;
+        return;
+    }
+    const fd: u32 = @intCast(opened);
+    var off: usize = 0;
+    while (off < captured.len) {
+        const n = abi.file_write(fd, captured[off..]);
+        if (n <= 0) break;
+        off += @intCast(n);
+    }
+    abi.file_close(fd);
+    g_shell.last_status = 0;
+}
+
+/// `cmd < file`: read the file into the command's stdin.
+fn runRedirectIn(left: []const u8, file: []const u8, depth: u32) void {
+    const opened = abi.file_open(file, abi.MODE_READ);
+    if (opened < 0) {
+        g_session.write("sh: cannot open ");
+        g_session.write(file);
+        g_session.write("\n");
+        g_shell.last_status = 1;
+        return;
+    }
+    const fd: u32 = @intCast(opened);
+    var total: usize = 0;
+    while (total < g_io_buf.len) {
+        const n = abi.file_read(fd, g_io_buf[total..]);
+        if (n <= 0) break;
+        total += @intCast(n);
+    }
+    abi.file_close(fd);
+    runSimple(left, g_io_buf[0..total], depth);
+    g_shell.setStdin(&.{});
+}
+
+fn dispatch(line: []const u8, depth: u32) void {
+    switch (pipe.pipeSplit(line)) {
+        .multiple => {
+            g_session.write("sh: only one pipe per line\n");
+            g_shell.last_status = 2;
+            return;
+        },
+        .split => |sp| {
+            runPipeline(sp.left, sp.right, depth);
+            return;
+        },
+        .none => {},
+    }
+    if (pipe.redirectSplit(line)) |rs| {
+        switch (rs.op) {
+            .stdin_file => runRedirectIn(rs.left, rs.right, depth),
+            .stdout_overwrite, .stdout_append => runRedirectOut(rs.left, rs.right, rs.op, depth),
+        }
+        return;
+    }
+    runSimple(line, &.{}, depth);
 }
 
 fn runSource(path: []const u8, depth: u32) void {

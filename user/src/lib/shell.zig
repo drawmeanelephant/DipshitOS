@@ -15,6 +15,7 @@
 //! (SH5), no tab completion or Ctrl-R (SH3).
 
 const std = @import("std");
+const pipe = @import("pipe.zig");
 
 pub const max_args: usize = 16;
 pub const line_max: usize = 256;
@@ -28,6 +29,8 @@ pub const prompt_max: usize = 64;
 pub const out_max: usize = 2048;
 pub const name_max: usize = 64;
 pub const max_candidates: usize = 6;
+/// The most glob matches the shell will materialize for one line.
+pub const glob_max: usize = 64;
 
 /// A bounded byte string with inline storage. All table cells are this shape
 /// so the shell stays allocation-free (fixed BSS in the guest).
@@ -65,6 +68,9 @@ pub const Program = Buf(name_max);
 
 pub const TokenizeResult = struct {
     argv: [max_args + 1][]const u8 = undefined,
+    /// Per-argument wildcard marker (unquoted, unescaped `*`/`?`/`[`) for the
+    /// SH4 glob-expansion stage.
+    arg_glob: [max_args + 1]bool = [_]bool{false} ** (max_args + 1),
     count: usize = 0,
     too_many: bool = false,
     unbalanced_quote: bool = false,
@@ -163,6 +169,7 @@ pub fn tokenize(line: []const u8, scratch: []u8) TokenizeResult {
                 }
                 continue;
             }
+            if (c == '*' or c == '?' or c == '[') result.arg_glob[arg_i] = true;
             if (spos < scratch.len) scratch[spos] = c;
             spos += 1;
             index += 1;
@@ -496,6 +503,7 @@ pub fn candidates(verb: []const u8, out: *[max_candidates]Program) usize {
 
 pub const Builtin = enum {
     echo,
+    cat,
     pwd,
     cd,
     exit,
@@ -521,17 +529,18 @@ pub const Builtin = enum {
 /// Builtin lookup by verb (the system command boundary, ADR 0021 D3).
 pub fn classify(verb: []const u8) ?Builtin {
     const table = .{
-        .{ "echo", Builtin.echo },         .{ "pwd", Builtin.pwd },
-        .{ "cd", Builtin.cd },             .{ "exit", Builtin.exit },
-        .{ "env", Builtin.env },           .{ "set", Builtin.set },
-        .{ "unset", Builtin.unset },       .{ "export", Builtin.export_ },
-        .{ "printenv", Builtin.printenv }, .{ "alias", Builtin.alias },
-        .{ "unalias", Builtin.unalias },   .{ "history", Builtin.history },
-        .{ "prompt", Builtin.prompt },     .{ "type", Builtin.type_ },
-        .{ "which", Builtin.which },       .{ "true", Builtin.true_ },
-        .{ "false", Builtin.false_ },      .{ "help", Builtin.help },
-        .{ "source", Builtin.source },     .{ ".", Builtin.source },
-        .{ "jobs", Builtin.jobs },         .{ "fg", Builtin.fg },
+        .{ "echo", Builtin.echo },       .{ "cat", Builtin.cat },
+        .{ "pwd", Builtin.pwd },         .{ "cd", Builtin.cd },
+        .{ "exit", Builtin.exit },       .{ "env", Builtin.env },
+        .{ "set", Builtin.set },         .{ "unset", Builtin.unset },
+        .{ "export", Builtin.export_ },  .{ "printenv", Builtin.printenv },
+        .{ "alias", Builtin.alias },     .{ "unalias", Builtin.unalias },
+        .{ "history", Builtin.history }, .{ "prompt", Builtin.prompt },
+        .{ "type", Builtin.type_ },      .{ "which", Builtin.which },
+        .{ "true", Builtin.true_ },      .{ "false", Builtin.false_ },
+        .{ "help", Builtin.help },       .{ "source", Builtin.source },
+        .{ ".", Builtin.source },        .{ "jobs", Builtin.jobs },
+        .{ "fg", Builtin.fg },
     };
     inline for (table) |row| {
         if (std.mem.eql(u8, verb, row[0])) return row[1];
@@ -542,10 +551,10 @@ pub fn classify(verb: []const u8) ?Builtin {
 /// The builtin verbs, in the order `help` advertises them. Public so the
 /// completion source can offer them without duplicating the list.
 pub const builtin_names = [_][]const u8{
-    "alias",   "cd",    "echo",  "env",     "exit", "export",
-    "false",   "fg",    "help",  "history", "jobs", "printenv",
-    "prompt",  "pwd",   "set",   "source",  "true", "type",
-    "unalias", "unset", "which",
+    "alias",    "cat",     "cd",    "echo",  "env",     "exit",
+    "export",   "false",   "fg",    "help",  "history", "jobs",
+    "printenv", "prompt",  "pwd",   "set",   "source",  "true",
+    "type",     "unalias", "unset", "which",
 };
 
 pub const completion_max: usize = 32;
@@ -659,9 +668,13 @@ pub const Shell = struct {
     last_status: u8 = 0,
     out: Buf(out_max) = .{},
     history: HistoryView = .{},
+    /// Bound stdin for `cat` (a pipe or `<` redirect); empty = none.
+    stdin: []const u8 = &.{},
 
     expand_buf: [line_max * 2]u8 = undefined,
     scratch: [line_max * 2]u8 = undefined,
+    glob_argv: [max_args + 1][]const u8 = undefined,
+    glob_names: [glob_max][path_max]u8 = undefined,
 
     pub fn init() Shell {
         var s = Shell{};
@@ -680,6 +693,12 @@ pub const Shell = struct {
 
     pub fn cwdSlice(self: *const Shell) []const u8 {
         return self.cwd.slice();
+    }
+
+    /// Bind (or clear) the input a `cat` builtin consumes. The slice must
+    /// outlive the next `execute` call.
+    pub fn setStdin(self: *Shell, data: []const u8) void {
+        self.stdin = data;
     }
 
     fn emit(self: *Shell, text: []const u8) void {
@@ -713,7 +732,8 @@ pub const Shell = struct {
             return .print;
         }
         if (tk.count == 0) return .none;
-        var argv = tk.argv[0..tk.count];
+        var argv: []const []const u8 = tk.argv[0..tk.count];
+        var wild: []const bool = tk.arg_glob[0..tk.count];
 
         // Alias expansion in command position (one level, bounded). `tk2`
         // lives to the end of this call so the argv slices stay valid.
@@ -736,10 +756,77 @@ pub const Shell = struct {
             tk2 = tokenize(joined[0..jl], &self.scratch);
             if (tk2.count == 0) return .none;
             argv = tk2.argv[0..tk2.count];
+            wild = tk2.arg_glob[0..tk2.count];
         }
+
+        // SH4: expand unquoted wildcard arguments against the share listing.
+        argv = self.expandGlobs(argv, wild, listing) orelse {
+            self.emitLine("glob: too many matches");
+            self.last_status = 2;
+            return .print;
+        };
 
         if (classify(argv[0])) |b| return self.runBuiltin(b, argv, listing);
         return runExternal(argv[0]);
+    }
+
+    /// Expand every wildcard-flagged argument against `listing`, byte-sorted
+    /// (nullglob-off: no match passes the literal pattern). Returns null
+    /// when the expansion would exceed the shell's argv/name bounds.
+    fn expandGlobs(
+        self: *Shell,
+        argv: []const []const u8,
+        wild: []const bool,
+        listing: []const []const u8,
+    ) ?[]const []const u8 {
+        var any = false;
+        for (wild) |w| {
+            if (w) {
+                any = true;
+                break;
+            }
+        }
+        if (!any) return argv;
+
+        var count: usize = 0;
+        var total: usize = 0;
+        for (argv, wild) |arg, is_wild| {
+            if (!is_wild) {
+                if (count >= self.glob_argv.len) return null;
+                self.glob_argv[count] = arg;
+                count += 1;
+                continue;
+            }
+            var matches: [glob_max][]const u8 = undefined;
+            var m: usize = 0;
+            for (listing) |name| {
+                if (!pipe.globMatch(arg, name)) continue;
+                var pos = m;
+                while (pos > 0 and std.mem.lessThan(u8, name, matches[pos - 1])) : (pos -= 1) {
+                    matches[pos] = matches[pos - 1];
+                }
+                matches[pos] = name;
+                m += 1;
+                if (m >= glob_max) break;
+            }
+            if (total + m > glob_max) return null;
+            if (m == 0) {
+                if (count >= self.glob_argv.len) return null;
+                self.glob_argv[count] = arg; // nullglob-off passthrough
+                count += 1;
+                continue;
+            }
+            for (matches[0..m]) |name| {
+                if (count >= self.glob_argv.len) return null;
+                const dst = &self.glob_names[total];
+                const n = @min(name.len, path_max);
+                @memcpy(dst[0..n], name[0..n]);
+                self.glob_argv[count] = dst[0..n];
+                count += 1;
+                total += 1;
+            }
+        }
+        return self.glob_argv[0..count];
     }
 
     fn runExternal(verb: []const u8) Action {
@@ -760,6 +847,18 @@ pub const Shell = struct {
                     self.emit(a);
                 }
                 self.emitLine("");
+                self.last_status = 0;
+                return .print;
+            },
+            .cat => {
+                // SH4: emit the bound input (a pipe or `<` redirect). A file
+                // argument is intentionally unsupported (`cat < FILE`).
+                if (self.stdin.len == 0) {
+                    self.emitLine("cat: no input (use `cat < FILE` or a pipe)");
+                    self.last_status = 1;
+                    return .print;
+                }
+                self.emit(self.stdin);
                 self.last_status = 0;
                 return .print;
             },
@@ -1231,4 +1330,32 @@ test "shell: complete offers builtins, aliases and share apps (basenames strippe
     // No match and empty prefix yield nothing.
     try std.testing.expectEqual(@as(usize, 0), complete("zzz", true, &aliases, &listing, &set));
     try std.testing.expectEqual(@as(usize, 0), complete("", true, &aliases, &listing, &set));
+}
+
+test "shell: glob expansion sorts matches and passes unmatched literals through" {
+    var s = Shell.init();
+    const listing = [_][]const u8{ "STATUS43.BIN", "PS.BIN", "NOTES.TXT" };
+    const a = s.execute("echo *.BIN", &listing);
+    try std.testing.expect(a == .print);
+    try std.testing.expectEqualStrings("PS.BIN STATUS43.BIN\n", s.outSlice());
+    // No match -> literal (nullglob off).
+    _ = s.execute("echo *.NOPE", &listing);
+    try std.testing.expectEqualStrings("*.NOPE\n", s.outSlice());
+    // Quoted and escaped wildcards stay literal.
+    _ = s.execute("echo '*.BIN'", &listing);
+    try std.testing.expectEqualStrings("*.BIN\n", s.outSlice());
+    _ = s.execute("echo \\*.BIN", &listing);
+    try std.testing.expectEqualStrings("*.BIN\n", s.outSlice());
+}
+
+test "shell: cat emits the bound stdin (pipe / redirect source)" {
+    var s = Shell.init();
+    s.setStdin("hello from stdin\n");
+    const a = s.execute("cat", &.{});
+    try std.testing.expect(a == .print);
+    try std.testing.expectEqualStrings("hello from stdin\n", s.outSlice());
+    // No input bound -> an honest message.
+    s.setStdin(&.{});
+    _ = s.execute("cat", &.{});
+    try std.testing.expect(std.mem.indexOf(u8, s.outSlice(), "no input") != null);
 }
