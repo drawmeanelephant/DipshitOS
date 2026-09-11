@@ -31,6 +31,10 @@ pub const bye_marker: []const u8 = "sh: bye\n";
 pub const exit_status: u64 = 70;
 /// SH7 (#1083): the default TCP port when `exec SH.BIN net` gives no port.
 pub const default_net_port: u16 = 2323;
+/// SH8 (#1084): the login startup script run once before the first prompt.
+pub const startup_path: []const u8 = "STARTUP.SH";
+/// SH8: the kernel settings file (for the `prompt` key).
+pub const settings_path: []const u8 = "SETTINGS.TXT";
 
 /// Read one 32-byte NUL-terminated argv slot from the kernel-packaged block
 /// (card 3e entry contract: argc in x0, the block VA in x1).
@@ -450,12 +454,47 @@ fn runSource(path: []const u8, depth: u32) void {
     }
 }
 
+/// SH8 (#1084): adopt the `prompt` key from the kernel's SETTINGS.TXT so
+/// `settings set prompt ...` drives the login shell too. A missing file or
+/// key keeps the shell's own default (`sh> `).
+fn applyPromptFromSettings() void {
+    const opened = abi.file_open(settings_path, abi.MODE_READ);
+    if (opened < 0) return;
+    const fd: u32 = @intCast(opened);
+    var data: [2048]u8 = undefined;
+    const got = abi.file_read(fd, &data);
+    abi.file_close(fd);
+    if (got <= 0) return;
+    const bytes = data[0..@intCast(got)];
+    var i: usize = 0;
+    while (i < bytes.len) {
+        var end = i;
+        while (end < bytes.len and bytes[end] != '\n') end += 1;
+        const line = bytes[i..end];
+        if (std.mem.startsWith(u8, line, "prompt=")) {
+            const val = std.mem.trim(u8, line["prompt=".len..], " \r\t");
+            if (val.len > 0 and val.len <= shell_mod.prompt_max) _ = g_shell.prompt.set(val);
+        }
+        i = end + 1;
+    }
+}
+
+/// SH8 (#1084): run the login startup script once, if present.
+fn runStartup() void {
+    const opened = abi.file_open(startup_path, abi.MODE_READ);
+    if (opened < 0) return; // absent: silent (the common case)
+    abi.file_close(@intCast(opened));
+    runSource(startup_path, 0);
+}
+
 pub export fn _start(argc: u64, argv_va: u64) callconv(.c) noreturn {
     ui.write_console(ready_marker);
 
     g_shell = shell_mod.Shell.init();
     g_shell.history = .{ .count_fn = historyCount, .entry_fn = historyEntry };
     g_editor = .{ .completer = shellComplete };
+    // SH8 (#1084): the settings `prompt` key drives the login shell too.
+    applyPromptFromSettings();
 
     g_session = tty.Session.open() orelse {
         ui.write_console("sh: no /dev/tty\n");
@@ -482,6 +521,8 @@ pub export fn _start(argc: u64, argv_va: u64) callconv(.c) noreturn {
     }
 
     const out = g_session.output();
+    // SH8 (#1084): run the login startup script once, before the prompt.
+    runStartup();
     g_session.write(g_shell.promptSlice());
 
     var buf: [64]u8 = undefined;

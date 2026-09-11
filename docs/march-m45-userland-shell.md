@@ -8,11 +8,13 @@ Claim rule: `AGENTS.md` — one `claim` issue per card before code.
 
 ## Where we are
 
-The terminal seam is done: an EL0 process can open `/dev/tty`, attach a
-front-end (`sys_tty_attach`, slot 67), and read/write it; the class-B pilot
-`TTYECHO.BIN` proves the serial round trip. There is still no userland shell —
-the kernel monitor is the only one, and it cannot live in a window or serve a
-remote session. M45 builds the daily-driver shell on the seam.
+M45 is **complete** (SH1–SH8). The terminal seam (ADR 0020) now has serial,
+window (Amendment A), and net (Amendment B) front-ends; the userland shell runs
+on it — `SH.BIN` on the serial console or a remote TCP session, `TERM.BIN` in a
+TABWM window — over the shared `lib/shell.zig` + `lib/tty.zig` core (M19 feature
+set: completion, history search, pipes/globs, scripting). `settings shell=sh`
+flips the boot login from the monitor to `SH.BIN` (the default stays the
+monitor). The kernel monitor remains the boot/recovery/diagnostic console.
 
 ## The cards, in order
 
@@ -25,7 +27,7 @@ remote session. M45 builds the daily-driver shell on the seam.
 | SH5 | **Scripting** | Variables, `if`/`fn`/`for`/`while`, `$()`/`$(( ))`, `source`, exit status/`$?`, `&&`/`||`/`;` — M19 semantics. | class-A script tests (port the M19 suites); class-B a script file from the share. | `user/src/sh.zig`, `user/src/lib/script.zig` |
 | SH6 | **`TERM.BIN` window front-end** | A TABWM terminal window that renders a shell's terminal (front-end selector `2`). Design landed: [ADR 0020 Amendment A](decisions/0020-terminal-seam.md) (owner attaches its own `.user` window; kernel-pumped rings; kernel-side text grid; window keys → terminal input via `hid_to_bytes`; close auto-detaches). | Design note ✅ (ADR 0020 Amendment A) + class-B: a terminal window shows the shell and accepts typed keys (via the WM input seam). | `user/src/term.zig`, `kernel/src/terminal.zig`, `kernel/src/input.zig`, `kernel/src/driving_award.zig`, kernel window/attach path, a spec |
 | SH7 | **Remote front-end** | A TCP session attaches front-end selector `3` to a shell (remote-in without SSH first). Implemented 2026-09-11 (claim #1102): [ADR 0020 Amendment B](decisions/0020-terminal-seam.md) (owner-hosted, kernel-pumped listener via `sys_tty_attach(3, port)`; plaintext trusted-network posture; disconnect auto-detach; host→guest inbound gate via a runner TCP-client seam). Ties into #1066 Stage 1; SSH later rides the same seam. | class-B: connect TCP, drive the shell, see output. | `user/src/sh.zig` net presentation, `kernel/src/terminal.zig`, `host/vm-runner`, a spec |
-| SH8 | **Default-shell flip + polish** | `settings set shell sh|monitor`; STARTUP file; prompt/themes; docs. Flip the raw-console login to `SH.BIN` only after SH2–SH5 are green. | class-B: a boot with `shell=sh` lands in `SH.BIN`; the default stays the monitor. | `kernel/src/shell.zig`/`main.zig` (login seam), `user/src/sh.zig`, `docs/` |
+| SH8 | **Default-shell flip + polish** | `settings set shell sh|monitor`; STARTUP file; prompt/themes; docs. Flip the raw-console login to `SH.BIN` only after SH2–SH5 are green. **Implemented 2026-09-11 (claim #1106)**: `settings shell` key + boot login handoff (`kernel/src/shell.zig`), `STARTUP.SH` + `prompt` adoption in `SH.BIN`; `live-shell-default` proves `shell=sh` lands in `SH.BIN` and the untouched default stays the monitor. | class-B: a boot with `shell=sh` lands in `SH.BIN`; the default stays the monitor. | `kernel/src/shell.zig`/`main.zig` (login seam), `user/src/sh.zig`, `docs/` |
 
 ## Dependency phases
 

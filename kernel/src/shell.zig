@@ -3537,6 +3537,47 @@ var boot_shell_storage: Shell = undefined;
 /// ~0x100 of locals) still runs on the boot stack.
 var park_stack: [64 * 1024]u8 align(16) = undefined;
 
+// ---------------------------------------------------------------------------
+// M45 SH8 (#1084, ADR 0021 D5): the boot login seam. When `settings shell=sh`
+// the monitor hands the raw console to SH.BIN at boot: it execs SH.BIN (which
+// opens /dev/tty and attaches the serial front-end) and stops reading the
+// console itself, so the terminal pump owns the RX. The default `monitor` is
+// byte-identical. If SH.BIN exits/detaches, the monitor resumes.
+// ---------------------------------------------------------------------------
+var login_relinquished = false;
+var login_was_attached = false;
+
+/// The pending boot login. Called once, after `.virelairc`, before the loop.
+fn login_handoff(mon: *monitor.Monitor) void {
+    if (!settings.login_shell_is_sh()) return;
+    switch (exec_mod.exec_file("SH.BIN", &[_][]const u8{})) {
+        .ok => {
+            login_relinquished = true;
+            login_was_attached = false;
+            mon.console.puts("login: shell=sh -> SH.BIN\n");
+        },
+        else => {
+            // Honest fallback: the share/image is unavailable — keep the
+            // monitor rather than leaving the console ownerless.
+            mon.console.puts("login: shell=sh but SH.BIN unavailable; staying in the monitor\n");
+        },
+    }
+}
+
+/// True while the monitor must not read the console (the login shell owns
+/// it). Resumes the monitor once the login shell has detached.
+fn login_console_relinquished() bool {
+    if (!login_relinquished) return false;
+    if (terminal.attachedSerial() != null) {
+        login_was_attached = true;
+    } else if (login_was_attached) {
+        // The login shell exited/detached: take the console back.
+        login_relinquished = false;
+        login_was_attached = false;
+    }
+    return login_relinquished;
+}
+
 /// Park-path body: the ENTIRE RX-wired shell path — init, history/env/
 /// window restore, .virelairc, then the interactive loop that never
 /// returns. Runs on park_stack: `boot_and_park` (aarch64) SP-switches to
@@ -3574,8 +3615,12 @@ fn park_body(mon: *monitor.Monitor) callconv(.c) void {
         }
         if (start < rc.len) handle_line(mon, rc[start..rc.len]);
     }
+    // M45 SH8: hand the console to SH.BIN when `settings shell=sh`.
+    login_handoff(mon);
     while (true) {
-        if (shell.poll() == .idle) {
+        // While the login shell owns the serial console, the monitor must
+        // NOT read it (the terminal pump feeds SH.BIN's /dev/tty instead).
+        if (login_console_relinquished() or shell.poll() == .idle) {
             // Claim 9187: the timer is serviced only through the IRQ path.
             // Claim 7948's main-loop comparator poll raced real delivery
             // after the GICR frame fix, double-consuming some periods.

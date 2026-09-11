@@ -31,7 +31,7 @@
 | `tools/status/` | 6 | multiagent coordination gate + claim tooling (class A) |
 | `tools/context/` | 2 | context snapshot helpers |
 | `tools/ragshit/` | 84 | host-side context engine (developer tooling, not guest software) |
-| `tools/gate/` | 196 | M40 vgate harness + specs (GF2+) |
+| `tools/gate/` | 197 | M40 vgate harness + specs (GF2+) |
 
 ## Class-B fleet (discovered from the spec dir)
 
@@ -165,6 +165,7 @@ of them with `just verify-vz`.
 | spec | `live-sh-complete` | 1 run / 9 assert | live-sh-complete.spec -- M45 card SH3 class-B gate (issue #1079, ADR 0021 D6). |
 | spec | `live-sh4` | 1 run / 7 assert | live-sh4.spec -- M45 card SH4 class-B gate (issue #1080, ADR 0021 D6). |
 | spec | `live-sh5` | 1 run / 16 assert | live-sh5.spec -- M45 card SH5 class-B gate (issue #1081, ADR 0021 D4/D6). |
+| spec | `live-shell-default` | 1 run / 10 assert | live-shell-default.spec -- M45 card SH8 class-B gate (issue #1084, ADR 0021 D5). |
 | spec | `live-sleep` | 1 run / 6 assert | live-sleep.spec -- blocking syscalls: USER.BIN yields, sleeps 2 |
 | spec | `live-smp` | 1 run / 1 assert | live-smp.spec -- Milestone 28 (claim 6438) class-B gate: |
 | spec | `live-smp-stress` | 1 run / 23 assert | live-smp-stress.spec -- M28 SMP card 11 (claim 0697) class-B gate: |
