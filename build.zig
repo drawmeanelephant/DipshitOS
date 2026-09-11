@@ -135,15 +135,6 @@ pub fn build(b: *std.Build) void {
         }),
     });
     kernel.root_module.addOptions("build_options", kernel_options);
-    // M47 ADR 0023 D2: the kernel's CSPRNG shares the ONE ChaCha20 core with
-    // the userland crypto library. Zig forbids a relative import that escapes
-    // the module path, so the shared file is exposed as a named module here.
-    const crypto_chacha_kernel = b.createModule(.{
-        .root_source_file = b.path("user/src/lib/crypto/chacha20.zig"),
-        .target = kernel_target,
-        .optimize = .ReleaseSmall,
-    });
-    kernel.root_module.addImport("crypto_chacha", crypto_chacha_kernel);
     // Dense layout from address 0 (kernel/linker.ld): without this, lld's
     // 64 KiB max-page-size padding would inflate the flat image ~100x.
     kernel.linker_script = b.path("kernel/linker.ld");
@@ -2346,23 +2337,12 @@ pub fn build(b: *std.Build) void {
         "test/helpers/helpers.zig",
     };
 
-    // M47 ADR 0023 D2: host-target instance of the shared ChaCha20 core.
-    // Zig resolves a named import within the module that contains the
-    // importing file, so every module that can reach `csprng.zig` (directly
-    // or through a relative import) must expose `crypto_chacha`.
-    const crypto_chacha_host = b.createModule(.{
-        .root_source_file = b.path("user/src/lib/crypto/chacha20.zig"),
-        .target = b.graph.host,
-        .optimize = .Debug,
-    });
-
     const ui_mod = b.createModule(.{
         .root_source_file = b.path("user/src/lib/ui.zig"),
         .target = b.graph.host,
         .optimize = .Debug,
     });
     ui_mod.addOptions("build_options", kernel_options);
-    ui_mod.addImport("crypto_chacha", crypto_chacha_host);
 
     const helpers_mod = b.createModule(.{
         .root_source_file = b.path("test/helpers/helpers.zig"),
@@ -2370,7 +2350,6 @@ pub fn build(b: *std.Build) void {
         .optimize = .Debug,
     });
     helpers_mod.addOptions("build_options", kernel_options);
-    helpers_mod.addImport("crypto_chacha", crypto_chacha_host);
 
     const scheduler_mod = b.createModule(.{
         .root_source_file = b.path("kernel/src/scheduler.zig"),
@@ -2378,7 +2357,6 @@ pub fn build(b: *std.Build) void {
         .optimize = .Debug,
     });
     scheduler_mod.addOptions("build_options", kernel_options);
-    scheduler_mod.addImport("crypto_chacha", crypto_chacha_host);
 
     const syscall_mod = b.createModule(.{
         .root_source_file = b.path("kernel/src/syscall.zig"),
@@ -2386,7 +2364,6 @@ pub fn build(b: *std.Build) void {
         .optimize = .Debug,
     });
     syscall_mod.addOptions("build_options", kernel_options);
-    syscall_mod.addImport("crypto_chacha", crypto_chacha_host);
 
     const monitor_mod = b.createModule(.{
         .root_source_file = b.path("kernel/src/monitor.zig"),
@@ -2394,7 +2371,6 @@ pub fn build(b: *std.Build) void {
         .optimize = .Debug,
     });
     monitor_mod.addOptions("build_options", kernel_options);
-    monitor_mod.addImport("crypto_chacha", crypto_chacha_host);
 
     const shell_mod = b.createModule(.{
         .root_source_file = b.path("kernel/src/shell.zig"),
@@ -2402,7 +2378,6 @@ pub fn build(b: *std.Build) void {
         .optimize = .Debug,
     });
     shell_mod.addOptions("build_options", kernel_options);
-    shell_mod.addImport("crypto_chacha", crypto_chacha_host);
 
     const alloc_mod = b.createModule(.{
         .root_source_file = b.path("kernel/src/alloc.zig"),
@@ -2410,7 +2385,6 @@ pub fn build(b: *std.Build) void {
         .optimize = .Debug,
     });
     alloc_mod.addOptions("build_options", kernel_options);
-    alloc_mod.addImport("crypto_chacha", crypto_chacha_host);
 
     const tcp_mod = b.createModule(.{
         .root_source_file = b.path("kernel/src/tcp.zig"),
@@ -2418,7 +2392,6 @@ pub fn build(b: *std.Build) void {
         .optimize = .Debug,
     });
     tcp_mod.addOptions("build_options", kernel_options);
-    tcp_mod.addImport("crypto_chacha", crypto_chacha_host);
 
     const dhcp_mod = b.createModule(.{
         .root_source_file = b.path("kernel/src/dhcp.zig"),
@@ -2426,7 +2399,6 @@ pub fn build(b: *std.Build) void {
         .optimize = .Debug,
     });
     dhcp_mod.addOptions("build_options", kernel_options);
-    dhcp_mod.addImport("crypto_chacha", crypto_chacha_host);
 
     const driving_award_mod = b.createModule(.{
         .root_source_file = b.path("kernel/src/driving_award.zig"),
@@ -2434,7 +2406,6 @@ pub fn build(b: *std.Build) void {
         .optimize = .Debug,
     });
     driving_award_mod.addOptions("build_options", kernel_options);
-    driving_award_mod.addImport("crypto_chacha", crypto_chacha_host);
 
     for (unit_test_sources) |src_path| {
         const test_mod = b.createModule(.{
@@ -2453,7 +2424,6 @@ pub fn build(b: *std.Build) void {
         test_mod.addImport("tcp", tcp_mod);
         test_mod.addImport("dhcp", dhcp_mod);
         test_mod.addImport("driving_award", driving_award_mod);
-        test_mod.addImport("crypto_chacha", crypto_chacha_host);
         const t = b.addTest(.{
             .root_module = test_mod,
         });
