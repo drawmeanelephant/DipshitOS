@@ -1,0 +1,88 @@
+# ADR 0021: The userland shell and the kernel-monitor boundary
+
+Status: **ACCEPTED** · Date: 2026-09-11 · Milestone: **M45** (userland shell &
+terminal front-ends) · Issues **#1065**, **#1072**
+
+> Commits the shell direction chosen in the 2026-09-10 triage and fixes the
+> boundary that keeps it from regressing. Builds directly on ADR 0020 (the
+> terminal seam, done) and the M19 shell-feature set.
+
+## Context
+
+The kernel monitor (`kernel/src/monitor.zig` + `kernel/src/shell.zig`) is the
+only shell today: ~90 commands over the kernel console, in EL1. The terminal
+seam (ADR 0020) now lets an EL0 process own a terminal (`/dev/tty`, attach the
+serial console; `TERM.BIN`/remote front-ends reserved). The M19 work already
+proved the interactive feature set (pipes, redirection, globs, `$()`,
+`$(( ))`, `if`/`fn`/`for`/`while`, jobs, history, Ctrl+R, completion) — in the
+kernel, where it cannot be hosted by a desktop window or reached over the
+network without a kernel console bridge.
+
+A shell is the thing the user wants. The question is not *whether* to move it
+to userland; it is **what stays in the kernel** and **how the two coexist**
+without a long-term ABI we have to claw back.
+
+## Decision
+
+### D1. Split, don't replace
+The kernel monitor stays the **boot / recovery / diagnostic console** (the
+UEFI-shell / BIOS-setup role) and keeps the raw serial console by default.
+`SH.BIN` is the **user-facing shell**, an ordinary EL0 process on the terminal
+seam. Both existing is healthy; users are only ever in one at a time, and the
+prompt / a `monitor` escape make it explicit which.
+
+### D2. The shell owns the terminal in userland
+`SH.BIN` opens `/dev/tty`, attaches a front-end (`sys_tty_attach`, slot 67),
+and owns line editing, history, completion, and command dispatch. Front-ends
+(serial now; `TERM.BIN` window; TCP/SSH later) attach through the same seam —
+the shell is written once (ADR 0020).
+
+### D3. The command boundary (the thing that prevents claw-back)
+- **User-facing** commands (files, processes, network, time, settings, `exec`)
+  are implemented in userland via **existing syscalls** and/or small apps. The
+  shell resolves externals from the host share with a PATH-like search.
+- **Shell builtins** are only what needs shell state: `cd`, `exit`, `env`/
+  `set`/`unset`/`export`, `alias`, `history`, `source`, `jobs`/`fg`, `prompt`.
+  Keep the builtin set small.
+- **Kernel-internal diagnostics stay in the monitor**: `mem`, `pages`, `pci`,
+  `timer`, `syscalls`, `uaccess`, `fault`, `strace`, `sym`, `addrspaces`,
+  `procs`-style kernel dumps. There is **no** "run a kernel command" syscall.
+  When a probe is genuinely wanted in the shell, add a **structured syscall**
+  returning data (the `sys_procs` model) — never a passthrough.
+- **No kernel-shell-over-network.** Remote attaches a front-end to a userland
+  shell's terminal, not to the monitor.
+
+### D4. Scripting is ported, not reinvented
+The M19 operator set moves to userland in phases (pipes via slots 56/57,
+redirection, globs, `$()`/`$(( ))`, `if`/`fn`/`for`/`while`, `source`).
+Semantics stay the M19 ones so existing scripts/docs carry over; the host
+tests port with them.
+
+### D5. Boot default is unchanged until proven
+The monitor keeps the raw console. A settings key (`shell = monitor | sh`)
+flips the raw-console login to `SH.BIN` **after** the shell's gates are green;
+until then `SH.BIN` runs on demand (`exec SH.BIN`) or in `TERM.BIN`.
+
+### D6. One shared userland terminal library
+A `lib/tty.zig` (read/write `/dev/tty`, raw-ish line buffering, history,
+completion) is shared by `SH.BIN` and the front-ends so behaviour cannot drift
+between the serial, window, and remote presentations.
+
+## Consequences
+
+- The shell becomes hot-reloadable and crash-isolated; the kernel stays thin.
+- `TERM.BIN` and remote/SSH become front-ends, not parallel shells.
+- The monitor keeps all kernel-diagnostic power; the shell gets none by
+  construction (a clean privilege story for the eventual remote session).
+- Risk: feature drift between monitor and shell — mitigated by moving whole
+  command families out of the monitor as their userland replacement lands, and
+  by keeping the monitor's job definition to "diagnostics + recovery".
+
+## Open issues (left to the M45 cards)
+
+- The exact command-family migration order (march doc `march-m45-*`).
+- Whether `procs`/`dui`/`wm`-style introspection becomes structured syscalls
+  for the shell or stays monitor-only (card-by-card decision).
+- Windows/remote front-end rendering (selector 2/3) — `TERM.BIN` + a TCP
+  front-end, per ADR 0020.
+- Whether the default-shell flip ships in M45 or a follow-up.
