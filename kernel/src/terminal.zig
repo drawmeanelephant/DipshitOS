@@ -18,6 +18,8 @@
 const std = @import("std");
 const console = @import("console.zig");
 const klog = @import("klog.zig");
+// M49 SD5 (#1132): copy a terminal selection into the shared clipboard.
+const clipboard = @import("clipboard.zig");
 // SH7 (#1083, ADR 0020 Amendment B): the net front-end pumps bytes between
 // a terminal and the kernel's single bounded TCP connection.
 const tcp = @import("tcp.zig");
@@ -49,8 +51,11 @@ pub const grid_lines: usize = 128;
 
 /// A bounded character grid with scrollback for one window-bound terminal.
 /// Bytes fed from the output ring are laid out (CR/LF/BS/TAB, a minimal CSI
-/// clear/home), wrapping at `grid_cols` and scrolling one line at a time.
-/// Pure: fixed arrays, no allocation, host-testable.
+/// clear/home), wrapping at `cols` and scrolling one line at a time. A
+/// window resize reflows the stored lines to the new column count (M49 SD5
+/// #1132). Pure: fixed arrays, no allocation, host-testable.
+pub const Point = struct { line: usize, col: usize };
+
 pub const Screen = struct {
     cells: [grid_lines][grid_cols]u8 = [_][grid_cols]u8{[_]u8{' '} ** grid_cols} ** grid_lines,
     lens: [grid_lines]usize = [_]usize{0} ** grid_lines,
@@ -62,6 +67,15 @@ pub const Screen = struct {
     /// Minimal CSI state: 0 normal, 1 ESC, 2 ESC [.
     esc_state: u8 = 0,
     esc_param: u32 = 0,
+    /// M49 SD5 (#1132): the effective column count (8..grid_cols). A window
+    /// resize reflows the grid to the new client width.
+    cols: usize = grid_cols,
+    /// M49 SD5: scrollback view offset — 0 follows the tail, N shows N
+    /// lines further back. New output snaps the view back to the tail.
+    view: usize = 0,
+    /// M49 SD5: the selection endpoints (absolute grid rows), if any.
+    sel_anchor: ?Point = null,
+    sel_cursor: ?Point = null,
 
     pub fn reset(self: *Screen) void {
         self.* = .{};
@@ -89,6 +103,7 @@ pub const Screen = struct {
             self.used = grid_lines;
         }
         self.col = 0;
+        self.view = 0;
     }
 
     pub fn clearScreen(self: *Screen) void {
@@ -97,6 +112,8 @@ pub const Screen = struct {
         self.used = 1;
         self.cur = 0;
         self.col = 0;
+        self.view = 0;
+        self.clearSelection();
     }
 
     /// Feed one output byte. Control bytes drive the cursor; a minimal
@@ -135,15 +152,16 @@ pub const Screen = struct {
             },
             '\t' => {
                 const next = (self.col + 8) & ~@as(usize, 7);
-                self.col = @min(next, grid_cols - 1);
+                self.col = @min(next, self.cols - 1);
             },
             0x07 => {}, // bell — silent
             else => {
                 if (b < 0x20 or b == 0x7f) return;
-                if (self.col >= grid_cols) self.newline();
+                if (self.col >= self.cols) self.newline();
                 self.cells[self.cur][self.col] = b;
                 if (self.col + 1 > self.lens[self.cur]) self.lens[self.cur] = self.col + 1;
                 self.col += 1;
+                self.view = 0;
             },
         }
     }
@@ -170,10 +188,170 @@ pub const Screen = struct {
         return self.col;
     }
 
-    pub fn cols() usize {
-        return grid_cols;
+    pub fn columns(self: *const Screen) usize {
+        return self.cols;
+    }
+
+    // -- M49 SD5 (#1132): scrollback view -----------------------------------
+
+    /// Move the scrollback view by `delta` lines (positive = older). Clamped
+    /// to the stored range; 0 follows the tail.
+    pub fn scrollBy(self: *Screen, delta: i32) void {
+        const max_view: i64 = if (self.used > 0) @intCast(self.used - 1) else 0;
+        var v: i64 = @as(i64, @intCast(self.view)) + delta;
+        if (v < 0) v = 0;
+        if (v > max_view) v = max_view;
+        self.view = @intCast(v);
+    }
+
+    /// Snap the view back to the tail (new output does this implicitly).
+    pub fn scrollReset(self: *Screen) void {
+        self.view = 0;
+    }
+
+    pub fn viewOffset(self: *const Screen) usize {
+        return self.view;
+    }
+
+    // -- M49 SD5 (#1132): resize reflow -------------------------------------
+
+    /// The number of grid rows needed for `len` bytes at `cols` columns
+    /// (at least one row, even for an empty line).
+    fn wrappedRows(len: usize, cols: usize) usize {
+        return @max(@as(usize, 1), (len + cols - 1) / cols);
+    }
+
+    /// Reflow the stored lines to `new_cols` columns. The buffer is fixed;
+    /// when the wrapped result would overflow `grid_lines`, whole oldest
+    /// lines are dropped (the same policy as output scrolling). The cursor
+    /// follows the last kept line. Selection is cleared (its coordinates
+    /// were for the old layout).
+    pub fn reflow(self: *Screen, new_cols: usize) void {
+        const c = @max(@as(usize, 8), @min(new_cols, grid_cols));
+        if (c == self.cols) return;
+
+        // The oldest line that still fits, so the reflow drops from the top
+        // exactly like new output would.
+        var kept: usize = 0;
+        var first: usize = self.used;
+        while (first > 0) {
+            const k = wrappedRows(self.lens[first - 1], c);
+            if (kept + k > grid_lines) break;
+            kept += k;
+            first -= 1;
+        }
+
+        // Snapshot the kept lines (module BSS scratch: the grid is ~10 KiB,
+        // too much for IRQ/Task stacks).
+        var count: usize = 0;
+        var i: usize = first;
+        while (i < self.used) : (i += 1) {
+            const len = @min(self.lens[i], grid_cols);
+            @memcpy(reflow_lines[count][0..len], self.cells[i][0..len]);
+            reflow_lens[count] = len;
+            count += 1;
+        }
+        var line_count: usize = 0;
+        while (line_count < grid_lines) : (line_count += 1) self.clearLine(line_count);
+        self.used = 1;
+        self.cur = 0;
+        self.col = 0;
+        self.esc_state = 0;
+        self.cols = c;
+        self.view = 0;
+        self.clearSelection();
+
+        // Re-feed the kept logical lines at the new width.
+        var n: usize = 0;
+        while (n < count) : (n += 1) {
+            self.feed(reflow_lines[n][0..reflow_lens[n]]);
+            if (n + 1 < count) self.feed("\n");
+        }
+    }
+
+    /// Set the effective column count, reflowing when it changes. Returns
+    /// the effective value.
+    pub fn setCols(self: *Screen, new_cols: usize) usize {
+        const c = @max(@as(usize, 8), @min(new_cols, grid_cols));
+        if (c != self.cols) self.reflow(c);
+        return self.cols;
+    }
+
+    // -- M49 SD5 (#1132): selection + copy ----------------------------------
+
+    fn clampPoint(self: *const Screen, row: usize, col: usize) Point {
+        return .{
+            .line = @min(row, self.used - 1),
+            .col = @min(col, self.cols),
+        };
+    }
+
+    pub fn beginSelection(self: *Screen, row: usize, col: usize) void {
+        const p = self.clampPoint(row, col);
+        self.sel_anchor = p;
+        self.sel_cursor = p;
+    }
+
+    pub fn extendSelection(self: *Screen, row: usize, col: usize) void {
+        if (self.sel_anchor == null) return;
+        self.sel_cursor = self.clampPoint(row, col);
+    }
+
+    pub fn clearSelection(self: *Screen) void {
+        self.sel_anchor = null;
+        self.sel_cursor = null;
+    }
+
+    pub fn hasSelection(self: *const Screen) bool {
+        return self.sel_anchor != null and self.sel_cursor != null;
+    }
+
+    /// True when the cell (row, col) lies inside the current selection
+    /// (used by the renderer to highlight it). Empty selections match
+    /// nothing.
+    pub fn inSelection(self: *const Screen, row: usize, col: usize) bool {
+        const a = self.sel_anchor orelse return false;
+        const b = self.sel_cursor orelse return false;
+        const start = if (a.line < b.line or (a.line == b.line and a.col <= b.col)) a else b;
+        const end = if (start.line == a.line and start.col == a.col) b else a;
+        if (row < start.line or row > end.line) return false;
+        if (row == start.line and col < start.col) return false;
+        if (row == end.line and col > end.col) return false;
+        return true;
+    }
+
+    /// Copy the selected region into `dst` (lines joined by `\n`, endpoints
+    /// inclusive; the region is clamped to the line lengths). Returns the
+    /// byte count; 0 when there is no selection.
+    pub fn copySelection(self: *const Screen, dst: []u8) usize {
+        const a = self.sel_anchor orelse return 0;
+        const b = self.sel_cursor orelse return 0;
+        const start = if (a.line < b.line or (a.line == b.line and a.col <= b.col)) a else b;
+        const end = if (start.line == a.line and start.col == a.col) b else a;
+        var out: usize = 0;
+        var row = start.line;
+        while (row <= end.line) : (row += 1) {
+            const text = self.line(row);
+            const from = if (row == start.line) @min(start.col, text.len) else 0;
+            const to = if (row == end.line) @min(end.col, text.len) else text.len;
+            if (to > from and out < dst.len) {
+                const n = @min(to - from, dst.len - out);
+                @memcpy(dst[out..][0..n], text[from..][0..n]);
+                out += n;
+            }
+            if (row < end.line and out < dst.len) {
+                dst[out] = '\n';
+                out += 1;
+            }
+        }
+        return out;
     }
 };
+
+/// M49 SD5: reflow scratch (module BSS — the grid is too large for the task
+/// stacks). One reflow at a time (the paint/idle path), documented bound.
+var reflow_lines: [grid_lines][grid_cols]u8 = undefined;
+var reflow_lens: [grid_lines]usize = undefined;
 
 /// The consumer that renders output and supplies input. Exclusive per
 /// terminal: one front-end at a time (ADR 0020 D2).
@@ -491,6 +669,38 @@ pub fn screenOf(window_id: u8) ?*const Screen {
     const t = windowTerminal(window_id) orelse return null;
     const h = handleOf(t) orelse return null;
     return &screens[h];
+}
+
+/// M49 SD5 (#1132): the mutable presentation grid bound to `window_id`.
+pub fn screenForWindow(window_id: u8) ?*Screen {
+    const t = windowTerminal(window_id) orelse return null;
+    const h = handleOf(t) orelse return null;
+    return &screens[h];
+}
+
+/// M49 SD5 (#1132): the mutable presentation grid for an already-resolved
+/// window-bound terminal.
+pub fn screenForTerminal(t: *Terminal) ?*Screen {
+    const h = handleOf(t) orelse return null;
+    return &screens[h];
+}
+
+/// M49 SD5 (#1132): sync the presentation grid to the window's current
+/// client width, reflowing the stored lines when the column count changed.
+/// Called by the compositor before rendering (never in IRQ context).
+pub fn syncWindowCols(window_id: u8, pixel_w: u32) void {
+    const s = screenForWindow(window_id) orelse return;
+    _ = s.setCols(@intCast(pixel_w / 8));
+}
+
+/// M49 SD5 (#1132): copy the window terminal's selection into the shared
+/// clipboard. Returns the bytes copied (0 when there is no selection).
+pub fn copySelectionToClipboard(window_id: u8) usize {
+    const s = screenForWindow(window_id) orelse return 0;
+    var buf: [clipboard.capacity]u8 = undefined;
+    const n = s.copySelection(&buf);
+    if (n == 0) return 0;
+    return clipboard.set(buf[0..n]);
 }
 
 // ---------------------------------------------------------------------------
@@ -1128,4 +1338,135 @@ test "terminal: net pump ends a half-open accept on its timeout (M46 #1105)" {
     try std.testing.expectEqual(@as(u64, 0), tcp.listen_port);
     for (&terminals) |*tt| tt.reset();
     tcp.reset();
+}
+
+// ---------------------------------------------------------------------------
+// M49 SD5 (#1132): reflow, scrollback view, selection/copy tests
+// ---------------------------------------------------------------------------
+
+test "terminal: setCols reflows long lines to the narrower width" {
+    var s = Screen{};
+    s.feed("abcdefghij\nxy");
+    try std.testing.expectEqual(@as(usize, 2), s.lineCount());
+    _ = s.setCols(4); // clamped to the 8-column floor
+    try std.testing.expectEqual(@as(usize, 8), s.cols);
+    try std.testing.expectEqual(@as(usize, 3), s.lineCount());
+    try std.testing.expectEqualStrings("abcdefgh", s.line(0));
+    try std.testing.expectEqualStrings("ij", s.line(1));
+    try std.testing.expectEqualStrings("xy", s.line(2));
+    // The cursor follows the last line.
+    try std.testing.expectEqual(@as(usize, 2), s.cursorLine());
+    try std.testing.expectEqual(@as(usize, 2), s.cursorCol());
+    // New output now wraps at the new width.
+    s.feed("z12345");
+    try std.testing.expectEqual(@as(usize, 3), s.lineCount());
+    try std.testing.expectEqualStrings("xyz12345", s.line(2));
+    s.feed("9");
+    try std.testing.expectEqual(@as(usize, 4), s.lineCount());
+    try std.testing.expectEqualStrings("9", s.line(3));
+}
+
+test "terminal: reflow overflow drops whole oldest lines" {
+    var s = Screen{};
+    var i: usize = 0;
+    while (i < grid_lines) : (i += 1) s.feed("0123456789\n");
+    try std.testing.expectEqual(@as(usize, grid_lines), s.lineCount());
+    // Each 10-byte line wraps to 2 rows at 8 columns: only half the content
+    // lines fit, and the old trailing empty line survives (127 rows).
+    _ = s.setCols(8);
+    try std.testing.expectEqual(@as(usize, 8), s.cols);
+    try std.testing.expectEqual(@as(usize, 127), s.lineCount());
+    // The newest lines survived; the oldest are gone.
+    try std.testing.expectEqualStrings("01234567", s.line(0));
+    try std.testing.expectEqualStrings("89", s.line(1));
+    try std.testing.expectEqualStrings("01234567", s.line(124));
+    try std.testing.expectEqualStrings("89", s.line(125));
+}
+
+test "terminal: setCols to the same value is a no-op; growth keeps lines" {
+    var s = Screen{};
+    s.feed("hello\nworld");
+    _ = s.setCols(40);
+    try std.testing.expectEqual(@as(usize, 40), s.cols);
+    try std.testing.expectEqualStrings("hello", s.line(0));
+    try std.testing.expectEqualStrings("world", s.line(1));
+    _ = s.setCols(80);
+    try std.testing.expectEqual(@as(usize, 2), s.lineCount());
+    try std.testing.expectEqualStrings("world", s.line(1));
+}
+
+test "terminal: scrollback view clamps to the stored range" {
+    var s = Screen{};
+    s.feed("one\ntwo\nthree\n");
+    try std.testing.expectEqual(@as(usize, 0), s.viewOffset());
+    s.scrollBy(1);
+    try std.testing.expectEqual(@as(usize, 1), s.viewOffset());
+    s.scrollBy(100);
+    try std.testing.expectEqual(@as(usize, s.lineCount() - 1), s.viewOffset());
+    s.scrollBy(-1);
+    try std.testing.expectEqual(@as(usize, s.lineCount() - 2), s.viewOffset());
+    s.scrollBy(-100);
+    try std.testing.expectEqual(@as(usize, 0), s.viewOffset());
+    s.scrollBy(2);
+    // New output snaps the view back to the tail.
+    s.feed("four\n");
+    try std.testing.expectEqual(@as(usize, 0), s.viewOffset());
+}
+
+test "terminal: selection copies across lines and normalizes direction" {
+    var s = Screen{};
+    s.feed("alpha\nbeta\ngamma");
+    var buf: [64]u8 = undefined;
+
+    // Forward selection from (0,2) to (2,3): "pha\nbeta\ngam".
+    s.beginSelection(0, 2);
+    s.extendSelection(2, 3);
+    const n = s.copySelection(&buf);
+    try std.testing.expectEqualStrings("pha\nbeta\ngam", buf[0..n]);
+
+    // Backwards selection (2,3) -> (0,2) is the same region.
+    s.beginSelection(2, 3);
+    s.extendSelection(0, 2);
+    const n2 = s.copySelection(&buf);
+    try std.testing.expectEqualStrings("pha\nbeta\ngam", buf[0..n2]);
+
+    // A single-point selection merges to the cell.
+    s.beginSelection(1, 1);
+    s.extendSelection(1, 3);
+    const n3 = s.copySelection(&buf);
+    try std.testing.expectEqualStrings("et", buf[0..n3]);
+
+    // In-range query.
+    s.beginSelection(0, 0);
+    s.extendSelection(0, 2);
+    try std.testing.expect(s.inSelection(0, 1));
+    try std.testing.expect(!s.inSelection(0, 3));
+    try std.testing.expect(!s.inSelection(1, 0));
+
+    s.clearSelection();
+    try std.testing.expectEqual(@as(usize, 0), s.copySelection(&buf));
+    try std.testing.expect(!s.hasSelection());
+}
+
+test "terminal: selection coordinates clamp to the grid" {
+    var s = Screen{};
+    s.feed("x");
+    var buf: [16]u8 = undefined;
+    // An out-of-range line clamps to the last row; the region then covers it.
+    s.beginSelection(999, 0);
+    s.extendSelection(0, 1);
+    const n = s.copySelection(&buf);
+    try std.testing.expectEqualStrings("x", buf[0..n]);
+    // An out-of-range column clamps to the grid width (the copy clamps to
+    // the stored line length).
+    s.beginSelection(0, 999);
+    s.extendSelection(0, 0);
+    const n2 = s.copySelection(&buf);
+    try std.testing.expectEqualStrings("x", buf[0..n2]);
+}
+
+test "terminal: copySelectionToClipboard is a no-op without a window binding" {
+    for (&terminals) |*t| t.reset();
+    try std.testing.expectEqual(@as(usize, 0), copySelectionToClipboard(42));
+    for (&terminals) |*t| t.reset();
 }

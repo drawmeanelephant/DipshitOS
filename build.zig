@@ -1346,6 +1346,31 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_term.step);
 
     // ------------------------------------------------------------------
+    // Guest: TOOL.BIN (M49 SD3 — issue #1130). The standalone busybox-style
+    // multicall over lib/toolbox.zig: argv[0] selects head/tail/wc/grep/
+    // sort/cut/test/[/printf, the rest are its arguments, stdin is the
+    // kernel pipe, and file arguments come from the host share.
+    // ------------------------------------------------------------------
+    const tool_prog = b.addExecutable(.{
+        .name = "user-tool",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/tool.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    tool_prog.linker_script = b.path("user/linker-segmented.ld");
+    const tool_step = b.step("tool", "Build the M49 SD3 tool multicall (zig-out/bin/TOOL.BIN) — DSK3 segmented");
+    const tool_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
+    tool_elf2bin.addFileArg(tool_prog.getEmittedBin());
+    const tool_bin = tool_elf2bin.addOutputFileArg("TOOL.BIN");
+    tool_elf2bin.has_side_effects = true;
+    tool_elf2bin.stdio = .inherit;
+    tool_step.dependOn(&tool_elf2bin.step);
+    const install_tool = b.addInstallFileWithDir(tool_bin, .bin, "TOOL.BIN");
+    b.getInstallStep().dependOn(&install_tool.step);
+
+    // ------------------------------------------------------------------
     // Guest: thirty-fourth ESP user program (M26 N1 — issue #399) PING.BIN.
     // Headless ICMP ping: sends echo requests, shows RTT + loss stats.
     // Uses existing ICMP path (net ping) when available; falls back to
@@ -2297,6 +2322,8 @@ pub fn build(b: *std.Build) void {
         "user/src/lib/ui.zig",
         "user/src/lib/tty.zig",
         "user/src/lib/shell.zig",
+        "user/src/lib/startup.zig",
+        "user/src/lib/toolbox.zig",
         "user/src/lib/pipe.zig",
         "user/src/lib/script.zig",
         "user/tests/ui/ui_test.zig",

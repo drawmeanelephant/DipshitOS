@@ -8,6 +8,7 @@
 //! in `user/src/sh.zig`.
 
 const std = @import("std");
+const pipe = @import("pipe.zig");
 
 fn isSpace(byte: u8) bool {
     return byte == ' ' or byte == '\t';
@@ -728,4 +729,99 @@ test "script: FuncTable define/find/redefine and body split" {
     try std.testing.expectEqual(@as(usize, 1), table.count);
     try std.testing.expectEqual(@as(usize, 0), table.funcs[table.find("greet").?].arg_count);
     try std.testing.expect(parseFuncDef("bad") == null);
+}
+
+// ---------------------------------------------------------------------------
+// M49 SD3 (#1130): a bounded single-line `case ... in ... esac`.
+// ---------------------------------------------------------------------------
+
+pub const case_arm_max: usize = 8;
+
+pub const CaseArm = struct {
+    pattern: []const u8,
+    body: []const u8,
+};
+
+pub const Case = struct {
+    subject: []const u8,
+    arms: [case_arm_max]CaseArm = undefined,
+    count: usize = 0,
+};
+
+/// Parse `case SUBJECT in PAT) BODY;; PAT2) BODY2;; esac`. Arms are split on
+/// `;;`; the pattern may hold `|` alternatives. Bounded to `case_arm_max`
+/// arms; a malformed line returns null (the caller reports it).
+pub fn parseCase(line: []const u8) ?Case {
+    if (!std.mem.startsWith(u8, line, "case")) return null;
+    const rest = stripPrefix(line, "case");
+    const in_pos = findKeyword(rest, "in") orelse return null;
+    const subject = trim(rest[0..in_pos]);
+    if (subject.len == 0) return null;
+    const after_in = rest[in_pos + 2 ..];
+    const esac_pos = findKeyword(after_in, "esac") orelse return null;
+    const arms_text = trimSemi(after_in[0..esac_pos]);
+
+    var c = Case{ .subject = subject };
+    var i: usize = 0;
+    while (i < arms_text.len and c.count < case_arm_max) {
+        while (i < arms_text.len and (arms_text[i] == ';' or isSpace(arms_text[i]))) i += 1;
+        if (i >= arms_text.len) break;
+        const pat_end = std.mem.indexOfScalar(u8, arms_text[i..], ')') orelse break;
+        const pattern = trim(arms_text[i .. i + pat_end]);
+        const body_start = i + pat_end + 1;
+        const sep = std.mem.indexOfPos(u8, arms_text, body_start, ";;");
+        const body_end = sep orelse arms_text.len;
+        c.arms[c.count] = .{
+            .pattern = pattern,
+            .body = trimSemi(arms_text[body_start..body_end]),
+        };
+        c.count += 1;
+        i = if (sep) |s| s + 2 else arms_text.len;
+    }
+    if (c.count == 0) return null;
+    return c;
+}
+
+/// True when `pattern` matches `subject`: `|` separates alternatives, and
+/// each alternative is fnmatch-style (via `pipe.globMatch`). The single
+/// pattern `*` matches everything.
+pub fn caseMatch(pattern: []const u8, subject: []const u8) bool {
+    var i: usize = 0;
+    while (i <= pattern.len) {
+        var j = i;
+        while (j < pattern.len and pattern[j] != '|') j += 1;
+        const alt = trim(pattern[i..j]);
+        if (alt.len > 0 and pipe.globMatch(alt, subject)) return true;
+        if (j >= pattern.len) break;
+        i = j + 1;
+    }
+    return false;
+}
+
+test "script: parseCase splits subject and arms" {
+    const c = parseCase("case $X in a) echo A;; b|c) echo BC;; *) echo OTHER;; esac").?;
+    try std.testing.expectEqualStrings("$X", c.subject);
+    try std.testing.expectEqual(@as(usize, 3), c.count);
+    try std.testing.expectEqualStrings("a", c.arms[0].pattern);
+    try std.testing.expectEqualStrings("echo A", c.arms[0].body);
+    try std.testing.expectEqualStrings("b|c", c.arms[1].pattern);
+    try std.testing.expectEqualStrings("echo BC", c.arms[1].body);
+    try std.testing.expectEqualStrings("*", c.arms[2].pattern);
+    try std.testing.expectEqualStrings("echo OTHER", c.arms[2].body);
+}
+
+test "script: parseCase rejects malformed lines" {
+    try std.testing.expect(parseCase("case x") == null);
+    try std.testing.expect(parseCase("case in esac") == null);
+    try std.testing.expect(parseCase("if x; then y; fi") == null);
+    try std.testing.expect(parseCase("case x in esac") == null);
+}
+
+test "script: caseMatch handles alternatives and globs" {
+    try std.testing.expect(caseMatch("a", "a"));
+    try std.testing.expect(!caseMatch("a", "b"));
+    try std.testing.expect(caseMatch("b|c", "c"));
+    try std.testing.expect(caseMatch("*", "anything"));
+    try std.testing.expect(caseMatch("*.TXT", "NOTES.TXT"));
+    try std.testing.expect(!caseMatch("*.TXT", "NOTES.BIN"));
 }

@@ -31,6 +31,7 @@ const app_events = @import("events.zig"); // Milestone 9 (claim 7206): applicati
 const driving_award = @import("driving_award.zig"); // Milestone six G5: window focus query for event routing
 const terminal = @import("terminal.zig"); // #1082 (ADR 0020 A5): window-front-end key routing
 const svclock = @import("svclock.zig"); // claim 9498 follow-on: the keyboard decode interleaves WIN + EV state
+const klog = @import("klog.zig"); // M49 SD5 (#1132): the terminal copy audit line
 
 pub const max_fifo: usize = 64;
 
@@ -85,6 +86,12 @@ var ptr_reports: usize = 0;
 /// the window manager consumes it via `take_click`.
 var ptr_valid: bool = false;
 var ptr_click_pending: bool = false;
+/// M49 SD5 (#1132): the left-button press sample, latched even when a whole
+/// injected drag is drained in one pass (last-write-wins state would lose
+/// the down edge). Consumed by `take_press`.
+var ptr_press_pending: bool = false;
+var ptr_press_x: u16 = 0;
+var ptr_press_y: u16 = 0;
 /// Card U5 (claim 0935): the Alt+Tab chord (modifier 0x04/0x40 + Tab
 /// usage 0x2b) latches here — the shell idle loop consumes it as a
 /// focus-cycle request (ADR 0008 D4's keyboard cycling). M32 WMS8 Gate 5
@@ -495,6 +502,7 @@ pub fn decode_keyboard_report(rep: []const u8) void {
         // Focus is NOT stolen, and WIN_CLOSE/WIN_RESIZE/WIN_FOCUS are
         // delivered by their own paths (this only redirects key bytes).
         if (terminal.windowTerminal(driving_award.focused_window_id())) |tt| {
+            const scr = terminal.screenForTerminal(tt);
             for (keys) |k| {
                 if (k == 0) continue;
                 var held = false;
@@ -506,6 +514,49 @@ pub fn decode_keyboard_report(rep: []const u8) void {
                 }
                 if (held) continue;
                 kb_last_usage = k;
+                // M49 SD5 (#1132): terminal-window chrome chords are consumed
+                // by the kernel presentation, not typed into the shell:
+                //   PageUp/PageDown + Shift+Up/Down  scroll the view
+                //   Shift+Home / Shift+End           jump to oldest / tail
+                //   Ctrl+Shift+C                     copy the selection
+                if (k == 0x4b) { // PageUp
+                    if (scr) |s| s.scrollBy(8);
+                    events += 1;
+                    continue;
+                }
+                if (k == 0x4e) { // PageDown
+                    if (scr) |s| s.scrollBy(-8);
+                    events += 1;
+                    continue;
+                }
+                if (shift and k == 0x52) { // Shift+Up
+                    if (scr) |s| s.scrollBy(1);
+                    events += 1;
+                    continue;
+                }
+                if (shift and k == 0x51) { // Shift+Down
+                    if (scr) |s| s.scrollBy(-1);
+                    events += 1;
+                    continue;
+                }
+                if (shift and k == 0x4a) { // Shift+Home
+                    if (scr) |s| s.scrollBy(32767);
+                    events += 1;
+                    continue;
+                }
+                if (shift and k == 0x4d) { // Shift+End
+                    if (scr) |s| s.scrollReset();
+                    events += 1;
+                    continue;
+                }
+                if (ctrl and shift and k == 0x06) { // Ctrl+Shift+C
+                    const copied = terminal.copySelectionToClipboard(driving_award.focused_window_id());
+                    var msg: [48]u8 = undefined;
+                    const m = std.fmt.bufPrint(&msg, "tty: copy {d} bytes\n", .{copied}) catch "tty: copy\n";
+                    klog.line(m);
+                    events += 1;
+                    continue;
+                }
                 var kout: [max_key_bytes]u8 = undefined;
                 const kn = hid_to_bytes(k, shift, ctrl, &kout);
                 if (kn > 0) {
@@ -678,7 +729,12 @@ pub fn decode_pointer_report(rep: []const u8) void {
     }
     ptr_reports += 1;
     ptr_valid = true;
-    if (prev_buttons == 0 and (ptr_buttons & 0x01) != 0) ptr_click_pending = true;
+    if (prev_buttons == 0 and (ptr_buttons & 0x01) != 0) {
+        ptr_click_pending = true;
+        ptr_press_pending = true;
+        ptr_press_x = ptr_x;
+        ptr_press_y = ptr_y;
+    }
 }
 
 /// The shell-idle-loop drain: poll each enumerated device's interrupt-IN
@@ -738,6 +794,13 @@ pub fn pointer_state() PointerState {
 
 /// Card U4: a consumed click edge (the pointer cell, HID logical units).
 pub const Click = struct { x: u16, y: u16 };
+
+/// M49 SD5 (#1132): the latched left-press position, consumed once.
+pub fn take_press() ?Click {
+    if (!ptr_press_pending) return null;
+    ptr_press_pending = false;
+    return .{ .x = ptr_press_x, .y = ptr_press_y };
+}
 
 /// Consume the latched click edge (buttons 0 -> nonzero). Returns the
 /// click's pointer cell or null when no click is pending.

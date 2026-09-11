@@ -24,6 +24,10 @@ const abi = @import("ui/abi.zig");
 
 /// The terminal device path (ADR 0020 D3).
 pub const tty_path = "/dev/tty";
+/// M49 SD4 (#1131): ask the front-end for bracketed paste (DECSET 2004).
+/// A front-end that does not implement it ignores the sequence; the kernel
+/// serial/window presentations swallow it.
+pub const paste_enable: []const u8 = "\x1b[?2004h";
 /// Fixed line capacity in bytes. `max_line` bytes fit; the next is refused.
 pub const max_line: usize = 256;
 /// Bounded session history: the most recent N submitted lines (fixed BSS).
@@ -80,6 +84,16 @@ pub const Key = union(enum) {
     tab,
     /// Ctrl-D — the demo uses it as end-of-session.
     eof,
+    /// A lone ESC (not the start of a recognized CSI sequence). The byte
+    /// that followed the ESC — if any — is available through
+    /// `KeyDecoder.takeReplay`; the editor processes it after acting on the
+    /// escape (vi mode uses this for insert -> normal, then the replayed
+    /// keystroke becomes a normal-mode command).
+    escape,
+    /// `ESC [ 200 ~` — a bracketed-paste region starts.
+    paste_start,
+    /// `ESC [ 201 ~` — the bracketed-paste region ends.
+    paste_end,
     /// A byte that produced no action (escape-sequence filler, unknown
     /// control codes).
     ignored,
@@ -95,10 +109,28 @@ pub const KeyDecoder = struct {
     /// The first numeric parameter (the `3` of Delete's `ESC [ 3 ~`),
     /// saturating so a longer parameter can only fail to match.
     esc_param: u32 = 0,
+    /// The byte consumed while resolving a lone ESC (state 1 sees a non-`[`
+    /// byte). The editor routes ESC -> action and then decodes this byte so
+    /// `ESC x` still types `x`.
+    replay: ?u8 = null,
 
     pub fn reset(self: *KeyDecoder) void {
         self.esc_state = 0;
         self.esc_param = 0;
+        self.replay = null;
+    }
+
+    /// True while the decoder is mid-escape-sequence. The bracketed-paste
+    /// path uses this to swallow the marker bytes without inserting them.
+    pub fn inEscape(self: *const KeyDecoder) bool {
+        return self.esc_state != 0;
+    }
+
+    /// Consume the byte held back after a lone ESC, if any.
+    pub fn takeReplay(self: *KeyDecoder) ?u8 {
+        const r = self.replay;
+        self.replay = null;
+        return r;
     }
 
     pub fn feed(self: *KeyDecoder, byte: u8) Key {
@@ -110,9 +142,11 @@ pub const KeyDecoder = struct {
                     self.esc_state = 2;
                     return .ignored;
                 }
-                // A lone ESC followed by anything else is not a sequence:
-                // reprocess the byte as a real keystroke.
-                return self.feed(byte);
+                // A lone ESC followed by anything else: report the escape
+                // and hold the byte back so the editor can process it next
+                // (vi insert -> normal then a command; emacs types it).
+                self.replay = byte;
+                return .escape;
             },
             2 => {
                 self.esc_state = 0;
@@ -140,7 +174,11 @@ pub const KeyDecoder = struct {
                 }
                 if (byte >= 0x3a and byte <= 0x3f) return .ignored; // ';' and friends
                 self.esc_state = 0;
-                if (byte == '~' and self.esc_param == 3) return .delete;
+                if (byte == '~') {
+                    if (self.esc_param == 3) return .delete;
+                    if (self.esc_param == 200) return .paste_start;
+                    if (self.esc_param == 201) return .paste_end;
+                }
                 return .ignored;
             },
             else => {},
@@ -171,6 +209,10 @@ pub const LineResult = enum {
     none,
     /// A complete line is in `buffer[0..len]` (terminated by CR or LF).
     submitted,
+    /// A trailing `\` continued the line (M49 SD4): the backslash was
+    /// removed, the cursor continues after a `> ` continuation prompt, and
+    /// the logical line keeps accumulating (POSIX backslash-newline join).
+    continued,
     /// Ctrl-C cleared the line; the buffer is empty again.
     cancelled,
     /// Ctrl-L cleared the screen; the caller reprints the prompt and calls
@@ -178,6 +220,19 @@ pub const LineResult = enum {
     repaint,
     /// Ctrl-D — the caller should end the session.
     eof,
+};
+
+/// The editor's keymap (M49 SD4). Emacs is the default; `set -o vi` in the
+/// shell switches to the bounded vi map (insert/normal states).
+pub const Mode = enum {
+    emacs,
+    vi,
+};
+
+/// The vi state machine (only consulted when `mode == .vi`).
+pub const ViState = enum {
+    insert,
+    normal,
 };
 
 /// One Tab-completion result from an injected completer. Mirrors the M19
@@ -241,6 +296,23 @@ pub const LineEditor = struct {
     search_draft_len: usize = 0,
     search_draft_cursor: usize = 0,
 
+    // M49 SD4 (#1131): editing ergonomics.
+    /// `emacs` (default) or `vi` (bounded: insert/normal, h l 0 $ x i a A I
+    /// k j, dd). Switched from the shell via `set -o vi` / `set +o vi`.
+    mode: Mode = .emacs,
+    vi_state: ViState = .insert,
+    /// The `d` half of vi's `dd` (cleared by any other normal-mode key).
+    vi_pending_d: bool = false,
+    /// True inside an `ESC [ 200 ~` ... `ESC [ 201 ~` bracketed paste.
+    /// Pasted bytes insert literally; a pasted newline submits the line.
+    pasting: bool = false,
+    /// Emit `ESC [ 3 J` on Ctrl-L to clear the front-end's scrollback too
+    /// (the window front-end has a bounded scrollback grid; the serial
+    /// presentation does not, so it stays off there).
+    clear_scrollback: bool = false,
+    /// Round-robin count of pasted bytes (diagnostic; `paste` state).
+    pasted: usize = 0,
+
     /// Full reset: empty line, clear flags, and any in-progress recall.
     pub fn reset(self: *LineEditor) void {
         self.len = 0;
@@ -251,6 +323,8 @@ pub const LineEditor = struct {
         self.hist_cursor = 0;
         self.completing = false;
         self.searching = false;
+        self.vi_state = .insert;
+        self.vi_pending_d = false;
     }
 
     /// Prepare for the next line after a submit. Keeps the CRLF swallow
@@ -263,6 +337,8 @@ pub const LineEditor = struct {
         self.hist_cursor = 0;
         self.completing = false;
         self.searching = false;
+        self.vi_state = .insert;
+        self.vi_pending_d = false;
     }
 
     /// Feed one raw byte. Echoes editing onto `out` as it goes. In
@@ -275,24 +351,82 @@ pub const LineEditor = struct {
             return .none;
         }
         self.submitted_cr = false;
+        // M49 SD4: inside a bracketed paste the byte stream is literal.
+        if (self.pasting) return self.pasteByte(out, byte);
         if (byte == 0x12) { // Ctrl+R
             self.search_enter(out);
             return .none;
         }
         // Any non-Tab byte ends a completion cycle (M19 semantics).
         if (byte != '\t') self.completing = false;
+        var b = byte;
+        while (true) {
+            const key = self.decoder.feed(b);
+            const result = self.feedKey(out, key);
+            if (result == .submitted) {
+                self.submitted_cr = (b == '\r');
+                return result;
+            }
+            // A lone ESC: the decoder holds the byte that followed it back;
+            // process it next (the escape action may have changed the mode).
+            if (key == .escape) {
+                if (self.decoder.takeReplay()) |replay| {
+                    b = replay;
+                    continue;
+                }
+            }
+            return result;
+        }
+    }
+
+    /// Bracketed paste (M49 SD4): bytes insert literally and a pasted
+    /// newline submits — so pasting a script runs it line by line, exactly
+    /// like typing it. The decoder still consumes CSI filler so the
+    /// `ESC [ 201 ~` terminator is found even when the paste contains
+    /// escape bytes.
+    fn pasteByte(self: *LineEditor, out: Output, byte: u8) LineResult {
         const key = self.decoder.feed(byte);
-        const result = self.feedKey(out, key);
-        if (result == .submitted) self.submitted_cr = (byte == '\r');
-        return result;
+        if (key == .paste_end or key == .paste_start) {
+            self.pasting = (key == .paste_start);
+            return .none;
+        }
+        if (key == .escape) {
+            if (self.decoder.takeReplay()) |replay| return self.insert(out, replay);
+            return .none;
+        }
+        if (self.decoder.inEscape()) return .none; // marker/CSI filler bytes
+        if (byte == '\r' or byte == '\n') {
+            out.write("\r\n");
+            self.remember_line();
+            self.submitted_cr = (byte == '\r');
+            return .submitted;
+        }
+        self.pasted += 1;
+        return self.insert(out, byte);
     }
 
     /// Apply one already-decoded key.
     pub fn feedKey(self: *LineEditor, out: Output, key: Key) LineResult {
+        // M49 SD4: bracketed paste state is keyed at this level so both the
+        // byte path and direct `feedKey` callers share it.
+        switch (key) {
+            .paste_start => {
+                self.pasting = true;
+                return .none;
+            },
+            .paste_end => {
+                self.pasting = false;
+                return .none;
+            },
+            else => {},
+        }
+        // M49 SD4: the bounded vi normal state owns every key while active.
+        if (self.mode == .vi and self.vi_state == .normal) return self.feedViNormal(out, key);
         switch (key) {
             .ignored => return .none,
             .text => |b| return self.insert(out, b),
             .enter => {
+                if (self.continuesLine()) return self.continueLine(out);
                 out.write("\r\n");
                 self.remember_line();
                 return .submitted;
@@ -308,7 +442,11 @@ pub const LineEditor = struct {
             .ctrl_k => return self.kill_to_end(out),
             .ctrl_u => return self.kill_to_start(out),
             .ctrl_l => {
-                out.write("\x1b[2J\x1b[H");
+                if (self.clear_scrollback) {
+                    out.write("\x1b[2J\x1b[3J\x1b[H");
+                } else {
+                    out.write("\x1b[2J\x1b[H");
+                }
                 return .repaint;
             },
             .ctrl_c => {
@@ -322,7 +460,122 @@ pub const LineEditor = struct {
                 return .none;
             },
             .eof => return .eof,
+            .escape => {
+                // M49 SD4: in vi mode, ESC enters normal (the held-back
+                // byte, if any, is replayed by `feed` and becomes the first
+                // normal-mode command). Emacs ignores it.
+                if (self.mode == .vi) self.vi_state = .normal;
+                return .none;
+            },
+            .paste_start, .paste_end => return .none, // handled above
         }
+    }
+
+    /// M49 SD4: the bounded vi normal map. Motions `h l 0 $`, `x` delete,
+    /// `i a A I` re-enter insert, `k j` history, `dd` clears the line.
+    /// Everything else bells.
+    fn feedViNormal(self: *LineEditor, out: Output, key: Key) LineResult {
+        const was_d = self.vi_pending_d;
+        self.vi_pending_d = false;
+        switch (key) {
+            .ignored, .escape => return .none,
+            .text => |b| {
+                switch (b) {
+                    'h' => return self.cursor_left(out),
+                    'l' => return self.cursor_right(out),
+                    '0' => return self.cursor_home(out),
+                    '$' => return self.cursor_end(out),
+                    'x' => return self.delete_forward(out),
+                    'i' => {
+                        self.vi_state = .insert;
+                        return .none;
+                    },
+                    'a' => {
+                        _ = self.cursor_right(out);
+                        self.vi_state = .insert;
+                        return .none;
+                    },
+                    'A' => {
+                        _ = self.cursor_end(out);
+                        self.vi_state = .insert;
+                        return .none;
+                    },
+                    'I' => {
+                        _ = self.cursor_home(out);
+                        self.vi_state = .insert;
+                        return .none;
+                    },
+                    'k' => return self.recall_older(out),
+                    'j' => return self.recall_newer(out),
+                    'd' => {
+                        if (was_d) {
+                            const old_len = self.len;
+                            const old_cursor = self.cursor;
+                            self.len = 0;
+                            self.cursor = 0;
+                            self.redraw(out, old_len, old_cursor);
+                            return .none;
+                        }
+                        self.vi_pending_d = true;
+                        return .none;
+                    },
+                    else => {
+                        out.byte(0x07);
+                        return .none;
+                    },
+                }
+            },
+            .enter => {
+                if (self.continuesLine()) return self.continueLine(out);
+                out.write("\r\n");
+                self.remember_line();
+                self.vi_state = .insert;
+                return .submitted;
+            },
+            .backspace, .left => return self.cursor_left(out),
+            .right => return self.cursor_right(out),
+            .home => return self.cursor_home(out),
+            .end => return self.cursor_end(out),
+            .up => return self.recall_older(out),
+            .down => return self.recall_newer(out),
+            .tab => return self.complete(out),
+            .ctrl_c => {
+                out.write("^C\r\n");
+                self.reset();
+                return .cancelled;
+            },
+            .ctrl_l => {
+                if (self.clear_scrollback) {
+                    out.write("\x1b[2J\x1b[3J\x1b[H");
+                } else {
+                    out.write("\x1b[2J\x1b[H");
+                }
+                return .repaint;
+            },
+            .eof => return .eof,
+            else => {
+                out.byte(0x07);
+                return .none;
+            },
+        }
+    }
+
+    /// M49 SD4: true when the line ends in an odd run of backslashes (a
+    /// POSIX backslash-newline continuation).
+    fn continuesLine(self: *const LineEditor) bool {
+        var n: usize = 0;
+        while (n < self.len and self.buffer[self.len - 1 - n] == '\\') n += 1;
+        return (n & 1) == 1;
+    }
+
+    /// M49 SD4: drop the continuation backslash (POSIX removes the escaped
+    /// newline) and open a `> ` continuation line. The logical line keeps
+    /// accumulating in the same buffer.
+    fn continueLine(self: *LineEditor, out: Output) LineResult {
+        self.len -= 1;
+        if (self.cursor > self.len) self.cursor = self.len;
+        out.write("\r\n> ");
+        return .continued;
     }
 
     /// Reprint the current line after a screen clear (Ctrl-L): the caller
@@ -537,6 +790,9 @@ pub const LineEditor = struct {
             return .none;
         } else {
             self.complete_index = (self.complete_index + 1) % self.complete_match_count;
+            // M49 SD4: wrapping the cycle lists the candidates (the richer
+            // completion surface) and repaints the prompt/line after.
+            const wrapped = self.complete_index == 0;
 
             const rep_start = self.complete_replace_start;
             const orig_len = self.complete_orig_token_len;
@@ -583,8 +839,40 @@ pub const LineEditor = struct {
             self.cursor = new_token_end;
             self.len = new_token_end + tail_len;
             self.redraw(out, old_len, old_cursor);
+            if (wrapped) return self.listMatches(out, completer_fn, temp_buf[0..temp_len], temp_cursor);
             return .none;
         }
+    }
+
+    /// M49 SD4: print every candidate for the original token (bounded to 3
+    /// columns of 24) and ask the caller to repaint prompt + line. Called
+    /// when a Tab cycle wraps, so the user sees what is on offer.
+    fn listMatches(
+        self: *LineEditor,
+        out: Output,
+        completer_fn: CompleterFn,
+        text: []const u8,
+        cursor: usize,
+    ) LineResult {
+        const count = @min(24, self.complete_match_count);
+        out.write("\r\n");
+        var i: usize = 0;
+        var col: usize = 0;
+        while (i < count) : (i += 1) {
+            const m = completer_fn(text, cursor, i) orelse continue;
+            if (col > 0 and col + m.text.len > 56) {
+                out.write("\r\n");
+                col = 0;
+            }
+            out.write(m.text);
+            col += m.text.len;
+            if (i + 1 < count) {
+                out.write("  ");
+                col += 2;
+            }
+        }
+        out.write("\r\n");
+        return .repaint;
     }
 
     // -- reverse-i-search (SH3) --------------------------------------------
@@ -930,9 +1218,12 @@ test "tty: KeyDecoder handles printable, control, and lone-ESC bytes" {
     try std.testing.expectEqual(Key.ctrl_l, d.feed(0x0c));
     try std.testing.expectEqual(Key.eof, d.feed(0x04));
     try std.testing.expectEqual(Key.tab, d.feed('\t'));
-    // A lone ESC does not eat the next keystroke.
+    // A lone ESC is reported (M49 SD4: vi uses it), and it does not eat the
+    // next keystroke — the byte is held back for the editor to replay.
     try std.testing.expectEqual(Key.ignored, d.feed(0x1b));
-    try std.testing.expectEqual(@as(u8, 'x'), d.feed('x').text);
+    try std.testing.expectEqual(Key.escape, d.feed('x'));
+    try std.testing.expectEqual(@as(?u8, 'x'), d.takeReplay());
+    try std.testing.expectEqual(@as(?u8, null), d.takeReplay());
 }
 
 test "tty: insert and backspace echo through the byte seam" {
@@ -1254,4 +1545,163 @@ test "tty: Ctrl+R cancel restores the pre-search draft" {
     try std.testing.expectEqual(LineResult.repaint, ed.feed(out, 0x1b)); // Esc cancels
     try std.testing.expect(!ed.searching);
     try std.testing.expectEqualStrings("draft", ed.line());
+}
+
+// ---------------------------------------------------------------------------
+// M49 SD4 (#1131): editing-ergonomics tests
+// ---------------------------------------------------------------------------
+
+test "tty: a lone ESC still types the following byte end to end (emacs)" {
+    var cap = Capture{};
+    const out = cap.out();
+    var ed = LineEditor{};
+    _ = ed.feed(out, 0x1b);
+    _ = ed.feed(out, 'x');
+    try std.testing.expectEqualStrings("x", ed.line());
+}
+
+test "tty: trailing backslash continues the line (POSIX join, no backslash)" {
+    var cap = Capture{};
+    const out = cap.out();
+    var ed = LineEditor{};
+    for ("echo foo \\") |c| _ = ed.feed(out, c);
+    try std.testing.expectEqual(LineResult.continued, ed.feed(out, '\r'));
+    try std.testing.expectEqualStrings("echo foo ", ed.line());
+    try std.testing.expectEqualStrings("echo foo \\\r\n> ", cap.contents());
+    for ("bar") |c| _ = ed.feed(out, c);
+    try std.testing.expectEqual(LineResult.submitted, ed.feed(out, '\n'));
+    try std.testing.expectEqualStrings("echo foo bar", ed.line());
+    try std.testing.expectEqual(@as(usize, 1), ed.hist_count);
+}
+
+test "tty: an escaped backslash does NOT continue (odd/even run)" {
+    var cap = Capture{};
+    const out = cap.out();
+    var ed = LineEditor{};
+    for ("echo a\\\\") |c| _ = ed.feed(out, c);
+    try std.testing.expectEqual(LineResult.submitted, ed.feed(out, '\r'));
+    try std.testing.expectEqualStrings("echo a\\\\", ed.line());
+}
+
+test "tty: bracketed paste inserts bytes literally and submits on newline" {
+    var cap = Capture{};
+    const out = cap.out();
+    var ed = LineEditor{};
+    for ("\x1b[200~") |c| _ = ed.feed(out, c);
+    try std.testing.expect(ed.pasting);
+    // Control bytes are literal data, not editor commands; the tab and
+    // Ctrl-C bytes ride through.
+    _ = ed.feed(out, 'a');
+    _ = ed.feed(out, '\t');
+    _ = ed.feed(out, 0x03);
+    _ = ed.feed(out, 'b');
+    try std.testing.expectEqualStrings("a\t\x03b", ed.line());
+    try std.testing.expectEqual(@as(usize, 4), ed.pasted);
+    // A pasted newline submits the (literal) line.
+    try std.testing.expectEqual(LineResult.submitted, ed.feed(out, '\n'));
+    try std.testing.expectEqualStrings("a\t\x03b", ed.line());
+    // The LF half of a CRLF pair is swallowed; the terminator ends paste.
+    for ("\x1b[201~") |c| _ = ed.feed(out, c);
+    try std.testing.expect(!ed.pasting);
+    // After paste, control codes are commands again.
+    ed.next_line();
+    try std.testing.expectEqual(LineResult.cancelled, ed.feed(out, 0x03));
+}
+
+test "tty: Ctrl-L clears scrollback only when the front-end has one" {
+    var cap = Capture{};
+    const out = cap.out();
+    var ed = LineEditor{};
+    for ("hi") |c| _ = ed.feed(out, c);
+    cap.reset();
+    try std.testing.expectEqual(LineResult.repaint, ed.feed(out, 0x0c));
+    try std.testing.expectEqualStrings("\x1b[2J\x1b[H", cap.contents());
+    ed.clear_scrollback = true;
+    cap.reset();
+    try std.testing.expectEqual(LineResult.repaint, ed.feed(out, 0x0c));
+    try std.testing.expectEqualStrings("\x1b[2J\x1b[3J\x1b[H", cap.contents());
+    try std.testing.expectEqualStrings("hi", ed.line());
+    cap.reset();
+    ed.reprint(out);
+    try std.testing.expectEqualStrings("hi", cap.contents());
+}
+
+test "tty: vi insert -> normal -> motions and back to insert" {
+    var cap = Capture{};
+    const out = cap.out();
+    var ed = LineEditor{ .mode = .vi };
+    for ("abc") |c| _ = ed.feed(out, c);
+    // ESC is a prefix: the next byte both switches mode and replays.
+    _ = ed.feed(out, 0x1b);
+    try std.testing.expectEqual(ViState.insert, ed.vi_state);
+    _ = ed.feed(out, 'h');
+    try std.testing.expectEqual(ViState.normal, ed.vi_state);
+    try std.testing.expectEqual(@as(usize, 2), ed.cursor);
+    // l moves right, 0 home, $ end, x deletes under the cursor.
+    _ = ed.feed(out, 'l');
+    try std.testing.expectEqual(@as(usize, 3), ed.cursor);
+    _ = ed.feed(out, '0');
+    try std.testing.expectEqual(@as(usize, 0), ed.cursor);
+    _ = ed.feed(out, 'x');
+    try std.testing.expectEqualStrings("bc", ed.line());
+    // $ to the end, i returns to insert at the cursor.
+    _ = ed.feed(out, '$');
+    try std.testing.expectEqual(@as(usize, 2), ed.cursor);
+    _ = ed.feed(out, 'i');
+    try std.testing.expectEqual(ViState.insert, ed.vi_state);
+    _ = ed.feed(out, '!');
+    try std.testing.expectEqualStrings("bc!", ed.line());
+}
+
+test "tty: vi normal j/k walk history and dd clears the line" {
+    var cap = Capture{};
+    const out = cap.out();
+    var ed = LineEditor{ .mode = .vi };
+    for ("first") |c| _ = ed.feed(out, c);
+    _ = ed.feed(out, '\r');
+    ed.next_line();
+    for ("second") |c| _ = ed.feed(out, c);
+    _ = ed.feed(out, '\r');
+    ed.next_line();
+    _ = ed.feed(out, 0x1b);
+    _ = ed.feed(out, 'k'); // ESC + k: normal then history older
+    try std.testing.expectEqualStrings("second", ed.line());
+    _ = ed.feed(out, 'k');
+    try std.testing.expectEqualStrings("first", ed.line());
+    _ = ed.feed(out, 'j');
+    try std.testing.expectEqualStrings("second", ed.line());
+    // dd needs two d's; the first d is dropped by another key.
+    _ = ed.feed(out, 'd');
+    _ = ed.feed(out, 'h');
+    _ = ed.feed(out, 'd');
+    try std.testing.expectEqualStrings("second", ed.line());
+    _ = ed.feed(out, 'd');
+    try std.testing.expectEqual(@as(usize, 0), ed.len);
+}
+
+test "tty: emacs mode ignores ESC state transitions" {
+    var cap = Capture{};
+    const out = cap.out();
+    var ed = LineEditor{};
+    for ("ab") |c| _ = ed.feed(out, c);
+    _ = ed.feedKey(out, .escape);
+    try std.testing.expectEqual(ViState.insert, ed.vi_state);
+    try std.testing.expectEqualStrings("ab", ed.line());
+}
+
+test "tty: completion cycle wrap lists the candidates and repaints" {
+    var cap = Capture{};
+    const out = cap.out();
+    var ed = LineEditor{ .completer = cycleCompleter };
+    for ("ca") |c| _ = ed.feed(out, c);
+    cap.reset();
+    _ = ed.feed(out, '\t'); // -> calc
+    try std.testing.expectEqualStrings("calc", ed.line());
+    _ = ed.feed(out, '\t'); // -> cat
+    try std.testing.expectEqualStrings("cat", ed.line());
+    cap.reset();
+    try std.testing.expectEqual(LineResult.repaint, ed.feed(out, '\t')); // wrap -> list
+    try std.testing.expect(std.mem.indexOf(u8, cap.contents(), "calc") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cap.contents(), "cat") != null);
+    try std.testing.expectEqualStrings("calc", ed.line());
 }

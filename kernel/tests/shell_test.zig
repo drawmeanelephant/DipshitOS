@@ -2631,3 +2631,16 @@ test "shell: wm autostart once — settings-driven, default shim (M42 SX5)" {
     try std.testing.expect(shell_mod.wm_autostart_attempted);
     try std.testing.expectEqual(@as(usize, 0), mock.contents().len);
 }
+
+test "shell: login ownerless-console fallback decision (M49 SD1)" {
+    // Attached: the shell owns the console, the monitor never resumes.
+    try std.testing.expect(!shell_mod.login_should_resume(true, false, true));
+    try std.testing.expect(!shell_mod.login_should_resume(true, true, false));
+    // Was attached and now detached/exited: the monitor resumes.
+    try std.testing.expect(shell_mod.login_should_resume(false, true, false));
+    try std.testing.expect(shell_mod.login_should_resume(false, true, true));
+    // Never attached: resume only once the login process is gone (the
+    // fallback — an orphaned console would otherwise have no reader).
+    try std.testing.expect(!shell_mod.login_should_resume(false, false, true));
+    try std.testing.expect(shell_mod.login_should_resume(false, false, false));
+}
