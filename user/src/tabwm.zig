@@ -119,6 +119,8 @@ pub const wm_window_kind: u16 = 20;
 pub const wm_key_kind: u16 = 21;
 
 pub const btn_left: u8 = 0x01;
+/// #1064: the middle mouse button — a middle-click on a tab closes it.
+pub const btn_middle: u8 = 0x04;
 
 // HID keyboard usage constants (USB HID Usage Tables §10 Keyboard/Keypad Page)
 pub const usage_a: u8 = 0x04;
@@ -143,6 +145,9 @@ pub const usage_pageup: u8 = 0x4b;
 pub const usage_pagedown: u8 = 0x4e;
 pub const usage_down: u8 = 0x51;
 pub const usage_up: u8 = 0x52;
+/// #1064: Left/Right — Ctrl+Shift+Left/Right reorders the active tab.
+pub const usage_right: u8 = 0x4f;
+pub const usage_left: u8 = 0x50;
 
 // Pinned markers (grepped by class-B live gates and tests)
 pub const registered_marker: []const u8 = "tabwm: registered\n";
@@ -172,6 +177,11 @@ pub const alt_tab_marker: []const u8 = "tabwm: alt-tab id=";
 pub const nav_marker: []const u8 = "tabwm: nav ";
 /// #1056 item 3: the tab-list overflow scroll offset changed.
 pub const tab_scroll_marker: []const u8 = "tabwm: tab-scroll ";
+/// #1064: the active tab was reordered (Ctrl+Shift+Left/Right).
+pub const tab_move_marker: []const u8 = "tabwm: tab-move\n";
+/// #1064: reopen-closed re-exec'd an app (id-carrying prefix, bufPrint
+/// appends the bin + `\n`).
+pub const reopen_marker: []const u8 = "tabwm: reopen ";
 
 // Geometry constants
 pub const fb_w: u32 = 1280;
@@ -346,6 +356,74 @@ pub fn overflow_label(buf: []u8) []const u8 {
 }
 
 // ---------------------------------------------------------------------------
+// #1064 rail-neutral tab ergonomics (middle-click close, reorder, reopen)
+// ---------------------------------------------------------------------------
+
+/// Record a closed tab in the reopen LIFO (bounded ring). Pure BSS.
+pub fn push_closed_tab(tab: *const Tab) void {
+    var c = ClosedTab{};
+    @memcpy(c.bin[0..tab.bin_len], tab.get_bin());
+    c.bin_len = tab.bin_len;
+    @memcpy(c.title[0..tab.title_len], tab.get_title());
+    c.title_len = tab.title_len;
+    closed_tabs[closed_count % max_tabs] = c;
+    closed_count += 1;
+}
+
+/// The k-th most-recently-closed tab (0 = most recent), or null.
+pub fn recently_closed_at(k: usize) ?*const ClosedTab {
+    if (k >= closed_count or k >= max_tabs) return null;
+    return &closed_tabs[(closed_count - 1 - k) % max_tabs];
+}
+
+/// Ctrl+Shift+T: reopen the most recently closed tab by re-exec'ing the app
+/// TABWM launched it from. Returns false when there is nothing left to
+/// reopen, or when the closed tab was NOT launched by TABWM (no recorded
+/// bin) — an honest no-op, since the WM cannot rebuild a window it never
+/// spawned. Un-reopenable entries are popped so the next press tries older
+/// ones.
+pub fn reopen_last_closed() bool {
+    const c = recently_closed_at(0) orelse return false;
+    if (c.bin_len == 0) {
+        closed_count -= 1;
+        return reopen_last_closed();
+    }
+    _ = ui.exec_program(c.bin[0..c.bin_len]);
+    var buf: [64]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{s}{s}\n", .{ reopen_marker, c.bin[0..c.bin_len] }) catch "tabwm: reopen\n";
+    closed_count -= 1;
+    write_marker(msg);
+    return true;
+}
+
+/// Ctrl+Shift+Left/Right: move the ACTIVE tab by `delta` within the list
+/// (swap with its neighbour) and keep it active/selected. The window stays
+/// focused — only the list order changes. Returns true on a move.
+pub fn move_active_tab(delta: i32) bool {
+    const cur = manager.active_idx orelse return false;
+    const last: i32 = @intCast(manager.tab_count - 1);
+    const next: i32 = @as(i32, @intCast(cur)) + delta;
+    if (next < 0 or next > last) return false;
+    if (!manager.swap_tabs(cur, @intCast(next))) return false;
+    manager.active_idx = @intCast(next);
+    if (nav_sel) |sel| {
+        if (sel == cur) nav_sel = @intCast(next);
+    }
+    write_marker(tab_move_marker);
+    save_tabs();
+    return true;
+}
+
+/// Middle-click on a tab row closes it through the SAME decision point as
+/// every other close (dirty tabs open the unsaved dialog). No-op while the
+/// modal owns input or the click is outside the tab rows.
+pub fn handle_middle_click(px: u32, py: u32) void {
+    if (unsaved_dialog_open_tabwm) return;
+    if (px >= sidebar_w) return;
+    if (tab_index_at(py)) |idx| request_close_tab(idx);
+}
+
+// ---------------------------------------------------------------------------
 // Syscall wrappers
 // ---------------------------------------------------------------------------
 fn syscall0(num: u64) i64 {
@@ -444,6 +522,11 @@ pub const Tab = struct {
     /// re-activating an already-fullscreen tab issues no repeat proposal, so
     /// the app gets no repeat WIN_RESIZE).
     applied_vp: ?Rect = null,
+    /// #1064 (rail-neutral ergonomics): the executable TABWM launched this
+    /// tab from, when it knows it (the god-menu launch path records the bin;
+    /// windows that opened themselves have none). Reopen-closed re-execs it.
+    bin: [24]u8 = [_]u8{0} ** 24,
+    bin_len: usize = 0,
 
     pub fn set_title(self: *Tab, text: []const u8) void {
         const len = @min(text.len, self.title.len);
@@ -453,6 +536,16 @@ pub const Tab = struct {
 
     pub fn get_title(self: *const Tab) []const u8 {
         return self.title[0..self.title_len];
+    }
+
+    pub fn set_bin(self: *Tab, text: []const u8) void {
+        const len = @min(text.len, self.bin.len);
+        @memcpy(self.bin[0..len], text[0..len]);
+        self.bin_len = len;
+    }
+
+    pub fn get_bin(self: *const Tab) []const u8 {
+        return self.bin[0..self.bin_len];
     }
 };
 
@@ -574,6 +667,16 @@ pub const TabManager = struct {
         }
         return null;
     }
+
+    /// Swap the tabs at `a` and `b` (bounds-checked; a no-op when equal or
+    /// out of range). Used by keyboard tab reorder. Returns true on swap.
+    pub fn swap_tabs(self: *TabManager, a: usize, b: usize) bool {
+        if (a == b or a >= self.tab_count or b >= self.tab_count) return false;
+        const tmp = self.tabs[a];
+        self.tabs[a] = self.tabs[b];
+        self.tabs[b] = tmp;
+        return true;
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -588,6 +691,34 @@ pub var hover_sexiburger: bool = false;
 pub var hover_theme_toggle: bool = false;
 pub var hover_clip: bool = false;
 pub var hover_new_tab: bool = false;
+
+// ---------------------------------------------------------------------------
+// #1064 rail-neutral tab ergonomics: middle-click close, keyboard reorder,
+// and reopen-closed. BSS only.
+// ---------------------------------------------------------------------------
+/// The previous pointer button byte, for middle-click EDGE detection (the
+/// kernel fans the raw held-button state on every sample, not just edges).
+pub var prev_buttons: u8 = 0;
+
+/// A recently-closed tab, enough to reopen it (the executable TABWM launched
+/// it from, plus its title for a fallback label).
+pub const ClosedTab = struct {
+    bin: [24]u8 = [_]u8{0} ** 24,
+    bin_len: usize = 0,
+    title: [32]u8 = [_]u8{0} ** 32,
+    title_len: usize = 0,
+};
+
+/// LIFO of recently-closed tabs (bounded to max_tabs); Ctrl+Shift+T reopens
+/// the top. `closed_count` grows monotonically; the ring index is
+/// `closed_count - 1 - k` mod max_tabs.
+pub var closed_tabs: [max_tabs]ClosedTab = [_]ClosedTab{.{}} ** max_tabs;
+pub var closed_count: usize = 0;
+
+/// The bin of an app the god-menu just launched, consumed by the NEXT new
+/// tab (the kernel fans the window mirror after the exec). Empty = none.
+pub var pending_launch_bin: [24]u8 = [_]u8{0} ** 24;
+pub var pending_launch_bin_len: usize = 0;
 
 // M42 UX r2 (2026-09-05, claim #1011): the unsaved-changes dialog state
 // machine — BSS only, no heap in WM paths.
@@ -1053,6 +1184,9 @@ pub fn close_tab(idx: usize) void {
     const msg = std.fmt.bufPrint(&buf, "{s} id={d} closed={d}\n", .{ tab_close_marker, closed_id, @as(u8, if (kernel_closed) 1 else 0) }) catch "tabwm: win-close\n";
     write_marker(msg);
 
+    // #1064: remember it for reopen (LIFO) before it leaves the list.
+    push_closed_tab(&manager.tabs[idx]);
+
     // 3. Remove tab from manager
     _ = manager.remove_tab(closed_id);
 
@@ -1202,6 +1336,8 @@ pub fn handle_window_mirror(wid: u8, visible: bool, released: bool, unsaved: boo
     const id: u32 = wid;
     if (released) {
         const idx = manager.find_by_id(id) orelse return;
+        // #1064: remember it for reopen (LIFO) before it leaves the list.
+        push_closed_tab(&manager.tabs[idx]);
         const was_active = (manager.active_idx != null and manager.active_idx.? == idx);
         _ = manager.remove_tab(id);
         if (was_active) {
@@ -1239,6 +1375,11 @@ pub fn handle_window_mirror(wid: u8, visible: bool, released: bool, unsaved: boo
     const title = query_window_name(id, &name_buf) orelse (std.fmt.bufPrint(&title_buf, "App {d}", .{wid}) catch "App");
     const idx = manager.add_or_update_tab_geom(id, title, orig_w, orig_h, false);
     manager.tabs[idx].unsaved = unsaved;
+    // #1064: adopt the launcher bin if the god-menu just spawned this window.
+    if (pending_launch_bin_len > 0) {
+        manager.tabs[idx].set_bin(pending_launch_bin[0..pending_launch_bin_len]);
+        pending_launch_bin_len = 0;
+    }
     activate_tab(idx);
     // #1056 item 3c: if this registration completes the restored window set,
     // reorder to the persisted tab order and re-activate the saved tab.
@@ -1402,6 +1543,10 @@ pub fn overlay_launch_selected() bool {
     var buf: [40]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, "{s}{s}\n", .{ launch_marker_prefix, bin }) catch launch_marker_prefix;
     write_marker(msg);
+    // #1064: remember the bin so the tab this spawns can be reopened later.
+    const blen = @min(bin.len, pending_launch_bin.len);
+    @memcpy(pending_launch_bin[0..blen], bin[0..blen]);
+    pending_launch_bin_len = blen;
     _ = ui.exec_program(bin);
     overlay_dismiss();
     return true;
@@ -1981,6 +2126,24 @@ pub fn handle_wm_key(usage: u8, flags: u16) void {
     }
 
     if (ctrl) {
+        // #1064: Ctrl+Shift+T reopens the last closed tab; Ctrl+Shift+Left/
+        // Right reorders the active tab in the list. (Ctrl+Shift+Tab still
+        // cycles — it is handled by the usage_tab branch below.)
+        if (shift) {
+            if (usage == usage_t) {
+                _ = reopen_last_closed();
+                return;
+            }
+            if (usage == usage_left) {
+                _ = move_active_tab(-1);
+                return;
+            }
+            if (usage == usage_right) {
+                _ = move_active_tab(1);
+                return;
+            }
+        }
+
         // Ctrl+Tab / Ctrl+Shift+Tab: cycle tabs (M42 UX r2: the SAME
         // alt_tab_next policy the Alt+Tab chord uses — the two chords
         // agree by construction).
@@ -2212,8 +2375,15 @@ fn main() noreturn {
             wm_pointer_kind => {
                 const px = ev.arg0 & 0xffff;
                 const py = ev.arg0 >> 16;
-                const clicked = (ev.flags & btn_left != 0);
+                const buttons: u8 = @intCast(ev.flags & 0xff);
+                const clicked = (buttons & btn_left) != 0;
                 handle_pointer(px, py, clicked);
+                // #1064: middle-click a tab to close it (edge-detected — the
+                // kernel fans the held-button state on every sample).
+                if ((buttons & btn_middle) != 0 and (prev_buttons & btn_middle) == 0) {
+                    handle_middle_click(px, py);
+                }
+                prev_buttons = buttons;
             },
             wm_window_kind => {
                 // Window opened or registered by an app (id >= 2). M42 UX:
@@ -2282,6 +2452,11 @@ pub fn resetForTest() void {
     persisted_tabs = null;
     have_last_saved_tabs = false;
     last_saved_tabs_len = 0;
+
+    // #1064: rail-neutral tab ergonomics state.
+    prev_buttons = 0;
+    closed_count = 0;
+    pending_launch_bin_len = 0;
 
     overlay_open = false;
     overlay_loaded = false;
@@ -3643,4 +3818,82 @@ test "tabwm: tick_clock_face prefers the host epoch, else uptime on the host" {
     // 23:59:59 + 1 s wraps to midnight.
     clock_epoch = 23 * 3600 + 59 * 60 + 59;
     try std.testing.expectEqual(Hms{ .h = 0, .m = 0, .s = 0 }, tick_clock_face(1));
+}
+
+// ---------------------------------------------------------------------------
+// Unit Tests (#1064 — rail-neutral browser tab ergonomics)
+// ---------------------------------------------------------------------------
+
+test "tabwm: middle-click closes the tab under the pointer (#1064)" {
+    resetForTest();
+    _ = manager.add_or_update_tab(2, "A");
+    _ = manager.add_or_update_tab(3, "B");
+    activate_tab(0);
+
+    // Row 1 band (y = tab_row_y(1)+4): closes B through the close decision.
+    handle_middle_click(50, tab_row_y(1) + 4);
+    try std.testing.expectEqual(@as(usize, 1), manager.tab_count);
+    try std.testing.expect(manager.find_by_id(3) == null);
+
+    // Outside the sidebar / outside any row: no-op.
+    _ = manager.add_or_update_tab(4, "C");
+    handle_middle_click(fb_w, tab_row_y(0) + 4);
+    handle_middle_click(50, 5);
+    try std.testing.expectEqual(@as(usize, 2), manager.tab_count);
+
+    // While the modal owns input, a middle-click is consumed (no close).
+    unsaved_dialog_open_tabwm = true;
+    handle_middle_click(50, tab_row_y(0) + 4);
+    try std.testing.expectEqual(@as(usize, 2), manager.tab_count);
+}
+
+test "tabwm: keyboard reorder moves the active tab (#1064)" {
+    resetForTest();
+    _ = manager.add_or_update_tab(2, "A");
+    _ = manager.add_or_update_tab(3, "B");
+    _ = manager.add_or_update_tab(4, "C");
+    activate_tab(0);
+
+    // Ctrl+Shift+Right swaps A right and keeps it active.
+    handle_wm_key(usage_right, ui.MOD_CTRL | ui.MOD_SHIFT);
+    try std.testing.expectEqual(@as(?usize, 1), manager.active_idx);
+    try std.testing.expectEqualStrings("B", manager.tabs[0].get_title());
+    try std.testing.expectEqualStrings("A", manager.tabs[1].get_title());
+    try std.testing.expectEqual(@as(?u32, 2), manager.get_active_id());
+
+    // Edge clamps: the ends do not wrap.
+    activate_tab(0);
+    try std.testing.expect(!move_active_tab(-1));
+    activate_tab(2);
+    try std.testing.expect(!move_active_tab(1));
+
+    // Ctrl+Shift+Left routes through the chord decoder.
+    activate_tab(1);
+    handle_wm_key(usage_left, ui.MOD_CTRL | ui.MOD_SHIFT);
+    try std.testing.expectEqual(@as(?usize, 0), manager.active_idx);
+}
+
+test "tabwm: reopen-closed re-execs a TABWM-launched app (#1064)" {
+    resetForTest();
+    // A window spawned through the launch path records its bin.
+    pending_launch_bin_len = 4;
+    @memcpy(pending_launch_bin[0..4], "CALC");
+    handle_window_mirror(2, true, false, false, 0, 0);
+    try std.testing.expectEqualStrings("CALC", manager.tabs[0].get_bin());
+    try std.testing.expectEqual(@as(usize, 0), pending_launch_bin_len);
+
+    // Close it: the reopen LIFO holds it, and Ctrl+Shift+T re-execs it
+    // (host exec is a no-op; the counter is the observable).
+    close_tab(0);
+    try std.testing.expectEqual(@as(usize, 1), closed_count);
+    handle_wm_key(usage_t, ui.MOD_CTRL | ui.MOD_SHIFT);
+    try std.testing.expectEqual(@as(usize, 0), closed_count);
+
+    // A tab with no recorded bin (window opened itself) is not reopenable;
+    // un-reopenable entries are popped so the stack drains honestly.
+    handle_window_mirror(9, true, false, false, 0, 0);
+    close_tab(0);
+    try std.testing.expectEqual(@as(usize, 1), closed_count);
+    try std.testing.expect(!reopen_last_closed());
+    try std.testing.expectEqual(@as(usize, 0), closed_count);
 }
