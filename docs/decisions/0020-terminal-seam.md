@@ -1,6 +1,7 @@
 # ADR 0020: The terminal (vt) seam — a userland-ownable console
 
-Status: **ACCEPTED** · Date: 2026-09-10 · Milestone: M44 (next focus) ·
+Status: **ACCEPTED** · Date: 2026-09-10 · amended 2026-09-11 (Amendment A,
+the window front-end — M45 card SH6, #1082) · Milestone: M44 (next focus) ·
 Issue **#1072** · Claims **#1073** (object + ABI) and **#1075** (pump + pilot)
 
 > The object (`kernel/src/terminal.zig`), the `/dev/tty` device-fd routing
@@ -112,5 +113,103 @@ returning data (the `sys_procs` model), never a command passthrough.
 - Multi-terminal allocation (`/dev/ttyN`), ownership transfer, and cleanup
   policy when multiple processes want a terminal.
 - Raw/cooked mode and kernel-side echo (only if a front-end wants them).
-- The window (TERM.BIN) and net (remote/SSH) front-end implementations (the
-  attach selectors are reserved and return `ENOSYS`).
+- ~~The window (TERM.BIN) front-end implementation.~~ — **design resolved by
+  Amendment A** (below); implementation is M45 card SH6 (#1082).
+- The net (remote/SSH) front-end implementation (selector `3` stays reserved
+  and returns `ENOSYS`).
+
+---
+
+# Amendment A — the window front-end (`TERM.BIN`, selector 2)
+
+Status: **ACCEPTED** (design) · Date: 2026-09-11 · Card **SH6** (#1082) ·
+Implementation tracked by #1082. The D1–D5 decisions above are unchanged;
+this amendment only fixes the window front-end the original D3/Open-issues
+left reserved.
+
+## Context
+
+The seam ships the serial front-end only. M45 card SH6 asks for `TERM.BIN`, a
+TABWM terminal window that renders a shell's terminal and feeds its keys
+(selector `2`, today `ENOSYS`). Four questions were open: **who owns the
+binding**, **who drains the output ring**, **who pushes input**, and
+**close/detach policy**. This amendment settles them against the existing
+kernel seams (`kernel/src/terminal.zig`, the `/dev/tty` routing in
+`kernel/src/file_table.zig`, `handle_tty_attach`, `input.zig`'s
+`focused_owner`/`hid_to_bytes`, and `driving_award.zig`'s per-process window
+ownership). No code lands here.
+
+## Decisions
+
+### A1. The window front-end is kernel-pumped, exactly like serial
+The terminal object stays a pure byte session (D1). A front-end binding names
+a **window**; the kernel moves bytes between the terminal rings and the window,
+symmetric with `pumpRuntimeInput`/`pumpRuntimeOutput` for the serial console.
+**No terminal-I/O syscall is added** (D3 holds): the owner keeps reading and
+writing `/dev/tty`.
+
+### A2. The owner attaches its own window
+`sys_tty_attach` selector `2` gains a second argument, `window_id`. The caller
+must **own** the `.user` window (the `sys_win_fill` ownership rule) and must
+already have opened `/dev/tty` (its controlling terminal). The binding is
+exclusive per terminal (D2) and mutually exclusive with the serial front-end;
+selector `0` detaches and frees both. Selector `3` (net) stays `ENOSYS`.
+
+Rationale: a window front-end needs **no cross-process access**. The process
+that owns the terminal also owns the window and is the single writer of both,
+so ADR 0020's per-process terminal invariant (`controlling_terminal(pid)`) is
+preserved and no new capability appears (no reading another process's
+terminal, no drawing into another's window).
+
+### A3. `TERM.BIN` hosts the shell in-process
+`TERM.BIN` is the owner: it opens a `.user` window, opens `/dev/tty`, calls
+`sys_tty_attach(2, id)`, and runs the shared shell core
+(`user/src/lib/shell.zig` + `user/src/lib/tty.zig`) over the terminal fd — the
+same core as `SH.BIN`, a different presentation. The kernel renders; `TERM.BIN`
+draws no pixels itself. `SH.BIN` remains the serial/raw-console shell
+(ADR 0021 D1); the desktop presentation is `TERM.BIN`. A future split into a
+separate shell process plus a front-end capability is deferred to its own
+amendment.
+
+### A4. Rendering is kernel-side, into the bound window
+On the owner's `/dev/tty` write, after appending to the output ring, the kernel
+drains the ring into a bounded per-terminal character grid + scrollback (sized
+like `text.zig`), marks the bound window damaged, and lets the existing
+compositor present it on its cadence (the deferred-present discipline, the
+`sys_win_present` shape). The glyph raster is the kernel's. Terminal output
+stays a byte pipe (D1); the grid is presentation state, not part of the
+terminal object.
+
+### A5. Window keys feed the terminal input queue
+`input.zig` already routes key events to the focused user window's owner
+(`focused_owner`). For a window bound as a terminal front-end, key events are
+encoded with the existing `hid_to_bytes` encoder and pushed into the bound
+terminal's input queue — the same byte encoding the serial console path uses,
+so the shell's line editor stays byte-driven and front-end-agnostic. Non-key
+events (`WIN_CLOSE`, `WIN_RESIZE`, `WIN_FOCUS`/`WIN_BLUR`) are still delivered
+to the owner, so the host observes close/resize. The binding does **not** steal
+focus: when the window is not focused, keys go where focus says.
+
+### A6. Close and detach
+Closing the bound window (owner `sys_win_close`, owner exit, or the WM close
+path) auto-detaches the terminal; the terminal survives, buffered, unattached
+(D2), and the serial console is **not** reclaimed automatically (boot default
+unchanged, D4). `sys_tty_attach(0)` is the explicit detach. A terminal has at
+most one window binding, and a window at most one terminal.
+
+## Rejected alternatives
+
+- **Cross-process front-end fd** (a `TERM.BIN` child attaches to `SH.BIN`'s
+  terminal and drains/pushes via inverted `/dev/tty` read/write): preserves
+  crash isolation but invents a cross-process terminal capability and inverts
+  the fd direction — a bigger ABI/security decision than SH6 needs. Deferred.
+- **Userland-rendered GUI terminal** (a normal app that reads keys from events
+  and draws with `lib/ui.zig`, bypassing the seam): simplest, but it does not
+  exercise the terminal seam, so remote/SSH could not reuse the path. Rejected
+  for this card.
+
+## Open issues left by this amendment
+
+- Kernel grid bounds/scrollback and `WIN_RESIZE` reflow.
+- The separate-shell-process split (would need its own amendment).
+- The net front-end (`3`) keeps its own amendment.
