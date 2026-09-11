@@ -106,6 +106,8 @@ const sys_win_set_visible = syscall.sys_win_set_visible;
 const sys_wmctl = syscall.sys_wmctl;
 const sys_time = syscall.sys_time;
 const sys_tty_attach = syscall.sys_tty_attach;
+const sys_principal = syscall.sys_principal;
+const principal_bytes = syscall.principal_bytes;
 const terminal = syscall.terminal;
 const sys_write = syscall.sys_write;
 const sys_yield = syscall.sys_yield;
@@ -141,7 +143,7 @@ fn capture_marshaled_args(args: Args, _: *exceptions.VectorFrame) u64 {
     return 0xcafe;
 }
 
-test "syscall: runtime table has 128 slots and sixty-eight unique implemented rows" {
+test "syscall: runtime table has 128 slots and sixty-nine unique implemented rows" {
     init(test_writer);
     const table = ensure_table();
     try std.testing.expectEqual(@as(usize, 128), table.len);
@@ -154,7 +156,7 @@ test "syscall: runtime table has 128 slots and sixty-eight unique implemented ro
             implemented += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 68), implemented);
+    try std.testing.expectEqual(@as(usize, 69), implemented);
     try std.testing.expectEqualStrings("sys_pipe_read", entry_info(sys_pipe_read).?.name);
     try std.testing.expectEqualStrings("sys_pipe_write", entry_info(sys_pipe_write).?.name);
     try std.testing.expectEqualStrings("sys_font_size", entry_info(sys_font_size).?.name);
@@ -215,6 +217,8 @@ test "syscall: runtime table has 128 slots and sixty-eight unique implemented ro
     try std.testing.expectEqualStrings("sys_munmap", entry_info(sys_munmap).?.name);
     // M32 WMS2 (issue #622): slot 65 is the render-server register.
     try std.testing.expectEqualStrings("sys_wmctl", entry_info(sys_wmctl).?.name);
+    // M50 TS1 (issue #1135): slot 68 is the read-only principal report.
+    try std.testing.expectEqualStrings("sys_principal", entry_info(sys_principal).?.name);
 }
 
 test "syscall: adapter decodes x8 and x0-x5 and unknown numbers return ENOSYS" {
@@ -228,13 +232,14 @@ test "syscall: adapter decodes x8 and x0-x5 and unknown numbers return ENOSYS" {
     try std.testing.expectEqual(@as(u64, 1), call_count(sys_ping));
 
     // Unimplemented in-range slots still return ENOSYS (65/66/67 are now
-    // sys_wmctl/sys_time/sys_tty_attach — use 68/69, still unregistered).
-    try std.testing.expect(exceptions.frame_write(&frame, 8, 68));
+    // sys_wmctl/sys_time/sys_tty_attach and 68 is sys_principal — use 69/70,
+    // still unregistered).
+    try std.testing.expect(exceptions.frame_write(&frame, 8, 69));
     try std.testing.expect(handle_svc(&frame, svc_immediate));
     try std.testing.expectEqual(error_result(.enosys), exceptions.frame_read(&frame, 0));
-    try std.testing.expectEqual(@as(u64, 1), call_count(68));
+    try std.testing.expectEqual(@as(u64, 1), call_count(69));
 
-    try std.testing.expect(exceptions.frame_write(&frame, 8, 69));
+    try std.testing.expect(exceptions.frame_write(&frame, 8, 70));
     try std.testing.expect(handle_svc(&frame, svc_immediate));
     try std.testing.expectEqual(error_result(.enosys), exceptions.frame_read(&frame, 0));
 }
@@ -1226,7 +1231,7 @@ test "syscall: counters are monotonic and report is deterministic" {
     var con = mock.console();
     report(&con);
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=68\n" ++
+        "syscalls: slots=64 implemented=69\n" ++
             "  0 sys_ping calls=2\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -1294,7 +1299,8 @@ test "syscall: counters are monotonic and report is deterministic" {
             "  64 sys_munmap calls=0\n" ++
             "  65 sys_wmctl calls=0\n" ++
             "  66 sys_time calls=0\n" ++
-            "  67 sys_tty_attach calls=0\n",
+            "  67 sys_tty_attach calls=0\n" ++
+            "  68 sys_principal calls=0\n",
         mock.contents(),
     );
 }
@@ -3040,7 +3046,8 @@ test "syscall: SYS_TIME (slot 66, #1058) returns the firmware wall-clock epoch" 
 
     // The slot is registered and named in the table.
     try std.testing.expectEqualStrings("sys_time", entry_info(sys_time).?.name);
-    try std.testing.expectEqual(@as(usize, 68), syscall.implemented_count);
+    // M50 TS1 added slot 68 (sys_principal).
+    try std.testing.expectEqual(@as(usize, 69), syscall.implemented_count);
 
     const saved_epoch = timer.boot_epoch_secs;
     const saved_ticks = timer.ticks;
@@ -3057,6 +3064,51 @@ test "syscall: SYS_TIME (slot 66, #1058) returns the firmware wall-clock epoch" 
     timer.boot_epoch_secs = 1_789_043_696; // 2026-09-10 12:34:56 wall-clock
     timer.ticks = 3;
     try std.testing.expectEqual(@as(u64, 1_789_043_699), dispatch(sys_time, .{ 0, 0, 0, 0, 0, 0 }, &frame));
+}
+
+test "syscall: SYS_PRINCIPAL (slot 68, #1135) reports uid_user and is read-only" {
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (uid_user)
+    scheduler.start();
+    var frame = fresh_frame();
+    var buf: [principal_bytes]u8 = undefined;
+    set_user_regions(.{ .base = 0, .len = 0 }, .{ .base = @intFromPtr(&buf), .len = buf.len });
+    // An EL1h caller (the shell) is not a process: EINVAL.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_principal, .{ @intFromPtr(&buf), 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+    try std.testing.expectEqual(@as(u64, principal_bytes), dispatch(sys_principal, .{ @intFromPtr(&buf), 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(process.uid_user, std.mem.readInt(u32, buf[0..4], .little));
+    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, buf[4..8], .little));
+    // A bad buffer is EFAULT, never a crash or a fabricated identity.
+    try std.testing.expectEqual(error_result(.efault), dispatch(sys_principal, .{ uaccess.diagnostic_unmapped, 0, 0, 0, 0, 0 }, &frame));
+}
+
+test "syscall: SYS_PRINCIPAL reports an explicit uid_system principal" {
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (uid_user)
+    var kstack: [scheduler.task_stack_size]u8 align(16) = undefined;
+    const sys_pid = process.create_as("SYS.BIN", .{ .entry_va = 0x400000, .content_len = 64 }, .{}, .{}, .{ .uid = process.uid_system, .caps = process.kernel_caps }).?;
+    const sys_task = scheduler.register_exec_user(userspace.text_va, 0x4000_0000, 100, 0x8000_0000, 8192, &kstack, 0, 0).?;
+    _ = process.bind(sys_pid, sys_task);
+    scheduler.start();
+    var frame = fresh_frame();
+    var buf: [principal_bytes]u8 = undefined;
+    set_user_regions(.{ .base = 0, .len = 0 }, .{ .base = @intFromPtr(&buf), .len = buf.len });
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expectEqual(sys_task, scheduler.current_id());
+    try std.testing.expectEqual(@as(u64, principal_bytes), dispatch(sys_principal, .{ @intFromPtr(&buf), 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(process.uid_system, std.mem.readInt(u32, buf[0..4], .little));
+    try std.testing.expectEqual(process.kernel_caps, std.mem.readInt(u32, buf[4..8], .little));
 }
 
 test "syscall: SYS_TTY_ATTACH (slot 67, #1072) attaches the caller's terminal" {

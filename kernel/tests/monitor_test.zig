@@ -1353,8 +1353,8 @@ test "monitor: procs reports the process table with lifecycle and exit status" {
     // running one shows its bound task and stack VA.
     try std.testing.expectEqualStrings(
         "procs: count=2\n" ++
-            "procs: id=0 name=user-el0 state=exited task=reaped stack=0x0000000080000000 exit=7\n" ++
-            "procs: id=1 name=USER.BIN state=running task=2 stack=0x000000001a400000 exit=-\n",
+            "procs: id=0 name=user-el0 uid=1000 caps=0 state=exited task=reaped stack=0x0000000080000000 exit=7\n" ++
+            "procs: id=1 name=USER.BIN uid=1000 caps=0 state=running task=2 stack=0x000000001a400000 exit=-\n",
         env.mock.contents(),
     );
 }
@@ -1443,7 +1443,7 @@ test "monitor: syscalls is registered and reports deterministic rows" {
     try std.testing.expectEqualStrings("numbered syscall table and counters", lookup("syscalls").?.help);
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"syscalls"}));
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=68\n" ++
+        "syscalls: slots=64 implemented=69\n" ++
             "  0 sys_ping calls=0\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -1511,7 +1511,8 @@ test "monitor: syscalls is registered and reports deterministic rows" {
             "  64 sys_munmap calls=0\n" ++
             "  65 sys_wmctl calls=0\n" ++
             "  66 sys_time calls=0\n" ++
-            "  67 sys_tty_attach calls=0\n",
+            "  67 sys_tty_attach calls=0\n" ++
+            "  68 sys_principal calls=0\n",
         env.mock.contents(),
     );
 }

@@ -105,6 +105,24 @@ pub const sys_time_num: u64 = 66;
 /// detach, 1 = serial console) the calling process's controlling terminal
 /// (opened as `/dev/tty`).
 pub const sys_tty_attach_num: u64 = 67;
+/// M50 TS1 (issue #1135, ADR 0024 D10): slot 68 `sys_principal(buf)` — the
+/// read-only principal report: two u32 LE words (uid, caps), 8 bytes.
+pub const sys_principal_num: u64 = 68;
+pub const principal_bytes: usize = 8;
+/// ADR 0024 D1/D5: the principal ids and capability bits (mirror of
+/// `kernel/src/process.zig`). Duplicated here because the kernel module is
+/// not reachable from the userland module graph.
+pub const uid_system: u32 = 0;
+pub const uid_user: u32 = 1000;
+pub const cap_fs_any: u32 = 1 << 0;
+pub const cap_proc_admin: u32 = 1 << 1;
+pub const kernel_caps: u32 = cap_fs_any | cap_proc_admin;
+
+/// A process principal (`sys_principal` wire shape / ADR 0024 D2).
+pub const Principal = extern struct {
+    uid: u32,
+    caps: u32,
+};
 pub const PROT_READ: u64 = 1;
 pub const PROT_WRITE: u64 = 2;
 pub const PROT_EXEC: u64 = 4;
@@ -750,6 +768,20 @@ pub fn tty_attach_window(window_id: u64) i64 {
 /// front-end — the caller owns a TCP listener on `port` (selector 3).
 pub fn tty_attach_net(port: u64) i64 {
     return syscall2(sys_tty_attach_num, 3, port);
+}
+
+/// M50 TS1 (#1135, ADR 0024 D10): read the calling process's principal
+/// through slot 68. Returns null on the host (no `svc`) or on any non-8-byte
+/// result. This is the only EL0 read of identity — there is no setter.
+pub fn principal() ?Principal {
+    if (@import("builtin").os.tag != .freestanding) return null;
+    var buf: [principal_bytes]u8 = undefined;
+    const rc = syscall1(sys_principal_num, @intFromPtr(&buf));
+    if (rc != principal_bytes) return null;
+    return .{
+        .uid = std.mem.readInt(u32, buf[0..4], .little),
+        .caps = std.mem.readInt(u32, buf[4..8], .little),
+    };
 }
 
 /// M46 RC3 (#1111, ADR 0022 D3/D4): attach the net front-end with v1 auth —

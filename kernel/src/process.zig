@@ -45,6 +45,41 @@ pub const max_processes: usize = 16;
 /// like "user-el0").
 pub const name_max: usize = 16;
 
+// ---------------------------------------------------------------------------
+// M50 TS1 (issue #1135, ADR 0024 D1/D2/D5): the process principal.
+// Identity lives on the Process record, is assigned at `create`, is preserved
+// by `exec`, and is NEVER persisted and NEVER settable by a syscall. Two
+// principals exist today: `uid_system` (the kernel's authority) and
+// `uid_user` (every EL0 process). A second uid becomes reachable only through
+// an explicit kernel/monitor spawn (`create_as`), never from EL0.
+// ---------------------------------------------------------------------------
+
+/// ADR 0024 D1: the kernel's authority — the EL1h monitor and kernel-internal
+/// consumers act as it.
+pub const uid_system: u32 = 0;
+/// ADR 0024 D1: every EL0 process spawned today.
+pub const uid_user: u32 = 1000;
+
+/// ADR 0024 D5: the spawn-time capability mask (no elevation syscall exists).
+/// `CAP_FS_ANY` bypasses the D3/D4 file checks; `CAP_PROC_ADMIN` permits
+/// acting on another principal's processes (`sys_kill`, future admin).
+pub const cap_fs_any: u32 = 1 << 0;
+pub const cap_proc_admin: u32 = 1 << 1;
+/// Kernel-internal actors (including the EL1h monitor) hold both caps.
+pub const kernel_caps: u32 = cap_fs_any | cap_proc_admin;
+
+/// A process principal: a single uid plus the capability mask, assigned at
+/// `process.create`. `exec` preserves it; there is no setuid bit and no
+/// syscall that can raise either.
+pub const Principal = struct {
+    uid: u32 = uid_user,
+    caps: u32 = 0,
+};
+
+/// The default spawn principal (ADR 0024 D5): every EL0-initiated spawn is
+/// `uid_user` with no caps. A kernel/monitor spawn may override explicitly.
+pub const default_principal = Principal{};
+
 /// Explicit process lifecycle state (claim 3848 — the process-level mirror
 /// of scheduler.State). A descriptor's state is the ONLY ownership signal:
 /// `created` is loaded-but-unbound, `running` is bound to a live task slot,
@@ -150,6 +185,11 @@ const Process = struct {
     state: State = .free,
     image: Image = .{},
     addr_space: AddrSpace = .{},
+    /// M50 TS1 (#1135, ADR 0024 D2): the process principal — assigned at
+    /// create, preserved by exec, never persisted, never settable by a
+    /// syscall. The `sys_procs` snapshot row deliberately omits it.
+    uid: u32 = uid_user,
+    caps: u32 = 0,
     /// Claim 0826: the executor's EL1 exception stack (allocator-backed
     /// for exec'd programs, the static boot stack for the payload).
     kernel_stack: KernelStack = .{},
@@ -318,18 +358,31 @@ pub fn next_mmap_va(pid: usize, len: u64) u64 {
     return va;
 }
 
-/// Create a process for a loaded program: `name` is copied into the
-/// descriptor (the caller's slice need not outlive the call); `addr_space`
-/// and `kernel_stack` record the pages the process owns. Takes the first
-/// free slot; when the registry is full, recycles the OLDEST exited
-/// process (never a created/running one) and frees its owned pages.
-/// Returns null only when every slot holds a live (created/running)
-/// process.
+/// Create a process for a loaded program with the DEFAULT principal
+/// (`uid_user`, no caps — ADR 0024 D5). See `create_as`.
 pub fn create(
     name: []const u8,
     image: Image,
     addr_space: AddrSpace,
     kernel_stack: KernelStack,
+) ?usize {
+    return create_as(name, image, addr_space, kernel_stack, default_principal);
+}
+
+/// Create a process with an explicit principal. `name` is copied into the
+/// descriptor (the caller's slice need not outlive the call); `addr_space`
+/// and `kernel_stack` record the pages the process owns. Takes the first
+/// free slot; when the registry is full, recycles the OLDEST exited
+/// process (never a created/running one) and frees its owned pages.
+/// Returns null only when every slot holds a live (created/running)
+/// process. M50 TS1 (#1135): `actor` is stored on the descriptor;
+/// `exec` preserves it, and no syscall can change it.
+pub fn create_as(
+    name: []const u8,
+    image: Image,
+    addr_space: AddrSpace,
+    kernel_stack: KernelStack,
+    actor: Principal,
 ) ?usize {
     var id: usize = 0;
     var oldest_exited: ?usize = null;
@@ -353,10 +406,20 @@ pub fn create(
     processes[id].image = image;
     processes[id].addr_space = addr_space;
     processes[id].kernel_stack = kernel_stack;
+    processes[id].uid = actor.uid;
+    processes[id].caps = actor.caps;
     processes[id].state = .created;
     registry_count +%= 1;
     current_id = id;
     return id;
+}
+
+/// The principal a process was created with (ADR 0024 D2). Returns null for
+/// an invalid or free id. This is the ONLY principal accessor — there is no
+/// setter, because no syscall may change uid/caps.
+pub fn principal(id: usize) ?Principal {
+    if (id >= max_processes or processes[id].state == .free) return null;
+    return .{ .uid = processes[id].uid, .caps = processes[id].caps };
 }
 
 /// Bind a created process to its executor task slot (state -> running).
@@ -480,6 +543,10 @@ pub fn count() usize {
 pub const ProcessInfo = struct {
     id: usize,
     name: []const u8,
+    /// M50 TS1 (#1135): the process principal (uid + caps). Reported by the
+    /// monitor; NOT part of the 40-byte `sys_procs` snapshot row.
+    uid: u32 = 0,
+    caps: u32 = 0,
     state: State,
     task_id: ?usize,
     entry_va: u64,
@@ -548,6 +615,8 @@ pub fn info(id: usize) ?ProcessInfo {
     return .{
         .id = id,
         .name = p.name_buf[0..p.name_len],
+        .uid = p.uid,
+        .caps = p.caps,
         .state = p.state,
         .task_id = p.task_id,
         .entry_va = p.image.entry_va,
@@ -1047,4 +1116,50 @@ test "process: mmap regions and dynamic page tracking" {
     // Reap frees all dynamic pages
     _ = on_task_exit(2, 0);
     try std.testing.expect(reap(pid));
+}
+
+// ---------------------------------------------------------------------------
+// M50 TS1 (issue #1135, ADR 0024 D1/D2/D5): principals
+// ---------------------------------------------------------------------------
+
+test "process: principal defaults to uid_user/no caps and create_as assigns explicitly" {
+    init();
+    const p0 = create("USER.BIN", .{}, .{}, .{}).?;
+    const pr0 = principal(p0).?;
+    try std.testing.expectEqual(uid_user, pr0.uid);
+    try std.testing.expectEqual(@as(u32, 0), pr0.caps);
+    try std.testing.expectEqual(uid_user, info(p0).?.uid);
+    try std.testing.expectEqual(@as(u32, 0), info(p0).?.caps);
+    // The explicit kernel principal is reachable only through create_as.
+    const p1 = create_as("SYS.BIN", .{}, .{}, .{}, .{ .uid = uid_system, .caps = kernel_caps }).?;
+    const pr1 = principal(p1).?;
+    try std.testing.expectEqual(uid_system, pr1.uid);
+    try std.testing.expectEqual(kernel_caps, pr1.caps);
+    try std.testing.expectEqual(uid_system, info(p1).?.uid);
+    try std.testing.expectEqual(kernel_caps, info(p1).?.caps);
+    // Invalid / free ids have no principal.
+    try std.testing.expect(principal(max_processes) == null);
+    try std.testing.expect(principal(99) == null);
+}
+
+test "process: sys_procs snapshot row is byte-frozen across principals" {
+    // ADR 0024 D2: identity is additive — the 40-byte sys_procs row never
+    // gains a uid/caps field. Two processes identical but for their
+    // principal must marshal byte-for-byte identical rows.
+    init();
+    var a: [max_processes * snapshot_row_bytes]u8 = [_]u8{0xaa} ** (max_processes * snapshot_row_bytes);
+    var b: [max_processes * snapshot_row_bytes]u8 = [_]u8{0xaa} ** (max_processes * snapshot_row_bytes);
+    _ = create("SAME.BIN", .{ .entry_va = 0x400000, .content_len = 8 }, .{}, .{}).?;
+    const rows_a = snapshot(&a);
+    init();
+    _ = create_as("SAME.BIN", .{ .entry_va = 0x400000, .content_len = 8 }, .{}, .{}, .{ .uid = uid_system, .caps = kernel_caps }).?;
+    const rows_b = snapshot(&b);
+    try std.testing.expectEqual(rows_a, rows_b);
+    try std.testing.expectEqualSlices(
+        u8,
+        a[0 .. rows_a * snapshot_row_bytes],
+        b[0 .. rows_b * snapshot_row_bytes],
+    );
+    // And the row width itself is unchanged.
+    try std.testing.expectEqual(@as(usize, 40), snapshot_row_bytes);
 }

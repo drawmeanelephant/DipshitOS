@@ -4065,6 +4065,12 @@ fn cmd_procs(m: *Monitor, args: []const []const u8) ExecError {
         m.console.print_u64(@intCast(info.id));
         m.console.puts(" name=");
         m.console.puts(info.name);
+        // M50 TS1 (#1135, ADR 0024 D2): the process principal. The kernel
+        // and the EL0 `sys_principal` seam read the SAME descriptor field.
+        m.console.puts(" uid=");
+        m.console.print_u64(@intCast(info.uid));
+        m.console.puts(" caps=");
+        m.console.print_u64(@intCast(info.caps));
         m.console.puts(" state=");
         m.console.puts(process.state_name(info.state));
         m.console.puts(" task=");

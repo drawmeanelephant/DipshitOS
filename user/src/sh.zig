@@ -74,6 +74,14 @@ fn historyEntry(ctx: ?*anyopaque, i: usize) ?[]const u8 {
     return g_editor.history[i][0..g_editor.hist_len[i]];
 }
 
+/// M50 TS1 (#1135): the calling process's principal via slot 68, for the
+/// `whoami`/`id` builtins. The kernel assigns it; nothing here can change it.
+fn principalGet(ctx: ?*anyopaque) ?shell_mod.Principal {
+    _ = ctx;
+    const p = abi.principal() orelse return null;
+    return .{ .uid = p.uid, .caps = p.caps };
+}
+
 /// Tab completion source for the SH1 editor: builtins + aliases + share apps
 /// in command position, share files in argument position (SH3).
 fn shellComplete(line: []const u8, cursor: usize, index: usize) ?tty.CompletionMatch {
@@ -633,6 +641,9 @@ pub export fn _start(argc: u64, argv_va: u64) callconv(.c) noreturn {
 
     g_shell = shell_mod.Shell.init();
     g_shell.history = .{ .count_fn = historyCount, .entry_fn = historyEntry };
+    // M50 TS1 (#1135): `whoami`/`id` read the caller's principal through
+    // slot 68 (the kernel-assigned uid/caps).
+    g_shell.principal = .{ .get_fn = principalGet };
     g_editor = .{ .completer = shellComplete };
     // SH8 (#1084): the settings `prompt` key drives the login shell too.
     applyPromptFromSettings();

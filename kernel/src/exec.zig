@@ -263,7 +263,15 @@ pub fn argv_va_for(content_len: usize) u64 {
 /// ESP stays the fallback (dual path until HF6 deletes the FAT app path),
 /// so every default boot is byte-identical.
 pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
-    return exec_file_impl(name, args, null);
+    return exec_file_impl(name, args, null, process.default_principal);
+}
+
+/// `exec_file` with an explicit spawn principal (M50 TS1, issue #1135,
+/// ADR 0024 D2/D5). `exec` preserves the caller's uid/caps by passing them
+/// here; the EL1h monitor uses it for an administrative spawn. No EL0 path
+/// raises privilege — only the kernel can name a principal.
+pub fn exec_file_as(name: []const u8, args: []const []const u8, principal: process.Principal) ExecResult {
+    return exec_file_impl(name, args, null, principal);
 }
 
 /// `exec_file` plus an SMP pin (claim 2369): the spawned task may run ONLY
@@ -273,10 +281,15 @@ pub fn exec_file(name: []const u8, args: []const []const u8) ExecResult {
 /// Pinned user tasks are safe on a secondary core because console TX is
 /// now locked; they stay on their pinned core for their whole lifetime.
 pub fn exec_file_pinned(name: []const u8, args: []const []const u8, pin: usize) ExecResult {
-    return exec_file_impl(name, args, pin);
+    return exec_file_impl(name, args, pin, process.default_principal);
 }
 
-fn exec_file_impl(name: []const u8, args: []const []const u8, pin: ?usize) ExecResult {
+/// `exec_file_pinned` with an explicit spawn principal (M50 TS1).
+pub fn exec_file_pinned_as(name: []const u8, args: []const []const u8, pin: usize, principal: process.Principal) ExecResult {
+    return exec_file_impl(name, args, pin, principal);
+}
+
+fn exec_file_impl(name: []const u8, args: []const []const u8, pin: ?usize, principal: process.Principal) ExecResult {
     if (args.len > max_exec_args) return .too_many_args;
     if (name.len == 0) return .not_found;
 
@@ -347,7 +360,7 @@ fn exec_file_impl(name: []const u8, args: []const []const u8, pin: ?usize) ExecR
 
             if (image.interp) |interp_name| {
                 // Dynamic ELF executable (claim 7921): load runtime interpreter (LD.SO), setup auxv and shared library aperture.
-                return exec_dynamic_elf(name, args, program[0..got], image, interp_name, pin);
+                return exec_dynamic_elf(name, args, program[0..got], image, interp_name, pin, principal);
             }
 
             const seg0 = image.segments[0];
@@ -513,7 +526,7 @@ fn exec_file_impl(name: []const u8, args: []const []const u8, pin: ?usize) ExecR
     // exhausted only when every slot holds a live process (no exited
     // descriptor to recycle) — an honest, distinct failure from the pool
     // being full.
-    const proc_id = process.create(
+    const proc_id = process.create_as(
         name,
         .{ .entry_va = entry_va, .content_len = content_len },
         .{
@@ -532,6 +545,7 @@ fn exec_file_impl(name: []const u8, args: []const []const u8, pin: ?usize) ExecR
             .stack_pages = stack_pages,
         },
         .{ .phys = kstack_phys, .pages = kstack_pages },
+        principal,
     ) orelse {
         _ = alloc.free_pages(text_phys, text_pages);
         if (data_pages > 0) _ = alloc.free_pages(data_phys, data_pages);
@@ -584,6 +598,7 @@ fn exec_dynamic_elf(
     image: elf_mod.Image,
     interp_name: []const u8,
     pin: ?usize,
+    principal: process.Principal,
 ) ExecResult {
     if (!scheduler.has_free_slot()) return .pool_full;
 
@@ -814,7 +829,7 @@ fn exec_dynamic_elf(
     uaccess.add_read_region(.{ .base = lib_va, .len = lib_pages * alloc.page_size });
 
     const interp_entry_va = interp_image.base_vaddr + interp_image.entry_rel;
-    const proc_id = process.create(
+    const proc_id = process.create_as(
         name,
         .{ .entry_va = interp_entry_va, .content_len = text_len },
         .{
@@ -837,6 +852,7 @@ fn exec_dynamic_elf(
             .lib_pages = lib_pages,
         },
         .{ .phys = kstack_phys, .pages = kstack_pages },
+        principal,
     ) orelse {
         _ = alloc.free_pages(text_phys, text_pages);
         if (data_pages > 0) _ = alloc.free_pages(data_phys, data_pages);
@@ -1208,6 +1224,9 @@ test "exec: ok path loads, validates, builds the root, and spawns the task" {
     try std.testing.expectEqual(@as(u64, 7), boot_proc.exit_status);
     const exec_proc = process.info(1).?;
     try std.testing.expectEqualStrings("USER.BIN", exec_proc.name);
+    // M50 TS1 (#1135): a plain exec spawns uid_user with no caps.
+    try std.testing.expectEqual(process.uid_user, exec_proc.uid);
+    try std.testing.expectEqual(@as(u32, 0), exec_proc.caps);
     try std.testing.expectEqual(process.State.running, exec_proc.state);
     try std.testing.expectEqual(@as(?usize, 2), exec_proc.task_id);
     try std.testing.expectEqual(@as(u64, 25), exec_proc.content_len);
@@ -1225,6 +1244,39 @@ test "exec: ok path loads, validates, builds the root, and spawns the task" {
     // The loaded bytes landed in the process's OWN text page.
     const text_dst: [*]const u8 = @ptrFromInt(exec_proc.text_phys);
     try std.testing.expectEqualStrings("user: hello from the ESP\n", text_dst[0..25]);
+}
+
+test "exec: exec_file_as assigns an explicit principal (M50 TS1)" {
+    // M50 TS1 (#1135, ADR 0024 D2/D5): only the kernel can name a spawn
+    // principal. `exec_file_as` is the monitor's administrative path; the
+    // EL0 sys_exec path preserves the caller instead (no elevation).
+    virtio_file.set_test_share(null);
+    defer virtio_file.set_test_share(null);
+    arm_allocator();
+    _ = mmu.build_user_root(userspace.text_va, 0x1000, 64, userspace.stack_va, 0x2000, 8192) orelse return error.TestUnexpectedResult;
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0);
+    scheduler.start();
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+    try std.testing.expect(scheduler.exit_current(7)); // user -> idle
+    try std.testing.expect(scheduler.reap(2));
+
+    const img = dsk1("user: hello from the ESP\n", 24, 24 + 25);
+    test_seed("USER.BIN", img[0 .. 24 + 25]);
+    const sys_principal = process.Principal{ .uid = process.uid_system, .caps = process.kernel_caps };
+    try std.testing.expectEqual(ExecResult.ok, exec_file_as("USER.BIN", &.{}, sys_principal));
+    const pid = last_exec_pid().?;
+    const p = process.info(pid).?;
+    try std.testing.expectEqual(process.uid_system, p.uid);
+    try std.testing.expectEqual(process.kernel_caps, p.caps);
+    // The default exec path stays uid_user/no caps.
+    try std.testing.expectEqual(ExecResult.ok, exec_file("USER.BIN", &.{}));
+    const plain = process.info(last_exec_pid().?).?;
+    try std.testing.expectEqual(process.uid_user, plain.uid);
+    try std.testing.expectEqual(@as(u32, 0), plain.caps);
 }
 
 test "exec: pinned exec routes the spawned task to exactly one core" {
