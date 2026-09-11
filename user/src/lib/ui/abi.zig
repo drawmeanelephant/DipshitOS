@@ -740,6 +740,16 @@ pub fn tty_attach(front_end: u64) i64 {
     return syscall1(sys_tty_attach_num, front_end);
 }
 
+/// ADR 0007 slot 8 `sys_wait(target)`: block the calling process until the
+/// process with id `target` exits, then return its exit status. The SH2
+/// shell uses it to run external commands in the foreground and propagate
+/// `$?`. Negative ADR 0007 error on a bad/self/`created` target.
+pub const sys_wait_num: u64 = 8;
+
+pub fn wait_process(pid: u64) i64 {
+    return syscall1(sys_wait_num, pid);
+}
+
 pub const sys_ping_send_num: u64 = 59;
 pub const sys_ping_poll_num: u64 = 60;
 pub const sys_net_stats_num: u64 = 62;
