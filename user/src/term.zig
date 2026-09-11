@@ -155,30 +155,21 @@ fn runLine(session: *tty.Session, raw: []const u8, depth: u32) void {
 pub export fn _start(argc: u64, argv_va: u64) callconv(.c) noreturn {
     ui.write_console(ready_marker);
 
-    // The `.user` window this process owns and renders through (A2/A3).
-    const opened = abi.win_open(win_x, win_y, win_w, win_h);
-    if (opened < 0) {
-        ui.write_console("term: no window\n");
-        ui.exit_process(3);
-    }
-    const win_id: u8 = @intCast(opened);
-
     g_shell = shell_mod.Shell.init();
     _ = g_shell.prompt.set("term> ");
     g_shell.history = .{ .count_fn = historyCount, .entry_fn = historyEntry };
     g_editor = .{};
 
     var session = tty.Session.open() orelse {
-        abi.win_close(win_id);
         ui.write_console("term: no /dev/tty\n");
         ui.exit_process(1);
     };
     // M46 RC3b (#1104): `TERM.BIN net [port] [secret] [allow-ip]` attaches the
     // net front-end (ADR 0020 Amendment B, auth per ADR 0022 D3/D4) instead of
     // the window; the default (no args) is the window front-end, unchanged.
+    // Net mode needs no window, so it attaches before any window is opened.
     if (netargs.parse(argc, argv_va)) |na| {
         if (!session.attachNetAuth(na.port, na.secret, na.allow_ip)) {
-            abi.win_close(win_id);
             session.close();
             ui.write_console("term: net attach failed\n");
             ui.exit_process(2);
@@ -187,6 +178,14 @@ pub export fn _start(argc: u64, argv_va: u64) callconv(.c) noreturn {
         const rm = std.fmt.bufPrint(&rb, "term: remote on {d}\n", .{na.port}) catch "term: remote\n";
         ui.write_console(rm);
     } else {
+        // The `.user` window this process owns and renders through (A2/A3).
+        const opened = abi.win_open(win_x, win_y, win_w, win_h);
+        if (opened < 0) {
+            session.close();
+            ui.write_console("term: no window\n");
+            ui.exit_process(3);
+        }
+        const win_id: u8 = @intCast(opened);
         if (!session.attachWindow(win_id)) {
             abi.win_close(win_id);
             session.close();
