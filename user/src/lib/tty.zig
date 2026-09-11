@@ -76,6 +76,7 @@ pub const Key = union(enum) {
     ctrl_u,
     ctrl_l,
     ctrl_c,
+    ctrl_r,
     tab,
     /// Ctrl-D — the demo uses it as end-of-session.
     eof,
@@ -156,6 +157,7 @@ pub const KeyDecoder = struct {
         if (byte == 0x0b) return .ctrl_k;
         if (byte == 0x15) return .ctrl_u;
         if (byte == 0x0c) return .ctrl_l;
+        if (byte == 0x12) return .ctrl_r;
         if (byte == 0x04) return .eof;
         if (byte == '\t') return .tab;
         if (byte >= 0x20 and byte != 0x7f) return .{ .text = byte };
@@ -177,6 +179,21 @@ pub const LineResult = enum {
     /// Ctrl-D — the caller should end the session.
     eof,
 };
+
+/// One Tab-completion result from an injected completer. Mirrors the M19
+/// kernel shape (`kernel/src/lineedit.zig`).
+pub const CompletionMatch = struct {
+    /// Where in the line the matched token starts.
+    replace_start: usize,
+    /// The replacement text (a long-lived slice owned by the completer).
+    text: []const u8,
+    /// Total candidates for this prefix (drives cycling on repeated Tab).
+    match_count: usize = 1,
+    /// Append a trailing space on a unique match.
+    has_trailing_space: bool = false,
+};
+
+pub const CompleterFn = *const fn (line: []const u8, cursor: usize, index: usize) ?CompletionMatch;
 
 /// A bounded, allocation-free line editor with session history. Feed it raw
 /// bytes (or decoded keys) one at a time; it echoes editing to `out` and
@@ -206,6 +223,24 @@ pub const LineEditor = struct {
 
     decoder: KeyDecoder = .{},
 
+    // Tab completion (SH3). The completer is injected by the shell.
+    completer: ?CompleterFn = null,
+    completing: bool = false,
+    complete_replace_start: usize = 0,
+    complete_orig_token: [max_line]u8 = undefined,
+    complete_orig_token_len: usize = 0,
+    complete_cur_token_len: usize = 0,
+    complete_index: usize = 0,
+    complete_match_count: usize = 0,
+
+    // Reverse-i-search (SH3): search backward through the history ring.
+    searching: bool = false,
+    search_query: [64]u8 = undefined,
+    search_query_len: usize = 0,
+    search_draft: [max_line]u8 = undefined,
+    search_draft_len: usize = 0,
+    search_draft_cursor: usize = 0,
+
     /// Full reset: empty line, clear flags, and any in-progress recall.
     pub fn reset(self: *LineEditor) void {
         self.len = 0;
@@ -214,6 +249,8 @@ pub const LineEditor = struct {
         self.submitted_cr = false;
         self.decoder.reset();
         self.hist_cursor = 0;
+        self.completing = false;
+        self.searching = false;
     }
 
     /// Prepare for the next line after a submit. Keeps the CRLF swallow
@@ -224,16 +261,26 @@ pub const LineEditor = struct {
         self.rejected = false;
         self.decoder.reset();
         self.hist_cursor = 0;
+        self.completing = false;
+        self.searching = false;
     }
 
-    /// Feed one raw byte. Echoes editing onto `out` as it goes.
+    /// Feed one raw byte. Echoes editing onto `out` as it goes. In
+    /// reverse-i-search mode every byte feeds the query matcher instead.
     pub fn feed(self: *LineEditor, out: Output, byte: u8) LineResult {
+        if (self.searching) return self.search_handle(out, byte);
         // The LF half of a CRLF pair is swallowed (one Enter = one line).
         if (self.submitted_cr and byte == '\n') {
             self.submitted_cr = false;
             return .none;
         }
         self.submitted_cr = false;
+        if (byte == 0x12) { // Ctrl+R
+            self.search_enter(out);
+            return .none;
+        }
+        // Any non-Tab byte ends a completion cycle (M19 semantics).
+        if (byte != '\t') self.completing = false;
         const key = self.decoder.feed(byte);
         const result = self.feedKey(out, key);
         if (result == .submitted) self.submitted_cr = (byte == '\r');
@@ -269,9 +316,9 @@ pub const LineEditor = struct {
                 self.reset();
                 return .cancelled;
             },
-            .tab => {
-                // Completion is card SH3; until then Tab is a bell.
-                out.byte(0x07);
+            .tab => return self.complete(out),
+            .ctrl_r => {
+                self.search_enter(out);
                 return .none;
             },
             .eof => return .eof,
@@ -411,6 +458,218 @@ pub const LineEditor = struct {
         self.cursor = 0;
         self.redraw(out, old_len, old_cursor);
         return .none;
+    }
+
+    // -- tab completion (SH3) ----------------------------------------------
+
+    fn complete(self: *LineEditor, out: Output) LineResult {
+        const completer_fn = self.completer orelse {
+            out.byte(0x07); // no completion source wired
+            return .none;
+        };
+        return self.complete_cycle(out, completer_fn);
+    }
+
+    fn complete_cycle(self: *LineEditor, out: Output, completer_fn: CompleterFn) LineResult {
+        const old_len = self.len;
+        const old_cursor = self.cursor;
+
+        if (!self.completing) {
+            const m = completer_fn(self.buffer[0..self.len], self.cursor, 0) orelse {
+                out.byte(0x07);
+                return .none;
+            };
+            if (m.match_count == 0 or m.replace_start > self.cursor) {
+                out.byte(0x07);
+                return .none;
+            }
+
+            const orig_token = self.buffer[m.replace_start..self.cursor];
+            if (orig_token.len > max_line) {
+                out.byte(0x07);
+                return .none;
+            }
+            @memcpy(self.complete_orig_token[0..orig_token.len], orig_token);
+            self.complete_orig_token_len = orig_token.len;
+            self.complete_replace_start = m.replace_start;
+
+            const add_space = (m.match_count == 1 and m.has_trailing_space);
+            const extra_space: usize = if (add_space) 1 else 0;
+            const new_token_len = m.text.len + extra_space;
+            const tail_len = self.len - self.cursor;
+
+            if (m.replace_start + new_token_len + tail_len > max_line) {
+                out.byte(0x07);
+                return .none;
+            }
+
+            if (m.replace_start + new_token_len > self.cursor) {
+                const shift = (m.replace_start + new_token_len) - self.cursor;
+                var i = self.len;
+                while (i > self.cursor) : (i -= 1) {
+                    self.buffer[i - 1 + shift] = self.buffer[i - 1];
+                }
+            } else if (m.replace_start + new_token_len < self.cursor) {
+                const shift = self.cursor - (m.replace_start + new_token_len);
+                var i = self.cursor;
+                while (i < self.len) : (i += 1) {
+                    self.buffer[i - shift] = self.buffer[i];
+                }
+            }
+
+            @memcpy(self.buffer[m.replace_start .. m.replace_start + m.text.len], m.text);
+            if (add_space) {
+                self.buffer[m.replace_start + m.text.len] = ' ';
+            }
+
+            self.cursor = m.replace_start + new_token_len;
+            self.len = m.replace_start + new_token_len + tail_len;
+            self.redraw(out, old_len, old_cursor);
+
+            if (m.match_count > 1) {
+                self.completing = true;
+                self.complete_cur_token_len = m.text.len;
+                self.complete_index = 0;
+                self.complete_match_count = m.match_count;
+            } else {
+                self.completing = false;
+            }
+            return .none;
+        } else {
+            self.complete_index = (self.complete_index + 1) % self.complete_match_count;
+
+            const rep_start = self.complete_replace_start;
+            const orig_len = self.complete_orig_token_len;
+            const cur_token_len = self.complete_cur_token_len;
+            const tail_len = self.len - self.cursor;
+
+            var temp_buf: [max_line]u8 = undefined;
+            @memcpy(temp_buf[0..rep_start], self.buffer[0..rep_start]);
+            @memcpy(temp_buf[rep_start .. rep_start + orig_len], self.complete_orig_token[0..orig_len]);
+            const temp_cursor = rep_start + orig_len;
+            @memcpy(temp_buf[temp_cursor .. temp_cursor + tail_len], self.buffer[self.cursor .. self.cursor + tail_len]);
+            const temp_len = temp_cursor + tail_len;
+
+            const m = completer_fn(temp_buf[0..temp_len], temp_cursor, self.complete_index) orelse {
+                out.byte(0x07);
+                self.completing = false;
+                return .none;
+            };
+
+            const old_token_end = rep_start + cur_token_len;
+            const new_token_end = rep_start + m.text.len;
+            if (new_token_end + tail_len > max_line) {
+                out.byte(0x07);
+                self.completing = false;
+                return .none;
+            }
+
+            if (new_token_end > old_token_end) {
+                const shift = new_token_end - old_token_end;
+                var i = self.len;
+                while (i > old_token_end) : (i -= 1) {
+                    self.buffer[i - 1 + shift] = self.buffer[i - 1];
+                }
+            } else if (new_token_end < old_token_end) {
+                const shift = old_token_end - new_token_end;
+                var i = old_token_end;
+                while (i < self.len) : (i += 1) {
+                    self.buffer[i - shift] = self.buffer[i];
+                }
+            }
+
+            @memcpy(self.buffer[rep_start..new_token_end], m.text);
+            self.complete_cur_token_len = m.text.len;
+            self.cursor = new_token_end;
+            self.len = new_token_end + tail_len;
+            self.redraw(out, old_len, old_cursor);
+            return .none;
+        }
+    }
+
+    // -- reverse-i-search (SH3) --------------------------------------------
+
+    /// Search the history ring newest-first for a line containing `query`.
+    fn search_match(self: *const LineEditor, query: []const u8) ?[]const u8 {
+        if (query.len == 0) return null;
+        var hi: usize = 0;
+        while (hi < self.hist_count) : (hi += 1) {
+            const entry = self.history[hi][0..self.hist_len[hi]];
+            if (std.mem.indexOf(u8, entry, query) != null) return entry;
+        }
+        return null;
+    }
+
+    /// Enter reverse-i-search, saving the draft line for cancel.
+    fn search_enter(self: *LineEditor, out: Output) void {
+        @memcpy(self.search_draft[0..self.len], self.buffer[0..self.len]);
+        self.search_draft_len = self.len;
+        self.search_draft_cursor = self.cursor;
+        self.searching = true;
+        self.search_query_len = 0;
+        self.search_redraw(out);
+    }
+
+    fn search_redraw(self: *LineEditor, out: Output) void {
+        out.write("\r\n(reverse-i-search)`");
+        if (self.search_query_len > 0) {
+            out.write(self.search_query[0..self.search_query_len]);
+        } else {
+            out.write("_");
+        }
+        out.write("`: ");
+        const query = self.search_query[0..self.search_query_len];
+        if (self.search_match(query)) |match| {
+            out.write(match);
+            self.len = @min(match.len, max_line);
+            @memcpy(self.buffer[0..self.len], match[0..self.len]);
+            self.cursor = self.len;
+        } else {
+            out.write("(no match)");
+        }
+    }
+
+    fn search_handle(self: *LineEditor, out: Output, byte: u8) LineResult {
+        switch (byte) {
+            0x1b => { // Esc: cancel, restore the draft
+                self.search_exit(out, false);
+                return .repaint;
+            },
+            0x0d, 0x0a => { // Enter: accept the current match
+                self.search_exit(out, true);
+                return .repaint;
+            },
+            0x7f, 0x08 => { // Backspace: remove the last query byte
+                if (self.search_query_len > 0) {
+                    self.search_query_len -= 1;
+                    self.search_redraw(out);
+                }
+                return .none;
+            },
+            0x03 => { // Ctrl-C: cancel
+                self.search_exit(out, false);
+                return .repaint;
+            },
+            0x0c => return .none, // Ctrl-L: ignore inside search
+            else => {
+                if (byte >= 0x20 and byte != 0x7f and self.search_query_len < self.search_query.len) {
+                    self.search_query[self.search_query_len] = byte;
+                    self.search_query_len += 1;
+                    self.search_redraw(out);
+                }
+                return .none;
+            },
+        }
+    }
+
+    fn search_exit(self: *LineEditor, out: Output, accept: bool) void {
+        self.searching = false;
+        if (!accept) {
+            @memcpy(self.buffer[0..self.search_draft_len], self.search_draft[0..self.search_draft_len]);
+            self.len = self.search_draft_len;
+            self.cursor = self.search_draft_cursor;
+        }
+        out.write("\r\n");
     }
 
     // -- history -----------------------------------------------------------
@@ -854,4 +1113,116 @@ test "tty: Session.open is a thin facade (no syscall executes on host)" {
     try std.testing.expect(!session.attached);
     session.close();
     try std.testing.expect(!session.valid);
+}
+
+fn uniqueCompleter(line: []const u8, cursor: usize, index: usize) ?CompletionMatch {
+    _ = index;
+    var start = cursor;
+    while (start > 0 and line[start - 1] != ' ') start -= 1;
+    return .{ .replace_start = start, .text = "example", .match_count = 1, .has_trailing_space = true };
+}
+
+fn cycleCompleter(line: []const u8, cursor: usize, index: usize) ?CompletionMatch {
+    var start = cursor;
+    while (start > 0 and line[start - 1] != ' ') start -= 1;
+    const prefix = line[start..cursor];
+    if (std.mem.eql(u8, prefix, "ca")) {
+        const cands = [_][]const u8{ "calc", "cat" };
+        return .{ .replace_start = start, .text = cands[index % cands.len], .match_count = cands.len };
+    }
+    return null;
+}
+
+test "tty: tab completion inserts a unique suffix with a trailing space" {
+    var cap = Capture{};
+    const out = cap.out();
+    var ed = LineEditor{ .completer = uniqueCompleter };
+    for ("exam") |c| _ = ed.feed(out, c);
+    cap.reset();
+    _ = ed.feed(out, '\t');
+    try std.testing.expectEqualStrings("example ", ed.line());
+    try std.testing.expectEqual(@as(usize, 8), ed.cursor);
+    try std.testing.expect(!ed.completing);
+    // The inserted suffix was echoed.
+    try std.testing.expect(std.mem.indexOf(u8, cap.contents(), "ple") != null);
+}
+
+test "tty: multi-match completion cycles candidates on repeated Tab" {
+    var cap = Capture{};
+    const out = cap.out();
+    var ed = LineEditor{ .completer = cycleCompleter };
+    for ("ca") |c| _ = ed.feed(out, c);
+    // First Tab -> "calc".
+    _ = ed.feed(out, '\t');
+    try std.testing.expectEqualStrings("calc", ed.line());
+    try std.testing.expect(ed.completing);
+    // Second Tab -> "cat".
+    _ = ed.feed(out, '\t');
+    try std.testing.expectEqualStrings("cat", ed.line());
+    // Third Tab -> back to "calc".
+    _ = ed.feed(out, '\t');
+    try std.testing.expectEqualStrings("calc", ed.line());
+    // A non-Tab byte breaks cycling and is inserted.
+    _ = ed.feed(out, ' ');
+    try std.testing.expect(!ed.completing);
+    try std.testing.expectEqualStrings("calc ", ed.line());
+}
+
+test "tty: completion with no source or no match bells and changes nothing" {
+    var cap = Capture{};
+    const out = cap.out();
+    var ed = LineEditor{};
+    for ("ab") |c| _ = ed.feed(out, c);
+    cap.reset();
+    _ = ed.feed(out, '\t');
+    try std.testing.expectEqualStrings("\x07", cap.contents());
+    try std.testing.expectEqualStrings("ab", ed.line());
+    // A completer that returns null also bells.
+    var ed2 = LineEditor{ .completer = cycleCompleter };
+    _ = ed2.feed(out, 'z');
+    cap.reset();
+    _ = ed2.feed(out, '\t');
+    try std.testing.expect(std.mem.indexOf(u8, cap.contents(), "\x07") != null);
+    try std.testing.expectEqualStrings("z", ed2.line());
+}
+
+test "tty: Ctrl+R reverse-i-search finds and accepts a history match" {
+    var cap = Capture{};
+    const out = cap.out();
+    var ed = LineEditor{};
+    for ("status43") |c| _ = ed.feed(out, c);
+    _ = ed.feed(out, '\r');
+    ed.next_line();
+    for ("help") |c| _ = ed.feed(out, c);
+    _ = ed.feed(out, '\r');
+    ed.next_line();
+    cap.reset();
+    // Ctrl+R enters search and draws the UI.
+    try std.testing.expectEqual(LineResult.none, ed.feed(out, 0x12));
+    try std.testing.expect(ed.searching);
+    try std.testing.expect(std.mem.indexOf(u8, cap.contents(), "reverse-i-search") != null);
+    // Typing narrows to the "status43" entry.
+    for ("stat") |c| _ = ed.feed(out, c);
+    try std.testing.expectEqualStrings("status43", ed.line());
+    // Enter accepts (repaint); the line stays runnable.
+    try std.testing.expectEqual(LineResult.repaint, ed.feed(out, '\r'));
+    try std.testing.expect(!ed.searching);
+    try std.testing.expectEqualStrings("status43", ed.line());
+    try std.testing.expectEqual(LineResult.submitted, ed.feed(out, '\r'));
+}
+
+test "tty: Ctrl+R cancel restores the pre-search draft" {
+    var cap = Capture{};
+    const out = cap.out();
+    var ed = LineEditor{};
+    for ("status43") |c| _ = ed.feed(out, c);
+    _ = ed.feed(out, '\r');
+    ed.next_line();
+    for ("draft") |c| _ = ed.feed(out, c);
+    _ = ed.feed(out, 0x12); // enter search (draft saved)
+    for ("stat") |c| _ = ed.feed(out, c); // match loads "status43"
+    try std.testing.expectEqualStrings("status43", ed.line());
+    try std.testing.expectEqual(LineResult.repaint, ed.feed(out, 0x1b)); // Esc cancels
+    try std.testing.expect(!ed.searching);
+    try std.testing.expectEqualStrings("draft", ed.line());
 }

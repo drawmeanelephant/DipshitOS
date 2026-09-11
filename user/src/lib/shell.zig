@@ -539,6 +539,92 @@ pub fn classify(verb: []const u8) ?Builtin {
     return null;
 }
 
+/// The builtin verbs, in the order `help` advertises them. Public so the
+/// completion source can offer them without duplicating the list.
+pub const builtin_names = [_][]const u8{
+    "alias",   "cd",    "echo",  "env",     "exit", "export",
+    "false",   "fg",    "help",  "history", "jobs", "printenv",
+    "prompt",  "pwd",   "set",   "source",  "true", "type",
+    "unalias", "unset", "which",
+};
+
+pub const completion_max: usize = 32;
+
+/// A sorted, de-duplicated set of completion candidates.
+pub const CompletionSet = struct {
+    names: [completion_max][path_max]u8 = undefined,
+    lens: [completion_max]usize = [_]usize{0} ** completion_max,
+    count: usize = 0,
+
+    pub fn at(self: *const CompletionSet, i: usize) []const u8 {
+        return self.names[i][0..self.lens[i]];
+    }
+};
+
+fn addCompletion(prefix: []const u8, name: []const u8, out: *CompletionSet) void {
+    if (name.len == 0 or prefix.len == 0) return;
+    if (name.len < prefix.len) return;
+    if (!std.ascii.startsWithIgnoreCase(name, prefix)) return;
+    var k: usize = 0;
+    while (k < out.count) : (k += 1) {
+        if (std.mem.eql(u8, out.names[k][0..out.lens[k]], name)) return;
+    }
+    if (out.count >= completion_max) return;
+    const n = @min(name.len, path_max);
+    @memcpy(out.names[out.count][0..n], name[0..n]);
+    out.lens[out.count] = n;
+    out.count += 1;
+}
+
+fn sortCompletion(out: *CompletionSet) void {
+    if (out.count <= 1) return;
+    var i: usize = 1;
+    while (i < out.count) : (i += 1) {
+        var j = i;
+        while (j > 0) : (j -= 1) {
+            const a = out.at(j - 1);
+            const b = out.at(j);
+            if (std.mem.order(u8, a, b) != .gt) break;
+            const tmp_name = out.names[j - 1];
+            const tmp_len = out.lens[j - 1];
+            out.names[j - 1] = out.names[j];
+            out.lens[j - 1] = out.lens[j];
+            out.names[j] = tmp_name;
+            out.lens[j] = tmp_len;
+        }
+    }
+}
+
+/// Collect completion candidates for `prefix`: in command position the
+/// builtins, aliases, and share apps (with `.BIN`/`.ELF`/`.SO` basenames);
+/// in argument position the share files. Case-insensitive, de-duplicated,
+/// sorted.
+pub fn complete(
+    prefix: []const u8,
+    is_cmd: bool,
+    aliases: *const AliasTable,
+    listing: []const []const u8,
+    out: *CompletionSet,
+) usize {
+    out.count = 0;
+    if (prefix.len == 0) return 0;
+    if (is_cmd) {
+        for (builtin_names) |b| addCompletion(prefix, b, out);
+        for (aliases.names[0..aliases.count]) |*n| addCompletion(prefix, n.slice(), out);
+    }
+    for (listing) |entry| {
+        addCompletion(prefix, entry, out);
+        if (std.mem.endsWith(u8, entry, ".BIN") or
+            std.mem.endsWith(u8, entry, ".ELF") or
+            std.mem.endsWith(u8, entry, ".SO"))
+        {
+            addCompletion(prefix, entry[0 .. entry.len - 4], out);
+        }
+    }
+    sortCompletion(out);
+    return out.count;
+}
+
 pub const RunRequest = struct {
     candidates: [max_candidates]Program = [_]Program{.{}} ** max_candidates,
     count: usize = 0,
@@ -1123,4 +1209,26 @@ test "shell: type consults the share listing when available" {
     try std.testing.expect(std.mem.indexOf(u8, s.outSlice(), "(present)") != null);
     _ = s.execute("type NOPE.BIN", &listing);
     try std.testing.expect(std.mem.indexOf(u8, s.outSlice(), "(external)") != null);
+}
+
+test "shell: complete offers builtins, aliases and share apps (basenames stripped)" {
+    var aliases = AliasTable{};
+    _ = aliases.set("hello", "echo hi");
+    var set: CompletionSet = undefined;
+    // Command position: alias + builtin, sorted.
+    try std.testing.expectEqual(@as(usize, 2), complete("he", true, &aliases, &.{}, &set));
+    try std.testing.expectEqualStrings("hello", set.at(0));
+    try std.testing.expectEqualStrings("help", set.at(1));
+    // Share app: the full name and the extension-stripped basename.
+    const listing = [_][]const u8{ "STATUS43.BIN", "PS.BIN" };
+    try std.testing.expectEqual(@as(usize, 2), complete("stat", true, &aliases, &listing, &set));
+    try std.testing.expectEqualStrings("STATUS43", set.at(0));
+    try std.testing.expectEqualStrings("STATUS43.BIN", set.at(1));
+    // Argument position: share files only (no builtins).
+    try std.testing.expectEqual(@as(usize, 2), complete("ps", false, &aliases, &listing, &set));
+    try std.testing.expectEqualStrings("PS", set.at(0));
+    try std.testing.expectEqualStrings("PS.BIN", set.at(1));
+    // No match and empty prefix yield nothing.
+    try std.testing.expectEqual(@as(usize, 0), complete("zzz", true, &aliases, &listing, &set));
+    try std.testing.expectEqual(@as(usize, 0), complete("", true, &aliases, &listing, &set));
 }

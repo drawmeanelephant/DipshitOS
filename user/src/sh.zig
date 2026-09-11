@@ -32,6 +32,7 @@ var g_editor: tty.LineEditor = undefined;
 var g_session: tty.Session = undefined;
 var g_entries: [16]abi.DirEntry = undefined;
 var g_listing: [16][]const u8 = undefined;
+var g_complete: shell_mod.CompletionSet = undefined;
 
 fn historyCount(ctx: ?*anyopaque) usize {
     _ = ctx;
@@ -42,6 +43,34 @@ fn historyEntry(ctx: ?*anyopaque, i: usize) ?[]const u8 {
     _ = ctx;
     if (i >= g_editor.hist_count) return null;
     return g_editor.history[i][0..g_editor.hist_len[i]];
+}
+
+/// Tab completion source for the SH1 editor: builtins + aliases + share apps
+/// in command position, share files in argument position (SH3).
+fn shellComplete(line: []const u8, cursor: usize, index: usize) ?tty.CompletionMatch {
+    if (cursor > line.len) return null;
+    var start = cursor;
+    while (start > 0 and line[start - 1] != ' ' and line[start - 1] != '\t') start -= 1;
+    const prefix = line[start..cursor];
+    if (prefix.len == 0) return null;
+    var is_cmd = true;
+    var j = start;
+    while (j > 0) : (j -= 1) {
+        const c = line[j - 1];
+        if (c == ';' or c == '|' or c == '&') break;
+        if (c != ' ' and c != '\t') {
+            is_cmd = false;
+            break;
+        }
+    }
+    const n = shell_mod.complete(prefix, is_cmd, &g_shell.aliases, refreshListing(), &g_complete);
+    if (n == 0) return null;
+    return .{
+        .replace_start = start,
+        .text = g_complete.at(index % n),
+        .match_count = n,
+        .has_trailing_space = (n == 1),
+    };
 }
 
 fn dirNameLen(name: *const [32]u8) usize {
@@ -125,7 +154,7 @@ pub export fn _start() callconv(.c) noreturn {
 
     g_shell = shell_mod.Shell.init();
     g_shell.history = .{ .count_fn = historyCount, .entry_fn = historyEntry };
-    g_editor = .{};
+    g_editor = .{ .completer = shellComplete };
 
     g_session = tty.Session.open() orelse {
         ui.write_console("sh: no /dev/tty\n");
