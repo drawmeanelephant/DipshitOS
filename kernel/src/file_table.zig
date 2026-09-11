@@ -33,6 +33,10 @@ const usb_msc = @import("usb_msc.zig");
 // routed to this process's controlling terminal (open/read/write reuse the
 // frozen file ABI — no new syscall slot).
 const terminal = @import("terminal.zig");
+// #1082 (ADR 0020 Amendment A): a `.tty` write to a WINDOW-bound terminal
+// drains the ring into the window's presentation grid and marks the bound
+// `.user` window damaged (the deferred present) — the compositor blits it.
+const driving_award = @import("driving_award.zig");
 
 pub const max_handles_per_process: usize = 8;
 pub const max_path_len: usize = 64;
@@ -478,11 +482,19 @@ pub fn write(pid: u64, fd: u64, in_buf: []const u8) i64 {
     if (h.is_dir) return -7; // M25 Lane B: never write through a dir handle
 
     // #1072 (ADR 0020): a `.tty` handle appends to the terminal's output
-    // ring; the pump immediately drains it to the serial front-end.
+    // ring; the pump immediately drains it to the serial front-end. #1082
+    // (Amendment A): a WINDOW-bound terminal drains into its presentation
+    // grid and marks the bound `.user` window damaged instead.
     if (h.partition == .tty) {
         const t = terminal.get(h.term_handle) orelse return -2;
         const n = t.write(in_buf);
-        _ = terminal.pumpRuntimeOutput();
+        if (t.window_id) |wid| {
+            if (terminal.pumpWindowOutput(h.term_handle) > 0) {
+                _ = driving_award.user_present(wid);
+            }
+        } else {
+            _ = terminal.pumpRuntimeOutput();
+        }
         return @intCast(n);
     }
 

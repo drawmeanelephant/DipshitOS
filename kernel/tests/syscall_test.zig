@@ -3062,6 +3062,7 @@ test "syscall: SYS_TIME (slot 66, #1058) returns the firmware wall-clock epoch" 
 test "syscall: SYS_TTY_ATTACH (slot 67, #1072) attaches the caller's terminal" {
     userspace.init();
     init(test_writer);
+    driving_award.arm();
     wm_server.init();
     _ = scheduler.init();
     _ = scheduler.register_worker(0x2000);
@@ -3086,9 +3087,22 @@ test "syscall: SYS_TTY_ATTACH (slot 67, #1072) attaches the caller's terminal" {
     try std.testing.expectEqual(@as(u64, 0), dispatch(sys_tty_attach, .{ 1, 0, 0, 0, 0, 0 }, &frame));
     try std.testing.expectEqual(@as(u64, 0), dispatch(sys_tty_attach, .{ 0, 0, 0, 0, 0, 0 }, &frame));
     try std.testing.expect(terminal.attachedSerial() == null);
-    // Reserved window/net front-ends -> ENOSYS; a bad selector -> EINVAL.
-    try std.testing.expectEqual(error_result(.enosys), dispatch(sys_tty_attach, .{ 2, 0, 0, 0, 0, 0 }, &frame));
+
+    // A window front-end (selector 2) requires an existing `.user` window the
+    // caller OWNS (else EINVAL); the net front-end stays reserved (ENOSYS);
+    // a bad selector is EINVAL.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_tty_attach, .{ 2, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.enosys), dispatch(sys_tty_attach, .{ 3, 0, 0, 0, 0, 0 }, &frame));
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_tty_attach, .{ 9, 0, 0, 0, 0, 0 }, &frame));
+
+    // Open a `.user` window owned by the caller (process 0) and attach it as
+    // the terminal's window front-end; the binding is observable and detach
+    // frees it.
+    try std.testing.expectEqual(@as(u64, 2), dispatch(sys_win_open, .{ 32, 32, 256, 192, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_tty_attach, .{ 2, 2, 0, 0, 0, 0 }, &frame));
+    try std.testing.expect(terminal.windowTerminal(2) != null);
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_tty_attach, .{ 0, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expect(terminal.windowTerminal(2) == null);
 
     file_table.reset_process(0);
 }

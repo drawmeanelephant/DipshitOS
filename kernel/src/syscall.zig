@@ -1682,12 +1682,15 @@ fn handle_time(_: Args, _: *exceptions.VectorFrame) u64 {
     return timer.wall_epoch() orelse error_result(.enosys);
 }
 
-/// `sys_tty_attach(front_end)` (slot 67, #1072/ADR 0020): attach (or detach)
-/// the CALLING process's controlling terminal — opened as `/dev/tty` — to a
-/// front-end. a0: 0 = detach, 1 = the serial console (the kernel console).
-/// Window/net front-ends are reserved (ENOSYS) until they land. The process
-/// must have opened `/dev/tty` (else EINVAL); the console can be held by only
-/// one terminal at a time (busy -> EACCES). Returns 0.
+/// `sys_tty_attach(front_end, arg)` (slot 67, #1072/ADR 0020): attach (or
+/// detach) the CALLING process's controlling terminal — opened as
+/// `/dev/tty` — to a front-end. a0: 0 = detach, 1 = the serial console
+/// (the kernel console), 2 = a `.user` window front-end (a1 = window id),
+/// 3 = net (reserved, ENOSYS). The process must have opened `/dev/tty`
+/// (else EINVAL). The console can be held by only one terminal at a time
+/// (busy -> EACCES). For selector 2 the caller must OWN the `.user` window
+/// (`driving_award` ownership) and the window must not already be another
+/// terminal's front-end (EACCES). Returns 0.
 fn handle_tty_attach(args: Args, _: *exceptions.VectorFrame) u64 {
     const pid = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
     const th = file_table.controlling_terminal(pid) orelse return error_result(.einval);
@@ -1704,7 +1707,19 @@ fn handle_tty_attach(args: Args, _: *exceptions.VectorFrame) u64 {
             if (!t.attach(.serial)) return error_result(.eacces);
             return 0;
         },
-        2, 3 => return error_result(.enosys), // window/net front-ends not implemented yet
+        2 => {
+            // #1082 (ADR 0020 Amendment A): the caller attaches its OWN
+            // `.user` window as the terminal's front-end. No cross-process
+            // access: the owner is the single writer of both.
+            if (args[1] > std.math.maxInt(u8)) return error_result(.einval);
+            const wid: u8 = @truncate(args[1]);
+            const w = driving_award.find_user_window(wid) orelse return error_result(.einval);
+            if (w.owner == null or w.owner.? != pid) return error_result(.eacces);
+            if (terminal.attachedSerial() != null) return error_result(.eacces);
+            if (!t.attachWindow(wid)) return error_result(.eacces);
+            return 0;
+        },
+        3 => return error_result(.enosys), // net front-end not implemented yet
         else => return error_result(.einval),
     }
 }
