@@ -31,7 +31,7 @@
 | `tools/status/` | 6 | multiagent coordination gate + claim tooling (class A) |
 | `tools/context/` | 2 | context snapshot helpers |
 | `tools/ragshit/` | 84 | host-side context engine (developer tooling, not guest software) |
-| `tools/gate/` | 195 | M40 vgate harness + specs (GF2+) |
+| `tools/gate/` | 196 | M40 vgate harness + specs (GF2+) |
 
 ## Class-B fleet (discovered from the spec dir)
 
@@ -143,6 +143,7 @@ of them with `just verify-vz`.
 | spec | `live-ps` | 1 run / 6 assert | live-ps.spec -- vgate pilot (seeded share + display/input + repeat): |
 | spec | `live-quote` | 1 run / 7 assert | live-quote.spec -- quoting & escaping: single-quote grouping, |
 | spec | `live-reboot` | 2 run / 7 assert | live-reboot.spec -- live reboot and shutdown from the shell. |
+| spec | `live-remote` | 1 run / 10 assert | live-remote.spec -- M45 card SH7 class-B gate (issue #1083, ADR 0020 B). |
 | spec | `live-resmon` | 1 run / 5 assert | live-resmon.spec -- M22 D10: RESMON.BIN resource monitor on VZ. |
 | spec | `live-roadpops` | 1 run / 11 assert | live-roadpops.spec -- claim 1574 (milestone six, card G3) class-B |
 | spec | `live-sb2-shared-anon` | 1 run / 8 assert | live-sb2-shared-anon.spec -- M33 SB2 (claim 8878) class-B gate: the |

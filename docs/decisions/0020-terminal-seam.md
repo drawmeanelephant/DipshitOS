@@ -221,8 +221,10 @@ most one window binding, and a window at most one terminal.
 # Amendment B — the net (remote TCP) front-end (selector 3)
 
 Status: **ACCEPTED** (design) · Date: 2026-09-11 · Card **SH7** (#1083) ·
-Implementation tracked by #1083. The D1–D5 decisions and Amendment A are
-unchanged; this amendment only fixes the net front-end the original
+Implemented 2026-09-11 (claim #1102): the kernel net front-end + pump,
+`SH.BIN net [port]`, the host-client runner seam (`--net-tcp-connect`), and
+the class-B `live-remote` gate (**PASS**). The D1–D5 decisions and Amendment A
+are unchanged; this amendment only fixes the net front-end the original
 D3/Open-issues left reserved.
 
 ## Context

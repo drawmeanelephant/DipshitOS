@@ -17,6 +17,11 @@
 
 const std = @import("std");
 const console = @import("console.zig");
+const klog = @import("klog.zig");
+// SH7 (#1083, ADR 0020 Amendment B): the net front-end pumps bytes between
+// a terminal and the kernel's single bounded TCP connection.
+const tcp = @import("tcp.zig");
+const virtio_net = @import("virtio_net.zig");
 
 /// Output ring capacity (bytes the owner has written, awaiting a front-end).
 pub const out_capacity: usize = 4096;
@@ -192,6 +197,9 @@ pub const Terminal = struct {
     /// #1082 (ADR 0020 Amendment A): the `.user` window this terminal is a
     /// front-end for, when `front_end == .window`. Null otherwise.
     window_id: ?u8 = null,
+    /// #1083 (ADR 0020 Amendment B): the TCP listen port this terminal is a
+    /// front-end for, when `front_end == .net`. 0 otherwise.
+    net_port: u16 = 0,
 
     /// Append owner output to the ring. Always accepts every byte; when the
     /// ring is full it drops the oldest byte and counts it. Returns bytes
@@ -268,6 +276,7 @@ pub const Terminal = struct {
         self.attached = false;
         self.front_end = .none;
         self.window_id = null;
+        self.net_port = 0;
     }
 
     /// #1082 (ADR 0020 Amendment A): attach this terminal to a `.user`
@@ -286,6 +295,26 @@ pub const Terminal = struct {
         self.attached = true;
         self.front_end = .window;
         self.window_id = window_id;
+        return true;
+    }
+
+    /// #1083 (ADR 0020 Amendment B): attach this terminal to a TCP listener
+    /// on `port`. Exclusive per terminal (D2) and — because the TCP seam is
+    /// a single connection at a time (B2) — at most one terminal may hold
+    /// the net front-end. Idempotent for the same port. The caller must have
+    /// entered LISTEN first.
+    pub fn attachNet(self: *Terminal, port: u16) bool {
+        if (self.attached) {
+            if (self.front_end == .net and self.net_port == port) return true;
+            return false;
+        }
+        for (&terminals) |*o| {
+            if (@intFromPtr(o) == @intFromPtr(self)) continue;
+            if (o.in_use and o.attached and o.front_end == .net) return false;
+        }
+        self.attached = true;
+        self.front_end = .net;
+        self.net_port = port;
         return true;
     }
 
@@ -377,6 +406,15 @@ pub fn detachWindow(window_id: u8) void {
     if (windowTerminal(window_id)) |t| t.detach();
 }
 
+/// True when any live terminal holds the window front-end (used by the
+/// attach syscall to keep serial/window/net mutually exclusive, B2/A2).
+pub fn anyWindowAttached() bool {
+    for (&terminals) |*t| {
+        if (t.in_use and t.attached and t.front_end == .window) return true;
+    }
+    return false;
+}
+
 /// #1082 (A4): drain terminal `handle`'s output ring into its presentation
 /// grid. Returns bytes moved; a no-op when the terminal has no window
 /// binding. The caller marks the bound window damaged (deferred present).
@@ -400,6 +438,78 @@ pub fn screenOf(window_id: u8) ?*const Screen {
     const t = windowTerminal(window_id) orelse return null;
     const h = handleOf(t) orelse return null;
     return &screens[h];
+}
+
+// ---------------------------------------------------------------------------
+// The net front-end pump (SH7 #1083, ADR 0020 Amendment B). The kernel's
+// TCP seam is a single bounded connection; the pump moves bytes between the
+// net-bound terminal and that connection. Incoming segments are drained by
+// `virtio_net.net_rx_drain`, a pending ACK/SYN-ACK is flushed, the received
+// payload is pushed into the terminal input queue, and (on the owner's
+// `/dev/tty` write) the terminal output ring is chunked into TCP data
+// segments. A peer FIN or a dead connection auto-detaches the terminal (B4).
+// Like the serial pump, it is driven from the `/dev/tty` syscall path.
+// ---------------------------------------------------------------------------
+
+/// The terminal currently attached to the net front-end, if any (at most
+/// one — the TCP seam is a single connection at a time).
+pub fn attachedNet() ?*Terminal {
+    for (&terminals) |*t| {
+        if (t.in_use and t.attached and t.front_end == .net) return t;
+    }
+    return null;
+}
+
+/// Pump TCP bytes into the net-attached terminal's input queue: drain the
+/// device RX, flush any built ACK/SYN-ACK, deliver a received payload, and
+/// auto-detach on a peer FIN / dead connection. Returns bytes delivered.
+pub fn pumpNetInput() usize {
+    const t = attachedNet() orelse return 0;
+    virtio_net.net_rx_drain();
+    if (tcp.ack_pending) {
+        var ack_len: usize = 0;
+        if (virtio_net.net_tcp_send(tcp.msg[0..tcp.msg_len], &ack_len) == .ok) {
+            tcp.ack_pending = false;
+            tcp.ack_sent += 1;
+        }
+    }
+    var total: usize = 0;
+    if (tcp.rx_pending) {
+        total += t.pushInput(tcp.take_rx());
+    }
+    // Once the connection is up, flush anything the shell wrote before the
+    // handshake completed (the initial prompt).
+    if (tcp.state == .established and !tcp.peer_fin) _ = pumpNetOutput();
+    if (tcp.peer_fin or tcp.state == .closed) {
+        // The peer disconnected (or the connection died): end the session,
+        // release the listener, and leave the terminal buffered/unattached.
+        tcp.reset();
+        t.detach();
+        klog.line("tty net: detached\n");
+    }
+    return total;
+}
+
+/// Drain the net-attached terminal's output ring into TCP data segments
+/// (chunked to the stack's `payload_max`). A no-op unless the connection is
+/// ESTABLISHED. Returns bytes sent.
+pub fn pumpNetOutput() usize {
+    const t = attachedNet() orelse return 0;
+    if (tcp.state != .established) return 0;
+    var total: usize = 0;
+    var buf: [tcp.payload_max]u8 = undefined;
+    while (true) {
+        const n = t.readOut(&buf);
+        if (n == 0) break;
+        tcp.build_data_msg(buf[0..n]);
+        var out_len: usize = 0;
+        if (virtio_net.net_tcp_send(tcp.msg[0..tcp.msg_len], &out_len) != .ok) break;
+        tcp.data_sent += 1;
+        tcp.advance_snd(@intCast(n));
+        tcp.record_pending();
+        total += n;
+    }
+    return total;
 }
 
 // ---------------------------------------------------------------------------
@@ -718,4 +828,29 @@ test "terminal: window pump drains the output ring into the grid and screenOf fi
     try std.testing.expect(screenOf(99) == null);
     for (&terminals) |*tt| tt.reset();
     for (&screens) |*ss| ss.reset();
+}
+
+test "terminal: net binding is exclusive and single-session (SH7 B2)" {
+    for (&terminals) |*tt| tt.reset();
+    const a = create(1) orelse return error.TestUnexpectedResult;
+    const b = create(2) orelse return error.TestUnexpectedResult;
+    const ta = get(a).?;
+    const tb = get(b).?;
+    try std.testing.expect(ta.attachNet(2323));
+    try std.testing.expectEqual(FrontEnd.net, ta.front_end);
+    try std.testing.expectEqual(@as(u16, 2323), ta.net_port);
+    try std.testing.expect(attachedNet() == ta);
+    // A second terminal may not hold the net front-end (one TCP connection).
+    try std.testing.expect(!tb.attachNet(4242));
+    try std.testing.expect(attachedNet() == ta);
+    // A net terminal may not take a window (front-end exclusive).
+    try std.testing.expect(!ta.attachWindow(5));
+    // Idempotent re-attach of the same port succeeds.
+    try std.testing.expect(ta.attachNet(2323));
+    // Detach frees the single net slot.
+    ta.detach();
+    try std.testing.expect(attachedNet() == null);
+    try std.testing.expectEqual(@as(u16, 0), ta.net_port);
+    try std.testing.expect(tb.attachNet(4242));
+    for (&terminals) |*tt| tt.reset();
 }

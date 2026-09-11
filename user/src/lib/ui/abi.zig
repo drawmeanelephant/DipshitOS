@@ -746,6 +746,12 @@ pub fn tty_attach_window(window_id: u64) i64 {
     return syscall2(sys_tty_attach_num, 2, window_id);
 }
 
+/// #1083 (ADR 0020 Amendment B): host the controlling terminal's net
+/// front-end — the caller owns a TCP listener on `port` (selector 3).
+pub fn tty_attach_net(port: u64) i64 {
+    return syscall2(sys_tty_attach_num, 3, port);
+}
+
 /// ADR 0007 slot 8 `sys_wait(target)`: block the calling process until the
 /// process with id `target` exits, then return its exit status. The SH2
 /// shell uses it to run external commands in the foreground and propagate
