@@ -1731,6 +1731,29 @@ fn handle_tty_attach(args: Args, _: *exceptions.VectorFrame) u64 {
             if (!virtio_net.net_ready) return error_result(.einval);
             if (!virtio_net.arp.ip_set()) return error_result(.einval);
             const port: u16 = @truncate(args[1]);
+            // M46 RC3 (#1111, ADR 0022 D3/D4): optional v1 auth. args[2]/
+            // args[3] are the shared-secret user pointer + length (0/0 =
+            // none; the first line of the session must match it), and args[4]
+            // is an optional source-IP allowlist (a big-endian IPv4 u32; 0 =
+            // any). The secret is copied through uaccess once, into the
+            // bounded terminal field.
+            var secret_buf: [terminal.net_secret_max]u8 = undefined;
+            var secret: []const u8 = &.{};
+            if (args[3] > 0) {
+                if (args[3] > terminal.net_secret_max) return error_result(.einval);
+                const slen: usize = @intCast(args[3]);
+                if (uaccess.copy_in(secret_buf[0..slen], args[2], slen) != .ok) return error_result(.efault);
+                secret = secret_buf[0..slen];
+            }
+            var allow: ?[4]u8 = null;
+            if (args[4] != 0) {
+                allow = .{
+                    @truncate((args[4] >> 24) & 0xff),
+                    @truncate((args[4] >> 16) & 0xff),
+                    @truncate((args[4] >> 8) & 0xff),
+                    @truncate(args[4] & 0xff),
+                };
+            }
             if (terminal.attachedSerial() != null or terminal.anyWindowAttached()) return error_result(.eacces);
             if (terminal.attachedNet()) |cur| {
                 if (cur != t) return error_result(.eacces);
@@ -1744,8 +1767,10 @@ fn handle_tty_attach(args: Args, _: *exceptions.VectorFrame) u64 {
             if (tcp.state != .idle and tcp.state != .listen) return error_result(.eacces);
             tcp.reset();
             tcp.listen(port);
+            tcp.allow_ip = if (allow) |ip| ip else .{ 0, 0, 0, 0 };
+            tcp.allow_ip_set = allow != null;
             tcp.owner_pid = pid;
-            if (!t.attachNet(port)) {
+            if (!t.attachNetAuth(port, secret, allow)) {
                 tcp.reset();
                 return error_result(.eacces);
             }

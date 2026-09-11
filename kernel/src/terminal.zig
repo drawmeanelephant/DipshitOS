@@ -22,6 +22,10 @@ const klog = @import("klog.zig");
 // a terminal and the kernel's single bounded TCP connection.
 const tcp = @import("tcp.zig");
 const virtio_net = @import("virtio_net.zig");
+// M46 RC3 (#1111, ADR 0022): the net pump stamps the TCP RTO clock from the
+// 1 Hz generic timer so the half-open accept timeout (#1105) advances while a
+// net-bound shell waits for its first client.
+const timer = @import("timer.zig");
 
 /// Output ring capacity (bytes the owner has written, awaiting a front-end).
 pub const out_capacity: usize = 4096;
@@ -29,6 +33,12 @@ pub const out_capacity: usize = 4096;
 pub const in_capacity: usize = 256;
 /// How many concurrent terminals the kernel tracks.
 pub const max_terminals: usize = 4;
+
+/// M46 RC3 (#1111, ADR 0022 D3): the longest accepted net-front-end shared
+/// secret (bytes). Bounded so the terminal object stays fixed-array sized;
+/// the challenge buffer is one byte longer to catch the newline terminator.
+pub const net_secret_max: usize = 63;
+pub const net_challenge_max: usize = net_secret_max + 1;
 
 /// #1082 (ADR 0020 Amendment A): the window front-end's presentation grid.
 /// The terminal OBJECT stays a pure byte session (D1); this bounded
@@ -200,6 +210,18 @@ pub const Terminal = struct {
     /// #1083 (ADR 0020 Amendment B): the TCP listen port this terminal is a
     /// front-end for, when `front_end == .net`. 0 otherwise.
     net_port: u16 = 0,
+    /// M46 RC3 (#1111, ADR 0022 D3): the net-front-end v1 auth state. A
+    /// non-empty `net_secret` requires the session's first line to match
+    /// before any byte reaches the shell; `net_authed` is set on success and
+    /// gates delivery. `net_allow_on`/`net_allow_ip` are the optional
+    /// source-IP allowlist (D4). All cleared on detach/reset.
+    net_secret: [net_secret_max]u8 = [_]u8{0} ** net_secret_max,
+    net_secret_len: u8 = 0,
+    net_authed: bool = true, // no secret => open (SH7 behavior)
+    net_challenge: [net_challenge_max]u8 = [_]u8{0} ** net_challenge_max,
+    net_challenge_len: usize = 0,
+    net_allow_ip: [4]u8 = .{ 0, 0, 0, 0 },
+    net_allow_on: bool = false,
 
     /// Append owner output to the ring. Always accepts every byte; when the
     /// ring is full it drops the oldest byte and counts it. Returns bytes
@@ -277,6 +299,17 @@ pub const Terminal = struct {
         self.front_end = .none;
         self.window_id = null;
         self.net_port = 0;
+        self.clearNetAuth();
+    }
+
+    /// M46 RC3 (#1111): drop all net-auth state (secret, challenge, auth
+    /// flag, allowlist). Called on detach and before a fresh bind.
+    pub fn clearNetAuth(self: *Terminal) void {
+        self.net_secret_len = 0;
+        self.net_authed = true;
+        self.net_challenge_len = 0;
+        self.net_allow_on = false;
+        self.net_allow_ip = .{ 0, 0, 0, 0 };
     }
 
     /// #1082 (ADR 0020 Amendment A): attach this terminal to a `.user`
@@ -315,6 +348,26 @@ pub const Terminal = struct {
         self.attached = true;
         self.front_end = .net;
         self.net_port = port;
+        return true;
+    }
+
+    /// M46 RC3 (#1111, ADR 0022 D3/D4): attach the net front-end with v1
+    /// auth — an optional shared `secret` (the session's first line must
+    /// match) and an optional source-IP `allow_ip`. An empty secret means
+    /// "accept immediately" (SH7 behavior, boot default unchanged).
+    pub fn attachNetAuth(self: *Terminal, port: u16, secret: []const u8, allow_ip: ?[4]u8) bool {
+        if (!self.attachNet(port)) return false;
+        self.clearNetAuth();
+        const n = @min(secret.len, net_secret_max);
+        if (n > 0) {
+            @memcpy(self.net_secret[0..n], secret[0..n]);
+            self.net_secret_len = @intCast(n);
+            self.net_authed = false; // the first line must match
+        }
+        if (allow_ip) |ip| {
+            self.net_allow_ip = ip;
+            self.net_allow_on = true;
+        }
         return true;
     }
 
@@ -441,15 +494,39 @@ pub fn screenOf(window_id: u8) ?*const Screen {
 }
 
 // ---------------------------------------------------------------------------
-// The net front-end pump (SH7 #1083, ADR 0020 Amendment B). The kernel's
-// TCP seam is a single bounded connection; the pump moves bytes between the
-// net-bound terminal and that connection. Incoming segments are drained by
-// `virtio_net.net_rx_drain`, a pending ACK/SYN-ACK is flushed, the received
-// payload is pushed into the terminal input queue, and (on the owner's
-// `/dev/tty` write) the terminal output ring is chunked into TCP data
-// segments. A peer FIN or a dead connection auto-detaches the terminal (B4).
-// Like the serial pump, it is driven from the `/dev/tty` syscall path.
+// The net front-end pump (SH7 #1083, ADR 0020 Amendment B; M46 RC3 #1111,
+// ADR 0022). The kernel's TCP seam is a single bounded connection; the pump
+// moves bytes between the net-bound terminal and that connection. Incoming
+// segments are drained, a pending ACK/SYN-ACK is flushed, the received
+// payload is delivered (through the v1 shared-secret gate when set), and (on
+// the owner's `/dev/tty` write) the terminal output ring is chunked into TCP
+// data segments. A peer FIN / dead connection / exhausted SYN-ACK accept
+// auto-detaches the terminal (B4, #1105). The pump is driven from the
+// `/dev/tty` syscall path.
+//
+// The transport is an injectable seam (`NetSeam`) so the byte movement is
+// host-testable without a live NIC (#1105): the default seam drives
+// virtio-net + the 1 Hz timer; tests inject a capture seam.
 // ---------------------------------------------------------------------------
+
+/// The net transport seam: `rxDrain` pulls pending frames from the device,
+/// `tx` transmits one built frame, `now` is the accept-timeout clock. It is a
+/// COMPTIME type parameter, not a runtime function-pointer table — a static
+/// initializer holding code addresses is exactly the unrelocated link-time
+/// pointer hazard the M33 sweep guards against (issue #1042). A host test
+/// injects its own type with the same three functions.
+pub const NetSeam = struct {
+    pub fn rxDrain() void {
+        virtio_net.net_rx_drain();
+    }
+    pub fn tx(bytes: []const u8) bool {
+        var out_len: usize = 0;
+        return virtio_net.net_tcp_send(bytes, &out_len) == .ok;
+    }
+    pub fn now() u64 {
+        return timer.ticks;
+    }
+};
 
 /// The terminal currently attached to the net front-end, if any (at most
 /// one — the TCP seam is a single connection at a time).
@@ -460,26 +537,106 @@ pub fn attachedNet() ?*Terminal {
     return null;
 }
 
+/// Best-effort constant-time byte compare (ADR 0022 D3: intent only — a
+/// length difference leaks, and this is not a side-channel guarantee).
+fn secretEq(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    var diff: u8 = 0;
+    for (a, b) |x, y| diff |= x ^ y;
+    return diff == 0;
+}
+
+/// Build + transmit one raw TCP data segment, advancing the send state.
+/// Returns whether the transport accepted it.
+fn netTx(comptime seam: type, bytes: []const u8) bool {
+    tcp.build_data_msg(bytes);
+    if (!seam.tx(tcp.msg[0..tcp.msg_len])) return false;
+    tcp.data_sent += 1;
+    tcp.advance_snd(bytes.len);
+    tcp.record_pending();
+    return true;
+}
+
+/// Deliver a received payload through the v1 auth gate (ADR 0022 D3). With no
+/// secret set the bytes go straight to the shell; with a secret the FIRST
+/// line is the credential — a match consumes it and authenticates, a mismatch
+/// transmits `auth failed\n`, ends the session, and detaches. Returns bytes
+/// delivered to the terminal input queue.
+fn netAuthConsume(t: *Terminal, comptime seam: type, bytes: []const u8) usize {
+    var delivered: usize = 0;
+    var i: usize = 0;
+    while (i < bytes.len) {
+        if (t.net_authed) {
+            delivered += t.pushInput(bytes[i..]);
+            break;
+        }
+        const b = bytes[i];
+        i += 1;
+        if (b == '\n' or b == '\r') {
+            if (secretEq(t.net_challenge[0..t.net_challenge_len], t.net_secret[0..t.net_secret_len])) {
+                t.net_authed = true;
+                t.net_challenge_len = 0;
+                if (b == '\r' and i < bytes.len and bytes[i] == '\n') i += 1; // CRLF
+                continue; // consume the credential line, deliver the rest
+            }
+            _ = netTx(seam, "auth failed\n");
+            klog.line("tty net: auth failed\n");
+            tcp.reset();
+            t.detach();
+            return delivered;
+        }
+        if (t.net_challenge_len < net_secret_max) {
+            t.net_challenge[t.net_challenge_len] = b;
+            t.net_challenge_len += 1;
+        } else {
+            // Over-long credential line: reject honestly (bounded buffer).
+            _ = netTx(seam, "auth failed\n");
+            klog.line("tty net: auth failed\n");
+            tcp.reset();
+            t.detach();
+            return delivered;
+        }
+    }
+    return delivered;
+}
+
 /// Pump TCP bytes into the net-attached terminal's input queue: drain the
-/// device RX, flush any built ACK/SYN-ACK, deliver a received payload, and
+/// device RX, flush any built ACK/SYN-ACK, deliver a received payload through
+/// the auth gate, enforce the half-open accept timeout (#1105), and
 /// auto-detach on a peer FIN / dead connection. Returns bytes delivered.
 pub fn pumpNetInput() usize {
+    return pumpNetInputSeam(NetSeam);
+}
+
+pub fn pumpNetInputSeam(comptime seam: type) usize {
     const t = attachedNet() orelse return 0;
-    virtio_net.net_rx_drain();
+    seam.rxDrain();
+    tcp.now_ticks = seam.now(); // the #1105 accept-timeout clock
     if (tcp.ack_pending) {
-        var ack_len: usize = 0;
-        if (virtio_net.net_tcp_send(tcp.msg[0..tcp.msg_len], &ack_len) == .ok) {
+        if (seam.tx(tcp.msg[0..tcp.msg_len])) {
             tcp.ack_pending = false;
             tcp.ack_sent += 1;
         }
     }
     var total: usize = 0;
     if (tcp.rx_pending) {
-        total += t.pushInput(tcp.take_rx());
+        total += netAuthConsume(t, seam, tcp.take_rx());
+    }
+    // #1105: a half-open accept (a SYN whose ACK never arrives) is ended after
+    // a bounded timeout instead of stranding the terminal in `.syn_received`.
+    // A dedicated accept clock (not the client RTO) so the front-end never
+    // retransmits and only ever TXes from the owner's read/write path.
+    if (tcp.state == .syn_received and
+        tcp.now_ticks -| tcp.accept_ticks >= tcp.accept_timeout)
+    {
+        klog.line("tty net: accept timeout\n");
+        tcp.reset();
+        t.detach();
+        return total;
     }
     // Once the connection is up, flush anything the shell wrote before the
     // handshake completed (the initial prompt).
-    if (tcp.state == .established and !tcp.peer_fin) _ = pumpNetOutput();
+    if (tcp.state == .established and !tcp.peer_fin) _ = pumpNetOutputSeam(NetCapture);
     if (tcp.peer_fin or tcp.state == .closed) {
         // The peer disconnected (or the connection died): end the session,
         // release the listener, and leave the terminal buffered/unattached.
@@ -492,21 +649,22 @@ pub fn pumpNetInput() usize {
 
 /// Drain the net-attached terminal's output ring into TCP data segments
 /// (chunked to the stack's `payload_max`). A no-op unless the connection is
-/// ESTABLISHED. Returns bytes sent.
+/// ESTABLISHED and authenticated (output is never leaked before auth).
+/// Returns bytes sent.
 pub fn pumpNetOutput() usize {
+    return pumpNetOutputSeam(NetSeam);
+}
+
+pub fn pumpNetOutputSeam(comptime seam: type) usize {
     const t = attachedNet() orelse return 0;
+    if (!t.net_authed) return 0; // never leak output before auth
     if (tcp.state != .established) return 0;
     var total: usize = 0;
     var buf: [tcp.payload_max]u8 = undefined;
     while (true) {
         const n = t.readOut(&buf);
         if (n == 0) break;
-        tcp.build_data_msg(buf[0..n]);
-        var out_len: usize = 0;
-        if (virtio_net.net_tcp_send(tcp.msg[0..tcp.msg_len], &out_len) != .ok) break;
-        tcp.data_sent += 1;
-        tcp.advance_snd(@intCast(n));
-        tcp.record_pending();
+        if (!netTx(seam, buf[0..n])) break;
         total += n;
     }
     return total;
@@ -853,4 +1011,121 @@ test "terminal: net binding is exclusive and single-session (SH7 B2)" {
     try std.testing.expectEqual(@as(u16, 0), ta.net_port);
     try std.testing.expect(tb.attachNet(4242));
     for (&terminals) |*tt| tt.reset();
+}
+
+// M46 RC3 (#1111) / #1105: the net pump is host-testable through an injected
+// seam. These fixtures drive the auth gate and byte movement with no NIC.
+const NetCapture = struct {
+    var buf: [4096]u8 = undefined;
+    var len: usize = 0;
+    var clock: u64 = 0;
+    fn clear() void {
+        len = 0;
+    }
+    pub fn rxDrain() void {}
+    pub fn tx(bytes: []const u8) bool {
+        if (len + bytes.len > buf.len) return false;
+        @memcpy(buf[len..][0..bytes.len], bytes);
+        len += bytes.len;
+        return true;
+    }
+    pub fn now() u64 {
+        return clock;
+    }
+};
+
+fn netTestSetRx(bytes: []const u8) void {
+    @memcpy(tcp.rx_payload[0..bytes.len], bytes);
+    tcp.rx_len = bytes.len;
+    tcp.rx_pending = true;
+}
+
+fn netTestSent(needle: []const u8) bool {
+    return std.mem.indexOf(u8, NetCapture.buf[0..NetCapture.len], needle) != null;
+}
+
+fn netTestEstablish(port: u16) void {
+    tcp.reset();
+    tcp.listen(port);
+    tcp.state = .established;
+}
+
+test "terminal: net pump gates delivery on the shared secret (M46 RC3)" {
+    for (&terminals) |*tt| tt.reset();
+    tcp.reset();
+    defer tcp.reset();
+    NetCapture.clock = 0;
+    // (1) A wrong secret is rejected: detached, `auth failed` sent, and NO
+    // byte reaches the shell.
+    NetCapture.clear();
+    const h1 = create(3) orelse return error.TestUnexpectedResult;
+    const t1 = get(h1).?;
+    try std.testing.expect(t1.attachNetAuth(2323, "s3cret", null));
+    try std.testing.expect(!t1.net_authed);
+    netTestEstablish(2323);
+    netTestSetRx("nope\nhelp\n");
+    _ = pumpNetInputSeam(NetCapture);
+    try std.testing.expect(attachedNet() == null);
+    try std.testing.expectEqual(@as(usize, 0), t1.pendingInput());
+    try std.testing.expect(netTestSent("auth failed"));
+
+    // (2) The correct secret in the same chunk as a command: the credential
+    // line is consumed, the command is delivered, output stays withheld until
+    // auth and then flows.
+    NetCapture.clear();
+    const h2 = create(4) orelse return error.TestUnexpectedResult;
+    const t2 = get(h2).?;
+    try std.testing.expect(t2.attachNetAuth(2323, "s3cret", null));
+    netTestEstablish(2323);
+    _ = t2.write("prompt> ");
+    try std.testing.expectEqual(@as(usize, 0), pumpNetOutputSeam(NetCapture));
+    try std.testing.expect(!netTestSent("prompt> "));
+    netTestSetRx("s3cret\r\nhelp\n");
+    _ = pumpNetInputSeam(NetCapture);
+    try std.testing.expect(t2.net_authed);
+    var in: [32]u8 = undefined;
+    const n = t2.readInput(&in);
+    try std.testing.expectEqualStrings("help\n", in[0..n]);
+    try std.testing.expect(netTestSent("prompt> ")); // the withheld prompt flushed
+    t2.detach();
+    tcp.reset();
+
+    // (3) No secret = SH7 behavior: bytes flow immediately.
+    NetCapture.clear();
+    const h3 = create(5) orelse return error.TestUnexpectedResult;
+    const t3 = get(h3).?;
+    try std.testing.expect(t3.attachNetAuth(2323, &.{}, null));
+    try std.testing.expect(t3.net_authed);
+    netTestEstablish(2323);
+    netTestSetRx("help\n");
+    _ = pumpNetInputSeam(NetCapture);
+    var in3: [32]u8 = undefined;
+    const n3 = t3.readInput(&in3);
+    try std.testing.expectEqualStrings("help\n", in3[0..n3]);
+
+    for (&terminals) |*tt| tt.reset();
+    tcp.reset();
+}
+
+test "terminal: net pump ends a half-open accept on its timeout (M46 #1105)" {
+    for (&terminals) |*tt| tt.reset();
+    tcp.reset();
+    defer tcp.reset();
+    NetCapture.clear();
+    const h = create(3) orelse return error.TestUnexpectedResult;
+    const t = get(h).?;
+    try std.testing.expect(t.attachNetAuth(2323, &.{}, null));
+    // A SYN was accepted (state syn_received) with the accept clock stamped.
+    tcp.listen(2323);
+    tcp.state = .syn_received;
+    tcp.accept_ticks = 0;
+    NetCapture.clock = tcp.accept_timeout - 1;
+    _ = pumpNetInputSeam(NetCapture);
+    try std.testing.expect(attachedNet() != null); // still waiting for the ACK
+    NetCapture.clock = tcp.accept_timeout;
+    _ = pumpNetInputSeam(NetCapture);
+    try std.testing.expect(attachedNet() == null); // timed out and detached
+    try std.testing.expectEqual(@as(u64, 0), tcp.listen_port);
+    for (&terminals) |*tt| tt.reset();
+    tcp.reset();
 }

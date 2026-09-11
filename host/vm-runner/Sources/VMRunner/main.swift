@@ -361,6 +361,10 @@ var consoleMode = false
 // time — the trusted-LAN MVP before any guest crypto/SSH.
 var consoleTCPPort: UInt16?
 var consoleTCPBind: String = "127.0.0.1"
+// M46 RC1 (#1110, ADR 0022 D2): an optional bridge shared secret. When set
+// (`[host:]port:secret`), the client's first line must equal it, else the
+// bridge writes `console-tcp: auth failed` and closes the client.
+var consoleTCPSecret: String?
 var debugInput = false
 var markerDumpPath: String?
 var nvramConsolePath: String?
@@ -692,18 +696,32 @@ while idx < arguments.count {
         consoleMode = true
         idx += 1
     } else if arg == "--console-tcp", idx + 1 < arguments.count {
-        // #1066 Stage 0: `[host:]port` — bind host (default 127.0.0.1) and
-        // serve the guest console over TCP. Implies console mode (duplex
-        // serial attachment + guest-output tee).
+        // #1066 Stage 0 / M46 RC1 (#1110, ADR 0022 D2): `[host:]port[:secret]`
+        // — bind host (default 127.0.0.1) and serve the guest console over
+        // TCP. The optional secret gates the client's first line. Implies
+        // console mode (duplex serial attachment + guest-output tee).
         let spec = arguments[idx + 1]
-        if let colon = spec.lastIndex(of: ":") {
-            consoleTCPBind = String(spec[spec.startIndex..<colon])
-            consoleTCPPort = UInt16(spec[spec.index(after: colon)...])
-        } else {
-            consoleTCPPort = UInt16(spec)
+        let parts = spec.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
+        var parsed = false
+        switch parts.count {
+        case 1:
+            if let p = UInt16(parts[0]) { consoleTCPPort = p; parsed = true }
+        case 2:
+            if let p = UInt16(parts[0]) { // port:secret
+                consoleTCPPort = p; consoleTCPSecret = parts[1]; parsed = true
+            } else if let p = UInt16(parts[1]) { // host:port
+                consoleTCPBind = parts[0]; consoleTCPPort = p; parsed = true
+            }
+        case 3:
+            if let p = UInt16(parts[1]) { // host:port:secret
+                consoleTCPBind = parts[0]; consoleTCPPort = p; consoleTCPSecret = parts[2]; parsed = true
+            }
+        default:
+            break
         }
-        guard consoleTCPPort != nil else { fail("--console-tcp: invalid port in '\(spec)' (want [host:]port)") }
+        guard parsed else { fail("--console-tcp: invalid spec '\(spec)' (want [host:]port[:secret])") }
         if consoleTCPBind.isEmpty { consoleTCPBind = "127.0.0.1" }
+        if consoleTCPSecret?.isEmpty == true { consoleTCPSecret = nil }
         consoleMode = true
         idx += 2
     } else if arg == "--debug-input" {
@@ -1662,7 +1680,8 @@ if consoleMode {
     print("  serial log: \(serialLogPath)  (guest output teed to terminal + log)")
     print("  interactive input: enabled — stdin → serial attachment (fileHandleForReading non-nil)")
     if let port = consoleTCPPort {
-        print("  console-tcp: \(consoleTCPBind):\(port) — remote console bridge (plaintext; #1066 Stage 0)")
+        let auth = consoleTCPSecret != nil ? ", first-line secret required" : ""
+        print("  console-tcp: \(consoleTCPBind):\(port) — remote console bridge (plaintext; #1066 Stage 0\(auth))")
     }
     print("  NOTE: guest RX is the polled virtio receive queue (claim 6684) — host bytes reach the kernel via the serial attachment")
     print("  controls: Ctrl-C ends the session and restores the terminal; Backspace/Enter are forwarded raw (no host line editing)")
@@ -2601,6 +2620,30 @@ func startTCPConsoleBridge(port: UInt16, bindHost: String) {
             var clen = socklen_t(MemoryLayout<sockaddr>.size)
             let c = accept(s, &caddr, &clen)
             if c < 0 { if errno == EINTR { continue }; break }
+            if let secret = consoleTCPSecret {
+                // M46 RC1: the client's first line is the bridge credential.
+                var line = [UInt8]()
+                var newline = false
+                var one = [UInt8](repeating: 0, count: 1)
+                while line.count <= 128 {
+                    var r: Int
+                    repeat { r = read(c, &one, 1) } while r < 0 && errno == EINTR
+                    if r <= 0 { break }
+                    if one[0] == 0x0a { newline = true; break }
+                    if one[0] == 0x0d { continue }
+                    line.append(one[0])
+                }
+                guard newline, String(decoding: line, as: UTF8.self) == secret else {
+                    let msg = "console-tcp: auth failed\n"
+                    _ = msg.withCString { write(c, $0, strlen($0)) }
+                    close(c)
+                    print("  console-tcp: auth failed (secret mismatch; still listening)")
+                    FileHandle.standardOutput.synchronizeFile()
+                    continue
+                }
+                print("  console-tcp: client authenticated")
+                FileHandle.standardOutput.synchronizeFile()
+            }
             tcpClientLock.lock(); tcpClientFD = c; tcpClientLock.unlock()
             print("  console-tcp: client connected")
             FileHandle.standardOutput.synchronizeFile()

@@ -795,6 +795,17 @@ pub const Session = struct {
         return ok;
     }
 
+    /// M46 RC3 (#1111, ADR 0022 D3/D4): host the net front-end with v1 auth —
+    /// an optional shared `secret` (the session's first line; empty = open)
+    /// and an optional source-IP allowlist (`allow_ip` big-endian u32; 0 =
+    /// any). The secret buffer must outlive the attach call.
+    pub fn attachNetAuth(self: *Session, port: u16, secret: []const u8, allow_ip: u32) bool {
+        const ptr: u64 = if (secret.len > 0) @intFromPtr(secret.ptr) else 0;
+        const ok = abi.tty_attach_net_auth(port, ptr, secret.len, allow_ip) == 0;
+        if (ok) self.attached = true;
+        return ok;
+    }
+
     /// Non-blocking read of the terminal input queue: >0 bytes, 0 when
     /// nothing is pending, <0 on error.
     pub fn read(self: *Session, buf: []u8) i64 {

@@ -35,6 +35,7 @@ VGATE_FMT="boot/src/*.zig kernel/src/*.zig user/src/*.zig build.zig"
 VGATE_RUNNER_FLAGS="" VGATE_REPEAT=1 VGATE_REPEAT_ENV=""
 VGATE_NOTES=() VGATE_FILE_NAMES=() VGATE_FILE_BODIES=()
 VGATE_SETUP_PY=() VGATE_RUN_TAGS=() VGATE_RUN_FLAGS=() VGATE_ALLOW_RC=() VGATE_ASSERTS=()
+VGATE_CLIENT_TAGS=() VGATE_CLIENT_ARGS=()
 
 # --- DSL (the only commands a spec may use) ----------------------------------
 vgate_name() { VGATE_NAME="$1"; VGATE_DESC="${2:-$VGATE_DESC}"; }
@@ -69,12 +70,26 @@ vgate_assert() {
     # vgate_assert TAG KIND [args...] -- kinds: serial-contains STR
     # serial-contains-file FILE | serial-count STR MIN | serial-exact STR N
     # serial-absent STR | serial-echo CMD | output-contains STR |
-    # capture-equals FILE FIXTURE | capture-empty FILE | snapshot GLOB
-    # (python body on stdin) | python (body on stdin, RUN_DIR/VG_SER/VG_TAG env)
+    # client-contains STR | capture-equals FILE FIXTURE | capture-empty FILE |
+    # snapshot GLOB (python body on stdin) | python (body on stdin,
+    # RUN_DIR/VG_SER/VG_TAG env)
     local tag="$1" kind="$2"; shift 2
     local body=""
     case "$kind" in snapshot|python) body="$(cat; echo x)"; body="${body%x}" ;; esac
     VGATE_ASSERTS+=("${tag}"$'\x1f'"${kind}"$'\x1f'"${1:-}"$'\x1f'"${2:-}"$'\x1f'"${body}")
+}
+vgate_client() {
+    # vgate_client TAG -- FLAGS... -- launch tools/lib/vgate-client.py in the
+    # BACKGROUND for the run tagged TAG (M46 RC2, issue #1069): it waits for an
+    # optional serial marker, connects to --addr, sends a fixture, captures the
+    # reply to $RUN_DIR/client-TAG.out, and must exit 0 or the run fails. The
+    # `--` separates the tag from the hook flags. See tools/lib/vgate-client.py
+    # for --addr/--after/--send-file/--send-text/--expect/--expect-fail/--timeout.
+    local tag="$1"; shift
+    [ "${1:-}" = "--" ] || { echo "vgate_client $tag missing -- separator" >&2; exit 2; }
+    shift
+    VGATE_CLIENT_TAGS+=("$tag")
+    VGATE_CLIENT_ARGS+=("$(printf '%q ' "$@")")
 }
 
 # --- load the spec (unknown commands fail under set -e) ----------------------
@@ -173,6 +188,11 @@ vg_assert_one() {
         output-contains)
             grep -a -qF -- "$a1" "$VG_OUT" 2>/dev/null && ok=1
             detail="output-contains [$a1]=$ok" ;;
+        client-contains)
+            local cap="$RUN_DIR/client-$VG_TAG.out"
+            vg_note_evidence "client-$VG_TAG.out"
+            grep -a -qF -- "$a1" "$cap" 2>/dev/null && ok=1
+            detail="client-contains [$a1]=$ok" ;;
         capture-equals)
             local cap="$RUN_DIR/$a1" fix="$RUN_DIR/$a2" tries=0
             vg_note_evidence "$a1"
@@ -228,6 +248,7 @@ while [ "$n" -lt "$REPEAT" ]; do
     for i in "${!VGATE_RUN_TAGS[@]}"; do
         base="${VGATE_RUN_TAGS[$i]}"
         if [ "$REPEAT" -gt 1 ]; then tag="${base}-$(printf '%02d' "$n")"; else tag="$base"; fi
+        client_pid=""
         TOTAL=$((TOTAL + 1))
         echo; echo "=== $VGATE_NAME run $tag ==="
         rm -f "$RUN_DIR/efi-vars.bin" "$RUN_DIR/vm-serial-$tag.log"
@@ -243,6 +264,26 @@ while [ "$n" -lt "$REPEAT" ]; do
             expanded+=("$f")
         done
         set -- "${expanded[@]}"
+        runner_args=("$@")
+        # M46 RC2 (#1069): launch the declared during-run TCP client(s) in the
+        # background BEFORE the VM, so the hook can connect while it boots.
+        # The client's positional args are isolated (runner_args preserves the
+        # VMRunner flags; `$@` is reused inside the loop).
+        for ci in "${!VGATE_CLIENT_TAGS[@]}"; do
+            [ "${VGATE_CLIENT_TAGS[$ci]}" = "$base" ] || continue
+            eval "set -- ${VGATE_CLIENT_ARGS[$ci]}"
+            cexpanded=()
+            for f in "$@"; do
+                f="${f//\$RUN_DIR/$RUN_DIR}"
+                f="${f//\$\{RUN_DIR\}/$RUN_DIR}"
+                cexpanded+=("$f")
+            done
+            set -- "${cexpanded[@]}"
+            RUN_DIR="$RUN_DIR" VG_TAG="$tag" VG_SER="$RUN_DIR/vm-serial-$tag.log" \
+                python3 tools/lib/vgate-client.py "$@" > "$RUN_DIR/client-$tag.log" 2>&1 &
+            client_pid=$!
+        done
+        set -- "${runner_args[@]}"
         host/vm-runner/.build/release/VMRunner "${GATE_RUNNER_ARGS[@]}" \
             --serial "$RUN_DIR/vm-serial-$tag.log" "$@" > "$RUN_DIR/run-$tag.out" 2>&1
         RC=$?
@@ -251,6 +292,13 @@ while [ "$n" -lt "$REPEAT" ]; do
         [ -f "$VG_SER" ] && cp "$VG_SER" "$(art "$VGATE_NAME-serial-$tag.log")" || true
         cp "$VG_OUT" "$(art "$VGATE_NAME-run-$tag.txt")"
         run_ok=1
+        if [ -n "$client_pid" ]; then
+            set +e; wait "$client_pid"; client_rc=$?; set -e
+            echo "$tag: client-rc=$client_rc" | tee -a "$REPORT"
+            [ "$client_rc" = 0 ] || run_ok=0
+            [ -f "$RUN_DIR/client-$tag.out" ] && cp "$RUN_DIR/client-$tag.out" "$(art "$VGATE_NAME-client-$tag.out")" || true
+            [ -f "$RUN_DIR/client-$tag.log" ] && cp "$RUN_DIR/client-$tag.log" "$(art "$VGATE_NAME-client-$tag.log")" || true
+        fi
         allowed_rc="0"
         for arc in "${VGATE_ALLOW_RC[@]}"; do
             [ "${arc%%$'\x1f'*}" = "$base" ] && allowed_rc="${arc#*$'\x1f'}"
