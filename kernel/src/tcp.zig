@@ -160,6 +160,24 @@ pub var rx_pending: bool = false;
 /// but the net terminal front-end uses this to auto-detach on disconnect
 /// (Amendment B, B4). Cleared by `listen`/`release_conn`/`reset`.
 pub var peer_fin: bool = false;
+/// M46 RC3 (#1111, ADR 0022 D4): the optional source-IP allowlist for the
+/// passive-open path. When `allow_ip_set`, a SYN from any other source IP is
+/// refused with an RST (`auth_rejected`) and the listener stays up. Cleared
+/// by `reset()`; set by the net-front-end attach syscall after `listen()`.
+pub var allow_ip: [4]u8 = .{ 0, 0, 0, 0 };
+pub var allow_ip_set: bool = false;
+/// M46 RC3: server connections refused by the source-IP allowlist.
+pub var auth_rejected: u64 = 0;
+/// M46 RC3/#1105: set when the retransmission bound aborts a server SYN-ACK
+/// (a half-open accept — a client sent SYN and never ACKed). A diagnostic for
+/// the monitor/idle-loop RTO poll; the net-front-end pump uses its own
+/// dedicated `accept_ticks` clock instead (it never retransmits).
+pub var accept_aborted: bool = false;
+/// M46 #1105: the half-open accept clock. Stamped when an incoming SYN is
+/// accepted (the pump's `now_ticks` at that moment); the net-front-end pump
+/// detaches when `now_ticks - accept_ticks >= accept_timeout`.
+pub var accept_ticks: u64 = 0;
+pub const accept_timeout: u64 = 30;
 /// The connect-timeout clock. The caller (the shell idle loop + `net
 /// tcp`) stamps `now_ticks` from the 1 Hz generic timer (`timer.ticks`
 /// — seconds) each poll; `start` stamps `syn_ticks`, so the elapsed
@@ -355,6 +373,11 @@ pub fn reset() void {
     rx_len = 0;
     rx_pending = false;
     peer_fin = false;
+    allow_ip = .{ 0, 0, 0, 0 };
+    allow_ip_set = false;
+    auth_rejected = 0;
+    accept_aborted = false;
+    accept_ticks = 0;
     tx_pending = false;
     retx_len = 0;
     tx_ticks = 0;
@@ -505,6 +528,9 @@ pub fn poll_rto() RtoEvent {
     if (now_ticks -| tx_ticks < rto_ticks) return .none;
     if (retx_count >= retx_max) {
         retx_aborted += 1;
+        // #1105: a server SYN-ACK that exhausted its retransmissions is a
+        // half-open accept — flag it so the terminal pump detaches.
+        if (is_server and state == .syn_received) accept_aborted = true;
         release_conn();
         return .abort;
     }
@@ -612,10 +638,24 @@ pub fn handle_rx(frame: []const u8) Event {
         },
         .listen => {
             if ((flags & flag_syn) != 0 and (flags & flag_ack) == 0) {
+                // M46 RC3 (ADR 0022 D4): a SYN from a non-allowlisted source
+                // is refused with an RST+ACK (RFC 793 §3.4 closed-port form)
+                // and the listener stays in LISTEN for the allowed host.
+                if (allow_ip_set and !std.mem.eql(u8, &src, &allow_ip)) {
+                    peer_ip = src;
+                    peer_port = src_port;
+                    @memcpy(&peer_mac, frame[6..12]);
+                    build_msg(0, seq +% 1, flag_rst | flag_ack, &.{});
+                    ack_pending = true;
+                    rst_sent += 1;
+                    auth_rejected += 1;
+                    return .none;
+                }
                 // Incoming client SYN on listening port
                 peer_ip = src;
                 peer_port = src_port;
                 @memcpy(&peer_mac, frame[6..12]);
+                accept_ticks = now_ticks; // #1105 half-open accept clock
                 srv_isn = seq;
                 rcv_nxt = srv_isn +% 1;
                 isn = 0x54321098; // Server ISN

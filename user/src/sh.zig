@@ -24,41 +24,21 @@ const tty = @import("lib/tty.zig");
 const shell_mod = @import("lib/shell.zig");
 const pipe = @import("lib/pipe.zig");
 const script = @import("lib/script.zig");
+const netargs = @import("lib/netargs.zig");
 
 pub const ready_marker: []const u8 = "sh: ready\n";
 pub const attached_marker: []const u8 = "sh: attached\n";
 pub const bye_marker: []const u8 = "sh: bye\n";
 pub const exit_status: u64 = 70;
 /// SH7 (#1083): the default TCP port when `exec SH.BIN net` gives no port.
-pub const default_net_port: u16 = 2323;
+pub const default_net_port: u16 = netargs.default_port;
+/// M46 RC3 (#1111): the shared `net [port] [secret] [allow-ip]` parser.
+pub const NetArgs = netargs.Args;
+pub const parseNetArgs = netargs.parse;
 /// SH8 (#1084): the login startup script run once before the first prompt.
 pub const startup_path: []const u8 = "STARTUP.SH";
 /// SH8: the kernel settings file (for the `prompt` key).
 pub const settings_path: []const u8 = "SETTINGS.TXT";
-
-/// Read one 32-byte NUL-terminated argv slot from the kernel-packaged block
-/// (card 3e entry contract: argc in x0, the block VA in x1).
-fn argSlot(block: [*]const u8, i: usize) []const u8 {
-    const slot = (block + i * 32)[0..32];
-    var n: usize = 0;
-    while (n < slot.len and slot[n] != 0) n += 1;
-    return slot[0..n];
-}
-
-/// SH7: the optional front-end argument. `SH.BIN` with no args keeps the
-/// serial console (boot default, unchanged); `SH.BIN net [port]` hosts the
-/// net front-end (ADR 0020 Amendment B). Returns the port, or null for the
-/// serial default.
-fn parseNetPort(argc: u64, argv_va: u64) ?u16 {
-    if (argc == 0 or argv_va == 0) return null;
-    const block: [*]const u8 = @ptrFromInt(argv_va);
-    if (!std.mem.eql(u8, argSlot(block, 0), "net")) return null;
-    if (argc >= 2) {
-        const arg = argSlot(block, 1);
-        if (arg.len > 0) return std.fmt.parseInt(u16, arg, 10) catch null;
-    }
-    return default_net_port;
-}
 
 /// All heavy state is BSS, not the task stack (the kernel learned this with
 /// its own shell: a bounded editor/history ring plus tables is large).
@@ -500,17 +480,21 @@ pub export fn _start(argc: u64, argv_va: u64) callconv(.c) noreturn {
         ui.write_console("sh: no /dev/tty\n");
         ui.exit_process(1);
     };
-    // SH7 (#1083, ADR 0020 Amendment B): `SH.BIN net [port]` hosts the net
-    // front-end; the default (no args) is the serial console, unchanged.
-    if (parseNetPort(argc, argv_va)) |port| {
-        if (!g_session.attachNet(port)) {
+    // SH7 (#1083, ADR 0020 Amendment B): `SH.BIN net [port] [secret]
+    // [allow-ip]` hosts the net front-end; the default (no args) is the
+    // serial console, unchanged. M46 RC3 (#1111) adds the optional secret /
+    // source-IP allowlist (ADR 0022 D3/D4).
+    if (parseNetArgs(argc, argv_va)) |na| {
+        if (!g_session.attachNetAuth(na.port, na.secret, na.allow_ip)) {
             ui.write_console("sh: remote attach failed\n");
             g_session.close();
             ui.exit_process(2);
         }
-        var rb: [32]u8 = undefined;
-        const rm = std.fmt.bufPrint(&rb, "sh: remote on {d}\n", .{port}) catch "sh: remote\n";
+        var rb: [48]u8 = undefined;
+        const rm = std.fmt.bufPrint(&rb, "sh: remote on {d}\n", .{na.port}) catch "sh: remote\n";
         ui.write_console(rm);
+        if (na.secret.len > 0) ui.write_console("sh: remote auth=secret\n");
+        if (na.allow_ip != 0) ui.write_console("sh: remote auth=srcip\n");
     } else {
         if (!g_session.attach(.serial)) {
             ui.write_console("sh: attach failed\n");
