@@ -962,7 +962,7 @@ fn cmd_uname(m: *Monitor, args: []const []const u8) ExecError {
 fn cmd_handoff(m: *Monitor, args: []const []const u8) ExecError {
     _ = args;
     const h = &m.state.handoff;
-    m.console.print_line("handoff v2");
+    m.console.print_line("handoff v3");
     const fields = [_]struct { label: []const u8, value: u64 }{
         .{ .label = "magic", .value = h.magic },
         .{ .label = "version", .value = h.version },
@@ -973,6 +973,7 @@ fn cmd_handoff(m: *Monitor, args: []const []const u8) ExecError {
         .{ .label = "stack_base", .value = h.stack_base },
         .{ .label = "stack_size", .value = h.stack_size },
         .{ .label = "flags", .value = h.flags },
+        .{ .label = "boot_epoch", .value = h.boot_epoch_secs },
     };
     for (fields) |field| {
         m.console.puts("  ");

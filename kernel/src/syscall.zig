@@ -101,7 +101,7 @@ pub const slot_count: usize = 128;
 /// M26 N2 (issue #400): slot 62 is the net-stats snapshot.
 /// M29 (issue #598): slots 63/64 are sys_mmap/sys_munmap.
 /// M32 WMS2 (issue #622): slot 65 is sys_wmctl (ADR 0015).
-pub const implemented_count: usize = 66;
+pub const implemented_count: usize = 67;
 /// Card G6 (claim 0487) follow-on (slot 18): the fixed `sys_win_get` shape —
 /// four u32 LE words (x, y, w, h), 16 bytes, marshaled per call and copy_out'd
 /// through uaccess (the procs snapshot pattern).
@@ -284,6 +284,11 @@ pub const sys_munmap: u64 = 64;
 /// 3=REQUEST_PRESENT. Calls from any process other than the registered WM
 /// return EACCES; no WM registered → ENOSYS; unknown cmd → EINVAL.
 pub const sys_wmctl: u64 = 65;
+/// #1058: `sys_time()` returns the current Unix wall-clock seconds (the
+/// boot loader's EFI GetTime epoch advanced by 1 Hz uptime). No arguments;
+/// ENOSYS when the firmware gave no epoch (the caller's uptime fallback).
+/// The first post-WM ADR 0007 slot; the ABI shape is otherwise unchanged.
+pub const sys_time: u64 = 66;
 
 pub const ErrorCode = enum(i64) {
     einval = -1,
@@ -437,6 +442,8 @@ pub fn ensure_table() *const [slot_count]Entry {
         table_storage[sys_munmap] = .{ .name = "sys_munmap", .handler = handle_munmap };
         // M32 WMS2 (issue #622): slot 65 — sys_wmctl (the render-server register).
         table_storage[sys_wmctl] = .{ .name = "sys_wmctl", .handler = handle_wmctl };
+        // #1058: slot 66 — sys_time (the boot EFI GetTime wall clock).
+        table_storage[sys_time] = .{ .name = "sys_time", .handler = handle_time };
         table_ready = true;
     }
     return &table_storage;
@@ -478,7 +485,7 @@ fn doms_of(number: u64) u5 {
         sys_exec => f | k,
         sys_win_open, sys_win_fill, sys_win_present, sys_win_close, sys_win_move, sys_win_raise, sys_win_get, sys_win_query, sys_win_set_visible, sys_win_fill_batch, sys_win_resize, 48, sys_win_raise_front, sys_win_lower_back, 52, sys_win_set_unsaved, sys_win_set_title, sys_drag_read, sys_font_size => w,
         sys_ipc_send, sys_ipc_recv, sys_poll_event, sys_wait_event, sys_timer_set, sys_timer_cancel, sys_notify, sys_wmctl => e,
-        sys_procs, sys_wait, sys_kill, sys_clipboard_set, sys_clipboard_get, sys_audio_info, sys_audio_play, sys_audio_volume, sys_audio_mute, sys_pipe_read, sys_pipe_write, 54, sys_mmap, sys_munmap => k,
+        sys_procs, sys_wait, sys_kill, sys_clipboard_set, sys_clipboard_get, sys_audio_info, sys_audio_play, sys_audio_volume, sys_audio_mute, sys_pipe_read, sys_pipe_write, 54, sys_mmap, sys_munmap, sys_time => k,
         sys_exit => svclock.all_bits,
         else => 0,
     };
@@ -1659,6 +1666,14 @@ fn handle_clipboard_get(args: Args, _: *exceptions.VectorFrame) u64 {
     return @intCast(n);
 }
 
+/// `sys_time()` (slot 66, #1058): return the current Unix wall-clock seconds
+/// — the boot loader's EFI `GetTime` epoch advanced by 1 Hz uptime. No
+/// arguments; ENOSYS when the firmware gave no epoch, so a caller falls back
+/// honestly (TABWM's host `.clock` or uptime). No uaccess, no hardware.
+fn handle_time(_: Args, _: *exceptions.VectorFrame) u64 {
+    return timer.wall_epoch() orelse error_result(.enosys);
+}
+
 /// Milestone 14 (claim 7323): slot 40 — sys_timer_set(delay_ticks)
 /// Arm the CALLING process's app timer to fire ONE TIMER event (kind 9)
 /// into its ADR 0009 queue after `delay_ticks` scheduler ticks. Zero
@@ -2811,17 +2826,6 @@ fn handle_wmctl(args: Args, _: *exceptions.VectorFrame) u64 {
             const n = @min(name.len, cap);
             if (n > 0 and uaccess.copy_out(args[2], name[0..n], n) != .ok) return error_result(.efault);
             return n;
-        },
-        wm_server.wmctl_clock => {
-            // #1056 item 1: the WM reads the real system clock — the boot
-            // EFI GetTime capture advanced by 1 Hz uptime (timer.wall_time_of_day),
-            // wrapped at 24h. Returns LOCAL seconds since midnight; ENOSYS
-            // when the firmware provided no clock (the WM's uptime fallback).
-            // Seat-gated like every other WMCTL command.
-            if (!wm_server.registered()) return error_result(.enosys);
-            if (wm_server.registered_pid() != pid) return error_result(.eacces);
-            const tod = timer.wall_time_of_day() orelse return error_result(.enosys);
-            return tod;
         },
         wm_server.wmctl_dialog => {
             // M32 WMS8 Gate 2 (issue #628): the WM — not the kernel — owns

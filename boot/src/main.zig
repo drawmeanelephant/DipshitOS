@@ -36,6 +36,7 @@
 const std = @import("std");
 const uefi = std.os.uefi;
 const build_options = @import("build_options");
+const efi_time = @import("efi_time.zig"); // #1058: pure EFI_TIME -> Unix epoch
 
 /// Convert a comptime ASCII string into a null-terminated UTF-16LE array as
 /// required by the EFI APIs. (All of our strings are pure ASCII.)
@@ -91,26 +92,22 @@ const HandoffV2 = extern struct {
     stack_base: u64,
     stack_size: u64,
     flags: u64,
-    boot_time_of_day: u64,
+    boot_epoch_secs: u64,
 };
 const handoff_magic: u32 = 0x324B5344; // "DSK2"
-const handoff_version: u32 = 2;
-/// #1056 item 1: sentinel for "no wall-clock time from firmware".
-const no_boot_time: u64 = std.math.maxInt(u64);
+const handoff_version: u32 = 3;
+/// #1058: sentinel for "no wall-clock epoch from firmware".
+const no_boot_epoch: u64 = efi_time.no_epoch;
 const kernel_stack_size: usize = 16 * 1024;
 
-/// #1056 item 1: read the firmware clock through EFI RuntimeServices.GetTime
-/// and return the LOCAL time-of-day as seconds since midnight, or null when
-/// the platform refuses / reports an out-of-range face. GetTime yields the
-/// platform's local broken-down time, so the guest has an epoch with or
-/// without a host share. Best effort — a failure leaves the kernel's
-/// honest uptime fallback in place.
-fn read_boot_time_of_day(st: *const uefi.tables.SystemTable) ?u64 {
-    const got = st.runtime_services.getTime() catch return null;
+/// #1058: read the firmware clock through EFI RuntimeServices.GetTime and
+/// convert the broken-down face to Unix wall-clock seconds. Best effort — a
+/// failed/absent/garbage clock records `no_boot_epoch` (the kernel's honest
+/// uptime fallback) and never aborts the handoff.
+fn read_boot_epoch(st: *const uefi.tables.SystemTable) u64 {
+    const got = st.runtime_services.getTime() catch return no_boot_epoch;
     const t = got[0];
-    if (t.year < 1900 or t.month < 1 or t.month > 12 or t.day < 1 or t.day > 31) return null;
-    if (t.hour > 23 or t.minute > 59 or t.second > 59) return null;
-    return @as(u64, t.hour) * 3600 + @as(u64, t.minute) * 60 + @as(u64, t.second);
+    return efi_time.toEpochSecs(t.year, t.month, t.day, t.hour, t.minute, t.second) orelse no_boot_epoch;
 }
 
 pub fn main() void {
@@ -272,7 +269,7 @@ fn load_and_enter_kernel(st: *const uefi.tables.SystemTable) void {
         .stack_base = stack_base,
         .stack_size = kernel_stack_size,
         .flags = 0,
-        .boot_time_of_day = read_boot_time_of_day(st) orelse no_boot_time,
+        .boot_epoch_secs = read_boot_epoch(st),
     };
 
     // 5. Jump. entry_offset is file-relative (includes the header); with

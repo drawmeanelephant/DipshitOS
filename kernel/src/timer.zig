@@ -67,25 +67,32 @@ var heartbeat_poll: u64 = 0;
 var irq_report_irq: u64 = 0;
 
 // ---------------------------------------------------------------------------
-// Wall clock (#1056 item 1)
+// Wall clock (#1058)
 // ---------------------------------------------------------------------------
-/// Boot-time LOCAL seconds since midnight, captured from the handoff
-/// (EFI RuntimeServices.GetTime in the loader), or `std.math.maxInt(u64)`
-/// when the firmware gave none.
-pub var boot_time_of_day: u64 = std.math.maxInt(u64);
+/// Boot-time Unix wall-clock seconds, captured from the handoff (EFI
+/// RuntimeServices.GetTime in the loader), or `std.math.maxInt(u64)` when
+/// the firmware gave no epoch.
+pub var boot_epoch_secs: u64 = std.math.maxInt(u64);
 
-/// Record the handoff's boot clock once at kernel entry.
-pub fn set_boot_time_of_day(v: u64) void {
-    boot_time_of_day = v;
+/// Record the handoff's boot epoch once at kernel entry.
+pub fn set_boot_epoch_secs(v: u64) void {
+    boot_epoch_secs = v;
 }
 
-/// Current LOCAL seconds since midnight: the boot clock advanced by the
-/// elapsed 1 Hz ticks, wrapping at 24h. Null when no firmware clock was
-/// captured (the honest uptime fallback). Reads two module globals; no
-/// hardware, so it is host-testable via `on_tick`.
-pub fn wall_time_of_day() ?u64 {
-    if (boot_time_of_day == std.math.maxInt(u64)) return null;
-    return (boot_time_of_day + ticks) % 86400;
+/// Current Unix wall-clock seconds: the boot epoch advanced by the elapsed
+/// 1 Hz ticks. Null when no firmware epoch was captured (the honest uptime
+/// fallback). Reads two module globals; no hardware, so it is host-testable
+/// via `on_tick`.
+pub fn wall_epoch() ?u64 {
+    if (boot_epoch_secs == std.math.maxInt(u64)) return null;
+    return boot_epoch_secs + ticks;
+}
+
+/// Current LOCAL seconds since midnight: `wall_epoch() % 86400`. Null when
+/// there is no firmware epoch.
+pub fn local_time_of_day() ?u64 {
+    const e = wall_epoch() orelse return null;
+    return e % 86_400;
 }
 
 /// True once `init` armed the timer on real hardware.
@@ -355,28 +362,34 @@ test "timer: period math for a 1 s tick" {
     try std.testing.expectEqual(@as(u64, 100_000_000), 100_000_000 * period_ns / 1_000_000_000);
 }
 
-test "timer: wall_time_of_day tracks the boot clock and wraps at midnight (#1056)" {
-    const saved_tod = boot_time_of_day;
+test "timer: wall_epoch tracks the boot epoch and local_time_of_day wraps (#1058)" {
+    const saved = boot_epoch_secs;
     const saved_ticks = ticks;
     defer {
-        boot_time_of_day = saved_tod;
+        boot_epoch_secs = saved;
         ticks = saved_ticks;
     }
 
-    // No firmware clock captured: the honest null (uptime fallback).
-    set_boot_time_of_day(std.math.maxInt(u64));
+    // No firmware epoch captured: the honest null (uptime fallback).
+    set_boot_epoch_secs(std.math.maxInt(u64));
     ticks = 0;
-    try std.testing.expectEqual(@as(?u64, null), wall_time_of_day());
+    try std.testing.expectEqual(@as(?u64, null), wall_epoch());
+    try std.testing.expectEqual(@as(?u64, null), local_time_of_day());
 
-    // Boot clock + elapsed seconds.
-    set_boot_time_of_day(23 * 3600 + 59 * 60 + 50);
+    // Boot epoch + elapsed seconds.
+    const boot = 1_789_043_696; // 2026-09-10 12:34:56 wall-clock
+    set_boot_epoch_secs(boot);
     ticks = 0;
-    try std.testing.expectEqual(@as(?u64, 23 * 3600 + 59 * 60 + 50), wall_time_of_day());
-    // 23:59:50 + 20 s wraps to 00:00:10 the next day.
+    try std.testing.expectEqual(@as(?u64, boot), wall_epoch());
+    try std.testing.expectEqual(@as(?u64, 12 * 3600 + 34 * 60 + 56), local_time_of_day());
+
+    // 20 s later is 12:35:16 the same day.
     ticks = 20;
-    try std.testing.expectEqual(@as(?u64, 10), wall_time_of_day());
-    // A full day later is the same face (boot at midnight + 8:15:00).
-    set_boot_time_of_day(0);
-    ticks = 86400 + 8 * 3600 + 15 * 60;
-    try std.testing.expectEqual(@as(?u64, 8 * 3600 + 15 * 60), wall_time_of_day());
+    try std.testing.expectEqual(@as(?u64, boot + 20), wall_epoch());
+    try std.testing.expectEqual(@as(?u64, 12 * 3600 + 35 * 60 + 16), local_time_of_day());
+
+    // A boot at 23:59:50 crosses midnight: 00:00:10 the next day.
+    set_boot_epoch_secs(boot - (12 * 3600 + 34 * 60 + 56) + 23 * 3600 + 59 * 60 + 50);
+    ticks = 20;
+    try std.testing.expectEqual(@as(?u64, 10), local_time_of_day());
 }

@@ -983,9 +983,9 @@ test "monitor: handoff formatting is deterministic and validated" {
     var mon = env.monitor();
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"handoff"}));
     try std.testing.expectEqualStrings(
-        "handoff v2\n" ++
+        "handoff v3\n" ++
             "  magic        0x00000000324b5344\n" ++
-            "  version      0x0000000000000002\n" ++
+            "  version      0x0000000000000003\n" ++
             "  kernel_base  0x000000007e4df000\n" ++
             "  kernel_size  0x00000000000823e8\n" ++
             "  system_table 0x000000000feed000\n" ++
@@ -993,6 +993,7 @@ test "monitor: handoff formatting is deterministic and validated" {
             "  stack_base   0x000000007e520000\n" ++
             "  stack_size   0x0000000000004000\n" ++
             "  flags        0x0000000000000000\n" ++
+            "  boot_epoch   0xffffffffffffffff\n" ++
             "  status       valid\n",
         env.mock.contents(),
     );
@@ -1442,7 +1443,7 @@ test "monitor: syscalls is registered and reports deterministic rows" {
     try std.testing.expectEqualStrings("numbered syscall table and counters", lookup("syscalls").?.help);
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"syscalls"}));
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=66\n" ++
+        "syscalls: slots=64 implemented=67\n" ++
             "  0 sys_ping calls=0\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -1508,7 +1509,8 @@ test "monitor: syscalls is registered and reports deterministic rows" {
             "  62 sys_net_stats calls=0\n" ++
             "  63 sys_mmap calls=0\n" ++
             "  64 sys_munmap calls=0\n" ++
-            "  65 sys_wmctl calls=0\n",
+            "  65 sys_wmctl calls=0\n" ++
+            "  66 sys_time calls=0\n",
         env.mock.contents(),
     );
 }
