@@ -13,7 +13,10 @@
 //! so the RFC 7539 known-answer test vectors are pinned directly in
 //! `zig test` — the §2.2.1 quarter-round state vector, the §2.3.2
 //! block-function vector, and the §2.4.2 114-byte ciphertext vector — and
-//! there is no hidden allocation or host-test surface.
+//! there is no hidden allocation or host-test surface. Since M47
+//! (ADR 0023 D2) the cipher core is SHARED with the userland crypto library
+//! (`user/src/lib/crypto/chacha20.zig`) so there is exactly one ChaCha20 in
+//! the tree; this module keeps only the kernel policy around it.
 //!
 //! The seed layout (64 bytes, all used): key = bytes[0..32] with
 //! bytes[48..64] folded in (XOR into key bytes 16..31), nonce =
@@ -26,78 +29,26 @@
 const std = @import("std");
 const spinlock = @import("spinlock.zig"); // claim 9498 follow-on: cross-core random_bytes/seed
 
-pub const key_len: usize = 32;
-pub const nonce_len: usize = 12;
-pub const block_len: usize = 64;
+// M47 ADR 0023 D2: the ONE ChaCha20 core, shared with userland. A
+// cross-directory relative import is rejected by Zig ("outside module
+// path"), so build.zig exposes the shared file as the named module
+// `crypto_chacha` to both the kernel and the host test roots.
+const chacha20 = @import("crypto_chacha");
+
+pub const key_len: usize = chacha20.key_len;
+pub const nonce_len: usize = chacha20.nonce_len;
+pub const block_len: usize = chacha20.block_len;
 pub const seed_len: usize = 64;
 
-// RFC 7539 §2.3 constants: "expa" "nd 3" "2-by" "te k".
-const c0: u32 = 0x61707865;
-const c1: u32 = 0x3320646e;
-const c2: u32 = 0x79622d32;
-const c3: u32 = 0x6b206574;
+// The cipher core lives in the shared userland module; re-export the two
+// names this module's callers and tests already use.
+pub const quarter_round = chacha20.quarterRound;
+pub const chacha20_block = chacha20.block;
 
 // The claim-5804 fixed user stack VA — the unseeded ASLR default (the
 // boot-time static EL0 payload's root is built before the seed, so it
 // keeps exactly this placement).
 pub const default_stack_va: u64 = 0x8000_0000;
-
-fn rotl(x: u32, n: u5) u32 {
-    return (x << n) | (x >> @intCast(32 - @as(u6, n)));
-}
-
-/// RFC 7539 §2.1 quarter round over four state words addressed by index.
-/// Exposed (pub) for the §2.2.1 state test vector.
-pub fn quarter_round(state: *[16]u32, a: usize, b: usize, c: usize, d: usize) void {
-    state[a] +%= state[b];
-    state[d] ^= state[a];
-    state[d] = rotl(state[d], 16);
-    state[c] +%= state[d];
-    state[b] ^= state[c];
-    state[b] = rotl(state[b], 12);
-    state[a] +%= state[b];
-    state[d] ^= state[a];
-    state[d] = rotl(state[d], 8);
-    state[c] +%= state[d];
-    state[b] ^= state[c];
-    state[b] = rotl(state[b], 7);
-}
-
-/// RFC 7539 §2.3.1/§2.3.2: one 64-byte ChaCha20 block. `key` is 32 bytes,
-/// `counter` the 32-bit block count (word 12), `nonce` 12 bytes (words
-/// 13–15); `out` receives the serialized keystream block.
-pub fn chacha20_block(key: *const [key_len]u8, counter: u32, nonce: *const [nonce_len]u8, out: *[block_len]u8) void {
-    var state: [16]u32 = undefined;
-    state[0] = c0;
-    state[1] = c1;
-    state[2] = c2;
-    state[3] = c3;
-    var i: usize = 0;
-    while (i < 8) : (i += 1) {
-        state[4 + i] = std.mem.readInt(u32, key[i * 4 ..][0..4], .little);
-    }
-    state[12] = counter;
-    var j: usize = 0;
-    while (j < 3) : (j += 1) {
-        state[13 + j] = std.mem.readInt(u32, nonce[j * 4 ..][0..4], .little);
-    }
-    var working = state;
-    var round: usize = 0;
-    while (round < 10) : (round += 1) {
-        quarter_round(&working, 0, 4, 8, 12);
-        quarter_round(&working, 1, 5, 9, 13);
-        quarter_round(&working, 2, 6, 10, 14);
-        quarter_round(&working, 3, 7, 11, 15);
-        quarter_round(&working, 0, 5, 10, 15);
-        quarter_round(&working, 1, 6, 11, 12);
-        quarter_round(&working, 2, 7, 8, 13);
-        quarter_round(&working, 3, 4, 9, 14);
-    }
-    var k: usize = 0;
-    while (k < 16) : (k += 1) {
-        std.mem.writeInt(u32, out[k * 4 ..][0..4], working[k] +% state[k], .little);
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Stream state (module-level BSS — one global CSPRNG, no allocation)
