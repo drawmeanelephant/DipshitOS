@@ -16,6 +16,7 @@
 
 const std = @import("std");
 const pipe = @import("pipe.zig");
+const script = @import("script.zig");
 
 pub const max_args: usize = 16;
 pub const line_max: usize = 256;
@@ -524,23 +525,26 @@ pub const Builtin = enum {
     source,
     jobs,
     fg,
+    break_,
+    continue_,
 };
 
 /// Builtin lookup by verb (the system command boundary, ADR 0021 D3).
 pub fn classify(verb: []const u8) ?Builtin {
     const table = .{
-        .{ "echo", Builtin.echo },       .{ "cat", Builtin.cat },
-        .{ "pwd", Builtin.pwd },         .{ "cd", Builtin.cd },
-        .{ "exit", Builtin.exit },       .{ "env", Builtin.env },
-        .{ "set", Builtin.set },         .{ "unset", Builtin.unset },
-        .{ "export", Builtin.export_ },  .{ "printenv", Builtin.printenv },
-        .{ "alias", Builtin.alias },     .{ "unalias", Builtin.unalias },
-        .{ "history", Builtin.history }, .{ "prompt", Builtin.prompt },
-        .{ "type", Builtin.type_ },      .{ "which", Builtin.which },
-        .{ "true", Builtin.true_ },      .{ "false", Builtin.false_ },
-        .{ "help", Builtin.help },       .{ "source", Builtin.source },
-        .{ ".", Builtin.source },        .{ "jobs", Builtin.jobs },
-        .{ "fg", Builtin.fg },
+        .{ "echo", Builtin.echo },          .{ "cat", Builtin.cat },
+        .{ "pwd", Builtin.pwd },            .{ "cd", Builtin.cd },
+        .{ "exit", Builtin.exit },          .{ "env", Builtin.env },
+        .{ "set", Builtin.set },            .{ "unset", Builtin.unset },
+        .{ "export", Builtin.export_ },     .{ "printenv", Builtin.printenv },
+        .{ "alias", Builtin.alias },        .{ "unalias", Builtin.unalias },
+        .{ "history", Builtin.history },    .{ "prompt", Builtin.prompt },
+        .{ "type", Builtin.type_ },         .{ "which", Builtin.which },
+        .{ "true", Builtin.true_ },         .{ "false", Builtin.false_ },
+        .{ "help", Builtin.help },          .{ "source", Builtin.source },
+        .{ ".", Builtin.source },           .{ "jobs", Builtin.jobs },
+        .{ "fg", Builtin.fg },              .{ "break", Builtin.break_ },
+        .{ "continue", Builtin.continue_ },
     };
     inline for (table) |row| {
         if (std.mem.eql(u8, verb, row[0])) return row[1];
@@ -551,10 +555,11 @@ pub fn classify(verb: []const u8) ?Builtin {
 /// The builtin verbs, in the order `help` advertises them. Public so the
 /// completion source can offer them without duplicating the list.
 pub const builtin_names = [_][]const u8{
-    "alias",    "cat",     "cd",    "echo",  "env",     "exit",
-    "export",   "false",   "fg",    "help",  "history", "jobs",
-    "printenv", "prompt",  "pwd",   "set",   "source",  "true",
-    "type",     "unalias", "unset", "which",
+    "alias", "break",   "cat",    "cd",       "continue", "echo",
+    "env",   "exit",    "export", "false",    "fg",       "fn",
+    "help",  "history", "jobs",   "printenv", "prompt",   "pwd",
+    "set",   "source",  "true",   "type",     "unalias",  "unset",
+    "which",
 };
 
 pub const completion_max: usize = 32;
@@ -656,6 +661,9 @@ pub const Action = union(enum) {
     run: RunRequest,
     /// Read `path` and execute its lines.
     source: SourceRequest,
+    /// Call the function at this `FuncTable` index; the glue runs its body
+    /// commands through the full line interpreter.
+    call: usize,
     /// Leave the shell with this status.
     exit: u8,
 };
@@ -670,8 +678,15 @@ pub const Shell = struct {
     history: HistoryView = .{},
     /// Bound stdin for `cat` (a pipe or `<` redirect); empty = none.
     stdin: []const u8 = &.{},
+    /// SH5 shell functions (`fn NAME(args) { ... }`).
+    funcs: script.FuncTable = .{},
+    /// SH5 loop signals set by `break`/`continue`; the glue's loop runner
+    /// clears them between iterations and reads them after each body.
+    loop_break: bool = false,
+    loop_continue: bool = false,
 
     expand_buf: [line_max * 2]u8 = undefined,
+    arith_buf: [line_max * 2]u8 = undefined,
     scratch: [line_max * 2]u8 = undefined,
     glob_argv: [max_args + 1][]const u8 = undefined,
     glob_names: [glob_max][path_max]u8 = undefined,
@@ -724,7 +739,8 @@ pub const Shell = struct {
     /// candidate list so the 16-entry dir_list cap cannot hide an image.
     pub fn execute(self: *Shell, line: []const u8, listing: []const []const u8) Action {
         self.out.len = 0;
-        const expanded = expandVars(line, &self.expand_buf, &self.env, self.last_status);
+        const arith = script.arithExpand(line, &self.arith_buf);
+        const expanded = expandVars(arith, &self.expand_buf, &self.env, self.last_status);
         var tk = tokenize(expanded, &self.scratch);
         if (tk.too_many) {
             self.emitLine("sh: too many arguments");
@@ -767,7 +783,48 @@ pub const Shell = struct {
         };
 
         if (classify(argv[0])) |b| return self.runBuiltin(b, argv, listing);
+        if (self.funcs.find(argv[0])) |idx| {
+            self.bindFuncArgs(idx, argv);
+            return .{ .call = idx };
+        }
         return runExternal(argv[0]);
+    }
+
+    /// Bind `$0`, `$1..$N` and the declared named arguments for a function
+    /// call (M19 semantics), then the glue runs the body.
+    fn bindFuncArgs(self: *Shell, idx: usize, argv: []const []const u8) void {
+        const f = &self.funcs.funcs[idx];
+        _ = self.env.set("0", f.name[0..f.name_len]);
+        var ai: usize = 1;
+        while (ai < argv.len and ai <= script.func_arg_max) : (ai += 1) {
+            var pn: [4]u8 = undefined;
+            const s = std.fmt.bufPrint(&pn, "{d}", .{ai}) catch continue;
+            _ = self.env.set(s, argv[ai]);
+        }
+        ai = 1;
+        while (ai < argv.len and ai - 1 < f.arg_count) : (ai += 1) {
+            _ = self.env.set(f.argName(ai - 1), argv[ai]);
+        }
+    }
+
+    /// True for a `fn ...` definition line (SH5).
+    pub fn isFuncDef(line: []const u8) bool {
+        if (!std.mem.startsWith(u8, line, "fn")) return false;
+        if (line.len == 2) return true;
+        return line[2] == ' ' or line[2] == '\t' or line[2] == '(';
+    }
+
+    /// Define a shell function from a raw `fn NAME(args) { body }` line.
+    pub fn defineFuncLine(self: *Shell, line: []const u8) bool {
+        if (!isFuncDef(line)) return false;
+        const rest = if (line.len > 2 and (line[2] == ' ' or line[2] == '\t')) line[3..] else line[2..];
+        const def = script.parseFuncDef(rest) orelse return false;
+        return self.funcs.define(def);
+    }
+
+    pub fn clearLoopFlags(self: *Shell) void {
+        self.loop_break = false;
+        self.loop_continue = false;
     }
 
     /// Expand every wildcard-flagged argument against `listing`, byte-sorted
@@ -1051,6 +1108,16 @@ pub const Shell = struct {
                 self.emitLine("fg: no background jobs");
                 self.last_status = 1;
                 return .print;
+            },
+            .break_ => {
+                self.loop_break = true;
+                self.last_status = 0;
+                return .none;
+            },
+            .continue_ => {
+                self.loop_continue = true;
+                self.last_status = 0;
+                return .none;
             },
         }
     }
@@ -1358,4 +1425,46 @@ test "shell: cat emits the bound stdin (pipe / redirect source)" {
     s.setStdin(&.{});
     _ = s.execute("cat", &.{});
     try std.testing.expect(std.mem.indexOf(u8, s.outSlice(), "no input") != null);
+}
+
+test "shell: arithmetic expansion happens during execute" {
+    var s = Shell.init();
+    const a = s.execute("echo $(( (2+3)*4 ))", &.{});
+    try std.testing.expect(a == .print);
+    try std.testing.expectEqualStrings("20\n", s.outSlice());
+    _ = s.execute("echo n=$((7-2))!", &.{});
+    try std.testing.expectEqualStrings("n=5!\n", s.outSlice());
+}
+
+test "shell: fn define + call binds named and positional args" {
+    var s = Shell.init();
+    try std.testing.expect(Shell.isFuncDef("fn greet(name) { echo HELLO-$name }"));
+    try std.testing.expect(s.defineFuncLine("fn greet(name) { echo HELLO-$name }"));
+    const a = s.execute("greet world", &.{});
+    try std.testing.expect(a == .call);
+    const idx = a.call;
+    const f = &s.funcs.funcs[idx];
+    try std.testing.expectEqual(@as(usize, 1), f.body_count);
+    // The glue runs the body command; here we do it directly.
+    const b = s.execute(f.command(0), &.{});
+    try std.testing.expect(b == .print);
+    try std.testing.expectEqualStrings("HELLO-world\n", s.outSlice());
+    // Positional $1 is also bound.
+    _ = s.execute("echo arg=$1", &.{});
+    try std.testing.expectEqualStrings("arg=world\n", s.outSlice());
+    // A non-definition line is not a function definition.
+    try std.testing.expect(!Shell.isFuncDef("find /"));
+}
+
+test "shell: break/continue set the loop signals" {
+    var s = Shell.init();
+    s.clearLoopFlags();
+    _ = s.execute("break", &.{});
+    try std.testing.expect(s.loop_break);
+    s.clearLoopFlags();
+    _ = s.execute("continue", &.{});
+    try std.testing.expect(s.loop_continue);
+    try std.testing.expect(!s.loop_break);
+    s.clearLoopFlags();
+    try std.testing.expect(!s.loop_break and !s.loop_continue);
 }

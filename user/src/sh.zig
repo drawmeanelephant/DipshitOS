@@ -23,6 +23,7 @@ const abi = @import("lib/ui/abi.zig");
 const tty = @import("lib/tty.zig");
 const shell_mod = @import("lib/shell.zig");
 const pipe = @import("lib/pipe.zig");
+const script = @import("lib/script.zig");
 
 pub const ready_marker: []const u8 = "sh: ready\n";
 pub const attached_marker: []const u8 = "sh: attached\n";
@@ -39,6 +40,8 @@ var g_listing: [16][]const u8 = undefined;
 var g_complete: shell_mod.CompletionSet = undefined;
 /// Scratch for a pipeline's stdin / a `<` redirect's file contents.
 var g_io_buf: [4096]u8 = undefined;
+/// Scratch for a line rebuilt after `$( )` substitution.
+var g_subst_buf: [1024]u8 = undefined;
 
 fn historyCount(ctx: ?*anyopaque) usize {
     _ = ctx;
@@ -122,25 +125,33 @@ fn exitShell(status: u8) noreturn {
 }
 
 /// Perform one core action.
-fn perform(action: shell_mod.Action, depth: u32) void {
+fn performAction(action: shell_mod.Action, depth: u32) void {
     switch (action) {
         .none => {},
         .print => g_session.write(g_shell.outSlice()),
         .run => |req| g_shell.last_status = runExternal(&req),
         .source => |req| runSource(req.path.slice(), depth),
+        .call => |idx| runFunction(idx, depth),
         .exit => |status| exitShell(status),
     }
 }
 
+/// Run a function body (already arg-bound by the core).
+fn runFunction(idx: usize, depth: u32) void {
+    const f = &g_shell.funcs.funcs[idx];
+    var i: usize = 0;
+    while (i < f.body_count) : (i += 1) runLine(f.command(i), depth + 1);
+}
+
 fn runSimple(line: []const u8, stdin: []const u8, depth: u32) void {
     g_shell.setStdin(stdin);
-    perform(g_shell.execute(line, refreshListing()), depth);
+    performAction(g_shell.execute(line, refreshListing()), depth);
 }
 
 /// Run a command with its stdout captured (a builtin `print`). External
 /// apps write fd 1 directly and cannot be captured yet — they run through
-/// with a bound notice. Returns a slice into `g_shell.out` valid until the
-/// next execute.
+/// with a bound notice. Function calls run through uncaptured. Returns a
+/// slice into `g_shell.out` valid until the next execute.
 fn capture(line: []const u8, depth: u32) []const u8 {
     g_shell.setStdin(&.{});
     switch (g_shell.execute(line, refreshListing())) {
@@ -153,6 +164,10 @@ fn capture(line: []const u8, depth: u32) []const u8 {
         },
         .source => |req| {
             runSource(req.path.slice(), depth);
+            return &.{};
+        },
+        .call => |idx| {
+            runFunction(idx, depth);
             return &.{};
         },
         .exit => |status| exitShell(status),
@@ -236,7 +251,56 @@ fn runRedirectIn(left: []const u8, file: []const u8, depth: u32) void {
     g_shell.setStdin(&.{});
 }
 
-fn dispatch(line: []const u8, depth: u32) void {
+/// Run a `;`-separated body. Returns true when a `break` was signaled.
+fn runBody(body: []const u8, depth: u32) bool {
+    var cmds: [16][]const u8 = undefined;
+    const n = script.splitCommands(body, &cmds);
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        runLine(cmds[i], depth);
+        if (g_shell.loop_break) return true;
+        if (g_shell.loop_continue) return false; // end this iteration
+    }
+    return false;
+}
+
+fn runChain(chain: script.Chain, depth: u32) void {
+    var idx: usize = 0;
+    while (idx < chain.seg_count) : (idx += 1) {
+        const should_run = if (idx == 0) true else switch (chain.ops[idx - 1]) {
+            .seq => true,
+            .run_and => g_shell.last_status == 0,
+            .run_or => g_shell.last_status != 0,
+        };
+        if (!should_run) continue;
+        if (chain.segs[idx].len == 0) continue;
+        runLine(chain.segs[idx], depth);
+    }
+}
+
+/// Substitute the first `$(cmd)` with the captured output of `cmd`.
+fn commandSubst(raw: []const u8, depth: u32) []const u8 {
+    const c = script.locateCommandSubst(raw) orelse return raw;
+    const captured = capture(c.inner, depth);
+    var end = captured.len;
+    while (end > 0 and (captured[end - 1] == '\n' or captured[end - 1] == '\r')) end -= 1;
+    const trimmed = captured[0..end];
+    var op: usize = 0;
+    const pn = @min(c.prefix.len, g_subst_buf.len);
+    @memcpy(g_subst_buf[0..pn], c.prefix[0..pn]);
+    op += pn;
+    const tn = @min(trimmed.len, g_subst_buf.len - op);
+    @memcpy(g_subst_buf[op..][0..tn], trimmed[0..tn]);
+    op += tn;
+    const sn = @min(c.suffix.len, g_subst_buf.len - op);
+    @memcpy(g_subst_buf[op..][0..sn], c.suffix[0..sn]);
+    op += sn;
+    return g_subst_buf[0..op];
+}
+
+/// The M19 4-level dispatch: pipeline, then redirection, then a simple
+/// command.
+fn runSegment(line: []const u8, stdin: []const u8, depth: u32) void {
     switch (pipe.pipeSplit(line)) {
         .multiple => {
             g_session.write("sh: only one pipe per line\n");
@@ -256,7 +320,82 @@ fn dispatch(line: []const u8, depth: u32) void {
         }
         return;
     }
-    runSimple(line, &.{}, depth);
+    runSimple(line, stdin, depth);
+}
+
+fn runIf(st: script.If, depth: u32) void {
+    runLine(st.cond, depth);
+    if (g_shell.last_status == 0) {
+        _ = runBody(st.then_body, depth);
+    } else if (st.has_else) {
+        _ = runBody(st.else_body, depth);
+    }
+}
+
+fn runFor(f: *const script.For, depth: u32) void {
+    var i: usize = 0;
+    while (i < f.word_count) : (i += 1) {
+        _ = g_shell.env.set(f.var_name, f.words[i]);
+        g_shell.clearLoopFlags();
+        if (runBody(f.body, depth)) break;
+    }
+    _ = g_shell.env.unset(f.var_name);
+    g_shell.clearLoopFlags();
+}
+
+fn runWhile(w: script.While, depth: u32) void {
+    var iter: usize = 0;
+    while (iter < 256) : (iter += 1) {
+        g_shell.clearLoopFlags();
+        runLine(w.cond, depth);
+        if (g_shell.last_status != 0) break;
+        if (runBody(w.body, depth)) break;
+    }
+    g_shell.clearLoopFlags();
+}
+
+/// The SH5 line interpreter: function definitions, command substitution,
+/// single-line `if`/`for`/`while`, chains, then per-segment dispatch.
+fn runLine(raw: []const u8, depth: u32) void {
+    if (depth > 8) return;
+    const line = script.trim(raw);
+    if (line.len == 0) return;
+
+    if (shell_mod.Shell.isFuncDef(line)) {
+        if (g_shell.defineFuncLine(line)) {
+            g_session.write("fn: ok\n");
+        } else {
+            g_session.write("fn: bad definition\n");
+            g_shell.last_status = 1;
+        }
+        return;
+    }
+
+    // Loop bodies are expanded at execution time, so skip substitution.
+    const is_loop = std.mem.startsWith(u8, line, "for") or std.mem.startsWith(u8, line, "while");
+    const substituted = if (is_loop) line else commandSubst(line, depth);
+
+    if (script.parseIf(substituted)) |st| {
+        runIf(st, depth);
+        return;
+    }
+    var f: script.For = undefined;
+    if (script.parseFor(substituted, &f)) {
+        runFor(&f, depth);
+        return;
+    }
+    if (script.parseWhile(substituted)) |w| {
+        runWhile(w, depth);
+        return;
+    }
+    switch (script.chainSplit(substituted)) {
+        .too_many => {
+            g_session.write("sh: chain too long\n");
+            g_shell.last_status = 2;
+        },
+        .chain => |ch| runChain(ch, depth),
+        .none => runSegment(substituted, &.{}, depth),
+    }
 }
 
 fn runSource(path: []const u8, depth: u32) void {
@@ -279,7 +418,7 @@ fn runSource(path: []const u8, depth: u32) void {
     var i: usize = 0;
     while (i <= len) : (i += 1) {
         if (i == len or data[i] == '\n' or data[i] == '\r') {
-            if (i > start) dispatch(data[start..i], depth + 1);
+            if (i > start) runLine(data[start..i], depth + 1);
             start = i + 1;
         }
     }
@@ -318,7 +457,7 @@ pub export fn _start() callconv(.c) noreturn {
         while (i < len) : (i += 1) {
             switch (g_editor.feed(out, buf[i])) {
                 .submitted => {
-                    dispatch(g_editor.line(), 0);
+                    runLine(g_editor.line(), 0);
                     g_editor.next_line();
                     g_session.write(g_shell.promptSlice());
                 },
