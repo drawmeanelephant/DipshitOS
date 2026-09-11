@@ -3089,10 +3089,12 @@ test "syscall: SYS_TTY_ATTACH (slot 67, #1072) attaches the caller's terminal" {
     try std.testing.expect(terminal.attachedSerial() == null);
 
     // A window front-end (selector 2) requires an existing `.user` window the
-    // caller OWNS (else EINVAL); the net front-end stays reserved (ENOSYS);
-    // a bad selector is EINVAL.
+    // caller OWNS (else EINVAL); a bad selector is EINVAL.
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_tty_attach, .{ 2, 0, 0, 0, 0, 0 }, &frame));
-    try std.testing.expectEqual(error_result(.enosys), dispatch(sys_tty_attach, .{ 3, 0, 0, 0, 0, 0 }, &frame));
+    // The net front-end (selector 3, SH7/Amendment B) needs an armed NIC and
+    // an own-IP (this host test has neither): the honest refusal is EINVAL.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_tty_attach, .{ 3, 2323, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_tty_attach, .{ 3, 0, 0, 0, 0, 0 }, &frame));
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_tty_attach, .{ 9, 0, 0, 0, 0, 0 }, &frame));
 
     // Open a `.user` window owned by the caller (process 0) and attach it as

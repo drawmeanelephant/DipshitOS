@@ -430,6 +430,8 @@ pub fn read(pid: u64, fd: u64, out_buf: []u8) i64 {
     if (h.partition == .tty) {
         const t = terminal.get(h.term_handle) orelse return -2;
         _ = terminal.pumpRuntimeInput();
+        // SH7 (#1083): a net-bound terminal's input comes from the TCP seam.
+        _ = terminal.pumpNetInput();
         return @intCast(t.readInput(out_buf));
     }
 
@@ -488,7 +490,10 @@ pub fn write(pid: u64, fd: u64, in_buf: []const u8) i64 {
     if (h.partition == .tty) {
         const t = terminal.get(h.term_handle) orelse return -2;
         const n = t.write(in_buf);
-        if (t.window_id) |wid| {
+        if (t.front_end == .net) {
+            // SH7 (#1083, Amendment B): drain the ring into TCP segments.
+            _ = terminal.pumpNetOutput();
+        } else if (t.window_id) |wid| {
             if (terminal.pumpWindowOutput(h.term_handle) > 0) {
                 _ = driving_award.user_present(wid);
             }

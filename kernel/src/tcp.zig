@@ -155,6 +155,11 @@ pub var ack_pending: bool = false;
 pub var rx_payload: [payload_max]u8 = undefined;
 pub var rx_len: usize = 0;
 pub var rx_pending: bool = false;
+/// SH7 (#1083): a clean peer FIN+ACK was received in ESTABLISHED. The
+/// connection stays ESTABLISHED (the kernel TCP seam's close discipline),
+/// but the net terminal front-end uses this to auto-detach on disconnect
+/// (Amendment B, B4). Cleared by `listen`/`release_conn`/`reset`.
+pub var peer_fin: bool = false;
 /// The connect-timeout clock. The caller (the shell idle loop + `net
 /// tcp`) stamps `now_ticks` from the 1 Hz generic timer (`timer.ticks`
 /// — seconds) each poll; `start` stamps `syn_ticks`, so the elapsed
@@ -349,6 +354,7 @@ pub fn reset() void {
     ack_pending = false;
     rx_len = 0;
     rx_pending = false;
+    peer_fin = false;
     tx_pending = false;
     retx_len = 0;
     tx_ticks = 0;
@@ -387,6 +393,7 @@ pub fn listen(port: u16) void {
     ack_pending = false;
     rx_len = 0;
     rx_pending = false;
+    peer_fin = false;
     clear_pending();
 }
 
@@ -447,6 +454,7 @@ pub fn release_conn() void {
     peer_mac = .{ 0, 0, 0, 0, 0, 0 };
     ack_pending = false;
     rx_pending = false;
+    peer_fin = false;
     clear_pending();
 }
 
@@ -703,6 +711,7 @@ pub fn handle_rx(frame: []const u8) Event {
                 // — the caller's `net tcp close` completes the close.
                 rcv_nxt = seq +% 1; // the FIN consumes one sequence number
                 finack_recv += 1;
+                peer_fin = true; // SH7: the peer asked to disconnect
                 build_msg(snd_una, rcv_nxt, flag_ack, &.{});
                 ack_pending = true;
                 return .finack_recv;

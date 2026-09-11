@@ -1686,21 +1686,24 @@ fn handle_time(_: Args, _: *exceptions.VectorFrame) u64 {
 /// detach) the CALLING process's controlling terminal — opened as
 /// `/dev/tty` — to a front-end. a0: 0 = detach, 1 = the serial console
 /// (the kernel console), 2 = a `.user` window front-end (a1 = window id),
-/// 3 = net (reserved, ENOSYS). The process must have opened `/dev/tty`
-/// (else EINVAL). The console can be held by only one terminal at a time
-/// (busy -> EACCES). For selector 2 the caller must OWN the `.user` window
-/// (`driving_award` ownership) and the window must not already be another
-/// terminal's front-end (EACCES). Returns 0.
+/// 3 = a net front-end (a1 = TCP listen port; SH7/Amendment B). The process
+/// must have opened `/dev/tty` (else EINVAL). Front-ends are mutually
+/// exclusive (serial/window/net, D2) and the console can be held by only
+/// one terminal at a time (busy -> EACCES). For selector 2 the caller must
+/// OWN the `.user` window; for selector 3 the caller must own the TCP
+/// listener (the single-connection seam). Returns 0.
 fn handle_tty_attach(args: Args, _: *exceptions.VectorFrame) u64 {
     const pid = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
     const th = file_table.controlling_terminal(pid) orelse return error_result(.einval);
     const t = terminal.get(th) orelse return error_result(.einval);
     switch (args[0]) {
         0 => {
+            if (t.front_end == .net) tcp.reset(); // close the listener/session
             t.detach();
             return 0;
         },
         1 => {
+            if (terminal.attachedNet() != null or terminal.anyWindowAttached()) return error_result(.eacces);
             if (terminal.attachedSerial()) |cur| {
                 if (cur != t) return error_result(.eacces); // console already held
             }
@@ -1713,13 +1716,41 @@ fn handle_tty_attach(args: Args, _: *exceptions.VectorFrame) u64 {
             // access: the owner is the single writer of both.
             if (args[1] > std.math.maxInt(u8)) return error_result(.einval);
             const wid: u8 = @truncate(args[1]);
+            if (terminal.attachedSerial() != null or terminal.attachedNet() != null) return error_result(.eacces);
             const w = driving_award.find_user_window(wid) orelse return error_result(.einval);
             if (w.owner == null or w.owner.? != pid) return error_result(.eacces);
-            if (terminal.attachedSerial() != null) return error_result(.eacces);
             if (!t.attachWindow(wid)) return error_result(.eacces);
             return 0;
         },
-        3 => return error_result(.enosys), // net front-end not implemented yet
+        3 => {
+            // #1083 (ADR 0020 Amendment B): the caller hosts the net
+            // front-end — it enters LISTEN on `port` through the single
+            // bounded TCP seam and attaches its own terminal. No
+            // cross-process terminal capability (B2).
+            if (args[1] == 0 or args[1] > 0xffff) return error_result(.einval);
+            if (!virtio_net.net_ready) return error_result(.einval);
+            if (!virtio_net.arp.ip_set()) return error_result(.einval);
+            const port: u16 = @truncate(args[1]);
+            if (terminal.attachedSerial() != null or terminal.anyWindowAttached()) return error_result(.eacces);
+            if (terminal.attachedNet()) |cur| {
+                if (cur != t) return error_result(.eacces);
+            }
+            // The single TCP connection may only be (re)claimed by its owner
+            // and only from idle/listen.
+            if (tcp.owner_pid) |op| {
+                if (op != pid) return error_result(.eacces);
+            }
+            if (tcp.state == .closed) tcp.reset();
+            if (tcp.state != .idle and tcp.state != .listen) return error_result(.eacces);
+            tcp.reset();
+            tcp.listen(port);
+            tcp.owner_pid = pid;
+            if (!t.attachNet(port)) {
+                tcp.reset();
+                return error_result(.eacces);
+            }
+            return 0;
+        },
         else => return error_result(.einval),
     }
 }

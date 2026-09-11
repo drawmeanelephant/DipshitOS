@@ -86,6 +86,18 @@
 //          with a SYN-ACK then goes SILENT on data/FIN — the
 //          deterministic black hole for the retransmission-bound run.
 //          Requires --net. OFF by default: the default VM is unchanged.)
+//         [--net-tcp-connect <guest-ip>:<port>[:<payload-file>]]
+//          [--net-tcp-connect-after <text>]
+//          [--net-tcp-connect-close-after <text>] (M45 SH7, issue #1083,
+//          ADR 0020 Amendment B: the host INITIATES an inbound TCP
+//          connection TO a guest listener — the reverse of
+//          --net-tcp-respond. After <text> (default "sh: remote") the host
+//          sends a SYN, completes the handshake against the guest server's
+//          fixed ISN 0x54321098, sends the payload file's bytes, captures
+//          the guest shell's reply, and closes with a FIN — the guest
+//          auto-detaches on disconnect. <close-after> (optional) delays the
+//          FIN until the reply contains that text. Requires --net. OFF by
+//          default: every existing gate is byte-identical.)
 //         [--net-nat] (milestone five card N7, claim 4678: attach one
 //          VZVirtioNetworkDeviceConfiguration with a
 //          VZNATNetworkDeviceAttachment instead of the file-handle
@@ -543,6 +555,27 @@ var netTcpRespondHandshakeOnly = false
 // machine).
 let netTcpSrvIsn: UInt32 = 0x12345678
 var netTcpSrvNxt: UInt32 = 0x12345679 // after the SYN
+// SH7 (#1083, ADR 0020 Amendment B): `--net-tcp-connect
+// <guest-ip>:<port>[:<payload-file>]` — the host initiates an INBOUND TCP
+// connection TO a guest listener (the reverse of the N10 responder): SYN,
+// handshake, the payload, the guest shell's reply, then a FIN. Frames ride
+// the same `--net` attachment socketpair. The guest server's ISN is the
+// fixed `kernel/src/tcp.zig` constant 0x54321098; the client ISN/source
+// port are fixed for gate assertability.
+var netTcpConnectGuestIP: [UInt8]?
+var netTcpConnectPort: UInt16?
+var netTcpConnectPayload: [UInt8] = []
+var netTcpConnectAfter: String?
+var netTcpConnectCloseAfter: String?
+var netTcpConnectState: UInt8 = 0 // 0 idle, 1 synSent, 2 established, 3 closed, 4 finSent
+var netTcpConnRecvText: String = ""
+let netTcpCliIsn: UInt32 = 0x10203040
+let netTcpCliPort: UInt16 = 12345
+let netTcpCliSrcIP: [UInt8] = [10, 0, 0, 2]
+let netTcpGuestMAC: [UInt8] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01]
+let netTcpGuestSrvIsn: UInt32 = 0x54321098
+var netTcpCliSeq: UInt32 = 0
+var netTcpCliAck: UInt32 = 0
 // Milestone five card N7 (claim 4678): `--net-nat` attaches one
 // VZVirtioNetworkDeviceConfiguration with a VZNATNetworkDeviceAttachment
 // instead of the file-handle attachment — the host is the guest's router
@@ -883,6 +916,37 @@ while idx < arguments.count {
         netTcpRespondHostIP = parts
         netTcpRespondHostPort = port
         idx += 2
+    } else if arg == "--net-tcp-connect", idx + 1 < arguments.count {
+        // SH7 (#1083, ADR 0020 Amendment B): the host-initiated inbound TCP
+        // client, the reverse of --net-tcp-respond. The optional third
+        // component is a payload file whose bytes are sent once the
+        // handshake completes.
+        let token = arguments[idx + 1]
+        let halves = token.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false)
+        guard halves.count >= 2, let port = UInt16(halves[1]) else {
+            fail("--net-tcp-connect requires <guest-ip>:<port>[:<payload-file>], got '\(token)'.")
+        }
+        let parts = halves[0].split(separator: ".").compactMap { UInt8($0) }
+        guard parts.count == 4 else {
+            fail("--net-tcp-connect requires a dotted-quad guest IPv4 address, got '\(token)'.")
+        }
+        netTcpConnectGuestIP = parts
+        netTcpConnectPort = port
+        if halves.count == 3, !halves[2].isEmpty {
+            let payloadPath = String(halves[2])
+            do {
+                netTcpConnectPayload = [UInt8](try Data(contentsOf: URL(fileURLWithPath: payloadPath)))
+            } catch {
+                fail("--net-tcp-connect could not read payload file '\(payloadPath)': \(error).")
+            }
+        }
+        idx += 2
+    } else if arg == "--net-tcp-connect-after", idx + 1 < arguments.count {
+        netTcpConnectAfter = arguments[idx + 1]
+        idx += 2
+    } else if arg == "--net-tcp-connect-close-after", idx + 1 < arguments.count {
+        netTcpConnectCloseAfter = arguments[idx + 1]
+        idx += 2
     } else if arg == "--script2-delay", idx + 1 < arguments.count {
         // Card N9 (claim 9489): the claim-6684 settle before forwarding
         // script2 becomes configurable (flag-gated, default 0.5 — every
@@ -1213,6 +1277,9 @@ if netDhcpRespondLeaseIP != nil, netCapturePath == nil {
 if netTcpRespondHostIP != nil, netCapturePath == nil {
     fail("--net-tcp-respond requires --net (the TCP reply is written into the SAME attachment's socket).")
 }
+if netTcpConnectGuestIP != nil, netCapturePath == nil {
+    fail("--net-tcp-connect requires --net (the client frames are written into the SAME attachment's socket).")
+}
 // Milestone five card N7 (claim 4678): `--net-nat` is mutually exclusive
 // with `--net` — one network device per guest for now (the flag
 // validation shape: a clear fail, like the responder requirements above).
@@ -1422,6 +1489,75 @@ if let netCapturePath {
                     // A pure ACK (the handshake / the echo / the final
                     // ACK) — observed.
                     print("NET-TCP: observed the guest's ACK (ack 0x\(hex32(ack)))")
+                }
+            }
+            // SH7 (#1083, ADR 0020 Amendment B): the host-initiated inbound
+            // TCP client. Match the guest server's segments (src = the
+            // guest listener) and drive the handshake / data / close.
+            if let guestIP = netTcpConnectGuestIP, let guestPort = netTcpConnectPort,
+               isTcpSegmentFromGuest(buf, n, guestIP, guestPort, netTcpCliPort) {
+                let flags = tcpFlags(buf)
+                let seq = tcpSeq(buf)
+                var payload = [UInt8]()
+                if n > 54 { payload = [UInt8](buf[54..<n]) }
+                let isSynAck = (flags & 0x02) != 0 && (flags & 0x10) != 0
+                let isFin = (flags & 0x01) != 0
+                let isRst = (flags & 0x04) != 0
+                var reply = [UInt8](repeating: 0, count: 4096)
+                switch netTcpConnectState {
+                case 1:
+                    // SYN sent — expect the guest's SYN-ACK.
+                    if isSynAck {
+                        netTcpCliAck = seq &+ 1
+                        netTcpCliSeq = netTcpCliIsn &+ 1
+                        let replyLen = buildTcpFrameExplicit(&reply, netTcpGuestMAC, [0x02, 0x00, 0x00, 0x00, 0x00, 0x02], netTcpCliSrcIP, guestIP, netTcpCliPort, guestPort, netTcpCliSeq, netTcpCliAck, 0x10, netTcpConnectPayload)
+                        try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<replyLen]))
+                        netTcpCliSeq = netTcpCliSeq &+ UInt32(netTcpConnectPayload.count)
+                        netTcpConnectState = 2
+                        print("NET-TCP-CONNECT: handshake complete (server ISN 0x\(hex32(seq)), ack 0x\(hex32(netTcpCliAck))); sent \(netTcpConnectPayload.count)-byte payload")
+                    } else if isRst {
+                        netTcpConnectState = 3
+                        print("NET-TCP-CONNECT: the guest refused the connection (RST)")
+                    }
+                case 2:
+                    // ESTABLISHED — the guest shell's data / a FIN.
+                    if isRst {
+                        netTcpConnectState = 3
+                        print("NET-TCP-CONNECT: the guest reset the connection (RST)")
+                    } else if isFin {
+                        netTcpCliAck = seq &+ 1
+                        let replyLen = buildTcpFrameExplicit(&reply, netTcpGuestMAC, [0x02, 0x00, 0x00, 0x00, 0x00, 0x02], netTcpCliSrcIP, guestIP, netTcpCliPort, guestPort, netTcpCliSeq, netTcpCliAck, 0x10, [])
+                        try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<replyLen]))
+                        netTcpConnectState = 3
+                        print("NET-TCP-CONNECT: the guest sent FIN; ACKed and closed")
+                    } else if !payload.isEmpty {
+                        netTcpCliAck = seq &+ UInt32(payload.count)
+                        var text = ""
+                        for b in payload { text.append((b >= 0x20 && b < 0x7f) ? Character(UnicodeScalar(b)) : ".") }
+                        netTcpConnRecvText.append(text)
+                        print("NET-TCP-CONNECT: received \(payload.count) byte(s): \(text)")
+                        let replyLen = buildTcpFrameExplicit(&reply, netTcpGuestMAC, [0x02, 0x00, 0x00, 0x00, 0x00, 0x02], netTcpCliSrcIP, guestIP, netTcpCliPort, guestPort, netTcpCliSeq, netTcpCliAck, 0x10, [])
+                        try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<replyLen]))
+                        // Close once the reply shows the command ran (the
+                        // configure marker) or, absent one, after the first
+                        // data segment.
+                        let shouldClose = netTcpConnectCloseAfter.map { netTcpConnRecvText.contains($0) } ?? true
+                        if shouldClose {
+                            let finLen = buildTcpFrameExplicit(&reply, netTcpGuestMAC, [0x02, 0x00, 0x00, 0x00, 0x00, 0x02], netTcpCliSrcIP, guestIP, netTcpCliPort, guestPort, netTcpCliSeq, netTcpCliAck, 0x11, [])
+                            try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<finLen]))
+                            netTcpCliSeq = netTcpCliSeq &+ 1
+                            netTcpConnectState = 4
+                            print("NET-TCP-CONNECT: sent FIN (closing the session)")
+                        }
+                    }
+                case 4:
+                    // FIN sent — expect the guest's ACK.
+                    if (flags & 0x10) != 0 {
+                        netTcpConnectState = 3
+                        print("NET-TCP-CONNECT: close acknowledged (session done)")
+                    }
+                default:
+                    break
                 }
             }
         }
@@ -1640,6 +1776,10 @@ if let hostIP = netTcpRespondHostIP, let hostPort = netTcpRespondHostPort {
     if netTcpRespondHandshakeOnly {
         print("  net-tcp-respond mode: handshake-only (card N11) — the SYN is answered with a SYN-ACK, then data/FIN go unanswered (the deterministic black hole for the retransmission-bound run)")
     }
+}
+if let guestIP = netTcpConnectGuestIP, let guestPort = netTcpConnectPort {
+    let ipText = guestIP.map(String.init).joined(separator: ".")
+    print("  net-tcp-connect: ENABLED (M45 SH7, issue #1083, ADR 0020 Amendment B) — the host initiates an INBOUND TCP connection to the guest listener \(ipText):\(guestPort) (client port \(netTcpCliPort), ISN 0x\(hex32(netTcpCliIsn)), guest server ISN 0x\(hex32(netTcpGuestSrvIsn))) after \"\(netTcpConnectAfter ?? "sh: remote")\"\(netTcpConnectPayload.isEmpty ? "" : ", \(netTcpConnectPayload.count)-byte payload")")
 }
 if netNatEnabled {
     print("  net-nat: ENABLED (milestone five card N7, claim 4678) — VZNATNetworkDeviceAttachment attached (host router + NAT; no capture file — guest-observed counters are the gate's evidence)")
@@ -3408,6 +3548,44 @@ func startNetInject() {
     }
 }
 
+// SH7 (#1083, ADR 0020 Amendment B): the host-initiated inbound TCP client
+// kicker — wait for the guest shell's listening marker, then write the SYN
+// into the attachment socketpair. The capture thread drives the rest
+// (SYN-ACK -> ACK+payload -> data -> FIN). Deterministic — a serial
+// trigger, not a sleep. Requires --net (validated at parse time).
+func startNetTcpConnect() {
+    guard let guestIP = netTcpConnectGuestIP, let guestPort = netTcpConnectPort,
+          let socket = netCaptureReadSocket else { return }
+    let q = DispatchQueue(label: "virelaios.nettcpconnect")
+    q.async {
+        let marker = netTcpConnectAfter ?? "sh: remote"
+        let waitDeadline = Date().addingTimeInterval(60)
+        var sent = false
+        while Date() < waitDeadline {
+            if let text = try? String(contentsOf: serialURL, encoding: .utf8), text.contains(marker) {
+                netTcpCliSeq = netTcpCliIsn
+                netTcpCliAck = 0
+                netTcpConnectState = 1
+                var syn = [UInt8](repeating: 0, count: 4096)
+                let len = buildTcpFrameExplicit(&syn, netTcpGuestMAC, [0x02, 0x00, 0x00, 0x00, 0x00, 0x02], netTcpCliSrcIP, guestIP, netTcpCliPort, guestPort, netTcpCliIsn, 0, 0x02, [])
+                do {
+                    try socket.write(contentsOf: Data(syn[0..<len]))
+                    let ipText = guestIP.map(String.init).joined(separator: ".")
+                    FileHandle.standardOutput.write(Data("NET-TCP-CONNECT: sent SYN to \(ipText):\(guestPort) (seq 0x\(hex32(netTcpCliIsn))) after \"\(marker)\"\n".utf8))
+                } catch {
+                    FileHandle.standardError.write(Data("ERROR: net-tcp-connect SYN write failed: \(error)\n".utf8))
+                }
+                sent = true
+                break
+            }
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        if !sent {
+            FileHandle.standardError.write(Data("ERROR: guest did not emit net-tcp-connect marker '\(marker)' within 60s; connection not attempted\n".utf8))
+        }
+    }
+}
+
 // Card N3 (claim 7293): is the datagram an ARP request (Ethernet II
 // ethertype 0x0806, ARP htype 1 / ptype 0x0800 / hlen 6 / plen 4, op 1)?
 // The guest's request frames are raw Ethernet — dst ff*6 (broadcast),
@@ -3924,6 +4102,69 @@ func buildTcpReply(_ reply: inout [UInt8], _ req: [UInt8], _ n: Int, _ hostMAC: 
     return frameLen
 }
 
+// SH7 (#1083, ADR 0020 Amendment B): match a guest-originated TCP segment
+// in the HOST-CLIENT direction — src IP/port = the guest listener, dst port
+// = the host client's fixed source port (the reverse of `isTcpSegment`).
+func isTcpSegmentFromGuest(_ buf: [UInt8], _ n: Int, _ guestIP: [UInt8], _ guestPort: UInt16, _ clientPort: UInt16) -> Bool {
+    guard n >= 54 else { return false }
+    guard buf[12] == 0x08 && buf[13] == 0x00 else { return false } // ethertype IPv4
+    guard buf[14] == 0x45 else { return false } // version 4, IHL 5
+    guard (buf[20] & 0x1f) == 0 && buf[21] == 0 else { return false } // NOT a fragment
+    guard buf[23] == 6 else { return false } // protocol TCP
+    guard buf[26] == guestIP[0] && buf[27] == guestIP[1] && buf[28] == guestIP[2] && buf[29] == guestIP[3] else { return false }
+    let srcPort = (UInt16(buf[34]) << 8) | UInt16(buf[35])
+    let dstPort = (UInt16(buf[36]) << 8) | UInt16(buf[37])
+    return srcPort == guestPort && dstPort == clientPort
+}
+
+// SH7: synthesize a frame from EXPLICIT Ethernet/IPv4/TCP fields (the N10
+// `buildTcpReply` copies those from a request frame; a host-initiated
+// client has no request to copy from). Both checksums are recomputed.
+func buildTcpFrameExplicit(_ frame: inout [UInt8], _ dstMAC: [UInt8], _ srcMAC: [UInt8], _ srcIP: [UInt8], _ dstIP: [UInt8], _ srcPort: UInt16, _ dstPort: UInt16, _ seq: UInt32, _ ack: UInt32, _ flags: UInt8, _ payload: [UInt8]) -> Int {
+    let frameLen = 54 + payload.count
+    frame = [UInt8](repeating: 0, count: frameLen)
+    frame[0...5] = dstMAC[0...5]
+    frame[6...11] = srcMAC[0...5]
+    frame[12] = 0x08
+    frame[13] = 0x00 // ethertype IPv4
+    frame[14] = 0x45 // version 4, IHL 5
+    frame[16] = UInt8((20 + 20 + payload.count) >> 8)
+    frame[17] = UInt8((20 + 20 + payload.count) & 0xff) // total length
+    frame[22] = 64 // TTL
+    frame[23] = 6 // protocol TCP
+    frame[26...29] = srcIP[0...3]
+    frame[30...33] = dstIP[0...3]
+    let hdrChk = ipChecksum(frame, 14, 34)
+    frame[24] = UInt8(hdrChk >> 8)
+    frame[25] = UInt8(hdrChk & 0xff)
+    frame[34] = UInt8(srcPort >> 8)
+    frame[35] = UInt8(srcPort & 0xff)
+    frame[36] = UInt8(dstPort >> 8)
+    frame[37] = UInt8(dstPort & 0xff)
+    frame[38] = UInt8(seq >> 24)
+    frame[39] = UInt8((seq >> 16) & 0xff)
+    frame[40] = UInt8((seq >> 8) & 0xff)
+    frame[41] = UInt8(seq & 0xff)
+    frame[42] = UInt8(ack >> 24)
+    frame[43] = UInt8((ack >> 16) & 0xff)
+    frame[44] = UInt8((ack >> 8) & 0xff)
+    frame[45] = UInt8(ack & 0xff)
+    frame[46] = 0x50 // data offset 5 (no options)
+    frame[47] = flags
+    frame[48] = 0x10 // window 4096
+    frame[49] = 0x00
+    if !payload.isEmpty {
+        frame[54...54 + payload.count - 1] = payload[0...payload.count - 1]
+    }
+    var seg = [UInt8](frame[34..<frameLen])
+    seg[16] = 0
+    seg[17] = 0
+    let tcpChk = tcpChecksum(srcIP, dstIP, seg, UInt16(20 + payload.count))
+    frame[50] = UInt8(tcpChk >> 8)
+    frame[51] = UInt8(tcpChk & 0xff)
+    return frameLen
+}
+
 // Card N4 (claim 0148): synthesize the ICMP ECHO REPLY to the echo
 // request in `req` (the guest's bytes) into `reply` (same length):
 // Ethernet dst/src swapped, ethertype 0x0800, IPv4 src/dst swapped, the
@@ -4157,6 +4398,7 @@ if consoleMode {
     startScript2Input()
     startScript3Input()
     startNetInject()
+    startNetTcpConnect()
     startKeyInject()
     startKeyStringInject()
     startChordInject()

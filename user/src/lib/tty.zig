@@ -786,6 +786,15 @@ pub const Session = struct {
         return ok;
     }
 
+    /// #1083 (ADR 0020 Amendment B): host this terminal's net front-end —
+    /// enter LISTEN on `port` through the kernel's single bounded TCP seam
+    /// (selector 3). A remote client drives the shell from there.
+    pub fn attachNet(self: *Session, port: u16) bool {
+        const ok = abi.tty_attach_net(port) == 0;
+        if (ok) self.attached = true;
+        return ok;
+    }
+
     /// Non-blocking read of the terminal input queue: >0 bytes, 0 when
     /// nothing is pending, <0 on error.
     pub fn read(self: *Session, buf: []u8) i64 {
