@@ -1,7 +1,8 @@
 # ADR 0020: The terminal (vt) seam — a userland-ownable console
 
 Status: **ACCEPTED** · Date: 2026-09-10 · amended 2026-09-11 (Amendment A,
-the window front-end — M45 card SH6, #1082) · Milestone: M44 (next focus) ·
+the window front-end — M45 card SH6, #1082; Amendment B, the net/remote
+front-end — M45 card SH7, #1083) · Milestone: M44 (next focus) ·
 Issue **#1072** · Claims **#1073** (object + ABI) and **#1075** (pump + pilot)
 
 > The object (`kernel/src/terminal.zig`), the `/dev/tty` device-fd routing
@@ -116,7 +117,8 @@ returning data (the `sys_procs` model), never a command passthrough.
 - ~~The window (TERM.BIN) front-end implementation.~~ — **design resolved by
   Amendment A** (below); implementation is M45 card SH6 (#1082).
 - The net (remote/SSH) front-end implementation (selector `3` stays reserved
-  and returns `ENOSYS`).
+  and returns `ENOSYS`). — **design resolved by Amendment B** (below);
+  implementation is M45 card SH7 (#1083).
 
 ---
 
@@ -213,3 +215,135 @@ most one window binding, and a window at most one terminal.
 - Kernel grid bounds/scrollback and `WIN_RESIZE` reflow.
 - The separate-shell-process split (would need its own amendment).
 - The net front-end (`3`) keeps its own amendment.
+
+---
+
+# Amendment B — the net (remote TCP) front-end (selector 3)
+
+Status: **ACCEPTED** (design) · Date: 2026-09-11 · Card **SH7** (#1083) ·
+Implementation tracked by #1083. The D1–D5 decisions and Amendment A are
+unchanged; this amendment only fixes the net front-end the original
+D3/Open-issues left reserved.
+
+## Context
+
+The seam ships the serial front-end (ADR 0020) and the window front-end
+(Amendment A). M45 card SH7 asks for a **remote TCP session** that drives a
+shell's terminal: a client connects over the network, types into the shell,
+and sees its output — "remote in" without SSH first (#1066 Stage 1). Selector
+`3` (`.net`) is reserved and returns `ENOSYS` today.
+
+The kernel already has a bounded TCP seam (`kernel/src/tcp.zig` + slots
+30–33) and a listener consumer (`HTTPD.BIN`): `sys_tcp_connect(0, port)`
+passive-opens a listener; an incoming SYN completes a server handshake with a
+**fixed server ISN**; `sys_tcp_send`/`sys_tcp_recv`/`sys_tcp_close` move
+bytes. The stack is a **single** bounded connection at a time, has **no TCP
+loopback** (an own-IP connect is refused `.no_peer`), no reassembly, a fixed
+4096 window, and a `payload_max` TX/RX bound. Four questions were open: **who
+listens**, **who pumps the bytes**, **what the trust posture is**, and
+**how disconnect is handled**. This amendment settles them against those
+seams. No code lands here.
+
+## Decisions
+
+### B1. The net front-end is kernel-pumped, exactly like serial and window
+The terminal object stays a pure byte session (D1). A front-end binding names
+a **TCP listener port**; the kernel moves bytes between the terminal rings and
+the kernel TCP connection, symmetric with `pumpRuntimeInput`/
+`pumpRuntimeOutput` for the serial console and the Amendment-A window pump.
+**No terminal-I/O syscall is added** (D3 holds): the owner keeps reading and
+writing `/dev/tty`. Bytes are raw — no line discipline, no echo, no crypto.
+
+### B2. The owner attaches its own listener
+`sys_tty_attach` selector `3` gains an argument, `args[1] = listen port`. The
+caller must already have opened `/dev/tty` (its controlling terminal). The
+kernel enters LISTEN on that port through the same path as
+`sys_tcp_connect(0, port)` (reusing the `tcp.zig` passive-open state
+machine), records the caller as the connection owner (`tcp.owner_pid`), and
+binds the terminal `.net`. The binding is exclusive per terminal (D2) and
+**mutually exclusive with the serial and window front-ends**; `sys_tty_attach(0)`
+detaches and closes the listener. Because the TCP seam is a **single
+connection at a time**, at most one terminal may hold the net front-end: a
+second `sys_tty_attach(3, …)` while a session is listening/connected is
+`EACCES`, and a port already owned by another process is `EACCES` too.
+
+Rationale: a net front-end needs **no cross-process access**. The process
+that owns the terminal also opens the listener and is the single writer of
+both, preserving ADR 0020's per-process terminal invariant
+(`controlling_terminal(pid)`) and adding no capability (no reading another
+process's terminal, no steering another process's socket). This is the same
+reasoning as A2.
+
+### B3. The pump moves bytes between the terminal rings and the connection
+On the owner's `/dev/tty` write, after appending to the output ring, the
+kernel drains the ring into TCP data segments (chunked to the stack's
+`payload_max`, the honest bound — overflow is the stack's documented
+behavior, never silent), and a received TCP payload is pushed into the
+terminal's input queue. The pump is driven from the kernel idle loop and
+flushed from the terminal write path, symmetric with the serial pump (D2/A1).
+The shell's line editor stays byte-driven and front-end-agnostic (A5's
+principle): `SH.BIN` and `TERM.BIN` run unchanged over a net-attached
+terminal.
+
+### B4. Disconnect, detach, and lifecycle
+A client disconnect (FIN/RST), a `sys_tcp_close` on the session,
+`sys_tty_attach(0)`, or owner exit auto-detaches the terminal; the terminal
+survives, buffered, unattached (D2), and the serial console is **not**
+reclaimed automatically (boot default unchanged, D4). The listener is closed
+on detach so no port lingers. The net front-end is a **session** front-end:
+a disconnect ends the session, and the owner may re-attach (re-listen) to
+accept again. A terminal has at most one net binding; a net session has at
+most one terminal.
+
+### B5. Trust posture — plaintext, trusted-network only
+v1 adds **no authentication, encryption, or source-IP filtering**. The
+listener binds the guest's own IP and the requested port; anyone who can
+reach it obtains a shell at the owner's privilege. This is an explicit,
+documented posture (ADR, `docs/status.md`, help), not an accident: the
+machine is expected to be on a trusted network / behind the VZ NAT boundary.
+SSH/TLS is #1066 Stage 2/3 and rides this same seam as another front-end; a
+bounded shared-secret or source-IP allowlist is a follow-up, not SH7.
+
+### B6. Remote is a front-end of the shell, not a separate shell
+`SH.BIN` and `TERM.BIN` can each open a listener and attach selector `3`; the
+shared shell core (`lib/shell.zig` + `lib/tty.zig`) is unchanged. No dedicated
+`REMOTED.BIN` is required, and a cross-process front-end is rejected for the
+same reason as A's cross-process fd. The remote presentation is the shell
+seen through a fourth front-end.
+
+## Class-B gate topology (host → guest inbound)
+
+`kernel/src/tcp.zig` has **no loopback** (own-IP connect refused `.no_peer`)
+and the guest is behind VZ NAT, so the gate cannot use an in-guest client and
+the host cannot reach in without a forward. The live gate therefore adds a
+**host-side TCP client seam** to `host/vm-runner`
+(`--net-tcp-connect <guest-ip>:<port>[:<payload-file>]`): it initiates the
+SYN toward the guest's listener, completes the handshake (the guest's server
+ISN is fixed; the runner's ISN is deterministic), sends the payload, captures
+the guest's reply, then closes. The gate: the guest shell attaches selector
+`3` on a port, the host connects and sends `echo remote-ok\n`, the serial log
+shows the shell output, and the client FIN detaches the terminal
+(`attached` → `detached`, session closed). This runner + spec work lands in
+the implementation tranche (#1083), alongside class-A terminal
+net-binding/pump tests.
+
+## Rejected alternatives
+
+- **Cross-process front-end process** (`REMOTED.BIN` accepting and feeding a
+  *different* process's terminal): invents a cross-process terminal
+  capability. Rejected for the same reason as Amendment A's cross-process fd.
+- **In-guest loopback client:** impossible today — the TCP seam refuses
+  own-IP connects and has no loopback. The gate connects from the host.
+- **SSH-first / crypto:** out of scope. #1066 Stage 2 builds the primitives
+  first; SSH is Stage 3 and reuses this seam.
+- **A userland app that shells out over TCP** (bypassing the seam): does not
+  exercise the terminal seam, so remote/SSH could not reuse the path.
+
+## Open issues left by this amendment
+
+- Authentication (shared secret / source-IP allowlist) and TLS/SSH over the
+  same seam (#1066 Stage 2/3).
+- Multiple concurrent remote sessions — needs a multi-connection TCP stack;
+  today the seam is a single connection at a time.
+- Listener bind-address/port policy and a `settings` key (deferred to SH8).
+- The host-client runner seam's exact deterministic ISN/pacing contract.
