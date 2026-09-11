@@ -740,6 +740,12 @@ pub fn tty_attach(front_end: u64) i64 {
     return syscall1(sys_tty_attach_num, front_end);
 }
 
+/// #1082 (ADR 0020 Amendment A): attach the caller's OWN `.user` window
+/// (`window_id`) as the controlling terminal's window front-end (selector 2).
+pub fn tty_attach_window(window_id: u64) i64 {
+    return syscall2(sys_tty_attach_num, 2, window_id);
+}
+
 /// ADR 0007 slot 8 `sys_wait(target)`: block the calling process until the
 /// process with id `target` exits, then return its exit status. The SH2
 /// shell uses it to run external commands in the foreground and propagate

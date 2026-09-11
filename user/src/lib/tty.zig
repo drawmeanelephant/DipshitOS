@@ -777,6 +777,15 @@ pub const Session = struct {
         self.attached = false;
     }
 
+    /// #1082 (ADR 0020 Amendment A): attach the caller's OWN `.user` window
+    /// as this terminal's window front-end (selector 2). The kernel renders
+    /// the terminal's grid into that window; the process draws no pixels.
+    pub fn attachWindow(self: *Session, window_id: u8) bool {
+        const ok = abi.tty_attach_window(window_id) == 0;
+        if (ok) self.attached = true;
+        return ok;
+    }
+
     /// Non-blocking read of the terminal input queue: >0 bytes, 0 when
     /// nothing is pending, <0 on error.
     pub fn read(self: *Session, buf: []u8) i64 {

@@ -53,6 +53,7 @@ pub const settings = @import("settings.zig");
 pub const klog = @import("klog.zig"); // issue #990 (claim #997): the serial-log seam (hook armed by main.zig)
 pub const geom = @import("wnd_core.zig"); // M32 WMS3 (issue #623): the shared pure rules (hit-test / workspace / clamps / title-layout) — compiled by the kernel AND the WM server so they cannot drift
 pub const process = @import("process.zig"); // #1056 item 2: resolve a window's owning process name (the non-tabapp tab-title fallback)
+pub const terminal = @import("terminal.zig"); // #1082 (ADR 0020 A4/A6): window-bound terminal grid + close auto-detach
 
 /// M27 G13: Focus-follows-mouse configuration and dialog previous-focus tracking
 pub var focus_follows_mouse: bool = false;
@@ -2000,6 +2001,11 @@ pub fn close_owner(owner: usize) usize {
 pub fn remove_user_at(idx: usize) void {
     const removed_win = windows[idx];
     const removed_id = removed_win.id;
+    // #1082 (ADR 0020 Amendment A, A6): closing the bound window auto-detaches
+    // its terminal. The terminal survives, buffered, unattached, and the
+    // serial console is NOT reclaimed (boot default unchanged). Pure BSS
+    // writes — safe in the exit/exception context this runs in.
+    terminal.detachWindow(removed_id);
     // M42 UX: the released mirror goes out FIRST (the pre-removal fan the
     // old user_close owned) — focused_id still holds the pre-removal truth
     // here, and the WM drops its hit-test target before anything mutates.
@@ -3684,6 +3690,45 @@ pub fn render_clock_content(buf: [*]u8, stride: usize, w: usize, h: usize, ticks
     draw_string(buf, stride, 8, 74, "windows=2", clock_fg_rgb);
 }
 
+/// #1082 (ADR 0020 Amendment A, A4): render a window-bound terminal's
+/// presentation grid into its back-buffer with the kernel glyph raster. The
+/// bytes were already drained into the grid (file_table's write path); this
+/// turns the grid into the window's pixels, and the compositor blits it on
+/// its cadence (the deferred-present discipline).
+pub fn render_terminal_screen(dst: [*]u8, w: *const Window, scr: *const terminal.Screen) void {
+    const wu: usize = @intCast(w.w);
+    const hu: usize = @intCast(w.h);
+    const stride = wu * 4;
+    fill_rect(dst, stride, 0, 0, wu, hu, fbtext.bg_rgb);
+    const cols = @min(terminal.grid_cols, wu / 8);
+    // The compositor draws the title bar over the top `title_bar_h` rows, so
+    // the grid's first line starts below it (client-area origin).
+    const y0: usize = @intCast(geom.title_bar_h);
+    const rows = if (hu > y0) (hu - y0) / 8 else 0;
+    if (cols == 0 or rows == 0) return;
+    const total = scr.lineCount();
+    const first = if (total > rows) total - rows else 0;
+    var r: usize = 0;
+    while (r < rows) : (r += 1) {
+        const line = scr.line(first + r);
+        var c: usize = 0;
+        while (c < cols and c < line.len) : (c += 1) {
+            draw_glyph(dst, stride, c * 8, y0 + r * 8, line[c], fbtext.fg_rgb);
+        }
+    }
+    // The block cursor: invert the cell the shell's line editor is at.
+    const cl = scr.cursorLine();
+    if (cl >= first and cl - first < rows) {
+        const cc = scr.cursorCol();
+        if (cc < cols) {
+            const cy = y0 + (cl - first) * 8;
+            fill_rect(dst, stride, cc * 8, cy, 8, 8, fbtext.fg_rgb);
+            const line = scr.line(cl);
+            if (cc < line.len) draw_glyph(dst, stride, cc * 8, cy, line[cc], fbtext.bg_rgb);
+        }
+    }
+}
+
 /// Paint one window into the framebuffer. The terminal renders the shared
 /// text layer straight into the scanout framebuffer; the clock renders its
 /// back-buffer and blits it over the terminal.
@@ -3724,6 +3769,14 @@ pub fn paint(w: *Window) void {
                 @as([*]const u8, @ptrFromInt(sf.pa_base))
             else
                 kbuf_ptr(w);
+            // #1082 (A4): a WINDOW-bound terminal repaints its whole grid
+            // into the back-buffer from the kernel's presentation state; the
+            // blit below then shows it. The full-grid render means the whole
+            // window is repainted, so the partial-damage path is skipped.
+            const term_screen = terminal.screenOf(w.id);
+            if (term_screen) |scr| {
+                render_terminal_screen(@constCast(src_ptr), w, scr);
+            }
             const src_stride: usize = @as(usize, w.w) * 4;
             // The source is the window's own back-buffer (surface and pool
             // buffer are both sized exactly win.w × win.h); clamp SOURCE
@@ -3740,7 +3793,7 @@ pub fn paint(w: *Window) void {
             var dest_y: u32 = w.y;
             var sw = bw;
             var sh = bh;
-            if (w.damaged) {
+            if (w.damaged and term_screen == null) {
                 const sx = @min(w.dx, bw);
                 const sy = @min(w.dy, bh);
                 sw = @min(w.dw, bw - @min(w.dx, bw));

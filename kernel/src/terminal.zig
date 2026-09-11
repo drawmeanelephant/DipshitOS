@@ -25,6 +25,141 @@ pub const in_capacity: usize = 256;
 /// How many concurrent terminals the kernel tracks.
 pub const max_terminals: usize = 4;
 
+/// #1082 (ADR 0020 Amendment A): the window front-end's presentation grid.
+/// The terminal OBJECT stays a pure byte session (D1); this bounded
+/// character grid + scrollback is presentation state rendered by the kernel
+/// into the bound `.user` window (A4). 8x8 cells, the kernel glyph raster.
+pub const grid_cols: usize = 80;
+pub const grid_lines: usize = 128;
+
+/// A bounded character grid with scrollback for one window-bound terminal.
+/// Bytes fed from the output ring are laid out (CR/LF/BS/TAB, a minimal CSI
+/// clear/home), wrapping at `grid_cols` and scrolling one line at a time.
+/// Pure: fixed arrays, no allocation, host-testable.
+pub const Screen = struct {
+    cells: [grid_lines][grid_cols]u8 = [_][grid_cols]u8{[_]u8{' '} ** grid_cols} ** grid_lines,
+    lens: [grid_lines]usize = [_]usize{0} ** grid_lines,
+    /// Number of lines in use (>= 1); grows to `grid_lines` then scrolls.
+    used: usize = 1,
+    /// The cursor's line (0..used-1) and column.
+    cur: usize = 0,
+    col: usize = 0,
+    /// Minimal CSI state: 0 normal, 1 ESC, 2 ESC [.
+    esc_state: u8 = 0,
+    esc_param: u32 = 0,
+
+    pub fn reset(self: *Screen) void {
+        self.* = .{};
+    }
+
+    fn clearLine(self: *Screen, i: usize) void {
+        @memset(&self.cells[i], ' ');
+        self.lens[i] = 0;
+    }
+
+    fn newline(self: *Screen) void {
+        if (self.cur + 1 < grid_lines) {
+            self.cur += 1;
+            if (self.cur >= self.used) self.used = self.cur + 1;
+            self.clearLine(self.cur);
+        } else {
+            // Scroll up one line, dropping the oldest (bounded scrollback).
+            var i: usize = 0;
+            while (i + 1 < grid_lines) : (i += 1) {
+                self.cells[i] = self.cells[i + 1];
+                self.lens[i] = self.lens[i + 1];
+            }
+            self.clearLine(grid_lines - 1);
+            self.cur = grid_lines - 1;
+            self.used = grid_lines;
+        }
+        self.col = 0;
+    }
+
+    pub fn clearScreen(self: *Screen) void {
+        var i: usize = 0;
+        while (i < grid_lines) : (i += 1) self.clearLine(i);
+        self.used = 1;
+        self.cur = 0;
+        self.col = 0;
+    }
+
+    /// Feed one output byte. Control bytes drive the cursor; a minimal
+    /// `ESC [ <param> <final>` is consumed (`2J` clears, `H` homes).
+    pub fn putByte(self: *Screen, b: u8) void {
+        switch (self.esc_state) {
+            0 => {},
+            1 => {
+                if (b == '[') {
+                    self.esc_state = 2;
+                    self.esc_param = 0;
+                } else {
+                    self.esc_state = 0;
+                }
+                return;
+            },
+            2 => {
+                if (b >= '0' and b <= '9') {
+                    self.esc_param = self.esc_param *% 10 +% (b - '0');
+                    return;
+                }
+                if (b >= 0x3a and b <= 0x3f) return; // parameter separators
+                self.esc_state = 0;
+                if (b == 'J' and self.esc_param == 2) self.clearScreen();
+                if (b == 'H') self.col = 0;
+                return;
+            },
+            else => self.esc_state = 0,
+        }
+        switch (b) {
+            0x1b => self.esc_state = 1,
+            '\n' => self.newline(),
+            '\r' => self.col = 0,
+            0x08 => {
+                if (self.col > 0) self.col -= 1;
+            },
+            '\t' => {
+                const next = (self.col + 8) & ~@as(usize, 7);
+                self.col = @min(next, grid_cols - 1);
+            },
+            0x07 => {}, // bell — silent
+            else => {
+                if (b < 0x20 or b == 0x7f) return;
+                if (self.col >= grid_cols) self.newline();
+                self.cells[self.cur][self.col] = b;
+                if (self.col + 1 > self.lens[self.cur]) self.lens[self.cur] = self.col + 1;
+                self.col += 1;
+            },
+        }
+    }
+
+    pub fn feed(self: *Screen, bytes: []const u8) void {
+        for (bytes) |b| self.putByte(b);
+    }
+
+    pub fn lineCount(self: *const Screen) usize {
+        return self.used;
+    }
+
+    /// The rendered bytes of line `i` (empty for an out-of-range line).
+    pub fn line(self: *const Screen, i: usize) []const u8 {
+        if (i >= self.used) return &.{};
+        return self.cells[i][0..self.lens[i]];
+    }
+
+    pub fn cursorLine(self: *const Screen) usize {
+        return self.cur;
+    }
+
+    pub fn cursorCol(self: *const Screen) usize {
+        return self.col;
+    }
+
+    pub fn cols() usize {
+        return grid_cols;
+    }
+};
+
 /// The consumer that renders output and supplies input. Exclusive per
 /// terminal: one front-end at a time (ADR 0020 D2).
 pub const FrontEnd = enum(u8) {
@@ -54,6 +189,9 @@ pub const Terminal = struct {
     front_end: FrontEnd = .none,
     owner_pid: ?usize = null,
     in_use: bool = false,
+    /// #1082 (ADR 0020 Amendment A): the `.user` window this terminal is a
+    /// front-end for, when `front_end == .window`. Null otherwise.
+    window_id: ?u8 = null,
 
     /// Append owner output to the ring. Always accepts every byte; when the
     /// ring is full it drops the oldest byte and counts it. Returns bytes
@@ -129,6 +267,26 @@ pub const Terminal = struct {
     pub fn detach(self: *Terminal) void {
         self.attached = false;
         self.front_end = .none;
+        self.window_id = null;
+    }
+
+    /// #1082 (ADR 0020 Amendment A): attach this terminal to a `.user`
+    /// window as its front-end. Exclusive per terminal (D2) and per window
+    /// (A6): fails when another front-end is attached, or when another
+    /// terminal already binds `window_id`. Idempotent for the same window.
+    pub fn attachWindow(self: *Terminal, window_id: u8) bool {
+        if (self.attached) {
+            if (self.front_end == .window and self.window_id == window_id) return true;
+            return false;
+        }
+        for (&terminals) |*o| {
+            if (@intFromPtr(o) == @intFromPtr(self)) continue;
+            if (o.in_use and o.attached and o.front_end == .window and o.window_id == window_id) return false;
+        }
+        self.attached = true;
+        self.front_end = .window;
+        self.window_id = window_id;
+        return true;
     }
 
     pub fn isAttached(self: *const Terminal) bool {
@@ -157,6 +315,11 @@ pub const Terminal = struct {
 
 pub var terminals: [max_terminals]Terminal = [_]Terminal{.{}} ** max_terminals;
 
+/// #1082 (ADR 0020 Amendment A): the per-terminal presentation grid,
+/// parallel to `terminals` and keyed by the same registry handle. Kept out
+/// of `Terminal` so the object stays a pure byte session (D1).
+pub var screens: [max_terminals]Screen = [_]Screen{.{}} ** max_terminals;
+
 /// Allocate a free terminal for `owner`, or null when all slots are taken.
 pub fn create(owner: ?usize) ?usize {
     for (&terminals, 0..) |*t, i| {
@@ -164,6 +327,7 @@ pub fn create(owner: ?usize) ?usize {
             t.reset();
             t.in_use = true;
             t.owner_pid = owner;
+            screens[i].reset();
             return i;
         }
     }
@@ -181,6 +345,61 @@ pub fn get(handle: usize) ?*Terminal {
 pub fn release(handle: usize) void {
     if (handle >= max_terminals) return;
     terminals[handle].reset();
+    screens[handle].reset();
+}
+
+/// The registry handle of `t`, or null when it is not a live slot.
+fn handleOf(t: *const Terminal) ?usize {
+    for (&terminals, 0..) |*x, i| {
+        if (@intFromPtr(x) == @intFromPtr(t)) return i;
+    }
+    return null;
+}
+
+/// #1082 (A5): the terminal bound to the `.user` window `window_id`, or
+/// null when the window is not a terminal front-end. `input.zig` uses this
+/// to encode focused-window keys into the bound terminal's input queue.
+pub fn windowTerminal(window_id: u8) ?*Terminal {
+    for (&terminals) |*t| {
+        if (t.in_use and t.attached and t.front_end == .window) {
+            if (t.window_id) |wid| {
+                if (wid == window_id) return t;
+            }
+        }
+    }
+    return null;
+}
+
+/// #1082 (A6): auto-detach any terminal bound to `window_id` (called by the
+/// window close / owner-exit path). The terminal survives, buffered,
+/// unattached; the serial console is NOT reclaimed.
+pub fn detachWindow(window_id: u8) void {
+    if (windowTerminal(window_id)) |t| t.detach();
+}
+
+/// #1082 (A4): drain terminal `handle`'s output ring into its presentation
+/// grid. Returns bytes moved; a no-op when the terminal has no window
+/// binding. The caller marks the bound window damaged (deferred present).
+pub fn pumpWindowOutput(handle: usize) usize {
+    const t = get(handle) orelse return 0;
+    if (t.window_id == null) return 0;
+    var total: usize = 0;
+    var buf: [128]u8 = undefined;
+    while (true) {
+        const n = t.readOut(&buf);
+        if (n == 0) break;
+        screens[handle].feed(buf[0..n]);
+        total += n;
+    }
+    return total;
+}
+
+/// #1082 (A4): the presentation grid bound to `window_id`, or null when the
+/// window is not a terminal front-end. `driving_award.paint` renders it.
+pub fn screenOf(window_id: u8) ?*const Screen {
+    const t = windowTerminal(window_id) orelse return null;
+    const h = handleOf(t) orelse return null;
+    return &screens[h];
 }
 
 // ---------------------------------------------------------------------------
@@ -416,4 +635,87 @@ test "terminal: serial pump round-trips console input/output through an attached
     try std.testing.expectEqual(@as(usize, 0), pumpInput(con));
     try std.testing.expectEqual(@as(usize, 0), pumpOutput(con));
     for (&terminals) |*tt| tt.reset();
+}
+
+test "terminal: screen lays out CR/LF/BS/TAB and wraps at the column bound" {
+    var s = Screen{};
+    s.feed("abc\r\nx");
+    try std.testing.expectEqual(@as(usize, 2), s.lineCount());
+    try std.testing.expectEqualStrings("abc", s.line(0));
+    try std.testing.expectEqualStrings("x", s.line(1));
+    try std.testing.expectEqual(@as(usize, 1), s.cursorCol());
+    // Backspace erases the cursor's column (no glyph invented).
+    s.feed("\x08y");
+    try std.testing.expectEqualStrings("y", s.line(1));
+    // TAB advances to the next multiple of 8.
+    s.feed("\tz");
+    try std.testing.expectEqual(@as(usize, 9), s.cursorCol());
+    try std.testing.expectEqualStrings("y       z", s.line(1));
+    // A line longer than the grid wraps instead of overrunning.
+    var long: [grid_cols + 3]u8 = undefined;
+    @memset(&long, 'a');
+    s.feed(&long);
+    try std.testing.expectEqual(@as(usize, 3), s.lineCount());
+    try std.testing.expectEqual(@as(usize, grid_cols), s.line(1).len);
+    try std.testing.expectEqual(@as(usize, 12), s.line(2).len);
+}
+
+test "terminal: screen scrolls past the line bound and clears on CSI 2J" {
+    var s = Screen{};
+    var i: usize = 0;
+    while (i < grid_lines + 5) : (i += 1) {
+        s.feed("L\n");
+    }
+    // The buffer is full and the oldest lines were dropped.
+    try std.testing.expectEqual(@as(usize, grid_lines), s.lineCount());
+    // `ESC [ 2 J` clears the screen back to one empty line.
+    s.feed("\x1b[2J\x1b[Hx");
+    try std.testing.expectEqual(@as(usize, 1), s.lineCount());
+    try std.testing.expectEqualStrings("x", s.line(0));
+}
+
+test "terminal: window binding is exclusive per terminal and per window" {
+    for (&terminals) |*t| t.reset();
+    const a = create(1) orelse return error.TestUnexpectedResult;
+    const b = create(2) orelse return error.TestUnexpectedResult;
+    const ta = get(a).?;
+    const tb = get(b).?;
+    try std.testing.expect(ta.attachWindow(2));
+    try std.testing.expectEqual(@as(?u8, 2), ta.window_id);
+    try std.testing.expect(windowTerminal(2) == ta);
+    // Another terminal may not bind the same window.
+    try std.testing.expect(!tb.attachWindow(2));
+    // The same terminal may not bind a second window (front-end exclusive).
+    try std.testing.expect(!ta.attachWindow(3));
+    // Idempotent re-attach of the same window succeeds.
+    try std.testing.expect(ta.attachWindow(2));
+    // A different window on a free terminal succeeds.
+    try std.testing.expect(tb.attachWindow(3));
+    try std.testing.expect(windowTerminal(3) == tb);
+    // Detach frees the binding for both lookups.
+    detachWindow(2);
+    try std.testing.expect(windowTerminal(2) == null);
+    try std.testing.expect(!ta.isAttached());
+    for (&terminals) |*t| t.reset();
+}
+
+test "terminal: window pump drains the output ring into the grid and screenOf finds it" {
+    for (&terminals) |*t| t.reset();
+    const h = create(3) orelse return error.TestUnexpectedResult;
+    const t = get(h).?;
+    try std.testing.expect(t.attachWindow(7));
+    _ = t.write("hi\nthere");
+    try std.testing.expectEqual(@as(usize, 8), pumpWindowOutput(h));
+    const scr = screenOf(7) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("hi", scr.line(0));
+    try std.testing.expectEqualStrings("there", scr.line(1));
+    // A second pump with an empty ring moves nothing (idempotent).
+    try std.testing.expectEqual(@as(usize, 0), pumpWindowOutput(h));
+    // An unbound handle pumps nothing.
+    const h2 = create(4) orelse return error.TestUnexpectedResult;
+    _ = get(h2).?.write("x");
+    try std.testing.expectEqual(@as(usize, 0), pumpWindowOutput(h2));
+    try std.testing.expect(screenOf(99) == null);
+    for (&terminals) |*tt| tt.reset();
+    for (&screens) |*ss| ss.reset();
 }

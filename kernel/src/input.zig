@@ -29,6 +29,7 @@ const std = @import("std");
 const xhci = @import("xhci.zig"); // I1/I2: the XHCI transport + enumerated HID devices
 const app_events = @import("events.zig"); // Milestone 9 (claim 7206): application event queues
 const driving_award = @import("driving_award.zig"); // Milestone six G5: window focus query for event routing
+const terminal = @import("terminal.zig"); // #1082 (ADR 0020 A5): window-front-end key routing
 const svclock = @import("svclock.zig"); // claim 9498 follow-on: the keyboard decode interleaves WIN + EV state
 
 pub const max_fifo: usize = 64;
@@ -487,6 +488,35 @@ pub fn decode_keyboard_report(rep: []const u8) void {
     }
 
     if (driving_award.focused_owner()) |owner_pid| {
+        // #1082 (ADR 0020 Amendment A, A5): when the focused window is a
+        // terminal front-end, encode its keys with the SAME `hid_to_bytes`
+        // encoder the console path uses and push them into the bound
+        // terminal's input queue — the shell reads them via `/dev/tty`.
+        // Focus is NOT stolen, and WIN_CLOSE/WIN_RESIZE/WIN_FOCUS are
+        // delivered by their own paths (this only redirects key bytes).
+        if (terminal.windowTerminal(driving_award.focused_window_id())) |tt| {
+            for (keys) |k| {
+                if (k == 0) continue;
+                var held = false;
+                for (kb_held) |h| {
+                    if (h == k) {
+                        held = true;
+                        break;
+                    }
+                }
+                if (held) continue;
+                kb_last_usage = k;
+                var kout: [max_key_bytes]u8 = undefined;
+                const kn = hid_to_bytes(k, shift, ctrl, &kout);
+                if (kn > 0) {
+                    kb_last_byte = kout[kn - 1]; // the sequence's final byte
+                    _ = tt.pushInput(kout[0..kn]);
+                    events += 1;
+                }
+            }
+            kb_held = keys;
+            return;
+        }
         // Milestone 9 Card E2: Route keyboard events to focused user window process!
         // 1. Key DOWN: keys present now but not in kb_held
         for (keys) |k| {
@@ -1044,4 +1074,36 @@ test "input: keyboard routing delivers KEY_DOWN and KEY_UP events to focused use
 
     // Clean up window
     _ = driving_award.user_close(win_id);
+}
+
+test "input: a window-bound terminal receives encoded keys, not app events (#1082 A5)" {
+    app_events.init();
+    driving_award.arm();
+    for (&terminal.terminals) |*tt| tt.reset();
+    const res = driving_award.user_open(10, 10, 100, 100, 2);
+    try std.testing.expect(res == .opened);
+    const win_id = res.opened;
+    _ = app_events.pop(2); // Consume WIN_FOCUS
+    const th = terminal.create(2) orelse return error.TestUnexpectedResult;
+    const tt = terminal.get(th).?;
+    try std.testing.expect(tt.attachWindow(win_id));
+
+    fifo_count = 0;
+    fifo_head = 0;
+    kb_held = [_]u8{0} ** 6;
+    // Space (usage 0x2c) with no modifiers: the bound terminal gets the byte,
+    // the console FIFO stays empty, and no KEY_DOWN app event is pushed.
+    decode_keyboard_report(&[_]u8{ 0, 0, 0x2c, 0, 0, 0, 0, 0 });
+    try std.testing.expectEqual(@as(usize, 0), fifo_count);
+    try std.testing.expectEqual(@as(usize, 0), app_events.pending(2));
+    var buf: [8]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 1), tt.readInput(&buf));
+    try std.testing.expectEqual(@as(u8, ' '), buf[0]);
+
+    // Closing the bound window auto-detaches the terminal (A6) and the
+    // terminal survives, buffered, unattached.
+    _ = driving_award.user_close(win_id);
+    try std.testing.expect(!tt.isAttached());
+    try std.testing.expect(terminal.windowTerminal(win_id) == null);
+    for (&terminal.terminals) |*t2| t2.reset();
 }
