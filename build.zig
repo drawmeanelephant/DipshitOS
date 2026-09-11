@@ -1191,6 +1191,31 @@ pub fn build(b: *std.Build) void {
     const install_wasm = b.addInstallFileWithDir(wasm_bin, .bin, "WASM.BIN");
     b.getInstallStep().dependOn(&install_wasm.step);
 
+    // ------------------------------------------------------------------
+    // Guest: M47 CP5 (#1119) CRYPTOD.BIN — the crypto KAT demo. Streams a
+    // host-share file through SHA-256 + HMAC-SHA256 using the shared
+    // `user/src/lib/crypto.zig` library and prints one line in one write;
+    // the class-B live-crypto gate asserts guest bytes == host KAT.
+    // ------------------------------------------------------------------
+    const cryptod_prog = b.addExecutable(.{
+        .name = "user-cryptod",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/cryptod.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    cryptod_prog.linker_script = b.path("user/linker.ld");
+    const cryptod_step = b.step("cryptod", "Build the M47 crypto KAT demo (zig-out/bin/CRYPTOD.BIN) — DSK1 flat (no writable globals)");
+    const cryptod_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    cryptod_elf2bin.addFileArg(cryptod_prog.getEmittedBin());
+    const cryptod_bin = cryptod_elf2bin.addOutputFileArg("CRYPTOD.BIN");
+    cryptod_elf2bin.has_side_effects = true;
+    cryptod_elf2bin.stdio = .inherit;
+    cryptod_step.dependOn(&cryptod_elf2bin.step);
+    const install_cryptod = b.addInstallFileWithDir(cryptod_bin, .bin, "CRYPTOD.BIN");
+    b.getInstallStep().dependOn(&install_cryptod.step);
+
     // M35 W3 (#764) + claim 4912: the virelai.h / virelai.zig host-author
     // shim probes. `zig build shim-check` compiles tests/virelai-probe.c
     // (zig cc) AND tests/virelai-probe.zig (zig build-exe) to wasm32
