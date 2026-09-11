@@ -52,7 +52,7 @@ user/src/lib/crypto/aead.zig       ChaCha20-Poly1305 seal/open
 user/src/lib/crypto/curve25519.zig field arithmetic + scalar helpers
 user/src/lib/crypto/x25519.zig     X25519 scalarmult
 user/src/lib/crypto/ed25519.zig    Ed25519 sign/verify
-user/src/cryptod.zig               EL0 demo app (CRYPTOD.BIN)
+user/src/cryptod.zig               EL0 demo app (CRYPTOD.BIN, DSK1 flat)
 tools/gate/specs/live-crypto.spec  class-B guest==host KAT gate
 ```
 
@@ -139,37 +139,41 @@ issue; it is never silently adjusted.
 
 ## CP5 — the EL0 demo and the live gate
 
-**`CRYPTOD.BIN`** (`user/src/cryptod.zig`, DSK3 segmented, EL0 app):
+**`CRYPTOD.BIN`** (`user/src/cryptod.zig`, EL0 app — **DSK1 flat**: it has
+no writable globals, so the flat image is the correct fit; the segmented
+linker would demand a page-aligned data segment the demo does not need):
 
 ```
-exec CRYPTOD.BIN <file> [sha256|hmac]
+exec CRYPTOD.BIN <file>
 ```
 
 1. `sys_file_open(<file>, MODE_READ)` (slot 23) — bare names route to the
    M34 host share.
-2. Stream the file in fixed 256-byte chunks into the SHA-256 context and,
-   in `hmac` mode, the HMAC-SHA256 context (fixed demo key). No whole-file
-   buffer; memory is O(1).
-3. Format one line — `cryptod: <mode> <hex digest> <hex mac>` — into a
-   caller buffer and emit it with **exactly one** `sys_write` (slot 1), then
+2. Stream the file in fixed 256-byte chunks into **both** a SHA-256 context
+   and an HMAC-SHA256 context (`user/src/lib/crypto.zig`), keyed with the
+   fixed demo literal `VIRELAIOS-M47-CRYPTO-DEMO-KEY` — "fixed vectors
+   first". No whole-file buffer; memory is O(1).
+3. Format one line — `cryptod: sha256=<64 hex> hmac=<64 hex>` — into a
+   stack buffer and emit it with **exactly one** `sys_write` (slot 1), then
    `sys_exit(0)`.
 4. Any open/read failure prints a distinct refusal and exits non-zero.
 
 **`tools/gate/specs/live-crypto.spec`** (declarative; ADR 0023 D6):
 
 - `vgate_share seed` arms the host share; a setup hook copies `CRYPTOD.BIN`
-  from `zig-out/bin` and writes a pinned share file (`CRYPTO.TXT`).
-- A script runs `exec CRYPTOD.BIN CRYPTO.TXT` and `... CRYPTO.TXT hmac`, then
-  an `echo` sentinel.
+  from `zig-out/bin` and writes a pinned share file (`CRYPTO.TXT` = the 256
+  bytes `0x00..0xff`, each once).
+- A script runs `exec CRYPTOD.BIN CRYPTO.TXT` and an `echo` sentinel.
 - Assertions:
-  - `serial-contains` the exact host-computed SHA-256 hex of `CRYPTO.TXT`;
-  - `serial-contains` the exact host-computed HMAC-SHA256 hex;
-  - `serial-contains` the sentinel (shell alive) and `serial-absent` the
-    refusal lines.
+  - `serial-contains-file expected.txt` — the host-recomputed line must
+    occur verbatim in the guest serial (guest bytes == host KAT);
+  - `serial-contains` the `exec: loaded CRYPTOD.BIN` line and the sentinel;
+  - `serial-absent` every refusal line and `[EXC] parking:`.
 - A `python` hook recomputes both values **independently on the host**
-  (hashlib/hmac) from the salt/seed used by the setup step and fails the
-  gate if the spec's literal expectations disagree — so the gate cannot
-  bless a hard-coded wrong string.
+  (hashlib/hmac) from the pinned fixture and fails the gate if the spec's
+  literal expectations (pinned here as hex) or the generated
+  `expected.txt` disagree — so the gate cannot bless a hard-coded wrong
+  string.
 
 The gate proves the strongest available claim: the guest's bytes equal the
 host's bytes on the same input. It does **not** prove SSH/TLS.
@@ -189,11 +193,12 @@ host's bytes on the same input. It does **not** prove SSH/TLS.
 - **Field arithmetic performance.** The u256/u512 Mod-p approach (ADR 0023)
   is chosen for provable reduction, not speed; the in-guest demo does not
   run curve ops. A limb rewrite is safe behind the same API.
-- **Cross-directory import.** `kernel/src/csprng.zig` importing the shared
-  ChaCha20 lives outside the kernel tree; the build must prove it compiles
-  for both `b.graph.host` tests and the freestanding AArch64 kernel. If it
-  cannot, the fallback (recorded honestly) is a kernel-local copy plus a
-  drift test that runs the same vectors in both roots.
+- **Cross-directory import (resolved).** Zig rejects a relative import that
+  escapes the importing file's module path, so `build.zig` exposes the
+  shared `crypto/chacha20.zig` as the named module `crypto_chacha` to the
+  freestanding kernel module and to the host test modules. `zig build
+  kernel` and `zig build test` both compile it; no kernel copy exists to
+  drift.
 - **`iterative` X25519 test cost.** 1,000 iterations of scalarmult is fine
   on the host; the test may be gated to a smaller count in CI if needed,
   but the RFC value is asserted exactly when it runs.

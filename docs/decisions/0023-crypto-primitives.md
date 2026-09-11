@@ -60,15 +60,20 @@ no kernel dependency, no I/O.
 
 ### D2. The kernel imports the shared ChaCha20 core — no mirror
 `kernel/src/csprng.zig`'s `chacha20_block`/`quarter_round` are **re-homed**
-into `crypto/chacha20.zig`; `csprng.zig` imports it
-(`@import("../../user/src/lib/crypto/chacha20.zig")`) and keeps only what is
-kernel policy: the entropy-device seeding, the spinlock, the stream state,
-the ASLR placement, and the honest `seeded()` flag. There is **one**
-ChaCha20 implementation in the tree, proven by the same RFC vectors in both
-test roots. A duplicate "kernel mirror" is rejected: it is the exact drift
-risk this ADR exists to prevent. The shared file is already freestanding, so
-crossing the `kernel/`-`user/` directory boundary costs nothing at compile
-time.
+into `crypto/chacha20.zig`; `csprng.zig` obtains it through the build-system
+**named module `crypto_chacha`** and keeps only what is kernel policy: the
+entropy-device seeding, the spinlock, the stream state, the ASLR placement,
+and the honest `seeded()` flag. There is **one** ChaCha20 implementation in
+the tree, proven by the same RFC vectors in both test roots. A duplicate
+"kernel mirror" is rejected: it is the exact drift risk this ADR exists to
+prevent.
+
+Zig rejects a relative import that escapes the importing file's module path
+(`error: import of file outside module path`), so `build.zig` roots a module
+at `user/src/lib/crypto/chacha20.zig` and adds it as `crypto_chacha` to both
+the freestanding kernel module and the host test modules; the source file is
+unchanged and shared. The shared file is already freestanding, so the
+`kernel/`–`user/` directory boundary costs nothing at compile time.
 
 ### D3. Constant-time discipline (bounded, honest)
 Secret-dependent **branches, memory indices, and early exits are forbidden**;
