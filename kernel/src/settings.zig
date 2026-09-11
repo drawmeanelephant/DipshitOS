@@ -9,6 +9,7 @@
 //!   - `prompt`: interactive shell prompt string (default: "virelai> ")
 //!   - `theme`: UI visual color accent (default: "default")
 //!   - `scrollback`: terminal scrollback buffer lines (default: "1000")
+//!   - `shell`: boot login shell, "monitor"|"sh" (default: "monitor")
 //!
 //! Boot contract:
 //!   On kernel boot, after the file channel is armed, `init_from_share()`
@@ -39,6 +40,7 @@
 //!   scrollback string  "1000"        positive integer, terminal scrollback lines
 //!   color      string  "on"          "on"|"off", ANSI terminal colors in shell
 //!   shadow     string  "off"         "on"|"off", M37 DQ4 compositor drop-shadow
+//!   shell      string  "monitor"     "monitor"|"sh", M45 SH8 boot login shell
 
 const std = @import("std");
 // M34 HF5 (issue #739): the host-share persistence path; HF6 (issue
@@ -82,6 +84,7 @@ pub fn init() void {
     _ = set_internal("scrollback", "1000");
     _ = set_internal("shadow", "off"); // M37 DQ4 (issue #838): compositor drop-shadow, default off
     _ = set_internal("focus_follows_mouse", "off");
+    _ = set_internal("shell", "monitor"); // M45 SH8 (#1084): boot login shell (monitor|sh)
     initialized = true;
 }
 
@@ -130,6 +133,17 @@ pub fn get_prompt() []const u8 {
 /// Dynamic helper for system hostname.
 pub fn get_hostname() []const u8 {
     return get("hostname") orelse "virelai";
+}
+
+/// M45 SH8 (#1084, ADR 0021 D5): the boot login shell. `"monitor"` (the
+/// default) keeps the raw-console monitor; `"sh"` hands the console to
+/// `SH.BIN` at boot.
+pub fn login_shell() []const u8 {
+    return get("shell") orelse "monitor";
+}
+
+pub fn login_shell_is_sh() bool {
+    return std.mem.eql(u8, login_shell(), "sh");
 }
 
 /// M18 T5: whether ANSI terminal colors are enabled.
@@ -461,6 +475,15 @@ test "settings: default initialization and getters" {
     try std.testing.expectEqualStrings("virelai> ", get_prompt());
     try std.testing.expectEqualStrings("dark", get("theme").?);
     try std.testing.expectEqualStrings("1000", get("scrollback").?);
+}
+
+test "settings: login shell defaults to monitor and accepts sh (M45 SH8)" {
+    init();
+    try std.testing.expectEqualStrings("monitor", login_shell());
+    try std.testing.expect(!login_shell_is_sh());
+    try std.testing.expectEqual(SetResult.ok, set("shell", "sh"));
+    try std.testing.expect(login_shell_is_sh());
+    init(); // restore defaults for other tests
 }
 
 test "settings: debug_font applies to the text layer (M20-U11)" {

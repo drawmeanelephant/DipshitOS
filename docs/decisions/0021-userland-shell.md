@@ -63,6 +63,14 @@ The monitor keeps the raw console. A settings key (`shell = monitor | sh`)
 flips the raw-console login to `SH.BIN` **after** the shell's gates are green;
 until then `SH.BIN` runs on demand (`exec SH.BIN`) or in `TERM.BIN`.
 
+**Implemented 2026-09-11** (M45 card SH8, issue #1084, claim #1106):
+`settings shell=monitor|sh` (default `monitor`) drives a boot login seam —
+`shell=sh` execs `SH.BIN` and the monitor relinquishes the raw console (the
+serial terminal front-end owns the RX; the monitor resumes if the shell
+detaches). `SH.BIN` runs an optional `STARTUP.SH` and adopts the persisted
+`prompt`. The class-B `live-shell-default` gate proves `shell=sh` lands in
+`SH.BIN` and the untouched default lands in the monitor.
+
 ### D6. One shared userland terminal library
 A `lib/tty.zig` (read/write `/dev/tty`, raw-ish line buffering, history,
 completion) is shared by `SH.BIN` and the front-ends so behaviour cannot drift
