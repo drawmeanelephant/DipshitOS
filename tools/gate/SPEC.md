@@ -23,6 +23,16 @@ PY
 vgate_run TAG -- FLAGS...          # one boot; FLAGS pass through verbatim
                                    # to VMRunner after the harness-owned
                                    # --serial/--overlay-base/--vars/--cvc-file
+vgate_client TAG -- FLAGS...       # (M46 RC2 #1069) a during-run TCP client:
+                                   # tools/lib/vgate-client.py runs in the
+                                   # background while the TAG run boots; it
+                                   # exits non-zero => the run fails. Flags:
+                                   # --addr host:port (req), --after MARKER,
+                                   # --send-file FILE | --send-text TEXT,
+                                   # --expect TEXT, --expect-fail,
+                                   # --timeout S, --connect-timeout S,
+                                   # --after-timeout S, --out FILE.
+                                   # Capture: $RUN_DIR/client-TAG.out
 vgate_allow_rc TAG RC...           # allowed VMRunner exit codes for TAG (default 0;
                                    # e.g. 1 for death-asserting gates like reboot)
 vgate_assert TAG KIND [args]       # all asserts of a TAG must hold, plus
@@ -40,6 +50,7 @@ Assert KINDs (serial = the run's `vm-serial.log` copy; output = runner stdout):
 | `serial-absent` | STR | STR never occurs (e.g. `[EXC] parking:`) |
 | `serial-echo` | CMD | `gate_serial_has_echo` accepts CMD (colored-or-plain prompt echo) |
 | `output-contains` | STR | STR occurs in runner stdout (e.g. `input-string: ENABLED`) |
+| `client-contains` | STR | STR occurs in the run's `$RUN_DIR/client-TAG.out` (the `vgate_client` capture) |
 | `capture-equals` | FILE FIXTURE | `$RUN_DIR/FILE` is byte-equal to `$RUN_DIR/FIXTURE` (5×0.5 s retry; copied to evidence) |
 | `capture-empty` | FILE | `$RUN_DIR/FILE` missing or zero-length |
 | `snapshot` | GLOB + python on stdin | newest `$RUN_DIR/GLOB` exists and the python (path as `sys.argv[1]`, `sys.exit(str)` fails) passes; snapshot copied to evidence |
@@ -62,6 +73,13 @@ Rules:
 - Evidence per run: `artifacts/NAME-serial-TAG.log`,
   `artifacts/NAME-run-TAG.txt`, `artifacts/NAME-report.txt`, referenced
   captures/snapshots, all `VIRELAI_GATE_SUFFIX`-aware.
+- `vgate_client` is launched once per matching run **before** VMRunner with
+  `RUN_DIR`/`VG_SER`/`VG_TAG` in its environment; the harness waits for it
+  after the run and fails the run on a non-zero exit (evidence
+  `artifacts/NAME-client-TAG.{out,log}`). A client that cannot connect within
+  its timeout exits non-zero — so "no listener ⇒ run fails" is the negative
+  default; `--expect-fail` inverts that for a gate asserting refusal. A spec
+  may declare several clients for one run (each is waited on).
 - `VGATE_NO_BUILD=1` skips the build preamble (dev iteration only).
   It is only valid when the already-built runner matches the spec's
   `vgate_runner_flags` (plain vs `-DSPIKE`): a stale-variant binary fails
