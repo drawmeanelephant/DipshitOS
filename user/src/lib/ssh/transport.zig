@@ -9,7 +9,10 @@
 //! enc_length(4) || enc_payload(packet_length) || tag(16)
 //! ```
 //!
-//! - **Send**: `packet.encode` frames the payload with entropy padding, then
+//! - **Send**: `packet.encode` frames the payload with entropy padding under
+//!   the **AEAD alignment** (packet_length % 8 == 0, see `packet.Alignment`;
+//!   #1210: real OpenSSH rejects the RFC 4253 `4 + packet_length` variant
+//!   for chacha20-poly1305), then
 //!   `ssh_cipher.seal` encrypts `length ‖ rest` in place (K_1 for the length,
 //!   K_2 for the payload) and tags it; the sealed frame + tag go out as one
 //!   `stream.send` (which paces ≤192-byte segments).
@@ -154,7 +157,7 @@ pub const Transport = struct {
     }
 
     fn wireLen(payload_len: usize) usize {
-        return packet.len_field + 1 + payload_len + packet.paddingLen(payload_len) + tag_len;
+        return packet.len_field + 1 + payload_len + packet.paddingLen(payload_len, .aead) + tag_len;
     }
 
     /// Frame, seal and send one payload. No bound accounting: the caller is
@@ -163,10 +166,10 @@ pub const Transport = struct {
     fn sendRaw(self: *Transport, payload: []const u8) Error!void {
         if (payload.len > maxPayload(self.tx.len)) return error.Overlong;
         const frame_room = self.tx[0 .. self.tx.len - tag_len];
-        const pad_len = packet.paddingLen(payload.len);
+        const pad_len = packet.paddingLen(payload.len, .aead);
         var pad: [16]u8 = undefined;
         try self.fillRandom(pad[0..pad_len]);
-        const frame = try packet.encode(frame_room, payload, pad[0..pad_len]);
+        const frame = try packet.encode(frame_room, payload, pad[0..pad_len], .aead);
         // In-place seal: xorStream reads input byte i before writing output
         // byte i, so an aliased ciphertext/plaintext slice round-trips.
         var tag: [tag_len]u8 = undefined;
@@ -249,7 +252,7 @@ pub const Transport = struct {
             self.s.fail();
             return error.BadPacket;
         }
-        const payload = packet.decode(ct) catch {
+        const payload = packet.decode(ct, .aead) catch {
             self.s.fail();
             return error.BadPacket;
         };
@@ -543,8 +546,11 @@ test "transport: sequence numbers continue across the NEWKEYS boundary (never re
     // frame shape.
     var enc_len: [ssh_cipher.length_len]u8 = undefined;
     @memcpy(&enc_len, wire[0..ssh_cipher.length_len]);
-    const want_pl = packet.paddingLen(payload.len) + 1 + payload.len;
+    const want_pl = packet.paddingLen(payload.len, .aead) + 1 + payload.len;
     try std.testing.expectEqual(@as(u32, @intCast(want_pl)), ssh_cipher.decryptLength(&enc_len, 3, &key));
+    // #1210: the AEAD wire length is `packet_length`, and OpenSSH requires
+    // it block-aligned (the 4-byte length field is outside the padded part).
+    try std.testing.expectEqual(@as(usize, 0), @as(usize, want_pl) % packet.block_size);
     try std.testing.expect(ssh_cipher.decryptLength(&enc_len, 2, &key) != @as(u32, @intCast(want_pl)));
 
     // A receiver at 2 (the "reset" bug) cannot authenticate the packet: an

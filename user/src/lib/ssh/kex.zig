@@ -544,11 +544,11 @@ pub const Kex = struct {
 
     /// Frame and send one plaintext packet, padding from entropy.
     fn sendPacket(self: *Kex, payload: []const u8) Error!void {
-        const pad_len = packet.paddingLen(payload.len);
+        const pad_len = packet.paddingLen(payload.len, .plaintext);
         var pad: [16]u8 = undefined;
         try self.fillRandom(pad[0..pad_len]);
         var frame: [512]u8 = undefined;
-        const encoded = try packet.encode(&frame, payload, pad[0..pad_len]);
+        const encoded = try packet.encode(&frame, payload, pad[0..pad_len], .plaintext);
         try self.s.send(encoded);
         self.send_seq +%= 1;
     }
@@ -852,10 +852,10 @@ const Script = struct {
     }
 
     fn frame(self: *Script, payload: []const u8) void {
-        const pad_len = packet.paddingLen(payload.len);
+        const pad_len = packet.paddingLen(payload.len, .plaintext);
         var pad: [16]u8 = undefined;
         @memset(pad[0..pad_len], 0xaa);
-        const encoded = packet.encode(self.buf[self.len..], payload, pad[0..pad_len]) catch unreachable;
+        const encoded = packet.encode(self.buf[self.len..], payload, pad[0..pad_len], .plaintext) catch unreachable;
         self.len += encoded.len;
     }
 
@@ -944,20 +944,20 @@ test "kex: pinned deterministic transcript — H, KDF keys, NEWKEYS install" {
     try std.testing.expectEqualSlices(u8, line, TestNet.tx[0..line.len]);
     var off: usize = line.len;
 
-    const h1 = try packet.decodeHeader(TestNet.tx[off..]);
-    try std.testing.expectEqualSlices(u8, &Vector.i_c, try packet.decode(TestNet.tx[off..][0..h1.total()]));
+    const h1 = try packet.decodeHeader(TestNet.tx[off..], .plaintext);
+    try std.testing.expectEqualSlices(u8, &Vector.i_c, try packet.decode(TestNet.tx[off..][0..h1.total()], .plaintext));
     off += h1.total();
 
     var init_payload: [1 + 4 + 32]u8 = undefined;
     var iw = wire.Writer.init(&init_payload);
     try iw.writeByte(msg_kex_ecdh_init);
     try iw.writeString(&Vector.q_c);
-    const h2 = try packet.decodeHeader(TestNet.tx[off..]);
-    try std.testing.expectEqualSlices(u8, iw.written(), try packet.decode(TestNet.tx[off..][0..h2.total()]));
+    const h2 = try packet.decodeHeader(TestNet.tx[off..], .plaintext);
+    try std.testing.expectEqualSlices(u8, iw.written(), try packet.decode(TestNet.tx[off..][0..h2.total()], .plaintext));
     off += h2.total();
 
-    const h3 = try packet.decodeHeader(TestNet.tx[off..]);
-    try std.testing.expectEqualSlices(u8, &.{msg_newkeys}, try packet.decode(TestNet.tx[off..][0..h3.total()]));
+    const h3 = try packet.decodeHeader(TestNet.tx[off..], .plaintext);
+    try std.testing.expectEqualSlices(u8, &.{msg_newkeys}, try packet.decode(TestNet.tx[off..][0..h3.total()], .plaintext));
 
     // The installed send cipher seals at the continuing sequence number
     // with the pinned C→S key.

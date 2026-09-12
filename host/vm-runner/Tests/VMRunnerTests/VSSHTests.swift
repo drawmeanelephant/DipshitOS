@@ -139,6 +139,18 @@ final class VSSHTests: XCTestCase {
         XCTAssertNil(cipher.open(ciphertext: badCt, tag: tag, seq: 7))
         // A peer that resets the sequence number cannot open the frame.
         XCTAssertNil(cipher.open(ciphertext: ct, tag: tag, seq: 6))
+
+        // #1210 frame-alignment vector: the pinned OpenSSH frame's
+        // packet_length (0x48 = 72) is a multiple of 8 while 4 + 72 = 76 is
+        // not. ONLY the AEAD rule accepts it; the RFC 4253 plaintext rule
+        // rejects the exact frame real sshd emits (and sends).
+        XCTAssertEqual(SSHPacket.paddingLen(65, alignment: .aead), 6)
+        let payload = try SSHPacket.decode(plain, alignment: .aead)
+        XCTAssertEqual(payload.count, 65)
+        XCTAssertEqual(payload, Array(plain[5 ..< 5 + 65]))
+        XCTAssertThrowsError(try SSHPacket.decode(plain, alignment: .plaintext)) { error in
+            XCTAssertEqual(error as? SSHPacketError, .badLength)
+        }
     }
 
     func testOpenSSHCipherZeroKeyPinsSplitKeyConstruction() throws {
@@ -218,8 +230,10 @@ final class VSSHTests: XCTestCase {
     // MARK: - the server state machine (scripted CryptoKit client)
 
     private func plainFrame(_ payload: [UInt8], pad: UInt8 = 0x33) -> [UInt8] {
-        let padding = [UInt8](repeating: pad, count: SSHPacket.paddingLen(payload.count))
-        return try! SSHPacket.encode(payload: payload, pad: padding)
+        let padding = [UInt8](
+            repeating: pad, count: SSHPacket.paddingLen(payload.count, alignment: .plaintext)
+        )
+        return try! SSHPacket.encode(payload: payload, pad: padding, alignment: .plaintext)
     }
 
     /// A CryptoKit client that speaks the OpenSSH cipher at the wire level.
@@ -237,8 +251,12 @@ final class VSSHTests: XCTestCase {
         }
 
         func packet(_ payload: [UInt8]) -> [UInt8] {
-            let padding = [UInt8](repeating: 0x44, count: SSHPacket.paddingLen(payload.count))
-            let frame = try! SSHPacket.encode(payload: payload, pad: padding)
+            let padding = [UInt8](
+                repeating: 0x44, count: SSHPacket.paddingLen(payload.count, alignment: .aead)
+            )
+            let frame = try! SSHPacket.encode(
+                payload: payload, pad: padding, alignment: .aead
+            )
             let (ct, tag) = send.seal(frame, seq: sendSeq)
             sendSeq += 1
             return ct + tag
@@ -262,7 +280,7 @@ final class VSSHTests: XCTestCase {
                 }
                 rx.removeFirst(wire)
                 recvSeq += 1
-                if let payload = try? SSHPacket.decode(plain) {
+                if let payload = try? SSHPacket.decode(plain, alignment: .aead) {
                     decoded.append(payload)
                 }
             }
@@ -301,7 +319,9 @@ final class VSSHTests: XCTestCase {
                 | (Int(bytes[i + 2]) << 8) | Int(bytes[i + 3])
             let total = 4 + length
             guard total >= 5, i + total <= bytes.count else { break }
-            if let payload = try? SSHPacket.decode(Array(bytes[i ..< i + total])) {
+            if let payload = try? SSHPacket.decode(
+                Array(bytes[i ..< i + total]), alignment: .plaintext
+            ) {
                 frames.append(payload)
             }
             i += total
@@ -494,6 +514,35 @@ final class VSSHTests: XCTestCase {
         XCTAssertTrue(server.events.contains { $0.contains("exec command=uname -a") })
     }
 
+    func testAEADFramesAlignPacketLengthToBlockSize() throws {
+        // #1210: after NEWKEYS the responder must pad packet_length alone
+        // (OpenSSH `ssh_packet_send2_wrapped`), not `4 + packet_length` —
+        // real sshd rejects the latter with
+        // `padding error: need N block 8 mod M`.
+        let (server, c2s, s2c, _, _) = try runKex()
+        let client = ScriptedClient(c2s: c2s, s2c: s2c)
+        var service = SSHWriter()
+        service.byte(SSHServer.msgServiceRequest)
+        service.string("ssh-userauth")
+
+        // SERVICE_ACCEPT is the first encrypted server packet (send seq 3
+        // after the KEXINIT/ECDH_REPLY/NEWKEYS plaintext frames).
+        let serverBytes = server.feed(client.packet(service.bytes))
+        let length = Int(
+            SSHOpenSSHCipher(key: s2c).decryptLength(Array(serverBytes[0 ..< 4]), seq: 3)
+        )
+        XCTAssertEqual(length % SSHPacket.blockSize, 0, "AEAD packet_length is block-aligned")
+        XCTAssertEqual(length, 24)
+        XCTAssertNotEqual((SSHPacket.lenField + length) % SSHPacket.blockSize, 0)
+
+        // The client's AEAD decoder reads the same frame back.
+        let responses = client.feed(serverBytes)
+        XCTAssertEqual(responses.count, 1)
+        var sr = SSHReader(responses[0])
+        XCTAssertEqual(try sr.byte(), SSHServer.msgServiceAccept)
+        XCTAssertEqual(try sr.stringUTF8(), "ssh-userauth")
+    }
+
     func testServerRejectsTamperedFirstServerTag() throws {
         let (server, c2s, s2c, _, _) = try runKex(tamper: true)
         let client = ScriptedClient(c2s: c2s, s2c: s2c)
@@ -565,9 +614,18 @@ final class VSSHTests: XCTestCase {
         XCTAssertEqual(r.remaining, 0)
         var short = SSHReader([0, 0, 0, 4, 0x61])
         XCTAssertThrowsError(try short.string())
-        // Packet padding bounds mirror packet.zig.
-        XCTAssertEqual(SSHPacket.paddingLen(0), 11)
-        XCTAssertThrowsError(try SSHPacket.decode([0, 0, 0, 4, 0]))
+        // Packet padding bounds mirror packet.zig: the plaintext rule pads
+        // to `4 + packet_length` (11 for an empty payload), the AEAD rule
+        // pads packet_length alone (7).
+        XCTAssertEqual(SSHPacket.paddingLen(0, alignment: .plaintext), 11)
+        XCTAssertEqual(SSHPacket.paddingLen(0, alignment: .aead), 7)
+        XCTAssertThrowsError(try SSHPacket.decode([0, 0, 0, 4, 0], alignment: .plaintext))
+        XCTAssertThrowsError(try SSHPacket.decode([0, 0, 0, 4, 0], alignment: .aead))
+        // An AEAD-aligned frame that violates the plaintext rule (and vice
+        // versa): 12 gives 4 + 12 = 16 (plaintext OK, AEAD 12 % 8 != 0);
+        // 16 gives 4 + 16 = 20 (AEAD OK, plaintext 20 % 8 != 0).
+        XCTAssertThrowsError(try SSHPacket.decode([0, 0, 0, 12, 4], alignment: .aead))
+        XCTAssertThrowsError(try SSHPacket.decode([0, 0, 0, 16, 4], alignment: .plaintext))
     }
 
     func testFixturesDeriveThePinnedPublicKeys() throws {

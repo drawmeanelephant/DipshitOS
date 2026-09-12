@@ -1,0 +1,60 @@
+# relay-03 SSH evidence extract (#1210 progression; full run logs were run-local and not committed)
+# guest serial SSH lines:
+[32mvirelai> [0mexec SSH.BIN tbuddy@10.0.0.2:2222 echo VIRELAI-INTEROP-OK
+ssh: target user=tbuddy host=10.0.0.2 port=2222 mode=exec
+ssh: connected
+ssh: kex-ok
+ssh: pin-ok
+ssh: auth-ok method=publickey
+ssh: channel-error Protocol
+ssh: fail stage=channel rc=6
+# runner stdout SSH/relay lines + final result:
+NET-TCP-RELAY: connection accepted (guest SYN seq 0x8490560a); dialing upstream 127.0.0.1:2222
+NET-TCP-RELAY: upstream 127.0.0.1:2222 connected (real server; bytes proxied, no crypto here)
+NET-TCP-RELAY: observed the guest's ACK (ack 0x12345679)
+NET-TCP-RELAY: upstream -> guest 22 bytes buffered
+NET-TCP-RELAY: sent 22 bytes to the guest (seq 0x12345679)
+NET-TCP-RELAY: upstream -> guest 992 bytes buffered
+NET-TCP-RELAY: sent 192 bytes to the guest (seq 0x1234568f)
+NET-TCP-RELAY: sent 192 bytes to the guest (seq 0x1234574f)
+NET-TCP-RELAY: sent 192 bytes to the guest (seq 0x1234580f)
+NET-TCP-RELAY: sent 192 bytes to the guest (seq 0x123458cf)
+NET-TCP-RELAY: sent 192 bytes to the guest (seq 0x1234598f)
+NET-TCP-RELAY: sent 32 bytes to the guest (seq 0x12345a4f)
+NET-TCP-RELAY: observed the guest's ACK (ack 0x12345a6f)
+NET-TCP-RELAY: upstream -> guest 208 bytes buffered
+NET-TCP-RELAY: sent 192 bytes to the guest (seq 0x12345a6f)
+NET-TCP-RELAY: sent 16 bytes to the guest (seq 0x12345b2f)
+NET-TCP-RELAY: observed the guest's ACK (ack 0x12345b3f)
+NET-TCP-RELAY: upstream -> guest 44 bytes buffered
+NET-TCP-RELAY: sent 44 bytes to the guest (seq 0x12345b3f)
+NET-TCP-RELAY: observed the guest's ACK (ack 0x12345b6b)
+NET-TCP-RELAY: upstream -> guest 44 bytes buffered
+NET-TCP-RELAY: sent 44 bytes to the guest (seq 0x12345b6b)
+NET-TCP-RELAY: observed the guest's ACK (ack 0x12345b97)
+NET-TCP-RELAY: upstream -> guest 28 bytes buffered
+NET-TCP-RELAY: sent 28 bytes to the guest (seq 0x12345b97)
+NET-TCP-RELAY: upstream -> guest 328 bytes buffered
+NET-TCP-RELAY: sent 192 bytes to the guest (seq 0x12345bb3)
+NET-TCP-RELAY: sent 136 bytes to the guest (seq 0x12345c73)
+NET-TCP-RELAY: the guest sent FIN; FIN-ACK and upstream close
+NET-TCP-RELAY: observed the guest's ACK (ack 0x12345cfc)
+NET-TCP-RELAY: upstream 127.0.0.1:2222 closed (EOF)
+FAILURE: expected transcript 'interop-relay-done' not observed within 180s (log=91124 bytes).
+# sshd log (see sshd.log for the full DEBUG3):
+debug1: userauth-request for user tbuddy service ssh-connection method none [preauth]
+debug1: userauth-request for user tbuddy service ssh-connection method publickey [preauth]
+debug1: userauth-request for user tbuddy service ssh-connection method publickey-hostbound-v00@openssh.com [preauth]
+Accepted publickey for tbuddy from 127.0.0.1 port 63701 ssh2: ED25519 SHA256:Jm12L140DAnDw/rMLYQGUqES3xD6QLORkWa30dfEKXg
+debug1: server_input_channel_open: ctype session rchan 0 win 2097152 max 32768
+debug1: server_input_channel_open: confirm session
+debug1: session_input_channel_req: session 0 req env
+debug1: session_input_channel_req: session 0 req exec
+Close session: user tbuddy from 127.0.0.1 port 63701 id 0
+debug1: userauth-request for user tbuddy service ssh-connection method none [preauth]
+debug1: userauth-request for user tbuddy service ssh-connection method publickey [preauth]
+Accepted publickey for tbuddy from 127.0.0.1 port 63707 ssh2: ED25519 SHA256:F34nin7tcaYH6WR5LSWSfj6weFBPfBpuyUUoPFP9YjA
+debug1: server_input_channel_open: ctype session rchan 0 win 131072 max 32768
+debug1: server_input_channel_open: confirm session
+Connection closed by 127.0.0.1 port 63707
+Close session: user tbuddy from 127.0.0.1 port 63707 id 0

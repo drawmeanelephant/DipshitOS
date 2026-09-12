@@ -1,20 +1,48 @@
-# M51 real-OpenSSH interop evidence — issue #1209 (goal #1066, ADR 0025 D8)
+# M51 real-OpenSSH interop evidence — issues #1209/#1210 (goal #1066, ADR 0025 D8)
 
-Date: 2026-09-12. Host: macOS 27.0 (26A428), arm64. Revision: the branch
-`t3code/m51-interop` where this directory was added.
+Date: 2026-09-12. Host: macOS 27.0 (26A428), arm64. Revision: `#1209` ran on
+`t3code/m51-interop`; `#1210` ran on `t3code/m51-ssh-padding`.
 Server: `/usr/sbin/sshd` from Apple's OpenSSH_10.3p1 (LibreSSL 3.3.6),
 started non-root on port 2222 with `sshd/sshd_config`, a generated
 ssh-ed25519 host key, and the RFC 8032 TEST 2 client key in
 `sshd/authorized_keys`. Client seed provisioned via `share/SECRETS.TXT`;
 host-key pin via `share/SSH/KNOWN_HOSTS` (see `sshd-hostpin.txt`).
 
-This is a documented manual check (ADR 0025 D8), NOT a CI gate. The
-follow-up fix claim is **#1210**; the full analysis lives in ADR 0025 D8
-and `docs/ssh-scoping.md`.
+This is a documented manual check (ADR 0025 D8), NOT a CI gate. The full
+analysis lives in ADR 0025 D8 and `docs/ssh-scoping.md`.
 
-## Result
+## Result (claim #1210): OBSERVED end to end against real OpenSSH
 
-**Transport proved; one conformance gap observed.**
+After the #1210 padding realignment (and two further real-server fixes it
+exposed — see below), the canonical run is `runs/relay-06/` (raw
+`vm-serial.log`, `run.out`, `sshd.log` DEBUG3, `cap.bin`, scripts, and
+`seed-absence-check.txt`; all small enough to commit in full):
+
+- `exec SSH.BIN tbuddy@10.0.0.2:2222 echo VIRELAI-INTEROP-OK` →
+  `ssh: kex-ok` → `ssh: pin-ok` → `ssh: auth-ok method=publickey` →
+  `ssh: channel-open remote=0` → **remote stdout `VIRELAI-INTEROP-OK`** →
+  `ssh: eof` → `ssh: exit-status=0` → `ssh: bye rc=0`.
+- Real sshd's DEBUG3 log shows `Accepted publickey ... port 64116`, the
+  session channel open, the `exec` request with `exit 0`, and a clean
+  close. Runner rc=0 (`interop-relay-done` observed).
+- The client seed appears in **no** log (`seed-absence-check.txt`).
+- The three class-B gates re-ran green with the realigned responder:
+  `gates/live-ssh-endpoint-rerun.txt` (PASS 1/1),
+  `gates/live-ssh-negative-rerun.txt` (PASS 3/3),
+  `gates/live-ssh-packet-rerun.txt` (PASS 1/1).
+
+The fix: `packet.Alignment` selects the padding rule by cipher
+(`.plaintext` `4 + packet_length` for KEX, `.aead` `packet_length % 8 == 0`
+for `chacha20-poly1305@openssh.com`), mirrored in VSSH. The same run then
+exposed two more real-server gaps, both fixed with class-A vectors:
+`channel.open()` rejected OpenSSH's pre-confirmation
+`hostkeys-00@openssh.com` GLOBAL_REQUEST (it carries request-specific
+host-key data; RFC 4254 §4 says ignore it) and treated sender channel id
+**0** as "unset". Progression runs: `runs/relay-03/` (padding fixed,
+userauth accepted; channel-stage `Protocol`), `runs/relay-04/` (global
+request with data still failing), `runs/relay-05/` (channel id 0 rejected).
+
+## History: the #1209 run (transport proved, one padding gap)
 
 - VZ-NAT guest→host TCP is a dead end on this host (evidence:
   `runs/nat-*/`, `runs/nat-debug/host-observations.txt`). While the VM ran,
@@ -58,12 +86,24 @@ and `docs/ssh-scoping.md`.
   probe and guest→host-LAN).
 - `runs/nat-debug/` — VM-alive host observations: `host-observations.txt`.
 - `runs/relay-01/` — first relay run (guest KEX stalled; blocking relay).
-- `runs/relay-02/` — canonical run: real OpenSSH KEX + padding rejection,
-  `sshd-log-delta.txt`, `seed-absence-check.txt`, `cap.bin` (guest frames).
-  The committed `vm-serial.head.log` / `run.out.head.txt` carry everything
-  through the sshd disconnect; the full 100k-line originals (the tail is
-  periodic kernel worker output with no SSH content) are left on disk in
-  the worktree, untracked.
-- `gates/` — post-change re-runs of `live-ssh-endpoint` (PASS 1/1) and
-  `live-ssh-negative` (PASS 3/3) proving the `:ssh` responder is unchanged,
-  plus the gate-inventory check.
+- `runs/relay-02/` — #1209 canonical run: real OpenSSH KEX + padding
+  rejection, `sshd-log-delta.txt`, `seed-absence-check.txt`, `cap.bin`
+  (guest frames). The committed `vm-serial.head.log` / `run.out.head.txt`
+  carry everything through the sshd disconnect; the full 100k-line
+  originals (the tail is periodic kernel worker output with no SSH
+  content) are left on disk in the worktree, untracked.
+- `runs/relay-03/` … `runs/relay-05/` — #1210 progression: padding fixed +
+  userauth accepted (`03`), pre-confirmation GLOBAL_REQUEST with data still
+  failing (`04`), sender channel id 0 still rejected (`05`). The run-local
+  132 KiB serial/runner logs are not committed; each dir carries
+  `ssh-evidence.txt` (the exact SSH/relay/sshd grep extract of those logs)
+  plus the full `sshd.log` DEBUG3 and guest `cap.bin`.
+- `runs/relay-06/` — #1210 canonical success: full raw evidence (serial,
+  runner stdout, sshd DEBUG3, `cap.bin`, scripts, seed-absence scan, and
+  `sshd_config.used`, the exact config the run's sshd was started with).
+- `gates/` — post-change re-runs: `live-ssh-endpoint-rerun.log` /
+  `live-ssh-negative-rerun.log` from #1209, plus
+  `live-ssh-endpoint-rerun-1210.txt` (PASS 1/1),
+  `live-ssh-negative-rerun-1210.txt` (PASS 3/3) and
+  `live-ssh-packet-rerun-1210.txt` (PASS 1/1) from #1210, and the
+  gate-inventory check.
