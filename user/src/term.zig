@@ -73,13 +73,17 @@ fn modeSet(ctx: ?*anyopaque, path: []const u8, mode: u16) i64 {
 /// M50 TS5 (#1139): the `secrets` builtin's glue — the calling principal's
 /// key NAMES from `sys_secret_get` (slot 70). Mirrors the `SH.BIN` glue
 /// (`user/src/sh.zig`) so the secret view is consistent across both shell
-/// presentations; values are never printed here.
+/// presentations; values are wiped from this buffer after the names are
+/// copied out and never printed.
 var g_secret_buf: [abi.secret_entries_max * abi.secret_entry_bytes]u8 = undefined;
 
 fn secretList(ctx: ?*anyopaque, out: *shell_mod.SecretList) bool {
     _ = ctx;
     const rc = abi.secret_get(&g_secret_buf);
-    if (rc < 0) return false;
+    if (rc < 0) {
+        @memset(&g_secret_buf, 0);
+        return false;
+    }
     const n: usize = @intCast(@divTrunc(rc, abi.secret_entry_bytes));
     var i: usize = 0;
     while (i < n and i < out.names.len) : (i += 1) {
@@ -89,6 +93,7 @@ fn secretList(ctx: ?*anyopaque, out: *shell_mod.SecretList) bool {
         out.lens[i] = klen;
     }
     out.count = @min(n, out.names.len);
+    @memset(&g_secret_buf, 0);
     return true;
 }
 

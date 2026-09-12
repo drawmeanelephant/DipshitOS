@@ -274,6 +274,18 @@ print secret *names* only. `sys_secret_get` and `sys_tty_net_auth` are
 excluded from argument/return tracing, and a test asserts their buffers do
 not appear in captured output.
 
+**TS5 implementation notes** (2026-09-11, #1139): (a) the on-share line
+format is `key<TAB>uid<TAB>value` — deliberately NOT `SETTINGS.TXT`'s
+`key=value` — because each entry carries the principal scoping `uid`
+(ADR 0024 D1); the key/value bounds and `#v1` header are the shared engine
+semantics the ADR promises. (b) A malformed `SECRETS.TXT` line is SKIPPED
+(not fail-closed like a malformed `OWNERS.TXT` line): the file is
+host-provisioned and the file ABI cannot read it, so a bad host line is not
+guest-reachable and poisoning the whole store would silently strand every
+principal's secrets; the store still refuses a non-`#v1` schema entirely.
+(c) The guest glue zeroes its `sys_secret_get` staging buffer after copying
+out key names (key-material hygiene; TS4 follows the same discipline).
+
 ### D9. Settings (non-secret) keep their existing contract
 `SETTINGS.TXT` and `kernel/src/settings.zig` are unchanged in format and
 semantics; they gain no secret keys. The "store" is one engine with two
