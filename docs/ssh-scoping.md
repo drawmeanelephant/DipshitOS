@@ -1,7 +1,8 @@
 # SSH (M51) — scoping and gated card split
 
-Status: **OPEN — design accepted (ADR 0025); SSH-P1/P2 + SSH1–SSH5 filed,
-not started** · Date: 2026-09-12 · Milestone **M51** (goal **#1066**
+Status: **OPEN — design accepted (ADR 0025); SSH-P1/P2 + SSH1–SSH4
+implemented on `main`, SSH5 (#1172) is the remaining class-B endpoint
+gate** · Date: 2026-09-12 · Milestone **M51** (goal **#1066**
 Stage 3) · Umbrella **#1164** · Design card **#1165** (SSH0) · Depends on:
 the M46 remote seam (ADR 0022, `--net` + `--net-tcp-respond`), the M47
 primitives (ADR 0023, `user/src/lib/crypto/`), the M50 secret store and
@@ -103,8 +104,10 @@ user/src/lib/ssh/wire.zig          NEW  SSH byte/string/mpint/name-list codec (S
 user/src/lib/ssh/packet.zig        NEW  RFC 4253 binary packet framing (SSH1)
 user/src/lib/ssh/stream.zig        NEW  stream adapter over sys_tcp_* (SSH1)
 user/src/lib/ssh/kex.zig           NEW  version/KEXINIT/curve25519-sha256/NEWKEYS (SSH2)
+user/src/lib/ssh/transport.zig     NEW  encrypted RFC 4253 packet transport over the AEAD (SSH4)
 user/src/lib/ssh/userauth.zig      NEW  none probe + publickey ed25519 (SSH3)
 user/src/lib/ssh/channel.zig       NEW  session/pty/exec channels (SSH4)
+user/src/lib/ssh/cli.zig           NEW  pure [user@]host[:port] [cmd] grammar (SSH4)
 user/src/ssh.zig                   NEW  SSH.BIN app + CLI (SSH4)
 user/src/lib/rng.zig               NEW  sys_getrandom wrapper (SSH-P1)
 user/src/lib/crypto/chacha20_ssh.zig  NEW  djb ChaCha20, 64-bit nonce/counter (SSH-P2)
@@ -130,12 +133,39 @@ crypto library and the OS seams, not the protocol or the direction.
 | **SSH1** #1168 | `ssh/wire.zig`, `ssh/packet.zig`, `ssh/stream.zig` | wire round-trips (byte/uint32/uint64/string/mpint/name-list); packet length/padding bounds; split-packet reassembly; ring-overflow **fail-closed**; one-outstanding-segment TX pacing — all over an injected seam | a deterministic responder sends a known packet split across many segments; the guest reassembles and echoes a digest | untouched |
 | **SSH2** #1169 | `ssh/kex.zig`: version exchange, KEXINIT, `curve25519-sha256`, `ssh-ed25519` host-key verify, exchange hash `H`, KDF, NEWKEYS, cipher install | pinned RFC 8731/4253 KEX vectors; wrong host-key sig / tampered `H` / wrong `session_id` rejected; derived keys match the KDF | covered by SSH5's positive run | untouched |
 | **SSH3** #1170 | `ssh/userauth.zig`: service request, `none` probe, `publickey` ed25519 signature; `SSH/KNOWN_HOSTS` parser; TS5 `ssh-user-ed25519` read + `ct.wipe` | signature over `session_id ‖ request` verifies; wrong key refused; `none`→`publickey` flow; missing key/pin fails closed with a distinct status; secret never logged | covered by SSH5's positive/negative runs | no secret read at boot |
-| **SSH4** #1171 | `ssh/channel.zig` + `user/src/ssh.zig` (`SSH.BIN`): session open, `pty-req`/`shell` or `exec`, data/window/EOF/close; CLI `SSH.BIN [user@]host[:port] [cmd]` | channel state machine, window accounting, EOF/close, exec-vs-pty dispatch; no-rekey byte/packet bound disconnects | SSH5 drives a one-shot `exec` marker and an interactive shell line | untouched |
+| **SSH4** #1171 | `ssh/transport.zig` (encrypted packet transport over `kex.Result`), `ssh/channel.zig`, `ssh/cli.zig` + `user/src/ssh.zig` (`SSH.BIN`): session open, `pty-req`/`shell` or `exec`, data/window/EOF/close; CLI `SSH.BIN [user@]host[:port] [cmd]` | channel state machine, window accounting, EOF/close, exec-vs-pty dispatch; no-rekey byte/packet bound disconnects; sealed/open transport round trip + tamper fail-closed; sequence continuation across NEWKEYS | SSH5 drives a one-shot `exec` marker and an interactive shell line | untouched |
 | **SSH5** #1172 | runner `--net-tcp-respond …:ssh` minimal SSH server (pinned host key + pinned publickey + one exec); `tools/gate/specs/live-ssh-*.spec`; inventory regenerated | — (gate card) | positive KEX+auth+exec; unknown host key refused; wrong user key refused; tampered MAC disconnected; missing credential fail-closed; `serial-absent '[EXC]'` | fleet re-run green |
 
 Each implementation PR updates ADR 0007's table and `implemented_count` where
 it adds a slot (only SSH-P1), regenerates `docs/gate-fleet-inventory.md` when
 it adds a spec (SSH5), and presents `boot-default-unchanged` evidence.
+
+### SSH4 implementation notes (the decisions SSH5's gate targets)
+
+- **Encrypted transport landed** in `user/src/lib/ssh/transport.zig` (the
+  piece SSH3 deferred): RFC 4253 §6 framing + the OpenSSH AEAD wire shape
+  `enc_length(4) ‖ enc_payload ‖ tag(16)`, `decryptLength` first, tag
+  verified before use, and the cipher sequence numbers **continuing across
+  NEWKEYS** (never reset).
+- **No-rekey bound**: 1 GiB or 2^20 packets per direction, whichever comes
+  first; reaching it sends `SSH_MSG_DISCONNECT` (reason 11
+  `BY_APPLICATION`) and closes. A DISCONNECT from either side ends cleanly.
+- **Interactive `shell` local input is LANDED with no new kernel surface.**
+  The question "where does the local keyboard come from" is answered with
+  the existing `/dev/tty` file ABI (slots 23/24/26) plus slot 67's serial
+  attach — the same seam `SH.BIN` uses — with the raw byte queue pumped as
+  `CHANNEL_DATA`; the remote pty echoes. If no terminal can be attached,
+  `SSH.BIN` fails closed with `stage=tty` / exit 10. The acceptance-critical
+  path remains the one-shot `exec` (and is what SSH5's positive run drives
+  first).
+- **Hostnames/DNS are a documented later slice.** SSH4 resolves only a
+  numeric IPv4 literal; `host.example` fails usage (exit 1) instead of
+  guessing. The KNOWN_HOSTS `#v1` key stays the literal host text the user
+  typed, matching the M50 pin format.
+- **`SSH.BIN` exit statuses** (distinct per failure stage): 0 remote/success
+  (or the remote `exit-status`), 1 usage, 2 connect, 3 kex, 4 host pin,
+  5 auth, 6 channel, 7 request, 8 transport/protocol, 9 no-rekey bound,
+  10 no tty, 255 remote `exec` sent no `exit-status`.
 
 **Coordination with #1163 (GOOS=virelai port).** `sys_getrandom` is a single
 shared contract, not two: **slot 72 is owned by SSH-P1 (#1166)** and the Go

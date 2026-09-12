@@ -8,7 +8,11 @@
 //! hash seed. No capability is required — every principal may read entropy.
 
 const std = @import("std");
-const abi = @import("ui/abi.zig");
+// Module-mapped dep (the `ssh/` pattern): the wrapper is its own module in
+// the SSH.BIN graph, so `ui` arrives as a mapped module. Resolving
+// `ui/abi.zig` by path here would load the ui tree into this module too and
+// collide with the `ui` module that `userauth.zig` also imports.
+const abi = @import("ui").abi;
 
 /// ADR 0007 slot 72: `sys_getrandom(buf, len)`.
 pub const sys_getrandom_num: u64 = 72;
