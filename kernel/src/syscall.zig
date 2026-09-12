@@ -762,17 +762,25 @@ fn append_trace_hex(buf: []u8, v: u64) usize {
 /// processes, the module-global regions set by the last root rebuild would
 /// otherwise validate one process's stack against another's. EL1h tasks
 /// never SVC, so their zero regions are inert. The ABI is untouched.
-pub fn handle_svc(frame: *exceptions.VectorFrame, immediate: u16) bool {
+/// Re-arm the module-global uaccess view from the CURRENT task's TCB —
+/// the exact sequence handle_svc runs at every SVC entry, exposed as a
+/// seam so host tests can replicate the arming (issue #1163 A1: the
+/// mmap-visibility regression test drives this directly).
+pub fn arm_task_regions() void {
     const regions = scheduler.current_user_regions();
     if (regions.text.len != 0 or regions.stack.len != 0) {
         set_user_regions(regions.text, regions.stack);
         for (regions.extra_reads[0..regions.extra_read_count]) |r| {
-            uaccess.add_read_region(.{ .base = r.base, .len = r.len });
+            _ = uaccess.add_read_region(.{ .base = r.base, .len = r.len });
         }
         for (regions.extra_writes[0..regions.extra_write_count]) |r| {
-            uaccess.add_write_region(.{ .base = r.base, .len = r.len });
+            _ = uaccess.add_write_region(.{ .base = r.base, .len = r.len });
         }
     }
+}
+
+pub fn handle_svc(frame: *exceptions.VectorFrame, immediate: u16) bool {
+    arm_task_regions();
     var args: Args = undefined;
     for (&args, 0..) |*arg, reg| arg.* = exceptions.frame_read(frame, @intCast(reg));
     const number = exceptions.frame_read(frame, 8);
@@ -2525,6 +2533,16 @@ fn handle_mmap(args: Args, _: *exceptions.VectorFrame) u64 {
         va = process.next_mmap_va(pid, aligned_len);
     }
 
+    const task_id = scheduler.current_id();
+    // Issue #1163 A1: the mapping is only usable if its uaccess regions
+    // fit the task's TCB (the module lists are re-armed from the TCB at
+    // every SVC and sized to match). Pre-check so a mapping is never
+    // created half-registered — the silent alternative was mmap'd memory
+    // that EFAULTs on the next syscall.
+    const need_read: usize = if ((prot & 1) != 0) 1 else 0;
+    const need_write: usize = if ((prot & 2) != 0) 1 else 0;
+    if (!scheduler.has_task_region_capacity(task_id, need_read, need_write)) return error_result(.enomem);
+
     if (!process.add_mmap_region(pid, va, aligned_len, prot, flags)) return error_result(.enomem);
 
     // Register the region in BOTH places uaccess reads from: the transient
@@ -2533,15 +2551,23 @@ fn handle_mmap(args: Args, _: *exceptions.VectorFrame) u64 {
     // module lists (the historical sys_mmap behavior) vanishes before the
     // next syscall — kernel copy_in/copy_out of mmap'd memory (e.g. the zc
     // dialect file round trip, Z2a issue #756) then EFAULTs. exec.zig has
-    // always done both; sys_mmap only did the transient side.
-    const task_id = scheduler.current_id();
+    // always done both; sys_mmap only did the transient side. The adds
+    // cannot fail past the pre-check above (same task, same tick).
     if ((prot & 2) != 0) {
-        uaccess.add_write_region(.{ .base = va, .len = aligned_len });
-        scheduler.add_task_write_region(task_id, .{ .base = va, .len = aligned_len });
+        if (!uaccess.add_write_region(.{ .base = va, .len = aligned_len }) or
+            !scheduler.add_task_write_region(task_id, .{ .base = va, .len = aligned_len }))
+        {
+            _ = process.remove_mmap_region(pid, va, aligned_len);
+            return error_result(.enomem);
+        }
     }
     if ((prot & 1) != 0) {
-        uaccess.add_read_region(.{ .base = va, .len = aligned_len });
-        scheduler.add_task_read_region(task_id, .{ .base = va, .len = aligned_len });
+        if (!uaccess.add_read_region(.{ .base = va, .len = aligned_len }) or
+            !scheduler.add_task_read_region(task_id, .{ .base = va, .len = aligned_len }))
+        {
+            _ = process.remove_mmap_region(pid, va, aligned_len);
+            return error_result(.enomem);
+        }
     }
 
     // MAP_POPULATE (eager allocation)
@@ -2672,7 +2698,7 @@ fn handle_mmap_shared(addr: u64, len: u64, prot: u64, flags: u64, pid: usize, pi
         }
         _ = shared_region.grant_read(handle);
         _ = shared_region.set_peer(handle, pid, peer_va);
-        uaccess.add_read_region(.{ .base = peer_va, .len = aligned_len });
+        if (!uaccess.add_read_region(.{ .base = peer_va, .len = aligned_len })) return error_result(.enomem);
         return peer_va;
     }
 
@@ -2835,8 +2861,14 @@ fn bind_window_surface(wid: u8, len: u64, prot: u64, flags: u64, pid: usize, pin
     }
     // uaccess follows the OWNER only (the WM reads through its peer leaf,
     // never a uaccess aperture — the ADR 0016 D2 owner-side-only rule).
-    if ((prot & 2) != 0) uaccess.add_write_region(.{ .base = va, .len = aligned_len });
-    if ((prot & 1) != 0) uaccess.add_read_region(.{ .base = va, .len = aligned_len });
+    // Shared-region adds cannot exhaust the lists here (the owner seat was
+    // pre-checked above); a false means the caller's mapping is refused.
+    if ((prot & 2) != 0) {
+        if (!uaccess.add_write_region(.{ .base = va, .len = aligned_len })) return error_result(.enomem);
+    }
+    if ((prot & 1) != 0) {
+        if (!uaccess.add_read_region(.{ .base = va, .len = aligned_len })) return error_result(.enomem);
+    }
     return va;
 }
 

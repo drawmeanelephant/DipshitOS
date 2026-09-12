@@ -586,8 +586,9 @@ fn exec_file_impl(name: []const u8, args: []const []const u8, pin: ?usize, princ
         // buffer inside the data segment EFAULTs forever and a segmented
         // program with globals spins instead of blocking.
         if (data_mem_size > 0) {
-            scheduler.add_task_read_region(task_id, .{ .base = data_va, .len = data_mem_size });
-            scheduler.add_task_write_region(task_id, .{ .base = data_va, .len = data_mem_size });
+            // Fresh task: extras are empty, these cannot overflow (24 slots).
+            if (!scheduler.add_task_read_region(task_id, .{ .base = data_va, .len = data_mem_size })) return .pool_full;
+            if (!scheduler.add_task_write_region(task_id, .{ .base = data_va, .len = data_mem_size })) return .pool_full;
         }
         _ = process.bind(proc_id, task_id);
         // SMP: `exec -c<core>` — an explicit pin (null = unpinned plain
@@ -612,8 +613,10 @@ fn exec_file_impl(name: []const u8, args: []const []const u8, pin: ?usize, princ
 /// shape [R+X][R]…[RW]. The gc Go linker emits exactly this (its segments
 /// are 64K-aligned with gaps), which the contiguous staging contract
 /// cannot represent. Mirrors the dynamic path's aperture machinery minus
-/// interpreter/library staging. No argv here (the Go entry contract is
-/// satisfied by the GOOS rt0 stub with argc=0 — phase 0b wires argv).
+/// interpreter/library staging. Issue #1163 B2: takes the card-3e argv
+/// contract — the block (prepended program name + args) packs into the
+/// writable segment's reserved tail page, and the GOOS rt0 stub converts
+/// it to a SysV char* array for rt0_go.
 fn exec_static_elf_gap(
     name: []const u8,
     args: []const []const u8,
@@ -622,7 +625,18 @@ fn exec_static_elf_gap(
     pin: ?usize,
     principal: process.Principal,
 ) ExecResult {
-    if (args.len > 0) return .no_args_room;
+    // Issue #1163 B2 (phase 0b): ELF images take the card-3e argv contract.
+    // Go's os.Args[0] is the program name, so the block is
+    // [<name>, args...] (the DSK1 flat path keeps its own convention —
+    // untouched). Bounded to max_exec_args slots like every other path.
+    var argv_list: [max_exec_args][]const u8 = undefined;
+    if (1 + args.len > max_exec_args) return .too_many_args;
+    argv_list[0] = name;
+    for (args, 1..) |a, i| argv_list[i] = a;
+    const argc: usize = 1 + args.len;
+    // The block lives in the LAST (writable) segment's mapped tail; a
+    // single-segment (text-only) image has nowhere writable to host it.
+    if (image.segment_count < 2 and argc > 1) return .no_args_room;
     if (!scheduler.has_free_slot()) return .pool_full;
 
     // Per-segment physical backing (issue #1163): segment i's pages are
@@ -634,7 +648,10 @@ fn exec_static_elf_gap(
     var allocated: usize = 0;
     while (allocated < image.segment_count) : (allocated += 1) {
         const seg = image.segments[allocated];
-        const pages: u64 = (seg.mem_size + alloc.page_size - 1) / alloc.page_size;
+        var pages: u64 = (seg.mem_size + alloc.page_size - 1) / alloc.page_size;
+        // B2: reserve one extra page on the writable segment for the argv
+        // block (a 256-byte block always fits one page past the image end).
+        if (allocated == image.segment_count - 1 and argc > 0) pages += 1;
         if (pages == 0) continue;
         const phys = alloc.alloc_pages(pages) orelse {
             var j: usize = 0;
@@ -667,6 +684,22 @@ fn exec_static_elf_gap(
         _ = alloc.free_pages(stack_phys, stack_pages);
         return .out_of_memory;
     };
+
+    // B2: pack the argv block into the writable segment's reserved tail
+    // (after the image's own bss; the page was allocated above and must be
+    // zeroed before packing — fresh allocator pages are not zeroed).
+    var argv_va: u64 = 0;
+    const last_seg = image.segments[image.segment_count - 1];
+    if (argc > 0 and image.segment_count >= 2) {
+        const last_phys = seg_phys[image.segment_count - 1];
+        const last_pages = seg_pages[image.segment_count - 1];
+        const block_off: u64 = (last_seg.mem_size + 7) & ~@as(u64, 7);
+        if (block_off + arg_block_bytes > last_pages * alloc.page_size) return .no_args_room;
+        const block_dst: [*]u8 = @ptrFromInt(last_phys + block_off);
+        @memset(block_dst[0..arg_block_bytes], 0);
+        _ = pack_args(argv_list[0..argc], block_dst[0..arg_block_bytes]);
+        argv_va = last_seg.vaddr + block_off;
+    }
 
     // Initial stack placement (per-process ASLR, claim 2665) and the
     // TTBR0 multi-aperture root: one aperture per PT_LOAD at its declared
@@ -765,20 +798,25 @@ fn exec_static_elf_gap(
     app_timers.reset(proc_id);
 
     const kstack: []u8 = @as(*[scheduler.task_stack_size]u8, @ptrFromInt(kstack_phys))[0..];
-    if (scheduler.register_exec_user(entry_va, root_phys, @intCast(text_len_pages), stack_va, scheduler.task_stack_size, kstack, 0, 0)) |task_id| {
+    // Review fix 2: the block only exists when the argv page was reserved
+    // (a writable segment exists). A single-segment gap image would
+    // otherwise enter EL0 with x0=1 / x1=0 and rt0 would dereference argv
+    // at address 0. Consistent contract: argc==0 <=> argv_va==0.
+    const entry_argc: u64 = if (argv_va != 0) @intCast(argc) else 0;
+    if (scheduler.register_exec_user(entry_va, root_phys, @intCast(text_len_pages), stack_va, scheduler.task_stack_size, kstack, entry_argc, argv_va)) |task_id| {
         // Middle (rodata) segments are readable through syscalls; the
         // writable data segment is readable AND writable. The text and
         // stack regions were set by register_exec_user itself.
         if (image.segment_count == 3) {
             const ro = image.segments[1];
-            scheduler.add_task_read_region(task_id, .{ .base = ro.vaddr, .len = seg_pages[1] * alloc.page_size });
+            if (!scheduler.add_task_read_region(task_id, .{ .base = ro.vaddr, .len = seg_pages[1] * alloc.page_size })) return .pool_full;
         }
         // I1: data regions only for a REAL data segment — with one
         // segment the text is already covered by the task's text region,
         // and it must never appear as a copy-out write destination.
         if (has_data and last.mem_size > 0) {
-            scheduler.add_task_read_region(task_id, .{ .base = last.vaddr, .len = seg_pages[image.segment_count - 1] * alloc.page_size });
-            scheduler.add_task_write_region(task_id, .{ .base = last.vaddr, .len = seg_pages[image.segment_count - 1] * alloc.page_size });
+            if (!scheduler.add_task_read_region(task_id, .{ .base = last.vaddr, .len = seg_pages[image.segment_count - 1] * alloc.page_size })) return .pool_full;
+            if (!scheduler.add_task_write_region(task_id, .{ .base = last.vaddr, .len = seg_pages[image.segment_count - 1] * alloc.page_size })) return .pool_full;
         }
         // register_exec_user hardcodes the task text region at
         // userspace.text_va; the gap layout's declared base differs (the
@@ -1020,16 +1058,18 @@ fn exec_dynamic_elf(
     mmu.clean_dcache_range(lib_phys, lib_pages * alloc.page_size);
     syscall.set_user_regions(userspace.text_va_region(), userspace.stack_va_region());
     if (data_mem_size > 0) {
-        uaccess.add_read_region(.{ .base = data_va, .len = data_mem_size });
-        uaccess.add_write_region(.{ .base = data_va, .len = data_mem_size });
+        // Fresh process: the module lists were just reset for this task —
+        // cannot be full (26 slots vs <= 6 registrations).
+        if (!uaccess.add_read_region(.{ .base = data_va, .len = data_mem_size })) return .pool_full;
+        if (!uaccess.add_write_region(.{ .base = data_va, .len = data_mem_size })) return .pool_full;
     }
-    uaccess.add_read_region(.{ .base = interp_image.base_vaddr, .len = interp_text_pages * alloc.page_size });
+    if (!uaccess.add_read_region(.{ .base = interp_image.base_vaddr, .len = interp_text_pages * alloc.page_size })) return .pool_full;
     if (interp_data_pages > 0 and interp_image.segment_count == 2) {
         const interp_data_va = interp_image.segments[1].vaddr;
-        uaccess.add_read_region(.{ .base = interp_data_va, .len = interp_data_pages * alloc.page_size });
-        uaccess.add_write_region(.{ .base = interp_data_va, .len = interp_data_pages * alloc.page_size });
+        if (!uaccess.add_read_region(.{ .base = interp_data_va, .len = interp_data_pages * alloc.page_size })) return .pool_full;
+        if (!uaccess.add_write_region(.{ .base = interp_data_va, .len = interp_data_pages * alloc.page_size })) return .pool_full;
     }
-    uaccess.add_read_region(.{ .base = lib_va, .len = lib_pages * alloc.page_size });
+    if (!uaccess.add_read_region(.{ .base = lib_va, .len = lib_pages * alloc.page_size })) return .pool_full;
 
     const interp_entry_va = interp_image.base_vaddr + interp_image.entry_rel;
     const proc_id = process.create_as(
@@ -1075,16 +1115,16 @@ fn exec_dynamic_elf(
     const kstack: []u8 = @as(*[scheduler.task_stack_size]u8, @ptrFromInt(kstack_phys))[0..];
     if (scheduler.register_exec_user_auxv(interp_entry_va, root_phys, @intCast(text_len), stack_va, frame_off, kstack, @intCast(argc), 0, frame_va + 24)) |task_id| {
         if (data_mem_size > 0) {
-            scheduler.add_task_read_region(task_id, .{ .base = data_va, .len = data_mem_size });
-            scheduler.add_task_write_region(task_id, .{ .base = data_va, .len = data_mem_size });
+            if (!scheduler.add_task_read_region(task_id, .{ .base = data_va, .len = data_mem_size })) return .pool_full;
+            if (!scheduler.add_task_write_region(task_id, .{ .base = data_va, .len = data_mem_size })) return .pool_full;
         }
-        scheduler.add_task_read_region(task_id, .{ .base = interp_image.base_vaddr, .len = interp_text_pages * alloc.page_size });
+        if (!scheduler.add_task_read_region(task_id, .{ .base = interp_image.base_vaddr, .len = interp_text_pages * alloc.page_size })) return .pool_full;
         if (interp_data_pages > 0 and interp_image.segment_count == 2) {
             const interp_data_va = interp_image.segments[1].vaddr;
-            scheduler.add_task_read_region(task_id, .{ .base = interp_data_va, .len = interp_data_pages * alloc.page_size });
-            scheduler.add_task_write_region(task_id, .{ .base = interp_data_va, .len = interp_data_pages * alloc.page_size });
+            if (!scheduler.add_task_read_region(task_id, .{ .base = interp_data_va, .len = interp_data_pages * alloc.page_size })) return .pool_full;
+            if (!scheduler.add_task_write_region(task_id, .{ .base = interp_data_va, .len = interp_data_pages * alloc.page_size })) return .pool_full;
         }
-        scheduler.add_task_read_region(task_id, .{ .base = lib_va, .len = lib_pages * alloc.page_size });
+        if (!scheduler.add_task_read_region(task_id, .{ .base = lib_va, .len = lib_pages * alloc.page_size })) return .pool_full;
         _ = process.bind(proc_id, task_id);
         // SMP: `exec -c<core>` — an explicit pin (claim 907, see above).
         if (pin) |p| _ = scheduler.pin_task(task_id, p);

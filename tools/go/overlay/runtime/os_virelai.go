@@ -6,6 +6,7 @@
 package runtime
 
 import (
+	"internal/goarch"
 	"internal/runtime/atomic"
 	"unsafe"
 )
@@ -273,8 +274,31 @@ func readRandom(r []byte) int {
 	return n
 }
 
-// goenvs: no environment on virelai (exec passes none).
+// VirelaiArgs returns the argument vector for programs that predate the
+// phase-2 `os` package (the go-args gate fixture linknames it). The
+// self-referencing //go:linkname marks the symbol pullable — cmd/link's
+// checklinkname otherwise refuses ANY pull from the runtime package.
+// Phase 2 deletes this when os.Args works for real.
+//
+//go:linkname VirelaiArgs runtime.VirelaiArgs
+func VirelaiArgs() []string {
+	return argslice
+}
+
+// goenvs builds os.Args from the exec entry contract (issue #1163 B2):
+// the kernel packs [<program name>, args...] into 32-byte NUL-terminated
+// slots and the rt0 stub hands rt0_go a SysV char* array, so argc/argv are
+// the plain SysV shapes runtime.args stored. There is no environment —
+// envs stays empty.
 func goenvs() {
+	argslice = make([]string, argc)
+	for i := uintptr(0); i < uintptr(argc); i++ {
+		p := *(**byte)(add(unsafe.Pointer(argv), i*goarch.PtrSize))
+		if p == nil {
+			break
+		}
+		argslice[i] = gostring(p)
+	}
 	envs = make([]string, 0)
 }
 

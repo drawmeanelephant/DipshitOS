@@ -186,15 +186,25 @@ pub fn state_name(state: State) []const u8 {
     };
 }
 
+/// Per-task extra-region capacity, sized for the WORST case (issue #1163
+/// A1): every sys_mmap registers one read + one write extra (and the Go
+/// runtime's sbrk heap accumulates up to `max_mmap_regions` of them), ON
+/// TOP of the exec-path registrations (gap layout: rodata read + data
+/// read/write; dynamic: data r/w + interp r/w + lib read). Sized as
+/// max_mmap_regions + 8 so the exec shapes always fit with headroom; a
+/// task that somehow exceeds it fails LOUDLY at `sys_mmap` time (ENOMEM)
+/// instead of silently EFAULTing later.
+pub const extra_region_capacity: usize = process.max_mmap_regions + 8;
+
 /// Claim 0826: the uaccess/syscall apertures a user task's syscalls
 /// validate against (its OWN text + stack VAs — every live user task has
 /// its own root + stack now). Zero for EL1h tasks (they never SVC).
 pub const UserRegions = struct {
     text: userspace.Region = .{ .base = 0, .len = 0 },
     stack: userspace.Region = .{ .base = 0, .len = 0 },
-    extra_reads: [6]userspace.Region = [_]userspace.Region{.{ .base = 0, .len = 0 }} ** 6,
+    extra_reads: [extra_region_capacity]userspace.Region = [_]userspace.Region{.{ .base = 0, .len = 0 }} ** extra_region_capacity,
     extra_read_count: usize = 0,
-    extra_writes: [6]userspace.Region = [_]userspace.Region{.{ .base = 0, .len = 0 }} ** 6,
+    extra_writes: [extra_region_capacity]userspace.Region = [_]userspace.Region{.{ .base = 0, .len = 0 }} ** extra_region_capacity,
     extra_write_count: usize = 0,
 };
 
@@ -901,18 +911,36 @@ pub fn set_task_text_region(id: usize, base: u64, len: u64) void {
     }
 }
 
-pub fn add_task_read_region(id: usize, reg: userspace.Region) void {
+/// Register an extra READ region on the task's TCB. Returns false (LOUD —
+/// callers must fail the operation honestly) when the task is out of
+/// slots; silent drops made mmap'd memory invisible to copy_in.
+pub fn add_task_read_region(id: usize, reg: userspace.Region) bool {
     if (id < max_tasks and tasks[id].regions.extra_read_count < tasks[id].regions.extra_reads.len) {
         tasks[id].regions.extra_reads[tasks[id].regions.extra_read_count] = reg;
         tasks[id].regions.extra_read_count += 1;
+        return true;
     }
+    return false;
 }
 
-pub fn add_task_write_region(id: usize, reg: userspace.Region) void {
+/// Register an extra WRITE region on the task's TCB (see add_task_read_region).
+pub fn add_task_write_region(id: usize, reg: userspace.Region) bool {
     if (id < max_tasks and tasks[id].regions.extra_write_count < tasks[id].regions.extra_writes.len) {
         tasks[id].regions.extra_writes[tasks[id].regions.extra_write_count] = reg;
         tasks[id].regions.extra_write_count += 1;
+        return true;
     }
+    return false;
+}
+
+/// Issue #1163 A1: can the task's TCB absorb `reads` more read and
+/// `writes` more write regions? sys_mmap pre-checks this so a mapping is
+/// never created half-registered (the mapping exists but syscalls cannot
+/// see it — the silent-EFAULT bug class).
+pub fn has_task_region_capacity(id: usize, reads: usize, writes: usize) bool {
+    if (id >= max_tasks) return false;
+    return tasks[id].regions.extra_read_count + reads <= tasks[id].regions.extra_reads.len and
+        tasks[id].regions.extra_write_count + writes <= tasks[id].regions.extra_writes.len;
 }
 
 /// Claim 0826: the pool has at least one free slot (the exec gate — a new

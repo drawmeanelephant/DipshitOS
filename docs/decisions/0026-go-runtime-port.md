@@ -70,7 +70,7 @@ instead of parking (nothing exists to wake a parked M). Locks come from
 `lock_sema.go` (self-contained spinning semaphores over a userspace
 `waitsemacount`); preemption is cooperative only (known cost: a call-free
 tight loop delays STW — shared with wasip1 and Fuchsia). Phase 0b adds
-kernel slots 72/73 (`thread_create`, futex) and exec argv, removing every
+kernel slots 73/74 (`thread_create`, futex — 72 is `sys_getrandom`, #1166) and exec argv, removing every
 delta; phase 0c adds fault delivery → `sigtrampgo` (recover(),
 tracebacks).
 

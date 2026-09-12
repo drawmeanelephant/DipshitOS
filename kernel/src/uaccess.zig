@@ -72,12 +72,17 @@ pub const diagnostic_unmapped: u64 = 0x1_2000_0000;
 // shared window latch would let one core's fault consume another core's
 // window).
 /// EL0-readable regions (copy-in sources): user text (RX) + user stack (RW) + dynamic segments.
-var read_regions: [cores][8]Region = [_][8]Region{[_]Region{.{ .base = 0, .len = 0 }} ** 8} ** cores;
+/// Per-core region-list capacity (issue #1163 A1): re-armed at every SVC
+/// entry from the task TCB (text + stack + the extras), so it must hold
+/// the TCB worst case: 2 base + scheduler.extra_region_capacity. Sized
+/// here so a full TCB re-arms completely — a silent drop here was the
+/// mmap'd-memory-invisible-to-copy_in bug class.
+var read_regions: [cores][26]Region = [_][26]Region{[_]Region{.{ .base = 0, .len = 0 }} ** 26} ** cores;
 var read_region_count: [cores]usize = [_]usize{0} ** cores;
 /// EL0-writable regions (copy-out destinations): the user stack only — the
 /// text aperture is read-only at EL0, so copying into it is a permission
 /// fault (rejected at validation).
-var write_regions: [cores][8]Region = [_][8]Region{[_]Region{.{ .base = 0, .len = 0 }} ** 8} ** cores;
+var write_regions: [cores][26]Region = [_][26]Region{[_]Region{.{ .base = 0, .len = 0 }} ** 26} ** cores;
 var write_region_count: [cores]usize = [_]usize{0} ** cores;
 
 /// The window state is VOLATILE on purpose. `window_active` has no reader
@@ -142,8 +147,8 @@ pub const Stats = struct {
 /// with `set_regions` immediately after.
 pub fn init() void {
     const c = core_index();
-    read_regions[c] = [_]Region{.{ .base = 0, .len = 0 }} ** 8;
-    write_regions[c] = [_]Region{.{ .base = 0, .len = 0 }} ** 8;
+    read_regions[c] = [_]Region{.{ .base = 0, .len = 0 }} ** 26;
+    write_regions[c] = [_]Region{.{ .base = 0, .len = 0 }} ** 26;
     read_region_count[c] = 0;
     write_region_count[c] = 0;
     set_window_active(false);
@@ -158,8 +163,8 @@ pub fn init() void {
 /// The syscall layer delegates its `set_user_regions` here.
 pub fn set_regions(text: Region, stack: Region) void {
     const c = core_index();
-    read_regions[c] = [_]Region{.{ .base = 0, .len = 0 }} ** 8;
-    write_regions[c] = [_]Region{.{ .base = 0, .len = 0 }} ** 8;
+    read_regions[c] = [_]Region{.{ .base = 0, .len = 0 }} ** 26;
+    write_regions[c] = [_]Region{.{ .base = 0, .len = 0 }} ** 26;
     read_regions[c][0] = text;
     read_regions[c][1] = stack;
     read_region_count[c] = 2;
@@ -168,23 +173,31 @@ pub fn set_regions(text: Region, stack: Region) void {
 }
 
 /// Add an additional readable EL0 aperture (e.g. interpreter text, dynamic segments, shared libs).
-pub fn add_read_region(reg: Region) void {
-    if (reg.len == 0) return;
+/// Returns false when the per-core list is full — callers that register
+/// on behalf of a pre-checked TCB can treat false as unreachable, but the
+/// return keeps the drop LOUD for new callers (issue #1163 A1).
+pub fn add_read_region(reg: Region) bool {
+    if (reg.len == 0) return true;
     const c = core_index();
     if (read_region_count[c] < read_regions[c].len) {
         read_regions[c][read_region_count[c]] = reg;
         read_region_count[c] += 1;
+        return true;
     }
+    return false;
 }
 
 /// Add an additional writable EL0 aperture (e.g. data segment, heap).
-pub fn add_write_region(reg: Region) void {
-    if (reg.len == 0) return;
+/// See add_read_region (issue #1163 A1).
+pub fn add_write_region(reg: Region) bool {
+    if (reg.len == 0) return true;
     const c = core_index();
     if (write_region_count[c] < write_regions[c].len) {
         write_regions[c][write_region_count[c]] = reg;
         write_region_count[c] += 1;
+        return true;
     }
+    return false;
 }
 
 /// Remove a dynamic EL0 aperture by base and len.
@@ -241,6 +254,13 @@ fn range_ok(regions: []const Region, address: u64, len: u64) bool {
 /// inside a readable EL0 region, and `.fault` when a data abort was
 /// recovered mid-copy (unmapped/permission case that slipped past range
 /// validation).
+/// Observability seam (issue #1163 A1 tests): does the CURRENT core's
+/// armed read-region view cover [address, address+len)? No memory access.
+pub fn read_region_covers(address: u64, len: usize) bool {
+    const c = core_index();
+    return range_ok(read_regions[c][0..read_region_count[c]], address, @intCast(len));
+}
+
 pub fn copy_in(dst: []u8, address: u64, len: usize) Outcome {
     if (len == 0) return .ok;
     if (len > dst.len) return .fault; // caller bug: bounded by the buffer
