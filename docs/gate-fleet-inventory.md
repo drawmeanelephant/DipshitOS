@@ -20,8 +20,8 @@
 | with a just recipe | 12 |
 | in the class-B fleet (spec dir / legacy script) | 4 |
 | named in a GitHub workflow | 10 |
-| named in docs/status.md | 12 |
-| **orphans (gate-class, registered nowhere)** | **9** |
+| named in docs/status.md | 13 |
+| **orphans (gate-class, registered nowhere)** | **0** |
 
 ## Subdirectory tooling (not gates)
 
@@ -271,18 +271,7 @@ of them with `just verify-vz`.
 
 ## Orphans
 
-Gate-class scripts with no just recipe, no fleet membership, and no
-status.md row:
-
-- `audit-vz-irq-api.sh`
-- `probe-pointer-routes.sh`
-- `test-unicode-torture.sh`
-- `verify-fw-mmu-capture.sh`
-- `verify-pointer-manual.sh`
-- `verify-t0sz16-walkprobe.sh`
-- `verify-t0sz16.sh`
-- `verify-transcript.sh`
-- `verify-tx-transition.sh`
+None -- every gate-class script is registered somewhere.
 
 ## All top-level scripts
 
@@ -293,41 +282,41 @@ named in `.github/workflows/*.yml`; `st` = named in
 
 | script | lines | class | just | fleet | ci | st | purpose |
 |---|---|---|---|---|---|---|---|
-| `audit-vz-irq-api.sh` | 46 | D | n | n | n | n | Record the selected Xcode/macOS SDK's public host interrupt surface. |
+| `audit-vz-irq-api.sh` | 46 | D | n | n | n | y | Record the selected Xcode/macOS SDK's public host interrupt surface. |
 | `build-zc-host.sh` | 81 | tooling | n | n | n | n | build-zc-host.sh -- Z4b (issue #761) host link contract: the target recipe. |
 | `check-zc-host-contract.py` | 116 | A | n | n | n | y | Z4b (issue #761): check an ELF against the VirelaiOS static-loader contract. |
 | `decode-screen-glyphs.py` | 538 | tooling | n | n | n | n | decode-screen-glyphs.py -- decode a captured framebuffer PNG against the |
 | `elf2bin.py` | 382 | tooling | n | n | n | n | Convert a Zig aarch64-freestanding ELF executable into the VirelaiOS flat |
 | `env-check.sh` | 259 | tooling | n | n | y | n | tools/env-check.sh -- source me at the start of every agent session. |
 | `inspect.sh` | 93 | tooling | y | n | n | n | inspect.sh -- report useful facts about the generated EFI binary and the |
-| `inventory-gates.sh` | 555 | tooling | n | n | y | y | inventory-gates.sh -- regenerate (or --check) the machine-generated gate |
-| `lint-workflows.sh` | 195 | tooling | y | n | y | y | lint-workflows.sh -- lint the GitHub Actions workflows (class A). |
-| `mkdyn-elf.py` | 1090 | tooling | n | n | n | y | Generate freestanding dynamic ELF binaries for VirelaiOS. |
+| `inventory-gates.sh` | 555 | tooling | n | n | y | n | inventory-gates.sh -- regenerate (or --check) the machine-generated gate |
+| `lint-workflows.sh` | 195 | tooling | y | n | y | n | lint-workflows.sh -- lint the GitHub Actions workflows (class A). |
+| `mkdyn-elf.py` | 1090 | tooling | n | n | n | n | Generate freestanding dynamic ELF binaries for VirelaiOS. |
 | `mkhello-elf.py` | 205 | tooling | n | n | n | n | Emit a minimal statically linked AArch64 ELF32 executable (M22 D1, issue #324). |
 | `png2qoi.py` | 94 | tooling | n | n | n | n | Convert standard images (PNG, JPG) to Quite OK Image (QOI) format. |
-| `probe-pointer-routes.sh` | 53 | D | n | n | n | n | Probe: sweep pointer routes against the same guest session, comparing |
+| `probe-pointer-routes.sh` | 53 | D | n | n | n | y | Probe: sweep pointer routes against the same guest session, comparing |
 | `session.sh` | 144 | tooling | y | n | n | n | session.sh -- boot an INTERACTIVE, WINDOWED VirelaiOS desktop. |
-| `test-unicode-torture.sh` | 18 | D | n | n | n | n | M20-U14: the Unicode torture gate. |
-| `verify-bad-handoff.sh` | 24 | B | y | y | n | y | (no header line) |
+| `test-unicode-torture.sh` | 18 | D | n | n | n | y | M20-U14: the Unicode torture gate. |
+| `verify-bad-handoff.sh` | 24 | B | y | y | n | n | (no header line) |
 | `verify-bss-budget.sh` | 165 | A | y | n | y | n | verify-bss-budget.sh -- ADR 0013 D3.1 CI gate: enforce a hard .bss ceiling |
 | `verify-custom-virtio.sh` | 213 | B | n | n | n | y | verify-custom-virtio.sh -- claims 0828/4374/9492/9737/4837 class-B gate: |
 | `verify-cvc-echo.sh` | 182 | B | n | n | n | y | verify-cvc-echo.sh -- claim 3141 class-B gate (issue #523 item 3, first |
-| `verify-fw-mmu-capture.sh` | 94 | D | n | n | n | n | verify-fw-mmu-capture.sh -- claim 0021 gate: capture the firmware's MMU |
+| `verify-fw-mmu-capture.sh` | 94 | D | n | n | n | y | verify-fw-mmu-capture.sh -- claim 0021 gate: capture the firmware's MMU |
 | `verify-glyph-raster.sh` | 67 | A | n | n | y | n | verify-glyph-raster.sh -- class A: the font8x8 LSB-first glyph raster |
 | `verify-host-console.sh` | 149 | B | y | y | n | n | M1.5 agent A gate: host-side interactive serial plumbing (host-only). |
-| `verify-marker.sh` | 111 | B | y | y | n | y | verify-marker.sh -- ADR 0004 D4 fixed-memory-marker fallback gate |
+| `verify-marker.sh` | 111 | B | y | y | n | n | verify-marker.sh -- ADR 0004 D4 fixed-memory-marker fallback gate |
 | `verify-mmu-debt.sh` | 104 | A | y | n | y | n | verify-mmu-debt.sh -- claim 1517 gate: the MMU takeover contract is |
 | `verify-mutations.sh` | 117 | A | n | n | y | n | verify-mutations.sh -- class A: the MUTATION CHECK, generalized (claim |
-| `verify-nvram-console.sh` | 132 | B | y | y | n | y | verify-nvram-console.sh -- claim 0015 gate: post-exit console bytes via |
-| `verify-pointer-manual.sh` | 231 | C | n | n | n | n | verify-pointer-manual.sh -- milestone eight card U4 (claim 4993, ADR 0008 |
+| `verify-nvram-console.sh` | 132 | B | y | y | n | n | verify-nvram-console.sh -- claim 0015 gate: post-exit console bytes via |
+| `verify-pointer-manual.sh` | 231 | C | n | n | n | y | verify-pointer-manual.sh -- milestone eight card U4 (claim 4993, ADR 0008 |
 | `verify-preexit-tx.sh` | 151 | D | y | n | n | n | verify-preexit-tx.sh -- claim 0017 diagnostic gate: can the CURRENT |
-| `verify-t0sz16-walkprobe.sh` | 220 | D | n | n | n | n | verify-t0sz16-walkprobe.sh -- claim 1517 (claims 6460/7896 follow-up) |
-| `verify-t0sz16.sh` | 276 | D | n | n | n | n | verify-t0sz16.sh -- claim 1517 (claims 6460/7896 follow-up) class-D |
-| `verify-transcript.sh` | 32 | A | n | n | n | n | M1.5 march step 19 gate: the automated `virelai>` transcript test. |
-| `verify-ttf-fonts.sh` | 62 | A | n | n | y | y | verify-ttf-fonts.sh -- class A: TrueType font engine verification for |
+| `verify-t0sz16-walkprobe.sh` | 220 | D | n | n | n | y | verify-t0sz16-walkprobe.sh -- claim 1517 (claims 6460/7896 follow-up) |
+| `verify-t0sz16.sh` | 276 | D | n | n | n | y | verify-t0sz16.sh -- claim 1517 (claims 6460/7896 follow-up) class-D |
+| `verify-transcript.sh` | 32 | A | n | n | n | y | M1.5 march step 19 gate: the automated `virelai>` transcript test. |
+| `verify-ttf-fonts.sh` | 62 | A | n | n | y | n | verify-ttf-fonts.sh -- class A: TrueType font engine verification for |
 | `verify-tx-diag.sh` | 263 | D | y | n | n | n | verify-tx-diag.sh -- claim 0018 gate: bisect the FIRST post-exit virtio TX |
-| `verify-tx-transition.sh` | 238 | D | n | n | n | n | verify-tx-transition.sh -- claim 0020 gate: which transition destroys |
+| `verify-tx-transition.sh` | 238 | D | n | n | n | y | verify-tx-transition.sh -- claim 0020 gate: which transition destroys |
 | `verify-unit-tests.sh` | 38 | A | n | n | y | n | Run the VirelaiOS unit test suites. |
-| `verify-vf-class-a.sh` | 118 | A | y | n | y | y | verify-vf-class-a.sh -- M34 HF1–HF4 (issues #735/#736/#737/#738) class-A |
+| `verify-vf-class-a.sh` | 118 | A | y | n | y | n | verify-vf-class-a.sh -- M34 HF1–HF4 (issues #735/#736/#737/#738) class-A |
 | `verify-virelai-probe.py` | 88 | tooling | n | n | n | n | verify-virelai-probe.py — class-A check for the W3 shim acceptance item. |
 | `verify-zc-corpus.sh` | 578 | B | n | n | n | y | verify-zc-corpus.sh -- M20 Z4a + Z4b (issues #760 + #761): the corpus |
