@@ -29,9 +29,12 @@ vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 vgate_repeat 1 BOOTS
 
+# Issue #1163 A2 review follow-up: the run waits on the PROGRAM's own
+# final line (below) — the old `echo go-hello-done` raced the VM shutdown
+# against the exec'd process's first scheduling (observed live once on
+# go-args), a flaky FAIL by construction.
 vgate_file script.txt <<'EOF'
 exec GOHELLO.ELF
-echo go-hello-done
 EOF
 
 vgate_setup_python <<'PY'
@@ -47,7 +50,7 @@ print("staged GOHELLO.ELF into share (%d bytes)" %
       os.path.getsize(os.path.join(share, "GOHELLO.ELF")))
 PY
 
-vgate_run 01 -- --script '$RUN_DIR/script.txt' --script-expect 'go-hello-done' --timeout 120
+vgate_run 01 -- --script '$RUN_DIR/script.txt' --script-expect 'virelai-go OK' --timeout 120
 
 vgate_assert 01 serial-contains 'VirelaiOS kernel has seized control.'
 vgate_assert 01 serial-contains 'exec: loaded GOHELLO.ELF'
