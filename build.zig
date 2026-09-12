@@ -816,6 +816,39 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_fetch.step);
 
     // ------------------------------------------------------------------
+    // Guest: M51 SSH1 (#1168) class-B proof program — SSHPACKET.BIN. The
+    // guest half of the live-ssh-packet gate: it reassembles one SSH binary
+    // packet the host sends split across many paced TCP segments. DSK3
+    // segmented (the stream adapter's bounded buffer is a static .bss
+    // global, ADR 0025 D6).
+    // ------------------------------------------------------------------
+    const sshpacket_ui_mod = b.createModule(.{
+        .root_source_file = b.path("user/src/lib/ui.zig"),
+        .target = kernel_target,
+        .optimize = .ReleaseSmall,
+    });
+    const sshpacket_mod = b.createModule(.{
+        .root_source_file = b.path("user/src/sshpacket.zig"),
+        .target = kernel_target,
+        .optimize = .ReleaseSmall,
+    });
+    sshpacket_mod.addImport("ui", sshpacket_ui_mod);
+    const sshpacket_prog = b.addExecutable(.{
+        .name = "user-sshpacket",
+        .root_module = sshpacket_mod,
+    });
+    sshpacket_prog.linker_script = b.path("user/linker-segmented.ld");
+    const sshpacket_step = b.step("sshpacket", "Build the M51 SSH1 class-B proof program (zig-out/bin/SSHPACKET.BIN) — DSK3 segmented");
+    const sshpacket_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
+    sshpacket_elf2bin.addFileArg(sshpacket_prog.getEmittedBin());
+    const sshpacket_bin = sshpacket_elf2bin.addOutputFileArg("SSHPACKET.BIN");
+    sshpacket_elf2bin.has_side_effects = true;
+    sshpacket_elf2bin.stdio = .inherit;
+    sshpacket_step.dependOn(&sshpacket_elf2bin.step);
+    const install_sshpacket = b.addInstallFileWithDir(sshpacket_bin, .bin, "SSHPACKET.BIN");
+    b.getInstallStep().dependOn(&install_sshpacket.step);
+
+    // ------------------------------------------------------------------
     // Guest: twentieth ESP user program (milestone twelve, card N3 — claim 5416)
     // CHAT.BIN. Userland graphical P2P chat application.
     // DSK3 segmented (writable .data/.bss — the WMS9 fill-batcher global).
@@ -2355,6 +2388,9 @@ pub fn build(b: *std.Build) void {
         "user/src/lib/script.zig",
         "user/src/lib/netauth.zig",
         "user/src/lib/crypto.zig",
+        "user/src/lib/ssh/wire.zig",
+        "user/src/lib/ssh/packet.zig",
+        "user/src/lib/ssh/stream.zig",
         "user/tests/ui/ui_test.zig",
         "kernel/tests/scheduler_test.zig",
         "kernel/tests/syscall_test.zig",
