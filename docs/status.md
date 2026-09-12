@@ -192,12 +192,15 @@ native AArch64 ELF (`exec OLIVER.ELF`) with no libc/POSIX/WASI: it reads
 (its real `parse`/`html.render`), and writes `/host/OLIVER.HTML` back through
 the M34 HF share. The new class-B gate **`live-oliver`** asserts that file
 **host-side, byte-exact** against the reference tool's own output (754 B; both
-sha256 `540f2400…f76a390e`) — **PASS 1/1 on VZ**, exit status = bytes written.
-Two measured bounds for the loader, both folding into #1163: the image is
-253,160 B with 248,776 B of `p_memsz` — **94.9% of the 256 KiB
-`exec_program_max` cap, 13,368 B of headroom** — and `exec` packs argv for
+sha256 `540f2400…f76a390e`) — **PASS 2/2 on VZ**, exit status = bytes written.
+One measured bound for the loader, folding into #1163: `exec` packs argv for
 DSK1/DSK3 images only, so a **raw ELF gets `.no_args_room`** (the tool runs on
-its documented default paths; argument-driven CLIs wait on #1163). Evidence:
+its documented default paths; argument-driven CLIs wait on #1163). Size is
+*not* a bound — the image is 253,160 B with 248,776 B of `p_memsz`, **47.5% of
+the real 512 KiB `exec_program_max` / `elf.load_max` cap** (~269 KiB spare; an
+earlier draft of this note said 256 KiB, which was a stale doc comment in
+`kernel/src/elf.zig:26` plus a stale cap in `tools/check-zc-host-contract.py`,
+both corrected). Evidence:
 `artifacts/oliver-spike/`. Footnote: the spike's original wasm-channel framing
 is measured in `artifacts/wasm-zigtool-spike/wasm-footnote.md` — the same tool
 builds contract-clean for `wasm32-freestanding` (imports exactly the frozen

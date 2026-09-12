@@ -4,8 +4,9 @@
 # source in tests/oliver-spike/), and writes /host/OLIVER.HTML back through
 # the M34 HF host share. The HTML is asserted HOST-SIDE byte-exact against the
 # reference tool's own native CLI output; serial carries the order of events.
-# The image is one PT_LOAD R+X at 0x0040_0000, 248,856 B of memory (contract
-# check: python3 tools/check-zc-host-contract.py tests/oliver-spike/OLIVER.ELF).
+# The image is one PT_LOAD R+X at 0x0040_0000, 248,776 B of memory (47.5% of
+# `exec_program_max` / `elf.load_max` = 512 KiB; contract check: python3
+# tools/check-zc-host-contract.py tests/oliver-spike/OLIVER.ELF).
 
 vgate_name live-oliver "real Zig HTML tool (oliver) as a native ELF app, host-side HTML compare"
 vgate_share seed

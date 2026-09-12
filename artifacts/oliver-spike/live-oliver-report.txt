@@ -1,7 +1,7 @@
 VIRELAIOS vgate live-oliver -- real Zig HTML tool (oliver) as a native ELF app, host-side HTML compare
 spec: tools/gate/specs/live-oliver.spec
-revision: 89cf813e4ad1cb839ee8b2262b4fcd0d72958992 branch=agent/buffy/wasm-zig-tool-spike dirty-files=5
-date: 2026-09-12T13:32:13Z
+revision: 314f619dd53de5d8eb48dbeb804400b95ac6856b branch=agent/buffy/wasm-zig-tool-spike dirty-files=7
+date: 2026-09-12T14:06:34Z
 
 01: runner-rc=0
   serial-contains [VirelaiOS kernel has seized control.]=1

@@ -2,9 +2,10 @@
 
 **Verdict: VIABLE.** A real Zig HTML tool runs on VZ today as a native ELF
 app, and the HTML it produces is byte-identical to the reference tool's own
-output. Two measured constraints bound the story: the tool gets **no argv**
-(raw ELF images cannot receive arguments) and it consumes **95% of the
-256 KiB** loader memory cap.
+output. One measured constraint bounds the story: the tool gets **no argv**
+(raw ELF images cannot receive arguments). Size is not a constraint — the image
+uses **47.5% of the real 512 KiB loader memory cap** (see B3's correction
+note).
 
 Spec: `tools/gate/specs/live-oliver.spec` · Evidence:
 `artifacts/live-oliver-serial-01.log`, `artifacts/live-oliver-oliver-html-guest.html`,
@@ -77,24 +78,34 @@ anonymous `sys_mmap`, so it has *no* writable segment at all — one PT_LOAD,
 R+X, `phnum=1`. (The `.no_args_room` message above is that same 256-byte block
 trying to land in a writable tail.)
 
-### B3 — memory headroom is 5%: 248,776 B of a 256 KiB cap
+### B3 — size is NOT a blocker: 248,776 B is 47.5% of the real 512 KiB cap
 
 | image (native, `-O ReleaseSmall -fstrip`) | file | total `p_memsz` | PT_LOADs |
 |---|---|---|---|
-| **OLIVER.ELF** (real tool: parse + render + file I/O, all buffers mmap'd) | 253,160 B | 248,776 B (**94.9% of cap**) | 1 |
+| **OLIVER.ELF** (real tool: parse + render + file I/O, all buffers mmap'd) | 253,160 B | 248,776 B (**47.5% of cap**) | 1 |
 | `sizeprobe-parse-only.zig` (document + markdown) | 174,592 B | — | 2 (contract-fails, B2) |
 | `sizeprobe-render-only.zig` (document + html) | 87,040 B | — | 2 (contract-fails, B2) |
 
-oliver's *floor* (renderer only, no frontend) is 87 KB and the real tool is
-253 KB, so the 256 KiB budget leaves 13,368 B — thinner than one more real
-feature. A larger tool of the same family (boris: Markdown → content graph →
-`dist/`, with a site graph and a filesystem-writing publication layer) will
-not fit.
+The ceiling is `exec.exec_program_max` = **512 KiB** (`kernel/src/exec.zig:98`)
+and `elf.load_max` = **512 KiB** (`kernel/src/elf.zig:145`), so the real tool
+leaves **275,512 B (~269 KiB) of headroom** — room for a substantially larger
+tool, not merely one more feature.
 
-**Verdict (3) hard → the loader lift is required, blocked on #1163.** Inferred
-but strongly supported: boris-style tools need N PT_LOADs, per-segment W^X and
-a lifted image/memory cap, i.e. exactly #1163's scope. Not measured here —
-boris was out of scope this round.
+**Verdict: not a blocker. The earlier "larger tools are blocked by the size
+cap" verdict is WITHDRAWN.** The loader's remaining *shape* constraints (≤2
+PT_LOAD, exact data adjacency, static, no relocations) are B2's subject.
+
+**Correction (2026-09-12, pre-merge review).** This file originally reported a
+256 KiB cap and ~5% headroom, and scored that as a hard blocker. The 256 KiB
+figure came from a **stale doc comment** — `kernel/src/elf.zig:26` still reads
+"total load size <= `load_max` (256 KiB — the shared `exec.exec_program_max`
+staging buffer bound)" — and from the matching stale cap in a repo-owned tool,
+`tools/check-zc-host-contract.py`'s `LOAD_MAX = 256 * 1024` (now raised to
+512 KiB to mirror the kernel; the regenerated check is in
+`native-build-log.txt`). Both kernel constants were already 512 KiB at this
+branch's merge base, so the tool image, its gate and its pins were always
+valid — only the prose was wrong. `kernel/src/elf.zig` belongs to #1163, so
+its stale comment is reported there rather than edited here.
 
 ### B4 — the wasm channel (demoted to a footnote)
 
@@ -117,8 +128,10 @@ floor (69,300 B) already over too.
 * **Inferred (not observed):** that the wasm path would be rejected with
   `wasm: module too large`/exit 4 — read from `user/src/wasm.zig`'s
   `max_module_size` (line 3098) and its fail path, plus the measured module
-  size; the wasm module was never executed live. That boris-scale tools will
-  need #1163 — from oliver's measured headroom, not from building boris.
+  size; the wasm module was never executed live. That boris-scale tools would
+  be blocked by the *size* limit — **withdrawn**: with the corrected 512 KiB
+  cap there is ~269 KiB of headroom, and boris's PT_LOAD/relocation shape was
+  never measured (it was out of scope this round).
 * **Not attempted:** demand-paging *fault* behaviour for guest stores into the
   non-`MAP_POPULATE` arena was exercised only indirectly (every page the app
   used was already touched by guest code before the kernel copied it out), so

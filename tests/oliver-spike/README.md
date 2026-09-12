@@ -59,5 +59,8 @@ byte-exact rather than normalized (recorded in the spec's setup hook).
 * The image uses **no static writable buffers** (every buffer is anonymous
   `sys_mmap`): that keeps it a single R+X PT_LOAD and avoids the
   `data == text_base + p_memsz[0]` alignment trap the size probes hit.
-* Headroom is thin: 248,776 B of memory against the 256 KiB
-  (`exec_program_max`) cap — 13,368 B (5%). A larger tool needs #1163.
+* Size is not tight: 248,776 B of memory against the real 512 KiB
+  (`exec_program_max` / `elf.load_max`) cap — 47.5%, ~269 KiB of headroom.
+  (An earlier draft of these notes said 256 KiB; that figure was a stale doc
+  comment in `kernel/src/elf.zig:26` plus a stale cap in
+  `tools/check-zc-host-contract.py`, now fixed.)

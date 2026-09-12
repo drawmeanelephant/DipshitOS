@@ -12,7 +12,7 @@ class-agnostic — ELF32 or ELF64 — and the *layout* is the contract):
     p_memsz[0] EXACTLY (data directly after the text memory image);
   * file ranges ordered + disjoint, p_memsz >= p_filesz, ranges inside
     the file;
-  * total p_memsz <= 256 KiB (`load_max` / `exec_program_max`);
+  * total p_memsz <= 512 KiB (`load_max` / `exec_program_max`);
   * e_entry lands inside segment 0's INITIALIZED (file) bytes.
 
 Exit 0 with "CONTRACT OK" when every check passes; prints each PT_LOAD and
@@ -26,7 +26,11 @@ import struct
 import sys
 
 TEXT_BASE = 0x00400000
-LOAD_MAX = 256 * 1024
+# Mirrors `elf.load_max` / `exec.exec_program_max` in the kernel. Was 256 KiB
+# here until 2026-09-12 (issue #1177) — the kernel constants have been 512 KiB
+# for a long time, and a stale kernel doc comment (`kernel/src/elf.zig:26`)
+# kept this tool's copy stale with it.
+LOAD_MAX = 512 * 1024
 EM_AARCH64 = 0xB7
 PT_LOAD = 1
 
