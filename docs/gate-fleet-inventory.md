@@ -112,7 +112,7 @@ of them with `just verify-vz`.
 | spec | `live-m21-max-fullscreen-aot` | 1 run / 12 assert | live-m21-max-fullscreen-aot.spec -- M21 W6 max + W7 fullscreen + W8 always-on-top + W10 kmove |
 | spec | `live-m21-minimize-ws` | 1 run / 10 assert | live-m21-minimize-ws.spec -- M21 W3 minimize/restore + W4 workspace switching |
 | spec | `live-m21-notif-dialog-transient` | 1 run / 16 assert | live-m21-notif-dialog-transient.spec -- M21 W5 notif + W13 dialog + W15 modal + W16 transient |
-| spec | `live-m21-persist-title-orphan` | 1 run / 7 assert | live-m21-persist-title-orphan.spec -- tools/verify-live-m21-persist-title-orphan.sh — class-B live a |
+| spec | `live-m21-persist-title-orphan` | 1 run / 7 assert | live-m21-persist-title-orphan.spec -- tools/verify-live-m21-persist-title-orphan.sh — class-B live |
 | spec | `live-m21-tile-master` | 2 run / 18 assert | live-m21-tile-master.spec -- claim 8777: M21 W1 tiling + W2 master swap |
 | spec | `live-n1-ping` | 1 run / 10 assert | live-n1-ping.spec -- PING.BIN (exec'd) pings the host responder 3x |
 | spec | `live-n11-download` | 1 run / 10 assert | live-n11-download.spec -- DOWNLOAD.BIN (exec'd) fetches the HTTP |
@@ -137,6 +137,7 @@ of them with `just verify-vz`.
 | spec | `live-net-udp` | 4 run / 28 assert | live-net-udp.spec -- UDP live on VZ. Mirrors |
 | spec | `live-net-udp-syscall` | 1 run / 15 assert | live-net-udp-syscall.spec -- the UDP syscall seam from EL0: UDP.BIN |
 | spec | `live-netstat` | 1 run / 8 assert | live-netstat.spec -- NETSTAT.BIN dashboard sections live: iface, |
+| spec | `live-oliver` | 1 run / 11 assert | live-oliver.spec -- a REAL Zig HTML tool (oliver) as a native AArch64 ELF |
 | spec | `live-pipe` | 1 run / 5 assert | live-pipe.spec -- the pipe operator: left-echo output travels through |
 | spec | `live-pointer-cg` | 0 run / 0 assert | live-pointer-cg.spec -- milestone eight card U4 (claim 4993) CG |
 | spec | `live-pointer-virtio` | 1 run / 9 assert | live-pointer-virtio.spec -- claim 9367 (issue #523 item 3 |

@@ -185,6 +185,25 @@ Post-milestone landings since M31: the in-guest HTTP/1.1 web server
 preflight cards N13/N14 (claim 8852), and the `sys_tcp_connect` wall-clock
 bounding fix (issue #613, claim 2572, PR #615).
 
+**Real Zig tools run as native ELF apps (spike, issue #1177, 2026-09-12).** A
+third-party Zig tool — `oliver`, Markdown → HTML — runs in the guest as a
+native AArch64 ELF (`exec OLIVER.ELF`) with no libc/POSIX/WASI: it reads
+`/host/MD.TXT` through the ADR 0010 file table, renders with its own library
+(its real `parse`/`html.render`), and writes `/host/OLIVER.HTML` back through
+the M34 HF share. The new class-B gate **`live-oliver`** asserts that file
+**host-side, byte-exact** against the reference tool's own output (754 B; both
+sha256 `540f2400…f76a390e`) — **PASS 1/1 on VZ**, exit status = bytes written.
+Two measured bounds for the loader, both folding into #1163: the image is
+253,160 B with 248,776 B of `p_memsz` — **94.9% of the 256 KiB
+`exec_program_max` cap, 13,368 B of headroom** — and `exec` packs argv for
+DSK1/DSK3 images only, so a **raw ELF gets `.no_args_room`** (the tool runs on
+its documented default paths; argument-driven CLIs wait on #1163). Evidence:
+`artifacts/oliver-spike/`. Footnote: the spike's original wasm-channel framing
+is measured in `artifacts/wasm-zigtool-spike/wasm-footnote.md` — the same tool
+builds contract-clean for `wasm32-freestanding` (imports exactly the frozen
+`env.*` five, 23/32 memory pages) but is 274,698 B against the interpreter's
+64 KiB `max_module_size`, 4.19× over.
+
 **M32 is complete.** Every WMS1–WMS9 issue (#621–#629) is closed; the sole
 remaining M32 card (#630, WMS10 / seam B) is proposed as the next milestone
 (M33). The ABI is effectively full: a 128-slot table with **65 implemented**

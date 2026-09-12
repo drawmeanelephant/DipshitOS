@@ -1,0 +1,39 @@
+=== vgate live-oliver: real Zig HTML tool (oliver) as a native ELF app, host-side HTML compare ===
+spec: tools/gate/specs/live-oliver.spec
+revision: 89cf813e4ad1cb839ee8b2262b4fcd0d72958992 branch=agent/buffy/wasm-zig-tool-spike dirty-files=5
+vgate: skipping build preamble (VGATE_NO_BUILD=1)
+gate-run: share armed (empty) at /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.Xx808p/share
+mkhello-elf: wrote /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.Xx808p/share/HELLO.ELF (142 bytes; entry=0x400000 filesz=58)
+mkhello-elf: wrote /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.Xx808p/share/CRASH.ELF (332 bytes; BRK inside 'crasher' at +4 -> tombstone note '(in crasher+0x4)')
+Generated /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.Xx808p/share/LIBUI.SO (1240 bytes)
+Generated /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.Xx808p/share/LIBFONT.SO (456 bytes)
+Generated /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.Xx808p/share/PLUGIN.SO (480 bytes)
+Generated /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.Xx808p/share/DYNAPP.ELF (8192 bytes)
+Generated /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.Xx808p/share/CALC.ELF (8192 bytes)
+Generated /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.Xx808p/share/NOTEPAD.ELF (8192 bytes)
+Generated /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.Xx808p/share/FILE.ELF (8192 bytes)
+Generated /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.Xx808p/share/DESKTOP.ELF (8192 bytes)
+gate-run: share seeded at /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.Xx808p/share (97 files, 23 APPS.TXT entries)
+run dir: /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.Xx808p
+
+=== live-oliver run 01 ===
+01: runner-rc=0
+  serial-contains [VirelaiOS kernel has seized control.]=1
+guest share/OLIVER.HTML 754 B sha256 540f240054ad929c7311f29d83e0432b01551300ab97f01cf2aaac82f76a390e
+host  expect.html      754 B sha256 540f240054ad929c7311f29d83e0432b01551300ab97f01cf2aaac82f76a390e
+byte-exact: guest-written HTML == the reference tool's own output
+  python [01] PASS
+evidence: guest-written HTML 754 B sha256 540f240054ad929c7311f29d83e0432b01551300ab97f01cf2aaac82f76a390e
+  snapshot [oliver-html-guest.html] PASS (oliver-html-guest.html)
+  serial-contains [oliver: wrote 754 bytes]=1
+  serial-echo [exec OLIVER.ELF]=1
+  serial-contains [rx-oliver-rendered]=1
+  serial-absent [error: ] ok=1
+  serial-absent [not found on the host share] ok=1
+  serial-absent [image larger than the] ok=1
+  serial-absent [leaves no room for the argv block] ok=1
+  serial-absent [[EXC] parking:] ok=1
+01: PASS
+
+=== result ===
+vgate live-oliver: PASS (1/1 runs)

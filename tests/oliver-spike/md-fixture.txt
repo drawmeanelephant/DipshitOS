@@ -1,0 +1,32 @@
+# VirelaiOS wasm channel
+
+A *real* Zig tool -- **oliver** -- rendering Markdown to HTML in-guest.
+
+## Inline
+
+Text with `code`, a [link](https://example.com), an autolink <https://virelai.os>,
+entities &amp; and <em>raw html</em>, plus a hard  
+break.
+
+## Blocks
+
+- one
+- two
+  - nested
+
+1. first
+2. second
+
+> quoted `text`
+
+```zig
+const x = 1; // fence
+```
+
+| a | b |
+|---|---|
+| 1 | 2 |
+
+---
+
+Trailing paragraph.
