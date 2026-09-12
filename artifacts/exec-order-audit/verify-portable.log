@@ -3,9 +3,9 @@ bash tools/verify-unit-tests.sh
 === verify-unit-tests: running unified parallel test suite (zig build test) ===
 Build Summary: 166/166 steps succeeded; 3324/3324 tests passed
 test success
-+- run test 4 pass (4 total) 81ms MaxRSS:2M
-|  +- compile test Debug native success 2s MaxRSS:238M
-|     +- options success
++- run test 4 pass (4 total) 20ms MaxRSS:2M
+|  +- compile test Debug native cached 116ms MaxRSS:35M
+|     +- options cached
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -18,8 +18,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test success 71ms MaxRSS:2M
-|  +- compile test Debug native success 1s MaxRSS:272M
++- run test success 7ms MaxRSS:2M
+|  +- compile test Debug native cached 75ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -33,8 +33,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 33 pass (33 total) 92ms MaxRSS:4M
-|  +- compile test Debug native success 1s MaxRSS:291M
++- run test 33 pass (33 total) 22ms MaxRSS:4M
+|  +- compile test Debug native cached 126ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -48,8 +48,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 6 pass (6 total) 95ms MaxRSS:2M
-|  +- compile test Debug native success 2s MaxRSS:238M
++- run test 6 pass (6 total) 23ms MaxRSS:2M
+|  +- compile test Debug native cached 124ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -63,8 +63,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 10 pass (10 total) 69ms MaxRSS:2M
-|  +- compile test Debug native success 2s MaxRSS:237M
++- run test 10 pass (10 total) 24ms MaxRSS:2M
+|  +- compile test Debug native cached 91ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -78,8 +78,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 10 pass (10 total) 79ms MaxRSS:2M
-|  +- compile test Debug native success 1s MaxRSS:283M
++- run test 10 pass (10 total) 15ms MaxRSS:2M
+|  +- compile test Debug native cached 79ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -93,8 +93,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test success 84ms MaxRSS:2M
-|  +- compile test Debug native success 1s MaxRSS:276M
++- run test success 3ms MaxRSS:2M
+|  +- compile test Debug native cached 97ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -108,8 +108,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 3 pass (3 total) 72ms MaxRSS:2M
-|  +- compile test Debug native success 3s MaxRSS:240M
++- run test 3 pass (3 total) 16ms MaxRSS:2M
+|  +- compile test Debug native cached 124ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -123,8 +123,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test success 75ms MaxRSS:2M
-|  +- compile test Debug native success 1s MaxRSS:273M
++- run test success 8ms MaxRSS:2M
+|  +- compile test Debug native cached 89ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -138,8 +138,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 28 pass (28 total) 73ms MaxRSS:4M
-|  +- compile test Debug native success 3s MaxRSS:246M
++- run test 28 pass (28 total) 24ms MaxRSS:4M
+|  +- compile test Debug native cached 119ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -153,8 +153,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 370 pass (370 total) 244ms MaxRSS:14M
-|  +- compile test Debug native success 3s MaxRSS:438M
++- run test 370 pass (370 total) 72ms MaxRSS:14M
+|  +- compile test Debug native cached 90ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -168,8 +168,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 71 pass (71 total) 86ms MaxRSS:4M
-|  +- compile test Debug native success 2s MaxRSS:302M
++- run test 71 pass (71 total) 15ms MaxRSS:4M
+|  +- compile test Debug native cached 86ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -183,8 +183,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 4 pass (4 total) 66ms MaxRSS:2M
-|  +- compile test Debug native success 1s MaxRSS:278M
++- run test 4 pass (4 total) 7ms MaxRSS:2M
+|  +- compile test Debug native cached 125ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -198,8 +198,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 25 pass (25 total) 124ms MaxRSS:2M
-|  +- compile test Debug native success 1s MaxRSS:284M
++- run test 25 pass (25 total) 30ms MaxRSS:2M
+|  +- compile test Debug native cached 121ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -213,8 +213,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 4 pass (4 total) 66ms MaxRSS:2M
-|  +- compile test Debug native success 2s MaxRSS:240M
++- run test 4 pass (4 total) 28ms MaxRSS:2M
+|  +- compile test Debug native cached 121ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -228,8 +228,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 163 pass (163 total) 106ms MaxRSS:8M
-|  +- compile test Debug native success 2s MaxRSS:347M
++- run test 163 pass (163 total) 28ms MaxRSS:8M
+|  +- compile test Debug native cached 68ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -243,8 +243,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 20 pass (20 total) 89ms MaxRSS:2M
-|  +- compile test Debug native success 1s MaxRSS:288M
++- run test 20 pass (20 total) 10ms MaxRSS:2M
+|  +- compile test Debug native cached 126ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -258,8 +258,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 33 pass (33 total) 94ms MaxRSS:3M
-|  +- compile test Debug native success 1s MaxRSS:285M
++- run test 33 pass (33 total) 10ms MaxRSS:3M
+|  +- compile test Debug native cached 86ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -273,8 +273,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 20 pass (20 total) 62ms MaxRSS:2M
-|  +- compile test Debug native success 2s MaxRSS:248M
++- run test 20 pass (20 total) 10ms MaxRSS:2M
+|  +- compile test Debug native cached 132ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -288,8 +288,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 28 pass (28 total) 85ms MaxRSS:4M
-|  +- compile test Debug native success 1s MaxRSS:289M
++- run test 28 pass (28 total) 17ms MaxRSS:4M
+|  +- compile test Debug native cached 94ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -303,8 +303,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 5 pass (5 total) 85ms MaxRSS:2M
-|  +- compile test Debug native success 1s MaxRSS:277M
++- run test 5 pass (5 total) 14ms MaxRSS:2M
+|  +- compile test Debug native cached 120ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -318,8 +318,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 15 pass (15 total) 68ms MaxRSS:2M
-|  +- compile test Debug native success 1s MaxRSS:282M
++- run test 15 pass (15 total) 18ms MaxRSS:2M
+|  +- compile test Debug native cached 75ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -333,8 +333,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test success 74ms MaxRSS:2M
-|  +- compile test Debug native success 1s MaxRSS:273M
++- run test success 15ms MaxRSS:2M
+|  +- compile test Debug native cached 133ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -348,8 +348,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 22 pass (22 total) 77ms MaxRSS:3M
-|  +- compile test Debug native success 1s MaxRSS:284M
++- run test 22 pass (22 total) 17ms MaxRSS:3M
+|  +- compile test Debug native cached 84ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -363,8 +363,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 23 pass (23 total) 74ms MaxRSS:4M
-|  +- compile test Debug native success 1s MaxRSS:287M
++- run test 23 pass (23 total) 12ms MaxRSS:4M
+|  +- compile test Debug native cached 77ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -378,8 +378,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 2 pass (2 total) 84ms MaxRSS:2M
-|  +- compile test Debug native success 1s MaxRSS:276M
++- run test 2 pass (2 total) 9ms MaxRSS:2M
+|  +- compile test Debug native cached 117ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -393,8 +393,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 16 pass (16 total) 68ms MaxRSS:2M
-|  +- compile test Debug native success 2s MaxRSS:240M
++- run test 16 pass (16 total) 4ms MaxRSS:2M
+|  +- compile test Debug native cached 97ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -408,8 +408,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 19 pass (19 total) 73ms MaxRSS:2M
-|  +- compile test Debug native success 1s MaxRSS:280M
++- run test 19 pass (19 total) 12ms MaxRSS:2M
+|  +- compile test Debug native cached 94ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -423,8 +423,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test success 83ms MaxRSS:2M
-|  +- compile test Debug native success 1s MaxRSS:274M
++- run test success 7ms MaxRSS:2M
+|  +- compile test Debug native cached 86ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -438,8 +438,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 4 pass (4 total) 91ms MaxRSS:2M
-|  +- compile test Debug native success 1s MaxRSS:277M
++- run test 4 pass (4 total) 6ms MaxRSS:2M
+|  +- compile test Debug native cached 84ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -453,8 +453,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 29 pass (29 total) 74ms MaxRSS:4M
-|  +- compile test Debug native success 2s MaxRSS:252M
++- run test 29 pass (29 total) 16ms MaxRSS:4M
+|  +- compile test Debug native cached 113ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -468,8 +468,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 83 pass (83 total) 95ms MaxRSS:6M
-|  +- compile test Debug native success 2s MaxRSS:304M
++- run test 83 pass (83 total) 24ms MaxRSS:6M
+|  +- compile test Debug native cached 123ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -483,8 +483,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 7 pass (7 total) 73ms MaxRSS:2M
-|  +- compile test Debug native success 1s MaxRSS:276M
++- run test 7 pass (7 total) 6ms MaxRSS:2M
+|  +- compile test Debug native cached 75ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -498,8 +498,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 479 pass (479 total) 239ms MaxRSS:15M
-|  +- compile test Debug native success 2s MaxRSS:545M
++- run test 479 pass (479 total) 79ms MaxRSS:15M
+|  +- compile test Debug native cached 111ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -513,8 +513,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 2 pass (2 total) 144ms MaxRSS:2M
-|  +- compile test Debug native success 1s MaxRSS:275M
++- run test 2 pass (2 total) 6ms MaxRSS:2M
+|  +- compile test Debug native cached 75ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -528,8 +528,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 3 pass (3 total) 74ms MaxRSS:2M
-|  +- compile test Debug native success 1s MaxRSS:277M
++- run test 3 pass (3 total) 14ms MaxRSS:2M
+|  +- compile test Debug native cached 92ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -543,8 +543,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 10 pass (10 total) 90ms MaxRSS:2M
-|  +- compile test Debug native success 1s MaxRSS:277M
++- run test 10 pass (10 total) 19ms MaxRSS:2M
+|  +- compile test Debug native cached 87ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -558,8 +558,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test success 79ms MaxRSS:2M
-|  +- compile test Debug native success 2s MaxRSS:231M
++- run test success 13ms MaxRSS:2M
+|  +- compile test Debug native cached 79ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -573,8 +573,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test success 72ms MaxRSS:2M
-|  +- compile test Debug native success 1s MaxRSS:271M
++- run test success 16ms MaxRSS:2M
+|  +- compile test Debug native cached 126ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -588,8 +588,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 88 pass (88 total) 127ms MaxRSS:3M
-|  +- compile test Debug native success 1s MaxRSS:320M
++- run test 88 pass (88 total) 17ms MaxRSS:3M
+|  +- compile test Debug native cached 121ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -603,8 +603,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 202 pass (202 total) 95ms MaxRSS:8M
-|  +- compile test Debug native success 3s MaxRSS:292M
++- run test 202 pass (202 total) 28ms MaxRSS:8M
+|  +- compile test Debug native cached 109ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -618,8 +618,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 72 pass (72 total) 90ms MaxRSS:6M
-|  +- compile test Debug native success 1s MaxRSS:300M
++- run test 72 pass (72 total) 30ms MaxRSS:6M
+|  +- compile test Debug native cached 85ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -633,8 +633,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 22 pass (22 total) 67ms MaxRSS:2M
-|  +- compile test Debug native success 1s MaxRSS:284M
++- run test 22 pass (22 total) 14ms MaxRSS:2M
+|  +- compile test Debug native cached 89ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -648,8 +648,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 17 pass (17 total) 112ms MaxRSS:2M
-|  +- compile test Debug native success 1s MaxRSS:280M
++- run test 17 pass (17 total) 7ms MaxRSS:2M
+|  +- compile test Debug native cached 84ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -663,8 +663,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 24 pass (24 total) 106ms MaxRSS:2M
-|  +- compile test Debug native success 1s MaxRSS:281M
++- run test 24 pass (24 total) 17ms MaxRSS:2M
+|  +- compile test Debug native cached 66ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -678,8 +678,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 14 pass (14 total) 75ms MaxRSS:2M
-|  +- compile test Debug native success 1s MaxRSS:282M
++- run test 14 pass (14 total) 14ms MaxRSS:2M
+|  +- compile test Debug native cached 92ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -693,8 +693,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 11 pass (11 total) 84ms MaxRSS:2M
-|  +- compile test Debug native success 1s MaxRSS:279M
++- run test 11 pass (11 total) 12ms MaxRSS:2M
+|  +- compile test Debug native cached 113ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -708,8 +708,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 41 pass (41 total) 164ms MaxRSS:6M
-|  +- compile test Debug native success 1s MaxRSS:295M
++- run test 41 pass (41 total) 21ms MaxRSS:7M
+|  +- compile test Debug native cached 82ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -723,8 +723,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 16 pass (16 total) 80ms MaxRSS:2M
-|  +- compile test Debug native success 1s MaxRSS:282M
++- run test 16 pass (16 total) 9ms MaxRSS:2M
+|  +- compile test Debug native cached 76ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -738,8 +738,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 56 pass (56 total) 161ms MaxRSS:7M
-|  +- compile test Debug native success 1s MaxRSS:300M
++- run test 56 pass (56 total) 38ms MaxRSS:7M
+|  +- compile test Debug native cached 121ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -753,8 +753,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 18 pass (18 total) 73ms MaxRSS:6M
-|  +- compile test Debug native success 1s MaxRSS:285M
++- run test 18 pass (18 total) 18ms MaxRSS:6M
+|  +- compile test Debug native cached 90ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -768,8 +768,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 47 pass (47 total) 70ms MaxRSS:3M
-|  +- compile test Debug native success 2s MaxRSS:266M
++- run test 47 pass (47 total) 8ms MaxRSS:3M
+|  +- compile test Debug native cached 82ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -783,8 +783,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 204 pass (204 total) 226ms MaxRSS:8M
-|  +- compile test Debug native success 2s MaxRSS:360M
++- run test 204 pass (204 total) 82ms MaxRSS:8M
+|  +- compile test Debug native cached 128ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -798,8 +798,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 15 pass (15 total) 166ms MaxRSS:2M
-|  +- compile test Debug native success 1s MaxRSS:281M
++- run test 15 pass (15 total) 10ms MaxRSS:2M
+|  +- compile test Debug native cached 89ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -813,8 +813,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 26 pass (26 total) 66ms MaxRSS:2M
-|  +- compile test Debug native success 1s MaxRSS:288M
++- run test 26 pass (26 total) 11ms MaxRSS:3M
+|  +- compile test Debug native cached 119ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -828,8 +828,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test success 78ms MaxRSS:2M
-|  +- compile test Debug native success 2s MaxRSS:230M
++- run test success 5ms MaxRSS:2M
+|  +- compile test Debug native cached 123ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -843,8 +843,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 29 pass (29 total) 66ms MaxRSS:3M
-|  +- compile test Debug native success 1s MaxRSS:291M
++- run test 29 pass (29 total) 27ms MaxRSS:3M
+|  +- compile test Debug native cached 111ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -858,8 +858,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 61 pass (61 total) 79ms MaxRSS:3M
-|  +- compile test Debug native success 1s MaxRSS:312M
++- run test 61 pass (61 total) 9ms MaxRSS:3M
+|  +- compile test Debug native cached 69ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -873,8 +873,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 6 pass (6 total) 128ms MaxRSS:2M
-|  +- compile test Debug native success 1s MaxRSS:278M
++- run test 6 pass (6 total) 9ms MaxRSS:2M
+|  +- compile test Debug native cached 92ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -888,8 +888,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 13 pass (13 total) 71ms MaxRSS:2M
-|  +- compile test Debug native success 1s MaxRSS:281M
++- run test 13 pass (13 total) 14ms MaxRSS:2M
+|  +- compile test Debug native cached 94ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -903,8 +903,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 4 pass (4 total) 78ms MaxRSS:2M
-|  +- compile test Debug native success 3s MaxRSS:237M
++- run test 4 pass (4 total) 10ms MaxRSS:2M
+|  +- compile test Debug native cached 122ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -918,8 +918,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 16 pass (16 total) 70ms MaxRSS:2M
-|  +- compile test Debug native success 3s MaxRSS:248M
++- run test 16 pass (16 total) 10ms MaxRSS:2M
+|  +- compile test Debug native cached 133ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -933,8 +933,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 42 pass (42 total) 129ms MaxRSS:3M
-|  +- compile test Debug native success 1s MaxRSS:290M
++- run test 42 pass (42 total) 49ms MaxRSS:3M
+|  +- compile test Debug native cached 107ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -948,8 +948,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 61 pass (61 total) 326ms MaxRSS:3M
-|  +- compile test Debug native success 1s MaxRSS:295M
++- run test 61 pass (61 total) 371ms MaxRSS:3M
+|  +- compile test Debug native cached 129ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -963,8 +963,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 9 pass (9 total) 66ms MaxRSS:2M
-|  +- compile test Debug native success 1s MaxRSS:282M
++- run test 9 pass (9 total) 10ms MaxRSS:2M
+|  +- compile test Debug native cached 96ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -978,8 +978,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 4 pass (4 total) 115ms MaxRSS:2M
-|  +- compile test Debug native success 1s MaxRSS:280M
++- run test 4 pass (4 total) 5ms MaxRSS:2M
+|  +- compile test Debug native cached 74ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -993,8 +993,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 13 pass (13 total) 85ms MaxRSS:2M
-|  +- compile test Debug native success 1s MaxRSS:282M
++- run test 13 pass (13 total) 19ms MaxRSS:2M
+|  +- compile test Debug native cached 69ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -1008,8 +1008,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 36 pass (36 total) 94ms MaxRSS:3M
-|  +- compile test Debug native success 1s MaxRSS:301M
++- run test 36 pass (36 total) 44ms MaxRSS:3M
+|  +- compile test Debug native cached 85ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -1023,8 +1023,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 25 pass (25 total) 89ms MaxRSS:3M
-|  +- compile test Debug native success 1s MaxRSS:298M
++- run test 25 pass (25 total) 40ms MaxRSS:3M
+|  +- compile test Debug native cached 82ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -1038,8 +1038,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 21 pass (21 total) 79ms MaxRSS:3M
-|  +- compile test Debug native success 1s MaxRSS:290M
++- run test 21 pass (21 total) 25ms MaxRSS:3M
+|  +- compile test Debug native cached 134ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -1053,8 +1053,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 22 pass (22 total) 69ms MaxRSS:3M
-|  +- compile test Debug native success 1s MaxRSS:295M
++- run test 22 pass (22 total) 17ms MaxRSS:3M
+|  +- compile test Debug native cached 128ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -1068,8 +1068,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 4 pass (4 total) 111ms MaxRSS:2M
-|  +- compile test Debug native success 1s MaxRSS:281M
++- run test 4 pass (4 total) 10ms MaxRSS:2M
+|  +- compile test Debug native cached 92ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -1083,8 +1083,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 64 pass (64 total) 80ms MaxRSS:3M
-|  +- compile test Debug native success 1s MaxRSS:313M
++- run test 64 pass (64 total) 11ms MaxRSS:3M
+|  +- compile test Debug native cached 118ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -1098,8 +1098,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 33 pass (33 total) 82ms MaxRSS:4M
-|  +- compile test Debug native success 3s MaxRSS:259M
++- run test 33 pass (33 total) 13ms MaxRSS:4M
+|  +- compile test Debug native cached 117ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -1113,8 +1113,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 72 pass (72 total) 100ms MaxRSS:7M
-|  +- compile test Debug native success 2s MaxRSS:389M
++- run test 72 pass (72 total) 25ms MaxRSS:7M
+|  +- compile test Debug native cached 69ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -1128,8 +1128,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 74 pass (74 total) 100ms MaxRSS:7M
-|  +- compile test Debug native success 3s MaxRSS:417M
++- run test 74 pass (74 total) 15ms MaxRSS:7M
+|  +- compile test Debug native cached 101ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -1143,8 +1143,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 161 pass (161 total) 267ms MaxRSS:5M
-|  +- compile test Debug native success 3s MaxRSS:438M
++- run test 161 pass (161 total) 118ms MaxRSS:5M
+|  +- compile test Debug native cached 65ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -1158,8 +1158,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 26 pass (26 total) 90ms MaxRSS:3M
-|  +- compile test Debug native success 1s MaxRSS:281M
++- run test 26 pass (26 total) 54ms MaxRSS:3M
+|  +- compile test Debug native cached 108ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -1173,8 +1173,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 16 pass (16 total) 83ms MaxRSS:2M
-|  +- compile test Debug native success 1s MaxRSS:287M
++- run test 16 pass (16 total) 8ms MaxRSS:2M
+|  +- compile test Debug native cached 91ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -1188,8 +1188,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 14 pass (14 total) 70ms MaxRSS:2M
-|  +- compile test Debug native success 1s MaxRSS:285M
++- run test 14 pass (14 total) 8ms MaxRSS:2M
+|  +- compile test Debug native cached 75ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -1203,8 +1203,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 64 pass (64 total) 254ms MaxRSS:15M
-|  +- compile test Debug native success 2s MaxRSS:318M
++- run test 64 pass (64 total) 229ms MaxRSS:15M
+|  +- compile test Debug native cached 127ms MaxRSS:35M
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
@@ -1218,8 +1218,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 10 pass (10 total) 95ms MaxRSS:2M
-   +- compile test Debug native success 3s MaxRSS:239M
++- run test 10 pass (10 total) 14ms MaxRSS:2M
+   +- compile test Debug native cached 68ms MaxRSS:35M
       +- options (reused)
       +- options (reused)
       +- options (reused)
@@ -1970,90 +1970,90 @@ All 479 tests passed.
 === transcript gate 2: emitted transcript vs canonical fixture ===
 verify-transcript: PASS — mock transcript is byte-identical to the canonical fixture
 zig build
-elf2bin: ./.zig-cache/o/7dd258baa0ef84b8f95bf2d57c9037c0/user-smp1 -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/147a78c337c5743ba7e1ea9973518779/SMP1.BIN: entry_offset=0x18 image_size=159 (content 135 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/1fdf368ca645c6d4df115053cdc2b209/user-winmove -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/5caea6acdfaaf5d89f5d2657e091ac77/WINMOVE.BIN: entry_offset=0x18 image_size=1340 (content 1316 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/f71e5e8e241da3621bbd84babd8a9d68/user-sb3-wm -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/de8711e5536140a7f24a2405f67d1b7e/SB3WM.BIN: entry_offset=0x18 image_size=1960 (content 1936 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/eaf53708678e23a770897048d096f525/user-tabhold -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/9fa05bd163101320980a0f77b9d57141/TABHOLD.BIN: entry_offset=0x18 image_size=2440 (content 2416 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/60a5c26465345f563a91560d0dddde0b/user-sb5wm -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/63f3287724d7956dae6da3624b903989/SB5WM.BIN: entry_offset=0x18 image_size=2256 (content 2232 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/e423695ff1b0008728eb8ee16ea83e8a/user-smpst-file -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/d19511987101d9a5b048adeb9ca41587/SMPFILE.BIN: entry_offset=0x30 image_size=4144 text=4096 data=0 (bss tail 4) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/db24e6a19a3a4aa77497ef56e7c856f3/user-desktop -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/c9e40df52505f15346bbb36113a5f122/DESKTOP.BIN: entry_offset=0x30 image_size=20528 text=20480 data=0 (bss tail 81584) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/8b52f1b99c83448bc50662d09a0665ef/user-settings -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/b4e19406c89559851d79fb87a92d399c/SETTINGS.BIN: entry_offset=0x30 image_size=20576 text=20480 data=48 (bss tail 81584) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/d9f757665336ec63b7d8507c032283d1/user-chat -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/5817e7390d3c02ff28b5fa47fc12c58b/CHAT.BIN: entry_offset=0x30 image_size=12336 text=12288 data=0 (bss tail 81584) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/970dcb2c688265c8688771c4edfc61e2/user-ps -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/b14ba09f007bbe80c2ce130eb00ab98f/PS.BIN: entry_offset=0x30 image_size=12336 text=12288 data=0 (bss tail 82800) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/7407a275b10d0e7fe1bd78e40fa3c292/user-edit -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/b20568ae290862d6ee3c85f067b1ae37/EDIT.BIN: entry_offset=0x30 image_size=246160 text=49152 data=196960 (bss tail 115880) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/35d366d2855a625fb4894994b1bba513/user-schedring -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/cc55c8a46af090a2cc048f21f2a3252e/SCHEDRING.BIN: entry_offset=0x18 image_size=213 (content 189 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/f0c511266c018d2a28eedad24d17d31c/user-smpst-ev -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/90f7277e5f340e6cd620a07d519aeeee/SMPEV.BIN: entry_offset=0x30 image_size=4144 text=4096 data=0 (bss tail 4) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/142cdf842bd4ace60429c6e2ca620838/user-spin -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/f499cf990d6b981791e442ce9b101059/SPIN.BIN: entry_offset=0x18 image_size=132 (content 108 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/6a333c8b514b4476dfc94124b887f1e7/user-devcons -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/32b8ee19cda320f8598e4bdbc46a160c/DEVCONS.BIN: entry_offset=0x30 image_size=16492 text=16384 data=60 (bss tail 118508) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/b1c580b24663fe92028446103b7a7f46/user-zc -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/0320ebc89cf6a677d1905edfc30dcc7b/ZC.BIN: entry_offset=0x30 image_size=32816 text=32768 data=0 (bss tail 216184) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/00740675325f96ac5c34a2fff8f421e1/user-wasm -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/dac4e2522033af77b821c8a3fc5195b4/WASM.BIN: entry_offset=0x30 image_size=63456 text=32768 data=30640 (bss tail 152728) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/4b78d9a629801b60408b8f1813372689/user-ssh -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/d18885178a1a084340811f243647e06e/SSH.BIN: entry_offset=0x30 image_size=61488 text=61440 data=0 (bss tail 116160) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/60efdcd49a8f283159edc2487a68190e/user-tabwm -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/ae376730e14560f1049db6378936c065/TABWM.BIN: entry_offset=0x30 image_size=45152 text=45056 data=48 (bss tail 96792) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/f837b6ae33795c5795590fff9835c423/user-calc -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/72253861aca001c0c132a6f26f110652/CALC.BIN: entry_offset=0x30 image_size=82016 text=81920 data=48 (bss tail 81592) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/8277cc82d352930a2665558606bcbdf1/user-sh -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/460a01804cbb4c062fb9c4d48dc17312/SH.BIN: entry_offset=0x30 image_size=98360 text=98304 data=8 (bss tail 85824) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/a538b8ebaaf98dfe9c3e2bec875045cc/user-globals -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/ff7876e0a1ab3a98e5cb3885a1a19677/GLOBALS.BIN: entry_offset=0x30 image_size=28728 text=28672 data=8 (bss tail 4104) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/218d95e46a571b1542fe5f25089a3113/user-peer -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/bee3d2b71ba96c74edfa23878b8affae/PEER.BIN: entry_offset=0x18 image_size=623 (content 599 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/d9dad8c01367752044db9963239efc6f/user-harden -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/139a19022bbfb5e62629d141af6097fe/HARDEN.BIN: entry_offset=0x18 image_size=714 (content 690 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/9bb14ccbef364246719f3d22456d4d81/user-chime -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/c09fe2bdb2d64c9f7e3b71864a2b3d3b/CHIME.BIN: entry_offset=0x18 image_size=8688 (content 8664 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/2c549f7c59f0399873c69504e18f6154/user-smpst-win -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/412e68f9c576aba9107d74c0aa6f36c0/SMPWIN.BIN: entry_offset=0x30 image_size=4144 text=4096 data=0 (bss tail 4) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/6a53b0a2f3ccad22fcfc9238f09885ff/user-fetch -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/1c2e4a8a08e1c3d33e9bc878c75f0e1f/FETCH.BIN: entry_offset=0x18 image_size=2979 (content 2955 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/aebec3a130b6dcbed61a8252be096c2a/user-netprof -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/b72bdacf39d6e4ff7a0f948c3eba2292/NETPROF.BIN: entry_offset=0x18 image_size=4345 (content 4321 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/d47c38d4fbc570280916aa67e23a2e00/user-tool -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/4208c28b5a6f28854c66f1aeb3727281/TOOL.BIN: entry_offset=0x30 image_size=12336 text=12288 data=0 (bss tail 45608) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/7e4e69d7869a47eb537e24c529a86fbf/user-sexitest -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/34d88f145ac40598ff884807349ef569/SEXITEST.BIN: entry_offset=0x18 image_size=3088 (content 3064 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/beac31668635c48787fd766d52a262ec/user-win -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/a03aba52d84698b65fed5727cc120377/WIN.BIN: entry_offset=0x18 image_size=364 (content 340 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/81306e6d2af1a169e5ed328b1da63070/user-timertest -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/056ab7d1fecdea299e046dda34dbe99e/TIMER.BIN: entry_offset=0x18 image_size=1129 (content 1105 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/1ba8f089023bbaa0af97345ce2b54f8a/user-notepad -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/24c64166f4c0c6f0ea2ca0a5d1504a48/NOTEPAD.BIN: entry_offset=0x30 image_size=28768 text=28672 data=48 (bss tail 81584) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/ffb0eae533d2f7242332b876eaae65f8/user-download -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/ff03e65eae8b9437de741f97421f5d8e/DOWNLOAD.BIN: entry_offset=0x18 image_size=3255 (content 3231 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/7c6c3a3b8c09214297f9dcf04d872451/user-dns -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/236ed2075d3a968a1c6d5cde37fae382/DNS.BIN: entry_offset=0x18 image_size=4711 (content 4687 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/c5928a023b4d409ef1b419bdce9d8b06/user-udp -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/63230dbbf6dad0101b5b4ced9c1dcb7d/UDP.BIN: entry_offset=0x18 image_size=605 (content 581 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/d77319957e7f69b54857096729fe7b83/user-sb5own -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/b49f9a7d296e2c8427f908522ae9c1b7/SB5OWN.BIN: entry_offset=0x18 image_size=1141 (content 1117 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/8cb85256f18e7089bc358fc16aae67cb/user-traceroute -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/1654ea3f1c8d540544f7c414ba3fcb61/TRACEROUTE.BIN: entry_offset=0x18 image_size=2464 (content 2440 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/0b8608adb7b296373fde1c6148fdbab5/user-guard -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/7607b43e7fc8f54c2de8b36961807414/GUARD.BIN: entry_offset=0x18 image_size=88 (content 64 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/6e3add1c203ea8d08ddc8d54500f2940/user-wndstub -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/c8c9c0ba1ce03a39e20dd51ab5c58470/WNDSTUB.BIN: entry_offset=0x18 image_size=230 (content 206 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/9f84d74097d31b01342fad1cc0b33cd1/user-wnd -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/ecfea99b0eb809a122d430f545681b7d/WND.BIN: entry_offset=0x30 image_size=54504 text=53248 data=1208 (bss tail 193864) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/2f0ac74dbc38c5ce523de31762bb8b09/user-sexitest -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/0cfc145129e5a8671d5230e67e0ae4a5/SEXITEST.BIN: entry_offset=0x18 image_size=3088 (content 3064 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/7a82a9e348b0ff1be6be1a0f421d918b/user-cryptod -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/6598cb08417fe8abb1f315ca48e6d99f/CRYPTOD.BIN: entry_offset=0x18 image_size=2464 (content 2440 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/fcaf33450ef983ced666374caa424a1b/user-type -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/93e7751ad1f6208b9be2eb7aebe0c333/TYPE.BIN: entry_offset=0x18 image_size=232 (content 208 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/59796706660e032ceaa043497a6c2b3d/user-download -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/6e01a1d602ef1c2370391fb612ee1b8a/DOWNLOAD.BIN: entry_offset=0x18 image_size=3255 (content 3231 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/e380e868a1c8c156076efdc68573f9e3/user-guard -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/c017ee7494ef3aeeeec1dea6dbb8fa0b/GUARD.BIN: entry_offset=0x18 image_size=88 (content 64 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/cf365b623326e8e131a45a4f65fcff82/user-sb2-wm -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/cc6ecba7313f918c5e45689a863511e0/SB2WM.BIN: entry_offset=0x18 image_size=1824 (content 1800 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/b416ed297da1b3377510eb1cb82ccb65/user-udp -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/5a69db5ff6214fecfb63173f609e96f7/UDP.BIN: entry_offset=0x18 image_size=605 (content 581 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/e32cffb77c0972a1b684d6e612f58780/user-notepad -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/2f656290f6f7217aec981c07c3b0a34f/NOTEPAD.BIN: entry_offset=0x30 image_size=28768 text=28672 data=48 (bss tail 81584) from 3 PT_LOAD segment(s)
 elf2bin: ./.zig-cache/o/41fe5b9ae9b564d166b4c344f3ad13b8/user-sb4dam -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/063d05207f92d7b0f8f658dd3708312d/SB4DAM.BIN: entry_offset=0x18 image_size=434 (content 410 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/f327238fe5bebcb8b179a2eaf98fa2e1/user-sb6wm -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/76a9d2f77e65ff133167e6d493dbfc13/SB6WM.BIN: entry_offset=0x18 image_size=2600 (content 2576 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/684022a7ac6414b515c39414faad9bce/user-vmtest -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/7a5223cbeb80b48f5cf4ba04e204b212/VMTEST.BIN: entry_offset=0x18 image_size=968 (content 944 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/302daea751cb17086c06b5b195773671/user-wmrpc -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/3b743683546cda3e9a5bea2195afe88b/WMRPC.BIN: entry_offset=0x18 image_size=4366 (content 4342 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/476eef505b184a786b464d4d6e7eea57/user-wnd -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/11fe18eb7980feadffb397e711328aa8/WND.BIN: entry_offset=0x30 image_size=54504 text=53248 data=1208 (bss tail 193864) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/13c3451319657eaf04c432f1c3606e28/user-jingle -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/42a4038bf4050ad356e8dcbe92c7ef03/JINGLE.BIN: entry_offset=0x18 image_size=8624 (content 8600 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/a038fa3b816fc1be9cb7138666ae2300/user-sb2-wm -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/e16e018346cb27c0ac77b39a65741043/SB2WM.BIN: entry_offset=0x18 image_size=1824 (content 1800 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/f993f678f5a4e0fb89954db881b8857d/user-blkd -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/bfb8c5dce365052dc2238e9f918bc888/BLKD.BIN: entry_offset=0x18 image_size=247 (content 223 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/e7070e9b6cc07776eada1929c136490a/user-counter -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/0358297bb8ad03a1cd7bc276a2fd9f15/COUNTER.BIN: entry_offset=0x18 image_size=940 (content 916 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/d3b40ec5b9e759b361cf58d57aab9f9e/user-m21demo -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/92a5c6422d4d609674957530b021169d/M21DEMO.BIN: entry_offset=0x18 image_size=593 (content 569 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/54d69cbef4de446ed780938a2d24f613/user-dir -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/7623788e2002fe65e3cc0baa8a6ca2dc/DIR.BIN: entry_offset=0x18 image_size=248 (content 224 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/84e90cf1bbc919606e5e1665f4a0ec8d/user-status43 -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/bfbbec4c088a129309c0556b8fee0524/STATUS43.BIN: entry_offset=0x18 image_size=134 (content 110 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/4923e47a041009e462b1738763724b89/user-winloop -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/6366eb069ba9e4998e5653e42984a7dd/WINLOOP.BIN: entry_offset=0x18 image_size=417 (content 393 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/91f9b986efca104ecececa00aa9130ee/user-term -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/faa0f076070d4839cafdc6706a8eddd6/TERM.BIN: entry_offset=0x30 image_size=94264 text=94208 data=8 (bss tail 78712) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/725c67be20c5dcac872c9fdae6ce35c3/user-disas -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/e6f41001f20b2e9765327224f4e98ad2/DISAS.BIN: entry_offset=0x18 image_size=6496 (content 6472 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/d1fc9be7fe088384e3e8a00601ac69d0/user-ttyecho -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/8be45dd966f124c05971243e56ab742a/TTYECHO.BIN: entry_offset=0x18 image_size=1280 (content 1256 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/bf54116ecf235bb203e87fbd423aabd7/user-savetext -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/21135453a44132e785d1d281c52839b8/SAVETEXT.BIN: entry_offset=0x18 image_size=225 (content 201 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/c0d1e4c2a95f149fa76fb93d83c683f4/user-smpst-net -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/208dbc56cba1b109165fe9fd3d9eec1f/SMPNET.BIN: entry_offset=0x30 image_size=4144 text=4096 data=0 (bss tail 4) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/d8fe8131e929b39d3e41081ad23f2979/user-resmon -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/dee4ee9b20ed2785621aa86690b4994b/RESMON.BIN: entry_offset=0x30 image_size=12336 text=12288 data=0 (bss tail 82800) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/87b20217998ecc162cce0b5406005fdb/user-ttyed -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/b9262b1eea07326ebd773a54c771f32f/TTYED.BIN: entry_offset=0x18 image_size=8477 (content 8453 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/2f20923a7259ea6c3aa219af45156ebe/user-keytest -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/fefc3a5d10ade1b59b0795838b081fa6/KEYTEST.BIN: entry_offset=0x18 image_size=645 (content 621 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/8411acb0402a8c7a0e409246cc076ef6/user-sb3-own -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/df8ab4b5cf607bad8f95f09712b931b7/SB3OWN.BIN: entry_offset=0x18 image_size=1127 (content 1103 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/b136dec05badf1289085ba564beb06d9/user-sb2-own -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/f213332b31003054aa5a1490b9d5f0ed/SB2OWN.BIN: entry_offset=0x18 image_size=979 (content 955 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/ad708161848c317f2260b68d2734d63d/user-sexiburg -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/678736d643995bbd3b62bc3543730318/SEXIBURG.BIN: entry_offset=0x30 image_size=45104 text=45056 data=0 (bss tail 109392) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/126a6727f799c9818eddcf1a4f6c06b2/user-sb6new -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/79634920947550af8766b59307eeba43/SB6NEW.BIN: entry_offset=0x18 image_size=1273 (content 1249 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/e0bc1f5936842aea6e12cc076fa481f5/user-winclose -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/a59007ba074a4c50eaaa0cb8f3814c7c/WINCLOSE.BIN: entry_offset=0x18 image_size=261 (content 237 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/bf2e13374e46f13dc9da225b908755ac/user-sshpacket -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/91f21995ba7537bc9f8e1708f090dd5b/SSHPACKET.BIN: entry_offset=0x30 image_size=4144 text=4096 data=0 (bss tail 35000) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/91cb08a937dd9ab294df6370884fa1c1/user-hardening-victim -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/afe1e9fb43112d8784c47a7f27923809/VICTIM.BIN: entry_offset=0x30 image_size=4144 text=4096 data=0 (bss tail 1112) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/0894b24bb0ded1a068915f7ede4d7942/user-netstat -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/ad1236fdfc1b6476a50a079f2a6f5f63/NETSTAT.BIN: entry_offset=0x30 image_size=16432 text=16384 data=0 (bss tail 81824) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/9b74f10883afd7467fda1c6b144e2a06/user-sysmon -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/f624cd0c348208d7825edc14d2e73b88/SYSMON.BIN: entry_offset=0x30 image_size=20576 text=20480 data=48 (bss tail 81584) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/f8a4bf640aabd1bf6920e657a4e12997/user-sb6old -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/5c09e153a6f63f9ba37475fe477726c6/SB6OLD.BIN: entry_offset=0x18 image_size=476 (content 452 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/d99192b0b6a2b8c493cec77bfb9ceee4/user-hello -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/81823aecb9d7685a95effb146102d010/USER.BIN: entry_offset=0x18 image_size=397 (content 373 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/dd9f1f3f6df1275ce9ef2cd659c9a653/user-type -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/9758cf8c47389fd91ca43ad91f437ced/TYPE.BIN: entry_offset=0x18 image_size=232 (content 208 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/20b85e0252941b101dab67693802213d/user-ping -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/b080e7188e9b63e42190b00a99de5af1/PING.BIN: entry_offset=0x18 image_size=5670 (content 5646 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/f4722b1aa5b4171fb136b12e881c8411/user-view -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/90928aeeff4a5c9a1a662e7c72a4e98f/VIEW.BIN: entry_offset=0x30 image_size=28904 text=28672 data=184 (bss tail 89880) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/1ac4f1df3e9d2ba4dd00380a19c2c9a8/user-file-browser -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/9de52f5b9cf6c99755a49659056fbc63/FILE.BIN: entry_offset=0x30 image_size=49248 text=49152 data=48 (bss tail 81584) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/1d4315e7f1061356d1ff884424845997/user-asm -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/6d0210efdf446dfbc386c85738130eb2/ASM.BIN: entry_offset=0x18 image_size=12690 (content 12666 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/3779bb17ccc2d91094a5a2fb4461eeb0/user-tcp -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/bf636dd1f17db27c3b5a301551918c7b/TCP.BIN: entry_offset=0x18 image_size=267 (content 243 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/2b53bccb4a234a62bf2b56e0697d3793/user-cryptod -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/8f1df1623523e3eca2db9a3f58478abd/CRYPTOD.BIN: entry_offset=0x18 image_size=2464 (content 2440 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/8cfcfc36b09cd6c648ec0ce21e42f086/user-zc -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/60d17fdb062f7a7caced7653f0fa1f06/ZC.BIN: entry_offset=0x30 image_size=32816 text=32768 data=0 (bss tail 216184) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/451877a82e30913e593bccd9a0fc26de/user-file-browser -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/d6eca69f997bafa90a2dfe618373d40b/FILE.BIN: entry_offset=0x30 image_size=49248 text=49152 data=48 (bss tail 81584) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/bec49f9cf0b11c241718b79df661508c/user-m21demo -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/44bdb223c762982f59d00c29f0ef4858/M21DEMO.BIN: entry_offset=0x18 image_size=593 (content 569 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/5b47de1a3dccb8f0eeee7bf4ca4229bc/user-winloop -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/071955fc8a4277a3f6f84eba7b81305c/WINLOOP.BIN: entry_offset=0x18 image_size=417 (content 393 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/c82b608d6a1022cbb26a4ea29c8b8b42/user-win -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/086f38048720f3391ea4055320c680b7/WIN.BIN: entry_offset=0x18 image_size=364 (content 340 bytes from 1 PT_LOAD segment(s))
 elf2bin: ./.zig-cache/o/578dedec6b876ac1b259cb0bbc34557c/user-httpd -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/83d31f364a0fb573ed6220c523b612a4/HTTPD.BIN: entry_offset=0x18 image_size=15305 (content 15281 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/ef233646bac5d57abfe4e6ec209df2f2/user-top -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/b229caef017e13000af53b464a41b131/TOP.BIN: entry_offset=0x30 image_size=28768 text=28672 data=48 (bss tail 81584) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/0a5d78a2018dbc7dbef810832c04b127/virelai-kernel -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/7a6d29c330af09933a524591a3ce9650/KERNEL.BIN: entry_offset=0x28 image_size=12496664 (4 PT_LOAD segment(s), 117 absolute reloc(s))
+elf2bin: ./.zig-cache/o/89ad2072ca22e4640c9b3d52b5eef2b8/user-sb5own -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/f355a87d9336e0340bdddab706bc7594/SB5OWN.BIN: entry_offset=0x18 image_size=1141 (content 1117 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/c29a39bf99ff30ccf4b667486b258213/user-status43 -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/9f2a6156e1a791e0a6ad615c7341ab5f/STATUS43.BIN: entry_offset=0x18 image_size=134 (content 110 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/d6c695824e03aea5b289dbcc22a055f8/user-wndstub -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/f6b2479098de0b43f44dcb5c5e0380e6/WNDSTUB.BIN: entry_offset=0x18 image_size=230 (content 206 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/b136dec05badf1289085ba564beb06d9/user-sb2-own -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/f213332b31003054aa5a1490b9d5f0ed/SB2OWN.BIN: entry_offset=0x18 image_size=979 (content 955 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/add038350f1a5aa960afa900bc8c27fc/user-sb6wm -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/20c7abe6bc63b1d838ae667f9c893f65/SB6WM.BIN: entry_offset=0x18 image_size=2600 (content 2576 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/72c886fbf41911f813c8fef28c0c2cb3/user-hardening-victim -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/4bbb7e7c045ef4f0b880a7af2e55b6f1/VICTIM.BIN: entry_offset=0x30 image_size=4144 text=4096 data=0 (bss tail 1112) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/cb42fcb4faf202f14617528acbbc7e7e/user-globals -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/855197b022a9aac0ebdc322c47d070e1/GLOBALS.BIN: entry_offset=0x30 image_size=28728 text=28672 data=8 (bss tail 4104) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/37a262416819a2fa73bb98179b6dfcc9/user-counter -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/d4cc14a9996d42f7ac5f4abf31576c1d/COUNTER.BIN: entry_offset=0x18 image_size=940 (content 916 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/d093f97120e181b03b5da708138f1750/user-smpst-net -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/06990b4b6f1602b54c39796f40adfaa5/SMPNET.BIN: entry_offset=0x30 image_size=4144 text=4096 data=0 (bss tail 4) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/2d2ab3ea516d7d31c2405ab1bad27e4d/user-sh -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/d0d479bffbe3a575f4e594f90ff0360c/SH.BIN: entry_offset=0x30 image_size=98360 text=98304 data=8 (bss tail 85824) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/a3dd3cdec07bcfd907a852fdab2bcb5f/user-dns -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/caff498c61c343667a670f4d3cc11c74/DNS.BIN: entry_offset=0x18 image_size=4711 (content 4687 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/69e7e911bbd64b98204f8b4d55045a49/user-tabhold -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/3cae90de843db5c13c34b13ca1c792f4/TABHOLD.BIN: entry_offset=0x18 image_size=2440 (content 2416 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/dd8bd0e2258ff58585aeda96da65f84f/user-disas -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/8644dcba8893298d95621d7d4e577afe/DISAS.BIN: entry_offset=0x18 image_size=6496 (content 6472 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/22f2c412cf0535893b4619ba797e5b28/user-chime -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/59ccb670bddffb8ee3ef4891bc6d5314/CHIME.BIN: entry_offset=0x18 image_size=8688 (content 8664 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/dde36e0acff72c730c4e17e4e8d6b0f1/user-blkd -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/22b03e75b8c613178b54a2150977a2e7/BLKD.BIN: entry_offset=0x18 image_size=247 (content 223 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/a82ce1f1db86c4c13e13ec2050fda7ee/virelai-kernel -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/279f0f4fb078f9bb73319bc64ba1e0d5/KERNEL.BIN: entry_offset=0x28 image_size=12496664 (4 PT_LOAD segment(s), 117 absolute reloc(s))
+elf2bin: ./.zig-cache/o/544d97d193bb3c6602be8a1d755e2e1c/user-schedring -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/3010e10fdd1f1dde74ce13f35897ea3d/SCHEDRING.BIN: entry_offset=0x18 image_size=213 (content 189 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/2a87073889716615e58807b85df4645e/user-ps -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/7cf268e94bc4c91866a2ee61dde73b56/PS.BIN: entry_offset=0x30 image_size=12336 text=12288 data=0 (bss tail 82800) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/a3a3a977bb0495cade7ccea98a5f6f50/user-tool -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/73cc4f0d4aa7519714ba0c9d87e71bdb/TOOL.BIN: entry_offset=0x30 image_size=12336 text=12288 data=0 (bss tail 45608) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/eb5e6ff93d7d7b33a926de004609f57a/user-sb6new -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/c31f33e55f43e53d0caa3f3bfc0a6751/SB6NEW.BIN: entry_offset=0x18 image_size=1273 (content 1249 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/5f423cd2bcff39b5eeedd7ae1789d015/user-smpst-file -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/f74cc4ece21b550bbbcc717579c3e206/SMPFILE.BIN: entry_offset=0x30 image_size=4144 text=4096 data=0 (bss tail 4) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/b9525bd0dac19d67d54d4587e4ffe0bc/user-jingle -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/6157a8815453148894b81ce72fb8590a/JINGLE.BIN: entry_offset=0x18 image_size=8624 (content 8600 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/4ee18613d863f22277cd4001e3f4e09a/user-sshpacket -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/7a9c80b4fe85be2e46d704a28e777414/SSHPACKET.BIN: entry_offset=0x30 image_size=4144 text=4096 data=0 (bss tail 35000) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/f6326ae90911d25d718eb9030dceb8ed/user-tcp -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/c0523f5dd14b7d1bdd4e5b0eb0e2be09/TCP.BIN: entry_offset=0x18 image_size=267 (content 243 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/e0a54648aaf17ce3748bd113764d33a1/user-keytest -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/0c21758a5931ba51165522b1b32cb031/KEYTEST.BIN: entry_offset=0x18 image_size=645 (content 621 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/ea74cfc569aad310928d27deabb9f551/user-devcons -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/160747e3c03b78514270bb866207a306/DEVCONS.BIN: entry_offset=0x30 image_size=16492 text=16384 data=60 (bss tail 118508) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/8489c52d762037c7fda2e98c8d3db936/user-netstat -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/fdc137e923d38efea506d4cd1a6ec0e4/NETSTAT.BIN: entry_offset=0x30 image_size=16432 text=16384 data=0 (bss tail 81824) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/815a396c3450f6acad5ff6dfe5a2aa35/user-sb3-wm -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/06c07728babe65f74f4457d4b774a2e5/SB3WM.BIN: entry_offset=0x18 image_size=1960 (content 1936 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/0a584d257a46faf51630c4a2daaf509f/user-tabwm -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/9b52bc6ccaefcedc782aa5b89c0799b8/TABWM.BIN: entry_offset=0x30 image_size=45152 text=45056 data=48 (bss tail 96792) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/de16fcf156deac2dd85a82409d5cc598/user-vmtest -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/d369cb79e65686a749e7b4ce33765353/VMTEST.BIN: entry_offset=0x18 image_size=968 (content 944 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/0c58d2ed3d13a51688396ab46dcbf43c/user-term -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/fa4281e8e0c89037754f27182a99a546/TERM.BIN: entry_offset=0x30 image_size=94264 text=94208 data=8 (bss tail 78712) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/0f36a2d2125b73b943573a2da3c92b18/user-desktop -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/e25eb3bad7af1427a915dbe3afcf4a18/DESKTOP.BIN: entry_offset=0x30 image_size=20528 text=20480 data=0 (bss tail 81584) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/3200644be6c6c9c64293af4c7e569a3a/user-ssh -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/3658f684dc1b0a7b06ebaa76d1b97f44/SSH.BIN: entry_offset=0x30 image_size=61488 text=61440 data=0 (bss tail 116160) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/d0b290bd0dcba42925eae370cce4cae3/user-hello -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/6b78c843c32b63ee81c15bb66d196bda/USER.BIN: entry_offset=0x18 image_size=397 (content 373 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/ccc575b075304e07908feff26cf8dea3/user-savetext -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/4af98716f37fbe66c4efe88b01493aee/SAVETEXT.BIN: entry_offset=0x18 image_size=225 (content 201 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/8471f38a195eccfe52a66d3dc6a2bea8/user-chat -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/518a819313fc2c2dd6e9f8ef6d653bbe/CHAT.BIN: entry_offset=0x30 image_size=12336 text=12288 data=0 (bss tail 81584) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/f8a4bf640aabd1bf6920e657a4e12997/user-sb6old -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/5c09e153a6f63f9ba37475fe477726c6/SB6OLD.BIN: entry_offset=0x18 image_size=476 (content 452 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/d4b79f951819002beaf09b8eaeb8111c/user-traceroute -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/e83c9922485b0660bc38a593bbe57c83/TRACEROUTE.BIN: entry_offset=0x18 image_size=2464 (content 2440 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/85a4cd9400fa005cbfe576e998acc2ea/user-winmove -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/3da9316b910ea44fc370412b0fc38fd9/WINMOVE.BIN: entry_offset=0x18 image_size=1340 (content 1316 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/ca195d2eceb96a9752526933ef9794fb/user-sexiburg -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/aed2fd40e84805fb3eab4d9d9c7f883d/SEXIBURG.BIN: entry_offset=0x30 image_size=45104 text=45056 data=0 (bss tail 109392) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/b10cbf559546efa9371a23225b3f062a/user-calc -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/2538ff01b7a6a96d3873b673dc712b21/CALC.BIN: entry_offset=0x30 image_size=82016 text=81920 data=48 (bss tail 81592) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/e1dfba22fe37f0543682d75f296e3ad3/user-ttyed -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/b09f68130a2f2a800270f7a706e28e03/TTYED.BIN: entry_offset=0x18 image_size=8477 (content 8453 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/c5b8a179727899bed672d4abbc4bbad9/user-top -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/a3f462b41f2302a6fde34c0c49da2284/TOP.BIN: entry_offset=0x30 image_size=28768 text=28672 data=48 (bss tail 81584) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/dfda978cd7d286384f2c9d3af551571f/user-spin -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/92ec82b7a3eff27f4baa52f3f8081420/SPIN.BIN: entry_offset=0x18 image_size=132 (content 108 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/ce3f12fa6c4b2d4765c075921340de6d/user-wasm -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/4769f98055355e33a94ae4e392ad2030/WASM.BIN: entry_offset=0x30 image_size=63456 text=32768 data=30640 (bss tail 152728) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/4ec49522a44bd496ce89941faac8c6ab/user-sb3-own -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/f3e663e67a2ba757ba52dc2158a9d4e2/SB3OWN.BIN: entry_offset=0x18 image_size=1127 (content 1103 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/d9afe553cf4a9f462897b08d2e158ff9/user-settings -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/3d63ee37a7c70393894cc8b18ed9f8c2/SETTINGS.BIN: entry_offset=0x30 image_size=20576 text=20480 data=48 (bss tail 81584) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/b583f65c3ce217d29f3b599456068c20/user-view -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/26c0d62f501545fd257bf857908ca3c3/VIEW.BIN: entry_offset=0x30 image_size=28904 text=28672 data=184 (bss tail 89880) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/4500050e4c12c471ad4a50b4a91f3736/user-fetch -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/f1e171085ee12252f3d8da6ce2e81947/FETCH.BIN: entry_offset=0x18 image_size=2979 (content 2955 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/946a4911a1600e85af8940c2deb4a330/user-ping -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/af9170363eac925fd2b1bad021515c5a/PING.BIN: entry_offset=0x18 image_size=5670 (content 5646 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/715dcf7614b404a09f46a0f6d4786e75/user-edit -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/c98c993c7af2d12ed68d554c721d5f2e/EDIT.BIN: entry_offset=0x30 image_size=246160 text=49152 data=196960 (bss tail 115880) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/0790511b2272b0bfddda3017de3ac53f/user-wmrpc -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/d28c6704e98ac66d08cf15eea2a24e34/WMRPC.BIN: entry_offset=0x18 image_size=4366 (content 4342 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/1bdf58eb4561796c0752b3179bce4e8e/user-peer -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/a97d46dadfaab1418458bf73b141274c/PEER.BIN: entry_offset=0x18 image_size=623 (content 599 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/81306e6d2af1a169e5ed328b1da63070/user-timertest -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/056ab7d1fecdea299e046dda34dbe99e/TIMER.BIN: entry_offset=0x18 image_size=1129 (content 1105 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/0bec6158728d4ee3949f02c779468682/user-sysmon -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/e8e66d57d586177d722fce3d05ea7b27/SYSMON.BIN: entry_offset=0x30 image_size=20576 text=20480 data=48 (bss tail 81584) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/ebc73555ea38daba29b98edc4b035d33/user-sb5wm -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/c2ebcd40e5125b9371dfc225106abbb1/SB5WM.BIN: entry_offset=0x18 image_size=2256 (content 2232 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/e739e6e5b18653a2d17fc4f9ed44894f/user-smpst-ev -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/a4c82675c653ea38dc839f9d5b490f4b/SMPEV.BIN: entry_offset=0x30 image_size=4144 text=4096 data=0 (bss tail 4) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/76583c40ed22539a90c32d5d3f625b50/user-winclose -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/8df5328db7fbaf0ec5bca17a96c0a6f4/WINCLOSE.BIN: entry_offset=0x18 image_size=261 (content 237 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/d6cf2a5af6384f8fac529a442c543352/user-netprof -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/9d65a7a4f49cfdd319ad19d89e902bb7/NETPROF.BIN: entry_offset=0x18 image_size=4345 (content 4321 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/3d48b34cef5e9e29309c8cebb2e319dc/user-harden -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/305b1338cd9f137dfc6f42d4558387d7/HARDEN.BIN: entry_offset=0x18 image_size=714 (content 690 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/1b085398c74ece005539f8aa0d7cf96d/user-resmon -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/b7afed0c988e0b7eb7ee5c9850f982e1/RESMON.BIN: entry_offset=0x30 image_size=12336 text=12288 data=0 (bss tail 82800) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/2c549f7c59f0399873c69504e18f6154/user-smpst-win -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/412e68f9c576aba9107d74c0aa6f36c0/SMPWIN.BIN: entry_offset=0x30 image_size=4144 text=4096 data=0 (bss tail 4) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/650559db67fa6e9474f971cb942b62ad/user-asm -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/b6fb04dbe9880d4f4353be16bcac0ae3/ASM.BIN: entry_offset=0x18 image_size=12690 (content 12666 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/21e07034dd523443073e25392aaffc22/user-smp1 -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/31f49d32f571c65ef4cd8ba6fac6a152/SMP1.BIN: entry_offset=0x18 image_size=159 (content 135 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/54d69cbef4de446ed780938a2d24f613/user-dir -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/7623788e2002fe65e3cc0baa8a6ca2dc/DIR.BIN: entry_offset=0x18 image_size=248 (content 224 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/a26de40f97088f6c61ad5be41178a57c/user-ttyecho -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/d120717308fb3a4ca325a1ba8dba6e76/TTYECHO.BIN: entry_offset=0x18 image_size=1280 (content 1256 bytes from 2 PT_LOAD segment(s))
 zig build image
-elf2bin: ./.zig-cache/o/0a5d78a2018dbc7dbef810832c04b127/virelai-kernel -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/7a6d29c330af09933a524591a3ce9650/KERNEL.BIN: entry_offset=0x28 image_size=12496664 (4 PT_LOAD segment(s), 117 absolute reloc(s))
+elf2bin: ./.zig-cache/o/a82ce1f1db86c4c13e13ec2050fda7ee/virelai-kernel -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/279f0f4fb078f9bb73319bc64ba1e0d5/KERNEL.BIN: entry_offset=0x28 image_size=12496664 (4 PT_LOAD segment(s), 117 absolute reloc(s))
 make-image: building FAT32+GPT boot image 'artifacts/disk.img' (0 MiB)...
 mkfat32: wrote artifacts/disk.img.tmp (174592 EFI + 12496664 kernel bytes)
 make-image: verifying image contents...
@@ -2069,21 +2069,21 @@ FAT: directory tree:
   KERNEL.BIN  (12496664 bytes)
 make-image: done.
 zig build inspect
-=== EFI binary: ./.zig-cache/o/8a56dc87a0aed31a031e3894ddf7d05f/bootaa64.efi ===
-./.zig-cache/o/8a56dc87a0aed31a031e3894ddf7d05f/bootaa64.efi: PE32+ executable (EFI application) Aarch64, for MS Windows
+=== EFI binary: ./.zig-cache/o/e6125ea194129b2bab6b885d5ced383e/bootaa64.efi ===
+./.zig-cache/o/e6125ea194129b2bab6b885d5ced383e/bootaa64.efi: PE32+ executable (EFI application) Aarch64, for MS Windows
 -- llvm-objdump -f (file header) --
 
-./.zig-cache/o/8a56dc87a0aed31a031e3894ddf7d05f/bootaa64.efi:	file format coff-arm64
+./.zig-cache/o/e6125ea194129b2bab6b885d5ced383e/bootaa64.efi:	file format coff-arm64
 architecture: aarch64
 start address: 0x0000000000000000
 -- llvm-objdump --private-headers (PE/COFF) --
 
-./.zig-cache/o/8a56dc87a0aed31a031e3894ddf7d05f/bootaa64.efi:	file format coff-arm64
+./.zig-cache/o/e6125ea194129b2bab6b885d5ced383e/bootaa64.efi:	file format coff-arm64
 Characteristics 0x22
 	executable
 	large address aware
 
-Time/Date               Sat Sep 12 13:20:30 2026
+Time/Date               Sat Sep 12 13:23:42 2026
 Magic                   020b	(PE32+)
 MajorLinkerVersion      14
 MinorLinkerVersion      0
@@ -2138,7 +2138,7 @@ Entry f 0000000000000000 00000000 Reserved
 
 -- llvm-objdump -h (sections) --
 
-./.zig-cache/o/8a56dc87a0aed31a031e3894ddf7d05f/bootaa64.efi:	file format coff-arm64
+./.zig-cache/o/e6125ea194129b2bab6b885d5ced383e/bootaa64.efi:	file format coff-arm64
 
 Sections:
 Idx Name          Size     VMA              Type
@@ -2148,7 +2148,7 @@ Idx Name          Size     VMA              Type
   3 .reloc        00000118 000000000002c000 DATA
 -- llvm-objdump -d (first 24 lines of disassembly) --
 
-./.zig-cache/o/8a56dc87a0aed31a031e3894ddf7d05f/bootaa64.efi:	file format coff-arm64
+./.zig-cache/o/e6125ea194129b2bab6b885d5ced383e/bootaa64.efi:	file format coff-arm64
 
 Disassembly of section .text:
 
@@ -2173,7 +2173,7 @@ Disassembly of section .text:
     1044: 52800409     	mov	w9, #0x20               // =32
   (tool not available: llvm-readobj)
 -- symbols of interest --
-./.zig-cache/o/8a56dc87a0aed31a031e3894ddf7d05f/bootaa64.efi: no symbols
+./.zig-cache/o/e6125ea194129b2bab6b885d5ced383e/bootaa64.efi: no symbols
 
 === Disk image: artifacts/disk.img ===
 artifacts/disk.img: DOS/MBR boot sector; partition 1 : ID=0xee, start-CHS (0x0,0,0), end-CHS (0x3ff,255,63), startsector 1, 69071 sectors, extended partition table (last)
@@ -2191,77 +2191,2022 @@ FAT: directory tree:
   (tool not available: mdir)
 swift build --package-path host/vm-runner
 Building for debugging...
-[Planning deferred tasks]
-[23 / 38]
-[24 / 39] VFWire
-[34 / 75]
-[41 / 75]
-[43 / 75]
-[48 / 75]
-[52 / 75]
-[55 / 75]
-[57 / 75]
-[58 / 75]
-[69 / 76] VMRunner-product
-[86 / 121]
-[95 / 121]
-[97 / 121]
-[102 / 121]
-[108 / 121] VFWire
-[110 / 121]
-[111 / 121]
-[114 / 121]
-[116 / 121] VMRunner-product
-[117 / 121] VMRunner-product
-/Users/tbuddy/t3/zig/virelaios-buffy-execrace/host/vm-runner/Sources/VMRunner/main.swift:1987:79: [1;33mwarning: [1;39m'activateIgnoringOtherApps' was deprecated in macOS 14.0: ignoringOtherApps is deprecated in macOS 14 and will have no effect.[0;0m [#]8;;https://docs.swift.org/compiler/documentation/diagnostics/deprecated-declaration\DeprecatedDeclaration]8;;\]
-[0;36m1985 |[0;0m         NSApp.activate(ignoringOtherApps: true)
-[0;36m1986 |[0;0m         NSApp.activate()
-[0;36m1987 |[0;0m         NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
-     [0;36m|[0;0m                                                                               `- [1;33mwarning: [1;39m'activateIgnoringOtherApps' was deprecated in macOS 14.0: ignoringOtherApps is deprecated in macOS 14 and will have no effect.[0;0m [#]8;;https://docs.swift.org/compiler/documentation/diagnostics/deprecated-declaration\DeprecatedDeclaration]8;;\]
-[0;36m1988 |[0;0m         // Re-assert after the run loop has a chance to complete the
-[0;36m1989 |[0;0m         // activation (async on macOS), so the first synthesized event
-
-/Users/tbuddy/t3/zig/virelaios-buffy-execrace/host/vm-runner/Sources/VMRunner/main.swift:1995:83: [1;33mwarning: [1;39m'activateIgnoringOtherApps' was deprecated in macOS 14.0: ignoringOtherApps is deprecated in macOS 14 and will have no effect.[0;0m [#]8;;https://docs.swift.org/compiler/documentation/diagnostics/deprecated-declaration\DeprecatedDeclaration]8;;\]
-[0;36m1993 |[0;0m             NSApp.activate(ignoringOtherApps: true)
-[0;36m1994 |[0;0m             NSApp.activate()
-[0;36m1995 |[0;0m             NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
-     [0;36m|[0;0m                                                                                   `- [1;33mwarning: [1;39m'activateIgnoringOtherApps' was deprecated in macOS 14.0: ignoringOtherApps is deprecated in macOS 14 and will have no effect.[0;0m [#]8;;https://docs.swift.org/compiler/documentation/diagnostics/deprecated-declaration\DeprecatedDeclaration]8;;\]
-[0;36m1996 |[0;0m             pmo("diag key-after-activate=\(window.isKeyWindow) main=\(window.isMainWindow) active=\(NSApp.isActive) visible=\(window.isVisible) onscreen=\(window.isOnActiveSpace)")
-[0;36m1997 |[0;0m         }
-
-/Users/tbuddy/t3/zig/virelaios-buffy-execrace/host/vm-runner/Sources/VMRunner/main.swift:2555:6: [1;33mwarning: [1;39mconcurrently-executed global function 'requestTeeStop()' must be marked as '@Sendable'; this is an error in the Swift 6 language mode[0;0m
-[0;36m2553 |[0;0m var teeStopRequested = false
-[0;36m2554 |[0;0m 
-[0;36m2555 |[0;0m func requestTeeStop() {
-     [0;36m|[0;0m      `- [1;33mwarning: [1;39mconcurrently-executed global function 'requestTeeStop()' must be marked as '@Sendable'; this is an error in the Swift 6 language mode[0;0m
-[0;36m2556 |[0;0m     teeStopLock.lock()
-[0;36m2557 |[0;0m     teeStopRequested = true
-
-/Users/tbuddy/t3/zig/virelaios-buffy-execrace/host/vm-runner/Sources/VMRunner/main.swift:2694:6: [1;33mwarning: [1;39mconcurrently-executed global function 'hexDecode' must be marked as '@Sendable'; this is an error in the Swift 6 language mode[0;0m
-[0;36m2692 |[0;0m }
-[0;36m2693 |[0;0m 
-[0;36m2694 |[0;0m func hexDecode(_ s: String) -> [UInt8]? {
-     [0;36m|[0;0m      `- [1;33mwarning: [1;39mconcurrently-executed global function 'hexDecode' must be marked as '@Sendable'; this is an error in the Swift 6 language mode[0;0m
-[0;36m2695 |[0;0m     let chars = Array(s.utf8)
-[0;36m2696 |[0;0m     guard chars.count % 2 == 0 else { return nil }
-
-/Users/tbuddy/t3/zig/virelaios-buffy-execrace/host/vm-runner/Sources/VMRunner/main.swift:2683:6: [1;33mwarning: [1;39mconcurrently-executed global function 'hexString' must be marked as '@Sendable'; this is an error in the Swift 6 language mode[0;0m
-[0;36m2681 |[0;0m // answer. Lower-case hex of a byte array; the inverse decode; and the
-[0;36m2682 |[0;0m // `VIRELAIOS-AUTH/1 <scheme> <hex-challenge>` line parser/answer.
-[0;36m2683 |[0;0m func hexString(_ bytes: [UInt8]) -> String {
-     [0;36m|[0;0m      `- [1;33mwarning: [1;39mconcurrently-executed global function 'hexString' must be marked as '@Sendable'; this is an error in the Swift 6 language mode[0;0m
-[0;36m2684 |[0;0m     let digits = Array("0123456789abcdef")
-[0;36m2685 |[0;0m     var out = ""
-
-[#DeprecatedDeclaration]: <https://docs.swift.org/compiler/documentation/diagnostics/deprecated-declaration>
-[119 / 121] VMRunner-product
-Build complete! (8.91 sec)
+[3 / 13] VFWire
+Build complete! (0.49 sec)
 zig build context
 context written to artifacts/context.md
 bash tools/status/verify-issue-coordination.sh
-error: open claims #1194 ('agent/go-port/goos-virelai-0b-r1') and #1193 ('agent/buffy-execrace/fleet-exec-race') both declare 'docs/gate-fleet-inventory.md' / 'docs/gate-fleet-inventory.md' — one editor per file: coordinate, or close/stall one claim
-error: open claims #1192 ('t3code/m51-ssh5') and #1194 ('agent/go-port/goos-virelai-0b-r1') both declare 'docs/status.md' / 'docs/status.md' — one editor per file: coordinate, or close/stall one claim
-error: open claims #1192 ('t3code/m51-ssh5') and #1194 ('agent/go-port/goos-virelai-0b-r1') both declare 'docs/gate-fleet-inventory.md' / 'docs/gate-fleet-inventory.md' — one editor per file: coordinate, or close/stall one claim
-error: open claims #1192 ('t3code/m51-ssh5') and #1193 ('agent/buffy-execrace/fleet-exec-race') both declare 'docs/gate-fleet-inventory.md' / 'docs/gate-fleet-inventory.md' — one editor per file: coordinate, or close/stall one claim
-verify-issue-coordination: FAILED
-error: recipe `verify-portable` failed on line 30 with exit code 1
+verify-issue-coordination: ok — 4 open claim issue(s) checked, no file overlaps
+bash tools/status/test-coordination.sh
+ok   disjoint claims pass
+ok   overlap across branches fails (names both issues)
+ok   blocked claim excluded from overlap
+ok   same-branch overlap allowed (one editor)
+ok   prefix-glob overlap fails
+ok   missing backticked branch fails
+ok   stale claim warns
+ok   empty tracker passes
+ok   sweep: fresh claims not flagged
+ok   sweep: stale claims flagged (names both)
+ok   sweep: already-flagged stale claim skipped
+ok   sweep: updated claim unlabeled
+ok   sweep: fresh unlabeled claim untouched
+ok   guard: human comment unlabels a stale claim
+ok   guard: sweep warning (bot author) does not unlabel
+ok   guard: local-token sweep warning (marker) does not unlabel
+ok   guard: third-party bot comment does not unlabel
+ok   guard: human issues edit unlabels a stale claim
+ok   guard: bot-driven issues event does not unlabel
+ok   guard: third-party bot issues event does not unlabel
+ok   guard: unlabeled claim left alone
+ok   guard: closed claim left alone
+
+test-coordination: 22/22 PASS
+bash tools/inventory-gates.sh --check
+inventory-gates --check: OK (docs/gate-fleet-inventory.md matches a fresh render)
+inventory-gates --check: OK (render is locale-invariant: LC_ALL=C == en_US.UTF-8)
+spec-order: 211 spec file(s) in tools/gate/specs; 3 declared exemption(s), 3 excused violation(s)
+  declared  go-hello.spec                      assert-proven    the run cannot go green without the program's
+  declared  live-chain.spec                    intentional      the script's only exec is `exec NOTEXIST.BIN`,
+  declared  live-jobs.spec                     self-sequenced   `fg 2` reaps STATUS43.BIN before the closing
+  excused   go-hello.spec                      run 01
+  excused   live-chain.spec                    run 01
+  excused   live-jobs.spec                     run 01
+spec-order: OK (no ungated echo-ended run, no file op racing an exec)
+inventory-gates --check: OK (spec-order self-test: 4 FAIL fixtures still flagged)
+bash tools/lint-workflows.sh
+bash tools/verify-mmu-debt.sh
+=== verify-mmu-debt: claim 1517 — MMU takeover contract intact (corrected start level T0SZ=16 + TLBI at the switch; deterministic, no VM) ===
+
+--- 1. ADR 0006 exists with the invalidation list + supersession note ---
+  PASS: docs/decisions/0006-mmu-debt-boundary.md exists
+  PASS: ADR 0006 invalidation item: Descriptor changes
+  PASS: ADR 0006 invalidation item: Permission/attribute changes
+  PASS: ADR 0006 invalidation item: Page reclamation
+  PASS: ADR 0006 invalidation item: Non-identity mappings
+  PASS: ADR 0006 invalidation item: ASID / address-space work
+  PASS: ADR 0006 invalidation item: Unmapping
+  PASS: ADR 0006 invalidation item: Mappings above the blanket
+  PASS: ADR 0006 invalidation item: TCR/MAIR changes
+  PASS: ADR 0006 title
+  PASS: ADR 0006 supersession note (claim 1517)
+
+--- 2. ADR 0004 D3 records the corrected start level + TLBI and points to 0006 ---
+  PASS: ADR 0004 D3 records the corrected start level (T0SZ=16)
+  PASS: ADR 0004 D3 mentions the tlbi (historical + claim 1517)
+  PASS: ADR 0004 D3 claim-1517 addendum present
+  PASS: ADR 0004 D3 points to ADR 0006
+
+--- 3. hardware-contract records the corrected MMU + post-MMU TX observations ---
+  PASS: hardware-contract: production T0SZ=16
+  PASS: hardware-contract: TLBI at the switch
+  PASS: hardware-contract: post-MMU virtio TX [observed]
+  PASS: hardware-contract: ADR 0006 pointer
+
+--- 4. kernel install_identity_map() still carries the load-bearing comments ---
+  PASS: kernel: TLBI executed at the switch
+  PASS: kernel: claim-1517 TLBI comment
+  PASS: kernel: 4 GiB blanket constant
+  PASS: kernel: descriptors-immutable statement
+
+verify-mmu-debt: PASS — MMU takeover contract intact (T0SZ=16 + TLBI at the switch; ADR 0006 + ADR 0004 D3 + hardware-contract + kernel comments).
+bash tools/verify-glyph-raster.sh
+=== verify-glyph-raster: the font8x8 LSB-first convention, as a named class-A gate ===
+
+[1/3] raster-golden module tests (font8x8 + text + driving_award)
+-- zig test kernel/src/font8x8.zig
+1/4 font8x8.test.font8x8: source rows are LSB-first with bit zero at the left...OK
+2/4 font8x8.test.font8x8: the 760-byte table is pinned — no row bits ever reverse (issue 125)...OK
+3/4 font8x8.test.font8x8: the table is overwhelmingly horizontally asymmetric...OK
+4/4 font8x8.test.font8x8: glyphs_16 is a correct 2x vertical stretch of glyphs...OK
+All 4 tests passed.
+-- zig test kernel/src/text.zig
+1/72 text.test.text: asymmetric C raster is LSB-first in B8G8R8X8...OK
+2/72 text.test.text: the full 95-glyph table rasters LSB-first — every pixel matches the raw source bits (issue 125)...OK
+3/72 text.test.text: line wrap starts a new line at the region width...OK
+4/72 text.test.text: backspace and carriage return move the cursor (U2)...OK
+5/72 text.test.text: the scrollback ring is bounded and drops the oldest line...OK
+6/72 text.test.text: clear resets the ring and cursor...OK
+7/72 text.test.text: Ctrl-L's erase-in-display clears the layer instead of drawing '[2J'...OK
+8/72 text.test.text: render never writes outside the canvas...OK
+9/72 text.test.text: tab advances to the next multiple of the stop and fills spaces (U10)...OK
+10/72 text.test.text: tab stops land on successive multiples (U10)...OK
+11/72 text.test.text: tab width is configurable (4-stop editor style) and clamped (U10)...OK
+12/72 text.test.text: tab near the region edge clamps without wrapping (U10)...OK
+13/72 text.test.text: monospace guarantee — narrow and wide glyphs occupy exactly one cell (U10)...OK
+14/72 text.test.text: char_width categories (U4)...OK
+15/72 text.test.text: char_width is comptime-evaluable...OK
+16/72 text.test.text: UTF-8 é decodes and stores the Latin-1 literal cell (U2)...OK
+17/72 text.test.text: rendered é paints the accent-composed glyph, not blank (U2)...OK
+18/72 text.test.text: a width-2 codepoint takes exactly two cells (U2/U4)...OK
+19/72 text.test.text: broken UTF-8 becomes U+FFFD, not garbage cells (U2)...OK
+20/72 text.test.text: DEL and unknown control bytes stay invisible blanks (U2)...OK
+21/72 text.test.text: missing glyph falls back to the replacement character (U11)...OK
+22/72 text.test.text: Ext-A Š decodes, stores literal, and paints its caron (U3)...OK
+23/72 text.test.text: debug_font counts and reports misses through the hook (U11)...OK
+24/72 text.test.text: e + combining acute is ONE cell and one cursor step (U5/U6)...OK
+25/72 text.test.text: stacked marks stay one cell; identical clusters share a pool slot (U6)...OK
+26/72 text.test.text: leading combining mark gets a dotted-circle base (U6)...OK
+27/72 text.test.text: ignorable zero-width codepoints vanish without advancing (U6)...OK
+28/72 text.test.text: backspace deletes a whole cluster — composed or wide (U5)...OK
+29/72 text.test.text: font sizes — same glyph, exact nearest-neighbor cells (U1)...OK
+30/72 text.test.text: visible geometry follows the font size and wrap respects it (U1)...OK
+31/72 text.test.text: emoji render two cells wide with real art (U7)...OK
+32/72 text.test.text: unknown wide codepoints stay double-wide fallback (U7)...OK
+33/72 text.test.text: measure_text — exact monospace arithmetic (U12)...OK
+34/72 text.test.text: wrap_line segment contents pin the issue's examples (U15)...OK
+35/72 text.test.text: wrap_line reports truncation on a small out-buffer (U15)...OK
+36/72 text.test.text: glyph cache hits, sizes, and LRU eviction (U13)...OK
+37/72 text.test.text: cached rows are pixel-identical to the direct path (U13)...OK
+38/72 text.test.text: Unicode torture document renders deterministically (U14)...OK
+39/72 text.test.text: an exhausted cluster pool degrades to ignoring new marks (U6)...OK
+40/72 virtio_gpu.test.virtio_gpu: spec constants, wire shapes, and the fill are the spec shapes...OK
+41/72 virtio_gpu.test.virtio_gpu: fill writes the B8G8R8X8 little-endian byte order...OK
+42/72 virtio_gpu.test.virtio_gpu: display-info response parse takes pmodes[0]...OK
+43/72 font_emoji.test.font_emoji: every entry has ink and unique codepoints...OK
+44/72 font_emoji.test.font_emoji: lookup finds knowns and rejects unknowns...OK
+45/72 font_emoji.test.font_emoji: the smile is carved into the filled face...OK
+46/72 font_emoji.test.font_emoji: thumbsdown is the vertical flip of thumbsup...OK
+47/72 font8x8.test.font8x8: source rows are LSB-first with bit zero at the left...OK
+48/72 font8x8.test.font8x8: the 760-byte table is pinned — no row bits ever reverse (issue 125)...OK
+49/72 font8x8.test.font8x8: the table is overwhelmingly horizontally asymmetric...OK
+50/72 font8x8.test.font8x8: glyphs_16 is a correct 2x vertical stretch of glyphs...OK
+51/72 font_unicode.test.font_unicode: combining overlays exist for the common marks...OK
+52/72 font_unicode.test.font_unicode: scaling is exact nearest-neighbor doubling/tripling...OK
+53/72 font_unicode.test.font_unicode: é composes e with an acute overlay in the top rows...OK
+54/72 font_unicode.test.font_unicode: ¡ and ¿ are vertical flips of ! and ?...OK
+55/72 font_unicode.test.font_unicode: NBSP is blank, lookup rejects untabled ranges...OK
+56/72 font_unicode.test.font_unicode: Ext-A covers the whole block with real art (M20-U3)...OK
+57/72 font_unicode.test.font_unicode: FFFD is the diamond-with-question-mark silhouette...OK
+58/72 mmu.test.mmu: build_user_root returns a fresh root per call (per-process roots)...OK
+59/72 mmu.test.mmu: user leaves are page-local W^X and reject Device mappings...OK
+60/72 mmu.test.mmu: map_user_page and unmap_user_page dynamic lifecycle...OK
+61/72 mmu.test.mmu: map_user_cow_page and set_user_leaf_writable...OK
+62/72 userspace.test.userspace: two sequenced pings preserve the claim-8215 round-trip...OK
+63/72 console.test.console: mock captures writes in order...OK
+64/72 console.test.console: reset clears capture and flags...OK
+65/72 console.test.console: overflow truncates, flags, and never wraps...OK
+66/72 console.test.console: zero-capacity mock flags every write...OK
+67/72 console.test.console: print_hex prints fixed 16 lowercase digits...OK
+68/72 console.test.console: print_hex_min prints minimal lowercase hex...OK
+69/72 console.test.console: print_u64 prints decimal without leading zeros...OK
+70/72 console.test.console: mock readByte returns scripted input in order...OK
+71/72 console.test.console: mock feed overflow is refused and flagged, never wraps...OK
+72/72 console.test.console: reset clears the scripted input queue too...OK
+All 72 tests passed.
+-- zig test kernel/src/driving_award.zig
+All 0 tests passed.
+module goldens: PASS
+
+[2/3] offline in-cell mirror self-test (decode-screen-glyphs.py --self-test)
+self-test: asymmetric C golden confirms source LSB-left orientation
+self-test: forward title='clock' body='DRIVING AWARD'
+self-test: after in-cell mirror, forward title='?J???' (4 unknowns) body='??J?J?? ?????' (10 unknowns)
+self-test: after in-cell mirror, mirrored decode title='clock' body='DRIVING AWARD'
+SELF-TEST PASS: the clock title/body tripwire reads forward and detects an in-cell mirror
+offline self-test: PASS# --- 3. Mutation check: delegated to the generalized bit-order gate ---
+
+[3/3] mutation check (delegated: tools/verify-mutations.sh — row_pixel reversal + FAT endianness + virtio NEXT-bit)
+=== verify-mutations: the generalized bit-order mutation check ===
+
+[mutation 1] font8x8 row_pixel (kernel/src/font8x8.zig)
+  !! driving_award did NOT fail under the mutation — the golden cannot detect this regression
+  detected (all listed modules failed)
+
+[mutation 2] file_table traversal boundary (kernel/src/file_table.zig)
+  detected (all listed modules failed)
+
+[mutation 3] virtio chain-walk NEXT bit (kernel/src/virtio_custom.zig)
+  detected (all listed modules failed)
+
+=== verify-mutations: PASS (3 bit-order mutations applied; every golden failed under its mutation) ===
+mutation check: PASS (every bit-order mutation failed its goldens)
+
+=== verify-glyph-raster: PASS (goldens green, self-test green, mutation detected) ===
+bash tools/verify-ttf-fonts.sh
+=== verify-ttf-fonts: TrueType Engine & Typography Verification (Inter + Fira Code) ===
+
+[1/3] Verifying source TrueType font files in image/fonts/
+  Inter-Regular.ttf: 411640 bytes (OK)
+  FiraCode-Regular.ttf: 289624 bytes (OK)
+
+[2/3] Running TrueType parser, rasterizer, composite, cache & blend unit tests
+1/5 font_ttf.test.TrueTypeFace parses Fira Code and Inter headers and cmap...OK
+2/5 font_ttf.test.TrueTypeFace loads simple glyph outlines...OK
+3/5 font_ttf.test.TrueTypeFace rasterizes anti-aliased glyphs with subpixel coverage...
+--- Rasterized Inter 'O' (16px, 12x13, advance=12px) ---
+  =%@@%=    
+ #@+::+@+   
+-%:    -@:  
+#+      #+  
+@-      -%  
+@:      :@: 
+@:      :@. 
+@-      =#  
+#*      #+  
+:@+    +@.  
+ +@#++#@-   
+  .****.    
+            
+
+--- Rasterized Fira Code 'A' (14px, 10x11) ---
+  :@#     
+  +*@.    
+  #.#-    
+ .% +#    
+ =+ .@.   
+ #-  #-   
+.@#**%#   
+-#:::-@.  
+*-    @-  
+*     ++  
+          
+OK
+4/5 font_ttf.test.TrueTypeFace loads and rasterizes composite glyphs (accented é)...OK
+5/5 font_ttf.test.GlyphCache and blend_glyph_bgra render text into 32-bpp BGRA buffer...OK
+All 5 tests passed.
+
+[3/3] Compiling userland with font engine integrated
+elf2bin: ./.zig-cache/o/715dcf7614b404a09f46a0f6d4786e75/user-edit -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/c98c993c7af2d12ed68d554c721d5f2e/EDIT.BIN: entry_offset=0x30 image_size=246160 text=49152 data=196960 (bss tail 115880) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/0f36a2d2125b73b943573a2da3c92b18/user-desktop -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/e25eb3bad7af1427a915dbe3afcf4a18/DESKTOP.BIN: entry_offset=0x30 image_size=20528 text=20480 data=0 (bss tail 81584) from 3 PT_LOAD segment(s)
+
+=== verify-ttf-fonts: PASS (Inter & Fira Code TrueType engine verified) ===
+bash tools/verify-mutations.sh
+=== verify-mutations: the generalized bit-order mutation check ===
+
+[mutation 1] font8x8 row_pixel (kernel/src/font8x8.zig)
+  !! driving_award did NOT fail under the mutation — the golden cannot detect this regression
+  detected (all listed modules failed)
+
+[mutation 2] file_table traversal boundary (kernel/src/file_table.zig)
+  detected (all listed modules failed)
+
+[mutation 3] virtio chain-walk NEXT bit (kernel/src/virtio_custom.zig)
+  detected (all listed modules failed)
+
+=== verify-mutations: PASS (3 bit-order mutations applied; every golden failed under its mutation) ===
+bash tools/verify-bss-budget.sh
+=== verify-bss-budget: ADR 0013 D3.1 CI gate — kernel .bss ceiling (class A, deterministic, no VM) ===
+budget source: docs/decisions/0013-post-m14-abi-amendment.md D3.1
+budget:        13631488 B (11.0 MiB)
+
+-- building kernel --
+elf2bin: ./.zig-cache/o/a82ce1f1db86c4c13e13ec2050fda7ee/virelai-kernel -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/279f0f4fb078f9bb73319bc64ba1e0d5/KERNEL.BIN: entry_offset=0x28 image_size=12496664 (4 PT_LOAD segment(s), 117 absolute reloc(s))
+
+-- kernel ELF section sizes --
+  .bss:           11322360 B  (0xacc3f8)
+  .data:          619960 B  (0x0975b8)
+  .userbss:       36864 B  (0x009000)
+
+-- budget check --
+  measured:       11322360 B
+  budget:         13631488 B
+  remaining:      2309128 B
+  over budget:    0 B
+  status:         PASS
+
+-- known large .bss contributors (sourced from kernel/src; informational) --
+  mmu.table_storage (kernel/src/mmu.zig):     2,097,152 B (2.0 MiB; page-table carve-out, ADR 0006, doubled in M16 C4)
+  virtio_gpu.gpu_fb (kernel/src/virtio_gpu.zig): 3,686,400 B (3.52 MiB; 1280x720x4 scanout, align 4096)
+  post-M14 reservations (ADR 0013 D3):           1,737 B (~1.7 KiB; planned, not yet landed)
+  other (font, console, scheduler, virtio rings, process table, mailbox, evidence, etc.): the remainder
+
+verify-bss-budget: PASS — kernel .bss = 11322360 B / 13631488 B (2309128 B headroom).
+bash tools/verify-vf-class-a.sh
+=== verify-vf-class-a: M34 HF1–HF4 (issues #735/#736/#737/#738) — host file channel wire parity (class A) ===
+0.16.0
+swift-driver version: 1.168.6 Apple Swift version 6.4 (swiftlang-6.4.0.34.1 clang-2100.3.34.1)
+revision: 1b1819acc3d00e04d0c02ea8b8b8ec948a264064 branch=agent/buffy-execrace/fleet-exec-race dirty-files=1
+
+── zig fmt --check ──
+
+── zig build ──
+elf2bin: ./.zig-cache/o/f8a4bf640aabd1bf6920e657a4e12997/user-sb6old -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/5c09e153a6f63f9ba37475fe477726c6/SB6OLD.BIN: entry_offset=0x18 image_size=476 (content 452 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/7a82a9e348b0ff1be6be1a0f421d918b/user-cryptod -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/6598cb08417fe8abb1f315ca48e6d99f/CRYPTOD.BIN: entry_offset=0x18 image_size=2464 (content 2440 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/1dd9ce3492f863637ba2294936b58e08/user-smpst-file -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/f2b7ff2feee4e8dc404ca52975a6ac30/SMPFILE.BIN: entry_offset=0x30 image_size=4144 text=4096 data=0 (bss tail 4) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/eb97c5e8f1a0213576afa3417aa05a95/user-wmrpc -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/f6250b9ef2929da79f4bd31e9c1baa3b/WMRPC.BIN: entry_offset=0x18 image_size=4366 (content 4342 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/578dedec6b876ac1b259cb0bbc34557c/user-httpd -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/83d31f364a0fb573ed6220c523b612a4/HTTPD.BIN: entry_offset=0x18 image_size=15305 (content 15281 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/ea5f1597495d1a3784e5ad5ce47c0d19/user-devcons -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/90acc746d2f05f1019df31db90f0e4eb/DEVCONS.BIN: entry_offset=0x30 image_size=16492 text=16384 data=60 (bss tail 118508) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/bec49f9cf0b11c241718b79df661508c/user-m21demo -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/44bdb223c762982f59d00c29f0ef4858/M21DEMO.BIN: entry_offset=0x18 image_size=593 (content 569 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/218d95e46a571b1542fe5f25089a3113/user-peer -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/bee3d2b71ba96c74edfa23878b8affae/PEER.BIN: entry_offset=0x18 image_size=623 (content 599 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/81306e6d2af1a169e5ed328b1da63070/user-timertest -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/056ab7d1fecdea299e046dda34dbe99e/TIMER.BIN: entry_offset=0x18 image_size=1129 (content 1105 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/36bfc7bd6f9f95b33c7329bd6475632d/user-top -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/f92078fdeacb670c79f98721583130b7/TOP.BIN: entry_offset=0x30 image_size=28768 text=28672 data=48 (bss tail 81584) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/0a3032e95e24d8b9c432e914b1771005/user-fetch -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/de1758a2d700c93ca770c16b52eea9a9/FETCH.BIN: entry_offset=0x18 image_size=2979 (content 2955 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/7e4e69d7869a47eb537e24c529a86fbf/user-sexitest -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/34d88f145ac40598ff884807349ef569/SEXITEST.BIN: entry_offset=0x18 image_size=3088 (content 3064 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/c2482ef64d4e6a4226b8bb32f4a546fa/user-savetext -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/ec7960f745bca1c1d77fdb1ee5b39b5a/SAVETEXT.BIN: entry_offset=0x18 image_size=225 (content 201 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/258e14e4b1f64646f0bb7ee77f1fc891/user-sshpacket -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/7878efaec530fe24cdfa0833da7e88d7/SSHPACKET.BIN: entry_offset=0x30 image_size=4144 text=4096 data=0 (bss tail 35000) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/c49ca33953ecb88dcf40de32ff6e6e37/user-winloop -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/d004d3901f5b2e0f9caea3da12c97a1d/WINLOOP.BIN: entry_offset=0x18 image_size=417 (content 393 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/95bc2a1dc54f144d6f99ad658ec546c5/user-tabwm -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/2e5810839bff904420cd9b39ed8802d6/TABWM.BIN: entry_offset=0x30 image_size=45152 text=45056 data=48 (bss tail 96792) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/e32cffb77c0972a1b684d6e612f58780/user-notepad -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/2f656290f6f7217aec981c07c3b0a34f/NOTEPAD.BIN: entry_offset=0x30 image_size=28768 text=28672 data=48 (bss tail 81584) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/1f0c4bf58ceb731f2319a58fec25b44b/user-desktop -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/4cc0e09f4bffbb3e037cac8161f4a94c/DESKTOP.BIN: entry_offset=0x30 image_size=20528 text=20480 data=0 (bss tail 81584) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/0c58d2ed3d13a51688396ab46dcbf43c/user-term -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/fa4281e8e0c89037754f27182a99a546/TERM.BIN: entry_offset=0x30 image_size=94264 text=94208 data=8 (bss tail 78712) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/2d81f85f8915393c806ed36d5a975371/user-settings -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/926ad9c978e37c0cb4dd9f4447f9311c/SETTINGS.BIN: entry_offset=0x30 image_size=20576 text=20480 data=48 (bss tail 81584) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/d5b8ada15fca41947f8cbe58a566f822/user-winclose -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/85318c702fb0f15de1ca47ab7123e725/WINCLOSE.BIN: entry_offset=0x18 image_size=261 (content 237 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/b1140ff9f065467687d2091d8a72008c/user-chime -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/4c4238aaf75d1c945af44fdceab66ed1/CHIME.BIN: entry_offset=0x18 image_size=8688 (content 8664 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/72c886fbf41911f813c8fef28c0c2cb3/user-hardening-victim -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/4bbb7e7c045ef4f0b880a7af2e55b6f1/VICTIM.BIN: entry_offset=0x30 image_size=4144 text=4096 data=0 (bss tail 1112) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/6137853ddc906cb398995058ea18ce14/user-harden -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/c6521b7ceb394221106cbff09d403419/HARDEN.BIN: entry_offset=0x18 image_size=714 (content 690 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/ae5862f902e5ca9bc23da87f85fa7106/user-netstat -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/1dcf9c3bf92f355b410ac01240d37bf6/NETSTAT.BIN: entry_offset=0x30 image_size=16432 text=16384 data=0 (bss tail 81824) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/650559db67fa6e9474f971cb942b62ad/user-asm -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/b6fb04dbe9880d4f4353be16bcac0ae3/ASM.BIN: entry_offset=0x18 image_size=12690 (content 12666 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/8f2cc4e2a7de424325105ce09cde3762/user-sb4dam -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/25ceec45b36f453e76677566a45b2a78/SB4DAM.BIN: entry_offset=0x18 image_size=434 (content 410 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/2a00490ca804ad4ef4d35041f2327b38/user-guard -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/fa838e0e2b4f6ae5c4da8072c9b303e9/GUARD.BIN: entry_offset=0x18 image_size=88 (content 64 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/3e50c7b825a49414a3033fb6b7c7a29a/user-ttyecho -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/e0acb477833520e787bcb7987abe90b5/TTYECHO.BIN: entry_offset=0x18 image_size=1280 (content 1256 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/fd05280947fc04cfb46670e19b88fef4/user-sb6new -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/2f97db78d6ce92f87354efb2cf1666a1/SB6NEW.BIN: entry_offset=0x18 image_size=1273 (content 1249 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/8c7f2f8e3058a090d3c56d2ff95e9e4a/user-calc -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/6a3df0c9250d7135bfe6dc4c2ceb205a/CALC.BIN: entry_offset=0x30 image_size=82016 text=81920 data=48 (bss tail 81592) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/2953e46007bfb72197433bf393860057/user-type -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/d1887c868cce204572fe5b7438c8dba5/TYPE.BIN: entry_offset=0x18 image_size=232 (content 208 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/eb2acfc18e5c0c94d876f01646a4984d/user-resmon -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/93147deb6b1ee4520d162095165b9ef7/RESMON.BIN: entry_offset=0x30 image_size=12336 text=12288 data=0 (bss tail 82800) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/824c3e6d38612424afa74b73f735ebd9/user-win -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/aaf5fa0dc817072a83dda86156bc0137/WIN.BIN: entry_offset=0x18 image_size=364 (content 340 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/dd23598ed53704de744ecfd139825c44/user-smpst-win -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/8f2e8b5e87f7a7879b896b0a60ff2a4d/SMPWIN.BIN: entry_offset=0x30 image_size=4144 text=4096 data=0 (bss tail 4) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/fcb606c9ad8f882716119c93a59334d4/user-ttyed -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/390bac12ea610cc198636b0c55930c88/TTYED.BIN: entry_offset=0x18 image_size=8477 (content 8453 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/2a87073889716615e58807b85df4645e/user-ps -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/7cf268e94bc4c91866a2ee61dde73b56/PS.BIN: entry_offset=0x30 image_size=12336 text=12288 data=0 (bss tail 82800) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/a05f5de13e4ae52986973c6f695c2440/user-tool -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/5814c9130dae7394ed71dd5befb8e43d/TOOL.BIN: entry_offset=0x30 image_size=12336 text=12288 data=0 (bss tail 45608) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/7156fef59da810af77f19cc5c57e0a09/user-wasm -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/94bb834659c7a2421f9b18b5aa2c2b70/WASM.BIN: entry_offset=0x30 image_size=63456 text=32768 data=30640 (bss tail 152728) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/27db4c157b7a00ca604ce68fae3f665e/user-ssh -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/55531d1c27951f0b6b9bcc2b2cdc024e/SSH.BIN: entry_offset=0x30 image_size=61488 text=61440 data=0 (bss tail 116160) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/dde36e0acff72c730c4e17e4e8d6b0f1/user-blkd -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/22b03e75b8c613178b54a2150977a2e7/BLKD.BIN: entry_offset=0x18 image_size=247 (content 223 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/02c1cd32180365ea3271226150e0ecfb/user-wndstub -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/9371ebdb69ca5269a32d532689b0adb8/WNDSTUB.BIN: entry_offset=0x18 image_size=230 (content 206 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/6935454e3abb7ac56e97dd21001a8cb7/user-sb2-own -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/8155cb5940cecb3581e6b25dc774dba9/SB2OWN.BIN: entry_offset=0x18 image_size=979 (content 955 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/3a29e7b901bd39a9891a2265f7cc149f/user-vmtest -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/41b368f2ce7dc9bccc139baf422d8af2/VMTEST.BIN: entry_offset=0x18 image_size=968 (content 944 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/3c4c1e762c12a97fedcc9b1aca62ee3f/user-disas -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/96d5f82141af086b19d761265f88e7d8/DISAS.BIN: entry_offset=0x18 image_size=6496 (content 6472 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/7e010cbd21b47e6f090896eeadb67d19/user-tcp -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/c34570ac8b376f06d2b8efb18fca9625/TCP.BIN: entry_offset=0x18 image_size=267 (content 243 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/9b74f10883afd7467fda1c6b144e2a06/user-sysmon -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/f624cd0c348208d7825edc14d2e73b88/SYSMON.BIN: entry_offset=0x30 image_size=20576 text=20480 data=48 (bss tail 81584) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/b416ed297da1b3377510eb1cb82ccb65/user-udp -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/5a69db5ff6214fecfb63173f609e96f7/UDP.BIN: entry_offset=0x18 image_size=605 (content 581 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/937969a52d25a1f12a8dda12c31a6c9d/user-keytest -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/17a319a82d3941531d7b5e7c69b6c962/KEYTEST.BIN: entry_offset=0x18 image_size=645 (content 621 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/e739e6e5b18653a2d17fc4f9ed44894f/user-smpst-ev -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/a4c82675c653ea38dc839f9d5b490f4b/SMPEV.BIN: entry_offset=0x30 image_size=4144 text=4096 data=0 (bss tail 4) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/ef653cfccb9f855bc861d4bc60bb7ac8/user-sexiburg -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/ce8498e9bfebb8a9b8ec2a44f6ec276e/SEXIBURG.BIN: entry_offset=0x30 image_size=45104 text=45056 data=0 (bss tail 109392) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/0b7e7b1a12bd5bdadca7fa5ee00caca1/user-sb5wm -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/82f843eca273aaa36deeb34ee1598af1/SB5WM.BIN: entry_offset=0x18 image_size=2256 (content 2232 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/9d89f311d3b51393043cb72ed2021a75/user-traceroute -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/3f7edaed686c191b4488e5b6697a2be4/TRACEROUTE.BIN: entry_offset=0x18 image_size=2464 (content 2440 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/40f2cafa5b4ed9984570b0bdc620ff1d/user-smpst-net -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/4fd2e64f20501a838bce6d9ae494e1ab/SMPNET.BIN: entry_offset=0x30 image_size=4144 text=4096 data=0 (bss tail 4) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/a538b8ebaaf98dfe9c3e2bec875045cc/user-globals -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/ff7876e0a1ab3a98e5cb3885a1a19677/GLOBALS.BIN: entry_offset=0x30 image_size=28728 text=28672 data=8 (bss tail 4104) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/d77319957e7f69b54857096729fe7b83/user-sb5own -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/b49f9a7d296e2c8427f908522ae9c1b7/SB5OWN.BIN: entry_offset=0x18 image_size=1141 (content 1117 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/8411acb0402a8c7a0e409246cc076ef6/user-sb3-own -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/df8ab4b5cf607bad8f95f09712b931b7/SB3OWN.BIN: entry_offset=0x18 image_size=1127 (content 1103 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/2bb3907d60785118d4b56d0e6c9c6a14/user-tabhold -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/0a934ce116f1d628fcf956ef58f010ad/TABHOLD.BIN: entry_offset=0x18 image_size=2440 (content 2416 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/655630287ca3d157ec433caf9205e6f4/user-edit -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/6ee6df79701b0aa8df1fa130beb77a79/EDIT.BIN: entry_offset=0x30 image_size=246160 text=49152 data=196960 (bss tail 115880) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/37a262416819a2fa73bb98179b6dfcc9/user-counter -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/d4cc14a9996d42f7ac5f4abf31576c1d/COUNTER.BIN: entry_offset=0x18 image_size=940 (content 916 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/54d69cbef4de446ed780938a2d24f613/user-dir -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/7623788e2002fe65e3cc0baa8a6ca2dc/DIR.BIN: entry_offset=0x18 image_size=248 (content 224 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/47f6a7cdb525bdfa11342ab9de4cecf6/user-status43 -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/c370e8c3aeb7434e9b3635d1570e6695/STATUS43.BIN: entry_offset=0x18 image_size=134 (content 110 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/3602fc1fff6e629f4a628a39c7928376/user-zc -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/ec028d552ab0f3ec5eeeab7c74748d4e/ZC.BIN: entry_offset=0x30 image_size=32816 text=32768 data=0 (bss tail 216184) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/91b7124e1d653f9e9b982fce85f891eb/user-hello -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/f00b7057924389dc2263601c5559d062/USER.BIN: entry_offset=0x18 image_size=397 (content 373 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/6f76ea65f69eedad503b269b07265edb/user-jingle -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/7dbb804451523ccd2f44b39b6d8d0336/JINGLE.BIN: entry_offset=0x18 image_size=8624 (content 8600 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/c2183f13e305517e7669de39f5301960/user-sb3-wm -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/d9549b12f858ccc08b481ccec060297c/SB3WM.BIN: entry_offset=0x18 image_size=1960 (content 1936 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/1fdf368ca645c6d4df115053cdc2b209/user-winmove -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/5caea6acdfaaf5d89f5d2657e091ac77/WINMOVE.BIN: entry_offset=0x18 image_size=1340 (content 1316 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/d448e71bf05f2a850076c1f9f0af42ee/user-sb2-wm -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/1f5f7a2f3ecefda7b414f70d2064cbaf/SB2WM.BIN: entry_offset=0x18 image_size=1824 (content 1800 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/287da0fb9855fa7dbba65f47bcc1a3cc/user-download -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/aa9d78f7ff425fd6a9b803f9fa0d9dde/DOWNLOAD.BIN: entry_offset=0x18 image_size=3255 (content 3231 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/476eef505b184a786b464d4d6e7eea57/user-wnd -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/11fe18eb7980feadffb397e711328aa8/WND.BIN: entry_offset=0x30 image_size=54504 text=53248 data=1208 (bss tail 193864) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/415d07db15c7fcf0004c51b7581ea9e4/user-smp1 -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/64d282cc452616c635574d637e08019f/SMP1.BIN: entry_offset=0x18 image_size=159 (content 135 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/0f7d7e9a2c739033e1b3e21730d8fed7/user-schedring -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/3486ec96f943b711263a44c2276bcba2/SCHEDRING.BIN: entry_offset=0x18 image_size=213 (content 189 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/3b39ec8160f6e94a3e40a7e81d1905fa/user-netprof -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/a411112d0321f201739e6947318d2bac/NETPROF.BIN: entry_offset=0x18 image_size=4345 (content 4321 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/713f22fb0d3abc96b0f956de0a8c5c4d/user-chat -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/17773e77a0f97d414167cfe734f19935/CHAT.BIN: entry_offset=0x30 image_size=12336 text=12288 data=0 (bss tail 81584) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/a82ce1f1db86c4c13e13ec2050fda7ee/virelai-kernel -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/279f0f4fb078f9bb73319bc64ba1e0d5/KERNEL.BIN: entry_offset=0x28 image_size=12496664 (4 PT_LOAD segment(s), 117 absolute reloc(s))
+elf2bin: ./.zig-cache/o/cdc728c870be94c6891d674cfbe2d565/user-spin -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/27108ea89be0c3aca755f902d76ee990/SPIN.BIN: entry_offset=0x18 image_size=132 (content 108 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/451877a82e30913e593bccd9a0fc26de/user-file-browser -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/d6eca69f997bafa90a2dfe618373d40b/FILE.BIN: entry_offset=0x30 image_size=49248 text=49152 data=48 (bss tail 81584) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/add038350f1a5aa960afa900bc8c27fc/user-sb6wm -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/20c7abe6bc63b1d838ae667f9c893f65/SB6WM.BIN: entry_offset=0x18 image_size=2600 (content 2576 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/0bbea3a450afd42b835a52ff66b965d6/user-dns -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/1b99a2890bef98cd974427d45ec35bd6/DNS.BIN: entry_offset=0x18 image_size=4711 (content 4687 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/e8b6ed3854fe7caf01ed998d1cdbf772/user-ping -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/c4377a10cf28b656ea6a9612643cdf58/PING.BIN: entry_offset=0x18 image_size=5670 (content 5646 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/96e0be34e86a0bedd2bd1a9d581b9891/user-view -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/3102767a8d60e32eb4e4f874912bdbcd/VIEW.BIN: entry_offset=0x30 image_size=28904 text=28672 data=184 (bss tail 89880) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/d923519478e2f97c037801d981c26d47/user-sh -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/91793c9b9b7b2c94261d6d4a68708e3f/SH.BIN: entry_offset=0x30 image_size=98360 text=98304 data=8 (bss tail 85824) from 3 PT_LOAD segment(s)
+
+── zig build image ──
+elf2bin: ./.zig-cache/o/a82ce1f1db86c4c13e13ec2050fda7ee/virelai-kernel -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/279f0f4fb078f9bb73319bc64ba1e0d5/KERNEL.BIN: entry_offset=0x28 image_size=12496664 (4 PT_LOAD segment(s), 117 absolute reloc(s))
+make-image: building FAT32+GPT boot image 'artifacts/disk.img' (0 MiB)...
+mkfat32: wrote artifacts/disk.img.tmp (174592 EFI + 12496664 kernel bytes)
+make-image: verifying image contents...
+size: 35364864 bytes (69072 sectors)
+LBA0: MBR present
+GPT: valid signature, header crc32=0xde33e5c4
+GPT: ESP partition at LBA 2048, 67024 sectors
+FAT: boot sig ok, label='VIRELAIOS', 512-byte sectors, 1 sector/cluster, 32 reserved, 2 FATs x 516 sectors, root cluster 2
+FAT: directory tree:
+  EFI/
+    BOOT/
+      BOOTAA64.EFI  (174592 bytes)
+  KERNEL.BIN  (12496664 bytes)
+make-image: done.
+
+── virtio_file host tests (G1–G12) ──
+1/56 virtio_file.test.virtio_file: G1 — pattern generator parity is pinned (fixture class)...OK
+2/56 virtio_file.test.virtio_file: G2 — reply_len clamp math — over-cap dlen never reads OOB...OK
+3/56 virtio_file.test.virtio_file: G3 — probe request shape + the raw 32 KiB pattern reply...OK
+4/56 virtio_file.test.virtio_file: G4 — hostile envelopes (bad status, truncated rows) are honest...OK
+5/56 virtio_file.test.virtio_file: G5 — entry row round trip + read payload + streaming cksum...OK
+6/56 virtio_file.test.virtio_file: G6 — request encode bounds (over-long payload, small out)...OK
+7/56 virtio_file.test.virtio_file: G7 — HF3 op/status constants + 8-handle parity with file_table.zig...OK
+8/56 virtio_file.test.virtio_file: G8 — open request flags + reply handle decode...OK
+9/56 virtio_file.test.virtio_file: G9 — write payload shape + written-cursor reply...OK
+10/56 virtio_file.test.virtio_file: G10 — truncate/close/fsync payloads (handle + size)...OK
+11/56 virtio_file.test.virtio_file: G11 — rename NUL-framed payload + bounds...OK
+12/56 virtio_file.test.virtio_file: G12 — pattern chunk plan for the mutation gate...OK
+13/56 virtio_file.test.virtio_file: G13 — HF7 clone op: 0x0c, NUL frame, bounds, honest refusal...OK
+14/56 virtio_file.test.virtio_file: read_chunk and read_into copy-out under test_share...OK
+15/56 virtio_file.test.virtio_file: clean_path strips leading slashes...OK
+16/56 virtio_custom.test.virtio_custom: payload is the 16-byte known string, reply cap 64, big payload 12340...OK
+17/56 virtio_custom.test.virtio_custom: ring shapes match the split-ring spec...OK
+18/56 virtio_custom.test.virtio_custom: feature bits are the spec's ANY_LAYOUT / VERSION_1 / NOTIFICATION_DATA...OK
+19/56 virtio_custom.test.virtio_custom: allocator hands out chains, recycles freed indices, and exhausts...OK
+20/56 virtio_custom.test.virtio_custom: post_avail builds the spec-correct chain (read-then-write)...OK
+21/56 virtio_custom.test.virtio_custom: post_avail builds an ANY_LAYOUT chain (write first) with a 3-part scatter...OK
+22/56 virtio_custom.test.virtio_custom: scan_used matches by id, handles out-of-order completion, wraps...OK
+23/56 virtio_custom.test.virtio_custom: park_chain keeps a timed-out head out of the free list until reap_parked sees its reply...OK
+24/56 virtio_custom.test.virtio_custom: the reply read is length-driven, clamped to the buffer...OK
+25/56 virtio_custom.test.virtio_custom: fresh transport reports no-device honestly...OK
+26/56 virtio_custom.test.virtio_custom: note_irq records the first INTID and count...OK
+27/56 virtio_custom.test.virtio_custom: push-echo shapes (claim 3141) — queue index, buffer sizes...OK
+28/56 virtio_custom.test.virtio_custom: input-channel shapes (claim 9588) — queue index, envelope, pool...OK
+29/56 virtio_custom.test.virtio_custom: dispatch_input_msg validates the envelope and counts honestly...OK
+30/56 virtio_custom.test.virtio_custom: kind-2 pointer messages dispatch through the pointer hook (claim 9367)...OK
+31/56 virtio_custom.test.virtio_custom: checksum1071 matches RFC 1071 semantics...OK
+32/56 virtio_custom.test.virtio_custom: snapshot framing builders produce the documented wire shapes (claim 0680)...OK
+33/56 virtio_custom.test.virtio_custom: kind-3 console control arms and disarms the tee (claim 0680)...OK
+34/56 virtio_custom.test.virtio_custom: kind-4 snapshot request pends for the idle seam (claim 0680)...OK
+35/56 virtio_custom.test.virtio_custom: console tee accumulator buffers, splits, and drops (claim 0680)...OK
+36/56 spinlock.test.spinlock: basic uncontended lock and unlock...OK
+37/56 spinlock.test.spinlock: try_lock behavior...OK
+38/56 spinlock.test.spinlock: concurrent multi-threaded stress test...OK
+39/56 mmu.test.mmu: build_user_root returns a fresh root per call (per-process roots)...OK
+40/56 mmu.test.mmu: user leaves are page-local W^X and reject Device mappings...OK
+41/56 mmu.test.mmu: map_user_page and unmap_user_page dynamic lifecycle...OK
+42/56 mmu.test.mmu: map_user_cow_page and set_user_leaf_writable...OK
+43/56 userspace.test.userspace: two sequenced pings preserve the claim-8215 round-trip...OK
+44/56 console.test.console: mock captures writes in order...OK
+45/56 console.test.console: reset clears capture and flags...OK
+46/56 console.test.console: overflow truncates, flags, and never wraps...OK
+47/56 console.test.console: zero-capacity mock flags every write...OK
+48/56 console.test.console: print_hex prints fixed 16 lowercase digits...OK
+49/56 console.test.console: print_hex_min prints minimal lowercase hex...OK
+50/56 console.test.console: print_u64 prints decimal without leading zeros...OK
+51/56 console.test.console: mock readByte returns scripted input in order...OK
+52/56 console.test.console: mock feed overflow is refused and flagged, never wraps...OK
+53/56 console.test.console: reset clears the scripted input queue too...OK
+54/56 virtio_gpu.test.virtio_gpu: spec constants, wire shapes, and the fill are the spec shapes...OK
+55/56 virtio_gpu.test.virtio_gpu: fill writes the B8G8R8X8 little-endian byte order...OK
+56/56 virtio_gpu.test.virtio_gpu: display-info response parse takes pmodes[0]...OK
+All 56 tests passed.
+
+── verify-unit-tests.sh (all monitor modules incl. virtio_file) ──
+=== verify-unit-tests: running unified parallel test suite (zig build test) ===
+Build Summary: 166/166 steps succeeded; 3324/3324 tests passed
+test success
++- run test 4 pass (4 total) 68ms MaxRSS:2M
+|  +- compile test Debug native success 2s MaxRSS:276M
+|     +- options cached
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test success 108ms MaxRSS:2M
+|  +- compile test Debug native success 2s MaxRSS:230M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 33 pass (33 total) 158ms MaxRSS:4M
+|  +- compile test Debug native success 2s MaxRSS:291M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 6 pass (6 total) 86ms MaxRSS:2M
+|  +- compile test Debug native success 3s MaxRSS:241M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 10 pass (10 total) 93ms MaxRSS:2M
+|  +- compile test Debug native success 3s MaxRSS:238M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 10 pass (10 total) 91ms MaxRSS:2M
+|  +- compile test Debug native success 2s MaxRSS:270M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test success 87ms MaxRSS:2M
+|  +- compile test Debug native success 2s MaxRSS:272M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 3 pass (3 total) 71ms MaxRSS:2M
+|  +- compile test Debug native success 2s MaxRSS:278M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test success 71ms MaxRSS:2M
+|  +- compile test Debug native success 2s MaxRSS:247M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 28 pass (28 total) 84ms MaxRSS:4M
+|  +- compile test Debug native success 2s MaxRSS:272M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 370 pass (370 total) 164ms MaxRSS:14M
+|  +- compile test Debug native success 3s MaxRSS:441M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 71 pass (71 total) 169ms MaxRSS:4M
+|  +- compile test Debug native success 2s MaxRSS:281M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 4 pass (4 total) 79ms MaxRSS:2M
+|  +- compile test Debug native success 2s MaxRSS:254M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 25 pass (25 total) 78ms MaxRSS:2M
+|  +- compile test Debug native success 1s MaxRSS:284M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 4 pass (4 total) 73ms MaxRSS:2M
+|  +- compile test Debug native success 1s MaxRSS:275M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 163 pass (163 total) 137ms MaxRSS:8M
+|  +- compile test Debug native success 2s MaxRSS:345M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 20 pass (20 total) 154ms MaxRSS:2M
+|  +- compile test Debug native success 2s MaxRSS:287M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 33 pass (33 total) 68ms MaxRSS:2M
+|  +- compile test Debug native success 1s MaxRSS:285M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 20 pass (20 total) 98ms MaxRSS:2M
+|  +- compile test Debug native success 2s MaxRSS:237M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 28 pass (28 total) 101ms MaxRSS:4M
+|  +- compile test Debug native success 2s MaxRSS:289M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 5 pass (5 total) 78ms MaxRSS:2M
+|  +- compile test Debug native success 2s MaxRSS:245M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 15 pass (15 total) 66ms MaxRSS:2M
+|  +- compile test Debug native success 2s MaxRSS:281M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test success 147ms MaxRSS:2M
+|  +- compile test Debug native success 2s MaxRSS:262M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 22 pass (22 total) 91ms MaxRSS:3M
+|  +- compile test Debug native success 2s MaxRSS:281M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 23 pass (23 total) 150ms MaxRSS:4M
+|  +- compile test Debug native success 2s MaxRSS:288M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 2 pass (2 total) 75ms MaxRSS:2M
+|  +- compile test Debug native success 2s MaxRSS:240M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 16 pass (16 total) 70ms MaxRSS:2M
+|  +- compile test Debug native success 2s MaxRSS:235M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 19 pass (19 total) 71ms MaxRSS:2M
+|  +- compile test Debug native success 1s MaxRSS:280M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test success 82ms MaxRSS:2M
+|  +- compile test Debug native success 1s MaxRSS:270M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 4 pass (4 total) 74ms MaxRSS:2M
+|  +- compile test Debug native success 1s MaxRSS:276M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 29 pass (29 total) 134ms MaxRSS:4M
+|  +- compile test Debug native success 1s MaxRSS:292M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 83 pass (83 total) 115ms MaxRSS:6M
+|  +- compile test Debug native success 2s MaxRSS:246M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 7 pass (7 total) 68ms MaxRSS:2M
+|  +- compile test Debug native success 2s MaxRSS:275M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 479 pass (479 total) 186ms MaxRSS:15M
+|  +- compile test Debug native success 4s MaxRSS:527M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 2 pass (2 total) 68ms MaxRSS:2M
+|  +- compile test Debug native success 2s MaxRSS:234M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 3 pass (3 total) 85ms MaxRSS:2M
+|  +- compile test Debug native success 1s MaxRSS:274M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 10 pass (10 total) 169ms MaxRSS:2M
+|  +- compile test Debug native success 1s MaxRSS:277M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test success 80ms MaxRSS:2M
+|  +- compile test Debug native success 2s MaxRSS:233M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test success 75ms MaxRSS:2M
+|  +- compile test Debug native success 1s MaxRSS:273M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 88 pass (88 total) 81ms MaxRSS:3M
+|  +- compile test Debug native success 2s MaxRSS:319M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 202 pass (202 total) 100ms MaxRSS:8M
+|  +- compile test Debug native success 3s MaxRSS:377M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 72 pass (72 total) 96ms MaxRSS:6M
+|  +- compile test Debug native success 2s MaxRSS:259M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 22 pass (22 total) 155ms MaxRSS:2M
+|  +- compile test Debug native success 1s MaxRSS:282M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 17 pass (17 total) 78ms MaxRSS:2M
+|  +- compile test Debug native success 2s MaxRSS:278M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 24 pass (24 total) 76ms MaxRSS:2M
+|  +- compile test Debug native success 2s MaxRSS:238M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 14 pass (14 total) 78ms MaxRSS:2M
+|  +- compile test Debug native success 2s MaxRSS:281M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 11 pass (11 total) 61ms MaxRSS:2M
+|  +- compile test Debug native success 2s MaxRSS:278M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 41 pass (41 total) 158ms MaxRSS:6M
+|  +- compile test Debug native success 2s MaxRSS:295M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 16 pass (16 total) 86ms MaxRSS:2M
+|  +- compile test Debug native success 2s MaxRSS:282M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 56 pass (56 total) 141ms MaxRSS:7M
+|  +- compile test Debug native success 1s MaxRSS:301M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 18 pass (18 total) 84ms MaxRSS:6M
+|  +- compile test Debug native success 2s MaxRSS:237M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 47 pass (47 total) 183ms MaxRSS:3M
+|  +- compile test Debug native success 3s MaxRSS:254M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 204 pass (204 total) 166ms MaxRSS:8M
+|  +- compile test Debug native success 2s MaxRSS:360M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 15 pass (15 total) 99ms MaxRSS:2M
+|  +- compile test Debug native success 2s MaxRSS:253M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 26 pass (26 total) 93ms MaxRSS:2M
+|  +- compile test Debug native success 2s MaxRSS:287M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test success 78ms MaxRSS:2M
+|  +- compile test Debug native success 2s MaxRSS:249M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 29 pass (29 total) 80ms MaxRSS:3M
+|  +- compile test Debug native success 3s MaxRSS:249M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 61 pass (61 total) 81ms MaxRSS:3M
+|  +- compile test Debug native success 2s MaxRSS:310M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 6 pass (6 total) 78ms MaxRSS:2M
+|  +- compile test Debug native success 2s MaxRSS:274M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 13 pass (13 total) 76ms MaxRSS:2M
+|  +- compile test Debug native success 3s MaxRSS:245M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 4 pass (4 total) 84ms MaxRSS:2M
+|  +- compile test Debug native success 3s MaxRSS:242M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 16 pass (16 total) 80ms MaxRSS:3M
+|  +- compile test Debug native success 1s MaxRSS:290M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 42 pass (42 total) 253ms MaxRSS:3M
+|  +- compile test Debug native success 2s MaxRSS:287M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 61 pass (61 total) 512ms MaxRSS:3M
+|  +- compile test Debug native success 1s MaxRSS:296M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 9 pass (9 total) 68ms MaxRSS:2M
+|  +- compile test Debug native success 3s MaxRSS:243M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 4 pass (4 total) 140ms MaxRSS:2M
+|  +- compile test Debug native success 1s MaxRSS:279M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 13 pass (13 total) 86ms MaxRSS:2M
+|  +- compile test Debug native success 1s MaxRSS:285M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 36 pass (36 total) 129ms MaxRSS:3M
+|  +- compile test Debug native success 3s MaxRSS:256M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 25 pass (25 total) 120ms MaxRSS:3M
+|  +- compile test Debug native success 2s MaxRSS:254M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 21 pass (21 total) 160ms MaxRSS:3M
+|  +- compile test Debug native success 2s MaxRSS:241M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 22 pass (22 total) 85ms MaxRSS:3M
+|  +- compile test Debug native success 2s MaxRSS:244M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 4 pass (4 total) 74ms MaxRSS:2M
+|  +- compile test Debug native success 1s MaxRSS:279M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 64 pass (64 total) 118ms MaxRSS:3M
+|  +- compile test Debug native success 2s MaxRSS:291M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 33 pass (33 total) 89ms MaxRSS:4M
+|  +- compile test Debug native success 3s MaxRSS:298M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 72 pass (72 total) 100ms MaxRSS:7M
+|  +- compile test Debug native success 3s MaxRSS:321M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 74 pass (74 total) 167ms MaxRSS:7M
+|  +- compile test Debug native success 3s MaxRSS:386M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 161 pass (161 total) 179ms MaxRSS:5M
+|  +- compile test Debug native success 4s MaxRSS:400M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 26 pass (26 total) 95ms MaxRSS:3M
+|  +- compile test Debug native success 2s MaxRSS:280M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 16 pass (16 total) 69ms MaxRSS:2M
+|  +- compile test Debug native success 2s MaxRSS:274M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 14 pass (14 total) 105ms MaxRSS:2M
+|  +- compile test Debug native success 2s MaxRSS:281M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 64 pass (64 total) 405ms MaxRSS:15M
+|  +- compile test Debug native success 2s MaxRSS:317M
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 10 pass (10 total) 143ms MaxRSS:2M
+   +- compile test Debug native success 2s MaxRSS:236M
+      +- options (reused)
+      +- options (reused)
+      +- options (reused)
+      +- options (reused)
+      +- options (reused)
+      +- options (reused)
+      +- options (reused)
+      +- options (reused)
+      +- options (reused)
+      +- options (reused)
+      +- options (reused)
+      +- options (reused)
+      +- options (reused)
+
+=== verify-unit-tests: app-level test roots (direct zig test) ===
+1/35 tabapp.test.tabapp: dispatch classifies WM lifecycle events and tracks the canvas...OK
+2/35 tabapp.test.tabapp: scale is the identity at the native canvas (zero-regression fixed point)...OK
+3/35 tabapp.test.tabapp: scale maps a fixed layout into the full viewport...OK
+4/35 tabapp.test.tabapp: scale never produces zero-size rects...OK
+5/35 tabapp.test.tabapp: nav declare/poll are best-effort with no WM seat (M48/BT5)...OK
+6/35 ui.abi.test.WMS7 Gate B: the toolkit WM_RPC wire mirror matches the frozen wnd_core ABI...OK
+7/35 ui.draw.test.draw: draw_image_buf source-over into a raw buffer...OK
+8/35 ui.draw.test.draw: draw_image_buf clips to buffer and stride...OK
+9/35 image.test.image: pixel_at bounds checking...OK
+10/35 image.test.image: sub_image view and zero-sized handling...OK
+11/35 image.test.image: blit Porter-Duff alpha blending...OK
+12/35 image.test.image: format dispatch with QOI...OK
+13/35 image.test.image: format dispatch with PNG...OK
+14/35 qoi.test.qoi: reject header magic and truncated headers...OK
+15/35 qoi.test.qoi: decode solid red 4x4 fixture...OK
+16/35 qoi.test.qoi: decode gradient rgba 8x8 fixture...OK
+17/35 qoi.test.qoi: decode non-square 12x4 fixture...OK
+18/35 qoi.test.qoi: buffer too small rejection...OK
+19/35 qoi.test.qoi: corrupt end marker rejection...OK
+20/35 png.test.png: reject invalid signature and corrupt crc...OK
+21/35 png.test.png: decode solid rgb 4x4 fixture...OK
+22/35 png.test.png: decode gradient rgba 8x8 fixture...OK
+23/35 png.test.png: decode non-square 12x4 fixture...OK
+24/35 png.test.png: scan sizes the multi-chunk viewer fixture exactly...OK
+25/35 png.test.png: workspace decode of the split-IDAT viewer fixture...OK
+26/35 png.test.png: scan rejects bad signature and bad crc...OK
+27/35 png.test.png: workspace decode covers images past the convenience caps...OK
+28/35 png.test.png: decode grayscale 8x8 fixture...OK
+29/35 crc32.test.crc32: standard vectors...OK
+30/35 flate.test.flate: uncompressed block...OK
+31/35 flate.test.flate: zlib wrapped hello...OK
+32/35 flate.test.flate: raw deflate hello...OK
+33/35 flate.test.flate: zlib large repetitive dynamic Huffman and LZ77...OK
+34/35 flate.test.flate: buffer too small rejection...OK
+35/35 flate.test.flate: invalid zlib header and adler mismatch...OK
+All 35 tests passed.
+1/100 tabwm.test.tabwm: tab manager allocation and lifecycle...OK
+2/100 tabwm.test.tabwm: tab manager active index adjustment on removal...OK
+3/100 tabwm.test.tabwm: tab cycle forward and backward...OK
+4/100 tabwm.test.tabwm: keyboard shortcuts routing...OK
+5/100 tabwm.test.tabwm: pointer hit testing and tab selection / close button...OK
+6/100 tabwm.test.tabwm: wnd_mail_apply RPC commands...OK
+7/100 tabwm.test.tabwm: geometry constants respect M39 tokens...OK
+8/100 tabwm.test.tabwm: compute_tab_viewport centering and full bleed...OK
+9/100 tabwm.test.tabwm: draw_viewport_backdrop writes canvas outside window...OK
+10/100 tabwm.test.tabwm: proper mascot emblem decodes at 28x28 (M42 SX1)...OK
+11/100 tabwm.test.tabwm: draw_sidebar blits the raster emblem into the scanout (M42 SX1)...OK
+12/100 tabwm.test.tabwm: tab-aware fixed app takes the full viewport (M42 SX2)...OK
+13/100 tabwm.test.tabwm: viewport_change_needed idempotence (M42 SX2)...OK
+14/100 tabwm.test.tabwm: declare_fullscreen RPC registers and applies the full viewport (M42 SX2)...OK
+15/100 tabwm.test.tabwm: declare_fullscreen on an inactive tab defers the proposal (M42 SX2)...OK
+16/100 tabwm.test.tabwm: god-menu overlay filters the manifest (M42 SX5)...OK
+17/100 tabwm.test.tabwm: god-menu overlay keys — filter, select, launch, dismiss (M42 SX5)...OK
+18/100 tabwm.test.tabwm: overlay keys are consumed only while open (M42 SX5)...OK
+19/100 tabwm.test.tabwm: god-menu overlay accepts digits, minus, period in the filter (M42 SX5)...OK
+20/100 tabwm.test.tabwm: released mirror removes the tab and activates the next (M42 UX)...OK
+21/100 tabwm.test.tabwm: released mirror for an unknown id is a no-op (M42 UX)...OK
+22/100 tabwm.test.tabwm: hide mirror without released does NOT remove a tab (M42 UX)...OK
+23/100 tabwm.test.tabwm: visible mirror upserts geometry (M42 UX)...OK
+24/100 tabwm.test.tabwm: the 17th window is ignored, tab 0 not hijacked (M42 UX)...OK
+25/100 tabwm.test.tabwm: + New tab affordance and Ctrl+T trigger the new-tab path (M42 UX)...OK
+26/100 tabwm.test.tabwm: overlay empty vs filtered-empty messages are distinguishable (M42 UX)...OK
+27/100 tabwm.test.tabwm: close_tab removes the tab and activates the next (M42 UX)...OK
+28/100 tabwm.test.tabwm: unsaved bit-12 mirror sets, clears, and still releases (M42 UX r2)...OK
+29/100 tabwm.test.tabwm: request_close_tab intercepts a dirty tab with the dialog (M42 UX r2)...OK
+30/100 tabwm.test.tabwm: unsaved choices — save closes, cancel keeps, discard defers to the mirror (M42 UX r2)...OK
+31/100 tabwm.test.tabwm: wnd_core dialog hit-test maps the three buttons (M42 UX r2)...OK
+32/100 tabwm.test.tabwm: alt_tab_next policy — null, cycle, invert, 0-start (M42 UX r2)...OK
+33/100 tabwm.test.tabwm: Alt+Tab chord moves the active tab, Alt+Shift+Tab inverts (M42 UX r2)...OK
+34/100 tabwm.test.tabwm: close_flash_active lives for the tick window then expires (M42 UX r2)...OK
+35/100 tabwm.test.tabwm: dialog modal keys — Enter saves, Escape cancels, chords swallowed (M42 UX r2)...OK
+36/100 tabwm.test.tabwm: dialog modal pointer — clicks route to the buttons, tabs are safe (M42 UX r2)...OK
+37/100 tabwm.test.tabwm: the Sexiburger overlay cannot summon over the modal dialog (M42 UX r2)...OK
+38/100 tabwm.test.tabwm: unsaved + alt-tab markers are pinned (M42 UX r2)...OK
+39/100 tabwm.test.tabwm: tab_index_at only reaches DRAWN rows (the shared row rule)...OK
+40/100 tabwm.test.tabwm: RPC upserts refuse a full manager instead of aliasing tab 0...OK
+41/100 tabwm.test.tabwm: parse_clock_epoch accepts seconds-since-midnight, rejects junk...OK
+42/100 tabwm.test.tabwm: clock_hms shows wall time with an epoch, uptime without...OK
+43/100 tabwm.test.tabwm: resetForTest restores every mutated global to cold-boot...OK
+44/100 tabwm.test.tabwm: overflow scroll moves the list window and the hit-test follows...OK
+45/100 tabwm.test.tabwm: overflow_label reports the visible window with arrows...OK
+46/100 tabwm.test.tabwm: keyboard nav moves the selection, scrolls, and activates...OK
+47/100 tabwm.test.tabwm: serialize_tabs/parse_tabs round-trip order and active...OK
+48/100 tabwm.test.tabwm: persisted order re-applies by title and sets the active tab...OK
+49/100 tabwm.test.tabwm: new-tab pill tracks the visible window...OK
+50/100 tabwm.test.tabwm: tick_clock_face prefers the host epoch, else uptime on the host...OK
+51/100 tabwm.test.tabwm: middle-click closes the tab under the pointer (#1064)...OK
+52/100 tabwm.test.tabwm: keyboard reorder moves the active tab (#1064)...OK
+53/100 tabwm.test.tabwm: reopen-closed re-execs a TABWM-launched app (#1064)...OK
+54/100 tabwm.test.tabwm: M48 markers are pinned (BT1–BT6)...OK
+55/100 tabwm.test.tabwm: duplicate active tab re-execs its recorded bin (M48/BT1)...OK
+56/100 tabwm.test.tabwm: move_tab shifts, keeps active, and reorder persists (M48/BT2)...OK
+57/100 tabwm.test.tabwm: pointer drag reorders tabs (M48/BT2)...OK
+58/100 tabwm.test.tabwm: pinning sorts pinned tabs first (M48/BT3)...OK
+59/100 tabwm.test.tabwm: manifest group parsing + dock pin adoption (M48/BT3)...OK
+60/100 tabwm.test.tabwm: START surface summons, shares the catalog, and launches (M48/BT4)...OK
+61/100 tabwm.test.tabwm: per-tab navigation history records, dedupes, truncates, bounds (M48/BT5)...OK
+62/100 tabwm.test.tabwm: back/forward queue the target for the owning app (M48/BT5)...OK
+63/100 tabwm.test.tabwm: hover preview dwell, frozen badge, and tab search (M48/BT6)...OK
+64/100 lib.ui.draw.test.draw: draw_image_buf source-over into a raw buffer...OK
+65/100 lib.ui.draw.test.draw: draw_image_buf clips to buffer and stride...OK
+66/100 lib.ui.abi.test.WMS7 Gate B: the toolkit WM_RPC wire mirror matches the frozen wnd_core ABI...OK
+67/100 lib.image.test.image: pixel_at bounds checking...OK
+68/100 lib.image.test.image: sub_image view and zero-sized handling...OK
+69/100 lib.image.test.image: blit Porter-Duff alpha blending...OK
+70/100 lib.image.test.image: format dispatch with QOI...OK
+71/100 lib.image.test.image: format dispatch with PNG...OK
+72/100 lib.qoi.test.qoi: reject header magic and truncated headers...OK
+73/100 lib.qoi.test.qoi: decode solid red 4x4 fixture...OK
+74/100 lib.qoi.test.qoi: decode gradient rgba 8x8 fixture...OK
+75/100 lib.qoi.test.qoi: decode non-square 12x4 fixture...OK
+76/100 lib.qoi.test.qoi: buffer too small rejection...OK
+77/100 lib.qoi.test.qoi: corrupt end marker rejection...OK
+78/100 lib.png.test.png: reject invalid signature and corrupt crc...OK
+79/100 lib.png.test.png: decode solid rgb 4x4 fixture...OK
+80/100 lib.png.test.png: decode gradient rgba 8x8 fixture...OK
+81/100 lib.png.test.png: decode non-square 12x4 fixture...OK
+82/100 lib.png.test.png: scan sizes the multi-chunk viewer fixture exactly...OK
+83/100 lib.png.test.png: workspace decode of the split-IDAT viewer fixture...OK
+84/100 lib.png.test.png: scan rejects bad signature and bad crc...OK
+85/100 lib.png.test.png: workspace decode covers images past the convenience caps...OK
+86/100 lib.png.test.png: decode grayscale 8x8 fixture...OK
+87/100 lib.crc32.test.crc32: standard vectors...OK
+88/100 lib.flate.test.flate: uncompressed block...OK
+89/100 lib.flate.test.flate: zlib wrapped hello...OK
+90/100 lib.flate.test.flate: raw deflate hello...OK
+91/100 lib.flate.test.flate: zlib large repetitive dynamic Huffman and LZ77...OK
+92/100 lib.flate.test.flate: buffer too small rejection...OK
+93/100 lib.flate.test.flate: invalid zlib header and adler mismatch...OK
+94/100 lib.font_ttf.test.TrueTypeFace parses Fira Code and Inter headers and cmap...OK
+95/100 lib.font_ttf.test.TrueTypeFace loads simple glyph outlines...OK
+96/100 lib.font_ttf.test.TrueTypeFace rasterizes anti-aliased glyphs with subpixel coverage...
+--- Rasterized Inter 'O' (16px, 12x13, advance=12px) ---
+  =%@@%=    
+ #@+::+@+   
+-%:    -@:  
+#+      #+  
+@-      -%  
+@:      :@: 
+@:      :@. 
+@-      =#  
+#*      #+  
+:@+    +@.  
+ +@#++#@-   
+  .****.    
+            
+
+--- Rasterized Fira Code 'A' (14px, 10x11) ---
+  :@#     
+  +*@.    
+  #.#-    
+ .% +#    
+ =+ .@.   
+ #-  #-   
+.@#**%#   
+-#:::-@.  
+*-    @-  
+*     ++  
+          
+OK
+97/100 lib.font_ttf.test.TrueTypeFace loads and rasterizes composite glyphs (accented é)...OK
+98/100 lib.font_ttf.test.GlyphCache and blend_glyph_bgra render text into 32-bpp BGRA buffer...OK
+99/100 lib.font8x8.test.user font8x8: source rows are LSB-first with bit zero at the left...OK
+100/100 lib.font8x8.test.user font8x8: the 760-byte table is pinned...OK
+All 100 tests passed.
+1/55 sexiburger.test.sexiburger app: initial state and button trigger...OK
+2/55 sexiburger.test.sexiburger app: chord trigger opens menu...OK
+3/55 sexiburger.test.sexiburger app: command invocation updates last action...OK
+4/55 sexiburger.test.sexiburger app: proper 24x24 and 64x64 mascot rasters decode...OK
+5/55 lib.image.test.image: pixel_at bounds checking...OK
+6/55 lib.image.test.image: sub_image view and zero-sized handling...OK
+7/55 lib.image.test.image: blit Porter-Duff alpha blending...OK
+8/55 lib.image.test.image: format dispatch with QOI...OK
+9/55 lib.image.test.image: format dispatch with PNG...OK
+10/55 lib.qoi.test.qoi: reject header magic and truncated headers...OK
+11/55 lib.qoi.test.qoi: decode solid red 4x4 fixture...OK
+12/55 lib.qoi.test.qoi: decode gradient rgba 8x8 fixture...OK
+13/55 lib.qoi.test.qoi: decode non-square 12x4 fixture...OK
+14/55 lib.qoi.test.qoi: buffer too small rejection...OK
+15/55 lib.qoi.test.qoi: corrupt end marker rejection...OK
+16/55 lib.sexiburger.test.sexiburger menu: zero-pixel idle footprint until summoned...OK
+17/55 lib.sexiburger.test.sexiburger menu: chord open and dismiss...OK
+18/55 lib.sexiburger.test.sexiburger menu: six sections at invariant positions...OK
+19/55 lib.sexiburger.test.sexiburger menu: type-to-filter interaction...OK
+20/55 lib.sexiburger.test.sexiburger menu: raster mascot emblem integration...OK
+21/55 lib.sexiburger.test.sexiburger manifest: parses apps, skips comments/blanks/malformed...OK
+22/55 lib.sexiburger.test.sexiburger manifest: empty text yields zero, overlong input caps at out.len...OK
+23/55 lib.ui.draw.test.draw: draw_image_buf source-over into a raw buffer...OK
+24/55 lib.ui.draw.test.draw: draw_image_buf clips to buffer and stride...OK
+25/55 lib.action_registry.test.covenant of six: exactly six canonical sections...OK
+26/55 lib.action_registry.test.covenant of six: seventh section registration strictly rejected with citation...OK
+27/55 lib.action_registry.test.action registry: command registration and section isolation...OK
+28/55 lib.action_registry.test.action registry: shell verb lookup (M19 synergy)...OK
+29/55 lib.action_registry.test.action registry: active app contextual scoping...OK
+30/55 lib.action_registry.test.action registry: type-to-filter with abbreviation and fuzzy matching...OK
+31/55 lib.action_registry.test.mascot diagnostics: deterministic 6-layer 6-tentacle accounting...OK
+32/55 lib.ui.abi.test.WMS7 Gate B: the toolkit WM_RPC wire mirror matches the frozen wnd_core ABI...OK
+33/55 lib.png.test.png: reject invalid signature and corrupt crc...OK
+34/55 lib.png.test.png: decode solid rgb 4x4 fixture...OK
+35/55 lib.png.test.png: decode gradient rgba 8x8 fixture...OK
+36/55 lib.png.test.png: decode non-square 12x4 fixture...OK
+37/55 lib.png.test.png: scan sizes the multi-chunk viewer fixture exactly...OK
+38/55 lib.png.test.png: workspace decode of the split-IDAT viewer fixture...OK
+39/55 lib.png.test.png: scan rejects bad signature and bad crc...OK
+40/55 lib.png.test.png: workspace decode covers images past the convenience caps...OK
+41/55 lib.png.test.png: decode grayscale 8x8 fixture...OK
+42/55 lib.crc32.test.crc32: standard vectors...OK
+43/55 lib.flate.test.flate: uncompressed block...OK
+44/55 lib.flate.test.flate: zlib wrapped hello...OK
+45/55 lib.flate.test.flate: raw deflate hello...OK
+46/55 lib.flate.test.flate: zlib large repetitive dynamic Huffman and LZ77...OK
+47/55 lib.flate.test.flate: buffer too small rejection...OK
+48/55 lib.flate.test.flate: invalid zlib header and adler mismatch...OK
+49/55 lib.font_ttf.test.TrueTypeFace parses Fira Code and Inter headers and cmap...OK
+50/55 lib.font_ttf.test.TrueTypeFace loads simple glyph outlines...OK
+51/55 lib.font_ttf.test.TrueTypeFace rasterizes anti-aliased glyphs with subpixel coverage...
+--- Rasterized Inter 'O' (16px, 12x13, advance=12px) ---
+  =%@@%=    
+ #@+::+@+   
+-%:    -@:  
+#+      #+  
+@-      -%  
+@:      :@: 
+@:      :@. 
+@-      =#  
+#*      #+  
+:@+    +@.  
+ +@#++#@-   
+  .****.    
+            
+
+--- Rasterized Fira Code 'A' (14px, 10x11) ---
+  :@#     
+  +*@.    
+  #.#-    
+ .% +#    
+ =+ .@.   
+ #-  #-   
+.@#**%#   
+-#:::-@.  
+*-    @-  
+*     ++  
+          
+OK
+52/55 lib.font_ttf.test.TrueTypeFace loads and rasterizes composite glyphs (accented é)...OK
+53/55 lib.font_ttf.test.GlyphCache and blend_glyph_bgra render text into 32-bpp BGRA buffer...OK
+54/55 lib.font8x8.test.user font8x8: source rows are LSB-first with bit zero at the left...OK
+55/55 lib.font8x8.test.user font8x8: the 760-byte table is pinned...OK
+All 55 tests passed.
+verify-unit-tests: all unit tests passed
+
+── swift test (VFWire S1–S10) ──
+Building for debugging...
+[1 / 12]
+Build complete! (0.35 sec)
+Test Suite 'All tests' started at 2026-09-12 13:41:43.416.
+Test Suite 'VMRunnerTests.xctest' started at 2026-09-12 13:41:43.418.
+Test Suite 'VFWireTests' started at 2026-09-12 13:41:43.418.
+Test Case '-[VMRunnerTests.VFWireTests testProbeChecksumStable]' started.
+Test Case '-[VMRunnerTests.VFWireTests testProbeChecksumStable]' passed (0.005 seconds).
+Test Case '-[VMRunnerTests.VFWireTests testS10HandleTableCap]' started.
+Test Case '-[VMRunnerTests.VFWireTests testS10HandleTableCap]' passed (0.002 seconds).
+Test Case '-[VMRunnerTests.VFWireTests testS11CloneOpAndFraming]' started.
+Test Case '-[VMRunnerTests.VFWireTests testS11CloneOpAndFraming]' passed (0.000 seconds).
+Test Case '-[VMRunnerTests.VFWireTests testS1PatternGeneratorParity]' started.
+Test Case '-[VMRunnerTests.VFWireTests testS1PatternGeneratorParity]' passed (0.009 seconds).
+Test Case '-[VMRunnerTests.VFWireTests testS2RequestEncodeParity]' started.
+Test Case '-[VMRunnerTests.VFWireTests testS2RequestEncodeParity]' passed (0.001 seconds).
+Test Case '-[VMRunnerTests.VFWireTests testS3ReplyDecodeParity]' started.
+Test Case '-[VMRunnerTests.VFWireTests testS3ReplyDecodeParity]' passed (0.001 seconds).
+Test Case '-[VMRunnerTests.VFWireTests testS4PathDefense]' started.
+Test Case '-[VMRunnerTests.VFWireTests testS4PathDefense]' passed (0.001 seconds).
+Test Case '-[VMRunnerTests.VFWireTests testS5Hf3ConstantsParity]' started.
+Test Case '-[VMRunnerTests.VFWireTests testS5Hf3ConstantsParity]' passed (0.000 seconds).
+Test Case '-[VMRunnerTests.VFWireTests testS6PayloadBuildersAndReplyEncoders]' started.
+Test Case '-[VMRunnerTests.VFWireTests testS6PayloadBuildersAndReplyEncoders]' passed (0.000 seconds).
+Test Case '-[VMRunnerTests.VFWireTests testS7RenameFraming]' started.
+Test Case '-[VMRunnerTests.VFWireTests testS7RenameFraming]' passed (0.000 seconds).
+Test Case '-[VMRunnerTests.VFWireTests testS8HandleTableCursorAndTruncate]' started.
+Test Case '-[VMRunnerTests.VFWireTests testS8HandleTableCursorAndTruncate]' passed (0.001 seconds).
+Test Case '-[VMRunnerTests.VFWireTests testS9HandleTableAppend]' started.
+Test Case '-[VMRunnerTests.VFWireTests testS9HandleTableAppend]' passed (0.001 seconds).
+Test Suite 'VFWireTests' passed at 2026-09-12 13:41:43.440.
+	 Executed 12 tests, with 0 failures (0 unexpected) in 0.021 (0.022) seconds
+Test Suite 'VMRunnerTests.xctest' passed at 2026-09-12 13:41:43.440.
+	 Executed 12 tests, with 0 failures (0 unexpected) in 0.021 (0.022) seconds
+Test Suite 'All tests' passed at 2026-09-12 13:41:43.440.
+	 Executed 12 tests, with 0 failures (0 unexpected) in 0.021 (0.024) seconds
+VF-CKSUM-32K: 0x0000
+􀟈  Test run started.
+􀄵  Testing Library Version: 2084
+􀄵  Target Platform: arm64e-apple-macos14.0
+􁁛  Test run with 0 tests in 0 suites passed after 0.001 seconds.
+
+── fixture sha256 pins + python generator cross-check ──
+vf-pattern-32k.bin: 32768 B sha256=8b16fec9d2a8c48be47789a462c2d4b3d9be75ec91310607ec5fb5e180982ed5 OK
+vf-req-read.bin: 23 B sha256=605f3306e9b608dcf763e7b8498438cbb3b4b160620160eed35c984627a14724 OK
+vf-reply-read.bin: 8 B sha256=c018a33ef9fe2bb21707201011270883aa7dc3da2b5ab368687255da5197e3ce OK
+vf-reply-list.bin: 83 B sha256=710a1372b7a64e14c53105774e37ccfb5cb9e6a93e889a4c76b6039acd83e909 OK
+vf-pattern-32k.bin: python generator reproduces the fixture byte-for-byte
+pattern cksum1071 = 0x0000
+
+── verify-bss-budget.sh ──
+=== verify-bss-budget: ADR 0013 D3.1 CI gate — kernel .bss ceiling (class A, deterministic, no VM) ===
+budget source: docs/decisions/0013-post-m14-abi-amendment.md D3.1
+budget:        13631488 B (11.0 MiB)
+
+-- building kernel --
+elf2bin: ./.zig-cache/o/a82ce1f1db86c4c13e13ec2050fda7ee/virelai-kernel -> /Users/tbuddy/t3/zig/virelaios-buffy-execrace/.zig-cache/o/279f0f4fb078f9bb73319bc64ba1e0d5/KERNEL.BIN: entry_offset=0x28 image_size=12496664 (4 PT_LOAD segment(s), 117 absolute reloc(s))
+
+-- kernel ELF section sizes --
+  .bss:           11322360 B  (0xacc3f8)
+  .data:          619960 B  (0x0975b8)
+  .userbss:       36864 B  (0x009000)
+
+-- budget check --
+  measured:       11322360 B
+  budget:         13631488 B
+  remaining:      2309128 B
+  over budget:    0 B
+  status:         PASS
+
+-- known large .bss contributors (sourced from kernel/src; informational) --
+  mmu.table_storage (kernel/src/mmu.zig):     2,097,152 B (2.0 MiB; page-table carve-out, ADR 0006, doubled in M16 C4)
+  virtio_gpu.gpu_fb (kernel/src/virtio_gpu.zig): 3,686,400 B (3.52 MiB; 1280x720x4 scanout, align 4096)
+  post-M14 reservations (ADR 0013 D3):           1,737 B (~1.7 KiB; planned, not yet landed)
+  other (font, console, scheduler, virtio rings, process table, mailbox, evidence, etc.): the remainder
+
+verify-bss-budget: PASS — kernel .bss = 11322360 B / 13631488 B (2309128 B headroom).
+
+── verify-issue-coordination.sh ──
+verify-issue-coordination: ok — 4 open claim issue(s) checked, no file overlaps
+
+verify-vf-class-a: PASS — wire parity locked on both sides, budgets green.
