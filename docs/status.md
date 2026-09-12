@@ -185,19 +185,24 @@ Post-milestone landings since M31: the in-guest HTTP/1.1 web server
 preflight cards N13/N14 (claim 8852), and the `sys_tcp_connect` wall-clock
 bounding fix (issue #613, claim 2572, PR #615).
 
-**Real Zig tools run as native ELF apps (spike, issue #1177, 2026-09-12).** A
-third-party Zig tool — `oliver`, Markdown → HTML — runs in the guest as a
-native AArch64 ELF (`exec OLIVER.ELF`) with no libc/POSIX/WASI: it reads
-`/host/MD.TXT` through the ADR 0010 file table, renders with its own library
-(its real `parse`/`html.render`), and writes `/host/OLIVER.HTML` back through
-the M34 HF share. The new class-B gate **`live-oliver`** asserts that file
-**host-side, byte-exact** against the reference tool's own output (754 B; both
-sha256 `540f2400…f76a390e`) — **PASS 2/2 on VZ**, exit status = bytes written.
-One measured bound for the loader, folding into #1163: `exec` packs argv for
-DSK1/DSK3 images only, so a **raw ELF gets `.no_args_room`** (the tool runs on
-its documented default paths; argument-driven CLIs wait on #1163). Size is
-*not* a bound — the image is 253,160 B with 248,776 B of `p_memsz`, **47.5% of
-the real 512 KiB `exec_program_max` / `elf.load_max` cap** (~269 KiB spare; an
+**Real Zig tools run as native apps (spike, issues #1177/#1188, 2026-09-12).**
+A third-party Zig tool — `oliver`, Markdown → HTML — runs in the guest with no
+libc/POSIX/WASI, as **two images from one source**: a native AArch64 ELF
+(`exec OLIVER.ELF`) and a DSK1 flat image (`exec OLIVER.BIN`) that carries
+**real arguments**. It reads `/host/MD.TXT` through the ADR 0010 file table,
+renders with its own library (its real `parse`/`html.render`), and writes its
+output back through the M34 HF share. The class-B gate **`live-oliver`** asserts
+the written file **host-side, byte-exact** against the reference tool's own
+output (754 B, sha256 `540f2400…f76a390e`) **on both load paths**, that an
+argv-named output exists while the **default name is never written** by the
+argv runs, and that the app's own `oliver: argc=2 in=… out=…` marker reports
+the arguments it received — **PASS 4/4 on VZ**, exit status = bytes written.
+`exec` packs argv for DSK1/DSK3 images only, so a **raw ELF still gets
+`.no_args_room`** (#1163); the flat image's argv block rides the text page's
+slack — 249,196 B of content, block at 249,200 + 256 = 249,456 against
+`page_limit` 249,856, i.e. **400 B of headroom** before it would need a 62nd
+page. Size is otherwise *not* a bound: 249,196 B of `p_memsz` is **47.6% of the
+real 512 KiB `exec_program_max` / `elf.load_max` cap** (~275 KiB spare; an
 earlier draft of this note said 256 KiB, which was a stale doc comment in
 `kernel/src/elf.zig:26` plus a stale cap in `tools/check-zc-host-contract.py`,
 both corrected). Evidence:
