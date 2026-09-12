@@ -1,0 +1,11 @@
+inventory-gates --check: OK (docs/gate-fleet-inventory.md matches a fresh render)
+inventory-gates --check: OK (render is locale-invariant: LC_ALL=C == en_US.UTF-8)
+spec-order: 214 spec file(s) in tools/gate/specs; 3 declared exemption(s), 3 excused violation(s)
+  declared  go-hello.spec                      assert-proven    the run cannot go green without the program's
+  declared  live-chain.spec                    intentional      the script's only exec is `exec NOTEXIST.BIN`,
+  declared  live-jobs.spec                     self-sequenced   `fg 2` reaps STATUS43.BIN before the closing
+  excused   go-hello.spec                      run 01
+  excused   live-chain.spec                    run 01
+  excused   live-jobs.spec                     run 01
+spec-order: OK (no ungated echo-ended run, no file op racing an exec)
+inventory-gates --check: OK (spec-order self-test: 4 FAIL fixtures still flagged)

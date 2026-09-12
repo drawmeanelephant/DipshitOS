@@ -1,0 +1,9 @@
+net tcp
+net tcp
+net tcp
+net tcp
+net tcp
+net tcp recv
+net tcp reset
+exec SSH.BIN tbuddy@192.168.64.1:2222 echo VIRELAI-INTEROP-OK
+echo interop-nat-done

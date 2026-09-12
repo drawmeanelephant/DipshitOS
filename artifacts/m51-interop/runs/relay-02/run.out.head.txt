@@ -1,0 +1,1301 @@
+  disk: artifacts/disk.img (base, read-only) + throwaway ASIF overlay in /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T/virelai-overlay-F1F6A3C2-BC4E-4C10-A776-77A6AED2FB3A
+  custom virtio: ENABLED — VID 0x1af4 DID 0x1082 (virtio deviceID 0x42), class 0x00/0x00, 6 queue(s) incl. push-echo, INPUT, SNAPSHOT, and the M34 FILE channel (queue 5) serving "artifacts/m51-interop/share" (--cvc-file)
+CUSTOM-VIRTIO: device created (didCreateDevice)
+VIRELAIOS VM runner
+  host: arm64 (Apple silicon), macOS 27.0
+  disk: --overlay-base
+  memory: 256 MiB, cpus: 2
+  mode: scripted input (non-interactive; claim 6684)
+  serial log: artifacts/m51-interop/runs/relay-02/vm-serial.log  (guest output teed to log)
+  script: artifacts/m51-interop/runs/relay-02/script-1.txt  (forwarded once after the configured serial marker appears)
+  script2: artifacts/m51-interop/runs/relay-02/script-2.txt  (claim 4613: forwarded once after script2-after appears)
+  script2-after: "ssh: bye rc=0"  (forward script2 once after this serial text appears)
+  script-expect: "interop-relay-done"  (exit 0 iff observed in the serial log)
+  script-expect-tail: 1.5s  (claim 4912: hold the VM after the match so post-marker kernel output reaches the serial log; 0 = stop immediately)
+  net: ENABLED (milestone five card N1, claim 1373) — virtio-net device attached, guest TX frames captured byte-exactly to artifacts/m51-interop/runs/relay-02/cap.bin, fixed MAC 02:00:00:00:00:01
+  via-virtio: ENABLED (claim 9588, issue #523 item 3) — keyboard injection rides the custom-virtio INPUT queue as HID-shaped 16-byte messages; NO NSEvent/CGEvent synthesis and no window/view required (attacks #179 synthesized-drop and #151 activation wall)
+  net-arp-respond: ENABLED (milestone five card N3, claim 7293) — the host answers the guest's ARP requests for 10.0.0.2 (host MAC 02:00:00:00:00:02) via the capture thread (deterministic, request-driven)
+  net-tcp-respond: ENABLED (milestone five card N10, claim 7026) + card N11 (claim 5357) — the host answers the guest's bounded TCP client on 10.0.0.2:2222 (host MAC 02:00:00:00:00:02, server ISN 0x12345678) via the capture thread (deterministic, request-driven)
+script2: waiting for marker "ssh: bye rc=0" (script 32 bytes, settle 0.5s, deadline 150s)
+script: waiting for marker "kernel terminal state" (script 115 bytes, settle 0.5s, deadline 150s)
+CUSTOM-VIRTIO: device reset
+VirelaiOS kernel has seized control.
+memory-map descriptors=0x000000000000001b descriptor_size=0x0000000000000030 version=0x0000000000000001 key=0x000000000000029b
+map type=0x0000000000000007 base=0x0000000070000000 pages=0x0000000000008000 attr=0x0000000000000008
+map type=0x0000000000000004 base=0x0000000078000000 pages=0x0000000000000020 attr=0x0000000000000008
+map type=0x0000000000000007 base=0x0000000078020000 pages=0x000000000000594f attr=0x0000000000000008
+map type=0x0000000000000002 base=0x000000007d96f000 pages=0x0000000000000007 attr=0x0000000000000008
+map type=0x0000000000000001 base=0x000000007d976000 pages=0x0000000000000c18 attr=0x0000000000000008
+map type=0x0000000000000003 base=0x000000007e58e000 pages=0x0000000000000072 attr=0x0000000000000008
+map type=0x0000000000000000 base=0x000000007e600000 pages=0x0000000000000040 attr=0x0000000000000008
+map type=0x0000000000000006 base=0x000000007e640000 pages=0x0000000000000050 attr=0x8000000000000008
+map type=0x0000000000000007 base=0x000000007e690000 pages=0x00000000000008ef attr=0x0000000000000008
+map type=0x0000000000000004 base=0x000000007ef7f000 pages=0x0000000000000001 attr=0x0000000000000008
+map type=0x0000000000000007 base=0x000000007ef80000 pages=0x000000000000002b attr=0x0000000000000008
+map type=0x0000000000000004 base=0x000000007efab000 pages=0x00000000000008e5 attr=0x0000000000000008
+map type=0x0000000000000003 base=0x000000007f890000 pages=0x0000000000000200 attr=0x0000000000000008
+map type=0x0000000000000005 base=0x000000007fa90000 pages=0x0000000000000090 attr=0x8000000000000008
+map type=0x0000000000000007 base=0x000000007fb20000 pages=0x0000000000000030 attr=0x0000000000000008
+map type=0x0000000000000006 base=0x000000007fb50000 pages=0x0000000000000020 attr=0x8000000000000008
+map type=0x0000000000000007 base=0x000000007fb70000 pages=0x000000000000002f attr=0x0000000000000008
+map type=0x0000000000000009 base=0x000000007fb9f000 pages=0x0000000000000001 attr=0x0000000000000008
+map type=0x0000000000000007 base=0x000000007fba0000 pages=0x0000000000000019 attr=0x0000000000000008
+map type=0x0000000000000004 base=0x000000007fbb9000 pages=0x0000000000000021 attr=0x0000000000000008
+map type=0x0000000000000003 base=0x000000007fbda000 pages=0x0000000000000026 attr=0x0000000000000008
+map type=0x0000000000000004 base=0x000000007fc00000 pages=0x00000000000003c7 attr=0x0000000000000008
+map type=0x0000000000000007 base=0x000000007ffc7000 pages=0x0000000000000010 attr=0x0000000000000008
+map type=0x0000000000000003 base=0x000000007ffd7000 pages=0x0000000000000020 attr=0x0000000000000008
+map type=0x0000000000000004 base=0x000000007fff7000 pages=0x0000000000000009 attr=0x0000000000000008
+map type=0x000000000000000b base=0x0000000001000000 pages=0x0000000000000010 attr=0x8000000000000001
+map type=0x000000000000000b base=0x0000000020050000 pages=0x0000000000000001 attr=0x8000000000000001
+probe base=0x0000000100010000 layout=virtio-console
+ records=0x0000000000000000
+interrupts: gic=v3 armed=1 dist=0x0000000010000000 redist=0x0000000010010000 active=0x0000000010010000 fallback=1 ppi=0x000000000000001e edge=0 freq=0x00000000016e3600
+host share: absent
+kernel terminal state
+cvspike: cap @0x0000000000000040 head=0x0000000001105009 t=0x0000000000000001 bar=0x0000000000000000 off=0x0000000000000000
+cvspike: cap @0x0000000000000050 head=0x0000000003106009 t=0x0000000000000003 bar=0x0000000000000000 off=0x0000000000001000
+cvspike: cap @0x0000000000000060 head=0x0000000002147409 t=0x0000000000000002 bar=0x0000000000000000 off=0x0000000000004000
+cvspike: probe dev=0x0000000000000008 common=0x0000000100030000 notify=0x0000000100034000 bar=0x0000000100030000 b0=0x0000000000030004 b2=0x0000000050000000 cp=0x0000000000000040 nc=0x0000000000000003
+cvspike: walk console-bar va=0x0000000100010000 l3=0x0000000100010403 ok
+cvspike: walk cv-bar va=0x0000000100030000 l3=0x0000000100030403 ok
+CUSTOM-VIRTIO: device reset
+cvspike: init ok
+CUSTOM-VIRTIO: guest set DRIVER_OK — negotiation complete, queues ready
+cvspike: dev=0x0000000000000008 did=0x1082 common=0x0000000100030000 notify=0x0000000100034000 qoff=0x0000000000000000 qoff1=0x0000000000000001 ready=1
+cvspike: feat=0x0000000530000000 acc=0x0000000100000000 nd=0 al=0 notify=16bit
+cvspike: payload="VIRELAIOS-CV0x42" len=0x0000000000000010
+CUSTOM-VIRTIO: guest notified queue 0 (size 32)
+CUSTOM-VIRTIO: dequeued 16 byte(s) (read 16): hex=[56 49 52 45 4c 41 49 4f 53 2d 43 56 30 78 34 32] ascii="VIRELAIOS-CV0x42"
+CUSTOM-VIRTIO: echoed 16 byte(s) into 16 byte(s) of write buffers
+CUSTOM-VIRTIO: returned element to queue 0 — used ring advanced, device interrupt asserted
+cvspike: q0 xchg=1 n=0x10 echo=CUSTOM-VIRTIO: dequeued 16 byte(s) (read 16): hex=[56 49 52 45 4c 41 49 4f 53 2d 43 56 30 78 34 32] ascii="VIRELAIOS-CV0x42"
+CUSTOM-VIRTIO: echoed 16 byte(s) into 16 byte(s) of write buffers
+CUSTOM-VIRTIO: returned element to queue 0 — used ring advanced, device interrupt asserted
+okCUSTOM-VIRTIO: dequeued 16 byte(s) (read 16): hex=[56 49 52 45 4c 41 49 4f 53 2d 43 56 30 78 34 32] ascii="VIRELAIOS-CV0x42"
+CUSTOM-VIRTIO: echoed 16 byte(s) into 16 byte(s) of write buffers
+CUSTOM-VIRTIO: returned element to queue 0 — used ring advanced, device interrupt asserted
+
+cvspike: q0 xchg=CUSTOM-VIRTIO: dequeued 16 byte(s) (read 16): hex=[56 49 52 45 4c 41 49 4f 53 2d 43 56 30 78 34 32] ascii="VIRELAIOS-CV0x42"
+CUSTOM-VIRTIO: echoed 16 byte(s) into 16 byte(s) of write buffers
+CUSTOM-VIRTIO: returned element to queue 0 — used ring advanced, device interrupt asserted
+CUSTOM-VIRTIO: guest notified queue 0 (size 32)
+CUSTOM-VIRTIO: guest notified queue 0 (size 32)
+2 n=0x10 echo=ok
+CUSTOM-VIRTIO: guest notified queue 0 (size 32)
+cvspike: q0 xchg=3 n=0x10 echo=ok
+cvspike: q0 xchg=4 n=0x10 echo=ok
+CUSTOM-VIRTIO: guest notified queue 0 (size 32)
+CUSTOM-VIRTIO: dequeued 16 byte(s) (read 16): hex=[56 49 52 45 4c 41 49 4f 53 2d 43 56 30 78 34 32] ascii="VIRELAIOS-CV0x42"
+CUSTOM-VIRTIO: echoed 16 byte(s) into 16 byte(s) of write buffers
+CUSTOM-VIRTIO: returned element to queue 0 — used ring advanced, device interrupt asserted
+CUSTOM-VIRTIO: dequeued 16 byte(s) (read 16): hex=[56 49 52 45 4c 41 49 4f 53 2d 43 56 30 78 34 32] ascii="VIRELAIOS-CV0x42"
+CUSTOM-VIRTIO: echoed 16 byte(s) into 16 byte(s) of write buffers
+CUSTOM-VIRTIO: returned element to queue 0 — used ring advanced, device interrupt asserted
+CUSTOM-VIRTIO: dequeued 16 byte(s) (read 16): hex=[56 49 52 45 4c 41 49 4f 53 2d 43 56 30 78 34 32] ascii="VIRELAIOS-CV0x42"
+CUSTOM-VIRTIO: echoed 16 byte(s) into 16 byte(s) of write buffers
+CUSTOM-VIRTIO: returned element to queue 0 — used ring advanced, device interrupt asserted
+CUSTOM-VIRTIO: dequeued 16 byte(s) (read 16): hex=[56 49 52 45 4c 41 49 4f 53 2d 43 56 30 78 34 32] ascii="VIRELAIOS-CV0x42"
+CUSTOM-VIRTIO: echoed 16 byte(s) into 16 byte(s) of write buffers
+CUSTOM-VIRTIO: returned element to queue 0 — used ring advanced, device interrupt asserted
+CUSTOM-VIRTIO: guest notified queue 0 (size 32)
+CUSTOM-VIRTIO: guest notified queue 0 (size 32)
+CUSTOM-VIRTIO: guest notified queue 0 (size 32)
+cvspike: q0 heads=0x0000000000000000,0x0000000000000002,0x0000000000000004,0x0000000000000006 recycle=1
+CUSTOM-VIRTIO: guest notified queue 0 (size 32)
+CUSTOM-VIRTIO: dequeued 12340 byte(s) (read 12340): hex=[01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f 10..1a 1b 1c 1d 1e 1f 20 21 22 23 24 25 26 27 28 29 sum=0x0017a8c7] ascii="<binary>"
+CUSTOM-VIRTIO: echoed 12340 byte(s) into 12340 byte(s) of write buffers
+CUSTOM-VIRTIO: returned element to queue 0 — used ring advanced, device interrupt asserted
+cvspike: q0 big n=0x3034 echo=ok
+cvspike: q0 ok=1
+CUSTOM-VIRTIO: guest notified queue 1 (size 32)
+CUSTOM-VIRTIO-LOG: cvlog-1
+CUSTOM-VIRTIO: log ack written (5 byte(s) into 32 byte(s) of write buffers)
+CUSTOM-VIRTIO: returned element to queue 1 — used ring advanced, device interrupt asserted
+cvspike: q1 log="cvlog-1" ack="ACK:7" n=0x0000000000000005
+CUSTOM-VIRTIO: guest notified queue 1 (size 32)
+CUSTOM-VIRTIO-LOG: cvlog-2
+CUSTOM-VIRTIO: log ack written (5 byte(s) into 32 byte(s) of write buffers)
+CUSTOM-VIRTIO: returned element to queue 1 — used ring advanced, device interrupt asserted
+cvspike: q1 log="cvlog-2" ack="ACK:7" n=0x0000000000000005
+CUSTOM-VIRTIO: guest notified queue 1 (size 32)
+CUSTOM-VIRTIO-LOG: cvlog-3
+CUSTOM-VIRTIO: log ack written (5 byte(s) into 32 byte(s) of write buffers)
+CUSTOM-VIRTIO: returned element to queue 1 — used ring advanced, device interrupt asserted
+cvspike: q1 log="cvlog-3" ack="ACK:7" n=0x0000000000000005
+cvspike: q1 ok=3
+cvspike: q2 armed rx=1 handle=0x0000000000000000
+CUSTOM-VIRTIO: guest notified queue 2 (size 32)
+CUSTOM-VIRTIO-PUSH: queue 2 notified with the rx buffer armed (idle — waiting for the guest's armed signal)
+CUSTOM-VIRTIO: guest notified queue 1 (size 32)
+CUSTOM-VIRTIO-LOG: cvc-push-armed
+CUSTOM-VIRTIO-PUSH: host enqueued req="CVC-PING-0x42" (13 byte(s)) into the pre-armed rx buffer
+CUSTOM-VIRTIO: log ack written (6 byte(s) into 32 byte(s) of write buffers)
+CUSTOM-VIRTIO: returned element to queue 1 — used ring advanced, device interrupt asserted
+cvspike: q2 req="CVC-PING-0x42" n=0x000000000000000d req=ok handle=ok
+CUSTOM-VIRTIO: guest notified queue 2 (size 32)
+CUSTOM-VIRTIO-PUSH: reply verified rsp="CVC-PING-0x42" (byte-exact), wrote ack="OK:13"
+cvspike: q2 rsp="CVC-PING-0x42" ack="OK:13" ok=1
+cvspike: q2 ok=1
+cvspike: q3 armed bufs=0x0000000000000008
+CUSTOM-VIRTIO: guest notified queue 3 (size 32)
+CUSTOM-VIRTIO-INPUT: queue 3 notified (guest rx pool cycling)
+CUSTOM-VIRTIO: guest notified queue 1 (size 32)
+CUSTOM-VIRTIO-LOG: cvconsole-ready
+CUSTOM-VIRTIO: log ack written (6 byte(s) into 32 byte(s) of write buffers)
+CUSTOM-VIRTIO: returned element to queue 1 — used ring advanced, device interrupt asserted
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+VF-PROBE: wrote 32768/32768 bytes (write buffers 32768)
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+VF-PROBE: wrote 32768/32768 bytes (write buffers 32768)
+vf: probe 32k ok len=0x8000 cksum=0x0000 free=0020
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+VF-FILE: STAT SECRETS.TXT → file size=91
+VF-FILE: READ SECRETS.TXT off=0 → 91 byte(s)
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+cvspike: irq=0x00000000000000c5 first=0x0000000000000045 spi=0x0000000000000045 armed=0x0000000000000020..0x00000000000000bf
+entropy: pre-rearm st=00
+entropy: seeded n=64
+net: pre-rearm st=0f
+net: rx-armed
+aslr: boot user stack=0x00000000523a0000
+VirelaiOS - AArch64 firmware-assisted kernel monitor
+VirelaiOS: the elephant has left the building.
+motd: aarch64 el1 kernel live; scheduler, uaccess, fs, net, gfx, xhci armed.
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+Type 'help' before touching anything expensive.
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+VF-FILE: STAT HISTORY.TXT → file size=810
+VF-FILE: READ HISTORY.TXT off=0 → 810 byte(s)
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+[32mvirelai> [0m[AUDIT] task-ring+procs audit armed slots=11 procs=16
+script: marker "kernel terminal state" seen at t=0.5s (serial log 5507 bytes) — settle 0.5s, then forward
+script: forwarded 115 bytes to the serial attachment (write took 0.000s)
+net ip 10.0.0.1
+net ip: ip=10.0.0.1
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+VF-FILE: STAT HISTORY.TXT → file size=810
+VF-FILE: READ HISTORY.TXT off=0 → 810 byte(s)
+VF-FILE: OPEN HISTORY.TXT → h=0 append=false create=true
+VF-FILE: TRUNCATE h=0 size=0 → status 0
+VF-FILE: WRITE h=0 → 826 byte(s), cursor advanced
+VF-FILE: CLOSE h=0 → status 0
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+[32mvirelai> [0mnet arp 10.0.0.2
+net arp: request for 10.0.0.2 sent (42NET-ARP: answered the guest's ARP request for 10.0.0.1 with host MAC 02:00:00:00:00:02 bytes)
+
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+VF-FILE: STAT HISTORY.TXT → file size=826
+VF-FILE: READ HISTORY.TXT off=0 → 826 byte(s)
+VF-FILE: OPEN HISTORY.TXT → h=0 append=false create=true
+VF-FILE: TRUNCATE h=0 size=0 → status 0
+VF-FILE: WRITE h=0 → 843 byte(s), cursor advanced
+VF-FILE: CLOSE h=0 → status 0
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+[32mvirelai> [0mexec SSH.BIN tbuddy@10.0.0.2:2222 echo VIRELAI-INTEROP-OK
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+VF-FILE: STAT SSH.BIN → file size=61488
+VF-FILE: READ SSH.BIN off=0 → 32765 byte(s)
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+VF-FILE: READ SSH.BIN off=32765 → 28723 byte(s)
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+exec: loaded SSH.BIN size=0x000000000000f000 entry=0x0000000000400000 stack=0x0000000048de0000 head=0xfd7bbaa9e2031eaa data=0x000000000001c6c0 datapages=29
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+VF-FILE: STAT HISTORY.TXT → file size=843
+VF-FILE: READ HISTORY.TXT off=0 → 843 byte(s)
+VF-FILE: OPEN HISTORY.TXT → h=0 append=false create=true
+VF-FILE: TRUNCATE h=0 size=0 → status 0
+VF-FILE: WRITE h=0 → 901 byte(s), cursor advanced
+VF-FILE: CLOSE h=0 → status 0
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+[32mvirelai> [0mecho ssh-relay-launched
+ssh-relay-launched
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+VF-FILE: STAT HISTORY.TXT → file size=901
+VF-FILE: READ HISTORY.TXT off=0 → 901 byte(s)
+VF-FILE: OPEN HISTORY.TXT → h=0 append=false create=true
+VF-FILE: TRUNCATE h=0 size=0 → status 0
+VF-FILE: WRITE h=0 → 925 byte(s), cursor advanced
+VF-FILE: CLOSE h=0 → status 0
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+[32mvirelai> [0m
+syscall: write ok n=23
+uaccess: efault ok n=8
+ssh: target user=tbuddy host=10.0.0.2 port=2222 mode=exec
+NET-TCP-RELAY: connection accepted (guest SYN seq 0x6023bb90); dialing upstream 127.0.0.1:2222
+NET-TCP-RELAY: upstream 127.0.0.1:2222 connected (real server; bytes proxied, no crypto here)
+NET-TCP: answered the guest's SYN (seq 0x6023bb90) with a SYN-ACK (seq 0x12345678, ack 0x6023bb91)
+NET-TCP-RELAY: observed the guest's ACK (ack 0x12345679)
+ssh: connected
+NET-TCP-RELAY: upstream -> guest 22 bytes buffered
+NET-TCP-RELAY: sent 22 bytes to the guest (seq 0x12345679)
+NET-TCP-RELAY: upstream -> guest 992 bytes buffered
+NET-TCP-RELAY: sent 192 bytes to the guest (seq 0x1234568f)
+NET-TCP-RELAY: sent 192 bytes to the guest (seq 0x1234574f)
+NET-TCP-RELAY: sent 192 bytes to the guest (seq 0x1234580f)
+NET-TCP-RELAY: sent 192 bytes to the guest (seq 0x123458cf)
+NET-TCP-RELAY: sent 192 bytes to the guest (seq 0x1234598f)
+NET-TCP-RELAY: sent 32 bytes to the guest (seq 0x12345a4f)
+NET-TCP-RELAY: observed the guest's ACK (ack 0x12345a6f)
+NET-TCP-RELAY: upstream -> guest 208 bytes buffered
+NET-TCP-RELAY: sent 192 bytes to the guest (seq 0x12345a6f)
+NET-TCP-RELAY: sent 16 bytes to the guest (seq 0x12345b2f)
+NET-TCP-RELAY: observed the guest's ACK (ack 0x12345b3f)
+ssh: kex-ok
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+VF-FILE: STAT SSH/KNOWN_HOSTS → file size=95
+VF-FILE: READ SSH/KNOWN_HOSTS off=0 → 95 byte(s)
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+NET-TCP-RELAY: upstream 127.0.0.1:2222 closed (EOF)
+script: serial input pipe drained (bytes left the host pipe — any stall is VZ delivery or guest RX)
+timer irq delivered ppi=0x1e irq_ticks=1
+smp: secondary runs=1 task=user-el0
+smp: secondary runs=2 task=worker
+smp: steal runs=1 task=user-el0 from=0
+smp: steal runs=2 task=worker from=0
+tasks worker advances=64
+userspace: el0=1 svc=2 roundtrips=1 arg=2 result=2 rejected=0
+tasks worker advances=3840
+smp: secondary runs=3 task=user-el0
+smp: secondary runs=4 task=SSH.BIN
+smp: secondary runs=5 task=worker
+smp: steal runs=3 task=SSH.BIN from=0
+tasks worker advances=3904
+tasks worker advances=3968
+tasks worker advances=4032
+tasks worker advances=4096
+tasks worker advances=4160
+tasks worker advances=4224
+tasks worker advances=4288
+tasks worker advances=4352
+tasks worker advances=4416
+tasks worker advances=4480
+tasks worker advances=4544
+tasks worker advances=4608
+tasks worker advances=4672
+tasks worker advances=4736
+tasks worker advances=4800
+tasks worker advances=4864
+tasks worker advances=4928
+tasks worker advances=4992
+tasks worker advances=5056
+tasks worker advances=5120
+tasks worker advances=5184
+tasks worker advances=5248
+tasks worker advances=5312
+tasks worker advances=5376
+tasks worker advances=5440
+tasks worker advances=5504
+tasks worker advances=5568
+tasks worker advances=5632
+tasks worker advances=5696
+tasks worker advances=5760
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+timer heartbeat ticks=5 irq=5 poll=0
+smp: secondary runs=6 task=SSH.BIN
+smp: secondary runs=7 task=worker
+smp: steal runs=4 task=user-el0 from=1
+smp: steal runs=5 task=SSH.BIN from=1
+smp: steal runs=6 task=SSH.BIN from=0
+tasks worker advances=5824
+tasks user-el0 exited status=7
+procs user-el0 exited status=7
+tasks user-el0 reaped
+tasks worker advances=7680
+smp: secondary runs=8 task=SSH.BIN
+smp: secondary runs=9 task=worker
+tasks worker advances=7744
+tasks worker advances=7808
+tasks worker advances=7872
+tasks worker advances=7936
+tasks worker advances=8000
+tasks worker advances=8064
+tasks worker advances=8128
+tasks worker advances=8192
+tasks worker advances=8256
+tasks worker advances=8320
+tasks worker advances=8384
+tasks worker advances=8448
+tasks worker advances=8512
+tasks worker advances=8576
+tasks worker advances=8640
+tasks worker advances=8704
+tasks worker advances=8768
+tasks worker advances=8832
+tasks worker advances=8896
+tasks worker advances=8960
+tasks worker advances=9024
+tasks worker advances=9088
+tasks worker advances=9152
+tasks worker advances=9216
+tasks worker advances=9280
+tasks worker advances=9344
+tasks worker advances=9408
+tasks worker advances=9472
+tasks worker advances=9536
+tasks worker advances=9600
+smp: secondary runs=10 task=SSH.BIN
+smp: secondary runs=11 task=worker
+smp: steal runs=7 task=SSH.BIN from=1
+smp: steal runs=8 task=SSH.BIN from=0
+tasks worker advances=9664
+tasks worker advances=11520
+smp: secondary runs=12 task=SSH.BIN
+smp: secondary runs=13 task=worker
+tasks worker advances=11584
+tasks worker advances=11648
+tasks worker advances=11712
+tasks worker advances=11776
+tasks worker advances=11840
+tasks worker advances=11904
+tasks worker advances=11968
+tasks worker advances=12032
+tasks worker advances=12096
+tasks worker advances=12160
+tasks worker advances=12224
+tasks worker advances=12288
+tasks worker advances=12352
+tasks worker advances=12416
+tasks worker advances=12480
+tasks worker advances=12544
+tasks worker advances=12608
+tasks worker advances=12672
+tasks worker advances=12736
+tasks worker advances=12800
+tasks worker advances=12864
+tasks worker advances=12928
+tasks worker advances=12992
+tasks worker advances=13056
+tasks worker advances=13120
+tasks worker advances=13184
+tasks worker advances=13248
+tasks worker advances=13312
+tasks worker advances=13376
+smp: secondary runs=14 task=SSH.BIN
+smp: secondary runs=15 task=worker
+smp: steal runs=9 task=SSH.BIN from=1
+smp: steal runs=10 task=SSH.BIN from=0
+tasks worker advances=13440
+tasks worker advances=15296
+smp: secondary runs=16 task=worker
+smp: secondary runs=17 task=worker
+tasks worker advances=15360
+tasks worker advances=15424
+tasks worker advances=15488
+tasks worker advances=15552
+tasks worker advances=15616
+tasks worker advances=15680
+tasks worker advances=15744
+tasks worker advances=15808
+tasks worker advances=15872
+tasks worker advances=15936
+tasks worker advances=16000
+tasks worker advances=16064
+tasks worker advances=16128
+tasks worker advances=16192
+tasks worker advances=16256
+tasks worker advances=16320
+tasks worker advances=16384
+tasks worker advances=16448
+tasks worker advances=16512
+tasks worker advances=16576
+tasks worker advances=16640
+tasks worker advances=16704
+tasks worker advances=16768
+tasks worker advances=16832
+tasks worker advances=16896
+tasks worker advances=16960
+tasks worker advances=17024
+tasks worker advances=17088
+tasks worker advances=17152
+timer heartbeat ticks=10 irq=10 poll=0
+smp: secondary runs=18 task=worker
+smp: secondary runs=19 task=worker
+smp: steal runs=11 task=SSH.BIN from=1
+smp: steal runs=12 task=SSH.BIN from=0
+tasks worker advances=17216
+smp: secondary runs=20 task=worker
+smp: secondary runs=21 task=worker
+tasks worker advances=19072
+tasks worker advances=19136
+tasks worker advances=19200
+tasks worker advances=19264
+tasks worker advances=19328
+tasks worker advances=19392
+tasks worker advances=19456
+tasks worker advances=19520
+tasks worker advances=19584
+tasks worker advances=19648
+tasks worker advances=19712
+tasks worker advances=19776
+tasks worker advances=19840
+tasks worker advances=19904
+tasks worker advances=19968
+tasks worker advances=20032
+tasks worker advances=20096
+tasks worker advances=20160
+tasks worker advances=20224
+tasks worker advances=20288
+tasks worker advances=20352
+tasks worker advances=20416
+tasks worker advances=20480
+tasks worker advances=20544
+tasks worker advances=20608
+tasks worker advances=20672
+tasks worker advances=20736
+tasks worker advances=20800
+tasks worker advances=20864
+tasks worker advances=20928
+smp: secondary runs=22 task=worker
+smp: secondary runs=23 task=worker
+smp: steal runs=13 task=SSH.BIN from=1
+smp: steal runs=14 task=SSH.BIN from=0
+tasks worker advances=20992
+smp: secondary runs=24 task=worker
+smp: secondary runs=25 task=worker
+tasks worker advances=22912
+tasks worker advances=22976
+tasks worker advances=23040
+tasks worker advances=23104
+tasks worker advances=23168
+tasks worker advances=23232
+tasks worker advances=23296
+tasks worker advances=23360
+tasks worker advances=23424
+tasks worker advances=23488
+tasks worker advances=23552
+tasks worker advances=23616
+tasks worker advances=23680
+tasks worker advances=23744
+tasks worker advances=23808
+tasks worker advances=23872
+tasks worker advances=23936
+tasks worker advances=24000
+tasks worker advances=24064
+tasks worker advances=24128
+tasks worker advances=24192
+tasks worker advances=24256
+tasks worker advances=24320
+tasks worker advances=24384
+tasks worker advances=24448
+tasks worker advances=24512
+tasks worker advances=24576
+tasks worker advances=24640
+tasks worker advances=24704
+tasks worker advances=24768
+timer heartbeat ticks=15 irq=15 poll=0
+smp: secondary runs=26 task=worker
+smp: secondary runs=27 task=worker
+smp: steal runs=15 task=SSH.BIN from=1
+smp: steal runs=16 task=SSH.BIN from=0
+tasks worker advances=24832
+smp: secondary runs=28 task=worker
+smp: secondary runs=29 task=worker
+tasks worker advances=26752
+tasks worker advances=26816
+tasks worker advances=26880
+tasks worker advances=26944
+tasks worker advances=27008
+tasks worker advances=27072
+tasks worker advances=27136
+tasks worker advances=27200
+tasks worker advances=27264
+tasks worker advances=27328
+tasks worker advances=27392
+tasks worker advances=27456
+tasks worker advances=27520
+tasks worker advances=27584
+tasks worker advances=27648
+tasks worker advances=27712
+tasks worker advances=27776
+tasks worker advances=27840
+tasks worker advances=27904
+tasks worker advances=27968
+tasks worker advances=28032
+tasks worker advances=28096
+tasks worker advances=28160
+tasks worker advances=28224
+tasks worker advances=28288
+tasks worker advances=28352
+tasks worker advances=28416
+tasks worker advances=28480
+tasks worker advances=28544
+tasks worker advances=28608
+smp: secondary runs=30 task=worker
+smp: secondary runs=31 task=worker
+smp: steal runs=17 task=SSH.BIN from=0
+smp: steal runs=18 task=SSH.BIN from=0
+tasks worker advances=28672
+tasks worker advances=30592
+smp: secondary runs=32 task=worker
+smp: secondary runs=33 task=worker
+tasks worker advances=30656
+tasks worker advances=30720
+tasks worker advances=30784
+tasks worker advances=30848
+tasks worker advances=30912
+tasks worker advances=30976
+tasks worker advances=31040
+tasks worker advances=31104
+tasks worker advances=31168
+tasks worker advances=31232
+tasks worker advances=31296
+tasks worker advances=31360
+tasks worker advances=31424
+tasks worker advances=31488
+tasks worker advances=31552
+tasks worker advances=31616
+tasks worker advances=31680
+tasks worker advances=31744
+tasks worker advances=31808
+tasks worker advances=31872
+tasks worker advances=31936
+tasks worker advances=32000
+tasks worker advances=32064
+tasks worker advances=32128
+tasks worker advances=32192
+tasks worker advances=32256
+tasks worker advances=32320
+tasks worker advances=32384
+tasks worker advances=32448
+smp: secondary runs=34 task=worker
+smp: secondary runs=35 task=worker
+smp: steal runs=19 task=SSH.BIN from=0
+smp: steal runs=20 task=SSH.BIN from=0
+tasks worker advances=32512
+smp: secondary runs=36 task=worker
+smp: secondary runs=37 task=worker
+tasks worker advances=34496
+tasks worker advances=34560
+tasks worker advances=34624
+tasks worker advances=34688
+tasks worker advances=34752
+tasks worker advances=34816
+tasks worker advances=34880
+tasks worker advances=34944
+tasks worker advances=35008
+tasks worker advances=35072
+tasks worker advances=35136
+tasks worker advances=35200
+tasks worker advances=35264
+tasks worker advances=35328
+tasks worker advances=35392
+tasks worker advances=35456
+tasks worker advances=35520
+tasks worker advances=35584
+tasks worker advances=35648
+tasks worker advances=35712
+tasks worker advances=35776
+tasks worker advances=35840
+tasks worker advances=35904
+tasks worker advances=35968
+tasks worker advances=36032
+tasks worker advances=36096
+tasks worker advances=36160
+timer heartbeat ticks=20 irq=20 poll=0
+smp: secondary runs=38 task=worker
+smp: secondary runs=39 task=worker
+smp: steal runs=21 task=SSH.BIN from=0
+smp: steal runs=22 task=SSH.BIN from=0
+tasks worker advances=36224
+tasks worker advances=38144
+smp: secondary runs=40 task=worker
+smp: secondary runs=41 task=worker
+tasks worker advances=38208
+tasks worker advances=38272
+tasks worker advances=38336
+tasks worker advances=38400
+tasks worker advances=38464
+tasks worker advances=38528
+tasks worker advances=38592
+tasks worker advances=38656
+tasks worker advances=38720
+tasks worker advances=38784
+tasks worker advances=38848
+tasks worker advances=38912
+tasks worker advances=38976
+tasks worker advances=39040
+tasks worker advances=39104
+tasks worker advances=39168
+tasks worker advances=39232
+tasks worker advances=39296
+tasks worker advances=39360
+tasks worker advances=39424
+tasks worker advances=39488
+tasks worker advances=39552
+tasks worker advances=39616
+tasks worker advances=39680
+tasks worker advances=39744
+tasks worker advances=39808
+tasks worker advances=39872
+tasks worker advances=39936
+tasks worker advances=40000
+smp: secondary runs=42 task=worker
+smp: secondary runs=43 task=worker
+smp: steal runs=23 task=SSH.BIN from=0
+smp: steal runs=24 task=SSH.BIN from=0
+tasks worker advances=40064
+smp: secondary runs=44 task=worker
+smp: secondary runs=45 task=worker
+tasks worker advances=42048
+tasks worker advances=42112
+tasks worker advances=42176
+tasks worker advances=42240
+tasks worker advances=42304
+tasks worker advances=42368
+tasks worker advances=42432
+tasks worker advances=42496
+tasks worker advances=42560
+tasks worker advances=42624
+tasks worker advances=42688
+tasks worker advances=42752
+tasks worker advances=42816
+tasks worker advances=42880
+tasks worker advances=42944
+tasks worker advances=43008
+tasks worker advances=43072
+tasks worker advances=43136
+tasks worker advances=43200
+tasks worker advances=43264
+tasks worker advances=43328
+tasks worker advances=43392
+tasks worker advances=43456
+tasks worker advances=43520
+tasks worker advances=43584
+tasks worker advances=43648
+tasks worker advances=43712
+tasks worker advances=43776
+tasks worker advances=43840
+tasks worker advances=43904
+timer heartbeat ticks=25 irq=25 poll=0
+smp: secondary runs=46 task=worker
+smp: secondary runs=47 task=worker
+smp: secondary runs=48 task=worker
+smp: secondary runs=49 task=worker
+smp: steal runs=25 task=SSH.BIN from=0
+smp: steal runs=26 task=SSH.BIN from=0
+tasks worker advances=43968
+tasks worker advances=45888
+tasks worker advances=45952
+tasks worker advances=46016
+tasks worker advances=46080
+tasks worker advances=46144
+tasks worker advances=46208
+tasks worker advances=46272
+tasks worker advances=46336
+tasks worker advances=46400
+tasks worker advances=46464
+tasks worker advances=46528
+tasks worker advances=46592
+tasks worker advances=46656
+tasks worker advances=46720
+tasks worker advances=46784
+tasks worker advances=46848
+tasks worker advances=46912
+tasks worker advances=46976
+tasks worker advances=47040
+tasks worker advances=47104
+tasks worker advances=47168
+tasks worker advances=47232
+tasks worker advances=47296
+tasks worker advances=47360
+tasks worker advances=47424
+tasks worker advances=47488
+tasks worker advances=47552
+tasks worker advances=47616
+tasks worker advances=47680
+tasks worker advances=47744
+smp: secondary runs=50 task=worker
+smp: secondary runs=51 task=worker
+smp: secondary runs=52 task=worker
+smp: secondary runs=53 task=worker
+smp: steal runs=27 task=SSH.BIN from=0
+smp: steal runs=28 task=SSH.BIN from=0
+tasks worker advances=47808
+tasks worker advances=49728
+tasks worker advances=49792
+tasks worker advances=49856
+tasks worker advances=49920
+tasks worker advances=49984
+tasks worker advances=50048
+tasks worker advances=50112
+tasks worker advances=50176
+tasks worker advances=50240
+tasks worker advances=50304
+tasks worker advances=50368
+tasks worker advances=50432
+tasks worker advances=50496
+tasks worker advances=50560
+tasks worker advances=50624
+tasks worker advances=50688
+tasks worker advances=50752
+tasks worker advances=50816
+tasks worker advances=50880
+tasks worker advances=50944
+tasks worker advances=51008
+tasks worker advances=51072
+tasks worker advances=51136
+tasks worker advances=51200
+tasks worker advances=51264
+tasks worker advances=51328
+tasks worker advances=51392
+tasks worker advances=51456
+tasks worker advances=51520
+tasks worker advances=51584
+smp: secondary runs=54 task=worker
+smp: secondary runs=55 task=worker
+tasks worker advances=51648
+smp: secondary runs=56 task=worker
+smp: secondary runs=57 task=worker
+smp: steal runs=29 task=SSH.BIN from=0
+smp: steal runs=30 task=SSH.BIN from=0
+tasks worker advances=51712
+tasks worker advances=53632
+tasks worker advances=53696
+tasks worker advances=53760
+tasks worker advances=53824
+tasks worker advances=53888
+tasks worker advances=53952
+tasks worker advances=54016
+tasks worker advances=54080
+tasks worker advances=54144
+tasks worker advances=54208
+tasks worker advances=54272
+tasks worker advances=54336
+tasks worker advances=54400
+tasks worker advances=54464
+tasks worker advances=54528
+tasks worker advances=54592
+tasks worker advances=54656
+tasks worker advances=54720
+tasks worker advances=54784
+tasks worker advances=54848
+tasks worker advances=54912
+tasks worker advances=54976
+tasks worker advances=55040
+tasks worker advances=55104
+tasks worker advances=55168
+tasks worker advances=55232
+tasks worker advances=55296
+scriptPoll: alive (log=21606 bytes, expect=interop-relay-done, matched=false)
+timer heartbeat ticks=30 irq=30 poll=0
+smp: secondary runs=58 task=worker
+smp: secondary runs=59 task=worker
+smp: steal runs=31 task=SSH.BIN from=0
+smp: steal runs=32 task=SSH.BIN from=0
+tasks worker advances=55360
+tasks worker advances=57152
+tasks worker advances=57216
+tasks worker advances=57280
+tasks worker advances=57344
+tasks worker advances=57408
+tasks worker advances=57472
+tasks worker advances=57536
+tasks worker advances=57600
+tasks worker advances=57664
+tasks worker advances=57728
+tasks worker advances=57792
+tasks worker advances=57856
+tasks worker advances=57920
+tasks worker advances=57984
+tasks worker advances=58048
+tasks worker advances=58112
+tasks worker advances=58176
+tasks worker advances=58240
+tasks worker advances=58304
+tasks worker advances=58368
+tasks worker advances=58432
+tasks worker advances=58496
+tasks worker advances=58560
+tasks worker advances=58624
+tasks worker advances=58688
+tasks worker advances=58752
+tasks worker advances=58816
+tasks worker advances=58880
+tasks worker advances=58944
+smp: secondary runs=60 task=SSH.BIN
+smp: secondary runs=61 task=worker
+smp: secondary runs=62 task=worker
+smp: secondary runs=63 task=worker
+smp: steal runs=33 task=SSH.BIN from=0
+smp: steal runs=34 task=SSH.BIN from=0
+tasks worker advances=59008
+tasks worker advances=60864
+tasks worker advances=60928
+tasks worker advances=60992
+tasks worker advances=61056
+tasks worker advances=61120
+tasks worker advances=61184
+tasks worker advances=61248
+tasks worker advances=61312
+tasks worker advances=61376
+tasks worker advances=61440
+tasks worker advances=61504
+tasks worker advances=61568
+tasks worker advances=61632
+tasks worker advances=61696
+tasks worker advances=61760
+tasks worker advances=61824
+tasks worker advances=61888
+tasks worker advances=61952
+tasks worker advances=62016
+tasks worker advances=62080
+tasks worker advances=62144
+tasks worker advances=62208
+tasks worker advances=62272
+tasks worker advances=62336
+tasks worker advances=62400
+tasks worker advances=62464
+tasks worker advances=62528
+tasks worker advances=62592
+tasks worker advances=62656
+smp: secondary runs=64 task=worker
+smp: secondary runs=65 task=worker
+smp: secondary runs=66 task=worker
+smp: secondary runs=67 task=worker
+smp: steal runs=35 task=SSH.BIN from=0
+smp: steal runs=36 task=SSH.BIN from=0
+tasks worker advances=62720
+timer heartbeat ticks=35 irq=35 poll=0
+tasks worker advances=64576
+tasks worker advances=64640
+tasks worker advances=64704
+tasks worker advances=64768
+tasks worker advances=64832
+tasks worker advances=64896
+tasks worker advances=64960
+tasks worker advances=65024
+tasks worker advances=65088
+tasks worker advances=65152
+tasks worker advances=65216
+tasks worker advances=65280
+tasks worker advances=65344
+tasks worker advances=65408
+tasks worker advances=65472
+tasks worker advances=65536
+tasks worker advances=65600
+tasks worker advances=65664
+tasks worker advances=65728
+tasks worker advances=65792
+tasks worker advances=65856
+tasks worker advances=65920
+tasks worker advances=65984
+tasks worker advances=66048
+tasks worker advances=66112
+tasks worker advances=66176
+tasks worker advances=66240
+tasks worker advances=66304
+tasks worker advances=66368
+smp: secondary runs=68 task=worker
+smp: secondary runs=69 task=worker
+smp: secondary runs=70 task=worker
+smp: secondary runs=71 task=worker
+smp: steal runs=37 task=SSH.BIN from=0
+smp: steal runs=38 task=SSH.BIN from=0
+tasks worker advances=66432
+tasks worker advances=68288
+tasks worker advances=68352
+tasks worker advances=68416
+tasks worker advances=68480
+tasks worker advances=68544
+tasks worker advances=68608
+tasks worker advances=68672
+tasks worker advances=68736
+tasks worker advances=68800
+tasks worker advances=68864
+tasks worker advances=68928
+tasks worker advances=68992
+tasks worker advances=69056
+tasks worker advances=69120
+tasks worker advances=69184
+tasks worker advances=69248
+tasks worker advances=69312
+tasks worker advances=69376
+tasks worker advances=69440
+tasks worker advances=69504
+tasks worker advances=69568
+tasks worker advances=69632
+tasks worker advances=69696
+tasks worker advances=69760
+tasks worker advances=69824
+tasks worker advances=69888
+tasks worker advances=69952
+tasks worker advances=70016
+tasks worker advances=70080
+smp: secondary runs=72 task=SSH.BIN
+smp: secondary runs=73 task=worker
+smp: secondary runs=74 task=worker
+smp: secondary runs=75 task=worker
+smp: steal runs=39 task=SSH.BIN from=0
+smp: steal runs=40 task=SSH.BIN from=0
+tasks worker advances=70144
+tasks worker advances=72000
+tasks worker advances=72064
+tasks worker advances=72128
+tasks worker advances=72192
+tasks worker advances=72256
+tasks worker advances=72320
+tasks worker advances=72384
+tasks worker advances=72448
+tasks worker advances=72512
+tasks worker advances=72576
+tasks worker advances=72640
+tasks worker advances=72704
+tasks worker advances=72768
+tasks worker advances=72832
+tasks worker advances=72896
+tasks worker advances=72960
+tasks worker advances=73024
+tasks worker advances=73088
+tasks worker advances=73152
+tasks worker advances=73216
+tasks worker advances=73280
+tasks worker advances=73344
+tasks worker advances=73408
+tasks worker advances=73472
+tasks worker advances=73536
+tasks worker advances=73600
+tasks worker advances=73664
+tasks worker advances=73728
+tasks worker advances=73792
+tasks worker advances=73856
+smp: secondary runs=76 task=worker
+smp: secondary runs=77 task=worker
+timer heartbeat ticks=40 irq=40 poll=0
+smp: steal runs=41 task=SSH.BIN from=1
+tasks worker advances=73920
+smp: secondary runs=78 task=worker
+smp: secondary runs=79 task=worker
+smp: steal runs=42 task=SSH.BIN from=0
+tasks worker advances=75776
+tasks worker advances=75840
+tasks worker advances=75904
+tasks worker advances=75968
+tasks worker advances=76032
+tasks worker advances=76096
+tasks worker advances=76160
+tasks worker advances=76224
+tasks worker advances=76288
+tasks worker advances=76352
+tasks worker advances=76416
+tasks worker advances=76480
+tasks worker advances=76544
+tasks worker advances=76608
+tasks worker advances=76672
+tasks worker advances=76736
+tasks worker advances=76800
+tasks worker advances=76864
+tasks worker advances=76928
+tasks worker advances=76992
+tasks worker advances=77056
+tasks worker advances=77120
+tasks worker advances=77184
+tasks worker advances=77248
+tasks worker advances=77312
+tasks worker advances=77376
+tasks worker advances=77440
+tasks worker advances=77504
+tasks worker advances=77568
+smp: secondary runs=80 task=worker
+smp: secondary runs=81 task=worker
+smp: steal runs=43 task=SSH.BIN from=0
+smp: steal runs=44 task=SSH.BIN from=0
+tasks worker advances=77632
+smp: secondary runs=82 task=SSH.BIN
+smp: secondary runs=83 task=worker
+tasks worker advances=79424
+tasks worker advances=79488
+tasks worker advances=79552
+tasks worker advances=79616
+tasks worker advances=79680
+tasks worker advances=79744
+tasks worker advances=79808
+tasks worker advances=79872
+tasks worker advances=79936
+tasks worker advances=80000
+tasks worker advances=80064
+tasks worker advances=80128
+tasks worker advances=80192
+tasks worker advances=80256
+tasks worker advances=80320
+tasks worker advances=80384
+tasks worker advances=80448
+tasks worker advances=80512
+tasks worker advances=80576
+tasks worker advances=80640
+tasks worker advances=80704
+tasks worker advances=80768
+tasks worker advances=80832
+tasks worker advances=80896
+tasks worker advances=80960
+tasks worker advances=81024
+tasks worker advances=81088
+tasks worker advances=81152
+timer heartbeat ticks=45 irq=45 poll=0
+smp: secondary runs=84 task=worker
+smp: secondary runs=85 task=worker
+smp: steal runs=45 task=SSH.BIN from=0
+smp: steal runs=46 task=SSH.BIN from=0
+tasks worker advances=81216
+smp: secondary runs=86 task=worker
+smp: secondary runs=87 task=worker
+tasks worker advances=83072
+tasks worker advances=83136
+tasks worker advances=83200
+tasks worker advances=83264
+tasks worker advances=83328
+tasks worker advances=83392
+tasks worker advances=83456
+tasks worker advances=83520
+tasks worker advances=83584
+tasks worker advances=83648
+tasks worker advances=83712
+tasks worker advances=83776
+tasks worker advances=83840
+tasks worker advances=83904
+tasks worker advances=83968
+tasks worker advances=84032
+tasks worker advances=84096
+tasks worker advances=84160
+tasks worker advances=84224
+tasks worker advances=84288
+tasks worker advances=84352
+tasks worker advances=84416
+tasks worker advances=84480
+tasks worker advances=84544
+tasks worker advances=84608
+tasks worker advances=84672
+tasks worker advances=84736
+tasks worker advances=84800
+tasks worker advances=84864
+smp: secondary runs=88 task=worker
+smp: secondary runs=89 task=worker
+smp: steal runs=47 task=SSH.BIN from=0
+smp: steal runs=48 task=SSH.BIN from=0
+tasks worker advances=84928
+smp: secondary runs=90 task=worker
+smp: secondary runs=91 task=worker
+tasks worker advances=86720
+tasks worker advances=86784
+tasks worker advances=86848
+tasks worker advances=86912
+tasks worker advances=86976
+tasks worker advances=87040
+tasks worker advances=87104
+tasks worker advances=87168
+tasks worker advances=87232
+tasks worker advances=87296
+tasks worker advances=87360
+tasks worker advances=87424
+tasks worker advances=87488
+tasks worker advances=87552
+tasks worker advances=87616
+tasks worker advances=87680
+tasks worker advances=87744
+tasks worker advances=87808
+tasks worker advances=87872
+tasks worker advances=87936
+tasks worker advances=88000
+tasks worker advances=88064
+tasks worker advances=88128
+tasks worker advances=88192
+tasks worker advances=88256
+tasks worker advances=88320
+tasks worker advances=88384
+tasks worker advances=88448
+tasks worker advances=88512
+smp: secondary runs=92 task=worker
+smp: secondary runs=93 task=worker
+smp: secondary runs=94 task=worker
+smp: secondary runs=95 task=worker
+smp: steal runs=49 task=SSH.BIN from=0
+smp: steal runs=50 task=SSH.BIN from=0
+tasks worker advances=88576
+tasks worker advances=90432
+tasks worker advances=90496
+tasks worker advances=90560
+tasks worker advances=90624
+tasks worker advances=90688
+tasks worker advances=90752
+tasks worker advances=90816
+tasks worker advances=90880
+tasks worker advances=90944
+tasks worker advances=91008
+tasks worker advances=91072
+tasks worker advances=91136
+tasks worker advances=91200
+tasks worker advances=91264
+tasks worker advances=91328
+tasks worker advances=91392
+tasks worker advances=91456
+tasks worker advances=91520
+tasks worker advances=91584
+tasks worker advances=91648
+tasks worker advances=91712
+tasks worker advances=91776
+tasks worker advances=91840
+tasks worker advances=91904
+tasks worker advances=91968
+tasks worker advances=92032
+tasks worker advances=92096
+tasks worker advances=92160
+tasks worker advances=92224
+timer heartbeat ticks=50 irq=50 poll=0
+smp: secondary runs=96 task=worker
+smp: secondary runs=97 task=worker
+smp: secondary runs=98 task=worker
+smp: secondary runs=99 task=worker
+smp: steal runs=51 task=SSH.BIN from=0
+smp: steal runs=52 task=SSH.BIN from=0
+tasks worker advances=92288
+tasks worker advances=94208
+tasks worker advances=94272
+tasks worker advances=94336
+tasks worker advances=94400
+tasks worker advances=94464
+tasks worker advances=94528
+tasks worker advances=94592
+tasks worker advances=94656
+tasks worker advances=94720
+tasks worker advances=94784
+tasks worker advances=94848
+tasks worker advances=94912
+tasks worker advances=94976
+tasks worker advances=95040
+tasks worker advances=95104
+tasks worker advances=95168
+tasks worker advances=95232
+tasks worker advances=95296
+tasks worker advances=95360
+tasks worker advances=95424
+tasks worker advances=95488
+tasks worker advances=95552
+tasks worker advances=95616
+tasks worker advances=95680
+tasks worker advances=95744
+tasks worker advances=95808
+tasks worker advances=95872
+tasks worker advances=95936
+tasks worker advances=96000
+smp: secondary runs=100 task=worker
+smp: secondary runs=101 task=worker
+smp: secondary runs=102 task=worker
+smp: secondary runs=103 task=worker
+smp: steal runs=53 task=SSH.BIN from=0
+smp: steal runs=54 task=SSH.BIN from=0
+tasks worker advances=96064
+tasks worker advances=97984
+tasks worker advances=98048
+tasks worker advances=98112
+tasks worker advances=98176
+tasks worker advances=98240
+tasks worker advances=98304
+tasks worker advances=98368
+tasks worker advances=98432
+tasks worker advances=98496
+tasks worker advances=98560
+tasks worker advances=98624
+tasks worker advances=98688
+tasks worker advances=98752
+tasks worker advances=98816
+tasks worker advances=98880
+tasks worker advances=98944
+tasks worker advances=99008
+tasks worker advances=99072
+tasks worker advances=99136
+tasks worker advances=99200
+tasks worker advances=99264
+tasks worker advances=99328
+tasks worker advances=99392
+tasks worker advances=99456
+tasks worker advances=99520
+tasks worker advances=99584
+tasks worker advances=99648
+tasks worker advances=99712
+tasks worker advances=99776
+timer heartbeat ticks=55 irq=55 poll=0
+smp: secondary runs=104 task=worker
+smp: secondary runs=105 task=worker
+smp: steal runs=55 task=SSH.BIN from=0
+smp: steal runs=56 task=SSH.BIN from=0
+tasks worker advances=99840
+tasks worker advances=101632
+tasks worker advances=101696
+tasks worker advances=101760
+tasks worker advances=101824
+tasks worker advances=101888
+tasks worker advances=101952
+tasks worker advances=102016
+tasks worker advances=102080
+tasks worker advances=102144
+tasks worker advances=102208
+tasks worker advances=102272
+tasks worker advances=102336
+tasks worker advances=102400
+tasks worker advances=102464
+tasks worker advances=102528
+tasks worker advances=102592
+tasks worker advances=102656
+tasks worker advances=102720
+tasks worker advances=102784
+tasks worker advances=102848
+tasks worker advances=102912
+tasks worker advances=102976
+tasks worker advances=103040
+tasks worker advances=103104
+tasks worker advances=103168
+tasks worker advances=103232
+tasks worker advances=103296
+tasks worker advances=103360
+tasks worker advances=103424
+tasks worker advances=103488
+ssh: auth-error Transport
+ssh: fail stage=auth rc=8
+NET-TCP-RELAY: the guest sent FIN; FIN-ACK and upstream close
+NET-TCP-RELAY: observed the guest's ACK (ack 0x12345b40)
+CUSTOM-VIRTIO: guest notified queue 5 (size 32)
+smp: secondary runs=106 task=worker
+smp: secondary runs=107 task=worker
+smp: secondary runs=108 task=worker
+smp: secondary runs=109 task=worker
+smp: secondary runs=110 task=worker
+smp: secondary runs=111 task=worker
+smp: secondary runs=112 task=worker
+smp: secondary runs=113 task=worker
+smp: secondary runs=114 task=worker
+smp: secondary runs=115 task=worker
+smp: secondary runs=116 task=worker
+smp: secondary runs=117 task=worker
+smp: secondary runs=118 task=worker
+smp: secondary runs=119 task=worker
+smp: secondary runs=120 task=worker
+smp: secondary runs=121 task=worker
+smp: secondary runs=122 task=worker
+smp: secondary runs=123 task=worker
+smp: secondary runs=124 task=worker
+smp: secondary runs=125 task=worker
+smp: secondary runs=126 task=worker
+smp: secondary runs=127 task=worker
+smp: secondary runs=128 task=worker
+[...] head of 102660-line file: the remainder echoes the idle guest console; full raw file kept on disk
