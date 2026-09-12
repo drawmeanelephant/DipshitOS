@@ -94,7 +94,10 @@ request with data still failing), `runs/relay-05/` (channel id 0 rejected).
   content) are left on disk in the worktree, untracked.
 - `runs/relay-03/` … `runs/relay-05/` — #1210 progression: padding fixed +
   userauth accepted (`03`), pre-confirmation GLOBAL_REQUEST with data still
-  failing (`04`), sender channel id 0 still rejected (`05`).
+  failing (`04`), sender channel id 0 still rejected (`05`). The run-local
+  132 KiB serial/runner logs are not committed; each dir carries
+  `ssh-evidence.txt` (the exact SSH/relay/sshd grep extract of those logs)
+  plus the full `sshd.log` DEBUG3 and guest `cap.bin`.
 - `runs/relay-06/` — #1210 canonical success: full raw evidence (serial,
   runner stdout, sshd DEBUG3, `cap.bin`, scripts, seed-absence scan, and
   `sshd_config.used`, the exact config the run's sshd was started with).
