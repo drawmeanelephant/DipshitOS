@@ -19,6 +19,11 @@
 # HOST PREREQUISITE (not hermetic — see tools/go/README.md):
 # `just go-toolchain` must have produced .build/go/GOARGS.ELF + GOHELLO.ELF.
 #
+# exec-order: assert-proven -- the run cannot go green without the program's
+# own output (`go-args n=3 [GOARGS.ELF] [alpha] [beta]`), so `echo
+# go-args-done` is not what proves it ran. Same residual risk as go-hello:
+# a flaky FAIL on a loaded host, never a false pass (tools/gate/SPEC.md).
+#
 # Note: the go-args fixture asserts the program NAME too — argv[0] is the
 # exec'd file, matching the Go convention.
 
