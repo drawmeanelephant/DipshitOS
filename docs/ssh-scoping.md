@@ -137,6 +137,14 @@ Each implementation PR updates ADR 0007's table and `implemented_count` where
 it adds a slot (only SSH-P1), regenerates `docs/gate-fleet-inventory.md` when
 it adds a spec (SSH5), and presents `boot-default-unchanged` evidence.
 
+**Coordination with #1163 (GOOS=virelai port).** `sys_getrandom` is a single
+shared contract, not two: **slot 72 is owned by SSH-P1 (#1166)** and the Go
+runtime consumes it — if the Go port lands first it implements slot 72 to
+this contract and SSH-P1 becomes the thin `lib/rng.zig` wrapper. The Go
+port's `thread_create`/`futex` append at 73/74. The Go port's ADR takes
+**0026** (SSH0 keeps 0025). Neither claim re-adds an entropy syscall; see
+#1163 for the reciprocal note.
+
 ## Implementation order
 
 ```
