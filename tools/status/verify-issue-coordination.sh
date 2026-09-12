@@ -17,6 +17,11 @@
 #   1. Every open claim has an Owner line with a backticked branch.
 #   2. Two open claims from different branches declaring overlapping Touches
 #      fail the gate (one editor per file). ⛔ blocked claims are skipped.
+#      GENERATED artifacts (machine-rendered; see `is_generated`) are exempt:
+#      they are re-rendered mechanically and merge sequentially, so
+#      declaring one never holds the file and never conflicts (the recurring
+#      `docs/gate-fleet-inventory.md` false failure). Extend the list when a
+#      new generated file is tracked.
 #   3. Claims with no comment/edit for STALE_DAYS (default 14) draw a
 #      warning — comment on the issue (or close it) to show life.
 #
@@ -69,6 +74,18 @@ trap 'rm -rf "$tmp"' EXIT
 now="$(date -u +%s)"
 STALE_DAYS="${STALE_DAYS:-14}"
 
+# is_generated TOKEN -- is a Touches token a machine-generated artifact?
+# Generated files are re-rendered (not hand-edited) and merge sequentially,
+# so a claim declaring one must never hold the file against another claim.
+# Matched by EXACT token so a broad `docs/*` glob still collides on real docs.
+# Add a line per newly tracked generated file.
+is_generated() {
+    case "$1" in
+        docs/gate-fleet-inventory.md) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # tokens_overlap A B -- do two Touches tokens collide?
 # Exact match, or either side is a `prefix*` glob matching the other.
 tokens_overlap() {
@@ -99,6 +116,7 @@ print(int(datetime.datetime.strptime(s, "%Y-%m-%dT%H:%M:%S").timestamp()))
 # Records: "branch touches" lines for ACTIVE (non-blocked) claims.
 active_declared=""
 checked=0
+generated_exempt=0
 
 while IFS= read -r rec; do
     [ -n "$rec" ] || continue
@@ -136,6 +154,10 @@ while IFS= read -r rec; do
 
     touches="$(sed -n 's/^- \*\*Touches:\*\* //p' "$tmp/body-$num.md" | head -1 | tr ',' ' ')"
     for t in $touches; do
+        if is_generated "$t"; then
+            generated_exempt=$((generated_exempt + 1))
+            continue
+        fi
         active_declared="${active_declared}${num} ${branch} ${t}
 "
     done
@@ -163,6 +185,10 @@ EOF1
 fi
 
 # --- verdict ----------------------------------------------------------------
+
+if [ "$generated_exempt" -gt 0 ]; then
+    printf 'note: %d generated-artifact Touches declaration(s) exempt from the one-editor rule\n' "$generated_exempt"
+fi
 
 if [ "$fail" -ne 0 ]; then
     printf 'verify-issue-coordination: FAILED\n' >&2
