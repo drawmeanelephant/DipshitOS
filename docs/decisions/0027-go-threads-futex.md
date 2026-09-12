@@ -1,6 +1,6 @@
 # ADR 0027: GOOS=virelai threads and futex (phase 0b kernel model)
 
-- Status: PROPOSED (design card for phase 0b — no thread kernel code until reviewed)
+- Status: ACCEPTED (2026-09-12 — review calls 1-3 below; thread kernel code is the next claim)
 - Date: 2026-09-12
 - Issue: #1194 (round claim; successor of #1163 / ADR 0026)
 - Related: ADR 0007 (syscall ABI), ADR 0026 (Go runtime port, D5 lists the
@@ -45,23 +45,29 @@ which is the runtime's own model anyway. Reap/recycle keeps freeing
 process-owned pages exactly once (the phase-0a I1 alias guard already
 fixed the only double-free shape).
 
-D3 — **slot 73 `sys_thread_create(entry, stack_hi, arg, tls) -> tid`.**
-Arguments: `entry` (EL0 PC, must land in the process's executable
-aperture — validated like `exec`'s entry check), `stack_hi` (the TOP of a
-CALLER-PROVIDED EL0 stack; Go passes `mp.g0.stack.hi`), `arg` (x0 for the
-child: the `m` pointer), `tls` (reserved 0 in phase 0b — pure-Go arm64
-keeps g in R28, no TLS programming). The kernel: allocates a task, binds
-it to the caller's process, arms the initial frame at `stack_hi` with
-`x0 = arg, pc = entry` (the same frame machinery `register_exec_user`
-uses), marks it running on the caller's core ring (no pin unless the
-caller pins — SMP placement follows the unpinned exec rule, claim 9498).
-Returns the new kernel tid (Go stores it in `m.procid`). Principal,
-uid/caps inherit from the process (no new privilege surface; the slot is
-NOT capability-gated — it can only create work inside the caller's own
-address space).
+D3 — **ACCEPTED as one op-based slot: slot 73 is `sys_thread(op, ...)`.**
+Op 0 = create — arguments `entry, stack_hi, arg, tls` (`entry`: EL0 PC,
+validated inside the process's executable aperture like `exec`; `stack_hi`:
+the TOP of a CALLER-PROVIDED EL0 stack — Go passes `mp.g0.stack.hi`; `arg`:
+x0 for the child, the `m` pointer; `tls`: reserved 0 — pure-Go arm64 keeps
+g in R28). Op 1 = exit (thread-only, no args). `sys_exit` (slot 3) stays
+process-exit; the process dies when its LAST task exits; no join (Go joins
+via channels). The kernel: allocates a task, binds it to the caller's
+process, arms the initial frame at `stack_hi` with `x0 = arg, pc = entry`
+(the same frame machinery `register_exec_user` uses), marks it running on
+the caller's core ring (no pin unless the caller pins — SMP placement
+follows the unpinned exec rule, claim 9498). Returns the new kernel tid
+(Go stores it in `m.procid`). Principal, uid/caps inherit from the process
+(no new privilege surface; not capability-gated — it can only create work
+inside the caller's own address space). implemented_count 73 → 75.
 
-D4 — **slot 74 `sys_futex(op, uaddr, val, timeout_ns)` — one bounded
-wait/wake op on a user word.** Op 0 = wait (sleep the task while
+D4 — **ACCEPTED as one op-based slot: `sys_futex(op, uaddr, val,
+timeout_ns)` — op 0 = wait, op 1 = wake(n).** The ADR 0007 amendment must
+table the ops, the per-op errors, and state the timeout unit explicitly
+(nanoseconds), with ETIMEDOUT distinct from a real wake. Two slots buy
+nothing at 11 tasks; the repo already uses op selectors (sys_wmctl cmd,
+sys_tty_net_auth op, sys_tty_attach selectors). Bounded
+wait/wake on a user word. Op 0 = wait (sleep the task while
 `*uaddr == val`, kernel-verified under the mmu read of the user word —
 no copy, a direct read of the 4-byte user word via the existing uaccess
 window), op 1 = wake n (default 1). Backing: a bounded BSS wait-table
@@ -87,20 +93,21 @@ keeping the futex file shape). Async preemption stays OFF
 (`preemptMSupported = false` — signals are phase 0c; STW remains
 cooperative, the known tight-loop caveat).
 
-D6 — **Gate: `go-goroutines` (class B).** Fixture prints a
-serial-ordered completion proof: N goroutines (N > GOMAXPROCS) increment
-an atomic counter and send on a buffered channel; main drains N
-completions and prints `go-goroutines done n=<N> counter=<K>` with
-K == N. Serial asserts: the done line, plus the strace signature of
-slot 73 (`sys_thread_create` called ≥ 2 times). **Proof scope, honestly
-stated:** phase 0b keeps `numCPUStartup = 1`, so the extra Ms the gate
-exercises are the slot-73-created ones (sysmon + the template thread) —
-this proves real M creation via slot 73, goroutines scheduled across
-Ms, and channel blocking/wake through futex; it does NOT prove parallel
-worker Ms on separate cores. That proof needs GOMAXPROCS > 1 (the
-envp/GOMAXPROCS half) — OR the gate implementation may set
-`numCPUStartup = 2` for the gate boot, decided at implementation
-review; the gate asserts whichever scope was chosen.
+D6 — **ACCEPTED: `numCPUStartup = 2` in 0b as the REAL runtime setting**
+(not a gate-only boot hack), and the gate asserts the strong proof:
+`go-goroutines` (class B) — the fixture prints a serial-ordered
+completion proof: N goroutines (N > GOMAXPROCS) increment an atomic
+counter and send on a buffered channel; main drains N completions and
+prints `go-goroutines done n=<N> counter=<K>` with K == N. Asserts:
+the done line, the strace signature of slot 73 (`sys_thread` op 0
+called ≥ 2 times), AND the cross-core scheduling proof in the monitor
+`smp` report — `task=<GOROUT>.ELF` on a secondary core during a held
+window, exactly the pattern live-smp1/live-smp-stress assert
+(`smp: secondary runs=`). Slot-73 tasks carry the PROCESS name so the
+assert holds. Pool cost recorded: 2 Ps + sysmon + template ≈ 4 of
+max_tasks = 11. If sampling proves unreliable during implementation,
+fall back to the narrow scope honestly — but the strong proof is tried
+first.
 
 ## Consequences
 
