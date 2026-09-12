@@ -60,9 +60,12 @@ vgate_run 02 -- --net '$RUN_DIR/cap2.bin' \
     --script-expect 'tty net: detached' \
     --timeout 120
 
-# Run 03: replay a captured handshake. The MAC below was valid for the
-# fixed challenge 000102...1f under `s3cret` (a previous session's capture);
-# the fresh challenge makes it stale, so the reply is rejected.
+# Run 03: a stale fixed MAC, NOT a capture-then-replay within the boot. The
+# MAC below was valid for the fixed challenge 000102...1f under `s3cret`;
+# the fresh challenge makes it wrong. The replay property proper (two
+# accepts mint different challenges, so a captured handshake cannot answer
+# the fresh one) is the class-A freshness test; this run proves the
+# class-B framing rejects a MAC not valid for the current challenge.
 vgate_run 03 -- --net '$RUN_DIR/cap3.bin' \
     --script '$RUN_DIR/script.txt' \
     --net-tcp-connect '10.0.0.1:2323:$RUN_DIR/help.txt' \

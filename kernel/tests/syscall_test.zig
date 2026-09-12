@@ -3371,6 +3371,8 @@ test "syscall: SYS_TTY_NET_AUTH (slot 71, #1138) serves the owner and never trac
     for (&fixed, 0..) |*b, i| b.* = @intCast(i + 1);
     t.net_challenge = fixed;
     t.net_challenge_sent = true;
+    // A too-small out buffer is EINVAL before any copy.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_tty_net_auth, .{ 0, @intFromPtr(&scratch), 8, 0, 0, 0 }, &frame));
     try std.testing.expectEqual(@as(u64, 32), dispatch(sys_tty_net_auth, .{ 0, @intFromPtr(&scratch), scratch.len, 0, 0, 0 }, &frame));
     try std.testing.expectEqualSlices(u8, &fixed, scratch[0..32]);
     // No reply yet: op 1 returns 0 and a verdict is EINVAL.
@@ -3381,6 +3383,8 @@ test "syscall: SYS_TTY_NET_AUTH (slot 71, #1138) serves the owner and never trac
     @memcpy(t.net_reply[0..64], hexr);
     t.net_reply_len = 64;
     t.net_reply_ready = true;
+    // A too-small out buffer is EINVAL before any copy.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_tty_net_auth, .{ 1, @intFromPtr(&scratch), 32, 0, 0, 0 }, &frame));
     try std.testing.expectEqual(@as(u64, 64), dispatch(sys_tty_net_auth, .{ 1, @intFromPtr(&scratch), scratch.len, 0, 0, 0 }, &frame));
     try std.testing.expectEqualStrings(hexr, scratch[0..64]);
     // The verdict op is strace-excluded even while tracing this pid.

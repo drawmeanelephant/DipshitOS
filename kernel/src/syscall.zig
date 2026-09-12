@@ -1920,9 +1920,10 @@ fn handle_tty_attach(args: Args, _: *exceptions.VectorFrame) u64 {
 /// accept opens the byte gate, reject sends `auth failed` + reset + detach.
 /// The caller must be the process that owns the attached net terminal.
 /// `EINVAL` when the terminal is not in auth mode, no reply awaits a
-/// verdict, or the op is unknown; `EACCES` when the caller does not own the
-/// attached terminal; `EFAULT` for a bad buffer. Excluded from strace in
-/// `dispatch`/`maybe_trace` (the never-logged contract).
+/// verdict, the out buffer is too small, or the op is unknown; `EACCES`
+/// when the caller does not own the attached terminal; `EFAULT` for a bad
+/// buffer. Excluded from strace in `dispatch`/`maybe_trace` (the
+/// never-logged contract).
 fn handle_tty_net_auth(args: Args, _: *exceptions.VectorFrame) u64 {
     const op = args[0];
     const pid = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
@@ -1936,6 +1937,7 @@ fn handle_tty_net_auth(args: Args, _: *exceptions.VectorFrame) u64 {
     switch (op) {
         net_auth_op_challenge => {
             if (t.net_authed or !t.net_challenge_sent) return 0;
+            if (args[2] < terminal.net_challenge_len) return error_result(.einval);
             if (uaccess.copy_out(args[1], &t.net_challenge, terminal.net_challenge_len) != .ok) {
                 return error_result(.efault);
             }
@@ -1944,6 +1946,7 @@ fn handle_tty_net_auth(args: Args, _: *exceptions.VectorFrame) u64 {
         net_auth_op_response => {
             if (t.net_authed or !t.net_reply_ready) return 0;
             if (args[1] == 0) return error_result(.efault);
+            if (args[2] < t.net_reply_len) return error_result(.einval);
             if (uaccess.copy_out(args[1], t.net_reply[0..t.net_reply_len], t.net_reply_len) != .ok) {
                 return error_result(.efault);
             }
