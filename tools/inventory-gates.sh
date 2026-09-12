@@ -22,10 +22,26 @@
 #                                          # regenerated and committed.
 #   just inventory-gates [--check]
 #
-# Deterministic by construction: LC_ALL=C sorting, no dates, no revisions,
-# no host state. A fresh render on a clean tree is byte-identical.
+# Deterministic by construction: no dates, no revisions, no host state, and
+# -- since issue #1177 -- a LOCALE PIN, so a fresh render on a clean tree is
+# byte-identical in every environment.
+#
+# Locale pin (issue #1177): the render used to depend on the ambient locale.
+# `cut -c1-100` counts BYTES under LC_ALL=C (the common macOS shell default
+# for scripts) but CHARACTERS under a UTF-8 locale, so a header containing a
+# non-ASCII character -- e.g. live-m21-persist-title-orphan.spec's em dash --
+# rendered differently in the two environments: `--check` failed for whoever
+# was not in the same locale as the author, and `[[:space:]]` in the trailing
+# sed was locale-sensitive too. LC_ALL=C is now pinned for the whole render
+# (byte-deterministic sorting/comparison), and header truncation is done by
+# `truncate_chars` in UTF-8 CHARACTERS rather than bytes -- byte truncation
+# can also split a multi-byte sequence and write invalid UTF-8 into a tracked
+# markdown file. `--check` additionally asserts render equality across two
+# locales, so a future locale-sensitive operation cannot creep back in.
 #
 set -euo pipefail
+
+export LC_ALL=C
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -57,13 +73,27 @@ class_of() {
     esac
 }
 
+# truncate_chars N -- copy stdin to stdout, keeping at most N UTF-8
+# CHARACTERS (not bytes). Explicit and locale-proof: python3 decodes UTF-8
+# itself, so neither the ambient locale nor a split multi-byte sequence can
+# change the result. Readers/writers are the raw byte streams on purpose --
+# python's text mode would pick up the very locale we are pinning away from.
+truncate_chars() {
+    python3 -c '
+import sys
+limit = int(sys.argv[1])
+text = sys.stdin.buffer.read().decode("utf-8", "replace")
+sys.stdout.buffer.write(text[:limit].encode("utf-8"))
+' "$1"
+}
+
 # First "# text" header line (or """docstring opener for .py) in the
 # first 12 lines; truncated, pipe-escaped for the markdown table.
 purpose_of() {
     awk 'NR<=12 {
         if ($0 ~ /^# [^ ]/) { sub(/^# /, ""); print; exit }
         if ($0 ~ /^"""/) { sub(/^"""/, ""); print; exit }
-    }' "$1" | cut -c1-110 | sed 's/|/\\|/g; s/[[:space:]]*$//'
+    }' "$1" | truncate_chars 110 | sed 's/|/\\|/g; s/[[:space:]]*$//'
 }
 
 has_just() {
@@ -177,7 +207,7 @@ EOF
                 spec="$ROOT/tools/gate/specs/$id.spec"
                 na="$(grep -c '^vgate_assert ' "$spec" || true)"
                 nr="$(grep -c '^vgate_run ' "$spec" || true)"
-                hdr="$(grep -m1 '^# ' "$spec" | sed 's/^# //' | cut -c1-100 | sed 's/|/\\|/g; s/[[:space:]]*$//')"
+                hdr="$(grep -m1 '^# ' "$spec" | sed 's/^# //' | truncate_chars 100 | sed 's/|/\\|/g; s/[[:space:]]*$//')"
                 [ -n "$hdr" ] || hdr="(no header comment)"
                 echo "| spec | \`$id\` | ${nr:-0} run / ${na:-0} assert | $hdr |"
             else
@@ -211,16 +241,44 @@ EOF
 }
 
 if [ "$CHECK" -eq 1 ]; then
-    tmp="$(mktemp -d "${TMPDIR:-/tmp}/inv-check.XXXXXX")/report.md"
+    tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/inv-check.XXXXXX")"
+    tmp="$tmpdir/report.md"
     render_to "$tmp"
+    rc=0
     if cmp -s "$tmp" "$REPORT"; then
         echo "inventory-gates --check: OK ($REPORT matches a fresh render)"
     else
         echo "inventory-gates --check: FAIL -- $REPORT drifted from a fresh render."
         echo "Run 'bash tools/inventory-gates.sh' (or 'just inventory-gates') and commit the result."
         diff -u "$REPORT" "$tmp" | head -30 || true
-        exit 1
+        rc=1
     fi
+    # Locale invariance (issue #1177): the render must be byte-identical when
+    # the ambient locale differs. Plain `render_to` already pins LC_ALL=C, so
+    # render the second copy with a UTF-8 locale forced for the whole pass --
+    # if any operation is still locale-sensitive, the two diverge here instead
+    # of in a contributor's shell.
+    # NOTE: `locale -a | grep -q ...` is a trap under `set -o pipefail` --
+    # grep leaves early on the match, the producer takes SIGPIPE, and the
+    # pipeline reports failure, so the probe silently reads "not installed".
+    # Feed grep from a here-string (no second process, no pipe to break).
+    probe="en_US.UTF-8"
+    if grep -qixE 'en_US\.utf-?8' <<< "$(locale -a 2>/dev/null || true)"; then
+        ( export LC_ALL="$probe" LC_CTYPE="$probe"; render_to "$tmpdir/report-utf8.md" )
+        if cmp -s "$tmp" "$tmpdir/report-utf8.md"; then
+            echo "inventory-gates --check: OK (render is locale-invariant: LC_ALL=C == $probe)"
+        else
+            echo "inventory-gates --check: FAIL -- the render depends on the locale."
+            echo "A locale-sensitive operation crept back into render_to; diff (C vs $probe):"
+            diff -u "$tmp" "$tmpdir/report-utf8.md" | head -30 || true
+            rc=1
+        fi
+    else
+        echo "inventory-gates --check: NOTE -- $probe not installed on this host; " \
+             "the two-locale invariance check was skipped (the render is still LC_ALL-pinned)"
+    fi
+    rm -rf "$tmpdir"
+    exit "$rc"
 else
     render_to "$REPORT"
     echo "wrote $REPORT"

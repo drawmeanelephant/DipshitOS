@@ -112,7 +112,7 @@ of them with `just verify-vz`.
 | spec | `live-m21-max-fullscreen-aot` | 1 run / 12 assert | live-m21-max-fullscreen-aot.spec -- M21 W6 max + W7 fullscreen + W8 always-on-top + W10 kmove |
 | spec | `live-m21-minimize-ws` | 1 run / 10 assert | live-m21-minimize-ws.spec -- M21 W3 minimize/restore + W4 workspace switching |
 | spec | `live-m21-notif-dialog-transient` | 1 run / 16 assert | live-m21-notif-dialog-transient.spec -- M21 W5 notif + W13 dialog + W15 modal + W16 transient |
-| spec | `live-m21-persist-title-orphan` | 1 run / 7 assert | live-m21-persist-title-orphan.spec -- tools/verify-live-m21-persist-title-orphan.sh — class-B live |
+| spec | `live-m21-persist-title-orphan` | 1 run / 7 assert | live-m21-persist-title-orphan.spec -- tools/verify-live-m21-persist-title-orphan.sh — class-B live a |
 | spec | `live-m21-tile-master` | 2 run / 18 assert | live-m21-tile-master.spec -- claim 8777: M21 W1 tiling + W2 master swap |
 | spec | `live-n1-ping` | 1 run / 10 assert | live-n1-ping.spec -- PING.BIN (exec'd) pings the host responder 3x |
 | spec | `live-n11-download` | 1 run / 10 assert | live-n11-download.spec -- DOWNLOAD.BIN (exec'd) fetches the HTTP |
@@ -298,7 +298,7 @@ named in `.github/workflows/*.yml`; `st` = named in
 | `elf2bin.py` | 382 | tooling | n | n | n | n | Convert a Zig aarch64-freestanding ELF executable into the VirelaiOS flat |
 | `env-check.sh` | 259 | tooling | n | n | y | n | tools/env-check.sh -- source me at the start of every agent session. |
 | `inspect.sh` | 93 | tooling | y | n | n | n | inspect.sh -- report useful facts about the generated EFI binary and the |
-| `inventory-gates.sh` | 227 | tooling | n | n | n | n | inventory-gates.sh -- regenerate (or --check) the machine-generated gate |
+| `inventory-gates.sh` | 285 | tooling | n | n | n | n | inventory-gates.sh -- regenerate (or --check) the machine-generated gate |
 | `lint-workflows.sh` | 62 | tooling | y | n | y | n | lint-workflows.sh -- lint the GitHub Actions workflows (class A). |
 | `mkdyn-elf.py` | 1090 | tooling | n | n | n | y | Generate freestanding dynamic ELF binaries for VirelaiOS. |
 | `mkhello-elf.py` | 205 | tooling | n | n | n | n | Emit a minimal statically linked AArch64 ELF32 executable (M22 D1, issue #324). |
