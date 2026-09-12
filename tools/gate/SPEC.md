@@ -30,6 +30,8 @@ vgate_client TAG -- FLAGS...       # (M46 RC2 #1069) a during-run TCP client:
                                    # --addr host:port (req), --after MARKER,
                                    # --send-file FILE | --send-text TEXT,
                                    # --expect TEXT, --expect-fail,
+                                   # --hmac-secret S (M50 TS4: answer the
+                                   #   --console-tcp HMAC challenge),
                                    # --timeout S, --connect-timeout S,
                                    # --after-timeout S, --out FILE.
                                    # Capture: $RUN_DIR/client-TAG.out

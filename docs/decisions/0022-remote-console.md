@@ -63,6 +63,15 @@ a barrier against accidental exposure, **not** a cryptographic control.
   VM and every existing gate are byte-identical.
 
 ### D3. Guest session auth (Stage 1): an in-band shared secret
+**Superseded in part by M50 TS4 (2026-09-11, issue #1138, ADR 0024 D6).**
+The v1 shared secret documented below is deleted; selector 3 now takes an
+auth scheme (0 open / 1 hmac-sha256 / 2 ed25519), the pump frames a fresh
+`VIRELAIOS-AUTH/1` challenge, and the attached process votes the verdict
+through slot 71. The explicit `open` mode is the only way to reproduce the
+v1 accept-immediately posture. The historical text is kept for the v1
+record; see ADR 0024 D6 + the ADR 0007 slot-71 amendment for the binding
+shape.
+
 The v1 guest primitive is a **shared secret sent in-band as the first line**,
 checked by the kernel net-front-end pump:
 
@@ -86,6 +95,11 @@ checked by the kernel net-front-end pump:
   side-channel guarantee.
 
 ### D4. Optional source-IP allowlist (the "and/or" of #1111)
+**TS4 note (2026-09-11):** the kernel-side opt-in documented below remains
+(a4 of `sys_tty_attach` selector 3), but the M50 TS4 userland CLI is
+`net <port> [open]` and no longer exposes an allow-ip argument. No gate used
+it; the kernel field stays available for a future front-end.
+
 `sys_tty_attach(3, port, secret_ptr, secret_len, allow_ip)` gains a fifth
 argument: a **source-IP allowlist** entry as a big-endian `u32` (`0` = any).
 CLI: `SH.BIN net <port> [secret] [allow-ip]`. When set, the TCP passive-open

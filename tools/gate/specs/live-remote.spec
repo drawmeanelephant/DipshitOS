@@ -6,7 +6,9 @@
 # single bounded TCP connection. Because kernel/src/tcp.zig has NO loopback
 # and the guest is behind VZ NAT, the HOST initiates the connection via the
 # runner's --net-tcp-connect seam: SYN -> handshake -> `help` payload -> the
-# shell's reply -> FIN, which auto-detaches the terminal (B4).
+# shell's reply -> FIN, which auto-detaches the terminal (B4). M50 TS4
+# (#1138, ADR 0024 D6): `open` is the explicit insecure mode (no credential
+# in the store on this share); the default posture refuses to listen.
 #
 # Boot default unchanged: nothing attaches until SH.BIN is asked with the
 # `net` argument; the untouched serial default is the other live-sh gates.
@@ -17,7 +19,7 @@ vgate_runner_flags -Xswiftc -DSPIKE
 
 vgate_file script.txt <<'EOF'
 net ip 10.0.0.1
-exec SH.BIN net 2323
+exec SH.BIN net 2323 open
 EOF
 
 vgate_file payload.txt <<'EOF'
@@ -35,6 +37,7 @@ vgate_run 01 -- --net '$RUN_DIR/cap.bin' \
 vgate_assert 01 serial-contains 'net ip: ip=10.0.0.1'
 vgate_assert 01 serial-contains 'sh: ready'
 vgate_assert 01 serial-contains 'sh: remote on 2323'
+vgate_assert 01 serial-contains 'sh: remote auth=open'
 vgate_assert 01 serial-contains 'tty net: detached'
 vgate_assert 01 output-contains 'NET-TCP-CONNECT: sent SYN'
 vgate_assert 01 output-contains 'NET-TCP-CONNECT: handshake complete'

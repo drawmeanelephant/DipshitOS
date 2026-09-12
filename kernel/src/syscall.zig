@@ -104,9 +104,10 @@ pub const slot_count: usize = 128;
 /// M29 (issue #598): slots 63/64 are sys_mmap/sys_munmap.
 /// M32 WMS2 (issue #622): slot 65 is sys_wmctl (ADR 0015).
 /// M50 TS1 (#1135): slot 68 is sys_principal; TS2 (#1136): slot 69 is
-/// sys_file_mode; TS5 (#1139): slot 70 is sys_secret_get. Slot 71
-/// (sys_tty_net_auth) is reserved for TS4 (#1138).
-pub const implemented_count: usize = 71;
+/// sys_file_mode; TS5 (#1139): slot 70 is sys_secret_get; TS4 (#1138):
+/// slot 71 is sys_tty_net_auth. `implemented_count` is the number of
+/// registered rows (rows 0..implemented_count-1).
+pub const implemented_count: usize = 72;
 /// Card G6 (claim 0487) follow-on (slot 18): the fixed `sys_win_get` shape —
 /// four u32 LE words (x, y, w, h), 16 bytes, marshaled per call and copy_out'd
 /// through uaccess (the procs snapshot pattern).
@@ -318,10 +319,17 @@ pub const sys_file_mode: u64 = 69;
 /// is host-side; a non-echoing set path is deferred per D8). Excluded from
 /// strace argument/return tracing (never-logged contract).
 pub const sys_secret_get: u64 = 70;
-/// M50 TS4 (issue #1138, ADR 0024 D6/D10): the delegated net-auth slot —
-/// reserved NOW so the TS5 strace exclusion for it lands in the same
-/// `trace_excluded` table TS4 will consume. Not registered until TS4.
+/// M50 TS4 (issue #1138, ADR 0024 D6/D10): `sys_tty_net_auth(op, buf, len)` —
+/// slot 71. The delegated net-auth channel: op 0 copies the fresh challenge
+/// OUT, op 1 copies the buffered client reply line OUT, op 2 copies the
+/// process's accept/reject verdict IN. The caller must own the attached net
+/// terminal. Excluded from strace argument/return tracing (never-logged
+/// contract).
 pub const sys_tty_net_auth: u64 = 71;
+/// The op selectors of slot 71 (ADR 0007 amendment).
+pub const net_auth_op_challenge: u64 = 0;
+pub const net_auth_op_response: u64 = 1;
+pub const net_auth_op_verdict: u64 = 2;
 
 pub const ErrorCode = enum(i64) {
     einval = -1,
@@ -493,6 +501,8 @@ pub fn ensure_table() *const [slot_count]Entry {
         table_storage[sys_file_mode] = .{ .name = "sys_file_mode", .handler = handle_file_mode };
         // M50 TS5 (#1139, ADR 0024 D8/D10): slot 70 — sys_secret_get.
         table_storage[sys_secret_get] = .{ .name = "sys_secret_get", .handler = handle_secret_get };
+        // M50 TS4 (#1138, ADR 0024 D6/D10): slot 71 — sys_tty_net_auth.
+        table_storage[sys_tty_net_auth] = .{ .name = "sys_tty_net_auth", .handler = handle_tty_net_auth };
         table_ready = true;
     }
     return &table_storage;
@@ -534,7 +544,7 @@ fn doms_of(number: u64) u5 {
         sys_exec => f | k,
         sys_win_open, sys_win_fill, sys_win_present, sys_win_close, sys_win_move, sys_win_raise, sys_win_get, sys_win_query, sys_win_set_visible, sys_win_fill_batch, sys_win_resize, 48, sys_win_raise_front, sys_win_lower_back, 52, sys_win_set_unsaved, sys_win_set_title, sys_drag_read, sys_font_size => w,
         sys_ipc_send, sys_ipc_recv, sys_poll_event, sys_wait_event, sys_timer_set, sys_timer_cancel, sys_notify, sys_wmctl => e,
-        sys_procs, sys_wait, sys_kill, sys_clipboard_set, sys_clipboard_get, sys_audio_info, sys_audio_play, sys_audio_volume, sys_audio_mute, sys_pipe_read, sys_pipe_write, 54, sys_mmap, sys_munmap, sys_time, sys_tty_attach, sys_principal, sys_secret_get => k,
+        sys_procs, sys_wait, sys_kill, sys_clipboard_set, sys_clipboard_get, sys_audio_info, sys_audio_play, sys_audio_volume, sys_audio_mute, sys_pipe_read, sys_pipe_write, 54, sys_mmap, sys_munmap, sys_time, sys_tty_attach, sys_principal, sys_secret_get, sys_tty_net_auth => k,
         sys_exit => svclock.all_bits,
         else => 0,
     };
@@ -583,8 +593,9 @@ pub fn dispatch(number: u64, args: Args, frame: *exceptions.VectorFrame) u64 {
 /// never traced. `sys_secret_get` moves secret VALUES between the store and
 /// caller memory; a strace line would name the buffer pointers and byte
 /// counts of the only in-guest secret reader. `sys_tty_net_auth` (slot 71,
-/// TS4) carries the delegated-auth buffers and is reserved into the same
-/// exclusion now so TS4 cannot accidentally trace a credential.
+/// M50 TS4 #1138) carries the delegated-auth challenge/reply/verdict buffers
+/// across the same redaction — TS5 reserved it here so TS4 cannot accidentally
+/// trace a credential.
 fn trace_excluded(number: u64) bool {
     return switch (number) {
         sys_secret_get, sys_tty_net_auth => true,
@@ -1804,16 +1815,18 @@ fn handle_time(_: Args, _: *exceptions.VectorFrame) u64 {
     return timer.wall_epoch() orelse error_result(.enosys);
 }
 
-/// `sys_tty_attach(front_end, arg)` (slot 67, #1072/ADR 0020): attach (or
-/// detach) the CALLING process's controlling terminal — opened as
-/// `/dev/tty` — to a front-end. a0: 0 = detach, 1 = the serial console
-/// (the kernel console), 2 = a `.user` window front-end (a1 = window id),
-/// 3 = a net front-end (a1 = TCP listen port; SH7/Amendment B). The process
-/// must have opened `/dev/tty` (else EINVAL). Front-ends are mutually
-/// exclusive (serial/window/net, D2) and the console can be held by only
-/// one terminal at a time (busy -> EACCES). For selector 2 the caller must
-/// OWN the `.user` window; for selector 3 the caller must own the TCP
-/// listener (the single-connection seam). Returns 0.
+/// `sys_tty_attach(front_end, arg, mode, reserved, allow_ip)` (slot 67,
+/// #1072/ADR 0020): attach (or detach) the CALLING process's controlling
+/// terminal — opened as `/dev/tty` — to a front-end. a0: 0 = detach, 1 = the
+/// serial console (the kernel console), 2 = a `.user` window front-end
+/// (a1 = window id), 3 = a net front-end (a1 = TCP listen port; SH7/
+/// Amendment B). The process must have opened `/dev/tty` (else EINVAL).
+/// Front-ends are mutually exclusive (serial/window/net, D2) and the console
+/// can be held by only one terminal at a time (busy -> EACCES). For selector
+/// 2 the caller must OWN the `.user` window; for selector 3 the caller must
+/// own the TCP listener (the single-connection seam), a2 is the auth scheme
+/// (M50 TS4: 0 = open, 1 = hmac-sha256, 2 = ed25519), and a4 is the optional
+/// source-IP allowlist. Returns 0.
 fn handle_tty_attach(args: Args, _: *exceptions.VectorFrame) u64 {
     const pid = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
     const th = file_table.controlling_terminal(pid) orelse return error_result(.einval);
@@ -1849,24 +1862,17 @@ fn handle_tty_attach(args: Args, _: *exceptions.VectorFrame) u64 {
             // front-end — it enters LISTEN on `port` through the single
             // bounded TCP seam and attaches its own terminal. No
             // cross-process terminal capability (B2).
+            // M50 TS4 (#1138, ADR 0024 D6): a2 = the auth scheme the pump
+            // frames (0 open, 1 hmac-sha256, 2 ed25519). The credential is
+            // NEVER an argument — the process reads it from the TS5 store
+            // and votes through slot 71. a4 = optional source-IP allowlist
+            // (big-endian IPv4 u32; 0 = any).
             if (args[1] == 0 or args[1] > 0xffff) return error_result(.einval);
+            if (args[2] > 2) return error_result(.einval);
             if (!virtio_net.net_ready) return error_result(.einval);
             if (!virtio_net.arp.ip_set()) return error_result(.einval);
             const port: u16 = @truncate(args[1]);
-            // M46 RC3 (#1111, ADR 0022 D3/D4): optional v1 auth. args[2]/
-            // args[3] are the shared-secret user pointer + length (0/0 =
-            // none; the first line of the session must match it), and args[4]
-            // is an optional source-IP allowlist (a big-endian IPv4 u32; 0 =
-            // any). The secret is copied through uaccess once, into the
-            // bounded terminal field.
-            var net_secret_buf: [terminal.net_secret_max]u8 = undefined;
-            var net_secret: []const u8 = &.{};
-            if (args[3] > 0) {
-                if (args[3] > terminal.net_secret_max) return error_result(.einval);
-                const slen: usize = @intCast(args[3]);
-                if (uaccess.copy_in(net_secret_buf[0..slen], args[2], slen) != .ok) return error_result(.efault);
-                net_secret = net_secret_buf[0..slen];
-            }
+            const scheme: terminal.NetAuthScheme = @enumFromInt(@as(u8, @intCast(args[2])));
             var allow: ?[4]u8 = null;
             if (args[4] != 0) {
                 allow = .{
@@ -1892,10 +1898,64 @@ fn handle_tty_attach(args: Args, _: *exceptions.VectorFrame) u64 {
             tcp.allow_ip = if (allow) |ip| ip else .{ 0, 0, 0, 0 };
             tcp.allow_ip_set = allow != null;
             tcp.owner_pid = pid;
-            if (!t.attachNetAuth(port, net_secret, allow)) {
+            if (!t.attachNetAuth(port, scheme, allow)) {
                 tcp.reset();
                 return error_result(.eacces);
             }
+            return 0;
+        },
+        else => return error_result(.einval),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// M50 TS4 (issue #1138, ADR 0024 D6/D10): sys_tty_net_auth — slot 71
+// ---------------------------------------------------------------------------
+
+/// `sys_tty_net_auth(op, buf, len)`: the delegated challenge-response
+/// channel between the kernel net pump and the attached process. op 0 copies
+/// the fresh 32-byte challenge OUT (returns 32; 0 before it is minted); op 1
+/// copies the buffered client reply line OUT (its hex length; 0 when none);
+/// op 2 reads the one-byte verdict IN (0 reject, 1 accept) and applies it —
+/// accept opens the byte gate, reject sends `auth failed` + reset + detach.
+/// The caller must be the process that owns the attached net terminal.
+/// `EINVAL` when the terminal is not in auth mode, no reply awaits a
+/// verdict, or the op is unknown; `EACCES` when the caller does not own the
+/// attached terminal; `EFAULT` for a bad buffer. Excluded from strace in
+/// `dispatch`/`maybe_trace` (the never-logged contract).
+fn handle_tty_net_auth(args: Args, _: *exceptions.VectorFrame) u64 {
+    const op = args[0];
+    const pid = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    const th = file_table.controlling_terminal(pid) orelse return error_result(.einval);
+    const t = terminal.get(th) orelse return error_result(.einval);
+    const net_t = terminal.attachedNet() orelse return error_result(.einval);
+    // "Caller must own the attached terminal" — the same ownership the
+    // attach path recorded (file_table's controlling-terminal registry).
+    if (net_t != t) return error_result(.eacces);
+    if (!t.net_auth_on) return error_result(.einval);
+    switch (op) {
+        net_auth_op_challenge => {
+            if (t.net_authed or !t.net_challenge_sent) return 0;
+            if (uaccess.copy_out(args[1], &t.net_challenge, terminal.net_challenge_len) != .ok) {
+                return error_result(.efault);
+            }
+            return terminal.net_challenge_len;
+        },
+        net_auth_op_response => {
+            if (t.net_authed or !t.net_reply_ready) return 0;
+            if (args[1] == 0) return error_result(.efault);
+            if (uaccess.copy_out(args[1], t.net_reply[0..t.net_reply_len], t.net_reply_len) != .ok) {
+                return error_result(.efault);
+            }
+            return @intCast(t.net_reply_len);
+        },
+        net_auth_op_verdict => {
+            if (t.net_verdict != null or !t.net_reply_ready or t.net_authed) return error_result(.einval);
+            if (args[1] == 0 or args[2] < 1) return error_result(.efault);
+            var b: [1]u8 = undefined;
+            if (uaccess.copy_in(&b, args[1], 1) != .ok) return error_result(.efault);
+            if (b[0] > 1) return error_result(.einval);
+            if (!terminal.netAuthVerdict(t, b[0] == 1)) return error_result(.einval);
             return 0;
         },
         else => return error_result(.einval),

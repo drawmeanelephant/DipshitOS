@@ -970,3 +970,57 @@ redaction tests) and class-B (`live-secrets`: a host-seeded known value is
 listed by NAME in the guest `secrets` and never appears in the serial
 capture, and `cat SECRETS.TXT` / `vf cat SECRETS.TXT` are denied at both
 seams).
+
+### Amendment (2026-09-11, #1138 — slot 71 `sys_tty_net_auth`, the delegated net-auth seam)
+
+M50 TS4 (ADR 0024 D6/D10) adds the trust milestone's fourth slot: **71** =
+`sys_tty_net_auth(op, buf, len)`. It is the delegated challenge-response
+channel between the kernel net pump and the process that owns the attached
+net terminal (selector 3). `op` 0 copies the fresh 32-byte challenge OUT
+(returns 32; 0 before it is minted or after auth); `op` 1 copies the
+buffered client reply line (hex) OUT (its length; 0 when none yet); `op` 2
+copies the one-byte verdict IN (0 = reject, 1 = accept) and applies it —
+accept opens the byte gate and delivers pipelined post-auth bytes, reject
+transmits `auth failed\n` + `tcp.reset()` + detach. The caller must be the
+process that owns the attached net terminal (`EACCES` otherwise); `EINVAL`
+when the terminal is not in auth mode, no reply awaits a verdict, or the op
+is unknown; `EFAULT` for a bad buffer. The handler and its results are
+excluded from strace (the never-logged contract, shared with slot 70).
+
+The M46 in-band shared secret is **deleted, not layered**: `sys_tty_attach`
+selector 3's `secret_ptr`/`secret_len` arguments are replaced by `a2` = the
+auth scheme (**0 open, 1 hmac-sha256, 2 ed25519**; the secret never rides an
+argument), `a4` stays the optional source-IP allowlist, and `terminal.zig`'s
+`net_secret`/`secretEq` are gone. On TCP accept the pump mints a fresh
+32-byte challenge via `csprng`, frames exactly one line
+`VIRELAIOS-AUTH/1 <scheme> <hex-challenge>\n`, buffers one reply line
+(length- and hex-validated against the scheme: 64 hex for HMAC-SHA256, 128
+for Ed25519), and gates every post-challenge byte on the process's verdict.
+Reject, a malformed line, or no verdict within the **10 s** auth deadline is
+`auth failed` + reset + detach — never a bypass, and pre-auth bytes never
+reach the terminal input queue. The handshake bounds raise
+`tcp.payload_max` 64 → **192** and `segment_max` 84 → **212** (fixed-size,
+reassembly-free; `frame_max` 118 → 246, still far under the 1514 wire
+bound); `net_auth_line_max = 160` replaces the shared-secret fields.
+Userland (`user/src/lib/netauth.zig`) reads the challenge and reply, verifies
+`hmacSha256` + `ct.ctEq` over
+`"VIRELAIOS-AUTH/1 hmac-sha256" || 0x00 || challenge[32]` (or
+`ed25519.verify` over the `"VIRELAIOS-AUTH/1 ed25519"` message), and votes;
+keys come from the TS5 store (`net-hmac`, the key byte-for-byte;
+`net-ed25519`, the 64-hex public key) and are zeroized. CLI: `net <port>
+[open]` — with a credential auth is mandatory; with none the shell refuses
+to listen unless `open` is explicit (fail closed). The Stage-0 host bridge
+`--console-tcp [host:]port[:secret]` runs the same HMAC handshake with
+CryptoKit, and `vgate-client.py --hmac-secret` answers it with Python's
+stdlib HMAC; no secret ⇒ byte-identical to the pre-TS4 bridge.
+`implemented_count` becomes **72** (rows 0–71; reserved 72–127). No existing
+number, argument, result, or error code changes. Verified class-A (the
+`terminal.zig` pump state machine over the injectable `NetSeam`: fresh
+challenge, wrong/malformed reply, replay/stale challenge, 10 s deadline,
+key/challenge wipe, framing bounds; `netauth.zig` pinned HMAC RFC 4231-style
+and Ed25519 CryptoKit vectors, wrong-MAC, replay, zeroize; the slot-71
+owner/strace tests) and class-B (`live-remote-auth2`: wrong MAC →
+`auth failed`, right MAC drives the shell, a captured handshake replayed
+against the fresh challenge is rejected, explicit `open` still accepts;
+`live-remote` re-pointed to `open`, `live-term-net` updated, and
+`live-remote-auth` retired/removed).
