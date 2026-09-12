@@ -536,8 +536,11 @@ pub const Userauth = struct {
 
         // The signed message and the outgoing request share one buffer: the
         // prefix written before the signature IS `string session_id ||
-        // request` (RFC 4252 §7), and the trailing signature string turns it
-        // into the packet body.
+        // request` (RFC 4252 §7). The session identifier is signed but is
+        // NOT part of the USERAUTH_REQUEST packet, so the send skips the
+        // `string session_id` prefix (4-byte length + 32 bytes) — SSH5's
+        // class-B endpoint gate caught the earlier whole-buffer send, which
+        // no RFC 4252 server accepts.
         var req_buf: [request_max]u8 = undefined;
         var w = wire.Writer.init(&req_buf);
         try w.writeString(session_id);
@@ -551,7 +554,7 @@ pub const Userauth = struct {
         try sw.writeString(&self.sig);
         try w.writeString(sw.written());
 
-        try self.send(w.written());
+        try self.send(w.written()[4 + session_id.len ..]);
 
         while (true) {
             const payload = try self.recv(&self.recv_buf);
@@ -617,20 +620,24 @@ const Vector = struct {
     const service_request = hex("050000000c7373682d7573657261757468");
     const none_request = hex("3200000007766972656c61690000000e7373682d636f6e6e656374696f6e000000046e6f6e65");
 
+    /// The RFC 4252 §7 `publickey` request body, WITHOUT the leading
+    /// `string session identifier` (that string is signed, never sent).
+    const request_body_hex =
+        "3200000007766972656c61690000000e7373682d636f6e6e656374696f6e000000097075626c69636b657901" ++
+        "0000000b7373682d6564323535313900000033" ++
+        "0000000b7373682d65643235353139000000203d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c";
+    const request = hex(request_body_hex);
+    const sig_hex =
+        "e51e41d7670cbbae44e868b6a961badae27a6172bce46f944233dfa47900fe7124f0c51c05acc9ebe309d32691455c1608c729a41f99dada6b263d4b488f490f";
+    const sig_blob_hex =
+        "0000000b7373682d6564323535313900000040" ++ sig_hex;
+
     /// `string session_id || byte 50 || string user || string
     /// "ssh-connection" || string "publickey" || TRUE || string
     /// "ssh-ed25519" || string key_blob` — the exact signed bytes.
-    const signed = hex("0000002015c9cacbd36588f06a5189f221597e1e4d13f2f8c1fe9951f62b85afb957136d" ++
-        "3200000007766972656c61690000000e7373682d636f6e6e656374696f6e000000097075626c69636b657901" ++
-        "0000000b7373682d6564323535313900000033" ++
-        "0000000b7373682d65643235353139000000203d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c");
-    const sig = hex("e51e41d7670cbbae44e868b6a961badae27a6172bce46f944233dfa47900fe7124f0c51c05acc9ebe309d32691455c1608c729a41f99dada6b263d4b488f490f");
-    const publickey_request = hex("0000002015c9cacbd36588f06a5189f221597e1e4d13f2f8c1fe9951f62b85afb957136d" ++
-        "3200000007766972656c61690000000e7373682d636f6e6e656374696f6e000000097075626c69636b657901" ++
-        "0000000b7373682d6564323535313900000033" ++
-        "0000000b7373682d65643235353139000000203d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c" ++
-        "00000053" ++
-        "0000000b7373682d6564323535313900000040e51e41d7670cbbae44e868b6a961badae27a6172bce46f944233dfa47900fe7124f0c51c05acc9ebe309d32691455c1608c729a41f99dada6b263d4b488f490f");
+    const signed = hex("0000002015c9cacbd36588f06a5189f221597e1e4d13f2f8c1fe9951f62b85afb957136d" ++ request_body_hex);
+    const sig = hex(sig_hex);
+    const publickey_request = hex(request_body_hex ++ "00000053" ++ sig_blob_hex);
 
     const service_accept = hex("060000000c7373682d7573657261757468");
     const failure_publickey_password = hex("33000000127075626c69636b65792c70617373776f726400");
@@ -800,22 +807,25 @@ test "userauth: pinned none -> publickey flow, exact RFC 4252 §7 layout" {
     // Exactly three payloads: service request, none probe, publickey.
     try std.testing.expectEqual(@as(usize, 3), TestPeer.tx_count);
 
-    // Each outgoing payload is byte-exact against the pinned vector.
+    // Each outgoing payload is byte-exact against the pinned vector. The
+    // publickey packet is the RFC 4252 §7 request + signature string; the
+    // session identifier is signed but must NOT appear on the wire.
     try std.testing.expectEqualSlices(u8, &Vector.service_request, TestPeer.sentPayload(0));
     try std.testing.expectEqualSlices(u8, &Vector.none_request, TestPeer.sentPayload(1));
     try std.testing.expectEqualSlices(u8, &Vector.publickey_request, TestPeer.sentPayload(2));
+    try std.testing.expectEqual(@as(u8, msg_userauth_request), TestPeer.sentPayload(2)[0]);
+    try std.testing.expect(!std.mem.startsWith(u8, TestPeer.sentPayload(2), &Vector.signed));
 
-    // The signed bytes are `session_id || request prefix`, asserted
-    // byte-for-byte, and the pinned signature verifies with the derived key.
-    const signed_wire = TestPeer.sentPayload(2)[0..Vector.signed.len];
-    try std.testing.expectEqualSlices(u8, &Vector.signed, signed_wire);
+    // The signed bytes are `session_id || request prefix`; the pinned
+    // signature verifies with the derived key over exactly those bytes.
     // The signed layout ends with `string <key blob>`, and the key blob is
     // `string "ssh-ed25519" || string <32-byte pubkey>`.
-    try std.testing.expectEqualSlices(u8, &Vector.key_blob, signed_wire[signed_wire.len - Vector.key_blob.len ..]);
+    const signed_tail: []const u8 = Vector.signed[Vector.signed.len - Vector.key_blob.len ..];
+    try std.testing.expectEqualSlices(u8, &Vector.key_blob, signed_tail);
     var pk: [host_key_len]u8 = undefined;
     ed25519.derivePublicKey(&pk, &Vector.user_seed);
     try std.testing.expectEqualSlices(u8, &Vector.user_pk, &pk);
-    try std.testing.expect(ed25519.verify(&Vector.sig, signed_wire, &pk));
+    try std.testing.expect(ed25519.verify(&Vector.sig, &Vector.signed, &pk));
 
     // Secret hygiene: every staging buffer is zero, and the seed (raw and
     // hex) never appears in any captured byte.
@@ -927,10 +937,28 @@ test "userauth: a wrong user key is refused (signature does not verify)" {
     // with the wrong (TEST 3) seed; the wrong key does. That is the
     // server-side "wrong user key refused", observed on the wire.
     const req = TestPeer.sentPayload(2);
-    const signed_wire = req[0..Vector.signed.len];
+    try std.testing.expectEqual(@as(u8, msg_userauth_request), req[0]);
+
+    // Rebuild the exact signed message for this run: string session_id ||
+    // request, where the request carries the WRONG (TEST 3) key blob.
+    var blob_buf: [4 + algo_ed25519.len + 4 + host_key_len]u8 = undefined;
+    var bw = wire.Writer.init(&blob_buf);
+    try bw.writeString(algo_ed25519);
+    try bw.writeString(&Vector.wrong_pk);
+    var signed_buf: [request_max]u8 = undefined;
+    var w = wire.Writer.init(&signed_buf);
+    try w.writeString(&Vector.session_id);
+    try w.writeByte(msg_userauth_request);
+    try w.writeString(Vector.user);
+    try w.writeString(service_connection);
+    try w.writeString(method_publickey);
+    try w.writeBool(true);
+    try w.writeString(algo_ed25519);
+    try w.writeString(bw.written());
+
     const sig_wire: [sig_len]u8 = req[req.len - sig_len ..][0..sig_len].*;
-    try std.testing.expect(!ed25519.verify(&sig_wire, signed_wire, &Vector.user_pk));
-    try std.testing.expect(ed25519.verify(&sig_wire, signed_wire, &Vector.wrong_pk));
+    try std.testing.expect(!ed25519.verify(&sig_wire, w.written(), &Vector.user_pk));
+    try std.testing.expect(ed25519.verify(&sig_wire, w.written(), &Vector.wrong_pk));
 }
 
 test "userauth: the service request must be accepted (DISCONNECT fails closed)" {
