@@ -209,16 +209,35 @@ it adds a spec (SSH5), and presents `boot-default-unchanged` evidence.
   segments arrived; no retransmission was needed), but that remains the
   documented best-effort limit below — the ABI still has no `tx_pending`
   read.
-- **Real-OpenSSH interop: attempted, not observed (honest).** A non-root
-  `/usr/sbin/sshd` on port 2222 with a generated host key and the pinned
-  RFC 8032 TEST 2 client key in `authorized_keys` accepted that key with the
-  host's own `ssh` client. The guest→host leg did not run: under
-  `--net-nat` the guest resolved the 192.168.64.1 gateway ARP but
-  `SSH.BIN tbuddy@192.168.64.1:2222 …` failed at `stage=connect` (VZ NAT
-  delivered no SYN to the host listener), and a host-LAN-IP attempt failed
-  for the same reason (the seam is same-subnet/ARP-bound); no container
-  runtime (docker daemon down) or root SSH service was available. Recorded
-  as a manual check pending a NAT host-port story or a container host.
+- **Real-OpenSSH interop (issue #1209, 2026-09-12): transport proved, one
+  conformance gap observed.** The SSH5 attempt had stopped at the network
+  leg; #1209 first proved that blocker is real and not a
+  bind/firewall mistake: under `--net-nat` the guest resolves and pings
+  the 192.168.64.1 gateway, but while the VM ran no host interface carried
+  the guest subnet (`vmenet0` inactive, no address), there was no host
+  route or ARP entry for 192.168.64.0/24, the gateway MAC is synthetic
+  (a Virtualization.framework-internal router), the macOS application
+  firewall was OFF, and `sshd` bound `*:2222` (DEBUG3) logged **nothing**
+  while both `SSH.BIN` and the monitor's own `net tcp connect` sat in
+  SYN_SENT. The run then used a new **byte-transparent runner relay**
+  (`--net-tcp-respond <ip>:<port>:relay` +
+  `--net-tcp-respond-relay 127.0.0.1:2222`; no crypto in the runner)
+  against the host's real `/usr/sbin/sshd` (OpenSSH_10.3p1, LibreSSL
+  3.3.6), generated host key pinned in `SSH/KNOWN_HOSTS`, RFC 8032 TEST 2
+  client key in `authorized_keys`, fixed command `echo
+  VIRELAI-INTEROP-OK`. Observed: KEX negotiated `curve25519-sha256` +
+  `ssh-ed25519` + `chacha20-poly1305@openssh.com` (no compression) and the
+  client verified the real host-key signature (`ssh: kex-ok`); real sshd
+  then rejected the first encrypted packet with `padding error: need 28
+  block 8 mod 4`, `SSH2_MSG_DISCONNECT: Packet corrupt`, and `message
+  authentication code incorrect`. Root cause: OpenSSH pads
+  `chacha20-poly1305` so `packet_length` (the encrypted part after the
+  4-byte length) is block-aligned, while the client and VSSH aligned
+  `4 + packet_length`; the plaintext KEX path uses the other rule, which
+  is why KEX completed. Userauth/exec stdout/`exit-status` were NOT
+  observed; the seed never appears in any log. Fix: follow-up **#1210**
+  (client + VSSH realignment), not smuggled into the evidence change.
+  Raw evidence: `artifacts/m51-interop/`.
 
 **Coordination with #1163 (GOOS=virelai port).** `sys_getrandom` is a single
 shared contract, not two: **slot 72 is owned by SSH-P1 (#1166)** and the Go
@@ -304,16 +323,19 @@ multi-user isolation beyond TS5 `uid` scoping.
 - **Ephemeral key entropy is a new kernel surface.** Slot 72 is small and
   ownerless by design; SSH-P1 must prove it cannot be called on the boot
   path and does not weaken the CSRNG (it only reads it).
-- **Real-OpenSSH interop was attempted and is NOT observed (2026-09-12).**
-  The hermetic gate proves the profile against our own responder; the
-  documented real-`sshd` run stopped at the network leg — VZ-NAT
-  guest→host TCP did not reach a host listener (`SSH.BIN` `stage=connect`
-  after the gateway ARP resolved), and no container/root-sshd host was
-  available. This is the honesty check's precise blocked step; a NAT
-  host-port story (or a container reachable from the guest) unblocks it.
-  Conformance gaps that only a real server can surface (packet padding,
-  window sizes, the exact rekey/`mpint` behaviours) therefore remain
-  unobserved.
+- **Real-OpenSSH interop: transport proved, padding gap open (2026-09-12,
+  issue #1209).** VZ-NAT guest→host TCP is a confirmed dead end on this
+  host (no host interface/route/ARP for the guest subnet, synthetic
+  gateway, firewall off, sshd saw nothing); the run went through the new
+  byte-transparent runner relay to real OpenSSH 10.3, where KEX completed
+  and the real host key verified, and real sshd rejected the first
+  encrypted packet on the `chacha20-poly1305` padding alignment
+  (`padding error: need 28 block 8 mod 4` → DISCONNECT `Packet corrupt`).
+  So the honesty check **did surface a conformance gap that only a real
+  server could**: the padding rule for the encrypted (post-NEWKEYS) path.
+  The predicted gaps list shrinks to window sizes and the exact
+  rekey/`mpint` behaviours, all still unobserved; userauth/exec stdout/
+  `exit-status` against real OpenSSH await the #1210 fix.
 - **The guest's multi-segment TX is best-effort (SSH1's documented limit).**
   The ABI has no `tx_pending` read, so the adapter cannot wait for an ACK
   between segments; the kernel's retransmit buffer holds one segment and a

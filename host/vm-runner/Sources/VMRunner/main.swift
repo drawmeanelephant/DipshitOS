@@ -85,6 +85,16 @@
 //          `:handshake` suffix (card N11, claim 5357) answers the SYN
 //          with a SYN-ACK then goes SILENT on data/FIN — the
 //          deterministic black hole for the retransmission-bound run.
+//          M51 SSH1 (#1168) added a `:packet` suffix (paced payload) and
+//          M51 SSH5 (#1172) a `:ssh` suffix (the runner-hosted minimal
+//          SSH-2 server, VSSH). M51 real-OpenSSH interop (#1209, goal
+//          #1066, ADR 0025 D8) adds a `:relay` suffix with
+//          [--net-tcp-respond-relay <host-ip>:<host-port>]: the same
+//          deterministic TCP endpoint, but the byte stream is proxied
+//          byte-for-byte (NO crypto in the runner) to that real upstream
+//          TCP server — e.g. a local OpenSSH `sshd` — so the guest's
+//          SSH.BIN negotiates with real OpenSSH. The documented manual
+//          check, never a CI gate.
 //          Requires --net. OFF by default: the default VM is unchanged.)
 //         [--net-tcp-connect <guest-ip>:<port>[:<payload-file>]]
 //          [--net-tcp-connect-after <text>]
@@ -590,6 +600,23 @@ var netTcpRespondSSHExitStatus: UInt32 = 0
 var netTcpRespondSSHServer: SSHServer?
 var netTcpRespondSSHTx: [UInt8] = []
 var netTcpRespondSSHTxOffset = 0
+// M51 real-OpenSSH interop (#1209, goal #1066, ADR 0025 D8): the optional
+// `:relay` responder mode — the same deterministic TCP endpoint, but the
+// byte stream is proxied byte-for-byte to a REAL upstream TCP server
+// (typically a local OpenSSH `sshd`). The runner performs NO SSH/crypto:
+// it only carries bytes, so the guest's SSH.BIN negotiates with real
+// OpenSSH. TX is paced exactly like `:ssh` (one ≤192-byte segment per
+// guest ACK) because the guest kernel RX is a single 192-byte slot with
+// no reassembly. OFF by default: every existing gate is byte-identical.
+var netTcpRespondRelayMode = false
+var netTcpRespondRelayHost = "127.0.0.1"
+var netTcpRespondRelayPort: UInt16?
+var netTcpRespondRelayFd: Int32 = -1
+var netTcpRespondRelayGen = 0
+var netTcpRespondRelayClosed = false
+var netTcpRespondRelayTx: [UInt8] = []
+var netTcpRespondRelayTxOffset = 0
+let netTcpRespondRelayLock = NSLock()
 // The responder's per-connection state: the server's next sequence
 // number. The FIXED server ISN (gate-assertable); a new SYN resets the
 // state — ONE connection at a time (the guest's ONE client state
@@ -966,7 +993,7 @@ while idx < arguments.count {
         let token = arguments[idx + 1]
         let halves = token.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false)
         guard halves.count >= 2, let port = UInt16(halves[1]) else {
-            fail("--net-tcp-respond requires <host-ip>:<host-port>[:handshake|packet|ssh], got '\(token)'.")
+            fail("--net-tcp-respond requires <host-ip>:<host-port>[:handshake|packet|ssh|relay], got '\(token)'.")
         }
         if halves.count == 3 {
             if halves[2] == "handshake" {
@@ -976,8 +1003,12 @@ while idx < arguments.count {
             } else if halves[2] == "ssh" {
                 // M51 SSH5 (#1172): the minimal SSH-2 server.
                 netTcpRespondSSHMode = true
+            } else if halves[2] == "relay" {
+                // M51 interop (#1209): byte-forward to a real upstream
+                // (`--net-tcp-respond-relay`).
+                netTcpRespondRelayMode = true
             } else {
-                fail("--net-tcp-respond mode must be 'handshake', 'packet' or 'ssh', got '\(halves[2])'.")
+                fail("--net-tcp-respond mode must be 'handshake', 'packet', 'ssh' or 'relay', got '\(halves[2])'.")
             }
         }
         let parts = halves[0].split(separator: ".").compactMap { UInt8($0) }
@@ -1030,6 +1061,22 @@ while idx < arguments.count {
             fail("--net-tcp-respond-ssh-exit requires a uint32, got '\(arguments[idx + 1])'.")
         }
         netTcpRespondSSHExitStatus = n
+        idx += 2
+    } else if arg == "--net-tcp-respond-relay", idx + 1 < arguments.count {
+        // M51 interop (#1209): the real upstream the `:relay` mode
+        // byte-forwards to, `<host-ip>:<host-port>` (dotted quad, like the
+        // other responders — the documented manual real-sshd check).
+        let token = arguments[idx + 1]
+        let halves = token.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false)
+        guard halves.count >= 2, let port = UInt16(halves[1]) else {
+            fail("--net-tcp-respond-relay requires <host-ip>:<host-port>, got '\(token)'.")
+        }
+        let parts = halves[0].split(separator: ".").compactMap { UInt8($0) }
+        guard parts.count == 4 else {
+            fail("--net-tcp-respond-relay requires a dotted-quad IPv4 address, got '\(token)'.")
+        }
+        netTcpRespondRelayHost = String(halves[0])
+        netTcpRespondRelayPort = port
         idx += 2
     } else if arg == "--net-tcp-connect", idx + 1 < arguments.count {
         // SH7 (#1083, ADR 0020 Amendment B): the host-initiated inbound TCP
@@ -1415,6 +1462,10 @@ if netTcpRespondSSHMode {
     }
     print("NET-TCP-SSH: cipher self-check ok (OpenSSH PROTOCOL.chacha20poly1305 pinned vector, seq 7, tag \(SSHFixtures.opensshVectorTagHex))")
 }
+// M51 interop (#1209): `:relay` needs the real upstream to forward to.
+if netTcpRespondRelayMode, netTcpRespondRelayPort == nil {
+    fail("--net-tcp-respond :relay requires --net-tcp-respond-relay <host-ip>:<host-port> (the real upstream TCP server).")
+}
 if netTcpConnectGuestIP != nil, netCapturePath == nil {
     fail("--net-tcp-connect requires --net (the client frames are written into the SAME attachment's socket).")
 }
@@ -1585,7 +1636,10 @@ if let netCapturePath {
                 let isRst = (flags & 0x04) != 0
                 if isRst {
                     // The guest aborted — the connection is dead; observe.
-                    if netTcpRespondSSHMode {
+                    if netTcpRespondRelayMode {
+                        netTcpRespondRelayShutdown()
+                        print("NET-TCP-RELAY: observed the guest's RST (seq 0x\(hex32(seq))); upstream closed")
+                    } else if netTcpRespondSSHMode {
                         print("NET-TCP-SSH: observed the guest's RST (seq 0x\(hex32(seq)))")
                     } else {
                         print("NET-TCP: observed the guest's RST (seq 0x\(hex32(seq)))")
@@ -1593,7 +1647,19 @@ if let netCapturePath {
                 } else if isSyn {
                     netTcpSrvNxt = netTcpSrvIsn &+ 1
                     netTcpRespondPacketIndex = 0
-                    if netTcpRespondSSHMode {
+                    if netTcpRespondRelayMode, netTcpRespondRelayPort != nil {
+                        // M51 interop (#1209): a fresh connection dials the
+                        // real upstream NOW — real sshd sends its banner
+                        // before the guest's version line, so the first
+                        // paced chunk is already buffered.
+                        netTcpRespondRelayLock.lock()
+                        netTcpRespondRelayTemplate = []
+                        netTcpRespondRelayGuestNext = 0
+                        netTcpRespondRelayGuestAck = 0
+                        netTcpRespondRelayLock.unlock()
+                        print("NET-TCP-RELAY: connection accepted (guest SYN seq 0x\(hex32(seq))); dialing upstream \(netTcpRespondRelayHost):\(netTcpRespondRelayPort!)")
+                        netTcpRespondRelayStart(netTcpRespondRelayHost, netTcpRespondRelayPort!)
+                    } else if netTcpRespondSSHMode {
                         // M51 SSH5 (#1172): a fresh connection gets a fresh
                         // server state machine and an empty paced TX stream.
                         netTcpRespondSSHTx = []
@@ -1623,7 +1689,10 @@ if let netCapturePath {
                     } else {
                         let replyLen = buildTcpReply(&reply, buf, n, arpHostMAC, hostPort, netTcpSrvNxt, seq &+ 1, 0x11, payload)
                         try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<replyLen]))
-                        if netTcpRespondSSHMode {
+                        if netTcpRespondRelayMode {
+                            netTcpRespondRelayShutdown()
+                            print("NET-TCP-RELAY: the guest sent FIN; FIN-ACK and upstream close")
+                        } else if netTcpRespondSSHMode {
                             print("NET-TCP-SSH: the guest sent FIN; FIN-ACK and close (SSH session done)")
                         } else {
                             print("NET-TCP: answered the guest's FIN (seq 0x\(hex32(seq))) with a FIN-ACK (seq 0x\(hex32(netTcpSrvNxt)), ack 0x\(hex32(seq &+ 1)))")
@@ -1632,7 +1701,31 @@ if let netCapturePath {
                 } else if !payload.isEmpty {
                     // A data segment: the SSH responder's byte stream, the
                     // paced packet stream, or the HTTP/echo response.
-                    if netTcpRespondSSHMode {
+                    if netTcpRespondRelayMode {
+                        // M51 interop (#1209): save the reply template,
+                        // forward the guest's bytes to the REAL upstream,
+                        // and pump at most one real-server chunk back. No
+                        // blocking wait: the guest waits on a bounded read
+                        // and the upstream reader pumps asynchronously.
+                        netTcpRespondRelaySaveTemplate(buf, n)
+                        netTcpRespondRelayLock.lock()
+                        let upfd = netTcpRespondRelayFd
+                        netTcpRespondRelayLock.unlock()
+                        if upfd >= 0 {
+                            let wr = payload.withUnsafeBufferPointer { p in
+                                write(upfd, p.baseAddress, p.count)
+                            }
+                            if wr < 0 {
+                                print("NET-TCP-RELAY: upstream write failed (errno \(errno))")
+                            }
+                        }
+                        if !netTcpRespondRelayPump() {
+                            // Not established upstream bytes yet (or a chunk
+                            // is still in flight): ACK the guest's data bare.
+                            let replyLen = buildTcpReply(&reply, buf, n, arpHostMAC, hostPort, netTcpSrvNxt, seq &+ UInt32(payload.count), 0x10, [])
+                            try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<replyLen]))
+                        }
+                    } else if netTcpRespondSSHMode {
                         // M51 SSH5 (#1172): feed the SSH server with the
                         // guest's bytes and pace the next ≤192-byte chunk of
                         // its output with this ACK; when nothing is pending
@@ -1676,7 +1769,12 @@ if let netCapturePath {
                     // every later ACK for a delivered chunk) paces out the
                     // next chunk; M51 SSH5 (#1172): the same pacing feeds the
                     // encrypted SSH byte stream. Otherwise it is observed.
-                    if netTcpRespondSSHMode {
+                    if netTcpRespondRelayMode {
+                        netTcpRespondRelaySaveTemplate(buf, n)
+                        if !netTcpRespondRelayPump() {
+                            print("NET-TCP-RELAY: observed the guest's ACK (ack 0x\(hex32(ack)))")
+                        }
+                    } else if netTcpRespondSSHMode {
                         if !netTcpRespondSSHSendChunk(&reply, buf, n, arpHostMAC, hostPort, seq, 0) {
                             print("NET-TCP-SSH: observed the guest's ACK (ack 0x\(hex32(ack)))")
                         }
@@ -4488,6 +4586,145 @@ func netTcpRespondSSHSendChunk(_ reply: inout [UInt8], _ buf: [UInt8], _ n: Int,
         netTcpRespondSSHTx.removeAll(keepingCapacity: true)
         netTcpRespondSSHTxOffset = 0
     }
+    return true
+}
+
+// M51 real-OpenSSH interop (#1209, goal #1066): the `:relay` upstream
+// plumbing. The rendezvous is the guest's SYN: connect the real server
+// (localhost sshd), then start the reader that appends real bytes to the
+// paced TX buffer. The capture thread writes guest bytes to the upstream
+// fd. Only the reader closes its own fd (a generation counter retires a
+// previous reader without an fd-reuse race).
+func netTcpRespondRelayShutdown() {
+    netTcpRespondRelayLock.lock()
+    let fd = netTcpRespondRelayFd
+    netTcpRespondRelayFd = -1
+    netTcpRespondRelayLock.unlock()
+    if fd >= 0 { shutdown(fd, SHUT_RDWR) }
+}
+
+func netTcpRespondRelayStart(_ host: String, _ port: UInt16) {
+    netTcpRespondRelayShutdown()
+    let fd = socket(AF_INET, SOCK_STREAM, 0)
+    guard fd >= 0 else {
+        print("NET-TCP-RELAY: upstream socket() failed (errno \(errno)); the relay is dead for this connection")
+        return
+    }
+    var addr = sockaddr_in()
+    addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+    addr.sin_family = sa_family_t(AF_INET)
+    addr.sin_port = port.bigEndian
+    var a4 = in_addr()
+    guard inet_pton(AF_INET, host, &a4) == 1 else {
+        print("NET-TCP-RELAY: upstream '\(host)' is not a dotted-quad IPv4 address")
+        close(fd)
+        return
+    }
+    addr.sin_addr = a4
+    let rc = withUnsafePointer(to: &addr) { ptr in
+        ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+            connect(fd, sa, socklen_t(MemoryLayout<sockaddr_in>.size))
+        }
+    }
+    guard rc == 0 else {
+        print("NET-TCP-RELAY: upstream connect \(host):\(port) failed (errno \(errno)); the relay is dead for this connection")
+        close(fd)
+        return
+    }
+    netTcpRespondRelayLock.lock()
+    netTcpRespondRelayGen += 1
+    let gen = netTcpRespondRelayGen
+    netTcpRespondRelayFd = fd
+    netTcpRespondRelayTx = []
+    netTcpRespondRelayTxOffset = 0
+    netTcpRespondRelayClosed = false
+    netTcpRespondRelayLock.unlock()
+    print("NET-TCP-RELAY: upstream \(host):\(port) connected (real server; bytes proxied, no crypto here)")
+    let reader = Thread {
+        var buf = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let n = read(fd, &buf, buf.count)
+            if n < 0 && errno == EINTR { continue }
+            if n <= 0 {
+                netTcpRespondRelayLock.lock()
+                if gen == netTcpRespondRelayGen {
+                    netTcpRespondRelayClosed = true
+                    if netTcpRespondRelayFd == fd { netTcpRespondRelayFd = -1 }
+                }
+                netTcpRespondRelayLock.unlock()
+                close(fd)
+                print("NET-TCP-RELAY: upstream \(host):\(port) closed (\(n == 0 ? "EOF" : "errno \(errno)"))")
+                return
+            }
+            netTcpRespondRelayLock.lock()
+            let current = gen == netTcpRespondRelayGen
+            if current { netTcpRespondRelayTx.append(contentsOf: buf[0..<n]) }
+            netTcpRespondRelayLock.unlock()
+            if !current {
+                close(fd)
+                return
+            }
+            print("NET-TCP-RELAY: upstream -> guest \(n) bytes buffered")
+            // M51 interop (#1209): real-server bytes arriving with no
+            // guest segment to trigger the next chunk are pumped right
+            // here — the guest's bounded KEX/auth reads cannot wait for
+            // the next guest ACK alone.
+            netTcpRespondRelayPump()
+        }
+    }
+    reader.name = "net-tcp-relay-upstream"
+    reader.start()
+}
+
+// M51 interop (#1209): the reply template — the most recent guest segment,
+// saved so the upstream reader can pump the next real-server chunk the
+// moment it arrives, with no guest segment needed as a trigger (the guest
+// waits on a BOUNDED read; a blocking capture thread would time it out).
+// `GuestNext` is the ACK value our next segment must carry.
+var netTcpRespondRelayTemplate: [UInt8] = []
+var netTcpRespondRelayGuestNext: UInt32 = 0
+var netTcpRespondRelayGuestAck: UInt32 = 0
+
+/// Save the reply template from one guest segment (under the lock).
+func netTcpRespondRelaySaveTemplate(_ buf: [UInt8], _ n: Int) {
+    let payload = n > 54 ? n - 54 : 0
+    netTcpRespondRelayLock.lock()
+    netTcpRespondRelayTemplate = Array(buf[0..<n])
+    netTcpRespondRelayGuestNext = tcpSeq(buf) &+ UInt32(payload)
+    netTcpRespondRelayGuestAck = tcpAck(buf)
+    netTcpRespondRelayLock.unlock()
+}
+
+/// Pump at most ONE ≤192-byte upstream chunk to the guest, and only when
+/// the previously sent chunk has been ACKed (`netTcpSrvNxt == GuestAck` —
+/// the guest kernel RX is a single 192-byte slot with no reassembly and
+/// the host has no retransmission). Called from the capture thread (guest
+/// traffic) AND the upstream reader (real-server bytes); the lock
+/// serializes, so exactly one segment is in flight. Returns true when a
+/// chunk went out.
+@discardableResult
+func netTcpRespondRelayPump() -> Bool {
+    guard netTcpRespondRelayMode else { return false }
+    netTcpRespondRelayLock.lock()
+    defer { netTcpRespondRelayLock.unlock() }
+    let total = netTcpRespondRelayTx.count
+    let off = netTcpRespondRelayTxOffset
+    guard off < total else { return false }
+    guard netTcpSrvNxt == netTcpRespondRelayGuestAck else { return false }
+    let tmpl = netTcpRespondRelayTemplate
+    guard tmpl.count >= 54 else { return false }
+    let end = min(off + netTcpRespondPacketChunk, total)
+    let chunk = Array(netTcpRespondRelayTx[off..<end])
+    netTcpRespondRelayTxOffset = end
+    if end >= total {
+        netTcpRespondRelayTx.removeAll(keepingCapacity: true)
+        netTcpRespondRelayTxOffset = 0
+    }
+    var reply = [UInt8](repeating: 0, count: 4096)
+    let replyLen = buildTcpReply(&reply, tmpl, tmpl.count, [0x02, 0x00, 0x00, 0x00, 0x00, 0x02], netTcpRespondHostPort ?? 0, netTcpSrvNxt, netTcpRespondRelayGuestNext, 0x10, chunk)
+    try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<replyLen]))
+    netTcpSrvNxt = netTcpSrvNxt &+ UInt32(chunk.count)
+    print("NET-TCP-RELAY: sent \(chunk.count) bytes to the guest (seq 0x\(hex32(netTcpSrvNxt &- UInt32(chunk.count))))")
     return true
 }
 

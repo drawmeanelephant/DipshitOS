@@ -1,0 +1,127 @@
+debug1: fd 7 clearing O_NONBLOCK
+debug2: fd 8 setting O_NONBLOCK
+debug1: Forked child 72761.
+debug1: rexec start in 7 out 7 newsock 7 config_s 8/9
+debug1: sshd-session version OpenSSH_10.3, LibreSSL 3.3.6
+debug2: server_accept_loop: child 72761 for connection from 127.0.0.1 to 127.0.0.1 received config
+debug1: network sockets: 8, 8
+debug2: fd 8 setting TCP_NODELAY
+debug3: set_sock_tos: set socket 8 IP_TOS 0xb8
+debug3: server_process_channel_timeouts: setting 0 timeouts
+debug3: channel_clear_timeouts: clearing
+debug3: BSM audit: connection from 127.0.0.1 port 61302
+debug3: BSM audit: iptype 4 machine ID 0100007f 00000000 00000000 00000000
+Connection from 127.0.0.1 port 61302 on 127.0.0.1 port 2222
+debug2: fd 8 setting O_NONBLOCK
+debug2: Network child is on pid 72762
+debug3: preauth child monitor started
+debug3: mm_request_receive: entering
+debug3: monitor_read: checking request 51
+debug1: mm_answer_state: config len 555
+debug3: mm_request_send: entering, type 52
+debug3: mm_answer_state: done
+debug2: monitor_read: 51 used once, disabling now
+debug1: sshd-auth version OpenSSH_10.3, LibreSSL 3.3.6 [preauth]
+debug3: server_process_channel_timeouts: setting 0 timeouts [preauth]
+debug3: channel_clear_timeouts: clearing [preauth]
+debug3: fd 5 is O_NONBLOCK [preauth]
+debug3: ssh_sandbox_init: preparing Darwin sandbox [preauth]
+debug3: ssh_sandbox_child: starting Darwin sandbox [preauth]
+debug1: list_hostkey_types: ssh-ed25519 [preauth]
+debug1: Local version string SSH-2.0-OpenSSH_10.3 [preauth]
+debug1: Remote protocol version 2.0, remote software version VirelaiOS_1.0 [preauth]
+debug1: compat_banner: no match: VirelaiOS_1.0 [preauth]
+debug3: mm_sshkey_setcompat: entering [preauth]
+debug3: mm_request_send: entering, type 18 [preauth]
+debug3: send packet: type 20 [preauth]
+debug1: SSH2_MSG_KEXINIT sent [preauth]
+debug3: mm_request_receive: entering
+debug3: monitor_read: checking request 18
+debug3: mm_answer_setcompat: entering
+debug2: monitor_read: 18 used once, disabling now
+debug3: receive packet: type 20 [preauth]
+debug1: SSH2_MSG_KEXINIT received [preauth]
+debug2: local server KEXINIT proposal [preauth]
+debug2: KEX algorithms: mlkem768x25519-sha256,sntrup761x25519-sha512,sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org,ecdh-sha2-nistp256,ecdh-sha2-nistp384,ecdh-sha2-nistp521,ext-info-s,kex-strict-s-v00@openssh.com [preauth]
+debug2: host key algorithms: ssh-ed25519 [preauth]
+debug2: ciphers ctos: chacha20-poly1305@openssh.com,aes128-gcm@openssh.com,aes256-gcm@openssh.com,aes128-ctr,aes192-ctr,aes256-ctr [preauth]
+debug2: ciphers stoc: chacha20-poly1305@openssh.com,aes128-gcm@openssh.com,aes256-gcm@openssh.com,aes128-ctr,aes192-ctr,aes256-ctr [preauth]
+debug2: MACs ctos: umac-64-etm@openssh.com,umac-128-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com,hmac-sha1-etm@openssh.com,umac-64@openssh.com,umac-128@openssh.com,hmac-sha2-256,hmac-sha2-512,hmac-sha1 [preauth]
+debug2: MACs stoc: umac-64-etm@openssh.com,umac-128-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com,hmac-sha1-etm@openssh.com,umac-64@openssh.com,umac-128@openssh.com,hmac-sha2-256,hmac-sha2-512,hmac-sha1 [preauth]
+debug2: compression ctos: none,zlib@openssh.com [preauth]
+debug2: compression stoc: none,zlib@openssh.com [preauth]
+debug2: languages ctos:  [preauth]
+debug2: languages stoc:  [preauth]
+debug2: first_kex_follows 0  [preauth]
+debug2: reserved 0  [preauth]
+debug2: peer client KEXINIT proposal [preauth]
+debug2: KEX algorithms: curve25519-sha256,curve25519-sha256@libssh.org [preauth]
+debug2: host key algorithms: ssh-ed25519 [preauth]
+debug2: ciphers ctos: chacha20-poly1305@openssh.com [preauth]
+debug2: ciphers stoc: chacha20-poly1305@openssh.com [preauth]
+debug2: MACs ctos:  [preauth]
+debug2: MACs stoc:  [preauth]
+debug2: compression ctos: none [preauth]
+debug2: compression stoc: none [preauth]
+debug2: languages ctos:  [preauth]
+debug2: languages stoc:  [preauth]
+debug2: first_kex_follows 0  [preauth]
+debug2: reserved 0  [preauth]
+debug1: kex: algorithm: curve25519-sha256 [preauth]
+debug1: kex: host key algorithm: ssh-ed25519 [preauth]
+debug1: kex: client->server cipher: chacha20-poly1305@openssh.com MAC: <implicit> compression: none [preauth]
+debug1: kex: server->client cipher: chacha20-poly1305@openssh.com MAC: <implicit> compression: none [preauth]
+debug1: expecting SSH2_MSG_KEX_ECDH_INIT [preauth]
+debug3: receive packet: type 30 [preauth]
+debug1: SSH2_MSG_KEX_ECDH_INIT received [preauth]
+debug3: mm_sshkey_sign: entering [preauth]
+debug3: mm_request_send: entering, type 6 [preauth]
+debug3: mm_sshkey_sign: waiting for MONITOR_ANS_SIGN [preauth]
+debug3: mm_request_receive_expect: entering, type 7 [preauth]
+debug3: mm_request_receive: entering [preauth]
+debug3: mm_request_receive: entering
+debug3: monitor_read: checking request 6
+debug3: mm_answer_sign: entering
+debug1: mm_answer_sign: hostkey ssh-ed25519 index 0
+debug3: mm_answer_sign: ssh-ed25519 KEX signature len=83
+debug3: mm_request_send: entering, type 7
+debug2: monitor_read: 6 used once, disabling now
+debug3: mm_sshkey_sign: ssh-ed25519 signature len=83 [preauth]
+debug3: send packet: type 31 [preauth]
+debug3: send packet: type 21 [preauth]
+debug2: ssh_set_newkeys: mode 1 [preauth]
+debug1: rekey out after 134217728 blocks [preauth]
+debug1: SSH2_MSG_NEWKEYS sent [preauth]
+debug1: expecting SSH2_MSG_NEWKEYS [preauth]
+debug3: receive packet: type 21 [preauth]
+debug1: SSH2_MSG_NEWKEYS received [preauth]
+debug2: ssh_set_newkeys: mode 0 [preauth]
+debug1: rekey in after 134217728 blocks [preauth]
+debug2: KEX algorithms: mlkem768x25519-sha256,sntrup761x25519-sha512,sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org,ecdh-sha2-nistp256,ecdh-sha2-nistp384,ecdh-sha2-nistp521,ext-info-s,kex-strict-s-v00@openssh.com [preauth]
+debug2: host key algorithms: ssh-ed25519 [preauth]
+debug2: ciphers ctos: chacha20-poly1305@openssh.com,aes128-gcm@openssh.com,aes256-gcm@openssh.com,aes128-ctr,aes192-ctr,aes256-ctr [preauth]
+debug2: ciphers stoc: chacha20-poly1305@openssh.com,aes128-gcm@openssh.com,aes256-gcm@openssh.com,aes128-ctr,aes192-ctr,aes256-ctr [preauth]
+debug2: MACs ctos: umac-64-etm@openssh.com,umac-128-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com,hmac-sha1-etm@openssh.com,umac-64@openssh.com,umac-128@openssh.com,hmac-sha2-256,hmac-sha2-512,hmac-sha1 [preauth]
+debug2: MACs stoc: umac-64-etm@openssh.com,umac-128-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com,hmac-sha1-etm@openssh.com,umac-64@openssh.com,umac-128@openssh.com,hmac-sha2-256,hmac-sha2-512,hmac-sha1 [preauth]
+debug2: compression ctos: none,zlib@openssh.com [preauth]
+debug2: compression stoc: none,zlib@openssh.com [preauth]
+debug2: languages ctos:  [preauth]
+debug2: languages stoc:  [preauth]
+debug2: first_kex_follows 0  [preauth]
+debug2: reserved 0  [preauth]
+debug1: KEX done [preauth]
+padding error: need 28 block 8 mod 4 [preauth]
+debug2: sshpkt_disconnect: sending SSH2_MSG_DISCONNECT: Packet corrupt [preauth]
+debug3: send packet: type 1 [preauth]
+ssh_dispatch_run_fatal: Connection from 127.0.0.1 port 61302: message authentication code incorrect [preauth]
+debug1: monitor_read_log: child log fd closed
+debug3: mm_request_receive: entering
+debug3: mm_request_receive: monitor fd closed
+debug1: mm_reap: child exited with status 255
+debug1: do_cleanup
+debug1: Killing privsep child 72762
+debug1: audit_event: connection closed without authentication
+debug3: server_accept_loop: child 72761 for connection from 127.0.0.1 to 127.0.0.1 closed pipe
+debug1: child_close: enter
+debug1: child_reap: preauth child 72761 for connection from 127.0.0.1 to 127.0.0.1 exited with status 255
+srclimit_penalise: ipv4: new 127.0.0.1/32 deferred penalty of 1.000 seconds for penalty: connections without attempting authentication

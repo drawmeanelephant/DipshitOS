@@ -1,0 +1,17 @@
+=== host observations while the guest's SYN to 192.168.64.1:2222 is unanswered (PID 29737) ===
+--- ifconfig (guest subnet only; full list is elsewhere) ---
+(no host interface carries 192.168.64.x)
+--- vmenet0 ---
+vmenet0: flags=8822<BROADCAST,SMART,SIMPLEX,MULTICAST> mtu 1500
+	ether 02:00:00:00:00:00
+	media: autoselect
+	status: inactive
+--- arp ---
+(no host ARP entry for the guest subnet)
+--- routes ---
+(no host route for the guest subnet)
+--- firewall ---
+Firewall is disabled. (State = 0)
+--- sshd listener ---
+COMMAND   PID   USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+sshd    95105 tbuddy    6u  IPv4 0x9d35a0ebcc0749fe      0t0  TCP *:2222 (LISTEN)

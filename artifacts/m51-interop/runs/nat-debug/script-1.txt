@@ -1,0 +1,5 @@
+net ip 192.168.64.5
+net arp 192.168.64.1
+net ping 192.168.64.1
+net tcp connect 192.168.64.1 2222
+echo nat-debug-alive
