@@ -301,7 +301,7 @@ named in `.github/workflows/*.yml`; `st` = named in
 | `env-check.sh` | 259 | tooling | n | n | y | n | tools/env-check.sh -- source me at the start of every agent session. |
 | `inspect.sh` | 93 | tooling | y | n | n | n | inspect.sh -- report useful facts about the generated EFI binary and the |
 | `inventory-gates.sh` | 555 | tooling | n | n | y | y | inventory-gates.sh -- regenerate (or --check) the machine-generated gate |
-| `lint-workflows.sh` | 171 | tooling | y | n | y | y | lint-workflows.sh -- lint the GitHub Actions workflows (class A). |
+| `lint-workflows.sh` | 195 | tooling | y | n | y | y | lint-workflows.sh -- lint the GitHub Actions workflows (class A). |
 | `mkdyn-elf.py` | 1090 | tooling | n | n | n | y | Generate freestanding dynamic ELF binaries for VirelaiOS. |
 | `mkhello-elf.py` | 205 | tooling | n | n | n | n | Emit a minimal statically linked AArch64 ELF32 executable (M22 D1, issue #324). |
 | `png2qoi.py` | 94 | tooling | n | n | n | n | Convert standard images (PNG, JPG) to Quite OK Image (QOI) format. |

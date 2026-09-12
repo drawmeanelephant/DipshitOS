@@ -27,6 +27,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 TITLE="" OWNER="" BRANCH="" SCOPE="" TOUCHES="" DEPENDS="—" VERIFICATION="" NOTES=""
+POSITIONAL=""
 DRY_RUN=0
 
 usage() {
@@ -46,9 +47,14 @@ while [ "$#" -gt 0 ]; do
         --notes) NOTES="${2:-}"; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
         -h|--help) usage 0 ;;
-        *) echo "new-claim.sh: unknown argument: $1" >&2; usage 2 ;;
+        -*) echo "new-claim.sh: unknown argument: $1" >&2; usage 2 ;;
+        *) POSITIONAL="${POSITIONAL:+$POSITIONAL }$1"; shift ;;
     esac
 done
+
+# Accept a bare positional title too, so `just claim "Fix the flake"` works
+# alongside the explicit `--title`/`--touches` form.
+[ -n "$TITLE" ] || TITLE="$POSITIONAL"
 
 [ -n "$TITLE" ] || { echo "new-claim.sh: --title is required" >&2; usage 2; }
 

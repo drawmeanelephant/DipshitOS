@@ -182,15 +182,11 @@ lint-workflows:
 test-coordination:
     bash tools/status/test-coordination.sh
 
-# Claim an EXISTING card (issue) in place: adds the `claim` label + the
-# machine-read Owner/Scope/Touches fields. Prefer this over filing a new issue
-# — one issue per card, and the card IS the claim.
+# One issue per card, and the card IS the claim: claim an EXISTING card (issue)
+# in place, adding the `claim` label + machine-read Owner/Scope/Touches fields.
+# Prefer this over filing a new issue.
 claim-card ISSUE *ARGS:
     bash tools/status/claim-card.sh {{ISSUE}} {{ARGS}}
-
-# File an ad-hoc claim when there is no existing card issue (tools/status/new-claim.sh).
-claim *ARGS:
-    bash tools/status/new-claim.sh {{ARGS}}
 
 # Rehearse the real-time claim:stale removal path end to end (live: creates + closes a throwaway claim issue; REHEARSAL_MODE=local forces the in-process guard run)
 rehearse-unlabel:
@@ -200,9 +196,11 @@ rehearse-unlabel:
 sweep-stale-claims:
     bash tools/status/sweep-stale-claims.sh --dry-run
 
-# File a claim as a GitHub issue (label `claim`; docs/claims/ is gone — claims live on the tracker)
-claim TITLE:
-    bash tools/status/new-claim.sh --title "{{TITLE}}"
+# For an existing card, prefer `just claim-card <issue>`.
+# Otherwise file an ad-hoc claim (tools/status/new-claim.sh, label `claim`),
+# bare title or full flags: `just claim "Fix the flake"` / `just claim --touches ...`.
+claim *ARGS:
+    bash tools/status/new-claim.sh {{ARGS}}
 
 # Create an isolated per-agent checkout (issue #523 item 1; claim 4928):
 #   just new-agent buffy m18-t16-scripting
