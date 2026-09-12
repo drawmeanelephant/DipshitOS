@@ -238,6 +238,19 @@ pinned key signs the pinned challenge); its class-B client story needs a
 host Ed25519 helper and is an explicit TS4 stretch. The HMAC scheme is the
 TS4 acceptance primitive.
 
+**TS4 implementation notes** (2026-09-11, issue #1138): (a) the store key
+names are `net-hmac` (the HMAC key used byte-for-byte as stored) and
+`net-ed25519` (the 64-hex public key); a store with neither refuses to
+listen without the explicit `open` argument. (b) The Ed25519 signed message
+is `"VIRELAIOS-AUTH/1 ed25519" || 0x00 || challenge[32]`, symmetric with the
+HMAC domain separation. (c) A reply line is length- and hex-validated in
+the kernel (64 hex for hmac-sha256, 128 for ed25519) before the process ever
+sees it; a malformed line is a failed connection. (d) Accepted pipelined
+post-auth bytes are held in a bounded buffer and delivered only after the
+accept verdict. (e) The Stage-0 bridge computes its HMAC with CryptoKit
+(verified building and running on this host); the recorded Swift-HMAC
+fallback was not needed.
+
 ### D7. Stage 0 host bridge gets the same handshake, host-side; no TLS anywhere
 `--console-tcp [host:]port[:secret]` becomes HMAC-SHA256 challenge-response:
 the bridge sends the same `VIRELAIOS-AUTH/1` line and requires

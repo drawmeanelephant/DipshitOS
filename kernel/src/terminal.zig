@@ -24,6 +24,9 @@ const clipboard = @import("clipboard.zig");
 // a terminal and the kernel's single bounded TCP connection.
 const tcp = @import("tcp.zig");
 const virtio_net = @import("virtio_net.zig");
+// M50 TS4 (#1138, ADR 0024 D6): the pump mints a fresh challenge from the
+// kernel CSPRNG on every accept (ADR 0023 D7 keeps randomness kernel-side).
+const csprng = @import("csprng.zig");
 // M46 RC3 (#1111, ADR 0022): the net pump stamps the TCP RTO clock from the
 // 1 Hz generic timer so the half-open accept timeout (#1105) advances while a
 // net-bound shell waits for its first client.
@@ -36,11 +39,44 @@ pub const in_capacity: usize = 256;
 /// How many concurrent terminals the kernel tracks.
 pub const max_terminals: usize = 4;
 
-/// M46 RC3 (#1111, ADR 0022 D3): the longest accepted net-front-end shared
-/// secret (bytes). Bounded so the terminal object stays fixed-array sized;
-/// the challenge buffer is one byte longer to catch the newline terminator.
-pub const net_secret_max: usize = 63;
-pub const net_challenge_max: usize = net_secret_max + 1;
+/// M50 TS4 (#1138, ADR 0024 D6): the delegated net-auth protocol.
+/// `net_challenge_len` is the fresh 32-byte server challenge minted from the
+/// kernel CSPRNG on every accept; `net_auth_line_max` bounds the client's
+/// one-line reply (64 hex chars for HMAC-SHA256, 128 for Ed25519 — 160 is
+/// the ADR's fixed bound, reassembly-free). `net_auth_deadline` is the 1 Hz
+/// seam clock's 10 s bound: no verdict by then is a failed connection,
+/// never a bypass.
+pub const net_challenge_len: usize = 32;
+pub const net_auth_line_max: usize = 160;
+pub const net_auth_deadline: u64 = 10;
+/// The framing tag: `VIRELAIOS-AUTH/1 <scheme> <hex-challenge>\n`.
+pub const net_auth_tag: []const u8 = "VIRELAIOS-AUTH/1";
+
+/// M50 TS4: the scheme the pump frames and the verifier (the attached
+/// process) must answer. `.open` is M46's accept-immediately posture,
+/// reached only through the explicit insecure CLI mode (ADR 0024 D6).
+pub const NetAuthScheme = enum(u8) {
+    open = 0,
+    hmac_sha256 = 1,
+    ed25519 = 2,
+
+    pub fn name(self: NetAuthScheme) []const u8 {
+        return switch (self) {
+            .open => "open",
+            .hmac_sha256 => "hmac-sha256",
+            .ed25519 => "ed25519",
+        };
+    }
+
+    /// The expected hex reply length for the scheme (0 for `.open`).
+    pub fn expectedReplyLen(self: NetAuthScheme) usize {
+        return switch (self) {
+            .open => 0,
+            .hmac_sha256 => 64,
+            .ed25519 => 128,
+        };
+    }
+};
 
 /// #1082 (ADR 0020 Amendment A): the window front-end's presentation grid.
 /// The terminal OBJECT stays a pure byte session (D1); this bounded
@@ -388,16 +424,28 @@ pub const Terminal = struct {
     /// #1083 (ADR 0020 Amendment B): the TCP listen port this terminal is a
     /// front-end for, when `front_end == .net`. 0 otherwise.
     net_port: u16 = 0,
-    /// M46 RC3 (#1111, ADR 0022 D3): the net-front-end v1 auth state. A
-    /// non-empty `net_secret` requires the session's first line to match
-    /// before any byte reaches the shell; `net_authed` is set on success and
-    /// gates delivery. `net_allow_on`/`net_allow_ip` are the optional
-    /// source-IP allowlist (D4). All cleared on detach/reset.
-    net_secret: [net_secret_max]u8 = [_]u8{0} ** net_secret_max,
-    net_secret_len: u8 = 0,
-    net_authed: bool = true, // no secret => open (SH7 behavior)
-    net_challenge: [net_challenge_max]u8 = [_]u8{0} ** net_challenge_max,
-    net_challenge_len: usize = 0,
+    /// M50 TS4 (#1138, ADR 0024 D6): the delegated net-auth state. When
+    /// `net_auth_on`, the pump mints a fresh 32-byte challenge once the
+    /// connection is ESTABLISHED, frames it as
+    /// `VIRELAIOS-AUTH/1 <scheme> <hex>\n`, buffers the client's one-line
+    /// reply, and gates every post-challenge byte on the attached process's
+    /// verdict. `net_authed` is the byte gate; `net_reply_ready` means a
+    /// well-formed reply awaits the verdict; `net_auth_ticks` is the
+    /// challenge clock (10 s deadline). All cleared on detach/reset.
+    net_auth_on: bool = false,
+    net_auth_scheme: NetAuthScheme = .open,
+    net_authed: bool = true, // no auth => open (SH7 behavior)
+    net_challenge: [net_challenge_len]u8 = [_]u8{0} ** net_challenge_len,
+    net_challenge_sent: bool = false,
+    net_auth_ticks: u64 = 0,
+    net_reply: [net_auth_line_max]u8 = [_]u8{0} ** net_auth_line_max,
+    net_reply_len: usize = 0,
+    net_reply_ready: bool = false,
+    /// Bytes pipelined after the reply line (the client's first command):
+    /// held until the verdict accepts, then delivered — never before.
+    net_post: [tcp.payload_max]u8 = [_]u8{0} ** tcp.payload_max,
+    net_post_len: usize = 0,
+    net_verdict: ?bool = null,
     net_allow_ip: [4]u8 = .{ 0, 0, 0, 0 },
     net_allow_on: bool = false,
 
@@ -480,14 +528,24 @@ pub const Terminal = struct {
         self.clearNetAuth();
     }
 
-    /// M46 RC3 (#1111): drop all net-auth state (secret, challenge, auth
-    /// flag, allowlist). Called on detach and before a fresh bind.
+    /// M50 TS4: drop all net-auth state (challenge, reply, post bytes,
+    /// verdict, auth flag, allowlist). Called on detach and before a fresh
+    /// bind. Wipes the challenge and reply buffers (key-material hygiene).
     pub fn clearNetAuth(self: *Terminal) void {
-        self.net_secret_len = 0;
+        self.net_auth_on = false;
+        self.net_auth_scheme = .open;
         self.net_authed = true;
-        self.net_challenge_len = 0;
+        self.net_challenge_sent = false;
+        self.net_auth_ticks = 0;
+        self.net_reply_len = 0;
+        self.net_reply_ready = false;
+        self.net_post_len = 0;
+        self.net_verdict = null;
         self.net_allow_on = false;
         self.net_allow_ip = .{ 0, 0, 0, 0 };
+        @memset(&self.net_challenge, 0);
+        @memset(&self.net_reply, 0);
+        @memset(&self.net_post, 0);
     }
 
     /// #1082 (ADR 0020 Amendment A): attach this terminal to a `.user`
@@ -529,18 +587,18 @@ pub const Terminal = struct {
         return true;
     }
 
-    /// M46 RC3 (#1111, ADR 0022 D3/D4): attach the net front-end with v1
-    /// auth — an optional shared `secret` (the session's first line must
-    /// match) and an optional source-IP `allow_ip`. An empty secret means
-    /// "accept immediately" (SH7 behavior, boot default unchanged).
-    pub fn attachNetAuth(self: *Terminal, port: u16, secret: []const u8, allow_ip: ?[4]u8) bool {
+    /// M50 TS4 (#1138, ADR 0024 D6): attach the net front-end with the
+    /// delegated challenge-response gate. `scheme` is what the pump frames
+    /// in `VIRELAIOS-AUTH/1`; `.open` reproduces M46's accept-immediately
+    /// behavior (the explicit insecure mode). A source-IP `allow_ip` is
+    /// optional and unchanged from ADR 0022 D4.
+    pub fn attachNetAuth(self: *Terminal, port: u16, scheme: NetAuthScheme, allow_ip: ?[4]u8) bool {
         if (!self.attachNet(port)) return false;
         self.clearNetAuth();
-        const n = @min(secret.len, net_secret_max);
-        if (n > 0) {
-            @memcpy(self.net_secret[0..n], secret[0..n]);
-            self.net_secret_len = @intCast(n);
-            self.net_authed = false; // the first line must match
+        if (scheme != .open) {
+            self.net_auth_on = true;
+            self.net_auth_scheme = scheme;
+            self.net_authed = false; // the handshake must complete first
         }
         if (allow_ip) |ip| {
             self.net_allow_ip = ip;
@@ -705,12 +763,13 @@ pub fn copySelectionToClipboard(window_id: u8) usize {
 
 // ---------------------------------------------------------------------------
 // The net front-end pump (SH7 #1083, ADR 0020 Amendment B; M46 RC3 #1111,
-// ADR 0022). The kernel's TCP seam is a single bounded connection; the pump
-// moves bytes between the net-bound terminal and that connection. Incoming
-// segments are drained, a pending ACK/SYN-ACK is flushed, the received
-// payload is delivered (through the v1 shared-secret gate when set), and (on
-// the owner's `/dev/tty` write) the terminal output ring is chunked into TCP
-// data segments. A peer FIN / dead connection / exhausted SYN-ACK accept
+// ADR 0022; M50 TS4 #1138, ADR 0024 D6). The kernel's TCP seam is a single
+// bounded connection; the pump moves bytes between the net-bound terminal
+// and that connection. Incoming segments are drained, a pending ACK/SYN-ACK
+// is flushed, the received payload is delivered through the delegated
+// challenge-response gate (the process's verdict), and (on the owner's
+// `/dev/tty` write) the terminal output ring is chunked into TCP data
+// segments. A peer FIN / dead connection / exhausted SYN-ACK accept
 // auto-detaches the terminal (B4, #1105). The pump is driven from the
 // `/dev/tty` syscall path.
 //
@@ -747,13 +806,176 @@ pub fn attachedNet() ?*Terminal {
     return null;
 }
 
-/// Best-effort constant-time byte compare (ADR 0022 D3: intent only — a
-/// length difference leaks, and this is not a side-channel guarantee).
-fn secretEq(a: []const u8, b: []const u8) bool {
-    if (a.len != b.len) return false;
-    var diff: u8 = 0;
-    for (a, b) |x, y| diff |= x ^ y;
-    return diff == 0;
+/// M50 TS4 (#1138): the deterministic-challenge hook for pinned-vector host
+/// tests. Production never sets it; `mintChallenge` uses the kernel CSPRNG.
+pub var test_challenge: ?[net_challenge_len]u8 = null;
+
+/// Mint a fresh 32-byte challenge (CSPRNG, or the test override).
+fn mintChallenge(out: *[net_challenge_len]u8) void {
+    if (test_challenge) |c| {
+        out.* = c;
+        return;
+    }
+    csprng.random_bytes(out);
+}
+
+const hex_digits = "0123456789abcdef";
+
+/// Append the lowercase hex of `bytes` to `out`; returns the characters
+/// written (a short `out` truncates — callers size it for the full form).
+fn appendHex(out: []u8, bytes: []const u8) usize {
+    var n: usize = 0;
+    for (bytes) |b| {
+        if (n + 2 > out.len) break;
+        out[n] = hex_digits[b >> 4];
+        out[n + 1] = hex_digits[b & 0xf];
+        n += 2;
+    }
+    return n;
+}
+
+/// True when every byte is a hex digit (either case).
+fn isHex(bytes: []const u8) bool {
+    for (bytes) |b| {
+        const ok = (b >= '0' and b <= '9') or (b >= 'a' and b <= 'f') or (b >= 'A' and b <= 'F');
+        if (!ok) return false;
+    }
+    return true;
+}
+
+/// Transmit `auth failed`, end the session, and detach — the one failed-door
+/// path shared by a wrong/malformed reply, a reject verdict, and the
+/// deadline. Pre-auth bytes are never delivered by this path.
+fn netAuthFailSeam(t: *Terminal, comptime seam: type) void {
+    _ = netTx(seam, "auth failed\n");
+    klog.line("tty net: auth failed\n");
+    tcp.reset();
+    t.detach();
+}
+
+/// Production-seam wrapper (used by the slot-71 verdict handler).
+pub fn netAuthFail(t: *Terminal) void {
+    netAuthFailSeam(t, NetSeam);
+}
+
+/// Send the `VIRELAIOS-AUTH/1 <scheme> <hex-challenge>\n` line once, when
+/// the connection is ESTABLISHED. Stamps the 10 s deadline clock. Returns
+/// whether the challenge was sent (or already sent).
+pub fn netAuthSendChallengeSeam(t: *Terminal, comptime seam: type) bool {
+    if (t.net_challenge_sent) return true;
+    if (!t.net_auth_on or t.net_auth_scheme == .open) return false;
+    mintChallenge(&t.net_challenge);
+    var line: [tcp.payload_max]u8 = undefined;
+    var n: usize = 0;
+    @memcpy(line[n..][0..net_auth_tag.len], net_auth_tag);
+    n += net_auth_tag.len;
+    line[n] = ' ';
+    n += 1;
+    const sname = t.net_auth_scheme.name();
+    @memcpy(line[n..][0..sname.len], sname);
+    n += sname.len;
+    line[n] = ' ';
+    n += 1;
+    n += appendHex(line[n..], &t.net_challenge);
+    line[n] = '\n';
+    n += 1;
+    if (!netTx(seam, line[0..n])) return false;
+    t.net_challenge_sent = true;
+    t.net_auth_ticks = seam.now();
+    return true;
+}
+
+/// Production-seam wrapper (the pump uses the injected seam directly).
+pub fn netAuthSendChallenge(t: *Terminal) bool {
+    return netAuthSendChallengeSeam(t, NetSeam);
+}
+
+/// Hold pipelined post-reply bytes until the verdict (bounded by
+/// `tcp.payload_max`; overflow is an honest failed connection).
+fn netAuthAppendPost(t: *Terminal, comptime seam: type, bytes: []const u8) usize {
+    if (bytes.len == 0) return 0;
+    if (t.net_post_len + bytes.len > t.net_post.len) {
+        netAuthFailSeam(t, seam);
+        return 0;
+    }
+    @memcpy(t.net_post[t.net_post_len..][0..bytes.len], bytes);
+    t.net_post_len += bytes.len;
+    return 0;
+}
+
+/// Buffer one received payload through the delegated auth gate (ADR 0024
+/// D6). Pre-auth bytes go to the bounded reply line (or the pipelined-post
+/// buffer) and NEVER to the terminal input queue. A complete reply line is
+/// length- and hex-validated immediately; malformed/over-long is a failed
+/// connection. A valid reply waits for the process's verdict. Once
+/// `net_authed`, every byte flows to the input queue. Returns bytes
+/// delivered to the terminal (0 while the handshake is pending).
+fn netAuthConsume(t: *Terminal, comptime seam: type, bytes: []const u8) usize {
+    const delivered: usize = 0;
+    if (t.net_authed) {
+        return t.pushInput(bytes);
+    }
+    // Already have a reply: only pipeline post bytes (the client may send
+    // its first command without waiting for the accept marker).
+    if (t.net_reply_ready) {
+        _ = netAuthAppendPost(t, seam, bytes);
+        return 0;
+    }
+    var i: usize = 0;
+    while (i < bytes.len) {
+        const b = bytes[i];
+        i += 1;
+        if (b == '\n' or b == '\r') {
+            if (b == '\r' and i < bytes.len and bytes[i] == '\n') i += 1; // CRLF
+            const want = t.net_auth_scheme.expectedReplyLen();
+            if (t.net_reply_len != want or !isHex(t.net_reply[0..t.net_reply_len])) {
+                netAuthFailSeam(t, seam);
+                return delivered;
+            }
+            t.net_reply_ready = true;
+            return delivered + netAuthAppendPost(t, seam, bytes[i..]);
+        }
+        if (t.net_reply_len < net_auth_line_max) {
+            t.net_reply[t.net_reply_len] = b;
+            t.net_reply_len += 1;
+        } else {
+            // Over-long line: reject honestly (bounded buffer).
+            netAuthFailSeam(t, seam);
+            return delivered;
+        }
+    }
+    return delivered;
+}
+
+/// Apply the attached process's verdict for the buffered reply (slot 71
+/// op = verdict). Accept opens the byte gate and delivers any pipelined
+/// post-auth bytes; reject is the same failed connection as a malformed
+/// line. Returns false when there is no reply awaiting a verdict.
+pub fn netAuthVerdictSeam(t: *Terminal, accept: bool, comptime seam: type) bool {
+    if (!t.net_auth_on or t.net_authed or !t.net_reply_ready or t.net_verdict != null) return false;
+    t.net_verdict = accept;
+    if (!accept) {
+        netAuthFailSeam(t, seam);
+        return true;
+    }
+    t.net_authed = true;
+    t.net_reply_ready = false;
+    const n = t.net_post_len;
+    if (n > 0) {
+        _ = t.pushInput(t.net_post[0..n]);
+        t.net_post_len = 0;
+    }
+    // Key-material hygiene: the challenge and the reply (a MAC/signature)
+    // are never needed again.
+    t.net_reply_len = 0;
+    @memset(&t.net_reply, 0);
+    @memset(&t.net_challenge, 0);
+    return true;
+}
+
+/// Production-seam wrapper (the slot-71 handler).
+pub fn netAuthVerdict(t: *Terminal, accept: bool) bool {
+    return netAuthVerdictSeam(t, accept, NetSeam);
 }
 
 /// Build + transmit one raw TCP data segment, advancing the send state.
@@ -765,49 +987,6 @@ fn netTx(comptime seam: type, bytes: []const u8) bool {
     tcp.advance_snd(bytes.len);
     tcp.record_pending();
     return true;
-}
-
-/// Deliver a received payload through the v1 auth gate (ADR 0022 D3). With no
-/// secret set the bytes go straight to the shell; with a secret the FIRST
-/// line is the credential — a match consumes it and authenticates, a mismatch
-/// transmits `auth failed\n`, ends the session, and detaches. Returns bytes
-/// delivered to the terminal input queue.
-fn netAuthConsume(t: *Terminal, comptime seam: type, bytes: []const u8) usize {
-    var delivered: usize = 0;
-    var i: usize = 0;
-    while (i < bytes.len) {
-        if (t.net_authed) {
-            delivered += t.pushInput(bytes[i..]);
-            break;
-        }
-        const b = bytes[i];
-        i += 1;
-        if (b == '\n' or b == '\r') {
-            if (secretEq(t.net_challenge[0..t.net_challenge_len], t.net_secret[0..t.net_secret_len])) {
-                t.net_authed = true;
-                t.net_challenge_len = 0;
-                if (b == '\r' and i < bytes.len and bytes[i] == '\n') i += 1; // CRLF
-                continue; // consume the credential line, deliver the rest
-            }
-            _ = netTx(seam, "auth failed\n");
-            klog.line("tty net: auth failed\n");
-            tcp.reset();
-            t.detach();
-            return delivered;
-        }
-        if (t.net_challenge_len < net_secret_max) {
-            t.net_challenge[t.net_challenge_len] = b;
-            t.net_challenge_len += 1;
-        } else {
-            // Over-long credential line: reject honestly (bounded buffer).
-            _ = netTx(seam, "auth failed\n");
-            klog.line("tty net: auth failed\n");
-            tcp.reset();
-            t.detach();
-            return delivered;
-        }
-    }
-    return delivered;
 }
 
 /// Pump TCP bytes into the net-attached terminal's input queue: drain the
@@ -843,6 +1022,22 @@ pub fn pumpNetInputSeam(comptime seam: type) usize {
         tcp.reset();
         t.detach();
         return total;
+    }
+    // M50 TS4 (#1138, ADR 0024 D6): the delegated handshake. Once the
+    // connection is ESTABLISHED, mint + send the fresh challenge (never
+    // before establishment), then enforce the 10 s deadline: no process
+    // verdict in time is the same failed connection as a bad reply.
+    if (t.net_auth_on and !t.net_authed) {
+        if (tcp.state == .established and !tcp.peer_fin) {
+            _ = netAuthSendChallengeSeam(t, seam);
+        }
+        if (t.net_challenge_sent and
+            tcp.now_ticks -| t.net_auth_ticks >= net_auth_deadline)
+        {
+            klog.line("tty net: auth deadline\n");
+            netAuthFailSeam(t, seam);
+            return total;
+        }
     }
     // Once the connection is up, flush anything the shell wrote before the
     // handshake completed (the initial prompt).
@@ -1260,59 +1455,215 @@ fn netTestEstablish(port: u16) void {
     tcp.state = .established;
 }
 
-test "terminal: net pump gates delivery on the shared secret (M46 RC3)" {
+test "terminal: net pump mints a fresh challenge and gates delivery on the verdict (TS4)" {
     for (&terminals) |*tt| tt.reset();
     tcp.reset();
     defer tcp.reset();
+    defer test_challenge = null;
     NetCapture.clock = 0;
-    // (1) A wrong secret is rejected: detached, `auth failed` sent, and NO
-    // byte reaches the shell.
     NetCapture.clear();
+
+    // (1) The challenge is minted + framed on establishment: pre-auth output
+    // is withheld and nothing reaches the shell.
     const h1 = create(3) orelse return error.TestUnexpectedResult;
     const t1 = get(h1).?;
-    try std.testing.expect(t1.attachNetAuth(2323, "s3cret", null));
+    try std.testing.expect(t1.attachNetAuth(2323, .hmac_sha256, null));
     try std.testing.expect(!t1.net_authed);
+    try std.testing.expect(!t1.net_challenge_sent);
+    var fixed: [net_challenge_len]u8 = undefined;
+    for (&fixed, 0..) |*b, i| b.* = @intCast(i);
+    test_challenge = fixed;
     netTestEstablish(2323);
-    netTestSetRx("nope\nhelp\n");
+    _ = t1.write("prompt> ");
+    _ = pumpNetInputSeam(NetCapture);
+    try std.testing.expect(t1.net_challenge_sent);
+    try std.testing.expect(netTestSent("VIRELAIOS-AUTH/1 hmac-sha256 "));
+    // The exact 32-byte challenge hex (000102...1f) + newline.
+    try std.testing.expect(netTestSent("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\n"));
+    try std.testing.expect(!netTestSent("prompt> ")); // output withheld pre-verdict
+    try std.testing.expectEqual(@as(usize, 0), t1.pendingInput());
+
+    // (2) A malformed (non-hex) reply is the failed connection: `auth failed`
+    // + reset + detach, and NO byte reached the shell.
+    NetCapture.clear();
+    netTestSetRx("zz\n");
     _ = pumpNetInputSeam(NetCapture);
     try std.testing.expect(attachedNet() == null);
-    try std.testing.expectEqual(@as(usize, 0), t1.pendingInput());
     try std.testing.expect(netTestSent("auth failed"));
+    try std.testing.expectEqual(@as(usize, 0), t1.pendingInput());
+    release(h1);
 
-    // (2) The correct secret in the same chunk as a command: the credential
-    // line is consumed, the command is delivered, output stays withheld until
-    // auth and then flows.
+    // (3) A fresh accept mints a NEW challenge (the CSPRNG stream advances,
+    // never a reused nonce): a captured handshake cannot answer it. No test
+    // override here, so the mint path runs.
+    test_challenge = null;
     NetCapture.clear();
     const h2 = create(4) orelse return error.TestUnexpectedResult;
     const t2 = get(h2).?;
-    try std.testing.expect(t2.attachNetAuth(2323, "s3cret", null));
+    try std.testing.expect(t2.attachNetAuth(2323, .hmac_sha256, null));
     netTestEstablish(2323);
-    _ = t2.write("prompt> ");
-    try std.testing.expectEqual(@as(usize, 0), pumpNetOutputSeam(NetCapture));
-    try std.testing.expect(!netTestSent("prompt> "));
-    netTestSetRx("s3cret\r\nhelp\n");
     _ = pumpNetInputSeam(NetCapture);
-    try std.testing.expect(t2.net_authed);
-    var in: [32]u8 = undefined;
-    const n = t2.readInput(&in);
-    try std.testing.expectEqualStrings("help\n", in[0..n]);
-    try std.testing.expect(netTestSent("prompt> ")); // the withheld prompt flushed
-    t2.detach();
+    var first: [net_challenge_len]u8 = undefined;
+    @memcpy(&first, &t2.net_challenge);
+    release(h2);
     tcp.reset();
-
-    // (3) No secret = SH7 behavior: bytes flow immediately.
     NetCapture.clear();
-    const h3 = create(5) orelse return error.TestUnexpectedResult;
+    const h2b = create(5) orelse return error.TestUnexpectedResult;
+    const t2b = get(h2b).?;
+    try std.testing.expect(t2b.attachNetAuth(2323, .hmac_sha256, null));
+    netTestEstablish(2323);
+    _ = pumpNetInputSeam(NetCapture);
+    try std.testing.expect(!std.mem.eql(u8, &first, &t2b.net_challenge));
+    release(h2b);
+
+    // (4) A well-formed reply + an accept verdict delivers the pipelined
+    // command and opens the output gate.
+    NetCapture.clear();
+    tcp.reset();
+    const h3 = create(6) orelse return error.TestUnexpectedResult;
     const t3 = get(h3).?;
-    try std.testing.expect(t3.attachNetAuth(2323, &.{}, null));
+    try std.testing.expect(t3.attachNetAuth(2323, .hmac_sha256, null));
+    netTestEstablish(2323);
+    _ = t3.write("prompt> ");
+    _ = pumpNetInputSeam(NetCapture);
+    try std.testing.expect(!netTestSent("prompt> "));
+    const mac_hex = "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf" ++
+        "b0b1b2b3b4b5b6b7b8b9babbbcbdbebf";
+    netTestSetRx(mac_hex ++ "\r\nhelp\n");
+    _ = pumpNetInputSeam(NetCapture);
+    try std.testing.expect(t3.net_reply_ready); // awaiting the process verdict
+    try std.testing.expect(!t3.net_authed);
+    try std.testing.expectEqual(@as(usize, 0), t3.pendingInput());
+    try std.testing.expectEqualStrings("help\n", t3.net_post[0..t3.net_post_len]);
+    try std.testing.expect(netAuthVerdict(t3, true));
+    var in: [32]u8 = undefined;
+    const n = t3.readInput(&in);
+    try std.testing.expectEqualStrings("help\n", in[0..n]);
+    try std.testing.expectEqual(@as(usize, 0), t3.net_reply_len); // wiped
     try std.testing.expect(t3.net_authed);
+    release(h3);
+
+    // (5) A reject verdict is the same failed connection.
+    NetCapture.clear();
+    tcp.reset();
+    const h4 = create(7) orelse return error.TestUnexpectedResult;
+    const t4 = get(h4).?;
+    try std.testing.expect(t4.attachNetAuth(2323, .hmac_sha256, null));
+    netTestEstablish(2323);
+    test_challenge = fixed;
+    _ = pumpNetInputSeam(NetCapture);
+    netTestSetRx(mac_hex ++ "\n");
+    _ = pumpNetInputSeam(NetCapture);
+    try std.testing.expect(t4.net_reply_ready);
+    try std.testing.expect(netAuthVerdictSeam(t4, false, NetCapture));
+    try std.testing.expect(attachedNet() == null);
+    try std.testing.expect(netTestSent("auth failed"));
+    try std.testing.expectEqual(@as(usize, 0), t4.pendingInput());
+
+    for (&terminals) |*tt| tt.reset();
+    tcp.reset();
+}
+
+test "terminal: ED25519 net auth accepts the 128-hex reply (TS4 class-A framing)" {
+    for (&terminals) |*tt| tt.reset();
+    tcp.reset();
+    defer tcp.reset();
+    defer test_challenge = null;
+    NetCapture.clock = 0;
+    NetCapture.clear();
+    const h = create(3) orelse return error.TestUnexpectedResult;
+    const t = get(h).?;
+    try std.testing.expect(t.attachNetAuth(2323, .ed25519, null));
+    netTestEstablish(2323);
+    _ = pumpNetInputSeam(NetCapture);
+    try std.testing.expect(netTestSent("VIRELAIOS-AUTH/1 ed25519 "));
+    // A 128-hex signature line (the kernel frames 64/128; it does not
+    // verify — the process does).
+    var sig_hex: [128]u8 = undefined;
+    for (&sig_hex, 0..) |*b, i| b.* = hex_digits[i % 16];
+    netTestSetRx(sig_hex ++ "\n");
+    _ = pumpNetInputSeam(NetCapture);
+    try std.testing.expect(t.net_reply_ready);
+    try std.testing.expect(netAuthVerdict(t, true));
+    try std.testing.expect(t.net_authed);
+    // A 64-hex HMAC line is malformed for ed25519.
+    t.detach();
+    tcp.reset();
+    NetCapture.clear();
+    const h2 = create(4) orelse return error.TestUnexpectedResult;
+    const t2 = get(h2).?;
+    try std.testing.expect(t2.attachNetAuth(2323, .ed25519, null));
+    netTestEstablish(2323);
+    _ = pumpNetInputSeam(NetCapture);
+    netTestSetRx("a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf\n");
+    _ = pumpNetInputSeam(NetCapture);
+    try std.testing.expect(attachedNet() == null);
+    try std.testing.expect(netTestSent("auth failed"));
+    for (&terminals) |*tt| tt.reset();
+    tcp.reset();
+}
+
+test "terminal: net auth deadline trips to a failed connection, never a bypass (TS4)" {
+    for (&terminals) |*tt| tt.reset();
+    tcp.reset();
+    defer tcp.reset();
+    NetCapture.clear();
+    const h = create(3) orelse return error.TestUnexpectedResult;
+    const t = get(h).?;
+    try std.testing.expect(t.attachNetAuth(2323, .hmac_sha256, null));
+    netTestEstablish(2323);
+    NetCapture.clock = 0;
+    _ = pumpNetInputSeam(NetCapture);
+    try std.testing.expect(t.net_challenge_sent);
+    // One tick short of the deadline: still waiting, not authed.
+    NetCapture.clock = net_auth_deadline - 1;
+    _ = pumpNetInputSeam(NetCapture);
+    try std.testing.expect(attachedNet() != null);
+    try std.testing.expect(!t.net_authed);
+    // At the deadline: the failed connection — `auth failed`, reset, detach.
+    NetCapture.clock = net_auth_deadline;
+    NetCapture.clear();
+    _ = pumpNetInputSeam(NetCapture);
+    try std.testing.expect(attachedNet() == null);
+    try std.testing.expect(netTestSent("auth failed"));
+    try std.testing.expectEqual(@as(usize, 0), t.pendingInput());
+    try std.testing.expectEqual(@as(u64, 0), tcp.listen_port);
+    for (&terminals) |*tt| tt.reset();
+    tcp.reset();
+}
+
+test "terminal: the TS4 auth framing fits one bounded TCP segment (bounds audit)" {
+    // The challenge line: tag + scheme + 2*32 hex + newline.
+    const hmac_line = net_auth_tag.len + 1 + "hmac-sha256".len + 1 + 2 * net_challenge_len + 1;
+    const ed_line = net_auth_tag.len + 1 + "ed25519".len + 1 + 2 * net_challenge_len + 1;
+    try std.testing.expect(hmac_line <= tcp.payload_max);
+    try std.testing.expect(ed_line <= tcp.payload_max);
+    // The reply line: 128 hex chars (Ed25519) + newline fits the raised bound.
+    try std.testing.expect(NetAuthScheme.hmac_sha256.expectedReplyLen() + 1 <= tcp.payload_max);
+    try std.testing.expect(NetAuthScheme.ed25519.expectedReplyLen() + 1 <= tcp.payload_max);
+    try std.testing.expect(net_auth_line_max >= NetAuthScheme.ed25519.expectedReplyLen());
+    try std.testing.expectEqual(@as(usize, 192), tcp.payload_max);
+    try std.testing.expectEqual(@as(usize, 212), tcp.segment_max);
+}
+
+test "terminal: explicit open mode reproduces SH7 byte flow (TS4)" {
+    for (&terminals) |*tt| tt.reset();
+    tcp.reset();
+    defer tcp.reset();
+    NetCapture.clear();
+    const h = create(3) orelse return error.TestUnexpectedResult;
+    const t = get(h).?;
+    try std.testing.expect(t.attachNetAuth(2323, .open, null));
+    try std.testing.expect(t.net_authed);
+    try std.testing.expect(!t.net_auth_on);
     netTestEstablish(2323);
     netTestSetRx("help\n");
     _ = pumpNetInputSeam(NetCapture);
-    var in3: [32]u8 = undefined;
-    const n3 = t3.readInput(&in3);
-    try std.testing.expectEqualStrings("help\n", in3[0..n3]);
-
+    var in: [32]u8 = undefined;
+    const n = t.readInput(&in);
+    try std.testing.expectEqualStrings("help\n", in[0..n]);
+    // No challenge was ever framed in open mode.
+    try std.testing.expect(!netTestSent("VIRELAIOS-AUTH/1"));
     for (&terminals) |*tt| tt.reset();
     tcp.reset();
 }
@@ -1324,7 +1675,7 @@ test "terminal: net pump ends a half-open accept on its timeout (M46 #1105)" {
     NetCapture.clear();
     const h = create(3) orelse return error.TestUnexpectedResult;
     const t = get(h).?;
-    try std.testing.expect(t.attachNetAuth(2323, &.{}, null));
+    try std.testing.expect(t.attachNetAuth(2323, .open, null));
     // A SYN was accepted (state syn_received) with the accept clock stamped.
     tcp.listen(2323);
     tcp.state = .syn_received;

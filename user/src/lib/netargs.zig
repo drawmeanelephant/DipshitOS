@@ -1,16 +1,19 @@
-//! M46 RC3 (#1111) / RC3b (#1104): the shared net-front-end argv parser.
+//! M50 TS4 (#1138, ADR 0024 D6): the shared net-front-end argv parser.
 //!
 //! Both `SH.BIN` (serial/remote shell) and `TERM.BIN` (windowed shell) accept
-//! the same optional front-end argument, fixed by ADR 0020 Amendment B and
-//! extended by ADR 0022 D3/D4:
+//! the same optional front-end argument:
 //!
-//!     <app>                          -> serial by default (SH) / window (TERM)
-//!     <app> net [port] [secret] [allow-ip]
+//!     <app>                -> serial by default (SH) / window (TERM)
+//!     <app> net [port] [open]
 //!
-//! `port` defaults to 2323; `secret` is the session's first-line credential
-//! (empty = open); `allow-ip` is an optional source-IP allowlist as a
-//! big-endian u32. The argv block is the kernel's card-3e 32-byte-per-slot
-//! packaging (`argc` in x0, block VA in x1).
+//! `port` defaults to 2323. Without `open` the caller must have a credential
+//! in the TS5 store and the session authenticates with the delegated
+//! challenge-response handshake (the kernel frames the challenge; the
+//! process verifies and votes). With no credential the caller REFUSES to
+//! listen unless `open` is passed explicitly — the documented insecure
+//! trusted-network mode that reproduces M46's accept-immediately behavior.
+//! Fail closed by default. The argv block is the kernel's card-3e
+//! 32-byte-per-slot packaging (`argc` in x0, block VA in x1).
 
 const std = @import("std");
 
@@ -19,8 +22,8 @@ pub const default_port: u16 = 2323;
 
 pub const Args = struct {
     port: u16,
-    secret: []const u8 = &.{},
-    allow_ip: u32 = 0,
+    /// The explicit insecure mode: accept without authentication.
+    open: bool = false,
 };
 
 /// Read one 32-byte NUL-terminated argv slot from the kernel-packaged block.
@@ -31,24 +34,9 @@ pub fn argSlot(block: [*]const u8, i: usize) []const u8 {
     return slot[0..n];
 }
 
-/// Parse a dotted-quad IPv4 into a big-endian u32 (the allowlist wire form).
-pub fn parseIpv4(s: []const u8) ?u32 {
-    var parts: [4]u8 = undefined;
-    var idx: usize = 0;
-    var it = std.mem.splitScalar(u8, s, '.');
-    while (it.next()) |p| {
-        if (idx >= 4 or p.len == 0) return null;
-        parts[idx] = std.fmt.parseInt(u8, p, 10) catch return null;
-        idx += 1;
-    }
-    if (idx != 4) return null;
-    return (@as(u32, parts[0]) << 24) | (@as(u32, parts[1]) << 16) |
-        (@as(u32, parts[2]) << 8) | @as(u32, parts[3]);
-}
-
-/// `net [port] [secret] [allow-ip]` — null when the first argument is not
-/// `net` (the caller then uses its default front-end). A malformed port or
-/// allow-ip also returns null (the caller rejects the attach).
+/// `net [port] [open]` — null when the first argument is not `net` (the
+/// caller then uses its default front-end). A malformed port or an unknown
+/// third argument also returns null (the caller rejects the attach).
 pub fn parse(argc: u64, argv_va: u64) ?Args {
     if (argc == 0 or argv_va == 0) return null;
     const block: [*]const u8 = @ptrFromInt(argv_va);
@@ -58,47 +46,56 @@ pub fn parse(argc: u64, argv_va: u64) ?Args {
         const arg = argSlot(block, 1);
         if (arg.len > 0) port = std.fmt.parseInt(u16, arg, 10) catch return null;
     }
-    var secret: []const u8 = &.{};
-    if (argc >= 3) secret = argSlot(block, 2);
-    var allow_ip: u32 = 0;
-    if (argc >= 4) {
-        const a = argSlot(block, 3);
-        if (a.len > 0) allow_ip = parseIpv4(a) orelse return null;
+    var open = false;
+    if (argc >= 3) {
+        const arg = argSlot(block, 2);
+        if (arg.len > 0) {
+            if (!std.mem.eql(u8, arg, "open")) return null;
+            open = true;
+        }
     }
-    return .{ .port = port, .secret = secret, .allow_ip = allow_ip };
+    return .{ .port = port, .open = open };
 }
 
-test "netargs: parse defaults, port, secret, and allow-ip" {
+test "netargs: parse defaults, port, and the explicit open mode" {
     var block = [_]u8{0} ** 128;
     const write = struct {
         fn f(b: []u8, i: usize, s: []const u8) void {
             @memcpy(b[i * 32 ..][0..s.len], s);
         }
     }.f;
-    // Just `net` -> default port, no auth.
+    // Just `net` -> default port, auth required (fail closed).
     write(&block, 0, "net");
     const a = parse(1, @intFromPtr(&block)).?;
     try std.testing.expectEqual(default_port, a.port);
-    try std.testing.expectEqual(@as(usize, 0), a.secret.len);
-    try std.testing.expectEqual(@as(u32, 0), a.allow_ip);
-    // `net 4444 s3cret 10.0.0.2`.
+    try std.testing.expect(!a.open);
+    // `net 4444 open`.
     @memset(&block, 0);
     write(&block, 0, "net");
     write(&block, 1, "4444");
-    write(&block, 2, "s3cret");
-    write(&block, 3, "10.0.0.2");
-    const b = parse(4, @intFromPtr(&block)).?;
+    write(&block, 2, "open");
+    const b = parse(3, @intFromPtr(&block)).?;
     try std.testing.expectEqual(@as(u16, 4444), b.port);
-    try std.testing.expectEqualStrings("s3cret", b.secret);
-    try std.testing.expectEqual(@as(u32, 0x0a000002), b.allow_ip);
+    try std.testing.expect(b.open);
+    // An empty third slot is the default posture, not an error.
+    @memset(&block, 0);
+    write(&block, 0, "net");
+    write(&block, 1, "4444");
+    const c = parse(3, @intFromPtr(&block)).?;
+    try std.testing.expect(!c.open);
     // A different first arg is not the net front-end.
     @memset(&block, 0);
     write(&block, 0, "exec");
     try std.testing.expect(parse(1, @intFromPtr(&block)) == null);
-    // A bad allow-ip is rejected.
+    // An unknown mode word is rejected (never silently treated as open).
     @memset(&block, 0);
     write(&block, 0, "net");
     write(&block, 1, "4444");
-    write(&block, 3, "999.1.1.1");
-    try std.testing.expect(parse(4, @intFromPtr(&block)) == null);
+    write(&block, 2, "secret");
+    try std.testing.expect(parse(3, @intFromPtr(&block)) == null);
+    // A bad port is rejected.
+    @memset(&block, 0);
+    write(&block, 0, "net");
+    write(&block, 1, "99999");
+    try std.testing.expect(parse(2, @intFromPtr(&block)) == null);
 }

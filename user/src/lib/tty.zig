@@ -1083,13 +1083,14 @@ pub const Session = struct {
         return ok;
     }
 
-    /// M46 RC3 (#1111, ADR 0022 D3/D4): host the net front-end with v1 auth —
-    /// an optional shared `secret` (the session's first line; empty = open)
-    /// and an optional source-IP allowlist (`allow_ip` big-endian u32; 0 =
-    /// any). The secret buffer must outlive the attach call.
-    pub fn attachNetAuth(self: *Session, port: u16, secret: []const u8, allow_ip: u32) bool {
-        const ptr: u64 = if (secret.len > 0) @intFromPtr(secret.ptr) else 0;
-        const ok = abi.tty_attach_net_auth(port, ptr, secret.len, allow_ip) == 0;
+    /// M50 TS4 (#1138, ADR 0024 D6): host the net front-end with the chosen
+    /// auth posture — `scheme` 0 = open (the explicit insecure mode),
+    /// 1 = hmac-sha256, 2 = ed25519. The credential never rides argv; the
+    /// caller reads it from the TS5 store and answers via slot 71
+    /// (`lib/netauth.zig`). `allow_ip` is an optional source-IP allowlist
+    /// (big-endian u32; 0 = any).
+    pub fn attachNetMode(self: *Session, port: u16, scheme: u64, allow_ip: u32) bool {
+        const ok = abi.tty_attach_net_mode(port, scheme, allow_ip) == 0;
         if (ok) self.attached = true;
         return ok;
     }

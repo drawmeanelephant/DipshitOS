@@ -145,8 +145,8 @@ of them with `just verify-vz`.
 | spec | `live-ps` | 1 run / 6 assert | live-ps.spec -- vgate pilot (seeded share + display/input + repeat): |
 | spec | `live-quote` | 1 run / 7 assert | live-quote.spec -- quoting & escaping: single-quote grouping, |
 | spec | `live-reboot` | 2 run / 7 assert | live-reboot.spec -- live reboot and shutdown from the shell. |
-| spec | `live-remote` | 1 run / 10 assert | live-remote.spec -- M45 card SH7 class-B gate (issue #1083, ADR 0020 B). |
-| spec | `live-remote-auth` | 2 run / 9 assert | live-remote-auth.spec -- M46 RC3 class-B gate (issue #1111, ADR 0022 D3). |
+| spec | `live-remote` | 1 run / 11 assert | live-remote.spec -- M45 card SH7 class-B gate (issue #1083, ADR 0020 B). |
+| spec | `live-remote-auth2` | 4 run / 21 assert | live-remote-auth2.spec -- M50 TS4 class-B gate (issue #1138, ADR 0024 D6). |
 | spec | `live-remote-console` | 2 run / 7 assert | live-remote-console.spec -- M46 RC4 class-B gate (issue #1112, ADR 0022). |
 | spec | `live-resmon` | 1 run / 5 assert | live-resmon.spec -- M22 D10: RESMON.BIN resource monitor on VZ. |
 | spec | `live-roadpops` | 1 run / 11 assert | live-roadpops.spec -- claim 1574 (milestone six, card G3) class-B |

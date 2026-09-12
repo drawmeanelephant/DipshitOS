@@ -215,8 +215,8 @@ test "tcp: malformed + unexpected segments are counted, never assumed away" {
     try std.testing.expectEqual(Event.none, handle_rx(&opts));
     try std.testing.expectEqual(@as(u64, 3), tcp.dropped_malformed);
 
-    // An oversize payload (65 bytes > payload_max) -> tcp.dropped_malformed.
-    const big: [65]u8 = .{0x41} ** 65;
+    // An oversize payload (193 bytes > payload_max) -> tcp.dropped_malformed.
+    const big: [193]u8 = .{0x41} ** 193;
     const over = craft_frame(ip_host, host_mac, ip_guest, test_mac, 9999, default_src_port, 0x22222222, 0x11111112, flag_syn | flag_ack, &big);
     try std.testing.expectEqual(Event.none, handle_rx(&over));
     try std.testing.expectEqual(@as(u64, 4), tcp.dropped_malformed);

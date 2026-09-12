@@ -28,6 +28,8 @@ const shell_mod = @import("lib/shell.zig");
 const pipe = @import("lib/pipe.zig");
 const script = @import("lib/script.zig");
 const netargs = @import("lib/netargs.zig");
+// M50 TS4 (#1138, ADR 0024 D6): the delegated net-auth verifier.
+const netauth = @import("lib/netauth.zig");
 const startup = @import("lib/startup.zig");
 const toolbox = @import("lib/toolbox.zig");
 
@@ -40,7 +42,7 @@ pub const monitor_marker: []const u8 = "sh: monitor\n";
 pub const exit_status: u64 = 70;
 /// SH7 (#1083): the default TCP port when `exec SH.BIN net` gives no port.
 pub const default_net_port: u16 = netargs.default_port;
-/// M46 RC3 (#1111): the shared `net [port] [secret] [allow-ip]` parser.
+/// M50 TS4 (#1138): the shared `net [port] [open]` parser (ADR 0024 D6).
 pub const NetArgs = netargs.Args;
 pub const parseNetArgs = netargs.parse;
 /// M49 SD2 (#1129): the unified shell startup files (`STARTUP.SH` then the
@@ -55,6 +57,8 @@ pub const settings_path: []const u8 = "SETTINGS.TXT";
 var g_shell: shell_mod.Shell = undefined;
 var g_editor: tty.LineEditor = undefined;
 var g_session: tty.Session = undefined;
+/// M50 TS4 (#1138): the delegated net-auth verifier, live only in net mode.
+var g_netauth: ?netauth.Auth = null;
 var g_entries: [16]abi.DirEntry = undefined;
 var g_listing: [16][]const u8 = undefined;
 var g_complete: shell_mod.CompletionSet = undefined;
@@ -694,21 +698,36 @@ pub export fn _start(argc: u64, argv_va: u64) callconv(.c) noreturn {
         ui.write_console("sh: no /dev/tty\n");
         ui.exit_process(1);
     };
-    // SH7 (#1083, ADR 0020 Amendment B): `SH.BIN net [port] [secret]
-    // [allow-ip]` hosts the net front-end; the default (no args) is the
-    // serial console, unchanged. M46 RC3 (#1111) adds the optional secret /
-    // source-IP allowlist (ADR 0022 D3/D4).
+    // SH7 (#1083, ADR 0020 Amendment B): `SH.BIN net [port] [open]` hosts
+    // the net front-end; the default (no args) is the serial console,
+    // unchanged. M50 TS4 (#1138, ADR 0024 D6): with a credential in the TS5
+    // store the session authenticates with the delegated challenge-response
+    // handshake; with no credential it REFUSES to listen unless `open` is
+    // explicit (the documented insecure trusted-network mode). Fail closed.
     if (parseNetArgs(argc, argv_va)) |na| {
-        if (!g_session.attachNetAuth(na.port, na.secret, na.allow_ip)) {
+        const scheme: netauth.Scheme = if (na.open) .open else (netauth.selectScheme() orelse {
+            ui.write_console("sh: net refused: no credential (pass 'open' for the insecure mode)\n");
+            g_session.close();
+            ui.exit_process(2);
+        });
+        if (!g_session.attachNetMode(na.port, @intFromEnum(scheme), 0)) {
             ui.write_console("sh: remote attach failed\n");
             g_session.close();
             ui.exit_process(2);
         }
+        if (scheme != .open) {
+            g_netauth = netauth.Auth.init(scheme, netauth.sysOps(), .{ .get_fn = netauth.storeSource });
+        }
         var rb: [48]u8 = undefined;
         const rm = std.fmt.bufPrint(&rb, "sh: remote on {d}\n", .{na.port}) catch "sh: remote\n";
         ui.write_console(rm);
-        if (na.secret.len > 0) ui.write_console("sh: remote auth=secret\n");
-        if (na.allow_ip != 0) ui.write_console("sh: remote auth=srcip\n");
+        if (scheme == .open) {
+            ui.write_console("sh: remote auth=open\n");
+        } else if (scheme == .hmac_sha256) {
+            ui.write_console("sh: remote auth=hmac-sha256\n");
+        } else {
+            ui.write_console("sh: remote auth=ed25519\n");
+        }
     } else {
         if (!g_session.attach(.serial)) {
             ui.write_console("sh: attach failed\n");
@@ -728,6 +747,10 @@ pub export fn _start(argc: u64, argv_va: u64) callconv(.c) noreturn {
 
     var buf: [64]u8 = undefined;
     while (true) {
+        // M50 TS4 (#1138): one delegated-handshake step per loop turn (the
+        // read below drives the kernel pump that frames the challenge and
+        // buffers the reply).
+        if (g_netauth) |*a| a.step();
         const n = g_session.read(&buf);
         if (n <= 0) {
             ui.yield_task();

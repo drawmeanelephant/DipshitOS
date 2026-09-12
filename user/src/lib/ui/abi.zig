@@ -116,6 +116,18 @@ pub const sys_file_mode_num: u64 = 69;
 /// len)` — the calling principal's entries from the `SECRETS.TXT` store.
 /// The ONLY in-guest reader of the secret store; no `sys_secret_set` exists.
 pub const sys_secret_get_num: u64 = 70;
+/// M50 TS4 (issue #1138, ADR 0024 D6/D10): slot 71 `sys_tty_net_auth(op,
+/// buf, len)` — the delegated challenge/response/verdict channel between
+/// the kernel net pump and the attached process. Excluded from strace.
+pub const sys_tty_net_auth_num: u64 = 71;
+/// The slot-71 op selectors (ADR 0007 amendment).
+pub const net_auth_op_challenge: u64 = 0;
+pub const net_auth_op_response: u64 = 1;
+pub const net_auth_op_verdict: u64 = 2;
+/// The challenge length the kernel mints (32 bytes), mirrored for the
+/// userland verifier.
+pub const net_challenge_len: usize = 32;
+
 /// The fixed `sys_secret_get` wire record (key + value per caller entry).
 pub const secret_entry_bytes: usize = 4 + 4 + 4 + 32 + 64;
 pub const secret_entries_max: usize = 8;
@@ -825,12 +837,25 @@ pub fn principal() ?Principal {
     };
 }
 
-/// M46 RC3 (#1111, ADR 0022 D3/D4): attach the net front-end with v1 auth —
-/// `secret` (the session's first line must match; empty = open) and an
-/// optional source-IP allowlist (`allow_ip` as a big-endian IPv4 u32; 0 =
-/// any). Selector 3 args: port, secret_ptr, secret_len, allow_ip.
-pub fn tty_attach_net_auth(port: u64, secret_ptr: u64, secret_len: u64, allow_ip: u64) i64 {
-    return syscall6(sys_tty_attach_num, 3, port, secret_ptr, secret_len, allow_ip, 0);
+/// M50 TS4 (#1138, ADR 0024 D6/D10): attach the net front-end with selector
+/// 3 in the chosen auth mode — `scheme` (0 = open, 1 = hmac-sha256,
+/// 2 = ed25519) and an optional source-IP allowlist (`allow_ip` as a
+/// big-endian IPv4 u32; 0 = any). The credential is NEVER an argument: the
+/// process reads it from the TS5 store and answers through
+/// `tty_net_auth` (slot 71).
+pub fn tty_attach_net_mode(port: u64, scheme: u64, allow_ip: u64) i64 {
+    return syscall6(sys_tty_attach_num, 3, port, scheme, 0, allow_ip, 0);
+}
+
+/// M50 TS4 (#1138, ADR 0024 D6): one slot-71 step. `op` 0 = read the fresh
+/// challenge (returns 32, or 0 before it is minted); 1 = read the buffered
+/// client reply line (returns its hex length, 0 when none); 2 = vote the
+/// verdict — `buf[0]` 0 = reject, 1 = accept (returns 0). Negative ADR 0007
+/// error otherwise (EINVAL no reply pending/not auth mode, EACCES the
+/// caller does not own the attached terminal, EFAULT a bad buffer).
+pub fn tty_net_auth(op: u64, buf: []u8) i64 {
+    if (@import("builtin").os.tag != .freestanding) return -4;
+    return syscall3(sys_tty_net_auth_num, op, @intFromPtr(buf.ptr), buf.len);
 }
 
 /// ADR 0007 slot 8 `sys_wait(target)`: block the calling process until the

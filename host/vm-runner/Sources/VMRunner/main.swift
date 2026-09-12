@@ -88,7 +88,12 @@
 //          Requires --net. OFF by default: the default VM is unchanged.)
 //         [--net-tcp-connect <guest-ip>:<port>[:<payload-file>]]
 //          [--net-tcp-connect-after <text>]
-//          [--net-tcp-connect-close-after <text>] (M45 SH7, issue #1083,
+//          [--net-tcp-connect-close-after <text>]
+//          [--net-tcp-connect-secret <s>] (M50 TS4: answer the guest's
+//           VIRELAIOS-AUTH/1 challenge with HMAC-SHA256(s))
+//          [--net-tcp-connect-mac <hex>] (M50 TS4 replay: send this
+//           pre-recorded MAC line instead of computing one)
+//          (M45 SH7, issue #1083,
 //          ADR 0020 Amendment B: the host INITIATES an inbound TCP
 //          connection TO a guest listener — the reverse of
 //          --net-tcp-respond. After <text> (default "sh: remote") the host
@@ -193,6 +198,7 @@
 
 import AppKit
 import ApplicationServices
+import CryptoKit
 import Darwin
 // DiskImageKit ships in the macOS 27 SDK only (#523 item 2). The class-A
 // CI job builds against the older macos-latest SDK, so the import and the
@@ -361,9 +367,11 @@ var consoleMode = false
 // time — the trusted-LAN MVP before any guest crypto/SSH.
 var consoleTCPPort: UInt16?
 var consoleTCPBind: String = "127.0.0.1"
-// M46 RC1 (#1110, ADR 0022 D2): an optional bridge shared secret. When set
-// (`[host:]port:secret`), the client's first line must equal it, else the
-// bridge writes `console-tcp: auth failed` and closes the client.
+// M50 TS4 (#1138, ADR 0024 D7): an optional bridge HMAC secret. When set
+// (`[host:]port:secret`), the bridge sends a fresh
+// `VIRELAIOS-AUTH/1 hmac-sha256 <hex-challenge>` line and requires
+// `hex(HMAC-SHA256(secret, domain || 0x00 || challenge))` as the client's
+// first line; on mismatch it writes `console-tcp: auth failed` and closes.
 var consoleTCPSecret: String?
 var debugInput = false
 var markerDumpPath: String?
@@ -571,7 +579,15 @@ var netTcpConnectPort: UInt16?
 var netTcpConnectPayload: [UInt8] = []
 var netTcpConnectAfter: String?
 var netTcpConnectCloseAfter: String?
-var netTcpConnectState: UInt8 = 0 // 0 idle, 1 synSent, 2 established, 3 closed, 4 finSent
+// M50 TS4 (#1138, ADR 0024 D6): the delegated-auth client. With a secret
+// set the client waits for the guest's `VIRELAIOS-AUTH/1` challenge, answers
+// with hex(HMAC-SHA256(secret, domain || 0x00 || challenge)), then sends the
+// payload. `netTcpConnectMac` is the replay path: send that pre-recorded MAC
+// hex line instead of computing one (a captured handshake replayed against a
+// fresh challenge must fail).
+var netTcpConnectSecret: String?
+var netTcpConnectMac: String?
+var netTcpConnectState: UInt8 = 0 // 0 idle, 1 synSent, 2 established, 3 closed, 4 finSent, 5 awaitingChallenge
 var netTcpConnRecvText: String = ""
 let netTcpCliIsn: UInt32 = 0x10203040
 let netTcpCliPort: UInt16 = 12345
@@ -964,6 +980,16 @@ while idx < arguments.count {
         idx += 2
     } else if arg == "--net-tcp-connect-close-after", idx + 1 < arguments.count {
         netTcpConnectCloseAfter = arguments[idx + 1]
+        idx += 2
+    } else if arg == "--net-tcp-connect-secret", idx + 1 < arguments.count {
+        // M50 TS4 (#1138, ADR 0024 D6/D7): answer the guest's
+        // `VIRELAIOS-AUTH/1` challenge with HMAC-SHA256(secret, message).
+        netTcpConnectSecret = arguments[idx + 1]
+        idx += 2
+    } else if arg == "--net-tcp-connect-mac", idx + 1 < arguments.count {
+        // M50 TS4 replay path: send this pre-recorded MAC hex line verbatim
+        // (a captured handshake replayed against the fresh challenge).
+        netTcpConnectMac = arguments[idx + 1]
         idx += 2
     } else if arg == "--script2-delay", idx + 1 < arguments.count {
         // Card N9 (claim 9489): the claim-6684 settle before forwarding
@@ -1528,14 +1554,55 @@ if let netCapturePath {
                     if isSynAck {
                         netTcpCliAck = seq &+ 1
                         netTcpCliSeq = netTcpCliIsn &+ 1
-                        let replyLen = buildTcpFrameExplicit(&reply, netTcpGuestMAC, [0x02, 0x00, 0x00, 0x00, 0x00, 0x02], netTcpCliSrcIP, guestIP, netTcpCliPort, guestPort, netTcpCliSeq, netTcpCliAck, 0x10, netTcpConnectPayload)
+                        // M50 TS4 (#1138, ADR 0024 D6): in auth mode the
+                        // guest mints + sends its challenge once the
+                        // connection is ESTABLISHED, so the handshake ACK
+                        // must be bare; the payload follows the MAC.
+                        let authPending = netTcpConnectSecret != nil || netTcpConnectMac != nil
+                        let firstPayload = authPending ? [UInt8]() : netTcpConnectPayload
+                        let replyLen = buildTcpFrameExplicit(&reply, netTcpGuestMAC, [0x02, 0x00, 0x00, 0x00, 0x00, 0x02], netTcpCliSrcIP, guestIP, netTcpCliPort, guestPort, netTcpCliSeq, netTcpCliAck, 0x10, firstPayload)
                         try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<replyLen]))
-                        netTcpCliSeq = netTcpCliSeq &+ UInt32(netTcpConnectPayload.count)
-                        netTcpConnectState = 2
-                        print("NET-TCP-CONNECT: handshake complete (server ISN 0x\(hex32(seq)), ack 0x\(hex32(netTcpCliAck))); sent \(netTcpConnectPayload.count)-byte payload")
+                        netTcpCliSeq = netTcpCliSeq &+ UInt32(firstPayload.count)
+                        netTcpConnectState = authPending ? 5 : 2
+                        if authPending {
+                            print("NET-TCP-CONNECT: handshake complete (server ISN 0x\(hex32(seq)), ack 0x\(hex32(netTcpCliAck))); awaiting the VIRELAIOS-AUTH/1 challenge")
+                        } else {
+                            print("NET-TCP-CONNECT: handshake complete (server ISN 0x\(hex32(seq)), ack 0x\(hex32(netTcpCliAck))); sent \(netTcpConnectPayload.count)-byte payload")
+                        }
                     } else if isRst {
                         netTcpConnectState = 3
                         print("NET-TCP-CONNECT: the guest refused the connection (RST)")
+                    }
+                case 5:
+                    // M50 TS4: awaiting the guest's `VIRELAIOS-AUTH/1` line.
+                    if isRst {
+                        netTcpConnectState = 3
+                        print("NET-TCP-CONNECT: the guest reset the connection (RST)")
+                    } else if isFin {
+                        netTcpCliAck = seq &+ 1
+                        let replyLen = buildTcpFrameExplicit(&reply, netTcpGuestMAC, [0x02, 0x00, 0x00, 0x00, 0x00, 0x02], netTcpCliSrcIP, guestIP, netTcpCliPort, guestPort, netTcpCliSeq, netTcpCliAck, 0x10, [])
+                        try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<replyLen]))
+                        netTcpConnectState = 3
+                        print("NET-TCP-CONNECT: the guest sent FIN; ACKed and closed")
+                    } else if !payload.isEmpty {
+                        var text = ""
+                        for b in payload { text.append((b >= 0x20 && b < 0x7f) ? Character(UnicodeScalar(b)) : ".") }
+                        netTcpConnRecvText.append(text)
+                        print("NET-TCP-CONNECT: received \(payload.count) byte(s): \(text)")
+                        netTcpCliAck = seq &+ UInt32(payload.count)
+                        if let answer = netTcpAuthAnswer(challenge: payload) {
+                            let combined = answer + netTcpConnectPayload
+                            let replyLen = buildTcpFrameExplicit(&reply, netTcpGuestMAC, [0x02, 0x00, 0x00, 0x00, 0x00, 0x02], netTcpCliSrcIP, guestIP, netTcpCliPort, guestPort, netTcpCliSeq, netTcpCliAck, 0x10, combined)
+                            try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<replyLen]))
+                            netTcpCliSeq = netTcpCliSeq &+ UInt32(combined.count)
+                            netTcpConnectState = 2
+                            print("NET-TCP-CONNECT: answered the challenge (\(answer.count) bytes) with the \(netTcpConnectMac != nil ? "recorded replay MAC" : "computed HMAC"); sent \(netTcpConnectPayload.count)-byte payload")
+                        } else {
+                            let replyLen = buildTcpFrameExplicit(&reply, netTcpGuestMAC, [0x02, 0x00, 0x00, 0x00, 0x00, 0x02], netTcpCliSrcIP, guestIP, netTcpCliPort, guestPort, netTcpCliSeq, netTcpCliAck, 0x10, [])
+                            try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<replyLen]))
+                            netTcpConnectState = 3
+                            print("NET-TCP-CONNECT: could not answer the challenge (malformed / no HMAC support); closing")
+                        }
                     }
                 case 2:
                     // ESTABLISHED — the guest shell's data / a FIN.
@@ -1680,7 +1747,7 @@ if consoleMode {
     print("  serial log: \(serialLogPath)  (guest output teed to terminal + log)")
     print("  interactive input: enabled — stdin → serial attachment (fileHandleForReading non-nil)")
     if let port = consoleTCPPort {
-        let auth = consoleTCPSecret != nil ? ", first-line secret required" : ""
+        let auth = consoleTCPSecret != nil ? ", HMAC-SHA256 challenge-response required" : ""
         print("  console-tcp: \(consoleTCPBind):\(port) — remote console bridge (plaintext; #1066 Stage 0\(auth))")
     }
     print("  NOTE: guest RX is the polled virtio receive queue (claim 6684) — host bytes reach the kernel via the serial attachment")
@@ -2560,6 +2627,67 @@ func startConsoleStreams() {
     }
 }
 
+// M50 TS4 (#1138, ADR 0024 D6): the host-initiated client's challenge
+// answer. Lower-case hex of a byte array; the inverse decode; and the
+// `VIRELAIOS-AUTH/1 <scheme> <hex-challenge>` line parser/answer.
+func hexString(_ bytes: [UInt8]) -> String {
+    let digits = Array("0123456789abcdef")
+    var out = ""
+    out.reserveCapacity(bytes.count * 2)
+    for b in bytes {
+        out.append(digits[Int(b >> 4)])
+        out.append(digits[Int(b & 0xf)])
+    }
+    return out
+}
+
+func hexDecode(_ s: String) -> [UInt8]? {
+    let chars = Array(s.utf8)
+    guard chars.count % 2 == 0 else { return nil }
+    func nib(_ c: UInt8) -> UInt8? {
+        switch c {
+        case 0x30...0x39: return c - 0x30
+        case 0x61...0x66: return c - 0x61 + 10
+        case 0x41...0x46: return c - 0x41 + 10
+        default: return nil
+        }
+    }
+    var out = [UInt8]()
+    out.reserveCapacity(chars.count / 2)
+    var i = 0
+    while i < chars.count {
+        guard let hi = nib(chars[i]), let lo = nib(chars[i + 1]) else { return nil }
+        out.append((hi << 4) | lo)
+        i += 2
+    }
+    return out
+}
+
+/// Answer one `VIRELAIOS-AUTH/1 <scheme> <hex-challenge>` line with
+/// `hex(HMAC-SHA256(secret, "<domain>" || 0x00 || challenge)) + "\n"` (the
+/// TS4 acceptance primitive). `netTcpConnectMac` sends the pre-recorded hex
+/// line instead (the captured-handshake replay path). Returns nil on a
+/// malformed line or an unsupported scheme (Ed25519 host signing is the
+/// recorded TS4 stretch) — the caller then closes honestly.
+func netTcpAuthAnswer(challenge payload: [UInt8]) -> [UInt8]? {
+    guard let newline = payload.firstIndex(of: 0x0a) else { return nil }
+    var line = payload[0..<newline]
+    if line.last == 0x0d { line = line.dropLast() }
+    let parts = String(decoding: line, as: UTF8.self).split(separator: " ")
+    guard parts.count == 3, parts[0] == "VIRELAIOS-AUTH/1" else { return nil }
+    guard let challengeBytes = hexDecode(String(parts[2])) else { return nil }
+    if let mac = netTcpConnectMac {
+        return Array((mac + "\n").utf8)
+    }
+    guard parts[1] == "hmac-sha256", let secret = netTcpConnectSecret else { return nil }
+    var message = Data("VIRELAIOS-AUTH/1 hmac-sha256".utf8)
+    message.append(0)
+    message.append(contentsOf: challengeBytes)
+    let key = SymmetricKey(data: Data(secret.utf8))
+    let mac = HMAC<SHA256>.authenticationCode(for: message, using: key)
+    return Array((hexString(Array(mac)) + "\n").utf8)
+}
+
 // #1066 Stage 0 (issue #1066): the TCP console bridge. One client at a
 // time; the listen loop accepts a connection, forwards its bytes into the
 // guest serial input pipe, and re-accepts after the client leaves. Guest
@@ -2621,11 +2749,19 @@ func startTCPConsoleBridge(port: UInt16, bindHost: String) {
             let c = accept(s, &caddr, &clen)
             if c < 0 { if errno == EINTR { continue }; break }
             if let secret = consoleTCPSecret {
-                // M46 RC1: the client's first line is the bridge credential.
+                // M50 TS4 (#1138, ADR 0024 D7): the bridge now runs
+                // HMAC-SHA256 challenge-response. Send a fresh 32-byte
+                // challenge line, read the client's one-line hex MAC, and
+                // compare the hex HMAC computed with CryptoKit. No secret
+                // configured => byte-identical to the pre-TS4 bridge.
+                var challenge = [UInt8](repeating: 0, count: 32)
+                for i in 0..<challenge.count { challenge[i] = UInt8.random(in: 0...255) }
+                let challengeLine = "VIRELAIOS-AUTH/1 hmac-sha256 " + hexString(challenge) + "\n"
+                _ = challengeLine.withCString { write(c, $0, strlen($0)) }
                 var line = [UInt8]()
                 var newline = false
                 var one = [UInt8](repeating: 0, count: 1)
-                while line.count <= 128 {
+                while line.count <= 160 {
                     var r: Int
                     repeat { r = read(c, &one, 1) } while r < 0 && errno == EINTR
                     if r <= 0 { break }
@@ -2633,11 +2769,16 @@ func startTCPConsoleBridge(port: UInt16, bindHost: String) {
                     if one[0] == 0x0d { continue }
                     line.append(one[0])
                 }
-                guard newline, String(decoding: line, as: UTF8.self) == secret else {
+                var message = Data("VIRELAIOS-AUTH/1 hmac-sha256".utf8)
+                message.append(0)
+                message.append(contentsOf: challenge)
+                let key = SymmetricKey(data: Data(secret.utf8))
+                let expected = hexString(Array(HMAC<SHA256>.authenticationCode(for: message, using: key)))
+                guard newline, String(decoding: line, as: UTF8.self) == expected else {
                     let msg = "console-tcp: auth failed\n"
                     _ = msg.withCString { write(c, $0, strlen($0)) }
                     close(c)
-                    print("  console-tcp: auth failed (secret mismatch; still listening)")
+                    print("  console-tcp: auth failed (MAC mismatch; still listening)")
                     FileHandle.standardOutput.synchronizeFile()
                     continue
                 }

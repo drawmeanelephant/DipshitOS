@@ -4,7 +4,8 @@
 # SH.BIN: `TERM.BIN net [port] [secret] [allow-ip]` attaches selector 3
 # instead of the window. The host initiates via the runner's
 # --net-tcp-connect seam; the shell core runs over the terminal and replies
-# on the TCP connection. Boot default is unchanged — TERM.BIN with no args is
+# on the TCP connection. M50 TS4 (#1138): explicit `open` mode (no credential
+# in the store on this share; the default posture refuses to listen). Boot default is unchanged — TERM.BIN with no args is
 # still the window front-end (live-term).
 
 vgate_name live-term-net "M46 RC3b: TERM.BIN hosts the net front-end (selector 3) (#1104)"
@@ -13,7 +14,7 @@ vgate_runner_flags -Xswiftc -DSPIKE
 
 vgate_file script.txt <<'EOF'
 net ip 10.0.0.1
-exec TERM.BIN net 2323
+exec TERM.BIN net 2323 open
 EOF
 
 vgate_file payload.txt <<'EOF'

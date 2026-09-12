@@ -9,12 +9,19 @@ $RUN_DIR/client-$VG_TAG.out, and exits 0 on success.
 
 Environment (set by the harness): RUN_DIR, VG_TAG, VG_SER.
 
+M50 TS4 (#1138, ADR 0024 D7): `--hmac-secret S` answers the host bridge's
+`VIRELAIOS-AUTH/1 hmac-sha256 <hex-challenge>` line with
+hex(HMAC-SHA256(S, "VIRELAIOS-AUTH/1 hmac-sha256" || 0x00 || challenge))
+before sending the payload (Python stdlib hmac/hashlib, no new dependency).
+
 Exit codes: 0 success; 1 expectation/timeout/connect failure; 2 usage.
 --expect-fail inverts the connect result (0 iff the connect is refused or
 times out) for negative gates such as "no listener".
 """
 
 import argparse
+import hashlib
+import hmac
 import os
 import socket
 import sys
@@ -94,6 +101,50 @@ def load_payload(args):
     return b""
 
 
+def recv_line(s, timeout):
+    """Read one CR-stripped line from `s` (bounded), or None on EOF/timeout."""
+    line = bytearray()
+    deadline = time.time() + timeout
+    while time.time() < deadline and len(line) <= 160:
+        s.settimeout(max(0.1, min(1.0, deadline - time.time())))
+        try:
+            b = s.recv(1)
+        except socket.timeout:
+            continue
+        except OSError:
+            return None
+        if not b:
+            return None
+        if b == b"\n":
+            return bytes(line)
+        if b != b"\r":
+            line += b
+    return None
+
+
+def answer_challenge(s, secret, timeout):
+    """M50 TS4 (#1138, ADR 0024 D6): read the host bridge's
+    `VIRELAIOS-AUTH/1 hmac-sha256 <hex-challenge>` line and answer with
+    hex(HMAC-SHA256(secret, 'VIRELAIOS-AUTH/1 hmac-sha256' || 0x00 ||
+    challenge)) + newline. Returns None when no challenge parses."""
+    line = recv_line(s, timeout)
+    if line is None:
+        return None
+    parts = line.decode("utf-8", "replace").split(" ")
+    if len(parts) != 3 or parts[0] != "VIRELAIOS-AUTH/1" or parts[1] != "hmac-sha256":
+        log(f"unexpected challenge line: {line!r}")
+        return None
+    try:
+        challenge = bytes.fromhex(parts[2])
+    except ValueError:
+        log(f"challenge is not hex: {parts[2]!r}")
+        return None
+    msg = b"VIRELAIOS-AUTH/1 hmac-sha256\x00" + challenge
+    mac = hmac.new(secret.encode("utf-8"), msg, hashlib.sha256).hexdigest()
+    s.sendall(mac.encode("ascii") + b"\n")
+    return mac
+
+
 def main():
     ap = argparse.ArgumentParser(add_help=False)
     ap.add_argument("--addr", required=True)
@@ -104,6 +155,7 @@ def main():
     ap.add_argument("--send-file", default=None)
     ap.add_argument("--expect", default=None)
     ap.add_argument("--expect-fail", action="store_true")
+    ap.add_argument("--hmac-secret", default=None)
     ap.add_argument("--timeout", type=float, default=20.0)
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
@@ -141,6 +193,12 @@ def main():
         with open(out, "wb") as f:
             f.write(b"<connect failed>\n")
         sys.exit(1)
+
+    # M50 TS4 (#1138, ADR 0024 D7): answer the host bridge's HMAC-SHA256
+    # challenge before sending the payload. No --hmac-secret => the bridge
+    # has no secret either and is byte-identical to the pre-TS4 path.
+    if args.hmac_secret:
+        answer_challenge(s, args.hmac_secret, max(args.timeout, 5.0))
 
     payload = load_payload(args)
     if payload:

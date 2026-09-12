@@ -20,8 +20,10 @@ const ui = @import("lib/ui.zig");
 const abi = @import("lib/ui/abi.zig");
 const tty = @import("lib/tty.zig");
 const shell_mod = @import("lib/shell.zig");
-// M46 RC3b (#1104): the shared `net [port] [secret] [allow-ip]` parser.
+// M50 TS4 (#1138, ADR 0024 D6): the shared `net [port] [open]` parser and
+// the delegated net-auth verifier.
 const netargs = @import("lib/netargs.zig");
+const netauth = @import("lib/netauth.zig");
 // M49 SD2 (#1129): the shared startup order (STARTUP.SH then PROFILE.SH).
 const startup = @import("lib/startup.zig");
 // M49 SD3 (#1130): the shared built-in tool multicall.
@@ -47,6 +49,8 @@ var g_shell: shell_mod.Shell = undefined;
 var g_editor: tty.LineEditor = undefined;
 var g_entries: [16]abi.DirEntry = undefined;
 var g_listing: [16][]const u8 = undefined;
+/// M50 TS4 (#1138): the delegated net-auth verifier, live only in net mode.
+var g_netauth: ?netauth.Auth = null;
 
 fn historyCount(ctx: ?*anyopaque) usize {
     _ = ctx;
@@ -342,15 +346,24 @@ pub export fn _start(argc: u64, argv_va: u64) callconv(.c) noreturn {
         ui.write_console("term: no /dev/tty\n");
         ui.exit_process(1);
     };
-    // M46 RC3b (#1104): `TERM.BIN net [port] [secret] [allow-ip]` attaches the
-    // net front-end (ADR 0020 Amendment B, auth per ADR 0022 D3/D4) instead of
-    // the window; the default (no args) is the window front-end, unchanged.
+    // M50 TS4 (#1138, ADR 0024 D6): `TERM.BIN net [port] [open]` attaches
+    // the net front-end instead of the window; the default (no args) is the
+    // window front-end, unchanged. Credential => delegated challenge-
+    // response; no credential => refuse unless the explicit `open` mode.
     // Net mode needs no window, so it attaches before any window is opened.
     if (netargs.parse(argc, argv_va)) |na| {
-        if (!session.attachNetAuth(na.port, na.secret, na.allow_ip)) {
+        const scheme: netauth.Scheme = if (na.open) .open else (netauth.selectScheme() orelse {
+            session.close();
+            ui.write_console("term: net refused: no credential (pass 'open' for the insecure mode)\n");
+            ui.exit_process(2);
+        });
+        if (!session.attachNetMode(na.port, @intFromEnum(scheme), 0)) {
             session.close();
             ui.write_console("term: net attach failed\n");
             ui.exit_process(2);
+        }
+        if (scheme != .open) {
+            g_netauth = netauth.Auth.init(scheme, netauth.sysOps(), .{ .get_fn = netauth.storeSource });
         }
         var rb: [48]u8 = undefined;
         const rm = std.fmt.bufPrint(&rb, "term: remote on {d}\n", .{na.port}) catch "term: remote\n";
@@ -385,6 +398,8 @@ pub export fn _start(argc: u64, argv_va: u64) callconv(.c) noreturn {
 
     var buf: [64]u8 = undefined;
     while (true) {
+        // M50 TS4 (#1138): one delegated-handshake step per loop turn.
+        if (g_netauth) |*a| a.step();
         const n = session.read(&buf);
         if (n <= 0) {
             ui.yield_task();

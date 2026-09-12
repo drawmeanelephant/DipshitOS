@@ -106,6 +106,7 @@ const sys_win_set_visible = syscall.sys_win_set_visible;
 const sys_wmctl = syscall.sys_wmctl;
 const sys_time = syscall.sys_time;
 const sys_tty_attach = syscall.sys_tty_attach;
+const sys_tty_net_auth = syscall.sys_tty_net_auth;
 const sys_principal = syscall.sys_principal;
 const sys_file_mode = syscall.sys_file_mode;
 const sys_secret_get = syscall.sys_secret_get;
@@ -146,7 +147,7 @@ fn capture_marshaled_args(args: Args, _: *exceptions.VectorFrame) u64 {
     return 0xcafe;
 }
 
-test "syscall: runtime table has 128 slots and seventy-one unique implemented rows" {
+test "syscall: runtime table has 128 slots and seventy-two unique implemented rows" {
     init(test_writer);
     const table = ensure_table();
     try std.testing.expectEqual(@as(usize, 128), table.len);
@@ -159,7 +160,7 @@ test "syscall: runtime table has 128 slots and seventy-one unique implemented ro
             implemented += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 71), implemented);
+    try std.testing.expectEqual(@as(usize, 72), implemented);
     try std.testing.expectEqualStrings("sys_pipe_read", entry_info(sys_pipe_read).?.name);
     try std.testing.expectEqualStrings("sys_pipe_write", entry_info(sys_pipe_write).?.name);
     try std.testing.expectEqualStrings("sys_font_size", entry_info(sys_font_size).?.name);
@@ -238,14 +239,14 @@ test "syscall: adapter decodes x8 and x0-x5 and unknown numbers return ENOSYS" {
 
     // Unimplemented in-range slots still return ENOSYS (65/66/67 are now
     // sys_wmctl/sys_time/sys_tty_attach, 68 is sys_principal, 69 is
-    // sys_file_mode, 70 is sys_secret_get — use 71/72, still unregistered;
-    // 71 is the reserved-for-TS4 sys_tty_net_auth).
-    try std.testing.expect(exceptions.frame_write(&frame, 8, 71));
+    // sys_file_mode, 70 is sys_secret_get, 71 is sys_tty_net_auth — use
+    // 72/73, still unregistered).
+    try std.testing.expect(exceptions.frame_write(&frame, 8, 72));
     try std.testing.expect(handle_svc(&frame, svc_immediate));
     try std.testing.expectEqual(error_result(.enosys), exceptions.frame_read(&frame, 0));
-    try std.testing.expectEqual(@as(u64, 1), call_count(71));
+    try std.testing.expectEqual(@as(u64, 1), call_count(72));
 
-    try std.testing.expect(exceptions.frame_write(&frame, 8, 72));
+    try std.testing.expect(exceptions.frame_write(&frame, 8, 73));
     try std.testing.expect(handle_svc(&frame, svc_immediate));
     try std.testing.expectEqual(error_result(.enosys), exceptions.frame_read(&frame, 0));
 }
@@ -1237,7 +1238,7 @@ test "syscall: counters are monotonic and report is deterministic" {
     var con = mock.console();
     report(&con);
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=71\n" ++
+        "syscalls: slots=64 implemented=72\n" ++
             "  0 sys_ping calls=2\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -1308,7 +1309,8 @@ test "syscall: counters are monotonic and report is deterministic" {
             "  67 sys_tty_attach calls=0\n" ++
             "  68 sys_principal calls=0\n" ++
             "  69 sys_file_mode calls=0\n" ++
-            "  70 sys_secret_get calls=0\n",
+            "  70 sys_secret_get calls=0\n" ++
+            "  71 sys_tty_net_auth calls=0\n",
         mock.contents(),
     );
 }
@@ -3054,8 +3056,9 @@ test "syscall: SYS_TIME (slot 66, #1058) returns the firmware wall-clock epoch" 
 
     // The slot is registered and named in the table.
     try std.testing.expectEqualStrings("sys_time", entry_info(sys_time).?.name);
-    // M50 TS1 added slot 68 (sys_principal); TS2 added slot 69 (sys_file_mode).
-    try std.testing.expectEqual(@as(usize, 71), syscall.implemented_count);
+    // M50 TS1 added slot 68 (sys_principal), TS2 slot 69 (sys_file_mode),
+    // TS5 slot 70 (sys_secret_get), TS4 slot 71 (sys_tty_net_auth).
+    try std.testing.expectEqual(@as(usize, 72), syscall.implemented_count);
 
     const saved_epoch = timer.boot_epoch_secs;
     const saved_ticks = timer.ticks;
@@ -3324,5 +3327,82 @@ test "syscall: SYS_TTY_ATTACH (slot 67, #1072) attaches the caller's terminal" {
     try std.testing.expectEqual(@as(u64, 0), dispatch(sys_tty_attach, .{ 0, 0, 0, 0, 0, 0 }, &frame));
     try std.testing.expect(terminal.windowTerminal(2) == null);
 
+    file_table.reset_process(0);
+}
+
+test "syscall: SYS_TTY_NET_AUTH (slot 71, #1138) serves the owner and never traces" {
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0
+    scheduler.start();
+    var frame = fresh_frame();
+    for (&terminal.terminals) |*t| t.reset();
+    file_table.reset_process(0);
+    tcp.reset();
+    defer tcp.reset();
+    virtio_net.net_ready = true;
+    virtio_net.arp.own_ip = .{ 10, 0, 0, 1 };
+    defer {
+        virtio_net.net_ready = false;
+        virtio_net.arp.own_ip = .{ 0, 0, 0, 0 };
+    }
+
+    // An EL1h caller is not a process: EINVAL, never a read.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_tty_net_auth, .{ 0, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expect(scheduler.yield_current());
+
+    const fd = file_table.open(0, "/dev/tty", file_table.MODE_READ | file_table.MODE_WRITE);
+    try std.testing.expect(fd >= 0);
+    // Attach the net front-end in hmac-sha256 mode (selector 3, a2 = 1).
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_tty_attach, .{ 3, 2323, 1, 0, 0, 0 }, &frame));
+    const t = terminal.attachedNet() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(t.net_auth_on);
+    try std.testing.expect(!t.net_authed);
+
+    var scratch: [256]u8 = undefined;
+    set_user_regions(.{ .base = 0, .len = 0 }, .{ .base = @intFromPtr(&scratch), .len = scratch.len });
+    // No challenge minted yet: op 0 returns 0 (nothing to read).
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_tty_net_auth, .{ 0, @intFromPtr(&scratch), scratch.len, 0, 0, 0 }, &frame));
+    // Once the pump framed it: op 0 copies the 32 challenge bytes OUT.
+    var fixed: [terminal.net_challenge_len]u8 = undefined;
+    for (&fixed, 0..) |*b, i| b.* = @intCast(i + 1);
+    t.net_challenge = fixed;
+    t.net_challenge_sent = true;
+    // A too-small out buffer is EINVAL before any copy.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_tty_net_auth, .{ 0, @intFromPtr(&scratch), 8, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 32), dispatch(sys_tty_net_auth, .{ 0, @intFromPtr(&scratch), scratch.len, 0, 0, 0 }, &frame));
+    try std.testing.expectEqualSlices(u8, &fixed, scratch[0..32]);
+    // No reply yet: op 1 returns 0 and a verdict is EINVAL.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_tty_net_auth, .{ 1, @intFromPtr(&scratch), scratch.len, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_tty_net_auth, .{ 2, @intFromPtr(&scratch), 1, 0, 0, 0 }, &frame));
+    // A buffered 64-hex reply: op 1 copies it OUT.
+    const hexr = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    @memcpy(t.net_reply[0..64], hexr);
+    t.net_reply_len = 64;
+    t.net_reply_ready = true;
+    // A too-small out buffer is EINVAL before any copy.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_tty_net_auth, .{ 1, @intFromPtr(&scratch), 32, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 64), dispatch(sys_tty_net_auth, .{ 1, @intFromPtr(&scratch), scratch.len, 0, 0, 0 }, &frame));
+    try std.testing.expectEqualStrings(hexr, scratch[0..64]);
+    // The verdict op is strace-excluded even while tracing this pid.
+    syscall.strace_pid = 0;
+    defer syscall.strace_pid = null;
+    test_write_len = 0;
+    scratch[0] = 1; // accept
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_tty_net_auth, .{ 2, @intFromPtr(&scratch), 1, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(usize, 0), test_write_len);
+    try std.testing.expect(t.net_authed);
+    // A subsequent normal syscall still traces (the exclusion is per-slot).
+    _ = dispatch(sys_ping, .{ 1, 0, 0, 0, 0, 0 }, &frame);
+    try std.testing.expect(test_write_len > 0);
+    // Key-material hygiene: the challenge and reply are wiped on accept.
+    try std.testing.expect(std.mem.allEqual(u8, &t.net_challenge, 0));
+    try std.testing.expect(std.mem.allEqual(u8, &t.net_reply, 0));
+    try std.testing.expectEqual(@as(usize, 0), t.net_reply_len);
+
+    for (&terminal.terminals) |*tt| tt.reset();
     file_table.reset_process(0);
 }
