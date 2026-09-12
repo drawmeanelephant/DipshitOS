@@ -66,6 +66,29 @@ shipped slice uses fixed, documented defaults instead.
 which generalizes exactly this loader surface), so this claim does not touch
 them; the measurements are recorded here and on #1163.
 
+**The bound is proven to bite, not merely computed (#1188 follow-up).** Boots
+05–07 of `live-oliver` derive two fixtures from the pinned image by appending
+zeros to its content — identical code, identical entry, only the trailing length
+differs — and show the check is a per-page *boundary* rather than a size:
+
+| derived fixture | content | block_off | page_limit | block end | slack | argv |
+|---|---|---|---|---|---|---|
+| `OLIVER-NEAR.BIN` | 249,700 | 249,704 | 249,856 | 249,960 | **−104** | **refused** |
+| `OLIVER-FAR.BIN` | 249,912 | 249,912 | 253,952 | 250,168 | +3,784 | accepted |
+
+`OLIVER-FAR.BIN` is **212 B larger** than the refused fixture and is accepted,
+because it crossed into a fresh page with more slack; the refusal window for
+this image is `content_len ∈ [249,601, 249,856]`, so the rule is not monotonic
+in size. Observed on the refusal boot: the only error line is
+`error: image leaves no room for the argv block (256 bytes)`, `exec: loaded`
+never appears (the app never starts — no truncated argv, no partial run), and
+`OUT5.HTML` was never created. It fails closed. The controls are what make that
+a statement about argv: boot 06 runs the *same argument* against the accepted
+fixture (byte-exact HTML), and boot 07 runs the refused fixture with **no**
+argument — it loads and renders byte-exact, so the padded image is a valid image
+and the refusal is argv-specific. Both derived headers are re-validated inside
+the gate, so the case cannot silently stop proving its claim.
+
 **Update — argument use landed anyway, through the DSK1 path (#1188).** The
 same pinned source is also shipped as a **DSK1 flat image**
 (`tools/elf2bin.py` over the identical ELF), and card 3e's DSK1 packing does
@@ -82,12 +105,15 @@ content_len 249,196   block_off 249,200   block 256   page_limit 249,856
 
 The gate reproduces that arithmetic from the image header host-side and fails if
 it stops fitting, so the headroom cannot silently disappear under code growth.
-Two consequences worth carrying to #1163: (1) raw-ELF argv is still the
+Three consequences worth carrying to #1163: (1) raw-ELF argv is still the
 *right* fix — a flagged CLI should not have to fit the tail of a text page;
 (2) `exec_program_max`/`load_max` (512 KiB) is far from binding, so a loader
 lift that adds a real argv region has plenty of room, while the flat-image
 route has single-page granularity and will refuse before it truncates
-(`.no_args_room`).
+(`.no_args_room`); (3) the per-page rule is **not monotonic in size** — a
+212 B *larger* image is accepted where a smaller one is refused (table above),
+which is exactly the kind of thing an author cannot predict from the docs. A
+real argv region on the ELF path removes the sawtooth with the flat path.
 
 ### B2 — the data segment must be *exactly* adjacent, and the recipe's `ALIGN(16)` can violate that
 

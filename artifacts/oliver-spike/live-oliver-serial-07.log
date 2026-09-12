@@ -60,20 +60,20 @@ vf: probe 32k ok len=0x8000 cksum=0x0000 free=0020
 cvspike: irq=0x00000000000000c3 first=0x0000000000000045 spi=0x0000000000000045 armed=0x0000000000000020..0x00000000000000bf
 entropy: pre-rearm st=00
 entropy: seeded n=64
-aslr: boot user stack=0x0000000044510000
+aslr: boot user stack=0x000000003ecf0000
 VirelaiOS - AArch64 firmware-assisted kernel monitor
 VirelaiOS: the elephant has left the building.
 motd: aarch64 el1 kernel live; scheduler, uaccess, fs, net, gfx, xhci armed.
 Type 'help' before touching anything expensive.
 [32mvirelai> [0m[AUDIT] task-ring+procs audit armed slots=11 procs=16
-exec OLIVER.BIN /host/MD.TXT /host/OUT4.HTML
-exec: loaded OLIVER.BIN size=0x000000000003cd6c entry=0x0000000000402b20 stack=0x0000000035d80000 head=0xff0301d1fe4f03a9
-[32mvirelai> [0mecho rx-oliver-argv-abs
-rx-oliver-argv-abs
+exec OLIVER-NEAR.BIN
+exec: loaded OLIVER-NEAR.BIN size=0x000000000003cf64 entry=0x0000000000402b20 stack=0x00000000296d0000 head=0xff0301d1fe4f03a9
+[32mvirelai> [0mecho rx-oliver-near-defaults
+rx-oliver-near-defaults
 [32mvirelai> [0m
 syscall: write ok n=23
 uaccess: efault ok n=8
-oliver: argc=2 in=/host/MD.TXT out=/host/OUT4.HTML
+oliver: argc=0 in=MD.TXT out=OLIVER.HTML
 oliver: wrote 754 bytes
 timer irq delivered ppi=0x1e irq_ticks=1
 smp: secondary runs=1 task=user-el0
@@ -82,22 +82,12 @@ smp: steal runs=1 task=user-el0 from=0
 smp: steal runs=2 task=worker from=0
 tasks worker advances=64
 tasks user-exec exited status=754
-procs OLIVER.BIN exited status=754
+procs OLIVER-NEAR.BIN exited status=754
 tasks user-exec reaped
 userspace: el0=1 svc=2 roundtrips=1 arg=2 result=2 rejected=0
+tasks worker advances=3264
 smp: secondary runs=3 task=user-el0
 smp: secondary runs=4 task=worker
-tasks worker advances=2624
-tasks worker advances=2688
-tasks worker advances=2752
-tasks worker advances=2816
-tasks worker advances=2880
-tasks worker advances=2944
-tasks worker advances=3008
-tasks worker advances=3072
-tasks worker advances=3136
-tasks worker advances=3200
-tasks worker advances=3264
 tasks worker advances=3328
 tasks worker advances=3392
 tasks worker advances=3456
@@ -107,3 +97,22 @@ tasks worker advances=3648
 tasks worker advances=3712
 tasks worker advances=3776
 tasks worker advances=3840
+tasks worker advances=3904
+tasks worker advances=3968
+tasks worker advances=4032
+tasks worker advances=4096
+tasks worker advances=4160
+tasks worker advances=4224
+tasks worker advances=4288
+tasks worker advances=4352
+tasks worker advances=4416
+tasks worker advances=4480
+tasks worker advances=4544
+tasks worker advances=4608
+tasks worker advances=4672
+tasks worker advances=4736
+tasks worker advances=4800
+tasks worker advances=4864
+tasks worker advances=4928
+tasks worker advances=4992
+tasks worker advances=5056

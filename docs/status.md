@@ -196,7 +196,13 @@ the written file **host-side, byte-exact** against the reference tool's own
 output (754 B, sha256 `540f2400…f76a390e`) **on both load paths**, that an
 argv-named output exists while the **default name is never written** by the
 argv runs, and that the app's own `oliver: argc=2 in=… out=…` marker reports
-the arguments it received — **PASS 4/4 on VZ**, exit status = bytes written.
+the arguments it received — **PASS 7/7 on VZ**, exit status = bytes written.
+Boots 05–07 make the argv bound *bite* instead of asserting it: two fixtures
+derived from the pinned image by padding alone show the check is a per-page
+**boundary**, not a size (content 249,700 → slack −104, argv **refused closed**
+with the app never starting and no output written; content 249,912 — 212 B
+larger — → slack +3,784, argv accepted), and the refused fixture still runs
+correctly with no argv, so the refusal is argv-specific.
 `exec` packs argv for DSK1/DSK3 images only, so a **raw ELF still gets
 `.no_args_room`** (#1163); the flat image's argv block rides the text page's
 slack — 249,196 B of content, block at 249,200 + 256 = 249,456 against

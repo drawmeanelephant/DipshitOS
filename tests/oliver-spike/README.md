@@ -3,7 +3,9 @@
 `oliver` (a Markdown → HTML tool, <https://github.com/drawmeanelephant/oliver>)
 running on VirelaiOS as **two images from one source**: a native AArch64 ELF
 (`exec OLIVER.ELF`) and a DSK1 flat image (`exec OLIVER.BIN`) that carries real
-arguments. Proof: `tools/gate/specs/live-oliver.spec` (class-B, live VZ, 4/4).
+arguments. Proof: `tools/gate/specs/live-oliver.spec` (class-B, live VZ, 7/7).
+Two further images are *derived inside the gate* (never committed) to prove the
+argv bound bites: see "The bound is a boundary" below.
 
 | file | what it is | size | sha256 |
 |---|---|---|---|
@@ -53,6 +55,34 @@ That budget is measured, not assumed: content 249,196 B, block at
 block would need a 62nd text page. The gate reproduces this arithmetic from the
 image header on the host side and fails if it ever stops fitting. A larger app
 needs the loader work in #1163 (or the DSK3 shape, which reserves a data tail).
+
+### The bound is a boundary, and the gate proves it bites
+
+Size alone does not decide — *where the content ends inside its last page* does
+(`page_limit = round_up(content_len, 4096)`), so the rule is not monotonic.
+`live-oliver` boots 05–07 exercise it with two fixtures **derived from the
+pinned image** by appending zeros: same code, same entry point, only the
+trailing length differs.
+
+| derived fixture | content | block_off | page_limit | block end | slack | argv |
+|---|---|---|---|---|---|---|
+| `OLIVER-NEAR.BIN` | 249,700 | 249,704 | 249,856 | 249,960 | **−104** | **refused** |
+| `OLIVER-FAR.BIN` | 249,912 | 249,912 | 253,952 | 250,168 | +3,784 | accepted |
+
+`OLIVER-FAR.BIN` is **212 B larger** than the refused fixture and is accepted,
+because it crossed into a fresh page with more slack; the refusal window for
+this image is `content_len ∈ [249,601, 249,856]`. Both derived headers are
+re-validated inside the gate (`argv-boundary.txt`), so the case cannot quietly
+stop proving what it claims.
+
+The refused case fails **closed**: boot 05 asserts that
+`error: image leaves no room for the argv block (256 bytes)` is the *only* error
+line, that `exec: loaded` never appears (the app never starts, so there is no
+truncated argv and no partial run), that no `oliver: argc=` line exists, and
+that `OUT5.HTML` was never created. Boot 06 then runs the same argument against
+the accepted fixture (byte-exact HTML), and boot 07 runs the refused fixture
+with **no** arguments — it loads and writes byte-exact HTML — which is what
+makes boot 05 a statement about argv rather than about a padded image.
 
 ## Rebuilding
 
