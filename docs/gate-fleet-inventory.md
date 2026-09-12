@@ -28,7 +28,7 @@
 | dir | files | role |
 |---|---|---|
 | `tools/lib/` | 2 | per-run isolation for live gates (`gate-run.sh`) |
-| `tools/status/` | 6 | multiagent coordination gate + claim tooling (class A) |
+| `tools/status/` | 7 | multiagent coordination gate + claim tooling (class A) |
 | `tools/context/` | 2 | context snapshot helpers |
 | `tools/ragshit/` | 84 | host-side context engine (developer tooling, not guest software) |
 | `tools/gate/` | 227 | M40 vgate harness + specs (GF2+) |
