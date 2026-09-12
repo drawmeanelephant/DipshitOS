@@ -675,8 +675,9 @@ pub fn delete(pid: u64, path_bytes: []const u8) i64 {
     if (path_bytes.len == 0 or path_bytes.len > max_path_len) return -1;
     const parsed = parse_path(path_bytes) orelse return -1;
     // M50 TS2 (ADR 0024 D4/D8): the ownership/mode gate — a secret-class
-    // path is denied delete through the file ABI for every actor.
-    if (!hostAllowed(pid, parsed.path[0..parsed.parsed_len()], .delete)) return -7; // EACCES
+    // path is denied delete through the file ABI for every actor. Only the
+    // `.host` table is keyed by paths; `.usb`/`.tty` are not mode-governed.
+    if (parsed.partition == .host and !hostAllowed(pid, parsed.path[0..parsed.parsed_len()], .delete)) return -7; // EACCES
     if (!virtio_file.available()) return -6;
     const subpath = parsed.path[0..parsed.parsed_len()];
     // M34 HF5 (issue #739): host deletes route to the channel.

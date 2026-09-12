@@ -50,6 +50,12 @@
 //! because absent metadata means the documented default policy, never a
 //! silent allow or a silent deny. Enforcement callers treat anything other
 //! than `allow` as a denial.
+//!
+//! Directory-name listings (`virtio_file.list` called from the monitor's
+//! `ls`/`du`/`find`/`inventory` and the shell's glob/completion) are
+//! intentionally NOT gated: D8 allows the monitor to print secret *names*,
+//! and a listing is not a content read. A `list` request whose path is
+//! itself secret-class is denied by `check`.
 
 const std = @import("std");
 const file_table = @import("file_table.zig");

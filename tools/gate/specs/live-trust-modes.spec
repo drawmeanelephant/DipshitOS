@@ -15,10 +15,12 @@ vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 
 # The EL1h monitor session: prove the DIRECT-CONSUMER seam first (the monitor
-# is uid_system + CAP_FS_ANY, yet a secret read is denied), then hand the
-# console to SH.BIN for the EL0 file-ABI session.
+# is uid_system + CAP_FS_ANY, yet a secret read is denied) at BOTH the `vf
+# cat` verb and the kernel `sh <script>` loader, then hand the console to
+# SH.BIN for the EL0 file-ABI session.
 vgate_file script.txt <<'EOF'
 vf cat SECRETS.TXT
+sh SECRETS.TXT
 exec SH.BIN
 EOF
 
@@ -52,8 +54,10 @@ vgate_run 01 -- --script '$RUN_DIR/script.txt' \
     --script-expect-tail 16 \
     --timeout 90
 
-# Direct-consumer seam: the monitor's own secret read is denied for every actor.
+# Direct-consumer seam: the monitor's own secret read is denied for every actor
+# (`vf cat`), and the kernel `sh <script>` content loader is denied too.
 vgate_assert 01 serial-contains 'vf cat: SECRETS.TXT: permission denied'
+vgate_assert 01 serial-contains 'sh: SECRETS.TXT: permission denied'
 # EL0 file ABI: owner mismatch (uid_system-owned 0600, caller uid_user).
 vgate_assert 01 serial-contains 'sh: cannot open TARGET.TXT: EACCES'
 # Default policy: the unlisted file reads (the empty/absent table behavior).

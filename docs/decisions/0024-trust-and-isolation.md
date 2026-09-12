@@ -145,6 +145,15 @@ check(actor, partition, path, want) -> allow | eacces | enoent
   `kernel_actor()` call, and each existing consumer is audited in the TS2
   card. Secret-class paths (D8) are denied at this seam too, for every
   actor, because the file ABI must never be a way to read a secret.
+  **TS2 implementation note:** every content read/write/delete consumer
+  (`vf cat`/`open`/`write`/`truncate`/`rm`/`mv`/`clone`/`ls`, monitor
+  `cat`/`stat`/`write`/`mktemp`/`sym`/`sh <script>`, exec, settings,
+  kernel-shell history/env/`.virelairc`/`WINDOWS.SAV`, tombstones,
+  redirects) is gated with `kernel_actor()` + `check`. Directory-name
+  listings through `virtio_file.list` are intentionally **not** gated:
+  D8 explicitly allows the monitor to print secret *names*, and a listing
+  is not a content read (asking `ls`/`stat` on a secret path itself is
+  denied, since `list`/`read` are denied for it).
 - **Rename/delete of a secret-class path is denied through the file ABI
   entirely** (otherwise renaming would strip the class). Only a host-side
   move of the share file, outside the guest's view, can relocate it.

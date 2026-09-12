@@ -1597,6 +1597,15 @@ pub fn load_history(editor: *lineedit.LineEditor) void {
 /// staging bound). Prints the honest refusal and returns null on any
 /// miss. M34 HF6 (issue #740): the ESP/FAT read paths are gone.
 fn script_load(mon: *monitor.Monitor, name: []const u8) ?[]const u8 {
+    // M50 TS2 (ADR 0024 D4/D8): the kernel-actor content-read gate —
+    // `sh <script>` must not read a secret-class path (the monitor `sh`
+    // command, and EL0 `source`/pipes routed through it, inherit this).
+    if (trust.check(trust.kernel_actor(), .host, name, .read) != .allow) {
+        mon.console.puts("sh: ");
+        mon.console.puts(name);
+        mon.console.print_line(": permission denied");
+        return null;
+    }
     const taken = acquire_file_lock();
     defer release_file_lock(taken);
     var st = virtio_file.StatResult{};
