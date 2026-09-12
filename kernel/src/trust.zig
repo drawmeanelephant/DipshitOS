@@ -69,6 +69,10 @@ pub const max_path_len: usize = file_table.max_path_len;
 /// octal mode + uid + flags) plus the header, with generous headroom.
 pub const save_max: usize = 8192;
 pub const filename = "OWNERS.TXT";
+/// The secret store's share file (ADR 0024 D8). Defined here (not imported
+/// from `secret.zig`, which imports THIS module) so `ensure_secret_file`
+/// can flag it by construction without a circular dependency.
+pub const secret_filename = "SECRETS.TXT";
 
 /// ADR 0024 D3 defaults (owner/other policy; group is reserved/zero).
 pub const default_file_mode: u16 = 0o644;
@@ -254,6 +258,32 @@ pub fn remove(partition: file_table.Partition, path: []const u8) bool {
         return true;
     }
     return false;
+}
+
+/// M50 TS5 (issue #1139, ADR 0024 D8): register the secret store's file as
+/// a secret-class path BY CONSTRUCTION — the class holds even when no
+/// hand-seeded `OWNERS.TXT` names `SECRETS.TXT`. An existing entry is
+/// upgraded to `secret = true` (never downgraded, never un-poisoned);
+/// otherwise a new entry is minted in the ADR's documented shape (mode
+/// `0600`, owner `uid_system`). Returns false ONLY when the bounded table
+/// is so full that the class cannot be registered — the caller must then
+/// fail closed (an unclassified `SECRETS.TXT` would read as an ordinary
+/// 0644 file). The entry persists to `OWNERS.TXT` on the next save, which
+/// is exactly what a guest chmod already triggers.
+pub fn ensure_secret_file() bool {
+    if (find(.host, secret_filename)) |e| {
+        e.used = true;
+        e.deny = false;
+        e.secret = true;
+        return true;
+    }
+    const slot = freeSlot() orelse return false;
+    slot.used = true;
+    slot.deny = false;
+    slot.secret = true;
+    setEntry(slot, .host, secret_filename, 0o600, process.uid_system, true);
+    entry_count += 1;
+    return true;
 }
 
 /// Move metadata old→new in the same transaction as a rename. Returns true
@@ -516,6 +546,32 @@ test "trust: secret class denies read/list/delete/create for every actor (D8)" {
     try std.testing.expectEqual(Verdict.eacces, check(actor_system, .host, "SECRETS.TXT", .list));
     try std.testing.expectEqual(Verdict.eacces, check(actor_system, .host, "SECRETS.TXT", .delete));
     try std.testing.expectEqual(Verdict.eacces, check(actor_system, .host, "SECRETS.TXT", .create));
+}
+
+test "trust: ensure_secret_file makes SECRETS.TXT secret-class by construction (D8)" {
+    // NO hand-seeded OWNERS.TXT: the class holds because the store registers
+    // it, not because a host file says so.
+    init();
+    try std.testing.expect(ensure_secret_file());
+    try std.testing.expectEqual(Verdict.eacces, check(actor_user, .host, "SECRETS.TXT", .read));
+    try std.testing.expectEqual(Verdict.eacces, check(actor_other, .host, "SECRETS.TXT", .read));
+    try std.testing.expectEqual(Verdict.eacces, check(actor_system, .host, "SECRETS.TXT", .read));
+    try std.testing.expectEqual(Verdict.eacces, check(actor_system, .host, "SECRETS.TXT", .list));
+    try std.testing.expectEqual(Verdict.eacces, check(actor_system, .host, "SECRETS.TXT", .delete));
+    try std.testing.expectEqual(Verdict.eacces, check(actor_system, .host, "SECRETS.TXT", .create));
+    // The registered entry serializes into OWNERS.TXT on the next save.
+    var buf: [save_max]u8 = undefined;
+    const n = save(&buf);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "SECRETS.TXT\t600\t0\tsecret\n") != null);
+
+    // An existing hand-authored entry is upgraded (never downgraded) and the
+    // authored owner/spelling survive.
+    init();
+    _ = load("#v1\nSECRETS.TXT\t600\t1000\t-\n");
+    try std.testing.expect(ensure_secret_file());
+    try std.testing.expectEqual(Verdict.eacces, check(actor_user, .host, "SECRETS.TXT", .read));
+    const n2 = save(&buf);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n2], "SECRETS.TXT\t600\t1000\tsecret\n") != null);
 }
 
 test "trust: malformed + unknown-schema lines fail closed on the named path" {

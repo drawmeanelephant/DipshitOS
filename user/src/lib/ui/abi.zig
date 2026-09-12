@@ -112,6 +112,24 @@ pub const principal_bytes: usize = 8;
 /// M50 TS2 (issue #1136, ADR 0024 D3/D4/D10): slot 69 `sys_file_mode(path,
 /// mode)` — owner-only chmod on an existing path (no chown).
 pub const sys_file_mode_num: u64 = 69;
+/// M50 TS5 (issue #1139, ADR 0024 D8/D10): slot 70 `sys_secret_get(buf,
+/// len)` — the calling principal's entries from the `SECRETS.TXT` store.
+/// The ONLY in-guest reader of the secret store; no `sys_secret_set` exists.
+pub const sys_secret_get_num: u64 = 70;
+/// The fixed `sys_secret_get` wire record (key + value per caller entry).
+pub const secret_entry_bytes: usize = 4 + 4 + 4 + 32 + 64;
+pub const secret_entries_max: usize = 8;
+/// ADR 0024 D8: the userland mirror of the store bounds.
+pub const secret_max_key_len: usize = 32;
+pub const secret_max_val_len: usize = 64;
+/// A `sys_secret_get` record — the caller's own entries, fixed-size.
+pub const SecretRecord = extern struct {
+    uid: u32,
+    key_len: u32,
+    val_len: u32,
+    key: [secret_max_key_len]u8,
+    val: [secret_max_val_len]u8,
+};
 /// ADR 0024 D1/D5: the principal ids and capability bits (mirror of
 /// `kernel/src/process.zig`). Duplicated here because the kernel module is
 /// not reachable from the userland module graph.
@@ -642,6 +660,17 @@ pub fn file_free(volume: u32) i64 {
 /// the ownership table is full).
 pub fn file_mode(path: []const u8, mode: u16) i64 {
     return syscall3(sys_file_mode_num, @intFromPtr(path.ptr), path.len, mode);
+}
+
+/// M50 TS5 (#1139, ADR 0024 D8/D10): read the CALLING principal's entries
+/// from the `SECRETS.TXT` store (slot 70) into `buf` as fixed
+/// `SecretRecord`s. Returns the byte length written (a multiple of
+/// `secret_entry_bytes`; 0 when the principal owns nothing), or a negative
+/// ADR 0007 error (EINVAL a too-small buffer / non-process caller, EFAULT a
+/// bad buffer). The ONLY in-guest reader; values never reach any log.
+pub fn secret_get(buf: []u8) i64 {
+    if (@import("builtin").os.tag != .freestanding) return -4;
+    return syscall2(sys_secret_get_num, @intFromPtr(buf.ptr), buf.len);
 }
 
 /// Claim 0169 (ADR 0007 slot 38): store text in the SHARED kernel clipboard

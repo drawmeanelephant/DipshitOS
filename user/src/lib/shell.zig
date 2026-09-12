@@ -351,6 +351,31 @@ pub const ModeView = struct {
     }
 };
 
+/// M50 TS5 (#1139, ADR 0024 D8): the `secrets` builtin's view of the
+/// secret store — key NAMES only, never values. The glue fills it from
+/// `sys_secret_get` (slot 70); host tests supply a fake so the builtin
+/// stays pure. Values never leave the caller's memory; the builtin prints
+/// names only.
+pub const max_secret_names: usize = 8;
+pub const SecretList = struct {
+    names: [max_secret_names][secret_max_key_len]u8 = undefined,
+    lens: [max_secret_names]usize = [_]usize{0} ** max_secret_names,
+    count: usize = 0,
+
+    pub fn at(self: *const SecretList, i: usize) []const u8 {
+        return self.names[i][0..self.lens[i]];
+    }
+};
+pub const secret_max_key_len: usize = 32;
+pub const SecretView = struct {
+    ctx: ?*anyopaque = null,
+    list_fn: ?*const fn (?*anyopaque, *SecretList) bool = null,
+
+    pub fn list(self: SecretView, out: *SecretList) bool {
+        return if (self.list_fn) |f| f(self.ctx, out) else false;
+    }
+};
+
 /// The ADR 0007 error mnemonics, for the shell's file-op error lines (the
 /// class-B trust gate asserts the EACCES spelling).
 pub fn errnoName(rc: i64) []const u8 {
@@ -592,6 +617,7 @@ pub const Builtin = enum {
     whoami,
     id_,
     chmod,
+    secrets,
 };
 
 /// Builtin lookup by verb (the system command boundary, ADR 0021 D3).
@@ -612,6 +638,7 @@ pub fn classify(verb: []const u8) ?Builtin {
         .{ "read", Builtin.read_ },         .{ "break", Builtin.break_ },
         .{ "continue", Builtin.continue_ }, .{ "whoami", Builtin.whoami },
         .{ "id", Builtin.id_ },             .{ "chmod", Builtin.chmod },
+        .{ "secrets", Builtin.secrets },
     };
     inline for (table) |row| {
         if (std.mem.eql(u8, verb, row[0])) return row[1];
@@ -625,9 +652,9 @@ pub const builtin_names = [_][]const u8{
     "alias",    "break",  "cat",    "cd",      "chmod", "continue", "cut",
     "echo",     "env",    "exit",   "export",  "false", "fg",       "fn",
     "grep",     "head",   "help",   "history", "id",    "jobs",     "monitor",
-    "printenv", "printf", "prompt", "pwd",     "read",  "set",      "sort",
-    "source",   "tail",   "test",   "true",    "type",  "unalias",  "unset",
-    "wc",       "which",  "whoami", "[",
+    "printenv", "printf", "prompt", "pwd",     "read",  "secrets",  "set",
+    "sort",     "source", "tail",   "test",    "true",  "type",     "unalias",
+    "unset",    "wc",     "which",  "whoami",  "[",
 };
 
 pub const completion_max: usize = 32;
@@ -799,6 +826,9 @@ pub const Shell = struct {
     principal: PrincipalView = .{},
     /// M50 TS2 (#1136): the `chmod` glue (slot 69, owner-only).
     mode_view: ModeView = .{},
+    /// M50 TS5 (#1139): the `secrets` builtin's names-only view of the
+    /// secret store (slot 70). Values never reach this struct.
+    secret_view: SecretView = .{},
     /// Bound stdin for `cat` (a pipe or `<` redirect); empty = none.
     stdin: []const u8 = &.{},
     /// SH5 shell functions (`fn NAME(args) { ... }`).
@@ -1258,7 +1288,7 @@ pub const Shell = struct {
                 return .none;
             },
             .help => {
-                self.emitLine("builtins: echo pwd cd exit env set unset export printenv alias unalias history prompt type which true false help source jobs fg monitor read whoami id");
+                self.emitLine("builtins: echo pwd cd exit env set unset export printenv alias unalias history prompt type which true false help source jobs fg monitor read whoami id chmod secrets");
                 self.emitLine("tools: head tail wc grep sort cut test [ printf");
                 self.last_status = 0;
                 return .print;
@@ -1381,6 +1411,29 @@ pub const Shell = struct {
                     }
                 } else {
                     self.emitLine("chmod: no mode view");
+                    self.last_status = 1;
+                }
+                return .print;
+            },
+            .secrets => {
+                // M50 TS5 (#1139, ADR 0024 D8): the secret store's key NAMES
+                // for the calling principal. Values leave the kernel only
+                // into the caller's memory and this builtin prints names
+                // only — the never-logged contract holds in the shell too.
+                var list = SecretList{};
+                if (self.secret_view.list(&list)) {
+                    if (list.count == 0) {
+                        self.emitLine("secrets: (none)");
+                    } else {
+                        var i: usize = 0;
+                        while (i < list.count) : (i += 1) {
+                            self.emit("  ");
+                            self.emitLine(list.at(i));
+                        }
+                    }
+                    self.last_status = 0;
+                } else {
+                    self.emitLine("secrets: unavailable");
                     self.last_status = 1;
                 }
                 return .print;
@@ -1903,4 +1956,51 @@ test "shell: chmod parses octal and renders the kernel verdict (M50 TS2)" {
     try std.testing.expectEqual(@as(?u16, 0o600), parseOctMode("0600"));
     try std.testing.expect(parseOctMode("8") == null);
     try std.testing.expect(parseOctMode("") == null);
+}
+
+const SecretProbe = struct {
+    names: [4][32]u8 = undefined,
+    lens: [4]usize = [_]usize{0} ** 4,
+    count: usize = 0,
+    ok: bool = true,
+};
+
+fn testSecretList(ctx: ?*anyopaque, out: *SecretList) bool {
+    const p: *SecretProbe = @ptrCast(@alignCast(ctx.?));
+    if (!p.ok) return false;
+    var i: usize = 0;
+    while (i < p.count and i < out.names.len) : (i += 1) {
+        const n = @min(p.lens[i], out.names[i].len);
+        @memcpy(out.names[i][0..n], p.names[i][0..n]);
+        out.lens[i] = n;
+    }
+    out.count = p.count;
+    return true;
+}
+
+test "shell: secrets lists NAMES only from the view (M50 TS5)" {
+    var s = Shell.init();
+    var probe = SecretProbe{};
+    probe.count = 2;
+    @memcpy(probe.names[0][0..6], "netkey");
+    probe.lens[0] = 6;
+    @memcpy(probe.names[1][0..6], "audkey");
+    probe.lens[1] = 6;
+    s.secret_view = .{ .ctx = &probe, .list_fn = testSecretList };
+
+    _ = s.execute("secrets", &.{});
+    try std.testing.expectEqualStrings("  netkey\n  audkey\n", s.outSlice());
+
+    // No entries: an honest `(none)`.
+    probe.count = 0;
+    _ = s.execute("secrets", &.{});
+    try std.testing.expectEqualStrings("secrets: (none)\n", s.outSlice());
+
+    // No view wired: an honest refusal, never a fabricated listing.
+    var bare = Shell.init();
+    _ = bare.execute("secrets", &.{});
+    try std.testing.expectEqualStrings("secrets: unavailable\n", bare.outSlice());
+
+    // Classification + completion name registration.
+    try std.testing.expectEqual(Builtin.secrets, classify("secrets").?);
 }

@@ -31,7 +31,7 @@
 | `tools/status/` | 6 | multiagent coordination gate + claim tooling (class A) |
 | `tools/context/` | 2 | context snapshot helpers |
 | `tools/ragshit/` | 84 | host-side context engine (developer tooling, not guest software) |
-| `tools/gate/` | 209 | M40 vgate harness + specs (GF2+) |
+| `tools/gate/` | 210 | M40 vgate harness + specs (GF2+) |
 
 ## Class-B fleet (discovered from the spec dir)
 
@@ -161,6 +161,7 @@ of them with `just verify-vz`.
 | spec | `live-scripting` | 1 run / 9 assert | live-scripting.spec -- scripting + tab completion: `sh` runs a |
 | spec | `live-scrollback` | 1 run / 5 assert | live-scrollback.spec -- milestone-eighteen card T1 class-B gate (issue #404): |
 | spec | `live-search` | 1 run / 6 assert | live-search.spec -- milestone-eighteen card T3 class-B gate (issue #406): |
+| spec | `live-secrets` | 1 run / 9 assert | live-secrets.spec -- M50 TS5 class-B gate (issue #1139, ADR 0024 D8/D10). |
 | spec | `live-selection` | 1 run / 6 assert | live-selection.spec -- milestone-eighteen card T2 class-B gate (issue #405): |
 | spec | `live-settings` | 2 run / 8 assert | live-settings.spec -- claim 2649: persistent settings on host share across reboot |
 | spec | `live-sexiburger` | 1 run / 4 assert | live-sexiburger.spec -- Milestone 19 Sexiburger God Menu on VZ |

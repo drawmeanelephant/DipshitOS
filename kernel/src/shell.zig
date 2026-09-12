@@ -4170,6 +4170,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  reboot      restart the machine\n" ++
         "  repeat      repeat text, safely bounded\n" ++
         "  sh          run a script file of shell commands ('sh <script>' executes it line by line; 64 lines max, 256 chars per line; '#' comments; 'exit' stops early)\n" ++
+        "  secrets     list the secret store's key NAMES only (never values; ADR 0024 D8)\n" ++
         "  settings    persistent configuration: `settings [list]`, `settings get <key>`, `settings set <key> <val>`, `settings reset`\n" ++
         "  shortcuts   keyboard shortcut reference card (G29)\n" ++
         "  sound       virtio-snd transport: device DID, class, status, control-queue state, device-config counts (jacks/streams/channel-maps), re-arm; stream-state control: 'sound volume <0-100>' and 'sound mute <on|off>'\n" ++

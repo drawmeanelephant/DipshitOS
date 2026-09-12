@@ -108,6 +108,8 @@ const sys_time = syscall.sys_time;
 const sys_tty_attach = syscall.sys_tty_attach;
 const sys_principal = syscall.sys_principal;
 const sys_file_mode = syscall.sys_file_mode;
+const sys_secret_get = syscall.sys_secret_get;
+const secret = syscall.secret;
 const principal_bytes = syscall.principal_bytes;
 const terminal = syscall.terminal;
 const sys_write = syscall.sys_write;
@@ -144,7 +146,7 @@ fn capture_marshaled_args(args: Args, _: *exceptions.VectorFrame) u64 {
     return 0xcafe;
 }
 
-test "syscall: runtime table has 128 slots and seventy unique implemented rows" {
+test "syscall: runtime table has 128 slots and seventy-one unique implemented rows" {
     init(test_writer);
     const table = ensure_table();
     try std.testing.expectEqual(@as(usize, 128), table.len);
@@ -157,7 +159,7 @@ test "syscall: runtime table has 128 slots and seventy unique implemented rows" 
             implemented += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 70), implemented);
+    try std.testing.expectEqual(@as(usize, 71), implemented);
     try std.testing.expectEqualStrings("sys_pipe_read", entry_info(sys_pipe_read).?.name);
     try std.testing.expectEqualStrings("sys_pipe_write", entry_info(sys_pipe_write).?.name);
     try std.testing.expectEqualStrings("sys_font_size", entry_info(sys_font_size).?.name);
@@ -235,14 +237,15 @@ test "syscall: adapter decodes x8 and x0-x5 and unknown numbers return ENOSYS" {
     try std.testing.expectEqual(@as(u64, 1), call_count(sys_ping));
 
     // Unimplemented in-range slots still return ENOSYS (65/66/67 are now
-    // sys_wmctl/sys_time/sys_tty_attach, 68 is sys_principal, and 69 is
-    // sys_file_mode — use 70/71, still unregistered).
-    try std.testing.expect(exceptions.frame_write(&frame, 8, 70));
+    // sys_wmctl/sys_time/sys_tty_attach, 68 is sys_principal, 69 is
+    // sys_file_mode, 70 is sys_secret_get — use 71/72, still unregistered;
+    // 71 is the reserved-for-TS4 sys_tty_net_auth).
+    try std.testing.expect(exceptions.frame_write(&frame, 8, 71));
     try std.testing.expect(handle_svc(&frame, svc_immediate));
     try std.testing.expectEqual(error_result(.enosys), exceptions.frame_read(&frame, 0));
-    try std.testing.expectEqual(@as(u64, 1), call_count(70));
+    try std.testing.expectEqual(@as(u64, 1), call_count(71));
 
-    try std.testing.expect(exceptions.frame_write(&frame, 8, 71));
+    try std.testing.expect(exceptions.frame_write(&frame, 8, 72));
     try std.testing.expect(handle_svc(&frame, svc_immediate));
     try std.testing.expectEqual(error_result(.enosys), exceptions.frame_read(&frame, 0));
 }
@@ -1234,7 +1237,7 @@ test "syscall: counters are monotonic and report is deterministic" {
     var con = mock.console();
     report(&con);
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=70\n" ++
+        "syscalls: slots=64 implemented=71\n" ++
             "  0 sys_ping calls=2\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -1304,7 +1307,8 @@ test "syscall: counters are monotonic and report is deterministic" {
             "  66 sys_time calls=0\n" ++
             "  67 sys_tty_attach calls=0\n" ++
             "  68 sys_principal calls=0\n" ++
-            "  69 sys_file_mode calls=0\n",
+            "  69 sys_file_mode calls=0\n" ++
+            "  70 sys_secret_get calls=0\n",
         mock.contents(),
     );
 }
@@ -3051,7 +3055,7 @@ test "syscall: SYS_TIME (slot 66, #1058) returns the firmware wall-clock epoch" 
     // The slot is registered and named in the table.
     try std.testing.expectEqualStrings("sys_time", entry_info(sys_time).?.name);
     // M50 TS1 added slot 68 (sys_principal); TS2 added slot 69 (sys_file_mode).
-    try std.testing.expectEqual(@as(usize, 70), syscall.implemented_count);
+    try std.testing.expectEqual(@as(usize, 71), syscall.implemented_count);
 
     const saved_epoch = timer.boot_epoch_secs;
     const saved_ticks = timer.ticks;
@@ -3143,6 +3147,134 @@ test "syscall: SYS_FILE_MODE (slot 69, #1136) is process-gated with the frozen e
     try std.testing.expectEqual(error_result(.enoent), dispatch(sys_file_mode, .{ @intFromPtr(&path_buf), good.len, 0o600, 0, 0, 0 }, &frame));
     // A bad pointer is EFAULT.
     try std.testing.expectEqual(error_result(.efault), dispatch(sys_file_mode, .{ uaccess.diagnostic_unmapped, 5, 0o600, 0, 0, 0 }, &frame));
+}
+
+test "syscall: SYS_SECRET_GET (slot 70, #1139) serves only the caller's principal" {
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (uid_user)
+    scheduler.start();
+    var frame = fresh_frame();
+    // Seed the store with uid_user + uid_system entries (the TS5 class-A
+    // known-value pair).
+    try std.testing.expectEqual(secret.LoadResult.ok, secret.parse(
+        "#v1\n" ++
+            "netkey\t1000\tsupersecretvalue\n" ++
+            "audkey\t0\tsystemsecretvalue\n",
+    ));
+
+    // An EL1h caller is not a process: EINVAL, never a read.
+    var buf: [secret.max_secret_entries * secret.record_bytes]u8 = undefined;
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_secret_get, .{ @intFromPtr(&buf), buf.len, 0, 0, 0, 0 }, &frame));
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+
+    set_user_regions(.{ .base = 0, .len = 0 }, .{ .base = @intFromPtr(&buf), .len = buf.len });
+    // The user principal (uid_user) gets ONLY its own entry.
+    const rc = dispatch(sys_secret_get, .{ @intFromPtr(&buf), buf.len, 0, 0, 0, 0 }, &frame);
+    try std.testing.expectEqual(@as(u64, secret.record_bytes), rc);
+    const rec = @as(*align(1) const secret.SecretRecord, @ptrCast(&buf));
+    try std.testing.expectEqual(process.uid_user, rec.uid);
+    try std.testing.expectEqualStrings("netkey", rec.key[0..rec.key_len]);
+    try std.testing.expectEqualStrings("supersecretvalue", rec.val[0..rec.val_len]);
+
+    // A buffer too small to hold every caller entry is EINVAL.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_secret_get, .{ @intFromPtr(&buf), secret.record_bytes - 1, 0, 0, 0, 0 }, &frame));
+    // A bad buffer address is EFAULT.
+    try std.testing.expectEqual(error_result(.efault), dispatch(sys_secret_get, .{ uaccess.diagnostic_unmapped, buf.len, 0, 0, 0, 0 }, &frame));
+    // The uid_system entry is NOT visible to the uid_user caller.
+    try std.testing.expect(std.mem.indexOf(u8, &buf, "systemsecretvalue") == null);
+}
+
+test "syscall: SYS_SECRET_GET serves a uid_system principal its own entries" {
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (uid_user)
+    var kstack: [scheduler.task_stack_size]u8 align(16) = undefined;
+    const sys_pid = process.create_as("SYS.BIN", .{ .entry_va = 0x400000, .content_len = 64 }, .{}, .{}, .{ .uid = process.uid_system, .caps = process.kernel_caps }).?;
+    const sys_task = scheduler.register_exec_user(userspace.text_va, 0x4000_0000, 100, 0x8000_0000, 8192, &kstack, 0, 0).?;
+    _ = process.bind(sys_pid, sys_task);
+    scheduler.start();
+    var frame = fresh_frame();
+    try std.testing.expectEqual(secret.LoadResult.ok, secret.parse(
+        "#v1\n" ++
+            "netkey\t1000\tsupersecretvalue\n" ++
+            "audkey\t0\tsystemsecretvalue\n",
+    ));
+    var buf: [secret.max_secret_entries * secret.record_bytes]u8 = undefined;
+    set_user_regions(.{ .base = 0, .len = 0 }, .{ .base = @intFromPtr(&buf), .len = buf.len });
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expectEqual(sys_task, scheduler.current_id());
+    const rc = dispatch(sys_secret_get, .{ @intFromPtr(&buf), buf.len, 0, 0, 0, 0 }, &frame);
+    try std.testing.expectEqual(@as(u64, secret.record_bytes), rc);
+    const rec = @as(*align(1) const secret.SecretRecord, @ptrCast(&buf));
+    try std.testing.expectEqual(process.uid_system, rec.uid);
+    try std.testing.expectEqualStrings("audkey", rec.key[0..rec.key_len]);
+    try std.testing.expectEqualStrings("systemsecretvalue", rec.val[0..rec.val_len]);
+}
+
+test "syscall: secret VALUES never reach the sys_procs snapshot (D8 redaction)" {
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (uid_user)
+    scheduler.start();
+    var frame = fresh_frame();
+    try std.testing.expectEqual(secret.LoadResult.ok, secret.parse("#v1\nnetkey\t1000\tsupersecretvalue\n"));
+    // The monitor/secrets surface prints the key NAME, so the name may
+    // legitimately reach a log; the VALUE must never follow it.
+    var snap: [process.max_processes * process.snapshot_row_bytes]u8 = undefined;
+    set_user_regions(.{ .base = 0, .len = 0 }, .{ .base = @intFromPtr(&snap), .len = snap.len });
+    const rc = dispatch(sys_procs, .{ @intFromPtr(&snap), snap.len, 0, 0, 0, 0 }, &frame);
+    try std.testing.expect(rc > 0);
+    try std.testing.expect(std.mem.indexOf(u8, &snap, "supersecretvalue") == null);
+    // The snapshot is byte-frozen: no secret-bearing field was added.
+    try std.testing.expectEqual(process.snapshot_row_bytes, 40);
+}
+
+test "syscall: sys_secret_get is excluded from strace (never-logged contract, D8)" {
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (uid_user)
+    scheduler.start();
+    var frame = fresh_frame();
+    try std.testing.expectEqual(secret.LoadResult.ok, secret.parse("#v1\nnetkey\t1000\tsupersecretvalue\n"));
+    var buf: [secret.max_secret_entries * secret.record_bytes]u8 = undefined;
+    set_user_regions(.{ .base = 0, .len = 0 }, .{ .base = @intFromPtr(&buf), .len = buf.len });
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+
+    // Arm the tracer on the user process (pid 0).
+    syscall.strace_pid = 0;
+    defer syscall.strace_pid = null;
+    // A NORMAL syscall IS traced — proves the tracer works.
+    test_write_len = 0;
+    _ = dispatch(sys_ping, .{ 9, 0, 0, 0, 0, 0 }, &frame);
+    try std.testing.expect(std.mem.indexOf(u8, test_write_buffer[0..test_write_len], "[strace 0] sys_ping") != null);
+    const after_ping = test_write_len;
+    // sys_secret_get is NOT traced: the capture does not grow at all, so
+    // neither the argument pointers nor the returned secret bytes ever
+    // reach the transcript.
+    _ = dispatch(sys_secret_get, .{ @intFromPtr(&buf), buf.len, 0, 0, 0, 0 }, &frame);
+    try std.testing.expectEqual(after_ping, test_write_len);
+    // The known secret VALUE is absent from the captured output, and so is
+    // the syscall name (the whole line is suppressed).
+    try std.testing.expect(std.mem.indexOf(u8, test_write_buffer[0..test_write_len], "supersecretvalue") == null);
+    try std.testing.expect(std.mem.indexOf(u8, test_write_buffer[0..test_write_len], "sys_secret_get") == null);
+    // A subsequent normal syscall still traces (the exclusion is per-slot).
+    _ = dispatch(sys_ping, .{ 10, 0, 0, 0, 0, 0 }, &frame);
+    try std.testing.expect(test_write_len > after_ping);
 }
 
 test "syscall: SYS_TTY_ATTACH (slot 67, #1072) attaches the caller's terminal" {
