@@ -31,7 +31,7 @@
 | `tools/status/` | 6 | multiagent coordination gate + claim tooling (class A) |
 | `tools/context/` | 2 | context snapshot helpers |
 | `tools/ragshit/` | 84 | host-side context engine (developer tooling, not guest software) |
-| `tools/gate/` | 213 | M40 vgate harness + specs (GF2+) |
+| `tools/gate/` | 214 | M40 vgate harness + specs (GF2+) |
 
 ## Class-B fleet (discovered from the spec dir)
 
@@ -50,6 +50,7 @@ of them with `just verify-vz`.
 
 | kind | id | runs / asserts | spec header |
 |---|---|---|---|
+| spec | `go-hello` | 1 run / 8 assert | go-hello.spec -- issue #1163, GOOS=virelai phase 0a: the gc Go runtime |
 | spec | `live-addrspaces` | 1 run / 11 assert | live-addrspaces.spec -- per-task user address spaces on VZ hardware: |
 | spec | `live-args` | 1 run / 6 assert | live-args.spec -- exec arguments reach EL0: the same USER.BIN exec'd |
 | spec | `live-asm` | 1 run / 9 assert | live-asm.spec -- M22 D2: on-machine assembler produces an ELF the on-machine loader runs. |

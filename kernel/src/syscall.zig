@@ -2499,7 +2499,12 @@ fn handle_mmap(args: Args, _: *exceptions.VectorFrame) u64 {
     const prot = args[2];
     const flags = args[3];
 
-    if (len == 0 or len > 16 * 1024 * 1024) return error_result(.einval);
+    // Issue #1163 (GOOS=virelai phase 0a): 16 MiB → 1 GiB per call — the
+    // gc Go runtime's sbrk layer maps its heap growth in one call (the
+    // first-target run straced a 512 MiB sysReserve). Demand-backed: only
+    // touched pages are recorded and charged, so a huge reservation costs
+    // region bookkeeping, not physical memory.
+    if (len == 0 or len > 1024 * 1024 * 1024) return error_result(.einval);
     const pid = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
     const pinfo = process.info(pid) orelse return error_result(.einval);
 

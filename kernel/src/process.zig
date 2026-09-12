@@ -121,8 +121,13 @@ pub const Image = struct {
 
 /// The address space a process runs in (what its TTBR0 user root maps).
 /// Claim 0826: the process OWNS the backing pages for exec'd programs —
-pub const max_mmap_regions: usize = 8;
-pub const max_dynamic_pages: usize = 128;
+/// Issue #1163 (GOOS=virelai phase 0a): raised 8 → 16 mmap regions and
+/// 128 → 4096 recorded demand pages (~16 MiB). The gc Go runtime's sbrk
+/// heap grows as sys_mmap regions (one per grow) and its working set
+/// exceeds the old 128-page (~512 KiB) recording cap within milliseconds
+/// of mallocinit.
+pub const max_mmap_regions: usize = 16;
+pub const max_dynamic_pages: usize = 4096;
 
 pub const MmapRegion = struct {
     base_va: u64 = 0,
@@ -163,6 +168,11 @@ pub const AddrSpace = struct {
     /// Physical interpreter pages (PT_INTERP / LD.SO, claim 7921).
     interp_phys: u64 = 0,
     interp_pages: u64 = 0,
+    /// Physical read-only RODATA pages of a gap-layout ELF image (issue
+    /// #1163, GOOS=virelai phase 0a): the middle [R] PT_LOAD mapped at its
+    /// declared vaddr; 0 = none.
+    ro_phys: u64 = 0,
+    ro_pages: u64 = 0,
     /// Physical shared library staging/heap pages (claim 7921).
     lib_phys: u64 = 0,
     lib_pages: u64 = 0,
@@ -298,6 +308,7 @@ fn release_resources(p: *Process) void {
     if (p.addr_space.data_pages > 0) _ = alloc.free_pages(p.addr_space.data_phys, p.addr_space.data_pages);
     if (p.addr_space.interp_pages > 0) _ = alloc.free_pages(p.addr_space.interp_phys, p.addr_space.interp_pages);
     if (p.addr_space.lib_pages > 0) _ = alloc.free_pages(p.addr_space.lib_phys, p.addr_space.lib_pages);
+    if (p.addr_space.ro_pages > 0) _ = alloc.free_pages(p.addr_space.ro_phys, p.addr_space.ro_pages);
     if (p.addr_space.stack_pages > 0) _ = alloc.free_pages(p.addr_space.stack_phys, p.addr_space.stack_pages);
     if (p.kernel_stack.pages > 0) _ = alloc.free_pages(p.kernel_stack.phys, p.kernel_stack.pages);
     // M29 VM Depth: unref/free all dynamically faulted and mmap'd pages
@@ -516,6 +527,8 @@ pub fn release_pages_on_reap(task_id: usize) bool {
         processes[id].addr_space.interp_pages = 0;
         processes[id].addr_space.lib_phys = 0;
         processes[id].addr_space.lib_pages = 0;
+        processes[id].addr_space.ro_phys = 0;
+        processes[id].addr_space.ro_pages = 0;
         processes[id].addr_space.stack_phys = 0;
         processes[id].addr_space.stack_pages = 0;
         processes[id].kernel_stack = .{};
