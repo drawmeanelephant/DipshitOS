@@ -1,11 +1,11 @@
 VIRELAIOS vgate live-oliver -- real Zig HTML tool (oliver) as a native ELF app, host-side HTML compare
-spec: tools/gate/specs/live-oliver.spec
-revision: 314f619dd53de5d8eb48dbeb804400b95ac6856b branch=agent/buffy/wasm-zig-tool-spike dirty-files=7
-date: 2026-09-12T14:06:34Z
+spec: /Users/tbuddy/t3/zig/virelaios-buffy/tools/gate/specs/live-oliver.spec
+revision: a6dd751bb2aca869f86e22449a0abf55de76ef7e branch=agent/buffy/wasm-zig-tool-spike dirty-files=0
+date: 2026-09-12T14:45:16Z
 
-01: runner-rc=0
+01-01: runner-rc=0
   serial-contains [VirelaiOS kernel has seized control.]=1
-  python [01] PASS
+  python [01-01] PASS
   snapshot [oliver-html-guest.html] PASS (oliver-html-guest.html)
   serial-contains [oliver: wrote 754 bytes]=1
   serial-echo [exec OLIVER.ELF]=1
@@ -15,5 +15,18 @@ date: 2026-09-12T14:06:34Z
   serial-absent [image larger than the] ok=1
   serial-absent [leaves no room for the argv block] ok=1
   serial-absent [[EXC] parking:] ok=1
-01: PASS
-PASS: 1/1
+01-01: PASS
+01-02: runner-rc=0
+  serial-contains [VirelaiOS kernel has seized control.]=1
+  python [01-02] PASS
+  snapshot [oliver-html-guest.html] PASS (oliver-html-guest.html)
+  serial-contains [oliver: wrote 754 bytes]=1
+  serial-echo [exec OLIVER.ELF]=1
+  serial-contains [rx-oliver-rendered]=1
+  serial-absent [error: ] ok=1
+  serial-absent [not found on the host share] ok=1
+  serial-absent [image larger than the] ok=1
+  serial-absent [leaves no room for the argv block] ok=1
+  serial-absent [[EXC] parking:] ok=1
+01-02: PASS
+PASS: 2/2
