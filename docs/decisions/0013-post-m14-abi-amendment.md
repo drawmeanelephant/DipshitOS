@@ -128,12 +128,16 @@ Build: `rm -rf .zig-cache zig-out && zig build kernel`. Inspection:
 | **Delta** | **~1,050,000 B (~1.002 MiB)** | *(not re-measured)* |
 
 **Amendment (issue #1163, GOOS=virelai phase 0a, 2026-09-12):** the kernel
-`.bss` is now **11,326,456 B (10.80 MiB)** — the growth over the 9,787,576 B
-baseline is the port's deliberate reservations: `exec_program_max` 512 KiB →
-2 MiB (+1.5 MiB: the gc Go runtime's first images exceed 512 KiB even
-`-s -w`-stripped, and the gap-layout loader stages the whole file), the
-per-process recorded-demand-page array 128 → 4096 entries ×16 processes
-(+0.5 MiB), and the mmap-region array 8 → 16 ×16. Budget raised 11,534,336 →
+`.bss` is now **11,326,456 B (10.80 MiB)** measured against this gate
+(`zig build kernel` + the gate's own readelf pass). The port's deliberate
+reservations, re-derived from the constants that actually feed the image:
+`exec_program_max` 512 KiB → 2 MiB backs **TWO staging buffers**
+(`exec.zig`'s `program` AND `interp_program`), contributing +3.0 MiB (the
+gc Go runtime's first images exceed 512 KiB even `-s -w`-stripped, and the
+gap-layout loader stages the whole file); the per-process
+recorded-demand-page array 128 → 4096 entries × 16 processes contributes
++0.5 MiB; the mmap-region array 8 → 16 × 16 processes and the added
+rodata-segment fields account for the remainder. Budget raised 11,534,336 →
 **13,631,488 B (13.0 MiB)**; headroom after the raise ≈ 2.2 MiB. Next
 re-measurement trigger: any claim growing `.bss` past 12.5 MiB.
 

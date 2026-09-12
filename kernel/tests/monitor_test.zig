@@ -41,6 +41,8 @@ const MockMachineControl = monitor.MockMachineControl;
 const BootMessages = monitor.BootMessages;
 const lookup = monitor.lookup;
 const exec = monitor.exec;
+const alloc = monitor.alloc;
+const esp_exec = monitor.esp_exec;
 const complete = monitor.complete;
 const ensure_registry = monitor.ensure_registry;
 const category_order = monitor.category_order;
@@ -1688,6 +1690,82 @@ fn test_seed_share(name: []const u8, content: []const u8) void {
 fn test_reset_share() void {
     test_share_n = 0;
     virtio_file.set_test_share(test_share_files[0..0]);
+}
+
+
+// ---------------------------------------------------------------------------
+// Issue #1163 I1: single-segment GAP images (legal per elf.parse — any
+// sane declared base) must not alias the text allocation into the
+// data-segment descriptor. Before the fix, exec_static_elf_gap set
+// .data_phys/.data_pages to segment 0's pages (a double free at reap) and
+// registered the R+X text as a copy-out WRITE region.
+// ---------------------------------------------------------------------------
+
+const gap_elf_aarch64: u16 = 0xB7;
+
+/// Build a minimal ELF64 with ONE R+X PT_LOAD at `vaddr` (the entry sits
+/// in its initialized bytes) — a legal 1-segment gap image when
+/// `vaddr != text_base`.
+fn one_segment_gap_elf(comptime vaddr: u64) [256]u8 {
+    var img = [_]u8{0} ** 256;
+    const magic4 = [4]u8{ 0x7f, 'E', 'L', 'F' };
+    @memcpy(img[0..4], &magic4);
+    img[4] = 2; // ELF64
+    img[5] = 1; // little-endian
+    img[6] = 1; // EV_CURRENT
+    std.mem.writeInt(u16, img[16..18], 2, .little); // ET_EXEC
+    std.mem.writeInt(u16, img[18..20], gap_elf_aarch64, .little); // EM_AARCH64
+    std.mem.writeInt(u32, img[20..24], 1, .little); // e_version
+    std.mem.writeInt(u64, img[24..32], vaddr, .little); // e_entry (at code)
+    std.mem.writeInt(u64, img[32..40], 64, .little); // e_phoff
+    std.mem.writeInt(u16, img[52..54], 64, .little); // e_ehsize
+    std.mem.writeInt(u16, img[54..56], 56, .little); // e_phentsize
+    std.mem.writeInt(u16, img[56..58], 1, .little); // e_phnum
+    // phdr @64: PT_LOAD R+X, offset 120, filesz 32, memsz 32.
+    std.mem.writeInt(u32, img[64..68], 1, .little); // PT_LOAD
+    std.mem.writeInt(u32, img[68..72], 5, .little); // PF_R | PF_X
+    std.mem.writeInt(u64, img[72..80], 120, .little); // p_offset
+    std.mem.writeInt(u64, img[80..88], vaddr, .little); // p_vaddr
+    std.mem.writeInt(u64, img[96..104], 32, .little); // p_filesz
+    std.mem.writeInt(u64, img[104..112], 32, .little); // p_memsz
+    // Entry code at file offset 120 (mov x0, #42; ret).
+    std.mem.writeInt(u32, img[120..124], 0xD2800540, .little);
+    std.mem.writeInt(u32, img[124..128], 0xD65F03C0, .little);
+    return img;
+}
+
+// Host-test RAM: the exec path memcpies into allocated pages through the
+// identity map (phys == kernel pointer), so the fixture's "physical" base
+// must be a real host-writable buffer.
+var gap_test_ram: [512 * 4096]u8 align(4096) = undefined;
+
+test "exec: single-segment gap image owns no data alias (issue #1163 I1)" {
+    // Arm the physical allocator the way kernel_main does at boot (the
+    // exec path allocates the program's own text/stack/kstack pages).
+    var descs = [_]memmap.MemoryDescriptor{
+        .{ .type = .conventional_memory, .physical_start = @intFromPtr(&gap_test_ram), .virtual_start = 0, .number_of_pages = 512, .attribute = 0 },
+    };
+    const view = memmap.MapView.init(std.mem.asBytes(&descs), @sizeOf(memmap.MemoryDescriptor), descs.len);
+    try std.testing.expect(alloc.init(view, &.{}));
+
+    // A declared base != the text aperture makes the 1-segment image a
+    // GAP layout (the shape the fix guards).
+    const img = one_segment_gap_elf(0x30_0000);
+    test_reset_share();
+    defer virtio_file.set_test_share(null);
+    test_seed_share("GAP1.ELF", img[0..]);
+
+    _ = scheduler.init();
+    const result = esp_exec.exec_file("GAP1.ELF", &.{});
+    try std.testing.expectEqual(esp_exec.ExecResult.ok, result);
+    const pid = esp_exec.last_exec_pid().?;
+    const info = process.info(pid).?;
+    // The alias guard: the process owns its text and NOTHING else —
+    // data_pages == 0 means reap frees each page exactly once.
+    try std.testing.expect(info.text_pages > 0);
+    try std.testing.expectEqual(@as(u64, 0), info.data_pages);
+    try std.testing.expectEqual(@as(u64, 0), info.data_len);
+    try std.testing.expectEqual(@as(u64, 0), info.data_phys);
 }
 
 test "monitor: ls lists the host-share files deterministically" {

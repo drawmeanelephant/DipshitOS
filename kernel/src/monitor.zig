@@ -17,7 +17,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const alloc = @import("alloc.zig");
+pub const alloc = @import("alloc.zig");
 pub const console = @import("console.zig");
 pub const esp_exec = @import("exec.zig"); // claim 6783: load a user program from the host share and enter it at EL0
 pub const svclock = @import("svclock.zig"); // claim 9498 follow-on: per-service-domain locks — commands take the kernel lock plus their domain(s)

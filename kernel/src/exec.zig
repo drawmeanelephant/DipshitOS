@@ -714,6 +714,12 @@ fn exec_static_elf_gap(
     const seg0 = image.segments[0];
     const last = image.segments[image.segment_count - 1];
     const text_len_pages = seg_pages[0] * alloc.page_size;
+    // Issue #1163 I1 (review pass): a single-segment GAP image is legal
+    // (the parser accepts any sane declared base), and there `last ==`
+    // `seg0` — aliasing the text allocation into `.data_*` would free the
+    // SAME pages twice at reap and register the R+X text as a copy-out
+    // WRITE region. Data exists only when there is more than one segment.
+    const has_data = image.segment_count > 1;
     // Re-arm the global uaccess view (replaced at every SVC entry by the
     // task TCB copy): text + stack baseline, then per-task extras below.
     syscall.set_user_regions(.{ .base = seg0.vaddr, .len = text_len_pages }, .{ .base = stack_va, .len = scheduler.task_stack_size });
@@ -728,10 +734,10 @@ fn exec_static_elf_gap(
             .text_len = seg0.mem_size,
             .text_phys = seg_phys[0],
             .text_pages = seg_pages[0],
-            .data_va = last.vaddr,
-            .data_len = last.mem_size,
-            .data_phys = seg_phys[image.segment_count - 1],
-            .data_pages = seg_pages[image.segment_count - 1],
+            .data_va = if (has_data) last.vaddr else 0,
+            .data_len = if (has_data) last.mem_size else 0,
+            .data_phys = if (has_data) seg_phys[image.segment_count - 1] else 0,
+            .data_pages = if (has_data) seg_pages[image.segment_count - 1] else 0,
             .stack_va = stack_va,
             .stack_len = scheduler.task_stack_size,
             .stack_phys = stack_phys,
@@ -767,7 +773,10 @@ fn exec_static_elf_gap(
             const ro = image.segments[1];
             scheduler.add_task_read_region(task_id, .{ .base = ro.vaddr, .len = seg_pages[1] * alloc.page_size });
         }
-        if (last.mem_size > 0) {
+        // I1: data regions only for a REAL data segment — with one
+        // segment the text is already covered by the task's text region,
+        // and it must never appear as a copy-out write destination.
+        if (has_data and last.mem_size > 0) {
             scheduler.add_task_read_region(task_id, .{ .base = last.vaddr, .len = seg_pages[image.segment_count - 1] * alloc.page_size });
             scheduler.add_task_write_region(task_id, .{ .base = last.vaddr, .len = seg_pages[image.segment_count - 1] * alloc.page_size });
         }
@@ -1108,6 +1117,7 @@ fn elf_exec_error(err: elf_mod.Error) ExecResult {
         error.readable_data,
         error.writable_rodata,
         error.unaligned_gap,
+        error.gap_too_high,
         error.bad_text_base,
         error.bad_data_base,
         => .segment_too_large,

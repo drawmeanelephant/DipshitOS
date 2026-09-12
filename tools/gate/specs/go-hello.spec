@@ -11,8 +11,12 @@
 #   * nanotime via CNTPCT_EL0 (timers + runtime.GC pacing).
 # Every assert reads vm-serial.log on real Apple Silicon VZ hardware.
 #
-# Prerequisite: `bash tools/go/build-go.sh` must have produced
-# .build/go/GOHELLO.ELF (the setup hook fails with that exact hint).
+# HOST PREREQUISITE (fails the gate honestly when missing): this gate is
+# NOT hermetic — .build/go/GOHELLO.ELF must exist before ANY fleet run
+# (`just verify-vz` includes this spec). Build it with
+# `bash tools/go/build-go.sh` (multi-minute first run: it clones nothing
+# but runs both Go make.bash passes; fork prerequisites in
+# tools/go/README.md). The setup hook below fails with that exact hint.
 
 vgate_name go-hello "issue #1163 GOOS=virelai phase 0a: gc Go runtime first target on VZ"
 vgate_share seed

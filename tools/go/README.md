@@ -41,6 +41,15 @@ bash tools/go/build-go.sh         # toolchain + .build/go/GOHELLO.ELF
 just gate go-hello                # class-B VZ gate: execs it, asserts serial
 ```
 
+**The go-hello gate is not hermetic**: `just verify-vz` includes it, and it
+refuses to run (honest setup failure) until
+`bash tools/go/build-go.sh` has produced `.build/go/GOHELLO.ELF`. The first
+build takes several minutes (two `make.bash` passes); every Go release
+rebase re-runs `apply.sh` on a fresh distribution copy. Auto-building the
+fork inside the gate was considered and rejected — a multi-minute external
+toolchain build inside every fleet run hides gate latency and couples the
+fleet to the host's Go install.
+
 The fork lives OUTSIDE the repo (`../go-virelai` by default; `--fork-dir`
 or `GO_FORK_DIR` to move it) — it is a build artifact; this directory is
 the reviewable patch series. `GOTOOLCHAIN=local` is exported by

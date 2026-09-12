@@ -149,9 +149,12 @@ pub const text_base: u64 = 0x0040_0000;
 /// Page granularity for gap-layout segment vaddrs (the kernel maps whole
 /// pages at declared vaddrs — mmu/alloc page size, 4 KiB).
 pub const page_alignment: u64 = 4096;
-/// Upper sanity bound for a gap-layout segment 0's declared base: user
-/// mmap bump-allocations start at 0x1000_0000 and the default stack sits
-/// at 0x8000_0000, so a loaded image above 256 MiB would collide.
+/// Upper sanity bound for EVERY gap-layout segment's placement: a loaded
+/// image must end below the user mmap bump window (0x1000_0000) so it can
+/// never collide with `sys_mmap` allocations or the reserved windows
+/// above them. The user stack is not a fixed address (ASLR'd per exec via
+/// the CSPRNG) — the bound exists to keep images below the bump region,
+/// not below any fixed stack VA.
 pub const gap_base_max: u64 = 0x1000_0000;
 /// Total load bound — mirrors `exec.exec_program_max` (the shared staging
 /// buffer). A program whose PT_LOAD memory exceeds this is rejected.
@@ -198,6 +201,9 @@ pub const Error = error{
     /// A gap-layout segment's p_vaddr is not page-aligned (the kernel maps
     /// whole pages at declared vaddrs).
     unaligned_gap,
+    /// A gap-layout segment ends at or above `gap_base_max` — inside the
+    /// mmap bump window or a reserved window above it.
+    gap_too_high,
     /// A gap-layout MIDDLE segment is writable (only the last segment may
     /// carry PF_W — W^X: [R+X][R][RW]).
     writable_rodata,
@@ -530,10 +536,20 @@ pub fn parse_at(buf: []const u8, expected_base: ?u64) Error!Image {
     if (gap_layout) {
         // Declared-base sanity: page-aligned, clear of page 0 (the
         // compiler's nil checks rely on faulting at low addresses), and
-        // inside the user VA region (mmap bump-allocates from 0x1000_0000;
-        // the stack sits at 2 GiB).
+        // every segment's END inside the user VA region — issue #1163 I2:
+        // this bound applies to ALL segments, not just segment 0, so a
+        // crafted image cannot place rodata/data in the mmap bump window
+        // or any reserved window above it.
         if (raws[0].vaddr & (page_alignment - 1) != 0) return error.unaligned_gap;
-        if (raws[0].vaddr < page_alignment or raws[0].vaddr >= gap_base_max) return error.bad_text_base;
+        if (raws[0].vaddr < page_alignment) return error.bad_text_base;
+        var k: usize = 0;
+        while (k < count) : (k += 1) {
+            if (raws[k].vaddr >= gap_base_max or
+                raws[k].vaddr + raws[k].memsz > gap_base_max)
+            {
+                return error.gap_too_high;
+            }
+        }
         // Middle segments must be read-only; the LAST must be writable.
         var j: usize = 1;
         while (j < count) : (j += 1) {
@@ -739,15 +755,59 @@ test "elf: enforces W^X segment flags and placement contract" {
     try testing.expectError(error.writable_text, parse(&wtxt));
 
     // Wrong CONTIGUOUS text base: a 1-segment image at a declared base is
-    // a legal GAP layout now, so refusal comes from the gap sanity bound —
-    // 0x1000_0000 is the mmap-bump region (gap_base_max), and an unaligned
-    // base is refused outright (issue #1163).
+    // a legal GAP layout now, so refusal comes from the gap placement
+    // bounds — a base at/above gap_base_max (the 0x1000_0000 mmap bump
+    // region) is gap_too_high (issue #1163 I2), an unaligned base is
+    // refused outright, and below-page-0 stays bad_text_base.
     const above_bound = elf32_one(&code, 0x1000_0000, 0, 0, 5);
-    try testing.expectError(error.bad_text_base, parse(&above_bound));
+    try testing.expectError(error.gap_too_high, parse(&above_bound));
     const unaligned_base = elf32_one(&code, 0x400800, 0, 0, 5);
     try testing.expectError(error.unaligned_gap, parse(&unaligned_base));
     const below_page0 = elf32_one(&code, 0, 0, 0, 5);
     try testing.expectError(error.bad_text_base, parse(&below_page0));
+
+    // I2: a LATER gap segment ending at/above the bound → refused, even
+    // though its base is below it (ends just past gap_base_max).
+    var img2 = [_]u8{0} ** 512;
+    @memcpy(img2[0..4], &magic);
+    img2[4] = 1;
+    img2[5] = 1;
+    img2[6] = 1;
+    std.mem.writeInt(u16, img2[18..20], em_aarch64, .little);
+    std.mem.writeInt(u32, img2[20..24], 1, .little);
+    std.mem.writeInt(u32, img2[24..28], 0x400000, .little); // entry
+    std.mem.writeInt(u32, img2[28..32], 52, .little);
+    std.mem.writeInt(u16, img2[42..44], 32, .little);
+    std.mem.writeInt(u16, img2[44..46], 3, .little);
+    // seg0: R+X @0x400000, filesz 8, memsz 0x1000
+    std.mem.writeInt(u32, img2[52..56], pt_load, .little);
+    std.mem.writeInt(u32, img2[56..60], 124, .little);
+    std.mem.writeInt(u32, img2[60..64], 0x400000, .little);
+    std.mem.writeInt(u32, img2[68..72], 8, .little);
+    std.mem.writeInt(u32, img2[72..76], 0x1000, .little);
+    std.mem.writeInt(u32, img2[76..80], 5, .little);
+    // seg1: rodata R @0x402000 (legal)
+    std.mem.writeInt(u32, img2[84..88], pt_load, .little);
+    std.mem.writeInt(u32, img2[88..92], 132, .little);
+    std.mem.writeInt(u32, img2[92..96], 0x402000, .little);
+    std.mem.writeInt(u32, img2[100..104], 4, .little);
+    std.mem.writeInt(u32, img2[104..108], 4, .little);
+    std.mem.writeInt(u32, img2[108..112], 4, .little);
+    // seg2: data RW ending just PAST gap_base_max → refused (base is
+    // page-aligned BELOW the bound; the END crosses it)
+    const last_page: u32 = 0x1000_0000 - 0x1000; // 0x0FFF000, aligned
+    std.mem.writeInt(u32, img2[116..120], pt_load, .little);
+    std.mem.writeInt(u32, img2[120..124], 136, .little);
+    std.mem.writeInt(u32, img2[124..128], last_page, .little);
+    std.mem.writeInt(u32, img2[132..136], 4, .little);
+    std.mem.writeInt(u32, img2[136..140], 0x1004, .little); // ends 4 over
+    std.mem.writeInt(u32, img2[140..144], 6, .little);
+    try testing.expectError(error.gap_too_high, parse(&img2));
+    // Same image with the data segment INSIDE the bound → parses.
+    std.mem.writeInt(u32, img2[136..140], 0x1000, .little);
+    const image2 = try parse(&img2);
+    try testing.expect(image2.gap_layout);
+    try testing.expectEqual(@as(usize, 3), image2.segment_count);
 
     // Entry outside the initialized range → bad entry.
     var bad_entry_img = elf32_one(&code, 0x400000, 8, 0, 5); // filesz 12 > code 4? no: extra widens range
