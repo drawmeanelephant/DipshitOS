@@ -1,0 +1,61 @@
+tools/ locale audit (issue #1186) -- captured sweeps
+host: macOS 27.0 / GNU bash, version 5.3.15(1)-release (aarch64-apple-darwin25.4.0)
+
+== A. inventory --check under three ambient locales ==
+--- env: ambient
+inventory-gates --check: OK (docs/gate-fleet-inventory.md matches a fresh render)
+inventory-gates --check: OK (render is locale-invariant: LC_ALL=C == en_US.UTF-8)
+rc=0
+--- env: LC_ALL=C
+inventory-gates --check: OK (docs/gate-fleet-inventory.md matches a fresh render)
+inventory-gates --check: OK (render is locale-invariant: LC_ALL=C == en_US.UTF-8)
+rc=0
+--- env: LC_ALL=en_US.UTF-8
+inventory-gates --check: OK (docs/gate-fleet-inventory.md matches a fresh render)
+inventory-gates --check: OK (render is locale-invariant: LC_ALL=C == en_US.UTF-8)
+rc=0
+
+== B. live 'cut -c/-b' uses in tools/ (byte-vs-char truncation) ==
+count: 0
+
+== C. live locale-sensitive POSIX classes in tools/ ==
+tools/inventory-gates.sh:96:    }' "$1" | truncate_chars 110 | sed 's/|/\\|/g; s/[[:space:]]*$//'
+tools/inventory-gates.sh:210:                hdr="$(grep -m1 '^# ' "$spec" | sed 's/^# //' | truncate_chars 100 | sed 's/|/\\|/g; s/[[:space:]]*$//')"
+tools/lint-workflows.sh:99:    l="$(printf '%s' "$l" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+tools/lint-workflows.sh:101:        "run: "*) l="$(printf '%s' "$l" | sed -e 's/^run:[[:space:]]*//')" ;;
+tools/lint-workflows.sh:133:            if (line ~ /^(bash|zig|swift)[[:space:]]/) print line
+count: 5
+
+== D. unpinned sort/uniq in tools/ ==
+tools/verify-pointer-manual.sh:127:    DISTINCT_FOCUS=$(grep -a -o "dui: pointer focus=[0-9]*" "$SERIAL" | sort -u | wc -l | tr -d ' ' || true)
+tools/verify-tx-diag.sh:201:echo "=== interpretation (per unique stopping stage) ==="
+tools/probe-pointer-routes.sh:38:        FOCUS=$(grep -a -o "dui: pointer focus=[0-9]*" artifacts/vm-serial.log | sort -u | tr '\n' ' ' || true)
+tools/gate/fleet.sh:28:#   resolve <id>      echo the id for an exact name or unique prefix
+tools/gate/fleet.sh:97:    # Exact id, else unique prefix. Errors (rc=2) listing candidates.
+tools/gate/fleet.sh:104:    if [ "$hits" -eq 1 ]; then return 0; fi   # unique prefix candidates already printed
+count: 6
+
+== E. locale-dependent case tables (tr [:lower:]/[:upper:]) ==
+tools/verify-zc-corpus.sh:290:    outname="$(printf '%s' "$name" | LC_ALL=C tr '[:lower:]' '[:upper:]')"
+tools/verify-zc-corpus.sh:421:    outname="$(printf '%s' "$name" | LC_ALL=C tr '[:lower:]' '[:upper:]')"
+
+== F. printf precision truncation / bash substring (both byte- or char-counting) ==
+printf %.Ns: 0
+bash \${v:0:N}: 0
+
+== G. bracket ranges in grep/sed ==
+count: 0
+
+== H. tools that write a TRACKED file (REPORT= into a non-artifacts path) ==
+tools/verify-zc-corpus.sh:512:REPORT="$(art zc-corpus-report.txt)"
+tools/inventory-gates.sh:49:REPORT="docs/gate-fleet-inventory.md"
+tools/_va-scripting.sh:49:REPORT="$(art live-scripting-report.txt)"
+tools/gate/vgate.sh:104:REPORT="$(art "$VGATE_NAME-report.txt")"
+tools/verify-t0sz16-walkprobe.sh:146:    REPORT="$(report_for "$c")"
+
+== I. non-ASCII reach into the one tracked render ==
+specs total: 210
+specs containing non-ASCII: 51
+specs whose first-line (scraped) header contains non-ASCII:
+  tools/gate/specs/live-m21-persist-title-orphan.spec
+  tools/gate/specs/live-wnd5-gate2-policy.spec

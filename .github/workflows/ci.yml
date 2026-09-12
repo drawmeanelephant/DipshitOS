@@ -79,7 +79,7 @@ jobs:
       - name: Test multiagent coordination tooling (class A)
         run: bash tools/status/test-coordination.sh
 
-      - name: Lint GitHub Actions workflows (class A — actionlint, pinned; runner-label allowance in .github/actionlint.yaml)
+      - name: Lint GitHub Actions workflows and assert class-A parity with `just verify-portable` (class A — actionlint, pinned; runner-label allowance in .github/actionlint.yaml)
         run: bash tools/lint-workflows.sh
 
       - name: Verify MMU takeover contract (class A — ADR 0006 supersession, T0SZ=16 + TLBI comments)
@@ -93,6 +93,21 @@ jobs:
 
       - name: Verify the kernel `.bss` ceiling (class A — ADR 0013 D3.1)
         run: bash tools/verify-bss-budget.sh
+
+      # --- Class A: the three gates this job silently stopped running -----
+      # `just verify-portable` owns the portable set; this job hand-copied a
+      # subset of it and three gates had quietly gone local-only, including
+      # the GF1 registration guard (issue #1186). `tools/lint-workflows.sh`
+      # now fails when the recipe and this step list drift apart again.
+
+      - name: Verify the TTF font engine (class A — Inter + Fira Code — SFNT tables, outlines, raster, layout)
+        run: bash tools/verify-ttf-fonts.sh
+
+      - name: Verify the host-file-channel wire parity (class A — M34 HF1–HF4, kernel host tests + Swift host tests + fixture pins)
+        run: bash tools/verify-vf-class-a.sh
+
+      - name: Verify the gate-fleet inventory is current (class A — GF1 registration guard; a new script or spec must ship with a regenerated report)
+        run: bash tools/inventory-gates.sh --check
 
       # --- Class B: Apple-silicon VZ hardware gates run in vz-gates.yml ---
 

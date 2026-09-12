@@ -19,9 +19,9 @@
 | tooling (not gates) | 13 |
 | with a just recipe | 12 |
 | in the class-B fleet (spec dir / legacy script) | 4 |
-| named in a GitHub workflow | 7 |
-| named in docs/status.md | 8 |
-| **orphans (gate-class, registered nowhere)** | **10** |
+| named in a GitHub workflow | 10 |
+| named in docs/status.md | 12 |
+| **orphans (gate-class, registered nowhere)** | **9** |
 
 ## Subdirectory tooling (not gates)
 
@@ -283,7 +283,6 @@ status.md row:
 - `verify-t0sz16-walkprobe.sh`
 - `verify-t0sz16.sh`
 - `verify-transcript.sh`
-- `verify-ttf-fonts.sh`
 - `verify-tx-transition.sh`
 
 ## All top-level scripts
@@ -303,8 +302,8 @@ named in `.github/workflows/*.yml`; `st` = named in
 | `elf2bin.py` | 382 | tooling | n | n | n | n | Convert a Zig aarch64-freestanding ELF executable into the VirelaiOS flat |
 | `env-check.sh` | 259 | tooling | n | n | y | n | tools/env-check.sh -- source me at the start of every agent session. |
 | `inspect.sh` | 93 | tooling | y | n | n | n | inspect.sh -- report useful facts about the generated EFI binary and the |
-| `inventory-gates.sh` | 556 | tooling | n | n | n | n | inventory-gates.sh -- regenerate (or --check) the machine-generated gate |
-| `lint-workflows.sh` | 62 | tooling | y | n | y | n | lint-workflows.sh -- lint the GitHub Actions workflows (class A). |
+| `inventory-gates.sh` | 556 | tooling | n | n | y | y | inventory-gates.sh -- regenerate (or --check) the machine-generated gate |
+| `lint-workflows.sh` | 171 | tooling | y | n | y | y | lint-workflows.sh -- lint the GitHub Actions workflows (class A). |
 | `mkdyn-elf.py` | 1090 | tooling | n | n | n | y | Generate freestanding dynamic ELF binaries for VirelaiOS. |
 | `mkhello-elf.py` | 205 | tooling | n | n | n | n | Emit a minimal statically linked AArch64 ELF32 executable (M22 D1, issue #324). |
 | `png2qoi.py` | 94 | tooling | n | n | n | n | Convert standard images (PNG, JPG) to Quite OK Image (QOI) format. |
@@ -327,10 +326,10 @@ named in `.github/workflows/*.yml`; `st` = named in
 | `verify-t0sz16-walkprobe.sh` | 220 | D | n | n | n | n | verify-t0sz16-walkprobe.sh -- claim 1517 (claims 6460/7896 follow-up) |
 | `verify-t0sz16.sh` | 276 | D | n | n | n | n | verify-t0sz16.sh -- claim 1517 (claims 6460/7896 follow-up) class-D |
 | `verify-transcript.sh` | 32 | A | n | n | n | n | M1.5 march step 19 gate: the automated `virelai>` transcript test. |
-| `verify-ttf-fonts.sh` | 62 | A | n | n | n | n | verify-ttf-fonts.sh -- class A: TrueType font engine verification for |
+| `verify-ttf-fonts.sh` | 62 | A | n | n | y | y | verify-ttf-fonts.sh -- class A: TrueType font engine verification for |
 | `verify-tx-diag.sh` | 263 | D | y | n | n | n | verify-tx-diag.sh -- claim 0018 gate: bisect the FIRST post-exit virtio TX |
 | `verify-tx-transition.sh` | 238 | D | n | n | n | n | verify-tx-transition.sh -- claim 0020 gate: which transition destroys |
 | `verify-unit-tests.sh` | 38 | A | n | n | y | n | Run the VirelaiOS unit test suites. |
-| `verify-vf-class-a.sh` | 118 | A | y | n | n | n | verify-vf-class-a.sh -- M34 HF1–HF4 (issues #735/#736/#737/#738) class-A |
+| `verify-vf-class-a.sh` | 118 | A | y | n | y | y | verify-vf-class-a.sh -- M34 HF1–HF4 (issues #735/#736/#737/#738) class-A |
 | `verify-virelai-probe.py` | 88 | tooling | n | n | n | n | verify-virelai-probe.py — class-A check for the W3 shim acceptance item. |
-| `verify-zc-corpus.sh` | 575 | B | n | n | n | y | verify-zc-corpus.sh -- M20 Z4a + Z4b (issues #760 + #761): the corpus |
+| `verify-zc-corpus.sh` | 578 | B | n | n | n | y | verify-zc-corpus.sh -- M20 Z4a + Z4b (issues #760 + #761): the corpus |

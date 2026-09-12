@@ -102,7 +102,10 @@ for a in "$@"; do
     esac
 done
 [ -n "${CASES:-}" ] && CASE_FILTER="$CASE_FILTER $CASES"
-CASE_FILTER="$(echo $CASE_FILTER | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')" # dedupe
+# Locale policy: anything whose ORDER or NAME reaches a comparison, a gate
+# line or an artifact name is pinned to C (collation and the [:lower:]/[:upper:]
+# tables are locale-dependent; see docs/testing.md "Locale determinism").
+CASE_FILTER="$(echo $CASE_FILTER | tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort -u | tr '\n' ' ')" # dedupe
 
 SUFFIX="${VIRELAI_GATE_SUFFIX:-}"
 art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
@@ -284,7 +287,7 @@ run_one() {
     local desc kind exit_code ordered needles
     IFS='|' read -r _ kind exit_code ordered needles <<< "$(case_def "$name")"
     local outname
-    outname="$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')"
+    outname="$(printf '%s' "$name" | LC_ALL=C tr '[:lower:]' '[:upper:]')"
     local outelf="$outname.ELF"
     local run_log="$(art zc-corpus-$name-run.txt)"
     local serial_copy="$(art zc-corpus-$name-serial.log)"
@@ -415,7 +418,7 @@ run_one_host() {
     IFS='|' read -r _ kind exit_code ordered needles <<< "$(case_def "$name")"
     [ "$kind" = "run" ] || return 1
     local outname
-    outname="$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')"
+    outname="$(printf '%s' "$name" | LC_ALL=C tr '[:lower:]' '[:upper:]')"
     local hostelf="${outname}H.ELF"
     local host_image="$(art zc-host-$name.elf)"
     [ -f "$host_image" ] || { echo "$name-host: MISSING host ELF $host_image (host_check phase failed?)" >&2; return 1; }
