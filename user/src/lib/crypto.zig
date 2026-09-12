@@ -8,15 +8,18 @@
 //! submodule's) run under `zig build test`.
 //!
 //! Cards: CP1 SHA-256/512 + HMAC (#1115); CP2 ChaCha20-Poly1305 (#1116);
-//! CP3 X25519 (#1117); CP4 Ed25519 (#1118); CP5 ct + demo (#1119).
+//! CP3 X25519 (#1117); CP4 Ed25519 (#1118); CP5 ct + demo (#1119);
+//! SSH-P2 djb ChaCha20 + OpenSSH cipher (#1167, M51).
 
 pub const ct = @import("crypto/ct.zig");
 pub const sha256 = @import("crypto/sha256.zig");
 pub const sha512 = @import("crypto/sha512.zig");
 pub const hmac = @import("crypto/hmac.zig");
 pub const chacha20 = @import("crypto/chacha20.zig");
+pub const chacha20_ssh = @import("crypto/chacha20_ssh.zig");
 pub const poly1305 = @import("crypto/poly1305.zig");
 pub const aead = @import("crypto/aead.zig");
+pub const ssh_cipher = @import("crypto/ssh_cipher.zig");
 pub const curve25519 = @import("crypto/curve25519.zig");
 pub const x25519 = @import("crypto/x25519.zig");
 pub const ed25519 = @import("crypto/ed25519.zig");
@@ -61,4 +64,34 @@ test "crypto: AEAD then X25519 shared-secret consistency" {
     var pt: [5]u8 = undefined;
     try std.testing.expect(aead.open(&pt, &ctbuf, &tag, "aad", &nonce, &s2));
     try std.testing.expectEqualSlices(u8, "hello", &pt);
+}
+
+test "crypto: OpenSSH cipher is not the RFC 8439 AEAD (distinct constructions)" {
+    // M51: the two constructions take the same primitive inputs but are not
+    // interchangeable (ADR 0025 D4) — a drift guard against substituting one
+    // for the other. The OpenSSH cipher splits a 64-byte key and uses the
+    // sequence number as a 64-bit nonce; the RFC 8439 AEAD uses a 32-byte key
+    // and a 96-bit nonce.
+    var key: [ssh_cipher.key_len]u8 = undefined;
+    for (0..key.len) |i| key[i] = @truncate(i * 3 + 5);
+    const packet = "an ssh binary packet (length || padding || payload)";
+    const seq: u64 = 9;
+
+    var ssh_ct: [packet.len]u8 = undefined;
+    var ssh_tag: [ssh_cipher.tag_len]u8 = undefined;
+    ssh_cipher.seal(&ssh_ct, &ssh_tag, packet, seq, &key);
+    var back: [packet.len]u8 = undefined;
+    try std.testing.expect(ssh_cipher.open(&back, &ssh_ct, &ssh_tag, seq, &key));
+    try std.testing.expectEqualSlices(u8, packet, &back);
+
+    const rfc_nonce = [_]u8{0} ** 12;
+    var rfc_ct: [packet.len]u8 = undefined;
+    var rfc_tag: [16]u8 = undefined;
+    aead.seal(&rfc_ct, &rfc_tag, packet, "", &rfc_nonce, key[0..32]);
+    try std.testing.expect(!std.mem.eql(u8, &ssh_ct, &rfc_ct));
+    try std.testing.expect(!std.mem.eql(u8, &ssh_tag, &rfc_tag));
+    // And the RFC construction does not authenticate the SSH tag, nor the
+    // SSH construction the RFC tag (the reverse direction).
+    try std.testing.expect(!aead.open(&back, &ssh_ct, &ssh_tag, "", &rfc_nonce, key[0..32]));
+    try std.testing.expect(!ssh_cipher.open(&back, &rfc_ct, &rfc_tag, seq, &key));
 }
