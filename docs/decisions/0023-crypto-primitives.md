@@ -45,8 +45,10 @@ crypto/sha256.zig SHA-256 streaming + HMAC-SHA256
 crypto/sha512.zig SHA-512 streaming
 crypto/hmac.zig   generic HMAC over a hash descriptor
 crypto/chacha20.zig RFC 7539/8439 ChaCha20 block + XOR stream  (userland AEAD core)
+crypto/chacha20_ssh.zig djb ChaCha20, 64-bit counter + 64-bit nonce (M51 SSH-P2)
 crypto/poly1305.zig RFC 8439 Poly1305 (streaming)
 crypto/aead.zig   RFC 8439 ChaCha20-Poly1305 AEAD (seal/open)
+crypto/ssh_cipher.zig chacha20-poly1305@openssh.com construction (M51 SSH-P2)
 crypto/curve25519.zig field/pow/scalar helpers (shared by X25519/Ed25519)
 crypto/x25519.zig RFC 7748 X25519
 crypto/ed25519.zig RFC 8032 Ed25519 sign/verify
@@ -147,6 +149,48 @@ The library is deterministic and takes all keys/nonces from the caller.
 Randomness stays the kernel's job (`csprng`); a future userland RNG would
 obtain bytes via a syscall and feed this library. Keeping RNG out of the
 primitive layer means the KAT surface stays pure.
+
+### D8. SSH adds a second construction, not a second AEAD (M51 SSH-P2, #1167)
+SSH (M51, ADR 0025 D4) requires `chacha20-poly1305@openssh.com`, and it is
+**not** the RFC 8439 AEAD this library ships:
+
+- The original djb ChaCha20 takes a **64-bit block counter** (state words
+  12–13) and an **8-byte nonce** (words 14–15); `crypto/chacha20.zig` is the
+  RFC 8439 variant (32-bit counter + 96-bit nonce) and cannot express it.
+  SSH uses the packet **sequence number** as the 64-bit nonce — SSH wire
+  big-endian, decoded into the little-endian state words — so
+  `crypto/chacha20_ssh.zig` is a second ChaCha20 that **shares
+  `chacha20.quarterRound` with `chacha20.zig`** so the two cannot drift.
+- The 64-byte key from the key exchange is **split in half**, and the halves
+  are not interchangeable. Per the authoritative OpenSSH
+  `PROTOCOL.chacha20poly1305` file, the **first 256 bits are K_2** and key
+  the AEAD: the Poly1305 one-time key is the first 32 bytes of
+  `ChaCha20(K_2, seq, 0)`, and the payload (everything after the 4-byte
+  length) is encrypted with K_2 from block counter 1. The **second 256 bits
+  are K_1** and encrypt only the 4-byte length field at block counter 0.
+- The tag is **Encrypt-then-MAC** Poly1305 over `enc_length ‖ enc_payload`
+  (the whole ciphertext); `crypto/ssh_cipher.zig` verifies it with
+  `ct.ctEq` **before** decrypting anything, and `open` leaves the output
+  untouched on failure. `decryptLength` exposes the OpenSSH "length first"
+  step for the packet layer, with the tag still mandatory.
+- **Hazard (ADR 0025 D4, binding):** the IETF draft
+  `draft-ietf-sshm-chacha20-poly1305` names K_1/K_2 **inverted** relative to
+  the OpenSSH file (the draft's K_1 is the OpenSSH file's K_2). Implement by
+  byte position to the OpenSSH file. Pinned class-A vectors: the OpenSSH
+  construction's zero-key Poly1305 key is the RFC 8439 Appendix A.1 all-zero
+  block (`76b8e0ad…`), and the full seal/open vector is the draft's own
+  Appendix A worked example (key `8bbff685…`, seq 7, tag `95349e85…`) —
+  which the OpenSSH byte orientation reproduces and the inverted assignment
+  does not.
+- `crypto/aead.zig` and `crypto/chacha20.zig` remain the RFC 8439 primitives
+  (they are not dead code — they are simply the wrong construction here), and
+  the umbrella carries a class-A test asserting the two constructions are
+  distinct.
+
+Verification for SSH-P2 is class A only (crypto KATs; the scoping doc's
+class-B column is "none"): the vectors above plus round trip, tag tamper
+rejection, sequence-number advance, and the split-key boundary are `zig test`
+cases in the two new files and the umbrella; nothing is on the boot path.
 
 ## Consequences
 
