@@ -57,17 +57,17 @@ cvspike: q2 rsp="CVC-PING-0x42" ack="OK:13" ok=1
 cvspike: q2 ok=1
 cvspike: q3 armed bufs=0x0000000000000008
 vf: probe 32k ok len=0x8000 cksum=0x0000 free=0020
-cvspike: irq=0x00000000000000c8 first=0x0000000000000045 spi=0x0000000000000045 armed=0x0000000000000020..0x00000000000000bf
+cvspike: irq=0x00000000000000bf first=0x0000000000000045 spi=0x0000000000000045 armed=0x0000000000000020..0x00000000000000bf
 entropy: pre-rearm st=00
 entropy: seeded n=64
-aslr: boot user stack=0x000000002bb30000
+aslr: boot user stack=0x00000000291d0000
 VirelaiOS - AArch64 firmware-assisted kernel monitor
 VirelaiOS: the elephant has left the building.
 motd: aarch64 el1 kernel live; scheduler, uaccess, fs, net, gfx, xhci armed.
 Type 'help' before touching anything expensive.
 [32mvirelai> [0m[AUDIT] task-ring+procs audit armed slots=11 procs=16
 exec GOHELLO.ELF
-exec: loaded GOHELLO.ELF size=0x000000000006b9c4 entry=0x000000000007a960 stack=0x00000000265b0000 head=0x7f454c4602010100 data=0x000000000002f250 datapages=49
+exec: loaded GOHELLO.ELF size=0x000000000006b9c4 entry=0x000000000007a960 stack=0x000000006f8b0000 head=0x7f454c4602010100 data=0x000000000002f250 datapages=49
 [32mvirelai> [0mecho go-hello-done
 go-hello-done
 [32mvirelai> [0m
