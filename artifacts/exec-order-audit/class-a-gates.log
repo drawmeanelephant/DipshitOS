@@ -1,0 +1,16 @@
+tools/status/test-coordination.sh  rc=0  2s
+tools/inventory-gates.sh --check   rc=0  13s
+tools/lint-workflows.sh            rc=0  0s
+tools/verify-mmu-debt.sh           rc=0  1s
+tools/verify-glyph-raster.sh       rc=0  10s
+tools/verify-ttf-fonts.sh          rc=0  2s
+tools/verify-mutations.sh          rc=0  1s
+tools/verify-bss-budget.sh         rc=0  9s
+tools/verify-vf-class-a.sh         rc=1  56s
+      error: open claims #1194 ('agent/go-port/goos-virelai-0b-r1') and #1193 ('agent/buffy-execrace/fleet-exec-race') both declare 'docs/gate-fleet-inventory.md' / 'docs/gate-fleet-inventory.md' — one editor per file: coordinate, or close/stall one claim
+      error: open claims #1192 ('t3code/m51-ssh5') and #1194 ('agent/go-port/goos-virelai-0b-r1') both declare 'docs/status.md' / 'docs/status.md' — one editor per file: coordinate, or close/stall one claim
+      error: open claims #1192 ('t3code/m51-ssh5') and #1194 ('agent/go-port/goos-virelai-0b-r1') both declare 'docs/gate-fleet-inventory.md' / 'docs/gate-fleet-inventory.md' — one editor per file: coordinate, or close/stall one claim
+      error: open claims #1192 ('t3code/m51-ssh5') and #1193 ('agent/buffy-execrace/fleet-exec-race') both declare 'docs/gate-fleet-inventory.md' / 'docs/gate-fleet-inventory.md' — one editor per file: coordinate, or close/stall one claim
+      verify-issue-coordination: FAILED
+=== failures: 1 ===
+zig build test rc=0

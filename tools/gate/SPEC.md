@@ -94,3 +94,57 @@ Rules:
   fleet section of `docs/gate-fleet-inventory.md` with zero list edits
   (regenerate the report; `--check` fails until you do). Discovery lives
   in `tools/gate/fleet.sh`.
+
+## exec ordering: `exec` returns immediately (claim #1193)
+
+`exec` loads a program, spawns it as an EL0 task, and **returns**. It does not
+wait for the program to run, let alone finish. So a boot script that launches a
+program and then does anything else has given up its ordering: the next line
+runs while that program is still starting. The serial log hides this — it looks
+interleaved-but-complete — and it produced a real failure: live-oliver's first
+spec drove a second invocation, and a `vf rm` between them, while the first
+program was still writing (#1188).
+
+One more consequence: a script cannot sequence two exec'd programs, because the
+harness stops the VM when `--script-expect` matches. **One invocation per
+boot**, plus the markers to order the run:
+
+1. **Graded run (preferred).** End the run on a marker the PROGRAM prints, and
+   hold later scripts with a stage gate — `--script-after` / `--script2-after` /
+   `--script3-after` / `--input-string-after` wait for guest output before the
+   next script forwards.
+2. **Self-sequencing.** Launch with `&` and block on the program with `fg N`
+   (the guest shell has `jobs` and `fg`; there is no `wait`/`bg`), so the
+   closing marker cannot be echoed before the program's output is logged.
+3. **Timeout-ordered.** Bound the run with `--timeout` and assert only
+   order-independent facts — nothing that needs program output.
+
+If a spec carries a shape the guard cannot prove safe, it must declare the
+intent in a header comment or the guard fails it:
+
+```
+# exec-order: <class> -- <one-line reason>
+```
+
+| class | means |
+|---|---|
+| `intentional` | the author vouches for the ordering and says why — the bucket for a provable case the parser cannot see (e.g. an exec whose binary does not exist, so the refusal is synchronous and no program ever runs) |
+| `self-sequenced` | idiom 2: the script blocks on the program (`fg N`) |
+| `timeout-ordered` | idiom 3: `--timeout`-bounded, asserts need no program output |
+| `assert-proven` | the run ends on a script marker, but its asserts read output only the program produces, so a program that never ran still fails the run — the residual risk is a late tail (a flaky FAIL, never a false pass) |
+
+The class must be one of those four: a typo is a hard failure, not a silent
+exemption, and declarations are printed in the guard's output so they stay
+visible.
+
+Enforcement is `check_spec_order` in `tools/inventory-gates.sh` (`--check`,
+hence `just verify-portable`), which flags exactly two mechanical shapes: a run
+that launches a program and ends on a marker the script itself supplies with no
+stage gate anchoring it on guest output, and a `vf` file-channel operation
+following an `exec` in one script. A stage gate only counts as an anchor when
+at least one of its markers is NOT supplied by any script the run forwards —
+a gate on the script's own echo is a delay, not a gate; the shell prompt does
+count, since the guest prints it. Anything else that launches two programs from one script is the
+author's to prove. The guard is itself regression-tested against
+`tools/gate/fixtures/exec-order/{fail,pass}` — never fleet members, never
+executed, excluded from the fleet because `fleet.sh` globs this directory only.

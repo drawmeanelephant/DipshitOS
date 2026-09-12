@@ -12,6 +12,11 @@
 #   true ; echo ok=$?                   -> ok=0
 #   echo chain-done                     -> completion marker
 
+# exec-order: intentional -- the script's only exec is `exec NOTEXIST.BIN`,
+# which fails synchronously (nothing is staged under that name), so no program
+# is ever running when the closing marker is echoed; every assert reads a shell
+# or kernel line that predates it.
+
 vgate_name live-chain "milestone-nineteen cards P3+P4 class-B gate"
 vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
