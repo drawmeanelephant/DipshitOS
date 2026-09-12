@@ -50,6 +50,9 @@ out_dir="${GO_BUILD_OUT:-$REPO/.build/go}"
 mkdir -p "$out_dir"
 rc=0
 for prog in "${@:-$REPO/tools/go/hello.go}"; do
+    # GOPATH mode needs an absolute FILE path (a relative one is parsed as
+    # an import path).
+    prog="$(cd "$(dirname "$prog")" && pwd)/$(basename "$prog")"
     base="$(basename "${prog%.go}")"
     out="$out_dir/${GO_BUILD_NAME:-$base}.ELF"
     log "building $prog -> $out"

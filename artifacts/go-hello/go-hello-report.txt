@@ -1,7 +1,7 @@
 VIRELAIOS vgate go-hello -- issue #1163 GOOS=virelai phase 0a: gc Go runtime first target on VZ
 spec: /Users/tbuddy/t3/zig/virelaios-go-port/tools/gate/specs/go-hello.spec
-revision: 06a68f8c0ac053ce96e4a776f197d44817183480 branch=agent/go-port/goos-virelai-phase0a dirty-files=0
-date: 2026-09-12T16:50:28Z
+revision: 283dfa09c6dd939f21c03cdb4883879e1830a318 branch=agent/go-port/goos-virelai-0b-r1 dirty-files=18
+date: 2026-09-12T17:25:37Z
 
 01: runner-rc=0
   serial-contains [VirelaiOS kernel has seized control.]=1

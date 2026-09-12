@@ -2,7 +2,7 @@
 """Apply the GOOS=virelai scheduler gates to the fork's proc.go
 (issue #1163, phase 0a). Idempotent; called by tools/go/apply.sh.
 
-Phase 0a has no kernel thread_create (slot 72 lands in phase 0b), so every
+Phase 0a has no kernel thread_create (slot 73 lands in phase 0b; slot 72 is\nsys_getrandom, #1166), so every
 path that funnels into newosproc must be gated, and the single M must never
 park (nothing else exists to wake it). One const, canCreateM, carries the
 thread-creation delta; these deltas disappear in phase 0b.
@@ -104,7 +104,7 @@ new = '''func stopm() {
 		// issue #1163 phase 0a: the single M must never park — nothing
 		// else exists to wake it (no sysmon, no second thread). Yield to
 		// the kernel scheduler and let the caller retry findRunnable.
-		// Removed with slot 72.
+		// Removed with slot 73 (thread_create).
 		osyield()
 		return
 	}

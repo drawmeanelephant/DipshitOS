@@ -157,6 +157,13 @@ Every verification command belongs to exactly one class (canonical inventory:
 > **CI proves only this class** — a green badge says nothing about the
 > Apple-silicon VZ hardware gates (class B).
 >
+> **Host prerequisites (class B):** the Go-runtime gates (`go-hello`,
+> `go-args`) are NOT hermetic — they exec `.build/go/*.ELF` binaries built
+> by the GOOS=virelai fork, and refuse to run (honestly, with the build
+> hint) until `just go-toolchain` has provisioned this machine. The recipe
+> is idempotent; the first run takes several minutes. Do not auto-build the
+> fork inside a gate (rejected in review — see `tools/go/README.md`).
+>
 > The class-B fleet is **discovered, not listed** (M40 GF5, issue #940):
 > every `tools/gate/specs/*.spec` plus the four legacy class-B scripts
 > (`bad-handoff`, `marker`, `nvram-console`, `host-console`), exactly as

@@ -61,7 +61,7 @@ the reviewable patch series. `GOTOOLCHAIN=local` is exported by
   memory, no signals, cooperative preemption only. Kernel side: 3-segment
   gap-layout ELF loader, mmap cap lifts, `sys_getrandom` (slot 72, M51 #1166), FPEN
   armed.
-- **0b**: kernel slots 72/73 (`thread_create`, futex) + exec argv/envp →
+- **0b**: kernel slots 73/74 (`thread_create`, futex — 72 is `sys_getrandom`, #1166) + exec argv/envp →
   drop the haveSysmon delta, real threads, `GOMAXPROCS > 1`.
 - **0c**: kernel fault-delivery seam → `sigtrampgo`/`sigpanic` (recover(),
   tracebacks), Fuchsia-exception-channel pattern.

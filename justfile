@@ -62,6 +62,15 @@ gates PATTERN:
 gate-list:
     bash tools/gate/fleet.sh list
 
+# Provision the GOOS=virelai Go toolchain + first-target binary (issue
+# #1163; idempotent — apply.sh + both make.bash passes run only when
+# missing). HOST PREREQUISITE for the go-hello / go-args class-B gates:
+# `just verify-vz` includes them, and they refuse to run (honestly) until
+# this has produced .build/go/*.ELF on this machine. First run takes
+# several minutes (two Go make.bash passes).
+go-toolchain:
+    bash tools/go/build-go.sh
+
 # Compile the AArch64 UEFI application and kernel image (class A — zig build)
 build:
     zig build

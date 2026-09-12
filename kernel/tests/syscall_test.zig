@@ -2549,6 +2549,66 @@ test "syscall: sys_mmap and sys_munmap anonymous allocation and teardown" {
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_munmap, .{ mapped_va + 1, 4096, 0, 0, 0, 0 }, &frame));
 }
 
+test "syscall: mmap visibility survives past the old 6-slot TCB cap (issue #1163 A1)" {
+    mmu.reset();
+    alloc.reset_refcounts();
+    process.init();
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    scheduler.start();
+
+    var frame = fresh_frame();
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+
+    // Eight prot-RW mappings: the OLD extra capacity (6) silently dropped
+    // the 7th/8th TCB registrations and the 8-slot module list overflowed —
+    // file round-trips into the 7th+ heap buffer EFAULTed invisibly.
+    var last_va: u64 = 0;
+    var i: usize = 0;
+    while (i < 8) : (i += 1) {
+        const va = dispatch(sys_mmap, .{ 0, 4096, 3, 0x22, 0, 0 }, &frame);
+        try std.testing.expect(va >= 0x1000_0000);
+        last_va = va;
+    }
+
+    // Re-arm exactly as handle_svc does at every SVC entry, then the LAST
+    // mapping must be visible to copy_in's region check.
+    syscall.arm_task_regions();
+    try std.testing.expect(uaccess.read_region_covers(last_va, 8));
+}
+
+test "syscall: mmap at TCB region capacity fails LOUDLY with ENOMEM (issue #1163 A1)" {
+    mmu.reset();
+    alloc.reset_refcounts();
+    process.init();
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0);
+    scheduler.start();
+
+    var frame = fresh_frame();
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+
+    // Simulate config drift: a task whose extras are already at capacity
+    // (the pre-check must refuse the mmap instead of registering half of
+    // it and leaving the mapping invisible to later syscalls).
+    var i: usize = 0;
+    while (i < scheduler.extra_region_capacity) : (i += 1) {
+        try std.testing.expect(scheduler.add_task_write_region(2, .{ .base = 0x7000_0000 + @as(u64, i) * 0x1000, .len = 0x1000 }));
+    }
+    try std.testing.expect(!scheduler.has_task_region_capacity(2, 0, 1));
+    try std.testing.expectEqual(error_result(.enomem), dispatch(sys_mmap, .{ 0, 4096, 3, 0x22, 0, 0 }, &frame));
+}
+
 test "syscall: shared anon mmap — two EL0 roots map one region; owner RW, WM RO; munmap revokes the peer seat" {
     mmu.reset();
     alloc.reset_refcounts();
