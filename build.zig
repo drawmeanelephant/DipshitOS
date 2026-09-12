@@ -2392,6 +2392,7 @@ pub fn build(b: *std.Build) void {
         "user/src/lib/ssh/packet.zig",
         "user/src/lib/ssh/stream.zig",
         "user/src/lib/ssh/kex.zig",
+        "user/src/lib/ssh/userauth.zig",
         "user/tests/ui/ui_test.zig",
         "kernel/tests/scheduler_test.zig",
         "kernel/tests/syscall_test.zig",
