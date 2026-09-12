@@ -160,6 +160,12 @@ migration time became issues #859–#863. The binding rules:
   second waits or merges through the integration branch — never edit the
   same file (e.g. `kernel/src/main.zig`) concurrently. The gate fails when
   two ACTIVE claims from different branches declare overlapping `Touches`.
+  **Generated artifacts are exempt** (`docs/gate-fleet-inventory.md` today):
+  they are machine-rendered and merge sequentially, so declaring one never
+  holds the file and never conflicts — re-render it, don't serialize. The
+  exemption list lives in `is_generated()` in
+  `tools/status/verify-issue-coordination.sh` (add a line per new tracked
+  generated file).
 - **Progress and completion live on the issue.** Append progress as issue
   comments (never rewrite earlier comments); edit the body when fields
   change. When the work lands, close the issue with a final evidence

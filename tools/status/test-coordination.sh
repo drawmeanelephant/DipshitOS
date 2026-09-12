@@ -109,6 +109,30 @@ jq -s '.' \
     > "$TMP/fixture.json"
 run_case "prefix-glob overlap fails" 1
 
+# --- case 5b: generated artifact overlap across branches -> PASS ------------
+# The generated inventory is re-rendered mechanically; two claims declaring
+# it must NOT false-conflict (the recurring docs/gate-fleet-inventory.md bug).
+
+jq -s '.' \
+    <(claim_json 511 "agent/a/one" "2026-09-02T00:00:00Z" "docs/gate-fleet-inventory.md, kernel/src/a.zig") \
+    <(claim_json 512 "agent/b/two" "2026-09-02T00:00:00Z" "docs/gate-fleet-inventory.md, user/src/b.zig") \
+    > "$TMP/fixture.json"
+run_case "generated inventory overlap across branches is exempt" 0
+
+# --- case 5c: the exemption does not mask a real overlap -> FAIL ------------
+
+jq -s '.' \
+    <(claim_json 521 "agent/a/one" "2026-09-02T00:00:00Z" "docs/gate-fleet-inventory.md, kernel/src/monitor.zig") \
+    <(claim_json 522 "agent/b/two" "2026-09-02T00:00:00Z" "docs/gate-fleet-inventory.md, kernel/src/monitor.zig") \
+    > "$TMP/fixture.json"
+rc=0
+out="$(bash "$GATE" --issues-json "$TMP/fixture.json" 2>&1)" || rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q "both declare 'kernel/src/monitor.zig'"; then
+    pass=$((pass + 1)); printf 'ok   generated exemption does not mask a real overlap\n'
+else
+    failn=$((failn + 1)); printf 'FAIL generated exemption masked a real overlap (rc=%d): %s\n' "$rc" "$out" >&2
+fi
+
 # --- case 6: missing Owner branch -> FAIL -----------------------------------
 
 printf '%s' '[
