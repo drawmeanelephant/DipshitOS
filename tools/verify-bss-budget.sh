@@ -50,7 +50,7 @@ mkdir -p "$(dirname "$GATE_LOG")"
 
 # Budget ceiling. Override at run time for ad-hoc checks:
 #   BSS_BUDGET_BYTES=8000000 bash tools/verify-bss-budget.sh
-BSS_BUDGET_BYTES="${BSS_BUDGET_BYTES:-11534336}" # 11.0 MiB (see header comment)
+BSS_BUDGET_BYTES="${BSS_BUDGET_BYTES:-13631488}" # 13.0 MiB (ADR 0013 D3.1, amended for issue #1163)
 # Discover llvm-readelf: env override > PATH > Homebrew > Xcode > fail.
 if [ -z "${LLVM_READELF:-}" ]; then
     LLVM_READELF="$(command -v llvm-readelf 2>/dev/null || true)"

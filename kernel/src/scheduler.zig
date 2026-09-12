@@ -891,6 +891,16 @@ pub fn pin_task(id: usize, core: usize) bool {
     return true;
 }
 
+/// Issue #1163 (GOOS=virelai phase 0a): the gap-layout ELF loader maps
+/// text at the image's DECLARED base (not userspace.text_va), so it
+/// re-points the freshly registered task's text region after
+/// `register_exec_user`. Caller must own the just-spawned task (pre-run).
+pub fn set_task_text_region(id: usize, base: u64, len: u64) void {
+    if (id < max_tasks) {
+        tasks[id].regions.text = .{ .base = base, .len = len };
+    }
+}
+
 pub fn add_task_read_region(id: usize, reg: userspace.Region) void {
     if (id < max_tasks and tasks[id].regions.extra_read_count < tasks[id].regions.extra_reads.len) {
         tasks[id].regions.extra_reads[tasks[id].regions.extra_read_count] = reg;

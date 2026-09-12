@@ -8,23 +8,29 @@
 //!
 //! Loader contract (documented, host-tested):
 //!   * Only PT_LOAD program headers matter; every other type is skipped.
-//!   * At most 2 PT_LOAD segments (max 2): segment 0 is TEXT (must NOT be
-//!     writable — W^X), an optional segment 1 is DATA (must be writable).
+//!   * At most 3 PT_LOAD segments: segment 0 is TEXT (must NOT be
+//!     writable — W^X); a middle segment (gap layout) is read-only
+//!     non-executable; the last segment is DATA (must be writable).
 //!   * Segment 0's p_vaddr MUST equal `text_base` (0x0040_0000), the fixed
 //!     EL0 text aperture (`userspace.text_va`). The kernel maps it there,
 //!     so absolute addresses in a normally linked image stay valid — no
 //!     relocation is performed.
-//!   * An optional data segment must start EXACTLY at text_base +
-//!     p_memsz[0] (directly after the text memory image); the kernel maps
-//!     it as the writable data aperture right there, matching the
-//!     claim-3805 DSK3 shape.
+//!   * Two placement shapes:
+//!       - CONTIGUOUS (the original contract): every later segment starts
+//!         EXACTLY at the previous segment's memory end; the kernel stages
+//!         [text][data] contiguously at text_va (claim-3805 DSK3 shape).
+//!       - GAP (issue #1163, the GOOS=virelai gc-toolchain shape): a later
+//!         segment sits at its own page-aligned p_vaddr ABOVE the previous
+//!         segment's end (the Go linker's 64K-aligned R+X / R / RW
+//!         segments). The kernel maps each gap segment at its DECLARED
+//!         vaddr (`Image.gap_layout` tells the exec path which shape).
 //!   * e_entry must land inside segment 0's INITIALIZED bytes (file range);
 //!     it is reported relative to segment 0's p_vaddr because the staging
 //!     strip re-bases the content at the aperture base.
 //!   * Bounded: p_memsz >= p_filesz per segment, file ranges inside the
-//!     read buffer, non-overlapping file ranges (the staging copy is
-//!     forward-only), and total load size <= `load_max` (256 KiB — the
-//!     shared `exec.exec_program_max` staging buffer bound).
+//!     read buffer, non-overlapping ordered file ranges, and total load
+//!     size <= `load_max` (mirrors `exec.exec_program_max`, the shared
+//!     staging buffer bound).
 //!
 //! No dynamic linking, no sections, no relocations, no libc/POSIX.
 
@@ -140,11 +146,25 @@ pub const Elf64Sym = struct {
 /// this module stays dependency-free for host tests; exec.zig asserts the
 /// two agree.
 pub const text_base: u64 = 0x0040_0000;
+/// Page granularity for gap-layout segment vaddrs (the kernel maps whole
+/// pages at declared vaddrs — mmu/alloc page size, 4 KiB).
+pub const page_alignment: u64 = 4096;
+/// Upper sanity bound for EVERY gap-layout segment's placement: a loaded
+/// image must end below the user mmap bump window (0x1000_0000) so it can
+/// never collide with `sys_mmap` allocations or the reserved windows
+/// above them. The user stack is not a fixed address (ASLR'd per exec via
+/// the CSPRNG) — the bound exists to keep images below the bump region,
+/// not below any fixed stack VA.
+pub const gap_base_max: u64 = 0x1000_0000;
 /// Total load bound — mirrors `exec.exec_program_max` (the shared staging
 /// buffer). A program whose PT_LOAD memory exceeds this is rejected.
-pub const load_max: usize = 512 * 1024;
-/// At most two PT_LOAD segments (text + optional data).
-pub const max_segments: usize = 2;
+/// Issue #1163: raised from 512 KiB — the gc Go runtime's first images
+/// exceed the old bound even `-s -w`-stripped (GOHELLO.ELF is 1.06 MiB of
+/// file / 1.21 MiB of PT_LOAD memory).
+pub const load_max: usize = 2 * 1024 * 1024;
+/// At most three PT_LOAD segments: text + optional RO rodata + data
+/// (issue #1163 — the Go linker's R+X / R / RW layout).
+pub const max_segments: usize = 3;
 
 pub const Error = error{
     /// Not an ELF file (bad magic or absurdly short buffer).
@@ -176,9 +196,17 @@ pub const Error = error{
     readable_data,
     /// The first segment's p_vaddr is not `text_base`.
     bad_text_base,
-    /// The second segment does not start exactly at the text segment's
-    /// memory end (text_base + p_memsz[0]).
+    /// A later segment's p_vaddr is BELOW the previous segment's memory end.
     bad_data_base,
+    /// A gap-layout segment's p_vaddr is not page-aligned (the kernel maps
+    /// whole pages at declared vaddrs).
+    unaligned_gap,
+    /// A gap-layout segment ends at or above `gap_base_max` — inside the
+    /// mmap bump window or a reserved window above it.
+    gap_too_high,
+    /// A gap-layout MIDDLE segment is writable (only the last segment may
+    /// carry PF_W — W^X: [R+X][R][RW]).
+    writable_rodata,
     /// e_entry falls outside segment 0's initialized bytes.
     bad_entry,
 };
@@ -212,6 +240,11 @@ pub const Image = struct {
     phnum: usize = 0,
     /// Dynamic interpreter path (from PT_INTERP, e.g. "LD.SO").
     interp: ?[]const u8 = null,
+    /// True when at least one later segment sits at its own page-aligned
+    /// p_vaddr ABOVE the previous segment's end (issue #1163 gap layout —
+    /// the exec path maps such segments at their declared vaddrs instead
+    /// of staging [text][data] contiguously).
+    gap_layout: bool = false,
     /// PT_DYNAMIC segment location if present.
     dynamic_vaddr: u64 = 0,
     dynamic_size: u64 = 0,
@@ -467,27 +500,65 @@ pub fn parse_at(buf: []const u8, expected_base: ?u64) Error!Image {
         if (total_mem > load_max) return error.segment_too_large;
     }
     if (raws[0].flags & pf_w != 0) return error.writable_text;
+    // Contiguous shape: segment 1 (the last) must be writable. In the gap
+    // shape (checked below) only the LAST segment may be writable; middle
+    // segments are read-only rodata (W^X: [R+X][R][RW]).
     if (count == 2 and raws[1].flags & pf_w == 0) return error.readable_data;
 
-    // File ranges must be disjoint AND ordered (forward-only staging copy:
-    // destination offsets only ever shrink below source offsets when the
-    // sources do not overlap).
-    if (count == 2) {
-        const a_end = raws[0].offset + raws[0].filesz;
-        const b_start = raws[1].offset;
-        if (a_end > b_start) return error.overlapping_segments;
+    // File ranges must be disjoint AND ordered (the staging copy is
+    // forward-only and every per-segment copy reads forward).
+    var prev_end: u64 = 0;
+    for (raws[0..count]) |r| {
+        if (r.offset < prev_end) return error.overlapping_segments;
+        prev_end = r.offset + r.filesz;
     }
 
-    // Placement contract: text at the expected base aperture; optional data
-    // DIRECTLY after the text segment's memory image.
+    // Placement contract: segment 0 at the expected base aperture for the
+    // CONTIGUOUS shape; the GAP shape maps every segment (including 0) at
+    // its own declared vaddr, so it only needs a page-aligned, sane base
+    // (the Go linker places the ELF headers one page below `-T`, so seg0
+    // lands at e.g. 0x3f0000 for a 0x400000 text start). Later segments
+    // are either contiguous or page-aligned gaps, checked below.
+    var gap_layout = false;
     if (expected_base) |exp| {
-        if (raws[0].vaddr != exp) return error.bad_text_base;
+        if (raws[0].vaddr != exp) gap_layout = true;
     }
-    if (count == 2) {
-        if (expected_base != null) {
-            if (raws[1].vaddr != raws[0].vaddr + raws[0].memsz) return error.bad_data_base;
-        } else {
-            if (raws[1].vaddr < raws[0].vaddr + raws[0].memsz) return error.bad_data_base;
+    var seg_i: usize = 1;
+    while (seg_i < count) : (seg_i += 1) {
+        const prev_mem_end = raws[seg_i - 1].vaddr + raws[seg_i - 1].memsz;
+        if (raws[seg_i].vaddr == prev_mem_end) continue; // contiguous
+        if (raws[seg_i].vaddr < prev_mem_end) return error.bad_data_base;
+        // Gap segment: page-aligned (the kernel maps whole pages at
+        // declared vaddrs).
+        if (raws[seg_i].vaddr & (page_alignment - 1) != 0) return error.unaligned_gap;
+        gap_layout = true;
+    }
+    if (gap_layout) {
+        // Declared-base sanity: page-aligned, clear of page 0 (the
+        // compiler's nil checks rely on faulting at low addresses), and
+        // every segment's END inside the user VA region — issue #1163 I2:
+        // this bound applies to ALL segments, not just segment 0, so a
+        // crafted image cannot place rodata/data in the mmap bump window
+        // or any reserved window above it.
+        if (raws[0].vaddr & (page_alignment - 1) != 0) return error.unaligned_gap;
+        if (raws[0].vaddr < page_alignment) return error.bad_text_base;
+        var k: usize = 0;
+        while (k < count) : (k += 1) {
+            if (raws[k].vaddr >= gap_base_max or
+                raws[k].vaddr + raws[k].memsz > gap_base_max)
+            {
+                return error.gap_too_high;
+            }
+        }
+        // Middle segments must be read-only; the LAST must be writable.
+        var j: usize = 1;
+        while (j < count) : (j += 1) {
+            const writable = raws[j].flags & pf_w != 0;
+            if (j == count - 1) {
+                if (!writable) return error.readable_data;
+            } else if (writable) {
+                return error.writable_rodata;
+            }
         }
     }
 
@@ -497,18 +568,13 @@ pub fn parse_at(buf: []const u8, expected_base: ?u64) Error!Image {
     if (entry < raws[0].vaddr or entry >= raws[0].vaddr + raws[0].filesz) return error.bad_entry;
 
     var segments: [max_segments]Segment = undefined;
-    segments[0] = .{
-        .file_offset = @intCast(raws[0].offset),
-        .file_size = @intCast(raws[0].filesz),
-        .mem_size = @intCast(raws[0].memsz),
-        .vaddr = raws[0].vaddr,
-    };
-    if (count == 2) {
-        segments[1] = .{
-            .file_offset = @intCast(raws[1].offset),
-            .file_size = @intCast(raws[1].filesz),
-            .mem_size = @intCast(raws[1].memsz),
-            .vaddr = raws[1].vaddr,
+    var si: usize = 0;
+    while (si < count) : (si += 1) {
+        segments[si] = .{
+            .file_offset = @intCast(raws[si].offset),
+            .file_size = @intCast(raws[si].filesz),
+            .mem_size = @intCast(raws[si].memsz),
+            .vaddr = raws[si].vaddr,
         };
     }
     return .{
@@ -524,6 +590,7 @@ pub fn parse_at(buf: []const u8, expected_base: ?u64) Error!Image {
         .dynamic_vaddr = dyn_vaddr,
         .dynamic_size = dyn_size,
         .has_dynamic = has_dyn,
+        .gap_layout = gap_layout,
     };
 }
 
@@ -687,9 +754,60 @@ test "elf: enforces W^X segment flags and placement contract" {
     const wtxt = elf32_one(&code, 0x400000, 0, 0, 7);
     try testing.expectError(error.writable_text, parse(&wtxt));
 
-    // Wrong text base (linked at 0x1000) → refused honestly.
-    const wrong_base = elf32_one(&code, 0x1000, 0, 0, 5);
-    try testing.expectError(error.bad_text_base, parse(&wrong_base));
+    // Wrong CONTIGUOUS text base: a 1-segment image at a declared base is
+    // a legal GAP layout now, so refusal comes from the gap placement
+    // bounds — a base at/above gap_base_max (the 0x1000_0000 mmap bump
+    // region) is gap_too_high (issue #1163 I2), an unaligned base is
+    // refused outright, and below-page-0 stays bad_text_base.
+    const above_bound = elf32_one(&code, 0x1000_0000, 0, 0, 5);
+    try testing.expectError(error.gap_too_high, parse(&above_bound));
+    const unaligned_base = elf32_one(&code, 0x400800, 0, 0, 5);
+    try testing.expectError(error.unaligned_gap, parse(&unaligned_base));
+    const below_page0 = elf32_one(&code, 0, 0, 0, 5);
+    try testing.expectError(error.bad_text_base, parse(&below_page0));
+
+    // I2: a LATER gap segment ending at/above the bound → refused, even
+    // though its base is below it (ends just past gap_base_max).
+    var img2 = [_]u8{0} ** 512;
+    @memcpy(img2[0..4], &magic);
+    img2[4] = 1;
+    img2[5] = 1;
+    img2[6] = 1;
+    std.mem.writeInt(u16, img2[18..20], em_aarch64, .little);
+    std.mem.writeInt(u32, img2[20..24], 1, .little);
+    std.mem.writeInt(u32, img2[24..28], 0x400000, .little); // entry
+    std.mem.writeInt(u32, img2[28..32], 52, .little);
+    std.mem.writeInt(u16, img2[42..44], 32, .little);
+    std.mem.writeInt(u16, img2[44..46], 3, .little);
+    // seg0: R+X @0x400000, filesz 8, memsz 0x1000
+    std.mem.writeInt(u32, img2[52..56], pt_load, .little);
+    std.mem.writeInt(u32, img2[56..60], 124, .little);
+    std.mem.writeInt(u32, img2[60..64], 0x400000, .little);
+    std.mem.writeInt(u32, img2[68..72], 8, .little);
+    std.mem.writeInt(u32, img2[72..76], 0x1000, .little);
+    std.mem.writeInt(u32, img2[76..80], 5, .little);
+    // seg1: rodata R @0x402000 (legal)
+    std.mem.writeInt(u32, img2[84..88], pt_load, .little);
+    std.mem.writeInt(u32, img2[88..92], 132, .little);
+    std.mem.writeInt(u32, img2[92..96], 0x402000, .little);
+    std.mem.writeInt(u32, img2[100..104], 4, .little);
+    std.mem.writeInt(u32, img2[104..108], 4, .little);
+    std.mem.writeInt(u32, img2[108..112], 4, .little);
+    // seg2: data RW ending just PAST gap_base_max → refused (base is
+    // page-aligned BELOW the bound; the END crosses it)
+    const last_page: u32 = 0x1000_0000 - 0x1000; // 0x0FFF000, aligned
+    std.mem.writeInt(u32, img2[116..120], pt_load, .little);
+    std.mem.writeInt(u32, img2[120..124], 136, .little);
+    std.mem.writeInt(u32, img2[124..128], last_page, .little);
+    std.mem.writeInt(u32, img2[132..136], 4, .little);
+    std.mem.writeInt(u32, img2[136..140], 0x1004, .little); // ends 4 over
+    std.mem.writeInt(u32, img2[140..144], 6, .little);
+    try testing.expectError(error.gap_too_high, parse(&img2));
+    // Same image with the data segment INSIDE the bound → parses.
+    std.mem.writeInt(u32, img2[136..140], 0x1000, .little);
+    const image2 = try parse(&img2);
+    try testing.expect(image2.gap_layout);
+    try testing.expectEqual(@as(usize, 3), image2.segment_count);
 
     // Entry outside the initialized range → bad entry.
     var bad_entry_img = elf32_one(&code, 0x400000, 8, 0, 5); // filesz 12 > code 4? no: extra widens range
@@ -759,15 +877,89 @@ test "elf: two-segment layout validates the data-base contract" {
     try testing.expectEqual(@as(usize, 124), image.segments[1].file_offset);
     try testing.expectEqual(@as(usize, 4), image.segments[1].mem_size);
 
-    // Data NOT on the following page boundary → refused.
+    // Gap segment vaddr NOT page-aligned → refused (the kernel maps whole
+    // pages at declared vaddrs).
     var misaligned = img;
     std.mem.writeInt(u32, misaligned[92..96], 0x401800, .little);
-    try testing.expectError(error.bad_data_base, parse(&misaligned));
+    try testing.expectError(error.unaligned_gap, parse(&misaligned));
 
     // Overlapping FILE ranges → refused (staging copy safety).
     var overlap = img;
     std.mem.writeInt(u32, overlap[88..92], 118, .little); // data file starts inside text file range
     try testing.expectError(error.overlapping_segments, parse(&overlap));
+}
+
+test "elf: three-segment gap layout (Go linker shape) parses with declared vaddrs" {
+    // The GOOS=virelai shape (issue #1163): R+X at 0x400000, R-only rodata
+    // at a page-aligned gap vaddr, RW data at another — each segment at
+    // its DECLARED vaddr, flagged gap_layout.
+    var img = [_]u8{0} ** 512;
+    @memcpy(img[0..4], &magic);
+    img[4] = 1; // ELF32
+    img[5] = 1;
+    img[6] = 1;
+    std.mem.writeInt(u16, img[18..20], em_aarch64, .little);
+    std.mem.writeInt(u32, img[20..24], 1, .little);
+    std.mem.writeInt(u32, img[24..28], 0x400000, .little); // entry
+    std.mem.writeInt(u32, img[28..32], 52, .little); // e_phoff
+    std.mem.writeInt(u16, img[42..44], 32, .little);
+    std.mem.writeInt(u16, img[44..46], 3, .little); // three phdrs
+    // phdr 0 @52: text, R+X, offset 124, vaddr 0x400000, filesz 8, memsz 0x1000
+    std.mem.writeInt(u32, img[52..56], pt_load, .little);
+    std.mem.writeInt(u32, img[56..60], 124, .little);
+    std.mem.writeInt(u32, img[60..64], 0x400000, .little);
+    std.mem.writeInt(u32, img[68..72], 8, .little);
+    std.mem.writeInt(u32, img[72..76], 0x1000, .little);
+    std.mem.writeInt(u32, img[76..80], 5, .little); // R+X
+    // phdr 1 @84: rodata, R, offset 132, vaddr 0x402000 (gap), filesz/memsz 4
+    std.mem.writeInt(u32, img[84..88], pt_load, .little);
+    std.mem.writeInt(u32, img[88..92], 132, .little);
+    std.mem.writeInt(u32, img[92..96], 0x402000, .little);
+    std.mem.writeInt(u32, img[100..104], 4, .little);
+    std.mem.writeInt(u32, img[104..108], 4, .little);
+    std.mem.writeInt(u32, img[108..112], 4, .little); // R
+    // phdr 2 @116: data, RW, offset 136, vaddr 0x403000 (gap), filesz/memsz 4
+    std.mem.writeInt(u32, img[116..120], pt_load, .little);
+    std.mem.writeInt(u32, img[120..124], 136, .little);
+    std.mem.writeInt(u32, img[124..128], 0x403000, .little);
+    std.mem.writeInt(u32, img[132..136], 4, .little);
+    std.mem.writeInt(u32, img[136..140], 8, .little); // memsz > filesz (bss)
+    std.mem.writeInt(u32, img[140..144], 6, .little); // RW
+
+    const image = try parse(&img);
+    try testing.expectEqual(@as(usize, 3), image.segment_count);
+    try testing.expect(image.gap_layout);
+    try testing.expectEqual(@as(u64, 0x400000), image.segments[0].vaddr);
+    try testing.expectEqual(@as(u64, 0x402000), image.segments[1].vaddr);
+    try testing.expectEqual(@as(u64, 0x403000), image.segments[2].vaddr);
+    try testing.expectEqual(@as(usize, 8), image.segments[2].mem_size);
+
+    // A writable MIDDLE segment breaks the [R+X][R][RW] shape → refused.
+    var wro = img;
+    std.mem.writeInt(u32, wro[108..112], 6, .little); // rodata becomes RW
+    try testing.expectError(error.writable_rodata, parse(&wro));
+
+    // A read-only LAST segment → refused.
+    var rdata = img;
+    std.mem.writeInt(u32, rdata[140..144], 4, .little); // data becomes R
+    try testing.expectError(error.readable_data, parse(&rdata));
+
+    // A segment BELOW the previous segment's end → refused.
+    var below = img;
+    std.mem.writeInt(u32, below[124..128], 0x400800, .little);
+    try testing.expectError(error.bad_data_base, parse(&below));
+
+    // FOUR PT_LOAD segments → refused (max_segments is 3).
+    var four = img;
+    std.mem.writeInt(u16, four[44..46], 4, .little);
+    // phdr 3 @148: PT_LOAD RW at 0x404000 (well-formed, just too many).
+    std.mem.writeInt(u32, four[148..152], pt_load, .little);
+    std.mem.writeInt(u32, four[152..156], 140, .little);
+    std.mem.writeInt(u32, four[156..160], 0x404000, .little);
+    std.mem.writeInt(u32, four[164..168], 4, .little);
+    std.mem.writeInt(u32, four[168..172], 4, .little);
+    std.mem.writeInt(u32, four[172..176], 6, .little);
+    try testing.expectError(error.too_many_segments, parse(&four));
 }
 
 test "elf: collect_symbols reads a hand-built symtab" {

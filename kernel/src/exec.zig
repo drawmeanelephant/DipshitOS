@@ -90,12 +90,13 @@ const elf_mod = @import("elf.zig");
 // loaded image's .symtab on every ELF exec, cleared on every other exec.
 const symbol = @import("symbol.zig");
 
-/// Fixed load buffer: 256 KiB (64 pages). A program larger than this is
-/// rejected honestly (`too_large`). Milestone sixteen C1 (claim 3805) lifts
-/// this from the original 16 KiB bound — the M15 JINGLE draft was 33 KB and
-/// would not load (claim 7636) — so programs can grow. 256 KiB = 8× the old
-/// bound and comfortably fits the first big program (`GLOBALS.BIN`).
-pub const exec_program_max: usize = 512 * 1024;
+/// Fixed load buffer. A program larger than this is rejected honestly
+/// (`too_large`). Milestone sixteen C1 (claim 3805) lifted this from the
+/// original 16 KiB bound. Issue #1163 (GOOS=virelai phase 0a): 512 KiB →
+/// 1 MiB — the gc Go runtime's first images exceed 512 KiB even stripped
+/// (`-s -w`); the gap-layout path copies per segment straight out of this
+/// buffer, so it must hold the whole file.
+pub const exec_program_max: usize = 2 * 1024 * 1024;
 /// Card 3e (claim 4636): the bounded argv block — at most 8 args, each in
 /// a 32-byte slot (31 chars + NUL terminator), 256 bytes total. Packed into
 /// the process's OWN text page right after the loaded content (the text
@@ -367,6 +368,16 @@ fn exec_file_impl(name: []const u8, args: []const []const u8, pin: ?usize, princ
                 return exec_dynamic_elf(name, args, program[0..got], image, interp_name, pin, principal);
             }
 
+            if (image.gap_layout) {
+                // Issue #1163 (GOOS=virelai phase 0a): the gc Go linker's
+                // [R+X][R][RW] segments sit at 64K-aligned declared vaddrs
+                // with gaps — the contiguous staging contract cannot
+                // represent them. The gap path maps every segment at its
+                // DECLARED vaddr (aperture machinery from the dynamic
+                // path); symbols were already collected above.
+                return exec_static_elf_gap(name, args, program[0..got], image, pin, principal);
+            }
+
             const seg0 = image.segments[0];
             // The loader contract (elf.zig): segment 0 sits at
             // userspace.text_va, an optional writable segment 1 directly
@@ -591,6 +602,194 @@ fn exec_file_impl(name: []const u8, args: []const []const u8, pin: ?usize, princ
     }
     // Claim 6359 (slot 28 `sys_exec`): record the spawned pid at the true
     // success point so the EL0 caller can read it back.
+    last_pid = proc_id;
+    return .ok;
+}
+
+/// Issue #1163 (GOOS=virelai phase 0a): static-ELF GAP layout — every
+/// PT_LOAD is mapped at its DECLARED page-aligned vaddr (segment 0 at the
+/// fixed text aperture, `elf.text_base`), with the parser-enforced W^X
+/// shape [R+X][R]…[RW]. The gc Go linker emits exactly this (its segments
+/// are 64K-aligned with gaps), which the contiguous staging contract
+/// cannot represent. Mirrors the dynamic path's aperture machinery minus
+/// interpreter/library staging. No argv here (the Go entry contract is
+/// satisfied by the GOOS rt0 stub with argc=0 — phase 0b wires argv).
+fn exec_static_elf_gap(
+    name: []const u8,
+    args: []const []const u8,
+    prog_buf: []const u8,
+    image: elf_mod.Image,
+    pin: ?usize,
+    principal: process.Principal,
+) ExecResult {
+    if (args.len > 0) return .no_args_room;
+    if (!scheduler.has_free_slot()) return .pool_full;
+
+    // Per-segment physical backing (issue #1163): segment i's pages are
+    // owned by the process and freed at reap. Segment 0 is the text
+    // aperture (vaddr == elf.text_base, parser-enforced); middle segments
+    // are read-only rodata; the last is the writable data segment.
+    var seg_phys: [elf_mod.max_segments]u64 = .{0} ** elf_mod.max_segments;
+    var seg_pages: [elf_mod.max_segments]u64 = .{0} ** elf_mod.max_segments;
+    var allocated: usize = 0;
+    while (allocated < image.segment_count) : (allocated += 1) {
+        const seg = image.segments[allocated];
+        const pages: u64 = (seg.mem_size + alloc.page_size - 1) / alloc.page_size;
+        if (pages == 0) continue;
+        const phys = alloc.alloc_pages(pages) orelse {
+            var j: usize = 0;
+            while (j < allocated) : (j += 1) {
+                if (seg_pages[j] > 0) _ = alloc.free_pages(seg_phys[j], seg_pages[j]);
+            }
+            return .out_of_memory;
+        };
+        seg_phys[allocated] = phys;
+        seg_pages[allocated] = pages;
+        const dst: [*]u8 = @ptrFromInt(phys);
+        if (seg.file_size > 0) @memcpy(dst[0..seg.file_size], prog_buf[seg.file_offset..][0..seg.file_size]);
+        if (seg.mem_size > seg.file_size) @memset(dst[seg.file_size..seg.mem_size], 0);
+    }
+
+    const stack_pages: u64 = (scheduler.task_stack_size + alloc.page_size - 1) / alloc.page_size;
+    const stack_phys = alloc.alloc_pages(stack_pages) orelse {
+        var j: usize = 0;
+        while (j < image.segment_count) : (j += 1) {
+            if (seg_pages[j] > 0) _ = alloc.free_pages(seg_phys[j], seg_pages[j]);
+        }
+        return .out_of_memory;
+    };
+    const kstack_pages: u64 = stack_pages;
+    const kstack_phys = alloc.alloc_pages(kstack_pages) orelse {
+        var j: usize = 0;
+        while (j < image.segment_count) : (j += 1) {
+            if (seg_pages[j] > 0) _ = alloc.free_pages(seg_phys[j], seg_pages[j]);
+        }
+        _ = alloc.free_pages(stack_phys, stack_pages);
+        return .out_of_memory;
+    };
+
+    // Initial stack placement (per-process ASLR, claim 2665) and the
+    // TTBR0 multi-aperture root: one aperture per PT_LOAD at its declared
+    // vaddr with the parser-validated permissions, plus the user stack.
+    const stack_va = csprng.random_stack_va();
+    userspace.set_stack_va(stack_va);
+    var aps: [1 + elf_mod.max_segments]mmu.UserAperture = undefined;
+    var ap_count: usize = 0;
+    for (image.segments[0..image.segment_count], 0..) |seg, i| {
+        if (seg_pages[i] == 0) continue;
+        aps[ap_count] = .{
+            .va_start = seg.vaddr,
+            .va_end = seg.vaddr + seg_pages[i] * alloc.page_size,
+            .phys = seg_phys[i],
+            // W^X (parser-enforced): only the LAST segment is writable,
+            // and a single-segment image is text-only (never writable).
+            .writable = image.segment_count > 1 and i == image.segment_count - 1,
+            .executable = i == 0,
+        };
+        ap_count += 1;
+    }
+    aps[ap_count] = .{
+        .va_start = stack_va,
+        .va_end = stack_va + scheduler.task_stack_size,
+        .phys = stack_phys,
+        .writable = true,
+        .executable = false,
+    };
+    ap_count += 1;
+
+    const root_phys = mmu.build_user_root_apertures(aps[0..ap_count]) orelse {
+        var j: usize = 0;
+        while (j < image.segment_count) : (j += 1) {
+            if (seg_pages[j] > 0) _ = alloc.free_pages(seg_phys[j], seg_pages[j]);
+        }
+        _ = alloc.free_pages(stack_phys, stack_pages);
+        _ = alloc.free_pages(kstack_phys, kstack_pages);
+        return .table_full;
+    };
+    mmu.clean_table_storage();
+    for (image.segments[0..image.segment_count], 0..) |_, i| {
+        if (seg_pages[i] > 0) mmu.clean_dcache_range(seg_phys[i], seg_pages[i] * alloc.page_size);
+    }
+
+    const seg0 = image.segments[0];
+    const last = image.segments[image.segment_count - 1];
+    const text_len_pages = seg_pages[0] * alloc.page_size;
+    // Issue #1163 I1 (review pass): a single-segment GAP image is legal
+    // (the parser accepts any sane declared base), and there `last ==`
+    // `seg0` — aliasing the text allocation into `.data_*` would free the
+    // SAME pages twice at reap and register the R+X text as a copy-out
+    // WRITE region. Data exists only when there is more than one segment.
+    const has_data = image.segment_count > 1;
+    // Re-arm the global uaccess view (replaced at every SVC entry by the
+    // task TCB copy): text + stack baseline, then per-task extras below.
+    syscall.set_user_regions(.{ .base = seg0.vaddr, .len = text_len_pages }, .{ .base = stack_va, .len = scheduler.task_stack_size });
+
+    const entry_va = seg0.vaddr + image.entry_rel;
+    const proc_id = process.create_as(
+        name,
+        .{ .entry_va = entry_va, .content_len = seg0.mem_size },
+        .{
+            .root_phys = root_phys,
+            .text_va = seg0.vaddr,
+            .text_len = seg0.mem_size,
+            .text_phys = seg_phys[0],
+            .text_pages = seg_pages[0],
+            .data_va = if (has_data) last.vaddr else 0,
+            .data_len = if (has_data) last.mem_size else 0,
+            .data_phys = if (has_data) seg_phys[image.segment_count - 1] else 0,
+            .data_pages = if (has_data) seg_pages[image.segment_count - 1] else 0,
+            .stack_va = stack_va,
+            .stack_len = scheduler.task_stack_size,
+            .stack_phys = stack_phys,
+            .stack_pages = stack_pages,
+            // Issue #1163: the gap layout's middle read-only segment
+            // (rodata) — freed with the rest at reap.
+            .ro_phys = if (image.segment_count == 3) seg_phys[1] else 0,
+            .ro_pages = if (image.segment_count == 3) seg_pages[1] else 0,
+        },
+        .{ .phys = kstack_phys, .pages = kstack_pages },
+        principal,
+    ) orelse {
+        var j: usize = 0;
+        while (j < image.segment_count) : (j += 1) {
+            if (seg_pages[j] > 0) _ = alloc.free_pages(seg_phys[j], seg_pages[j]);
+        }
+        _ = alloc.free_pages(stack_phys, stack_pages);
+        _ = alloc.free_pages(kstack_phys, kstack_pages);
+        return .process_full;
+    };
+
+    mailbox.reset(proc_id);
+    events.reset(proc_id);
+    file_table.reset_process(proc_id);
+    app_timers.reset(proc_id);
+
+    const kstack: []u8 = @as(*[scheduler.task_stack_size]u8, @ptrFromInt(kstack_phys))[0..];
+    if (scheduler.register_exec_user(entry_va, root_phys, @intCast(text_len_pages), stack_va, scheduler.task_stack_size, kstack, 0, 0)) |task_id| {
+        // Middle (rodata) segments are readable through syscalls; the
+        // writable data segment is readable AND writable. The text and
+        // stack regions were set by register_exec_user itself.
+        if (image.segment_count == 3) {
+            const ro = image.segments[1];
+            scheduler.add_task_read_region(task_id, .{ .base = ro.vaddr, .len = seg_pages[1] * alloc.page_size });
+        }
+        // I1: data regions only for a REAL data segment — with one
+        // segment the text is already covered by the task's text region,
+        // and it must never appear as a copy-out write destination.
+        if (has_data and last.mem_size > 0) {
+            scheduler.add_task_read_region(task_id, .{ .base = last.vaddr, .len = seg_pages[image.segment_count - 1] * alloc.page_size });
+            scheduler.add_task_write_region(task_id, .{ .base = last.vaddr, .len = seg_pages[image.segment_count - 1] * alloc.page_size });
+        }
+        // register_exec_user hardcodes the task text region at
+        // userspace.text_va; the gap layout's declared base differs (the
+        // Go linker places headers one page below -T), so re-point it.
+        scheduler.set_task_text_region(task_id, seg0.vaddr, text_len_pages);
+        _ = process.bind(proc_id, task_id);
+        if (pin) |p| _ = scheduler.pin_task(task_id, p);
+    } else {
+        _ = process.reap(proc_id);
+        return .pool_full;
+    }
     last_pid = proc_id;
     return .ok;
 }
@@ -916,6 +1115,9 @@ fn elf_exec_error(err: elf_mod.Error) ExecResult {
         error.overlapping_segments,
         error.writable_text,
         error.readable_data,
+        error.writable_rodata,
+        error.unaligned_gap,
+        error.gap_too_high,
         error.bad_text_base,
         error.bad_data_base,
         => .segment_too_large,

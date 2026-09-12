@@ -170,12 +170,30 @@ pub fn allow_el0_counter() void {
     asm volatile ("isb");
 }
 
+/// Issue #1163 (GOOS=virelai phase 0a): guarantee EL0 FP/ASIMD access.
+/// The gc Go runtime is NEON-heavy (duffzero, GC bitmaps, string ops) and
+/// dies at its first FPU instruction if CPACR_EL1.FPEN denies EL0 — the
+/// kernel itself never wrote CPACR, so EL0 state was inherited from
+/// firmware/VZ (untested territory until now). Arm FPEN=0b11 (full access
+/// at EL0 and EL1); idempotent when already full access. Per-PE config,
+/// so both init paths arm it (mirrors allow_el0_counter). No-op on
+/// non-aarch64 hosts.
+pub fn allow_el0_fpu() void {
+    if (comptime builtin.cpu.arch != .aarch64) return;
+    asm volatile ("msr cpacr_el1, %[v]"
+        :
+        : [v] "r" (@as(u64, 0b11 << 20)),
+    );
+    asm volatile ("isb");
+}
+
 /// Program the timer: read the frequency, compute the 1 s period, arm.
 /// Caller is responsible for the GIC being programmed first (the PPI must
 /// be enabled for the tick to be delivered) and for unmasking IRQs after.
 pub fn init() void {
     if (comptime builtin.cpu.arch != .aarch64) return;
     allow_el0_counter();
+    allow_el0_fpu();
     freq = cntfrq();
     if (freq == 0) return;
     period_ticks = freq * period_ns / 1_000_000_000;
@@ -187,6 +205,7 @@ pub fn init() void {
 pub fn init_secondary() void {
     if (comptime builtin.cpu.arch != .aarch64) return;
     allow_el0_counter();
+    allow_el0_fpu();
     arm();
 }
 
