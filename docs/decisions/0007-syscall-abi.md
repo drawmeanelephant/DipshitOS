@@ -908,3 +908,37 @@ EL1h monitor's `procs` report gains `uid=`/`caps=` columns read from the SAME
 descriptor field. Verified class-A (process/exec/syscall host tests) and
 class-B (`live-trust-whoami`: `whoami`/`id` agree with the monitor's `procs`
 row).
+
+### Amendment (2026-09-11, #1136 — slot 69 `sys_file_mode`, the ownership/mode seam)
+
+M50 TS2 (ADR 0024 D3/D4/D8/D10) adds the trust milestone's second slot:
+**69** = `sys_file_mode(path_ptr, path_len, mode)`. Owner-only `chmod` on an
+existing path, or `CAP_FS_ANY`; `chown` is **not** in scope (ADR 0024 D10).
+`mode` is the 3-digit octal `rwxrwxrwx` value; the group triplet is reserved
+and normalized to zero (single-user — no groups, ADR 0024 D3). Returns 0 on
+success; `EINVAL` for a non-process caller, a bad/traversal path, or an
+out-of-range mode; `EACCES` when the caller is not the owner or the path is
+secret-class for a denied op, or for the fixed read-only `.usb`; `ENOENT`
+when the path is absent or no host channel is armed; `ENOSPC` when the
+64-entry ownership table is full (never silent eviction); `EFAULT` for a bad
+path pointer.
+
+The metadata lives in `kernel/src/trust.zig` (ADR 0024 D3): a bounded
+64-entry BSS table keyed by the `parse_path`-normalized `(Partition, path)`
+pair and persisted as `OWNERS.TXT` (`#v1`, one
+`path<TAB>mode<TAB>uid<TAB>flags` line per entry). Every `file_table` entry
+point (`open`/`read`/`write`/`delete`/`rename`/`truncate`/`dir_list`) calls
+the single `trust.check(actor, partition, path, want)` predicate after
+`parse_path` and before any `virtio_file` access; every direct
+`virtio_file` consumer declares an explicit `kernel_actor()`. Malformed or
+unknown-schema `OWNERS.TXT` lines fail closed (they deny their path, never
+default). Keys compare case-insensitively (the host share may be
+case-insensitive) while `OWNERS.TXT` preserves the authored spelling.
+`implemented_count` becomes **70** (rows 0–69; reserved 70–127). No existing
+number, argument, result, or error code changes. Verified class-A (the
+`trust.zig` allow/deny matrix, default policy, fail-closed malformed
+entries, table-full `ENOSPC`, `OWNERS.TXT` round trip, and the case-key
+decision; the extended syscall/monitor table tests) and class-B
+(`live-trust-modes`: EL0 `cat` → `EACCES`, owner `chmod` persists an
+`OWNERS.TXT` the host inspects, the monitor `vf cat` of a secret is denied,
+and the secret value never appears in the transcript).

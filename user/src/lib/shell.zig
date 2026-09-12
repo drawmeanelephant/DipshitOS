@@ -339,6 +339,36 @@ pub const PrincipalView = struct {
     }
 };
 
+/// M50 TS2 (issue #1136, ADR 0024 D10): the chmod glue for `sys_file_mode`
+/// (slot 69, owner-only). The glue (`user/src/sh.zig`) supplies the syscall;
+/// host tests supply a fake so the builtin stays pure.
+pub const ModeView = struct {
+    ctx: ?*anyopaque = null,
+    set_fn: ?*const fn (?*anyopaque, []const u8, u16) i64 = null,
+
+    pub fn set(self: ModeView, path: []const u8, mode: u16) ?i64 {
+        return if (self.set_fn) |f| f(self.ctx, path, mode) else null;
+    }
+};
+
+/// The ADR 0007 error mnemonics, for the shell's file-op error lines (the
+/// class-B trust gate asserts the EACCES spelling).
+pub fn errnoName(rc: i64) []const u8 {
+    return switch (rc) {
+        -1 => "EINVAL",
+        -2 => "EBADF",
+        -3 => "EFAULT",
+        -4 => "ENOSYS",
+        -5 => "ENOSPC",
+        -6 => "ENOENT",
+        -7 => "EACCES",
+        -8 => "ENAMETOOLONG",
+        -9 => "ENXIO",
+        -10 => "ENOMEM",
+        else => "ERROR",
+    };
+}
+
 // ---------------------------------------------------------------------------
 // Variable expansion.
 // ---------------------------------------------------------------------------
@@ -561,6 +591,7 @@ pub const Builtin = enum {
     continue_,
     whoami,
     id_,
+    chmod,
 };
 
 /// Builtin lookup by verb (the system command boundary, ADR 0021 D3).
@@ -580,7 +611,7 @@ pub fn classify(verb: []const u8) ?Builtin {
         .{ "fg", Builtin.fg },              .{ "monitor", Builtin.monitor_ },
         .{ "read", Builtin.read_ },         .{ "break", Builtin.break_ },
         .{ "continue", Builtin.continue_ }, .{ "whoami", Builtin.whoami },
-        .{ "id", Builtin.id_ },
+        .{ "id", Builtin.id_ },             .{ "chmod", Builtin.chmod },
     };
     inline for (table) |row| {
         if (std.mem.eql(u8, verb, row[0])) return row[1];
@@ -591,12 +622,12 @@ pub fn classify(verb: []const u8) ?Builtin {
 /// The builtin verbs, in the order `help` advertises them. Public so the
 /// completion source can offer them without duplicating the list.
 pub const builtin_names = [_][]const u8{
-    "alias",  "break",  "cat",     "cd",    "continue", "cut",     "echo",
-    "env",    "exit",   "export",  "false", "fg",       "fn",      "grep",
-    "head",   "help",   "history", "id",    "jobs",     "monitor", "printenv",
-    "printf", "prompt", "pwd",     "read",  "set",      "sort",    "source",
-    "tail",   "test",   "true",    "type",  "unalias",  "unset",   "wc",
-    "which",  "whoami", "[",
+    "alias",    "break",  "cat",    "cd",      "chmod", "continue", "cut",
+    "echo",     "env",    "exit",   "export",  "false", "fg",       "fn",
+    "grep",     "head",   "help",   "history", "id",    "jobs",     "monitor",
+    "printenv", "printf", "prompt", "pwd",     "read",  "set",      "sort",
+    "source",   "tail",   "test",   "true",    "type",  "unalias",  "unset",
+    "wc",       "which",  "whoami", "[",
 };
 
 pub const completion_max: usize = 32;
@@ -766,6 +797,8 @@ pub const Shell = struct {
     /// M50 TS1 (#1135): the calling process's principal (uid/caps) for
     /// `whoami`/`id`. The glue fills it from `sys_principal`.
     principal: PrincipalView = .{},
+    /// M50 TS2 (#1136): the `chmod` glue (slot 69, owner-only).
+    mode_view: ModeView = .{},
     /// Bound stdin for `cat` (a pipe or `<` redirect); empty = none.
     stdin: []const u8 = &.{},
     /// SH5 shell functions (`fn NAME(args) { ... }`).
@@ -1321,9 +1354,54 @@ pub const Shell = struct {
                 }
                 return .print;
             },
+            .chmod => {
+                // M50 TS2 (#1136, ADR 0024 D10): owner-only chmod through
+                // `sys_file_mode` (slot 69). The kernel is the authority; the
+                // shell only forwards the 3-digit octal mode.
+                if (argv.len < 3) {
+                    self.emitLine("chmod: usage: chmod MODE FILE");
+                    self.last_status = 1;
+                    return .print;
+                }
+                const mode = parseOctMode(argv[1]) orelse {
+                    self.emitLine("chmod: invalid mode (use octal, e.g. 600)");
+                    self.last_status = 1;
+                    return .print;
+                };
+                if (self.mode_view.set(argv[2], mode)) |rc| {
+                    if (rc == 0) {
+                        self.emitLine("chmod: ok");
+                        self.last_status = 0;
+                    } else {
+                        self.emit("chmod: ");
+                        self.emit(argv[2]);
+                        self.emit(": ");
+                        self.emitLine(errnoName(rc));
+                        self.last_status = 1;
+                    }
+                } else {
+                    self.emitLine("chmod: no mode view");
+                    self.last_status = 1;
+                }
+                return .print;
+            },
         }
     }
 };
+
+/// Parse a 1..4 digit octal mode (e.g. `600`, `0600`, `644`). The kernel
+/// re-validates and reserves the group triplet; the shell only rejects
+/// non-octal input.
+fn parseOctMode(s: []const u8) ?u16 {
+    if (s.len == 0 or s.len > 4) return null;
+    var v: u16 = 0;
+    for (s) |c| {
+        if (c < '0' or c > '7') return null;
+        v = v * 8 + @as(u16, c - '0');
+    }
+    if (v > 0o777) return null;
+    return v;
+}
 
 // ---------------------------------------------------------------------------
 // Host tests (pure; no syscalls)
@@ -1771,4 +1849,58 @@ test "shell: whoami/id render the principal from the view (M50 TS1)" {
     // `type` recognizes the new builtins.
     try std.testing.expectEqual(Builtin.whoami, classify("whoami").?);
     try std.testing.expectEqual(Builtin.id_, classify("id").?);
+}
+
+const ModeProbe = struct {
+    path: [64]u8 = [_]u8{0} ** 64,
+    len: usize = 0,
+    mode: u16 = 0,
+    rc: i64 = 0,
+    calls: usize = 0,
+};
+
+fn testModeSet(ctx: ?*anyopaque, path: []const u8, mode: u16) i64 {
+    const p: *ModeProbe = @ptrCast(@alignCast(ctx.?));
+    p.calls += 1;
+    const n = @min(path.len, p.path.len);
+    @memcpy(p.path[0..n], path[0..n]);
+    p.len = n;
+    p.mode = mode;
+    return p.rc;
+}
+
+test "shell: chmod parses octal and renders the kernel verdict (M50 TS2)" {
+    var s = Shell.init();
+    var probe = ModeProbe{};
+    s.mode_view = .{ .ctx = &probe, .set_fn = testModeSet };
+
+    _ = s.execute("chmod 600 PLAIN.TXT", &.{});
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expectEqualStrings("PLAIN.TXT", probe.path[0..probe.len]);
+    try std.testing.expectEqual(@as(u16, 0o600), probe.mode);
+    try std.testing.expectEqualStrings("chmod: ok\n", s.outSlice());
+
+    // A kernel denial renders the EACCES mnemonic (the class-B assertion).
+    probe.rc = -7;
+    _ = s.execute("chmod 600 TARGET.TXT", &.{});
+    try std.testing.expectEqualStrings("chmod: TARGET.TXT: EACCES\n", s.outSlice());
+
+    // A bad mode is refused before any syscall.
+    probe.rc = 0;
+    const before = probe.calls;
+    _ = s.execute("chmod 999 TARGET.TXT", &.{});
+    try std.testing.expectEqual(before, probe.calls);
+    try std.testing.expectEqualStrings("chmod: invalid mode (use octal, e.g. 600)\n", s.outSlice());
+
+    // Missing argument -> usage.
+    _ = s.execute("chmod 600", &.{});
+    try std.testing.expectEqualStrings("chmod: usage: chmod MODE FILE\n", s.outSlice());
+
+    // Classification + pure parsers.
+    try std.testing.expectEqual(Builtin.chmod, classify("chmod").?);
+    try std.testing.expectEqualStrings("EACCES", errnoName(-7));
+    try std.testing.expectEqual(@as(?u16, 0o644), parseOctMode("644"));
+    try std.testing.expectEqual(@as(?u16, 0o600), parseOctMode("0600"));
+    try std.testing.expect(parseOctMode("8") == null);
+    try std.testing.expect(parseOctMode("") == null);
 }

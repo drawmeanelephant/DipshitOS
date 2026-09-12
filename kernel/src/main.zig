@@ -27,6 +27,7 @@ const terminal = @import("terminal.zig"); // #1072 (ADR 0020): the terminal seam
 // the virtio-blk transport), replacing the NVRAM persistence medium.
 
 const settings = @import("settings.zig"); // milestone eight card U8 (claim 2649): persistent settings on DATA partition
+const file_table = @import("file_table.zig"); // M50 TS2 (#1136): OWNERS.TXT load at boot
 // Milestone four (claim 2665): virtio entropy driver + ChaCha20 CSPRNG.
 // The entropy device (DID 0x1044) seeds the CSPRNG post-MMU; `random` and
 // the exec-path ASLR consumer live off that seed.
@@ -656,6 +657,10 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // virtio-blk path are gone — settings load from the host share (a
     // no-op without a channel; defaults stay in force).
     settings.init_from_share();
+    // M50 TS2 (issue #1136, ADR 0024 D3): the ownership/mode metadata
+    // (`OWNERS.TXT`) is loaded at the queue-5 arming point below, after the
+    // host channel becomes available (the pre-probe "absent" state is not
+    // a failure; an empty table is today's behavior).
 
     uart_puts("kernel terminal state\n");
 
@@ -1799,6 +1804,10 @@ fn custom_virtio_spike() void {
         // migration is gone (its job finished in HF5; the share is the
         // only store). No-op on default boots.
         _ = settings.load_from_share();
+        // M50 TS2 (issue #1136, ADR 0024 D3): the ownership/mode table
+        // shares this arming point — the queue-5 probe above arms it. A
+        // boot with no `OWNERS.TXT` stays byte-identical (no line).
+        if (file_table.load_trust_from_share()) uart_puts("owners: OWNERS.TXT loaded\n");
     } else {
         uart_puts("vf: queue 5 absent (no host file channel)\n");
     }

@@ -102,7 +102,7 @@ pub const slot_count: usize = 128;
 /// M26 N2 (issue #400): slot 62 is the net-stats snapshot.
 /// M29 (issue #598): slots 63/64 are sys_mmap/sys_munmap.
 /// M32 WMS2 (issue #622): slot 65 is sys_wmctl (ADR 0015).
-pub const implemented_count: usize = 69;
+pub const implemented_count: usize = 70;
 /// Card G6 (claim 0487) follow-on (slot 18): the fixed `sys_win_get` shape —
 /// four u32 LE words (x, y, w, h), 16 bytes, marshaled per call and copy_out'd
 /// through uaccess (the procs snapshot pattern).
@@ -302,6 +302,11 @@ pub const sys_tty_attach: u64 = 67;
 pub const sys_principal: u64 = 68;
 /// The fixed `sys_principal` payload shape: two u32 LE words (uid, caps).
 pub const principal_bytes: usize = 8;
+/// M50 TS2 (issue #1136, ADR 0024 D3/D4/D10): `sys_file_mode(path, mode)` —
+/// slot 69. Owner-only chmod on an existing path, or `CAP_FS_ANY`; there is
+/// NO chown. Persists the metadata to `OWNERS.TXT`; a full 64-entry table is
+/// `ENOSPC`. The only additive slot TS2 introduces.
+pub const sys_file_mode: u64 = 69;
 
 pub const ErrorCode = enum(i64) {
     einval = -1,
@@ -464,6 +469,8 @@ pub fn ensure_table() *const [slot_count]Entry {
         table_storage[sys_tty_attach] = .{ .name = "sys_tty_attach", .handler = handle_tty_attach };
         // M50 TS1 (#1135, ADR 0024 D10): slot 68 — sys_principal.
         table_storage[sys_principal] = .{ .name = "sys_principal", .handler = handle_principal };
+        // M50 TS2 (#1136, ADR 0024 D3/D4/D10): slot 69 — sys_file_mode.
+        table_storage[sys_file_mode] = .{ .name = "sys_file_mode", .handler = handle_file_mode };
         table_ready = true;
     }
     return &table_storage;
@@ -1675,6 +1682,24 @@ fn handle_file_free(args: Args, _: *exceptions.VectorFrame) u64 {
     const res = file_table.free_space(pid, volume);
     if (res < 0) return @bitCast(res);
     return @intCast(res);
+}
+
+/// M50 TS2 (#1136, ADR 0024 D3/D4/D10): slot 69 —
+/// sys_file_mode(path_ptr, path_len, mode). Owner-only chmod on an existing
+/// path, or `CAP_FS_ANY` (no chown). EINVAL bad path/mode or a non-process
+/// caller; EACCES not the owner / secret-class denial; ENOENT absent;
+/// ENOSPC the 64-entry table is full; EFAULT bad pointer.
+fn handle_file_mode(args: Args, _: *exceptions.VectorFrame) u64 {
+    const path_ptr = args[0];
+    const path_len = args[1];
+    const mode: u16 = @truncate(args[2]);
+    if (path_len == 0 or path_len > file_table.max_path_len) return error_result(.einval);
+    const pid = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    var path_buf: [file_table.max_path_len]u8 = undefined;
+    if (uaccess.copy_in(&path_buf, path_ptr, @intCast(path_len)) != .ok) return error_result(.efault);
+    const res = file_table.set_mode(pid, path_buf[0..path_len], mode);
+    if (res < 0) return @bitCast(res);
+    return 0;
 }
 
 /// Milestone 14 (claim 0169): slot 38 — sys_clipboard_set(buf_ptr, len)

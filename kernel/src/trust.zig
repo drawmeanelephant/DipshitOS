@@ -1,0 +1,640 @@
+//! VirelaiOS M50 TS2 (issue #1136, ADR 0024 D3/D4/D8/D10): the guest-side
+//! file-ownership / mode-bit metadata table and the single access predicate.
+//!
+//! This module is the substrate the milestone promised:
+//!
+//!   - A bounded in-kernel metadata table (`max_entries` = 64, pure BSS, no
+//!     allocation, no eviction). A full table is an honest `ENOSPC` on the
+//!     creating operation (`set_mode`), never a silent eviction.
+//!   - A single pure predicate `check(actor, partition, path, want)` keyed by
+//!     the normalized `(Partition, path)` pair that `file_table.parse_path`
+//!     produces. The five `want` values map to the classic mode bits:
+//!     `read`/`list` need the read bit, `write`/`create`/`delete` the write
+//!     bit, and `admin` (chmod) is owner-only or `CAP_FS_ANY`.
+//!   - Default policy when no entry exists: regular file `0644`, directory
+//!     `0755`, owner `uid_user`, `secret = false`; `.usb` is read-only `0444`;
+//!     `.tty` keeps device semantics and is not mode-governed.
+//!   - A `secret` class flagged by `OWNERS.TXT` (D8): a secret-class path is
+//!     denied read/list/delete/create through the file ABI for EVERY actor,
+//!     including `uid_system`/`CAP_FS_ANY` and the EL1h monitor's `vf` seam.
+//!   - `OWNERS.TXT` `#v1` load/save: one `path<TAB>mode<TAB>uid<TAB>flags`
+//!     line per entry. Malformed or unknown-schema lines FAIL CLOSED (deny
+//!     that path) rather than defaulting.
+//!
+//! ## Mode semantics
+//!
+//! `mode` is a 9-bit `rwxrwxrwx` value. The group triplet is **reserved and
+//! enforced as zero**: there are no groups in a single-user guest (ADR 0024
+//! D3), so every authored mode is accepted in the conventional 3-digit octal
+//! form (`0644`, `0755`, `0600`) and normalized with its group triplet
+//! cleared before it is stored or serialized. Enforcement reads only the
+//! owner triplet (when `caller.uid == entry.uid`) or the other triplet. This
+//! makes `OWNERS.TXT` canonical: no persisted mode ever has group bits set.
+//!
+//! ## Key canonicalization (ADR 0024 D4 / trust-scoping "Risks")
+//!
+//! The host share is a macOS folder; the default APFS volume is
+//! case-INSENSITIVE while the guest `parse_path` key is byte-exact. A
+//! byte-exact lookup would let `secret.txt` bypass an entry written for
+//! `SECRETS.TXT`. The table therefore compares keys case-insensitively
+//! (`std.ascii.eqlIgnoreCase`) while preserving the authored spelling in the
+//! file. A case-varied request can no longer bypass an explicit entry. On a
+//! case-SENSITIVE host the rule may apply an entry to a distinct
+//! same-lowercase file: that is an over-deny, i.e. fail-closed, not a bypass.
+//! Default policy is unaffected.
+//!
+//! ## Return value
+//!
+//! `check` returns `allow`/`eacces`/`enoent`. `enoent` is reserved for the
+//! filesystem layer's own "missing path" report; `check` never fabricates it,
+//! because absent metadata means the documented default policy, never a
+//! silent allow or a silent deny. Enforcement callers treat anything other
+//! than `allow` as a denial.
+//!
+//! Directory-name listings (`virtio_file.list` called from the monitor's
+//! `ls`/`du`/`find`/`inventory` and the shell's glob/completion) are
+//! intentionally NOT gated: D8 allows the monitor to print secret *names*,
+//! and a listing is not a content read. A `list` request whose path is
+//! itself secret-class is denied by `check`.
+
+const std = @import("std");
+const file_table = @import("file_table.zig");
+const process = @import("process.zig");
+
+/// ADR 0024 D3: the bounded table size. Full ⇒ `ENOSPC` on the creating
+/// operation, never silent eviction.
+pub const max_entries: usize = 64;
+pub const max_path_len: usize = file_table.max_path_len;
+/// The serialized `OWNERS.TXT` bound: 64 entries × (path ≤ 64 + separators +
+/// octal mode + uid + flags) plus the header, with generous headroom.
+pub const save_max: usize = 8192;
+pub const filename = "OWNERS.TXT";
+
+/// ADR 0024 D3 defaults (owner/other policy; group is reserved/zero).
+pub const default_file_mode: u16 = 0o644;
+pub const default_dir_mode: u16 = 0o755;
+pub const usb_mode: u16 = 0o444;
+
+/// The actor whose request is being authorized. `is_kernel` is informational;
+/// the capability bit is what bypasses ordinary mode checks.
+pub const Actor = struct {
+    uid: u32,
+    caps: u32,
+    is_kernel: bool = false,
+};
+
+/// The operation class (ADR 0024 D4). `admin` is the chmod surface (owner or
+/// `CAP_FS_ANY`), not a mode-bit test.
+pub const Want = enum { read, write, create, delete, list, admin };
+
+/// The frozen predicate result (ADR 0024 D4).
+pub const Verdict = enum { allow, eacces, enoent };
+
+/// `set_mode` outcome. `enospc` is the table-full refusal (never eviction).
+pub const SetResult = enum { ok, eacces, enospc, einval };
+
+/// `load` outcome. `full` means the file carried more valid entries than the
+/// 64-entry cap; what fit was loaded and the rest was refused (never evicted
+/// an earlier entry).
+pub const LoadResult = enum { ok, full };
+
+/// Kernel/internal actors (the EL1h monitor and every kernel consumer) act as
+/// `uid_system` with both capabilities (ADR 0024 D5).
+pub fn kernel_actor() Actor {
+    return .{ .uid = process.uid_system, .caps = process.kernel_caps, .is_kernel = true };
+}
+
+const Entry = struct {
+    used: bool = false,
+    /// A poisoned / malformed source line: deny this path for every actor.
+    deny: bool = false,
+    secret: bool = false,
+    partition: file_table.Partition = .host,
+    path: [max_path_len]u8 = [_]u8{0} ** max_path_len,
+    path_len: u8 = 0,
+    mode: u16 = default_file_mode,
+    uid: u32 = process.uid_user,
+};
+
+/// Metadata table (pure BSS). Entries are never evicted to make room.
+var entries: [max_entries]Entry = [_]Entry{.{}} ** max_entries;
+var entry_count: usize = 0;
+
+/// Clear the table (boot + host tests; `load` also starts from empty).
+pub fn init() void {
+    entries = [_]Entry{.{}} ** max_entries;
+    entry_count = 0;
+}
+
+pub fn count() usize {
+    return entry_count;
+}
+
+/// The reserved group triplet is enforced zero (single-user; no groups).
+pub fn normalizeMode(mode: u16) u16 {
+    return mode & 0o707;
+}
+
+fn pathMatches(e: *const Entry, partition: file_table.Partition, path: []const u8) bool {
+    if (e.partition != partition) return false;
+    if (e.path_len != path.len) return false;
+    return std.ascii.eqlIgnoreCase(e.path[0..e.path_len], path);
+}
+
+fn find(partition: file_table.Partition, path: []const u8) ?*Entry {
+    for (&entries) |*e| {
+        if (!e.used) continue;
+        if (pathMatches(e, partition, path)) return e;
+    }
+    return null;
+}
+
+fn freeSlot() ?*Entry {
+    for (&entries) |*e| {
+        if (!e.used) return e;
+    }
+    return null;
+}
+
+fn setEntry(e: *Entry, partition: file_table.Partition, path: []const u8, mode: u16, uid: u32, secret: bool) void {
+    const n = @min(path.len, max_path_len);
+    @memcpy(e.path[0..n], path[0..n]);
+    e.path_len = @intCast(n);
+    e.partition = partition;
+    e.mode = normalizeMode(mode);
+    e.uid = uid;
+    e.secret = secret;
+}
+
+fn isPrivileged(actor: Actor) bool {
+    return actor.is_kernel or (actor.caps & process.cap_fs_any) != 0;
+}
+
+/// The secret class (D8) denies these operation classes for every actor: the
+/// file ABI can never read a secret, and rename/delete cannot strip the class.
+fn secretDenies(want: Want) bool {
+    return switch (want) {
+        .read, .list, .delete, .create => true,
+        .write, .admin => false,
+    };
+}
+
+fn defaultMode(partition: file_table.Partition, want: Want) u16 {
+    return switch (partition) {
+        .usb => usb_mode,
+        .tty => 0o666, // unreachable: tty returns allow early
+        .host => if (want == .list) default_dir_mode else default_file_mode,
+    };
+}
+
+fn modeVerdict(actor: Actor, mode: u16, owner: u32, want: Want) Verdict {
+    if (want == .admin) return if (actor.uid == owner) .allow else .eacces;
+    const bits: u16 = if (actor.uid == owner) (mode >> 6) & 7 else mode & 7;
+    const need: u16 = switch (want) {
+        .read, .list => 4,
+        .write, .create, .delete => 2,
+        .admin => 4, // unreachable
+    };
+    return if ((bits & need) != 0) .allow else .eacces;
+}
+
+/// ADR 0024 D4: the one policy predicate. See the module doc for the secret
+/// class, the mode semantics, and the canonicalization decision. `path` is
+/// the caller's `parse_path`-normalized key (share-relative for `.host`).
+pub fn check(actor: Actor, partition: file_table.Partition, path: []const u8, want: Want) Verdict {
+    if (partition == .tty) return .allow; // device semantics, not mode-governed
+
+    if (path.len <= max_path_len) {
+        if (find(partition, path)) |e| {
+            if (e.deny) return .eacces; // malformed entry: fail closed
+            if (e.secret and secretDenies(want)) return .eacces; // D8
+            if (isPrivileged(actor)) return .allow;
+            return modeVerdict(actor, e.mode, e.uid, want);
+        }
+    }
+    // No explicit entry (or a path too long to carry one): default policy.
+    if (isPrivileged(actor)) return .allow;
+    return modeVerdict(actor, defaultMode(partition, want), process.uid_user, want);
+}
+
+/// ADR 0024 D10 slot 69: owner-only chmod on an existing path, or
+/// `CAP_FS_ANY`. Creates the metadata entry when none exists (the creating
+/// operation that can return `ENOSPC`); never chowns, never mutates the
+/// secret flag. Existence and path syntax are the caller's business.
+pub fn set_mode(actor: Actor, partition: file_table.Partition, path: []const u8, mode: u16) SetResult {
+    if (partition == .tty) return .einval; // device semantics
+    if (partition == .usb) return .eacces; // fixed read-only 0444
+    if (mode > 0o777) return .einval;
+    if (path.len == 0 or path.len > max_path_len) return .einval;
+
+    if (find(partition, path)) |e| {
+        if (e.deny) return .eacces; // never heal a poisoned path via chmod
+        if (!isPrivileged(actor) and actor.uid != e.uid) return .eacces;
+        e.mode = normalizeMode(mode);
+        return .ok;
+    }
+    // No entry: the effective owner is the documented default (uid_user), so
+    // only that owner or a privileged actor may mint the entry.
+    if (check(actor, partition, path, .admin) != .allow) return .eacces;
+    const slot = freeSlot() orelse return .enospc;
+    slot.used = true;
+    slot.deny = false;
+    slot.secret = false;
+    setEntry(slot, partition, path, mode, process.uid_user, false);
+    entry_count += 1;
+    return .ok;
+}
+
+/// Drop any metadata for a deleted path. Returns true when the table changed.
+pub fn remove(partition: file_table.Partition, path: []const u8) bool {
+    if (path.len == 0 or path.len > max_path_len) return false;
+    if (find(partition, path)) |e| {
+        e.* = .{};
+        entry_count -%= 1;
+        return true;
+    }
+    return false;
+}
+
+/// Move metadata old→new in the same transaction as a rename. Returns true
+/// when the table changed. A destination entry is replaced (the host rename
+/// overwrites the target).
+pub fn rename_meta(old_partition: file_table.Partition, old_path: []const u8, new_partition: file_table.Partition, new_path: []const u8) bool {
+    if (old_path.len == 0 or old_path.len > max_path_len) return false;
+    if (new_path.len == 0 or new_path.len > max_path_len) return false;
+    const src = find(old_partition, old_path) orelse return false;
+    // A same-key rename (a case-only rename canonicalizes the same way) is a
+    // no-op: its source and destination are literally the same slot.
+    if (old_partition == new_partition and std.ascii.eqlIgnoreCase(old_path, new_path)) return false;
+    // Snapshot the source before any mutation (find returns a pointer into
+    // the same table, so move the bytes into a local first).
+    const moved = src.*;
+    // Drop any existing destination entry.
+    if (find(new_partition, new_path)) |dst| {
+        dst.* = .{};
+        entry_count -%= 1;
+    }
+    // Drop the source name and re-add under the new key (reuse its slot).
+    src.* = .{};
+    entry_count -%= 1;
+    src.used = true;
+    src.deny = moved.deny;
+    setEntry(src, new_partition, new_path, moved.mode, moved.uid, moved.secret);
+    entry_count += 1;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// OWNERS.TXT `#v1` persistence
+// ---------------------------------------------------------------------------
+
+const header = "#v1\n";
+
+/// Serialize the table as `#v1\n` + one `path<TAB>mode<TAB>uid<TAB>flags`
+/// line per non-poisoned entry. Returns bytes written (0 when `out` is too
+/// small to hold even the header). Insertion order is preserved.
+pub fn save(out: []u8) usize {
+    if (out.len < header.len) return 0;
+    @memcpy(out[0..header.len], header);
+    var pos: usize = header.len;
+    for (&entries) |*e| {
+        if (!e.used or e.deny) continue;
+        // path
+        if (pos + e.path_len + 1 > out.len) break;
+        @memcpy(out[pos .. pos + e.path_len], e.path[0..e.path_len]);
+        pos += e.path_len;
+        out[pos] = '\t';
+        pos += 1;
+        // mode: exactly three octal digits (group triplet is always zero)
+        if (pos + 3 > out.len) break;
+        out[pos] = '0' + @as(u8, @intCast((e.mode >> 6) & 7));
+        out[pos + 1] = '0' + @as(u8, @intCast((e.mode >> 3) & 7));
+        out[pos + 2] = '0' + @as(u8, @intCast(e.mode & 7));
+        pos += 3;
+        out[pos] = '\t';
+        pos += 1;
+        // uid: decimal
+        var ubuf: [10]u8 = undefined;
+        const ulen = std.fmt.bufPrint(&ubuf, "{d}", .{e.uid}) catch break;
+        if (pos + ulen.len + 1 > out.len) break;
+        @memcpy(out[pos .. pos + ulen.len], ulen);
+        pos += ulen.len;
+        out[pos] = '\t';
+        pos += 1;
+        // flags
+        const flags: []const u8 = if (e.secret) "secret" else "-";
+        if (pos + flags.len + 1 > out.len) break;
+        @memcpy(out[pos .. pos + flags.len], flags);
+        pos += flags.len;
+        out[pos] = '\n';
+        pos += 1;
+    }
+    return pos;
+}
+
+fn allOctal(s: []const u8) bool {
+    if (s.len == 0 or s.len > 3) return false;
+    for (s) |c| if (c < '0' or c > '7') return false;
+    return true;
+}
+
+fn allDigits(s: []const u8) bool {
+    if (s.len == 0) return false;
+    for (s) |c| if (c < '0' or c > '9') return false;
+    return true;
+}
+
+/// Add (or upgrade to) a fail-closed deny entry for `path`. Used for every
+/// malformed or unknown-schema source line. No-op when the path is not a
+/// keyable host-share path (a request for it cannot parse either).
+fn addDeny(raw_path: []const u8) void {
+    const parsed = file_table.parse_path(raw_path) orelse return;
+    if (parsed.partition != .host) return;
+    const key = parsed.path[0..parsed.parsed_len()];
+    if (find(.host, key)) |e| {
+        e.deny = true;
+        return;
+    }
+    const slot = freeSlot() orelse return;
+    slot.used = true;
+    slot.deny = true;
+    slot.secret = false;
+    setEntry(slot, .host, key, 0, process.uid_user, false);
+    entry_count += 1;
+}
+
+/// Parse one well-formed `path<TAB>mode<TAB>uid<TAB>flags` line. A malformed
+/// field makes the whole line a deny entry (fail closed, never default).
+fn parseEntry(line: []const u8) void {
+    var fields: [4][]const u8 = .{ "", "", "", "" };
+    var nfields: usize = 0;
+    var it = std.mem.splitScalar(u8, line, '\t');
+    while (it.next()) |f| {
+        if (nfields < 4) fields[nfields] = f;
+        nfields += 1;
+    }
+    if (nfields != 4) return addDeny(fields[0]);
+    const parsed = file_table.parse_path(fields[0]) orelse return;
+    if (parsed.partition != .host) return;
+    if (parsed.parsed_len() == 0) return; // the share root is not a metadata key
+
+    if (!allOctal(fields[1])) return addDeny(fields[0]);
+    const mode = std.fmt.parseInt(u16, fields[1], 8) catch return addDeny(fields[0]);
+    if (mode > 0o777) return addDeny(fields[0]);
+
+    if (!allDigits(fields[2])) return addDeny(fields[0]);
+    const uid = std.fmt.parseInt(u32, fields[2], 10) catch return addDeny(fields[0]);
+
+    var secret = false;
+    if (std.mem.eql(u8, fields[3], "-") or fields[3].len == 0) {
+        secret = false;
+    } else if (std.mem.eql(u8, fields[3], "secret")) {
+        secret = true;
+    } else {
+        return addDeny(fields[0]);
+    }
+
+    const key = parsed.path[0..parsed.parsed_len()];
+    if (find(.host, key)) |e| {
+        e.used = true;
+        e.deny = false;
+        setEntry(e, .host, key, mode, uid, secret);
+        return;
+    }
+    const slot = freeSlot() orelse return; // cap reached: refuse, never evict
+    slot.used = true;
+    slot.deny = false;
+    setEntry(slot, .host, key, mode, uid, secret);
+    entry_count += 1;
+}
+
+/// True when `line`'s first field already maps to a table row (a valid
+/// update, or a poison that landed). Used to distinguish an update from a
+/// cap refusal while `load` counts entries.
+fn lineKeyExists(line: []const u8) bool {
+    const tab = std.mem.indexOfScalar(u8, line, '\t') orelse return true;
+    const parsed = file_table.parse_path(line[0..tab]) orelse return true;
+    if (parsed.partition != .host) return true;
+    return find(.host, parsed.path[0..parsed.parsed_len()]) != null;
+}
+
+/// Load an `OWNERS.TXT` payload. The file must open with `#v1`; any other
+/// leading `#` header (or a data-first file) is an unknown schema, and every
+/// keyable path it lists becomes a fail-closed deny entry. Returns `full`
+/// when more valid entries existed than the 64-entry cap (what fit is kept).
+pub fn load(text: []const u8) LoadResult {
+    init();
+    var seen_header = false;
+    var known_schema = false;
+    var overflow = false;
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |raw| {
+        const line = std.mem.trimEnd(u8, raw, "\r");
+        if (line.len == 0) continue;
+        if (!seen_header) {
+            seen_header = true;
+            known_schema = std.mem.eql(u8, line, "#v1");
+            if (known_schema) continue;
+            // Unknown/absent schema: fall through and poison the line.
+        }
+        if (!known_schema) {
+            // Poison the listed path (field 0) — fail closed.
+            const tab = std.mem.indexOfScalar(u8, line, '\t') orelse line.len;
+            addDeny(line[0..tab]);
+            continue;
+        }
+        const before = entry_count;
+        parseEntry(line);
+        if (entry_count == before and !lineKeyExists(line)) overflow = true;
+    }
+    return if (overflow) .full else .ok;
+}
+
+// ---------------------------------------------------------------------------
+// Host tests (pure; no syscalls, no filesystem)
+// ---------------------------------------------------------------------------
+
+const actor_user = Actor{ .uid = process.uid_user, .caps = 0 };
+const actor_system = Actor{ .uid = process.uid_system, .caps = process.kernel_caps, .is_kernel = true };
+const actor_other = Actor{ .uid = 2000, .caps = 0 };
+
+test "trust: default policy — regular file 0644, dir 0755, usb 0444, tty allow" {
+    init();
+    // Owner (uid_user) may read/write a default file.
+    try std.testing.expectEqual(Verdict.allow, check(actor_user, .host, "a.txt", .read));
+    try std.testing.expectEqual(Verdict.allow, check(actor_user, .host, "a.txt", .write));
+    // A different uid gets the other bits: read yes, write no.
+    try std.testing.expectEqual(Verdict.allow, check(actor_other, .host, "a.txt", .read));
+    try std.testing.expectEqual(Verdict.eacces, check(actor_other, .host, "a.txt", .write));
+    // A directory defaults 0755: other may read/list but not write.
+    try std.testing.expectEqual(Verdict.allow, check(actor_other, .host, "d", .list));
+    try std.testing.expectEqual(Verdict.eacces, check(actor_other, .host, "d", .create));
+    // `.usb` is fixed read-only 0444 for every actor.
+    try std.testing.expectEqual(Verdict.allow, check(actor_user, .usb, "", .read));
+    try std.testing.expectEqual(Verdict.eacces, check(actor_user, .usb, "", .write));
+    // `.tty` keeps device semantics (not mode-governed).
+    try std.testing.expectEqual(Verdict.allow, check(actor_user, .tty, "", .write));
+}
+
+test "trust: owner vs other mode bits (read/write) from OWNERS" {
+    init();
+    _ = load("#v1\nlocked.txt\t600\t1000\t-\npublic.txt\t644\t1000\t-\n");
+    // uid_user owns both; owner bits allow read+write on 600 and 644.
+    try std.testing.expectEqual(Verdict.allow, check(actor_user, .host, "locked.txt", .read));
+    try std.testing.expectEqual(Verdict.allow, check(actor_user, .host, "locked.txt", .write));
+    // A different uid is "other": 600 denies read, 644 allows read but not write.
+    try std.testing.expectEqual(Verdict.eacces, check(actor_other, .host, "locked.txt", .read));
+    try std.testing.expectEqual(Verdict.allow, check(actor_other, .host, "public.txt", .read));
+    try std.testing.expectEqual(Verdict.eacces, check(actor_other, .host, "public.txt", .write));
+}
+
+test "trust: create/delete/list/rename-class matrix" {
+    init();
+    _ = load("#v1\nro.txt\t400\t1000\t-\nrw.txt\t600\t1000\t-\nsysdir\t755\t0\t-\n");
+    // Owner cannot delete a read-only 400 file (write bit absent).
+    try std.testing.expectEqual(Verdict.eacces, check(actor_user, .host, "ro.txt", .delete));
+    // Owner can delete a writable 600 file.
+    try std.testing.expectEqual(Verdict.allow, check(actor_user, .host, "rw.txt", .delete));
+    // Other cannot write either file.
+    try std.testing.expectEqual(Verdict.eacces, check(actor_other, .host, "rw.txt", .delete));
+    // A uid_system-owned dir denies uid_user create/delete but allows list.
+    try std.testing.expectEqual(Verdict.allow, check(actor_user, .host, "sysdir", .list));
+    try std.testing.expectEqual(Verdict.eacces, check(actor_user, .host, "sysdir", .create));
+    try std.testing.expectEqual(Verdict.eacces, check(actor_user, .host, "sysdir", .delete));
+    // Kernel actors bypass ordinary bits (CAP_FS_ANY).
+    try std.testing.expectEqual(Verdict.allow, check(actor_system, .host, "sysdir", .create));
+}
+
+test "trust: secret class denies read/list/delete/create for every actor (D8)" {
+    init();
+    _ = load("#v1\nSECRETS.TXT\t600\t0\tsecret\n");
+    // Every actor — user, other, and the kernel/monitor — is denied the read.
+    try std.testing.expectEqual(Verdict.eacces, check(actor_user, .host, "SECRETS.TXT", .read));
+    try std.testing.expectEqual(Verdict.eacces, check(actor_other, .host, "SECRETS.TXT", .read));
+    try std.testing.expectEqual(Verdict.eacces, check(actor_system, .host, "SECRETS.TXT", .read));
+    // list/delete/create are denied too; write stays mode-governed.
+    try std.testing.expectEqual(Verdict.eacces, check(actor_system, .host, "SECRETS.TXT", .list));
+    try std.testing.expectEqual(Verdict.eacces, check(actor_system, .host, "SECRETS.TXT", .delete));
+    try std.testing.expectEqual(Verdict.eacces, check(actor_system, .host, "SECRETS.TXT", .create));
+}
+
+test "trust: malformed + unknown-schema lines fail closed on the named path" {
+    init();
+    // Bad mode, bad uid, bad flags, wrong field count: each poisons its path.
+    _ = load("#v1\nbadmode.txt\t999\t1000\t-\nbaduid.txt\t644\tzzz\t-\nbadflag.txt\t644\t1000\tbogus\noneline.txt\n");
+    try std.testing.expectEqual(Verdict.eacces, check(actor_user, .host, "badmode.txt", .read));
+    try std.testing.expectEqual(Verdict.eacces, check(actor_user, .host, "baduid.txt", .read));
+    try std.testing.expectEqual(Verdict.eacces, check(actor_user, .host, "badflag.txt", .read));
+    try std.testing.expectEqual(Verdict.eacces, check(actor_user, .host, "oneline.txt", .read));
+    // Even the privileged actor is denied a poisoned path (fail closed).
+    try std.testing.expectEqual(Verdict.eacces, check(actor_system, .host, "badmode.txt", .read));
+    // A path NOT listed still gets the default policy (no global poisoning).
+    try std.testing.expectEqual(Verdict.allow, check(actor_user, .host, "fine.txt", .read));
+
+    // Unknown schema: the header is not #v1, so every listed path is poisoned.
+    init();
+    _ = load("#v2\nfoo.txt\t644\t1000\t-\n");
+    try std.testing.expectEqual(Verdict.eacces, check(actor_user, .host, "foo.txt", .read));
+}
+
+test "trust: group triplet is reserved and normalized to zero" {
+    init();
+    _ = load("#v1\na.txt\t777\t1000\t-\n");
+    var buf: [save_max]u8 = undefined;
+    const n = save(&buf);
+    // 0777 normalizes to 0707: the group triplet is always zero.
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "a.txt\t707\t1000\t-\n") != null);
+    try std.testing.expectEqual(SetResult.ok, set_mode(actor_user, .host, "a.txt", 0o644));
+    const n2 = save(&buf);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n2], "a.txt\t604\t1000\t-\n") != null);
+}
+
+test "trust: table-full is ENOSPC on chmod, never silent eviction" {
+    init();
+    var i: usize = 0;
+    while (i < max_entries) : (i += 1) {
+        var name_buf: [32]u8 = undefined;
+        const name = std.fmt.bufPrint(&name_buf, "f{d}.txt", .{i}) catch unreachable;
+        try std.testing.expectEqual(SetResult.ok, set_mode(actor_user, .host, name, 0o600));
+    }
+    try std.testing.expectEqual(@as(usize, max_entries), count());
+    // The 65th distinct path cannot mint an entry.
+    try std.testing.expectEqual(SetResult.enospc, set_mode(actor_user, .host, "overflow.txt", 0o600));
+    // The pre-existing entries were NOT evicted and still hold their mode.
+    try std.testing.expectEqual(Verdict.allow, check(actor_user, .host, "f0.txt", .read));
+    // Updating an existing entry still works at capacity.
+    try std.testing.expectEqual(SetResult.ok, set_mode(actor_user, .host, "f0.txt", 0o400));
+}
+
+test "trust: chmod is owner-only or CAP_FS_ANY (no chown)" {
+    init();
+    _ = load("#v1\nmine.txt\t644\t1000\t-\ntheirs.txt\t644\t2000\t-\n");
+    try std.testing.expectEqual(SetResult.ok, set_mode(actor_user, .host, "mine.txt", 0o600));
+    try std.testing.expectEqual(Verdict.allow, check(actor_user, .host, "mine.txt", .write));
+    // A non-owner cannot chmod even a writable file.
+    try std.testing.expectEqual(SetResult.eacces, set_mode(actor_user, .host, "theirs.txt", 0o600));
+    // CAP_FS_ANY can.
+    try std.testing.expectEqual(SetResult.ok, set_mode(actor_system, .host, "theirs.txt", 0o600));
+    // Chmod never changes the owner.
+    try std.testing.expectEqual(Verdict.eacces, check(actor_user, .host, "theirs.txt", .write));
+    // Invalid modes and non-mode-governed partitions are refused honestly.
+    try std.testing.expectEqual(SetResult.einval, set_mode(actor_user, .host, "mine.txt", 0o7000));
+    try std.testing.expectEqual(SetResult.einval, set_mode(actor_user, .tty, "mine.txt", 0o600));
+    try std.testing.expectEqual(SetResult.eacces, set_mode(actor_user, .usb, "sector", 0o600));
+}
+
+test "trust: OWNERS.TXT round-trip parse/serialize" {
+    const src = "#v1\nSECRETS.TXT\t600\t0\tsecret\na.txt\t644\t1000\t-\nsub/b.txt\t755\t1000\t-\n";
+    try std.testing.expectEqual(LoadResult.ok, load(src));
+    var buf: [save_max]u8 = undefined;
+    const n = save(&buf);
+    try std.testing.expect(n > 0);
+    const out = buf[0..n];
+    try std.testing.expect(std.mem.startsWith(u8, out, "#v1\n"));
+    try std.testing.expect(std.mem.indexOf(u8, out, "SECRETS.TXT\t600\t0\tsecret\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "a.txt\t604\t1000\t-\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "sub/b.txt\t705\t1000\t-\n") != null);
+    // Re-loading the serialized form reproduces the same decisions.
+    try std.testing.expectEqual(LoadResult.ok, load(out));
+    try std.testing.expectEqual(Verdict.eacces, check(actor_user, .host, "SECRETS.TXT", .read));
+    try std.testing.expectEqual(Verdict.allow, check(actor_user, .host, "a.txt", .read));
+}
+
+test "trust: case-insensitive host-share keys cannot bypass an entry (D4 risk)" {
+    init();
+    // The entry was authored with mixed case; storage preserves the spelling.
+    _ = load("#v1\nSecret.TXT\t600\t1000\tsecret\n");
+    // Every case variant resolves to the same entry (case-insensitive compare).
+    try std.testing.expectEqual(Verdict.eacces, check(actor_system, .host, "SECRET.TXT", .read));
+    try std.testing.expectEqual(Verdict.eacces, check(actor_system, .host, "secret.txt", .read));
+    try std.testing.expectEqual(Verdict.eacces, check(actor_system, .host, "Secret.Txt", .read));
+    // A genuinely different name is not poisoned.
+    try std.testing.expectEqual(Verdict.allow, check(actor_user, .host, "secret2.txt", .read));
+    // Save preserves the authored spelling so the host file is not lower-cased.
+    var buf: [save_max]u8 = undefined;
+    const n = save(&buf);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "Secret.TXT\t600\t1000\tsecret\n") != null);
+}
+
+test "trust: remove and rename_meta keep the table consistent" {
+    init();
+    _ = load("#v1\na.txt\t600\t1000\t-\nb.txt\t644\t1000\t-\n");
+    try std.testing.expectEqual(Verdict.eacces, check(actor_other, .host, "a.txt", .read));
+    // Rename a -> c moves the metadata with it.
+    try std.testing.expect(rename_meta(.host, "a.txt", .host, "c.txt"));
+    try std.testing.expectEqual(Verdict.eacces, check(actor_other, .host, "c.txt", .read));
+    try std.testing.expectEqual(Verdict.allow, check(actor_other, .host, "a.txt", .read)); // default now
+    // Delete b drops its entry.
+    try std.testing.expect(remove(.host, "b.txt"));
+    try std.testing.expectEqual(@as(usize, 1), count());
+}
+
+test "trust: over-long paths never falsely match a short entry" {
+    init();
+    _ = load("#v1\na.txt\t600\t1000\t-\n");
+    // A path longer than the 64-byte key window cannot equal a stored key.
+    var long_buf: [88]u8 = undefined;
+    @memcpy(long_buf[0..5], "a.txt");
+    @memset(long_buf[5..], 'x');
+    try std.testing.expectEqual(Verdict.allow, check(actor_other, .host, long_buf[0..], .read));
+}

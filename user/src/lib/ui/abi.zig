@@ -109,6 +109,9 @@ pub const sys_tty_attach_num: u64 = 67;
 /// read-only principal report: two u32 LE words (uid, caps), 8 bytes.
 pub const sys_principal_num: u64 = 68;
 pub const principal_bytes: usize = 8;
+/// M50 TS2 (issue #1136, ADR 0024 D3/D4/D10): slot 69 `sys_file_mode(path,
+/// mode)` — owner-only chmod on an existing path (no chown).
+pub const sys_file_mode_num: u64 = 69;
 /// ADR 0024 D1/D5: the principal ids and capability bits (mirror of
 /// `kernel/src/process.zig`). Duplicated here because the kernel module is
 /// not reachable from the userland module graph.
@@ -630,6 +633,15 @@ pub fn file_truncate(handle: u32, size: u32) i64 {
 /// Claim 5801 (ADR 0007 slot 37): free bytes on a volume (0 = DATA, 1 = ESP).
 pub fn file_free(volume: u32) i64 {
     return syscall1(sys_file_free_num, volume);
+}
+
+/// M50 TS2 (#1136, ADR 0024 D10, ADR 0007 slot 69): owner-only chmod on an
+/// existing path. `mode` is the 3-digit octal permission value (the group
+/// triplet is reserved and stored zero). Returns 0, or a negative ADR 0007
+/// error (EACCES not the owner, ENOENT absent, EINVAL bad path/mode, ENOSPC
+/// the ownership table is full).
+pub fn file_mode(path: []const u8, mode: u16) i64 {
+    return syscall3(sys_file_mode_num, @intFromPtr(path.ptr), path.len, mode);
 }
 
 /// Claim 0169 (ADR 0007 slot 38): store text in the SHARED kernel clipboard

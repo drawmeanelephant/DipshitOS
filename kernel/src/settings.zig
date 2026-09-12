@@ -46,6 +46,9 @@ const std = @import("std");
 // M34 HF5 (issue #739): the host-share persistence path; HF6 (issue
 // #740) made it the ONLY path — the DATA partition is gone.
 const virtio_file = @import("virtio_file.zig");
+// M50 TS2 (issue #1136, ADR 0024 D4): the kernel-actor file policy for the
+// settings consumer.
+const trust = @import("trust.zig");
 
 pub const filename = "SETTINGS.TXT";
 
@@ -428,6 +431,7 @@ fn apply_bytes(bytes: []const u8) bool {
 pub fn load_from_share() bool {
     ensure_init();
     if (!virtio_file.available()) return false;
+    if (trust.check(trust.kernel_actor(), .host, filename, .read) != .allow) return false;
     var file_buf: [2048]u8 = undefined;
     const n = virtio_file.read_whole(filename, &file_buf) orelse return false;
     return apply_bytes(file_buf[0..n]);
@@ -453,6 +457,7 @@ fn migrate(from_version: u32) void {
 pub fn save_to_share() bool {
     ensure_init();
     if (!virtio_file.available()) return false;
+    if (trust.check(trust.kernel_actor(), .host, filename, .write) != .allow) return false;
     var buf: [2048]u8 = undefined;
     const len = serialize(&buf);
     return virtio_file.write_whole(filename, buf[0..len]) == virtio_file.st_ok;
