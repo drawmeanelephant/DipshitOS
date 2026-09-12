@@ -211,6 +211,7 @@ import Foundation
 import ScreenCaptureKit
 import Virtualization
 import VFWire
+import VSSH
 
 // Diagnostics and the console tee must survive signal exits (SIGINT/SIGTERM),
 // so stdout is unbuffered: print() reaches the terminal/file immediately.
@@ -571,6 +572,24 @@ var netTcpRespondPacketMode = false
 var netTcpRespondPacketPayload: [UInt8] = []
 var netTcpRespondPacketChunk: Int = 192
 var netTcpRespondPacketIndex = 0
+// M51 SSH5 (#1172): the optional `:ssh` responder mode — a runner-hosted
+// minimal SSH-2 server (VSSH) behind the same deterministic TCP responder:
+// curve25519-sha256 KEX with a pinned ssh-ed25519 host key, pinned
+// publickey ed25519 userauth, one session channel, one fixed exec. The
+// guest's `SSH.BIN` is the client. TX is paced exactly like `:packet`
+// (one ≤192-byte segment per guest ACK) because the guest kernel RX is a
+// single 192-byte slot with no reassembly. The pinned fixtures default to
+// RFC 8032 §7.1 TEST 1/TEST 2; the flags allow the negative runs to pin
+// different keys.
+var netTcpRespondSSHMode = false
+var netTcpRespondSSHHostKey: [UInt8] = SSHFixtures.hex(SSHFixtures.hostKeySeedHex) ?? []
+var netTcpRespondSSHUserKey: [UInt8] = SSHFixtures.hex(SSHFixtures.userPublicKeyHex) ?? []
+var netTcpRespondSSHTamperMAC = false
+var netTcpRespondSSHMarker = SSHFixtures.defaultMarker
+var netTcpRespondSSHExitStatus: UInt32 = 0
+var netTcpRespondSSHServer: SSHServer?
+var netTcpRespondSSHTx: [UInt8] = []
+var netTcpRespondSSHTxOffset = 0
 // The responder's per-connection state: the server's next sequence
 // number. The FIXED server ISN (gate-assertable); a new SYN resets the
 // state — ONE connection at a time (the guest's ONE client state
@@ -947,15 +966,18 @@ while idx < arguments.count {
         let token = arguments[idx + 1]
         let halves = token.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false)
         guard halves.count >= 2, let port = UInt16(halves[1]) else {
-            fail("--net-tcp-respond requires <host-ip>:<host-port>[:handshake|packet], got '\(token)'.")
+            fail("--net-tcp-respond requires <host-ip>:<host-port>[:handshake|packet|ssh], got '\(token)'.")
         }
         if halves.count == 3 {
             if halves[2] == "handshake" {
                 netTcpRespondHandshakeOnly = true
             } else if halves[2] == "packet" {
                 netTcpRespondPacketMode = true
+            } else if halves[2] == "ssh" {
+                // M51 SSH5 (#1172): the minimal SSH-2 server.
+                netTcpRespondSSHMode = true
             } else {
-                fail("--net-tcp-respond mode must be 'handshake' or 'packet', got '\(halves[2])'.")
+                fail("--net-tcp-respond mode must be 'handshake', 'packet' or 'ssh', got '\(halves[2])'.")
             }
         }
         let parts = halves[0].split(separator: ".").compactMap { UInt8($0) }
@@ -978,6 +1000,36 @@ while idx < arguments.count {
             fail("--net-tcp-respond-chunk requires 1..192 bytes, got '\(arguments[idx + 1])'.")
         }
         netTcpRespondPacketChunk = n
+        idx += 2
+    } else if arg == "--net-tcp-respond-ssh-hostkey", idx + 1 < arguments.count {
+        // M51 SSH5 (#1172): the pinned ssh-ed25519 host key seed (64 hex
+        // chars). Default: RFC 8032 §7.1 TEST 1.
+        guard let seed = SSHFixtures.hex(arguments[idx + 1]), seed.count == 32 else {
+            fail("--net-tcp-respond-ssh-hostkey requires 64 hex chars (a 32-byte Ed25519 seed), got '\(arguments[idx + 1])'.")
+        }
+        netTcpRespondSSHHostKey = seed
+        idx += 2
+    } else if arg == "--net-tcp-respond-ssh-userkey", idx + 1 < arguments.count {
+        // M51 SSH5 (#1172): the pinned client ssh-ed25519 PUBLIC key (64 hex
+        // chars) the server accepts. Default: RFC 8032 §7.1 TEST 2.
+        guard let key = SSHFixtures.hex(arguments[idx + 1]), key.count == 32 else {
+            fail("--net-tcp-respond-ssh-userkey requires 64 hex chars (a 32-byte Ed25519 public key), got '\(arguments[idx + 1])'.")
+        }
+        netTcpRespondSSHUserKey = key
+        idx += 2
+    } else if arg == "--net-tcp-respond-ssh-tamper-mac" {
+        // NEGATIVE MODE: flip one bit of the first encrypted server tag so
+        // the guest's AEAD open must fail closed.
+        netTcpRespondSSHTamperMAC = true
+        idx += 1
+    } else if arg == "--net-tcp-respond-ssh-marker", idx + 1 < arguments.count {
+        netTcpRespondSSHMarker = arguments[idx + 1]
+        idx += 2
+    } else if arg == "--net-tcp-respond-ssh-exit", idx + 1 < arguments.count {
+        guard let n = UInt32(arguments[idx + 1]) else {
+            fail("--net-tcp-respond-ssh-exit requires a uint32, got '\(arguments[idx + 1])'.")
+        }
+        netTcpRespondSSHExitStatus = n
         idx += 2
     } else if arg == "--net-tcp-connect", idx + 1 < arguments.count {
         // SH7 (#1083, ADR 0020 Amendment B): the host-initiated inbound TCP
@@ -1354,6 +1406,15 @@ if netTcpRespondHostIP != nil, netCapturePath == nil {
 if netTcpRespondPacketMode, netTcpRespondPacketPayload.isEmpty {
     fail("--net-tcp-respond :packet requires --net-tcp-respond-payload <file>.")
 }
+// M51 SSH5 (#1172): the SSH responder's hand-rolled cipher must reproduce
+// the OpenSSH `PROTOCOL.chacha20poly1305` vector the guest's Zig
+// implementation pins (ADR 0023 D2 drift guard) before the mode is armed.
+if netTcpRespondSSHMode {
+    guard SSHFixtures.cipherSelfCheck() else {
+        fail("--net-tcp-respond :ssh cipher self-check FAILED (the OpenSSH PROTOCOL.chacha20poly1305 pinned vector did not reproduce). Refusing to serve the SSH responder.")
+    }
+    print("NET-TCP-SSH: cipher self-check ok (OpenSSH PROTOCOL.chacha20poly1305 pinned vector, seq 7, tag \(SSHFixtures.opensshVectorTagHex))")
+}
 if netTcpConnectGuestIP != nil, netCapturePath == nil {
     fail("--net-tcp-connect requires --net (the client frames are written into the SAME attachment's socket).")
 }
@@ -1524,10 +1585,31 @@ if let netCapturePath {
                 let isRst = (flags & 0x04) != 0
                 if isRst {
                     // The guest aborted — the connection is dead; observe.
-                    print("NET-TCP: observed the guest's RST (seq 0x\(hex32(seq)))")
+                    if netTcpRespondSSHMode {
+                        print("NET-TCP-SSH: observed the guest's RST (seq 0x\(hex32(seq)))")
+                    } else {
+                        print("NET-TCP: observed the guest's RST (seq 0x\(hex32(seq)))")
+                    }
                 } else if isSyn {
                     netTcpSrvNxt = netTcpSrvIsn &+ 1
                     netTcpRespondPacketIndex = 0
+                    if netTcpRespondSSHMode {
+                        // M51 SSH5 (#1172): a fresh connection gets a fresh
+                        // server state machine and an empty paced TX stream.
+                        netTcpRespondSSHTx = []
+                        netTcpRespondSSHTxOffset = 0
+                        let cfg = SSHServer.Config(
+                            hostKeySeed: netTcpRespondSSHHostKey,
+                            acceptedUserKey: netTcpRespondSSHUserKey,
+                            marker: netTcpRespondSSHMarker,
+                            exitStatus: netTcpRespondSSHExitStatus,
+                            tamperFirstServerTag: netTcpRespondSSHTamperMAC
+                        )
+                        let server = SSHServer(config: cfg)
+                        server.logSink = { line in print("SSH-SRV: \(line)") }
+                        netTcpRespondSSHServer = server
+                        print("NET-TCP-SSH: connection accepted (guest SYN seq 0x\(hex32(seq))); awaiting the version exchange")
+                    }
                     let replyLen = buildTcpReply(&reply, buf, n, arpHostMAC, hostPort, netTcpSrvIsn, seq &+ 1, 0x12, payload)
                     try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<replyLen]))
                     print("NET-TCP: answered the guest's SYN (seq 0x\(hex32(seq))) with a SYN-ACK (seq 0x\(hex32(netTcpSrvIsn)), ack 0x\(hex32(seq &+ 1)))")
@@ -1541,11 +1623,28 @@ if let netCapturePath {
                     } else {
                         let replyLen = buildTcpReply(&reply, buf, n, arpHostMAC, hostPort, netTcpSrvNxt, seq &+ 1, 0x11, payload)
                         try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<replyLen]))
-                        print("NET-TCP: answered the guest's FIN (seq 0x\(hex32(seq))) with a FIN-ACK (seq 0x\(hex32(netTcpSrvNxt)), ack 0x\(hex32(seq &+ 1)))")
+                        if netTcpRespondSSHMode {
+                            print("NET-TCP-SSH: the guest sent FIN; FIN-ACK and close (SSH session done)")
+                        } else {
+                            print("NET-TCP: answered the guest's FIN (seq 0x\(hex32(seq))) with a FIN-ACK (seq 0x\(hex32(netTcpSrvNxt)), ack 0x\(hex32(seq &+ 1)))")
+                        }
                     }
                 } else if !payload.isEmpty {
-                    // A data segment: HTTP response if GET request, else echo payload.
-                    if netTcpRespondPacketMode {
+                    // A data segment: the SSH responder's byte stream, the
+                    // paced packet stream, or the HTTP/echo response.
+                    if netTcpRespondSSHMode {
+                        // M51 SSH5 (#1172): feed the SSH server with the
+                        // guest's bytes and pace the next ≤192-byte chunk of
+                        // its output with this ACK; when nothing is pending
+                        // the ACK goes out bare.
+                        if let server = netTcpRespondSSHServer {
+                            netTcpRespondSSHTx.append(contentsOf: server.feed(payload))
+                        }
+                        if !netTcpRespondSSHSendChunk(&reply, buf, n, arpHostMAC, hostPort, seq, payload.count) {
+                            let replyLen = buildTcpReply(&reply, buf, n, arpHostMAC, hostPort, netTcpSrvNxt, seq &+ UInt32(payload.count), 0x10, [])
+                            try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<replyLen]))
+                        }
+                    } else if netTcpRespondPacketMode {
                         // M51 SSH1 (#1168): a trigger/keepalive — ACK it bare
                         // and pace the next chunk; never echo (the payload is
                         // the SSH packet stream, not an echo surface).
@@ -1575,8 +1674,13 @@ if let netCapturePath {
                     // A pure ACK (the handshake / the echo / the final ACK).
                     // M51 SSH1 (#1168): in packet mode the handshake ACK (and
                     // every later ACK for a delivered chunk) paces out the
-                    // next chunk; otherwise it is just observed.
-                    if !netTcpSendPacketChunk(&reply, buf, n, arpHostMAC, hostPort, seq, 0) {
+                    // next chunk; M51 SSH5 (#1172): the same pacing feeds the
+                    // encrypted SSH byte stream. Otherwise it is observed.
+                    if netTcpRespondSSHMode {
+                        if !netTcpRespondSSHSendChunk(&reply, buf, n, arpHostMAC, hostPort, seq, 0) {
+                            print("NET-TCP-SSH: observed the guest's ACK (ack 0x\(hex32(ack)))")
+                        }
+                    } else if !netTcpSendPacketChunk(&reply, buf, n, arpHostMAC, hostPort, seq, 0) {
                         print("NET-TCP: observed the guest's ACK (ack 0x\(hex32(ack)))")
                     }
                 }
@@ -1911,6 +2015,9 @@ if let hostIP = netTcpRespondHostIP, let hostPort = netTcpRespondHostPort {
     if netTcpRespondPacketMode {
         let chunkCount = (netTcpRespondPacketPayload.count + netTcpRespondPacketChunk - 1) / netTcpRespondPacketChunk
         print("  net-tcp-respond mode: packet (M51 SSH1, #1168) — after the handshake, page \(netTcpRespondPacketPayload.count) bytes out as \(chunkCount) chunks of ≤\(netTcpRespondPacketChunk) bytes, one per guest ACK")
+    }
+    if netTcpRespondSSHMode {
+        print("NET-TCP-SSH: ENABLED (M51 SSH5, #1172) hostkey=\(SSHFixtures.hexString(netTcpRespondSSHHostKey)) userkey=\(SSHFixtures.hexString(netTcpRespondSSHUserKey)) marker=\(netTcpRespondSSHMarker.debugDescription) exit=\(netTcpRespondSSHExitStatus) tamper-mac=\(netTcpRespondSSHTamperMAC)")
     }
 }
 if let guestIP = netTcpConnectGuestIP, let guestPort = netTcpConnectPort {
@@ -4355,6 +4462,32 @@ func netTcpSendPacketChunk(_ reply: inout [UInt8], _ buf: [UInt8], _ n: Int, _ h
     netTcpSrvNxt = netTcpSrvNxt &+ UInt32(chunk.count)
     netTcpRespondPacketIndex += 1
     print("NET-TCP: packet mode sent chunk \(netTcpRespondPacketIndex)/\(chunkCount) (\(chunk.count) bytes, seq 0x\(hex32(netTcpSrvNxt &- UInt32(chunk.count))))")
+    return true
+}
+
+// M51 SSH5 (#1172): pace one ≤192-byte segment of the SSH server's output
+// stream out in `--net-tcp-respond :ssh` mode. Called once per accepted
+// guest segment; `guestSeq`/`guestPayload` are the incoming segment's seq
+// and payload length (so our ACK covers it). Same contract as
+// `netTcpSendPacketChunk`: the guest kernel RX is a single 192-byte slot
+// with no reassembly and the host has no retransmission, so at most one
+// segment goes out per guest ACK. Returns true when a chunk was sent.
+func netTcpRespondSSHSendChunk(_ reply: inout [UInt8], _ buf: [UInt8], _ n: Int, _ hostMAC: [UInt8], _ hostPort: UInt16, _ guestSeq: UInt32, _ guestPayload: Int) -> Bool {
+    guard netTcpRespondSSHMode else { return false }
+    let total = netTcpRespondSSHTx.count
+    let off = netTcpRespondSSHTxOffset
+    guard off < total else { return false }
+    let end = min(off + netTcpRespondPacketChunk, total)
+    let chunk = Array(netTcpRespondSSHTx[off..<end])
+    let replyLen = buildTcpReply(&reply, buf, n, hostMAC, hostPort, netTcpSrvNxt, guestSeq &+ UInt32(guestPayload), 0x10, chunk)
+    try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<replyLen]))
+    netTcpSrvNxt = netTcpSrvNxt &+ UInt32(chunk.count)
+    netTcpRespondSSHTxOffset = end
+    print("NET-TCP-SSH: sent \(chunk.count) bytes (\(end)/\(total), seq 0x\(hex32(netTcpSrvNxt &- UInt32(chunk.count))))")
+    if end >= total {
+        netTcpRespondSSHTx.removeAll(keepingCapacity: true)
+        netTcpRespondSSHTxOffset = 0
+    }
     return true
 }
 

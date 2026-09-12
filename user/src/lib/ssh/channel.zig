@@ -370,7 +370,15 @@ pub const Channel = struct {
                 return .{ .extended = .{ .code = code, .bytes = data } };
             },
             msg_channel_eof => {
-                if (payload.len != 1) return error.Protocol;
+                // RFC 4254 §5.3: `byte SSH_MSG_CHANNEL_EOF; uint32 recipient
+                // channel`. SSH5's class-B endpoint gate caught the earlier
+                // 1-byte expectation (no RFC 4254 peer sends that); the
+                // recipient is validated like every other channel message.
+                var r = wire.Reader.init(payload);
+                _ = try r.readByte();
+                const recipient = try r.readUint32();
+                if (recipient != self.local_id) return error.Protocol;
+                if (r.remaining() != 0) return error.Protocol;
                 self.recv_eof = true;
                 return .eof;
             },
@@ -761,7 +769,7 @@ test "channel: open -> exec -> data/extended/exit-status -> eof -> close" {
     TestPeer.appendScript(&.{channelData(&dbuf, test_local_id, "uid=1000\n")});
     TestPeer.appendScript(&.{extendedData(&dbuf, test_local_id, ext_stderr, "warning\n")});
     TestPeer.appendScript(&.{exitStatus(&dbuf, test_local_id, 3)});
-    TestPeer.appendScript(&.{&.{msg_channel_eof}});
+    TestPeer.appendScript(&.{msg1(&dbuf, msg_channel_eof, test_local_id)});
     TestPeer.appendScript(&.{msg1(&dbuf, msg_channel_close, test_local_id)});
 
     {
@@ -990,8 +998,9 @@ test "channel: EOF/close clean order — we send EOF, answer CLOSE once" {
     try ch.sendClose(); // idempotent
 
     var dbuf: [64]u8 = undefined;
+    var ebuf: [8]u8 = undefined;
     TestPeer.setScript(&.{
-        &.{msg_channel_eof},
+        msg1(&ebuf, msg_channel_eof, test_local_id),
         msg1(&dbuf, msg_channel_close, test_local_id),
     });
     try std.testing.expect((try ch.next()) == .eof);

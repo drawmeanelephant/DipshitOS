@@ -1,8 +1,8 @@
 # SSH (M51) — scoping and gated card split
 
-Status: **OPEN — design accepted (ADR 0025); SSH-P1/P2 + SSH1–SSH4
-implemented on `main`, SSH5 (#1172) is the remaining class-B endpoint
-gate** · Date: 2026-09-12 · Milestone **M51** (goal **#1066**
+Status: **COMPLETE — M51 done 2026-09-12 (all eight cards merged:
+SSH-P1/P2 + SSH1–SSH5; ADR 0025 accepted)** · Date: 2026-09-12 · Milestone
+**M51** (goal **#1066**
 Stage 3) · Umbrella **#1164** · Design card **#1165** (SSH0) · Depends on:
 the M46 remote seam (ADR 0022, `--net` + `--net-tcp-respond`), the M47
 primitives (ADR 0023, `user/src/lib/crypto/`), the M50 secret store and
@@ -135,7 +135,6 @@ crypto library and the OS seams, not the protocol or the direction.
 | **SSH3** #1170 | `ssh/userauth.zig`: service request, `none` probe, `publickey` ed25519 signature; `SSH/KNOWN_HOSTS` parser; TS5 `ssh-user-ed25519` read + `ct.wipe` | signature over `session_id ‖ request` verifies; wrong key refused; `none`→`publickey` flow; missing key/pin fails closed with a distinct status; secret never logged | covered by SSH5's positive/negative runs | no secret read at boot |
 | **SSH4** #1171 | `ssh/transport.zig` (encrypted packet transport over `kex.Result`), `ssh/channel.zig`, `ssh/cli.zig` + `user/src/ssh.zig` (`SSH.BIN`): session open, `pty-req`/`shell` or `exec`, data/window/EOF/close; CLI `SSH.BIN [user@]host[:port] [cmd]` | channel state machine, window accounting, EOF/close, exec-vs-pty dispatch; no-rekey byte/packet bound disconnects; sealed/open transport round trip + tamper fail-closed; sequence continuation across NEWKEYS | SSH5 drives a one-shot `exec` marker and an interactive shell line | untouched |
 | **SSH5** #1172 | runner `--net-tcp-respond …:ssh` minimal SSH server (pinned host key + pinned publickey + one exec); `tools/gate/specs/live-ssh-*.spec`; inventory regenerated | — (gate card) | positive KEX+auth+exec; unknown host key refused; wrong user key refused; tampered MAC disconnected; missing credential fail-closed; `serial-absent '[EXC]'` | fleet re-run green |
-
 Each implementation PR updates ADR 0007's table and `implemented_count` where
 it adds a slot (only SSH-P1), regenerates `docs/gate-fleet-inventory.md` when
 it adds a spec (SSH5), and presents `boot-default-unchanged` evidence.
@@ -166,6 +165,60 @@ it adds a spec (SSH5), and presents `boot-default-unchanged` evidence.
   (or the remote `exit-status`), 1 usage, 2 connect, 3 kex, 4 host pin,
   5 auth, 6 channel, 7 request, 8 transport/protocol, 9 no-rekey bound,
   10 no tty, 255 remote `exec` sent no `exit-status`.
+
+### SSH5 implementation notes (the endpoint gate, and what it caught)
+
+- **Runner-hosted responder**: `host/vm-runner/Sources/VSSH/` (a
+  Virtualization-free Swift library) implements the minimal SSH-2 server:
+  version exchange, one-suite KEXINIT, `curve25519-sha256` (CryptoKit
+  X25519), a pinned `ssh-ed25519` host key, the RFC 4253 §7.2 KDF, NEWKEYS,
+  the OpenSSH AEAD, `publickey` verification against a pinned client key,
+  one `session` channel, and one fixed `exec` (marker + `exit-status`).
+  `VMRunner` gains `--net-tcp-respond <ip>:<port>:ssh` plus
+  `--net-tcp-respond-ssh-hostkey/-userkey/-tamper-mac/-marker/-exit`; TX is
+  paced **one encrypted ≤192-byte segment per guest ACK**, the `:packet`
+  mechanism.
+- **Cipher drift guard**: the Swift cipher is **hand-rolled** (djb ChaCha20
+  with the 64-bit nonce/counter, Poly1305, the OpenSSH split-key Encrypt-
+  then-MAC). It is tied to SSH-P2 by the same pinned vectors: a startup
+  self-check refuses to arm `:ssh` unless the OpenSSH
+  `PROTOCOL.chacha20poly1305` vector reproduces (`cipher self-check ok`),
+  and `swift test` pins that vector plus the RFC 8439 ChaCha20/Poly1305
+  vectors and `kex.zig`'s deterministic transcript (X25519 K, H, the KDF
+  C2S/S2C keys, and verification of the OpenSSL-pinned host signature).
+  CryptoKit Ed25519 signs with a hedged nonce (two signatures differ per
+  call — observed), so the host-key tie is verification, not byte equality.
+- **The gate caught two latent SSH4 wire bugs, fixed here**: SSH3's
+  `publickey` request sent the signed `string session_id` prefix **on the
+  wire** (RFC 4252 §7 signs it but the packet starts at
+  `SSH_MSG_USERAUTH_REQUEST`), and the channel layer expected a 1-byte
+  `CHANNEL_EOF` instead of the RFC 4254 §5.3 `uint32 recipient` form. Both
+  were invisible to the class-A scripted peers (they pinned the same wrong
+  layouts); the end-to-end endpoint gate exposed them, and the class-A
+  vectors were re-pinned to the corrected bytes.
+- **Live class-B results (2026-09-12, Apple silicon VZ)**:
+  `live-ssh-endpoint` PASS 1/1 (guest `kex-ok` → `pin-ok` →
+  `auth-ok method=publickey` → `channel-open remote=42` →
+  `VIRELAI-SSH5-OK` → `exit-status=0` → `eof` → `bye rc=0`; responder log
+  shows KEX, `publickey accepted`, and the exec; the seed never appears in
+  either log); `live-ssh-negative` PASS 3/3 (unknown pin → `stage=auth rc=4`
+  with **no** service request observed server-side; wrong user key →
+  `AuthRejected rc=5`; tampered first server tag → `stage=protocol rc=8`);
+  `live-ssh-nocred` PASS 1/1 (`MissingCredential rc=5`). No TX clobbering
+  was observed in these runs (all multi-segment KEXINIT/ECDH/NEWKEYS/RESP
+  segments arrived; no retransmission was needed), but that remains the
+  documented best-effort limit below — the ABI still has no `tx_pending`
+  read.
+- **Real-OpenSSH interop: attempted, not observed (honest).** A non-root
+  `/usr/sbin/sshd` on port 2222 with a generated host key and the pinned
+  RFC 8032 TEST 2 client key in `authorized_keys` accepted that key with the
+  host's own `ssh` client. The guest→host leg did not run: under
+  `--net-nat` the guest resolved the 192.168.64.1 gateway ARP but
+  `SSH.BIN tbuddy@192.168.64.1:2222 …` failed at `stage=connect` (VZ NAT
+  delivered no SYN to the host listener), and a host-LAN-IP attempt failed
+  for the same reason (the seam is same-subnet/ARP-bound); no container
+  runtime (docker daemon down) or root SSH service was available. Recorded
+  as a manual check pending a NAT host-port story or a container host.
 
 **Coordination with #1163 (GOOS=virelai port).** `sys_getrandom` is a single
 shared contract, not two: **slot 72 is owned by SSH-P1 (#1166)** and the Go
@@ -242,16 +295,32 @@ multi-user isolation beyond TS5 `uid` scoping.
 - **The kernel does not validate RX sequence numbers.** The adapter assumes
   the peer's in-order TCP guarantee; a hostile peer could desynchronize the
   stream. Fail-closed parsing bounds the damage, but it is an assumption.
-- **Swift responder ↔ Zig client cipher drift.** SSH-P2's pinned OpenSSH
-  vectors must be asserted on both sides (ADR 0023 D2 precedent); if the
-  Swift implementation is rejected, the custom-virtio bridge is the fallback.
+- **Swift responder ↔ Zig client cipher drift — closed, pinned.** The
+  hand-rolled Swift cipher is asserted against the same OpenSSH/ChaCha20/
+  Poly1305 vectors and the `kex.zig` transcript at both `swift test` time
+  and at `:ssh` startup (`cipher self-check ok`); the custom-virtio fallback
+  was not needed. CryptoKit Ed25519's hedged nonce means signatures are
+  verified, not byte-pinned.
 - **Ephemeral key entropy is a new kernel surface.** Slot 72 is small and
   ownerless by design; SSH-P1 must prove it cannot be called on the boot
   path and does not weaken the CSRNG (it only reads it).
-- **Real-OpenSSH interop is unproven until run.** The hermetic gate proves
-  the profile against our own responder; the documented real-`sshd` run is
-  the honesty check, and it may surface conformance gaps (packet padding,
-  window sizes, the exact `mpint` encoding of the shared secret).
+- **Real-OpenSSH interop was attempted and is NOT observed (2026-09-12).**
+  The hermetic gate proves the profile against our own responder; the
+  documented real-`sshd` run stopped at the network leg — VZ-NAT
+  guest→host TCP did not reach a host listener (`SSH.BIN` `stage=connect`
+  after the gateway ARP resolved), and no container/root-sshd host was
+  available. This is the honesty check's precise blocked step; a NAT
+  host-port story (or a container reachable from the guest) unblocks it.
+  Conformance gaps that only a real server can surface (packet padding,
+  window sizes, the exact rekey/`mpint` behaviours) therefore remain
+  unobserved.
+- **The guest's multi-segment TX is best-effort (SSH1's documented limit).**
+  The ABI has no `tx_pending` read, so the adapter cannot wait for an ACK
+  between segments; the kernel's retransmit buffer holds one segment and a
+  loss on a real link can outrun it. No TX clobbering was observed across
+  the five SSH5 live runs (all KEX segments arrived without retransmission),
+  but this is the recorded driver for a future `tx_pending`/RX-ring
+  amendment if a real link ever exposes it.
 - **Key provisioning UX.** Two host-edited files (`SECRETS.TXT`,
   `SSH/KNOWN_HOSTS`) with no in-guest setter; the human must hex-encode keys.
   A future card may add a provisioning helper or OpenSSH-format import.
