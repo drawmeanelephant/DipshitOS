@@ -849,6 +849,52 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_sshpacket.step);
 
     // ------------------------------------------------------------------
+    // Guest: SSH.BIN — M51 SSH4 (#1171, ADR 0025 D1/D2/D6/D7). The SSH-2
+    // client: KEX + userauth + the encrypted packet transport + a session
+    // channel, `exec`-one-shot or interactive `shell`. DSK3 segmented (the
+    // transport's bounded rx/tx/msg buffers are static .bss, ADR 0025 D6).
+    // No kernel change and no new syscall slot.
+    // ------------------------------------------------------------------
+    const ssh_ui_mod = b.createModule(.{
+        .root_source_file = b.path("user/src/lib/ui.zig"),
+        .target = kernel_target,
+        .optimize = .ReleaseSmall,
+    });
+    const ssh_crypto_mod = b.createModule(.{
+        .root_source_file = b.path("user/src/lib/crypto.zig"),
+        .target = kernel_target,
+        .optimize = .ReleaseSmall,
+    });
+    const ssh_rng_mod = b.createModule(.{
+        .root_source_file = b.path("user/src/lib/rng.zig"),
+        .target = kernel_target,
+        .optimize = .ReleaseSmall,
+    });
+    ssh_rng_mod.addImport("ui", ssh_ui_mod);
+    const ssh_mod = b.createModule(.{
+        .root_source_file = b.path("user/src/ssh.zig"),
+        .target = kernel_target,
+        .optimize = .ReleaseSmall,
+    });
+    ssh_mod.addImport("ui", ssh_ui_mod);
+    ssh_mod.addImport("crypto", ssh_crypto_mod);
+    ssh_mod.addImport("rng", ssh_rng_mod);
+    const ssh_prog = b.addExecutable(.{
+        .name = "user-ssh",
+        .root_module = ssh_mod,
+    });
+    ssh_prog.linker_script = b.path("user/linker-segmented.ld");
+    const ssh_step = b.step("ssh", "Build the M51 SSH4 client (zig-out/bin/SSH.BIN) — DSK3 segmented");
+    const ssh_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
+    ssh_elf2bin.addFileArg(ssh_prog.getEmittedBin());
+    const ssh_bin = ssh_elf2bin.addOutputFileArg("SSH.BIN");
+    ssh_elf2bin.has_side_effects = true;
+    ssh_elf2bin.stdio = .inherit;
+    ssh_step.dependOn(&ssh_elf2bin.step);
+    const install_ssh = b.addInstallFileWithDir(ssh_bin, .bin, "SSH.BIN");
+    b.getInstallStep().dependOn(&install_ssh.step);
+
+    // ------------------------------------------------------------------
     // Guest: twentieth ESP user program (milestone twelve, card N3 — claim 5416)
     // CHAT.BIN. Userland graphical P2P chat application.
     // DSK3 segmented (writable .data/.bss — the WMS9 fill-batcher global).
@@ -2393,6 +2439,9 @@ pub fn build(b: *std.Build) void {
         "user/src/lib/ssh/stream.zig",
         "user/src/lib/ssh/kex.zig",
         "user/src/lib/ssh/userauth.zig",
+        "user/src/lib/ssh/transport.zig",
+        "user/src/lib/ssh/channel.zig",
+        "user/src/lib/ssh/cli.zig",
         "user/tests/ui/ui_test.zig",
         "kernel/tests/scheduler_test.zig",
         "kernel/tests/syscall_test.zig",
@@ -2427,9 +2476,9 @@ pub fn build(b: *std.Build) void {
         .target = b.graph.host,
         .optimize = .Debug,
     });
-    // rng.zig's `@import("ui/abi.zig")` must resolve through the mapped `ui`
-    // module; otherwise the same ui files load under two module roots and
-    // Zig rejects the duplicate ownership.
+    // rng.zig imports the mapped `ui` module; without the mapping its
+    // `@import("ui")` cannot resolve (the SSH.BIN graph loads rng.zig as its
+    // own module alongside the real ui module).
     rng_mod.addImport("ui", ui_mod);
     rng_mod.addOptions("build_options", kernel_options);
 
@@ -2503,10 +2552,9 @@ pub fn build(b: *std.Build) void {
             .optimize = .Debug,
         });
         test_mod.addOptions("build_options", kernel_options);
-        // kex.zig reaches `rng` (module-mapped) whose own `ui` dep resolves
-        // `ui/abi.zig`; additionally mapping `ui` at this test root makes Zig
-        // attribute the ui files to both modules, so skip it here — kex.zig
-        // does not import `ui` itself.
+        // kex.zig reaches `rng` (module-mapped), which imports the mapped
+        // `ui` module. kex.zig itself does not import `ui`, so leave the
+        // mapping off this test root (nothing here needs it).
         if (!std.mem.eql(u8, src_path, "user/src/lib/ssh/kex.zig")) {
             test_mod.addImport("ui", ui_mod);
         }
