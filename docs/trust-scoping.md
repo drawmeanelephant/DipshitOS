@@ -1,6 +1,7 @@
 # Trust & isolation baseline (M50) — scoping and gated card split
 
-Status: **OPEN — design accepted (ADR 0024); TS1–TS2, TS4 and TS5 landed, TS3 not started** ·
+Status: **DONE 2026-09-11 — design accepted (ADR 0024); TS1–TS5 all landed
+(TS3 last, issue #1137); umbrella #1133 closed** ·
 Date: 2026-09-11 · Milestone **M50** · Umbrella **#1133** · Design card
 **#1134** (TS0) · Depends on: M46 remote (**#1145**, merged) and M47
 crypto (**#1148**, merged), ADR 0010 (file ABI), ADR 0016 (owner-check

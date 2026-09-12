@@ -1024,3 +1024,46 @@ owner/strace tests) and class-B (`live-remote-auth2`: wrong MAC →
 against the fresh challenge is rejected, explicit `open` still accepts;
 `live-remote` re-pointed to `open`, `live-term-net` updated, and
 `live-remote-auth` retired/removed).
+
+### Amendment (2026-09-11, #1137 — no slot: the TS3 kill gate + monitor admin spawn)
+
+M50 TS3 (ADR 0024 D5/D10) adds **no syscall slot** — `implemented_count`
+stays **72**. It makes the process privilege enforceable at the existing
+seam:
+
+- `sys_kill` (29) is gated by the **explicit, bounded `capability_gates`
+  table** in `kernel/src/syscall.zig` (one row: `sys_kill` →
+  `process.cap_proc_admin`), consumed by the handler (`gated(sys_kill)`) so
+  a future gate is one table row plus its explicit query. **Self and
+  same-uid targets are allowed for every principal**; a cross-principal
+  kill returns `EACCES` unless the caller's `caps` holds the gated
+  capability. The principal check runs BEFORE the target-state checks, so
+  an unprivileged caller always gets `EACCES` for a foreign principal —
+  never a state-dependent `EINVAL`. The EL1h monitor is never a target: it
+  has no process descriptor (no pid names it), and
+  `scheduler.request_kill` independently refuses the kernel-owned
+  shell/idle executor slots.
+- `sys_exec` (28) stays **ungated and principal-preserving** (TS1): it
+  takes only `(path_ptr, path_len)`, inherits the caller's uid/caps, and
+  there is **no elevation syscall** — the table deliberately contains only
+  ADR 0024 D10's gated set and nothing else.
+- The tables' other D10 rows are unchanged: the `sys_file_*` family keeps
+  its TS2 `trust.check` enforcement, `sys_tty_attach` (67) keeps its
+  owner checks (TS4), `sys_wmctl` (65) and shared-anon mmap (63/64) hold,
+  and `sys_setrlimit` (54) stays self-only.
+- The EL1h monitor's `exec` gains the administrative `-u<uid>` flag:
+  `exec [-c<core>] [-u<uid>] [<file> [arg...]]`. `-u0` assigns
+  `uid_system` + `kernel_caps`, `-u1000` assigns the default `uid_user` +
+  no caps, and any other uid is refused. This is the ONLY path that names
+  a spawn principal — EL0 `sys_exec` has no principal argument — so the
+  admin spawn is a raw-console monitor surface, never EL0-reachable.
+
+Verified class-A (the gate table's exact bounded shape and the ungated
+D10 rows; cross-principal `EACCES`; same-uid + self allowed; a
+`uid_system` + `CAP_PROC_ADMIN` caller killing across principals; the
+no-elevation slot audit; the `exec -u` CLI vocabulary with overflow
+refusal) and class-B (`live-trust-caps`: a monitor admin-spawned
+`uid_system` probe is untouchable from a `uid_user` process — `EACCES`
+from slot 29 and the probe's markers continue — while the same-uid kill
+still yields status 137). The boot default is unchanged: the all-`uid_user`
+fleet's same-uid kills behave exactly as before.

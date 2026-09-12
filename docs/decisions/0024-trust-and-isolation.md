@@ -186,6 +186,24 @@ capability: the remote door is controlled by authentication (D6), not by
 who opened it. The gated syscall set starts explicit and small (D10) and
 grows only by amendment.
 
+**TS3 implementation notes** (2026-09-11, #1137): (a) the D10 gate is the
+explicit, bounded `capability_gates` table in `kernel/src/syscall.zig` —
+one row today (`sys_kill` → `CAP_PROC_ADMIN`) — queried through
+`gated(number) ?cap` by the slot-29 handler; a future gate is one row plus
+its handler's explicit query, and the table's small size is what makes the
+set auditable. (b) `sys_kill`'s principal check runs BEFORE the
+target-state checks, so a cross-principal kill by a caller without the cap
+is always `EACCES`, never a state-dependent `EINVAL` (no foreign-state
+leak). (c) The EL1h monitor is never a target: it has no process
+descriptor, so no pid names it, and `scheduler.request_kill` independently
+refuses the kernel-owned shell/idle slots. (d) The monitor's admin spawn
+is the `exec -u<uid>` flag (`-u0` = `uid_system` + `kernel_caps`;
+`-u1000` = `uid_user` + no caps; any other uid refused); it is the only
+path that can name a principal, EL0 `sys_exec` has no principal argument
+and preserves the caller's. (e) There is no elevation syscall and no
+setter on the principal surface — class-A audits every implemented slot
+name and the gate table so a privilege setter cannot land unnoticed.
+
 ### D6. Remote auth: a fresh challenge, verified in userland by M47, gated by the kernel pump
 The Stage-1 shared secret is **replaced** (not layered) by a
 challenge-response handshake over the same M46 seam:
@@ -329,6 +347,13 @@ Gated existing syscalls:
 | `sys_tty_attach` (67) | existing serial/window owner checks unchanged; net selector uses the D6 handshake instead of a secret argument |
 | `sys_wmctl` (65), shared-anon mmap (63/64) | unchanged: existing one-seat and owner/capability checks already hold |
 | `sys_setrlimit` (54) | unchanged (self-limits only); watching for cross-principal growth is an open issue |
+
+**TS3 (2026-09-11, #1137)** implements the `sys_kill` row and adds no slot:
+self and same-uid targets are allowed for every principal, a
+cross-principal target needs `CAP_PROC_ADMIN` (else `EACCES`), the EL1h
+monitor has no pid and is never a target, and the monitor's
+`exec -u<uid>` admin spawn is the only EL0-unreachable path that can name
+a principal. `implemented_count` stays 72.
 
 ### D11. Verification is two-class, and the boot default does not move
 - **Class A:** principal defaults and inheritance in `process.zig`; the

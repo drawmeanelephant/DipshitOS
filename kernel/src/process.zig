@@ -74,6 +74,15 @@ pub const kernel_caps: u32 = cap_fs_any | cap_proc_admin;
 pub const Principal = struct {
     uid: u32 = uid_user,
     caps: u32 = 0,
+
+    /// M50 TS3 (#1137, ADR 0024 D5/D10): does this principal hold `cap`?
+    /// READ-ONLY — the mask is assigned once at `create_as` and never
+    /// mutated; this is the only capability predicate the syscall gate
+    /// table consumes. `uid_system` is NOT special-cased here: a
+    /// monitor-spawned system principal carries `kernel_caps` explicitly.
+    pub fn has(self: Principal, cap: u32) bool {
+        return (self.caps & cap) != 0;
+    }
 };
 
 /// The default spawn principal (ADR 0024 D5): every EL0-initiated spawn is
