@@ -66,7 +66,13 @@ executed live.
   the measurement is reproducible; the 275 KiB module itself is not committed
   (rebuild with the line above).
 
-Unrelated to this spike but hit while running the fleet: `bash` resolves to
-macOS 3.2 unless `/opt/homebrew/bin` leads `PATH` (`tools/env-check.sh` says so
-loudly) — with system bash, `vgate.sh` dies on `VGATE_NOTES[@]: unbound
-variable`.
+Unrelated to this spike but hit while running the fleet — the AGENTS.md PATH
+trap, stated precisely: in this shell `bash` resolved to **macOS `/bin/bash`
+3.2.57**, and under `set -u` bash 3.2 treats the expansion of the *empty*
+array `"${VGATE_NOTES[@]}"` (`tools/gate/vgate.sh:151`) as an unbound-variable
+error, so the run died before the first boot. **Homebrew bash 5.3.15 passes the
+same spec.** The gate script is not at fault and needs no change: the fix is
+the documented one — `source tools/env-check.sh` in the session that runs
+gates (or otherwise make `$HOMEBREW_BIN` lead `PATH` so `bash`/`sed` resolve to
+the Homebrew builds) — and it must be sourced per session, since a subshell
+cannot repair its parent's `PATH`.
