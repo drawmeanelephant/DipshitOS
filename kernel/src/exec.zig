@@ -798,7 +798,12 @@ fn exec_static_elf_gap(
     app_timers.reset(proc_id);
 
     const kstack: []u8 = @as(*[scheduler.task_stack_size]u8, @ptrFromInt(kstack_phys))[0..];
-    if (scheduler.register_exec_user(entry_va, root_phys, @intCast(text_len_pages), stack_va, scheduler.task_stack_size, kstack, @intCast(argc), argv_va)) |task_id| {
+    // Review fix 2: the block only exists when the argv page was reserved
+    // (a writable segment exists). A single-segment gap image would
+    // otherwise enter EL0 with x0=1 / x1=0 and rt0 would dereference argv
+    // at address 0. Consistent contract: argc==0 <=> argv_va==0.
+    const entry_argc: u64 = if (argv_va != 0) @intCast(argc) else 0;
+    if (scheduler.register_exec_user(entry_va, root_phys, @intCast(text_len_pages), stack_va, scheduler.task_stack_size, kstack, entry_argc, argv_va)) |task_id| {
         // Middle (rodata) segments are readable through syscalls; the
         // writable data segment is readable AND writable. The text and
         // stack regions were set by register_exec_user itself.

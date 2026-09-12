@@ -88,13 +88,19 @@ keeping the futex file shape). Async preemption stays OFF
 cooperative, the known tight-loop caveat).
 
 D6 — **Gate: `go-goroutines` (class B).** Fixture prints a
-serial-ordered completion proof: N goroutines (N > GOMAXPROCS, spanning
-multiple Ms) increment an atomic counter and send on a buffered channel;
-main drains N completions and prints `go-goroutines done n=<N> counter=<K>`
-with K == N. Serial asserts: the done line, plus the strace signature of
-slot 73 (`sys_thread_create` called ≥ 2 times — sysmon's M + a worker M).
-This proves: real Ms, real scheduling across them, channel blocking/wake
-through futex, and clean exit.
+serial-ordered completion proof: N goroutines (N > GOMAXPROCS) increment
+an atomic counter and send on a buffered channel; main drains N
+completions and prints `go-goroutines done n=<N> counter=<K>` with
+K == N. Serial asserts: the done line, plus the strace signature of
+slot 73 (`sys_thread_create` called ≥ 2 times). **Proof scope, honestly
+stated:** phase 0b keeps `numCPUStartup = 1`, so the extra Ms the gate
+exercises are the slot-73-created ones (sysmon + the template thread) —
+this proves real M creation via slot 73, goroutines scheduled across
+Ms, and channel blocking/wake through futex; it does NOT prove parallel
+worker Ms on separate cores. That proof needs GOMAXPROCS > 1 (the
+envp/GOMAXPROCS half) — OR the gate implementation may set
+`numCPUStartup = 2` for the gate boot, decided at implementation
+review; the gate asserts whichever scope was chosen.
 
 ## Consequences
 

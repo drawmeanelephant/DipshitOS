@@ -11,6 +11,11 @@
 #      linkname accessor os.Args will use once the os package lands in
 #      phase 2).
 #
+# SCOPE: argv is wired on the GAP-layout path only (the Go linker shape).
+# The contiguous ELF path still refuses args (.no_args_room) — DSK1's own
+# argv block covers native Zig tools today; extending contiguous ELFs is a
+# follow-up card if a need shows up.
+#
 # HOST PREREQUISITE (not hermetic — see tools/go/README.md):
 # `just go-toolchain` must have produced .build/go/GOARGS.ELF + GOHELLO.ELF.
 #

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # build-go.sh -- build GOOS=virelai programs with the fork toolchain
-# (issue #1163). Runs the two make.bash passes on first use (host toolchain
-# for go generate plumbing, then the virelai/arm64 cross toolchain), then
+# (issue #1163). Runs the host make.bash pass on first use (the
+# cross-std pass is GOVIRELAI_STD=1 opt-in; see the pass-1 comment), then
 # links the named program as a static ET_EXEC at the kernel's fixed text
 # aperture (0x400000), DWARF+symtab stripped to fit the 1 MiB staging
 # bound (kernel exec.zig exec_program_max).
@@ -54,6 +54,13 @@ for prog in "${@:-$REPO/tools/go/hello.go}"; do
     # an import path).
     prog="$(cd "$(dirname "$prog")" && pwd)/$(basename "$prog")"
     base="$(basename "${prog%.go}")"
+    # Gate-canonical output names: the class-B specs stage
+    # .build/go/GOHELLO.ELF / GOARGS.ELF into the guest share, so `just
+    # go-toolchain` must land those exact names (GO_BUILD_NAME overrides).
+    case "$base" in
+        hello)  base="GOHELLO" ;;
+        goargs) base="GOARGS" ;;
+    esac
     out="$out_dir/${GO_BUILD_NAME:-$base}.ELF"
     log "building $prog -> $out"
     GOOS=virelai GOARCH=arm64 go build -o "$out" \

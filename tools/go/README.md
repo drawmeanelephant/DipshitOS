@@ -24,7 +24,7 @@ tracking each release. The maintenance surface here is deliberately tiny:
 | `overlay/runtime/netpoll_virelai.go` | blocking stub netpoll (copy of plan9's netpoll_stub) |
 | `overlay/internal/goos/zgoos_virelai.go` | generated GOOS consts (gengoos shape, hand-applied) |
 | `apply.sh` | copies a stock distribution + applies everything, idempotently, committing a git delta in the fork |
-| `build-go.sh` | runs both make.bash passes, then links programs with `-ldflags "-T 0x400000 -s -w"` (the kernel's fixed text aperture; stripped to fit the 1 MiB exec staging bound) |
+| `build-go.sh` | runs the host make.bash pass on first use (the cross-std pass is `GOVIRELAI_STD=1` opt-in for phase 2), then links programs with `-ldflags "-s -w"` at the Go default base (the gap loader maps at declared vaddrs; stripped to fit the 2 MiB exec staging bound) |
 | `GOHELLO.GO` | the phase-0a first target: console + sbrk heap growth + a full GC cycle |
 
 ## Prerequisites
@@ -38,13 +38,15 @@ tracking each release. The maintenance surface here is deliberately tiny:
 ```bash
 bash tools/go/apply.sh            # create/patch the fork (../go-virelai)
 bash tools/go/build-go.sh         # toolchain + .build/go/GOHELLO.ELF
+                                   # (go-args needs both: add tools/go/goargs.go)
 just gate go-hello                # class-B VZ gate: execs it, asserts serial
 ```
 
 **The go-hello gate is not hermetic**: `just verify-vz` includes it, and it
 refuses to run (honest setup failure) until
 `bash tools/go/build-go.sh` has produced `.build/go/GOHELLO.ELF`. The first
-build takes several minutes (two `make.bash` passes); every Go release
+build takes several minutes (one `make.bash` pass; the cross-std pass is
+phase-2 opt-in via `GOVIRELAI_STD=1`); every Go release
 rebase re-runs `apply.sh` on a fresh distribution copy. Auto-building the
 fork inside the gate was considered and rejected — a multi-minute external
 toolchain build inside every fleet run hides gate latency and couples the
