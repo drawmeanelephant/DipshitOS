@@ -186,6 +186,16 @@ lint-workflows:
 test-coordination:
     bash tools/status/test-coordination.sh
 
+# Claim an EXISTING card (issue) in place: adds the `claim` label + the
+# machine-read Owner/Scope/Touches fields. Prefer this over filing a new issue
+# — one issue per card, and the card IS the claim.
+claim-card ISSUE *ARGS:
+    bash tools/status/claim-card.sh {{ISSUE}} {{ARGS}}
+
+# File an ad-hoc claim when there is no existing card issue (tools/status/new-claim.sh).
+claim *ARGS:
+    bash tools/status/new-claim.sh {{ARGS}}
+
 # Rehearse the real-time claim:stale removal path end to end (live: creates + closes a throwaway claim issue; REHEARSAL_MODE=local forces the in-process guard run)
 rehearse-unlabel:
     bash tools/status/rehearse-unlabel.sh

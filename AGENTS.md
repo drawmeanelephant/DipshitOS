@@ -12,104 +12,52 @@ These rules bind any AI agent or human contributor working in this project.
 - It must not depend on libc, POSIX, or an existing guest operating system.
 - The guest implementation language is Zig; the host launcher is Swift.
 
-## Current milestone
+## Where we are
 
-Milestones zero through **thirty-two** are implemented and closed — the boot
-pipeline; kernel handoff; kernel proper (VZ serial gate since claim 1517);
-`m1.5-interactive-monitor`; `m3-userspace`; `m4-processes`; milestone five
-networking — virtio-net through TCP; milestone six graphics — Road Pops +
-Driving Award; milestone seven input — USB XHCI + HID; milestone eight
-usability — ADR 0008; milestone nine app events — ADR 0009; milestone ten
-userland storage — ADR 0010; milestone eleven desktop platform — ADR 0011;
-milestone twelve userland network applications — ADR 0012; milestone
-thirteen files & applications (ADR 0007 slots 34–37, the `APPS.TXT`
-manifest, `FILE.BIN`, manifest-driven desktop); milestone fourteen shared
-user services (clipboard, app timers, hardening); milestone fifteen audio;
-milestone sixteen kernel consolidation; milestone seventeen desktop
-completeness plus the post-M17 arcs; M18 terminal & shell depth; M19 shell
-as a programming environment; M20 text rendering & Unicode; M21 window
-management depth; M22 developer tools; M23 the text editor; M24 CALC grows
-up; M25 file manager depth; M26 network experience; M27 desktop polish &
-completeness; M28 SMP; M29 VM depth (demand paging, COW, anonymous mmap);
-M30 dynamic linking & shared libraries (`LD.SO`, `LIBUI.SO`, `LIBFONT.SO`);
-M31 the dynamic linking ecosystem (dynamic desktop apps, `dlopen`/
-`dlsym`); and M32 the WM server migration (WMS1–WMS9, issues #621–#629).
+Read **`docs/status.md`** — the canonical status table (milestones, active
+work, next). Do not duplicate status prose here, in `march-*.md`, or in a
+scoping doc. Canonical answer lives in one place.
 
-All GitHub milestones are closed and the issue tracker is at **zero open
-issues** (2026-08-28); the two long-running threads are resolved — the M8 U4
-pointer-focus proof is now class-B-headless via custom-virtio pointer
-injection (claim 9367, issue #151), and the synthesized-keyboard `events=0`
-report is fixed by the headless virtio input channel (claims 9588/0680,
-issue #179). The project is now **VirelaiOS** (ADR 0017 ACCEPTED 2026-08-31,
-issue #676 — the DipshitOS name is retired to `docs/archive/dipshitos-name.md`
-and history). **M33 (seam B — full pixel ownership) done 2026-08-31**
-(SB1–SB6: ADR 0016 ACCEPTED, shared-anon mmap, surface handoff, damage
-tracking, WM compose-N, perf payoff — GH milestone 17 closed); **M34
-(FAT-free storage — the host file channel, issue #727) done 2026-09-02 —
-GH milestone 21 closed 8/8** (HF1–HF7, PRs #745/#747/#749/#792/#806/#816,
-including the HF7 CLONE COW dedup work); M35 (WASM core) done 2026-09-02
-(6/6, GH milestone 22). The #810 flake family (boot-probe EL0 hang /
-post-exec EL1h data aborts) was root-caused as a broken exception
-resume seam — same-EL IRQ nesting + SMP race on the single global
-`resume_frame` (tasks resuming with the GIC/timer handler's register
-image, x23=0x1e/x26=0x10040080 at two fault sites) — and FIXED in PR
-#852 / issue #850 (mask IRQ at vector entry + per-core resume state;
-claim 9094 flipped ✅; verified 19/19 live VZ gates; #810/#814/#850 all
-CLOSED 2026-09-03). For the canonical, always-current answer to "where
-are we, and what's next", read
-`docs/status.md`.
-
-## Milestone scope rules
+## Scope rules
 
 - Do not implement work from later milestones.
 - Do not introduce libc or POSIX.
-- Do not add a kernel during milestone zero. *(Historical — milestones
-  zero and one are complete; a kernel has existed since milestone two.)*
-- Do not add graphics, networking, SMP, processes, or filesystems.
-  *(Historical — the allocator (claims 3972/5162), exception vectors (9746),
-  and the guest-side FAT32 storage driver on the ESP (claim 6420) all
-  landed post-tag; the list is the milestone promise.)*
-- Host-side observation devices (serial console, a framebuffer used only to
-  screenshot the guest, the BOOTED.TXT evidence file) are permitted and are
-  not "graphics" or "filesystem" milestones; guest-side graphics, network,
-  or storage stacks remain out of scope.
-- Milestone zero ends at: a Zig-compiled AArch64 UEFI application boots
-  from `EFI/BOOT/BOOTAA64.EFI` on a FAT image and prints its message.
+- Do not change the boot default unless the card is explicitly about doing so.
 
 ## Evidence rules
 
-- State what was directly observed versus inferred. Never present a guess
-  as a result.
-- Run available verification before claiming success. Save command output
-  and logs under `artifacts/`.
-- Do not fabricate successful command output. If a dependency or platform
-  capability is unavailable, complete everything else and report the
-  precise blocked step.
+- State what was **observed** versus **inferred**. Never present a guess as a
+  result, and never fabricate command output.
+- **Gates are the evidence.** Run the relevant gates; their output lives in
+  CI and the local, gitignored `artifacts/`. Commit only small pinned
+  fixtures (a golden file, a byte vector), not logs or narrative write-ups.
+- If a dependency or platform capability is unavailable, finish everything
+  else and name the precise blocked step.
 
-## Documentation rules
+## Documentation — keep it thin
 
-- Record hardware assumptions in `docs/hardware-contract.md`.
-- Record important design choices as architecture decision records under
-  `docs/decisions/`.
-- Keep `docs/status.md` current: it is the canonical "where we are" answer,
-  updated whenever a gate passes, fails, or a milestone completes. Other
-  docs link to it instead of duplicating status prose.
-- Keep `README.md` and `docs/testing.md` honest about what was observed.
+- **One doc per arc, not four.** Write an **ADR** (`docs/decisions/`) only
+  when the decision is ABI/security/cross-cutting or expensive to reverse.
+  The ADR carries the card split and acceptance; do not also write a
+  separate `*-scoping.md` unless the arc is genuinely multi-week.
+- **`docs/march-m*.md` is retired for new work.** Existing trackers stay as
+  history; cards + `docs/status.md` cover new milestones. Do not add one.
+- **`docs/status.md` is a compact table, not a changelog.** Rows are
+  `milestone | state | one line | links`. Per-card detail lives on the GitHub
+  issue. When you complete something, edit its row (or add one small line),
+  not a paragraph.
+- Record hardware assumptions in `docs/hardware-contract.md`; keep
+  `README.md` and `docs/testing.md` honest about what was observed.
 
-## Repository tooling
-
-- `tools/ragshit/` is a host-side context engine (local SQLite+FTS5 index,
-  deterministic LLM-context bundles, no network calls). It is developer
-  tooling, not guest software, and counts toward no milestone.
-
-## Gate rules (permanent, M40 GF6)
+## Gate rules (permanent)
 
 - New verification gates are declarative specs under `tools/gate/specs/`
-  (`tools/gate/SPEC.md` format) — never a new `tools/verify-*.sh` script;
-  one-off shell gate scripts are rejected in review.
+  (`tools/gate/SPEC.md` format) — never a new `tools/verify-*.sh` script.
+- **Extend an existing spec when it already covers the change**; do not add a
+  new spec per tiny card. One spec may assert several things.
 - The fleet is discovered, not listed (`tools/gate/fleet.sh`); the generated
-  `docs/gate-fleet-inventory.md` fails CI (`--check`) on any unregistered
-  gate.
+  `docs/gate-fleet-inventory.md` is exempt from the coordination gate —
+  re-render it (`bash tools/inventory-gates.sh`), never hand-edit it.
 
 ## Host toolchain sanity check (source me first)
 
@@ -134,62 +82,37 @@ idempotent — run it from your login/agent startup once per session.
 ## Multiagent coordination rules
 
 Multiple agents and humans develop this repo in parallel. Claims are GitHub
-issues — **no coordination files live in the repository**. The
-`docs/claims/` + `docs/logs/` file system and its index/gate machinery were
-deleted 2026-09-03; old four-digit claim numbers cited in prose (e.g.
-"claim 9094") are git-history references, and the five claims active at
-migration time became issues #859–#863. The binding rules:
+issues — **no coordination files live in the repository**. The binding rules:
 
-- **One worktree per agent.** Concurrent agents never share a checkout.
-  Create yours with `just new-agent <name> <slug>` (worktree at
-  `../virelaios-<name>`, branch `agent/<name>/<slug>` off `origin/main`),
-  reattach later with `just resume-agent`, clean up with `just drop-agent`.
-  Each worktree has its own `.build/` and `artifacts/`, so builds and
-  class-B VM gates cannot collide. File claims and comments from inside
-  your own worktree.
-- **Claim before you start.** Non-trivial work gets one GitHub issue
-  labeled `claim` before code is written — `just claim "<short title>"` or
-  `bash tools/status/new-claim.sh` (flags in the script header), or the web
-  form at `.github/ISSUE_TEMPLATE/claim.md`. The issue body carries the
-  machine-read fields: an `Owner` bullet naming the agent and its backticked
-  branch, a `Touches` bullet of comma-separated paths/globs you will edit,
-  and an optional `Status: ⛔` when blocked. An OPEN `claim` issue is an
-  ACTIVE claim — another agent will not duplicate it, and claimed work is
-  not fair game.
-- **One editor per file at a time.** If two agents need the same file, the
-  second waits or merges through the integration branch — never edit the
-  same file (e.g. `kernel/src/main.zig`) concurrently. The gate fails when
-  two ACTIVE claims from different branches declare overlapping `Touches`.
-  **Generated artifacts are exempt** (`docs/gate-fleet-inventory.md` today):
-  they are machine-rendered and merge sequentially, so declaring one never
-  holds the file and never conflicts — re-render it, don't serialize. The
-  exemption list lives in `is_generated()` in
-  `tools/status/verify-issue-coordination.sh` (add a line per new tracked
-  generated file).
-- **Progress and completion live on the issue.** Append progress as issue
-  comments (never rewrite earlier comments); edit the body when fields
-  change. When the work lands, close the issue with a final evidence
-  comment and reference `Closes #<n>` from the PR. Blocked = comment and
-  set `Status: ⛔` (or close); a closed claim tells the next agent not to
-  repeat the attempt.
-- **Heartbeats.** Any comment or edit keeps a claim alive. A `claim` issue
-  with no update for 14+ days draws a gate warning, and a weekly automated
-  sweep (`.github/workflows/claim-staleness.yml`) comments a warning on it
-  and applies the `claim:stale` label even when nobody runs the gate —
-  filter with `gh issue list --label claim --label claim:stale`. The label
-  is removed automatically the moment the claim is updated again — an
-  event-driven job in the staleness workflow unlabels on human comments,
-  edits, or reopens (the sweep's own comments never reset the staleness
-  clock). That job's bot-vs-human guard is the fixture-tested script
-  `tools/status/unlabel-guard.sh`. Past ~21 days anyone may close it with a
-  comment (reopen or file a fresh issue to pick it up).
+- **One worktree per agent.** Concurrent agents never share a checkout. Create
+  yours with `just new-agent <name> <slug>` (worktree at `../virelaios-<name>`,
+  branch `agent/<name>/<slug>` off `origin/main`), reattach with
+  `just resume-agent`, clean up with `just drop-agent`. Each worktree has its
+  own `.build/` and `artifacts/`, so builds and class-B VM gates cannot collide.
+- **One issue per card, and the card IS the claim.** When you start an existing
+  card, claim it in place: `just claim-card <issue>` (adds the `claim` label and
+  the machine-read `Owner`/`Scope`/`Touches` fields) — do **not** file a second
+  issue. Ad-hoc work with no card may file one with `bash tools/status/new-claim.sh`
+  (flags in its header). The landing PR must say `Closes #<the claimed issue>` so
+  merge closes it automatically — never leave a claim open after merge.
+- **The machine-read fields** (the coordination gate parses them): an `Owner`
+  bullet naming the agent and its backticked branch, a comma-separated `Touches`
+  bullet of every path/glob you will edit, and an optional `Status: ⛔` when
+  blocked. An OPEN `claim` issue is an ACTIVE claim — another agent will not
+  duplicate it.
+- **One editor per file at a time.** The gate fails when two ACTIVE claims from
+  different branches declare overlapping `Touches`. Generated artifacts
+  (`docs/gate-fleet-inventory.md`) are exempt — re-render, don't serialize.
+- **Progress and completion live on the issue.** Append progress as comments
+  (never rewrite earlier comments); close with a final evidence comment. Blocked
+  = comment and set `Status: ⛔` (or close).
+- **Heartbeats.** A `claim` issue with no update for 14+ days draws a gate
+  warning; a weekly sweep (`.github/workflows/claim-staleness.yml`) also labels
+  it `claim:stale` (filter `--label claim --label claim:stale`), and the label
+  clears on the next human comment/edit/reopen. Past ~21 days anyone may close
+  it.
 - **The gate.** Run `bash tools/status/verify-issue-coordination.sh`
-  (`just verify-coordination`, also CI) before opening a PR: it reads the
-  open `claim` issues from GitHub via `gh` (GH_TOKEN in CI), fails on
-  Touches overlaps between different branches, and warns on stale claims.
-  `bash tools/status/test-coordination.sh` (`just test-coordination`)
-  tests the tooling offline.
-- **Doc edits go through `docs/status.md`.** Milestone-level status prose
-  lives there; other docs link to it. Prefer pointer-level changes to other
-  docs. Per-claim records live on the GitHub issue tracker, never in repo
-  files.
+  (`just verify-coordination`, also CI) before opening a PR. It reads open
+  `claim` issues via `gh` (GH_TOKEN in CI), fails on `Touches` overlaps between
+  branches, and warns on stale claims. `bash tools/status/test-coordination.sh`
+  (`just test-coordination`) tests the tooling offline.

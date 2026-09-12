@@ -93,7 +93,8 @@ $NOTES
 Progress lives in COMMENTS on this issue (append a new comment; never
 rewrite earlier ones). Close the issue with a final evidence comment when
 the work lands or is abandoned. Filed by tools/status/new-claim.sh — the
-coordination gate treats this open \`claim\` issue as ACTIVE.
+coordination gate treats this open \`claim\` issue as ACTIVE. The landing PR
+MUST say \`Closes #<this issue>\` so merge closes it.
 EOF
 )"
 
