@@ -82,7 +82,7 @@ The only threads not closed:
 | Thread | State / next step | Cards |
 |--------|-------------------|-------|
 | **M-web — in-guest HTML renderer (`DOC.BIN`)** | Design landed (ADR 0028 + `docs/html-renderer-scoping.md` + the Oliver fixture); **slice-1 parser `user/src/lib/html/parse.zig` is unstarted** | #1200, #1202 |
-| **Go runtime port — `GOOS=virelai`** | Phase 0a merged (PR #1187); phase 0b in flight — argv done (`go-args`), uaccess regions landed, then the thread/futex model per ADR 0027 | #1163, #1194, #1214 |
+| **Go runtime port — `GOOS=virelai`** | Phase 0a merged (PR #1187); phase 0b round 2 in flight — threads/futex landed per ADR 0027 (slots 73/74, `go-goroutines` gate PASS with the cross-core proof), every `proc.go` delta retired, and the argv boot flake root-caused (ASLR band vs the ~1.2 GiB sbrk heap; `sys_mmap` collision refusal is the backstop). Next: envp half, then 0c fault delivery | #1163, #1194, #1214 |
 
 ## Gate status
 
