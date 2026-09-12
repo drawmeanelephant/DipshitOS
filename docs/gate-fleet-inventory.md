@@ -11,12 +11,12 @@
 
 | metric | count |
 |---|---|
-| top-level scripts (`tools/*.sh` + `tools/*.py`) | 39 |
+| top-level scripts (`tools/*.sh` + `tools/*.py`) | 38 |
 | class A (portable / CI) | 9 |
 | class B (VZ hardware gate) | 7 |
 | class C (interactive) | 1 |
 | class D (diagnostic) | 9 |
-| tooling (not gates) | 13 |
+| tooling (not gates) | 12 |
 | with a just recipe | 12 |
 | in the class-B fleet (spec dir / legacy script) | 4 |
 | named in a GitHub workflow | 10 |
@@ -294,7 +294,6 @@ named in `.github/workflows/*.yml`; `st` = named in
 
 | script | lines | class | just | fleet | ci | st | purpose |
 |---|---|---|---|---|---|---|---|
-| `_va-scripting.sh` | 133 | tooling | n | n | n | n | verify-live-scripting.sh -- milestone-eighteen card T16 class-B gate |
 | `audit-vz-irq-api.sh` | 46 | D | n | n | n | n | Record the selected Xcode/macOS SDK's public host interrupt surface. |
 | `build-zc-host.sh` | 81 | tooling | n | n | n | n | build-zc-host.sh -- Z4b (issue #761) host link contract: the target recipe. |
 | `check-zc-host-contract.py` | 116 | A | n | n | n | y | Z4b (issue #761): check an ELF against the VirelaiOS static-loader contract. |

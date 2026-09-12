@@ -1,7 +1,0 @@
-seed-absence check (claim #1210 raw-OpenSSH relay run, relay-06)
-seed: 4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb
-absent in artifacts/m51-interop/runs/relay-06/vm-serial.log
-absent in artifacts/m51-interop/runs/relay-06/run.out
-absent in artifacts/m51-interop/runs/relay-06/sshd.log
-absent in artifacts/m51-interop/runs/relay-06/script-1.txt
-absent in artifacts/m51-interop/runs/relay-06/script-2.txt
