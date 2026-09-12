@@ -1,0 +1,16 @@
+VIRELAIOS vgate live-ssh-packet -- SSH1 stream adapter reassembles a split SSH packet on VZ
+spec: /Users/tbuddy/.t3/worktrees/dipshitos/t3code-758ded84/tools/gate/specs/live-ssh-packet.spec
+revision: 7486a43c1ef911d394233644fcc324f008c1501a branch=t3code/m51-ssh-padding dirty-files=9
+date: 2026-09-12T19:39:22Z
+
+01: runner-rc=0
+  output-contains [net-tcp-respond: ENABLED]=1
+  output-contains [net-tcp-respond mode: packet]=1
+  output-contains [NET-TCP: packet mode sent chunk 8/8]=1
+  serial-contains [sshpacket: starting]=1
+  serial-contains [sshpacket: connected]=1
+  serial-contains-file [ssh-packet-expected.txt]=1
+  serial-absent [[EXC] parking:] ok=1
+  python [01] PASS
+01: PASS
+PASS: 1/1

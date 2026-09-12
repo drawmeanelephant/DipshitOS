@@ -1,0 +1,15 @@
+Port 2222
+ListenAddress 0.0.0.0
+HostKey /Users/tbuddy/.t3/worktrees/dipshitos/t3code-758ded84/artifacts/m51-interop/sshd/hostkey
+AuthorizedKeysFile /Users/tbuddy/.t3/worktrees/dipshitos/t3code-758ded84/artifacts/m51-interop/sshd/authorized_keys
+PermitRootLogin no
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+UsePAM no
+StrictModes no
+PidFile /Users/tbuddy/.t3/worktrees/dipshitos/t3code-758ded84/artifacts/m51-interop/sshd/sshd.pid
+LogLevel DEBUG3
+PrintMotd no
+AcceptEnv LANG LC_*

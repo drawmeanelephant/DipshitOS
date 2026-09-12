@@ -18,7 +18,11 @@
 //!     (96), `CHANNEL_CLOSE` (97);
 //!   * the server→client `exit-status` / `exit-signal` requests (§6.10) that
 //!     carry a one-shot `exec`'s remote status; unknown requests with
-//!     `want_reply` get a `CHANNEL_FAILURE`.
+//!     `want_reply` get a `CHANNEL_FAILURE`;
+//!   * `SSH_MSG_GLOBAL_REQUEST` (80): unsupported, so a `want_reply` request
+//!     gets `REQUEST_FAILURE` (82). This is skipped in BOTH `open` (real
+//!     OpenSSH's `hostkeys-00@openssh.com` arrives before the channel
+//!     confirmation — #1210 interop) and `dispatch`.
 //!
 //! Window accounting is exact (RFC 4254 §5.2):
 //!
@@ -135,7 +139,11 @@ pub const Channel = struct {
     /// Send scratch: one outgoing message (open/request/data/eof/close).
     tx: []u8,
     local_id: u32,
+    /// The peer's channel number from OPEN_CONFIRMATION. 0 is a LEGAL peer
+    /// id (real OpenSSH assigns its first channel 0), so "no peer id yet"
+    /// is tracked separately.
     remote_id: u32 = 0,
+    remote_set: bool = false,
     state: State = .idle,
     sent_eof: bool = false,
     recv_eof: bool = false,
@@ -220,12 +228,20 @@ pub const Channel = struct {
             switch (payload[0]) {
                 msg_ignore, msg_debug => continue,
                 msg_disconnect => return error.PeerDisconnect,
+                // Real OpenSSH sends `hostkeys-00@openssh.com` (and a DEBUG)
+                // between userauth success and the confirmation, so global
+                // requests must be skipped here too (#1210 interop).
+                msg_global_request => {
+                    try self.readGlobalRequest(payload);
+                    continue;
+                },
                 msg_open_confirmation => {
                     var r = wire.Reader.init(payload);
                     _ = try r.readByte();
                     const recipient = try r.readUint32();
                     if (recipient != self.local_id) return error.Protocol;
                     self.remote_id = try r.readUint32();
+                    self.remote_set = true;
                     self.remote_window = try r.readUint32();
                     self.remote_max_packet = try r.readUint32();
                     // RFC 4254 §5.1: type-specific data MAY follow; ignored.
@@ -253,7 +269,7 @@ pub const Channel = struct {
     fn writeRequest(self: *Channel, kind: Request, body: []const u8) Error!void {
         if (self.state != .open) return error.BadState;
         if (self.pending != null) return error.BadState;
-        if (self.remote_id == 0) return error.BadState;
+        if (!self.remote_set) return error.BadState;
         try self.sendRaw(body);
         self.pending = kind;
     }
@@ -335,13 +351,7 @@ pub const Channel = struct {
             msg_ignore, msg_debug => return null,
             msg_disconnect => return error.PeerDisconnect,
             msg_global_request => {
-                // We issue no global requests; answer per §4 and continue.
-                var r = wire.Reader.init(payload);
-                _ = try r.readByte();
-                _ = try r.readString();
-                const want_reply = try r.readBool();
-                if (r.remaining() != 0) return error.Protocol;
-                if (want_reply) try self.sendGlobalFailure();
+                try self.readGlobalRequest(payload);
                 return .ignored;
             },
             msg_request_success, msg_request_failure => {
@@ -471,6 +481,22 @@ pub const Channel = struct {
         try self.sendRaw(w.written());
     }
 
+    /// Read and consume one GLOBAL_REQUEST (§4): we issue none and support
+    /// none, so a `want_reply` request is answered with REQUEST_FAILURE.
+    /// Shared by `open` (pre-confirmation, where real OpenSSH's
+    /// `hostkeys-00@openssh.com` arrives) and `dispatch` (#1210).
+    ///
+    /// Request-specific data is only defined for the specific request
+    /// (§4) and unhandled requests MUST ignore it — OpenSSH's hostkeys
+    /// request appends one or more host-key blobs after `want_reply`.
+    fn readGlobalRequest(self: *Channel, payload: []const u8) Error!void {
+        var r = wire.Reader.init(payload);
+        _ = try r.readByte();
+        _ = try r.readString();
+        const want_reply = try r.readBool();
+        if (want_reply) try self.sendGlobalFailure();
+    }
+
     fn sendGlobalFailure(self: *Channel) Error!void {
         var w = wire.Writer.init(self.tx);
         try w.writeByte(msg_request_failure);
@@ -536,7 +562,7 @@ pub const Channel = struct {
     /// Send CHANNEL_CLOSE exactly once and mark the channel closed.
     pub fn sendClose(self: *Channel) Error!void {
         if (self.sent_close) return;
-        if (self.remote_id == 0 and self.state != .closed) return error.BadState;
+        if (!self.remote_set and self.state != .closed) return error.BadState;
         var w = wire.Writer.init(self.tx);
         try w.writeByte(msg_channel_close);
         try w.writeUint32(self.remote_id);
@@ -701,6 +727,25 @@ fn requestReply(out: []u8, kind: u8, recipient: u32) []const u8 {
     return w.written();
 }
 
+fn globalRequestWithData(
+    out: []u8,
+    name: []const u8,
+    want_reply: bool,
+    extra: []const u8,
+) []const u8 {
+    var w = wire.Writer.init(out);
+    w.writeByte(msg_global_request) catch unreachable;
+    w.writeString(name) catch unreachable;
+    w.writeBool(want_reply) catch unreachable;
+    // OpenSSH's hostkeys request appends one host-key blob per key.
+    if (extra.len > 0) w.writeString(extra) catch unreachable;
+    return w.written();
+}
+
+fn globalRequest(out: []u8, name: []const u8, want_reply: bool) []const u8 {
+    return globalRequestWithData(out, name, want_reply, &.{});
+}
+
 const test_local_id = 7;
 
 fn makeChannel() Channel {
@@ -811,6 +856,75 @@ test "channel: OPEN_FAILURE fails closed with the reason code captured" {
     try std.testing.expectError(error.OpenRejected, ch.open());
     try std.testing.expectEqual(@as(u32, 1), ch.open_failure_reason);
     try std.testing.expectEqual(State.closed, ch.state);
+}
+
+test "channel: a pre-confirmation GLOBAL_REQUEST is skipped, not a protocol error" {
+    // #1210 interop: real OpenSSH sends `hostkeys-00@openssh.com` between
+    // userauth success and the OPEN_CONFIRMATION, so `open` must skip
+    // global requests (replying only when the peer asked for one). The
+    // hostkeys request carries request-specific data (a host-key blob) that
+    // MUST be ignored, not rejected (§4).
+    TestPeer.reset();
+    var gbuf: [128]u8 = undefined;
+    var cbuf: [256]u8 = undefined;
+    const fake_hostkey_blob = [_]u8{
+        0x00, 0x00, 0x00, 0x0b, 's', 's', 'h',  '-',  'e',
+        'd',  '2',  '5',  '5',  '1', '9', 0x00, 0x00, 0x00,
+        0x20,
+    } ++ [_]u8{0xab} ** 32;
+    TestPeer.setScript(&.{
+        globalRequestWithData(
+            &gbuf,
+            "hostkeys-00@openssh.com",
+            false,
+            &fake_hostkey_blob,
+        ),
+        openConfirmation(&cbuf, test_local_id, confirm_remote_id, 1 << 16, 32768),
+    });
+    var ch = makeChannel();
+    try ch.open();
+    try std.testing.expect(ch.isOpen());
+    try std.testing.expectEqual(confirm_remote_id, ch.remote_id);
+    // want_reply false owes no answer: only CHANNEL_OPEN went out.
+    try std.testing.expectEqual(@as(usize, 1), TestPeer.tx_count);
+
+    // A want_reply request is answered with REQUEST_FAILURE (82) before the
+    // confirmation is processed.
+    TestPeer.reset();
+    TestPeer.setScript(&.{
+        globalRequest(&gbuf, "keepalive@openssh.com", true),
+        openConfirmation(&cbuf, test_local_id, confirm_remote_id, 1 << 16, 32768),
+    });
+    var ch2 = makeChannel();
+    try ch2.open();
+    try std.testing.expect(ch2.isOpen());
+    try std.testing.expectEqual(@as(usize, 2), TestPeer.tx_count);
+    try std.testing.expectEqualSlices(u8, &.{msg_request_failure}, TestPeer.sent(1));
+}
+
+test "channel: a peer channel id of 0 is valid (real OpenSSH's first channel)" {
+    // #1210 interop: OpenSSH confirms its first session channel with sender
+    // id 0. 0 must not be treated as "unset" — requests and closes must
+    // carry it as the recipient.
+    TestPeer.reset();
+    var cbuf: [256]u8 = undefined;
+    TestPeer.setScript(&.{openConfirmation(&cbuf, test_local_id, 0, 1 << 16, 32768)});
+    var ch = makeChannel();
+    try ch.open();
+    try std.testing.expect(ch.isOpen());
+    try std.testing.expectEqual(@as(u32, 0), ch.remote_id);
+
+    var rbuf: [16]u8 = undefined;
+    TestPeer.setScript(&.{requestReply(&rbuf, msg_channel_success, test_local_id)});
+    try ch.requestExec("true");
+    try std.testing.expectEqual(Request.exec, ch.pending.?);
+    // The exec request's recipient channel is 0, not rejected.
+    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, TestPeer.sent(1)[1..5], .big));
+    const ev = try ch.next();
+    try std.testing.expect(ev == .reply);
+    try std.testing.expect(ev.reply.ok);
+    try ch.sendClose();
+    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, TestPeer.sent(2)[1..5], .big));
 }
 
 test "channel: pty-req and shell dispatch the exact RFC 4254 §6.2/§6.5 bytes" {

@@ -238,6 +238,22 @@ it adds a spec (SSH5), and presents `boot-default-unchanged` evidence.
   observed; the seed never appears in any log. Fix: follow-up **#1210**
   (client + VSSH realignment), not smuggled into the evidence change.
   Raw evidence: `artifacts/m51-interop/`.
+- **Real-OpenSSH interop FIXED (claim #1210, 2026-09-12): observed end to
+  end.** The AEAD padding now follows the cipher (`packet.Alignment`):
+  `.aead` aligns `packet_length` alone for the post-NEWKEYS
+  `chacha20-poly1305` path, `.plaintext` keeps `4 + packet_length` for KEX,
+  and VSSH mirrors it (its startup drift guard also pins the OpenSSH
+  `packet_length = 0x48` frame). Re-running the same relay against real
+  OpenSSH 10.3 then exposed **two more real-server conformance bugs**, both
+  fixed with class-A vectors: `channel.open()` rejected OpenSSH's
+  pre-confirmation `hostkeys-00@openssh.com` GLOBAL_REQUEST (which carries a
+  request-specific host-key blob — RFC 4254 §4 says ignore it) and treated
+  sender channel id **0** as "unset". Observed in
+  `artifacts/m51-interop/runs/relay-06/` (serial + sshd DEBUG3 + runner
+  stdout; seed absent everywhere): `SSH.BIN tbuddy@10.0.0.2:2222 echo
+  VIRELAI-INTEROP-OK` completed `kex-ok`, `pin-ok`, `auth-ok
+  method=publickey`, `channel-open remote=0`, the remote stdout
+  `VIRELAI-INTEROP-OK`, `eof`, `exit-status=0`, `bye rc=0`.
 
 **Coordination with #1163 (GOOS=virelai port).** `sys_getrandom` is a single
 shared contract, not two: **slot 72 is owned by SSH-P1 (#1166)** and the Go
@@ -323,19 +339,19 @@ multi-user isolation beyond TS5 `uid` scoping.
 - **Ephemeral key entropy is a new kernel surface.** Slot 72 is small and
   ownerless by design; SSH-P1 must prove it cannot be called on the boot
   path and does not weaken the CSRNG (it only reads it).
-- **Real-OpenSSH interop: transport proved, padding gap open (2026-09-12,
-  issue #1209).** VZ-NAT guest→host TCP is a confirmed dead end on this
-  host (no host interface/route/ARP for the guest subnet, synthetic
-  gateway, firewall off, sshd saw nothing); the run went through the new
-  byte-transparent runner relay to real OpenSSH 10.3, where KEX completed
-  and the real host key verified, and real sshd rejected the first
-  encrypted packet on the `chacha20-poly1305` padding alignment
-  (`padding error: need 28 block 8 mod 4` → DISCONNECT `Packet corrupt`).
-  So the honesty check **did surface a conformance gap that only a real
-  server could**: the padding rule for the encrypted (post-NEWKEYS) path.
-  The predicted gaps list shrinks to window sizes and the exact
-  rekey/`mpint` behaviours, all still unobserved; userauth/exec stdout/
-  `exit-status` against real OpenSSH await the #1210 fix.
+- **Real-OpenSSH interop: CLOSED by #1210 (2026-09-12).** The honesty run
+  (#1209) surfaced three conformance gaps that only a real server could —
+  the AEAD `packet_length` alignment, the pre-confirmation
+  `hostkeys-00@openssh.com` GLOBAL_REQUEST (with trailing request data), and
+  sender channel id 0 — all fixed and observed end to end against real
+  OpenSSH 10.3 (`artifacts/m51-interop/runs/relay-06/`: KEX, userauth,
+  remote stdout, `exit-status`, EOF, clean close; seed absent from every
+  log). VZ-NAT guest→host TCP remains a confirmed dead end on this host (no
+  host interface/route/ARP for the guest subnet, synthetic gateway,
+  firewall off, sshd saw nothing), so the run goes through the
+  byte-transparent runner relay. The predicted gaps list shrinks to window
+  sizes and the exact rekey/`mpint` behaviours, all still unobserved
+  against a real server.
 - **The guest's multi-segment TX is best-effort (SSH1's documented limit).**
   The ABI has no `tx_pending` read, so the adapter cannot wait for an ACK
   between segments; the kernel's retransmit buffer holds one segment and a

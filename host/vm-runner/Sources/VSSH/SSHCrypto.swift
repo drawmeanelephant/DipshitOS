@@ -127,23 +127,41 @@ public struct SSHWriter {
     public mutating func raw(_ b: [UInt8]) { bytes.append(contentsOf: b) }
 }
 
+/// The frame-alignment rule in force for the negotiated cipher (#1210).
+/// Mirrors `user/src/lib/ssh/packet.zig`'s `Alignment`:
+///
+///   * `.plaintext` — RFC 4253 §6: `4 + packet_length` is a multiple of 8
+///     (all pre-NEWKEYS KEX packets; the rule OpenSSH completes KEX with);
+///   * `.aead` — `chacha20-poly1305@openssh.com`: `packet_length` alone is
+///     padded to the block size (`packet.c ssh_packet_send2_wrapped`); the
+///     4-byte length field is authenticated but outside the padded region.
+public enum SSHPacketAlignment {
+    case plaintext
+    case aead
+}
+
 /// RFC 4253 §6 binary packet framing. `encode` validates the same
 /// invariants `user/src/lib/ssh/packet.zig` enforces: padding ≥ 4, the
-/// total a multiple of 8, the total ≤ 35000.
+/// selected `alignment` rule, the total ≤ 35000.
 public enum SSHPacket {
     public static let lenField = 4
     public static let blockSize = 8
     public static let minPadding = 4
     public static let maxTotal = 35000
 
-    public static func paddingLen(_ payloadLen: Int) -> Int {
-        var pad = blockSize - ((lenField + 1 + payloadLen) % blockSize)
+    public static func paddingLen(_ payloadLen: Int, alignment: SSHPacketAlignment) -> Int {
+        let base = alignment == .plaintext ? lenField + 1 + payloadLen : 1 + payloadLen
+        var pad = blockSize - (base % blockSize)
         if pad < minPadding { pad += blockSize }
         return pad
     }
 
-    public static func encode(payload: [UInt8], pad: [UInt8]) throws -> [UInt8] {
-        guard pad.count == paddingLen(payload.count) else { throw SSHPacketError.badPadding }
+    public static func encode(
+        payload: [UInt8], pad: [UInt8], alignment: SSHPacketAlignment
+    ) throws -> [UInt8] {
+        guard pad.count == paddingLen(payload.count, alignment: alignment) else {
+            throw SSHPacketError.badPadding
+        }
         let packetLength = 1 + payload.count + pad.count
         let total = lenField + packetLength
         guard total <= maxTotal else { throw SSHPacketError.overlong }
@@ -160,14 +178,19 @@ public enum SSHPacket {
     }
 
     /// Decode exactly one frame (`4 + packet_length` bytes) to its payload.
-    public static func decode(_ frame: [UInt8]) throws -> [UInt8] {
+    public static func decode(
+        _ frame: [UInt8], alignment: SSHPacketAlignment
+    ) throws -> [UInt8] {
         guard frame.count >= 5 else { throw SSHPacketError.short }
         let packetLength = (Int(frame[0]) << 24) | (Int(frame[1]) << 16)
             | (Int(frame[2]) << 8) | Int(frame[3])
         let padding = Int(frame[4])
         guard packetLength <= maxTotal - lenField else { throw SSHPacketError.overlong }
         guard packetLength >= 1 + minPadding else { throw SSHPacketError.badLength }
-        guard (lenField + packetLength) % blockSize == 0 else { throw SSHPacketError.badLength }
+        let aligned = alignment == .plaintext
+            ? (lenField + packetLength) % blockSize == 0
+            : packetLength % blockSize == 0
+        guard aligned else { throw SSHPacketError.badLength }
         guard padding >= minPadding, padding <= packetLength - 1 else {
             throw SSHPacketError.badLength
         }
@@ -579,7 +602,19 @@ public enum SSHFixtures {
         guard cipher.open(ciphertext: ciphertext, tag: tamperedTag, seq: 7) == nil else {
             return false
         }
-        return cipher.decryptLength(Array(ciphertext[0 ..< 4]), seq: 7) == 0x48
+        guard cipher.decryptLength(Array(ciphertext[0 ..< 4]), seq: 7) == 0x48 else {
+            return false
+        }
+        // #1210 frame-alignment drift guard: the pinned OpenSSH frame's
+        // packet_length (0x48 = 72) is a multiple of 8 while 4 + 72 is not,
+        // so only the AEAD rule accepts it and it carries 65 payload bytes
+        // with 6 padding bytes (the same numbers `packet.zig` pins).
+        guard let framePayload = try? SSHPacket.decode(plain, alignment: .aead),
+              framePayload.count == 65,
+              (try? SSHPacket.decode(plain, alignment: .plaintext)) == nil,
+              SSHPacket.paddingLen(framePayload.count, alignment: .aead) == 6
+        else { return false }
+        return true
     }
 
     public static func hex(_ text: String) -> [UInt8]? {

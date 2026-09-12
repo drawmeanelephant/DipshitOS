@@ -275,7 +275,7 @@ public final class SSHServer {
         let frame = Array(input[0 ..< total])
         input.removeFirst(total)
         do {
-            let payload = try SSHPacket.decode(frame)
+            let payload = try SSHPacket.decode(frame, alignment: .plaintext)
             recvSeq += 1
             return payload
         } catch {
@@ -441,7 +441,9 @@ public final class SSHServer {
         input.removeFirst(wire)
         recvSeq += 1
         do {
-            return try SSHPacket.decode(plain)
+            // #1210: the AEAD path aligns packet_length alone (OpenSSH's
+            // `send2_wrapped`); 4 + packet_length need not be a multiple of 8.
+            return try SSHPacket.decode(plain, alignment: .aead)
         } catch {
             fail("malformed encrypted frame")
             return nil
@@ -698,7 +700,14 @@ public final class SSHServer {
     // MARK: - framing
 
     private func sendPacket(_ payload: [UInt8]) {
-        guard let frame = try? SSHPacket.encode(payload: payload, pad: deterministicPad(payload.count)) else {
+        // The negotiated cipher picks the alignment: plaintext KEX packets
+        // use RFC 4253 §6 (`4 + packet_length` aligned); once the AEAD is
+        // installed, packet_length alone is aligned (#1210, OpenSSH parity).
+        let alignment: SSHPacketAlignment = sendCipher == nil ? .plaintext : .aead
+        guard let frame = try? SSHPacket.encode(
+            payload: payload, pad: deterministicPad(payload.count, alignment: alignment),
+            alignment: alignment
+        ) else {
             fail("could not frame outbound packet")
             return
         }
@@ -717,8 +726,10 @@ public final class SSHServer {
         sendSeq += 1
     }
 
-    private func deterministicPad(_ payloadLen: Int) -> [UInt8] {
-        let n = SSHPacket.paddingLen(payloadLen)
+    private func deterministicPad(
+        _ payloadLen: Int, alignment: SSHPacketAlignment
+    ) -> [UInt8] {
+        let n = SSHPacket.paddingLen(payloadLen, alignment: alignment)
         return (0 ..< n).map { UInt8(0x5a ^ (($0 * 7) & 0xff)) }
     }
 

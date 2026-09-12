@@ -159,7 +159,7 @@ pub const Stream = struct {
             try self.drain();
             if (self.avail() < 5) return null;
         }
-        const h = packet.decodeHeader(self.buf[self.start..self.end]) catch |e| {
+        const h = packet.decodeHeader(self.buf[self.start..self.end], .plaintext) catch |e| {
             self.fail();
             return switch (e) {
                 error.Overlong => error.Overlong,
@@ -177,7 +177,7 @@ pub const Stream = struct {
             try self.drain();
             if (self.avail() < total) return null;
         }
-        const payload = packet.decode(self.buf[self.start .. self.start + total]) catch {
+        const payload = packet.decode(self.buf[self.start .. self.start + total], .plaintext) catch {
             self.fail();
             return error.BadPacket;
         };
@@ -319,10 +319,10 @@ const Harness = struct {
 };
 
 fn buildPacket(out: []u8, payload: []const u8, pad_byte: u8) []u8 {
-    const pl = packet.paddingLen(payload.len);
+    const pl = packet.paddingLen(payload.len, .plaintext);
     var pad: [64]u8 = undefined;
     @memset(pad[0..pl], pad_byte);
-    return packet.encode(out, payload, pad[0..pl]) catch unreachable;
+    return packet.encode(out, payload, pad[0..pl], .plaintext) catch unreachable;
 }
 
 test "stream: a packet split across many 192-byte segments reassembles" {
