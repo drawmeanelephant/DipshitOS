@@ -1,5 +1,5 @@
 === spec-order guard evidence -- claim #1193 ===
-revision: 7e2e01064484eec690a4866f63a3828a34a8af29  branch: agent/buffy-execrace/fleet-exec-race  dirty-files: 0 (this evidence file excluded)
+revision: 58377996b9f40cab92ec45d2aa44daa0be412b02  branch: agent/buffy-execrace/fleet-exec-race  dirty-files: 0 (this evidence file excluded)
 date: 2026-09-12T17:29:18Z
 
 --- 1. guard over the real fleet (tools/gate/specs) -- as enforced by --check
