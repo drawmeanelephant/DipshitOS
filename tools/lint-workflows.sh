@@ -75,6 +75,30 @@ set +e
 LINT_RC=$?
 set -e
 
+# --- justfile sanity: recipe names must be unique ---------------------------
+#
+# `just` refuses to load a file that defines two recipes with the same name,
+# which silently breaks EVERY `just` command while this text-only linter still
+# passes. A duplicate `claim` recipe landed in #1216 and went unnoticed until a
+# manual `just --list`. Extract recipe-definition names textually and fail on
+# dupes, so CI catches it without needing `just` installed on the runner.
+JUSTFILE="${JUSTFILE:-$ROOT/justfile}"
+DUPES="$(awk '
+    /^[[:space:]]*#/ { next }                          # comment
+    /^[[:space:]]*$/ { next }                          # blank
+    /:=/ { next }                                      # assignment / alias / set :=
+    /^[A-Za-z_][A-Za-z0-9_-]*([[:space:]]+[^:]*)?:/ {  # recipe definition
+        name = $1
+        sub(/:.*$/, "", name)
+        if (name != "" && seen[name]++) print name
+    }
+' "$JUSTFILE" | sort -u)"
+if [ -n "$DUPES" ]; then
+    echo "lint-workflows: justfile defines duplicate recipe name(s): $DUPES" >&2
+    echo "lint-workflows: 'just' cannot load the file, so every 'just' command is broken." >&2
+    exit 1
+fi
+
 # --- class-A parity: the justfile recipe must be a subset of ci.yml --------
 #
 # Normalization, and nothing else: `zig fmt --check <globs>` compares as

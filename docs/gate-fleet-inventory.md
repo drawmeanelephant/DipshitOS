@@ -5,18 +5,18 @@
 > `--check` mode fails when the tracked file drifts from a fresh
 > render, so every new script under `tools/` must arrive with a
 > regenerated report. Subdirectory tooling (`lib/`, `status/`,
-> `context/`, `gate/`, `ragshit/`) is summarized below, not rowed.
+> `context/`, `gate/`) is summarized below, not rowed.
 
 ## Summary
 
 | metric | count |
 |---|---|
-| top-level scripts (`tools/*.sh` + `tools/*.py`) | 39 |
+| top-level scripts (`tools/*.sh` + `tools/*.py`) | 38 |
 | class A (portable / CI) | 9 |
 | class B (VZ hardware gate) | 7 |
 | class C (interactive) | 1 |
 | class D (diagnostic) | 9 |
-| tooling (not gates) | 13 |
+| tooling (not gates) | 12 |
 | with a just recipe | 12 |
 | in the class-B fleet (spec dir / legacy script) | 4 |
 | named in a GitHub workflow | 10 |
@@ -30,7 +30,6 @@
 | `tools/lib/` | 2 | per-run isolation for live gates (`gate-run.sh`) |
 | `tools/status/` | 7 | multiagent coordination gate + claim tooling (class A) |
 | `tools/context/` | 2 | context snapshot helpers |
-| `tools/ragshit/` | 84 | host-side context engine (developer tooling, not guest software) |
 | `tools/gate/` | 227 | M40 vgate harness + specs (GF2+) |
 
 ## Class-B fleet (discovered from the spec dir)
@@ -294,7 +293,6 @@ named in `.github/workflows/*.yml`; `st` = named in
 
 | script | lines | class | just | fleet | ci | st | purpose |
 |---|---|---|---|---|---|---|---|
-| `_va-scripting.sh` | 133 | tooling | n | n | n | n | verify-live-scripting.sh -- milestone-eighteen card T16 class-B gate |
 | `audit-vz-irq-api.sh` | 46 | D | n | n | n | n | Record the selected Xcode/macOS SDK's public host interrupt surface. |
 | `build-zc-host.sh` | 81 | tooling | n | n | n | n | build-zc-host.sh -- Z4b (issue #761) host link contract: the target recipe. |
 | `check-zc-host-contract.py` | 116 | A | n | n | n | y | Z4b (issue #761): check an ELF against the VirelaiOS static-loader contract. |
@@ -302,8 +300,8 @@ named in `.github/workflows/*.yml`; `st` = named in
 | `elf2bin.py` | 382 | tooling | n | n | n | n | Convert a Zig aarch64-freestanding ELF executable into the VirelaiOS flat |
 | `env-check.sh` | 259 | tooling | n | n | y | n | tools/env-check.sh -- source me at the start of every agent session. |
 | `inspect.sh` | 93 | tooling | y | n | n | n | inspect.sh -- report useful facts about the generated EFI binary and the |
-| `inventory-gates.sh` | 556 | tooling | n | n | y | y | inventory-gates.sh -- regenerate (or --check) the machine-generated gate |
-| `lint-workflows.sh` | 171 | tooling | y | n | y | y | lint-workflows.sh -- lint the GitHub Actions workflows (class A). |
+| `inventory-gates.sh` | 555 | tooling | n | n | y | y | inventory-gates.sh -- regenerate (or --check) the machine-generated gate |
+| `lint-workflows.sh` | 195 | tooling | y | n | y | y | lint-workflows.sh -- lint the GitHub Actions workflows (class A). |
 | `mkdyn-elf.py` | 1090 | tooling | n | n | n | y | Generate freestanding dynamic ELF binaries for VirelaiOS. |
 | `mkhello-elf.py` | 205 | tooling | n | n | n | n | Emit a minimal statically linked AArch64 ELF32 executable (M22 D1, issue #324). |
 | `png2qoi.py` | 94 | tooling | n | n | n | n | Convert standard images (PNG, JPG) to Quite OK Image (QOI) format. |

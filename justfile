@@ -147,10 +147,6 @@ inspect:
 context:
     zig build context
 
-# Local Git-aware context engine — tools/ragshit (ragshit index/query/bundle/doctor ...)
-ragshit *ARGS:
-    python3 tools/ragshit/ragshit {{ARGS}}
-
 # Sanity-check the host toolchain at session start (class A — sourceable, no VM):
 # verifies bash/sed/jq/yq resolve to the MODERN Homebrew builds, re-prepends
 # /opt/homebrew/bin to PATH, and bitches vocally about any 2007-era /bin/bash
@@ -186,15 +182,11 @@ lint-workflows:
 test-coordination:
     bash tools/status/test-coordination.sh
 
-# Claim an EXISTING card (issue) in place: adds the `claim` label + the
-# machine-read Owner/Scope/Touches fields. Prefer this over filing a new issue
-# — one issue per card, and the card IS the claim.
+# One issue per card, and the card IS the claim: claim an EXISTING card (issue)
+# in place, adding the `claim` label + machine-read Owner/Scope/Touches fields.
+# Prefer this over filing a new issue.
 claim-card ISSUE *ARGS:
     bash tools/status/claim-card.sh {{ISSUE}} {{ARGS}}
-
-# File an ad-hoc claim when there is no existing card issue (tools/status/new-claim.sh).
-claim *ARGS:
-    bash tools/status/new-claim.sh {{ARGS}}
 
 # Rehearse the real-time claim:stale removal path end to end (live: creates + closes a throwaway claim issue; REHEARSAL_MODE=local forces the in-process guard run)
 rehearse-unlabel:
@@ -204,9 +196,11 @@ rehearse-unlabel:
 sweep-stale-claims:
     bash tools/status/sweep-stale-claims.sh --dry-run
 
-# File a claim as a GitHub issue (label `claim`; docs/claims/ is gone — claims live on the tracker)
-claim TITLE:
-    bash tools/status/new-claim.sh --title "{{TITLE}}"
+# For an existing card, prefer `just claim-card <issue>`.
+# Otherwise file an ad-hoc claim (tools/status/new-claim.sh, label `claim`),
+# bare title or full flags: `just claim "Fix the flake"` / `just claim --touches ...`.
+claim *ARGS:
+    bash tools/status/new-claim.sh {{ARGS}}
 
 # Create an isolated per-agent checkout (issue #523 item 1; claim 4928):
 #   just new-agent buffy m18-t16-scripting
@@ -255,11 +249,3 @@ verify-vf-class-a:
 # Verify the M1.5 host-side interactive serial plumbing (class B — boots VZ VMs; Apple silicon only)
 verify-host-console:
     bash tools/verify-host-console.sh
-
-# Git-aware change-impact reviewer context (developer tooling — ragshit impact)
-impact *ARGS:
-    python3 tools/ragshit/ragshit impact {{ARGS}}
-
-# Deterministic budgeted reviewer packet (ragshit review)
-review *ARGS:
-    python3 tools/ragshit/ragshit review {{ARGS}}

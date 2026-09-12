@@ -1,7 +1,0 @@
-VIRELAIOS zc corpus dual-parity gate (M20 Z4a #760 + Z4b #761)
-revision: 3e4a1cea7da058fb20e58057753a6a438fa06cc9
-date: 2026-09-12T15:18:22Z
-
-z2b: kind=run runner-rc=0 banner=1 compiled=1 srcs=1/1 needles=1 markers=1 ordered=1 loaded=1 exit=1 reaped=1 echo=1 out-sha256=- (exp -) out_pin=1 fatal=0 -> PASS
-z2b-host: runner-rc=0 banner=1 loaded=1 exit=1 reaped=1 echo=1 needles=1 markers=1 ordered=1 out-sha256=- (exp -) out_pin=1 fatal=0 -> PASS
-PASS: 1/1 cases, 1 dual-run
