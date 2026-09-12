@@ -1,4 +1,4 @@
-# ADR 0025: The GOOS=virelai Go runtime port
+# ADR 0026: The GOOS=virelai Go runtime port
 
 - Status: ACCEPTED (phase 0a)
 - Date: 2026-09-12
@@ -80,12 +80,16 @@ segments at their own page-aligned declared vaddrs — alongside the
 original contiguous contract. `exec_program_max` is 1 MiB (Go images
 exceed 512 KiB stripped). Programs link with `-T 0x400000 -s -w`.
 
-D7 — **Kernel additions stay append-only per ADR 0007**: slot 74
-`sys_getrandom(buf, len)` (CSPRNG → uaccess, hash seed); mmap per-call cap
-16 MiB → 256 MiB; mmap-region cap 8 → 16; recorded demand-page cap
-128 → 4096 (~16 MiB/process; the Go working set exceeds 512 KiB within
-milliseconds of `mallocinit`). CPACR_EL1.FPEN is armed at boot (Go is
-NEON-heavy; EL0 FP state was previously untested inherited firmware state).
+D7 — **Kernel additions ride existing seams where they exist.**
+`sys_getrandom` (the runtime's hash seed) is **ADR 0007 slot 72, landed by
+M51 SSH-P1 (#1166, ADR 0025 D5)** — this port consumes it rather than
+adding a second entropy slot; the rebase onto #1166 renumbered the
+original phase-0a proposal (slot 74) accordingly. Port-specific lifts:
+mmap per-call cap 16 MiB → 1 GiB; mmap-region cap 8 → 16; recorded
+demand-page cap 128 → 4096 (~16 MiB/process; the Go working set exceeds
+512 KiB within milliseconds of `mallocinit`). CPACR_EL1.FPEN is armed at
+boot (Go is NEON-heavy; EL0 FP state was previously untested inherited
+firmware state).
 
 D8 — **Console writes stage through the image's data segment.**
 `sys_write`'s copy_in validates the buffer against the task's uaccess

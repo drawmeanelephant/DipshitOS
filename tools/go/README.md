@@ -50,7 +50,7 @@ the reviewable patch series. `GOTOOLCHAIN=local` is exported by
 
 - **0a (this)**: single-thread, no sysmon (one `proc.go` delta), sbrk
   memory, no signals, cooperative preemption only. Kernel side: 3-segment
-  gap-layout ELF loader, mmap cap lifts, `sys_getrandom` (slot 74), FPEN
+  gap-layout ELF loader, mmap cap lifts, `sys_getrandom` (slot 72, M51 #1166), FPEN
   armed.
 - **0b**: kernel slots 72/73 (`thread_create`, futex) + exec argv/envp →
   drop the haveSysmon delta, real threads, `GOMAXPROCS > 1`.

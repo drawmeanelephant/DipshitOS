@@ -17,7 +17,7 @@
 #define VIR_SYS_EXIT      3
 #define VIR_SYS_MMAP      63
 #define VIR_SYS_TIME      66
-#define VIR_SYS_GETRANDOM 74
+#define VIR_SYS_GETRANDOM 72
 
 #define VIR_MMAP_PROT_RW  3
 #define VIR_MAP_ANON      0x20
@@ -71,7 +71,7 @@ TEXT runtime·virTime(SB),NOSPLIT|NOFRAME,$0-8
 	MOVD	R0, ret+0(FP)
 	RET
 
-// func virGetrandom(p *byte, n int) int — sys_getrandom (slot 74): CSPRNG
+// func virGetrandom(p *byte, n int) int — sys_getrandom (slot 72): CSPRNG
 // bytes for the runtime hash/PRNG seed. Returns x0 (count or negative).
 TEXT runtime·virGetrandom(SB),NOSPLIT|NOFRAME,$0-24
 	MOVD	p+0(FP), R0

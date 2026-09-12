@@ -36,7 +36,7 @@ const (
 	virSysYield     = 2  // sys_yield()
 	virSysExit      = 3  // sys_exit(status)
 	virSysTime      = 66 // sys_time(): boot wall-clock epoch, unix seconds
-	virSysGetrandom = 74 // sys_getrandom(buf, len): CSPRNG bytes
+	virSysGetrandom = 72 // sys_getrandom(buf, len): CSPRNG bytes (M51 #1166)
 )
 
 // virWrite1 issues ONE sys_write (the kernel caps len at 256 bytes).
