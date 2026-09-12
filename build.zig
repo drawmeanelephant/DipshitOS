@@ -2391,6 +2391,7 @@ pub fn build(b: *std.Build) void {
         "user/src/lib/ssh/wire.zig",
         "user/src/lib/ssh/packet.zig",
         "user/src/lib/ssh/stream.zig",
+        "user/src/lib/ssh/kex.zig",
         "user/tests/ui/ui_test.zig",
         "kernel/tests/scheduler_test.zig",
         "kernel/tests/syscall_test.zig",
@@ -2409,6 +2410,27 @@ pub fn build(b: *std.Build) void {
         .optimize = .Debug,
     });
     ui_mod.addOptions("build_options", kernel_options);
+
+    // Module-mapped userland library roots (M51 SSH2): `ssh/` files are
+    // unit-test module roots themselves, so their `../lib` deps arrive as
+    // mapped modules exactly like `ui` does.
+    const crypto_mod = b.createModule(.{
+        .root_source_file = b.path("user/src/lib/crypto.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    crypto_mod.addOptions("build_options", kernel_options);
+
+    const rng_mod = b.createModule(.{
+        .root_source_file = b.path("user/src/lib/rng.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    // rng.zig's `@import("ui/abi.zig")` must resolve through the mapped `ui`
+    // module; otherwise the same ui files load under two module roots and
+    // Zig rejects the duplicate ownership.
+    rng_mod.addImport("ui", ui_mod);
+    rng_mod.addOptions("build_options", kernel_options);
 
     const helpers_mod = b.createModule(.{
         .root_source_file = b.path("test/helpers/helpers.zig"),
@@ -2480,7 +2502,15 @@ pub fn build(b: *std.Build) void {
             .optimize = .Debug,
         });
         test_mod.addOptions("build_options", kernel_options);
-        test_mod.addImport("ui", ui_mod);
+        // kex.zig reaches `rng` (module-mapped) whose own `ui` dep resolves
+        // `ui/abi.zig`; additionally mapping `ui` at this test root makes Zig
+        // attribute the ui files to both modules, so skip it here — kex.zig
+        // does not import `ui` itself.
+        if (!std.mem.eql(u8, src_path, "user/src/lib/ssh/kex.zig")) {
+            test_mod.addImport("ui", ui_mod);
+        }
+        test_mod.addImport("crypto", crypto_mod);
+        test_mod.addImport("rng", rng_mod);
         test_mod.addImport("helpers", helpers_mod);
         test_mod.addImport("scheduler", scheduler_mod);
         test_mod.addImport("syscall", syscall_mod);
