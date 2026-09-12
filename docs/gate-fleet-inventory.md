@@ -31,7 +31,7 @@
 | `tools/status/` | 6 | multiagent coordination gate + claim tooling (class A) |
 | `tools/context/` | 2 | context snapshot helpers |
 | `tools/ragshit/` | 84 | host-side context engine (developer tooling, not guest software) |
-| `tools/gate/` | 208 | M40 vgate harness + specs (GF2+) |
+| `tools/gate/` | 209 | M40 vgate harness + specs (GF2+) |
 
 ## Class-B fleet (discovered from the spec dir)
 
@@ -209,6 +209,7 @@ of them with `just verify-vz`.
 | spec | `live-timers` | 1 run / 13 assert | live-timers.spec -- claim 7323 (Milestone 14, Card S2) class-B gate: |
 | spec | `live-tokens` | 12 run / 36 assert | live-tokens.spec -- M37 DQ4 design tokens & cohesion |
 | spec | `live-transcript` | 1 run / 6 assert | live-transcript.spec -- vgate pilot (serial-only + repeat): live RX. |
+| spec | `live-trust-modes` | 1 run / 10 assert | live-trust-modes.spec -- M50 TS2 class-B gate (issue #1136, ADR 0024 D3/D4/D8). |
 | spec | `live-trust-whoami` | 1 run / 8 assert | live-trust-whoami.spec -- M50 TS1 class-B gate (issue #1135, ADR 0024 D2). |
 | spec | `live-ttyecho` | 1 run / 6 assert | live-ttyecho.spec -- #1072 terminal (vt) seam pilot (class B, ADR 0020). |
 | spec | `live-ttyed` | 1 run / 8 assert | live-ttyed.spec -- M45 card SH1 class-B gate (issue #1077, ADR 0021 D6). |

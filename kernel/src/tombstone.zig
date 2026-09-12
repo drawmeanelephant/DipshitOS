@@ -17,6 +17,7 @@
 const std = @import("std");
 const symbol = @import("symbol.zig");
 const virtio_file = @import("virtio_file.zig");
+const trust = @import("trust.zig"); // M50 TS2 (#1136, ADR 0024 D4): the kernel-actor gate for crash writes
 const timer = @import("timer.zig");
 const console = @import("console.zig");
 
@@ -244,6 +245,8 @@ pub fn write_to_disk(t: *const Tombstone) bool {
     const content_len = format_tombstone(t, &content_buf);
 
     // Write file through the host channel
+    // M50 TS2 (ADR 0024 D4): the kernel-actor gate (secret-class paths deny).
+    if (trust.check(trust.kernel_actor(), .host, filename, .write) != .allow) return false;
     const result = virtio_file.write_whole(filename, content_buf[0..content_len]);
 
     return result == virtio_file.st_ok;

@@ -78,6 +78,7 @@ const events = @import("events.zig");
 const app_timers = @import("app_timers.zig"); // claim 7323: the per-process app timer reset on exec
 // Milestone 10 (claim 9948): per-process file handle table
 const file_table = @import("file_table.zig");
+const trust = @import("trust.zig"); // M50 TS2 (#1136, ADR 0024 D4/D8): the kernel-actor read gate
 // Claim 0826: the per-process text/stack/kernel-stack pages come from the
 // physical page allocator (claims 3972/5162).
 const alloc = @import("alloc.zig");
@@ -300,6 +301,9 @@ fn exec_file_impl(name: []const u8, args: []const []const u8, pin: ?usize, princ
     // allows `virtio_file.path_max`; the process registry truncates long
     // names.
     if (name.len > virtio_file.path_max) return .not_found;
+    // M50 TS2 (ADR 0024 D4/D8): the explicit kernel-actor gate — a
+    // secret-class path is never loadable (exec must not read SECRETS.TXT).
+    if (trust.check(trust.kernel_actor(), .host, name, .read) != .allow) return .not_found;
     if (!virtio_file.available()) return .no_disk;
     var st = virtio_file.StatResult{};
     if (virtio_file.stat(name, &st) != virtio_file.st_ok or st.is_dir) return .not_found;
@@ -1036,6 +1040,8 @@ pub fn parse_dsk3(buf: []const u8, got: usize) union(enum) { ok: Segments, err: 
 fn read_host_file(name: []const u8, buf: []u8) ?usize {
     if (!virtio_file.available()) return null;
     if (name.len == 0 or name.len > virtio_file.path_max) return null;
+    // M50 TS2 (ADR 0024 D4/D8): shared-library reads use the same kernel gate.
+    if (trust.check(trust.kernel_actor(), .host, name, .read) != .allow) return null;
     var st = virtio_file.StatResult{};
     if (virtio_file.stat(name, &st) != virtio_file.st_ok or st.is_dir) return null;
     if (st.size > buf.len) return null;

@@ -63,6 +63,13 @@ fn historyEntry(ctx: ?*anyopaque, i: usize) ?[]const u8 {
 /// `whoami`/`id` builtins. The kernel assigns it; nothing here can change it.
 /// Mirrors the `SH.BIN` glue (`user/src/sh.zig`) so identity is consistent
 /// across both shell presentations.
+/// M50 TS2 (#1136): the `chmod` builtin's glue — owner-only `sys_file_mode`
+/// (slot 69). The kernel enforces ownership; this only forwards the call.
+fn modeSet(ctx: ?*anyopaque, path: []const u8, mode: u16) i64 {
+    _ = ctx;
+    return abi.file_mode(path, mode);
+}
+
 fn principalGet(ctx: ?*anyopaque) ?shell_mod.Principal {
     _ = ctx;
     const p = abi.principal() orelse return null;
@@ -299,6 +306,7 @@ pub export fn _start(argc: u64, argv_va: u64) callconv(.c) noreturn {
     // M50 TS1 (#1135): `whoami`/`id` read the caller's principal through
     // slot 68 (same wiring as SH.BIN).
     g_shell.principal = .{ .get_fn = principalGet };
+    g_shell.mode_view = .{ .set_fn = modeSet };
     g_editor = .{};
 
     var session = tty.Session.open() orelse {

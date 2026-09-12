@@ -82,6 +82,13 @@ fn principalGet(ctx: ?*anyopaque) ?shell_mod.Principal {
     return .{ .uid = p.uid, .caps = p.caps };
 }
 
+/// M50 TS2 (#1136): the `chmod` builtin's glue — owner-only `sys_file_mode`
+/// (slot 69). The kernel enforces ownership; this only forwards the call.
+fn modeSet(ctx: ?*anyopaque, path: []const u8, mode: u16) i64 {
+    _ = ctx;
+    return abi.file_mode(path, mode);
+}
+
 /// Tab completion source for the SH1 editor: builtins + aliases + share apps
 /// in command position, share files in argument position (SH3).
 fn shellComplete(line: []const u8, cursor: usize, index: usize) ?tty.CompletionMatch {
@@ -363,6 +370,8 @@ fn runRedirectOut(left: []const u8, file: []const u8, op: pipe.RedirectOp, depth
     if (opened < 0) {
         g_session.write("sh: cannot open ");
         g_session.write(file);
+        g_session.write(": ");
+        g_session.write(shell_mod.errnoName(opened));
         g_session.write("\n");
         g_shell.last_status = 1;
         return;
@@ -384,6 +393,8 @@ fn runRedirectIn(left: []const u8, file: []const u8, depth: u32) void {
     if (opened < 0) {
         g_session.write("sh: cannot open ");
         g_session.write(file);
+        g_session.write(": ");
+        g_session.write(shell_mod.errnoName(opened));
         g_session.write("\n");
         g_shell.last_status = 1;
         return;
@@ -644,6 +655,7 @@ pub export fn _start(argc: u64, argv_va: u64) callconv(.c) noreturn {
     // M50 TS1 (#1135): `whoami`/`id` read the caller's principal through
     // slot 68 (the kernel-assigned uid/caps).
     g_shell.principal = .{ .get_fn = principalGet };
+    g_shell.mode_view = .{ .set_fn = modeSet };
     g_editor = .{ .completer = shellComplete };
     // SH8 (#1084): the settings `prompt` key drives the login shell too.
     applyPromptFromSettings();

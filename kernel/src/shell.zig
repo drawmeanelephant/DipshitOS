@@ -47,6 +47,7 @@ pub const clipboard = @import("clipboard.zig"); // M18 T2 (issue #405): shared c
 // until HF6).
 pub const virtio_file = @import("virtio_file.zig");
 const svclock = @import("svclock.zig"); // claim 9498 follow-on: the idle loop's service-state brackets (NET/WIN+EV/FILE)
+const trust = @import("trust.zig"); // M50 TS2 (#1136, ADR 0024 D4): the kernel-actor gate for history/env
 
 /// M18 T4: path for persistent shell history file.
 const history_path = "HISTORY.TXT";
@@ -428,6 +429,7 @@ fn release_file_lock(taken: u5) void {
 /// SHARE. M34 HF6 (issue #740): the ESP fallback is gone — the share is
 /// the only file store; without a channel the read is an honest 0.
 fn env_read_existing(buf: []u8) usize {
+    if (trust.check(trust.kernel_actor(), .host, env_path, .read) != .allow) return 0;
     const taken = acquire_file_lock();
     defer release_file_lock(taken);
     return virtio_file.read_whole(env_path, buf) orelse 0;
@@ -435,6 +437,7 @@ fn env_read_existing(buf: []u8) usize {
 
 /// HF5/HF6: write the whole env file to the share.
 fn env_write_all(bytes: []const u8) void {
+    if (trust.check(trust.kernel_actor(), .host, env_path, .write) != .allow) return;
     const taken = acquire_file_lock();
     defer release_file_lock(taken);
     _ = virtio_file.write_whole(env_path, bytes);
@@ -1504,6 +1507,7 @@ pub const Shell = struct {
 /// HF5/HF6: read the existing history file from the HOST SHARE into
 /// `buf`. Returns the byte count (0 = absent/empty / no channel).
 fn history_read_existing(buf: []u8) usize {
+    if (trust.check(trust.kernel_actor(), .host, history_path, .read) != .allow) return 0;
     const taken = acquire_file_lock();
     defer release_file_lock(taken);
     return virtio_file.read_whole(history_path, buf) orelse 0;
@@ -1511,6 +1515,7 @@ fn history_read_existing(buf: []u8) usize {
 
 /// HF5/HF6: write the whole history file to the share.
 fn history_write_all(bytes: []const u8) void {
+    if (trust.check(trust.kernel_actor(), .host, history_path, .write) != .allow) return;
     const taken = acquire_file_lock();
     defer release_file_lock(taken);
     _ = virtio_file.write_whole(history_path, bytes);
@@ -3631,6 +3636,7 @@ fn park_body(mon: *monitor.Monitor) callconv(.c) void {
     // share (HF6: the ESP window is gone).
     var rc_buf: [2048]u8 = undefined;
     const rc_len_opt = blk: {
+        if (trust.check(trust.kernel_actor(), .host, ".virelairc", .read) != .allow) break :blk null;
         const taken = acquire_file_lock();
         defer release_file_lock(taken);
         break :blk virtio_file.read_whole(".virelairc", &rc_buf);
@@ -3952,6 +3958,8 @@ fn save_windows() void {
     if (n == 0) return;
     if (have_last_saved_windows and last_saved_windows_len == n and std.mem.eql(u8, last_saved_windows[0..n], buf[0..n])) return;
     // M34 HF6 (issue #740): WINDOWS.SAV lives on the host share.
+    // M50 TS2 (ADR 0024 D4): the kernel-actor gate (secret paths deny).
+    if (trust.check(trust.kernel_actor(), .host, "WINDOWS.SAV", .write) != .allow) return;
     if (virtio_file.write_whole("WINDOWS.SAV", buf[0..n]) == virtio_file.st_ok) {
         @memcpy(last_saved_windows[0..n], buf[0..n]);
         last_saved_windows_len = n;
@@ -3964,6 +3972,7 @@ fn save_windows() void {
 fn restore_windows() void {
     var content: [driving_award.persist_max_bytes]u8 = undefined;
     const n_opt = blk: {
+        if (trust.check(trust.kernel_actor(), .host, "WINDOWS.SAV", .read) != .allow) break :blk null;
         const taken = acquire_file_lock();
         defer release_file_lock(taken);
         break :blk virtio_file.read_whole("WINDOWS.SAV", &content);

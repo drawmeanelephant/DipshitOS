@@ -2330,6 +2330,7 @@ pub fn build(b: *std.Build) void {
         "kernel/src/syscall.zig",
         "kernel/src/tcp.zig",
         "kernel/src/terminal.zig",
+        "kernel/src/trust.zig",
         "kernel/src/text.zig",
         "kernel/src/timer.zig",
         "kernel/src/tokenizer.zig",

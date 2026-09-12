@@ -11,6 +11,7 @@
 const std = @import("std");
 const console = @import("console.zig");
 const virtio_file = @import("virtio_file.zig"); // HF6: the host file channel is the only file store
+const trust = @import("trust.zig"); // M50 TS2 (#1136, ADR 0024 D4): the kernel-actor gate for redirect I/O
 
 /// The capture buffer size — same as the pipe buffer (4 KiB).
 pub const capture_capacity: usize = 4096;
@@ -85,6 +86,8 @@ pub fn capture_console() console.Console {
 /// #740): the ESP/FAT write paths are gone — the share is the only file
 /// store.
 pub fn write_captured_to_file(name: []const u8, content: []const u8) ?[]const u8 {
+    // M50 TS2 (ADR 0024 D4/D8): the kernel-actor gate (secret paths deny).
+    if (trust.check(trust.kernel_actor(), .host, name, .write) != .allow) return "redirect: permission denied";
     const st = virtio_file.write_whole(name, content);
     if (st != virtio_file.st_ok) {
         return switch (st) {
@@ -101,6 +104,8 @@ pub fn write_captured_to_file(name: []const u8, content: []const u8) ?[]const u8
 /// the slice of `out` holding the content, or null (absent / too big / no
 /// channel). M34 HF6 (issue #740): the ESP/FAT read paths are gone.
 pub fn read_file_into(name: []const u8, out: []u8) ?[]const u8 {
+    // M50 TS2 (ADR 0024 D4/D8): the kernel-actor gate (secret paths deny).
+    if (trust.check(trust.kernel_actor(), .host, name, .read) != .allow) return null;
     var st = virtio_file.StatResult{};
     if (virtio_file.stat(name, &st) != virtio_file.st_ok or st.is_dir) return null;
     if (st.size > out.len) return null;

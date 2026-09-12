@@ -37,6 +37,9 @@ const terminal = @import("terminal.zig");
 // drains the ring into the window's presentation grid and marks the bound
 // `.user` window damaged (the deferred present) — the compositor blits it.
 const driving_award = @import("driving_award.zig");
+// M50 TS2 (issue #1136, ADR 0024 D3/D4): the file-ownership/mode predicate
+// and the bounded metadata table `OWNERS.TXT` persists.
+const trust = @import("trust.zig");
 
 pub const max_handles_per_process: usize = 8;
 pub const max_path_len: usize = 64;
@@ -170,6 +173,78 @@ pub fn reset_process(pid: u64) void {
         terminal.release(th);
         process_terminal[pid] = null;
     }
+}
+
+// ---------------------------------------------------------------------------
+// M50 TS2 (issue #1136, ADR 0024 D3/D4/D8): ownership/mode enforcement.
+//
+// Every entry point below calls `trust.check` AFTER `parse_path` and BEFORE
+// any `virtio_file` access. The syscall seam derives the actor from the
+// process principal (every EL0 process is uid_user today); kernel-internal
+// consumers use `trust.kernel_actor()` at their own call sites. A non-allow
+// verdict is EACCES, never a silent allow.
+// ---------------------------------------------------------------------------
+
+/// Fixed BSS buffer for `OWNERS.TXT` load/save (no allocation; no large
+/// stack frame in the exception-context syscall path).
+var owners_scratch: [trust.save_max]u8 = undefined;
+
+/// The actor for a `file_table` caller: the process principal (ADR 0024 D2).
+/// An unknown pid (host tests, a non-process caller) defaults to
+/// `uid_user`/no caps — the same principal every EL0 process has today.
+pub fn actorFor(pid: u64) trust.Actor {
+    if (pid < process.max_processes) {
+        if (process.principal(@intCast(pid))) |p| return .{ .uid = p.uid, .caps = p.caps };
+    }
+    return .{ .uid = process.uid_user, .caps = 0 };
+}
+
+fn trustWant(flags: u32) trust.Want {
+    if ((flags & MODE_DIR) != 0) return .create;
+    if ((flags & MODE_WRITE) != 0) return if ((flags & MODE_CREATE) != 0) .create else .write;
+    return .read;
+}
+
+fn hostAllowed(pid: u64, path: []const u8, want: trust.Want) bool {
+    return trust.check(actorFor(pid), .host, path, want) == .allow;
+}
+
+/// Serialize the trust table and persist it to `OWNERS.TXT` on the share.
+fn persist_trust() bool {
+    const n = trust.save(&owners_scratch);
+    if (n == 0) return false;
+    return virtio_file.write_whole(trust.filename, owners_scratch[0..n]) == virtio_file.st_ok;
+}
+
+/// Load `OWNERS.TXT` from the host share at boot (no-op without a channel or
+/// when the file is absent — the empty table is today's behavior).
+pub fn load_trust_from_share() bool {
+    if (!virtio_file.available()) return false;
+    const n = virtio_file.read_whole(trust.filename, &owners_scratch) orelse return false;
+    return trust.load(owners_scratch[0..n]) == .ok;
+}
+
+/// ADR 0024 D10 slot 69: `sys_file_mode(path, mode)` — owner-only chmod on an
+/// existing path, or `CAP_FS_ANY`. No chown. Persists the table to
+/// `OWNERS.TXT`; a full table is ENOSPC, never eviction.
+pub fn set_mode(pid: u64, path_bytes: []const u8, mode: u16) i64 {
+    if (pid >= process.max_processes) return -1;
+    if (path_bytes.len == 0 or path_bytes.len > max_path_len) return -1;
+    const parsed = parse_path(path_bytes) orelse return -1;
+    if (parsed.partition == .tty) return -1; // device semantics
+    if (parsed.partition == .usb) return -7; // fixed read-only
+    if (!virtio_file.available()) return -6;
+    const subpath = parsed.path[0..parsed.parsed_len()];
+    var st = virtio_file.StatResult{};
+    if (virtio_file.stat(subpath, &st) != virtio_file.st_ok) return -6; // existing path only
+    switch (trust.set_mode(actorFor(pid), .host, subpath, mode)) {
+        .ok => {},
+        .eacces => return -7,
+        .enospc => return -5,
+        .einval => return -1,
+    }
+    if (!persist_trust()) return -5; // honest: nothing half-persisted
+    return 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -339,6 +414,11 @@ pub fn open(pid: u64, path_bytes: []const u8, flags: u32) i64 {
         return @intCast(slot);
     }
 
+    // M50 TS2 (ADR 0024 D4): the ownership/mode gate, after parse_path and
+    // before any virtio_file access. `.usb` was handled above and `.tty`
+    // before parse_path; every path here is `.host`.
+    if (!hostAllowed(pid, parsed.path[0..parsed.parsed_len()], trustWant(flags))) return -7; // EACCES
+
     if (!virtio_file.available()) return -6; // ENOENT (no host file channel)
 
     const subpath = parsed.path[0..parsed.parsed_len()];
@@ -435,6 +515,9 @@ pub fn read(pid: u64, fd: u64, out_buf: []u8) i64 {
         return @intCast(t.readInput(out_buf));
     }
 
+    // M50 TS2 (ADR 0024 D4): the host-share ownership/mode gate for reads.
+    if (h.partition == .host and !hostAllowed(pid, h.path[0..h.path_len], .read)) return -7; // EACCES
+
     if (out_buf.len == 0) return 0;
     if (h.cursor >= h.size) return 0; // EOF
 
@@ -503,6 +586,9 @@ pub fn write(pid: u64, fd: u64, in_buf: []const u8) i64 {
         return @intCast(n);
     }
 
+    // M50 TS2 (ADR 0024 D4): the host-share ownership/mode gate for writes.
+    if (h.partition == .host and !hostAllowed(pid, h.path[0..h.path_len], .write)) return -7; // EACCES
+
     // M34 HF5 (issue #739): host writes ride the host handle's cursor
     // (chunked across WRITE round trips; the host returns the confirmed
     // count, which is what advances our mirror cursor).
@@ -550,6 +636,9 @@ pub fn dir_list(pid: u64, path_bytes: []const u8, out_entries: []DirEntry) i64 {
     else
         parse_path(path_bytes) orelse return -1;
 
+    // M50 TS2 (ADR 0024 D4): the host-share ownership/mode gate for listing.
+    if (parsed.partition == .host and !hostAllowed(pid, parsed.path[0..parsed.path_len], .list)) return -7; // EACCES
+
     if (!virtio_file.available()) return -6;
 
     const subpath = parsed.path[0..parsed.path_len];
@@ -585,15 +674,21 @@ pub fn delete(pid: u64, path_bytes: []const u8) i64 {
     if (pid >= process.max_processes) return -1;
     if (path_bytes.len == 0 or path_bytes.len > max_path_len) return -1;
     const parsed = parse_path(path_bytes) orelse return -1;
+    // M50 TS2 (ADR 0024 D4/D8): the ownership/mode gate — a secret-class
+    // path is denied delete through the file ABI for every actor.
+    if (!hostAllowed(pid, parsed.path[0..parsed.parsed_len()], .delete)) return -7; // EACCES
     if (!virtio_file.available()) return -6;
     const subpath = parsed.path[0..parsed.parsed_len()];
     // M34 HF5 (issue #739): host deletes route to the channel.
-    return switch (virtio_file.delete(subpath)) {
+    const rc: i64 = switch (virtio_file.delete(subpath)) {
         virtio_file.st_ok => 0,
         virtio_file.st_not_found => -6,
         virtio_file.st_is_dir => -1,
         else => -6,
     };
+    // M50 TS2: drop the metadata in the same transaction (persist on change).
+    if (rc == 0 and trust.remove(.host, subpath)) _ = persist_trust();
+    return rc;
 }
 
 /// Rename `old_path` to `new_path` (same directory — cross-directory moves
@@ -605,14 +700,26 @@ pub fn rename(pid: u64, old_bytes: []const u8, new_bytes: []const u8) i64 {
     const old = parse_path(old_bytes) orelse return -1;
     const new = parse_path(new_bytes) orelse return -1;
     if (old.partition != new.partition) return -1; // cross-partition unsupported
+    const oldp = old.path[0..old.parsed_len()];
+    const newp = new.path[0..new.parsed_len()];
+    // M50 TS2 (ADR 0024 D4/D8): the ownership/mode gate on BOTH ends — a
+    // secret-class path is denied rename for every actor, so the class can
+    // never be stripped by a guest rename.
+    if (old.partition == .host) {
+        if (!hostAllowed(pid, oldp, .delete)) return -7; // EACCES
+        if (!hostAllowed(pid, newp, .create)) return -7; // EACCES
+    }
     if (!virtio_file.available()) return -6;
     // M34 HF5 (issue #739): host renames route to the channel (stateless
     // NUL-framed RENAME; the host overwrites the target, like FAT).
-    return switch (virtio_file.rename(old.path[0..old.parsed_len()], new.path[0..new.parsed_len()])) {
+    const rc: i64 = switch (virtio_file.rename(oldp, newp)) {
         virtio_file.st_ok => 0,
         virtio_file.st_not_found => -6,
         else => -1, // exists/host error — no EEXIST row in the frozen ABI
     };
+    // M50 TS2: move the metadata with the file (persist on change).
+    if (rc == 0 and old.partition == .host and trust.rename_meta(.host, oldp, .host, newp)) _ = persist_trust();
+    return rc;
 }
 
 /// Resize the OPEN handle `fd` to `new_size` bytes (shrink truncates, grow
@@ -624,6 +731,8 @@ pub fn truncate(pid: u64, fd: u64, new_size: u32) i64 {
     if (!h.in_use) return -2; // EBADF
     if ((h.flags & MODE_WRITE) == 0) return -7; // EACCES
     if (h.is_dir) return -7; // M25 Lane B: never truncate through a dir handle
+    // M50 TS2 (ADR 0024 D4): the host-share ownership/mode gate for resize.
+    if (h.partition == .host and !hostAllowed(pid, h.path[0..h.path_len], .write)) return -7; // EACCES
     // M34 HF5 (issue #739): host truncate rides the host handle.
     if (!h.host_handle_valid) return -7; // EACCES
     const st = virtio_file.truncate(h.host_handle, new_size);

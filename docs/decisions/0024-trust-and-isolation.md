@@ -149,10 +149,13 @@ check(actor, partition, path, want) -> allow | eacces | enoent
   entirely** (otherwise renaming would strip the class). Only a host-side
   move of the share file, outside the guest's view, can relocate it.
 - The metadata key follows `parse_path`'s normalization; create/delete/
-  rename update entries in the same transaction as the operation. The
-  known gap — the host filesystem may be case-insensitive while the guest
-  key is byte-exact — is recorded as a TS2 risk and must be resolved there
-  (canonicalization or exact-name tracking), not assumed away.
+  rename update entries in the same transaction as the operation. **TS2
+  resolution (2026-09-11):** keys are compared **case-insensitively**
+  (`std.ascii.eqlIgnoreCase`) while `OWNERS.TXT` preserves the authored
+  spelling, so a case-varied request cannot bypass an explicit entry; on a
+  case-sensitive host the rule may over-apply to a distinct same-lowercase
+  file, which is fail-closed, never a bypass. The group triplet is reserved
+  and normalized to zero. See `kernel/src/trust.zig`.
 
 ### D5. Process privilege is `uid_system` plus two capabilities; there is no elevation
 `caps` is a small bitmask, spawn-time only:
@@ -358,5 +361,6 @@ Gated existing syscalls:
   whether it changes the auth framing.
 - Whether remote sessions should run under a distinct principal mapped
   from the authenticated host key; TS4 uses `uid_user`.
-- Case/normalization resolution for `OWNERS.TXT` keys against a
-  case-insensitive host share (TS2 owns the decision).
+- ~~Case/normalization resolution for `OWNERS.TXT` keys against a
+  case-insensitive host share~~ **Resolved by TS2 (2026-09-11, #1136):
+  case-insensitive comparison with case-preserving storage; see D4.**

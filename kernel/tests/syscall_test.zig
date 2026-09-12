@@ -107,6 +107,7 @@ const sys_wmctl = syscall.sys_wmctl;
 const sys_time = syscall.sys_time;
 const sys_tty_attach = syscall.sys_tty_attach;
 const sys_principal = syscall.sys_principal;
+const sys_file_mode = syscall.sys_file_mode;
 const principal_bytes = syscall.principal_bytes;
 const terminal = syscall.terminal;
 const sys_write = syscall.sys_write;
@@ -143,7 +144,7 @@ fn capture_marshaled_args(args: Args, _: *exceptions.VectorFrame) u64 {
     return 0xcafe;
 }
 
-test "syscall: runtime table has 128 slots and sixty-nine unique implemented rows" {
+test "syscall: runtime table has 128 slots and seventy unique implemented rows" {
     init(test_writer);
     const table = ensure_table();
     try std.testing.expectEqual(@as(usize, 128), table.len);
@@ -156,7 +157,7 @@ test "syscall: runtime table has 128 slots and sixty-nine unique implemented row
             implemented += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 69), implemented);
+    try std.testing.expectEqual(@as(usize, 70), implemented);
     try std.testing.expectEqualStrings("sys_pipe_read", entry_info(sys_pipe_read).?.name);
     try std.testing.expectEqualStrings("sys_pipe_write", entry_info(sys_pipe_write).?.name);
     try std.testing.expectEqualStrings("sys_font_size", entry_info(sys_font_size).?.name);
@@ -219,6 +220,8 @@ test "syscall: runtime table has 128 slots and sixty-nine unique implemented row
     try std.testing.expectEqualStrings("sys_wmctl", entry_info(sys_wmctl).?.name);
     // M50 TS1 (issue #1135): slot 68 is the read-only principal report.
     try std.testing.expectEqualStrings("sys_principal", entry_info(sys_principal).?.name);
+    // M50 TS2 (issue #1136): slot 69 is owner-only chmod.
+    try std.testing.expectEqualStrings("sys_file_mode", entry_info(sys_file_mode).?.name);
 }
 
 test "syscall: adapter decodes x8 and x0-x5 and unknown numbers return ENOSYS" {
@@ -232,14 +235,14 @@ test "syscall: adapter decodes x8 and x0-x5 and unknown numbers return ENOSYS" {
     try std.testing.expectEqual(@as(u64, 1), call_count(sys_ping));
 
     // Unimplemented in-range slots still return ENOSYS (65/66/67 are now
-    // sys_wmctl/sys_time/sys_tty_attach and 68 is sys_principal — use 69/70,
-    // still unregistered).
-    try std.testing.expect(exceptions.frame_write(&frame, 8, 69));
+    // sys_wmctl/sys_time/sys_tty_attach, 68 is sys_principal, and 69 is
+    // sys_file_mode — use 70/71, still unregistered).
+    try std.testing.expect(exceptions.frame_write(&frame, 8, 70));
     try std.testing.expect(handle_svc(&frame, svc_immediate));
     try std.testing.expectEqual(error_result(.enosys), exceptions.frame_read(&frame, 0));
-    try std.testing.expectEqual(@as(u64, 1), call_count(69));
+    try std.testing.expectEqual(@as(u64, 1), call_count(70));
 
-    try std.testing.expect(exceptions.frame_write(&frame, 8, 70));
+    try std.testing.expect(exceptions.frame_write(&frame, 8, 71));
     try std.testing.expect(handle_svc(&frame, svc_immediate));
     try std.testing.expectEqual(error_result(.enosys), exceptions.frame_read(&frame, 0));
 }
@@ -1231,7 +1234,7 @@ test "syscall: counters are monotonic and report is deterministic" {
     var con = mock.console();
     report(&con);
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=69\n" ++
+        "syscalls: slots=64 implemented=70\n" ++
             "  0 sys_ping calls=2\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -1300,7 +1303,8 @@ test "syscall: counters are monotonic and report is deterministic" {
             "  65 sys_wmctl calls=0\n" ++
             "  66 sys_time calls=0\n" ++
             "  67 sys_tty_attach calls=0\n" ++
-            "  68 sys_principal calls=0\n",
+            "  68 sys_principal calls=0\n" ++
+            "  69 sys_file_mode calls=0\n",
         mock.contents(),
     );
 }
@@ -3046,8 +3050,8 @@ test "syscall: SYS_TIME (slot 66, #1058) returns the firmware wall-clock epoch" 
 
     // The slot is registered and named in the table.
     try std.testing.expectEqualStrings("sys_time", entry_info(sys_time).?.name);
-    // M50 TS1 added slot 68 (sys_principal).
-    try std.testing.expectEqual(@as(usize, 69), syscall.implemented_count);
+    // M50 TS1 added slot 68 (sys_principal); TS2 added slot 69 (sys_file_mode).
+    try std.testing.expectEqual(@as(usize, 70), syscall.implemented_count);
 
     const saved_epoch = timer.boot_epoch_secs;
     const saved_ticks = timer.ticks;
@@ -3109,6 +3113,36 @@ test "syscall: SYS_PRINCIPAL reports an explicit uid_system principal" {
     try std.testing.expectEqual(@as(u64, principal_bytes), dispatch(sys_principal, .{ @intFromPtr(&buf), 0, 0, 0, 0, 0 }, &frame));
     try std.testing.expectEqual(process.uid_system, std.mem.readInt(u32, buf[0..4], .little));
     try std.testing.expectEqual(process.kernel_caps, std.mem.readInt(u32, buf[4..8], .little));
+}
+
+test "syscall: SYS_FILE_MODE (slot 69, #1136) is process-gated with the frozen error contract" {
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0
+    scheduler.start();
+    file_table.init();
+    var frame = fresh_frame();
+
+    // An EL1h caller is not a process: EINVAL, never a silent chmod.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_file_mode, .{ 0x1000, 5, 0o600, 0, 0, 0 }, &frame));
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+
+    const bad = "../x.txt";
+    const good = "PLAIN.TXT";
+    var path_buf: [file_table.max_path_len]u8 = undefined;
+    @memcpy(path_buf[0..bad.len], bad);
+    set_user_regions(.{ .base = @intFromPtr(&path_buf), .len = path_buf.len }, .{ .base = 0, .len = 0 });
+    // Traversal syntax is refused before any filesystem access.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_file_mode, .{ @intFromPtr(&path_buf), bad.len, 0o600, 0, 0, 0 }, &frame));
+    // A valid path with no host channel is an honest ENOENT.
+    @memcpy(path_buf[0..good.len], good);
+    try std.testing.expectEqual(error_result(.enoent), dispatch(sys_file_mode, .{ @intFromPtr(&path_buf), good.len, 0o600, 0, 0, 0 }, &frame));
+    // A bad pointer is EFAULT.
+    try std.testing.expectEqual(error_result(.efault), dispatch(sys_file_mode, .{ uaccess.diagnostic_unmapped, 5, 0o600, 0, 0, 0 }, &frame));
 }
 
 test "syscall: SYS_TTY_ATTACH (slot 67, #1072) attaches the caller's terminal" {

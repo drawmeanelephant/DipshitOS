@@ -56,6 +56,7 @@ pub const events = @import("events.zig"); // milestone sixteen C3 (claim 0339): 
 pub const file_table = @import("file_table.zig"); // milestone sixteen C3 (claim 0339): per-process handle bound behind `resources`
 pub const serial_ring = @import("serial_ring.zig"); // Arc5 issue #243: serial output ring buffer behind `dmesg`
 pub const smp = @import("smp.zig");
+pub const trust = @import("trust.zig"); // M50 TS2 (#1136, ADR 0024 D4): the kernel-actor file policy for direct consumers
 
 // ---------------------------------------------------------------------------
 // Limits (fixed-size, explicit bounds)
@@ -1200,6 +1201,7 @@ fn cmd_mount(m: *Monitor, args: []const []const u8) ExecError {
 fn cmd_calc(m: *Monitor, args: []const []const u8) ExecError {
     if (args.len == 0 or std.mem.eql(u8, args[0], "history")) {
         const path = "calc_hst.txt";
+        if (!kernel_vf_allowed(path, .read)) return trust_denied(m, "calc history", path);
         var buf: [2048]u8 = undefined;
         const got = virtio_file.read_whole(path, &buf) orelse {
             err_prefix(m);
@@ -1246,6 +1248,9 @@ fn cmd_calc(m: *Monitor, args: []const []const u8) ExecError {
 /// read buffer.
 fn cmd_cat(m: *Monitor, args: []const []const u8) ExecError {
     const name = args[0];
+    // M50 TS2 (ADR 0024 D8): the monitor's own read of a secret-class path
+    // is denied for every actor.
+    if (!kernel_vf_allowed(name, .read)) return trust_denied(m, "cat", name);
     var st = virtio_file.StatResult{};
     if (virtio_file.stat(name, &st) != virtio_file.st_ok) {
         err_prefix(m);
@@ -1305,6 +1310,27 @@ fn cmd_cat_path(m: *Monitor, path: []const u8) ExecError {
 // the host disk). `vf mkdir/rm/mv` are stateless path ops.
 // ---------------------------------------------------------------------------
 
+/// M50 TS2 (issue #1136, ADR 0024 D4/D8): the monitor's explicit
+/// `kernel_actor()` gate. The monitor is uid_system + CAP_FS_ANY, so ordinary
+/// paths pass and secret-class paths are denied for EVERY actor. An empty
+/// path is the share root (list); an unparseable/over-long path fails closed.
+pub fn kernel_vf_allowed(path: []const u8, want: trust.Want) bool {
+    if (path.len == 0) return trust.check(trust.kernel_actor(), .host, "", want) == .allow;
+    const parsed = file_table.parse_path(path) orelse return false;
+    if (parsed.partition == .tty) return true;
+    return trust.check(trust.kernel_actor(), parsed.partition, parsed.path[0..parsed.parsed_len()], want) == .allow;
+}
+
+/// The honest refusal line for a policy-denied direct-consumer file op.
+fn trust_denied(m: *Monitor, verb: []const u8, path: []const u8) ExecError {
+    err_prefix(m);
+    m.console.puts(verb);
+    m.console.puts(": ");
+    m.console.puts(path);
+    m.console.print_line(": permission denied");
+    return .invalid_argument;
+}
+
 fn cmd_vf(m: *Monitor, args: []const []const u8) ExecError {
     if (!virtio_file.available()) {
         m.console.print_line("vf: no host file channel (boot the runner with --cvc-file <host-dir>)");
@@ -1357,6 +1383,7 @@ fn vf_err(m: *Monitor, verb: []const u8, path: []const u8, st: u8) ExecError {
 fn cmd_vf_open(m: *Monitor, args: []const []const u8) ExecError {
     if (args.len == 0) return cmd_vf_usage(m);
     const path = args[0];
+    if (!kernel_vf_allowed(path, .create)) return trust_denied(m, "vf open", path);
     var flags: u8 = virtio_file.open_flag_create;
     if (args.len > 1 and std.mem.eql(u8, args[1], "append")) flags |= virtio_file.open_flag_append;
     var handle: u16 = 0;
@@ -1434,6 +1461,7 @@ fn cmd_vf_fsync(m: *Monitor, args: []const []const u8) ExecError {
 fn cmd_vf_mkdir(m: *Monitor, args: []const []const u8) ExecError {
     if (args.len == 0) return cmd_vf_usage(m);
     const path = args[0];
+    if (!kernel_vf_allowed(path, .create)) return trust_denied(m, "vf mkdir", path);
     const st = virtio_file.mkdir(path);
     if (st != virtio_file.st_ok) return vf_err(m, "mkdir", path, st);
     m.console.puts("vf: mkdir ");
@@ -1446,6 +1474,7 @@ fn cmd_vf_mkdir(m: *Monitor, args: []const []const u8) ExecError {
 fn cmd_vf_rm(m: *Monitor, args: []const []const u8) ExecError {
     if (args.len == 0) return cmd_vf_usage(m);
     const path = args[0];
+    if (!kernel_vf_allowed(path, .delete)) return trust_denied(m, "vf rm", path);
     const st = virtio_file.delete(path);
     if (st != virtio_file.st_ok) return vf_err(m, "rm", path, st);
     m.console.puts("vf: rm ");
@@ -1459,6 +1488,8 @@ fn cmd_vf_mv(m: *Monitor, args: []const []const u8) ExecError {
     if (args.len < 2) return cmd_vf_usage(m);
     const from = args[0];
     const to = args[1];
+    if (!kernel_vf_allowed(from, .delete)) return trust_denied(m, "vf mv", from);
+    if (!kernel_vf_allowed(to, .create)) return trust_denied(m, "vf mv", to);
     const st = virtio_file.rename(from, to);
     if (st != virtio_file.st_ok) return vf_err(m, "mv", from, st);
     m.console.puts("vf: mv ");
@@ -1478,6 +1509,8 @@ fn cmd_vf_clone(m: *Monitor, args: []const []const u8) ExecError {
     if (args.len < 2) return cmd_vf_usage(m);
     const from = args[0];
     const to = args[1];
+    if (!kernel_vf_allowed(from, .read)) return trust_denied(m, "vf clone", from);
+    if (!kernel_vf_allowed(to, .create)) return trust_denied(m, "vf clone", to);
     const st = virtio_file.clone(from, to);
     if (st != virtio_file.st_ok) return vf_err(m, "clone", from, st);
     m.console.puts("vf: clone ");
@@ -1490,6 +1523,7 @@ fn cmd_vf_clone(m: *Monitor, args: []const []const u8) ExecError {
 
 fn cmd_vf_ls(m: *Monitor, args: []const []const u8) ExecError {
     const path: []const u8 = if (args.len > 0) args[0] else "";
+    if (!kernel_vf_allowed(path, .list)) return trust_denied(m, "vf ls", path);
     var res: virtio_file.ListResult = .{};
     const st = virtio_file.list(path, &res);
     if (st != virtio_file.st_ok) {
@@ -1514,6 +1548,7 @@ fn cmd_vf_ls(m: *Monitor, args: []const []const u8) ExecError {
 fn cmd_vf_cat(m: *Monitor, args: []const []const u8) ExecError {
     if (args.len == 0) return cmd_vf_usage(m);
     const path = args[0];
+    if (!kernel_vf_allowed(path, .read)) return trust_denied(m, "vf cat", path);
     var st_res: virtio_file.StatResult = .{};
     const st = virtio_file.stat(path, &st_res);
     if (st != virtio_file.st_ok) {
@@ -1614,6 +1649,7 @@ fn cmd_write(m: *Monitor, args: []const []const u8) ExecError {
         @memcpy(buf[n..][0..p.len], p);
         n += p.len;
     }
+    if (!kernel_vf_allowed(name, .write)) return trust_denied(m, "write", name);
     const st = virtio_file.write_whole(name, buf[0..n]);
     if (st == virtio_file.st_ok) {
         m.console.puts("write: ok (persisted ");
@@ -1660,6 +1696,7 @@ fn cmd_mktemp(m: *Monitor, args: []const []const u8) ExecError {
     n += 4;
     const name = name_buf[0..n];
     // Create the empty file on the host share (HF6: the ESP window is gone).
+    if (!kernel_vf_allowed(name, .create)) return trust_denied(m, "mktemp", name);
     const st = virtio_file.write_whole(name, "");
     if (st == virtio_file.st_ok) {
         m.console.puts(name);
@@ -1683,6 +1720,7 @@ fn cmd_mktemp(m: *Monitor, args: []const []const u8) ExecError {
 /// gone): size, type (file/dir), and path.
 fn cmd_stat(m: *Monitor, args: []const []const u8) ExecError {
     const name = args[0];
+    if (!kernel_vf_allowed(name, .read)) return trust_denied(m, "stat", name);
     var st = virtio_file.StatResult{};
     const sst = virtio_file.stat(name, &st);
     if (sst != virtio_file.st_ok or st.is_dir) {
@@ -3829,6 +3867,8 @@ fn write_shutdown_marker(reason: []const u8) void {
     buf[pos] = '\n';
     pos += 1;
 
+    // M50 TS2 (ADR 0024 D4): the kernel-actor gate (secret paths deny).
+    if (!kernel_vf_allowed("SHUTDOWN.TXT", .write)) return;
     _ = virtio_file.write_whole("SHUTDOWN.TXT", buf[0..pos]);
 }
 
@@ -3841,6 +3881,8 @@ fn flush_clipboard_to_disk() void {
     var buf: [clipboard.capacity]u8 = undefined;
     const n = clipboard.get(&buf);
     if (n == 0) return;
+    // M50 TS2 (ADR 0024 D4): the kernel-actor gate (secret paths deny).
+    if (!kernel_vf_allowed("clipboard.txt", .write)) return;
     _ = virtio_file.write_whole("clipboard.txt", buf[0..n]);
 }
 
@@ -6129,6 +6171,8 @@ fn cmd_screen_peek(m: *Monitor) ExecError {
 /// byte header layout is byte-identical to fat.write_fb_bmp (the host
 /// verifies the file on disk). Returns true on a fully-written file.
 fn vf_write_fb_bmp(path: []const u8, width: u32, height: u32, fb: [*]const u8) bool {
+    // M50 TS2 (ADR 0024 D4): the kernel-actor gate (secret paths deny).
+    if (!kernel_vf_allowed(path, .write)) return false;
     const row_raw: usize = @as(usize, width) * 3;
     const row_pad: usize = (4 - (row_raw % 4)) % 4;
     const row_stride: usize = row_raw + row_pad;
@@ -6884,6 +6928,7 @@ fn cmd_sym(m: *Monitor, args: []const []const u8) ExecError {
     // File inspection: read up to sym_file_max bytes and walk sections
     // (HF6: from the host share — the FAT volume is gone).
     const name = args[0];
+    if (!kernel_vf_allowed(name, .read)) return trust_denied(m, "sym", name);
     const got = virtio_file.read_whole(name, &sym_file_buf) orelse {
         err_prefix(m);
         m.console.puts(name);
@@ -7660,6 +7705,7 @@ pub const BootMessages = struct {
 fn show_last_shutdown(m: *Monitor) void {
     if (!virtio_file.available()) return;
     var file_buf: [256]u8 = undefined;
+    if (!kernel_vf_allowed("SHUTDOWN.TXT", .read)) return;
     const n = virtio_file.read_whole("SHUTDOWN.TXT", &file_buf) orelse return;
     const bytes = file_buf[0..n];
     // Extract the Reason: line if present
