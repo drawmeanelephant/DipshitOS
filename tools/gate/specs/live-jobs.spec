@@ -3,6 +3,11 @@
 # and an honest bounded-wait timeout on the eternal child.
 # Mirrors tools/verify-live-jobs.sh (M19 P7, issue #296).
 
+# exec-order: self-sequenced -- `fg 2` reaps STATUS43.BIN before the closing
+# `echo jobs-done` the run ends on, so the `Done: ... (exit=43)` line the python
+# assert counts is already logged. `fg 1` returns early by design (bounded wait
+# on the eternal child; nothing asserted after it needs COUNTER.BIN output).
+
 vgate_name live-jobs "background jobs with real exit status on VZ"
 vgate_share seed
 vgate_repeat 1 BOOTS

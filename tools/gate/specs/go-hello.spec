@@ -18,6 +18,12 @@
 # but runs both Go make.bash passes; fork prerequisites in
 # tools/go/README.md). The setup hook below fails with that exact hint.
 
+# exec-order: assert-proven -- the run cannot go green without the program's
+# own output (`heap: wrote 1048576 bytes`, `gc: cycle completed`, `virelai-go
+# OK`), so `echo go-hello-done` is not what proves it ran. Residual risk is the
+# whole program runtime sitting inside the 1.5 s expect tail -- a flaky FAIL on
+# a loaded host, never a false pass. See tools/gate/SPEC.md (exec ordering).
+
 vgate_name go-hello "issue #1163 GOOS=virelai phase 0a: gc Go runtime first target on VZ"
 vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE

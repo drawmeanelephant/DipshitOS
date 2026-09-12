@@ -1,0 +1,63 @@
+=== spec-order guard evidence -- claim #1193 ===
+revision: 58377996b9f40cab92ec45d2aa44daa0be412b02  branch: agent/buffy-execrace/fleet-exec-race  dirty-files: 0 (this evidence file excluded)
+date: 2026-09-12T17:29:18Z
+
+--- 1. guard over the real fleet (tools/gate/specs) -- as enforced by --check
+spec-order: 211 spec file(s) in tools/gate/specs; 3 declared exemption(s), 3 excused violation(s)
+  declared  go-hello.spec                      assert-proven    the run cannot go green without the program's
+  declared  live-chain.spec                    intentional      the script's only exec is `exec NOTEXIST.BIN`,
+  declared  live-jobs.spec                     self-sequenced   `fg 2` reaps STATUS43.BIN before the closing
+  excused   go-hello.spec                      run 01
+  excused   live-chain.spec                    run 01
+  excused   live-jobs.spec                     run 01
+spec-order: OK (no ungated echo-ended run, no file op racing an exec)
+[rc=0]
+
+--- 2. guard over the FAIL fixtures (expect rc=1)
+spec-order: 4 spec file(s) in tools/gate/fixtures/exec-order/fail; 0 declared exemption(s), 0 excused violation(s)
+  FAIL      bad-class.spec                     declaration class 'because-i-said-so' is not one of intentional|self-sequenced|timeout-ordered|assert-proven
+  VIOLATION bad-class.spec (run 01):
+            run 01 launches a program but ends on --script-expect 'fixture-done', which the script itself supplies, and no stage gate anchors the run on guest output: the VM stops while that program is still starting, so the run can pass without proof it ran. End the run on a program marker through a stage gate (--script-after/--script2-after/--script3-after/--input-string-after), or declare `# exec-order: <class> -- <reason>`.
+  VIOLATION exec-then-vf.spec (script script.txt):
+            `vf rm OUT.HTML` follows an exec in the same script: exec returns before the program runs, so the file operation can race that program's own writes (the #1188 shape). Split it into a later staged script, or declare `# exec-order: <class> -- <reason>`.
+  VIOLATION ungated-echo-end.spec (run 01):
+            run 01 launches a program but ends on --script-expect 'fixture-done', which the script itself supplies, and no stage gate anchors the run on guest output: the VM stops while that program is still starting, so the run can pass without proof it ran. End the run on a program marker through a stage gate (--script-after/--script2-after/--script3-after/--input-string-after), or declare `# exec-order: <class> -- <reason>`.
+  VIOLATION vacuous-gate.spec (run 01):
+            run 01 launches a program but ends on --script-expect 'fixture-go', which the script itself supplies, and no stage gate anchors the run on guest output: the VM stops while that program is still starting, so the run can pass without proof it ran. End the run on a program marker through a stage gate (--script-after/--script2-after/--script3-after/--input-string-after), or declare `# exec-order: <class> -- <reason>`.
+spec-order: FAIL -- 5 violation(s) need a fix or a declaration
+[rc=1]
+
+--- 3. guard over the PASS fixtures (expect rc=0)
+spec-order: 4 spec file(s) in tools/gate/fixtures/exec-order/pass; 2 declared exemption(s), 2 excused violation(s)
+  declared  declared-assert-proven.spec        assert-proven    the assert below reads program output, so the
+  declared  declared-self-sequenced.spec       self-sequenced   blocking `fg` reaps the jobs before the closing
+  excused   declared-assert-proven.spec        run 01
+  excused   declared-self-sequenced.spec       run 01
+spec-order: OK (no ungated echo-ended run, no file op racing an exec)
+[rc=0]
+
+--- 4. self-test teeth: mutate the guard so BOTH rules stop matching
+    (sed: anchor-gate excuse -> always true;  file-op rule -> never fires)
+    the mutated guard then reports OK on the real fleet -- and --check still fails,
+    naming every fixture that stopped tripping.
+
+inventory-gates --check: OK (docs/gate-fleet-inventory.md matches a fresh render)
+inventory-gates --check: OK (render is locale-invariant: LC_ALL=C == en_US.UTF-8)
+spec-order: 211 spec file(s) in tools/gate/specs; 3 declared exemption(s), 0 excused violation(s)
+  declared  go-hello.spec                      assert-proven    the run cannot go green without the program's
+  declared  live-chain.spec                    intentional      the script's only exec is `exec NOTEXIST.BIN`,
+  declared  live-jobs.spec                     self-sequenced   `fg 2` reaps STATUS43.BIN before the closing
+spec-order: OK (no ungated echo-ended run, no file op racing an exec)
+inventory-gates --check: spec-order self-test FAILED -- ungated-echo-end.spec no longer trips ('no stage gate' absent from its output).
+spec-order: 4 spec file(s) in tools/gate/fixtures/exec-order/fail; 0 declared exemption(s), 0 excused violation(s)
+  FAIL      bad-class.spec                     declaration class 'because-i-said-so' is not one of intentional|self-sequenced|timeout-ordered|assert-proven
+spec-order: FAIL -- 1 violation(s) need a fix or a declaration
+inventory-gates --check: spec-order self-test FAILED -- exec-then-vf.spec no longer trips ('follows an exec' absent from its output).
+spec-order: 4 spec file(s) in tools/gate/fixtures/exec-order/fail; 0 declared exemption(s), 0 excused violation(s)
+  FAIL      bad-class.spec                     declaration class 'because-i-said-so' is not one of intentional|self-sequenced|timeout-ordered|assert-proven
+spec-order: FAIL -- 1 violation(s) need a fix or a declaration
+inventory-gates --check: spec-order self-test FAILED -- vacuous-gate.spec no longer trips ('no stage gate' absent from its output).
+spec-order: 4 spec file(s) in tools/gate/fixtures/exec-order/fail; 0 declared exemption(s), 0 excused violation(s)
+  FAIL      bad-class.spec                     declaration class 'because-i-said-so' is not one of intentional|self-sequenced|timeout-ordered|assert-proven
+spec-order: FAIL -- 1 violation(s) need a fix or a declaration
+[mutated rc=1 expected]

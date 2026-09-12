@@ -1,0 +1,55 @@
+specs scanned                        : 211
+specs whose scripts launch a program : 142
+runs whose scripts launch a program  : 198
+   no-expect (timeout-ordered)         : 16
+   anchor gate, ends on script marker  : 82
+   ends on script marker, unanchored   : 3
+   ends on program marker (graded)     : 97
+   (sum check 198)
+
+runs the guard flags (need a declaration): 3
+   go-hello.spec                      run 01
+   live-chain.spec                    run 01
+   live-jobs.spec                     run 01
+
+scripts launching >1 program (one boot)  : 38
+   live-args.spec                     script.txt     exec=4
+   live-concurrent.spec               script.txt     exec=2
+   live-desktop.spec                  script.txt     exec=3
+   live-disas.spec                    script.txt     exec=2
+   live-ipc.spec                      script1.txt    exec=2
+   live-ipc.spec                      script2.txt    exec=7
+   live-jobs.spec                     script.txt     exec=2
+   live-long-lived.spec               script1.txt    exec=2
+   live-long-lived.spec               script2.txt    exec=2
+   live-m16-composition.spec          script2.txt    exec=2
+   live-m16-composition.spec          script3.txt    exec=7
+   live-m16-guards.spec               script.txt     exec=2
+   live-m16-resources.spec            script.txt     exec=9
+   live-net-offline.spec              a1.txt         exec=2
+   live-procs-syscall.spec            script.txt     exec=2
+   live-ps.spec                       script.txt     exec=2
+   live-sb2-shared-anon.spec          script.txt     exec=2
+   live-sb3-surface-handoff.spec      script.txt     exec=2
+   live-sb5-wm-compose-n.spec         script.txt     exec=2
+   live-sb6-perf-payoff.spec          script.txt     exec=3
+   live-scale.spec                    script.txt     exec=9
+   live-sched-ring.spec               script.txt     exec=2
+   live-smp-stress.spec               script.txt     exec=4
+   live-sys-kill.spec                 script1.txt    exec=2
+   live-tabclick.spec                 script-A.txt   exec=2
+   live-tabstrip.spec                 script-A.txt   exec=2
+   live-tabwm-alttab.spec             script.txt     exec=2
+   live-trust-caps.spec               script1.txt    exec=2
+   live-trust-caps.spec               script3.txt    exec=2
+   live-user-fs.spec                  script-B.txt   exec=2
+   live-vf.spec                       script-app.txt exec=2
+   live-wait.spec                     script1.txt    exec=2
+   live-wasm.spec                     script1.txt    exec=5
+   live-wm1.spec                      script.txt     exec=5
+   live-wm1.spec                      script2.txt    exec=3
+   live-wm3-taskbar.spec              script-B1.txt  exec=2
+   live-wm3-taskbar.spec              script-B2.txt  exec=2
+   live-wm4-paint.spec                script-A.txt   exec=2
+
+vf file-channel op after an exec        : 0

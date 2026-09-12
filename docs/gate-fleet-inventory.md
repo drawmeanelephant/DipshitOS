@@ -31,7 +31,7 @@
 | `tools/status/` | 6 | multiagent coordination gate + claim tooling (class A) |
 | `tools/context/` | 2 | context snapshot helpers |
 | `tools/ragshit/` | 84 | host-side context engine (developer tooling, not guest software) |
-| `tools/gate/` | 217 | M40 vgate harness + specs (GF2+) |
+| `tools/gate/` | 226 | M40 vgate harness + specs (GF2+) |
 
 ## Class-B fleet (discovered from the spec dir)
 
@@ -302,7 +302,7 @@ named in `.github/workflows/*.yml`; `st` = named in
 | `elf2bin.py` | 382 | tooling | n | n | n | n | Convert a Zig aarch64-freestanding ELF executable into the VirelaiOS flat |
 | `env-check.sh` | 259 | tooling | n | n | y | n | tools/env-check.sh -- source me at the start of every agent session. |
 | `inspect.sh` | 93 | tooling | y | n | n | n | inspect.sh -- report useful facts about the generated EFI binary and the |
-| `inventory-gates.sh` | 285 | tooling | n | n | n | n | inventory-gates.sh -- regenerate (or --check) the machine-generated gate |
+| `inventory-gates.sh` | 556 | tooling | n | n | n | n | inventory-gates.sh -- regenerate (or --check) the machine-generated gate |
 | `lint-workflows.sh` | 62 | tooling | y | n | y | n | lint-workflows.sh -- lint the GitHub Actions workflows (class A). |
 | `mkdyn-elf.py` | 1090 | tooling | n | n | n | y | Generate freestanding dynamic ELF binaries for VirelaiOS. |
 | `mkhello-elf.py` | 205 | tooling | n | n | n | n | Emit a minimal statically linked AArch64 ELF32 executable (M22 D1, issue #324). |
