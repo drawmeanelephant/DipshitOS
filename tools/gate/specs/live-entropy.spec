@@ -41,7 +41,8 @@ for l in lines:
         break
 if not m:
     sys.exit("FAIL: no boot ASLR stack line")
-if not (0x10000000 <= int(m.group(1), 16) < 0x80000000):
+# issue #1214: the ASLR band moved above the GOOS=virelai sbrk heap ceiling.
+if not (0x1_00000000 <= int(m.group(1), 16) < 0x2_00000000):
     sys.exit("FAIL: boot stack out of band: %s" % m.group(1))
 # `random 32`: exactly 64 lowercase hex chars after hex= (anchored).
 rline = next((l for l in lines if "random: n=32 hex=" in l), None)
@@ -79,7 +80,8 @@ for l in lines:
         break
 if not m:
     sys.exit("FAIL: no boot ASLR stack line")
-if not (0x10000000 <= int(m.group(1), 16) < 0x80000000):
+# issue #1214: the ASLR band moved above the GOOS=virelai sbrk heap ceiling.
+if not (0x1_00000000 <= int(m.group(1), 16) < 0x2_00000000):
     sys.exit("FAIL: boot stack out of band: %s" % m.group(1))
 rline = next((l for l in lines if "random: n=32 hex=" in l), None)
 if rline is None:

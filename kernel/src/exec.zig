@@ -776,9 +776,11 @@ fn exec_static_elf_gap(
             .stack_phys = stack_phys,
             .stack_pages = stack_pages,
             // Issue #1163: the gap layout's middle read-only segment
-            // (rodata) — freed with the rest at reap.
+            // (rodata) — freed with the rest at reap. Issue #1214: the
+            // segment's VA rides along so mmap_collides can protect it.
             .ro_phys = if (image.segment_count == 3) seg_phys[1] else 0,
             .ro_pages = if (image.segment_count == 3) seg_pages[1] else 0,
+            .ro_va = if (image.segment_count == 3) image.segments[1].vaddr else 0,
         },
         .{ .phys = kstack_phys, .pages = kstack_pages },
         principal,

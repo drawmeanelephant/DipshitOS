@@ -201,11 +201,19 @@ pub fn random_u64() u64 {
 // ---------------------------------------------------------------------------
 
 /// Pure placement function: map a 64-bit random value to a user stack VA in
-/// the ASLR band [0x1000_0000, 0x8000_0000) with 64 KiB placement
-/// granularity (page-aligned, far from `userspace.text_va` = 4 MiB).
+/// the ASLR band [0x1_0000_0000, 0x2_0000_0000) with 64 KiB placement
+/// granularity (page-aligned). The band sits ABOVE the identity-mapped RAM,
+/// the exec image apertures, and — since issue #1214 — the GOOS=virelai
+/// sbrk heap: the gc runtime reserves its heap contiguously upward from the
+/// image end (a hello-world already spans ~1.2 GiB of reservation), and a
+/// stack inside that span gets wiped by the runtime's own heap trims
+/// (memclrNoHeapPointers over a freed arena range). The old band
+/// [0x1000_0000, 0x8000_0000) overlapped that span for ~54% of placements —
+/// the go-args boot flake. handle_mmap's collision refusal (syscall.zig)
+/// makes any residual overlap an honest EINVAL instead of silent aliasing.
 pub fn stack_va_from_random(r: u64) u64 {
-    const band_base: u64 = 0x1000_0000;
-    const band_end: u64 = 0x8000_0000;
+    const band_base: u64 = 0x1_0000_0000;
+    const band_end: u64 = 0x2_0000_0000;
     const granularity: u64 = 0x1_0000;
     const slots = (band_end - band_base) / granularity;
     return band_base + (r % slots) * granularity;
@@ -340,15 +348,15 @@ test "csprng: ASLR stack placement stays in band, aligned, clear of text_va" {
     var r: u64 = 0;
     while (r < 997) : (r += 1) {
         const va = stack_va_from_random(r *% 0x9e3779b97f4a7c15);
-        try std.testing.expect(va >= 0x1000_0000);
-        try std.testing.expect(va < 0x8000_0000);
+        try std.testing.expect(va >= 0x1_0000_0000);
+        try std.testing.expect(va < 0x2_0000_0000);
         try std.testing.expect(va % 0x1_0000 == 0);
         try std.testing.expect(va != 0x0040_0000);
     }
     // Seeded path: a real call also lands in the band.
     seed(&[_]u8{0x5a} ** seed_len);
     const va = random_stack_va();
-    try std.testing.expect(va >= 0x1000_0000 and va < 0x8000_0000);
+    try std.testing.expect(va >= 0x1_0000_0000 and va < 0x2_0000_0000);
     try std.testing.expect(va % 0x1_0000 == 0);
 }
 

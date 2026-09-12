@@ -129,6 +129,13 @@ pub const Image = struct {
 pub const max_mmap_regions: usize = 16;
 pub const max_dynamic_pages: usize = 4096;
 
+/// ADR 0027 D1/D3: ONE process may carry several live tasks (the Go M:N
+/// mapping — every M is a kernel task bound to the SAME descriptor). The
+/// primary task is `task_id` (the exec'd creator); `thread_tasks` holds the
+/// extra slots created via `sys_thread` op 0. Bounded by the descriptor
+/// (the task pool bounds it further: 11 slots total).
+pub const max_threads: usize = 6;
+
 pub const MmapRegion = struct {
     base_va: u64 = 0,
     len: u64 = 0,
@@ -173,6 +180,9 @@ pub const AddrSpace = struct {
     /// declared vaddr; 0 = none.
     ro_phys: u64 = 0,
     ro_pages: u64 = 0,
+    /// User VA of the gap-layout rodata segment (issue #1214): recorded so
+    /// `mmap_collides` can protect it like text/data/stack. 0 = none.
+    ro_va: u64 = 0,
     /// Physical shared library staging/heap pages (claim 7921).
     lib_phys: u64 = 0,
     lib_pages: u64 = 0,
@@ -218,6 +228,22 @@ const Process = struct {
     /// reap, an exited process still names its last executor slot — the
     /// `procs` command prints `task=reaped` for exited rows regardless.
     task_id: ?usize = null,
+    /// ADR 0027 D1/D3: the EXTRA live tasks bound to this process (created
+    /// via `sys_thread` op 0). Null = free seat. Thread exit clears its
+    /// seat; the descriptor's task_id stays the ORIGINAL creator until the
+    /// process transitions to exited, at which point it names the LAST
+    /// exiting task (the slot whose reap frees the process pages,
+    /// `release_pages_on_reap`).
+    thread_tasks: [max_threads]?usize = [_]?usize{null} ** max_threads,
+    /// Live tasks on this process (primary + threads). The process dies
+    /// when this reaches 0 — `sys_exit`/fault request the exit and kill the
+    /// siblings; thread exit just decrements.
+    live_tasks: usize = 0,
+    /// ADR 0027 D2: a process exit REQUESTED via sys_exit/kill/fault while
+    /// sibling threads still run. The first request wins and snapshots the
+    /// status the process reports when the LAST task exits.
+    exit_requested: bool = false,
+    exit_status_snapshot: u64 = 0,
     /// Exit status, snapshotted at exit so it survives the task reap.
     exit_status: u64 = 0,
     /// Arc5 issue #246: per-process resource limits.
@@ -360,6 +386,47 @@ pub fn find_mmap_region(pid: usize, va: u64) ?*const MmapRegion {
     return null;
 }
 
+/// Issue #1214: does [va, va+len) overlap ANY region the process already
+/// owns — the exec apertures (text, rodata, data, stack) or a previously
+/// registered mmap region? handle_mmap refuses such mappings with EINVAL
+/// instead of aliasing them: the GOOS=virelai sbrk heap once swallowed the
+/// randomized stack aperture (its reservation spanned ~1.2 GiB upward from
+/// the image end), and the runtime's arena trims then memclr'd the live
+/// EL0 stack — the go-args boot flake. Both ranges are page-granular, so a
+/// plain end-of-one/start-of-next adjacency is NOT a collision.
+/// The mapped byte span of an exec aperture for `mmap_collides`: the
+/// page-rounded image length. The gap path's extra argv-headroom page (the
+/// data segment's `+1` page) is deliberately EXCLUDED — the GOOS=virelai
+/// sbrk heap starts at `memRound(firstmoduledata.end)`, which lands on that
+/// page by design, and nothing the image needs lives in it (the argv block
+/// itself fits inside the page-rounded image end).
+fn aperture_span(base: u64, byte_len: u64) u64 {
+    if (base == 0) return 0;
+    return (byte_len + 4095) & ~@as(u64, 4095);
+}
+
+pub fn mmap_collides(pid: usize, va: u64, len: u64) bool {
+    if (pid >= max_processes or processes[pid].state == .free) return true;
+    const space = &processes[pid].addr_space;
+    const start = va;
+    const end = va + len;
+    const apertures = [_]struct { base: u64, len: u64 }{
+        .{ .base = space.text_va, .len = aperture_span(space.text_va, space.text_len) },
+        .{ .base = space.ro_va, .len = space.ro_pages * 4096 },
+        .{ .base = space.data_va, .len = aperture_span(space.data_va, space.data_len) },
+        .{ .base = space.stack_va, .len = aperture_span(space.stack_va, space.stack_len) },
+    };
+    for (apertures) |ap| {
+        if (ap.len == 0) continue;
+        if (start < ap.base + ap.len and end > ap.base) return true;
+    }
+    for (&space.mmap_regions) |*r| {
+        if (r.len == 0) continue;
+        if (start < r.base_va + r.len and end > r.base_va) return true;
+    }
+    return false;
+}
+
 pub fn record_dynamic_page(pid: usize, pa: u64) bool {
     if (pid >= max_processes or processes[pid].state == .free) return false;
     var space = &processes[pid].addr_space;
@@ -452,7 +519,44 @@ pub fn bind(id: usize, task_id: usize) bool {
     // (a torn read that would route its work at the wrong process).
     processes[id].task_id = task_id;
     processes[id].state = .running;
+    processes[id].live_tasks = 1;
     return true;
+}
+
+/// ADR 0027 D3: bind ONE MORE task to a RUNNING process (a thread created
+/// via `sys_thread` op 0). The thread inherits the process's principal and
+/// address space; the descriptor bounds the count (`max_threads`) and the
+/// task pool bounds it further. Returns false for an invalid/stopped
+/// process, a full thread list, or a task already bound.
+pub fn bind_thread(id: usize, task_id: usize) bool {
+    if (id >= max_processes or processes[id].state != .running) return false;
+    if (processes[id].task_id == task_id) return false;
+    for (&processes[id].thread_tasks) |*t| {
+        if (t.* == task_id) return false;
+    }
+    for (&processes[id].thread_tasks) |*t| {
+        if (t.* == null) {
+            t.* = task_id;
+            processes[id].live_tasks += 1;
+            return true;
+        }
+    }
+    return false;
+}
+
+/// The primary task slot of a running process (its creator task), if any.
+pub fn primary_task(id: usize) ?usize {
+    if (id >= max_processes or processes[id].state != .running) return null;
+    return processes[id].task_id;
+}
+
+/// ADR 0027 D3: does the running process have a free thread seat?
+pub fn has_thread_capacity(id: usize) bool {
+    if (id >= max_processes or processes[id].state != .running) return false;
+    for (&processes[id].thread_tasks) |*t| {
+        if (t.* == null) return true;
+    }
+    return false;
 }
 
 /// Free a process descriptor. Only a non-running process may be reaped:
@@ -472,35 +576,75 @@ pub fn reap(id: usize) bool {
 
 /// Notify the registry that the task in slot `task_id` exited with
 /// `status` (called from the scheduler's `exit_current` — exception
-/// context, so this must stay console-free and allocation-free): the bound
-/// process becomes `exited`, snapshots its status, and marks the exit
-/// report pending (first one wins while undrained). Claim 4613: the
-/// binding to the executor slot is KEPT until the lifecycle reap frees the
-/// exited process's pages (`release_pages_on_reap`), so a `procs` read
-/// between exit and reap still shows the executor slot as `task=reaped`.
-/// A no-op (returns null) when no process is bound to that slot (kernel
-/// demo tasks never exit; user programs do). Card 4c (claim 9946): the
-/// returned pid lets the scheduler's exit path wake every task blocked in
-/// `sys_wait` on this process.
+/// context, so this must stay console-free and allocation-free).
+/// ADR 0027 D1/D2 (issue #1214 round): a process may carry several live
+/// tasks. This call decrements the live count; the process transitions to
+/// `exited` only when the LAST task leaves. `request_process_exit`
+/// snapshots the status the process will report (the first sys_exit /
+/// fault / kill wins) — the last task out uses it, so a dying process's
+/// waiters observe the REQUESTED status, not some sibling's. The process
+/// keeps the exiting slot in `task_id` for the lifecycle reap to free the
+/// owned pages. Returns the pid on the process-exit transition (so the
+/// scheduler wakes `sys_wait` waiters), null otherwise. No-op for a task
+/// bound to no live process.
 pub fn on_task_exit(task_id: usize, status: u64) ?usize {
     var id: usize = 0;
     while (id < max_processes) : (id += 1) {
         if (processes[id].state != .running) continue;
-        if (processes[id].task_id != task_id) continue;
+        const is_primary = processes[id].task_id == task_id;
+        var is_thread = false;
+        for (&processes[id].thread_tasks) |*t| {
+            if (t.* == task_id) {
+                t.* = null;
+                is_thread = true;
+                break;
+            }
+        }
+        if (!is_primary and !is_thread) continue;
+        processes[id].live_tasks -= 1;
+        if (processes[id].live_tasks > 0) {
+            // A thread (or the primary with threads still alive) left. If
+            // the PRIMARY left, clear its slot so `find_by_task` never
+            // matches a dead primary while the descriptor stays running.
+            if (is_primary) processes[id].task_id = null;
+            return null;
+        }
+        // LAST task out: the process dies. The exit status is the FIRST
+        // requested exit status (sys_exit/fault/kill snapshot) when one was
+        // requested, else this task's own status (a pure thread-model exit
+        // of the last task).
+        const final_status: u64 = if (processes[id].exit_requested)
+            processes[id].exit_status_snapshot
+        else
+            status;
         processes[id].state = .exited;
-        processes[id].exit_status = status;
-        // Claim 4613: keep the executor slot on the exited process so the
-        // lifecycle reap can find it and free its owned pages (the slot
-        // itself is a zombie until the idle task reaps it). Cleared by
-        // `release_pages_on_reap`.
+        processes[id].exit_status = final_status;
+        // Claim 4613: the lifecycle reap keys the page release on the LAST
+        // exiting task's slot.
+        processes[id].task_id = task_id;
         // Card 3d (claim 1014): EVERY exit is queued — two exits in one
         // idle-loop window print as two lines in order (the old
         // first-wins-while-undrained flag collapsed them). A full ring
         // drops the oldest to admit the newest.
-        push_exit_report(processes[id].name_buf[0..processes[id].name_len], status);
+        push_exit_report(processes[id].name_buf[0..processes[id].name_len], final_status);
         return id;
     }
     return null;
+}
+
+/// ADR 0027 D2: request the WHOLE process to die (a `sys_exit`, fault, or
+/// kill on any task of a multi-task process). The first request wins and
+/// snapshots the status; the scheduler arms the sibling tasks' kills (its
+/// responsibility — it owns the task states). Single-task processes set
+/// the same state and exit with their own status immediately, so this is
+/// behavior-neutral for every pre-thread shape.
+pub fn request_process_exit(task_id: usize, status: u64) ?usize {
+    const id = find_by_task(task_id) orelse return null;
+    if (!processes[id].exit_requested) {
+        processes[id].exit_requested = true;
+        processes[id].exit_status_snapshot = status;
+    }
+    return id;
 }
 
 /// Free the allocator-backed pages of the exited process that last ran on
@@ -544,12 +688,16 @@ pub fn current() ?usize {
     return current_id;
 }
 
-/// The process currently bound to pool slot `task_id`, if any.
+/// The process currently bound to pool slot `task_id`, if any — the
+/// PRIMARY executor slot or one of its ADR 0027 thread slots.
 pub fn find_by_task(task_id: usize) ?usize {
     var id: usize = 0;
     while (id < max_processes) : (id += 1) {
         if (processes[id].state != .running) continue;
         if (processes[id].task_id == task_id) return id;
+        for (&processes[id].thread_tasks) |*t| {
+            if (t.* == task_id) return id;
+        }
     }
     return null;
 }
@@ -577,6 +725,10 @@ pub const ProcessInfo = struct {
     root_phys: u64,
     text_phys: u64,
     text_pages: u64,
+    /// ADR 0027 D3 (issue #1214 round 2): the executable aperture's user VA
+    /// span — sys_thread create validates the child PC against it.
+    text_va: u64 = 0,
+    text_len: u64 = 0,
     data_va: u64,
     data_len: u64,
     data_phys: u64,
@@ -647,6 +799,8 @@ pub fn info(id: usize) ?ProcessInfo {
         .root_phys = p.addr_space.root_phys,
         .text_phys = p.addr_space.text_phys,
         .text_pages = p.addr_space.text_pages,
+        .text_va = p.addr_space.text_va,
+        .text_len = p.addr_space.text_len,
         .data_va = p.addr_space.data_va,
         .data_len = p.addr_space.data_len,
         .data_phys = p.addr_space.data_phys,

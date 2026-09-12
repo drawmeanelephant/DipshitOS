@@ -70,7 +70,7 @@ gate-list:
 # First run takes several minutes (one Go make.bash pass; the second
 # cross-std pass is phase-2 opt-in via GOVIRELAI_STD=1).
 go-toolchain:
-    bash tools/go/build-go.sh tools/go/hello.go tools/go/goargs.go
+    bash tools/go/build-go.sh tools/go/hello.go tools/go/goargs.go tools/go/goroutines.go
 
 # Compile the AArch64 UEFI application and kernel image (class A — zig build)
 build:
