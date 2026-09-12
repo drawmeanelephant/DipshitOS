@@ -59,6 +59,16 @@ fn historyEntry(ctx: ?*anyopaque, i: usize) ?[]const u8 {
     return g_editor.history[i][0..g_editor.hist_len[i]];
 }
 
+/// M50 TS1 (#1135): the calling process's principal via slot 68, for the
+/// `whoami`/`id` builtins. The kernel assigns it; nothing here can change it.
+/// Mirrors the `SH.BIN` glue (`user/src/sh.zig`) so identity is consistent
+/// across both shell presentations.
+fn principalGet(ctx: ?*anyopaque) ?shell_mod.Principal {
+    _ = ctx;
+    const p = abi.principal() orelse return null;
+    return .{ .uid = p.uid, .caps = p.caps };
+}
+
 fn dirNameLen(name: *const [32]u8) usize {
     var n: usize = 0;
     while (n < name.len and name[n] != 0) n += 1;
@@ -286,6 +296,9 @@ pub export fn _start(argc: u64, argv_va: u64) callconv(.c) noreturn {
     g_shell = shell_mod.Shell.init();
     _ = g_shell.prompt.set("term> ");
     g_shell.history = .{ .count_fn = historyCount, .entry_fn = historyEntry };
+    // M50 TS1 (#1135): `whoami`/`id` read the caller's principal through
+    // slot 68 (same wiring as SH.BIN).
+    g_shell.principal = .{ .get_fn = principalGet };
     g_editor = .{};
 
     var session = tty.Session.open() orelse {

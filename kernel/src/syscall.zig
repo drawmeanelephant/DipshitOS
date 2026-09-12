@@ -102,7 +102,7 @@ pub const slot_count: usize = 128;
 /// M26 N2 (issue #400): slot 62 is the net-stats snapshot.
 /// M29 (issue #598): slots 63/64 are sys_mmap/sys_munmap.
 /// M32 WMS2 (issue #622): slot 65 is sys_wmctl (ADR 0015).
-pub const implemented_count: usize = 68;
+pub const implemented_count: usize = 69;
 /// Card G6 (claim 0487) follow-on (slot 18): the fixed `sys_win_get` shape —
 /// four u32 LE words (x, y, w, h), 16 bytes, marshaled per call and copy_out'd
 /// through uaccess (the procs snapshot pattern).
@@ -295,6 +295,13 @@ pub const sys_time: u64 = 66;
 /// a0: 0 = detach, 1 = the serial console. The terminal seam's only new
 /// slot; terminal I/O itself reuses `sys_file_*`.
 pub const sys_tty_attach: u64 = 67;
+/// M50 TS1 (issue #1135, ADR 0024 D2/D10): `sys_principal(buf)` — slot 68.
+/// Copy the CALLING process's principal `{ u32 uid, u32 caps }` (8 bytes LE)
+/// OUT through uaccess. Read-only: there is no syscall to set uid/caps. The
+/// M50 trust milestone's first additive slot.
+pub const sys_principal: u64 = 68;
+/// The fixed `sys_principal` payload shape: two u32 LE words (uid, caps).
+pub const principal_bytes: usize = 8;
 
 pub const ErrorCode = enum(i64) {
     einval = -1,
@@ -339,6 +346,9 @@ pub var strace_pid: ?usize = null;
 /// Card 4a (claim 5799): fixed BSS scratch for the process snapshot —
 /// `max_processes` rows × 40 bytes, marshaled per call, no allocation.
 var procs_scratch: [process.max_processes * process.snapshot_row_bytes]u8 = undefined;
+/// M50 TS1 (#1135): fixed BSS scratch for the `sys_principal` reply — two
+/// u32 LE words (uid, caps), marshaled per call, no allocation.
+var principal_scratch: [principal_bytes]u8 = undefined;
 /// Card N6 (claim 1384): fixed BSS scratch for the UDP send payload and
 /// the recv peek — `payload_max` / `datagram_max` bytes, marshaled per
 /// call, no allocation (the ipc staging pattern).
@@ -452,6 +462,8 @@ pub fn ensure_table() *const [slot_count]Entry {
         table_storage[sys_time] = .{ .name = "sys_time", .handler = handle_time };
         // #1072 (ADR 0020): slot 67 — sys_tty_attach (terminal front-end).
         table_storage[sys_tty_attach] = .{ .name = "sys_tty_attach", .handler = handle_tty_attach };
+        // M50 TS1 (#1135, ADR 0024 D10): slot 68 — sys_principal.
+        table_storage[sys_principal] = .{ .name = "sys_principal", .handler = handle_principal };
         table_ready = true;
     }
     return &table_storage;
@@ -493,7 +505,7 @@ fn doms_of(number: u64) u5 {
         sys_exec => f | k,
         sys_win_open, sys_win_fill, sys_win_present, sys_win_close, sys_win_move, sys_win_raise, sys_win_get, sys_win_query, sys_win_set_visible, sys_win_fill_batch, sys_win_resize, 48, sys_win_raise_front, sys_win_lower_back, 52, sys_win_set_unsaved, sys_win_set_title, sys_drag_read, sys_font_size => w,
         sys_ipc_send, sys_ipc_recv, sys_poll_event, sys_wait_event, sys_timer_set, sys_timer_cancel, sys_notify, sys_wmctl => e,
-        sys_procs, sys_wait, sys_kill, sys_clipboard_set, sys_clipboard_get, sys_audio_info, sys_audio_play, sys_audio_volume, sys_audio_mute, sys_pipe_read, sys_pipe_write, 54, sys_mmap, sys_munmap, sys_time, sys_tty_attach => k,
+        sys_procs, sys_wait, sys_kill, sys_clipboard_set, sys_clipboard_get, sys_audio_info, sys_audio_play, sys_audio_volume, sys_audio_mute, sys_pipe_read, sys_pipe_write, 54, sys_mmap, sys_munmap, sys_time, sys_tty_attach, sys_principal => k,
         sys_exit => svclock.all_bits,
         else => 0,
     };
@@ -801,6 +813,25 @@ fn handle_procs(args: Args, _: *exceptions.VectorFrame) u64 {
     if (take_bytes == 0) return 0;
     if (uaccess.copy_out(address, procs_scratch[0..take_bytes], take_bytes) != .ok) return error_result(.efault);
     return take_bytes / process.snapshot_row_bytes;
+}
+
+// ---------------------------------------------------------------------------
+// M50 TS1 (issue #1135, ADR 0024 D2/D10): sys_principal — slot 68
+// ---------------------------------------------------------------------------
+
+/// `sys_principal(buf)`: copy the CALLING process's principal
+/// `{ u32 uid, u32 caps }` (8 bytes LE) OUT through uaccess. READ-ONLY —
+/// there is no counterpart that sets uid/caps, because only the kernel
+/// assigns a principal (ADR 0024 D2/D5); the process must itself be a
+/// process (an EL1h task is `EINVAL`). `EFAULT` for a bad buffer.
+fn handle_principal(args: Args, _: *exceptions.VectorFrame) u64 {
+    const address = args[0];
+    const pid = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    const pr = process.principal(pid) orelse return error_result(.einval);
+    std.mem.writeInt(u32, principal_scratch[0..4], pr.uid, .little);
+    std.mem.writeInt(u32, principal_scratch[4..8], pr.caps, .little);
+    if (uaccess.copy_out(address, &principal_scratch, principal_bytes) != .ok) return error_result(.efault);
+    return principal_bytes;
 }
 
 // ---------------------------------------------------------------------------
@@ -1896,12 +1927,16 @@ fn handle_exec(args: Args, _: *exceptions.VectorFrame) u64 {
     // max (the ESP 8.3 window is gone).
     if (path_len == 0 or path_len > virtio_file.path_max) return error_result(.einval);
     // The caller must be a process (an EL1h task cannot exec from EL0).
-    _ = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    const caller = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
 
     var path_buf: [virtio_file.path_max]u8 = undefined;
     if (uaccess.copy_in(&path_buf, path_ptr, @intCast(path_len)) != .ok) return error_result(.efault);
 
-    const res = esp_exec.exec_file(path_buf[0..path_len], &.{});
+    // M50 TS1 (#1135, ADR 0024 D2): exec PRESERVES the caller's principal —
+    // no setuid semantics, no elevation path. The spawned process inherits
+    // the caller's uid and caps.
+    const principal = process.principal(caller) orelse process.default_principal;
+    const res = esp_exec.exec_file_as(path_buf[0..path_len], &.{}, principal);
     return switch (res) {
         .ok => blk: {
             // The pid is set at the loader's success point; a missing

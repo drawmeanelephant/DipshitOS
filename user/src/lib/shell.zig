@@ -311,6 +311,35 @@ pub const HistoryView = struct {
 };
 
 // ---------------------------------------------------------------------------
+// M50 TS1 (issue #1135, ADR 0024 D2): the process principal view.
+// ---------------------------------------------------------------------------
+
+/// ADR 0024 D1: the two principal ids (`uid_system` = the kernel's
+/// authority, `uid_user` = every EL0 process). Mirrored from the kernel; the
+/// userland module graph cannot reach `kernel/src/process.zig`.
+pub const uid_system: u32 = 0;
+pub const uid_user: u32 = 1000;
+
+/// A process principal (uid + caps). Assigned by the kernel at spawn and
+/// preserved by exec; no syscall can change it.
+pub const Principal = struct {
+    uid: u32 = uid_user,
+    caps: u32 = 0,
+};
+
+/// The shell's read-only view of the calling process's principal. The glue
+/// (`user/src/sh.zig`) fills it from `sys_principal`; host tests supply a
+/// fake so the builtins stay pure.
+pub const PrincipalView = struct {
+    ctx: ?*anyopaque = null,
+    get_fn: ?*const fn (?*anyopaque) ?Principal = null,
+
+    pub fn get(self: PrincipalView) ?Principal {
+        return if (self.get_fn) |f| f(self.ctx) else null;
+    }
+};
+
+// ---------------------------------------------------------------------------
 // Variable expansion.
 // ---------------------------------------------------------------------------
 
@@ -530,6 +559,8 @@ pub const Builtin = enum {
     read_,
     break_,
     continue_,
+    whoami,
+    id_,
 };
 
 /// Builtin lookup by verb (the system command boundary, ADR 0021 D3).
@@ -548,7 +579,8 @@ pub fn classify(verb: []const u8) ?Builtin {
         .{ ".", Builtin.source },           .{ "jobs", Builtin.jobs },
         .{ "fg", Builtin.fg },              .{ "monitor", Builtin.monitor_ },
         .{ "read", Builtin.read_ },         .{ "break", Builtin.break_ },
-        .{ "continue", Builtin.continue_ },
+        .{ "continue", Builtin.continue_ }, .{ "whoami", Builtin.whoami },
+        .{ "id", Builtin.id_ },
     };
     inline for (table) |row| {
         if (std.mem.eql(u8, verb, row[0])) return row[1];
@@ -559,12 +591,12 @@ pub fn classify(verb: []const u8) ?Builtin {
 /// The builtin verbs, in the order `help` advertises them. Public so the
 /// completion source can offer them without duplicating the list.
 pub const builtin_names = [_][]const u8{
-    "alias",  "break", "cat",     "cd",      "continue", "cut",      "echo",
-    "env",    "exit",  "export",  "false",   "fg",       "fn",       "grep",
-    "head",   "help",  "history", "jobs",    "monitor",  "printenv", "printf",
-    "prompt", "pwd",   "read",    "set",     "sort",     "source",   "tail",
-    "test",   "true",  "type",    "unalias", "unset",    "wc",       "which",
-    "[",
+    "alias",  "break",  "cat",     "cd",    "continue", "cut",     "echo",
+    "env",    "exit",   "export",  "false", "fg",       "fn",      "grep",
+    "head",   "help",   "history", "id",    "jobs",     "monitor", "printenv",
+    "printf", "prompt", "pwd",     "read",  "set",      "sort",    "source",
+    "tail",   "test",   "true",    "type",  "unalias",  "unset",   "wc",
+    "which",  "whoami", "[",
 };
 
 pub const completion_max: usize = 32;
@@ -731,6 +763,9 @@ pub const Shell = struct {
     last_status: u8 = 0,
     out: Buf(out_max) = .{},
     history: HistoryView = .{},
+    /// M50 TS1 (#1135): the calling process's principal (uid/caps) for
+    /// `whoami`/`id`. The glue fills it from `sys_principal`.
+    principal: PrincipalView = .{},
     /// Bound stdin for `cat` (a pipe or `<` redirect); empty = none.
     stdin: []const u8 = &.{},
     /// SH5 shell functions (`fn NAME(args) { ... }`).
@@ -1190,7 +1225,7 @@ pub const Shell = struct {
                 return .none;
             },
             .help => {
-                self.emitLine("builtins: echo pwd cd exit env set unset export printenv alias unalias history prompt type which true false help source jobs fg monitor read");
+                self.emitLine("builtins: echo pwd cd exit env set unset export printenv alias unalias history prompt type which true false help source jobs fg monitor read whoami id");
                 self.emitLine("tools: head tail wc grep sort cut test [ printf");
                 self.last_status = 0;
                 return .print;
@@ -1254,6 +1289,37 @@ pub const Shell = struct {
                 self.loop_continue = true;
                 self.last_status = 0;
                 return .none;
+            },
+            .whoami => {
+                // M50 TS1 (#1135): the calling process's principal, read
+                // through slot 68 (the glue supplies the view).
+                if (self.principal.get()) |p| {
+                    self.emit("uid=");
+                    self.emitNum(p.uid);
+                    self.emitLine(if (p.uid == uid_system) " system" else " user");
+                    self.last_status = 0;
+                } else {
+                    self.emitLine("whoami: no principal");
+                    self.last_status = 1;
+                }
+                return .print;
+            },
+            .id_ => {
+                // M50 TS1 (#1135): `id` adds the capability mask — the
+                // class-B gate asserts uid=1000/caps=0 agree with whoami.
+                if (self.principal.get()) |p| {
+                    self.emit("uid=");
+                    self.emitNum(p.uid);
+                    self.emit(if (p.uid == uid_system) " system" else " user");
+                    self.emit(" caps=");
+                    self.emitNum(p.caps);
+                    self.emitLine("");
+                    self.last_status = 0;
+                } else {
+                    self.emitLine("id: no principal");
+                    self.last_status = 1;
+                }
+                return .print;
             },
         }
     }
@@ -1677,4 +1743,32 @@ test "shell: break/continue set the loop signals" {
     try std.testing.expect(!s.loop_break);
     s.clearLoopFlags();
     try std.testing.expect(!s.loop_break and !s.loop_continue);
+}
+
+fn testPrincipalGet(ctx: ?*anyopaque) ?Principal {
+    const p: *const Principal = @ptrCast(@alignCast(ctx.?));
+    return p.*;
+}
+
+test "shell: whoami/id render the principal from the view (M50 TS1)" {
+    var s = Shell.init();
+    var p = Principal{ .uid = uid_user, .caps = 0 };
+    s.principal = .{ .ctx = &p, .get_fn = testPrincipalGet };
+    _ = s.execute("whoami", &.{});
+    try std.testing.expectEqualStrings("uid=1000 user\n", s.outSlice());
+    _ = s.execute("id", &.{});
+    try std.testing.expectEqualStrings("uid=1000 user caps=0\n", s.outSlice());
+    // A kernel principal renders as `system`, not `user`.
+    p = .{ .uid = uid_system, .caps = 3 };
+    _ = s.execute("whoami", &.{});
+    try std.testing.expectEqualStrings("uid=0 system\n", s.outSlice());
+    _ = s.execute("id", &.{});
+    try std.testing.expectEqualStrings("uid=0 system caps=3\n", s.outSlice());
+    // No principal view wired: an honest refusal, never a fabricated identity.
+    var bare = Shell.init();
+    _ = bare.execute("whoami", &.{});
+    try std.testing.expectEqualStrings("whoami: no principal\n", bare.outSlice());
+    // `type` recognizes the new builtins.
+    try std.testing.expectEqual(Builtin.whoami, classify("whoami").?);
+    try std.testing.expectEqual(Builtin.id_, classify("id").?);
 }

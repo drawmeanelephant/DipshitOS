@@ -890,3 +890,21 @@ reserved 68–127). No existing number, argument, result, or error code changes.
 Verified class-A (terminal/seam/syscall host tests) and class-B
 (`live-ttyecho`: an EL0 pilot opens `/dev/tty`, attaches the console, and
 echoes a scripted line back through the serial log).
+
+### Amendment (2026-09-11, #1135 — slot 68 `sys_principal`, the principal report)
+
+M50 TS1 (ADR 0024 D2/D10) adds the trust milestone's first slot: **68** =
+`sys_principal(buf)`, copying the CALLING process's principal
+`{ u32 uid, u32 caps }` (8 bytes, little-endian) OUT through uaccess and
+returning `principal_bytes` = **8** on success. It is
+strictly **read-only**: the kernel assigns a process's uid/caps at
+`process.create` (default `uid_user = 1000`, no caps), `exec` preserves them,
+and there is no syscall that can set or raise either (ADR 0024 D2/D5).
+`EINVAL` for a non-process caller (an EL1h task); `EFAULT` for a bad buffer.
+`implemented_count` becomes **69** (rows 0–68; reserved 69–127). No existing
+number, argument, result, or error code changes; the 40-byte `sys_procs`
+snapshot row is byte-frozen (identity is additive, not a wire change). The
+EL1h monitor's `procs` report gains `uid=`/`caps=` columns read from the SAME
+descriptor field. Verified class-A (process/exec/syscall host tests) and
+class-B (`live-trust-whoami`: `whoami`/`id` agree with the monitor's `procs`
+row).
