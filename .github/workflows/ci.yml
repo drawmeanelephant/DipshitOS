@@ -105,6 +105,10 @@ jobs:
 
       - name: Verify the host-file-channel wire parity (class A — M34 HF1–HF4, kernel host tests + Swift host tests + fixture pins)
         run: bash tools/verify-vf-class-a.sh
+        env:
+          # verify-vf-class-a.sh also runs the coordination gate, which reads
+          # the live claim issues via `gh` — it needs the workflow token.
+          GH_TOKEN: ${{ github.token }}
 
       - name: Verify the gate-fleet inventory is current (class A — GF1 registration guard; a new script or spec must ship with a regenerated report)
         run: bash tools/inventory-gates.sh --check
