@@ -25,7 +25,7 @@ tracking each release. The maintenance surface here is deliberately tiny:
 | `overlay/internal/goos/zgoos_virelai.go` | generated GOOS consts (gengoos shape, hand-applied) |
 | `apply.sh` | copies a stock distribution + applies everything, idempotently, committing a git delta in the fork |
 | `build-go.sh` | runs the host make.bash pass on first use (the cross-std pass is `GOVIRELAI_STD=1` opt-in for phase 2), then links programs with `-ldflags "-s -w"` at the Go default base (the gap loader maps at declared vaddrs; stripped to fit the 2 MiB exec staging bound) |
-| `GOHELLO.GO` | the phase-0a first target: console + sbrk heap growth + a full GC cycle |
+| `hello.go` / `goargs.go` / `goroutines.go` | the class-B fixtures: console + sbrk heap growth + a full GC cycle; raw-ELF argv; goroutines + futex + the cross-core proof |
 
 ## Prerequisites
 
@@ -37,14 +37,15 @@ tracking each release. The maintenance surface here is deliberately tiny:
 
 ```bash
 bash tools/go/apply.sh            # create/patch the fork (../go-virelai)
-bash tools/go/build-go.sh         # toolchain + .build/go/GOHELLO.ELF
-                                   # (go-args needs both: add tools/go/goargs.go)
-just gate go-hello                # class-B VZ gate: execs it, asserts serial
+just go-toolchain                  # builds .build/go/{GOHELLO,GOARGS,GOROUT}.ELF
+just gate go-hello                 # class-B VZ gate: execs it, asserts serial
+just gate go-args                  # class-B VZ gate: raw-ELF argv
+just gate go-goroutines            # class-B VZ gate: threads/futex + cross-core
 ```
 
-**The go-hello gate is not hermetic**: `just verify-vz` includes it, and it
-refuses to run (honest setup failure) until
-`bash tools/go/build-go.sh` has produced `.build/go/GOHELLO.ELF`. The first
+**The Go-runtime gates are not hermetic**: `just verify-vz` includes them,
+and each refuses to run (honest setup failure) until
+`just go-toolchain` has produced its `.build/go/*.ELF` fixture. The first
 build takes several minutes (one `make.bash` pass; the cross-std pass is
 phase-2 opt-in via `GOVIRELAI_STD=1`); every Go release
 rebase re-runs `apply.sh` on a fresh distribution copy. Auto-building the
