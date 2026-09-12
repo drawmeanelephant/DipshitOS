@@ -1,0 +1,35 @@
+# oliver → native AArch64 ELF: build + loader-contract check (observed output)
+# host: 27.0 arm64; zig 0.16.0
+# regenerated 2026-09-12 after the pre-merge correction: the checker's
+# LOAD_MAX was stale at 256 KiB and now mirrors elf.load_max / exec_program_max
+# (512 KiB, kernel/src/elf.zig:145 / kernel/src/exec.zig:98) — issue #1177.
+
+$ python3 tools/check-zc-host-contract.py tests/oliver-spike/OLIVER.ELF
+PT_LOAD off=0x1000 va=0x400000 filesz=0x3cbc8 memsz=0x3cbc8 flags=0x5
+entry=0x402b1c phnum=1 file=253160 B
+CONTRACT OK
+rc=0
+
+$ shasum -a 256 tests/oliver-spike/OLIVER.ELF tests/oliver-spike/expect.html tests/oliver-spike/md-fixture.txt
+246c2a533f625d44f338706b7782bca618e80511bb9b4329d1c5f768bda4afc1  tests/oliver-spike/OLIVER.ELF
+540f240054ad929c7311f29d83e0432b01551300ab97f01cf2aaac82f76a390e  tests/oliver-spike/expect.html
+acbdb682ac243f4a9d2adf6111f1cd64ca99e7c86e7631755d01637c8a8011f7  tests/oliver-spike/md-fixture.txt
+
+# size ladder (native, aarch64-freestanding -O ReleaseSmall -fstrip)
+# cap = 512 KiB = 524288 B (elf.load_max / exec.exec_program_max)
+OLIVER.ELF (real tool: parse+render+file io)   253160 B file / 248776 B p_memsz = 47.5% of cap
+sizeprobe-parse-only.ELF (document+markdown)   174592 B  2 PT_LOAD
+sizeprobe-render-only.ELF (document+html)      87040 B  2 PT_LOAD
+
+$ python3 tools/check-zc-host-contract.py /tmp/probe-render-only.ELF   # adjacency failure retained (gap report B2)
+CONTRACT FAIL: data base 0x4142a0 != text_base + p_memsz[0] (0x414298)
+PT_LOAD off=0x1000 va=0x400000 filesz=0x14298 memsz=0x14298 flags=0x5
+PT_LOAD off=0x152a0 va=0x4142a0 filesz=0x0 memsz=0x10400 flags=0x6
+entry=0x402328 phnum=2 file=87040 B
+rc=1
+$ python3 tools/check-zc-host-contract.py /tmp/probe-parse-only.ELF
+CONTRACT FAIL: data base 0x4298a0 != text_base + p_memsz[0] (0x42989a)
+PT_LOAD off=0x1000 va=0x400000 filesz=0x2989a memsz=0x2989a flags=0x5
+PT_LOAD off=0x2a8a0 va=0x4298a0 filesz=0x0 memsz=0x10000 flags=0x6
+entry=0x400000 phnum=2 file=174592 B
+rc=1

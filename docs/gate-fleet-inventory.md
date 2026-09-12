@@ -20,8 +20,8 @@
 | with a just recipe | 12 |
 | in the class-B fleet (spec dir / legacy script) | 4 |
 | named in a GitHub workflow | 7 |
-| named in docs/status.md | 7 |
-| **orphans (gate-class, registered nowhere)** | **11** |
+| named in docs/status.md | 8 |
+| **orphans (gate-class, registered nowhere)** | **10** |
 
 ## Subdirectory tooling (not gates)
 
@@ -31,7 +31,7 @@
 | `tools/status/` | 6 | multiagent coordination gate + claim tooling (class A) |
 | `tools/context/` | 2 | context snapshot helpers |
 | `tools/ragshit/` | 84 | host-side context engine (developer tooling, not guest software) |
-| `tools/gate/` | 212 | M40 vgate harness + specs (GF2+) |
+| `tools/gate/` | 213 | M40 vgate harness + specs (GF2+) |
 
 ## Class-B fleet (discovered from the spec dir)
 
@@ -137,6 +137,7 @@ of them with `just verify-vz`.
 | spec | `live-net-udp` | 4 run / 28 assert | live-net-udp.spec -- UDP live on VZ. Mirrors |
 | spec | `live-net-udp-syscall` | 1 run / 15 assert | live-net-udp-syscall.spec -- the UDP syscall seam from EL0: UDP.BIN |
 | spec | `live-netstat` | 1 run / 8 assert | live-netstat.spec -- NETSTAT.BIN dashboard sections live: iface, |
+| spec | `live-oliver` | 1 run / 11 assert | live-oliver.spec -- a REAL Zig HTML tool (oliver) as a native AArch64 ELF |
 | spec | `live-pipe` | 1 run / 5 assert | live-pipe.spec -- the pipe operator: left-echo output travels through |
 | spec | `live-pointer-cg` | 0 run / 0 assert | live-pointer-cg.spec -- milestone eight card U4 (claim 4993) CG |
 | spec | `live-pointer-virtio` | 1 run / 9 assert | live-pointer-virtio.spec -- claim 9367 (issue #523 item 3 |
@@ -270,7 +271,6 @@ Gate-class scripts with no just recipe, no fleet membership, and no
 status.md row:
 
 - `audit-vz-irq-api.sh`
-- `check-zc-host-contract.py`
 - `probe-pointer-routes.sh`
 - `test-unicode-torture.sh`
 - `verify-fw-mmu-capture.sh`
@@ -293,12 +293,12 @@ named in `.github/workflows/*.yml`; `st` = named in
 | `_va-scripting.sh` | 133 | tooling | n | n | n | n | verify-live-scripting.sh -- milestone-eighteen card T16 class-B gate |
 | `audit-vz-irq-api.sh` | 46 | D | n | n | n | n | Record the selected Xcode/macOS SDK's public host interrupt surface. |
 | `build-zc-host.sh` | 81 | tooling | n | n | n | n | build-zc-host.sh -- Z4b (issue #761) host link contract: the target recipe. |
-| `check-zc-host-contract.py` | 112 | A | n | n | n | n | Z4b (issue #761): check an ELF against the VirelaiOS static-loader contract. |
+| `check-zc-host-contract.py` | 116 | A | n | n | n | y | Z4b (issue #761): check an ELF against the VirelaiOS static-loader contract. |
 | `decode-screen-glyphs.py` | 538 | tooling | n | n | n | n | decode-screen-glyphs.py -- decode a captured framebuffer PNG against the |
 | `elf2bin.py` | 382 | tooling | n | n | n | n | Convert a Zig aarch64-freestanding ELF executable into the VirelaiOS flat |
 | `env-check.sh` | 259 | tooling | n | n | y | n | tools/env-check.sh -- source me at the start of every agent session. |
 | `inspect.sh` | 93 | tooling | y | n | n | n | inspect.sh -- report useful facts about the generated EFI binary and the |
-| `inventory-gates.sh` | 227 | tooling | n | n | n | n | inventory-gates.sh -- regenerate (or --check) the machine-generated gate |
+| `inventory-gates.sh` | 285 | tooling | n | n | n | n | inventory-gates.sh -- regenerate (or --check) the machine-generated gate |
 | `lint-workflows.sh` | 62 | tooling | y | n | y | n | lint-workflows.sh -- lint the GitHub Actions workflows (class A). |
 | `mkdyn-elf.py` | 1090 | tooling | n | n | n | y | Generate freestanding dynamic ELF binaries for VirelaiOS. |
 | `mkhello-elf.py` | 205 | tooling | n | n | n | n | Emit a minimal statically linked AArch64 ELF32 executable (M22 D1, issue #324). |
