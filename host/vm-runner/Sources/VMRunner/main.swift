@@ -561,6 +561,16 @@ var netTcpRespondHostPort: UInt16?
 // deterministic data black hole for the gate's retransmission-bound
 // run). Default (no suffix) = the full N10 responder.
 var netTcpRespondHandshakeOnly = false
+// M51 SSH1 (#1168): the optional `:packet` responder mode — after the
+// handshake, page a caller-supplied byte payload out as ≤chunk-byte TCP
+// segments, one per guest ACK. This is the deterministic peer the
+// `live-ssh-packet` gate needs: the guest's kernel RX is one 192-byte slot
+// with no reassembly, so the host MUST pace (blast several segments and the
+// guest drops all but the first; the host has no retransmission).
+var netTcpRespondPacketMode = false
+var netTcpRespondPacketPayload: [UInt8] = []
+var netTcpRespondPacketChunk: Int = 192
+var netTcpRespondPacketIndex = 0
 // The responder's per-connection state: the server's next sequence
 // number. The FIXED server ISN (gate-assertable); a new SYN resets the
 // state — ONE connection at a time (the guest's ONE client state
@@ -931,17 +941,22 @@ while idx < arguments.count {
         // (host-ip:host-port). Card N11 (claim 5357): an optional
         // `:handshake` suffix selects the handshake-only responder (SYN
         // -> SYN-ACK, then silent on data/FIN — the gate's deterministic
-        // black hole). Parse now (fail early, like --timeout).
+        // black hole). M51 SSH1 (#1168): a `:packet` suffix selects the
+        // paced packet responder (see --net-tcp-respond-payload). Parse now
+        // (fail early, like --timeout).
         let token = arguments[idx + 1]
         let halves = token.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false)
         guard halves.count >= 2, let port = UInt16(halves[1]) else {
-            fail("--net-tcp-respond requires <host-ip>:<host-port>[:handshake], got '\(token)'.")
+            fail("--net-tcp-respond requires <host-ip>:<host-port>[:handshake|packet], got '\(token)'.")
         }
         if halves.count == 3 {
-            guard halves[2] == "handshake" else {
-                fail("--net-tcp-respond mode must be 'handshake', got '\(halves[2])'.")
+            if halves[2] == "handshake" {
+                netTcpRespondHandshakeOnly = true
+            } else if halves[2] == "packet" {
+                netTcpRespondPacketMode = true
+            } else {
+                fail("--net-tcp-respond mode must be 'handshake' or 'packet', got '\(halves[2])'.")
             }
-            netTcpRespondHandshakeOnly = true
         }
         let parts = halves[0].split(separator: ".").compactMap { UInt8($0) }
         guard parts.count == 4 else {
@@ -949,6 +964,20 @@ while idx < arguments.count {
         }
         netTcpRespondHostIP = parts
         netTcpRespondHostPort = port
+        idx += 2
+    } else if arg == "--net-tcp-respond-payload", idx + 1 < arguments.count {
+        // M51 SSH1 (#1168): the byte payload the `:packet` mode paces out.
+        do {
+            netTcpRespondPacketPayload = [UInt8](try Data(contentsOf: URL(fileURLWithPath: arguments[idx + 1])))
+        } catch {
+            fail("--net-tcp-respond-payload could not read file '\(arguments[idx + 1])': \(error).")
+        }
+        idx += 2
+    } else if arg == "--net-tcp-respond-chunk", idx + 1 < arguments.count {
+        guard let n = Int(arguments[idx + 1]), n >= 1, n <= 192 else {
+            fail("--net-tcp-respond-chunk requires 1..192 bytes, got '\(arguments[idx + 1])'.")
+        }
+        netTcpRespondPacketChunk = n
         idx += 2
     } else if arg == "--net-tcp-connect", idx + 1 < arguments.count {
         // SH7 (#1083, ADR 0020 Amendment B): the host-initiated inbound TCP
@@ -1321,6 +1350,10 @@ if netDhcpRespondLeaseIP != nil, netCapturePath == nil {
 if netTcpRespondHostIP != nil, netCapturePath == nil {
     fail("--net-tcp-respond requires --net (the TCP reply is written into the SAME attachment's socket).")
 }
+// M51 SSH1 (#1168): the paced packet mode needs a payload to send.
+if netTcpRespondPacketMode, netTcpRespondPacketPayload.isEmpty {
+    fail("--net-tcp-respond :packet requires --net-tcp-respond-payload <file>.")
+}
 if netTcpConnectGuestIP != nil, netCapturePath == nil {
     fail("--net-tcp-connect requires --net (the client frames are written into the SAME attachment's socket).")
 }
@@ -1494,6 +1527,7 @@ if let netCapturePath {
                     print("NET-TCP: observed the guest's RST (seq 0x\(hex32(seq)))")
                 } else if isSyn {
                     netTcpSrvNxt = netTcpSrvIsn &+ 1
+                    netTcpRespondPacketIndex = 0
                     let replyLen = buildTcpReply(&reply, buf, n, arpHostMAC, hostPort, netTcpSrvIsn, seq &+ 1, 0x12, payload)
                     try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<replyLen]))
                     print("NET-TCP: answered the guest's SYN (seq 0x\(hex32(seq))) with a SYN-ACK (seq 0x\(hex32(netTcpSrvIsn)), ack 0x\(hex32(seq &+ 1)))")
@@ -1511,7 +1545,15 @@ if let netCapturePath {
                     }
                 } else if !payload.isEmpty {
                     // A data segment: HTTP response if GET request, else echo payload.
-                    if netTcpRespondHandshakeOnly {
+                    if netTcpRespondPacketMode {
+                        // M51 SSH1 (#1168): a trigger/keepalive — ACK it bare
+                        // and pace the next chunk; never echo (the payload is
+                        // the SSH packet stream, not an echo surface).
+                        if !netTcpSendPacketChunk(&reply, buf, n, arpHostMAC, hostPort, seq, payload.count) {
+                            let replyLen = buildTcpReply(&reply, buf, n, arpHostMAC, hostPort, netTcpSrvNxt, seq &+ UInt32(payload.count), 0x10, [])
+                            try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<replyLen]))
+                        }
+                    } else if netTcpRespondHandshakeOnly {
                         print("NET-TCP: handshake-only — ignoring the guest's \(payload.count)-byte data (black hole)")
                     } else {
                         var responsePayload = payload
@@ -1530,9 +1572,13 @@ if let netCapturePath {
                         netTcpSrvNxt = netTcpSrvNxt &+ UInt32(responsePayload.count)
                     }
                 } else {
-                    // A pure ACK (the handshake / the echo / the final
-                    // ACK) — observed.
-                    print("NET-TCP: observed the guest's ACK (ack 0x\(hex32(ack)))")
+                    // A pure ACK (the handshake / the echo / the final ACK).
+                    // M51 SSH1 (#1168): in packet mode the handshake ACK (and
+                    // every later ACK for a delivered chunk) paces out the
+                    // next chunk; otherwise it is just observed.
+                    if !netTcpSendPacketChunk(&reply, buf, n, arpHostMAC, hostPort, seq, 0) {
+                        print("NET-TCP: observed the guest's ACK (ack 0x\(hex32(ack)))")
+                    }
                 }
             }
             // SH7 (#1083, ADR 0020 Amendment B): the host-initiated inbound
@@ -1861,6 +1907,10 @@ if let hostIP = netTcpRespondHostIP, let hostPort = netTcpRespondHostPort {
     print("  net-tcp-respond: ENABLED (milestone five card N10, claim 7026) + card N11 (claim 5357) — the host answers the guest's bounded TCP client on \(ipText):\(hostPort) (host MAC 02:00:00:00:00:02, server ISN 0x\(hex32(netTcpSrvIsn))) via the capture thread (deterministic, request-driven)")
     if netTcpRespondHandshakeOnly {
         print("  net-tcp-respond mode: handshake-only (card N11) — the SYN is answered with a SYN-ACK, then data/FIN go unanswered (the deterministic black hole for the retransmission-bound run)")
+    }
+    if netTcpRespondPacketMode {
+        let chunkCount = (netTcpRespondPacketPayload.count + netTcpRespondPacketChunk - 1) / netTcpRespondPacketChunk
+        print("  net-tcp-respond mode: packet (M51 SSH1, #1168) — after the handshake, page \(netTcpRespondPacketPayload.count) bytes out as \(chunkCount) chunks of ≤\(netTcpRespondPacketChunk) bytes, one per guest ACK")
     }
 }
 if let guestIP = netTcpConnectGuestIP, let guestPort = netTcpConnectPort {
@@ -4284,6 +4334,28 @@ func buildTcpReply(_ reply: inout [UInt8], _ req: [UInt8], _ n: Int, _ hostMAC: 
     reply[50] = UInt8(tcpChk >> 8)
     reply[51] = UInt8(tcpChk & 0xff)
     return frameLen
+}
+
+// M51 SSH1 (#1168): pace one payload chunk out in `--net-tcp-respond :packet`
+// mode. Called once per accepted guest segment; `guestSeq`/`guestPayload` are
+// the incoming segment's seq and payload length (so our ACK covers it). Sends
+// at most one ≤chunk segment per call — the guest's one-slot RX cannot take
+// two back-to-back, and the host has no retransmission. Returns true when a
+// chunk was sent.
+func netTcpSendPacketChunk(_ reply: inout [UInt8], _ buf: [UInt8], _ n: Int, _ hostMAC: [UInt8], _ hostPort: UInt16, _ guestSeq: UInt32, _ guestPayload: Int) -> Bool {
+    guard netTcpRespondPacketMode else { return false }
+    let total = netTcpRespondPacketPayload.count
+    let off = netTcpRespondPacketIndex * netTcpRespondPacketChunk
+    guard off < total else { return false }
+    let end = min(off + netTcpRespondPacketChunk, total)
+    let chunk = Array(netTcpRespondPacketPayload[off..<end])
+    let chunkCount = (total + netTcpRespondPacketChunk - 1) / netTcpRespondPacketChunk
+    let replyLen = buildTcpReply(&reply, buf, n, hostMAC, hostPort, netTcpSrvNxt, guestSeq &+ UInt32(guestPayload), 0x10, chunk)
+    try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<replyLen]))
+    netTcpSrvNxt = netTcpSrvNxt &+ UInt32(chunk.count)
+    netTcpRespondPacketIndex += 1
+    print("NET-TCP: packet mode sent chunk \(netTcpRespondPacketIndex)/\(chunkCount) (\(chunk.count) bytes, seq 0x\(hex32(netTcpSrvNxt &- UInt32(chunk.count))))")
+    return true
 }
 
 // SH7 (#1083, ADR 0020 Amendment B): match a guest-originated TCP segment

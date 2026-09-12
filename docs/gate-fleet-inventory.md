@@ -31,7 +31,7 @@
 | `tools/status/` | 6 | multiagent coordination gate + claim tooling (class A) |
 | `tools/context/` | 2 | context snapshot helpers |
 | `tools/ragshit/` | 84 | host-side context engine (developer tooling, not guest software) |
-| `tools/gate/` | 211 | M40 vgate harness + specs (GF2+) |
+| `tools/gate/` | 212 | M40 vgate harness + specs (GF2+) |
 
 ## Class-B fleet (discovered from the spec dir)
 
@@ -184,6 +184,7 @@ of them with `just verify-vz`.
 | spec | `live-sound-control` | 1 run / 18 assert | live-sound-control.spec -- claim 9297 (M15 follow-up): stream-state control on VZ. |
 | spec | `live-sound-device` | 1 run / 9 assert | live-sound-device.spec -- claim 6140 (Milestone 15 Card A1): virtio-snd transport on VZ. |
 | spec | `live-sound-playback` | 1 run / 13 assert | live-sound-playback.spec -- claim 5877 (Milestone 15 Card A2): PCM playback on VZ. |
+| spec | `live-ssh-packet` | 1 run / 8 assert | live-ssh-packet.spec -- M51 SSH1 (#1168): the guest stream adapter |
 | spec | `live-stat-find` | 1 run / 8 assert | live-stat-find.spec -- M22 D8: stat + find filesystem inspection on VZ. |
 | spec | `live-strace` | 1 run / 9 assert | live-strace.spec -- M22 D5: per-syscall tracing. |
 | spec | `live-svc` | 1 run / 11 assert | live-svc.spec -- numbered syscall table dispatched through real EL0 |
