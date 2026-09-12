@@ -27,6 +27,8 @@ const input = monitor.input;
 const settings = monitor.settings;
 const dns = monitor.dns;
 const events = monitor.events;
+const secret = monitor.secret;
+const tombstone = monitor.tombstone;
 
 // Monitor types and symbols
 const Monitor = monitor.Monitor;
@@ -978,6 +980,62 @@ test "monitor: identity commands produce fixed output" {
     env.mock.reset();
 }
 
+test "monitor: secrets lists NAMES only and never mutates (M50 TS5 #1139)" {
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    try std.testing.expectEqual(secret.LoadResult.ok, secret.parse(
+        "#v1\n" ++
+            "netkey\t1000\tsupersecretvalue\n" ++
+            "audkey\t0\tsystemsecretvalue\n",
+    ));
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"secrets"}));
+    const out = env.mock.contents();
+    // NAMES are listed, for both principals.
+    try std.testing.expect(std.mem.indexOf(u8, out, "secrets:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "  netkey\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "  audkey\n") != null);
+    // VALUES never appear in the monitor output (the never-logged contract).
+    try std.testing.expect(std.mem.indexOf(u8, out, "supersecretvalue") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "systemsecretvalue") == null);
+    env.mock.reset();
+
+    // The command never mutates the store: it is still intact after a call.
+    var recs: [secret.max_secret_entries]secret.SecretRecord = undefined;
+    try std.testing.expectEqual(@as(usize, 1), secret.records_for_uid(process.uid_user, &recs));
+    try std.testing.expectEqualStrings("netkey", recs[0].key[0..recs[0].key_len]);
+
+    // Empty store: an honest `(none)`, and an argument is a usage error.
+    secret.init();
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"secrets"}));
+    try std.testing.expectEqualStrings("secrets: (none)\n", env.mock.contents());
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.usage, exec(&mon, &.{ "secrets", "netkey" }));
+}
+
+test "monitor: redaction — secret VALUES absent from procs + tombstones while NAMES show (D8)" {
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    try std.testing.expectEqual(secret.LoadResult.ok, secret.parse("#v1\nnetkey\t1000\tsupersecretvalue\n"));
+
+    // The `procs` report (the registry view behind the sys_procs snapshot)
+    // never carries the value.
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"procs"}));
+    const procs_out = env.mock.contents();
+    try std.testing.expect(std.mem.indexOf(u8, procs_out, "supersecretvalue") == null);
+    env.mock.reset();
+
+    // A crash tombstone whose serial snapshot captured the monitor `secrets`
+    // output — the NAME may appear there, the VALUE must not.
+    tombstone.init();
+    const snap = "secrets:\n  netkey\n"; // exactly what `secrets` prints
+    tombstone.record("CRASH.BIN", 7, 139, 0, 0, snap, snap.len);
+    var tbuf: [tombstone.tombstone_max_bytes]u8 = undefined;
+    const tlen = tombstone.format_tombstone(tombstone.get(0).?, &tbuf);
+    const report = tbuf[0..tlen];
+    try std.testing.expect(std.mem.indexOf(u8, report, "netkey") != null); // name present
+    try std.testing.expect(std.mem.indexOf(u8, report, "supersecretvalue") == null); // value absent
+}
+
 test "monitor: handoff formatting is deterministic and validated" {
     var env = TestEnv.init();
     var mon = env.monitor();
@@ -1443,7 +1501,7 @@ test "monitor: syscalls is registered and reports deterministic rows" {
     try std.testing.expectEqualStrings("numbered syscall table and counters", lookup("syscalls").?.help);
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"syscalls"}));
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=70\n" ++
+        "syscalls: slots=64 implemented=71\n" ++
             "  0 sys_ping calls=0\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -1513,7 +1571,8 @@ test "monitor: syscalls is registered and reports deterministic rows" {
             "  66 sys_time calls=0\n" ++
             "  67 sys_tty_attach calls=0\n" ++
             "  68 sys_principal calls=0\n" ++
-            "  69 sys_file_mode calls=0\n",
+            "  69 sys_file_mode calls=0\n" ++
+            "  70 sys_secret_get calls=0\n",
         env.mock.contents(),
     );
 }

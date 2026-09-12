@@ -89,6 +89,27 @@ fn modeSet(ctx: ?*anyopaque, path: []const u8, mode: u16) i64 {
     return abi.file_mode(path, mode);
 }
 
+/// M50 TS5 (#1139): the `secrets` builtin's glue — the calling principal's
+/// key NAMES from `sys_secret_get` (slot 70). Values land in this buffer
+/// only long enough to copy their NAMES out; nothing here is ever printed.
+var g_secret_buf: [abi.secret_entries_max * abi.secret_entry_bytes]u8 = undefined;
+
+fn secretList(ctx: ?*anyopaque, out: *shell_mod.SecretList) bool {
+    _ = ctx;
+    const rc = abi.secret_get(&g_secret_buf);
+    if (rc < 0) return false;
+    const n: usize = @intCast(@divTrunc(rc, abi.secret_entry_bytes));
+    var i: usize = 0;
+    while (i < n and i < out.names.len) : (i += 1) {
+        const rec = @as(*align(1) const abi.SecretRecord, @ptrCast(&g_secret_buf[i * abi.secret_entry_bytes]));
+        const klen = @min(rec.key_len, out.names[i].len);
+        @memcpy(out.names[i][0..klen], rec.key[0..klen]);
+        out.lens[i] = klen;
+    }
+    out.count = @min(n, out.names.len);
+    return true;
+}
+
 /// Tab completion source for the SH1 editor: builtins + aliases + share apps
 /// in command position, share files in argument position (SH3).
 fn shellComplete(line: []const u8, cursor: usize, index: usize) ?tty.CompletionMatch {
@@ -656,6 +677,8 @@ pub export fn _start(argc: u64, argv_va: u64) callconv(.c) noreturn {
     // slot 68 (the kernel-assigned uid/caps).
     g_shell.principal = .{ .get_fn = principalGet };
     g_shell.mode_view = .{ .set_fn = modeSet };
+    // M50 TS5 (#1139): `secrets` lists key NAMES through slot 70.
+    g_shell.secret_view = .{ .list_fn = secretList };
     g_editor = .{ .completer = shellComplete };
     // SH8 (#1084): the settings `prompt` key drives the login shell too.
     applyPromptFromSettings();

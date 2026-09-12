@@ -57,6 +57,7 @@ pub const file_table = @import("file_table.zig"); // milestone sixteen C3 (claim
 pub const serial_ring = @import("serial_ring.zig"); // Arc5 issue #243: serial output ring buffer behind `dmesg`
 pub const smp = @import("smp.zig");
 pub const trust = @import("trust.zig"); // M50 TS2 (#1136, ADR 0024 D4): the kernel-actor file policy for direct consumers
+pub const secret = @import("secret.zig"); // M50 TS5 (#1139, ADR 0024 D8): the SECRETS.TXT store behind the `secrets` command
 
 // ---------------------------------------------------------------------------
 // Limits (fixed-size, explicit bounds)
@@ -292,7 +293,7 @@ pub const Command = struct {
 /// grows it 54 -> 55 (`sym`). Milestone twenty-two D5 (issue #328)
 /// grows it 55 -> 56 (`strace`). Milestone twenty-two D6 (issue #329)
 /// grows it 56 -> 57 (`ps`).
-pub const registry_count: usize = 74; // 51 + sh/calc + `font` (M20 U1) + sym/strace/ps (M22 D3/D5/D6) + `type` (M19 P1) + `mktemp` (M19 P16) + stat/find/dmesg/time/which/inventory (M22 D8/D12/D13/D16) + du (M25 F4) + screenshot/shortcuts (M27 G27/G29) + smp (M28) + `wm` (M32 WMS2, issue #622) + `wnd` (M32 WMS3, issue #623) + `vf` (M34 HF1+HF2, issues #735/#736) + `sexiburger` (Milestone 19, issue #677) + `tabwm` (M39 TWM1, issue #928)
+pub const registry_count: usize = 75; // 51 + sh/calc + `font` (M20 U1) + sym/strace/ps (M22 D3/D5/D6) + `type` (M19 P1) + `mktemp` (M19 P16) + stat/find/dmesg/time/which/inventory (M22 D8/D12/D13/D16) + du (M25 F4) + screenshot/shortcuts (M27 G27/G29) + smp (M28) + `wm` (M32 WMS2, issue #622) + `wnd` (M32 WMS3, issue #623) + `vf` (M34 HF1+HF2, issues #735/#736) + `sexiburger` (Milestone 19, issue #677) + `tabwm` (M39 TWM1, issue #928) + `secrets` (M50 TS5, issue #1139)
 
 /// `sym <file>` reads at most this many bytes for on-disk symtab inspection
 /// (M22 D3). ELF symbol tables live near the file tail; 64 KiB covers every
@@ -352,6 +353,7 @@ pub fn ensure_registry() []const Command {
             .{ .name = "roadpops", .help = "Road Pops framebuffer console: armed/dirty/present counters (the boot terminal on the screen)", .usage = "roadpops", .category = .graphics_input, .handler = cmd_roadpops },
             .{ .name = "screen", .help = "virtio-gpu transport + framebuffer: device DID, features, scanout, status, re-arm ('screen fill <rrggbb>' fills the framebuffer and flushes it to the scanout)", .usage = "screen [fill <rrggbb>]", .category = .graphics_input, .max_args = 2, .handler = cmd_screen },
             .{ .name = "screenshot", .dom = svclock.dom_bit(.file), .help = "capture the current framebuffer (1280x720) and save as BMP to disk (G27)", .usage = "screenshot [<file>]", .category = .graphics_input, .max_args = 1, .handler = cmd_screenshot },
+            .{ .name = "secrets", .dom = svclock.dom_bit(.file), .help = "list the secret store's key NAMES only (never values; ADR 0024 D8)", .usage = "secrets", .category = .system, .handler = cmd_secrets },
             .{ .name = "settings", .dom = svclock.dom_bit(.file) | svclock.dom_bit(.win), .help = "persistent configuration: `settings [list]`, `settings get <key>`, `settings set <key> <val>`, `settings reset`", .usage = "settings [list|get <key>|set <key> <val>|reset]", .category = .system, .max_args = 3, .handler = cmd_settings },
             .{ .name = "shortcuts", .help = "keyboard shortcut reference card (G29)", .usage = "shortcuts", .category = .system, .handler = cmd_shortcuts },
             .{ .name = "sound", .help = "virtio-snd transport: device DID, class, status, control-queue state, device-config counts (jacks/streams/channel-maps), re-arm; stream-state control: 'sound volume <0-100>' and 'sound mute <on|off>'", .usage = "sound [volume <0-100> | mute <on|off>]", .category = .system, .min_args = 0, .max_args = 2, .handler = cmd_sound },
@@ -3766,6 +3768,32 @@ fn cmd_settings(m: *Monitor, args: []const []const u8) ExecError {
     }
     print_usage(m, lookup("settings").?);
     return .usage;
+}
+
+/// `secrets` — list the secret store's key NAMES only (M50 TS5, issue
+/// #1139, ADR 0024 D8). Values NEVER leave the store through this command
+/// (the monitor may print names only), and the command never mutates — the
+/// store is host-provisioned; there is no `sys_secret_set`.
+fn cmd_secrets(m: *Monitor, args: []const []const u8) ExecError {
+    if (args.len != 0) {
+        print_usage(m, lookup("secrets").?);
+        return .usage;
+    }
+    const n = secret.count();
+    if (n == 0) {
+        m.console.print_line("secrets: (none)");
+        return .none;
+    }
+    m.console.print_line("secrets:");
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        if (secret.entry_at(i)) |e| {
+            m.console.puts("  ");
+            m.console.puts(e.key); // NAMES only — never values
+            m.console.puts("\n");
+        }
+    }
+    return .none;
 }
 
 // ---------------------------------------------------------------------------

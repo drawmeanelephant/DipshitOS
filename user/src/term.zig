@@ -70,6 +70,28 @@ fn modeSet(ctx: ?*anyopaque, path: []const u8, mode: u16) i64 {
     return abi.file_mode(path, mode);
 }
 
+/// M50 TS5 (#1139): the `secrets` builtin's glue — the calling principal's
+/// key NAMES from `sys_secret_get` (slot 70). Mirrors the `SH.BIN` glue
+/// (`user/src/sh.zig`) so the secret view is consistent across both shell
+/// presentations; values are never printed here.
+var g_secret_buf: [abi.secret_entries_max * abi.secret_entry_bytes]u8 = undefined;
+
+fn secretList(ctx: ?*anyopaque, out: *shell_mod.SecretList) bool {
+    _ = ctx;
+    const rc = abi.secret_get(&g_secret_buf);
+    if (rc < 0) return false;
+    const n: usize = @intCast(@divTrunc(rc, abi.secret_entry_bytes));
+    var i: usize = 0;
+    while (i < n and i < out.names.len) : (i += 1) {
+        const rec = @as(*align(1) const abi.SecretRecord, @ptrCast(&g_secret_buf[i * abi.secret_entry_bytes]));
+        const klen = @min(rec.key_len, out.names[i].len);
+        @memcpy(out.names[i][0..klen], rec.key[0..klen]);
+        out.lens[i] = klen;
+    }
+    out.count = @min(n, out.names.len);
+    return true;
+}
+
 fn principalGet(ctx: ?*anyopaque) ?shell_mod.Principal {
     _ = ctx;
     const p = abi.principal() orelse return null;
@@ -307,6 +329,8 @@ pub export fn _start(argc: u64, argv_va: u64) callconv(.c) noreturn {
     // slot 68 (same wiring as SH.BIN).
     g_shell.principal = .{ .get_fn = principalGet };
     g_shell.mode_view = .{ .set_fn = modeSet };
+    // M50 TS5 (#1139): `secrets` lists key NAMES through slot 70.
+    g_shell.secret_view = .{ .list_fn = secretList };
     g_editor = .{};
 
     var session = tty.Session.open() orelse {

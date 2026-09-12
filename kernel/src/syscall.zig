@@ -87,6 +87,7 @@ pub const virtio_snd = @import("virtio_snd.zig"); // Milestone 15 (claim 7636): 
 pub const fbtext = @import("text.zig"); // M20-U1 (claim 5127): sys_font_size's terminal font state
 pub const shared_region = @import("shared_region.zig"); // M33 SB1 (claim 7418): the D2 shared-anon capability policy (ADR 0016)
 pub const shared_mmap = @import("shared_mmap.zig"); // M33 SB2 (claim 8878): the shared-anon MMU wiring (owner RW / WM RO leaves)
+pub const secret = @import("secret.zig"); // M50 TS5 (issue #1139, ADR 0024 D8): the SECRETS.TXT secret store behind sys_secret_get
 
 const builtin = @import("builtin");
 pub const mmu = @import("mmu.zig");
@@ -102,7 +103,10 @@ pub const slot_count: usize = 128;
 /// M26 N2 (issue #400): slot 62 is the net-stats snapshot.
 /// M29 (issue #598): slots 63/64 are sys_mmap/sys_munmap.
 /// M32 WMS2 (issue #622): slot 65 is sys_wmctl (ADR 0015).
-pub const implemented_count: usize = 70;
+/// M50 TS1 (#1135): slot 68 is sys_principal; TS2 (#1136): slot 69 is
+/// sys_file_mode; TS5 (#1139): slot 70 is sys_secret_get. Slot 71
+/// (sys_tty_net_auth) is reserved for TS4 (#1138).
+pub const implemented_count: usize = 71;
 /// Card G6 (claim 0487) follow-on (slot 18): the fixed `sys_win_get` shape —
 /// four u32 LE words (x, y, w, h), 16 bytes, marshaled per call and copy_out'd
 /// through uaccess (the procs snapshot pattern).
@@ -307,6 +311,17 @@ pub const principal_bytes: usize = 8;
 /// NO chown. Persists the metadata to `OWNERS.TXT`; a full 64-entry table is
 /// `ENOSPC`. The only additive slot TS2 introduces.
 pub const sys_file_mode: u64 = 69;
+/// M50 TS5 (issue #1139, ADR 0024 D8/D10): `sys_secret_get(buf, len)` —
+/// slot 70. Return the CALLING principal's entries from the `SECRETS.TXT`
+/// store into caller memory through uaccess. The ONLY in-guest reader of
+/// the secret store; there is deliberately NO `sys_secret_set` (provisioning
+/// is host-side; a non-echoing set path is deferred per D8). Excluded from
+/// strace argument/return tracing (never-logged contract).
+pub const sys_secret_get: u64 = 70;
+/// M50 TS4 (issue #1138, ADR 0024 D6/D10): the delegated net-auth slot —
+/// reserved NOW so the TS5 strace exclusion for it lands in the same
+/// `trace_excluded` table TS4 will consume. Not registered until TS4.
+pub const sys_tty_net_auth: u64 = 71;
 
 pub const ErrorCode = enum(i64) {
     einval = -1,
@@ -354,6 +369,11 @@ var procs_scratch: [process.max_processes * process.snapshot_row_bytes]u8 = unde
 /// M50 TS1 (#1135): fixed BSS scratch for the `sys_principal` reply — two
 /// u32 LE words (uid, caps), marshaled per call, no allocation.
 var principal_scratch: [principal_bytes]u8 = undefined;
+/// M50 TS5 (#1139): fixed BSS scratch for the `sys_secret_get` reply — the
+/// caller's entries as fixed `SecretRecord`s, marshaled per call, no
+/// allocation. Values live in kernel BSS only long enough to be copied out
+/// through uaccess; nothing here is ever logged.
+var secret_scratch: [secret.max_secret_entries * secret.record_bytes]u8 = undefined;
 /// Card N6 (claim 1384): fixed BSS scratch for the UDP send payload and
 /// the recv peek — `payload_max` / `datagram_max` bytes, marshaled per
 /// call, no allocation (the ipc staging pattern).
@@ -471,6 +491,8 @@ pub fn ensure_table() *const [slot_count]Entry {
         table_storage[sys_principal] = .{ .name = "sys_principal", .handler = handle_principal };
         // M50 TS2 (#1136, ADR 0024 D3/D4/D10): slot 69 — sys_file_mode.
         table_storage[sys_file_mode] = .{ .name = "sys_file_mode", .handler = handle_file_mode };
+        // M50 TS5 (#1139, ADR 0024 D8/D10): slot 70 — sys_secret_get.
+        table_storage[sys_secret_get] = .{ .name = "sys_secret_get", .handler = handle_secret_get };
         table_ready = true;
     }
     return &table_storage;
@@ -512,7 +534,7 @@ fn doms_of(number: u64) u5 {
         sys_exec => f | k,
         sys_win_open, sys_win_fill, sys_win_present, sys_win_close, sys_win_move, sys_win_raise, sys_win_get, sys_win_query, sys_win_set_visible, sys_win_fill_batch, sys_win_resize, 48, sys_win_raise_front, sys_win_lower_back, 52, sys_win_set_unsaved, sys_win_set_title, sys_drag_read, sys_font_size => w,
         sys_ipc_send, sys_ipc_recv, sys_poll_event, sys_wait_event, sys_timer_set, sys_timer_cancel, sys_notify, sys_wmctl => e,
-        sys_procs, sys_wait, sys_kill, sys_clipboard_set, sys_clipboard_get, sys_audio_info, sys_audio_play, sys_audio_volume, sys_audio_mute, sys_pipe_read, sys_pipe_write, 54, sys_mmap, sys_munmap, sys_time, sys_tty_attach, sys_principal => k,
+        sys_procs, sys_wait, sys_kill, sys_clipboard_set, sys_clipboard_get, sys_audio_info, sys_audio_play, sys_audio_volume, sys_audio_mute, sys_pipe_read, sys_pipe_write, 54, sys_mmap, sys_munmap, sys_time, sys_tty_attach, sys_principal, sys_secret_get => k,
         sys_exit => svclock.all_bits,
         else => 0,
     };
@@ -541,7 +563,7 @@ pub fn dispatch(number: u64, args: Args, frame: *exceptions.VectorFrame) u64 {
     // M22 D5: sys_exit never returns from its handler (the scheduler
     // stages another task), so its trace line must be printed BEFORE the
     // call — with an em-dash result, the convention for "no return value".
-    if (tracing_current()) {
+    if (tracing_current() and !trace_excluded(number)) {
         if (number == sys_exit) {
             var buf: [96]u8 = undefined;
             var pos: usize = append_trace_str(buf[0..], "[strace ");
@@ -553,8 +575,21 @@ pub fn dispatch(number: u64, args: Args, frame: *exceptions.VectorFrame) u64 {
         }
     }
     const result = handler(args, frame);
-    maybe_trace(number, args, result);
+    if (!trace_excluded(number)) maybe_trace(number, args, result);
     return result;
+}
+
+/// M50 TS5 (#1139, ADR 0024 D8): syscalls whose arguments and results are
+/// never traced. `sys_secret_get` moves secret VALUES between the store and
+/// caller memory; a strace line would name the buffer pointers and byte
+/// counts of the only in-guest secret reader. `sys_tty_net_auth` (slot 71,
+/// TS4) carries the delegated-auth buffers and is reserved into the same
+/// exclusion now so TS4 cannot accidentally trace a credential.
+fn trace_excluded(number: u64) bool {
+    return switch (number) {
+        sys_secret_get, sys_tty_net_auth => true,
+        else => false,
+    };
 }
 
 fn tracing_current() bool {
@@ -1702,6 +1737,37 @@ fn handle_file_mode(args: Args, _: *exceptions.VectorFrame) u64 {
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+// M50 TS5 (issue #1139, ADR 0024 D8/D10): sys_secret_get — slot 70
+// ---------------------------------------------------------------------------
+
+/// `sys_secret_get(buf, len)`: copy the CALLING principal's entries from
+/// the `SECRETS.TXT` store into caller memory as fixed `SecretRecord`s
+/// (ADR 0007 slot 70 wire shape). Returns the byte length written (a
+/// multiple of `secret.record_bytes`); 0 when the principal owns nothing;
+/// `EINVAL` for a non-process caller or a `len` too small to hold every
+/// caller entry; `EFAULT` for a bad buffer. The ONLY in-guest reader of the
+/// secret store; there is NO `sys_secret_set` (provisioning is host-side,
+/// D8). The handler and its results are excluded from strace in
+/// `dispatch`/`maybe_trace` (never-logged contract).
+fn handle_secret_get(args: Args, _: *exceptions.VectorFrame) u64 {
+    const address = args[0];
+    const buf_len = args[1];
+    const pid = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    const pr = process.principal(pid) orelse return error_result(.einval);
+    const needed = secret.count_for_uid(pr.uid) * secret.record_bytes;
+    if (buf_len < needed) return error_result(.einval);
+    if (needed == 0) return 0;
+    var recs: [secret.max_secret_entries]secret.SecretRecord = undefined;
+    const n = secret.records_for_uid(pr.uid, &recs);
+    const take = n * secret.record_bytes;
+    // Marshal the fixed records into BSS scratch, then copy out through
+    // uaccess only — the caller's memory is the sole destination of values.
+    @memcpy(secret_scratch[0..take], std.mem.asBytes(&recs)[0..take]);
+    if (uaccess.copy_out(address, secret_scratch[0..take], take) != .ok) return error_result(.efault);
+    return @intCast(take);
+}
+
 /// Milestone 14 (claim 0169): slot 38 — sys_clipboard_set(buf_ptr, len)
 fn handle_clipboard_set(args: Args, _: *exceptions.VectorFrame) u64 {
     const buf_ptr = args[0];
@@ -1793,13 +1859,13 @@ fn handle_tty_attach(args: Args, _: *exceptions.VectorFrame) u64 {
             // is an optional source-IP allowlist (a big-endian IPv4 u32; 0 =
             // any). The secret is copied through uaccess once, into the
             // bounded terminal field.
-            var secret_buf: [terminal.net_secret_max]u8 = undefined;
-            var secret: []const u8 = &.{};
+            var net_secret_buf: [terminal.net_secret_max]u8 = undefined;
+            var net_secret: []const u8 = &.{};
             if (args[3] > 0) {
                 if (args[3] > terminal.net_secret_max) return error_result(.einval);
                 const slen: usize = @intCast(args[3]);
-                if (uaccess.copy_in(secret_buf[0..slen], args[2], slen) != .ok) return error_result(.efault);
-                secret = secret_buf[0..slen];
+                if (uaccess.copy_in(net_secret_buf[0..slen], args[2], slen) != .ok) return error_result(.efault);
+                net_secret = net_secret_buf[0..slen];
             }
             var allow: ?[4]u8 = null;
             if (args[4] != 0) {
@@ -1826,7 +1892,7 @@ fn handle_tty_attach(args: Args, _: *exceptions.VectorFrame) u64 {
             tcp.allow_ip = if (allow) |ip| ip else .{ 0, 0, 0, 0 };
             tcp.allow_ip_set = allow != null;
             tcp.owner_pid = pid;
-            if (!t.attachNetAuth(port, secret, allow)) {
+            if (!t.attachNetAuth(port, net_secret, allow)) {
                 tcp.reset();
                 return error_result(.eacces);
             }

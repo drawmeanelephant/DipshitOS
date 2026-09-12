@@ -77,6 +77,7 @@ system
   reboot      restart the machine
   repeat      repeat text, safely bounded
   sh          run a script file of shell commands ('sh <script>' executes it line by line; 64 lines max, 256 chars per line; '#' comments; 'exit' stops early)
+  secrets     list the secret store's key NAMES only (never values; ADR 0024 D8)
   settings    persistent configuration: `settings [list]`, `settings get <key>`, `settings set <key> <val>`, `settings reset`
   shortcuts   keyboard shortcut reference card (G29)
   sound       virtio-snd transport: device DID, class, status, control-queue state, device-config counts (jacks/streams/channel-maps), re-arm; stream-state control: 'sound volume <0-100>' and 'sound mute <on|off>'

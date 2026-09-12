@@ -2321,6 +2321,7 @@ pub fn build(b: *std.Build) void {
         "kernel/src/road_pops.zig",
         "kernel/src/scheduler.zig",
         "kernel/src/scrollback.zig",
+        "kernel/src/secret.zig",
         "kernel/src/settings.zig",
         "kernel/src/shared_region.zig",
         "kernel/src/shell.zig",

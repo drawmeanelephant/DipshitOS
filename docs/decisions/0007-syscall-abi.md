@@ -942,3 +942,31 @@ decision; the extended syscall/monitor table tests) and class-B
 (`live-trust-modes`: EL0 `cat` → `EACCES`, owner `chmod` persists an
 `OWNERS.TXT` the host inspects, the monitor `vf cat` of a secret is denied,
 and the secret value never appears in the transcript).
+
+### Amendment (2026-09-11, #1139 — slot 70 `sys_secret_get`, the secret store reader)
+
+M50 TS5 (ADR 0024 D8/D10) adds the trust milestone's third slot: **70** =
+`sys_secret_get(buf, len)`, copying the CALLING principal's entries from the
+`SECRETS.TXT` secret store into caller memory as fixed `SecretRecord`s
+(`{ u32 uid, u32 key_len, u32 val_len, [32]u8 key, [64]u8 val }`, 108 bytes —
+`key_len`/`val_len` bounds 32/64 mirror the settings engine; 64 chars hold a
+32-byte key or Ed25519 seed in hex exactly). Returns the byte length written
+(a multiple of 108), 0 when the principal owns nothing, `EINVAL` for a
+non-process caller or a buffer too small to hold every caller entry, and
+`EFAULT` for a bad buffer. It is the ONLY in-guest reader of the secret
+store; there is deliberately NO `sys_secret_set` (provisioning is host-side;
+a non-echoing set path is deferred per D8). `sys_secret_get` and the
+reserved-for-TS4 slot 71 `sys_tty_net_auth` are excluded from strace
+argument/return tracing — the never-logged contract (secret values never
+reach the serial transcript, `HISTORY.TXT`, `ENV.TXT`, monitor
+`settings`/`vf` output, `sys_procs` snapshots, crash tombstones, or strace;
+the monitor and the EL0 `secrets` builtin print key NAMES only).
+`implemented_count` becomes **71** (rows 0–70; reserved 71–127). No existing
+number, argument, result, or error code changes. Verified class-A (the
+`secret.zig` bounds/round-trip/per-uid store, `trust.ensure_secret_file`
+registering `SECRETS.TXT` secret-class by construction, the syscall's
+owner-only + `EFAULT`/`EINVAL` contract, and the strace/snapshot/tombstone
+redaction tests) and class-B (`live-secrets`: a host-seeded known value is
+listed by NAME in the guest `secrets` and never appears in the serial
+capture, and `cat SECRETS.TXT` / `vf cat SECRETS.TXT` are denied at both
+seams).

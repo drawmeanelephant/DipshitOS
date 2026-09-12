@@ -28,6 +28,7 @@ const terminal = @import("terminal.zig"); // #1072 (ADR 0020): the terminal seam
 
 const settings = @import("settings.zig"); // milestone eight card U8 (claim 2649): persistent settings on DATA partition
 const file_table = @import("file_table.zig"); // M50 TS2 (#1136): OWNERS.TXT load at boot
+const secret = @import("secret.zig"); // M50 TS5 (#1139): SECRETS.TXT store load at the queue-5 arming point
 // Milestone four (claim 2665): virtio entropy driver + ChaCha20 CSPRNG.
 // The entropy device (DID 0x1044) seeds the CSPRNG post-MMU; `random` and
 // the exec-path ASLR consumer live off that seed.
@@ -1808,6 +1809,14 @@ fn custom_virtio_spike() void {
         // shares this arming point — the queue-5 probe above arms it. A
         // boot with no `OWNERS.TXT` stays byte-identical (no line).
         if (file_table.load_trust_from_share()) uart_puts("owners: OWNERS.TXT loaded\n");
+        // M50 TS5 (issue #1139, ADR 0024 D8): the secret store loads at the
+        // SAME arming point. `init_from_share` registers `SECRETS.TXT` as a
+        // secret-class path BY CONSTRUCTION before reading a byte (fail
+        // closed when the bounded metadata table cannot hold the class) and
+        // is a silent no-op without a host channel or file — no secret is
+        // read at boot on a default share, and no boot line is emitted
+        // (boot-default-unchanged).
+        _ = secret.init_from_share();
     } else {
         uart_puts("vf: queue 5 absent (no host file channel)\n");
     }
