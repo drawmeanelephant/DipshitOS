@@ -62,7 +62,7 @@ after = sum(1 for l in lines[kl + 1:] if mk in l)
 if before < 1 or after != 0:
     sys.exit("FAIL: markers before=%d after=%d" % (before, after))
 # Legacy -qE: the exited/reaped registry row with the real status.
-if not re.search(r"name=COUNTER.BIN state=exited task=reaped .*exit=137", ser):
+if not re.search(r"name=COUNTER.BIN uid=\d+ caps=\d+ state=exited task=reaped .*exit=137", ser):
     sys.exit("FAIL: no COUNTER.BIN exited/reaped row")
 # Page recovery: phase-3 free = phase-1 free + 17 (M25 stack size).
 frees = []
@@ -78,7 +78,7 @@ if frees[1] != frees[0] + 17:
 # Slot reuse: the phase-1 counter task id = the phase-3 USER.BIN id.
 def tid(name):
     for l in lines:
-        if re.search(r"procs: id=[0-9]+ name=%s state=running" % name, l):
+        if re.search(r"procs: id=[0-9]+ name=%s uid=\d+ caps=\d+ state=running" % name, l):
             m = re.search(r".*task=([0-9]+).*", l)
             if m:
                 return m.group(1)

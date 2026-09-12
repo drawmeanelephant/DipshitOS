@@ -1800,6 +1800,33 @@ test "monitor: exec is registered and refuses honestly without a channel" {
     try std.testing.expectEqualStrings("error: no host file channel (boot the runner with --cvc-file <host-dir>)\n", env.mock.contents());
 }
 
+test "monitor: exec -u<uid> admin-spawn flag validates the principal vocabulary" {
+    virtio_file.set_test_share(null); // no channel: the flag parsing is pinned
+    defer virtio_file.set_test_share(null);
+    var env = TestEnv.init();
+    var mon = env.monitor();
+    // M50 TS3 (#1137, ADR 0024 D5): the documented admin-spawn CLI.
+    try std.testing.expectEqualStrings("exec [-c<core>] [-u<uid>] [<file> [arg...]]", lookup("exec").?.usage);
+    // The two ADR 0024 D1 principals parse; without a channel the loader's
+    // honest no-disk refusal proves the flag was CONSUMED (never treated as
+    // a filename) and the command reached the principal-taking exec path.
+    try std.testing.expectEqual(ExecError.not_implemented, exec(&mon, &.{ "exec", "-u0", "USER.BIN" }));
+    try std.testing.expectEqual(ExecError.not_implemented, exec(&mon, &.{ "exec", "-u1000", "USER.BIN" }));
+    // Combined with the SMP pin, in either order.
+    try std.testing.expectEqual(ExecError.not_implemented, exec(&mon, &.{ "exec", "-c0", "-u0", "USER.BIN" }));
+    try std.testing.expectEqual(ExecError.not_implemented, exec(&mon, &.{ "exec", "-u1000", "-c0", "USER.BIN" }));
+    // Any other uid is refused with the documented D3 shape — never a
+    // silent default principal, never a wrap from an over-long decimal.
+    for ([_][]const u8{ "-u1", "-u999", "-ux", "-u99999999999999999999" }) |flag| {
+        env.mock.reset();
+        try std.testing.expectEqual(ExecError.invalid_argument, exec(&mon, &.{ "exec", flag, "USER.BIN" }));
+        try std.testing.expectEqualStrings("error: -u<uid>: uid must be 0 (system) or 1000 (user)\n", env.mock.contents());
+    }
+    // An unknown leading flag stays a filename (the pre-existing -c shape).
+    env.mock.reset();
+    try std.testing.expectEqual(ExecError.not_implemented, exec(&mon, &.{ "exec", "-x", "USER.BIN" }));
+}
+
 test "monitor: net dns command validation and execution" {
     var env = TestEnv.init();
     var mon = env.monitor();

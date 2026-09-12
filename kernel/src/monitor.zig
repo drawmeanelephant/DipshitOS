@@ -329,7 +329,7 @@ pub fn ensure_registry() []const Command {
             .{ .name = "echo", .help = "repeat your regrettable decisions", .usage = "echo <text...>", .category = .system, .handler = cmd_echo },
             .{ .name = "elephant", .help = "operational mascot diagnostics", .usage = "elephant", .category = .machine_identity, .handler = cmd_elephant },
             .{ .name = "sexiburger", .help = "operational mascot diagnostics (the Sexipus burger)", .usage = "sexiburger", .category = .machine_identity, .handler = cmd_sexiburger },
-            .{ .name = "exec", .dom = svclock.dom_bit(.file), .help = "load a user program from the host share and enter it at EL0", .usage = "exec [-c<core>] [<file> [arg...]]", .category = .tasks_processes, .max_args = 1 + esp_exec.max_exec_args, .handler = cmd_exec },
+            .{ .name = "exec", .dom = svclock.dom_bit(.file), .help = "load a user program from the host share and enter it at EL0", .usage = "exec [-c<core>] [-u<uid>] [<file> [arg...]]", .category = .tasks_processes, .max_args = 2 + esp_exec.max_exec_args, .handler = cmd_exec },
             .{ .name = "fault", .help = "trigger a synchronous exception (diagnostic)", .usage = "fault", .category = .memory_state, .handler = cmd_fault },
             .{ .name = "handoff", .help = "display boot-to-kernel ABI data", .usage = "handoff", .category = .memory_state, .handler = cmd_handoff },
             .{ .name = "help", .help = "grouped command catalog and per-command/per-topic help", .usage = "help [<command>|<topic>]", .category = .system, .max_args = 1, .handler = cmd_help },
@@ -6754,7 +6754,12 @@ fn cmd_spawn(m: *Monitor, args: []const []const u8) ExecError {
 /// volume root; it can also be written at runtime through the FAT `write`
 /// path). The program must be a DSK1 flat image; the kernel reads it
 /// through the claim-6420 FAT path, rebuilds the EL0 user root around its
-/// page, and spawns it as an EL0t task. Arguments (card 3e, claim 4636)
+/// page, and spawns it as an EL0t task. Flags: `-c<core>` pins the spawned
+/// task (SMP, claim 2369); `-u<uid>` is the M50 TS3 (#1137, ADR 0024 D5)
+/// ADMIN SPAWN — `-u0` assigns `uid_system` + `kernel_caps`, `-u1000` the
+/// default `uid_user` + no caps. It is the only path that can name a
+/// principal; EL0 `sys_exec` inherits the caller's (no elevation).
+/// Arguments (card 3e, claim 4636)
 /// are packed into the program's text page and passed at entry (argc in
 /// x0, argv block VA in x1) — bounded to `max_exec_args`; more than that
 /// is refused honestly. Every failure mode is reported honestly.
@@ -6766,33 +6771,77 @@ fn cmd_exec(m: *Monitor, args: []const []const u8) ExecError {
     // core 0 alongside the shell for the four-core four-domain gate. The
     // unpinned default (no flag) stays distinct: `pinned` tracks the flag's
     // presence because `pin == 0` is now a VALID explicit pin.
+    //
+    // M50 TS3 (#1137, ADR 0024 D5): `exec -u<uid> <file>` is the monitor's
+    // ADMIN SPAWN — the EL1h monitor (and only the monitor; EL0 `sys_exec`
+    // has no principal argument and always inherits the caller) may name a
+    // spawn principal. The two ADR D1 principals are the whole vocabulary:
+    // `-u0` assigns `uid_system` + `kernel_caps` (the administrative
+    // principal), `-u1000` assigns `uid_user` + no caps (the default), and
+    // any other uid is refused. This is a control surface on the raw
+    // console — an EL0 process has no path to request a principal.
     var pinned = false;
     var pin: usize = 0;
+    var spawn_principal = process.default_principal;
     var rest = args;
-    if (args.len >= 1 and args[0].len > 2 and args[0][0] == '-' and args[0][1] == 'c') {
-        var value: usize = 0;
-        for (args[0][2..]) |ch| {
-            if (ch < '0' or ch > '9') {
+    while (rest.len >= 1 and rest[0].len > 2 and rest[0][0] == '-') {
+        const flag = rest[0][1];
+        if (flag == 'c') {
+            var value: usize = 0;
+            for (rest[0][2..]) |ch| {
+                if (ch < '0' or ch > '9') {
+                    err_prefix(m);
+                    m.console.print_line("-c<core>: core must be a decimal number");
+                    return .invalid_argument;
+                }
+                value = value * 10 + (ch - '0');
+            }
+            if (value >= smp.max_cores) {
                 err_prefix(m);
-                m.console.print_line("-c<core>: core must be a decimal number");
+                m.console.puts("-c<core>: core must be in 0..");
+                m.console.print_u64(smp.max_cores - 1);
+                m.console.puts("\n");
                 return .invalid_argument;
             }
-            value = value * 10 + (ch - '0');
-        }
-        if (value >= smp.max_cores) {
-            err_prefix(m);
-            m.console.puts("-c<core>: core must be in 0..");
-            m.console.print_u64(smp.max_cores - 1);
-            m.console.puts("\n");
-            return .invalid_argument;
-        }
-        pinned = true;
-        pin = value;
-        rest = args[1..];
+            pinned = true;
+            pin = value;
+        } else if (flag == 'u') {
+            var value: u32 = 0;
+            for (rest[0][2..]) |ch| {
+                if (ch < '0' or ch > '9') {
+                    err_prefix(m);
+                    m.console.print_line("-u<uid>: uid must be 0 (system) or 1000 (user)");
+                    return .invalid_argument;
+                }
+                const digit: u32 = ch - '0';
+                // Reject a decimal that cannot fit a u32 BEFORE it wraps
+                // (an overflowed value must never be mistaken for a valid
+                // principal).
+                if (value > (0xffff_ffff - digit) / 10) {
+                    err_prefix(m);
+                    m.console.print_line("-u<uid>: uid must be 0 (system) or 1000 (user)");
+                    return .invalid_argument;
+                }
+                value = value * 10 + digit;
+            }
+            if (value == process.uid_system) {
+                spawn_principal = .{ .uid = process.uid_system, .caps = process.kernel_caps };
+            } else if (value == process.uid_user) {
+                spawn_principal = .{ .uid = process.uid_user, .caps = 0 };
+            } else {
+                err_prefix(m);
+                m.console.print_line("-u<uid>: uid must be 0 (system) or 1000 (user)");
+                return .invalid_argument;
+            }
+        } else break;
+        rest = rest[1..];
     }
     const name = if (rest.len >= 1) rest[0] else esp_exec.default_name;
     const prog_args = if (rest.len >= 2) rest[1..] else &.{};
-    const result = if (pinned) esp_exec.exec_file_pinned(name, prog_args, pin) else esp_exec.exec_file(name, prog_args);
+    const result = if (pinned)
+        esp_exec.exec_file_pinned_as(name, prog_args, pin, spawn_principal)
+    else
+        esp_exec.exec_file_as(name, prog_args, spawn_principal);
     switch (result) {
         .ok => {
             const info = esp_exec.loaded().?;

@@ -3122,6 +3122,160 @@ test "syscall: SYS_PRINCIPAL reports an explicit uid_system principal" {
     try std.testing.expectEqual(process.kernel_caps, std.mem.readInt(u32, buf[4..8], .little));
 }
 
+// ---------------------------------------------------------------------------
+// M50 TS3 (issue #1137, ADR 0024 D5/D10): the capability gate table + kill gate
+// ---------------------------------------------------------------------------
+
+test "syscall: M50 TS3 gate table is explicit, bounded, and exactly the ADR 0024 D10 set" {
+    init(test_writer);
+    // One auditable row: the whole dangerous-syscall capability surface.
+    try std.testing.expectEqual(@as(usize, 1), syscall.capability_gates.len);
+    try std.testing.expectEqual(sys_kill, syscall.capability_gates[0].number);
+    try std.testing.expectEqual(process.cap_proc_admin, syscall.capability_gates[0].cap);
+    try std.testing.expectEqual(@as(?u32, process.cap_proc_admin), syscall.gated(sys_kill));
+    // ADR 0024 D10's OTHER existing syscalls are deliberately NOT in the
+    // capability table: exec inherits (TS1), the file family enforces D3/D4
+    // inside trust.check (TS2), tty_attach keeps its owner checks (TS4),
+    // wmctl/mmap already hold, and setrlimit is self-only. Adding one here
+    // would change behavior silently — the table is the audit point.
+    const not_gated = [_]u64{
+        sys_exec,          sys_file_open, sys_file_read,   sys_file_write,
+        sys_file_close,    sys_dir_list,  sys_file_delete, sys_file_rename,
+        sys_file_truncate, sys_file_free, sys_file_mode,   sys_tty_attach,
+        sys_tty_net_auth,  sys_wmctl,     sys_mmap,        sys_munmap,
+        54, // slot 54 sys_setrlimit (self-only, ADR 0024 D10)
+        sys_principal,
+        sys_secret_get,
+    };
+    for (not_gated) |number| {
+        try std.testing.expectEqual(@as(?u32, null), syscall.gated(number));
+    }
+    // Every gated row names an EXISTING implemented slot, and TS3 adds NO
+    // slot: implemented_count is unchanged at 72.
+    for (syscall.capability_gates) |gate| {
+        try std.testing.expect(gate.number < syscall.implemented_count);
+        try std.testing.expect(entry_info(gate.number) != null);
+    }
+    try std.testing.expectEqual(@as(usize, 72), syscall.implemented_count);
+}
+
+test "syscall: no slot can raise uid/caps (TS3 consumes caps, adds no setter)" {
+    init(test_writer);
+    // The principal surface is read-only by construction: `process.principal`
+    // has no setter and `create_as` is the only assignment. The TS3 gate
+    // table only CONSUMES a capability, and every implemented row is audited
+    // here so a future privilege-NAMED row cannot land unnoticed.
+    var seen_principal = false;
+    for (0..syscall.implemented_count) |number| {
+        const info = entry_info(number).?;
+        if (std.mem.eql(u8, info.name, "sys_principal")) {
+            seen_principal = true;
+            continue;
+        }
+        try std.testing.expect(std.mem.indexOf(u8, info.name, "uid") == null);
+        try std.testing.expect(std.mem.indexOf(u8, info.name, "gid") == null);
+        try std.testing.expect(std.mem.indexOf(u8, info.name, "cap") == null);
+        try std.testing.expect(std.mem.indexOf(u8, info.name, "cred") == null);
+    }
+    try std.testing.expect(seen_principal);
+    // sys_exec (the EL0 spawn) is ungated and takes no principal argument:
+    // it inherits the caller (TS1), so `gated(28)` must stay null.
+    try std.testing.expectEqual(@as(?u32, null), syscall.gated(sys_exec));
+    try std.testing.expectEqualStrings("sys_exec", entry_info(sys_exec).?.name);
+}
+
+test "syscall: M50 TS3 kill gate — same-uid/self allowed, cross-principal EACCES" {
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (uid_user caller)
+    var kstack_sys: [scheduler.task_stack_size]u8 align(16) = undefined;
+    var kstack_nocap: [scheduler.task_stack_size]u8 align(16) = undefined;
+    var kstack_peer: [scheduler.task_stack_size]u8 align(16) = undefined;
+    // Cross-principal targets: one uid_system WITH both caps and one with
+    // no caps — the DENIAL keys on the caller's principal, not the
+    // target's capability mask.
+    const sys_cap_pid = process.create_as("SYS.BIN", .{ .entry_va = 0x400000, .content_len = 64 }, .{}, .{}, .{ .uid = process.uid_system, .caps = process.kernel_caps }).?;
+    const sys_cap_task = scheduler.register_exec_user(userspace.text_va, 0x4000_0000, 100, 0x8000_0000, 8192, &kstack_sys, 0, 0).?;
+    _ = process.bind(sys_cap_pid, sys_cap_task);
+    const sys_nocap_pid = process.create_as("NOCAP.BIN", .{ .entry_va = 0x400000, .content_len = 64 }, .{}, .{}, .{ .uid = process.uid_system, .caps = 0 }).?;
+    const sys_nocap_task = scheduler.register_exec_user(userspace.text_va, 0x4000_0000, 100, 0x8000_0000, 8192, &kstack_nocap, 0, 0).?;
+    _ = process.bind(sys_nocap_pid, sys_nocap_task);
+    // A same-uid (uid_user) target.
+    const peer_pid = process.create("PEER.BIN", .{ .entry_va = 0x400000, .content_len = 64 }, .{}, .{}).?;
+    const peer_task = scheduler.register_exec_user(userspace.text_va, 0x4000_0000, 100, 0x8000_0000, 8192, &kstack_peer, 0, 0).?;
+    _ = process.bind(peer_pid, peer_task);
+    scheduler.start();
+    var frame = fresh_frame();
+
+    // An EL1h caller is not a process: EINVAL (unchanged precedence).
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_kill, .{ peer_pid, 0, 0, 0, 0, 0 }, &frame));
+
+    // Drive to the uid_user caller (task 2, process 0).
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+
+    // Cross-principal -> EACCES, never armed (targets stay running).
+    try std.testing.expectEqual(error_result(.eacces), dispatch(sys_kill, .{ sys_cap_pid, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.eacces), dispatch(sys_kill, .{ sys_nocap_pid, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(process.State.running, process.info(sys_cap_pid).?.state);
+    try std.testing.expectEqual(process.State.running, process.info(sys_nocap_pid).?.state);
+
+    // Same-uid live target is allowed (0) and armed.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_kill, .{ peer_pid, 0, 0, 0, 0, 0 }, &frame));
+    // The denial precedes the target-state checks: an EXITED cross-principal
+    // target still answers EACCES (never the state-dependent EINVAL), so an
+    // unprivileged caller cannot learn a foreign principal's process state.
+    _ = process.on_task_exit(sys_nocap_task, 0);
+    try std.testing.expectEqual(process.State.exited, process.info(sys_nocap_pid).?.state);
+    try std.testing.expectEqual(error_result(.eacces), dispatch(sys_kill, .{ sys_nocap_pid, 0, 0, 0, 0, 0 }, &frame));
+    // The same-uid exit path keeps its EINVAL contract (the sys_wait
+    // precedent) — only the cross-principal rule changed.
+    _ = process.on_task_exit(peer_task, 0);
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_kill, .{ peer_pid, 0, 0, 0, 0, 0 }, &frame));
+    // Self is allowed (the caller's own pid — same principal by definition).
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_kill, .{ 0, 0, 0, 0, 0, 0 }, &frame));
+}
+
+test "syscall: M50 TS3 — uid_system + CAP_PROC_ADMIN kills across principals" {
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (uid_user)
+    var kstack_admin: [scheduler.task_stack_size]u8 align(16) = undefined;
+    var kstack_victim: [scheduler.task_stack_size]u8 align(16) = undefined;
+    // The admin caller: uid_system + both caps — exactly the `exec -u0`
+    // admin-spawn principal (ADR 0024 D5).
+    const admin_pid = process.create_as("ADMIN.BIN", .{ .entry_va = 0x400000, .content_len = 64 }, .{}, .{}, .{ .uid = process.uid_system, .caps = process.kernel_caps }).?;
+    const admin_task = scheduler.register_exec_user(userspace.text_va, 0x4000_0000, 100, 0x8000_0000, 8192, &kstack_admin, 0, 0).?;
+    _ = process.bind(admin_pid, admin_task);
+    // A uid_user victim (a different principal).
+    const victim_pid = process.create("VICTIM.BIN", .{ .entry_va = 0x400000, .content_len = 64 }, .{}, .{}).?;
+    const victim_task = scheduler.register_exec_user(userspace.text_va, 0x4000_0000, 100, 0x8000_0000, 8192, &kstack_victim, 0, 0).?;
+    _ = process.bind(victim_pid, victim_task);
+    scheduler.start();
+    var frame = fresh_frame();
+
+    // shell -> worker -> user (2) -> admin (3).
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expectEqual(admin_task, scheduler.current_id());
+
+    // The privileged cross-principal kill is allowed and armed; the ring
+    // converts the victim's next selection into the exit path (137).
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_kill, .{ victim_pid, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(process.State.running, process.info(victim_pid).?.state);
+    try std.testing.expect(scheduler.yield_current()); // admin -> victim -> killed -> idle
+    try std.testing.expect(scheduler.is_terminated(victim_task));
+    try std.testing.expectEqual(@as(?u64, scheduler.reserved_kill_status), scheduler.terminated_status(victim_task));
+    try std.testing.expectEqual(process.State.exited, process.info(victim_pid).?.state);
+    try std.testing.expectEqual(@as(u64, scheduler.reserved_kill_status), process.info(victim_pid).?.exit_status);
+}
+
 test "syscall: SYS_FILE_MODE (slot 69, #1136) is process-gated with the frozen error contract" {
     userspace.init();
     init(test_writer);

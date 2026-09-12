@@ -331,6 +331,46 @@ pub const net_auth_op_challenge: u64 = 0;
 pub const net_auth_op_response: u64 = 1;
 pub const net_auth_op_verdict: u64 = 2;
 
+// ---------------------------------------------------------------------------
+// M50 TS3 (#1137, ADR 0024 D5/D10): the capability gate table
+// ---------------------------------------------------------------------------
+
+/// One auditable row of the dangerous-syscall gate surface: `number` is an
+/// EXISTING slot (ADR 0007 never renumbers) and `cap` the capability its
+/// dangerous use requires. The set is bounded and starts at exactly ADR
+/// 0024 D10's gated set — one row today. `sys_exec` (28) is allowed for
+/// `uid_user` and preserves uid/caps (TS1); the `sys_file_*` family
+/// (23–27, 34–37) enforces D3/D4 inside `trust.check`; `sys_tty_attach`
+/// (67) keeps its owner checks (TS4); `sys_wmctl` (65) and shared-anon
+/// mmap (63/64) already hold; `sys_setrlimit` (54) is self-only. A future
+/// gate is one row here plus the handler's explicit `gated()` query —
+/// never a silent default.
+pub const CapabilityGate = struct {
+    /// The gated syscall slot.
+    number: u64,
+    /// The capability the caller must hold for the gated use.
+    cap: u32,
+};
+
+/// The D10 gated set. `sys_kill` needs `CAP_PROC_ADMIN` only for a
+/// CROSS-principal target: self and same-uid kills are allowed for every
+/// principal, so `handle_kill` consumes `gated(sys_kill)` after its
+/// same-principal test, when the rule applies. Gated rows are
+/// unconditional capabilities; the handler owns the conditional shape.
+pub const capability_gates = [_]CapabilityGate{
+    .{ .number = sys_kill, .cap = process.cap_proc_admin },
+};
+
+/// The capability `number` requires for its gated use, or null when the
+/// syscall is not capability-gated. The ONE lookup consumed at the syscall
+/// seam; a linear scan over a bounded, explicit table.
+pub fn gated(number: u64) ?u32 {
+    for (capability_gates) |gate| {
+        if (gate.number == number) return gate.cap;
+    }
+    return null;
+}
+
 pub const ErrorCode = enum(i64) {
     einval = -1,
     ebadf = -2,
@@ -2116,12 +2156,34 @@ fn handle_exec(args: Args, _: *exceptions.VectorFrame) u64 {
 /// targets). Self-kill is allowed (the monitor's `kill` is equally
 /// general); a permanently blocked target keeps the EL1h kill's
 /// documented bound — the arm applies at the target's next selection.
+///
+/// M50 TS3 (#1137, ADR 0024 D5/D10): the kill gate. Self (the caller's own
+/// pid) and same-uid targets are allowed for EVERY principal; a
+/// cross-principal kill requires the capability `gated(sys_kill)` names
+/// (`CAP_PROC_ADMIN`). The principal check runs BEFORE the target-state
+/// checks so an unprivileged caller cannot learn a foreign principal's
+/// state through the error code: a cross-principal kill from a principal
+/// without the cap is `EACCES`, never the state-dependent `EINVAL`. The
+/// EL1h monitor is never a target: it has no process descriptor, so no pid
+/// names it, and `scheduler.request_kill` independently refuses the
+/// kernel-owned shell/idle executor slots.
 fn handle_kill(args: Args, _: *exceptions.VectorFrame) u64 {
     const target = args[0];
     // The caller must be a process (an EL1h task cannot kill from EL0).
-    _ = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    const caller = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
     if (target >= process.max_processes) return error_result(.einval);
-    const info = process.info(@as(usize, @intCast(target))) orelse return error_result(.einval);
+    const target_pid: usize = @intCast(target);
+    const info = process.info(target_pid) orelse return error_result(.einval);
+    // The gate: same-principal (including self) is always allowed; a
+    // different uid needs the D10 capability. Denial is EACCES.
+    if (target_pid != caller) {
+        const caller_principal = process.principal(caller) orelse process.default_principal;
+        const target_principal = process.principal(target_pid) orelse return error_result(.einval);
+        if (caller_principal.uid != target_principal.uid) {
+            const required = gated(sys_kill) orelse process.cap_proc_admin;
+            if (!caller_principal.has(required)) return error_result(.eacces);
+        }
+    }
     if (info.state == .exited) return error_result(.einval);
     const task_id = info.task_id orelse return error_result(.einval);
     return switch (scheduler.request_kill(task_id)) {

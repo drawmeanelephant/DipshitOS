@@ -48,8 +48,8 @@ if counter_before < 1:
     sys.exit("no counter: alive markers before kill")
 if counter_after > 0:
     sys.exit(f"counter executed {counter_after} times after kill")
-if not re.search(r"procs: id=1 name=COUNTER\.BIN state=exited .*exit=137", content):
+if not re.search(r"procs: id=1 name=COUNTER\.BIN uid=\d+ caps=\d+ state=exited .*exit=137", content):
     sys.exit("procs line for killed COUNTER.BIN missing or invalid")
-if not re.search(r"procs: id=2 name=TOP\.BIN state=running", content):
+if not re.search(r"procs: id=2 name=TOP\.BIN uid=\d+ caps=\d+ state=running", content):
     sys.exit("procs line for TOP.BIN missing or invalid")
 PY
