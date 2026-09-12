@@ -147,10 +147,6 @@ inspect:
 context:
     zig build context
 
-# Local Git-aware context engine — tools/ragshit (ragshit index/query/bundle/doctor ...)
-ragshit *ARGS:
-    python3 tools/ragshit/ragshit {{ARGS}}
-
 # Sanity-check the host toolchain at session start (class A — sourceable, no VM):
 # verifies bash/sed/jq/yq resolve to the MODERN Homebrew builds, re-prepends
 # /opt/homebrew/bin to PATH, and bitches vocally about any 2007-era /bin/bash
@@ -255,11 +251,3 @@ verify-vf-class-a:
 # Verify the M1.5 host-side interactive serial plumbing (class B — boots VZ VMs; Apple silicon only)
 verify-host-console:
     bash tools/verify-host-console.sh
-
-# Git-aware change-impact reviewer context (developer tooling — ragshit impact)
-impact *ARGS:
-    python3 tools/ragshit/ragshit impact {{ARGS}}
-
-# Deterministic budgeted reviewer packet (ragshit review)
-review *ARGS:
-    python3 tools/ragshit/ragshit review {{ARGS}}

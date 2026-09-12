@@ -19,7 +19,7 @@ virelaios/
 ├── user/src/*.zig             the EL0 demo programs (built to .BIN images)
 ├── host/vm-runner/            the Swift Virtualization.framework launcher
 ├── image/                     the pure-Python GPT+FAT32 image builder
-├── tools/                     gate scripts, elf2bin, status indexes, ragshit
+├── tools/                     gate scripts, elf2bin, status indexes
 ├── site/                      THIS public documentation corpus (compiled by Boris)
 ├── themes/virelaios/          the site theme
 ├── docs/                      the engineering warehouse (claims/decisions/status/…)

@@ -5,7 +5,7 @@
 > `--check` mode fails when the tracked file drifts from a fresh
 > render, so every new script under `tools/` must arrive with a
 > regenerated report. Subdirectory tooling (`lib/`, `status/`,
-> `context/`, `gate/`, `ragshit/`) is summarized below, not rowed.
+> `context/`, `gate/`) is summarized below, not rowed.
 
 ## Summary
 
@@ -30,7 +30,6 @@
 | `tools/lib/` | 2 | per-run isolation for live gates (`gate-run.sh`) |
 | `tools/status/` | 7 | multiagent coordination gate + claim tooling (class A) |
 | `tools/context/` | 2 | context snapshot helpers |
-| `tools/ragshit/` | 84 | host-side context engine (developer tooling, not guest software) |
 | `tools/gate/` | 227 | M40 vgate harness + specs (GF2+) |
 
 ## Class-B fleet (discovered from the spec dir)
@@ -301,7 +300,7 @@ named in `.github/workflows/*.yml`; `st` = named in
 | `elf2bin.py` | 382 | tooling | n | n | n | n | Convert a Zig aarch64-freestanding ELF executable into the VirelaiOS flat |
 | `env-check.sh` | 259 | tooling | n | n | y | n | tools/env-check.sh -- source me at the start of every agent session. |
 | `inspect.sh` | 93 | tooling | y | n | n | n | inspect.sh -- report useful facts about the generated EFI binary and the |
-| `inventory-gates.sh` | 556 | tooling | n | n | y | y | inventory-gates.sh -- regenerate (or --check) the machine-generated gate |
+| `inventory-gates.sh` | 555 | tooling | n | n | y | y | inventory-gates.sh -- regenerate (or --check) the machine-generated gate |
 | `lint-workflows.sh` | 171 | tooling | y | n | y | y | lint-workflows.sh -- lint the GitHub Actions workflows (class A). |
 | `mkdyn-elf.py` | 1090 | tooling | n | n | n | y | Generate freestanding dynamic ELF binaries for VirelaiOS. |
 | `mkhello-elf.py` | 205 | tooling | n | n | n | n | Emit a minimal statically linked AArch64 ELF32 executable (M22 D1, issue #324). |
