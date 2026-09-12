@@ -1,11 +1,14 @@
 # Gap report — oliver as a native AArch64 ELF app on VirelaiOS
 
-**Verdict: VIABLE.** A real Zig HTML tool runs on VZ today as a native ELF
-app, and the HTML it produces is byte-identical to the reference tool's own
-output. One measured constraint bounds the story: the tool gets **no argv**
-(raw ELF images cannot receive arguments). Size is not a constraint — the image
-uses **47.5% of the real 512 KiB loader memory cap** (see B3's correction
-note).
+**Verdict: VIABLE — including real arguments (#1188).** A real Zig HTML tool
+runs on VZ today, from one source, two ways: as a native ELF app (`exec
+OLIVER.ELF`) and as a DSK1 flat image (`exec OLIVER.BIN`) that **receives real
+argv**. Either way the HTML is byte-identical to the reference tool's own
+output. Raw-ELF argv is still refused (B1) and still #1163's; the flat image
+carries arguments today by riding the text page's slack, which is a *measured*
+**400 B** of headroom, not an assumption. Size is otherwise not a constraint —
+the image uses **47.6% of the real 512 KiB loader memory cap** (see B3's
+correction note).
 
 Spec: `tools/gate/specs/live-oliver.spec` · Evidence:
 `artifacts/live-oliver-serial-01.log`, `artifacts/live-oliver-oliver-html-guest.html`,
@@ -13,19 +16,23 @@ Spec: `tools/gate/specs/live-oliver.spec` · Evidence:
 
 ## 1. What actually runs (observed on VZ)
 
-`exec OLIVER.ELF` — a 253,160 B native image, compiled by the **real host zig**
+`exec OLIVER.ELF` — a 253,576 B native image, compiled by the **real host zig**
 (`aarch64-freestanding -O ReleaseSmall -fstrip -fno-PIE -fno-entry
 -z max-page-size=4096 -T tools/zc-host-link.ld`) and launched from the host
-share:
+share; the same image converted by `tools/elf2bin.py` is the 249,220 B DSK1 flat
+image `exec OLIVER.BIN MD.TXT OUT2.HTML` drives with arguments:
 
 | observation | value |
 |---|---|
-| loader accepted it (serial) | `exec: loaded OLIVER.ELF size=0x000000000003cc18 entry=0x0000000000402b1c stack=0x0000000063650000` |
+| loader accepted it (serial) | `exec: loaded OLIVER.ELF size=0x000000000003cd6c entry=0x0000000000402b20 stack=0x0000000063650000` |
+| loader accepted the flat image | `exec: loaded OLIVER.BIN size=0x000000000003cd6c entry=0x0000000000402b20` (same content length, no argv in that column) |
+| **argv reached the app** | `oliver: argc=2 in=MD.TXT out=OUT2.HTML` / `in=/host/MD.TXT out=/host/OUT4.HTML` (relative and full-guest-path forms) |
+| argv drove the output | `OUT2.HTML`/`OUT3.HTML`/`OUT4.HTML` written byte-exact while **`OLIVER.HTML` was never written** by the argv boots |
 | app ran at EL0 and read the share | `/host/MD.TXT` via slots 23/24/26, 2048-byte chunks |
 | app wrote the share back (M34 HF) | `/host/OLIVER.HTML`, 754 B — host-side file, 754 B |
 | **byte-exactness** | guest sha256 `540f240054ad929c7311f29d83e0432b01551300ab97f01cf2aaac82f76a390e` == reference-CLI sha256 `540f2400…f76a390e` |
 | app report + exit status | `oliver: wrote 754 bytes`, exit status 754 (= bytes written) |
-| determinism | same byte count/sha on a second live boot (`BOOTS=2`) |
+| determinism | same 754 B/sha across all four boots (two argv runs, DSK1 defaults, raw-ELF defaults) |
 | FAIL needles | no `error: `, no `[EXC] parking:`, no loader refusal |
 
 The exact shipped capability: **Markdown in → HTML out through the guest file
@@ -59,6 +66,55 @@ shipped slice uses fixed, documented defaults instead.
 which generalizes exactly this loader surface), so this claim does not touch
 them; the measurements are recorded here and on #1163.
 
+**The bound is proven to bite, not merely computed (#1188 follow-up).** Boots
+05–07 of `live-oliver` derive two fixtures from the pinned image by appending
+zeros to its content — identical code, identical entry, only the trailing length
+differs — and show the check is a per-page *boundary* rather than a size:
+
+| derived fixture | content | block_off | page_limit | block end | slack | argv |
+|---|---|---|---|---|---|---|
+| `OLIVER-NEAR.BIN` | 249,700 | 249,704 | 249,856 | 249,960 | **−104** | **refused** |
+| `OLIVER-FAR.BIN` | 249,912 | 249,912 | 253,952 | 250,168 | +3,784 | accepted |
+
+`OLIVER-FAR.BIN` is **212 B larger** than the refused fixture and is accepted,
+because it crossed into a fresh page with more slack; the refusal window for
+this image is `content_len ∈ [249,601, 249,856]`, so the rule is not monotonic
+in size. Observed on the refusal boot: the only error line is
+`error: image leaves no room for the argv block (256 bytes)`, `exec: loaded`
+never appears (the app never starts — no truncated argv, no partial run), and
+`OUT5.HTML` was never created. It fails closed. The controls are what make that
+a statement about argv: boot 06 runs the *same argument* against the accepted
+fixture (byte-exact HTML), and boot 07 runs the refused fixture with **no**
+argument — it loads and renders byte-exact, so the padded image is a valid image
+and the refusal is argv-specific. Both derived headers are re-validated inside
+the gate, so the case cannot silently stop proving its claim.
+
+**Update — argument use landed anyway, through the DSK1 path (#1188).** The
+same pinned source is also shipped as a **DSK1 flat image**
+(`tools/elf2bin.py` over the identical ELF), and card 3e's DSK1 packing does
+hand it argv: `exec OLIVER.BIN MD.TXT OUT2.HTML` is live-passing, with the
+app's own `oliver: argc=2 in=… out=…` marker as the witness and the argv-named
+file byte-exact on the host side. The cost is a **space** budget rather than a
+loader change — the block sits at `align8(content_len)` inside the program's
+own text page:
+
+```
+content_len 249,196   block_off 249,200   block 256   page_limit 249,856
+249,200 + 256 = 249,456   =>   400 B of slack before a 62nd text page is needed
+```
+
+The gate reproduces that arithmetic from the image header host-side and fails if
+it stops fitting, so the headroom cannot silently disappear under code growth.
+Three consequences worth carrying to #1163: (1) raw-ELF argv is still the
+*right* fix — a flagged CLI should not have to fit the tail of a text page;
+(2) `exec_program_max`/`load_max` (512 KiB) is far from binding, so a loader
+lift that adds a real argv region has plenty of room, while the flat-image
+route has single-page granularity and will refuse before it truncates
+(`.no_args_room`); (3) the per-page rule is **not monotonic in size** — a
+212 B *larger* image is accepted where a smaller one is refused (table above),
+which is exactly the kind of thing an author cannot predict from the docs. A
+real argv region on the ELF path removes the sawtooth with the flat path.
+
 ### B2 — the data segment must be *exactly* adjacent, and the recipe's `ALIGN(16)` can violate that
 
 `kernel/src/elf.zig` requires segment 1 at **`text_base + p_memsz[0]`**, exact.
@@ -78,18 +134,20 @@ anonymous `sys_mmap`, so it has *no* writable segment at all — one PT_LOAD,
 R+X, `phnum=1`. (The `.no_args_room` message above is that same 256-byte block
 trying to land in a writable tail.)
 
-### B3 — size is NOT a blocker: 248,776 B is 47.5% of the real 512 KiB cap
+### B3 — size is NOT a blocker: 249,196 B is 47.6% of the real 512 KiB cap
 
 | image (native, `-O ReleaseSmall -fstrip`) | file | total `p_memsz` | PT_LOADs |
 |---|---|---|---|
-| **OLIVER.ELF** (real tool: parse + render + file I/O, all buffers mmap'd) | 253,160 B | 248,776 B (**47.5% of cap**) | 1 |
+| **OLIVER.ELF** (real tool: parse + render + file I/O, all buffers mmap'd) | 253,576 B | 249,196 B (**47.6% of cap**) | 1 |
+| **OLIVER.BIN** (the same image as a DSK1 flat image, #1188) | 249,220 B | 249,196 B content + 24 B header | 1 |
 | `sizeprobe-parse-only.zig` (document + markdown) | 174,592 B | — | 2 (contract-fails, B2) |
 | `sizeprobe-render-only.zig` (document + html) | 87,040 B | — | 2 (contract-fails, B2) |
 
 The ceiling is `exec.exec_program_max` = **512 KiB** (`kernel/src/exec.zig:98`)
 and `elf.load_max` = **512 KiB** (`kernel/src/elf.zig:145`), so the real tool
-leaves **275,512 B (~269 KiB) of headroom** — room for a substantially larger
-tool, not merely one more feature.
+leaves **275,092 B (~268.6 KiB) of headroom** — room for a substantially larger
+tool, not merely one more feature. The *argv* budget is the tight one (400 B,
+B1's update), not the size cap.
 
 **Verdict: not a blocker. The earlier "larger tools are blocked by the size
 cap" verdict is WITHDRAWN.** The loader's remaining *shape* constraints (≤2

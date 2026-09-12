@@ -1,88 +1,89 @@
-=== vgate live-oliver: real Zig HTML tool (oliver) as a native ELF app, host-side HTML compare ===
-spec: /Users/tbuddy/t3/zig/virelaios-buffy/tools/gate/specs/live-oliver.spec
-revision: a6dd751bb2aca869f86e22449a0abf55de76ef7e branch=agent/buffy/wasm-zig-tool-spike dirty-files=0
-elf2bin: ./.zig-cache/o/f0481e31236f20dbe5a593413e67c704/user-m21demo -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/deecf5ff658f423177063545e1365b77/M21DEMO.BIN: entry_offset=0x18 image_size=593 (content 569 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/6db6a5bc81b5cfd4e50fe642b71b6474/user-sexiburg -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/bf684f7fad45a25478b0da120b1a3555/SEXIBURG.BIN: entry_offset=0x30 image_size=45104 text=45056 data=0 (bss tail 109392) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/45c45ff65d6c37dd0e37254375a3b046/user-sb6new -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/f69c15db063701ccd41550d3a493a4dc/SB6NEW.BIN: entry_offset=0x18 image_size=1273 (content 1249 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/c83b8f889800b6c1bbd8ac9030916054/user-wnd -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/fd8b17d257fd1e6fc187d9c8761834be/WND.BIN: entry_offset=0x30 image_size=54504 text=53248 data=1208 (bss tail 193864) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/ee114fac50a0be8ee06f99e9fde2a0fc/user-win -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/2ee4f01fc0da1a206782b9b4d72ed98c/WIN.BIN: entry_offset=0x18 image_size=364 (content 340 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/fc88af709fef9cd5ce0b210e450d3444/user-smpst-ev -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/2aa7826adda02e98e154526273022bd8/SMPEV.BIN: entry_offset=0x30 image_size=4144 text=4096 data=0 (bss tail 4) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/e33449f46caf0b9e90267fb20e1e96ff/user-resmon -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/62ee6e2733c37ec0ac533f164b445410/RESMON.BIN: entry_offset=0x30 image_size=12336 text=12288 data=0 (bss tail 82800) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/74531ffca101505bee6d96a63baf9500/user-tabhold -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/3d7f941d7acb470c1e4e33e9a9accb9d/TABHOLD.BIN: entry_offset=0x18 image_size=2440 (content 2416 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/fe5887e2293dda55f79a45d7e3f8a2a6/user-sexitest -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/7a089d18e32cd23e1822893793c2cde2/SEXITEST.BIN: entry_offset=0x18 image_size=3088 (content 3064 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/0db9f47ba2cbc8c8c4e21cb910c1dd44/user-savetext -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/4555624ba0aa0b6e130a46ef045db674/SAVETEXT.BIN: entry_offset=0x18 image_size=225 (content 201 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/dcebd72daaf9118968afe7881649c2f1/user-wmrpc -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/5497cc53eb13a62a455c2e1325a4c8bc/WMRPC.BIN: entry_offset=0x18 image_size=4366 (content 4342 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/8fc36c37ddfb692766400e049edffd38/user-spin -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/0184a262e815970232723ad1b97c2087/SPIN.BIN: entry_offset=0x18 image_size=132 (content 108 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/7d2808faff4731496cb75728a41f13e1/user-top -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/7ccc5582b9470f1ddd2eda4aa9ca50ac/TOP.BIN: entry_offset=0x30 image_size=28768 text=28672 data=48 (bss tail 81584) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/955cda86123e07665f6a5e4388788b70/user-zc -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/5adcd03c495736c6613a8d9ed3a590ef/ZC.BIN: entry_offset=0x30 image_size=32816 text=32768 data=0 (bss tail 216184) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/d4b89dbbbcddd745f1a5a3d560800bc6/user-fetch -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/28b753b33adaba257aaa9ec37c38aed6/FETCH.BIN: entry_offset=0x18 image_size=2979 (content 2955 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/a7479d864281a8fbdc52d4f5b485d8b6/user-sysmon -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/cff6a25b2f6ec0664bb011a547c1d694/SYSMON.BIN: entry_offset=0x30 image_size=20576 text=20480 data=48 (bss tail 81584) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/2f0a46184b4186facf58a2dc51120d88/user-status43 -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/bbe6561754a47957ffcba211825f60d2/STATUS43.BIN: entry_offset=0x18 image_size=134 (content 110 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/47f3fd44f168ec4e25ebb30a6d4dd187/user-type -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/6801e40a2e92d202288f844c064cbe78/TYPE.BIN: entry_offset=0x18 image_size=232 (content 208 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/a979765a5f21890fbdc11d69a2ad6e1e/user-counter -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/274b3bb3098667d7574af448979460ee/COUNTER.BIN: entry_offset=0x18 image_size=940 (content 916 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/ec0ef533f3b9b1d11e6c0d025208869a/user-sb6old -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/fca1a4379e59cc30b4bae029e442e2c5/SB6OLD.BIN: entry_offset=0x18 image_size=476 (content 452 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/9b0e3e3529906306b4c467364212a57f/user-ps -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/17696359d3599d49f5f1364aff9fa5fe/PS.BIN: entry_offset=0x30 image_size=12336 text=12288 data=0 (bss tail 82800) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/58f56101cc5198574aeeb56c11f89f3f/user-smp1 -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/b9504f50b123a912f7230cf046c37969/SMP1.BIN: entry_offset=0x18 image_size=159 (content 135 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/f37ecc9024867ae43798df0a68fd1e7a/user-chat -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/f4b2c7e7acbdf751d8e9ab92e900cb04/CHAT.BIN: entry_offset=0x30 image_size=12336 text=12288 data=0 (bss tail 81584) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/64b3d685dfcd6623c3d933a7645e50f4/user-winloop -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/48ccb23355b93a7dac043ab5217992ff/WINLOOP.BIN: entry_offset=0x18 image_size=417 (content 393 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/bb1ae941c19ce6bd624d69e0214e4ba7/user-desktop -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/ba22551569dbd6dcc6f3f49b754a10a3/DESKTOP.BIN: entry_offset=0x30 image_size=20528 text=20480 data=0 (bss tail 81584) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/d2e98e5bf0f79e8c7464a44d9795f4f2/user-ttyecho -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/78be4224c76f959bf9a559e5c828471a/TTYECHO.BIN: entry_offset=0x18 image_size=1280 (content 1256 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/327038c49bfb7d9cfc1552a194ab8adc/user-udp -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/f4a6de1139d771a6541212f99727b229/UDP.BIN: entry_offset=0x18 image_size=605 (content 581 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/2d50650fdfcc271935b03a2f6262bb69/user-sb6wm -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/22145b475fb26da458790dfe1c012f10/SB6WM.BIN: entry_offset=0x18 image_size=2600 (content 2576 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/aef30fe6ef1c8c39f31eba8cf09203e5/user-timertest -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/e4c50684ed576cab8fdeb9a52daa8f54/TIMER.BIN: entry_offset=0x18 image_size=1129 (content 1105 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/134ffec5717bcb244f61e6652d58b7c0/user-keytest -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/a1b46d59d5bc4110fd7bed3ed98d470a/KEYTEST.BIN: entry_offset=0x18 image_size=645 (content 621 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/b93955ddbfd47788e796597e731a7b4d/user-tool -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/bac9f590d97e1d0972a634c477b0b12a/TOOL.BIN: entry_offset=0x30 image_size=12336 text=12288 data=0 (bss tail 45608) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/ac8fbea525f31105e6a273fc65763aa6/user-ping -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/1961f8daef70d6a3a801c657b26fd3ee/PING.BIN: entry_offset=0x18 image_size=5670 (content 5646 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/0755931d73514715733dfd19ac037a25/user-httpd -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/a94f7e08b6f8d5ae353ef52fd1a280cb/HTTPD.BIN: entry_offset=0x18 image_size=15305 (content 15281 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/3c4a3c57bf07a1e5acc5e95df3792546/user-blkd -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/8ab8a86f6f17f040589d52118f427df4/BLKD.BIN: entry_offset=0x18 image_size=247 (content 223 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/11e3deb78b0cbd60312998a90bc6dd62/user-tabwm -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/0955a672a1bdbc7c6be63fa4dec0ccca/TABWM.BIN: entry_offset=0x30 image_size=45152 text=45056 data=48 (bss tail 96792) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/7749a1d7a5695fab6058437cf163db0e/user-sb2-own -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/4f09865682c872012e1af8e629263c45/SB2OWN.BIN: entry_offset=0x18 image_size=979 (content 955 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/7bc60559e245e110c6ec9e5f0abed1b7/user-jingle -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/38975ec10cdd710366047a899f7a90fb/JINGLE.BIN: entry_offset=0x18 image_size=8624 (content 8600 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/eb44ff93f06df281d34031e7a00b1ca6/user-calc -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/3abb944f4994ae5d360f84ba4b90b667/CALC.BIN: entry_offset=0x30 image_size=82016 text=81920 data=48 (bss tail 81592) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/f19dd40d2708f0e3052b5bd926842e78/user-devcons -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/9b5f394de68a447237cd64dbe75097da/DEVCONS.BIN: entry_offset=0x30 image_size=16492 text=16384 data=60 (bss tail 118508) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/8046e45aa6e072e5614f8b00a0ebbe08/user-dir -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/76343957367f688b59fad3e74417c2b7/DIR.BIN: entry_offset=0x18 image_size=248 (content 224 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/f776bb48dcdbffab6d99b8dce387f2dc/user-hardening-victim -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/a464dd3751ce5d2ee1227f59338e4213/VICTIM.BIN: entry_offset=0x30 image_size=4144 text=4096 data=0 (bss tail 1112) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/bea1a1b86081b6d76f95305d6bdc5c42/user-sshpacket -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/bb4e8cee741418e5b70e31668b783d73/SSHPACKET.BIN: entry_offset=0x30 image_size=4144 text=4096 data=0 (bss tail 35000) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/1f08a96038c71da871c1cec97d0da96e/user-download -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/2879a4ac153c407cde24819d227e6f76/DOWNLOAD.BIN: entry_offset=0x18 image_size=3255 (content 3231 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/5570a138bc257e7d1d111a6438c53e07/user-sb2-wm -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/b708d87dd56935575475f3407cfa2f80/SB2WM.BIN: entry_offset=0x18 image_size=1824 (content 1800 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/01565e0c40b5b30e0ec04b9161b832fc/user-wndstub -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/9d3c4fa16f2098c5d1b353d19a283400/WNDSTUB.BIN: entry_offset=0x18 image_size=230 (content 206 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/bb8a6299a409f47a8318b9175f78144f/user-vmtest -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/c89d87656ea7af402d961a89f32cd0f0/VMTEST.BIN: entry_offset=0x18 image_size=968 (content 944 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/ce41b8e36a74fa6ec21f766d1a25bc76/user-wasm -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/b226dda6597383323cc2d51630db1aeb/WASM.BIN: entry_offset=0x30 image_size=63456 text=32768 data=30640 (bss tail 152728) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/28ae621d14df2f575b2d4871ba72b82f/user-hello -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/e5327b651bdee65cb9c355ffeead1bee/USER.BIN: entry_offset=0x18 image_size=397 (content 373 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/46b23beec53c92822fc65c0199dc0f18/user-winclose -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/f78fe41504db992550905d1015e38c67/WINCLOSE.BIN: entry_offset=0x18 image_size=261 (content 237 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/1f2f43faac4043eae7126af60558b9c7/user-edit -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/65fa567cf6b6a8e11ca76265beaac63e/EDIT.BIN: entry_offset=0x30 image_size=246160 text=49152 data=196960 (bss tail 115880) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/8f01aa95dc9ff372bbecc476130724a2/user-dns -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/b1549c0a006a5aa6cc035f189dc0b976/DNS.BIN: entry_offset=0x18 image_size=4711 (content 4687 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/b7951ef0141e8eeb7f266b1db7172796/user-sb3-wm -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/09d63b3840fdbb5196da73e43a1bb40d/SB3WM.BIN: entry_offset=0x18 image_size=1960 (content 1936 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/a5485523d1d41945557dfc1aebeddbf7/user-tcp -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/e5b9af4aba3c538063e3cd70262bf5d2/TCP.BIN: entry_offset=0x18 image_size=267 (content 243 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/c4f480b235b0dc450d8243e83310a881/user-smpst-net -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/a04d5c49fe373f963fd5fabd755b749c/SMPNET.BIN: entry_offset=0x30 image_size=4144 text=4096 data=0 (bss tail 4) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/ce038cff8dfacb1bbf6b5cae269d72fa/user-netstat -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/9f8aa2c5e4525fd7b9c4e13c0595ee4e/NETSTAT.BIN: entry_offset=0x30 image_size=16432 text=16384 data=0 (bss tail 81824) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/e87a26c1cb99bf99403905f578fa47b1/user-smpst-file -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/41a1c9e4c339065d7e7859d916273247/SMPFILE.BIN: entry_offset=0x30 image_size=4144 text=4096 data=0 (bss tail 4) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/aebb687bd1469bef9585e8f210411e00/user-schedring -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/169310f8966672c0356e946fc6261464/SCHEDRING.BIN: entry_offset=0x18 image_size=213 (content 189 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/a50e5936e388318162f7fb0a3c139f0b/user-disas -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/b713181d77b6d9c980166db45db07ce5/DISAS.BIN: entry_offset=0x18 image_size=6496 (content 6472 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/4aa686e52159e6c95e4528d4dc15999d/user-chime -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/5cc5922075115c2416026d03614795e9/CHIME.BIN: entry_offset=0x18 image_size=8688 (content 8664 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/3f9b694d6b32d3dd4cf46ddabdc5a455/user-sb5wm -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/067397d9f491d61a4fe65903491e6ca7/SB5WM.BIN: entry_offset=0x18 image_size=2256 (content 2232 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/9c1da1d41050cfbb9bd37cc0264f1561/user-file-browser -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/dd69f65d5e4a57759d81f1c9e51ff7c2/FILE.BIN: entry_offset=0x30 image_size=49248 text=49152 data=48 (bss tail 81584) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/adcd5b26b2294176f907e20bc9645fa8/user-term -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/98e893e691e238d596b220436135f67b/TERM.BIN: entry_offset=0x30 image_size=94264 text=94208 data=8 (bss tail 78712) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/e967ce92a0f9019fea62325a300b92be/user-sh -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/0fb08d2aeac5445f4425e511f6e4e177/SH.BIN: entry_offset=0x30 image_size=98360 text=98304 data=8 (bss tail 85824) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/e081e126df5f87a6f8b6dbc8744f45f7/user-cryptod -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/6b04fce6be3b1cf46fa95c235839a0a1/CRYPTOD.BIN: entry_offset=0x18 image_size=2464 (content 2440 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/b4bbd99ec24c66dfda7c87a0de51ae9d/user-notepad -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/3a1846b12c772084196b2c6821f15a58/NOTEPAD.BIN: entry_offset=0x30 image_size=28768 text=28672 data=48 (bss tail 81584) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/a63650566afa3c50456a6ee19ce79a2f/user-settings -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/24e6f7b290fb778c72c5686bd229a77b/SETTINGS.BIN: entry_offset=0x30 image_size=20576 text=20480 data=48 (bss tail 81584) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/e62d10f57ae42c1e2bcb9d48734ca61c/user-traceroute -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/da9a5606103e9b65387e9cddfad37f3d/TRACEROUTE.BIN: entry_offset=0x18 image_size=2464 (content 2440 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/aee92f963dc58fa8eebd11983349d6ff/user-peer -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/05627ab03b8db63637d4a4c4218adf21/PEER.BIN: entry_offset=0x18 image_size=623 (content 599 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/d68338dd468d684bfa96fbc1854402a0/user-sb4dam -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/9792303d73636749ac6225173c4868b2/SB4DAM.BIN: entry_offset=0x18 image_size=434 (content 410 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/dc3a9c584f41b46c84f41ab808b00874/user-guard -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/e4b81188d189b9c720dd9cde2f2556e2/GUARD.BIN: entry_offset=0x18 image_size=88 (content 64 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/6896299aae477e47e72d2e4f6f560b3e/virelai-kernel -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/ae1d6f63cce1c2f50abeea2cf759007c/KERNEL.BIN: entry_offset=0x28 image_size=8806096 (4 PT_LOAD segment(s), 114 absolute reloc(s))
-elf2bin: ./.zig-cache/o/ef7fdd804b81eaa53571a532fd77912b/user-winmove -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/f517166f6d70fecef043835e7584faa3/WINMOVE.BIN: entry_offset=0x18 image_size=1340 (content 1316 bytes from 1 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/f4431571b50a52f8e40f417bd0f82d61/user-sb5own -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/5096f193dea108669cd40b33723d7cf9/SB5OWN.BIN: entry_offset=0x18 image_size=1141 (content 1117 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/45d97f254667fc4cf9dde108504fd069/user-view -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/677a913c2364d867575aaf18607cd445/VIEW.BIN: entry_offset=0x30 image_size=28904 text=28672 data=184 (bss tail 89880) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/55ab1434b093b2effae55618dff7c64e/user-harden -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/4804e0dd68bd56db373f9c10c8698960/HARDEN.BIN: entry_offset=0x18 image_size=714 (content 690 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/d77c8f22526b70edadfd67b9999357d0/user-ttyed -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/494f41f44769533be809bef70149e82d/TTYED.BIN: entry_offset=0x18 image_size=8477 (content 8453 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/75c905450ef2a0e470e0624f68fcf012/user-asm -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/726f5df50610c7f8cd6ad399c56f41b4/ASM.BIN: entry_offset=0x18 image_size=12690 (content 12666 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/5fecdc40501bd37245b5c16a78f9db27/user-netprof -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/c4086dc56d05e3d6bc6c33cf3d867c99/NETPROF.BIN: entry_offset=0x18 image_size=4345 (content 4321 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/186b3f2efb3e5ee7fc452f97db4495ec/user-globals -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/03acc3469e8fb77ccb9237896936ef7f/GLOBALS.BIN: entry_offset=0x30 image_size=28728 text=28672 data=8 (bss tail 4104) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/87fd8b43dd9d5371894d8901e640e38c/user-sb3-own -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/05c7e6d5217dbc3cf7422318df0eb8f4/SB3OWN.BIN: entry_offset=0x18 image_size=1127 (content 1103 bytes from 2 PT_LOAD segment(s))
-elf2bin: ./.zig-cache/o/01d4c236c870486870433a4e761397e0/user-smpst-win -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/c4ae82e0c7f5731c13b1b02666ec5915/SMPWIN.BIN: entry_offset=0x30 image_size=4144 text=4096 data=0 (bss tail 4) from 3 PT_LOAD segment(s)
-elf2bin: ./.zig-cache/o/6896299aae477e47e72d2e4f6f560b3e/virelai-kernel -> /Users/tbuddy/t3/zig/virelaios-buffy/.zig-cache/o/ae1d6f63cce1c2f50abeea2cf759007c/KERNEL.BIN: entry_offset=0x28 image_size=8806096 (4 PT_LOAD segment(s), 114 absolute reloc(s))
+=== vgate live-oliver: real Zig HTML tool (oliver): DSK1 flat image with real argv + native ELF defaults, host-side HTML compare ===
+spec: /Users/tbuddy/t3/zig/virelaios-buffy-argv/tools/gate/specs/live-oliver.spec
+revision: 128e47e25e24abbb8ead692c548e816bf6a293f4 branch=agent/buffy-argv/oliver-argv dirty-files=0
+elf2bin: ./.zig-cache/o/5a78d95997bba64523c9a5b759f5adea/user-peer -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/471257e27567b4c71d39bd2da502374a/PEER.BIN: entry_offset=0x18 image_size=623 (content 599 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/f4ffc3a688f7e14f5d1dfe056272f001/user-hello -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/58ed7ff30d6e52238f8d920799602c72/USER.BIN: entry_offset=0x18 image_size=397 (content 373 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/4446be9f445a974532435177365920c2/user-jingle -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/03944e5dbbfee4acaa1b89b2b377fbcb/JINGLE.BIN: entry_offset=0x18 image_size=8624 (content 8600 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/6a4b1f08d38aaf5e15ffe51d23ff7a8e/user-tabhold -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/53f347cd4df3a1bb8dbcc1068809cc47/TABHOLD.BIN: entry_offset=0x18 image_size=2440 (content 2416 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/0b61608cc7dd0fe30f245f2d78182f74/user-harden -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/a13321aa43e3a0a8ac2618daec1cb307/HARDEN.BIN: entry_offset=0x18 image_size=714 (content 690 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/8138cc32e7ed299b862300bc8069a961/user-dns -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/aba2c0b9ea45809d1e2422e9ffc2aee4/DNS.BIN: entry_offset=0x18 image_size=4711 (content 4687 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/59964d82108fbb8a0c422466aafaaeb2/user-tcp -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/77cc6709a566a3c01b590cc14733e2cb/TCP.BIN: entry_offset=0x18 image_size=267 (content 243 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/659477eed7454b4f9a24b22c06092457/user-ttyed -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/7930faa70dd5e7e6452dcc1a74b92eaf/TTYED.BIN: entry_offset=0x18 image_size=8477 (content 8453 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/c548c344713a13c311e8dedf029d1210/user-status43 -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/3122ceb83d12439e34117877d5f3413e/STATUS43.BIN: entry_offset=0x18 image_size=134 (content 110 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/96e7c2078ee3e075d40c999432ed1612/user-ps -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/34642d5bf9b5c4fcf02649b1ac3f1416/PS.BIN: entry_offset=0x30 image_size=12336 text=12288 data=0 (bss tail 82800) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/4a7a1e2cf860355111f8064492905e78/user-counter -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/cf5a0f34e2e6121126a16523caa6ca13/COUNTER.BIN: entry_offset=0x18 image_size=940 (content 916 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/3ff0af5fefecb2df8051fe593563cfc4/user-keytest -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/96822cddd94ed2b568b9e63d9bf836f1/KEYTEST.BIN: entry_offset=0x18 image_size=645 (content 621 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/5acad85f9b92a7787ba12f8740668a33/user-smpst-file -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/5c9108b7d9ffba8a1f53a7b69438e63f/SMPFILE.BIN: entry_offset=0x30 image_size=4144 text=4096 data=0 (bss tail 4) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/3470d3c81eef37549a2c3b434830d62c/user-fetch -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/74fabd6bfb1f5e94e10961bfa70a2606/FETCH.BIN: entry_offset=0x18 image_size=2979 (content 2955 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/f454f62a1605923c0c00128041182154/user-sb2-wm -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/f29ba554e9ab221fcdadaaee518dbf8e/SB2WM.BIN: entry_offset=0x18 image_size=1824 (content 1800 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/9abc96a6cfdfef6c550743039463acf3/user-smpst-ev -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/c61ab0cf55634e558bf8c03eb5557b0c/SMPEV.BIN: entry_offset=0x30 image_size=4144 text=4096 data=0 (bss tail 4) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/3012d92fb21a3b0f903e5decb17fa5e3/user-smpst-win -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/effe1fff719481052ab56ede6ccbb7ab/SMPWIN.BIN: entry_offset=0x30 image_size=4144 text=4096 data=0 (bss tail 4) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/1341f17dd5e0c10aea07bb74567dd439/user-settings -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/17815b845171746d14bb80dfa26ae7c5/SETTINGS.BIN: entry_offset=0x30 image_size=20576 text=20480 data=48 (bss tail 81584) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/abb1309dbed1b376d60f1b5a7c042dd1/user-desktop -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/775dceb8fb6f35e6b5c09347fa5e5b10/DESKTOP.BIN: entry_offset=0x30 image_size=20528 text=20480 data=0 (bss tail 81584) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/af090193df698bdec65597e841aa7f22/user-view -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/a3aa526b634e063e274f2b92e5530e8d/VIEW.BIN: entry_offset=0x30 image_size=28904 text=28672 data=184 (bss tail 89880) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/f623d7fafdb81d8ed84d360a2a4b9f3e/user-spin -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/f7458ab6423623e5c74267cf9b9807fa/SPIN.BIN: entry_offset=0x18 image_size=132 (content 108 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/b1ca350bb0b938d6610305666e0ae7b2/user-vmtest -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/cc8334602564b1eba002acb6b96bda1b/VMTEST.BIN: entry_offset=0x18 image_size=968 (content 944 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/1b30c15d9953238d44a50bf7fcf8d224/user-sb2-own -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/f98ff3feceb5bca7eae93b769f5dfc51/SB2OWN.BIN: entry_offset=0x18 image_size=979 (content 955 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/686d0a21ba9760345bd680df553203ce/user-dir -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/e4d785358ac201643d563f48770b0579/DIR.BIN: entry_offset=0x18 image_size=248 (content 224 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/4f04687412e925454c3412a44f35493a/user-cryptod -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/1a87d611faa2646892d6b3dcfba41b5b/CRYPTOD.BIN: entry_offset=0x18 image_size=2464 (content 2440 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/74c25fb25bf0a9128367f06651b61e52/user-ping -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/a611f64b4348bba72af2de4eb5bd3972/PING.BIN: entry_offset=0x18 image_size=5670 (content 5646 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/109428e1edb038621f82d83136ae8199/user-globals -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/ce7d6d74f128c8d6ea8e37b99e68aa6a/GLOBALS.BIN: entry_offset=0x30 image_size=28728 text=28672 data=8 (bss tail 4104) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/1dbfe715b9d7dd4fb21b1064f7550b6b/user-sb6wm -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/45f5a1ca49efd1da105ee907dcc6c5a4/SB6WM.BIN: entry_offset=0x18 image_size=2600 (content 2576 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/c03db808b1b7a11582d378c0f86e622e/user-asm -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/0e14e8108a514f0dc3db76c4407844b5/ASM.BIN: entry_offset=0x18 image_size=12690 (content 12666 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/0986f42f8a25cdc1bf534a7da759511e/user-file-browser -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/6f343e329fe6b1771811297ea4547fc9/FILE.BIN: entry_offset=0x30 image_size=49248 text=49152 data=48 (bss tail 81584) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/5f28e75243f90fda753d68ba4c6bbd98/user-winclose -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/a7c0bcad55a489c35a4f5b82cdce32ac/WINCLOSE.BIN: entry_offset=0x18 image_size=261 (content 237 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/0895eaa7f6bcde118c0aa70e53af26f4/user-schedring -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/df774e793ed8efaa1dbebd6a25fc2e55/SCHEDRING.BIN: entry_offset=0x18 image_size=213 (content 189 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/5cf765de631cfed0fd2d70be85726e52/user-sb5own -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/bfed3b7ff0e471ef63e43be378443f1d/SB5OWN.BIN: entry_offset=0x18 image_size=1141 (content 1117 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/5b955d3c26a2ceb668e562fafb8911bb/user-sb3-wm -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/820b7eeb8ffa6417f9fde4541b4c4913/SB3WM.BIN: entry_offset=0x18 image_size=1960 (content 1936 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/efeb9caf02500329b21d0995b20b1dee/user-netprof -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/0a8c65de112156fa5c47dda38dc7336d/NETPROF.BIN: entry_offset=0x18 image_size=4345 (content 4321 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/cab3fbcbda1d95fafd1e05f0ad842a5e/user-wmrpc -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/9f88a1b0c6d878a618eaf499dd31bb1b/WMRPC.BIN: entry_offset=0x18 image_size=4366 (content 4342 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/c4d5e2892d4d909089b57c2f1ba48f19/user-hardening-victim -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/cacea50da927416058ea44003244dc1a/VICTIM.BIN: entry_offset=0x30 image_size=4144 text=4096 data=0 (bss tail 1112) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/65c966b2f3dfc4d2868c29f2b548f70d/user-devcons -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/3790a4ac6f5018c29b2c2900b31817e1/DEVCONS.BIN: entry_offset=0x30 image_size=16492 text=16384 data=60 (bss tail 118508) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/9431fa3dc82d2a9c3cd13e40dd891810/user-winmove -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/1f10a85912e67b9a52a73d1480f8609e/WINMOVE.BIN: entry_offset=0x18 image_size=1340 (content 1316 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/3de2d07f537455ae6ba57eabf54b84a5/user-sb5wm -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/929e728f7d7291bd6490f42e120eafcf/SB5WM.BIN: entry_offset=0x18 image_size=2256 (content 2232 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/123bc52af693e82a5db45f40d6a14d5a/user-netstat -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/9d99a61af5fc800aa8462a7d2d8effa6/NETSTAT.BIN: entry_offset=0x30 image_size=16432 text=16384 data=0 (bss tail 81824) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/9f4b83431c73fd337587fa97d9dd98ff/user-sysmon -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/993d513ddae0d81f807edc70af18fba3/SYSMON.BIN: entry_offset=0x30 image_size=20576 text=20480 data=48 (bss tail 81584) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/bd576300b65af68269b6b0b87591866b/user-resmon -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/71cba53c34c18e56b358a95fc8445093/RESMON.BIN: entry_offset=0x30 image_size=12336 text=12288 data=0 (bss tail 82800) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/f0371ffce7bef6aa092090d15c075dc5/user-sh -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/3eb7814fa62e2d104dc8a5d2aa3201de/SH.BIN: entry_offset=0x30 image_size=98360 text=98304 data=8 (bss tail 85824) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/89821c7580210ade0357b1588c9edaf6/user-ssh -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/aacfab5c13ad922d70c169160c55a719/SSH.BIN: entry_offset=0x30 image_size=61488 text=61440 data=0 (bss tail 116160) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/d7c15c68ee87ad2137970e8a0cd64c26/user-edit -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/7581cfec88d1aef2b9b4bf88916d12d0/EDIT.BIN: entry_offset=0x30 image_size=246160 text=49152 data=196960 (bss tail 115880) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/73f0b2a687ae7a32fd9ae71c0fe2b6e9/user-calc -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/f0e1c246d06343cdbdaba3c3adaa6bbc/CALC.BIN: entry_offset=0x30 image_size=82016 text=81920 data=48 (bss tail 81592) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/3dcbd3cc51002804990acaeb6ca387b9/user-term -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/49c86acf9ba28a43fab70908cac22e67/TERM.BIN: entry_offset=0x30 image_size=94264 text=94208 data=8 (bss tail 78712) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/0185f0f0e7ae112605c152062579d937/user-winloop -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/ac4cb13a0afaeffacb8ed283b7446345/WINLOOP.BIN: entry_offset=0x18 image_size=417 (content 393 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/0922ab6357c1413b2671e08cea5e6ffa/user-wndstub -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/748690241f6233203da6727d617fc7bb/WNDSTUB.BIN: entry_offset=0x18 image_size=230 (content 206 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/c06667c1104bc5ea361b699d3aef88f5/user-sb4dam -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/efc60408509082fa609a36aecc6aeaae/SB4DAM.BIN: entry_offset=0x18 image_size=434 (content 410 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/eab4d39f602d39796636b9cade2fb05a/user-ttyecho -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/92174d180f01180f7c61d87686816b9d/TTYECHO.BIN: entry_offset=0x18 image_size=1280 (content 1256 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/d7f42df590076dd8a609d1609f816c6e/user-sexitest -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/ff0fca008e7bdae439a77722bd56c19e/SEXITEST.BIN: entry_offset=0x18 image_size=3088 (content 3064 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/b5a2630914a3a3df12c6c08f71871842/user-m21demo -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/ad024de5486980b9ce6c8565deca8202/M21DEMO.BIN: entry_offset=0x18 image_size=593 (content 569 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/9355f5398c3160d6bc118637f653ade1/user-httpd -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/88a244231281a1dfb31780a4c9ce0f62/HTTPD.BIN: entry_offset=0x18 image_size=15305 (content 15281 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/e4a079edff34b2d97937d97b8f7de583/user-top -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/06b312268f8e77ed13c5e3f952854734/TOP.BIN: entry_offset=0x30 image_size=28768 text=28672 data=48 (bss tail 81584) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/7d221c76d24bf6d5012016215b31f986/user-notepad -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/1c74da786636c2e176b069f1e266c763/NOTEPAD.BIN: entry_offset=0x30 image_size=28768 text=28672 data=48 (bss tail 81584) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/92ddae485853eb5df11a8f4bdd9f219c/user-type -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/3128d82498a3c0ee5dff361130be0058/TYPE.BIN: entry_offset=0x18 image_size=232 (content 208 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/b70045ebf9e559d6ac56ae68a5a0ec1e/user-sb6old -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/9abee64eabf62d8908553fa9317f24f2/SB6OLD.BIN: entry_offset=0x18 image_size=476 (content 452 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/d0c599425829e5c02e00694619f48632/user-win -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/e82e0550a96be703108138dfed098ea6/WIN.BIN: entry_offset=0x18 image_size=364 (content 340 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/60f22982436e931d4fb37173f81328c7/user-sshpacket -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/08a5757f843fd2bc1f86157240196c8f/SSHPACKET.BIN: entry_offset=0x30 image_size=4144 text=4096 data=0 (bss tail 35000) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/b3ff4b391b5b92b48bd2977569e630a0/user-sb6new -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/0c15703a051731ed4c4447d6bdbc90f0/SB6NEW.BIN: entry_offset=0x18 image_size=1273 (content 1249 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/df49c08ccdbb6237c9e4a9e10fb7f7b6/user-udp -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/fb3fc41d6a061c732ddee7266b9c1d93/UDP.BIN: entry_offset=0x18 image_size=605 (content 581 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/b40ad6764763c7f1f00762e89214b6c2/user-timertest -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/3c5c31c4e6bebcddae2e0597cd18b3d1/TIMER.BIN: entry_offset=0x18 image_size=1129 (content 1105 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/28a5e7e1e1b7b6eab34d8b24ecaac64b/user-download -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/726744283c1f0473a1eb06fc66e9d17a/DOWNLOAD.BIN: entry_offset=0x18 image_size=3255 (content 3231 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/93ec646b8d8ed5c25b54f60a5635bedd/user-tool -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/1e8cdce3ac23e813699adc21539552a3/TOOL.BIN: entry_offset=0x30 image_size=12336 text=12288 data=0 (bss tail 45608) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/ae5e029cecec1a5f1fad7787181cd6fc/user-smp1 -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/d480f495d36aa3d94c81f1e075f5fa94/SMP1.BIN: entry_offset=0x18 image_size=159 (content 135 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/b014d9997f827814af70345ca3f59119/user-sb3-own -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/63ace434d297286525c5a9e384239611/SB3OWN.BIN: entry_offset=0x18 image_size=1127 (content 1103 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/f031258952322cc4fa6a8ed66b7214a6/user-chime -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/37f1dc4151591f70c919cdf70805bf99/CHIME.BIN: entry_offset=0x18 image_size=8688 (content 8664 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/58daa5040ecef8d445b61094a5bf860e/user-guard -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/f87aa4e373662669191f4bc761ac5d9a/GUARD.BIN: entry_offset=0x18 image_size=88 (content 64 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/4395bad37e36b2eb5ee396c033fa2bc3/user-smpst-net -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/fe6adb1399c1171249154b22dadaa608/SMPNET.BIN: entry_offset=0x30 image_size=4144 text=4096 data=0 (bss tail 4) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/6cc86a52a6e8e0d7cb31d9143e937bee/user-traceroute -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/e647021fcad655ddcb58479625c13304/TRACEROUTE.BIN: entry_offset=0x18 image_size=2464 (content 2440 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/0da60cb96b4d5eda0d63a207fd6748fe/user-sexiburg -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/e0f74bd05405d6585cff6b1309a45417/SEXIBURG.BIN: entry_offset=0x30 image_size=45104 text=45056 data=0 (bss tail 109392) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/6a646d5ee303d2e185a40cec17228c01/user-zc -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/75e6b493e86996cb87de8c39112a58c6/ZC.BIN: entry_offset=0x30 image_size=32816 text=32768 data=0 (bss tail 216184) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/a428d73e3931580caa94d6a9b98ba62d/user-tabwm -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/0ee7cdfb6a1f0ee23eb8b05d7b0b56ed/TABWM.BIN: entry_offset=0x30 image_size=45152 text=45056 data=48 (bss tail 96792) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/bebb3df9694f9a551b2c65a566efeb46/user-wasm -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/9d0572a4a48afcb3e61ae3fca0fa5577/WASM.BIN: entry_offset=0x30 image_size=63456 text=32768 data=30640 (bss tail 152728) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/e2611ab6f2d094cf240753f17d900e76/virelai-kernel -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/cdbb48ba7e860afe077323ff7966f01c/KERNEL.BIN: entry_offset=0x28 image_size=8806096 (4 PT_LOAD segment(s), 114 absolute reloc(s))
+elf2bin: ./.zig-cache/o/737f48fc140f11ec6592e7e04c0e81cc/user-savetext -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/7fb302228dc4a0a742d6b4901b74ac54/SAVETEXT.BIN: entry_offset=0x18 image_size=225 (content 201 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/0aa02c508b181c15f4c80306e07b250d/user-blkd -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/11e662d3da3eda61ffae9ae4b3edec0e/BLKD.BIN: entry_offset=0x18 image_size=247 (content 223 bytes from 1 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/3917b8537065ccca324c73ef0729820d/user-disas -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/772d04d3f7bdda41c9ead77a67dc4104/DISAS.BIN: entry_offset=0x18 image_size=6496 (content 6472 bytes from 2 PT_LOAD segment(s))
+elf2bin: ./.zig-cache/o/eee2a394d8493fdd3cce09960534bb83/user-chat -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/583aa7cd0cc90a5e052d84fcc08fdbf7/CHAT.BIN: entry_offset=0x30 image_size=12336 text=12288 data=0 (bss tail 81584) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/230d468f1dc01fae69366661917d4c39/user-wnd -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/13de432c2bef5480025e397f24ded959/WND.BIN: entry_offset=0x30 image_size=54504 text=53248 data=1208 (bss tail 193864) from 3 PT_LOAD segment(s)
+elf2bin: ./.zig-cache/o/e2611ab6f2d094cf240753f17d900e76/virelai-kernel -> /Users/tbuddy/t3/zig/virelaios-buffy-argv/.zig-cache/o/cdbb48ba7e860afe077323ff7966f01c/KERNEL.BIN: entry_offset=0x28 image_size=8806096 (4 PT_LOAD segment(s), 114 absolute reloc(s))
 make-image: building FAT32+GPT boot image 'artifacts/disk.img' (0 MiB)...
 mkfat32: wrote artifacts/disk.img.tmp (174592 EFI + 8806096 kernel bytes)
 make-image: verifying image contents...
@@ -98,62 +99,148 @@ FAT: directory tree:
   KERNEL.BIN  (8806096 bytes)
 make-image: done.
 Building for production...
-[2 / 3] VMRunner-product
-[3 / 3] VMRunner-product
-Build complete! (0.56 sec)
+[2 / 9]
+[3 / 10] VFWire
+[5 / 11] VFWire
+[8 / 9] VMRunner-product
+[9 / 9] VMRunner-product
+Build complete! (1.79 sec)
 host/vm-runner/.build/release/VMRunner: replacing existing signature
-gate-run: share armed (empty) at /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.QMzdqV/share
-mkhello-elf: wrote /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.QMzdqV/share/HELLO.ELF (142 bytes; entry=0x400000 filesz=58)
-mkhello-elf: wrote /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.QMzdqV/share/CRASH.ELF (332 bytes; BRK inside 'crasher' at +4 -> tombstone note '(in crasher+0x4)')
-Generated /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.QMzdqV/share/LIBUI.SO (1240 bytes)
-Generated /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.QMzdqV/share/LIBFONT.SO (456 bytes)
-Generated /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.QMzdqV/share/PLUGIN.SO (480 bytes)
-Generated /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.QMzdqV/share/DYNAPP.ELF (8192 bytes)
-Generated /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.QMzdqV/share/CALC.ELF (8192 bytes)
-Generated /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.QMzdqV/share/NOTEPAD.ELF (8192 bytes)
-Generated /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.QMzdqV/share/FILE.ELF (8192 bytes)
-Generated /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.QMzdqV/share/DESKTOP.ELF (8192 bytes)
-gate-run: share seeded at /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.QMzdqV/share (98 files, 23 APPS.TXT entries)
-run dir: /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.QMzdqV
+gate-run: share armed (empty) at /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.5XoQpi/share
+mkhello-elf: wrote /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.5XoQpi/share/HELLO.ELF (142 bytes; entry=0x400000 filesz=58)
+mkhello-elf: wrote /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.5XoQpi/share/CRASH.ELF (332 bytes; BRK inside 'crasher' at +4 -> tombstone note '(in crasher+0x4)')
+Generated /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.5XoQpi/share/LIBUI.SO (1240 bytes)
+Generated /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.5XoQpi/share/LIBFONT.SO (456 bytes)
+Generated /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.5XoQpi/share/PLUGIN.SO (480 bytes)
+Generated /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.5XoQpi/share/DYNAPP.ELF (8192 bytes)
+Generated /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.5XoQpi/share/CALC.ELF (8192 bytes)
+Generated /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.5XoQpi/share/NOTEPAD.ELF (8192 bytes)
+Generated /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.5XoQpi/share/FILE.ELF (8192 bytes)
+Generated /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.5XoQpi/share/DESKTOP.ELF (8192 bytes)
+gate-run: share seeded at /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.5XoQpi/share (99 files, 23 APPS.TXT entries)
+run dir: /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.5XoQpi
+staged OLIVER.ELF  253576 B sha256 4d79d76ad725e2017cef49eaab4c006027a2e3c93897a8103636d44cd264ccb5
+staged OLIVER.BIN  249220 B sha256 83b6549c853f5cf1e32ceb10ea966190bc3c2fac8ebe5915806d8ee0f4084743
+staged MD.TXT        415 B sha256 acbdb682ac243f4a9d2adf6111f1cd64ca99e7c86e7631755d01637c8a8011f7
+derived OLIVER-NEAR.BIN  content=249700 (pad +504) block_off=249704 page_limit=249856 block_end=249960 fits=False
+derived OLIVER-FAR.BIN   content=249912 (pad +716) block_off=249912 page_limit=253952 block_end=250168 fits=True
 
-=== live-oliver run 01-01 ===
-01-01: runner-rc=0
+=== live-oliver run 01 ===
+01: runner-rc=0
   serial-contains [VirelaiOS kernel has seized control.]=1
-guest share/OLIVER.HTML 754 B sha256 540f240054ad929c7311f29d83e0432b01551300ab97f01cf2aaac82f76a390e
-host  expect.html      754 B sha256 540f240054ad929c7311f29d83e0432b01551300ab97f01cf2aaac82f76a390e
-byte-exact: guest-written HTML == the reference tool's own output
-  python [01-01] PASS
-evidence: guest-written HTML 754 B sha256 540f240054ad929c7311f29d83e0432b01551300ab97f01cf2aaac82f76a390e
-  snapshot [oliver-html-guest.html] PASS (oliver-html-guest.html)
+  serial-echo [exec OLIVER.BIN MD.TXT OUT2.HTML]=1
+  serial-contains [exec: loaded OLIVER.BIN size=0x000000000003cd6c]=1
+  serial-contains [oliver: argc=2 in=MD.TXT out=OUT2.HTML]=1
+  serial-contains [procs OLIVER.BIN exited status=754]=1
   serial-contains [oliver: wrote 754 bytes]=1
-  serial-echo [exec OLIVER.ELF]=1
-  serial-contains [rx-oliver-rendered]=1
+  serial-contains [rx-oliver-argv]=1
+staged OLIVER.BIN 249220 B sha256 83b6549c853f5cf1e32ceb10ea966190bc3c2fac8ebe5915806d8ee0f4084743
+DSK1: content=249196 argv block_off=249200 page_limit=249856 slack=400 B
+share/OUT2.HTML 754 B sha256 540f240054ad929c7311f29d83e0432b01551300ab97f01cf2aaac82f76a390e
+argv ok: named output byte-exact, default name never written, block fits with 400 B to spare
+  python [01] PASS
+evidence: guest-written HTML via argv 754 B sha256 540f240054ad929c7311f29d83e0432b01551300ab97f01cf2aaac82f76a390e
+  snapshot [oliver-html-argv.html] PASS (oliver-html-argv.html)
   serial-absent [error: ] ok=1
   serial-absent [not found on the host share] ok=1
   serial-absent [image larger than the] ok=1
   serial-absent [leaves no room for the argv block] ok=1
   serial-absent [[EXC] parking:] ok=1
-01-01: PASS
+01: PASS
 
-=== live-oliver run 01-02 ===
-01-02: runner-rc=0
-  serial-contains [VirelaiOS kernel has seized control.]=1
-guest share/OLIVER.HTML 754 B sha256 540f240054ad929c7311f29d83e0432b01551300ab97f01cf2aaac82f76a390e
-host  expect.html      754 B sha256 540f240054ad929c7311f29d83e0432b01551300ab97f01cf2aaac82f76a390e
-byte-exact: guest-written HTML == the reference tool's own output
-  python [01-02] PASS
-evidence: guest-written HTML 754 B sha256 540f240054ad929c7311f29d83e0432b01551300ab97f01cf2aaac82f76a390e
-  snapshot [oliver-html-guest.html] PASS (oliver-html-guest.html)
-  serial-contains [oliver: wrote 754 bytes]=1
-  serial-echo [exec OLIVER.ELF]=1
-  serial-contains [rx-oliver-rendered]=1
+=== live-oliver run 02 ===
+02: runner-rc=0
+  serial-echo [exec OLIVER.BIN /host/MD.TXT /host/OUT4.HTML]=1
+  serial-contains [oliver: argc=2 in=/host/MD.TXT out=/host/OUT4.HTML]=1
+  serial-contains [procs OLIVER.BIN exited status=754]=1
+  serial-contains [rx-oliver-argv-abs]=1
+share/OUT4.HTML 754 B sha256 540f240054ad929c7311f29d83e0432b01551300ab97f01cf2aaac82f76a390e
+absolute-path argv ok: second independent run, same bytes, default name still absent
+  python [02] PASS
+evidence: guest-written HTML via absolute-path argv 754 B sha256 540f240054ad929c7311f29d83e0432b01551300ab97f01cf2aaac82f76a390e
+  snapshot [oliver-html-argv-abs.html] PASS (oliver-html-argv-abs.html)
   serial-absent [error: ] ok=1
-  serial-absent [not found on the host share] ok=1
-  serial-absent [image larger than the] ok=1
-  serial-absent [leaves no room for the argv block] ok=1
   serial-absent [[EXC] parking:] ok=1
-01-02: PASS
+02: PASS
+
+=== live-oliver run 03 ===
+03: runner-rc=0
+  serial-echo [exec OLIVER.BIN]=1
+  serial-contains [oliver: argc=0 in=MD.TXT out=OLIVER.HTML]=1
+  serial-contains [procs OLIVER.BIN exited status=754]=1
+  serial-contains [rx-oliver-defaults]=1
+share/OLIVER.HTML (no-arg DSK1) 754 B sha256 540f240054ad929c7311f29d83e0432b01551300ab97f01cf2aaac82f76a390e
+defaults ok: no argv -> the documented default names, same 754 bytes
+  python [03] PASS
+evidence: guest-written HTML via the DSK1 default 754 B sha256 540f240054ad929c7311f29d83e0432b01551300ab97f01cf2aaac82f76a390e
+  snapshot [oliver-html-guest.html] PASS (oliver-html-guest.html)
+  serial-absent [error: ] ok=1
+  serial-absent [[EXC] parking:] ok=1
+03: PASS
+
+=== live-oliver run 04 ===
+04: runner-rc=0
+  serial-echo [exec OLIVER.ELF]=1
+  serial-contains [exec: loaded OLIVER.ELF size=0x000000000003cd6c]=1
+  serial-contains [oliver: argc=0 in=MD.TXT out=OLIVER.HTML]=1
+  serial-contains [procs OLIVER.ELF exited status=754]=1
+  serial-contains [rx-oliver-rendered]=1
+share/OLIVER.HTML (raw ELF) 754 B sha256 540f240054ad929c7311f29d83e0432b01551300ab97f01cf2aaac82f76a390e
+host  expect.html         754 B sha256 540f240054ad929c7311f29d83e0432b01551300ab97f01cf2aaac82f76a390e
+byte-exact: both load paths emit the reference tool's own output
+  python [04] PASS
+  serial-absent [error: ] ok=1
+  serial-absent [[EXC] parking:] ok=1
+04: PASS
+
+=== live-oliver run 05 ===
+05: runner-rc=0
+  serial-echo [exec OLIVER-NEAR.BIN MD.TXT OUT5.HTML]=1
+  serial-contains [error: image leaves no room for the argv block (256 bytes)]=1
+  serial-count [error: ]=1 (min 1) ok=1
+  serial-absent [exec: loaded] ok=1
+  serial-absent [oliver: argc=] ok=1
+  serial-absent [oliver: wrote] ok=1
+  serial-contains [rx-oliver-refused]=1
+OLIVER-NEAR.BIN  file=249724 content=249700 block_off=249704 page_limit=249856 slack=-104 fits=False
+OLIVER-FAR.BIN   file=249936 content=249912 block_off=249912 page_limit=253952 slack=3784 fits=True
+refused exec wrote nothing: OUT5.HTML absent
+fail-closed ok: NEAR is out of room, FAR is not, refusal wrote nothing
+  python [05] PASS
+argv-block boundary, computed from the staged headers by exec.zig's rule:
+OLIVER-NEAR.BIN  file=249724 content=249700 block_off=249704 page_limit=249856 slack=-104 fits=False
+OLIVER-FAR.BIN   file=249936 content=249912 block_off=249912 page_limit=253952 slack=3784 fits=True
+refused exec wrote nothing: OUT5.HTML absent
+  snapshot [argv-boundary.txt] PASS (argv-boundary.txt)
+05: PASS
+
+=== live-oliver run 06 ===
+06: runner-rc=0
+  serial-echo [exec OLIVER-FAR.BIN MD.TXT OUT6.HTML]=1
+  serial-contains [oliver: argc=2 in=MD.TXT out=OUT6.HTML]=1
+  serial-contains [procs OLIVER-FAR.BIN exited status=754]=1
+  serial-contains [rx-oliver-far-argv]=1
+  serial-absent [leaves no room for the argv block] ok=1
+  serial-absent [error: ] ok=1
+share/OUT6.HTML (padded past its page boundary) 754 B sha256 540f240054ad929c7311f29d83e0432b01551300ab97f01cf2aaac82f76a390e
+fits-again ok: the longer fixture crossed its page boundary, and argv was accepted
+  python [06] PASS
+evidence: guest-written HTML from the FAR fixture 754 B sha256 540f240054ad929c7311f29d83e0432b01551300ab97f01cf2aaac82f76a390e
+  snapshot [oliver-html-far.html] PASS (oliver-html-far.html)
+06: PASS
+
+=== live-oliver run 07 ===
+07: runner-rc=0
+  serial-echo [exec OLIVER-NEAR.BIN]=1
+  serial-contains [oliver: argc=0 in=MD.TXT out=OLIVER.HTML]=1
+  serial-contains [procs OLIVER-NEAR.BIN exited status=754]=1
+  serial-contains [rx-oliver-near-defaults]=1
+  serial-absent [leaves no room for the argv block] ok=1
+  serial-absent [error: ] ok=1
+share/OLIVER.HTML (NEAR fixture, no argv) 754 B sha256 540f240054ad929c7311f29d83e0432b01551300ab97f01cf2aaac82f76a390e
+validity ok: the refused-with-argv image runs fine with no argv
+  python [07] PASS
+07: PASS
 
 === result ===
-vgate live-oliver: PASS (2/2 runs)
-gate-run: keeping /var/folders/p_/h710w89x7b16x249r_061lkw0000gn/T//virelai-live-oliver.QMzdqV (VIRELAI_KEEP_RUN=1)
+vgate live-oliver: PASS (7/7 runs)

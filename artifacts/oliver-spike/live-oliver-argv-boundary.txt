@@ -1,0 +1,4 @@
+argv-block boundary, computed from the staged headers by exec.zig's rule:
+OLIVER-NEAR.BIN  file=249724 content=249700 block_off=249704 page_limit=249856 slack=-104 fits=False
+OLIVER-FAR.BIN   file=249936 content=249912 block_off=249912 page_limit=253952 slack=3784 fits=True
+refused exec wrote nothing: OUT5.HTML absent
