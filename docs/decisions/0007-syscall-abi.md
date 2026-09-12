@@ -1067,3 +1067,28 @@ refusal) and class-B (`live-trust-caps`: a monitor admin-spawned
 from slot 29 and the probe's markers continue — while the same-uid kill
 still yields status 137). The boot default is unchanged: the all-`uid_user`
 fleet's same-uid kills behave exactly as before.
+
+### Amendment (2026-09-12, #1166 — slot 72 `sys_getrandom`, the EL0 entropy read)
+
+M51 SSH-P1 (ADR 0025 D5) adds the SSH milestone's **only** new slot: **72** =
+`sys_getrandom(buf, len)`, filling caller memory from the kernel CSPRNG
+(`kernel/src/csprng.zig` `random_bytes`) through uaccess. It is strictly
+**read-only**: it can never seed, reseed, or weaken the stream, and there is
+deliberately no `sys_seed`. It requires **no capability** — every principal
+may read entropy. `len` is **capped** at a fixed `getrandom_max` = **256**
+bytes (a longer request is clamped, never refused — the caller loops; 256
+matches `write_cap`, covering an ephemeral X25519 secret, a KEXINIT cookie,
+and a burst of per-packet padding while keeping the BSS staging buffer and
+one `copy_out` small); `len == 0` returns 0 without touching the buffer;
+`EFAULT` answers a bad buffer; `EINVAL` answers a non-process (EL1h) caller.
+The kernel stays crypto-free (ADR 0023 D2): it only returns bytes. Slot 72 is
+a **single shared contract**: the GOOS=virelai Go runtime (#1163) consumes it
+for its hash seed and does not add a second entropy slot. `implemented_count`
+becomes **73** (rows 0–72; reserved 73–127). No existing number, argument,
+result, or error code changes. The slot is registered but **never called on
+the boot path** (ADR 0025 D9), so the boot log is byte-unchanged. Verified
+class-A (the handler's cap / `len == 0` / `EFAULT` / non-process `EINVAL`
+contract, the no-capability gate, the table/count pin at 73, the boot-path
+call-counter-still-zero check, and the extended `syscalls` report rows) and
+the existing class-B fleet stays green; the EL0 entropy end-to-end proof
+rides SSH2's fresh-KEX-key proof (no new spec, per `docs/ssh-scoping.md`).

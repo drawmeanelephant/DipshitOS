@@ -110,6 +110,8 @@ const sys_tty_net_auth = syscall.sys_tty_net_auth;
 const sys_principal = syscall.sys_principal;
 const sys_file_mode = syscall.sys_file_mode;
 const sys_secret_get = syscall.sys_secret_get;
+const sys_getrandom = syscall.sys_getrandom;
+const getrandom_max = syscall.getrandom_max;
 const secret = syscall.secret;
 const principal_bytes = syscall.principal_bytes;
 const terminal = syscall.terminal;
@@ -147,7 +149,7 @@ fn capture_marshaled_args(args: Args, _: *exceptions.VectorFrame) u64 {
     return 0xcafe;
 }
 
-test "syscall: runtime table has 128 slots and seventy-two unique implemented rows" {
+test "syscall: runtime table has 128 slots and seventy-three unique implemented rows" {
     init(test_writer);
     const table = ensure_table();
     try std.testing.expectEqual(@as(usize, 128), table.len);
@@ -160,7 +162,7 @@ test "syscall: runtime table has 128 slots and seventy-two unique implemented ro
             implemented += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 72), implemented);
+    try std.testing.expectEqual(@as(usize, 73), implemented);
     try std.testing.expectEqualStrings("sys_pipe_read", entry_info(sys_pipe_read).?.name);
     try std.testing.expectEqualStrings("sys_pipe_write", entry_info(sys_pipe_write).?.name);
     try std.testing.expectEqualStrings("sys_font_size", entry_info(sys_font_size).?.name);
@@ -225,6 +227,8 @@ test "syscall: runtime table has 128 slots and seventy-two unique implemented ro
     try std.testing.expectEqualStrings("sys_principal", entry_info(sys_principal).?.name);
     // M50 TS2 (issue #1136): slot 69 is owner-only chmod.
     try std.testing.expectEqualStrings("sys_file_mode", entry_info(sys_file_mode).?.name);
+    // M51 SSH-P1 (issue #1166, ADR 0025 D5): slot 72 is the EL0 entropy read.
+    try std.testing.expectEqualStrings("sys_getrandom", entry_info(sys_getrandom).?.name);
 }
 
 test "syscall: adapter decodes x8 and x0-x5 and unknown numbers return ENOSYS" {
@@ -239,14 +243,14 @@ test "syscall: adapter decodes x8 and x0-x5 and unknown numbers return ENOSYS" {
 
     // Unimplemented in-range slots still return ENOSYS (65/66/67 are now
     // sys_wmctl/sys_time/sys_tty_attach, 68 is sys_principal, 69 is
-    // sys_file_mode, 70 is sys_secret_get, 71 is sys_tty_net_auth — use
-    // 72/73, still unregistered).
-    try std.testing.expect(exceptions.frame_write(&frame, 8, 72));
+    // sys_file_mode, 70 is sys_secret_get, 71 is sys_tty_net_auth, 72 is
+    // sys_getrandom — use 73/74, still unregistered).
+    try std.testing.expect(exceptions.frame_write(&frame, 8, 73));
     try std.testing.expect(handle_svc(&frame, svc_immediate));
     try std.testing.expectEqual(error_result(.enosys), exceptions.frame_read(&frame, 0));
-    try std.testing.expectEqual(@as(u64, 1), call_count(72));
+    try std.testing.expectEqual(@as(u64, 1), call_count(73));
 
-    try std.testing.expect(exceptions.frame_write(&frame, 8, 73));
+    try std.testing.expect(exceptions.frame_write(&frame, 8, 74));
     try std.testing.expect(handle_svc(&frame, svc_immediate));
     try std.testing.expectEqual(error_result(.enosys), exceptions.frame_read(&frame, 0));
 }
@@ -1238,7 +1242,7 @@ test "syscall: counters are monotonic and report is deterministic" {
     var con = mock.console();
     report(&con);
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=72\n" ++
+        "syscalls: slots=64 implemented=73\n" ++
             "  0 sys_ping calls=2\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -1310,7 +1314,8 @@ test "syscall: counters are monotonic and report is deterministic" {
             "  68 sys_principal calls=0\n" ++
             "  69 sys_file_mode calls=0\n" ++
             "  70 sys_secret_get calls=0\n" ++
-            "  71 sys_tty_net_auth calls=0\n",
+            "  71 sys_tty_net_auth calls=0\n" ++
+            "  72 sys_getrandom calls=0\n",
         mock.contents(),
     );
 }
@@ -3057,8 +3062,9 @@ test "syscall: SYS_TIME (slot 66, #1058) returns the firmware wall-clock epoch" 
     // The slot is registered and named in the table.
     try std.testing.expectEqualStrings("sys_time", entry_info(sys_time).?.name);
     // M50 TS1 added slot 68 (sys_principal), TS2 slot 69 (sys_file_mode),
-    // TS5 slot 70 (sys_secret_get), TS4 slot 71 (sys_tty_net_auth).
-    try std.testing.expectEqual(@as(usize, 72), syscall.implemented_count);
+    // TS5 slot 70 (sys_secret_get), TS4 slot 71 (sys_tty_net_auth);
+    // M51 SSH-P1 (#1166) slot 72 (sys_getrandom).
+    try std.testing.expectEqual(@as(usize, 73), syscall.implemented_count);
 
     const saved_epoch = timer.boot_epoch_secs;
     const saved_ticks = timer.ticks;
@@ -3146,17 +3152,20 @@ test "syscall: M50 TS3 gate table is explicit, bounded, and exactly the ADR 0024
         54, // slot 54 sys_setrlimit (self-only, ADR 0024 D10)
         sys_principal,
         sys_secret_get,
+        // M51 SSH-P1 (#1166): the EL0 entropy read is capability-free by
+        // contract — every principal may read entropy (ADR 0025 D5).
+        sys_getrandom,
     };
     for (not_gated) |number| {
         try std.testing.expectEqual(@as(?u32, null), syscall.gated(number));
     }
     // Every gated row names an EXISTING implemented slot, and TS3 adds NO
-    // slot: implemented_count is unchanged at 72.
+    // slot: implemented_count is 73 after SSH-P1's slot 72.
     for (syscall.capability_gates) |gate| {
         try std.testing.expect(gate.number < syscall.implemented_count);
         try std.testing.expect(entry_info(gate.number) != null);
     }
-    try std.testing.expectEqual(@as(usize, 72), syscall.implemented_count);
+    try std.testing.expectEqual(@as(usize, 73), syscall.implemented_count);
 }
 
 test "syscall: no slot can raise uid/caps (TS3 consumes caps, adds no setter)" {
@@ -3182,6 +3191,66 @@ test "syscall: no slot can raise uid/caps (TS3 consumes caps, adds no setter)" {
     // it inherits the caller (TS1), so `gated(28)` must stay null.
     try std.testing.expectEqual(@as(?u32, null), syscall.gated(sys_exec));
     try std.testing.expectEqualStrings("sys_exec", entry_info(sys_exec).?.name);
+}
+
+// ---------------------------------------------------------------------------
+// M51 SSH-P1 (issue #1166, ADR 0025 D5): the EL0 entropy read — slot 72
+// ---------------------------------------------------------------------------
+
+test "syscall: SYS_GETRANDOM (slot 72, #1166) is registered, capped, capability-free, and not called at boot" {
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    scheduler.start();
+    var frame = fresh_frame();
+
+    // Registered under its name; the table test pins the count at 73.
+    try std.testing.expectEqualStrings("sys_getrandom", entry_info(sys_getrandom).?.name);
+    // No capability: every principal may read entropy (ADR 0025 D5).
+    try std.testing.expectEqual(@as(?u32, null), syscall.gated(sys_getrandom));
+
+    // Boot default unchanged (ADR 0025 D9): bring-up registers the slot but
+    // NOTHING on the boot path dispatches it — the call counter is still zero
+    // after the scheduler and the static boot payload are running.
+    try std.testing.expectEqual(@as(u64, 0), call_count(sys_getrandom));
+
+    var buf: [getrandom_max + 64]u8 = undefined;
+    // An EL1h caller (the shell) is not a process: EINVAL, never entropy.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_getrandom, .{ @intFromPtr(&buf), 8, 0, 0, 0, 0 }, &frame));
+
+    // Drive to the boot payload's task (process 0) and arm its stack as the
+    // destination region so uaccess copy_out can validate it.
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+    set_user_regions(.{ .base = 0, .len = 0 }, .{ .base = @intFromPtr(&buf), .len = buf.len });
+
+    // len == 0 returns 0 without touching the buffer.
+    @memset(buf[0..16], 0xAA);
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_getrandom, .{ @intFromPtr(&buf), 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u8, 0xAA), buf[0]);
+
+    // A normal request writes exactly the requested bytes out of the CSPRNG.
+    @memset(buf[0..16], 0xAA);
+    try std.testing.expectEqual(@as(u64, 16), dispatch(sys_getrandom, .{ @intFromPtr(&buf), 16, 0, 0, 0, 0 }, &frame));
+    var filled = false;
+    for (buf[0..16]) |b| {
+        if (b != 0xAA) filled = true;
+    }
+    try std.testing.expect(filled);
+
+    // The cap clamps a longer request to getrandom_max; the caller loops.
+    @memset(buf[0..], 0x55);
+    try std.testing.expectEqual(@as(u64, getrandom_max), dispatch(sys_getrandom, .{ @intFromPtr(&buf), buf.len, 0, 0, 0, 0 }, &frame));
+
+    // A bad buffer is EFAULT, never a crash or a silently dropped entropy call.
+    try std.testing.expectEqual(error_result(.efault), dispatch(sys_getrandom, .{ uaccess.diagnostic_unmapped, 8, 0, 0, 0, 0 }, &frame));
+
+    // The slot was dispatched exactly the times the checks above issued it
+    // (EINVAL + zero + normal + cap + EFAULT) — proving no boot-path call.
+    try std.testing.expectEqual(@as(u64, 5), call_count(sys_getrandom));
 }
 
 test "syscall: M50 TS3 kill gate — same-uid/self allowed, cross-principal EACCES" {
