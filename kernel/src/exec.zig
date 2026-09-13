@@ -106,6 +106,15 @@ pub const exec_program_max: usize = 2 * 1024 * 1024;
 pub const max_exec_args: usize = 8;
 pub const arg_slot_bytes: usize = 32;
 pub const arg_block_bytes: usize = max_exec_args * arg_slot_bytes; // 256
+/// Issue #1226 (GOOS=virelai envp half): a bounded envp block packed
+/// immediately after the gap-path argv block. 16 slots × 128 B holds the
+/// kernel shell's whole `env_max` table as `KEY=VALUE` (name ≤ 32, val ≤
+/// 64). Still fits the gap path's one extra writable page (argv 256 +
+/// envp 2048 = 2304 < 4096). DSK1/contiguous ELF paths do not pack envp
+/// — same scope as the B2 argv gap-only contract.
+pub const max_exec_envs: usize = 16;
+pub const env_slot_bytes: usize = 128;
+pub const env_block_bytes: usize = max_exec_envs * env_slot_bytes; // 2048
 /// Default file name for `exec` with no argument.
 pub const default_name: []const u8 = "USER.BIN";
 /// elf2bin.py's DSK1 header size (magic/flags/entry/image_size).
@@ -242,6 +251,43 @@ pub fn pack_args(args: []const []const u8, block: []u8) usize {
     return args.len;
 }
 
+/// Pack `entries` (`KEY=VALUE` strings) into a fixed envp block (issue
+/// #1226): every slot is 128 bytes, NUL-terminated; a string longer than
+/// 127 bytes is truncated. Caller has already bounded `entries.len` to
+/// `max_exec_envs`. Returns the packed count.
+pub fn pack_env(entries: []const []const u8, block: []u8) usize {
+    @memset(block, 0);
+    const n = @min(entries.len, max_exec_envs);
+    for (entries[0..n], 0..) |e, i| {
+        const slot = block[i * env_slot_bytes ..][0..env_slot_bytes];
+        const take = @min(e.len, env_slot_bytes - 1);
+        @memcpy(slot[0..take], e[0..take]);
+    }
+    return n;
+}
+
+/// Pending envp for the next `exec_file` (kernel shell `set`/`export`
+/// snapshot). `set_envp` copies into BSS; `exec_file_impl` consumes it.
+var envp_storage: [max_exec_envs][env_slot_bytes]u8 = undefined;
+var envp_slices: [max_exec_envs][]const u8 = undefined;
+var envp_count: usize = 0;
+
+pub fn set_envp(entries: []const []const u8) void {
+    envp_count = 0;
+    for (entries) |e| {
+        if (envp_count >= max_exec_envs) break;
+        const take = @min(e.len, env_slot_bytes - 1);
+        @memset(&envp_storage[envp_count], 0);
+        @memcpy(envp_storage[envp_count][0..take], e[0..take]);
+        envp_slices[envp_count] = envp_storage[envp_count][0..take];
+        envp_count += 1;
+    }
+}
+
+pub fn clear_envp() void {
+    envp_count = 0;
+}
+
 /// The user VA of the argv block for a loaded program with `content_len`
 /// content bytes (the block sits right after the content, 8-aligned, in
 /// the program's OWN text page). 0 when the block does not fit.
@@ -292,6 +338,7 @@ pub fn exec_file_pinned_as(name: []const u8, args: []const []const u8, pin: usiz
 }
 
 fn exec_file_impl(name: []const u8, args: []const []const u8, pin: ?usize, principal: process.Principal) ExecResult {
+    defer clear_envp();
     if (args.len > max_exec_args) return .too_many_args;
     if (name.len == 0) return .not_found;
 
@@ -650,7 +697,8 @@ fn exec_static_elf_gap(
         const seg = image.segments[allocated];
         var pages: u64 = (seg.mem_size + alloc.page_size - 1) / alloc.page_size;
         // B2: reserve one extra page on the writable segment for the argv
-        // block (a 256-byte block always fits one page past the image end).
+        // + envp blocks (256 + 2048 bytes always fit one page past the
+        // image end).
         if (allocated == image.segment_count - 1 and argc > 0) pages += 1;
         if (pages == 0) continue;
         const phys = alloc.alloc_pages(pages) orelse {
@@ -688,17 +736,22 @@ fn exec_static_elf_gap(
     // B2: pack the argv block into the writable segment's reserved tail
     // (after the image's own bss; the page was allocated above and must be
     // zeroed before packing — fresh allocator pages are not zeroed).
+    // Issue #1226: the envp block sits immediately after argv (same extra
+    // page). rt0 converts both to the SysV argv/NULL/envp/NULL layout.
     var argv_va: u64 = 0;
     const last_seg = image.segments[image.segment_count - 1];
     if (argc > 0 and image.segment_count >= 2) {
         const last_phys = seg_phys[image.segment_count - 1];
         const last_pages = seg_pages[image.segment_count - 1];
         const block_off: u64 = (last_seg.mem_size + 7) & ~@as(u64, 7);
-        if (block_off + arg_block_bytes > last_pages * alloc.page_size) return .no_args_room;
+        if (block_off + arg_block_bytes + env_block_bytes > last_pages * alloc.page_size) return .no_args_room;
         const block_dst: [*]u8 = @ptrFromInt(last_phys + block_off);
         @memset(block_dst[0..arg_block_bytes], 0);
         _ = pack_args(argv_list[0..argc], block_dst[0..arg_block_bytes]);
         argv_va = last_seg.vaddr + block_off;
+        const env_dst: [*]u8 = @ptrFromInt(last_phys + block_off + arg_block_bytes);
+        @memset(env_dst[0..env_block_bytes], 0);
+        _ = pack_env(envp_slices[0..envp_count], env_dst[0..env_block_bytes]);
     }
 
     // Initial stack placement (per-process ASLR, claim 2665) and the
@@ -781,11 +834,11 @@ fn exec_static_elf_gap(
             .ro_phys = if (image.segment_count == 3) seg_phys[1] else 0,
             .ro_pages = if (image.segment_count == 3) seg_pages[1] else 0,
             .ro_va = if (image.segment_count == 3) image.segments[1].vaddr else 0,
-            // Issue #1214 review: the packed argv block's end — the data
-            // aperture collision bound extends through it, so the sbrk
-            // heap cannot swallow a block that starts on the headroom page
-            // (an exactly page-aligned `mem_size`).
-            .argv_end_va = if (argv_va != 0) argv_va + arg_block_bytes else 0,
+            // Issue #1214 review / #1226: the packed argv+envp region's
+            // end — the data aperture collision bound extends through it,
+            // so the sbrk heap cannot swallow a block that starts on the
+            // headroom page (an exactly page-aligned `mem_size`).
+            .argv_end_va = if (argv_va != 0) argv_va + arg_block_bytes + env_block_bytes else 0,
         },
         .{ .phys = kstack_phys, .pages = kstack_pages },
         principal,
@@ -2035,6 +2088,26 @@ test "exec: argv packing shape, per-arg truncation, and block VA" {
     try std.testing.expectEqual(userspace.text_va + 24, argv_va_for(24));
     try std.testing.expectEqual(userspace.text_va + 240, argv_va_for(234));
     try std.testing.expectEqual(@as(u64, 0), argv_va_for(4096 - 100));
+}
+
+test "exec: envp packing shape, per-entry truncation, and KEY=VALUE slots" {
+    // Issue #1226: 16 slots × 128 bytes, zeroed, NUL-terminated. pack_env
+    // is pure — the shape is pinned without a disk.
+    var block: [env_block_bytes]u8 = undefined;
+    const n = pack_env(&.{ "GOMAXPROCS=1", "HOME=/host" }, &block);
+    try std.testing.expectEqual(@as(usize, 2), n);
+    try std.testing.expectEqualStrings("GOMAXPROCS=1", block[0..12]);
+    try std.testing.expectEqual(@as(u8, 0), block[12]);
+    try std.testing.expectEqualStrings("HOME=/host", block[env_slot_bytes..][0..10]);
+    for (block[env_slot_bytes + 10 .. env_slot_bytes * 2]) |b| try std.testing.expectEqual(@as(u8, 0), b);
+
+    const long = "K=" ++ ("v" ** 200);
+    const n2 = pack_env(&.{long}, &block);
+    try std.testing.expectEqual(@as(usize, 1), n2);
+    try std.testing.expectEqual(@as(u8, 'K'), block[0]);
+    try std.testing.expectEqual(@as(u8, '='), block[1]);
+    try std.testing.expectEqual(@as(u8, 0), block[env_slot_bytes - 1]);
+    try std.testing.expectEqual(@as(usize, 127), std.mem.indexOfScalar(u8, block[0..env_slot_bytes], 0).?);
 }
 
 test "exec: more than 8 args is refused honestly (too_many_args)" {

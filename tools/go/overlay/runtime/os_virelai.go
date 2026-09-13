@@ -171,6 +171,8 @@ func osinit() {
 	// ADR 0027 D6 (ACCEPTED): the real phase-0b setting. Two Ps + the
 	// sysmon/template Ms ride the kernel's bounded task pool (11 slots);
 	// the go-goroutines gate proves cross-core scheduling of slot-73 tasks.
+	// Issue #1226: GOMAXPROCS in the exec envp overrides this at schedinit;
+	// the default stays 2 (two vCPUs) — no osinit bump.
 	numCPUStartup = 2
 	getg().m.procid = 1
 	initMonoScale()
@@ -332,21 +334,48 @@ func VirelaiArgs() []string {
 	return argslice
 }
 
-// goenvs builds os.Args from the exec entry contract (issue #1163 B2):
-// the kernel packs [<program name>, args...] into 32-byte NUL-terminated
-// slots and the rt0 stub hands rt0_go a SysV char* array, so argc/argv are
-// the plain SysV shapes runtime.args stored. There is no environment —
-// envs stays empty.
+// VirelaiEnvs returns the environment vector for programs that predate
+// the phase-2 `os` package (the go-args gate fixture linknames it).
+//
+//go:linkname VirelaiEnvs runtime.VirelaiEnvs
+func VirelaiEnvs() []string {
+	return envs
+}
+
+// goenvs builds os.Args and the environment from the exec entry contract
+// (issue #1163 B2 + #1226): the kernel packs argv as 32-byte slots and
+// envp as 128-byte KEY=VALUE slots; the rt0 stub hands rt0_go a SysV
+// char* array (argv…/NULL/envp…/NULL), so argc/argv are the plain SysV
+// shapes runtime.args stored. gogetenv("GOMAXPROCS") then drives
+// schedinit's override — numCPUStartup stays 2 (ADR 0027 D6).
 func goenvs() {
+	if argc == 0 || argv == nil {
+		argslice = make([]string, 0)
+		envs = make([]string, 0)
+		return
+	}
 	argslice = make([]string, argc)
 	for i := uintptr(0); i < uintptr(argc); i++ {
 		p := *(**byte)(add(unsafe.Pointer(argv), i*goarch.PtrSize))
 		if p == nil {
+			argslice = argslice[:i]
 			break
 		}
 		argslice[i] = gostring(p)
 	}
-	envs = make([]string, 0)
+	n := 0
+	for {
+		p := *(**byte)(add(unsafe.Pointer(argv), (uintptr(argc)+1+uintptr(n))*goarch.PtrSize))
+		if p == nil {
+			break
+		}
+		n++
+	}
+	envs = make([]string, n)
+	for i := 0; i < n; i++ {
+		p := *(**byte)(add(unsafe.Pointer(argv), (uintptr(argc)+1+uintptr(i))*goarch.PtrSize))
+		envs[i] = gostring(p)
+	}
 }
 
 // ---- signals: none (the kernel kills a faulting process; phase 0b/0c

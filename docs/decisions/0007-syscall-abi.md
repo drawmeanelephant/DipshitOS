@@ -1150,3 +1150,23 @@ collision refusals — stack/text/overlap refused, adjacency allowed) and
 class-B (`go-goroutines`: N=8 goroutines > GOMAXPROCS=2, `sys_thread`
 calls >= 2, `sys_futex` parked, `task=GOROUT.ELF` on a secondary core in
 the `smp` report; `go-hello`/`go-args` unchanged and green).
+
+### Amendment (2026-09-13, #1226 — exec envp on the gap path)
+
+The GOOS=virelai envp half is an **entry-contract extension**, not a new
+syscall — the same shape as card-3e argv (`x0` = argc, `x1` = argv block
+VA). Slot 28 `sys_exec` is unchanged (still path-only; EL0 has no env
+argument). The kernel monitor form packs a bounded envp block into the
+gap-layout ELF's extra writable page, immediately after argv:
+
+- 16 slots × 128 bytes (`KEY=VALUE`, name ≤ 32, val ≤ 64) — enough for
+  the kernel shell's whole `env_max` table.
+- Source: the kernel shell `set`/`export` table, snapshotted at `exec`.
+- rt0 converts argv+envp to the Unix `argv…/NULL/envp…/NULL` pointer
+  array; `goenvs` fills `runtime.envs` so `gogetenv("GOMAXPROCS")` works.
+- `numCPUStartup` stays **2** (ADR 0027 D6; two vCPUs). `GOMAXPROCS=N` in
+  the environment is the tuning knob; no osinit default bump.
+
+No `implemented_count` change. Verified class-A (`pack_env` shape +
+truncation) and class-B (`go-args`: argv unchanged, `env n=1
+[GOMAXPROCS=1]`, `procs=1`; `go-hello`/`go-goroutines` still PASS).
