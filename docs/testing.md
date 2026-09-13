@@ -190,11 +190,11 @@ under `C` with no workflow noticing). The rules that came out of it:
 > Apple-silicon VZ hardware gates (class B).
 >
 > **Host prerequisites (class B):** the Go-runtime gates (`go-hello`,
-> `go-args`, `go-goroutines`) are NOT hermetic — they exec
-> `.build/go/GOHELLO.ELF` + `.build/go/GOARGS.ELF` + `.build/go/GOROUT.ELF`,
-> and refuse to run (honestly, with the build hint) until
-> `just go-toolchain` has provisioned this machine (it builds ALL THREE
-> fixtures). The recipe is idempotent; the first run takes several
+> `go-args`, `go-goroutines`, `go-stress`) are NOT hermetic — they exec
+> `.build/go/GOHELLO.ELF` + `.build/go/GOARGS.ELF` + `.build/go/GOROUT.ELF`
+> + `.build/go/GOSTRESS.ELF`, and refuse to run (honestly, with the build
+> hint) until `just go-toolchain` has provisioned this machine (it builds
+> ALL FOUR fixtures). The recipe is idempotent; the first run takes several
 > minutes (one Go make.bash pass — the cross-std pass is phase-2 opt-in
 > via `GOVIRELAI_STD=1`). Do not auto-build the fork inside a gate
 > (rejected in review — see `tools/go/README.md`).

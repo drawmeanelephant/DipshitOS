@@ -342,6 +342,22 @@ func VirelaiEnvs() []string {
 	return envs
 }
 
+// VirelaiNanotime / VirelaiSleep are the pre-phase-2 timer accessors
+// (issue #1227). Package time imports syscall, which is unported until
+// phase 2, so the go-stress fixture linknames these instead of calling
+// time.Now / time.Sleep. VirelaiSleep is the real timer-heap path
+// (runtime.timeSleep → sysmon), not the busy-yield usleep.
+//
+//go:linkname VirelaiNanotime runtime.VirelaiNanotime
+func VirelaiNanotime() int64 {
+	return nanotime()
+}
+
+//go:linkname VirelaiSleep runtime.VirelaiSleep
+func VirelaiSleep(ns int64) {
+	timeSleep(ns)
+}
+
 // goenvs builds os.Args and the environment from the exec entry contract
 // (issue #1163 B2 + #1226): the kernel packs argv as 32-byte slots and
 // envp as 128-byte KEY=VALUE slots; the rt0 stub hands rt0_go a SysV
