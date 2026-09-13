@@ -81,8 +81,7 @@ The only threads not closed:
 
 | Thread | State / next step | Cards |
 |--------|-------------------|-------|
-| **M-web — in-guest HTML renderer (`DOC.BIN`)** | S1 merged (#1222); S2 tables PR #1223; S3–S6 (img/nav/fetch/publish) stacked as one gated PR | #1200, #1201 |
-| **Go runtime port — `GOOS=virelai`** | Phase 0a merged (PR #1187); phase 0b round 2 in flight — threads/futex landed per ADR 0027 (slots 73/74, `go-goroutines` gate PASS with the cross-core proof), every `proc.go` delta retired, and the argv boot flake root-caused (ASLR band vs the ~1.2 GiB sbrk heap; `sys_mmap` collision refusal is the backstop). Next: envp half, then 0c fault delivery | #1163, #1194, #1214 |
+| **Go runtime port — `GOOS=virelai`** | Phase 0a merged (PR #1187); phase 0b rounds 1+2 merged (#1196/#1221) — slots 73/74, argv, `go-hello`/`go-args`/`go-goroutines` (N=8, cross-core). Next: envp half (#1226), stress breadth (#1227), then 0c fault delivery (#1228). TABWM/DOC follow-ups stay parked until the Go fleet can carry the test apps. | #1163, #1194, #1214 |
 
 ## Gate status
 
