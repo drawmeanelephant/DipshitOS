@@ -116,6 +116,7 @@ TEXT runtime·nanotime1(SB),NOSPLIT|NOFRAME,$0-8
 
 #define VIR_SYS_THREAD     73
 #define VIR_SYS_FUTEX      74
+#define VIR_SYS_EXNOTIFY      75
 
 // func virThreadCreate(entry, stackHi, arg unsafe.Pointer) int — slot 73
 // op 0. Returns the new kernel tid (>= 0) or a negative errno.
@@ -174,3 +175,62 @@ TEXT runtime·virFutexWake(SB),NOSPLIT|NOFRAME,$0-16
 TEXT runtime·virThreadTrampoline(SB),NOSPLIT|NOFRAME,$0-0
 	MOVD	m_g0(R0), g
 	B	runtime·mstart(SB)
+
+// Issue #1228 (phase 0c): the fault seam — slot 75 sys_exnotify, a
+// single argument (nonzero installs the process's fault-delivery PC,
+// zero clears it; see handle_exnotify in kernel/src/syscall.zig).
+
+// func virExnotifyRegister(handler unsafe.Pointer) int — slot 75.
+// Returns 0 on success, negative errno otherwise.
+TEXT runtime·virExnotifyRegister(SB),NOSPLIT|NOFRAME,$0-16
+	MOVD	handler+0(FP), R0
+	MOVD	$VIR_SYS_EXNOTIFY, R8
+	SVC
+	MOVD	R0, ret+8(FP)
+	RET
+
+// runtime·sigtramp — phase 0c fault entry (ABI0, no Go prototype). The
+// kernel redirects a faulting task here with the fault record in
+// registers: x0=sig, x1=addr, x2=pc, x3=esr, x4=sp_el0, x5=lr, x6=r29.
+// g (R28) is the faulting g. Switch to the gsignal stack (the kernel did
+// not — the plan9 shape), run virfaulthandler to arm sigpanic on the
+// faulting stack, then resume the faulting g at sigpanic. A delivered
+// fault always panics; this frame is never returned through.
+TEXT runtime·sigtramp(SB),NOSPLIT|TOPFRAME,$0-0
+	// Park the fault record in callee-saved regs across the Go call.
+	MOVD	R0, R19
+	MOVD	R1, R20
+	MOVD	R2, R21
+	MOVD	R3, R22
+	MOVD	R4, R23
+	MOVD	R5, R24
+	MOVD	R6, R25
+	MOVD	g, R26
+	// Switch to the gsignal stack (a nil gsignal falls back to the
+	// faulting stack — still correct for the panic path).
+	MOVD	g_m(g), R10
+	MOVD	m_gsignal(R10), R10
+	CBZ	R10, sigtramp_noswitch
+	MOVD	(g_stack+stack_hi)(R10), R10
+	CBZ	R10, sigtramp_noswitch
+	MOVD	R10, RSP
+sigtramp_noswitch:
+	// virfaulthandler(gp, sig, addr, pc, esr, sp, lr, r29)
+	// -> (newsp, newlr, newpc).
+	MOVD	R26, R0
+	MOVD	R19, R1
+	MOVD	R20, R2
+	MOVD	R21, R3
+	MOVD	R22, R4
+	MOVD	R23, R5
+	MOVD	R24, R6
+	MOVD	R25, R7
+	MOVD	$runtime·virfaulthandler<ABIInternal>(SB), R8
+	BL	(R8)
+	// Resume the faulting g at sigpanic on its own stack.
+	MOVD	R2, R4
+	MOVD	R26, g
+	MOVD	$0, R29
+	MOVD	R0, RSP
+	MOVD	R1, R30
+	JMP	(R4)

@@ -253,6 +253,12 @@ const Process = struct {
     exit_status_snapshot: u64 = 0,
     /// Exit status, snapshotted at exit so it survives the task reap.
     exit_status: u64 = 0,
+    /// Issue #1228 (phase 0c): the EL0 fault-handler PC a process
+    /// registered via slot 75 `sys_exnotify` op 0. 0 = none (the reap path).
+    /// Process-scope like the text aperture: inherited by every
+    /// `sys_thread` task, cleared at create and at exec (a new image must
+    /// re-register — the old PC is meaningless under the new text).
+    exnotify_handler: u64 = 0,
     /// Arc5 issue #246: per-process resource limits.
     /// mem_limit: max pages (0 = unlimited). cpu_limit: max ticks (0 = unlimited).
     /// mem_usage: current page count (text + data + stack). cpu_usage: tick counter.
@@ -523,6 +529,9 @@ pub fn create_as(
     processes[id].uid = actor.uid;
     processes[id].caps = actor.caps;
     processes[id].state = .created;
+    // Issue #1228: a fresh (or recycled) descriptor carries no fault
+    // handler — the new image registers its own via slot 75.
+    processes[id].exnotify_handler = 0;
     registry_count +%= 1;
     current_id = id;
     return id;
@@ -584,6 +593,23 @@ pub fn has_thread_capacity(id: usize) bool {
         if (t.* == null) return true;
     }
     return false;
+}
+
+/// Issue #1228 (phase 0c): the registered EL0 fault-handler PC (0 =
+/// none). Read by the exception path to decide delivery vs reap.
+pub fn exnotify_handler(id: usize) ?u64 {
+    if (id >= max_processes or processes[id].state == .free) return null;
+    return processes[id].exnotify_handler;
+}
+
+/// Issue #1228 (phase 0c): install (or, with 0, clear) the process's EL0
+/// fault-handler PC. Returns false for an invalid id or a free/exited
+/// descriptor — a dead process registers nothing.
+pub fn set_exnotify_handler(id: usize, handler: u64) bool {
+    if (id >= max_processes or processes[id].state == .free) return false;
+    if (processes[id].state == .exited) return false;
+    processes[id].exnotify_handler = handler;
+    return true;
 }
 
 /// Free a process descriptor. Only a non-running process may be reaped:

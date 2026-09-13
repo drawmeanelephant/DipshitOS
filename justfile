@@ -65,13 +65,13 @@ gate-list:
 # Provision the GOOS=virelai Go toolchain + gate fixtures (issue #1163;
 # idempotent — apply.sh and the host make.bash pass run only when
 # missing). HOST PREREQUISITE for the go-hello / go-args / go-goroutines /
-# go-stress class-B gates: `just verify-vz` includes them, and they refuse
+# go-stress / go-panic class-B gates: `just verify-vz` includes them, and they refuse
 # to run (honestly) until this has produced .build/go/{GOHELLO,GOARGS,
-# GOROUT,GOSTRESS}.ELF on this machine. First run takes several minutes
+# GOROUT,GOSTRESS,GOPANIC}.ELF on this machine. First run takes several minutes
 # (one Go make.bash pass; the second cross-std pass is phase-2 opt-in via
 # GOVIRELAI_STD=1).
 go-toolchain:
-    bash tools/go/build-go.sh tools/go/hello.go tools/go/goargs.go tools/go/goroutines.go tools/go/gostress.go
+    bash tools/go/build-go.sh tools/go/hello.go tools/go/goargs.go tools/go/goroutines.go tools/go/gostress.go tools/go/gopanic.go
 
 # Compile the AArch64 UEFI application and kernel image (class A — zig build)
 build:

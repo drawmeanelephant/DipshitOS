@@ -12,20 +12,21 @@ Upstream Go has no third-party-GOOS mechanism (golang/go#35956 declined
 `GOOS=none`; golang/go#73608's `GOOSPKG` overlay proposal is still open).
 Every non-POSIX port (Fuchsia, TamaGo, IBM z/OS) is a maintained fork
 tracking each release. The maintenance surface here is deliberately tiny:
-**5 file edits + 5 new GOOS-gated files** (the sixth edit — proc.go's phase-0a thread gates — retired in 0b round 2, ADR 0027); everything else is stock.
+**5 file edits + 6 new GOOS-gated files** (the sixth edit — proc.go's phase-0a thread gates — retired in 0b round 2, ADR 0027; the sixth file — signal_virelai.go — is phase 0c, #1228); everything else is stock.
 
 ## Layout
 
 | Path | Role |
 |---|---|
-| `overlay/runtime/os_virelai.go` | the GOOS layer: osinit, write1, exit, time, readRandom, goenvs, no-signal surface, sbrk over sys_mmap |
+| `overlay/runtime/os_virelai.go` | the GOOS layer: osinit, write1, exit, time, readRandom, goenvs, futex-backed lock_sema, sbrk over sys_mmap (the signal surface moved to signal_virelai.go in 0c) |
+| `overlay/runtime/signal_virelai.go` | phase 0c (#1228): initsig registers sigtramp via slot 75, virfaulthandler arms sigpanic, crash() exits through the syscall |
 | `overlay/runtime/sys_virelai_arm64.s` | the syscall gateway: `svc #0` with x8=slot (ADR 0007), CNTPCT_EL0 nanotime |
 | `overlay/runtime/rt0_virelai_arm64.s` | entry (`_rt0_virelai_arm64`): argc/argv block → SysV argv array + envp (issue #1226) |
 | `overlay/runtime/netpoll_virelai.go` | blocking stub netpoll (copy of plan9's netpoll_stub) |
 | `overlay/internal/goos/zgoos_virelai.go` | generated GOOS consts (gengoos shape, hand-applied) |
 | `apply.sh` | copies a stock distribution + applies everything, idempotently, committing a git delta in the fork |
 | `build-go.sh` | runs the host make.bash pass on first use (the cross-std pass is `GOVIRELAI_STD=1` opt-in for phase 2), then links programs with `-ldflags "-s -w"` at the Go default base (the gap loader maps at declared vaddrs; stripped to fit the 2 MiB exec staging bound) |
-| `hello.go` / `goargs.go` / `goroutines.go` / `gostress.go` | the class-B fixtures: console + sbrk heap growth + a full GC cycle; raw-ELF argv+envp (`GOMAXPROCS` override); goroutines + futex + the cross-core proof; 0b breadth (GC/channel/timer/futex, issue #1227) |
+| `hello.go` / `goargs.go` / `goroutines.go` / `gostress.go` / `gopanic.go` | the class-B fixtures: console + sbrk heap growth + a full GC cycle; raw-ELF argv+envp (`GOMAXPROCS` override); goroutines + futex + the cross-core proof; 0b breadth (GC/channel/timer/futex, issue #1227); 0c fault delivery + recover + traceback (issue #1228) |
 
 ## Prerequisites
 
@@ -37,11 +38,12 @@ tracking each release. The maintenance surface here is deliberately tiny:
 
 ```bash
 bash tools/go/apply.sh            # create/patch the fork (../go-virelai)
-just go-toolchain                  # builds .build/go/{GOHELLO,GOARGS,GOROUT,GOSTRESS}.ELF
+just go-toolchain                  # builds .build/go/{GOHELLO,GOARGS,GOROUT,GOSTRESS,GOPANIC}.ELF
 just gate go-hello                 # class-B VZ gate: execs it, asserts serial
 just gate go-args                  # class-B VZ gate: raw-ELF argv + envp / GOMAXPROCS
 just gate go-goroutines            # class-B VZ gate: threads/futex + cross-core
 just gate go-stress                # class-B VZ gate: GC / channel / timer / futex breadth
+just gate go-panic                 # class-B VZ gate: fault delivery + recover + traceback
 ```
 
 **The Go-runtime gates are not hermetic**: `just verify-vz` includes them,
@@ -81,8 +83,13 @@ the reviewable patch series. `GOTOOLCHAIN=local` is exported by
   the default. `numCPUStartup` stays **2** (ADR 0027 D6; two vCPUs).
   Breadth stress (#1227): `go-stress` (GC churn, channel fan-out, timer
   pacing, futex contention at N=32).
-- **0c**: kernel fault-delivery seam → `sigtrampgo`/`sigpanic` (recover(),
-  tracebacks), Fuchsia-exception-channel pattern.
+- **0c**: landed (#1228) — kernel fault-delivery seam (slot 75
+  `sys_exnotify`, ADR 0007 amendment) in the Fuchsia-exception-channel
+  pattern, synchronous form: deliverable EL0 faults redirect to
+  `sigtramp`, `virfaulthandler` arms `sigpanic` on the faulting stack
+  (recover() works, the unwinder crosses the injected frame — proven by
+  `go-panic`), `crash()` exits through the syscall instead of faulting.
+  Async preemption stays OFF (no signals, only synchronous delivery).
 - **2**: `syscall`/`os` packages over the file channel; real netpoll over
   ADR 0009 events.
 

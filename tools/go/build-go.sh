@@ -62,6 +62,7 @@ for prog in "${@:-$REPO/tools/go/hello.go}"; do
         goargs)     base="GOARGS" ;;
         goroutines) base="GOROUT" ;;
         gostress)   base="GOSTRESS" ;;
+        gopanic)    base="GOPANIC" ;;
     esac
     out="$out_dir/${GO_BUILD_NAME:-$base}.ELF"
     log "building $prog -> $out"

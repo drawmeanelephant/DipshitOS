@@ -160,6 +160,85 @@ pub fn is_from_el0(spsr: u64) bool {
     return (spsr & 0xf) == 0;
 }
 
+// ---------------------------------------------------------------------------
+// Issue #1228 (phase 0c): EL0 fault delivery to a registered process
+// handler (the Fuchsia-exception-channel pattern, synchronous form).
+// ---------------------------------------------------------------------------
+
+/// Exception classes a registered handler receives instead of the reap
+/// path: EL0 data/instruction aborts, PC/SP alignment faults, and
+/// illegal encodings (EC 0x00 unknown-reason). Debug classes (breakpoint,
+/// step, watchpoint, BRK) stay reap-only — no debugger exists yet to back
+/// them, and silently swallowing a BRK would hide kernel/user bugs alike.
+pub fn fault_deliverable(ec: u64) bool {
+    return switch (ec) {
+        0x00, 0x20, 0x22, 0x24, 0x26 => true,
+        else => false,
+    };
+}
+
+/// Signal number per delivered class. The values match the GOOS=virelai
+/// runtime's `_SIGILL`/`_SIGBUS`/`_SIGSEGV` so the handler can classify
+/// without parsing ESR itself (ESR still rides in x3 for forensics).
+pub fn fault_signal(ec: u64) u64 {
+    return switch (ec) {
+        0x00 => 4, // SIGILL: illegal encoding
+        0x22, 0x26 => 7, // SIGBUS: PC/SP alignment
+        else => 11, // SIGSEGV: data/instruction abort
+    };
+}
+
+/// Fault address per delivered class. FAR_EL1 is meaningless for PC/SP
+/// alignment faults, so the faulting PC rides along instead (the M22 D3
+/// rule already used for BRK).
+pub fn fault_addr(ec: u64, far: u64, elr: u64) u64 {
+    return switch (ec) {
+        0x22, 0x26 => elr,
+        else => far,
+    };
+}
+
+/// The ELR redirect the delivery writes. Host-test-visible: on hardware
+/// this is `msr elr_el1` (like the resume-armed path below); under test
+/// the `msr` cannot execute, so the target is staged here for the assert.
+pub var test_redirect_pc: u64 = 0;
+
+fn redirect_elr(handler: u64) void {
+    if (comptime builtin.is_test or builtin.cpu.arch != .aarch64) {
+        test_redirect_pc = handler;
+        return;
+    }
+    asm volatile ("msr elr_el1, %[v]"
+        :
+        : [v] "r" (handler),
+    );
+    asm volatile ("isb");
+}
+
+/// Try to deliver an EL0 fault to the current process's registered
+/// handler. On success the saved frame carries the fault record
+/// (x0=sig, x1=addr, x2=pc, x3=esr, x4=sp_el0, x5=lr, x6=r29 — x5/x6 ride
+/// in place, the handler reads them), ELR points at the handler, and the
+/// caller resumes the SAME frame. Returns false (the reap path runs) when
+/// the class is not deliverable, no handler is registered, or the fault
+/// PC is already the handler (a fault INSIDE the handler — reaping beats
+/// a delivery loop). Runs in exception context: no console, no
+/// allocation, only the scheduler/process lookups the reap path uses.
+fn try_deliver_fault(esr: u64, far: u64, elr: u64, frame: *VectorFrame, sp_el0: u64) bool {
+    const ec = (esr >> 26) & 0x3f;
+    if (!fault_deliverable(ec)) return false;
+    const pid = process.find_by_task(scheduler.current_id()) orelse return false;
+    const handler = process.exnotify_handler(pid) orelse return false;
+    if (handler == 0 or elr == handler) return false;
+    _ = frame_write(frame, 0, fault_signal(ec));
+    _ = frame_write(frame, 1, fault_addr(ec, far, elr));
+    _ = frame_write(frame, 2, elr);
+    _ = frame_write(frame, 3, esr);
+    _ = frame_write(frame, 4, sp_el0);
+    redirect_elr(handler);
+    return true;
+}
+
 /// Per-core count for the staged resume seam. Mirrors `smp.max_cores`; a
 /// direct import would cycle (smp.zig imports this module for
 /// `install`/`irq_unmask`).
@@ -826,7 +905,7 @@ pub fn try_handle_page_fault(esr: u64, far: u64) bool {
     return false;
 }
 
-export fn exc_dispatch(
+pub export fn exc_dispatch(
     frame: *VectorFrame,
     esr: u64,
     far: u64,
@@ -880,6 +959,12 @@ export fn exc_dispatch(
     // If not, the fault dispatcher reaps the faulting process safely.
     if (kind == kind_sync and is_from_el0(spsr)) {
         if (try_handle_page_fault(esr, far)) {
+            return .{ .frame = @intFromPtr(frame), .sp_el0 = resume_sp_el0[cid] };
+        }
+        // Issue #1228 (phase 0c): a process with a registered slot-75
+        // handler receives deliverable faults synchronously (the runtime
+        // converts them to panics); everything else reaps as before.
+        if (try_deliver_fault(esr, far, elr, frame, resume_sp_el0[cid])) {
             return .{ .frame = @intFromPtr(frame), .sp_el0 = resume_sp_el0[cid] };
         }
         if (fault_dispatcher) |d| {
@@ -1422,7 +1507,7 @@ var test_fault_esr: u64 = 0;
 var test_fault_far: u64 = 0;
 var test_fault_resume_frame: ?*VectorFrame = null;
 
-fn test_fault_handler(esr: u64, far: u64, pc: u64) void {
+fn test_exnotify_handler(esr: u64, far: u64, pc: u64) void {
     _ = pc; // M22 D3: the PC rides along for symbol resolution; tests ignore it
     test_fault_esr = esr;
     test_fault_far = far;
@@ -1497,7 +1582,7 @@ test "exceptions: an EL0 sync fault reaches the fault dispatcher and resumes its
     test_fault_esr = 0;
     test_fault_far = 0;
     test_fault_resume_frame = &selected;
-    set_fault_dispatcher(test_fault_handler);
+    set_fault_dispatcher(test_exnotify_handler);
     // A data-abort-lower (EC 0x24) from EL0 (SPSR.M == 0) at FAR 0x7fff_f000.
     const esr: u64 = 0x24 << 26;
     const result = exc_dispatch(&frame, esr, 0x7fff_f000, 0x4000, 0, kind_sync);
@@ -1529,6 +1614,31 @@ test "exceptions: handled SVC may select another existing scheduler frame" {
     const result = exc_dispatch(&frame, 0x15 << 26, 0, 0x4000, 0, kind_sync);
     try std.testing.expectEqual(@intFromPtr(&selected), result.frame);
     test_svc_resume_frame = null;
+}
+
+test "exceptions: fault delivery classifies, signals, and addresses purely" {
+    // Deliverable: illegal encoding, aborts, alignment.
+    try std.testing.expect(fault_deliverable(0x00));
+    try std.testing.expect(fault_deliverable(0x20));
+    try std.testing.expect(fault_deliverable(0x22));
+    try std.testing.expect(fault_deliverable(0x24));
+    try std.testing.expect(fault_deliverable(0x26));
+    // Reap-only: SVC, debug classes, IRQs-as-kind never reach here.
+    try std.testing.expect(!fault_deliverable(0x15));
+    try std.testing.expect(!fault_deliverable(0x25));
+    try std.testing.expect(!fault_deliverable(0x30));
+    try std.testing.expect(!fault_deliverable(0x3c));
+    // Signals match the runtime's _SIGILL/_SIGBUS/_SIGSEGV.
+    try std.testing.expectEqual(@as(u64, 4), fault_signal(0x00));
+    try std.testing.expectEqual(@as(u64, 7), fault_signal(0x22));
+    try std.testing.expectEqual(@as(u64, 7), fault_signal(0x26));
+    try std.testing.expectEqual(@as(u64, 11), fault_signal(0x20));
+    try std.testing.expectEqual(@as(u64, 11), fault_signal(0x24));
+    // FAR rides for aborts; the PC rides for alignment (FAR meaningless).
+    try std.testing.expectEqual(@as(u64, 0xdead), fault_addr(0x24, 0xdead, 0x5000));
+    try std.testing.expectEqual(@as(u64, 0xdead), fault_addr(0x20, 0xdead, 0x5000));
+    try std.testing.expectEqual(@as(u64, 0x5000), fault_addr(0x22, 0xdead, 0x5000));
+    try std.testing.expectEqual(@as(u64, 0x5000), fault_addr(0x26, 0xdead, 0x5000));
 }
 
 test "exceptions: kind_name is stable" {

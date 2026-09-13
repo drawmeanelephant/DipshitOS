@@ -394,57 +394,10 @@ func goenvs() {
 	}
 }
 
-// ---- signals: none (the kernel kills a faulting process; phase 0b/0c
-// ---- add fault delivery -> sigtramp -> sigpanic) ----
-
-type sigset [1]uint32
-
-const _NSIG = 0
-
-const _SIGSEGV = 0xb
-
-func initsig(preinit bool) {}
-
-func signame(sig uint32) string { return "" }
-
-func sigdisable(sig uint32) {}
-func sigenable(sig uint32)  {}
-func sigignore(sig uint32)  {}
-
-func sigsave(p *sigset)              {}
-func msigrestore(sigmask sigset)     {}
-func clearSignalHandlers()           {}
-func sigblock(exiting bool)          {}
-func minit()                         {}
-func unminit()                       {}
-func mdestroy(mp *m)                 {}
-func os_sigpipe()                    {}
-func setProcessCPUProfiler(hz int32) {}
-func setThreadCPUProfiler(hz int32)  {}
-
-// Called to initialize a new m (including the bootstrap m). The signal
-// stack is never used on virelai (no signals), but mcommoninit calls
-// mpreinit unconditionally — mirror os_wasm.go and allocate it.
-func mpreinit(mp *m) {
-	mp.gsignal = malg(32 * 1024)
-	mp.gsignal.m = mp
-}
-
-func crash() {
-	abort() // runtime·abort lives in asm_arm64.s for every arm64 GOOS
-}
-
-// sigpanic: no fault delivery exists in phase 0a (an EL0 data abort kills
-// the process), so this is only reached through explicit panic paths.
-// Phase 0c wires the kernel's fault seam into sigtrampgo.
-func sigpanic() {
-	gp := getg()
-	if !canpanic() {
-		throw("unexpected signal during runtime execution")
-	}
-	gp.sig = _SIGSEGV
-	panicmem()
-}
+// ---- signals: phase 0c fault delivery (issue #1228) ----
+// The whole signal surface lives in signal_virelai.go now: initsig
+// registers sigtramp via slot 75, virfaulthandler arms sigpanic, crash()
+// exits through the syscall. Nothing signal-shaped remains here.
 
 // ---- threads (ADR 0027 D3/D5: slot 73, the clone-shaped seam) ----
 
