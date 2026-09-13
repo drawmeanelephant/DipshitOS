@@ -81,7 +81,7 @@ The only threads not closed:
 
 | Thread | State / next step | Cards |
 |--------|-------------------|-------|
-| **Go runtime port — `GOOS=virelai`** | Phase 0a merged (PR #1187); phase 0b rounds 1+2 merged (#1196/#1221) — slots 73/74, argv, `go-hello`/`go-args`/`go-goroutines` (N=8, cross-core). Next: envp half (#1226), stress breadth (#1227), then 0c fault delivery (#1228). TABWM/DOC follow-ups stay parked until the Go fleet can carry the test apps. | #1163, #1194, #1214 |
+| **Go runtime port — `GOOS=virelai`** | Phase 0a merged (PR #1187); phase 0b rounds 1+2 merged (#1196/#1221); envp half merged (#1230 / #1226). Next: stress breadth (#1227), then 0c fault delivery (#1228). TABWM/DOC follow-ups stay parked until the Go fleet can carry the test apps. | #1163, #1194, #1214 |
 
 ## Gate status
 

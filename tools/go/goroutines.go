@@ -6,6 +6,10 @@
 // tasks: newosproc maps Ms onto same-process kernel tasks, sysmon runs,
 // locks park on the slot-74 futex, and goroutines migrate across cores —
 // the gate also asserts task=GOROUT.ELF in the monitor smp report.
+//
+// Issue #1227 keeps this file as the ADR 0027 D6 N=8 cross-core proof;
+// GC / channel fan-out / timer / futex-contention-beyond-N=8 live in
+// gostress.go (go-stress gate).
 package main
 
 import (
