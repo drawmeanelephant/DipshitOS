@@ -1,4 +1,4 @@
-//! VirelaiOS HTML layout (M-web S2, ADR 0028 D3).
+//! VirelaiOS HTML layout (M-web S1, ADR 0028 D3).
 //!
 //! Nodes + UA style + content width → block boxes and line boxes. Pure: the
 //! measure function is injected so host tests stub 8 px/char instead of a
@@ -22,6 +22,8 @@ pub const hr_height: u32 = 1;
 pub const cell_pad: u32 = 4;
 pub const dd_indent: u32 = 16;
 pub const max_table_cols: u8 = 8;
+pub const placeholder_w: u32 = 96;
+pub const placeholder_h: u32 = 48;
 
 pub const MeasureFn = *const fn (text: []const u8, mono: bool, size: u32) u32;
 
@@ -58,6 +60,7 @@ pub const BlockKind = enum(u8) {
     hr,
     table,
     cell,
+    image,
 };
 
 pub const Marker = enum(u8) {
@@ -126,9 +129,23 @@ pub fn styleOf(tag: parse.Tag) Style {
         .table => .{ .size = 13, .before = 8, .after = 8, .indent = 0, .leading = 4, .mono = false },
         .th => .{ .size = 13, .before = 0, .after = 0, .indent = 0, .leading = 3, .mono = false },
         .td => .{ .size = 13, .before = 0, .after = 0, .indent = 0, .leading = 3, .mono = false },
+        .img => .{ .size = 13, .before = 8, .after = 8, .indent = 0, .leading = 0, .mono = false },
         .hr => .{ .size = 1, .before = 8, .after = 8, .indent = 0, .leading = 0, .mono = false },
         else => .{ .size = 14, .before = 0, .after = 8, .indent = 0, .leading = 4, .mono = false },
     };
+}
+
+pub const ImageMetrics = struct {
+    w: u32,
+    h: u32,
+    ok: bool,
+};
+
+pub const ImageSizeFn = *const fn (src: []const u8) ImageMetrics;
+
+pub fn stubImageSize(src: []const u8) ImageMetrics {
+    _ = src;
+    return .{ .w = placeholder_w, .h = placeholder_h, .ok = false };
 }
 
 pub fn lineHeight(tag: parse.Tag) u32 {
@@ -150,6 +167,18 @@ pub fn layout(
     spans: []Span,
     measure: MeasureFn,
 ) Layout {
+    return layoutWith(doc, width, blocks, lines, spans, measure, stubImageSize);
+}
+
+pub fn layoutWith(
+    doc: parse.Document,
+    width: u32,
+    blocks: []Block,
+    lines: []Line,
+    spans: []Span,
+    measure: MeasureFn,
+    image_size: ImageSizeFn,
+) Layout {
     var eng = Engine{
         .doc = doc,
         .width = if (width > 2 * page_margin) width - 2 * page_margin else width,
@@ -157,6 +186,7 @@ pub fn layout(
         .lines = lines,
         .spans = spans,
         .measure = measure,
+        .image_size = image_size,
         .y = page_margin,
     };
     if (doc.node_count > 0) {
@@ -183,6 +213,7 @@ const Engine = struct {
     lines: []Line,
     spans: []Span,
     measure: MeasureFn,
+    image_size: ImageSizeFn,
     y: u32 = 0,
     block_count: u16 = 0,
     line_count: u16 = 0,
@@ -251,6 +282,11 @@ const Engine = struct {
         if (tag == .pre) {
             self.layoutPre(idx, inner_x, inner_w, st);
             self.y += st.after;
+            return;
+        }
+
+        if (tag == .img) {
+            self.layoutImage(idx, inner_x, inner_w, true);
             return;
         }
 
@@ -479,6 +515,31 @@ const Engine = struct {
         self.blocks[start_b].h = @intCast(h);
     }
 
+    fn layoutImage(self: *Engine, idx: u16, x: u32, w: u32, with_margin: bool) void {
+        const st = styleOf(.img);
+        if (with_margin) self.y += st.before;
+        const src = self.doc.hrefOf(idx);
+        const metrics = self.image_size(src);
+        var box_w = if (metrics.w == 0) placeholder_w else metrics.w;
+        var box_h = if (metrics.h == 0) placeholder_h else metrics.h;
+        if (box_w > w and box_w > 0) {
+            box_h = @intCast(@as(u64, box_h) * w / box_w);
+            box_w = w;
+            if (box_h == 0) box_h = 1;
+        }
+        self.addBlock(.{
+            .tag = .img,
+            .y = @intCast(self.y),
+            .h = @intCast(box_h),
+            .x = @intCast(x),
+            .w = @intCast(box_w),
+            .kind = .image,
+            .node_idx = idx,
+        });
+        self.y += box_h;
+        if (with_margin) self.y += st.after;
+    }
+
     fn layoutPre(self: *Engine, idx: u16, x: u32, w: u32, st: Style) void {
         self.addBlock(.{
             .tag = .pre,
@@ -583,6 +644,13 @@ const Engine = struct {
         var idx = start;
         while (idx != parse.none) {
             const n = self.doc.nodes[idx];
+            if (n.tag == .img) {
+                self.closeLineIfOpen();
+                self.layoutImage(idx, x, w, false);
+                self.openLine(x, ist.size + 4);
+                idx = n.next_sibling;
+                continue;
+            }
             if (parse.isBlock(n.tag) and n.tag != .br) break;
             if (n.tag == .br) {
                 self.breakLine(x, lineHeight(.p));
@@ -1051,4 +1119,34 @@ test "html layout: compact tables fixture fits in the DOC client" {
         if (lay.blocks[i].tag == .dt) saw_dt = true;
     }
     try std.testing.expect(saw_table and saw_h4 and saw_dt);
+}
+
+fn testImageSize(src: []const u8) ImageMetrics {
+    if (std.mem.eql(u8, src, "ok.png")) return .{ .w = 200, .h = 100, .ok = true };
+    return .{ .w = placeholder_w, .h = placeholder_h, .ok = false };
+}
+
+test "html layout: img scales to content width; missing src is a placeholder" {
+    var nodes: [parse.max_nodes]parse.Node = undefined;
+    var text: [parse.max_text]u8 = undefined;
+    const src = "<p>hi</p><img src=\"ok.png\" /><img src=\"missing.png\" />";
+    const doc = parse.parse(src, nodes[0..], text[0..]);
+    var blocks: [max_blocks]Block = undefined;
+    var lines: [max_lines]Line = undefined;
+    var spans: [max_spans]Span = undefined;
+    const lay = layoutWith(doc, 120, blocks[0..], lines[0..], spans[0..], stubMeasure, testImageSize);
+    var imgs: u8 = 0;
+    var scaled_w: u16 = 0;
+    var ph_h: u16 = 0;
+    var i: u16 = 0;
+    while (i < lay.block_count) : (i += 1) {
+        if (lay.blocks[i].kind != .image) continue;
+        imgs += 1;
+        if (imgs == 1) scaled_w = lay.blocks[i].w;
+        if (imgs == 2) ph_h = lay.blocks[i].h;
+    }
+    try std.testing.expectEqual(@as(u8, 2), imgs);
+    // content width = 120 - 2*page_margin = 100; 200x100 image scales to 100x50
+    try std.testing.expectEqual(@as(u16, 100), scaled_w);
+    try std.testing.expectEqual(@as(u16, placeholder_h), ph_h);
 }

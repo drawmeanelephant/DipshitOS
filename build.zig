@@ -2212,7 +2212,7 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_view.step);
 
     // ------------------------------------------------------------------
-    // Guest: DOC.BIN — M-web S1 in-guest HTML viewer (issue #1202, ADR 0028).
+    // Guest: DOC.BIN — M-web in-guest HTML viewer (issues #1202–#1207, ADR 0028).
     // DSK3 segmented (writable .data/.bss — parse/layout arenas + TabApp).
     // ------------------------------------------------------------------
     const doc_prog = b.addExecutable(.{
@@ -2460,6 +2460,7 @@ pub fn build(b: *std.Build) void {
         "user/src/lib/crypto.zig",
         "user/src/lib/html/parse.zig",
         "user/src/lib/html/layout.zig",
+        "user/src/lib/html/url.zig",
         "user/src/lib/ssh/wire.zig",
         "user/src/lib/ssh/packet.zig",
         "user/src/lib/ssh/stream.zig",

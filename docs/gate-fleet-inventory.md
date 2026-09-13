@@ -11,12 +11,12 @@
 
 | metric | count |
 |---|---|
-| top-level scripts (`tools/*.sh` + `tools/*.py`) | 38 |
+| top-level scripts (`tools/*.sh` + `tools/*.py`) | 39 |
 | class A (portable / CI) | 9 |
 | class B (VZ hardware gate) | 7 |
 | class C (interactive) | 1 |
 | class D (diagnostic) | 9 |
-| tooling (not gates) | 12 |
+| tooling (not gates) | 13 |
 | with a just recipe | 12 |
 | in the class-B fleet (spec dir / legacy script) | 4 |
 | named in a GitHub workflow | 10 |
@@ -30,7 +30,7 @@
 | `tools/lib/` | 2 | per-run isolation for live gates (`gate-run.sh`) |
 | `tools/status/` | 7 | multiagent coordination gate + claim tooling (class A) |
 | `tools/context/` | 2 | context snapshot helpers |
-| `tools/gate/` | 230 | M40 vgate harness + specs (GF2+) |
+| `tools/gate/` | 231 | M40 vgate harness + specs (GF2+) |
 
 ## Class-B fleet (discovered from the spec dir)
 
@@ -72,6 +72,7 @@ of them with `just verify-vz`.
 | spec | `live-dmesg` | 1 run / 4 assert | live-dmesg.spec -- M22 D12: dmesg system log viewer on VZ. |
 | spec | `live-doc` | 3 run / 18 assert | live-doc.spec -- M-web S1: DOC.BIN renders oliver HTML in-guest (issue #1202) |
 | spec | `live-doc-tables` | 1 run / 9 assert | live-doc-tables.spec -- M-web S2: DOC.BIN tables/dl/h4 on-screen (issue #1203) |
+| spec | `live-doc-web` | 4 run / 23 assert | live-doc-web.spec -- M-web S3–S6: img, click-nav, fetch, publish (issues #1204–#1207) |
 | spec | `live-dynamic-ecosystem` | 5 run / 35 assert | live-dynamic-ecosystem.spec -- Milestone 31 Class-B Gate (claim 4001): |
 | spec | `live-dynamic-linking` | 1 run / 9 assert | live-dynamic-linking.spec -- Milestone 30 Class-B Gate (issue #599, claim 7921): |
 | spec | `live-editing` | 1 run / 13 assert | live-editing.spec -- milestone-eight card U2 class-B gate (claim 1809): |
@@ -296,6 +297,7 @@ named in `.github/workflows/*.yml`; `st` = named in
 | `lint-workflows.sh` | 195 | tooling | y | n | y | n | lint-workflows.sh -- lint the GitHub Actions workflows (class A). |
 | `mkdyn-elf.py` | 1090 | tooling | n | n | n | n | Generate freestanding dynamic ELF binaries for VirelaiOS. |
 | `mkhello-elf.py` | 205 | tooling | n | n | n | n | Emit a minimal statically linked AArch64 ELF32 executable (M22 D1, issue #324). |
+| `oliver-publish.sh` | 85 | tooling | n | n | n | n | oliver-publish.sh — M-web S6 host-side batch (issue #1207). |
 | `png2qoi.py` | 94 | tooling | n | n | n | n | Convert standard images (PNG, JPG) to Quite OK Image (QOI) format. |
 | `probe-pointer-routes.sh` | 53 | D | n | n | n | y | Probe: sweep pointer routes against the same guest session, comparing |
 | `session.sh` | 144 | tooling | y | n | n | n | session.sh -- boot an INTERACTIVE, WINDOWED VirelaiOS desktop. |

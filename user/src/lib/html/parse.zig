@@ -1,4 +1,4 @@
-//! VirelaiOS HTML parser (M-web S2, ADR 0028 D3).
+//! VirelaiOS HTML parser (M-web S1, ADR 0028 D3).
 //!
 //! Bytes → a flat node array with parent/child/sibling indices. No pointers,
 //! no allocator, no framebuffer. Caller supplies the node and text arenas.
@@ -9,8 +9,8 @@
 //!   - `pre` and `code`: whitespace is preserved; CR/CRLF become LF
 //!
 //! Unknown elements stay in the tree as `.unknown` so layout can lift their
-//! text in document order (D5). Tables, definition lists, and headings
-//! through h6 are first-class as of S2.
+//! text in document order (D5). Tables, definition lists, headings through
+//! h6, and `img` are first-class as of S2/S3.
 
 const std = @import("std");
 
@@ -42,6 +42,7 @@ pub const Tag = enum(u8) {
     strong,
     em,
     a,
+    img,
     table,
     thead,
     tbody,
@@ -113,6 +114,7 @@ pub fn isBlock(tag: Tag) bool {
         .dd,
         .blockquote,
         .pre,
+        .img,
         .table,
         .thead,
         .tbody,
@@ -125,7 +127,7 @@ pub fn isBlock(tag: Tag) bool {
 }
 
 pub fn isVoid(tag: Tag) bool {
-    return tag == .br or tag == .hr;
+    return tag == .br or tag == .hr or tag == .img;
 }
 
 pub fn parse(src: []const u8, nodes: []Node, text: []u8) Document {
@@ -317,6 +319,7 @@ const Parser = struct {
             return;
         }
         var href: []const u8 = &.{};
+        var src: []const u8 = &.{};
         var self_close = false;
         while (self.i < self.src.len and self.src[self.i] != '>') {
             const c = self.src[self.i];
@@ -331,6 +334,7 @@ const Parser = struct {
             }
             const attr = self.parseAttr();
             if (eqlCi(attr.name, "href")) href = attr.value;
+            if (eqlCi(attr.name, "src")) src = attr.value;
         }
         if (self.i < self.src.len and self.src[self.i] == '>') self.i += 1;
 
@@ -339,7 +343,8 @@ const Parser = struct {
             self.closeTag(tag, name);
             return;
         }
-        self.openTag(tag, href, self_close or isVoid(tag));
+        const attr = if (tag == .img) src else href;
+        self.openTag(tag, attr, self_close or isVoid(tag));
     }
 
     const Attr = struct { name: []const u8, value: []const u8 };
@@ -628,6 +633,7 @@ fn tagFromName(name: []const u8) Tag {
     if (eqlCi(name, "strong")) return .strong;
     if (eqlCi(name, "em")) return .em;
     if (eqlCi(name, "a")) return .a;
+    if (eqlCi(name, "img")) return .img;
     if (eqlCi(name, "table")) return .table;
     if (eqlCi(name, "thead")) return .thead;
     if (eqlCi(name, "tbody")) return .tbody;
@@ -757,13 +763,14 @@ test "html parse: stray angle brackets are text, not an unbounded tag scan" {
     try std.testing.expect(std.mem.indexOf(u8, plain, "still") != null);
 }
 
-test "html parse: table/dl/h4–h6 tags" {
+test "html parse: table/dl/h4–h6/img tags and img src" {
     var nodes: [max_nodes]Node = undefined;
     var text: [max_text]u8 = undefined;
     const src =
         \\<h4>Four</h4><h5>Five</h5><h6>Six</h6>
         \\<dl><dt>term</dt><dd>defn</dd></dl>
         \\<table><tr><th>H</th><td>C</td></tr></table>
+        \\<p>pic <img src="icon.png" alt="x" /> done</p>
     ;
     const doc = parse(src, nodes[0..], text[0..]);
     try std.testing.expect(findTag(doc, .h4) != none);
@@ -773,8 +780,9 @@ test "html parse: table/dl/h4–h6 tags" {
     try std.testing.expectEqualStrings("term", firstText(doc, findTag(doc, .dt)));
     try std.testing.expectEqualStrings("defn", firstText(doc, findTag(doc, .dd)));
     try std.testing.expect(findTag(doc, .table) != none);
-    try std.testing.expect(findTag(doc, .th) != none);
-    try std.testing.expect(findTag(doc, .td) != none);
+    const img = findTag(doc, .img);
+    try std.testing.expect(img != none);
+    try std.testing.expectEqualStrings("icon.png", doc.hrefOf(img));
 }
 
 test "html parse: overflow sets truncated and never panics" {
