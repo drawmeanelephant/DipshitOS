@@ -1170,3 +1170,35 @@ gap-layout ELF's extra writable page, immediately after argv:
 No `implemented_count` change. Verified class-A (`pack_env` shape +
 truncation) and class-B (`go-args`: argv unchanged, `env n=1
 [GOMAXPROCS=1]`, `procs=1`; `go-hello`/`go-goroutines` still PASS).
+
+### Amendment (2026-09-13, #1228 — slot 75 `sys_exnotify`, phase 0c)
+
+The GOOS=virelai fault-delivery card adds the panic seam as **one
+single-argument slot** (no ops: nonzero installs, zero clears). It is a
+**kernel-domain** syscall, not capability-gated: a handler can only
+redirect faults inside the caller's own address space.
+
+**Slot 75 — `sys_exnotify(handler)`**
+
+| Signature | Behavior | Errors |
+|-----------|----------|--------|
+| `exnotify(handler)` | Installs the CALLER'S process EL0 fault-handler PC. A deliverable EL0 fault (see below) then resumes the SAME frame at `handler` with the fault record in registers: `x0` = signal (4 SIGILL / 7 SIGBUS / 11 SIGSEGV, matching the runtime's constants), `x1` = fault address (FAR, or the faulting PC for alignment faults whose FAR is meaningless), `x2` = fault PC, `x3` = ESR, `x4` = SP_EL0, `x5` = LR, `x6` = R29. Process-scope: every `sys_thread` task inherits it. `handler == 0` clears the handler (the reap path returns). Returns 0. | `EINVAL`: non-process caller, misaligned `handler` (AArch64 instructions are 4-byte aligned), `handler` outside the process's executable text aperture (the slot-73 "like exec" rule), or a dead process. |
+
+**Delivery contract** (exceptions.zig, in the EL0 path after demand
+paging, before the reap dispatcher): deliverable classes are illegal
+encodings (EC 0x00), EL0 instruction aborts (0x20), PC/SP alignment
+(0x22/0x26), and EL0 data aborts (0x24). Debug classes (breakpoint,
+step, watchpoint, BRK) stay reap-only. A fault whose PC is already the
+handler is refused delivery (a fault inside the handler reaps — the
+backstop against delivery loops). `create` zeroes the handler and a new
+exec image must re-register (the old PC is meaningless under the new
+text). uaccess EL1 faults and demand-paged faults never reach delivery
+(the existing order guarantees it).
+
+`implemented_count` becomes **76** (rows 0–75; reserved 76–127). No
+existing number, argument, result, or error code changes. Verified
+class-A (register/unregister/refusals; the frame rewrite x0–x4 + ELR
+redirect; the nested-fault refusal; the table/count pin at 76) and
+class-B (`go-panic`: main + worker goroutines fault, recover with the
+nil-deref message, and walk the injected sigpanic frame;
+`sys_exnotify` calls >= 1; the full go fleet still PASS).

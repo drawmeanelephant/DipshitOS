@@ -106,9 +106,11 @@ pub const slot_count: usize = 128;
 /// M50 TS1 (#1135): slot 68 is sys_principal; TS2 (#1136): slot 69 is
 /// sys_file_mode; TS5 (#1139): slot 70 is sys_secret_get; TS4 (#1138):
 /// slot 71 is sys_tty_net_auth; M51 SSH-P1 (#1166, ADR 0025 D5):
-/// slot 72 is sys_getrandom. `implemented_count` is the number of
+/// slot 72 is sys_getrandom; ADR 0027 (#1214 round 2): slots 73/74 are
+/// sys_thread/sys_futex; issue #1228 (phase 0c): slot 75 is sys_exnotify.
+/// `implemented_count` is the number of
 /// registered rows (rows 0..implemented_count-1).
-pub const implemented_count: usize = 75;
+pub const implemented_count: usize = 76;
 /// Card G6 (claim 0487) follow-on (slot 18): the fixed `sys_win_get` shape —
 /// four u32 LE words (x, y, w, h), 16 bytes, marshaled per call and copy_out'd
 /// through uaccess (the procs snapshot pattern).
@@ -350,6 +352,11 @@ pub const sys_getrandom: u64 = 72;
 // op 1 wake(n). See the ADR 0007 amendment + ADR 0027 D3/D4.
 pub const sys_thread: u64 = 73;
 pub const sys_futex: u64 = 74;
+// Issue #1228 (phase 0c): slot 75 — the EL0 fault-handler register. A
+// single argument (no ops): nonzero installs, zero clears. See the ADR
+// 0007 amendment + the delivery contract in exceptions.zig
+// (`fault_deliverable`).
+pub const sys_exnotify: u64 = 75;
 /// The fixed per-call fill cap of slot 72 (ADR 0025 D5: "capped at a bounded
 /// maximum"). 256 matches `write_cap` — enough for an ephemeral X25519
 /// secret (32 B), a KEXINIT cookie (16 B), or a burst of per-packet padding,
@@ -583,6 +590,8 @@ pub fn ensure_table() *const [slot_count]Entry {
         // ADR 0027 (issue #1214 round 2): slots 73/74 — sys_thread / sys_futex.
         table_storage[sys_thread] = .{ .name = "sys_thread", .handler = handle_thread };
         table_storage[sys_futex] = .{ .name = "sys_futex", .handler = handle_futex };
+        // Issue #1228 (phase 0c): slot 75 — sys_exnotify.
+        table_storage[sys_exnotify] = .{ .name = "sys_exnotify", .handler = handle_exnotify };
         table_ready = true;
     }
     return &table_storage;
@@ -624,7 +633,7 @@ fn doms_of(number: u64) u5 {
         sys_exec => f | k,
         sys_win_open, sys_win_fill, sys_win_present, sys_win_close, sys_win_move, sys_win_raise, sys_win_get, sys_win_query, sys_win_set_visible, sys_win_fill_batch, sys_win_resize, 48, sys_win_raise_front, sys_win_lower_back, 52, sys_win_set_unsaved, sys_win_set_title, sys_drag_read, sys_font_size => w,
         sys_ipc_send, sys_ipc_recv, sys_poll_event, sys_wait_event, sys_timer_set, sys_timer_cancel, sys_notify, sys_wmctl => e,
-        sys_procs, sys_wait, sys_kill, sys_clipboard_set, sys_clipboard_get, sys_audio_info, sys_audio_play, sys_audio_volume, sys_audio_mute, sys_pipe_read, sys_pipe_write, 54, sys_mmap, sys_munmap, sys_time, sys_tty_attach, sys_principal, sys_secret_get, sys_tty_net_auth, sys_getrandom, sys_thread, sys_futex => k,
+        sys_procs, sys_wait, sys_kill, sys_clipboard_set, sys_clipboard_get, sys_audio_info, sys_audio_play, sys_audio_volume, sys_audio_mute, sys_pipe_read, sys_pipe_write, 54, sys_mmap, sys_munmap, sys_time, sys_tty_attach, sys_principal, sys_secret_get, sys_tty_net_auth, sys_getrandom, sys_thread, sys_futex, sys_exnotify => k,
         sys_exit => svclock.all_bits,
         else => 0,
     };
@@ -2015,6 +2024,32 @@ fn handle_futex(args: Args, frame: *exceptions.VectorFrame) u64 {
         },
         else => return error_result(.einval),
     }
+}
+
+/// `sys_exnotify(handler)` — slot 75 (issue #1228, phase 0c). A single
+/// argument, no ops: nonzero installs the CALLER'S process EL0
+/// fault-handler PC — the address the exception path redirects a
+/// deliverable EL0 fault to (see `exceptions.fault_deliverable`) with the
+/// fault record in x0-x6; zero clears it (the reap path returns). The
+/// handler is process-scope (every `sys_thread` task inherits it) and dies
+/// with the address space: `create` zeroes it and a new exec image must
+/// re-register. Errors: EINVAL for a non-process caller, a misaligned
+/// handler (AArch64 instructions are 4-byte aligned), or a handler outside
+/// the process's executable text aperture (the slot-73 "like exec" rule).
+fn handle_exnotify(args: Args, _: *exceptions.VectorFrame) u64 {
+    const handler = args[0];
+    const caller = scheduler.current_id();
+    const pid = process.find_by_task(caller) orelse return error_result(.einval);
+    if (handler == 0) {
+        if (!process.set_exnotify_handler(pid, 0)) return error_result(.einval);
+        return 0;
+    }
+    if ((handler & 3) != 0) return error_result(.einval);
+    const pinfo = process.info(pid) orelse return error_result(.einval);
+    const text_end = pinfo.text_va + pinfo.text_len;
+    if (handler < pinfo.text_va or handler >= text_end) return error_result(.einval);
+    if (!process.set_exnotify_handler(pid, handler)) return error_result(.einval);
+    return 0;
 }
 
 /// The re-check `futex_wait_current` runs under sched_lock after seating

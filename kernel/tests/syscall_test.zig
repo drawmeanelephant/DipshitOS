@@ -55,6 +55,7 @@ const sys_exec = syscall.sys_exec;
 const sys_exit = syscall.sys_exit;
 const sys_thread = syscall.sys_thread;
 const sys_futex = syscall.sys_futex;
+const sys_exnotify = syscall.sys_exnotify;
 const sys_file_close = syscall.sys_file_close;
 const sys_file_delete = syscall.sys_file_delete;
 const sys_file_free = syscall.sys_file_free;
@@ -151,7 +152,7 @@ fn capture_marshaled_args(args: Args, _: *exceptions.VectorFrame) u64 {
     return 0xcafe;
 }
 
-test "syscall: runtime table has 128 slots and seventy-five unique implemented rows" {
+test "syscall: runtime table has 128 slots and seventy-six unique implemented rows" {
     init(test_writer);
     const table = ensure_table();
     try std.testing.expectEqual(@as(usize, 128), table.len);
@@ -164,7 +165,7 @@ test "syscall: runtime table has 128 slots and seventy-five unique implemented r
             implemented += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 75), implemented);
+    try std.testing.expectEqual(@as(usize, 76), implemented);
     try std.testing.expectEqualStrings("sys_pipe_read", entry_info(sys_pipe_read).?.name);
     try std.testing.expectEqualStrings("sys_pipe_write", entry_info(sys_pipe_write).?.name);
     try std.testing.expectEqualStrings("sys_font_size", entry_info(sys_font_size).?.name);
@@ -231,6 +232,8 @@ test "syscall: runtime table has 128 slots and seventy-five unique implemented r
     try std.testing.expectEqualStrings("sys_file_mode", entry_info(sys_file_mode).?.name);
     // M51 SSH-P1 (issue #1166, ADR 0025 D5): slot 72 is the EL0 entropy read.
     try std.testing.expectEqualStrings("sys_getrandom", entry_info(sys_getrandom).?.name);
+    // Issue #1228 (phase 0c): slot 75 is the EL0 fault-handler register.
+    try std.testing.expectEqualStrings("sys_exnotify", entry_info(sys_exnotify).?.name);
 }
 
 test "syscall: adapter decodes x8 and x0-x5 and unknown numbers return ENOSYS" {
@@ -1243,7 +1246,7 @@ test "syscall: counters are monotonic and report is deterministic" {
     var con = mock.console();
     report(&con);
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=75\n" ++
+        "syscalls: slots=64 implemented=76\n" ++
             "  0 sys_ping calls=2\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -1318,7 +1321,8 @@ test "syscall: counters are monotonic and report is deterministic" {
             "  71 sys_tty_net_auth calls=0\n" ++
             "  72 sys_getrandom calls=0\n" ++
             "  73 sys_thread calls=0\n" ++
-            "  74 sys_futex calls=0\n",
+            "  74 sys_futex calls=0\n" ++
+            "  75 sys_exnotify calls=0\n",
         mock.contents(),
     );
 }
@@ -3199,8 +3203,8 @@ test "syscall: SYS_TIME (slot 66, #1058) returns the firmware wall-clock epoch" 
     try std.testing.expectEqualStrings("sys_time", entry_info(sys_time).?.name);
     // M50 TS1 added slot 68 (sys_principal), TS2 slot 69 (sys_file_mode),
     // TS5 slot 70 (sys_secret_get), TS4 slot 71 (sys_tty_net_auth);
-    // M51 SSH-P1 (#1166) slot 72 (sys_getrandom).
-    try std.testing.expectEqual(@as(usize, 75), syscall.implemented_count);
+    // M51 SSH-P1 (#1166) slot 72 (sys_getrandom); issue #1228 slot 75.
+    try std.testing.expectEqual(@as(usize, 76), syscall.implemented_count);
 
     const saved_epoch = timer.boot_epoch_secs;
     const saved_ticks = timer.ticks;
@@ -3296,12 +3300,13 @@ test "syscall: M50 TS3 gate table is explicit, bounded, and exactly the ADR 0024
         try std.testing.expectEqual(@as(?u32, null), syscall.gated(number));
     }
     // Every gated row names an EXISTING implemented slot, and TS3 adds NO
-    // slot: implemented_count is 75 after ADR 0027's slots 73/74.
+    // slot: implemented_count is 76 after issue #1228's slot 75 (73/74
+    // came from ADR 0027).
     for (syscall.capability_gates) |gate| {
         try std.testing.expect(gate.number < syscall.implemented_count);
         try std.testing.expect(entry_info(gate.number) != null);
     }
-    try std.testing.expectEqual(@as(usize, 75), syscall.implemented_count);
+    try std.testing.expectEqual(@as(usize, 76), syscall.implemented_count);
 }
 
 test "syscall: no slot can raise uid/caps (TS3 consumes caps, adds no setter)" {
@@ -3949,4 +3954,63 @@ test "syscall: mmap is process-scope — a post-spawn mapping reaches a thread (
     try std.testing.expectEqual(thread_id, scheduler.current_id());
     syscall.arm_task_regions();
     try std.testing.expect(uaccess.read_region_covers(va, 8));
+}
+
+// Issue #1228 (phase 0c): slot 75 sys_exnotify — register/unregister/refuse,
+// plus the EL0 delivery rewrite (frame x0-x4 + ELR redirect) and the
+// nested-fault refusal that keeps a faulting handler from looping.
+test "syscall: sys_exnotify registers the handler and EL0 faults deliver to it" {
+    mmu.reset();
+    alloc.reset_refcounts();
+    process.init();
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (primary)
+    scheduler.start();
+    var frame = fresh_frame();
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+    const pid = process.find_by_task(2).?;
+
+    // Refusals: misaligned handler, handler outside the process's
+    // executable text aperture. Zero is not a refusal — it unregisters.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_exnotify, .{ userspace.text_va + 1, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_exnotify, .{ 0x9000_0000, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expect(!process.set_exnotify_handler(999, userspace.text_va));
+
+    // Register: a 4-aligned PC inside text.
+    const handler = userspace.text_va + 0x40;
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_exnotify, .{ handler, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(handler, process.exnotify_handler(pid).?);
+
+    // Delivery: an EL0 data abort (EC 0x24) rewrites the SAME frame with
+    // the fault record and redirects ELR at the handler (staged in
+    // test_redirect_pc on host; `msr elr_el1` on hardware).
+    exceptions.test_redirect_pc = 0;
+    var dframe = fresh_frame();
+    const esr: u64 = 0x24 << 26;
+    const res = exceptions.exc_dispatch(&dframe, esr, 0xdead, 0x5000, 0, exceptions.kind_sync);
+    try std.testing.expectEqual(@intFromPtr(&dframe), res.frame);
+    try std.testing.expectEqual(@as(u64, 11), exceptions.frame_read(&dframe, 0)); // SIGSEGV
+    try std.testing.expectEqual(@as(u64, 0xdead), exceptions.frame_read(&dframe, 1)); // FAR
+    try std.testing.expectEqual(@as(u64, 0x5000), exceptions.frame_read(&dframe, 2)); // PC
+    try std.testing.expectEqual(esr, exceptions.frame_read(&dframe, 3)); // ESR
+    try std.testing.expectEqual(@as(u64, 0), exceptions.frame_read(&dframe, 4)); // SP_EL0 (host: none)
+    try std.testing.expectEqual(handler, exceptions.test_redirect_pc);
+
+    // Nested fault (PC already the handler) refuses delivery: with no test
+    // dispatcher installed the report path parks (frame 0), i.e. the reap
+    // shape — and the redirect is untouched.
+    exceptions.test_redirect_pc = 0;
+    var nframe = fresh_frame();
+    const nres = exceptions.exc_dispatch(&nframe, esr, 0xdead, handler, 0, exceptions.kind_sync);
+    try std.testing.expectEqual(@as(u64, 0), nres.frame);
+    try std.testing.expectEqual(@as(u64, 0), exceptions.test_redirect_pc);
+
+    // Unregister (zero): the process is reap-shaped again.
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_exnotify, .{ 0, 0, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u64, 0), process.exnotify_handler(pid).?);
 }
