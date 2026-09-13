@@ -20,6 +20,7 @@ DESKTOP.ELF | Dynamic Desktop | d
 ZC.BIN | Zig Compiler | z
 SEXIBURG.BIN | Sexiburger | x | dock=true
 VIEW.BIN | Image Viewer | v
+DOC.BIN | Document Viewer | o
 SEXITEST.BIN | Sexitest | x
 TABWM.BIN | Tabbed Desktop | w | dock=true
 

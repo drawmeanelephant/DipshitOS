@@ -1,6 +1,6 @@
 # In-guest HTML renderer — scoping (M-web slice 1)
 
-- Status: **design card** — this document plus ADR 0028 land before any code.
+- Status: **S1 implementation** — ADR 0028 accepted; `DOC.BIN` + parse/layout + `live-doc` land against this card.
 - Claim: #1200 · Umbrella: #1201 · Slices: #1202 / #1203 / #1204 / #1205
 - Related: ADR 0010 (userland storage), ADR 0011 (desktop platform),
   ADR 0016 (pixel ownership), ADR 0009 (app events), `tools/gate/SPEC.md`
@@ -99,6 +99,24 @@ Inline styling composes inside a run: `strong` (synthetic bold), `em`
 dropped, never a crash. This matters immediately: `expect.html` contains a
 `<table>`, and slice 1 has no table layout, so the cells must appear as text
 in document order. (The `<table>` block is what slice 2 earns.)
+
+### Whitespace (pinned)
+
+HTML whitespace is a layout input, not an accident of the source file. Slice 1
+pins the following and the parser tests lock it:
+
+- **Normal flow** (everything except `pre` and `code`): any run of ASCII
+  whitespace (`SP` / `HT` / `LF` / `CR`) collapses to a single `SP`. Leading
+  and trailing space at a block boundary (`h1`–`h3`, `p`, `li`, `blockquote`,
+  `ul`/`ol`, `pre`, `hr`, and the document root) is dropped. A `<br>` is a
+  forced break, not a space.
+- **`pre` and `code`:** whitespace is preserved. `CR` and `CRLF` become `LF`;
+  nothing is collapsed. `pre` does not wrap (S1 clips horizontal overflow).
+- **Entities** decode before whitespace collapsing (`&nbsp;` is `0xA0` and
+  does not collapse). Numeric entities above U+00FF (the draw path is a `u8`
+  glyph index) become `?` — an em dash (`&#8212;`) therefore renders as `?`
+  until the paint path grows a UTF-8/U+ codepoint seam. S1 records that
+  substitution rather than pretending Inter's em-dash glyph is reachable.
 
 ## Seams: parse → layout → paint
 
