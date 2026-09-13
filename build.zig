@@ -2212,6 +2212,30 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_view.step);
 
     // ------------------------------------------------------------------
+    // Guest: DOC.BIN — M-web S1 in-guest HTML viewer (issue #1202, ADR 0028).
+    // DSK3 segmented (writable .data/.bss — parse/layout arenas + TabApp).
+    // ------------------------------------------------------------------
+    const doc_prog = b.addExecutable(.{
+        .name = "user-doc",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/doc.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    doc_prog.linker_script = b.path("user/linker-segmented.ld");
+    const doc_step = b.step("doc", "Build the HTML document viewer (zig-out/bin/DOC.BIN) — DSK3 segmented (writable .data/.bss)");
+    const doc_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
+    doc_elf2bin.addFileArg(doc_prog.getEmittedBin());
+    const doc_bin = doc_elf2bin.addOutputFileArg("DOC.BIN");
+    doc_elf2bin.has_side_effects = true;
+    doc_elf2bin.stdio = .inherit;
+    doc_step.dependOn(&doc_elf2bin.step);
+    const install_doc = b.addInstallFileWithDir(doc_bin, .bin, "DOC.BIN");
+    doc_step.dependOn(&install_doc.step);
+    b.getInstallStep().dependOn(&install_doc.step);
+
+    // ------------------------------------------------------------------
     // Guest: Sexiburger Action & Tab test app (Milestone 19 — issues #701, #705, #782)
     // SEXITEST.BIN. Live end-to-end action registration and tab model test.
     // ------------------------------------------------------------------
@@ -2434,6 +2458,8 @@ pub fn build(b: *std.Build) void {
         "user/src/lib/script.zig",
         "user/src/lib/netauth.zig",
         "user/src/lib/crypto.zig",
+        "user/src/lib/html/parse.zig",
+        "user/src/lib/html/layout.zig",
         "user/src/lib/ssh/wire.zig",
         "user/src/lib/ssh/packet.zig",
         "user/src/lib/ssh/stream.zig",
