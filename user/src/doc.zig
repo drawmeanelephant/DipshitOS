@@ -1,8 +1,9 @@
-//! VirelaiOS DOC.BIN — M-web S1 in-guest HTML viewer (issue #1202, ADR 0028).
+//! VirelaiOS DOC.BIN — M-web S2 in-guest HTML viewer (issues #1202/#1203, ADR 0028).
 //!
 //! `exec DOC.BIN /host/PAGE.HTML` parses and lays out a local HTML page
-//! (oliver's output is the fixture of record) and paints it through TabApp.
-//! No JS, no CSS cascade, no network, no kernel changes.
+//! (oliver's output is the S1 fixture of record; tables.html is the S2
+//! on-screen table fixture) and paints it through TabApp. No JS, no CSS
+//! cascade, no network, no kernel changes.
 //!
 //! Parse and layout are the pure modules in `lib/html/`; this file is the
 //! only one that touches the framebuffer.
@@ -58,6 +59,9 @@ const State = struct {
     probe_quote: u16 = 0,
     probe_pre: u16 = 0,
     probe_hr: u16 = 0,
+    probe_table: u16 = 0,
+    probe_h4: u16 = 0,
+    probe_dt: u16 = 0,
 };
 
 var st: State = .{};
@@ -182,11 +186,24 @@ fn load(path: []const u8) void {
     }) catch "doc: probe\n";
     ui.write_console(qline);
 
+    var q2buf: [80]u8 = undefined;
+    const q2line = std.fmt.bufPrint(&q2buf, "doc: probe2 table={d} h4={d} dt={d}\n", .{
+        st.probe_table, st.probe_h4, st.probe_dt,
+    }) catch "doc: probe2\n";
+    ui.write_console(q2line);
+
     st.loaded = true;
     st.err = .none;
 }
 
 fn captureProbes() void {
+    st.probe_h1 = 0;
+    st.probe_quote = 0;
+    st.probe_pre = 0;
+    st.probe_hr = 0;
+    st.probe_table = 0;
+    st.probe_h4 = 0;
+    st.probe_dt = 0;
     var i: u16 = 0;
     while (i < lay.block_count) : (i += 1) {
         const b = lay.blocks[i];
@@ -194,6 +211,9 @@ fn captureProbes() void {
         if (st.probe_quote == 0 and b.quote_bar) st.probe_quote = b.y;
         if (st.probe_pre == 0 and b.tag == .pre) st.probe_pre = b.y;
         if (st.probe_hr == 0 and b.kind == .hr) st.probe_hr = b.y;
+        if (st.probe_table == 0 and b.kind == .table) st.probe_table = b.y;
+        if (st.probe_h4 == 0 and b.tag == .h4) st.probe_h4 = b.y;
+        if (st.probe_dt == 0 and b.tag == .dt) st.probe_dt = b.y;
     }
 }
 
@@ -254,6 +274,13 @@ fn drawPage(win: u32, cr: Rect) void {
         if (by > @as(i32, @intCast(cr.y + cr.h))) continue;
 
         if (b.kind == .pre and b.h > 0 and by >= 0) {
+            const y: u32 = @intCast(by);
+            const clip_h = clipH(y, b.h, cr);
+            if (clip_h > 0) {
+                ui.draw_rect(win, Rect.make(b.x, y, b.w, clip_h), surface);
+            }
+        }
+        if (b.kind == .cell and b.header_rule and b.h > 0 and by >= 0) {
             const y: u32 = @intCast(by);
             const clip_h = clipH(y, b.h, cr);
             if (clip_h > 0) {

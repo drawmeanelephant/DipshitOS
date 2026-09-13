@@ -1,6 +1,6 @@
-# In-guest HTML renderer — scoping (M-web slice 1)
+# In-guest HTML renderer — scoping (M-web)
 
-- Status: **S1 implementation** — ADR 0028 accepted; `DOC.BIN` + parse/layout + `live-doc` land against this card.
+- Status: **S2 implementation** — tables/`dl`/`h4`–`h6` on merged S1 (`DOC.BIN` + `live-doc-tables`).
 - Claim: #1200 · Umbrella: #1201 · Slices: #1202 / #1203 / #1204 / #1205
 - Related: ADR 0010 (userland storage), ADR 0011 (desktop platform),
   ADR 0016 (pixel ownership), ADR 0009 (app events), `tools/gate/SPEC.md`
@@ -26,12 +26,14 @@ and every later slice (images, links, fetch) has a place to land.
 - **No JavaScript.** Not an interpreter, not a subset, not "later".
 - **No CSS cascade.** One fixed UA stylesheet compiled into the binary — a
   table of per-tag metrics, not a parser. A page cannot change the styling.
-- **No network in slice 1.** Fetching is a later slice over the existing
-  FETCH/HTTP seam, and only after the local render path is honest.
+- **No network in slice 1–4.** Fetching is S5 over the existing FETCH/HTTP
+  seam, and only after the local render path is honest.
 - **No kernel changes, no new syscalls.** The renderer is a userland app; the
   kernel never parses HTML. `kernel/src/**` stays untouched.
-- **No layout engine beyond block + inline.** No floats, no flex, no
-  positioning, no tables in slice 1 (see the ladder).
+- **No layout engine beyond block + inline + a fixed table grid.** No floats,
+  no flex, no positioning. S2 earns `table`/`thead`/`tbody`/`tr`/`th`/`td`
+  as equal-width columns (cell padding, header rule) plus `dl`/`dt`/`dd`
+  and `h4`–`h6`.
 
 ## What already exists (reuse, do not reinvent)
 
@@ -83,12 +85,18 @@ Per-tag UA style table (slice 1) — the whole "stylesheet":
 | `h1` | 24 | 12 / 8 | 0 | |
 | `h2` | 18 | 10 / 6 | 0 | |
 | `h3` | 15 | 8 / 4 | 0 | |
+| `h4` | 14 | 8 / 4 | 0 | |
+| `h5` | 13 | 6 / 3 | 0 | |
+| `h6` | 12 | 6 / 3 | 0 | |
 | `p` | 14 | 0 / 8 | 0 | |
 | `ul`/`ol` | 14 | 4 / 4 | +16 (nested +16) | `li` marker drawn in the gutter |
+| `dl` | 14 | 4 / 4 | 0 | `dt` synthetic bold; `dd` indent +16 |
 | `blockquote` | 14 | 6 / 6 | +12 | 2 px accent bar in the gutter |
 | `pre` | 13 (mono) | 8 / 8 | +8 | surface background, **not** wrapped |
 | `code` (inline) | 13 (mono) | — | — | surface background per run |
 | `hr` | — | 8 / 8 | 0 | 1 px border rule |
+| `table` | 13 | 8 / 8 | 0 | equal-width cols from the first row; extra cells dropped |
+| `th`/`td` | 13 | 0 / 0 | 0 | cell pad 4; `th` surface fill + header rule + synthetic bold |
 | `a` | 14 | — | — | accent color, no underline affordance yet (not clickable) |
 | `br` | — | — | — | forces a line break inside the run |
 
@@ -96,9 +104,9 @@ Inline styling composes inside a run: `strong` (synthetic bold), `em`
 (accent), `code` (mono segment), `a` (accent + recorded link target).
 
 **Unknown or unsupported elements degrade to their text content** — never
-dropped, never a crash. This matters immediately: `expect.html` contains a
-`<table>`, and slice 1 has no table layout, so the cells must appear as text
-in document order. (The `<table>` block is what slice 2 earns.)
+dropped, never a crash. Slice 1 applied this to the oliver fixture's
+`<table>`; slice 2 lays that table out as a grid. Remaining unknown tags
+(including `<img>` until S3) still flatten to document-order text.
 
 ### Whitespace (pinned)
 
@@ -145,8 +153,8 @@ fixed-capacity (`max_nodes`, `max_lines`) with a documented overflow rule
 
 | slice | scope | issue |
 |---|---|---|
-| **S1** (this) | the tags above, local file, keyboard scroll, error path, gate | #1202 |
-| S2 | tables (`table`/`thead`/`tbody`/`tr`/`th`/`td`), `dl`/`dt`/`dd`, `h4`–`h6`, nested-list polish | #1203 |
+| **S1** | the tags above minus the S2 grid, local file, keyboard scroll, error path, `live-doc` | #1202 |
+| **S2** (this) | tables (`table`/`thead`/`tbody`/`tr`/`th`/`td`), `dl`/`dt`/`dd`, `h4`–`h6`, nested-list polish, `live-doc-tables` | #1203 |
 | S3 | `<img>` via `lib/png.zig` + `lib/qoi.zig` (decoders already exist, `view.zig` proves the blit) | #1204 |
 | S4 | links + navigation: `declare_nav`/`poll_nav` opens the target document in a new tab | #1205 |
 | S5 | `DOC.BIN <url>` over the FETCH/HTTP seam — the first genuinely browser-ish moment | #1206 |
@@ -154,8 +162,9 @@ fixed-capacity (`max_nodes`, `max_lines`) with a documented overflow rule
 
 ## Gate shape (class B, declarative spec only)
 
-`tools/gate/specs/live-doc.spec`, modeled on `live-typography.spec` (staging +
-`--snapshot-after`) and `live-chrome.spec` (pixel probes):
+`tools/gate/specs/live-doc.spec` (S1) and `live-doc-tables.spec` (S2),
+modeled on `live-typography.spec` (staging + `--snapshot-after`) and
+`live-chrome.spec` (pixel probes):
 
 - **staging**: `vgate_setup_python` copies `tests/oliver-spike/expect.html`
   (the pinned oliver output, 754 B) and `zig-out/bin/DOC.BIN` into the share.
@@ -169,8 +178,13 @@ fixed-capacity (`max_nodes`, `max_lines`) with a documented overflow rule
   point, plus `snapshot` pixel probes in the framebuffer capture —
   page background, dark text ink inside the `h1` band, the blockquote indent
   bar, a mono (Fira) block region, and the `hr` rule.
-- **evidence**: `artifacts/` with `git add -f` (`artifacts/*` is gitignored —
-  a plain `git add` silently drops it).
+- **S2 staging**: copies `tests/oliver-spike/tables.html` (short: h4 + 2×2
+  table + dl) so th surface, header rule, both columns, and dd indent are
+  on-screen. Oliver's own table stays below the fold and is not the S2
+  pixel fixture.
+- **assertions**: serial `doc: probe2 table=/h4=/dt=` plus snapshot probes —
+  page background, h4 ink, th `theme_surface` fill, left+right column ink,
+  header-rule border, dt/dd ink.
 
 ## Risks and open questions
 

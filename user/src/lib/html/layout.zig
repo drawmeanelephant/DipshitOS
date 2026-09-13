@@ -1,4 +1,4 @@
-//! VirelaiOS HTML layout (M-web S1, ADR 0028 D3).
+//! VirelaiOS HTML layout (M-web S2, ADR 0028 D3).
 //!
 //! Nodes + UA style + content width → block boxes and line boxes. Pure: the
 //! measure function is injected so host tests stub 8 px/char instead of a
@@ -19,6 +19,9 @@ pub const quote_indent: u32 = 12;
 pub const list_indent: u32 = 16;
 pub const pre_indent: u32 = 8;
 pub const hr_height: u32 = 1;
+pub const cell_pad: u32 = 4;
+pub const dd_indent: u32 = 16;
+pub const max_table_cols: u8 = 8;
 
 pub const MeasureFn = *const fn (text: []const u8, mono: bool, size: u32) u32;
 
@@ -53,6 +56,8 @@ pub const BlockKind = enum(u8) {
     flow,
     pre,
     hr,
+    table,
+    cell,
 };
 
 pub const Marker = enum(u8) {
@@ -73,6 +78,9 @@ pub const Block = struct {
     marker_index: u8 = 0,
     first_line: u16 = 0,
     line_count: u16 = 0,
+    node_idx: u16 = parse.none,
+    header_rule: bool = false,
+    cols: u8 = 0,
 };
 
 pub const Layout = struct {
@@ -105,10 +113,19 @@ pub fn styleOf(tag: parse.Tag) Style {
         .h1 => .{ .size = 24, .before = 12, .after = 8, .indent = 0, .leading = 6, .mono = false },
         .h2 => .{ .size = 18, .before = 10, .after = 6, .indent = 0, .leading = 5, .mono = false },
         .h3 => .{ .size = 15, .before = 8, .after = 4, .indent = 0, .leading = 4, .mono = false },
+        .h4 => .{ .size = 14, .before = 8, .after = 4, .indent = 0, .leading = 4, .mono = false },
+        .h5 => .{ .size = 13, .before = 6, .after = 3, .indent = 0, .leading = 3, .mono = false },
+        .h6 => .{ .size = 12, .before = 6, .after = 3, .indent = 0, .leading = 3, .mono = false },
         .pre => .{ .size = 13, .before = 8, .after = 8, .indent = pre_indent, .leading = 4, .mono = true },
         .blockquote => .{ .size = 14, .before = 6, .after = 6, .indent = quote_indent, .leading = 4, .mono = false },
         .ul, .ol => .{ .size = 14, .before = 4, .after = 4, .indent = list_indent, .leading = 4, .mono = false },
         .li => .{ .size = 14, .before = 2, .after = 2, .indent = 0, .leading = 4, .mono = false },
+        .dl => .{ .size = 14, .before = 4, .after = 4, .indent = 0, .leading = 4, .mono = false },
+        .dt => .{ .size = 14, .before = 4, .after = 2, .indent = 0, .leading = 4, .mono = false },
+        .dd => .{ .size = 14, .before = 0, .after = 6, .indent = dd_indent, .leading = 4, .mono = false },
+        .table => .{ .size = 13, .before = 8, .after = 8, .indent = 0, .leading = 4, .mono = false },
+        .th => .{ .size = 13, .before = 0, .after = 0, .indent = 0, .leading = 3, .mono = false },
+        .td => .{ .size = 13, .before = 0, .after = 0, .indent = 0, .leading = 3, .mono = false },
         .hr => .{ .size = 1, .before = 8, .after = 8, .indent = 0, .leading = 0, .mono = false },
         else => .{ .size = 14, .before = 0, .after = 8, .indent = 0, .leading = 4, .mono = false },
     };
@@ -237,7 +254,17 @@ const Engine = struct {
             return;
         }
 
-        if (tag == .ul or tag == .ol) {
+        if (tag == .table) {
+            self.layoutTable(idx, x, w);
+            return;
+        }
+
+        if (tag == .thead or tag == .tbody) {
+            self.walkTableRows(idx, x, w, countTableCols(self.doc, idx));
+            return;
+        }
+
+        if (tag == .ul or tag == .ol or tag == .dl) {
             self.addBlock(.{
                 .tag = tag,
                 .y = @intCast(self.y),
@@ -333,6 +360,125 @@ const Engine = struct {
         self.y += st.after;
     }
 
+    fn layoutTable(self: *Engine, idx: u16, x: u32, w: u32) void {
+        const st = styleOf(.table);
+        self.y += st.before;
+        var cols = countTableCols(self.doc, idx);
+        if (cols == 0) cols = 1;
+        if (cols > max_table_cols) cols = max_table_cols;
+        self.addBlock(.{
+            .tag = .table,
+            .y = @intCast(self.y),
+            .x = @intCast(x),
+            .w = @intCast(w),
+            .kind = .table,
+            .cols = cols,
+            .node_idx = idx,
+        });
+        const start_y = self.y;
+        const start_b = self.block_count - 1;
+        self.walkTableRows(idx, x, w, cols);
+        self.blocks[start_b].h = @intCast(self.y - start_y);
+        self.y += st.after;
+    }
+
+    fn walkTableRows(self: *Engine, idx: u16, x: u32, w: u32, cols: u8) void {
+        var child = self.doc.nodes[idx].first_child;
+        while (child != parse.none) {
+            const tag = self.doc.nodes[child].tag;
+            if (tag == .tr) {
+                self.layoutRow(child, x, w, cols);
+            } else if (tag == .thead or tag == .tbody) {
+                self.walkTableRows(child, x, w, cols);
+            } else if (parse.isBlock(tag) and tag != .th and tag != .td) {
+                self.layoutBlock(child, x, w);
+            }
+            child = self.doc.nodes[child].next_sibling;
+        }
+    }
+
+    fn layoutRow(self: *Engine, tr: u16, x: u32, w: u32, cols: u8) void {
+        const col_w: u32 = if (cols == 0) w else w / cols;
+        const row_y = self.y;
+        const first_block = self.block_count;
+        var max_h: u32 = 0;
+        var col: u8 = 0;
+        var header = false;
+        var child = self.doc.nodes[tr].first_child;
+        while (child != parse.none and col < cols) {
+            const tag = self.doc.nodes[child].tag;
+            if (tag == .th or tag == .td) {
+                if (tag == .th) header = true;
+                self.y = row_y;
+                const cell_x = x + @as(u32, col) * col_w;
+                self.layoutCell(child, cell_x, col_w, tag == .th);
+                const h = self.y - row_y;
+                if (h > max_h) max_h = h;
+                col += 1;
+            }
+            child = self.doc.nodes[child].next_sibling;
+        }
+        if (max_h == 0) max_h = lineHeight(.td);
+        var bi = first_block;
+        while (bi < self.block_count) : (bi += 1) {
+            if (self.blocks[bi].kind == .cell and @as(u32, self.blocks[bi].y) == row_y) {
+                self.blocks[bi].h = @intCast(max_h);
+            }
+        }
+        self.y = row_y + max_h;
+        if (header) {
+            self.addBlock(.{
+                .tag = .hr,
+                .y = @intCast(self.y),
+                .h = 1,
+                .x = @intCast(x),
+                .w = @intCast(w),
+                .kind = .hr,
+                .header_rule = true,
+            });
+            self.y += 1;
+        }
+    }
+
+    fn layoutCell(self: *Engine, idx: u16, x: u32, w: u32, is_th: bool) void {
+        const tag: parse.Tag = if (is_th) .th else .td;
+        const inner_x = x + cell_pad;
+        const inner_w = if (w > 2 * cell_pad) w - 2 * cell_pad else w;
+        self.addBlock(.{
+            .tag = tag,
+            .y = @intCast(self.y),
+            .x = @intCast(x),
+            .w = @intCast(w),
+            .kind = .cell,
+            .header_rule = is_th,
+            .node_idx = idx,
+            .first_line = self.line_count,
+        });
+        const start_y = self.y;
+        const start_b = self.block_count - 1;
+        const first_line = self.line_count;
+        self.y += cell_pad;
+        if (hasDirectInlines(self.doc, idx)) {
+            self.wrapInlines(self.doc.nodes[idx].first_child, inner_x, inner_w, tag);
+        }
+        var child = self.doc.nodes[idx].first_child;
+        while (child != parse.none) {
+            const ctag = self.doc.nodes[child].tag;
+            if (parse.isBlock(ctag) and ctag != .th and ctag != .td) {
+                self.layoutBlock(child, inner_x, inner_w);
+            }
+            child = self.doc.nodes[child].next_sibling;
+        }
+        self.y += cell_pad;
+        self.blocks[start_b].line_count = self.line_count - first_line;
+        var h = self.y - start_y;
+        if (h == 0) {
+            h = lineHeight(tag) + 2 * cell_pad;
+            self.y = start_y + h;
+        }
+        self.blocks[start_b].h = @intCast(h);
+    }
+
     fn layoutPre(self: *Engine, idx: u16, x: u32, w: u32, st: Style) void {
         self.addBlock(.{
             .tag = .pre,
@@ -425,7 +571,8 @@ const Engine = struct {
     fn wrapInlines(self: *Engine, start: u16, x: u32, w: u32, inherit: parse.Tag) void {
         const st = styleOf(inherit);
         var ist = InlineState{ .size = st.size, .mono = st.mono };
-        if (inherit == .h1 or inherit == .h2 or inherit == .h3) ist.size = st.size;
+        // th/dt have no bold face (ADR 0028 D4); paint synthesizes a 1-px strike.
+        if (inherit == .th or inherit == .dt) ist.bold = true;
         self.openLine(x, st.size + st.leading);
         self.walkInline(start, x, w, inherit, ist);
         self.closeLineIfOpen();
@@ -608,6 +755,36 @@ const Engine = struct {
     }
 };
 
+fn countRowCells(doc: parse.Document, tr: u16) u8 {
+    var n: u8 = 0;
+    var child = doc.nodes[tr].first_child;
+    while (child != parse.none) {
+        const tag = doc.nodes[child].tag;
+        if (tag == .th or tag == .td) {
+            n += 1;
+            if (n == max_table_cols) return n;
+        }
+        child = doc.nodes[child].next_sibling;
+    }
+    return n;
+}
+
+fn countTableCols(doc: parse.Document, idx: u16) u8 {
+    var child = doc.nodes[idx].first_child;
+    while (child != parse.none) {
+        const tag = doc.nodes[child].tag;
+        if (tag == .tr) {
+            const n = countRowCells(doc, child);
+            if (n > 0) return n;
+        } else if (tag == .thead or tag == .tbody) {
+            const n = countTableCols(doc, child);
+            if (n > 0) return n;
+        }
+        child = doc.nodes[child].next_sibling;
+    }
+    return 0;
+}
+
 fn hasDirectInlines(doc: parse.Document, idx: u16) bool {
     var child = doc.nodes[idx].first_child;
     while (child != parse.none) {
@@ -724,4 +901,154 @@ test "html layout: oliver fixture lays out without truncating" {
     try std.testing.expect(lay.block_count >= 8);
     try std.testing.expect(lay.line_count >= 8);
     try std.testing.expect(lay.content_h > page_margin * 2);
+    var saw_table = false;
+    var ti: u16 = 0;
+    while (ti < lay.block_count) : (ti += 1) {
+        if (lay.blocks[ti].kind == .table) saw_table = true;
+    }
+    try std.testing.expect(saw_table);
+}
+
+test "html layout: equal-width table columns and th header rule" {
+    var nodes: [parse.max_nodes]parse.Node = undefined;
+    var text: [parse.max_text]u8 = undefined;
+    const src = "<table><thead><tr><th>a</th><th>b</th></tr></thead><tbody><tr><td>1</td><td>2</td></tr></tbody></table>";
+    const doc = parse.parse(src, nodes[0..], text[0..]);
+    var blocks: [max_blocks]Block = undefined;
+    var lines: [max_lines]Line = undefined;
+    var spans: [max_spans]Span = undefined;
+    const lay = layout(doc, 220, blocks[0..], lines[0..], spans[0..], stubMeasure);
+    var table_w: u16 = 0;
+    var cols: u8 = 0;
+    var cells: u8 = 0;
+    var header_rule = false;
+    var th_x: u16 = 0;
+    var td_x: u16 = 0;
+    var i: u16 = 0;
+    while (i < lay.block_count) : (i += 1) {
+        const b = lay.blocks[i];
+        if (b.kind == .table) {
+            table_w = b.w;
+            cols = b.cols;
+        }
+        if (b.kind == .cell) {
+            cells += 1;
+            if (b.tag == .th and th_x == 0) th_x = b.x;
+            if (b.tag == .th and b.x > th_x and td_x == 0) td_x = b.x;
+        }
+        if (b.header_rule and b.kind == .hr) header_rule = true;
+    }
+    try std.testing.expectEqual(@as(u8, 2), cols);
+    try std.testing.expect(cells >= 4);
+    try std.testing.expect(header_rule);
+    try std.testing.expect(td_x > th_x);
+    // equal-width: second column starts halfway across the table
+    const content_w = table_w;
+    try std.testing.expect(td_x >= th_x + content_w / 4);
+    var th_bold = false;
+    var td_bold = false;
+    var bi: u16 = 0;
+    while (bi < lay.block_count) : (bi += 1) {
+        const b = lay.blocks[bi];
+        var li: u16 = 0;
+        while (li < b.line_count) : (li += 1) {
+            const line = lay.lines[b.first_line + li];
+            var si: u16 = 0;
+            while (si < line.span_count) : (si += 1) {
+                const sp = lay.spans[line.first_span + si];
+                if (b.tag == .th and sp.flags.bold) th_bold = true;
+                if (b.tag == .td and sp.flags.bold) td_bold = true;
+            }
+        }
+    }
+    try std.testing.expect(th_bold);
+    try std.testing.expect(!td_bold);
+}
+
+test "html layout: ragged row extra cells are dropped" {
+    var nodes: [parse.max_nodes]parse.Node = undefined;
+    var text: [parse.max_text]u8 = undefined;
+    const src = "<table><tr><td>a</td><td>b</td></tr><tr><td>1</td><td>2</td><td>3</td></tr></table>";
+    const doc = parse.parse(src, nodes[0..], text[0..]);
+    var blocks: [max_blocks]Block = undefined;
+    var lines: [max_lines]Line = undefined;
+    var spans: [max_spans]Span = undefined;
+    const lay = layout(doc, 240, blocks[0..], lines[0..], spans[0..], stubMeasure);
+    var cells: u8 = 0;
+    var i: u16 = 0;
+    while (i < lay.block_count) : (i += 1) {
+        if (lay.blocks[i].kind == .cell) cells += 1;
+    }
+    try std.testing.expectEqual(@as(u8, 4), cells);
+}
+
+test "html layout: dl indent and h4–h6 stack" {
+    var nodes: [parse.max_nodes]parse.Node = undefined;
+    var text: [parse.max_text]u8 = undefined;
+    const src = "<h4>Four</h4><h5>Five</h5><dl><dt>term</dt><dd>defn</dd></dl>";
+    const doc = parse.parse(src, nodes[0..], text[0..]);
+    var blocks: [max_blocks]Block = undefined;
+    var lines: [max_lines]Line = undefined;
+    var spans: [max_spans]Span = undefined;
+    const lay = layout(doc, 240, blocks[0..], lines[0..], spans[0..], stubMeasure);
+    var h4_y: u16 = 0;
+    var h5_y: u16 = 0;
+    var dt_x: u16 = 0;
+    var dd_x: u16 = 0;
+    var i: u16 = 0;
+    while (i < lay.block_count) : (i += 1) {
+        const b = lay.blocks[i];
+        if (b.tag == .h4 and h4_y == 0) h4_y = b.y;
+        if (b.tag == .h5 and h5_y == 0) h5_y = b.y;
+        if (b.tag == .dt) dt_x = b.x;
+        if (b.tag == .dd) dd_x = b.x;
+    }
+    try std.testing.expect(h5_y > h4_y);
+    try std.testing.expect(dd_x > dt_x);
+    var dt_bold = false;
+    var dd_bold = false;
+    var bi: u16 = 0;
+    while (bi < lay.block_count) : (bi += 1) {
+        const b = lay.blocks[bi];
+        var li: u16 = 0;
+        while (li < b.line_count) : (li += 1) {
+            const line = lay.lines[b.first_line + li];
+            var si: u16 = 0;
+            while (si < line.span_count) : (si += 1) {
+                const sp = lay.spans[line.first_span + si];
+                if (b.tag == .dt and sp.flags.bold) dt_bold = true;
+                if (b.tag == .dd and sp.flags.bold) dd_bold = true;
+            }
+        }
+    }
+    try std.testing.expect(dt_bold);
+    try std.testing.expect(!dd_bold);
+}
+
+test "html layout: compact tables fixture fits in the DOC client" {
+    var nodes: [parse.max_nodes]parse.Node = undefined;
+    var text: [parse.max_text]u8 = undefined;
+    const src =
+        \\<h4>On-screen table</h4>
+        \\<table><thead><tr><th>Left</th><th>Right</th></tr></thead>
+        \\<tbody><tr><td>one</td><td>two</td></tr></tbody></table>
+        \\<dl><dt>term</dt><dd>definition sits indented</dd></dl>
+    ;
+    const doc = parse.parse(src, nodes[0..], text[0..]);
+    var blocks: [max_blocks]Block = undefined;
+    var lines: [max_lines]Line = undefined;
+    var spans: [max_spans]Span = undefined;
+    const lay = layout(doc, 512, blocks[0..], lines[0..], spans[0..], stubMeasure);
+    try std.testing.expect(!lay.truncated);
+    try std.testing.expect(lay.content_h < 352);
+    var saw_table = false;
+    var saw_h4 = false;
+    var saw_dt = false;
+    var i: u16 = 0;
+    while (i < lay.block_count) : (i += 1) {
+        if (lay.blocks[i].kind == .table) saw_table = true;
+        if (lay.blocks[i].tag == .h4) saw_h4 = true;
+        if (lay.blocks[i].tag == .dt) saw_dt = true;
+    }
+    try std.testing.expect(saw_table and saw_h4 and saw_dt);
 }
