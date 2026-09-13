@@ -1,7 +1,7 @@
 # In-guest HTML renderer — scoping (M-web)
 
-- Status: **S2 implementation** — tables/`dl`/`h4`–`h6` on merged S1 (`DOC.BIN` + `live-doc-tables`).
-- Claim: #1200 · Umbrella: #1201 · Slices: #1202 / #1203 / #1204 / #1205
+- Status: **S3–S6 implementation** (stacked on S2) — img, click-nav, fetch, publish behind `live-doc-web`.
+- Claim: #1200 · Umbrella: #1201 · Slices: #1202 / #1203 / #1204 / #1205 / #1206 / #1207
 - Related: ADR 0010 (userland storage), ADR 0011 (desktop platform),
   ADR 0016 (pixel ownership), ADR 0009 (app events), `tools/gate/SPEC.md`
 
@@ -26,7 +26,7 @@ and every later slice (images, links, fetch) has a place to land.
 - **No JavaScript.** Not an interpreter, not a subset, not "later".
 - **No CSS cascade.** One fixed UA stylesheet compiled into the binary — a
   table of per-tag metrics, not a parser. A page cannot change the styling.
-- **No network in slice 1–4.** Fetching is S5 over the existing FETCH/HTTP
+- **No network until S5.** Fetching is S5 over the existing FETCH/HTTP
   seam, and only after the local render path is honest.
 - **No kernel changes, no new syscalls.** The renderer is a userland app; the
   kernel never parses HTML. `kernel/src/**` stays untouched.
@@ -154,17 +154,13 @@ fixed-capacity (`max_nodes`, `max_lines`) with a documented overflow rule
 | slice | scope | issue |
 |---|---|---|
 | **S1** | the tags above minus the S2 grid, local file, keyboard scroll, error path, `live-doc` | #1202 |
-| **S2** (this) | tables (`table`/`thead`/`tbody`/`tr`/`th`/`td`), `dl`/`dt`/`dd`, `h4`–`h6`, nested-list polish, `live-doc-tables` | #1203 |
-| S3 | `<img>` via `lib/png.zig` + `lib/qoi.zig` (decoders already exist, `view.zig` proves the blit) | #1204 |
-| S4 | links + navigation: `declare_nav`/`poll_nav` opens the target document in a new tab | #1205 |
-| S5 | `DOC.BIN <url>` over the FETCH/HTTP seam — the first genuinely browser-ish moment | #1206 |
-| S6 | publish workflow: batch oliver over the share, DOC views, `HTTPD.BIN` serves the same tree | #1207 |
+| **S2** | tables (`table`/`thead`/`tbody`/`tr`/`th`/`td`), `dl`/`dt`/`dd`, `h4`–`h6`, nested-list polish, `live-doc-tables` | #1203 |
+| **S3–S6** (this) | `<img>` (png/qoi), click-nav, `DOC.BIN <url>` fetch, oliver-publish + HTTPD png/qoi MIME, `live-doc-web` | #1204–#1207 |
 
 ## Gate shape (class B, declarative spec only)
 
-`tools/gate/specs/live-doc.spec` (S1) and `live-doc-tables.spec` (S2),
-modeled on `live-typography.spec` (staging + `--snapshot-after`) and
-`live-chrome.spec` (pixel probes):
+`tools/gate/specs/live-doc.spec` (S1), `live-doc-tables.spec` (S2), and
+`live-doc-web.spec` (S3–S6: img, click-nav, fetch, publish — four boots).
 
 - **staging**: `vgate_setup_python` copies `tests/oliver-spike/expect.html`
   (the pinned oliver output, 754 B) and `zig-out/bin/DOC.BIN` into the share.

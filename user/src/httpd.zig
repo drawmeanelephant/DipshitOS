@@ -69,7 +69,13 @@ pub fn sanitize_path(path: []const u8) ?[]const u8 {
 pub fn mime_for_path(path: []const u8) []const u8 {
     if (std.mem.endsWith(u8, path, ".html") or std.mem.endsWith(u8, path, ".htm")) {
         return "text/html; charset=utf-8";
-    } else if (std.mem.endsWith(u8, path, ".txt") or std.mem.endsWith(u8, path, ".TXT")) {
+    } else if (std.mem.endsWith(u8, path, ".png") or std.mem.endsWith(u8, path, ".PNG")) {
+        return "image/png";
+    } else if (std.mem.endsWith(u8, path, ".qoi") or std.mem.endsWith(u8, path, ".QOI")) {
+        return "image/qoi";
+    } else if (std.mem.endsWith(u8, path, ".md") or std.mem.endsWith(u8, path, ".MD") or
+        std.mem.endsWith(u8, path, ".txt") or std.mem.endsWith(u8, path, ".TXT"))
+    {
         return "text/plain; charset=utf-8";
     } else if (std.mem.endsWith(u8, path, ".json")) {
         return "application/json";
@@ -547,6 +553,8 @@ test "httpd: mime_for_path maps known extensions" {
     try std.testing.expectEqualStrings("text/html; charset=utf-8", mime_for_path("index.html"));
     try std.testing.expectEqualStrings("application/json", mime_for_path("data.json"));
     try std.testing.expectEqualStrings("text/plain; charset=utf-8", mime_for_path("APPS.TXT"));
+    try std.testing.expectEqualStrings("image/png", mime_for_path("icon.png"));
+    try std.testing.expectEqualStrings("image/qoi", mime_for_path("pic.qoi"));
     try std.testing.expectEqualStrings("image/bmp", mime_for_path("screen.bmp"));
     try std.testing.expectEqualStrings("application/octet-stream", mime_for_path("CALC.BIN"));
 }

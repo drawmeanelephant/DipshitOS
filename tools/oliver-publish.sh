@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# oliver-publish.sh — M-web S6 host-side batch (issue #1207).
+#
+# Turns a directory of Markdown into a sibling HTML tree that DOC.BIN can
+# view and HTTPD.BIN can serve. Oliver itself is a guest binary
+# (tests/oliver-spike/OLIVER.BIN); this script does the host-side staging:
+#
+#   1. Copy every .md/.MD/.txt/.markdown into OUT_DIR (share-shaped names).
+#   2. If a sibling .html already exists next to the source, copy it.
+#   3. For tests/oliver-spike/md-fixture.txt, copy the pinned expect.html
+#      as the matching .html (byte-exact oliver output, no guest needed).
+#   4. Write OUT_DIR/PUBLISH.TXT listing `exec OLIVER.BIN <in> <out>`
+#      lines for any markdown that still has no HTML — a cheap-model
+#      live gate can run those in-guest.
+#
+# Usage:
+#   bash tools/oliver-publish.sh [SRC_DIR] [OUT_DIR]
+# Defaults: SRC_DIR=tests/oliver-spike  OUT_DIR=artifacts/publish
+#
+# No network. No VM. Idempotent.
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SRC="${1:-$ROOT/tests/oliver-spike}"
+OUT="${2:-$ROOT/artifacts/publish}"
+
+mkdir -p "$OUT"
+
+html_name() {
+  local base="$1"
+  case "$base" in
+    *.md|*.MD) printf '%s.html' "${base%.*}" ;;
+    *.markdown) printf '%s.html' "${base%.*}" ;;
+    *.txt|*.TXT) printf '%s.html' "${base%.*}" ;;
+    *) return 1 ;;
+  esac
+}
+
+copied=0
+pending=0
+: >"$OUT/PUBLISH.TXT"
+
+shopt -s nullglob
+for src in "$SRC"/*.{md,MD,txt,TXT,markdown}; do
+  [ -f "$src" ] || continue
+  base="$(basename "$src")"
+  if [ "$base" = "README.md" ] || [ "$base" = "README.MD" ]; then
+    continue
+  fi
+  out_html="$(html_name "$base")" || continue
+  cp "$src" "$OUT/$base"
+  copied=$((copied + 1))
+
+  sibling="${src%.*}.html"
+  pinned_expect="$ROOT/tests/oliver-spike/expect.html"
+  if [ -f "$sibling" ]; then
+    cp "$sibling" "$OUT/$out_html"
+  elif [ "$base" = "md-fixture.txt" ] && [ -f "$pinned_expect" ]; then
+    cp "$pinned_expect" "$OUT/$out_html"
+    # Also publish as index.html so HTTPD's / files listing has a page.
+    cp "$pinned_expect" "$OUT/index.html"
+  elif [ -f "$SRC/$out_html" ]; then
+    cp "$SRC/$out_html" "$OUT/$out_html"
+  else
+    printf 'exec OLIVER.BIN %s %s\n' "$base" "$out_html" >>"$OUT/PUBLISH.TXT"
+    pending=$((pending + 1))
+  fi
+done
+
+# Seed DOC's usual argv name when we published the pinned fixture.
+if [ -f "$OUT/md-fixture.html" ] && [ ! -f "$OUT/PAGE.HTML" ]; then
+  cp "$OUT/md-fixture.html" "$OUT/PAGE.HTML"
+fi
+
+{
+  echo "oliver-publish: src=$SRC"
+  echo "oliver-publish: out=$OUT"
+  echo "oliver-publish: copied=$copied pending=$pending"
+} | tee "$OUT/MANIFEST.TXT"
+cat "$OUT/PUBLISH.TXT" >>"$OUT/MANIFEST.TXT"
+
+if [ "$pending" -gt 0 ]; then
+  echo "oliver-publish: $pending file(s) need in-guest OLIVER.BIN (see PUBLISH.TXT)" >&2
+fi
