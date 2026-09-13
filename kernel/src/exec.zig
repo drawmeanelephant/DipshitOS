@@ -781,6 +781,11 @@ fn exec_static_elf_gap(
             .ro_phys = if (image.segment_count == 3) seg_phys[1] else 0,
             .ro_pages = if (image.segment_count == 3) seg_pages[1] else 0,
             .ro_va = if (image.segment_count == 3) image.segments[1].vaddr else 0,
+            // Issue #1214 review: the packed argv block's end — the data
+            // aperture collision bound extends through it, so the sbrk
+            // heap cannot swallow a block that starts on the headroom page
+            // (an exactly page-aligned `mem_size`).
+            .argv_end_va = if (argv_va != 0) argv_va + arg_block_bytes else 0,
         },
         .{ .phys = kstack_phys, .pages = kstack_pages },
         principal,

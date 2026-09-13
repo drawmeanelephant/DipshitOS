@@ -183,6 +183,13 @@ pub const AddrSpace = struct {
     /// User VA of the gap-layout rodata segment (issue #1214): recorded so
     /// `mmap_collides` can protect it like text/data/stack. 0 = none.
     ro_va: u64 = 0,
+    /// User VA one-past the gap layout's packed argv block in the writable
+    /// segment's reserved tail page (issue #1214 review; 0 = no block).
+    /// `mmap_collides` protects the data aperture through this end: when
+    /// the data segment's `mem_size` is exactly page-aligned the argv block
+    /// starts ON the otherwise-excluded headroom page, and the sbrk heap
+    /// must not swallow it.
+    argv_end_va: u64 = 0,
     /// Physical shared library staging/heap pages (claim 7921).
     lib_phys: u64 = 0,
     lib_pages: u64 = 0,
@@ -386,6 +393,18 @@ pub fn find_mmap_region(pid: usize, va: u64) ?*const MmapRegion {
     return null;
 }
 
+/// The `index`-th live mmap region of `pid`, or null. ADR 0027 review
+/// (finding 2): `arm_task_regions` merges these PROCESS-scope regions into
+/// every task's uaccess view, so a mapping is visible to all of the
+/// process's tasks regardless of which M created it or when.
+pub fn mmap_region_at(pid: usize, index: usize) ?MmapRegion {
+    if (pid >= max_processes or processes[pid].state == .free) return null;
+    if (index >= max_mmap_regions) return null;
+    const r = processes[pid].addr_space.mmap_regions[index];
+    if (r.len == 0) return null;
+    return r;
+}
+
 /// Issue #1214: does [va, va+len) overlap ANY region the process already
 /// owns — the exec apertures (text, rodata, data, stack) or a previously
 /// registered mmap region? handle_mmap refuses such mappings with EINVAL
@@ -398,8 +417,10 @@ pub fn find_mmap_region(pid: usize, va: u64) ?*const MmapRegion {
 /// page-rounded image length. The gap path's extra argv-headroom page (the
 /// data segment's `+1` page) is deliberately EXCLUDED — the GOOS=virelai
 /// sbrk heap starts at `memRound(firstmoduledata.end)`, which lands on that
-/// page by design, and nothing the image needs lives in it (the argv block
-/// itself fits inside the page-rounded image end).
+/// page by design, and nothing else the image needs lives in it. The packed
+/// argv block is the exception: `mmap_collides` extends the data aperture
+/// through `argv_end_va` precisely because an exactly page-aligned
+/// `mem_size` puts the block ON the excluded page (issue #1214 review).
 fn aperture_span(base: u64, byte_len: u64) u64 {
     if (base == 0) return 0;
     return (byte_len + 4095) & ~@as(u64, 4095);
@@ -410,10 +431,16 @@ pub fn mmap_collides(pid: usize, va: u64, len: u64) bool {
     const space = &processes[pid].addr_space;
     const start = va;
     const end = va + len;
+    // Protect the data aperture through the packed argv block, not just to
+    // the page-rounded image end: on an exactly page-aligned `mem_size` the
+    // block starts at the headroom page and the sbrk break would otherwise
+    // swallow it.
+    var data_len = aperture_span(space.data_va, space.data_len);
+    if (space.argv_end_va > space.data_va) data_len = @max(data_len, space.argv_end_va - space.data_va);
     const apertures = [_]struct { base: u64, len: u64 }{
         .{ .base = space.text_va, .len = aperture_span(space.text_va, space.text_len) },
         .{ .base = space.ro_va, .len = space.ro_pages * 4096 },
-        .{ .base = space.data_va, .len = aperture_span(space.data_va, space.data_len) },
+        .{ .base = space.data_va, .len = data_len },
         .{ .base = space.stack_va, .len = aperture_span(space.stack_va, space.stack_len) },
     };
     for (apertures) |ap| {
@@ -1293,6 +1320,32 @@ test "process: mmap regions and dynamic page tracking" {
     // Reap frees all dynamic pages
     _ = on_task_exit(2, 0);
     try std.testing.expect(reap(pid));
+}
+
+test "process: mmap_collides protects the argv block on a page-aligned data segment (issue #1214 review)" {
+    init();
+    const data_va: u64 = 0x50_0000;
+    const pid = create_as("ARGV.BIN", .{}, .{
+        .data_va = data_va,
+        .data_len = 0x2000, // exactly page-aligned: block starts ON the headroom page
+        .argv_end_va = data_va + 0x2000 + 256,
+    }, .{}, .{}).?;
+    // The headroom page carrying the argv block is a collision...
+    try std.testing.expect(mmap_collides(pid, data_va + 0x2000, 4096));
+    // ...the range past the block is not (the sbrk heap starts there)...
+    try std.testing.expect(!mmap_collides(pid, data_va + 0x2000 + 4096, 4096));
+    // ...and without a block the rounded image span is the whole bound.
+    const pid2 = create_as("NOARGV.BIN", .{}, .{
+        .data_va = data_va,
+        .data_len = 0x2000,
+    }, .{}, .{}).?;
+    try std.testing.expect(!mmap_collides(pid2, data_va + 0x2000, 4096));
+    // The index accessor backs arm_task_regions' process-scope merge.
+    try std.testing.expect(add_mmap_region(pid, 0x6000_0000, 4096, 3, 0x22));
+    const r = mmap_region_at(pid, 0).?;
+    try std.testing.expectEqual(@as(u64, 0x6000_0000), r.base_va);
+    try std.testing.expectEqual(@as(u64, 3), r.prot);
+    try std.testing.expect(mmap_region_at(pid, max_mmap_regions) == null);
 }
 
 // ---------------------------------------------------------------------------

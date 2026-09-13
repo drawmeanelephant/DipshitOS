@@ -843,6 +843,23 @@ pub fn init() usize {
 pub fn spawn(name: []const u8, entry: u64, spsr: u64, stack: []u8, ttbr0: u64, sp_el0: u64) ?usize {
     sched_lock_acquire();
     defer sched_lock_release();
+    const id = alloc_task_locked(name, entry, spsr, stack, ttbr0, sp_el0) orelse return null;
+    tasks[id].state = .ready;
+    // Claim 881 slice 1: the new task joins its home ring (ring 0 for the
+    // any-core default; `pin_task` re-homes it when `exec -c<core>` pins).
+    // Slice 3: the push takes the home ring's lock (we hold sched_lock).
+    push_home_locked(id);
+    return id;
+}
+
+/// `spawn` internals: claim the first free pool slot and build the
+/// synthetic frame, leaving the task OFF the ready rings in `.blocked` so
+/// a caller with more TCB fields to set (the ADR 0027 thread path) can
+/// finish before any core can select it. `spawn` publishes immediately;
+/// `spawn_thread` publishes after its process bind. Caller holds
+/// sched_lock (which also keeps `wake_expired` from touching the not-yet-
+/// published `.blocked` slot: every tick path takes sched_lock).
+fn alloc_task_locked(name: []const u8, entry: u64, spsr: u64, stack: []u8, ttbr0: u64, sp_el0: u64) ?usize {
     var id: usize = 0;
     while (id < max_tasks) : (id += 1) {
         if (tasks[id].state == .free) break;
@@ -855,12 +872,8 @@ pub fn spawn(name: []const u8, entry: u64, spsr: u64, stack: []u8, ttbr0: u64, s
         .spsr = spsr,
         .sp_el0 = sp_el0,
         .ttbr0 = ttbr0,
-        .state = .ready,
+        .state = .blocked,
     };
-    // Claim 881 slice 1: the new task joins its home ring (ring 0 for the
-    // any-core default; `pin_task` re-homes it when `exec -c<core>` pins).
-    // Slice 3: the push takes the home ring's lock (we hold sched_lock).
-    push_home_locked(id);
     task_count += 1;
     return id;
 }
@@ -1008,16 +1021,6 @@ pub fn add_task_write_region(id: usize, reg: userspace.Region) bool {
     return false;
 }
 
-/// Issue #1163 A1: can the task's TCB absorb `reads` more read and
-/// `writes` more write regions? sys_mmap pre-checks this so a mapping is
-/// never created half-registered (the mapping exists but syscalls cannot
-/// see it — the silent-EFAULT bug class).
-pub fn has_task_region_capacity(id: usize, reads: usize, writes: usize) bool {
-    if (id >= max_tasks) return false;
-    return tasks[id].regions.extra_read_count + reads <= tasks[id].regions.extra_reads.len and
-        tasks[id].regions.extra_write_count + writes <= tasks[id].regions.extra_writes.len;
-}
-
 /// Claim 0826: the pool has at least one free slot (the exec gate — a new
 /// program may load and run while another is alive; only the fixed pool
 /// bounds how many). The exec path checks this BEFORE allocating pages or
@@ -1107,13 +1110,6 @@ pub fn fault_current(esr: u64, far: u64, pc: u64) void {
 /// entry so `sys_write` bounds always follow the task that issued the call.
 pub fn current_user_regions() UserRegions {
     return tasks[current[smp.core_id()]].regions;
-}
-
-/// Physical address of the static user stack pages (claim 6783: the boot
-/// payload's stack — exec'd programs now own allocator-backed stack pages
-/// instead, claim 0826). Identity on host tests.
-pub fn user_stack_phys() u64 {
-    return mmu.to_phys(@intFromPtr(&user_stack));
 }
 
 pub fn register_user(entry: u64, image_base: u64) ?usize {
@@ -1657,10 +1653,13 @@ pub fn spawn_thread(
     const kstack_phys = alloc.alloc_pages(kstack_pages) orelse return null;
     const kstack: []u8 = @as([*]u8, @ptrFromInt(kstack_phys))[0..task_stack_size];
     const name = pinfo.name;
-    // spawn() builds the synthetic frame on the thread's EL1 kstack with
-    // the same machinery register_exec_user uses; .elr = entry, .sp_el0 =
-    // stack_hi, and the frame carries x0 = arg below.
-    const id = spawn(name, entry, spsr_el0t_irqs, kstack, pinfo.root_phys, stack_hi) orelse {
+    // The whole build is one sched_lock hold: the task stays off-ring
+    // (`.blocked`, unpublished) until its TCB fields, region copy, and
+    // process bind are all in place — no core can select a half-built
+    // thread, and the undo path mutates the pool under the same lock.
+    sched_lock_acquire();
+    const id = alloc_task_locked(name, entry, spsr_el0t_irqs, kstack, pinfo.root_phys, stack_hi) orelse {
+        sched_lock_release();
         _ = alloc.free_pages(kstack_phys, kstack_pages);
         return null;
     };
@@ -1669,30 +1668,47 @@ pub fn spawn_thread(
     tasks[id].is_thread = true;
     tasks[id].thread_kstack_phys = kstack_phys;
     tasks[id].thread_kstack_pages = kstack_pages;
-    tasks[id].regions = tasks[caller_task].regions; // same process view
+    // Exec shapes only; process-scope mmap regions are merged at arm time
+    // (ADR 0027 review finding 2).
+    tasks[id].regions = tasks[caller_task].regions;
     if (!process.bind_thread(pid, id)) {
-        // The descriptor bound is full or racing: undo the spawn.
-        _ = ring_remove_anywhere(id);
+        // The descriptor bound is full or racing: undo under the lock.
         tasks[id] = .{};
-        task_count -= 1;
+        task_count -%= 1;
+        sched_lock_release();
         _ = alloc.free_pages(kstack_phys, kstack_pages);
         return null;
     }
+    tasks[id].state = .ready;
+    push_home_locked(id);
+    sched_lock_release();
     return id;
 }
 
-/// ADR 0027 D4: block the calling task in `sys_futex` op 0 — the kernel has
-/// ALREADY verified `*uaddr == val` under the caller's uaccess window (the
-/// syscall layer reads the 4-byte user word; no second read here). Same
-/// seam as wait_current: the saved SVC frame stays on the task's kernel
-/// stack; `futex_wake` (op 1, thread death) or `wake_expired` (the ns
-/// deadline, ETIMEDOUT) flips it back to ready and patches x0. A
-/// deadline of 0 waits forever. The futex seat is inserted here so the
-/// waker finds it; the caller's task state is `.blocked` when this
-/// returns true.
-pub fn futex_wait_current(pid: usize, uaddr: u64, deadline_tick: u64) bool {
+/// ADR 0027 D4 + review finding 1: block the calling task in `sys_futex`
+/// op 0. The syscall layer runs a fast-path compare under the caller's
+/// uaccess window, but the authoritative re-check runs HERE — after the
+/// `(pid, uaddr)` seat is visible and still under sched_lock — closing the
+/// lost-wake window where a peer's store + wake lands between the fast
+/// compare and the seat insertion (the wake would find no waiter and
+/// `semasleep(-1)` would park forever). `word_matches` reads the 4-byte
+/// word through the same uaccess window; the callback keeps uaccess out of
+/// the scheduler. Returns `.blocked` on a real park (the waker/timeout
+/// patches the saved frame's x0), `.word_changed` when the re-check failed
+/// (the caller returns EAGAIN), and `.unavailable` for an inactive
+/// scheduler, a bad task state, a full seat table, or no successor (also
+/// EAGAIN — transient; the caller re-reads).
+pub const FutexWaitOutcome = enum { blocked, word_changed, unavailable };
+
+pub fn futex_wait_current(
+    pid: usize,
+    uaddr: u64,
+    val: u32,
+    deadline_tick: u64,
+    word_matches: *const fn (uaddr: u64, val: u32) bool,
+) FutexWaitOutcome {
     const c = smp.core_id();
-    if (!scheduling_active() or task_count == 0 or current[c] == idle_id) return false;
+    if (!scheduling_active() or task_count == 0 or current[c] == idle_id) return .unavailable;
     const waiting = current[c];
     // Seat the (pid, uaddr) entry BEFORE blocking — a waker on another core
     // (or the tick, for a deadline already in the past) must find it.
@@ -1703,14 +1719,23 @@ pub fn futex_wait_current(pid: usize, uaddr: u64, deadline_tick: u64) bool {
             break;
         }
     }
-    const entry = seat orelse return false;
+    const entry = seat orelse return .unavailable;
     sched_lock_acquire();
     if (tasks[waiting].state != .ready and tasks[waiting].state != .running) {
         sched_lock_release();
-        return false;
+        return .unavailable;
     }
     entry.* = .{ .used = true, .pid = pid, .uaddr = uaddr, .task = waiting };
     tasks[waiting].futex_waiting = true;
+    // Finding 1: re-check AFTER the seat is visible, under the same lock
+    // the waker takes. A peer that stored the word and called wake before
+    // this point either found the seat (and will wake us) or its store is
+    // visible to this read (and we bail to the caller's re-read).
+    if (!word_matches(uaddr, val)) {
+        futex_entry_clear(entry);
+        sched_lock_release();
+        return .word_changed;
+    }
     const pc = current_exception_pc();
     tasks[waiting].sp = exceptions.resume_frame[c];
     tasks[waiting].elr = pc.elr;
@@ -1722,7 +1747,7 @@ pub fn futex_wait_current(pid: usize, uaddr: u64, deadline_tick: u64) bool {
     tasks[waiting].wakeup_tick = deadline_tick;
     sched_lock_release();
     if (!claim_and_stage(c, waiting)) {
-        if (stage_secondary_park(c)) return true;
+        if (stage_secondary_park(c)) return .blocked;
         // No successor: roll back (the always-ready idle task makes this
         // unreachable in a normal boot; kept as a defensive bound).
         sched_lock_acquire();
@@ -1732,10 +1757,10 @@ pub fn futex_wait_current(pid: usize, uaddr: u64, deadline_tick: u64) bool {
         tasks[waiting].saves -%= 1;
         sched_lock_release();
         futex_entry_clear(entry);
-        return false;
+        return .unavailable;
     }
     apply_pending();
-    return true;
+    return .blocked;
 }
 
 /// ADR 0027 D4: `sys_futex` op 1 — wake up to `n` waiters of THIS process
@@ -1976,9 +2001,13 @@ fn arm_sibling_kills_locked(pid: usize, except_task: usize) void {
                 tasks[i].kill_pending = true;
             },
             .blocked => {
+                // Review minor: clear the futex seat, not just the flag —
+                // a leaked seat can fill the bounded table across several
+                // sibling deaths and fail a later wait. No wake: every
+                // same-process peer is being killed here anyway.
+                _ = futex_clear_for(i);
                 tasks[i].kill_pending = true;
                 tasks[i].state = .ready;
-                tasks[i].futex_waiting = false;
                 tasks[i].wait_pid = null;
                 tasks[i].wait_event_pid = null;
                 push_home_locked(i);

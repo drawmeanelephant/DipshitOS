@@ -124,3 +124,39 @@ first.
   `osinit`, decided at implementation review.
 - Slots 73/74 land as ADR 0007 amendments (append-only; 72 is taken by
   #1166's getrandom, implemented_count 73 → 75).
+
+## Implementation amendments (2026-09-13, PR #1221 review)
+
+- **D1 correction — mmap regions are PROCESS-scope, not per-task.**
+  D1's "uaccess TCB regions are exactly what Go's M-local state wants"
+  holds for the TASK extras (the exec shapes), but the Go sbrk heap is
+  reserved by one M and read/written by every M, so a mapping made after
+  a thread was created was invisible to that thread's TCB snapshot.
+  `sys_mmap` now registers only on the process
+  (`process.add_mmap_region`), and `arm_task_regions` merges the process
+  registry into every task's uaccess view at each SVC entry. The task
+  extras keep the exec/rodata/dynamic apertures; the per-core 26-slot
+  lists still bound the union (2 base + ≤ 5 exec + 16 mmap).
+- **D4 correction — the wait word is re-checked AFTER the seat is
+  visible.** The syscall layer's compare is a fast path only; the
+  authoritative check runs inside `futex_wait_current` under `sched_lock`
+  once the `(pid, uaddr)` seat and `futex_waiting` are set. Without it a
+  peer's store + wake landing between the compare and the seat would find
+  no waiter and `semasleep(-1)` would park forever. A failed re-check
+  clears the seat and returns `-EAGAIN`; a full seat table or a rotation
+  refusal is also transient `-EAGAIN`.
+- **Thread spawn is published last.** `spawn_thread` builds the task
+  off-ring (`.blocked`) and finishes TCB fields, the region copy, and the
+  process bind under one `sched_lock` hold; only then does it become
+  `.ready` and join a ring. The capacity-failure undo runs under the same
+  lock.
+- **Kernel boot-payload hang (unrelated latent bug surfaced by the
+  review's gate sweep).** The `.userbss` symbol order is linker-defined:
+  when `user_timer_preemptions` precedes `user_stack`, boot's
+  `rebuild_user_root` mapping from `&user_stack` was one page off, and —
+  worse — an aperture ABOVE the 4 GiB identity blanket had no source slot
+  for the user-root clone to descend, so the witness page was silently
+  unmapped and EL0 demand-zero reads spun forever. Fixed by mapping the
+  `.userbss` SECTION base and by having the root builder construct
+  missing tables for aperture slots (`mmu.zig` host regression test).
+  `live-addrspaces`/`live-args`/`live-entropy`/`live-zc` now catch it.

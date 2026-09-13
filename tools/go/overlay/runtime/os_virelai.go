@@ -221,6 +221,12 @@ func semasleep(ns int64) int32 {
 			}
 			v = atomic.Load(&gp.m.waitsemacount)
 		}
+		// Go's contract: ns == 0 is a non-blocking attempt — the kernel's
+		// timeout 0 means WAIT FOREVER (that is how ns < 0 arrives), so a
+		// zero timeout must return here after the lost race, not park.
+		if ns == 0 {
+			return -1
+		}
 		// Park until a wake bumps the count; the kernel returns -EAGAIN
 		// (re-check) if it changed concurrently, -ETIMEDOUT on expiry.
 		r := virFutexWait(noescape(unsafe.Pointer(&gp.m.waitsemacount)), 0, timeout)

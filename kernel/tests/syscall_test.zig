@@ -2570,7 +2570,9 @@ test "syscall: mmap visibility survives past the old 6-slot TCB cap (issue #1163
 
     // Eight prot-RW mappings: the OLD extra capacity (6) silently dropped
     // the 7th/8th TCB registrations and the 8-slot module list overflowed —
-    // file round-trips into the 7th+ heap buffer EFAULTed invisibly.
+    // file round-trips into the 7th+ heap buffer EFAULTed invisibly. Since
+    // ADR 0027's review the mappings live on the PROCESS registry and arm
+    // from there; the last mapping must still be visible.
     var last_va: u64 = 0;
     var i: usize = 0;
     while (i < 8) : (i += 1) {
@@ -2585,7 +2587,7 @@ test "syscall: mmap visibility survives past the old 6-slot TCB cap (issue #1163
     try std.testing.expect(uaccess.read_region_covers(last_va, 8));
 }
 
-test "syscall: mmap at TCB region capacity fails LOUDLY with ENOMEM (issue #1163 A1)" {
+test "syscall: mmap capacity is PROCESS-scope, not the calling task's TCB (ADR 0027 review)" {
     mmu.reset();
     alloc.reset_refcounts();
     process.init();
@@ -2601,15 +2603,49 @@ test "syscall: mmap at TCB region capacity fails LOUDLY with ENOMEM (issue #1163
     try std.testing.expect(scheduler.yield_current());
     try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
 
-    // Simulate config drift: a task whose extras are already at capacity
-    // (the pre-check must refuse the mmap instead of registering half of
-    // it and leaving the mapping invisible to later syscalls).
+    // The task TCB extras are full (the old pre-check refused here). Since
+    // the fix, mmap consumes no TCB slot: the mapping registers on the
+    // process and arms from there, so it must succeed and be visible.
     var i: usize = 0;
     while (i < scheduler.extra_region_capacity) : (i += 1) {
         try std.testing.expect(scheduler.add_task_write_region(2, .{ .base = 0x7000_0000 + @as(u64, i) * 0x1000, .len = 0x1000 }));
     }
-    try std.testing.expect(!scheduler.has_task_region_capacity(2, 0, 1));
+    const va = dispatch(sys_mmap, .{ 0, 4096, 3, 0x22, 0, 0 }, &frame);
+    try std.testing.expect(va >= 0x1000_0000);
+    syscall.arm_task_regions();
+    try std.testing.expect(uaccess.read_region_covers(va, 8));
+}
+
+test "syscall: mmap at process region capacity fails LOUDLY with ENOMEM (issue #1163 A1)" {
+    mmu.reset();
+    alloc.reset_refcounts();
+    process.init();
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0);
+    scheduler.start();
+
+    var frame = fresh_frame();
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+
+    // The process registry (max_mmap_regions = 16) is the loud gate: fill
+    // it, then the next mapping refuses instead of half-registering; the
+    // last live mapping is still visible after a re-arm (no silent drop at
+    // capacity — 2 base + 16 regions fit the 26-slot per-core lists).
+    var last_va: u64 = 0;
+    var i: usize = 0;
+    while (i < process.max_mmap_regions) : (i += 1) {
+        const va = dispatch(sys_mmap, .{ 0, 4096, 3, 0x22, 0, 0 }, &frame);
+        try std.testing.expect(va >= 0x1000_0000);
+        last_va = va;
+    }
     try std.testing.expectEqual(error_result(.enomem), dispatch(sys_mmap, .{ 0, 4096, 3, 0x22, 0, 0 }, &frame));
+    syscall.arm_task_regions();
+    try std.testing.expect(uaccess.read_region_covers(last_va, 8));
 }
 
 test "syscall: sys_mmap refuses hints that alias the caller's own apertures/regions (issue #1214)" {
@@ -3734,6 +3770,13 @@ test "syscall: SYS_TTY_NET_AUTH (slot 71, #1138) serves the owner and never trac
 // ADR 0027 (issue #1214 round 2): slots 73/74 — sys_thread + sys_futex
 // ---------------------------------------------------------------------------
 
+/// ADR 0027 review finding 1 test seam: a re-check that always reports a
+/// changed word, so the post-seat authoritative check path is exercised
+/// without a real concurrent peer.
+fn futex_never_matches(_: u64, _: u32) bool {
+    return false;
+}
+
 test "syscall: sys_futex wait re-checks the user word, sleeps, wakes, and times out" {
     mmu.reset();
     alloc.reset_refcounts();
@@ -3764,6 +3807,12 @@ test "syscall: sys_futex wait re-checks the user word, sleeps, wakes, and times 
     // Word mismatch -> EAGAIN without blocking (the kernel re-check).
     futex_word[0] = 1;
     try std.testing.expectEqual(error_result(.eagain), dispatch(sys_futex, .{ 0, word_va, 0, 0, 0, 0 }, &frame));
+    try std.testing.expect(!scheduler.is_blocked(2));
+
+    // Review finding 1: the post-seat re-check is authoritative. A false
+    // re-check (a peer stored the word in the fast-compare-to-seat window)
+    // clears the seat and reports word_changed instead of parking forever.
+    try std.testing.expectEqual(scheduler.FutexWaitOutcome.word_changed, scheduler.futex_wait_current(pid, word_va, 0, 0, futex_never_matches));
     try std.testing.expect(!scheduler.is_blocked(2));
 
     // Word holds the expected value -> the task BLOCKS (successor staged);
@@ -3856,4 +3905,48 @@ test "syscall: sys_thread creates a same-process task and op 1 exits only the th
     try std.testing.expectEqual(@as(u64, 0), dispatch(sys_exit, .{ 7, 0, 0, 0, 0, 0 }, &exit2));
     try std.testing.expect(process.info(pid).?.state == .exited);
     try std.testing.expectEqual(@as(u64, 7), process.info(pid).?.exit_status);
+}
+
+test "syscall: mmap is process-scope — a post-spawn mapping reaches a thread (ADR 0027 review finding 2)" {
+    mmu.reset();
+    alloc.reset_refcounts();
+    process.init();
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0);
+    scheduler.start();
+    // spawn_thread allocates its EL1 kstack from the physical pool (the
+    // fixture's identity-mapped host buffer).
+    var thread_test_ram: [64 * 4096]u8 align(4096) = undefined;
+    const map_desc = [_]memmap.MemoryDescriptor{
+        .{ .type = .conventional_memory, .physical_start = @intFromPtr(&thread_test_ram), .virtual_start = 0, .number_of_pages = 64, .attribute = 0 },
+    };
+    const view = memmap.MapView.init(std.mem.asBytes(&map_desc), @sizeOf(memmap.MemoryDescriptor), map_desc.len);
+    try std.testing.expect(alloc.init(view, &.{}));
+
+    var frame = fresh_frame();
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+
+    // Thread FIRST: its TCB region snapshot predates the mapping below —
+    // exactly the case the old per-TCB registration missed.
+    const tid = dispatch(sys_thread, .{ 0, userspace.text_va + 4, 0x7000_0000, 0, 0, 0 }, &frame);
+    try std.testing.expect(tid < scheduler.max_tasks);
+    const thread_id: usize = @intCast(tid);
+
+    // ...then the primary maps. Arm from the THREAD: the process-scope
+    // merge must make the new mapping visible even though the thread's own
+    // TCB copy never saw it.
+    const va = dispatch(sys_mmap, .{ 0, 4096, 3, 0x22, 0, 0 }, &frame);
+    try std.testing.expect(va >= 0x1000_0000);
+    var spins: usize = 0;
+    while (scheduler.current_id() != thread_id and spins < 8) : (spins += 1) {
+        try std.testing.expect(scheduler.yield_current());
+    }
+    try std.testing.expectEqual(thread_id, scheduler.current_id());
+    syscall.arm_task_regions();
+    try std.testing.expect(uaccess.read_region_covers(va, 8));
 }

@@ -933,7 +933,14 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     // (fallback) boot skips the rebuild and keeps the fixed stack —
     // behavior unchanged there.
     if (csprng.seeded()) {
-        if (exec.rebuild_user_root(user_text.base, user_text.len, scheduler.user_stack_phys(), user_stack.len)) |aslr| {
+        // Issue #1214 review (boot-payload hang): map the WHOLE .userbss
+        // SECTION, not the `user_stack` array — the linker may place
+        // `user_timer_preemptions` (or padding) before the array, and both
+        // the user-root mapping and `bss_user_va`'s arithmetic are
+        // section-relative. Passing the array's physical address shifted
+        // the mapping by one page: the payload's witness VA resolved to
+        // the zeroed stack page and it never observed a preemption.
+        if (exec.rebuild_user_root(user_text.base, user_text.len, user_stack.base, user_stack.len)) |aslr| {
             uart_puts("aslr: boot user stack=");
             uart_hex(aslr.stack_va);
             uart_puts("\n");

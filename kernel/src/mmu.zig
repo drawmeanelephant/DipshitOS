@@ -557,6 +557,12 @@ fn split_block_view(desc: u64) ?*align(4096) [512]u64 {
     return pages;
 }
 
+/// A zero source table for aperture slots the identity tree does not cover
+/// (issue #1214 review): user apertures may sit ABOVE the 4 GiB identity
+/// blanket, where the source has no entry — the clone still has to build
+/// the walk to the page level or the aperture is silently unmapped.
+const empty_table: [512]u64 = [_]u64{0} ** 512;
+
 /// Recursively clone the identity tree (rooted at `src`, covering
 /// [va_base, va_base + 512 << shift(level))) into a fresh per-task root,
 /// overriding the user apertures' pages with EL0 leaves. Every other leaf
@@ -564,8 +570,12 @@ fn split_block_view(desc: u64) ?*align(4096) [512]u64 {
 /// cloned kernel overlay keeps the kernel reachable under the user root
 /// while denying EL0 any access to kernel RAM, firmware, or MMIO. Blocks
 /// that straddle a user aperture are split so the override reaches the
-/// page level. Must run BEFORE `install_identity_map` (the table allocator
-/// stores physical addresses; pre-install `@intFromPtr` is identity).
+/// page level. Aperture slots the SOURCE cannot reach (above the identity
+/// blanket) are built from `empty_table` instead of skipped — an
+/// unmapped-at-EL0 aperture otherwise reads as demand-filled zeros, the
+/// go-args-era boot-payload witness hang. Must run BEFORE
+/// `install_identity_map` (the table allocator stores physical addresses;
+/// pre-install `@intFromPtr` is identity).
 fn clone_into_user_root_apertures(
     src: *const [512]u64,
     level: u8,
@@ -578,7 +588,6 @@ fn clone_into_user_root_apertures(
     var i: usize = 0;
     while (i < 512) : (i += 1) {
         const desc = src[i];
-        if (desc == 0) continue;
         const slot_va = va_base + @as(u64, i) * slot_bytes;
         const slot_end = slot_va + slot_bytes;
         var matching_ap: ?UserAperture = null;
@@ -591,8 +600,12 @@ fn clone_into_user_root_apertures(
         const hits_user = (matching_ap != null);
         if (hits_user and level < 3) {
             // The slot intersects a user aperture: the clone must descend
-            // to the page level, splitting a covering block if needed.
-            const child_src: *const [512]u64 = if ((desc & 3) == 3)
+            // to the page level, splitting a covering block if needed, and
+            // building the walk from an empty source when the identity
+            // tree has no entry here (above the blanket).
+            const child_src: *const [512]u64 = if (desc == 0)
+                &empty_table
+            else if ((desc & 3) == 3)
                 table_entry(&src[i]) orelse return null
             else
                 split_block_view(desc) orelse return null;
@@ -605,6 +618,8 @@ fn clone_into_user_root_apertures(
             const pa = ap.phys + (slot_va - ap.va_start);
             const normal = (pa & ~@as(u64, 0xfff)) | attr_bits(.normal, true);
             dst[i] = user_leaf(normal, ap.writable, ap.executable) orelse return null;
+        } else if (desc == 0) {
+            continue; // no source entry and no aperture here
         } else if ((desc & 3) == 3 and level < 3) {
             const child = clone_into_user_root_apertures(table_entry(&src[i]) orelse return null, level + 1, slot_va, apertures) orelse return null;
             dst[i] = @intFromPtr(child) | 3;
@@ -817,6 +832,25 @@ test "mmu: build_user_root returns a fresh root per call (per-process roots)" {
     try std.testing.expect(tables_used() > 0);
     try std.testing.expect(tables_used() <= tables_capacity());
     try std.testing.expect(tables_used() < tables_capacity() / 2); // headroom for the boot-time static payload
+}
+
+test "mmu: an aperture above the identity blanket still gets EL0 leaves (issue #1214 review)" {
+    reset();
+    // The boot identity tree covers only the low 4 GiB blanket, and the
+    // host tree is empty — so an aperture above the blanket has NO source
+    // slot to clone. The pre-fix builder skipped those slots silently and
+    // EL0 reads fell through to demand-filled zero pages (the boot-payload
+    // witness spin never saw a preemption). The aperture must be built
+    // from an empty source all the way down to the page level.
+    const stack_va: u64 = identity_blanket_end + 0x1000_0000; // above the blanket
+    const stack_pa: u64 = 0x0000_0000_0500_0000;
+    const root = build_user_root(userspace.text_va, 0x1000, 64, stack_va, stack_pa, 3 * 4096).?;
+    const stats = walk_leaves(root);
+    // text (1 page) + the full 3-page stack aperture.
+    try std.testing.expectEqual(@as(usize, 4), stats.el0_leaves);
+    const leaf = get_user_leaf(root, stack_va + 4096).?;
+    try std.testing.expectEqual(stack_pa + 4096, leaf.* & 0x0000_ffff_ffff_f000);
+    try std.testing.expectEqual(@as(u64, 1), (leaf.* >> 6) & 3); // EL0 RW
 }
 
 test "mmu: user leaves are page-local W^X and reject Device mappings" {

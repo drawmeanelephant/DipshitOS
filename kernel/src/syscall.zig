@@ -789,6 +789,23 @@ pub fn arm_task_regions() void {
             _ = uaccess.add_write_region(.{ .base = r.base, .len = r.len });
         }
     }
+    // ADR 0027 review finding 2: mmap regions are PROCESS-scope. The TCB
+    // extras above carry only the task's exec shapes; every mapped region
+    // lives once on the process and is merged here, so a mapping made by
+    // one M is visible to every other M of the process even when it lands
+    // after that M's task was created (the old per-TCB registration missed
+    // exactly that case). Capacity: 2 base + exec extras (<= 5) +
+    // max_mmap_regions (16) fits the 26-slot per-core lists — the A1
+    // tests pin the arithmetic, and the add_* false branch would mean
+    // configuration drift.
+    if (process.find_by_task(scheduler.current_id())) |pid| {
+        var i: usize = 0;
+        while (i < process.max_mmap_regions) : (i += 1) {
+            const r = process.mmap_region_at(pid, i) orelse continue;
+            if ((r.prot & 1) != 0) _ = uaccess.add_read_region(.{ .base = r.base_va, .len = r.len });
+            if ((r.prot & 2) != 0) _ = uaccess.add_write_region(.{ .base = r.base_va, .len = r.len });
+        }
+    }
 }
 
 pub fn handle_svc(frame: *exceptions.VectorFrame, immediate: u16) bool {
@@ -1970,24 +1987,45 @@ fn handle_futex(args: Args, frame: *exceptions.VectorFrame) u64 {
     if ((uaddr & 3) != 0) return error_result(.einval); // the wait word is 4-byte aligned
     switch (op) {
         0 => {
-            // Kernel-verified compare: read the 4-byte user word through
-            // the caller's own uaccess window.
+            // Fast path: verify the word and validate the pointer through
+            // the caller's own uaccess window. The authoritative re-check
+            // runs inside futex_wait_current AFTER the seat is visible
+            // (review finding 1) — this first read alone has a
+            // store-then-wake lost-wake window.
             var word: [4]u8 = undefined;
             if (uaccess.copy_in(&word, uaddr, 4) != .ok) return error_result(.efault);
-            if (std.mem.readInt(u32, &word, .little) != @as(u32, @truncate(val))) return error_result(.eagain);
+            const expected: u32 = @truncate(val);
+            if (std.mem.readInt(u32, &word, .little) != expected) return error_result(.eagain);
             const deadline = futex_deadline_tick(timeout_ns);
-            if (!scheduler.futex_wait_current(pid, uaddr, deadline)) return error_result(.einval);
-            // The task blocked and has been re-selected: the wake/timeout
-            // patched x0 in THIS saved frame (0 = woken, -ETIMEDOUT on
-            // expiry) — read it back so the value returns exactly once.
-            return exceptions.frame_read(frame, 0);
+            return switch (scheduler.futex_wait_current(pid, uaddr, expected, deadline, futex_word_matches)) {
+                // The task blocked and has been re-selected: the wake/timeout
+                // patched x0 in THIS saved frame (0 = woken, -ETIMEDOUT on
+                // expiry) — read it back so the value returns exactly once.
+                .blocked => exceptions.frame_read(frame, 0),
+                // A word that changed under the seat is the Linux re-check
+                // contract; a full seat table or a rotation refusal is
+                // transient too — both EAGAIN, the caller loops and re-reads.
+                .word_changed, .unavailable => error_result(.eagain),
+            };
         },
         1 => {
-            const n = @max(val, 1);
-            return scheduler.futex_wake(pid, uaddr, @intCast(@min(n, scheduler.futex_max)));
+            // Linux semantics: n == 0 wakes nobody.
+            const n = @min(val, scheduler.futex_max);
+            return scheduler.futex_wake(pid, uaddr, @intCast(n));
         },
         else => return error_result(.einval),
     }
+}
+
+/// The re-check `futex_wait_current` runs under sched_lock after seating
+/// the waiter: read the 4-byte user word through the same uaccess window
+/// the fast path used (the callback keeps the scheduler free of a uaccess
+/// import). False means a peer's store landed in the compare-to-seat
+/// window — the caller returns EAGAIN and re-reads.
+fn futex_word_matches(uaddr: u64, val: u32) bool {
+    var word: [4]u8 = undefined;
+    if (uaccess.copy_in(&word, uaddr, 4) != .ok) return false;
+    return std.mem.readInt(u32, &word, .little) == val;
 }
 
 /// Milestone 14 (claim 0169): slot 38 — sys_clipboard_set(buf_ptr, len)
@@ -2646,42 +2684,16 @@ fn handle_mmap(args: Args, _: *exceptions.VectorFrame) u64 {
     // arena trims wiped the live EL0 stack (the go-args boot flake).
     if (process.mmap_collides(pid, va, aligned_len)) return error_result(.einval);
 
-    const task_id = scheduler.current_id();
-    // Issue #1163 A1: the mapping is only usable if its uaccess regions
-    // fit the task's TCB (the module lists are re-armed from the TCB at
-    // every SVC and sized to match). Pre-check so a mapping is never
-    // created half-registered — the silent alternative was mmap'd memory
-    // that EFAULTs on the next syscall.
-    const need_read: usize = if ((prot & 1) != 0) 1 else 0;
-    const need_write: usize = if ((prot & 2) != 0) 1 else 0;
-    if (!scheduler.has_task_region_capacity(task_id, need_read, need_write)) return error_result(.enomem);
-
+    // ADR 0027 review finding 2: uaccess visibility for mappings is
+    // PROCESS-scope. The region is registered once on the process and
+    // arm_task_regions merges it into every task's uaccess view at each SVC
+    // entry — so a mapping is visible to every M of the process, including
+    // mappings made after a thread was created (the old per-TCB
+    // registration missed exactly those; sys_mmap added the region to the
+    // CALLING task only). The process registry (max_mmap_regions = 16) is
+    // the only capacity gate; a full table refuses LOUDLY here rather than
+    // half-registering (issue #1163 A1's rule).
     if (!process.add_mmap_region(pid, va, aligned_len, prot, flags)) return error_result(.enomem);
-
-    // Register the region in BOTH places uaccess reads from: the transient
-    // module lists and the task TCB extras. handle_svc re-arms uaccess from
-    // the current task's TCB at EVERY svc entry, so a region only in the
-    // module lists (the historical sys_mmap behavior) vanishes before the
-    // next syscall — kernel copy_in/copy_out of mmap'd memory (e.g. the zc
-    // dialect file round trip, Z2a issue #756) then EFAULTs. exec.zig has
-    // always done both; sys_mmap only did the transient side. The adds
-    // cannot fail past the pre-check above (same task, same tick).
-    if ((prot & 2) != 0) {
-        if (!uaccess.add_write_region(.{ .base = va, .len = aligned_len }) or
-            !scheduler.add_task_write_region(task_id, .{ .base = va, .len = aligned_len }))
-        {
-            _ = process.remove_mmap_region(pid, va, aligned_len);
-            return error_result(.enomem);
-        }
-    }
-    if ((prot & 1) != 0) {
-        if (!uaccess.add_read_region(.{ .base = va, .len = aligned_len }) or
-            !scheduler.add_task_read_region(task_id, .{ .base = va, .len = aligned_len }))
-        {
-            _ = process.remove_mmap_region(pid, va, aligned_len);
-            return error_result(.enomem);
-        }
-    }
 
     // MAP_POPULATE (eager allocation)
     if ((flags & 0x8000) != 0) {
