@@ -183,12 +183,12 @@ pub const AddrSpace = struct {
     /// User VA of the gap-layout rodata segment (issue #1214): recorded so
     /// `mmap_collides` can protect it like text/data/stack. 0 = none.
     ro_va: u64 = 0,
-    /// User VA one-past the gap layout's packed argv block in the writable
-    /// segment's reserved tail page (issue #1214 review; 0 = no block).
-    /// `mmap_collides` protects the data aperture through this end: when
-    /// the data segment's `mem_size` is exactly page-aligned the argv block
-    /// starts ON the otherwise-excluded headroom page, and the sbrk heap
-    /// must not swallow it.
+    /// User VA one-past the gap layout's packed argv+envp region in the
+    /// writable segment's reserved tail page (issue #1214 review / #1226;
+    /// 0 = no block). `mmap_collides` protects the data aperture through
+    /// this end: when the data segment's `mem_size` is exactly page-aligned
+    /// the argv/envp blocks start ON the otherwise-excluded headroom page,
+    /// and the sbrk heap must not swallow them.
     argv_end_va: u64 = 0,
     /// Physical shared library staging/heap pages (claim 7921).
     lib_phys: u64 = 0,
@@ -418,9 +418,9 @@ pub fn mmap_region_at(pid: usize, index: usize) ?MmapRegion {
 /// data segment's `+1` page) is deliberately EXCLUDED — the GOOS=virelai
 /// sbrk heap starts at `memRound(firstmoduledata.end)`, which lands on that
 /// page by design, and nothing else the image needs lives in it. The packed
-/// argv block is the exception: `mmap_collides` extends the data aperture
-/// through `argv_end_va` precisely because an exactly page-aligned
-/// `mem_size` puts the block ON the excluded page (issue #1214 review).
+/// argv+envp region is the exception: `mmap_collides` extends the data
+/// aperture through `argv_end_va` precisely because an exactly page-aligned
+/// `mem_size` puts the block ON the excluded page (issue #1214 review / #1226).
 fn aperture_span(base: u64, byte_len: u64) u64 {
     if (base == 0) return 0;
     return (byte_len + 4095) & ~@as(u64, 4095);
@@ -431,10 +431,10 @@ pub fn mmap_collides(pid: usize, va: u64, len: u64) bool {
     const space = &processes[pid].addr_space;
     const start = va;
     const end = va + len;
-    // Protect the data aperture through the packed argv block, not just to
-    // the page-rounded image end: on an exactly page-aligned `mem_size` the
-    // block starts at the headroom page and the sbrk break would otherwise
-    // swallow it.
+    // Protect the data aperture through the packed argv+envp region, not
+    // just to the page-rounded image end: on an exactly page-aligned
+    // `mem_size` the block starts at the headroom page and the sbrk break
+    // would otherwise swallow it.
     var data_len = aperture_span(space.data_va, space.data_len);
     if (space.argv_end_va > space.data_va) data_len = @max(data_len, space.argv_end_va - space.data_va);
     const apertures = [_]struct { base: u64, len: u64 }{

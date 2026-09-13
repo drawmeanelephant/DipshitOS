@@ -49,7 +49,7 @@ of them with `just verify-vz`.
 
 | kind | id | runs / asserts | spec header |
 |---|---|---|---|
-| spec | `go-args` | 1 run / 4 assert | go-args.spec -- issue #1163 B2 (phase 0b round 1): raw-ELF exec argv. |
+| spec | `go-args` | 1 run / 7 assert | go-args.spec -- issue #1163 B2 (phase 0b round 1) + issue #1226 envp half. |
 | spec | `go-goroutines` | 1 run / 8 assert | go-goroutines.spec -- ADR 0027 D6 (issue #1214 round 2): the phase-0b |
 | spec | `go-hello` | 1 run / 8 assert | go-hello.spec -- issue #1163, GOOS=virelai phase 0a: the gc Go runtime |
 | spec | `live-addrspaces` | 1 run / 11 assert | live-addrspaces.spec -- per-task user address spaces on VZ hardware: |

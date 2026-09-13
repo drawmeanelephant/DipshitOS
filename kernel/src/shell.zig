@@ -353,6 +353,32 @@ const EnvEntry = struct {
 pub var env_table: [env_max]EnvEntry = undefined;
 pub var env_count: usize = 0;
 
+/// Issue #1226: format the kernel env table as KEY=VALUE slices for the
+/// gap-path exec envp block. Lives in BSS so the slices outlive this
+/// call; `exec.set_envp` copies them again into its own storage.
+var exec_envp_buf: [exec_mod.max_exec_envs][exec_mod.env_slot_bytes]u8 = undefined;
+var exec_envp_ptr: [exec_mod.max_exec_envs][]const u8 = undefined;
+
+fn arm_exec_envp() void {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < env_count and n < exec_mod.max_exec_envs) : (i += 1) {
+        const e = &env_table[i];
+        const slot = &exec_envp_buf[n];
+        @memset(slot, 0);
+        const nl = e.name_len;
+        const vl = e.val_len;
+        if (nl == 0 or nl + 1 >= exec_mod.env_slot_bytes) continue;
+        @memcpy(slot[0..nl], e.name[0..nl]);
+        slot[nl] = '=';
+        const take = @min(vl, exec_mod.env_slot_bytes - 1 - nl - 1);
+        if (take > 0) @memcpy(slot[nl + 1 ..][0..take], e.val[0..take]);
+        exec_envp_ptr[n] = slot[0 .. nl + 1 + take];
+        n += 1;
+    }
+    exec_mod.set_envp(exec_envp_ptr[0..n]);
+}
+
 /// M19 P4: shell function storage (8 functions × 4 commands × 64 chars).
 const FuncEntry = struct {
     name: [func_name_max]u8 = [_]u8{0} ** func_name_max,
@@ -3405,6 +3431,7 @@ fn shell_handle_expanded(mon: *monitor.Monitor, line: []const u8) void {
     // a launch that produced a NEW pid becomes a tracked job; anything
     // else consumed the flag without one.
     const pid_before = exec_mod.last_exec_pid();
+    if (std.mem.eql(u8, argv[0], "exec")) arm_exec_envp();
     const exec_err = monitor.exec(mon, argv);
     set_exit_code(exec_error_code(exec_err));
     if (bg_pending) {

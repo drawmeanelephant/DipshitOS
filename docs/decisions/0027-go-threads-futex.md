@@ -116,12 +116,13 @@ first.
 - Unblocks 0c (fault delivery) and phase 2 (netpoll needs wakeable Ms;
   sysmon needs a thread — both assume this ADR).
 - The task pool (11) bounds GOMAXPROCS: a Go program's Ms + every other
-  process's task share the pool; `GOMAXPROCS` env cannot be set (no env
-  until argv/envp env half lands) so the runtime defaults to
-  `numCPUStartup` — phase 0b sets it to 1 in `osinit` still, with sysmon
-  + template thread as the only extra Ms (2-3 tasks per Go process);
-  multi-P comes with the envp half or a `GOMAXPROCS` default bump in
-  `osinit`, decided at implementation review.
+  process's task share the pool. **Issue #1226 (envp half):** the kernel
+  shell `set`/`export` table is packed onto the gap-path exec as a bounded
+  envp block, so `GOMAXPROCS=N` in the environment now overrides the
+  default at `schedinit`. `numCPUStartup` stays **2** in `osinit`
+  (D6 — two vCPUs); there is no osinit default bump. Multi-P stress
+  (`GOMAXPROCS=1` serial, `GOMAXPROCS=2` default, higher N within the
+  task-pool bound) is an env choice, not a rebuild.
 - Slots 73/74 land as ADR 0007 amendments (append-only; 72 is taken by
   #1166's getrandom, implemented_count 73 → 75).
 

@@ -1,18 +1,24 @@
-// GOOS=virelai argv proof (issue #1163 B2, phase 0b round 1).
+// GOOS=virelai argv + envp proof (issue #1163 B2, issue #1226 envp half).
 //
-// os is not ported until phase 2, so the fixture reads the argument vector
-// through the runtime's VirelaiArgs accessor (function linkname — the same
-// state os.Args will expose once os lands). Proves the whole chain: exec
-// argv packing in the gap loader, the rt0 SysV conversion, args to
-// argslice — end to end.
+// os is not ported until phase 2, so the fixture reads the argument and
+// environment vectors through the runtime's VirelaiArgs / VirelaiEnvs
+// accessors (function linknames — the same state os.Args / os.Environ
+// will expose once os lands). Proves the whole chain: exec argv+envp
+// packing in the gap loader, the rt0 SysV conversion, args/envs slices,
+// and the GOMAXPROCS env override — end to end.
 package main
 
 import (
 	_ "unsafe"
+
+	"runtime"
 )
 
 //go:linkname goargs runtime.VirelaiArgs
 func goargs() []string
+
+//go:linkname goenvs runtime.VirelaiEnvs
+func goenvs() []string
 
 func main() {
 	args := goargs()
@@ -21,6 +27,14 @@ func main() {
 		out += " [" + a + "]"
 	}
 	println(out)
+
+	envs := goenvs()
+	eout := "go-args env n=" + itoa(len(envs))
+	for _, e := range envs {
+		eout += " [" + e + "]"
+	}
+	println(eout)
+	println("go-args procs=" + itoa(runtime.GOMAXPROCS(0)))
 }
 
 // itoa: the fixture's only dependency-free positive-int formatter (one
