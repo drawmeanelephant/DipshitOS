@@ -108,7 +108,7 @@ pub const slot_count: usize = 128;
 /// slot 71 is sys_tty_net_auth; M51 SSH-P1 (#1166, ADR 0025 D5):
 /// slot 72 is sys_getrandom. `implemented_count` is the number of
 /// registered rows (rows 0..implemented_count-1).
-pub const implemented_count: usize = 73;
+pub const implemented_count: usize = 75;
 /// Card G6 (claim 0487) follow-on (slot 18): the fixed `sys_win_get` shape —
 /// four u32 LE words (x, y, w, h), 16 bytes, marshaled per call and copy_out'd
 /// through uaccess (the procs snapshot pattern).
@@ -344,6 +344,12 @@ pub const net_auth_op_verdict: u64 = 2;
 /// seed rather than adding a second entropy syscall. Registered but never
 /// called on the boot path (ADR 0025 D9).
 pub const sys_getrandom: u64 = 72;
+// ADR 0027 (ACCEPTED 2026-09-12, issue #1214 round 2): slots 73/74 — the
+// GOOS=virelai thread + futex seam. Op-based: sys_thread(op, ...), op 0
+// create / op 1 exit; sys_futex(op, uaddr, val, timeout_ns), op 0 wait /
+// op 1 wake(n). See the ADR 0007 amendment + ADR 0027 D3/D4.
+pub const sys_thread: u64 = 73;
+pub const sys_futex: u64 = 74;
 /// The fixed per-call fill cap of slot 72 (ADR 0025 D5: "capped at a bounded
 /// maximum"). 256 matches `write_cap` — enough for an ephemeral X25519
 /// secret (32 B), a KEXINIT cookie (16 B), or a burst of per-packet padding,
@@ -402,6 +408,9 @@ pub const ErrorCode = enum(i64) {
     enametoolong = -8,
     enxio = -9, // "no such device" — the sys_audio_* seam's honest no-device refusal
     enomem = -10, // "out of memory"
+    // ADR 0007 amendment (2026-09-12, issue #1214 round 2 — slots 73/74):
+    eagain = -11, // futex wait: the user word no longer holds the expected value
+    etimedout = -12, // futex wait: the ns deadline expired without a wake
 };
 
 pub fn error_result(code: ErrorCode) u64 {
@@ -571,6 +580,9 @@ pub fn ensure_table() *const [slot_count]Entry {
         table_storage[sys_tty_net_auth] = .{ .name = "sys_tty_net_auth", .handler = handle_tty_net_auth };
         // M51 SSH-P1 (#1166, ADR 0025 D5): slot 72 — sys_getrandom.
         table_storage[sys_getrandom] = .{ .name = "sys_getrandom", .handler = handle_getrandom };
+        // ADR 0027 (issue #1214 round 2): slots 73/74 — sys_thread / sys_futex.
+        table_storage[sys_thread] = .{ .name = "sys_thread", .handler = handle_thread };
+        table_storage[sys_futex] = .{ .name = "sys_futex", .handler = handle_futex };
         table_ready = true;
     }
     return &table_storage;
@@ -612,7 +624,7 @@ fn doms_of(number: u64) u5 {
         sys_exec => f | k,
         sys_win_open, sys_win_fill, sys_win_present, sys_win_close, sys_win_move, sys_win_raise, sys_win_get, sys_win_query, sys_win_set_visible, sys_win_fill_batch, sys_win_resize, 48, sys_win_raise_front, sys_win_lower_back, 52, sys_win_set_unsaved, sys_win_set_title, sys_drag_read, sys_font_size => w,
         sys_ipc_send, sys_ipc_recv, sys_poll_event, sys_wait_event, sys_timer_set, sys_timer_cancel, sys_notify, sys_wmctl => e,
-        sys_procs, sys_wait, sys_kill, sys_clipboard_set, sys_clipboard_get, sys_audio_info, sys_audio_play, sys_audio_volume, sys_audio_mute, sys_pipe_read, sys_pipe_write, 54, sys_mmap, sys_munmap, sys_time, sys_tty_attach, sys_principal, sys_secret_get, sys_tty_net_auth, sys_getrandom => k,
+        sys_procs, sys_wait, sys_kill, sys_clipboard_set, sys_clipboard_get, sys_audio_info, sys_audio_play, sys_audio_volume, sys_audio_mute, sys_pipe_read, sys_pipe_write, 54, sys_mmap, sys_munmap, sys_time, sys_tty_attach, sys_principal, sys_secret_get, sys_tty_net_auth, sys_getrandom, sys_thread, sys_futex => k,
         sys_exit => svclock.all_bits,
         else => 0,
     };
@@ -775,6 +787,23 @@ pub fn arm_task_regions() void {
         }
         for (regions.extra_writes[0..regions.extra_write_count]) |r| {
             _ = uaccess.add_write_region(.{ .base = r.base, .len = r.len });
+        }
+    }
+    // ADR 0027 review finding 2: mmap regions are PROCESS-scope. The TCB
+    // extras above carry only the task's exec shapes; every mapped region
+    // lives once on the process and is merged here, so a mapping made by
+    // one M is visible to every other M of the process even when it lands
+    // after that M's task was created (the old per-TCB registration missed
+    // exactly that case). Capacity: 2 base + exec extras (<= 5) +
+    // max_mmap_regions (16) fits the 26-slot per-core lists — the A1
+    // tests pin the arithmetic, and the add_* false branch would mean
+    // configuration drift.
+    if (process.find_by_task(scheduler.current_id())) |pid| {
+        var i: usize = 0;
+        while (i < process.max_mmap_regions) : (i += 1) {
+            const r = process.mmap_region_at(pid, i) orelse continue;
+            if ((r.prot & 1) != 0) _ = uaccess.add_read_region(.{ .base = r.base_va, .len = r.len });
+            if ((r.prot & 2) != 0) _ = uaccess.add_write_region(.{ .base = r.base_va, .len = r.len });
         }
     }
 }
@@ -1883,6 +1912,122 @@ fn handle_getrandom(args: Args, _: *exceptions.VectorFrame) u64 {
     return @intCast(take);
 }
 
+// ---------------------------------------------------------------------------
+// ADR 0027 (ACCEPTED 2026-09-12, issue #1214 round 2): slots 73/74 — the
+// GOOS=virelai thread + futex seam (D3/D4)
+// ---------------------------------------------------------------------------
+
+/// The ns->tick conversion for a futex timeout. The scheduler tick is the
+/// 1 s timer period (ADR 0007 sys_sleep row), so any sub-second timeout
+/// rounds UP to one tick — coarse but honest, and documented in the ADR
+/// 0007 amendment. `timeout_ns == 0` waits forever (Go's semasleep(-1)).
+fn futex_deadline_tick(timeout_ns: u64) u64 {
+    if (timeout_ns == 0) return 0;
+    const ticks = (timeout_ns + timer.period_ns - 1) / timer.period_ns;
+    return scheduler.current_tick() +| @max(ticks, 1);
+}
+
+/// `sys_thread(op, ...)` — slot 73 (ADR 0027 D3). Op 0 = create(entry,
+/// stack_hi, arg, tls): a NEW task bound to the CALLER'S process (same
+/// TTBR0 root, principal inherited, NOT capability-gated — it can only
+/// create work inside the caller's own address space), initial EL0 frame
+/// at the caller-provided stack with x0=arg, pc=entry; returns the new
+/// kernel tid. Op 1 = exit: thread-only teardown (the process dies when
+/// its LAST task exits — `sys_exit` slot 3 stays process-exit). Errors:
+/// EINVAL for an unknown op, a non-process caller, a bad entry (outside
+/// the process's executable aperture), a null/misaligned stack_hi, a
+/// nonzero tls (reserved), or an exhausted task pool / thread bound
+/// (EAGAIN — a transient capacity refusal, the caller may retry).
+fn handle_thread(args: Args, _: *exceptions.VectorFrame) u64 {
+    const op = args[0];
+    const caller = scheduler.current_id();
+    const pid = process.find_by_task(caller) orelse return error_result(.einval);
+    switch (op) {
+        0 => {
+            const entry = args[1];
+            const stack_hi = args[2];
+            const arg = args[3];
+            const tls = args[4];
+            if (tls != 0) return error_result(.einval); // reserved: pure-Go arm64 keeps g in R28
+            if (stack_hi == 0 or (stack_hi & 0xf) != 0) return error_result(.einval);
+            // Entry validation "like exec": the PC must sit inside the
+            // process's executable text aperture.
+            const pinfo = process.info(pid) orelse return error_result(.einval);
+            const text_base = pinfo.text_va;
+            const text_end = text_base + pinfo.text_len;
+            if (entry < text_base or entry >= text_end) return error_result(.einval);
+            return scheduler.spawn_thread(caller, entry, stack_hi, arg) orelse error_result(.eagain);
+        },
+        1 => {
+            // Thread-only exit: the task tears down; the process lives on
+            // unless this was its last task.
+            if (!scheduler.exit_thread_current()) return error_result(.einval);
+            return 0;
+        },
+        else => return error_result(.einval),
+    }
+}
+
+/// `sys_futex(op, uaddr, val, timeout_ns)` — slot 74 (ADR 0027 D4). Op 0 =
+/// wait: the kernel VERIFIES `*uaddr == val` under the caller's uaccess
+/// window (a direct 4-byte user read, no copy), then sleeps the task with
+/// a (pid, uaddr) seat in the bounded BSS wait table. Returns 0 on a real
+/// wake, -ETIMEDOUT when the deadline expires, -EAGAIN when the word no
+/// longer holds `val` (the Linux futex re-check semantics). Op 1 =
+/// wake(n): wake up to `n` waiters of THIS process keyed (pid, uaddr);
+/// returns the number woken. timeout_ns is nanoseconds, rounding UP to the
+/// 1 s scheduler tick; 0 waits forever.
+fn handle_futex(args: Args, frame: *exceptions.VectorFrame) u64 {
+    const op = args[0];
+    const uaddr = args[1];
+    const val = args[2];
+    const timeout_ns = args[3];
+    const caller = scheduler.current_id();
+    const pid = process.find_by_task(caller) orelse return error_result(.einval);
+    if ((uaddr & 3) != 0) return error_result(.einval); // the wait word is 4-byte aligned
+    switch (op) {
+        0 => {
+            // Fast path: verify the word and validate the pointer through
+            // the caller's own uaccess window. The authoritative re-check
+            // runs inside futex_wait_current AFTER the seat is visible
+            // (review finding 1) — this first read alone has a
+            // store-then-wake lost-wake window.
+            var word: [4]u8 = undefined;
+            if (uaccess.copy_in(&word, uaddr, 4) != .ok) return error_result(.efault);
+            const expected: u32 = @truncate(val);
+            if (std.mem.readInt(u32, &word, .little) != expected) return error_result(.eagain);
+            const deadline = futex_deadline_tick(timeout_ns);
+            return switch (scheduler.futex_wait_current(pid, uaddr, expected, deadline, futex_word_matches)) {
+                // The task blocked and has been re-selected: the wake/timeout
+                // patched x0 in THIS saved frame (0 = woken, -ETIMEDOUT on
+                // expiry) — read it back so the value returns exactly once.
+                .blocked => exceptions.frame_read(frame, 0),
+                // A word that changed under the seat is the Linux re-check
+                // contract; a full seat table or a rotation refusal is
+                // transient too — both EAGAIN, the caller loops and re-reads.
+                .word_changed, .unavailable => error_result(.eagain),
+            };
+        },
+        1 => {
+            // Linux semantics: n == 0 wakes nobody.
+            const n = @min(val, scheduler.futex_max);
+            return scheduler.futex_wake(pid, uaddr, @intCast(n));
+        },
+        else => return error_result(.einval),
+    }
+}
+
+/// The re-check `futex_wait_current` runs under sched_lock after seating
+/// the waiter: read the 4-byte user word through the same uaccess window
+/// the fast path used (the callback keeps the scheduler free of a uaccess
+/// import). False means a peer's store landed in the compare-to-seat
+/// window — the caller returns EAGAIN and re-reads.
+fn futex_word_matches(uaddr: u64, val: u32) bool {
+    var word: [4]u8 = undefined;
+    if (uaccess.copy_in(&word, uaddr, 4) != .ok) return false;
+    return std.mem.readInt(u32, &word, .little) == val;
+}
+
 /// Milestone 14 (claim 0169): slot 38 — sys_clipboard_set(buf_ptr, len)
 fn handle_clipboard_set(args: Args, _: *exceptions.VectorFrame) u64 {
     const buf_ptr = args[0];
@@ -2532,43 +2677,23 @@ fn handle_mmap(args: Args, _: *exceptions.VectorFrame) u64 {
     } else {
         va = process.next_mmap_va(pid, aligned_len);
     }
+    // Issue #1214: a mapping may never alias a region the process already
+    // owns (text/rodata/data/STACK apertures or an earlier mmap). The hint
+    // is honored only when it is honest — the GOOS=virelai sbrk heap once
+    // swallowed its own randomized stack aperture here and the runtime's
+    // arena trims wiped the live EL0 stack (the go-args boot flake).
+    if (process.mmap_collides(pid, va, aligned_len)) return error_result(.einval);
 
-    const task_id = scheduler.current_id();
-    // Issue #1163 A1: the mapping is only usable if its uaccess regions
-    // fit the task's TCB (the module lists are re-armed from the TCB at
-    // every SVC and sized to match). Pre-check so a mapping is never
-    // created half-registered — the silent alternative was mmap'd memory
-    // that EFAULTs on the next syscall.
-    const need_read: usize = if ((prot & 1) != 0) 1 else 0;
-    const need_write: usize = if ((prot & 2) != 0) 1 else 0;
-    if (!scheduler.has_task_region_capacity(task_id, need_read, need_write)) return error_result(.enomem);
-
+    // ADR 0027 review finding 2: uaccess visibility for mappings is
+    // PROCESS-scope. The region is registered once on the process and
+    // arm_task_regions merges it into every task's uaccess view at each SVC
+    // entry — so a mapping is visible to every M of the process, including
+    // mappings made after a thread was created (the old per-TCB
+    // registration missed exactly those; sys_mmap added the region to the
+    // CALLING task only). The process registry (max_mmap_regions = 16) is
+    // the only capacity gate; a full table refuses LOUDLY here rather than
+    // half-registering (issue #1163 A1's rule).
     if (!process.add_mmap_region(pid, va, aligned_len, prot, flags)) return error_result(.enomem);
-
-    // Register the region in BOTH places uaccess reads from: the transient
-    // module lists and the task TCB extras. handle_svc re-arms uaccess from
-    // the current task's TCB at EVERY svc entry, so a region only in the
-    // module lists (the historical sys_mmap behavior) vanishes before the
-    // next syscall — kernel copy_in/copy_out of mmap'd memory (e.g. the zc
-    // dialect file round trip, Z2a issue #756) then EFAULTs. exec.zig has
-    // always done both; sys_mmap only did the transient side. The adds
-    // cannot fail past the pre-check above (same task, same tick).
-    if ((prot & 2) != 0) {
-        if (!uaccess.add_write_region(.{ .base = va, .len = aligned_len }) or
-            !scheduler.add_task_write_region(task_id, .{ .base = va, .len = aligned_len }))
-        {
-            _ = process.remove_mmap_region(pid, va, aligned_len);
-            return error_result(.enomem);
-        }
-    }
-    if ((prot & 1) != 0) {
-        if (!uaccess.add_read_region(.{ .base = va, .len = aligned_len }) or
-            !scheduler.add_task_read_region(task_id, .{ .base = va, .len = aligned_len }))
-        {
-            _ = process.remove_mmap_region(pid, va, aligned_len);
-            return error_result(.enomem);
-        }
-    }
 
     // MAP_POPULATE (eager allocation)
     if ((flags & 0x8000) != 0) {
@@ -2691,6 +2816,8 @@ fn handle_mmap_shared(addr: u64, len: u64, prot: u64, flags: u64, pid: usize, pi
         if (aligned_len != @as(u64, r.page_count) * 4096) return error_result(.einval);
         // The peer maps at ITS OWN va in ITS OWN root (ADR 0016 D1).
         const peer_va = process.next_mmap_va(pid, aligned_len);
+        // Issue #1214: a peer mirror may not alias the peer's own regions.
+        if (process.mmap_collides(pid, peer_va, aligned_len)) return error_result(.einval);
         if (!process.add_mmap_region(pid, peer_va, aligned_len, prot, flags)) return error_result(.enomem);
         if (!shared_mmap.map_peer_leaves(pinfo.root_phys, peer_va, r.page_count, r.pa_base)) {
             _ = process.remove_mmap_region(pid, peer_va, aligned_len);
@@ -2712,6 +2839,9 @@ fn handle_mmap_shared(addr: u64, len: u64, prot: u64, flags: u64, pid: usize, pi
     } else {
         va = process.next_mmap_va(pid, aligned_len);
     }
+    // Issue #1214: the same collision rule as the plain path — a shared
+    // surface may not alias the owner's own apertures/regions.
+    if (process.mmap_collides(pid, va, aligned_len)) return error_result(.einval);
     const cs = owner_create_shared_surface(pid, pinfo, va, aligned_len, prot, flags);
     return switch (cs) {
         .ok => |o| o.va,

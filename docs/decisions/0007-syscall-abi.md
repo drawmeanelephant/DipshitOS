@@ -1092,3 +1092,61 @@ contract, the no-capability gate, the table/count pin at 73, the boot-path
 call-counter-still-zero check, and the extended `syscalls` report rows) and
 the existing class-B fleet stays green; the EL0 entropy end-to-end proof
 rides SSH2's fresh-KEX-key proof (no new spec, per `docs/ssh-scoping.md`).
+
+### Amendment (2026-09-12, #1214 round 2 — slots 73/74 `sys_thread` / `sys_futex`, ADR 0027 D3/D4)
+
+The GOOS=virelai thread card (ADR 0027, ACCEPTED 2026-09-12) adds the M:N
+seam as **two op-based slots**, following the repo's op-selector convention
+(sys_wmctl cmd, sys_tty_net_auth op). Both are **kernel-domain** syscalls,
+not capability-gated: a thread can only create work inside the caller's own
+address space.
+
+**Slot 73 — `sys_thread(op, ...)`**
+
+| op | Signature | Behavior | Errors |
+|----|-----------|----------|--------|
+| 0 | `thread_create(entry, stack_hi, arg, tls)` | Allocates a task bound to the CALLER'S process (same TTBR0 root, principal inherited, per-task EL1 kstack + uaccess TCB copy), arms the initial EL0 frame at the caller-provided `stack_hi` with `x0 = arg`, `pc = entry`, and joins the unpinned ready ring (claim-9498 SMP placement). The task NAME is the process name. Returns the new kernel tid (`>= 0`). | `EINVAL`: unknown op, non-process caller, `tls != 0` (reserved — pure-Go arm64 keeps g in R28), `stack_hi == 0` or not 16-byte aligned, `entry` outside the process's executable text aperture. `EAGAIN`: task pool or per-process thread bound exhausted (transient; the caller may retry). |
+| 1 | `thread_exit()` | Tears down the CALLING TASK only: zombie → reap frees the thread's own EL1 kstack. **The process dies when its LAST task exits**; `sys_exit` (slot 3) stays process-exit — it requests the whole process (the first request snapshots the reported status) and arms the sibling tasks' kill conversion, force-waking blocked ones. No join (Go joins via channels); `sys_wait` keeps waiting on process exit only. | `EINVAL`: non-process caller or an inactive pool. |
+
+**Slot 74 — `sys_futex(op, uaddr, val, timeout_ns)`**
+
+| op | Signature | Behavior | Errors |
+|----|-----------|----------|--------|
+| 0 | `futex_wait(uaddr, val, timeout_ns)` | Kernel-VERIFIED compare: the 4-byte little-endian user word at `uaddr` is read through the caller's uaccess window; a mismatch returns immediately. On a match the task sleeps with a seat in the bounded BSS wait table keyed `(pid, uaddr)` (`max_tasks` entries, flat scan). The word is re-checked AFTER the seat is visible and under the scheduler lock (PR #1221 review — closes the store-then-wake lost-wake window); a failed re-check clears the seat. Returns 0 on a real wake; **`-ETIMEDOUT`** when the deadline expires — distinct from a wake; `-EAGAIN` on a mismatched word. Thread death while waiting removes the seat and performs one `wake(1)` (the Go `exitThread` contract expects the woken peer to re-check the word). | `EINVAL`: non-process caller or a misaligned `uaddr`. `EFAULT`: the word read fails the uaccess window. `EAGAIN`: word != `val`, the bounded wait table is full, or the rotation could not stage a successor (all transient — the caller re-reads). `ETIMEDOUT`: deadline expired. |
+| 1 | `futex_wake(uaddr, n)` | Wakes up to `n` waiters of the CALLER'S process keyed `(pid, uaddr)`; each woken task's syscall returns 0. Returns the number woken. | `EINVAL`: non-process caller or a misaligned `uaddr`. |
+
+**`timeout_ns` unit: nanoseconds**, rounding UP to whole scheduler ticks
+(the 1 s timer period — a sub-second timeout waits one tick);
+`timeout_ns == 0` waits forever.
+
+**New error codes** (the D3 table's bounded -1..-10 namespace extends
+append-only; no existing code changes):
+
+| Value | Name | Meaning |
+|-------|------|---------|
+| -11 | `EAGAIN` | Futex wait: the user word no longer holds the expected value. |
+| -12 | `ETIMEDOUT` | Futex wait: the nanosecond deadline expired without a wake. |
+
+**Mmap-hint collision refusal (issue #1214 root cause).** The same round
+tightens `sys_mmap` (slot 63): a mapping whose range overlaps the caller's
+own text/rodata/data/STACK apertures or any earlier mmap region is refused
+with `EINVAL` — the hint is honored only when honest. This is the guard the
+go-args boot flake lacked: the GOOS=virelai sbrk heap reserved ~1.2 GiB
+contiguously upward from the image end, the claim-2665 ASLR stack band
+started at 0x1000_0000, and the runtime's arena trims then `memclr`'d the
+live EL0 stack for ~54% of placements. The ASLR band itself moved above the
+heap's practical ceiling (`[0x1_0000_0000, 0x2_0000_0000)`, csprng.zig — a
+kernel-internal choice, no ABI change), so the refusal is the honest
+backstop, not the expected path. The data aperture's collision bound
+excludes the gap layout's defensive argv-headroom page: the sbrk heap starts
+at `memRound(firstmoduledata.end)`, which lands on that page by design.
+
+`implemented_count` becomes **75** (rows 0–74; reserved 75–127). No existing
+number, argument, result, or error code changes. Verified class-A (the
+thread lifecycle: same-process bind, thread-only exit, process death at the
+last task with the requested status snapshot; the futex
+mismatch/sleep/wake/timeout contract; the table/count pin at 75; the mmap
+collision refusals — stack/text/overlap refused, adjacency allowed) and
+class-B (`go-goroutines`: N=8 goroutines > GOMAXPROCS=2, `sys_thread`
+calls >= 2, `sys_futex` parked, `task=GOROUT.ELF` on a secondary core in
+the `smp` report; `go-hello`/`go-args` unchanged and green).

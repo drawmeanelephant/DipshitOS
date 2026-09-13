@@ -48,7 +48,7 @@ PY
 vgate_assert 01 python <<'PY'
 import os, re, sys
 lines = open(os.environ["VG_SER"], errors="replace").read().splitlines()
-rows = [l for l in lines if re.search(r"procs: id=[0-9]+ name=USER.BIN state=running", l)]
+rows = [l for l in lines if re.search(r"procs: id=[0-9]+ name=USER.BIN uid=\d+ caps=\d+ state=running", l)]
 if len(rows) != 4:
     sys.exit("FAIL: running USER.BIN rows=%d, want 4" % len(rows))
 tasks, stacks = [], []

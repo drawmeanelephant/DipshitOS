@@ -88,7 +88,9 @@ const wm_server = @import("wm_server.zig");
 // Arc5 issue #243: crash tombstone recording — written in the exit path
 // when status is 139 (fault) or non-zero unexpected exits. Pure BSS
 // writes, safe in the exception context `exit_current` runs in.
+const alloc = @import("alloc.zig");
 const tombstone = @import("tombstone.zig");
+const symbol = @import("symbol.zig");
 const serial_ring = @import("serial_ring.zig"); // Arc5 #243: serial snapshot for tombstones
 const virtio_file = @import("virtio_file.zig"); // Arc5 #243: tombstone write through the host file channel (HF6: the DATA partition is gone)
 const smp = @import("smp.zig");
@@ -289,8 +291,80 @@ const Task = struct {
     /// a secondary core's pick requires pin_core == its own id (plus
     /// `secondary_ok`). `exec -c<core>` sets this via `pin_task`.
     pin_core: usize = 0,
+    /// ADR 0027 D3: this task is a THREAD of its process (created via
+    /// `sys_thread` op 0), not the exec'd creator. Its EL1 exception stack
+    /// is pool-allocated per thread and freed at this task's own reap.
+    is_thread: bool = false,
+    thread_kstack_phys: u64 = 0,
+    thread_kstack_pages: u64 = 0,
+    /// ADR 0027 D4: this blocked task is parked in `sys_futex` wait — the
+    /// wake path patches its saved frame x0 (0 = real wake, the ETIMEDOUT
+    /// errno on expiry) and clears its futex-table seat.
+    futex_waiting: bool = false,
 };
 pub var tasks: [max_tasks]Task = [_]Task{.{}} ** max_tasks;
+
+// ---------------------------------------------------------------------------
+// Futex wait table (ADR 0027 D4, issue #1214 round 2)
+// ---------------------------------------------------------------------------
+
+/// Bounded BSS wait table keyed (pid, uaddr) — the same shape as the
+/// pipe/event seams, flat scan (max_tasks entries; no hash table at 11
+/// slots). `sys_futex` op 0 inserts the calling task; op 1 and the exit
+/// path remove/wake.
+pub const futex_max: usize = max_tasks;
+const FutexEntry = struct {
+    used: bool = false,
+    pid: usize = 0,
+    uaddr: u64 = 0,
+    task: usize = 0,
+};
+var futex_table: [futex_max]FutexEntry = [_]FutexEntry{.{}} ** futex_max;
+
+fn futex_entry_clear(entry: *FutexEntry) void {
+    if (!entry.used) return;
+    if (entry.task < max_tasks) {
+        tasks[entry.task].futex_waiting = false;
+    }
+    entry.* = .{};
+}
+
+/// The (pid, uaddr) seat a task held in the futex wait table.
+pub const FutexSeat = struct { pid: usize, uaddr: u64 };
+
+/// Remove the calling task's futex seat, if any (exit path bookkeeping).
+/// Returns the (pid, uaddr) it was waiting on so the exit path can perform
+/// the wake-on-thread-death one-wake (ADR 0027 D4).
+fn futex_clear_for(task_id: usize) ?FutexSeat {
+    for (&futex_table) |*e| {
+        if (e.used and e.task == task_id) {
+            const out = FutexSeat{ .pid = e.pid, .uaddr = e.uaddr };
+            futex_entry_clear(e);
+            return out;
+        }
+    }
+    return null;
+}
+
+/// Wake up to `n` waiters keyed (pid, uaddr): clear their seats, patch each
+/// saved frame's x0 with `result` (0 for a real wake), and re-home them to
+/// the ready rings. Returns the number woken. Caller holds sched_lock.
+fn futex_wake_locked(pid: usize, uaddr: u64, n: usize, result: u64) usize {
+    var woken: usize = 0;
+    for (&futex_table) |*e| {
+        if (woken >= n) break;
+        if (!e.used or e.pid != pid or e.uaddr != uaddr) continue;
+        const tid = e.task;
+        futex_entry_clear(e);
+        if (tid >= max_tasks or tasks[tid].state != .blocked) continue;
+        tasks[tid].state = .ready;
+        const frame: *exceptions.VectorFrame = @ptrFromInt(tasks[tid].sp);
+        _ = exceptions.frame_write(frame, 0, result);
+        push_home_locked(tid);
+        woken += 1;
+    }
+    return woken;
+}
 
 // ---------------------------------------------------------------------------
 // Per-core ready rings (claim 881 / issue #856)
@@ -668,7 +742,7 @@ var reap_report_count: usize = 0;
 /// as the exit-report rings — a busy drain window could silently lose the
 /// oldest `fault:` line while `live-exceptions` asserts specific ones.
 pub const fault_report_max: usize = 8;
-const FaultEntry = struct { name: []const u8, far: u64, ec: u64, pc: u64 = 0 };
+const FaultEntry = struct { name: []const u8, far: u64, ec: u64, pc: u64 = 0, esr: u64 = 0 };
 var fault_reports: [fault_report_max]FaultEntry = [_]FaultEntry{.{ .name = "", .far = 0, .ec = 0 }} ** fault_report_max;
 var fault_report_head: usize = 0;
 var fault_report_count: usize = 0;
@@ -729,6 +803,7 @@ pub fn init() usize {
     user_timer_preemptions = 0;
     tick_count = 0;
     for (&tasks) |*task| task.* = .{};
+    for (&futex_table) |*e| e.* = .{};
     // Claim 3848: every pool reset also clears the process layer (the
     // boot path initializes both here; host tests get isolation). Card 3f
     // (claim 5965): the IPC mailbox rings reset with it. Card E1 (claim 7670):
@@ -768,6 +843,23 @@ pub fn init() usize {
 pub fn spawn(name: []const u8, entry: u64, spsr: u64, stack: []u8, ttbr0: u64, sp_el0: u64) ?usize {
     sched_lock_acquire();
     defer sched_lock_release();
+    const id = alloc_task_locked(name, entry, spsr, stack, ttbr0, sp_el0) orelse return null;
+    tasks[id].state = .ready;
+    // Claim 881 slice 1: the new task joins its home ring (ring 0 for the
+    // any-core default; `pin_task` re-homes it when `exec -c<core>` pins).
+    // Slice 3: the push takes the home ring's lock (we hold sched_lock).
+    push_home_locked(id);
+    return id;
+}
+
+/// `spawn` internals: claim the first free pool slot and build the
+/// synthetic frame, leaving the task OFF the ready rings in `.blocked` so
+/// a caller with more TCB fields to set (the ADR 0027 thread path) can
+/// finish before any core can select it. `spawn` publishes immediately;
+/// `spawn_thread` publishes after its process bind. Caller holds
+/// sched_lock (which also keeps `wake_expired` from touching the not-yet-
+/// published `.blocked` slot: every tick path takes sched_lock).
+fn alloc_task_locked(name: []const u8, entry: u64, spsr: u64, stack: []u8, ttbr0: u64, sp_el0: u64) ?usize {
     var id: usize = 0;
     while (id < max_tasks) : (id += 1) {
         if (tasks[id].state == .free) break;
@@ -780,12 +872,8 @@ pub fn spawn(name: []const u8, entry: u64, spsr: u64, stack: []u8, ttbr0: u64, s
         .spsr = spsr,
         .sp_el0 = sp_el0,
         .ttbr0 = ttbr0,
-        .state = .ready,
+        .state = .blocked,
     };
-    // Claim 881 slice 1: the new task joins its home ring (ring 0 for the
-    // any-core default; `pin_task` re-homes it when `exec -c<core>` pins).
-    // Slice 3: the push takes the home ring's lock (we hold sched_lock).
-    push_home_locked(id);
     task_count += 1;
     return id;
 }
@@ -933,16 +1021,6 @@ pub fn add_task_write_region(id: usize, reg: userspace.Region) bool {
     return false;
 }
 
-/// Issue #1163 A1: can the task's TCB absorb `reads` more read and
-/// `writes` more write regions? sys_mmap pre-checks this so a mapping is
-/// never created half-registered (the mapping exists but syscalls cannot
-/// see it — the silent-EFAULT bug class).
-pub fn has_task_region_capacity(id: usize, reads: usize, writes: usize) bool {
-    if (id >= max_tasks) return false;
-    return tasks[id].regions.extra_read_count + reads <= tasks[id].regions.extra_reads.len and
-        tasks[id].regions.extra_write_count + writes <= tasks[id].regions.extra_writes.len;
-}
-
 /// Claim 0826: the pool has at least one free slot (the exec gate — a new
 /// program may load and run while another is alive; only the fixed pool
 /// bounds how many). The exec path checks this BEFORE allocating pages or
@@ -1016,7 +1094,7 @@ pub fn fault_current(esr: u64, far: u64, pc: u64) void {
         fault_report_count -= 1;
     }
     const idx = (fault_report_head + fault_report_count) % fault_report_max;
-    fault_reports[idx] = .{ .name = name, .far = far, .ec = ec, .pc = pc };
+    fault_reports[idx] = .{ .name = name, .far = far, .ec = ec, .pc = pc, .esr = esr };
     fault_report_count += 1;
     // Arc5 issue #246: if the process has a memory limit and it's exceeded,
     // use status 140 (mem_limit) instead of 139 (guard page).
@@ -1032,13 +1110,6 @@ pub fn fault_current(esr: u64, far: u64, pc: u64) void {
 /// entry so `sys_write` bounds always follow the task that issued the call.
 pub fn current_user_regions() UserRegions {
     return tasks[current[smp.core_id()]].regions;
-}
-
-/// Physical address of the static user stack pages (claim 6783: the boot
-/// payload's stack — exec'd programs now own allocator-backed stack pages
-/// instead, claim 0826). Identity on host tests.
-pub fn user_stack_phys() u64 {
-    return mmu.to_phys(@intFromPtr(&user_stack));
 }
 
 pub fn register_user(entry: u64, image_base: u64) ?usize {
@@ -1345,7 +1416,7 @@ fn convert_kill(c: usize, lk: RingLockPair, next: usize) void {
     tasks[next].kill_pending = false;
     const status = tasks[next].kill_pending_status;
     tasks[next].kill_pending_status = reserved_kill_status; // back to the request_kill default
-    _ = exit_current_locked(status);
+    _ = exit_current_locked(status, true);
 }
 
 pub fn switch_context(frame_sp: u64, elr: u64, spsr: u64, sp_el0: u64) void {
@@ -1555,6 +1626,151 @@ pub fn wait_current(target_pid: usize) bool {
     return true;
 }
 
+/// ADR 0027 D3 (issue #1214 round 2): create a THREAD task of the CALLER's
+/// process — `sys_thread` op 0. The new task shares the caller's process
+/// (same TTBR0 root, principal, mailbox), starts with pc=`entry`, x0=`arg`,
+/// SP_EL0=`stack_hi` (a caller-provided EL0 stack — Go passes
+/// `mp.g0.stack.hi`), and a COPY of the caller's uaccess TCB regions (new
+/// Ms syscall — sys_write/mmap/futex — and must see the same regions).
+/// Unpinned: SMP placement follows the unpinned exec rule (claim 9498).
+/// The task NAME is the process name so the monitor `smp` report and fault
+/// lines attribute threads to their program. Returns the new kernel tid
+/// (Go stores it in `m.procid`); null when the pool or thread bound is
+/// exhausted or the kstack allocation fails.
+pub fn spawn_thread(
+    caller_task: usize,
+    entry: u64,
+    stack_hi: u64,
+    arg: u64,
+) ?usize {
+    if (caller_task >= max_tasks) return null;
+    const pid = process.find_by_task(caller_task) orelse return null;
+    const pinfo = process.info(pid) orelse return null;
+    if (pinfo.state != .running) return null;
+    if (!process.has_thread_capacity(pid)) return null;
+    if (stack_hi == 0 or (stack_hi & 0xf) != 0) return null;
+    const kstack_pages: u64 = (task_stack_size + alloc.page_size - 1) / alloc.page_size;
+    const kstack_phys = alloc.alloc_pages(kstack_pages) orelse return null;
+    const kstack: []u8 = @as([*]u8, @ptrFromInt(kstack_phys))[0..task_stack_size];
+    const name = pinfo.name;
+    // The whole build is one sched_lock hold: the task stays off-ring
+    // (`.blocked`, unpublished) until its TCB fields, region copy, and
+    // process bind are all in place — no core can select a half-built
+    // thread, and the undo path mutates the pool under the same lock.
+    sched_lock_acquire();
+    const id = alloc_task_locked(name, entry, spsr_el0t_irqs, kstack, pinfo.root_phys, stack_hi) orelse {
+        sched_lock_release();
+        _ = alloc.free_pages(kstack_phys, kstack_pages);
+        return null;
+    };
+    _ = exceptions.frame_write(@ptrFromInt(tasks[id].sp), 0, arg);
+    tasks[id].secondary_ok = true; // unpinned: any core may take it
+    tasks[id].is_thread = true;
+    tasks[id].thread_kstack_phys = kstack_phys;
+    tasks[id].thread_kstack_pages = kstack_pages;
+    // Exec shapes only; process-scope mmap regions are merged at arm time
+    // (ADR 0027 review finding 2).
+    tasks[id].regions = tasks[caller_task].regions;
+    if (!process.bind_thread(pid, id)) {
+        // The descriptor bound is full or racing: undo under the lock.
+        tasks[id] = .{};
+        task_count -%= 1;
+        sched_lock_release();
+        _ = alloc.free_pages(kstack_phys, kstack_pages);
+        return null;
+    }
+    tasks[id].state = .ready;
+    push_home_locked(id);
+    sched_lock_release();
+    return id;
+}
+
+/// ADR 0027 D4 + review finding 1: block the calling task in `sys_futex`
+/// op 0. The syscall layer runs a fast-path compare under the caller's
+/// uaccess window, but the authoritative re-check runs HERE — after the
+/// `(pid, uaddr)` seat is visible and still under sched_lock — closing the
+/// lost-wake window where a peer's store + wake lands between the fast
+/// compare and the seat insertion (the wake would find no waiter and
+/// `semasleep(-1)` would park forever). `word_matches` reads the 4-byte
+/// word through the same uaccess window; the callback keeps uaccess out of
+/// the scheduler. Returns `.blocked` on a real park (the waker/timeout
+/// patches the saved frame's x0), `.word_changed` when the re-check failed
+/// (the caller returns EAGAIN), and `.unavailable` for an inactive
+/// scheduler, a bad task state, a full seat table, or no successor (also
+/// EAGAIN — transient; the caller re-reads).
+pub const FutexWaitOutcome = enum { blocked, word_changed, unavailable };
+
+pub fn futex_wait_current(
+    pid: usize,
+    uaddr: u64,
+    val: u32,
+    deadline_tick: u64,
+    word_matches: *const fn (uaddr: u64, val: u32) bool,
+) FutexWaitOutcome {
+    const c = smp.core_id();
+    if (!scheduling_active() or task_count == 0 or current[c] == idle_id) return .unavailable;
+    const waiting = current[c];
+    // Seat the (pid, uaddr) entry BEFORE blocking — a waker on another core
+    // (or the tick, for a deadline already in the past) must find it.
+    var seat: ?*FutexEntry = null;
+    for (&futex_table) |*e| {
+        if (!e.used) {
+            seat = e;
+            break;
+        }
+    }
+    const entry = seat orelse return .unavailable;
+    sched_lock_acquire();
+    if (tasks[waiting].state != .ready and tasks[waiting].state != .running) {
+        sched_lock_release();
+        return .unavailable;
+    }
+    entry.* = .{ .used = true, .pid = pid, .uaddr = uaddr, .task = waiting };
+    tasks[waiting].futex_waiting = true;
+    // Finding 1: re-check AFTER the seat is visible, under the same lock
+    // the waker takes. A peer that stored the word and called wake before
+    // this point either found the seat (and will wake us) or its store is
+    // visible to this read (and we bail to the caller's re-read).
+    if (!word_matches(uaddr, val)) {
+        futex_entry_clear(entry);
+        sched_lock_release();
+        return .word_changed;
+    }
+    const pc = current_exception_pc();
+    tasks[waiting].sp = exceptions.resume_frame[c];
+    tasks[waiting].elr = pc.elr;
+    tasks[waiting].spsr = pc.spsr;
+    tasks[waiting].sp_el0 = exceptions.resume_sp_el0[c];
+    tasks[waiting].saves += 1;
+    _ = ring_remove_anywhere(waiting);
+    tasks[waiting].state = .blocked;
+    tasks[waiting].wakeup_tick = deadline_tick;
+    sched_lock_release();
+    if (!claim_and_stage(c, waiting)) {
+        if (stage_secondary_park(c)) return .blocked;
+        // No successor: roll back (the always-ready idle task makes this
+        // unreachable in a normal boot; kept as a defensive bound).
+        sched_lock_acquire();
+        tasks[waiting].state = .ready;
+        tasks[waiting].futex_waiting = false;
+        tasks[waiting].wakeup_tick = 0;
+        tasks[waiting].saves -%= 1;
+        sched_lock_release();
+        futex_entry_clear(entry);
+        return .unavailable;
+    }
+    apply_pending();
+    return .blocked;
+}
+
+/// ADR 0027 D4: `sys_futex` op 1 — wake up to `n` waiters of THIS process
+/// keyed (pid, uaddr). Returns the number woken.
+pub fn futex_wake(pid: usize, uaddr: u64, n: usize) usize {
+    sched_lock_acquire();
+    defer sched_lock_release();
+    return futex_wake_locked(pid, uaddr, n, 0);
+}
+
 /// Milestone 9 (claim 1016): block the calling task until an application event
 /// arrives for process `pid`, then stage its successor. Rewinds ELR by 4
 /// so when the task wakes up, it re-executes `svc #0` under its own context.
@@ -1669,7 +1885,27 @@ fn wake_expired() void {
         // Card 4c / Card E5: event-blocked tasks (`sys_wait` / `sys_wait_event` —
         // no deadline) are woken by their event hooks, never by the tick clock.
         if (tasks[i].wait_pid != null or tasks[i].wait_event_pid != null) continue;
+        if (tasks[i].futex_waiting and tasks[i].wakeup_tick == 0) continue; // wait forever
         if (tick_count < tasks[i].wakeup_tick) continue;
+        // ADR 0027 D4: an expired FUTEX deadline is a TIMED-OUT wait — the
+        // syscall returns -ETIMEDOUT (a distinct negative from a real wake,
+        // which futex_wake_locked patches as 0) and the seat clears.
+        if (tasks[i].futex_waiting) {
+            for (&futex_table) |*e| {
+                if (e.used and e.task == i) {
+                    const tid = e.task;
+                    futex_entry_clear(e);
+                    if (tid < max_tasks and tasks[tid].state == .blocked) {
+                        tasks[tid].state = .ready;
+                        const frame: *exceptions.VectorFrame = @ptrFromInt(tasks[tid].sp);
+                        _ = exceptions.frame_write(frame, 0, futex_timed_out_result);
+                        push_home_locked(tid);
+                    }
+                    break;
+                }
+            }
+            continue;
+        }
         tasks[i].state = .ready;
         tasks[i].wakeup_tick = 0;
         // Claim 881 slice 2: the woken task joins its home ring (ring 0
@@ -1679,6 +1915,10 @@ fn wake_expired() void {
         push_home_locked(i);
     }
 }
+
+/// The ETIMEDOUT errno (ADR 0007 amendment) a futex wait reports on expiry —
+/// the D4 contract: a timed-out wait is distinct from a real wake.
+pub const futex_timed_out_result: u64 = @bitCast(@as(i64, -12));
 
 /// Host-testable tick seam (mirrors `timer.on_tick`): advance the tick
 /// counter and run the timer-driven wakeups. Called by the real `tick`
@@ -1733,7 +1973,48 @@ pub fn exit_current(status: u64) bool {
     // nothing); the fault path does not.
     const taken = svclock.acquire_missing(svclock.all_bits);
     defer svclock.release_set(taken);
-    return exit_current_locked(status);
+    return exit_current_locked(status, true);
+}
+
+/// ADR 0027 D2 (issue #1214 round 2): exit the calling task WITHOUT
+/// requesting the process's death — `sys_thread` op 1. The process dies
+/// only when its LAST task exits (via on_task_exit's live-task count);
+/// every OTHER exit shape (sys_exit, fault, kill) requests the whole
+/// process. Futex wake-on-thread-death applies to both shapes (D4).
+pub fn exit_thread_current() bool {
+    const taken = svclock.acquire_missing(svclock.all_bits);
+    defer svclock.release_set(taken);
+    return exit_current_locked(0, false);
+}
+
+/// Arm the kill conversion on every LIVE sibling task of `pid` (the
+/// process-exit request path). Blocked siblings are force-woken to ready so
+/// the conversion can happen at their next selection instead of parking
+/// forever on a dead process. Caller holds `sched_lock`.
+fn arm_sibling_kills_locked(pid: usize, except_task: usize) void {
+    var i: usize = 0;
+    while (i < max_tasks) : (i += 1) {
+        if (i == except_task or i == idle_id) continue;
+        if (process.find_by_task(i) != pid) continue;
+        switch (tasks[i].state) {
+            .ready, .running => {
+                tasks[i].kill_pending = true;
+            },
+            .blocked => {
+                // Review minor: clear the futex seat, not just the flag —
+                // a leaked seat can fill the bounded table across several
+                // sibling deaths and fail a later wait. No wake: every
+                // same-process peer is being killed here anyway.
+                _ = futex_clear_for(i);
+                tasks[i].kill_pending = true;
+                tasks[i].state = .ready;
+                tasks[i].wait_pid = null;
+                tasks[i].wait_event_pid = null;
+                push_home_locked(i);
+            },
+            else => {},
+        }
+    }
 }
 
 /// Ring-exit core: mark the calling task zombie, run the teardown under
@@ -1744,8 +2025,10 @@ pub fn exit_current(status: u64) bool {
 /// a core-1 exit can no longer stall core-0's rotation (the claim-9498
 /// live flake this slice fixes). Callers hold every service-domain bit
 /// (exit_current's acquire_missing; the kill conversions' try_take) and
-/// NO sched_lock.
-fn exit_current_locked(status: u64) bool {
+/// NO sched_lock. `process_exit` selects the ADR 0027 D2 shape: true
+/// (sys_exit/fault/kill) requests the WHOLE process and arms sibling
+/// kills; false (sys_thread op 1) tears down only this task.
+fn exit_current_locked(status: u64, process_exit: bool) bool {
     const c = smp.core_id(); // per-core current
     // Brief sched_lock: validate, the zombie mark, and the exit report.
     // The mark must be atomic against the idle reaper's scan, and
@@ -1772,6 +2055,20 @@ fn exit_current_locked(status: u64) bool {
     tasks[exiting].teardown_pending = true;
     queue_exit_report(name, status);
     exits +%= 1;
+    // ADR 0027 D4: a dying task leaves its futex seat with one wake on the
+    // (pid, uaddr) — Go's exitThread contract expects the woken peer to
+    // re-check the user word, which the wake enables.
+    if (futex_clear_for(exiting)) |seat| {
+        _ = futex_wake_locked(seat.pid, seat.uaddr, 1, 0);
+    }
+    // ADR 0027 D2: a process-exit request arms the live siblings' kill
+    // conversion (and force-wakes blocked ones) so the process's tasks all
+    // terminate instead of lingering on a dying address space.
+    if (process_exit) {
+        if (process.request_process_exit(exiting, status)) |pid| {
+            arm_sibling_kills_locked(pid, exiting);
+        }
+    }
     sched_lock_release();
     // Arc5 issue #243: record a tombstone for fault exits (status 139)
     // or any non-zero unexpected exit. The tombstone is written to /data/crash/
@@ -1928,6 +2225,10 @@ pub fn reap(id: usize) bool {
         sched_lock_release();
         return false;
     }
+    // ADR 0027 D3: a thread task's EL1 exception stack is its OWN allocation
+    // (not the process descriptor's) — record it before the slot reset.
+    const thread_kstack_phys = tasks[id].thread_kstack_phys;
+    const thread_kstack_pages = tasks[id].thread_kstack_pages;
     // Claim 881: the freed slot leaves its ring BEFORE the reset (the
     // exit path already dropped it — this remove is the defensive net).
     _ = ring_remove_anywhere(id);
@@ -1935,6 +2236,9 @@ pub fn reap(id: usize) bool {
     task_count -%= 1;
     sched_lock_release();
     _ = process.release_pages_on_reap(id);
+    if (thread_kstack_phys != 0 and thread_kstack_pages > 0) {
+        _ = alloc.free_pages(thread_kstack_phys, thread_kstack_pages);
+    }
     return true;
 }
 
@@ -2087,7 +2391,7 @@ pub fn tick() void {
             tasks[current[c]].kill_pending = false;
             const status = tasks[current[c]].kill_pending_status;
             tasks[current[c]].kill_pending_status = reserved_kill_status; // back to the request_kill default
-            _ = exit_current_locked(status); // tick holds all five; exit takes sched_lock itself
+            _ = exit_current_locked(status, true); // tick holds all five; exit takes sched_lock itself
             return;
         }
     }
@@ -2407,14 +2711,26 @@ pub fn maybe_report(con: *console.Console) void {
     }
     // Milestone sixteen C2 (claim 8403): drain the EL0 fault FIFO IN ORDER
     // before the exit reports, so a `fault:` line precedes its
-    // `exited status=139` consequence in the serial log.
+    // `exited status=139` consequence in the serial log. Issue #1214: the
+    // line carries the faulting PC + raw ESR too — the tombstone's anchor
+    // facts surfaced on serial (the crash/ file needs the host file
+    // channel, which class-B gate boots don't attach), plus the symbol
+    // note when the exec'd image's symtab names the PC (M22 D3).
     while (fault_report_count > 0) {
         const entry = fault_reports[fault_report_head];
         fault_report_head = (fault_report_head + 1) % fault_report_max;
         fault_report_count -= 1;
-        var buf: [160]u8 = undefined;
-        const line = std.fmt.bufPrint(&buf, "fault: {s} far=0x{x:0>16} ec=0x{x}\n", .{ entry.name, entry.far, entry.ec }) catch continue;
+        var buf: [256]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "fault: {s} far=0x{x:0>16} ec=0x{x} pc=0x{x:0>16} esr=0x{x:0>16}", .{ entry.name, entry.far, entry.ec, entry.pc, entry.esr }) catch continue;
         con.puts(line);
+        const hit = if (entry.pc != 0) symbol.lookup(entry.pc) else null;
+        if (hit) |m| {
+            var nbuf: [96]u8 = undefined;
+            const note = std.fmt.bufPrint(&nbuf, " (in {s}+0x{x})\n", .{ m.name, m.offset }) catch "\n";
+            con.puts(note);
+        } else {
+            con.puts("\n");
+        }
     }
     // Card 3d (claim 1014): drain the task exit report FIFO IN ORDER — N
     // exits in one window print N `tasks <name> exited status=<n>` lines.
@@ -2509,6 +2825,12 @@ pub fn task_info(id: usize) ?TaskInfo {
         .pin_core = tasks[id].pin_core,
         .secondary_ok = tasks[id].secondary_ok,
     };
+}
+
+/// ADR 0027 D4: the current tick counter (the futex deadline arithmetic
+/// lives in the syscall layer, which owns the ns unit).
+pub fn current_tick() u64 {
+    return tick_count;
 }
 
 pub fn current_id() usize {

@@ -19,10 +19,11 @@
 # HOST PREREQUISITE (not hermetic — see tools/go/README.md):
 # `just go-toolchain` must have produced .build/go/GOARGS.ELF + GOHELLO.ELF.
 #
-# exec-order: assert-proven -- the run cannot go green without the program's
-# own output (`go-args n=3 [GOARGS.ELF] [alpha] [beta]`), so `echo
-# go-args-done` is not what proves it ran. Same residual risk as go-hello:
-# a flaky FAIL on a loaded host, never a false pass (tools/gate/SPEC.md).
+# exec-order: assert-proven -- the run's --script-expect IS the program's
+# own output (`go-args n=3 ...`), so a green run always proves the exec'd
+# program ran; there is no script-echo race (the go-hello/go-args echo
+# waits were removed after one live flake — a flaky FAIL on a loaded host,
+# never a false pass, tools/gate/SPEC.md).
 #
 # Note: the go-args fixture asserts the program NAME too — argv[0] is the
 # exec'd file, matching the Go convention.
@@ -31,9 +32,9 @@ vgate_name go-args "issue #1163 B2: raw-ELF exec argv -> Go os.Args chain on VZ"
 vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 
+# Same race fix as go-hello: wait on the program's own output line.
 vgate_file script.txt <<'EOF'
 exec GOARGS.ELF alpha beta
-echo go-args-done
 EOF
 
 vgate_setup_python <<'PY'
@@ -49,7 +50,7 @@ for name in ("GOARGS.ELF", "GOHELLO.ELF"):
 print("staged GOARGS.ELF + GOHELLO.ELF into share")
 PY
 
-vgate_run 01 -- --script '$RUN_DIR/script.txt' --script-expect 'go-args-done' --timeout 120
+vgate_run 01 -- --script '$RUN_DIR/script.txt' --script-expect 'go-args n=3' --timeout 120
 
 vgate_assert 01 serial-contains 'exec: loaded GOARGS.ELF'
 vgate_assert 01 serial-contains 'go-args n=3'

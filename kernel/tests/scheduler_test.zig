@@ -803,11 +803,14 @@ test "scheduler: an EL0 fault reaps the task with status 139 and reports it" {
     try std.testing.expectEqual(@as(usize, idle_id), current_id());
     try std.testing.expect(is_terminated(2));
     try std.testing.expectEqual(@as(?u64, reserved_fault_status), terminated_status(2));
-    var mock = console.MockConsole(128){};
+    var mock = console.MockConsole(256){};
     var con = mock.console();
     maybe_report(&con);
     try std.testing.expectEqualStrings(
-        "fault: user-el0 far=0x000000007ffff000 ec=0x24\n" ++
+        // Issue #1214: the fault line surfaces the tombstone's anchor facts
+        // (PC + raw ESR); this fixture PC resolves to no symbol, so the line
+        // ends without a symbol note.
+        "fault: user-el0 far=0x000000007ffff000 ec=0x24 pc=0x0000000000004000 esr=0x0000000090000000\n" ++
             "tasks user-el0 exited status=139\n" ++
             "procs user-el0 exited status=139\n",
         mock.contents(),

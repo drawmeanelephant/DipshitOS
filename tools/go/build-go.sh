@@ -58,8 +58,9 @@ for prog in "${@:-$REPO/tools/go/hello.go}"; do
     # .build/go/GOHELLO.ELF / GOARGS.ELF into the guest share, so `just
     # go-toolchain` must land those exact names (GO_BUILD_NAME overrides).
     case "$base" in
-        hello)  base="GOHELLO" ;;
-        goargs) base="GOARGS" ;;
+        hello)      base="GOHELLO" ;;
+        goargs)     base="GOARGS" ;;
+        goroutines) base="GOROUT" ;;
     esac
     out="$out_dir/${GO_BUILD_NAME:-$base}.ELF"
     log "building $prog -> $out"

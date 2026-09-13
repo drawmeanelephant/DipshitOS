@@ -12,7 +12,7 @@ Upstream Go has no third-party-GOOS mechanism (golang/go#35956 declined
 `GOOS=none`; golang/go#73608's `GOOSPKG` overlay proposal is still open).
 Every non-POSIX port (Fuchsia, TamaGo, IBM z/OS) is a maintained fork
 tracking each release. The maintenance surface here is deliberately tiny:
-**6 file edits + 5 new GOOS-gated files**; everything else is stock.
+**5 file edits + 5 new GOOS-gated files** (the sixth edit — proc.go's phase-0a thread gates — retired in 0b round 2, ADR 0027); everything else is stock.
 
 ## Layout
 
@@ -25,7 +25,7 @@ tracking each release. The maintenance surface here is deliberately tiny:
 | `overlay/internal/goos/zgoos_virelai.go` | generated GOOS consts (gengoos shape, hand-applied) |
 | `apply.sh` | copies a stock distribution + applies everything, idempotently, committing a git delta in the fork |
 | `build-go.sh` | runs the host make.bash pass on first use (the cross-std pass is `GOVIRELAI_STD=1` opt-in for phase 2), then links programs with `-ldflags "-s -w"` at the Go default base (the gap loader maps at declared vaddrs; stripped to fit the 2 MiB exec staging bound) |
-| `GOHELLO.GO` | the phase-0a first target: console + sbrk heap growth + a full GC cycle |
+| `hello.go` / `goargs.go` / `goroutines.go` | the class-B fixtures: console + sbrk heap growth + a full GC cycle; raw-ELF argv; goroutines + futex + the cross-core proof |
 
 ## Prerequisites
 
@@ -37,14 +37,15 @@ tracking each release. The maintenance surface here is deliberately tiny:
 
 ```bash
 bash tools/go/apply.sh            # create/patch the fork (../go-virelai)
-bash tools/go/build-go.sh         # toolchain + .build/go/GOHELLO.ELF
-                                   # (go-args needs both: add tools/go/goargs.go)
-just gate go-hello                # class-B VZ gate: execs it, asserts serial
+just go-toolchain                  # builds .build/go/{GOHELLO,GOARGS,GOROUT}.ELF
+just gate go-hello                 # class-B VZ gate: execs it, asserts serial
+just gate go-args                  # class-B VZ gate: raw-ELF argv
+just gate go-goroutines            # class-B VZ gate: threads/futex + cross-core
 ```
 
-**The go-hello gate is not hermetic**: `just verify-vz` includes it, and it
-refuses to run (honest setup failure) until
-`bash tools/go/build-go.sh` has produced `.build/go/GOHELLO.ELF`. The first
+**The Go-runtime gates are not hermetic**: `just verify-vz` includes them,
+and each refuses to run (honest setup failure) until
+`just go-toolchain` has produced its `.build/go/*.ELF` fixture. The first
 build takes several minutes (one `make.bash` pass; the cross-std pass is
 phase-2 opt-in via `GOVIRELAI_STD=1`); every Go release
 rebase re-runs `apply.sh` on a fresh distribution copy. Auto-building the
@@ -57,14 +58,24 @@ or `GO_FORK_DIR` to move it) — it is a build artifact; this directory is
 the reviewable patch series. `GOTOOLCHAIN=local` is exported by
 `build-go.sh` so cmd/go can never silently swap back to a stock toolchain.
 
-## Phase map (issue #1163)
+## Phase map (issue #1163 / #1194)
 
-- **0a (this)**: single-thread, no sysmon (one `proc.go` delta), sbrk
-  memory, no signals, cooperative preemption only. Kernel side: 3-segment
-  gap-layout ELF loader, mmap cap lifts, `sys_getrandom` (slot 72, M51 #1166), FPEN
-  armed.
-- **0b**: kernel slots 73/74 (`thread_create`, futex — 72 is `sys_getrandom`, #1166) + exec argv/envp →
-  drop the haveSysmon delta, real threads, `GOMAXPROCS > 1`.
+- **0a**: single-thread, no sysmon (one `proc.go` delta), sbrk memory, no
+  signals, cooperative preemption only. Kernel side: 3-segment gap-layout
+  ELF loader, mmap cap lifts, `sys_getrandom` (slot 72, M51 #1166), FPEN
+  armed. Landed #1187/#1196.
+- **0b (this round, #1214)**: kernel slots 73/74 (`sys_thread`/`sys_futex`,
+  ADR 0027) — **every `proc.go` delta is retired** (`patch_proc.py` is
+  deleted; proc.go is byte-identical to upstream), newosproc maps Ms onto
+  same-process kernel tasks, lock_sema parks on the futex,
+  `numCPUStartup = 2`, exec argv on the gap path. The gate is
+  `go-goroutines` (N=8 goroutines > GOMAXPROCS=2, `sys_thread` calls >= 2,
+  the cross-core `task=GOROUT.ELF` smp proof). Round 2 also root-caused the
+  go-args boot flake: the sbrk heap reservation (~1.2 GiB) swallowed the old
+  ASLR stack band — the band moved to [0x1_0000_0000, 0x2_0000_0000) and
+  `sys_mmap` now refuses collisions with the caller's own apertures
+  (ADR 0007 amendment).
+- **0b remaining**: exec envp half (a `GOMAXPROCS` env override needs it).
 - **0c**: kernel fault-delivery seam → `sigtrampgo`/`sigpanic` (recover(),
   tracebacks), Fuchsia-exception-channel pattern.
 - **2**: `syscall`/`os` packages over the file channel; real netpoll over

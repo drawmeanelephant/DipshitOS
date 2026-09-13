@@ -88,11 +88,11 @@ if ! head -6 "$F/runtime/lock_sema.go" | grep -q virelai; then
     edits=$((edits+1)); log "patched runtime/lock_sema.go (build tag)"
 fi
 
-# --- 3f. runtime/proc.go: sysmon off for the single-thread phase -------
-if ! have "$F/runtime/proc.go" 'GOARCH != "wasm" && GOOS != "virelai"'; then
-    gsed -i 's|^const haveSysmon = GOARCH != "wasm"$|const haveSysmon = GOARCH != "wasm" \&\& GOOS != "virelai" // issue #1163: phase 0a single-thread; remove with slots 72/73|' "$F/runtime/proc.go"
-    edits=$((edits+1)); log "patched runtime/proc.go (haveSysmon)"
-fi
+# ADR 0027 (ACCEPTED 2026-09-12): the phase-0a proc.go deltas are RETIRED —
+# haveSysmon restores to the upstream form, canCreateM/dolock/dounlock/
+# stopm/newosproc gates are gone, and patch_proc.py is deleted. proc.go is
+# byte-identical to upstream again; threads ride kernel slot 73 and the
+# futex backs lock_sema via os_virelai.go.
 
 # --- 3f2. runtime/tls_arm64.h: the virelai TLS case --------------------
 # Pure-Go arm64 keeps g in R28 (load_g/save_g return immediately for
@@ -110,16 +110,6 @@ if "GOOS_virelai" not in s:
     open(p, "w").write(s)
 PYEOF
     edits=$((edits+1)); log "patched runtime/tls_arm64.h (virelai -> TPIDR_EL0, unused)"
-fi
-
-# --- 3f3. runtime/proc.go: gate the remaining thread-creation paths ----
-# Phase 0a has no kernel thread_create (slot 72, phase 0b): the template
-# thread, startTheWorld's spare-M handoff, and startm's new-M fallback all
-# funnel into newosproc, which throws on virelai. One const carries the
-# fork delta (tools/go/patch_proc.py); it disappears with slot 72/73.
-if ! have "$F/runtime/proc.go" 'canCreateM'; then
-    python3 "$REPO/tools/go/patch_proc.py" "$F/runtime/proc.go"
-    edits=$((edits+1)); log "patched runtime/proc.go (canCreateM thread gates)"
 fi
 
 # --- 3g. exclude virelai from generic-tag files it must not match ------

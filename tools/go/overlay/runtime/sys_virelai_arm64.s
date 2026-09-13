@@ -105,3 +105,72 @@ TEXT runtime·nanotime1(SB),NOSPLIT|NOFRAME,$0-8
 	ADD	R2, R3, R2
 	MOVD	R2, ret+0(FP)
 	RET
+
+// ADR 0027 D3 (phase 0b): the thread seam — slot 73 sys_thread, slot 74
+// sys_futex. One `svc #0` per call: x8 = slot, x0-x5 = args, x0 = result
+// (negative = the kernel's errno; the ADR 0007 amendment adds EAGAIN -11
+// and ETIMEDOUT -12 for the futex).
+//
+// sys_thread(op, entry, stack_hi, arg, tls): op 0 create / op 1 exit.
+// sys_futex(op, uaddr, val, timeout_ns):   op 0 wait / op 1 wake(n).
+
+#define VIR_SYS_THREAD     73
+#define VIR_SYS_FUTEX      74
+
+// func virThreadCreate(entry, stackHi, arg unsafe.Pointer) int — slot 73
+// op 0. Returns the new kernel tid (>= 0) or a negative errno.
+TEXT runtime·virThreadCreate(SB),NOSPLIT|NOFRAME,$0-24
+	MOVD	entry+0(FP), R1
+	MOVD	stackHi+8(FP), R2
+	MOVD	arg+16(FP), R3
+	MOVD	$0, R0            // op 0 = create
+	MOVD	$0, R4            // tls: reserved 0 (pure-Go arm64 keeps g in R28)
+	MOVD	$VIR_SYS_THREAD, R8
+	SVC
+	MOVD	R0, ret+24(FP)
+	RET
+
+// func virThreadExit() — slot 73 op 1, noreturn: thread-only exit (the
+// process dies when its LAST task exits; sys_exit stays process-exit).
+TEXT runtime·virThreadExit(SB),NOSPLIT|NOFRAME,$0-0
+	MOVD	$1, R0            // op 1 = exit
+	MOVD	$VIR_SYS_THREAD, R8
+	SVC
+	JMP	0(PC)             // not reached
+
+// func virFutexWait(uaddr unsafe.Pointer, val uint32, timeoutNs int64) int
+// — slot 74 op 0. The kernel verifies *uaddr == val (4-byte LE) under the
+// caller's uaccess window, parks the task, and returns 0 on a real wake,
+// -EAGAIN on a mismatched word, -ETIMEDOUT on deadline expiry
+// (timeoutNs == 0 waits forever).
+TEXT runtime·virFutexWait(SB),NOSPLIT|NOFRAME,$0-24
+	MOVD	uaddr+0(FP), R1
+	MOVW	val+8(FP), R2
+	MOVD	timeoutNs+16(FP), R3
+	MOVD	$0, R0            // op 0 = wait
+	MOVD	$VIR_SYS_FUTEX, R8
+	SVC
+	MOVD	R0, ret+24(FP)
+	RET
+
+// func virFutexWake(uaddr unsafe.Pointer, n uint32) int — slot 74 op 1.
+// Wakes up to n waiters of the caller's process keyed (pid, uaddr);
+// returns the number woken.
+TEXT runtime·virFutexWake(SB),NOSPLIT|NOFRAME,$0-16
+	MOVD	uaddr+0(FP), R1
+	MOVW	n+8(FP), R2
+	MOVD	$1, R0            // op 1 = wake
+	MOVD	$VIR_SYS_FUTEX, R8
+	SVC
+	MOVD	R0, ret+16(FP)
+	RET
+
+// runtime·virThreadTrampoline — the entry newosproc passes to slot 73
+// op 0. The kernel's child frame starts here with x0 = arg (the new m)
+// and SP_EL0 = stack_hi (mp.g0.stack.hi). Pure-Go arm64 keeps g in R28:
+// load g = mp.g0, then tail-jump mstart, which runs mstart0/mstart1 on
+// this g0 stack exactly like every other GOOS's newosproc child. mstart1
+// records the caller's SP (this g0 stack) via save(getcallersp()).
+TEXT runtime·virThreadTrampoline(SB),NOSPLIT|NOFRAME,$0-0
+	MOVD	m_g0(R0), g
+	B	runtime·mstart(SB)

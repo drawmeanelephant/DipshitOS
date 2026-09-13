@@ -47,7 +47,8 @@ if not m:
     sys.exit("FAIL: no stack=0x<16hex> on user line")
 sv = m.group(1)
 dec = int(sv, 16)
-if not (0x10000000 <= dec < 0x80000000 and dec % 65536 == 0 and sv != "0000000000400000"):
+# issue #1214: the ASLR band moved above the GOOS=virelai sbrk heap ceiling.
+if not (0x1_00000000 <= dec < 0x2_00000000 and dec % 65536 == 0 and sv != "0000000000400000"):
     sys.exit("FAIL: stack VA out of ASLR band/unaliased: %s" % sv)
 m = re.search(r".*el0=([0-9]+).*", ul)
 if not m or int(m.group(1)) < 3:
