@@ -30,7 +30,7 @@
 | `tools/lib/` | 2 | per-run isolation for live gates (`gate-run.sh`) |
 | `tools/status/` | 7 | multiagent coordination gate + claim tooling (class A) |
 | `tools/context/` | 2 | context snapshot helpers |
-| `tools/gate/` | 229 | M40 vgate harness + specs (GF2+) |
+| `tools/gate/` | 230 | M40 vgate harness + specs (GF2+) |
 
 ## Class-B fleet (discovered from the spec dir)
 
@@ -71,6 +71,7 @@ of them with `just verify-vz`.
 | spec | `live-disas` | 1 run / 9 assert | live-disas.spec -- M22 D4: disassemble assembler output on the machine. |
 | spec | `live-dmesg` | 1 run / 4 assert | live-dmesg.spec -- M22 D12: dmesg system log viewer on VZ. |
 | spec | `live-doc` | 3 run / 18 assert | live-doc.spec -- M-web S1: DOC.BIN renders oliver HTML in-guest (issue #1202) |
+| spec | `live-doc-tables` | 1 run / 9 assert | live-doc-tables.spec -- M-web S2: DOC.BIN tables/dl/h4 on-screen (issue #1203) |
 | spec | `live-dynamic-ecosystem` | 5 run / 35 assert | live-dynamic-ecosystem.spec -- Milestone 31 Class-B Gate (claim 4001): |
 | spec | `live-dynamic-linking` | 1 run / 9 assert | live-dynamic-linking.spec -- Milestone 30 Class-B Gate (issue #599, claim 7921): |
 | spec | `live-editing` | 1 run / 13 assert | live-editing.spec -- milestone-eight card U2 class-B gate (claim 1809): |

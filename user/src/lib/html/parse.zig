@@ -1,4 +1,4 @@
-//! VirelaiOS HTML parser (M-web S1, ADR 0028 D3).
+//! VirelaiOS HTML parser (M-web S2, ADR 0028 D3).
 //!
 //! Bytes → a flat node array with parent/child/sibling indices. No pointers,
 //! no allocator, no framebuffer. Caller supplies the node and text arenas.
@@ -9,7 +9,8 @@
 //!   - `pre` and `code`: whitespace is preserved; CR/CRLF become LF
 //!
 //! Unknown elements stay in the tree as `.unknown` so layout can lift their
-//! text in document order (D5 — the fixture's `<table>` must still read).
+//! text in document order (D5). Tables, definition lists, and headings
+//! through h6 are first-class as of S2.
 
 const std = @import("std");
 
@@ -23,18 +24,30 @@ pub const Tag = enum(u8) {
     h1,
     h2,
     h3,
+    h4,
+    h5,
+    h6,
     p,
     br,
     hr,
     ul,
     ol,
     li,
+    dl,
+    dt,
+    dd,
     blockquote,
     pre,
     code,
     strong,
     em,
     a,
+    table,
+    thead,
+    tbody,
+    tr,
+    th,
+    td,
     unknown,
     text,
 };
@@ -74,9 +87,39 @@ pub const Document = struct {
     }
 };
 
+pub fn isHeading(tag: Tag) bool {
+    return switch (tag) {
+        .h1, .h2, .h3, .h4, .h5, .h6 => true,
+        else => false,
+    };
+}
+
 pub fn isBlock(tag: Tag) bool {
     return switch (tag) {
-        .document, .h1, .h2, .h3, .p, .hr, .ul, .ol, .li, .blockquote, .pre => true,
+        .document,
+        .h1,
+        .h2,
+        .h3,
+        .h4,
+        .h5,
+        .h6,
+        .p,
+        .hr,
+        .ul,
+        .ol,
+        .li,
+        .dl,
+        .dt,
+        .dd,
+        .blockquote,
+        .pre,
+        .table,
+        .thead,
+        .tbody,
+        .tr,
+        .th,
+        .td,
+        => true,
         else => false,
     };
 }
@@ -327,10 +370,19 @@ const Parser = struct {
     }
 
     fn openTag(self: *Parser, tag: Tag, href: []const u8, void_el: bool) void {
-        if (tag == .p or tag == .h1 or tag == .h2 or tag == .h3) {
+        if (tag == .p or isHeading(tag)) {
             self.closeOpen(.p);
         }
         if (tag == .li) self.closeOpen(.li);
+        if (tag == .dt or tag == .dd) {
+            self.closeOpen(.dd);
+            self.closeOpen(.dt);
+        }
+        if (tag == .td or tag == .th) {
+            self.closeOpen(.td);
+            self.closeOpen(.th);
+        }
+        if (tag == .tr) self.closeOpen(.tr);
         if (isBlock(tag)) {
             self.endText();
             self.trimTrailingSpace();
@@ -558,18 +610,30 @@ fn tagFromName(name: []const u8) Tag {
     if (eqlCi(name, "h1")) return .h1;
     if (eqlCi(name, "h2")) return .h2;
     if (eqlCi(name, "h3")) return .h3;
+    if (eqlCi(name, "h4")) return .h4;
+    if (eqlCi(name, "h5")) return .h5;
+    if (eqlCi(name, "h6")) return .h6;
     if (eqlCi(name, "p")) return .p;
     if (eqlCi(name, "br")) return .br;
     if (eqlCi(name, "hr")) return .hr;
     if (eqlCi(name, "ul")) return .ul;
     if (eqlCi(name, "ol")) return .ol;
     if (eqlCi(name, "li")) return .li;
+    if (eqlCi(name, "dl")) return .dl;
+    if (eqlCi(name, "dt")) return .dt;
+    if (eqlCi(name, "dd")) return .dd;
     if (eqlCi(name, "blockquote")) return .blockquote;
     if (eqlCi(name, "pre")) return .pre;
     if (eqlCi(name, "code")) return .code;
     if (eqlCi(name, "strong")) return .strong;
     if (eqlCi(name, "em")) return .em;
     if (eqlCi(name, "a")) return .a;
+    if (eqlCi(name, "table")) return .table;
+    if (eqlCi(name, "thead")) return .thead;
+    if (eqlCi(name, "tbody")) return .tbody;
+    if (eqlCi(name, "tr")) return .tr;
+    if (eqlCi(name, "th")) return .th;
+    if (eqlCi(name, "td")) return .td;
     return .unknown;
 }
 
@@ -640,7 +704,9 @@ test "html parse: oliver fixture yields h1/h2 and table text in document order" 
     const plain = collectText(doc, &buf);
     try std.testing.expect(std.mem.indexOf(u8, plain, "oliver") != null);
     try std.testing.expect(std.mem.indexOf(u8, plain, "nested") != null);
-    // Slice 1 has no table layout — cells still appear as text (D5).
+    try std.testing.expect(findTag(doc, .table) != none);
+    try std.testing.expect(findTag(doc, .th) != none);
+    try std.testing.expect(findTag(doc, .td) != none);
     try std.testing.expect(std.mem.indexOf(u8, plain, "a") != null);
     try std.testing.expect(std.mem.indexOf(u8, plain, "1") != null);
     try std.testing.expect(std.mem.indexOf(u8, plain, "Trailing paragraph.") != null);
@@ -689,6 +755,26 @@ test "html parse: stray angle brackets are text, not an unbounded tag scan" {
     const plain = collectText(doc, &buf);
     try std.testing.expect(std.mem.indexOf(u8, plain, "<<<<") != null);
     try std.testing.expect(std.mem.indexOf(u8, plain, "still") != null);
+}
+
+test "html parse: table/dl/h4–h6 tags" {
+    var nodes: [max_nodes]Node = undefined;
+    var text: [max_text]u8 = undefined;
+    const src =
+        \\<h4>Four</h4><h5>Five</h5><h6>Six</h6>
+        \\<dl><dt>term</dt><dd>defn</dd></dl>
+        \\<table><tr><th>H</th><td>C</td></tr></table>
+    ;
+    const doc = parse(src, nodes[0..], text[0..]);
+    try std.testing.expect(findTag(doc, .h4) != none);
+    try std.testing.expect(findTag(doc, .h5) != none);
+    try std.testing.expect(findTag(doc, .h6) != none);
+    try std.testing.expect(findTag(doc, .dl) != none);
+    try std.testing.expectEqualStrings("term", firstText(doc, findTag(doc, .dt)));
+    try std.testing.expectEqualStrings("defn", firstText(doc, findTag(doc, .dd)));
+    try std.testing.expect(findTag(doc, .table) != none);
+    try std.testing.expect(findTag(doc, .th) != none);
+    try std.testing.expect(findTag(doc, .td) != none);
 }
 
 test "html parse: overflow sets truncated and never panics" {
