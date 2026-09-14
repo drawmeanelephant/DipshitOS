@@ -2469,6 +2469,11 @@ pub fn build(b: *std.Build) void {
         "user/src/lib/ssh/transport.zig",
         "user/src/lib/ssh/channel.zig",
         "user/src/lib/ssh/cli.zig",
+        // TLS 1.3 (RFC 8446) key schedule + record layer. Both roots reach
+        // the crypto library through the module-mapped `crypto` import, so
+        // they need no extra mapping of their own.
+        "user/src/lib/tls/keyschedule.zig",
+        "user/src/lib/tls/record.zig",
         "user/tests/ui/ui_test.zig",
         "kernel/tests/scheduler_test.zig",
         "kernel/tests/syscall_test.zig",
