@@ -27,6 +27,8 @@ FIXTURES = [
     ("leaf-nc", "nc.example.com", 1, 0, False, 0),
     ("leaf-unknowncrit", "unknown.example.com", 1, 0, False, 1),
     ("leaf-nosan", "cnonly.example.com", 0, 0, False, 0),
+    ("leaf-ncevil", "evil.example.com", 1, 0, False, 0),
+    ("leaf-ncother", "other.example", 1, 0, False, 0),
 ]
 
 UNKNOWN_OID = "1.3.6.1.4.1.55555.1"
