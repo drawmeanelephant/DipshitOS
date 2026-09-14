@@ -25,11 +25,21 @@
 //! WM-death teardown mirrors the `close_owner(pid)` window-teardown semantic
 //! in the scheduler exit path: on WM process exit the kernel unregisters it
 //! and pacing automatically falls back to the shell idle shim.
+//!
+//! M52 card 2 (#1239) adds the seat's INPUT-CAPTURE discipline to that
+//! teardown. The WMS6/WMS8 drains moved the DECISION for the Alt+Tab
+//! overlay, the mission-control grid, the tooltip, the notification panel
+//! and the two modals into the WM while leaving the kernel holding the
+//! applied state — so each is a CAPTURE held on the WM's behalf, and the
+//! resumed shim has no path left to dismiss it (the shim decision was
+//! drained/deleted). Seat release therefore clears them all, and every
+//! routing point refuses a seat whose process descriptor says the process
+//! is dead, so no event is ever delivered to a dead pid.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const events = @import("events.zig");
-const process = @import("process.zig"); // the registry row bound (max_processes) — used only by the host tests
+const process = @import("process.zig"); // the seat's process row: the registry bound (max_processes) + the M52 dead-seat routing gate
 const virtio_gpu = @import("virtio_gpu.zig");
 const mmu = @import("mmu.zig");
 const driving_award = @import("driving_award.zig"); // M32 WMS4: the renderer owns the chrome state the seam's teardown clears
@@ -194,6 +204,34 @@ var scanout_pid: u64 = 0;
 var scanout_va: u64 = 0;
 var scanout_pages: u32 = 0;
 
+/// M52 card 2 (#1239): the captures a registered WM leaves to the kernel.
+///
+/// Each of these is applied by the kernel but DECIDED by the WM — the WM's
+/// slot-65 command is the only producer (the shim's own path for it was
+/// drained in WMS6 or deleted in WMS8), which makes each one a modality the
+/// kernel is holding on the WM's behalf. A dead WM must not strand one: the
+/// resumed shim cannot dismiss what it no longer decides, so an Alt+Tab
+/// snapshot, a grid, a tooltip box, a panel or a modal would stay up (and
+/// stay PAINTED) for the rest of the boot. Seat release is the one moment
+/// that knows the WM is gone, so the release lives here.
+fn release_wm_captures() void {
+    // Alt+Tab overlay snapshot (cmd 5 ALT_TAB activate/cycle).
+    driving_award.alt_tab_dismiss();
+    // Mission-control grid (cmd 21 OVERVIEW enter).
+    driving_award.overview_exit();
+    // Tooltip box (cmd 8 TOOLTIP show).
+    driving_award.tooltip_clear();
+    // Notification-center panel (cmd 6 NOTIF_CENTER open).
+    driving_award.notif_center_set_open(false);
+    // About modal (cmd 11 DIALOG open/toggle) — closes and restores the
+    // focus it saved, so the modal cannot strand the pre-modal focus either.
+    driving_award.about_dialog_close();
+    // Unsaved-changes modal (cmd 11 DIALOG actions 3-6): DISMISS it. The
+    // WM's pending choice dies with the WM — the kernel never auto-applies
+    // a dead compositor's save/discard decision to a live client window.
+    driving_award.unsaved_dialog_cancel();
+}
+
 /// Reset the seam (kernel boot + host-test setups).
 pub fn init() void {
     wm_pid = null;
@@ -231,6 +269,9 @@ pub fn init() void {
     driving_award.wm_window_hook = null;
     // M32 WMS5 Gate 2 (claim 4278): the keyboard fan-out hook detaches too.
     driving_award.wm_key_hook = null;
+    // M52 card 2 (#1239): a reset is a seat release — no WM-owned capture
+    // may leak into the next boot/test (the same reasoning as the hooks).
+    release_wm_captures();
 }
 
 /// True when a WM is registered (composite pacing has moved to the tick path).
@@ -353,6 +394,10 @@ pub fn unregister(pid: usize) bool {
     // painted). driving_award imports only wnd_core, so this import is
     // cycle-free (the seam delegates render-state teardown to the renderer).
     driving_award.clear_wm_chrome();
+    // M52 card 2 (#1239): the WM's INPUT CAPTURES die with it too. The
+    // chrome above is the dead WM's LOOK; these are its MODALITY — see
+    // release_wm_captures for why the resumed shim cannot drop them itself.
+    release_wm_captures();
     // M32 WMS5: the WM's input ownership dies with it — the kernel resumes
     // consuming pointer geometry (shim fallback, byte-identical to pre-WMS5).
     driving_award.wm_owns_input = false;
@@ -380,8 +425,23 @@ pub fn take_fallback_report() bool {
 /// this is delivered ONLY to `wm_pid`. A no-op when no WM is registered
 /// (nothing changes in shim mode). `events.push` wakes a blocked
 /// `sys_wait_event` caller via the `on_event_pushed` hook.
+/// M52 card 2 (#1239): true when the seat's process descriptor says the
+/// process is DEAD. `.exited` is the state that outlives the process (the
+/// descriptor stays for the `procs` exit record), so it is the one a seat
+/// can be left pointing at. A MISSING descriptor is NOT dead: the host-test
+/// register contract binds bare pids with no process row at all, and a
+/// reaped slot's descriptor is gone entirely — treating absence as death
+/// would make the gate reject the tests' own seats. The gate only refuses
+/// to ROUTE to a dead seat; releasing it stays `unregister`'s job (the
+/// scheduler exit seam calls it for every exiting process).
+pub fn seat_dead(pid: usize) bool {
+    const p = process.info(pid) orelse return false;
+    return p.state == .exited;
+}
+
 pub fn on_tick() void {
     const pid = wm_pid orelse return;
+    if (seat_dead(pid)) return; // M52 card 2: never route a tick to a dead pid
     tick_count +%= 1;
     // M33 SB5 (claim 7397): the kernel paints its layer (chrome + unmigrated
     // windows) at TICK time, BEFORE the WM's compose-N stores land — so at
@@ -508,6 +568,7 @@ var set_state_count: u64 = 0;
 /// before; zero regression). Caller maps HID logicals to pixels first.
 pub fn fan_pointer(x: u32, y: u32, buttons: u8) void {
     const pid = wm_pid orelse return;
+    if (seat_dead(pid)) return; // M52 card 2: never route to a dead pid
     pointer_fan_count +%= 1;
     events.push(pid, .{
         .kind = events.WM_POINTER,
@@ -527,6 +588,7 @@ pub fn fan_pointer(x: u32, y: u32, buttons: u8) void {
 /// as opposed to a plain state mirror. No-op when no WM is registered.
 pub fn fan_window(id: u8, x: u32, y: u32, w: u32, h: u32, visible: bool, focused: bool, workspace: u8, unsaved: bool, released: bool) void {
     const pid = wm_pid orelse return;
+    if (seat_dead(pid)) return; // M52 card 2: never route to a dead pid
     window_mirror_count +%= 1;
     var flags: u16 = id;
     if (visible) flags |= 1 << 8;
@@ -550,6 +612,7 @@ pub fn fan_window(id: u8, x: u32, y: u32, w: u32, h: u32, visible: bool, focused
 /// as before; zero regression). Caller edge-detects (key-DOWN only).
 pub fn fan_key(usage: u8, flags: u16) void {
     const pid = wm_pid orelse return;
+    if (seat_dead(pid)) return; // M52 card 2: never route to a dead pid
     key_fan_count +%= 1;
     events.push(pid, .{
         .kind = events.WM_KEY,
@@ -883,4 +946,104 @@ test "wm_server: REQUEST_PRESENT advances the present sequence and count" {
     // Tear down so the aggregated test binary does not leak input ownership.
     try std.testing.expect(unregister(3));
     try std.testing.expect(!driving_award.wm_owns_input);
+}
+
+test "wm_server: seat release drops every WM-owned input capture (M52 card 2, #1239)" {
+    events.init();
+    init();
+    events.on_event_pushed = null;
+    driving_award.arm();
+
+    // Two live windows: the Alt+Tab snapshot and the overview grid both need
+    // more than one alt-tab-able card to open.
+    const a = switch (driving_award.user_open(10, 10, 200, 120, 3)) {
+        .opened => |id| id,
+        else => return error.TestUnexpectedResult,
+    };
+    const b = switch (driving_award.user_open(240, 10, 200, 120, 3)) {
+        .opened => |id| id,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(a != b);
+
+    try std.testing.expect(register(3));
+    // Open every capture through the SAME applied primitive the WM's slot-65
+    // command reaches: cmd 5 activate / cmd 21 enter / cmd 8 show /
+    // cmd 6 open / cmd 11 (about + unsaved).
+    try std.testing.expect(driving_award.alt_tab_activate());
+    try std.testing.expect(driving_award.overlay_active);
+    _ = driving_award.overview_enter();
+    try std.testing.expect(driving_award.overview_is_open());
+    driving_award.tooltip_show("Clock");
+    try std.testing.expect(driving_award.tooltip_visible);
+    driving_award.notif_center_set_open(true);
+    try std.testing.expect(driving_award.notif_center_open);
+    driving_award.about_dialog_open_dialog();
+    try std.testing.expect(driving_award.about_dialog_open);
+    driving_award.unsaved_dialog_show(a);
+    try std.testing.expect(driving_award.unsaved_dialog_is_open());
+
+    // A non-owner exit is a no-op for the seat AND its captures.
+    try std.testing.expect(!unregister(4));
+    try std.testing.expect(driving_award.overlay_active);
+    try std.testing.expect(driving_award.tooltip_visible);
+
+    // The SEAT RELEASE drops all six — the resumed shim never inherits a
+    // modality it has no path to dismiss.
+    try std.testing.expect(unregister(3));
+    try std.testing.expect(!driving_award.overlay_active);
+    try std.testing.expect(!driving_award.overview_is_open());
+    try std.testing.expect(!driving_award.tooltip_visible);
+    try std.testing.expect(!driving_award.notif_center_open);
+    try std.testing.expect(!driving_award.about_dialog_open);
+    try std.testing.expect(!driving_award.unsaved_dialog_is_open());
+}
+
+test "wm_server: a dead seat routes nothing — no tick, no fan-out (M52 card 2, #1239)" {
+    events.init();
+    init();
+    events.on_event_pushed = null;
+    process.init();
+    const seat = process.create("WND.BIN", .{ .entry_va = 0x400000, .content_len = 1 }, .{}, .{}).?;
+    _ = process.bind(seat, 9);
+    try std.testing.expectEqual(process.State.running, process.info(seat).?.state);
+    try std.testing.expect(register(seat));
+
+    // Baseline: a LIVE seat takes the tick and all three fans.
+    on_tick();
+    fan_pointer(1, 2, 0);
+    fan_window(2, 3, 4, 5, 6, true, true, 0, false, false);
+    fan_key(0x17, events.MOD_CTRL);
+    try std.testing.expectEqual(@as(usize, 4), events.pending(seat));
+    const tick0 = info().tick_count;
+    try std.testing.expectEqual(@as(u64, 1), tick0);
+
+    // The process dies WITHOUT the register being told. The scheduler exit
+    // seam is the seat-release authority (it calls `unregister`); this pins
+    // the NET for any path that reaches a dead pid with the seat still bound.
+    _ = process.on_task_exit(9, 0);
+    try std.testing.expectEqual(process.State.exited, process.info(seat).?.state);
+    try std.testing.expect(seat_dead(seat));
+
+    const ptr0 = info().pointer_fan_count;
+    const win0 = info().window_mirror_count;
+    const key0 = info().key_fan_count;
+    on_tick();
+    fan_pointer(9, 9, 1);
+    fan_window(2, 9, 9, 9, 9, true, false, 0, false, true);
+    fan_key(0x04, events.MOD_SHIFT);
+    // Nothing was routed to the dead pid, and no counter claimed a delivery.
+    try std.testing.expectEqual(@as(usize, 4), events.pending(seat));
+    try std.testing.expectEqual(tick0, info().tick_count);
+    try std.testing.expectEqual(ptr0, info().pointer_fan_count);
+    try std.testing.expectEqual(win0, info().window_mirror_count);
+    try std.testing.expectEqual(key0, info().key_fan_count);
+    // The gate refuses to ROUTE; it does not silently release the seat.
+    try std.testing.expectEqual(@as(?usize, seat), registered_pid());
+
+    // Tear down for the aggregated binary: release the seat, then the row.
+    try std.testing.expect(unregister(seat));
+    try std.testing.expect(!driving_award.wm_owns_input);
+    process.init();
+    try std.testing.expect(!seat_dead(seat)); // no descriptor is NOT death
 }

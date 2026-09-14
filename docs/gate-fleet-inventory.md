@@ -159,10 +159,10 @@ of them with `just verify-vz`.
 | spec | `live-resmon` | 1 run / 5 assert | live-resmon.spec -- M22 D10: RESMON.BIN resource monitor on VZ. |
 | spec | `live-roadpops` | 1 run / 11 assert | live-roadpops.spec -- claim 1574 (milestone six, card G3) class-B |
 | spec | `live-sb2-shared-anon` | 1 run / 8 assert | live-sb2-shared-anon.spec -- M33 SB2 (claim 8878) class-B gate: the |
-| spec | `live-sb3-surface-handoff` | 1 run / 8 assert | live-sb3-surface-handoff.spec -- M33 SB3 (claim 3633) class-B gate: |
+| spec | `live-sb3-surface-handoff` | 1 run / 9 assert | live-sb3-surface-handoff.spec -- M33 SB3 (claim 3633) class-B gate: |
 | spec | `live-sb4-damage-tracking` | 1 run / 5 assert | live-sb4-damage-tracking.spec -- M33 SB4 (claim 2382) class-B gate: |
 | spec | `live-sb5-wm-compose-n` | 1 run / 18 assert | live-sb5-wm-compose-n.spec -- M33 SB5 (claim 7397) class-B gate: |
-| spec | `live-sb6-perf-payoff` | 1 run / 24 assert | live-sb6-perf-payoff.spec -- M33 SB6 (claim 6864) class-B gate: |
+| spec | `live-sb6-perf-payoff` | 2 run / 32 assert | live-sb6-perf-payoff.spec -- M33 SB6 (claim 6864) class-B gate: |
 | spec | `live-scale` | 1 run / 4 assert | live-scale.spec -- pool scale at the 11-slot budget: counter + up |
 | spec | `live-sched-ring` | 1 run / 13 assert | live-sched-ring.spec -- M28 SMP card 10 (claim 1163) class-B gate: |
 | spec | `live-screen` | 1 run / 12 assert | live-screen.spec -- claim 6053 (milestone six, card G1) class-B |
@@ -254,7 +254,7 @@ of them with `just verify-vz`.
 | spec | `live-wm4-paint` | 2 run / 4 assert | live-wm4-paint.spec -- M32 WM4 (Lane 1, #707): WM rest policy blends unfocused, focused pure |
 | spec | `live-wm7-gateb` | 2 run / 11 assert | live-wm7-gateb.spec -- WMS7 Gate B (issue #627): toolkit round-trip and no-wm fallback |
 | spec | `live-wmctl-register` | 1 run / 11 assert | live-wmctl-register.spec -- M32 WMS2: kernel render-server register on VZ |
-| spec | `live-wnd-server` | 1 run / 10 assert | live-wnd-server.spec -- M32 WMS3: long-lived EL0 WM server (WND.BIN) on VZ |
+| spec | `live-wnd-server` | 2 run / 14 assert | live-wnd-server.spec -- M32 WMS3: long-lived EL0 WM server (WND.BIN) on VZ |
 | spec | `live-wnd2-mission-control` | 4 run / 17 assert | live-wnd2-mission-control.spec -- WM2 mission-control overview (Lane 1, #707) |
 | spec | `live-wnd4-chrome` | 2 run / 7 assert | live-wnd4-chrome.spec -- WMS4 Chrome parity (issue #624) |
 | spec | `live-wnd5-gate2-policy` | 2 run / 15 assert | live-wnd5-gate2-policy.spec -- WMS5 Gate 2: registered-WM W1–W16 matrix & WM-driven Ctrl+T policy |

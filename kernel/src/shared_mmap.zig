@@ -17,6 +17,11 @@
 //!     teardown unrefs 1->0 and frees. A peer exit/munmap detaches only its
 //!     seat (unref 2->1); the owner's writable leaf and the region survive
 //!     (ADR 0016 D1: per-root teardown).
+//!   - M52 card 3 (#1240): an owner-side revoke is COMPLETE — it also drops
+//!     the peer's `mmap_region` row + armed read aperture (the mirror's
+//!     kernel-side half, so no stale row can exhaust the peer's table) and
+//!     ends any window bound to the dying surface (no zombie window blitting
+//!     freed pages).
 //!
 //! No libc, no POSIX, no allocation — fixed BSS only.
 
@@ -24,6 +29,8 @@ const alloc = @import("alloc.zig");
 const mmu = @import("mmu.zig");
 const process = @import("process.zig");
 const shared_region = @import("shared_region.zig");
+const uaccess = @import("uaccess.zig"); // M52 card 3 (#1240): the peer's read aperture
+const driving_award = @import("driving_award.zig"); // M52 card 3 (#1240): end the bound window
 
 /// Map the owner's writable leaves for a freshly created region (SB2 create
 /// path). `root_phys` is the owner's TTBR0 root. The pages were allocated by
@@ -142,15 +149,52 @@ pub fn detach_peer(pid: usize, va: u64) bool {
 
 fn revoke_peer(handle: u32) void {
     const info = shared_region.info(handle) orelse return;
-    if (info.peer_pid == 0) return;
-    if (process.info(@intCast(info.peer_pid))) |peer| {
-        unmap_peer_leaves(peer.root_phys, info.peer_va, info.page_count, info.pa_base);
-    } else {
-        // Peer exited without detaching (defensive — the exit seam detaches
-        // first, so this is unreachable in practice): the leaves died with
-        // its root; account the refs so no leak.
-        unref_peer_pages(info.page_count, info.pa_base);
+    // NOTE (M52 card 3 review follow-up): the peer-seat work is conditional,
+    // the ZOMBIE CLOSE below is NOT — it is about the SURFACE dying, not about
+    // the peer seat. Do not fold the two guards back together.
+    if (info.peer_pid != 0) {
+        const peer_pid: usize = @intCast(info.peer_pid);
+        const len = @as(u64, info.page_count) * 4096;
+        if (process.info(peer_pid)) |peer| {
+            unmap_peer_leaves(peer.root_phys, info.peer_va, info.page_count, info.pa_base);
+            // M52 card 3 (#1240): an owner-side revoke must ALSO release what
+            // the peer still owns on the KERNEL side of the mapping — the
+            // leaves are not the whole mirror. The peer's own `mmap_region`
+            // row (its va reservation, and with it the aperture
+            // `arm_task_regions` rebuilds from that row at its next SVC) and
+            // the currently-armed read aperture would otherwise outlive the
+            // region: the peer's table is 16 rows, so 16 owner deaths exhaust
+            // the WM's mirror capacity and every later attach fails ENOMEM,
+            // and the stale aperture keeps admitting a range no leaf maps.
+            // This mirrors the peer-side `detach_peer` call site in
+            // handle_munmap, which always did both.
+            _ = process.remove_mmap_region(peer_pid, info.peer_va, len);
+            uaccess.remove_region(info.peer_va, len);
+        } else {
+            // Peer exited without detaching (defensive — the exit seam
+            // detaches first, so this is unreachable in practice): the leaves
+            // died with its root; account the refs so no leak.
+            unref_peer_pages(info.page_count, info.pa_base);
+        }
     }
+    // M52 card 3 (#1240): the surface is gone, so a window still bound to it
+    // has no source left to render or composite — `composite()` would blit
+    // from freed physical pages and `sys_win_fill` would write into them.
+    // End the window now (the same `remove_user_at` primitive every release
+    // path uses) so the registry holds no zombie and the WM learns it is
+    // released. A window closed BEFORE its surface is the ordinary order and
+    // finds nothing here; a peer-side detach (the WM dying) never reaches
+    // this function, so the owner's window survives its WM (ADR 0016 D1).
+    //
+    // UNCONDITIONAL (M52 card 3 review follow-up): the peer seat may ALREADY
+    // be gone — a WM that died first cleared it (peer_pid == 0) — and this
+    // owner-side revoke is then the only remaining moment that knows the
+    // surface is dying. Behind the peer-seat guard it was skipped, and the
+    // owner's later `sys_munmap` left the window surface_backed over freed
+    // physical pages: the same use-after-free the guard-free case fixes,
+    // reached by a different interleaving. Owner EXIT was safe only because
+    // the seam runs close_owner before revoke_owner; the munmap order is not.
+    _ = driving_award.surface_revoked(handle);
 }
 
 fn unref_peer_pages(page_count: u32, pa_base: u64) void {
