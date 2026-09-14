@@ -1,6 +1,9 @@
 package webrender
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseHTTPURL(t *testing.T) {
 	cases := []struct {
@@ -99,5 +102,71 @@ func TestFormatGetRequest(t *testing.T) {
 	}
 	if got := FormatGetRequest("h", ""); got[:4] != "GET " || got[4:5] != "/" {
 		t.Fatalf("empty path: %q", got)
+	}
+}
+
+func TestSetCookieHeaders(t *testing.T) {
+	head := "HTTP/1.0 200 OK\r\nSet-Cookie: sid=abc; Path=/; HttpOnly; Secure\r\nSet-Cookie: theme=dark; Domain=.example.com\r\nset-cookie: bare=1\r\n\r\n"
+	cs := SetCookieHeaders(head)
+	if len(cs) != 3 {
+		t.Fatalf("parsed %d cookies want 3: %+v", len(cs), cs)
+	}
+	if cs[0].Name != "sid" || cs[0].Value != "abc" || cs[0].Path != "/" || cs[0].Flags != "HttpOnly; Secure" {
+		t.Fatalf("cookie 0 = %+v", cs[0])
+	}
+	if cs[1].Domain != ".example.com" {
+		t.Fatalf("cookie 1 = %+v", cs[1])
+	}
+	if cs[2].Name != "bare" || cs[2].Value != "1" {
+		t.Fatalf("cookie 2 = %+v", cs[2])
+	}
+	if got := SetCookieHeaders("HTTP/1.0 200 OK\r\nContent-Length: 3\r\n\r\n"); len(got) != 0 {
+		t.Fatalf("cookie-less head parsed %d cookies", len(got))
+	}
+	// A malformed row must be skipped, not crash.
+	if got := SetCookieHeaders("HTTP/1.0 200 OK\r\nSet-Cookie: novalue\r\n\r\n"); len(got) != 0 {
+		t.Fatalf("malformed Set-Cookie parsed %d cookies", len(got))
+	}
+}
+
+func TestCookieHeaderMatching(t *testing.T) {
+	rows := []string{
+		"1\tsid\tabc\t\t/\tHttpOnly",    // host-only, path /
+		"2\tid\t7\t.example.com\t/\t",   // domain suffix
+		"3\tscoped\tx\t\t/app\t",        // path /app
+		"4\tother\t9\t.other.test\t/\t", // unrelated domain
+		"broken",                        // malformed row ignored
+	}
+	got := CookieHeader(rows, "example.com", "/app/page")
+	for _, want := range []string{"sid=abc", "id=7", "scoped=x"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %s in %q", want, got)
+		}
+	}
+	if strings.Contains(got, "other=9") {
+		t.Fatalf("unrelated domain cookie leaked: %q", got)
+	}
+	if got := CookieHeader(rows, "example.com", "/other"); strings.Contains(got, "scoped=x") {
+		t.Fatalf("path-scoped cookie leaked: %q", got)
+	}
+	if got := CookieHeader(nil, "example.com", "/"); got != "" {
+		t.Fatalf("empty store produced %q", got)
+	}
+}
+
+func TestFormatGetRequestWithCookies(t *testing.T) {
+	plain := FormatGetRequest("10.0.0.2", "/")
+	if got := FormatGetRequestWithCookies("10.0.0.2", "/", ""); got != plain {
+		t.Fatalf("cookie-less request changed: %q", got)
+	}
+	got := FormatGetRequestWithCookies("10.0.0.2", "/x", "sid=abc; id=7")
+	if !strings.Contains(got, "Cookie: sid=abc; id=7\r\n") {
+		t.Fatalf("missing cookie header: %q", got)
+	}
+	if !strings.HasSuffix(got, "\r\n\r\n") {
+		t.Fatalf("request must end with a blank line: %q", got)
+	}
+	if strings.Index(got, "Cookie:") > strings.Index(got, "\r\n\r\n") {
+		t.Fatal("cookie header after the terminator")
 	}
 }

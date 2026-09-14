@@ -30,6 +30,8 @@ const (
 	SlotTCPSend      uintptr = 31
 	SlotTCPRecv      uintptr = 32
 	SlotTCPClose     uintptr = 33
+	SlotFileDelete   uintptr = 34
+	SlotFileTruncate uintptr = 36
 	SlotWinFillBatch uintptr = 46
 	SlotMmap         uintptr = 63
 	SlotTime         uintptr = 66
@@ -52,6 +54,7 @@ const (
 	ModeWrite  uint32 = 0x0002
 	ModeCreate uint32 = 0x0004
 	ModeAppend uint32 = 0x0008
+	ModeDir    uint32 = 0x0010
 )
 
 // Event kinds (ADR 0009).
@@ -358,6 +361,20 @@ func FileAppend(path string, b []byte) bool {
 	defer FileClose(uint32(h))
 	n, wr := FileWrite(uint32(h), b)
 	return wr >= 0 && n == len(b)
+}
+
+// FileTruncate resizes an open handle to size bytes (slot 36) — the
+// compaction half of the ledger rewrite path.
+func FileTruncate(h uint32, size uint32) int64 {
+	return syscall2(SlotFileTruncate, uintptr(h), uintptr(size))
+}
+
+// FileDelete removes a file by path (slot 34).
+func FileDelete(path string) int64 {
+	if path == "" {
+		return -ErrEINVAL
+	}
+	return syscall2(SlotFileDelete, strPtr(path), uintptr(len(path)))
 }
 
 // TCPConnect opens the single TCP socket (VirelaiOS has one per process).

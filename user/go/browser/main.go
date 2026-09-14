@@ -71,6 +71,12 @@ const (
 	markerNavReady  = "web: nav-ready"
 	markerFetch     = "web: fetch "
 	markerRedirect  = "web: redirect n="
+	markerStores    = "web: stores "
+	markerCache     = "web: cache store "
+	markerOffline   = "web: offline "
+	markerBookmark  = "web: bookmark "
+	markerCleared   = "web: cleared "
+	markerDownload  = "web: download "
 	markerSettled   = "web: settled"
 	markerQuit      = "web: quit"
 )
@@ -105,6 +111,11 @@ const (
 	keyEnd      = 0x4d
 	keyF5       = 0x3e
 	keyX        = 0x1b
+	keyB        = 0x05
+	keyC        = 0x06
+	keyD        = 0x07
+	keyK        = 0x0e
+	keyS        = 0x16
 )
 
 type app struct {
@@ -138,6 +149,7 @@ type app struct {
 	// load (a browser must not freeze on a slow peer).
 	settled  bool
 	loading  bool
+	lastBody []byte
 	loadFrom string
 	loadURL  webrender.URL
 	loadBuf  []byte
@@ -174,6 +186,9 @@ func main() {
 	}
 	a := &app{win: id, hist: newHistory()}
 	vi.ConsoleLine(markerOpen + itoa(id))
+	// The store inventory is read from disk at boot: it is how the gate sees
+	// that a previous run's rows persisted.
+	vi.ConsoleLine(a.storeSummary())
 
 	if target == "" {
 		a.showStartSurface()
@@ -351,12 +366,13 @@ func classifyTarget(resolved string) string {
 // startHTTP connects, sends the GET, and arms the stepped read.
 func (a *app) startHTTP(u webrender.URL) {
 	if rc := vi.TCPConnect(u.IPv4, u.Port); rc < 0 {
-		a.finishError("tcp", a.target, a.loadFrom)
+		a.offlineOr("tcp")
 		return
 	}
-	if _, rc := vi.TCPSend([]byte(webrender.FormatGetRequest(u.Host, u.Path))); rc < 0 {
+	req := webrender.FormatGetRequestWithCookies(u.Host, u.Path, a.cookieHeaderFor(u.Host, u.Path))
+	if _, rc := vi.TCPSend([]byte(req)); rc < 0 {
 		vi.TCPClose()
-		a.finishError("tcp", a.target, a.loadFrom)
+		a.offlineOr("tcp")
 		return
 	}
 	a.loadURL = u
@@ -372,7 +388,7 @@ func (a *app) loadStep() {
 	if rc < 0 {
 		vi.TCPClose()
 		a.loading = false
-		a.finishError("tcp", a.target, a.loadFrom)
+		a.offlineOr("tcp")
 		return
 	}
 	if n == 0 {
@@ -384,7 +400,7 @@ func (a *app) loadStep() {
 		if a.loadIdle > readIdleMax {
 			vi.TCPClose()
 			a.loading = false
-			a.finishError("timeout", a.target, a.loadFrom)
+			a.offlineOr("timeout")
 		}
 		return
 	}
@@ -441,6 +457,10 @@ func (a *app) completeLoad() {
 		return
 	}
 	a.loadBody(body, a.target)
+	if n := a.persistCookies(head); n > 0 {
+		vi.ConsoleLine(markerStores + "cookies+" + itoa(n))
+	}
+	a.cacheStore(a.target, body)
 	a.afterLoad(a.loadFrom)
 }
 
@@ -454,6 +474,22 @@ func (a *app) cancelLoad() {
 	vi.TCPClose()
 	a.loading = false
 	a.finishError("cancelled", a.target, a.loadFrom)
+}
+
+// offlineOr falls back to the stored copy of a page when the network cannot
+// deliver it, and is explicit about it: an offline copy is never passed off as
+// a fresh fetch.
+func (a *app) offlineOr(kind string) {
+	if kind == "tcp" || kind == "timeout" {
+		if body, ok := a.cacheLookup(a.target); ok {
+			a.loadBody(body, a.target)
+			a.status = "offline copy (network unavailable)"
+			vi.ConsoleLine(markerOffline + a.target)
+			a.afterLoad(a.loadFrom)
+			return
+		}
+	}
+	a.finishError(kind, a.target, a.loadFrom)
 }
 
 // afterLoad records the visit and announces the navigation once the frame is
@@ -486,6 +522,7 @@ func (a *app) finishError(kind, target, from string) {
 // loadBody runs the renderer pipeline and emits the parse/layout markers.
 func (a *app) loadBody(body []byte, target string) {
 	a.errKind, a.errMsg = "", ""
+	a.lastBody = body
 	a.doc = webrender.ParseHTML(body)
 	a.lay = webrender.LayoutDocument(a.doc, contentW, nil)
 	a.scroll = 0
@@ -523,6 +560,33 @@ func (a *app) key(usage uint32, flags uint16) {
 		a.quit = true
 	case keyEscape, keyX:
 		a.cancelLoad()
+	case keyB:
+		if ok, added := a.bookmarkToggle(); ok {
+			if added {
+				vi.ConsoleLine(markerBookmark + "added")
+			} else {
+				vi.ConsoleLine(markerBookmark + "removed")
+			}
+			a.status = "bookmark"
+			a.dirty = true
+		}
+	case keyC:
+		vi.ConsoleLine(markerCleared + "cookies " + itoa(a.clearCookies()))
+		a.status = "cookies cleared"
+		a.dirty = true
+	case keyD:
+		vi.ConsoleLine(markerCleared + "history-entry " + boolStr(a.historyDeleteNewest()))
+		a.status = "history entry deleted"
+		a.dirty = true
+	case keyK:
+		vi.ConsoleLine(markerCleared + "cache " + itoa(a.clearCache()))
+		a.status = "cache cleared"
+		a.dirty = true
+	case keyS:
+		if a.saveDownload() {
+			a.status = "saved to the share"
+			a.dirty = true
+		}
 	case keyR, keyF5:
 		a.reload()
 	case keyUp:

@@ -49,6 +49,18 @@ vgate_file script-badurl.txt <<'EOF'
 exec WEB.ELF http://
 EOF
 
+vgate_file script-store.txt <<'EOF'
+net ip 10.0.0.1
+net arp 10.0.0.2
+exec WEB.ELF http://10.0.0.2/
+EOF
+
+vgate_file script-offline.txt <<'EOF'
+net ip 10.0.0.1
+net arp 10.0.0.2
+exec WEB.ELF http://10.0.0.2/
+EOF
+
 vgate_file script-slow.txt <<'EOF'
 net ip 10.0.0.1
 net arp 10.0.0.2
@@ -365,4 +377,94 @@ assert "web: fetch 10.0.0.2/" in ser, "the load was never armed"
 assert "web: error cancelled" in ser, "the injected cancel key did not stop the load"
 assert "web: settled" in ser, "no frame was published after the cancel"
 print("live-web 08 cancel ok (a load in flight was stopped by the injected cancel key)")
+PY
+
+# --- boot 09: the stores are written, and they land on the host share ----
+# Fetch with the responder armed, then save the page. The python assert reads
+# the share itself, so this is evidence of a persistent store, not of a
+# marker the app printed about itself.
+vgate_run 09 -- \
+    --screen '$RUN_DIR/screen' \
+    --via-virtio --cvc-snap \
+    --snapshot-out '$RUN_DIR/snap-09' \
+    --net '$RUN_DIR/cap9.bin' --net-arp-respond 10.0.0.2 --net-tcp-respond 10.0.0.2:80 \
+    --script '$RUN_DIR/script-store.txt' \
+    --input-chords s --input-chords-after "web: ready" \
+    --snapshot-after "web: repaint" \
+    --script-expect "web: download " --timeout 180
+
+vgate_assert 09 serial-contains 'web: stores '
+vgate_assert 09 serial-contains 'web: cache store '
+vgate_assert 09 serial-contains 'web: download '
+vgate_assert 09 serial-absent '[EXC] parking:'
+vgate_assert 09 python <<'PY'
+import glob, os
+share = os.environ["VG_SHARE"]
+def rows(path):
+    with open(path, errors="replace") as fh:
+        return [l for l in fh.read().splitlines() if l and not l.startswith("#")]
+hist = rows(os.path.join(share, "WEB-HISTORY.TXT"))
+assert hist, "WEB-HISTORY.TXT has no data rows"
+assert any("http://10.0.0.2/" in r for r in hist), "the visit was not recorded"
+idx = rows(os.path.join(share, "WEB-CACHE.TXT"))
+assert idx, "WEB-CACHE.TXT has no data rows"
+bodies = glob.glob(os.path.join(share, "WEB-C-*.BIN"))
+assert bodies, "no cached body file"
+size = os.path.getsize(bodies[0])
+dl = glob.glob(os.path.join(share, "WEB-DL-*"))
+assert dl, "no download file"
+dlsize = os.path.getsize(dl[0])
+print("live-web 09 stores ok (history rows=%d, cache rows=%d, body=%dB, download=%s %dB)"
+      % (len(hist), len(idx), size, os.path.basename(dl[0]), dlsize))
+PY
+
+# --- boot 10: the store survives a restart, and serves an offline copy ---
+# A second, independent boot with NO responder: the connection cannot be
+# answered, so the browser must fall back to what it stored in boot 09 and
+# say so. The boot-time inventory is what proves the rows were read back
+# from disk.
+vgate_run 10 -- \
+    --screen '$RUN_DIR/screen' \
+    --via-virtio --cvc-snap \
+    --snapshot-out '$RUN_DIR/snap-10' \
+    --net '$RUN_DIR/cap10.bin' --net-arp-respond 10.0.0.2 \
+    --script '$RUN_DIR/script-offline.txt' \
+    --snapshot-after "web: settled" \
+    --snapshot-after "web: repaint" \
+    --script-expect "web: ready" --timeout 180
+
+vgate_assert 10 serial-contains 'web: offline http://10.0.0.2/'
+vgate_assert 10 serial-contains 'web: settled'
+vgate_assert 10 serial-absent 'web: error tcp'
+vgate_assert 10 serial-absent '[EXC] parking:'
+vgate_assert 10 python <<'PY'
+import os
+ser = open(os.environ["VG_SER"], errors="replace").read()
+line = ""
+for ln in ser.splitlines():
+    if ln.startswith("web: stores "):
+        line = ln
+        break
+assert line, "no store inventory at boot"
+fields = dict(f.split("=", 1) for f in line.split()[2:] if "=" in f)
+assert int(fields.get("cache", 0)) >= 1, "the cache did not survive the restart: " + line
+assert int(fields.get("history", 0)) >= 1, "history did not survive the restart: " + line
+assert int(fields.get("downloads", 0)) >= 1, "downloads did not survive the restart: " + line
+print("live-web 10 restart-persistence ok (%s)" % line.strip())
+PY
+vgate_assert 10 snapshot 'snap-10-*.raw' <<'PY'
+import sys
+data = open(sys.argv[1], "rb").read()
+w = 1280
+X, Y = 40, 28
+def px(x, y):
+    k = (y * w + x) * 4
+    return (data[k + 2], data[k + 1], data[k])
+def ink(c):
+    return c[0] > 200 and c[1] > 200 and c[2] > 200
+n = sum(1 for yy in range(Y + 52, Y + 130)
+        for xx in range(X + 10, X + 400)
+        if ink(px(xx, yy)))
+assert n >= 40, f"offline copy body ink {n}"
+print(f"live-web 10 offline pixels ok (ink={n})")
 PY

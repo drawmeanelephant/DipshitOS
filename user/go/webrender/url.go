@@ -312,3 +312,101 @@ func ResolveHrefForRedirect(base, href string) (string, bool) {
 
 // RedirectStatus reports whether a status code is a redirect we follow.
 func RedirectStatus(code int) bool { return code >= 300 && code < 400 }
+
+// Cookie is one parsed cookie row from a Set-Cookie response header.
+type Cookie struct {
+	Name   string
+	Value  string
+	Domain string // as sent ("" when the header had none)
+	Path   string
+	Flags  string // raw attribute tail, kept for the ledger only
+}
+
+// SetCookieHeaders parses every Set-Cookie header in a response head. Only the
+// name=value pair and the Domain/Path attributes are interpreted (there is no
+// JS to read the rest); the remaining attributes are kept verbatim in Flags so
+// the ledger stays inspectable and lossless.
+func SetCookieHeaders(head string) []Cookie {
+	var out []Cookie
+	for _, ln := range strings.Split(head, "\n") {
+		ln = strings.TrimRight(ln, "\r")
+		i := strings.IndexByte(ln, ':')
+		if i <= 0 {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(ln[:i]), "set-cookie") {
+			continue
+		}
+		spec := strings.TrimSpace(ln[i+1:])
+		if spec == "" {
+			continue
+		}
+		parts := strings.Split(spec, ";")
+		nv := strings.TrimSpace(parts[0])
+		eq := strings.IndexByte(nv, '=')
+		if eq <= 0 {
+			continue
+		}
+		c := Cookie{Name: strings.TrimSpace(nv[:eq]), Value: strings.TrimSpace(nv[eq+1:])}
+		var tail []string
+		for _, attr := range parts[1:] {
+			a := strings.TrimSpace(attr)
+			if a == "" {
+				continue
+			}
+			low := strings.ToLower(a)
+			switch {
+			case strings.HasPrefix(low, "domain="):
+				c.Domain = strings.TrimSpace(a[len("domain="):])
+			case strings.HasPrefix(low, "path="):
+				c.Path = strings.TrimSpace(a[len("path="):])
+			default:
+				tail = append(tail, a)
+			}
+		}
+		c.Flags = strings.Join(tail, "; ")
+		out = append(out, c)
+	}
+	return out
+}
+
+// CookieHeader builds a request Cookie header for host+path from stored rows
+// ("name=value" fields, as written to the ledger). Host matching is
+// domain-suffix (a leading dot is ignored); an empty Domain matches the
+// request's own host; an empty Path matches everything.
+func CookieHeader(rows []string, host, path string) string {
+	var pairs []string
+	for _, row := range rows {
+		f := strings.Split(row, "\t")
+		if len(f) < 5 {
+			continue
+		}
+		name, value, domain, cpath := f[1], f[2], f[3], f[4]
+		if name == "" {
+			continue
+		}
+		if domain != "" && domain != "." {
+			d := strings.TrimPrefix(domain, ".")
+			if !strings.EqualFold(host, d) && !strings.HasSuffix(strings.ToLower(host), "."+strings.ToLower(d)) {
+				continue
+			}
+		}
+		if cpath != "" && !strings.HasPrefix(path, cpath) {
+			continue
+		}
+		pairs = append(pairs, name+"="+value)
+	}
+	return strings.Join(pairs, "; ")
+}
+
+// FormatGetRequestWithCookies is FormatGetRequest plus the store's Cookie
+// header (empty cookie == identical to FormatGetRequest).
+func FormatGetRequestWithCookies(host, path, cookie string) string {
+	base := FormatGetRequest(host, path)
+	if cookie == "" {
+		return base
+	}
+	// Insert before the terminating blank line.
+	head := strings.TrimSuffix(base, "\r\n\r\n")
+	return head + "\r\nCookie: " + cookie + "\r\n\r\n"
+}
