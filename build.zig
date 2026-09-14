@@ -2481,6 +2481,13 @@ pub fn build(b: *std.Build) void {
         "user/src/lib/tls/bigint.zig",
         "user/src/lib/tls/rsa.zig",
         "user/src/lib/tls/ecdsa.zig",
+        // X.509 layer (card TLS13-C3): the strict DER reader, the certificate
+        // parser, PEM decoding and hostname/identity matching. None of these
+        // touch the crypto library, so no extra module mapping is needed.
+        "user/src/lib/tls/der.zig",
+        "user/src/lib/tls/pem.zig",
+        "user/src/lib/tls/x509.zig",
+        "user/src/lib/tls/identity.zig",
         "user/tests/ui/ui_test.zig",
         "kernel/tests/scheduler_test.zig",
         "kernel/tests/syscall_test.zig",
