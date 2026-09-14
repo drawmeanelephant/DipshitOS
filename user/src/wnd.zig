@@ -62,6 +62,10 @@ pub const Rect = ui.Rect;
 const sys_write: u64 = 1;
 const sys_yield_num: u64 = 2;
 const sys_wait_event_num: u64 = 22;
+/// WMP card 2 (#1250): the non-blocking sibling of slot 22. It CONSUMES an
+/// event (kernel `events.drop`), so the loop carries its result rather than
+/// treating it as a peek — see the loop head.
+const sys_poll_event_num: u64 = 21;
 const sys_wmctl: u64 = 65;
 
 // Slot-65 subcommands (ADR 0007 — frozen by WMS1/claim 1484, extended by
@@ -2338,6 +2342,12 @@ fn main() noreturn {
     var ev: Event = undefined;
     var ticks: u64 = 0;
     var presents: u64 = 0;
+    // WMP card 2 (#1250): an event the head's look-ahead already took out of
+    // the queue, to be serviced WITHOUT parking.
+    var queued: bool = false;
+    // WMP card 2 (#1250): this burst serviced input (kinds 19/20/21), so the
+    // frame owes a flush before the loop parks. See the loop head.
+    var input_dirty: bool = false;
     var grabbing: bool = false;
     var grab_dx: u32 = 0;
     var grab_dy: u32 = 0;
@@ -2356,23 +2366,60 @@ fn main() noreturn {
     var tray_state: TrayState = .{};
     var prev_in_tray: bool = false;
     var prev_dock_idx: ?u8 = null;
-
     while (true) {
-        // BLOCK until at least one event is queued for this process. The
-        // kernel delivers COMPOSITE_TICK (18), WM_POINTER (19), WM_WINDOW
-        // (20), and WM_KEY (21) while we are registered. `handle_wait_event`
-        // returns immediately while the queue is non-empty and only parks us
-        // when it drains — so a single wake serves the WHOLE backlog, and
-        // the bounded work per wake is "drain the queue", not "one event".
-        const wait_rc = syscall1(sys_wait_event_num, @intFromPtr(&ev));
-        if (wait_rc != 1) {
-            // TEMP DEBUG: print the wait_event return code.
-            var dbg: [32]u8 = undefined;
-            const s = std.fmt.bufPrint(&dbg, "wnd: wait_rc={d}\n", .{wait_rc}) catch "wnd: dbg-err\n";
-            write_marker(s);
-            _ = syscall0(sys_yield_num);
-            continue;
+        // WMP card 2 (#1250): NON-BLOCKING look-ahead before parking.
+        // `sys_poll_event` CONSUMES, so a hit is not a peek — it is the next
+        // queued event, carried to the body by `queued` without parking. An
+        // empty queue with `input_dirty` set means an input burst just ENDED,
+        // and the frame is flushed HERE.
+        //
+        // Present-on-input is the fix for the measured WMP card 1 (#1247)
+        // finding: the kernel's kind-18 tick is 1 Hz and this WM presented
+        // only every Nth tick (`present_every` = 2 s on VZ), so a pointer
+        // sample waited 0.8-1.2 s on average and up to 3.0 s for its frame
+        // while a present's own transfer+flush costs 0.3 ms. Flushing at the
+        // END of a burst coalesces a pointer storm into ONE present while a
+        // single click or drag step reaches the screen at once. The tick
+        // cadence stays as the idle repaint heartbeat.
+        //
+        // This sits at the HEAD rather than after the switch on purpose: the
+        // arms `continue` in several places (an untracked registry mirror, a
+        // pointer event that changes nothing), and a tail flush would be
+        // skipped by every one of them — stranding the frame until the next
+        // decimated tick, which is the bug being fixed.
+        if (!queued) {
+            const rc = syscall1(sys_poll_event_num, @intFromPtr(&ev));
+            if (rc == 1) {
+                queued = true;
+            } else {
+                if (input_dirty) {
+                    _ = syscall6(sys_wmctl, wmctl_request_present, 0, 0, 0, 0, 0);
+                    presents +%= 1;
+                    if (presents % marker_every == 0) {
+                        write_marker(present_marker);
+                    }
+                    input_dirty = false;
+                }
+                // BLOCK until at least one event is queued for this process.
+                // The kernel delivers COMPOSITE_TICK (18), WM_POINTER (19),
+                // WM_WINDOW (20), and WM_KEY (21) while we are registered.
+                // `handle_wait_event` returns immediately while the queue is
+                // non-empty and only parks us when it drains — so a single
+                // wake serves the WHOLE backlog, and the bounded work per
+                // wake is "drain the queue", not "one event".
+                const wait_rc = syscall1(sys_wait_event_num, @intFromPtr(&ev));
+                if (wait_rc != 1) {
+                    // TEMP DEBUG: print the wait_event return code.
+                    var dbg: [32]u8 = undefined;
+                    const s = std.fmt.bufPrint(&dbg, "wnd: wait_rc={d}\n", .{wait_rc}) catch "wnd: dbg-err\n";
+                    write_marker(s);
+                    _ = syscall0(sys_yield_num);
+                    continue;
+                }
+            }
         }
+        queued = false;
+
         switch (ev.kind) {
             composite_tick_kind => {
                 ticks +%= 1;
@@ -2425,6 +2472,11 @@ fn main() noreturn {
                 // WM_WINDOW (kind 20) registry mirror: flags low byte = id,
                 // bit 8 = visible, bit 9 = focused, bits 10-11 = workspace;
                 // arg0 = x|(y<<16), arg1 = w|(h<<16).
+                // WMP card 2 (#1250): a registry mirror IS something the frame
+                // must show — a window moved/resized/raised is exactly what a
+                // drag looks like from here. Dirtied before the `continue` so
+                // the flush cannot be skipped (the head reads it next turn).
+                input_dirty = true;
                 const id: u8 = @intCast(ev.flags & 0xff);
                 const s = mirror_slot(id) orelse continue; // not a window we track
                 const m = &mirrors[s];
@@ -2447,6 +2499,11 @@ fn main() noreturn {
                 // px|(py<<16) (framebuffer pixels), flags low byte = HID
                 // button byte (0x01 = left). The WM — not the kernel —
                 // hit-tests and decides geometry.
+                // WMP card 2 (#1250): the pointer stream is what the desktop
+                // must answer promptly — the measured 0.8-1.2 s wait lived
+                // here. Set before the arm's `continue`s for the same reason
+                // as the mirror arm: the head reads it on the next turn.
+                input_dirty = true;
                 const px = ev.arg0 & 0xffff;
                 const py = ev.arg0 >> 16;
                 const btn: u8 = @intCast(ev.flags & 0xff);
@@ -2723,6 +2780,10 @@ fn main() noreturn {
                 // ADR 0009 modifier bits. The WM — not the kernel — decides
                 // geometry from chords.
                 handle_wm_key(@intCast(ev.arg0), ev.flags);
+                // WMP card 2 (#1250): a chord is input too (a WM-driven
+                // Ctrl+T layout change, a modal, a focus move) — flush it
+                // when the burst ends rather than at the next tick.
+                input_dirty = true;
             },
             else => {},
         }
