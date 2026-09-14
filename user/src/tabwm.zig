@@ -206,13 +206,25 @@ pub const go_pick_tab_marker: []const u8 = "tabwm: go-pick ";
 pub const go_launch_marker: []const u8 = "tabwm: go-launch ";
 /// A Go jump named a target that no longer exists (honest no-op marker).
 pub const go_miss_marker: []const u8 = "tabwm: go-miss\n";
+/// Painted chip text. `JUMP` rather than `GO` so the rail does not collide
+/// with `GOOS=virelai` in repo vocabulary. The chord is still Ctrl+Shift+G
+/// (`^G`); serial markers stay `tabwm: go-*`.
+pub const go_chip_label: []const u8 = "JUMP";
+pub const go_chip_hint: []const u8 = "^G";
+/// Upper bound (microseconds) the live-tabwm-bt gate pins for one
+/// `go_refresh` scan. 32 candidates × 3 fields is a few microseconds on
+/// the reference host; 5 ms is a loud regression, not a tight budget.
+pub const go_scan_us_limit: u64 = 5000;
+pub const go_scan_us_marker: []const u8 = "tabwm: go-scan-us=";
+/// v2 persist-apply evidence (`tabwm: tabs-applied v2 n=… pin=… freeze=… title=…`).
+pub const tabs_applied_marker: []const u8 = "tabwm: tabs-applied v2 ";
 /// The Go rail chip lives in the ONE free band of the 180px rail: below
 /// the tray row (the clock/theme/clipboard badges occupy y = 672..696)
 /// and above the scanout edge. Nothing else draws there, so the chip
 /// cannot collide with the tray or with the tab list.
 pub const go_chip_x: u32 = 8;
 pub const go_chip_y: u32 = 700;
-pub const go_chip_w: u32 = 76;
+pub const go_chip_w: u32 = 92;
 pub const go_chip_h: u32 = 16;
 
 pub fn go_chip_rect() Rect {
@@ -710,6 +722,7 @@ pub fn freeze_toggle(idx: usize) bool {
     // TWM: record the freeze change in the change log.
     var fzbuf: [16]u8 = undefined;
     tablog_event(if (manager.tabs[idx].frozen) tablog_code_freeze else tablog_code_unfreeze, std.fmt.bufPrint(&fzbuf, "{d}", .{manager.tabs[idx].id}) catch fzbuf[0..0]);
+    save_tabs();
     return true;
 }
 
@@ -1051,6 +1064,30 @@ pub fn go_refresh() void {
     go_sel = if (go_result_count == 0) 0 else @min(go_sel, go_result_count - 1);
 }
 
+fn read_cntpct() u64 {
+    if (@import("builtin").os.tag != .freestanding) return 0;
+    var val: u64 = 0;
+    asm volatile ("mrs %[val], cntpct_el0"
+        : [val] "=r" (val),
+    );
+    return val;
+}
+
+fn read_cntfrq() u64 {
+    if (@import("builtin").os.tag != .freestanding) return 0;
+    var val: u64 = 0;
+    asm volatile ("mrs %[val], cntfrq_el0"
+        : [val] "=r" (val),
+    );
+    return val;
+}
+
+/// Convert a CNTPCT delta to microseconds. Pure — host-testable.
+pub fn ticks_to_us(delta: u64, freq: u64) u64 {
+    if (freq == 0) return 0;
+    return @as(u64, @intCast((@as(u128, delta) * 1_000_000) / freq));
+}
+
 /// How many rows the Go panel is offering right now (host-testable).
 pub fn go_match_count() usize {
     return go_result_count;
@@ -1124,9 +1161,15 @@ pub fn go_summon() void {
     if (!overlay_loaded) _ = overlay_load_manifest();
     go_query_len = 0;
     go_sel = 0;
+    const t0 = read_cntpct();
     go_refresh();
+    const t1 = read_cntpct();
     go_open = true;
     write_marker(go_marker);
+    const us = ticks_to_us(t1 -| t0, read_cntfrq());
+    var ubuf: [40]u8 = undefined;
+    const umsg = std.fmt.bufPrint(&ubuf, "{s}{d}\n", .{ go_scan_us_marker, us }) catch "tabwm: go-scan-us=0\n";
+    write_marker(umsg);
 }
 
 pub fn go_dismiss() void {
@@ -2229,9 +2272,12 @@ pub noinline fn tablog_flush() void {
 //     flags bit0 = pinned, bit1 = frozen, bit2 = docked-at-launch
 // A v1 FILE still parses exactly as before (load_tabs keeps the v1 path), so
 // an existing install is never stranded; the v2 parser refuses a v1 buffer
-// rather than misreading it. The parser is TOTAL: a short buffer, a wrong
-// version, a count above max_tabs, an out-of-range active index or a
-// truncated record is rejected rather than trusted.
+// rather than misreading it. The other direction is equally loud: an older
+// TABWM.BIN's v1 parser rejects a v2 file (version mismatch) and degrades
+// to "no saved state" — it does not silently reinterpret the extra fields.
+// The parser is TOTAL: a short buffer, a wrong version, a count above
+// max_tabs, an out-of-range active index or a truncated record is rejected
+// rather than trusted.
 pub const tabs_state_version_v2: u8 = 2;
 pub const tabs_v2_header_bytes: usize = 6;
 pub const persist_group_max: usize = 12;
@@ -2393,6 +2439,18 @@ pub noinline fn maybe_apply_persisted_tabs_v2() bool {
         if (pa < manager.tab_count) manager.active_idx = pa;
     }
     persisted_tabs_v2 = null; // apply exactly once
+    var pin_n: usize = 0;
+    var freeze_n: usize = 0;
+    for (0..manager.tab_count) |i| {
+        if (manager.tabs[i].pinned) pin_n += 1;
+        if (manager.tabs[i].frozen) freeze_n += 1;
+    }
+    const title = if (manager.tab_count > 0) manager.tabs[0].get_title() else "";
+    var abuf: [96]u8 = undefined;
+    const amsg = std.fmt.bufPrint(&abuf, "{s}n={d} pin={d} freeze={d} title={s}\n", .{
+        tabs_applied_marker, manager.tab_count, pin_n, freeze_n, title,
+    }) catch "tabwm: tabs-applied v2\n";
+    write_marker(amsg);
     return true;
 }
 
@@ -2660,6 +2718,18 @@ pub fn unsaved_dialog_key(usage: u8) bool {
     return true;
 }
 
+/// If a persisted `.tabs` record is waiting and the live tab count now
+/// matches, apply it and keep pinned tabs in front. CALC's
+/// `declare_fullscreen` RPC often creates the tab *before* the kernel
+/// WM_WINDOW mirror, so apply has to be attempted on every join path
+/// (RPC, mirror-add, mirror-update), not only on the first unknown id.
+fn try_apply_persisted_after_join() void {
+    if (maybe_apply_persisted_tabs()) {
+        if (manager.active_idx) |a| activate_tab(a);
+    }
+    _ = manager.normalize_pinned();
+}
+
 /// One kernel WM_WINDOW mirror (kind 20), mirror-synced into the tab list
 /// (M42 UX, 2026-09-05 — extracted from main()'s inline handler):
 ///   - `released=true`: the kernel RELEASED the window (app self-exit or a
@@ -2723,6 +2793,10 @@ pub fn handle_window_mirror(wid: u8, visible: bool, released: bool, unsaved: boo
                 manager.tabs[idx].set_title(name);
             }
         }
+        // CALC's declare_fullscreen RPC often creates the tab *before*
+        // this mirror, so the add path (and its apply) never runs. Retry
+        // here once the live count can match the saved one.
+        try_apply_persisted_after_join();
         return;
     }
     // Unknown window: ids 0/1 are kernel-fixed layers, never tabs; the
@@ -2755,11 +2829,7 @@ pub fn handle_window_mirror(wid: u8, visible: bool, released: bool, unsaved: boo
     activate_tab(idx);
     // #1056 item 3c: if this registration completes the restored window set,
     // reorder to the persisted tab order and re-activate the saved tab.
-    if (maybe_apply_persisted_tabs()) {
-        if (manager.active_idx) |a| activate_tab(a);
-    }
-    // M48/BT3: keep pinned tabs ahead of the (possibly restored) order.
-    _ = manager.normalize_pinned();
+    try_apply_persisted_after_join();
 }
 
 // ---------------------------------------------------------------------------
@@ -3341,8 +3411,8 @@ pub fn draw_sidebar(scan: [*]u32) void {
     // the one free band of the rail, below the tray row.
     const go_rect = go_chip_rect();
     ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, go_rect, 4, if (hover_go) ui.sidebar_hover_pill() else ui.sidebar_bg());
-    ui.draw_text_sized(0, "GO", go_rect.x + 8, go_rect.y + 2, ui.font_size_badge, ui.theme_accent());
-    ui.draw_text_sized(0, "^G", go_rect.x + 58, go_rect.y + 2, ui.font_size_badge, ui.sidebar_text_inactive());
+    ui.draw_text_sized(0, go_chip_label, go_rect.x + 6, go_rect.y + 2, ui.font_size_badge, ui.theme_accent());
+    ui.draw_text_sized(0, go_chip_hint, go_rect.x + go_chip_w - 18, go_rect.y + 2, ui.font_size_badge, ui.sidebar_text_inactive());
 
     // M42 SX5: the Sexiburger god-menu overlay renders last (over the
     // canvas + sidebar dim).
@@ -3449,7 +3519,7 @@ pub fn draw_go(pixels: []u32) void {
     // Dim the content viewport behind the panel (source-over alpha).
     ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(viewport_x, 0, viewport_w, fb_h), 0, 0xB0000000);
     ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(px, py, pw, ph), 10, ui.sidebar_active_pill());
-    ui.draw_text_sized(0, "GO", px + 16, py + 12, ui.font_size_tab_title, ui.sidebar_text_active());
+    ui.draw_text_sized(0, go_chip_label, px + 16, py + 12, ui.font_size_tab_title, ui.sidebar_text_active());
     ui.draw_text_sized(0, "Ctrl+Shift+G", px + pw - 122, py + 14, ui.font_size_badge, ui.sidebar_text_inactive());
     // The query line — a pill, so the type-ahead target is unmistakable.
     ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(px + 12, py + 40, pw - 24, 26), 6, ui.sidebar_hover_pill());
@@ -3964,6 +4034,7 @@ pub fn wnd_mail_apply(req: *const ui.WmRpc) bool {
             if (label_slice.len > 0) {
                 if (manager.at_capacity(req.id)) return false;
                 _ = manager.add_or_update_tab(req.id, label_slice);
+                try_apply_persisted_after_join();
                 return true;
             }
             return false;
@@ -3995,6 +4066,7 @@ pub fn wnd_mail_apply(req: *const ui.WmRpc) bool {
             if (manager.active_idx != null and manager.active_idx.? == idx) {
                 activate_tab(idx);
             }
+            try_apply_persisted_after_join();
             return true;
         },
         ui.wm_rpc_kind_cycle_tab => {
@@ -6079,6 +6151,8 @@ test "tabwm: Go rail chip and chord are wired (TWM/GO7)" {
     try std.testing.expect(r.x + r.w <= sidebar_w);
     try std.testing.expect(r.y >= 696 and r.y + r.h <= fb_h);
     try std.testing.expectEqual(@as(u8, 0x0a), usage_g);
+    try std.testing.expectEqualStrings("JUMP", go_chip_label);
+    try std.testing.expectEqualStrings("^G", go_chip_hint);
     try std.testing.expectEqualStrings("tabwm: go-summon\n", go_marker);
     try std.testing.expectEqualStrings("tabwm: go-miss\n", go_miss_marker);
     try std.testing.expectEqualStrings("tabwm: go-pick ", go_pick_tab_marker);
@@ -6090,6 +6164,32 @@ test "tabwm: go panel draws every selectable row (TWM/GO8)" {
     const last_row_bottom = go_panel_y + go_rows_y + @as(u32, @intCast(go_max_results)) * go_row_h;
     try std.testing.expect(last_row_bottom <= go_panel_y + go_panel_h - go_panel_footer);
     try std.testing.expectEqual(max_tabs + overlay_max_apps, go_scan_max);
+}
+
+test "tabwm: go_refresh is bounded well under the live scan budget (TWM/GO9)" {
+    resetForTest();
+    overlay_loaded = true;
+    overlay_count = overlay_max_apps;
+    var e: usize = 0;
+    while (e < overlay_max_apps) : (e += 1) {
+        overlay_label_lens[e] = 4;
+        @memcpy(overlay_labels[e][0..4], "AppX");
+        overlay_bin_lens[e] = 8;
+        @memcpy(overlay_bins[e][0..8], "APPS.BIN");
+    }
+    var i: usize = 0;
+    while (i < max_tabs) : (i += 1) {
+        var tbuf: [8]u8 = undefined;
+        const t = std.fmt.bufPrint(&tbuf, "T{d}", .{i}) catch "T";
+        _ = manager.add_or_update_tab(@intCast(i + 2), t);
+    }
+    go_refresh();
+    try std.testing.expect(go_match_count() == go_max_results);
+    // The live 5 ms budget is pinned by `tabwm: go-scan-us=` on
+    // live-tabwm-bt (CNTPCT). Host zig 0.16 has no std.time.Timer; the
+    // conversion itself is what we can unit-test here.
+    try std.testing.expectEqual(@as(u64, 1000), ticks_to_us(24_000, 24_000_000));
+    try std.testing.expectEqual(@as(u64, 0), ticks_to_us(100, 0));
 }
 
 test "tabwm: .tabs v2 round-trips pinned, frozen, group, and bin (TWM/ST1)" {
@@ -6149,6 +6249,50 @@ test "tabwm: a v2 state re-applies pinned/frozen/group/bin and order (TWM/ST2)" 
     try std.testing.expect(!maybe_apply_persisted_tabs()); // applies once
 }
 
+test "tabwm: declare_fullscreen join still applies pending v2 pin/freeze (TWM/ST6)" {
+    resetForTest();
+    var st = TabsStateV2{};
+    st.count = 1;
+    st.active = 0;
+    @memcpy(st.titles[0][0..4], "Calc");
+    st.title_lens[0] = 4;
+    st.flags[0] = tab_flag_pinned | tab_flag_frozen;
+    persisted_tabs_v2 = st;
+    var req = ui.WmRpc{
+        .kind = ui.wm_rpc_kind_declare_fullscreen,
+        .id = 2,
+        .seq = 1,
+        .reply_to = 5,
+        .applied = 0,
+        .pad = 0,
+        .x = 0,
+        .y = 0,
+        .w = 0,
+        .h = 0,
+        .title = [_]u8{0} ** ui.wm_rpc_title_max,
+    };
+    @memcpy(req.title[0..4], "Calc");
+    try std.testing.expect(wnd_mail_apply(&req));
+    try std.testing.expectEqual(@as(usize, 1), manager.tab_count);
+    try std.testing.expect(manager.tabs[0].pinned);
+    try std.testing.expect(manager.tabs[0].frozen);
+    try std.testing.expect(!maybe_apply_persisted_tabs());
+}
+
+test "tabwm: a later mirror still applies pending v2 when the RPC joined first (TWM/ST7)" {
+    resetForTest();
+    var st = TabsStateV2{};
+    st.count = 1;
+    @memcpy(st.titles[0][0..4], "Calc");
+    st.title_lens[0] = 4;
+    st.flags[0] = tab_flag_pinned | tab_flag_frozen;
+    persisted_tabs_v2 = st;
+    _ = manager.add_or_update_tab(2, "Calc");
+    handle_window_mirror(2, true, false, false, 512, 424);
+    try std.testing.expect(manager.tabs[0].pinned);
+    try std.testing.expect(manager.tabs[0].frozen);
+}
+
 test "tabwm: a v1 file still parses and a v2 parser refuses it (TWM/ST3)" {
     resetForTest();
     _ = manager.add_or_update_tab(2, "Legacy");
@@ -6160,6 +6304,12 @@ test "tabwm: a v1 file still parses and a v2 parser refuses it (TWM/ST3)" {
     try std.testing.expectEqualStrings("Legacy", st.titles[0][0..st.title_lens[0]]);
     var st2: TabsStateV2 = .{};
     try std.testing.expect(!parse_tabs_v2(buf[0..n], &st2));
+    // Downgrade: an older (v1-only) build refuses a v2 file rather than
+    // misreading the extra fields — version mismatch, no saved state.
+    const n2 = serialize_tabs_v2(&buf);
+    try std.testing.expectEqual(@as(u8, 2), buf[0]);
+    var st_v1: TabsState = .{};
+    try std.testing.expect(!parse_tabs(buf[0..n2], &st_v1));
 }
 
 test "tabwm: truncated or out-of-range v2 records are rejected (TWM/ST4)" {
