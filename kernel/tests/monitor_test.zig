@@ -97,9 +97,15 @@ const MapFixture = struct {
 };
 
 const TestEnv = struct {
-    // 8192: the `help` listing of the full command registry (46 commands,
-    // milestone fifteen card A1 added `sound`) must fit with its footer.
-    mock: console.MockConsole(8192) = .{},
+    // 12288: the `help` listing of the full command registry must fit with its
+    // footer. This buffer is a capture bound, not a design limit — the real
+    // console writes one line per command into the TX ring, so the listing has
+    // no total-size ceiling there — and it was at 8192 since the registry held
+    // 46 commands. At 76 (#1278 added `forensics`) the listing no longer fit
+    // and the footer was silently dropped, which is what this bound now needs
+    // headroom for: a new command grows the listing, so leave slack rather than
+    // re-tuning this to the exact byte count every time.
+    mock: console.MockConsole(12288) = .{},
     machine: MockMachineControl = .{},
     fixture: MapFixture = undefined,
 

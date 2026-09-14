@@ -30,7 +30,7 @@
 | `tools/lib/` | 2 | per-run isolation for live gates (`gate-run.sh`) |
 | `tools/status/` | 7 | multiagent coordination gate + claim tooling (class A) |
 | `tools/context/` | 2 | context snapshot helpers |
-| `tools/gate/` | 238 | M40 vgate harness + specs (GF2+) |
+| `tools/gate/` | 239 | M40 vgate harness + specs (GF2+) |
 
 ## Class-B fleet (discovered from the spec dir)
 
@@ -91,6 +91,7 @@ of them with `just verify-vz`.
 | spec | `live-filemanager-props` | 1 run / 5 assert | live-filemanager-props.spec -- M25 Lane A F2: properties inspector on VZ. |
 | spec | `live-filemanager-recent` | 1 run / 7 assert | live-filemanager-recent.spec -- M25 Lane B F5: recent ring on VZ. |
 | spec | `live-font-sizes` | 1 run / 6 assert | live-font-sizes.spec -- milestone-twenty card U1 class-B gate |
+| spec | `live-forensics` | 1 run / 10 assert | live-forensics.spec -- #1278 class-B gate: the last-words recorder. |
 | spec | `live-fs` | 2 run / 12 assert | live-fs.spec -- host-share storage (M34 HF6): run A writes |
 | spec | `live-gfs` | 2 run / 10 assert | live-gfs.spec -- the general store IS the host share: `mount` |
 | spec | `live-glob` | 1 run / 6 assert | live-glob.spec -- shell globbing: *, ?, and [...] all expand to |

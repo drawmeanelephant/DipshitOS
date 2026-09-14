@@ -40,14 +40,22 @@ let package = Package(
             name: "VSSH",
             path: "Sources/VSSH"
         ),
+        // #1278: the VM stop-reason recorder — the host half of the fault/state
+        // recorder that unblocks #1261. Pure Swift/Foundation, ZERO
+        // Virtualization imports, so its formatting and ordering rules are
+        // pinned by `swift test` on a machine that never boots a VM.
+        .target(
+            name: "VMPostmortem",
+            path: "Sources/VMPostmortem"
+        ),
         .executableTarget(
             name: "VMRunner",
-            dependencies: ["VFWire", "VSSH"],
+            dependencies: ["VFWire", "VSSH", "VMPostmortem"],
             path: "Sources/VMRunner"
         ),
         .testTarget(
             name: "VMRunnerTests",
-            dependencies: ["VFWire", "VSSH"]
+            dependencies: ["VFWire", "VSSH", "VMPostmortem"]
         )
     ],
     swiftLanguageModes: [.v5]

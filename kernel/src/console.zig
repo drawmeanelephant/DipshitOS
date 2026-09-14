@@ -17,6 +17,19 @@ const std = @import("std");
 /// Value-type console handle: `ctx` plus a stateless function-pointer vtable.
 /// Every method below degrades to `write`, so a transport only has to
 /// provide one function (plus a no-op-friendly `flush`).
+/// Forensics drain seam (claim #1278). A hook the console calls immediately
+/// before each write, so a recorder can prefix pending trace records to an
+/// ordinary line. A seam rather than an import because the recorder needs
+/// `Console` to print, and `Console` would need the recorder to call it — the
+/// same wiring pattern `exceptions.init(writer)` and `set_irq_dispatcher` use.
+///
+/// Null by default, so a default boot has no hook and no recorder.
+var drain_hook: ?*const fn (Console) void = null;
+
+pub fn set_drain_hook(f: *const fn (Console) void) void {
+    drain_hook = f;
+}
+
 pub const Console = struct {
     ctx: *anyopaque,
     vtable: *const VTable,
@@ -35,6 +48,10 @@ pub const Console = struct {
     };
 
     pub fn write(self: Console, bytes: []const u8) void {
+        // Claim #1278: let the recorder emit pending trace records ahead of
+        // this line. The hook is responsible for its own reentrancy guard —
+        // it prints, which lands back here.
+        if (drain_hook) |h| h(self);
         self.vtable.write(self.ctx, bytes);
     }
 

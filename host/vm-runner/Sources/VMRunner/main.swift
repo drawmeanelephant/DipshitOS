@@ -221,6 +221,7 @@ import Foundation
 import ScreenCaptureKit
 import Virtualization
 import VFWire
+import VMPostmortem
 import VSSH
 
 // Diagnostics and the console tee must survive signal exits (SIGINT/SIGTERM),
@@ -1970,7 +1971,48 @@ final class Runner: NSObject {
     }
 }
 
+// ---------------------------------------------------------------------------
+// VM stop reasons (claim #1278, the unblock for #1261).
+//
+// VZVirtualMachineDelegate exists precisely to carry the reason a VM stopped,
+// and its own header says so (VZVirtualMachine.h: "For error cases, use the
+// `state` property and information passed through the VZVirtualMachineDelegate
+// to inspect the virtual machine's current state"). This binary set no
+// delegate, so that information was discarded and a dying boot could only ever
+// be reported as the bare state rawValue — which is why #1261 spent a whole
+// investigation looking at `state=3` with no reason attached.
+//
+// Every member of the protocol is `@optional`, which makes a wrong signature
+// compile silently and simply never be called. Both names below are therefore
+// witnessed, not guessed: `#selector(VZVirtualMachineDelegate.guestDidStop(_:))`
+// and `#selector(VZVirtualMachineDelegate.virtualMachine(_:didStopWithError:))`
+// each resolve, which a wrong spelling could not.
+//
+// This class is only the VZ selector surface: the recording rules (what an
+// error line looks like, and that an error outranks a racing clean stop) live in
+// the VMPostmortem module, where `swift test` pins them without a VM.
+final class VMRunnerDelegate: NSObject, VZVirtualMachineDelegate {
+    let stopReasons = StopReasonRecorder()
+
+    func guestDidStop(_ virtualMachine: VZVirtualMachine) {
+        stopReasons.recordGuestPoweredOff()
+    }
+
+    func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: Error) {
+        stopReasons.recordError(error)
+    }
+
+    /// The ` reason=…` suffix for a verdict line (never empty: a VM that stopped
+    /// without VZ narrating it says so).
+    func verdict() -> String { stopReasons.verdictSuffix() }
+}
+
+// Held strongly: `VZVirtualMachine.delegate` is a weak property, so a
+// temporary would be deallocated immediately and never called.
+let vmDelegate = VMRunnerDelegate()
+
 let runner = Runner(configuration: config)
+runner.vm.delegate = vmDelegate
 // Set when vm.start completes successfully; consolePoll only treats a
 // .stopped/.error state as "session over" after the VM has actually started
 // (a fresh VZVirtualMachine is .stopped until boot begins).
@@ -2406,6 +2448,12 @@ func finish(success: Bool) {
                 _ = netCaptureDone.wait(timeout: .now() + 2)
                 try? netCaptureHandle?.close()
             }
+            // Claim #1278: report the stop verdict on EVERY run, not only the
+            // failing ones. The live gate asserts this line, so dropping the
+            // `runner.vm.delegate = vmDelegate` wiring — the exact omission that
+            // left #1261 with a bare `state=3` and no reason — now fails a gate
+            // instead of silently discarding the reason again.
+            print("vm-stop: state=\(runner.vm.state.rawValue)\(vmDelegate.verdict())")
             exit(finalSuccess ? 0 : 1)
         }
     }
@@ -4861,7 +4909,9 @@ func scriptPoll(matchedAt: Date? = nil) {
         if matchedAt != nil {
             finish(success: true)
         } else {
-            FileHandle.standardError.write(Data("FAILURE: VM ended before the expected transcript appeared (state=\(runner.vm.state.rawValue)).\n".utf8))
+            // Claim #1278: name the reason, not just the state. `state=3` on
+            // its own is what made #1261 unfalsifiable from the outside.
+            FileHandle.standardError.write(Data("FAILURE: VM ended before the expected transcript appeared (state=\(runner.vm.state.rawValue)).\(vmDelegate.verdict())\n".utf8))
             finish(success: false)
         }
         return
@@ -4990,7 +5040,10 @@ func consolePoll() {
     if vmDidStart && (state == .stopped || state == .error) {
         // The VM already ended, so VZ closed the serial pipe — the tee is
         // draining on its own; wait for it instead of the fixed 0.5 s sleep.
-        beginConsoleExit("VM ended (state=\(state.rawValue))", code: 0)
+        // Claim #1278: report the delegate's reason alongside the state on the
+        // console-exit path too — this is the branch a passing-but-dead boot
+        // takes, so it is the one that most often hid an error.
+        beginConsoleExit("VM ended (state=\(state.rawValue)).\(vmDelegate.verdict())", code: 0)
         return
     }
     if consoleTimeout > 0, Date() > consoleDeadline {
