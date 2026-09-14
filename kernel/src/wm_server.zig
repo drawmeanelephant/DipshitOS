@@ -40,6 +40,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const events = @import("events.zig");
 const process = @import("process.zig"); // the seat's process row: the registry bound (max_processes) + the M52 dead-seat routing gate
+const timer = @import("timer.zig"); // M53 card 1 (#1247): the counter clock behind the rate/latency figures
 const virtio_gpu = @import("virtio_gpu.zig");
 const mmu = @import("mmu.zig");
 const driving_award = @import("driving_award.zig"); // M32 WMS4: the renderer owns the chrome state the seam's teardown clears
@@ -154,6 +155,101 @@ var present_seq: u32 = 0;
 var present_count: u64 = 0;
 /// Total COMPOSITE_TICK events delivered to the registered WM.
 var tick_count: u64 = 0;
+
+// --- M53 card 1 (#1247): frame observability ---------------------------------
+//
+// Two questions no gate could answer before this: **how often does the desktop
+// actually present**, and **how long does an input sample wait to reach the
+// screen**. The kind-18 COMPOSITE_TICK is 1 Hz (timer.zig `period_ns`), but in
+// WM mode the present is the WM's own decision (`pointer_tick` returns early
+// once a seat is registered, and REQUEST_PRESENT is what transfers+flushes), so
+// 1 Hz is the heartbeat, not necessarily the cadence. These counters measure
+// rather than assume.
+//
+// The latency is deliberately split into its two halves, because they have
+// different owners and different fixes:
+//   * input sample -> REQUEST_PRESENT  = how long the WM's loop took to answer
+//     (the WM's responsiveness; a WM that only presents on the tick shows ~1 s)
+//   * REQUEST_PRESENT -> flushed       = the kernel + GPU cost of a present
+// A single end-to-end number would hide which half is slow.
+
+/// Injectable ns clock. Host tests drive it (they cannot read CNTPCT_EL0:
+/// `timer.cntpct` returns 0 under `builtin.is_test`), which is the same reason
+/// the hook exists — the math is testable only against a clock we choose.
+/// The kernel path reads the counter and converts with CNTFRQ_EL0, in u128 so
+/// no uptime can overflow the multiply.
+pub var now_ns_hook: ?*const fn () u64 = null;
+
+fn now_ns() u64 {
+    if (now_ns_hook) |h| return h();
+    const f = timer.freq;
+    if (f == 0) return 0;
+    return @intCast(@as(u128, timer.cntpct()) * 1_000_000_000 / f);
+}
+
+/// The rate window's edges (ns): first/last present, first/last tick.
+var first_present_ns: u64 = 0;
+var last_present_ns: u64 = 0;
+var first_tick_ns: u64 = 0;
+var last_tick_ns: u64 = 0;
+/// Arrival of the OLDEST input sample not yet answered by a present; 0 = none
+/// outstanding. Only the oldest is kept: it is the sample whose visible delay
+/// is the longest, which is the number that matters.
+var input_stamp_ns: u64 = 0;
+/// input sample -> present. `sum`/`max` in ns; `count` is the sample count.
+var lat_count: u64 = 0;
+var lat_sum_ns: u64 = 0;
+var lat_max_ns: u64 = 0;
+/// present -> transfer+flush complete (the kernel/GPU half).
+var flush_count: u64 = 0;
+var flush_sum_ns: u64 = 0;
+var flush_max_ns: u64 = 0;
+
+/// Timestamp an input sample if none is outstanding (see `input_stamp_ns`).
+/// Gated on `present_count > 0` so shim-mode fan-out (no presenter yet) does
+/// not manufacture a latency sample for a present that never answers it.
+fn note_input() void {
+    if (input_stamp_ns == 0 and present_count > 0) input_stamp_ns = now_ns();
+}
+
+fn record_latency(ns: u64) void {
+    lat_count +%= 1;
+    lat_sum_ns +%= ns;
+    if (ns > lat_max_ns) lat_max_ns = ns;
+}
+
+fn record_flush(ns: u64) void {
+    flush_count +%= 1;
+    flush_sum_ns +%= ns;
+    if (ns > flush_max_ns) flush_max_ns = ns;
+}
+
+/// The cadence is reported as an AVERAGE INTERVAL in ms, not as a
+/// presents-per-second integer: the live run measured 15 presents over ~31 s,
+/// and `15/31` truncates to 0 pps — a row that reads `present_pps=0` beside
+/// `presents=15` is worse than useless, it is a lie by rounding. An interval
+/// is lossless at this granularity and is the thing both questions actually
+/// need (present interval vs tick interval; a rate is 1000/interval).
+/// 0 means "no positive window yet" — never an invented figure.
+pub fn present_window_ms() u64 {
+    if (present_count < 2 or last_present_ns <= first_present_ns) return 0;
+    return (last_present_ns - first_present_ns) / 1_000_000;
+}
+
+pub fn present_avg_ms() u64 {
+    if (present_count < 2 or last_present_ns <= first_present_ns) return 0;
+    return (last_present_ns - first_present_ns) / (present_count - 1) / 1_000_000;
+}
+
+/// The tick interval by the same arithmetic — printed beside the present
+/// interval so the row states the heartbeat it is being compared against,
+/// rather than leaving 1 Hz as folklore. Note it needs a span of MANY ticks to
+/// read as 1000 ms: a 30-tick span that drifted 2% short truncates a pps form
+/// to 0, which is exactly how this field was caught being wrong.
+pub fn tick_avg_ms() u64 {
+    if (tick_count < 2 or last_tick_ns <= first_tick_ns) return 0;
+    return (last_tick_ns - first_tick_ns) / (tick_count - 1) / 1_000_000;
+}
 /// M32 WMS4 (issue #624): total SET_WINDOW chrome-descriptor submissions
 /// accepted (the `wm` observability counter — submissions counted). The
 /// descriptors themselves live in `driving_award` (per-window + policy);
@@ -238,6 +334,19 @@ pub fn init() void {
     present_seq = 0;
     present_count = 0;
     tick_count = 0;
+    // M53 card 1 (#1247): a reset is a fresh window — every rate/latency
+    // accumulator starts empty (the hook itself is the test's to own).
+    first_present_ns = 0;
+    last_present_ns = 0;
+    first_tick_ns = 0;
+    last_tick_ns = 0;
+    input_stamp_ns = 0;
+    lat_count = 0;
+    lat_sum_ns = 0;
+    lat_max_ns = 0;
+    flush_count = 0;
+    flush_sum_ns = 0;
+    flush_max_ns = 0;
     set_window_count = 0;
     set_state_count = 0;
     alt_tab_apply_count = 0;
@@ -443,6 +552,11 @@ pub fn on_tick() void {
     const pid = wm_pid orelse return;
     if (seat_dead(pid)) return; // M52 card 2: never route a tick to a dead pid
     tick_count +%= 1;
+    // M53 card 1 (#1247): the tick rate's window (printed beside the present
+    // rate so the comparison is stated, not assumed).
+    const t = now_ns();
+    if (first_tick_ns == 0) first_tick_ns = t;
+    last_tick_ns = t;
     // M33 SB5 (claim 7397): the kernel paints its layer (chrome + unmigrated
     // windows) at TICK time, BEFORE the WM's compose-N stores land — so at
     // flush time the scanout z-order is kernel-layer UNDER the WM's user
@@ -482,9 +596,25 @@ pub fn request_present() bool {
     // pattern): on a host test the counters still advance — the present was
     // SCHEDULED, which is the observable contract — and the live gate runs
     // the real transfer+flush on the kernel image.
+    //
+    // M53 card 1 (#1247): the present is timed on both edges. `t0..t1` is the
+    // kernel+GPU half of the latency (on a host test the work is skipped, so
+    // that figure is the clock's resolution, not a GPU cost — the live gate is
+    // the one that measures hardware).
+    const t0 = now_ns();
     if (!builtin.is_test) {
         _ = virtio_gpu.gpu_transfer();
         _ = virtio_gpu.gpu_flush();
+    }
+    const t1 = now_ns();
+    record_flush(t1 -% t0);
+    // The present is the right edge of the rate window, and it ANSWERS the
+    // oldest outstanding input sample — that wait is the WM's half.
+    if (first_present_ns == 0) first_present_ns = t1;
+    last_present_ns = t1;
+    if (input_stamp_ns != 0) {
+        record_latency(t1 -% input_stamp_ns);
+        input_stamp_ns = 0;
     }
     return true;
 }
@@ -510,6 +640,20 @@ pub const WmInfo = struct {
     pointer_fan_count: u64,
     window_mirror_count: u64,
     key_fan_count: u64,
+    // M53 card 1 (#1247): measured cadence + latency. Cadence is an average
+    // INTERVAL in ms (see `present_avg_ms` — a pps integer truncates sub-1
+    // rates to 0). `window_ms` is 0 until a positive window exists;
+    // `lat_avg_ns`/`flush_avg_ns` are 0 with no samples (never a fabricated
+    // 0-sample average).
+    present_window_ms: u64,
+    present_avg_ms: u64,
+    tick_avg_ms: u64,
+    lat_count: u64,
+    lat_avg_ns: u64,
+    lat_max_ns: u64,
+    flush_count: u64,
+    flush_avg_ns: u64,
+    flush_max_ns: u64,
 };
 
 pub fn info() WmInfo {
@@ -533,6 +677,15 @@ pub fn info() WmInfo {
         .pointer_fan_count = pointer_fan_count,
         .window_mirror_count = window_mirror_count,
         .key_fan_count = key_fan_count,
+        .present_window_ms = present_window_ms(),
+        .present_avg_ms = present_avg_ms(),
+        .tick_avg_ms = tick_avg_ms(),
+        .lat_count = lat_count,
+        .lat_avg_ns = if (lat_count == 0) 0 else lat_sum_ns / lat_count,
+        .lat_max_ns = lat_max_ns,
+        .flush_count = flush_count,
+        .flush_avg_ns = if (flush_count == 0) 0 else flush_sum_ns / flush_count,
+        .flush_max_ns = flush_max_ns,
     };
 }
 
@@ -569,6 +722,7 @@ var set_state_count: u64 = 0;
 pub fn fan_pointer(x: u32, y: u32, buttons: u8) void {
     const pid = wm_pid orelse return;
     if (seat_dead(pid)) return; // M52 card 2: never route to a dead pid
+    note_input(); // M53 card 1 (#1247): the left edge of the latency sample
     pointer_fan_count +%= 1;
     events.push(pid, .{
         .kind = events.WM_POINTER,
@@ -613,6 +767,7 @@ pub fn fan_window(id: u8, x: u32, y: u32, w: u32, h: u32, visible: bool, focused
 pub fn fan_key(usage: u8, flags: u16) void {
     const pid = wm_pid orelse return;
     if (seat_dead(pid)) return; // M52 card 2: never route to a dead pid
+    note_input(); // M53 card 1 (#1247): the left edge of the latency sample
     key_fan_count +%= 1;
     events.push(pid, .{
         .kind = events.WM_KEY,
@@ -946,6 +1101,99 @@ test "wm_server: REQUEST_PRESENT advances the present sequence and count" {
     // Tear down so the aggregated test binary does not leak input ownership.
     try std.testing.expect(unregister(3));
     try std.testing.expect(!driving_award.wm_owns_input);
+}
+
+/// M53 card 1 (#1247): the injected clock. `step` lets a test advance time per
+/// read (which is how the kernel+GPU half gets a nonzero figure) or hold it
+/// still and position it by hand (which is how the latency math is pinned
+/// exactly).
+var test_clock_ns: u64 = 0;
+var test_clock_step: u64 = 0;
+fn test_clock() u64 {
+    test_clock_ns += test_clock_step;
+    return test_clock_ns;
+}
+
+test "wm_server: M53 frame observability — cadence + both latency halves from an injected clock" {
+    events.init();
+    init();
+    events.on_event_pushed = null;
+    process.init();
+    const seat = process.create("WND.BIN", .{ .entry_va = 0x400000, .content_len = 1 }, .{}, .{}).?;
+    _ = process.bind(seat, 9);
+    try std.testing.expect(register(seat));
+
+    now_ns_hook = &test_clock;
+    defer now_ns_hook = null;
+    test_clock_step = 0; // hold time still; position it by hand
+    test_clock_ns = 1_000;
+
+    // Present 1: the rate window's left edge. No input is outstanding, so it
+    // records a flush but NO latency sample (never fabricate a sample).
+    try std.testing.expect(request_present());
+    try std.testing.expectEqual(@as(u64, 0), info().lat_count);
+
+    // An input sample 10 ms later, answered 30 ms after that: the WM's half of
+    // the latency — how long the sample waited for the WM's own present.
+    test_clock_ns += 10_000_000;
+    fan_pointer(1, 2, 0);
+    test_clock_ns += 30_000_000;
+    try std.testing.expect(request_present());
+    try std.testing.expectEqual(@as(u64, 1), info().lat_count);
+    try std.testing.expectEqual(@as(u64, 30_000_000), info().lat_avg_ns);
+    try std.testing.expectEqual(@as(u64, 30_000_000), info().lat_max_ns);
+
+    // A second sample (keyboard rides the same seam) that waits only 5 ms: the
+    // average moves, the max does not.
+    test_clock_ns += 1;
+    fan_key(0x04, 0);
+    test_clock_ns += 5_000_000;
+    try std.testing.expect(request_present());
+    try std.testing.expectEqual(@as(u64, 2), info().lat_count);
+    try std.testing.expectEqual(@as(u64, 17_500_000), info().lat_avg_ns);
+    try std.testing.expectEqual(@as(u64, 30_000_000), info().lat_max_ns);
+
+    // A present nobody was waiting for adds no sample and does not move max.
+    test_clock_ns += 1_000_000;
+    try std.testing.expect(request_present());
+    try std.testing.expectEqual(@as(u64, 2), info().lat_count);
+    // 4 presents over a 46.000001 ms window -> 3 gaps -> 46 ms window,
+    // 15 ms average interval (the pps form would have read 65; the interval
+    // form is what a sub-1 pps desktop needs to be legible at all).
+    try std.testing.expectEqual(@as(u64, 46), info().present_window_ms);
+    try std.testing.expectEqual(@as(u64, 15), info().present_avg_ms);
+    // No ticks yet: the tick interval is 0, not a fabricated 1 s.
+    try std.testing.expectEqual(@as(u64, 0), info().tick_avg_ms);
+    try std.testing.expectEqual(@as(u64, 4), info().flush_count);
+
+    // Now advance the clock per read: the present's own t0..t1 span becomes a
+    // real 1 ms, which is the SHAPE of the kernel+GPU half (the figure is a
+    // hardware number only on the live gate — this pins the accounting).
+    test_clock_step = 1_000_000;
+    try std.testing.expect(request_present());
+    try std.testing.expectEqual(@as(u64, 5), info().flush_count);
+    try std.testing.expectEqual(@as(u64, 200_000), info().flush_avg_ns);
+    try std.testing.expectEqual(@as(u64, 1_000_000), info().flush_max_ns);
+    try std.testing.expectEqual(@as(u64, 2), info().lat_count); // still nothing outstanding
+
+    // The tick interval is measured the same way — one tick per second.
+    test_clock_step = 0;
+    test_clock_ns = 1_000_000_000;
+    on_tick();
+    test_clock_ns = 2_000_000_000;
+    on_tick();
+    try std.testing.expectEqual(@as(u64, 1000), info().tick_avg_ms);
+    // And it SURVIVES drift: a third tick 20 ms late reads as a 1010 ms
+    // average interval. The pps form read 0 for the same span (2/2.02
+    // truncates) — which is exactly how the live run's `tick_pps=0` beside
+    // `ticks=31` was caught.
+    test_clock_ns = 3_020_000_000;
+    on_tick();
+    try std.testing.expectEqual(@as(u64, 1010), info().tick_avg_ms);
+
+    // Tear down for the aggregated binary.
+    try std.testing.expect(unregister(seat));
+    process.init();
 }
 
 test "wm_server: seat release drops every WM-owned input capture (M52 card 2, #1239)" {
