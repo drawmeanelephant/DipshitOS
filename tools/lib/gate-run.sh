@@ -168,6 +168,93 @@ gate_build_runner() {
     swift build --package-path host/vm-runner --configuration release "$@"
     codesign --force --sign - --entitlements host/vm-runner/entitlements.plist \
         host/vm-runner/.build/release/VMRunner
+    # The signature is the difference between a runner that boots and one that
+    # cannot; assert it here, where it was just applied, rather than letting a
+    # later VM boot report it as something else (see the preflight below).
+    gate_assert_runner_entitled "$VZ_RUNNER_BIN"
+}
+
+# --- VZ preflight -------------------------------------------------------------
+# Two class-B failures both surface at VM boot looking like something else, and
+# both are cheap to name in advance:
+#
+#   1. A runner built with a bare `swift build` -- i.e. without gate_build_
+#      runner's codesign step -- carries no entitlements. Virtualization.
+#      framework then refuses it, and the failure reads like a hardware or
+#      configuration problem instead of a missing signature. VGATE_NO_BUILD=1
+#      makes this reachable for a stale binary nobody re-signed.
+#   2. A host without Hypervisor.framework cannot boot a guest at all, and the
+#      gate that fails gets blamed instead of the host. Measured 2026-09-14 on
+#      GitHub's hosted runners: kern.hv_support=0 with hv_vmm_present=1 (the
+#      runner is itself a guest), and a direct hv_vm_create returns
+#      0xfae9400f HV_UNSUPPORTED.
+#
+# Note the code in (2) matters: a MIS-SIGNED hv_vm_create probe returns
+# 0xfae94007 HV_DENIED instead -- a verdict about the signature standing where
+# a verdict about the machine is expected. That is exactly why the entitlement
+# is asserted separately here, and why docs/vz-runner.md keeps the two apart.
+
+VZ_RUNNER_BIN="host/vm-runner/.build/release/VMRunner"
+VZ_RUNNER_ENTITLEMENT="com.apple.security.virtualization"
+
+# gate_assert_runner_entitled [BIN] -- the runner binary must actually carry
+# the Virtualization.framework entitlement in its signature.
+gate_assert_runner_entitled() {
+    local bin="${1:-$VZ_RUNNER_BIN}"
+    if [ ! -f "$bin" ]; then
+        echo "gate-run: ERROR — no runner binary at $bin" >&2
+        echo "  Build it through gate_build_runner (tools/lib/gate-run.sh)," >&2
+        echo "  which builds AND signs it." >&2
+        return 1
+    fi
+    local sig
+    sig="$(codesign -d --entitlements - "$bin" 2>&1 || true)"
+    case "$sig" in
+        *"$VZ_RUNNER_ENTITLEMENT"*) return 0 ;;
+    esac
+    {
+        echo "gate-run: ERROR — $bin is NOT entitled with $VZ_RUNNER_ENTITLEMENT."
+        echo "  A bare 'swift build' produces a binary Virtualization.framework"
+        echo "  will refuse; the entitlement comes from an ad-hoc codesign pass"
+        echo "  AFTER the build. Booting now would fail with an error that looks"
+        echo "  like a host or configuration problem. Fix with either:"
+        echo "      codesign --force --sign - \\"
+        echo "          --entitlements host/vm-runner/entitlements.plist $bin"
+        echo "  or rebuild through gate_build_runner. (codesign said: ${sig%%$'\n'*})"
+    } >&2
+    return 1
+}
+
+# gate_report_hv_capability -- print the host's hypervisor capability verdict
+# and fail when this host cannot host a guest at all, so the reason is stated
+# rather than inferred from whatever Virtualization.framework reports.
+gate_report_hv_capability() {
+    local hv vmm
+    hv="$(sysctl -n kern.hv_support 2>/dev/null || true)"
+    vmm="$(sysctl -n kern.hv_vmm_present 2>/dev/null || true)"
+    echo "gate-run: host $(sw_vers -productVersion 2>/dev/null || echo '?')/$(uname -m); kern.hv_support=${hv:-?} hv_vmm_present=${vmm:-?}"
+    if [ "$hv" = "1" ]; then
+        return 0
+    fi
+    {
+        echo "gate-run: ERROR — Hypervisor.framework unavailable (kern.hv_support=${hv:-?})."
+        echo "  Virtualization.framework cannot boot a guest on this host, so every"
+        echo "  class-B gate will fail here regardless of the code under test."
+        if [ "$vmm" = "1" ]; then
+            echo "  hv_vmm_present=1: this host is itself a VM without nested"
+            echo "  virtualization (that is the GitHub-hosted runner case)."
+        fi
+        echo "  See docs/vz-runner.md; class B needs a real Apple silicon host."
+    } >&2
+    return 1
+}
+
+# gate_preflight_vz [BIN] -- the one call a class-B harness makes before it
+# boots anything. Tolerant of being called twice (the vgate preamble runs it
+# for both the build and the VGATE_NO_BUILD=1 branches).
+gate_preflight_vz() {
+    gate_report_hv_capability || return 1
+    gate_assert_runner_entitled "${1:-$VZ_RUNNER_BIN}"
 }
 
 # gate_serial_has_echo -- did the guest console echo the given command in the
