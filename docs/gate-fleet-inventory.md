@@ -30,7 +30,7 @@
 | `tools/lib/` | 2 | per-run isolation for live gates (`gate-run.sh`) |
 | `tools/status/` | 7 | multiagent coordination gate + claim tooling (class A) |
 | `tools/context/` | 2 | context snapshot helpers |
-| `tools/gate/` | 233 | M40 vgate harness + specs (GF2+) |
+| `tools/gate/` | 234 | M40 vgate harness + specs (GF2+) |
 
 ## Class-B fleet (discovered from the spec dir)
 
@@ -249,6 +249,7 @@ of them with `just verify-vz`.
 | spec | `live-win-move` | 1 run / 26 assert | live-win-move.spec -- claim 0487 (milestone six, card G6 move/raise |
 | spec | `live-win-syscall` | 1 run / 18 assert | live-win-syscall.spec -- claim 0487 (milestone six, card G6) class-B |
 | spec | `live-wm-ipc` | 2 run / 9 assert | live-wm-ipc.spec -- M32 WMS7 (issue #627) app<->WM mailbox protocol (WM_RPC) on VZ |
+| spec | `live-wm-pacing` | 1 run / 7 assert | live-wm-pacing.spec -- M53 card 1 (#1247): what the desktop's frame cadence |
 | spec | `live-wm1` | 1 run / 13 assert | live-wm1.spec -- Lane 1 WM1 (#707, claim 919) class-B gate: eight concurrent user windows |
 | spec | `live-wm3-taskbar` | 3 run / 13 assert | live-wm3-taskbar.spec -- M32 WM3 (Lane 1, #707): taskbar shows per-window entries, workspace-aware |
 | spec | `live-wm4-paint` | 2 run / 4 assert | live-wm4-paint.spec -- M32 WM4 (Lane 1, #707): WM rest policy blends unfocused, focused pure |

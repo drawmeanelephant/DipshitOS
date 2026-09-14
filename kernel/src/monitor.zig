@@ -7191,6 +7191,29 @@ fn cmd_wm(m: *Monitor, args: []const []const u8) ExecError {
         m.console.puts(" ticks=");
         m.console.print_u64(info.tick_count);
         m.console.puts("\n");
+        // M53 card 1 (#1247): the MEASURED cadence, and the two halves of the
+        // input->scanout latency (WM loop turn | kernel+GPU present cost).
+        // Integer pps is an average over the register's life; tick_pps is
+        // printed beside it so the comparison is stated, not assumed.
+        m.console.puts("wm: rate window_ms=");
+        m.console.print_u64(info.present_window_ms);
+        m.console.puts(" present_avg_ms=");
+        m.console.print_u64(info.present_avg_ms);
+        m.console.puts(" tick_avg_ms=");
+        m.console.print_u64(info.tick_avg_ms);
+        m.console.puts(" lat_n=");
+        m.console.print_u64(info.lat_count);
+        m.console.puts(" lat_avg_us=");
+        m.console.print_u64(info.lat_avg_ns / 1000);
+        m.console.puts(" lat_max_us=");
+        m.console.print_u64(info.lat_max_ns / 1000);
+        m.console.puts(" flush_n=");
+        m.console.print_u64(info.flush_count);
+        m.console.puts(" flush_avg_us=");
+        m.console.print_u64(info.flush_avg_ns / 1000);
+        m.console.puts(" flush_max_us=");
+        m.console.print_u64(info.flush_max_ns / 1000);
+        m.console.puts("\n");
         // M32 WMS4 (issue #624): chrome observability — SET_WINDOW
         // submissions counted, the broadcast policy's chrome kind, and the
         // effective last chrome kind of every user window (0 = shim rules).
