@@ -2574,7 +2574,6 @@ pub fn build(b: *std.Build) void {
     });
     driving_award_mod.addOptions("build_options", kernel_options);
 
-
     // TLS 1.3 client (ADR 0029 D8). The library is not yet linked into any
     // guest binary, so this flag is the entire rollback surface: with
     // -Dtls_client=false the TLS roots are not built or tested and every other
