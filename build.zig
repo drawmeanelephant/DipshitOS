@@ -2474,13 +2474,6 @@ pub fn build(b: *std.Build) void {
         // they need no extra mapping of their own.
         "user/src/lib/tls/keyschedule.zig",
         "user/src/lib/tls/record.zig",
-        // X.509 layer (card TLS13-C3): the strict DER reader, the certificate
-        // parser, PEM decoding and hostname/identity matching. None of these
-        // touch the crypto library, so no extra module mapping is needed.
-        "user/src/lib/tls/der.zig",
-        "user/src/lib/tls/pem.zig",
-        "user/src/lib/tls/x509.zig",
-        "user/src/lib/tls/identity.zig",
         // RSA + ECDSA verification (card TLS13-C2): fixed-capacity bigint,
         // RSASSA-PKCS1-v1_5 and RSASSA-PSS, ECDSA over P-256/P-384. rsa.zig
         // and ecdsa.zig reach the crypto library through the mapped `crypto`
