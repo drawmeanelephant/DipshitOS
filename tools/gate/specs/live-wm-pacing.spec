@@ -100,10 +100,16 @@ assert 800 <= tick_avg_ms <= 1200, "tick_avg_ms=%d is not the 1 Hz heartbeat: %s
 # sample) and the right edge (the WM's present) both happened.
 assert lat_n >= 1, "no input->present latency sample was recorded: %s" % row
 assert lat_avg_us > 0, "latency recorded as zero — the clock never advanced: %s" % row
-# Sanity ceiling only: the heartbeat period is the worst case for a WM that
-# answers on the tick, so anything beyond a few seconds means the accounting
-# is broken rather than slow.
-assert lat_max_us < 5_000_000, "impossible latency (%d us): %s" % (lat_max_us, row)
+# The bound WMP card 2 (#1250) earned: before it, the WM presented only on
+# every 2nd tick and the worst sample waited two intervals (3004 ms measured on
+# the pre-fix tree). Now the frame is flushed when the input burst ends, so the
+# remaining term is WAKE-TO-RUN — the scheduler round-robins on the 1 Hz timer
+# (scheduler.zig "every tick preempts the current task"), so a woken WM still
+# waits up to one tick to actually execute. One tick (~1.0-1.1 s on VZ) plus
+# jitter is therefore the honest ceiling; 1.5 s catches a regression to the
+# old 2-tick cadence without pinning the tick period itself (that belongs to
+# the card that changes the quantum).
+assert lat_max_us < 1_500_000, "latency regressed past one tick (%d us): %s" % (lat_max_us, row)
 assert flush_max_us < 5_000_000, "impossible flush cost (%d us): %s" % (flush_max_us, row)
 
 # The latency samples must come from the INJECTED burst, not a stray sample:
