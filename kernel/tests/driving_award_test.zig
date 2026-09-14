@@ -1334,6 +1334,33 @@ test "driving_award: M52 card 3 — a dead drag source leaves no capture; anothe
     try std.testing.expectEqual(@as(?u8, null), driving_award.drag_over_id);
 }
 
+test "driving_award: M52 card 3 review — removing the HOVERED window clears the drag target (review nit)" {
+    arm();
+    _ = user_open(64, 64, 512, 384, 7); // window 2, owned by 7 (the drag source)
+    _ = user_open(320, 64, 512, 384, 8); // window 3, owned by 8
+
+    // An active drag whose pointer sits over window 2. The pointer path sets
+    // this field (`pointer_tick`, which returns early once a WM is
+    // registered), so the host test writes the state that path would have.
+    drag_start("payload", 7);
+    driving_award.drag_over_id = 2;
+
+    // A DIFFERENT window leaving must not disturb the hover.
+    try std.testing.expectEqual(@as(usize, 1), close_owner(8));
+    try std.testing.expectEqual(@as(?u8, 2), driving_award.drag_over_id);
+
+    // The HOVERED window leaving clears it: capture state may not keep naming
+    // a window that has left the registry.
+    try std.testing.expect(user_close(2));
+    try std.testing.expectEqual(@as(?u8, null), driving_award.drag_over_id);
+
+    // The drag itself survives — its live source is untouched; only the
+    // target it named is gone.
+    try std.testing.expect(drag_is_active());
+    try std.testing.expectEqual(@as(usize, 7), driving_award.drag_source_pid);
+    drag_cancel();
+}
+
 // ---------------------------------------------------------------------------
 // Card U4/U5 host tests (claims 0935/4993)
 // ---------------------------------------------------------------------------

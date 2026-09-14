@@ -2146,6 +2146,15 @@ pub fn remove_user_at(idx: usize) void {
     if (resize_id != null and resize_id.? == removed_id) {
         resize_id = null;
     }
+    // M52 card 3 review nit (#1240): the Arc4 #237 drag target is capture
+    // state too — if the pointer was over THIS window, the drag must stop
+    // naming it. (Not the WMS8-deleted title-bar drag_id above: this is the
+    // drag-and-drop hover. The DRAG_LEAVE/DROP fans are gated on drag_active,
+    // so a removed target made them inert rather than absent — the same
+    // "no stale capture state" rule the rest of the card enforces.)
+    if (drag_over_id != null and drag_over_id.? == removed_id) {
+        drag_over_id = null;
+    }
     // Reveal whatever sat under the released window.
     _ = mark_dirty(0);
     _ = mark_dirty(1);
