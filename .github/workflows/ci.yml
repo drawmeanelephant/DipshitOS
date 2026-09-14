@@ -5,15 +5,20 @@
 # Virtualization.framework hardware gates (class B) — those live in the
 # dedicated `vz-gates` workflow (.github/workflows/vz-gates.yml), which
 # runs them on a self-hosted macOS 27+ Apple silicon runner once the
-# repository variable VZ_RUNNER_LABEL names its label (until then that
-# workflow reports SKIPPED honestly). GitHub-hosted runners top out at
-# macOS 26 and do not prove VZ hardware behavior — a green CI badge here
-# still means "the portable gates passed", nothing more. Run
+# repository variable VZ_RUNNER_LABEL names its label. Until a runner is
+# registered, that workflow skips every gate and SAYS SO in its run
+# summary ("NOT ENFORCED: 0 of N class-B gates ran") rather than showing
+# a green required check that enforced nothing.
+# GitHub-hosted runners cannot run class B at any macOS version:
+# Hypervisor.framework is unavailable on them (actions/runner-images#13505,
+# closed as not planned), so Virtualization.framework cannot boot a guest
+# there — A green CI badge here still means "the portable gates passed",
+# nothing more. Run
 # `just verify-vz` on an Apple silicon host for local VZ gate runs.
 #
 # One build check requires the macOS 27 SDK (the custom-virtio spike): it
 # runs in a separate job on GitHub's `xcode-27` public-preview arm64 runner
-# (announced 2026-07-16; macOS 26 OS with Xcode 27 / the macOS 27.0 SDK). It
+# (announced 2026-07-16; the image has run macOS 27 itself since 2026-09-10). It
 # still boots no VM, so it remains class A.
 
 name: CI
@@ -113,13 +118,21 @@ jobs:
       - name: Verify the gate-fleet inventory is current (class A — GF1 registration guard; a new script or spec must ship with a regenerated report)
         run: bash tools/inventory-gates.sh --check
 
+      # The VZ preflight's own failure modes, exercised with `codesign` and
+      # `sysctl` stubbed (class A — no VM, no Apple silicon). It fails when a
+      # runner binary carries no Virtualization entitlement, and when the host
+      # reports no Hypervisor.framework; both used to surface at VM boot as
+      # something else. Guards the guard.
+      - name: Verify the VZ preflight fails loudly (class A — runner entitlement + hypervisor capability)
+        run: bash tools/gate/test-gate-run.sh
+
       # --- Class B: Apple-silicon VZ hardware gates run in vz-gates.yml ---
 
       - name: State which gates this CI does NOT prove
         run: |
           echo "CI complete: portable/build gates (class A) passed."
           echo "Class-B VZ hardware gates run in the separate 'VZ hardware gates' workflow"
-          echo "(skipped until VZ_RUNNER_LABEL names a registered macOS 27+ runner)."
+          echo "(NOT ENFORCED until VZ_RUNNER_LABEL names a registered macOS 27+ runner — docs/vz-runner.md)."
           echo "NOT proven by THIS workflow — see also just verify-vz:"
           # The class-B fleet is discovered from the spec dir (M40 GF5,
           # issue #940): tools/gate/fleet.sh list is the machine-readable

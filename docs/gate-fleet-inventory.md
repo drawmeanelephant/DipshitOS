@@ -30,7 +30,7 @@
 | `tools/lib/` | 2 | per-run isolation for live gates (`gate-run.sh`) |
 | `tools/status/` | 7 | multiagent coordination gate + claim tooling (class A) |
 | `tools/context/` | 2 | context snapshot helpers |
-| `tools/gate/` | 234 | M40 vgate harness + specs (GF2+) |
+| `tools/gate/` | 238 | M40 vgate harness + specs (GF2+) |
 
 ## Class-B fleet (discovered from the spec dir)
 
@@ -159,10 +159,10 @@ of them with `just verify-vz`.
 | spec | `live-resmon` | 1 run / 5 assert | live-resmon.spec -- M22 D10: RESMON.BIN resource monitor on VZ. |
 | spec | `live-roadpops` | 1 run / 11 assert | live-roadpops.spec -- claim 1574 (milestone six, card G3) class-B |
 | spec | `live-sb2-shared-anon` | 1 run / 8 assert | live-sb2-shared-anon.spec -- M33 SB2 (claim 8878) class-B gate: the |
-| spec | `live-sb3-surface-handoff` | 1 run / 8 assert | live-sb3-surface-handoff.spec -- M33 SB3 (claim 3633) class-B gate: |
+| spec | `live-sb3-surface-handoff` | 1 run / 9 assert | live-sb3-surface-handoff.spec -- M33 SB3 (claim 3633) class-B gate: |
 | spec | `live-sb4-damage-tracking` | 1 run / 5 assert | live-sb4-damage-tracking.spec -- M33 SB4 (claim 2382) class-B gate: |
 | spec | `live-sb5-wm-compose-n` | 1 run / 18 assert | live-sb5-wm-compose-n.spec -- M33 SB5 (claim 7397) class-B gate: |
-| spec | `live-sb6-perf-payoff` | 1 run / 24 assert | live-sb6-perf-payoff.spec -- M33 SB6 (claim 6864) class-B gate: |
+| spec | `live-sb6-perf-payoff` | 2 run / 32 assert | live-sb6-perf-payoff.spec -- M33 SB6 (claim 6864) class-B gate: |
 | spec | `live-scale` | 1 run / 4 assert | live-scale.spec -- pool scale at the 11-slot budget: counter + up |
 | spec | `live-sched-ring` | 1 run / 13 assert | live-sched-ring.spec -- M28 SMP card 10 (claim 1163) class-B gate: |
 | spec | `live-screen` | 1 run / 12 assert | live-screen.spec -- claim 6053 (milestone six, card G1) class-B |
@@ -250,12 +250,13 @@ of them with `just verify-vz`.
 | spec | `live-win-move` | 1 run / 26 assert | live-win-move.spec -- claim 0487 (milestone six, card G6 move/raise |
 | spec | `live-win-syscall` | 1 run / 18 assert | live-win-syscall.spec -- claim 0487 (milestone six, card G6) class-B |
 | spec | `live-wm-ipc` | 2 run / 9 assert | live-wm-ipc.spec -- M32 WMS7 (issue #627) app<->WM mailbox protocol (WM_RPC) on VZ |
+| spec | `live-wm-pacing` | 1 run / 7 assert | live-wm-pacing.spec -- M53 card 1 (#1247): what the desktop's frame cadence |
 | spec | `live-wm1` | 1 run / 13 assert | live-wm1.spec -- Lane 1 WM1 (#707, claim 919) class-B gate: eight concurrent user windows |
 | spec | `live-wm3-taskbar` | 3 run / 13 assert | live-wm3-taskbar.spec -- M32 WM3 (Lane 1, #707): taskbar shows per-window entries, workspace-aware |
 | spec | `live-wm4-paint` | 2 run / 4 assert | live-wm4-paint.spec -- M32 WM4 (Lane 1, #707): WM rest policy blends unfocused, focused pure |
 | spec | `live-wm7-gateb` | 2 run / 11 assert | live-wm7-gateb.spec -- WMS7 Gate B (issue #627): toolkit round-trip and no-wm fallback |
 | spec | `live-wmctl-register` | 1 run / 11 assert | live-wmctl-register.spec -- M32 WMS2: kernel render-server register on VZ |
-| spec | `live-wnd-server` | 1 run / 10 assert | live-wnd-server.spec -- M32 WMS3: long-lived EL0 WM server (WND.BIN) on VZ |
+| spec | `live-wnd-server` | 2 run / 14 assert | live-wnd-server.spec -- M32 WMS3: long-lived EL0 WM server (WND.BIN) on VZ |
 | spec | `live-wnd2-mission-control` | 4 run / 17 assert | live-wnd2-mission-control.spec -- WM2 mission-control overview (Lane 1, #707) |
 | spec | `live-wnd4-chrome` | 2 run / 7 assert | live-wnd4-chrome.spec -- WMS4 Chrome parity (issue #624) |
 | spec | `live-wnd5-gate2-policy` | 2 run / 15 assert | live-wnd5-gate2-policy.spec -- WMS5 Gate 2: registered-WM W1–W16 matrix & WM-driven Ctrl+T policy |

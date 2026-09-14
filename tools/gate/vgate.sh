@@ -124,6 +124,14 @@ else
     gate_build_runner $VGATE_RUNNER_FLAGS
 fi
 
+# --- preflight: name the two failures that otherwise surface at VM boot -----
+# Runs for BOTH branches above: the build path just signed the binary, but
+# VGATE_NO_BUILD=1 skips the build entirely, so a stale or hand-built runner
+# reaches the VM without anyone having checked it. Also states the host's
+# hypervisor capability, so "this machine cannot boot a guest" is said out
+# loud instead of being blamed on the gate under test.
+gate_preflight_vz
+
 gate_begin "$VGATE_NAME"
 case "$VGATE_SHARE" in
     arm) gate_arm_share ;;

@@ -495,9 +495,14 @@ pub fn drag_get_payload() []const u8 {
 }
 
 /// Arc4 #237: cancel an active drag (e.g. source window closed).
+/// M52 card 3 (#1240): the source pid clears with the payload — a cancelled
+/// drag must not leave state naming a process that may already be gone (the
+/// DRAG_ENTER/LEAVE/DROP fans are gated on `drag_active`, so a stale pid was
+/// inert, but "inert stale capture state" is exactly what this card bans).
 pub fn drag_cancel() void {
     drag_active = false;
     drag_payload_len = 0;
+    drag_source_pid = 0;
     drag_over_id = null;
 }
 
@@ -1146,6 +1151,13 @@ pub fn arm() void {
     cursor_shown = false;
     prev_ptr_buttons = 0;
     resize_id = null;
+    // M52 card 3 (#1240): a fresh registry holds no drag — the Arc4 #237
+    // capture is process-scoped BSS and must not survive a re-arm (a stuck
+    // capture would otherwise outlive the process it named).
+    drag_active = false;
+    drag_payload_len = 0;
+    drag_source_pid = 0;
+    drag_over_id = null;
     overlay_active = false;
     overlay_count = 0;
     overlay_selected = 0;
@@ -1994,12 +2006,49 @@ pub fn resize_current_id() ?u8 {
 /// exited process's pid). Returns how many windows were released. Pure
 /// BSS writes (safe in the exception context the exit path runs in).
 pub fn close_owner(owner: usize) usize {
+    // M52 card 3 (#1240): a dead drag SOURCE leaves no live pointer capture.
+    // The Arc4 #237 drag payload is process-scoped (`drag_source_pid`) and
+    // its only clear sites are the drop path and `sys_drag_read`, so a
+    // source that dies mid-drag used to strand `drag_active` forever: every
+    // later pointer move kept crossing windows and every drop still named
+    // the dead pid as the source. Cancel it with the source.
+    if (drag_active and drag_source_pid == owner) drag_cancel();
     var closed: usize = 0;
     while (true) {
         var idx: ?usize = null;
         var i: usize = 0;
         while (i < win_count) : (i += 1) {
             if (windows[i].kind == .user and windows[i].owner == owner) {
+                idx = i;
+                break;
+            }
+        }
+        const found = idx orelse break;
+        remove_user_at(found);
+        closed += 1;
+    }
+    return closed;
+}
+
+/// M52 card 3 (#1240): close every user window BOUND to shared-surface
+/// `handle` (the zombie-close seam `shared_mmap.revoke_peer` calls when an
+/// owner-side revoke frees the surface). A surface-backed window's pixels
+/// live in the region's pages, so once the region is revoked the window has
+/// no source left: `composite()` would blit from freed physical pages and a
+/// frozen `sys_win_fill` would WRITE into them (the surface fill path uses
+/// `surface_pa` directly, not a uaccess-checked va). Ending the window here
+/// keeps the registry honest — the release runs through the same
+/// `remove_user_at` primitive as every other path, so the WM gets its one
+/// released mirror and the owner its WIN_CLOSE. Returns the windows closed.
+/// Pure BSS writes (safe in the exit/exception context the revoke runs in).
+pub fn surface_revoked(handle: u32) usize {
+    if (handle == 0) return 0; // unmigrated windows hold no surface
+    var closed: usize = 0;
+    while (true) {
+        var idx: ?usize = null;
+        var i: usize = 0;
+        while (i < win_count) : (i += 1) {
+            if (windows[i].kind == .user and windows[i].surface_handle == handle) {
                 idx = i;
                 break;
             }
@@ -2096,6 +2145,15 @@ pub fn remove_user_at(idx: usize) void {
     // state clearing stays.
     if (resize_id != null and resize_id.? == removed_id) {
         resize_id = null;
+    }
+    // M52 card 3 review nit (#1240): the Arc4 #237 drag target is capture
+    // state too — if the pointer was over THIS window, the drag must stop
+    // naming it. (Not the WMS8-deleted title-bar drag_id above: this is the
+    // drag-and-drop hover. The DRAG_LEAVE/DROP fans are gated on drag_active,
+    // so a removed target made them inert rather than absent — the same
+    // "no stale capture state" rule the rest of the card enforces.)
+    if (drag_over_id != null and drag_over_id.? == removed_id) {
+        drag_over_id = null;
     }
     // Reveal whatever sat under the released window.
     _ = mark_dirty(0);

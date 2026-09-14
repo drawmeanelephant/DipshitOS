@@ -14,7 +14,7 @@
 
 ## Milestones
 
-All milestones through M51 are complete. Closed-milestone detail is under
+All milestones through M52 are complete. Closed-milestone detail is under
 `docs/archive/` and in the per-arc `docs/march-m*.md` trackers; open cards, if
 any, are on the GitHub tracker.
 
@@ -71,6 +71,7 @@ any, are on the GitHub tracker.
 | 49 | A shell I'd use daily | `monitor` detach, startup contract, `toolbox.zig` multicall, editing ergonomics | ✅ 2026-09-11 |
 | 50 | Trust & isolation | uid/caps, permissions, secrets, authenticated remote, privilege gating; ADR 0024 | ✅ 2026-09-11 |
 | 51 | SSH | Userland SSH-2 client `SSH.BIN`; real-OpenSSH interop; ADR 0025 | ✅ 2026-09-12 |
+| 52 | Client-death hardening | Exit/revoke teardown pinned end-to-end: a client dying with focus, a drag, or a bound surface leaves no zombie window, stale mapping, stuck capture, or dead-seat routing (umbrella #1237) | ✅ 2026-09-14 |
 
 > M40 (the gate-fleet consolidation, issue #934, done 2026-09-06) was a tooling
 > workstream, not a product milestone; M36 was skipped.
@@ -101,7 +102,7 @@ The only threads not closed:
 | Context snapshot | `zig build context` | ✅ |
 | Unit tests | `zig build test` (parallel; 2,260+ host tests) | ✅ |
 | Class-A portable set | `just verify-portable` | ✅ |
-| Class-B VZ fleet | `just verify-vz` (sharded ×4 in CI; needs repo var `VZ_RUNNER_LABEL`) | ✅ on the reference host |
+| Class-B VZ fleet | `just verify-vz` (226 members; sharded ×4 in CI + nightly once `VZ_RUNNER_LABEL` names a runner) | ✅ on the reference host; ⛔ 0 gates run in CI |
 | Coordination gate | `just verify-coordination` + `just test-coordination` | ✅ |
 
 Per-gate evidence lives in the run logs / CI. Verbose per-gate notes (M3-era

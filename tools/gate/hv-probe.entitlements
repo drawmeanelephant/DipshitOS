@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Required for a DIRECT Hypervisor.framework call (hv_vm_create).
+
+         This is deliberately NOT host/vm-runner/entitlements.plist: a
+         Virtualization.framework app wants com.apple.security.virtualization,
+         and that key does not authorize hv_vm_create. Signing the probe with
+         the virtualization key instead of this one returns 0xfae94007
+         HV_DENIED, which reads like "this host cannot host a hypervisor"
+         and is really "this binary is not entitled". tools/lib/gate-run.sh
+         treats HV_DENIED as a harness fault for exactly that reason.
+
+         (No double hyphens in this comment: XML comments may not contain
+         them, and a plist codesign will not parse is a silent failure.) -->
+    <key>com.apple.security.hypervisor</key>
+    <true/>
+</dict>
+</plist>

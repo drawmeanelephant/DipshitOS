@@ -32,7 +32,13 @@ vgate_assert 01 serial-absent '[EXC] parking:'
 vgate_assert 01 python <<'PY'
 import os, re, sys
 ser = open(os.environ["VG_SER"]).read()
-rows = re.findall(r'procs:\s+id=\d+\s+name=SCHEDRING\.BIN\s+state=running\s+task=(\d+)', ser)
+# NOTE (2026-09-14): the `procs:` row gained `uid=` and `caps=` BETWEEN
+# `name=` and `state=` in eb37fbe (M50 TS1, process principals, #1135), which
+# this regex was never updated for — so it matched NOTHING and this assertion
+# could not pass, independently of any scheduler change. `.*?` spans the
+# columns it does not care about; the assertion's meaning (two SCHEDRING
+# processes, still running, on DISTINCT tasks) is unchanged.
+rows = re.findall(r'procs:\s+id=\d+\s+name=SCHEDRING\.BIN\s+.*?state=running\s+task=(\d+)', ser)
 if len(rows) < 2 or rows[0] == rows[1]:
     print(f"expected 2 running SCHEDRING rows with distinct tasks, got {rows}", file=sys.stderr)
     sys.exit(1)

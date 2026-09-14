@@ -1273,6 +1273,94 @@ test "driving_award: close_owner auto-closes exactly the owning process's window
     try std.testing.expectEqual(@as(?usize, 9), user_owner(2));
 }
 
+test "driving_award: M52 card 3 — a revoked surface closes exactly its bound window (the zombie close)" {
+    arm();
+    try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 512, 384, 7));
+    try std.testing.expectEqual(UserOpenResult{ .opened = 3 }, user_open(320, 64, 512, 384, 8));
+    // Only window 2 is migrated (the SB3 handoff): its pixels live in the
+    // shared region, so once that region is revoked it has no source left.
+    try std.testing.expect(user_bind_surface(2, .{ .handle = 5, .pa_base = 0x1000_0000, .page_count = 48 }));
+    try std.testing.expect(user_is_surface_backed(2));
+    try std.testing.expect(!user_is_surface_backed(3));
+
+    // A handle nobody is bound to (and the unmigrated sentinel 0) close
+    // nothing — the sweep is exact, not a blanket window purge.
+    try std.testing.expectEqual(@as(usize, 0), driving_award.surface_revoked(0));
+    try std.testing.expectEqual(@as(usize, 0), driving_award.surface_revoked(9));
+    try std.testing.expectEqual(@as(usize, 6), driving_award.win_count);
+
+    // The revoke ends the bound window through the ordinary release
+    // primitive — the registry holds no zombie and window 3, bound to
+    // nothing, is untouched. Window 3 held the focus, so it KEEPS it (only a
+    // removed FOCUSED window falls the focus back to the terminal).
+    try std.testing.expectEqual(@as(usize, 1), driving_award.surface_revoked(5));
+    try std.testing.expect(find_user_window(2) == null);
+    try std.testing.expect(find_user_window(3) != null);
+    try std.testing.expectEqual(@as(usize, 5), driving_award.win_count);
+    try std.testing.expectEqual(@as(u8, 3), driving_award.focused_id);
+    // No window means no fill can reach the freed physical pages a surface
+    // binding used to point at (`user_fill` writes `surface_pa` directly).
+    try std.testing.expect(!user_fill(2, 0, 0, 4, 4, 0xff0000));
+    // Idempotent: the binding is gone with the window, so a second sweep for
+    // the same handle finds nothing.
+    try std.testing.expectEqual(@as(usize, 0), driving_award.surface_revoked(5));
+    _ = close_owner(8);
+}
+
+test "driving_award: M52 card 3 — a dead drag source leaves no capture; another process's death does not cancel it" {
+    arm();
+    try std.testing.expect(!drag_is_active());
+    _ = user_open(64, 64, 512, 384, 7);
+    _ = user_open(320, 64, 512, 384, 8);
+
+    // Process 7 starts the Arc4 #237 drag (the payload is process-scoped).
+    drag_start("hello", 7);
+    try std.testing.expect(drag_is_active());
+    try std.testing.expectEqualStrings("hello", drag_get_payload());
+    try std.testing.expectEqual(@as(usize, 7), driving_award.drag_source_pid);
+
+    // A DIFFERENT process dying must not steal the live drag: only the
+    // source's own death ends it.
+    try std.testing.expectEqual(@as(usize, 1), close_owner(8));
+    try std.testing.expect(drag_is_active());
+    try std.testing.expectEqualStrings("hello", drag_get_payload());
+
+    // The source's death cancels the capture and clears every field that
+    // named it — nothing survives pointing at a dead pid.
+    try std.testing.expectEqual(@as(usize, 1), close_owner(7));
+    try std.testing.expect(!drag_is_active());
+    try std.testing.expectEqual(@as(usize, 0), drag_get_payload().len);
+    try std.testing.expectEqual(@as(usize, 0), driving_award.drag_source_pid);
+    try std.testing.expectEqual(@as(?u8, null), driving_award.drag_over_id);
+}
+
+test "driving_award: M52 card 3 review — removing the HOVERED window clears the drag target (review nit)" {
+    arm();
+    _ = user_open(64, 64, 512, 384, 7); // window 2, owned by 7 (the drag source)
+    _ = user_open(320, 64, 512, 384, 8); // window 3, owned by 8
+
+    // An active drag whose pointer sits over window 2. The pointer path sets
+    // this field (`pointer_tick`, which returns early once a WM is
+    // registered), so the host test writes the state that path would have.
+    drag_start("payload", 7);
+    driving_award.drag_over_id = 2;
+
+    // A DIFFERENT window leaving must not disturb the hover.
+    try std.testing.expectEqual(@as(usize, 1), close_owner(8));
+    try std.testing.expectEqual(@as(?u8, 2), driving_award.drag_over_id);
+
+    // The HOVERED window leaving clears it: capture state may not keep naming
+    // a window that has left the registry.
+    try std.testing.expect(user_close(2));
+    try std.testing.expectEqual(@as(?u8, null), driving_award.drag_over_id);
+
+    // The drag itself survives — its live source is untouched; only the
+    // target it named is gone.
+    try std.testing.expect(drag_is_active());
+    try std.testing.expectEqual(@as(usize, 7), driving_award.drag_source_pid);
+    drag_cancel();
+}
+
 // ---------------------------------------------------------------------------
 // Card U4/U5 host tests (claims 0935/4993)
 // ---------------------------------------------------------------------------

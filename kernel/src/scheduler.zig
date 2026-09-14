@@ -2112,6 +2112,37 @@ fn exit_current_locked(status: u64, process_exit: bool) bool {
     // on this process — their saved frames get the observed status patched
     // into x0, so the syscall return lands when the ring resumes them.
     if (process.on_task_exit(exiting, status)) |pid| {
+        // M52 card 1 (#1238): EXIT-PATH INVENTORY — the pinned client-death
+        // teardown order. This comment IS the inventory; the seam-level host
+        // tests in kernel/tests/syscall_test.zig drive `exit_current` and pin
+        // every entry. The order is load-bearing:
+        //   1. wake_waiters(pid, status)         — sys_wait waiters observe the exit
+        //   2. driving_award.close_owner(pid)    — no zombie window; focus falls
+        //                                          back; the WM gets ONE released
+        //                                          mirror so it drops the target
+        //   3. shared_mmap.revoke_owner(pid)     — D2: owned regions revoke their
+        //                                          peer RO seat BEFORE the reap
+        //                                          unrefs the owner's pages (no
+        //                                          peer aliasing freed physical PA)
+        //   4. shared_mmap.revoke_peer_role(pid) — its own peer seats detach; the
+        //                                          owner's surface survives (D1)
+        //   5. file_table.reset_process(pid)
+        //   6. tcp.close_owner(pid)
+        //   7. app_timers.reset(pid)             — no stale fire at a recycled pid
+        //   8. wm_server.unregister(pid)         — the WM seat, the scanout grant
+        //                                          and the input handoff return to
+        //                                          the shim (a client's death does
+        //                                          NOT unregister the WM)
+        // Audited in #1238 — deliberately NOT in the inventory:
+        //   `events`/`mailbox` are not reset here. A task blocked in
+        //   sys_wait_event always waits on its OWN pid (handle_wait_event
+        //   derives the pid from the caller), so no live waiter can outlive
+        //   its queue, and every creation path (exec_file_impl + the boot
+        //   payload) resets both before a recycled pid can run again. The
+        //   dying pid's queue may hold the WIN_CLOSE that step 2 pushes at it;
+        //   nothing can read it. No `on_event_pushed` wake is owed either:
+        //   that hook fires on `events.push`, and the exit path pushes no
+        //   event any other process is blocked on.
         wake_waiters(pid, status);
         // Per-process window ownership: the exiting process's user windows
         // are released NOW (the real teardown semantic — no window leaks
