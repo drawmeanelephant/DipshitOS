@@ -95,6 +95,7 @@ const serial_ring = @import("serial_ring.zig"); // Arc5 #243: serial snapshot fo
 const virtio_file = @import("virtio_file.zig"); // Arc5 #243: tombstone write through the host file channel (HF6: the DATA partition is gone)
 const smp = @import("smp.zig");
 const spinlock = @import("spinlock.zig");
+const forensics = @import("forensics.zig"); // #1278: last-words recorder (inert unless `forensics on`)
 
 const user_stack_section = if (builtin.object_format == .elf) ".userbss" else "__DATA,__userbss";
 
@@ -551,6 +552,12 @@ fn push_home_locked(id: usize) void {
     // through here would make every rotation request the next one, which is
     // exactly the unbounded feedback the nudge was parked for.
     request_resched();
+    // #1278: this is the wake funnel, so it is where a dying boot's trace shows
+    // whether the task that matters ever became runnable. `note` is a per-core
+    // counter and one BSS slot when recording is off it returns on its first
+    // byte, and it never prints — this runs in SVC/IRQ/lock-held contexts and
+    // must stay allocation- and console-free.
+    forensics.note(.wake, id);
 }
 
 /// The ready-membership invariant, asserted by the host tests after every
@@ -2533,6 +2540,11 @@ pub fn tick() void {
     // quantum — witness included — at the cost of one save/restore per
     // second. EL1h kernel tasks (the worker) keep the no-churn bail-out.
     if (c != 0 and next_runnable_for(current[c], c) == null and (spsr & 0xf) != spsr_el0t_irqs) return;
+    // #1278: record the rotation and the task it preempts. A boot that dies
+    // silently inside a switch is exactly the shape #1261 could not see, and
+    // `arg` is the task id being switched AWAY from — the half that a "which
+    // task is current" dump taken after the fact can never recover.
+    forensics.note(.rotate, current[c]);
     timer_switch_context(exceptions.resume_frame[c], elr, spsr, exceptions.resume_sp_el0[c]);
     apply_pending();
     // A rotation just ran, so any reschedule request it was serving is

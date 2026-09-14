@@ -4203,6 +4203,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  sound       virtio-snd transport: device DID, class, status, control-queue state, device-config counts (jacks/streams/channel-maps), re-arm; stream-state control: 'sound volume <0-100>' and 'sound mute <on|off>'\n" ++
         "  shutdown    request power-off\n" ++
         "  type        echo stdin (the pipe source) to stdout — the right half of `a | type`\n" ++
+        "  forensics   last-words recorder: on|off|dump|reset (off by default)\n" ++
         "  dmesg       system log viewer: last bytes of serial output (D12)\n" ++
         "  time        command timing: measure elapsed ticks and wall-clock time (D13)\n" ++
         "  which       locate a command: shell builtin, monitor command, or host-share application (D16; HF6: the ESP is gone)\n" ++

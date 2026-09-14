@@ -51,6 +51,7 @@ pub const driving_award = @import("driving_award.zig"); // milestone six card G5
 pub const wm_server = @import("wm_server.zig"); // M32 WMS2 (issue #622): the render-server register behind `wm`
 pub const settings = @import("settings.zig"); // milestone eight card U8 (claim 2649): persistent settings engine
 pub const tombstone = @import("tombstone.zig"); // Arc5 issue #243: crash tombstone engine
+pub const forensics = @import("forensics.zig"); // #1278: the last-words recorder behind `forensics`
 pub const dns = @import("dns.zig"); // milestone twelve card N2 (claim 7566): DNS resolver
 pub const events = @import("events.zig"); // milestone sixteen C3 (claim 0339): per-process event queue bound behind `resources`
 pub const file_table = @import("file_table.zig"); // milestone sixteen C3 (claim 0339): per-process handle bound behind `resources`
@@ -293,7 +294,7 @@ pub const Command = struct {
 /// grows it 54 -> 55 (`sym`). Milestone twenty-two D5 (issue #328)
 /// grows it 55 -> 56 (`strace`). Milestone twenty-two D6 (issue #329)
 /// grows it 56 -> 57 (`ps`).
-pub const registry_count: usize = 75; // 51 + sh/calc + `font` (M20 U1) + sym/strace/ps (M22 D3/D5/D6) + `type` (M19 P1) + `mktemp` (M19 P16) + stat/find/dmesg/time/which/inventory (M22 D8/D12/D13/D16) + du (M25 F4) + screenshot/shortcuts (M27 G27/G29) + smp (M28) + `wm` (M32 WMS2, issue #622) + `wnd` (M32 WMS3, issue #623) + `vf` (M34 HF1+HF2, issues #735/#736) + `sexiburger` (Milestone 19, issue #677) + `tabwm` (M39 TWM1, issue #928) + `secrets` (M50 TS5, issue #1139)
+pub const registry_count: usize = 76; // 51 + sh/calc + `font` (M20 U1) + sym/strace/ps (M22 D3/D5/D6) + `type` (M19 P1) + `mktemp` (M19 P16) + stat/find/dmesg/time/which/inventory (M22 D8/D12/D13/D16) + du (M25 F4) + screenshot/shortcuts (M27 G27/G29) + smp (M28) + `wm` (M32 WMS2, issue #622) + `wnd` (M32 WMS3, issue #623) + `vf` (M34 HF1+HF2, issues #735/#736) + `sexiburger` (Milestone 19, issue #677) + `tabwm` (M39 TWM1, issue #928) + `secrets` (M50 TS5, issue #1139) + `forensics` (#1278, the last-words recorder)
 
 /// `sym <file>` reads at most this many bytes for on-disk symtab inspection
 /// (M22 D3). ELF symbol tables live near the file tail; 64 KiB covers every
@@ -372,6 +373,7 @@ pub fn ensure_registry() []const Command {
             .{ .name = "smp", .help = "multiprocessor topology, online CPU cores, and per-core task state", .usage = "smp", .category = .tasks_processes, .handler = cmd_smp },
             .{ .name = "type", .help = "echo stdin (the pipe source) to stdout — the right half of `a | type`", .usage = "type", .category = .system, .handler = cmd_type },
             .{ .name = "timer", .help = "interrupt controller + timer status", .usage = "timer", .category = .memory_state, .handler = cmd_timer },
+            .{ .name = "forensics", .help = "last-words recorder: on|off|dump|reset (off by default)", .usage = "forensics [on|off|dump|reset]", .category = .system, .max_args = 1, .handler = cmd_forensics },
             .{ .name = "tour", .help = "guided tour of the system for new users", .usage = "tour", .category = .machine_identity, .handler = cmd_welcome },
             .{ .name = "uaccess", .help = "user-memory copy diagnostics (valid, fault, recovery)", .usage = "uaccess", .category = .memory_state, .handler = cmd_uaccess },
             .{ .name = "usb", .help = "XHCI host controller: `usb` transport report, `usb devices` enumerated devices, `usb report` last HID report, `usb bulk [probe ...]` bulk engine (U1), `usb msc [probe] [lba]` mass-storage BOT/SCSI probe (U2), `usb rescan` polled lifecycle rescan (U4), `usb detach [slot]` administrative detach (U4)", .usage = "usb [devices|report|bulk [probe ...]|msc [probe] [lba]|rescan|detach [slot]]", .category = .graphics_input, .handler = cmd_usb },
@@ -3985,6 +3987,58 @@ pub fn sexiburger_lines() []const []const u8 {
         sexiburger_diag_ready = true;
     }
     return &sexiburger_diag_storage;
+}
+
+// ---------------------------------------------------------------------------
+// Last-words recorder command (#1278)
+// ---------------------------------------------------------------------------
+
+/// `forensics [on|off|dump|reset]` — the last-words recorder (claim #1278).
+///
+/// Off by default on purpose: a default boot must be byte-identical, so the
+/// recorder is only ever armed by a gate (or a human) that is chasing
+/// exactly the kind of death that reports nothing.
+fn cmd_forensics(m: *Monitor, args: []const []const u8) ExecError {
+    const sub = if (args.len > 0) args[0] else "status";
+    if (std.mem.eql(u8, sub, "on")) {
+        forensics.enabled = true;
+        // Record this very line's arrival, so the trace opens with a mark the
+        // reader can anchor on rather than an ambiguous empty prefix.
+        forensics.note(.shot, 1);
+        m.console.puts("forensics: on (records prefix the next console line)\n");
+        return .none;
+    }
+    if (std.mem.eql(u8, sub, "off")) {
+        forensics.enabled = false;
+        m.console.puts("forensics: off\n");
+        return .none;
+    }
+    if (std.mem.eql(u8, sub, "reset")) {
+        forensics.reset();
+        m.console.puts("forensics: reset\n");
+        return .none;
+    }
+    if (std.mem.eql(u8, sub, "dump")) {
+        // Force the pending tail out even with recording off, so the last
+        // capture can be read after the fact.
+        var buf: [forensics.max_per_drain * 64]u8 = undefined;
+        const n = forensics.format_pending(buf[0..]);
+        m.console.puts("forensics: dump wrote=");
+        m.console.print_u64(n);
+        m.console.puts("\n");
+        if (n > 0) m.console.puts(buf[0..n]);
+        return .none;
+    }
+    m.console.puts("forensics: enabled=");
+    m.console.print_u64(if (forensics.enabled) 1 else 0);
+    m.console.puts(" pending=");
+    m.console.print_u64(forensics.pending());
+    m.console.puts(" emitted=");
+    m.console.print_u64(forensics.emitted);
+    m.console.puts(" truncated=");
+    m.console.print_u64(forensics.truncated);
+    m.console.puts("\n");
+    return .none;
 }
 
 // ---------------------------------------------------------------------------

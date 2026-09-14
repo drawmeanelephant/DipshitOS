@@ -107,6 +107,7 @@ const evidence = @import("evidence.zig");
 const virtio_console = @import("virtio_console.zig");
 const walkprobe = @import("walkprobe.zig"); // claim 7896 diagnostic (linker-eliminated from default builds)
 const exceptions = @import("exceptions.zig"); // claim 9746: VBAR_EL1 vector table + basic sync/IRQ handlers
+const forensics = @import("forensics.zig"); // #1278: the last-words recorder (off by default)
 const gic = @import("gic.zig"); // claim 7948: GIC distributor + CPU interface
 const timer = @import("timer.zig"); // claim 7948: ARM generic timer (CNTP)
 const scheduler = @import("scheduler.zig"); // claim 5275: tick-driven round-robin tasks
@@ -541,6 +542,12 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
     gic.init(timer.ppi, timer.interrupt_edge);
     timer.init();
     exceptions.set_irq_dispatcher(irq_dispatch);
+    // #1278: arm the recorder's drain seam. Installed unconditionally but inert
+    // until `forensics on` sets `enabled`, so this wiring costs one null check
+    // plus one bool test per console write and leaves a default boot
+    // byte-identical. It is installed HERE, next to the IRQ chain, because the
+    // recorder exists to narrate the window in which interrupts are live.
+    console.set_drain_hook(&forensics.drain);
     exceptions.irq_unmask();
     evidence.set_marker(marker_mmu);
     evidence.write_marker_var(st, marker_mmu);
@@ -1909,6 +1916,11 @@ fn irq_dispatch() void {
     const intid = gic.ack();
     if (gic.is_spurious(intid)) return;
     gic.note_irq(intid);
+    // #1278: record the delivery itself. This runs in IRQ context, which is
+    // exactly why `note` may not print — the record is emitted by whatever
+    // console line the guest prints next, so the tail of a dying boot's serial
+    // log shows the interrupts it was servicing when it stopped.
+    forensics.note(.irq, intid);
     if (intid < 16) {
         smp.handle_sgi(intid);
     } else if (timer.is_ppi(intid)) {
