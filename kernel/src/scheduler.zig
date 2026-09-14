@@ -95,6 +95,9 @@ const serial_ring = @import("serial_ring.zig"); // Arc5 #243: serial snapshot fo
 const virtio_file = @import("virtio_file.zig"); // Arc5 #243: tombstone write through the host file channel (HF6: the DATA partition is gone)
 const smp = @import("smp.zig");
 const spinlock = @import("spinlock.zig");
+// WMP card 3: the reschedule nudge pulls this core's comparator forward so a
+// woken task runs in milliseconds instead of at the next 1 Hz boundary.
+const timer = @import("timer.zig");
 
 const user_stack_section = if (builtin.object_format == .elf) ".userbss" else "__DATA,__userbss";
 
@@ -541,6 +544,17 @@ fn push_home_locked(id: usize) void {
     const daif = ring_locks[home].lock();
     ready_rings[home].push(id);
     ring_locks[home].unlock(daif);
+    // WMP card 3: this is the single blocked->ready funnel, so it is also the
+    // single place a rotation can become owed. Placed AFTER the ring unlock
+    // so the nudge (which may immediately interrupt this core) can never
+    // observe a half-pushed ring; the task is already runnable and visible to
+    // the rotation by then.
+    //
+    // NOTE: the ROTATION does not come through here — `switch_context` pushes
+    // the preempted task back with a direct `ready_rings[c].push`. That is
+    // load-bearing: routing it through here would make every rotation request
+    // the next one, and the comparator would never stop firing.
+    request_resched();
 }
 
 /// The ready-membership invariant, asserted by the host tests after every
@@ -766,6 +780,79 @@ pub var user_stack: [task_stack_size]u8 align(4096) linksection(user_stack_secti
 /// sys_yield. It lives in the already-mapped user BSS aperture and exposes no
 /// privileged state beyond the fact that this task was preempted by a tick.
 pub var user_timer_preemptions: u64 align(8) linksection(user_stack_section) = 0;
+
+// ---------------------------------------------------------------------------
+// WMP card 3: the reschedule request
+// ---------------------------------------------------------------------------
+/// A task became runnable while another is executing, so a rotation is OWED.
+/// WMP card 1 (#1247) measured what the absence of this costs: the WM's
+/// pointer response was 786-1216 ms typical and 3004 ms worst, because
+/// round-robin evaluates preemption ONLY at the 1 Hz tick, so a woken task
+/// waits a uniformly distributed 0-1 s to be scheduled. The request pulls the
+/// core-0 comparator forward (`timer.nudge`), so the SAME IRQ rotation a
+/// period tick uses runs ~2 ms later instead of ~1 s later.
+///
+/// The flag is the coalescing rule: at most one nudge is in flight between
+/// rotations, so a burst of wakes costs ONE extra comparator fire, not one
+/// per wake. It is cleared by every rotation on core 0 (the end of `tick`).
+pub var resched_requested: bool = false;
+/// Requests that owed a rotation (one per wake that found none pending).
+pub var resched_requests: u64 = 0;
+/// Requests that arrived while one was already owed — the coalesced surplus.
+/// Non-zero here is what proves the coalescing is load-bearing rather than
+/// the wake rate simply being too low to matter.
+pub var resched_coalesced: u64 = 0;
+/// Rotations that discharged a request (a nudge that did its job, or a period
+/// boundary that subsumed one).
+pub var resched_discharged: u64 = 0;
+
+/// A task just became runnable while another is executing: ask the timer to
+/// preempt us sooner than the next 1 Hz boundary. Called from the wake funnel
+/// (`push_home_locked`), so it covers every blocked->ready transition —
+/// event pushes (`sys_wait_event`), process-exit waiters, futex wakes, spawn,
+/// and the app-timer/WM-pacing fires inside `on_tick`. Pure BSS writes plus a
+/// comparator `msr`; safe in the SVC, IRQ and lock-held contexts those paths
+/// run in (no console, no allocation, no lock).
+///
+/// Deliberately narrow:
+///   * a no-op until preemption is armed (`start`), so boot-time wakes do not
+///     fire comparators before the shell loop is the running context;
+///   * core 0 only — that is the core whose PPI carries the shell/desktop
+///     rotation, and the only core whose `timer.handle` consumes a nudge
+///     (a secondary core re-arms without inspecting it, so a nudge armed
+///     there would never be served);
+///   * a wake raised from INSIDE a rotation (`on_tick`'s app timers, WM
+///     pacing, `wake_expired`) is discharged free by that same rotation, so
+///     the common tick-driven wake costs no extra interrupt at all.
+pub fn request_resched() void {
+    if (!enabled_flag) return;
+    if (smp.core_id() != 0) return;
+    if (resched_requested) {
+        resched_coalesced +%= 1;
+        return;
+    }
+    resched_requested = true;
+    resched_requests +%= 1;
+    timer.nudge();
+}
+
+/// A rotation ran on core `c`: any request it was serving is discharged.
+///
+/// Split out of `tick` (rather than inlined at its tail) because `tick`'s
+/// body is aarch64-only — it reads ELR_EL1/SPSR_EL1, which fault at EL0 — so
+/// a host test cannot call it, while the coalescing rule below is precisely
+/// what a host test must be able to pin. The tick wiring itself (and the
+/// nudge's real comparator arithmetic) is proven live by the class-B
+/// `live-wm-pacing` gate.
+///
+/// Core-gated: only core 0 ever raises a request, so a secondary core's
+/// rotation must not swallow core 0's pending one.
+pub fn discharge_resched(c: usize) void {
+    if (c == 0 and resched_requested) {
+        resched_requested = false;
+        resched_discharged +%= 1;
+    }
+}
 /// The idle task's static stack (BSS, like every other kernel global).
 var idle_stack: [task_stack_size]u8 align(16) = undefined;
 /// The monitor `spawn` command's dedicated demo stack; one spawn only, so
@@ -2351,7 +2438,14 @@ fn spawn_demo_entry() void {
 /// stack (`exceptions.resume_frame[c]`); ELR_EL1/SPSR_EL1 still hold the
 /// interrupted PC/PSTATE. The switch itself only programs ELR/SPSR and the
 /// stub's restore frame — the stub does the register pop and eret.
-pub fn tick() void {
+/// `period_tick` is WMP card 3's distinction: TRUE when this timer PPI was
+/// the 1 Hz period boundary (`timer.handle` returned true) and the wall clock
+/// may advance, FALSE when it served a reschedule nudge. A nudge owes a
+/// ROTATION and nothing else — the timekeeping beat (`on_tick`: tick_count,
+/// the sleepers, app timers, WM pacing, CPU-limit accounting) must not run,
+/// or scheduling latency would be paid for by silently running the clock
+/// fast. The rotation below runs either way.
+pub fn tick(period_tick: bool) void {
     if (comptime builtin.cpu.arch != .aarch64) return;
     if (!scheduling_active()) return;
     const c = smp.core_id(); // per-core staging
@@ -2374,7 +2468,7 @@ pub fn tick() void {
     // here — skipped => one 1 s cadence loss (the pre-existing skip
     // semantic; claim 9498). Claim 881 slice 3: sched_lock no longer
     // spans the rotation below — only this timekeeping beat.
-    if (c == 0 and evk_taken != null and sched_lock.try_lock()) {
+    if (period_tick and c == 0 and evk_taken != null and sched_lock.try_lock()) {
         sched_lock_holder = smp.core_id();
         on_tick();
         sched_lock_release();
@@ -2443,6 +2537,13 @@ pub fn tick() void {
     if (c != 0 and next_runnable_for(current[c], c) == null and (spsr & 0xf) != spsr_el0t_irqs) return;
     timer_switch_context(exceptions.resume_frame[c], elr, spsr, exceptions.resume_sp_el0[c]);
     apply_pending();
+    // WMP card 3: a rotation just ran, so any reschedule request it was
+    // serving is discharged. Clearing here rather than at entry is what makes
+    // a wake raised inside this same beat's `on_tick` (app timers, WM pacing,
+    // `wake_expired`) free: the request lands, then this discharges it, and
+    // no redundant nudge is armed. Nothing can wake between the rotation and
+    // this call — the IRQ handler is masked throughout.
+    discharge_resched(c);
 }
 
 /// Tick-only wrapper around the pure switch core. Keeping the source of the

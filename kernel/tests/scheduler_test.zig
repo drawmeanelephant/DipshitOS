@@ -46,6 +46,10 @@ const register_user = scheduler.register_user;
 const register_worker = scheduler.register_worker;
 const request_kill = scheduler.request_kill;
 const request_report = scheduler.request_report;
+const request_resched = scheduler.request_resched;
+// WMP card 3: the pure half of the rotation's discharge. `tick` itself reads
+// ELR_EL1/SPSR_EL1 and cannot be called from a host test.
+const discharge_resched = scheduler.discharge_resched;
 const reserved_fault_status = scheduler.reserved_fault_status;
 const reserved_kill_status = scheduler.reserved_kill_status;
 const ring_claim = scheduler.ring_claim;
@@ -1093,4 +1097,119 @@ test "scheduler: teardown_pending gates the reaper off a mid-teardown zombie" {
     // cycle never sees a stale gate.
     try std.testing.expectEqual(@as(usize, 2), register_user(0x3000, 0).?);
     try std.testing.expect(!scheduler.tasks[2].teardown_pending);
+}
+
+// ---------------------------------------------------------------------------
+// WMP card 3 — the reschedule request
+// ---------------------------------------------------------------------------
+//
+// WMP card 1 (#1247) measured what the absence of this costs: round-robin
+// evaluated preemption ONLY at the 1 Hz tick, so a woken WM waited a uniformly
+// distributed 0-1 s for its frame (786-1216 ms typical, 3004 ms worst) while
+// the frame's own transfer+flush was ~0.3 ms. The wake funnel now asks the
+// timer to pull the comparator forward, so the SAME rotation a period tick
+// uses runs ~2 ms later instead of ~1 s later.
+//
+// The flag is the coalescing rule, and coalescing is the whole safety
+// argument: at most one nudge is in flight between rotations, so a pointer
+// storm costs one extra comparator fire, not one per wake.
+
+test "scheduler: a wake through the ready-ring funnel raises a reschedule request; a core-0 rotation discharges it" {
+    _ = init();
+    _ = register_worker(0x2000).?;
+    _ = register_user(0x3000, 0).?;
+    start();
+    // Explicit reset: these are module globals and the host test binary runs
+    // every scheduler test in one process.
+    scheduler.resched_requested = false;
+    scheduler.resched_requests = 0;
+    scheduler.resched_coalesced = 0;
+    scheduler.resched_discharged = 0;
+
+    try std.testing.expect(!scheduler.resched_requested);
+    try std.testing.expectEqual(@as(u64, 0), scheduler.resched_requests);
+
+    try std.testing.expect(yield_current()); // shell -> worker
+    try std.testing.expect(yield_current()); // worker -> user (slot 2)
+
+    // The running user sleeps. Blocking stages a successor and takes the user
+    // off the rings — NO task became runnable, so nothing is owed. A user- or
+    // WM-initiated block must not request a preemption, or a GUI that blocks
+    // waiting for input would run the comparator hot for the whole wait.
+    try std.testing.expect(sleep_current(1));
+    try std.testing.expect(is_blocked(2));
+    try std.testing.expect(!scheduler.resched_requested);
+    try std.testing.expectEqual(@as(u64, 0), scheduler.resched_requests);
+    check_ready_membership();
+
+    // The deadline passes and the sleeper becomes runnable again. In a real
+    // boot this runs inside `tick`'s `on_tick`, so the rotation from the SAME
+    // beat discharges the request and the tick-driven wake costs no extra
+    // interrupt at all; here `on_tick` is driven standalone, which is what
+    // leaves the request observable.
+    on_tick();
+    try std.testing.expect(!is_blocked(2));
+    try std.testing.expect(scheduler.ready_rings[0].contains(2));
+    try std.testing.expect(scheduler.resched_requested);
+    try std.testing.expectEqual(@as(u64, 1), scheduler.resched_requests);
+    check_ready_membership();
+
+    // COALESCE: while a request is owed, further demand is absorbed rather
+    // than armed. Two more demands leave `requests` at 1 — this is what caps
+    // a wake burst at one comparator fire instead of one per wake.
+    request_resched();
+    request_resched();
+    try std.testing.expectEqual(@as(u64, 1), scheduler.resched_requests);
+    try std.testing.expectEqual(@as(u64, 2), scheduler.resched_coalesced);
+
+    // A SECONDARY core's rotation must not swallow core 0's pending request —
+    // only core 0 ever raises one, so only core 0 may clear it.
+    discharge_resched(1);
+    try std.testing.expect(scheduler.resched_requested);
+    try std.testing.expectEqual(@as(u64, 0), scheduler.resched_discharged);
+
+    // The core-0 rotation does discharge it. (This is the pure half of
+    // `tick`; `tick`'s own wiring — that a NUDGE delivery skips the
+    // timekeeping beat while still rotating — is live-only, pinned by the
+    // `live-wm-pacing` class-B gate.)
+    discharge_resched(0);
+    try std.testing.expect(!scheduler.resched_requested);
+    try std.testing.expectEqual(@as(u64, 1), scheduler.resched_discharged);
+
+    // Discharge must leave the mechanism ARMED, not latched off: the next
+    // wake owes a fresh rotation. (Without this, a single discharge would
+    // silence every later wake and the latency would quietly come back.)
+    try std.testing.expect(yield_current()); // idle -> shell
+    try std.testing.expect(yield_current()); // shell -> worker
+    try std.testing.expect(yield_current()); // worker -> user
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current[0]);
+    try std.testing.expect(sleep_current(1));
+    try std.testing.expect(!scheduler.resched_requested);
+    on_tick();
+    try std.testing.expectEqual(@as(u64, 2), scheduler.resched_requests);
+    check_ready_membership();
+}
+
+test "scheduler: a wake before preemption is armed requests nothing" {
+    // The same boundary `start` draws for preemption itself. Boot-time wakes
+    // (process registration, the early service spawns) run before the shell
+    // loop is the running context, and must not pull comparators forward.
+    _ = init();
+    _ = register_worker(0x2000).?;
+    _ = register_user(0x3000, 0).?;
+    scheduler.resched_requested = false;
+    scheduler.resched_requests = 0;
+    try std.testing.expect(!enabled());
+
+    request_resched();
+    try std.testing.expect(!scheduler.resched_requested);
+    try std.testing.expectEqual(@as(u64, 0), scheduler.resched_requests);
+
+    // ...and the identical call IS live once preemption is armed, so the
+    // guard is a gate and not a permanently dead path.
+    start();
+    request_resched();
+    try std.testing.expect(scheduler.resched_requested);
+    try std.testing.expectEqual(@as(u64, 1), scheduler.resched_requests);
+    discharge_resched(0);
 }

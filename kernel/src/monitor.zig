@@ -4012,6 +4012,19 @@ fn cmd_timer(m: *Monitor, args: []const []const u8) ExecError {
     m.console.print_u64(timer.irq_ticks);
     m.console.puts(" poll=");
     m.console.print_u64(timer.poll_ticks);
+    // WMP card 3: the nudge counters. `armed` > `served` means nudges were
+    // subsumed by the period boundary arriving first (harmless — the owed
+    // rotation ran from the period); `coalesced` is the surplus a wake burst
+    // did NOT pay for. `period_first` counts requests dropped because the 1 Hz
+    // boundary was already sooner than the 2 ms nudge would have been.
+    m.console.puts(" nudge_armed=");
+    m.console.print_u64(timer.nudge_armed_total);
+    m.console.puts(" nudge_served=");
+    m.console.print_u64(timer.nudge_served);
+    m.console.puts(" nudge_coalesced=");
+    m.console.print_u64(timer.nudge_coalesced);
+    m.console.puts(" nudge_period_first=");
+    m.console.print_u64(timer.nudge_period_first);
     m.console.puts(" acked=");
     m.console.print_u64(gic.acked_total()); // claim 7339: summed across cores
     m.console.puts(" first=");
@@ -7213,6 +7226,24 @@ fn cmd_wm(m: *Monitor, args: []const []const u8) ExecError {
         m.console.print_u64(info.flush_avg_ns / 1000);
         m.console.puts(" flush_max_us=");
         m.console.print_u64(info.flush_max_ns / 1000);
+        // WMP card 3: the scheduling half of the same latency. The nudge is
+        // what makes a woken WM run in milliseconds rather than at the next
+        // 1 Hz boundary, so the counters belong on the row that reports the
+        // latency they buy. Reported here rather than behind a `sched`
+        // command because the pacing gate reads THIS row: a latency claim
+        // that cannot be attributed to nudges would be unfalsifiable.
+        //   requests   = wakes that owed a rotation
+        //   coalesced  = of those, the ones that found one already owed
+        //   nudges     = comparators pulled forward
+        //   served     = of those, the ones that actually delivered a nudge
+        m.console.puts(" resched_requests=");
+        m.console.print_u64(scheduler.resched_requests);
+        m.console.puts(" resched_coalesced=");
+        m.console.print_u64(scheduler.resched_coalesced);
+        m.console.puts(" nudge_armed=");
+        m.console.print_u64(timer.nudge_armed_total);
+        m.console.puts(" nudge_served=");
+        m.console.print_u64(timer.nudge_served);
         m.console.puts("\n");
         // M32 WMS4 (issue #624): chrome observability — SET_WINDOW
         // submissions counted, the broadcast policy's chrome kind, and the

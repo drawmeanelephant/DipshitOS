@@ -1,5 +1,8 @@
-# live-wm-pacing.spec -- M53 card 1 (#1247): what the desktop's frame cadence
-# and input latency ACTUALLY are, measured rather than assumed.
+# live-wm-pacing.spec -- WMP (WM frame pacing) card 1 (#1247): what the
+# desktop's frame cadence and input latency ACTUALLY are, measured rather than
+# assumed. Carried forward by card 2 (#1250, present-on-input) and card 3
+# (the reschedule nudge), which is what turned it from an instrument into a
+# gate with bounds.
 #
 # The question this gate exists to answer: in WM mode the kind-18
 # COMPOSITE_TICK is 1 Hz (timer.zig `period_ns`), but `pointer_tick` returns
@@ -12,11 +15,17 @@
 # REQUEST_PRESENT -> transfer+flush complete (the kernel + GPU cost). The
 # `wm` monitor row reports both, plus the present and tick rates side by side.
 #
-# This gate proves the INSTRUMENT is live and sane on real hardware. The
-# measured VALUES are the card's finding and are reported on the issue, not
-# frozen here as a threshold nobody has justified.
+# WMP card 3: the gate now carries the BOUND the fix earned. Card 2 made the
+# WM present when an input burst ends, which left the whole remaining term in
+# the scheduler: round-robin evaluated preemption only at the 1 Hz tick, so a
+# woken WM still waited a uniformly distributed 0-1 s to execute. The wake
+# funnel now pulls the core-0 comparator forward (`scheduler.request_resched`
+# -> `timer.nudge`), serving the owed rotation in ~2 ms instead. Measured
+# 815 ms -> 2.5 ms average and 1005 ms -> 2.7 ms worst, with tick_avg_ms
+# unchanged at 1000 — the nudge buys scheduling latency WITHOUT stealing
+# wall-clock seconds, which is what the tick_avg_ms assertion defends.
 
-vgate_name live-wm-pacing "M53 card 1: measured present cadence + input latency on VZ"
+vgate_name live-wm-pacing "WMP: present cadence + input->present latency + reschedule nudge on VZ"
 vgate_share seed
 # The custom-virtio INPUT queue (the headless-safe pointer transport) is
 # SPIKE-gated, exactly like live-wnd-server run 02.
@@ -58,9 +67,9 @@ vgate_assert 01 serial-contains 'wm: rate window_ms='
 vgate_assert 01 serial-contains 'pacing-done'
 vgate_assert 01 serial-absent '[EXC] parking:'
 
-# The instrument is live, tied to a real input burst, and physically sane.
-# Deliberately loose: the observed VALUES are the finding (reported on #1247),
-# and a tightened bound belongs in the follow-up card that fixes the cadence.
+# The instrument is live, tied to a real input burst, physically sane, and as
+# of card 3 carrying the bounds the fix earned — see the latency and
+# non-vacuity assertions below.
 vgate_assert 01 python <<'PY'
 import os, re
 ser = open(os.environ["VG_SER"]).read()
@@ -84,6 +93,12 @@ lat_avg_us = field("lat_avg_us", row)
 lat_max_us = field("lat_max_us", row)
 flush_n = field("flush_n", row)
 flush_max_us = field("flush_max_us", row)
+# WMP card 3: the scheduling side of the same latency. If these are missing the
+# instrument regressed; if they are zero the latency below cannot be attributed
+# to the nudge and the assertion that follows is vacuous.
+resched_requests = field("resched_requests", row)
+nudge_armed = field("nudge_armed", row)
+nudge_served = field("nudge_served", row)
 
 # The desktop presents, more than once (a cadence needs a positive window),
 # and the interval is stated rather than a rate that truncates to 0.
@@ -100,17 +115,33 @@ assert 800 <= tick_avg_ms <= 1200, "tick_avg_ms=%d is not the 1 Hz heartbeat: %s
 # sample) and the right edge (the WM's present) both happened.
 assert lat_n >= 1, "no input->present latency sample was recorded: %s" % row
 assert lat_avg_us > 0, "latency recorded as zero — the clock never advanced: %s" % row
-# The bound WMP card 2 (#1250) earned: before it, the WM presented only on
-# every 2nd tick and the worst sample waited two intervals (3004 ms measured on
-# the pre-fix tree). Now the frame is flushed when the input burst ends, so the
-# remaining term is WAKE-TO-RUN — the scheduler round-robins on the 1 Hz timer
-# (scheduler.zig "every tick preempts the current task"), so a woken WM still
-# waits up to one tick to actually execute. One tick (~1.0-1.1 s on VZ) plus
-# jitter is therefore the honest ceiling; 1.5 s catches a regression to the
-# old 2-tick cadence without pinning the tick period itself (that belongs to
-# the card that changes the quantum).
-assert lat_max_us < 1_500_000, "latency regressed past one tick (%d us): %s" % (lat_max_us, row)
+# WMP card 3: the bound the reschedule nudge earned. Before it the remaining
+# term was WAKE-TO-RUN — round-robin preempted only at the 1 Hz tick, so a
+# woken WM waited a uniformly distributed 0-1 s and BOTH aggregates sat in the
+# hundreds of milliseconds (815 ms avg / 1005 ms max measured at card 2's tip).
+# Now the owed rotation is served ~2 ms after the wake, so the aggregates are a
+# few ms (2.5 / 2.7 measured).
+#
+# 50 ms / 100 ms are therefore not tight measurements of the new behaviour but
+# REGRESSION bounds: they sit ~20-40x above what the fix achieves, and ~10x
+# below a tick, so a return to tick-gated scheduling fails them immediately (a
+# 0-1 s uniform wait exceeds 100 ms on all but ~10% of single samples, and the
+# average of a burst cannot). Left deliberately loose of the observed value so
+# a loaded runner does not flake it.
+assert lat_avg_us < 50_000, "average latency regressed toward tick-gated scheduling (%d us): %s" % (lat_avg_us, row)
+assert lat_max_us < 100_000, "worst-case latency regressed toward tick-gated scheduling (%d us): %s" % (lat_max_us, row)
 assert flush_max_us < 5_000_000, "impossible flush cost (%d us): %s" % (flush_max_us, row)
+
+# NON-VACUITY, and the attribution without which the bounds above are
+# unfalsifiable: the latency must have been bought by nudges that actually
+# fired, and there must have been at least one nudge available to answer EVERY
+# sample the latency aggregate counted. Zero nudges means the improvement came
+# from somewhere else and this gate is not testing card 3 at all.
+assert resched_requests >= 1, "no reschedule request was ever raised: %s" % row
+assert nudge_armed >= 1, "no comparator was ever pulled forward: %s" % row
+assert nudge_served >= 1, "no nudge ever delivered (raised but all subsumed by the period): %s" % row
+assert nudge_served >= lat_n, \
+    "%d latency samples but only %d nudges served — some sample was answered without a nudge: %s" % (lat_n, nudge_served, row)
 
 # The latency samples must come from the INJECTED burst, not a stray sample:
 # `ptr_fan` is the kernel's own count of fanned pointer samples, printed in
@@ -121,6 +152,6 @@ assert fan_rows, "no ptr_fan row: the input seam never reported"
 ptr_fan = field("ptr_fan", fan_rows[-1])
 assert ptr_fan >= 4, "only %d pointer samples fanned — the burst did not land: %s" % (ptr_fan, fan_rows[-1])
 
-print("M53 pacing OBSERVED: window_ms=%d present_avg_ms=%d tick_avg_ms=%d ptr_fan=%d lat_n=%d lat_avg_us=%d lat_max_us=%d flush_n=%d flush_max_us=%d"
-      % (window_ms, present_avg_ms, tick_avg_ms, ptr_fan, lat_n, lat_avg_us, lat_max_us, flush_n, flush_max_us))
+print("WMP pacing OBSERVED: window_ms=%d present_avg_ms=%d tick_avg_ms=%d ptr_fan=%d lat_n=%d lat_avg_us=%d lat_max_us=%d flush_n=%d flush_max_us=%d resched_requests=%d nudge_armed=%d nudge_served=%d"
+      % (window_ms, present_avg_ms, tick_avg_ms, ptr_fan, lat_n, lat_avg_us, lat_max_us, flush_n, flush_max_us, resched_requests, nudge_armed, nudge_served))
 PY

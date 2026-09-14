@@ -35,6 +35,15 @@ pub const ppi_default: u32 = 30;
 pub const heartbeat_every: u64 = 5;
 /// One tick period: 1 second.
 pub const period_ns: u64 = 1_000_000_000;
+/// WMP card 3: how long a RESCHEDULE NUDGE waits after a woken task becomes
+/// runnable before the comparator fires. The 1 Hz period above is the wall
+/// clock; this is the scheduling latency floor, and they are deliberately
+/// different numbers. 2 ms sits far below a compositor frame (the measured
+/// present's own transfer+flush is ~0.3 ms, a full WM loop is tens of ms) so
+/// a woken task runs "now" in any user-visible sense, while staying long
+/// enough that a wake burst coalesces into a single extra comparator fire
+/// rather than an interrupt storm.
+pub const nudge_period_ns: u64 = 2_000_000;
 
 // ---------------------------------------------------------------------------
 // State (module globals; read by the monitor `timer` command)
@@ -52,7 +61,27 @@ pub var ticks: u64 = 0;
 pub var irq_ticks: u64 = 0;
 /// Ticks consumed by an explicit diagnostic comparator poll.
 pub var poll_ticks: u64 = 0;
+// WMP card 3 observability. `nudge_armed_total` counts comparators pulled
+// forward; `nudge_served` counts those that actually delivered a nudge
+// (the remainder were subsumed by the period boundary arriving first);
+// `nudge_coalesced` counts requests that found one already in flight — the
+// number that proves the coalescing rule is doing its job rather than the
+// load simply being light. BSS counters only, IRQ-safe (same discipline as
+// the tick counters above).
+pub var nudge_armed_total: u64 = 0;
+pub var nudge_served: u64 = 0;
+pub var nudge_coalesced: u64 = 0;
+pub var nudge_period_first: u64 = 0;
 var period_ticks: u64 = 0;
+/// Comparator delta for a reschedule nudge, derived once from CNTFRQ_EL0.
+var nudge_ticks: u64 = 0;
+/// Absolute CNTPCT value of the NEXT 1 Hz period boundary, as recorded by
+/// `arm()`. A nudge moves the comparator off this value and `handle()` moves
+/// it back, so the wall clock never loses or gains a second.
+var period_deadline: u64 = 0;
+/// A nudge is armed and the comparator is currently pulled forward of
+/// `period_deadline`. At most one at a time (the coalescing rule).
+var nudge_armed_flag: bool = false;
 var armed_flag: bool = false;
 var pending_heartbeat: bool = false;
 var pending_irq_report: bool = false;
@@ -136,20 +165,63 @@ pub fn cntpct() u64 {
     return v;
 }
 
-/// Arm (or re-arm) the comparator one period from now and enable the timer.
-pub fn arm() void {
-    if (comptime builtin.cpu.arch != .aarch64) return;
-    if (period_ticks == 0) return;
-    const cval = cntpct() + period_ticks;
+/// Program the comparator to an absolute CNTPCT value and enable the timer.
+fn program_cval(target: u64) void {
     asm volatile ("msr cntp_cval_el0, %[v]"
         :
-        : [v] "r" (cval),
+        : [v] "r" (target),
     );
     asm volatile ("msr cntp_ctl_el0, %[v]"
         :
         : [v] "r" (@as(u64, 1)), // enable, IMASK=0
     );
     asm volatile ("isb");
+}
+
+/// Arm (or re-arm) the comparator one period from now and enable the timer.
+pub fn arm() void {
+    if (comptime builtin.cpu.arch != .aarch64) return;
+    if (period_ticks == 0) return;
+    const cval = cntpct() + period_ticks;
+    period_deadline = cval;
+    program_cval(cval);
+}
+
+/// WMP card 3: the pure arming decision, split out so the coalescing rule is
+/// host-testable (`cntpct()`/CNTFRQ are unreachable in a host test binary, so
+/// the counter arithmetic is the only part that can be pinned there). Returns
+/// the absolute value to program, or null when the request is dropped:
+/// either a nudge is already in flight (COALESCE — one comparator pull per
+/// rotation, not one per wake) or the 1 Hz boundary is already at least as
+/// soon as the nudge would be (nothing to gain, and pulling the comparator
+/// would only move the wall clock).
+pub fn nudge_target(nudge_in_flight: bool, now: u64, deadline: u64, delta: u64) ?u64 {
+    if (nudge_in_flight) return null;
+    const target = now + delta;
+    if (target >= deadline) return null;
+    return target;
+}
+
+/// WMP card 3: pull the comparator forward so the pending reschedule is
+/// served in `nudge_period_ns` rather than at the next 1 Hz boundary. Called
+/// by the scheduler from ordinary task context (an event push waking a
+/// blocked task), never from the tick handler itself. IRQ-safe: BSS writes
+/// plus two `msr`s, no console, no allocation, no lock.
+///
+/// The nudge rides whatever core's comparator the caller is on, so the
+/// SCHEDULER is the layer that decides which core is worth nudging (there it
+/// is core 0, whose PPI carries the rotation for the shell/desktop). This
+/// function only refuses when the timer was never programmed.
+pub fn nudge() void {
+    if (comptime builtin.cpu.arch != .aarch64) return;
+    if (period_ticks == 0 or nudge_ticks == 0) return;
+    const target = nudge_target(nudge_armed_flag, cntpct(), period_deadline, nudge_ticks) orelse {
+        if (nudge_armed_flag) nudge_coalesced +%= 1 else nudge_period_first +%= 1;
+        return;
+    };
+    nudge_armed_flag = true;
+    nudge_armed_total +%= 1;
+    program_cval(target);
 }
 
 /// Grant EL0 access to the counter registers (CNTPCT_EL0, CNTFRQ_EL0,
@@ -197,6 +269,7 @@ pub fn init() void {
     freq = cntfrq();
     if (freq == 0) return;
     period_ticks = freq * period_ns / 1_000_000_000;
+    nudge_ticks = freq * nudge_period_ns / 1_000_000_000;
     arm();
     armed_flag = true;
 }
@@ -243,10 +316,34 @@ pub fn on_tick() void {
 
 /// IRQ-context tick handler (called by the kernel's irq_dispatch when the
 /// acknowledged INTID matches `ppi`). Console-free by design.
-pub fn handle() void {
-    if (comptime builtin.cpu.arch != .aarch64) return;
+///
+/// Returns TRUE when this delivery was the **1 Hz period boundary** — the
+/// caller may advance the wall clock (scheduler `on_tick`: tick_count,
+/// sleepers, app timers, WM pacing, CPU accounting) — and FALSE when it
+/// served a **reschedule nudge**, which must NOT be mistaken for a second
+/// passing. WMP card 3 hangs the whole "a woken task runs promptly" change
+/// on that distinction: the fix pays for scheduling latency out of shared
+/// wall-clock ticks, so the period must stay exactly 1 Hz while extra,
+/// uncounted comparator fires appear between them.
+pub fn handle() bool {
+    if (comptime builtin.cpu.arch != .aarch64) return true;
+    if (nudge_armed_flag and cntpct() < period_deadline) {
+        // A nudge: the comparator was pulled forward to serve a pending
+        // reschedule, not to mark a second. Record NO tick — that is the
+        // whole point — and put the comparator back on the boundary the wall
+        // clock is keeping, so the next period arrives on schedule.
+        nudge_armed_flag = false;
+        nudge_served +%= 1;
+        program_cval(period_deadline);
+        return false;
+    }
+    // The period boundary. This also subsumes a nudge that was still armed:
+    // the rotation it owed is about to run anyway, so there is nothing left
+    // for it to serve and the flag must not survive into the next period.
+    nudge_armed_flag = false;
     record_tick(.irq);
     arm();
+    return true;
 }
 
 /// True when `intid` is this timer's PPI.
@@ -411,4 +508,59 @@ test "timer: wall_epoch tracks the boot epoch and local_time_of_day wraps (#1058
     set_boot_epoch_secs(boot - (12 * 3600 + 34 * 60 + 56) + 23 * 3600 + 59 * 60 + 50);
     ticks = 20;
     try std.testing.expectEqual(@as(?u64, 10), local_time_of_day());
+}
+
+// ---------------------------------------------------------------------------
+// WMP card 3 — the reschedule nudge's arming rule
+// ---------------------------------------------------------------------------
+
+// The nudge is the answer to WMP card 1's measurement: round-robin evaluated
+// preemption only at the 1 Hz tick, so a woken WM waited 786-1216 ms typical
+// and 3004 ms worst for its frame. Pulling the comparator forward serves the
+// owed rotation in ~2 ms instead.
+//
+// Only the DECISION is reachable from a host test — `cntpct()` returns 0
+// under `builtin.is_test` and `arm()` never programs a comparator without a
+// CNTFRQ — so the counter arithmetic (`nudge_target`) is pinned here and the
+// real arming/delivery split is pinned live by the class-B `live-wm-pacing`
+// gate, which reads `nudge_armed`/`nudge_served` off the pacing row.
+test "timer: nudge_target pulls the comparator forward, coalesces, and yields to the period" {
+    const deadline: u64 = 10_000_000;
+    const delta: u64 = 48_000; // 2 ms at a 24 MHz counter
+
+    // The ordinary case: nothing in flight and the period is far enough away
+    // that 2 ms from now genuinely beats it. This is the arm that makes a
+    // woken task run promptly.
+    try std.testing.expectEqual(@as(?u64, 1_000 + delta), nudge_target(false, 1_000, deadline, delta));
+
+    // COALESCE: a nudge is already in flight, so the caller's demand is
+    // absorbed rather than armed again. This is the rule that caps a wake
+    // burst at ONE extra comparator fire — without it every wake in a pointer
+    // storm would arm its own interrupt and the comparator would never stop.
+    try std.testing.expectEqual(@as(?u64, null), nudge_target(true, 1_000, deadline, delta));
+    try std.testing.expectEqual(@as(?u64, null), nudge_target(true, 9_999_999, deadline, delta));
+
+    // The 1 Hz boundary is already at least as soon as the nudge would be:
+    // arming would move the wall clock for no scheduling gain, so the request
+    // is dropped and the period serves the owed rotation.
+    try std.testing.expectEqual(@as(?u64, null), nudge_target(false, deadline, deadline, delta));
+    try std.testing.expectEqual(@as(?u64, null), nudge_target(false, deadline - 1, deadline, delta));
+
+    // Exactly touching the boundary is the edge: a target of `deadline` is
+    // NOT strictly sooner, so the period wins and no second is at risk; one
+    // tick earlier still arms.
+    try std.testing.expectEqual(@as(?u64, deadline - 1), nudge_target(false, deadline - delta - 1, deadline, delta));
+    try std.testing.expectEqual(@as(?u64, null), nudge_target(false, deadline - delta, deadline, delta));
+}
+
+test "timer: the nudge period is far below the frame it serves and far above an interrupt storm" {
+    // The two constants are a deliberate pair and both must hold: the nudge
+    // has to be invisible next to the work it unblocks (a WM loop is tens of
+    // ms; even a present's own transfer+flush is ~0.3 ms), and it must not be
+    // so short that the comparator is pulled forward for every wake.
+    try std.testing.expect(nudge_period_ns <= period_ns / 100);
+    try std.testing.expect(nudge_period_ns >= 1_000_000);
+    // At the counter frequency the guest actually sees, the delta is not zero
+    // ticks — a zero delta would re-arm the comparator to "now" and spin.
+    try std.testing.expect(24_000_000 * nudge_period_ns / 1_000_000_000 > 0);
 }
