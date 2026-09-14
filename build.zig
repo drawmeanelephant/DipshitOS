@@ -2488,6 +2488,9 @@ pub fn build(b: *std.Build) void {
         "user/src/lib/tls/pem.zig",
         "user/src/lib/tls/x509.zig",
         "user/src/lib/tls/identity.zig",
+        // Chain validation + trust store (card TLS13-C4).
+        "user/src/lib/tls/trust_store.zig",
+        "user/src/lib/tls/validate.zig",
         "user/tests/ui/ui_test.zig",
         "kernel/tests/scheduler_test.zig",
         "kernel/tests/syscall_test.zig",

@@ -375,6 +375,36 @@ fn cmpSlice(a: []const u64, b: []const u64, n: usize) i8 {
 
 const vectors = @import("ecdsa_vectors.zig");
 
+/// Construct the P-256 / P-384 curve contexts. The constants are generated
+/// from `openssl ecparam -param_enc explicit` into `ecdsa_vectors.zig`, which
+/// is shipped in-tree (not a test-only fixture) precisely so these
+/// constructors have an authoritative source rather than typed constants.
+/// Decode a comptime hex string into a byte array. The curve constants are hex
+/// text (as generated from openssl); the constructor needs bytes.
+fn hexBytes(comptime hex: []const u8) [hex.len / 2]u8 {
+    var out: [hex.len / 2]u8 = undefined;
+    _ = std.fmt.hexToBytes(&out, hex) catch unreachable;
+    return out;
+}
+
+pub fn curveP256() Curve {
+    const p = hexBytes(vectors.p256.p);
+    const b = hexBytes(vectors.p256.b);
+    const n = hexBytes(vectors.p256.n);
+    const gx = hexBytes(vectors.p256.gx);
+    const gy = hexBytes(vectors.p256.gy);
+    return Curve.init(&p, &b, &n, &gx, &gy) catch unreachable;
+}
+
+pub fn curveP384() Curve {
+    const p = hexBytes(vectors.p384.p);
+    const b = hexBytes(vectors.p384.b);
+    const n = hexBytes(vectors.p384.n);
+    const gx = hexBytes(vectors.p384.gx);
+    const gy = hexBytes(vectors.p384.gy);
+    return Curve.init(&p, &b, &n, &gx, &gy) catch unreachable;
+}
+
 fn decode(out: []u8, hexstr: []const u8) usize {
     _ = std.fmt.hexToBytes(out[0 .. hexstr.len / 2], hexstr) catch |e| {
         std.debug.print("decode failed: hexlen={d} outlen={d} err={any}\n", .{ hexstr.len, hexstr.len / 2, e });

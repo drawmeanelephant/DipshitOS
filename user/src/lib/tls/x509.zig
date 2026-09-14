@@ -96,12 +96,20 @@ pub const ku = struct {
 
 pub const Cert = struct {
     der: []const u8 = "",
+    /// Raw bytes of the tbsCertificate (the full SEQUENCE, header included).
+    tbs: []const u8 = "",
+    /// The signature value from the signatureValue BIT STRING.
+    signature: []const u8 = "",
     version: u8 = 1,
     serial: []const u8 = "",
     sig_alg_oid: []const u8 = "",
     sig_alg: SigAlg = .unknown,
     issuer_cn: ?[]const u8 = null,
     subject_cn: ?[]const u8 = null,
+    /// Raw DER of the issuer / subject Name (the full SEQUENCE element), for
+    /// exact issuer-subject matching during path building.
+    issuer_raw: []const u8 = "",
+    subject_raw: []const u8 = "",
     not_before: i64 = 0,
     not_after: i64 = 0,
     key: Key = .{},
@@ -140,8 +148,10 @@ pub const Cert = struct {
         var c = der.Reader.init(cert_seq.content);
         const tbs = try c.expect(der.tag.sequence);
         const outer_alg = try c.expect(der.tag.sequence);
-        _ = try c.expect(der.tag.bit_string);
+        const sig_elem = try c.expect(der.tag.bit_string);
         if (!c.atEnd()) return Error.NotACertificate;
+        out.tbs = tbs.raw;
+        out.signature = (try der.bitString(sig_elem)).bits;
 
         // signatureAlgorithm is the first element of the AlgorithmIdentifier.
         {
@@ -200,7 +210,9 @@ fn parseTbs(buf: []const u8, out: *Cert) Error!void {
     out.serial = try der.integer(e);
 
     _ = try r.expect(der.tag.sequence); // inner signature AlgorithmIdentifier
-    out.issuer_cn = try parseNameCn((try r.expect(der.tag.sequence)).content);
+    const issuer_elem = try r.expect(der.tag.sequence);
+    out.issuer_cn = try parseNameCn(issuer_elem.content);
+    out.issuer_raw = issuer_elem.raw;
 
     {
         const validity = try r.expect(der.tag.sequence);
@@ -209,7 +221,9 @@ fn parseTbs(buf: []const u8, out: *Cert) Error!void {
         out.not_after = try der.parseTime(try vr.next());
     }
 
-    out.subject_cn = try parseNameCn((try r.expect(der.tag.sequence)).content);
+    const subject_elem = try r.expect(der.tag.sequence);
+    out.subject_cn = try parseNameCn(subject_elem.content);
+    out.subject_raw = subject_elem.raw;
     try parseSpki((try r.expect(der.tag.sequence)).content, out);
 
     while (!r.atEnd()) {

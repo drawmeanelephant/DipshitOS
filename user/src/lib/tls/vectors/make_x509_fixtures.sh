@@ -90,6 +90,22 @@ openssl x509 -req -in leaf-unk.csr -CA inter.pem -CAkey inter.key -CAcreateseria
     -days $DAYS -sha256 -extfile leaf-unk.ext -out leaf-unknowncrit.pem 2>/dev/null
 der leaf-unknowncrit.pem
 
+# ---- leaf under ca-nc whose SAN is in the EXCLUDED subtree ----
+openssl ecparam -name prime256v1 -genkey -noout -out leaf-ncevil.key 2>/dev/null
+openssl req -new -key leaf-ncevil.key -subj "/CN=evil.example.com$SUBJ" -out leaf-ncevil.csr 2>/dev/null
+printf 'basicConstraints=critical,CA:FALSE\nsubjectAltName=DNS:evil.example.com\n' > leaf-ncevil.ext
+openssl x509 -req -in leaf-ncevil.csr -CA ca-nc.pem -CAkey ca-nc.key -CAcreateserial \
+    -days $DAYS -sha256 -extfile leaf-ncevil.ext -out leaf-ncevil.pem 2>/dev/null
+der leaf-ncevil.pem
+
+# ---- leaf under ca-nc whose SAN is OUTSIDE the permitted subtree ----
+openssl ecparam -name prime256v1 -genkey -noout -out leaf-ncother.key 2>/dev/null
+openssl req -new -key leaf-ncother.key -subj "/CN=other.example$SUBJ" -out leaf-ncother.csr 2>/dev/null
+printf 'basicConstraints=critical,CA:FALSE\nsubjectAltName=DNS:other.com\n' > leaf-ncother.ext
+openssl x509 -req -in leaf-ncother.csr -CA ca-nc.pem -CAkey ca-nc.key -CAcreateserial \
+    -days $DAYS -sha256 -extfile leaf-ncother.ext -out leaf-ncother.pem 2>/dev/null
+der leaf-ncother.pem
+
 # ---- leaf with NO subjectAltName extension at all (CN fallback case) ----
 openssl ecparam -name prime256v1 -genkey -noout -out leaf-cn.key 2>/dev/null
 openssl req -new -key leaf-cn.key -subj "/CN=cnonly.example.com$SUBJ" -out leaf-cn.csr 2>/dev/null
