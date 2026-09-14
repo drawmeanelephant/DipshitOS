@@ -3196,6 +3196,191 @@ test "syscall: M33 SB3 — window surface handoff; bind records the surface, WM 
     _ = wm_server.unregister(wm_pid);
 }
 
+/// M52 card 3 (#1240): count the live `mmap_region` rows a process owns (the
+/// rows compact into the low slots, so a scan is the count).
+fn live_mmap_rows(pid: usize) usize {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < process.max_mmap_regions) : (i += 1) {
+        if (process.mmap_region_at(pid, i) != null) n += 1;
+    }
+    return n;
+}
+
+test "syscall: M52 card 3 — an owner-side revoke ends the bound window and drops the peer's mirror row + aperture; 17 cycles never exhaust the WM" {
+    mmu.reset();
+    alloc.reset_refcounts();
+    shared_region.reset();
+    process.init();
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0);
+    driving_award.arm();
+    events.init();
+
+    const map_desc = [_]memmap.MemoryDescriptor{
+        .{ .type = .conventional_memory, .physical_start = 0x100000, .virtual_start = 0, .number_of_pages = 256, .attribute = 0 },
+    };
+    const view = memmap.MapView.init(std.mem.asBytes(&map_desc), @sizeOf(memmap.MemoryDescriptor), map_desc.len);
+    try std.testing.expect(alloc.init(view, &.{}));
+
+    const owner_root = mmu.build_user_root(userspace.text_va, 0x1000, 64, userspace.stack_va, 0x2000, 8192).?;
+    const wm_root = mmu.build_user_root(userspace.text_va, 0x3000, 64, userspace.stack_va, 0x4000, 8192).?;
+    var kstack1: [scheduler.task_stack_size]u8 align(16) = undefined;
+    var kstack2: [scheduler.task_stack_size]u8 align(16) = undefined;
+    const owner_pid = process.create("APP.BIN", .{ .entry_va = 0x400000, .content_len = 64 }, .{
+        .root_phys = owner_root,
+        .text_va = userspace.text_va,
+        .text_len = 64,
+        .stack_va = userspace.stack_va,
+        .stack_len = 8192,
+    }, .{}).?;
+    const wm_pid = process.create("WM.BIN", .{ .entry_va = 0x400000, .content_len = 64 }, .{
+        .root_phys = wm_root,
+        .text_va = userspace.text_va,
+        .text_len = 64,
+        .stack_va = userspace.stack_va,
+        .stack_len = 8192,
+    }, .{}).?;
+    const owner_task = scheduler.register_exec_user(userspace.text_va, 0x4000_0000, 100, 0x8000_0000, 8192, &kstack1, 0, 0).?;
+    const wm_task = scheduler.register_exec_user(userspace.text_va, 0x5000_0000, 100, 0x9000_0000, 8192, &kstack2, 0, 0).?;
+    _ = process.bind(owner_pid, owner_task);
+    _ = process.bind(wm_pid, wm_task);
+    scheduler.start();
+
+    var frame = fresh_frame();
+    var guard: usize = 0;
+    while (scheduler.current_id() != owner_task and guard < scheduler.max_tasks) : (guard += 1) {
+        try std.testing.expect(scheduler.yield_current());
+    }
+    try std.testing.expectEqual(owner_task, scheduler.current_id());
+    _ = wm_server.register(wm_pid);
+
+    // --- The owner's WINDOW-BOUND surface (SB3 handoff): the binding makes
+    // the zombie question concrete — the window's pixels live in the region.
+    const wid = dispatch(sys_win_open, .{ 64, 64, 128, 96, 0, 0 }, &frame);
+    try std.testing.expectEqual(@as(u64, 2), wid);
+    const surf_len: u64 = 128 * 96 * 4;
+    const owner_va = dispatch(sys_mmap, .{ m33_surf_win_tag | wid, surf_len, 3, 0x20 | 0x10000, 0, 0 }, &frame);
+    try std.testing.expect(owner_va >= 0x1000_0000);
+    try std.testing.expect(driving_award.user_is_surface_backed(@intCast(wid)));
+    const h: u32 = 1;
+    try std.testing.expectEqual(surf_len, @as(u64, shared_region.info(h).?.page_count) * 4096);
+    const pa_base = shared_region.info(h).?.pa_base;
+    try std.testing.expectEqual(@as(u64, wm_pid), shared_region.info(h).?.peer_pid);
+    try std.testing.expectEqual(@as(u16, 2), alloc.page_refcount(pa_base)); // owner + WM mirror
+
+    // The WM's auto-mirror registered a PROCESS-scope row for its own va (the
+    // row every SVC entry's `arm_task_regions` bridges into the EL0 aperture).
+    guard = 0;
+    while (scheduler.current_id() != wm_task and guard < scheduler.max_tasks) : (guard += 1) {
+        try std.testing.expect(scheduler.yield_current());
+    }
+    try std.testing.expectEqual(wm_task, scheduler.current_id());
+    const wm_va = shared_region.info(h).?.peer_va;
+    try std.testing.expect(wm_va >= 0x1000_0000);
+    var row_found = false;
+    {
+        var i: usize = 0;
+        while (i < process.max_mmap_regions) : (i += 1) {
+            const r = process.mmap_region_at(wm_pid, i) orelse continue;
+            if (r.base_va == wm_va) row_found = true;
+        }
+    }
+    try std.testing.expect(row_found);
+    // The WM's SVC-entry arming turns that row into the EL0 read aperture
+    // (the exact sequence handle_svc runs; the A1 mmap-visibility tests use
+    // this same seam).
+    @import("syscall").arm_task_regions();
+    try std.testing.expect(uaccess.read_region_covers(wm_va, 8));
+    // Drain the WM's queue: the RELEASED mirror asserted below must be the
+    // revoke's own fan, not an open-time leftover.
+    while (events.pop(wm_pid)) |_| {}
+
+    // --- Back on the owner: it MUNMAPS the window's surface (not an exit —
+    // the ordinary owner-side teardown, which used to leave the window
+    // surface-backed on the freed physical pages).
+    guard = 0;
+    while (scheduler.current_id() != owner_task and guard < scheduler.max_tasks) : (guard += 1) {
+        try std.testing.expect(scheduler.yield_current());
+    }
+    try std.testing.expectEqual(owner_task, scheduler.current_id());
+    // Drain the owner's queue too: the open/focus fan-out is not what this
+    // test reads (the WIN_CLOSE below must be the revoke's own push).
+    while (events.pop(owner_pid)) |_| {}
+    const rows_before = live_mmap_rows(wm_pid);
+    try std.testing.expectEqual(@as(usize, 1), rows_before);
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_munmap, .{ owner_va, surf_len, 0, 0, 0, 0 }, &frame));
+
+    // --- The ZOMBIE CLOSE: the window that was bound to the revoked surface
+    // left the registry (it has no source left — its pixels were the region's
+    // pages) and the registry is back to the four fixed layers. No window, so
+    // composite() can never blit the freed pa and sys_win_fill can never
+    // write it.
+    try std.testing.expect(driving_award.find_user_window(@intCast(wid)) == null);
+    try std.testing.expectEqual(@as(usize, 4), driving_award.count());
+    try std.testing.expectEqual(@as(u8, 0), driving_award.focused_window_id()); // focus fell back
+    // The release ran through the ONE primitive: the owner learned WIN_CLOSE
+    // and the WM learned RELEASED (bit 13) exactly once.
+    const close_ev = events.pop(owner_pid).?;
+    try std.testing.expectEqual(events.WIN_CLOSE, close_ev.kind);
+    try std.testing.expectEqual(wid, close_ev.arg0);
+    try std.testing.expect(events.pop(owner_pid) == null); // exactly one WIN_CLOSE
+    const rel = events.pop(wm_pid).?;
+    try std.testing.expectEqual(events.WM_WINDOW, rel.kind);
+    try std.testing.expectEqual(wid, @as(u8, @truncate(rel.flags)));
+    try std.testing.expect((rel.flags & (1 << 8)) == 0); // not a visibility mirror
+    try std.testing.expect((rel.flags & (1 << 13)) != 0); // RELEASED
+    try std.testing.expect(events.pop(wm_pid) == null); // exactly one
+    // The region died and the WM holds no leaf, no row, no aperture — the
+    // mirror's kernel-side half is not separable from the leaves.
+    try std.testing.expect(shared_region.info(h) == null);
+    try std.testing.expect(mmu.unmap_user_page(wm_root, wm_va) == null); // peer RO leaf gone
+    try std.testing.expectEqual(@as(u16, 1), alloc.page_refcount(pa_base)); // back to the owner's ref only
+    try std.testing.expectEqual(@as(usize, 0), live_mmap_rows(wm_pid)); // peer's va reservation released
+    try std.testing.expect(!uaccess.read_region_covers(wm_va, 8)); // aperture dropped
+
+    // --- 17 further create/attach/revoke cycles: the WM's 16-row table is
+    // never the binding constraint. Pre-fix each owner revoke left its row
+    // behind, so the 17th attach failed ENOMEM and the WM could never mirror
+    // again for the rest of the boot.
+    var cycle: usize = 0;
+    while (cycle < 17) : (cycle += 1) {
+        var g: usize = 0;
+        while (scheduler.current_id() != owner_task and g < scheduler.max_tasks) : (g += 1) {
+            try std.testing.expect(scheduler.yield_current());
+        }
+        const cva = dispatch(sys_mmap, .{ 0, 4096, 3, 0x20 | 0x10000, 0, 0 }, &frame);
+        try std.testing.expect(cva >= 0x1000_0000);
+        // The kernel-issued handle of the newest region (the table is emptied
+        // by every revoke, so this is the only live region the owner holds).
+        const handle = shared_region.find_owner(owner_pid, cva).?;
+        try std.testing.expect(handle != 0);
+        g = 0;
+        while (scheduler.current_id() != wm_task and g < scheduler.max_tasks) : (g += 1) {
+            try std.testing.expect(scheduler.yield_current());
+        }
+        const cpeer_va = dispatch(sys_mmap, .{ handle, 4096, 1, 0x20 | 0x10000, 0, 0 }, &frame);
+        // A REAL va, never an error: the WM's 16-row table is never the
+        // binding constraint. (Errors are small negative i64s, so `>=` alone
+        // would happily accept ENOMEM — assert the range AND the code.)
+        try std.testing.expect(cpeer_va != error_result(.enomem));
+        try std.testing.expect(cpeer_va >= 0x1000_0000 and cpeer_va < 0x0001_0000_0000_0000);
+        try std.testing.expectEqual(@as(usize, 1), live_mmap_rows(wm_pid));
+        g = 0;
+        while (scheduler.current_id() != owner_task and g < scheduler.max_tasks) : (g += 1) {
+            try std.testing.expect(scheduler.yield_current());
+        }
+        try std.testing.expectEqual(@as(u64, 0), dispatch(sys_munmap, .{ cva, 4096, 0, 0, 0, 0 }, &frame));
+        try std.testing.expectEqual(@as(usize, 0), live_mmap_rows(wm_pid)); // released every cycle
+    }
+
+    // Cleanup: unregister the WM seat.
+    _ = wm_server.unregister(wm_pid);
+}
+
 test "syscall: M33 SB5 — the scanout grant is WM-only, full-frame, writable, idempotent, and tears down (claim 7397)" {
     mmu.reset();
     alloc.reset_refcounts();
