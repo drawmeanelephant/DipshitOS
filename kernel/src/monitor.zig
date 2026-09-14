@@ -4012,6 +4012,18 @@ fn cmd_timer(m: *Monitor, args: []const []const u8) ExecError {
     m.console.print_u64(timer.irq_ticks);
     m.console.puts(" poll=");
     m.console.print_u64(timer.poll_ticks);
+    // WMP card 3 (#1274): the reschedule DEMAND. `requests` counts wakes that
+    // became runnable while another task was executing — i.e. how often the 1 Hz
+    // period tick is the only thing standing between a woken task and running;
+    // `coalesced` is the surplus a wake burst absorbed rather than arming again;
+    // `discharged` counts the rotations that served one. Nothing here pulls the
+    // comparator — these are the numbers that say what such a pull would buy.
+    m.console.puts(" resched_requests=");
+    m.console.print_u64(scheduler.resched_requests);
+    m.console.puts(" resched_coalesced=");
+    m.console.print_u64(scheduler.resched_coalesced);
+    m.console.puts(" resched_discharged=");
+    m.console.print_u64(scheduler.resched_discharged);
     m.console.puts(" acked=");
     m.console.print_u64(gic.acked_total()); // claim 7339: summed across cores
     m.console.puts(" first=");
@@ -7213,6 +7225,17 @@ fn cmd_wm(m: *Monitor, args: []const []const u8) ExecError {
         m.console.print_u64(info.flush_avg_ns / 1000);
         m.console.puts(" flush_max_us=");
         m.console.print_u64(info.flush_max_ns / 1000);
+        // WMP card 3 (#1274): the scheduling half of this same latency, on the
+        // row that reports the latency. The pacing gate reads THIS row, so a
+        // latency figure can now be attributed to the wake demand behind it
+        // instead of standing on its own. `requests > 0` is the non-vacuity
+        // proof: the demand is real and it is not being served by the tick.
+        m.console.puts(" resched_requests=");
+        m.console.print_u64(scheduler.resched_requests);
+        m.console.puts(" resched_coalesced=");
+        m.console.print_u64(scheduler.resched_coalesced);
+        m.console.puts(" resched_discharged=");
+        m.console.print_u64(scheduler.resched_discharged);
         m.console.puts("\n");
         // M32 WMS4 (issue #624): chrome observability — SET_WINDOW
         // submissions counted, the broadcast policy's chrome kind, and the
