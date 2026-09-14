@@ -102,7 +102,7 @@ The only threads not closed:
 | Context snapshot | `zig build context` | ✅ |
 | Unit tests | `zig build test` (parallel; 2,260+ host tests) | ✅ |
 | Class-A portable set | `just verify-portable` | ✅ |
-| Class-B VZ fleet | `just verify-vz` (sharded ×4 in CI; needs repo var `VZ_RUNNER_LABEL`) | ✅ on the reference host |
+| Class-B VZ fleet | `just verify-vz` (226 members; sharded ×4 in CI + nightly once `VZ_RUNNER_LABEL` names a runner) | ✅ on the reference host; ⛔ 0 gates run in CI |
 | Coordination gate | `just verify-coordination` + `just test-coordination` | ✅ |
 
 Per-gate evidence lives in the run logs / CI. Verbose per-gate notes (M3-era
