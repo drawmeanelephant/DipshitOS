@@ -2842,6 +2842,10 @@ test "syscall: shared anon revoke-on-exit — owner exit revokes the peer seat; 
     _ = scheduler.init();
     _ = scheduler.register_worker(0x2000);
     _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    // M52 card 1 (#1238): the exit seam runs close_owner, so the window
+    // registry must start EMPTY — a window left behind by an earlier test in
+    // this binary would have its (foreign-arena) back-buffer freed here.
+    driving_award.arm();
 
     const map_desc = [_]memmap.MemoryDescriptor{
         .{ .type = .conventional_memory, .physical_start = 0x100000, .virtual_start = 0, .number_of_pages = 64, .attribute = 0 },
@@ -2896,10 +2900,15 @@ test "syscall: shared anon revoke-on-exit — owner exit revokes the peer seat; 
     // Owner (1) + peer (1): the page is 2-ref'd while both roots map it.
     try std.testing.expectEqual(@as(u16, 2), alloc.page_refcount(pa_base));
 
-    // --- The WM (peer) exits first: only ITS seat detaches. The region and
-    // the owner's writable leaf survive; the page drops back to the owner's
-    // single ref. (This is scheduler's revoke_peer_role at exit.)
-    _ = shared_mmap.revoke_peer_role(peer_pid);
+    // --- The WM (peer) exits first THROUGH THE REAL SEAM (M52 card 1,
+    // #1238): only ITS seat detaches. The region and the owner's writable
+    // leaf survive; the page drops back to the owner's single ref. The seam
+    // runs revoke_owner (nothing owned) + revoke_peer_role + the service
+    // resets + wm_server.unregister; the peer's descriptor is still
+    // resolvable here (state `.exited`, not yet `.free`), which is exactly
+    // why the peer leaf CAN be unmapped from its root.
+    try std.testing.expect(scheduler.exit_current(0));
+    try std.testing.expect(scheduler.is_terminated(peer_task));
     try std.testing.expect(mmu.unmap_user_page(peer_root, peer_va) == null); // peer RO leaf gone
     try std.testing.expect(shared_region.info(h) != null); // region survives
     try std.testing.expectEqual(@as(u32, 0), shared_region.read_count(h));
@@ -2908,9 +2917,16 @@ test "syscall: shared anon revoke-on-exit — owner exit revokes the peer seat; 
     // The owner's writable leaf is untouched.
     try std.testing.expect(mmu.unmap_user_page(owner_root, owner_va) != null); // still mapped (probe returns its pa)
 
-    // --- The owner exits: the region dies; the page is only held by the
-    // owner's dynamic_pages list now (1) — the reap unrefs it to 0 (free).
-    _ = shared_mmap.revoke_owner(owner_pid);
+    // --- The owner exits through the seam too: the region dies; the page is
+    // only held by the owner's dynamic_pages list now (1) — the reap unrefs
+    // it to 0 (free).
+    var owner_guard: usize = 0;
+    while (scheduler.current_id() != owner_task and owner_guard < scheduler.max_tasks) : (owner_guard += 1) {
+        try std.testing.expect(scheduler.yield_current());
+    }
+    try std.testing.expectEqual(owner_task, scheduler.current_id());
+    try std.testing.expect(scheduler.exit_current(0));
+    try std.testing.expect(scheduler.is_terminated(owner_task));
     try std.testing.expect(shared_region.info(h) == null);
     try std.testing.expectEqual(@as(u16, 1), alloc.page_refcount(pa_base));
     // Simulate the reap's release_resources unref of the owner's dynamic page.
@@ -2919,8 +2935,148 @@ test "syscall: shared anon revoke-on-exit — owner exit revokes the peer seat; 
     try std.testing.expect(alloc.unref_page(pa_base));
     try std.testing.expect(!alloc.unref_page(pa_base));
 
-    // Cleanup: unregister the WM seat (see the sibling test's note).
-    _ = wm_server.unregister(peer_pid);
+    // The seam's own wm_server.unregister already tore the seat down — a
+    // zombie WM leaves no registered seat behind, and the shim fallback is
+    // reported exactly once (the shell idle loop drains it).
+    try std.testing.expect(!wm_server.registered());
+    try std.testing.expect(wm_server.registered_pid() == null);
+    try std.testing.expect(wm_server.take_fallback_report());
+    try std.testing.expect(!wm_server.take_fallback_report());
+}
+
+test "syscall: M52 exit-path inventory — the owner's death through the scheduler seam (window, focus, WM mirror, surface revoke, timer)" {
+    mmu.reset();
+    alloc.reset_refcounts();
+    shared_region.reset();
+    process.init();
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (boot payload)
+    driving_award.arm();
+
+    const map_desc = [_]memmap.MemoryDescriptor{
+        .{ .type = .conventional_memory, .physical_start = 0x100000, .virtual_start = 0, .number_of_pages = 256, .attribute = 0 },
+    };
+    const view = memmap.MapView.init(std.mem.asBytes(&map_desc), @sizeOf(memmap.MemoryDescriptor), map_desc.len);
+    try std.testing.expect(alloc.init(view, &.{}));
+
+    const owner_root = mmu.build_user_root(userspace.text_va, 0x1000, 64, userspace.stack_va, 0x2000, 8192).?;
+    const wm_root = mmu.build_user_root(userspace.text_va, 0x3000, 64, userspace.stack_va, 0x4000, 8192).?;
+    var kstack1: [scheduler.task_stack_size]u8 align(16) = undefined;
+    var kstack2: [scheduler.task_stack_size]u8 align(16) = undefined;
+    const owner_pid = process.create("OWNER.BIN", .{ .entry_va = 0x400000, .content_len = 64 }, .{
+        .root_phys = owner_root,
+        .text_va = userspace.text_va,
+        .text_len = 64,
+        .stack_va = userspace.stack_va,
+        .stack_len = 8192,
+    }, .{}).?;
+    const wm_pid = process.create("WM.BIN", .{ .entry_va = 0x400000, .content_len = 64 }, .{
+        .root_phys = wm_root,
+        .text_va = userspace.text_va,
+        .text_len = 64,
+        .stack_va = userspace.stack_va,
+        .stack_len = 8192,
+    }, .{}).?;
+    const owner_task = scheduler.register_exec_user(userspace.text_va, 0x4000_0000, 100, 0x8000_0000, 8192, &kstack1, 0, 0).?;
+    const wm_task = scheduler.register_exec_user(userspace.text_va, 0x5000_0000, 100, 0x9000_0000, 8192, &kstack2, 0, 0).?;
+    _ = process.bind(owner_pid, owner_task);
+    _ = process.bind(wm_pid, wm_task);
+    scheduler.start();
+
+    var frame = fresh_frame();
+    var guard: usize = 0;
+    while (scheduler.current_id() != owner_task and guard < scheduler.max_tasks) : (guard += 1) {
+        try std.testing.expect(scheduler.yield_current());
+    }
+    try std.testing.expectEqual(owner_task, scheduler.current_id());
+
+    // Inventory step 2's input: a user window owned by the dying process, and
+    // FOCUSED (user_open focuses the new window) — the "holder of focus"
+    // shape the M52 umbrella kills.
+    const wid: u8 = @intCast(dispatch(sys_win_open, .{ 48, 48, 96, 64, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(u8, 2), wid);
+    try std.testing.expectEqual(wid, driving_award.focused_window_id());
+
+    // Inventory step 3's input: a shared surface the owner OWNS (the peer
+    // half is attached by the registered WM below).
+    const owner_va = dispatch(sys_mmap, .{ 0, 4096, 3, 0x20 | 0x10000, 0, 0 }, &frame);
+    try std.testing.expect(owner_va >= 0x1000_0000);
+    const h: u32 = 1;
+    const pa_base = shared_region.info(h).?.pa_base;
+
+    // Inventory step 7's input: an armed app timer for the dying pid — the
+    // seam's reset must disarm it so no stale TIMER can reach a recycled pid.
+    try std.testing.expect(app_timers.set(owner_pid, 4));
+    try std.testing.expect(app_timers.armed_pending(owner_pid));
+
+    // The WM registers and attaches the surface READ-ONLY by handle.
+    guard = 0;
+    while (scheduler.current_id() != wm_task and guard < scheduler.max_tasks) : (guard += 1) {
+        try std.testing.expect(scheduler.yield_current());
+    }
+    try std.testing.expectEqual(wm_task, scheduler.current_id());
+    _ = wm_server.register(wm_pid);
+    const peer_va = dispatch(sys_mmap, .{ h, 4096, 1, 0x20 | 0x10000, 0, 0 }, &frame);
+    try std.testing.expect(peer_va >= 0x1000_0000);
+    try std.testing.expectEqual(@as(u16, 2), alloc.page_refcount(pa_base));
+    // Drain the WM's queue so the RELEASED mirror below is unambiguously the
+    // exit path's own fan-out.
+    while (events.pop(wm_pid)) |_| {}
+
+    // Back to the owner: it dies THROUGH THE REAL SEAM.
+    guard = 0;
+    while (scheduler.current_id() != owner_task and guard < scheduler.max_tasks) : (guard += 1) {
+        try std.testing.expect(scheduler.yield_current());
+    }
+    try std.testing.expectEqual(owner_task, scheduler.current_id());
+    try std.testing.expect(scheduler.exit_current(0));
+
+    // --- The seam ran to completion: a zombie with its status, teardown done.
+    try std.testing.expect(scheduler.is_terminated(owner_task));
+    try std.testing.expectEqual(@as(?u64, 0), scheduler.terminated_status(owner_task));
+
+    // --- Step 2: no zombie window. The window left the registry and focus
+    // fell back to the terminal (the shim default) instead of latching onto
+    // a dead owner.
+    try std.testing.expect(driving_award.find_user_window(wid) == null);
+    try std.testing.expectEqual(@as(u8, 0), driving_award.focused_window_id());
+
+    // --- Step 2: the WM is told EXACTLY ONCE that the window left the
+    // registry (RELEASED mirror, flags bit 13, focus bit set because the
+    // removed window held focus at fan time) — the WM drops a hit-test
+    // target instead of compositing a stale surface.
+    const rel = events.pop(wm_pid).?;
+    try std.testing.expectEqual(events.WM_WINDOW, rel.kind);
+    try std.testing.expectEqual(wid, @as(u8, @truncate(rel.flags))); // the released window's id
+    try std.testing.expect((rel.flags & (1 << 8)) == 0); // NOT a visibility mirror
+    try std.testing.expect((rel.flags & (1 << 9)) != 0); // it held focus at fan time
+    try std.testing.expect((rel.flags & (1 << 13)) != 0); // RELEASED — left the registry
+    try std.testing.expect(events.pop(wm_pid) == null);
+
+    // --- Steps 3+4: the owned surface is revoked. The peer's RO leaf is
+    // unmapped, the descriptor is dropped, and the page is back to the
+    // owner's single ref (the reap unrefs it to 0).
+    try std.testing.expect(mmu.unmap_user_page(wm_root, peer_va) == null);
+    try std.testing.expect(shared_region.info(h) == null);
+    try std.testing.expectEqual(@as(u16, 1), alloc.page_refcount(pa_base));
+
+    // --- Step 7: the timer died with the process (no stale fire).
+    try std.testing.expect(!app_timers.armed_pending(owner_pid));
+
+    // --- Step 8: a CLIENT's death leaves the WM seat alone — unregister is
+    // the registrant's own teardown, not any window owner's.
+    try std.testing.expect(wm_server.registered());
+    try std.testing.expectEqual(@as(?usize, wm_pid), wm_server.registered_pid());
+
+    // Cleanup: the reap's release_resources unref frees the owner's dynamic
+    // page (1 -> 0; the second probe is the honest "already freed" check),
+    // then the WM seat tears down for the aggregated binary.
+    try std.testing.expect(alloc.unref_page(pa_base));
+    try std.testing.expect(!alloc.unref_page(pa_base));
+    try std.testing.expect(wm_server.unregister(wm_pid));
 }
 
 test "syscall: M33 SB3 — window surface handoff; bind records the surface, WM mirror aliases RO, unmigrated stays frozen" {
