@@ -84,6 +84,13 @@ lat_avg_us = field("lat_avg_us", row)
 lat_max_us = field("lat_max_us", row)
 flush_n = field("flush_n", row)
 flush_max_us = field("flush_max_us", row)
+# WMP card 3 (#1274): the reschedule DEMAND behind this latency. `requests`
+# counts wake events that found no rotation already owed; `discharged` counts
+# the rotations that served one. No comparator is pulled by these — they are
+# the measurement of what the parked nudge would buy.
+resched_requests = field("resched_requests", row)
+resched_coalesced = field("resched_coalesced", row)
+resched_discharged = field("resched_discharged", row)
 
 # The desktop presents, more than once (a cadence needs a positive window),
 # and the interval is stated rather than a rate that truncates to 0.
@@ -112,6 +119,22 @@ assert lat_avg_us > 0, "latency recorded as zero — the clock never advanced: %
 assert lat_max_us < 1_500_000, "latency regressed past one tick (%d us): %s" % (lat_max_us, row)
 assert flush_max_us < 5_000_000, "impossible flush cost (%d us): %s" % (flush_max_us, row)
 
+# WMP card 3 (#1274): the demand must be REAL, or the whole "a woken task
+# waits for the tick" story is unfalsifiable. A boot where nothing ever became
+# runnable while another task was executing would make every latency figure
+# above meaningless, so the count of owed rotations must be non-zero. It is a
+# lower bound only — the exact figure is the finding, not a target — and it is
+# asserted on a tree with NO comparator pull, which is the point: this gate
+# proves the demand exists before anything is paid for it.
+assert resched_requests >= 1, "no wake ever owed a rotation — the latency above is unattributable: %s" % row
+# Every owed rotation is serviced by the next 1 Hz tick, which is exactly why
+# the latency is bounded by one tick. A discharge count below the request count
+# would mean requests are being stranded (never served), which is a scheduler
+# bug rather than a pacing observation.
+assert resched_discharged >= resched_requests, (
+    "%d requests but only %d discharges — requests are being stranded: %s"
+    % (resched_requests, resched_discharged, row))
+
 # The latency samples must come from the INJECTED burst, not a stray sample:
 # `ptr_fan` is the kernel's own count of fanned pointer samples, printed in
 # the same dump's sibling row. Without this, one incidental sample would
@@ -123,4 +146,6 @@ assert ptr_fan >= 4, "only %d pointer samples fanned — the burst did not land:
 
 print("M53 pacing OBSERVED: window_ms=%d present_avg_ms=%d tick_avg_ms=%d ptr_fan=%d lat_n=%d lat_avg_us=%d lat_max_us=%d flush_n=%d flush_max_us=%d"
       % (window_ms, present_avg_ms, tick_avg_ms, ptr_fan, lat_n, lat_avg_us, lat_max_us, flush_n, flush_max_us))
+print("M53 resched demand OBSERVED: requests=%d coalesced=%d discharged=%d (no comparator pull on this tree)"
+      % (resched_requests, resched_coalesced, resched_discharged))
 PY

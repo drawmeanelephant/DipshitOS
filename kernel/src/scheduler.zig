@@ -541,6 +541,16 @@ fn push_home_locked(id: usize) void {
     const daif = ring_locks[home].lock();
     ready_rings[home].push(id);
     ring_locks[home].unlock(daif);
+    // This is the single blocked->ready funnel, so it is also the single place a
+    // rotation can become owed. Placed AFTER the ring unlock so nothing can
+    // observe a half-pushed ring; the task is already runnable and visible to
+    // the rotation by then.
+    //
+    // NOTE: the ROTATION does not come through here — `switch_context` pushes
+    // the preempted task back with a direct `ready_rings[c].push`. Routing it
+    // through here would make every rotation request the next one, which is
+    // exactly the unbounded feedback the nudge was parked for.
+    request_resched();
 }
 
 /// The ready-membership invariant, asserted by the host tests after every
@@ -766,6 +776,88 @@ pub var user_stack: [task_stack_size]u8 align(4096) linksection(user_stack_secti
 /// sys_yield. It lives in the already-mapped user BSS aperture and exposes no
 /// privileged state beyond the fact that this task was preempted by a tick.
 pub var user_timer_preemptions: u64 align(8) linksection(user_stack_section) = 0;
+
+// ---------------------------------------------------------------------------
+// The reschedule request (WMP card 3 demand, #1274)
+// ---------------------------------------------------------------------------
+//
+// WMP card 1 (#1247) measured what the ABSENCE of prompt preemption costs: the
+// WM's pointer response was 786-1216 ms typical and 3004 ms worst, while a
+// frame's own transfer+flush is ~0.3 ms. The scheduler only evaluates
+// preemption at the 1 Hz period tick, so a task that becomes runnable just
+// after a tick waits a uniformly distributed 0-1 s to execute.
+//
+// This block lands the MEASUREMENT of that demand and nothing else. The wake
+// funnel records that a rotation is owed; every core-0 rotation records that it
+// serviced one. No comparator is moved, no rotation is added, and no scheduling
+// behaviour changes — with the request bookkeeping in place and no
+// `timer.nudge()` behind it, a boot is exactly as schedulable as before. That
+// is the `timer.nudge() disabled entirely -> PASS 2/2` probe from #1261's
+// bisection, made permanent and observable.
+//
+// The nudge that would consume these counters (the comparator pull,
+// `nudge_target`, the `period_tick` threading) is parked on draft PR #1255
+// because it kills the SMP boot — `live-wnd5-gate2-policy` PASS -> FAIL, ending
+// in a silent `VZVirtualMachine.State.error`. See #1252 and #1261. Landing the
+// demand now means that when that defect is fixed, the win can be attributed to
+// a measured number of owed rotations rather than asserted.
+
+/// A task became runnable while another is executing, so a rotation is OWED.
+///
+/// The flag is the coalescing rule: at most one request is outstanding between
+/// rotations, so a burst of wakes costs one extra preemption rather than one per
+/// wake. Cleared by every rotation on core 0 (the tail of `tick`).
+pub var resched_requested: bool = false;
+/// Requests that owed a rotation (one per wake that found none already owed).
+pub var resched_requests: u64 = 0;
+/// Requests that arrived while one was already owed — the coalesced surplus.
+/// This is the number that says whether coalescing is load-bearing or the wake
+/// rate is simply too low to matter.
+pub var resched_coalesced: u64 = 0;
+/// Rotations that discharged a request.
+pub var resched_discharged: u64 = 0;
+
+/// A task just became runnable while another is executing: record that a
+/// rotation is owed. Called from the wake funnel (`push_home_locked`), so it
+/// covers every blocked->ready transition — event pushes (`sys_wait_event`),
+/// process-exit waiters, futex wakes, spawn, and the app-timer/WM-pacing fires
+/// inside `on_tick`.
+///
+/// Pure BSS writes: safe in the SVC, IRQ and lock-held contexts those paths run
+/// in. No console, no allocation, no lock — and, load-bearing for this split, no
+/// comparator write, so it cannot interrupt anything.
+///
+/// Deliberately narrow:
+///   * a no-op until preemption is armed (`start`), so boot-time wakes do not
+///     count against a shell loop that is not running yet;
+///   * core 0 only — that is the core whose PPI carries the shell/desktop
+///     rotation, so it is the only core whose rotations can discharge one.
+pub fn request_resched() void {
+    if (!enabled_flag) return;
+    if (smp.core_id() != 0) return;
+    if (resched_requested) {
+        resched_coalesced +%= 1;
+        return;
+    }
+    resched_requested = true;
+    resched_requests +%= 1;
+}
+
+/// A rotation ran on core `c`: any request it was serving is discharged.
+///
+/// Split out of `tick` (rather than inlined at its tail) because `tick`'s body
+/// is aarch64-only — it reads ELR_EL1/SPSR_EL1, which fault at EL0 — so a host
+/// test cannot call it, while the coalescing rule is precisely what a host test
+/// must be able to pin.
+///
+/// Core-gated: only core 0 ever raises a request, so a secondary core's rotation
+/// must not swallow core 0's pending one.
+pub fn discharge_resched(c: usize) void {
+    if (c == 0 and resched_requested) {
+        resched_requested = false;
+        resched_discharged +%= 1;
+    }
+}
 /// The idle task's static stack (BSS, like every other kernel global).
 var idle_stack: [task_stack_size]u8 align(16) = undefined;
 /// The monitor `spawn` command's dedicated demo stack; one spawn only, so
@@ -2443,6 +2535,13 @@ pub fn tick() void {
     if (c != 0 and next_runnable_for(current[c], c) == null and (spsr & 0xf) != spsr_el0t_irqs) return;
     timer_switch_context(exceptions.resume_frame[c], elr, spsr, exceptions.resume_sp_el0[c]);
     apply_pending();
+    // A rotation just ran, so any reschedule request it was serving is
+    // discharged. Clearing here rather than at entry is what makes a wake raised
+    // inside this same beat's `on_tick` (app timers, WM pacing, `wake_expired`)
+    // land on a request served by the rotation already happening, rather than
+    // arming a second one. Nothing can wake between the rotation and this call,
+    // because the IRQ handler is masked throughout.
+    discharge_resched(c);
 }
 
 /// Tick-only wrapper around the pure switch core. Keeping the source of the
