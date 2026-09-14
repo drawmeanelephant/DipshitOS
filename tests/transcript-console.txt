@@ -83,6 +83,7 @@ system
   sound       virtio-snd transport: device DID, class, status, control-queue state, device-config counts (jacks/streams/channel-maps), re-arm; stream-state control: 'sound volume <0-100>' and 'sound mute <on|off>'
   shutdown    request power-off
   type        echo stdin (the pipe source) to stdout — the right half of `a | type`
+  forensics   last-words recorder: on|off|dump|reset (off by default)
   dmesg       system log viewer: last bytes of serial output (D12)
   time        command timing: measure elapsed ticks and wall-clock time (D13)
   which       locate a command: shell builtin, monitor command, or host-share application (D16; HF6: the ESP is gone)
