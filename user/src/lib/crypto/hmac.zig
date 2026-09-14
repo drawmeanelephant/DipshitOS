@@ -9,6 +9,7 @@
 const std = @import("std");
 const sha256 = @import("sha256.zig");
 const sha512 = @import("sha512.zig");
+const sha384 = @import("sha384.zig");
 
 pub const HmacSha256 = struct {
     inner: sha256.Sha256,
@@ -86,6 +87,47 @@ pub const HmacSha512 = struct {
     }
 };
 
+/// HMAC-SHA384 (RFC 2104 over FIPS 180-4 SHA-384). TLS 1.3's SHA-384
+/// cipher suites (`TLS_AES_256_GCM_SHA384`, `TLS_CHACHA20_POLY1305_SHA256`
+/// with a SHA-384 transcript) need it; the block size is SHA-512's.
+pub const HmacSha384 = struct {
+    inner: sha384.Sha384,
+    opad: [sha384.block_len]u8,
+
+    pub fn init(key: []const u8) HmacSha384 {
+        var kblock = [_]u8{0} ** sha384.block_len;
+        if (key.len > sha384.block_len) {
+            var d: [sha384.digest_len]u8 = undefined;
+            sha384.sha384(&d, key);
+            @memcpy(kblock[0..sha384.digest_len], &d);
+        } else {
+            @memcpy(kblock[0..key.len], key);
+        }
+        var ipad: [sha384.block_len]u8 = undefined;
+        var opad: [sha384.block_len]u8 = undefined;
+        for (0..sha384.block_len) |i| {
+            ipad[i] = kblock[i] ^ 0x36;
+            opad[i] = kblock[i] ^ 0x5c;
+        }
+        var inner = sha384.Sha384.init();
+        inner.update(&ipad);
+        return .{ .inner = inner, .opad = opad };
+    }
+
+    pub fn update(self: *HmacSha384, bytes: []const u8) void {
+        self.inner.update(bytes);
+    }
+
+    pub fn final(self: *HmacSha384, out: *[sha384.digest_len]u8) void {
+        var inner_digest: [sha384.digest_len]u8 = undefined;
+        self.inner.final(&inner_digest);
+        var outer = sha384.Sha384.init();
+        outer.update(&self.opad);
+        outer.update(&inner_digest);
+        outer.final(out);
+    }
+};
+
 /// One-shot HMAC-SHA256.
 pub fn hmacSha256(out: *[sha256.digest_len]u8, key: []const u8, msg: []const u8) void {
     var h = HmacSha256.init(key);
@@ -96,6 +138,13 @@ pub fn hmacSha256(out: *[sha256.digest_len]u8, key: []const u8, msg: []const u8)
 /// One-shot HMAC-SHA512.
 pub fn hmacSha512(out: *[sha512.digest_len]u8, key: []const u8, msg: []const u8) void {
     var h = HmacSha512.init(key);
+    h.update(msg);
+    h.final(out);
+}
+
+/// One-shot HMAC-SHA384.
+pub fn hmacSha384(out: *[sha384.digest_len]u8, key: []const u8, msg: []const u8) void {
+    var h = HmacSha384.init(key);
     h.update(msg);
     h.final(out);
 }

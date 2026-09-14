@@ -14,10 +14,14 @@
 pub const ct = @import("crypto/ct.zig");
 pub const sha256 = @import("crypto/sha256.zig");
 pub const sha512 = @import("crypto/sha512.zig");
+pub const sha384 = @import("crypto/sha384.zig");
 pub const hmac = @import("crypto/hmac.zig");
+pub const hkdf = @import("crypto/hkdf.zig");
 pub const chacha20 = @import("crypto/chacha20.zig");
 pub const chacha20_ssh = @import("crypto/chacha20_ssh.zig");
 pub const poly1305 = @import("crypto/poly1305.zig");
+pub const aes = @import("crypto/aes.zig");
+pub const gcm = @import("crypto/gcm.zig");
 pub const aead = @import("crypto/aead.zig");
 pub const ssh_cipher = @import("crypto/ssh_cipher.zig");
 pub const curve25519 = @import("crypto/curve25519.zig");
@@ -25,6 +29,40 @@ pub const x25519 = @import("crypto/x25519.zig");
 pub const ed25519 = @import("crypto/ed25519.zig");
 
 const std = @import("std");
+
+test "crypto: HKDF and SHA-384 are reachable from the umbrella (TLS 1.3 keystone)" {
+    // Zig analyzes a `pub const x = @import(...)` lazily, so a new submodule's
+    // tests only run under `zig build test` once something in this root
+    // actually references it. This test is that reference: it also pins the
+    // one call shape TLS 1.3's key schedule depends on.
+    var prk: [32]u8 = undefined;
+    hkdf.Sha256.extract(&prk, "salt", "ikm");
+    var okm: [32]u8 = undefined;
+    hkdf.Sha256.expand(&okm, &prk, "info");
+    try std.testing.expect(!ct.ctEq(&okm, &([_]u8{0} ** 32)));
+
+    var d: [sha384.digest_len]u8 = undefined;
+    sha384.sha384(&d, "abc");
+    try std.testing.expect(!ct.ctEq(&d, &([_]u8{0} ** sha384.digest_len)));
+
+    // The SHA-384 HMAC must be distinct from the SHA-512 HMAC when both are
+    // truncated to 48 bytes (different IV), i.e. HMAC-SHA384 is not
+    // "HMAC-SHA512 truncated".
+    var m384: [sha384.digest_len]u8 = undefined;
+    hmac.hmacSha384(&m384, "key", "msg");
+    var m512: [sha512.digest_len]u8 = undefined;
+    hmac.hmacSha512(&m512, "key", "msg");
+    try std.testing.expect(!std.mem.eql(u8, &m384, m512[0..sha384.digest_len]));
+
+    // AES-GCM is reachable too (TLS_AES_128_GCM_SHA256 is mandatory to
+    // implement, so this is the suite that makes SSH-only interop general).
+    const n12 = [_]u8{0} ** 12;
+    const k16 = [_]u8{0} ** 16;
+    var zero_out: [0]u8 = undefined;
+    var gt: [gcm.tag_len]u8 = undefined;
+    gcm.seal128(&zero_out, &gt, "", "", &n12, &k16);
+    try std.testing.expect(!ct.ctEq(&gt, &([_]u8{0} ** gcm.tag_len)));
+}
 
 test "crypto: HMAC-SHA256 and Ed25519 compose (a signed, authenticated transcript)" {
     // A tiny end-to-end composition: an Ed25519 key signs a transcript whose

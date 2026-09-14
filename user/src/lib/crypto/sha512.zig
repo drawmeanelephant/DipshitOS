@@ -87,7 +87,9 @@ pub const Sha512 = struct {
     }
 };
 
-fn compress(state: *[8]u64, block: *const [block_len]u8) void {
+/// The SHA-512 compression function. `pub` so SHA-384 (`sha384.zig`) can
+/// reuse it with its own initial hash value instead of duplicating it.
+pub fn compress(state: *[8]u64, block: *const [block_len]u8) void {
     var w: [80]u64 = undefined;
     for (0..16) |j| w[j] = std.mem.readInt(u64, block[j * 8 ..][0..8], .big);
     for (16..80) |j| {
