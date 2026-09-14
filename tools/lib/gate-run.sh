@@ -225,19 +225,121 @@ gate_assert_runner_entitled() {
     return 1
 }
 
-# gate_report_hv_capability -- print the host's hypervisor capability verdict
-# and fail when this host cannot host a guest at all, so the reason is stated
-# rather than inferred from whatever Virtualization.framework reports.
+# --- the hypervisor capability probe ----------------------------------------
+# kern.hv_support reports what the KERNEL supports; it does not ask whether a
+# process can obtain a hypervisor, and it is not what the gates depend on.
+# hv_vm_create is the ground truth -- Virtualization.framework is built on it
+# -- so the verdict is a real call, not a proxy.
+#
+# tools/gate/hv-probe.c is signed with com.apple.security.hypervisor, a
+# DIFFERENT key from the com.apple.security.virtualization the runner uses.
+# That distinction is the whole reason HV_DENIED is treated as a harness fault
+# below rather than as a capability answer.
+
+VZ_HV_PROBE_SRC="tools/gate/hv-probe.c"
+VZ_HV_PROBE_ENT="tools/gate/hv-probe.entitlements"
+VZ_HV_PROBE_BIN="${VZ_HV_PROBE_BIN:-.build/hv-probe/hvprobe}"
+
+# gate_build_hv_probe -- compile + ad-hoc-sign the probe when it is missing or
+# older than its source, so a fleet sweep pays for it once. Non-zero (having
+# said why) when it cannot be produced; callers fall back to the sysctl proxy.
+gate_build_hv_probe() {
+    if [ ! -f "$VZ_HV_PROBE_SRC" ] || [ ! -f "$VZ_HV_PROBE_ENT" ]; then
+        echo "gate-run: hv probe sources missing ($VZ_HV_PROBE_SRC / $VZ_HV_PROBE_ENT)" >&2
+        return 1
+    fi
+    if [ -x "$VZ_HV_PROBE_BIN" ] && [ "$VZ_HV_PROBE_BIN" -nt "$VZ_HV_PROBE_SRC" ]; then
+        return 0
+    fi
+    command -v clang >/dev/null 2>&1 || { echo "gate-run: clang not found; cannot build the hv probe" >&2; return 1; }
+    mkdir -p "$(dirname "$VZ_HV_PROBE_BIN")" 2>/dev/null || { echo "gate-run: cannot create $(dirname "$VZ_HV_PROBE_BIN")" >&2; return 1; }
+    clang -o "$VZ_HV_PROBE_BIN" "$VZ_HV_PROBE_SRC" -framework Hypervisor >/dev/null 2>&1 \
+        || { echo "gate-run: clang failed to build the hv probe" >&2; return 1; }
+    codesign --force --sign - --entitlements "$VZ_HV_PROBE_ENT" "$VZ_HV_PROBE_BIN" >/dev/null 2>&1 \
+        || { echo "gate-run: codesign failed on the hv probe" >&2; return 1; }
+    return 0
+}
+
+# gate_report_hv_capability -- ask the host whether a hypervisor can be created
+# here, print the verdict, and fail when it cannot, so the reason is stated
+# instead of inferred from whatever Virtualization.framework later reports.
+#
+# $VZ_HV_PROBE_BIN may point at a stub; the class-A test drives the code->
+# verdict mapping that way (tools/gate/test-gate-run.sh).
 gate_report_hv_capability() {
-    local hv vmm
+    local hv vmm out code name
     hv="$(sysctl -n kern.hv_support 2>/dev/null || true)"
     vmm="$(sysctl -n kern.hv_vmm_present 2>/dev/null || true)"
-    echo "gate-run: host $(sw_vers -productVersion 2>/dev/null || echo '?')/$(uname -m); kern.hv_support=${hv:-?} hv_vmm_present=${vmm:-?}"
+
+    if [ ! -x "$VZ_HV_PROBE_BIN" ]; then
+        gate_build_hv_probe || true
+    fi
+
+    code="" name=""
+    if [ -x "$VZ_HV_PROBE_BIN" ]; then
+        out="$("$VZ_HV_PROBE_BIN" 2>/dev/null || true)"
+        code="$(printf '%s\n' "$out" | sed -n 's/.*HV_CODE=\(0x[0-9a-f]*\).*/\1/p' | head -1)"
+        name="$(printf '%s\n' "$out" | sed -n 's/.*HV_NAME=\([A-Z_]*\).*/\1/p' | head -1)"
+    fi
+
+    if [ -n "$code" ]; then
+        local hostline
+        hostline="gate-run: host $(sw_vers -productVersion 2>/dev/null || echo '?')/$(uname -m)"
+        hostline="$hostline; kern.hv_support=${hv:-?} hv_vmm_present=${vmm:-?}"
+        hostline="$hostline; hv_vm_create -> $code (${name:-?})"
+        echo "$hostline"
+    else
+        local hostline_fb
+        hostline_fb="gate-run: host $(sw_vers -productVersion 2>/dev/null || echo '?')/$(uname -m)"
+        hostline_fb="$hostline_fb; kern.hv_support=${hv:-?} hv_vmm_present=${vmm:-?}"
+        hostline_fb="$hostline_fb; hv probe unavailable, falling back to the sysctl"
+        echo "$hostline_fb"
+    fi
+
+    case "$name" in
+        HV_SUCCESS)
+            return 0 ;;
+        HV_DENIED)
+            {
+                echo "gate-run: ERROR — the hv probe returned $code HV_DENIED."
+                echo "  That is a statement about the probe's SIGNATURE, not about this"
+                echo "  machine: a direct hv_vm_create needs com.apple.security.hypervisor"
+                echo "  (tools/gate/hv-probe.entitlements), which gate_build_hv_probe applies"
+                echo "  after the build. There is no capability verdict here — treat this as"
+                echo "  a harness fault, not as 'this host cannot boot a guest'."
+            } >&2
+            return 1 ;;
+        HV_UNSUPPORTED|HV_NO_DEVICE|HV_NO_RESOURCES|HV_ERROR|HV_FAULT|HV_BUSY|HV_BAD_ARGUMENT)
+            {
+                echo "gate-run: ERROR — the host refused a hypervisor ($code $name)."
+                echo "  Virtualization.framework cannot boot a guest here, so every"
+                echo "  class-B gate will fail regardless of the code under test."
+                if [ "$vmm" = "1" ]; then
+                    echo "  hv_vmm_present=1: this host is itself a VM without nested"
+                    echo "  virtualization (that is the GitHub-hosted runner case)."
+                fi
+                echo "  See docs/vz-runner.md; class B needs a real Apple silicon host."
+            } >&2
+            return 1 ;;
+    esac
+
+    # A code we do not know is NOT a free pass to the weaker check: refusing to
+    # guess is the whole point of asking the hypervisor directly.
+    if [ -n "$code" ]; then
+        {
+            echo "gate-run: ERROR — the hv probe returned an unrecognised code ($code ${name:-?})."
+            echo "  Refusing to guess a verdict; hv_error.h is the authority, and"
+            echo "  tools/gate/hv-probe.c should be extended with this code."
+        } >&2
+        return 1
+    fi
+
+    # No probe at all: fall back to the kernel's own answer. Weaker, and said so.
     if [ "$hv" = "1" ]; then
         return 0
     fi
     {
-        echo "gate-run: ERROR — Hypervisor.framework unavailable (kern.hv_support=${hv:-?})."
+        echo "gate-run: ERROR — no hv probe and kern.hv_support=${hv:-?}."
         echo "  Virtualization.framework cannot boot a guest on this host, so every"
         echo "  class-B gate will fail here regardless of the code under test."
         if [ "$vmm" = "1" ]; then

@@ -55,8 +55,19 @@ case "${2:-}" in
     *) exit 1 ;;
 esac
 SH
-chmod +x "$STUB_BIN/codesign" "$STUB_BIN/sysctl"
+# hv probe stub: fakes the one machine-readable line hv-probe.c prints, so the
+# code->verdict mapping is exercised without a hypervisor needing to exist.
+cat > "$STUB_BIN/hvprobe-stub" <<'SH'
+#!/usr/bin/env bash
+printf 'hv_vm_create(NULL) -> %s\n' "${STUB_HV_CODE:-0x00000000}"
+printf 'HV_CODE=%s HV_NAME=%s\n' "${STUB_HV_CODE:-0x00000000}" "${STUB_HV_NAME:-HV_SUCCESS}"
+SH
+chmod +x "$STUB_BIN/codesign" "$STUB_BIN/sysctl" "$STUB_BIN/hvprobe-stub"
+ORIG_PATH="$PATH"
 PATH="$STUB_BIN:$PATH"
+
+STUB_PROBE="$STUB_BIN/hvprobe-stub"
+NO_PROBE="$TMP/no-such-hv-probe"
 
 # --- fixtures ---------------------------------------------------------------
 BIN="$TMP/VMRunner"
@@ -116,29 +127,39 @@ run gate_assert_runner_entitled "$MISSING"; rc=$?
     && ok "VZ_RUNNER_BIN is the release VMRunner path" \
     || bad "VZ_RUNNER_BIN is '$VZ_RUNNER_BIN'"
 
-# --- gate_report_hv_capability ----------------------------------------------
-echo
-echo "── gate_report_hv_capability ──"
+# --- gate_report_hv_capability ----------------------------------------------echo
+echo "── gate_report_hv_capability (real probe shapes) ──"
 
+export VZ_HV_PROBE_BIN="$STUB_PROBE"
 STUB_HV_SUPPORT=1 STUB_HV_VMM_PRESENT=0
 export STUB_HV_SUPPORT STUB_HV_VMM_PRESENT
+
+# The reference host: hypervisor created.
+STUB_HV_NAME=HV_SUCCESS STUB_HV_CODE=0x00000000
+export STUB_HV_NAME STUB_HV_CODE
 run gate_report_hv_capability; rc=$?
-[ "$rc" = 0 ] && ok "hv_support=1 passes (rc=0)" || bad "hv_support=1 should pass, got rc=$rc: $CASE_OUT"
+[ "$rc" = 0 ] && ok "HV_SUCCESS passes (rc=0)" || bad "HV_SUCCESS should pass, got rc=$rc: $CASE_OUT"
 case "$CASE_OUT" in
-    *"kern.hv_support=1"*) ok "the verdict line prints kern.hv_support=1" ;;
-    *) bad "the verdict line should print the capability: $CASE_OUT" ;;
+    *"hv_vm_create -> 0x00000000 (HV_SUCCESS)"*) ok "the verdict line reports the actual call and code" ;;
+    *) bad "the verdict line should report the hv call: $CASE_OUT" ;;
 esac
 
-STUB_HV_SUPPORT=0 STUB_HV_VMM_PRESENT=1
-export STUB_HV_SUPPORT STUB_HV_VMM_PRESENT
+# The hosted-runner case: the real refusal.
+STUB_HV_NAME=HV_UNSUPPORTED STUB_HV_CODE=0xfae9400f
+STUB_HV_VMM_PRESENT=1
+export STUB_HV_NAME STUB_HV_CODE STUB_HV_VMM_PRESENT
 run gate_report_hv_capability; rc=$?
 if [ "$rc" = 0 ]; then
-    bad "hv_support=0 must fail, got rc=0"
+    bad "HV_UNSUPPORTED must fail, got rc=0"
 else
-    ok "hv_support=0 fails (rc=$rc)"
+    ok "HV_UNSUPPORTED fails (rc=$rc)"
 fi
 case "$CASE_OUT" in
-    *"itself a VM"*) ok "it names the nested-virtualization case (hosted runner)" ;;
+    *"0xfae9400f HV_UNSUPPORTED"*) ok "it quotes the code and its name" ;;
+    *) bad "it should quote the refused code: $CASE_OUT" ;;
+esac
+case "$CASE_OUT" in
+    *"itself a VM"*) ok "it names the nested-virtualization case" ;;
     *) bad "it should identify the host-is-a-guest case: $CASE_OUT" ;;
 esac
 case "$CASE_OUT" in
@@ -146,19 +167,75 @@ case "$CASE_OUT" in
     *) bad "it should say the failure is not the gate's: $CASE_OUT" ;;
 esac
 
-# An absent sysctl (non-Darwin, or a key that is not there) must be a failure,
-# never a silent pass.
-STUB_SYSCTL_RC=1 STUB_HV_SUPPORT="" STUB_HV_VMM_PRESENT=""
-export STUB_SYSCTL_RC STUB_HV_SUPPORT STUB_HV_VMM_PRESENT
+# The trap: a mis-signed probe must NEVER be reported as a host verdict.
+STUB_HV_NAME=HV_DENIED STUB_HV_CODE=0xfae94007
+export STUB_HV_NAME STUB_HV_CODE
 run gate_report_hv_capability; rc=$?
-[ "$rc" != 0 ] && ok "an unreadable kern.hv_support fails (rc=$rc)" \
-               || bad "an unreadable kern.hv_support must not pass: $CASE_OUT"
-unset STUB_SYSCTL_RC
+[ "$rc" != 0 ] && ok "HV_DENIED fails (rc=$rc)" || bad "HV_DENIED must not pass"
+case "$CASE_OUT" in
+    *"SIGNATURE, not about this"*) ok "it calls HV_DENIED a signature statement" ;;
+    *) bad "HV_DENIED must be attributed to the signature, not the host: $CASE_OUT" ;;
+esac
+case "$CASE_OUT" in
+    *"harness fault"*) ok "it says there is no capability verdict here" ;;
+    *) bad "HV_DENIED should be a harness fault: $CASE_OUT" ;;
+esac
+# It must not borrow the phrasing of the host verdict. (A substring check on
+# "cannot boot a guest" would fire on the denial message's own warning against
+# that reading, so assert on the host-verdict SENTENCE instead.)
+case "$CASE_OUT" in
+    *"the host refused a hypervisor"*) bad "HV_DENIED must NOT be reported as the host refusing" ;;
+    *) ok "it does NOT claim the host refused a hypervisor" ;;
+esac
+
+# An unrecognised code is a failure, never a pass.
+STUB_HV_NAME=HV_UNKNOWN STUB_HV_CODE=0xdeadbeef
+export STUB_HV_NAME STUB_HV_CODE
+run gate_report_hv_capability; rc=$?
+[ "$rc" != 0 ] && ok "an unrecognised code fails (rc=$rc)" || bad "an unrecognised code must not pass"
+
+# --- fallback: no probe, so the kernel's weaker answer is used, and said so --
+echo
+echo "── fallback when the probe cannot be built ──"
+
+VZ_HV_PROBE_BIN="$NO_PROBE" VZ_HV_PROBE_SRC="$TMP/no-such-source.c"
+export VZ_HV_PROBE_BIN VZ_HV_PROBE_SRC
+STUB_HV_SUPPORT=1 STUB_HV_VMM_PRESENT=0
+export STUB_HV_SUPPORT STUB_HV_VMM_PRESENT
+unset STUB_HV_NAME STUB_HV_CODE
+run gate_report_hv_capability; rc=$?
+[ "$rc" = 0 ] && ok "no probe + hv_support=1 passes via the fallback" \
+              || bad "the fallback should pass on hv_support=1, got rc=$rc: $CASE_OUT"
+case "$CASE_OUT" in
+    *"falling back to the sysctl"*) ok "the fallback is announced, not silent" ;;
+    *) bad "the fallback must say it is a fallback: $CASE_OUT" ;;
+esac
+
+STUB_HV_SUPPORT=0 STUB_HV_VMM_PRESENT=1
+export STUB_HV_SUPPORT STUB_HV_VMM_PRESENT
+run gate_report_hv_capability; rc=$?
+[ "$rc" != 0 ] && ok "no probe + hv_support=0 fails (rc=$rc)" \
+               || bad "no probe + hv_support=0 must not pass"
+
 STUB_HV_SUPPORT="" STUB_HV_VMM_PRESENT=""
 export STUB_HV_SUPPORT STUB_HV_VMM_PRESENT
 run gate_report_hv_capability; rc=$?
-[ "$rc" != 0 ] && ok "an EMPTY kern.hv_support fails (rc=$rc)" \
+[ "$rc" != 0 ] && ok "no probe + EMPTY hv_support fails (rc=$rc)" \
                || bad "an empty kern.hv_support must not pass: $CASE_OUT"
+
+STUB_SYSCTL_RC=1
+export STUB_SYSCTL_RC
+run gate_report_hv_capability; rc=$?
+[ "$rc" != 0 ] && ok "no probe + unreadable hv_support fails (rc=$rc)" \
+               || bad "an unreadable kern.hv_support must not pass: $CASE_OUT"
+unset STUB_SYSCTL_RC
+
+# Back to the stub probe for the preflight section.
+VZ_HV_PROBE_SRC="tools/gate/hv-probe.c"
+VZ_HV_PROBE_BIN="$STUB_PROBE"
+export VZ_HV_PROBE_SRC VZ_HV_PROBE_BIN
+STUB_HV_SUPPORT=1 STUB_HV_VMM_PRESENT=0 STUB_HV_NAME=HV_SUCCESS STUB_HV_CODE=0x00000000
+export STUB_HV_SUPPORT STUB_HV_VMM_PRESENT STUB_HV_NAME STUB_HV_CODE
 
 # --- gate_preflight_vz: both checks, and both must hold ---------------------
 echo
@@ -177,10 +254,13 @@ run gate_preflight_vz "$BIN"; rc=$?
                || bad "preflight must fail on an un-entitled binary"
 
 STUB_HV_SUPPORT=0 STUB_HV_VMM_PRESENT=1 STUB_CODESIGN_OUT="$ENTITLED_OUT" STUB_CODESIGN_RC=0
+STUB_HV_NAME=HV_UNSUPPORTED STUB_HV_CODE=0xfae9400f
 export STUB_HV_SUPPORT STUB_HV_VMM_PRESENT STUB_CODESIGN_OUT STUB_CODESIGN_RC
 run gate_preflight_vz "$BIN"; rc=$?
 [ "$rc" != 0 ] && ok "incapable host fails even with an entitled binary" \
                || bad "preflight must fail on an incapable host"
+STUB_HV_NAME=HV_SUCCESS STUB_HV_CODE=0x00000000
+export STUB_HV_NAME STUB_HV_CODE
 
 # --- wiring invariants ------------------------------------------------------
 # The helpers are only worth anything if the gate path actually calls them.
@@ -215,6 +295,47 @@ if [ -s "$TMP/preflight.line" ] && [ -s "$TMP/begin.line" ] \
 else
     bad "the preflight must run before gate_begin"
 fi
+
+# --- the real probe: it must build, and carry the right entitlement --------
+echo
+echo "── the shipped probe (no stubs) ──"
+
+if command -v clang >/dev/null 2>&1; then
+    # The REAL codesign, not the stub: this section builds and signs the shipped
+    # probe for real. (Left stubbed, it silently produced an unsigned probe that
+    # reported HV_DENIED -- the stub caught itself.)
+    PATH="$ORIG_PATH"
+    # The default source/entitlement paths, a throwaway binary.
+    export VZ_HV_PROBE_SRC VZ_HV_PROBE_ENT
+    REAL_BIN="$TMP/real-hvprobe"
+    VZ_HV_PROBE_BIN="$REAL_BIN"
+    export VZ_HV_PROBE_BIN
+    if gate_build_hv_probe; then
+        ok "the shipped probe compiles"
+        real_out="$("$REAL_BIN" 2>/dev/null || true)"
+        case "$real_out" in
+            *HV_NAME=HV_*) ok "it runs and reports a recognised HV code ($(printf '%s' "$real_out" | sed -n 's/.*HV_NAME=\([A-Z_]*\).*/\1/p' | head -1))" ;;
+            *) bad "it should print an HV_NAME: $real_out" ;;
+        esac
+        case "$(codesign -d --entitlements - "$REAL_BIN" 2>&1)" in
+            *"com.apple.security.hypervisor"*) ok "it carries com.apple.security.hypervisor" ;;
+            *) bad "the probe must be signed with the hypervisor entitlement" ;;
+        esac
+        # The arm64 header point: hv.h is x86-only, so this only builds if the
+        # source uses the umbrella header.
+        grep -q '<Hypervisor/Hypervisor.h>' tools/gate/hv-probe.c \
+            && ok "hv-probe.c includes <Hypervisor/Hypervisor.h>" \
+            || bad "hv-probe.c must include the arm64 umbrella header"
+    else
+        bad "the shipped probe failed to build"
+    fi
+else
+    echo "  skip  clang not available; the shipped probe was not built here"
+fi
+
+# Restore the stub for any later cases.
+VZ_HV_PROBE_BIN="$STUB_PROBE"
+export VZ_HV_PROBE_BIN
 
 echo
 if [ "$FAIL" = 0 ]; then
