@@ -96,6 +96,8 @@ func TestMarkerConstants(t *testing.T) {
 		markerRepaint:  "web: repaint items=",
 		markerReady:    "web: ready",
 		markerNavReady: "web: nav-ready",
+		markerFetch:    "web: fetch ",
+		markerRedirect: "web: redirect n=",
 		markerSettled:  "web: settled",
 	}
 	for got, expect := range want {
@@ -111,7 +113,7 @@ func TestResolveInput(t *testing.T) {
 		{"NEXT.HTML", "/host/NEXT.HTML", "file"},
 		{"http://10.0.0.2/x", "http://10.0.0.2/x", "http"},
 		{"HTTP://10.0.0.2/", "HTTP://10.0.0.2/", "http"},
-		{"https://example.com/", "https://example.com/", "unsupported"},
+		{"https://example.com/", "https://example.com/", "http"}, // scheme-shaped; classifyTarget refuses it
 		{"ftp://x/y", "ftp://x/y", "unsupported"},
 		{"", "", "empty"},
 	}

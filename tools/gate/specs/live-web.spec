@@ -33,6 +33,62 @@ vgate_file script-missing.txt <<'EOF'
 exec WEB.ELF /host/NOPE.HTML
 EOF
 
+vgate_file script-https.txt <<'EOF'
+net ip 10.0.0.1
+net arp 10.0.0.2
+exec WEB.ELF https://10.0.0.2/
+EOF
+
+vgate_file script-dns.txt <<'EOF'
+net ip 10.0.0.1
+net arp 10.0.0.2
+exec WEB.ELF http://example.com/
+EOF
+
+vgate_file script-badurl.txt <<'EOF'
+exec WEB.ELF http://
+EOF
+
+vgate_file script-slow.txt <<'EOF'
+net ip 10.0.0.1
+net arp 10.0.0.2
+exec WEB.ELF http://10.0.0.2/
+EOF
+
+vgate_setup_python <<'PY'
+# Boot 08 needs a peer that ACCEPTS the connection and never answers: the
+# browser must sit in its waiting state so the injected cancel key has a load
+# to cancel. A plain silent listener on the host, reached through the runner's
+# relay responder, is exactly that peer.
+import os, socket, sys, time
+srv = socket.socket()
+srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    srv.bind(("127.0.0.1", 45871))
+except OSError as exc:
+    sys.exit("boot 08: cannot bind the silent peer on 127.0.0.1:45871: %s" % exc)
+srv.listen(4)
+srv.settimeout(1.0)
+pid = os.fork()
+if pid == 0:
+    # The peer must not inherit the gate's stdio pipes: holding them open
+    # keeps the runner's session alive after the gate finishes.
+    devnull = os.open(os.devnull, os.O_RDWR)
+    os.dup2(devnull, 0)
+    os.dup2(devnull, 1)
+    os.dup2(devnull, 2)
+    conns = []
+    deadline = time.time() + 300
+    while time.time() < deadline:
+        try:
+            conn, _ = srv.accept()
+            conns.append(conn)   # held open, never written to
+        except OSError:
+            pass
+    os._exit(0)
+print("boot 08: silent peer listening on 127.0.0.1:45871 (pid %d)" % pid)
+PY
+
 vgate_setup_python <<'PY'
 import os, shutil, sys
 rd = os.environ["RUN_DIR"]
@@ -222,4 +278,91 @@ n = sum(1 for yy in range(Y + 52, Y + 130)
         if ink(px(xx, yy)))
 assert n >= 20, f"error page ink {n}"
 print("live-web 04 error pixels ok")
+PY
+
+# --- boot 05: https is refused, and nothing is sent in the clear ---------
+# The host TCP responder IS armed for 10.0.0.2:80, so a silent downgrade to
+# plain http would definitely be answered (and print an NET-TCP line). The
+# `web: fetch` marker is printed only when a request is actually armed, so
+# its absence plus `web: error https` is the no-downgrade proof.
+vgate_run 05 -- \
+    --screen '$RUN_DIR/screen' \
+    --via-virtio --cvc-snap \
+    --snapshot-out '$RUN_DIR/snap-05' \
+    --net '$RUN_DIR/cap5.bin' --net-arp-respond 10.0.0.2 --net-tcp-respond 10.0.0.2:80 \
+    --script '$RUN_DIR/script-https.txt' \
+    --snapshot-after "web: settled" \
+    --snapshot-after "web: repaint" \
+    --script-expect "web: ready" --timeout 120
+
+vgate_assert 05 serial-contains 'web: url https://10.0.0.2/'
+vgate_assert 05 serial-contains 'web: error https'
+vgate_assert 05 serial-contains 'web: ready'
+vgate_assert 05 serial-absent 'web: fetch '
+vgate_assert 05 serial-absent '[EXC] parking:'
+vgate_assert 05 python <<'PY'
+import os, sys
+ser = open(os.environ["VG_SER"], errors="replace").read()
+# Only meaningful because the responder is armed for this exact address.
+assert "web: error https" in ser, "https was not refused"
+assert "web: fetch " not in ser, "a request was armed for an https URL"
+assert "web: parse nodes=" not in ser, "an https URL produced a rendered page"
+print("live-web 05 https refusal ok (no request armed, responder idle)")
+PY
+
+# --- boot 06: a hostname is refused (no resolver), not attempted ---------
+vgate_run 06 -- \
+    --screen '$RUN_DIR/screen' \
+    --via-virtio --cvc-snap \
+    --snapshot-out '$RUN_DIR/snap-06' \
+    --script '$RUN_DIR/script-dns.txt' \
+    --snapshot-after "web: settled" \
+    --snapshot-after "web: repaint" \
+    --script-expect "web: ready" --timeout 120
+
+vgate_assert 06 serial-contains 'web: error dns'
+vgate_assert 06 serial-contains 'web: ready'
+vgate_assert 06 serial-absent 'web: fetch '
+vgate_assert 06 serial-absent '[EXC] parking:'
+
+# --- boot 07: a malformed URL is a defined error, not a hang -------------
+vgate_run 07 -- \
+    --screen '$RUN_DIR/screen' \
+    --via-virtio --cvc-snap \
+    --snapshot-out '$RUN_DIR/snap-07' \
+    --script '$RUN_DIR/script-badurl.txt' \
+    --snapshot-after "web: settled" \
+    --snapshot-after "web: repaint" \
+    --script-expect "web: ready" --timeout 120
+
+vgate_assert 07 serial-contains 'web: error url'
+vgate_assert 07 serial-contains 'web: ready'
+vgate_assert 07 serial-absent 'web: fetch '
+vgate_assert 07 serial-absent '[EXC] parking:'
+
+# --- boot 08: a load in flight can be stopped (cancel) -------------------
+# The guest's request is relayed to the silent host peer (see the first setup
+# hook), so the browser is genuinely waiting when the injected `x` arrives:
+# the assert requires the cancel, not a fast connection failure.
+vgate_run 08 -- \
+    --screen '$RUN_DIR/screen' \
+    --via-virtio --cvc-snap \
+    --snapshot-out '$RUN_DIR/snap-08' \
+    --net '$RUN_DIR/cap8.bin' --net-arp-respond 10.0.0.2 \
+    --net-tcp-respond 10.0.0.2:80:relay --net-tcp-respond-relay 127.0.0.1:45871 \
+    --script '$RUN_DIR/script-slow.txt' \
+    --input-chords x --input-chords-after "web: fetch " \
+    --snapshot-after "web: settled" \
+    --snapshot-after "web: repaint" \
+    --script-expect "web: ready" --timeout 180
+
+vgate_assert 08 serial-absent '[EXC] parking:'
+vgate_assert 08 serial-contains 'web: fetch 10.0.0.2/'
+vgate_assert 08 python <<'PY'
+import os
+ser = open(os.environ["VG_SER"], errors="replace").read()
+assert "web: fetch 10.0.0.2/" in ser, "the load was never armed"
+assert "web: error cancelled" in ser, "the injected cancel key did not stop the load"
+assert "web: settled" in ser, "no frame was published after the cancel"
+print("live-web 08 cancel ok (a load in flight was stopped by the injected cancel key)")
 PY

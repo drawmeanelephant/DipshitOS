@@ -250,3 +250,65 @@ func indexHeaderEnd(raw []byte) int {
 	}
 	return -1
 }
+
+// LocationHeader extracts the Location header value from a response head
+// ("" when absent). The comparison is case-insensitive on the field name.
+func LocationHeader(head string) string {
+	lines := strings.Split(head, "\n")
+	for _, ln := range lines[1:] {
+		ln = strings.TrimRight(ln, "\r")
+		i := strings.IndexByte(ln, ':')
+		if i <= 0 {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(ln[:i]), "location") {
+			return strings.TrimSpace(ln[i+1:])
+		}
+	}
+	return ""
+}
+
+// ResolveRedirect resolves a Location value against the URL that produced it.
+// A Location may be absolute (http://...), root-relative (/x), or relative
+// (x, ../x). Returns ok=false when the result is not an http URL we can use.
+func ResolveRedirect(from URL, location string) (URL, bool) {
+	if location == "" {
+		return URL{}, false
+	}
+	if IsHTTPURL(location) {
+		return ParseHTTPURL(location)
+	}
+	if strings.HasPrefix(location, "//") {
+		// Protocol-relative: keep the scheme we already have.
+		return ParseHTTPURL("http:" + location)
+	}
+	base := "http://" + from.Host
+	if from.Path != "" && from.Path != "/" {
+		if i := strings.LastIndexByte(from.Path, '/'); i >= 0 {
+			base += from.Path[:i+1]
+		} else {
+			base += "/"
+		}
+	} else {
+		base += "/"
+	}
+	resolved, ok := ResolveHrefForRedirect(base, location)
+	if !ok {
+		return URL{}, false
+	}
+	return ParseHTTPURL(resolved)
+}
+
+// ResolveHrefForRedirect is ResolveHref specialised for absolute http bases.
+func ResolveHrefForRedirect(base, href string) (string, bool) {
+	if strings.HasPrefix(href, "/") {
+		if u, ok := ParseHTTPURL(base); ok {
+			return "http://" + u.Host + href, true
+		}
+		return "", false
+	}
+	return ResolveHref(base, href)
+}
+
+// RedirectStatus reports whether a status code is a redirect we follow.
+func RedirectStatus(code int) bool { return code >= 300 && code < 400 }

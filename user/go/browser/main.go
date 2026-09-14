@@ -69,8 +69,17 @@ const (
 	markerRepaint   = "web: repaint items="
 	markerReady     = "web: ready"
 	markerNavReady  = "web: nav-ready"
+	markerFetch     = "web: fetch "
+	markerRedirect  = "web: redirect n="
 	markerSettled   = "web: settled"
 	markerQuit      = "web: quit"
+)
+
+// Load bounds. The response read is bounded three ways so a bad network
+// cannot hang the app: a byte cap, an idle cap, and the redirect hop cap.
+const (
+	maxRedirects = 5
+	readIdleMax  = 300
 )
 
 // HistoryPersistence is where visits are appended (inspectable text, one
@@ -95,6 +104,7 @@ const (
 	keyHome     = 0x4a
 	keyEnd      = 0x4d
 	keyF5       = 0x3e
+	keyX        = 0x1b
 )
 
 type app struct {
@@ -122,6 +132,19 @@ type app struct {
 	lastFills  int
 	logPaint   bool
 	loggedPoll bool
+
+	// In-flight HTTP load. The loop steps the socket instead of blocking
+	// inside navigate(), so Stop/cancel and window-close stay live during a
+	// load (a browser must not freeze on a slow peer).
+	settled  bool
+	loading  bool
+	loadFrom string
+	loadURL  webrender.URL
+	loadBuf  []byte
+	loadIdle int
+	loadHops int
+	loadSeen map[string]bool
+	chunk    [1024]byte
 }
 
 // virender adapts the kernel fill batcher to the renderer's Surface.
@@ -157,9 +180,7 @@ func main() {
 	} else {
 		a.navigate(target, "")
 	}
-	a.render()
-	vi.ConsoleLine(markerSettled)
-	a.settleRepaint()
+	a.settleIfNeeded()
 	a.loop()
 }
 
@@ -179,11 +200,31 @@ func (a *app) settleRepaint() {
 	vi.ConsoleLine(markerReady)
 }
 
+// settleIfNeeded publishes the first frame exactly once, and only once the
+// window has real content. With a stepped load the socket can still be in
+// flight when the window opens, so `web: settled` must keep meaning "the page
+// (or its error page) is on screen" rather than "the window exists".
+func (a *app) settleIfNeeded() {
+	if a.settled || a.loading {
+		return
+	}
+	if a.lay == nil && a.errKind == "" {
+		return
+	}
+	a.render()
+	vi.ConsoleLine(markerSettled)
+	a.settleRepaint()
+	a.settled = true
+}
+
 func (a *app) loop() {
 	for !a.quit {
+		if a.loading {
+			a.loadStep()
+		}
 		a.polls++
 		if a.polls%250 == 0 {
-			vi.ConsoleLine(markerLoop + itoa(a.polls) + " ev=" + itoa(a.events))
+			vi.ConsoleLine(markerLoop + itoa(a.polls) + " ev=" + itoa(a.events) + " loading=" + boolStr(a.loading))
 		}
 		ev, raw, ok := vi.PollEventRaw()
 		if !ok {
@@ -235,104 +276,211 @@ func (a *app) showStartSurface() {
 	a.target = ""
 	a.title = "Start"
 	a.loadBody(body, "/")
-	a.render()
-	vi.ConsoleLine(markerSettled)
 }
 
 func (a *app) navigate(target, from string) {
 	resolved, kind := resolveInput(target)
-	if kind == "empty" {
-		a.setError("url", target)
-		a.dirty = true
+	switch kind {
+	case "empty":
+		a.finishError("url", target, from)
 		return
-	}
-	if kind == "unsupported" {
-		a.setError("scheme", resolved)
-		a.dirty = true
+	case "unsupported":
+		a.finishError("scheme", resolved, from)
 		return
 	}
 	a.target = resolved
 	a.scroll = 0
+	a.loadFrom = from
+	a.loadHops = 0
+	a.loadSeen = nil
 	vi.ConsoleLine(markerURL + resolved)
 
-	body, errKind := a.fetch(resolved)
-	if errKind != "" {
-		a.setError(errKind, resolved)
-	} else {
-		a.loadBody(body, resolved)
+	switch kind := classifyTarget(resolved); kind {
+	case "https":
+		// TLS is not implemented on this OS yet: there is no trust store and
+		// no record layer in userland. Refuse loudly. The one thing this
+		// must never do is fall back to plain TCP — the request would leave
+		// the machine in the clear while the address bar said https.
+		a.finishError("https", resolved, from)
+	case "dns":
+		// No resolver in this slice: refuse rather than hang or guess.
+		a.finishError("dns", resolved, from)
+	case "url":
+		a.finishError("url", resolved, from)
+	case "http":
+		u, _ := webrender.ParseHTTPURL(resolved)
+		a.startHTTP(u)
+	default:
+		body, rc := vi.ReadFileAll(resolved, vi.MaxFileBytes)
+		switch {
+		case rc < 0:
+			a.finishError("file", resolved, from)
+		case len(body) == 0:
+			a.finishError("empty", resolved, from)
+		default:
+			a.loadBody(body, resolved)
+			a.afterLoad(from)
+		}
 	}
-	a.hist.push(entry{Target: resolved, Title: a.title})
-	a.persistHistory(resolved)
-	a.dirty = true
 }
 
-// fetch returns the page bytes or a short error kind. Network failures are
-// distinct kinds so the error page can be honest about what happened.
-func (a *app) fetch(target string) ([]byte, string) {
-	if strings.HasPrefix(strings.ToLower(target), "http://") {
-		u, ok := webrender.ParseHTTPURL(target)
+// classifyTarget decides what a resolved target is, and it is deliberately a
+// pure function: the "never send an https request in the clear" decision is
+// the one thing here that must be unit-testable without a socket.
+//
+//	kinds: "https" (refused), "dns" (hostname, no resolver), "url" (malformed),
+//	       "http" (fetchable), "file" (file channel)
+func classifyTarget(resolved string) string {
+	low := strings.ToLower(resolved)
+	switch {
+	case strings.HasPrefix(low, "https://"):
+		return "https"
+	case strings.HasPrefix(low, "http://"):
+		u, ok := webrender.ParseHTTPURL(resolved)
 		if !ok {
-			return nil, "url"
+			return "url"
 		}
 		if !u.IsIP {
-			// No resolver in this slice: say so instead of hanging.
-			return nil, "dns"
+			return "dns"
 		}
-		if rc := vi.TCPConnect(u.IPv4, u.Port); rc < 0 {
-			return nil, "tcp"
-		}
-		defer vi.TCPClose()
-		req := webrender.FormatGetRequest(u.Host, u.Path)
-		if _, rc := vi.TCPSend([]byte(req)); rc < 0 {
-			return nil, "tcp"
-		}
-		buf := make([]byte, 0, 8192)
-		chunk := make([]byte, 1024)
-		idle := 0
-		for len(buf) < vi.MaxFileBytes {
-			n, rc := vi.TCPRecv(chunk)
-			if rc < 0 {
-				return nil, "tcp"
-			}
-			if n == 0 {
-				if len(buf) > 0 {
-					break // the responder closes after the body
-				}
-				idle++
-				if idle > 900 {
-					return nil, "timeout"
-				}
-				vi.Sleep(1)
-				continue
-			}
-			idle = 0
-			buf = append(buf, chunk[:n]...)
-		}
-		if len(buf) == 0 {
-			return nil, "timeout"
-		}
-		head, body, ok := webrender.SplitHTTPResponse(buf)
-		if !ok {
-			return nil, "truncated"
-		}
-		if code := webrender.HTTPStatus(head); code != 200 {
-			a.status = "HTTP " + itoa(code)
-			return nil, "http"
-		}
-		if len(body) == 0 {
-			return nil, "empty"
-		}
-		return body, ""
+		return "http"
 	}
+	return "file"
+}
 
-	body, rc := vi.ReadFileAll(target, vi.MaxFileBytes)
+// startHTTP connects, sends the GET, and arms the stepped read.
+func (a *app) startHTTP(u webrender.URL) {
+	if rc := vi.TCPConnect(u.IPv4, u.Port); rc < 0 {
+		a.finishError("tcp", a.target, a.loadFrom)
+		return
+	}
+	if _, rc := vi.TCPSend([]byte(webrender.FormatGetRequest(u.Host, u.Path))); rc < 0 {
+		vi.TCPClose()
+		a.finishError("tcp", a.target, a.loadFrom)
+		return
+	}
+	a.loadURL = u
+	a.loadBuf = a.loadBuf[:0]
+	a.loadIdle = 0
+	a.loading = true
+	vi.ConsoleLine(markerFetch + u.Host + u.Path)
+}
+
+// loadStep advances an in-flight load by one bounded read.
+func (a *app) loadStep() {
+	n, rc := vi.TCPRecv(a.chunk[:])
 	if rc < 0 {
-		return nil, "file"
+		vi.TCPClose()
+		a.loading = false
+		a.finishError("tcp", a.target, a.loadFrom)
+		return
+	}
+	if n == 0 {
+		if len(a.loadBuf) > 0 {
+			a.completeLoad()
+			return
+		}
+		a.loadIdle++
+		if a.loadIdle > readIdleMax {
+			vi.TCPClose()
+			a.loading = false
+			a.finishError("timeout", a.target, a.loadFrom)
+		}
+		return
+	}
+	a.loadIdle = 0
+	a.loadBuf = append(a.loadBuf, a.chunk[:n]...)
+	if len(a.loadBuf) >= vi.MaxFileBytes {
+		a.completeLoad()
+	}
+}
+
+// completeLoad turns a finished response into a page, a redirect step, or an
+// error page.
+func (a *app) completeLoad() {
+	vi.TCPClose()
+	a.loading = false
+	head, body, ok := webrender.SplitHTTPResponse(a.loadBuf)
+	if !ok {
+		a.finishError("truncated", a.target, a.loadFrom)
+		return
+	}
+	code := webrender.HTTPStatus(head)
+	if webrender.RedirectStatus(code) {
+		next, ok := webrender.ResolveRedirect(a.loadURL, webrender.LocationHeader(head))
+		if !ok || next.Host == "" {
+			a.finishError("redirect", a.target, a.loadFrom)
+			return
+		}
+		key := next.Host + next.Path
+		if a.loadSeen == nil {
+			a.loadSeen = map[string]bool{}
+		}
+		if a.loadSeen[key] || a.loadHops >= maxRedirects {
+			a.finishError("redirect-loop", a.target, a.loadFrom)
+			return
+		}
+		a.loadSeen[key] = true
+		a.loadHops++
+		a.target = "http://" + key
+		vi.ConsoleLine(markerRedirect + itoa(a.loadHops) + " " + a.target)
+		if !next.IsIP {
+			a.finishError("dns", a.target, a.loadFrom)
+			return
+		}
+		a.startHTTP(next)
+		return
+	}
+	if code != 200 {
+		a.status = "HTTP " + itoa(code)
+		a.finishError("http", a.target, a.loadFrom)
+		return
 	}
 	if len(body) == 0 {
-		return nil, "empty"
+		a.finishError("empty", a.target, a.loadFrom)
+		return
 	}
-	return body, ""
+	a.loadBody(body, a.target)
+	a.afterLoad(a.loadFrom)
+}
+
+// cancelLoad stops an in-flight load (Stop / Escape / X).
+func (a *app) cancelLoad() {
+	if !a.loading {
+		a.status = "stopped"
+		a.dirty = true
+		return
+	}
+	vi.TCPClose()
+	a.loading = false
+	a.finishError("cancelled", a.target, a.loadFrom)
+}
+
+// afterLoad records the visit and announces the navigation once the frame is
+// up (see announceNavigation).
+func (a *app) afterLoad(from string) {
+	a.hist.push(entry{Target: a.target, Title: a.title})
+	a.persistHistory(a.target)
+	if from != "" {
+		a.announceNavigation()
+	} else {
+		a.settleIfNeeded()
+	}
+}
+
+// finishError renders the error page for a failed load and records the visit.
+func (a *app) finishError(kind, target, from string) {
+	if a.loading {
+		a.loading = false
+	}
+	a.setError(kind, target)
+	a.hist.push(entry{Target: target, Title: a.title})
+	a.persistHistory(target)
+	if from != "" {
+		a.announceNavigation()
+	} else {
+		a.settleIfNeeded()
+	}
 }
 
 // loadBody runs the renderer pipeline and emits the parse/layout markers.
@@ -373,9 +521,8 @@ func (a *app) key(usage uint32, flags uint16) {
 	switch usage {
 	case keyQ:
 		a.quit = true
-	case keyEscape:
-		a.status = "stopped"
-		a.dirty = true
+	case keyEscape, keyX:
+		a.cancelLoad()
 	case keyR, keyF5:
 		a.reload()
 	case keyUp:
@@ -631,9 +778,12 @@ func resolveInput(in string) (string, string) {
 	}
 	low := strings.ToLower(s)
 	switch {
-	case strings.HasPrefix(low, "http://"):
+	case strings.HasPrefix(low, "http://"), strings.HasPrefix(low, "https://"):
+		// Scheme-shaped: hand it on unresolved so classifyTarget can refuse
+		// https explicitly (and say why) rather than the classifier never
+		// seeing it.
 		return s, "http"
-	case strings.HasPrefix(low, "https://"), strings.Contains(low, "://"):
+	case strings.Contains(low, "://"):
 		return s, "unsupported"
 	case strings.HasPrefix(s, "/"):
 		return s, "file"
@@ -745,6 +895,14 @@ func errorMessage(kind, target string) string {
 		return "The server answered with a non-200 status."
 	case "scheme":
 		return "Only http:// and the local file channel are supported."
+	case "https":
+		return "https:// refused: this OS has no TLS trust store yet. Nothing was sent in the clear."
+	case "cancelled":
+		return "Load stopped before the server answered."
+	case "redirect":
+		return "The server sent a redirect we could not resolve."
+	case "redirect-loop":
+		return "Too many redirects (or a redirect loop); stopped after " + itoa(maxRedirects) + " hops."
 	}
 	return "Unrecognised target."
 }
