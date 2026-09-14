@@ -1,26 +1,22 @@
 # live-tabwm-bt.spec -- M48 BT1-BT6 (umbrella #1120) class-B gate: the
 # browser-style tab depth behaviours end to end on real VZ hardware.
 #
-# ONE headless boot with --screen (GPU armed) + --via-virtio (the HID chord
-# transport). The choreography:
+# TWO headless boots sharing the seeded host share (`vgate_share seed`):
 #
-#   1. `tabwm start`       -> TABWM registers, renders the sidebar.
-#   2. script2 `exec CALC.BIN` after the sidebar -> calc opens as tab id=2
-#      (tab-aware, full viewport).
-#   3. The chord sequence fires AFTER `calc: open id=2` (via-virtio paces
-#      chords at 0.25 s/stroke, so gating on the open marker is what makes
-#      the tab-dependent chords deterministic):
-#        ctrl-shift-p            -> BT3: pin the CALC tab
-#        ctrl-shift-f            -> BT6: freeze the CALC tab
-#        ctrl-shift-a, escape    -> BT6: tab search opens then closes
-#        ctrl-shift-g, escape    -> TWM/GO: the Go quick-jump opens then closes
-#        ctrl-t, escape          -> BT4: the START surface opens then closes
-#   4. script3 `echo rx-m48-ok` after `tabwm: start` is the expect terminator.
+#   01  `tabwm start` + `exec CALC.BIN` + HID chords. Pins M48 markers and
+#       the TWM quick-jump (`tabwm: go-summon` + `tabwm: go-scan-us=N`).
+#       Ctrl+Shift+P / F persist pin+freeze into `.tabs` v2.
+#   02  A second boot of TABWM + CALC against the same share. Proves the
+#       v2 record's *content* (pin, freeze, title) actually restores —
+#       boot 01 writing v2 without fault is not enough; the temp share used
+#       to be discarded at run end.
 #
-# The class-A suite covers the tranches the runner's chord vocabulary cannot
-# express (Ctrl+Shift+PgUp/PgDn reorder, Ctrl+Shift+[ / ] history,
-# duplicate/reopen of a WM-launched tab). This gate proves the additive
-# M48 markers land on real hardware without an exception.
+# Chord sequence on 01 (after `calc: open id=2`; via-virtio paces 0.25 s):
+#   ctrl-shift-p, ctrl-shift-f, ctrl-shift-a, escape,
+#   ctrl-shift-g, escape, ctrl-t, escape
+#
+# The class-A suite covers chords the runner cannot type. A v2 file is
+# refused by a v1 parser (loud version mismatch → no saved state).
 
 vgate_name live-tabwm-bt "M48 BT1-BT6: rail-native pin, freeze, start surface, tab search"
 vgate_share seed
@@ -36,6 +32,18 @@ EOF
 
 vgate_file script3.txt <<'EOF'
 echo rx-m48-ok
+EOF
+
+vgate_file script-02.txt <<'EOF'
+tabwm start
+EOF
+
+vgate_file script2-02.txt <<'EOF'
+exec CALC.BIN
+EOF
+
+vgate_file script3-02.txt <<'EOF'
+echo rx-m48-v2-ok
 EOF
 
 vgate_run 01 -- --screen '$RUN_DIR/screen' --via-virtio \
@@ -57,7 +65,81 @@ vgate_assert 01 serial-contains 'tabwm: tab-freeze 2 on'
 vgate_assert 01 serial-contains 'tabwm: tab-search'
 # TWM: the Go quick-jump (Ctrl+Shift+G) opens on real hardware.
 vgate_assert 01 serial-contains 'tabwm: go-summon'
+vgate_assert 01 serial-contains 'tabwm: go-scan-us='
 vgate_assert 01 serial-contains 'tabwm: start-surface'
 vgate_assert 01 serial-contains 'tabwm: new-tab'
 vgate_assert 01 serial-absent '\[EXC\]'
 vgate_assert 01 serial-absent '[EXC] parking:'
+vgate_assert 01 python <<'PY'
+import os, re
+ser = open(os.environ["VG_SER"], "rb").read().decode("utf-8", "replace")
+m = re.search(r"tabwm: go-scan-us=(\d+)", ser)
+if not m:
+    raise SystemExit("missing tabwm: go-scan-us")
+us = int(m.group(1))
+if us > 5000:
+    raise SystemExit("go_refresh too slow: %d us (limit 5000)" % us)
+share = os.environ["VG_SHARE"]
+path = os.path.join(share, ".tabs")
+data = open(path, "rb").read()
+if not data or data[0] != 2:
+    raise SystemExit(".tabs is not v2 (got %r)" % (data[:8],))
+count = data[2]
+if count < 1 or len(data) < 6 + count * 69:
+    raise SystemExit("v2 truncated: len=%d count=%d" % (len(data), count))
+found = None
+for i in range(count):
+    off = 6 + i * 69
+    flags = data[off + 32]
+    if (flags & 0x01) and (flags & 0x02):
+        found = data[off:off + 69]
+        break
+if found is None:
+    raise SystemExit("no v2 record with pin+freeze")
+open(os.path.join(os.environ["RUN_DIR"], "tabs-v2-pinned.bin"), "wb").write(found)
+PY
+
+vgate_run 02 -- --screen '$RUN_DIR/screen' --via-virtio \
+    --script '$RUN_DIR/script-02.txt' \
+    --script2 '$RUN_DIR/script2-02.txt' --script2-after 'tabwm: sidebar-rendered' \
+    --script3 '$RUN_DIR/script3-02.txt' --script3-after 'tabwm: tabs-applied' \
+    --script-expect 'rx-m48-v2-ok' --timeout 120
+
+vgate_assert 02 serial-contains 'VirelaiOS kernel has seized control.'
+vgate_assert 02 serial-contains 'tabwm: starting TABWM.BIN'
+vgate_assert 02 serial-contains 'tabwm: registered'
+vgate_assert 02 serial-contains 'tabwm: tabs-restored v2'
+vgate_assert 02 serial-contains 'calc: open id=2'
+vgate_assert 02 serial-contains 'tabwm: tabs-applied v2'
+vgate_assert 02 serial-contains 'pin=1'
+vgate_assert 02 serial-contains 'freeze=1'
+vgate_assert 02 serial-absent '\[EXC\]'
+vgate_assert 02 serial-absent '[EXC] parking:'
+vgate_assert 02 python <<'PY'
+import os, re
+ser = open(os.environ["VG_SER"], "rb").read().decode("utf-8", "replace")
+m = re.search(r"tabwm: tabs-applied v2 n=(\d+) pin=(\d+) freeze=(\d+) title=(.*)", ser)
+if not m:
+    raise SystemExit("missing tabs-applied content line")
+n, pin, freeze, title = int(m.group(1)), int(m.group(2)), int(m.group(3)), m.group(4).strip()
+if n < 1 or pin < 1 or freeze < 1:
+    raise SystemExit("restore missing pin/freeze: n=%d pin=%d freeze=%d" % (n, pin, freeze))
+expect_path = os.path.join(os.environ["RUN_DIR"], "tabs-v2-pinned.bin")
+expect = open(expect_path, "rb").read()
+want_title = expect[:32].split(b"\x00", 1)[0].decode("ascii", "replace")
+if title != want_title:
+    raise SystemExit("restored title %r != boot1 title %r" % (title, want_title))
+share = os.environ["VG_SHARE"]
+data = open(os.path.join(share, ".tabs"), "rb").read()
+if not data or data[0] != 2:
+    raise SystemExit("boot2 .tabs is not v2")
+got = None
+for i in range(data[2]):
+    off = 6 + i * 69
+    rec = data[off:off + 69]
+    if rec[:32] == expect[:32] and (rec[32] & 0x03) == 0x03:
+        got = rec
+        break
+if got is None:
+    raise SystemExit("boot2 .tabs lost pin+freeze for %r" % (want_title,))
+PY
