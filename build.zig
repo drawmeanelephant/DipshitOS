@@ -2580,6 +2580,9 @@ pub fn build(b: *std.Build) void {
     // gate is unaffected.
     const tls_client_enabled = b.option(bool, "tls_client", "Build and test the in-tree TLS 1.3 client") orelse true;
     const tls_test_sources = [_][]const u8{
+        // The TCP seam adapter is host-testable (its Ops seam is injected), so
+        // it runs here even though its guest entry point needs sys_tcp_*.
+        "user/src/lib/tls/stream.zig",
         "user/src/lib/tls/keyschedule.zig",
         "user/src/lib/tls/record.zig",
         "user/src/lib/tls/der.zig",
