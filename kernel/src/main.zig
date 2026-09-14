@@ -1892,7 +1892,10 @@ fn process_stdout(text: []const u8) void {
 
 /// Claim 9187 IRQ chain, registered as the exception module's dispatcher:
 /// ack from the GIC, handle the timer tick if the INTID is the timer's
-/// PPI (re-arming the comparator), then EOI. Runs in IRQ context with a
+/// PPI (re-arming the comparator), then EOI. WMP card 3 adds a second way a
+/// timer PPI can arrive: a reschedule nudge, which runs the same rotation
+/// without advancing the wall clock (see `timer.handle`'s return value).
+/// Runs in IRQ context with a
 /// register frame on the stack — NO console access (the heartbeat prints
 /// from the shell idle loop, where a print cannot re-enter the polled
 /// virtio TX path mid-flush). Claim 5275: on a timer PPI the scheduler
@@ -1912,15 +1915,22 @@ fn irq_dispatch() void {
     if (intid < 16) {
         smp.handle_sgi(intid);
     } else if (timer.is_ppi(intid)) {
+        // WMP card 3: `handle` reports whether this delivery was the 1 Hz
+        // period boundary or a reschedule nudge, and that answer decides
+        // whether the wall clock advances. A secondary core only re-arms, so
+        // its beat is a period boundary by construction (it does no
+        // timekeeping anyway — the `c == 0` guard in `tick` keeps that
+        // core-0's).
+        var period_tick = true;
         if (smp.core_id() == 0) {
-            timer.handle(); // core-0 timekeeping authority (tick record + re-arm)
+            period_tick = timer.handle(); // core-0 timekeeping authority (tick record + re-arm)
         } else {
             timer.arm(); // secondary core: re-arm only — no tick record
         }
         // SMP lift (claim 8477 follow-up): every core runs the tick; on
         // secondary cores it runs ONLY the switch machinery on its own
         // per-core staging (global timekeeping/registries stay core-0).
-        scheduler.tick();
+        scheduler.tick(period_tick);
     } else {
         virtio_custom.note_irq(intid);
     }
