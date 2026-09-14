@@ -154,6 +154,9 @@ pub const usage_d: u8 = 0x07;
 pub const usage_p: u8 = 0x13;
 /// M48/BT6: 'f' — Ctrl+Shift+F toggles the frozen badge.
 pub const usage_f: u8 = 0x09;
+/// TWM: 'g' — Ctrl+Shift+G summons the "Go" quick-jump, the rail-native
+/// go-to surface.
+pub const usage_g: u8 = 0x0a;
 /// M48/BT5: '[' / ']' — Ctrl+Shift+[ / ] step the per-tab history.
 pub const usage_left_bracket: u8 = 0x2f;
 pub const usage_right_bracket: u8 = 0x30;
@@ -191,6 +194,30 @@ pub const tab_move_marker: []const u8 = "tabwm: tab-move\n";
 /// #1064: reopen-closed re-exec'd an app (id-carrying prefix, bufPrint
 /// appends the bin + `\n`).
 pub const reopen_marker: []const u8 = "tabwm: reopen ";
+
+// ---------------------------------------------------------------------------
+// TWM — the "Go" quick-jump markers and the rail chip geometry
+// ---------------------------------------------------------------------------
+/// The Go surface was summoned (pinned evidence marker).
+pub const go_marker: []const u8 = "tabwm: go-summon\n";
+/// A Go jump selected a live tab (id-carrying prefix).
+pub const go_pick_tab_marker: []const u8 = "tabwm: go-pick ";
+/// A Go jump launched a catalog app (bin-carrying prefix).
+pub const go_launch_marker: []const u8 = "tabwm: go-launch ";
+/// A Go jump named a target that no longer exists (honest no-op marker).
+pub const go_miss_marker: []const u8 = "tabwm: go-miss\n";
+/// The Go rail chip lives in the ONE free band of the 180px rail: below
+/// the tray row (the clock/theme/clipboard badges occupy y = 672..696)
+/// and above the scanout edge. Nothing else draws there, so the chip
+/// cannot collide with the tray or with the tab list.
+pub const go_chip_x: u32 = 8;
+pub const go_chip_y: u32 = 700;
+pub const go_chip_w: u32 = 76;
+pub const go_chip_h: u32 = 16;
+
+pub fn go_chip_rect() Rect {
+    return Rect.make(go_chip_x, go_chip_y, go_chip_w, go_chip_h);
+}
 
 // Geometry constants
 pub const fb_w: u32 = 1280;
@@ -400,6 +427,8 @@ pub fn reopen_last_closed() bool {
     _ = ui.exec_program(c.bin[0..c.bin_len]);
     var buf: [64]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, "{s}{s}\n", .{ reopen_marker, c.bin[0..c.bin_len] }) catch "tabwm: reopen\n";
+    // TWM: record the reopen in the change log.
+    tablog_event(tablog_code_reopen, c.bin[0..c.bin_len]);
     closed_count -= 1;
     write_marker(msg);
     return true;
@@ -419,6 +448,9 @@ pub fn move_active_tab(delta: i32) bool {
         if (sel == cur) nav_sel = @intCast(next);
     }
     write_marker(tab_move_marker);
+    // TWM: record the keyboard move in the change log.
+    var mmbuf: [16]u8 = undefined;
+    tablog_event(tablog_code_reorder, std.fmt.bufPrint(&mmbuf, "{d}->{d}", .{ cur, next }) catch mmbuf[0..0]);
     save_tabs();
     return true;
 }
@@ -500,6 +532,9 @@ pub fn reorder_tab(from: usize, to: usize) bool {
     var buf: [64]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, "{s}{d}->{d}\n", .{ tab_reorder_marker, from, to }) catch "tabwm: tab-reorder\n";
     write_marker(msg);
+    // TWM: record the reorder in the change log.
+    var rrbuf: [16]u8 = undefined;
+    tablog_event(tablog_code_reorder, std.fmt.bufPrint(&rrbuf, "{d}->{d}", .{ from, to }) catch rrbuf[0..0]);
     save_tabs();
     return true;
 }
@@ -524,6 +559,9 @@ pub fn pin_toggle(idx: usize) bool {
     var buf: [64]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, "{s}{d} {s}\n", .{ pin_marker, id, if (on) "on" else "off" }) catch "tabwm: tab-pin\n";
     write_marker(msg);
+    // TWM: record the pin change in the change log.
+    var pbuf: [16]u8 = undefined;
+    tablog_event(if (on) tablog_code_pin else tablog_code_unpin, std.fmt.bufPrint(&pbuf, "{d}", .{id}) catch pbuf[0..0]);
     save_tabs();
     return true;
 }
@@ -540,6 +578,8 @@ pub fn adopt_tab_group(id: u32, label: []const u8) bool {
     var buf: [64]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, "{s}{d} {s}\n", .{ group_marker, id, label }) catch "tabwm: tab-group\n";
     write_marker(msg);
+    // TWM: record the group adoption in the change log.
+    tablog_event(tablog_code_group, label);
     return true;
 }
 
@@ -667,6 +707,9 @@ pub fn freeze_toggle(idx: usize) bool {
     var buf: [48]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, "{s}{d} {s}\n", .{ freeze_marker, manager.tabs[idx].id, if (manager.tabs[idx].frozen) "on" else "off" }) catch "tabwm: tab-freeze\n";
     write_marker(msg);
+    // TWM: record the freeze change in the change log.
+    var fzbuf: [16]u8 = undefined;
+    tablog_event(if (manager.tabs[idx].frozen) tablog_code_freeze else tablog_code_unfreeze, std.fmt.bufPrint(&fzbuf, "{d}", .{manager.tabs[idx].id}) catch fzbuf[0..0]);
     return true;
 }
 
@@ -813,6 +856,412 @@ pub fn tab_search_key(usage: u8) bool {
         return true;
     }
     return false;
+}
+
+// ---------------------------------------------------------------------------
+// TWM — "Go": the rail-native quick-jump (Ctrl+Shift+G)
+// ---------------------------------------------------------------------------
+// The user-facing "Go" affordance: ONE surface to jump to anything the rail
+// can show — a live tab (by title, 1-based index, or group label) or an app
+// in the APPS.TXT catalog. It is a SIBLING of the M48 tab search
+// (Ctrl+Shift+A, tabs only), of the Sexiburger catalog (Ctrl+Space) and of
+// the START page (Ctrl+T). It shares none of their state and none of their
+// chords, so all four surfaces stay independent and mutually exclusive.
+//
+// Every scan/rank/match function below is PURE over `manager` + the catalog
+// arrays — host-testable with no framebuffer, no kernel and no host share.
+// Static BSS only: no heap, no dynamic allocation.
+
+/// The Go query buffer — deliberately larger than tab_search's 16 bytes so a
+/// real title can be typed in full.
+pub const go_query_max: usize = 24;
+
+/// Panel geometry in scanout coordinates (centered on the content viewport).
+pub const go_panel_w: u32 = 520;
+pub const go_panel_h: u32 = 360;
+pub const go_panel_y: u32 = 100;
+/// The result rows start this far below the panel top, one `go_row_h` apart.
+pub const go_rows_y: u32 = 78;
+pub const go_row_h: u32 = 22;
+/// Hint row under the list; the last drawn result must stay above this band.
+pub const go_panel_footer: u32 = 26;
+/// How many results the panel can draw. Derived from geometry so a Down-arrow
+/// or click cannot select a row the renderer never paints.
+pub const go_max_results: usize = (go_panel_h - go_rows_y - go_panel_footer) / go_row_h;
+/// Upper bound on the candidate set scanned (live tabs + catalog apps).
+pub const go_scan_max: usize = max_tabs + overlay_max_apps;
+
+pub fn go_panel_x() u32 {
+    return viewport_x + (viewport_w - go_panel_w) / 2;
+}
+
+/// A result is a live tab or a catalog app.
+pub const go_kind_tab: u8 = 0;
+pub const go_kind_app: u8 = 1;
+
+/// Match classes, best (0) to worst (3). The ranking rule the spec pins:
+/// EXACT > PREFIX > SUBSTRING > SUBSEQUENCE.
+pub const go_rank_exact: u8 = 0;
+pub const go_rank_prefix: u8 = 1;
+pub const go_rank_substring: u8 = 2;
+pub const go_rank_subsequence: u8 = 3;
+
+pub const GoTarget = struct {
+    kind: u8 = go_kind_tab,
+    idx: usize = 0,
+    /// Window id for a tab target (0 for an app). Activate looks up by id
+    /// so a close that shifts later rows cannot land on the wrong tab.
+    id: u32 = 0,
+    rank: u8 = go_rank_subsequence,
+    pinned: bool = false,
+};
+
+pub var go_open: bool = false;
+pub var hover_go: bool = false;
+var go_query: [go_query_max]u8 = [_]u8{0} ** go_query_max;
+var go_query_len: usize = 0;
+var go_results: [go_scan_max]GoTarget = [_]GoTarget{.{}} ** go_scan_max;
+var go_result_count: usize = 0;
+var go_sel: usize = 0;
+
+pub fn go_is_open() bool {
+    return go_open;
+}
+
+/// The live query text (what the renderer draws after the '>' prompt).
+pub fn go_query_slice() []const u8 {
+    return go_query[0..go_query_len];
+}
+
+/// Case-insensitive ASCII equality.
+pub fn go_eql_ci(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| {
+        if (std.ascii.toLower(x) != std.ascii.toLower(y)) return false;
+    }
+    return true;
+}
+
+/// Case-insensitive prefix test.
+pub fn go_starts_ci(hay: []const u8, needle: []const u8) bool {
+    if (needle.len > hay.len) return false;
+    return go_eql_ci(hay[0..needle.len], needle);
+}
+
+/// Case-insensitive substring test.
+pub fn go_contains_ci(hay: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (needle.len > hay.len) return false;
+    const last = hay.len - needle.len;
+    var start: usize = 0;
+    while (start <= last) : (start += 1) {
+        if (go_eql_ci(hay[start .. start + needle.len], needle)) return true;
+    }
+    return false;
+}
+
+/// Case-insensitive SUBSEQUENCE test — the deterministic "fuzzy" fallback.
+/// Every needle byte must appear in `hay` in order (not necessarily
+/// adjacent), so "ntpd" finds "Notepad".
+pub fn go_subsequence_ci(hay: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    var n: usize = 0;
+    for (hay) |c| {
+        if (n >= needle.len) break;
+        if (std.ascii.toLower(c) == std.ascii.toLower(needle[n])) n += 1;
+    }
+    return n == needle.len;
+}
+
+/// Rank one haystack against the query. Null means NO MATCH. Pure.
+pub fn go_rank(hay: []const u8, needle: []const u8) ?u8 {
+    if (needle.len == 0) return go_rank_exact;
+    if (go_eql_ci(hay, needle)) return go_rank_exact;
+    if (go_starts_ci(hay, needle)) return go_rank_prefix;
+    if (go_contains_ci(hay, needle)) return go_rank_substring;
+    if (go_subsequence_ci(hay, needle)) return go_rank_subsequence;
+    return null;
+}
+
+fn go_rank_min(best: ?u8, r: ?u8) ?u8 {
+    if (r) |v| return if (best) |b| @min(b, v) else v;
+    return best;
+}
+
+/// Best rank of `needle` over a tab's candidate fields: its title, its
+/// manifest group label, and its 1-based index as text. Pure.
+pub fn go_rank_tab(i: usize, needle: []const u8) ?u8 {
+    if (i >= manager.tab_count) return null;
+    const t = &manager.tabs[i];
+    var best = go_rank(t.get_title(), needle);
+    if (t.group_len > 0) best = go_rank_min(best, go_rank(t.group[0..t.group_len], needle));
+    var num: [8]u8 = undefined;
+    const n = std.fmt.bufPrint(&num, "{d}", .{i + 1}) catch num[0..0];
+    best = go_rank_min(best, go_rank(n, needle));
+    return best;
+}
+
+/// Best rank of `needle` over a catalog entry (label, bin, group). Pure.
+pub fn go_rank_app(e: usize, needle: []const u8) ?u8 {
+    if (e >= overlay_count) return null;
+    var best = go_rank(overlay_labels[e][0..overlay_label_lens[e]], needle);
+    best = go_rank_min(best, go_rank(overlay_bins[e][0..overlay_bin_lens[e]], needle));
+    if (overlay_group_lens[e] > 0) best = go_rank_min(best, go_rank(overlay_groups[e][0..overlay_group_lens[e]], needle));
+    return best;
+}
+
+/// Deterministic order: rank, then pinned, then tabs before apps, then
+/// source order. This is the tie-break the spec pins.
+fn go_target_less(a: GoTarget, b: GoTarget) bool {
+    if (a.rank != b.rank) return a.rank < b.rank;
+    if (a.pinned != b.pinned) return a.pinned;
+    if (a.kind != b.kind) return a.kind < b.kind;
+    return a.idx < b.idx;
+}
+
+fn go_push(kind: u8, idx: usize, rank: u8, pinned: bool, id: u32) void {
+    if (go_result_count >= go_scan_max) return;
+    go_results[go_result_count] = .{ .kind = kind, .idx = idx, .id = id, .rank = rank, .pinned = pinned };
+    go_result_count += 1;
+}
+
+/// Rebuild the Go result list. Pure over `manager` + the catalog. An EMPTY
+/// query yields the default list (pinned tabs first, then tabs in rail
+/// order, then catalog apps in manifest order) so the surface is already
+/// useful before a single key is typed. Insertion sort — bounded list.
+pub fn go_refresh() void {
+    go_result_count = 0;
+    const q = go_query[0..go_query_len];
+    for (0..manager.tab_count) |i| {
+        if (go_rank_tab(i, q)) |r| go_push(go_kind_tab, i, r, manager.tabs[i].pinned, manager.tabs[i].id);
+    }
+    for (0..overlay_count) |e| {
+        if (go_rank_app(e, q)) |r| go_push(go_kind_app, e, r, overlay_dock[e], 0);
+    }
+    var i: usize = 1;
+    while (i < go_result_count) : (i += 1) {
+        const key = go_results[i];
+        var j: usize = i;
+        while (j > 0 and go_target_less(key, go_results[j - 1])) : (j -= 1) {
+            go_results[j] = go_results[j - 1];
+        }
+        go_results[j] = key;
+    }
+    if (go_result_count > go_max_results) go_result_count = go_max_results;
+    go_sel = if (go_result_count == 0) 0 else @min(go_sel, go_result_count - 1);
+}
+
+/// How many rows the Go panel is offering right now (host-testable).
+pub fn go_match_count() usize {
+    return go_result_count;
+}
+
+/// The current selection index into the result list.
+pub fn go_selection() usize {
+    return go_sel;
+}
+
+/// True when two live tabs carry the SAME title — the case where a row must
+/// carry a disambiguator, because otherwise two rows would be
+/// indistinguishable. Exact (case-sensitive) comparison: the disambiguator
+/// fires on visually identical rows, not on lookalikes.
+pub fn go_title_ambiguous(title: []const u8) bool {
+    var seen: usize = 0;
+    for (0..manager.tab_count) |i| {
+        if (std.mem.eql(u8, manager.tabs[i].get_title(), title)) seen += 1;
+        if (seen > 1) return true;
+    }
+    return false;
+}
+
+/// The label for result `r`, written into `buf` when a disambiguator is
+/// needed. The renderer draws EXACTLY this string, so drawing and
+/// key-handling can never disagree. Pure.
+pub fn go_row_label(r: usize, buf: []u8) []const u8 {
+    if (r >= go_result_count) return "";
+    const t = go_results[r];
+    if (t.kind == go_kind_tab) {
+        if (t.idx >= manager.tab_count) return "";
+        const tab = &manager.tabs[t.idx];
+        const title = tab.get_title();
+        if (go_title_ambiguous(title)) {
+            return std.fmt.bufPrint(buf, "{s} #{d}", .{ title, tab.id }) catch title;
+        }
+        return title;
+    }
+    if (t.idx >= overlay_count) return "";
+    const lbl = overlay_labels[t.idx][0..overlay_label_lens[t.idx]];
+    if (overlay_group_lens[t.idx] > 0) {
+        const g = overlay_groups[t.idx][0..overlay_group_lens[t.idx]];
+        return std.fmt.bufPrint(buf, "{s} / {s}", .{ lbl, g }) catch lbl;
+    }
+    return lbl;
+}
+
+/// The short type tag the row shows on its right.
+pub fn go_row_kind_label(r: usize) []const u8 {
+    if (r >= go_result_count) return "";
+    return if (go_results[r].kind == go_kind_tab) "tab" else "app";
+}
+
+/// The empty / no-match copy. Distinguishes a surface with NOTHING to jump
+/// to (empty rail + empty catalog) from a query with no hits — the same
+/// honest-distinction rule `overlay_empty_message` uses.
+pub fn go_empty_message() []const u8 {
+    if (go_result_count != 0) return "";
+    if (manager.tab_count == 0 and overlay_count == 0) return "nothing to jump to";
+    if (go_query_len == 0) return "type to jump";
+    return "no matches";
+}
+
+pub fn go_summon() void {
+    // The modal owns the input: never open over the unsaved dialog.
+    if (unsaved_dialog_open_tabwm) return;
+    // The catalog surfaces are mutually exclusive.
+    overlay_open = false;
+    start_open = false;
+    tab_search_open = false;
+    if (!overlay_loaded) _ = overlay_load_manifest();
+    go_query_len = 0;
+    go_sel = 0;
+    go_refresh();
+    go_open = true;
+    write_marker(go_marker);
+}
+
+pub fn go_dismiss() void {
+    go_open = false;
+    go_query_len = 0;
+    go_refresh();
+}
+
+/// Activate the selected target. A TAB target that has since been closed is
+/// a SAFE NO-OP — the miss is reported and false returned, rather than
+/// activating the wrong tab. An APP target launches through the SAME
+/// `pending_launch_bin` handshake the catalog uses, so the spawned window
+/// joins as a normal, reopenable tab.
+pub fn go_activate() bool {
+    if (!go_open) return false;
+    if (go_result_count == 0) return false;
+    const r = go_results[go_sel];
+    if (r.kind == go_kind_tab) {
+        const idx = manager.find_by_id(r.id) orelse {
+            write_marker(go_miss_marker);
+            go_refresh();
+            return false;
+        };
+        const id = manager.tabs[idx].id;
+        activate_tab(idx);
+        var buf: [64]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "{s}{d}\n", .{ go_pick_tab_marker, id }) catch "tabwm: go-pick\n";
+        write_marker(msg);
+        var dbuf: [16]u8 = undefined;
+        tablog_event(tablog_code_go, std.fmt.bufPrint(&dbuf, "tab {d}", .{id}) catch dbuf[0..0]);
+        go_dismiss();
+        return true;
+    }
+    const bin = overlay_bins[r.idx][0..overlay_bin_lens[r.idx]];
+    if (bin.len == 0) return false;
+    var buf: [64]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{s}{s}\n", .{ go_launch_marker, bin }) catch "tabwm: go-launch\n";
+    write_marker(msg);
+    const blen = @min(bin.len, pending_launch_bin.len);
+    @memcpy(pending_launch_bin[0..blen], bin[0..blen]);
+    pending_launch_bin_len = blen;
+    const group = overlay_groups[r.idx][0..overlay_group_lens[r.idx]];
+    const glen = @min(group.len, pending_launch_group.len);
+    @memcpy(pending_launch_group[0..glen], group[0..glen]);
+    pending_launch_group_len = glen;
+    pending_launch_pinned = overlay_dock[r.idx];
+    _ = ui.exec_program(bin);
+    var dbuf: [24]u8 = undefined;
+    tablog_event(tablog_code_launch, std.fmt.bufPrint(&dbuf, "{s}", .{bin}) catch dbuf[0..0]);
+    go_dismiss();
+    return true;
+}
+
+/// One key while the Go surface is open. The surface is MODAL — the same
+/// rule the unsaved-changes dialog uses — so EVERY key is consumed and no
+/// tab chord can fire underneath the panel. Escape clears a non-empty query
+/// first and dismisses on the second press. (The raw WM_KEY fan carries no
+/// modifier bits into these handlers, so Ctrl+U is not distinguishable from
+/// 'u' and is deliberately NOT the clear gesture.)
+pub fn go_key(usage: u8) bool {
+    if (!go_open) return false;
+    switch (usage) {
+        0x29 => { // Escape: clear, else dismiss
+            if (go_query_len > 0) {
+                go_query_len = 0;
+                go_sel = 0;
+                go_refresh();
+            } else {
+                go_dismiss();
+            }
+            return true;
+        },
+        0x28 => { // Enter: jump
+            _ = go_activate();
+            return true;
+        },
+        0x2a => { // Backspace: trim the query
+            if (go_query_len > 0) {
+                go_query_len -= 1;
+                go_refresh();
+            }
+            return true;
+        },
+        0x52 => { // Up
+            if (go_sel > 0) go_sel -= 1;
+            return true;
+        },
+        0x51 => { // Down
+            if (go_sel + 1 < go_result_count) go_sel += 1;
+            return true;
+        },
+        0x4b => { // PageUp
+            go_sel = if (go_sel > go_max_results) go_sel - go_max_results else 0;
+            return true;
+        },
+        0x4e => { // PageDown
+            if (go_result_count > 0) go_sel = @min(go_sel + go_max_results, go_result_count - 1);
+            return true;
+        },
+        else => {},
+    }
+    // Ctrl+Shift+G again toggles the surface closed.
+    if (usage == usage_g) {
+        go_dismiss();
+        return true;
+    }
+    const printable = (usage >= 0x04 and usage <= 0x1d) or (usage >= 0x1e and usage <= 0x27) or
+        usage == 0x2c or usage == 0x2d or usage == 0x37;
+    if (printable and go_query_len < go_query.len) {
+        const c: u8 = if (usage == 0x2c) ' ' else if (usage == 0x2d) '-' else if (usage == 0x37) '.' else if (usage <= 0x1d) @intCast(usage - 0x04 + 'a') else @intCast(usage - 0x1e + '1');
+        go_query[go_query_len] = c;
+        go_query_len += 1;
+        go_refresh();
+    }
+    return true; // modal: swallow everything else
+}
+
+/// A click while the Go surface is up. Inside the result list a click
+/// selects and activates the row under the pointer; anywhere else it
+/// dismisses. Always consumed (the surface is modal).
+pub fn go_click(px: u32, py: u32) bool {
+    const px0 = go_panel_x();
+    if (px < px0 or px >= px0 + go_panel_w or py < go_panel_y or py >= go_panel_y + go_panel_h) {
+        go_dismiss();
+        return true;
+    }
+    const first = go_panel_y + go_rows_y;
+    if (py >= first) {
+        const r = (py - first) / go_row_h;
+        if (r < go_result_count and r < go_max_results) {
+            go_sel = r;
+            _ = go_activate();
+        }
+    }
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1207,29 +1656,27 @@ pub const TabManager = struct {
     /// Stable-partition pinned tabs to the front, preserving the relative
     /// order of both halves, and keep the ACTIVE tab on the same tab (by
     /// id). Returns true when the order changed.
-    pub fn normalize_pinned(self: *TabManager) bool {
-        var reordered: [max_tabs]Tab = [_]Tab{.{}} ** max_tabs;
+    pub noinline fn normalize_pinned(self: *TabManager) bool {
         const active_id = self.get_active_id();
         var n: usize = 0;
         for (0..self.tab_count) |i| {
             if (self.tabs[i].pinned) {
-                reordered[n] = self.tabs[i];
+                tab_reorder_scratch[n] = self.tabs[i];
                 n += 1;
             }
         }
         for (0..self.tab_count) |i| {
             if (!self.tabs[i].pinned) {
-                reordered[n] = self.tabs[i];
+                tab_reorder_scratch[n] = self.tabs[i];
                 n += 1;
             }
         }
         var changed = false;
         for (0..self.tab_count) |i| {
-            if (reordered[i].id != self.tabs[i].id) changed = true;
+            if (tab_reorder_scratch[i].id != self.tabs[i].id) changed = true;
         }
         if (!changed) return false;
-        self.tabs = reordered;
-        self.tab_count = n;
+        commit_tab_scratch(self, n);
         if (active_id) |id| self.active_idx = self.find_by_id(id);
         return true;
     }
@@ -1241,6 +1688,22 @@ pub const TabManager = struct {
 pub var manager: TabManager = TabManager{};
 var scanout_ptr: ?[*]u32 = null;
 var scanout_mapped: bool = false;
+
+/// EL0 stack is 32 KiB (`scheduler.task_stack_size`). A `[max_tabs]Tab`
+/// scratch is ~8 KiB; LLVM inlines `normalize_pinned` and the persist-apply
+/// paths into `handle_window_mirror` → `main`, so a stack copy of that array
+/// (plus a by-value `TabsStateV2`) overflows. The title slice in
+/// `add_or_update_tab_geom` then becomes a NULL memcpy source and TABWM
+/// takes an EL0 data abort (`live-tabwm-fullscreen` run B). One BSS scratch,
+/// reused serially from the event loop — never live on two call frames.
+var tab_reorder_scratch: [max_tabs]Tab = [_]Tab{.{}} ** max_tabs;
+
+fn commit_tab_scratch(self: *TabManager, n: usize) void {
+    var i: usize = 0;
+    while (i < n) : (i += 1) self.tabs[i] = tab_reorder_scratch[i];
+    while (i < max_tabs) : (i += 1) self.tabs[i] = .{};
+    self.tab_count = n;
+}
 
 pub var hover_tab: ?usize = null;
 pub var hover_sexiburger: bool = false;
@@ -1515,22 +1978,38 @@ pub fn parse_tabs(buf: []const u8, out: *TabsState) bool {
 /// The persisted state loaded at boot, pending application.
 pub var persisted_tabs: ?TabsState = null;
 
-var last_saved_tabs: [tabs_state_max_bytes]u8 = undefined;
+var last_saved_tabs: [tabs_v2_max_bytes]u8 = undefined;
 var last_saved_tabs_len: usize = 0;
 var have_last_saved_tabs: bool = false;
+/// Shared I/O buffer for `.tabs` load/save — must not live on the EL0 stack.
+var tabs_io_buf: [tabs_v2_max_bytes]u8 = undefined;
 
 /// Read `.tabs` from the host share once at startup. A no-op on the host
 /// and when the file is absent (the honest no-persistence fallback).
-pub fn load_tabs() void {
+pub noinline fn load_tabs() void {
     if (@import("builtin").os.tag != .freestanding) return;
-    var buf: [tabs_state_max_bytes]u8 = undefined;
     const fd = ui.file_open(tabs_state_file, ui.MODE_READ);
     if (fd < 0) return;
     defer ui.file_close(@intCast(fd));
-    const n = ui.file_read(@intCast(fd), &buf);
+    const n = ui.file_read(@intCast(fd), &tabs_io_buf);
     if (n <= 0) return;
+    const bytes = tabs_io_buf[0..@intCast(n)];
+    // TWM: v2 first; a v1 file falls through to the v1 parser, so an
+    // existing install is never stranded by the format bump.
+    if (bytes.len > 0 and bytes[0] == tabs_state_version_v2) {
+        persisted_tabs_v2 = .{};
+        if (parse_tabs_v2(bytes, &persisted_tabs_v2.?)) {
+            tabs_seq = persisted_tabs_v2.?.seq;
+            var b: [48]u8 = undefined;
+            const msg = std.fmt.bufPrint(&b, "tabwm: tabs-restored v2 count={d}\n", .{persisted_tabs_v2.?.count}) catch "tabwm: tabs-restored v2\n";
+            write_marker(msg);
+        } else {
+            persisted_tabs_v2 = null;
+        }
+        return;
+    }
     var st: TabsState = .{};
-    if (parse_tabs(buf[0..@intCast(n)], &st)) {
+    if (parse_tabs(bytes, &st)) {
         persisted_tabs = st;
         var b: [48]u8 = undefined;
         const msg = std.fmt.bufPrint(&b, "tabwm: tabs-restored count={d}\n", .{st.count}) catch "tabwm: tabs-restored\n";
@@ -1541,12 +2020,17 @@ pub fn load_tabs() void {
 /// Write the current tab list to `.tabs` when it differs from the last
 /// write (the kernel's WINDOWS.SAV dedup discipline — a stable desktop
 /// must not hammer the transport). A no-op on the host.
-pub fn save_tabs() void {
+pub noinline fn save_tabs() void {
     if (@import("builtin").os.tag != .freestanding) return;
-    var buf: [tabs_state_max_bytes]u8 = undefined;
-    const n = serialize_tabs(&buf);
-    if (n == 0) return;
-    if (have_last_saved_tabs and last_saved_tabs_len == n and std.mem.eql(u8, last_saved_tabs[0..n], buf[0..n])) return;
+    // TWM: v2 is the writer now — the v1 serializer stays for back-compat
+    // and for the migration test.
+    const written_n = serialize_tabs_v2(&tabs_io_buf);
+    if (written_n == 0) return;
+    if (have_last_saved_tabs and last_saved_tabs_len == written_n and std.mem.eql(u8, last_saved_tabs[0..written_n], tabs_io_buf[0..written_n])) return;
+    // A real write: stamp it so a restored state can be told from a stale one.
+    tabs_seq +%= 1;
+    tabs_io_buf[3] = @intCast(tabs_seq & 0xff);
+    tabs_io_buf[4] = @intCast((tabs_seq >> 8) & 0xff);
     const fd_trunc = ui.file_open(tabs_state_file, ui.MODE_WRITE);
     if (fd_trunc >= 0) {
         _ = ui.file_truncate(@as(u32, @intCast(fd_trunc)), 0);
@@ -1555,11 +2039,11 @@ pub fn save_tabs() void {
     const fd = ui.file_open(tabs_state_file, ui.MODE_WRITE | ui.MODE_CREATE);
     if (fd < 0) return;
     const handle = @as(u32, @intCast(fd));
-    const written = ui.file_write(handle, buf[0..n]);
+    const written = ui.file_write(handle, tabs_io_buf[0..written_n]);
     ui.file_close(handle);
     if (written >= 0) {
-        @memcpy(last_saved_tabs[0..n], buf[0..n]);
-        last_saved_tabs_len = n;
+        @memcpy(last_saved_tabs[0..written_n], tabs_io_buf[0..written_n]);
+        last_saved_tabs_len = written_n;
         have_last_saved_tabs = true;
     }
 }
@@ -1568,10 +2052,11 @@ pub fn save_tabs() void {
 /// complete (the live tab count first reaches the saved count). Matches by
 /// title; unknown titles append in arrival order. Applies once; returns true
 /// when it ran (so the caller can re-activate the restored active tab).
-pub fn maybe_apply_persisted_tabs() bool {
-    const st = persisted_tabs orelse return false;
+pub noinline fn maybe_apply_persisted_tabs() bool {
+    // TWM: a v2 record may be pending instead of the v1 one.
+    if (persisted_tabs_v2 != null) return maybe_apply_persisted_tabs_v2();
+    const st = if (persisted_tabs) |*s| s else return false;
     if (manager.tab_count != st.count) return false;
-    var reordered: [max_tabs]Tab = [_]Tab{.{}} ** max_tabs;
     var used = [_]bool{false} ** max_tabs;
     var n: usize = 0;
     for (0..st.count) |pi| {
@@ -1579,7 +2064,7 @@ pub fn maybe_apply_persisted_tabs() bool {
         for (0..manager.tab_count) |ti| {
             if (used[ti]) continue;
             if (std.mem.eql(u8, manager.tabs[ti].get_title(), want)) {
-                reordered[n] = manager.tabs[ti];
+                tab_reorder_scratch[n] = manager.tabs[ti];
                 used[ti] = true;
                 n += 1;
                 break;
@@ -1588,18 +2073,326 @@ pub fn maybe_apply_persisted_tabs() bool {
     }
     for (0..manager.tab_count) |ti| {
         if (!used[ti]) {
-            reordered[n] = manager.tabs[ti];
+            tab_reorder_scratch[n] = manager.tabs[ti];
             n += 1;
         }
     }
     const old_active_id = manager.get_active_id();
-    manager.tabs = reordered;
-    manager.tab_count = n;
+    commit_tab_scratch(&manager, n);
     if (old_active_id) |id| manager.active_idx = manager.find_by_id(id);
     if (st.active) |pa| {
         if (pa < manager.tab_count) manager.active_idx = pa;
     }
     persisted_tabs = null; // apply exactly once
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// TWM — the tab-state change log (`.tablog`)
+// ---------------------------------------------------------------------------
+// The deliverable contract asks for "an inspectable local record of stored
+// state and setting changes". `.tabs` alone is a snapshot: it can say what
+// the state IS, never how it got there. `.tablog` is the bounded history:
+// the last `tablog_ring` tab-state events, each `<seq> <event> <detail>`,
+// flushed to the host share wholesale (the same discipline `save_tabs` uses
+// — a stable desktop must not hammer the transport). The formatter and the
+// reader view are pure and host-testable.
+pub const tablog_file: []const u8 = ".tablog";
+pub const tablog_line_max: usize = 40;
+pub const tablog_ring: usize = 24;
+pub const tablog_max_bytes: usize = tablog_line_max * tablog_ring;
+
+/// The event codes. The numeric value is the on-disk contract, so the
+/// mapping is pinned by a test.
+pub const tablog_code_switch: u8 = 1;
+pub const tablog_code_close: u8 = 2;
+pub const tablog_code_reopen: u8 = 3;
+pub const tablog_code_reorder: u8 = 4;
+pub const tablog_code_pin: u8 = 5;
+pub const tablog_code_unpin: u8 = 6;
+pub const tablog_code_group: u8 = 7;
+pub const tablog_code_freeze: u8 = 8;
+pub const tablog_code_unfreeze: u8 = 9;
+pub const tablog_code_go: u8 = 10;
+pub const tablog_code_launch: u8 = 11;
+
+pub var tablog_seq: u32 = 0;
+var tablog_lines: [tablog_ring][tablog_line_max]u8 = [_][tablog_line_max]u8{[_]u8{0} ** tablog_line_max} ** tablog_ring;
+pub var tablog_line_lens: [tablog_ring]usize = [_]usize{0} ** tablog_ring;
+var tablog_head: usize = 0;
+var tablog_count: usize = 0;
+var tablog_last_flush_seq: u32 = 0;
+/// Flush buffer for `.tablog` — kept off the EL0 stack (same reason as
+/// `tabs_io_buf`).
+var tablog_io_buf: [tablog_max_bytes]u8 = undefined;
+
+/// The stable name for an event code ("switch", "close", "go", ...).
+pub fn tablog_code_name(code: u8) []const u8 {
+    return switch (code) {
+        tablog_code_switch => "switch",
+        tablog_code_close => "close",
+        tablog_code_reopen => "reopen",
+        tablog_code_reorder => "reorder",
+        tablog_code_pin => "pin",
+        tablog_code_unpin => "unpin",
+        tablog_code_group => "group",
+        tablog_code_freeze => "freeze",
+        tablog_code_unfreeze => "unfreeze",
+        tablog_code_go => "go",
+        tablog_code_launch => "launch",
+        else => "?",
+    };
+}
+
+/// Format one log line: `<seq> <event> <detail>`. Pure — the ring stores
+/// exactly this string and the reader view prints it verbatim, so a test
+/// that pins the formatter pins the file too. A detail that would overflow
+/// `buf` is truncated rather than degrading the whole line to `0 ? ?`.
+pub fn tablog_format(seq: u32, code: u8, detail: []const u8, buf: []u8) []const u8 {
+    const name = tablog_code_name(code);
+    var pre: [24]u8 = undefined;
+    const prefix = std.fmt.bufPrint(&pre, "{d} {s} ", .{ seq, name }) catch return "0 ? ?";
+    if (prefix.len >= buf.len) return "0 ? ?";
+    @memcpy(buf[0..prefix.len], prefix);
+    const n = @min(detail.len, buf.len - prefix.len);
+    if (n > 0) @memcpy(buf[prefix.len .. prefix.len + n], detail[0..n]);
+    return buf[0 .. prefix.len + n];
+}
+
+/// Record one tab-state change. Bounded ring: after `tablog_ring` events the
+/// oldest is overwritten. A no-op on the host (like `save_tabs`), but the
+/// ring itself is always updated, so the log is host-testable.
+pub fn tablog_event(code: u8, detail: []const u8) void {
+    tablog_seq += 1;
+    var buf: [tablog_line_max]u8 = undefined;
+    const line = tablog_format(tablog_seq, code, detail, &buf);
+    const n = @min(line.len, tablog_line_max);
+    @memcpy(tablog_lines[tablog_head][0..n], line[0..n]);
+    tablog_line_lens[tablog_head] = n;
+    tablog_head = (tablog_head + 1) % tablog_ring;
+    if (tablog_count < tablog_ring) tablog_count += 1;
+    tablog_flush();
+}
+
+/// How many events the ring currently holds (host-testable).
+pub fn tablog_count_events() usize {
+    return tablog_count;
+}
+
+/// The k-th OLDEST retained line (0 = oldest), or null. This is the reader
+/// view an external tool or the shell prints back to the user.
+pub fn tablog_view(k: usize) ?[]const u8 {
+    if (k >= tablog_count) return null;
+    const start = if (tablog_count < tablog_ring) 0 else tablog_head;
+    const slot = (start + k) % tablog_ring;
+    return tablog_lines[slot][0..tablog_line_lens[slot]];
+}
+
+/// Flush the whole ring to the host share (truncate + write), oldest first.
+/// A sequence-stamp dedup keeps an unchanged ring off the transport. A
+/// no-op on the host.
+pub noinline fn tablog_flush() void {
+    if (@import("builtin").os.tag != .freestanding) return;
+    if (tablog_seq == tablog_last_flush_seq) return;
+    var off: usize = 0;
+    var k: usize = 0;
+    while (k < tablog_count) : (k += 1) {
+        const line = tablog_view(k) orelse continue;
+        if (off + line.len + 1 > tablog_io_buf.len) break;
+        @memcpy(tablog_io_buf[off .. off + line.len], line);
+        off += line.len;
+        tablog_io_buf[off] = '\n';
+        off += 1;
+    }
+    const fd_trunc = ui.file_open(tablog_file, ui.MODE_WRITE);
+    if (fd_trunc >= 0) {
+        _ = ui.file_truncate(@as(u32, @intCast(fd_trunc)), 0);
+        ui.file_close(@as(u32, @intCast(fd_trunc)));
+    }
+    const fd = ui.file_open(tablog_file, ui.MODE_WRITE | ui.MODE_CREATE);
+    if (fd < 0) return;
+    const handle = @as(u32, @intCast(fd));
+    const written = ui.file_write(handle, tablog_io_buf[0..off]);
+    ui.file_close(handle);
+    if (written >= 0) tablog_last_flush_seq = tablog_seq;
+}
+
+// ---------------------------------------------------------------------------
+// TWM — `.tabs` v2: persist what v1 silently dropped
+// ---------------------------------------------------------------------------
+// v1 stored ORDER + ACTIVE by title and nothing else, so pinned ordering,
+// the pinned bit, group labels, the frozen badge and the executable a tab
+// was launched from were all recomputed or lost on every restart. v2 keeps
+// every v1 field in the same place and APPENDS the missing ones per record:
+//   header: [version, active+1, count, seq_lo, seq_hi, prefs]   (6 bytes)
+//   record: [title(32) | flags(1) | group(12) | bin(24)]        (69 bytes)
+//     flags bit0 = pinned, bit1 = frozen, bit2 = docked-at-launch
+// A v1 FILE still parses exactly as before (load_tabs keeps the v1 path), so
+// an existing install is never stranded; the v2 parser refuses a v1 buffer
+// rather than misreading it. The parser is TOTAL: a short buffer, a wrong
+// version, a count above max_tabs, an out-of-range active index or a
+// truncated record is rejected rather than trusted.
+pub const tabs_state_version_v2: u8 = 2;
+pub const tabs_v2_header_bytes: usize = 6;
+pub const persist_group_max: usize = 12;
+pub const persist_bin_max: usize = 24;
+pub const tabs_v2_record_bytes: usize = persist_title_max + 1 + persist_group_max + persist_bin_max;
+pub const tabs_v2_max_bytes: usize = tabs_v2_header_bytes + max_tabs * tabs_v2_record_bytes;
+
+pub const tab_flag_pinned: u8 = 0x01;
+pub const tab_flag_frozen: u8 = 0x02;
+pub const tab_flag_dock: u8 = 0x04;
+
+pub const TabsStateV2 = struct {
+    active: ?usize = null,
+    count: usize = 0,
+    seq: u16 = 0,
+    prefs: u8 = 0,
+    titles: [max_tabs][persist_title_max]u8 = [_][persist_title_max]u8{[_]u8{0} ** persist_title_max} ** max_tabs,
+    title_lens: [max_tabs]usize = [_]usize{0} ** max_tabs,
+    flags: [max_tabs]u8 = [_]u8{0} ** max_tabs,
+    groups: [max_tabs][persist_group_max]u8 = [_][persist_group_max]u8{[_]u8{0} ** persist_group_max} ** max_tabs,
+    group_lens: [max_tabs]usize = [_]usize{0} ** max_tabs,
+    bins: [max_tabs][persist_bin_max]u8 = [_][persist_bin_max]u8{[_]u8{0} ** persist_bin_max} ** max_tabs,
+    bin_lens: [max_tabs]usize = [_]usize{0} ** max_tabs,
+};
+
+/// The monotonically increasing stamp written into every v2 file, so a
+/// restored state can be told apart from a stale one.
+pub var tabs_seq: u16 = 0;
+
+/// Encode the live tab list as a v2 file. Returns the byte count, or 0 when
+/// `buf` is too small. Pure.
+pub fn serialize_tabs_v2(buf: []u8) usize {
+    if (buf.len < tabs_v2_max_bytes) return 0;
+    buf[0] = tabs_state_version_v2;
+    buf[1] = if (manager.active_idx) |a| @as(u8, @intCast(a)) + 1 else 0;
+    buf[2] = @intCast(manager.tab_count);
+    buf[3] = @intCast(tabs_seq & 0xff);
+    buf[4] = @intCast((tabs_seq >> 8) & 0xff);
+    buf[5] = 0; // prefs (reserved: rail density / Go-enable bits)
+    var off: usize = tabs_v2_header_bytes;
+    for (0..manager.tab_count) |i| {
+        const t = &manager.tabs[i];
+        const title = t.get_title();
+        const tn = @min(title.len, persist_title_max);
+        @memcpy(buf[off .. off + tn], title[0..tn]);
+        @memset(buf[off + tn .. off + persist_title_max], 0);
+        off += persist_title_max;
+        var flags: u8 = 0;
+        if (t.pinned) flags |= tab_flag_pinned;
+        if (t.frozen) flags |= tab_flag_frozen;
+        buf[off] = flags;
+        off += 1;
+        const g = t.group[0..t.group_len];
+        const gn = @min(g.len, persist_group_max);
+        @memcpy(buf[off .. off + gn], g[0..gn]);
+        @memset(buf[off + gn .. off + persist_group_max], 0);
+        off += persist_group_max;
+        const b = t.get_bin();
+        const bn = @min(b.len, persist_bin_max);
+        @memcpy(buf[off .. off + bn], b[0..bn]);
+        @memset(buf[off + bn .. off + persist_bin_max], 0);
+        off += persist_bin_max;
+    }
+    return off;
+}
+
+fn tab_read_fixed(src: []const u8, out: []u8) usize {
+    var n: usize = 0;
+    while (n < out.len and src[n] != 0) : (n += 1) {}
+    @memcpy(out[0..n], src[0..n]);
+    return n;
+}
+
+/// Decode a v2 buffer into `out`. False on a non-v2 version byte, a bad
+/// count, an out-of-range active index, or a truncated record. Pure.
+/// Writes through `out` — never a by-value `TabsStateV2` on the stack.
+pub noinline fn parse_tabs_v2(buf: []const u8, out: *TabsStateV2) bool {
+    if (buf.len < tabs_v2_header_bytes) return false;
+    if (buf[0] != tabs_state_version_v2) return false;
+    const act_plus1 = buf[1];
+    const count: usize = buf[2];
+    if (count > max_tabs) return false;
+    if (buf.len < tabs_v2_header_bytes + count * tabs_v2_record_bytes) return false;
+    const active: ?usize = if (act_plus1 == 0) null else @as(usize, act_plus1 - 1);
+    if (active) |a| {
+        if (a >= count) return false;
+    }
+    out.* = .{};
+    out.count = count;
+    out.seq = @as(u16, buf[3]) | (@as(u16, buf[4]) << 8);
+    out.prefs = buf[5];
+    out.active = active;
+    var off: usize = tabs_v2_header_bytes;
+    for (0..count) |i| {
+        out.title_lens[i] = tab_read_fixed(buf[off .. off + persist_title_max], &out.titles[i]);
+        off += persist_title_max;
+        out.flags[i] = buf[off];
+        off += 1;
+        out.group_lens[i] = tab_read_fixed(buf[off .. off + persist_group_max], &out.groups[i]);
+        off += persist_group_max;
+        out.bin_lens[i] = tab_read_fixed(buf[off .. off + persist_bin_max], &out.bins[i]);
+        off += persist_bin_max;
+    }
+    return true;
+}
+
+/// The v2 state loaded at boot, pending application.
+pub var persisted_tabs_v2: ?TabsStateV2 = null;
+
+/// Apply a v2 state once the restored window set is complete: restore the
+/// pinned/frozen/group/bin fields per matched record, then reorder into the
+/// stored order (the v1 rule) and restore the active index. Applies exactly
+/// once. Pure over the manager + the state record.
+pub noinline fn maybe_apply_persisted_tabs_v2() bool {
+    const st = if (persisted_tabs_v2) |*s| s else return false;
+    if (manager.tab_count != st.count) return false;
+    for (0..manager.tab_count) |ti| {
+        const title = manager.tabs[ti].get_title();
+        for (0..st.count) |pi| {
+            if (!std.mem.eql(u8, st.titles[pi][0..st.title_lens[pi]], title)) continue;
+            const f = st.flags[pi];
+            manager.tabs[ti].pinned = (f & tab_flag_pinned) != 0;
+            manager.tabs[ti].frozen = (f & tab_flag_frozen) != 0;
+            const gn = st.group_lens[pi];
+            @memcpy(manager.tabs[ti].group[0..gn], st.groups[pi][0..gn]);
+            manager.tabs[ti].group_len = gn;
+            const bn = st.bin_lens[pi];
+            if (bn > 0 and manager.tabs[ti].bin_len == 0) {
+                @memcpy(manager.tabs[ti].bin[0..bn], st.bins[pi][0..bn]);
+                manager.tabs[ti].bin_len = bn;
+            }
+            break;
+        }
+    }
+    var used = [_]bool{false} ** max_tabs;
+    var n: usize = 0;
+    for (0..st.count) |pi| {
+        const want = st.titles[pi][0..st.title_lens[pi]];
+        for (0..manager.tab_count) |ti| {
+            if (used[ti]) continue;
+            if (std.mem.eql(u8, manager.tabs[ti].get_title(), want)) {
+                tab_reorder_scratch[n] = manager.tabs[ti];
+                used[ti] = true;
+                n += 1;
+                break;
+            }
+        }
+    }
+    for (0..manager.tab_count) |ti| {
+        if (!used[ti]) {
+            tab_reorder_scratch[n] = manager.tabs[ti];
+            n += 1;
+        }
+    }
+    const old_active_id = manager.get_active_id();
+    commit_tab_scratch(&manager, n);
+    if (old_active_id) |id| manager.active_idx = manager.find_by_id(id);
+    if (st.active) |pa| {
+        if (pa < manager.tab_count) manager.active_idx = pa;
+    }
+    persisted_tabs_v2 = null; // apply exactly once
     return true;
 }
 
@@ -1697,6 +2490,10 @@ pub fn activate_tab(idx: usize) void {
         }
     }
 
+    // TWM: record the switch in the change log.
+    var srbuf: [16]u8 = undefined;
+    tablog_event(tablog_code_switch, std.fmt.bufPrint(&srbuf, "tab {d}", .{active_id}) catch srbuf[0..0]);
+
     var buf: [64]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, "{s} idx={d} id={d}\n", .{ tab_switch_marker, idx, active_id }) catch "tabwm: tab-switch\n";
     write_marker(msg);
@@ -1760,6 +2557,9 @@ pub fn close_tab(idx: usize) void {
 
     // #1056 item 3: the list shrank — re-clamp the cursor/scroll and persist.
     clamp_nav_selection();
+    // TWM: record the close in the change log.
+    var lcbuf: [16]u8 = undefined;
+    tablog_event(tablog_code_close, std.fmt.bufPrint(&lcbuf, "tab {d}", .{closed_id}) catch lcbuf[0..0]);
     save_tabs();
 }
 
@@ -2536,6 +3336,14 @@ pub fn draw_sidebar(scan: [*]u32) void {
     ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, clip_rect, 4, clip_bg);
     ui.draw_text_sized(0, "CB", 144, 676, ui.font_size_badge, ui.theme_accent());
 
+    // TWM: the "Go" rail chip — the discoverable, mouse-reachable entry
+    // to the quick-jump (the keyboard path is Ctrl+Shift+G). It lives in
+    // the one free band of the rail, below the tray row.
+    const go_rect = go_chip_rect();
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, go_rect, 4, if (hover_go) ui.sidebar_hover_pill() else ui.sidebar_bg());
+    ui.draw_text_sized(0, "GO", go_rect.x + 8, go_rect.y + 2, ui.font_size_badge, ui.theme_accent());
+    ui.draw_text_sized(0, "^G", go_rect.x + 58, go_rect.y + 2, ui.font_size_badge, ui.sidebar_text_inactive());
+
     // M42 SX5: the Sexiburger god-menu overlay renders last (over the
     // canvas + sidebar dim).
     draw_overlay(pixels);
@@ -2544,6 +3352,9 @@ pub fn draw_sidebar(scan: [*]u32) void {
     // M48/BT6: the tab-search overlay and the hover preview card.
     draw_tab_search(pixels);
     draw_hover_preview(pixels);
+    // TWM: the Go quick-jump panel renders over the tab surfaces and
+    // under the modal.
+    draw_go(pixels);
     // M42 UX r2: the unsaved-changes dialog renders after EVERYTHING —
     // TABWM composes the full scanout every tick, so its compose overdraws
     // the kernel's own dialog blit; TABWM self-paints the modal (same
@@ -2623,6 +3434,50 @@ pub fn draw_tab_search(pixels: []u32) void {
     if (tab_search_count == 0) {
         ui.draw_text_sized(0, "no matching tabs", px + 14, py + 76, ui.font_size_badge, ui.sidebar_text_inactive());
     }
+}
+
+/// The TWM "Go" panel: a rail-native quick-jump centered on the content
+/// viewport, drawn AFTER the tab surfaces and BEFORE the modal. Rendering
+/// only — the scan/rank/selection state lives in `go_*`, and every row label
+/// comes from `go_row_label`, so draw and key-handling can never disagree.
+pub fn draw_go(pixels: []u32) void {
+    if (!go_open) return;
+    const pw = go_panel_w;
+    const ph = go_panel_h;
+    const px = go_panel_x();
+    const py = go_panel_y;
+    // Dim the content viewport behind the panel (source-over alpha).
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(viewport_x, 0, viewport_w, fb_h), 0, 0xB0000000);
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(px, py, pw, ph), 10, ui.sidebar_active_pill());
+    ui.draw_text_sized(0, "GO", px + 16, py + 12, ui.font_size_tab_title, ui.sidebar_text_active());
+    ui.draw_text_sized(0, "Ctrl+Shift+G", px + pw - 122, py + 14, ui.font_size_badge, ui.sidebar_text_inactive());
+    // The query line — a pill, so the type-ahead target is unmistakable.
+    ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(px + 12, py + 40, pw - 24, 26), 6, ui.sidebar_hover_pill());
+    ui.draw_text_sized(0, ">", px + 20, py + 46, ui.font_size_badge, ui.theme_accent());
+    if (go_query_len > 0) {
+        ui.draw_text_sized(0, go_query[0..go_query_len], px + 34, py + 46, ui.font_size_badge, ui.sidebar_text_active());
+    } else {
+        ui.draw_text_sized(0, "go to a tab, a group, or an app", px + 34, py + 46, ui.font_size_badge, ui.sidebar_text_inactive());
+    }
+    // Result rows.
+    var r: usize = 0;
+    while (r < go_result_count) : (r += 1) {
+        const ry = py + go_rows_y + @as(u32, @intCast(r)) * go_row_h;
+        if (ry + go_row_h > py + ph - go_panel_footer) break;
+        const is_sel = (r == go_sel);
+        if (is_sel) {
+            ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(px + 10, ry - 3, pw - 20, 20), 5, ui.theme_accent());
+        }
+        const fg = if (is_sel) 0x000000 else ui.sidebar_text_active();
+        var lbuf: [56]u8 = undefined;
+        const lbl = go_row_label(r, &lbuf);
+        ui.draw_text_sized(0, lbl[0..@min(lbl.len, 44)], px + 18, ry, ui.font_size_badge, fg);
+        ui.draw_text_sized(0, go_row_kind_label(r), px + pw - 54, ry, ui.font_size_badge, if (is_sel) 0x000000 else ui.sidebar_text_inactive());
+    }
+    if (go_result_count == 0) {
+        ui.draw_text_sized(0, go_empty_message(), px + 18, py + go_rows_y + 4, ui.font_size_badge, ui.sidebar_text_inactive());
+    }
+    ui.draw_text_sized(0, "Enter jump   Up/Down move   Esc back", px + 16, py + ph - 22, ui.font_size_badge, ui.sidebar_text_inactive());
 }
 
 /// The M48/BT6 hover preview card: after the pointer rests on a tab, a small
@@ -2780,7 +3635,22 @@ pub fn handle_pointer(px: u32, py: u32, clicked: bool) void {
         hover_theme_toggle = false;
         hover_clip = false;
         hover_new_tab = false;
+        hover_go = false;
         if (clicked) apply_unsaved_choice(wnd_core.unsaved_dialog_choice_at(fb_w, fb_h, px, py));
+        return;
+    }
+
+    // TWM: while the Go surface is up it is modal over the rail — a click
+    // either picks the row under the pointer or dismisses, and NOTHING
+    // underneath (tab pills, Sexiburger, tray) may react.
+    if (go_open) {
+        hover_sexiburger = false;
+        hover_tab = null;
+        hover_theme_toggle = false;
+        hover_clip = false;
+        hover_new_tab = false;
+        hover_go = false;
+        if (clicked) _ = go_click(px, py);
         return;
     }
 
@@ -2790,6 +3660,18 @@ pub fn handle_pointer(px: u32, py: u32, clicked: bool) void {
         hover_theme_toggle = false;
         hover_clip = false;
         hover_new_tab = false;
+        hover_go = false;
+        return;
+    }
+
+    // TWM: the Go rail chip is checked BEFORE the Sexiburger header test —
+    // it lives inside the rail, so the generic header hit-test would
+    // otherwise eat its click (the same precedence pattern the "+ New
+    // tab" pill and the row close 'x' use).
+    const gcr = go_chip_rect();
+    hover_go = (px >= gcr.x and px < gcr.x + gcr.w and py >= gcr.y and py < gcr.y + gcr.h);
+    if (hover_go) {
+        if (clicked) go_summon();
         return;
     }
 
@@ -2965,6 +3847,11 @@ pub fn handle_wm_key(usage: u8, flags: u16) void {
             // M48/BT6: tab search.
             if (usage == usage_a) {
                 tab_search_summon();
+                return;
+            }
+            // TWM: Ctrl+Shift+G — the Go quick-jump.
+            if (usage == usage_g) {
+                go_summon();
                 return;
             }
             // M48/BT5: per-tab history back/forward (Ctrl+Shift+[ / ]).
@@ -3286,7 +4173,7 @@ fn main() noreturn {
                 // a close decision is pending).
                 if (unsaved_dialog_open_tabwm) {
                     _ = unsaved_dialog_key(usage);
-                } else if (!overlay_key(usage) and !tab_search_key(usage)) {
+                } else if (!overlay_key(usage) and !go_key(usage) and !tab_search_key(usage)) {
                     // M42 SX5: the god-menu overlay (and the M48 START page)
                     // consume the stream next; the M48 tab-search overlay
                     // follows, then the tab chords.
@@ -3352,6 +4239,20 @@ pub fn resetForTest() void {
     tab_search_count = 0;
     tab_search_sel = 0;
     rpc_reply_payload_len = 0;
+
+    // TWM: the Go surface, the v2 persistence slot, and the change log.
+    go_open = false;
+    go_query_len = 0;
+    go_result_count = 0;
+    go_sel = 0;
+    hover_go = false;
+    persisted_tabs_v2 = null;
+    tabs_seq = 0;
+    tablog_seq = 0;
+    tablog_head = 0;
+    tablog_count = 0;
+    tablog_last_flush_seq = 0;
+    tablog_line_lens = [_]usize{0} ** tablog_ring;
 
     overlay_open = false;
     overlay_loaded = false;
@@ -5057,4 +5958,293 @@ test "tabwm: hover preview dwell, frozen badge, and tab search (M48/BT6)" {
     try std.testing.expect(tab_search_activate());
     try std.testing.expect(!tab_search_is_open());
     try std.testing.expectEqual(@as(?u32, 3), manager.get_active_id());
+}
+
+// ---------------------------------------------------------------------------
+// Unit Tests (TWM — the "Go" quick-jump, `.tabs` v2, and the change log)
+// ---------------------------------------------------------------------------
+
+test "tabwm: go rank classes — exact over prefix over substring (TWM/GO1)" {
+    try std.testing.expectEqual(go_rank_exact, go_rank("Notes", "notes").?);
+    try std.testing.expectEqual(go_rank_exact, go_rank("notes", "notes").?);
+    try std.testing.expectEqual(go_rank_prefix, go_rank("Notes App", "note").?);
+    try std.testing.expectEqual(go_rank_substring, go_rank("My Notes", "note").?);
+    try std.testing.expectEqual(go_rank_subsequence, go_rank("Notepad Editor", "ntpd").?);
+    try std.testing.expect(go_rank("Notes", "zzz") == null);
+    try std.testing.expectEqualStrings("go", tablog_code_name(tablog_code_go));
+}
+
+test "tabwm: go query append, backspace, two-stage escape, toggle (TWM/GO2)" {
+    resetForTest();
+    _ = manager.add_or_update_tab(2, "Notes");
+    overlay_loaded = true;
+    go_summon();
+    try std.testing.expect(go_is_open());
+    try std.testing.expectEqual(@as(usize, 0), go_query_slice().len);
+    _ = go_key(0x11); // 'n'
+    _ = go_key(0x12); // 'o'
+    try std.testing.expectEqualStrings("no", go_query_slice());
+    try std.testing.expectEqual(@as(usize, 1), go_match_count());
+    _ = go_key(0x2a); // Backspace
+    try std.testing.expectEqualStrings("n", go_query_slice());
+    _ = go_key(0x29); // Escape clears a non-empty query, does not dismiss
+    try std.testing.expectEqualStrings("", go_query_slice());
+    try std.testing.expect(go_is_open());
+    _ = go_key(0x29); // A second Escape dismisses
+    try std.testing.expect(!go_is_open());
+    // Ctrl+Shift+G re-summons, and the chord itself closes it again.
+    go_summon();
+    _ = go_key(usage_g);
+    try std.testing.expect(!go_is_open());
+}
+
+test "tabwm: go empty and no-match states are honestly distinct (TWM/GO3)" {
+    resetForTest();
+    overlay_loaded = true;
+    go_summon();
+    try std.testing.expectEqualStrings("nothing to jump to", go_empty_message());
+    _ = go_key(0x11); // 'n'
+    try std.testing.expectEqualStrings("nothing to jump to", go_empty_message());
+
+    resetForTest();
+    _ = manager.add_or_update_tab(2, "Notes");
+    overlay_loaded = true;
+    go_summon();
+    try std.testing.expect(go_match_count() >= 1);
+    try std.testing.expectEqualStrings("", go_empty_message());
+    _ = go_key(0x1a); // 'w' — no hits
+    try std.testing.expectEqual(@as(usize, 0), go_match_count());
+    try std.testing.expectEqualStrings("no matches", go_empty_message());
+}
+
+test "tabwm: go ranks tabs ahead of apps at equal rank (TWM/GO4)" {
+    resetForTest();
+    _ = manager.add_or_update_tab(2, "Notes");
+    overlay_loaded = true;
+    overlay_count = 1;
+    @memcpy(overlay_labels[0][0..5], "Notes");
+    overlay_label_lens[0] = 5;
+    @memcpy(overlay_bins[0][0..9], "NOTES.BIN");
+    overlay_bin_lens[0] = 9;
+    overlay_dock[0] = false;
+    go_open = true;
+    go_query_len = 5;
+    @memcpy(go_query[0..5], "notes");
+    go_refresh();
+    try std.testing.expectEqual(@as(usize, 2), go_match_count());
+    try std.testing.expectEqualStrings("tab", go_row_kind_label(0));
+    try std.testing.expectEqualStrings("app", go_row_kind_label(1));
+    go_open = false;
+}
+
+test "tabwm: go disambiguates two tabs with the same title (TWM/GO5)" {
+    resetForTest();
+    _ = manager.add_or_update_tab(2, "Text Editor");
+    _ = manager.add_or_update_tab(3, "Text Editor");
+    try std.testing.expect(go_title_ambiguous("Text Editor"));
+    try std.testing.expect(!go_title_ambiguous("Solo"));
+    overlay_loaded = true;
+    go_summon();
+    var b0: [56]u8 = undefined;
+    const l0 = go_row_label(0, &b0);
+    try std.testing.expect(std.mem.indexOf(u8, l0, "#2") != null);
+    var b1: [56]u8 = undefined;
+    const l1 = go_row_label(1, &b1);
+    try std.testing.expect(std.mem.indexOf(u8, l1, "#3") != null);
+    try std.testing.expect(!std.mem.eql(u8, l0, l1));
+}
+
+test "tabwm: go activate on a closed target is a safe no-op (TWM/GO6)" {
+    resetForTest();
+    _ = manager.add_or_update_tab(2, "A");
+    _ = manager.add_or_update_tab(3, "B");
+    _ = manager.add_or_update_tab(4, "C");
+    overlay_loaded = true;
+    go_summon();
+    go_sel = 1;
+    try std.testing.expectEqual(@as(u32, 3), go_results[go_sel].id);
+    // Close B: index 1 is now C (id=4). An index+valid check would activate C.
+    _ = manager.remove_tab(3);
+    try std.testing.expect(!go_activate());
+    try std.testing.expect(go_is_open());
+    try std.testing.expectEqual(@as(?u32, 2), manager.get_active_id());
+    // And a click outside the panel dismisses rather than acting.
+    _ = go_click(4, 4);
+    try std.testing.expect(!go_is_open());
+}
+
+test "tabwm: Go rail chip and chord are wired (TWM/GO7)" {
+    const r = go_chip_rect();
+    try std.testing.expectEqual(go_chip_x, r.x);
+    try std.testing.expect(r.x + r.w <= sidebar_w);
+    try std.testing.expect(r.y >= 696 and r.y + r.h <= fb_h);
+    try std.testing.expectEqual(@as(u8, 0x0a), usage_g);
+    try std.testing.expectEqualStrings("tabwm: go-summon\n", go_marker);
+    try std.testing.expectEqualStrings("tabwm: go-miss\n", go_miss_marker);
+    try std.testing.expectEqualStrings("tabwm: go-pick ", go_pick_tab_marker);
+    try std.testing.expectEqualStrings("tabwm: go-launch ", go_launch_marker);
+}
+
+test "tabwm: go panel draws every selectable row (TWM/GO8)" {
+    try std.testing.expectEqual(@as(usize, 11), go_max_results);
+    const last_row_bottom = go_panel_y + go_rows_y + @as(u32, @intCast(go_max_results)) * go_row_h;
+    try std.testing.expect(last_row_bottom <= go_panel_y + go_panel_h - go_panel_footer);
+    try std.testing.expectEqual(max_tabs + overlay_max_apps, go_scan_max);
+}
+
+test "tabwm: .tabs v2 round-trips pinned, frozen, group, and bin (TWM/ST1)" {
+    resetForTest();
+    _ = manager.add_or_update_tab(2, "Calc");
+    _ = manager.add_or_update_tab(3, "Files");
+    manager.tabs[0].pinned = true;
+    manager.tabs[1].frozen = true;
+    @memcpy(manager.tabs[1].group[0..5], "tools");
+    manager.tabs[1].group_len = 5;
+    @memcpy(manager.tabs[0].bin[0..8], "CALC.BIN");
+    manager.tabs[0].bin_len = 8;
+    activate_tab(0);
+    tabs_seq = 7;
+    var buf: [tabs_v2_max_bytes]u8 = undefined;
+    const n = serialize_tabs_v2(&buf);
+    try std.testing.expectEqual(tabs_v2_header_bytes + 2 * tabs_v2_record_bytes, n);
+    var st: TabsStateV2 = .{};
+    try std.testing.expect(parse_tabs_v2(buf[0..n], &st));
+    try std.testing.expectEqual(@as(usize, 2), st.count);
+    try std.testing.expectEqual(@as(?usize, 0), st.active);
+    try std.testing.expectEqual(@as(u16, 7), st.seq);
+    try std.testing.expectEqualStrings("Calc", st.titles[0][0..st.title_lens[0]]);
+    try std.testing.expect((st.flags[0] & tab_flag_pinned) != 0);
+    try std.testing.expect((st.flags[1] & tab_flag_frozen) != 0);
+    try std.testing.expectEqualStrings("tools", st.groups[1][0..st.group_lens[1]]);
+    try std.testing.expectEqualStrings("CALC.BIN", st.bins[0][0..st.bin_lens[0]]);
+}
+
+test "tabwm: a v2 state re-applies pinned/frozen/group/bin and order (TWM/ST2)" {
+    resetForTest();
+    var st = TabsStateV2{};
+    st.count = 2;
+    st.active = 1;
+    @memcpy(st.titles[0][0..4], "Calc");
+    st.title_lens[0] = 4;
+    st.flags[0] = tab_flag_pinned;
+    @memcpy(st.bins[0][0..8], "CALC.BIN");
+    st.bin_lens[0] = 8;
+    @memcpy(st.titles[1][0..5], "Files");
+    st.title_lens[1] = 5;
+    st.flags[1] = tab_flag_frozen;
+    @memcpy(st.groups[1][0..5], "tools");
+    st.group_lens[1] = 5;
+    persisted_tabs_v2 = st;
+    // The windows arrive out of order and with none of the extras.
+    _ = manager.add_or_update_tab(3, "Files");
+    _ = manager.add_or_update_tab(2, "Calc");
+    try std.testing.expect(maybe_apply_persisted_tabs());
+    try std.testing.expectEqualStrings("Calc", manager.tabs[0].get_title());
+    try std.testing.expect(manager.tabs[0].pinned);
+    try std.testing.expectEqualStrings("CALC.BIN", manager.tabs[0].get_bin());
+    try std.testing.expectEqualStrings("Files", manager.tabs[1].get_title());
+    try std.testing.expect(manager.tabs[1].frozen);
+    try std.testing.expectEqualStrings("tools", manager.tabs[1].group[0..manager.tabs[1].group_len]);
+    try std.testing.expectEqual(@as(?usize, 1), manager.active_idx);
+    try std.testing.expect(!maybe_apply_persisted_tabs()); // applies once
+}
+
+test "tabwm: a v1 file still parses and a v2 parser refuses it (TWM/ST3)" {
+    resetForTest();
+    _ = manager.add_or_update_tab(2, "Legacy");
+    var buf: [tabs_v2_max_bytes]u8 = undefined;
+    const n = serialize_tabs(&buf); // the v1 writer
+    try std.testing.expectEqual(@as(u8, 1), buf[0]);
+    var st: TabsState = .{};
+    try std.testing.expect(parse_tabs(buf[0..n], &st));
+    try std.testing.expectEqualStrings("Legacy", st.titles[0][0..st.title_lens[0]]);
+    var st2: TabsStateV2 = .{};
+    try std.testing.expect(!parse_tabs_v2(buf[0..n], &st2));
+}
+
+test "tabwm: truncated or out-of-range v2 records are rejected (TWM/ST4)" {
+    resetForTest();
+    _ = manager.add_or_update_tab(2, "A");
+    _ = manager.add_or_update_tab(3, "B");
+    var buf: [tabs_v2_max_bytes]u8 = undefined;
+    const n = serialize_tabs_v2(&buf);
+    var st: TabsStateV2 = .{};
+    try std.testing.expect(parse_tabs_v2(buf[0..n], &st));
+    try std.testing.expect(!parse_tabs_v2(buf[0 .. n - 1], &st)); // truncated
+    try std.testing.expect(!parse_tabs_v2(buf[0..4], &st)); // short header
+    var bad = buf;
+    bad[2] = max_tabs + 1;
+    try std.testing.expect(!parse_tabs_v2(bad[0..n], &st)); // count over max
+    bad = buf;
+    bad[1] = 9;
+    try std.testing.expect(!parse_tabs_v2(bad[0..n], &st)); // active out of range
+    bad = buf;
+    bad[0] = 9;
+    try std.testing.expect(!parse_tabs_v2(bad[0..n], &st)); // wrong version
+}
+
+test "tabwm: the change log formats, reads back in order, and is bounded (TWM/LOG1)" {
+    resetForTest();
+    var buf: [tablog_line_max]u8 = undefined;
+    try std.testing.expectEqualStrings("1 switch tab 2", tablog_format(1, tablog_code_switch, "tab 2", &buf));
+    try std.testing.expectEqualStrings("2 close tab 7", tablog_format(2, tablog_code_close, "tab 7", &buf));
+
+    resetForTest();
+    tablog_event(tablog_code_switch, "tab 2");
+    tablog_event(tablog_code_close, "tab 7");
+    try std.testing.expectEqual(@as(usize, 2), tablog_count_events());
+    try std.testing.expectEqualStrings("1 switch tab 2", tablog_view(0).?);
+    try std.testing.expectEqualStrings("2 close tab 7", tablog_view(1).?);
+    try std.testing.expect(tablog_view(2) == null);
+
+    // The ring is bounded and drops the OLDEST entry first.
+    resetForTest();
+    var i: usize = 0;
+    while (i < tablog_ring + 3) : (i += 1) tablog_event(tablog_code_reorder, "0->1");
+    try std.testing.expectEqual(tablog_ring, tablog_count_events());
+    var b0: [tablog_line_max]u8 = undefined;
+    try std.testing.expectEqualStrings(tablog_format(4, tablog_code_reorder, "0->1", &b0), tablog_view(0).?);
+    var b1: [tablog_line_max]u8 = undefined;
+    try std.testing.expectEqualStrings(tablog_format(@intCast(tablog_ring + 3), tablog_code_reorder, "0->1", &b1), tablog_view(tablog_ring - 1).?);
+}
+
+test "tabwm: tab actions record into the change log (TWM/LOG2)" {
+    resetForTest();
+    _ = manager.add_or_update_tab(2, "A");
+    _ = manager.add_or_update_tab(3, "B");
+    activate_tab(1);
+    _ = pin_toggle(0);
+    _ = freeze_toggle(1);
+    _ = reorder_tab(0, 1);
+    close_tab(1);
+    // close_tab re-activates the surviving tab, so the close ALSO records a
+    // switch: 6 events for 5 user actions. Every action must be present.
+    try std.testing.expectEqual(@as(usize, 6), tablog_count_events());
+    const want = [_][]const u8{ "switch", "pin", "freeze", "reorder", "close" };
+    for (want) |w| {
+        var seen = false;
+        var k: usize = 0;
+        while (k < tablog_count_events()) : (k += 1) {
+            if (std.mem.indexOf(u8, tablog_view(k).?, w) != null) seen = true;
+        }
+        try std.testing.expect(seen);
+    }
+    try std.testing.expectEqualStrings("switch tab 3", tablog_view(0).?[2..]);
+}
+
+test "tabwm: tablog formatter truncates a long detail rather than degrading (TWM/LOG3)" {
+    var buf: [tablog_line_max]u8 = undefined;
+    const line = tablog_format(1, tablog_code_launch, "THIS_IS_A_VERY_LONG_EXECUTABLE_NAME.BIN", &buf);
+    try std.testing.expect(line.len <= tablog_line_max);
+    try std.testing.expect(std.mem.startsWith(u8, line, "1 launch "));
+    try std.testing.expect(!std.mem.eql(u8, line, "0 ? ?"));
+}
+
+test "tabwm: Tab[max_tabs] reorder scratch lives in BSS (TWM/ST5)" {
+    // One [max_tabs]Tab is ~6.5 KiB. LLVM inlines normalize_pinned plus the
+    // v1 and v2 persist-apply paths into main; three of those plus a
+    // by-value TabsStateV2 blow the 32 KiB EL0 stack. The scratch is BSS.
+    const reorder = @sizeOf(Tab) * max_tabs;
+    try std.testing.expectEqual(reorder, @sizeOf(@TypeOf(tab_reorder_scratch)));
+    try std.testing.expect(reorder * 3 + @sizeOf(TabsStateV2) > 16 * 1024);
 }

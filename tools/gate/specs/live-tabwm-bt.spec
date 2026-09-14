@@ -13,6 +13,7 @@
 #        ctrl-shift-p            -> BT3: pin the CALC tab
 #        ctrl-shift-f            -> BT6: freeze the CALC tab
 #        ctrl-shift-a, escape    -> BT6: tab search opens then closes
+#        ctrl-shift-g, escape    -> TWM/GO: the Go quick-jump opens then closes
 #        ctrl-t, escape          -> BT4: the START surface opens then closes
 #   4. script3 `echo rx-m48-ok` after `tabwm: start` is the expect terminator.
 #
@@ -40,7 +41,7 @@ EOF
 vgate_run 01 -- --screen '$RUN_DIR/screen' --via-virtio \
     --script '$RUN_DIR/script.txt' \
     --script2 '$RUN_DIR/script2.txt' --script2-after 'tabwm: sidebar-rendered' \
-    --input-chords 'ctrl-shift-p,ctrl-shift-f,ctrl-shift-a,escape,ctrl-t,escape' \
+    --input-chords 'ctrl-shift-p,ctrl-shift-f,ctrl-shift-a,escape,ctrl-shift-g,escape,ctrl-t,escape' \
     --input-chords-after 'calc: open id=2' \
     --script3 '$RUN_DIR/script3.txt' --script3-after 'tabwm: start-surface' \
     --script-expect 'rx-m48-ok' --timeout 200
@@ -50,10 +51,12 @@ vgate_assert 01 serial-contains 'tabwm: starting TABWM.BIN'
 vgate_assert 01 serial-contains 'tabwm: registered'
 vgate_assert 01 serial-contains 'tabwm: sidebar-rendered'
 vgate_assert 01 serial-contains 'calc: open id=2'
-# M48 markers.
+# M48 markers + the TWM Go quick-jump.
 vgate_assert 01 serial-contains 'tabwm: tab-pin 2 on'
 vgate_assert 01 serial-contains 'tabwm: tab-freeze 2 on'
 vgate_assert 01 serial-contains 'tabwm: tab-search'
+# TWM: the Go quick-jump (Ctrl+Shift+G) opens on real hardware.
+vgate_assert 01 serial-contains 'tabwm: go-summon'
 vgate_assert 01 serial-contains 'tabwm: start-surface'
 vgate_assert 01 serial-contains 'tabwm: new-tab'
 vgate_assert 01 serial-absent '\[EXC\]'
