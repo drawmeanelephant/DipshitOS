@@ -28,8 +28,8 @@ pub const Error = der.Error || error{
     BadAlgorithm,
 };
 
-pub const max_general_names = 24;
-pub const max_unknown_critical = 8;
+pub const max_general_names = 64;
+pub const max_unknown_critical = 16;
 pub const max_nc = 12;
 
 pub const oid = struct {
