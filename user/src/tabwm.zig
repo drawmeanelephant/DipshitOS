@@ -872,10 +872,6 @@ pub fn tab_search_key(usage: u8) bool {
 // arrays — host-testable with no framebuffer, no kernel and no host share.
 // Static BSS only: no heap, no dynamic allocation.
 
-/// How many results the panel can draw and the cursor can step through.
-pub const go_max_results: usize = 12;
-/// Upper bound on the candidate set scanned (max_tabs + overlay_max_apps).
-pub const go_scan_max: usize = 48;
 /// The Go query buffer — deliberately larger than tab_search's 16 bytes so a
 /// real title can be typed in full.
 pub const go_query_max: usize = 24;
@@ -887,6 +883,13 @@ pub const go_panel_y: u32 = 100;
 /// The result rows start this far below the panel top, one `go_row_h` apart.
 pub const go_rows_y: u32 = 78;
 pub const go_row_h: u32 = 22;
+/// Hint row under the list; the last drawn result must stay above this band.
+pub const go_panel_footer: u32 = 26;
+/// How many results the panel can draw. Derived from geometry so a Down-arrow
+/// or click cannot select a row the renderer never paints.
+pub const go_max_results: usize = (go_panel_h - go_rows_y - go_panel_footer) / go_row_h;
+/// Upper bound on the candidate set scanned (live tabs + catalog apps).
+pub const go_scan_max: usize = max_tabs + overlay_max_apps;
 
 pub fn go_panel_x() u32 {
     return viewport_x + (viewport_w - go_panel_w) / 2;
@@ -906,6 +909,9 @@ pub const go_rank_subsequence: u8 = 3;
 pub const GoTarget = struct {
     kind: u8 = go_kind_tab,
     idx: usize = 0,
+    /// Window id for a tab target (0 for an app). Activate looks up by id
+    /// so a close that shifts later rows cannot land on the wrong tab.
+    id: u32 = 0,
     rank: u8 = go_rank_subsequence,
     pinned: bool = false,
 };
@@ -1013,9 +1019,9 @@ fn go_target_less(a: GoTarget, b: GoTarget) bool {
     return a.idx < b.idx;
 }
 
-fn go_push(kind: u8, idx: usize, rank: u8, pinned: bool) void {
+fn go_push(kind: u8, idx: usize, rank: u8, pinned: bool, id: u32) void {
     if (go_result_count >= go_scan_max) return;
-    go_results[go_result_count] = .{ .kind = kind, .idx = idx, .rank = rank, .pinned = pinned };
+    go_results[go_result_count] = .{ .kind = kind, .idx = idx, .id = id, .rank = rank, .pinned = pinned };
     go_result_count += 1;
 }
 
@@ -1027,10 +1033,10 @@ pub fn go_refresh() void {
     go_result_count = 0;
     const q = go_query[0..go_query_len];
     for (0..manager.tab_count) |i| {
-        if (go_rank_tab(i, q)) |r| go_push(go_kind_tab, i, r, manager.tabs[i].pinned);
+        if (go_rank_tab(i, q)) |r| go_push(go_kind_tab, i, r, manager.tabs[i].pinned, manager.tabs[i].id);
     }
     for (0..overlay_count) |e| {
-        if (go_rank_app(e, q)) |r| go_push(go_kind_app, e, r, overlay_dock[e]);
+        if (go_rank_app(e, q)) |r| go_push(go_kind_app, e, r, overlay_dock[e], 0);
     }
     var i: usize = 1;
     while (i < go_result_count) : (i += 1) {
@@ -1139,13 +1145,13 @@ pub fn go_activate() bool {
     if (go_result_count == 0) return false;
     const r = go_results[go_sel];
     if (r.kind == go_kind_tab) {
-        if (r.idx >= manager.tab_count or !manager.tabs[r.idx].valid) {
+        const idx = manager.find_by_id(r.id) orelse {
             write_marker(go_miss_marker);
             go_refresh();
             return false;
-        }
-        const id = manager.tabs[r.idx].id;
-        activate_tab(r.idx);
+        };
+        const id = manager.tabs[idx].id;
+        activate_tab(idx);
         var buf: [64]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "{s}{d}\n", .{ go_pick_tab_marker, id }) catch "tabwm: go-pick\n";
         write_marker(msg);
@@ -1250,7 +1256,7 @@ pub fn go_click(px: u32, py: u32) bool {
     const first = go_panel_y + go_rows_y;
     if (py >= first) {
         const r = (py - first) / go_row_h;
-        if (r < go_result_count) {
+        if (r < go_result_count and r < go_max_results) {
             go_sel = r;
             _ = go_activate();
         }
@@ -1650,29 +1656,27 @@ pub const TabManager = struct {
     /// Stable-partition pinned tabs to the front, preserving the relative
     /// order of both halves, and keep the ACTIVE tab on the same tab (by
     /// id). Returns true when the order changed.
-    pub fn normalize_pinned(self: *TabManager) bool {
-        var reordered: [max_tabs]Tab = [_]Tab{.{}} ** max_tabs;
+    pub noinline fn normalize_pinned(self: *TabManager) bool {
         const active_id = self.get_active_id();
         var n: usize = 0;
         for (0..self.tab_count) |i| {
             if (self.tabs[i].pinned) {
-                reordered[n] = self.tabs[i];
+                tab_reorder_scratch[n] = self.tabs[i];
                 n += 1;
             }
         }
         for (0..self.tab_count) |i| {
             if (!self.tabs[i].pinned) {
-                reordered[n] = self.tabs[i];
+                tab_reorder_scratch[n] = self.tabs[i];
                 n += 1;
             }
         }
         var changed = false;
         for (0..self.tab_count) |i| {
-            if (reordered[i].id != self.tabs[i].id) changed = true;
+            if (tab_reorder_scratch[i].id != self.tabs[i].id) changed = true;
         }
         if (!changed) return false;
-        self.tabs = reordered;
-        self.tab_count = n;
+        commit_tab_scratch(self, n);
         if (active_id) |id| self.active_idx = self.find_by_id(id);
         return true;
     }
@@ -1684,6 +1688,22 @@ pub const TabManager = struct {
 pub var manager: TabManager = TabManager{};
 var scanout_ptr: ?[*]u32 = null;
 var scanout_mapped: bool = false;
+
+/// EL0 stack is 32 KiB (`scheduler.task_stack_size`). A `[max_tabs]Tab`
+/// scratch is ~8 KiB; LLVM inlines `normalize_pinned` and the persist-apply
+/// paths into `handle_window_mirror` → `main`, so a stack copy of that array
+/// (plus a by-value `TabsStateV2`) overflows. The title slice in
+/// `add_or_update_tab_geom` then becomes a NULL memcpy source and TABWM
+/// takes an EL0 data abort (`live-tabwm-fullscreen` run B). One BSS scratch,
+/// reused serially from the event loop — never live on two call frames.
+var tab_reorder_scratch: [max_tabs]Tab = [_]Tab{.{}} ** max_tabs;
+
+fn commit_tab_scratch(self: *TabManager, n: usize) void {
+    var i: usize = 0;
+    while (i < n) : (i += 1) self.tabs[i] = tab_reorder_scratch[i];
+    while (i < max_tabs) : (i += 1) self.tabs[i] = .{};
+    self.tab_count = n;
+}
 
 pub var hover_tab: ?usize = null;
 pub var hover_sexiburger: bool = false;
@@ -1961,28 +1981,30 @@ pub var persisted_tabs: ?TabsState = null;
 var last_saved_tabs: [tabs_v2_max_bytes]u8 = undefined;
 var last_saved_tabs_len: usize = 0;
 var have_last_saved_tabs: bool = false;
+/// Shared I/O buffer for `.tabs` load/save — must not live on the EL0 stack.
+var tabs_io_buf: [tabs_v2_max_bytes]u8 = undefined;
 
 /// Read `.tabs` from the host share once at startup. A no-op on the host
 /// and when the file is absent (the honest no-persistence fallback).
-pub fn load_tabs() void {
+pub noinline fn load_tabs() void {
     if (@import("builtin").os.tag != .freestanding) return;
-    var buf: [tabs_v2_max_bytes]u8 = undefined;
     const fd = ui.file_open(tabs_state_file, ui.MODE_READ);
     if (fd < 0) return;
     defer ui.file_close(@intCast(fd));
-    const n = ui.file_read(@intCast(fd), &buf);
+    const n = ui.file_read(@intCast(fd), &tabs_io_buf);
     if (n <= 0) return;
-    const bytes = buf[0..@intCast(n)];
+    const bytes = tabs_io_buf[0..@intCast(n)];
     // TWM: v2 first; a v1 file falls through to the v1 parser, so an
     // existing install is never stranded by the format bump.
     if (bytes.len > 0 and bytes[0] == tabs_state_version_v2) {
-        var st2: TabsStateV2 = .{};
-        if (parse_tabs_v2(bytes, &st2)) {
-            persisted_tabs_v2 = st2;
-            tabs_seq = st2.seq;
+        persisted_tabs_v2 = .{};
+        if (parse_tabs_v2(bytes, &persisted_tabs_v2.?)) {
+            tabs_seq = persisted_tabs_v2.?.seq;
             var b: [48]u8 = undefined;
-            const msg = std.fmt.bufPrint(&b, "tabwm: tabs-restored v2 count={d}\n", .{st2.count}) catch "tabwm: tabs-restored v2\n";
+            const msg = std.fmt.bufPrint(&b, "tabwm: tabs-restored v2 count={d}\n", .{persisted_tabs_v2.?.count}) catch "tabwm: tabs-restored v2\n";
             write_marker(msg);
+        } else {
+            persisted_tabs_v2 = null;
         }
         return;
     }
@@ -1998,18 +2020,17 @@ pub fn load_tabs() void {
 /// Write the current tab list to `.tabs` when it differs from the last
 /// write (the kernel's WINDOWS.SAV dedup discipline — a stable desktop
 /// must not hammer the transport). A no-op on the host.
-pub fn save_tabs() void {
+pub noinline fn save_tabs() void {
     if (@import("builtin").os.tag != .freestanding) return;
     // TWM: v2 is the writer now — the v1 serializer stays for back-compat
     // and for the migration test.
-    var buf: [tabs_v2_max_bytes]u8 = undefined;
-    const n = serialize_tabs_v2(&buf);
-    if (n == 0) return;
-    if (have_last_saved_tabs and last_saved_tabs_len == n and std.mem.eql(u8, last_saved_tabs[0..n], buf[0..n])) return;
+    const written_n = serialize_tabs_v2(&tabs_io_buf);
+    if (written_n == 0) return;
+    if (have_last_saved_tabs and last_saved_tabs_len == written_n and std.mem.eql(u8, last_saved_tabs[0..written_n], tabs_io_buf[0..written_n])) return;
     // A real write: stamp it so a restored state can be told from a stale one.
     tabs_seq +%= 1;
-    buf[3] = @intCast(tabs_seq & 0xff);
-    buf[4] = @intCast((tabs_seq >> 8) & 0xff);
+    tabs_io_buf[3] = @intCast(tabs_seq & 0xff);
+    tabs_io_buf[4] = @intCast((tabs_seq >> 8) & 0xff);
     const fd_trunc = ui.file_open(tabs_state_file, ui.MODE_WRITE);
     if (fd_trunc >= 0) {
         _ = ui.file_truncate(@as(u32, @intCast(fd_trunc)), 0);
@@ -2018,11 +2039,11 @@ pub fn save_tabs() void {
     const fd = ui.file_open(tabs_state_file, ui.MODE_WRITE | ui.MODE_CREATE);
     if (fd < 0) return;
     const handle = @as(u32, @intCast(fd));
-    const written = ui.file_write(handle, buf[0..n]);
+    const written = ui.file_write(handle, tabs_io_buf[0..written_n]);
     ui.file_close(handle);
     if (written >= 0) {
-        @memcpy(last_saved_tabs[0..n], buf[0..n]);
-        last_saved_tabs_len = n;
+        @memcpy(last_saved_tabs[0..written_n], tabs_io_buf[0..written_n]);
+        last_saved_tabs_len = written_n;
         have_last_saved_tabs = true;
     }
 }
@@ -2031,12 +2052,11 @@ pub fn save_tabs() void {
 /// complete (the live tab count first reaches the saved count). Matches by
 /// title; unknown titles append in arrival order. Applies once; returns true
 /// when it ran (so the caller can re-activate the restored active tab).
-pub fn maybe_apply_persisted_tabs() bool {
+pub noinline fn maybe_apply_persisted_tabs() bool {
     // TWM: a v2 record may be pending instead of the v1 one.
     if (persisted_tabs_v2 != null) return maybe_apply_persisted_tabs_v2();
-    const st = persisted_tabs orelse return false;
+    const st = if (persisted_tabs) |*s| s else return false;
     if (manager.tab_count != st.count) return false;
-    var reordered: [max_tabs]Tab = [_]Tab{.{}} ** max_tabs;
     var used = [_]bool{false} ** max_tabs;
     var n: usize = 0;
     for (0..st.count) |pi| {
@@ -2044,7 +2064,7 @@ pub fn maybe_apply_persisted_tabs() bool {
         for (0..manager.tab_count) |ti| {
             if (used[ti]) continue;
             if (std.mem.eql(u8, manager.tabs[ti].get_title(), want)) {
-                reordered[n] = manager.tabs[ti];
+                tab_reorder_scratch[n] = manager.tabs[ti];
                 used[ti] = true;
                 n += 1;
                 break;
@@ -2053,13 +2073,12 @@ pub fn maybe_apply_persisted_tabs() bool {
     }
     for (0..manager.tab_count) |ti| {
         if (!used[ti]) {
-            reordered[n] = manager.tabs[ti];
+            tab_reorder_scratch[n] = manager.tabs[ti];
             n += 1;
         }
     }
     const old_active_id = manager.get_active_id();
-    manager.tabs = reordered;
-    manager.tab_count = n;
+    commit_tab_scratch(&manager, n);
     if (old_active_id) |id| manager.active_idx = manager.find_by_id(id);
     if (st.active) |pa| {
         if (pa < manager.tab_count) manager.active_idx = pa;
@@ -2103,6 +2122,9 @@ pub var tablog_line_lens: [tablog_ring]usize = [_]usize{0} ** tablog_ring;
 var tablog_head: usize = 0;
 var tablog_count: usize = 0;
 var tablog_last_flush_seq: u32 = 0;
+/// Flush buffer for `.tablog` — kept off the EL0 stack (same reason as
+/// `tabs_io_buf`).
+var tablog_io_buf: [tablog_max_bytes]u8 = undefined;
 
 /// The stable name for an event code ("switch", "close", "go", ...).
 pub fn tablog_code_name(code: u8) []const u8 {
@@ -2124,9 +2146,17 @@ pub fn tablog_code_name(code: u8) []const u8 {
 
 /// Format one log line: `<seq> <event> <detail>`. Pure — the ring stores
 /// exactly this string and the reader view prints it verbatim, so a test
-/// that pins the formatter pins the file too.
+/// that pins the formatter pins the file too. A detail that would overflow
+/// `buf` is truncated rather than degrading the whole line to `0 ? ?`.
 pub fn tablog_format(seq: u32, code: u8, detail: []const u8, buf: []u8) []const u8 {
-    return std.fmt.bufPrint(buf, "{d} {s} {s}", .{ seq, tablog_code_name(code), detail }) catch "0 ? ?";
+    const name = tablog_code_name(code);
+    var pre: [24]u8 = undefined;
+    const prefix = std.fmt.bufPrint(&pre, "{d} {s} ", .{ seq, name }) catch return "0 ? ?";
+    if (prefix.len >= buf.len) return "0 ? ?";
+    @memcpy(buf[0..prefix.len], prefix);
+    const n = @min(detail.len, buf.len - prefix.len);
+    if (n > 0) @memcpy(buf[prefix.len .. prefix.len + n], detail[0..n]);
+    return buf[0 .. prefix.len + n];
 }
 
 /// Record one tab-state change. Bounded ring: after `tablog_ring` events the
@@ -2161,18 +2191,17 @@ pub fn tablog_view(k: usize) ?[]const u8 {
 /// Flush the whole ring to the host share (truncate + write), oldest first.
 /// A sequence-stamp dedup keeps an unchanged ring off the transport. A
 /// no-op on the host.
-pub fn tablog_flush() void {
+pub noinline fn tablog_flush() void {
     if (@import("builtin").os.tag != .freestanding) return;
     if (tablog_seq == tablog_last_flush_seq) return;
-    var buf: [tablog_max_bytes]u8 = undefined;
     var off: usize = 0;
     var k: usize = 0;
     while (k < tablog_count) : (k += 1) {
         const line = tablog_view(k) orelse continue;
-        if (off + line.len + 1 > buf.len) break;
-        @memcpy(buf[off .. off + line.len], line);
+        if (off + line.len + 1 > tablog_io_buf.len) break;
+        @memcpy(tablog_io_buf[off .. off + line.len], line);
         off += line.len;
-        buf[off] = '\n';
+        tablog_io_buf[off] = '\n';
         off += 1;
     }
     const fd_trunc = ui.file_open(tablog_file, ui.MODE_WRITE);
@@ -2183,7 +2212,7 @@ pub fn tablog_flush() void {
     const fd = ui.file_open(tablog_file, ui.MODE_WRITE | ui.MODE_CREATE);
     if (fd < 0) return;
     const handle = @as(u32, @intCast(fd));
-    const written = ui.file_write(handle, buf[0..off]);
+    const written = ui.file_write(handle, tablog_io_buf[0..off]);
     ui.file_close(handle);
     if (written >= 0) tablog_last_flush_seq = tablog_seq;
 }
@@ -2278,33 +2307,34 @@ fn tab_read_fixed(src: []const u8, out: []u8) usize {
 
 /// Decode a v2 buffer into `out`. False on a non-v2 version byte, a bad
 /// count, an out-of-range active index, or a truncated record. Pure.
-pub fn parse_tabs_v2(buf: []const u8, out: *TabsStateV2) bool {
+/// Writes through `out` — never a by-value `TabsStateV2` on the stack.
+pub noinline fn parse_tabs_v2(buf: []const u8, out: *TabsStateV2) bool {
     if (buf.len < tabs_v2_header_bytes) return false;
     if (buf[0] != tabs_state_version_v2) return false;
     const act_plus1 = buf[1];
     const count: usize = buf[2];
     if (count > max_tabs) return false;
     if (buf.len < tabs_v2_header_bytes + count * tabs_v2_record_bytes) return false;
-    var st = TabsStateV2{};
-    st.count = count;
-    st.seq = @as(u16, buf[3]) | (@as(u16, buf[4]) << 8);
-    st.prefs = buf[5];
-    st.active = if (act_plus1 == 0) null else @as(usize, act_plus1 - 1);
-    if (st.active) |a| {
+    const active: ?usize = if (act_plus1 == 0) null else @as(usize, act_plus1 - 1);
+    if (active) |a| {
         if (a >= count) return false;
     }
+    out.* = .{};
+    out.count = count;
+    out.seq = @as(u16, buf[3]) | (@as(u16, buf[4]) << 8);
+    out.prefs = buf[5];
+    out.active = active;
     var off: usize = tabs_v2_header_bytes;
     for (0..count) |i| {
-        st.title_lens[i] = tab_read_fixed(buf[off .. off + persist_title_max], &st.titles[i]);
+        out.title_lens[i] = tab_read_fixed(buf[off .. off + persist_title_max], &out.titles[i]);
         off += persist_title_max;
-        st.flags[i] = buf[off];
+        out.flags[i] = buf[off];
         off += 1;
-        st.group_lens[i] = tab_read_fixed(buf[off .. off + persist_group_max], &st.groups[i]);
+        out.group_lens[i] = tab_read_fixed(buf[off .. off + persist_group_max], &out.groups[i]);
         off += persist_group_max;
-        st.bin_lens[i] = tab_read_fixed(buf[off .. off + persist_bin_max], &st.bins[i]);
+        out.bin_lens[i] = tab_read_fixed(buf[off .. off + persist_bin_max], &out.bins[i]);
         off += persist_bin_max;
     }
-    out.* = st;
     return true;
 }
 
@@ -2315,8 +2345,8 @@ pub var persisted_tabs_v2: ?TabsStateV2 = null;
 /// pinned/frozen/group/bin fields per matched record, then reorder into the
 /// stored order (the v1 rule) and restore the active index. Applies exactly
 /// once. Pure over the manager + the state record.
-pub fn maybe_apply_persisted_tabs_v2() bool {
-    const st = persisted_tabs_v2 orelse return false;
+pub noinline fn maybe_apply_persisted_tabs_v2() bool {
+    const st = if (persisted_tabs_v2) |*s| s else return false;
     if (manager.tab_count != st.count) return false;
     for (0..manager.tab_count) |ti| {
         const title = manager.tabs[ti].get_title();
@@ -2336,7 +2366,6 @@ pub fn maybe_apply_persisted_tabs_v2() bool {
             break;
         }
     }
-    var reordered: [max_tabs]Tab = [_]Tab{.{}} ** max_tabs;
     var used = [_]bool{false} ** max_tabs;
     var n: usize = 0;
     for (0..st.count) |pi| {
@@ -2344,7 +2373,7 @@ pub fn maybe_apply_persisted_tabs_v2() bool {
         for (0..manager.tab_count) |ti| {
             if (used[ti]) continue;
             if (std.mem.eql(u8, manager.tabs[ti].get_title(), want)) {
-                reordered[n] = manager.tabs[ti];
+                tab_reorder_scratch[n] = manager.tabs[ti];
                 used[ti] = true;
                 n += 1;
                 break;
@@ -2353,13 +2382,12 @@ pub fn maybe_apply_persisted_tabs_v2() bool {
     }
     for (0..manager.tab_count) |ti| {
         if (!used[ti]) {
-            reordered[n] = manager.tabs[ti];
+            tab_reorder_scratch[n] = manager.tabs[ti];
             n += 1;
         }
     }
     const old_active_id = manager.get_active_id();
-    manager.tabs = reordered;
-    manager.tab_count = n;
+    commit_tab_scratch(&manager, n);
     if (old_active_id) |id| manager.active_idx = manager.find_by_id(id);
     if (st.active) |pa| {
         if (pa < manager.tab_count) manager.active_idx = pa;
@@ -3435,7 +3463,7 @@ pub fn draw_go(pixels: []u32) void {
     var r: usize = 0;
     while (r < go_result_count) : (r += 1) {
         const ry = py + go_rows_y + @as(u32, @intCast(r)) * go_row_h;
-        if (ry + go_row_h > py + ph - 26) break;
+        if (ry + go_row_h > py + ph - go_panel_footer) break;
         const is_sel = (r == go_sel);
         if (is_sel) {
             ui.fill_rounded_rect_buf(pixels, fb_w, fb_h, Rect.make(px + 10, ry - 3, pw - 20, 20), 5, ui.theme_accent());
@@ -6030,11 +6058,12 @@ test "tabwm: go activate on a closed target is a safe no-op (TWM/GO6)" {
     resetForTest();
     _ = manager.add_or_update_tab(2, "A");
     _ = manager.add_or_update_tab(3, "B");
+    _ = manager.add_or_update_tab(4, "C");
     overlay_loaded = true;
     go_summon();
     go_sel = 1;
-    try std.testing.expectEqual(@as(usize, 1), go_results[go_sel].idx);
-    // The tab is closed behind the panel's back.
+    try std.testing.expectEqual(@as(u32, 3), go_results[go_sel].id);
+    // Close B: index 1 is now C (id=4). An index+valid check would activate C.
     _ = manager.remove_tab(3);
     try std.testing.expect(!go_activate());
     try std.testing.expect(go_is_open());
@@ -6054,6 +6083,13 @@ test "tabwm: Go rail chip and chord are wired (TWM/GO7)" {
     try std.testing.expectEqualStrings("tabwm: go-miss\n", go_miss_marker);
     try std.testing.expectEqualStrings("tabwm: go-pick ", go_pick_tab_marker);
     try std.testing.expectEqualStrings("tabwm: go-launch ", go_launch_marker);
+}
+
+test "tabwm: go panel draws every selectable row (TWM/GO8)" {
+    try std.testing.expectEqual(@as(usize, 11), go_max_results);
+    const last_row_bottom = go_panel_y + go_rows_y + @as(u32, @intCast(go_max_results)) * go_row_h;
+    try std.testing.expect(last_row_bottom <= go_panel_y + go_panel_h - go_panel_footer);
+    try std.testing.expectEqual(max_tabs + overlay_max_apps, go_scan_max);
 }
 
 test "tabwm: .tabs v2 round-trips pinned, frozen, group, and bin (TWM/ST1)" {
@@ -6194,4 +6230,21 @@ test "tabwm: tab actions record into the change log (TWM/LOG2)" {
         try std.testing.expect(seen);
     }
     try std.testing.expectEqualStrings("switch tab 3", tablog_view(0).?[2..]);
+}
+
+test "tabwm: tablog formatter truncates a long detail rather than degrading (TWM/LOG3)" {
+    var buf: [tablog_line_max]u8 = undefined;
+    const line = tablog_format(1, tablog_code_launch, "THIS_IS_A_VERY_LONG_EXECUTABLE_NAME.BIN", &buf);
+    try std.testing.expect(line.len <= tablog_line_max);
+    try std.testing.expect(std.mem.startsWith(u8, line, "1 launch "));
+    try std.testing.expect(!std.mem.eql(u8, line, "0 ? ?"));
+}
+
+test "tabwm: Tab[max_tabs] reorder scratch lives in BSS (TWM/ST5)" {
+    // One [max_tabs]Tab is ~6.5 KiB. LLVM inlines normalize_pinned plus the
+    // v1 and v2 persist-apply paths into main; three of those plus a
+    // by-value TabsStateV2 blow the 32 KiB EL0 stack. The scratch is BSS.
+    const reorder = @sizeOf(Tab) * max_tabs;
+    try std.testing.expectEqual(reorder, @sizeOf(@TypeOf(tab_reorder_scratch)));
+    try std.testing.expect(reorder * 3 + @sizeOf(TabsStateV2) > 16 * 1024);
 }
