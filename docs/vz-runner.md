@@ -2,19 +2,30 @@
 
 The `VZ hardware gates` workflow (`.github/workflows/vz-gates.yml`) runs
 the class-B gates — each boots the production image under
-Virtualization.framework and asserts observed guest behavior. GitHub has
-no hosted macOS 27 image yet (hosted tops out at macOS 26; see the
-workflow header), so these gates run on a **self-hosted Apple silicon
-macOS 27+ runner**. Until one is registered, the workflow reports
-SKIPPED on every PR and push — wired but not enforcing.
+Virtualization.framework and asserts observed guest behavior. They run on
+a **self-hosted Apple silicon macOS 27+ runner**.
 
-> **Status (2026-09-03):** the `vz-macos27-m4` runner was intentionally
-> decommissioned and the `VZ_RUNNER_LABEL` variable unset — the workflow
-> honestly reports SKIPPED until a runner is re-registered using the
-> steps below.
+> **Status (2026-09-14):** no runner is registered (`gh api
+> repos/<owner>/<repo>/actions/runners` → `total_count: 0`) and
+> `VZ_RUNNER_LABEL` is unset, so the workflow skips every gate. It no
+> longer reports that as OK: the aggregate prints **NOT ENFORCED (0 of
+> 226 class-B gates ran)**, annotates every run, and writes the reason
+> into the run summary. A green required check with nothing to fail on is
+> how the class-B fleet went unrun — and `live-sched-ring` stayed red —
+> for weeks. The `vz-macos27-m4` runner was decommissioned 2026-09-03.
 
 ## Why self-hosted
 
+- **GitHub-hosted runners cannot run class B at all, at any macOS
+  version.** Hypervisor.framework is unavailable on them
+  ([actions/runner-images#13505](https://github.com/actions/runner-images/issues/13505),
+  closed as not planned; its repro asserts `sysctl -n kern.hv_support`
+  returns 1, and it fails on those runners), so
+  Virtualization.framework cannot boot a guest there.
+  This is the durable reason — it does not expire when GitHub ships a
+  newer image. (The `xcode-27` hosted image has run macOS 27 itself since
+  2026-09-10, and still boots no VM: `ci.yml` uses it to compile against
+  the macOS 27 SDK, nothing more.)
 - Gates must observe real VZ hardware behavior; the project's evidence
   rules forbid a check that only pretends (`ci.yml` proves class A only).
 - The macOS 27 floor is a documented contract
@@ -69,10 +80,13 @@ controls enforce that:
 
 Once `VZ_RUNNER_LABEL` is set:
 
-- Every PR targeting main gets four shard jobs (~16 class-B gates each,
-  ~4 min total locally) plus the aggregate **VZ hardware gates**
-  context, which branch protection requires alongside the existing
-  class-A checks.
+- Every PR targeting main gets four shard jobs (the 226-member fleet
+  split ~57/57/56/56) plus the aggregate **VZ hardware gates** context,
+  which branch protection requires alongside the existing class-A
+  checks.
+- A nightly sweep (`schedule: 0 7 * * *`) re-runs the whole fleet on its
+  own cadence, so drift that no PR happens to provoke still surfaces
+  without waiting for someone to edit the repo.
 - Gate logs upload as workflow artifacts (`artifacts/vz-ci/<gate>.log`)
   with 14-day retention for post-mortems.
 - A wedged boot cannot hang CI: each gate has a 600s watchdog kill.
