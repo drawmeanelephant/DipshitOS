@@ -157,7 +157,7 @@ fn checkNameConstraints(leaf: *const x509.Cert, ca: *const x509.Cert) bool {
 pub fn validate(
     leaf_der: []const u8,
     intermediates: []const []const u8,
-    store: *const trust_store.TrustStore,
+    store: anytype,
     host: []const u8,
     now: i64,
 ) Result {
@@ -177,10 +177,16 @@ pub fn validate(
     path[0] = leaf;
     var n: usize = 1;
     var current: x509.Cert = leaf;
+    // The path is only acceptable if it terminates at a configured trust
+    // anchor. Without this, a self-issued certificate that the server also
+    // sends as its own "chain" matches itself as its issuer and the walk
+    // never has to reach a root at all.
+    var reached_anchor = false;
     while (n < max_path) {
         if (store.findIssuer(current.issuer_raw)) |root| {
             path[n] = root.*;
             n += 1;
+            reached_anchor = true;
             break;
         }
         var found = false;
@@ -195,6 +201,7 @@ pub fn validate(
         }
         if (!found) return .no_path_to_root;
     }
+    if (!reached_anchor) return .no_path_to_root;
 
     // --- per-step checks, leaf (0) through the cert below the root ---
     var i: usize = 0;
@@ -243,7 +250,7 @@ fn fixture(name: []const u8) []const u8 {
     return vectors.byName(name).der_hex;
 }
 
-fn validateNamed(store: *const trust_store.TrustStore, leaf: []const u8, inters: []const []const u8, host: []const u8, now: i64) Result {
+fn validateNamed(store: anytype, leaf: []const u8, inters: []const []const u8, host: []const u8, now: i64) Result {
     var derbuf: [8192]u8 = undefined;
     const leaf_der = hexToBytes(&derbuf, leaf);
     var ibuf: [4][8192]u8 = undefined;
@@ -326,6 +333,16 @@ test "validate: name constraints are enforced on the leaf's DNS names" {
     try std.testing.expectEqual(Result.name_constraint_violation, validateNamed(&store, fixture("leaf-ncother"), &.{fixture("ca-nc")}, "other.com", now));
 }
 
+test "validate: a self-issued certificate cannot be its own trust anchor" {
+    // The server may send a self-signed certificate as its own chain. It must
+    // still fail: the walk has to terminate at an anchor in the store, and a
+    // certificate that matches itself never does.
+    var empty = trust_store.TrustStore.init();
+    const now = vectors.byName("root").not_before + 100;
+    try std.testing.expectEqual(Result.no_path_to_root, validateNamed(&empty, fixture("root"), &.{fixture("root")}, "anything.example.com", now));
+    try std.testing.expectEqual(Result.no_path_to_root, validateNamed(&empty, fixture("leaf-ec"), &.{fixture("leaf-ec")}, "leaf.example.com", now));
+}
+
 test "validate: trust store mutation is reflected immediately" {
     var store = trust_store.TrustStore.init();
     var rb: [8192]u8 = undefined;
@@ -340,5 +357,5 @@ test "validate: trust store mutation is reflected immediately" {
     try std.testing.expectEqual(Result.no_path_to_root, validateNamed(&store, fixture("leaf-ec"), &.{fixture("inter")}, "leaf.example.com", now));
 
     // A non-CA root is refused at injection.
-    try std.testing.expectError(trust_store.Error.BadRoot, store.addRoot(hexToBytes(&rb, fixture("leaf-ec"))));
+    try std.testing.expectError(trust_store.TrustStore.Error.BadRoot, store.addRoot(hexToBytes(&rb, fixture("leaf-ec"))));
 }
