@@ -72,6 +72,7 @@ any, are on the GitHub tracker.
 | 50 | Trust & isolation | uid/caps, permissions, secrets, authenticated remote, privilege gating; ADR 0024 | ✅ 2026-09-11 |
 | 51 | SSH | Userland SSH-2 client `SSH.BIN`; real-OpenSSH interop; ADR 0025 | ✅ 2026-09-12 |
 | 52 | Client-death hardening | Exit/revoke teardown pinned end-to-end: a client dying with focus, a drag, or a bound surface leaves no zombie window, stale mapping, stuck capture, or dead-seat routing (umbrella #1237) | ✅ 2026-09-14 |
+| 53 | TLS 1.3 client + trust store | In-tree TLS 1.3 end to end: HKDF/SHA-384/AES-GCM, X.509 + chain validation, RSA/ECDSA verification, the handshake state machine; real interop against 4 peer implementations and 8 public endpoints, 5 negatives fail closed; ADR 0029 | ✅ 2026-09-14 |
 
 > M40 (the gate-fleet consolidation, issue #934, done 2026-09-06) was a tooling
 > workstream, not a product milestone; M36 was skipped.

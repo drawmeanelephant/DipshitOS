@@ -2393,7 +2393,7 @@ pub fn build(b: *std.Build) void {
     // ------------------------------------------------------------------
     const test_step = b.step("test", "Run host-side unit tests in parallel (M41 TS1)");
 
-    const unit_test_sources = [_][]const u8{
+    const core_test_sources = [_][]const u8{
         "boot/src/efi_time.zig",
         "kernel/src/alloc.zig",
         "kernel/src/app_timers.zig",
@@ -2469,28 +2469,8 @@ pub fn build(b: *std.Build) void {
         "user/src/lib/ssh/transport.zig",
         "user/src/lib/ssh/channel.zig",
         "user/src/lib/ssh/cli.zig",
-        // TLS 1.3 (RFC 8446) key schedule + record layer. Both roots reach
-        // the crypto library through the module-mapped `crypto` import, so
-        // they need no extra mapping of their own.
-        "user/src/lib/tls/keyschedule.zig",
-        "user/src/lib/tls/record.zig",
         // X.509 layer (card TLS13-C3): the strict DER reader, the certificate
         // parser, PEM decoding and hostname/identity matching. None of these
-        // touch the crypto library, so no extra module mapping is needed.
-        "user/src/lib/tls/der.zig",
-        "user/src/lib/tls/pem.zig",
-        "user/src/lib/tls/x509.zig",
-        "user/src/lib/tls/identity.zig",
-        // RSA + ECDSA verification (card TLS13-C2): fixed-capacity bigint,
-        // RSASSA-PKCS1-v1_5 and RSASSA-PSS, ECDSA over P-256/P-384. rsa.zig
-        // and ecdsa.zig reach the crypto library through the mapped `crypto`
-        // import, so no extra mapping is needed here either.
-        "user/src/lib/tls/bigint.zig",
-        "user/src/lib/tls/rsa.zig",
-        "user/src/lib/tls/ecdsa.zig",
-        // Chain validation + trust store (card TLS13-C4).
-        "user/src/lib/tls/trust_store.zig",
-        "user/src/lib/tls/validate.zig",
         "user/tests/ui/ui_test.zig",
         "kernel/tests/scheduler_test.zig",
         "kernel/tests/syscall_test.zig",
@@ -2593,6 +2573,39 @@ pub fn build(b: *std.Build) void {
         .optimize = .Debug,
     });
     driving_award_mod.addOptions("build_options", kernel_options);
+
+
+    // TLS 1.3 client (ADR 0029 D8). The library is not yet linked into any
+    // guest binary, so this flag is the entire rollback surface: with
+    // -Dtls_client=false the TLS roots are not built or tested and every other
+    // gate is unaffected.
+    const tls_client_enabled = b.option(bool, "tls_client", "Build and test the in-tree TLS 1.3 client") orelse true;
+    const tls_test_sources = [_][]const u8{
+        "user/src/lib/tls/keyschedule.zig",
+        "user/src/lib/tls/record.zig",
+        "user/src/lib/tls/der.zig",
+        "user/src/lib/tls/pem.zig",
+        "user/src/lib/tls/x509.zig",
+        "user/src/lib/tls/identity.zig",
+        "user/src/lib/tls/bigint.zig",
+        "user/src/lib/tls/rsa.zig",
+        "user/src/lib/tls/ecdsa.zig",
+        "user/src/lib/tls/trust_store.zig",
+        "user/src/lib/tls/validate.zig",
+    };
+    var test_source_buf: [core_test_sources.len + tls_test_sources.len][]const u8 = undefined;
+    var test_source_len: usize = 0;
+    for (core_test_sources) |s| {
+        test_source_buf[test_source_len] = s;
+        test_source_len += 1;
+    }
+    if (tls_client_enabled) {
+        for (tls_test_sources) |s| {
+            test_source_buf[test_source_len] = s;
+            test_source_len += 1;
+        }
+    }
+    const unit_test_sources = test_source_buf[0..test_source_len];
 
     for (unit_test_sources) |src_path| {
         const test_mod = b.createModule(.{
