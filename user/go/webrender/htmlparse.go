@@ -90,7 +90,7 @@ func BlockElement(tag string) bool {
 	switch tag {
 	case "html", "body", "div", "p", "h1", "h2", "h3", "h4", "h5", "h6",
 		"ul", "ol", "li", "pre", "blockquote", "hr", "table", "thead", "tbody",
-		"tr", "td", "th", "dl", "dt", "dd", "section", "article", "header",
+		"tr", "td", "th", "dl", "dt", "dd", "img", "section", "article", "header",
 		"footer", "main", "nav", "aside", "figure", "figcaption", "form", "center":
 		return true
 	}

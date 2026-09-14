@@ -77,6 +77,8 @@ const (
 	markerBookmark  = "web: bookmark "
 	markerCleared   = "web: cleared "
 	markerDownload  = "web: download "
+	markerBudget    = "web: budget "
+	markerOver      = "web: budget over "
 	markerSettled   = "web: settled"
 	markerQuit      = "web: quit"
 )
@@ -150,6 +152,17 @@ type app struct {
 	settled  bool
 	loading  bool
 	lastBody []byte
+
+	// Budget instrumentation. The numbers are printed with the first frame
+	// and asserted by the gate; the budgets themselves are stated below.
+	tStart   int64 // main() entry
+	tNav0    int64 // navigate() entered
+	tBody    int64 // body ready (or the error decided)
+	tParse   int64
+	tLayout  int64
+	tPaint   int64
+	tSettled int64 // first frame published
+	over     string
 	loadFrom string
 	loadURL  webrender.URL
 	loadBuf  []byte
@@ -172,7 +185,24 @@ func (v virender) Fill(x, y, w, h int, rgb uint32) {
 	v.f.Rect(v.win, uint32(x), uint32(y), uint32(w), uint32(h), rgb)
 }
 
+// Budgets for this machine (Apple silicon host, VZ, software raster, one
+// vCPU pair). They are deliberately loose: they exist to catch a structural
+// regression (an accidental O(n^2), a fetch on the render path), not to
+// micro-benchmark.
+const (
+	// budgetStartupMs is "cold start to a published frame" for a page that is
+	// already on the share — the only path where the browser owns the whole
+	// delay. A network page also waits on the peer, and that wait is reported
+	// separately (wait-ms) and never counted as browser cost.
+	budgetStartupMs = 1500
+	budgetRenderMs  = 400 // parse + layout + paint of a page
+	budgetParseMs   = 120
+	budgetLayoutMs  = 120
+	budgetPaintMs   = 250
+)
+
 func main() {
+	t0 := vi.Nanos()
 	args := vi.Args()
 	target := ""
 	if len(args) > 1 {
@@ -184,7 +214,7 @@ func main() {
 		vi.ConsoleLine("web: error window")
 		vi.Exit(2)
 	}
-	a := &app{win: id, hist: newHistory()}
+	a := &app{win: id, hist: newHistory(), tStart: t0}
 	vi.ConsoleLine(markerOpen + itoa(id))
 	// The store inventory is read from disk at boot: it is how the gate sees
 	// that a previous run's rows persisted.
@@ -227,9 +257,67 @@ func (a *app) settleIfNeeded() {
 		return
 	}
 	a.render()
+	a.tSettled = vi.Nanos() // absolute; reportBudget takes the deltas
 	vi.ConsoleLine(markerSettled)
+	a.reportBudget()
 	a.settleRepaint()
 	a.settled = true
+}
+
+// reportBudget prints the measured first-frame cost and flags any stage that
+// exceeded its stated budget. The gate asserts the line exists and that no
+// `web: budget over` line appears, so a regression fails the run.
+func (a *app) reportBudget() {
+	ms := func(ns int64) string { return itoa(int(ns / 1000000)) }
+	wait := a.tBody - a.tNav0
+	startup := a.tNav0 - a.tStart
+	render := a.tParse + a.tLayout + a.tPaint
+	settle := a.tSettled - a.tStart
+	// A missing or non-monotonic timestamp means the instrumentation is
+	// broken: say so out loud instead of clamping to a flattering zero. The
+	// gate asserts `web: budget over` is absent, so this fails the run.
+	switch {
+	case a.tNav0 == 0 || a.tBody == 0 || a.tSettled == 0:
+		a.over = "invalid"
+		vi.ConsoleLine(markerOver + "invalid missing-timestamp")
+	case wait < 0 || startup < 0 || settle < 0 || render < 0:
+		a.over = "invalid"
+		vi.ConsoleLine(markerOver + "invalid non-monotonic")
+	}
+	vi.ConsoleLine(markerBudget +
+		"startup-ms=" + ms(startup) +
+		" wait-ms=" + ms(wait) +
+		" render-ms=" + ms(render) +
+		" settle-ms=" + ms(settle) +
+		" parse-ms=" + ms(a.tParse) +
+		" layout-ms=" + ms(a.tLayout) +
+		" paint-ms=" + ms(a.tPaint))
+
+	checks := []struct {
+		name  string
+		ms    int
+		limit int
+	}{
+		{"startup", int(startup / 1000000), budgetStartupMs},
+		{"render", int(render / 1000000), budgetRenderMs},
+		{"parse", int(a.tParse / 1000000), budgetParseMs},
+		{"layout", int(a.tLayout / 1000000), budgetLayoutMs},
+		{"paint", int(a.tPaint / 1000000), budgetPaintMs},
+	}
+	// settle is only the browser's to own when nothing had to be fetched.
+	if wait == 0 {
+		checks = append(checks, struct {
+			name  string
+			ms    int
+			limit int
+		}{"settle", int(settle / 1000000), budgetStartupMs})
+	}
+	for _, st := range checks {
+		if st.ms > st.limit {
+			a.over = st.name
+			vi.ConsoleLine(markerOver + st.name + " " + itoa(st.ms) + "ms")
+		}
+	}
 }
 
 func (a *app) loop() {
@@ -294,6 +382,7 @@ func (a *app) showStartSurface() {
 }
 
 func (a *app) navigate(target, from string) {
+	a.tNav0 = vi.Nanos()
 	resolved, kind := resolveInput(target)
 	switch kind {
 	case "empty":
@@ -509,6 +598,9 @@ func (a *app) finishError(kind, target, from string) {
 	if a.loading {
 		a.loading = false
 	}
+	if a.tBody == 0 {
+		a.tBody = vi.Nanos()
+	}
 	a.setError(kind, target)
 	a.hist.push(entry{Target: target, Title: a.title})
 	a.persistHistory(target)
@@ -523,8 +615,14 @@ func (a *app) finishError(kind, target, from string) {
 func (a *app) loadBody(body []byte, target string) {
 	a.errKind, a.errMsg = "", ""
 	a.lastBody = body
+	a.tBody = vi.Nanos()
+	t0 := vi.Nanos()
 	a.doc = webrender.ParseHTML(body)
+	t1 := vi.Nanos()
 	a.lay = webrender.LayoutDocument(a.doc, contentW, nil)
+	t2 := vi.Nanos()
+	a.tParse = t1 - t0
+	a.tLayout = t2 - t1
 	a.scroll = 0
 	vi.ConsoleLine(markerParse + itoa(a.doc.Nodes) + " text=" + itoa(a.doc.TextBytes) + " truncated=" + boolStr(a.doc.Truncated))
 	vi.ConsoleLine(markerLayout + itoa(a.lay.Blocks) + " lines=" + itoa(a.lay.Lines) + " h=" + itoa(a.lay.Height))
@@ -771,9 +869,11 @@ func (a *app) render() {
 	f.Rect(a.win, 0, winH-statusH, winW, statusH, webrender.ColorChromeBg)
 	webrender.DrawText(vs, 6, winH-statusH+2, fit(a.statusText(), winW/8-2), 1, false, webrender.ColorMuted, clip)
 
+	t0 := vi.Nanos()
 	processed := f.Flush()
 	a.lastFills = processed
 	vi.WinPresent(a.win)
+	a.tPaint = vi.Nanos() - t0
 	if a.logPaint {
 		vi.ConsoleLine(markerPaint + itoa(itemsOf(a)) + " fills=" + itoa(processed))
 		a.logPaint = false
@@ -840,6 +940,17 @@ func resolveInput(in string) (string, string) {
 	if s == "" {
 		return "", "empty"
 	}
+	// A scheme prefix is recognised before anything else: "javascript:...",
+	// "file:///...", "mailto:..." must be refused as schemes, never rewritten
+	// into a file-channel path (which is where a bare-name rule would send
+	// them).
+	if i := strings.IndexByte(s, ':'); i > 0 && !strings.ContainsAny(s[:i], "/?#:") && isSchemeAlpha(s[:i]) {
+		switch strings.ToLower(s[:i]) {
+		case "http", "https":
+			return s, "http"
+		}
+		return s, "unsupported"
+	}
 	low := strings.ToLower(s)
 	switch {
 	case strings.HasPrefix(low, "http://"), strings.HasPrefix(low, "https://"):
@@ -853,6 +964,20 @@ func resolveInput(in string) (string, string) {
 		return s, "file"
 	}
 	return "/host/" + s, "file"
+}
+
+// isSchemeAlpha reports whether every byte is an RFC 3986 scheme character.
+func isSchemeAlpha(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z':
+		case i > 0 && (c >= '0' && c <= '9' || c == '+' || c == '-' || c == '.'):
+		default:
+			return false
+		}
+	}
+	return s != ""
 }
 
 // relativeTo resolves an href found on a page against the page's own target.

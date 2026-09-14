@@ -33,6 +33,13 @@ func MmapAnon(size int) ([]byte, error) {
 	return unsafe.Slice((*byte)(unsafe.Pointer(uintptr(r))), n), nil
 }
 
+//go:linkname runtimeNanos runtime.nanotime
+func runtimeNanos() int64
+
+// Nanos is the guest monotonic clock in nanoseconds (the runtime's CNTPCT_EL0
+// read: no syscall, no allocation, safe on any path).
+func Nanos() int64 { return runtimeNanos() }
+
 // Args returns the program's arguments (argv[0] is the program name).
 func Args() []string {
 	if runtimeArgs == nil {

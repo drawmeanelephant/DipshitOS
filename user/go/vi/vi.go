@@ -457,3 +457,27 @@ func putU32(b []byte, v uint32) {
 	b[2] = byte(v >> 16)
 	b[3] = byte(v >> 24)
 }
+
+// Itoa64 is the shared decimal formatter for the guest side (the stdlib
+// strconv is not ported to this GOOS).
+func Itoa64(v int64) string {
+	if v == 0 {
+		return "0"
+	}
+	neg := v < 0
+	if neg {
+		v = -v
+	}
+	var buf [24]byte
+	i := len(buf)
+	for v > 0 {
+		i--
+		buf[i] = byte('0' + v%10)
+		v /= 10
+	}
+	if neg {
+		i--
+		buf[i] = '-'
+	}
+	return string(buf[i:])
+}

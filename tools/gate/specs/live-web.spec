@@ -49,6 +49,10 @@ vgate_file script-badurl.txt <<'EOF'
 exec WEB.ELF http://
 EOF
 
+vgate_file script-hostile.txt <<'EOF'
+exec WEB.ELF /host/HOSTILE.HTML
+EOF
+
 vgate_file script-store.txt <<'EOF'
 net ip 10.0.0.1
 net arp 10.0.0.2
@@ -110,7 +114,8 @@ if not os.path.exists(src):
     sys.exit("WEB.ELF missing (expected " + src + ") - build it first: "
              "bash tools/go/build-web.sh browser WEB")
 shutil.copy(src, os.path.join(share, "WEB.ELF"))
-for src_name, dst_name in (("gate-page.html", "PAGE.HTML"), ("gate-next.html", "NEXT.HTML")):
+for src_name, dst_name in (("gate-page.html", "PAGE.HTML"), ("gate-next.html", "NEXT.HTML"),
+                           ("hostile.html", "HOSTILE.HTML")):
     shutil.copy(os.path.join("user", "go", "browser", "testdata", src_name),
                 os.path.join(share, dst_name))
 print("staged WEB.ELF (%d bytes) + PAGE.HTML/NEXT.HTML" %
@@ -132,6 +137,11 @@ vgate_assert 01 serial-contains 'web: parse nodes='
 vgate_assert 01 serial-contains 'web: layout blocks='
 vgate_assert 01 serial-contains 'web: url /host/PAGE.HTML'
 vgate_assert 01 serial-contains 'web: paint items='
+vgate_assert 01 serial-contains 'web: budget startup-ms='
+vgate_assert 01 serial-contains ' wait-ms='
+vgate_assert 01 serial-contains ' render-ms='
+vgate_assert 01 serial-contains ' settle-ms='
+vgate_assert 01 serial-absent 'web: budget over'
 vgate_assert 01 serial-contains 'web: settled'
 vgate_assert 01 serial-contains 'web: repaint items='
 vgate_assert 01 serial-contains 'web: ready'
@@ -238,6 +248,8 @@ vgate_assert 03 serial-contains 'web: paint items='
 vgate_assert 03 serial-contains 'web: settled'
 vgate_assert 03 serial-contains 'web: repaint items='
 vgate_assert 03 serial-contains 'web: ready'
+vgate_assert 03 serial-contains 'web: budget startup-ms='
+vgate_assert 03 serial-absent 'web: budget over'
 vgate_assert 03 serial-absent 'web: error'
 vgate_assert 03 serial-absent 'web: poll err='
 vgate_assert 03 serial-absent '[EXC] parking:'
@@ -467,4 +479,47 @@ n = sum(1 for yy in range(Y + 52, Y + 130)
         if ink(px(xx, yy)))
 assert n >= 40, f"offline copy body ink {n}"
 print(f"live-web 10 offline pixels ok (ink={n})")
+PY
+
+# --- boot 11: a hostile page is inert ------------------------------------
+# The fixture carries a script whose body would fetch a URL and read a local
+# file, an iframe/object/img pointing at the browser's own store files, and
+# javascript:/file: links. This browser has no JavaScript and no way for an
+# element to act on an attribute, so the page must render as text with no
+# request armed, no file read, and no extra syscall path.
+vgate_run 11 -- \
+    --screen '$RUN_DIR/screen' \
+    --via-virtio --cvc-snap \
+    --snapshot-out '$RUN_DIR/snap-11' \
+    --script '$RUN_DIR/script-hostile.txt' \
+    --snapshot-after "web: settled" \
+    --snapshot-after "web: repaint" \
+    --script-expect "web: ready" --timeout 120
+
+vgate_assert 11 serial-contains 'web: parse nodes='
+vgate_assert 11 serial-contains 'web: settled'
+vgate_assert 11 serial-contains 'web: budget startup-ms='
+vgate_assert 11 serial-contains ' wait-ms='
+vgate_assert 11 serial-contains ' render-ms='
+vgate_assert 11 serial-contains ' settle-ms='
+vgate_assert 11 serial-absent 'web: fetch'
+vgate_assert 11 serial-absent 'web: error'
+vgate_assert 11 serial-absent 'web: download'
+vgate_assert 11 serial-absent 'web: budget over'
+vgate_assert 11 serial-absent '[EXC] parking:'
+vgate_assert 11 snapshot 'snap-11-*.raw' <<'PY'
+import sys
+data = open(sys.argv[1], "rb").read()
+w = 1280
+X, Y = 40, 28
+def px(x, y):
+    k = (y * w + x) * 4
+    return (data[k + 2], data[k + 1], data[k])
+def ink(c):
+    return c[0] > 200 and c[1] > 200 and c[2] > 200
+n = sum(1 for yy in range(Y + 52, Y + 200)
+        for xx in range(X + 10, X + 480)
+        if ink(px(xx, yy)))
+assert n >= 80, f"hostile page ink {n}"
+print(f"live-web 11 hostile-page pixels ok (ink={n})")
 PY

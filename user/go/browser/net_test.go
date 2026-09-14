@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"virelai/webrender"
@@ -144,5 +145,41 @@ func TestRedirectResolution(t *testing.T) {
 	}
 	if got := webrender.LocationHeader("HTTP/1.0 200 OK\r\n\r\n"); got != "" {
 		t.Fatalf("LocationHeader on 200 = %q", got)
+	}
+}
+
+// Scheme-shaped targets must never be turned into file-channel paths: a
+// javascript: or file: href is refused as a scheme, not rewritten into
+// "/host/javascript:...".
+func TestSchemeShapedTargetsAreRefused(t *testing.T) {
+	cases := []struct{ in, wantKind string }{
+		{"javascript:alert(1)", "unsupported"},
+		{"file:///host/WEB-HISTORY.TXT", "unsupported"},
+		{"mailto:someone@example.com", "unsupported"},
+		{"data:text/html,<b>x</b>", "unsupported"},
+		{"ftp://10.0.0.2/x", "unsupported"},
+	}
+	for _, c := range cases {
+		got, kind := resolveInput(c.in)
+		if kind != c.wantKind {
+			t.Fatalf("resolveInput(%q) kind = %q want %q", c.in, kind, c.wantKind)
+		}
+		if strings.HasPrefix(got, "/host/") {
+			t.Fatalf("resolveInput(%q) rewrote a scheme into a file path: %q", c.in, got)
+		}
+	}
+	// And a plain name is still a file on the share.
+	if got, kind := resolveInput("PAGE.HTML"); kind != "file" || got != "/host/PAGE.HTML" {
+		t.Fatalf("plain name = %q,%q", got, kind)
+	}
+}
+
+// A hostile page must render as inert text with no request armed: the script
+// body is dropped by the parser and nothing on the page can act.
+func TestHostilePageIsInert(t *testing.T) {
+	a := &app{hist: newHistory()}
+	a.navigate("/host/HOSTILE.HTML", "")
+	if a.loading {
+		t.Fatal("a local page must not arm a request")
 	}
 }

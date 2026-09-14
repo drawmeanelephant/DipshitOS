@@ -243,7 +243,7 @@ of them with `just verify-vz`.
 | spec | `live-wait` | 1 run / 15 assert | live-wait.spec -- sys_wait (slot 8): COUNTER.BIN blocks on |
 | spec | `live-wallpaper` | 1 run / 4 assert | live-wallpaper.spec -- M33 IMG4: WND.BIN desktop wallpaper (issue #825) |
 | spec | `live-wasm` | 1 run / 39 assert | live-wasm.spec -- M35 W2+W3+W4+W5 + rustc cross-language app in-guest |
-| spec | `live-web` | 10 run / 64 assert | live-web.spec -- WEB.ELF: the in-guest Go browser (Go app shell + the |
+| spec | `live-web` | 11 run / 83 assert | live-web.spec -- WEB.ELF: the in-guest Go browser (Go app shell + the |
 | spec | `live-win` | 1 run / 11 assert | live-win.spec -- vgate pilot (SPIKE runner + snapshot pixel proof): |
 | spec | `live-win-close` | 1 run / 9 assert | live-win-close.spec -- EL0 window release on real VZ hardware (milestone six card G6) |
 | spec | `live-win-hig` | 1 run / 6 assert | live-win-hig.spec -- milestone eight card U5: window chrome visible and moves with focus |
