@@ -88,7 +88,15 @@ func main() {
 	vi.ConsoleLine(MarkerDraw)
 	vi.ConsoleLine(MarkerHolding)
 
-	// 5. Composite/present loop paced by the kind-18 tick.
+	// 5. The seat's OWN window lifecycle (M57b, issue #1317): open a Go
+	//    window, submit a chrome descriptor and a kernel-clamped rect, take
+	//    focus and lose it, close through the WM seam, and leave a window
+	//    open at exit so the kernel's client-death seam must reap it.
+	if !runWindowPhase() {
+		vi.Exit(7)
+	}
+
+	// 6. Composite/present loop paced by the kind-18 tick.
 	presents, ticks := 0, 0
 	for events := 0; events < maxEvents && ticks < maxTicks; events++ {
 		e, r := vi.WaitEvent()
