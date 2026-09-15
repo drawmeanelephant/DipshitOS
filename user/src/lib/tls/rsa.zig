@@ -226,7 +226,7 @@ fn verifyPssT(comptime h: Hash, n: []const u8, e: []const u8, msg: []const u8, s
 }
 
 /// RSASSA-PKCS1-v1_5 verification (RFC 8017 §8.2.2).
-pub fn verifyPkcs1(n: []const u8, e: []const u8, h: Hash, msg: []const u8, sig: []const u8) bool {
+pub noinline fn verifyPkcs1(n: []const u8, e: []const u8, h: Hash, msg: []const u8, sig: []const u8) bool {
     return switch (h) {
         .sha256 => verifyPkcs1T(.sha256, n, e, msg, sig),
         .sha384 => verifyPkcs1T(.sha384, n, e, msg, sig),
@@ -237,7 +237,7 @@ pub fn verifyPkcs1(n: []const u8, e: []const u8, h: Hash, msg: []const u8, sig: 
 /// RSASSA-PSS verification (RFC 8017 §8.1). The salt length is recovered from
 /// the encoded message rather than assumed, which is what a verifier must do
 /// when the parameters are not carried alongside the signature.
-pub fn verifyPss(n: []const u8, e: []const u8, h: Hash, msg: []const u8, sig: []const u8) bool {
+pub noinline fn verifyPss(n: []const u8, e: []const u8, h: Hash, msg: []const u8, sig: []const u8) bool {
     return switch (h) {
         .sha256 => verifyPssT(.sha256, n, e, msg, sig),
         .sha384 => verifyPssT(.sha384, n, e, msg, sig),
