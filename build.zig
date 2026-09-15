@@ -895,6 +895,52 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_ssh.step);
 
     // ------------------------------------------------------------------
+    // Guest: FETCHS.BIN — the first HTTPS consumer of the in-tree TLS 1.3
+    // client (ADR 0029, cards TLS13-C7/C8). Connects to the host gateway on
+    // 443 over the kernel TCP seam, completes a 1-RTT handshake against the
+    // vendored root blob, and streams one HTTP/1.0 GET. DSK3 segmented: the
+    // trust store and the seam accumulator are static .bss.
+    // ------------------------------------------------------------------
+    const fetchs_ui_mod = b.createModule(.{
+        .root_source_file = b.path("user/src/lib/ui.zig"),
+        .target = kernel_target,
+        .optimize = .ReleaseSmall,
+    });
+    const fetchs_crypto_mod = b.createModule(.{
+        .root_source_file = b.path("user/src/lib/crypto.zig"),
+        .target = kernel_target,
+        .optimize = .ReleaseSmall,
+    });
+    const fetchs_rng_mod = b.createModule(.{
+        .root_source_file = b.path("user/src/lib/rng.zig"),
+        .target = kernel_target,
+        .optimize = .ReleaseSmall,
+    });
+    fetchs_rng_mod.addImport("ui", fetchs_ui_mod);
+    const fetchs_mod = b.createModule(.{
+        .root_source_file = b.path("user/src/fetchs.zig"),
+        .target = kernel_target,
+        .optimize = .ReleaseSmall,
+    });
+    fetchs_mod.addImport("ui", fetchs_ui_mod);
+    fetchs_mod.addImport("crypto", fetchs_crypto_mod);
+    fetchs_mod.addImport("rng", fetchs_rng_mod);
+    const fetchs_prog = b.addExecutable(.{
+        .name = "user-fetchs",
+        .root_module = fetchs_mod,
+    });
+    fetchs_prog.linker_script = b.path("user/linker-segmented.ld");
+    const fetchs_step = b.step("fetchs", "Build the HTTPS consumer (zig-out/bin/FETCHS.BIN), DSK3 segmented");
+    const fetchs_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
+    fetchs_elf2bin.addFileArg(fetchs_prog.getEmittedBin());
+    const fetchs_bin = fetchs_elf2bin.addOutputFileArg("FETCHS.BIN");
+    fetchs_elf2bin.has_side_effects = true;
+    fetchs_elf2bin.stdio = .inherit;
+    fetchs_step.dependOn(&fetchs_elf2bin.step);
+    const install_fetchs = b.addInstallFileWithDir(fetchs_bin, .bin, "FETCHS.BIN");
+    b.getInstallStep().dependOn(&install_fetchs.step);
+
+    // ------------------------------------------------------------------
     // Guest: twentieth ESP user program (milestone twelve, card N3 — claim 5416)
     // CHAT.BIN. Userland graphical P2P chat application.
     // DSK3 segmented (writable .data/.bss — the WMS9 fill-batcher global).
