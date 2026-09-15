@@ -1,5 +1,7 @@
 package vi
 
+import "unsafe"
+
 // M57a (issue #1313): the WM-SEAT half of the slot-65 seam.
 //
 // wmclient.go is the tab-CLIENT half: an app asks the registered WM over the
@@ -70,4 +72,55 @@ func ErrnoOf(r int64) int64 {
 		return -r
 	}
 	return 0
+}
+
+// ---------------------------------------------------------------------------
+// M57b (issue #1317): the window-lifecycle half of the seat seam.
+// ---------------------------------------------------------------------------
+
+// Slot-65 window-lifecycle subcommands (kernel/src/wm_server.zig).
+const (
+	// WmctlSetWindowCmd is slot-65 subcommand 2: the WM proposes a window
+	// rect (a1 = x|(y<<16), a2 = w|(h<<16)) and/or submits a chrome
+	// descriptor (a4 = ptr, a5 = len; len 0 = chrome unchanged). The kernel
+	// applies the rect through its own clamped layout primitive — WM
+	// proposes, kernel clamps to the scanout.
+	WmctlSetWindowCmd uint64 = 2
+	// WmctlWinCloseCmd is slot-65 subcommand 13: the WM asks the kernel to
+	// release a user window. The kernel runs its OWN release primitive, so
+	// the OWNER receives the real WIN_CLOSE event (kind 8).
+	WmctlWinCloseCmd uint64 = 13
+	// ChromeDescBytes is the frozen v1 chrome-descriptor wire length (the
+	// kernel refuses any other non-zero length).
+	ChromeDescBytes = 40
+)
+
+// WmctlSetWindowRect proposes the rect (x,y,w,h) for window id. The kernel
+// clamps it to the scanout and pushes WIN_RESIZE to the owner when the
+// clamped size differs. Returns 0, or -EINVAL/-EACCES/-ENOSYS.
+func WmctlSetWindowRect(id, x, y, w, h uint32) int64 {
+	xy := (x & 0xffff) | (y&0xffff)<<16
+	wh := (w & 0xffff) | (h&0xffff)<<16
+	// Six arguments, not four: the kernel reads the chrome pointer/length out
+	// of a4/a5 and refuses a non-zero `len` that is not a frozen descriptor
+	// length, so a4/a5 MUST be explicitly zero on a geometry-only call.
+	return syscall6(SlotWmctl, uintptr(WmctlSetWindowCmd), uintptr(id), uintptr(xy), uintptr(wh), 0, 0)
+}
+
+// WmctlSetWindowChrome submits a 40-byte chrome descriptor for window id.
+// desc MUST live in a mapped page: the kernel reads it with uaccess.copy_in
+// through the caller's own page map, and a Go heap/stack buffer is not
+// guaranteed mapped for EL1 (ADR 0026 D8). MmapHint a page and write it there.
+func WmctlSetWindowChrome(id uint32, desc []byte) int64 {
+	if len(desc) != ChromeDescBytes {
+		return -ErrEINVAL
+	}
+	return syscall6(SlotWmctl, uintptr(WmctlSetWindowCmd), uintptr(id), 0, 0,
+		uintptr(unsafe.Pointer(&desc[0])), uintptr(len(desc)))
+}
+
+// WmctlWinClose releases window id through the WM seam (slot 65 cmd 13). The
+// owning process receives WIN_CLOSE. Returns 0, or -EINVAL/-EACCES/-ENOSYS.
+func WmctlWinClose(id uint32) int64 {
+	return syscall2(SlotWmctl, uintptr(WmctlWinCloseCmd), uintptr(id))
 }
