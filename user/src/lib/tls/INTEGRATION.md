@@ -110,23 +110,39 @@ Read these before wiring a consumer:
    worth knowing before reusing `bigint.zig` for signing).
 6. **RSASSA-PSS certificate signatures are verified as SHA-256** because the
    parser does not read the PSS parameters. PKCS#1 v1.5 is fully covered.
-7. **The guest has no consumer yet.** `fetch.zig` and `download.zig` are
-   plain-HTTP to the host gateway; neither speaks TLS. Wiring one is the next
-   card, and the gate design below lands with it.
+7. **The guest consumer exists but is not runtime-proven.** `FETCHS.BIN`
+   (`user/src/fetchs.zig`) is the first guest HTTPS consumer: it connects to
+   the host gateway on 443, completes a 1-RTT handshake against the vendored
+   root blob, and streams one HTTP/1.0 GET. It compiles, converts and installs
+   into the boot image, and its root-loading path is asserted on the host.
+   What is *not* proven is the guest actually completing a live handshake,
+   because that needs a boot this session could not perform. `fetch.zig` and
+   `download.zig` remain plain-HTTP on port 80 and are untouched.
 
 ## The gate to land with the consumer
 
 Every `vgate` spec requires a guest boot, so a spec cannot be committed before
-a guest TLS consumer exists without breaking the gate fleet. When `TLS.BIN`
-lands, the spec should be:
+the runner side can serve TLS: an unrunnable spec fails the gate fleet.
+
+Two halves of that prerequisite are now met and in-tree:
+
+- **The runner-side responder exists.** `tlsresponder.py` is a TLS 1.3-only
+  Python `ssl` responder that serves the fixture identity `FETCHS.BIN` expects
+  and exits on a bounded deadline, so it cannot hang a runner. It is exercised
+  today by `run_consumer_interop.sh`.
+- **The consumer's identity expectation is pinned**: `leaf.example.com`,
+  matching the fixture leaf's SAN and its chain to the vendored root.
+
+The remaining half is a *validated* boot. The spec should be:
 
 - `vgate_name live-tls13-handshake`
 - `vgate_share seed`, `vgate_runner_flags -Xswiftc -DSPIKE`
-- a `vgate_file` script that runs `TLS.BIN <host>:443 <path>` against the
-  runner's TLS responder
-- `vgate_client` to drive the responder side
-- asserts on the guest serial markers (`tls: handshake ok`, the negotiated
+- `vgate_setup_python` to start `tlsresponder.py` on a high port bound to the
+  gateway address the guest dials
+- a `vgate_file` script that runs `FETCHS.BIN` against it
+- asserts on the guest serial markers (`fetchs: handshake ok`, the negotiated
   suite, and the response body), plus a negative run that must fail closed
-  against a self-signed responder
+  against a wrong-hostname responder
 
-Class B (Apple silicon VZ).
+Class B (Apple silicon VZ). It lands with the first boot that can validate it;
+committing it unvalidated would redden the fleet rather than prove anything.
