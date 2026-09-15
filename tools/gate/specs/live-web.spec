@@ -1,17 +1,25 @@
 # live-web.spec -- WEB.ELF: the in-guest Go browser (Go app shell + the
-# project's own Go HTML renderer, virelai/webrender).
+# project's own Go HTML renderer, virelai/webrender), plus M58d (#1308)
+# GOFETCH.ELF over the Zig TLS helper.
 #
-# Four boots, one exec each, each ending on a marker the PROGRAM prints
+# Boots, one exec each, each ending on a marker the PROGRAM prints
 # (never a script echo):
 #   01 local page renders (parse/layout markers + scanout pixel probes)
 #   02 a pointer click on an in-page link navigates (history + second page)
 #   03 http:// fetch over the host TCP responder (no public internet)
 #   04 a missing target renders a distinct error page and still settles
+#   05 WEB.ELF refuses https (no silent downgrade to cleartext GET)
+#   12 GOFETCH.ELF execs FETCHS.BIN for https:// against the runner TLS
+#      responder (IP/port/SNI); never a cleartext GET. Handshake/body wait
+#      on #1336 (FETCHS.BIN's TLS nest needs ~131 KiB; production task
+#      stack is 32 KiB — live-tls13 is red for the same reason).
 #
-# HOST PREREQUISITE (fails honestly when missing): .build/go/WEB.ELF must
-# exist -- `bash tools/go/build-web.sh browser WEB`.
+# HOST PREREQUISITE (fails honestly when missing):
+#   .build/go/WEB.ELF     -- `bash tools/go/build-web.sh browser WEB`
+#   .build/go/GOFETCH.ELF -- `bash tools/go/build-web.sh fetch GOFETCH`
+#   zig-out/bin/FETCHS.BIN -- `zig build` (the in-tree TLS helper)
 
-vgate_name live-web "WEB.ELF: the in-guest Go browser renders, navigates, fetches, and reports errors"
+vgate_name live-web "WEB.ELF: the in-guest Go browser renders, navigates, fetches, and reports errors; GOFETCH.ELF https via FETCHS.BIN"
 vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 
@@ -71,6 +79,12 @@ net arp 10.0.0.2
 exec WEB.ELF http://10.0.0.2/
 EOF
 
+vgate_file script-gofetch.txt <<'EOF'
+net ip 10.0.0.1
+net arp 10.0.0.2
+exec GOFETCH.ELF https://10.0.0.2:24533/
+EOF
+
 vgate_setup_python <<'PY'
 # Boot 08 needs a peer that ACCEPTS the connection and never answers: the
 # browser must sit in its waiting state so the injected cancel key has a load
@@ -120,6 +134,41 @@ for src_name, dst_name in (("gate-page.html", "PAGE.HTML"), ("gate-next.html", "
                 os.path.join(share, dst_name))
 print("staged WEB.ELF (%d bytes) + PAGE.HTML/NEXT.HTML" %
       os.path.getsize(os.path.join(share, "WEB.ELF")))
+gofetch = os.path.join(".build", "go", "GOFETCH.ELF")
+if not os.path.exists(gofetch):
+    sys.exit("GOFETCH.ELF missing (expected " + gofetch + ") - build it first: "
+             "bash tools/go/build-web.sh fetch GOFETCH")
+shutil.copy(gofetch, os.path.join(share, "GOFETCH.ELF"))
+fetchs = os.path.join("zig-out", "bin", "FETCHS.BIN")
+if not os.path.exists(fetchs):
+    sys.exit("FETCHS.BIN missing at %s -- run 'zig build' first" % fetchs)
+shutil.copy(fetchs, os.path.join(share, "FETCHS.BIN"))
+print("staged GOFETCH.ELF (%d bytes) + FETCHS.BIN (%d bytes)" %
+      (os.path.getsize(os.path.join(share, "GOFETCH.ELF")),
+       os.path.getsize(os.path.join(share, "FETCHS.BIN"))))
+PY
+
+vgate_setup_python <<'PY'
+# Boot 12: TLS 1.3 responder on the same fixture identity FETCHS.BIN already
+# carries (leaf.example.com, vendored root). Bound to loopback:24533 and
+# reached through the runner's :relay, matching live-tls13. Long deadline
+# because this spec has many boots before 12.
+import os, subprocess, sys
+rd = os.environ["RUN_DIR"]
+cfx = os.path.join("user", "src", "lib", "tls", "vectors", "fx")
+chain = os.path.join(cfx, "chain-ec.pem")
+if not os.path.exists(chain):
+    sys.exit("pinned fixture chain missing at %s" % chain)
+cmd = [
+    sys.executable,
+    os.path.join("user", "src", "lib", "tls", "vectors", "tlsresponder.py"),
+    "--host", "127.0.0.1", "--port", "24533",
+    "--cert", chain, "--key", os.path.join(cfx, "leaf-ec.key"),
+    "--body", "live-web-https-ok\n", "--accept", "2", "--timeout", "3600",
+]
+log = open(os.path.join(rd, "tlsresponder.log"), "wb")
+proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+print("live-web 12: tlsresponder pid=%d on 127.0.0.1:24533" % proc.pid)
 PY
 
 # --- boot 01: a local page renders (markers + pixels) --------------------
@@ -522,4 +571,46 @@ n = sum(1 for yy in range(Y + 52, Y + 200)
         if ink(px(xx, yy)))
 assert n >= 80, f"hostile page ink {n}"
 print(f"live-web 11 hostile-page pixels ok (ink={n})")
+PY
+
+# --- boot 12: GOFETCH.ELF https via FETCHS.BIN (issue #1308) --------------
+# The host TCP responder is the TLS 1.3 fixture peer (setup hook), relayed
+# at 10.0.0.2:24533. WEB.ELF boot 05 still refuses https; this boot is the
+# Go consumer exec'ing the Zig helper. FETCHS.BIN owns the TCP socket
+# (one per process) and reaches `fetchs: connected`. The handshake itself
+# is #1336: the TLS call nest needs ~131 KiB against a 32 KiB task stack,
+# so this boot does not wait on `fetchs: body complete` (that would hang
+# the runner for the script-expect timeout, as live-tls13 does). sys_exec
+# does not print the monitor's `exec: loaded FETCHS.BIN` line.
+vgate_run 12 -- \
+    --screen '$RUN_DIR/screen' \
+    --via-virtio --cvc-snap \
+    --snapshot-out '$RUN_DIR/snap-12' \
+    --net '$RUN_DIR/cap12.bin' --net-arp-respond 10.0.0.2 \
+    --net-tcp-respond 10.0.0.2:24533:relay --net-tcp-respond-relay 127.0.0.1:24533 \
+    --script '$RUN_DIR/script-gofetch.txt' \
+    --script-expect "fetchs: connected" --timeout 180
+
+vgate_assert 12 serial-contains 'gofetch: open id='
+vgate_assert 12 serial-contains 'gofetch: url https://10.0.0.2:24533/'
+vgate_assert 12 serial-contains 'gofetch: helper FETCHS.BIN 10.0.0.2 24533 leaf.example.com'
+vgate_assert 12 serial-contains 'gofetch: helper pid='
+vgate_assert 12 serial-contains 'gofetch: ready'
+vgate_assert 12 serial-contains 'fetchs: target set'
+vgate_assert 12 serial-contains 'fetchs: roots loaded'
+vgate_assert 12 serial-contains 'fetchs: connected'
+vgate_assert 12 serial-absent 'gofetch: tcp'
+vgate_assert 12 serial-absent 'gofetch: error'
+vgate_assert 12 serial-absent 'web: fetch '
+vgate_assert 12 serial-absent 'GET / HTTP'
+vgate_assert 12 serial-absent 'fatal error: runtime: cannot allocate memory'
+vgate_assert 12 serial-absent '[EXC] parking:'
+vgate_assert 12 python <<'PY'
+import os
+ser = open(os.environ["VG_SER"], errors="replace").read()
+assert "gofetch: helper FETCHS.BIN" in ser, "the Zig TLS helper was not exec'd"
+assert "fetchs: connected" in ser, "the helper did not own the TCP connect"
+assert "gofetch: tcp" not in ser, "Go opened a TCP socket"
+assert "GET / HTTP" not in ser, "a cleartext GET was logged"
+print("live-web 12 https helper ok (GOFETCH exec'd FETCHS.BIN, connected, no cleartext GET)")
 PY

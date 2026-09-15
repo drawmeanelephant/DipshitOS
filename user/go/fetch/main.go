@@ -1,0 +1,200 @@
+// Command fetch is the M58d (issue #1308) Go HTTPS consumer: GET https://
+// via the in-tree Zig TLS helper (FETCHS.BIN / ADR 0029). Zero crypto in
+// this process. Full-viewport via tabapp inside Zig TABWM when that seat
+// is running; declare is best-effort so a raw-window live-web boot still
+// works.
+//
+// Usage: exec GOFETCH.ELF https://10.0.0.2:24533/
+//
+// The helper owns the TCP socket and the handshake. This program only
+// classifies the URL, execs FETCHS.BIN with IP/port/SNI, and prints
+// markers. An https URL is never rewritten to http and never armed as a
+// cleartext GET.
+package main
+
+import (
+	"virelai/tabapp"
+	"virelai/vi"
+	"virelai/widgets"
+)
+
+const (
+	appName  = "GOFETCH.ELF"
+	appTitle = "Fetch"
+	natW     = 512
+	natH     = 384
+
+	markerOpen    = "gofetch: open id="
+	markerDeclare = "gofetch: declare accepted"
+	markerURL     = "gofetch: url "
+	markerHelper  = "gofetch: helper "
+	markerPid     = "gofetch: helper pid="
+	markerPresent = "gofetch: present"
+	markerReady   = "gofetch: ready"
+	markerClose   = "gofetch: close"
+	markerOK      = "gofetch OK"
+	markerError   = "gofetch: error "
+
+	keyEscape = 0x29
+	keyQ      = 0x14
+)
+
+// argvPad keeps the Go sbrk heap from overlapping the kernel's argv+envp
+// block. sys_exec packs 256+2048 bytes after BSS on an extra mapped page;
+// if that tail spills past memRound(end), the runtime's first sys_mmap is
+// a collision and dies with "fatal error: runtime: cannot allocate memory"
+// before main (observed live-web boot 12, memsz remainder 0x850, tail
+// 1968 < 2304). WEB.ELF lucks into a larger last-page tail. Kernel
+// untouched — this pad is the app-side fix.
+var argvPad [2048]byte
+
+type app struct {
+	ta     *tabapp.TabApp
+	url    string
+	status string
+	title  widgets.Text
+	body   widgets.Text
+	stat   widgets.Text
+}
+
+func main() {
+	argvPad[0] = 1
+	ta := tabapp.Init(tabapp.Config{Name: appName, Title: appTitle, X: 40, Y: 28, W: natW, H: natH})
+	if ta == nil {
+		vi.ConsoleLine("gofetch: error open -1")
+		vi.Exit(1)
+	}
+	vi.ConsoleLine(markerOpen + vi.Itoa64(int64(ta.Win)))
+	if ta.TabAware {
+		vi.ConsoleLine(markerDeclare)
+	} else {
+		vi.ConsoleLine("gofetch: declare refused")
+	}
+
+	a := &app{ta: ta, url: startURL(), status: "starting"}
+	vi.ConsoleLine(markerURL + a.url)
+	a.draw()
+	a.ta.Present()
+	vi.ConsoleLine(markerPresent)
+	a.runFetch()
+	a.draw()
+	a.ta.Present()
+	vi.ConsoleLine(markerReady)
+
+	for {
+		ev, r, ok := vi.PollEventRaw()
+		if !ok {
+			if r < 0 {
+				break
+			}
+			vi.Sleep(1)
+			continue
+		}
+		switch a.ta.Dispatch(ev) {
+		case tabapp.ActionClosed:
+			vi.ConsoleLine(markerClose)
+			vi.ConsoleLine(markerOK)
+			a.ta.CloseAndExit(0)
+		case tabapp.ActionResized:
+			a.draw()
+			a.ta.Present()
+		case tabapp.ActionNone:
+			if a.handle(ev) {
+				a.draw()
+				a.ta.Present()
+			}
+		}
+	}
+}
+
+func startURL() string {
+	args := vi.Args()
+	if len(args) > 1 && args[1] != "" {
+		return args[1]
+	}
+	return "https://10.0.0.2/"
+}
+
+func (a *app) runFetch() {
+	tgt := Classify(a.url)
+	if WouldSendCleartext(tgt) {
+		a.fail(KindHTTPS, "cleartext refused")
+		return
+	}
+	plan, ok := PlanHelper(tgt)
+	if !ok {
+		a.fail(tgt.Kind, a.url)
+		return
+	}
+	vi.ConsoleLine(markerHelper + plan.Name + " " + plan.Args[0] + " " + plan.Args[1] + " " + plan.Args[2])
+	pid, err := vi.Exec(plan.Name, plan.Args...)
+	if err != nil {
+		a.fail("exec", err.Error())
+		return
+	}
+	vi.ConsoleLine(markerPid + vi.Itoa64(pid))
+	a.status = "helper pid " + vi.Itoa64(pid)
+}
+
+func (a *app) fail(kind, detail string) {
+	vi.ConsoleLine(markerError + kind)
+	a.status = kind + " " + detail
+}
+
+func (a *app) handle(ev vi.Event) bool {
+	if ev.Kind != vi.EvKeyDown {
+		return false
+	}
+	switch ev.Arg0 {
+	case keyEscape, keyQ:
+		vi.ConsoleLine(markerClose)
+		vi.ConsoleLine(markerOK)
+		a.ta.CloseAndExit(0)
+	}
+	return false
+}
+
+func (a *app) draw() {
+	var f vi.Filler
+	f.Rect(a.ta.Win, 0, 0, a.ta.W, a.ta.H, 0x101418)
+	cv := &widgetCanvas{f: &f, win: a.ta.Win}
+	a.title = widgets.Text{
+		R:     scaleR(a.ta, widgets.Rect{X: 8, Y: 8, W: int(natW) - 16, H: 20}),
+		Label: appTitle,
+		Fg:    0xffffff,
+		Bg:    0x1e2430,
+	}
+	a.body = widgets.Text{
+		R:     scaleR(a.ta, widgets.Rect{X: 8, Y: 36, W: int(natW) - 16, H: 20}),
+		Label: a.url,
+		Fg:    0xe6edf3,
+		Bg:    0x161c24,
+	}
+	a.stat = widgets.Text{
+		R:     scaleR(a.ta, widgets.Rect{X: 8, Y: 64, W: int(natW) - 16, H: 20}),
+		Label: a.status,
+		Fg:    0xa8b0b8,
+		Bg:    0x101418,
+	}
+	a.title.Draw(cv)
+	a.body.Draw(cv)
+	a.stat.Draw(cv)
+	f.Flush()
+}
+
+type widgetCanvas struct {
+	f   *vi.Filler
+	win int
+}
+
+func (c *widgetCanvas) FillRect(r widgets.Rect, rgb uint32) {
+	if r.W <= 0 || r.H <= 0 {
+		return
+	}
+	c.f.Rect(c.win, uint32(r.X), uint32(r.Y), uint32(r.W), uint32(r.H), rgb)
+}
+
+func scaleR(ta *tabapp.TabApp, r widgets.Rect) widgets.Rect {
+	s := ta.Layout(tabapp.Rect{X: r.X, Y: r.Y, W: r.W, H: r.H}, natW, natH)
+	return widgets.Rect{X: s.X, Y: s.Y, W: s.W, H: s.H}
+}
