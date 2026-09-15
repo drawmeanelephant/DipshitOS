@@ -20,6 +20,24 @@
 # The responder's trust anchor is the fixture root, which is byte-identical to
 # the vendored blob FETCHS.BIN carries, so the guest is validating against its
 # own pinned root rather than a test-only bypass.
+#
+# KNOWN-FAILING (measured locally on Apple silicon macOS 27, 2026-09-15).
+# The gate runs and reaches the consumer body, then the guest dies with a data
+# abort. Cause, measured rather than guessed:
+#
+#   guest task stack (scheduler.task_stack_size)      32,768 B
+#   largest stack frame in FETCHS.BIN                 79,856 B
+#   second largest                                    34,032 B
+#
+# The TLS client's stack footprint exceeds the guest stack, so this cannot go
+# green until one of two things changes: the client stops needing ~80 KiB of
+# stack, or the per-task stack grows. Both are real decisions (the second
+# changes every user task's memory), which is why this spec is committed red
+# rather than papered over. Do not "fix" it by weakening the assertions.
+#
+# Earlier defects this gate already found and that are now fixed: an 81,264-byte
+# entry frame (the client was a stack local), and argv shifted by one (the
+# DSK1/DSK3 argv block has no program name; the ELF block does).
 
 vgate_name live-tls13 "TLS 1.3: the guest consumer completes a real handshake and reads a response"
 vgate_share seed

@@ -166,22 +166,47 @@ noinline fn serve(target: target_mod.Target) noreturn {
         .entropy = entropy,
     });
 
-    client.handshake() catch {
+    if (!phaseHandshake()) {
         ui.write_console("fetchs: handshake failed\n");
         seam.close();
         ui.exit_process(exit_handshake);
-    };
+    }
     ui.write_console("fetchs: handshake ok\n");
     ui.write_console("fetchs: TLS1.3 TLS_AES_128_GCM_SHA256\n");
 
-    const request = "GET / HTTP/1.0\r\nConnection: close\r\n\r\n";
-    client.write(request) catch {
+    if (!phaseRequest()) {
         ui.write_console("fetchs: send failed\n");
         seam.close();
         ui.exit_process(exit_io);
-    };
+    }
     ui.write_console("fetchs: request sent\n");
 
+    if (phaseRead() == 0) {
+        ui.write_console("fetchs: empty response\n");
+        seam.close();
+        ui.exit_process(exit_io);
+    }
+    ui.write_console("\nfetchs: body complete\n");
+    seam.close();
+    ui.exit_process(exit_status);
+}
+
+/// Each protocol phase sits behind its own hard call boundary. Zig otherwise
+/// fuses the entire call graph into one frame: measured, the consumer body came
+/// to 79 KiB against a 32 KiB guest stack. Splitting does not by itself make
+/// the client fit -- that is the open finding -- but it turns one opaque
+/// 79 KiB number into per-phase numbers a decision can be made from.
+noinline fn phaseHandshake() bool {
+    client.handshake() catch return false;
+    return true;
+}
+
+noinline fn phaseRequest() bool {
+    client.write("GET / HTTP/1.0\r\nConnection: close\r\n\r\n") catch return false;
+    return true;
+}
+
+noinline fn phaseRead() usize {
     var buf: [1024]u8 = undefined;
     var total: usize = 0;
     var rounds: usize = 0;
@@ -191,12 +216,5 @@ noinline fn serve(target: target_mod.Target) noreturn {
         total += n;
         ui.write_console(buf[0..n]);
     }
-    if (total == 0) {
-        ui.write_console("fetchs: empty response\n");
-        seam.close();
-        ui.exit_process(exit_io);
-    }
-    ui.write_console("\nfetchs: body complete\n");
-    seam.close();
-    ui.exit_process(exit_status);
+    return total;
 }
