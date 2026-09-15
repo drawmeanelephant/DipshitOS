@@ -132,3 +132,42 @@ func TestArgsHost(t *testing.T) {
 		t.Fatal("host Args should be nil")
 	}
 }
+
+func TestDirEntryWireSize(t *testing.T) {
+	if got := unsafe.Sizeof(DirEntry{}); got != 40 {
+		t.Fatalf("DirEntry size = %d want 40", got)
+	}
+	if off := unsafe.Offsetof(DirEntry{}.Size); off != 32 {
+		t.Fatalf("Size offset = %d want 32", off)
+	}
+	if off := unsafe.Offsetof(DirEntry{}.IsDir); off != 36 {
+		t.Fatalf("IsDir offset = %d want 36", off)
+	}
+	if MaxDirEntries != 16 {
+		t.Fatalf("MaxDirEntries = %d want 16", MaxDirEntries)
+	}
+}
+
+func TestDirEntryNameString(t *testing.T) {
+	var e DirEntry
+	copy(e.Name[:], "KNOWN.TXT")
+	e.IsDir = 0
+	if got := e.NameString(); got != "KNOWN.TXT" {
+		t.Fatalf("NameString = %q", got)
+	}
+	if e.Dir() {
+		t.Fatal("file must not report Dir")
+	}
+	e.IsDir = 1
+	if !e.Dir() {
+		t.Fatal("directory must report Dir")
+	}
+}
+
+func TestDirListHostFails(t *testing.T) {
+	var buf [MaxDirEntries]DirEntry
+	n, rc := DirList("/host", buf[:])
+	if n != 0 || rc >= 0 {
+		t.Fatalf("host DirList = %d, %d want 0, <0", n, rc)
+	}
+}
