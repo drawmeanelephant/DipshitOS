@@ -30,7 +30,7 @@
 | `tools/lib/` | 2 | per-run isolation for live gates (`gate-run.sh`) |
 | `tools/status/` | 7 | multiagent coordination gate + claim tooling (class A) |
 | `tools/context/` | 2 | context snapshot helpers |
-| `tools/gate/` | 240 | M40 vgate harness + specs (GF2+) |
+| `tools/gate/` | 241 | M40 vgate harness + specs (GF2+) |
 
 ## Class-B fleet (discovered from the spec dir)
 
@@ -222,6 +222,7 @@ of them with `just verify-vz`.
 | spec | `live-time` | 1 run / 4 assert | live-time.spec -- M22 D13 (issue #336) class-B gate: |
 | spec | `live-timer` | 1 run / 6 assert | live-timer.spec -- real CNTP PPI delivery through the EL1 IRQ vector. |
 | spec | `live-timers` | 1 run / 13 assert | live-timers.spec -- claim 7323 (Milestone 14, Card S2) class-B gate: |
+| spec | `live-tls13` | 1 run / 9 assert | live-tls13.spec -- cards TLS13-C8/C11: the guest HTTPS consumer. |
 | spec | `live-tokens` | 12 run / 36 assert | live-tokens.spec -- M37 DQ4 design tokens & cohesion |
 | spec | `live-transcript` | 1 run / 6 assert | live-transcript.spec -- vgate pilot (serial-only + repeat): live RX. |
 | spec | `live-trust-caps` | 2 run / 14 assert | live-trust-caps.spec -- M50 TS3 class-B gate (issue #1137, ADR 0024 D5/D10). |
