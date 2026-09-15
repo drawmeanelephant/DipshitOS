@@ -47,6 +47,10 @@ var seam_acc: [4096]u8 = undefined;
 var store: trust_store.TrustStore = .{};
 /// The resolved server name, copied out of the argv block so it outlives it.
 var name_buf: [128]u8 = undefined;
+/// Last CSPRNG result and the high-water mark of bytes obtained, reported when
+/// a handshake fails.
+var entropy_last: i64 = 0;
+var entropy_bytes: usize = 0;
 
 /// The connection state. These are file-scope, not locals, and that is not
 /// house style — it is a hard requirement. The user stack is 32 KiB
@@ -57,13 +61,50 @@ var name_buf: [128]u8 = undefined;
 var seam: tls_stream.Stream = undefined;
 var client: tls_client.Client(trust_store.TrustStore) = undefined;
 
+/// Decimal-print a signed value to the console. Two inputs cannot be exercised
+/// by a host test -- the guest's wall clock and its CSPRNG -- and when a
+/// handshake that works on the host fails here, they are the first things to
+/// suspect. This makes both visible in the serial log.
+fn printNum(label: []const u8, v: i64) void {
+    ui.write_console(label);
+    var buf: [24]u8 = undefined;
+    var n: usize = 0;
+    var u: u64 = if (v < 0) @intCast(-v) else @intCast(v);
+    if (v < 0) {
+        buf[0] = '-';
+        n = 1;
+    }
+    var digits: [20]u8 = undefined;
+    var d: usize = 0;
+    if (u == 0) {
+        digits[0] = '0';
+        d = 1;
+    } else {
+        while (u > 0) : (u /= 10) {
+            digits[d] = '0' + @as(u8, @intCast(u % 10));
+            d += 1;
+        }
+    }
+    var i: usize = d;
+    while (i > 0) {
+        i -= 1;
+        buf[n] = digits[i];
+        n += 1;
+    }
+    buf[n] = '\n';
+    n += 1;
+    ui.write_console(buf[0..n]);
+}
+
 fn entropy(out: []u8) void {
     var off: usize = 0;
     while (off < out.len) {
         const n = rng.getrandom(out[off..]);
+        entropy_last = n;
         if (n <= 0) break;
         off += @intCast(n);
     }
+    if (off > entropy_bytes) entropy_bytes = off;
 }
 
 /// Load the vendored blob: repeated `u16 length || DER`. Returns the count.
@@ -128,6 +169,7 @@ pub export fn _start(argc: u64, argv_va: u64) callconv(.c) noreturn {
         ui.exit_process(exit_usage);
     };
     ui.write_console("fetchs: target set\n");
+    printNum("fetchs: clock ", ui.sys_time());
     serve(target);
 }
 
@@ -167,6 +209,12 @@ noinline fn serve(target: target_mod.Target) noreturn {
     });
 
     if (!phaseHandshake()) {
+        // Read AFTER the attempt: client.zig asks for entropy inside the
+        // handshake (client.zig:221-223), so printing before it reported the
+        // initial 0 and read like a dead CSPRNG. It was a diagnostic
+        // reporting its own initial value, and it cost a run to find out.
+        printNum("fetchs: entropy ", entropy_last);
+        printNum("fetchs: entropy-bytes ", @intCast(entropy_bytes));
         ui.write_console("fetchs: handshake failed\n");
         seam.close();
         ui.exit_process(exit_handshake);
