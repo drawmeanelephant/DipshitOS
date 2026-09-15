@@ -48,3 +48,37 @@ pub const blob = blk: {
     off += 480;
     break :blk b;
 };
+
+const std = @import("std");
+const x509 = @import("x509.zig");
+const store_mod = @import("trust_store.zig");
+
+// The blob is the guest's only source of trust, so its framing is asserted
+// rather than assumed: every byte is consumed by a length-prefixed DER
+// certificate, each anchor parses as a CA, and each loads into the same
+// `TrustStore` type the client validates against. A truncation or a stray
+// byte is a test failure here, not a silent empty store on the guest.
+test "vendored_roots: the blob frames, parses, and loads as an anchor" {
+    var off: usize = 0;
+    var anchors: usize = 0;
+    var s = store_mod.TrustStore{};
+    while (off + 2 <= blob.len) {
+        const len = std.mem.readInt(u16, blob[off..][0..2], .big);
+        off += 2;
+        try std.testing.expect(len > 0);
+        try std.testing.expect(off + len <= blob.len);
+        const der = blob[off..][0..len];
+        var cert: x509.Cert = .{};
+        try x509.Cert.parse(der, &cert);
+        try std.testing.expect(cert.is_ca);
+        try std.testing.expectEqualStrings("AutoClaw Test Root CA", cert.subject_cn.?);
+        try s.addRoot(der);
+        off += len;
+        anchors += 1;
+    }
+    try std.testing.expectEqual(blob.len, off);
+    try std.testing.expectEqual(@as(usize, 1), anchors);
+    try std.testing.expectEqual(@as(usize, 1), s.rootCount());
+    s.setVersion(version);
+    try std.testing.expectEqualStrings(version, s.versionString());
+}
