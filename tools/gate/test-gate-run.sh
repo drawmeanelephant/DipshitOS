@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
 #
 # test-gate-run.sh -- class-A self-test for the VZ preflight in
-# tools/lib/gate-run.sh (claim #1259).
+# tools/lib/gate-run.sh (claim #1259) and for the false-PASS guard in
+# tools/gate/vgate.sh (issue #1338).
 #
 # Why this exists: the preflight's whole job is to FAIL LOUDLY in two cases
 # that used to surface at VM boot as something else. A checker whose negative
 # path is never exercised is the same class of bug it was written to catch --
 # it can be wired backwards, or stop matching, and still report green. So the
 # negative paths are asserted here, on a CI runner, with no VM anywhere.
+#
+# Same reasoning, one level up, for the harness itself (issue #1338): a run
+# that ends before its result block must never read as PASS, and the shells
+# where that is possible (bash < 4.4 exits ZERO on an empty-array expansion
+# under `set -u`) must be refused at the door. Both are asserted below.
 #
 # Hermetic by construction: `codesign` and `sysctl` are stubbed on PATH, so the
 # real signature of any binary and the real capability of any host are
@@ -296,6 +302,121 @@ else
     bad "the preflight must run before gate_begin"
 fi
 
+# --- the false-PASS guard (issue #1338) ------------------------------------
+# The bug this covers: an empty-array expansion under `set -u` aborted the
+# harness with exit status ZERO, and the fleet reported `PASS go-fart (16s)`
+# for a gate that never booted a VM, never wrote a serial log and never
+# evaluated an assert. Two behaviours have to hold, and neither is observable
+# by reading the harness: the floor refuses the shells where that can happen,
+# and ANY exit before the result block is non-zero.
+echo
+echo "── a premature exit is never a PASS (issue #1338) ──"
+
+# The floor at its boundary. The explicit-version form is what makes this
+# assertable without a 20-year-old bash on the box (CI's is modern).
+for v in 3:2 4:0 4:3 0:0; do
+    major="${v%%:*}"; minor="${v##*:}"
+    run gate_assert_modern_bash "$major" "$minor"; rc=$?
+    [ "$rc" = 2 ] && ok "bash $major.$minor is refused (rc=2)" \
+                  || bad "bash $major.$minor must be refused with rc=2, got rc=$rc"
+done
+case "$CASE_OUT" in
+    *env-check.sh*) ok "the refusal names the fix (tools/env-check.sh)" ;;
+    *) bad "the refusal should name tools/env-check.sh: $CASE_OUT" ;;
+esac
+case "$CASE_OUT" in
+    *PASS*) ok "the refusal names its failure mode (a false PASS)" ;;
+    *) bad "the refusal should say the failure mode is a false PASS: $CASE_OUT" ;;
+esac
+# The mechanism, not just the verdict: an unbackticked `set -u` here once ate
+# its own text (the shell ran it as a command substitution), which is precisely
+# the kind of empty output a reader would not notice.
+case "$CASE_OUT" in
+    *"set -u"*) ok "the refusal names the mechanism (an empty-array expansion under set -u)" ;;
+    *) bad "the refusal should explain the mechanism (set -u): $CASE_OUT" ;;
+esac
+
+for v in 4:4 5:3 8:0; do
+    major="${v%%:*}"; minor="${v##*:}"
+    run gate_assert_modern_bash "$major" "$minor"; rc=$?
+    [ "$rc" = 0 ] && ok "bash $major.$minor clears the floor" \
+                  || bad "bash $major.$minor must clear the floor, got rc=$rc"
+done
+
+# ... and the no-arg form judges the shell this suite is running under, which
+# is the call the harness itself makes.
+run gate_assert_modern_bash; rc=$?
+[ "$rc" = 0 ] && ok "the no-arg form judges the running shell ($BASH_VERSION)" \
+              || bad "the running shell failed its own floor: rc=$rc"
+
+# End to end, through the real entry point: a spec that exits before the result
+# block. Exit status 0 is the dangerous case -- it is exactly what the bash 3.2
+# trap produced -- so the guard has to turn ANY premature exit non-zero.
+cat > "$TMP/premature.spec" <<'SPEC'
+vgate_name vg-premature "self-test fixture: a spec that exits before the result block"
+exit 0
+SPEC
+cat > "$TMP/bogus.spec" <<'SPEC'
+vgate_name vg-bogus "self-test fixture: a spec whose DSL call does not exist"
+vgate_not_a_real_command
+SPEC
+VGATE_NO_BUILD=1
+run bash tools/gate/vgate.sh "$TMP/premature.spec"; rc=$?
+[ "$rc" != 0 ] && ok "a spec that exits early is not a PASS (rc=$rc)" \
+               || bad "a premature exit reported rc=0 -- the false-PASS guard is not wired"
+case "$CASE_OUT" in
+    *"exited before its result block"*) ok "the abort names itself as a FAIL" ;;
+    *) bad "the abort should say 'exited before its result block': $CASE_OUT" ;;
+esac
+
+run bash tools/gate/vgate.sh "$TMP/bogus.spec"; rc=$?
+[ "$rc" != 0 ] && ok "a spec with an undefined DSL command is not a PASS (rc=$rc)" \
+               || bad "an undefined DSL command reported rc=0"
+unset VGATE_NO_BUILD
+
+# The refusal must fire in the real entry point, not only in the helper. Only
+# assertable where a pre-4.4 bash exists (macOS /bin/bash is 3.2; CI's is not).
+OLD_BASH=""
+for cand in /bin/bash /usr/bin/bash; do
+    [ -x "$cand" ] || continue
+    if ! "$cand" -c '[ "${BASH_VERSINFO[0]}" -gt 4 ] || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -ge 4 ]; }'; then
+        OLD_BASH="$cand"
+        break
+    fi
+done
+if [ -n "$OLD_BASH" ]; then
+    run "$OLD_BASH" tools/gate/vgate.sh "$TMP/premature.spec"; rc=$?
+    [ "$rc" = 2 ] && ok "$OLD_BASH ($("$OLD_BASH" -c 'echo $BASH_VERSION')) refuses the harness (rc=2)" \
+                  || bad "$OLD_BASH must refuse the harness with rc=2, got rc=$rc"
+    case "$CASE_OUT" in
+        *env-check.sh*) ok "the old-bash refusal names the fix" ;;
+        *) bad "the old-bash refusal should name tools/env-check.sh: $CASE_OUT" ;;
+    esac
+else
+    echo "  skip  no pre-4.4 bash on this host; the floor was asserted through its boundary cases"
+fi
+
+# Wiring: the floor must be called by the harness, before it sources the spec
+# (the first thing it would otherwise do with untrusted input)...
+grep -q 'gate_assert_modern_bash' tools/gate/vgate.sh \
+    && ok "vgate.sh calls the shell floor" \
+    || bad "vgate.sh never calls gate_assert_modern_bash"
+grep -n 'gate_assert_modern_bash' tools/gate/vgate.sh | head -1 | cut -d: -f1 > "$TMP/floor.line"
+grep -n 'source "\$SPEC"' tools/gate/vgate.sh | head -1 | cut -d: -f1 > "$TMP/spec.line"
+if [ -s "$TMP/floor.line" ] && [ -s "$TMP/spec.line" ] \
+        && [ "$(head -1 "$TMP/floor.line")" -lt "$(head -1 "$TMP/spec.line")" ]; then
+    ok "the floor is checked before the spec is sourced"
+else
+    bad "the floor must be checked before 'source \$SPEC'"
+fi
+
+# ... and the honest FAIL path must survive it: VGATE_COMPLETED is set past the
+# assert loop and before the result block, so a real FAIL still exits 1 instead
+# of being rewritten as the guard's 2.
+awk '/^VGATE_COMPLETED=1$/{c=NR} /=== result ===/{r=NR} END{exit !(c && r && c < r)}' tools/gate/vgate.sh \
+    && ok "VGATE_COMPLETED is set before the result block (a real FAIL keeps rc=1)" \
+    || bad "VGATE_COMPLETED must be set before the result block, or every FAIL reads as 2"
+
 # --- the real probe: it must build, and carry the right entitlement --------
 echo
 echo "── the shipped probe (no stubs) ──"
@@ -339,7 +460,7 @@ export VZ_HV_PROBE_BIN
 
 echo
 if [ "$FAIL" = 0 ]; then
-    echo "test-gate-run: PASS — $PASS case(s), both preflight failure modes verified."
+    echo "test-gate-run: PASS — $PASS case(s): both preflight failure modes, and the exit-ZERO false-PASS guard (issue #1338)."
     exit 0
 fi
 echo "test-gate-run: FAIL — $FAIL of $((PASS + FAIL)) case(s) failed."

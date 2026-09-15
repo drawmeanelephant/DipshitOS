@@ -36,6 +36,8 @@ const (
 	SlotTCPClose     uintptr = 33
 	SlotFileDelete   uintptr = 34
 	SlotFileTruncate uintptr = 36
+	SlotAudioInfo    uintptr = 42
+	SlotAudioPlay    uintptr = 43
 	SlotWinFillBatch uintptr = 46
 	SlotMmap         uintptr = 63
 	SlotTime         uintptr = 66
