@@ -14,7 +14,7 @@
 
 ## Milestones
 
-All milestones through M55 are complete. Closed-milestone detail is under
+All milestones through M52 are complete. Closed-milestone detail is under
 `docs/archive/` and in the per-arc `docs/march-m*.md` trackers; open cards, if
 any, are on the GitHub tracker.
 
@@ -74,7 +74,7 @@ any, are on the GitHub tracker.
 | 52 | Client-death hardening | Exit/revoke teardown pinned end-to-end: a client dying with focus, a drag, or a bound surface leaves no zombie window, stale mapping, stuck capture, or dead-seat routing (umbrella #1237) | ✅ 2026-09-14 |
 | 53 | TLS 1.3 client + trust store | In-tree TLS 1.3 end to end: HKDF/SHA-384/AES-GCM, X.509 + chain validation, RSA/ECDSA verification, the handshake state machine; real interop against 4 peer implementations and 8 public endpoints, 5 negatives fail closed; ADR 0029 | ✅ 2026-09-14 |
 | 54 | Go carries its first app | A Go EL0 program owns a raw ADR 0007 window (`GOWIN.ELF`, gate `go-win`), an independent Go `.tabs` v2 codec round-trips the TABWM session format (`tools/go/tabcodec`), and `WEB.ELF` renders in-guest over `user/go/webrender`; kernel untouched (umbrella #1244) | ✅ 2026-09-15 |
-| 55 | The language split | Zig owns the guest kernel, Go owns EL0; forbidden moves and the M56–M60 card split live in ADR 0030 (umbrella #1292, card #1293). No code. Boot default stays TABWM until M59 | ✅ 2026-09-15 |
+| 56 | Finish the Go SDK (`vi` + `tabapp`) | The Go EL0 SDK is complete enough to be a WM: `vi` gains IPC 5/6 + `procs` discovery, the tab-client WM_RPC wire, and addr-hinted mmap; `user/go/widgets` adds text/button/list; `user/go/tabapp` + a demo app run one Go tab full-viewport in Zig TABWM (gate `go-tabapp`) | 🔄 host green; `go-tabapp` VZ unrun |
 
 > M40 (the gate-fleet consolidation, issue #934, done 2026-09-06) was a tooling
 > workstream, not a product milestone; M36 was skipped.
@@ -86,7 +86,6 @@ The only threads not closed:
 | Thread | State / next step | Cards |
 |--------|-------------------|-------|
 | **Go runtime port — `GOOS=virelai`** | Phase 0a merged (PR #1187); 0b rounds 1+2 + envp + stress merged (#1196/#1221/#1230/#1231). Next: 0c fault delivery (#1228). TABWM/DOC follow-ups stay parked until the Go fleet can carry the test apps. | #1163, #1194, #1214, #1228 |
-| **Go is EL0 (M55–M60)** | M55 ADR 0030 accepted. Next: M56 Go SDK (`vi` + `tabapp`); first code is a Go tab inside Zig TABWM (#1315). Default stays TABWM until M59. | #1292, #1296 |
 
 ## Gate status
 
@@ -170,7 +169,6 @@ The old file-based tracker (`docs/claims/` + `docs/logs/`) was deleted
 ## Related docs
 
 - [`AGENTS.md`](../AGENTS.md) — project rules.
-- [ADR 0030](decisions/0030-go-is-el0.md) — Zig kernel / Go EL0 split (M55–M60).
 - [`testing.md`](testing.md) — verification sequence & evidence policy.
 - [`hardware-contract.md`](hardware-contract.md) — hardware `[observed]`/`[inferred]`.
 - [`architecture.md`](architecture.md) — components & data flow.
