@@ -2639,6 +2639,7 @@ pub fn build(b: *std.Build) void {
         "user/src/lib/tls/rsa.zig",
         "user/src/lib/tls/ecdsa.zig",
         "user/src/lib/tls/trust_store.zig",
+        "user/src/lib/tls/vendored_roots.zig",
         "user/src/lib/tls/validate.zig",
     };
     var test_source_buf: [core_test_sources.len + tls_test_sources.len][]const u8 = undefined;
