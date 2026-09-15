@@ -78,6 +78,10 @@ any, are on the GitHub tracker.
 
 > M40 (the gate-fleet consolidation, issue #934, done 2026-09-06) was a tooling
 > workstream, not a product milestone; M36 was skipped.
+>
+> Issue #1338 (2026-09-15) is likewise tooling: the class-B harness now refuses
+> `bash < 4.4` and treats any exit before a spec's result block as non-zero, so
+> a spec that dies mid-plan can no longer be read as PASS by `fleet.sh`.
 
 ## Open work
 
