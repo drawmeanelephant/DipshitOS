@@ -45,6 +45,7 @@ const scheduler = @import("scheduler.zig");
 const svclock = @import("svclock.zig"); // claim 9498 follow-on: demand-paging faults gate only the KERNEL domain (mmap-region/registry state)
 const memmap = @import("memmap.zig");
 const userspace = @import("userspace.zig");
+const forensics = @import("forensics.zig"); // #1261: exception-entry probe (inert unless `forensics on`)
 
 // ---------------------------------------------------------------------------
 // Exception kinds (the x5 value each stub passes; also the vector offset's
@@ -915,6 +916,12 @@ pub export fn exc_dispatch(
 ) callconv(.c) Resume {
     const cid = resume_core(); // per-core resume handoff (issue #810)
     handled_count_value[cid] += 1; // per-core: secondary-core IRQs fire in parallel
+    // #1261: record exception ENTRY, before any GIC state is consumed. The
+    // post-ack `irq` probe cannot distinguish "the interrupt stopped being
+    // delivered" from "it was delivered but acked as spurious"; this one
+    // fires the instant C code takes control, and its cadence vs the `irq`
+    // cadence and the `rearm` cadence separates the two.
+    forensics.note(.entry, kind);
     resume_frame[cid] = @intFromPtr(frame);
     resume_sp_el0[cid] = source_sp_el0(frame, spsr);
     // Claim 7948: taken IRQs route to the registered dispatcher (GIC ack

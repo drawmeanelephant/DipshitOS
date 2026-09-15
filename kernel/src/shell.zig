@@ -48,6 +48,7 @@ pub const clipboard = @import("clipboard.zig"); // M18 T2 (issue #405): shared c
 pub const virtio_file = @import("virtio_file.zig");
 const svclock = @import("svclock.zig"); // claim 9498 follow-on: the idle loop's service-state brackets (NET/WIN+EV/FILE)
 const trust = @import("trust.zig"); // M50 TS2 (#1136, ADR 0024 D4): the kernel-actor gate for history/env
+const forensics = @import("forensics.zig"); // #1261: console-free liveness sample from the idle loop
 
 /// M18 T4: path for persistent shell history file.
 const history_path = "HISTORY.TXT";
@@ -3706,6 +3707,16 @@ fn park_body(mon: *monitor.Monitor) callconv(.c) void {
             timer.maybe_heartbeat(&mon.console);
             scheduler.maybe_report(&mon.console);
             userspace.maybe_report(&mon.console);
+            // #1261: the console-free liveness sample. If the guest is still
+            // executing, `fxs:` lines keep appearing in the serial log every
+            // `forensics.sample_period_secs` seconds regardless of what the
+            // console traffic is doing — the cleanest way to tell "the guest
+            // stopped" from "the recorder had nothing to ride on". The clock
+            // is the free-running hardware counter divided by the programmed
+            // frequency: monotonic, wall-clock, shared by both cores (an
+            // earlier choice, `timer.irq_ticks`, is shared and resettable and
+            // flooded the trace at ~47 samples/s).
+            forensics.sample(mon.console, timer.cntpct(), timer.freq);
             // M19 P7 (issue #296): reap finished background jobs — the
             // `[N] Done:` line prints from the same idle path as every
             // other asynchronous report above.

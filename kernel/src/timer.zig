@@ -28,6 +28,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const mmio = @import("mmio.zig");
 const console = @import("console.zig");
+const forensics = @import("forensics.zig"); // #1261: comparator re-arm probe (inert unless `forensics on`)
 
 /// Conventional EL1 physical-timer PPI when the GTDT is absent or silent.
 pub const ppi_default: u32 = 30;
@@ -141,6 +142,11 @@ pub fn arm() void {
     if (comptime builtin.cpu.arch != .aarch64) return;
     if (period_ticks == 0) return;
     const cval = cntpct() + period_ticks;
+    // #1261: record that the hardware was given a deadline, and what it was.
+    // A steady `rearm` cadence with no `entry` records says the comparator
+    // fires but the exception is never taken; a `rearm` gap says the source
+    // itself stopped. The delta is what exposes a clobbered `period_ticks`.
+    forensics.note(.rearm, period_ticks);
     asm volatile ("msr cntp_cval_el0, %[v]"
         :
         : [v] "r" (cval),

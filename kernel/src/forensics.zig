@@ -59,6 +59,23 @@ pub const Site = enum(u8) {
     wake = 2,
     console_line = 3,
     shot = 4,
+    /// #1261: exception ENTRY, recorded before `gic.ack()`. The `irq` probe
+    /// sits after the ack and the spurious check, so "no irq records" in a
+    /// silent tail is ambiguous between "no interrupt was delivered" and "no
+    /// interrupt was acked-and-true". `entry` removes the ambiguity: it fires
+    /// the instant C code takes control, before any GIC state is consumed.
+    /// `arg` carries the exception KIND (the vector class, not an INTID).
+    entry = 5,
+    /// #1261: the comparator was (re-)programmed. A gap in `rearm` records
+    /// means the timer hardware was never given a new deadline — the PPIs
+    /// stopped at the SOURCE — while a steady `rearm` cadence with no `entry`
+    /// records means the comparator fires but the core never takes the
+    /// exception. `arg` is the programmed comparator delta in counter ticks.
+    rearm = 6,
+    /// #1261: `gic.ack()` returned a spurious INTID. "Signaled but not a real
+    /// interrupt" — the record that makes a spurious storm visible instead of
+    /// silently collapsing into the same tail as no interrupts at all.
+    spur = 7,
 
     pub fn name(self: Site) []const u8 {
         return switch (self) {
@@ -67,6 +84,9 @@ pub const Site = enum(u8) {
             .wake => "wake",
             .console_line => "line",
             .shot => "shot",
+            .entry => "entry",
+            .rearm => "rearm",
+            .spur => "spur",
         };
     }
 };
@@ -213,12 +233,64 @@ pub fn drain(con: console.Console) void {
     if (n > 0) con.write(buf[0..n]);
 }
 
+/// #1261: a console-FREE liveness sample. The recorder's emission is coupled
+/// to console writes, so "the trace stopped" is always confounded with "the
+/// console stopped" — on the nudge tree the last 47k serial lines print with
+/// no `irq` record, and that alone cannot separate delivery from recording.
+///
+/// This probe produces a record no console line needs to exist for: it notes
+/// the sample, then *drains it inline* through its own `con.write`. It runs
+/// from the shell idle loop (main context, the same rules as
+/// `maybe_heartbeat`), once per `sample_period_secs` of wall-clock time, so a
+/// guest that is still executing keeps appending `fxs:` lines to the serial
+/// log no matter what the console traffic looks like.
+pub const sample_period_secs: u64 = 4;
+var last_sample_secs: ?u64 = null;
+
+/// The clock is the free-running hardware counter (`timer.cntpct()`) divided
+/// by the programmed frequency (`timer.freq`) — monotonic by definition and
+/// exact in wall-clock seconds. Two clock choices were measured and rejected:
+///
+/// - `scheduler.tick_count` advances per scheduling quantum, not per second
+///   (6,212 records in one gate boot — a trace flood, not a heartbeat).
+/// - `timer.irq_ticks` is a SHARED counter, incremented by BOTH cores' 1 Hz
+///   PPIs and reset by timer re-init paths: it went 1 -> 0 during early boot
+///   and advanced ~2/s, so the `== 0` bypass plus the shared increments
+///   produced 5,575 samples in a 119 s boot (~47/s, bursts 50 µs apart).
+///
+/// `freq == 0` (counter not yet programmed) suppresses the sample rather than
+/// guessing a rate. `arg` of the `shot` record is the whole wall-clock second.
+pub fn sample(con: console.Console, counter: u64, freq: u64) void {
+    if (!enabled or draining) return;
+    if (freq == 0) return;
+    const secs = counter / freq;
+    if (last_sample_secs) |ls| {
+        // Saturation, not subtraction: the counter itself is NOT monotonic
+        // for the first ~0.9 s of a boot under VZ on this host (observed
+        // twice: a ~0.1 s backward step at t≈0.89 s, shell read ≥24M ticks
+        // while the recorder's read 54 µs later was 21.5M). A bare `secs -
+        // ls` would underflow there — Debug panics, ReleaseFast silently
+        // wraps. On a backward step, restart the cadence from the new base.
+        const elapsed = if (secs > ls) secs - ls else 0;
+        if (elapsed < sample_period_secs) return;
+    }
+    last_sample_secs = secs;
+    note(.shot, secs);
+    // Inline drain of JUST what is pending, reentrancy-guarded as `drain` is.
+    draining = true;
+    defer draining = false;
+    var buf: [max_per_drain * 64]u8 = undefined;
+    const n = format_pending(buf[0..]);
+    if (n > 0) con.write(buf[0..n]);
+}
+
 /// Reset for a fresh capture (the `forensics reset` command).
 pub fn reset() void {
     records = [_]Record{.{}} ** capacity;
     next = [_]u64{0} ** smp.max_cores;
     emitted = 0;
     truncated = 0;
+    last_sample_secs = null;
 }
 
 // ---------------------------------------------------------------------------
@@ -349,5 +421,35 @@ test "forensics: reset drops what was recorded and emits nothing stale" {
     note(.irq, 13);
     const n = format_pending(buf[0..]);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "seq=0 t=0 arg=13") != null);
+    enabled = false;
+}
+
+test "forensics: the idle sample fires once per period of wall-clock seconds, not per tick" {
+    reset();
+    enabled = true;
+    var mock = console.MockConsole(4096){};
+    const con = mock.console();
+    const freq: u64 = 24_000_000;
+    // The first call at freq=0 (counter not yet programmed) must be suppressed:
+    // an unprogrammed clock must not guess a rate.
+    sample(con, 1_000_000, 0);
+    try std.testing.expectEqual(@as(usize, 0), mock.contents().len);
+    try std.testing.expectEqual(@as(usize, 0), pending());
+    // First live sample at t=1s fires immediately (no last_sample_secs yet).
+    sample(con, freq, freq);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, mock.contents(), "fx: "));
+    // Within the period: every call, even thousands of them, adds nothing —
+    // the flood regression (5,575 samples in a 119 s boot) is pinned here.
+    var t: u64 = freq;
+    while (t < (sample_period_secs - 1) * freq) : (t += 1_000) {
+        sample(con, t, freq);
+    }
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, mock.contents(), "fx: "));
+    // Crossing the period boundary fires exactly once more (5 - 1 = 4 >= 4),
+    // with arg = the whole wall-clock second.
+    sample(con, (sample_period_secs + 1) * freq, freq);
+    const text = mock.contents();
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, text, "fx: "));
+    try std.testing.expect(std.mem.indexOf(u8, text, "site=shot core=0 seq=1 t=0 arg=5") != null);
     enabled = false;
 }
