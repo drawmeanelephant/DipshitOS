@@ -96,12 +96,22 @@ func main() {
 		vi.Exit(7)
 	}
 
-	// 6. Composite/present loop paced by the kind-18 tick.
+	// 6. Composite/present loop paced by the kind-18 tick - and the WM_RPC
+	//    serve loop (M57c): the seat hosts unmodified Zig apps that discover it
+	//    by process name and declare over the mailbox. PollEvent (not
+	//    WaitEvent) so a pending request is serviced between ticks.
 	presents, ticks := 0, 0
 	for events := 0; events < maxEvents && ticks < maxTicks; events++ {
-		e, r := vi.WaitEvent()
-		if r <= 0 {
-			vi.Yield()
+		serviceRPC()
+		if hostedApp != 0 {
+			hostTicksLeft--
+			if hostTicksLeft <= 0 {
+				closeHosted()
+			}
+		}
+		e, ok := vi.PollEvent()
+		if !ok {
+			vi.Sleep(1)
 			continue
 		}
 		if e.Kind != vi.EvCompositeTick {
@@ -109,7 +119,12 @@ func main() {
 		}
 		ticks++
 		vi.ConsoleLine(MarkerTick)
-		_ = paintBlank(scan, blankRGB)
+		// Paint the blank desktop only while nothing is hosted: the kernel
+		// paints a hosted app's window at the tick and this compose-N target
+		// sits above it, so a full-frame blank paint would overpaint the client.
+		if hostedApp == 0 {
+			_ = paintBlank(scan, blankRGB)
+		}
 		if vi.WmctlRequestPresent() == 0 {
 			presents++
 			if presents == 1 {
@@ -117,6 +132,7 @@ func main() {
 			}
 		}
 	}
+	vi.ConsoleLine(MarkerHostDone)
 
 	// 6. Clean exit. The kernel's exit path unregisters the seat.
 	vi.ConsoleLine(MarkerClose)

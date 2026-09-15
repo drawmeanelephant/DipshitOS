@@ -135,7 +135,7 @@ type WmSeat struct {
 // WMProcNames are the two seats an app's WM_RPC client resolves: the floating
 // WND.BIN desktop and the tabbed TABWM.BIN desktop. At most ONE is registered
 // at a time (sys_wmctl REGISTER is one-seat), so matching either is safe.
-var WMProcNames = [...]string{"WND.BIN", "TABWM.BIN"}
+var WMProcNames = [...]string{"WND.BIN", "TABWM.BIN", "GOTABWM.ELF"}
 
 // WmPeers finds the WM pid and this process's pid in a single `sys_procs`
 // scan (the M56a `wm_peers` helper). A zero field means "not found" (no WM

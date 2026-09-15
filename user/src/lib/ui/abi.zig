@@ -392,7 +392,14 @@ pub const wm_proc_name: []const u8 = "WND.BIN";
 /// exists (sys_wmctl REGISTER is one-seat), so matching either name is safe;
 /// the ack routing is by pid, not by name.
 pub const wm_proc_name_tab: []const u8 = "TABWM.BIN";
-pub const wm_proc_names: [2][]const u8 = .{ wm_proc_name, wm_proc_name_tab };
+/// M57c (issue #1318): GOTABWM.ELF — the Go second seat — is the third WM
+/// server the toolkit app<->WM RPC client resolves. Additive, exactly like
+/// M42 SX3 added TABWM.BIN: at most ONE seat is registered (sys_wmctl
+/// REGISTER is one-seat), so matching any known name is safe and the ack
+/// routing stays by pid, not by name. Unmodified Zig apps (CALC, NOTEPAD)
+/// therefore reach the Go seat with no app-source change.
+pub const wm_proc_name_go: []const u8 = "GOTABWM.ELF";
+pub const wm_proc_names: [3][]const u8 = .{ wm_proc_name, wm_proc_name_tab, wm_proc_name_go };
 /// The proc-snapshot buffer bound (16 rows × 40 B — plenty for any fleet).
 pub const wm_procs_buf: usize = 16 * 40;
 /// The mailbox slot bound the WM_RPC frame must fit (the frozen 64 B).

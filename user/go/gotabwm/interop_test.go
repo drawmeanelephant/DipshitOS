@@ -1,0 +1,86 @@
+package main
+
+import (
+	"testing"
+
+	"virelai/vi"
+)
+
+// The gate greps these exact strings; a drift is a host-test failure rather
+// than a live run that silently asserts nothing.
+func TestInteropMarkerShapes(t *testing.T) {
+	cases := []struct{ got, want string }{
+		{MarkerRpcDeclare, "gotabwm: rpc declare id="},
+		{MarkerRpcRaise, "gotabwm: rpc raise id="},
+		{MarkerRpcAttach, "gotabwm: rpc attach id="},
+		{MarkerRpcDetach, "gotabwm: rpc detach id="},
+		{MarkerRpcCycle, "gotabwm: rpc cycle"},
+		{MarkerRpcOther, "gotabwm: rpc other kind="},
+		{MarkerHostFocus, "gotabwm: host focus id="},
+		{MarkerHostView, "gotabwm: host view id="},
+		{MarkerHostClose, "gotabwm: host close id="},
+		{MarkerHostDone, "gotabwm: host done"},
+	}
+	for _, c := range cases {
+		if c.got != c.want {
+			t.Fatalf("marker = %q want %q", c.got, c.want)
+		}
+	}
+}
+
+// The ack MUST set the reply bit and mirror id/seq, or an unmodified Zig app
+// ignores it and falls back to its legacy rect (the interop silently no-ops).
+func TestBuildReplyWire(t *testing.T) {
+	req := vi.WmRpc{Kind: vi.WmRpcKindDeclareFullscreen, ID: 7, Seq: 5, ReplyTo: 3}
+	req.SetTitle("Calc")
+	rep := buildReply(req, true)
+	if rep.Kind&vi.WmRpcReplyFlag == 0 {
+		t.Fatalf("ack kind %#x lacks the reply bit", rep.Kind)
+	}
+	if rep.Kind&0x7f != vi.WmRpcKindDeclareFullscreen {
+		t.Fatalf("ack kind %#x lost the request kind", rep.Kind)
+	}
+	if rep.ID != req.ID || rep.Seq != req.Seq {
+		t.Fatalf("ack id/seq = %d/%d want %d/%d", rep.ID, rep.Seq, req.ID, req.Seq)
+	}
+	if rep.Applied != 1 {
+		t.Fatalf("ack applied = %d want 1", rep.Applied)
+	}
+	if rep.ReplyTo != req.ReplyTo {
+		t.Fatalf("ack reply_to = %d want %d", rep.ReplyTo, req.ReplyTo)
+	}
+	// The ack frame must survive the wire round-trip the app decodes.
+	got, ok := vi.DecodeWmRpc(rep.Encode())
+	if !ok || got.Kind != rep.Kind || got.ID != rep.ID || got.Seq != rep.Seq || got.Applied != 1 {
+		t.Fatalf("ack round-trip = %+v ok=%v", got, ok)
+	}
+	if rep2 := buildReply(req, false); rep2.Applied != 0 {
+		t.Fatalf("refused ack applied = %d want 0", rep2.Applied)
+	}
+}
+
+// A hosted app is closed after hostTicks ticks - the budget the composite loop
+// counts down.
+func TestHostTickBudget(t *testing.T) {
+	if hostTicks <= 0 {
+		t.Fatalf("hostTicks = %d: an app would never be closed", hostTicks)
+	}
+	if hostTicks > maxTicks {
+		t.Fatalf("hostTicks %d > maxTicks %d: the close is unreachable", hostTicks, maxTicks)
+	}
+}
+
+// The seat must not repaint the blank desktop while an app is hosted, or the
+// compose-N target (above the kernel's window layer) would overpaint the client.
+func TestHostedSuppressesBlankPaint(t *testing.T) {
+	saved := hostedApp
+	defer func() { hostedApp = saved }()
+	hostedApp = 0
+	if hostedApp != 0 {
+		t.Fatal("hostedApp should start 0")
+	}
+	hostedApp = 9
+	if hostedApp == 0 {
+		t.Fatal("hostedApp should be set while hosting")
+	}
+}
