@@ -21,23 +21,31 @@
 # the vendored blob FETCHS.BIN carries, so the guest is validating against its
 # own pinned root rather than a test-only bypass.
 #
-# KNOWN-FAILING (measured locally on Apple silicon macOS 27, 2026-09-15).
-# The gate runs and reaches the consumer body, then the guest dies with a data
-# abort. Cause, measured rather than guessed:
+# KNOWN-FAILING, with the diagnosis narrowed to one number.
 #
-#   guest task stack (scheduler.task_stack_size)      32,768 B
-#   largest stack frame in FETCHS.BIN                 79,856 B
-#   second largest                                    34,032 B
+# Measured locally on Apple silicon macOS 27. Left at the production
+# task_stack_size (32,768 B), the guest dies on a data abort. The faulting
+# instruction is a prologue store (`stp x29, x30, [sp, #-32]!`), and the
+# deepest address reached sits ~131 KiB below the stack top, so the client's
+# call nest needs more stack than the guest has. Raising task_stack_size to
+# 256 KiB on this machine removes the crash entirely and the run proceeds to a
+# real handshake verdict -- which is the honest way to say the stack is the
+# gate on this spec, and that changing it is a kernel-wide decision (it was
+# already doubled 16 -> 32 KiB once for M25, carries "+16 KiB BSS per static
+# stack" against the verify-bss-budget gate, and there are six static stacks).
 #
-# The TLS client's stack footprint exceeds the guest stack, so this cannot go
-# green until one of two things changes: the client stops needing ~80 KiB of
-# stack, or the per-task stack grows. Both are real decisions (the second
-# changes every user task's memory), which is why this spec is committed red
-# rather than papered over. Do not "fix" it by weakening the assertions.
+# Progress the gate has already forced, all of it invisible to host tests
+# because the driver has an 8 MB stack:
+#   - an 81,264-byte entry frame (the client was a stack local) -> 208 B
+#   - argv shifted by one (the DSK1/DSK3 argv block has no program name;
+#     the ELF block does) -> `fetchs: target set` now passes
+#   - signature verification inlined into the handshake frame -> 79,856 ->
+#     62,784 B
+#   - the guest's traffic does not reach the host by magic: `net ip` + `net arp`
+#     plus `--net-tcp-respond 10.0.0.2:<port>:relay` + `--net-tcp-respond-relay`
+#     are what connect the guest to a real responder on the host loopback.
 #
-# Earlier defects this gate already found and that are now fixed: an 81,264-byte
-# entry frame (the client was a stack local), and argv shifted by one (the
-# DSK1/DSK3 argv block has no program name; the ELF block does).
+# Do not "fix" this by weakening the assertions.
 
 vgate_name live-tls13 "TLS 1.3: the guest consumer completes a real handshake and reads a response"
 vgate_share seed
@@ -74,7 +82,7 @@ sys.path.insert(0, os.path.join("user", "src", "lib", "tls", "vectors"))
 cmd = [
     sys.executable,
     os.path.join("user", "src", "lib", "tls", "vectors", "tlsresponder.py"),
-    "--host", "0.0.0.0", "--port", "24533",
+    "--host", "127.0.0.1", "--port", "24533",
     "--cert", chain, "--key", os.path.join(fx, "leaf-ec.key"),
     "--body", "live-tls13-ok\n", "--accept", "1", "--timeout", "600",
 ]
@@ -84,10 +92,20 @@ print("live-tls13: staged FETCHS.BIN and the fixture chain; responder pid=%d on 
 PY
 
 vgate_file script.txt <<'EOF'
+net ip 10.0.0.1
+net arp 10.0.0.2
 exec FETCHS.BIN 10.0.0.2 24533
 EOF
 
-vgate_run 01 -- --script '$RUN_DIR/script.txt' --script-expect 'fetchs: handshake ok' --timeout 180
+# The guest's traffic does not reach the host by magic: the runner simulates the
+# link. `net ip` + `net arp` give the guest a stack and a neighbour, and
+# `:relay` is what turns the guest's SYN into a real connection to the Python
+# responder on the host loopback. Without the relay the guest sees a refused
+# connect and the responder never accepts anything -- which is exactly what the
+# first attempt at this spec did.
+vgate_run 01 -- --net '$RUN_DIR/cap.bin' --net-arp-respond 10.0.0.2 \
+    --net-tcp-respond 10.0.0.2:24533:relay --net-tcp-respond-relay 127.0.0.1:24533 \
+    --script '$RUN_DIR/script.txt' --script-expect 'fetchs: handshake ok' --timeout 180
 
 vgate_assert 01 serial-contains 'fetchs: target set'
 vgate_assert 01 serial-contains 'fetchs: roots loaded'
