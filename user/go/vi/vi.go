@@ -388,6 +388,47 @@ func FileDelete(path string) int64 {
 	return syscall2(SlotFileDelete, strPtr(path), uintptr(len(path)))
 }
 
+// MaxDirEntries is the kernel's sys_dir_list window (handle_dir_list clamps
+// max_entries to 16). A longer caller buffer is truncated to this.
+const MaxDirEntries = 16
+
+// DirEntry is the 40-byte sys_dir_list row (file_table.DirEntry): name[32]
+// NUL-padded, size u32, is_dir u8, reserved[3].
+type DirEntry struct {
+	Name     [32]byte
+	Size     uint32
+	IsDir    uint8
+	Reserved [3]byte
+}
+
+// NameString returns the NUL-trimmed directory entry name.
+func (e DirEntry) NameString() string {
+	n := 0
+	for n < len(e.Name) && e.Name[n] != 0 {
+		n++
+	}
+	return string(e.Name[:n])
+}
+
+// Dir reports whether the entry is a directory.
+func (e DirEntry) Dir() bool { return e.IsDir != 0 }
+
+// DirList enumerates path into buf (slot 27). Returns (count, result).
+// An empty path lists the host-share root. count is 0 when the call fails.
+func DirList(path string, buf []DirEntry) (int, int64) {
+	if len(buf) == 0 {
+		return 0, 0
+	}
+	if len(buf) > MaxDirEntries {
+		buf = buf[:MaxDirEntries]
+	}
+	r := syscall4(SlotDirList, strPtr(path), uintptr(len(path)), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+	if r < 0 {
+		return 0, r
+	}
+	return int(r), r
+}
+
 // TCPConnect opens the single TCP socket (VirelaiOS has one per process).
 func TCPConnect(ip [4]byte, port uint16) int64 {
 	word := uint32(ip[0])<<24 | uint32(ip[1])<<16 | uint32(ip[2])<<8 | uint32(ip[3])
