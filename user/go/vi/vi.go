@@ -14,6 +14,9 @@ const (
 	SlotYield        uintptr = 2
 	SlotExit         uintptr = 3
 	SlotSleep        uintptr = 4
+	SlotIPCSend      uintptr = 5
+	SlotIPCRecv      uintptr = 6
+	SlotProcs        uintptr = 7
 	SlotWinOpen      uintptr = 12
 	SlotWinFill      uintptr = 13
 	SlotWinPresent   uintptr = 14
@@ -37,15 +40,23 @@ const (
 	SlotTime         uintptr = 66
 )
 
-// Kernel error codes (ADR 0007 D3, negative values as returned).
+// Kernel error codes (ADR 0007 D3): the MAGNITUDES of the kernel's
+// `ErrorCode` enum (kernel/src/syscall.zig). A syscall returns the negation,
+// so a full mailbox ring hands back -ErrENOSPC from slot 5. Ordering is the
+// kernel's, not alphabetical; TestErrnoTable pins it.
 const (
-	ErrEINVAL int64 = 1
-	ErrEBADF  int64 = 2
-	ErrEFAULT int64 = 3
-	ErrENOSYS int64 = 4
-	ErrENOENT int64 = 5
-	ErrENOSPC int64 = 6
-	ErrEEXIST int64 = 9
+	ErrEINVAL       int64 = 1
+	ErrEBADF        int64 = 2
+	ErrEFAULT       int64 = 3
+	ErrENOSYS       int64 = 4
+	ErrENOSPC       int64 = 5
+	ErrENOENT       int64 = 6
+	ErrEACCES       int64 = 7
+	ErrENAMETOOLONG int64 = 8
+	ErrENXIO        int64 = 9
+	ErrENOMEM       int64 = 10
+	ErrEAGAIN       int64 = 11
+	ErrETIMEDOUT    int64 = 12
 )
 
 // File channel flags (ADR 0010).
@@ -434,12 +445,22 @@ func (e errno) Error() string {
 		return "EFAULT"
 	case ErrENOSYS:
 		return "ENOSYS"
-	case ErrENOENT:
-		return "ENOENT"
 	case ErrENOSPC:
 		return "ENOSPC"
-	case ErrEEXIST:
-		return "EEXIST"
+	case ErrENOENT:
+		return "ENOENT"
+	case ErrEACCES:
+		return "EACCES"
+	case ErrENAMETOOLONG:
+		return "ENAMETOOLONG"
+	case ErrENXIO:
+		return "ENXIO"
+	case ErrENOMEM:
+		return "ENOMEM"
+	case ErrEAGAIN:
+		return "EAGAIN"
+	case ErrETIMEDOUT:
+		return "ETIMEDOUT"
 	}
 	return "EIO"
 }
