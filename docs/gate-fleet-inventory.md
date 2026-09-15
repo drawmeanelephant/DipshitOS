@@ -57,7 +57,7 @@ of them with `just verify-vz`.
 | spec | `go-stress` | 1 run / 10 assert | go-stress.spec -- issue #1227: GOOS=virelai 0b breadth (GC / channel / |
 | spec | `go-tabapp` | 1 run / 15 assert | go-tabapp.spec -- M56d (issue #1315) class-B gate: one Go app full-viewport |
 | spec | `go-win` | 1 run / 9 assert | go-win.spec -- M53 Card 1 (issue #1245): the raw ADR 0007 window, from Go. |
-| spec | `go-wm-seat` | 1 run / 29 assert | go-wm-seat.spec -- M57a/M57b (issues #1313/#1317) class-B gate: a Go WM |
+| spec | `go-wm-seat` | 2 run / 53 assert | go-wm-seat.spec -- M57a/b/c (issues #1313/#1317/#1318) class-B gate: a Go WM |
 | spec | `live-addrspaces` | 1 run / 11 assert | live-addrspaces.spec -- per-task user address spaces on VZ hardware: |
 | spec | `live-args` | 1 run / 6 assert | live-args.spec -- exec arguments reach EL0: the same USER.BIN exec'd |
 | spec | `live-asm` | 1 run / 9 assert | live-asm.spec -- M22 D2: on-machine assembler produces an ELF the on-machine loader runs. |

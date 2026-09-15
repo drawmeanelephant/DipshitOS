@@ -124,3 +124,15 @@ func WmctlSetWindowChrome(id uint32, desc []byte) int64 {
 func WmctlWinClose(id uint32) int64 {
 	return syscall2(SlotWmctl, uintptr(WmctlWinCloseCmd), uintptr(id))
 }
+
+// WmctlTaskbarClickCmd is slot-65 subcommand 12: the WM asks the kernel for
+// the taskbar-click decision on window id — the kernel's own focus+raise
+// primitive, so the owner receives the real WIN_FOCUS event.
+const WmctlTaskbarClickCmd uint64 = 12
+
+// WmctlTaskbarClick focuses and raises window id through the WM seam (slot 65
+// cmd 12). The owning process receives WIN_FOCUS. Returns 0, or
+// -EINVAL/-EACCES/-ENOSYS.
+func WmctlTaskbarClick(id uint32) int64 {
+	return syscall2(SlotWmctl, uintptr(WmctlTaskbarClickCmd), uintptr(id))
+}
