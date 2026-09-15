@@ -47,3 +47,11 @@ func Args() []string {
 	}
 	return runtimeArgs()
 }
+
+// mmapSlice turns a kernel sys_mmap result (the mapping base address) into a
+// byte slice of n bytes. Guest-only: the address came from the syscall, and
+// this is the one place the uintptr->slice cast lives, behind the virelai
+// build tag so host `go vet` never sees unsafe.Pointer(uintptr(...)).
+func mmapSlice(base uintptr, n int) []byte {
+	return unsafe.Slice((*byte)(unsafe.Pointer(base)), n)
+}
