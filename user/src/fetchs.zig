@@ -245,7 +245,16 @@ noinline fn serve(target: target_mod.Target) noreturn {
 /// the client fit -- that is the open finding -- but it turns one opaque
 /// 79 KiB number into per-phase numbers a decision can be made from.
 noinline fn phaseHandshake() bool {
-    client.handshake() catch return false;
+    client.handshake() catch |e| {
+        // Name the error. "handshake failed" is a verdict, not a diagnosis:
+        // the client's error set distinguishes a bad record from a rejected
+        // certificate from an unexpected message, and only one of those is a
+        // reason to look at the TLS code.
+        ui.write_console("fetchs: handshake error ");
+        ui.write_console(@errorName(e));
+        ui.write_console("\n");
+        return false;
+    };
     return true;
 }
 
