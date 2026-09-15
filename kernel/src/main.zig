@@ -1914,7 +1914,14 @@ fn process_stdout(text: []const u8) void {
 /// fires.
 fn irq_dispatch() void {
     const intid = gic.ack();
-    if (gic.is_spurious(intid)) return;
+    if (gic.is_spurious(intid)) {
+        // #1261: a spurious ack means the interrupt was SIGNALED but not
+        // delivered as a real one (or was raced to zero by another core).
+        // Invisible after this point — without this record a storm of
+        // spurious acks is indistinguishable from silence.
+        forensics.note(.spur, intid);
+        return;
+    }
     gic.note_irq(intid);
     // #1278: record the delivery itself. This runs in IRQ context, which is
     // exactly why `note` may not print — the record is emitted by whatever

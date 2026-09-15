@@ -22,6 +22,14 @@
 #      run (`vm-stop: state=… reason=…`). A healthy boot must say VZ reported no
 #      reason, which is the one line that disappears if the VZVirtualMachine
 #      delegate stops being installed.
+#
+#   4. THE #1261 PROBES ARE WIRED. `entry` (exception entry, before GIC
+#      consumption), `rearm` (comparator programmed, arg = the delta) and
+#      `shot` (the console-free idle-loop sample) must all be present: each
+#      one is a call site whose silent deletion would zero exactly the
+#      reading a dying boot is read for. `spur` is deliberately NOT required
+#      here -- a healthy boot legitimately acks zero spurious interrupts --
+#      but it is still reported in the site census.
 
 vgate_name live-forensics "#1278 -- last-words recorder: off by default, records reach serial"
 vgate_share seed
@@ -45,6 +53,10 @@ vgate_assert 01 serial-contains 'forensics: enabled=0 pending=0 emitted=0 trunca
 # (2) It reaches serial once armed.
 vgate_assert 01 serial-contains 'fx: site=irq'
 vgate_assert 01 serial-contains 'fx: site=rotate'
+# (4) The #1261 probes reach serial too.
+vgate_assert 01 serial-contains 'fx: site=entry'
+vgate_assert 01 serial-contains 'fx: site=rearm'
+vgate_assert 01 serial-contains 'fx: site=shot'
 vgate_assert 01 serial-contains 'forensics: dump wrote='
 vgate_assert 01 serial-contains 'fx-ok'
 # (3) The HOST half is wired. The runner now reports a stop verdict on every
@@ -69,10 +81,13 @@ sites = {}
 for site, core, _seq, _t, _arg in rows:
     sites[site] = sites.get(site, 0) + 1
 
-# The two sites a silent death lands between: the interrupt that was being
-# serviced, and the switch that was in flight (with the task it left behind --
-# the half an after-the-fact "who is current" dump can never recover).
-for required in ("irq", "rotate"):
+# The sites a silent death lands between, plus the #1261 probes: the
+# interrupt being serviced, the switch in flight, the exception ENTRY before
+# any GIC state is consumed, the comparator re-arm (arg = the programmed
+# delta), and the console-free idle sample. Each required site fails the gate
+# if its call site is deleted. `spur` is reported but not required: a healthy
+# boot acks zero spurious interrupts.
+for required in ("irq", "rotate", "entry", "rearm", "shot"):
     if sites.get(required, 0) == 0:
         print("no %s records: %r" % (required, sites), file=sys.stderr)
         sys.exit(1)
