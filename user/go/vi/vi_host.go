@@ -25,3 +25,7 @@ func Args() []string { return nil }
 
 // MmapAnon has no meaning off the guest.
 func MmapAnon(size int) ([]byte, error) { return nil, errno(ErrENOSYS) }
+
+// mmapSlice has no meaning off the guest (MmapHint/MmapAnon already return
+// -ENOSYS there, so no caller reaches this with a real base).
+func mmapSlice(base uintptr, n int) []byte { return nil }
