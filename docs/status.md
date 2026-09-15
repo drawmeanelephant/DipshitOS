@@ -74,7 +74,7 @@ any, are on the GitHub tracker.
 | 52 | Client-death hardening | Exit/revoke teardown pinned end-to-end: a client dying with focus, a drag, or a bound surface leaves no zombie window, stale mapping, stuck capture, or dead-seat routing (umbrella #1237) | ✅ 2026-09-14 |
 | 53 | TLS 1.3 client + trust store | In-tree TLS 1.3 end to end: HKDF/SHA-384/AES-GCM, X.509 + chain validation, RSA/ECDSA verification, the handshake state machine; real interop against 4 peer implementations and 8 public endpoints, 5 negatives fail closed; ADR 0029 | ✅ 2026-09-14 |
 | 54 | Go carries its first app | A Go EL0 program owns a raw ADR 0007 window (`GOWIN.ELF`, gate `go-win`), an independent Go `.tabs` v2 codec round-trips the TABWM session format (`tools/go/tabcodec`), and `WEB.ELF` renders in-guest over `user/go/webrender`; kernel untouched (umbrella #1244) | ✅ 2026-09-15 |
-| 56 | Finish the Go SDK (`vi` + `tabapp`) | The Go EL0 SDK is complete enough to be a WM: `vi` gains IPC 5/6 + `procs` discovery, the tab-client WM_RPC wire, and addr-hinted mmap; `user/go/widgets` adds text/button/list; `user/go/tabapp` + a demo app run one Go tab full-viewport in Zig TABWM (gate `go-tabapp`) | 🔄 host green; `go-tabapp` VZ unrun |
+| 56 | Finish the Go SDK (`vi` + `tabapp`) | The Go EL0 SDK is complete enough to be a WM: `vi` gains IPC 5/6 + `procs` discovery, the tab-client WM_RPC wire, and addr-hinted mmap; `user/go/widgets` adds text/button/list; `user/go/tabapp` + a demo app run one Go tab full-viewport in Zig TABWM (gate `go-tabapp`) | ✅ 2026-09-15 (gate `go-tabapp` green on VZ) |
 
 > M40 (the gate-fleet consolidation, issue #934, done 2026-09-06) was a tooling
 > workstream, not a product milestone; M36 was skipped.
