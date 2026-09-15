@@ -1569,6 +1569,104 @@ test "syscall: slot 28 sys_exec marshals the path and maps loader errors" {
     try std.testing.expectEqual(@as(u64, 5), call_count(sys_exec));
 }
 
+test "syscall: slot 28 sys_exec argc>8 is EINVAL and ENOENT leaves the caller (issue #1333)" {
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0);
+    scheduler.start();
+    var share_files = [_]virtio_file.TestFile{
+        .{ .name = "BOOTED.TXT", .data = "1\n" },
+    };
+    virtio_file.set_test_share(&share_files);
+    defer virtio_file.set_test_share(null);
+    var frame = fresh_frame();
+
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+    try std.testing.expectEqual(@as(?usize, 0), process.find_by_task(2));
+
+    var path_buf: [16]u8 = undefined;
+    const path_addr = @intFromPtr(&path_buf);
+    @memcpy(path_buf[0..8], "NOSUCH.B");
+    set_user_regions(
+        .{ .base = 0, .len = 0 },
+        .{ .base = path_addr, .len = path_buf.len },
+    );
+
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_exec, .{ path_addr, 8, 0, 9, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(usize, 1), process.count());
+    try std.testing.expectEqual(process.State.running, process.info(0).?.state);
+
+    @memcpy(path_buf[0..10], "NOSUCH.BIN");
+    try std.testing.expectEqual(error_result(.enoent), dispatch(sys_exec, .{ path_addr, 10, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+    try std.testing.expectEqual(@as(?usize, 0), process.find_by_task(2));
+    try std.testing.expectEqual(process.State.running, process.info(0).?.state);
+    try std.testing.expectEqual(@as(usize, 1), process.count());
+}
+
+// Host-backed page pool for a successful sys_exec (exec copies into
+// text_phys; a fake 0x100000 base would segfault the host test).
+var sys_exec_pool: [256 * 4096]u8 align(4096) = undefined;
+
+fn arm_sys_exec_allocator() void {
+    const descriptors = [_]memmap.MemoryDescriptor{
+        .{ .type = .conventional_memory, .physical_start = @intFromPtr(&sys_exec_pool), .virtual_start = 0, .number_of_pages = 256, .attribute = 0 },
+    };
+    const view = memmap.MapView.init(std.mem.asBytes(&descriptors), @sizeOf(memmap.MemoryDescriptor), descriptors.len);
+    _ = alloc.init(view, &.{});
+}
+
+test "syscall: slot 28 sys_exec success preserves the caller task (issue #1333)" {
+    userspace.init();
+    init(test_writer);
+    mmu.reset();
+    arm_sys_exec_allocator();
+    _ = mmu.build_user_root(userspace.text_va, 0x1000, 64, userspace.stack_va, 0x2000, 8192) orelse return error.TestUnexpectedResult;
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0);
+    scheduler.start();
+
+    const content = "user: hello from the ESP\n";
+    var img = [_]u8{0} ** (24 + 25);
+    std.mem.writeInt(u32, img[0..4], 0x314b5344, .little);
+    std.mem.writeInt(u64, img[8..16], 24, .little);
+    std.mem.writeInt(u64, img[16..24], 24 + 25, .little);
+    @memcpy(img[24..], content);
+    var share_files = [_]virtio_file.TestFile{
+        .{ .name = "USER.BIN", .data = img[0..] },
+    };
+    virtio_file.set_test_share(&share_files);
+    defer virtio_file.set_test_share(null);
+
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+    try std.testing.expectEqual(@as(?usize, 0), process.find_by_task(2));
+
+    var wire: [40]u8 = [_]u8{0} ** 40;
+    @memcpy(wire[0..8], "USER.BIN");
+    @memcpy(wire[8..13], "alpha");
+    const wire_addr = @intFromPtr(&wire);
+    set_user_regions(
+        .{ .base = 0, .len = 0 },
+        .{ .base = wire_addr, .len = wire.len },
+    );
+
+    var frame = fresh_frame();
+    const rc = dispatch(sys_exec, .{ wire_addr, 8, wire_addr + 8, 1, 0, 0 }, &frame);
+    try std.testing.expectEqual(@as(u64, 1), rc);
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+    try std.testing.expectEqual(@as(?usize, 0), process.find_by_task(2));
+    try std.testing.expectEqual(process.State.running, process.info(0).?.state);
+    try std.testing.expectEqual(process.State.running, process.info(1).?.state);
+    try std.testing.expectEqualStrings("USER.BIN", process.info(1).?.name);
+}
+
 test "syscall: slot 29 sys_kill arms a process target and maps refusals" {
     userspace.init();
     init(test_writer);

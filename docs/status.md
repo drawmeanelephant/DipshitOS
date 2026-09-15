@@ -87,6 +87,7 @@ The only threads not closed:
 |--------|-------------------|-------|
 | **Go runtime port — `GOOS=virelai`** | Phase 0a merged (PR #1187); 0b rounds 1+2 + envp + stress merged (#1196/#1221/#1230/#1231). Next: 0c fault delivery (#1228). TABWM/DOC follow-ups stay parked until the Go fleet can carry the test apps. | #1163, #1194, #1214, #1228 |
 | **M58 — Move the apps you touch** | M58a Go file manager active (#1305). M58b–d unclaimed. Full-viewport via tabapp in Zig TABWM; does not wait on M57. | #1305, #1306, #1307, #1308 |
+| **EL0 `sys_exec` caller survival** | AddrSpaceSpec + argv on slot 28; class-B `live-el0-exec` | #1333 |
 
 ## Gate status
 

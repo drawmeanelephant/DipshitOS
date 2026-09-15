@@ -29,6 +29,7 @@ const (
 	SlotFileWrite    uintptr = 25
 	SlotFileClose    uintptr = 26
 	SlotDirList      uintptr = 27
+	SlotExec         uintptr = 28
 	SlotTCPConnect   uintptr = 30
 	SlotTCPSend      uintptr = 31
 	SlotTCPRecv      uintptr = 32
@@ -386,6 +387,35 @@ func FileDelete(path string) int64 {
 		return -ErrEINVAL
 	}
 	return syscall2(SlotFileDelete, strPtr(path), uintptr(len(path)))
+}
+
+// Exec loads name from the host share into a fresh process and returns its
+// pid (ADR 0007 slot 28). args is the card-3e argv list (at most 8 strings,
+// each truncated to 31 bytes + NUL); a missing list is argc=0.
+func Exec(name string, args ...string) (int64, error) {
+	if name == "" {
+		return 0, errno(ErrEINVAL)
+	}
+	if len(args) > 8 {
+		return 0, errno(ErrEINVAL)
+	}
+	var block [256]byte
+	for i, a := range args {
+		n := len(a)
+		if n > 31 {
+			n = 31
+		}
+		copy(block[i*32:], a[:n])
+	}
+	var argvPtr uintptr
+	if len(args) > 0 {
+		argvPtr = uintptr(unsafe.Pointer(&block[0]))
+	}
+	r := syscall4(SlotExec, strPtr(name), uintptr(len(name)), argvPtr, uintptr(len(args)))
+	if r < 0 {
+		return 0, errno(-r)
+	}
+	return r, nil
 }
 
 // MaxDirEntries is the kernel's sys_dir_list window (handle_dir_list clamps

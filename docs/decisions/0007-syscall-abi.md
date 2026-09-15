@@ -1202,3 +1202,34 @@ redirect; the nested-fault refusal; the table/count pin at 76) and
 class-B (`go-panic`: main + worker goroutines fault, recover with the
 nil-deref message, and walk the injected sigpanic frame;
 `sys_exnotify` calls >= 1; the full go fleet still PASS).
+
+### Amendment (2026-09-15, #1333 — slot 28 carries argv; EL0 caller survives)
+
+`sys_exec` from EL0 was path-only. A successful spawn still killed the
+caller: `process.create_as` took a full `AddrSpace` by value, and
+`AddrSpace.dynamic_pages` is `[4096]u64` (~32 KiB). Zig materializes that
+temporary on the caller's 32 KiB EL0 kstack, which sits next to the user
+stack — the overflow smashed the oldest EL0 frames. ENOENT returned
+before `create_as`, so a missing file looked fine; a real child (Go
+`WEB.ELF` exec'ing `FETCHS.BIN`) printed the pid and then died. The
+fix is `AddrSpaceSpec` (scalars only) plus in-place `@memset` of
+registry slots — never pass `AddrSpace`/`Process` by value.
+
+Slot 28 grows the card-3e argv block as two extra arguments. No new
+slot, no `implemented_count` change, no principal change (still
+ungated and caller-preserving).
+
+**Slot 28 — `sys_exec(path_ptr, path_len, argv_ptr, argc)`**
+
+| Signature | Behavior | Errors |
+|-----------|----------|--------|
+| `exec(path_ptr, path_len, argv_ptr, argc)` | Copy the path through uaccess, then run the EL1h loader (`exec.exec_file_as`) into a FRESH process slot and spawn it at EL0. `argc == 0` means no args (`argv_ptr` ignored). `argc` in 1..=8 copies packed 32-byte NUL-terminated slots (card-3e; 31 bytes + NUL, truncation is the packer's). Returns the new pid. The caller keeps running. | `EINVAL`: non-process caller, empty/over-long path, `argc > 8`, or a loader refusal (`.no_disk`, `.bad_magic`, `.bad_entry`, `.too_large`, `.no_args_room`, `.too_many_args`, ELF refusals). `EFAULT`: bad path or argv pointer. `ENOENT`: file absent. `ENOSPC`: pool / pages / page-tables / process registry full. |
+
+In-tree `ui.exec_program` now issues `syscall4(..., 0, 0)` so leftover
+x2/x3 cannot be read as argc. `ui.exec_program_args` / `vi.Exec` pack
+the block. Verified class-A (`AddrSpaceSpec` size pin; `argc > 8` is
+EINVAL; ENOENT leaves the caller running; a successful spawn preserves
+`scheduler.current_id` and the caller's process) and class-B
+(`live-el0-exec`: EL0EXEC.BIN execs a missing name, then USER.BIN with
+argv `alpha`, prints a survived marker from a stack buffer, waits, and
+the child completes).

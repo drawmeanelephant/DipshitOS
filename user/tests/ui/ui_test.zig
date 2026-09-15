@@ -64,6 +64,9 @@ const dir_list = ui.dir_list;
 const drag_read = ui.drag_read;
 const drag_start = ui.drag_start;
 const exec_program = ui.exec_program;
+const exec_program_args = ui.exec_program_args;
+const exec_max_args = ui.exec_max_args;
+const exec_arg_slot_bytes = ui.exec_arg_slot_bytes;
 const exit_process = ui.exit_process;
 const file_close = ui.file_close;
 const file_delete = ui.file_delete;
@@ -472,6 +475,13 @@ test "ui: parse_procs decodes 40-byte snapshot rows" {
     try std.testing.expectEqual(ProcState.exited, procs[1].state);
     try std.testing.expectEqual(@as(u64, 43), procs[1].exit_status);
     try std.testing.expectEqualStrings("CALC.BIN", procs[1].name[0..procs[1].name_len]);
+}
+
+test "ui: exec argv card-3e bounds (issue #1333)" {
+    try std.testing.expectEqual(@as(usize, 8), exec_max_args);
+    try std.testing.expectEqual(@as(usize, 32), exec_arg_slot_bytes);
+    try std.testing.expectEqual(@as(i64, -1), exec_program(""));
+    try std.testing.expectEqual(@as(i64, -1), exec_program_args("X.BIN", &[_][]const u8{ "a", "b", "c", "d", "e", "f", "g", "h", "i" }));
 }
 
 test "ui: DropDown open, select, and dismiss" {

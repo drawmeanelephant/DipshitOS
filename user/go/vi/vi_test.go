@@ -14,6 +14,7 @@ func TestSlotNumbers(t *testing.T) {
 		12: "win_open", 13: "win_fill", 14: "win_present", 15: "win_close",
 		19: "win_query", 21: "poll_event", 22: "wait_event",
 		23: "file_open", 24: "file_read", 25: "file_write", 26: "file_close", 27: "dir_list",
+		28: "exec",
 		30: "tcp_connect", 31: "tcp_send", 32: "tcp_recv", 33: "tcp_close",
 		34: "file_delete", 36: "file_truncate",
 		46: "win_fill_batch", 63: "mmap", 66: "time",
@@ -25,7 +26,7 @@ func TestSlotNumbers(t *testing.T) {
 		SlotWinClose: "win_close", SlotWinQuery: "win_query",
 		SlotPollEvent: "poll_event", SlotWaitEvent: "wait_event",
 		SlotFileOpen: "file_open", SlotFileRead: "file_read", SlotFileWrite: "file_write",
-		SlotFileClose: "file_close", SlotDirList: "dir_list",
+		SlotFileClose: "file_close", SlotDirList: "dir_list", SlotExec: "exec",
 		SlotTCPConnect: "tcp_connect", SlotTCPSend: "tcp_send", SlotTCPRecv: "tcp_recv",
 		SlotTCPClose: "tcp_close", SlotFileDelete: "file_delete",
 		SlotFileTruncate: "file_truncate", SlotWinFillBatch: "win_fill_batch",
@@ -169,5 +170,15 @@ func TestDirListHostFails(t *testing.T) {
 	n, rc := DirList("/host", buf[:])
 	if n != 0 || rc >= 0 {
 		t.Fatalf("host DirList = %d, %d want 0, <0", n, rc)
+	}
+}
+
+func TestExecRefusals(t *testing.T) {
+	if _, err := Exec(""); err != errno(ErrEINVAL) {
+		t.Fatalf("empty name: %v", err)
+	}
+	tooMany := make([]string, 9)
+	if _, err := Exec("X.BIN", tooMany...); err != errno(ErrEINVAL) {
+		t.Fatalf("argc>8: %v", err)
 	}
 }
