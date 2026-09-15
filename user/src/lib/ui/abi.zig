@@ -907,15 +907,29 @@ pub const ProcState = enum(u64) {
     _,
 };
 
-/// Claim 6359 (ADR 0007 slot 28): load a `.BIN` from the ESP into a fresh
-/// process slot from EL0 — the launcher half of the exec seam (the EL1h
-/// monitor's `exec` is the privileged equivalent). Returns the new
-/// process's pid on success; negative ADR 0007 error otherwise (EINVAL
-/// bad path/loader refusal, EFAULT bad pointer, ENOENT not on the ESP,
-/// ENOSPC capacity).
-pub fn exec_program(name: []const u8) i64 {
+/// Claim 6359 / issue #1333 (ADR 0007 slot 28): load a program from the
+/// share into a fresh process slot from EL0. `args` is at most 8 strings,
+/// packed as card-3e 32-byte NUL-terminated slots; an empty slice is
+/// `argc == 0` (no argv). Returns the new process's pid on success;
+/// negative ADR 0007 error otherwise (EINVAL bad path/argc/loader
+/// refusal, EFAULT bad pointer, ENOENT not on the share, ENOSPC capacity).
+pub const exec_max_args: usize = 8;
+pub const exec_arg_slot_bytes: usize = 32;
+
+pub fn exec_program_args(name: []const u8, args: []const []const u8) i64 {
     if (name.len == 0) return -1;
-    return syscall2(sys_exec_num, @intFromPtr(name.ptr), name.len);
+    if (args.len > exec_max_args) return -1;
+    var block: [exec_max_args * exec_arg_slot_bytes]u8 = [_]u8{0} ** (exec_max_args * exec_arg_slot_bytes);
+    for (args, 0..) |a, i| {
+        const take = @min(a.len, exec_arg_slot_bytes - 1);
+        @memcpy(block[i * exec_arg_slot_bytes ..][0..take], a[0..take]);
+    }
+    const argv_ptr: u64 = if (args.len == 0) 0 else @intFromPtr(&block);
+    return syscall4(sys_exec_num, @intFromPtr(name.ptr), name.len, argv_ptr, args.len);
+}
+
+pub fn exec_program(name: []const u8) i64 {
+    return exec_program_args(name, &.{});
 }
 
 /// Claim 7604 (ADR 0007 slot 29): arm the target process for termination

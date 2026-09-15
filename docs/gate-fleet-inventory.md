@@ -30,7 +30,7 @@
 | `tools/lib/` | 2 | per-run isolation for live gates (`gate-run.sh`) |
 | `tools/status/` | 7 | multiagent coordination gate + claim tooling (class A) |
 | `tools/context/` | 2 | context snapshot helpers |
-| `tools/gate/` | 244 | M40 vgate harness + specs (GF2+) |
+| `tools/gate/` | 245 | M40 vgate harness + specs (GF2+) |
 
 ## Class-B fleet (discovered from the spec dir)
 
@@ -83,6 +83,7 @@ of them with `just verify-vz`.
 | spec | `live-dynamic-linking` | 1 run / 9 assert | live-dynamic-linking.spec -- Milestone 30 Class-B Gate (issue #599, claim 7921): |
 | spec | `live-editing` | 1 run / 13 assert | live-editing.spec -- milestone-eight card U2 class-B gate (claim 1809): |
 | spec | `live-editor` | 1 run / 18 assert | live-editor.spec -- M23 E2-E5 class-B gate: |
+| spec | `live-el0-exec` | 1 run / 9 assert | live-el0-exec.spec -- EL0 sys_exec returns to the caller (issue #1333). |
 | spec | `live-elf` | 1 run / 8 assert | live-elf.spec -- M22 D1: load and execute ELF32 from the ESP at EL0. |
 | spec | `live-entropy` | 2 run / 15 assert | live-entropy.spec -- REAL virtio entropy (DID 0x1044) seeds the |
 | spec | `live-events` | 1 run / 8 assert | live-events.spec -- claim 9328 (milestone nine, card E6) class-B |

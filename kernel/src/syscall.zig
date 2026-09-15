@@ -196,11 +196,12 @@ pub const sys_file_read: u64 = 24;
 pub const sys_file_write: u64 = 25;
 pub const sys_file_close: u64 = 26;
 pub const sys_dir_list: u64 = 27;
-/// Claim 6359: `sys_exec(path_ptr, path_len)` — the EL0 exec seam. Copies
-/// the `.BIN` name through uaccess and runs the EL1h loader
-/// (`exec.exec_file`) to load the program from the ESP into a fresh
-/// process slot and spawn it at EL0 — so an EL0 launcher (DESKTOP.BIN)
-/// actually launches apps. Returns the new process's pid on success.
+/// Claim 6359 / issue #1333: `sys_exec(path_ptr, path_len, argv_ptr, argc)`
+/// — the EL0 exec seam. Copies the `.BIN` name through uaccess and runs
+/// the EL1h loader (`exec.exec_file_as`) to load the program from the
+/// share into a fresh process slot and spawn it at EL0. `argc == 0` means
+/// no args; `argc` in 1..=8 copies packed 32-byte NUL-terminated slots
+/// (card-3e). Returns the new process's pid on success.
 pub const sys_exec: u64 = 28;
 /// Claim 7604: `sys_kill(target_pid)` — the EL0 termination seam. Arms the
 /// target process's executor through the claim-7786 kill
@@ -2346,35 +2347,56 @@ fn handle_audio_mute(args: Args, _: *exceptions.VectorFrame) u64 {
     return 0;
 }
 
-/// Claim 6359 (ADR 0007 slot 28): `sys_exec(path_ptr, path_len)` — the
-/// EL0 exec seam. Marshals the path through the claim-6120 uaccess window
-/// (the `sys_file_open` pattern), requires a process caller, and reuses
-/// the EL1h loader `exec.exec_file` to load the named `.BIN` from the ESP
-/// into a fresh process slot and spawn it at EL0. Returns the new
-/// process's pid on success (via `exec.last_exec_pid`); the caller may
-/// hand it to `sys_wait` or a future `sys_kill`. Errors: `EINVAL` for a
-/// non-process caller, an empty/over-long path, or a loader refusal
-/// (no disk, bad DSK1 image, oversize, no args room); `EFAULT` for a bad
-/// path pointer; `ENOENT` when the file is absent; `ENOSPC` when a
-/// capacity gate refuses (pool, page allocator, page-table carve-out,
-/// process registry).
+/// Claim 6359 / issue #1333 (ADR 0007 slot 28): `sys_exec(path_ptr,
+/// path_len, argv_ptr, argc)` — the EL0 exec seam. Marshals the path
+/// (and, when `argc` is 1..=8, a packed card-3e argv block) through the
+/// claim-6120 uaccess window, requires a process caller, and reuses the
+/// EL1h loader `exec.exec_file_as` to load the named program from the
+/// share into a fresh process slot and spawn it at EL0. `argc == 0`
+/// means no args (`argv_ptr` ignored). Returns the new process's pid on
+/// success (via `exec.last_exec_pid`); the caller may hand it to
+/// `sys_wait` or `sys_kill`. Errors: `EINVAL` for a non-process caller,
+/// an empty/over-long path, `argc > 8`, or a loader refusal (no disk,
+/// bad image, oversize, no args room); `EFAULT` for a bad path or argv
+/// pointer; `ENOENT` when the file is absent; `ENOSPC` when a capacity
+/// gate refuses (pool, page allocator, page-table carve-out, process
+/// registry).
 fn handle_exec(args: Args, _: *exceptions.VectorFrame) u64 {
     const path_ptr = args[0];
     const path_len = args[1];
+    const argv_ptr = args[2];
+    const argc = args[3];
     // M34 HF6 (issue #740): the name bound is the host channel's path
     // max (the ESP 8.3 window is gone).
     if (path_len == 0 or path_len > virtio_file.path_max) return error_result(.einval);
+    if (argc > esp_exec.max_exec_args) return error_result(.einval);
     // The caller must be a process (an EL1h task cannot exec from EL0).
     const caller = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
 
     var path_buf: [virtio_file.path_max]u8 = undefined;
     if (uaccess.copy_in(&path_buf, path_ptr, @intCast(path_len)) != .ok) return error_result(.efault);
 
+    var arg_block: [esp_exec.arg_block_bytes]u8 = [_]u8{0} ** esp_exec.arg_block_bytes;
+    var arg_slices: [esp_exec.max_exec_args][]const u8 = undefined;
+    var exec_args: []const []const u8 = &.{};
+    if (argc > 0) {
+        const n: usize = @intCast(argc);
+        const nbytes = n * esp_exec.arg_slot_bytes;
+        if (uaccess.copy_in(arg_block[0..nbytes], argv_ptr, nbytes) != .ok) return error_result(.efault);
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            const slot = arg_block[i * esp_exec.arg_slot_bytes ..][0..esp_exec.arg_slot_bytes];
+            const end = std.mem.indexOfScalar(u8, slot, 0) orelse (esp_exec.arg_slot_bytes - 1);
+            arg_slices[i] = slot[0..end];
+        }
+        exec_args = arg_slices[0..n];
+    }
+
     // M50 TS1 (#1135, ADR 0024 D2): exec PRESERVES the caller's principal —
     // no setuid semantics, no elevation path. The spawned process inherits
     // the caller's uid and caps.
     const principal = process.principal(caller) orelse process.default_principal;
-    const res = esp_exec.exec_file_as(path_buf[0..path_len], &.{}, principal);
+    const res = esp_exec.exec_file_as(path_buf[0..path_len], exec_args, principal);
     return switch (res) {
         .ok => blk: {
             // The pid is set at the loader's success point; a missing

@@ -128,6 +128,9 @@ pub const Image = struct {
 /// of mallocinit.
 pub const max_mmap_regions: usize = 16;
 pub const max_dynamic_pages: usize = 4096;
+/// Default anonymous-mmap bump pointer (issue #1163). Restored explicitly
+/// after an in-place BSS zero — `@memset` would leave this 0.
+pub const mmap_default_va: u64 = 0x0000_0000_1000_0000;
 
 /// ADR 0027 D1/D3: ONE process may carry several live tasks (the Go M:N
 /// mapping — every M is a kernel task bound to the SAME descriptor). The
@@ -196,10 +199,47 @@ pub const AddrSpace = struct {
     /// M29 VM Depth: Anonymous mmap regions and dynamic page allocations
     mmap_regions: [max_mmap_regions]MmapRegion = [_]MmapRegion{.{}} ** max_mmap_regions,
     mmap_region_count: usize = 0,
-    mmap_next_va: u64 = 0x0000_0000_1000_0000,
+    mmap_next_va: u64 = mmap_default_va,
     dynamic_pages: [max_dynamic_pages]u64 = [_]u64{0} ** max_dynamic_pages,
     dynamic_page_count: usize = 0,
 };
+
+/// Scalar snapshot of an address space at create time (issue #1333).
+/// `AddrSpace` carries `dynamic_pages: [4096]u64` (~32 KiB) plus the mmap
+/// table; passing that by value (AAPCS64 large-struct copy) materializes a
+/// temporary on the caller's 32 KiB EL0 kstack and overflows into the
+/// adjacent user stack. `create`/`create_as` take this small spec and write
+/// fields in place after an in-BSS `@memset`.
+pub const AddrSpaceSpec = struct {
+    root_phys: u64 = 0,
+    text_va: u64 = 0,
+    text_len: u64 = 0,
+    text_phys: u64 = 0,
+    text_pages: u64 = 0,
+    data_va: u64 = 0,
+    data_len: u64 = 0,
+    data_phys: u64 = 0,
+    data_pages: u64 = 0,
+    stack_va: u64 = 0,
+    stack_len: u64 = 0,
+    stack_phys: u64 = 0,
+    stack_pages: u64 = 0,
+    interp_phys: u64 = 0,
+    interp_pages: u64 = 0,
+    ro_phys: u64 = 0,
+    ro_pages: u64 = 0,
+    ro_va: u64 = 0,
+    argv_end_va: u64 = 0,
+    lib_phys: u64 = 0,
+    lib_pages: u64 = 0,
+};
+
+comptime {
+    // Must stay pass-by-value-safe on the 32 KiB EL0 kstack (#1333).
+    if (@sizeOf(AddrSpaceSpec) > 256) {
+        @compileError("AddrSpaceSpec grew past 256 bytes; pass-by-value would overflow the EL0 kstack");
+    }
+}
 
 /// Kernel-side resources the process owns with its program (freed at
 /// reap/recycle like the address-space pages): the executor task's EL1
@@ -325,10 +365,46 @@ pub fn audit_proc(id: usize) ProcAuditCell {
     };
 }
 
+/// Zero a registry slot in place (issue #1333). `p.* = .{}` and
+/// `processes[id] = .{}` copy a full `Process` (~34 KiB, dominated by
+/// `AddrSpace.dynamic_pages`) onto the caller's stack — the same overflow
+/// as passing `AddrSpace` by value. `@memset` writes the BSS slot directly.
+fn reset_process(p: *Process) void {
+    @memset(std.mem.asBytes(p), 0);
+    p.addr_space.mmap_next_va = mmap_default_va;
+    p.uid = uid_user;
+    p.task_id = null;
+    p.thread_tasks = [_]?usize{null} ** max_threads;
+}
+
+fn apply_spec(space: *AddrSpace, spec: AddrSpaceSpec) void {
+    space.root_phys = spec.root_phys;
+    space.text_va = spec.text_va;
+    space.text_len = spec.text_len;
+    space.text_phys = spec.text_phys;
+    space.text_pages = spec.text_pages;
+    space.data_va = spec.data_va;
+    space.data_len = spec.data_len;
+    space.data_phys = spec.data_phys;
+    space.data_pages = spec.data_pages;
+    space.stack_va = spec.stack_va;
+    space.stack_len = spec.stack_len;
+    space.stack_phys = spec.stack_phys;
+    space.stack_pages = spec.stack_pages;
+    space.interp_phys = spec.interp_phys;
+    space.interp_pages = spec.interp_pages;
+    space.ro_phys = spec.ro_phys;
+    space.ro_pages = spec.ro_pages;
+    space.ro_va = spec.ro_va;
+    space.argv_end_va = spec.argv_end_va;
+    space.lib_phys = spec.lib_phys;
+    space.lib_pages = spec.lib_pages;
+}
+
 /// Reset the registry (boot + host tests; called by `scheduler.init` so
 /// every pool reset also clears the process layer).
 pub fn init() void {
-    for (&processes) |*p| p.* = .{};
+    for (&processes) |*p| reset_process(p);
     registry_count = 0;
     current_id = null;
     exit_report_head = 0;
@@ -470,7 +546,7 @@ pub fn record_dynamic_page(pid: usize, pa: u64) bool {
 }
 
 pub fn next_mmap_va(pid: usize, len: u64) u64 {
-    if (pid >= max_processes) return 0x1000_0000;
+    if (pid >= max_processes) return mmap_default_va;
     var space = &processes[pid].addr_space;
     const aligned_len = (len + 4095) & ~@as(u64, 4095);
     const va = space.mmap_next_va;
@@ -483,7 +559,7 @@ pub fn next_mmap_va(pid: usize, len: u64) u64 {
 pub fn create(
     name: []const u8,
     image: Image,
-    addr_space: AddrSpace,
+    addr_space: AddrSpaceSpec,
     kernel_stack: KernelStack,
 ) ?usize {
     return create_as(name, image, addr_space, kernel_stack, default_principal);
@@ -491,7 +567,8 @@ pub fn create(
 
 /// Create a process with an explicit principal. `name` is copied into the
 /// descriptor (the caller's slice need not outlive the call); `addr_space`
-/// and `kernel_stack` record the pages the process owns. Takes the first
+/// is a small scalar spec (issue #1333 — never a full `AddrSpace`) and
+/// `kernel_stack` records the pages the process owns. Takes the first
 /// free slot; when the registry is full, recycles the OLDEST exited
 /// process (never a created/running one) and frees its owned pages.
 /// Returns null only when every slot holds a live (created/running)
@@ -500,7 +577,7 @@ pub fn create(
 pub fn create_as(
     name: []const u8,
     image: Image,
-    addr_space: AddrSpace,
+    addr_space: AddrSpaceSpec,
     kernel_stack: KernelStack,
     actor: Principal,
 ) ?usize {
@@ -516,7 +593,7 @@ pub fn create_as(
         // allocator-backed pages are freed with it.
         const recycled = oldest_exited orelse return null;
         release_resources(&processes[recycled]);
-        processes[recycled] = .{};
+        reset_process(&processes[recycled]);
         registry_count -%= 1;
         id = recycled;
     }
@@ -524,7 +601,7 @@ pub fn create_as(
     @memcpy(processes[id].name_buf[0..take], name[0..take]);
     processes[id].name_len = take;
     processes[id].image = image;
-    processes[id].addr_space = addr_space;
+    apply_spec(&processes[id].addr_space, addr_space);
     processes[id].kernel_stack = kernel_stack;
     processes[id].uid = actor.uid;
     processes[id].caps = actor.caps;
@@ -622,7 +699,7 @@ pub fn reap(id: usize) bool {
     if (processes[id].state == .free or processes[id].state == .running) return false;
     if (current_id == id) current_id = null;
     release_resources(&processes[id]);
-    processes[id] = .{};
+    reset_process(&processes[id]);
     registry_count -%= 1;
     return true;
 }
@@ -1418,4 +1495,24 @@ test "process: sys_procs snapshot row is byte-frozen across principals" {
     );
     // And the row width itself is unchanged.
     try std.testing.expectEqual(@as(usize, 40), snapshot_row_bytes);
+}
+
+test "process: AddrSpaceSpec fits the EL0 kstack; AddrSpace does not (issue #1333)" {
+    try std.testing.expect(@sizeOf(AddrSpaceSpec) <= 256);
+    try std.testing.expect(@sizeOf(AddrSpace) > 32 * 1024);
+    try std.testing.expect(@sizeOf(Process) > 32 * 1024);
+}
+
+test "process: create_as leaves an existing running process untouched (issue #1333)" {
+    init();
+    const caller = create("CALLER.BIN", .{}, .{}, .{}).?;
+    _ = bind(caller, 2);
+    try std.testing.expectEqual(State.running, info(caller).?.state);
+    const child = create("CHILD.BIN", .{}, .{ .text_va = 0x400000, .text_len = 64 }, .{}).?;
+    try std.testing.expectEqual(State.running, info(caller).?.state);
+    try std.testing.expectEqual(@as(?usize, 2), info(caller).?.task_id);
+    try std.testing.expectEqual(State.created, info(child).?.state);
+    try std.testing.expectEqual(@as(u64, 0x400000), info(child).?.text_va);
+    try std.testing.expectEqual(@as(?usize, child), current());
+    try std.testing.expectEqual(mmap_default_va, next_mmap_va(child, 4096));
 }

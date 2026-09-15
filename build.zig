@@ -279,6 +279,31 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_status43.step);
 
     // ------------------------------------------------------------------
+    // Guest: EL0EXEC.BIN (issue #1333) — class-B proof that EL0 sys_exec
+    // returns to the caller. Flat DSK1 (Zig frames on the kernel-provided
+    // EL0 stack; no writable image globals). Not a GUI app (ADR 0030).
+    // ------------------------------------------------------------------
+    const el0exec_prog = b.addExecutable(.{
+        .name = "user-el0exec",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("user/src/el0exec.zig"),
+            .target = kernel_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    el0exec_prog.linker_script = b.path("user/linker.ld");
+    const el0exec_step = b.step("el0exec", "Build the EL0 sys_exec caller-survival fixture (zig-out/bin/EL0EXEC.BIN; #1333)");
+    const el0exec_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
+    el0exec_elf2bin.addFileArg(el0exec_prog.getEmittedBin());
+    const el0exec_bin = el0exec_elf2bin.addOutputFileArg("EL0EXEC.BIN");
+    el0exec_elf2bin.has_side_effects = true;
+    el0exec_elf2bin.stdio = .inherit;
+    el0exec_step.dependOn(&el0exec_elf2bin.step);
+    const install_el0exec = b.addInstallFileWithDir(el0exec_bin, .bin, "EL0EXEC.BIN");
+    el0exec_step.dependOn(&install_el0exec.step);
+    b.getInstallStep().dependOn(&install_el0exec.step);
+
+    // ------------------------------------------------------------------
     // Guest: the SMP user program (claim 2369) — SMP1.BIN, the FIRST user
     // task that runs on a secondary core. Same freestanding target,
     // linker script, elf2bin conversion, and ESP embedding as the others;
@@ -2515,6 +2540,7 @@ pub fn build(b: *std.Build) void {
         "user/src/lib/ssh/transport.zig",
         "user/src/lib/ssh/channel.zig",
         "user/src/lib/ssh/cli.zig",
+        "user/src/el0exec.zig",
         // X.509 layer (card TLS13-C3): the strict DER reader, the certificate
         // parser, PEM decoding and hostname/identity matching. None of these
         "user/tests/ui/ui_test.zig",
