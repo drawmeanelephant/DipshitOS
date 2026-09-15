@@ -46,6 +46,11 @@ export GOPATH="${TMPDIR:-/tmp}/go-virelai-gopath"
 export CGO_ENABLED=0
 
 mkdir -p "$GOPATH"
+# A fixture may import the shared guest SDK (virelai/vi): link user/go into
+# GOPATH as `virelai`, exactly like tools/go/build-web.sh, so GOPATH-mode
+# guest builds resolve the same import path the host module does.
+mkdir -p "$GOPATH/src"
+ln -sfn "$REPO/user/go" "$GOPATH/src/virelai"
 out_dir="${GO_BUILD_OUT:-$REPO/.build/go}"
 mkdir -p "$out_dir"
 rc=0
@@ -63,6 +68,7 @@ for prog in "${@:-$REPO/tools/go/hello.go}"; do
         goroutines) base="GOROUT" ;;
         gostress)   base="GOSTRESS" ;;
         gopanic)    base="GOPANIC" ;;
+        gowin)      base="GOWIN" ;;
     esac
     out="$out_dir/${GO_BUILD_NAME:-$base}.ELF"
     log "building $prog -> $out"

@@ -30,7 +30,7 @@
 | `tools/lib/` | 2 | per-run isolation for live gates (`gate-run.sh`) |
 | `tools/status/` | 7 | multiagent coordination gate + claim tooling (class A) |
 | `tools/context/` | 2 | context snapshot helpers |
-| `tools/gate/` | 239 | M40 vgate harness + specs (GF2+) |
+| `tools/gate/` | 240 | M40 vgate harness + specs (GF2+) |
 
 ## Class-B fleet (discovered from the spec dir)
 
@@ -54,6 +54,7 @@ of them with `just verify-vz`.
 | spec | `go-hello` | 1 run / 8 assert | go-hello.spec -- issue #1163, GOOS=virelai phase 0a: the gc Go runtime |
 | spec | `go-panic` | 1 run / 9 assert | go-panic.spec -- issue #1228: GOOS=virelai phase 0c fault delivery. |
 | spec | `go-stress` | 1 run / 10 assert | go-stress.spec -- issue #1227: GOOS=virelai 0b breadth (GC / channel / |
+| spec | `go-win` | 1 run / 9 assert | go-win.spec -- M53 Card 1 (issue #1245): the raw ADR 0007 window, from Go. |
 | spec | `live-addrspaces` | 1 run / 11 assert | live-addrspaces.spec -- per-task user address spaces on VZ hardware: |
 | spec | `live-args` | 1 run / 6 assert | live-args.spec -- exec arguments reach EL0: the same USER.BIN exec'd |
 | spec | `live-asm` | 1 run / 9 assert | live-asm.spec -- M22 D2: on-machine assembler produces an ELF the on-machine loader runs. |
