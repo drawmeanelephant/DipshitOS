@@ -95,7 +95,7 @@ fn ecdsaVerify(cert: *const x509.Cert, issuer: *const x509.Cert) bool {
     return curve.verify(qx, qy, rb, sb, z[0..zlen]);
 }
 
-pub fn verifyCertSignature(cert: *const x509.Cert, issuer: *const x509.Cert) bool {
+noinline fn verifyCertSignature(cert: *const x509.Cert, issuer: *const x509.Cert) bool {
     return switch (cert.sig_alg) {
         .rsa_pkcs1_sha256 => issuer.key.kind == .rsa and rsa.verifyPkcs1(issuer.key.rsa_modulus, issuer.key.rsa_exponent, .sha256, cert.tbs, cert.signature),
         .rsa_pkcs1_sha384 => issuer.key.kind == .rsa and rsa.verifyPkcs1(issuer.key.rsa_modulus, issuer.key.rsa_exponent, .sha384, cert.tbs, cert.signature),
