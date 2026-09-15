@@ -140,32 +140,49 @@ var WMProcNames = [...]string{"WND.BIN", "TABWM.BIN"}
 // WmPeers finds the WM pid and this process's pid in a single `sys_procs`
 // scan (the M56a `wm_peers` helper). A zero field means "not found" (no WM
 // seat, or this process is not yet in the table). Only RUNNING rows match.
+// WmPeers finds the WM pid and this process\'s pid in a single `sys_procs`
+// scan (the M56a `wm_peers` helper). A zero field means "not found". Only
+// RUNNING rows with a non-empty name match.
+//
+// The scan is RETRIED: on the guest `sys_procs` intermittently returns its row
+// count while the name bytes read back zeroed (observed on VZ, alternating
+// scans), which would otherwise make a declare silently fail. The retry is
+// bounded and yields between attempts; on the host (every syscall -ENOSYS) it
+// is a cheap no-op that still returns the zero seat.
 func WmPeers(selfName string) WmSeat {
 	var out WmSeat
 	if selfName == "" {
 		return out
 	}
 	rows := make([]ProcRow, 64)
-	n, r := Procs(rows)
-	if r < 0 || n <= 0 {
-		return out
-	}
-	for i := 0; i < n; i++ {
-		if rows[i].State != ProcRunning {
-			continue
-		}
-		name := rows[i].Name()
-		if out.Self == 0 && name == selfName {
-			out.Self = uint32(rows[i].PID)
-		}
-		if out.WM == 0 {
-			for _, w := range WMProcNames {
-				if name == w {
-					out.WM = uint32(rows[i].PID)
-					break
+	for attempt := 0; attempt < 8; attempt++ {
+		out = WmSeat{}
+		if n, r := Procs(rows); r > 0 && n > 0 {
+			for i := 0; i < n; i++ {
+				if rows[i].State != ProcRunning {
+					continue
+				}
+				name := rows[i].Name()
+				if name == "" {
+					continue
+				}
+				if out.Self == 0 && name == selfName {
+					out.Self = uint32(rows[i].PID)
+				}
+				if out.WM == 0 {
+					for _, w := range WMProcNames {
+						if name == w {
+							out.WM = uint32(rows[i].PID)
+							break
+						}
+					}
 				}
 			}
 		}
+		if out.WM != 0 && out.Self != 0 {
+			return out
+		}
+		Yield()
 	}
 	return out
 }
