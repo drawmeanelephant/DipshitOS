@@ -9,14 +9,14 @@
 # the runner-label allowance lives in .github/actionlint.yaml.
 #
 # Also asserts class-A parity between the two places the portable set is
-# written down: `just verify-portable` (the justfile recipe) and the step
-# list of the macos job in .github/workflows/ci.yml. Copied lists drift,
-# and this pair had: three class-A gates had silently stopped running in
-# CI (inventory-gates.sh --check — the GF1 registration guard —,
-# verify-ttf-fonts.sh, verify-vf-class-a.sh) while docs/testing.md claimed
-# CI ran the inventory check. A gate that only runs locally cannot fail a
-# merge, so the recipe is now asserted to be a subset of ci.yml. See the
-# normalization rules at the check itself.
+# written down: `just verify-portable` (the justfile recipe) and the macos
+# job in .github/workflows/ci.yml. That used to be two hand-copied lists
+# and they drifted (three class-A gates silently local-only, issue #1186),
+# so a subset check policed the drift after the fact. Since 2026-09 ci.yml
+# delegates to the recipe instead of copying it, parity holds by
+# construction — the check below asserts the delegation is present, and the
+# old line-by-line subset logic is kept only as the fallback for a
+# workflow that stops delegating.
 #
 # Deterministic across hosts: shellcheck/pyflakes integrations are
 # disabled (-shellcheck= -pyflakes=) so the result does not depend on
@@ -99,14 +99,12 @@ if [ -n "$DUPES" ]; then
     exit 1
 fi
 
-# --- class-A parity: the justfile recipe must be a subset of ci.yml --------
+# --- class-A parity: ci.yml must delegate to the justfile recipe -----------
 #
-# Normalization, and nothing else: `zig fmt --check <globs>` compares as
-# `zig fmt --check` (the two lists legitimately cover different file sets)
-# and `zig build <target>` compares as `zig build <target>` with flags
-# dropped. Every other line compares whole, arguments included, so
-# `inventory-gates.sh --check` can never be silently downgraded to the
-# report-rewriting `inventory-gates.sh`.
+# ci.yml runs `just verify-portable` instead of hand-copying its steps, so
+# the recipe and CI cannot drift apart. Assert the delegation is present;
+# only if some future workflow stops delegating does the line-by-line
+# subset check below run (normalization rules at the check itself).
 #
 # RECIPE= / JUSTFILE= / CI_YML= override the inputs, so the drift test can
 # run against fixtures without touching the real files.
@@ -114,6 +112,11 @@ fi
 RECIPE="${RECIPE:-verify-portable}"
 JUSTFILE="${JUSTFILE:-$ROOT/justfile}"
 CI_YML="${CI_YML:-$ROOT/.github/workflows/ci.yml}"
+
+if grep -qE "(^|[[:space:]])run:[[:space:]]*just +$RECIPE([[:space:]]|$)" "$CI_YML"; then
+    echo "lint-workflows: class-A parity OK -- $CI_YML delegates to 'just $RECIPE'"
+else
+echo "lint-workflows: $CI_YML does not delegate to 'just $RECIPE' -- falling back to the line-by-line subset check" >&2
 
 # parity_key LINE -- the comparable identity of one command line.
 # Kept `case`-based with BRE sed: this file must run under old bash too
@@ -188,8 +191,10 @@ if [ "$PARITY_MISSING" -eq 0 ]; then
 else
     echo "lint-workflows: class-A parity FAILED -- $PARITY_MISSING of $PARITY_TOTAL command(s) of 'just $RECIPE' are NOT run by $CI_YML:" >&2
     printf '%s' "$PARITY_LIST" >&2
-    echo "  Add the missing step(s) to $CI_YML: a gate that only runs locally cannot fail a merge." >&2
+    echo "  Delegate $CI_YML to 'just $RECIPE': a gate that only runs locally cannot fail a merge." >&2
     exit 1
+fi
+
 fi
 
 exit "$LINT_RC"

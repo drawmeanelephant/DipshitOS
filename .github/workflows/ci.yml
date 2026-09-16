@@ -1,7 +1,10 @@
 # CI proves ONLY the portable/build gate set — class A in
-# docs/gate-inventory.md: formatting, unit tests, transcript mock test,
-# guest/image builds, inspect, Swift runner build, context generation,
-# GitHub-Actions workflow lint, and the coordination gates. It does NOT run the Apple-silicon
+# docs/gate-inventory.md. The set is defined once, as `just verify-portable`
+# (justfile), and this workflow delegates to that recipe instead of
+# hand-copying its steps: a copied list drifted twice (three gates silently
+# local-only, issue #1186), and the parity guard that policed the drift is
+# gone with the copy. `tools/lint-workflows.sh` asserts the delegation is
+# present. It does NOT run the Apple-silicon
 # Virtualization.framework hardware gates (class B) — those live in the
 # dedicated `vz-gates` workflow (.github/workflows/vz-gates.yml), which
 # runs them on a self-hosted macOS 27+ Apple silicon runner once the
@@ -50,81 +53,21 @@ jobs:
         with:
           version: 0.16.0
 
-      # --- Class A: portable/build gates (see docs/gate-inventory.md) ---
+      # --- Class A: the whole portable set, via the recipe devs run -----
+      # `just verify-portable` IS the class-A gate set (docs/testing.md):
+      # formatting, unit tests, transcript mock test, guest/image builds,
+      # inspect, Swift runner build, context generation, workflow lint,
+      # and the coordination gates. One step, so CI can never drift from
+      # local again. Needs GH_TOKEN: the coordination gate reads the live
+      # `claim` issues via `gh`, like it does locally.
 
-      - name: Check Zig formatting (class A)
-        run: zig fmt --check boot/src/*.zig kernel/src/*.zig user/src/*.zig build.zig
+      - name: Ensure just is available
+        run: command -v just >/dev/null || brew install just
 
-      - name: Test kernel monitor modules (class A)
-        run: bash tools/verify-unit-tests.sh
-
-      - name: Test automated console transcript (class A)
-        run: zig build test-console
-
-      - name: Build UEFI application and kernel image (class A)
-        run: zig build
-
-      - name: Create FAT32+GPT boot disk image (class A)
-        run: zig build image
-
-      - name: Inspect binary and disk image (class A)
-        run: zig build inspect
-
-      - name: Build Swift Virtualization Launcher (class A — build only, does not boot)
-        run: swift build --package-path host/vm-runner
-
-      - name: Verify project context generator (class A)
-        run: zig build context
-
-      - name: Verify multiagent coordination gate (claims as GitHub issues, class A)
-        run: bash tools/status/verify-issue-coordination.sh
+      - name: Run the portable gate set (class A — just verify-portable)
+        run: just verify-portable
         env:
           GH_TOKEN: ${{ github.token }}
-
-      - name: Test multiagent coordination tooling (class A)
-        run: bash tools/status/test-coordination.sh
-
-      - name: Lint GitHub Actions workflows and assert class-A parity with `just verify-portable` (class A — actionlint, pinned; runner-label allowance in .github/actionlint.yaml)
-        run: bash tools/lint-workflows.sh
-
-      - name: Verify MMU takeover contract (class A — ADR 0006 supersession, T0SZ=16 + TLBI comments)
-        run: bash tools/verify-mmu-debt.sh
-
-      - name: Verify the glyph raster convention (class A — full-table goldens + offline mirror self-test + mutation check)
-        run: bash tools/verify-glyph-raster.sh
-
-      - name: Verify the bit-order mutation checks (class A — glyph raster + FAT endianness + virtio chain walk)
-        run: bash tools/verify-mutations.sh
-
-      - name: Verify the kernel `.bss` ceiling (class A — ADR 0013 D3.1)
-        run: bash tools/verify-bss-budget.sh
-
-      # --- Class A: the three gates this job silently stopped running -----
-      # `just verify-portable` owns the portable set; this job hand-copied a
-      # subset of it and three gates had quietly gone local-only, including
-      # the GF1 registration guard (issue #1186). `tools/lint-workflows.sh`
-      # now fails when the recipe and this step list drift apart again.
-
-      - name: Verify the TTF font engine (class A — Inter + Fira Code — SFNT tables, outlines, raster, layout)
-        run: bash tools/verify-ttf-fonts.sh
-
-      - name: Verify the host-file-channel wire parity (class A — M34 HF1–HF4, kernel host tests + Swift host tests + fixture pins)
-        run: bash tools/verify-vf-class-a.sh
-        env:
-          # verify-vf-class-a.sh also runs the coordination gate, which reads
-          # the live claim issues via `gh` — it needs the workflow token.
-          GH_TOKEN: ${{ github.token }}
-
-      - name: Verify the gate-fleet inventory is current (class A — GF1 registration guard; a new script or spec must ship with a regenerated report)
-        run: bash tools/inventory-gates.sh --check
-
-      # The VZ preflight's own failure modes, exercised with `codesign` and
-      # `sysctl` stubbed (class A — no VM, no Apple silicon). It fails when a
-      # runner binary carries no Virtualization entitlement, and when the host
-      # reports no Hypervisor.framework; both used to surface at VM boot as
-      # something else. Guards the guard.
-      - name: Verify the VZ preflight fails loudly (class A — runner entitlement + hypervisor capability)
-        run: bash tools/gate/test-gate-run.sh
 
       # --- Class B: Apple-silicon VZ hardware gates run in vz-gates.yml ---
 

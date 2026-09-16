@@ -19,7 +19,7 @@ alias verify := verify-portable
 # Run the full portable/build gate set (class A; mirrors CI). Does NOT run
 # the Apple-silicon VZ hardware gates (class B) — that is `just verify-vz`.
 verify-portable:
-    zig fmt --check boot/src/*.zig kernel/src/*.zig build.zig
+    zig fmt --check boot/src/*.zig kernel/src/*.zig user/src/*.zig build.zig
     bash tools/verify-unit-tests.sh
     zig build test-console
     zig build
