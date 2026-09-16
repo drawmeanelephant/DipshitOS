@@ -54,7 +54,7 @@ of them with `just verify-vz`.
 | spec | `go-files` | 1 run / 17 assert | go-files.spec -- M58a (issue #1305) class-B gate: a Go file manager lists a |
 | spec | `go-goroutines` | 1 run / 8 assert | go-goroutines.spec -- ADR 0027 D6 (issue #1214 round 2): the phase-0b |
 | spec | `go-hello` | 1 run / 8 assert | go-hello.spec -- issue #1163, GOOS=virelai phase 0a: the gc Go runtime |
-| spec | `go-net` | 2 run / 18 assert | go-net.spec -- issue #1163 (phase 2) class-B gate: GONET.ELF proves a |
+| spec | `go-net` | 2 run / 24 assert | go-net.spec -- issue #1163 (phase 2) class-B gate: GONET.ELF proves a |
 | spec | `go-panic` | 1 run / 9 assert | go-panic.spec -- issue #1228: GOOS=virelai phase 0c fault delivery. |
 | spec | `go-stress` | 1 run / 10 assert | go-stress.spec -- issue #1227: GOOS=virelai 0b breadth (GC / channel / |
 | spec | `go-tabapp` | 1 run / 15 assert | go-tabapp.spec -- M56d (issue #1315) class-B gate: one Go app full-viewport |

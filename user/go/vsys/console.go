@@ -49,15 +49,20 @@ func Itoa64(v int64) string {
 		return "0"
 	}
 	neg := v < 0
+	// Format from the UNSIGNED magnitude. `v = -v` overflows for
+	// math.MinInt64 (two's complement has no positive counterpart), which
+	// used to drain the digit loop and print a bare "-" — a wrong byte
+	// count or errno in every fixture that prints one.
+	u := uint64(v)
 	if neg {
-		v = -v
+		u = uint64(-(v + 1)) + 1
 	}
 	var buf [20]byte
 	i := len(buf)
-	for v > 0 {
+	for u > 0 {
 		i--
-		buf[i] = byte('0' + v%10)
-		v /= 10
+		buf[i] = byte('0' + u%10)
+		u /= 10
 	}
 	if neg {
 		i--

@@ -124,7 +124,12 @@ func TestConn_ReadFailsClosedWhenPeerGoesAway(t *testing.T) {
 }
 
 func TestConn_ReadTimesOutWhenNeverReadable(t *testing.T) {
+	// The wait is bounded by the WALL-CLOCK deadline (vsys.Nanotime), and
+	// each park advances the injected clock by one tick (1 s): a 2 s budget
+	// therefore pays 3 probes and 2 parks before failing closed.
 	resetConn(t)
+	now := int64(0)
+	fakeClock(t, func() int64 { return now })
 	probes, sleeps := 0, 0
 	fakeKern(t, func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
 		switch num {
@@ -132,25 +137,82 @@ func TestConn_ReadTimesOutWhenNeverReadable(t *testing.T) {
 			probes++ // never readable
 		case SlotSleep:
 			sleeps++
+			now += 1_000_000_000
 		}
 		return 0
 	})
 	c, _ := Dial("10.0.2.2", 80)
-	c.SetReadDeadline(2_000_000_000) // 2 ticks = 2 probes + 1 yield
+	c.SetReadDeadline(2_000_000_000) // 2 s of wall clock
 	_, err := c.Read(make([]byte, 16))
 	if !errors.Is(err, error(Errno(ErrETIMEDOUT))) {
 		t.Fatalf("Read on a never-readable socket = %v, want Errno(ETIMEDOUT)", err)
 	}
-	if probes != 2 || sleeps != 1 {
-		t.Fatalf("bounded wait = %d probes / %d yields, want 2 / 1", probes, sleeps)
+	if probes != 3 || sleeps != 2 {
+		t.Fatalf("bounded wait = %d probes / %d parks, want 3 / 2", probes, sleeps)
+	}
+}
+
+func TestConn_ReadExpiredDeadlineFailsOnFirstPoll(t *testing.T) {
+	// The clock made the deadline absolute: a budget that has already
+	// elapsed costs ONE probe and ZERO parks, instead of a whole tick.
+	resetConn(t)
+	now := int64(0)
+	fakeClock(t, func() int64 { return now })
+	probes, sleeps := 0, 0
+	fakeKern(t, func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
+		switch num {
+		case SlotSockReady:
+			probes++
+		case SlotSleep:
+			sleeps++
+		}
+		return 0
+	})
+	c, _ := Dial("10.0.2.2", 80)
+	c.SetReadDeadline(1_000_000_000) // absolute deadline = 1 s
+	now = 5_000_000_000              // ... and the clock is already 4 s past it
+	_, err := c.Read(make([]byte, 16))
+	if !errors.Is(err, error(Errno(ErrETIMEDOUT))) {
+		t.Fatalf("Read with an elapsed deadline = %v, want Errno(ETIMEDOUT)", err)
+	}
+	if probes != 1 || sleeps != 0 {
+		t.Fatalf("elapsed deadline cost %d probes / %d parks, want 1 / 0", probes, sleeps)
+	}
+}
+
+func TestConn_ReadDefaultBudgetIsThirtySeconds(t *testing.T) {
+	resetConn(t)
+	now := int64(0)
+	fakeClock(t, func() int64 { return now })
+	probes, sleeps := 0, 0
+	fakeKern(t, func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
+		switch num {
+		case SlotSockReady:
+			probes++
+		case SlotSleep:
+			sleeps++
+			now += 1_000_000_000
+		}
+		return 0
+	})
+	c, _ := Dial("10.0.2.2", 80)
+	// No SetReadDeadline: DefaultReadBudgetNs (30 s) applies.
+	_, err := c.Read(make([]byte, 16))
+	if !errors.Is(err, error(Errno(ErrETIMEDOUT))) {
+		t.Fatalf("Read = %v, want Errno(ETIMEDOUT)", err)
+	}
+	if probes != 31 || sleeps != 30 {
+		t.Fatalf("default budget = %d probes / %d parks, want 31 / 30", probes, sleeps)
 	}
 }
 
 func TestConn_ReadYieldsWhileWaiting(t *testing.T) {
-	// The bounded wait must YIELD (sys_sleep) between probes: that is what
+	// The bounded wait must PARK (sys_sleep) between probes: that is what
 	// keeps the other goroutine alive while this Read is blocked. The
 	// heartbeat-during-load proof depends on it.
 	resetConn(t)
+	now := int64(0)
+	fakeClock(t, func() int64 { return now })
 	order := []string{}
 	fakeKern(t, func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
 		switch num {
@@ -158,20 +220,21 @@ func TestConn_ReadYieldsWhileWaiting(t *testing.T) {
 			order = append(order, "probe")
 			return 0
 		case SlotSleep:
-			order = append(order, "yield")
+			order = append(order, "park")
+			now += 1_000_000_000
 		}
 		return 0
 	})
 	c, _ := Dial("10.0.2.2", 80)
 	c.SetReadDeadline(3_000_000_000)
 	_, _ = c.Read(make([]byte, 8))
-	want := []string{"probe", "yield", "probe", "yield", "probe"}
+	want := []string{"probe", "park", "probe", "park", "probe", "park", "probe"}
 	if len(order) != len(want) {
-		t.Fatalf("probe/yield order = %v, want %v", order, want)
+		t.Fatalf("probe/park order = %v, want %v", order, want)
 	}
 	for i := range want {
 		if order[i] != want[i] {
-			t.Fatalf("probe/yield order = %v, want %v", order, want)
+			t.Fatalf("probe/park order = %v, want %v", order, want)
 		}
 	}
 }
@@ -195,6 +258,8 @@ func TestConn_ReadDeliversQueuedBytes(t *testing.T) {
 }
 
 func TestConn_WriteTruncatesAtPayloadMax(t *testing.T) {
+	// Truncation is reported, never silent: the caller sees the count it
+	// sent AND ErrShortWrite (the io.Writer convention).
 	resetConn(t)
 	var sent uintptr
 	fakeKern(t, func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
@@ -206,11 +271,46 @@ func TestConn_WriteTruncatesAtPayloadMax(t *testing.T) {
 	})
 	c, _ := Dial("10.0.2.2", 80)
 	n, err := c.Write(make([]byte, TCPPayloadMax+100))
-	if err != nil {
-		t.Fatalf("Write: %v", err)
+	if err != ErrShortWrite {
+		t.Fatalf("Write over payload_max err = %v, want ErrShortWrite", err)
 	}
 	if sent != TCPPayloadMax || n != TCPPayloadMax {
 		t.Fatalf("Write sent %d/%d bytes, want %d (payload_max)", sent, n, TCPPayloadMax)
+	}
+}
+
+func TestConn_WriteShortWriteWhenKernelTruncates(t *testing.T) {
+	// A kernel partial send is reported too, not mistaken for success.
+	resetConn(t)
+	fakeKern(t, func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
+		if num == SlotTCPSend {
+			return int64(a1) - 10 // the transmit path truncated
+		}
+		return 0
+	})
+	c, _ := Dial("10.0.2.2", 80)
+	n, err := c.Write([]byte("GET / HTTP/1.0\r\n\r\n"))
+	if err != ErrShortWrite {
+		t.Fatalf("partial send err = %v, want ErrShortWrite", err)
+	}
+	if n != len("GET / HTTP/1.0\r\n\r\n")-10 {
+		t.Fatalf("partial send n = %d, want %d", n, len("GET / HTTP/1.0\r\n\r\n")-10)
+	}
+}
+
+func TestConn_WriteFullSegmentIsClean(t *testing.T) {
+	resetConn(t)
+	fakeKern(t, func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
+		if num == SlotTCPSend {
+			return int64(a1)
+		}
+		return 0
+	})
+	c, _ := Dial("10.0.2.2", 80)
+	body := []byte("GET / HTTP/1.0\r\n\r\n")
+	n, err := c.Write(body)
+	if err != nil || n != len(body) {
+		t.Fatalf("Write = (%d,%v), want (%d,nil)", n, err, len(body))
 	}
 }
 

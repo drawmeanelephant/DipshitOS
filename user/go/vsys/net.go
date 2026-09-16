@@ -12,30 +12,27 @@ type Conn struct {
 	port   uint16
 	open   bool
 	closed bool // peer FIN/RST observed: fail closed
-	// readDeadlineNs bounds a blocking Read, in nanoseconds; it is converted
-	// to a scheduler-TICK budget (1 tick ~ 1 s on this kernel) because the
-	// kernel exposes no per-call clock to user space. 0 means "use
-	// DefaultReadTicks". A peer that goes dark therefore makes the Read FAIL
-	// CLOSED (ETIMEDOUT) instead of waiting forever.
-	readDeadlineNs int64
+	// deadlineAt is an ABSOLUTE monotonic deadline in vsys.Nanotime()
+	// nanoseconds. 0 means "unset — Read uses DefaultReadBudgetNs".
+	//
+	// An absolute value is what makes the deadline honest: it is measured
+	// on the EL0 counter (clock.go), so a budget shorter than one scheduler
+	// tick is not rounded up to a whole tick, and a tick that arrives late
+	// cannot silently stretch the budget. The floor is still the kernel's
+	// wait granularity (one tick ~= 1 s, ADR 0007 slot 4) — the deadline
+	// bounds how LONG the read waits, not how finely it can wake.
+	deadlineAt int64
 }
 
-// DefaultReadTicks is the bounded-wait ceiling used when no read deadline is
-// set. An unbounded wait is deliberately not expressible: the point of this
-// type is that a blocking Read can always fail closed.
-const DefaultReadTicks = 30
+// DefaultReadBudgetNs is the bounded-wait ceiling used when no read
+// deadline is set. An unbounded wait is deliberately not expressible: the
+// point of this type is that a blocking Read can always fail closed.
+const DefaultReadBudgetNs int64 = 30_000_000_000 // 30 s
 
-// readTicks converts the deadline to a tick budget (>= 1).
-func (c *Conn) readTicks() int {
-	if c.readDeadlineNs <= 0 {
-		return DefaultReadTicks
-	}
-	t := int(c.readDeadlineNs / 1_000_000_000)
-	if t < 1 {
-		t = 1
-	}
-	return t
-}
+// maxReadPolls is a belt-and-braces iteration bound: even if the clock
+// never advances (a host test with no injected clock, or a counter that
+// stalls), the read loop still terminates. 3600 polls = one hour of ticks.
+const maxReadPolls = 3600
 
 // ParseIPv4 accepts a dotted-quad IPv4 literal ONLY. Hostnames are rejected
 // with ErrNotIPLiteral: UDP DNS is out of scope for this runtime (the Zig TLS
@@ -105,24 +102,29 @@ func Dial(host string, port uint16) (*Conn, error) {
 	return c, nil
 }
 
-// SetReadDeadline bounds a blocking Read, in nanoseconds, converted to a
-// scheduler-tick budget (see Conn.readTicks). 0 selects DefaultReadTicks.
-// A bounded read is what makes "the peer died mid-read" fail closed instead
-// of waiting forever.
+// SetReadDeadline bounds a blocking Read by a wall-clock budget in
+// nanoseconds, measured on vsys.Nanotime. ns <= 0 clears the deadline and
+// restores DefaultReadBudgetNs.
+//
+// A bounded read is what makes "the peer died mid-read" fail closed
+// instead of waiting forever.
 func (c *Conn) SetReadDeadline(ns int64) {
 	if c == nil {
 		return
 	}
-	if ns < 0 {
-		ns = 0
+	if ns <= 0 {
+		c.deadlineAt = 0
+		return
 	}
-	c.readDeadlineNs = ns
+	c.deadlineAt = Nanotime() + ns
 }
 
-// Read reads up to len(p) bytes. It BLOCKS by parking the goroutine through
-// the kernel readiness seam (slot 76 op 1) rather than spinning: this is what
-// removes the vi.TCPRecv-in-the-window-loop pattern. A peer FIN/RST makes it
-// fail closed with ErrPeerClosed.
+// Read reads up to len(p) bytes. It BLOCKS by parking the task on the
+// kernel's scheduler (slot 4 sys_sleep) between readiness probes, rather
+// than spinning in the caller's window loop: this is what removes the
+// vi.TCPRecv-in-the-window-loop pattern. A peer FIN/RST makes it fail
+// closed with ErrPeerClosed; an expired deadline fails closed with
+// ETIMEDOUT.
 func (c *Conn) Read(p []byte) (int, error) {
 	if c == nil || !c.open {
 		return 0, ErrConnClosed
@@ -137,11 +139,11 @@ func (c *Conn) Read(p []byte) (int, error) {
 	if max > TCPPayloadMax {
 		max = TCPPayloadMax
 	}
-	// Bounded wait. Slot 76 is a PROBE (the kernel refuses to re-enter the
-	// scheduler inside a syscall handler), so the waiting lives HERE: each
-	// iteration yields the M through sys_sleep, which is what lets the other
-	// goroutine (the heartbeat) keep running while this Read is blocked.
-	for i := 0; i < c.readTicks(); i++ {
+	deadline := c.deadlineAt
+	if deadline == 0 {
+		deadline = Nanotime() + DefaultReadBudgetNs
+	}
+	for polls := 0; ; polls++ {
 		mask, err := c.probeReadable()
 		if err != nil {
 			return 0, err
@@ -159,13 +161,17 @@ func (c *Conn) Read(p []byte) (int, error) {
 			}
 			return int(r), nil
 		}
-		// Yield one scheduler tick so other goroutines run. The M is not
-		// blocked by this: sys_sleep is a scheduler point.
-		if i+1 < c.readTicks() {
-			syscallFn(SlotSleep, 1, 0, 0, 0)
+		// The wall-clock deadline is checked against the EL0 counter, so an
+		// already-expired budget fails on the FIRST poll instead of paying a
+		// full tick for it.
+		if Nanotime() >= deadline || polls >= maxReadPolls {
+			return 0, Errno(ErrETIMEDOUT)
 		}
+		// Park for one scheduler tick so other goroutines run. The task is
+		// not busy-spinning: sys_sleep is a scheduler point, and this loop
+		// resumes, re-probes, and re-checks the deadline.
+		syscallFn(SlotSleep, 1, 0, 0, 0)
 	}
-	return 0, Errno(ErrETIMEDOUT)
 }
 
 // probeReadable asks the kernel for the socket's readiness mask (slot 76).
@@ -181,8 +187,17 @@ func (c *Conn) probeReadable() (int64, error) {
 	return r, nil
 }
 
-// Write sends p (one segment; the caller loops for a larger body). A write
-// on a peer-closed Conn fails closed.
+// Write sends up to TCPPayloadMax bytes in ONE segment (the kernel's
+// segment bound; a larger body must be looped by the caller). A write on a
+// peer-closed Conn fails closed.
+//
+// When fewer bytes are accepted than were offered, Write reports the count
+// AND ErrShortWrite (the io.Writer convention), so truncation is never
+// silent. In practice that means the caller exceeded TCPPayloadMax: the
+// kernel's slot-31 handler clamps to payload_max and returns that length on
+// success, or an error — it never returns a partial count (verified against
+// kernel/src/syscall.zig handle_tcp_send). The `n < len(p)` test below is a
+// defensive guard against a future partial-count ABI, not a live path.
 func (c *Conn) Write(p []byte) (int, error) {
 	if c == nil || !c.open {
 		return 0, ErrConnClosed
@@ -193,14 +208,19 @@ func (c *Conn) Write(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
-	if len(p) > TCPPayloadMax {
+	over := len(p) > TCPPayloadMax
+	if over {
 		p = p[:TCPPayloadMax]
 	}
 	r, err := syscallResult(syscallFn(SlotTCPSend, slicePtr(p), uintptr(len(p)), 0, 0))
 	if err != nil {
 		return 0, err
 	}
-	return int(r), nil
+	n := int(r)
+	if over || n < len(p) {
+		return n, ErrShortWrite
+	}
+	return n, nil
 }
 
 // Close tears the connection down (FIN) and clears the process's live slot,
