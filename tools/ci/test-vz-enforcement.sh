@@ -10,8 +10,10 @@
 # nothing" -- and the check was green in the second one, twice over: a skipped
 # shard, and a shard whose gate loop never iterated because it read a file no
 # step wrote (a failed input redirect runs zero iterations and exits 0 even
-# under `set -e`). Both now have to be REFUSED, and OK has to require that the
-# receipts account for the discovered fleet exactly.
+# under `set -e`). The skip (no-runner / fork-pr) is NOT ENFORCED (warning,
+# exit 0): failing it blocked every PR while no Apple-silicon runner exists
+# (card #1353). A shard whose gate loop never iterated is still REFUSED.
+# OK requires that the receipts account for the discovered fleet exactly.
 #
 # Hermetic: no runner, no VM, no network. Receipts are synthetic, and the fleet
 # count is either a fixture or the real `tools/gate/fleet.sh count`.
@@ -56,7 +58,7 @@ expect_word() {
     esac
 }
 
-echo "=== test-vz-enforcement: a green check means the fleet ran, or it is refused ==="
+echo "=== test-vz-enforcement: green means the fleet ran, or no runner exists ==="
 
 # --- the verdict tokens are the contract the workflow and tests share --------
 echo
@@ -76,14 +78,14 @@ expect_rc "$rc" 1 "a cancelled shard is refused"
 expect_word "it names the shard failure" "reason=shard-failed"
 
 run bash "$VERDICT" --fleet 235 --shards 4 --shard-result success --skip-flag 1; rc=$?
-expect_rc "$rc" 1 "a shard that declared a skip is refused"
-expect_word "it names non-enforcement" "reason=not-enforced"
+expect_rc "$rc" 0 "a shard that declared a skip is not a merge failure"
+expect_word "it names non-enforcement" "verdict=unenforced reason=not-enforced"
 expect_word "it says how many gates ran" "0 of 235 class-B gates ran"
 expect_word "it points at the registration doc" "docs/vz-runner.md"
 
 run bash "$VERDICT" --fleet 235 --shards 4 --shard-result skipped; rc=$?
-expect_rc "$rc" 1 "a job-level skip is refused"
-expect_word "it names non-enforcement" "reason=not-enforced"
+expect_rc "$rc" 0 "a job-level skip is not a merge failure"
+expect_word "it names non-enforcement" "verdict=unenforced reason=not-enforced"
 
 # --- the state that made this necessary: green, and nothing ran --------------
 echo
@@ -97,9 +99,16 @@ expect_word "it names the defect class" "never iterated"
 Z="$TMP/zero"
 for s in 0 1 2 3; do mk_receipt "$Z" "vz-receipt-shard-$s" "$s" 4 0 0 no-runner; done
 run bash "$VERDICT" --fleet 235 --shards 4 --shard-result success --receipts "$Z"; rc=$?
-expect_rc "$rc" 1 "receipts that all record zero gates are refused"
-expect_word "it names non-enforcement" "reason=not-enforced"
+expect_rc "$rc" 0 "receipts that all record no-runner are not a merge failure"
+expect_word "it names non-enforcement" "verdict=unenforced reason=not-enforced"
 expect_word "it carries the shards' own reason" "no-runner"
+
+FORK="$TMP/fork"
+for s in 0 1 2 3; do mk_receipt "$FORK" "vz-receipt-shard-$s" "$s" 4 0 0 fork-pr; done
+run bash "$VERDICT" --fleet 235 --shards 4 --shard-result success --receipts "$FORK"; rc=$?
+expect_rc "$rc" 0 "fork-pr receipts are not a merge failure"
+expect_word "it names non-enforcement for a fork" "verdict=unenforced reason=not-enforced"
+expect_word "it carries the fork reason" "fork-pr"
 
 # The real shard loop, before its fix, left a receipt with reason=ran and ran=0
 # (it reached the end of the step without executing a gate). That must not be a
@@ -108,7 +117,7 @@ ZG="$TMP/zero-gates"
 for s in 0 1 2 3; do mk_receipt "$ZG" "vz-receipt-shard-$s" "$s" 4 0 0 zero-gates; done
 run bash "$VERDICT" --fleet 235 --shards 4 --shard-result success --receipts "$ZG"; rc=$?
 expect_rc "$rc" 1 "a shard that reached its gate step but ran 0 gates is refused"
-expect_word "it names non-enforcement" "reason=not-enforced"
+expect_word "it names the zero-gate refusal" "reason=zero-gates"
 expect_word "it carries the shard's own reason" "zero-gates"
 
 # --- the happy path, and the arithmetic it must not skip --------------------

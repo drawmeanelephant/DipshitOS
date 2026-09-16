@@ -32,8 +32,11 @@
 #   --receipts     a directory holding <artifact>/receipt.env per shard, with
 #                  key=value lines: shard= of= ran= failed= reason=
 #
-# Exit status: 0 only when the receipts account for the whole fleet and nothing
-# failed. 1 otherwise, with a report on stdout suitable for a run summary and a
+# Exit status: 0 when the receipts account for the whole fleet and nothing
+# failed, OR when class B cannot run here (no runner / fork PR) — that is
+# reported as `verdict=unenforced`, not as a pass and not as a merge failure.
+# 1 otherwise (a runner executed nothing, a partial fleet, a failed gate, …),
+# with a report on stdout suitable for a run summary and a
 # "verdict=<...> reason=<...>" token line for tests and logs.
 
 set -uo pipefail
@@ -78,18 +81,34 @@ refuse() {
     echo
     for line in "$@"; do echo "$line"; done
     echo
-    if [ "$reason" = not-enforced ]; then
-        echo "Register a runner per \`docs/vz-runner.md\`, then set the repository variable"
-        echo "\`VZ_RUNNER_LABEL\` to its label — or merge with the explicit bypass this ruleset"
-        echo "is configured to require. Either way the absence is on the record."
-        echo
-    fi
     echo "This check is the merge gate for the Apple-silicon Virtualization.framework gates,"
     echo "so it reports nothing it cannot evidence (issue #1256, card #1344)."
     echo
     echo "verdict=refused reason=$reason"
     echo "::error title=VZ hardware gates REFUSED ($reason)::$headline"
     exit 1
+}
+
+# Host cannot run class B (no runner registered, or a fork PR that must not
+# touch the self-hosted runner). That is not a guest regression. Card #1344
+# failed the required check in this state, which blocked every PR (observed:
+# #1348, #1349, #1351 red; #1352 needed an --admin bypass to merge a
+# generated-file one-liner). Report it; do not fail the merge.
+unenforced() {
+    reason="$1"; headline="$2"; shift 2
+    echo "### VZ hardware gates — **NOT ENFORCED: $headline**"
+    echo
+    for line in "$@"; do echo "$line"; done
+    echo
+    echo "Register a runner per \`docs/vz-runner.md\`, then set the repository variable"
+    echo "\`VZ_RUNNER_LABEL\` to its label, and this check becomes a real merge gate."
+    echo "Until then a green badge here means class A only — nothing about guest behavior"
+    echo "was proven. A runner that *is* registered and still executes zero gates is"
+    echo "still REFUSED (\`reason=zero-gates\`)."
+    echo
+    echo "verdict=unenforced reason=$reason"
+    echo "::warning title=VZ hardware gates not enforced ($reason)::$headline"
+    exit 0
 }
 
 if [ "$FLEET" -eq 0 ]; then
@@ -112,6 +131,8 @@ case " $SHARD_RESULT " in *" skipped "*) skipped=1 ;; esac
 
 # --- the receipts: what the shards actually executed -------------------------
 count=0 sum_ran=0 sum_failed=0 seen="" dup="" mismatch="" shard_ran="" skipped_reasons=""
+# 1 until a receipt shows a reason that is not "the host cannot run class B".
+absent_only=1
 
 if [ -n "$RECEIPTS" ] && [ -d "$RECEIPTS" ]; then
     for f in "$RECEIPTS"/*/receipt.env "$RECEIPTS"/receipt.env; do
@@ -138,6 +159,12 @@ if [ -n "$RECEIPTS" ] && [ -d "$RECEIPTS" ]; then
         shard_ran="${shard_ran}#${shard}=${ran} "
         if [ "$ran" -eq 0 ]; then
             skipped_reasons="${skipped_reasons} ${reason}"
+            case "$reason" in
+                no-runner|fork-pr) ;;
+                *) absent_only=0 ;;
+            esac
+        else
+            absent_only=0
         fi
     done
 fi
@@ -156,11 +183,10 @@ fi
 
 if [ "$count" -eq 0 ]; then
     if [ "$skipped" -eq 1 ]; then
-        refuse not-enforced "0 of $FLEET class-B gates ran" \
+        unenforced not-enforced "0 of $FLEET class-B gates ran" \
             "Every shard exited 0 behind the \`VZ_SKIPPED\` marker: no VZ-capable runner is" \
             "registered under the repository variable \`VZ_RUNNER_LABEL\`, or this is a fork" \
             "PR (which never runs on the self-hosted runner by policy)." \
-            "The check was green before this change because it had nothing to fail on." \
             "GitHub-hosted runners cannot substitute ([actions/runner-images#13505]" \
             "(https://github.com/actions/runner-images/issues/13505), closed as not planned):" \
             "Hypervisor.framework is unavailable on them, so Virtualization.framework cannot" \
@@ -180,10 +206,16 @@ if [ "$sum_failed" -gt 0 ]; then
 fi
 
 if [ "$sum_ran" -eq 0 ]; then
-    refuse not-enforced "0 of $FLEET class-B gates ran" \
+    if [ "$absent_only" -eq 1 ]; then
+        unenforced not-enforced "0 of $FLEET class-B gates ran" \
+            "All $count shard(s) left a receipt and every one of them executed zero gates" \
+            "because the host cannot run class B (reason(s):${skipped_reasons:- unknown})." \
+            "Nothing about guest behavior was proven."
+    fi
+    refuse zero-gates "0 of $FLEET class-B gates ran" \
         "All $count shard(s) left a receipt and every one of them executed zero gates" \
-        "(reason(s):${skipped_reasons:- unknown}). Nothing about guest behavior was proven." \
-        "The check was green before this change because it had nothing to fail on."
+        "(reason(s):${skipped_reasons:- unknown}). A registered runner that executes" \
+        "nothing is not a skip — it is the false-PASS class this check exists to catch."
 fi
 
 # Every shard that was supposed to run must show up, and their total must be the

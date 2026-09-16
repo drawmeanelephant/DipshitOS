@@ -5,21 +5,17 @@ the class-B gates — each boots the production image under
 Virtualization.framework and asserts observed guest behavior. They run on
 a **self-hosted Apple silicon macOS 27+ runner**.
 
-> **Status (2026-09-15):** no runner is registered (`gh api
+> **Status (2026-09-16):** no runner is registered (`gh api
 > repos/<owner>/<repo>/actions/runners` → `total_count: 0`) and
-> `VZ_RUNNER_LABEL` is unset, so the shards skip every gate — and the
-> **required** `VZ hardware gates` check now **FAILS**, reporting
-> `REFUSED — 0 of N class-B gates ran` in the run summary and as an
-> annotation on the PR (card #1344). It used to print `NOT ENFORCED` and
-> pass. A green check with nothing to fail on is how the class-B fleet
-> went unrun — and `live-sched-ring` stayed red — for weeks; it also hid
-> a second defect, since the shard loop read a file no step wrote, so
-> even a registered runner would have executed **zero** gates and left
-> the aggregate printing OK (`/tmp/shard-gates.txt`, a path GF5 renamed
-> to `fleet.tsv` and missed here). Merging while class-B is unenforced is
-> therefore a deliberate, auditable act: either bypass this check on the
-> ruleset, or register a runner ("Dedicated host", below). The
-> `vz-macos27-m4` runner was decommissioned 2026-09-03.
+> `VZ_RUNNER_LABEL` is unset, so the shards skip every gate. The required
+> `VZ hardware gates` check reports **NOT ENFORCED** (`0 of N class-B
+> gates ran`, `reason=no-runner`) as a warning and **does not fail the
+> merge** (card #1353). Card #1344 had made that state a red required
+> check, which blocked every PR until someone `--admin` bypassed it
+> (#1352). A runner that *is* registered and still executes zero gates
+> (`reason=zero-gates`, the `/tmp/shard-gates.txt` loop that never
+> iterated) is still **REFUSED**. The `vz-macos27-m4` runner was
+> decommissioned 2026-09-03.
 
 ## Why self-hosted
 
@@ -161,8 +157,10 @@ Once `VZ_RUNNER_LABEL` is set:
 - Each shard writes an **execution receipt** (`shard= of= ran= failed=
   reason=`, uploaded as the `vz-receipt-shard-N` artifact) and the
   aggregate accepts only when the receipts account for the whole
-  discovered fleet, exactly, with nothing failed. This check's green
-  means *measured* execution, not a declared flag (card #1344).
+  discovered fleet, exactly, with nothing failed. When a runner is
+  registered, this check's green means *measured* execution, not a
+  declared flag (card #1344). When no runner is registered, green means
+  NOT ENFORCED (card #1353) — class A only.
 - A shard that executes zero gates **fails**. It used to print
   `::warning::Shard had zero gates` and exit 0, which is a PASS on a green
   check — and it was reachable by accident, because a failed input
@@ -178,20 +176,23 @@ Once `VZ_RUNNER_LABEL` is set:
 
 Delete or blank the `VZ_RUNNER_LABEL` variable — the shards return to
 skipping without any other changes, and the required check returns to
-**REFUSED**. That is by design (card #1344): the absence of a runner is a
-fact about this repository, and the check states it rather than absorbing
-it. The two honest ways to unblock a merge are on the record — an
-explicit bypass on the ruleset, or a dedicated host.
+**NOT ENFORCED** (warning, not a merge failure; card #1353). A registered
+runner that still executes zero gates is still **REFUSED**.
 
-## Why the check refuses instead of warning
+## Why absence is a warning and a silent zero-run is a refusal
 
 The aggregate used to finish with a `::warning::` plus exit 0 — loud, and
 still green. The cost of that choice is measurable: the class-B fleet sat
 unrun long enough for a fleet gate (`live-sched-ring`, red from `eb37fbe`)
 to stay red for weeks, because nothing in CI could fail on it, and the
 same greenness concealed a shard loop that could never execute a gate at
-all. `NOT ENFORCED` on a passing check is a statement people read as
-"fine". `REFUSED` on a failing check is a decision somebody has to make.
+all. Card #1344 failed the required check in both states. With no runner
+registered that blocked **every** PR (card #1353). Absence (`no-runner`,
+`fork-pr`) is now a warning: `NOT ENFORCED` on a passing check is a
+statement people read as "fine", and the run summary still says 0 of N
+ran. A runner that executes nothing (`zero-gates`, missing receipts) is
+still `REFUSED` — that is a defect, not a missing machine.
+
 The verdict itself lives in `tools/ci/vz-enforcement.sh` (no YAML), and
 every refusal state is exercised offline by
 `tools/ci/test-vz-enforcement.sh` in the class-A CI job — including the

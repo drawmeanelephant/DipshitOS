@@ -21,34 +21,28 @@
 # future macOS releases, unlike the old "hosted tops out at macOS 26"
 # claim. See docs/vz-runner.md for the one-time registration steps.
 #
-# A skip is NEVER reported as enforcement, and the aggregate now REFUSES
-# (fails the required check) when the fleet did not run. A shard that
-# skips and a shard that runs the whole fleet have the SAME job
-# conclusion (`success`), so join(needs.*.result) alone was green on every
-# PR while executing zero class-B gates — which is how a red fleet gate
-# (live-sched-ring, red from `eb37fbe`) stayed red for weeks without
-# failing anything. Claim #1256 made the aggregate honest but non-failing
-# (a `::warning::`, the run summary, exit 0) and left the trade open: with
-# no bypass actor on the ruleset, failing there blocks every merge until a
-# runner exists. Card #1344 takes the other side of that trade, because a
-# NON-failing green check is not honest either — it is what made this
-# repository's own CI decorative, and it also hid the second defect: the
-# shard loop read /tmp/shard-gates.txt, a file no step writes (GF5 renamed
-# it to fleet.tsv and missed the redirect), so even a registered runner
-# would have reported PASS having executed nothing. A failed input
-# redirect runs zero iterations and exits 0 even under `set -e`.
+# A skip is NEVER reported as enforcement. Card #1344 made the aggregate
+# FAIL the required check whenever the fleet did not run; with no runner
+# registered that blocked every PR (observed: #1348, #1349, #1351, and
+# #1352 needing an --admin bypass). Card #1353 restores the #1256 side of
+# that trade for ABSENCE only: no-runner / fork-pr is a warning and exit 0
+# (`verdict=unenforced`). A shard that skips and a shard that runs the
+# whole fleet still have the SAME job conclusion (`success`), so the
+# verdict reads receipts, not `join(needs.*.result)`. A registered runner
+# whose gate loop never iterates (`reason=zero-gates`, missing receipts, a
+# partial fleet) is still REFUSED — that is the /tmp/shard-gates.txt
+# false-PASS class, not "we have no machine".
 #
 # The verdict is therefore EVIDENCE, not a flag: every shard writes an
 # execution receipt (shard/of/ran/failed/reason) on every path -- including
 # the skip paths, where ran=0 is the fact worth recording -- and
 # tools/ci/vz-enforcement.sh accepts only when the receipts account for
-# the discovered fleet exactly. Missing evidence, a partial run, a
-# duplicate shard and a zero-gate shard are all refusals.
+# the discovered fleet exactly, or when every receipt is an honest
+# absence. Missing evidence, a partial run, a duplicate shard and a
+# zero-gate shard are all refusals.
 #
-# Merging while class-B is unenforced is a deliberate, explicit act:
-# either register a runner (docs/vz-runner.md) or bypass this check on
-# the ruleset. docs/vz-runner.md carries the status block and the
-# argument for refusing instead of warning.
+# Class B stays unenforced until a runner is registered (docs/vz-runner.md).
+# That absence is on the record as a warning, not as a red required check.
 #
 # Security note: self-hosted runners must never execute untrusted fork-PR
 # code. The trigger list below deliberately excludes pull_request_target,
@@ -69,8 +63,8 @@ on:
   # PR happens to touch the repo, so drift nothing provokes has no way to
   # surface; here the whole discovered fleet re-runs on its own cadence.
   # Effective once a runner is registered under VZ_RUNNER_LABEL — until
-  # then the shards skip exactly as before, and the aggregate says so
-  # instead of reporting OK.
+  # then the shards skip exactly as before, and the aggregate reports
+  # NOT ENFORCED (warning) instead of failing the required check.
   schedule:
     - cron: '0 7 * * *'
   workflow_dispatch:
@@ -336,8 +330,11 @@ jobs:
   #
   # This job IS the merge gate, so it must never claim more than it did. Since
   # card #1344 it decides from the shards' EXECUTION RECEIPTS rather than from a
-  # self-declared skip flag: green now requires that the receipts account for
-  # the discovered fleet exactly. The decision lives in
+  # self-declared skip flag. Card #1353: absence (no-runner / fork-pr) is
+  # `verdict=unenforced` (warning, exit 0) so the required check does not
+  # block every merge while no Apple-silicon runner exists. Green-because-
+  # the-fleet-ran still requires that the receipts account for the
+  # discovered fleet exactly. The decision lives in
   # tools/ci/vz-enforcement.sh, which tools/ci/test-vz-enforcement.sh drives
   # through every state offline -- a gate whose refusal path is never exercised
   # is the bug this repository keeps finding in itself.
@@ -357,7 +354,7 @@ jobs:
         uses: actions/checkout@v4
 
       # The receipts only -- not the gate logs. No artifact exists when every
-      # shard skipped, and that is a REFUSED verdict rather than an
+      # shard skipped, and that is a NOT-ENFORCED verdict rather than an
       # infrastructure error, so the download must not abort the job before the
       # verdict is allowed to say so.
       - name: Download the shards' execution receipts
@@ -422,6 +419,7 @@ jobs:
 
           # A refusal is the point, not a crash: name the state as the check's
           # conclusion, so nobody reads a red X as a flake (card #1344).
+          # rc=0 includes both OK (fleet ran) and unenforced (no runner).
           if [ "$rc" -ne 0 ]; then
             echo "::error title=VZ hardware gates REFUSED::The class-B fleet did not run (or did not all run) on this revision: see the run summary and docs/vz-runner.md."
           fi
