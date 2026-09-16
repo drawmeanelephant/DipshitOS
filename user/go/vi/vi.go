@@ -5,7 +5,44 @@
 // logic remains unit-testable.
 package vi
 
-import "unsafe"
+import (
+	"unsafe"
+
+	"virelai/vsys"
+)
+
+// syscallHook, when non-nil, replaces the raw SVC gateway. It is nil in a
+// guest build's steady state (every call goes straight to the assembly) and
+// exists so HOST tests can inject a fake kernel for the TCP path, the same
+// way vsys.syscallFn is injected. Never set it in guest code.
+var syscallHook func(num uintptr, a0, a1, a2, a3 uintptr) int64
+
+// SetSyscallHookForTest installs fn as the syscall gateway (nil restores the
+// raw one) and returns the previous hook. Host-test seam only.
+func SetSyscallHookForTest(fn func(num uintptr, a0, a1, a2, a3 uintptr) int64) func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
+	prev := syscallHook
+	syscallHook = fn
+	return prev
+}
+
+// SyscallHookForTest returns the current hook (nil = raw gateway).
+func SyscallHookForTest() func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
+	return syscallHook
+}
+
+func svc2(num uintptr, a0, a1 uintptr) int64 {
+	if syscallHook != nil {
+		return syscallHook(num, a0, a1, 0, 0)
+	}
+	return syscall2(num, a0, a1)
+}
+
+func svc0(num uintptr) int64 {
+	if syscallHook != nil {
+		return syscallHook(num, 0, 0, 0, 0)
+	}
+	return syscall0(num)
+}
 
 // ADR 0007 slot numbers (kernel/src/syscall.zig, mirrored by
 // user/src/lib/ui/abi.zig). Adding a row here must match that table.
@@ -467,12 +504,13 @@ func TCPConnect(ip [4]byte, port uint16) int64 {
 	return syscall2(SlotTCPConnect, uintptr(word), uintptr(port))
 }
 
-// TCPSend writes b to the socket.
+// TCPSend writes b to the socket (at most the kernel's 192-byte payload_max
+// per call; a caller with more must loop — see the browser's sendAll).
 func TCPSend(b []byte) (int, int64) {
 	if len(b) == 0 {
 		return 0, 0
 	}
-	r := syscall2(SlotTCPSend, uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)))
+	r := svc2(SlotTCPSend, uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)))
 	if r < 0 {
 		return 0, r
 	}
@@ -484,7 +522,7 @@ func TCPRecv(buf []byte) (int, int64) {
 	if len(buf) == 0 {
 		return 0, 0
 	}
-	r := syscall2(SlotTCPRecv, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+	r := svc2(SlotTCPRecv, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
 	if r < 0 {
 		return 0, r
 	}
@@ -492,7 +530,7 @@ func TCPRecv(buf []byte) (int, int64) {
 }
 
 // TCPClose closes the socket.
-func TCPClose() int64 { return syscall0(SlotTCPClose) }
+func TCPClose() int64 { return svc0(SlotTCPClose) }
 
 // Map flags / protections accepted by sys_mmap (slot 63).
 const (
@@ -555,23 +593,5 @@ func putU32(b []byte, v uint32) {
 // Itoa64 is the shared decimal formatter for the guest side (the stdlib
 // strconv is not ported to this GOOS).
 func Itoa64(v int64) string {
-	if v == 0 {
-		return "0"
-	}
-	neg := v < 0
-	if neg {
-		v = -v
-	}
-	var buf [24]byte
-	i := len(buf)
-	for v > 0 {
-		i--
-		buf[i] = byte('0' + v%10)
-		v /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
+	return vsys.Itoa64(v)
 }

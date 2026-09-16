@@ -90,10 +90,12 @@ const (
 )
 
 // Load bounds. The response read is bounded three ways so a bad network
-// cannot hang the app: a byte cap, an idle cap, and the redirect hop cap.
+// cannot hang the app: a byte cap, a wall-clock deadline, and the redirect
+// hop cap.
 const (
-	maxRedirects = 5
-	readIdleMax  = 300
+	maxRedirects   = 5
+	readIdleMax    = 300
+	readDeadlineMs = 30000
 )
 
 // HistoryPersistence is where visits are appended (inspectable text, one
@@ -178,6 +180,7 @@ type app struct {
 	loadIdle int
 	loadHops int
 	loadSeen map[string]bool
+	loadEnd  int64 // monotonic deadline (vi.Nanos ns) for the in-flight load
 	chunk    [1024]byte
 }
 
@@ -465,6 +468,19 @@ func classifyTarget(resolved string) string {
 	return "file"
 }
 
+// sendAll writes b to the socket in payload-bounded chunks, so a request
+// larger than one syscall send (192 B) can never be silently truncated.
+func sendAll(b []byte) bool {
+	for len(b) > 0 {
+		n, rc := vi.TCPSend(b)
+		if rc < 0 || n <= 0 {
+			return false
+		}
+		b = b[n:]
+	}
+	return true
+}
+
 // startHTTP connects, sends the GET, and arms the stepped read.
 func (a *app) startHTTP(u webrender.URL) {
 	if rc := vi.TCPConnect(u.IPv4, u.Port); rc < 0 {
@@ -472,7 +488,7 @@ func (a *app) startHTTP(u webrender.URL) {
 		return
 	}
 	req := webrender.FormatGetRequestWithCookies(u.Host, u.Path, a.cookieHeaderFor(u.Host, u.Path))
-	if _, rc := vi.TCPSend([]byte(req)); rc < 0 {
+	if !sendAll([]byte(req)) {
 		vi.TCPClose()
 		a.offlineOr("tcp")
 		return
@@ -481,6 +497,7 @@ func (a *app) startHTTP(u webrender.URL) {
 	a.loadBuf = a.loadBuf[:0]
 	a.loadIdle = 0
 	a.loading = true
+	a.loadEnd = vi.Nanos() + readDeadlineMs*1_000_000
 	vi.ConsoleLine(markerFetch + u.Host + u.Path)
 }
 
@@ -494,12 +511,11 @@ func (a *app) loadStep() {
 		return
 	}
 	if n == 0 {
-		if len(a.loadBuf) > 0 {
-			a.completeLoad()
-			return
-		}
-		a.loadIdle++
-		if a.loadIdle > readIdleMax {
+		// "No bytes right now" is not completion: with a half-closed peer the
+		// kernel's recv returns 0 while data may still be queued for a later
+		// poll, and only the deadline bounds the wait. A FIN/RST turns the
+		// next recv into an error (rc < 0) and ends the load above.
+		if vi.Nanos() >= a.loadEnd {
 			vi.TCPClose()
 			a.loading = false
 			a.offlineOr("timeout")
@@ -508,6 +524,7 @@ func (a *app) loadStep() {
 	}
 	a.loadIdle = 0
 	a.loadBuf = append(a.loadBuf, a.chunk[:n]...)
+	a.loadEnd = vi.Nanos() + readDeadlineMs*1_000_000
 	if len(a.loadBuf) >= vi.MaxFileBytes {
 		a.completeLoad()
 	}

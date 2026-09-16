@@ -130,6 +130,23 @@ func TestOutOfRangeAndCaps(t *testing.T) {
 	Console(string(make([]byte, 1000))) // must not panic when chunked
 }
 
+func TestItoa64(t *testing.T) {
+	for _, tc := range []struct {
+		value int64
+		want  string
+	}{
+		{0, "0"},
+		{1, "1"},
+		{-1, "-1"},
+		{9223372036854775807, "9223372036854775807"},
+		{-9223372036854775808, "-9223372036854775808"},
+	} {
+		if got := Itoa64(tc.value); got != tc.want {
+			t.Errorf("Itoa64(%d) = %q, want %q", tc.value, got, tc.want)
+		}
+	}
+}
+
 func TestArgsHost(t *testing.T) {
 	if Args() != nil {
 		t.Fatal("host Args should be nil")

@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"virelai/vi"
 	"virelai/webrender"
 )
 
@@ -107,6 +108,83 @@ func TestLoadStepErrorIsDefined(t *testing.T) {
 	}
 	if a.errKind == "" {
 		t.Fatal("a failed read must set an error kind")
+	}
+}
+
+// "No bytes right now" is not completion: an empty recv must NOT finish the
+// load while the deadline is live (the old code treated it as the end of the
+// response, truncating a page whose next segment was one poll away). Only a
+// timeout ends the load. A fake recv (0 bytes, no error) is injected through
+// vi's syscall hook because the HOST fallback reports -ENOSYS, which is the
+// rc<0 path, not the empty-read path.
+func TestLoadStepEmptyReadKeepsLoading(t *testing.T) {
+	prev := vi.SyscallHookForTest()
+	defer vi.SetSyscallHookForTest(prev)
+	vi.SetSyscallHookForTest(func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
+		if num == vi.SlotTCPRecv {
+			return 0
+		}
+		return 0
+	})
+	a := &app{hist: newHistory(), loading: true, target: "http://10.0.0.2/"}
+	a.loadEnd = vi.Nanos() + 60_000_000_000 // 60 s in the future
+	a.loadStep()
+	if !a.loading {
+		t.Fatal("an empty recv with a live deadline must keep the load armed")
+	}
+	if a.errKind != "" {
+		t.Fatalf("an empty recv must not raise an error: %q", a.errKind)
+	}
+	// And an expired deadline must end it as a timeout.
+	a.loadEnd = vi.Nanos() - 1
+	a.loadStep()
+	if a.loading {
+		t.Fatal("an expired deadline must end the load")
+	}
+	if a.errKind != "timeout" {
+		t.Fatalf("errKind = %q want timeout", a.errKind)
+	}
+}
+
+// sendAll loops the payload-bounded send. A fake socket is injected through
+// vi's syscall hook so the chunking is exercised deterministically: the fake
+// accepts at most 192 bytes per call (the kernel's payload_max), so a
+// truncating implementation (one send, ignore the count) cannot pass.
+func TestSendAllLoopsLargeRequests(t *testing.T) {
+	prev := vi.SyscallHookForTest()
+	defer vi.SetSyscallHookForTest(prev)
+	sent := 0
+	vi.SetSyscallHookForTest(func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
+		if num == vi.SlotTCPSend {
+			n := int(a1)
+			if n > 192 {
+				n = 192
+			}
+			sent += n
+			return int64(n)
+		}
+		return 0
+	})
+	if !sendAll(nil) {
+		t.Fatal("sendAll(nil) should succeed")
+	}
+	if sent != 0 {
+		t.Fatalf("sendAll(nil) sent %d bytes", sent)
+	}
+	sent = 0
+	if !sendAll([]byte("hello")) {
+		t.Fatal("sendAll(hello) should succeed")
+	}
+	if sent != 5 {
+		t.Fatalf("sent = %d want 5", sent)
+	}
+	sent = 0
+	big := make([]byte, 500)
+	if !sendAll(big) {
+		t.Fatal("sendAll(500B) must loop until the whole request is sent")
+	}
+	if sent != 500 {
+		t.Fatalf("sent = %d want 500 (a short write must be retried, not dropped)", sent)
 	}
 }
 

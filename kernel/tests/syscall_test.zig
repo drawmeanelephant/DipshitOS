@@ -2517,6 +2517,23 @@ test "syscall: TCP connection is process-owned — non-owner send/recv/close/con
     try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
     try std.testing.expectEqual(@as(u64, 0), dispatch(sys_tcp_connect, .{ 0x0a000002, 9999, 0, 0, 0, 0 }, &frame));
 
+    tcp.rx_payload[0..6].* = "abcdef".*;
+    tcp.rx_len = 6;
+    tcp.rx_pending = true;
+    try std.testing.expectEqual(error_result(.efault), dispatch(sys_tcp_recv, .{ 0, 2, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqual(@as(usize, 6), tcp.rx_len);
+    try std.testing.expectEqual(@as(u64, 2), dispatch(sys_tcp_recv, .{ test_buf_addr, 2, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqualStrings("ab", test_buf[0..2]);
+    try std.testing.expectEqual(@as(usize, 4), tcp.rx_len);
+    try std.testing.expect(tcp.rx_pending);
+    try std.testing.expect(tcp.ready_mask() & 1 != 0);
+    try std.testing.expectEqualStrings("cdef", tcp.rx_payload[0..tcp.rx_len]);
+    try std.testing.expectEqual(@as(u64, 4), dispatch(sys_tcp_recv, .{ test_buf_addr, test_buf.len, 0, 0, 0, 0 }, &frame));
+    try std.testing.expectEqualStrings("cdef", test_buf[0..4]);
+    try std.testing.expectEqual(@as(usize, 0), tcp.rx_len);
+    try std.testing.expect(!tcp.rx_pending);
+    try std.testing.expect(tcp.ready_mask() & 1 == 0);
+
     // Restore the honest default (net absent).
     tcp.reset();
     virtio_net.net_ready = false;
