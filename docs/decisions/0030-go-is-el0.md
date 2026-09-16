@@ -63,7 +63,11 @@ embeds them.
   (`TLS.BIN` / `FETCHS.BIN` over TCP, ADR 0029) and SSH stays `SSH.BIN`
   until their own cards exist.
 - No `settings set wm` / boot-default flip before M59. AGENTS.md's
-  "do not change the boot default" rule yields only on that card.
+  "do not change the boot default" rule yields only on that card. **#1298 is
+  that card, and it has landed**: the compiled `wm` default is `gotabwm`, so
+  a boot with no persisted setting seats the Go desktop; `settings set wm
+  tabwm` keeps the Zig seat, and `settings set wm none` is the explicit
+  shim-only VM the pre-M59 fleet assumed.
 - No claiming a milestone parent (`#1296`, `#1295`, `#1294`) — those are
   indexes. Claim the leaf.
 
@@ -111,7 +115,7 @@ change.
 | M58b | Go editor | #1306 | `go-edit` on VZ: open fixture, dirty, save, close. Usable buffer + save, not EDIT's feature list. |
 | M58c | Go terminal front-end (ADR 0020) | #1307 | `go-term` on VZ: attach, a typed line / shell marker, close. No new tty syscall. |
 | M58d | Go fetch over the Zig TLS helper | #1308 | HTTPS via the Zig helper; never a cleartext GET. No Go crypto. DNS is not this card. |
-| **M59** | Explicit default flip | #1298 | The **only** card allowed to move the boot default. `settings set wm gotabwm` persists; Zig TABWM remains the fallback. Touches include `kernel/src/shell.zig` (that is where the WM boot default lives), not only a settings panel. Gate: flip → reboot → Go WM hosting a leftover Zig app. Depends on M57 (second seat proven) and at least one leftover Zig app hosted under it. |
+| **M59** | Explicit default flip | #1298 | The **only** card allowed to move the boot default. `settings set wm gotabwm` persists; Zig TABWM remains the fallback. Touches include `kernel/src/shell.zig` (that is where the WM boot default lives), not only a settings panel. Gate: flip → reboot → Go WM hosting a leftover Zig app. Depends on M57 (second seat proven) and at least one leftover Zig app hosted under it. **Landed:** `wm` is a schema-v2 settings key whose compiled default is `gotabwm`; the shell-idle autostart resolves the seat through it (`gotabwm` → `GOTABWM.ELF`, `tabwm` → `TABWM.BIN`, `none` → shim), `tools/session.sh` stages the Go seat and lets the default apply, and `go-wm-default` proves the default boot on VZ (boot 01: no `wm` key → the Go seat hosts CALC; boot 02: the persisted `wm=tabwm` → the Zig seat). A boot whose share carries no seat binary says so and stays shim-only instead of faking a desktop. |
 | **M60** | Starve Zig EL0 | #1297 | Mini-umbrella: record the no-new-Zig-apps policy; each leftover deletion is its own claim against this card. No flag day. TLS/SSH stay Zig helpers until their own Go cards. |
 
 Superseded drafts (closed, do not claim): original M56/M57 leaves
@@ -124,8 +128,10 @@ Superseded drafts (closed, do not claim): original M56/M57 leaves
   process on slot 65; it does not move policy back into EL1.
 - Zig leftover apps keep working across the seat change because WM_RPC
   is the contract, provided `is_wm_name` learns `GOTABWM.ELF` (D5).
-- Two seats exist from M57 until M59. That is deliberate: the default
-  stays TABWM until the Go seat hosts a leftover Zig app on VZ.
+- Two seats exist from M57 onward, and since M59 the Go one is the
+  default. The compiled default idles the pre-M59 way only when it is
+  asked to (`settings set wm none`) or when the seat binary is not on the
+  share — in which case the boot reports the miss and stays shim-only.
 - `LIBUI.SO` / `user/src/lib/ui` become the toolkit of the dying Zig
   desktop, not a thing to port.
 

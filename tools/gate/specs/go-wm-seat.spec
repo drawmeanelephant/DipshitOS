@@ -17,6 +17,12 @@
 # shim). Serial markers are the proof; each is printed only after its syscall
 # returned.
 #
+# M59 (issue #1298) note: the COMPILED default is now the Go seat, so this
+# spec seeds `wm=none` in its share to keep what it actually proves -- the
+# seat's explicit, opt-in registration path -- separate from the default flip
+# (go-wm-default.spec owns that). Its "shim at boot" asserts are therefore
+# about the seeded setting, not about the out-of-the-box boot.
+#
 # HOST PREREQUISITE (fails the gate honestly when missing):
 #   bash tools/go/build-gotabwm.sh   ->  .build/go/GOTABWM.ELF
 #
@@ -29,7 +35,8 @@ vgate_name go-wm-seat "issues #1313/#1317/#1318 M57a+b+c: a Go WM registers the 
 vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 
-# Phase 1: the boot default reports shim (the seat is opt-in), then opt in.
+# Phase 1: the seeded `wm=none` keeps this boot shim-only, then the seat is
+# opted in explicitly.
 vgate_file script.txt <<'EOF'
 wm
 exec GOTABWM.ELF
@@ -67,6 +74,13 @@ if not os.path.exists(src):
 shutil.copy(src, os.path.join(share, "GOTABWM.ELF"))
 print("staged GOTABWM.ELF into share (%d bytes)" %
       os.path.getsize(os.path.join(share, "GOTABWM.ELF")))
+# M59 (issue #1298): the compiled default is the Go seat now. Seed `wm=none`
+# so this boot composites via the shim and the seat arrives only where the
+# script asks for it -- the point of THIS spec (go-wm-default.spec owns the
+# default-flip proof). `none` is the documented shim-only seat value.
+with open(os.path.join(share, "SETTINGS.TXT"), "w") as f:
+    f.write("#v2\nwm=none\n")
+print("seeded SETTINGS.TXT (wm=none: shim-only boot, explicit seat opt-in)")
 PY
 
 vgate_run 01 -- \
@@ -81,8 +95,9 @@ vgate_run 01 -- \
 # --- M57a: the seat and the blank desktop --------------------------------
 vgate_assert 01 serial-contains 'VirelaiOS kernel has seized control.'
 vgate_assert 01 serial-contains 'exec: loaded GOTABWM.ELF'
-# The seat is opt-in: the boot default reports shim, and so does the run's
-# closing `wm` query.
+# The seat is opt-in: the seeded `wm=none` leaves the boot shim-only (the
+# autostart reports nothing for that seat), and the run's `wm` query before
+# the exec and after the exit both report shim.
 vgate_assert 01 serial-count 'wm: none (shim compositing)' 2
 # The program's own marker chain (each printed after its syscall succeeded).
 vgate_assert 01 serial-contains 'gotabwm: registered'
