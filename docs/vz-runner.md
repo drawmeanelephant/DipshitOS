@@ -5,21 +5,14 @@ the class-B gates — each boots the production image under
 Virtualization.framework and asserts observed guest behavior. They run on
 a **self-hosted Apple silicon macOS 27+ runner**.
 
-> **Status (2026-09-15):** no runner is registered (`gh api
+> **Status (2026-09-14):** no runner is registered (`gh api
 > repos/<owner>/<repo>/actions/runners` → `total_count: 0`) and
-> `VZ_RUNNER_LABEL` is unset, so the shards skip every gate — and the
-> **required** `VZ hardware gates` check now **FAILS**, reporting
-> `REFUSED — 0 of N class-B gates ran` in the run summary and as an
-> annotation on the PR (card #1344). It used to print `NOT ENFORCED` and
-> pass. A green check with nothing to fail on is how the class-B fleet
-> went unrun — and `live-sched-ring` stayed red — for weeks; it also hid
-> a second defect, since the shard loop read a file no step wrote, so
-> even a registered runner would have executed **zero** gates and left
-> the aggregate printing OK (`/tmp/shard-gates.txt`, a path GF5 renamed
-> to `fleet.tsv` and missed here). Merging while class-B is unenforced is
-> therefore a deliberate, auditable act: either bypass this check on the
-> ruleset, or register a runner ("Dedicated host", below). The
-> `vz-macos27-m4` runner was decommissioned 2026-09-03.
+> `VZ_RUNNER_LABEL` is unset, so the workflow skips every gate. It no
+> longer reports that as OK: the aggregate prints **NOT ENFORCED (0 of
+> 226 class-B gates ran)**, annotates every run, and writes the reason
+> into the run summary. A green required check with nothing to fail on is
+> how the class-B fleet went unrun — and `live-sched-ring` stayed red —
+> for weeks. The `vz-macos27-m4` runner was decommissioned 2026-09-03.
 
 ## Why self-hosted
 
@@ -154,19 +147,10 @@ controls enforce that:
 
 Once `VZ_RUNNER_LABEL` is set:
 
-- Every PR targeting main gets four shard jobs (the discovered fleet,
-  split by index into four roughly equal shards) plus the aggregate **VZ
-  hardware gates** context, which branch protection requires alongside
-  the existing class-A checks.
-- Each shard writes an **execution receipt** (`shard= of= ran= failed=
-  reason=`, uploaded as the `vz-receipt-shard-N` artifact) and the
-  aggregate accepts only when the receipts account for the whole
-  discovered fleet, exactly, with nothing failed. This check's green
-  means *measured* execution, not a declared flag (card #1344).
-- A shard that executes zero gates **fails**. It used to print
-  `::warning::Shard had zero gates` and exit 0, which is a PASS on a green
-  check — and it was reachable by accident, because a failed input
-  redirect runs zero iterations and exits 0 even under `set -e`.
+- Every PR targeting main gets four shard jobs (the 226-member fleet
+  split ~57/57/56/56) plus the aggregate **VZ hardware gates** context,
+  which branch protection requires alongside the existing class-A
+  checks.
 - A nightly sweep (`schedule: 0 7 * * *`) re-runs the whole fleet on its
   own cadence, so drift that no PR happens to provoke still surfaces
   without waiting for someone to edit the repo.
@@ -176,23 +160,5 @@ Once `VZ_RUNNER_LABEL` is set:
 
 ## Removing / pausing
 
-Delete or blank the `VZ_RUNNER_LABEL` variable — the shards return to
-skipping without any other changes, and the required check returns to
-**REFUSED**. That is by design (card #1344): the absence of a runner is a
-fact about this repository, and the check states it rather than absorbing
-it. The two honest ways to unblock a merge are on the record — an
-explicit bypass on the ruleset, or a dedicated host.
-
-## Why the check refuses instead of warning
-
-The aggregate used to finish with a `::warning::` plus exit 0 — loud, and
-still green. The cost of that choice is measurable: the class-B fleet sat
-unrun long enough for a fleet gate (`live-sched-ring`, red from `eb37fbe`)
-to stay red for weeks, because nothing in CI could fail on it, and the
-same greenness concealed a shard loop that could never execute a gate at
-all. `NOT ENFORCED` on a passing check is a statement people read as
-"fine". `REFUSED` on a failing check is a decision somebody has to make.
-The verdict itself lives in `tools/ci/vz-enforcement.sh` (no YAML), and
-every refusal state is exercised offline by
-`tools/ci/test-vz-enforcement.sh` in the class-A CI job — including the
-shard step run against a sandbox fleet.
+Delete or blank the `VZ_RUNNER_LABEL` variable — the workflow returns
+to SKIPPED mode without any other changes.
