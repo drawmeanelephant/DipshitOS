@@ -313,7 +313,10 @@ echo
 echo "── a premature exit is never a PASS (issue #1338) ──"
 
 # The floor at its boundary. The explicit-version form is what makes this
-# assertable without a 20-year-old bash on the box (CI's is modern).
+# assertable without a 20-year-old bash on the box. Note that this suite itself
+# runs on whatever shell CI used to start it, and on GitHub's macOS runner that
+# is /bin/bash 3.2.57 (the job adds nothing to PATH; see the version-aware cases
+# below) -- so nothing here may assume a modern RUNNING shell.
 for v in 3:2 4:0 4:3 0:0; do
     major="${v%%:*}"; minor="${v##*:}"
     run gate_assert_modern_bash "$major" "$minor"; rc=$?
@@ -343,15 +346,40 @@ for v in 4:4 5:3 8:0; do
                   || bad "bash $major.$minor must clear the floor, got rc=$rc"
 done
 
-# ... and the no-arg form judges the shell this suite is running under, which
-# is the call the harness itself makes.
+# ... and the no-arg form judges the shell this suite is running under, which is
+# the call the harness itself makes. What that verdict MUST BE is a property of
+# the host, so it is computed here rather than assumed: on GitHub's macOS runner
+# the suite starts under /bin/bash 3.2.57, where a refusal is the DESIGNED
+# outcome. The first draft of this case asserted rc=0 unconditionally and failed
+# CI run 35037178834 (2 of 54) -- which is the issue-#1338 lesson one level up:
+# a self-test with a host assumption in it reports the host, not the change.
+RUN_MAJOR="${BASH_VERSINFO[0]:-0}"; RUN_MINOR="${BASH_VERSINFO[1]:-0}"
+if [ "$RUN_MAJOR" -gt 4 ] || { [ "$RUN_MAJOR" -eq 4 ] && [ "$RUN_MINOR" -ge 4 ]; }; then
+    RUNNING_MODERN=1
+else
+    RUNNING_MODERN=0
+fi
+
 run gate_assert_modern_bash; rc=$?
-[ "$rc" = 0 ] && ok "the no-arg form judges the running shell ($BASH_VERSION)" \
-              || bad "the running shell failed its own floor: rc=$rc"
+if [ "$RUNNING_MODERN" = 1 ]; then
+    [ "$rc" = 0 ] && ok "the no-arg form clears the running shell ($BASH_VERSION)" \
+                  || bad "the running shell is >= 4.4, so the floor must clear it, not rc=$rc"
+else
+    [ "$rc" = 2 ] && ok "the no-arg form refuses the running shell ($BASH_VERSION < 4.4)" \
+                  || bad "the running shell is < 4.4, so the floor must return rc=2, not rc=$rc"
+    case "$CASE_OUT" in
+        *env-check.sh*) ok "the running shell's refusal names the fix" ;;
+        *) bad "the running shell's refusal should name tools/env-check.sh: $CASE_OUT" ;;
+    esac
+fi
 
 # End to end, through the real entry point: a spec that exits before the result
 # block. Exit status 0 is the dangerous case -- it is exactly what the bash 3.2
-# trap produced -- so the guard has to turn ANY premature exit non-zero.
+# trap produced -- so the guard has to turn ANY premature exit non-zero. The
+# scenario needs a shell that clears the floor (the refusal comes first, by
+# design), so drive vgate.sh with a modern bash explicitly. Where the host has
+# none -- CI's macOS runner ships only /bin/bash 3.2.57 -- say so loudly instead
+# of re-measuring the floor and calling it a premature-exit result.
 cat > "$TMP/premature.spec" <<'SPEC'
 vgate_name vg-premature "self-test fixture: a spec that exits before the result block"
 exit 0
@@ -360,19 +388,36 @@ cat > "$TMP/bogus.spec" <<'SPEC'
 vgate_name vg-bogus "self-test fixture: a spec whose DSL call does not exist"
 vgate_not_a_real_command
 SPEC
-VGATE_NO_BUILD=1
-run bash tools/gate/vgate.sh "$TMP/premature.spec"; rc=$?
-[ "$rc" != 0 ] && ok "a spec that exits early is not a PASS (rc=$rc)" \
-               || bad "a premature exit reported rc=0 -- the false-PASS guard is not wired"
-case "$CASE_OUT" in
-    *"exited before its result block"*) ok "the abort names itself as a FAIL" ;;
-    *) bad "the abort should say 'exited before its result block': $CASE_OUT" ;;
-esac
 
-run bash tools/gate/vgate.sh "$TMP/bogus.spec"; rc=$?
-[ "$rc" != 0 ] && ok "a spec with an undefined DSL command is not a PASS (rc=$rc)" \
-               || bad "an undefined DSL command reported rc=0"
-unset VGATE_NO_BUILD
+MODERN_BASH=""
+for cand in /opt/homebrew/bin/bash /usr/local/bin/bash "$(command -v bash 2>/dev/null)"; do
+    [ -n "$cand" ] || continue
+    [ -x "$cand" ] || continue
+    if "$cand" -c '[ "${BASH_VERSINFO[0]}" -gt 4 ] || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -ge 4 ]; }'; then
+        MODERN_BASH="$cand"
+        break
+    fi
+done
+
+if [ -n "$MODERN_BASH" ]; then
+    VGATE_NO_BUILD=1
+    run "$MODERN_BASH" tools/gate/vgate.sh "$TMP/premature.spec"; rc=$?
+    [ "$rc" != 0 ] && ok "a spec that exits early is not a PASS (rc=$rc, $MODERN_BASH)" \
+                   || bad "a premature exit reported rc=0 -- the false-PASS guard is not wired"
+    case "$CASE_OUT" in
+        *"exited before its result block"*) ok "the abort names itself as a FAIL" ;;
+        *) bad "the abort should say 'exited before its result block': $CASE_OUT" ;;
+    esac
+
+    run "$MODERN_BASH" tools/gate/vgate.sh "$TMP/bogus.spec"; rc=$?
+    [ "$rc" != 0 ] && ok "a spec with an undefined DSL command is not a PASS (rc=$rc)" \
+                   || bad "an undefined DSL command reported rc=0"
+    unset VGATE_NO_BUILD
+else
+    echo "  skip  no bash >= 4.4 anywhere on this host (running: $BASH_VERSION): the"
+    echo "  skip  premature-exit scenario sits behind the floor, and the floor is"
+    echo "  skip  asserted above; CI's macOS runner has only /bin/bash 3.2.57."
+fi
 
 # The refusal must fire in the real entry point, not only in the helper. Only
 # assertable where a pre-4.4 bash exists (macOS /bin/bash is 3.2; CI's is not).
