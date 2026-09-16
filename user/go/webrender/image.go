@@ -131,8 +131,11 @@ func decodeQOI(data []byte) (*Image, error) {
 	return out, nil
 }
 
+// qoiHash is the format's 6-bit index hash. The mask is not optional: the
+// index table has 64 slots and the raw sum overruns it immediately (the
+// first swatch colour hashes to 1043), which panics the guest.
 func qoiHash(px uint32) uint32 {
-	return (px>>16&0xff)*3 + (px>>8&0xff)*5 + (px&0xff)*7
+	return ((px>>16&0xff)*3 + (px>>8&0xff)*5 + (px&0xff)*7) & 63
 }
 
 func qoiDelta(px uint32, dr, dg, db int) uint32 {
