@@ -206,9 +206,9 @@ under `C` with no workflow noticing). The rules that came out of it:
 > pattern group with `just gates <pattern>`, the whole fleet with
 > `just verify-vz` (Apple silicon only — each member boots VZ VMs; the
 > interactive serial-takeover gate `zig build run` needs a TTY and is run
-> with `just run`). The same list shards
-> `.github/workflows/vz-gates.yml` on a registered macOS 27+ Apple silicon
-> runner. The class-D diagnostics run individually per claim. See
+> with `just run`). CI does not shard this list: `.github/workflows/vz-gates.yml`
+> is a not-enforced placeholder until an Apple silicon runner is registered
+> (then the fleet shards onto it per `docs/vz-runner.md`). The class-D diagnostics run individually per claim. See
 > [`docs/gate-fleet-inventory.md`](gate-fleet-inventory.md) for the full
 > per-member table.
 >

@@ -1,42 +1,17 @@
+# vz-gates.yml -- class-B VZ hardware-gate placeholder (NOT enforcement).
 #
-# vz-gates.yml -- class-B Apple-silicon VZ hardware gates as a required CI
-# check. The gate fleet is DISCOVERED from the spec dir (M40 GF5, issue
-# #940): every tools/gate/specs/*.spec plus the four legacy class-B
-# scripts, as listed by `bash tools/gate/fleet.sh list`, sharded across a
-# matrix and run on REAL Virtualization.framework hardware: each one boots
-# the production image and asserts observed guest behavior. Adding a spec
-# adds it to these shards with zero workflow edits. The interactive
-# serial-takeover gate (`zig build run`) is not part of the automated
-# fleet (it needs a TTY); run `just run`.
+# There is no Apple-silicon runner (VZ_RUNNER_LABEL unset; GitHub-hosted
+# runners cannot boot VZ — Hypervisor.framework is unavailable on them),
+# so the old four-shard fleet machinery never ran a gate here: every shard
+# skipped in seconds and the aggregate printed NOT ENFORCED. The shards
+# were removed 2026-09; this single job keeps the `VZ hardware gates`
+# required check (ruleset "VZ hardware gates (bypassable, PR merges
+# only)") reporting instead of stuck on "expected". It proves nothing
+# about guest behavior — run `just verify-vz` on Apple silicon for that.
 #
-# Runner selection -- the shards run on whatever label the repository
-# variable VZ_RUNNER_LABEL names, which must be a self-hosted Apple
-# silicon macOS 27+ host. The reason is NOT the hosted macOS version:
-# GitHub's `xcode-27` hosted image has run macOS 27 (arm64) since
-# 2026-09-10. It is that Hypervisor.framework is unavailable on
-# GitHub-hosted runners, so Virtualization.framework cannot boot a guest
-# there at all (actions/runner-images#13505, closed as not planned; its
-# repro asserts `sysctl -n kern.hv_support` returns 1 and fails on those
-# runners). That reason survives
-# future macOS releases, unlike the old "hosted tops out at macOS 26"
-# claim. See docs/vz-runner.md for the one-time registration steps.
-#
-# A skip is NEVER reported as enforcement. Each shard exports its
-# vz_skipped state as a job output and the aggregate below refuses to
-# print OK when any shard exited 0 without running a gate. That matters
-# because a shard that skips and a shard that runs the whole fleet have
-# the SAME job conclusion (`success`) — so join(needs.*.result) alone was
-# green on every PR while executing zero class-B gates, which is how a
-# red fleet gate (live-sched-ring, red from `eb37fbe`) stayed red for
-# weeks without failing anything.
-#
-# Security note: self-hosted runners must never execute untrusted fork-PR
-# code. The trigger list below deliberately excludes pull_request_target,
-# and an early step skips fork pull requests outright (VZ_SKIPPED) so a
-# fork's workflow never reaches a self-hosted runner. The repository's
-# fork-PR workflow approval policy (Settings -> Actions -> General) is the
-# hard control behind that guard and must stay at its strictest setting;
-# fork PRs run only the portable class-A set in ci.yml.
+# If a runner is ever registered per docs/vz-runner.md, restore sharded
+# runs of the discovered fleet (`bash tools/gate/fleet.sh list`) on it;
+# the removed machinery lives in git history before this stub.
 
 name: VZ hardware gates
 
@@ -45,297 +20,22 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
-  # Nightly full-fleet sweep. PR shards only re-execute the fleet when a
-  # PR happens to touch the repo, so drift nothing provokes has no way to
-  # surface; here the whole discovered fleet re-runs on its own cadence.
-  # Effective once a runner is registered under VZ_RUNNER_LABEL — until
-  # then the shards skip exactly as before, and the aggregate says so
-  # instead of reporting OK.
-  schedule:
-    - cron: '0 7 * * *'
   workflow_dispatch:
 
-concurrency:
-  group: vz-gates-${{ github.event.pull_request.number || github.sha }}
-  cancel-in-progress: true
-
-env:
-  SHARD_COUNT: "4"
-  # Per-gate watchdog (a healthy gate takes ~10s locally; 600s is ample).
-  GATE_TIMEOUT_SECS: "600"
-
 jobs:
-  gate-shard:
-    name: vz shard ${{ matrix.shard }}
-    runs-on: ${{ vars.VZ_RUNNER_LABEL != '' && vars.VZ_RUNNER_LABEL || 'ubuntu-latest' }}
-    # vz_skipped: '1' when this shard exited without running a gate (no
-    # VZ-capable runner, or a fork PR). Both cases conclude `success`, the
-    # same as a shard that ran the whole fleet, so the flag — not the job
-    # conclusion — is what the aggregate below reads. Note that a matrix
-    # job id collapses to ONE `needs` entry, so what the aggregate sees is
-    # the last shard's value; that is sound only because every shard
-    # resolves the same `runs-on` (see the aggregate's note).
-    outputs:
-      vz_skipped: ${{ steps.fork_guard.outputs.vz_skipped || steps.capability.outputs.vz_skipped }}
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [0, 1, 2, 3]
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      # Fork-PR guard. The runs-on label above may already have resolved to
-      # the self-hosted runner, but no fork-controlled workflow code may
-      # execute on it. When the triggering PR's head is a different
-      # repository, exit 0 with the honest SKIPPED marker (the same
-      # machinery the capability gate uses) so every later step is skipped.
-      # Defense in depth behind the repo's fork-PR workflow approval
-      # policy; do not remove this guard, and never add pull_request_target.
-      - name: Skip fork pull requests (self-hosted runner policy)
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
-        id: fork_guard
-        shell: bash
-        run: |
-          echo "::notice title=VZ gates skipped::Fork pull requests never run class-B gates on the self-hosted runner."
-          echo "VZ_SKIPPED=1" >> "$GITHUB_ENV"
-          echo "vz_skipped=1" >> "$GITHUB_OUTPUT"
-
-      # Capability gate. On a non-macOS or pre-macOS-27 machine the shard
-      # exits 0 with a visible SKIPPED marker rather than pretending to
-      # have proven anything.
-      - name: Check runner capability (Apple silicon + macOS 27+ + Hypervisor.framework)
-        id: capability
-        shell: bash
-        run: |
-          os="$(uname -s)"; arch="$(uname -m)"
-          if [ "$os-$arch" != "Darwin-arm64" ]; then
-            echo "::notice title=VZ gates skipped::No Apple-silicon runner registered under VZ_RUNNER_LABEL yet."
-            echo "::notice::Register one per docs/vz-runner.md, then set repository variable VZ_RUNNER_LABEL to its label to enforce these gates."
-            echo "VZ_SKIPPED=1" >> "$GITHUB_ENV"
-            echo "vz_skipped=1" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          major="$(sw_vers -productVersion | cut -d. -f1)"
-          if [ "$major" -lt 27 ]; then
-            echo "::error::Runner OS is macOS $major; VirelaiOS requires macOS 27+ (docs/hardware-contract.md)."
-            exit 1
-          fi
-          # The macOS floor is necessary but not sufficient: a runner with
-          # no Hypervisor.framework (kern.hv_support != 1) cannot boot a VZ
-          # guest whatever its macOS version, which is exactly why
-          # GitHub-hosted runners cannot substitute for this one. A
-          # registered-but-incapable runner must fail loudly, not skip.
-          if [ "$(sysctl -n kern.hv_support 2>/dev/null)" != "1" ]; then
-            echo "::error::Runner reports no Hypervisor.framework (kern.hv_support != 1); Virtualization.framework cannot boot a guest here."
-            exit 1
-          fi
-          echo "vz_skipped=0" >> "$GITHUB_OUTPUT"
-          echo "Runner: $(sw_vers -productVersion) arm64, hv_support=1 — VZ gates will run."
-
-      # Self-hosted runners get a minimal PATH (a launchd service even more
-      # so), while the gate scripts and repo tooling expect Homebrew's
-      # modern bash/sed builds (tools/env-check.sh). Put the Homebrew
-      # toolchain on PATH for the remaining steps so CI matches the
-      # dev-shell environment the class-B gates are verified under.
-      # setup-zig below adds zig itself; swift/codesign live in /usr/bin.
-      - name: Put Homebrew toolchain on PATH
-        if: env.VZ_SKIPPED != '1'
-        shell: bash
-        run: |
-          echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
-          echo "/opt/homebrew/opt/gnu-sed/libexec/gnubin" >> "$GITHUB_PATH"
-
-      - name: Setup Zig 0.16.0
-        if: env.VZ_SKIPPED != '1'
-        uses: goto-bus-stop/setup-zig@v2
-        with:
-          version: 0.16.0
-
-      - name: Build kernel image (class A prerequisites)
-        if: env.VZ_SKIPPED != '1'
-        run: |
-          zig build
-          zig build image
-
-      - name: Build + codesign Swift VMRunner
-        if: env.VZ_SKIPPED != '1'
-        run: |
-          swift build --package-path host/vm-runner --configuration release
-          codesign --force --sign - --entitlements host/vm-runner/entitlements.plist \
-            host/vm-runner/.build/release/VMRunner
-
-      - name: Run this shard's class-B gates
-        if: env.VZ_SKIPPED != '1'
-        shell: bash
-        run: |
-          set -uo pipefail
-          mkdir -p artifacts/vz-ci
-
-          # The fleet, discovered from the spec dir (tools/gate/fleet.sh):
-          # one "kind<TAB>id" line per member, LC_ALL=C sorted.
-          bash tools/gate/fleet.sh list > /tmp/fleet.tsv
-          total=$(wc -l < /tmp/fleet.tsv)
-          echo "Class-B fleet members: $total (specs + legacy class-B scripts)."
-
-          failed_ids=""
-          ran=0
-          while IFS=$'\t' read -r kind id; do
-            [ -n "$id" ] || continue
-            # Shard assignment by stable sorted line order.
-            idx=$(awk -F'\t' -v k="$kind" -v i="$id" '$1==k && $2==i {print NR; exit}' /tmp/fleet.tsv)
-            if [ $(( (idx - 1) % SHARD_COUNT )) -ne "${{ matrix.shard }}" ]; then
-              continue
-            fi
-            case "$kind" in
-              spec)   cmd="bash tools/gate/vgate.sh tools/gate/specs/$id.spec" ;;
-              script) cmd="bash tools/$id.sh" ;;
-              *) echo "::error::unknown fleet kind: $kind"; exit 1 ;;
-            esac
-            ran=$((ran + 1))
-            log="artifacts/vz-ci/$id.log"
-            start=$SECONDS
-            printf '[shard %s] RUN  %-24s %s\n' "${{ matrix.shard }}" "$id" "$cmd"
-            (
-              eval "$cmd" >"$log" 2>&1
-            ) &
-            pid=$!
-            ( sleep "$GATE_TIMEOUT_SECS" && kill -9 "$pid" 2>/dev/null ) &
-            wd=$!
-            # The runner wraps `shell: bash` steps with an implicit -e, so a
-            # bare `wait "$pid"` aborts the whole step the moment a gate exits
-            # nonzero (rc is never captured, no FAIL line, later gates in the
-            # shard never run). Guard it: capture the gate's rc instead.
-            rc=0
-            wait "$pid" || rc=$?
-            kill -9 "$wd" 2>/dev/null || true
-            wait "$wd" 2>/dev/null || true
-            secs=$((SECONDS - start))
-            if [ $rc -eq 0 ]; then
-              printf '[shard %s] PASS %-24s (%ss)\n' "${{ matrix.shard }}" "$id" "$secs"
-            else
-              printf '[shard %s] FAIL %-24s rc=%s (%ss) -- tail of %s:\n' "${{ matrix.shard }}" "$id" "$rc" "$secs" "$log"
-              tail -25 "$log" || true
-              failed_ids="$failed_ids $id"
-            fi
-          done < /tmp/shard-gates.txt
-
-          echo "Shard ${{ matrix.shard }} ran $ran gates."
-          if [ -n "$failed_ids" ]; then
-            echo "::error::Failed gates:$failed_ids"
-            exit 1
-          fi
-          [ "$ran" -gt 0 ] || { echo "::warning::Shard had zero gates — check sharding math."; }
-
-      - name: Upload gate logs
-        if: always() && env.VZ_SKIPPED != '1'
-        uses: actions/upload-artifact@v4
-        with:
-          name: vz-gate-logs-shard-${{ matrix.shard }}
-          path: artifacts/vz-ci/
-          retention-days: 14
-          if-no-files-found: ignore
-
-      - name: Upload build evidence
-        if: always() && env.VZ_SKIPPED != '1'
-        uses: actions/upload-artifact@v4
-        with:
-          name: vz-evidence-shard-${{ matrix.shard }}
-          path: |
-            artifacts/*.log
-            artifacts/*.txt
-          retention-days: 14
-          if-no-files-found: ignore
-
-  # Single aggregate context for branch protection: "VZ hardware gates".
-  #
-  # This job IS the merge gate, so it must never claim more than it did:
-  # see the shard-outputs note in the header.
   summary:
     name: VZ hardware gates
-    needs: gate-shard
-    if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository (to count the discovered fleet)
-        uses: actions/checkout@v4
-
-      - name: Aggregate shard results
-        env:
-          # No object-filter (`.*`) syntax here, deliberately. What a
-          # collapsed matrix job id exposes was PROBED, not assumed
-          # (claim #1256, run 34862266506), because the form this step used
-          # to use is silently valid-looking and worthless:
-          #
-          #   needs = { "gate-shard": {
-          #              "result":  "failure",           # aggregates the matrix
-          #              "outputs": { "vz_skipped": "skip-3" }   # last member only
-          #            } }
-          #
-          #   - `.result` DOES aggregate: shard 0 failed and the single
-          #     collapsed result read "failure".
-          #   - `.outputs.<name>` does NOT: that same run surfaced shard
-          #     3's value while shard 0 was the one that failed.
-          #   - `needs.gate-shard.*.result` — the object-filter form the
-          #     failure branch below used to read — is not a valid path for
-          #     `.result`. It evaluated to the EMPTY STRING on every run
-          #     this workflow has ever had, so that branch could never
-          #     fire and the required "VZ hardware gates" check stayed
-          #     GREEN while a shard failed. That is the hole this step
-          #     closes, and it was observed rather than reasoned: with the
-          #     diagnostic shard failing on purpose, this job still
-          #     concluded `success`.
-          SHARD_RESULT: ${{ needs.gate-shard.result }}
-          SHARD_SKIP: ${{ needs.gate-shard.outputs.vz_skipped }}
+      - name: Report class-B as not enforced
         run: |
-          set -u
-          echo "shard result:    $SHARD_RESULT"
-          echo "shard skip flag: $SHARD_SKIP"
-          case " $SHARD_RESULT " in
-            *" failure "*|*" cancelled "*)
-              echo "::error::One or more VZ hardware-gate shards failed (aggregate shard result: $SHARD_RESULT)."
-              exit 1;;
-          esac
-          # A job-level shard skip is not enforcement either.
-          not_enforced=0
-          case " $SHARD_RESULT " in *" skipped "*) not_enforced=1;; esac
-          # One shard's flag is enough, and only because it is the flag of
-          # an arbitrary shard rather than a per-shard tally: all four
-          # resolve the SAME `runs-on` expression and the same fork guard,
-          # so they skip or run together. Any non-uniform outcome is a
-          # failure, and `.result` above already caught that. This flag is
-          # what separates "ran and passed" from "never ran" — the two
-          # states that share a `success` conclusion.
-          case " $SHARD_SKIP " in *1*) not_enforced=1;; esac
-          if [ "$not_enforced" -eq 1 ]; then
-              # Refuse to report enforcement that did not happen. This
-              # stays a non-failing conclusion deliberately: "VZ hardware
-              # gates" is a REQUIRED status check and the ruleset has no
-              # bypass actor, so failing here would block every merge in
-              # the repository until a runner is registered. Loud instead
-              # of blocking — the annotation hits every PR review surface
-              # and the run summary carries the detail.
-              fleet="$(bash tools/gate/fleet.sh count)"
-              {
-                echo "### VZ hardware gates — **NOT ENFORCED**"
-                echo
-                echo "This run executed **0 of the $fleet class-B gates**, so nothing about"
-                echo "guest behavior was proven: the shards skipped (no runner, or a fork PR)"
-                echo "and exited 0 behind the VZ_SKIPPED marker. The check is green because"
-                echo "it had nothing to fail on, not because the class-B fleet passed."
-                echo
-                echo "No Apple-silicon VZ-capable runner is registered under the repository"
-                echo "variable \`VZ_RUNNER_LABEL\`. GitHub-hosted runners cannot substitute"
-                echo "([actions/runner-images#13505](https://github.com/actions/runner-images/issues/13505),"
-                echo "closed as not planned): Hypervisor.framework is unavailable on them, so"
-                echo "Virtualization.framework cannot boot a guest there at any macOS version."
-                echo
-                echo "Register a runner per \`docs/vz-runner.md\`, then set \`VZ_RUNNER_LABEL\`."
-              } >> "$GITHUB_STEP_SUMMARY"
-              echo "::warning title=VZ hardware gates NOT ENFORCED::0 of $fleet class-B gates ran — no runner is registered under VZ_RUNNER_LABEL (see docs/vz-runner.md)."
-              echo "VZ hardware gates: NOT ENFORCED (0 of $fleet class-B gates ran)."
-              exit 0
-          fi
-          echo "VZ hardware gates: OK — the shards ran the class-B fleet."
+          {
+            echo "### VZ hardware gates — **NOT ENFORCED**"
+            echo
+            echo "No Apple-silicon VZ-capable runner is registered, so no"
+            echo "class-B gate ran in CI. This check passes without proving"
+            echo "anything about guest behavior. Run \`just verify-vz\` on"
+            echo "Apple silicon for the real fleet."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::warning title=VZ hardware gates NOT ENFORCED::no runner registered — class-B gates run only via just verify-vz on Apple silicon."
+          echo "VZ hardware gates: NOT ENFORCED (placeholder, no runner)."
