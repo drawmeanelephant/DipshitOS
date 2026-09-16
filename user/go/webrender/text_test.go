@@ -1,0 +1,454 @@
+package webrender
+
+import (
+	"bytes"
+	"image"
+	"image/color"
+	"image/png"
+	"os"
+	"strings"
+	"testing"
+)
+
+// The two faces the desktop loads. Both are committed fixtures; a missing one
+// fails the test rather than skipping it.
+const (
+	interFixture = "../../../image/fonts/Inter-Regular.ttf"
+	firaFixture  = "../../../image/fonts/FiraCode-Regular.ttf"
+)
+
+func loadFonts(t *testing.T) Fonts {
+	t.Helper()
+	ui, err := os.ReadFile(interFixture)
+	if err != nil {
+		t.Fatalf("Inter fixture is required by these tests: %v", err)
+	}
+	mono, err := os.ReadFile(firaFixture)
+	if err != nil {
+		t.Fatalf("Fira Code fixture is required by these tests: %v", err)
+	}
+	f := NewFonts(ui, mono)
+	if f.UI == nil {
+		t.Fatal("NewFonts dropped the Inter face")
+	}
+	if f.Mono == nil {
+		t.Fatal("NewFonts dropped the Fira Code face")
+	}
+	return f
+}
+
+// inkExtent is the horizontal span of painted (non-background) pixels.
+func inkExtent(f *fb, w, h int, bg uint32) (int, int, int) {
+	minX, maxX, n := -1, -1, 0
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			if f.at(x, y) != bg {
+				n++
+				if minX < 0 {
+					minX = x
+				}
+				maxX = x
+			}
+		}
+	}
+	return minX, maxX, n
+}
+
+func renderText(t *testing.T, engine TextEngine, markup string, w, h int) (*fb, *Layout) {
+	t.Helper()
+	doc := ParseHTML([]byte(markup))
+	lay := LayoutDocument(doc, w, engine)
+	f := newFB(w, h, ColorPageBg)
+	Paint(lay, f, 0, 0, w, h, 0)
+	return f, lay
+}
+
+// TestEngineNameAndProportionality pins the two engines' identities.
+func TestEngineNameAndProportionality(t *testing.T) {
+	f := loadFonts(t)
+	if !f.Proportional() {
+		t.Error("Fonts with Inter loaded must report Proportional")
+	}
+	if f.Name() != "truetype(inter+firacode)" {
+		t.Errorf("Fonts.Name() = %q", f.Name())
+	}
+	if b := (Bitmap{}); b.Proportional() || b.Name() != "bitmap8x8" {
+		t.Errorf("Bitmap must report itself as the non-proportional 8x8 fallback (got %q)", b.Name())
+	}
+	st := Style{Size: 1, Color: ColorText}
+	iii, www := f.Measure("iii", st), f.Measure("WWW", st)
+	t.Logf("Inter @size 1: Measure(iii)=%d Measure(WWW)=%d", iii, www)
+	if www <= iii*2 {
+		t.Errorf("Inter measure is not proportional: iii=%d WWW=%d", iii, www)
+	}
+	if bi, bw := (Bitmap{}).Measure("iii", st), (Bitmap{}).Measure("WWW", st); bi != bw {
+		t.Errorf("the bitmap fallback must be monospace: iii=%d WWW=%d", bi, bw)
+	}
+}
+
+// TestProportionalAdvancesAreVisibleInPixels is the rendering-level version of
+// the same fact, and the host-side stand-in for the class-B gate's pixel probe:
+// with a proportional face, "WWW" paints a visibly wider band than "iii"; on the
+// 8x8 lattice the two are exactly the same width.
+func TestProportionalAdvancesAreVisibleInPixels(t *testing.T) {
+	fonts := loadFonts(t)
+	bitmap := Bitmap{}
+	for _, tc := range []struct {
+		name   string
+		engine TextEngine
+	}{{"truetype", fonts}, {"bitmap", bitmap}} {
+		fi, li := renderText(t, tc.engine, "<p>iii</p>", 240, 40)
+		fw, lw := renderText(t, tc.engine, "<p>WWW</p>", 240, 40)
+		mini, maxi, ni := inkExtent(fi, 240, 40, ColorPageBg)
+		minw, maxw, nw := inkExtent(fw, 240, 40, ColorPageBg)
+		advI, advW := textRunWidth(li), textRunWidth(lw)
+		inkI, inkW := maxi-mini+1, maxw-minw+1
+		t.Logf("%s: iii advance=%d ink-span=%d (%d px), WWW advance=%d ink-span=%d (%d px)",
+			tc.name, advI, inkI, ni, advW, inkW, nw)
+		if ni == 0 || nw == 0 {
+			t.Fatalf("%s painted nothing", tc.name)
+		}
+		switch tc.name {
+		case "truetype":
+			if advW <= advI*3/2 {
+				t.Errorf("TrueType 'WWW' advance %d is not clearly wider than 'iii' advance %d", advW, advI)
+			}
+			if inkW <= inkI {
+				t.Errorf("TrueType 'WWW' ink span %d must exceed 'iii' ink span %d", inkW, inkI)
+			}
+		case "bitmap":
+			if advW != advI {
+				t.Errorf("the 8x8 fallback must advance 'WWW' and 'iii' identically: %d vs %d", advW, advI)
+			}
+		}
+	}
+}
+
+// textRunWidth is the advance the layout assigned to a page's text items.
+func textRunWidth(l *Layout) int {
+	n := 0
+	for _, it := range l.Items {
+		if it.Kind == ItemText {
+			n += it.W
+		}
+	}
+	return n
+}
+
+// TestWrapAtKnownWidths derives the expected line count from the engine's own
+// metrics and requires the layout to match. A wrapping bug is otherwise only
+// visible as slightly-wrong line breaks in a golden nobody looks at twice.
+func TestWrapAtKnownWidths(t *testing.T) {
+	fonts := loadFonts(t)
+	st := Style{Size: 1, Color: ColorText}
+	word := fonts.Measure("M", st)
+	space := fonts.Measure("M M", st) - word*2
+	if word <= 0 || space <= 0 {
+		t.Fatalf("implausible metrics: word=%d space=%d", word, space)
+	}
+	for _, width := range []int{160, 240, 320, 420} {
+		perLine := (width - word) / (word + space)
+		if perLine < 1 {
+			perLine = 1
+		}
+		for _, n := range []int{3, 7, 12} {
+			text := strings.TrimSuffix(strings.Repeat("M ", n), " ")
+			doc := ParseHTML([]byte("<p>" + text + "</p>"))
+			lay := LayoutDocument(doc, width, fonts)
+			lines := map[int]bool{}
+			for _, it := range lay.Items {
+				if it.Kind == ItemText {
+					lines[it.Y] = true
+				}
+			}
+			want := (n + perLine - 1) / perLine
+			t.Logf("width=%d words=%d word=%d space=%d perLine=%d -> lines=%d (want %d)",
+				width, n, word, space, perLine, len(lines), want)
+			if len(lines) != want {
+				t.Errorf("width=%d words=%d: %d lines, want %d (perLine=%d)",
+					width, n, len(lines), want, perLine)
+			}
+		}
+	}
+}
+
+// TestTTFLineHeightExceedsBitmap: a 13px Inter line box is taller than the 8px
+// bitmap's — the h1 band of a page renders at a different rhythm once the face
+// is real, which is what the gate's band probe keys on.
+func TestTTFLineHeightExceedsBitmap(t *testing.T) {
+	fonts := loadFonts(t)
+	for _, st := range []Style{{Size: 1}, {Size: 2}, {Size: 1, Mono: true}} {
+		tl, bl := fonts.LineHeight(st), (Bitmap{}).LineHeight(st)
+		t.Logf("style %+v: truetype=%d bitmap=%d", st, tl, bl)
+		if tl <= bl {
+			t.Errorf("style %+v: TrueType line height %d must exceed the bitmap's %d", st, tl, bl)
+		}
+	}
+}
+
+// TestFallbackNeverPaintsNothing is the hard rule: whatever is missing, the
+// page still renders something. A blank viewport is the one outcome the
+// renderer is not allowed to produce.
+func TestFallbackNeverPaintsNothing(t *testing.T) {
+	const markup = "<h1>Fallback</h1><p>No font was loaded, and the page still renders.</p>"
+	engines := []TextEngine{
+		Bitmap{},           // explicit fallback
+		Fonts{},            // no faces loaded at all
+		Fonts{UI: nil},     // UI face missing
+		NewFonts(nil, nil), // constructor with no bytes
+		NewFonts([]byte("not a font at all"), nil), // a rejected font
+	}
+	for _, e := range engines {
+		f, _ := renderText(t, e, markup, 260, 120)
+		_, _, ink := inkExtent(f, 260, 120, ColorPageBg)
+		t.Logf("%s: %d ink px", e.Name(), ink)
+		if ink < 100 {
+			t.Errorf("%s painted only %d px; a missing face must degrade typography, not blank the page",
+				e.Name(), ink)
+		}
+	}
+}
+
+// TestRejectedFontFallsBackButReports: a corrupt face is dropped, and the
+// engine says so through Name() so the app can put it on the wire.
+func TestRejectedFontFallsBackButReports(t *testing.T) {
+	junk := make([]byte, 4096)
+	copy(junk, "not-a-font")
+	f := NewFonts(junk, junk)
+	if f.UI != nil || f.Mono != nil {
+		t.Fatal("a corrupt font must not produce a face")
+	}
+	if f.Loaded() {
+		t.Error("Loaded() must be false when no face parsed")
+	}
+	if f.Name() != "bitmap8x8" {
+		t.Errorf("a fontless engine must report bitmap8x8, got %q", f.Name())
+	}
+}
+
+// TestMonoStylePrefersTheMonoFace: a monospace style takes Fira Code when it is
+// loaded, and the UI face otherwise; either way it is never blank.
+func TestMonoStylePrefersTheMonoFace(t *testing.T) {
+	fonts := loadFonts(t)
+	mono := Style{Size: 1, Mono: true}
+	if a, b := fonts.Measure("iiii", mono), fonts.Measure("WWWW", mono); a != b {
+		t.Errorf("mono style must be monospace: iiii=%d WWWW=%d", a, b)
+	}
+	onlyMono := Fonts{Mono: fonts.Mono}
+	if onlyMono.Measure("x", Style{Size: 1}) != (Bitmap{}).Measure("x", Style{Size: 1}) {
+		t.Error("with no UI face a proportional style must fall back to the bitmap metric")
+	}
+	prose := fonts.Measure("iiii", Style{Size: 1})
+	if prose == fonts.Measure("WWWW", Style{Size: 1}) {
+		t.Error("a proportional style must not report a fixed advance")
+	}
+}
+
+// TestHostileHTMLStillRenders: malformed and adversarial markup must still
+// paint real ink with the real face, and must not panic. Unknown tags flatten
+// to their text (ADR 0028 D5) and truncation stays visible (D6).
+func TestHostileHTMLStillRenders(t *testing.T) {
+	fonts := loadFonts(t)
+	cases := []struct {
+		name   string
+		markup string
+	}{
+		{"unclosed everything", "<div><p>text<h1>heading<span>inline"},
+		{"unknown tags", "<foo><bar>alpha</bar><baz>beta</baz></foo>"},
+		{"script and style are skipped", "<script>alert(1)</script><style>p{}</style><p>visible</p>"},
+		{"deep nesting", strings.Repeat("<div>", 300) + "deep" + strings.Repeat("</div>", 300)},
+		{"a megabyte of text", "<p>" + strings.Repeat("word ", 20000) + "</p>"},
+		{"nul and control bytes", "<p>a\x00b\x01c\x7f</p>"},
+		{"broken entity soup", "<p>&amp;&#xZZ;&notanentity;&#999999999;</p>"},
+		{"table with no rows", "<table></table>"},
+		{"table with ragged rows", "<table><tr><th>A</th><th>B</th></tr><tr><td>only one</td></tr></table>"},
+		{"img with no src", `<img alt="a box">`},
+		{"img with an unresolvable src", `<img src="/host/NOPE.PNG" alt="missing">`},
+		{"links with no href", "<p><a>bare anchor</a> and <a href=\"\">empty</a></p>"},
+		{"only whitespace", "   \n\t  "},
+		{"empty document", ""},
+	}
+	always := ImageResolver(func(string) ([]byte, bool) { return nil, false })
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("PANIC rendering hostile markup: %v", r)
+				}
+			}()
+			doc := ParseHTML([]byte(tc.markup))
+			lay := LayoutDocument(doc, 320, fonts, always)
+			f := newFB(320, 200, ColorPageBg)
+			Paint(lay, f, 0, 0, 320, 200, 0)
+			_, _, ink := inkExtent(f, 320, 200, ColorPageBg)
+			t.Logf("%s: nodes=%d items=%d lines=%d truncated=%v ink=%d",
+				tc.name, doc.Nodes, len(lay.Items), lay.Lines, lay.Truncated, ink)
+			// Whitespace-only markup legitimately paints nothing; anything
+			// with real text must leave ink.
+			if txt := strings.TrimSpace(TextContent(doc.Root)); txt != "" && ink == 0 {
+				t.Errorf("markup with %d runes of text (%q) painted nothing", len([]rune(txt)), txt)
+			}
+		})
+	}
+}
+
+// TestResolvedImagePaintsPixels: an <img> whose bytes the resolver can supply
+// paints decoded pixels, and its box takes the image's own geometry.
+func TestResolvedImagePaintsPixels(t *testing.T) {
+	fonts := loadFonts(t)
+	png := pngFixture(t)
+	res := ImageResolver(func(src string) ([]byte, bool) {
+		if src == "shot.png" {
+			return png, true
+		}
+		return nil, false
+	})
+	doc := ParseHTML([]byte(`<img src="shot.png" alt="shot">`))
+	lay := LayoutDocument(doc, 200, fonts, res)
+	if len(lay.Items) != 1 || lay.Items[0].Img == nil {
+		t.Fatalf("expected one decoded image item, got %d items", len(lay.Items))
+	}
+	it := lay.Items[0]
+	t.Logf("decoded image: %dx%d painted into a %dx%d box", it.Img.Width, it.Img.Height, it.W, it.H)
+	if it.W != it.Img.Width || it.H != it.Img.Height {
+		t.Errorf("image box %dx%d must match the decoded %dx%d", it.W, it.H, it.Img.Width, it.Img.Height)
+	}
+	f := newFB(200, 120, ColorPageBg)
+	Paint(lay, f, 0, 0, 200, 120, 0)
+	_, _, ink := inkExtent(f, 200, 120, ColorPageBg)
+	t.Logf("image ink: %d px (expected %d)", ink, it.W*it.H)
+	if ink != it.W*it.H {
+		t.Errorf("the decoded image painted %d px, want every one of its %d pixels", ink, it.W*it.H)
+	}
+	// Without a resolver the same img is still a visible labeled box.
+	lay2 := LayoutDocument(doc, 200, fonts)
+	if len(lay2.Items) != 1 || lay2.Items[0].Img != nil {
+		t.Fatal("without a resolver the img must be an undecoded placeholder")
+	}
+	f2 := newFB(200, 120, ColorPageBg)
+	Paint(lay2, f2, 0, 0, 200, 120, 0)
+	if _, _, ink := inkExtent(f2, 200, 120, ColorPageBg); ink < 100 {
+		t.Errorf("the placeholder box painted only %d px", ink)
+	}
+}
+
+// TestDecodeImageRejectsJunk: a bad image is an error, never a panic or an
+// unallocatable raster.
+func TestDecodeImageRejectsJunk(t *testing.T) {
+	cases := [][]byte{
+		nil,
+		[]byte("qoif"),
+		[]byte("qoif\x00\x00\x00\x02\x00\x00\x00\x02\x04\x00"),
+		[]byte("\x89PNG\r\n\x1a\ntruncated"),
+		[]byte("GIF89a not a png"),
+	}
+	for i, c := range cases {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("case %d panicked: %v", i, r)
+				}
+			}()
+			if img, err := DecodeImage(c); err == nil && img != nil {
+				t.Errorf("case %d decoded to %dx%d, want an error", i, img.Width, img.Height)
+			}
+		}()
+	}
+	// A QOI header announcing an enormous image must be refused, not allocated.
+	huge := append([]byte("qoif"), 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x40, 0x00, 4, 0)
+	if img, err := DecodeImage(huge); err == nil {
+		t.Errorf("a 16384x16384 qoi decoded to %dx%d", img.Width, img.Height)
+	}
+}
+
+// TestEngineSurvivesASurfaceWithNoMaskSink: the plain rect-only Surface must
+// still show the text (the thresholded-span path), which is what the guest uses
+// until its window has a direct back-buffer.
+func TestEngineSurvivesASurfaceWithNoMaskSink(t *testing.T) {
+	fonts := loadFonts(t)
+	doc := ParseHTML([]byte("<h1>Plain fill</h1><p>rect-only surface</p>"))
+	lay := LayoutDocument(doc, 260, fonts)
+	f := newFB(260, 120, ColorPageBg)
+	// Wrap it in a Surface that hides BlitMask, forcing the span fallback.
+	var plain Surface = plainSurface{f}
+	Paint(lay, plain, 0, 0, 260, 120, 0)
+	_, _, ink := inkExtent(f, 260, 120, ColorPageBg)
+	t.Logf("rect-only surface: %d ink px", ink)
+	if ink < 100 {
+		t.Errorf("the span fallback painted only %d px", ink)
+	}
+}
+
+// plainSurface implements Surface but deliberately not MaskSink.
+type plainSurface struct{ f *fb }
+
+func (p plainSurface) Fill(x, y, w, h int, rgb uint32) {
+	for yy := y; yy < y+h; yy++ {
+		for xx := x; xx < x+w; xx++ {
+			if xx >= 0 && yy >= 0 && xx < p.f.w && yy < p.f.h {
+				p.f.px[yy*p.f.w+xx] = rgb & 0x00ffffff
+			}
+		}
+	}
+}
+
+// pngFixture builds a small PNG in memory so the image path is exercised
+// without adding a binary fixture. 8x4, four quadrants of distinct colour.
+func pngFixture(t *testing.T) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 8, 4))
+	cols := []color.RGBA{
+		{0xff, 0x00, 0x00, 0xff}, {0x00, 0xff, 0x00, 0xff},
+		{0x00, 0x00, 0xff, 0xff}, {0xff, 0xff, 0x00, 0xff},
+	}
+	for y := 0; y < 4; y++ {
+		for x := 0; x < 8; x++ {
+			img.Set(x, y, cols[(y/2)*2+(x/4)])
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("encode fixture: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// TestGoldenOlivierFixtureWithTrueType pins the whole pipeline — parse, style,
+// layout, coverage-AA paint — against the fixture this project already uses to
+// prove its in-guest HTML path (tests/oliver-spike/expect.html, the pinned
+// oliver output). It is the host-side twin of the class-B screenshot: the page
+// the goal asks for must render, in Inter, with real ink.
+func TestGoldenOlivierFixtureWithTrueType(t *testing.T) {
+	fonts := loadFonts(t)
+	html, err := os.ReadFile("../../../tests/oliver-spike/expect.html")
+	if err != nil {
+		t.Fatalf("oliver fixture is required: %v", err)
+	}
+	doc := ParseHTML(html)
+	const w, h = 470, 320
+	lay := LayoutDocument(doc, w, fonts)
+	f := newFB(w, h, ColorPageBg)
+	Paint(lay, f, 0, 0, w, h, 0)
+	ink := f.count(func(v uint32) bool { return v != ColorPageBg })
+	t.Logf("oliver fixture with Inter: nodes=%d items=%d lines=%d blocks=%d ink=%d",
+		doc.Nodes, len(lay.Items), lay.Lines, lay.Blocks, ink)
+	if ink < 800 {
+		t.Fatalf("the oliver fixture rendered only %d px of ink", ink)
+	}
+	// The same page through the bitmap engine, for the comparison the goal is
+	// actually about: the two must differ, or the face is not being used.
+	layerB := LayoutDocument(doc, w, Bitmap{})
+	fbB := newFB(w, h, ColorPageBg)
+	Paint(layerB, fbB, 0, 0, w, h, 0)
+	diff := 0
+	for i := range f.px {
+		if f.px[i] != fbB.px[i] {
+			diff++
+		}
+	}
+	t.Logf("TrueType vs bitmap on the same fixture: %d of %d px differ", diff, len(f.px))
+	if diff == 0 {
+		t.Fatal("the TrueType render is pixel-identical to the bitmap fallback: no face was used")
+	}
+	checkGolden(t, "oliver-truetype", f)
+}
