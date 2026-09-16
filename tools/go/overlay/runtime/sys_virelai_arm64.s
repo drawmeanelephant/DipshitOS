@@ -234,3 +234,24 @@ sigtramp_noswitch:
 	MOVD	R0, RSP
 	MOVD	R1, R30
 	JMP	(R4)
+
+// Issue #1163 (phase 2): the socket-readiness seam — slot 76
+// `sys_sock_ready(op, want, timeout_ns)` (ADR 0007 append-only amendment).
+// BOTH ops are a probe returning the readiness mask (bit0 = readable,
+// bit1 = writable), 0 for "not ready", or a negative errno (-EAGAIN for a
+// process with no socket). The bounded wait lives in the runtime's netpoll
+// (usleep), not in a handler loop — see netpoll_virelai.go. The poller turns
+// a nonzero mask into netpollready.
+
+#define VIR_SYS_SOCK_READY 76
+
+// func virSockReady(want uintptr) int64 — slot 76 op 0.
+TEXT runtime·virSockReady(SB),NOSPLIT|NOFRAME,$0-16
+	MOVD	want+0(FP), R0
+	MOVD	$0, R1           // op 0 = probe
+	MOVD	$0, R2           // timeout_ns ignored on a probe
+	MOVD	$VIR_SYS_SOCK_READY, R8
+	SVC
+	MOVD	R0, ret+8(FP)
+	RET
+

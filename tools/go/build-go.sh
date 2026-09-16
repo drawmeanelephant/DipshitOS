@@ -69,10 +69,69 @@ for prog in "${@:-$REPO/tools/go/hello.go}"; do
         gostress)   base="GOSTRESS" ;;
         gopanic)    base="GOPANIC" ;;
         gowin)      base="GOWIN" ;;
+        gonet)      base="GONET" ;;
     esac
     out="$out_dir/${GO_BUILD_NAME:-$base}.ELF"
-    log "building $prog -> $out"
+    # The gap loader gives a program a FIXED text aperture, so image size is
+    # a correctness constraint: GONET (a bigger program than the other
+    # fixtures) links with symbols stripped (-s -w) to stay inside the text
+    # gap. < GO_LDFLAGS_VALUE defaults to the historical "-w".
+    strip="-w"
+    case "$base" in
+        GONET) strip="-s -w" ;;
+    esac
+    log "building $prog -> $out (ldflags: $strip)"
     GOOS=virelai GOARCH=arm64 go build -o "$out" \
-        ${GO_LDFLAGS:--ldflags "-w"} "$prog" || rc=1
+        -ldflags "${GO_LDFLAGS_VALUE:-$strip}" "$prog" || rc=1
+
+    # Issue #1163 phase 2: the kernel's gap loader maps a GOOS=virelai
+    # program at FIXED vaddrs (text 0x10000..0x80000, rodata ..0x110000,
+    # data 0x110000..). A program whose text or rodata outgrows its gap
+    # makes the Go linker SHIFT the later segments; the process then loads
+    # but misbehaves on target. Catch that at BUILD time, not as a mystery
+    # boot: report which segment overflowed and by how much.
+    if [ -f "$out" ]; then
+        guard="$(python3 - "$out" <<'PY'
+import struct, sys
+d = open(sys.argv[1], "rb").read()
+phoff = struct.unpack_from("<Q", d, 32)[0]
+phes = struct.unpack_from("<H", d, 54)[0]
+phnum = struct.unpack_from("<H", d, 56)[0]
+segs = []
+for i in range(phnum):
+    o = phoff + i * phes
+    t, fl, off, va, pa, fsz, msz, al = struct.unpack_from("<IIQQQQQQ", d, o)
+    if t == 1:
+        segs.append((va, fsz))
+segs.sort()
+bad = []
+if segs and segs[0][0] != 0x10000:
+    bad.append("text base 0x%x != 0x10000" % segs[0][0])
+if segs and segs[0][0] + segs[0][1] > 0x80000:
+    bad.append("text ends 0x%x > 0x80000" % (segs[0][0] + segs[0][1]))
+if len(segs) >= 2 and segs[1][0] != 0x80000:
+    bad.append("rodata base 0x%x != 0x80000" % segs[1][0])
+if len(segs) >= 2 and segs[1][0] + segs[1][1] > 0x110000:
+    bad.append("rodata ends 0x%x > 0x110000" % (segs[1][0] + segs[1][1]))
+if len(segs) >= 3 and segs[2][0] != 0x110000:
+    bad.append("data base 0x%x != 0x110000" % segs[2][0])
+print("; ".join(bad))
+PY
+)"
+        if [ -n "$guard" ]; then
+            # Kept as a WARNING: the overflow is a real anomaly (every
+            # known-good fixture fits), but making it fatal would block a
+            # fixture whose on-target behaviour is still under
+            # investigation. GO_STRICT_LAYOUT=1 promotes it to an error.
+            log "WARN: $(basename "$out") does not sit at the kernel's fixed gap vaddrs: $guard"
+            log "      the Go linker shifted a segment. This was measured on a build that"
+            log "      failed on target, but it did NOT prove causal (removing the text"
+            log "      overflow did not change the symptom), so treat it as a smell to"
+            log "      check, not a diagnosis. Shrink with -s -w / fewer stdlib imports."
+            if [ "${GO_STRICT_LAYOUT:-0}" = "1" ]; then rc=1; fi
+        else
+            log "gap layout ok: $(basename "$out")"
+        fi
+    fi
 done
 exit "$rc"

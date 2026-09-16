@@ -152,7 +152,7 @@ fn capture_marshaled_args(args: Args, _: *exceptions.VectorFrame) u64 {
     return 0xcafe;
 }
 
-test "syscall: runtime table has 128 slots and seventy-six unique implemented rows" {
+test "syscall: runtime table has 128 slots and seventy-seven unique implemented rows" {
     init(test_writer);
     const table = ensure_table();
     try std.testing.expectEqual(@as(usize, 128), table.len);
@@ -165,7 +165,7 @@ test "syscall: runtime table has 128 slots and seventy-six unique implemented ro
             implemented += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 76), implemented);
+    try std.testing.expectEqual(@as(usize, 77), implemented);
     try std.testing.expectEqualStrings("sys_pipe_read", entry_info(sys_pipe_read).?.name);
     try std.testing.expectEqualStrings("sys_pipe_write", entry_info(sys_pipe_write).?.name);
     try std.testing.expectEqualStrings("sys_font_size", entry_info(sys_font_size).?.name);
@@ -247,14 +247,15 @@ test "syscall: adapter decodes x8 and x0-x5 and unknown numbers return ENOSYS" {
     try std.testing.expectEqual(@as(u64, 1), call_count(sys_ping));
 
     // Unimplemented in-range slots still return ENOSYS (65..72 are now
-    // registered rows; 73/74 are ADR 0027's sys_thread/sys_futex — use
-    // 76/77, still unregistered).
-    try std.testing.expect(exceptions.frame_write(&frame, 8, 76));
+    // registered rows; 73/74 are ADR 0027's sys_thread/sys_futex; 75 is
+    // issue #1228's sys_exnotify; 76 is issue #1163 phase 2's
+    // sys_sock_ready — use 78/79, still unregistered).
+    try std.testing.expect(exceptions.frame_write(&frame, 8, 78));
     try std.testing.expect(handle_svc(&frame, svc_immediate));
     try std.testing.expectEqual(error_result(.enosys), exceptions.frame_read(&frame, 0));
-    try std.testing.expectEqual(@as(u64, 1), call_count(76));
+    try std.testing.expectEqual(@as(u64, 1), call_count(78));
 
-    try std.testing.expect(exceptions.frame_write(&frame, 8, 77));
+    try std.testing.expect(exceptions.frame_write(&frame, 8, 79));
     try std.testing.expect(handle_svc(&frame, svc_immediate));
     try std.testing.expectEqual(error_result(.enosys), exceptions.frame_read(&frame, 0));
 }
@@ -1246,7 +1247,7 @@ test "syscall: counters are monotonic and report is deterministic" {
     var con = mock.console();
     report(&con);
     try std.testing.expectEqualStrings(
-        "syscalls: slots=64 implemented=76\n" ++
+        "syscalls: slots=64 implemented=77\n" ++
             "  0 sys_ping calls=2\n" ++
             "  1 sys_write calls=0\n" ++
             "  2 sys_yield calls=0\n" ++
@@ -1322,7 +1323,8 @@ test "syscall: counters are monotonic and report is deterministic" {
             "  72 sys_getrandom calls=0\n" ++
             "  73 sys_thread calls=0\n" ++
             "  74 sys_futex calls=0\n" ++
-            "  75 sys_exnotify calls=0\n",
+            "  75 sys_exnotify calls=0\n" ++
+            "  76 sys_sock_ready calls=0\n",
         mock.contents(),
     );
 }
@@ -3756,8 +3758,9 @@ test "syscall: SYS_TIME (slot 66, #1058) returns the firmware wall-clock epoch" 
     try std.testing.expectEqualStrings("sys_time", entry_info(sys_time).?.name);
     // M50 TS1 added slot 68 (sys_principal), TS2 slot 69 (sys_file_mode),
     // TS5 slot 70 (sys_secret_get), TS4 slot 71 (sys_tty_net_auth);
-    // M51 SSH-P1 (#1166) slot 72 (sys_getrandom); issue #1228 slot 75.
-    try std.testing.expectEqual(@as(usize, 76), syscall.implemented_count);
+    // M51 SSH-P1 (#1166) slot 72 (sys_getrandom); issue #1228 slot 75;
+    // issue #1163 phase 2 slot 76 (sys_sock_ready).
+    try std.testing.expectEqual(@as(usize, 77), syscall.implemented_count);
 
     const saved_epoch = timer.boot_epoch_secs;
     const saved_ticks = timer.ticks;
@@ -3853,13 +3856,13 @@ test "syscall: M50 TS3 gate table is explicit, bounded, and exactly the ADR 0024
         try std.testing.expectEqual(@as(?u32, null), syscall.gated(number));
     }
     // Every gated row names an EXISTING implemented slot, and TS3 adds NO
-    // slot: implemented_count is 76 after issue #1228's slot 75 (73/74
-    // came from ADR 0027).
+    // slot: implemented_count is 77 after issue #1228's slot 75 (73/74 came
+    // from ADR 0027, 76 from issue #1163 phase 2).
     for (syscall.capability_gates) |gate| {
         try std.testing.expect(gate.number < syscall.implemented_count);
         try std.testing.expect(entry_info(gate.number) != null);
     }
-    try std.testing.expectEqual(@as(usize, 76), syscall.implemented_count);
+    try std.testing.expectEqual(@as(usize, 77), syscall.implemented_count);
 }
 
 test "syscall: no slot can raise uid/caps (TS3 consumes caps, adds no setter)" {

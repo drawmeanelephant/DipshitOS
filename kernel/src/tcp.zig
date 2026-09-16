@@ -474,6 +474,28 @@ pub fn abort_timeout() void {
 /// — no RST, no TX): IDLE (or LISTEN if server), the peer cleared, the pending buffers
 /// cleared. Called by the connect refusal, the retransmission abort
 /// (card N11), and any death path.
+/// Issue #1163 (phase 2): the readiness mask for the netpoll seam
+/// (slot 76). Bit 0 = readable (a segment payload is queued, or the
+/// connection is closed/fin_sent so a recv drains 0 and the caller can
+/// fail closed); bit 1 = writable (established with no pending
+/// retransmission). 0 = nothing to report. Level-triggered by design: it
+/// is a query, not an edge, so a poller cannot lose readiness.
+pub fn ready_mask() u64 {
+    var mask: u64 = 0;
+    if (rx_pending) mask |= 1;
+    if (state == .closed or state == .fin_sent) mask |= 1;
+    if (state == .established and !tx_pending) mask |= 2;
+    return mask;
+}
+
+/// Issue #1163 (phase 2): the slot-76 ownership test — only the process
+/// that opened the ONE socket may probe or wait on it (the kernel's
+/// one-TCP-socket-per-process law).
+pub fn owned_by_pid(pid: u64) bool {
+    if (owner_pid) |o| return o == pid;
+    return false;
+}
+
 pub fn release_conn() void {
     state = if (is_server) .listen else .idle;
     peer_ip = .{ 0, 0, 0, 0 };
