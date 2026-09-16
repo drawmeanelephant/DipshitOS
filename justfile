@@ -38,6 +38,7 @@ verify-portable:
     bash tools/verify-bss-budget.sh
     bash tools/verify-vf-class-a.sh
     bash tools/gate/test-gate-run.sh
+    bash tools/ci/test-vz-enforcement.sh
 
 # The class-B fleet is DISCOVERED, not listed (M40 GF5): every spec in
 # tools/gate/specs/ plus the four legacy class-B scripts (bad-handoff,

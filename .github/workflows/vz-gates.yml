@@ -21,14 +21,34 @@
 # future macOS releases, unlike the old "hosted tops out at macOS 26"
 # claim. See docs/vz-runner.md for the one-time registration steps.
 #
-# A skip is NEVER reported as enforcement. Each shard exports its
-# vz_skipped state as a job output and the aggregate below refuses to
-# print OK when any shard exited 0 without running a gate. That matters
-# because a shard that skips and a shard that runs the whole fleet have
-# the SAME job conclusion (`success`) — so join(needs.*.result) alone was
-# green on every PR while executing zero class-B gates, which is how a
-# red fleet gate (live-sched-ring, red from `eb37fbe`) stayed red for
-# weeks without failing anything.
+# A skip is NEVER reported as enforcement, and the aggregate now REFUSES
+# (fails the required check) when the fleet did not run. A shard that
+# skips and a shard that runs the whole fleet have the SAME job
+# conclusion (`success`), so join(needs.*.result) alone was green on every
+# PR while executing zero class-B gates — which is how a red fleet gate
+# (live-sched-ring, red from `eb37fbe`) stayed red for weeks without
+# failing anything. Claim #1256 made the aggregate honest but non-failing
+# (a `::warning::`, the run summary, exit 0) and left the trade open: with
+# no bypass actor on the ruleset, failing there blocks every merge until a
+# runner exists. Card #1344 takes the other side of that trade, because a
+# NON-failing green check is not honest either — it is what made this
+# repository's own CI decorative, and it also hid the second defect: the
+# shard loop read /tmp/shard-gates.txt, a file no step writes (GF5 renamed
+# it to fleet.tsv and missed the redirect), so even a registered runner
+# would have reported PASS having executed nothing. A failed input
+# redirect runs zero iterations and exits 0 even under `set -e`.
+#
+# The verdict is therefore EVIDENCE, not a flag: every shard writes an
+# execution receipt (shard/of/ran/failed/reason) on every path -- including
+# the skip paths, where ran=0 is the fact worth recording -- and
+# tools/ci/vz-enforcement.sh accepts only when the receipts account for
+# the discovered fleet exactly. Missing evidence, a partial run, a
+# duplicate shard and a zero-gate shard are all refusals.
+#
+# Merging while class-B is unenforced is a deliberate, explicit act:
+# either register a runner (docs/vz-runner.md) or bypass this check on
+# the ruleset. docs/vz-runner.md carries the status block and the
+# argument for refusing instead of warning.
 #
 # Security note: self-hosted runners must never execute untrusted fork-PR
 # code. The trigger list below deliberately excludes pull_request_target,
@@ -102,6 +122,12 @@ jobs:
           echo "::notice title=VZ gates skipped::Fork pull requests never run class-B gates on the self-hosted runner."
           echo "VZ_SKIPPED=1" >> "$GITHUB_ENV"
           echo "vz_skipped=1" >> "$GITHUB_OUTPUT"
+          # Evidence, not a notice: the verdict job refuses without a receipt,
+          # and "this shard could not run by policy" is a different fact from
+          # "this shard ran nothing because its list was empty".
+          mkdir -p artifacts/vz-ci
+          printf 'shard=%s\nof=%s\nran=0\nfailed=0\nreason=fork-pr\n' \
+            "${{ matrix.shard }}" "$SHARD_COUNT" > artifacts/vz-ci/receipt.env
 
       # Capability gate. On a non-macOS or pre-macOS-27 machine the shard
       # exits 0 with a visible SKIPPED marker rather than pretending to
@@ -110,12 +136,22 @@ jobs:
         id: capability
         shell: bash
         run: |
+          # A shard that already declared a skip (fork PR) must not probe here:
+          # this step cannot tell a Linux runner from a fork, and a second
+          # receipt would overwrite the true reason with the wrong one.
+          if [ "${VZ_SKIPPED:-}" = 1 ]; then
+            echo "Skip already declared by the fork guard; not probing compatibility."
+            exit 0
+          fi
           os="$(uname -s)"; arch="$(uname -m)"
           if [ "$os-$arch" != "Darwin-arm64" ]; then
             echo "::notice title=VZ gates skipped::No Apple-silicon runner registered under VZ_RUNNER_LABEL yet."
             echo "::notice::Register one per docs/vz-runner.md, then set repository variable VZ_RUNNER_LABEL to its label to enforce these gates."
             echo "VZ_SKIPPED=1" >> "$GITHUB_ENV"
             echo "vz_skipped=1" >> "$GITHUB_OUTPUT"
+            mkdir -p artifacts/vz-ci
+            printf 'shard=%s\nof=%s\nran=0\nfailed=0\nreason=no-runner\n' \
+              "${{ matrix.shard }}" "$SHARD_COUNT" > artifacts/vz-ci/receipt.env
             exit 0
           fi
           major="$(sw_vers -productVersion | cut -d. -f1)"
@@ -220,14 +256,44 @@ jobs:
               tail -25 "$log" || true
               failed_ids="$failed_ids $id"
             fi
-          done < /tmp/shard-gates.txt
+          # The loop's input is the FILE THE LINE ABOVE WROTE. It was
+          # /tmp/shard-gates.txt for four milestones -- a path no step in this
+          # workflow has ever created, left behind when GF5 (#940) renamed the
+          # list to fleet.tsv. A failed input redirect runs zero iterations and
+          # exits 0 even under `set -e`, so the shard reported PASS having
+          # executed nothing and the fleet saw `ran=0` as a warning. Anything
+          # that reads a list here must read the one this step just built.
+          done < /tmp/fleet.tsv
 
           echo "Shard ${{ matrix.shard }} ran $ran gates."
+
+          # --- the execution receipt --------------------------------------
+          # One key=value file per shard, written on EVERY path that reaches
+          # this point and BEFORE the failure exit below, so a shard that fails a
+          # gate still reports how much it managed to execute. The verdict job
+          # trusts these and nothing else.
+          if [ "$ran" -eq 0 ]; then reason=zero-gates; else reason=ran; fi
+          failed_count=$(printf '%s' "$failed_ids" | wc -w | tr -d ' ')
+          {
+            echo "shard=${{ matrix.shard }}"
+            echo "of=$SHARD_COUNT"
+            echo "ran=$ran"
+            echo "failed=$failed_count"
+            echo "reason=$reason"
+          } > artifacts/vz-ci/receipt.env
+          echo "Execution receipt: shard=${{ matrix.shard }} of=$SHARD_COUNT ran=$ran failed=$failed_count reason=$reason"
+
           if [ -n "$failed_ids" ]; then
             echo "::error::Failed gates:$failed_ids"
             exit 1
           fi
-          [ "$ran" -gt 0 ] || { echo "::warning::Shard had zero gates — check sharding math."; }
+          # A shard that executed nothing is not a pass. This used to be a
+          # ::warning:: plus exit 0, which is a PASS on a green check -- the
+          # whole defect class this card exists for (card #1344).
+          if [ "$ran" -eq 0 ]; then
+            echo "::error::Shard ${{ matrix.shard }} executed 0 gates of the $total-member fleet -- the sharding/list wiring is broken."
+            exit 1
+          fi
 
       - name: Upload gate logs
         if: always() && env.VZ_SKIPPED != '1'
@@ -237,6 +303,23 @@ jobs:
           path: artifacts/vz-ci/
           retention-days: 14
           if-no-files-found: ignore
+
+      # The receipt is uploaded on EVERY path, including the skip paths, because
+      # that is exactly when it carries the only statement this workflow can
+      # make about class-B. `if-no-files-found: error` makes a shard with no
+      # evidence FAIL rather than let the verdict guess -- that also covers a
+      # shard killed before it could write one (a build failure, a watchdog, a
+      # cancellation), which is the same problem from the reader's side: no
+      # evidence is not a pass. A tiny artifact on purpose: the verdict job
+      # downloads only these, not the gate logs.
+      - name: Upload this shard's execution receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vz-receipt-shard-${{ matrix.shard }}
+          path: artifacts/vz-ci/receipt.env
+          retention-days: 14
+          if-no-files-found: error
 
       - name: Upload build evidence
         if: always() && env.VZ_SKIPPED != '1'
@@ -251,18 +334,40 @@ jobs:
 
   # Single aggregate context for branch protection: "VZ hardware gates".
   #
-  # This job IS the merge gate, so it must never claim more than it did:
-  # see the shard-outputs note in the header.
+  # This job IS the merge gate, so it must never claim more than it did. Since
+  # card #1344 it decides from the shards' EXECUTION RECEIPTS rather than from a
+  # self-declared skip flag: green now requires that the receipts account for
+  # the discovered fleet exactly. The decision lives in
+  # tools/ci/vz-enforcement.sh, which tools/ci/test-vz-enforcement.sh drives
+  # through every state offline -- a gate whose refusal path is never exercised
+  # is the bug this repository keeps finding in itself.
   summary:
     name: VZ hardware gates
     needs: gate-shard
     if: always()
     runs-on: ubuntu-latest
+    permissions:
+      # contents: read for the checkout that counts the discovered fleet;
+      # actions: read to download the shards' receipts. A job whose only output
+      # is a verdict needs nothing else.
+      contents: read
+      actions: read
     steps:
       - name: Checkout repository (to count the discovered fleet)
         uses: actions/checkout@v4
 
-      - name: Aggregate shard results
+      # The receipts only -- not the gate logs. No artifact exists when every
+      # shard skipped, and that is a REFUSED verdict rather than an
+      # infrastructure error, so the download must not abort the job before the
+      # verdict is allowed to say so.
+      - name: Download the shards' execution receipts
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: vz-receipt-shard-*
+          path: receipts
+
+      - name: Decide the verdict from the receipts (never from a flag)
         env:
           # No object-filter (`.*`) syntax here, deliberately. What a
           # collapsed matrix job id exposes was PROBED, not assumed
@@ -287,55 +392,37 @@ jobs:
           #     closes, and it was observed rather than reasoned: with the
           #     diagnostic shard failing on purpose, this job still
           #     concluded `success`.
+          #
+          # `vz_skipped` is CONTEXT now, never the verdict: it is one arbitrary
+          # shard's word for what happened, and the receipts are what the shards
+          # actually did. It stays because it tells the refusal message apart
+          # when there are no receipts to read (card #1344).
           SHARD_RESULT: ${{ needs.gate-shard.result }}
           SHARD_SKIP: ${{ needs.gate-shard.outputs.vz_skipped }}
         run: |
-          set -u
-          echo "shard result:    $SHARD_RESULT"
-          echo "shard skip flag: $SHARD_SKIP"
-          case " $SHARD_RESULT " in
-            *" failure "*|*" cancelled "*)
-              echo "::error::One or more VZ hardware-gate shards failed (aggregate shard result: $SHARD_RESULT)."
-              exit 1;;
-          esac
-          # A job-level shard skip is not enforcement either.
-          not_enforced=0
-          case " $SHARD_RESULT " in *" skipped "*) not_enforced=1;; esac
-          # One shard's flag is enough, and only because it is the flag of
-          # an arbitrary shard rather than a per-shard tally: all four
-          # resolve the SAME `runs-on` expression and the same fork guard,
-          # so they skip or run together. Any non-uniform outcome is a
-          # failure, and `.result` above already caught that. This flag is
-          # what separates "ran and passed" from "never ran" — the two
-          # states that share a `success` conclusion.
-          case " $SHARD_SKIP " in *1*) not_enforced=1;; esac
-          if [ "$not_enforced" -eq 1 ]; then
-              # Refuse to report enforcement that did not happen. This
-              # stays a non-failing conclusion deliberately: "VZ hardware
-              # gates" is a REQUIRED status check and the ruleset has no
-              # bypass actor, so failing here would block every merge in
-              # the repository until a runner is registered. Loud instead
-              # of blocking — the annotation hits every PR review surface
-              # and the run summary carries the detail.
-              fleet="$(bash tools/gate/fleet.sh count)"
-              {
-                echo "### VZ hardware gates — **NOT ENFORCED**"
-                echo
-                echo "This run executed **0 of the $fleet class-B gates**, so nothing about"
-                echo "guest behavior was proven: the shards skipped (no runner, or a fork PR)"
-                echo "and exited 0 behind the VZ_SKIPPED marker. The check is green because"
-                echo "it had nothing to fail on, not because the class-B fleet passed."
-                echo
-                echo "No Apple-silicon VZ-capable runner is registered under the repository"
-                echo "variable \`VZ_RUNNER_LABEL\`. GitHub-hosted runners cannot substitute"
-                echo "([actions/runner-images#13505](https://github.com/actions/runner-images/issues/13505),"
-                echo "closed as not planned): Hypervisor.framework is unavailable on them, so"
-                echo "Virtualization.framework cannot boot a guest there at any macOS version."
-                echo
-                echo "Register a runner per \`docs/vz-runner.md\`, then set \`VZ_RUNNER_LABEL\`."
-              } >> "$GITHUB_STEP_SUMMARY"
-              echo "::warning title=VZ hardware gates NOT ENFORCED::0 of $fleet class-B gates ran — no runner is registered under VZ_RUNNER_LABEL (see docs/vz-runner.md)."
-              echo "VZ hardware gates: NOT ENFORCED (0 of $fleet class-B gates ran)."
-              exit 0
+          set -uo pipefail
+          fleet="$(bash tools/gate/fleet.sh count)"
+          echo "shard result:     $SHARD_RESULT"
+          echo "shard skip flag:  $SHARD_SKIP   (context only: the verdict reads receipts)"
+          echo "discovered fleet: $fleet"
+          echo "shards expected:  $SHARD_COUNT"
+          # The verdict -- and the job's exit status -- is the script's. Its
+          # output is the run summary (markdown) plus one annotation line; the
+          # `::` lines are stripped from the summary because they are runner
+          # directives, not prose.
+          rc=0
+          bash tools/ci/vz-enforcement.sh \
+              --fleet "$fleet" \
+              --shards "$SHARD_COUNT" \
+              --shard-result "$SHARD_RESULT" \
+              --skip-flag "$SHARD_SKIP" \
+              --receipts receipts > "$RUNNER_TEMP/verdict.txt" 2>&1 || rc=$?
+          cat "$RUNNER_TEMP/verdict.txt"
+          grep -v '^::' "$RUNNER_TEMP/verdict.txt" >> "$GITHUB_STEP_SUMMARY" || true
+
+          # A refusal is the point, not a crash: name the state as the check's
+          # conclusion, so nobody reads a red X as a flake (card #1344).
+          if [ "$rc" -ne 0 ]; then
+            echo "::error title=VZ hardware gates REFUSED::The class-B fleet did not run (or did not all run) on this revision: see the run summary and docs/vz-runner.md."
           fi
-          echo "VZ hardware gates: OK — the shards ran the class-B fleet."
+          exit "$rc"

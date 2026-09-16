@@ -6,9 +6,13 @@
 # dedicated `vz-gates` workflow (.github/workflows/vz-gates.yml), which
 # runs them on a self-hosted macOS 27+ Apple silicon runner once the
 # repository variable VZ_RUNNER_LABEL names its label. Until a runner is
-# registered, that workflow skips every gate and SAYS SO in its run
-# summary ("NOT ENFORCED: 0 of N class-B gates ran") rather than showing
-# a green required check that enforced nothing.
+# registered, that workflow skips every gate and its REQUIRED check
+# FAILS: "REFUSED -- 0 of N class-B gates ran" (card #1344). A green
+# check with nothing to fail on is how this repository's class-B fleet
+# went unrun for weeks while a red fleet gate stayed red, so the absence
+# is now a failure that has to be answered -- by registering a runner
+# (docs/vz-runner.md) or by an explicit, audited bypass on the ruleset.
+# The verdict itself is class-A tested below, offline.
 # GitHub-hosted runners cannot run class B at any macOS version:
 # Hypervisor.framework is unavailable on them (actions/runner-images#13505,
 # closed as not planned), so Virtualization.framework cannot boot a guest
@@ -125,6 +129,16 @@ jobs:
       # something else. Guards the guard.
       - name: Verify the VZ preflight fails loudly (class A — runner entitlement + hypervisor capability)
         run: bash tools/gate/test-gate-run.sh
+
+      # The class-B verdict is the MERGE GATE for the VZ fleet, so its refusal
+      # paths are exercised here, offline: every state the aggregate can reach
+      # (no runner, no receipts, a partial run, a duplicate shard, a zero-gate
+      # shard, a failing gate) plus the shard step itself, run against a sandbox
+      # fleet. That last one is not decoration -- the defect that made this
+      # necessary was a wrong filename inside the shard loop, which no amount of
+      # grepping would have caught.
+      - name: Verify the class-B verdict refuses when the fleet did not run (class A — every refusal state + the shard step, offline)
+        run: bash tools/ci/test-vz-enforcement.sh
 
       # --- Class B: Apple-silicon VZ hardware gates run in vz-gates.yml ---
 
