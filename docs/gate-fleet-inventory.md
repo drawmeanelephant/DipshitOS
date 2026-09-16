@@ -336,7 +336,7 @@ recipe a workflow delegates to; `st` = named in
 | `verify-t0sz16-walkprobe.sh` | 220 | D | n | n | n | y | verify-t0sz16-walkprobe.sh -- claim 1517 (claims 6460/7896 follow-up) |
 | `verify-t0sz16.sh` | 276 | D | n | n | n | y | verify-t0sz16.sh -- claim 1517 (claims 6460/7896 follow-up) class-D |
 | `verify-transcript.sh` | 32 | A | n | n | n | y | M1.5 march step 19 gate: the automated `virelai>` transcript test. |
-| `verify-ttf-fonts.sh` | 62 | A | n | n | y | n | verify-ttf-fonts.sh -- class A: TrueType font engine verification for |
+| `verify-ttf-fonts.sh` | 64 | A | n | n | y | n | verify-ttf-fonts.sh -- class A: TrueType font engine verification for |
 | `verify-tx-diag.sh` | 263 | D | y | n | n | n | verify-tx-diag.sh -- claim 0018 gate: bisect the FIRST post-exit virtio TX |
 | `verify-tx-transition.sh` | 238 | D | n | n | n | y | verify-tx-transition.sh -- claim 0020 gate: which transition destroys |
 | `verify-unit-tests.sh` | 38 | A | n | n | y | n | Run the VirelaiOS unit test suites. |
