@@ -25,7 +25,10 @@ on:
 jobs:
   summary:
     name: VZ hardware gates
-    runs-on: ubuntu-latest
+    # Mac-only project, macOS 27 only: even the placeholder runs on the
+    # macOS 27 image (same label as the Swift-spike job in ci.yml), never
+    # Ubuntu.
+    runs-on: xcode-27
     steps:
       - name: Report class-B as not enforced
         run: |
