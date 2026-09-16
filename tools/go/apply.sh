@@ -137,6 +137,17 @@ if ! have "$F/internal/platform/zosarch.go" '{"virelai", "arm64"}'; then
     edits=$((edits+1)); log "patched internal/platform/zosarch.go"
 fi
 
+# --- 3h. runtime/netpoll.go: enable the poller CORE for virelai --------
+# Issue #1163 phase 2. The platform-independent poller core (netpollblock/
+# unblock, netpollready, the deadline machinery) is tagged
+# "unix || (js && wasm) || wasip1 || windows"; virelai must join that set or
+# the overlay's netpoll platform hooks have no core to plug into. The core
+# itself is stock — this only widens the build tag.
+if ! head -6 "$F/runtime/netpoll.go" | grep -q virelai; then
+    gsed -i 's#^//go:build unix || (js && wasm) || wasip1 || windows$#//go:build unix || (js \&\& wasm) || wasip1 || windows || virelai#' "$F/runtime/netpoll.go"
+    edits=$((edits+1)); log "patched runtime/netpoll.go (enable poller core for virelai)"
+fi
+
 # --- 4. commit the delta ----------------------------------------------
 if [ "$edits" -gt 0 ]; then
     ( cd "$FORK_DIR" && git add -A &&

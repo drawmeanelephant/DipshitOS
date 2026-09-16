@@ -110,7 +110,7 @@ pub const slot_count: usize = 128;
 /// sys_thread/sys_futex; issue #1228 (phase 0c): slot 75 is sys_exnotify.
 /// `implemented_count` is the number of
 /// registered rows (rows 0..implemented_count-1).
-pub const implemented_count: usize = 76;
+pub const implemented_count: usize = 77;
 /// Card G6 (claim 0487) follow-on (slot 18): the fixed `sys_win_get` shape —
 /// four u32 LE words (x, y, w, h), 16 bytes, marshaled per call and copy_out'd
 /// through uaccess (the procs snapshot pattern).
@@ -358,6 +358,11 @@ pub const sys_futex: u64 = 74;
 // 0007 amendment + the delivery contract in exceptions.zig
 // (`fault_deliverable`).
 pub const sys_exnotify: u64 = 75;
+// Issue #1163 (phase 2): slot 76 — the socket-readiness seam for the
+// GOOS=virelai netpoll. Op-based: sys_sock_ready(op, want, timeout_ns),
+// op 0 poll / op 1 park-until-ready-or-deadline. See the ADR 0007
+// append-only amendment (2026-09-15, phase 2).
+pub const sys_sock_ready: u64 = 76;
 /// The fixed per-call fill cap of slot 72 (ADR 0025 D5: "capped at a bounded
 /// maximum"). 256 matches `write_cap` — enough for an ephemeral X25519
 /// secret (32 B), a KEXINIT cookie (16 B), or a burst of per-packet padding,
@@ -593,6 +598,8 @@ pub fn ensure_table() *const [slot_count]Entry {
         table_storage[sys_futex] = .{ .name = "sys_futex", .handler = handle_futex };
         // Issue #1228 (phase 0c): slot 75 — sys_exnotify.
         table_storage[sys_exnotify] = .{ .name = "sys_exnotify", .handler = handle_exnotify };
+        // Issue #1163 (phase 2): slot 76 — sys_sock_ready.
+        table_storage[sys_sock_ready] = .{ .name = "sys_sock_ready", .handler = handle_sock_ready };
         table_ready = true;
     }
     return &table_storage;
@@ -629,7 +636,7 @@ fn doms_of(number: u64) u5 {
     const e: u5 = svclock.dom_bit(.ev);
     const k: u5 = svclock.dom_bit(.kernel);
     return switch (number) {
-        sys_udp_listen, sys_udp_send, sys_udp_recv, sys_tcp_connect, sys_tcp_send, sys_tcp_recv, sys_tcp_close, sys_ping_send, sys_ping_poll, sys_net_stats => n,
+        sys_udp_listen, sys_udp_send, sys_udp_recv, sys_tcp_connect, sys_tcp_send, sys_tcp_recv, sys_tcp_close, sys_sock_ready, sys_ping_send, sys_ping_poll, sys_net_stats => n,
         sys_file_open, sys_file_read, sys_file_write, sys_file_close, sys_dir_list, sys_file_delete, sys_file_rename, sys_file_truncate, sys_file_free => f,
         sys_exec => f | k,
         sys_win_open, sys_win_fill, sys_win_present, sys_win_close, sys_win_move, sys_win_raise, sys_win_get, sys_win_query, sys_win_set_visible, sys_win_fill_batch, sys_win_resize, 48, sys_win_raise_front, sys_win_lower_back, 52, sys_win_set_unsaved, sys_win_set_title, sys_drag_read, sys_font_size => w,
@@ -2022,6 +2029,52 @@ fn handle_futex(args: Args, frame: *exceptions.VectorFrame) u64 {
             // Linux semantics: n == 0 wakes nobody.
             const n = @min(val, scheduler.futex_max);
             return scheduler.futex_wake(pid, uaddr, @intCast(n));
+        },
+        else => return error_result(.einval),
+    }
+}
+
+/// Slot 76: `sys_sock_ready(op, want, timeout_ns)` — issue #1163 (phase 2),
+/// the GOOS=virelai netpoll readiness seam (ADR 0007 append-only amendment).
+///
+/// op 0 probes: return the readiness mask of the CALLING PROCESS's TCP
+/// socket (bit 0 = readable, bit 1 = writable; 0 = nothing yet). op 1 parks
+/// the caller until a wanted bit is set or the deadline elapses. The caller
+/// must own the socket, and `want` must name at least one bit.
+///
+/// Deliberately NOT an ADR 0009 event: the per-process event queue is the
+/// application's input stream (drop-oldest, 16 deep), and a poller draining
+/// it would steal the app's window/keyboard events and could silently lose
+/// readiness. A level-triggered mask cannot lose an edge.
+fn handle_sock_ready(args: Args, _: *exceptions.VectorFrame) u64 {
+    const op = args[0];
+    const want = args[1];
+    const timeout_ns = args[2];
+    const caller = scheduler.current_id();
+    const pid = process.find_by_task(caller) orelse return error_result(.einval);
+    if (want == 0 or (want & ~@as(u64, 3)) != 0) return error_result(.einval);
+    if (!tcp.owned_by_pid(pid)) return error_result(.eagain);
+    const want_mask: u32 = @truncate(want);
+    switch (op) {
+        0 => return @intCast(tcp.ready_mask()),
+        1 => {
+            const start_pct = timer.cntpct();
+            var iterations: usize = 0;
+            while (true) {
+                const mask = tcp.ready_mask();
+                if ((mask & want_mask) != 0) return @intCast(mask);
+                if (timeout_ns != 0 and timer.freq != 0) {
+                    const elapsed_s = (timer.cntpct() -| start_pct) / timer.freq;
+                    if (elapsed_s * 1_000_000_000 >= timeout_ns) return error_result(.etimedout);
+                }
+                // Let the rest of the machine run while we wait: this is a
+                // scheduler point, never a spin that starves other tasks.
+                virtio_net.net_rx_drain();
+                _ = scheduler.yield_current();
+                iterations += 1;
+                if (timer.freq == 0 and iterations > 100_000) return error_result(.etimedout);
+                if (iterations > 50_000_000) return error_result(.etimedout);
+            }
         },
         else => return error_result(.einval),
     }

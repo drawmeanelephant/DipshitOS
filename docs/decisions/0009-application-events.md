@@ -168,3 +168,36 @@ Milestone 9 allocates slots 21 and 22 in the frozen ADR 0007 syscall table:
 - Applications can implement real-time interactive loops using `sys_wait_event` without polling or spinning.
 - The window manager gains bidirectional event flow between host input and guest user processes.
 - Syscall dispatch table grows to 23 implemented slots (0..22).
+
+---
+
+### Amendment (2026-09-15, phase 2 — socket readiness is NOT an event kind)
+
+**Append-only.** The decision record above is unchanged; this records the
+negative decision and its reason, so the next reader does not "helpfully" add
+a readiness event.
+
+Phase 2 (`syscall`/`os`/`net` for GOOS=virelai) needed a way to wake a task
+that is blocked on TCP readiness. The obvious shape — push an event, let the
+runtime's netpoll drain the queue — is **rejected**, for three reasons:
+
+1. **The queue belongs to the application.** Kinds 1–21 are the input and
+   window stream the GUI loop consumes (`sys_poll_event` / `sys_wait_event`).
+   A runtime poller draining readiness from the same FIFO would consume the
+   application's keyboard and window events.
+2. **Drop-oldest would lose readiness.** The queue is a bounded 16-event FIFO
+   with a drop-oldest overflow policy. Readiness is not a notification that
+   tolerates loss; dropping it wedges a reader until an unrelated event
+   happens to arrive.
+3. **Edge vs level.** An event kind is edge-shaped; socket readiness is
+   level-shaped, and a level-triggered query cannot lose an edge that
+   arrived while nobody waited.
+
+The chosen mechanism is therefore **slot 76 `sys_sock_ready(op, want,
+timeout_ns)`** (ADR 0007, appended the same day): a level-triggered readiness
+mask plus a bounded task park. It is the "or equivalent" the phase-2 brief
+allows, and it keeps ADR 0009's queue semantics exactly as specified.
+
+Consequences for this document: no new event kind is defined, `Event` stays
+16 bytes with kinds 1–21, and `sys_poll_event` / `sys_wait_event` are
+untouched. ADR 0009's "Syscall seam" row (D7) is unaffected.
