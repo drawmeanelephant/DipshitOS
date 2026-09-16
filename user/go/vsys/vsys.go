@@ -7,6 +7,10 @@
 // layer, no libc, no POSIX and no cgo. A virelai program gets os.File-shaped
 // and net.Conn-shaped values from here.
 //
+// CONCURRENCY: VirelaiOS has ONE TCP socket per process, so Dial/Close are
+// not safe for concurrent use — there is no second socket for a lock to hand
+// out. One Conn at a time, from one goroutine, is the whole contract.
+//
 // Host/guest split (the same shape user/go/vi uses): the pure logic —
 // path validation, IP-literal parsing, the Conn state machine, error
 // mapping — lives in this file and file.go/net.go and is exercised by

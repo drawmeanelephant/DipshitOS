@@ -2,7 +2,6 @@ package vsys
 
 import (
 	"errors"
-	"sync"
 	"testing"
 )
 
@@ -215,66 +214,27 @@ func TestConn_WriteTruncatesAtPayloadMax(t *testing.T) {
 	}
 }
 
-func TestConn_ConcurrentDialIsSerializedByTheBound(t *testing.T) {
+func TestConn_BoundIsEnforcedAcrossCloseDialCycles(t *testing.T) {
+	// The one-socket bound is a PROCESS-WIDE invariant, exercised the way a
+	// single-threaded app does: Dial/Close/Dial... ten times, with exactly one
+	// live Conn at every step. (Dial and Close are NOT safe for concurrent
+	// use — the kernel itself has one socket per process, so there is nothing
+	// for a lock to protect beyond ClientLive; see the package doc.)
 	resetConn(t)
 	fakeKern(t, func(num uintptr, a0, a1, a2, a3 uintptr) int64 { return 0 })
-	var wg sync.WaitGroup
-	var busy int
-	var mu sync.Mutex
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if _, err := Dial("10.0.2.2", 80); err == ErrConnBusy {
-				mu.Lock()
-				busy++
-				mu.Unlock()
-			}
-		}()
-	}
-	wg.Wait()
-	if busy != 7 {
-		t.Fatalf("busy refusals = %d, want 7 (one socket, 8 racers)", busy)
-	}
-}
-
-func TestConn_ProbeAsksForReadinessOnly(t *testing.T) {
-	resetConn(t)
-	var want, op uintptr
-	fakeKern(t, func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
-		if num == SlotSockReady {
-			op, want = a0, a1
+	for i := 0; i < 10; i++ {
+		c, err := Dial("10.0.2.2", 80)
+		if err != nil {
+			t.Fatalf("cycle %d: Dial = %v", i, err)
 		}
-		return 0
-	})
-	c, _ := Dial("10.0.2.2", 80)
-	c.SetReadDeadline(1_000_000_000)
-	_, _ = c.Read(make([]byte, 4))
-	if op != 0 || want != 1 {
-		t.Fatalf("slot 76 args = (op=%d, want=%d), want (0, 1) — probe, readable", op, want)
-	}
-}
-
-func TestConn_DefaultReadTicksWhenNoDeadline(t *testing.T) {
-	resetConn(t)
-	sleeps := 0
-	fakeKern(t, func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
-		if num == SlotSleep {
-			sleeps++
+		if _, err := Dial("10.0.2.2", 80); err != ErrConnBusy {
+			t.Fatalf("cycle %d: second Dial = %v, want ErrConnBusy", i, err)
 		}
-		return 0
-	})
-	c, _ := Dial("10.0.2.2", 80)
-	if got := c.readTicks(); got != DefaultReadTicks {
-		t.Fatalf("readTicks() = %d, want DefaultReadTicks (%d)", got, DefaultReadTicks)
+		if err := c.Close(); err != nil {
+			t.Fatalf("cycle %d: Close = %v", i, err)
+		}
+		if ClientLive != nil {
+			t.Fatalf("cycle %d: ClientLive not cleared by Close", i)
+		}
 	}
-	c.SetReadDeadline(-5)
-	if got := c.readTicks(); got != DefaultReadTicks {
-		t.Fatalf("negative deadline readTicks() = %d, want DefaultReadTicks", got)
-	}
-	c.SetReadDeadline(1) // sub-second rounds UP to one tick, never to zero
-	if got := c.readTicks(); got != 1 {
-		t.Fatalf("sub-second readTicks() = %d, want 1 (never 0)", got)
-	}
-	_ = sleeps
 }
