@@ -59,6 +59,7 @@ of them with `just verify-vz`.
 | spec | `go-stress` | 1 run / 10 assert | go-stress.spec -- issue #1227: GOOS=virelai 0b breadth (GC / channel / |
 | spec | `go-tabapp` | 1 run / 15 assert | go-tabapp.spec -- M56d (issue #1315) class-B gate: one Go app full-viewport |
 | spec | `go-win` | 1 run / 9 assert | go-win.spec -- M53 Card 1 (issue #1245): the raw ADR 0007 window, from Go. |
+| spec | `go-wm-default` | 2 run / 40 assert | go-wm-default.spec -- M59 (issue #1298) class-B gate: the boot-default flip. |
 | spec | `go-wm-seat` | 2 run / 53 assert | go-wm-seat.spec -- M57a/b/c (issues #1313/#1317/#1318) class-B gate: a Go WM |
 | spec | `live-addrspaces` | 1 run / 11 assert | live-addrspaces.spec -- per-task user address spaces on VZ hardware: |
 | spec | `live-args` | 1 run / 6 assert | live-args.spec -- exec arguments reach EL0: the same USER.BIN exec'd |
@@ -313,7 +314,7 @@ named in `.github/workflows/*.yml`; `st` = named in
 | `oliver-publish.sh` | 85 | tooling | n | n | n | n | oliver-publish.sh — M-web S6 host-side batch (issue #1207). |
 | `png2qoi.py` | 94 | tooling | n | n | n | n | Convert standard images (PNG, JPG) to Quite OK Image (QOI) format. |
 | `probe-pointer-routes.sh` | 53 | D | n | n | n | y | Probe: sweep pointer routes against the same guest session, comparing |
-| `session.sh` | 144 | tooling | y | n | n | n | session.sh -- boot an INTERACTIVE, WINDOWED VirelaiOS desktop. |
+| `session.sh` | 183 | tooling | y | n | n | n | session.sh -- boot an INTERACTIVE, WINDOWED VirelaiOS desktop. |
 | `test-unicode-torture.sh` | 18 | D | n | n | n | y | M20-U14: the Unicode torture gate. |
 | `verify-bad-handoff.sh` | 24 | B | y | y | n | n | (no header line) |
 | `verify-bss-budget.sh` | 165 | A | y | n | y | n | verify-bss-budget.sh -- ADR 0013 D3.1 CI gate: enforce a hard .bss ceiling |

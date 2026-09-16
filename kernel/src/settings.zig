@@ -10,6 +10,8 @@
 //!   - `theme`: UI visual color accent (default: "default")
 //!   - `scrollback`: terminal scrollback buffer lines (default: "1000")
 //!   - `shell`: boot login shell, "monitor"|"sh" (default: "monitor")
+//!   - `wm`: boot window-manager seat, "gotabwm"|"tabwm"|"none"
+//!     (default: "gotabwm" — M59 issue #1298 flipped it from TABWM)
 //!
 //! Boot contract:
 //!   On kernel boot, after the file channel is armed, `init_from_share()`
@@ -27,6 +29,7 @@
 //!   The current schema version is `current_version` (= 1).
 //!   - v0 (no header): legacy format, loaded then migrated to current.
 //!   - v1: versioned format with `#v1` header.
+//!   - v2 (M59, issue #1298): adds the `wm` seat key (default "gotabwm").
 //!   - newer: refused with honest degradation (compiled defaults used).
 //!   Migration steps live in `migrate()`. Each step adds missing keys
 //!   with defaults and removes obsolete keys. Serial logs what changed.
@@ -41,6 +44,10 @@
 //!   color      string  "on"          "on"|"off", ANSI terminal colors in shell
 //!   shadow     string  "off"         "on"|"off", M37 DQ4 compositor drop-shadow
 //!   shell      string  "monitor"     "monitor"|"sh", M45 SH8 boot login shell
+//!   wm         string  "gotabwm"     "gotabwm"|"tabwm"|"none", M59 (#1298)
+//!                                   boot window-manager seat: the Go seat by
+//!                                   default, the Zig TABWM fallback seat, or
+//!                                   no seat at all (shim-only VM)
 
 const std = @import("std");
 // M34 HF5 (issue #739): the host-share persistence path; HF6 (issue
@@ -54,7 +61,15 @@ pub const filename = "SETTINGS.TXT";
 
 /// Current schema version. Increment when keys are added/removed/renamed.
 /// The version header in SETTINGS.TXT is `#v<N>` on the first line.
-pub const current_version: u32 = 1;
+/// v2 (M59, issue #1298): added `wm`.
+pub const current_version: u32 = 2;
+
+/// M59 (issue #1298): the compiled default window-manager seat. A boot with
+/// no persisted `wm` key — a fresh share, or a settings file written before
+/// v2 — lands in the Go seat (`GOTABWM.ELF`). `"tabwm"` keeps the Zig
+/// TABWM.BIN seat reachable as the fallback; `"none"` is the explicit
+/// shim-only opt-out (the default VM every pre-M59 gate assumed).
+pub const wm_default: []const u8 = "gotabwm";
 
 pub const max_key_len: usize = 32;
 pub const max_val_len: usize = 64;
@@ -88,6 +103,7 @@ pub fn init() void {
     _ = set_internal("shadow", "off"); // M37 DQ4 (issue #838): compositor drop-shadow, default off
     _ = set_internal("focus_follows_mouse", "off");
     _ = set_internal("shell", "monitor"); // M45 SH8 (#1084): boot login shell (monitor|sh)
+    _ = set_internal("wm", wm_default); // M59 (#1298): the boot WM seat (gotabwm|tabwm|none)
     initialized = true;
 }
 
@@ -147,6 +163,52 @@ pub fn login_shell() []const u8 {
 
 pub fn login_shell_is_sh() bool {
     return std.mem.eql(u8, login_shell(), "sh");
+}
+
+/// M59 (issue #1298): the boot window-manager seat, as named in `SETTINGS.TXT`.
+/// The compiled default (`wm_default`) is what a boot with no persisted key
+/// uses, so the `orelse` is the flip: an unset `wm` is the Go seat, not
+/// shim-only.
+pub fn wm_seat() []const u8 {
+    return get("wm") orelse wm_default;
+}
+
+/// M59 (issue #1298): the seat vocabulary, resolved once so the autostart,
+/// the tests and any future `wm` report agree on it. `"gotabwm"` and
+/// `"tabwm"` name the two seats; `"none"` (and any unrecognized value)
+/// means no default seat is launched — the pre-M59 shim-only VM.
+pub const WmSeat = enum {
+    gotabwm,
+    tabwm,
+    none,
+
+    pub fn of(setting: []const u8) WmSeat {
+        if (std.mem.eql(u8, setting, "gotabwm")) return .gotabwm;
+        if (std.mem.eql(u8, setting, "tabwm")) return .tabwm;
+        return .none;
+    }
+
+    /// The share-resident program that seats this manager (null for `none`).
+    pub fn program(self: WmSeat) ?[]const u8 {
+        return switch (self) {
+            .gotabwm => "GOTABWM.ELF",
+            .tabwm => "TABWM.BIN",
+            .none => null,
+        };
+    }
+
+    pub fn name(self: WmSeat) []const u8 {
+        return switch (self) {
+            .gotabwm => "gotabwm",
+            .tabwm => "tabwm",
+            .none => "none",
+        };
+    }
+};
+
+/// M59 (issue #1298): the persisted seat resolved to its kind (see `WmSeat`).
+pub fn wm_seat_kind() WmSeat {
+    return WmSeat.of(wm_seat());
 }
 
 /// M18 T5: whether ANSI terminal colors are enabled.
@@ -447,7 +509,15 @@ fn migrate(from_version: u32) void {
         // v0 was the original format without version header.
         // No key changes needed — the schema is stable.
     }
-    // Future: if (from_version < 2) { migrate_v1_to_v2(); }
+    // v1 -> v2 (M59, issue #1298): the `wm` seat key. No key has to be added
+    // to the table here: `init()` already populated `wm` with the compiled
+    // default before the file was parsed, so a v1 file that never carried
+    // `wm` keeps that default (the Go seat). A v1 file that DID carry a
+    // `wm=tabwm` line (a human who opted out before the flip) parses it and
+    // wins — the persisted choice is respected, which is the point of the
+    // default seam. The version bump exists so an older kernel refuses the
+    // new file honestly instead of dropping the key silently.
+    if (from_version < 2) {}
 }
 
 /// Persist current in-memory configuration to `SETTINGS.TXT` on the HOST
@@ -533,7 +603,7 @@ test "settings: serialization round trip" {
     const len = serialize(&buf);
     try std.testing.expect(len > 0);
     // Version header must be the first line
-    try std.testing.expect(std.mem.startsWith(u8, buf[0..len], "#v1\n"));
+    try std.testing.expect(std.mem.startsWith(u8, buf[0..len], "#v2\n"));
     try std.testing.expect(std.mem.indexOf(u8, buf[0..len], "hostname=roundtrip-host\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..len], "prompt=rt> \n") != null);
 }
@@ -545,8 +615,47 @@ test "settings: version header is present" {
     try std.testing.expect(len > 3);
     try std.testing.expectEqual(@as(u8, '#'), buf[0]);
     try std.testing.expectEqual(@as(u8, 'v'), buf[1]);
-    try std.testing.expectEqual(@as(u8, '1'), buf[2]);
+    try std.testing.expectEqual(@as(u8, '2'), buf[2]);
     try std.testing.expectEqual(@as(u8, '\n'), buf[3]);
+}
+
+test "settings: the boot WM seat defaults to the Go seat (M59 #1298)" {
+    init();
+    try std.testing.expectEqualStrings("gotabwm", wm_seat());
+    try std.testing.expectEqualStrings("GOTABWM.ELF", wm_seat_kind().program().?);
+
+    // The fallback seat and the explicit shim-only opt-out both persist.
+    try std.testing.expectEqual(SetResult.ok, set("wm", "tabwm"));
+    try std.testing.expectEqualStrings("TABWM.BIN", wm_seat_kind().program().?);
+    try std.testing.expectEqual(SetResult.ok, set("wm", "none"));
+    try std.testing.expect(wm_seat_kind().program() == null);
+
+    // An unrecognized value is not a seat: no default manager, never a guess.
+    try std.testing.expectEqual(SetResult.ok, set("wm", "wnd"));
+    try std.testing.expect(wm_seat_kind() == .none);
+
+    init(); // restore defaults for other tests
+    try std.testing.expectEqualStrings("gotabwm", wm_seat());
+}
+
+test "settings: a pre-v2 file without wm keeps the flipped default (M59 #1298)" {
+    init();
+    defer init();
+    // A v1 settings file from before the flip: no `wm` line at all.
+    try std.testing.expect(apply_bytes("#v1\nhostname=v1box\n"));
+    try std.testing.expectEqualStrings("v1box", get_hostname());
+    try std.testing.expectEqualStrings("gotabwm", wm_seat());
+
+    // A v1 file that opted out of the default before the flip keeps its choice.
+    init();
+    try std.testing.expect(apply_bytes("#v1\nwm=tabwm\n"));
+    try std.testing.expectEqualStrings("TABWM.BIN", wm_seat_kind().program().?);
+
+    // A file written by a NEWER kernel is refused (honest degradation): the
+    // compiled defaults stay in force rather than a partial parse.
+    init();
+    try std.testing.expect(!apply_bytes("#v3\nwm=tabwm\n"));
+    try std.testing.expectEqualStrings("gotabwm", wm_seat());
 }
 
 test "settings: current_version constant" {

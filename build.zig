@@ -2424,8 +2424,9 @@ pub fn build(b: *std.Build) void {
     // Interactive desktop session (class C — a human at the keyboard): the
     // windowed GPU + USB-input front door. Seeds the persistent host share
     // (M34 HF6 removed the apps from the image), attaches GPU + keyboard +
-    // pointer, and autostarts TABWM via /host/.virelairc. Apple silicon +
-    // macOS 27 only; never run in CI (tools/session.sh owns the detail).
+    // pointer, stages the Go seat, and lets the M59 (issue #1298) boot
+    // default seat it via /host/.virelairc. Apple silicon + macOS 27 only;
+    // never run in CI (tools/session.sh owns the detail).
     const session_step = b.step("session", "Boot an interactive windowed VirelaiOS desktop (class C — human session; Apple silicon + macOS 27 only)");
     const session = b.addSystemCommand(&.{ "bash", "tools/session.sh" });
     session.step.dependOn(&image.step);
