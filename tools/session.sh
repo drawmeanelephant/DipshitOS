@@ -10,14 +10,17 @@
 #   1. build the guest + image + the SPIKE runner (the host file channel
 #      `--cvc-file` implies the custom-virtio device shape, which only the
 #      SPIKE build declares);
-#   2. seed a PERSISTENT host share (apps, APPS.TXT, wallpaper, fonts) --
-#      M34/HF6 removed the apps from the disk image, so without this the
-#      shell has nothing to `exec`;
+#   2. seed a PERSISTENT host share (apps, APPS.TXT, wallpaper, fonts, and
+#      the Go seat) -- M34/HF6 removed the apps from the disk image, so
+#      without this the shell has nothing to `exec`;
 #   3. boot with the GPU window + USB keyboard/pointing devices attached
 #      (`--display --input`);
-#   4. autostart the tabbed Sexiburger desktop via a `.virelairc` in the
-#      share (delete that line, or set VIRELAI_SESSION_NO_TABWM=1, for the
-#      classic floating-window WM).
+#   4. let the compiled boot default apply: M59 (issue #1298) flipped `wm`
+#      to the GO seat, so a boot lands in GOTABWM.ELF. The `.virelairc` in
+#      the share says so and offers the two escapes -- `settings set wm
+#      tabwm` for the older tabbed Zig desktop, VIRELAI_SESSION_NO_TABWM=1
+#      for the classic floating-window WM. When the Go seat cannot be built
+#      on this machine the rc falls back to `tabwm start` and says so.
 #
 # The canonical `artifacts/disk.img` is attached READ-ONLY through a
 # throwaway ASIF overlay, so a session never mutates the shared gate image.
@@ -33,7 +36,9 @@
 #
 # Environment:
 #   VIRELAI_SESSION_SHARE=<dir>      share directory (default artifacts/session-share)
-#   VIRELAI_SESSION_NO_TABWM=1       skip the tabwm autostart (floating WM)
+#   VIRELAI_SESSION_NO_TABWM=1       no seat autostart: the floating-window WM
+#   VIRELAI_SESSION_NO_GOTABWM=1     do not build/stage the Go seat (the rc
+#                                    then falls back to `tabwm start`)
 #   VIRELAI_SESSION_SKIP_BUILD=1     skip the build step (reuse the last build)
 #
 # Controls: the GUI window takes real keyboard + mouse. Ctrl-C in this
@@ -85,19 +90,50 @@ fi
 [ -f "$ROOT/image/fonts/Inter-Regular.ttf" ] && cp "$ROOT/image/fonts/Inter-Regular.ttf" "$SHARE/INTER.TTF"
 [ -f "$ROOT/image/fonts/FiraCode-Regular.ttf" ] && cp "$ROOT/image/fonts/FiraCode-Regular.ttf" "$SHARE/FIRACODE.TTF"
 
+# The GO seat (M59, issue #1298): the compiled `wm` default is `gotabwm`, so
+# a default boot looks for GOTABWM.ELF ON THE SHARE. Build it with the
+# GOOS=virelai fork toolchain and stage it; if that is unavailable the
+# session still opens, with an honest warning and the Zig TABWM fallback (the
+# rc below says which).
+GO_SEAT_STAGED=0
+if [ "${VIRELAI_SESSION_NO_GOTABWM:-0}" != "1" ]; then
+    if bash "$ROOT/tools/go/build-gotabwm.sh"; then
+        cp "$ROOT/.build/go/GOTABWM.ELF" "$SHARE/GOTABWM.ELF"
+        GO_SEAT_STAGED=1
+    else
+        echo "session: WARNING — GOTABWM.ELF did not build (Go fork toolchain missing?)"
+        echo "session:           the Zig TABWM seat is the fallback; this session autostarts it."
+    fi
+fi
+
 # --- 3. the session startup file (only written when absent) -----------------
 RC_FILE="$SHARE/.virelairc"
 if [ ! -f "$RC_FILE" ]; then
     if [ "${VIRELAI_SESSION_NO_TABWM:-0}" = "1" ]; then
-        printf '%s\n' \
-            '# VirelaiOS session startup. `tabwm start` boots the tabbed Sexiburger desktop;' \
-            '# uncomment the next line (and remove this file to regenerate) for the floating WM.' \
-            '# tabwm start' > "$RC_FILE"
-    else
+        # No seat at all: the classic floating-window WND desktop.
         printf '%s\n' \
             '# VirelaiOS session startup — edit freely. Each line runs at boot.' \
-            '# `tabwm start` boots the browser-style tabbed desktop with the Sexiburger sidebar.' \
-            '# Comment it out (or delete this file) to use the classic floating-window WM instead.' \
+            '# "wnd start" boots the classic floating-window WM and suppresses the' \
+            '# boot-default seat. Remove the line to get the Go seat instead.' \
+            'wnd start' > "$RC_FILE"
+    elif [ "$GO_SEAT_STAGED" = "1" ]; then
+        # M59 (issue #1298): the compiled default is the GO seat, so this file
+        # deliberately starts NO manager — the boot default decides. Naming a
+        # seat here would override it (the rc runs before the idle autostart).
+        printf '%s\n' \
+            '# VirelaiOS session startup — edit freely. Each line runs at boot.' \
+            '# No WM line here on purpose: the boot default seats the GO desktop' \
+            '# (GOTABWM.ELF, `settings set wm gotabwm`).' \
+            '#   older tabbed Zig desktop:  settings set wm tabwm' \
+            '#   classic floating windows:  settings set wm none  +  wnd start' \
+            '#   back to the Go seat:       settings set wm gotabwm' > "$RC_FILE"
+    else
+        # No Go seat on this machine: keep the pre-M59 behaviour rather than
+        # autostarting a seat that is not there.
+        printf '%s\n' \
+            '# VirelaiOS session startup — edit freely. Each line runs at boot.' \
+            '# GOTABWM.ELF could not be built, so this session boots the Zig' \
+            '# TABWM seat: uncomment/keep the next line.' \
             'tabwm start' > "$RC_FILE"
     fi
 fi
@@ -122,13 +158,16 @@ cat <<EOF
 
 >>>>>>>>>> VirelaiOS session <<<<<<<<<<
 
-A 1280x720 VM window is opening. It boots the tabbed desktop (Sexiburger
-sidebar on the left). Use the REAL keyboard + mouse in that window:
+A 1280x720 VM window is opening. Since M59 (issue #1298) the boot default is
+the GO seat (GOTABWM.ELF). It is deliberately thin today — M57 proved the seat
+and the Zig-app interop, not a desktop you live in: it paints the desktop,
+takes focus, hosts the leftover Zig apps (CALC, NOTEPAD), then exits. There is
+no sidebar, launcher or tab window yet; those are still the Zig TABWM seat.
 
-  * Ctrl+Space (or click the Sexiburger button)  open the launcher
-  * type to filter, Enter launches into a new tab
-  * Ctrl+Tab / Ctrl+1..9  switch tabs;  Ctrl+W closes the active tab
-  * the terminal window hosts the `virelai>` shell
+  * for the older tabbed desktop (sidebar + launcher + terminal window):
+      settings set wm tabwm      then Ctrl-C here and start again
+  * the seat's markers and the guest shell output are in
+      artifacts/session-serial.log
 
 The guest serial log is written to artifacts/session-serial.log.
 Your files persist in: $SHARE
