@@ -17,6 +17,7 @@ func TestSlotNumbers(t *testing.T) {
 		28: "exec",
 		30: "tcp_connect", 31: "tcp_send", 32: "tcp_recv", 33: "tcp_close",
 		34: "file_delete", 36: "file_truncate",
+		42: "audio_info", 43: "audio_play",
 		46: "win_fill_batch", 63: "mmap", 66: "time",
 	}
 	got := map[uintptr]string{
@@ -29,7 +30,8 @@ func TestSlotNumbers(t *testing.T) {
 		SlotFileClose: "file_close", SlotDirList: "dir_list", SlotExec: "exec",
 		SlotTCPConnect: "tcp_connect", SlotTCPSend: "tcp_send", SlotTCPRecv: "tcp_recv",
 		SlotTCPClose: "tcp_close", SlotFileDelete: "file_delete",
-		SlotFileTruncate: "file_truncate", SlotWinFillBatch: "win_fill_batch",
+		SlotFileTruncate: "file_truncate", SlotAudioInfo: "audio_info",
+		SlotAudioPlay: "audio_play", SlotWinFillBatch: "win_fill_batch",
 		SlotMmap: "mmap", SlotTime: "time",
 	}
 	for slot, name := range want {

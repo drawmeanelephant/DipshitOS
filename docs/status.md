@@ -78,6 +78,10 @@ any, are on the GitHub tracker.
 
 > M40 (the gate-fleet consolidation, issue #934, done 2026-09-06) was a tooling
 > workstream, not a product milestone; M36 was skipped.
+>
+> Issue #1338 (2026-09-15) is likewise tooling: the class-B harness now refuses
+> `bash < 4.4` and treats any exit before a spec's result block as non-zero, so
+> a spec that dies mid-plan can no longer be read as PASS by `fleet.sh`.
 
 ## Open work
 
@@ -86,7 +90,7 @@ The only threads not closed:
 | Thread | State / next step | Cards |
 |--------|-------------------|-------|
 | **Go runtime port — `GOOS=virelai`** | Phase 0a merged (PR #1187); 0b rounds 1+2 + envp + stress merged (#1196/#1221/#1230/#1231). Next: 0c fault delivery (#1228). TABWM/DOC follow-ups stay parked until the Go fleet can carry the test apps. | #1163, #1194, #1214, #1228 |
-| **M58 — Move the apps you touch** | M58d Go fetch over Zig TLS helper active (#1308). Full-viewport via tabapp in Zig TABWM; does not wait on M57. | #1305, #1306, #1307, #1308 |
+| **M58 — Move the apps you touch** | M58d Go fetch over Zig TLS helper active (#1308); M58e Go `vi` audio bindings (ADR 0007 slots 42/43) + M58f `FART.ELF` sound app (gate `go-fart`) done. Full-viewport via tabapp in Zig TABWM; does not wait on M57. | #1305, #1306, #1307, #1308, #1327, #1328 |
 | **EL0 `sys_exec` caller survival** | AddrSpaceSpec + argv on slot 28; class-B `live-el0-exec` | #1333 |
 
 ## Gate status

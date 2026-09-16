@@ -25,6 +25,13 @@ cd "$ROOT"
 
 source tools/lib/gate-run.sh
 
+# --- the shell floor (issue #1338) -------------------------------------------
+# A gate that cannot fail is not a gate: gate_assert_modern_bash refuses the
+# shells where this harness's failure mode is a false PASS (tools/lib/
+# gate-run.sh has the mechanism). It runs before anything else, so a refusal
+# costs nothing -- no build, no boot, no report claiming otherwise.
+gate_assert_modern_bash || exit $?
+
 [ $# -eq 1 ] || { echo "vgate: usage: bash tools/gate/vgate.sh <spec>" >&2; exit 2; }
 SPEC="$1"
 [ -f "$SPEC" ] || { echo "vgate: spec not found: $SPEC" >&2; exit 2; }
@@ -36,6 +43,16 @@ VGATE_RUNNER_FLAGS="" VGATE_REPEAT=1 VGATE_REPEAT_ENV=""
 VGATE_NOTES=() VGATE_FILE_NAMES=() VGATE_FILE_BODIES=()
 VGATE_SETUP_PY=() VGATE_RUN_TAGS=() VGATE_RUN_FLAGS=() VGATE_ALLOW_RC=() VGATE_ASSERTS=()
 VGATE_CLIENT_TAGS=() VGATE_CLIENT_ARGS=()
+
+# --- the false-PASS guard, stage 1 (issue #1338) ------------------------------
+# Installed BEFORE the spec is sourced, because sourcing runs untrusted spec
+# code: a stray `exit 0` there used to end the harness with status 0, which the
+# fleet reads as PASS. VGATE_COMPLETED is set only on the intended exit path
+# (past both the run loop and the assert engine), so anything that leaves early
+# is forced non-zero here. The stage-2 trap below adds the evidence teardown
+# (gate_end) once there is a run dir to tear down.
+VGATE_COMPLETED=0
+trap 'if [ "${VGATE_COMPLETED:-0}" != 1 ]; then echo "vgate: harness exited before its result block -- FAIL (see issue #1338)" >&2; exit 2; fi' EXIT
 
 # --- DSL (the only commands a spec may use) ----------------------------------
 vgate_name() { VGATE_NAME="$1"; VGATE_DESC="${2:-$VGATE_DESC}"; }
@@ -103,7 +120,10 @@ art() { printf 'artifacts/%s%s' "$1" "$SUFFIX"; }
 GATE_LOG="$(art "$VGATE_NAME-gate.txt")"
 REPORT="$(art "$VGATE_NAME-report.txt")"
 exec > >(tee "$GATE_LOG") 2>&1
-trap 'gate_end 2>/dev/null || true; sleep 0.5' EXIT
+# The false-PASS guard, stage 2 (issue #1338): the same completion check as
+# above, plus the evidence teardown that needs a run dir to exist. THIS trap
+# replaces the stage-1 one, so from here on a premature exit also cleans up.
+trap 'gate_end 2>/dev/null || true; sleep 0.5; if [ "${VGATE_COMPLETED:-0}" != 1 ]; then echo "vgate: harness exited before its result block -- FAIL (see issue #1338)" >&2; exit 2; fi' EXIT
 
 REVISION="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
@@ -333,6 +353,10 @@ done
 for f in "${VG_KEEP_FILES[@]}"; do
     [ -f "$RUN_DIR/$f" ] && cp "$RUN_DIR/$f" "$(art "$VGATE_NAME-$f")" || true
 done
+
+# Past this point the harness has done its job: every planned run booted and
+# every assert was evaluated, so the trap must let this rc through untouched.
+VGATE_COMPLETED=1
 
 echo; echo "=== result ==="
 if [ "$PASS" = "$TOTAL" ]; then
