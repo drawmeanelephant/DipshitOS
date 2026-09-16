@@ -25,6 +25,9 @@ vgate_assert 01 serial-contains 'wndstub: present ok'
 vgate_assert 01 serial-contains 'tasks user-exec reaped'
 vgate_assert 01 serial-contains 'wm: unregistered, shim resumed'
 vgate_assert 01 serial-contains '65 sys_wmctl calls=2'
-vgate_assert 01 serial-contains 'implemented=68'
+# `implemented=` is the LIVE count of registered rows (76 since #1228), so a
+# literal here rots on every slot landing: assert the report's shape plus the
+# row above (the claim-5069 shape-not-count precedent, live-ls-l.spec).
+vgate_assert 01 serial-contains 'syscalls: slots=64 implemented='
 vgate_assert 01 serial-contains 'rx-wmctl-ok'
 vgate_assert 01 serial-absent '[EXC] parking:'

@@ -26,8 +26,9 @@
 # -- since issue #1177 -- a LOCALE PIN, so a fresh render on a clean tree is
 # byte-identical in every environment.
 #
-# --check also runs the spec-shape guard (claim #1193) over
-# tools/gate/specs/*.spec: see check_spec_order below.
+# --check also runs the spec-shape guards over tools/gate/specs/*.spec: the
+# exec-order guard (claim #1193, check_spec_order below) and the syscall-count
+# guard (issue #1345, check_spec_counts below).
 #
 # Locale pin (issue #1177): the render used to depend on the ambient locale.
 # `cut -c1-100` counts BYTES under LC_ALL=C (the common macOS shell default
@@ -331,6 +332,67 @@ sys.exit(main())
 PY
 }
 
+
+# check_spec_counts [DIR] -- DIR defaults to tools/gate/specs. A spec may not
+# assert a syscall-report COUNT. kernel/src/syscall.zig prints
+# `syscalls: slots=64 implemented=N`, where N is counted live from the dispatch
+# table, so a spec that pins a literal N goes red the moment a slot lands and
+# stays red until somebody boots a VM to look. That is not hypothetical: six
+# specs pinned 68 while the kernel reported 76 (#1214 landed slots 73/74,
+# #1228 slot 75), and the legacy pre-spec scripts carry the older =61. The
+# rule is the claim-5069 shape-not-count precedent already cited in
+# live-ls-l.spec: assert the report's shape (`syscalls: slots=64 implemented=`)
+# plus the slot rows the gate is actually about. Comments may name a count --
+# this is about what the spec asserts.
+#
+# check_spec_counts [DIR] -- DIR defaults to tools/gate/specs. The --check
+# self-test points it at tools/gate/fixtures/spec-counts/{fail,pass} to prove
+# the rule still catches a pinned count and still clears a shape assert.
+check_spec_counts() {
+    local spec_dir="${1:-$ROOT/tools/gate/specs}"
+    python3 - "$ROOT" "$spec_dir" <<'PY'
+import os
+import re
+import sys
+
+root = sys.argv[1]
+spec_dir = sys.argv[2]
+
+# A pinned count: `implemented=` followed by digits, on a line the shell will
+# execute. A comment is documentation, so it is exempt by design.
+PIN_RE = re.compile(r"implemented=[0-9]")
+
+violations = []
+nspecs = 0
+for fname in sorted(os.listdir(spec_dir)):
+    if not fname.endswith(".spec"):
+        continue
+    nspecs += 1
+    with open(os.path.join(spec_dir, fname), encoding="utf-8",
+              errors="replace") as fh:
+        for lineno, line in enumerate(fh.read().split("\n"), 1):
+            if line.lstrip().startswith("#"):
+                continue
+            if PIN_RE.search(line):
+                violations.append((fname, lineno, line.strip()))
+print("spec-counts: %d spec file(s) in %s; %d pinned syscall count(s)"
+      % (nspecs, os.path.relpath(spec_dir, root), len(violations)))
+for fname, lineno, line in violations:
+    print("  VIOLATION %s:%d:\n            %s\n"
+          "            `implemented=` is the LIVE number of registered rows,"
+          " so this assert rots on\n            every slot landing. Assert the"
+          " shape (`syscalls: slots=64 implemented=`)\n            plus the slot"
+          " rows this gate is about -- the claim-5069 shape-not-count\n"
+          "            precedent (live-ls-l.spec)."
+          % (fname, lineno, line))
+if violations:
+    print("spec-counts: FAIL -- %d pinned syscall count(s) must become a shape assert"
+          % len(violations))
+    sys.exit(1)
+print("spec-counts: OK (no spec asserts a literal syscall-report count)")
+PY
+}
+
 render_to() {
     local out="$1"
     local total=0 orphans=0
@@ -544,6 +606,43 @@ PAIRS
              "(a declaration stopped clearing, or the rule over-fires on a launch-free run)."
         printf '%s\n' "$order_pass_out"
         rc=1
+    fi
+
+    # Syscall-count guard (issue #1345): a spec must assert the syscall
+    # report's SHAPE, never a literal count -- `implemented=` is counted live
+    # from the dispatch table, so a pinned number goes red on the next slot
+    # landing. Six specs pinned 68 while the kernel reported 76, and nothing
+    # failed until a VM was booted by hand (the vz shards have no runner).
+    check_spec_counts "$ROOT/tools/gate/specs" || rc=1
+
+    # ...and its own self-test, for the same reason as the spec-order one: the
+    # fixtures pin both verdicts, so a rule that stops matching its shape is
+    # caught here instead of in a red fleet.
+    count_fixtures="$ROOT/tools/gate/fixtures/spec-counts"
+    count_selftest_ok=1
+    if count_fail_out="$(check_spec_counts "$count_fixtures/fail" 2>&1)"; then
+        echo "inventory-gates --check: FAIL -- the syscall-count guard passed its FAIL fixtures."
+        printf '%s\n' "$count_fail_out"
+        rc=1
+        count_selftest_ok=0
+    elif ! grep -qF 'pinned-count.spec' <<<"$count_fail_out"; then
+        echo "inventory-gates --check: FAIL -- the syscall-count guard no longer flags pinned-count.spec."
+        printf '%s\n' "$count_fail_out"
+        rc=1
+        count_selftest_ok=0
+    fi
+    if ! count_pass_out="$(check_spec_counts "$count_fixtures/pass" 2>&1)"; then
+        echo "inventory-gates --check: FAIL -- the syscall-count guard flagged its PASS fixtures " \
+             "(a shape assert or an exempt comment now trips the rule)."
+        printf '%s\n' "$count_pass_out"
+        rc=1
+        count_selftest_ok=0
+    fi
+    # Printed whatever rc already is, unlike the spec-order self-test above:
+    # the self-test's verdict is evidence about the GUARD, and losing it because
+    # an unrelated check failed is how a guard's decay goes unnoticed.
+    if [ "$count_selftest_ok" -eq 1 ]; then
+        echo "inventory-gates --check: OK (syscall-count self-test: FAIL fixture still flagged, PASS fixtures clear)"
     fi
 
     rm -rf "$tmpdir"

@@ -39,7 +39,10 @@ vgate_assert 01 serial-contains 'dui: windows=4'
 vgate_assert 01 serial-contains 'winloop: loop ok'
 vgate_assert 01 serial-contains 'dui: windows=5'
 vgate_assert 01 serial-contains 'dui[4]: user user rect=64,64,512,384'
-vgate_assert 01 serial-contains 'syscalls: slots=64 implemented=68'
+# `implemented=` is the LIVE count of registered rows (76 since #1228), so a
+# literal here rots on every slot landing: assert the report's shape plus the
+# slot rows below (the claim-5069 shape-not-count precedent, live-ls-l.spec).
+vgate_assert 01 serial-contains 'syscalls: slots=64 implemented='
 vgate_assert 01 python <<'PY'
 import os, re
 ser = open(os.environ["VG_SER"]).read()

@@ -39,7 +39,10 @@ vgate_assert 01 serial-contains 'chime: vol=50 mute=0'
 vgate_assert 01 serial-contains 'chime: done'
 vgate_assert 01 serial-contains 'tasks user-exec exited status=0'
 vgate_assert 01 serial-contains 'sound: vol=50 mute=0'
-vgate_assert 01 serial-contains 'syscalls: slots=64 implemented=68'
+# `implemented=` is the LIVE count of registered rows (76 since #1228), so a
+# literal here rots on every slot landing: assert the report's shape plus the
+# slot rows below (the claim-5069 shape-not-count precedent, live-ls-l.spec).
+vgate_assert 01 serial-contains 'syscalls: slots=64 implemented='
 vgate_assert 01 serial-contains '44 sys_audio_volume calls=1'
 vgate_assert 01 serial-contains '45 sys_audio_mute calls=1'
 vgate_assert 01 serial-contains '43 sys_audio_play calls=30'

@@ -48,7 +48,10 @@ ser = open(os.environ["VG_SER"]).read()
 assert re.search(r'dui\[4\]: user user rect=768,336,512,384 .* owner=[0-9]+', ser), "owner check failed"
 assert re.search(r'dui\[4\]: user user rect=768,336,512,384 dirty=[01] visible=1', ser), "visible check failed"
 PY
-vgate_assert 01 serial-contains 'syscalls: slots=64 implemented=68'
+# `implemented=` is the LIVE count of registered rows (76 since #1228), so a
+# literal here rots on every slot landing: assert the report's shape plus the
+# slot rows below (the claim-5069 shape-not-count precedent, live-ls-l.spec).
+vgate_assert 01 serial-contains 'syscalls: slots=64 implemented='
 vgate_assert 01 serial-contains '  16 sys_win_move calls=2'
 vgate_assert 01 serial-contains '  17 sys_win_raise calls=1'
 vgate_assert 01 serial-contains '  18 sys_win_get calls=1'

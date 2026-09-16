@@ -22,6 +22,9 @@ vgate_assert 01 serial-count 'win: close ok' 2
 vgate_assert 01 serial-count 'procs WINCLOSE.BIN exited status=88' 2
 vgate_assert 01 serial-count 'dui: windows=4' 1
 vgate_assert 01 serial-absent 'user user'
-vgate_assert 01 serial-contains 'syscalls: slots=64 implemented=68'
+# `implemented=` is the LIVE count of registered rows (76 since #1228), so a
+# literal here rots on every slot landing: assert the report's shape plus the
+# slot rows below (the claim-5069 shape-not-count precedent, live-ls-l.spec).
+vgate_assert 01 serial-contains 'syscalls: slots=64 implemented='
 vgate_assert 01 serial-contains '  12 sys_win_open calls=1'
 vgate_assert 01 serial-contains '  15 sys_win_close calls=1'

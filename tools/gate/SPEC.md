@@ -148,3 +148,32 @@ count, since the guest prints it. Anything else that launches two programs from 
 author's to prove. The guard is itself regression-tested against
 `tools/gate/fixtures/exec-order/{fail,pass}` — never fleet members, never
 executed, excluded from the fleet because `fleet.sh` globs this directory only.
+
+## Asserting the syscall report: counts drift, shapes do not (issue #1345)
+
+`syscalls` prints `syscalls: slots=64 implemented=N` and then one row per
+registered slot. `N` is counted **live** from the dispatch table
+(`kernel/src/syscall.zig`, `report`), so it changes every time a slot lands: 68
+became 76 when #1214 added slots 73/74 and #1228 added 75. A spec that asserts
+`implemented=<N>` therefore goes red at a distance — on someone else's machine,
+weeks after the slot landed, with no author at the keyboard. Six specs carried
+`=68` while the kernel reported 76, and nothing failed, because the CI shards
+skip when no runner is registered under `VZ_RUNNER_LABEL` and a skipped shard
+concludes `success` exactly like one that ran the fleet.
+
+Assert the shape, then the rows this gate is actually about — the latter is the
+substantive claim, the former only proves the report ran:
+
+```
+vgate_assert 01 serial-contains 'syscalls: slots=64 implemented='
+vgate_assert 01 serial-contains '  65 sys_wmctl calls=2'
+```
+
+The rule is the claim-5069 shape-not-count precedent already cited in
+`live-ls-l.spec` (which pins KERNEL.BIN's row shape rather than its byte size).
+Enforcement is `check_spec_counts` in `tools/inventory-gates.sh` (`--check`,
+hence `just verify-portable`): a non-comment line carrying
+`implemented=<digits>` fails the spec. Comments may still name a count — the
+rule is about what the spec asserts, not about what it explains. The guard is
+regression-tested against `tools/gate/fixtures/spec-counts/{fail,pass}`, which
+are never fleet members for the same reason as the exec-order fixtures.
