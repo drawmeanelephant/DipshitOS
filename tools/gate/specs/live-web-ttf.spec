@@ -173,6 +173,7 @@ def px(x, y):
 def near(c, want, tol=6):
     return all(abs(a - b) <= tol for a, b in zip(c, want))
 PAGE_BG = (0x18, 0x20, 0x26)
+INK     = (0xe6, 0xed, 0xf3)
 ACCENT  = (0x3b, 0x82, 0xf6)
 
 rows = []
@@ -201,12 +202,35 @@ for yy in range(CY + first, CY + last):
             if maxx is None or xx > maxx:
                 maxx = xx
 span = maxx - minx + 1
-print("live-web-ttf 01: h1 band rows=[%d,%d) height=%d span=%d" % (first, last, band_h, span))
 
-# The fixture's two links must be on screen, in the real face.
+# The band has to be TEXT, which is the part a shape-only test cannot say: its
+# pixels must be the body ink colour, and its densest row must break into many
+# runs. Window chrome is a different colour, and a solid fill or a chrome strip
+# is one long run -- so both checks fail for anything that is not text.
+band_ink = 0
+for yy in range(CY + first, CY + last):
+    for xx in range(CX + minx, CX + maxx + 1):
+        if near(px(X + xx, Y + yy), INK, 2):
+            band_ink += 1
+densest, runs = 0, 0
+for yy in range(CY + first, CY + last):
+    n, row_runs, prev = 0, 0, False
+    for xx in range(CX + minx, CX + maxx + 1):
+        on = not near(px(X + xx, Y + yy), PAGE_BG, 12)
+        if on:
+            n += 1
+            if not prev:
+                row_runs += 1
+        prev = on
+    if n > densest:
+        densest, runs = n, row_runs
+print("live-web-ttf 01: h1 band rows=[%d,%d) height=%d span=%d ink-px=%d densest-row=%d runs=%d"
+      % (first, last, band_h, span, band_ink, densest, runs))
+
+# The fixture's two links: their text plus the underlines, in the accent colour.
 accent = 0
-for yy in range(CY, CY + CH, 2):
-    for xx in range(CX, CX + CW, 3):
+for yy in range(CY, CY + CH):
+    for xx in range(CX, CX + CW):
         if near(px(X + xx, Y + yy), ACCENT, 8):
             accent += 1
 print("live-web-ttf 01: link-accent px=%d" % accent)
@@ -219,10 +243,14 @@ if span > 320:
     fails.append("h1 band span %d (the 8x8 grid gives 347, Inter gives 294)" % span)
 if span < 200:
     fails.append("h1 band span %d is implausibly narrow" % span)
-if accent < 10:
-    fails.append("link accent pixels %d" % accent)
+if band_ink < 40:
+    fails.append("the band carries only %d body-ink px: that band is not text" % band_ink)
+if runs < 6:
+    fails.append("the band's densest row breaks into %d run(s): a fill or a chrome strip, not text" % runs)
+if accent < 20:
+    fails.append("link accent pixels %d (two links plus their underlines)" % accent)
 assert not fails, "WEB-TTF-FAILS: " + "; ".join(fails)
-print("live-web-ttf 01 pixels ok: Inter h1 band, links present")
+print("live-web-ttf 01 pixels ok: Inter h1 band (proved text, not just shape), links present")
 PY
 
 # --- boot 02: layout depth (table + decoded QOI image + link) -------------
@@ -258,13 +286,16 @@ PAGE_BG = (0x18, 0x20, 0x26)
 RULE = (0x2e, 0x3a, 0x44)
 ACCENT = (0x3b, 0x82, 0xf6)
 SWATCH = [(0x11, 0x7f, 0x33), (0xd0, 0x33, 0x99), (0x22, 0x66, 0xdd), (0xee, 0xcc, 0x00)]
-rule = accent = ink = 0
+INK = (0xe6, 0xed, 0xf3)
+rule = accent = ink = text_ink = 0
 sw = [0, 0, 0, 0]
 for yy in range(CY, CY + CH):
     for xx in range(CX, CX + CW):
         c = px(X + xx, Y + yy)
         if not near(c, PAGE_BG, 12):
             ink += 1
+        if near(c, INK, 2):
+            text_ink += 1
         if near(c, RULE, 6):
             rule += 1
         if near(c, ACCENT, 8):
@@ -272,15 +303,21 @@ for yy in range(CY, CY + CH):
         for i, s in enumerate(SWATCH):
             if near(c, s, 2):
                 sw[i] += 1
-print("live-web-ttf 02: ink=%d table-rule=%d link-accent=%d swatch-quadrants=%s"
-      % (ink, rule, accent, sw))
+print("live-web-ttf 02: ink=%d text-ink=%d table-rule=%d link-accent=%d swatch-quadrants=%s"
+      % (ink, text_ink, rule, accent, sw))
 fails = []
-if ink < 400:
+# Thresholds are set against what the page actually draws. The first version
+# accepted 3 rule px and 5 accent px, which any grey border or any accent pixel
+# could have satisfied without the table rule or the link existing; the header
+# rule here is a 496px line and the link is a word plus an underline.
+if ink < 1200:
     fails.append("the page painted only %d px" % ink)
-if rule < 3:
-    fails.append("table header rule px=%d (tables are ADR 0028 S2)" % rule)
-if accent < 5:
-    fails.append("link accent px=%d (links are S4)" % accent)
+if text_ink < 150:
+    fails.append("only %d px of body ink: the table and paragraphs did not render as text" % text_ink)
+if rule < 200:
+    fails.append("table header rule px=%d (a 496px rule is expected; tables are ADR 0028 S2)" % rule)
+if accent < 20:
+    fails.append("link accent px=%d (a word plus an underline is expected; links are S4)" % accent)
 for i, n in enumerate(sw):
     if n < 100:
         fails.append("swatch quadrant %d had %d px: the QOI image did not decode" % (i, n))
