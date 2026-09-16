@@ -41,6 +41,15 @@ const (
 	SlotWinFillBatch uintptr = 46
 	SlotMmap         uintptr = 63
 	SlotTime         uintptr = 66
+	SlotTtyAttach    uintptr = 67
+)
+
+// sys_tty_attach front-end selectors (ADR 0020 slot 67).
+const (
+	TtyDetach uint64 = 0
+	TtySerial uint64 = 1
+	TtyWindow uint64 = 2
+	TtyNet    uint64 = 3
 )
 
 // Kernel error codes (ADR 0007 D3): the MAGNITUDES of the kernel's
@@ -155,6 +164,21 @@ func Exit(status int) {
 // Time returns wall-clock unix seconds (negative when the firmware gave no
 // boot epoch).
 func Time() int64 { return syscall0(SlotTime) }
+
+// TtyAttach attaches or detaches the caller's controlling terminal (opened
+// as /dev/tty) to a front-end (ADR 0020 slot 67). frontEnd is TtyDetach (0),
+// TtySerial (1), TtyWindow (2; prefer TtyAttachWindow), or TtyNet (3).
+// Host builds return -ENOSYS.
+func TtyAttach(frontEnd uint64) int64 {
+	return syscall1(SlotTtyAttach, uintptr(frontEnd))
+}
+
+// TtyAttachWindow attaches the caller's own .user window as the controlling
+// terminal's window front-end (selector 2). The kernel paints the tty grid
+// into that window; the caller draws no pixels. Host builds return -ENOSYS.
+func TtyAttachWindow(windowID int) int64 {
+	return syscall2(SlotTtyAttach, uintptr(TtyWindow), uintptr(windowID))
+}
 
 // WinOpen opens a user window and returns (id, rawResult).
 func WinOpen(x, y, w, h uint32) (int, int64) {
