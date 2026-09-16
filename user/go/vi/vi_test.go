@@ -18,7 +18,7 @@ func TestSlotNumbers(t *testing.T) {
 		30: "tcp_connect", 31: "tcp_send", 32: "tcp_recv", 33: "tcp_close",
 		34: "file_delete", 36: "file_truncate",
 		42: "audio_info", 43: "audio_play",
-		46: "win_fill_batch", 63: "mmap", 66: "time",
+		46: "win_fill_batch", 63: "mmap", 66: "time", 67: "tty_attach",
 	}
 	got := map[uintptr]string{
 		SlotWrite: "write", SlotYield: "yield", SlotExit: "exit", SlotSleep: "sleep",
@@ -32,7 +32,7 @@ func TestSlotNumbers(t *testing.T) {
 		SlotTCPClose: "tcp_close", SlotFileDelete: "file_delete",
 		SlotFileTruncate: "file_truncate", SlotAudioInfo: "audio_info",
 		SlotAudioPlay: "audio_play", SlotWinFillBatch: "win_fill_batch",
-		SlotMmap: "mmap", SlotTime: "time",
+		SlotMmap: "mmap", SlotTime: "time", SlotTtyAttach: "tty_attach",
 	}
 	for slot, name := range want {
 		if got[slot] != name {
@@ -182,5 +182,23 @@ func TestExecRefusals(t *testing.T) {
 	tooMany := make([]string, 9)
 	if _, err := Exec("X.BIN", tooMany...); err != errno(ErrEINVAL) {
 		t.Fatalf("argc>8: %v", err)
+	}
+}
+
+func TestTtyAttachSelectors(t *testing.T) {
+	if SlotTtyAttach != 67 {
+		t.Fatalf("SlotTtyAttach = %d want 67", SlotTtyAttach)
+	}
+	if TtyDetach != 0 || TtySerial != 1 || TtyWindow != 2 || TtyNet != 3 {
+		t.Fatalf("selectors = %d/%d/%d/%d want 0/1/2/3", TtyDetach, TtySerial, TtyWindow, TtyNet)
+	}
+}
+
+func TestTtyAttachHostFails(t *testing.T) {
+	if r := TtyAttach(TtyDetach); r != -ErrENOSYS {
+		t.Fatalf("host TtyAttach = %d want -ENOSYS", r)
+	}
+	if r := TtyAttachWindow(1); r != -ErrENOSYS {
+		t.Fatalf("host TtyAttachWindow = %d want -ENOSYS", r)
 	}
 }
