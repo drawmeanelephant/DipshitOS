@@ -19,7 +19,7 @@
 | tooling (not gates) | 13 |
 | with a just recipe | 12 |
 | in the class-B fleet (spec dir / legacy script) | 4 |
-| named in a GitHub workflow | 10 |
+| named in a GitHub workflow | 9 |
 | named in docs/status.md | 13 |
 | **orphans (gate-class, registered nowhere)** | **0** |
 
@@ -35,8 +35,8 @@
 ## Class-B fleet (discovered from the spec dir)
 
 > M40 GF5 (issue #940): this section IS the fleet inventory -- the
-> exact list `bash tools/gate/fleet.sh list` produces and the
-> vz-gates.yml CI shards consume. A spec added under
+> exact list `bash tools/gate/fleet.sh list` produces, which
+> `just verify-vz` consumes on Apple silicon. A spec added under
 > tools/gate/specs/ appears here (and in just + CI) with zero list
 > edits; the --check mode fails until the report is regenerated.
 
@@ -296,7 +296,8 @@ None -- every gate-class script is registered somewhere.
 
 Columns: `just` = justfile recipe of the same name; `fleet` = in
 the spec-dir class-B fleet (`tools/gate/fleet.sh list`); `ci` =
-named in `.github/workflows/*.yml`; `st` = named in
+named in `.github/workflows/*.yml`, directly or through a `just`
+recipe a workflow delegates to; `st` = named in
 `docs/status.md` (`y` = yes, `n` = no throughout).
 
 | script | lines | class | just | fleet | ci | st | purpose |
@@ -306,10 +307,10 @@ named in `.github/workflows/*.yml`; `st` = named in
 | `check-zc-host-contract.py` | 116 | A | n | n | n | y | Z4b (issue #761): check an ELF against the VirelaiOS static-loader contract. |
 | `decode-screen-glyphs.py` | 538 | tooling | n | n | n | n | decode-screen-glyphs.py -- decode a captured framebuffer PNG against the |
 | `elf2bin.py` | 382 | tooling | n | n | n | n | Convert a Zig aarch64-freestanding ELF executable into the VirelaiOS flat |
-| `env-check.sh` | 259 | tooling | n | n | y | n | tools/env-check.sh -- source me at the start of every agent session. |
+| `env-check.sh` | 259 | tooling | n | n | n | n | tools/env-check.sh -- source me at the start of every agent session. |
 | `inspect.sh` | 93 | tooling | y | n | n | n | inspect.sh -- report useful facts about the generated EFI binary and the |
-| `inventory-gates.sh` | 555 | tooling | n | n | y | n | inventory-gates.sh -- regenerate (or --check) the machine-generated gate |
-| `lint-workflows.sh` | 195 | tooling | y | n | y | n | lint-workflows.sh -- lint the GitHub Actions workflows (class A). |
+| `inventory-gates.sh` | 577 | tooling | n | n | y | n | inventory-gates.sh -- regenerate (or --check) the machine-generated gate |
+| `lint-workflows.sh` | 200 | tooling | y | n | y | n | lint-workflows.sh -- lint the GitHub Actions workflows (class A). |
 | `mkdyn-elf.py` | 1090 | tooling | n | n | n | n | Generate freestanding dynamic ELF binaries for VirelaiOS. |
 | `mkhello-elf.py` | 205 | tooling | n | n | n | n | Emit a minimal statically linked AArch64 ELF32 executable (M22 D1, issue #324). |
 | `oliver-publish.sh` | 85 | tooling | n | n | n | n | oliver-publish.sh — M-web S6 host-side batch (issue #1207). |

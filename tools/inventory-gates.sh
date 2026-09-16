@@ -6,11 +6,12 @@
 # Every executable script directly under tools/ gets one row: line count,
 # class (A/B/C/D/tooling -- explicit exceptions below, prefix defaults
 # otherwise), registration status (just recipe? in the spec-dir class-B
-# fleet? status.md row?), and a one-line purpose scraped from its own
-# header comment. A gate-class script registered nowhere is listed as an
-# ORPHAN. Since GF5 the class-B fleet itself is discovered from
+# fleet? named in a workflow, directly or through a `just` recipe the
+# workflow delegates to? status.md row?), and a one-line purpose scraped
+# from its own header comment. A gate-class script registered nowhere is
+# listed as an ORPHAN. Since GF5 the class-B fleet itself is discovered from
 # tools/gate/specs/ via tools/gate/fleet.sh and rendered as its own
-# section -- the same list the vz-gates.yml CI shards consume.
+# section -- the same list `just verify-vz` consumes on Apple silicon.
 #
 # Usage:
 #   bash tools/inventory-gates.sh          # rewrite docs/gate-fleet-inventory.md
@@ -343,6 +344,25 @@ render_to() {
     local fleet_tsv="$(mktemp "${TMPDIR:-/tmp}/fleet-tsv.XXXXXX")"
     bash "$ROOT/tools/gate/fleet.sh" list > "$fleet_tsv"
 
+    # Delegation: a workflow may run `just <recipe>` instead of naming each
+    # gate script (ci.yml delegates class A to `just verify-portable`). A
+    # script the delegated recipe invokes is as registered as one the
+    # workflow names literally -- resolve those recipe bodies once and
+    # search them alongside the workflow files below.
+    local delegated_recipes="$(grep -hEo '(^|[[:space:]])run:[[:space:]]*just +[A-Za-z_][A-Za-z0-9_-]*' .github/workflows/*.yml 2>/dev/null | grep -Eo 'just +[A-Za-z_][A-Za-z0-9_-]*' | awk '{print $2}' | LC_ALL=C sort -u | tr '\n' ' ' || true)"
+    local just_body="$(mktemp "${TMPDIR:-/tmp}/just-body.XXXXXX")"
+    if [ -n "$delegated_recipes" ]; then
+        awk -v recipes=" $delegated_recipes" '
+            /^[A-Za-z_][A-Za-z0-9_-]*:/ {
+                name = $1; sub(/:.*$/, "", name)
+                insec = (index(recipes, " " name " ") > 0)
+                next
+            }
+            insec && /^[[:space:]]/ { print; next }
+            { insec = 0 }
+        ' justfile > "$just_body"
+    fi
+
     while IFS= read -r f; do
         base="$(basename "$f")"
         lines="$(wc -l < "$f" | tr -d ' ')"
@@ -356,7 +376,7 @@ render_to() {
         if awk -F'\t' -v id="${base%.sh}" -v py="${base%.py}" \
                 '$2==id || $2==py { found=1 } END { exit !found }' "$fleet_tsv"; then
             fl="y"; flt_yes=$((flt_yes+1)); else fl="n"; fi
-        if grep -qF "tools/$base" .github/workflows/*.yml 2>/dev/null; then
+        if grep -qF "tools/$base" .github/workflows/*.yml 2>/dev/null || grep -qF "tools/$base" "$just_body" 2>/dev/null; then
             c="y"; ci_yes=$((ci_yes+1)); else c="n"; fi
         if grep -qF "$base" docs/status.md 2>/dev/null; then
             s="y"; st_yes=$((st_yes+1)); else s="n"; fi
@@ -416,8 +436,8 @@ EOF
         echo "## Class-B fleet (discovered from the spec dir)"
         echo
         echo "> M40 GF5 (issue #940): this section IS the fleet inventory -- the"
-        echo "> exact list \`bash tools/gate/fleet.sh list\` produces and the"
-        echo "> vz-gates.yml CI shards consume. A spec added under"
+        echo "> exact list \`bash tools/gate/fleet.sh list\` produces, which"
+        echo "> \`just verify-vz\` consumes on Apple silicon. A spec added under"
         echo "> tools/gate/specs/ appears here (and in just + CI) with zero list"
         echo "> edits; the --check mode fails until the report is regenerated."
         echo
@@ -448,8 +468,9 @@ EOF
         if [ "$orphans" -eq 0 ]; then
             echo "None -- every gate-class script is registered somewhere."
         else
-            echo "Gate-class scripts with no just recipe, no fleet membership, and no"
-            echo "status.md row:"
+            echo "Gate-class scripts with no just recipe, no fleet membership, no"
+            echo "workflow mention (direct or through a delegated just recipe), and"
+            echo "no status.md row:"
             echo
             printf '%s' "$orphan_list" | sed 's/^/- `/' | sed 's/$/`/'
         fi
@@ -458,14 +479,15 @@ EOF
         echo
         echo "Columns: \`just\` = justfile recipe of the same name; \`fleet\` = in"
         echo "the spec-dir class-B fleet (\`tools/gate/fleet.sh list\`); \`ci\` ="
-        echo "named in \`.github/workflows/*.yml\`; \`st\` = named in"
+        echo "named in \`.github/workflows/*.yml\`, directly or through a \`just\`"
+        echo "recipe a workflow delegates to; \`st\` = named in"
         echo "\`docs/status.md\` (\`y\` = yes, \`n\` = no throughout)."
         echo
         echo "| script | lines | class | just | fleet | ci | st | purpose |"
         echo "|---|---|---|---|---|---|---|---|"
         printf '%s' "$rows"
     } > "$out"
-    rm -f "${fleet_tsv:-}"
+    rm -f "${fleet_tsv:-}" "${just_body:-}"
 }
 
 if [ "$CHECK" -eq 1 ]; then
