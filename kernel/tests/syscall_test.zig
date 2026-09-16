@@ -1612,11 +1612,14 @@ test "syscall: slot 28 sys_exec argc>8 is EINVAL and ENOENT leaves the caller (i
 
 // Host-backed page pool for a successful sys_exec (exec copies into
 // text_phys; a fake 0x100000 base would segfault the host test).
-var sys_exec_pool: [256 * 4096]u8 align(4096) = undefined;
+// #1336: one exec is text 1 + 48-page user stack + 48-page kstack = 97
+// pages; keep the same 1024-page headroom as exec.zig's fixture pool.
+const sys_exec_pool_pages: usize = 1024;
+var sys_exec_pool: [sys_exec_pool_pages * 4096]u8 align(4096) = undefined;
 
 fn arm_sys_exec_allocator() void {
     const descriptors = [_]memmap.MemoryDescriptor{
-        .{ .type = .conventional_memory, .physical_start = @intFromPtr(&sys_exec_pool), .virtual_start = 0, .number_of_pages = 256, .attribute = 0 },
+        .{ .type = .conventional_memory, .physical_start = @intFromPtr(&sys_exec_pool), .virtual_start = 0, .number_of_pages = sys_exec_pool_pages, .attribute = 0 },
     };
     const view = memmap.MapView.init(std.mem.asBytes(&descriptors), @sizeOf(memmap.MemoryDescriptor), descriptors.len);
     _ = alloc.init(view, &.{});

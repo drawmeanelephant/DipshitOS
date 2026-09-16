@@ -21,7 +21,26 @@
 # the vendored blob FETCHS.BIN carries, so the guest is validating against its
 # own pinned root rather than a test-only bypass.
 #
-# PASSES -- and it took two independent fixes to get here.
+# PASSES at production task_stack_size 192 KiB (#1336 option A).
+#
+# Observed 2026-09-16 on Apple silicon macOS 27 (host 27.0/arm64,
+# hv_vm_create HV_SUCCESS):
+#
+#   vgate live-tls13: PASS (1/1 runs)
+#     fetchs: target set                       = 1
+#     fetchs: roots loaded                     = 1
+#     fetchs: connected                        = 1
+#     fetchs: handshake ok                     = 1
+#     fetchs: TLS1.3 TLS_AES_128_GCM_SHA256    = 1
+#     fetchs: request sent                     = 1
+#     live-tls13-ok                            = 1
+#     fetchs: body complete                    = 1
+#     [EXC] parking:                           absent
+#
+# That is a real handshake, a real GET and a real response body from a guest
+# process under Virtualization.framework.
+#
+# Two independent fixes got here:
 #
 # 1. FIXTURES MUST BE PINNED. make_x509_fixtures.sh generates a fresh RANDOM CA
 #    on every run, but FETCHS.BIN's vendored root is baked in at build time. A
@@ -31,47 +50,15 @@
 #    user/src/lib/tls/vectors/fx/ are the same ones vendored_roots.zig was
 #    generated from, and the spec serves those.
 #
-# 2. THE GUEST NEEDS A BIGGER TASK STACK. At the production
-#    scheduler.task_stack_size (32,768 B) the faulting instruction is a prologue
-#    store (`stp x29, x30, [sp, #-32]!`) and the client's call nest reaches
-#    ~131 KiB below the stack top. At 256 KiB the spec goes green:
+# 2. THE GUEST NEEDED A BIGGER TASK STACK. At 32,768 B the faulting instruction
+#    was a prologue store (`stp x29, x30, [sp, #-32]!`) and the client's call
+#    nest reached ~131 KiB below the stack top. AutoCoder measured PASS at
+#    256 KiB. #1336 option A tried 192 KiB first (smallest page-aligned size
+#    >131 KiB that was asked); that is now the production value and this spec
+#    is green without shrinking the TLS client or weakening assertions.
 #
-#      vgate live-tls13: PASS (1/1 runs)
-#        fetchs: handshake ok                     = 1
-#        fetchs: TLS1.3 TLS_AES_128_GCM_SHA256    = 1
-#        fetchs: request sent                     = 1
-#        live-tls13-ok                            = 1
-#        fetchs: body complete                    = 1
-#
-#    That is a real handshake, a real GET and a real response body from a guest
-#    process under Virtualization.framework.
-#
-# The stack value is NOT changed here. It is a system-wide decision: kernel host
-# tests show a hardcoded 32768 expectation and an allocator that returns
-# .out_of_memory at ~8x, and it is 8x per task in production. The spec documents
-# the measurement; the value is the owner's call.
-#
-# Do not "fix" this by weakening the assertions.
-#
-# The responder's trust anchor is the fixture root, which is byte-identical to
-# the vendored blob FETCHS.BIN carries, so the guest is validating against its
-# own pinned root rather than a test-only bypass.
-#
-# KNOWN-FAILING, with the diagnosis narrowed to one number.
-#
-# Measured locally on Apple silicon macOS 27. Left at the production
-# task_stack_size (32,768 B), the guest dies on a data abort. The faulting
-# instruction is a prologue store (`stp x29, x30, [sp, #-32]!`), and the
-# deepest address reached sits ~131 KiB below the stack top, so the client's
-# call nest needs more stack than the guest has. Raising task_stack_size to
-# 256 KiB on this machine removes the crash entirely and the run proceeds to a
-# real handshake verdict -- which is the honest way to say the stack is the
-# gate on this spec, and that changing it is a kernel-wide decision (it was
-# already doubled 16 -> 32 KiB once for M25, carries "+16 KiB BSS per static
-# stack" against the verify-bss-budget gate, and there are six static stacks).
-#
-# Progress the gate has already forced, all of it invisible to host tests
-# because the driver has an 8 MB stack:
+# Earlier progress the gate forced, all of it invisible to host tests because
+# the driver has an 8 MB stack:
 #   - an 81,264-byte entry frame (the client was a stack local) -> 208 B
 #   - argv shifted by one (the DSK1/DSK3 argv block has no program name;
 #     the ELF block does) -> `fetchs: target set` now passes
@@ -81,7 +68,7 @@
 #     plus `--net-tcp-respond 10.0.0.2:<port>:relay` + `--net-tcp-respond-relay`
 #     are what connect the guest to a real responder on the host loopback.
 #
-# Do not "fix" this by weakening the assertions.
+# Do not "fix" a regression here by weakening the assertions.
 
 vgate_name live-tls13 "TLS 1.3: the guest consumer completes a real handshake and reads a response"
 vgate_share seed

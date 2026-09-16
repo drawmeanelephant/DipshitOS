@@ -125,10 +125,12 @@ pub const idle_id: usize = max_tasks - 1;
 /// 0434/2539): FILE.BIN's AppState alone occupies ~7.3 KiB of its EL0
 /// stack, and real feature chains (batch ops + deferred listing walks)
 /// overflowed the remaining headroom — observed live as guard-page
-/// status=139 faults on VZ. Cost: +16 KiB BSS per static stack (well
-/// inside the verify-bss-budget headroom) and 2 extra pages per exec'd
-/// process.
-pub const task_stack_size: usize = 32 * 1024;
+/// status=139 faults on VZ. Raised 32 → 192 KiB for #1336: FETCHS.BIN's
+/// TLS 1.3 call nest reaches ~131 KiB below the stack top (prologue
+/// `stp`, not a bad pointer); 192 KiB is the smallest page-aligned size
+/// tried that is >131 KiB. Cost: +160 KiB BSS per static stack and 40
+/// extra pages per stack (80 per exec: user stack + EL1 kstack).
+pub const task_stack_size: usize = 192 * 1024;
 
 /// SPSR modes for synthetic first entry. The kernel's observed M=0x5 is
 /// architecturally EL1h (SP_EL1), not EL1t; EL0t is M=0x0. DAIF bits are

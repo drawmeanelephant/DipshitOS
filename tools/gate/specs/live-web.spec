@@ -10,9 +10,10 @@
 #   04 a missing target renders a distinct error page and still settles
 #   05 WEB.ELF refuses https (no silent downgrade to cleartext GET)
 #   12 GOFETCH.ELF execs FETCHS.BIN for https:// against the runner TLS
-#      responder (IP/port/SNI); never a cleartext GET. Handshake/body wait
-#      on #1336 (FETCHS.BIN's TLS nest needs ~131 KiB; production task
-#      stack is 32 KiB — live-tls13 is red for the same reason).
+#      responder (IP/port/SNI); never a cleartext GET. #1336 raised
+#      task_stack_size to 192 KiB so FETCHS.BIN's TLS nest fits; live-tls13
+#      is the handshake proof. This boot still waits on `fetchs: connected`
+#      (helper spawn + TCP), not the full body.
 #
 # HOST PREREQUISITE (fails honestly when missing):
 #   .build/go/WEB.ELF     -- `bash tools/go/build-web.sh browser WEB`
@@ -578,10 +579,10 @@ PY
 # at 10.0.0.2:24533. WEB.ELF boot 05 still refuses https; this boot is the
 # Go consumer exec'ing the Zig helper. FETCHS.BIN owns the TCP socket
 # (one per process) and reaches `fetchs: connected`. The handshake itself
-# is #1336: the TLS call nest needs ~131 KiB against a 32 KiB task stack,
-# so this boot does not wait on `fetchs: body complete` (that would hang
-# the runner for the script-expect timeout, as live-tls13 does). sys_exec
-# does not print the monitor's `exec: loaded FETCHS.BIN` line.
+# is unblocked by #1336 (`task_stack_size` 192 KiB). live-tls13 waits on
+# `fetchs: body complete`; this boot still waits on `fetchs: connected`
+# (helper spawn + TCP, not the full handshake body). sys_exec does not
+# print the monitor's `exec: loaded FETCHS.BIN` line.
 vgate_run 12 -- \
     --screen '$RUN_DIR/screen' \
     --via-virtio --cvc-snap \
