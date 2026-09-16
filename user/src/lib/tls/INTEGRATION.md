@@ -89,6 +89,16 @@ endpoints, and 5 negatives that must fail. `vectors/run_interop.sh` and
 `vectors/run_real_endpoints.sh` regenerate it; the local-peer rows are
 reproducible in CI containers, the public rows are a recorded networked run.
 
+`run_interop.sh` **consumes** the committed `vectors/fx/` set. It does not
+call `make_x509_fixtures.sh` and it does not rewrite committed PEMs (openssl
+`genkey` is random; an in-place regen would desync `vendored_roots.zig`,
+which `FETCHS.BIN` vendors at build time). Runtime scratch — DER conversion
+from `root.pem`, the uncommitted `chain-rsa.pem`, the self-signed negative,
+peer logs — lands next to the ledger. To confirm the pin:
+`bash vectors/make_x509_fixtures.sh --check` (fresh regen, must fail) and
+`bash vectors/make_x509_fixtures.sh --check vectors/fx` (committed root,
+must pass).
+
 ## Scope limits and known risks
 
 Read these before wiring a consumer:
