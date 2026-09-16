@@ -2,7 +2,8 @@
 
 - Status: ACCEPTED
 - Date: 2026-09-15
-- Issue: #1293 (this document), umbrella #1292
+- Amended: 2026-09-16 (M60 / #1297 — no new Zig EL0 apps; first leftover `EDIT.BIN` deleted)
+- Issue: #1293 (this document), umbrella #1292, M60 #1297
 - Related: ADR 0001 (Zig as guest language — narrowed here), ADR 0007
   (syscall ABI; kernel changes still ride amendments of that file only),
   ADR 0015 (userland WM seat / slot 65), ADR 0020 (terminal seam),
@@ -58,9 +59,10 @@ embeds them.
 - No dual widget toolkits: small Go widgets actually needed (text,
   button, list) live under `user/go/tabapp` or a tiny `user/go/ui`.
   Never a `LIBUI` clone, never a second competing toolkit.
-- No new `user/src/*.zig` GUI apps.
+- No new `user/src/*.zig` apps (GUI or otherwise). In force as of M60
+  (#1297); see the amendment below. Zig kernel stays.
 - No porting crypto "because pivot": TLS stays a Zig *helper*
-  (`TLS.BIN` / `FETCHS.BIN` over TCP, ADR 0029) and SSH stays `SSH.BIN`
+  (`FETCHS.BIN` / `lib/tls` over TCP, ADR 0029) and SSH stays `SSH.BIN`
   until their own cards exist.
 - No `settings set wm` / boot-default flip before M59. AGENTS.md's
   "do not change the boot default" rule yields only on that card. **#1298 is
@@ -110,13 +112,13 @@ change.
 | M57a | GOTABWM registers slot 65, composites a blank desktop | #1313 | Starts `go-wm-seat`: register, compose, clean unregister; default boot still TABWM. |
 | M57b | GOTABWM manages its own Go windows | #1317 | Extends `go-wm-seat` (rect / chrome / focus / close). |
 | M57c | GOTABWM hosts leftover Zig CALC/NOTEPAD | #1318 | Completes `go-wm-seat`. Parity on the exercised path only. |
-| **M58** | Move the apps you touch | index #1294 | One app per card, full-viewport via `tabapp` in **Zig TABWM**. Does **not** wait on M57. Browser is already Go (M54). Leave CALC until it is in the way. Leave Zig `FILE.BIN` / `EDIT.BIN` / `TERM.BIN` until M60. |
+| **M58** | Move the apps you touch | index #1294 | One app per card, full-viewport via `tabapp` in **Zig TABWM**. Does **not** wait on M57. Browser is already Go (M54). Leave CALC until it is in the way. Leave Zig `FILE.BIN` until a later leftover card. `EDIT.BIN` deleted in M60; `TERM.BIN` superseded by GOTERM. |
 | M58a | Go file manager | #1305 | `go-files` on VZ: open, list a known share file, close. |
 | M58b | Go editor | #1306 | `go-edit` on VZ: open fixture, dirty, save, close. Usable buffer + save, not EDIT's feature list. |
 | M58c | Go terminal front-end (ADR 0020) | #1307 | `go-term` on VZ: attach, a typed line / shell marker, close. No new tty syscall. |
 | M58d | Go fetch over the Zig TLS helper | #1308 | HTTPS via the Zig helper; never a cleartext GET. No Go crypto. DNS is not this card. |
 | **M59** | Explicit default flip | #1298 | The **only** card allowed to move the boot default. `settings set wm gotabwm` persists; Zig TABWM remains the fallback. Touches include `kernel/src/shell.zig` (that is where the WM boot default lives), not only a settings panel. Gate: flip → reboot → Go WM hosting a leftover Zig app. Depends on M57 (second seat proven) and at least one leftover Zig app hosted under it. **Landed:** `wm` is a schema-v2 settings key whose compiled default is `gotabwm`; the shell-idle autostart resolves the seat through it (`gotabwm` → `GOTABWM.ELF`, `tabwm` → `TABWM.BIN`, `none` → shim), `tools/session.sh` stages the Go seat and lets the default apply, and `go-wm-default` proves the default boot on VZ (boot 01: no `wm` key → the Go seat hosts CALC; boot 02: the persisted `wm=tabwm` → the Zig seat). A boot whose share carries no seat binary says so and stays shim-only instead of faking a desktop. |
-| **M60** | Starve Zig EL0 | #1297 | Mini-umbrella: record the no-new-Zig-apps policy; each leftover deletion is its own claim against this card. No flag day. TLS/SSH stay Zig helpers until their own Go cards. |
+| **M60** | Starve Zig EL0 | #1297 | Policy in force (amendment below): no new `user/src/*.zig` apps. First leftover gone: `EDIT.BIN` → `GOEDIT.ELF` (gate `go-edit`). Further deletions are later cards. TLS stays `FETCHS.BIN` / `lib/tls`; SSH stays `SSH.BIN`. No flag day. |
 
 Superseded drafts (closed, do not claim): original M56/M57 leaves
 #1300–#1304; both-seats M58 drafts #1309, #1310, #1312, #1320.
@@ -134,6 +136,24 @@ Superseded drafts (closed, do not claim): original M56/M57 leaves
   share — in which case the boot reports the miss and stays shim-only.
 - `LIBUI.SO` / `user/src/lib/ui` become the toolkit of the dying Zig
   desktop, not a thing to port.
+
+## Amendment (M60 / #1297, 2026-09-16) — no new Zig EL0 apps
+
+The no-new-Zig-apps rule is now policy, not just a pivot-era restraint:
+
+- **No new `user/src/*.zig` apps.** Zig owns `boot/`, `kernel/`, virtio,
+  GIC, the scheduler, the syscall table, the Swift runner, and the serial
+  monitor. New userland is Go (`GOOS=virelai` ELF). Leftover Zig EL0 is
+  something you `exec`, then delete.
+- TLS stays a Zig helper: `FETCHS.BIN` / `lib/tls` (ADR 0029). Do not
+  port crypto "because pivot."
+- SSH stays `SSH.BIN` (ADR 0025) until its own Go card.
+- Deletions are one binary at a time, each independently revertible. No
+  flag day. Boot default does not move here (M59 already flipped it).
+
+**First leftover deletion (this card):** Zig `EDIT.BIN` (`user/src/edit.zig`)
+is gone. The editor is `GOEDIT.ELF` (gate `go-edit`). CALC, NOTEPAD, and
+TABWM remain hosted leftovers; TLS/SSH remain helpers.
 
 ## Not decided here
 

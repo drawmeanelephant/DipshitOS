@@ -703,7 +703,7 @@ fn topic_body(name: []const u8) ?[]const u8 {
     }
     if (std.mem.eql(u8, name, "editor")) {
         return "editor\n" ++
-            "  Full-screen and windowed text editing via EDIT.BIN and NOTEPAD.BIN.\n" ++
+            "  Full-screen and windowed text editing via GOEDIT.ELF and NOTEPAD.BIN.\n" ++
             "  Shortcuts: Ctrl+S save, Ctrl+O open, Ctrl+N new, Ctrl+Z undo, Ctrl+Y redo,\n" ++
             "  Ctrl+F find, Ctrl+Q quit. Full clipboard integration on Ctrl+C/Ctrl+V/Ctrl+X.\n";
     }

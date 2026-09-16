@@ -1,4 +1,8 @@
 # live-desktop-typing.spec -- issue #563: keys reach desktop-launched GUI app on VZ
+#
+# M60 / #1297: retargeted off Zig EDIT.BIN (deleted) onto leftover NOTEPAD.BIN.
+# One Down from the launcher head (CALC) selects NOTEPAD; typed glyphs must
+# land in the notepad text surface.
 vgate_name live-desktop-typing "issue #563: keys reach desktop-launched GUI app on VZ"
 vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
@@ -19,10 +23,10 @@ vgate_run A -- \
     --display --screen '$RUN_DIR/gpu-screen' \
     --via-virtio \
     --script '$RUN_DIR/script.txt' \
-    --input-chords "down,down,down,down,down,down,down,down,down,down,return" \
+    --input-chords "down,return" \
     --input-chords-after "desktop: menu ready" \
     --input-string "abcde" \
-    --input-string-after "edit: ready" \
+    --input-string-after "notepad: ready" \
     --script2 '$RUN_DIR/script2.txt' \
     --script2-after "timer heartbeat ticks=35" \
     --screenshot-after "timer heartbeat ticks=30" \
@@ -30,18 +34,18 @@ vgate_run A -- \
     --timeout 150
 
 vgate_assert A serial-contains "desktop: menu ready"
-vgate_assert A serial-contains "desktop: launch EDIT.BIN pid=2"
-vgate_assert A serial-contains "edit: ready"
-vgate_assert A serial-contains "input: armed=0 fifo=0/64 dropped=0 events=16"
+vgate_assert A serial-contains "desktop: launch NOTEPAD.BIN pid=2"
+vgate_assert A serial-contains "notepad: ready"
+vgate_assert A serial-contains "input: armed=0 fifo=0/64 dropped=0 events=7"
 vgate_assert A serial-contains "dui: windows=6 focused=3"
 vgate_assert A serial-absent "[EXC] parking:"
 
 vgate_assert A python <<'PY'
 import os, re
 ser = open(os.environ["VG_SER"]).read()
-assert ser.count("desktop: select app") >= 10, f"fewer than 10 select-app markers: {ser.count('desktop: select app')}"
-assert re.search(r'dui\[[0-9]*\]: user user rect=64,48,512,384', ser), "EDIT window rect missing"
-assert "owner=2" in ser, "EDIT window owner=2 missing"
+assert ser.count("desktop: select app") >= 1, f"fewer than 1 select-app markers: {ser.count('desktop: select app')}"
+assert re.search(r'dui\[[0-9]*\]: user user rect=56,56,512,384', ser), "NOTEPAD window rect missing"
+assert "owner=2" in ser, "NOTEPAD window owner=2 missing"
 PY
 
 vgate_assert A snapshot 'gpu-screen-after' <<'PY'
@@ -88,12 +92,13 @@ def px(x, y):
     k = (y * w + x) * bpp
     return out[k], out[k+1], out[k+2]
 
+# NOTEPAD text surface is native (6,36,244,150) inside a window at (56,56).
 glyphs = 0
-for y in range(155, 235, 2):
-    for x in range(180, 430, 2):
+for y in range(90, 210, 2):
+    for x in range(60, 310, 2):
         r, g, b = px(x, y)
         if min(r, g, b) > 170 or (g > 140 and r < 120 and b < 120) or (g > r + 30 and g > b + 30):
             glyphs += 1
-print("glyph samples in EDIT text region: %d" % glyphs)
+print("glyph samples in NOTEPAD text region: %d" % glyphs)
 assert glyphs >= 50, f"too few glyph pixels: {glyphs}"
 PY
