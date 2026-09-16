@@ -91,7 +91,10 @@ the reviewable patch series. `GOTOOLCHAIN=local` is exported by
   `go-panic`), `crash()` exits through the syscall instead of faulting.
   Async preemption stays OFF (no signals, only synchronous delivery).
 - **2**: `syscall`/`os` packages over the file channel; real netpoll over
-  ADR 0009 events.
+  ADR 0009 events (landed #1350).
+- **2.1**: user-space clock (`vsys.Nanotime` reads CNTPCT_EL0) so `Conn`
+  deadlines are wall-clock instants instead of scheduler-tick budgets;
+  `Write` reports `ErrShortWrite` on truncation (claim #1358).
 
 ## Releasing upstream (someday)
 
