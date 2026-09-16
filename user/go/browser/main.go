@@ -81,6 +81,12 @@ const (
 	markerOver      = "web: budget over "
 	markerSettled   = "web: settled"
 	markerQuit      = "web: quit"
+	// The typography probes. They carry measurable facts (engine name,
+	// per-glyph advances, line heights) rather than adjectives, so a silent
+	// regression to the 8x8 bitmap fails the class-B gate instead of only
+	// looking slightly wrong in a screenshot.
+	markerFonts = "web: fonts "
+	markerText  = "web: text "
 )
 
 // Load bounds. The response read is bounded three ways so a bad network
@@ -123,6 +129,9 @@ const (
 type app struct {
 	win    int
 	filler vi.Filler
+	// text is the engine the page is measured and painted with: real TrueType
+	// when the faces load, the 8x8 bitmap when they do not.
+	text webrender.TextEngine
 
 	hist   *history
 	target string
@@ -215,6 +224,10 @@ func main() {
 		vi.Exit(2)
 	}
 	a := &app{win: id, hist: newHistory(), tStart: t0}
+	engine, uiState, monoState := loadTextEngine()
+	a.text = engine
+	vi.ConsoleLine(markerFonts + engine.Name() + " ui=" + uiState + " mono=" + monoState)
+	vi.ConsoleLine(markerText + textProbeString(engine))
 	vi.ConsoleLine(markerOpen + itoa(id))
 	// The store inventory is read from disk at boot: it is how the gate sees
 	// that a previous run's rows persisted.
@@ -619,7 +632,10 @@ func (a *app) loadBody(body []byte, target string) {
 	t0 := vi.Nanos()
 	a.doc = webrender.ParseHTML(body)
 	t1 := vi.Nanos()
-	a.lay = webrender.LayoutDocument(a.doc, contentW, nil)
+	// The engine this page is measured with is stored on the Layout, so Paint
+	// draws it with identical metrics; a.resolveImage lets <img> decode without
+	// layout ever opening a file itself (ADR 0028 D1/D3).
+	a.lay = webrender.LayoutDocument(a.doc, contentW, a.text, a.resolveImage)
 	t2 := vi.Nanos()
 	a.tParse = t1 - t0
 	a.tLayout = t2 - t1

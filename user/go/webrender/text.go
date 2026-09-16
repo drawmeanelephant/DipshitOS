@@ -196,10 +196,21 @@ func blitMask(s Surface, c Clip, x, y int, m *ttf.Mask, rgb uint32) {
 		ms.BlitMask(x, y, m, rgb)
 		return
 	}
-	// No mask-capable surface: keep the pixels the glyph covers at least ~38%
-	// of, as one-pixel-high spans. This is the same threshold the Zig
-	// userland's own fallback uses (user/src/lib/ui/draw.zig draw_alpha_mask),
-	// and it is why text is never invisible on a plain fill surface.
+	BlitMaskSpans(s, c, x, y, m, rgb)
+}
+
+// BlitMaskSpans is the no-mask-capable-surface fallback, exported so a Surface
+// that DOES claim MaskSink can still delegate the plain-fill case (the guest's
+// window has a direct back-buffer only when the kernel grants one).
+//
+// It keeps the pixels the glyph covers at least ~38% of, as one-pixel-high
+// spans. That is the same threshold the Zig userland's own fallback uses
+// (user/src/lib/ui/draw.zig draw_alpha_mask), and it is why text is never
+// invisible on a rect-only surface.
+func BlitMaskSpans(s Surface, c Clip, x, y int, m *ttf.Mask, rgb uint32) {
+	if m.Empty() {
+		return
+	}
 	const cover = 96
 	for row := 0; row < m.Height; row++ {
 		py := y + row
