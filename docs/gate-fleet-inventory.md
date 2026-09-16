@@ -60,6 +60,7 @@ of them with `just verify-vz`.
 | spec | `go-panic` | 1 run / 9 assert | go-panic.spec -- issue #1228: GOOS=virelai phase 0c fault delivery. |
 | spec | `go-stress` | 1 run / 10 assert | go-stress.spec -- issue #1227: GOOS=virelai 0b breadth (GC / channel / |
 | spec | `go-tabapp` | 1 run / 15 assert | go-tabapp.spec -- M56d (issue #1315) class-B gate: one Go app full-viewport |
+| spec | `go-term` | 1 run / 16 assert | go-term.spec -- M58c (issue #1307) class-B gate: a Go terminal window opens |
 | spec | `go-win` | 1 run / 9 assert | go-win.spec -- M53 Card 1 (issue #1245): the raw ADR 0007 window, from Go. |
 | spec | `go-wm-default` | 2 run / 40 assert | go-wm-default.spec -- M59 (issue #1298) class-B gate: the boot-default flip. |
 | spec | `go-wm-seat` | 2 run / 53 assert | go-wm-seat.spec -- M57a/b/c (issues #1313/#1317/#1318) class-B gate: a Go WM |

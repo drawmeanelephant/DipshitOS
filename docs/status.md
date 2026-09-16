@@ -91,7 +91,7 @@ The only threads not closed:
 | Thread | State / next step | Cards |
 |--------|-------------------|-------|
 | **Go runtime port — `GOOS=virelai`** | Phase 0a–0c + phase 2 netpoll + 2.1 EL0 clock landed (#1187/#1196/#1221/#1230/#1231/#1228/#1350/#1359). | #1163 |
-| **M58 — Move the apps you touch** | M58a files (#1305) and M58d fetch (#1308) landed; M58b Go editor (`GOEDIT.ELF`, gate `go-edit`) salvaging #1306; M58c term still open. M58e/f done. Full-viewport via tabapp in Zig TABWM. | #1306, #1307 |
+| **M58 — Move the apps you touch** | M58a–f landed: files, GOEDIT (`go-edit`), GOTERM (`go-term`, #1307), fetch, FART. Full-viewport via tabapp in Zig TABWM. | |
 | **EL0 `sys_exec` caller survival** | AddrSpaceSpec + argv on slot 28; class-B `live-el0-exec` | #1333 |
 
 ## Gate status
