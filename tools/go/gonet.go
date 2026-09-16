@@ -37,6 +37,28 @@ func heartbeat(stop *bool, count *int) {
 func main() {
 	vsys.Println("gonet: start")
 
+	// Clock proof (phase 2.1): the EL0 counter must read > 0 and never go
+	// backwards. The gate asserts 'gonet: clock ok' and the ABSENCE of
+	// 'gonet: clock DEAD', so a clock that silently reads 0 fails the gate
+	// instead of quietly disabling every deadline.
+	n0 := vsys.Nanotime()
+	n1 := n0
+	// One tick is ~42 ns at 24 MHz, so two back-to-back reads can legitimately
+	// return the same value. Spin (bounded) until the counter ADVANCES: a
+	// frozen counter would silently disable every wall-clock deadline, so it
+	// must fail this gate rather than pass it.
+	for i := 0; i < 200000 && n1 <= n0; i++ {
+		n1 = vsys.Nanotime()
+	}
+	if n0 > 0 && n1 > n0 {
+		vsys.Println("gonet: clock ok")
+	} else {
+		vsys.Print("gonet: clock DEAD n0=")
+		vsys.Print(vsys.Itoa64(n0))
+		vsys.Print(" n1=")
+		vsys.Println(vsys.Itoa64(n1))
+	}
+
 	// 1. os.File path: read the host-share file to completion.
 	body, err := vsys.ReadFile("/host/GONET.SHARE")
 	if err != nil {
@@ -102,10 +124,16 @@ func main() {
 
 	// 5. The peer is gone; a further Read must fail closed, not hang and not
 	//    spin the window loop.
+	// The deadline set above is already in the past, so the wall-clock
+	// check must fail this read on its FIRST probe (no wasted tick). The
+	// elapsed count is printed as on-target evidence.
+	goneStart := vsys.Nanotime()
 	if _, err := conn.Read(make([]byte, 16)); err != nil {
 		vsys.Print("gonet: peer gone err=")
 		vsys.Println(err.Error())
 	}
+	vsys.Print("gonet: failclosed ms=")
+	vsys.Println(vsys.Itoa64((vsys.Nanotime() - goneStart) / 1_000_000))
 	_ = conn.Close()
 
 	// 6. Close-then-Dial is the legal reconnect path; a second LIVE Dial is not.

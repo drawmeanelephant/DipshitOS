@@ -74,10 +74,18 @@ vgate_assert 01 serial-contains 'gonet: heartbeat survived load'
 vgate_assert 01 serial-contains 'gonet OK'
 vgate_assert 01 output-contains "NET-TCP: answered the guest's HTTP request with 200 OK"
 vgate_assert 01 serial-absent '[EXC] parking:'
+# Phase 2.1: the EL0 clock is live on target (a 0/dead clock fails here).
+vgate_assert 01 serial-contains 'gonet: clock ok'
+vgate_assert 01 serial-absent 'gonet: clock DEAD'
+vgate_assert 01 serial-contains 'gonet: failclosed ms='
 
 vgate_assert 02 serial-contains 'gonet: connected'
 vgate_assert 02 serial-contains 'gonet: hb='
 vgate_assert 02 serial-contains 'gonet: read failed closed err='
+# Phase 2.1: the same clock proof on the peer-goes-dark run.
+vgate_assert 02 serial-contains 'gonet: clock ok'
+vgate_assert 02 serial-absent 'gonet: clock DEAD'
+vgate_assert 02 serial-contains 'gonet: failclosed ms='
 vgate_assert 02 serial-contains 'gonet: heartbeat survived load'
 vgate_assert 02 serial-contains 'gonet OK'
 vgate_assert 02 output-contains "NET-TCP: answered the guest's SYN"

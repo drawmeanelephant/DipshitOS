@@ -12,7 +12,7 @@ Upstream Go has no third-party-GOOS mechanism (golang/go#35956 declined
 `GOOS=none`; golang/go#73608's `GOOSPKG` overlay proposal is still open).
 Every non-POSIX port (Fuchsia, TamaGo, IBM z/OS) is a maintained fork
 tracking each release. The maintenance surface here is deliberately tiny:
-**5 file edits + 6 new GOOS-gated files** (the sixth edit — proc.go's phase-0a thread gates — retired in 0b round 2, ADR 0027; the sixth file — signal_virelai.go — is phase 0c, #1228); everything else is stock.
+**6 file edits + 7 new GOOS-gated files** (proc.go's phase-0a thread gates retired in 0b round 2, ADR 0027; signal_virelai.go is phase 0c, #1228; the phase-2 edit is `apply.sh` step 3h, which widens `runtime/netpoll.go`'s build tag so the platform-independent poller core compiles for virelai); everything else is stock.
 
 ## Layout
 
@@ -22,11 +22,11 @@ tracking each release. The maintenance surface here is deliberately tiny:
 | `overlay/runtime/signal_virelai.go` | phase 0c (#1228): initsig registers sigtramp via slot 75, virfaulthandler arms sigpanic, crash() exits through the syscall |
 | `overlay/runtime/sys_virelai_arm64.s` | the syscall gateway: `svc #0` with x8=slot (ADR 0007), CNTPCT_EL0 nanotime |
 | `overlay/runtime/rt0_virelai_arm64.s` | entry (`_rt0_virelai_arm64`): argc/argv block → SysV argv array + envp (issue #1226) |
-| `overlay/runtime/netpoll_virelai.go` | blocking stub netpoll (copy of plan9's netpoll_stub) |
+| `overlay/runtime/netpoll_virelai.go` | phase 2 (#1163): the REAL integrated poller (netpollinit/open/close/arm/poll/break) driving slot 76 `sys_sock_ready`; the parked G comes back through stock `netpollready -> netpollunblock -> goready` |
 | `overlay/internal/goos/zgoos_virelai.go` | generated GOOS consts (gengoos shape, hand-applied) |
 | `apply.sh` | copies a stock distribution + applies everything, idempotently, committing a git delta in the fork |
 | `build-go.sh` | runs the host make.bash pass on first use (the cross-std pass is `GOVIRELAI_STD=1` opt-in for phase 2), then links programs with `-ldflags "-s -w"` at the Go default base (the gap loader maps at declared vaddrs; stripped to fit the 2 MiB exec staging bound) |
-| `hello.go` / `goargs.go` / `goroutines.go` / `gostress.go` / `gopanic.go` | the class-B fixtures: console + sbrk heap growth + a full GC cycle; raw-ELF argv+envp (`GOMAXPROCS` override); goroutines + futex + the cross-core proof; 0b breadth (GC/channel/timer/futex, issue #1227); 0c fault delivery + recover + traceback (issue #1228) |
+| `hello.go` / `goargs.go` / `goroutines.go` / `gostress.go` / `gopanic.go` / `gonet.go` | the class-B fixtures: console + sbrk heap growth + a full GC cycle; raw-ELF argv+envp (`GOMAXPROCS` override); goroutines + futex + the cross-core proof; 0b breadth (GC/channel/timer/futex, issue #1227); 0c fault delivery + recover + traceback (issue #1228) |
 
 ## Prerequisites
 

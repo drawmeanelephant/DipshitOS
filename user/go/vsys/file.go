@@ -3,6 +3,10 @@ package vsys
 // virPathStaging is the uaccess-registered path buffer (see Open).
 var virPathStaging [MaxPathLen]byte
 
+// MaxFileIOBytes is the kernel's per-call file transfer bound
+// (kernel/src/file_table.zig, mirrored by user/go/vi).
+const MaxFileIOBytes = 2048
+
 // File is an os.File-shaped handle over the file channel (slots 23-27). The
 // kernel owns the handle table (8 per process); File carries the handle and
 // the local open/closed state so misuse fails without a syscall.
@@ -48,9 +52,8 @@ func Open(path string, flags uint32) (*File, error) {
 	// caller's registered uaccess regions, and a freshly allocated slice
 	// lives in the sbrk heap (unregistered), so passing heap memory here
 	// fails. Same reason the runtime's write1 stages into virWriteStaging.
-	if len(path) > MaxPathLen {
-		return nil, ErrNameTooLong
-	}
+	// (No second length check: ValidatePath above already enforces
+	// MaxPathLen.)
 	copy(virPathStaging[:], path)
 	r, err := syscallResult(syscallFn(SlotFileOpen, strPtr(virPathStaging[:len(path)]), uintptr(len(path)), uintptr(flags), 0))
 	if err != nil {
@@ -59,8 +62,8 @@ func Open(path string, flags uint32) (*File, error) {
 	return &File{h: r, open: true, path: path}, nil
 }
 
-// Read fills p with up to one kernel read (the kernel caps a single call at
-// 2048 bytes). A zero return with a nil error is "no more bytes right now" —
+// Read fills p with up to one kernel read (a single call moves at most
+// MaxFileIOBytes). A zero return with a nil error is "no more bytes right now" —
 // the kernel's read is level-triggered, not blocking.
 func (f *File) Read(p []byte) (int, error) {
 	if !f.open {
@@ -69,6 +72,12 @@ func (f *File) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
+	// Symmetric with Write: one kernel call moves at most MaxFileIOBytes.
+	// Reading fewer bytes is not an error (only writing can lose data), so
+	// the buffer is clamped rather than refused.
+	if len(p) > MaxFileIOBytes {
+		p = p[:MaxFileIOBytes]
+	}
 	r, err := syscallResult(syscallFn(SlotFileRead, uintptr(f.h), slicePtr(p), uintptr(len(p)), 0))
 	if err != nil {
 		return 0, err
@@ -76,7 +85,8 @@ func (f *File) Read(p []byte) (int, error) {
 	return int(r), nil
 }
 
-// Write writes p through one syscall (<= 2048 bytes per call by kernel law).
+// Write writes p through one syscall (at most MaxFileIOBytes per call by
+// kernel law; a longer buffer is refused so data cannot be silently lost).
 func (f *File) Write(p []byte) (int, error) {
 	if !f.open {
 		return 0, Errno(ErrEBADF)
@@ -84,7 +94,7 @@ func (f *File) Write(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
-	if len(p) > 2048 {
+	if len(p) > MaxFileIOBytes {
 		return 0, Errno(ErrENOSPC)
 	}
 	r, err := syscallResult(syscallFn(SlotFileWrite, uintptr(f.h), slicePtr(p), uintptr(len(p)), 0))
