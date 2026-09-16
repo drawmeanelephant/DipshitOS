@@ -39,7 +39,10 @@
 //     missed.
 //   - netpoll(delay == 0) NEVER blocks. netpoll(delay < 0) is bounded by
 //     virPollForeverNs (1 ms) so a missed edge degrades to a 1 ms re-probe
-//     latency rather than a wedge; netpollBreak() short-circuits it.
+//     latency rather than a wedge; netpollBreak() short-circuits it. The
+//     bounded wait is the runtime's own usleep(), NOT a kernel park: a
+//     syscall handler must not re-enter the scheduler (repo-observed EL1
+//     exception on an in-handler yield loop), so slot 76 is a PROBE only.
 //
 // READINESS SOURCE (ADR 0007 amendment, ADR 0009 amendment — appended by
 // this change): slot 76 `sys_sock_ready(op, want, timeout_ns)` reports the
@@ -89,9 +92,6 @@ var (
 //
 //go:noescape
 func virSockReady(want uintptr) int64
-
-//go:noescape
-func virSockWait(want uintptr, timeoutNs int64) int64
 
 func netpollinit() {}
 
@@ -186,10 +186,15 @@ func netpoll(delay int64) (gList, int32) {
 		if delay < 0 || bound > virPollForeverNs {
 			bound = virPollForeverNs
 		}
-		// Reading the break flag again here would race the park below; the
-		// bound already caps the worst case, so a break that lands in this
-		// window costs at most one bound (documented).
-		mask = virSockWait(want, bound)
+		// Bounded wait. The kernel's slot 76 is a PROBE only: a syscall
+		// handler must not re-enter the scheduler (an in-handler
+		// yield_current() loop was observed to take an EL1 synchronous
+		// exception, `[EXC] sync from EL1h ... unknown-reason`), so the wait
+		// lives here, on the runtime's own proven yield path. The poller M
+		// yields; it never spins holding a runnable G, and the bound caps the
+		// worst case if a readiness edge is missed.
+		usleep(uint32(bound / 1000))
+		mask = virSockReady(want)
 		if mask < 0 {
 			mask = 0
 		}

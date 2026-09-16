@@ -75,7 +75,7 @@ func TestOpen_MapsKernelErrno(t *testing.T) {
 
 func TestFile_ReadAfterCloseIsEBADF(t *testing.T) {
 	fakeKern(t, func(num uintptr, a0, a1, a2, a3 uintptr) int64 { return 5 })
-	f, err := Open("/host/FM/KNOWN.TXT", 0)
+	f, err := Open("/host/FM/KNOWN.TXT", ModeRead)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestReadFile_AccumulatesChunksUntilZero(t *testing.T) {
 
 func TestFile_WriteOverlimitIsENOSPC(t *testing.T) {
 	fakeKern(t, func(num uintptr, a0, a1, a2, a3 uintptr) int64 { return 1 })
-	f, _ := Open("/host/FM/OUT.TXT", 0)
+	f, _ := Open("/host/FM/OUT.TXT", ModeWrite)
 	if _, err := f.Write(make([]byte, 2049)); !errors.Is(err, error(Errno(ErrENOSPC))) {
 		t.Fatalf("Write(2049) = %v, want Errno(ENOSPC)", err)
 	}
@@ -132,8 +132,23 @@ func TestFile_WriteMapsKernelErrno(t *testing.T) {
 		}
 		return 1
 	})
-	f, _ := Open("/host/FM/OUT.TXT", 0)
+	f, _ := Open("/host/FM/OUT.TXT", ModeWrite)
 	if _, err := f.Write([]byte("x")); !errors.Is(err, error(Errno(ErrEACCES))) {
 		t.Fatalf("Write = %v, want Errno(EACCES)", err)
+	}
+}
+
+func TestOpen_ReadFileAsksForModeRead(t *testing.T) {
+	var gotFlags uintptr
+	fakeKern(t, func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
+		if num == SlotFileOpen {
+			gotFlags = a2
+			return -ErrENOENT
+		}
+		return 0
+	})
+	_, _ = ReadFile("/host/GONET.SHARE")
+	if gotFlags != uintptr(ModeRead) {
+		t.Fatalf("Open flags = %#x, want ModeRead (%#x) — flags 0 is EINVAL on target", gotFlags, ModeRead)
 	}
 }

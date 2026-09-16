@@ -26,6 +26,8 @@ import "virelai/vsys"
 func heartbeat(stop *bool, count *int) {
 	for !*stop {
 		*count++
+		// Print BEFORE sleeping, so a beat lands before the first blocking
+		// read and the gate's order proof has a "before" line to compare.
 		vsys.Print("gonet: hb=")
 		vsys.Println(vsys.Itoa64(int64(*count)))
 		vsys.Sleep(2)
@@ -49,6 +51,10 @@ func main() {
 	stop := false
 	hb := 0
 	go heartbeat(&stop, &hb)
+	// Let the heartbeat take its first step BEFORE the load starts: the order
+	// proof compares a heartbeat line against the fail-closed line, so at
+	// least one beat must precede the first blocking read.
+	vsys.Sleep(2)
 
 	// 3. net.Conn path over slots 30-33.
 	conn, err := vsys.Dial("10.0.0.2", 8080)

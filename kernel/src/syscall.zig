@@ -2049,35 +2049,19 @@ fn handle_futex(args: Args, frame: *exceptions.VectorFrame) u64 {
 fn handle_sock_ready(args: Args, _: *exceptions.VectorFrame) u64 {
     const op = args[0];
     const want = args[1];
-    const timeout_ns = args[2];
     const caller = scheduler.current_id();
     const pid = process.find_by_task(caller) orelse return error_result(.einval);
     if (want == 0 or (want & ~@as(u64, 3)) != 0) return error_result(.einval);
     if (!tcp.owned_by_pid(pid)) return error_result(.eagain);
-    const want_mask: u32 = @truncate(want);
-    switch (op) {
-        0 => return @intCast(tcp.ready_mask()),
-        1 => {
-            const start_pct = timer.cntpct();
-            var iterations: usize = 0;
-            while (true) {
-                const mask = tcp.ready_mask();
-                if ((mask & want_mask) != 0) return @intCast(mask);
-                if (timeout_ns != 0 and timer.freq != 0) {
-                    const elapsed_s = (timer.cntpct() -| start_pct) / timer.freq;
-                    if (elapsed_s * 1_000_000_000 >= timeout_ns) return error_result(.etimedout);
-                }
-                // Let the rest of the machine run while we wait: this is a
-                // scheduler point, never a spin that starves other tasks.
-                virtio_net.net_rx_drain();
-                _ = scheduler.yield_current();
-                iterations += 1;
-                if (timer.freq == 0 and iterations > 100_000) return error_result(.etimedout);
-                if (iterations > 50_000_000) return error_result(.etimedout);
-            }
-        },
-        else => return error_result(.einval),
-    }
+    // op 0 and op 1 are BOTH a probe. The level-triggered mask IS the
+    // readiness signal; the bounded wait belongs to the CALLER (the Go
+    // runtime's netpoll re-probes on its own scheduler-aware sleep), not to a
+    // loop inside a syscall handler. An earlier draft parked in-handler via
+    // scheduler.yield_current() and took an EL1 synchronous exception
+    // (observed: `[EXC] sync from EL1h ... unknown-reason`, `no recovery
+    // path`) — a syscall handler must not re-enter the scheduler.
+    _ = op;
+    return @intCast(tcp.ready_mask());
 }
 
 /// `sys_exnotify(handler)` — slot 75 (issue #1228, phase 0c). A single

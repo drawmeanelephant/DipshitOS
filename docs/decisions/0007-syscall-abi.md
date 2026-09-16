@@ -1257,7 +1257,17 @@ kernel's ONE-TCP-socket-per-process law (slot 30's `tcp` singleton,
 
 | Signature | Behavior | Errors |
 |-----------|----------|--------|
-| `sock_ready(op, want, timeout_ns)` | `op == 0` (probe, non-blocking): return the readiness mask of the calling process's TCP socket. `op == 1` (wait): if the mask is already nonzero return it; otherwise park the calling task until a wanted bit is set or `timeout_ns` elapses (`timeout_ns == 0` waits forever). `want` is the caller's mask of wanted bits (bit 0 = readable, bit 1 = writable); `timeout_ns` is ignored for `op == 0`. | `EINVAL`: unknown `op`, a non-process caller, or a `want` with no bit set. `EAGAIN`: the caller owns no socket (nothing is connected or listening) — slot 30 was never called or the connection was released. `ETIMEDOUT`: `op == 1` deadline expiry with no readiness. `EFAULT` is impossible (the call copies no buffer). |
+| `sock_ready(op, want, timeout_ns)` | Return the readiness mask of the calling process's TCP socket. **Both ops are a probe** — `want` is the caller's mask of wanted bits (bit 0 = readable, bit 1 = writable) and `timeout_ns` is reserved. The caller does the waiting. | `EINVAL`: a non-process caller, or a `want` with no bit set (or an unknown op). `EAGAIN`: the caller owns no socket (nothing is connected or listening) — slot 30 was never called or the connection was released. `EFAULT` is impossible (the call copies no buffer). |
+
+**Both ops are a probe, and that is deliberate.** An earlier draft had
+`op == 1` park inside the handler (`scheduler.yield_current()` in a bounded
+loop). It crashed the kernel on target: `[EXC] sync from EL1h count=15179 /
+esr=... ec=0x00 unknown-reason / [EXC] parking: no recovery path`. A syscall
+handler must not re-enter the scheduler. The bounded wait therefore lives in
+the CALLER — the Go runtime's netpoll, which yields on its own proven sleep
+path between probes — and `timeout_ns` is reserved for a future in-kernel
+park (a `wait_sock_current`/`wake_sock_waiters` pair mirroring
+`wait_event_current`, which does not change this slot's shape).
 
 Mask bits: **bit 0 (value 1) = readable** — a segment's payload is queued
 (`tcp.rx_pending`) or the peer's FIN has been consumed and the connection can
@@ -1281,7 +1291,11 @@ level-triggered query, so no edge can be lost, and the task park is the
 kernel's existing blocking-task mechanism, not an event push. ADR 0009 gains
 a one-paragraph note (below) recording that readiness is *not* an event kind.
 
-Verified: class-A kernel unit tests (mask for idle/established/closed, EAGAIN
-without a socket, `want == 0` rejected) and the class-B `go-net` gate on VZ
-(GONET.ELF: a parked reader is woken by an arriving segment while the
-heartbeat goroutine keeps running; a killed peer makes the read fail closed).
+Verified: the class-B `go-net` gate on VZ (2/2 runs). Run 01: GONET.ELF reads
+a share file, Dials an IP literal, writes a GET, reads the responder's pinned
+200 OK body, and its heartbeat goroutine is running on both sides. Run 02 (the
+peer answers the SYN then goes dark): the bounded read FAILS CLOSED
+(`vsys: kernel error 12` = ETIMEDOUT) and the gate's order proof confirms a
+heartbeat line still appears AFTER the fail-closed line. Additive static
+checks (mask for idle/established/closed, EAGAIN without a socket, `want == 0`
+rejected) are host-side in `user/go/vsys`

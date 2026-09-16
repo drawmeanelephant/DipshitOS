@@ -123,9 +123,11 @@ PY
             # known-good fixture fits), but making it fatal would block a
             # fixture whose on-target behaviour is still under
             # investigation. GO_STRICT_LAYOUT=1 promotes it to an error.
-            log "WARN: $(basename "$out") does not fit the kernel's fixed gap layout: $guard"
-            log "      the Go linker shifted a segment; on-target behaviour is suspect."
-            log "      shrink it (strip with -s -w; avoid stdlib imports that add text/rodata)."
+            log "WARN: $(basename "$out") does not sit at the kernel's fixed gap vaddrs: $guard"
+            log "      the Go linker shifted a segment. This was measured on a build that"
+            log "      failed on target, but it did NOT prove causal (removing the text"
+            log "      overflow did not change the symptom), so treat it as a smell to"
+            log "      check, not a diagnosis. Shrink with -s -w / fewer stdlib imports."
             if [ "${GO_STRICT_LAYOUT:-0}" = "1" ]; then rc=1; fi
         else
             log "gap layout ok: $(basename "$out")"

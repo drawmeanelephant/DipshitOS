@@ -47,6 +47,17 @@ const (
 	ErrETIMEDOUT    int64 = 12 // ADR 0027 amendment: deadline expiry
 )
 
+// File-open mode flags (kernel/src/file_table.zig, mirrored by
+// user/go/vi). flags == 0 is NOT "read" — the kernel refuses it (EINVAL), so
+// a reader must ask for ModeRead explicitly.
+const (
+	ModeRead   uint32 = 0x0001
+	ModeWrite  uint32 = 0x0002
+	ModeCreate uint32 = 0x0004
+	ModeAppend uint32 = 0x0008
+	ModeDir    uint32 = 0x0010
+)
+
 // ABI bounds, mirrored from the kernel (kernel/src/file_table.zig).
 const (
 	// MaxPathLen is file_table.max_path_len.

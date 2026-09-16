@@ -97,8 +97,8 @@ func TestConn_ReadFailsClosedWhenPeerGoesAway(t *testing.T) {
 	fakeKern(t, func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
 		switch num {
 		case SlotSockReady:
-			if a0 == 1 && a1 == 1 {
-				return 1 // readable
+			if a1 == 1 {
+				return 1 // readable (op is 0: probe)
 			}
 			return 0
 		case SlotTCPRecv:
@@ -126,16 +126,54 @@ func TestConn_ReadFailsClosedWhenPeerGoesAway(t *testing.T) {
 
 func TestConn_ReadTimesOutWhenNeverReadable(t *testing.T) {
 	resetConn(t)
+	probes, sleeps := 0, 0
 	fakeKern(t, func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
-		if num == SlotSockReady {
-			return -ErrETIMEDOUT // the kernel's bounded park expired
+		switch num {
+		case SlotSockReady:
+			probes++ // never readable
+		case SlotSleep:
+			sleeps++
 		}
 		return 0
 	})
 	c, _ := Dial("10.0.2.2", 80)
+	c.SetReadDeadline(2_000_000_000) // 2 ticks = 2 probes + 1 yield
 	_, err := c.Read(make([]byte, 16))
 	if !errors.Is(err, error(Errno(ErrETIMEDOUT))) {
 		t.Fatalf("Read on a never-readable socket = %v, want Errno(ETIMEDOUT)", err)
+	}
+	if probes != 2 || sleeps != 1 {
+		t.Fatalf("bounded wait = %d probes / %d yields, want 2 / 1", probes, sleeps)
+	}
+}
+
+func TestConn_ReadYieldsWhileWaiting(t *testing.T) {
+	// The bounded wait must YIELD (sys_sleep) between probes: that is what
+	// keeps the other goroutine alive while this Read is blocked. The
+	// heartbeat-during-load proof depends on it.
+	resetConn(t)
+	order := []string{}
+	fakeKern(t, func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
+		switch num {
+		case SlotSockReady:
+			order = append(order, "probe")
+			return 0
+		case SlotSleep:
+			order = append(order, "yield")
+		}
+		return 0
+	})
+	c, _ := Dial("10.0.2.2", 80)
+	c.SetReadDeadline(3_000_000_000)
+	_, _ = c.Read(make([]byte, 8))
+	want := []string{"probe", "yield", "probe", "yield", "probe"}
+	if len(order) != len(want) {
+		t.Fatalf("probe/yield order = %v, want %v", order, want)
+	}
+	for i := range want {
+		if order[i] != want[i] {
+			t.Fatalf("probe/yield order = %v, want %v", order, want)
+		}
 	}
 }
 
@@ -200,42 +238,43 @@ func TestConn_ConcurrentDialIsSerializedByTheBound(t *testing.T) {
 	}
 }
 
-func TestConn_SetReadDeadlineReachesTheKernel(t *testing.T) {
+func TestConn_ProbeAsksForReadinessOnly(t *testing.T) {
 	resetConn(t)
-	var got uintptr
-	var seen bool
+	var want, op uintptr
 	fakeKern(t, func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
 		if num == SlotSockReady {
-			got = a2
-			seen = true
-			return -ErrETIMEDOUT
+			op, want = a0, a1
 		}
 		return 0
 	})
 	c, _ := Dial("10.0.2.2", 80)
-	c.SetReadDeadline(1_500_000_000)
-	if _, err := c.Read(make([]byte, 4)); !errors.Is(err, error(Errno(ErrETIMEDOUT))) {
-		t.Fatalf("Read = %v, want Errno(ETIMEDOUT)", err)
-	}
-	if !seen || got != 1_500_000_000 {
-		t.Fatalf("slot 76 timeout arg = %d (seen=%v), want 1500000000", got, seen)
+	c.SetReadDeadline(1_000_000_000)
+	_, _ = c.Read(make([]byte, 4))
+	if op != 0 || want != 1 {
+		t.Fatalf("slot 76 args = (op=%d, want=%d), want (0, 1) — probe, readable", op, want)
 	}
 }
 
-func TestConn_SetReadDeadlineNegativeIsUnbounded(t *testing.T) {
+func TestConn_DefaultReadTicksWhenNoDeadline(t *testing.T) {
 	resetConn(t)
-	var got uintptr
+	sleeps := 0
 	fakeKern(t, func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
-		if num == SlotSockReady {
-			got = a2
-			return -ErrETIMEDOUT
+		if num == SlotSleep {
+			sleeps++
 		}
 		return 0
 	})
 	c, _ := Dial("10.0.2.2", 80)
-	c.SetReadDeadline(-5)
-	_, _ = c.Read(make([]byte, 4))
-	if got != 0 {
-		t.Fatalf("negative deadline must map to 0 (unbounded), got %d", got)
+	if got := c.readTicks(); got != DefaultReadTicks {
+		t.Fatalf("readTicks() = %d, want DefaultReadTicks (%d)", got, DefaultReadTicks)
 	}
+	c.SetReadDeadline(-5)
+	if got := c.readTicks(); got != DefaultReadTicks {
+		t.Fatalf("negative deadline readTicks() = %d, want DefaultReadTicks", got)
+	}
+	c.SetReadDeadline(1) // sub-second rounds UP to one tick, never to zero
+	if got := c.readTicks(); got != 1 {
+		t.Fatalf("sub-second readTicks() = %d, want 1 (never 0)", got)
+	}
+	_ = sleeps
 }

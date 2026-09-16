@@ -195,7 +195,9 @@ runtime's netpoll drain the queue — is **rejected**, for three reasons:
 
 The chosen mechanism is therefore **slot 76 `sys_sock_ready(op, want,
 timeout_ns)`** (ADR 0007, appended the same day): a level-triggered readiness
-mask plus a bounded task park. It is the "or equivalent" the phase-2 brief
+mask. Level-triggering is the point — the caller may poll it as often as it
+likes, so no edge can be lost even if a poll lands between two readiness
+changes. It is the "or equivalent" the phase-2 brief
 allows, and it keeps ADR 0009's queue semantics exactly as specified.
 
 Consequences for this document: no new event kind is defined, `Event` stays

@@ -1,5 +1,8 @@
 package vsys
 
+// virPathStaging is the uaccess-registered path buffer (see Open).
+var virPathStaging [MaxPathLen]byte
+
 // File is an os.File-shaped handle over the file channel (slots 23-27). The
 // kernel owns the handle table (8 per process); File carries the handle and
 // the local open/closed state so misuse fails without a syscall.
@@ -33,14 +36,23 @@ func ValidatePath(path string) error {
 	return nil
 }
 
-// Open opens path for reading when flags is 0 (the kernel's default). A
-// handle returned by the kernel is >= 0.
+// Open opens path with the given mode flags (vsys.ModeRead etc.). flags == 0
+// is refused by the kernel, so ReadFile passes ModeRead explicitly. A handle
+// returned by the kernel is >= 0.
 func Open(path string, flags uint32) (*File, error) {
 	if err := ValidatePath(path); err != nil {
 		return nil, err
 	}
-	buf := append([]byte(path), 0)
-	r, err := syscallResult(syscallFn(SlotFileOpen, strPtr(buf), uintptr(len(path)), uintptr(flags), 0))
+	// The path is staged in a package-level buffer inside the image's RW
+	// data segment: the kernel's copy_in validates the SOURCE against the
+	// caller's registered uaccess regions, and a freshly allocated slice
+	// lives in the sbrk heap (unregistered), so passing heap memory here
+	// fails. Same reason the runtime's write1 stages into virWriteStaging.
+	if len(path) > MaxPathLen {
+		return nil, ErrNameTooLong
+	}
+	copy(virPathStaging[:], path)
+	r, err := syscallResult(syscallFn(SlotFileOpen, strPtr(virPathStaging[:len(path)]), uintptr(len(path)), uintptr(flags), 0))
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +111,7 @@ const ReadFileMax = 64 * 1024
 // kernel reports 0. ReadFileMax bounds the result so a wrong path cannot
 // grow the heap without limit.
 func ReadFile(path string) ([]byte, error) {
-	f, err := Open(path, 0)
+	f, err := Open(path, ModeRead)
 	if err != nil {
 		return nil, err
 	}

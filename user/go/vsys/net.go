@@ -12,10 +12,29 @@ type Conn struct {
 	port   uint16
 	open   bool
 	closed bool // peer FIN/RST observed: fail closed
-	// readDeadlineNs bounds a blocking Read. 0 is "unbounded"; a nonzero
-	// value is handed to slot 76 op 1 so a peer that goes dark makes the
-	// Read FAIL CLOSED (ETIMEDOUT) instead of parking the goroutine forever.
+	// readDeadlineNs bounds a blocking Read, in nanoseconds; it is converted
+	// to a scheduler-TICK budget (1 tick ~ 1 s on this kernel) because the
+	// kernel exposes no per-call clock to user space. 0 means "use
+	// DefaultReadTicks". A peer that goes dark therefore makes the Read FAIL
+	// CLOSED (ETIMEDOUT) instead of waiting forever.
 	readDeadlineNs int64
+}
+
+// DefaultReadTicks is the bounded-wait ceiling used when no read deadline is
+// set. An unbounded wait is deliberately not expressible: the point of this
+// type is that a blocking Read can always fail closed.
+const DefaultReadTicks = 30
+
+// readTicks converts the deadline to a tick budget (>= 1).
+func (c *Conn) readTicks() int {
+	if c.readDeadlineNs <= 0 {
+		return DefaultReadTicks
+	}
+	t := int(c.readDeadlineNs / 1_000_000_000)
+	if t < 1 {
+		t = 1
+	}
+	return t
 }
 
 // ParseIPv4 accepts a dotted-quad IPv4 literal ONLY. Hostnames are rejected
@@ -86,9 +105,10 @@ func Dial(host string, port uint16) (*Conn, error) {
 	return c, nil
 }
 
-// SetReadDeadline bounds a blocking Read to ns nanoseconds (0 = unbounded).
+// SetReadDeadline bounds a blocking Read, in nanoseconds, converted to a
+// scheduler-tick budget (see Conn.readTicks). 0 selects DefaultReadTicks.
 // A bounded read is what makes "the peer died mid-read" fail closed instead
-// of parking the goroutine forever.
+// of waiting forever.
 func (c *Conn) SetReadDeadline(ns int64) {
 	if c == nil {
 		return
@@ -117,38 +137,44 @@ func (c *Conn) Read(p []byte) (int, error) {
 	if max > TCPPayloadMax {
 		max = TCPPayloadMax
 	}
-	mask, err := c.waitReadable()
-	if err != nil {
-		return 0, err
+	// Bounded wait. Slot 76 is a PROBE (the kernel refuses to re-enter the
+	// scheduler inside a syscall handler), so the waiting lives HERE: each
+	// iteration yields the M through sys_sleep, which is what lets the other
+	// goroutine (the heartbeat) keep running while this Read is blocked.
+	for i := 0; i < c.readTicks(); i++ {
+		mask, err := c.probeReadable()
+		if err != nil {
+			return 0, err
+		}
+		if mask&1 != 0 {
+			r, err := syscallResult(syscallFn(SlotTCPRecv, slicePtr(p[:max]), uintptr(max), 0, 0))
+			if err != nil {
+				return 0, err
+			}
+			if r == 0 {
+				// Readable but empty: the peer is gone (FIN/RST consumed)
+				// — fail closed instead of looping forever.
+				c.closed = true
+				return 0, ErrPeerClosed
+			}
+			return int(r), nil
+		}
+		// Yield one scheduler tick so other goroutines run. The M is not
+		// blocked by this: sys_sleep is a scheduler point.
+		if i+1 < c.readTicks() {
+			syscallFn(SlotSleep, 1, 0, 0, 0)
+		}
 	}
-	if mask&1 == 0 {
-		return 0, Errno(ErrETIMEDOUT)
-	}
-	r, err := syscallResult(syscallFn(SlotTCPRecv, slicePtr(p[:max]), uintptr(max), 0, 0))
-	if err != nil {
-		return 0, err
-	}
-	if r == 0 {
-		// Readable but empty: the peer is gone (FIN/RST consumed) — fail
-		// closed instead of looping forever.
-		c.closed = true
-		return 0, ErrPeerClosed
-	}
-	return int(r), nil
+	return 0, Errno(ErrETIMEDOUT)
 }
 
-// waitReadable parks on slot 76 op 1 until the socket is readable. A 0 mask
-// with no error means the deadline expired.
-func (c *Conn) waitReadable() (int64, error) {
-	r, err := syscallResult(syscallFn(SlotSockReady, 1, 1, uintptr(c.readDeadlineNs), 0))
+// probeReadable asks the kernel for the socket's readiness mask (slot 76).
+// A 0 mask means "nothing yet", not an error.
+func (c *Conn) probeReadable() (int64, error) {
+	r, err := syscallResult(syscallFn(SlotSockReady, 0, 1, 0, 0))
 	if err != nil {
-		if e, ok := err.(Errno); ok {
-			switch int64(e) {
-			case ErrETIMEDOUT:
-				return 0, nil // the bounded park expired: caller fails closed
-			case ErrEAGAIN:
-				return 0, ErrConnClosed // no socket owned any more
-			}
+		if e, ok := err.(Errno); ok && int64(e) == ErrEAGAIN {
+			return 0, ErrConnClosed // no socket owned any more
 		}
 		return 0, err
 	}
