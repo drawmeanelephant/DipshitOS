@@ -103,6 +103,18 @@ extension, and a leaf with no SAN at all. `vectors/emit_x509_vectors.py` then
 reads every expected value out of `openssl x509 -text` and refuses to emit if a
 count or a name disagrees with what the fixture set should contain.
 
+**Pinning rule.** `openssl genkey` produces a fresh random CA on every
+`make_x509_fixtures.sh` run. The committed `vectors/fx/` set is the live
+identity `FETCHS.BIN` vendors at build time via `vendored_roots.zig`; the
+two must stay byte-equal. The generator refuses to overwrite `fx/` unless
+`--write-committed` is passed. `--check` generates into a temp dir and
+compares the new root DER against the vendored anchor (a fresh regen
+**fails**, which is the point); `--check vectors/fx` compares the committed
+root and **passes**. `emit_vendored_roots.py --check` is the same comparison
+without generating. `run_interop.sh` consumes `fx/` and writes runtime
+scratch next to the ledger — it does not regenerate keys and it does not
+rewrite committed files such as `chain-ec.pem`.
+
 Honest bound: a wildcard in a public-suffix position (`*.co.uk`) cannot be
 refused without a public-suffix list, which this library does not ship. The
 rule enforced is the strongest one available locally — wildcard only as the
