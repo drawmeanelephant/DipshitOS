@@ -3,9 +3,9 @@
 > For the current state of each verification gate (pass/fail/blocked), see
 > [`docs/status.md`](status.md). This file is the sequence and policy. The
 > A/B/C/D classification is defined in
-> [`docs/gate-inventory.md`](gate-inventory.md); the single generated
-> inventory of every gate is
-> [`docs/gate-fleet-inventory.md`](gate-fleet-inventory.md).
+> [`docs/gate-inventory.md`](gate-inventory.md). The class-B fleet is
+> discovered live (`bash tools/gate/fleet.sh list`); a human-readable
+> table is generated locally by `just inventory-gates` and is gitignored.
 
 ## Verification classes
 
@@ -43,12 +43,14 @@ render was the *byte* truncation under `LC_ALL=C` and the *character*
 truncation under a UTF-8 locale, so `main` passed under UTF-8 and failed
 under `C` with no workflow noticing). The rules that came out of it:
 
-- **Committed generated files must render byte-identically under any
-  locale.** `tools/inventory-gates.sh` writes the only tracked render
-  (`docs/gate-fleet-inventory.md`); it pins `LC_ALL=C` for the render,
-  truncates headers in UTF-8 **characters** rather than bytes, and its
-  `--check` mode renders a second copy under `en_US.UTF-8` and fails when
-  the two disagree — so a locale-sensitive operation cannot creep back in.
+- **Generated output must render byte-identically under any locale.**
+  `tools/inventory-gates.sh` pins `LC_ALL=C` for the render, truncates
+  headers in UTF-8 **characters** rather than bytes, and its `--check`
+  mode renders a second copy under `en_US.UTF-8` and fails when the two
+  disagree — so a locale-sensitive operation cannot creep back in. The
+  markdown itself is gitignored (not a merge participant); `--check`
+  still compares the two in-memory renders. Committing that snapshot
+  made every spec/tooling PR conflict with every other (PR #1348).
   (Reachability: 51 of the 210 `tools/gate/specs/*.spec` files contain
   non-ASCII; **2** of their first-line headers do —
   `live-m21-persist-title-orphan` (em dash) and `live-wnd5-gate2-policy`
@@ -208,14 +210,13 @@ under `C` with no workflow noticing). The rules that came out of it:
 > interactive serial-takeover gate `zig build run` needs a TTY and is run
 > with `just run`). The same list shards
 > `.github/workflows/vz-gates.yml` on a registered macOS 27+ Apple silicon
-> runner. The class-D diagnostics run individually per claim. See
-> [`docs/gate-fleet-inventory.md`](gate-fleet-inventory.md) for the full
-> per-member table.
+> runner. The class-D diagnostics run individually per claim. Run
+> `just inventory-gates` for a local per-member table (gitignored).
 >
 > **Permanent rule (M40 GF6, issue #931):** new gates are specs under
 > `tools/gate/specs/` — never new `tools/verify-*.sh` scripts (rejected in
-> review); the generated inventory fails CI (`--check`) on any unregistered
-> gate. Full-fleet reference wall time: 10,052 s serial (185 members, M40
+> review); `--check` fails on any unregistered (orphan) gate-class script.
+> Full-fleet reference wall time: 10,052 s serial (185 members, M40
 > GF6 reference host, 2026-09-06).
 >
 > **Dev-shell PATH note (the one canonical paragraph):** fleet members and
@@ -232,21 +233,17 @@ under `C` with no workflow noticing). The rules that came out of it:
   review.
 - **The spec dir is the single source of truth.** `tools/gate/fleet.sh`
   discovers the class-B fleet (specs + the four legacy class-B scripts);
-  the `just gate`/`just gates`/`just verify-vz` recipes, the
-  `vz-gates.yml` CI shards, and the fleet section of
-  `docs/gate-fleet-inventory.md` are all derived from that discovery —
+  the `just gate`/`just gates`/`just verify-vz` recipes and the
+  `vz-gates.yml` CI shards are all derived from that discovery —
   adding a spec registers it everywhere with zero list edits.
-- **The fleet inventory is generated, not written:**
-  `bash tools/inventory-gates.sh` rewrites `docs/gate-fleet-inventory.md`
-  (also `just inventory-gates`); `just inventory-gates --check` fails when
-  the tracked report drifts from a fresh render — every added, removed, or
-  renamed spec or script under `tools/` must ship with a regenerated report.
-  This bullet used to say "and CI runs that check (GF5)", which was not
-  true: the macos CI job never ran it. Issue #1186 added the step (plus two
-  other portable gates that job had silently dropped), and
-  `tools/lint-workflows.sh` now asserts that every command in the
-  `just verify-portable` recipe appears in `.github/workflows/ci.yml`, so a
-  portable gate cannot go local-only again without failing that lint.
+- **The fleet inventory is generated locally, never committed:**
+  `bash tools/inventory-gates.sh` writes `docs/gate-fleet-inventory.md`
+  (also `just inventory-gates`); the file is gitignored. `--check` fails
+  on orphan gate-class scripts, on a tracked snapshot (the PR #1348
+  merge-conflict class), on locale-sensitive render, and on spec-shape
+  guards. It does not require a committed table. Issue #1186 put this
+  check in the macos CI job; `tools/lint-workflows.sh` asserts that every
+  command in `just verify-portable` appears in `.github/workflows/ci.yml`.
 - `docs/gate-inventory.md` defines the class A/B/C/D policy only; the
   archive detail file (`docs/archive/gate-inventory-detail.md`) is frozen
   historical evidence — nothing reads its `GATE_INVENTORY` block anymore.

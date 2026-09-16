@@ -1,13 +1,13 @@
 # VirelaiOS verification gate classes
 
 > This file defines the A/B/C/D classification and the evidence policy.
-> It is **not** an inventory: since M40 GF5 (issue #940) the single gate
-> inventory is the generated
-> [`gate-fleet-inventory.md`](gate-fleet-inventory.md) — the class-B fleet
-> section there is exactly what `just gate-list` prints and what the
-> `.github/workflows/vz-gates.yml` CI shards consume. Per-gate pass/fail
-> status lives in [`docs/status.md`](status.md); historical per-gate
-> evidence paragraphs and claim numbers live in
+> It is **not** an inventory: since M40 GF5 (issue #940) the class-B fleet
+> is discovered live by `tools/gate/fleet.sh` — that list is what
+> `just gate-list` prints and what the `.github/workflows/vz-gates.yml`
+> CI shards consume. `just inventory-gates` writes a local human-readable
+> table (gitignored; never commit it). Per-gate pass/fail status lives in
+> [`docs/status.md`](status.md); historical per-gate evidence paragraphs
+> and claim numbers live in
 > [`archive/gate-inventory-detail.md`](archive/gate-inventory-detail.md)
 > (frozen at GF5 — do not extend).
 
@@ -28,15 +28,15 @@
 
 ## Where every gate is registered
 
-One source of truth, three generated views — none hand-edited:
+One source of truth, three views — none hand-edited:
 
 | What | Where | Regenerate / check |
 |---|---|---|
-| Class-B fleet (specs + legacy scripts) | `docs/gate-fleet-inventory.md`, "Class-B fleet" section | `just inventory-gates` / `just inventory-gates --check` |
-| Class-A + top-level script rows | `docs/gate-fleet-inventory.md`, "All top-level scripts" | same |
+| Class-B fleet (specs + legacy scripts) | `bash tools/gate/fleet.sh list` | live discovery |
+| Class-A + top-level script rows | `just inventory-gates` (local, gitignored) | `just inventory-gates --check` |
 | CI shard input | `bash tools/gate/fleet.sh list` | derived from `tools/gate/specs/` live |
 
 Run one class-B gate with `just gate <id>`, a pattern group with
 `just gates <pattern>`, the whole fleet with `just verify-vz`. Adding a
-spec under `tools/gate/specs/` registers it in all of the above with zero
-list edits (the `--check` guard fails until the report is regenerated).
+spec under `tools/gate/specs/` registers it in `just` and CI with zero
+list edits (`--check` fails if a gate-class script is registered nowhere).

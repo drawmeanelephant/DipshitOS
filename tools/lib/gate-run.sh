@@ -46,6 +46,33 @@ GATE_NAME=""
 GATE_RUNNER_ARGS=()
 SHARE=""
 
+# --- the shell floor (issue #1338) -------------------------------------------
+# A class-B harness must never be able to report a PASS it did not earn. Under
+# `set -u`, bash < 4.4 expands an EMPTY array (`"${VGATE_NOTES[@]}"` with no
+# notes -- most specs) into a FATAL error whose exit status is ZERO: the
+# harness dies mid-plan, after the build preamble and before any boot, and the
+# caller reads PASS for a gate that never ran. Observed live 2026-09-15 with
+# /bin/bash 3.2.57 -- macOS's own, which is what a non-interactive shell gets
+# when /usr/bin leads PATH: `PASS go-fart (16s)`, no VM, no serial log, no
+# asserts evaluated. Rather than audit every array expansion in every harness
+# for a 20-year-old shell, the floor is named once and checked at the door.
+#
+# gate_assert_modern_bash [MAJOR MINOR] -- 0 when the version (default: the
+# running shell) is >= 4.4, else a loud 2. The explicit-version form is what
+# lets tools/gate/test-gate-run.sh pin the boundary on a modern CI shell.
+gate_assert_modern_bash() {
+    local major="${1:-${BASH_VERSINFO[0]:-0}}"
+    local minor="${2:-${BASH_VERSINFO[1]:-0}}"
+    if [ "$major" -gt 4 ] || { [ "$major" -eq 4 ] && [ "$minor" -ge 4 ]; }; then
+        return 0
+    fi
+    echo "gate-run: refusing to run under bash ${BASH_VERSION:-$major.$minor} — the gate harness needs >= 4.4." >&2
+    echo "  On bash < 4.4 an empty-array expansion under 'set -u' is fatal AND exits ZERO, so a" >&2
+    echo "  harness that dies there reports PASS for a gate that never booted (issue #1338)." >&2
+    echo "  Fix the shell first: source tools/env-check.sh (puts /opt/homebrew/bin ahead of /usr/bin)." >&2
+    return 2
+}
+
 gate_begin() {
     GATE_NAME="$1"
     # Base directory is overridable for experiments/debugging:

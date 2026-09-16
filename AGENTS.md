@@ -55,9 +55,12 @@ scoping doc. Canonical answer lives in one place.
   (`tools/gate/SPEC.md` format) — never a new `tools/verify-*.sh` script.
 - **Extend an existing spec when it already covers the change**; do not add a
   new spec per tiny card. One spec may assert several things.
-- The fleet is discovered, not listed (`tools/gate/fleet.sh`); the generated
-  `docs/gate-fleet-inventory.md` is exempt from the coordination gate —
-  re-render it (`bash tools/inventory-gates.sh`), never hand-edit it.
+- The fleet is discovered, not listed (`tools/gate/fleet.sh`). The generated
+  `docs/gate-fleet-inventory.md` is **gitignored — never commit it.** Render
+  locally with `bash tools/inventory-gates.sh` if you want to read it.
+  `--check` asserts zero orphans, locale-invariant render, and spec-shape
+  guards; it does not require a tracked snapshot. The path stays exempt from
+  the coordination gate so leftover `Touches` declarations are a no-op.
 
 ## Host toolchain sanity check (source me first)
 
@@ -102,7 +105,8 @@ issues — **no coordination files live in the repository**. The binding rules:
   duplicate it.
 - **One editor per file at a time.** The gate fails when two ACTIVE claims from
   different branches declare overlapping `Touches`. Generated artifacts
-  (`docs/gate-fleet-inventory.md`) are exempt — re-render, don't serialize.
+  (`docs/gate-fleet-inventory.md`) are exempt — that path is gitignored and
+  must not be committed.
 - **Progress and completion live on the issue.** Append progress as comments
   (never rewrite earlier comments); close with a final evidence comment. Blocked
   = comment and set `Status: ⛔` (or close).

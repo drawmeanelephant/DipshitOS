@@ -90,10 +90,8 @@ Rules:
   it needs its own issue and a pilot proving it. GF3/GF4 add specs only.
 - Since M40 GF5 (issue #940) the spec dir is the class-B fleet's single
   source of truth: dropping a `*.spec` here registers it in `just gate`,
-  `just gates`, `just verify-vz`, the `vz-gates.yml` CI shards, and the
-  fleet section of `docs/gate-fleet-inventory.md` with zero list edits
-  (regenerate the report; `--check` fails until you do). Discovery lives
-  in `tools/gate/fleet.sh`.
+  `just gates`, `just verify-vz`, and the `vz-gates.yml` CI shards with
+  zero list edits. Discovery lives in `tools/gate/fleet.sh`.
 
 ## exec ordering: `exec` returns immediately (claim #1193)
 

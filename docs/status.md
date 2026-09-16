@@ -75,9 +75,14 @@ any, are on the GitHub tracker.
 | 53 | TLS 1.3 client + trust store | In-tree TLS 1.3 end to end: HKDF/SHA-384/AES-GCM, X.509 + chain validation, RSA/ECDSA verification, the handshake state machine; real interop against 4 peer implementations and 8 public endpoints, 5 negatives fail closed; ADR 0029 | ✅ 2026-09-14 |
 | 54 | Go carries its first app | A Go EL0 program owns a raw ADR 0007 window (`GOWIN.ELF`, gate `go-win`), an independent Go `.tabs` v2 codec round-trips the TABWM session format (`tools/go/tabcodec`), and `WEB.ELF` renders in-guest over `user/go/webrender`; kernel untouched (umbrella #1244) | ✅ 2026-09-15 |
 | 56 | Finish the Go SDK (`vi` + `tabapp`) | The Go EL0 SDK is complete enough to be a WM: `vi` gains IPC 5/6 + `procs` discovery, the tab-client WM_RPC wire, and addr-hinted mmap; `user/go/widgets` adds text/button/list; `user/go/tabapp` + a demo app run one Go tab full-viewport in Zig TABWM (gate `go-tabapp`) | ✅ 2026-09-15 (gate `go-tabapp` green on VZ) |
+| 59 | Default flip (#1298) | The **boot default is the Go seat**: `wm` is a schema-v2 settings key whose compiled default is `gotabwm`, so a boot with no persisted value autostarts `GOTABWM.ELF` and hosts leftover Zig CALC/NOTEPAD over WM_RPC; `settings set wm tabwm` keeps the Zig seat as the reachable fallback and `none` is the explicit shim-only VM (gate `go-wm-default`, 2/2 runs: the untouched default boot, then the persisted fallback) | ✅ 2026-09-15 (gate `go-wm-default` green on VZ) |
 
 > M40 (the gate-fleet consolidation, issue #934, done 2026-09-06) was a tooling
 > workstream, not a product milestone; M36 was skipped.
+>
+> Issue #1338 (2026-09-15) is likewise tooling: the class-B harness now refuses
+> `bash < 4.4` and treats any exit before a spec's result block as non-zero, so
+> a spec that dies mid-plan can no longer be read as PASS by `fleet.sh`.
 
 ## Open work
 
@@ -86,7 +91,7 @@ The only threads not closed:
 | Thread | State / next step | Cards |
 |--------|-------------------|-------|
 | **Go runtime port — `GOOS=virelai`** | Phase 0a merged (PR #1187); 0b rounds 1+2 + envp + stress merged (#1196/#1221/#1230/#1231). Next: 0c fault delivery (#1228). TABWM/DOC follow-ups stay parked until the Go fleet can carry the test apps. | #1163, #1194, #1214, #1228 |
-| **M58 — Move the apps you touch** | M58d Go fetch over Zig TLS helper active (#1308). Full-viewport via tabapp in Zig TABWM; does not wait on M57. | #1305, #1306, #1307, #1308 |
+| **M58 — Move the apps you touch** | M58d Go fetch over Zig TLS helper active (#1308); M58e Go `vi` audio bindings (ADR 0007 slots 42/43) + M58f `FART.ELF` sound app (gate `go-fart`) done. Full-viewport via tabapp in Zig TABWM; does not wait on M57. | #1305, #1306, #1307, #1308, #1327, #1328 |
 | **EL0 `sys_exec` caller survival** | AddrSpaceSpec + argv on slot 28; class-B `live-el0-exec` | #1333 |
 
 ## Gate status
@@ -94,8 +99,8 @@ The only threads not closed:
 > All class-A (portable) and class-B (VZ hardware) gates are green at HEAD.
 > Gate classes are defined in [`docs/gate-inventory.md`](gate-inventory.md).
 > Since M40 the class-B fleet is **discovered** from `tools/gate/specs/` via
-> `tools/gate/fleet.sh`; the generated inventory is
-> [`gate-fleet-inventory.md`](gate-fleet-inventory.md) (`--check` enforced in CI).
+> `tools/gate/fleet.sh`. `--check` (orphans + spec-shape) is enforced in CI;
+> do not commit the generated `docs/gate-fleet-inventory.md` snapshot.
 
 | Gate | Command | Result |
 |------|---------|--------|
@@ -174,7 +179,7 @@ The old file-based tracker (`docs/claims/` + `docs/logs/`) was deleted
 - [`testing.md`](testing.md) — verification sequence & evidence policy.
 - [`hardware-contract.md`](hardware-contract.md) — hardware `[observed]`/`[inferred]`.
 - [`architecture.md`](architecture.md) — components & data flow.
-- [`gate-inventory.md`](gate-inventory.md) · [`gate-fleet-inventory.md`](gate-fleet-inventory.md) — gate classes; generated fleet inventory.
+- [`gate-inventory.md`](gate-inventory.md) — gate classes. Fleet membership is `bash tools/gate/fleet.sh list` (generated markdown is gitignored).
 - [`archive/`](archive/) — closed-milestone detail (`status-m*-detail.md`), frozen designs, one-shots.
 - Per-milestone trackers: `docs/march-m*.md`.
 - Claims: `gh issue list --label claim --state open`.

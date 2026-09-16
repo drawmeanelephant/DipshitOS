@@ -2274,10 +2274,17 @@ fn handle_timer_cancel(args: Args, _: *exceptions.VectorFrame) u64 {
 
 /// Milestone 15 (claim 7636): slot 42 — sys_audio_info(out_ptr)
 /// Copy the device's negotiated playback state out through uaccess as a
-/// 24-byte `AudioInfo` struct {ready, format, rate, channels, period_bytes,
+/// 16-byte `AudioInfo` struct {ready, format, rate, channels, period_bytes,
 /// max_len}. The app learns the format/rate/channels it must synthesize
 /// in (FLOAT 19 / 48000 7 / stereo 2 on the observed VZ device). Returns
 /// 0; `EINVAL` for a non-process caller, `EFAULT` for a bad buffer.
+///
+/// Erratum (M58e, issue #1328): this comment and ADR 0007's slot-42 row
+/// said "24-byte" for three milestones. The struct has been 16 bytes since
+/// it landed — `virtio_snd.AudioInfo` is `@sizeOf == 16`, and the frozen
+/// WAT contract already recorded that (docs/wasm-import-contract.md §5.3).
+/// The size matters: an out struct that claims 24 would read 8 bytes the
+/// kernel never wrote.
 fn handle_audio_info(args: Args, _: *exceptions.VectorFrame) u64 {
     const out_ptr = args[0];
     _ = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
