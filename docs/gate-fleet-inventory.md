@@ -30,7 +30,7 @@
 | `tools/lib/` | 2 | per-run isolation for live gates (`gate-run.sh`) |
 | `tools/status/` | 7 | multiagent coordination gate + claim tooling (class A) |
 | `tools/context/` | 2 | context snapshot helpers |
-| `tools/gate/` | 250 | M40 vgate harness + specs (GF2+) |
+| `tools/gate/` | 251 | M40 vgate harness + specs (GF2+) |
 
 ## Class-B fleet (discovered from the spec dir)
 
@@ -53,6 +53,7 @@ of them with `just verify-vz`.
 | spec | `go-edit` | 1 run / 17 assert | go-edit.spec -- M58b (issue #1306) class-B gate: a Go editor opens a share |
 | spec | `go-fart` | 2 run / 22 assert | go-fart.spec -- M58f (issue #1327) class-B gate: FART.ELF, the Go sound app. |
 | spec | `go-files` | 1 run / 17 assert | go-files.spec -- M58a (issue #1305) class-B gate: a Go file manager lists a |
+| spec | `go-git` | 1 run / 20 assert | go-git.spec -- issue #1337: GOTGIT.ELF clones a tiny fixture repo over |
 | spec | `go-goroutines` | 1 run / 8 assert | go-goroutines.spec -- ADR 0027 D6 (issue #1214 round 2): the phase-0b |
 | spec | `go-hello` | 1 run / 8 assert | go-hello.spec -- issue #1163, GOOS=virelai phase 0a: the gc Go runtime |
 | spec | `go-net` | 2 run / 24 assert | go-net.spec -- issue #1163 (phase 2) class-B gate: GONET.ELF proves a |

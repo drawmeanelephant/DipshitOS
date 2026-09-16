@@ -15,11 +15,16 @@
 //!     tell "not yet valid" from "valid".
 //!
 //! Usage:
-//!   exec FETCHS.BIN [ipv4 [port [server-name]]]
-//! Defaults to 10.0.0.2:443 as `leaf.example.com`. The target is a parameter
-//! rather than a constant because the live gate dials a responder on a high
-//! port, and a hardcoded 443 would need the runner to run as root. The rules
-//! live in `lib/tls/target.zig`, which is `ui`-free and host-tested.
+//!   exec FETCHS.BIN [ipv4 [port [server-name [method [pathfile [outfile [bodyfile]]]]]]]
+//! Defaults to 10.0.0.2:443 as `leaf.example.com`, GET /. Extra argv slots
+//! (issue #1337) are optional so live-tls13's three-arg GET stays identical:
+//! method is GET or POST, pathfile/bodyfile are share paths whose contents
+//! are the request-target and POST body, and outfile receives the HTTP
+//! response (headers+body) instead of dumping it on the console. The target
+//! is a parameter rather than a constant because the live gate dials a
+//! responder on a high port, and a hardcoded 443 would need the runner to
+//! run as root. The rules live in `lib/tls/target.zig`, which is `ui`-free
+//! and host-tested.
 //!
 //! DSK3 segmented: the trust store and the adapter accumulator are static
 //! .bss, which the flat ESP layout cannot express.
@@ -60,6 +65,21 @@ var entropy_bytes: usize = 0;
 /// storage is the same reason the trust store lives in .bss.
 var seam: tls_stream.Stream = undefined;
 var client: tls_client.Client(trust_store.TrustStore) = undefined;
+
+/// Optional HTTP extras (#1337). Default is GET / with the body printed to
+/// the console — the live-tls13 shape. POST body and the request-target live
+/// in share files because an argv slot is 31 bytes and a git path is not.
+var req_method: []const u8 = "GET";
+var req_path: []const u8 = "/";
+var req_host: []const u8 = target_mod.default_name;
+var req_body: []const u8 = &.{};
+var out_path: []const u8 = &.{};
+var method_store: [8]u8 = undefined;
+var path_store: [256]u8 = undefined;
+var outfile_store: [64]u8 = undefined;
+var body_store: [8192]u8 = undefined;
+var hdr_store: [512]u8 = undefined;
+var out_fd: i64 = -1;
 
 /// Decimal-print a signed value to the console. Two inputs cannot be exercised
 /// by a host test -- the guest's wall clock and its CSPRNG -- and when a
@@ -134,11 +154,41 @@ fn cliArg(block: [*]u8, i: usize) []const u8 {
 
 fn usage() void {
     ui.write_console("FETCHS.BIN - VirelaiOS HTTPS client (TLS 1.3)\n" ++
-        "usage: exec FETCHS.BIN [ipv4 [port [server-name]]]\n" ++
+        "usage: exec FETCHS.BIN [ipv4 [port [server-name [method [pathfile [outfile [bodyfile]]]]]]]\n" ++
         "  ipv4         numeric IPv4 literal (default 10.0.0.2)\n" ++
         "  port         decimal 1..65535 (default 443)\n" ++
         "  server-name  the name the peer certificate must match\n" ++
-        "               (default leaf.example.com)\n");
+        "               (default leaf.example.com)\n" ++
+        "  method       GET or POST (default GET)\n" ++
+        "  pathfile     share file whose contents are the request-target\n" ++
+        "  outfile      share file for the HTTP response (else console)\n" ++
+        "  bodyfile     share file whose contents are the POST body\n");
+}
+
+fn copyArg(src: []const u8, dest: []u8) ?[]const u8 {
+    if (src.len == 0 or src.len > dest.len) return null;
+    @memcpy(dest[0..src.len], src);
+    return dest[0..src.len];
+}
+
+/// Read a whole share file into dest. Returns the byte count, or null on
+/// open/read failure. When `trim_nl` is set, trailing CR/LF is stripped so
+/// a pathfile can be a single edited line. POST bodies are binary pkt-line
+/// and must not be trimmed.
+fn readShareFile(path: []const u8, dest: []u8, trim_nl: bool) ?usize {
+    const fd = ui.file_open(path, ui.MODE_READ);
+    if (fd < 0) return null;
+    defer ui.file_close(@intCast(fd));
+    var n: usize = 0;
+    while (n < dest.len) {
+        const r = ui.file_read(@intCast(fd), dest[n..]);
+        if (r <= 0) break;
+        n += @intCast(r);
+    }
+    if (trim_nl) {
+        while (n > 0 and (dest[n - 1] == '\n' or dest[n - 1] == '\r')) n -= 1;
+    }
+    return n;
 }
 
 pub export fn _start(argc: u64, argv_va: u64) callconv(.c) noreturn {
@@ -168,9 +218,38 @@ pub export fn _start(argc: u64, argv_va: u64) callconv(.c) noreturn {
         usage();
         ui.exit_process(exit_usage);
     };
+    req_host = target.name;
+    if (!parseHTTP(args_buf[0..args_len])) {
+        ui.write_console("fetchs: bad request\n");
+        usage();
+        ui.exit_process(exit_usage);
+    }
     ui.write_console("fetchs: target set\n");
     printNum("fetchs: clock ", ui.sys_time());
     serve(target);
+}
+
+/// argv[3..] is optional: METHOD PATHFILE OUTFILE BODYFILE. Missing slots
+/// keep GET / and console output so a three-arg live-tls13 exec is unchanged.
+noinline fn parseHTTP(args: []const []const u8) bool {
+    if (args.len < 4) return true;
+    const m = copyArg(args[3], &method_store) orelse return false;
+    if (!std.mem.eql(u8, m, "GET") and !std.mem.eql(u8, m, "POST")) return false;
+    req_method = m;
+    if (args.len >= 5 and args[4].len > 0) {
+        const n = readShareFile(args[4], &path_store, true) orelse return false;
+        if (n == 0 or path_store[0] != '/') return false;
+        req_path = path_store[0..n];
+    }
+    if (args.len >= 6 and args[5].len > 0) {
+        const p = copyArg(args[5], &outfile_store) orelse return false;
+        out_path = p;
+    }
+    if (args.len >= 7 and args[6].len > 0) {
+        const n = readShareFile(args[6], &body_store, false) orelse return false;
+        req_body = body_store[0..n];
+    }
+    return true;
 }
 
 /// The session proper, deliberately `noinline` and deliberately not part of
@@ -221,6 +300,12 @@ noinline fn serve(target: target_mod.Target) noreturn {
     }
     ui.write_console("fetchs: handshake ok\n");
     ui.write_console("fetchs: TLS1.3 TLS_AES_128_GCM_SHA256\n");
+    ui.write_console("fetchs: method ");
+    ui.write_console(req_method);
+    ui.write_console("\n");
+    ui.write_console("fetchs: path ");
+    ui.write_console(req_path);
+    ui.write_console("\n");
 
     if (!phaseRequest()) {
         ui.write_console("fetchs: send failed\n");
@@ -259,19 +344,45 @@ noinline fn phaseHandshake() bool {
 }
 
 noinline fn phaseRequest() bool {
-    client.write("GET / HTTP/1.0\r\nConnection: close\r\n\r\n") catch return false;
+    const hdr = if (std.mem.eql(u8, req_method, "POST"))
+        std.fmt.bufPrint(&hdr_store, "POST {s} HTTP/1.0\r\nHost: {s}\r\n" ++
+            "Content-Type: application/x-git-upload-pack-request\r\n" ++
+            "Content-Length: {d}\r\nConnection: close\r\n\r\n", .{ req_path, req_host, req_body.len })
+    else
+        std.fmt.bufPrint(&hdr_store, "GET {s} HTTP/1.0\r\nHost: {s}\r\nConnection: close\r\n\r\n", .{ req_path, req_host });
+    const header = hdr catch return false;
+    client.write(header) catch return false;
+    if (req_body.len > 0) {
+        client.write(req_body) catch return false;
+    }
     return true;
 }
 
 noinline fn phaseRead() usize {
+    if (out_path.len > 0) {
+        out_fd = ui.file_open(out_path, ui.MODE_WRITE | ui.MODE_CREATE);
+        if (out_fd < 0) return 0;
+        _ = ui.file_truncate(@intCast(out_fd), 0);
+    }
+    defer {
+        if (out_fd >= 0) {
+            ui.file_close(@intCast(out_fd));
+            out_fd = -1;
+        }
+    }
     var buf: [1024]u8 = undefined;
     var total: usize = 0;
     var rounds: usize = 0;
-    while (rounds < 64) : (rounds += 1) {
+    while (rounds < 256) : (rounds += 1) {
         const n = client.read(&buf) catch break;
         if (n == 0) break;
         total += n;
-        ui.write_console(buf[0..n]);
+        if (out_fd >= 0) {
+            _ = ui.file_write(@intCast(out_fd), buf[0..n]);
+        } else {
+            ui.write_console(buf[0..n]);
+        }
     }
+    printNum("fetchs: wrote ", @intCast(total));
     return total;
 }
