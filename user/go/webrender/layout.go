@@ -1,10 +1,6 @@
 package webrender
 
-import (
-	"strings"
-
-	"virelai/webrender/font"
-)
+import "strings"
 
 // ItemKind is the kind of painted primitive.
 type ItemKind uint8
@@ -27,12 +23,13 @@ type Item struct {
 	X, Y   int
 	W, H   int
 	Text   string
-	Size   int // font scale
+	Size   int // font scale (logical; the engine maps it to a pixel size)
 	Mono   bool
 	Bold   bool
 	Color  uint32
 	Bg     uint32
 	Target string // link target, when the run is inside an <a href>
+	Img    *Image // decoded pixels, when this is a real <img>
 }
 
 // Link is a hit-testable link rectangle in content coordinates.
@@ -42,7 +39,12 @@ type Link struct {
 }
 
 // Layout is the positioned result of laying a document out at one width.
+//
+// Text is the engine the layout was measured with. Paint reuses it, so a run is
+// wrapped and drawn with identical metrics — measuring with one face and
+// painting with another silently mis-wraps every line.
 type Layout struct {
+	Text      TextEngine
 	Items     []Item
 	Links     []Link
 	Width     int
@@ -65,7 +67,8 @@ type inlineRun struct {
 type builder struct {
 	items     []Item
 	links     []Link
-	m         Measurer
+	t         TextEngine
+	images    ImageResolver
 	right     int // absolute right edge of the content box
 	lineX     int // absolute left edge of the current inline flow
 	y         int
@@ -76,18 +79,24 @@ type builder struct {
 }
 
 // LayoutDocument lays out a parsed document in a content box of the given
-// pixel width. m may be nil to use the real bitmap metric.
-func LayoutDocument(doc *Document, width int, m Measurer) *Layout {
+// pixel width. t may be nil, which selects the built-in 8x8 bitmap engine — the
+// no-font fallback. An optional ImageResolver lets <img> elements be decoded
+// without layout ever touching a file itself (ADR 0028 D1/D3).
+func LayoutDocument(doc *Document, width int, t TextEngine, images ...ImageResolver) *Layout {
 	if width < 32 {
 		width = 32
 	}
-	if m == nil {
-		m = DefaultMeasurer
+	if t == nil {
+		t = Bitmap{}
 	}
-	b := &builder{m: m, right: width}
+	b := &builder{t: t, right: width}
+	if len(images) > 0 && images[0] != nil {
+		b.images = images[0]
+	}
 	b.walkChildren(doc.Root, StyleFor("body"), 0)
 	b.flushInline()
 	return &Layout{
+		Text:      t,
 		Items:     b.items,
 		Links:     b.links,
 		Width:     width,
@@ -333,7 +342,10 @@ func (b *builder) flushInline() {
 					i++
 					n++
 				}
-				segs = append(segs, seg{space: true, w: n * font.Advance(r.st.Size), st: r.st})
+				// A space costs what the engine MEASURES for one, not the
+				// cell advance: Measure and wrap must price text identically
+				// or every paragraph breaks in the wrong place.
+				segs = append(segs, seg{space: true, w: n * b.t.Measure(" ", r.st), st: r.st})
 				continue
 			}
 			j := i
@@ -341,7 +353,7 @@ func (b *builder) flushInline() {
 				j++
 			}
 			word := r.text[i:j]
-			segs = append(segs, seg{text: word, st: r.st, target: r.target, w: b.m(word, r.st.Size)})
+			segs = append(segs, seg{text: word, st: r.st, target: r.target, w: b.t.Measure(word, r.st)})
 			i = j
 		}
 	}
@@ -353,7 +365,7 @@ func (b *builder) flushInline() {
 		avail = 16
 	}
 	wid := b.lineX + avail
-	lineH := font.LineHeight(1)
+	lineH := b.t.LineHeight(Style{Size: 1})
 	started := false
 	counted := false
 
@@ -380,9 +392,9 @@ func (b *builder) flushInline() {
 			x = b.lineX
 			started = false
 			counted = false
-			lineH = font.LineHeight(1)
+			lineH = b.t.LineHeight(Style{Size: 1})
 		}
-		lh := font.LineHeight(sg.st.Size)
+		lh := b.t.LineHeight(sg.st)
 		if lh > lineH {
 			lineH = lh
 		}
@@ -429,8 +441,12 @@ func (b *builder) emitPre(e *Node, left, inner int) {
 	if n := len(lines); n > 1 && strings.TrimSpace(lines[n-1]) == "" {
 		lines = lines[:n-1]
 	}
-	const stride = 10
-	cols := inner / font.Advance(1)
+	monoSt := Style{Size: 1, Mono: true}
+	stride := b.t.LineHeight(monoSt)
+	if stride < 8 {
+		stride = 8
+	}
+	cols := inner / b.t.Advance(monoSt)
 	if cols < 1 {
 		cols = 1
 	}
@@ -438,16 +454,17 @@ func (b *builder) emitPre(e *Node, left, inner int) {
 	b.items = append(b.items, box)
 	ty := b.y + 3
 	for _, ln := range lines {
-		ln = UpperASCII(ln)
-		if len(ln) > cols {
-			ln = ln[:cols-1] + "\u2026"
-			ln = UpperASCII(ln)
-			if len(ln) > cols {
-				ln = ln[:cols]
+		// Truncation stays visible (ADR 0028 D6) and stays on a rune boundary,
+		// so a multi-byte character is never cut in half.
+		if rs := []rune(ln); len(rs) > cols {
+			if cols > 1 {
+				ln = string(rs[:cols-1]) + "\u2026"
+			} else {
+				ln = "\u2026"
 			}
 		}
 		if ln != "" {
-			b.items = append(b.items, Item{Kind: ItemText, X: left + 4, Y: ty, W: len(ln) * font.Advance(1), H: stride, Text: ln, Size: 1, Mono: true, Color: ColorText})
+			b.items = append(b.items, Item{Kind: ItemText, X: left + 4, Y: ty, W: b.t.Measure(ln, monoSt), H: stride, Text: ln, Size: 1, Mono: true, Color: ColorText})
 		}
 		ty += stride
 		b.lines++
@@ -456,11 +473,6 @@ func (b *builder) emitPre(e *Node, left, inner int) {
 }
 
 func (b *builder) emitImage(e *Node, left, inner int) {
-	w := inner
-	if w > 96 {
-		w = 96
-	}
-	h := 40
 	label := e.Attr("alt")
 	if label == "" {
 		label = e.Attr("src")
@@ -468,6 +480,34 @@ func (b *builder) emitImage(e *Node, left, inner int) {
 	if label == "" {
 		label = "img"
 	}
+	// ADR 0028 S3: an <img> whose bytes the app can supply is decoded and drawn
+	// at its intrinsic size, capped to the content box. A missing, undecodable,
+	// or unresolvable image keeps the labeled placeholder box — visible, never
+	// blank (D5's rule, applied to the one element whose failure is silent).
+	if b.images != nil {
+		if src := e.Attr("src"); src != "" {
+			if data, ok := b.images(src); ok {
+				if img, err := DecodeImage(data); err == nil && img != nil {
+					w, h := img.Width, img.Height
+					if w > inner && w > 0 {
+						h = h * inner / w
+						w = inner
+					}
+					if w < 1 || h < 1 {
+						w, h = 1, 1
+					}
+					b.items = append(b.items, Item{Kind: ItemImage, X: left, Y: b.y, W: w, H: h, Text: label, Color: ColorMuted, Img: img})
+					b.y += h
+					return
+				}
+			}
+		}
+	}
+	w := inner
+	if w > 96 {
+		w = 96
+	}
+	h := 40
 	b.items = append(b.items, Item{Kind: ItemImage, X: left, Y: b.y, W: w, H: h, Text: label, Color: ColorMuted})
 	b.y += h
 }
@@ -523,7 +563,7 @@ func (b *builder) emitTable(e *Node, left, inner int) {
 				}
 			}
 			_ = n
-			if lines := (b.y - cy) / font.LineHeight(1); lines > maxLines {
+			if lines := (b.y - cy) / b.t.LineHeight(Style{Size: 1}); lines > maxLines {
 				maxLines = lines
 			}
 			if b.y < before {
@@ -531,14 +571,14 @@ func (b *builder) emitTable(e *Node, left, inner int) {
 			}
 			b.right = savedRight
 		}
-		h := maxLines*font.LineHeight(1) + 5
+		h := maxLines*b.t.LineHeight(Style{Size: 1}) + 5
 		b.y = rowTop + h
 		if r.header {
 			b.items = append(b.items, Item{Kind: ItemRule, X: left, Y: b.y - 1, W: cols*colw + gutter*(cols-1), H: 1, Color: ColorRule})
 		}
 	}
 	if b.y == startY {
-		b.y += font.LineHeight(1)
+		b.y += b.t.LineHeight(Style{Size: 1})
 	}
 	b.lineX = 0
 }

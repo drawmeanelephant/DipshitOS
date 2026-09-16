@@ -10,13 +10,6 @@ type Surface interface {
 	Fill(x, y, w, h int, rgb uint32)
 }
 
-// Measurer measures text at a font scale. Layout takes one so tests can
-// inject a stub metric and assert wrapping without a font.
-type Measurer func(text string, size int) int
-
-// DefaultMeasurer is the real 8x8-bitmap metric.
-var DefaultMeasurer Measurer = font.Measure
-
 // Clip is a half-open pixel rectangle used to keep page paint inside the
 // content viewport (the chrome is drawn by the browser into the same window).
 type Clip struct {
@@ -43,32 +36,20 @@ func (c Clip) Intersect(o Clip) Clip {
 	return Clip{X: x0, Y: y0, W: x1 - x0, H: y1 - y0}
 }
 
-// DrawText paints text glyph-by-glyph as 1-pixel-high spans, clipped to c.
-// Bold is a synthetic second strike offset by one pixel — the same trick the
-// Zig userland renderer uses, because no bold face exists. It returns the
-// advance width consumed.
+// DrawText paints text with the built-in 8x8 face as 1-pixel-high spans,
+// clipped to c. It is the fixed-size painter the browser chrome uses (the page
+// content goes through the renderer's TextEngine instead). Bold is a synthetic
+// second strike offset by one pixel — the same trick the Zig userland renderer
+// uses, because no bold face exists. It returns the advance width consumed.
 func DrawText(s Surface, x, y int, text string, size int, bold bool, rgb uint32, c Clip) int {
-	if size < font.MinScale {
-		size = font.MinScale
-	}
-	adv := font.Advance(size)
-	cx := x
-	for _, ch := range text {
-		if ch == '\t' {
-			cx += adv * 4
-			continue
-		}
-		rows := font.Glyph8(ch)
-		emitGlyph(s, cx, y, rows, size, rgb, c)
-		if bold {
-			emitGlyph(s, cx+1, y, rows, size, rgb, c)
-		}
-		cx += adv
-	}
-	return cx - x
+	return Bitmap{}.Paint(s, x, y, text, Style{Size: size, Bold: bold}, rgb, c)
 }
 
-func emitGlyph(s Surface, x, y int, rows [8]byte, size int, rgb uint32, c Clip) {
+// bitmapGlyph is the 8x8 face's glyph for a rune.
+func bitmapGlyph(ch rune) [8]byte { return font.Glyph8(ch) }
+
+// bitmapGlyphRows emits one glyph's set pixels as spans.
+func bitmapGlyphRows(s Surface, x, y int, rows [8]byte, size int, rgb uint32, c Clip) {
 	for r := 0; r < 8; r++ {
 		py := y + r*size
 		if py >= c.Y+c.H || py < c.Y {
