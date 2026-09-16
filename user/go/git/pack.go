@@ -26,7 +26,9 @@ const (
 	objTag      = 4
 	objOfsDelta = 6
 	objRefDelta = 7
-	maxObjSize  = 256 * 1024
+	// One object and the HTTP response that carries the pack share the
+	// 256 KiB guest file-read cap (vi.MaxFileBytes / FETCHS phaseRead).
+	maxObjSize = 256 * 1024
 )
 
 type gitObj struct {

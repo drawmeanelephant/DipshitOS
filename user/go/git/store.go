@@ -2,7 +2,9 @@ package main
 
 // Loose object store + a root-tree checkout. Paths stay inside the kernel's
 // 64-byte cap (file_table.max_path_len): dest is a short share path like
-// /host/G so objects/ab/<38-hex> still fits.
+// /host/G so objects/ab/<38-hex> still fits. No .git/index or config —
+// host `git status` in the checkout will look dirty; fsck/log are the
+// #1337 evidence.
 
 const maxPath = 64
 

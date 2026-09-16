@@ -25,6 +25,13 @@ const (
 	markerErr    = "gotgit: error "
 
 	maxWrite = 2048
+
+	// file_table MODE_DIR create returns -9 (EEXIST). ADR 0007 maps
+	// magnitude 9 to ENXIO; vi has no ErrEXIST.
+	errExist = int64(-9)
+
+	// FETCHS.BIN success is exit_status 42 (user/src/fetchs.zig).
+	fetchsOK = int64(42)
 )
 
 // argvPad keeps the Go sbrk heap from overlapping the kernel's argv+envp
@@ -165,6 +172,11 @@ func clone(tgt target, dest, gitDir string) bool {
 	if !checkout(dest, objs, want.SHA) {
 		return fail("checkout")
 	}
+	// Transfer scratch (path/out/body). Not .git/index or config:
+	// #1337 is object store + checkout, not a working-tree clone.
+	_ = vi.FileDelete(pathF)
+	_ = vi.FileDelete(outF)
+	_ = vi.FileDelete(bodyF)
 	return true
 }
 
@@ -187,7 +199,8 @@ func runHelper(tgt target, method, pathF, outF, bodyF string) bool {
 	if st < 0 {
 		return fail("wait " + method)
 	}
-	if method != "" && st != 0 && st != 42 {
+	// 0 is accepted when waitPID observes the pid gone after ProcExited.
+	if method != "" && st != 0 && st != fetchsOK {
 		return fail("helper status " + vi.Itoa64(st))
 	}
 	return true
@@ -349,7 +362,7 @@ func mkdir(path string) bool {
 		vi.FileClose(uint32(h))
 		return true
 	}
-	return r == -9 // already exists (file_table MODE_DIR EEXIST)
+	return r == errExist
 }
 
 func mkdirAll(path string) bool {

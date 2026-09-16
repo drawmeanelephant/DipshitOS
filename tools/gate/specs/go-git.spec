@@ -3,7 +3,14 @@
 #
 # Smart HTTP against a real `git http-backend` on the host, TLS 1.3 only,
 # the Zig helper owns the socket. Never a cleartext GET. Kernel untouched.
-# Proves a known blob/tree/commit lands on the guest share.
+# Proves a known blob/tree/commit lands on the guest share. The fixture
+# HELLO is large enough that `git repack` emits a depth-1 delta so class-B
+# actually runs ofs/ref-delta resolution (host tests cover the codec).
+# Not a fully usable clone: no .git/index or config (#1337 is object store
+# + checkout). Guest-facing TCP 24541 is the runner --net-tcp-respond pin
+# (same family as live-tls13). A leftover listener on that port is killed
+# in setup (collides with a concurrent go-git; per-run bind(:0) needs
+# vgate_run to expand a generated host port).
 #
 # HOST PREREQUISITE: bash tools/go/build-gogit.sh -> .build/go/GOTGIT.ELF
 # plus `git` on PATH. FETCHS.BIN comes from `zig build` (the harness).
@@ -27,8 +34,12 @@ import os, shutil, subprocess, sys, time
 run = os.environ["RUN_DIR"]
 share = os.environ.get("VG_SHARE") or os.path.join(run, "share")
 os.makedirs(share, exist_ok=True)
-# A previous failed run can leave a TLS listener on 24541; FETCHS then
-# handshakes with a half-dead peer and gets AlertReceived.
+# Guest-facing TCP 24541 is the runner --net-tcp-respond pin (same family
+# as live-tls13). A crashed run can leave python on that port; FETCHS then
+# handshakes with a half-dead peer (AlertReceived). Per-run bind(:0) would
+# need vgate_run to expand a generated host port, which this card does not
+# add. The kill is leftover hygiene and will collide with a concurrent
+# go-git in another worktree on the same pin.
 subprocess.run(["sh", "-c", "lsof -ti tcp:24541 | xargs kill -9"],
                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 time.sleep(0.2)
@@ -63,11 +74,17 @@ env.update({
 def g(*args, cwd=None):
     subprocess.check_call([git, "-c", "init.defaultBranch=main"] + list(args), cwd=cwd, env=env)
 
+def hello_blob(punch):
+    lines = ["line %03d of the git fixture blob" % i for i in range(200)]
+    if punch is not None:
+        lines[punch] = "LINE %03d CHANGED IN COMMIT TWO" % punch
+    return "\n".join(lines) + "\n"
+
 g("init", "-q", cwd=work)
-open(os.path.join(work, "HELLO"), "w").write("hello, git\n")
+open(os.path.join(work, "HELLO"), "w").write(hello_blob(None))
 g("add", "HELLO", cwd=work)
 g("commit", "-q", "-m", "first", cwd=work)
-open(os.path.join(work, "HELLO"), "w").write("hello, git!\n")
+open(os.path.join(work, "HELLO"), "w").write(hello_blob(100))
 g("add", "HELLO", cwd=work)
 g("commit", "-q", "-m", "second", cwd=work)
 bare = os.path.join(root, "g.git")
@@ -75,6 +92,14 @@ g("clone", "-q", "--bare", work, bare)
 g("--git-dir", bare, "config", "http.uploadpack", "true")
 g("--git-dir", bare, "-c", "pack.window=50", "-c", "pack.depth=50",
   "repack", "-a", "-d", "-q")
+pack_dir = os.path.join(bare, "objects", "pack")
+packs = [os.path.join(pack_dir, f) for f in os.listdir(pack_dir)
+         if f.endswith(".pack")]
+if not packs:
+    sys.exit("go-git: no pack after repack")
+vp = subprocess.check_output([git, "verify-pack", "-v", packs[0]], text=True)
+if "chain length" not in vp:
+    sys.exit("go-git: fixture pack has no delta (need a larger HELLO edit)")
 
 cfx = os.path.join("user", "src", "lib", "tls", "vectors", "fx")
 chain = os.path.join(cfx, "chain-ec.pem")
@@ -216,6 +241,7 @@ vgate_assert 01 serial-contains 'gotgit: blob '
 vgate_assert 01 serial-contains 'gotgit: tree '
 vgate_assert 01 serial-contains 'gotgit: commit '
 vgate_assert 01 serial-contains 'gotgit: checkout HELLO'
+vgate_assert 01 serial-contains 'gotgit: delta'
 vgate_assert 01 serial-contains 'gotgit OK'
 vgate_assert 01 serial-absent 'gotgit: error'
 vgate_assert 01 serial-absent 'GET / HTTP'
@@ -225,7 +251,10 @@ import os, zlib
 share = os.environ.get("VG_SHARE") or os.path.join(os.environ["RUN_DIR"], "share")
 hello_path = os.path.join(share, "G", "HELLO")
 hello = open(hello_path, "rb").read()
-assert hello == b"hello, git!\n", "HELLO = %r" % hello
+lines = ["line %03d of the git fixture blob" % i for i in range(200)]
+lines[100] = "LINE %03d CHANGED IN COMMIT TWO" % 100
+want = ("\n".join(lines) + "\n").encode()
+assert hello == want, "HELLO mismatch len=%d" % len(hello)
 objroot = os.path.join(share, "G", ".git", "objects")
 found = {"blob": 0, "tree": 0, "commit": 0}
 saw_hello = False
@@ -239,9 +268,9 @@ for d in sorted(os.listdir(objroot)):
         for kind in found:
             if data.startswith(kind.encode() + b" "):
                 found[kind] += 1
-        if data.startswith(b"blob ") and b"hello, git!\n" in data:
+        if data.startswith(b"blob ") and b"CHANGED IN COMMIT TWO" in data:
             saw_hello = True
 assert found["blob"] >= 1 and found["tree"] >= 1 and found["commit"] >= 1, found
 assert saw_hello, "known blob content missing from object store"
-print("go-git objects on disk: %s HELLO=%r" % (found, hello))
+print("go-git objects on disk: %s HELLO len=%d" % (found, len(hello)))
 PY

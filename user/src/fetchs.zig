@@ -77,8 +77,15 @@ var out_path: []const u8 = &.{};
 var method_store: [8]u8 = undefined;
 var path_store: [256]u8 = undefined;
 var outfile_store: [64]u8 = undefined;
+// POST body cap: git-upload-pack want/done for a single-want clone. A
+// larger want-list would need a bigger .bss slot; argv cannot carry it.
 var body_store: [8192]u8 = undefined;
 var hdr_store: [512]u8 = undefined;
+/// One TLS 1.3 application record is at most 2^14 bytes. `Client.read`
+/// copies a whole record and drops the tail if `out` is smaller, so this
+/// buffer has to be a full record — a 1 KiB stack buf truncated a ~2 KiB
+/// git-upload-pack response at 1024 bytes and the pack parser saw garbage.
+var read_store: [16384]u8 = undefined;
 var out_fd: i64 = -1;
 
 /// Decimal-print a signed value to the console. Two inputs cannot be exercised
@@ -370,17 +377,22 @@ noinline fn phaseRead() usize {
             out_fd = -1;
         }
     }
-    var buf: [1024]u8 = undefined;
     var total: usize = 0;
     var rounds: usize = 0;
     while (rounds < 256) : (rounds += 1) {
-        const n = client.read(&buf) catch break;
+        const n = client.read(&read_store) catch break;
         if (n == 0) break;
         total += n;
         if (out_fd >= 0) {
-            _ = ui.file_write(@intCast(out_fd), buf[0..n]);
+            var off: usize = 0;
+            while (off < n) {
+                const chunk = @min(n - off, 2048);
+                const w = ui.file_write(@intCast(out_fd), read_store[off..][0..chunk]);
+                if (w <= 0) break;
+                off += @intCast(w);
+            }
         } else {
-            ui.write_console(buf[0..n]);
+            ui.write_console(read_store[0..n]);
         }
     }
     printNum("fetchs: wrote ", @intCast(total));
