@@ -34,6 +34,33 @@ Every verification command belongs to exactly one class (canonical inventory:
   platform capability is unavailable, everything else still runs and the
   blocked step is reported precisely.
 
+## Guest self-test (M61) — the split of labor
+
+ADR 0031 ([`decisions/0031-guest-selftest.md`](decisions/0031-guest-selftest.md))
+moved part of the evidence into the guest. The rule, in one table:
+
+| Lives | Who |
+|---|---|
+| Boot, VZ death, host-injected HID, framebuffer goldens, hypervisor restore | **Host** class-B spec (keep `just gate`) |
+| Syscall ABI, files, windows, clocks, "did this app actually compute" | **Guest** `GOSELF.ELF` writes `/host/SELFTEST/…` |
+| Pass/fail of the run | Host reads those files (and one serial summary line). Serial is the heartbeat, not the proof. |
+
+- The share layout is `SELFTEST/IN/` (host-seeded fixtures),
+  `SELFTEST/OUT/` (guest receipts) and `SELFTEST/REPORT.txt` (the guest's
+  report) inside the per-run `--cvc-file` share — the host `cat`s them on
+  macOS. Nothing for this arc is packed into `disk.img`, and the guest
+  reads intake fixtures from the share rather than carrying them.
+- The serial contract is one summary line, `selftest: FAIL n=<N>` (N=0 on
+  success), printed after `REPORT.txt` is closed; the report's
+  `summary cases=<n> failed=<k>` must agree with it, and a run whose
+  summary never appears is a failed run.
+- One thin spec (`go-selftest`) boots the app. Do **not** add a
+  `live-foo.spec` for a case that belongs in GOSELF, and do not retire a
+  `live-*` spec until a later card shows the self-test case is strictly
+  stronger. TLS/SSH/net responders stay host-side.
+- The per-run share is deleted at `gate_end`; any file the host compares is
+  copied into `artifacts/` first (`artifacts/go-selftest-report.txt`, …).
+
 ## Locale determinism
 
 A generated file whose bytes depend on the shell's locale is worse than no
@@ -265,6 +292,7 @@ under `C` with no workflow noticing). The rules that came out of it:
 | `\RC.TXT` on the ESP | loader, only after pre-exit failure | Non-zero kernel status for the bad-handoff fixture |
 | `\MEMMAP.TXT` on the ESP | boot stub, before handoff | Pre-exit EFI memory map evidence |
 | `\KERNEL.TXT` on the ESP | milestone-one regression only | Not written after the kernel exits Boot Services |
+| `artifacts/go-selftest-report.txt` | `go-selftest` spec (copied before `gate_end`) | The guest's own `/host/SELFTEST/REPORT.txt` (ADR 0031) |
 | `artifacts/m2-probe.log` | kernel serial output | Candidate reads, signatures, selected transport, and observed/inferred decision |
 | `\KERNEL.BIN` on the ESP | `zig build` | Flat kernel image, verified with `elf2bin.py --info` |
 
