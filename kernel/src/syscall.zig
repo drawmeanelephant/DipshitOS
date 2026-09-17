@@ -2691,7 +2691,13 @@ fn handle_tcp_recv(args: Args, _: *exceptions.VectorFrame) u64 {
 
     const take = @min(@as(usize, @intCast(max)), tcp.rx_len);
     if (uaccess.copy_out(address, tcp.rx_payload[0..take], take) != .ok) return error_result(.efault);
-    _ = tcp.take_rx();
+    if (take == tcp.rx_len) {
+        _ = tcp.take_rx();
+    } else {
+        std.mem.copyForwards(u8, tcp.rx_payload[0 .. tcp.rx_len - take], tcp.rx_payload[take..tcp.rx_len]);
+        tcp.rx_len -= take;
+        tcp.rx_pending = true;
+    }
     return @intCast(take);
 }
 

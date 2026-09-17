@@ -475,15 +475,17 @@ pub fn abort_timeout() void {
 /// cleared. Called by the connect refusal, the retransmission abort
 /// (card N11), and any death path.
 /// Issue #1163 (phase 2): the readiness mask for the netpoll seam
-/// (slot 76). Bit 0 = readable (a segment payload is queued, or the
-/// connection is closed/fin_sent so a recv drains 0 and the caller can
-/// fail closed); bit 1 = writable (established with no pending
+/// (slot 76). Bit 0 = readable (a segment payload is queued, the
+/// connection is closed/fin_sent, or a peer FIN was received — recv
+/// drains the queued bytes and then reports 0, so the caller fails
+/// closed); bit 1 = writable (established with no pending
 /// retransmission). 0 = nothing to report. Level-triggered by design: it
 /// is a query, not an edge, so a poller cannot lose readiness.
 pub fn ready_mask() u64 {
     var mask: u64 = 0;
     if (rx_pending) mask |= 1;
     if (state == .closed or state == .fin_sent) mask |= 1;
+    if (peer_fin) mask |= 1;
     if (state == .established and !tx_pending) mask |= 2;
     return mask;
 }

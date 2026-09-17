@@ -3,7 +3,7 @@
 #
 # Proves, in a live VZ VM on Apple silicon:
 #   1. The host share seeds TrueType fonts (/host/INTER.TTF and /host/FIRACODE.TTF).
-#   2. On application window creation (NOTEPAD.BIN and EDIT.BIN), ui.init_fonts()
+#   2. On application window creation (NOTEPAD.BIN), ui.init_fonts()
 #      automatically probes and loads both Inter and Fira Code fonts.
 #   3. The guest emits the serial markers:
 #        "typography: Inter TrueType font loaded"

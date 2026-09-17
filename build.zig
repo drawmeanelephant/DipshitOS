@@ -673,7 +673,7 @@ pub fn build(b: *std.Build) void {
     // Guest: fourteenth ESP user program (milestone eleven, card A2 — claim 8401)
     // CALC.BIN. Interactive graphical calculator with 64-bit engine.
     // DSK3 segmented (writable .data/.bss — the WMS9 fill-batcher global needs
-    // the RW data+bss aperture; the EDIT/GLOBALS precedent).
+    // the RW data+bss aperture; the GLOBALS precedent).
     // ------------------------------------------------------------------
     const calc_prog = b.addExecutable(.{
         .name = "user-calc",
@@ -767,32 +767,6 @@ pub fn build(b: *std.Build) void {
     desktop_step.dependOn(&desktop_elf2bin.step);
     const install_desktop = b.addInstallFileWithDir(desktop_bin, .bin, "DESKTOP.BIN");
     b.getInstallStep().dependOn(&install_desktop.step);
-
-    // ------------------------------------------------------------------
-    // Guy: thirtieth ESP user program (M23 E1-E6 — EDIT.BIN, the text editor).
-    // Built as a SEGMENTED DSK3 image (like GLOBALS.BIN): the editor's ~140 KiB
-    // of state (4 × 32 KiB tab buffers + undo ring) lives in .data/.bss as a
-    // global, and the flat DSK1 format maps text read-only — a writable global
-    // needs the DSK3 loader's RW data+bss aperture (observed in the live gate).
-    // ------------------------------------------------------------------
-    const edit_prog = b.addExecutable(.{
-        .name = "user-edit",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("user/src/edit.zig"),
-            .target = kernel_target,
-            .optimize = .ReleaseSmall,
-        }),
-    });
-    edit_prog.linker_script = b.path("user/linker-segmented.ld");
-    const edit_step = b.step("edit", "Build the thirtieth user program (zig-out/bin/EDIT.BIN) — DSK3 segmented (writable .data/.bss)");
-    const edit_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
-    edit_elf2bin.addFileArg(edit_prog.getEmittedBin());
-    const edit_bin = edit_elf2bin.addOutputFileArg("EDIT.BIN");
-    edit_elf2bin.has_side_effects = true;
-    edit_elf2bin.stdio = .inherit;
-    edit_step.dependOn(&edit_elf2bin.step);
-    const install_edit = b.addInstallFileWithDir(edit_bin, .bin, "EDIT.BIN");
-    b.getInstallStep().dependOn(&install_edit.step);
 
     // ------------------------------------------------------------------
     // Guest: eighteenth ESP user program (milestone twelve, card N1 — claim 7483)

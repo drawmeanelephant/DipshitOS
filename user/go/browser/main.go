@@ -90,10 +90,11 @@ const (
 )
 
 // Load bounds. The response read is bounded three ways so a bad network
-// cannot hang the app: a byte cap, an idle cap, and the redirect hop cap.
+// cannot hang the app: a byte cap, a wall-clock deadline, and the redirect
+// hop cap.
 const (
-	maxRedirects = 5
-	readIdleMax  = 300
+	maxRedirects   = 5
+	readDeadlineMs = 30000
 )
 
 // HistoryPersistence is where visits are appended (inspectable text, one
@@ -175,10 +176,16 @@ type app struct {
 	loadFrom string
 	loadURL  webrender.URL
 	loadBuf  []byte
-	loadIdle int
 	loadHops int
 	loadSeen map[string]bool
-	chunk    [1024]byte
+	loadEnd  int64 // monotonic deadline (vi.Nanos ns) for the in-flight load
+	// loadFramed/loadNeed cache the response framing once the header block
+	// arrives: loadNeed >= 0 is the Content-Length body size, -1 means
+	// close-delimited (the peer's FIN ends the body), -2 means unsupported
+	// framing (chunked, duplicate/bogus Content-Length, over the byte cap).
+	loadFramed bool
+	loadNeed   int
+	chunk      [1024]byte
 }
 
 // virender adapts the kernel fill batcher to the renderer's Surface.
@@ -465,6 +472,19 @@ func classifyTarget(resolved string) string {
 	return "file"
 }
 
+// sendAll writes b to the socket in payload-bounded chunks, so a request
+// larger than one syscall send (192 B) can never be silently truncated.
+func sendAll(b []byte) bool {
+	for len(b) > 0 {
+		n, rc := vi.TCPSend(b)
+		if rc < 0 || n <= 0 {
+			return false
+		}
+		b = b[n:]
+	}
+	return true
+}
+
 // startHTTP connects, sends the GET, and arms the stepped read.
 func (a *app) startHTTP(u webrender.URL) {
 	if rc := vi.TCPConnect(u.IPv4, u.Port); rc < 0 {
@@ -472,44 +492,154 @@ func (a *app) startHTTP(u webrender.URL) {
 		return
 	}
 	req := webrender.FormatGetRequestWithCookies(u.Host, u.Path, a.cookieHeaderFor(u.Host, u.Path))
-	if _, rc := vi.TCPSend([]byte(req)); rc < 0 {
+	if !sendAll([]byte(req)) {
 		vi.TCPClose()
 		a.offlineOr("tcp")
 		return
 	}
 	a.loadURL = u
 	a.loadBuf = a.loadBuf[:0]
-	a.loadIdle = 0
+	a.loadFramed = false
+	a.loadNeed = 0
 	a.loading = true
+	a.loadEnd = vi.Nanos() + readDeadlineMs*1_000_000
 	vi.ConsoleLine(markerFetch + u.Host + u.Path)
 }
 
-// loadStep advances an in-flight load by one bounded read.
-func (a *app) loadStep() {
-	n, rc := vi.TCPRecv(a.chunk[:])
-	if rc < 0 {
-		vi.TCPClose()
-		a.loading = false
-		a.offlineOr("tcp")
+// responseNeed returns the response framing of a buffer:
+//
+//	>= 0  the body is exactly n bytes (Content-Length)
+//	-1    close-delimited: no Content-Length, the peer's FIN ends the body
+//	-2    unsupported or invalid framing (chunked transfer coding, a
+//	      duplicate or non-numeric Content-Length, or a declared body
+//	      over vi.MaxFileBytes)
+//
+// ok is false while the header block has not fully arrived (keep loading).
+func responseNeed(raw []byte) (need int, ok bool) {
+	head, _, complete := webrender.SplitHTTPResponse(raw)
+	if !complete {
+		return 0, false
+	}
+	need = -1
+	for _, line := range strings.Split(head, "\n")[1:] {
+		i := strings.IndexByte(line, ':')
+		if i < 0 {
+			continue
+		}
+		name := strings.TrimSpace(line[:i])
+		value := strings.TrimSpace(line[i+1:])
+		if strings.EqualFold(name, "Transfer-Encoding") {
+			return -2, true // this browser does not decode transfer codings
+		}
+		if !strings.EqualFold(name, "Content-Length") {
+			continue
+		}
+		if need >= 0 || value == "" {
+			return -2, true // duplicate or empty length
+		}
+		n := 0
+		for _, c := range value {
+			if c < '0' || c > '9' {
+				return -2, true
+			}
+			if n > (vi.MaxFileBytes-int(c-'0'))/10 {
+				return -2, true // the declared body cannot fit the cap
+			}
+			n = n*10 + int(c-'0')
+		}
+		need = n
+	}
+	return need, true
+}
+
+// bodyLen is the response body bytes buffered so far (0 before the header
+// block completes).
+func (a *app) bodyLen() int {
+	_, body, ok := webrender.SplitHTTPResponse(a.loadBuf)
+	if !ok {
+		return 0
+	}
+	return len(body)
+}
+
+// frame parses (once) and caches the response framing.
+func (a *app) frame() {
+	if a.loadFramed {
 		return
 	}
-	if n == 0 {
-		if len(a.loadBuf) > 0 {
+	if need, ok := responseNeed(a.loadBuf); ok {
+		a.loadFramed, a.loadNeed = true, need
+	}
+}
+
+// endFail closes the socket and raises a load error.
+func (a *app) endFail(kind string) {
+	vi.TCPClose()
+	a.loading = false
+	a.finishError(kind, a.target, a.loadFrom)
+}
+
+// endOffline closes the socket and takes the offline fallback.
+func (a *app) endOffline(kind string) {
+	vi.TCPClose()
+	a.loading = false
+	a.offlineOr(kind)
+}
+
+// loadStep advances an in-flight load by one bounded read.
+//
+// The body ends by its declared Content-Length, by the peer's FIN (a
+// close-delimited body: readiness bit 0 with a drained recv), by the byte
+// cap, or by the wall-clock deadline. An empty recv alone is NOT completion —
+// the kernel returns 0 while the next segment may still be a poll away — so
+// only an explicit framing or the FIN ends the read. The deadline is
+// consulted only when a step makes no progress: it bounds waiting, never
+// discards queued bytes.
+func (a *app) loadStep() {
+	mask, rc := vi.TCPReady()
+	if rc < 0 {
+		a.endOffline("tcp")
+		return
+	}
+	n, rc := vi.TCPRecv(a.chunk[:])
+	if rc < 0 {
+		a.endOffline("tcp")
+		return
+	}
+	if n > 0 {
+		a.loadBuf = append(a.loadBuf, a.chunk[:n]...)
+		a.loadEnd = vi.Nanos() + readDeadlineMs*1_000_000
+	} else if mask&1 == 0 {
+		// No bytes and no FIN: the read is idle, so the deadline applies.
+		if vi.Nanos() >= a.loadEnd {
+			a.endOffline("timeout")
+		}
+		return
+	}
+	a.frame()
+	switch {
+	case a.loadFramed && a.loadNeed == -2:
+		a.endFail("truncated")
+	case a.loadFramed && a.loadNeed >= 0:
+		if a.bodyLen() >= a.loadNeed {
 			a.completeLoad()
 			return
 		}
-		a.loadIdle++
-		if a.loadIdle > readIdleMax {
-			vi.TCPClose()
-			a.loading = false
-			a.offlineOr("timeout")
+		if n == 0 { // the peer closed before the declared body arrived
+			a.endFail("truncated")
 		}
-		return
-	}
-	a.loadIdle = 0
-	a.loadBuf = append(a.loadBuf, a.chunk[:n]...)
-	if len(a.loadBuf) >= vi.MaxFileBytes {
-		a.completeLoad()
+	case n == 0:
+		if len(a.loadBuf) == 0 {
+			// The peer closed without answering: not an empty page, and not
+			// a truncated one either — take the offline fallback if there is one.
+			a.endOffline("tcp")
+			return
+		}
+		a.completeLoad() // close-delimited: the FIN ended the body
+	default:
+		if len(a.loadBuf) >= vi.MaxFileBytes {
+			a.completeLoad()
+		}
 	}
 }
 
