@@ -1,0 +1,310 @@
+// Command calc is the Go calculator (CALC.BIN successor): a usable 64-bit
+// integer calc (digits, + - * /, equals, clear), full-viewport inside Zig
+// TABWM via user/go/tabapp. Zig CALC.BIN stays (M60 deletes it later). Not
+// CALC's programmer-mode feature list. Kernel untouched. No new Zig app.
+//
+// Every marker below is printed only AFTER its syscall returned, so the
+// go-calc VZ gate's asserts can only pass if the app actually ran.
+package main
+
+import (
+	"virelai/tabapp"
+	"virelai/vi"
+	"virelai/widgets"
+)
+
+const (
+	appName  = "GOCALC.ELF"
+	appTitle = "Calc"
+	natW     = 512
+	natH     = 384
+
+	markerOpen    = "gocalc: open id="
+	markerDeclare = "gocalc: declare accepted"
+	markerPresent = "gocalc: present"
+	markerResult  = "gocalc: result "
+	markerSaveErr = "gocalc: save error "
+	markerClose   = "gocalc: close"
+	markerOK      = "gocalc OK"
+	markerOpenErr = "gocalc: error open "
+
+	defaultPath = "/host/CALC/RESULT.TXT"
+
+	keyEnter  = 0x28
+	keyEscape = 0x29
+	keyBacksp = 0x2a
+
+	padRows = 4
+	padCols = 4
+)
+
+var padLabels = [padRows][padCols]string{
+	{"7", "8", "9", "/"},
+	{"4", "5", "6", "*"},
+	{"1", "2", "3", "-"},
+	{"0", "C", "=", "+"},
+}
+
+type app struct {
+	ta         *tabapp.TabApp
+	eng        Engine
+	path       string
+	expr       string
+	lastLine   string
+	justEvaled bool
+	disp       widgets.Text
+	keys       [padRows * padCols]widgets.Button
+}
+
+func main() {
+	path := defaultPath
+	if args := vi.Args(); len(args) > 1 && len(args[1]) > 0 {
+		path = args[1]
+	}
+
+	ta := tabapp.Init(tabapp.Config{Name: appName, Title: appTitle, X: 32, Y: 32, W: natW, H: natH})
+	if ta == nil {
+		vi.ConsoleLine(markerOpenErr + "-1")
+		vi.Exit(1)
+	}
+	vi.ConsoleLine(markerOpen + vi.Itoa64(int64(ta.Win)))
+	if ta.TabAware {
+		vi.ConsoleLine(markerDeclare)
+	} else {
+		vi.ConsoleLine("gocalc: declare refused")
+	}
+
+	a := &app{ta: ta, path: path}
+	a.draw()
+	a.ta.Present()
+	vi.ConsoleLine(markerPresent)
+
+	for {
+		ev, r, ok := vi.PollEventRaw()
+		if !ok {
+			if r < 0 {
+				break
+			}
+			vi.Sleep(1)
+			continue
+		}
+		switch a.ta.Dispatch(ev) {
+		case tabapp.ActionClosed:
+			vi.ConsoleLine(markerClose)
+			vi.ConsoleLine(markerOK)
+			a.ta.CloseAndExit(0)
+		case tabapp.ActionResized:
+			a.draw()
+			a.ta.Present()
+		case tabapp.ActionNone:
+			if a.handle(ev) {
+				a.draw()
+				a.ta.Present()
+			}
+		}
+	}
+}
+
+func (a *app) handle(ev vi.Event) bool {
+	switch ev.Kind {
+	case vi.EvKeyDown:
+		return a.key(ev)
+	case vi.EvMouseDown:
+		if ev.Flags&vi.BtnLeft == 0 {
+			return false
+		}
+		x, y := int(ev.Arg0), int(ev.Arg1)
+		for i := range a.keys {
+			if a.keys[i].HitTest(x, y) {
+				return a.press(padLabels[i/padCols][i%padCols])
+			}
+		}
+	}
+	return false
+}
+
+func (a *app) key(ev vi.Event) bool {
+	if ev.Kind != vi.EvKeyDown {
+		return false
+	}
+	if ev.Flags&vi.ModCtrl != 0 {
+		return false
+	}
+	switch ev.Arg0 {
+	case keyEnter:
+		return a.doEval()
+	case keyEscape:
+		return a.doClear()
+	case keyBacksp:
+		return a.doBackspace()
+	}
+	ch := ev.Arg1
+	if ch >= '0' && ch <= '9' {
+		return a.doDigit(uint8(ch - '0'))
+	}
+	switch ch {
+	case '+', '-', '*', '/':
+		return a.doOp(byte(ch))
+	case '=', '\r', '\n':
+		return a.doEval()
+	case 'c', 'C':
+		return a.doClear()
+	case 0x08:
+		return a.doBackspace()
+	}
+	return false
+}
+
+func (a *app) press(label string) bool {
+	if len(label) != 1 {
+		return false
+	}
+	ch := label[0]
+	if ch >= '0' && ch <= '9' {
+		return a.doDigit(uint8(ch - '0'))
+	}
+	switch ch {
+	case '+', '-', '*', '/':
+		return a.doOp(ch)
+	case '=':
+		return a.doEval()
+	case 'C':
+		return a.doClear()
+	}
+	return false
+}
+
+func (a *app) doDigit(d uint8) bool {
+	if a.justEvaled {
+		a.expr = ""
+		a.justEvaled = false
+	}
+	a.eng.InputDigit(d)
+	a.expr += string('0' + d)
+	return true
+}
+
+func (a *app) doOp(op byte) bool {
+	a.justEvaled = false
+	a.eng.SetOp(op)
+	if a.eng.hasErr {
+		a.expr = ""
+		return true
+	}
+	a.expr += string(op)
+	return true
+}
+
+func (a *app) doEval() bool {
+	a.eng.Evaluate()
+	disp := a.eng.Display()
+	a.lastLine = a.expr + "=" + disp
+	a.justEvaled = true
+	if !a.writeResult(a.lastLine) {
+		vi.ConsoleLine(markerSaveErr + a.path)
+	}
+	vi.ConsoleLine(markerResult + a.lastLine)
+	return true
+}
+
+func (a *app) doClear() bool {
+	a.eng.Clear()
+	a.expr = ""
+	a.lastLine = ""
+	a.justEvaled = false
+	return true
+}
+
+func (a *app) doBackspace() bool {
+	if !a.eng.entering {
+		return false
+	}
+	a.eng.Backspace()
+	if len(a.expr) > 0 {
+		last := a.expr[len(a.expr)-1]
+		if last >= '0' && last <= '9' {
+			a.expr = a.expr[:len(a.expr)-1]
+		}
+	}
+	return true
+}
+
+func (a *app) writeResult(line string) bool {
+	h, rc := vi.FileOpen(a.path, vi.ModeWrite|vi.ModeCreate)
+	if rc < 0 {
+		return false
+	}
+	body := []byte(line + "\n")
+	written := 0
+	for written < len(body) {
+		n, wrc := vi.FileWrite(uint32(h), body[written:])
+		if wrc < 0 || n <= 0 {
+			vi.FileClose(uint32(h))
+			return false
+		}
+		written += n
+	}
+	if trc := vi.FileTruncate(uint32(h), uint32(written)); trc < 0 {
+		vi.FileClose(uint32(h))
+		return false
+	}
+	vi.FileClose(uint32(h))
+	return true
+}
+
+func (a *app) layout() {
+	ta := a.ta
+	a.disp = widgets.Text{
+		R:     scaleR(ta, widgets.Rect{X: 8, Y: 8, W: int(natW) - 16, H: 48}),
+		Label: a.eng.Display(),
+		Fg:    0xe6edf3,
+		Bg:    0x1e2430,
+	}
+	const (
+		btnW = 118
+		btnH = 68
+		gap  = 8
+		x0   = 8
+		y0   = 64
+	)
+	for r := 0; r < padRows; r++ {
+		for c := 0; c < padCols; c++ {
+			a.keys[r*padCols+c] = widgets.Button{
+				R:        scaleR(ta, widgets.Rect{X: x0 + c*(btnW+gap), Y: y0 + r*(btnH+gap), W: btnW, H: btnH}),
+				Label:    padLabels[r][c],
+				Face:     0x2a3340,
+				Border:   0x5a6a80,
+				LabelRGB: 0xe0e8f0,
+			}
+		}
+	}
+}
+
+func (a *app) draw() {
+	a.layout()
+	var f vi.Filler
+	f.Rect(a.ta.Win, 0, 0, a.ta.W, a.ta.H, 0x101418)
+	cv := &widgetCanvas{f: &f, win: a.ta.Win}
+	a.disp.Draw(cv)
+	for i := range a.keys {
+		a.keys[i].Draw(cv)
+	}
+	f.Flush()
+}
+
+type widgetCanvas struct {
+	f   *vi.Filler
+	win int
+}
+
+func (c *widgetCanvas) FillRect(r widgets.Rect, rgb uint32) {
+	if r.W <= 0 || r.H <= 0 {
+		return
+	}
+	c.f.Rect(c.win, uint32(r.X), uint32(r.Y), uint32(r.W), uint32(r.H), rgb)
+}
+
+func scaleR(ta *tabapp.TabApp, r widgets.Rect) widgets.Rect {
+	s := ta.Layout(tabapp.Rect{X: r.X, Y: r.Y, W: r.W, H: r.H}, natW, natH)
+	return widgets.Rect{X: s.X, Y: s.Y, W: s.W, H: s.H}
+}
