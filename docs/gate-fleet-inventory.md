@@ -30,7 +30,7 @@
 | `tools/lib/` | 2 | per-run isolation for live gates (`gate-run.sh`) |
 | `tools/status/` | 7 | multiagent coordination gate + claim tooling (class A) |
 | `tools/context/` | 2 | context snapshot helpers |
-| `tools/gate/` | 249 | M40 vgate harness + specs (GF2+) |
+| `tools/gate/` | 250 | M40 vgate harness + specs (GF2+) |
 
 ## Class-B fleet (discovered from the spec dir)
 
@@ -59,6 +59,7 @@ of them with `just verify-vz`.
 | spec | `go-hello` | 1 run / 8 assert | go-hello.spec -- issue #1163, GOOS=virelai phase 0a: the gc Go runtime |
 | spec | `go-net` | 2 run / 24 assert | go-net.spec -- issue #1163 (phase 2) class-B gate: GONET.ELF proves a |
 | spec | `go-panic` | 1 run / 9 assert | go-panic.spec -- issue #1228: GOOS=virelai phase 0c fault delivery. |
+| spec | `go-r3d` | 1 run / 12 assert | go-r3d.spec -- class-B gate for the moonshot: a from-scratch Go EL0 |
 | spec | `go-stress` | 1 run / 10 assert | go-stress.spec -- issue #1227: GOOS=virelai 0b breadth (GC / channel / |
 | spec | `go-tabapp` | 1 run / 15 assert | go-tabapp.spec -- M56d (issue #1315) class-B gate: one Go app full-viewport |
 | spec | `go-term` | 1 run / 16 assert | go-term.spec -- M58c (issue #1307) class-B gate: a Go terminal window opens |
