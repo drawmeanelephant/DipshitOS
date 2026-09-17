@@ -53,6 +53,8 @@ const (
 	tagCmap = 0x636d6170
 	tagLoca = 0x6c6f6361
 	tagGlyf = 0x676c7966
+	tagGSUB = 0x47535542 // 'GSUB'
+	tagGPOS = 0x47504f53 // 'GPOS'
 )
 
 // Big-endian readers. Every caller brackets these with a bounds check.
@@ -93,6 +95,8 @@ type Face struct {
 	hmtx []byte
 	loca []byte
 	glyf []byte
+	gsub []byte
+	gpos []byte
 
 	// Exactly one of these cmap representations is populated.
 	groups  []cmapGroup
@@ -100,6 +104,13 @@ type Face struct {
 	byteMap []byte
 
 	cache *glyphCache
+
+	// Lazily parsed layout features (shape.go). nil until ShapeLatin is
+	// first called; parsedLiga/parsedKern record whether the attempt was
+	// made so a font without the tables does not re-parse per call.
+	ligaInit, kernInit bool
+	liga               *layout
+	kern               *layout
 }
 
 // Parse reads the sfnt directory and the tables this package needs. It returns
@@ -119,7 +130,7 @@ func Parse(data []byte) (*Face, error) {
 		return nil, ErrMalformed
 	}
 
-	var head, hhea, hmtx, maxp, cmap, loca, glyf []byte
+	var head, hhea, hmtx, maxp, cmap, loca, glyf, gsub, gpos []byte
 	for i := 0; i < numTables; i++ {
 		off := 12 + i*16
 		tag := be32(data[off : off+4])
@@ -144,6 +155,10 @@ func Parse(data []byte) (*Face, error) {
 			loca = slice
 		case tagGlyf:
 			glyf = slice
+		case tagGSUB:
+			gsub = slice
+		case tagGPOS:
+			gpos = slice
 		}
 	}
 	if head == nil || hhea == nil || hmtx == nil || maxp == nil || cmap == nil || loca == nil || glyf == nil {
@@ -158,6 +173,8 @@ func Parse(data []byte) (*Face, error) {
 		hmtx:       hmtx,
 		loca:       loca,
 		glyf:       glyf,
+		gsub:       gsub,
+		gpos:       gpos,
 		unitsPerEm: int(be16(head[18:20])),
 		locFormat:  int(int16(be16(head[50:52]))),
 		numGlyphs:  int(be16(maxp[4:6])),
