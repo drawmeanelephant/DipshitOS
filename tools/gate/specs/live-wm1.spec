@@ -12,8 +12,9 @@ exec TOP.BIN
 exec DESKTOP.BIN
 EOF
 
+# M60 / #1374: Zig FILE.BIN deleted; leftover SETTINGS.BIN fills the eighth window.
 vgate_file script2.txt <<'EOF'
-exec FILE.BIN
+exec SETTINGS.BIN
 exec SYSMON.BIN
 exec PS.BIN
 EOF
@@ -31,7 +32,7 @@ vgate_assert 01 serial-contains 'calc: ready'
 vgate_assert 01 serial-contains 'notepad: ready'
 vgate_assert 01 serial-contains 'top: ready'
 vgate_assert 01 serial-contains 'desktop: ready'
-vgate_assert 01 serial-contains 'file: ready'
+vgate_assert 01 serial-contains 'settings: ready'
 vgate_assert 01 serial-contains 'sysmon: ready'
 vgate_assert 01 serial-contains 'ps: ready'
 vgate_assert 01 serial-contains '12 sys_win_open calls=8'

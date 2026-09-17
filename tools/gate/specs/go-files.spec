@@ -4,7 +4,8 @@
 # user/go/files is a tabapp client: init -> declare (kind-8 WM_RPC) ->
 # sys_dir_list the seeded /host/FM directory -> find KNOWN.TXT -> read it ->
 # present -> close. Serial markers are the proof; each is printed only after
-# its syscall returned. Zig FILE.BIN is untouched. Kernel untouched.
+# its syscall returned. Zig FILE.BIN is gone (M60 / #1374); the file manager
+# is GOFILES.ELF. Kernel untouched.
 #
 # HOST PREREQUISITE (fails the gate honestly when missing):
 #   bash tools/go/build-files.sh   ->  .build/go/GOFILES.ELF

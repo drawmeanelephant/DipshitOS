@@ -30,7 +30,7 @@
 | `tools/lib/` | 2 | per-run isolation for live gates (`gate-run.sh`) |
 | `tools/status/` | 7 | multiagent coordination gate + claim tooling (class A) |
 | `tools/context/` | 2 | context snapshot helpers |
-| `tools/gate/` | 252 | M40 vgate harness + specs (GF2+) |
+| `tools/gate/` | 248 | M40 vgate harness + specs (GF2+) |
 
 ## Class-B fleet (discovered from the spec dir)
 
@@ -95,11 +95,7 @@ of them with `just verify-vz`.
 | spec | `live-exceptions` | 1 run / 8 assert | live-exceptions.spec -- exception vectors live on VZ. Mirrors |
 | spec | `live-exec` | 1 run / 6 assert | live-exec.spec -- a real user program (USER.BIN) loaded from the ESP |
 | spec | `live-fetch` | 1 run / 15 assert | live-fetch.spec -- FETCH.BIN (exec'd) performs the HTTP/1.0 fetch |
-| spec | `live-file-browser` | 1 run / 12 assert | live-file-browser.spec -- claim 4046 (Milestone 13 B4): desktop composition on VZ. |
-| spec | `live-filemanager-bulk` | 1 run / 11 assert | live-filemanager-bulk.spec -- M25 Lane A F1: multi-select + batch delete on VZ. |
 | spec | `live-filemanager-du` | 1 run / 5 assert | live-filemanager-du.spec -- M25 F4: recursive disk usage (`du`) on VZ. |
-| spec | `live-filemanager-props` | 1 run / 5 assert | live-filemanager-props.spec -- M25 Lane A F2: properties inspector on VZ. |
-| spec | `live-filemanager-recent` | 1 run / 7 assert | live-filemanager-recent.spec -- M25 Lane B F5: recent ring on VZ. |
 | spec | `live-font-sizes` | 1 run / 6 assert | live-font-sizes.spec -- milestone-twenty card U1 class-B gate |
 | spec | `live-forensics` | 1 run / 13 assert | live-forensics.spec -- #1278 class-B gate: the last-words recorder. |
 | spec | `live-fs` | 2 run / 12 assert | live-fs.spec -- host-share storage (M34 HF6): run A writes |
@@ -227,12 +223,12 @@ of them with `just verify-vz`.
 | spec | `live-term-depth` | 1 run / 9 assert | live-term-depth.spec -- M49 card SD5 class-B gate (issue #1132). |
 | spec | `live-term-net` | 1 run / 5 assert | live-term-net.spec -- M46 RC3b class-B gate (issue #1104, ADR 0020 B6). |
 | spec | `live-text` | 1 run / 10 assert | live-text.spec -- claim 3194 (milestone six, card G2) class-B gate: |
-| spec | `live-text-search` | 2 run / 9 assert | live-text-search.spec -- milestone-twenty card U3 class-B gate (text search in apps) |
+| spec | `live-text-search` | 1 run / 5 assert | live-text-search.spec -- milestone-twenty card U3 class-B gate (text search in apps) |
 | spec | `live-time` | 1 run / 4 assert | live-time.spec -- M22 D13 (issue #336) class-B gate: |
 | spec | `live-timer` | 1 run / 6 assert | live-timer.spec -- real CNTP PPI delivery through the EL1 IRQ vector. |
 | spec | `live-timers` | 1 run / 13 assert | live-timers.spec -- claim 7323 (Milestone 14, Card S2) class-B gate: |
 | spec | `live-tls13` | 1 run / 9 assert | live-tls13.spec -- cards TLS13-C8/C11: the guest HTTPS consumer. |
-| spec | `live-tokens` | 10 run / 30 assert | live-tokens.spec -- M37 DQ4 design tokens & cohesion |
+| spec | `live-tokens` | 8 run / 24 assert | live-tokens.spec -- M37 DQ4 design tokens & cohesion |
 | spec | `live-transcript` | 1 run / 6 assert | live-transcript.spec -- vgate pilot (serial-only + repeat): live RX. |
 | spec | `live-trust-caps` | 2 run / 14 assert | live-trust-caps.spec -- M50 TS3 class-B gate (issue #1137, ADR 0024 D5/D10). |
 | spec | `live-trust-modes` | 1 run / 11 assert | live-trust-modes.spec -- M50 TS2 class-B gate (issue #1136, ADR 0024 D3/D4/D8). |

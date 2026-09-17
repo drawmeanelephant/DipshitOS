@@ -38,7 +38,7 @@ Every milestone through **thirty-one** has landed and closed:
 | User filesystem ABI | Per-process file table, `/esp/` + `/data/` routing, file syscalls (slots 23–27), storage utilities | Done |
 | Desktop platform | ADR 0011: zero-heap `ui.zig` widget toolkit + `CALC.BIN`, `NOTEPAD.BIN`, `TOP.BIN`, `DESKTOP.BIN` launcher | Done |
 | Network apps | TCP syscall seam (slots 30–33), RFC 1035 DNS, `TCP.BIN`/`FETCH.BIN`/`CHAT.BIN` | Done |
-| Files & applications | Mutating filesystem seam (slots 34–37), `APPS.TXT` manifest, `FILE.BIN` graphical data browser, desktop composition | Done |
+| Files & applications | Mutating filesystem seam (slots 34–37), `APPS.TXT` manifest, graphical data browser (now `GOFILES.ELF`), desktop composition | Done |
 | Shared services | Clipboard + app timers + composition capstone + isolation hardening (slots 38–41) | Done |
 | Audio | virtio-snd, PCM playback, `beep`, the EL0 audio seam (slots 42–45), `JINGLE.BIN` + the boot chime + `CHIME.BIN` | Done |
 | Internals consolidation | Multi-segment user images, guard pages, measured pools (issues #190–#193) | Done |
@@ -100,8 +100,8 @@ A single boot of VirelaiOS gets you, in order:
   terminal.
 - A graphical desktop: the `DESKTOP.BIN` launcher with a working calculator
   (`CALC.BIN`), a persistent text editor (`NOTEPAD.BIN`), a click-to-kill
-  process monitor (`TOP.BIN`), and a file browser over the DATA partition
-  (`FILE.BIN`).
+  process monitor (`TOP.BIN`), and a file browser over the host share
+  (`GOFILES.ELF`).
 - Userland network applications: an HTTP/1.0 client (`FETCH.BIN`), a
   peer-to-peer graphical chat app (`CHAT.BIN`), and an in-guest HTTP/1.1 web
   server (`HTTPD.BIN`) that serves the guest's own files to the host.
