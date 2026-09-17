@@ -191,6 +191,11 @@ func parseLookup(data []byte, lookupList, idx, wantType int, lay *layout) {
 	}
 	lookupType := int(be16(data[lookup : lookup+2]))
 	if lookupType == extSubst || lookupType == extPos {
+		// Type 7 unwraps GSUB lookups, type 9 unwraps GPOS lookups.
+		// A wrapper from the other table is ignored, not reinterpreted.
+		if (lookupType == extSubst && wantType != 4) || (lookupType == extPos && wantType != 2) {
+			return
+		}
 		n := int(be16(data[lookup+4 : lookup+6]))
 		for i := 0; i < n; i++ {
 			p := lookup + 6 + i*2
@@ -267,8 +272,7 @@ func parseLigatureSubtable(data []byte, sub int, lay *layout) {
 	if sub+6 > len(data) || int(be16(data[sub:sub+2])) != 1 {
 		return
 	}
-	covOff := sub + int(be16(data[sub+2:sub+4]))
-	cov := parseCoverage(data, covOff)
+	cov := parseCoverage(data, offsetTable(sub, be16(data[sub+2:sub+4])))
 	if cov == nil {
 		return
 	}
@@ -347,6 +351,20 @@ func parsePairSubtable(data []byte, sub int, lay *layout) {
 	}
 }
 
+// offsetTable resolves an OpenType offset16 relative to base. Offset 0 is
+// NULL (the table is absent), not "the table starts at base".
+func offsetTable(base int, offset uint16) int {
+	if offset == 0 {
+		return -1
+	}
+	return base + int(offset)
+}
+
+// maxRangeGlyphs caps Format-2 Coverage / ClassDef range expansion. A font
+// is attacker-supplied data; a handful of 0..65535 ranges must not
+// materialize unbounded slices or burn CPU.
+const maxRangeGlyphs = 65536
+
 // parseCoverage decodes a coverage table (either format) into its ordered
 // glyph list. Returns nil for anything malformed.
 func parseCoverage(data []byte, cov int) []uint16 {
@@ -365,11 +383,13 @@ func parseCoverage(data []byte, cov int) []uint16 {
 		}
 		return out
 	case 2:
-		if cov+12 > len(data) {
-			return nil
-		}
+		// CoverageFormat2: uint16 format, uint16 rangeCount, then
+		// RangeRecords (start, end, startCoverageIndex) of 6 bytes.
+		// A single range is 4+6 = 10 bytes; do not demand a 12-byte
+		// header. The glyph list is the glyph ids (start..end), not
+		// the startCoverageIndex column.
 		n := int(be16(data[cov+2 : cov+4]))
-		out := make([]uint16, 0, n*8)
+		out := make([]uint16, 0, n)
 		for i := 0; i < n; i++ {
 			p := cov + 4 + i*6
 			if p+6 > len(data) {
@@ -377,16 +397,17 @@ func parseCoverage(data []byte, cov int) []uint16 {
 			}
 			start := be16(data[p : p+2])
 			end := be16(data[p+2 : p+4])
-			gid := be16(data[p+4 : p+6])
 			if end < start {
 				continue
 			}
 			for g := start; ; g++ {
-				out = append(out, gid)
+				if len(out) >= maxRangeGlyphs {
+					return nil
+				}
+				out = append(out, g)
 				if g == end {
 					break
 				}
-				gid++
 			}
 		}
 		return out
@@ -445,8 +466,7 @@ func parsePairFormat1(data []byte, sub int, lay *layout) {
 	if sub+10 > len(data) || int(be16(data[sub:sub+2])) != 1 {
 		return
 	}
-	covOff := sub + int(be16(data[sub+2:sub+4]))
-	cov := parseCoverage(data, covOff)
+	cov := parseCoverage(data, offsetTable(sub, be16(data[sub+2:sub+4])))
 	if cov == nil {
 		return
 	}
@@ -510,9 +530,9 @@ func parsePairFormat2(data []byte, sub int, lay *layout) {
 	// PairPosFormat2 header: fmt, coverage, valueFormat1, valueFormat2,
 	// classDef1, classDef2, class1Count, class2Count — value formats
 	// come before the class-def offsets.
-	cov := parseCoverage(data, sub+int(be16(data[sub+2:sub+4])))
-	cd1 := parseClassDef(data, sub+int(be16(data[sub+8:sub+10])))
-	cd2 := parseClassDef(data, sub+int(be16(data[sub+10:sub+12])))
+	cov := parseCoverage(data, offsetTable(sub, be16(data[sub+2:sub+4])))
+	cd1 := parseClassDef(data, offsetTable(sub, be16(data[sub+8:sub+10])))
+	cd2 := parseClassDef(data, offsetTable(sub, be16(data[sub+10:sub+12])))
 	if cov == nil || cd1 == nil || cd2 == nil {
 		return
 	}
@@ -599,6 +619,9 @@ func parseClassDef(data []byte, cd int) map[uint16]int {
 	}
 	switch int(be16(data[cd : cd+2])) {
 	case 1:
+		if cd+6 > len(data) {
+			return nil
+		}
 		start := be16(data[cd+2 : cd+4])
 		n := int(be16(data[cd+4 : cd+6]))
 		if cd+6+n*2 > len(data) {
@@ -626,6 +649,9 @@ func parseClassDef(data []byte, cd int) map[uint16]int {
 				continue
 			}
 			for g := start; ; g++ {
+				if len(m) >= maxRangeGlyphs {
+					return nil
+				}
 				m[g] = cls
 				if g == end {
 					break

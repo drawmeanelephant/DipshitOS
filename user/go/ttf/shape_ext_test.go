@@ -283,3 +283,118 @@ func TestPairSetHugeCountDoesNotPanic(t *testing.T) {
 	data[83] = 0xFF
 	parseLayout(data, "kern", 2)
 }
+
+// TestParseCoverageFormat2 is the probe that failed on the first PR: a
+// 10-byte CoverageFormat2 (one range, glyphs 7–8) must return [7 8], not
+// nil (the old 12-byte header check) and not [0 1] (appending
+// startCoverageIndex instead of the glyph id).
+func TestParseCoverageFormat2(t *testing.T) {
+	b := []byte{
+		0x00, 0x02, // format 2
+		0x00, 0x01, // rangeCount 1
+		0x00, 0x07, // start 7
+		0x00, 0x08, // end 8
+		0x00, 0x00, // startCoverageIndex 0 — must not appear in the list
+	}
+	if len(b) != 10 {
+		t.Fatalf("fixture is %d bytes, want 10", len(b))
+	}
+	got := parseCoverage(b, 0)
+	if len(got) != 2 || got[0] != 7 || got[1] != 8 {
+		t.Fatalf("parseCoverage(format2 7-8) = %v, want [7 8]", got)
+	}
+}
+
+// buildPairFormat1Coverage2 is PairPosFormat1 whose coverage table is
+// Format 2 (one range, glyph 7). The pair must still resolve, so the
+// coverage list is used as first-glyph ids, not as coverage indexes.
+func buildPairFormat1Coverage2() []byte {
+	b := []byte{}
+	put16 := func(v int) { b = append(b, byte(v>>8), byte(v)) }
+	put32 := func(v uint32) {
+		b = append(b, byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
+	}
+	put32(0x00010000)
+	put16(10)
+	put16(30)
+	put16(44)
+
+	put16(1)
+	b = append(b, 'l', 'a', 't', 'n')
+	put16(8)
+	put16(4)
+	put16(0)
+	put16(0)
+	put16(0xFFFF)
+	put16(1)
+	put16(0)
+
+	put16(1)
+	b = append(b, 'k', 'e', 'r', 'n')
+	put16(8)
+	put16(0)
+	put16(1)
+	put16(0)
+
+	put16(1)
+	put16(4)
+	put16(2)
+	put16(0)
+	put16(1)
+	put16(8)
+
+	// PairPosFormat1 at 56: coverage@12, vf1 XAdvance, vf2 0,
+	// pairSetCount 1, pairSet@22 (coverage format 2 is 10 bytes).
+	put16(1)
+	put16(12)
+	put16(0x0004)
+	put16(0)
+	put16(1)
+	put16(22)
+	// CoverageFormat2 at 68: range 7..7.
+	put16(2)
+	put16(1)
+	put16(7)
+	put16(7)
+	put16(0)
+	// PairSet at 78.
+	put16(1)
+	put16(8)
+	put16(-120 & 0xFFFF)
+	return b
+}
+
+func TestParsePairFormat1Coverage2(t *testing.T) {
+	lay := parseLayout(buildPairFormat1Coverage2(), "kern", 2)
+	if lay == nil {
+		t.Fatal("format-2 coverage pair table did not parse")
+	}
+	m, ok := lay.pairs[7]
+	if !ok {
+		t.Fatalf("no pair entry for first glyph 7 (got pairs %v)", lay.pairs)
+	}
+	if m[8] != -120 {
+		t.Errorf("pair (7,8) = %d, want -120", m[8])
+	}
+}
+
+func TestZeroCoverageOffsetIsAbsent(t *testing.T) {
+	data := buildPairFormat1Coverage2()
+	// PairPosFormat1 lives at 56; bytes 58..59 are the coverage offset.
+	data[58] = 0
+	data[59] = 0
+	if lay := parseLayout(data, "kern", 2); lay != nil {
+		t.Fatalf("coverage offset 0 should be absent, got %+v", lay.pairs)
+	}
+}
+
+func TestExtensionTypeMustMatchTable(t *testing.T) {
+	data := buildExtLayout()
+	// Lookup at 48: type 9 (GPOS extension). Rewrite as type 7 (GSUB
+	// extension). A kern parse must not unwrap it.
+	data[48] = 0
+	data[49] = 7
+	if lay := parseLayout(data, "kern", 2); lay != nil {
+		t.Fatalf("GSUB extension wrapping a GPOS pair must be ignored, got %+v", lay.pairs)
+	}
+}

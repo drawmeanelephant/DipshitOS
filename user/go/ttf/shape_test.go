@@ -114,13 +114,15 @@ func TestInterFiraShapeIsCmapOnly(t *testing.T) {
 		if len(got) != 8 {
 			t.Fatalf("%s: shaped %d glyphs, want 8 (cmap-only)", path, len(got))
 		}
-		i := 0
+		gi := 0
+		byteOff := 0
 		for _, r := range fixtureString {
-			if got[i].GID != f.GlyphIndex(r) || got[i].Cluster != i {
+			if got[gi].GID != f.GlyphIndex(r) || got[gi].Cluster != byteOff {
 				t.Errorf("%s: glyph %d = (%d,%d), want (%d,%d)",
-					path, i, got[i].GID, got[i].Cluster, f.GlyphIndex(r), i)
+					path, gi, got[gi].GID, got[gi].Cluster, f.GlyphIndex(r), byteOff)
 			}
-			i += len(string(r))
+			gi++
+			byteOff += len(string(r))
 		}
 	}
 }
