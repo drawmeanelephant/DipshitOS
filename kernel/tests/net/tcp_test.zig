@@ -40,6 +40,7 @@ const advance_snd = tcp.advance_snd;
 const build_fin_msg = tcp.build_fin_msg;
 const build_data_msg = tcp.build_data_msg;
 const take_rx = tcp.take_rx;
+const ready_mask = tcp.ready_mask;
 const record_pending = tcp.record_pending;
 const poll_rto = tcp.poll_rto;
 const listen = tcp.listen;
@@ -247,6 +248,24 @@ test "tcp: the RX buffer holds ONE segment — a second unread segment is droppe
     try std.testing.expectEqual(Event.none, handle_rx(&d2));
     try std.testing.expectEqual(@as(u64, 1), tcp.dropped_malformed);
     try std.testing.expectEqualSlices(u8, "one", tcp.rx_payload[0..tcp.rx_len]); // unchanged
+}
+
+test "tcp: ready_mask reports a peer FIN in ESTABLISHED as readable" {
+    arp.own_ip = ip_guest;
+    defer arp.own_ip = .{ 0, 0, 0, 0 };
+    reset();
+    defer reset();
+    start(ip_host, 9999, 1, host_mac);
+    const sa = craft_frame(ip_host, host_mac, ip_guest, test_mac, 9999, default_src_port, 0xaaaa0000, 2, flag_syn | flag_ack, &.{});
+    try std.testing.expectEqual(Event.synack_recv, handle_rx(&sa));
+    try std.testing.expectEqual(@as(u64, 2), ready_mask() & 3); // writable, not readable
+    // The server closes first: FIN+ACK — no queued payload, but the
+    // connection is terminal, so bit 0 (readable) must be set for a
+    // poller to stop waiting (recv drains 0 and the caller fails closed).
+    const fin = craft_frame(ip_host, host_mac, ip_guest, test_mac, 9999, default_src_port, 0xaaaa0001, 3, flag_ack | flag_fin, &.{});
+    try std.testing.expectEqual(Event.finack_recv, handle_rx(&fin));
+    try std.testing.expect(!tcp.rx_pending);
+    try std.testing.expectEqual(@as(u64, 1), ready_mask() & 1);
 }
 
 test "tcp: the bounded connect timeout — 30 s then an honest refuse" {
