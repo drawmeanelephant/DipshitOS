@@ -46,20 +46,31 @@ const (
 	MarkerHostDone   = "gotabwm: host done"
 )
 
-// hostedApp is the window id of the Zig app the seat is hosting (0 = none).
-// While it is set the seat stops repainting the blank desktop: the kernel's own
-// layer (the unmigrated Zig window and its chrome) is painted at the tick, and
-// the compose-N target sits ABOVE it, so a full-frame blank paint would overpaint
-// the client.
-var hostedApp uint32
+// tabs is the in-process strip (M62b). hostedApp is the focused client's
+// window id (0 = none) kept in sync so the M57c paint-suppression check
+// and go-wm-seat close path keep working with one hosted app.
+var (
+	tabs      TabStrip
+	hostedApp uint32
+)
 
-// hostTicks is how long the seat hosts an app before closing it - enough ticks
-// for the app to declare, take the viewport and relayout.
+// hostTicks is how long the seat hosts a SINGLE app before closing it —
+// enough composite ticks for the app to declare, take the viewport and relayout.
+// Two tabs skip this countdown and use the strip choreography in seat.go.
 const hostTicks = 3
 
-// hostTicksLeft counts down while an app is hosted; the composite loop closes
-// the app when it reaches zero.
+// hostTicksLeft counts down while exactly one tab is open; the composite
+// loop closes that tab when it reaches zero (go-wm-seat / go-wm-default).
 var hostTicksLeft int
+
+// Two-tab close choreography (M62b): wait until the rail has been painted
+// with n>=2, close the focused tab, then close the last. The seat stays
+// registered after the strip is empty.
+var (
+	stripSawTwo    bool
+	stripClosedOne bool
+	stripDone      bool
+)
 
 // serviceRPC drains the seat's mailbox and services every queued WM_RPC
 // request. It is called from the composite loop, so the seat answers while it
@@ -95,12 +106,18 @@ func applyRPC(req vi.WmRpc) bool {
 	id := uint32(req.ID)
 	switch req.Kind & 0x7f {
 	case vi.WmRpcKindDeclareFullscreen: // 8, the path lib/tabapp.zig uses
+		if tabs.OpenTab(id, req.TitleString()) {
+			vi.ConsoleLine(MarkerTabOpen + vi.Itoa64(int64(id)))
+		}
 		hostedApp = id
 		hostTicksLeft = hostTicks
 		// Focus and raise through the kernel's taskbar-click primitive, so the
-		// app receives the real WIN_FOCUS.
+		// app receives the real WIN_FOCUS. New declares take focus so two
+		// clients leave exactly one focused tab (M62b).
 		if vi.WmctlTaskbarClick(id) == 0 {
+			_ = tabs.FocusTab(id)
 			vi.ConsoleLine(MarkerHostFocus + vi.Itoa64(int64(id)))
+			vi.ConsoleLine(MarkerTabFocus + vi.Itoa64(int64(id)))
 		}
 		// Propose the full viewport. The kernel clamps (WM proposes, kernel
 		// clamps) and pushes WIN_RESIZE to the app, which relayouts.
@@ -111,17 +128,30 @@ func applyRPC(req vi.WmRpc) bool {
 		return true
 	case vi.WmRpcKindRaise: // 1
 		if vi.WmctlTaskbarClick(id) == 0 {
+			_ = tabs.FocusTab(id)
 			vi.ConsoleLine(MarkerRpcRaise + vi.Itoa64(int64(id)))
+			vi.ConsoleLine(MarkerTabFocus + vi.Itoa64(int64(id)))
 			return true
 		}
 		return false
 	case vi.WmRpcKindAttachTab: // 5
+		if tabs.OpenTab(id, req.TitleString()) {
+			vi.ConsoleLine(MarkerTabOpen + vi.Itoa64(int64(id)))
+		}
 		vi.ConsoleLine(MarkerRpcAttach + vi.Itoa64(int64(id)))
 		return true
 	case vi.WmRpcKindDetachTab: // 6
+		_ = tabs.CloseTab(id)
+		syncHostedFromStrip()
 		vi.ConsoleLine(MarkerRpcDetach + vi.Itoa64(int64(id)))
 		return true
 	case vi.WmRpcKindCycleTab: // 7
+		if nid, ok := tabs.NextID(); ok {
+			if vi.WmctlTaskbarClick(nid) == 0 {
+				_ = tabs.FocusTab(nid)
+				vi.ConsoleLine(MarkerTabFocus + vi.Itoa64(int64(nid)))
+			}
+		}
 		vi.ConsoleLine(MarkerRpcCycle)
 		return true
 	default:
@@ -156,17 +186,39 @@ func buildReply(req vi.WmRpc, applied bool) vi.WmRpc {
 	return rep
 }
 
-// closeHosted closes the hosted app's window through the WM seam; the app
-// receives the real WIN_CLOSE and exits. Returns whether a close was issued.
+// closeHosted closes the focused tab's window through the WM seam; the app
+// receives the real WIN_CLOSE and exits. Focus moves to the remaining tab
+// (M62b) or the strip goes empty. Returns whether a close was issued.
 func closeHosted() bool {
-	if hostedApp == 0 {
+	id, ok := tabs.Focused()
+	if !ok {
+		if hostedApp == 0 {
+			return false
+		}
+		id = hostedApp
+	}
+	if vi.WmctlWinClose(id) != 0 {
 		return false
 	}
-	id := hostedApp
-	hostedApp = 0
-	if vi.WmctlWinClose(id) == 0 {
-		vi.ConsoleLine(MarkerHostClose + vi.Itoa64(int64(id)))
-		return true
+	vi.ConsoleLine(MarkerHostClose + vi.Itoa64(int64(id)))
+	vi.ConsoleLine(MarkerTabClose + vi.Itoa64(int64(id)))
+	_ = tabs.CloseTab(id)
+	syncHostedFromStrip()
+	if nid, ok := tabs.Focused(); ok {
+		if vi.WmctlTaskbarClick(nid) == 0 {
+			vi.ConsoleLine(MarkerTabFocus + vi.Itoa64(int64(nid)))
+			vi.ConsoleLine(MarkerHostFocus + vi.Itoa64(int64(nid)))
+		}
+	} else {
+		vi.ConsoleLine(MarkerTabsEmpty)
 	}
-	return false
+	return true
+}
+
+func syncHostedFromStrip() {
+	if id, ok := tabs.Focused(); ok {
+		hostedApp = id
+		return
+	}
+	hostedApp = 0
 }

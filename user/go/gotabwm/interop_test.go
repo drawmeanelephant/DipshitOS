@@ -20,6 +20,11 @@ func TestInteropMarkerShapes(t *testing.T) {
 		{MarkerHostView, "gotabwm: host view id="},
 		{MarkerHostClose, "gotabwm: host close id="},
 		{MarkerHostDone, "gotabwm: host done"},
+		{MarkerTabOpen, "gotabwm: tab open id="},
+		{MarkerTabFocus, "gotabwm: tab focus id="},
+		{MarkerTabClose, "gotabwm: tab close id="},
+		{MarkerRail, "gotabwm: rail "},
+		{MarkerTabsEmpty, "gotabwm: tabs empty"},
 	}
 	for _, c := range cases {
 		if c.got != c.want {
@@ -68,19 +73,34 @@ func TestHostTickBudget(t *testing.T) {
 	if hostTicks > maxTicks {
 		t.Fatalf("hostTicks %d > maxTicks %d: the close is unreachable", hostTicks, maxTicks)
 	}
+	// Two-tab close uses 1 tick to show n=2, 1 to close focused, 1 to close
+	// last. That plus the single-tab budget must still fit in maxTicks.
+	const twoTabTicks = 3
+	if hostTicks+twoTabTicks > maxTicks {
+		t.Fatalf("hostTicks %d + two-tab choreography %d > maxTicks %d",
+			hostTicks, twoTabTicks, maxTicks)
+	}
 }
 
-// The seat must not repaint the blank desktop while an app is hosted, or the
+// The seat must not repaint the blank desktop while a tab is hosted, or the
 // compose-N target (above the kernel's window layer) would overpaint the client.
 func TestHostedSuppressesBlankPaint(t *testing.T) {
-	saved := hostedApp
-	defer func() { hostedApp = saved }()
+	savedTabs := tabs
+	savedHosted := hostedApp
+	defer func() {
+		tabs = savedTabs
+		hostedApp = savedHosted
+	}()
+	tabs = TabStrip{}
 	hostedApp = 0
-	if hostedApp != 0 {
-		t.Fatal("hostedApp should start 0")
+	if tabs.Count() != 0 {
+		t.Fatal("strip should start empty")
+	}
+	if !tabs.OpenTab(9, "x") {
+		t.Fatal("OpenTab")
 	}
 	hostedApp = 9
-	if hostedApp == 0 {
-		t.Fatal("hostedApp should be set while hosting")
+	if tabs.Count() == 0 || hostedApp == 0 {
+		t.Fatal("hosted tab should be set")
 	}
 }

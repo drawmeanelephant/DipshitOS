@@ -97,18 +97,13 @@ func main() {
 	}
 
 	// 6. Composite/present loop paced by the kind-18 tick - and the WM_RPC
-	//    serve loop (M57c): the seat hosts unmodified Zig apps that discover it
-	//    by process name and declare over the mailbox. PollEvent (not
-	//    WaitEvent) so a pending request is serviced between ticks.
+	//    serve loop (M57c / M62b): the seat hosts tabapp clients that declare
+	//    over the mailbox, keeps them on the in-process strip, and paints a
+	//    rail on the compose-N scanout. PollEvent (not WaitEvent) so a pending
+	//    request is serviced between ticks.
 	presents, ticks := 0, 0
 	for events := 0; events < maxEvents && ticks < maxTicks; events++ {
 		serviceRPC()
-		if hostedApp != 0 {
-			hostTicksLeft--
-			if hostTicksLeft <= 0 {
-				closeHosted()
-			}
-		}
 		e, ok := vi.PollEvent()
 		if !ok {
 			vi.Sleep(1)
@@ -119,16 +114,52 @@ func main() {
 		}
 		ticks++
 		vi.ConsoleLine(MarkerTick)
-		// Paint the blank desktop only while nothing is hosted: the kernel
+		// Paint the blank desktop only while the strip is empty: the kernel
 		// paints a hosted app's window at the tick and this compose-N target
 		// sits above it, so a full-frame blank paint would overpaint the client.
-		if hostedApp == 0 {
+		// With tabs, paint only the rail band.
+		if tabs.Count() == 0 {
 			_ = paintBlank(scan, blankRGB)
+		} else {
+			_ = paintRail(scan, vi.ScanoutWidth, vi.ScanoutHeight, RailHeight, &tabs)
+			markRail()
 		}
 		if vi.WmctlRequestPresent() == 0 {
 			presents++
 			if presents == 1 {
 				vi.ConsoleLine(MarkerPresent)
+			}
+		}
+		if stripDone {
+			continue
+		}
+		n := tabs.Count()
+		// Two-tab choreography (M62b): after the rail has been presented with
+		// n>=2, close the focused tab, then the last. stripSawTwo stays set
+		// after the first close (n drops to 1) so we do not fall through to
+		// the single-tab countdown. The seat stays registered once empty.
+		if n >= 2 || stripSawTwo {
+			if !stripSawTwo {
+				stripSawTwo = true
+			} else if !stripClosedOne {
+				closeHosted()
+				stripClosedOne = true
+				if tabs.Count() == 0 {
+					stripDone = true
+				}
+			} else {
+				closeHosted()
+				stripDone = true
+			}
+			continue
+		}
+		// Single-tab close (go-wm-seat / go-wm-default). Counted on ticks,
+		// not empty polls, so a second declare can still land.
+		if n == 1 {
+			hostTicksLeft--
+			if hostTicksLeft <= 0 {
+				closeHosted()
+				stripDone = true
 			}
 		}
 	}
@@ -162,4 +193,27 @@ func paintBlank(scan []byte, rgb uint32) int {
 		pix[i] = rgb
 	}
 	return n
+}
+
+// lastRailN / lastRailFocus suppress repeat rail markers; the gate greps
+// the transition (n=2 then n=1), not a per-tick flood.
+var (
+	lastRailN     int
+	lastRailFocus uint32
+	railMarked    bool
+)
+
+func markRail() {
+	n := tabs.Count()
+	if n == 0 {
+		return
+	}
+	f, _ := tabs.Focused()
+	if railMarked && n == lastRailN && f == lastRailFocus {
+		return
+	}
+	railMarked = true
+	lastRailN = n
+	lastRailFocus = f
+	vi.ConsoleLine(MarkerRail + "n=" + vi.Itoa64(int64(n)) + " focus=" + vi.Itoa64(int64(f)))
 }
