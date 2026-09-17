@@ -34,7 +34,28 @@ type fakeFS struct {
 	lieDelete    bool // delete reports success and leaves the file
 	listStale    bool // deleted paths: removed from the table, still listed
 	ghosts       []string
+
+	winID         int       // the id the shell would have bound (-1 = open failed)
+	winGeometry   [8]uint32 // the record sys_win_query answers with
+	winQueryErr   bool      // query fails
+	winFillErr    bool      // fill fails
+	winPresentErr bool      // present fails
 }
+
+// The window the real run hands GOSELF. It is opened at 32,32 as 640x400 (the
+// app's own request) and TABWM then re-proposes the tab-aware content
+// viewport, so the geometry sys_win_query answers with is NOT what the app
+// asked for at open. The fake models that difference on purpose: it is the
+// distinction the window case exists to expose (it reports the kernel's
+// answer, not the request).
+const (
+	winReqW = 640
+	winReqH = 400
+	winGotX = 180
+	winGotY = 0
+	winGotW = 1100
+	winGotH = 720
+)
 
 func newFakeFS() *fakeFS {
 	return &fakeFS{
@@ -44,6 +65,9 @@ func newFakeFS() *fakeFS {
 		hflags:  map[int64]uint32{},
 		cursors: map[int64]int{},
 		clock:   1000,
+		winID:   2,
+		winGeometry: [8]uint32{winGotX, winGotY, winGotW, winGotH,
+			0 /*z*/, 1 /*focused*/, 1 /*visible*/, 0 /*dirty*/},
 	}
 }
 
@@ -71,6 +95,38 @@ func (f *fakeFS) syscalls() *syscalls {
 		close: func(h uint32) {
 			delete(f.handles, int64(h))
 			delete(f.hflags, int64(h))
+		},
+		win: f.windowSeam(),
+	}
+}
+
+// windowSeam models the tabapp surface: the id the shell binds, the geometry
+// the app asked for at open, and the three ADR 0007 window rows the case
+// drives. query answers with the fake's kernel-side record, so a test can make
+// the kernel's view differ from the app's request in either direction.
+func (f *fakeFS) windowSeam() windowSeam {
+	return windowSeam{
+		id:   f.winID,
+		reqW: winReqW,
+		reqH: winReqH,
+		query: func(id int) ([8]uint32, int64) {
+			// sys_win_query is owner-restricted: a foreign id is EINVAL.
+			if id != f.winID || f.winQueryErr {
+				return [8]uint32{}, -1
+			}
+			return f.winGeometry, 0
+		},
+		fill: func(id int, x, y, w, h uint32, rgb uint32) int64 {
+			if id != f.winID || f.winFillErr {
+				return -1
+			}
+			return 0
+		},
+		present: func(id int) int64 {
+			if id != f.winID || f.winPresentErr {
+				return -1
+			}
+			return 0
 		},
 	}
 }
@@ -256,13 +312,14 @@ func (f *fakeFS) write(h uint32, b []byte) (int, int64) {
 	return len(b), int64(len(b))
 }
 
-// wantReport is the byte-exact report after M61d: the M61f `share-equals`
+// wantReport is the byte-exact report after M61e: the M61f `share-equals`
 // fixture shape, and the report the go-selftest spec requires on the share.
 // Adding a case updates this and the spec together.
 const wantReport = "case intake pass\ncase intake-altered pass\n" +
 	"case clock-monotonic pass\ncase file-write pass\n" +
 	"case file-roundtrip pass\ncase file-truncate pass\n" +
-	"case file-delete pass\ncase file-list pass\nsummary cases=8 failed=0\n"
+	"case file-delete pass\ncase file-list pass\ncase window pass\n" +
+	"summary cases=9 failed=0\n"
 
 // seedFixtures is the host's half of the intake contract: IN/fixture.txt holds
 // the canonical body, IN/altered.txt the altered one (ADR 0031 D2).
@@ -276,8 +333,8 @@ func TestRunCasesAllPassAndReportBytes(t *testing.T) {
 	seedFixtures(fs)
 	rs := runCases(fs.syscalls())
 
-	if len(rs) != 8 {
-		t.Fatalf("cases = %d, want 8", len(rs))
+	if len(rs) != 9 {
+		t.Fatalf("cases = %d, want 9", len(rs))
 	}
 	for _, r := range rs {
 		if !r.ok {
@@ -287,7 +344,7 @@ func TestRunCasesAllPassAndReportBytes(t *testing.T) {
 	if got := string(renderReport(rs)); got != wantReport {
 		t.Fatalf("report bytes:\n got %q\nwant %q", got, wantReport)
 	}
-	if got := string(renderSummary(rs)); got != "summary cases=8 failed=0\n" {
+	if got := string(renderSummary(rs)); got != "summary cases=9 failed=0\n" {
 		t.Fatalf("summary = %q", got)
 	}
 	if got := fs.files[helloPath]; !bytes.Equal(got, []byte(helloPayload)) {
@@ -349,7 +406,7 @@ func TestIntakeFailsOnAMutatedSeed(t *testing.T) {
 	if !strings.Contains(report, "case intake fail fixture mismatch") {
 		t.Fatalf("report lacks the intake failure: %q", report)
 	}
-	if !strings.Contains(report, "summary cases=8 failed=2") {
+	if !strings.Contains(report, "summary cases=9 failed=2") {
 		t.Fatalf("report summary wrong: %q", report)
 	}
 	if got := fs.files[intakeCopy]; !bytes.Equal(got, []byte(intakeAltered)) {
@@ -376,14 +433,121 @@ func TestIntakeFailsWhenTheFixtureIsMissing(t *testing.T) {
 	if got := string(fs.files[alteredReceipt]); !strings.Contains(got, "bytes=0 err=open rc=-6") {
 		t.Fatalf("altered receipt = %q", got)
 	}
-	// The report is still complete: 8 cases, the 2 intake ones failed (the
-	// clock and file cases do not read IN/).
+	// The report is still complete: 9 cases, the 2 intake ones failed (the
+	// clock, file and window cases do not read IN/).
 	report := string(renderReport(rs))
-	if !strings.Contains(report, "summary cases=8 failed=2") {
+	if !strings.Contains(report, "summary cases=9 failed=2") {
 		t.Fatalf("report summary wrong: %q", report)
 	}
 	if lines := strings.Count(report, "\n"); lines != len(rs)+1 {
 		t.Fatalf("report has %d lines, want %d", lines, len(rs)+1)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// M61e (#1385): the window receipt
+// ---------------------------------------------------------------------------
+// Index map after M61e: … 7 file-list · 8 window.
+
+// The receipt carries the KERNEL's geometry from the query, which is NOT what
+// the app asked for at open: if the case restated its request, the w/h here
+// would be the 640x400 the app opened with. The default fake's record is the
+// real one — TABWM re-proposes the tab-aware content viewport at 180,0
+// 1100x720 (tabwm's compute_tab_viewport), so the read-back must report that.
+func TestWindowReceiptCarriesTheKernelsGeometry(t *testing.T) {
+	fs := newFakeFS()
+	seedFixtures(fs)
+	rs := runCases(fs.syscalls())
+	if !rs[8].ok || rs[8].id != "window" {
+		t.Fatalf("window should have passed, got %+v", rs[8])
+	}
+	wantLine := "case window win=2 w=1100 h=720 present=ok\n"
+	if got := string(fs.files[windowReceipt]); got != wantLine {
+		t.Fatalf("window receipt = %q, want %q", got, wantLine)
+	}
+	if winGotW == winReqW || winGotH == winReqH {
+		t.Fatal("the fake's geometry equals the app's request — " +
+			"the read-back distinction is not being exercised")
+	}
+}
+
+// The case reports whatever the kernel says, for any geometry: this is a
+// read-back, not a hardcoded expectation. A window the WM has not resized yet
+// must still produce a receipt with its own numbers.
+func TestWindowReceiptFollowsTheQueryWhereverItPoints(t *testing.T) {
+	fs := newFakeFS()
+	seedFixtures(fs)
+	fs.winGeometry = [8]uint32{32, 32, winReqW, winReqH, 0, 1, 1, 0}
+	rs := runCases(fs.syscalls())
+	if !rs[8].ok {
+		t.Fatalf("window should have passed, got %+v", rs[8])
+	}
+	wantLine := "case window win=2 w=640 h=400 present=ok\n"
+	if got := string(fs.files[windowReceipt]); got != wantLine {
+		t.Fatalf("window receipt = %q, want %q", got, wantLine)
+	}
+}
+
+// A window that could not be opened is a FAILED case that names why — never a
+// query of window 0, which the kernel would refuse as somebody else's.
+func TestWindowFailsWithoutAWindow(t *testing.T) {
+	fs := newFakeFS()
+	seedFixtures(fs)
+	fs.winID = -1
+	rs := runCases(fs.syscalls())
+	if rs[8].ok {
+		t.Fatalf("window passed with no window, got %+v", rs[8])
+	}
+	if !strings.Contains(rs[8].detail, "no window") {
+		t.Fatalf("detail = %q", rs[8].detail)
+	}
+	if _, ok := fs.files[windowReceipt]; ok {
+		t.Fatal("a window-less run still wrote a receipt")
+	}
+}
+
+// Every window row's refusal is named, so a failure says which call refused.
+func TestWindowNamesEachRefusal(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		break_ func(*fakeFS)
+		want   string
+	}{
+		{"fill", func(f *fakeFS) { f.winFillErr = true }, "fill rc=-1"},
+		{"present", func(f *fakeFS) { f.winPresentErr = true }, "present rc=-1"},
+		{"query", func(f *fakeFS) { f.winQueryErr = true }, "query rc=-1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newFakeFS()
+			seedFixtures(fs)
+			tc.break_(fs)
+			rs := runCases(fs.syscalls())
+			if rs[8].ok {
+				t.Fatalf("window passed with %s refused, got %+v", tc.name, rs[8])
+			}
+			if !strings.Contains(rs[8].detail, tc.want) {
+				t.Fatalf("detail = %q, want %q", rs[8].detail, tc.want)
+			}
+		})
+	}
+}
+
+// A zero-geometry window is caught by the READ-BACK even though the fill and
+// the present both returned success: that is the read-back earning its keep.
+func TestWindowCatchesAnEmptyWindow(t *testing.T) {
+	fs := newFakeFS()
+	seedFixtures(fs)
+	fs.winGeometry = [8]uint32{0, 0, 0, 0, 0, 1, 1, 0}
+	rs := runCases(fs.syscalls())
+	if rs[8].ok {
+		t.Fatalf("window passed on an empty window, got %+v", rs[8])
+	}
+	if !strings.Contains(rs[8].detail, "query reports an empty window: 0x0") {
+		t.Fatalf("detail = %q", rs[8].detail)
+	}
+	// The receipt still holds what was measured, so the host sees the zeros.
+	if got := string(fs.files[windowReceipt]); got != "case window win=2 w=0 h=0 present=ok\n" {
+		t.Fatalf("window receipt = %q", got)
 	}
 }
 
@@ -468,7 +632,7 @@ func TestFileWriteCaseFailsWhenTheWriteIsRefused(t *testing.T) {
 	if !strings.Contains(report, "case file-write fail ") {
 		t.Fatalf("report lacks the fail detail: %q", report)
 	}
-	if !strings.Contains(report, "summary cases=8 failed=1") {
+	if !strings.Contains(report, "summary cases=9 failed=1") {
 		t.Fatalf("report summary wrong: %q", report)
 	}
 }

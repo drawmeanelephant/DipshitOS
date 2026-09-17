@@ -69,6 +69,11 @@ func main() {
 	}
 
 	s := guestSyscalls()
+	// M61e: hand the window case the surface THIS process actually got. The
+	// id comes from tabapp.Init's win_open return; a -1 here (open failed)
+	// makes the case fail rather than query window 0.
+	s.win.id = ta.Win
+	s.win.reqW, s.win.reqH = ta.W, ta.H
 
 	rs := runCases(&s)
 	for _, r := range rs {

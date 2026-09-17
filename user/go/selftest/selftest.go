@@ -92,6 +92,11 @@ const (
 	listDir    = outDir + "/LIST"
 	listedPath = listDir + "/listed.txt"
 	listOk     = outDir + "/file-list.ok"
+
+	// M61e window receipt (issue #1385), in the card's shape: the id the
+	// kernel assigned, the geometry the KERNEL reports for that window, and
+	// the present verdict.
+	windowReceipt = outDir + "/window.txt"
 )
 
 // fileUnit is the payload unit of the round-trip and truncate cases: the same
@@ -133,6 +138,24 @@ type syscalls struct {
 	remove   func(path string) int64
 	list     func(path string, buf []vi.DirEntry) (int, int64)
 	close    func(h uint32)
+
+	// M61e (#1385): the window surface. Separate from the file rows above
+	// because id/reqW/reqH are STATE the shell copied out of tabapp.Init, not
+	// syscall bindings — the three function rows are the ADR 0007 window rows
+	// the case drives.
+	win windowSeam
+}
+
+// windowSeam is the app's own tabapp window plus the window rows the window
+// case drives. id is -1 until the shell binds it (main.go), so a case that
+// runs without a window FAILS rather than querying window 0.
+type windowSeam struct {
+	id      int    // the id the kernel assigned; -1 when open failed
+	reqW    uint32 // the geometry the app asked for at open
+	reqH    uint32
+	query   func(id int) ([8]uint32, int64)
+	fill    func(id int, x, y, w, h uint32, rgb uint32) int64
+	present func(id int) int64
 }
 
 // guestSyscalls is the real EL0 surface (vi over ADR 0007).
@@ -160,6 +183,15 @@ func guestSyscalls() syscalls {
 		remove:   vi.FileDelete,
 		list:     vi.DirList,
 		close:    vi.FileClose,
+		// M61e: the real window rows. id/reqW/reqH stay -1/0 here — the shell
+		// binds them from tabapp.Init, so this function never claims a window
+		// the app did not get.
+		win: windowSeam{
+			id:      -1,
+			query:   vi.WinQuery,
+			fill:    vi.WinFill,
+			present: vi.WinPresent,
+		},
 	}
 }
 
@@ -193,6 +225,9 @@ func cases() []testCase {
 		{id: "file-truncate", run: caseFileTruncate},
 		{id: "file-delete", run: caseFileDelete},
 		{id: "file-list", run: caseFileList},
+		// M61e (#1385): the window receipt — appended last so the M61d report
+		// prefix is untouched (the report is byte-compared).
+		{id: "window", run: caseWindow},
 	}
 }
 
@@ -582,6 +617,72 @@ func caseFileList(s *syscalls) error {
 		return errors.New("listing missed listed.txt (entries=" + strconv.Itoa(n1) + ")")
 	case !gone:
 		return errors.New("listing still shows listed.txt (entries=" + strconv.Itoa(n2) + ")")
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// M61e (#1385): the window receipt
+// ---------------------------------------------------------------------------
+
+// colWindowProbe is the window case's one fill rectangle. It exists so a human
+// looking at the captured frame can see the case ran. It is never compared to
+// anything and never part of a verdict — the card's non-goal is pixel
+// comparison, and this case reads no pixels at all.
+const colWindowProbe = uint32(0x2d6a4f)
+
+// caseWindow: fill + present the app's own tabapp window, then write the one
+// line the card asks for — the id the kernel assigned, the geometry the KERNEL
+// reports for that window, and the present verdict.
+//
+// The geometry is a READ-BACK, not a restatement of the app's request: it
+// comes from sys_win_query, which copies the kernel's window record into a
+// fresh user buffer through the same kernel->user path issue #1391 broke and
+// ADR 0032 fixed. That distinction is what makes the receipt worth reading —
+// the host can hold `win=<id>` to the window the KERNEL's own serial log says
+// it created (`open: id=<N> owner=<pid> rect=…`) and to the id TABWM reports
+// (`tabwm: tab-switch … id=<N>`), two reporters that are not this process.
+// See the spec, which does exactly that before it byte-compares the line.
+//
+// This is deliberately NOT a framebuffer golden: no pixels are read, no PNG
+// is produced, and nothing here knows what the window looks like.
+func caseWindow(s *syscalls) error {
+	s.mkdir(outDir)
+	w := s.win
+	if w.id < 0 {
+		return errors.New("no window: tabapp open failed")
+	}
+	// Fill, then present — the card's sequence. Both returns are checked: a
+	// window that cannot take a rect or flush a frame is a failed case, not a
+	// warning.
+	if frc := w.fill(w.id, 0, 0, 8, 8, colWindowProbe); frc < 0 {
+		return errors.New("fill rc=" + strconv.FormatInt(frc, 10))
+	}
+	if prc := w.present(w.id); prc < 0 {
+		return errors.New("present rc=" + strconv.FormatInt(prc, 10))
+	}
+	q, qrc := w.query(w.id)
+	if qrc < 0 {
+		return errors.New("query rc=" + strconv.FormatInt(qrc, 10))
+	}
+	// q is (x, y, w, h, z, focused, visible, dirty) — the kernel's view.
+	gotW, gotH := q[2], q[3]
+
+	// The receipt is written BEFORE the verdict (the file is the evidence), so
+	// a failing run still leaves the host the numbers that failed it.
+	line := "case window win=" + strconv.Itoa(w.id) +
+		" w=" + strconv.FormatUint(uint64(gotW), 10) +
+		" h=" + strconv.FormatUint(uint64(gotH), 10) +
+		" present=ok"
+	if werr := writeReceipt(s, windowReceipt, line); werr != nil {
+		return werr
+	}
+	if gotW == 0 || gotH == 0 {
+		// A window the kernel reports as empty is a broken window: the fill and
+		// the present both claimed success, so this is the read-back catching
+		// what the two writes could not.
+		return errors.New("query reports an empty window: " +
+			strconv.FormatUint(uint64(gotW), 10) + "x" + strconv.FormatUint(uint64(gotH), 10))
 	}
 	return nil
 }
