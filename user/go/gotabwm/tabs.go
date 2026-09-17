@@ -1,10 +1,10 @@
-// GOTABWM.ELF — M62b/M62c (issues #1400/#1401): an in-process tab strip
-// with a two-pane constrained split.
+// GOTABWM.ELF — M62b–d (issues #1400/#1401/#1402): an in-process tab strip
+// with a two-pane constrained split, pin, and reorder.
 //
-// OpenTab / CloseTab / FocusTab / SplitH / SplitV / Unsplit are a pure
-// state machine: no syscalls, no WM_RPC. The seat hooks each successful
-// mutation with the kernel primitive that made it true, then prints a
-// marker.
+// OpenTab / CloseTab / FocusTab / SplitH / SplitV / Unsplit / Pin / Unpin /
+// Reorder are a pure state machine: no syscalls, no WM_RPC. The seat hooks
+// each successful mutation with the kernel primitive that made it true,
+// then prints a marker.
 //
 // Close of the focused tab moves focus to the neighbour that shifts into
 // its slot (Zig TABWM remove_tab). Close of the last tab leaves the strip
@@ -25,8 +25,10 @@ const RailHeight = 22
 
 // Tab is one strip entry. ID is the kernel window id the client declared.
 type Tab struct {
-	ID    uint32
-	Title string
+	ID     uint32
+	Title  string
+	Bin    string // `.tabs` v2 bin field; empty until M62e persists
+	Pinned bool   // FlagPinned (0x01); pinned tabs sit at the left of the rail
 }
 
 // TabStrip is the in-process tab list. The zero value is empty (unsplit).
@@ -49,7 +51,14 @@ const (
 	MarkerUnsplit   = "gotabwm: unsplit"
 	MarkerLayout    = "gotabwm: layout "
 	MarkerPane      = "gotabwm: pane "
+	MarkerPin       = "gotabwm: pin "
+	MarkerReorder   = "gotabwm: reorder "
+	MarkerOrder     = "gotabwm: order "
 )
+
+// FlagPinned is `.tabs` v2 bit 0 — the same value as tabcodec.FlagPinned
+// / tabwm.tab_flag_pinned. Frozen/dock stay unused (M62d non-goal).
+const FlagPinned uint8 = 0x01
 
 const (
 	railIdleRGB  uint32 = 0x2E3448
@@ -158,6 +167,113 @@ func (s *TabStrip) index(id uint32) int {
 		}
 	}
 	return -1
+}
+
+// Pin sets FlagPinned on id and stable-partitions pinned tabs to the
+// front (M48/BT3). Focus follows the same tab by id. False when id is
+// missing or already pinned.
+func (s *TabStrip) Pin(id uint32) bool {
+	i := s.index(id)
+	if i < 0 || s.tabs[i].Pinned {
+		return false
+	}
+	s.tabs[i].Pinned = true
+	s.normalizePinned()
+	return true
+}
+
+// Unpin clears FlagPinned on id and re-partitions. Closing a pinned tab
+// is allowed separately — pin is not a lock.
+func (s *TabStrip) Unpin(id uint32) bool {
+	i := s.index(id)
+	if i < 0 || !s.tabs[i].Pinned {
+		return false
+	}
+	s.tabs[i].Pinned = false
+	s.normalizePinned()
+	return true
+}
+
+// Reorder moves the tab at from to to (Zig TABWM move_tab). Refused when
+// either tab is pinned — M62d reorders two unpinned tabs; pinned stay
+// left until Unpin. Focus follows the same tab by id.
+func (s *TabStrip) Reorder(from, to int) bool {
+	if from < 0 || to < 0 || from >= s.count || to >= s.count || from == to {
+		return false
+	}
+	if s.tabs[from].Pinned || s.tabs[to].Pinned {
+		return false
+	}
+	moved := s.tabs[from]
+	fid, _ := s.Focused()
+	if from < to {
+		for i := from; i < to; i++ {
+			s.tabs[i] = s.tabs[i+1]
+		}
+	} else {
+		for i := from; i > to; i-- {
+			s.tabs[i] = s.tabs[i-1]
+		}
+	}
+	s.tabs[to] = moved
+	if fid != 0 {
+		s.focus = s.index(fid)
+	}
+	return true
+}
+
+func (s *TabStrip) normalizePinned() {
+	if s.count == 0 {
+		return
+	}
+	fid, has := s.Focused()
+	var pinned, rest [MaxTabs]Tab
+	np, nr := 0, 0
+	for i := 0; i < s.count; i++ {
+		if s.tabs[i].Pinned {
+			pinned[np] = s.tabs[i]
+			np++
+		} else {
+			rest[nr] = s.tabs[i]
+			nr++
+		}
+	}
+	n := 0
+	for i := 0; i < np; i++ {
+		s.tabs[n] = pinned[i]
+		n++
+	}
+	for i := 0; i < nr; i++ {
+		s.tabs[n] = rest[i]
+		n++
+	}
+	if has {
+		s.focus = s.index(fid)
+	}
+}
+
+// orderLine is the rail report: ids and pin bits in strip order, plus
+// who is focused. Not a LAYOUT.txt line (ADR 0033 has no pin= field).
+func orderLine(s *TabStrip) string {
+	ids := "ids="
+	pins := "pin="
+	for i := 0; i < s.count; i++ {
+		if i > 0 {
+			ids += ","
+			pins += ","
+		}
+		ids += dec(s.tabs[i].ID)
+		if s.tabs[i].Pinned {
+			pins += "1"
+		} else {
+			pins += "0"
+		}
+	}
+	f := uint32(0)
+	if id, ok := s.Focused(); ok {
+		f = id
+	}
+	return ids + " " + pins + " focus=" + dec(f)
 }
 
 // SplitKind is the two-pane layout (ADR 0033 LAYOUT.txt `split=`).

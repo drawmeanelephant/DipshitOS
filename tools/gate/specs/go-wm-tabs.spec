@@ -1,9 +1,11 @@
-# go-wm-tabs.spec -- M62b (issue #1400) + M62c (issue #1401) class-B gate:
-# GOTABWM tab strip, then a constrained two-pane split. Two tabapp clients
-# (leftover Zig CALC + NOTEPAD) declare over WM_RPC; the rail paints with
-# n=2; SplitV then Unsplit then SplitH then Unsplit; applied pane rects
-# match the LAYOUT.txt-shaped dump; unsplit restores full-viewport; then
-# close focused / last, empty desktop, seat still registered until exit.
+# go-wm-tabs.spec -- M62b–d (issues #1400/#1401/#1402) class-B gate:
+# GOTABWM tab strip, constrained two-pane split, then pin + reorder.
+# Two tabapp clients (leftover Zig CALC + NOTEPAD) declare over WM_RPC;
+# the rail paints with n=2; unpinned reorder; pin stays left across focus;
+# SplitV then Unsplit then SplitH then Unsplit; applied pane rects match
+# the LAYOUT.txt-shaped dump; unsplit restores full-viewport; close of a
+# pinned tab is allowed; last close leaves an empty desktop, seat still
+# registered until exit.
 #
 # Seed wm=none and exec GOTABWM.ELF like go-wm-seat: this is the Go seat,
 # not Zig TABWM. Do not overload go-wm-seat or go-wm-default. Kernel
@@ -18,7 +20,7 @@
 # script2 start in parallel after the window phase is waiting for blur;
 # both declares sit in the mailbox until the serve loop drains them.
 
-vgate_name go-wm-tabs "issues #1400/#1401 M62b+c: GOTABWM tab strip + constrained two-pane split on VZ"
+vgate_name go-wm-tabs "issues #1400/#1401/#1402 M62b–d: GOTABWM tabs + split + pin/reorder on VZ"
 vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 
@@ -78,6 +80,36 @@ vgate_assert 01 serial-contains 'gotabwm: tab focus id='
 vgate_assert 01 serial-contains 'gotabwm: rail n=2 focus='
 vgate_assert 01 serial-contains 'calc: tab-aware (full-viewport)'
 vgate_assert 01 serial-contains 'notepad: tab-aware (full-viewport)'
+# M62d: reorder two unpinned tabs; pin jumps to the left and stays there
+# across a focus change. Order line names ids + pin bits (not LAYOUT.txt).
+vgate_assert 01 serial-contains 'gotabwm: reorder 0->1'
+vgate_assert 01 serial-contains 'gotabwm: pin id='
+vgate_assert 01 serial-contains 'gotabwm: order ids='
+vgate_assert 01 serial-contains 'pin=1,0'
+vgate_assert 01 python <<'PY'
+import os, re, sys
+ser = open(os.environ["VG_SER"], errors="replace").read()
+order_re = re.compile(
+    r"^gotabwm: order ids=(\d+),(\d+) pin=(\d),(\d) focus=(\d+)$")
+pinned = []
+for line in ser.splitlines():
+    m = order_re.match(line)
+    if not m:
+        continue
+    if m.group(3) == "1" and m.group(4) == "0":
+        pinned.append((m.group(1), m.group(2), m.group(5)))
+if len(pinned) < 2:
+    sys.exit("want >=2 order lines with pin=1,0 (pin then focus), got %d" %
+             len(pinned))
+if pinned[0][0] != pinned[1][0] or pinned[0][1] != pinned[1][1]:
+    sys.exit("pin did not stay left across focus: %s then %s" % (
+        pinned[0], pinned[1]))
+if pinned[0][2] == pinned[1][2]:
+    sys.exit("focus did not change between pin-left dumps: focus=%s" %
+             pinned[0][2])
+print("pin stayed left ids=%s,%s across focus %s -> %s" % (
+    pinned[0][0], pinned[0][1], pinned[0][2], pinned[1][2]))
+PY
 # M62c: integer two-pane split. Dump lines (LAYOUT.txt shape) plus the
 # applied pane (SET_WINDOW accepted; slot 19 WinQuery is owner-only so
 # the seat cannot read a hosted client's rect). Unsplit restores 1280x720.

@@ -29,6 +29,9 @@ func TestInteropMarkerShapes(t *testing.T) {
 		{MarkerUnsplit, "gotabwm: unsplit"},
 		{MarkerLayout, "gotabwm: layout "},
 		{MarkerPane, "gotabwm: pane "},
+		{MarkerPin, "gotabwm: pin "},
+		{MarkerReorder, "gotabwm: reorder "},
+		{MarkerOrder, "gotabwm: order "},
 	}
 	for _, c := range cases {
 		if c.got != c.want {
@@ -77,9 +80,10 @@ func TestHostTickBudget(t *testing.T) {
 	if hostTicks > maxTicks {
 		t.Fatalf("hostTicks %d > maxTicks %d: the close is unreachable", hostTicks, maxTicks)
 	}
-	// Two-tab path: 1 tick to show n=2, SplitV, Unsplit, SplitH, Unsplit,
-	// close focused, close last (7). Plus the single-tab budget must fit.
-	const twoTabTicks = 7
+	// Two-tab path: 1 tick to show n=2, reorder, pin+refocus, SplitV,
+	// Unsplit, SplitH, Unsplit, close pinned, close last (9). Plus the
+	// single-tab budget must still fit in maxTicks.
+	const twoTabTicks = 9
 	if hostTicks+twoTabTicks > maxTicks {
 		t.Fatalf("hostTicks %d + two-tab choreography %d > maxTicks %d",
 			hostTicks, twoTabTicks, maxTicks)

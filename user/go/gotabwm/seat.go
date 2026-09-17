@@ -146,15 +146,19 @@ func main() {
 				stripStep++
 				switch stripStep {
 				case 1:
-					_ = applySplit(SplitVert)
+					_ = applySwapUnpinned()
 				case 2:
-					_ = applyUnsplit()
+					_ = applyPinStay()
 				case 3:
-					_ = applySplit(SplitHoriz)
+					_ = applySplit(SplitVert)
 				case 4:
 					_ = applyUnsplit()
 				case 5:
-					closeHosted()
+					_ = applySplit(SplitHoriz)
+				case 6:
+					_ = applyUnsplit()
+				case 7:
+					closePinnedFirst()
 					stripClosedOne = true
 					if tabs.Count() == 0 {
 						stripDone = true
