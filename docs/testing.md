@@ -99,6 +99,28 @@ moved part of the evidence into the guest. The rule, in one table:
   for real — the MODE_DIR row needs `MODE_WRITE|MODE_CREATE|MODE_DIR`
   together, and only the host-side `makedirs` had been keeping the app's
   bare-MODE_DIR call from being silently EINVAL.
+- **The window receipt (M61e, #1385) is a read-back, not a restatement.** The
+  `window` case fills and presents the app's own tabapp window (failing on
+  either return) and writes `OUT/window.txt` — `case window win=<id> w=<W>
+  h=<H> present=ok` — where `w=`/`h=` come from `sys_win_query`, the kernel's
+  record of the window, read back into a fresh buffer (the same kernel->user
+  path as the other read-backs). The spec matches the line (its id is a
+  runtime value) and then holds it to the two reporters of that window which
+  are not this process: the kernel's own open-attribution marker
+  `open: id=<N> owner=<pid> rect=<x>,<y> <W>x<H> ws=<k>` (`driving_award.zig`,
+  issue #990) and TABWM's `tabwm: tab-switch idx=<i> id=<N>`. All three ids
+  must agree.
+- The geometry carries a second assertion worth understanding before changing
+  anything: GOSELF opens at 32,32 640x400 and the kernel logs exactly that,
+  but TABWM then proposes the tab-aware content viewport (180,0 1100x720 —
+  tabwm's `compute_tab_viewport`), so the receipt must report **1100x720**. The
+  spec fails on a receipt that repeats the open rect, which is what a case
+  restating its own request would do — a number the kernel's open line
+  contains. Change the WM's viewport policy and the SPEC is what changes; the
+  app stays a probe. This is emphatically **not** a framebuffer golden (the
+  card's non-goal): no pixels are read, no PNG is compared, and the case knows
+  nothing about what the window looks like. Framebuffer goldens stay host-side
+  (`vgate_assert snapshot`) for r3d and friends.
 - The serial contract is one summary line, `selftest: FAIL n=<N>` (N=0 on
   success), printed after `REPORT.txt` is closed; the report's
   `summary cases=<n> failed=<k>` must agree with it, and a run whose
@@ -345,7 +367,7 @@ under `C` with no workflow noticing). The rules that came out of it:
 | `\KERNEL.TXT` on the ESP | milestone-one regression only | Not written after the kernel exits Boot Services |
 | `artifacts/go-selftest-report.txt` | `go-selftest` spec (copied before `gate_end`) | The harness's own run report |
 | `artifacts/go-selftest-share-report` | `go-selftest` spec (copied before `gate_end`) | The guest's own `/host/SELFTEST/REPORT.txt` (ADR 0031) |
-| `artifacts/go-selftest-share-*` | `go-selftest` spec (copied before `gate_end`) | The share evidence the spec byte-compared: the intake copies/receipts, and the file-ABI receipts (`file-*.ok`) and read-back copies |
+| `artifacts/go-selftest-share-*` | `go-selftest` spec (copied before `gate_end`) | The share evidence the spec byte-compared: the intake copies/receipts, the file-ABI receipts (`file-*.ok`) and read-back copies, and the `window.txt` receipt whose id/geometry the spec cross-checked against the kernel's `open:` line and TABWM's `tab-switch` line |
 | `artifacts/m2-probe.log` | kernel serial output | Candidate reads, signatures, selected transport, and observed/inferred decision |
 | `\KERNEL.BIN` on the ESP | `zig build` | Flat kernel image, verified with `elf2bin.py --info` |
 
