@@ -20,7 +20,8 @@ func layoutBin(t Tab) string {
 }
 
 // layoutFileBody is the LAYOUT.txt payload for s. Empty strip yields nil
-// (do not write an empty file over a good dump).
+// (do not write an empty file over a good dump). Split is only settable at
+// n==2; otherwise every tab reports the full viewport (headless fallback).
 func layoutFileBody(s *TabStrip, scanW, scanH uint32) []byte {
 	n := s.Count()
 	if n == 0 {
