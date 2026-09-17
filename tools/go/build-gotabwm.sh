@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 #
-# build-gotabwm.sh -- build the M57a Go window manager (user/go/gotabwm) with
+# build-gotabwm.sh -- build the Go window manager (user/go/gotabwm) with
 # the GOOS=virelai fork toolchain, the same way tools/go/build-tabapp.sh builds
 # the demo tab app. Output: .build/go/GOTABWM.ELF
+#
+# M57a–c: seat + own windows + Zig-app hosting. M62b (#1400): in-process
+# tab strip (open / close / focus) painted onto the compose-N scanout.
 #
 # Usage: bash tools/go/build-gotabwm.sh
 #
