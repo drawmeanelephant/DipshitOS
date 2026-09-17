@@ -74,6 +74,7 @@ var (
 	stripSawTwo    bool
 	stripClosedOne bool
 	stripDone      bool
+	stripStep      int // two-tab choreography: rail → V → unsplit → H → unsplit → close
 )
 
 // serviceRPC drains the seat's mailbox and services every queued WM_RPC
@@ -216,6 +217,12 @@ func closeHosted() bool {
 	_ = tabs.CloseTab(id)
 	syncHostedFromStrip()
 	if nid, ok := tabs.Focused(); ok {
+		// Closing one side of a split leaves a single tab: restore
+		// full-viewport (Unsplit already ran in the two-tab choreography;
+		// this covers a close while still split).
+		if tabs.Count() == 1 {
+			_ = applyRect(nid, FullRect(uint32(vi.ScanoutWidth), uint32(vi.ScanoutHeight)))
+		}
 		if vi.WmctlTaskbarClick(nid) == 0 {
 			vi.ConsoleLine(MarkerTabFocus + vi.Itoa64(int64(nid)))
 			vi.ConsoleLine(MarkerHostFocus + vi.Itoa64(int64(nid)))
@@ -247,4 +254,5 @@ func noteStripOpen() {
 	stripDone = false
 	stripSawTwo = false
 	stripClosedOne = false
+	stripStep = 0
 }

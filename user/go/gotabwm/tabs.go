@@ -1,12 +1,16 @@
-// GOTABWM.ELF — M62b (issue #1400): an in-process tab strip.
+// GOTABWM.ELF — M62b/M62c (issues #1400/#1401): an in-process tab strip
+// with a two-pane constrained split.
 //
-// OpenTab / CloseTab / FocusTab are a pure state machine: no syscalls, no
-// WM_RPC. The seat (interop.go / seat.go) hooks each successful mutation
-// with the kernel primitive that made it true, then prints a marker.
+// OpenTab / CloseTab / FocusTab / SplitH / SplitV / Unsplit are a pure
+// state machine: no syscalls, no WM_RPC. The seat hooks each successful
+// mutation with the kernel primitive that made it true, then prints a
+// marker.
 //
 // Close of the focused tab moves focus to the neighbour that shifts into
 // its slot (Zig TABWM remove_tab). Close of the last tab leaves the strip
 // empty; the seat stays registered. Max 16 tabs (ADR 0033 / `.tabs` v2).
+// Split is exactly two panes; pane minimum is 160×120 (ADR 0033) on the
+// 1280×720 scanout. Integer math; the kernel clamp stays authoritative.
 package main
 
 import "unsafe"
@@ -25,11 +29,12 @@ type Tab struct {
 	Title string
 }
 
-// TabStrip is the in-process tab list. The zero value is empty.
+// TabStrip is the in-process tab list. The zero value is empty (unsplit).
 type TabStrip struct {
 	tabs  [MaxTabs]Tab
 	count int
 	focus int // index into tabs[0:count]; ignored when count == 0
+	split SplitKind
 }
 
 // The tab-strip marker lines the class-B gate greps. Exported so tabs_test.go
@@ -40,6 +45,10 @@ const (
 	MarkerTabClose  = "gotabwm: tab close id="
 	MarkerRail      = "gotabwm: rail "
 	MarkerTabsEmpty = "gotabwm: tabs empty"
+	MarkerSplit     = "gotabwm: split "
+	MarkerUnsplit   = "gotabwm: unsplit"
+	MarkerLayout    = "gotabwm: layout "
+	MarkerPane      = "gotabwm: pane "
 )
 
 const (
@@ -105,12 +114,16 @@ func (s *TabStrip) CloseTab(id uint32) bool {
 	s.count--
 	if s.count == 0 {
 		s.focus = 0
+		s.split = SplitNone
 		return true
 	}
 	if s.focus > i {
 		s.focus--
 	} else if s.focus >= s.count {
 		s.focus = s.count - 1
+	}
+	if s.count < 2 {
+		s.split = SplitNone
 	}
 	return true
 }
@@ -145,6 +158,157 @@ func (s *TabStrip) index(id uint32) int {
 		}
 	}
 	return -1
+}
+
+// SplitKind is the two-pane layout (ADR 0033 LAYOUT.txt `split=`).
+type SplitKind uint8
+
+const (
+	SplitNone  SplitKind = iota // split=none — full viewport
+	SplitHoriz                  // split=h — top / bottom (horizontal divider)
+	SplitVert                   // split=v — left / right (vertical divider)
+)
+
+func (k SplitKind) String() string {
+	switch k {
+	case SplitHoriz:
+		return "h"
+	case SplitVert:
+		return "v"
+	default:
+		return "none"
+	}
+}
+
+// PaneMinW / PaneMinH are the ADR 0033 pane floor (CSS-pixels on 1280×720).
+const (
+	PaneMinW uint32 = 160
+	PaneMinH uint32 = 120
+)
+
+// Rect is a window rectangle in scanout pixels.
+type Rect struct{ X, Y, W, H uint32 }
+
+// FullRect is the unsplit viewport (origin + scanout size).
+func FullRect(scanW, scanH uint32) Rect {
+	return Rect{X: 0, Y: 0, W: scanW, H: scanH}
+}
+
+// Split reports the current two-pane kind.
+func (s *TabStrip) Split() SplitKind { return s.split }
+
+// SplitH splits two already-open tabs top/bottom. Refused unless count==2.
+func (s *TabStrip) SplitH() bool { return s.setSplit(SplitHoriz) }
+
+// SplitV splits two already-open tabs left/right. Refused unless count==2.
+func (s *TabStrip) SplitV() bool { return s.setSplit(SplitVert) }
+
+func (s *TabStrip) setSplit(k SplitKind) bool {
+	if s.count != 2 || k == SplitNone {
+		return false
+	}
+	s.split = k
+	return true
+}
+
+// Unsplit restores the unsplit (full-viewport) kind. False when already none.
+func (s *TabStrip) Unsplit() bool {
+	if s.split == SplitNone {
+		return false
+	}
+	s.split = SplitNone
+	return true
+}
+
+// SplitRects is the integer two-pane layout. Remainder goes to the right
+// (SplitV) or bottom (SplitH) pane so odd widths/heights do not drop a
+// pixel. Refused when either pane would fall under PaneMinW×PaneMinH.
+func SplitRects(kind SplitKind, scanW, scanH uint32) (Rect, Rect, bool) {
+	if kind == SplitNone {
+		full := FullRect(scanW, scanH)
+		return full, full, true
+	}
+	if kind == SplitVert {
+		left := scanW / 2
+		right := scanW - left
+		if left < PaneMinW || right < PaneMinW || scanH < PaneMinH {
+			return Rect{}, Rect{}, false
+		}
+		return Rect{0, 0, left, scanH}, Rect{left, 0, right, scanH}, true
+	}
+	if kind == SplitHoriz {
+		top := scanH / 2
+		bot := scanH - top
+		if scanW < PaneMinW || top < PaneMinH || bot < PaneMinH {
+			return Rect{}, Rect{}, false
+		}
+		return Rect{0, 0, scanW, top}, Rect{0, top, scanW, bot}, true
+	}
+	return Rect{}, Rect{}, false
+}
+
+// PaneRects returns the two pane rects for the current split, or false
+// when the strip is not two tabs.
+func (s *TabStrip) PaneRects(scanW, scanH uint32) (Rect, Rect, bool) {
+	if s.count != 2 {
+		return Rect{}, Rect{}, false
+	}
+	return SplitRects(s.split, scanW, scanH)
+}
+
+// rectsWithin reports whether a and b differ by at most tol on every edge.
+func rectsWithin(a, b Rect, tol uint32) bool {
+	return uabs(a.X, b.X) <= tol && uabs(a.Y, b.Y) <= tol &&
+		uabs(a.W, b.W) <= tol && uabs(a.H, b.H) <= tol
+}
+
+func uabs(a, b uint32) uint32 {
+	if a > b {
+		return a - b
+	}
+	return b - a
+}
+
+// layoutLine is one ADR 0033 LAYOUT.txt surface line (no trailing LF).
+func layoutLine(id uint32, bin string, r Rect, focus bool, kind SplitKind) string {
+	if bin == "" {
+		bin = "-"
+	}
+	f := "0"
+	if focus {
+		f = "1"
+	}
+	return "tab=" + dec(id) +
+		" bin=" + bin +
+		" x=" + dec(r.X) +
+		" y=" + dec(r.Y) +
+		" w=" + dec(r.W) +
+		" h=" + dec(r.H) +
+		" focus=" + f +
+		" split=" + kind.String()
+}
+
+// paneLine is the applied-rect counterpart the gate pairs with layoutLine.
+func paneLine(id uint32, r Rect) string {
+	return "id=" + dec(id) +
+		" x=" + dec(r.X) +
+		" y=" + dec(r.Y) +
+		" w=" + dec(r.W) +
+		" h=" + dec(r.H)
+}
+
+func dec(v uint32) string {
+	if v == 0 {
+		return "0"
+	}
+	var b [10]byte
+	i := len(b)
+	for v > 0 {
+		i--
+		b[i] = byte('0' + v%10)
+		v /= 10
+	}
+	return string(b[i:])
 }
 
 // paintRail fills the top stripH rows of a width x height scanout with
