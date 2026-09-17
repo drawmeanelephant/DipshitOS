@@ -33,6 +33,35 @@ const std = @import("std");
 const builtin = @import("builtin");
 const mmu = @import("mmu.zig");
 
+// ---------------------------------------------------------------------------
+// Issue #1391: the destination guard for kernel -> user stores
+// ---------------------------------------------------------------------------
+//
+// Under a task's own root, TTBR0 carries the kernel's EL1-only identity
+// overlay as well as the process's EL0 leaves. So a user VA whose page has
+// not been demand-populated yet still RESOLVES for EL1 — to its own identity
+// twin (physical == VA, Device where RAM is not, AP = 0b00). A kernel store
+// there succeeds and reaches nothing the process can ever read: the guest's
+// first read into a buffer EL0 had never written came back as a correct
+// LENGTH of zeros (issue #1391), and the store landed on a physical address
+// the guest does not own.
+//
+// `copy_out` therefore never stores into an unproven page. Proving it needs
+// the process registry, the page allocator and the kernel domain lock — none
+// of which belong in this leaf module (it is imported BY exceptions) — so the
+// kernel arms this seam at boot (`exceptions.init`) and each copy-out asks it
+// first. The resolver demand-populates the destination page in the process's
+// OWN root (the only mapping EL0 will see) or returns false, and the copy is
+// refused with EFAULT having touched no memory.
+/// Resolution seam: true when every 4 KiB page of [address, address+len) is
+/// backed in the calling process's own root (populating any that are not),
+/// false when it cannot be — the caller refuses the copy.
+pub const ResolveWritePages = *const fn (address: u64, len: usize) bool;
+
+/// Armed by `exceptions.init`; null pre-boot and on host test binaries
+/// (which have no user roots, so there is nothing to resolve).
+pub var resolve_write_pages: ?ResolveWritePages = null;
+
 /// CPU count (matches smp.max_cores / svclock.cores); literal to dodge
 /// import cycles — uaccess is imported by exceptions.
 const cores: usize = 4;
@@ -136,11 +165,17 @@ fn compiler_barrier() void {
 var copies_value: [cores]u64 = [_]u64{0} ** cores;
 var validation_faults_value: [cores]u64 = [_]u64{0} ** cores;
 var recoveries_value: [cores]u64 = [_]u64{0} ** cores;
+/// Issue #1391: copy-outs refused because a destination page could not be
+/// resolved in the process's own root. Zero is the healthy value — a
+/// non-zero one means a store would have been swallowed by the identity
+/// overlay (or the caller passed a page it does not own).
+var unbacked_value: [cores]u64 = [_]u64{0} ** cores;
 
 pub const Stats = struct {
     copies: u64,
     validation_faults: u64,
     recoveries: u64,
+    unbacked: u64,
 };
 
 /// Reset module state (kernel boot / host tests). Regions are re-configured
@@ -157,6 +192,7 @@ pub fn init() void {
     copies_value[c] = 0;
     validation_faults_value[c] = 0;
     recoveries_value[c] = 0;
+    unbacked_value[c] = 0;
 }
 
 /// Configure the claim-8215 EL0 apertures (text readable, stack read-write).
@@ -219,13 +255,16 @@ pub fn stats() Stats {
     var copies: u64 = 0;
     var vfaults: u64 = 0;
     var recovers: u64 = 0;
+    var unbacked: u64 = 0;
     for (copies_value) |v| copies +%= v;
     for (validation_faults_value) |v| vfaults +%= v;
     for (recoveries_value) |v| recovers +%= v;
+    for (unbacked_value) |v| unbacked +%= v;
     return .{
         .copies = copies,
         .validation_faults = vfaults,
         .recoveries = recovers,
+        .unbacked = unbacked,
     };
 }
 
@@ -286,6 +325,15 @@ pub fn copy_out(address: u64, src: []const u8, len: usize) Outcome {
     if (!range_ok(write_regions[c][0..write_region_count[c]], address, @intCast(len))) {
         validation_faults_value[c] +%= 1;
         return .fault;
+    }
+    // Issue #1391: never store through the EL1-only identity overlay. The
+    // check is per 4 KiB page of the destination and runs before the window
+    // opens, so a refusal leaves the destination untouched.
+    if (resolve_write_pages) |resolve| {
+        if (!resolve(address, len)) {
+            unbacked_value[c] +%= 1;
+            return .fault;
+        }
     }
     open_window();
     const result = copy_out_window(address, src[0..len], len);
@@ -411,6 +459,9 @@ pub const DiagResult = struct {
     recoveries: u64,
     copies: u64,
     validation_faults: u64,
+    /// Issue #1391: kernel->user copies refused because a destination page
+    /// was not the calling process's to write. 0 is the healthy value.
+    unbacked: u64,
 };
 
 /// Monitor `uaccess` diagnostic: prove both paths on live hardware. The
@@ -440,6 +491,7 @@ pub fn diag() DiagResult {
         .recoveries = totals.recoveries,
         .copies = totals.copies,
         .validation_faults = totals.validation_faults,
+        .unbacked = totals.unbacked,
     };
 }
 
@@ -529,6 +581,52 @@ test "uaccess: out-of-region kernel/MMIO/blanket addresses fault" {
     // validation here; the hardware recovery for such addresses is proven by
     // the raw diagnostic + live gate.
     try std.testing.expectEqual(Outcome.fault, copy_in(dst[0..], diagnostic_unmapped, 8));
+}
+
+fn testResolveRefuse(address: u64, len: usize) bool {
+    _ = address;
+    _ = len;
+    return false;
+}
+
+fn testResolveAccept(address: u64, len: usize) bool {
+    _ = address;
+    _ = len;
+    return true;
+}
+
+test "uaccess: copy_out consults the destination resolver and refuses with EFAULT when it says no (issue #1391)" {
+    init();
+    const text = "kernel says hi";
+    var user: [64]u8 = undefined;
+    @memset(user[0..], 0);
+    set_regions(
+        .{ .base = 0, .len = 0 },
+        .{ .base = @intFromPtr(&user), .len = user.len },
+    );
+    // Unarmed (host tests, pre-boot host: the pre-#1391 contract — the range
+    // check alone) copies as before.
+    try std.testing.expectEqual(Outcome.ok, copy_out(@intFromPtr(&user), text, text.len));
+    try std.testing.expectEqualStrings(text, user[0..text.len]);
+
+    // Armed and refusing: nothing is stored at all, and the refusal is
+    // countable (it is the observable form of "this store would have been
+    // swallowed by the EL1-only identity overlay").
+    @memset(user[0..], 0);
+    resolve_write_pages = &testResolveRefuse;
+    defer resolve_write_pages = null;
+    const before = stats();
+    try std.testing.expectEqual(Outcome.fault, copy_out(@intFromPtr(&user), text, text.len));
+    try std.testing.expectEqualStrings("\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00", user[0..text.len]);
+    const after = stats();
+    try std.testing.expectEqual(before.unbacked + 1, after.unbacked);
+    try std.testing.expectEqual(before.copies, after.copies); // a refused copy never opens the window
+
+    // Armed and accepting: the same copy lands byte-exactly.
+    resolve_write_pages = &testResolveAccept;
+    try std.testing.expectEqual(Outcome.ok, copy_out(@intFromPtr(&user), text, text.len));
+    try std.testing.expectEqualStrings(text, user[0..text.len]);
+    try std.testing.expectEqual(after.copies + 1, stats().copies);
 }
 
 test "uaccess: copy_out to the read-only text aperture is a permission fault" {

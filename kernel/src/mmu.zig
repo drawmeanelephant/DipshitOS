@@ -787,6 +787,19 @@ pub fn get_user_leaf(root_phys: u64, va: u64) ?*u64 {
     return &l3[ix.l3];
 }
 
+/// Issue #1391: does `va` resolve, in THIS root, to a page EL0 itself can
+/// reach? False for an absent entry, for an L2 block leaf (the identity
+/// overlay's blocks are EL1-only by construction — `user_leaf` is only ever
+/// applied at the page level), and for an EL1-only page leaf. A kernel store
+/// through such a mapping returns success and lands on the identity twin
+/// (physical == VA), which no EL0 access can observe, so the kernel->user
+/// copy path refuses instead of storing.
+pub fn leaf_el0_visible(root_phys: u64, va: u64) bool {
+    const leaf = get_user_leaf(root_phys, va) orelse return false;
+    if ((leaf.* & 3) != 3) return false;
+    return ((leaf.* >> 6) & 3) != 0;
+}
+
 /// Unmap a 4 KiB user page at `va`, returning the physical address previously mapped.
 pub fn unmap_user_page(root_phys: u64, va: u64) ?u64 {
     const leaf = get_user_leaf(root_phys, va) orelse return null;
@@ -851,6 +864,26 @@ test "mmu: an aperture above the identity blanket still gets EL0 leaves (issue #
     const leaf = get_user_leaf(root, stack_va + 4096).?;
     try std.testing.expectEqual(stack_pa + 4096, leaf.* & 0x0000_ffff_ffff_f000);
     try std.testing.expectEqual(@as(u64, 1), (leaf.* >> 6) & 3); // EL0 RW
+}
+
+test "mmu: leaf_el0_visible rejects the EL1-only identity overlay (issue #1391)" {
+    reset();
+    const text_va = userspace.text_va;
+    const stack_va: u64 = 0x1a400000;
+    const root = build_user_root(text_va, 0x1000, 64, stack_va, 0x2000, 8192).?;
+    // The apertures are EL0 leaves: visible.
+    try std.testing.expect(leaf_el0_visible(root, text_va));
+    try std.testing.expect(leaf_el0_visible(root, stack_va + 4096));
+    // A VA the root does not map at all: not visible (the copy path will
+    // demand-populate it or refuse, never store).
+    try std.testing.expect(!leaf_el0_visible(root, stack_va + 64 * 4096));
+    // An EL1-only leaf — exactly the identity overlay's shape (AP = 0b00,
+    // here Device, physical == VA) — is NOT a destination the kernel may
+    // store into: EL0 could never observe the store.
+    const va = stack_va + 4096;
+    const leaf = get_user_leaf(root, va).?;
+    leaf.* &= ~(@as(u64, 3) << 6);
+    try std.testing.expect(!leaf_el0_visible(root, va));
 }
 
 test "mmu: user leaves are page-local W^X and reject Device mappings" {

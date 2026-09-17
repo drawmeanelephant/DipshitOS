@@ -20,7 +20,7 @@ vgate_assert 01 serial-count 'syscall: write ok n=23' 1
 vgate_assert 01 serial-count 'uaccess: efault ok n=8' 1
 vgate_assert 01 serial-exact '  0 sys_ping calls=2' 1
 vgate_assert 01 serial-exact '  1 sys_write calls=3' 1
-vgate_assert 01 serial-exact 'uaccess: valid=1 fault=1 recovered=1 copies=4 validation_faults=1' 1
+vgate_assert 01 serial-exact 'uaccess: valid=1 fault=1 recovered=1 copies=4 validation_faults=1 unbacked=0' 1
 vgate_assert 01 serial-exact 'rx-uaccess-ok' 1
 vgate_assert 01 serial-exact 'userspace: el0=1 svc=2 roundtrips=1 arg=2 result=2 rejected=0' 1
 vgate_assert 01 serial-absent '[EXC] parking:'
