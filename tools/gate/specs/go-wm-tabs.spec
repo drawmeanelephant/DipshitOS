@@ -82,6 +82,8 @@ vgate_assert 01 serial-contains 'calc: tab-aware (full-viewport)'
 vgate_assert 01 serial-contains 'notepad: tab-aware (full-viewport)'
 # M62d: reorder two unpinned tabs; pin jumps to the left and stays there
 # across a focus change. Order line names ids + pin bits (not LAYOUT.txt).
+# There is no kernel pin object: the first dump is Pin() on the strip; the
+# second is only printed after WmctlTaskbarClick actually took focus.
 vgate_assert 01 serial-contains 'gotabwm: reorder 0->1'
 vgate_assert 01 serial-contains 'gotabwm: pin id='
 vgate_assert 01 serial-contains 'gotabwm: order ids='

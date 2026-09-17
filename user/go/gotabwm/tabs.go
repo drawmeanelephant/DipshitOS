@@ -194,18 +194,16 @@ func (s *TabStrip) Unpin(id uint32) bool {
 	return true
 }
 
-// Reorder moves the tab at from to to (Zig TABWM move_tab). Refused when
-// either tab is pinned — M62d reorders two unpinned tabs; pinned stay
-// left until Unpin. Focus follows the same tab by id.
+// Reorder moves the tab at from to to. Same as Zig TABWM move_tab: any
+// pair of indices, including pinned tabs. Pin-left is restored by Pin /
+// Unpin (normalize_pinned), not by every move — a reorder can briefly
+// leave a pinned tab off the front, matching M48. Focus follows by id.
 func (s *TabStrip) Reorder(from, to int) bool {
 	if from < 0 || to < 0 || from >= s.count || to >= s.count || from == to {
 		return false
 	}
-	if s.tabs[from].Pinned || s.tabs[to].Pinned {
-		return false
-	}
 	moved := s.tabs[from]
-	fid, _ := s.Focused()
+	fid, has := s.Focused()
 	if from < to {
 		for i := from; i < to; i++ {
 			s.tabs[i] = s.tabs[i+1]
@@ -216,7 +214,7 @@ func (s *TabStrip) Reorder(from, to int) bool {
 		}
 	}
 	s.tabs[to] = moved
-	if fid != 0 {
+	if has {
 		s.focus = s.index(fid)
 	}
 	return true

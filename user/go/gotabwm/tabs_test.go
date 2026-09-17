@@ -374,7 +374,7 @@ func TestPinSortsLeftAndSurvivesFocus(t *testing.T) {
 	}
 }
 
-func TestReorderUnpinnedOnly(t *testing.T) {
+func TestReorderMatchesMoveTab(t *testing.T) {
 	var s TabStrip
 	s.OpenTab(2, "A")
 	s.OpenTab(3, "B")
@@ -392,11 +392,19 @@ func TestReorderUnpinnedOnly(t *testing.T) {
 	if !s.Pin(2) {
 		t.Fatal("Pin A")
 	}
-	if s.Reorder(0, 1) {
-		t.Fatal("must not reorder a pinned tab")
+	// Zig move_tab will move a pinned tab; pin-left is not repaired until
+	// the next Pin/Unpin (normalize_pinned).
+	if !s.Reorder(0, 1) {
+		t.Fatal("Reorder of a pinned tab (Zig move_tab)")
 	}
-	if !s.Reorder(1, 2) {
-		t.Fatal("unpinned tail must still reorder")
+	if s.At(0).ID != 4 || s.At(1).ID != 2 || !s.At(1).Pinned {
+		t.Fatalf("pinned A moved off the front: %d,%d pin1=%v", s.At(0).ID, s.At(1).ID, s.At(1).Pinned)
+	}
+	if !s.Unpin(2) {
+		t.Fatal("Unpin A")
+	}
+	if s.At(0).Pinned || s.At(1).Pinned {
+		t.Fatal("Unpin must re-partition")
 	}
 }
 

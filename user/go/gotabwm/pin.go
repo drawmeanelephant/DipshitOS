@@ -9,8 +9,9 @@ func dumpOrder() {
 	vi.ConsoleLine(MarkerOrder + orderLine(&tabs))
 }
 
-// applySwapUnpinned reorders two unpinned tabs (indices 0→1). The new
-// order is what `.tabs` v2 will later persist (M62e).
+// applySwapUnpinned reorders indices 0→1. The live two-tab path does this
+// while both are still unpinned (the M62d card); Reorder itself matches
+// Zig move_tab and will move a pinned tab too.
 func applySwapUnpinned() bool {
 	if tabs.Count() != 2 {
 		return false
@@ -37,21 +38,28 @@ func applyPinStay() bool {
 		return false
 	}
 	vi.ConsoleLine(MarkerPin + "id=" + vi.Itoa64(int64(right.ID)) + " on")
+	// First dump: pin bit + left partition. There is no kernel pin object
+	// to ack; this is the strip after Pin().
 	dumpOrder()
 	fid, _ := tabs.Focused()
 	other := tabs.At(0).ID
 	if other == fid {
 		other = tabs.At(1).ID
 	}
-	if other == 0 {
+	if other == 0 || other == fid {
 		return false
 	}
-	if vi.WmctlTaskbarClick(other) == 0 {
-		_ = tabs.FocusTab(other)
-		vi.ConsoleLine(MarkerTabFocus + vi.Itoa64(int64(other)))
-		vi.ConsoleLine(MarkerHostFocus + vi.Itoa64(int64(other)))
-		hostedApp = other
+	// Second dump only after the kernel took the focus change. A failed
+	// taskbar click must not look like pin-stayed-left-across-focus.
+	if vi.WmctlTaskbarClick(other) != 0 {
+		return false
 	}
+	if !tabs.FocusTab(other) {
+		return false
+	}
+	vi.ConsoleLine(MarkerTabFocus + vi.Itoa64(int64(other)))
+	vi.ConsoleLine(MarkerHostFocus + vi.Itoa64(int64(other)))
+	hostedApp = other
 	dumpOrder()
 	return true
 }
@@ -65,9 +73,9 @@ func closePinnedFirst() bool {
 		if !t.Pinned {
 			continue
 		}
+		_ = tabs.FocusTab(t.ID)
+		hostedApp = t.ID
 		if vi.WmctlTaskbarClick(t.ID) == 0 {
-			_ = tabs.FocusTab(t.ID)
-			hostedApp = t.ID
 			vi.ConsoleLine(MarkerTabFocus + vi.Itoa64(int64(t.ID)))
 		}
 		return closeHosted()
