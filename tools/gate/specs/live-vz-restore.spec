@@ -4,6 +4,7 @@ vgate_share none
 
 vgate_run 01 -- --vz-restore --timeout 90
 
+# VZVirtualMachineState SDK raw values: stopped=0, running=1, paused=2.
 vgate_assert 01 output-contains 'VZ-RESTORE: validateSaveRestoreSupport passed'
 vgate_assert 01 output-contains 'VZ-RESTORE: pause completed state=2'
 vgate_assert 01 output-contains 'VZ-RESTORE: saveMachineStateTo completed state=2'

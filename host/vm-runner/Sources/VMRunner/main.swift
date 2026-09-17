@@ -5,6 +5,11 @@
 // (--overlay-base: macOS 27 DiskImageKit stacked image — read-only base +
 //  throwaway ASIF overlay per run; positional <disk-image> is then ignored.
 //  --vars <path>: per-run EFI variable store.)
+//         [--vz-restore] (claim #1370: standalone headless save/restore probe —
+//          real VZ pause/saveMachineStateTo/stop/restoreMachineStateFrom/resume;
+//          a fresh post-restore serial query must recover a RAM-only clipboard
+//          marker. Supports only --overlay-base/--vars/--serial/--cpus/--timeout;
+//          needs --timeout in (0,600]. See docs/hardware-contract.md.)
 //         [--timeout <s|0>] (0 = run until Ctrl-C) [--expect <line>] [--terminal-marker <line>]
 //         [--cpus <n>] (claim 907: VCPU count, default 2 — the four-core
 //          four-domain stress gate boots 4)
