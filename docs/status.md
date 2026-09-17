@@ -76,7 +76,8 @@ any, are on the GitHub tracker.
 | 54 | Go carries its first app | A Go EL0 program owns a raw ADR 0007 window (`GOWIN.ELF`, gate `go-win`), an independent Go `.tabs` v2 codec round-trips the TABWM session format (`tools/go/tabcodec`), and `WEB.ELF` renders in-guest over `user/go/webrender`; kernel untouched (umbrella #1244) | ✅ 2026-09-15 |
 | 56 | Finish the Go SDK (`vi` + `tabapp`) | The Go EL0 SDK is complete enough to be a WM: `vi` gains IPC 5/6 + `procs` discovery, the tab-client WM_RPC wire, and addr-hinted mmap; `user/go/widgets` adds text/button/list; `user/go/tabapp` + a demo app run one Go tab full-viewport in Zig TABWM (gate `go-tabapp`) | ✅ 2026-09-15 (gate `go-tabapp` green on VZ) |
 | 59 | Default flip (#1298) | The **boot default is the Go seat**: `wm` is a schema-v2 settings key whose compiled default is `gotabwm`, so a boot with no persisted value autostarts `GOTABWM.ELF` and hosts leftover Zig CALC/NOTEPAD over WM_RPC; `settings set wm tabwm` keeps the Zig seat as the reachable fallback and `none` is the explicit shim-only VM (gate `go-wm-default`, 2/2 runs: the untouched default boot, then the persisted fallback) | ✅ 2026-09-15 (gate `go-wm-default` green on VZ) |
-| 60 | Starve Zig EL0 (#1297) | No new `user/src/*.zig` apps (ADR 0030). Leftovers deleted: `EDIT.BIN` → `GOEDIT.ELF` (gate `go-edit`); `FILE.BIN` → `GOFILES.ELF` (gate `go-files`, #1374). CALC successor `GOCALC.ELF` (gate `go-calc`, #1378); Zig `CALC.BIN` stays. Further Zig EL0 deletions are later cards. TLS stays `FETCHS.BIN` / `lib/tls`; SSH stays `SSH.BIN`. | 🔄 2026-09-16 (policy + EDIT/FILE deletions) |
+| 60 | Starve Zig EL0 (#1297) | No new `user/src/*.zig` apps (ADR 0030). Leftovers deleted: `EDIT.BIN` → `GOEDIT.ELF` (gate `go-edit`); `FILE.BIN` → `GOFILES.ELF` (gate `go-files`, #1374). CALC successor `GOCALC.ELF` (gate `go-calc`, #1378); Zig `CALC.BIN` stays until M62h. Further Zig EL0 deletions are later cards. TLS stays `FETCHS.BIN` / `lib/tls`; SSH stays `SSH.BIN`. | 🔄 2026-09-16 (policy + EDIT/FILE deletions) |
+| 62 | GOTABWM is the tabbed desktop | Deepen the Go seat that already boots (ADR 0033): tabs, split, pin/reorder, `.tabs` v2 session, `LAYOUT.txt` dump, then delete `CALC.BIN`. No second compositor. | 🔄 2026-09-17 (docs #1399; cards #1400–#1406) |
 
 > M40 (the gate-fleet consolidation, issue #934, done 2026-09-06) was a tooling
 > workstream, not a product milestone; M36 was skipped.
@@ -93,9 +94,9 @@ The only threads not closed:
 |--------|-------------------|-------|
 | **Go runtime port — `GOOS=virelai`** | Phase 0a–0c + phase 2 netpoll + 2.1 EL0 clock landed (#1187/#1196/#1221/#1230/#1231/#1228/#1350/#1359). | #1163 |
 | **M58 — Move the apps you touch** | M58a–f landed: files, GOEDIT (`go-edit`), GOTERM (`go-term`, #1307), fetch, FART. `GOCALC.ELF` (gate `go-calc`, #1378) is the CALC successor. Full-viewport via tabapp in Zig TABWM. | |
-| **M60 leftovers** | Policy recorded; `EDIT.BIN` and `FILE.BIN` gone. `GOCALC.ELF` (gate `go-calc`, #1378) is the CALC successor; Zig `CALC.BIN` stays until a later delete card. Remaining Zig EL0 (CALC, NOTEPAD, TABWM, SH, TLS/SSH helpers) deletes one binary per card when its Go successor is VZ-green. | |
-| **M61 — Guest self-test** | ADR 0031 landed (#1381); M61b `GOSELF.ELF` + `go-selftest` VZ-green (#1382, PR #1392); M61c intake (#1383) reads the host-seeded `IN/` fixtures and the host byte-compares the guest's copies; M61d (#1384) adds the file-ABI pack (`file-roundtrip` / `file-truncate` / `file-delete` / `file-list`) with a receipt and a read-back copy per case, byte-compared on macOS. #1391 is fixed kernel-side (ADR 0032 — `copy_out` resolves its destination page in the process's own root), the read helper's workaround is deleted and the intake case is its regression test. Next: M61e window receipts (#1385). | #1380 |
-| **EL0 `sys_exec` caller survival** | AddrSpaceSpec + argv on slot 28; class-B `live-el0-exec` | #1333 |
+| **M60 leftovers** | Policy recorded; `EDIT.BIN` and `FILE.BIN` gone. Zig `CALC.BIN` waits on M62h (#1406). Remaining Zig EL0 (NOTEPAD, TABWM, SH, TLS/SSH helpers) deletes one binary per card when its Go successor is VZ-green. | |
+| **M61 — Guest self-test** | a–d landed; e window receipt (#1385) in flight; f `share-equals` (#1386) closes the arc. | #1380 |
+| **M62 — GOTABWM depth** | ADR 0033 (#1399). Next: tab strip (#1400), then split / pin / session / dump / two real apps; CALC.BIN last (#1406). Serialize on `user/go/gotabwm/`. | #1398 |
 
 ## Gate status
 

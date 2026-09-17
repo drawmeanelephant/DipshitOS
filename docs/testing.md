@@ -110,6 +110,24 @@ moved part of the evidence into the guest. The rule, in one table:
 - The per-run share is deleted at `gate_end`; any file the host compares is
   copied into `artifacts/` first (`artifacts/go-selftest-report.txt`, …).
 
+## GOTABWM depth (M62) — the seat is the desktop
+
+ADR 0033 ([`decisions/0033-gotabwm-depth.md`](decisions/0033-gotabwm-depth.md))
+is the product split after M61: **deepen `GOTABWM.ELF`**, do not invent a
+second compositor. Zig `TABWM.BIN` stays the `wm=tabwm` fallback; the
+compiled default stays `gotabwm`. Kernel, virtio-gpu, and ADR 0007 are
+untouched. Session bytes are existing `.tabs` v2 (`tabcodec`). Structural
+proof is `/host/SELFTEST/LAYOUT.txt` written by GOTABWM (not GOSELF):
+
+```
+tab=<id> bin=<name> x=<X> y=<Y> w=<W> h=<H> focus=<0|1> split=<none|h|v>
+```
+
+UTF-8 LF, deterministic, closed before the serial line that names it. The
+tabbed-product gate is `go-wm-tabs`; `go-wm-seat` / `go-wm-default` keep
+their current proofs. Cards #1400–#1406 serialize on `user/go/gotabwm/`
+except the leftover CALC delete (#1406).
+
 ## Locale determinism
 
 A generated file whose bytes depend on the shell's locale is worse than no
