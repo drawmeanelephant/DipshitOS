@@ -1,3 +1,10 @@
+// Same-process, same-host VZ machine-state round trip for the headless
+// EFI/disk/serial/entropy configuration; see docs/hardware-contract.md.
+// Graphics, custom-virtio, USB, and cross-process/host portability are unproven.
+// The RAM clipboard is set only before save; after restore, only a fresh
+// serial query past serialOffset can pass. No framebuffer or reboot fallback.
+// Saved state is removed on success; failures may leave it beside the serial
+// log for diagnosis, subject to the enclosing gate's temporary-directory cleanup.
 import Darwin
 import Foundation
 import Virtualization
