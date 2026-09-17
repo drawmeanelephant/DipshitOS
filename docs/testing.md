@@ -60,17 +60,21 @@ moved part of the evidence into the guest. The rule, in one table:
   file makes the case FAIL (`read returned <n>B of zeros (issue #1391)`
   when the channel itself is the problem). Writes stay out of `IN/`:
   the spec also asserts both fixtures are unchanged after the run.
-- **Known defect on the read path (#1391).** On VZ the *first* kernel→user
-  copy into a user buffer whose pages EL0 has never written is silently
-  lost — the syscall returns the right byte count and the app reads zeros
-  (seen in M61b as an all-zeros `APPS.TXT` read and a zeros read-back of a
-  file the guest had just written; root-caused in M61c to the buffer's
-  first touch, since touching it first makes the same read correct). The
-  host file channel is not involved — the runner's stdout shows the bytes
-  being served. `user/go/selftest`'s read helper warms its buffer ends as
-  a documented workaround and the case still fails on wrong bytes; do not
-  add retries or warm-up *reads*, and fix #1391 before the M61d case pack
-  (create/write/read-back) relies on fresh buffers.
+- **The read path's defect is fixed (#1391, ADR 0032).** A kernel→user copy
+  into a page EL0 had never written used to be silently lost — the syscall
+  returned the right byte count and the app read zeros (M61b: an all-zeros
+  `APPS.TXT` read and a zeros read-back of a file the guest had just
+  written). It was never the host file channel (the runner's stdout shows
+  the bytes served) nor the guest's write path; the destination page
+  resolved for EL1 into the kernel's EL1-only identity overlay, so the
+  store reached a physical address no EL0 access could see. The copy path
+  now resolves each destination page in the process's own root before
+  storing (`exceptions.populate_user_page`; `unbacked` in the monitor's
+  `uaccess` line counts refusals and must stay 0). `user/go/selftest`'s
+  workaround is **deleted** — the intake case reading a host-seeded fixture
+  into a fresh buffer is the regression test, so do not add retries,
+  warm-up writes or buffer reuse there, and M61d (create/write/read-back)
+  can rely on fresh buffers.
 - The serial contract is one summary line, `selftest: FAIL n=<N>` (N=0 on
   success), printed after `REPORT.txt` is closed; the report's
   `summary cases=<n> failed=<k>` must agree with it, and a run whose

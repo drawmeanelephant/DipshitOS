@@ -172,12 +172,17 @@ type fixtureCheck struct {
 func (c fixtureCheck) run(s *syscalls) error {
 	// The READ comes first, before anything else in this run touches the
 	// share: intake is "what the host seeded", and the app reads it before it
-	// writes anything of its own. Order is also load-bearing for issue #1391
-	// — on VZ a share read that follows another share operation in the same
-	// process has come back as the right length of zeros, while a process's
-	// first share operation, when it is the read, has been correct in every
-	// run measured. The case still FAILS and names #1391 if the channel lies
-	// (that is what the check below is for); it does not retry or warm up.
+	// writes anything of its own.
+	//
+	// This read is also the fleet's regression test for issue #1391 (the
+	// first kernel->user copy into a page EL0 has never written was silently
+	// lost — the syscall returned the right LENGTH and the app read zeros).
+	// M61c's first diagnosis blamed the ORDER of share operations; the probe
+	// evidence recorded on #1391 blamed the DESTINATION PAGE, and the fix is
+	// kernel-side (the copy path resolves the page in the process's own root
+	// before it stores). That test only stays meaningful while the read lands
+	// in an untouched buffer, so nothing here retries, warms up or reuses one;
+	// the case FAILS, naming #1391, on a zeros read.
 	//
 	// One byte over the expectation: a longer fixture is a mismatch, and the
 	// bound keeps a hostile file from being read into memory unboundedly.
@@ -203,20 +208,40 @@ func (c fixtureCheck) run(s *syscalls) error {
 
 	switch {
 	case c.mustEqu && !equal:
-		// A read that returns the right LENGTH of zeros is issue #1391, a
-		// file-channel defect seen on VZ during M61b. Name it here: the
-		// detail is the only place a human sees it, and the reported bytes
-		// are what the investigation needs.
+		// A read that returns the right LENGTH of zeros is issue #1391's
+		// shape — a kernel->user copy that never reached the page the app
+		// reads. Name it: the detail is the only place a human sees it, and a
+		// zeros read is worth distinguishing from a genuine byte mismatch.
 		if isAllZero(got) {
 			return errors.New("read returned " + strconv.Itoa(len(got)) + "B of zeros (issue #1391)")
 		}
 		return errors.New("fixture mismatch: got=" + strconv.Itoa(len(got)) +
 			" want=" + strconv.Itoa(len(c.want)))
-	case !c.mustEqu && equal:
+	case c.mustEqu:
+		return nil
+	case equal:
 		return errors.New("altered fixture matched the expectation: " +
 			strconv.Itoa(len(got)) + "B")
 	}
+	// The negative check needs the read to be a BODY, not just different from
+	// the canonical bytes: an empty, short or all-zero read differs for the
+	// wrong reason. Observed on VZ while #1391 was live — this case PASSED on
+	// 25 bytes of zeros, a wrong answer reported as a verdict, so the shape
+	// is checked here as well as byte-compared on the host.
+	if isAllZero(got) || len(got) != len(c.want) {
+		return errors.New("altered fixture read is not a body: " + readShape(got))
+	}
 	return nil
+}
+
+// readShape names what a wrong read returned: its length, and whether every
+// byte was zero (issue #1391's shape). Used by the negative check's detail.
+func readShape(b []byte) string {
+	shape := strconv.Itoa(len(b)) + "B"
+	if isAllZero(b) {
+		shape += " of zeros"
+	}
+	return shape
 }
 
 // writeReceipt writes the case's OUT/<id>.* receipt: the fixture it read, the
@@ -283,8 +308,9 @@ func caseClockMonotonic(s *syscalls) error {
 // that reported success without landing cannot pass the gate.
 //
 // The read-back half deliberately stays out of M61b: it lands with the
-// file-ABI case pack (M61d, #1384), where the first-read behaviour filed as
-// #1391 is fixed or explicitly worked around.
+// file-ABI case pack (M61d, #1384) — the first-read behaviour filed as #1391
+// is fixed kernel-side, so a read-back into a fresh buffer is now expected to
+// work rather than to be worked around.
 func caseFileWrite(s *syscalls) error {
 	s.mkdir(outDir)
 	payload := []byte(helloPayload)
@@ -341,17 +367,19 @@ func writeFile(s *syscalls, path string, b []byte) (int, error) {
 // intake (M61c) and read-back (M61d) cases, unit-tested through the fake share
 // in selftest_test.go.
 //
-// KNOWN ISSUE (#1391, M61b, root-caused in M61c): the FIRST kernel->user copy
-// into a user buffer whose pages EL0 has never written is silently lost — the
-// syscall returns the right byte count and the app reads zeros. Observed as a
-// zeros read for APPS.TXT (852 B) and for a file the guest had just written
-// (13 B) in M61b, and reproduced on demand in M61c with a probe that reads into
-// a fresh buffer: touch the buffer first (see the workaround below) and the
-// same read returns the real bytes. The host file channel is NOT at fault —
-// the runner's own stdout shows the bytes served — and the guest's write path
-// is not either (a write's pages are dirty before the syscall). fixtureCheck
-// names the shape in the case detail so a regression is never a bare
-// "mismatch", and nothing here retries or warms up as a substitute for a fix.
+// The buffer is deliberately a FRESH allocation the case then reads into.
+// That is the regression test for issue #1391: the first kernel->user copy
+// into a page EL0 has never written used to be silently lost (the syscall
+// returned the right byte count and the app read the page's zeros — observed
+// the same way for APPS.TXT (852 B) and for a file the guest had just written
+// (13 B). It was never the file channel — the runner's own stdout shows the
+// bytes served — nor the guest's write path, whose pages are dirty before the
+// syscall; the cause was the destination page resolving for EL1 through the
+// kernel's identity overlay, and it is fixed in the kernel's copy path (every
+// destination page is resolved in the reading process's own root before the
+// store). fixtureCheck still names the zeros shape in the case detail, so a
+// regression is never a bare "mismatch" — and nothing here retries, warms up
+// or reuses a buffer as a substitute for that fix.
 func readFile(s *syscalls, path string, max int) ([]byte, error) {
 	h, rc := s.open(path, vi.ModeRead)
 	if rc < 0 {
@@ -360,16 +388,6 @@ func readFile(s *syscalls, path string, max int) ([]byte, error) {
 	defer s.close(uint32(h))
 	var out []byte
 	buf := make([]byte, 4096)
-	// Issue #1391 workaround, and ONLY that: on VZ the first kernel->user
-	// copy into a user buffer whose pages EL0 has never written is silently
-	// lost — the syscall reports success and the app reads the page's zeros.
-	// Writing the buffer's ends first makes every page the read can touch
-	// warm, which is measurable (a probe that skips this line returns nothing
-	// but zeros in every VZ run so far). It hides no bad data: the case below
-	// still requires the exact fixture bytes and fails, naming #1391, on
-	// anything else. Delete this when #1391 is fixed.
-	buf[0] = 0
-	buf[len(buf)-1] = 0
 	for len(out) < max {
 		n, rrc := s.read(uint32(h), buf)
 		if rrc < 0 {

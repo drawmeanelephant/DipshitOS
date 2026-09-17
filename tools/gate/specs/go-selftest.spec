@@ -27,15 +27,17 @@
 # TestIntakeFailsOnAMutatedSeed) and the anti-embedding property is what the
 # asserts here cover continuously.
 #
-# KNOWN ISSUE (#1391, root-caused while building this card): the FIRST
-# kernel->user copy into a user buffer whose pages EL0 has never written is
-# silently lost on VZ — the syscall reports the right byte count and the app
-# reads zeros. The guest's read helper touches its buffer first, which is a
-# documented workaround for that defect, not a retry and not a warm-up read:
-# the case still requires the fixture's exact bytes and fails, naming #1391
-# (`case intake fail read returned 25B of zeros (issue #1391)`), on anything
-# else. The host's file channel is not involved (its stdout shows the bytes
-# served). Removing the workaround is part of fixing #1391.
+# REGRESSION TEST for #1391 (fixed in the kernel, ADR 0032): the first
+# kernel->user copy into a user buffer whose pages EL0 has never written used
+# to be silently lost on VZ — the syscall reported the right byte count and the
+# app read zeros, because the destination page still resolved for EL1 into the
+# kernel's EL1-only identity overlay. The guest's read helper no longer touches
+# its buffer first (that workaround is deleted): `intake` reads a host-seeded
+# fixture into a fresh buffer, and the asserts below require the fixture bytes
+# back — in the report, in the OUT/ copies and in the receipts. With the defect
+# live, this run ended on `case intake fail read returned 25B of zeros (issue
+# #1391)` + `selftest: FAIL n=1` (recorded on #1391). The host's file channel
+# was never involved (its stdout shows the bytes served).
 #
 # The report fixture below is byte-exact on purpose — the report is
 # deterministic (ADR 0031). Adding a case in M61d/e updates this fixture.

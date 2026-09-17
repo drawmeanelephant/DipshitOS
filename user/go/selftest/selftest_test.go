@@ -279,6 +279,24 @@ func TestIntakeNamesZerosReads(t *testing.T) {
 	}
 }
 
+// A zeros read must fail the NEGATIVE case too: while issue #1391 was live,
+// `intake-altered` PASSED on 25 bytes of zeros because zeros do differ from
+// the canonical body. That is a wrong answer reported as a verdict, so the
+// negative check requires a body (right length, not all zeros) as well.
+func TestAlteredCaseFailsOnAZerosRead(t *testing.T) {
+	fs := newFakeFS()
+	seedFixtures(fs)
+	fs.zeroRead = true
+	rs := runCases(fs.syscalls())
+
+	if rs[1].ok {
+		t.Fatalf("intake-altered passed on a zeros read, got %+v", rs[1])
+	}
+	if !strings.Contains(rs[1].detail, "not a body: 25B of zeros") {
+		t.Fatalf("detail = %q", rs[1].detail)
+	}
+}
+
 // readFile is the intake/read-back substrate for M61c/M61d; M61b's cases do
 // not read yet, so it is exercised directly here (including the failure path
 // the guest must not paper over — see issue #1391).

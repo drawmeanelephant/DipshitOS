@@ -449,6 +449,18 @@ Non-PCI platform facts:
   other address (including undeclared firmware MMIO)** as Device nGnRnE, so
   no post-switch access faults or hangs on an unmapped address.
   **[observed]** claim 0010.
+- **Under a task's own TTBR0 root, an untouched user page still resolves for
+  EL1.** The per-task root clones the identity overlay verbatim, so a user VA
+  the process has not faulted in yet is a present-but-EL1-only entry
+  (AP = 0b00) whose physical twin is the VA itself — Device-nGnRnE where that
+  VA is not RAM. An EL1 store there **succeeds and is lost**: no EL0 access
+  can ever observe it. Observed during #1391 with a temporary descriptor
+  probe on GOSELF's read destinations in the mmap arena
+  (`kind=3 ap=0 memattr=0 desc=0x4809a403`, physical == VA); the guest then
+  read a correct length of zeros, because the page EL0 later got was a
+  different, demand-filled one. The kernel's copy path now resolves every
+  destination page in the process's own root before storing (ADR 0032), so
+  the overlay is never a store target. **[observed]** #1391.
 - **TTBR1 translation is incompatible with this kernel's tables on VZ**
   [measured, claim 5804]: 4 KiB-aligned tables fault at the first descent
   level in every configuration; 64 KiB-aligned tables resolve but Normal-WB

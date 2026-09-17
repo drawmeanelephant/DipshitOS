@@ -1631,7 +1631,9 @@ test "monitor: uaccess command is honest on a host process (no vectors)" {
     // fault without dereferencing (recovered=0). On VZ the class-B gate
     // asserts the real recovery line instead.
     try std.testing.expectEqualStrings(
-        "uaccess: valid=0 fault=1 recovered=0 copies=0 validation_faults=1\n",
+        // `unbacked` (issue #1391) counts copy-outs refused because a
+        // destination page was not the process's to write: 0 is healthy.
+        "uaccess: valid=0 fault=1 recovered=0 copies=0 validation_faults=1 unbacked=0\n",
         env.mock.contents(),
     );
 }

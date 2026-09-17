@@ -108,6 +108,13 @@ var report_writer: ?*const fn ([]const u8) void = null;
 /// null and assert on `format_report` directly.
 pub fn init(writer: *const fn ([]const u8) void) void {
     report_writer = writer;
+    // Issue #1391: arm the kernel -> user destination resolver. Every
+    // `uaccess.copy_out` asks it before it stores, because under a task's
+    // root a user VA that has no EL0 leaf still resolves for EL1 into the
+    // EL1-only identity overlay — a store there is silently lost. The
+    // resolver demand-populates the page in the process's own root or
+    // refuses the copy; see `ensure_user_write_pages`.
+    uaccess.resolve_write_pages = ensure_user_write_pages;
 }
 
 // ---------------------------------------------------------------------------
@@ -872,38 +879,96 @@ pub fn try_handle_page_fault(esr: u64, far: u64) bool {
         }
     }
 
-    // Case 2: Zero-fill demand paging (translation fault 0x4..0x7 OR permission fault 0xc..0xf on unmapped address)
-    // Check anonymous mmap regions
-    if (process.find_mmap_region(pid, far)) |mreg| {
-        const writable = (mreg.prot & 2) != 0;
-        const executable = (mreg.prot & 4) != 0;
-        const pa = alloc.alloc_pages(1) orelse return false;
-        zero_phys_page(pa);
-        const page_va = far & ~@as(u64, 0xfff);
-        if (!mmu.map_user_page(root, page_va, pa, writable, executable)) {
-            _ = alloc.free_pages(pa, 1);
-            return false;
-        }
-        _ = process.record_dynamic_page(pid, pa);
-        demand_fault_count += 1;
-        return true;
-    }
-
-    // Check stack expansion
-    if (pinfo.stack_len > 0 and far >= pinfo.stack_va and far < pinfo.stack_va + pinfo.stack_len) {
-        const pa = alloc.alloc_pages(1) orelse return false;
-        zero_phys_page(pa);
-        const page_va = far & ~@as(u64, 0xfff);
-        if (!mmu.map_user_page(root, page_va, pa, true, false)) {
-            _ = alloc.free_pages(pa, 1);
-            return false;
-        }
-        _ = process.record_dynamic_page(pid, pa);
-        demand_fault_count += 1;
-        return true;
-    }
+    // Case 2: zero-fill demand paging (translation fault 0x4..0x7 OR a
+    // permission fault on an address the EL1-only identity overlay still
+    // covers — the clone copies that overlay verbatim, so an untouched user
+    // page is present-but-AP=0b00 rather than absent). ONE resolution,
+    // shared with the kernel -> user copy path (issue #1391), so both agree
+    // on what counts as this process's page.
+    if (populate_user_page(pid, root, far)) return true;
 
     return false;
+}
+
+/// Issue #1391: populate ONE 4 KiB page of `pid` at `va` in the process's OWN
+/// root — the mapping EL0 will actually read — and record it for teardown.
+/// The VA must be a demand region of the process: one of its anonymous mmap
+/// regions (that region's prot picks the leaf) or its stack aperture
+/// (writable, grown down). Anything else returns false, which both callers
+/// treat as "not this process's page": the fault path reaps or delivers it,
+/// the copy path refuses with EFAULT. Nothing here ever falls back to the
+/// identity overlay — that is the defect this function exists to close.
+/// The caller holds the kernel domain lock (allocator + process registry).
+pub fn populate_user_page(pid: usize, root: u64, va: u64) bool {
+    const page = va & ~@as(u64, 0xfff);
+    var writable = false;
+    var executable = false;
+    var demand = false;
+    if (process.find_mmap_region(pid, page)) |mreg| {
+        writable = (mreg.prot & 2) != 0;
+        executable = (mreg.prot & 4) != 0;
+        demand = true;
+    } else if (process.info(pid)) |inf| {
+        if (inf.stack_len > 0 and page >= inf.stack_va and page < inf.stack_va + inf.stack_len) {
+            writable = true;
+            demand = true;
+        }
+    }
+    if (!demand) return false;
+    const pa = alloc.alloc_pages(1) orelse return false;
+    zero_phys_page(pa);
+    if (!mmu.map_user_page(root, page, pa, writable, executable)) {
+        _ = alloc.free_pages(pa, 1);
+        return false;
+    }
+    _ = process.record_dynamic_page(pid, pa);
+    demand_fault_count += 1;
+    return true;
+}
+
+/// Issue #1391: the destination resolver armed into
+/// `uaccess.resolve_write_pages`. A kernel -> user store may only land in a
+/// page the CURRENT process's own root exposes to EL0; anything else either
+/// stores through the EL1-only identity overlay (the bytes are lost, the
+/// syscall still reports success — the M61b/M61c zeros) or is memory the
+/// process does not own. Returns true when every 4 KiB page of
+/// [address, address+len) is EL0-visible after the call — demand-populating
+/// the ones that are not — and false when a page is not the process's to map,
+/// in which case `copy_out` refuses with EFAULT and touches nothing.
+///
+/// The caller has already validated the range against the task's uaccess
+/// write regions, so a refusal here means the region view and the page tables
+/// disagree — a real bug — rather than a hostile pointer. Host test binaries
+/// have neither user roots nor a live process; there the seam is a no-op and
+/// the copy primitives keep their off-guest contract.
+pub fn ensure_user_write_pages(address: u64, len: usize) bool {
+    if (comptime builtin.is_test) return true;
+    const pid = if (process.find_by_task(scheduler.current_id())) |p|
+        p
+    else if (process.current()) |p|
+        p
+    else
+        return false;
+    const inf = process.info(pid) orelse return false;
+    const root = inf.root_phys;
+    if (root == 0) return false;
+    // Mapping allocates pages and records them on the process descriptor —
+    // state exec/mmap mutate under the kernel domain lock, and the canonical
+    // order puts that lock LAST. This runs under the caller's own domain lock
+    // (FILE for a read, KERNEL for mmap/pipes), so take only the bits this
+    // core does not already hold: acquiring it again on the same core would
+    // self-deadlock an IRQ-masking spinlock.
+    const taken = svclock.acquire_missing(svclock.dom_bit(.kernel));
+    defer svclock.release_set(taken);
+    const end = address +% len;
+    if (end < address) return false;
+    var page = address & ~@as(u64, 0xfff);
+    while (page < end) : (page += 4096) {
+        if (!mmu.leaf_el0_visible(root, page)) {
+            if (!populate_user_page(pid, root, page)) return false;
+        }
+    }
+    return true;
 }
 
 pub export fn exc_dispatch(
@@ -1800,4 +1865,53 @@ test "exceptions: try_handle_page_fault demand zero-fill and COW splitting" {
     try std.testing.expectEqual(@as(u64, 1), (new_leaf.* >> 6) & 3); // RW
     try std.testing.expect((new_leaf.* & mmu.sw_cow) == 0);
     try std.testing.expect((new_leaf.* & 0x0000_ffff_ffff_f000) != shared_pa);
+}
+
+test "exceptions: populate_user_page maps the process's own demand regions and refuses the rest (issue #1391)" {
+    mmu.reset();
+    alloc.reset_refcounts();
+    process.init();
+
+    const map_desc = [_]memmap.MemoryDescriptor{
+        .{ .type = .conventional_memory, .physical_start = 0x100000, .virtual_start = 0, .number_of_pages = 20, .attribute = 0 },
+    };
+    const view = memmap.MapView.init(std.mem.asBytes(&map_desc), @sizeOf(memmap.MemoryDescriptor), map_desc.len);
+    try std.testing.expect(alloc.init(view, &.{}));
+
+    const root = mmu.build_user_root(userspace.text_va, 0x1000, 64, userspace.stack_va, 0x2000, 8192).?;
+    const pid = process.create("TEST_1391", .{}, .{
+        .root_phys = root,
+        .text_va = userspace.text_va,
+        .text_len = 64,
+        .stack_va = userspace.stack_va,
+        .stack_len = 8192,
+    }, .{}).?;
+    _ = process.bind(pid, 2);
+
+    const mmap_va: u64 = 0x0000_0000_1000_0000;
+    try std.testing.expect(process.add_mmap_region(pid, mmap_va, 8192, 3, 0x22)); // RW
+
+    // An untouched page of a registered region has no EL0 leaf: the
+    // kernel->user path populates it in the process's OWN root, EL0-RW, so
+    // the store cannot be swallowed by the identity overlay.
+    try std.testing.expect(!mmu.leaf_el0_visible(root, mmap_va));
+    try std.testing.expect(populate_user_page(pid, root, mmap_va + 64));
+    try std.testing.expect(mmu.leaf_el0_visible(root, mmap_va));
+    const leaf = mmu.get_user_leaf(root, mmap_va).?;
+    try std.testing.expectEqual(@as(u64, 1), (leaf.* >> 6) & 3); // EL0 RW
+
+    // A VA that is neither an mmap region nor the stack is REFUSED, and the
+    // refusal leaves the page tables untouched (so no store can land).
+    const foreign: u64 = 0x0000_0000_2000_0000;
+    try std.testing.expect(!populate_user_page(pid, root, foreign));
+    try std.testing.expect(!mmu.leaf_el0_visible(root, foreign));
+}
+
+test "exceptions: ensure_user_write_pages is a no-op on host test binaries (issue #1391)" {
+    // Host test processes have no user roots and no live task: the seam must
+    // not refuse the copies the off-guest tests perform with host pointers.
+    // The resolver's real work is proven on VZ by the class-B gates (the
+    // go-selftest intake case reads a host-seeded fixture into a page EL0 has
+    // never written and requires the exact bytes back).
+    try std.testing.expect(ensure_user_write_pages(0x1000, 4096));
 }

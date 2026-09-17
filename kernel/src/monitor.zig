@@ -7644,6 +7644,12 @@ fn cmd_uaccess(m: *Monitor, args: []const []const u8) ExecError {
     m.console.print_u64(d.copies);
     m.console.puts(" validation_faults=");
     m.console.print_u64(d.validation_faults);
+    // Issue #1391: kernel->user copies refused because a destination page
+    // was not the process's to write. Always 0 in a healthy boot; a
+    // non-zero count means a store would have been swallowed by the
+    // EL1-only identity overlay (or a caller passed a foreign page).
+    m.console.puts(" unbacked=");
+    m.console.print_u64(d.unbacked);
     m.console.puts("\n");
     return .none;
 }
