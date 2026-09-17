@@ -5,6 +5,11 @@
 // (--overlay-base: macOS 27 DiskImageKit stacked image — read-only base +
 //  throwaway ASIF overlay per run; positional <disk-image> is then ignored.
 //  --vars <path>: per-run EFI variable store.)
+//         [--vz-restore] (claim #1370: standalone headless save/restore probe —
+//          real VZ pause/saveMachineStateTo/stop/restoreMachineStateFrom/resume;
+//          a fresh post-restore serial query must recover a RAM-only clipboard
+//          marker. Supports only --overlay-base/--vars/--serial/--cpus/--timeout;
+//          needs --timeout in (0,600]. See docs/hardware-contract.md.)
 //         [--timeout <s|0>] (0 = run until Ctrl-C) [--expect <line>] [--terminal-marker <line>]
 //         [--cpus <n>] (claim 907: VCPU count, default 2 — the four-core
 //          four-domain stress gate boots 4)
@@ -364,6 +369,7 @@ var pointerRoute: String = "window"
 // first and reports `PTR-TRUST: untrusted` instead of silently dropping
 // the post (the claim-4993 observation).
 var pointerRequestTrust = false
+let vzRestore = arguments.contains("--vz-restore")
 var cpuCount = 2
 var timeout: TimeInterval = 30
 var timeoutExplicit = false
@@ -676,6 +682,19 @@ var varsOverridePath: String?
 var idx = arguments.count > 1 && arguments[1].hasPrefix("--") ? 1 : 2
 while idx < arguments.count {
     let arg = arguments[idx]
+    if vzRestore, arg.hasPrefix("--") {
+        guard ["--vz-restore", "--overlay-base", "--vars", "--serial", "--cpus", "--timeout"].contains(arg) else {
+            fail("--vz-restore is a standalone headless save/restore probe; supports only --overlay-base, --vars, --serial, --cpus, and --timeout.")
+        }
+        if arg != "--vz-restore" {
+            guard idx + 1 < arguments.count, !arguments[idx + 1].hasPrefix("--") else {
+                fail("--vz-restore: \(arg) requires a value.")
+            }
+            if arg == "--timeout", Double(arguments[idx + 1]) == nil {
+                fail("--vz-restore: --timeout requires a numeric value.")
+            }
+        }
+    }
     if arg == "--overlay-base", idx + 1 < arguments.count {
         overlayBasePath = arguments[idx + 1]
         idx += 2
@@ -748,6 +767,8 @@ while idx < arguments.count {
         idx += 2
     } else if arg == "--pointer-request-trust" {
         pointerRequestTrust = true
+        idx += 1
+    } else if arg == "--vz-restore" {
         idx += 1
     } else if arg == "--cpus", idx + 1 < arguments.count {
         guard let n = Int(arguments[idx + 1]), n >= 1, n <= 8 else {
@@ -1241,6 +1262,10 @@ guard osVersion.majorVersion >= 27 else {
     fail("macOS \(osVersion.majorVersion) is too old — this project requires macOS 27 or newer (Apple silicon + Virtualization.framework).")
 }
 
+if vzRestore, !timeout.isFinite || timeout <= 0 || timeout > 600 {
+    fail("--vz-restore requires --timeout in (0, 600] seconds; it never runs unbounded.")
+}
+
 let overlayMode = overlayBasePath != nil
 let diskURL = URL(fileURLWithPath: diskImagePath)
 if !overlayMode {
@@ -1360,7 +1385,7 @@ if consoleMode || scriptMode {
         fail("Could not open serial log at \(serialURL.path): \(error)")
     }
     serialConfig.attachment = VZFileHandleSerialPortAttachment(
-        fileHandleForReading: nil,
+        fileHandleForReading: vzRestore ? consoleInputPipe.fileHandleForReading : nil,
         fileHandleForWriting: serialHandle
     )
 }
@@ -1962,6 +1987,18 @@ if customVirtioEnabled {
 }
 #endif
 do { try config.validate() } catch { fail("Invalid VM configuration: \(error)") }
+if vzRestore {
+#if arch(arm64)
+    do {
+        try config.validateSaveRestoreSupport()
+        print("VZ-RESTORE: validateSaveRestoreSupport passed; \(ProcessInfo.processInfo.operatingSystemVersionString), arm64")
+    } catch {
+        fail("--vz-restore validateSaveRestoreSupport failed: \(error as NSError). No snapshot or reboot fallback.")
+    }
+#else
+    fail("--vz-restore requires arm64 save/restore APIs.")
+#endif
+}
 
 final class Runner: NSObject {
     let vm: VZVirtualMachine
@@ -2177,6 +2214,11 @@ runner.queue.async {
             exit(1)
         }
         vmDidStart = true
+        if vzRestore {
+            let probe = VZRestoreProbe(vm: runner.vm, queue: runner.queue, serialURL: serialURL,
+                                       input: consoleInputPipe.fileHandleForWriting, timeout: timeout)
+            probe.start()
+        }
     }
 }
 
@@ -5059,7 +5101,11 @@ func exitWithTerminalRestore(_ code: Int32) -> Never {
     exit(code)
 }
 
-if consoleMode {
+if vzRestore {
+    runner.queue.asyncAfter(deadline: .now() + timeout) {
+        fail("--vz-restore timed out; no successful restore verdict.")
+    }
+} else if consoleMode {
     // Install signal handlers BEFORE engaging raw/character mode so there is
     // never a window where the terminal is raw with no restore path.
     installSignalHandlers()

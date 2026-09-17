@@ -364,6 +364,15 @@ Non-PCI platform facts:
   (the NVRAM marker/fallback channel). **[observed]** claim 0009.
 - **Guest RAM is NOT mapped into the host runner process** — a host-side
   memory-dump fallback is impossible on VZ. **[observed]** claim 0009.
+- **VZ machine-state save/restore**: **[observed]** #1370, macOS 27.2
+  (26B5086k), arm64, Xcode 27.0 (27A266a). `--vz-restore` passes
+  `validateSaveRestoreSupport`, then `pause` → `saveMachineStateTo` → `stop`
+  → `restoreMachineStateFrom` → `resume`; a fresh serial query recovers the
+  RAM-only clipboard UUID (`live-vz-restore`). Proven only for same-process,
+  same-host headless EFI/disk/serial/entropy, including the ASIF overlay;
+  graphics/custom-virtio/USB and cross-process/host portability are unproven.
+  Saved state is deleted on success; failures may leave it beside the serial log
+  until enclosing temporary-directory cleanup. This is not a framebuffer snapshot.
 - Config used: 256 MiB RAM, 2 vCPUs, optional virtio-gpu/sound/net devices
   (flag-gated; the default VM stays byte-identical without flags).
 - The project targets Apple silicon / Virtualization.framework only; there
