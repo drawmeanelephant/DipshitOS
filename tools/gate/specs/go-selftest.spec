@@ -82,13 +82,23 @@
 # was never involved (its stdout shows the bytes served). The M61d read-backs
 # and M61e's win_query land in fresh buffers on the same path.
 #
+# This spec is also the PILOT for the two share-assert kinds added by M61f
+# (#1386), the only amendment to tools/gate/SPEC.md since M40 GF2: REPORT.txt
+# and the host-seeded IN/fixture.txt are checked with `share-equals` (a
+# byte-exact compare against a vgate_file fixture, with the compared share file
+# lifted into evidence automatically) and the guest's own summary with
+# `share-contains`. The two were proven both ways on VZ before landing — a
+# deliberately truncated `report.expected` reddens the run naming share-equals,
+# and an unarmed share FAILs rather than skipping (recorded on #1386).
+#
 # The report fixture below is byte-exact on purpose — the report is
-# deterministic (ADR 0031). Adding a case in M61f updates this fixture.
+# deterministic (ADR 0031). Adding a case updates the fixture, the
+# share-contains case count, and want_summary in the python block.
 #
 # HOST PREREQUISITE (fails the gate honestly when missing):
 #   bash tools/go/build-goself.sh   ->  .build/go/GOSELF.ELF
 
-vgate_name go-selftest "issues #1382-#1385 M61b-e: GOSELF.ELF runs the guest self-test cases over host-seeded intake fixtures, the file-ABI case pack and the window receipt; the host reads REPORT.txt and every OUT/ receipt on the share"
+vgate_name go-selftest "issues #1382-#1386 M61b-f: GOSELF.ELF runs the guest self-test cases over host-seeded intake fixtures, the file-ABI case pack and the window receipt; the host reads REPORT.txt and every OUT/ receipt on the share (share-assert pilot)"
 vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 
@@ -99,6 +109,29 @@ EOF
 
 vgate_file script2.txt <<'EOF'
 exec GOSELF.ELF
+EOF
+
+# The expected bytes for the two share-equals asserts. vgate_file bodies are
+# newline-terminated by contract, which is exactly REPORT.txt's shape (the
+# report ends on the summary line + one newline, ADR 0031), so the fixture and
+# the share file are byte-comparable without any trailing-newline games.
+vgate_file report.expected <<'EOF'
+case intake pass
+case intake-altered pass
+case clock-monotonic pass
+case file-write pass
+case file-roundtrip pass
+case file-truncate pass
+case file-delete pass
+case file-list pass
+case window pass
+summary cases=9 failed=0
+EOF
+
+# The canonical intake fixture as the spec seeds it (see the setup hook). The
+# assert is that the GUEST left it alone: IN/ belongs to the host (ADR 0031 D2).
+vgate_file intake-fixture.expected <<'EOF'
+goself intake fixture v1
 EOF
 
 vgate_setup_python <<'PY'
@@ -164,19 +197,31 @@ vgate_assert 01 serial-absent 'exited status=139'
 # so these are the fixed substrings; the python assert extracts and compares it.
 vgate_assert 01 serial-contains 'owner='
 vgate_assert 01 serial-contains 'rect=32,32 640x400 ws='
-vgate_assert 01 serial-contains 'tabwm: tab-switch idx='
+# --- the share asserts (the M61f #1386 pilot) --------------------------------
+# REPORT.txt is byte-exact against a vgate_file fixture, and IN/fixture.txt must
+# still hold the bytes the setup hook seeded (the guest writes only to OUT/).
+# Both also lift the share file they compared into artifacts/ automatically,
+# which is what the python block below still does by hand for its own files.
+vgate_assert 01 share-equals SELFTEST/REPORT.txt report.expected
+vgate_assert 01 share-equals SELFTEST/IN/fixture.txt intake-fixture.expected
+# share-contains is the substring kind: the guest's own summary count. Weaker
+# than the python's byte-exact summary.txt compare below, and kept deliberately
+# as the kind's pilot in a real gate.
+vgate_assert 01 share-contains SELFTEST/OUT/summary.txt 'summary cases=9 failed=0'
 
-# The load-bearing assert: the report, the copies and the receipts on the
-# host's own filesystem must be byte-exact, the share's directory state must
-# agree with what the cases claim they did, and the window receipt must agree
-# with the kernel's and the WM's own record of that window. A marker that
-# reported success without writing the bytes cannot pass this. The share is a
-# per-run temp dir deleted at gate_end, so the files this spec relied on are
-# copied into artifacts/ as evidence (ADR 0031 D4).
+# The load-bearing assert: the copies and the receipts on the host's own
+# filesystem must be byte-exact, the share's directory state must agree with
+# what the cases claim they did, and the window receipt must agree with the
+# kernel's and the WM's own record of that window. A marker that reported
+# success without writing the bytes cannot pass this. The share is a per-run
+# temp dir deleted at gate_end, so the files this spec relied on are copied
+# into artifacts/ as evidence (ADR 0031 D4) — the two share-* asserts above do
+# that for their own files, this block still does it by hand.
 #
-# The report copy is named `go-selftest-share-report.txt`, NOT
-# `go-selftest-report.txt`: the harness already owns `artifacts/NAME-report.txt`
-# (SPEC.md's per-gate report), and a copy to that name clobbers it.
+# NEVER copy a share file to `artifacts/NAME-report.txt`: the harness already
+# owns that name (SPEC.md's per-gate report) and a copy there clobbers it.
+# This block uses `go-selftest-share-*`, and the share kinds use
+# `go-selftest-share-<RELPATH with / and space to _>`.
 vgate_assert 01 python <<'PY'
 import os, re, shutil
 share = os.environ["VG_SHARE"]
@@ -201,16 +246,6 @@ win_open_rect = (32, 32, 640, 400)
 win_viewport_w = 1100
 win_viewport_h = 720
 
-want_report = (b"case intake pass\n"
-               b"case intake-altered pass\n"
-               b"case clock-monotonic pass\n"
-               b"case file-write pass\n"
-               b"case file-roundtrip pass\n"
-               b"case file-truncate pass\n"
-               b"case file-delete pass\n"
-               b"case file-list pass\n"
-               b"case window pass\n"
-               b"summary cases=9 failed=0\n")
 want_summary = b"summary cases=9 failed=0\n"
 want_hello = b"goself smoke\n"
 want_intake_receipt = b"case intake path=IN/fixture.txt bytes=25 match=yes\n"
@@ -240,7 +275,9 @@ def require(path, want, what):
     return got
 
 
-report = require(os.path.join(st, "REPORT.txt"), want_report, "REPORT")
+# REPORT.txt is not compared here: the share-equals assert above owns it (and
+# owns the evidence copy). This block is what share-* cannot express — the
+# share's own directory state, the window cross-checks against the serial log.
 require(os.path.join(out, "summary.txt"), want_summary, "SUMMARY")
 require(os.path.join(out, "hello.txt"), want_hello, "HELLO")
 # The guest read the fixtures it says it read: these copies hold the bytes the
@@ -332,12 +369,12 @@ if (win_w, win_h) != (win_viewport_w, win_viewport_h):
     raise SystemExit(1)
 
 # The host owns IN/: neither intake case may have written there (ADR 0031 D2).
-require(os.path.join(st, "IN", "fixture.txt"), fixture, "IN/FIXTURE (guest wrote it?)")
+# IN/fixture.txt is the share-equals assert's job; the altered twin has no
+# fixture in this spec, so it is compared here.
 require(os.path.join(st, "IN", "altered.txt"), altered, "IN/ALTERED (guest wrote it?)")
 
 os.makedirs("artifacts", exist_ok=True)
-for name, path in (("report", os.path.join(st, "REPORT.txt")),
-                   ("intake.txt", os.path.join(out, "intake.txt")),
+for name, path in (("intake.txt", os.path.join(out, "intake.txt")),
                    ("intake-altered.txt", os.path.join(out, "intake-altered.txt")),
                    ("fixture.copy", os.path.join(out, "fixture.copy")),
                    ("altered.copy", os.path.join(out, "altered.copy")),
@@ -350,11 +387,10 @@ for name, path in (("report", os.path.join(st, "REPORT.txt")),
                    ("truncated.copy", os.path.join(out, "truncated.copy")),
                    ("window.txt", os.path.join(out, "window.txt"))):
     shutil.copy(path, "artifacts/go-selftest-share-%s%s" % (name, suffix))
-print("host read-back byte-exact: REPORT.txt %d B (%d cases); file-ABI evidence "
-      "roundtrip.copy %d B, truncated.copy %d B; OUT/deleted.txt absent, "
-      "OUT/LIST empty, OUT/truncate.txt holds the %d-byte prefix"
-      % (len(report), len(want_report.splitlines()) - 1,
-         len(roundtrip_body), len(truncate_kept), len(truncate_kept)))
+print("host read-back byte-exact: file-ABI evidence roundtrip.copy %d B, "
+      "truncated.copy %d B; OUT/deleted.txt absent, OUT/LIST empty, "
+      "OUT/truncate.txt holds the %d-byte prefix"
+      % (len(roundtrip_body), len(truncate_kept), len(truncate_kept)))
 print("window receipt agreed with the kernel and the WM: win=%d (kernel `open:`, "
       "app `goself: open`, WM `tab-switch`); kernel open rect %r; read-back "
       "geometry %dx%d (the tab-aware viewport, not the open rect)"

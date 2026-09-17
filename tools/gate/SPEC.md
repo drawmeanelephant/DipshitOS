@@ -55,6 +55,8 @@ Assert KINDs (serial = the run's `vm-serial.log` copy; output = runner stdout):
 | `client-contains` | STR | STR occurs in the run's `$RUN_DIR/client-TAG.out` (the `vgate_client` capture) |
 | `capture-equals` | FILE FIXTURE | `$RUN_DIR/FILE` is byte-equal to `$RUN_DIR/FIXTURE` (5×0.5 s retry; copied to evidence) |
 | `capture-empty` | FILE | `$RUN_DIR/FILE` missing or zero-length |
+| `share-equals` | RELPATH FILE-OR-LITERAL | the ARMED share's `RELPATH` is byte-equal to the literal, or to `$RUN_DIR/FILE-OR-LITERAL` when that names an existing file (5×0.5 s retry; copied to evidence) |
+| `share-contains` | RELPATH STR | the armed share's `RELPATH` exists and STR occurs in it (fixed-string; copied to evidence) |
 | `snapshot` | GLOB + python on stdin | newest `$RUN_DIR/GLOB` exists and the python (path as `sys.argv[1]`, `sys.exit(str)` fails) passes; snapshot copied to evidence |
 | `python` | python on stdin | hook passes (`$RUN_DIR`/`$VG_SER`/`$VG_TAG`/`$VG_SHARE` env; nonzero exit fails) |
 
@@ -63,6 +65,21 @@ Rules:
 - Assert values are **literal** — no expansion. Files a hook needs go
   through `vgate_file`/`vgate_setup_python` (`$RUN_DIR` env) or the
   `FILE`/`FIXTURE` operands (resolved under `$RUN_DIR`).
+- The `share-*` kinds read the **armed share** (`vgate_share arm|seed`),
+  which is what makes them differ from the `capture-*` kinds (those read
+  `$RUN_DIR` files a client hook wrote). Both fail closed: a share that was
+  never armed, a `RELPATH` that is not there, or a mismatch are all FAILs,
+  never skips. `share-equals` resolves its expectation the same way the
+  capture kinds resolve `FIXTURE` — **an existing `$RUN_DIR` file wins over
+  the literal**, so a one-line value is passed as a literal and anything
+  with newlines goes in a `vgate_file` fixture (real newlines in a literal
+  need `$'…\n…'`). A typo'd fixture name therefore degrades to a literal
+  compare, which fails rather than passing.
+- Both `share-*` kinds copy the share file they compared into evidence
+  (`artifacts/NAME-share-<RELPATH with / and space to _>`), because the
+  share is deleted at `gate_end` — a spec that reads the share with `python`
+  instead has to do that copy by hand, which is the main reason to prefer
+  these kinds.
 - The one exception is `vgate_run` FLAGS: a literal `$RUN_DIR` (or
   `${RUN_DIR}`) token there expands to the run dir at execution, so specs
   can name their `vgate_file` outputs (`--script $RUN_DIR/script.txt`).
@@ -88,6 +105,9 @@ Rules:
   with the runner's SPIKE error, not a gate failure.
 - Extending this file (new KINDs, new commands) is a spec-format change:
   it needs its own issue and a pilot proving it. GF3/GF4 add specs only.
+  The one amendment since M40 GF2 is issue #1386 (M61f): the `share-equals`
+  and `share-contains` kinds, piloted in `go-selftest.spec`. The serial
+  kinds were deliberately left alone, and no VZ CI enforcement was restored.
 - Since M40 GF5 (issue #940) the spec dir is the class-B fleet's single
   source of truth: dropping a `*.spec` here registers it in `just gate`,
   `just gates`, `just verify-vz`, the `vz-gates.yml` CI shards, and the

@@ -88,6 +88,7 @@ vgate_assert() {
     # serial-contains-file FILE | serial-count STR MIN | serial-exact STR N
     # serial-absent STR | serial-echo CMD | output-contains STR |
     # client-contains STR | capture-equals FILE FIXTURE | capture-empty FILE |
+    # share-equals RELPATH FILE-OR-LITERAL | share-contains RELPATH STR |
     # snapshot GLOB (python body on stdin) | python (body on stdin,
     # RUN_DIR/VG_SER/VG_TAG env)
     local tag="$1" kind="$2"; shift 2
@@ -182,6 +183,21 @@ done
 VG_SER="" VG_TAG="" VG_OUT="" VG_KEEP_FILES=()
 vg_note_evidence() { VG_KEEP_FILES+=("$1"); }
 
+# The armed share is a per-run temp dir deleted at gate_end, so an assert that
+# reads it must lift the file it compared into RUN_DIR first or the evidence is
+# gone by the time anyone looks. Flattens the RELPATH into the RUN_DIR name
+# (`share-SELFTEST_REPORT.txt`) so the teardown's `artifacts/NAME-$f` is unique
+# and readable; echoes the RUN_DIR-relative name it registered (empty when the
+# share file is not there — the assert has already failed by then).
+vg_share_evidence() {
+    local rel="$1" dst
+    [ -n "${SHARE:-}" ] && [ -f "$SHARE/$rel" ] || return 0
+    dst="share-$(printf '%s' "$rel" | tr '/ ' '__')"
+    cp -f "$SHARE/$rel" "$RUN_DIR/$dst" 2>/dev/null || return 0
+    vg_note_evidence "$dst"
+    printf '%s' "$dst"
+}
+
 vg_assert_one() {
     # $1=kind $2=a1 $3=a2 $4=body -> returns 0 on hold, prints one detail line
     local kind="$1" a1="$2" a2="$3" body="$4" ok=0 detail=""
@@ -233,6 +249,47 @@ vg_assert_one() {
             vg_note_evidence "$a1"
             { [ ! -f "$RUN_DIR/$a1" ] || [ ! -s "$RUN_DIR/$a1" ]; } && ok=1
             detail="capture-empty [$a1]=$ok" ;;
+        share-equals)
+            # $a1 is a path relative to the ARMED share; $a2 is the expectation
+            # — either the name of a $RUN_DIR fixture (a vgate_file, per the
+            # FILE/FIXTURE convention the capture kinds already use) or a
+            # literal. A value that names an EXISTING RUN_DIR file is taken as
+            # the fixture, so the fixture form wins on a collision — and a
+            # typo'd fixture name falls through to a literal compare, which
+            # still FAILS rather than passing: the default is never `ok`.
+            # 5x0.5 s retry like capture-equals: the guest's last write can
+            # land just after the VM stops on --script-expect.
+            local want="$RUN_DIR/$a2" form="fixture" tries=0
+            if [ ! -f "$want" ]; then
+                printf '%s' "$a2" > "$RUN_DIR/share-literal"
+                want="$RUN_DIR/share-literal"; form="literal"
+            fi
+            if [ -z "${SHARE:-}" ]; then
+                detail="share-equals [$a1] FAIL (no armed share -- declare vgate_share arm|seed)"
+            else
+                while [ "$tries" -lt 5 ]; do
+                    if [ -f "$SHARE/$a1" ] && cmp -s "$SHARE/$a1" "$want"; then ok=1; break; fi
+                    tries=$((tries+1)); sleep 0.5
+                done
+                vg_share_evidence "$a1" >/dev/null
+                detail="share-equals [$a1]==${form}[${a2}]=$ok"
+                if [ "$ok" = 0 ]; then
+                    if [ -f "$SHARE/$a1" ]; then detail="$detail (differs)"
+                    else detail="$detail (missing on the share)"; fi
+                fi
+            fi ;;
+        share-contains)
+            # $a1 relative to the armed share, $a2 a fixed string it must
+            # contain (same fail-closed shape as share-equals: a missing file
+            # is a FAIL, never a skip).
+            if [ -z "${SHARE:-}" ]; then
+                detail="share-contains [$a1] FAIL (no armed share -- declare vgate_share arm|seed)"
+            else
+                grep -a -qF -- "$a2" "$SHARE/$a1" 2>/dev/null && ok=1
+                vg_share_evidence "$a1" >/dev/null
+                detail="share-contains [$a1][$a2]=$ok"
+                [ "$ok" = 1 ] || detail="$detail (missing or does not contain it)"
+            fi ;;
         snapshot)
             local snap; snap="$(ls -t "$RUN_DIR"/$a1 2>/dev/null | head -1 || true)"
             if [ -n "$snap" ] && [ -f "$snap" ]; then

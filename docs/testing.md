@@ -121,6 +121,20 @@ moved part of the evidence into the guest. The rule, in one table:
   card's non-goal): no pixels are read, no PNG is compared, and the case knows
   nothing about what the window looks like. Framebuffer goldens stay host-side
   (`vgate_assert snapshot`) for r3d and friends.
+- **`share-equals` / `share-contains` (M61f, #1386) read the armed share
+  directly**, so a spec that only needs to compare share bytes needs no
+  `python` assert at all — and the harness lifts the compared file into
+  `artifacts/` itself (a hand-written python block has to do that copy, and
+  that copy is what survives `gate_end`). `go-selftest.spec` is the pilot:
+  `share-equals` owns `REPORT.txt` and the host-seeded `IN/fixture.txt`,
+  `share-contains` owns the guest's summary count, and the `python` assert
+  keeps only what the kinds cannot express (the share's directory state and
+  the window cross-checks against the serial log). Both kinds **fail closed**:
+  an unarmed share, a missing `RELPATH`, and a mismatch are FAILs, never
+  skips — a share assert that silently passed is the false PASS the kinds exist
+  to remove. See `tools/gate/SPEC.md` for the argument forms; note that
+  `share-equals` resolves an existing `$RUN_DIR` file as the fixture and
+  anything else as a literal.
 - The serial contract is one summary line, `selftest: FAIL n=<N>` (N=0 on
   success), printed after `REPORT.txt` is closed; the report's
   `summary cases=<n> failed=<k>` must agree with it, and a run whose
@@ -366,8 +380,8 @@ under `C` with no workflow noticing). The rules that came out of it:
 | `\MEMMAP.TXT` on the ESP | boot stub, before handoff | Pre-exit EFI memory map evidence |
 | `\KERNEL.TXT` on the ESP | milestone-one regression only | Not written after the kernel exits Boot Services |
 | `artifacts/go-selftest-report.txt` | `go-selftest` spec (copied before `gate_end`) | The harness's own run report |
-| `artifacts/go-selftest-share-report` | `go-selftest` spec (copied before `gate_end`) | The guest's own `/host/SELFTEST/REPORT.txt` (ADR 0031) |
 | `artifacts/go-selftest-share-*` | `go-selftest` spec (copied before `gate_end`) | The share evidence the spec byte-compared: the intake copies/receipts, the file-ABI receipts (`file-*.ok`) and read-back copies, and the `window.txt` receipt whose id/geometry the spec cross-checked against the kernel's `open:` line and TABWM's `tab-switch` line |
+| `artifacts/go-selftest-share-<RELPATH>` | the `share-equals`/`share-contains` asserts (M61f), copied by the harness | The same evidence for the files the share kinds read — `share-SELFTEST_REPORT.txt` is the guest's own `/host/SELFTEST/REPORT.txt` (ADR 0031) |
 | `artifacts/m2-probe.log` | kernel serial output | Candidate reads, signatures, selected transport, and observed/inferred decision |
 | `\KERNEL.BIN` on the ESP | `zig build` | Flat kernel image, verified with `elf2bin.py --info` |
 
