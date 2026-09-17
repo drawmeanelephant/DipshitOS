@@ -30,7 +30,7 @@
 | `tools/lib/` | 2 | per-run isolation for live gates (`gate-run.sh`) |
 | `tools/status/` | 7 | multiagent coordination gate + claim tooling (class A) |
 | `tools/context/` | 2 | context snapshot helpers |
-| `tools/gate/` | 252 | M40 vgate harness + specs (GF2+) |
+| `tools/gate/` | 253 | M40 vgate harness + specs (GF2+) |
 
 ## Class-B fleet (discovered from the spec dir)
 
@@ -253,6 +253,7 @@ of them with `just verify-vz`.
 | spec | `live-vf` | 6 run / 105 assert | live-vf.spec -- M34 HF1+HF2+HF3+HF4+HF7 (issues #735-#738/#741) |
 | spec | `live-virtio-e2e` | 1 run / 8 assert | live-virtio-e2e.spec -- claim 0680 (issue #523 item 3 capstone, the |
 | spec | `live-vm-depth` | 1 run / 9 assert | live-vm-depth.spec -- Milestone 29 (Issue #598, Claim 8247) Class-B gate: |
+| spec | `live-vz-restore` | 5 run / 13 assert | Real VZ machine-state restore, not a framebuffer snapshot or a reboot. |
 | spec | `live-wait` | 1 run / 15 assert | live-wait.spec -- sys_wait (slot 8): COUNTER.BIN blocks on |
 | spec | `live-wallpaper` | 1 run / 4 assert | live-wallpaper.spec -- M33 IMG4: WND.BIN desktop wallpaper (issue #825) |
 | spec | `live-wasm` | 1 run / 39 assert | live-wasm.spec -- M35 W2+W3+W4+W5 + rustc cross-language app in-guest |
