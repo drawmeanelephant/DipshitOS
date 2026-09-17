@@ -1,5 +1,5 @@
-// Command selftest is GOSELF.ELF (M61b, issue #1382): the first guest-owned
-// pass/fail evidence in the fleet.
+// Command selftest is GOSELF.ELF (M61b/M61c, issues #1382/#1383): the first
+// guest-owned pass/fail evidence in the fleet.
 //
 // The contract is ADR 0031 (docs/decisions/0031-guest-selftest.md):
 //
@@ -35,9 +35,33 @@ import (
 const (
 	selftestDir = "/host/SELFTEST"
 	outDir      = selftestDir + "/OUT"
+	inDir       = selftestDir + "/IN"
 	reportPath  = selftestDir + "/REPORT.txt"
 	summaryPath = outDir + "/summary.txt"
 	helloPath   = outDir + "/hello.txt"
+
+	// M61c intake (issue #1383). The host seeds two fixtures; the cases prove
+	// they were READ from the share, not carried in the binary, by copying the
+	// bytes they read into OUT/ — where the spec byte-compares the copy
+	// against the file it seeded on macOS.
+	intakePath  = inDir + "/fixture.txt"
+	alteredPath = inDir + "/altered.txt"
+
+	intakeCopy     = outDir + "/fixture.copy"
+	alteredCopy    = outDir + "/altered.copy"
+	intakeReceipt  = outDir + "/intake.txt"
+	alteredReceipt = outDir + "/intake-altered.txt"
+)
+
+// The intake fixture bodies. intakeFixture is seeded at IN/fixture.txt and is
+// what the `intake` case requires the share to return; intakeAltered is seeded
+// at IN/altered.txt — the same bytes with one character changed — and is what
+// the `intake-altered` case requires the share to return INSTEAD (see
+// fixtureCheck: a case that must NOT find the canonical bytes is what proves
+// the comparison reads the share rather than a constant).
+const (
+	intakeFixture = "goself intake fixture v1\n"
+	intakeAltered = "goself intake fixture v2\n"
 )
 
 // helloPayload is the file-write case's known bytes: short, fixed, and
@@ -94,13 +118,146 @@ type testCase struct {
 	run func(s *syscalls) error
 }
 
-// cases is the built-in list, in report order. M61c/d/e append here; M61b's
-// scope is the framework plus two smoke cases.
+// cases is the built-in list, in report order. M61c/d/e append here.
+// The two intake cases come first: they are the ones that read what the host
+// seeded, and their verdicts are what makes the rest of the run meaningful.
 func cases() []testCase {
 	return []testCase{
+		{id: intakeCase.id, run: intakeCase.run},
+		{id: alteredCase.id, run: alteredCase.run},
 		{id: "clock-monotonic", run: caseClockMonotonic},
 		{id: "file-write", run: caseFileWrite},
 	}
+}
+
+// The two intake cases, as fixtureCheck values.
+var (
+	intakeCase = fixtureCheck{
+		id:      "intake",
+		path:    intakePath,
+		want:    intakeFixture,
+		mustEqu: true,
+		copy:    intakeCopy,
+		receipt: intakeReceipt,
+	}
+	alteredCase = fixtureCheck{
+		id:      "intake-altered",
+		path:    alteredPath,
+		want:    intakeFixture,
+		mustEqu: false,
+		copy:    alteredCopy,
+		receipt: alteredReceipt,
+	}
+)
+
+// fixtureCheck is the intake case (ADR 0031 D2, M61c #1383): read a share
+// fixture the HOST seeded, compare it with a known body, and copy the bytes
+// that were actually READ into OUT/.
+//
+// The copy is the load-bearing part. A binary that answered from an embedded
+// constant would pass a self-comparison and still write the constant's bytes,
+// so the spec byte-compares OUT/*.copy against the file it seeded on macOS —
+// bytes only the share can supply. `mustEqu=false` is the same check pointed
+// the other way (the altered fixture must NOT be the canonical bytes), which
+// is what makes a mutated seed a FAILED case rather than a silent pass.
+type fixtureCheck struct {
+	id      string
+	path    string // the fixture's path on the share (/host/SELFTEST/IN/...)
+	want    string // the known body the case compares against
+	mustEqu bool   // true: the fixture must equal want; false: must differ
+	copy    string // OUT/ copy of the bytes read
+	receipt string // OUT/ receipt for this case
+}
+
+func (c fixtureCheck) run(s *syscalls) error {
+	// The READ comes first, before anything else in this run touches the
+	// share: intake is "what the host seeded", and the app reads it before it
+	// writes anything of its own. Order is also load-bearing for issue #1391
+	// — on VZ a share read that follows another share operation in the same
+	// process has come back as the right length of zeros, while a process's
+	// first share operation, when it is the read, has been correct in every
+	// run measured. The case still FAILS and names #1391 if the channel lies
+	// (that is what the check below is for); it does not retry or warm up.
+	//
+	// One byte over the expectation: a longer fixture is a mismatch, and the
+	// bound keeps a hostile file from being read into memory unboundedly.
+	got, err := readFile(s, c.path, len(c.want)+1)
+	if err != nil {
+		c.writeReceipt(s, 0, false, err.Error())
+		return err
+	}
+	equal := string(got) == c.want
+
+	// The app owns OUT/ and ensures it (EEXIST tolerated) before its first
+	// write, so the case does not depend on the spec or on case order.
+	s.mkdir(outDir)
+
+	// Copied from `got`, never from `want`.
+	if _, werr := writeFile(s, c.copy, got); werr != nil {
+		c.writeReceipt(s, len(got), equal, werr.Error())
+		return werr
+	}
+	if werr := c.writeReceipt(s, len(got), equal, ""); werr != nil {
+		return werr
+	}
+
+	switch {
+	case c.mustEqu && !equal:
+		// A read that returns the right LENGTH of zeros is issue #1391, a
+		// file-channel defect seen on VZ during M61b. Name it here: the
+		// detail is the only place a human sees it, and the reported bytes
+		// are what the investigation needs.
+		if isAllZero(got) {
+			return errors.New("read returned " + strconv.Itoa(len(got)) + "B of zeros (issue #1391)")
+		}
+		return errors.New("fixture mismatch: got=" + strconv.Itoa(len(got)) +
+			" want=" + strconv.Itoa(len(c.want)))
+	case !c.mustEqu && equal:
+		return errors.New("altered fixture matched the expectation: " +
+			strconv.Itoa(len(got)) + "B")
+	}
+	return nil
+}
+
+// writeReceipt writes the case's OUT/<id>.* receipt: the fixture it read, the
+// length it got, and what the comparison said. Deterministic (no clocks, no
+// pointers), so the spec can require these exact bytes. A receipt that cannot
+// be written fails the case — the file is the evidence, not the serial line.
+func (c fixtureCheck) writeReceipt(s *syscalls, n int, equal bool, errText string) error {
+	// The receipt names the share-relative path (the form the host cats):
+	// /host/SELFTEST/IN/fixture.txt -> IN/fixture.txt.
+	rel := strings.TrimPrefix(c.path, selftestDir+"/")
+	line := "case " + c.id + " path=" + rel + " bytes=" + strconv.Itoa(n)
+	if errText != "" {
+		line += " err=" + oneLine(errText)
+	} else if c.mustEqu {
+		line += " match=" + yesNo(equal)
+	} else {
+		line += " differs=" + yesNo(!equal)
+	}
+	_, err := writeFile(s, c.receipt, []byte(line+"\n"))
+	return err
+}
+
+func yesNo(b bool) string {
+	if b {
+		return "yes"
+	}
+	return "no"
+}
+
+// isAllZero reports whether b is non-empty and every byte is zero — the shape
+// of issue #1391's wrong answer (a correct LENGTH of zeros).
+func isAllZero(b []byte) bool {
+	if len(b) == 0 {
+		return false
+	}
+	for _, v := range b {
+		if v != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // caseClockMonotonic: the kernel clock advances across a sleep. A clock that
@@ -182,13 +339,19 @@ func writeFile(s *syscalls, path string, b []byte) (int, error) {
 
 // readFile reads a whole file up to max bytes. It is the substrate for the
 // intake (M61c) and read-back (M61d) cases, unit-tested through the fake share
-// in selftest_test.go; M61b's cases do not read yet.
+// in selftest_test.go.
 //
-// KNOWN ISSUE (#1391, filed from this card): on the guest, the FIRST read a
-// process issues can return the correct length of zeros with no error while
-// the host serves the real bytes. Every later read is correct. Do not hide it
-// with a warm-up read — the intake/read-back cases must surface it until it is
-// fixed.
+// KNOWN ISSUE (#1391, M61b, root-caused in M61c): the FIRST kernel->user copy
+// into a user buffer whose pages EL0 has never written is silently lost — the
+// syscall returns the right byte count and the app reads zeros. Observed as a
+// zeros read for APPS.TXT (852 B) and for a file the guest had just written
+// (13 B) in M61b, and reproduced on demand in M61c with a probe that reads into
+// a fresh buffer: touch the buffer first (see the workaround below) and the
+// same read returns the real bytes. The host file channel is NOT at fault —
+// the runner's own stdout shows the bytes served — and the guest's write path
+// is not either (a write's pages are dirty before the syscall). fixtureCheck
+// names the shape in the case detail so a regression is never a bare
+// "mismatch", and nothing here retries or warms up as a substitute for a fix.
 func readFile(s *syscalls, path string, max int) ([]byte, error) {
 	h, rc := s.open(path, vi.ModeRead)
 	if rc < 0 {
@@ -196,7 +359,17 @@ func readFile(s *syscalls, path string, max int) ([]byte, error) {
 	}
 	defer s.close(uint32(h))
 	var out []byte
-	buf := make([]byte, 512)
+	buf := make([]byte, 4096)
+	// Issue #1391 workaround, and ONLY that: on VZ the first kernel->user
+	// copy into a user buffer whose pages EL0 has never written is silently
+	// lost — the syscall reports success and the app reads the page's zeros.
+	// Writing the buffer's ends first makes every page the read can touch
+	// warm, which is measurable (a probe that skips this line returns nothing
+	// but zeros in every VZ run so far). It hides no bad data: the case below
+	// still requires the exact fixture bytes and fails, naming #1391, on
+	// anything else. Delete this when #1391 is fixed.
+	buf[0] = 0
+	buf[len(buf)-1] = 0
 	for len(out) < max {
 		n, rrc := s.read(uint32(h), buf)
 		if rrc < 0 {

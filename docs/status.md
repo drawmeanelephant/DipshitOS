@@ -94,7 +94,7 @@ The only threads not closed:
 | **Go runtime port — `GOOS=virelai`** | Phase 0a–0c + phase 2 netpoll + 2.1 EL0 clock landed (#1187/#1196/#1221/#1230/#1231/#1228/#1350/#1359). | #1163 |
 | **M58 — Move the apps you touch** | M58a–f landed: files, GOEDIT (`go-edit`), GOTERM (`go-term`, #1307), fetch, FART. `GOCALC.ELF` (gate `go-calc`, #1378) is the CALC successor. Full-viewport via tabapp in Zig TABWM. | |
 | **M60 leftovers** | Policy recorded; `EDIT.BIN` and `FILE.BIN` gone. `GOCALC.ELF` (gate `go-calc`, #1378) is the CALC successor; Zig `CALC.BIN` stays until a later delete card. Remaining Zig EL0 (CALC, NOTEPAD, TABWM, SH, TLS/SSH helpers) deletes one binary per card when its Go successor is VZ-green. | |
-| **M61 — Guest self-test** | ADR 0031 landed (#1381); M61b `GOSELF.ELF` + `go-selftest` VZ-green (#1382, PR #1392) with the host reading `REPORT.txt` byte-exact. Next: M61c intake (#1383) — it meets #1391 (the first READ in a process returns zeros) first. | #1380 |
+| **M61 — Guest self-test** | ADR 0031 landed (#1381); M61b `GOSELF.ELF` + `go-selftest` VZ-green (#1382, PR #1392); M61c intake (#1383) reads the host-seeded `IN/` fixtures and the host byte-compares the guest's copies. Next: M61d file-ABI pack (#1384) — it should come after #1391 (the first kernel→user copy into an untouched user page is silently lost; M61c works around it in its read helper). | #1380 |
 | **EL0 `sys_exec` caller survival** | AddrSpaceSpec + argv on slot 28; class-B `live-el0-exec` | #1333 |
 
 ## Gate status
