@@ -17,6 +17,9 @@ func TestTabMarkerShapes(t *testing.T) {
 		{MarkerUnsplit, "gotabwm: unsplit"},
 		{MarkerLayout, "gotabwm: layout "},
 		{MarkerPane, "gotabwm: pane "},
+		{MarkerPin, "gotabwm: pin "},
+		{MarkerReorder, "gotabwm: reorder "},
+		{MarkerOrder, "gotabwm: order "},
 	}
 	for _, c := range cases {
 		if c.got != c.want {
@@ -332,5 +335,91 @@ func TestPaneRectsNeedTwoTabs(t *testing.T) {
 	a, b, ok := s.PaneRects(1280, 720)
 	if !ok || a.W != 640 || b.X != 640 {
 		t.Fatalf("PaneRects %+v %+v ok=%v", a, b, ok)
+	}
+}
+
+func TestPinSortsLeftAndSurvivesFocus(t *testing.T) {
+	if FlagPinned != 0x01 {
+		t.Fatalf("FlagPinned = %#x want 0x01 (tabcodec.FlagPinned)", FlagPinned)
+	}
+	var s TabStrip
+	s.OpenTab(2, "A")
+	s.OpenTab(3, "B")
+	s.OpenTab(4, "C")
+	_ = s.FocusTab(4) // C
+	if !s.Pin(4) {
+		t.Fatal("Pin C")
+	}
+	if s.At(0).ID != 4 || !s.At(0).Pinned {
+		t.Fatalf("pinned C must sit at left, got id=%d pin=%v", s.At(0).ID, s.At(0).Pinned)
+	}
+	if id, _ := s.Focused(); id != 4 {
+		t.Fatalf("focus followed C by id, got %d", id)
+	}
+	if s.Pin(4) {
+		t.Fatal("Pin twice")
+	}
+	_ = s.FocusTab(2)
+	if s.At(0).ID != 4 || !s.At(0).Pinned {
+		t.Fatal("pin must stay left across FocusTab")
+	}
+	if line := orderLine(&s); line != "ids=4,2,3 pin=1,0,0 focus=2" {
+		t.Fatalf("orderLine = %q", line)
+	}
+	if !s.Unpin(4) {
+		t.Fatal("Unpin")
+	}
+	if s.At(0).Pinned {
+		t.Fatal("unpin left a pin at front")
+	}
+}
+
+func TestReorderMatchesMoveTab(t *testing.T) {
+	var s TabStrip
+	s.OpenTab(2, "A")
+	s.OpenTab(3, "B")
+	s.OpenTab(4, "C")
+	_ = s.FocusTab(3)
+	if !s.Reorder(1, 2) {
+		t.Fatal("reorder unpinned B and C")
+	}
+	if s.At(0).ID != 2 || s.At(1).ID != 4 || s.At(2).ID != 3 {
+		t.Fatalf("order after 1->2: %d,%d,%d", s.At(0).ID, s.At(1).ID, s.At(2).ID)
+	}
+	if id, _ := s.Focused(); id != 3 {
+		t.Fatalf("focus followed B, got %d", id)
+	}
+	if !s.Pin(2) {
+		t.Fatal("Pin A")
+	}
+	// Zig move_tab will move a pinned tab; pin-left is not repaired until
+	// the next Pin/Unpin (normalize_pinned).
+	if !s.Reorder(0, 1) {
+		t.Fatal("Reorder of a pinned tab (Zig move_tab)")
+	}
+	if s.At(0).ID != 4 || s.At(1).ID != 2 || !s.At(1).Pinned {
+		t.Fatalf("pinned A moved off the front: %d,%d pin1=%v", s.At(0).ID, s.At(1).ID, s.At(1).Pinned)
+	}
+	if !s.Unpin(2) {
+		t.Fatal("Unpin A")
+	}
+	if s.At(0).Pinned || s.At(1).Pinned {
+		t.Fatal("Unpin must re-partition")
+	}
+}
+
+func TestClosePinnedIsAllowed(t *testing.T) {
+	var s TabStrip
+	s.OpenTab(2, "A")
+	s.OpenTab(3, "B")
+	s.Pin(2)
+	if !s.CloseTab(2) {
+		t.Fatal("close pinned")
+	}
+	if s.Count() != 1 || s.At(0).ID != 3 {
+		t.Fatalf("after close pinned: count=%d id=%d", s.Count(), s.At(0).ID)
+	}
+	if s.At(0).Pinned {
+		t.Fatal("remaining tab inherited pin")
 	}
 }

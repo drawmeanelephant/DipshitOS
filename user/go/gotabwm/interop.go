@@ -74,7 +74,7 @@ var (
 	stripSawTwo    bool
 	stripClosedOne bool
 	stripDone      bool
-	stripStep      int // two-tab choreography: rail → V → unsplit → H → unsplit → close
+	stripStep      int // two-tab: rail → reorder → pin → V → unsplit → H → unsplit → close pinned → close last
 )
 
 // serviceRPC drains the seat's mailbox and services every queued WM_RPC
