@@ -111,29 +111,229 @@ func TestLoadStepErrorIsDefined(t *testing.T) {
 	}
 }
 
-// "No bytes right now" is not completion: an empty recv must NOT finish the
-// load while the deadline is live (the old code treated it as the end of the
-// response, truncating a page whose next segment was one poll away). Only a
-// timeout ends the load. A fake recv (0 bytes, no error) is injected through
-// vi's syscall hook because the HOST fallback reports -ENOSYS, which is the
-// rc<0 path, not the empty-read path.
-func TestLoadStepEmptyReadKeepsLoading(t *testing.T) {
+// fakeTCP is a scripted stand-in for the kernel's ONE socket, injected
+// through vi's syscall hook: connect/send succeed, and the readiness/recv
+// answers follow scripts. The mask shape is the kernel's
+// `rx_pending || peer_fin` (kernel/src/tcp.zig ready_mask): bit 0 when a
+// segment is queued or the peer FIN'd, bit 1 while established.
+//
+// The fake never writes the recv buffer (a raw uintptr through the hook is
+// exactly the unsafe conversion `go vet` refuses); instead the tests
+// pre-load a.chunk — the buffer the app hands to TCPRecv — and the fake
+// only reports the length, which is all vi.TCPRecv returns.
+type fakeTCP struct {
+	ready []int64 // readiness answers, in probe order
+	recv  []int64 // recv lengths, in call order
+	ri    int
+	ci    int
+	sent  int // bytes TCPSend accepted
+}
+
+func (f *fakeTCP) install() func() {
 	prev := vi.SyscallHookForTest()
-	defer vi.SetSyscallHookForTest(prev)
 	vi.SetSyscallHookForTest(func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
-		if num == vi.SlotTCPRecv {
+		switch num {
+		case vi.SlotTCPConnect:
+			return 0
+		case vi.SlotTCPSend:
+			f.sent += int(a1)
+			return int64(a1)
+		case vi.SlotSockReady:
+			if f.ri < len(f.ready) {
+				v := f.ready[f.ri]
+				f.ri++
+				return v
+			}
+			return 2
+		case vi.SlotTCPRecv:
+			if f.ci < len(f.recv) {
+				v := f.recv[f.ci]
+				f.ci++
+				return v
+			}
 			return 0
 		}
 		return 0
 	})
+	return func() { vi.SetSyscallHookForTest(prev) }
+}
+
+// The regression from #1366: a close-delimited response (no Content-Length)
+// that ends with the peer's FIN must complete the load. The merged behavior
+// kept polling until the 30 s deadline and then rendered "error timeout"
+// (observed on live-web boot 03).
+func TestLoadCompletesOnPeerClose(t *testing.T) {
+	body := "HTTP/1.0 200 OK\r\n\r\n<p>hi</p>"
+	f := &fakeTCP{ready: []int64{3, 1}, recv: []int64{int64(len(body)), 0}}
+	defer f.install()()
+	a := &app{hist: newHistory()}
+	copy(a.chunk[:], body) // the buffer TCPRecv would fill
+	u, ok := webrender.ParseHTTPURL("http://10.0.0.2/")
+	if !ok {
+		t.Fatal("fixture URL must parse")
+	}
+	a.startHTTP(u)
+	if !a.loading {
+		t.Fatal("startHTTP must arm a load")
+	}
+	for i := 0; i < 8 && a.loading; i++ {
+		a.loadStep()
+	}
+	if a.loading {
+		t.Fatal("a peer FIN after the response must complete the load")
+	}
+	if a.errKind != "" {
+		t.Fatalf("errKind = %q, want the page with no error", a.errKind)
+	}
+	if a.doc == nil || a.lay == nil {
+		t.Fatal("a completed load must parse and lay out the body")
+	}
+	if f.sent == 0 {
+		t.Fatal("the request was never sent over the faked socket")
+	}
+}
+
+// A Content-Length body completes as soon as the declared bytes arrive —
+// the peer does not have to close (the host responder answers and stays up).
+func TestLoadCompletesOnContentLength(t *testing.T) {
+	body := "HTTP/1.0 200 OK\r\nContent-Length: 9\r\n\r\n<p>hi</p>"
+	f := &fakeTCP{ready: []int64{3, 2}, recv: []int64{int64(len(body))}}
+	defer f.install()()
+	a := &app{hist: newHistory()}
+	copy(a.chunk[:], body) // the buffer TCPRecv would fill
+	u, ok := webrender.ParseHTTPURL("http://10.0.0.2/")
+	if !ok {
+		t.Fatal("fixture URL must parse")
+	}
+	a.startHTTP(u)
+	for i := 0; i < 8 && a.loading; i++ {
+		a.loadStep()
+	}
+	if a.loading {
+		t.Fatal("a satisfied Content-Length must complete the load")
+	}
+	if a.errKind != "" {
+		t.Fatalf("errKind = %q, want the page with no error", a.errKind)
+	}
+	if a.doc == nil || a.lay == nil {
+		t.Fatal("a completed load must parse and lay out the body")
+	}
+}
+
+// Transfer-Encoding: chunked is not decoded by this browser: it is refused
+// as a defined error, never silently treated as the body.
+func TestLoadStepRefusesChunked(t *testing.T) {
+	body := "HTTP/1.0 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n"
+	f := &fakeTCP{ready: []int64{3, 2}, recv: []int64{int64(len(body))}}
+	defer f.install()()
+	a := &app{hist: newHistory()}
+	copy(a.chunk[:], body)
+	u, _ := webrender.ParseHTTPURL("http://10.0.0.2/")
+	a.startHTTP(u)
+	for i := 0; i < 8 && a.loading; i++ {
+		a.loadStep()
+	}
+	if a.loading {
+		t.Fatal("an unsupported transfer coding must end the load")
+	}
+	if a.errKind != "truncated" {
+		t.Fatalf("errKind = %q want truncated", a.errKind)
+	}
+}
+
+// responseNeed pins the framing decisions without a socket.
+func TestResponseNeed(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want int
+		ok   bool
+	}{
+		{"incomplete", "HTTP/1.0 200 OK\r\nContent-Len", 0, false},
+		{"length", "HTTP/1.0 200 OK\r\nContent-Length: 3\r\n\r\nabc", 3, true},
+		{"length case", "HTTP/1.0 200 OK\r\ncontent-length: 0\r\n\r\n", 0, true},
+		{"no length", "HTTP/1.0 200 OK\r\n\r\nabc", -1, true},
+		{"duplicate", "HTTP/1.0 200 OK\r\nContent-Length: 3\r\nContent-Length: 3\r\n\r\nabc", -2, true},
+		{"empty", "HTTP/1.0 200 OK\r\nContent-Length:\r\n\r\nabc", -2, true},
+		{"nondigit", "HTTP/1.0 200 OK\r\nContent-Length: 3x\r\n\r\nabc", -2, true},
+		{"chunked", "HTTP/1.0 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nabc", -2, true},
+		{"over cap", "HTTP/1.0 200 OK\r\nContent-Length: 99999999\r\n\r\n", -2, true},
+	}
+	for _, c := range cases {
+		got, ok := responseNeed([]byte(c.raw))
+		if ok != c.ok || (ok && got != c.want) {
+			t.Errorf("%s: responseNeed = (%d, %v), want (%d, %v)", c.name, got, ok, c.want, c.ok)
+		}
+	}
+}
+
+// A redirect hop must be re-framed from scratch: the second response's
+// Content-Length belongs to the second response, not the first one. The
+// second response arrives in two segments with a body longer than the first
+// hop's length, so a stale frame would silently truncate it to "abc".
+func TestRedirectReframesTheNextHop(t *testing.T) {
+	first := "HTTP/1.0 302 Found\r\nLocation: http://10.0.0.2/next\r\nContent-Length: 2\r\n\r\nok"
+	head := "HTTP/1.0 200 OK\r\nContent-Length: 9\r\n\r\n"
+	part1, part2 := head+"abc", "defghi"
+	f := &fakeTCP{
+		ready: []int64{3, 3, 3},
+		recv:  []int64{int64(len(first)), int64(len(part1)), int64(len(part2))},
+	}
+	defer f.install()()
+	a := &app{hist: newHistory()}
+	copy(a.chunk[:], first) // hop 1's segment
+	u, _ := webrender.ParseHTTPURL("http://10.0.0.2/")
+	a.startHTTP(u)
+	a.loadStep()
+	if a.loadHops != 1 || !a.loading {
+		t.Fatalf("hop 1: loadHops = %d loading = %v, want a redirect and a live load", a.loadHops, a.loading)
+	}
+	copy(a.chunk[:], part1) // hop 2's first segment: headers + 3 body bytes
+	a.loadStep()
+	if !a.loading {
+		t.Fatal("hop 2 must keep loading until its own Content-Length is satisfied")
+	}
+	copy(a.chunk[:], part2) // hop 2's second segment: the remaining 6 bytes
+	a.loadStep()
+	if a.loading {
+		t.Fatal("hop 2 must complete on its own Content-Length")
+	}
+	if a.errKind != "" {
+		t.Fatalf("errKind = %q, want the page with no error", a.errKind)
+	}
+	if string(a.lastBody) != "abcdefghi" {
+		t.Fatalf("body = %q, want abcdefghi (a stale frame truncates it)", a.lastBody)
+	}
+}
+
+// A peer that closes without ever answering is not a truncated page: the
+// load ends on the offline path, not in completeLoad.
+func TestLoadStepEmptyCloseIsNotATruncatedPage(t *testing.T) {
+	f := &fakeTCP{ready: []int64{1}, recv: []int64{0}}
+	defer f.install()()
+	a := &app{hist: newHistory(), loading: true, target: "http://10.0.0.2/", loadEnd: vi.Nanos() + 60_000_000_000}
+	a.loadStep()
+	if a.loading {
+		t.Fatal("a closed peer must end the load")
+	}
+	if a.errKind != "tcp" {
+		t.Fatalf("errKind = %q want tcp", a.errKind)
+	}
+}
+
+// "No bytes right now" is not completion: with no FIN the load stays armed
+// while the deadline is live, and an expired deadline ends it as a timeout.
+func TestLoadStepNoProgressKeepsLoading(t *testing.T) {
+	f := &fakeTCP{ready: []int64{2, 2}, recv: []int64{0, 0}}
+	defer f.install()()
 	a := &app{hist: newHistory(), loading: true, target: "http://10.0.0.2/"}
 	a.loadEnd = vi.Nanos() + 60_000_000_000 // 60 s in the future
 	a.loadStep()
 	if !a.loading {
-		t.Fatal("an empty recv with a live deadline must keep the load armed")
+		t.Fatal("an idle read with a live deadline must keep the load armed")
 	}
 	if a.errKind != "" {
-		t.Fatalf("an empty recv must not raise an error: %q", a.errKind)
+		t.Fatalf("an idle read must not raise an error: %q", a.errKind)
 	}
 	// And an expired deadline must end it as a timeout.
 	a.loadEnd = vi.Nanos() - 1

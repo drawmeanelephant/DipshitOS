@@ -1752,7 +1752,8 @@ if let netCapturePath {
                         var responsePayload = payload
                         let isGet = payload.count >= 4 && payload[0] == 0x47 && payload[1] == 0x45 && payload[2] == 0x54 && payload[3] == 0x20
                         if hostPort == 80 || hostPort == 8080 || isGet {
-                            let httpBody = "HTTP/1.0 200 OK\r\n\r\nHello from VirelaiOS Host!\n"
+                            let body = "Hello from VirelaiOS Host!\n"
+                            let httpBody = "HTTP/1.0 200 OK\r\nContent-Length: \(body.utf8.count)\r\n\r\n\(body)"
                             responsePayload = Array(httpBody.utf8)
                         }
                         let replyLen = buildTcpReply(&reply, buf, n, arpHostMAC, hostPort, netTcpSrvNxt, seq &+ UInt32(payload.count), 0x10, responsePayload)

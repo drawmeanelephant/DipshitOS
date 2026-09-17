@@ -79,6 +79,7 @@ const (
 	SlotMmap         uintptr = 63
 	SlotTime         uintptr = 66
 	SlotTtyAttach    uintptr = 67
+	SlotSockReady    uintptr = 76
 )
 
 // sys_tty_attach front-end selectors (ADR 0020 slot 67).
@@ -525,7 +526,7 @@ func DirList(path string, buf []DirEntry) (int, int64) {
 // TCPConnect opens the single TCP socket (VirelaiOS has one per process).
 func TCPConnect(ip [4]byte, port uint16) int64 {
 	word := uint32(ip[0])<<24 | uint32(ip[1])<<16 | uint32(ip[2])<<8 | uint32(ip[3])
-	return syscall2(SlotTCPConnect, uintptr(word), uintptr(port))
+	return svc2(SlotTCPConnect, uintptr(word), uintptr(port))
 }
 
 // TCPSend writes b to the socket (at most the kernel's 192-byte payload_max
@@ -555,6 +556,20 @@ func TCPRecv(buf []byte) (int, int64) {
 
 // TCPClose closes the socket.
 func TCPClose() int64 { return svc0(SlotTCPClose) }
+
+// TCPReady probes the socket's readiness mask (slot 76, op 0): bit 0 =
+// readable, bit 1 = writable, 0 = nothing yet. It is level-triggered and is
+// the only way to tell a peer FIN from "no segment yet" — the kernel's recv
+// returns 0 for both, and this kernel reports a received FIN as readable.
+// A readable socket whose recv then drains 0 bytes is at EOF: the caller
+// must fail closed (finish the response) instead of polling on.
+func TCPReady() (mask int64, rc int64) {
+	r := svc2(SlotSockReady, 0, 1)
+	if r < 0 {
+		return 0, r
+	}
+	return r, 0
+}
 
 // Map flags / protections accepted by sys_mmap (slot 63).
 const (
