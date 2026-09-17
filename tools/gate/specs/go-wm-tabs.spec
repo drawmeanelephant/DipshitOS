@@ -1,20 +1,23 @@
-# go-wm-tabs.spec -- M62b–e (issues #1400/#1401/#1402/#1403) class-B gate:
-# GOTABWM tab strip, constrained two-pane split, pin + reorder, then
-# `.tabs` v2 session save/restore. Two tabapp clients (leftover Zig CALC
-# + NOTEPAD) declare over WM_RPC; the rail paints with n=2; unpinned
-# reorder; pin stays left across focus; SplitV then Unsplit then SplitH
-# then Unsplit; applied pane rects match the LAYOUT.txt-shaped dump;
+# go-wm-tabs.spec -- M62b–f (issues #1400/#1401/#1402/#1403/#1404) class-B gate:
+# GOTABWM tab strip, constrained two-pane split, pin + reorder,
+# `.tabs` v2 session save/restore, then LAYOUT.txt. Two tabapp clients
+# (leftover Zig CALC + NOTEPAD) declare over WM_RPC; the rail paints with
+# n=2; unpinned reorder; pin stays left across focus; SplitV then Unsplit
+# then SplitH then Unsplit; applied pane rects match the LAYOUT.txt dump;
 # unsplit restores full-viewport; close of a pinned tab is allowed; last
 # close leaves an empty desktop, seat still registered until exit.
 #
 # TWO vgate_runs share one seeded host share (`vgate_share seed`):
 #   01  CALC+NOTEPAD under GOTABWM; pin-stay writes /host/SESSION.TABS
-#       (`.tabs` v2). Closes still run so M62b–d asserts hold.
-#   02  GOTABWM only. Loads the file; rail titles/order/pin/active match.
+#       (`.tabs` v2). Last two-tab unsplit writes /host/SELFTEST/LAYOUT.txt
+#       (closed before the serial line that names it). Closes still run so
+#       M62b–d asserts hold.
+#   02  GOTABWM only. Loads the session; rail titles/order/pin/active match;
+#       LAYOUT.txt is rewritten for the restored strip.
 #
 # Seed wm=none and exec GOTABWM.ELF like go-wm-seat: this is the Go seat,
 # not Zig TABWM. Do not overload go-wm-seat or go-wm-default. Kernel
-# untouched. No HID. No framebuffer golden. No LAYOUT.txt file (M62f).
+# untouched. No HID. No framebuffer golden.
 #
 # HOST PREREQUISITE (fails the gate honestly when missing):
 #   bash tools/go/build-gotabwm.sh   ->  .build/go/GOTABWM.ELF
@@ -25,7 +28,7 @@
 # Boot 02 still needs `dui focus 0` after win focus so the window phase
 # can finish before SESSION.TABS is loaded.
 
-vgate_name go-wm-tabs "issues #1400/#1401/#1402/#1403 M62b–e: GOTABWM tabs + split + pin + session on VZ"
+vgate_name go-wm-tabs "issues #1400–#1404 M62b–f: GOTABWM tabs + split + pin + session + LAYOUT.txt on VZ"
 vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 
@@ -235,6 +238,47 @@ if b[107] != 0:
     sys.exit("record 1 flags %#x want unpinned" % b[107])
 print("SESSION.TABS v2 n=2 Calc pinned left, Calc active")
 PY
+# M62f: LAYOUT.txt is closed before the serial line that names it. Last
+# two-tab write is the unsplit full-viewport dump (closes do not rewrite).
+vgate_assert 01 serial-contains 'gotabwm: layout file=/host/SELFTEST/LAYOUT.txt'
+vgate_assert 01 share-contains SELFTEST/LAYOUT.txt 'split=none'
+vgate_assert 01 python <<'PY'
+import os, re, sys
+p = os.path.join(os.environ["VG_SHARE"], "SELFTEST/LAYOUT.txt")
+try:
+    raw = open(p, "rb").read()
+except FileNotFoundError:
+    sys.exit("SELFTEST/LAYOUT.txt missing on the share")
+if b"\r" in raw:
+    sys.exit("LAYOUT.txt contains CR")
+if not raw.endswith(b"\n"):
+    sys.exit("LAYOUT.txt is not LF-terminated")
+text = raw.decode("utf-8")
+line_re = re.compile(
+    r"^tab=(\d+) bin=(\S+) x=(\d+) y=(\d+) w=(\d+) h=(\d+) focus=([01]) split=(none|h|v)$")
+lines = text.splitlines()
+if len(lines) != 2:
+    sys.exit("LAYOUT.txt has %d lines, want 2" % len(lines))
+parsed = []
+for line in lines:
+    m = line_re.match(line)
+    if not m:
+        sys.exit("bad LAYOUT line: %r" % line)
+    parsed.append(m.groups())
+ids = {parsed[0][0], parsed[1][0]}
+if len(ids) != 2:
+    sys.exit("tab ids not unique: %s" % (ids,))
+bins = {parsed[0][1], parsed[1][1]}
+if bins != {"CALC.BIN", "NOTEPAD.BIN"}:
+    sys.exit("bins %s want CALC.BIN and NOTEPAD.BIN" % (bins,))
+for row in parsed:
+    if row[2:6] != ("0", "0", "1280", "720") or row[7] != "none":
+        sys.exit("last dump must be unsplit full-viewport, got %s" % (row,))
+foci = {parsed[0][6], parsed[1][6]}
+if foci != {"0", "1"}:
+    sys.exit("need one focused tab, focus bits %s" % (foci,))
+print("LAYOUT.txt n=2 unsplit 1280x720 bins=%s focus ok" % ",".join(sorted(bins)))
+PY
 
 vgate_run 02 -- \
     --screen '$RUN_DIR/screen-02' \
@@ -253,10 +297,36 @@ vgate_assert 02 serial-contains 'gotabwm: session titles=Calc,Notepad pin=1,0 ac
 vgate_assert 02 serial-contains 'gotabwm: order ids='
 vgate_assert 02 serial-contains 'pin=1,0'
 vgate_assert 02 serial-contains 'gotabwm: rail n=2 focus='
+vgate_assert 02 serial-contains 'gotabwm: layout file=/host/SELFTEST/LAYOUT.txt'
 # Restored placeholder ids are not kernel windows: skip split/close.
 vgate_assert 02 serial-absent 'gotabwm: split '
 vgate_assert 02 serial-absent 'gotabwm: tab close id='
 vgate_assert 02 serial-absent 'gotabwm: session bad'
+vgate_assert 02 share-contains SELFTEST/LAYOUT.txt 'bin=CALC.BIN'
+vgate_assert 02 python <<'PY'
+import os, re, sys
+p = os.path.join(os.environ["VG_SHARE"], "SELFTEST/LAYOUT.txt")
+raw = open(p, "rb").read()
+if b"\r" in raw or not raw.endswith(b"\n"):
+    sys.exit("LAYOUT.txt encoding")
+line_re = re.compile(
+    r"^tab=(\d+) bin=(\S+) x=(\d+) y=(\d+) w=(\d+) h=(\d+) focus=([01]) split=(none|h|v)$")
+lines = raw.decode("utf-8").splitlines()
+if len(lines) != 2:
+    sys.exit("LAYOUT.txt has %d lines, want 2" % len(lines))
+parsed = [line_re.match(line) for line in lines]
+if not all(parsed):
+    sys.exit("bad LAYOUT line in %r" % lines)
+ids = [parsed[0].group(1), parsed[1].group(1)]
+if ids != ["256", "257"]:
+    sys.exit("restored ids %s want 256,257 (sessionIDBase=0x100)" % ids)
+bins = [parsed[0].group(2), parsed[1].group(2)]
+if bins != ["CALC.BIN", "NOTEPAD.BIN"]:
+    sys.exit("bins %s" % bins)
+if parsed[0].group(8) != "none" or parsed[1].group(8) != "none":
+    sys.exit("restore dump must be unsplit")
+print("LAYOUT.txt restore n=2 ids=256,257 unsplit")
+PY
 vgate_assert 02 serial-contains 'gotabwm: host done'
 vgate_assert 02 serial-contains 'gotabwm: close'
 vgate_assert 02 serial-contains 'gotabwm OK'

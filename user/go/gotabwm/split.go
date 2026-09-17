@@ -31,6 +31,7 @@ func applySplit(kind SplitKind) bool {
 	vi.ConsoleLine(MarkerSplit + kind.String())
 	dumpTab(a, ra, kind)
 	dumpTab(b, rb, kind)
+	_ = writeLayoutFile()
 	return true
 }
 
@@ -46,6 +47,7 @@ func applyUnsplit() bool {
 		dumpTab(t, full, SplitNone)
 	}
 	vi.ConsoleLine(MarkerUnsplit)
+	_ = writeLayoutFile()
 	return true
 }
 
@@ -65,7 +67,7 @@ func dumpTab(t Tab, applied Rect, kind SplitKind) {
 	if id, ok := tabs.Focused(); ok && id == t.ID {
 		focus = true
 	}
-	vi.ConsoleLine(MarkerLayout + layoutLine(t.ID, t.Title, applied, focus, kind))
+	vi.ConsoleLine(MarkerLayout + layoutLine(t.ID, layoutBin(t), applied, focus, kind))
 	// Slot 19 WinQuery is owner-restricted (CALLER's window only). The
 	// seat cannot read a hosted client's rect back. The pane line is the
 	// rect SET_WINDOW just accepted; a kernel refusal skips dumpTab.
