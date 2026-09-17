@@ -96,6 +96,10 @@ func main() {
 		vi.Exit(7)
 	}
 
+	// M62e: restore `.tabs` v2 from /host/SESSION.TABS if a prior boot
+	// wrote it. Missing is a no-op; corrupt fails closed (empty strip).
+	loadSession()
+
 	// 6. Composite/present loop paced by the kind-18 tick - and the WM_RPC
 	//    serve loop (M57c / M62b): the seat hosts tabapp clients that declare
 	//    over the mailbox, keeps them on the in-process strip, and paints a
@@ -148,7 +152,9 @@ func main() {
 				case 1:
 					_ = applySwapUnpinned()
 				case 2:
-					_ = applyPinStay()
+					if applyPinStay() {
+						_ = writeSession()
+					}
 				case 3:
 					_ = applySplit(SplitVert)
 				case 4:
