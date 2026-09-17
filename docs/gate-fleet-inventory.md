@@ -30,7 +30,7 @@
 | `tools/lib/` | 2 | per-run isolation for live gates (`gate-run.sh`) |
 | `tools/status/` | 7 | multiagent coordination gate + claim tooling (class A) |
 | `tools/context/` | 2 | context snapshot helpers |
-| `tools/gate/` | 252 | M40 vgate harness + specs (GF2+) |
+| `tools/gate/` | 251 | M40 vgate harness + specs (GF2+) |
 
 ## Class-B fleet (discovered from the spec dir)
 
@@ -88,7 +88,6 @@ of them with `just verify-vz`.
 | spec | `live-dynamic-ecosystem` | 5 run / 35 assert | live-dynamic-ecosystem.spec -- Milestone 31 Class-B Gate (claim 4001): |
 | spec | `live-dynamic-linking` | 1 run / 9 assert | live-dynamic-linking.spec -- Milestone 30 Class-B Gate (issue #599, claim 7921): |
 | spec | `live-editing` | 1 run / 13 assert | live-editing.spec -- milestone-eight card U2 class-B gate (claim 1809): |
-| spec | `live-editor` | 1 run / 18 assert | live-editor.spec -- M23 E2-E5 class-B gate: |
 | spec | `live-el0-exec` | 1 run / 9 assert | live-el0-exec.spec -- EL0 sys_exec returns to the caller (issue #1333). |
 | spec | `live-elf` | 1 run / 8 assert | live-elf.spec -- M22 D1: load and execute ELF32 from the ESP at EL0. |
 | spec | `live-entropy` | 2 run / 15 assert | live-entropy.spec -- REAL virtio entropy (DID 0x1044) seeds the |
@@ -233,7 +232,7 @@ of them with `just verify-vz`.
 | spec | `live-timer` | 1 run / 6 assert | live-timer.spec -- real CNTP PPI delivery through the EL1 IRQ vector. |
 | spec | `live-timers` | 1 run / 13 assert | live-timers.spec -- claim 7323 (Milestone 14, Card S2) class-B gate: |
 | spec | `live-tls13` | 1 run / 9 assert | live-tls13.spec -- cards TLS13-C8/C11: the guest HTTPS consumer. |
-| spec | `live-tokens` | 12 run / 36 assert | live-tokens.spec -- M37 DQ4 design tokens & cohesion |
+| spec | `live-tokens` | 10 run / 30 assert | live-tokens.spec -- M37 DQ4 design tokens & cohesion |
 | spec | `live-transcript` | 1 run / 6 assert | live-transcript.spec -- vgate pilot (serial-only + repeat): live RX. |
 | spec | `live-trust-caps` | 2 run / 14 assert | live-trust-caps.spec -- M50 TS3 class-B gate (issue #1137, ADR 0024 D5/D10). |
 | spec | `live-trust-modes` | 1 run / 11 assert | live-trust-modes.spec -- M50 TS2 class-B gate (issue #1136, ADR 0024 D3/D4/D8). |
@@ -337,7 +336,7 @@ recipe a workflow delegates to; `st` = named in
 | `verify-t0sz16-walkprobe.sh` | 220 | D | n | n | n | y | verify-t0sz16-walkprobe.sh -- claim 1517 (claims 6460/7896 follow-up) |
 | `verify-t0sz16.sh` | 276 | D | n | n | n | y | verify-t0sz16.sh -- claim 1517 (claims 6460/7896 follow-up) class-D |
 | `verify-transcript.sh` | 32 | A | n | n | n | y | M1.5 march step 19 gate: the automated `virelai>` transcript test. |
-| `verify-ttf-fonts.sh` | 62 | A | n | n | y | n | verify-ttf-fonts.sh -- class A: TrueType font engine verification for |
+| `verify-ttf-fonts.sh` | 64 | A | n | n | y | n | verify-ttf-fonts.sh -- class A: TrueType font engine verification for |
 | `verify-tx-diag.sh` | 263 | D | y | n | n | n | verify-tx-diag.sh -- claim 0018 gate: bisect the FIRST post-exit virtio TX |
 | `verify-tx-transition.sh` | 238 | D | n | n | n | y | verify-tx-transition.sh -- claim 0020 gate: which transition destroys |
 | `verify-unit-tests.sh` | 38 | A | n | n | y | n | Run the VirelaiOS unit test suites. |

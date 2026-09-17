@@ -56,7 +56,9 @@ PATH="/opt/homebrew/opt/gnu-sed/libexec/gnubin:/opt/homebrew/bin:$PATH" zig test
 # 3. Assert userland compilation with font subsystem
 echo
 echo "[3/3] Compiling userland with font engine integrated"
-PATH="/opt/homebrew/opt/gnu-sed/libexec/gnubin:/opt/homebrew/bin:$PATH" zig build desktop edit
+# M60 / #1297: EDIT.BIN is gone; leftover NOTEPAD.BIN still compiles the
+# font engine into userland (with DESKTOP.BIN).
+PATH="/opt/homebrew/opt/gnu-sed/libexec/gnubin:/opt/homebrew/bin:$PATH" zig build desktop notepad
 
 echo
 echo "=== verify-ttf-fonts: PASS (Inter & Fira Code TrueType engine verified) ==="
