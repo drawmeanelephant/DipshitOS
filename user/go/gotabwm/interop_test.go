@@ -104,3 +104,71 @@ func TestHostedSuppressesBlankPaint(t *testing.T) {
 		t.Fatal("hosted tab should be set")
 	}
 }
+
+func TestLateOpenTabClearsStripDone(t *testing.T) {
+	savedTabs := tabs
+	savedDone, savedTwo, savedOne := stripDone, stripSawTwo, stripClosedOne
+	defer func() {
+		tabs = savedTabs
+		stripDone, stripSawTwo, stripClosedOne = savedDone, savedTwo, savedOne
+	}()
+
+	tabs = TabStrip{}
+	stripDone, stripSawTwo, stripClosedOne = true, true, true
+	if !tabs.OpenTab(4, "late") {
+		t.Fatal("OpenTab from empty")
+	}
+	noteStripOpen()
+	if stripDone || stripSawTwo || stripClosedOne {
+		t.Fatalf("late OpenTab from empty left stripDone=%v sawTwo=%v closedOne=%v",
+			stripDone, stripSawTwo, stripClosedOne)
+	}
+
+	// A second tab on a live strip must not clear the two-tab latch.
+	stripSawTwo = true
+	if !tabs.OpenTab(5, "b") {
+		t.Fatal("OpenTab second")
+	}
+	noteStripOpen()
+	if !stripSawTwo {
+		t.Fatal("OpenTab of a second tab cleared stripSawTwo")
+	}
+
+	// A no-op (duplicate) OpenTab must not reset either.
+	stripDone = true
+	if tabs.OpenTab(5, "b") {
+		t.Fatal("duplicate OpenTab counted as added")
+	}
+	// applyRPC only calls noteStripOpen on added==true; pin that Count!=1
+	// is what the helper uses when a second tab is already present.
+	if tabs.Count() != 2 {
+		t.Fatalf("count = %d want 2", tabs.Count())
+	}
+}
+
+func TestAttachSyncsHostState(t *testing.T) {
+	savedTabs := tabs
+	savedHosted := hostedApp
+	savedTicks := hostTicksLeft
+	defer func() {
+		tabs = savedTabs
+		hostedApp = savedHosted
+		hostTicksLeft = savedTicks
+	}()
+
+	tabs = TabStrip{}
+	hostedApp = 0
+	hostTicksLeft = 0
+	if !tabs.OpenTab(7, "attached") {
+		t.Fatal("OpenTab")
+	}
+	noteStripOpen()
+	if !tabs.FocusTab(7) {
+		t.Fatal("FocusTab")
+	}
+	hostedApp = 7
+	hostTicksLeft = hostTicks
+	if id, ok := tabs.Focused(); !ok || id != 7 || hostedApp != 7 || hostTicksLeft != hostTicks {
+		t.Fatalf("attach sync: focus=%d ok=%v hosted=%d ticks=%d", id, ok, hostedApp, hostTicksLeft)
+	}
+}

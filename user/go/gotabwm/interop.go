@@ -10,14 +10,18 @@
 // The seat is the SERVER half. It drains its own mailbox, applies each request
 // with the kernel's own primitives, and acks to the requester. The markers are:
 //
-//	declare_fullscreen (8)      gotabwm: rpc declare id=<n>
-//	                            gotabwm: host focus id=<n> (taskbar-click)
-//	                            gotabwm: host view id=<n>  (full viewport)
-//	raise (1)                   gotabwm: rpc raise id=<n>
-//	attach (5) / detach (6)     gotabwm: rpc attach/detach id=<n>
-//	cycle (7)                   gotabwm: rpc cycle
+//	declare_fullscreen (8)      gotabwm: tab open id=<n>
+//	                            gotabwm: host focus / tab focus id=<n>
+//	                            gotabwm: host view id=<n>
+//	                            gotabwm: rpc declare id=<n>
+//	raise (1)                   gotabwm: rpc raise / tab focus id=<n>
+//	attach (5)                  gotabwm: tab open (if new); rpc attach id=<n>
+//	detach (6)                  gotabwm: rpc detach id=<n>
+//	cycle (7)                   gotabwm: tab focus id=<n>; rpc cycle
 //	anything else               gotabwm: rpc other kind=<n>
-//	after hostTicks ticks       gotabwm: host close id=<n> (WIN_CLOSE)
+//	rail after paint            gotabwm: rail n=<n> focus=<id>
+//	close focused / last        gotabwm: host close / tab close id=<n>
+//	                            then tab focus remaining, or tabs empty
 //	loop ends                   gotabwm: host done
 //
 // The ack is the M56b wire (wmclient.go / wnd_core.zig): kind | 0x80, id, seq,
@@ -107,6 +111,7 @@ func applyRPC(req vi.WmRpc) bool {
 	switch req.Kind & 0x7f {
 	case vi.WmRpcKindDeclareFullscreen: // 8, the path lib/tabapp.zig uses
 		if tabs.OpenTab(id, req.TitleString()) {
+			noteStripOpen()
 			vi.ConsoleLine(MarkerTabOpen + vi.Itoa64(int64(id)))
 		}
 		hostedApp = id
@@ -136,8 +141,14 @@ func applyRPC(req vi.WmRpc) bool {
 		return false
 	case vi.WmRpcKindAttachTab: // 5
 		if tabs.OpenTab(id, req.TitleString()) {
+			noteStripOpen()
 			vi.ConsoleLine(MarkerTabOpen + vi.Itoa64(int64(id)))
 		}
+		// Same host-state sync as declare: an attach-without-declare client
+		// still lands on the strip with focus and the single-tab close budget.
+		_ = tabs.FocusTab(id)
+		hostedApp = id
+		hostTicksLeft = hostTicks
 		vi.ConsoleLine(MarkerRpcAttach + vi.Itoa64(int64(id)))
 		return true
 	case vi.WmRpcKindDetachTab: // 6
@@ -221,4 +232,19 @@ func syncHostedFromStrip() {
 		return
 	}
 	hostedApp = 0
+}
+
+// noteStripOpen restarts close-handling when a tab lands on an empty strip.
+// Without this, a late OpenTab after the single-tab path set stripDone would
+// stay open until process exit (the gate-unreachable edge: a second declare
+// more than hostTicks after the first). A second tab on an already-populated
+// strip must not clear stripSawTwo — that latch is what keeps the two-tab
+// close path from falling through to the single-tab countdown.
+func noteStripOpen() {
+	if tabs.Count() != 1 {
+		return
+	}
+	stripDone = false
+	stripSawTwo = false
+	stripClosedOne = false
 }
