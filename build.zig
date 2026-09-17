@@ -964,29 +964,6 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_chat.step);
 
     // ------------------------------------------------------------------
-    // Guest: twenty-first ESP user program (milestone thirteen, card B3 — claim 4742)
-    // FILE.BIN. Graphical file browser for the DATA partition.
-    // ------------------------------------------------------------------
-    const file_prog = b.addExecutable(.{
-        .name = "user-file-browser",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("user/src/file_browser.zig"),
-            .target = kernel_target,
-            .optimize = .ReleaseSmall,
-        }),
-    });
-    file_prog.linker_script = b.path("user/linker-segmented.ld");
-    const file_step = b.step("file", "Build the twenty-first ESP user program (zig-out/bin/FILE.BIN) — DSK3 segmented (writable .data/.bss)");
-    const file_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
-    file_elf2bin.addFileArg(file_prog.getEmittedBin());
-    const file_bin = file_elf2bin.addOutputFileArg("FILE.BIN");
-    file_elf2bin.has_side_effects = true;
-    file_elf2bin.stdio = .inherit;
-    file_step.dependOn(&file_elf2bin.step);
-    const install_file = b.addInstallFileWithDir(file_bin, .bin, "FILE.BIN");
-    b.getInstallStep().dependOn(&install_file.step);
-
-    // ------------------------------------------------------------------
     // Guest: twenty-third ESP user program (milestone fourteen, card S2 — claim 7323)
     // TIMER.BIN. Headless per-process app-timer proof (arm/wait/fire/cancel).
     // ------------------------------------------------------------------

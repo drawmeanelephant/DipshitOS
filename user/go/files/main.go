@@ -1,6 +1,6 @@
 // Command files is the M58a (issue #1305) Go file manager: list / open /
 // navigate the host share, full-viewport inside Zig TABWM via user/go/tabapp.
-// Zig FILE.BIN stays. No LIBUI — the three M56e widgets (text/button/list)
+// Zig FILE.BIN is gone (M60 / #1374). No LIBUI — the three M56e widgets (text/button/list)
 // are the whole toolkit.
 //
 // Every marker below is printed only AFTER its syscall returned, so the
