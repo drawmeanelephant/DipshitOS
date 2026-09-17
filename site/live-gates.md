@@ -37,7 +37,7 @@ Each gate is a `tools/verify-live-*.sh` script that:
 - **Network** — `live-net-tx`, `-rx`, `-arp`, `-icmp`, `-udp`, `-udp-syscall`, `-nat`, `-dhcp`, `-dhcp-renew`, `-tcp`, `-tcp-rto`, `-tcp-syscall`, `-dns`, `-fetch`
 - **Graphics / input** — `live-screen`, `live-text`, `live-roadpops`, `live-glyphs`, `live-win`, `live-win-syscall`, `live-win-move`, `live-win-close`, `live-win-hig`, `live-xhci`, `live-usb`, `live-input`
 - **Usability / HIG** — `live-help`, `live-editing`, `live-settings`, plus the pointer seams: `pointer-manual` (class C, a human at the mouse), `live-pointer-cg` (class B, self-gating on Accessibility trust), and `live-pointer-virtio` (class B-headless — custom-virtio pointer injection, issue #151)
-- **Events / desktop / apps** — `live-events`, `live-sys-kill`, `live-desktop`, `live-file-browser`
+- **Events / desktop / apps** — `live-events`, `live-sys-kill`, `live-desktop`, `go-files`
 - **Shared services** — `live-clipboard`, `live-timers`, `live-m14-composition`, `live-hardening`
 - **Sound** — `live-sound-device`, `live-sound-playback`, `live-sound-app`, `live-sound-control`, `live-m15-composition`
 - **Window depth / desktop (M21–M27)** — the `live-m21-*` set (tile-master, minimize-ws, max-fullscreen-aot, notif-dialog-transient, persist-title-orphan), `live-httpd` (TCP passive open), and the M25 file-manager sweep

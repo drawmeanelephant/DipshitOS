@@ -33,7 +33,6 @@ dynamic executables and shared libraries listed below):
 | `TCP.BIN` | `user/src/tcp_client.zig` | the TCP syscall seam: connect, send, receive echo, close, exit 18 |
 | `FETCH.BIN` | `user/src/fetch.zig` | an HTTP/1.0 client over TCP: request, parse response, exit 42 |
 | `CHAT.BIN` | `user/src/chat.zig` | graphical UDP chat: windows + events + `sys_udp_*` |
-| `FILE.BIN` | `user/src/file_browser.zig` | the graphical DATA-partition file browser (list, read, delete, rename) |
 | `FSTEST.BIN` | `user/src/fstest.zig` | the mutating filesystem seam: create/write → truncate → rename → free → delete |
 | `TIMER.BIN` | `user/src/timertest.zig` | the app-timer seam: arm → block on `TIMER` event → cancel |
 | `VICTIM.BIN` | `user/src/hardening_victim.zig` | the hostile-EL0 proof's victim: owns a window and yield-loops forever |
@@ -68,7 +67,8 @@ dynamic executables and shared libraries listed below):
 | `LD.SO` | `user/src/ld.zig` | M30: the freestanding runtime linker (PT_DYNAMIC, GOT relocations, AuxV) |
 | `LIBUI.SO` / `LIBFONT.SO` | `user/src/libui_so.zig` / `user/src/libfont_so.zig` | M30: position-independent UI + font shared libraries |
 | `DYNAPP.ELF` | `user/src/dynapp.zig` | M30 D4: the dynamic-executable proof — links both libraries, opens a window, exits 0 |
-| `CALC.ELF` / `NOTEPAD.ELF` / `FILE.ELF` / `DESKTOP.ELF` | migrated M31 apps | M31 E1–E4: the desktop apps rebuilt as dynamic executables |
+| `CALC.ELF` / `NOTEPAD.ELF` / `FILE.ELF` / `DESKTOP.ELF` | migrated M31 apps | M31 E1–E4: the desktop apps rebuilt as dynamic executables (`FILE.ELF` is the dynlink leftover, not Zig `FILE.BIN`) |
+| `GOFILES.ELF` | `user/go/files` | M58a/M60: Go file manager (list/open on the host share; gate `go-files`). Zig `FILE.BIN` deleted. |
 | `PLUGIN.SO` | loaded via `dlopen`/`dlsym` | M31 E5: runtime-loadable plugin modules |
 
 They are built by the same pipeline as the kernel: Zig → ELF → a flat `DSK1`

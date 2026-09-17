@@ -38,10 +38,10 @@ Milestone ten opened storage to EL0: a per-process file-handle table
 behind the `sys_file_open`/`read`/`write`/`close` and `sys_dir_list` syscalls
 (slots 23–27), with path canonicalization routing `/esp/...` and `/data/...`
 to the right volume. `SAVETEXT.BIN`, `TYPE.BIN`, and `DIR.BIN` prove the
-seam; `NOTEPAD.BIN` and `FILE.BIN` use it for real work. Milestone thirteen's
+seam; `NOTEPAD.BIN` and `GOFILES.ELF` use it for real work. Milestone thirteen's
 B1 card extended the seam with `sys_file_delete`/`rename`/`truncate`/`free`
-(slots 34–37) — proven live by `FSTEST.BIN` and exposed through `FILE.BIN`'s
-Delete/Rename buttons.
+(slots 34–37) — proven live by `FSTEST.BIN`. The current file manager is
+`GOFILES.ELF` (gate `go-files`: list/open).
 
 ## Loading programs
 
