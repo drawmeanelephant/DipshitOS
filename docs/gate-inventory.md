@@ -32,8 +32,8 @@ One source of truth, three generated views — none hand-edited:
 
 | What | Where | Regenerate / check |
 |---|---|---|
-| Class-B fleet (specs + legacy scripts) | `docs/gate-fleet-inventory.md`, "Class-B fleet" section | `just inventory-gates` / `just inventory-gates --check` |
-| Class-A + top-level script rows | `docs/gate-fleet-inventory.md`, "All top-level scripts" | same |
+| Class-B fleet (specs + legacy scripts) | `docs/gate-fleet-inventory.md` snapshot (do not commit in a spec PR) | `just inventory-gates` locally; `--check` is spec-order + locale |
+| Class-A + top-level script rows | same snapshot | same |
 | CI shard input | `bash tools/gate/fleet.sh list` | derived from `tools/gate/specs/` live |
 
 Run one class-B gate with `just gate <id>`, a pattern group with

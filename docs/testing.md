@@ -70,12 +70,14 @@ render was the *byte* truncation under `LC_ALL=C` and the *character*
 truncation under a UTF-8 locale, so `main` passed under UTF-8 and failed
 under `C` with no workflow noticing). The rules that came out of it:
 
-- **Committed generated files must render byte-identically under any
-  locale.** `tools/inventory-gates.sh` writes the only tracked render
-  (`docs/gate-fleet-inventory.md`); it pins `LC_ALL=C` for the render,
-  truncates headers in UTF-8 **characters** rather than bytes, and its
-  `--check` mode renders a second copy under `en_US.UTF-8` and fails when
-  the two disagree — so a locale-sensitive operation cannot creep back in.
+- **Generated inventory bytes must not depend on the shell locale.**
+  `tools/inventory-gates.sh` pins `LC_ALL=C` for the render, truncates
+  headers in UTF-8 **characters** rather than bytes, and `--check` renders
+  a second copy under `en_US.UTF-8` and fails when the two disagree — so a
+  locale-sensitive operation cannot creep back in. The tracked
+  `docs/gate-fleet-inventory.md` is a snapshot, not a PR artifact:
+  `--check` does not require it to match, because that made every spec PR
+  conflict on the same generated table.
   (Reachability: 51 of the 210 `tools/gate/specs/*.spec` files contain
   non-ASCII; **2** of their first-line headers do —
   `live-m21-persist-title-orphan` (em dash) and `live-wnd5-gate2-policy`
@@ -265,13 +267,13 @@ under `C` with no workflow noticing). The rules that came out of it:
   adding a spec registers it everywhere with zero list edits.
 - **The fleet inventory is generated, not written:**
   `bash tools/inventory-gates.sh` rewrites `docs/gate-fleet-inventory.md`
-  (also `just inventory-gates`); `just inventory-gates --check` fails when
-  the tracked report drifts from a fresh render — every added, removed, or
-  renamed spec or script under `tools/` must ship with a regenerated report.
-  This bullet used to say "and CI runs that check (GF5)", which was not
-  true: the macos CI job never ran it. Issue #1186 added the step (plus two
-  other portable gates that job had silently dropped), and
-  `tools/lint-workflows.sh` now asserts that every command in the
+  (also `just inventory-gates`) as a local snapshot. Do not commit that
+  file in a spec or script PR — GitHub then blocks parallel merges on a
+  generated table. `just inventory-gates --check` (class A / CI) enforces
+  spec-order and locale invariance; it does not require the snapshot to
+  match. Adding a spec under `tools/gate/specs/` registers it via
+  `tools/gate/fleet.sh` with zero list edits.
+  `tools/lint-workflows.sh` asserts that every command in the
   `just verify-portable` recipe appears in `.github/workflows/ci.yml`, so a
   portable gate cannot go local-only again without failing that lint.
 - `docs/gate-inventory.md` defines the class A/B/C/D policy only; the

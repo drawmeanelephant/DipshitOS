@@ -91,8 +91,8 @@ Rules:
 - Since M40 GF5 (issue #940) the spec dir is the class-B fleet's single
   source of truth: dropping a `*.spec` here registers it in `just gate`,
   `just gates`, `just verify-vz`, the `vz-gates.yml` CI shards, and the
-  fleet section of `docs/gate-fleet-inventory.md` with zero list edits
-  (regenerate the report; `--check` fails until you do). Discovery lives
+  fleet section of `docs/gate-fleet-inventory.md` with zero list edits.
+  Do not commit a re-render of that snapshot in the spec PR. Discovery lives
   in `tools/gate/fleet.sh`.
 
 ## exec ordering: `exec` returns immediately (claim #1193)
