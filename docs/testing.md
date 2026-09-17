@@ -50,6 +50,27 @@ moved part of the evidence into the guest. The rule, in one table:
   report) inside the per-run `--cvc-file` share — the host `cat`s them on
   macOS. Nothing for this arc is packed into `disk.img`, and the guest
   reads intake fixtures from the share rather than carrying them.
+- **Intake (M61c, #1383) is the anti-embedding test.** The spec seeds TWO
+  fixtures with different bodies (`IN/fixture.txt` = the canonical bytes,
+  `IN/altered.txt` = the same bytes with one character changed) and the
+  `intake` / `intake-altered` cases copy the bytes they actually **read**
+  to `OUT/fixture.copy` and `OUT/altered.copy`. The host byte-compares
+  those copies against the files it wrote, so an app that answered from a
+  constant compiled into the binary cannot pass, and mutating the seeded
+  file makes the case FAIL (`read returned <n>B of zeros (issue #1391)`
+  when the channel itself is the problem). Writes stay out of `IN/`:
+  the spec also asserts both fixtures are unchanged after the run.
+- **Known defect on the read path (#1391).** On VZ the *first* kernel→user
+  copy into a user buffer whose pages EL0 has never written is silently
+  lost — the syscall returns the right byte count and the app reads zeros
+  (seen in M61b as an all-zeros `APPS.TXT` read and a zeros read-back of a
+  file the guest had just written; root-caused in M61c to the buffer's
+  first touch, since touching it first makes the same read correct). The
+  host file channel is not involved — the runner's stdout shows the bytes
+  being served. `user/go/selftest`'s read helper warms its buffer ends as
+  a documented workaround and the case still fails on wrong bytes; do not
+  add retries or warm-up *reads*, and fix #1391 before the M61d case pack
+  (create/write/read-back) relies on fresh buffers.
 - The serial contract is one summary line, `selftest: FAIL n=<N>` (N=0 on
   success), printed after `REPORT.txt` is closed; the report's
   `summary cases=<n> failed=<k>` must agree with it, and a run whose

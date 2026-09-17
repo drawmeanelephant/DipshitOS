@@ -19,10 +19,12 @@ type fakeFS struct {
 	next    int64
 	clock   int64
 
-	frozenClock bool // sleep does not advance the clock
-	shortWrite  bool // every write accepts one byte (the loop path)
-	corruptRead bool // reads return the wrong bytes
-	denyWrite   bool // write-opens fail
+	frozenClock bool   // sleep does not advance the clock
+	shortWrite  bool   // every write accepts one byte (the loop path)
+	corruptRead bool   // reads return the wrong bytes
+	denyWrite   bool   // every write-op fails
+	denyPath    string // write-opens of this path fail (the intake copy is unaffected)
+	zeroRead    bool   // reads return the right length of zeros (issue #1391)
 }
 
 func newFakeFS() *fakeFS {
@@ -88,7 +90,7 @@ func (f *fakeFS) open(path string, flags uint32) (int64, int64) {
 		f.cursors[f.next] = 0
 		return f.next, f.next
 	case flags&flagModeWrite != 0:
-		if f.denyWrite {
+		if f.denyWrite || (f.denyPath != "" && f.denyPath == path) {
 			return 0, -2
 		}
 		f.files[path] = nil // ADR 0010 replace semantics
@@ -115,6 +117,11 @@ func (f *fakeFS) read(h uint32, buf []byte) (int, int64) {
 	if f.corruptRead {
 		buf[0] ^= 0xff
 	}
+	if f.zeroRead {
+		for i := 0; i < n; i++ {
+			buf[i] = 0
+		}
+	}
 	return n, int64(n)
 }
 
@@ -127,29 +134,36 @@ func (f *fakeFS) write(h uint32, b []byte) (int, int64) {
 	return len(b), int64(len(b))
 }
 
-// wantReport is the byte-exact report of the two M61b smoke cases: the M61f
-// `share-equals` fixture shape.
-const wantReport = "case clock-monotonic pass\ncase file-write pass\nsummary cases=2 failed=0\n"
+// wantReport is the byte-exact report of the four cases after M61c: the M61f
+// `share-equals` fixture shape, and the report the go-selftest spec requires on
+// the share. Adding a case updates this and the spec together.
+const wantReport = "case intake pass\ncase intake-altered pass\n" +
+	"case clock-monotonic pass\ncase file-write pass\nsummary cases=4 failed=0\n"
+
+// seedFixtures is the host's half of the intake contract: IN/fixture.txt holds
+// the canonical body, IN/altered.txt the altered one (ADR 0031 D2).
+func seedFixtures(fs *fakeFS) {
+	fs.files[intakePath] = []byte(intakeFixture)
+	fs.files[alteredPath] = []byte(intakeAltered)
+}
 
 func TestRunCasesAllPassAndReportBytes(t *testing.T) {
 	fs := newFakeFS()
+	seedFixtures(fs)
 	rs := runCases(fs.syscalls())
 
-	if len(rs) != 2 {
-		t.Fatalf("cases = %d, want 2", len(rs))
+	if len(rs) != 4 {
+		t.Fatalf("cases = %d, want 4", len(rs))
 	}
 	for _, r := range rs {
 		if !r.ok {
 			t.Fatalf("case %s failed: %s", r.id, r.detail)
 		}
-		if r.id != "clock-monotonic" && r.id != "file-write" {
-			t.Fatalf("unexpected case id %q", r.id)
-		}
 	}
 	if got := string(renderReport(rs)); got != wantReport {
 		t.Fatalf("report bytes:\n got %q\nwant %q", got, wantReport)
 	}
-	if got := string(renderSummary(rs)); got != "summary cases=2 failed=0\n" {
+	if got := string(renderSummary(rs)); got != "summary cases=4 failed=0\n" {
 		t.Fatalf("summary = %q", got)
 	}
 	if got := fs.files[helloPath]; !bytes.Equal(got, []byte(helloPayload)) {
@@ -157,6 +171,111 @@ func TestRunCasesAllPassAndReportBytes(t *testing.T) {
 	}
 	if !fs.dirs[outDir] {
 		t.Fatal("the file-write case did not ensure OUT/ exists")
+	}
+}
+
+// The intake case copies the bytes it READ into OUT/, and its receipt is the
+// byte-exact line the spec requires. The copy is what the host compares, so a
+// case that copied its own expectation instead of the read bytes fails here.
+func TestIntakeCopiesTheBytesItRead(t *testing.T) {
+	fs := newFakeFS()
+	seedFixtures(fs)
+	rs := runCases(fs.syscalls())
+
+	if !rs[0].ok || rs[0].id != "intake" {
+		t.Fatalf("intake should have passed, got %+v", rs[0])
+	}
+	if got := fs.files[intakeCopy]; !bytes.Equal(got, []byte(intakeFixture)) {
+		t.Fatalf("OUT/fixture.copy = %q, want %q", got, intakeFixture)
+	}
+	wantLine := "case intake path=IN/fixture.txt bytes=25 match=yes\n"
+	if got := string(fs.files[intakeReceipt]); got != wantLine {
+		t.Fatalf("intake receipt = %q, want %q", got, wantLine)
+	}
+	wantAltered := "case intake-altered path=IN/altered.txt bytes=25 differs=yes\n"
+	if got := string(fs.files[alteredReceipt]); got != wantAltered {
+		t.Fatalf("altered receipt = %q, want %q", got, wantAltered)
+	}
+	if got := fs.files[alteredCopy]; !bytes.Equal(got, []byte(intakeAltered)) {
+		t.Fatalf("OUT/altered.copy = %q, want %q", got, intakeAltered)
+	}
+}
+
+// A mutated seed must FAIL the intake case (ADR 0031 D2) — that is the whole
+// point of reading the share instead of carrying a constant. The copy still
+// holds what was read, so the host can see the mutation that failed it.
+func TestIntakeFailsOnAMutatedSeed(t *testing.T) {
+	fs := newFakeFS()
+	fs.files[intakePath] = []byte(intakeAltered)
+	fs.files[alteredPath] = []byte(intakeFixture)
+	rs := runCases(fs.syscalls())
+
+	if rs[0].ok {
+		t.Fatal("intake passed on a mutated seed")
+	}
+	if !strings.Contains(rs[0].detail, "fixture mismatch: got=25 want=25") {
+		t.Fatalf("detail = %q", rs[0].detail)
+	}
+	// The altered case now sees the canonical bytes: an embedded constant
+	// would report success here, the share read reports the truth.
+	if rs[1].ok {
+		t.Fatal("intake-altered passed while the share held the canonical bytes")
+	}
+	report := string(renderReport(rs))
+	if !strings.Contains(report, "case intake fail fixture mismatch") {
+		t.Fatalf("report lacks the intake failure: %q", report)
+	}
+	if !strings.Contains(report, "summary cases=4 failed=2") {
+		t.Fatalf("report summary wrong: %q", report)
+	}
+	if got := fs.files[intakeCopy]; !bytes.Equal(got, []byte(intakeAltered)) {
+		t.Fatalf("the copy is %q, want the mutated bytes", got)
+	}
+	wantLine := "case intake path=IN/fixture.txt bytes=25 match=no\n"
+	if got := string(fs.files[intakeReceipt]); got != wantLine {
+		t.Fatalf("intake receipt = %q, want %q", got, wantLine)
+	}
+}
+
+// A missing fixture is a failed case with the open error as its detail, never
+// a crash and never a skipped report (issue #1383 acceptance).
+func TestIntakeFailsWhenTheFixtureIsMissing(t *testing.T) {
+	fs := newFakeFS()
+	rs := runCases(fs.syscalls())
+
+	if rs[0].ok || rs[0].id != "intake" {
+		t.Fatalf("intake should have failed, got %+v", rs[0])
+	}
+	if !strings.Contains(rs[0].detail, "open rc=-6") {
+		t.Fatalf("detail = %q", rs[0].detail)
+	}
+	if got := string(fs.files[alteredReceipt]); !strings.Contains(got, "bytes=0 err=open rc=-6") {
+		t.Fatalf("altered receipt = %q", got)
+	}
+	// The report is still complete: 4 cases, 2 of them failed (the clock and
+	// file-write cases do not read the share).
+	report := string(renderReport(rs))
+	if !strings.Contains(report, "summary cases=4 failed=2") {
+		t.Fatalf("report summary wrong: %q", report)
+	}
+	if lines := strings.Count(report, "\n"); lines != len(rs)+1 {
+		t.Fatalf("report has %d lines, want %d", lines, len(rs)+1)
+	}
+}
+
+// The #1391 shape — the right length of zeros — is named in the case detail
+// rather than reported as a bare mismatch, so a future flake says what it was.
+func TestIntakeNamesZerosReads(t *testing.T) {
+	fs := newFakeFS()
+	seedFixtures(fs)
+	fs.zeroRead = true
+	rs := runCases(fs.syscalls())
+
+	if rs[0].ok {
+		t.Fatalf("intake passed on a zeros read, got %+v", rs[0])
+	}
+	if !strings.Contains(rs[0].detail, "25B of zeros (issue #1391)") {
+		t.Fatalf("detail = %q", rs[0].detail)
 	}
 }
 
@@ -196,17 +315,18 @@ func TestReadFileSurfacesACorruptReadback(t *testing.T) {
 
 func TestFileWriteCaseFailsWhenTheWriteIsRefused(t *testing.T) {
 	fs := newFakeFS()
-	fs.denyWrite = true
+	seedFixtures(fs)
+	fs.denyPath = helloPath
 	rs := runCases(fs.syscalls())
 
-	if rs[1].id != "file-write" || rs[1].ok {
-		t.Fatalf("file-write should have failed, got %+v", rs[1])
+	if rs[3].id != "file-write" || rs[3].ok {
+		t.Fatalf("file-write should have failed, got %+v", rs[3])
 	}
 	report := string(renderReport(rs))
 	if !strings.Contains(report, "case file-write fail ") {
 		t.Fatalf("report lacks the fail detail: %q", report)
 	}
-	if !strings.Contains(report, "summary cases=2 failed=1") {
+	if !strings.Contains(report, "summary cases=4 failed=1") {
 		t.Fatalf("report summary wrong: %q", report)
 	}
 }
@@ -216,24 +336,25 @@ func TestClockCaseFailsWhenTheClockStandsStill(t *testing.T) {
 	fs.frozenClock = true
 	rs := runCases(fs.syscalls())
 
-	if rs[0].id != "clock-monotonic" || rs[0].ok {
-		t.Fatalf("clock-monotonic should have failed, got %+v", rs[0])
+	if rs[2].id != "clock-monotonic" || rs[2].ok {
+		t.Fatalf("clock-monotonic should have failed, got %+v", rs[2])
 	}
-	if !strings.Contains(rs[0].detail, "clock did not advance") {
-		t.Fatalf("detail = %q", rs[0].detail)
+	if !strings.Contains(rs[2].detail, "clock did not advance") {
+		t.Fatalf("detail = %q", rs[2].detail)
 	}
 }
 
 func TestFileWriteCaseDetailNamesTheOpenFailure(t *testing.T) {
 	fs := newFakeFS()
-	fs.denyWrite = true
+	seedFixtures(fs)
+	fs.denyPath = helloPath
 	rs := runCases(fs.syscalls())
 
-	if rs[1].ok {
-		t.Fatalf("file-write should have failed, got %+v", rs[1])
+	if rs[3].ok {
+		t.Fatalf("file-write should have failed, got %+v", rs[3])
 	}
-	if !strings.Contains(rs[1].detail, "open rc=-2") {
-		t.Fatalf("detail = %q", rs[1].detail)
+	if !strings.Contains(rs[3].detail, "open rc=-2") {
+		t.Fatalf("detail = %q", rs[3].detail)
 	}
 }
 
@@ -257,6 +378,8 @@ func TestWriteFileLoopsUntilEveryByteLands(t *testing.T) {
 // render byte-identical bytes, which is what lets the host byte-compare it.
 func TestReportIsDeterministicAcrossRuns(t *testing.T) {
 	a, b := newFakeFS(), newFakeFS()
+	seedFixtures(a)
+	seedFixtures(b)
 	b.clock = 999999
 	ra, rb := runCases(a.syscalls()), runCases(b.syscalls())
 	if !bytes.Equal(renderReport(ra), renderReport(rb)) {
@@ -282,6 +405,7 @@ func TestCaseIDsAreUniqueAndContractShaped(t *testing.T) {
 // count it carries is the report's failed count.
 func TestSerialSummaryCarriesTheReportCount(t *testing.T) {
 	fs := newFakeFS()
+	seedFixtures(fs)
 	rs := runCases(fs.syscalls())
 	if got := failed(rs); got != 0 {
 		t.Fatalf("failed = %d", got)
@@ -314,7 +438,8 @@ func TestOneLineBoundsAndFlattensDetails(t *testing.T) {
 	}
 	// A detail can never add a line to the report.
 	fs := newFakeFS()
-	fs.denyWrite = true
+	seedFixtures(fs)
+	fs.denyPath = helloPath
 	rs := runCases(fs.syscalls())
 	report := string(renderReport(rs))
 	if got := strings.Count(report, "\n"); got != len(rs)+1 {
