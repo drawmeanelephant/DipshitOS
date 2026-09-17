@@ -141,15 +141,28 @@ func main() {
 		if n >= 2 || stripSawTwo {
 			if !stripSawTwo {
 				stripSawTwo = true
-			} else if !stripClosedOne {
-				closeHosted()
-				stripClosedOne = true
-				if tabs.Count() == 0 {
+				stripStep = 0
+			} else {
+				stripStep++
+				switch stripStep {
+				case 1:
+					_ = applySplit(SplitVert)
+				case 2:
+					_ = applyUnsplit()
+				case 3:
+					_ = applySplit(SplitHoriz)
+				case 4:
+					_ = applyUnsplit()
+				case 5:
+					closeHosted()
+					stripClosedOne = true
+					if tabs.Count() == 0 {
+						stripDone = true
+					}
+				default:
+					closeHosted()
 					stripDone = true
 				}
-			} else {
-				closeHosted()
-				stripDone = true
 			}
 			continue
 		}

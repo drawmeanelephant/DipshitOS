@@ -13,6 +13,10 @@ func TestTabMarkerShapes(t *testing.T) {
 		{MarkerTabClose, "gotabwm: tab close id="},
 		{MarkerRail, "gotabwm: rail "},
 		{MarkerTabsEmpty, "gotabwm: tabs empty"},
+		{MarkerSplit, "gotabwm: split "},
+		{MarkerUnsplit, "gotabwm: unsplit"},
+		{MarkerLayout, "gotabwm: layout "},
+		{MarkerPane, "gotabwm: pane "},
 	}
 	for _, c := range cases {
 		if c.got != c.want {
@@ -204,5 +208,129 @@ func TestPaintRailScanoutGeometry(t *testing.T) {
 	}
 	if RailHeight >= vi.ScanoutHeight {
 		t.Fatal("rail covers the whole scanout")
+	}
+}
+
+func TestSplitHVUnsplitMachine(t *testing.T) {
+	var s TabStrip
+	if s.SplitH() || s.SplitV() {
+		t.Fatal("split with no tabs")
+	}
+	s.OpenTab(4, "Calc")
+	if s.SplitV() {
+		t.Fatal("split with one tab")
+	}
+	s.OpenTab(5, "Notepad")
+	if !s.SplitV() {
+		t.Fatal("SplitV")
+	}
+	if s.Split() != SplitVert {
+		t.Fatalf("kind = %s want v", s.Split())
+	}
+	if s.SplitH() {
+		// SplitH from already-two is allowed (retarget the kind).
+	}
+	if !s.SplitH() {
+		t.Fatal("SplitH retarget")
+	}
+	if s.Split() != SplitHoriz {
+		t.Fatalf("kind = %s want h", s.Split())
+	}
+	if !s.Unsplit() {
+		t.Fatal("Unsplit")
+	}
+	if s.Split() != SplitNone {
+		t.Fatal("Unsplit left a kind")
+	}
+	if s.Unsplit() {
+		t.Fatal("Unsplit twice")
+	}
+	s.SplitV()
+	s.CloseTab(4)
+	if s.Split() != SplitNone {
+		t.Fatal("CloseTab of a pane must unsplit")
+	}
+}
+
+func TestSplitRectsIntegerAndMin(t *testing.T) {
+	if PaneMinW != 160 || PaneMinH != 120 {
+		t.Fatalf("pane min %dx%d want 160x120 (ADR 0033)", PaneMinW, PaneMinH)
+	}
+	a, b, ok := SplitRects(SplitVert, 1280, 720)
+	if !ok {
+		t.Fatal("SplitV 1280x720")
+	}
+	if a != (Rect{0, 0, 640, 720}) || b != (Rect{640, 0, 640, 720}) {
+		t.Fatalf("SplitV rects %+v %+v", a, b)
+	}
+	if a.W+b.W != 1280 || a.H != 720 || b.H != 720 {
+		t.Fatal("SplitV does not cover the scanout")
+	}
+	a, b, ok = SplitRects(SplitHoriz, 1280, 720)
+	if !ok {
+		t.Fatal("SplitH 1280x720")
+	}
+	if a != (Rect{0, 0, 1280, 360}) || b != (Rect{0, 360, 1280, 360}) {
+		t.Fatalf("SplitH rects %+v %+v", a, b)
+	}
+	if a.H+b.H != 720 {
+		t.Fatal("SplitH does not cover the scanout")
+	}
+	// Remainder goes to the far pane.
+	a, b, ok = SplitRects(SplitVert, 1281, 720)
+	if !ok || a.W != 640 || b.W != 641 || a.W+b.W != 1281 {
+		t.Fatalf("odd SplitV %+v %+v ok=%v", a, b, ok)
+	}
+	if _, _, ok = SplitRects(SplitVert, 200, 720); ok {
+		t.Fatal("SplitV 200-wide should miss PaneMinW")
+	}
+	if _, _, ok = SplitRects(SplitHoriz, 1280, 200); ok {
+		t.Fatal("SplitH 200-tall should miss PaneMinH")
+	}
+	fullA, fullB, ok := SplitRects(SplitNone, 1280, 720)
+	if !ok || fullA != FullRect(1280, 720) || fullB != fullA {
+		t.Fatalf("SplitNone %+v %+v ok=%v", fullA, fullB, ok)
+	}
+}
+
+func TestLayoutLineAndDumpMatch(t *testing.T) {
+	line := layoutLine(5, "Calc", Rect{640, 0, 640, 720}, true, SplitVert)
+	want := "tab=5 bin=Calc x=640 y=0 w=640 h=720 focus=1 split=v"
+	if line != want {
+		t.Fatalf("layoutLine = %q want %q", line, want)
+	}
+	pane := paneLine(5, Rect{640, 0, 640, 720})
+	if pane != "id=5 x=640 y=0 w=640 h=720" {
+		t.Fatalf("paneLine = %q", pane)
+	}
+	if line := layoutLine(1, "", FullRect(1280, 720), false, SplitNone); line !=
+		"tab=1 bin=- x=0 y=0 w=1280 h=720 focus=0 split=none" {
+		t.Fatalf("empty bin / unsplit: %q", line)
+	}
+	a, b, _ := SplitRects(SplitVert, 1280, 720)
+	if !rectsWithin(a, a, 1) || rectsWithin(a, b, 1) {
+		t.Fatal("rectsWithin")
+	}
+	near := Rect{a.X, a.Y, a.W + 1, a.H}
+	if !rectsWithin(a, near, 1) {
+		t.Fatal("1px w drift must be within tol")
+	}
+	far := Rect{a.X, a.Y, a.W + 2, a.H}
+	if rectsWithin(a, far, 1) {
+		t.Fatal("2px w drift must fail tol=1")
+	}
+}
+
+func TestPaneRectsNeedTwoTabs(t *testing.T) {
+	var s TabStrip
+	s.OpenTab(1, "a")
+	if _, _, ok := s.PaneRects(1280, 720); ok {
+		t.Fatal("one tab must not yield pane rects")
+	}
+	s.OpenTab(2, "b")
+	s.SplitV()
+	a, b, ok := s.PaneRects(1280, 720)
+	if !ok || a.W != 640 || b.X != 640 {
+		t.Fatalf("PaneRects %+v %+v ok=%v", a, b, ok)
 	}
 }

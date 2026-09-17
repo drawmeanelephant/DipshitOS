@@ -1,13 +1,13 @@
-# go-wm-tabs.spec -- M62b (issue #1400) class-B gate: GOTABWM grows a tab
-# strip. Two tabapp clients (leftover Zig CALC + NOTEPAD) declare over
-# WM_RPC, the rail paints with n=2 and one focused, the focused tab closes
-# and focus moves to the remaining one, then the last tab closes and the
-# desktop is empty with the seat still registered until GOTABWM exits.
+# go-wm-tabs.spec -- M62b (issue #1400) + M62c (issue #1401) class-B gate:
+# GOTABWM tab strip, then a constrained two-pane split. Two tabapp clients
+# (leftover Zig CALC + NOTEPAD) declare over WM_RPC; the rail paints with
+# n=2; SplitV then Unsplit then SplitH then Unsplit; applied pane rects
+# match the LAYOUT.txt-shaped dump; unsplit restores full-viewport; then
+# close focused / last, empty desktop, seat still registered until exit.
 #
 # Seed wm=none and exec GOTABWM.ELF like go-wm-seat: this is the Go seat,
-# not Zig TABWM. Do not overload go-wm-seat (M57 seat+interop) or
-# go-wm-default (boot-flip). Kernel untouched. No HID. No framebuffer
-# golden — serial markers after the syscall/RPC that made them true.
+# not Zig TABWM. Do not overload go-wm-seat or go-wm-default. Kernel
+# untouched. No HID. No framebuffer golden. No LAYOUT.txt file (M62f).
 #
 # HOST PREREQUISITE (fails the gate honestly when missing):
 #   bash tools/go/build-gotabwm.sh   ->  .build/go/GOTABWM.ELF
@@ -18,7 +18,7 @@
 # script2 start in parallel after the window phase is waiting for blur;
 # both declares sit in the mailbox until the serve loop drains them.
 
-vgate_name go-wm-tabs "issue #1400 M62b: GOTABWM tab strip — two clients, open/close/focus on VZ"
+vgate_name go-wm-tabs "issues #1400/#1401 M62b+c: GOTABWM tab strip + constrained two-pane split on VZ"
 vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 
@@ -78,6 +78,56 @@ vgate_assert 01 serial-contains 'gotabwm: tab focus id='
 vgate_assert 01 serial-contains 'gotabwm: rail n=2 focus='
 vgate_assert 01 serial-contains 'calc: tab-aware (full-viewport)'
 vgate_assert 01 serial-contains 'notepad: tab-aware (full-viewport)'
+# M62c: integer two-pane split. Dump lines (LAYOUT.txt shape) plus the
+# applied pane (SET_WINDOW accepted; slot 19 WinQuery is owner-only so
+# the seat cannot read a hosted client's rect). Unsplit restores 1280x720.
+# Remainder-free on this scanout. Clients print resize relayout = WIN_RESIZE.
+vgate_assert 01 serial-contains 'gotabwm: split v'
+vgate_assert 01 serial-contains 'split=v'
+vgate_assert 01 serial-contains 'x=640 y=0 w=640 h=720'
+vgate_assert 01 serial-contains 'gotabwm: split h'
+vgate_assert 01 serial-contains 'split=h'
+vgate_assert 01 serial-contains 'y=360 w=1280 h=360'
+vgate_assert 01 serial-count 'gotabwm: unsplit' 2
+vgate_assert 01 serial-contains 'split=none'
+vgate_assert 01 serial-contains 'x=0 y=0 w=1280 h=720'
+vgate_assert 01 serial-contains 'calc: resize relayout'
+vgate_assert 01 serial-contains 'notepad: resize relayout'
+# Pair each layout dump with the applied pane line dumpTab prints next.
+# Every pair must match within 1 px (integer-half remainder).
+vgate_assert 01 python <<'PY'
+import os, re, sys
+ser = open(os.environ["VG_SER"], errors="replace").read()
+lay_re = re.compile(
+    r"^gotabwm: layout tab=(\d+) bin=\S+ x=(\d+) y=(\d+) w=(\d+) h=(\d+) ")
+pane_re = re.compile(
+    r"^gotabwm: pane id=(\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)$")
+n = 0
+pending = None
+for line in ser.splitlines():
+    lm = lay_re.match(line)
+    if lm:
+        pending = lm
+        continue
+    pm = pane_re.match(line)
+    if not pm:
+        continue
+    if pending is None:
+        sys.exit("pane line with no preceding layout dump: " + line)
+    if pending.group(1) != pm.group(1):
+        sys.exit("layout tab=%s paired with pane id=%s" % (
+            pending.group(1), pm.group(1)))
+    for i, name in ((2, "x"), (3, "y"), (4, "w"), (5, "h")):
+        a, b = int(pending.group(i)), int(pm.group(i))
+        if abs(a - b) > 1:
+            sys.exit("tab %s %s dump=%d applied=%d (tol 1)" % (
+                pending.group(1), name, a, b))
+    n += 1
+    pending = None
+if n < 8:
+    sys.exit("only %d layout/pane pairs (want >= 8: V+unsplit+H+unsplit x2)" % n)
+print("layout vs applied pane: %d pairs within 1 px" % n)
+PY
 # Close focused -> remaining focused -> last close leaves the strip empty
 # while the seat is still in its composite loop (tabs empty before close).
 vgate_assert 01 serial-count 'gotabwm: tab close id=' 2
