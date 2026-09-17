@@ -105,9 +105,9 @@ type Face struct {
 
 	cache *glyphCache
 
-	// Lazily parsed layout features (shape.go). nil until ShapeLatin is
-	// first called; parsedLiga/parsedKern record whether the attempt was
-	// made so a font without the tables does not re-parse per call.
+	// Lazily parsed layout features (shape.go). ligaInit/kernInit record
+	// whether the parse was attempted so a font without the tables does
+	// not re-parse per call.
 	ligaInit, kernInit bool
 	liga               *layout
 	kern               *layout

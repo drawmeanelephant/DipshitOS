@@ -82,7 +82,7 @@ func parseLayout(data []byte, wantFeature string, wantLookupType int) *layout {
 	for _, li := range lookupIdxs {
 		parseLookup(data, lookupList, li, wantLookupType, lay)
 	}
-	if len(lay.ligatures) == 0 && len(lay.pairs) == 0 {
+	if len(lay.ligatures) == 0 && len(lay.pairs) == 0 && len(lay.classPairs) == 0 {
 		return nil
 	}
 	return lay
@@ -119,7 +119,12 @@ func featureLookups(data []byte, scriptBase, featureList int, want string) []int
 		return nil
 	}
 	// Script table: offset16 defaultLangSys, uint16 langSysCount, records.
-	langSys := scriptBase + int(be16(data[scriptBase:scriptBase+2]))
+	// defaultLangSys == 0 means the script has no default LangSys.
+	defOff := int(be16(data[scriptBase : scriptBase+2]))
+	if defOff == 0 {
+		return nil
+	}
+	langSys := scriptBase + defOff
 	if langSys+6 > len(data) {
 		return nil
 	}
@@ -400,10 +405,19 @@ func readXAdvance(data []byte, off int, format int) (int, bool) {
 	if format&(1<<xAdvanceShift) == 0 {
 		return 0, true
 	}
-	if off < 0 || off+2 > len(data) {
+	// ValueRecord field order: XPlacement, YPlacement, XAdvance, …
+	skip := 0
+	if format&0x01 != 0 {
+		skip += 2
+	}
+	if format&0x02 != 0 {
+		skip += 2
+	}
+	p := off + skip
+	if p < 0 || p+2 > len(data) {
 		return 0, false
 	}
-	return int(int16(be16(data[off : off+2]))), true
+	return int(int16(be16(data[p : p+2]))), true
 }
 
 // parseValueRecord reads a GPOS value record per the given format at off and
@@ -457,6 +471,9 @@ func parsePairFormat1(data []byte, sub int, lay *layout) {
 		n := int(be16(data[ps : ps+2]))
 		for j := 0; j < n; j++ {
 			q := ps + 2 + j*recordLen(valueFormat1, valueFormat2)
+			if q+2 > len(data) {
+				break
+			}
 			second := be16(data[q : q+2])
 			x1, _, ok := parseValueRecord(data, q+2, valueFormat1)
 			if !ok {
@@ -475,30 +492,10 @@ func parsePairFormat1(data []byte, sub int, lay *layout) {
 	}
 }
 
-// recordLen is the byte size of one PairValueRecord for the two formats.
+// recordLen is the byte size of one PairValueRecord for the two formats:
+// uint16 secondGlyph plus both value records.
 func recordLen(format1, format2 int) int {
-	n := 2
-	for _, f := range []int{format1, format2} {
-		if f&0x01 != 0 {
-			n += 2
-		}
-		if f&0x02 != 0 {
-			n += 2
-		}
-		if f&0x04 != 0 {
-			n += 2
-		}
-		if f&0x08 != 0 {
-			n += 2
-		}
-		if f&0x10 != 0 {
-			n += 2
-		}
-		if f&0x20 != 0 {
-			n += 2
-		}
-	}
-	return n
+	return 2 + valueLen(format1) + valueLen(format2)
 }
 
 // parsePairFormat2 decodes PairPosFormat2: class-based pair kerning through
@@ -510,17 +507,23 @@ func parsePairFormat2(data []byte, sub int, lay *layout) {
 	if sub+16 > len(data) {
 		return
 	}
+	// PairPosFormat2 header: fmt, coverage, valueFormat1, valueFormat2,
+	// classDef1, classDef2, class1Count, class2Count — value formats
+	// come before the class-def offsets.
+	cov := parseCoverage(data, sub+int(be16(data[sub+2:sub+4])))
+	cd1 := parseClassDef(data, sub+int(be16(data[sub+8:sub+10])))
+	cd2 := parseClassDef(data, sub+int(be16(data[sub+10:sub+12])))
+	if cov == nil || cd1 == nil || cd2 == nil {
+		return
+	}
 	if lay.classPairs == nil {
 		lay.classPairs = make([]classPairTable, 0, 1)
 	}
 	lay.classPairs = append(lay.classPairs, classPairTable{
-		sub: sub,
-		cov: parseCoverage(data, sub+int(be16(data[sub+2:sub+4]))),
-		// PairPosFormat2 header: fmt, coverage, valueFormat1, valueFormat2,
-		// classDef1, classDef2, class1Count, class2Count — value formats
-		// come before the class-def offsets.
-		cd1:          parseClassDef(data, sub+int(be16(data[sub+8:sub+10]))),
-		cd2:          parseClassDef(data, sub+int(be16(data[sub+10:sub+12]))),
+		sub:          sub,
+		cov:          cov,
+		cd1:          cd1,
+		cd2:          cd2,
 		valueFormat1: int(be16(data[sub+4 : sub+6])),
 		valueFormat2: int(be16(data[sub+6 : sub+8])),
 		class1Count:  int(be16(data[sub+12 : sub+14])),
@@ -576,10 +579,12 @@ func (t *classPairTable) pairAdjust(data []byte, first, second uint16) (int, boo
 }
 
 // valueLen is the byte length of a GPOS ValueRecord for the given format.
+// Each of the eight ValueFormat bits occupies a uint16 in the record
+// (the four Device-table bits store an offset16, still two bytes).
 func valueLen(format int) int {
 	n := 0
-	for _, bit := range []int{0x01, 0x02, 0x04, 0x08, 0x10, 0x20} {
-		if format&bit != 0 {
+	for bit := 0; bit < 8; bit++ {
+		if format&(1<<bit) != 0 {
 			n += 2
 		}
 	}
