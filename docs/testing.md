@@ -75,6 +75,30 @@ moved part of the evidence into the guest. The rule, in one table:
   into a fresh buffer is the regression test, so do not add retries,
   warm-up writes or buffer reuse there, and M61d (create/write/read-back)
   can rely on fresh buffers.
+- **The file-ABI pack (M61d, #1384) is the file channel's evidence.** Four
+  cases on the share under `OUT/`: `file-roundtrip` (create, write, close,
+  reopen, read back the exact bytes), `file-truncate` (write 840 B, shrink
+  through the same write handle to 105, read the prefix), `file-delete`
+  (delete, then a read-only open must fail) and `file-list` (a listing sees
+  `OUT/LIST/listed.txt`, and does not once it is deleted). Each case leaves
+  a one-line `OUT/file-<case>.ok` receipt **and** — where bytes came back —
+  a `.copy` of the bytes it **read** (`roundtrip.copy` 525 B,
+  `truncated.copy` 105 B). The spec byte-compares all of it, and then checks
+  the share's own directory state independently of the receipts
+  (`OUT/deleted.txt` absent, `OUT/LIST` empty, `OUT/truncate.txt` holding the
+  reconstructed prefix). A run with right-length-but-wrong bytes keeps every
+  receipt and both serial verdicts green and still fails: the reported
+  verdict is never the proof, the bytes are. Watch the coupling — the
+  payloads are reconstructed on the host from one expression
+  (`b"goself file abi line\n" * n`), so changing that unit in
+  `user/go/selftest` means changing the spec.
+- `file-list` lists its own subdirectory (`OUT/LIST`), not `OUT/`:
+  `sys_dir_list` clamps to 16 rows, and `OUT/` holds far more than that by
+  the time the case runs, so listing it would make the verdict depend on the
+  alphabet. That subdirectory is also what exercises the guest's own `mkdir`
+  for real — the MODE_DIR row needs `MODE_WRITE|MODE_CREATE|MODE_DIR`
+  together, and only the host-side `makedirs` had been keeping the app's
+  bare-MODE_DIR call from being silently EINVAL.
 - The serial contract is one summary line, `selftest: FAIL n=<N>` (N=0 on
   success), printed after `REPORT.txt` is closed; the report's
   `summary cases=<n> failed=<k>` must agree with it, and a run whose
@@ -319,7 +343,9 @@ under `C` with no workflow noticing). The rules that came out of it:
 | `\RC.TXT` on the ESP | loader, only after pre-exit failure | Non-zero kernel status for the bad-handoff fixture |
 | `\MEMMAP.TXT` on the ESP | boot stub, before handoff | Pre-exit EFI memory map evidence |
 | `\KERNEL.TXT` on the ESP | milestone-one regression only | Not written after the kernel exits Boot Services |
-| `artifacts/go-selftest-report.txt` | `go-selftest` spec (copied before `gate_end`) | The guest's own `/host/SELFTEST/REPORT.txt` (ADR 0031) |
+| `artifacts/go-selftest-report.txt` | `go-selftest` spec (copied before `gate_end`) | The harness's own run report |
+| `artifacts/go-selftest-share-report` | `go-selftest` spec (copied before `gate_end`) | The guest's own `/host/SELFTEST/REPORT.txt` (ADR 0031) |
+| `artifacts/go-selftest-share-*` | `go-selftest` spec (copied before `gate_end`) | The share evidence the spec byte-compared: the intake copies/receipts, and the file-ABI receipts (`file-*.ok`) and read-back copies |
 | `artifacts/m2-probe.log` | kernel serial output | Candidate reads, signatures, selected transport, and observed/inferred decision |
 | `\KERNEL.BIN` on the ESP | `zig build` | Flat kernel image, verified with `elf2bin.py --info` |
 

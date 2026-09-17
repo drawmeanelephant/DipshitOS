@@ -3,8 +3,11 @@ package main
 import (
 	"bytes"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
+
+	"virelai/vi"
 )
 
 // fakeFS is an in-memory share for the case logic: it implements the syscalls
@@ -15,6 +18,7 @@ type fakeFS struct {
 	files   map[string][]byte
 	dirs    map[string]bool
 	handles map[int64]string
+	hflags  map[int64]uint32 // the flags each handle was opened with (truncate's gate)
 	cursors map[int64]int
 	next    int64
 	clock   int64
@@ -25,6 +29,11 @@ type fakeFS struct {
 	denyWrite   bool   // every write-op fails
 	denyPath    string // write-opens of this path fail (the intake copy is unaffected)
 	zeroRead    bool   // reads return the right length of zeros (issue #1391)
+
+	denyTruncate bool // truncate fails with EACCES
+	lieDelete    bool // delete reports success and leaves the file
+	listStale    bool // deleted paths: removed from the table, still listed
+	ghosts       []string
 }
 
 func newFakeFS() *fakeFS {
@@ -32,6 +41,7 @@ func newFakeFS() *fakeFS {
 		files:   map[string][]byte{},
 		dirs:    map[string]bool{},
 		handles: map[int64]string{},
+		hflags:  map[int64]uint32{},
 		cursors: map[int64]int{},
 		clock:   1000,
 	}
@@ -52,43 +62,145 @@ func (f *fakeFS) syscalls() *syscalls {
 			f.dirs[path] = true
 			return 0
 		},
-		open: f.open,
-		read: f.read,
-		write: func(h uint32, b []byte) (int, int64) {
-			if f.denyWrite {
-				return 0, -2
-			}
-			if f.shortWrite && len(b) > 1 {
-				b = b[:1]
-			}
-			return f.write(h, b)
+		open:     f.open,
+		read:     f.read,
+		write:    f.writeGuarded,
+		truncate: f.truncate,
+		remove:   f.remove,
+		list:     f.list,
+		close: func(h uint32) {
+			delete(f.handles, int64(h))
+			delete(f.hflags, int64(h))
 		},
-		close: func(h uint32) { delete(f.handles, int64(h)) },
 	}
 }
 
+// writeGuarded applies the fake's write fault switches, then the plain write.
+func (f *fakeFS) writeGuarded(h uint32, b []byte) (int, int64) {
+	if f.denyWrite {
+		return 0, -2
+	}
+	if f.shortWrite && len(b) > 1 {
+		b = b[:1]
+	}
+	return f.write(h, b)
+}
+
+// truncate mirrors file_table.truncate: EBADF for a dead handle, EACCES
+// without MODE_WRITE, shrink keeps the prefix, growth zero-fills, and the
+// cursor is clamped to the new size.
+func (f *fakeFS) truncate(h uint32, size uint32) int64 {
+	p, ok := f.handles[int64(h)]
+	if !ok {
+		return -2 // EBADF
+	}
+	if f.denyTruncate || f.hflags[int64(h)]&flagModeWrite == 0 {
+		return -7 // EACCES
+	}
+	body := f.files[p]
+	var next []byte
+	if int(size) <= len(body) {
+		next = append([]byte(nil), body[:size]...)
+	} else {
+		next = make([]byte, size)
+		copy(next, body)
+	}
+	f.files[p] = next
+	if f.cursors[int64(h)] > int(size) {
+		f.cursors[int64(h)] = int(size)
+	}
+	return 0
+}
+
+// remove mirrors file_table.delete: ENOENT for a path that is not a file,
+// EINVAL for a directory.
+func (f *fakeFS) remove(path string) int64 {
+	if _, ok := f.files[path]; !ok {
+		return -6 // ENOENT
+	}
+	if f.dirs[path] {
+		return -1 // EINVAL: a directory is not a file
+	}
+	if f.lieDelete {
+		return 0 // reports success, leaves the bytes: the case must catch it
+	}
+	delete(f.files, path)
+	if f.listStale {
+		f.ghosts = append(f.ghosts, path)
+	}
+	return 0
+}
+
+// list mirrors sys_dir_list over the share: the direct children of an
+// existing directory, sorted, as 40-byte rows. A missing directory is ENOENT
+// (the host's LIST has no entries to return).
+func (f *fakeFS) list(path string, buf []vi.DirEntry) (int, int64) {
+	if !f.dirs[path] {
+		return 0, -6 // ENOENT
+	}
+	prefix := path + "/"
+	type row struct {
+		name string
+		dir  bool
+	}
+	var rows []row
+	add := func(p string, dir bool) {
+		rest, ok := strings.CutPrefix(p, prefix)
+		if !ok || rest == "" || strings.Contains(rest, "/") {
+			return // not a direct child
+		}
+		rows = append(rows, row{name: rest, dir: dir})
+	}
+	for p := range f.files {
+		add(p, false)
+	}
+	for d := range f.dirs {
+		add(d, true)
+	}
+	for _, g := range f.ghosts {
+		add(g, false) // a stale listing still reports a deleted name
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].name < rows[j].name })
+	n := 0
+	for _, r := range rows {
+		if n >= len(buf) {
+			break
+		}
+		var e vi.DirEntry
+		copy(e.Name[:], r.name)
+		if r.dir {
+			e.IsDir = 1
+		} else {
+			e.Size = uint32(len(f.files[prefix+r.name]))
+		}
+		buf[n] = e
+		n++
+	}
+	return n, int64(n)
+}
+
 const (
-	flagModeRead  = 0x0001
-	flagModeWrite = 0x0002
-	flagModeDir   = 0x0010
+	flagModeRead   = 0x0001
+	flagModeWrite  = 0x0002
+	flagModeCreate = 0x0004
+	flagModeDir    = 0x0010
 )
 
 func (f *fakeFS) open(path string, flags uint32) (int64, int64) {
 	switch {
 	case flags&flagModeDir != 0:
+		// The kernel's open validates MODE_DIR against
+		// MODE_WRITE|MODE_CREATE — a bare MODE_DIR is EINVAL, which is what
+		// the guest's mkdir helper used to pass (and therefore always
+		// failed silently).
+		if flags&(flagModeWrite|flagModeCreate) != flagModeWrite|flagModeCreate {
+			return 0, -1
+		}
 		if f.dirs[path] {
 			return 0, -9
 		}
 		f.dirs[path] = true
 		return 0, 0
-	case flags&flagModeRead != 0:
-		if _, ok := f.files[path]; !ok {
-			return 0, -6 // ENOENT
-		}
-		f.next++
-		f.handles[f.next] = path
-		f.cursors[f.next] = 0
-		return f.next, f.next
 	case flags&flagModeWrite != 0:
 		if f.denyWrite || (f.denyPath != "" && f.denyPath == path) {
 			return 0, -2
@@ -96,6 +208,16 @@ func (f *fakeFS) open(path string, flags uint32) (int64, int64) {
 		f.files[path] = nil // ADR 0010 replace semantics
 		f.next++
 		f.handles[f.next] = path
+		f.hflags[f.next] = flags
+		f.cursors[f.next] = 0
+		return f.next, f.next
+	case flags&flagModeRead != 0:
+		if _, ok := f.files[path]; !ok {
+			return 0, -6 // ENOENT
+		}
+		f.next++
+		f.handles[f.next] = path
+		f.hflags[f.next] = flags
 		f.cursors[f.next] = 0
 		return f.next, f.next
 	}
@@ -134,11 +256,13 @@ func (f *fakeFS) write(h uint32, b []byte) (int, int64) {
 	return len(b), int64(len(b))
 }
 
-// wantReport is the byte-exact report of the four cases after M61c: the M61f
-// `share-equals` fixture shape, and the report the go-selftest spec requires on
-// the share. Adding a case updates this and the spec together.
+// wantReport is the byte-exact report after M61d: the M61f `share-equals`
+// fixture shape, and the report the go-selftest spec requires on the share.
+// Adding a case updates this and the spec together.
 const wantReport = "case intake pass\ncase intake-altered pass\n" +
-	"case clock-monotonic pass\ncase file-write pass\nsummary cases=4 failed=0\n"
+	"case clock-monotonic pass\ncase file-write pass\n" +
+	"case file-roundtrip pass\ncase file-truncate pass\n" +
+	"case file-delete pass\ncase file-list pass\nsummary cases=8 failed=0\n"
 
 // seedFixtures is the host's half of the intake contract: IN/fixture.txt holds
 // the canonical body, IN/altered.txt the altered one (ADR 0031 D2).
@@ -152,8 +276,8 @@ func TestRunCasesAllPassAndReportBytes(t *testing.T) {
 	seedFixtures(fs)
 	rs := runCases(fs.syscalls())
 
-	if len(rs) != 4 {
-		t.Fatalf("cases = %d, want 4", len(rs))
+	if len(rs) != 8 {
+		t.Fatalf("cases = %d, want 8", len(rs))
 	}
 	for _, r := range rs {
 		if !r.ok {
@@ -163,7 +287,7 @@ func TestRunCasesAllPassAndReportBytes(t *testing.T) {
 	if got := string(renderReport(rs)); got != wantReport {
 		t.Fatalf("report bytes:\n got %q\nwant %q", got, wantReport)
 	}
-	if got := string(renderSummary(rs)); got != "summary cases=4 failed=0\n" {
+	if got := string(renderSummary(rs)); got != "summary cases=8 failed=0\n" {
 		t.Fatalf("summary = %q", got)
 	}
 	if got := fs.files[helloPath]; !bytes.Equal(got, []byte(helloPayload)) {
@@ -225,7 +349,7 @@ func TestIntakeFailsOnAMutatedSeed(t *testing.T) {
 	if !strings.Contains(report, "case intake fail fixture mismatch") {
 		t.Fatalf("report lacks the intake failure: %q", report)
 	}
-	if !strings.Contains(report, "summary cases=4 failed=2") {
+	if !strings.Contains(report, "summary cases=8 failed=2") {
 		t.Fatalf("report summary wrong: %q", report)
 	}
 	if got := fs.files[intakeCopy]; !bytes.Equal(got, []byte(intakeAltered)) {
@@ -252,10 +376,10 @@ func TestIntakeFailsWhenTheFixtureIsMissing(t *testing.T) {
 	if got := string(fs.files[alteredReceipt]); !strings.Contains(got, "bytes=0 err=open rc=-6") {
 		t.Fatalf("altered receipt = %q", got)
 	}
-	// The report is still complete: 4 cases, 2 of them failed (the clock and
-	// file-write cases do not read the share).
+	// The report is still complete: 8 cases, the 2 intake ones failed (the
+	// clock and file cases do not read IN/).
 	report := string(renderReport(rs))
-	if !strings.Contains(report, "summary cases=4 failed=2") {
+	if !strings.Contains(report, "summary cases=8 failed=2") {
 		t.Fatalf("report summary wrong: %q", report)
 	}
 	if lines := strings.Count(report, "\n"); lines != len(rs)+1 {
@@ -344,7 +468,7 @@ func TestFileWriteCaseFailsWhenTheWriteIsRefused(t *testing.T) {
 	if !strings.Contains(report, "case file-write fail ") {
 		t.Fatalf("report lacks the fail detail: %q", report)
 	}
-	if !strings.Contains(report, "summary cases=4 failed=1") {
+	if !strings.Contains(report, "summary cases=8 failed=1") {
 		t.Fatalf("report summary wrong: %q", report)
 	}
 }
@@ -467,5 +591,198 @@ func TestOneLineBoundsAndFlattensDetails(t *testing.T) {
 		if !strings.HasPrefix(line, "case ") && !strings.HasPrefix(line, "summary ") {
 			t.Fatalf("report line %q is outside the grammar", line)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// M61d (#1384): the file-ABI pack
+// ---------------------------------------------------------------------------
+//
+// Index map after M61d: 0 intake · 1 intake-altered · 2 clock-monotonic ·
+// 3 file-write · 4 file-roundtrip · 5 file-truncate · 6 file-delete ·
+// 7 file-list.
+
+func TestFileRoundtripCopiesTheBytesItRead(t *testing.T) {
+	fs := newFakeFS()
+	seedFixtures(fs)
+	rs := runCases(fs.syscalls())
+	if !rs[4].ok || rs[4].id != "file-roundtrip" {
+		t.Fatalf("file-roundtrip should have passed, got %+v", rs[4])
+	}
+	want := roundtripPayload()
+	if len(want) != 525 {
+		t.Fatalf("roundtrip payload = %d B, want 525 (25 units)", len(want))
+	}
+	if got := fs.files[roundtripPath]; !bytes.Equal(got, want) {
+		t.Fatalf("roundtrip.txt = %q, want %q", got, want)
+	}
+	// The copy holds what was READ, not what was written: a write that
+	// reported success without landing, or a read that invented bytes, cannot
+	// pass the host's byte comparison.
+	if got := fs.files[roundtripCopy]; !bytes.Equal(got, want) {
+		t.Fatalf("roundtrip.copy = %q, want %q", got, want)
+	}
+	wantLine := "case file-roundtrip path=OUT/roundtrip.txt bytes=525 match=yes\n"
+	if got := string(fs.files[roundtripOk]); got != wantLine {
+		t.Fatalf("roundtrip receipt = %q, want %q", got, wantLine)
+	}
+}
+
+// The #1391 shape is named by the round-trip case too: the right length of
+// zeros is a lost kernel->user copy, not a byte mismatch — and the copy still
+// holds the zeros, so the host sees what the app saw.
+func TestFileRoundtripNamesAZerosRead(t *testing.T) {
+	fs := newFakeFS()
+	seedFixtures(fs)
+	fs.zeroRead = true
+	rs := runCases(fs.syscalls())
+	if rs[4].ok {
+		t.Fatalf("file-roundtrip passed on a zeros read, got %+v", rs[4])
+	}
+	if !strings.Contains(rs[4].detail, "525B of zeros (issue #1391)") {
+		t.Fatalf("detail = %q", rs[4].detail)
+	}
+	if got := fs.files[roundtripCopy]; len(got) != 525 || !isAllZero(got) {
+		t.Fatalf("roundtrip.copy = %d B (all zero: %v), want 525 zero bytes", len(got), isAllZero(got))
+	}
+}
+
+func TestFileTruncateKeepsThePrefix(t *testing.T) {
+	fs := newFakeFS()
+	seedFixtures(fs)
+	rs := runCases(fs.syscalls())
+	if !rs[5].ok || rs[5].id != "file-truncate" {
+		t.Fatalf("file-truncate should have passed, got %+v", rs[5])
+	}
+	kept := truncateKept()
+	if len(kept) != 105 {
+		t.Fatalf("kept prefix = %d B, want 105 (5 units)", len(kept))
+	}
+	if got := fs.files[truncatedCopy]; !bytes.Equal(got, kept) {
+		t.Fatalf("truncated.copy = %q, want %q", got, kept)
+	}
+	if got := fs.files[truncatePath]; !bytes.Equal(got, kept) {
+		t.Fatalf("truncate.txt = %q, want the kept prefix", got)
+	}
+	wantLine := "case file-truncate path=OUT/truncate.txt wrote=840 kept=105 bytes=105 match=yes\n"
+	if got := string(fs.files[truncateOk]); got != wantLine {
+		t.Fatalf("truncate receipt = %q, want %q", got, wantLine)
+	}
+}
+
+// A refused truncate fails the case and names the code: the case keeps ONE
+// write handle, so a refusal is the ABI rejecting a legitimate shrink, not the
+// replace-on-open semantics the case deliberately avoids.
+func TestFileTruncateFailsWhenTheAbiRefuses(t *testing.T) {
+	fs := newFakeFS()
+	seedFixtures(fs)
+	fs.denyTruncate = true
+	rs := runCases(fs.syscalls())
+	if rs[5].ok {
+		t.Fatalf("file-truncate passed with a refused truncate, got %+v", rs[5])
+	}
+	if !strings.Contains(rs[5].detail, "truncate rc=-7") {
+		t.Fatalf("detail = %q", rs[5].detail)
+	}
+}
+
+func TestFileDeleteProvesThePathIsGone(t *testing.T) {
+	fs := newFakeFS()
+	seedFixtures(fs)
+	rs := runCases(fs.syscalls())
+	if !rs[6].ok || rs[6].id != "file-delete" {
+		t.Fatalf("file-delete should have passed, got %+v", rs[6])
+	}
+	if _, exists := fs.files[deletePath]; exists {
+		t.Fatal("deleted.txt survived the case")
+	}
+	wantLine := "case file-delete path=OUT/deleted.txt delete=0 reopen=-6\n"
+	if got := string(fs.files[deleteOk]); got != wantLine {
+		t.Fatalf("delete receipt = %q, want %q", got, wantLine)
+	}
+}
+
+// A delete that reports success without removing the file must FAIL: the
+// reopen failing is the only evidence the case accepts.
+func TestFileDeleteCatchesALyingDelete(t *testing.T) {
+	fs := newFakeFS()
+	seedFixtures(fs)
+	fs.lieDelete = true
+	rs := runCases(fs.syscalls())
+	if rs[6].ok {
+		t.Fatalf("file-delete passed while the file survived, got %+v", rs[6])
+	}
+	if !strings.Contains(rs[6].detail, "open after delete succeeded") {
+		t.Fatalf("detail = %q", rs[6].detail)
+	}
+}
+
+func TestFileListSeesThenDoesNotSee(t *testing.T) {
+	fs := newFakeFS()
+	seedFixtures(fs)
+	rs := runCases(fs.syscalls())
+	if !rs[7].ok || rs[7].id != "file-list" {
+		t.Fatalf("file-list should have passed, got %+v", rs[7])
+	}
+	if _, exists := fs.files[listedPath]; exists {
+		t.Fatal("listed.txt survived the case")
+	}
+	wantLine := "case file-list dir=OUT/LIST file=listed.txt first=seen second=absent\n"
+	if got := string(fs.files[listOk]); got != wantLine {
+		t.Fatalf("list receipt = %q, want %q", got, wantLine)
+	}
+}
+
+// A listing that keeps reporting a deleted name is a wrong answer: the case
+// fails, and the detail names what it saw.
+func TestFileListCatchesAStaleListing(t *testing.T) {
+	fs := newFakeFS()
+	seedFixtures(fs)
+	fs.listStale = true
+	rs := runCases(fs.syscalls())
+	if rs[7].ok {
+		t.Fatalf("file-list passed on a stale listing, got %+v", rs[7])
+	}
+	if !strings.Contains(rs[7].detail, "listing still shows listed.txt") {
+		t.Fatalf("detail = %q", rs[7].detail)
+	}
+}
+
+// Every M61d case leaves a receipt: the host reads one file per case instead
+// of grepping a transcript, and the receipt is exactly one `case …` line.
+func TestEveryM61dCaseWritesAReceipt(t *testing.T) {
+	fs := newFakeFS()
+	seedFixtures(fs)
+	runCases(fs.syscalls())
+	for _, path := range []string{writeOk, roundtripOk, truncateOk, deleteOk, listOk} {
+		got, ok := fs.files[path]
+		if !ok {
+			t.Fatalf("receipt %s missing", path)
+		}
+		line := string(got)
+		if !strings.HasPrefix(line, "case ") || strings.Count(line, "\n") != 1 || !strings.HasSuffix(line, "\n") {
+			t.Fatalf("receipt %s = %q, want one 'case …' line", path, line)
+		}
+	}
+}
+
+// The MODE_DIR row needs MODE_WRITE|MODE_CREATE together (file_table.open
+// validates them as a triple): a bare MODE_DIR is EINVAL, which is what the
+// guest's mkdir helper used to send — so the app never actually created a
+// directory and only the spec's host-side makedirs made OUT/ exist. The fake
+// enforces the kernel's rule, so a regression here fails off-guest.
+func TestMkdirRowNeedsCreateAndWrite(t *testing.T) {
+	fs := newFakeFS()
+	if _, rc := fs.open(listDir, flagModeDir); rc != -1 {
+		t.Fatalf("bare MODE_DIR rc = %d, want -1 (EINVAL)", rc)
+	}
+	if _, rc := fs.open(listDir, flagModeWrite|flagModeCreate|flagModeDir); rc != 0 {
+		t.Fatalf("MODE_WRITE|MODE_CREATE|MODE_DIR rc = %d, want 0", rc)
+	}
+	if !fs.dirs[listDir] {
+		t.Fatal("the triple did not create the directory")
+	}
+	if _, rc := fs.open(listDir, flagModeWrite|flagModeCreate|flagModeDir); rc != -9 {
+		t.Fatalf("second create rc = %d, want -9 (EEXIST)", rc)
 	}
 }

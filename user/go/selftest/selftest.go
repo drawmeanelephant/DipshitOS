@@ -23,6 +23,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"strconv"
 	"strings"
@@ -69,16 +70,69 @@ const (
 // macOS and requires these exact bytes).
 const helloPayload = "goself smoke\n"
 
+// M61d file-ABI scratch (issue #1384). Every case owns its own paths under
+// OUT/, so an earlier case's leftovers can never make a later one pass; every
+// case leaves a receipt (OUT/file-<case>.ok) and — where there are bytes to
+// compare — a copy of the bytes it READ (OUT/*.copy). The host byte-compares
+// both, so nothing here passes by printing.
+const (
+	writeOk = outDir + "/file-write.ok"
+
+	roundtripPath = outDir + "/roundtrip.txt"
+	roundtripCopy = outDir + "/roundtrip.copy"
+	roundtripOk   = outDir + "/file-roundtrip.ok"
+
+	truncatePath  = outDir + "/truncate.txt"
+	truncatedCopy = outDir + "/truncated.copy"
+	truncateOk    = outDir + "/file-truncate.ok"
+
+	deletePath = outDir + "/deleted.txt"
+	deleteOk   = outDir + "/file-delete.ok"
+
+	listDir    = outDir + "/LIST"
+	listedPath = listDir + "/listed.txt"
+	listOk     = outDir + "/file-list.ok"
+)
+
+// fileUnit is the payload unit of the round-trip and truncate cases: the same
+// 21-byte line, repeated. One expression reconstructs each body on the host
+// (`b"goself file abi line\n" * n`), which is what makes the .copy files
+// byte-comparable without a fixture file. The counts differ per case so the
+// two copies are distinguishable: roundtrip 25 units in and out; truncate 40
+// units in, 5 kept.
+const (
+	fileUnit       = "goself file abi line\n"
+	roundtripUnits = 25
+	truncateUnits  = 40
+	truncateKeeps  = 5
+
+	listMarkerBody = "goself list marker\n"
+	deleteBody     = "goself delete me\n"
+)
+
+// roundtripPayload / truncatePayload / truncateKept are the byte bodies above
+// as the cases write them, shrink to and read back.
+func roundtripPayload() []byte { return []byte(strings.Repeat(fileUnit, roundtripUnits)) }
+func truncatePayload() []byte  { return []byte(strings.Repeat(fileUnit, truncateUnits)) }
+func truncateKept() []byte     { return []byte(strings.Repeat(fileUnit, truncateKeeps)) }
+
 // syscalls is the slice of the ADR 0010 file ABI (plus the clock) the cases
-// use, as function fields so tests can fake every one of them.
+// use, as function fields so tests can fake every one of them. M61d added the
+// mutating/enumeration rows (`truncate`, `remove`, `list`): the file-ABI pack
+// is only as strong as the fake's model of them, so the fake checks the same
+// invariants the kernel does (a truncate through a read-only handle, a delete
+// of a missing path, a listing's direct children).
 type syscalls struct {
-	now   func() int64
-	sleep func(ticks uint64)
-	mkdir func(path string) int64
-	open  func(path string, flags uint32) (int64, int64)
-	read  func(h uint32, buf []byte) (int, int64)
-	write func(h uint32, b []byte) (int, int64)
-	close func(h uint32)
+	now      func() int64
+	sleep    func(ticks uint64)
+	mkdir    func(path string) int64
+	open     func(path string, flags uint32) (int64, int64)
+	read     func(h uint32, buf []byte) (int, int64)
+	write    func(h uint32, b []byte) (int, int64)
+	truncate func(h uint32, size uint32) int64
+	remove   func(path string) int64
+	list     func(path string, buf []vi.DirEntry) (int, int64)
+	close    func(h uint32)
 }
 
 // guestSyscalls is the real EL0 surface (vi over ADR 0007).
@@ -86,20 +140,26 @@ func guestSyscalls() syscalls {
 	return syscalls{
 		now:   vi.Time,
 		sleep: vi.Sleep,
-		// MODE_DIR is the ADR 0010 mkdir row; the returned handle is a
-		// directory slot. "already exists" is not an error here — a
-		// pre-created SELFTEST/OUT must not fail a run (ADR 0031 D2).
+		// MODE_DIR creates the directory, but the kernel's open validation
+		// requires it together with MODE_WRITE|MODE_CREATE (file_table.open:
+		// `(flags & (MODE_CREATE|MODE_WRITE)) != (MODE_CREATE|MODE_WRITE)` is
+		// EINVAL) — the same triple user/go/git's mkdir uses. "already
+		// exists" (-9 EEXIST) is not an error here — a pre-created
+		// SELFTEST/OUT must not fail a run (ADR 0031 D2).
 		mkdir: func(path string) int64 {
-			h, rc := vi.FileOpen(path, vi.ModeDir)
+			h, rc := vi.FileOpen(path, vi.ModeWrite|vi.ModeCreate|vi.ModeDir)
 			if rc >= 0 {
 				vi.FileClose(uint32(h))
 			}
 			return rc
 		},
-		open:  vi.FileOpen,
-		read:  vi.FileRead,
-		write: vi.FileWrite,
-		close: vi.FileClose,
+		open:     vi.FileOpen,
+		read:     vi.FileRead,
+		write:    vi.FileWrite,
+		truncate: vi.FileTruncate,
+		remove:   vi.FileDelete,
+		list:     vi.DirList,
+		close:    vi.FileClose,
 	}
 }
 
@@ -127,6 +187,12 @@ func cases() []testCase {
 		{id: alteredCase.id, run: alteredCase.run},
 		{id: "clock-monotonic", run: caseClockMonotonic},
 		{id: "file-write", run: caseFileWrite},
+		// M61d (#1384): the file-ABI pack on the host share, in ABI order —
+		// create/write/close/reopen/read-back, shrink, delete, enumerate.
+		{id: "file-roundtrip", run: caseFileRoundtrip},
+		{id: "file-truncate", run: caseFileTruncate},
+		{id: "file-delete", run: caseFileDelete},
+		{id: "file-list", run: caseFileList},
 	}
 }
 
@@ -321,6 +387,238 @@ func caseFileWrite(s *syscalls) error {
 	if n != len(payload) {
 		return errors.New("wrote " + strconv.Itoa(n) + "B of " + strconv.Itoa(len(payload)) + "B")
 	}
+	// The receipt is M61d's addition: every case names what it wrote, so the
+	// host has one file per case to read rather than a novel to grep.
+	if werr := writeReceipt(s, writeOk, "case file-write path=OUT/hello.txt bytes="+strconv.Itoa(n)); werr != nil {
+		return werr
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// M61d (#1384): the file-ABI pack
+// ---------------------------------------------------------------------------
+//
+// Each case's receipt is one deterministic line naming what it concluded, and
+// each case that reads bytes back copies those bytes beside it. The guest's
+// claim is the syscall result; the host's claim is the bytes on macOS —
+// REPORT.txt, the .ok receipts and the .copy files.
+
+// caseFileRoundtrip: create, write, close, REOPEN and read the exact bytes
+// back. The read-back runs through readFile, i.e. into a freshly allocated
+// buffer, so this case is also the file path's witness for issue #1391 (the
+// first kernel->user copy into a page EL0 has never written; ADR 0032), on top
+// of the intake case's share read. OUT/roundtrip.copy holds the bytes READ,
+// never the bytes written, so neither a write that reported success without
+// landing nor a read that invented bytes can pass the host's comparison.
+func caseFileRoundtrip(s *syscalls) error {
+	s.mkdir(outDir)
+	want := roundtripPayload()
+	n, err := writeFile(s, roundtripPath, want)
+	if err != nil {
+		return err
+	}
+	if n != len(want) {
+		return errors.New("wrote " + strconv.Itoa(n) + "B of " + strconv.Itoa(len(want)) + "B")
+	}
+	got, err := readFile(s, roundtripPath, len(want)+1)
+	if err != nil {
+		return err
+	}
+	match := bytes.Equal(got, want)
+	if werr := copyBytes(s, roundtripCopy, got); werr != nil {
+		return werr
+	}
+	line := "case file-roundtrip path=OUT/roundtrip.txt bytes=" + strconv.Itoa(len(got)) +
+		" match=" + yesNo(match)
+	if werr := writeReceipt(s, roundtripOk, line); werr != nil {
+		return werr
+	}
+	switch {
+	case len(got) != len(want):
+		return errors.New("read back " + strconv.Itoa(len(got)) + "B of " + strconv.Itoa(len(want)) + "B")
+	case !match:
+		// The right length of zeros is issue #1391's shape (a kernel->user
+		// copy that never reached the page the app reads); anything else is a
+		// genuine byte mismatch. Name them differently — the detail is the
+		// only place a human sees either.
+		if isAllZero(got) {
+			return errors.New("read returned " + strconv.Itoa(len(got)) + "B of zeros (issue #1391)")
+		}
+		return errors.New("read back differs from the bytes written: " + strconv.Itoa(len(got)) + "B")
+	}
+	return nil
+}
+
+// caseFileTruncate: create, write, SHRINK through the same write handle, then
+// reopen and read the prefix back. The shrink deliberately does not reopen
+// first: per ADR 0010 a write-open without MODE_APPEND replaces the file
+// (truncates to zero), which would prove the replace semantics instead of
+// truncate's — and the kernel's truncate requires a write handle anyway
+// (file_table.truncate: EACCES without MODE_WRITE). OUT/truncated.copy holds
+// the bytes read after the shrink.
+func caseFileTruncate(s *syscalls) error {
+	s.mkdir(outDir)
+	full := truncatePayload()
+	kept := truncateKept()
+	h, rc := s.open(truncatePath, vi.ModeWrite|vi.ModeCreate)
+	if rc < 0 {
+		return errors.New("open rc=" + strconv.FormatInt(rc, 10))
+	}
+	werr := writeAll(s, uint32(h), full)
+	trc := int64(0)
+	if werr == nil {
+		trc = s.truncate(uint32(h), uint32(len(kept)))
+	}
+	s.close(uint32(h))
+	if werr != nil {
+		return werr
+	}
+	if trc < 0 {
+		return errors.New("truncate rc=" + strconv.FormatInt(trc, 10))
+	}
+	got, err := readFile(s, truncatePath, len(full)+1)
+	if err != nil {
+		return err
+	}
+	match := bytes.Equal(got, kept)
+	if cerr := copyBytes(s, truncatedCopy, got); cerr != nil {
+		return cerr
+	}
+	line := "case file-truncate path=OUT/truncate.txt wrote=" + strconv.Itoa(len(full)) +
+		" kept=" + strconv.Itoa(len(kept)) + " bytes=" + strconv.Itoa(len(got)) +
+		" match=" + yesNo(match)
+	if rerr := writeReceipt(s, truncateOk, line); rerr != nil {
+		return rerr
+	}
+	switch {
+	case len(got) != len(kept):
+		return errors.New("after truncate read " + strconv.Itoa(len(got)) + "B of " +
+			strconv.Itoa(len(kept)) + "B")
+	case !match:
+		return errors.New("truncate kept the wrong bytes: " + strconv.Itoa(len(got)) + "B")
+	}
+	return nil
+}
+
+// caseFileDelete: delete a file the case just created, then prove the path is
+// gone — a read-only open without MODE_CREATE must fail (the receipt records
+// the exact codes, and the host requires them byte-exactly). Nothing recreates
+// the path in between, so the delete is the only thing that can make the open
+// fail.
+func caseFileDelete(s *syscalls) error {
+	s.mkdir(outDir)
+	if _, err := writeFile(s, deletePath, []byte(deleteBody)); err != nil {
+		return err
+	}
+	drc := s.remove(deletePath)
+	h, orc := s.open(deletePath, vi.ModeRead)
+	if h >= 0 {
+		s.close(uint32(h))
+	}
+	line := "case file-delete path=OUT/deleted.txt delete=" + strconv.FormatInt(drc, 10) +
+		" reopen=" + strconv.FormatInt(orc, 10)
+	if werr := writeReceipt(s, deleteOk, line); werr != nil {
+		return werr
+	}
+	switch {
+	case drc < 0:
+		return errors.New("delete rc=" + strconv.FormatInt(drc, 10))
+	case orc >= 0:
+		return errors.New("open after delete succeeded: h=" + strconv.FormatInt(h, 10))
+	}
+	return nil
+}
+
+// caseFileList: enumerate a directory that shows a file the case just created
+// and does not show it once deleted. The listing runs in the case's OWN
+// subdirectory (OUT/LIST): sys_dir_list clamps to 16 rows and mirrors the
+// host's sorted direct children, while OUT/ already holds far more than 16
+// entries by the time this case runs — listing OUT/ would make the verdict
+// depend on the alphabet. The subdirectory also exercises MODE_DIR creation
+// for real (the mkdir row needs MODE_WRITE|MODE_CREATE|MODE_DIR together).
+func caseFileList(s *syscalls) error {
+	s.mkdir(outDir)
+	if rc := s.mkdir(listDir); rc != 0 && rc != -9 { // -9 EEXIST is fine
+		return errors.New("mkdir OUT/LIST rc=" + strconv.FormatInt(rc, 10))
+	}
+	if _, err := writeFile(s, listedPath, []byte(listMarkerBody)); err != nil {
+		return err
+	}
+	var buf [vi.MaxDirEntries]vi.DirEntry
+	n1, r1 := s.list(listDir, buf[:])
+	if r1 < 0 {
+		return errors.New("list rc=" + strconv.FormatInt(r1, 10))
+	}
+	// The marker must appear as a FILE row: a directory row with that name
+	// would mean the listing resolved something else entirely.
+	seen := false
+	for _, e := range buf[:n1] {
+		if e.NameString() == "listed.txt" {
+			seen = !e.Dir()
+		}
+	}
+	drc := s.remove(listedPath)
+	if drc < 0 {
+		return errors.New("delete rc=" + strconv.FormatInt(drc, 10))
+	}
+	n2, r2 := s.list(listDir, buf[:])
+	if r2 < 0 {
+		return errors.New("list after delete rc=" + strconv.FormatInt(r2, 10))
+	}
+	gone := true
+	for _, e := range buf[:n2] {
+		if e.NameString() == "listed.txt" {
+			gone = false
+		}
+	}
+	line := "case file-list dir=OUT/LIST file=listed.txt first=" + seenWord(seen) +
+		" second=" + seenWord(!gone)
+	if werr := writeReceipt(s, listOk, line); werr != nil {
+		return werr
+	}
+	switch {
+	case !seen:
+		return errors.New("listing missed listed.txt (entries=" + strconv.Itoa(n1) + ")")
+	case !gone:
+		return errors.New("listing still shows listed.txt (entries=" + strconv.Itoa(n2) + ")")
+	}
+	return nil
+}
+
+// seenWord renders a listing verdict for a receipt: "seen" / "absent".
+func seenWord(seen bool) string {
+	if seen {
+		return "seen"
+	}
+	return "absent"
+}
+
+// copyBytes writes b to path, replacing it — the .copy half of a case's
+// evidence: the bytes the case READ, for the host to compare.
+func copyBytes(s *syscalls, path string, b []byte) error {
+	_, err := writeFile(s, path, b)
+	return err
+}
+
+// writeReceipt writes one receipt line (plus its newline) to path.
+func writeReceipt(s *syscalls, path string, line string) error {
+	_, err := writeFile(s, path, []byte(line+"\n"))
+	return err
+}
+
+// writeAll writes b through an OPEN handle, looping until every byte is
+// accepted: FileWrite is one kernel call and may accept fewer bytes than
+// offered (the kernel stages bounded chunks).
+func writeAll(s *syscalls, h uint32, b []byte) error {
+	written := 0
+	for written < len(b) {
+		n, rc := s.write(h, b[written:])
+		if rc < 0 || n <= 0 {
+			return errors.New("write rc=" + strconv.FormatInt(rc, 10))
+		}
+		written += n
+	}
 	return nil
 }
 
@@ -350,17 +648,12 @@ func writeFile(s *syscalls, path string, b []byte) (int, error) {
 	if rc < 0 {
 		return 0, errors.New("open rc=" + strconv.FormatInt(rc, 10))
 	}
-	written := 0
-	for written < len(b) {
-		n, wrc := s.write(uint32(h), b[written:])
-		if wrc < 0 || n <= 0 {
-			s.close(uint32(h))
-			return written, errors.New("write rc=" + strconv.FormatInt(wrc, 10))
-		}
-		written += n
+	if err := writeAll(s, uint32(h), b); err != nil {
+		s.close(uint32(h))
+		return 0, err
 	}
 	s.close(uint32(h))
-	return written, nil
+	return len(b), nil
 }
 
 // readFile reads a whole file up to max bytes. It is the substrate for the
