@@ -103,7 +103,7 @@ The only threads not closed:
 > Gate classes are defined in [`docs/gate-inventory.md`](gate-inventory.md).
 > Since M40 the class-B fleet is **discovered** from `tools/gate/specs/` via
 > `tools/gate/fleet.sh`; the generated inventory is
-> [`gate-fleet-inventory.md`](gate-fleet-inventory.md) (`--check` enforced in CI).
+> [`gate-fleet-inventory.md`](gate-fleet-inventory.md) (snapshot; `--check` is spec-order + locale, not a PR commit).
 
 | Gate | Command | Result |
 |------|---------|--------|
