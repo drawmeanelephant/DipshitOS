@@ -152,6 +152,8 @@ func main() {
 				case 1:
 					_ = applySwapUnpinned()
 				case 2:
+					// M62e: persist this pin-stay snapshot only. Not a
+					// general save-on-exit; writeSession is once-only.
 					if applyPinStay() {
 						_ = writeSession()
 					}

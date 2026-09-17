@@ -77,6 +77,13 @@ print("staged GOTABWM.ELF into share (%d bytes)" %
 with open(os.path.join(share, "SETTINGS.TXT"), "w") as f:
     f.write("#v2\nwm=none\n")
 print("seeded SETTINGS.TXT (wm=none: shim-only boot, explicit seat opt-in)")
+# Seed is a fresh RUN_DIR/share per gate, but a leftover SESSION.TABS on a
+# reused share would make boot 01 loadSession set stripDone and skip the
+# M62b–d choreography. Drop it so boot 01 starts empty.
+stale = os.path.join(share, "SESSION.TABS")
+if os.path.exists(stale):
+    os.remove(stale)
+    print("cleared stale SESSION.TABS")
 PY
 
 vgate_run 01 -- \
@@ -202,6 +209,9 @@ vgate_assert 01 serial-absent 'exited status=139'
 vgate_assert 01 serial-contains 'gotabwm: session write n=2'
 vgate_assert 01 python <<'PY'
 import os, sys
+# Offsets match user/go/gotabwm/tabsv2.go: tabsV2HeaderBytes=6,
+# tabsV2RecordBytes=69, tabsV2TitleMax=32. Record 0 title at 6, flags at
+# 38; record 1 starts at 75, flags at 107.
 p = os.path.join(os.environ["VG_SHARE"], "SESSION.TABS")
 try:
     b = open(p, "rb").read()

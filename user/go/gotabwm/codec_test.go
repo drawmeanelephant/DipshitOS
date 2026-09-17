@@ -47,7 +47,8 @@ func stripToTabcodec(s TabStrip) tabcodec.State {
 }
 
 // M62d/e: the strip's pin bit is the same byte tabcodec persists. The
-// guest encoder must match tabcodec.Encode byte-for-byte (no VZ).
+// guest encoder matches tabcodec.Encode for Prefs=0 and in-range focus
+// (this fixture: Seq=1, Prefs=0).
 func TestSessionRoundTripTabcodec(t *testing.T) {
 	if FlagPinned != tabcodec.FlagPinned {
 		t.Fatalf("FlagPinned = %#x tabcodec.FlagPinned = %#x", FlagPinned, tabcodec.FlagPinned)
@@ -117,8 +118,34 @@ func TestApplyStateRestoresTitlesPinActive(t *testing.T) {
 	if restored.At(0).ID == 0 || restored.At(1).ID == 0 {
 		t.Fatal("placeholder ids must not be 0")
 	}
-	if line := sessionTitlesLine(&restored); line != "titles=Calc,Notepad pin=1,0 active=1" {
+	if line := MarkerSessionTitles + sessionTitlesLine(&restored); line != "gotabwm: session titles=Calc,Notepad pin=1,0 active=1" {
 		t.Fatalf("titles line = %q", line)
+	}
+}
+
+func TestApplyPreservesEmptyBin(t *testing.T) {
+	st := tabcodec.State{Tabs: []tabcodec.Tab{{Title: "Calc"}}}
+	raw, err := tabcodec.Encode(st)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	var s TabStrip
+	if _, ok := s.applyTabsV2(raw); !ok {
+		t.Fatal("applyTabsV2")
+	}
+	if s.At(0).Bin != "" {
+		t.Fatalf("empty bin became %q (must not guessBin on restore)", s.At(0).Bin)
+	}
+	out, ok := s.encodeTabsV2(0)
+	if !ok {
+		t.Fatal("encodeTabsV2")
+	}
+	got, err := tabcodec.Decode(out)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got.Tabs[0].Bin != "" {
+		t.Fatalf("re-encode bin = %q want empty", got.Tabs[0].Bin)
 	}
 }
 

@@ -1,7 +1,12 @@
-// Guest-safe `.tabs` v2 codec (M62e / ADR 0033 D3). Byte-identical to
-// tools/go/tabcodec, but it must not import that package: tabcodec uses
-// fmt.Errorf, fmt pulls os, and os is not a GOOS=virelai guest import.
-// Host tests in codec_test.go compare these bytes to tabcodec.Encode/Decode.
+// Guest-safe `.tabs` v2 codec (M62e / ADR 0033 D3). Layout matches
+// tools/go/tabcodec (header v2, active+1, count, seq, 69-byte records),
+// but it must not import that package: tabcodec uses fmt.Errorf, fmt
+// pulls os, and os is not a GOOS=virelai guest import.
+//
+// Byte identity vs tabcodec.Encode is claimed only for Prefs=0 and an
+// in-range focus (host tests pin Seq=1, Prefs=0). This writer always
+// emits buf[5]=0; an out-of-range focus becomes "no active" rather than
+// an error (tabcodec.Encode refuses a bad Active).
 package main
 
 const (
@@ -30,7 +35,8 @@ func readFixed(src []byte) string {
 	return string(src[:n])
 }
 
-// encodeTabsV2 serializes the strip the same way tabcodec.Encode does.
+// encodeTabsV2 serializes the strip as `.tabs` v2 with Prefs=0. See the
+// file comment for where this is not a full tabcodec.Encode equivalent.
 func (s *TabStrip) encodeTabsV2(seq uint16) ([]byte, bool) {
 	n := s.count
 	if n > MaxTabs {
@@ -115,9 +121,9 @@ func (s *TabStrip) applyTabsV2(raw []byte) (uint16, bool) {
 			*s = TabStrip{}
 			return 0, false
 		}
-		if recs[i].Bin != "" {
-			s.tabs[i].Bin = recs[i].Bin
-		}
+		// OpenTab fills Bin via guessBin(title). The record wins, including
+		// empty: a generic `.tabs` file must round-trip, not grow a guessed bin.
+		s.tabs[i].Bin = recs[i].Bin
 		s.tabs[i].Pinned = recs[i].Pinned
 	}
 	if hasActive && active >= 0 && active < s.count {

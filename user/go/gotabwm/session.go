@@ -18,7 +18,7 @@ var (
 )
 
 func sessionTitlesLine(s *TabStrip) string {
-	titles := "titles="
+	titles := ""
 	pins := "pin="
 	for i := 0; i < s.count; i++ {
 		if i > 0 {
@@ -65,8 +65,10 @@ func writeHostFile(path string, data []byte) bool {
 	return true
 }
 
-// writeSession encodes the live strip and writes SESSION.TABS. Refuses an
-// empty strip so the two-tab close path cannot clobber a good save.
+// writeSession encodes the live strip and writes SESSION.TABS. M62e is
+// this one pin-stay snapshot (seat.go case 2), not save-on-exit/detach.
+// Refuses an empty strip and runs once (sessionWritten) so the two-tab
+// close path cannot clobber a good save.
 func writeSession() bool {
 	if tabs.Count() == 0 || sessionWritten {
 		return false
@@ -102,10 +104,11 @@ func loadSession() {
 	if tabs.Count() == 0 {
 		return
 	}
+	// Placeholder ids (sessionIDBase+) are not kernel windows. Leave
+	// hostedApp=0 so a later Wmctl* cannot aim at 0x100+i. stripDone
+	// skips the live choreography that would close/split them.
+	hostedApp = 0
 	stripDone = true
-	if id, ok := tabs.Focused(); ok {
-		hostedApp = id
-	}
 	vi.ConsoleLine(MarkerSessionLoad + vi.Itoa64(int64(tabs.Count())))
 	vi.ConsoleLine(MarkerSessionTitles + sessionTitlesLine(&tabs))
 	dumpOrder()
