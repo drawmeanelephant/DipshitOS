@@ -1,5 +1,6 @@
-// GOTABWM.ELF — M62b–d (issues #1400/#1401/#1402): an in-process tab strip
-// with a two-pane constrained split, pin, and reorder.
+// GOTABWM.ELF — M62b–e (issues #1400/#1401/#1402/#1403): an in-process tab
+// strip with a two-pane constrained split, pin, reorder, and `.tabs` v2
+// session save/restore.
 //
 // OpenTab / CloseTab / FocusTab / SplitH / SplitV / Unsplit / Pin / Unpin /
 // Reorder are a pure state machine: no syscalls, no WM_RPC. The seat hooks
@@ -27,7 +28,7 @@ const RailHeight = 22
 type Tab struct {
 	ID     uint32
 	Title  string
-	Bin    string // `.tabs` v2 bin field; empty until M62e persists
+	Bin    string // `.tabs` v2 bin field (CALC.BIN / NOTEPAD.BIN from title)
 	Pinned bool   // FlagPinned (0x01); pinned tabs sit at the left of the rail
 }
 
@@ -42,23 +43,47 @@ type TabStrip struct {
 // The tab-strip marker lines the class-B gate greps. Exported so tabs_test.go
 // pins the exact shapes.
 const (
-	MarkerTabOpen   = "gotabwm: tab open id="
-	MarkerTabFocus  = "gotabwm: tab focus id="
-	MarkerTabClose  = "gotabwm: tab close id="
-	MarkerRail      = "gotabwm: rail "
-	MarkerTabsEmpty = "gotabwm: tabs empty"
-	MarkerSplit     = "gotabwm: split "
-	MarkerUnsplit   = "gotabwm: unsplit"
-	MarkerLayout    = "gotabwm: layout "
-	MarkerPane      = "gotabwm: pane "
-	MarkerPin       = "gotabwm: pin "
-	MarkerReorder   = "gotabwm: reorder "
-	MarkerOrder     = "gotabwm: order "
+	MarkerTabOpen       = "gotabwm: tab open id="
+	MarkerTabFocus      = "gotabwm: tab focus id="
+	MarkerTabClose      = "gotabwm: tab close id="
+	MarkerRail          = "gotabwm: rail "
+	MarkerTabsEmpty     = "gotabwm: tabs empty"
+	MarkerSplit         = "gotabwm: split "
+	MarkerUnsplit       = "gotabwm: unsplit"
+	MarkerLayout        = "gotabwm: layout "
+	MarkerPane          = "gotabwm: pane "
+	MarkerPin           = "gotabwm: pin "
+	MarkerReorder       = "gotabwm: reorder "
+	MarkerOrder         = "gotabwm: order "
+	MarkerSessionWrite  = "gotabwm: session write n="
+	MarkerSessionLoad   = "gotabwm: session load n="
+	MarkerSessionTitles = "gotabwm: session titles="
+	MarkerSessionBad    = "gotabwm: session bad"
 )
 
 // FlagPinned is `.tabs` v2 bit 0 — the same value as tabcodec.FlagPinned
 // / tabwm.tab_flag_pinned. Frozen/dock stay unused (M62d non-goal).
 const FlagPinned uint8 = 0x01
+
+func pinFlag(t Tab) uint8 {
+	if t.Pinned {
+		return FlagPinned
+	}
+	return 0
+}
+
+// guessBin fills the `.tabs` v2 bin field from a declared title. WM_RPC
+// carries the window title, not the executable name.
+func guessBin(title string) string {
+	switch title {
+	case "Calc":
+		return "CALC.BIN"
+	case "Notepad":
+		return "NOTEPAD.BIN"
+	default:
+		return title
+	}
+}
 
 const (
 	railIdleRGB  uint32 = 0x2E3448
@@ -94,12 +119,15 @@ func (s *TabStrip) OpenTab(id uint32, title string) bool {
 	}
 	if i := s.index(id); i >= 0 {
 		s.tabs[i].Title = title
+		if s.tabs[i].Bin == "" {
+			s.tabs[i].Bin = guessBin(title)
+		}
 		return false
 	}
 	if s.count >= MaxTabs {
 		return false
 	}
-	s.tabs[s.count] = Tab{ID: id, Title: title}
+	s.tabs[s.count] = Tab{ID: id, Title: title, Bin: guessBin(title)}
 	if s.count == 0 {
 		s.focus = 0
 	}

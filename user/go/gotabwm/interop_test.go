@@ -32,6 +32,10 @@ func TestInteropMarkerShapes(t *testing.T) {
 		{MarkerPin, "gotabwm: pin "},
 		{MarkerReorder, "gotabwm: reorder "},
 		{MarkerOrder, "gotabwm: order "},
+		{MarkerSessionWrite, "gotabwm: session write n="},
+		{MarkerSessionLoad, "gotabwm: session load n="},
+		{MarkerSessionTitles, "gotabwm: session titles="},
+		{MarkerSessionBad, "gotabwm: session bad"},
 	}
 	for _, c := range cases {
 		if c.got != c.want {
