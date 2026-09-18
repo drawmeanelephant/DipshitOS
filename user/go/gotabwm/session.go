@@ -9,7 +9,6 @@ import "virelai/vi"
 const (
 	sessionPath   = "/host/SESSION.TABS"
 	sessionIDBase = uint32(0x100) // placeholder ids; records have no window id
-	sessionWriteN = 2048          // FileWrite cap (GOEDIT / GOTGIT)
 )
 
 var (
@@ -39,30 +38,16 @@ func sessionTitlesLine(s *TabStrip) string {
 	return titles + " " + pins + " active=" + dec(uint32(a))
 }
 
+// writeHostFile replaces path with data through the M66b crash-safe
+// write: temp + fsync + delete/rename publish (vi.WriteFileSafe). M62e
+// wrote in place — the write-open truncated the live file to zero before
+// the first chunk landed — so a crash mid-write left a partial
+// SESSION.TABS or LAYOUT.txt behind for the next boot to trust or trip
+// over; now the live path only ever appears atomically, and the crash
+// window leaves the previous bytes or none, which fail-closed readers
+// treat as defaults.
 func writeHostFile(path string, data []byte) bool {
-	h, r := vi.FileOpen(path, vi.ModeWrite|vi.ModeCreate)
-	if r < 0 {
-		return false
-	}
-	written := 0
-	for written < len(data) {
-		n := len(data) - written
-		if n > sessionWriteN {
-			n = sessionWriteN
-		}
-		wn, wr := vi.FileWrite(uint32(h), data[written:written+n])
-		if wr < 0 || wn <= 0 {
-			vi.FileClose(uint32(h))
-			return false
-		}
-		written += wn
-	}
-	if vi.FileTruncate(uint32(h), uint32(written)) < 0 {
-		vi.FileClose(uint32(h))
-		return false
-	}
-	vi.FileClose(uint32(h))
-	return true
+	return vi.WriteFileSafe(path, data) == 0
 }
 
 // writeSession encodes the live strip and writes SESSION.TABS. M62e is

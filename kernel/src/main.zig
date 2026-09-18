@@ -1817,8 +1817,14 @@ fn custom_virtio_spike() void {
         // M34 HF5 (issue #739): re-load settings from the share — the
         // share IS the settings home. M34 HF6 (issue #740): the /data
         // migration is gone (its job finished in HF5; the share is the
-        // only store). No-op on default boots.
+        // only store). No-op on default boots. M66b (#1444): a file that
+        // is present but corrupt (no valid schema header — the partial
+        // in-place write shape) is REFUSED: one honest boot line, and the
+        // compiled defaults stay in force.
         _ = settings.load_from_share();
+        if (settings.last_load_refused) {
+            uart_puts("settings: SETTINGS.TXT refused (defaults in force)\n");
+        }
         // M50 TS2 (issue #1136, ADR 0024 D3): the ownership/mode table
         // shares this arming point — the queue-5 probe above arms it. A
         // boot with no `OWNERS.TXT` stays byte-identical (no line).

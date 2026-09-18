@@ -24,13 +24,18 @@
 //!
 //! No libc, no POSIX, bounded BSS storage, no heap allocation.
 //!
-//! Version contract (Arc5 issue #247):
+//! Version contract (Arc5 issue #247; amended M66b #1444):
 //!   SETTINGS.TXT carries a version header on the first line: `#v<N>\n`.
-//!   The current schema version is `current_version` (= 1).
-//!   - v0 (no header): legacy format, loaded then migrated to current.
+//!   The current schema version is `current_version` (= 2).
 //!   - v1: versioned format with `#v1` header.
 //!   - v2 (M59, issue #1298): adds the `wm` seat key (default "gotabwm").
 //!   - newer: refused with honest degradation (compiled defaults used).
+//!   - NO header: refused (M66b corrupt-fails-closed). The pre-M66b
+//!     "headerless = legacy v0, load anyway" rule is gone: since HF6 the
+//!     only SETTINGS.TXT writer is this kernel, which always writes the
+//!     header, so a headerless file is not a legacy file — it is exactly
+//!     what a partial in-place write produces, and it is refused whole
+//!     (compiled defaults) like `.tabs` v2 refuses corrupt bytes.
 //!   Migration steps live in `migrate()`. Each step adds missing keys
 //!   with defaults and removes obsolete keys. Serial logs what changed.
 //!   To increment: bump `current_version`, add a migration step in
@@ -436,33 +441,43 @@ pub fn serialize(out: []u8) usize {
     return pos;
 }
 
-/// Parse + apply a SETTINGS.TXT payload (versioned v1+ / legacy v0),
-/// shared by the DATA and host-share loaders. Returns false when a NEWER
-/// schema version is refused (honest degradation per issue #247).
+/// Parse + apply a SETTINGS.TXT payload. M66b (#1444): the version header
+/// is the LOAD GATE — corrupt-fails-closed like `.tabs` v2. The first line
+/// (trimmed of surrounding SP/CR/TAB) must be `#v<digits>` (at least one
+/// digit, at most three, value this kernel understands); a headerless
+/// file (the leftover shape of a partial in-place write), malformed
+/// header, or newer schema is refused WHOLE — the compiled defaults stay
+/// in force, never a partial parse. Shared by the host-share loader.
+/// Returns false when refused.
 fn apply_bytes(bytes: []const u8) bool {
     var pos: usize = 0;
-    var file_version: u32 = 0; // v0 = no header (legacy)
+    var file_version: u32 = 0; // set below once the header validates
+    var have_header = false;
 
-    // Parse first line: check for version header
+    // Parse first line: it must be exactly `#v<digits>`.
     if (bytes.len > 0) {
         var end: usize = 0;
         while (end < bytes.len and bytes[end] != '\n') : (end += 1) {}
         const first_line = std.mem.trim(u8, bytes[0..end], " \r\t");
-        if (std.mem.startsWith(u8, first_line, "#v")) {
-            // Parse version number after #v
-            const version_str = first_line[2..];
-            file_version = 0;
-            for (version_str) |c| {
-                if (c >= '0' and c <= '9') {
-                    file_version = file_version * 10 + @as(u32, c - '0');
-                } else {
-                    break;
-                }
+        if (std.mem.startsWith(u8, first_line, "#v") and first_line.len > 2) {
+            var digits: usize = 0;
+            var v: u32 = 0;
+            for (first_line[2..]) |c| {
+                if (c < '0' or c > '9') break;
+                v = v * 10 + @as(u32, c - '0');
+                digits += 1;
+                if (digits > 3) break; // no real schema version needs > 3 digits
             }
-            pos = end + 1; // skip version line
+            // Every header-line byte after `#v` must be a digit.
+            if (digits > 0 and digits == first_line.len - 2) {
+                file_version = v;
+                have_header = true;
+                pos = end + 1; // skip version line
+            }
         }
-        // If no #v prefix, file_version stays 0 (legacy v0 format)
+        // If the first line is not a valid header the file is refused.
     }
+    if (!have_header) return false;
 
     // Handle version-specific loading
     if (file_version > current_version) {
@@ -488,15 +503,40 @@ fn apply_bytes(bytes: []const u8) bool {
     return true;
 }
 
+/// M66b (#1444): set by `load_from_share` when a settings file EXISTS on
+/// the share but was refused (no valid schema header — the corrupt shape).
+/// Read by main.zig's queue-5 arming point for the one honest boot line;
+/// not a general-purpose flag.
+pub var last_load_refused: bool = false;
+
 /// M34 HF5 (issue #739): load settings from the HOST SHARE when the file
 /// channel is armed. No-op without a channel (defaults stay in force).
+/// M66b (#1444): a file that is present but unloadable — empty, larger
+/// than the bounded buffer, or refused by `apply_bytes` — is corrupt:
+/// report it via `last_load_refused` and keep the defaults.
 pub fn load_from_share() bool {
     ensure_init();
+    last_load_refused = false;
     if (!virtio_file.available()) return false;
     if (trust.check(trust.kernel_actor(), .host, filename, .read) != .allow) return false;
+    var st = virtio_file.StatResult{};
+    if (virtio_file.stat(filename, &st) != virtio_file.st_ok) return false; // absent: normal first boot
     var file_buf: [2048]u8 = undefined;
-    const n = virtio_file.read_whole(filename, &file_buf) orelse return false;
-    return apply_bytes(file_buf[0..n]);
+    if (st.is_dir or st.size == 0 or st.size > file_buf.len) {
+        last_load_refused = true;
+        return false;
+    }
+    const n = virtio_file.read_whole(filename, &file_buf) orelse {
+        // Stat said present; the read could not deliver it — corrupt too
+        // (M66b review): take the refused line, not a silent default.
+        last_load_refused = true;
+        return false;
+    };
+    if (!apply_bytes(file_buf[0..n])) {
+        last_load_refused = true;
+        return false;
+    }
+    return true;
 }
 
 /// Migrate from one version to the current version.
@@ -521,16 +561,34 @@ fn migrate(from_version: u32) void {
 }
 
 /// Persist current in-memory configuration to `SETTINGS.TXT` on the HOST
-/// SHARE (write_whole = open/create + truncate + write + close,
-/// host-verified on disk by the gate). HF6 (issue #740): the DATA
-/// fallback is gone — without a channel the save is an honest no-op.
+/// SHARE — crash-safe (M66b #1444): the body is written to a sacrificial
+/// `SETTINGS.TXT.tmp` (write_whole may truncate OUR temp; the live file is
+/// never touched until publish), fsync'd through the handle, and published
+/// by the host's rename. The HF rename is no-overwrite (the host answers
+/// st_exists for a live target), so the publish is delete-then-rename —
+/// the crash window leaves the file ABSENT, which the next load reads as
+/// compiled defaults; the file is never truncated or left partial. An
+/// orphan tmp from a save that crashed between its close and the publish
+/// is not cleaned at boot — the next save simply replaces it.
+/// HF6 (issue #740): without a channel the save is an honest no-op.
 pub fn save_to_share() bool {
     ensure_init();
     if (!virtio_file.available()) return false;
     if (trust.check(trust.kernel_actor(), .host, filename, .write) != .allow) return false;
     var buf: [2048]u8 = undefined;
     const len = serialize(&buf);
-    return virtio_file.write_whole(filename, buf[0..len]) == virtio_file.st_ok;
+    const tmp_name = filename ++ ".tmp";
+    if (virtio_file.write_whole(tmp_name, buf[0..len]) != virtio_file.st_ok) return false;
+    const dst = virtio_file.delete(filename);
+    if (dst != virtio_file.st_ok and dst != virtio_file.st_not_found) {
+        _ = virtio_file.delete(tmp_name);
+        return false;
+    }
+    if (virtio_file.rename(tmp_name, filename) != virtio_file.st_ok) {
+        _ = virtio_file.delete(tmp_name);
+        return false;
+    }
+    return true;
 }
 
 /// Initializer called during kernel boot: resets defaults then attempts
@@ -656,6 +714,40 @@ test "settings: a pre-v2 file without wm keeps the flipped default (M59 #1298)" 
     init();
     try std.testing.expect(!apply_bytes("#v3\nwm=tabwm\n"));
     try std.testing.expectEqualStrings("gotabwm", wm_seat());
+}
+
+test "settings: a headerless or malformed file is refused whole (M66b #1444)" {
+    init();
+    defer init();
+    // The corrupt shapes: empty, headerless (what a partial in-place write
+    // leaves behind), a truncated or malformed header, a merged header+data
+    // line, and a newer schema. EVERY one is refused whole — the compiled
+    // defaults stay in force, never a partial parse.
+    try std.testing.expect(!apply_bytes(""));
+    try std.testing.expect(!apply_bytes("hostname=legacy\n"));
+    try std.testing.expect(!apply_bytes("wm=none\n"));
+    try std.testing.expect(!apply_bytes("#\nwm=none\n"));
+    try std.testing.expect(!apply_bytes("#v\nwm=none\n"));
+    try std.testing.expect(!apply_bytes("#vx\nwm=none\n"));
+    try std.testing.expect(!apply_bytes("#v2x\nwm=none\n"));
+    try std.testing.expect(!apply_bytes("#v2 wm=none\n"));
+    try std.testing.expect(!apply_bytes("#v300\nwm=none\n"));
+    try std.testing.expectEqualStrings("gotabwm", wm_seat());
+    try std.testing.expectEqualStrings("virelai", get_hostname());
+}
+
+test "settings: a valid v2 file still loads (M66b #1444)" {
+    init();
+    defer init();
+    try std.testing.expect(apply_bytes("#v2\nwm=tabwm\nhostname=m66b\n"));
+    try std.testing.expectEqualStrings("tabwm", wm_seat());
+    try std.testing.expectEqualStrings("m66b", get_hostname());
+}
+
+test "settings: save_to_share without a channel is an honest no-op (M66b #1444)" {
+    init();
+    try std.testing.expect(!save_to_share());
+    try std.testing.expect(!last_load_refused); // no channel is not a refusal
 }
 
 test "settings: current_version constant" {
