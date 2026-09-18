@@ -1397,10 +1397,10 @@ fn test_seed(name: []const u8, content: []const u8) void {
 /// but a fake 0x100000 base would segfault the host tests).
 // Milestone sixteen C3 (claim 0339): the pool grew to EIGHT live user
 // programs. #1336 raised task_stack_size to 192 KiB (48 pages), so each
-// exec owns text 1 + user stack 48 + EL1 kstack 48 = 97 pages; eight
-// live programs need 776 pages plus headroom. 1024 pages (4 MiB) covers
-// that without the 8× OOM the 256-page fixture hit at 256 KiB.
-const fixture_pool_pages: usize = 1024;
+// exec owns text 1 + user stack 48 + EL1 kstack 48 = 97 pages. #1426
+// filled ten user slots (970 pages) inside 1024. M65d / #1442 fills
+// thirteen (1261 pages plus MMU tables) — 2048 pages (8 MiB) covers that.
+const fixture_pool_pages: usize = 2048;
 var fixture_pool: [fixture_pool_pages * 4096]u8 align(4096) = undefined;
 
 fn arm_allocator() void {
@@ -1661,8 +1661,8 @@ test "exec: a second program loads and runs while the first is alive" {
     test_seed("USER.BIN", img[0 .. 24 + 25]);
     // Claim 0826: the exec gate is gone — the FIRST exec succeeds with the
     // pool slot free, and the rest succeed WITHOUT waiting for the earlier
-    // programs to exit (the old `user_busy` refusal is gone). #1426: TEN
-    // live user programs fill max_tasks (shell + worker + idle + 10).
+    // programs to exit (the old `user_busy` refusal is gone). #1426/#1442:
+    // user slots = max_tasks - 3 (shell + worker + idle); M65d is 13.
     const user_slots = scheduler.max_tasks - 3;
     var n: usize = 0;
     while (n < user_slots) : (n += 1) {
@@ -1859,9 +1859,9 @@ test "exec: a valid AArch64 ELF32 loads through the magic-sniff path" {
 
 test "exec: PEER.BIN loads by name — counter + peer fill the task pool" {
     // Card 3f (claim 5965): the THIRD ESP program loads by name exactly
-    // like USER.BIN/COUNTER.BIN (same DSK1 pipeline). #1426: TEN user
-    // slots (shell + worker + idle + 10) — counter + peer + eight
-    // USER.BINs fill the pool, so one more exec is pool_full.
+    // like USER.BIN/COUNTER.BIN (same DSK1 pipeline). #1426/#1442: user
+    // slots = max_tasks - 3; fillers occupy every slot so one more exec
+    // is pool_full.
     virtio_file.set_test_share(null); // reset any prior test's armed share
     // Restore hardware mode on EVERY exit (success or failure): the exec
     // batch links syscall's tests into the SAME process, so a leaked
@@ -1941,7 +1941,7 @@ test "exec: permanent occupant + recycle — one spare slot, pool_full, then the
 
     // The counter is the permanent occupant: it takes one slot and never
     // exits (this test never drives it to exit). Remaining user slots fill
-    // with short programs so the pool is full (#1426: TEN user slots).
+    // with short programs so the pool is full (#1426/#1442: max_tasks-3).
     const user_slots = scheduler.max_tasks - 3;
     const filler = user_slots - 1;
     try std.testing.expectEqual(ExecResult.ok, exec_file("COUNTER.BIN", &.{})); // slot 2

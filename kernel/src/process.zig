@@ -136,7 +136,10 @@ pub const mmap_default_va: u64 = 0x0000_0000_1000_0000;
 /// mapping — every M is a kernel task bound to the SAME descriptor). The
 /// primary task is `task_id` (the exec'd creator); `thread_tasks` holds the
 /// extra slots created via `sys_thread` op 0. Bounded by the descriptor
-/// (the task pool bounds it further: 11 slots total).
+/// (the task pool bounds it further: `scheduler.max_tasks` slots total,
+/// 16 after M65d / #1442). A GOMAXPROCS=2 runtime is 4 Ms (1 primary +
+/// 3 extra); 6 extra seats leave headroom for syscall-spawned Ms. Not a
+/// new per-process cap — ADR 0027 D1: the global pool is the bound.
 pub const max_threads: usize = 6;
 
 pub const MmapRegion = struct {
@@ -1539,4 +1542,25 @@ test "process: last live task exit dies the process (ADR 0027 D2/D3)" {
     try std.testing.expectEqual(State.exited, info(id).?.state);
     try std.testing.expectEqual(@as(u64, 11), info(id).?.exit_status);
     _ = take_exit_report();
+}
+
+test "process: three GOMAXPROCS=2 runtimes bind 4 tasks each (M65d, #1442)" {
+    // Seat + two hosted ELFs. Each runtime: primary + 3 extra (2 Ps +
+    // sysmon + template). max_threads = 6 extra still has headroom — not
+    // a new per-process cap; the global pool is the bound (ADR 0027 D1).
+    init();
+    var r: usize = 0;
+    while (r < 3) : (r += 1) {
+        const id = create("GO.ELF", .{}, .{}, .{}).?;
+        const primary: usize = 20 + r * 10;
+        try std.testing.expect(bind(id, primary));
+        var extra: usize = 1;
+        while (extra < 4) : (extra += 1) {
+            try std.testing.expect(bind_thread(id, primary + extra));
+            try std.testing.expectEqual(@as(?usize, id), find_by_task(primary + extra));
+        }
+        try std.testing.expectEqual(@as(?usize, id), find_by_task(primary));
+        try std.testing.expectEqual(State.running, info(id).?.state);
+        try std.testing.expect(has_thread_capacity(id));
+    }
 }

@@ -110,9 +110,15 @@ const user_stack_section = if (builtin.object_format == .elf) ".userbss" else "_
 /// (each runtime is primary + sysmon + helper even with GOMAXPROCS=1); a
 /// third runtime's sysmon hits EAGAIN. Grown 11 → 13 so idle_id stays
 /// `max_tasks - 1` with TEN EL0t user slots (12 occupied + one spare).
+/// M65d (#1442): every live Go M is a task (ADR 0027 D1). Compiled
+/// default GOMAXPROCS=2 (D6) is 2 Ps + sysmon + template = 4 Ms per
+/// runtime. Seating GOTABWM + two hosted ELFs is 3 × 4 = 12 user tasks;
+/// plus shell + worker + idle = 15 occupied. Same one-spare headroom as
+/// #1426 → 16 (`idle_id` stays `max_tasks - 1`; THIRTEEN EL0t user slots).
+/// WM specs still pin GOMAXPROCS=1 (3 Ms/runtime); that still fits.
 /// Fixed at comptime — no allocation, no dynamic registration or
 /// processes; the lifecycle's spawn/reap only recycle these slots.
-pub const max_tasks: usize = 13;
+pub const max_tasks: usize = 16;
 /// The idle task's fixed slot (registered by `init`, never recycled).
 pub const idle_id: usize = max_tasks - 1;
 /// The worker's static stack (BSS, like every other kernel global). The
