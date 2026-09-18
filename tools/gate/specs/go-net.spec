@@ -56,7 +56,7 @@ EOF
 vgate_file script-vidns.txt <<'EOF'
 net ip 10.0.0.1
 net arp 10.0.0.2
-exec GOVINET.ELF vidns
+exec GOVIDNS.ELF
 EOF
 
 vgate_file script-viloop.txt <<'EOF'
@@ -106,9 +106,9 @@ vgate_assert 01 serial-contains 'gonet: start'
 vgate_assert 01 serial-contains 'gonet: readfile n='
 vgate_assert 01 serial-contains 'gonet: connected'
 vgate_assert 01 serial-contains 'gonet: wrote GET n='
-vgate_assert 01 serial-contains 'govinet: hb='
+vgate_assert 01 serial-contains 'gonet: hb='
 vgate_assert 01 serial-contains 'gonet: body total='
-vgate_assert 01 serial-contains 'govinet: heartbeat survived load'
+vgate_assert 01 serial-contains 'gonet: heartbeat survived load'
 vgate_assert 01 serial-contains 'gonet OK'
 vgate_assert 01 output-contains "NET-TCP: answered the guest's HTTP request with 200 OK"
 vgate_assert 01 serial-absent '[EXC] parking:'
@@ -118,13 +118,13 @@ vgate_assert 01 serial-absent 'gonet: clock DEAD'
 vgate_assert 01 serial-contains 'gonet: failclosed ms='
 
 vgate_assert 02 serial-contains 'gonet: connected'
-vgate_assert 02 serial-contains 'govinet: hb='
+vgate_assert 02 serial-contains 'gonet: hb='
 vgate_assert 02 serial-contains 'gonet: read failed closed err='
 # Phase 2.1: the same clock proof on the peer-goes-dark run.
 vgate_assert 02 serial-contains 'gonet: clock ok'
 vgate_assert 02 serial-absent 'gonet: clock DEAD'
 vgate_assert 02 serial-contains 'gonet: failclosed ms='
-vgate_assert 02 serial-contains 'govinet: heartbeat survived load'
+vgate_assert 02 serial-contains 'gonet: heartbeat survived load'
 vgate_assert 02 serial-contains 'gonet OK'
 vgate_assert 02 output-contains "NET-TCP: answered the guest's SYN"
 # The ORDER proof: a heartbeat line must appear AFTER the fail-closed line,
@@ -136,10 +136,10 @@ lines = ser.splitlines()
 fail = next((i for i, l in enumerate(lines) if "gonet: read failed closed err=" in l), None)
 if fail is None:
     sys.exit("FAIL: no fail-closed marker (the peer went dark but the read did not fail closed)")
-after = [i for i, l in enumerate(lines) if "govinet: hb=" in l and i > fail]
+after = [i for i, l in enumerate(lines) if "gonet: hb=" in l and i > fail]
 if not after:
     sys.exit("FAIL: the heartbeat did NOT continue after the read failed closed")
-before = [i for i, l in enumerate(lines) if "govinet: hb=" in l and i < fail]
+before = [i for i, l in enumerate(lines) if "gonet: hb=" in l and i < fail]
 if not before:
     sys.exit("FAIL: the heartbeat never ran before the read blocked")
 print("go-net order ok: %d heartbeats before the fail-closed line, %d after"
