@@ -1,6 +1,7 @@
 # WASM `env.*` import contract — frozen (W1a, #778)
 
-Status: **FROZEN** · Date: 2026-09-01 · **Amended 2026-09-01 (audit, claim 5335):** §5.1 `file_open` MODE_* flags + DirEntry layout, §5.3 AudioInfo (16 B), §5.5 munmap, §6 list — corrected against the kernel dispatch table · Owner: W1a (#778) \
+Status: **FROZEN · v2 additive 2026-09-18** · Date: 2026-09-01 · **Amended 2026-09-01 (audit, claim 5335):** §5.1 `file_open` MODE_* flags + DirEntry layout, §5.3 AudioInfo (16 B), §5.5 munmap, §6 list — corrected against the kernel dispatch table · Owner: W1a (#778) \
+**Amended 2026-09-18 (M70e #1457):** **§9 added** — contract v2: the `virelai.abi` custom section, the capability names, and the host-share delivery manifest. §9 is strictly ADDITIVE to §1–§8: nothing above changes, and a module with no §9 section behaves exactly as it did in M35. \
 Source of truth for: W3 (#764, import breadth), W5 (#766, `wc` capstone) \
 Normative syscall ABI: `docs/decisions/0007-syscall-abi.md` (ADR 0007) \
 Scoping doc: `docs/wasm-core-scoping.md` (W1a–W5 gated split)
@@ -352,3 +353,144 @@ only — wrote [tests/wc.c](virelai.h) this way:
 * `docs/wasm-core-scoping.md` — M35 gated card split (W1a/W1b/W2–W5) and proposal survey.
 
 W3 implementors: implement imports exactly as §5; W5 (`wc`) authors: only §5 + this recipe were used — and nothing else was needed.
+
+---
+
+## 9. Contract v2 — declared capabilities and delivery admission (M70e #1457)
+
+**Additive.** §9 adds two things to §1–§8 and changes none of them: a custom
+section a module MAY carry to declare which contract revision it targets and
+which capabilities it requires, and a host-share manifest that a module
+carrying that section MUST be listed in before it runs. A module with no
+`virelai.abi` section is a **v1** module and behaves exactly as §1–§8 already
+specify — that is the whole compatibility story, and it is why every M35
+fixture and every already-authored module keeps loading unchanged.
+
+### 9.1 The `virelai.abi` custom section
+
+A wasm **custom section** named `virelai.abi` (standard custom-section
+encoding: section id `0`, a length-prefixed name, then the payload). Its
+payload is ASCII text, one directive per line, `\n`-separated; blank lines and
+lines whose first non-space character is `#` are ignored. Two directives:
+
+```
+virelai.abi=2
+capabilities=file,window,timer
+```
+
+* **`virelai.abi=<n>`** — REQUIRED. The contract revision the module targets.
+  `1` and `2` are accepted; **a revision above the loader's current revision
+  is refused** (`UnsupportedAbiRevision`, exit **14**, `wasm: abi: unsupported
+  revision`), because an unknown revision may mean imports the loader would
+  mis-dispatch. A missing, repeated, or non-numeric revision, an unknown
+  directive, or a second `virelai.abi` section is malformed
+  (`BadAbiSection`, exit **15**, `wasm: abi: bad virelai.abi section`).
+* **`capabilities=<name>[,<name>…]`** — OPTIONAL, and **omitting it means the
+  empty set**; an empty value (`capabilities=`) is malformed, because "none"
+  is spelled by leaving the line out. Names are §9.3 spellings, matched
+  exactly (no trimming inside a name, no case folding).
+
+**The gate.** When a module carries the section, every `env.*` import it
+declares must be covered by a declared capability; otherwise validation fails
+**before start** with `UndeclaredCapability` (exit **16**, `wasm: abi:
+undeclared capability`). The check sits in the same validator that already
+enforces §1's "unknown imports → validation failure", so the frozen surface
+and its capabilities cannot drift apart.
+
+Declaring a capability the module does not use is allowed (a module may be
+prepared for a later revision). Declaring *no* capabilities while importing
+anything from §5 that has a capability is refused — including the §7 debug
+pair, which is capability `debug` like any other.
+
+### 9.2 The delivery manifest — `/host/WASM.TXT`
+
+A v2 module runs **only** when the host share vouches for the exact bytes that
+were delivered. The share carries one manifest file, `/host/WASM.TXT`, with
+one row per module:
+
+```
+NAME.WASM | <bytes> | <64 lowercase hex chars, SHA-256 of the module> | abi=<n> | caps=<a,b,c>
+```
+
+* Five `|`-separated fields, in that order, with optional surrounding spaces.
+  Exactly five — a sixth field is malformed. `#` comments and blank lines are
+  ignored.
+* `caps=none` is the explicit empty set.
+* The **row name is compared ASCII case-insensitively** against the name given
+  to `exec WASM.BIN <name>` (the share is 8.3-uppercase by convention; the
+  name typed at the shell is whatever it is).
+* `abi=<n>` must be a revision §9.1 accepts (`1` or `2`).
+
+**Admission rule (normative).** For a module that declares v2, the loader
+reads the manifest, finds the row whose name matches, and requires in order:
+
+| # | Condition | Refusal | Exit | Serial |
+|---|-----------|---------|-----:|--------|
+| 1 | a matching, parseable row exists | `no_row` | 17 | `wasm: manifest: no row` |
+| 2 | module byte length == `bytes` | `size` | 18 | `wasm: manifest: size mismatch` |
+| 3 | SHA-256(module) == the row digest | `digest` | 19 | `wasm: manifest: digest mismatch` |
+| 4 | declared revision == `abi` | `revision` | 20 | `wasm: manifest: abi revision mismatch` |
+| 5 | every capability the module *uses* is granted by `caps` | `capability` | 21 | `wasm: manifest: capability not granted` |
+
+A row may grant **more** than the module uses (an operator may pre-provision);
+it may never grant less. Every refusal is a named error with its own exit
+status — never a trap inside the interpreter, and never a silent downgrade to
+"run it anyway". A malformed row is treated exactly like a missing one, on
+purpose: nothing about a delivery is guessed at.
+
+**Authoring.** Rows are generated, never hand-written:
+
+```
+python3 tools/wasm-manifest.py stamp app.wasm 'virelai.abi=2\ncapabilities=file,debug\n'   # add/refresh the section
+python3 tools/wasm-manifest.py gen   <share-dir>    # (re)write WASM.TXT from the modules present
+python3 tools/wasm-manifest.py check <share-dir>    # re-verify every row against every file
+```
+
+`gen`/`check` read the name→capability table out of `user/src/wasm.zig`, so the
+manifest tool and the loader cannot disagree about which capability a name
+belongs to. `stamp` is how a module gets its section without a linker that
+emits custom sections.
+
+### 9.3 Capability names
+
+Seven names, each owning a discontiguous-or-contiguous slice of §5. The
+authoritative mapping is the `cap` field of the `frozen_imports` table in
+`user/src/wasm.zig` (one capability per frozen import, enforced by a host
+test); this table is the contract spelling:
+
+| Capability | Imports it covers |
+|------------|-------------------|
+| `debug` | `write`, `exit` (§7) |
+| `file` | `file_open`, `file_read`, `file_write`, `file_close`, `dir_list`, `file_delete`, `file_rename`, `file_truncate`, `file_free` (§5.1) |
+| `window` | `win_open`, `win_fill`, `win_present`, `win_close`, `win_move`, `win_raise`, `win_get`, `win_query`, `win_set_visible` (§5.2) |
+| `audio` | `audio_info`, `audio_play`, `audio_volume`, `audio_mute` (§5.3) |
+| `timer` | `timer_set`, `timer_cancel` (§5.4) |
+| `memory` | `mmap`, `munmap` (§5.5) |
+| `process` | `procs`, `wait` (§5.6, §5.7) |
+
+### 9.4 Author recipe for a v2 module
+
+Same three toolchains as §7, with two extra steps — write the app, declare
+what it needs, stamp it:
+
+```
+zig cc -target wasm32-freestanding -nostdlib -fno-sanitize=undefined -g0 -I tests trio.c -o trio.wasm
+python3 tools/wasm-manifest.py stamp trio.wasm 'virelai.abi=2\ncapabilities=debug,file,window,timer\n'
+python3 tools/wasm-manifest.py gen <share-dir>
+```
+
+`user/src/wasm-corpus/trio.c` and `ticker.c` were written from §5 + §9 alone,
+which is the same provenance rule §7 states for `wc` — the corpus is the
+evidence that this document is sufficient for a fresh author.
+
+### 9.5 What v2 explicitly does NOT change
+
+* §5 signatures, slots, errno mapping, and every §4 error — unchanged. No new
+  import, no new slot, no rename, no removal.
+* A v1 module (no section) is not admitted, not listed, and not affected. The
+  legacy drop-and-exec path is intact.
+* No WASI, no networking imports, no threads/SIMD/multi-memory (§6 stands).
+  A capability is a *declaration* about §5, never a grant of something §5 does
+  not already name.
+* The manifest is a delivery check, not a package registry: no download, no
+  version solving, no dependency resolution.
