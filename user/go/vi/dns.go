@@ -72,14 +72,14 @@ var errNotOurs = errors.New("dns: not our reply")
 // listen slot has no unlisten; a repeat bind would fail EINVAL honestly).
 var dnsPortBound bool
 
-// udpListen binds port in the kernel's global listen table (slot 9).
-func udpListen(port uint16) int64 { return svc1(SlotUDPListen, uintptr(port)) }
+// UDPListen binds port in the kernel's global listen table (slot 9).
+func UDPListen(port uint16) int64 { return svc1(SlotUDPListen, uintptr(port)) }
 
-// udpSend sends ONE datagram to ip:port from the fixed source port (slot
+// UDPSend sends ONE datagram to ip:port from the fixed source port (slot
 // 10). Returns the payload length sent, or a negative errno. len is capped
 // at udpPayloadMax by the kernel — this wrapper refuses more up front so
 // truncation can never masquerade as a send.
-func udpSend(ip [4]byte, port uint16, b []byte) int64 {
+func UDPSend(ip [4]byte, port uint16, b []byte) int64 {
 	if len(b) == 0 {
 		return 0
 	}
@@ -92,7 +92,7 @@ func udpSend(ip [4]byte, port uint16, b []byte) int64 {
 // udpRecv copies the oldest datagram for the listener on port OUT (slot
 // 11): the full 8-byte UDP header + payload, clamped to udpDatagramMax.
 // Returns the copied length (0 = ring empty) or a negative errno.
-func udpRecv(port uint16, buf []byte) int64 {
+func UDPRecv(port uint16, buf []byte) int64 {
 	if len(buf) == 0 {
 		return 0
 	}
@@ -119,13 +119,13 @@ func ResolveDNS(name string, server [4]byte, budgetNs int64) ([4]byte, error) {
 	// recv has no ownership check) — that is this process's earlier
 	// resolution or another task's, and recv(port) works either way.
 	if !dnsPortBound {
-		if rc := udpListen(udpSourcePort); rc == 0 {
+		if rc := UDPListen(udpSourcePort); rc == 0 {
 			dnsPortBound = true
 		}
 	}
 
 	// One query, honestly refused or honestly sent.
-	if rc := udpSend(server, DNSPort, query); rc < 0 {
+	if rc := UDPSend(server, DNSPort, query); rc < 0 {
 		if -rc == ErrEINVAL {
 			return [4]byte{}, ErrDNSRefused
 		}
@@ -138,7 +138,7 @@ func ResolveDNS(name string, server [4]byte, budgetNs int64) ([4]byte, error) {
 	deadline := Nanos() + budgetNs
 	buf := make([]byte, udpDatagramMax)
 	for polls := 0; ; polls++ {
-		n := udpRecv(udpSourcePort, buf)
+		n := UDPRecv(udpSourcePort, buf)
 		if n < 0 {
 			// Not "empty" (that is 0): the port is not bound (the table
 			// filled between listen and recv) — fail honestly.
