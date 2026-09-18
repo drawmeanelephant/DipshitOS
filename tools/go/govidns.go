@@ -49,8 +49,7 @@ func main() {
 	if err != nil {
 		die("resolve", err)
 	}
-	vsys.Print("govinet: vidns resolved myhost.local -> ")
-	vsys.Println(ipText(ip))
+	vsys.Println("govinet: vidns resolved myhost.local -> " + ipText(ip))
 
 	// Dial the RESOLVED literal (not the name): the marker proves the
 	// resolved address is what actually dials.
@@ -64,8 +63,7 @@ func main() {
 	if n, err := conn.Send([]byte(req)); err != nil {
 		die("send", err)
 	} else {
-		vsys.Print("govinet: vidns sent n=")
-		vsys.Println(vsys.Itoa64(int64(n)))
+		vsys.Println("govinet: vidns sent n=" + vsys.Itoa64(int64(n)))
 	}
 
 	conn.SetRecvDeadline(2_000_000_000) // 2 s: fail closed on a dark peer
@@ -81,8 +79,7 @@ func main() {
 			break
 		}
 	}
-	vsys.Print("govinet: vidns body total=")
-	vsys.Println(vsys.Itoa64(int64(total)))
+	vsys.Println("govinet: vidns body total=" + vsys.Itoa64(int64(total)))
 	_ = conn.Close()
 
 	vsys.Println("gonet OK")

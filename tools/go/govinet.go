@@ -26,8 +26,7 @@ func heartbeat(stop *bool, count *int) {
 		*count++
 		// Print BEFORE sleeping, so a beat lands before the first blocking
 		// call and the gate's order proof has a "before" line to compare.
-		vsys.Print("govinet: hb=")
-		vsys.Println(vsys.Itoa64(int64(*count)))
+		vsys.Println("govinet: hb=" + vsys.Itoa64(int64(*count)))
 		vsys.Sleep(2)
 	}
 }
@@ -74,8 +73,7 @@ func runViloop() {
 		vsys.Println(vsys.Itoa64(rc))
 		fail("send")
 	}
-	vsys.Print("govinet: viloop sent n=")
-	vsys.Println(vsys.Itoa64(int64(len(payload))))
+	vsys.Println("govinet: viloop sent n=" + vsys.Itoa64(int64(len(payload))))
 
 	deadline := vsys.Nanotime() + 5_000_000_000
 	buf := make([]byte, 72) // udp.datagram_max: 8-byte header + 64 payload
@@ -83,8 +81,7 @@ func runViloop() {
 		if n := vi.UDPRecv(port, buf); n >= int64(8+len(payload)) {
 			src := uint16(buf[0])<<8 | uint16(buf[1])
 			if src == port && string(buf[8:8+len(payload)]) == "loop" {
-				vsys.Print("govinet: viloop echoed n=")
-				vsys.Println(vsys.Itoa64(n))
+				vsys.Println("govinet: viloop echoed n=" + vsys.Itoa64(n))
 				vsys.Println("gonet OK")
 				vsys.Exit(0)
 			}
@@ -110,8 +107,7 @@ func runViclosed() {
 
 	vsys.Println("govinet: viclosed dialing 10.0.0.2:8081")
 	rc := vi.TCPConnect([4]byte{10, 0, 0, 2}, 8081)
-	vsys.Print("govinet: viclosed refused rc=")
-	vsys.Println(vsys.Itoa64(rc))
+	vsys.Println("govinet: viclosed refused rc=" + vsys.Itoa64(rc))
 	vi.TCPClose()
 
 	vsys.Sleep(8)
