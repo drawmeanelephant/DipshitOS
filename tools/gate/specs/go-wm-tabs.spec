@@ -14,7 +14,8 @@
 #   03  GOEDIT+GOTERM, empty strip. Same two-tab choreography.
 #
 # Seed wm=none and exec GOTABWM.ELF like go-wm-seat. No HID. No framebuffer
-# golden. Do not overload go-wm-seat or go-wm-default.
+# golden. Do not overload go-wm-seat or go-wm-default. Boot 01 `reorder 0->1`
+# is M62d auto-choreography; HID press/release Reorder() is go-wm-hid run 02.
 #
 # HOST PREREQUISITE (fails the gate honestly when missing):
 #   bash tools/go/build-gotabwm.sh   ->  .build/go/GOTABWM.ELF
@@ -162,6 +163,7 @@ vgate_assert 01 serial-contains 'notepad: tab-aware (full-viewport)'
 # across a focus change. Order line names ids + pin bits (not LAYOUT.txt).
 # There is no kernel pin object: the first dump is Pin() on the strip; the
 # second is only printed after WmctlTaskbarClick actually took focus.
+# This `reorder 0->1` is applySwapUnpinned (choreography), not M63d HID drag.
 vgate_assert 01 serial-contains 'gotabwm: reorder 0->1'
 vgate_assert 01 serial-contains 'gotabwm: pin id='
 vgate_assert 01 serial-contains 'gotabwm: order ids='

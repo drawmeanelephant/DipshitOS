@@ -78,6 +78,7 @@ any, are on the GitHub tracker.
 | 59 | Default flip (#1298) | The **boot default is the Go seat**: `wm` is a schema-v2 settings key whose compiled default is `gotabwm`, so a boot with no persisted value autostarts `GOTABWM.ELF` and hosts `GOCALC.ELF` plus leftover Zig NOTEPAD over WM_RPC; `settings set wm tabwm` keeps the Zig seat as the reachable fallback and `none` is the explicit shim-only VM (gate `go-wm-default`, 2/2 runs: the untouched default boot, then the persisted fallback) | ✅ 2026-09-15 (gate `go-wm-default` green on VZ) |
 | 60 | Starve Zig EL0 (#1297) | No new `user/src/*.zig` apps (ADR 0030). Leftovers deleted: `EDIT.BIN` → `GOEDIT.ELF` (gate `go-edit`); `FILE.BIN` → `GOFILES.ELF` (gate `go-files`, #1374); `CALC.BIN` → `GOCALC.ELF` (gate `go-calc`, #1378, deleted M62h / #1406). Further Zig EL0 deletions are later cards. TLS stays `FETCHS.BIN` / `lib/tls`; SSH stays `SSH.BIN`. | 🔄 2026-09-17 (policy + EDIT/FILE/CALC deletions) |
 | 61 | Guest self-test (#1380) | `GOSELF.ELF` runs in-OS cases and writes `/host/SELFTEST/…` (report + intake copies + file-ABI receipts + window receipt); host only boots it and byte-compares via `share-equals`/`share-contains`; ADR 0031/0032 | ✅ 2026-09-17 |
+| 63 | GOTABWM HID (#1418) | Boot-default seat drains kind 19/21; pin/Alt+Tab; rail click; type into GOEDIT (share `seed-line\nXYZ`); HID drag-reorder is `go-wm-hid` run 02 (not `go-wm-tabs` M62d choreography). Dual path ADR 0009. Optional runner `ctrl-tab` is #1424. | ✅ 2026-09-18 (`go-wm-hid` 2/2, `go-wm-seat` 2/2, `go-wm-tabs` 3/3, `go-wm-default` 2/2) |
 
 > M40 (the gate-fleet consolidation, issue #934, done 2026-09-06) was a tooling
 > workstream, not a product milestone; M36 was skipped.
@@ -96,7 +97,6 @@ The only threads not closed:
 | **M58 — Move the apps you touch** | M58a–f landed: files, GOEDIT (`go-edit`), GOTERM (`go-term`, #1307), fetch, FART. `GOCALC.ELF` (gate `go-calc`, #1378) is the CALC successor. Full-viewport via tabapp in Zig TABWM. | |
 | **M60 leftovers** | Policy recorded; `EDIT.BIN`, `FILE.BIN`, and `CALC.BIN` gone. Remaining Zig EL0 (NOTEPAD, TABWM, SH, TLS/SSH helpers) deletes one binary per card when its Go successor is VZ-green. | |
 | **EL0 `sys_exec` caller survival** | AddrSpaceSpec + argv on slot 28; class-B `live-el0-exec` | #1333 |
-| **M63 — GOTABWM HID** | Drain 19/21; pin/Alt+Tab; rail click; type into GOEDIT; HID drag on run 02 (gate `go-wm-hid`). Optional ctrl-tab is M63r. | #1418 |
 
 ## Gate status
 
