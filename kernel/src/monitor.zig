@@ -4510,6 +4510,19 @@ fn cmd_smp(m: *Monitor, args: []const []const u8) ExecError {
     m.console.puts(" spins=");
     m.console.print_u64(scheduler.sched_lock_spins);
     m.console.puts("\n");
+    // M70b (#1454): wake-placement evidence — of all blocked->ready
+    // transitions, how many stayed on the calling core, how many landed
+    // on a remote (targeted) ring, and how many of those nudged a parked
+    // target with the RESCHEDULE SGI.
+    m.console.puts("smp: wakes=");
+    m.console.print_u64(scheduler.wake_local + scheduler.wake_remote);
+    m.console.puts(" local=");
+    m.console.print_u64(scheduler.wake_local);
+    m.console.puts(" remote=");
+    m.console.print_u64(scheduler.wake_remote);
+    m.console.puts(" nudges=");
+    m.console.print_u64(scheduler.wake_nudges);
+    m.console.puts("\n");
     return .none;
 }
 

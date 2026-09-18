@@ -1930,6 +1930,12 @@ fn irq_dispatch() void {
     forensics.note(.irq, intid);
     if (intid < 16) {
         smp.handle_sgi(intid);
+        // M70b (#1454): the RESCHEDULE SGI is the wake-target nudge — a
+        // parked secondary exits WFE and claims the woken task NOW (the
+        // same seam tick's parked branch runs) instead of waiting for its
+        // next 1 Hz PPI. Kept here rather than inside smp.handle_sgi so
+        // the SMP module stays free of a scheduler dependency.
+        if (intid == smp.SGI_IPI_RESCHEDULE) scheduler.ipi_reschedule();
     } else if (timer.is_ppi(intid)) {
         if (smp.core_id() == 0) {
             timer.handle(); // core-0 timekeeping authority (tick record + re-arm)
