@@ -232,6 +232,8 @@ test "syscall: runtime table has 128 slots and seventy-seven unique implemented 
     try std.testing.expectEqualStrings("sys_file_mode", entry_info(sys_file_mode).?.name);
     // M51 SSH-P1 (issue #1166, ADR 0025 D5): slot 72 is the EL0 entropy read.
     try std.testing.expectEqualStrings("sys_getrandom", entry_info(sys_getrandom).?.name);
+    // ADR 0027 D3 (M65a, #1439): slot 73 is sys_thread.
+    try std.testing.expectEqualStrings("sys_thread", entry_info(sys_thread).?.name);
     // Issue #1228 (phase 0c): slot 75 is the EL0 fault-handler register.
     try std.testing.expectEqualStrings("sys_exnotify", entry_info(sys_exnotify).?.name);
 }
@@ -4447,24 +4449,33 @@ test "syscall: sys_thread creates a same-process task and op 1 exits only the th
     try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
     const pid = process.find_by_task(2).?;
 
-    // Refusals: bad tls, null stack_hi, misaligned stack_hi, entry outside
-    // the process's executable text aperture.
+    // Refusals: unknown op, bad tls, null stack_hi, misaligned stack_hi,
+    // entry outside the process's executable text aperture.
+    try std.testing.expectEqual(error_result(.einval), dispatch(sys_thread, .{ 2, userspace.text_va + 4, 0x7000_0000, 0, 0, 0 }, &frame));
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_thread, .{ 0, userspace.text_va + 4, 0x7000_0000, 0, 1, 0 }, &frame));
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_thread, .{ 0, userspace.text_va + 4, 0, 0, 0, 0 }, &frame));
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_thread, .{ 0, userspace.text_va + 4, 0x7000_0003, 0, 0, 0 }, &frame));
     try std.testing.expectEqual(error_result(.einval), dispatch(sys_thread, .{ 0, 0x9000_0000, 0x7000_0000, 0, 0, 0 }, &frame));
 
     // Create: entry inside text, 16-byte-aligned stack_hi, arg = 0x1234.
-    const tid = dispatch(sys_thread, .{ 0, userspace.text_va + 4, 0x7000_0000, 0x1234, 0, 0 }, &frame);
+    // ADR 0027 D3: the initial frame uses the same machinery as
+    // register_exec_user — x0 = arg, pc/ELR = entry, SP_EL0 = stack_hi.
+    const entry: u64 = userspace.text_va + 4;
+    const stack_hi: u64 = 0x7000_0000;
+    const tid = dispatch(sys_thread, .{ 0, entry, stack_hi, 0x1234, 0, 0 }, &frame);
     try std.testing.expect(tid < scheduler.max_tasks);
     const thread_id: usize = @intCast(tid);
-    // Same process, thread-shaped (own kstack), ready with x0 = arg.
+    // Same process, thread-shaped (own kstack), unpinned, named like the process.
     try std.testing.expectEqual(pid, process.find_by_task(thread_id).?);
     try std.testing.expect(process.info(pid).?.state == .running);
     try std.testing.expect(scheduler.tasks[thread_id].is_thread);
     try std.testing.expect(scheduler.tasks[thread_id].thread_kstack_phys != 0);
+    try std.testing.expect(scheduler.tasks[thread_id].secondary_ok);
+    try std.testing.expectEqualStrings(process.info(pid).?.name, scheduler.tasks[thread_id].name);
     const thread_frame: *const exceptions.VectorFrame = @ptrFromInt(scheduler.tasks[thread_id].sp);
     try std.testing.expectEqual(@as(u64, 0x1234), exceptions.frame_read(thread_frame, 0));
+    try std.testing.expectEqual(entry, scheduler.tasks[thread_id].elr);
+    try std.testing.expectEqual(stack_hi, scheduler.tasks[thread_id].sp_el0);
 
     // Op 1 from the thread: only the thread exits; the process survives.
     try std.testing.expect(scheduler.yield_current()); // rotate until the thread is current
@@ -4486,6 +4497,104 @@ test "syscall: sys_thread creates a same-process task and op 1 exits only the th
     try std.testing.expectEqual(@as(u64, 0), dispatch(sys_exit, .{ 7, 0, 0, 0, 0, 0 }, &exit2));
     try std.testing.expect(process.info(pid).?.state == .exited);
     try std.testing.expectEqual(@as(u64, 7), process.info(pid).?.exit_status);
+}
+
+test "syscall: sys_thread last remaining task dies the process (ADR 0027 D2/D3)" {
+    // Thread-exit (op 1) is not process-exit. sys_exit stays process-exit;
+    // the process dies only when its LAST task leaves.
+    mmu.reset();
+    alloc.reset_refcounts();
+    process.init();
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0 (primary)
+    scheduler.start();
+    var thread_test_ram: [64 * 4096]u8 align(4096) = undefined;
+    const map_desc = [_]memmap.MemoryDescriptor{
+        .{ .type = .conventional_memory, .physical_start = @intFromPtr(&thread_test_ram), .virtual_start = 0, .number_of_pages = 64, .attribute = 0 },
+    };
+    const view = memmap.MapView.init(std.mem.asBytes(&map_desc), @sizeOf(memmap.MemoryDescriptor), map_desc.len);
+    try std.testing.expect(alloc.init(view, &.{}));
+
+    var frame = fresh_frame();
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+    const pid = process.find_by_task(2).?;
+
+    const tid = dispatch(sys_thread, .{ 0, userspace.text_va + 4, 0x7000_0000, 0, 0, 0 }, &frame);
+    try std.testing.expect(tid < scheduler.max_tasks);
+    const thread_id: usize = @intCast(tid);
+    try std.testing.expect(process.info(pid).?.state == .running);
+
+    // Child thread-exits: the process stays running with the primary.
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expectEqual(thread_id, scheduler.current_id());
+    var child_exit = fresh_frame();
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_thread, .{ 1, 0, 0, 0, 0, 0 }, &child_exit));
+    try std.testing.expect(scheduler.is_terminated(thread_id));
+    try std.testing.expect(process.info(pid).?.state == .running);
+    try std.testing.expect(scheduler.reap(thread_id));
+
+    // Primary thread-exits (op 1, not sys_exit) as the last remaining task:
+    // the process dies with this task's status (0 — no prior sys_exit snapshot).
+    var spins: usize = 0;
+    while (scheduler.current_id() != 2 and spins < 8) : (spins += 1) {
+        try std.testing.expect(scheduler.yield_current());
+    }
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+    var last_exit = fresh_frame();
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_thread, .{ 1, 0, 0, 0, 0, 0 }, &last_exit));
+    try std.testing.expect(scheduler.is_terminated(2));
+    try std.testing.expect(process.info(pid).?.state == .exited);
+    try std.testing.expectEqual(@as(u64, 0), process.info(pid).?.exit_status);
+}
+
+test "syscall: sys_thread op 1 reap frees the thread EL1 kstack (ADR 0027 D3)" {
+    mmu.reset();
+    alloc.reset_refcounts();
+    process.init();
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0);
+    scheduler.start();
+    var thread_test_ram: [64 * 4096]u8 align(4096) = undefined;
+    const map_desc = [_]memmap.MemoryDescriptor{
+        .{ .type = .conventional_memory, .physical_start = @intFromPtr(&thread_test_ram), .virtual_start = 0, .number_of_pages = 64, .attribute = 0 },
+    };
+    const view = memmap.MapView.init(std.mem.asBytes(&map_desc), @sizeOf(memmap.MemoryDescriptor), map_desc.len);
+    try std.testing.expect(alloc.init(view, &.{}));
+
+    var frame = fresh_frame();
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+    const pid = process.find_by_task(2).?;
+    const free_before = alloc.stats().free_pages;
+
+    const tid = dispatch(sys_thread, .{ 0, userspace.text_va + 4, 0x7000_0000, 0, 0, 0 }, &frame);
+    try std.testing.expect(tid < scheduler.max_tasks);
+    const thread_id: usize = @intCast(tid);
+    const kstack_pages = scheduler.tasks[thread_id].thread_kstack_pages;
+    try std.testing.expect(kstack_pages > 0);
+    try std.testing.expectEqual(free_before - kstack_pages, alloc.stats().free_pages);
+
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expectEqual(thread_id, scheduler.current_id());
+    var exit_frame = fresh_frame();
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_thread, .{ 1, 0, 0, 0, 0, 0 }, &exit_frame));
+    try std.testing.expect(scheduler.is_terminated(thread_id));
+    try std.testing.expect(process.info(pid).?.state == .running);
+    // Exit marks the zombie; the kstack returns on reap (D3).
+    try std.testing.expectEqual(free_before - kstack_pages, alloc.stats().free_pages);
+    try std.testing.expect(scheduler.reap(thread_id));
+    try std.testing.expectEqual(free_before, alloc.stats().free_pages);
+    try std.testing.expectEqual(@as(u64, 0), scheduler.tasks[thread_id].thread_kstack_phys);
+    try std.testing.expectEqual(@as(u64, 0), scheduler.tasks[thread_id].thread_kstack_pages);
 }
 
 test "syscall: mmap is process-scope — a post-spawn mapping reaches a thread (ADR 0027 review finding 2)" {

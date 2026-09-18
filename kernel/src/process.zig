@@ -1516,3 +1516,27 @@ test "process: create_as leaves an existing running process untouched (issue #13
     try std.testing.expectEqual(@as(?usize, child), current());
     try std.testing.expectEqual(mmap_default_va, next_mmap_va(child, 4096));
 }
+
+test "process: last live task exit dies the process (ADR 0027 D2/D3)" {
+    // Thread exit decrements live_tasks; the descriptor stays running until
+    // the last bound task leaves. No request_process_exit — the last task's
+    // own status is the process status (sys_exit snapshots are a different path).
+    init();
+    const id = create("T.BIN", .{}, .{}, .{}).?;
+    try std.testing.expect(bind(id, 2));
+    try std.testing.expect(bind_thread(id, 5));
+    try std.testing.expect(has_thread_capacity(id)); // max_threads = 6; one seat used
+    try std.testing.expectEqual(@as(?usize, id), find_by_task(2));
+    try std.testing.expectEqual(@as(?usize, id), find_by_task(5));
+    try std.testing.expectEqual(State.running, info(id).?.state);
+
+    try std.testing.expect(on_task_exit(5, 0) == null);
+    try std.testing.expectEqual(State.running, info(id).?.state);
+    try std.testing.expect(find_by_task(5) == null);
+    try std.testing.expectEqual(@as(?usize, id), find_by_task(2));
+
+    try std.testing.expectEqual(@as(?usize, id), on_task_exit(2, 11));
+    try std.testing.expectEqual(State.exited, info(id).?.state);
+    try std.testing.expectEqual(@as(u64, 11), info(id).?.exit_status);
+    _ = take_exit_report();
+}
