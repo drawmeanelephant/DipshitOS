@@ -121,3 +121,111 @@ func TestHandleWmKeyAltTabNeedsKernel(t *testing.T) {
 		t.Fatalf("failed alt-tab mutated focus to %d", id)
 	}
 }
+
+func TestPointerDownEdge(t *testing.T) {
+	if pointerDownEdge(0, 0) || pointerDownEdge(0, hidBtnLeft) {
+		t.Fatal("hover/up must not be a down edge")
+	}
+	if !pointerDownEdge(hidBtnLeft, 0) {
+		t.Fatal("press must be a down edge")
+	}
+	if pointerDownEdge(hidBtnLeft, hidBtnLeft) {
+		t.Fatal("held must not re-fire")
+	}
+}
+
+func TestRailCellAtTwoTabs(t *testing.T) {
+	const w, n, h = 1280, 2, 22
+	if i, ok := railCellAt(320, 10, w, n, h); !ok || i != 0 {
+		t.Fatalf("tab 0 center (320,10) = %d ok=%v want 0", i, ok)
+	}
+	if i, ok := railCellAt(960, 10, w, n, h); !ok || i != 1 {
+		t.Fatalf("tab 1 center (960,10) = %d ok=%v want 1", i, ok)
+	}
+	if i, ok := railCellAt(639, 0, w, n, h); !ok || i != 0 {
+		t.Fatalf("left cell edge = %d ok=%v want 0", i, ok)
+	}
+	if i, ok := railCellAt(640, 21, w, n, h); !ok || i != 1 {
+		t.Fatalf("right cell start = %d ok=%v want 1", i, ok)
+	}
+	if _, ok := railCellAt(320, 22, w, n, h); ok {
+		t.Fatal("py == RailHeight is the pane, not the rail")
+	}
+	if _, ok := railCellAt(640, 360, w, n, h); ok {
+		t.Fatal("client-area click must miss the rail")
+	}
+	if _, ok := railCellAt(320, 10, w, 0, h); ok {
+		t.Fatal("empty strip has no cell")
+	}
+	// Remainder pixels past n*cellW still hit the last cell.
+	if i, ok := railCellAt(1279, 10, 1280, 3, h); !ok || i != 2 {
+		t.Fatalf("right remainder = %d ok=%v want 2", i, ok)
+	}
+}
+
+func TestApplyRailClickMissesAndHostFailsClosed(t *testing.T) {
+	saved := tabs
+	savedHosted := hostedApp
+	savedBtn := prevPtrButtons
+	defer func() {
+		tabs = saved
+		hostedApp = savedHosted
+		prevPtrButtons = savedBtn
+	}()
+	tabs = TabStrip{}
+	hostedApp = 0
+	prevPtrButtons = 0
+	if applyRailClick(320, 10) {
+		t.Fatal("empty strip must miss")
+	}
+	if !tabs.OpenTab(3, "A") || !tabs.OpenTab(4, "B") {
+		t.Fatal("OpenTab")
+	}
+	_ = tabs.FocusTab(4)
+	if applyRailClick(640, 360) {
+		t.Fatal("client-area must not focus")
+	}
+	id, _ := tabs.Focused()
+	if id != 4 {
+		t.Fatalf("client-area mutated focus to %d", id)
+	}
+	if applyRailClick(960, 10) {
+		t.Fatal("already-focused cell must not re-fire")
+	}
+	if applyRailClick(320, 10) {
+		t.Fatal("host rail click must fail closed (no slot 65)")
+	}
+	id, _ = tabs.Focused()
+	if id != 4 {
+		t.Fatalf("failed rail click mutated focus to %d", id)
+	}
+}
+
+func TestHandleWmPointerDownEdgeOnly(t *testing.T) {
+	saved := tabs
+	savedHosted := hostedApp
+	savedBtn := prevPtrButtons
+	defer func() {
+		tabs = saved
+		hostedApp = savedHosted
+		prevPtrButtons = savedBtn
+	}()
+	tabs = TabStrip{}
+	hostedApp = 0
+	prevPtrButtons = 0
+	if !tabs.OpenTab(3, "A") || !tabs.OpenTab(4, "B") {
+		t.Fatal("OpenTab")
+	}
+	_ = tabs.FocusTab(4)
+	arg := uint32(320) | uint32(10)<<16
+	handleWmPointer(vi.Event{Kind: vi.EvWmPointer, Arg0: arg, Flags: 0})
+	handleWmPointer(vi.Event{Kind: vi.EvWmPointer, Arg0: arg, Flags: uint16(hidBtnLeft)})
+	handleWmPointer(vi.Event{Kind: vi.EvWmPointer, Arg0: arg, Flags: 0})
+	id, _ := tabs.Focused()
+	if id != 4 {
+		t.Fatalf("host pointer sequence mutated focus to %d", id)
+	}
+	if prevPtrButtons != 0 {
+		t.Fatalf("up must clear prevPtrButtons, got %#x", prevPtrButtons)
+	}
+}

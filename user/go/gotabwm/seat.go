@@ -58,8 +58,9 @@ const blankRGB uint32 = 0x1A1E2E
 // each runtime is 3 kernel tasks: primary + sysmon + helper). A
 // `--pointer-virtio` click is 3 messages × 2.5 s; pointerClickHold is that
 // budget in ticks. maxTicks must cover hostTicks + hidChordHold + the
-// two-tab choreography (9) so M63b chords land before auto pin/close.
-const maxTicks = 40
+// two-tab choreography (9) so M63b chords and an M63c rail click land
+// before auto pin/close.
+const maxTicks = 48
 
 // pointerClickHold is how many composite ticks one `--pointer-virtio` click
 // needs at the 1 Hz kind-18 heartbeat (3 messages × 2.5 s, rounded up).
@@ -224,12 +225,14 @@ func main() {
 }
 
 // consumeSeatEvent handles one non-empty poll. Pointer and key log their
-// markers and return false (not a tick). Window mirrors are recognized and
-// dropped (hit-test is a later card). Any other kind is the pre-M63a
-// ignore-non-tick path. Only EvCompositeTick returns true.
+// markers and return false (not a tick). Kind 19 also hit-tests the top
+// rail (M63c). Window mirrors are dropped; client-area clicks are ignored.
+// Any other kind is the pre-M63a ignore-non-tick path. Only
+// EvCompositeTick returns true.
 func consumeSeatEvent(e vi.Event) bool {
 	if e.Kind == vi.EvWmPointer {
 		vi.ConsoleLine(MarkerPtr)
+		handleWmPointer(e)
 		return false
 	}
 	if e.Kind == vi.EvWmKey {
