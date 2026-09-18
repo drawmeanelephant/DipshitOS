@@ -234,6 +234,207 @@ final class VFWireTests: XCTestCase {
         _ = table.close(h)
     }
 
+    // ------------------------------------------------------------------
+    // M70a (#1453) — the host half of the fuzz fleet. Seeded mutation over
+    // the pinned fixtures plus property checks on the pure builders and the
+    // path defense. Deterministic by construction (an explicit-seed
+    // SplitMix64 — no Date, no SystemRandomNumberGenerator), so a failure
+    // reproduces from "seed + iteration" alone, exactly like the guest-side
+    // corpus in kernel/tests/fuzz_test.zig.
+    // ------------------------------------------------------------------
+
+    private struct Fuzz {
+        private var state: UInt64
+        init(seed: UInt64) { self.state = seed }
+        mutating func next() -> UInt64 {
+            state = state &+ 0x9e37_79b9_7f4a_7c15
+            var z = state
+            z = (z ^ (z >> 30)) &* 0xbf58_476d_1ce4_e5b9
+            z = (z ^ (z >> 27)) &* 0x94d0_49bb_1331_11eb
+            return z ^ (z >> 31)
+        }
+        mutating func below(_ n: Int) -> Int { n <= 0 ? 0 : Int(next() % UInt64(n)) }
+        mutating func byte() -> UInt8 { UInt8(truncatingIfNeeded: next() >> 33) }
+    }
+
+    private static let fuzzSeeds: [UInt64] = [
+        0x5eed_0001, 0x1337_2026, 0xdead_beef_cafe, 0x0f0f_1234_5678,
+    ]
+
+    /// F1 — a reply frame may never decode out of bounds, over-report its
+    /// length, or lie about clamping, whatever the mutation did to it.
+    func testFuzz12ReplyDecodeFailsClosedOverFixtureMutations() throws {
+        let corpus = [try fixture("vf-reply-read.bin"), try fixture("vf-reply-list.bin")]
+        var decoded = 0
+        for seed in Self.fuzzSeeds {
+            var fuzz = Fuzz(seed: seed)
+            for original in corpus {
+                for iteration in 0..<64 {
+                    var buf = original
+                    var len = buf.count
+                    switch iteration % 4 {
+                    case 0: // byte flips
+                        for _ in 0..<(1 + fuzz.below(3)) { buf[fuzz.below(buf.count)] = fuzz.byte() }
+                    case 1: // truncation anywhere, including inside the header
+                        len = fuzz.below(buf.count + 1)
+                    case 2: // extension with bytes past the declared length
+                        for _ in 0..<(1 + fuzz.below(8)) { buf.append(fuzz.byte()) }
+                        len = buf.count
+                    default: // a hostile declared length on an intact frame
+                        if buf.count >= VFWire.replyHdrLen {
+                            buf[1] = fuzz.byte()
+                            buf[2] = fuzz.byte()
+                        }
+                    }
+                    let input = Array(buf[0..<len])
+                    let rep = VFWire.decodeReply(input)
+                    decoded += 1
+                    let where_ = "seed 0x\(String(seed, radix: 16)) iteration \(iteration)"
+                    if input.count < VFWire.replyHdrLen {
+                        XCTAssertEqual(rep.status, VFWire.stHostError, where_)
+                        XCTAssertEqual(rep.dlen, 0, where_)
+                        XCTAssertTrue(rep.data.isEmpty, where_)
+                        XCTAssertTrue(rep.clamped, where_)
+                        continue
+                    }
+                    let declared = UInt16(input[1]) | (UInt16(input[2]) << 8)
+                    let avail = input.count - VFWire.replyHdrLen
+                    let take = min(Int(declared), avail)
+                    XCTAssertEqual(rep.status, input[0], where_)
+                    XCTAssertEqual(rep.dlen, declared, where_)
+                    XCTAssertEqual(rep.data.count, take, where_)
+                    XCTAssertEqual(rep.clamped, take < Int(declared), where_)
+                    XCTAssertEqual(rep.data, Array(input[VFWire.replyHdrLen..<(VFWire.replyHdrLen + take)]), where_)
+                }
+            }
+        }
+        XCTAssertEqual(decoded, Self.fuzzSeeds.count * corpus.count * 64)
+    }
+
+    /// F2 — the path defense is the host's only trust boundary for a guest
+    /// path: every path it ACCEPTS must land inside the share root, and the
+    /// shapes it refuses stay refused.
+    func testFuzz13ResolveSubpathConfinesEveryAcceptedPathUnderRoot() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vf-fuzz-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let canonicalRoot = root.resolvingSymlinksInPath().path
+
+        var accepted = 0
+        var refused = 0
+        for seed in Self.fuzzSeeds {
+            var fuzz = Fuzz(seed: seed)
+            for _ in 0..<512 {
+                var path = ""
+                for _ in 0..<fuzz.below(48) {
+                    switch fuzz.below(8) {
+                    case 0: path += "/"
+                    case 1: path += "."
+                    case 2: path += ".."
+                    case 3: path += "\\"
+                    case 4: path += "a"
+                    case 5: path += "b"
+                    case 6: path += " "
+                    default: path += "z"
+                    }
+                }
+                guard let resolved = VFWire.resolveSubpath(root: root, path: path) else {
+                    refused += 1
+                    continue
+                }
+                accepted += 1
+                let landed = resolved.resolvingSymlinksInPath().path
+                XCTAssertTrue(
+                    landed == canonicalRoot || landed.hasPrefix(canonicalRoot + "/"),
+                    "accepted path escaped the share root: \"\(path)\" -> \(landed)"
+                )
+                XCTAssertFalse(path.hasPrefix("/"), "absolute path accepted: \"\(path)\"")
+            }
+        }
+        XCTAssertGreaterThan(accepted, 0, "the corpus must exercise accepted paths too")
+        XCTAssertGreaterThan(refused, 0, "the corpus must exercise refused paths too")
+
+        // The named refusals stay refused (the pre-existing S4 set, re-pinned
+        // against the fuzz corpus's alphabet).
+        for hostile in ["/etc/passwd", "../escape", "a/../../escape", "a\\..\\escape", "..", "./.."] {
+            XCTAssertNil(VFWire.resolveSubpath(root: root, path: hostile), "accepted \"\(hostile)\"")
+        }
+    }
+
+    /// F3 — the pure builders and decoders refuse ambiguous input: the NUL
+    /// frame separator (found here: RENAME did not check it while CLONE did),
+    /// the u16 request length field, short handles, and long entry names.
+    func testFuzz14BuildersAndDecodersRefuseAmbiguousInput() throws {
+        // NUL smuggling must be refused by BOTH NUL-framed builders.
+        XCTAssertNil(VFWire.buildRenamePayload(from: "a\u{0}b", to: "x"))
+        XCTAssertNil(VFWire.buildRenamePayload(from: "x", to: "a\u{0}b"))
+        XCTAssertNil(VFWire.buildClonePayload(from: "a\u{0}b", to: "x"))
+        XCTAssertNil(VFWire.buildClonePayload(from: "x", to: "a\u{0}b"))
+        // Empty and over-long halves on both.
+        let long = String(repeating: "a", count: VFWire.pathMax + 1)
+        XCTAssertNil(VFWire.buildRenamePayload(from: "", to: "x"))
+        XCTAssertNil(VFWire.buildRenamePayload(from: "x", to: ""))
+        XCTAssertNil(VFWire.buildRenamePayload(from: long, to: "x"))
+        XCTAssertNil(VFWire.buildRenamePayload(from: "x", to: long))
+        XCTAssertNil(VFWire.buildClonePayload(from: long, to: "x"))
+        XCTAssertNil(VFWire.buildClonePayload(from: "x", to: long))
+
+        // encodeRequest: exact little-endian header, refusal only past u16.
+        var fuzz = Fuzz(seed: Self.fuzzSeeds[3])
+        for _ in 0..<256 {
+            let n = fuzz.below(VFWire.replyCap)
+            var payload = [UInt8]()
+            payload.reserveCapacity(n)
+            for _ in 0..<n { payload.append(fuzz.byte()) }
+            let enc = try XCTUnwrap(VFWire.encodeRequest(op: VFWire.opRead, flags: 0, payload: payload))
+            XCTAssertEqual(enc.count, VFWire.requestHdrLen + n)
+            XCTAssertEqual(enc[0], VFWire.opRead)
+            XCTAssertEqual(enc[1], 0)
+            XCTAssertEqual(Int(enc[2]) | (Int(enc[3]) << 8), n)
+            XCTAssertEqual(Array(enc[VFWire.requestHdrLen...]), payload)
+        }
+        XCTAssertNil(VFWire.encodeRequest(op: VFWire.opRead, flags: 0,
+                                          payload: [UInt8](repeating: 0, count: 0x10000)))
+
+        // Short-buffer parses must refuse, never trap: a u16 handle needs
+        // `handleLen` bytes from the offset it is read at, no more no less.
+        for n in 0..<VFWire.handleLen {
+            XCTAssertNil(VFWire.handle(fromPayload: [UInt8](repeating: 0, count: n)),
+                         "a \(n)-byte payload holds no handle")
+        }
+        let threeByte: [UInt8] = [0x01, 0x02, 0x03]
+        XCTAssertEqual(VFWire.handle(fromPayload: threeByte), 0x0201)
+        XCTAssertEqual(VFWire.handle(fromPayload: threeByte, at: 1), 0x0302)
+        XCTAssertNil(VFWire.handle(fromPayload: threeByte, at: 2))
+        XCTAssertNil(VFWire.handle(fromPayload: threeByte, at: 3))
+
+        // decodeReply over EVERY prefix of a real reply: sub-header prefixes
+        // are honest host errors, the rest clamp without over-reading.
+        let read = try fixture("vf-reply-read.bin")
+        for n in 0..<read.count {
+            let rep = VFWire.decodeReply(Array(read[0..<n]))
+            if n < VFWire.replyHdrLen {
+                XCTAssertEqual(rep.status, VFWire.stHostError)
+                XCTAssertTrue(rep.data.isEmpty)
+                XCTAssertTrue(rep.clamped)
+            } else {
+                XCTAssertLessThanOrEqual(rep.data.count, n - VFWire.replyHdrLen)
+            }
+        }
+
+        // encodeEntryRow truncates a long name to the 31-byte row field.
+        let row = VFWire.encodeEntryRow(VFWire.DirEntry(
+            name: String(repeating: "x", count: 64),
+            type: VFWire.dirTypeFile,
+            size: 9
+        ))
+        XCTAssertEqual(row.count, VFWire.entryRowLen)
+        XCTAssertEqual(Array(row[0..<31]), Array(repeating: UInt8(ascii: "x"), count: 31))
+        XCTAssertEqual(row[31], VFWire.dirTypeFile)
+        XCTAssertEqual(Int(row[32]), 9)
+    }
+
     /// S10 — 8-slot cap (parity with the kernel ABI): the ninth open is
     /// refused with stHandle; closing frees a slot.
     func testS10HandleTableCap() throws {

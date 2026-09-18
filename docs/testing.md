@@ -180,6 +180,42 @@ under `C` with no workflow noticing). The rules that came out of it:
   `tools/probe-pointer-routes.sh`) feed a count or a diagnostic string in
   class C/D gates, never a tracked byte or a compared filename.
 
+## Fuzz fleet (M70a, issue #1453)
+
+Two seeded, host-only corpora — both class A, no VM, no device:
+
+- **`kernel/tests/fuzz_test.zig`** (runs inside `bash tools/verify-unit-tests.sh`
+  / `zig build test`): drives the ADR 0007 dispatch seam with hostile
+  argument tuples over every slot in and just past the namespace — an
+  out-of-namespace or reserved row must answer exactly `-ENOSYS`, most
+  hostile tuples must produce a documented errno or the ABI's `0`, and no
+  call may leave a service-domain lock held or move the caller. A separate
+  live-EL0 sweep drives the 24 slot/argument positions the syscall suite
+  already pins as buffer-carrying (`uaccess.diagnostic_unmapped`) and
+  requires a non-positive answer. It also mutates the checked-in
+  `tests/vf-*.bin` fixtures (embedded through a build option, so the corpus
+  cannot drift from the files) through the HF decoders.
+- **`host/vm-runner/Tests/VMRunnerTests/VFWireTests.swift`** (`swift test`):
+  the same fixture mutation over the Swift `VFWire` decode, the share-root
+  containment property of `resolveSubpath`, and the refusal properties of
+  the pure payload builders.
+
+**Determinism is the rule:** every generator takes a fixed seed; a failure
+names the seed and the slot/iteration, so it replays byte-identically on any
+machine. Do not introduce wall-clock time, `sys_getrandom`, or host entropy
+into a gate-run corpus.
+
+**Keep a green run silent.** An unconditional `std.debug.print` in a test
+module makes the Zig 0.16 build runner mark that run step `w` and echo
+`failed command: … --listen=-` for a step whose tests all passed and whose
+build exits 0 (observed 2026-09-18 with a five-line probe module). Print only
+when there is a violation to report.
+
+**Named gaps** (do not read a green run as coverage of these): the live EL0
+entry path (`#1333`'s class); `virtio_file.stat`'s inline `[size][type]` field
+parse, which is only reachable through the queue-5 transport; and the host
+runner's request parse in `main.swift`, which is not VZ-free.
+
 ## Verification sequence
 
 1. Print the detected tool versions.

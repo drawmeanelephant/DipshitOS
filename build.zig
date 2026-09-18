@@ -2476,6 +2476,9 @@ pub fn build(b: *std.Build) void {
         "kernel/tests/monitor_test.zig",
         "kernel/tests/shell_test.zig",
         "kernel/tests/alloc_test.zig",
+        // M70a (#1453): the seeded fuzz fleet — the syscall-seam sweep plus the
+        // HF-wire mutation corpus. Class A only (no VM, no device).
+        "kernel/tests/fuzz_test.zig",
         "kernel/tests/net/tcp_test.zig",
         "kernel/tests/net/dhcp_test.zig",
         "kernel/tests/driving_award_test.zig",
@@ -2516,6 +2519,16 @@ pub fn build(b: *std.Build) void {
         .optimize = .Debug,
     });
     helpers_mod.addOptions("build_options", kernel_options);
+
+    // M70a (#1453): the HF-wire fixtures the fuzz root mutates, embedded as a
+    // build option of THAT root only — the checked-in bytes cannot drift from
+    // what the fuzz corpus feeds the decoders, and the kernel image never
+    // carries fixture data.
+    const fuzz_fixture_options = b.addOptions();
+    fuzz_fixture_options.addOption([]const u8, "vf_pattern_32k", @embedFile("tests/vf-pattern-32k.bin"));
+    fuzz_fixture_options.addOption([]const u8, "vf_req_read", @embedFile("tests/vf-req-read.bin"));
+    fuzz_fixture_options.addOption([]const u8, "vf_reply_read", @embedFile("tests/vf-reply-read.bin"));
+    fuzz_fixture_options.addOption([]const u8, "vf_reply_list", @embedFile("tests/vf-reply-list.bin"));
 
     const scheduler_mod = b.createModule(.{
         .root_source_file = b.path("kernel/src/scheduler.zig"),
@@ -2617,6 +2630,10 @@ pub fn build(b: *std.Build) void {
             .optimize = .Debug,
         });
         test_mod.addOptions("build_options", kernel_options);
+        // The fuzz root is the only one that reads the wire fixtures.
+        if (std.mem.eql(u8, src_path, "kernel/tests/fuzz_test.zig")) {
+            test_mod.addOptions("fuzz_fixtures", fuzz_fixture_options);
+        }
         // kex.zig reaches `rng` (module-mapped), which imports the mapped
         // `ui` module. kex.zig itself does not import `ui`, so leave the
         // mapping off this test root (nothing here needs it).

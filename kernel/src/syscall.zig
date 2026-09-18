@@ -60,7 +60,11 @@ pub const exceptions = @import("exceptions.zig");
 pub const mailbox = @import("mailbox.zig"); // claim 5965: per-process rings
 pub const process = @import("process.zig"); // claim 5965: target/current-process lookup
 pub const scheduler = @import("scheduler.zig");
-const svclock = @import("svclock.zig"); // claim 9498 follow-on: per-service-domain locks — syscalls contend only within their domain
+// claim 9498 follow-on: per-service-domain locks — syscalls contend only within
+// their domain. Exported since M70a (#1453) so a host test can observe the
+// dispatch seam's acquire/release symmetry through THIS instance (a separately
+// mapped module would be a different copy of the lock state).
+pub const svclock = @import("svclock.zig");
 pub const arp = @import("arp.zig"); // M26 N2 (issue #400): the ARP table for the net-stats snapshot
 pub const dhcp = @import("dhcp.zig"); // M26 N2 (issue #400): DHCP lease state for the net-stats snapshot
 pub const udp = @import("udp.zig"); // claim 1384 (card N6): the milestone-five UDP layer
