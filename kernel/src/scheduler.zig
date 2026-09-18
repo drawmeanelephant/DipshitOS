@@ -100,17 +100,19 @@ const forensics = @import("forensics.zig"); // #1278: last-words recorder (inert
 const user_stack_section = if (builtin.object_format == .elf) ".userbss" else "__DATA,__userbss";
 
 /// Round-robin pool (card 3g, claim 5795 — the pool-scale capstone;
-/// milestone sixteen C3, claim 0339 — the measured growth). Card 3g set
-/// the budget at 7: shell + EL1h demo worker + FOUR EL0t user slots + the
-/// scheduler-owned idle task (7/7, FOUR live user programs). C3 measures
-/// that the demo apps (launcher, file browser, chat, sound apps, desktop)
-/// exhaust those four user slots — the exec path refuses a FIFTH
-/// concurrent program with `pool_full` — and grows the pool to 11:
-/// shell + worker + EIGHT EL0t user slots + idle (11/11, EIGHT live user
-/// programs — the "8+ apps on the desktop" consuming experience). Fixed at
-/// comptime — no allocation, no dynamic registration or processes; the
-/// lifecycle's spawn/reap only recycle these slots.
-pub const max_tasks: usize = 11;
+/// milestone sixteen C3, claim 0339 — the measured growth; #1426 — three
+/// concurrent Go runtimes). Card 3g set the budget at 7: shell + EL1h demo
+/// worker + FOUR EL0t user slots + the scheduler-owned idle task (7/7,
+/// FOUR live user programs). C3 measures that the demo apps exhaust those
+/// four user slots — the exec path refuses a FIFTH concurrent program with
+/// `pool_full` — and grows the pool to 11: shell + worker + EIGHT EL0t
+/// user slots + idle. #1426: GOTABWM + two Go clients is 9/11 already
+/// (each runtime is primary + sysmon + helper even with GOMAXPROCS=1); a
+/// third runtime's sysmon hits EAGAIN. Grown 11 → 13 so idle_id stays
+/// `max_tasks - 1` with TEN EL0t user slots (12 occupied + one spare).
+/// Fixed at comptime — no allocation, no dynamic registration or
+/// processes; the lifecycle's spawn/reap only recycle these slots.
+pub const max_tasks: usize = 13;
 /// The idle task's fixed slot (registered by `init`, never recycled).
 pub const idle_id: usize = max_tasks - 1;
 /// The worker's static stack (BSS, like every other kernel global). The
@@ -312,8 +314,8 @@ pub var tasks: [max_tasks]Task = [_]Task{.{}} ** max_tasks;
 // ---------------------------------------------------------------------------
 
 /// Bounded BSS wait table keyed (pid, uaddr) — the same shape as the
-/// pipe/event seams, flat scan (max_tasks entries; no hash table at 11
-/// slots). `sys_futex` op 0 inserts the calling task; op 1 and the exit
+/// pipe/event seams, flat scan (max_tasks entries; no hash table at this
+/// bound). `sys_futex` op 0 inserts the calling task; op 1 and the exit
 /// path remove/wake.
 pub const futex_max: usize = max_tasks;
 const FutexEntry = struct {

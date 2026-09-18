@@ -1,12 +1,12 @@
-# live-scale.spec -- pool scale at the 11-slot budget: counter + up
-# to eight USER.BINs live at once (>= 6 running rows, all-distinct
+# live-scale.spec -- pool scale at the 13-slot budget: counter + up
+# to nine USER.BINs live at once (>= 6 running rows, all-distinct
 # tasks/stacks), every load runs the EL0 flow, the worker advances
-# mid-span, and EITHER the ninth exec is refused OR every exec fit
+# mid-span, and EITHER the eleventh exec is refused OR every exec fit
 # (both prove the substance; both occur across runs). The tables
 # carve-out keeps headroom. No --script-expect (full window).
-# Mirrors tools/verify-live-scale.sh (claim 5795 + C3 claim 0339).
+# Mirrors tools/verify-live-scale.sh (claim 5795 + C3 claim 0339 + #1426).
 
-vgate_name live-scale "eight live programs at the pool budget on VZ"
+vgate_name live-scale "ten live programs at the pool budget on VZ"
 vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 vgate_repeat 1 BOOTS
@@ -21,8 +21,10 @@ exec USER.BIN
 exec USER.BIN
 exec USER.BIN
 exec USER.BIN
+exec USER.BIN
 procs
 addrspaces
+exec USER.BIN
 exec USER.BIN
 echo rx-scale-ok
 EOF
@@ -51,9 +53,10 @@ if sum(1 for l in lines if "user: hello from the ESP" in l) < 6:
 if sum(1 for l in lines if "counter: alive" in l) < 3:
     sys.exit("FAIL: fewer than 3 counter markers")
 # Running rows: >= 6, all-distinct tasks AND stacks (the ==8 snapshot
-# is a scheduler race -- pinned >= 6 since claim 5069).
+# is a scheduler race -- pinned >= 6 since claim 5069). Procs lines grew
+# uid/caps (M50) between name and state.
 rows = [l for l in lines
-        if re.search(r"procs: id=[0-9]+ name=(COUNTER.BIN|USER.BIN) state=running", l)]
+        if re.search(r"procs: id=[0-9]+ name=(COUNTER.BIN|USER.BIN)\b.* state=running", l)]
 if len(rows) < 6:
     sys.exit("FAIL: running rows=%d, want >= 6" % len(rows))
 tasks = [re.search(r".*task=([0-9]+).*", l).group(1) for l in rows]
@@ -67,10 +70,10 @@ if len(set(stacks)) != len(rows):
 mks = [i for i, l in enumerate(lines) if "counter: alive" in l]
 if len(mks) < 2 or not any("tasks worker advances=" in l for l in lines[mks[0] + 1:mks[-1]]):
     sys.exit("FAIL: no worker advance mid-span")
-# Capacity: the ninth exec refused OR every exec fit (>= 7 loads).
+# Capacity: the eleventh exec refused OR every exec fit (>= 9 loads).
 pool_full = sum(1 for l in lines if "error: no free scheduler pool slot" in l) >= 1
 loads = sum(1 for l in lines if "exec: loaded USER.BIN size=" in l)
-if not (pool_full or loads >= 7):
+if not (pool_full or loads >= 9):
     sys.exit("FAIL: capacity unproven (pool_full=%s loads=%d)" % (pool_full, loads))
 # Tables headroom: 0 < used < 512 on the last tables report.
 tbl = [l for l in lines if re.search(r"addrspaces: tables=[0-9]+/512", l)]

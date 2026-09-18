@@ -69,9 +69,9 @@ const task_stack_size = scheduler.task_stack_size;
 const task_ttbr0 = scheduler.task_ttbr0;
 const terminated_status = scheduler.terminated_status;
 
-// #1336: eight × 192 KiB kstack locals overflow a typical host test
-// stack, so the eight-user coexistence test borrows this BSS pool.
-var exec_kstack_pool: [8][task_stack_size]u8 align(16) = undefined;
+// #1336: N × 192 KiB kstack locals overflow a typical host test stack,
+// so the multi-user coexistence test borrows this BSS pool.
+var exec_kstack_pool: [max_tasks][task_stack_size]u8 align(16) = undefined;
 const tick = scheduler.tick;
 const timer_switch_context = scheduler.timer_switch_context;
 const user_timer_preemption_count = scheduler.user_timer_preemption_count;
@@ -120,18 +120,14 @@ test "scheduler: register_worker builds a valid synthetic frame" {
     while (i < frame_bytes) : (i += 8) {
         try std.testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, @as(*const [8]u8, @ptrFromInt(t.sp + i)), .little));
     }
-    // Milestone sixteen C3 (claim 0339): the pool is shell + idle +
-    // worker + EIGHT user slots (eight live programs at the 11/11 budget);
-    // a registration beyond the 11-slot budget fails (bounded).
+    // #1426: the pool is shell + idle + worker + TEN user slots (13/13);
+    // a registration beyond that budget fails (bounded).
     try std.testing.expectEqual(@as(usize, 2), register_user(0x3333, 0).?);
-    try std.testing.expectEqual(@as(usize, 3), register_worker(0).?);
-    try std.testing.expectEqual(@as(usize, 4), register_worker(0).?);
-    try std.testing.expectEqual(@as(usize, 5), register_worker(0).?);
-    try std.testing.expectEqual(@as(usize, 6), register_worker(0).?);
-    try std.testing.expectEqual(@as(usize, 7), register_worker(0).?);
-    try std.testing.expectEqual(@as(usize, 8), register_worker(0).?);
-    try std.testing.expectEqual(@as(usize, 9), register_worker(0).?);
-    try std.testing.expectEqual(@as(usize, 11), scheduler.task_count);
+    var next: usize = 3;
+    while (next < idle_id) : (next += 1) {
+        try std.testing.expectEqual(next, register_worker(0).?);
+    }
+    try std.testing.expectEqual(max_tasks, scheduler.task_count);
     try std.testing.expect(register_worker(0) == null);
     // Claim 0826: capacity is observable — the full pool has no free slot.
     try std.testing.expect(!has_free_slot());
@@ -566,27 +562,17 @@ test "scheduler: two live user scheduler.tasks coexist with their own roots and 
     const kstack_b = exec_kstack_pool[0][0..];
     const user_b = register_exec_user(0x4000, root_b, 64, 0x1a400000, 8192, kstack_b, 0, 0).?;
     try std.testing.expectEqual(@as(usize, 3), user_b);
-    // Card 3g (claim 5795): the 7-slot pool holds FOUR user scheduler.tasks. Fill
-    // the remaining two slots so the capacity gate is observable at the
-    // new budget.
-    const kstack_c = exec_kstack_pool[1][0..];
-    const user_c = register_exec_user(0x5000, root_b, 64, 0x1b400000, 8192, kstack_c, 0, 0).?;
-    try std.testing.expectEqual(@as(usize, 4), user_c);
-    const kstack_d = exec_kstack_pool[2][0..];
-    const user_d = register_exec_user(0x6000, root_b, 64, 0x1c400000, 8192, kstack_d, 0, 0).?;
-    try std.testing.expectEqual(@as(usize, 5), user_d);
-    // Milestone sixteen C3 (claim 0339): the 11-slot pool holds EIGHT user
-    // scheduler.tasks. Fill the remaining four slots so the capacity gate is
-    // observable at the new budget.
-    const kstack_e = exec_kstack_pool[3][0..];
-    _ = register_exec_user(0x7000, root_b, 64, 0x1d400000, 8192, kstack_e, 0, 0).?;
-    const kstack_f = exec_kstack_pool[4][0..];
-    _ = register_exec_user(0x8000, root_b, 64, 0x1e400000, 8192, kstack_f, 0, 0).?;
-    const kstack_g = exec_kstack_pool[5][0..];
-    _ = register_exec_user(0x9000, root_b, 64, 0x1f400000, 8192, kstack_g, 0, 0).?;
-    const kstack_h = exec_kstack_pool[6][0..];
-    _ = register_exec_user(0xa000, root_b, 64, 0x20400000, 8192, kstack_h, 0, 0).?;
-    try std.testing.expectEqual(@as(usize, 11), scheduler.task_count); // shell + worker + A..H + idle
+    // #1426: fill remaining user slots so the capacity gate is observable
+    // at max_tasks (shell + worker + idle + TEN user tasks).
+    var fill: usize = 0;
+    while (has_free_slot()) : (fill += 1) {
+        const kstack = exec_kstack_pool[1 + fill][0..];
+        const entry: u64 = 0x5000 + fill * 0x1000;
+        const stack_va: u64 = 0x1b400000 + fill * 0x100000;
+        _ = register_exec_user(entry, root_b, 64, stack_va, 8192, kstack, 0, 0) orelse
+            return error.TestUnexpectedResult;
+    }
+    try std.testing.expectEqual(max_tasks, scheduler.task_count);
     try std.testing.expect(!has_free_slot());
     // Each task carries ITS OWN root and apertures.
     try std.testing.expect(task_ttbr0(user_a) != task_ttbr0(user_b));
@@ -613,7 +599,7 @@ test "scheduler: two live user scheduler.tasks coexist with their own roots and 
     try std.testing.expectEqual(@as(usize, user_a), current_id());
     try std.testing.expect(yield_current()); // A -> B
     try std.testing.expectEqual(@as(usize, user_b), current_id());
-    // A ninth user program cannot load: the pool is the capacity gate.
+    // One more user program cannot load: the pool is the capacity gate.
     try std.testing.expect(register_exec_user(0x5000, root_a, 64, 0x2a400000, 8192, kstack_b, 0, 0) == null);
 }
 
