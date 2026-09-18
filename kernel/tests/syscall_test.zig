@@ -234,6 +234,8 @@ test "syscall: runtime table has 128 slots and seventy-seven unique implemented 
     try std.testing.expectEqualStrings("sys_getrandom", entry_info(sys_getrandom).?.name);
     // ADR 0027 D3 (M65a, #1439): slot 73 is sys_thread.
     try std.testing.expectEqualStrings("sys_thread", entry_info(sys_thread).?.name);
+    // ADR 0027 D4 (M65b, #1440): slot 74 is sys_futex.
+    try std.testing.expectEqualStrings("sys_futex", entry_info(sys_futex).?.name);
     // Issue #1228 (phase 0c): slot 75 is the EL0 fault-handler register.
     try std.testing.expectEqualStrings("sys_exnotify", entry_info(sys_exnotify).?.name);
 }
@@ -4421,6 +4423,175 @@ test "syscall: sys_futex wait re-checks the user word, sleeps, wakes, and times 
     try std.testing.expect(!scheduler.is_blocked(2));
     const timeout_frame: *const exceptions.VectorFrame = @ptrFromInt(scheduler.tasks[2].sp);
     try std.testing.expectEqual(syscall.error_result(.etimedout), exceptions.frame_read(timeout_frame, 0));
+}
+
+fn futex_boot_user() void {
+    mmu.reset();
+    alloc.reset_refcounts();
+    process.init();
+    userspace.init();
+    init(test_writer);
+    _ = scheduler.init();
+    _ = scheduler.register_worker(0x2000);
+    _ = scheduler.register_user(0x3000, 0); // task 2 = process 0
+    scheduler.start();
+}
+
+fn futex_drive_to_user() !void {
+    try std.testing.expect(scheduler.yield_current()); // shell -> worker
+    try std.testing.expect(scheduler.yield_current()); // worker -> user (2)
+    try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
+}
+
+fn futex_arm_word(task: usize, word_va: u64) void {
+    _ = scheduler.add_task_read_region(task, .{ .base = word_va, .len = 8 });
+    _ = scheduler.add_task_write_region(task, .{ .base = word_va, .len = 8 });
+}
+
+fn futex_init_thread_ram(ram: *[64 * 4096]u8) !void {
+    const map_desc = [_]memmap.MemoryDescriptor{
+        .{ .type = .conventional_memory, .physical_start = @intFromPtr(ram), .virtual_start = 0, .number_of_pages = 64, .attribute = 0 },
+    };
+    const view = memmap.MapView.init(std.mem.asBytes(&map_desc), @sizeOf(memmap.MemoryDescriptor), map_desc.len);
+    try std.testing.expect(alloc.init(view, &.{}));
+}
+
+fn futex_yield_until(id: usize) !void {
+    var spins: usize = 0;
+    while (scheduler.current_id() != id and spins < 8) : (spins += 1) {
+        try std.testing.expect(scheduler.yield_current());
+    }
+    try std.testing.expectEqual(id, scheduler.current_id());
+}
+
+test "syscall: sys_futex wait-equals parks while the user word matches (ADR 0027 D4)" {
+    // Op 0 waits only when the kernel-verified 4-byte word still holds val.
+    futex_boot_user();
+    var frame = fresh_frame();
+    try futex_drive_to_user();
+    const pid = process.find_by_task(2).?;
+
+    var futex_word: [8]u8 align(4) = [_]u8{0} ** 8;
+    const word_va: u64 = @intFromPtr(&futex_word);
+    futex_arm_word(2, word_va);
+    syscall.arm_task_regions();
+
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_futex, .{ 0, word_va, 0, 0, 0, 0 }, &frame));
+    try std.testing.expect(scheduler.is_blocked(2));
+    try std.testing.expect(scheduler.tasks[2].futex_waiting);
+    try std.testing.expectEqual(@as(usize, 1), scheduler.futex_wake(pid, word_va, 1));
+    try std.testing.expect(!scheduler.is_blocked(2));
+}
+
+test "syscall: sys_futex op 1 wake(n) default 1 unparks a same-process waiter (ADR 0027 D4)" {
+    // Go's semawakeup passes n=1; n=0 wakes nobody (Linux FUTEX_WAKE).
+    futex_boot_user();
+    var thread_test_ram: [64 * 4096]u8 align(4096) = undefined;
+    try futex_init_thread_ram(&thread_test_ram);
+    var frame = fresh_frame();
+    try futex_drive_to_user();
+    const pid = process.find_by_task(2).?;
+
+    var futex_word: [8]u8 align(4) = [_]u8{0} ** 8;
+    const word_va: u64 = @intFromPtr(&futex_word);
+    futex_arm_word(2, word_va);
+    syscall.arm_task_regions();
+
+    const tid = dispatch(sys_thread, .{ 0, userspace.text_va + 4, 0x7000_0000, 0, 0, 0 }, &frame);
+    try std.testing.expect(tid < scheduler.max_tasks);
+    const thread_id: usize = @intCast(tid);
+    try std.testing.expectEqual(pid, process.find_by_task(thread_id).?);
+
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_futex, .{ 0, word_va, 0, 0, 0, 0 }, &frame));
+    try std.testing.expect(scheduler.is_blocked(2));
+    try futex_yield_until(thread_id);
+    syscall.arm_task_regions();
+
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_futex, .{ 1, word_va, 0, 0, 0, 0 }, &frame));
+    try std.testing.expect(scheduler.is_blocked(2));
+    try std.testing.expectEqual(@as(u64, 1), dispatch(sys_futex, .{ 1, word_va, 1, 0, 0, 0 }, &frame));
+    try std.testing.expect(!scheduler.is_blocked(2));
+    const woken_frame: *const exceptions.VectorFrame = @ptrFromInt(scheduler.tasks[2].sp);
+    try std.testing.expectEqual(@as(u64, 0), exceptions.frame_read(woken_frame, 0));
+}
+
+test "syscall: sys_futex ETIMEDOUT is distinct from a real wake (ADR 0027 D4)" {
+    futex_boot_user();
+    var frame = fresh_frame();
+    try futex_drive_to_user();
+    const pid = process.find_by_task(2).?;
+
+    var futex_word: [8]u8 align(4) = [_]u8{0} ** 8;
+    const word_va: u64 = @intFromPtr(&futex_word);
+    futex_arm_word(2, word_va);
+    syscall.arm_task_regions();
+
+    const wake_rc: u64 = 0;
+    const timeout_rc = error_result(.etimedout);
+    try std.testing.expect(wake_rc != timeout_rc);
+    try std.testing.expectEqual(@as(i64, -12), @as(i64, @bitCast(timeout_rc)));
+
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_futex, .{ 0, word_va, 0, 0, 0, 0 }, &frame));
+    try std.testing.expect(scheduler.is_blocked(2));
+    try std.testing.expectEqual(@as(usize, 1), scheduler.futex_wake(pid, word_va, 1));
+    try std.testing.expect(!scheduler.is_blocked(2));
+    const woken_frame: *const exceptions.VectorFrame = @ptrFromInt(scheduler.tasks[2].sp);
+    try std.testing.expectEqual(wake_rc, exceptions.frame_read(woken_frame, 0));
+
+    try futex_yield_until(2);
+    syscall.arm_task_regions();
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_futex, .{ 0, word_va, 0, timer.period_ns, 0, 0 }, &frame));
+    try std.testing.expect(scheduler.is_blocked(2));
+    scheduler.on_tick();
+    try std.testing.expect(!scheduler.is_blocked(2));
+    const timeout_frame: *const exceptions.VectorFrame = @ptrFromInt(scheduler.tasks[2].sp);
+    try std.testing.expectEqual(timeout_rc, exceptions.frame_read(timeout_frame, 0));
+}
+
+test "syscall: sys_futex death-wakes-peer (ADR 0027 D4 exitThread)" {
+    // Two same-process waiters on one word. The dying waiter leaves its
+    // seat with wake(1); the peer resumes with x0 = 0 (a real wake, not
+    // ETIMEDOUT). The process lives — this is thread-exit, not sys_exit.
+    futex_boot_user();
+    var thread_test_ram: [64 * 4096]u8 align(4096) = undefined;
+    try futex_init_thread_ram(&thread_test_ram);
+    var frame = fresh_frame();
+    try futex_drive_to_user();
+    const pid = process.find_by_task(2).?;
+
+    var futex_word: [8]u8 align(4) = [_]u8{0} ** 8;
+    const word_va: u64 = @intFromPtr(&futex_word);
+    futex_arm_word(2, word_va);
+    syscall.arm_task_regions();
+
+    const tid = dispatch(sys_thread, .{ 0, userspace.text_va + 4, 0x7000_0000, 0, 0, 0 }, &frame);
+    try std.testing.expect(tid < scheduler.max_tasks);
+    const thread_id: usize = @intCast(tid);
+
+    try std.testing.expect(scheduler.yield_current());
+    try std.testing.expectEqual(thread_id, scheduler.current_id());
+    syscall.arm_task_regions();
+    var tframe = fresh_frame();
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_futex, .{ 0, word_va, 0, 0, 0, 0 }, &tframe));
+    try std.testing.expect(scheduler.is_blocked(thread_id));
+    try std.testing.expect(scheduler.tasks[thread_id].futex_waiting);
+
+    try futex_yield_until(2);
+    syscall.arm_task_regions();
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_futex, .{ 0, word_va, 0, 0, 0, 0 }, &frame));
+    try std.testing.expect(scheduler.is_blocked(2));
+    try std.testing.expect(scheduler.tasks[2].futex_waiting);
+
+    scheduler.tasks[thread_id].state = .running;
+    scheduler.current[0] = thread_id;
+    var death = fresh_frame();
+    try std.testing.expectEqual(@as(u64, 0), dispatch(sys_thread, .{ 1, 0, 0, 0, 0, 0 }, &death));
+    try std.testing.expect(scheduler.is_terminated(thread_id));
+    try std.testing.expect(!scheduler.is_blocked(2));
+    const peer_frame: *const exceptions.VectorFrame = @ptrFromInt(scheduler.tasks[2].sp);
+    try std.testing.expectEqual(@as(u64, 0), exceptions.frame_read(peer_frame, 0));
+    try std.testing.expect(error_result(.etimedout) != exceptions.frame_read(peer_frame, 0));
+    try std.testing.expect(process.info(pid).?.state == .running);
 }
 
 test "syscall: sys_thread creates a same-process task and op 1 exits only the thread" {
