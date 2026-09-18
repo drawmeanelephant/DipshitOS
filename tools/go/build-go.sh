@@ -66,6 +66,7 @@ for prog in "${@:-$REPO/tools/go/hello.go}"; do
         hello)      base="GOHELLO" ;;
         goargs)     base="GOARGS" ;;
         goroutines) base="GOROUT" ;;
+        smpscale)   base="GOSCALE" ;;
         gostress)   base="GOSTRESS" ;;
         gopanic)    base="GOPANIC" ;;
         gowin)      base="GOWIN" ;;
