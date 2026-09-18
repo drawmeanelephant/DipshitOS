@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"virelai/vi"
+)
 
 // The gate greps these exact strings; a drift is a host-test failure rather
 // than a live run that silently asserts nothing.
@@ -12,6 +16,8 @@ func TestMarkerShapes(t *testing.T) {
 		{MarkerDraw, "gotabwm: draw"},
 		{MarkerHolding, "gotabwm: holding seat"},
 		{MarkerTick, "gotabwm: tick"},
+		{MarkerPtr, "gotabwm: ptr"},
+		{MarkerKey, "gotabwm: key"},
 		{MarkerPresent, "gotabwm: present"},
 		{MarkerClose, "gotabwm: close"},
 		{MarkerOK, "gotabwm OK"},
@@ -35,6 +41,12 @@ func TestLoopBounds(t *testing.T) {
 	}
 	if maxEvents < maxTicks {
 		t.Fatalf("maxEvents %d < maxTicks %d: the tick bound is unreachable", maxEvents, maxTicks)
+	}
+	if pointerClickHold < 8 {
+		t.Fatalf("pointerClickHold = %d: a 3×2.5s click does not fit", pointerClickHold)
+	}
+	if maxTicks < pointerClickHold {
+		t.Fatalf("maxTicks %d < pointerClickHold %d: a click expires mid-sequence", maxTicks, pointerClickHold)
 	}
 }
 
@@ -63,5 +75,49 @@ func TestPaintBlankEdgeCases(t *testing.T) {
 	}
 	if got := paintBlank(make([]byte, 6), 1); got != 1 {
 		t.Fatalf("paintBlank(6 bytes) = %d want 1", got)
+	}
+}
+
+// hidMarker logs ptr/key only for real WM input-seam kinds — never for an
+// empty poll (kind 0), a composite tick, a window mirror, or app-side
+// MOUSE_*/KEY_* events (the ignore-non-tick regression).
+func TestHidMarkerOnlyAfterRealEvent(t *testing.T) {
+	if hidMarker(vi.EvWmPointer) != MarkerPtr {
+		t.Fatalf("kind 19 marker = %q want %q", hidMarker(vi.EvWmPointer), MarkerPtr)
+	}
+	if hidMarker(vi.EvWmKey) != MarkerKey {
+		t.Fatalf("kind 21 marker = %q want %q", hidMarker(vi.EvWmKey), MarkerKey)
+	}
+	zeros := []uint16{0, vi.EvCompositeTick, vi.EvWmWindow, vi.EvKeyDown, vi.EvMouseMove, vi.EvWinFocus}
+	for _, k := range zeros {
+		if m := hidMarker(k); m != "" {
+			t.Fatalf("hidMarker(%d) = %q: empty polls / non-HID kinds must not log ptr/key", k, m)
+		}
+	}
+}
+
+func TestConsumeSeatEventIgnoreNonTick(t *testing.T) {
+	if !consumeSeatEvent(vi.Event{Kind: vi.EvCompositeTick}) {
+		t.Fatal("kind 18 must count as a tick")
+	}
+	// Pointer and key are drained (not ticks). consumeSeatEvent logs via
+	// ConsoleLine; on the host that degrades to ENOSYS and does not panic.
+	if consumeSeatEvent(vi.Event{Kind: vi.EvWmPointer}) {
+		t.Fatal("kind 19 must not count as a tick")
+	}
+	if consumeSeatEvent(vi.Event{Kind: vi.EvWmKey}) {
+		t.Fatal("kind 21 must not count as a tick")
+	}
+	if consumeSeatEvent(vi.Event{Kind: vi.EvWmWindow}) {
+		t.Fatal("kind 20 must not count as a tick")
+	}
+	if consumeSeatEvent(vi.Event{}) {
+		t.Fatal("empty event must not count as a tick")
+	}
+	if consumeSeatEvent(vi.Event{Kind: vi.EvWinFocus}) {
+		t.Fatal("WIN_FOCUS must stay on the ignore-non-tick path")
+	}
+	if consumeSeatEvent(vi.Event{Kind: vi.EvMouseMove}) {
+		t.Fatal("app MOUSE_MOVE must stay on the ignore-non-tick path")
 	}
 }

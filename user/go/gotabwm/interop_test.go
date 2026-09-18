@@ -82,6 +82,10 @@ func TestHostTickBudget(t *testing.T) {
 	if hostTicks <= 0 {
 		t.Fatalf("hostTicks = %d: an app would never be closed", hostTicks)
 	}
+	if hostTicks < pointerClickHold {
+		t.Fatalf("hostTicks %d < pointerClickHold %d: a click expires while hosted",
+			hostTicks, pointerClickHold)
+	}
 	if hostTicks > maxTicks {
 		t.Fatalf("hostTicks %d > maxTicks %d: the close is unreachable", hostTicks, maxTicks)
 	}

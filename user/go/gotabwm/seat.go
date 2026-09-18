@@ -9,6 +9,8 @@
 //	paint the blank desktop         -> gotabwm: draw
 //	seat held, awaiting ticks       -> gotabwm: holding seat
 //	COMPOSITE_TICK (kind 18)        -> gotabwm: tick
+//	WM_POINTER (kind 19)            -> gotabwm: ptr
+//	WM_KEY (kind 21)                -> gotabwm: key
 //	vi.WmctlRequestPresent (65/3)   -> gotabwm: present
 //	loop bound reached              -> gotabwm: close
 //	clean exit                      -> gotabwm OK
@@ -40,6 +42,8 @@ const (
 	MarkerDraw       = "gotabwm: draw"
 	MarkerHolding    = "gotabwm: holding seat"
 	MarkerTick       = "gotabwm: tick"
+	MarkerPtr        = "gotabwm: ptr"
+	MarkerKey        = "gotabwm: key"
 	MarkerPresent    = "gotabwm: present"
 	MarkerClose      = "gotabwm: close"
 	MarkerOK         = "gotabwm OK"
@@ -51,13 +55,19 @@ const blankRGB uint32 = 0x1A1E2E
 
 // maxTicks bounds the composite loop so a boot can never hang (~1 tick/s).
 // Three Go runtimes (this seat + two clients) fit max_tasks=13 (#1426;
-// each runtime is 3 kernel tasks: primary + sysmon + helper). maxTicks=18
-// still leaves 9 choreography ticks if a single Go client declares late.
-const maxTicks = 18
+// each runtime is 3 kernel tasks: primary + sysmon + helper). A
+// `--pointer-virtio` click is 3 messages × 2.5 s; pointerClickHold is that
+// budget in ticks. maxTicks must cover hostTicks + the two-tab choreography
+// (9) and still have room for one click after `gotabwm: rail` (M63a).
+const maxTicks = 28
 
-// maxEvents bounds the wait loop regardless of which kinds arrive (the tick is
-// the only expected one — no input is driven — but the bound keeps a spurious
-// event stream from spinning forever).
+// pointerClickHold is how many composite ticks one `--pointer-virtio` click
+// needs at the 1 Hz kind-18 heartbeat (3 messages × 2.5 s, rounded up).
+const pointerClickHold = 8
+
+// maxEvents bounds the wait loop regardless of which kinds arrive (ticks,
+// WM pointer/key, window mirrors). The bound keeps a spurious event stream
+// from spinning forever.
 const maxEvents = 500
 
 func main() {
@@ -116,7 +126,9 @@ func main() {
 			vi.Sleep(1)
 			continue
 		}
-		if e.Kind != vi.EvCompositeTick {
+		// Drain kinds 19/21 (and 20) before Sleep: Sleep runs only on an
+		// empty poll. Log ptr/key after a real event, never on empty.
+		if !consumeSeatEvent(e) {
 			continue
 		}
 		ticks++
@@ -205,6 +217,32 @@ func main() {
 	}
 	vi.ConsoleLine(MarkerOK)
 	vi.Exit(0)
+}
+
+// consumeSeatEvent handles one non-empty poll. Pointer and key log their
+// markers and return false (not a tick). Window mirrors are recognized and
+// dropped (hit-test is a later card). Any other kind is the pre-M63a
+// ignore-non-tick path. Only EvCompositeTick returns true.
+func consumeSeatEvent(e vi.Event) bool {
+	if m := hidMarker(e.Kind); m != "" {
+		vi.ConsoleLine(m)
+		return false
+	}
+	return e.Kind == vi.EvCompositeTick
+}
+
+// hidMarker is the serial line for a WM input-seam kind, or "" for ticks,
+// window mirrors, empty polls, and everything else. Empty polls never call
+// this — the loop Sleeps instead.
+func hidMarker(kind uint16) string {
+	switch kind {
+	case vi.EvWmPointer:
+		return MarkerPtr
+	case vi.EvWmKey:
+		return MarkerKey
+	default:
+		return ""
+	}
 }
 
 // paintBlank fills every pixel of the mapped scanout with rgb and returns the
