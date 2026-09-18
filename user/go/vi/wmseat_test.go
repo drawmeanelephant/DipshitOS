@@ -18,6 +18,23 @@ func TestWmSeatWireConstants(t *testing.T) {
 	if EvCompositeTick != 18 {
 		t.Fatalf("EvCompositeTick = %d want 18", EvCompositeTick)
 	}
+	if EvWmPointer != 19 {
+		t.Fatalf("EvWmPointer = %d want 19", EvWmPointer)
+	}
+	if EvWmWindow != 20 {
+		t.Fatalf("EvWmWindow = %d want 20", EvWmWindow)
+	}
+	if EvWmKey != 21 {
+		t.Fatalf("EvWmKey = %d want 21", EvWmKey)
+	}
+	// Distinct from the app-side MOUSE_*/KEY_* kinds (ADR 0009 D2): while a
+	// seat is registered the kernel fans 19/21 to the WM, not 3/1.
+	if EvWmPointer == EvMouseMove || EvWmPointer == EvMouseDown {
+		t.Fatal("EvWmPointer collided with an app mouse kind")
+	}
+	if EvWmKey == EvKeyDown || EvWmKey == EvKeyUp {
+		t.Fatal("EvWmKey collided with an app key kind")
+	}
 	if M33ScanoutTag != 0x4000000000000000 {
 		t.Fatalf("M33ScanoutTag = %#x want 0x4000000000000000", uint64(M33ScanoutTag))
 	}

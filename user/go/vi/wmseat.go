@@ -45,6 +45,20 @@ const (
 // per scheduler tick.
 const EvCompositeTick uint16 = 18
 
+// WM input-seam kinds (ADR 0009 numbering, WMS5). SDK mirrors of the kernel
+// constants in kernel/src/events.zig — not a new ABI. Routing-restricted:
+// the kernel pushes them ONLY to the registered WM, never in shim mode.
+const (
+	// EvWmPointer is kind 19: raw absolute pointer. arg0 = x|(y<<16) in
+	// framebuffer pixels, flags low byte = HID button byte (0x01 left).
+	EvWmPointer uint16 = 19
+	// EvWmWindow is kind 20: a window-registry mirror (id / rect / focus).
+	EvWmWindow uint16 = 20
+	// EvWmKey is kind 21: raw keyboard. arg0 = HID usage, flags = ADR 0009
+	// modifier bits.
+	EvWmKey uint16 = 21
+)
+
 // WmctlRegister asks the kernel to accept the calling process as the active
 // render-server seat (slot 65 cmd 1). Returns 0 on success; -EACCES when a
 // seat is already taken (the one-seat discipline); -ENXIO when the compositor
