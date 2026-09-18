@@ -33,6 +33,7 @@ func TestInteropMarkerShapes(t *testing.T) {
 		{MarkerPin, "gotabwm: pin "},
 		{MarkerReorder, "gotabwm: reorder "},
 		{MarkerOrder, "gotabwm: order "},
+		{MarkerAltTab, "gotabwm: alt-tab id="},
 		{MarkerSessionWrite, "gotabwm: session write n="},
 		{MarkerSessionLoad, "gotabwm: session load n="},
 		{MarkerSessionTitles, "gotabwm: session titles="},
@@ -93,9 +94,9 @@ func TestHostTickBudget(t *testing.T) {
 	// Unsplit, SplitH, Unsplit, close pinned, close last (9). Plus the
 	// single-tab budget must still fit in maxTicks.
 	const twoTabTicks = 9
-	if hostTicks+twoTabTicks > maxTicks {
-		t.Fatalf("hostTicks %d + two-tab choreography %d > maxTicks %d",
-			hostTicks, twoTabTicks, maxTicks)
+	if hostTicks+hidChordHold+twoTabTicks > maxTicks {
+		t.Fatalf("hostTicks %d + hidChordHold %d + two-tab choreography %d > maxTicks %d",
+			hostTicks, hidChordHold, twoTabTicks, maxTicks)
 	}
 }
 
