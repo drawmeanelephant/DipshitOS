@@ -456,11 +456,11 @@ test "ui: parse_procs decodes 40-byte snapshot rows" {
     std.mem.writeInt(u64, raw[16..24], 0, .little);
     @memcpy(raw[24..34], "KERNEL.BIN");
 
-    // Row 1: pid=2, state=3 (exited), exit=43, name="CALC.BIN"
+    // Row 1: pid=2, state=3 (exited), exit=43, name="GOCALC.ELF"
     std.mem.writeInt(u64, raw[40..48], 2, .little);
     std.mem.writeInt(u64, raw[48..56], 3, .little);
     std.mem.writeInt(u64, raw[56..64], 43, .little);
-    @memcpy(raw[64..72], "CALC.BIN");
+    @memcpy(raw[64..74], "GOCALC.ELF");
 
     var procs: [4]ProcInfo = undefined;
     const count = parse_procs(&raw, 2, &procs);
@@ -474,7 +474,7 @@ test "ui: parse_procs decodes 40-byte snapshot rows" {
     try std.testing.expectEqual(@as(u64, 2), procs[1].pid);
     try std.testing.expectEqual(ProcState.exited, procs[1].state);
     try std.testing.expectEqual(@as(u64, 43), procs[1].exit_status);
-    try std.testing.expectEqualStrings("CALC.BIN", procs[1].name[0..procs[1].name_len]);
+    try std.testing.expectEqualStrings("GOCALC.ELF", procs[1].name[0..procs[1].name_len]);
 }
 
 test "ui: exec argv card-3e bounds (issue #1333)" {

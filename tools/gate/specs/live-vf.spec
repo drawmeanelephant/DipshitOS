@@ -164,7 +164,7 @@ if res.returncode != 0:
     sys.exit(1)
 
 with open(os.path.join(share, "APPS.TXT"), "w") as f:
-    f.write("HF4APP.ELF | Host Hello | h\nCALC.BIN | 64-bit Calc | c\n")
+    f.write("HF4APP.ELF | Host Hello | h\nGOCALC.ELF | 64-bit Calc | c\n")
 
 if os.path.exists("zig-out/bin/DESKTOP.BIN"):
     with open("zig-out/bin/DESKTOP.BIN", "rb") as sf:

@@ -1,18 +1,18 @@
 # go-wm-seat.spec -- M57a/b/c (issues #1313/#1317/#1318) class-B gate: a Go WM
 # (GOTABWM.ELF) registers the kernel render-server seat (slot 65), composites a
-# blank desktop, manages its OWN Go windows, and HOSTS UNMODIFIED Zig apps.
+# blank desktop, manages its OWN Go windows, and HOSTS GOCALC.ELF (M62h)
+# plus leftover Zig NOTEPAD.BIN.
 #
 # M57a: REGISTER (slot 65 cmd 1), the seam-B scanout grant, and a REQUEST_PRESENT
 # loop paced by the kind-18 COMPOSITE_TICK. M57b: the seat's own window
 # lifecycle (open, chrome descriptor, a kernel-clamped rect, focus/blur, a
-# WM-seam close, the client-death probe). M57c: interop - an unmodified Zig app
-# (CALC.BIN) discovers the seat by process name, declares over the WM_RPC
-# mailbox, and is focused, given the full viewport, and closed by the seat, with
-# the SAME app-side markers the TABWM parity gate (live-tabwm-close.spec)
-# asserts.
+# WM-seam close, the client-death probe). M57c: interop — GOCALC.ELF
+# discovers the seat by process name, declares over the WM_RPC
+# mailbox, and is focused, given the full viewport, and closed by the seat.
+# Zig CALC.BIN is gone (M62h / #1406).
 #
 # One headless boot arms the GPU, execs GOTABWM.ELF, queries the seat and the
-# window registry while both are live, execs CALC.BIN under it, and lets the
+# window registry while both are live, execs GOCALC.ELF under it, and lets the
 # program exit cleanly (the kernel unregisters the seat, falling back to the
 # shim). Serial markers are the proof; each is printed only after its syscall
 # returned.
@@ -25,19 +25,21 @@
 #
 # HOST PREREQUISITE (fails the gate honestly when missing):
 #   bash tools/go/build-gotabwm.sh   ->  .build/go/GOTABWM.ELF
+#   bash tools/go/build-gocalc.sh    ->  .build/go/GOCALC.ELF
 #
 # exec-order: assert-proven -- the run ends on `rx-gotabwm-ok`, which only the
 # script prints, and every stage gate waits on guest output the program, the
-# kernel and the hosted Zig app produce (`gotabwm: win focus`,
+# kernel and the hosted app produce (`gotabwm: win focus`,
 # `wm: unregistered, shim resumed`).
 
-vgate_name go-wm-seat "issues #1313/#1317/#1318 M57a+b+c: a Go WM registers the slot-65 seat and HOSTS an unmodified Zig app on VZ"
+vgate_name go-wm-seat "issues #1313/#1317/#1318 M57a+b+c: a Go WM registers the slot-65 seat and HOSTS GOCALC.ELF on VZ"
 vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 
 # Phase 1: the seeded `wm=none` keeps this boot shim-only, then the seat is
 # opted in explicitly.
 vgate_file script.txt <<'EOF'
+set GOMAXPROCS=1
 wm
 exec GOTABWM.ELF
 EOF
@@ -46,12 +48,12 @@ EOF
 # the blur. `dui focus 0` (the fixed terminal window) hands focus away, so the
 # kernel routes WIN_BLUR to the seat. The `wm` + `dui` queries land while the
 # seat's window is live (5 = the four fixed layers + the seat's Go window).
-# Then the UNMODIFIED Zig app is exec'd under the Go seat.
+# Then GOCALC.ELF is exec'd under the Go seat.
 vgate_file script2.txt <<'EOF'
 wm
 dui
 dui focus 0
-exec CALC.BIN
+exec GOCALC.ELF
 EOF
 
 # Phase 3: after the program exits and the kernel unregisters the seat, the
@@ -74,6 +76,13 @@ if not os.path.exists(src):
 shutil.copy(src, os.path.join(share, "GOTABWM.ELF"))
 print("staged GOTABWM.ELF into share (%d bytes)" %
       os.path.getsize(os.path.join(share, "GOTABWM.ELF")))
+src = os.path.join(".build", "go", "GOCALC.ELF")
+if not os.path.exists(src):
+    sys.exit("GOCALC.ELF missing (expected " + src + ") - build it first: "
+             "bash tools/go/build-gocalc.sh")
+shutil.copy(src, os.path.join(share, "GOCALC.ELF"))
+print("staged GOCALC.ELF into share (%d bytes)" %
+      os.path.getsize(os.path.join(share, "GOCALC.ELF")))
 # M59 (issue #1298): the compiled default is the Go seat now. Seed `wm=none`
 # so this boot composites via the shim and the seat arrives only where the
 # script asks for it -- the point of THIS spec (go-wm-default.spec owns the
@@ -131,23 +140,15 @@ vgate_assert 01 serial-contains 'gotabwm: win rect x=1024 y=528 w=256 h=192'
 # terminal/wallpaper/taskbar/dock windows + the seat's Go window).
 vgate_assert 01 serial-contains 'dui: windows=5 focused='
 
-# --- M57c: an UNMODIFIED Zig app hosted by the Go seat -------------------
-# The kernel loaded the untouched Zig binary.
-vgate_assert 01 serial-contains 'exec: loaded CALC.BIN'
-# The app found the Go seat BY NAME and its declare round-tripped: the ack
-# carried applied=1, which is what makes it print this.
+# --- M57c: GOCALC.ELF hosted by the Go seat --------------------------------
+vgate_assert 01 serial-contains 'exec: loaded GOCALC.ELF'
 vgate_assert 01 serial-contains 'gotabwm: rpc declare id='
-vgate_assert 01 serial-contains 'calc: tab-aware (full-viewport)'
-# The seat focused+raised it through the kernel's own primitive...
+vgate_assert 01 serial-contains 'gocalc: declare accepted'
+vgate_assert 01 serial-contains 'gocalc: present'
 vgate_assert 01 serial-contains 'gotabwm: host focus id='
-# ...and proposed the full viewport, which the app observed as WIN_RESIZE and
-# relaid out. These are the SAME app-side markers the TABWM parity gate
-# (live-tabwm-close.spec) asserts, on the same exercised path.
 vgate_assert 01 serial-contains 'gotabwm: host view id='
-vgate_assert 01 serial-contains 'calc: resize relayout'
-# The seat closed it through the WM seam: the app received the real WIN_CLOSE.
 vgate_assert 01 serial-contains 'gotabwm: host close id='
-vgate_assert 01 serial-contains 'calc: win_close'
+vgate_assert 01 serial-contains 'gocalc: close'
 vgate_assert 01 serial-contains 'gotabwm: host done'
 # No residue: the hosted app closed and the leaked probe window was reaped, so
 # the registry is back to the four fixed layers only. The seat's own window sat
@@ -158,11 +159,11 @@ vgate_assert 01 serial-count 'dui[4]: user' 1
 vgate_assert 01 serial-absent '[EXC] parking:'
 vgate_assert 01 serial-absent 'exited status=139'
 
-# --- M57c run 02: the SECOND unmodified Zig app (NOTEPAD) ----------------
-# Same choreography, the other tab-aware app. NOTEPAD links the same
-# lib/tabapp.zig: if CALC hosts and NOTEPAD does not (or vice versa) the
-# interop would be app-specific rather than seat-wide, so both are gated.
+# --- M57c run 02: leftover Zig NOTEPAD -----------------------------------
+# Same choreography, a leftover Zig tab-aware app. If GOCALC hosts and
+# NOTEPAD does not (or vice versa) the interop would be app-specific.
 vgate_file script-02.txt <<'EOF'
+set GOMAXPROCS=1
 wm
 exec GOTABWM.ELF
 EOF

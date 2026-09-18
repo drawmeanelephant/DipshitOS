@@ -1,15 +1,14 @@
 # go-wm-tabs.spec -- M62b–g (issues #1400/#1401/#1402/#1403/#1404/#1405)
-# class-B gate: GOTABWM tab strip, split, pin, session, LAYOUT.txt, then a
-# shipping Go ELF as a tab. Boots 01–02 keep leftover Zig CALC+NOTEPAD.
-# Boot 03 hosts GOEDIT.ELF + leftover NOTEPAD.BIN: both declared, focus
-# switch, both alive, close one without killing the seat, LAYOUT.txt names
-# both bins. Two concurrent Go clients under this Go seat do not fit
-# scheduler.max_tasks=11 (observed GOTABWM+GOEDIT = 9/11; GOTERM's sysmon
-# then hits `newosproc: sys_thread create failed`). Kernel untouched.
-# Follow-up #1426: second Go tab after a pool/task-budget change.
+# class-B gate: GOTABWM tab strip, split, pin, session, LAYOUT.txt, then
+# shipping Go ELFs as tabs. Boot 01 hosts GOCALC.ELF + leftover NOTEPAD.BIN.
+# Boot 03 hosts GOEDIT.ELF + leftover NOTEPAD.BIN. Two concurrent Go *clients*
+# under this Go seat do not fit scheduler.max_tasks=11 (observed
+# GOTABWM+GOEDIT = 9/11; a third runtime's sysmon hits
+# `newosproc: sys_thread create failed`). Kernel untouched. Zig CALC.BIN is
+# gone (M62h / #1406). Follow-up #1426: second Go client after a pool bump.
 #
 # THREE vgate_runs share one seeded host share (`vgate_share seed`):
-#   01  CALC+NOTEPAD; pin-stay writes SESSION.TABS; last unsplit writes
+#   01  GOCALC+NOTEPAD; pin-stay writes SESSION.TABS; last unsplit writes
 #       LAYOUT.txt (closed before the serial line that names it).
 #   02  GOTABWM only. Restores the session; then drops SESSION.TABS.
 #   03  GOEDIT+NOTEPAD, empty strip. Same two-tab choreography.
@@ -20,6 +19,7 @@
 # HOST PREREQUISITE (fails the gate honestly when missing):
 #   bash tools/go/build-gotabwm.sh   ->  .build/go/GOTABWM.ELF
 #   bash tools/go/build-goedit.sh    ->  .build/go/GOEDIT.ELF
+#   bash tools/go/build-gocalc.sh    ->  .build/go/GOCALC.ELF
 #
 # exec-order: assert-proven -- each run ends on a marker only its script
 # prints (`rx-gotabwm-tabs-ok` / `rx-gotabwm-session-ok` / `rx-gotabwm-apps-ok`).
@@ -32,13 +32,14 @@ vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 
 vgate_file script.txt <<'EOF'
+set GOMAXPROCS=1
 wm
 exec GOTABWM.ELF
 EOF
 
 vgate_file script2.txt <<'EOF'
 dui focus 0
-exec CALC.BIN
+exec GOCALC.ELF
 exec NOTEPAD.BIN
 EOF
 
@@ -49,6 +50,7 @@ echo rx-gotabwm-tabs-ok
 EOF
 
 vgate_file script-02.txt <<'EOF'
+set GOMAXPROCS=1
 wm
 exec GOTABWM.ELF
 EOF
@@ -101,6 +103,13 @@ if not os.path.exists(src):
 shutil.copy(src, os.path.join(share, "GOEDIT.ELF"))
 print("staged GOEDIT.ELF into share (%d bytes)" %
       os.path.getsize(os.path.join(share, "GOEDIT.ELF")))
+src = os.path.join(".build", "go", "GOCALC.ELF")
+if not os.path.exists(src):
+    sys.exit("GOCALC.ELF missing (expected " + src + ") - build it first: "
+             "bash tools/go/build-gocalc.sh")
+shutil.copy(src, os.path.join(share, "GOCALC.ELF"))
+print("staged GOCALC.ELF into share (%d bytes)" %
+      os.path.getsize(os.path.join(share, "GOCALC.ELF")))
 ed = os.path.join(share, "EDIT")
 os.makedirs(ed, exist_ok=True)
 seed = os.path.join(ed, "SEED.TXT")
@@ -134,13 +143,13 @@ vgate_run 01 -- \
 vgate_assert 01 serial-contains 'VirelaiOS kernel has seized control.'
 vgate_assert 01 serial-contains 'exec: loaded GOTABWM.ELF'
 vgate_assert 01 serial-contains 'gotabwm: registered'
-vgate_assert 01 serial-contains 'exec: loaded CALC.BIN'
+vgate_assert 01 serial-contains 'exec: loaded GOCALC.ELF'
 vgate_assert 01 serial-contains 'exec: loaded NOTEPAD.BIN'
 # Two clients on the strip, rail painted, one focused.
 vgate_assert 01 serial-count 'gotabwm: tab open id=' 2
 vgate_assert 01 serial-contains 'gotabwm: tab focus id='
 vgate_assert 01 serial-contains 'gotabwm: rail n=2 focus='
-vgate_assert 01 serial-contains 'calc: tab-aware (full-viewport)'
+vgate_assert 01 serial-contains 'gocalc: declare accepted'
 vgate_assert 01 serial-contains 'notepad: tab-aware (full-viewport)'
 # M62d: reorder two unpinned tabs; pin jumps to the left and stays there
 # across a focus change. Order line names ids + pin bits (not LAYOUT.txt).
@@ -187,7 +196,7 @@ vgate_assert 01 serial-contains 'y=360 w=1280 h=360'
 vgate_assert 01 serial-count 'gotabwm: unsplit' 2
 vgate_assert 01 serial-contains 'split=none'
 vgate_assert 01 serial-contains 'x=0 y=0 w=1280 h=720'
-vgate_assert 01 serial-contains 'calc: resize relayout'
+vgate_assert 01 serial-contains 'gocalc: present'
 vgate_assert 01 serial-contains 'notepad: resize relayout'
 # Pair each layout dump with the applied pane line dumpTab prints next.
 # Every pair must match within 1 px (integer-half remainder).
@@ -229,7 +238,7 @@ PY
 vgate_assert 01 serial-count 'gotabwm: tab close id=' 2
 vgate_assert 01 serial-contains 'gotabwm: rail n=1 focus='
 vgate_assert 01 serial-contains 'gotabwm: tabs empty'
-vgate_assert 01 serial-contains 'calc: win_close'
+vgate_assert 01 serial-contains 'gocalc: close'
 vgate_assert 01 serial-contains 'notepad: win_close'
 vgate_assert 01 serial-contains 'gotabwm: host done'
 vgate_assert 01 serial-contains 'gotabwm: close'
@@ -302,8 +311,8 @@ ids = {parsed[0][0], parsed[1][0]}
 if len(ids) != 2:
     sys.exit("tab ids not unique: %s" % (ids,))
 bins = {parsed[0][1], parsed[1][1]}
-if bins != {"CALC.BIN", "NOTEPAD.BIN"}:
-    sys.exit("bins %s want CALC.BIN and NOTEPAD.BIN" % (bins,))
+if bins != {"GOCALC.ELF", "NOTEPAD.BIN"}:
+    sys.exit("bins %s want GOCALC.ELF and NOTEPAD.BIN" % (bins,))
 for row in parsed:
     if row[2:6] != ("0", "0", "1280", "720") or row[7] != "none":
         sys.exit("last dump must be unsplit full-viewport, got %s" % (row,))
@@ -335,7 +344,7 @@ vgate_assert 02 serial-contains 'gotabwm: layout file=/host/SELFTEST/LAYOUT.txt'
 vgate_assert 02 serial-absent 'gotabwm: split '
 vgate_assert 02 serial-absent 'gotabwm: tab close id='
 vgate_assert 02 serial-absent 'gotabwm: session bad'
-vgate_assert 02 share-contains SELFTEST/LAYOUT.txt 'bin=CALC.BIN'
+vgate_assert 02 share-contains SELFTEST/LAYOUT.txt 'bin=GOCALC.ELF'
 vgate_assert 02 python <<'PY'
 import os, re, sys
 p = os.path.join(os.environ["VG_SHARE"], "SELFTEST/LAYOUT.txt")
@@ -354,12 +363,12 @@ ids = [parsed[0].group(1), parsed[1].group(1)]
 if ids != ["256", "257"]:
     sys.exit("restored ids %s want 256,257 (sessionIDBase=0x100)" % ids)
 bins = [parsed[0].group(2), parsed[1].group(2)]
-if bins != ["CALC.BIN", "NOTEPAD.BIN"]:
+if bins != ["GOCALC.ELF", "NOTEPAD.BIN"]:
     sys.exit("bins %s" % bins)
 if parsed[0].group(8) != "none" or parsed[1].group(8) != "none":
     sys.exit("restore dump must be unsplit")
 print("LAYOUT.txt restore n=2 ids=256,257 unsplit")
-# Boot 03 must not restore Calc/Notepad placeholders.
+# Boot 03 must not restore Calc/Notepad session placeholders.
 stale = os.path.join(os.environ["VG_SHARE"], "SESSION.TABS")
 try:
     os.remove(stale)

@@ -38,7 +38,7 @@ pub const AppEntry = struct {
 /// issue #738 — drop a new APPS.TXT into the share, no image rebuild),
 /// then the ESP, so adding an app means a manifest line, not a recompile.
 pub const installed_apps = [_]AppEntry{
-    .{ .name = "CALC.BIN", .desc = "64-bit Calc", .status = "GUI Active", .icon = 'c' },
+    .{ .name = "GOCALC.ELF", .desc = "64-bit Calc", .status = "GUI Active", .icon = 'c' },
     .{ .name = "NOTEPAD.BIN", .desc = "Text Editor", .status = "Host Share", .icon = 'n' },
     .{ .name = "TOP.BIN", .desc = "Task Manager", .status = "sys_procs", .icon = 't' },
     .{ .name = "KEYTEST.BIN", .desc = "HID Input", .status = "USB Events", .icon = 'k' },
@@ -457,7 +457,7 @@ pub export fn _start() callconv(.c) noreturn {
 
 test "desktop: installed application catalog metadata" {
     try std.testing.expectEqual(@as(usize, 9), installed_apps.len);
-    try std.testing.expectEqualStrings("CALC.BIN", installed_apps[0].name);
+    try std.testing.expectEqualStrings("GOCALC.ELF", installed_apps[0].name);
     try std.testing.expectEqualStrings("NOTEPAD.BIN", installed_apps[1].name);
     try std.testing.expectEqualStrings("TOP.BIN", installed_apps[2].name);
     try std.testing.expectEqualStrings("KEYTEST.BIN", installed_apps[3].name);
@@ -471,7 +471,7 @@ test "desktop: manifest cap holds the full 9-app catalog incl FILE.BIN (card B4)
     // The real APPS.TXT catalog (9 entries) parses end-to-end without
     // truncation — FILE.BIN must be the ninth entry and reachable.
     const text =
-        "CALC.BIN | 64-bit Calc | c\n" ++
+        "GOCALC.ELF | 64-bit Calc | c\n" ++
         "NOTEPAD.BIN | Text Editor | n\n" ++
         "TOP.BIN | Task Manager | t\n" ++
         "KEYTEST.BIN | HID Input | k\n" ++
@@ -492,7 +492,7 @@ test "desktop: parse_manifest reads NAME | Display | icon lines (claim 8877)" {
     const text =
         "# comment line\n" ++
         "\n" ++
-        "CALC.BIN | 64-bit Calc | c\n" ++
+        "GOCALC.ELF | 64-bit Calc | c\n" ++
         "NOTEPAD.BIN | Text Editor | n\n" ++
         "  TOP.BIN  |  Task Manager  |  t  \n" ++
         "# another comment\n" ++
@@ -500,7 +500,7 @@ test "desktop: parse_manifest reads NAME | Display | icon lines (claim 8877)" {
     var out: [manifest_max_apps]AppEntry = undefined;
     const n = parse_manifest(text, &out);
     try std.testing.expectEqual(@as(usize, 4), n);
-    try std.testing.expectEqualStrings("CALC.BIN", out[0].name);
+    try std.testing.expectEqualStrings("GOCALC.ELF", out[0].name);
     try std.testing.expectEqualStrings("64-bit Calc", out[0].desc);
     try std.testing.expectEqual(@as(u8, 'c'), out[0].icon);
     try std.testing.expectEqualStrings("NOTEPAD.BIN", out[1].name);
@@ -545,7 +545,7 @@ test "desktop: empty or comment-only manifest yields zero apps" {
 
 test "desktop: Enter routes the selected list item to launch (claim 6359)" {
     var app = AppState.init();
-    // The catalog starts selected at index 0 (CALC.BIN)
+    // The catalog starts selected at index 0 (GOCALC.ELF)
     try std.testing.expectEqual(@as(?usize, 0), app.list_apps.selected_idx);
 
     // Enter (HID usage 0x28, ASCII '\n') with a selection -> launch

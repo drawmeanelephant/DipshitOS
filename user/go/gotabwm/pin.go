@@ -24,22 +24,35 @@ func applySwapUnpinned() bool {
 	return true
 }
 
-// applyPinStay pins the right-hand tab so it jumps to the left of the
-// rail, then focuses the other tab. The pin stays at index 0.
+// applyPinStay pins Calc when that title is on the strip so SESSION.TABS
+// is Calc-left regardless of which client declared first (Zig NOTEPAD
+// often beats GOCALC.ELF to WM_RPC). Without a Calc tab (boot 03
+// GOEDIT+NOTEPAD) it pins the right-hand tab. Then it focuses the other
+// tab so pin-left is dumped twice, and restores focus to the pinned tab
+// so the M62e snapshot's active index is 0.
 func applyPinStay() bool {
 	if tabs.Count() != 2 {
 		return false
 	}
-	right := tabs.At(1)
-	if right.ID == 0 || right.Pinned {
+	pinID := tabs.At(1).ID
+	for i := 0; i < 2; i++ {
+		t := tabs.At(i)
+		if t.Title == "Calc" {
+			pinID = t.ID
+			break
+		}
+	}
+	if pinID == 0 {
 		return false
 	}
-	if !tabs.Pin(right.ID) {
+	pi := tabs.index(pinID)
+	if pi < 0 || tabs.At(pi).Pinned {
 		return false
 	}
-	vi.ConsoleLine(MarkerPin + "id=" + vi.Itoa64(int64(right.ID)) + " on")
-	// First dump: pin bit + left partition. There is no kernel pin object
-	// to ack; this is the strip after Pin().
+	if !tabs.Pin(pinID) {
+		return false
+	}
+	vi.ConsoleLine(MarkerPin + "id=" + vi.Itoa64(int64(pinID)) + " on")
 	dumpOrder()
 	fid, _ := tabs.Focused()
 	other := tabs.At(0).ID
@@ -49,8 +62,6 @@ func applyPinStay() bool {
 	if other == 0 || other == fid {
 		return false
 	}
-	// Second dump only after the kernel took the focus change. A failed
-	// taskbar click must not look like pin-stayed-left-across-focus.
 	if vi.WmctlTaskbarClick(other) != 0 {
 		return false
 	}
@@ -61,6 +72,16 @@ func applyPinStay() bool {
 	vi.ConsoleLine(MarkerHostFocus + vi.Itoa64(int64(other)))
 	hostedApp = other
 	dumpOrder()
+	left := tabs.At(0)
+	if left.ID == 0 {
+		return false
+	}
+	if !tabs.FocusTab(left.ID) {
+		return false
+	}
+	if vi.WmctlTaskbarClick(left.ID) == 0 {
+		hostedApp = left.ID
+	}
 	return true
 }
 

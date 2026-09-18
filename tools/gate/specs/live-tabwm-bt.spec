@@ -3,7 +3,7 @@
 #
 # TWO headless boots sharing the seeded host share (`vgate_share seed`):
 #
-#   01  `tabwm start` + `exec CALC.BIN` + HID chords. Pins M48 markers and
+#   01  `tabwm start` + `exec NOTEPAD.BIN` + HID chords. Pins M48 markers and
 #       the TWM quick-jump (`tabwm: go-summon` + `tabwm: go-scan-us=N`).
 #       Ctrl+Shift+P / F persist pin+freeze into `.tabs` v2.
 #   02  A second boot of TABWM + CALC against the same share. Proves the
@@ -11,7 +11,7 @@
 #       boot 01 writing v2 without fault is not enough; the temp share used
 #       to be discarded at run end.
 #
-# Chord sequence on 01 (after `calc: open id=2`; via-virtio paces 0.25 s):
+# Chord sequence on 01 (after `notepad: open id=2`; via-virtio paces 0.25 s):
 #   ctrl-shift-p, ctrl-shift-f, ctrl-shift-a, escape,
 #   ctrl-shift-g, escape, ctrl-t, escape
 #
@@ -27,7 +27,7 @@ tabwm start
 EOF
 
 vgate_file script2.txt <<'EOF'
-exec CALC.BIN
+exec NOTEPAD.BIN
 EOF
 
 vgate_file script3.txt <<'EOF'
@@ -39,7 +39,7 @@ tabwm start
 EOF
 
 vgate_file script2-02.txt <<'EOF'
-exec CALC.BIN
+exec NOTEPAD.BIN
 EOF
 
 vgate_file script3-02.txt <<'EOF'
@@ -50,7 +50,7 @@ vgate_run 01 -- --screen '$RUN_DIR/screen' --via-virtio \
     --script '$RUN_DIR/script.txt' \
     --script2 '$RUN_DIR/script2.txt' --script2-after 'tabwm: sidebar-rendered' \
     --input-chords 'ctrl-shift-p,ctrl-shift-f,ctrl-shift-a,escape,ctrl-shift-g,escape,ctrl-t,escape' \
-    --input-chords-after 'calc: open id=2' \
+    --input-chords-after 'notepad: open id=2' \
     --script3 '$RUN_DIR/script3.txt' --script3-after 'tabwm: start-surface' \
     --script-expect 'rx-m48-ok' --timeout 200
 
@@ -58,7 +58,7 @@ vgate_assert 01 serial-contains 'VirelaiOS kernel has seized control.'
 vgate_assert 01 serial-contains 'tabwm: starting TABWM.BIN'
 vgate_assert 01 serial-contains 'tabwm: registered'
 vgate_assert 01 serial-contains 'tabwm: sidebar-rendered'
-vgate_assert 01 serial-contains 'calc: open id=2'
+vgate_assert 01 serial-contains 'notepad: open id=2'
 # M48 markers + the TWM Go quick-jump.
 vgate_assert 01 serial-contains 'tabwm: tab-pin 2 on'
 vgate_assert 01 serial-contains 'tabwm: tab-freeze 2 on'
@@ -109,7 +109,7 @@ vgate_assert 02 serial-contains 'VirelaiOS kernel has seized control.'
 vgate_assert 02 serial-contains 'tabwm: starting TABWM.BIN'
 vgate_assert 02 serial-contains 'tabwm: registered'
 vgate_assert 02 serial-contains 'tabwm: tabs-restored v2'
-vgate_assert 02 serial-contains 'calc: open id=2'
+vgate_assert 02 serial-contains 'notepad: open id=2'
 vgate_assert 02 serial-contains 'tabwm: tabs-applied v2'
 vgate_assert 02 serial-contains 'pin=1'
 vgate_assert 02 serial-contains 'freeze=1'

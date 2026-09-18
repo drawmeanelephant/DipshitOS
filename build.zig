@@ -670,31 +670,6 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_blkd.step);
 
     // ------------------------------------------------------------------
-    // Guest: fourteenth ESP user program (milestone eleven, card A2 — claim 8401)
-    // CALC.BIN. Interactive graphical calculator with 64-bit engine.
-    // DSK3 segmented (writable .data/.bss — the WMS9 fill-batcher global needs
-    // the RW data+bss aperture; the GLOBALS precedent).
-    // ------------------------------------------------------------------
-    const calc_prog = b.addExecutable(.{
-        .name = "user-calc",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("user/src/calc.zig"),
-            .target = kernel_target,
-            .optimize = .ReleaseSmall,
-        }),
-    });
-    calc_prog.linker_script = b.path("user/linker-segmented.ld");
-    const calc_step = b.step("calc", "Build the fourteenth ESP user program (zig-out/bin/CALC.BIN) — DSK3 segmented (writable .data/.bss)");
-    const calc_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
-    calc_elf2bin.addFileArg(calc_prog.getEmittedBin());
-    const calc_bin = calc_elf2bin.addOutputFileArg("CALC.BIN");
-    calc_elf2bin.has_side_effects = true;
-    calc_elf2bin.stdio = .inherit;
-    calc_step.dependOn(&calc_elf2bin.step);
-    const install_calc = b.addInstallFileWithDir(calc_bin, .bin, "CALC.BIN");
-    b.getInstallStep().dependOn(&install_calc.step);
-
-    // ------------------------------------------------------------------
     // Guest: fifteenth ESP user program (milestone eleven, card A3 — claim 3234)
     // NOTEPAD.BIN. Interactive graphical text editor with /data persistence.
     // DSK3 segmented (writable .data/.bss — the WMS9 fill-batcher global needs

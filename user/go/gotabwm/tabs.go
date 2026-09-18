@@ -78,7 +78,7 @@ func pinFlag(t Tab) uint8 {
 func guessBin(title string) string {
 	switch title {
 	case "Calc":
-		return "CALC.BIN"
+		return "GOCALC.ELF"
 	case "Notepad":
 		return "NOTEPAD.BIN"
 	case "Edit":
@@ -418,7 +418,7 @@ func uabs(a, b uint32) uint32 {
 
 // layoutLine is one ADR 0033 LAYOUT.txt surface line (no trailing LF).
 // bin is a single token: a space or newline would break bin=\S+ and the
-// one-line-per-tab dump. Gate titles are app-controlled (CALC.BIN etc.).
+// one-line-per-tab dump. Gate titles are app-controlled (GOCALC.ELF etc.).
 func layoutLine(id uint32, bin string, r Rect, focus bool, kind SplitKind) string {
 	if bin == "" {
 		bin = "-"

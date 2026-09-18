@@ -826,7 +826,7 @@ test "sexiburger manifest: parses apps, skips comments/blanks/malformed" {
     const text =
         \\# comment line
         \\
-        \\CALC.BIN | Calculator | c | dock=true
+        \\GOCALC.ELF | Calculator | c | dock=true
         \\NOTEPAD.BIN|Text Editor|n
         \\MALFORMED-NO-PIPE
         \\ | Empty Name | x
@@ -836,7 +836,7 @@ test "sexiburger manifest: parses apps, skips comments/blanks/malformed" {
     var out: [menu_apps_max]MenuApp = undefined;
     const n = parse_apps_manifest(text, &out);
     try std.testing.expectEqual(@as(usize, 3), n);
-    try std.testing.expectEqualStrings("CALC.BIN", out[0].name);
+    try std.testing.expectEqualStrings("GOCALC.ELF", out[0].name);
     try std.testing.expectEqualStrings("Calculator", out[0].desc);
     try std.testing.expect(out[0].dock);
     try std.testing.expectEqualStrings("NOTEPAD.BIN", out[1].name);

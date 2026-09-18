@@ -1138,7 +1138,7 @@ test "top: AppState sortable columns and indicator (C8)" {
 test "top: AppState text filter and sort+filter (C8)" {
     var app = AppState.init();
     app.table.count = 4;
-    app.table.procs[0] = .{ .pid = 0, .state = .running, .exit_status = 0, .name = "CALC.BIN\x00\x00\x00\x00\x00\x00\x00\x00".*, .name_len = 8 };
+    app.table.procs[0] = .{ .pid = 0, .state = .running, .exit_status = 0, .name = "VIEW.BIN\x00\x00\x00\x00\x00\x00\x00\x00".*, .name_len = 8 };
     app.table.procs[1] = .{ .pid = 1, .state = .running, .exit_status = 0, .name = "NOTEPAD.BIN\x00\x00\x00\x00\x00".*, .name_len = 11 };
     app.table.procs[2] = .{ .pid = 2, .state = .running, .exit_status = 0, .name = "TOP.BIN\x00\x00\x00\x00\x00\x00\x00\x00\x00".*, .name_len = 7 };
     app.table.procs[3] = .{ .pid = 3, .state = .running, .exit_status = 0, .name = "FILE.BIN\x00\x00\x00\x00\x00\x00\x00\x00".*, .name_len = 8 };
@@ -1151,11 +1151,11 @@ test "top: AppState text filter and sort+filter (C8)" {
     app.set_filter("bin");
     app.click_column(.name);
     try std.testing.expectEqual(@as(usize, 4), app.display_count);
-    // Sorted by name asc: CALC, FILE, NOTEPAD, TOP
-    try std.testing.expectEqual(@as(u64, 0), app.table.procs[app.display_indices[0]].pid);
-    try std.testing.expectEqual(@as(u64, 3), app.table.procs[app.display_indices[1]].pid);
-    try std.testing.expectEqual(@as(u64, 1), app.table.procs[app.display_indices[2]].pid);
-    try std.testing.expectEqual(@as(u64, 2), app.table.procs[app.display_indices[3]].pid);
+    // Sorted by name asc: FILE, NOTEPAD, TOP, VIEW
+    try std.testing.expectEqual(@as(u64, 3), app.table.procs[app.display_indices[0]].pid);
+    try std.testing.expectEqual(@as(u64, 1), app.table.procs[app.display_indices[1]].pid);
+    try std.testing.expectEqual(@as(u64, 2), app.table.procs[app.display_indices[2]].pid);
+    try std.testing.expectEqual(@as(u64, 0), app.table.procs[app.display_indices[3]].pid);
     // Clear filter
     app.set_filter("");
     try std.testing.expectEqual(@as(usize, 4), app.display_count);
