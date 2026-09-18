@@ -47,8 +47,11 @@ func TestLoopBounds(t *testing.T) {
 	if pointerClickHold < 8 {
 		t.Fatalf("pointerClickHold = %d: a 3×2.5s click does not fit", pointerClickHold)
 	}
-	if hidChordHold < 16 {
-		t.Fatalf("hidChordHold = %d: a rail click plus chords do not fit before auto-pin", hidChordHold)
+	if pointerDragHold < 12 {
+		t.Fatalf("pointerDragHold = %d: a 4×2.5s drag does not fit", pointerDragHold)
+	}
+	if hidChordHold < pointerDragHold {
+		t.Fatalf("hidChordHold = %d: a rail drag plus chords do not fit before auto-pin", hidChordHold)
 	}
 	if maxTicks < pointerClickHold {
 		t.Fatalf("maxTicks %d < pointerClickHold %d: a click expires mid-sequence", maxTicks, pointerClickHold)
@@ -105,6 +108,14 @@ func TestHidMarkerOnlyAfterRealEvent(t *testing.T) {
 }
 
 func TestConsumeSeatEventIgnoreNonTick(t *testing.T) {
+	savedBtn := prevPtrButtons
+	savedDrag := railDragFrom
+	defer func() {
+		prevPtrButtons = savedBtn
+		railDragFrom = savedDrag
+	}()
+	prevPtrButtons = 0
+	railDragFrom = -1
 	if !consumeSeatEvent(vi.Event{Kind: vi.EvCompositeTick}) {
 		t.Fatal("kind 18 must count as a tick")
 	}

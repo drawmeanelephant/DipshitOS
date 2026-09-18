@@ -1,14 +1,15 @@
-// GOTABWM.ELF — M63b/c (issues #1420/#1421): kind-21 chords + kind-19 rail click.
+// GOTABWM.ELF — M63b–d (issues #1420/#1421/#1422): chords, rail click, drag-reorder.
 //
 // Frozen table on #1418 (no new ADR, no new kernel cmd, no ctrl-tab):
 //
 //	ctrl-shift-p  -> Pin() the focused tab
 //	alt-tab       -> FocusTab + WmctlTaskbarClick (cmd 12), wrapping
 //	rail click    -> top strip, equal-width cells, same TASKBAR+FocusTab
+//	rail drag     -> press/release over different cells → existing Reorder()
 //
 // Markers print only after the mutation/syscall that made them true.
 // Ctrl+W is not bound (it collides with the editor). Ctrl+Tab waits on M63r.
-// Close-x and drag-reorder are later cards. Client-area clicks are ignored.
+// Close-x, sash, and hover-preview are later cards. Client-area is ignored.
 package main
 
 import "virelai/vi"
@@ -24,13 +25,20 @@ const (
 )
 
 // hidChordHold is how many composite ticks the two-tab choreography waits
-// after first seeing n>=2, so a `--pointer-virtio` rail click (3×2.5 s)
+// after first seeing n>=2, so a `--pointer-virtio` rail drag (4×2.5 s)
 // and `--input-chords 'ctrl-shift-p,alt-tab'` land before auto reorder/pin.
-const hidChordHold = 16
+const hidChordHold = 20
+
+// pointerDragHold is one `--pointer-virtio 'x,y,d;x,y,u'` (4 messages × 2.5 s).
+const pointerDragHold = 12
 
 // prevPtrButtons is the last kind-19 flags low byte; rail click is a left
-// down edge, matching Zig TABWM.
-var prevPtrButtons uint8
+// down edge and drag-reorder commits on the matching up edge, matching
+// Zig TABWM begin_tab_drag / end_tab_drag.
+var (
+	prevPtrButtons uint8
+	railDragFrom   = -1 // source cell, or -1 when no drag is armed
+)
 
 func handleWmKey(e vi.Event) {
 	usage := uint8(e.Arg0)
@@ -113,15 +121,24 @@ func handleWmPointer(e vi.Event) {
 	py := e.Arg0 >> 16
 	btn := uint8(e.Flags & 0xff)
 	down := pointerDownEdge(btn, prevPtrButtons)
+	up := pointerUpEdge(btn, prevPtrButtons)
 	prevPtrButtons = btn
-	if !down {
+	if down {
+		beginRailDrag(px, py)
+		_ = applyRailClick(px, py)
 		return
 	}
-	_ = applyRailClick(px, py)
+	if up {
+		_ = endRailDrag(px, py)
+	}
 }
 
 func pointerDownEdge(btn, prev uint8) bool {
 	return btn&hidBtnLeft != 0 && prev&hidBtnLeft == 0
+}
+
+func pointerUpEdge(btn, prev uint8) bool {
+	return btn&hidBtnLeft == 0 && prev&hidBtnLeft != 0
 }
 
 // railCellAt is the top-strip hit-test (M63c). Equal-width cells matching
@@ -164,6 +181,39 @@ func applyRailClick(px, py uint32) bool {
 	vi.ConsoleLine(MarkerRailClick + vi.Itoa64(int64(id)))
 	vi.ConsoleLine(MarkerTabFocus + vi.Itoa64(int64(id)))
 	vi.ConsoleLine(MarkerHostFocus + vi.Itoa64(int64(id)))
+	dumpOrder()
+	return true
+}
+
+func beginRailDrag(px, py uint32) {
+	railDragFrom = -1
+	i, ok := railCellAt(px, py, vi.ScanoutWidth, tabs.Count(), RailHeight)
+	if ok {
+		railDragFrom = i
+	}
+}
+
+func endRailDrag(px, py uint32) bool {
+	from := railDragFrom
+	railDragFrom = -1
+	if from < 0 {
+		return false
+	}
+	to, ok := railCellAt(px, py, vi.ScanoutWidth, tabs.Count(), RailHeight)
+	if !ok {
+		return false
+	}
+	return applyRailReorder(from, to)
+}
+
+// applyRailReorder is Zig TABWM reorder_tab: Reorder() then the existing
+// `gotabwm: reorder from->to` marker. Same-cell release is a click no-op.
+// Does not write SESSION.TABS (M62e stays the once-only pin-stay snapshot).
+func applyRailReorder(from, to int) bool {
+	if !tabs.Reorder(from, to) {
+		return false
+	}
+	vi.ConsoleLine(MarkerReorder + vi.Itoa64(int64(from)) + "->" + vi.Itoa64(int64(to)))
 	dumpOrder()
 	return true
 }
