@@ -714,8 +714,11 @@ pub fn truncate(handle: u16, size: u64) u8 {
     return decode_reply(vf_reply_buf[0..n]).status;
 }
 
-/// RENAME/overwrite `from` → `to` on the host share (stateless).
-/// NUL-separated payload (paths are NUL-free by construction).
+/// RENAME `from` → `to` on the host share (stateless). The host publishes
+/// with a moveItem and REFUSES a live target (st_exists — the rename is
+/// no-overwrite), so a replace is the caller's delete-then-rename sequence
+/// (M66b #1444: the crash-safe save's publish step). NUL-separated payload
+/// (paths are NUL-free by construction).
 pub fn rename(raw_from: []const u8, raw_to: []const u8) u8 {
     const from = clean_path(raw_from);
     const to = clean_path(raw_to);

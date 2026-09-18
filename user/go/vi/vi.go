@@ -547,14 +547,15 @@ func FileRename(oldPath, newPath string) int64 {
 // WriteFileSafe replaces path with b crash-safe (M66b #1444): the body is
 // written to a sacrificial temp beside the target, fsync'd through slot 77
 // BEFORE close, and published — the live path is never truncated in place,
-// so a crash mid-write can never leave a partial file behind. The HF
-// rename is no-overwrite, so the publish is delete-then-rename: the crash
-// window leaves the target ABSENT, which every reader treats as defaults
-// (corrupt-fails-closed), never as garbage. The temp is the one file that
-// may be truncated in place — it is the sacrificial copy, and a stale temp
-// from an earlier crash is simply replaced. Returns 0, or the negative
-// kernel code of the step that failed; on failure the temp is removed and
-// the target is untouched.
+// so no failure or crash can leave a PARTIAL file behind. The HF rename is
+// no-overwrite, so the publish is delete-then-rename: from the delete on,
+// the honest failure mode for the target is ABSENT, which every reader
+// treats as defaults (corrupt-fails-closed) — never garbage. The temp is
+// the one file that may be truncated in place (it is the sacrificial
+// copy), and an orphan temp from a crash between its close and the
+// publish is simply replaced by the next safe write — nothing removes it
+// at boot. Returns 0, or the negative kernel code of the step that failed;
+// every failure removes the temp.
 func WriteFileSafe(path string, b []byte) int64 {
 	if path == "" {
 		return -ErrEINVAL
@@ -576,6 +577,7 @@ func WriteFileSafe(path string, b []byte) int64 {
 	}
 	FileClose(uint32(h))
 	if rc := FileDelete(path); rc < 0 && rc != ErrFileNotFound {
+		_ = FileDelete(tmp)
 		return rc
 	}
 	if rc := FileRename(tmp, path); rc < 0 {

@@ -443,11 +443,12 @@ pub fn serialize(out: []u8) usize {
 
 /// Parse + apply a SETTINGS.TXT payload. M66b (#1444): the version header
 /// is the LOAD GATE — corrupt-fails-closed like `.tabs` v2. The first line
-/// must be exactly `#v<digits>` (at least one digit, at most three, value
-/// this kernel understands); a headerless file (the leftover shape of a
-/// partial in-place write), malformed header, or newer schema is refused
-/// WHOLE — the compiled defaults stay in force, never a partial parse.
-/// Shared by the host-share loader. Returns false when refused.
+/// (trimmed of surrounding SP/CR/TAB) must be `#v<digits>` (at least one
+/// digit, at most three, value this kernel understands); a headerless
+/// file (the leftover shape of a partial in-place write), malformed
+/// header, or newer schema is refused WHOLE — the compiled defaults stay
+/// in force, never a partial parse. Shared by the host-share loader.
+/// Returns false when refused.
 fn apply_bytes(bytes: []const u8) bool {
     var pos: usize = 0;
     var file_version: u32 = 0; // set below once the header validates
@@ -525,7 +526,12 @@ pub fn load_from_share() bool {
         last_load_refused = true;
         return false;
     }
-    const n = virtio_file.read_whole(filename, &file_buf) orelse return false;
+    const n = virtio_file.read_whole(filename, &file_buf) orelse {
+        // Stat said present; the read could not deliver it — corrupt too
+        // (M66b review): take the refused line, not a silent default.
+        last_load_refused = true;
+        return false;
+    };
     if (!apply_bytes(file_buf[0..n])) {
         last_load_refused = true;
         return false;
@@ -561,7 +567,9 @@ fn migrate(from_version: u32) void {
 /// by the host's rename. The HF rename is no-overwrite (the host answers
 /// st_exists for a live target), so the publish is delete-then-rename —
 /// the crash window leaves the file ABSENT, which the next load reads as
-/// compiled defaults; the file is never truncated or left partial.
+/// compiled defaults; the file is never truncated or left partial. An
+/// orphan tmp from a save that crashed between its close and the publish
+/// is not cleaned at boot — the next save simply replaces it.
 /// HF6 (issue #740): without a channel the save is an honest no-op.
 pub fn save_to_share() bool {
     ensure_init();

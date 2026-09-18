@@ -39,7 +39,7 @@ func TestSettingsParseMirrorsTheKernelGate(t *testing.T) {
 
 func TestSettingsParseIsFailClosed(t *testing.T) {
 	bad := map[string]string{
-		"empty":      "", // a wiped file
+		"empty":      "",          // a wiped file
 		"headerless": "wm=none\n", // the partial in-place write shape
 		"bare hash":  "#\nwm=none\n",
 		"no digits":  "#v\nwm=none\n",
@@ -95,7 +95,9 @@ func TestSettingsParseDropsRowsButStands(t *testing.T) {
 // the kernel's own serializer emits for the same table (settings.zig
 // init() order), so the two implementations cannot drift. Note the kernel
 // round-trips `prompt=virelai> ` byte-exactly on WRITE (only a REload
-// trims the value).
+// trims the value). This unit pin compares Go against a Go-side literal —
+// it cannot catch kernel/Go drift by itself; the real cross-implementation
+// pin is go-wm-default boot 04's share-equals on the healed file.
 func TestSettingsRenderMatchesTheKernelSerializer(t *testing.T) {
 	rows := []setting{
 		{"hostname", "virelai"},

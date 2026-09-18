@@ -143,8 +143,15 @@ func renderSettings(ss []setting) []byte {
 // seat runs on its own defaults, never a boot failure. A good decode names
 // the `wm` seat the file carries (the key the boot default turns on).
 func loadSettings() {
-	b, r := vi.ReadFileAll(settingsPath, settingsMaxBody)
+	// Read one byte past the kernel's bounded buffer: a file LARGER than
+	// settingsMaxBody is refused whole (the kernel's stat gate), so the
+	// seat never accepts what the kernel would refuse (M66b review).
+	b, r := vi.ReadFileAll(settingsPath, settingsMaxBody+1)
 	if r < 0 || b == nil {
+		return
+	}
+	if len(b) > settingsMaxBody {
+		vi.ConsoleLine(MarkerSettingsBad)
 		return
 	}
 	ss, ok := parseSettingsTXT(b)
