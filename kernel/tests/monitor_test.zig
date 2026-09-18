@@ -1363,7 +1363,7 @@ test "monitor: tasks is registered and reports the deterministic host state" {
     _ = scheduler.register_user(0, 0);
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{"tasks"}));
     try std.testing.expectEqualStrings(
-        "tasks: enabled=0 current=0 switches=0 pool=4/11 zombies=0\n" ++
+        "tasks: enabled=0 current=0 switches=0 pool=4/13 zombies=0\n" ++
             "  shell    saves=0 resumes=0 advances=0 state=ready\n" ++
             "  worker   saves=0 resumes=0 advances=0 state=ready\n" ++
             "  user-el0 saves=0 resumes=0 advances=0 state=ready\n" ++
@@ -1389,7 +1389,7 @@ test "monitor: resources audits the fixed pools at their bounds (C3 claim 0339)"
     // The occupancy lines are exact (4 tasks, 0 procs, 0 tables); the
     // windows line only asserts the shape (other tests in this binary may
     // have armed the window manager, leaving a non-zero win_count).
-    try std.testing.expect(std.mem.indexOf(u8, out, "resources: tasks=4/11 zombies=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "resources: tasks=4/13 zombies=0\n") != null);
     // register_user also registers the boot payload as a PROCESS (claim
     // 3848), so the registry holds exactly one descriptor here.
     try std.testing.expect(std.mem.indexOf(u8, out, "resources: procs=1/16\n") != null);
