@@ -4468,61 +4468,41 @@ fn cmd_tasks(m: *Monitor, args: []const []const u8) ExecError {
 
 fn cmd_smp(m: *Monitor, args: []const []const u8) ExecError {
     _ = args;
-    m.console.puts("smp: cores=");
-    m.console.print_u64(@as(u64, smp.num_cores));
+    // M70b (#1454): every line below is built into one buffer and written
+    // once (the claim-881-slice-4 rule) — with wake targeting, secondary
+    // cores print concurrently with the monitor, and a split line is
+    // exactly what the live gates' per-core placement asserts grep for.
     var online_count: u64 = 0;
     var c: usize = 0;
     while (c < smp.max_cores) : (c += 1) {
         if (smp.core_online[c]) online_count += 1;
     }
-    m.console.puts(" online=");
-    m.console.print_u64(online_count);
-    m.console.puts("\n");
+    var buf: [160]u8 = undefined;
+    m.console.puts(std.fmt.bufPrint(&buf, "smp: cores={d} online={d}\n", .{ smp.num_cores, online_count }) catch return .not_implemented);
 
     c = 0;
     while (c < smp.max_cores) : (c += 1) {
         if (c >= smp.num_cores and !smp.core_online[c]) continue;
-        m.console.puts("  core ");
-        m.console.print_u64(c);
-        m.console.puts(": ");
-        if (c == 0) m.console.puts("bsp ") else m.console.puts("ap  ");
-        m.console.puts("mpidr=");
-        m.console.print_hex(smp.core_mpidr[c]);
-        m.console.puts(" state=");
-        m.console.puts(if (smp.core_online[c]) "online" else "offline");
-        m.console.puts(" ticks=");
-        m.console.print_u64(smp.core_ticks[c]); // per-core tick counter (claim 8477 follow-up)
-        m.console.puts(" task=");
         const cur_tid = scheduler.current_task_for_core(c);
-        if (scheduler.task_info(cur_tid)) |info| {
-            m.console.puts(info.name);
-        } else {
-            m.console.puts("none");
-        }
-        m.console.puts("\n");
+        const task_name = if (scheduler.task_info(cur_tid)) |info| info.name else "none";
+        const line = std.fmt.bufPrint(&buf, "  core {d}: {s} mpidr=0x{x:0>16} state={s} ticks={d} task={s}\n", .{
+            c,
+            if (c == 0) @as([]const u8, "bsp ") else @as([]const u8, "ap  "),
+            smp.core_mpidr[c],
+            if (smp.core_online[c]) @as([]const u8, "online") else @as([]const u8, "offline"),
+            smp.core_ticks[c], // per-core tick counter (claim 8477 follow-up)
+            task_name,
+        }) catch return .not_implemented;
+        m.console.puts(line);
     }
     // M70b (#1454): contention evidence for the wake/TCB sched_lock —
     // observed data read at the measurement point, never a threshold.
-    m.console.puts("smp: sched-lock acquires=");
-    m.console.print_u64(scheduler.sched_lock_acquires);
-    m.console.puts(" contended=");
-    m.console.print_u64(scheduler.sched_lock_contended);
-    m.console.puts(" spins=");
-    m.console.print_u64(scheduler.sched_lock_spins);
-    m.console.puts("\n");
+    m.console.puts(std.fmt.bufPrint(&buf, "smp: sched-lock acquires={d} contended={d} spins={d}\n", .{ scheduler.sched_lock_acquires, scheduler.sched_lock_contended, scheduler.sched_lock_spins }) catch return .not_implemented);
     // M70b (#1454): wake-placement evidence — of all blocked->ready
     // transitions, how many stayed on the calling core, how many landed
     // on a remote (targeted) ring, and how many of those nudged a parked
     // target with the RESCHEDULE SGI.
-    m.console.puts("smp: wakes=");
-    m.console.print_u64(scheduler.wake_local + scheduler.wake_remote);
-    m.console.puts(" local=");
-    m.console.print_u64(scheduler.wake_local);
-    m.console.puts(" remote=");
-    m.console.print_u64(scheduler.wake_remote);
-    m.console.puts(" nudges=");
-    m.console.print_u64(scheduler.wake_nudges);
-    m.console.puts("\n");
+    m.console.puts(std.fmt.bufPrint(&buf, "smp: wakes={d} local={d} remote={d} nudges={d}\n", .{ scheduler.wake_local + scheduler.wake_remote, scheduler.wake_local, scheduler.wake_remote, scheduler.wake_nudges }) catch return .not_implemented);
     return .none;
 }
 
@@ -7260,31 +7240,21 @@ fn cmd_exec(m: *Monitor, args: []const []const u8) ExecError {
     switch (result) {
         .ok => {
             const info = esp_exec.loaded().?;
-            m.console.puts("exec: loaded ");
-            m.console.puts(info.name);
-            m.console.puts(" size=");
-            m.console.print_hex(@intCast(info.content_len));
-            m.console.puts(" entry=");
-            m.console.print_hex(info.entry_va);
-            // Claim 0826: the process's OWN stack placement, not the
-            // static boot stack's.
-            m.console.puts(" stack=");
-            m.console.print_hex(info.stack_va);
+            // One write per line (the claim-881-slice-4 discipline): with
+            // M70b wake targeting the exec'd task starts on a remote core
+            // the moment it is published, and its first output can
+            // otherwise land between these puts and split the very line
+            // the live gates byte-match (observed: `exec: loaded ` +
+            // SMPNET's first heartbeat + ` size=`).
             const head = esp_exec.head();
             var head_value: u64 = 0;
             for (head, 0..) |byte, i| head_value |= @as(u64, byte) << @intCast(56 - i * 8);
-            m.console.puts(" head=");
-            m.console.print_hex(head_value);
-            // Claim 3805 (milestone sixteen C1): a segmented image's data+bss
-            // region is reported so the live gate can assert the kernel's own
-            // page accounting is exact. Flat DSK1 images omit it (byte-identical).
-            if (info.data_len > 0) {
-                m.console.puts(" data=");
-                m.console.print_hex(info.data_len);
-                m.console.puts(" datapages=");
-                m.console.print_u64(info.data_pages);
-            }
-            m.console.puts("\n");
+            var buf: [256]u8 = undefined;
+            const line = if (info.data_len > 0)
+                std.fmt.bufPrint(&buf, "exec: loaded {s} size=0x{x:0>16} entry=0x{x:0>16} stack=0x{x:0>16} head=0x{x:0>16} data=0x{x:0>16} datapages={d}\n", .{ info.name, info.content_len, info.entry_va, info.stack_va, head_value, info.data_len, info.data_pages }) catch return .not_implemented
+            else
+                std.fmt.bufPrint(&buf, "exec: loaded {s} size=0x{x:0>16} entry=0x{x:0>16} stack=0x{x:0>16} head=0x{x:0>16}\n", .{ info.name, info.content_len, info.entry_va, info.stack_va, head_value }) catch return .not_implemented;
+            m.console.puts(line);
             return .none;
         },
         .no_disk => {

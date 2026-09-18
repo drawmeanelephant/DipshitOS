@@ -623,7 +623,7 @@ fn exec_file_impl(name: []const u8, args: []const []const u8, pin: ?usize, princ
     events.reset(proc_id);
     file_table.reset_process(proc_id);
     app_timers.reset(proc_id); // claim 7323: a recycled pid inherits no stale app timer
-    if (scheduler.register_exec_user(entry_va, rebuild.root_phys, @intCast(text_len), rebuild.stack_va, scheduler.task_stack_size, kstack, @intCast(argc), argv_va)) |task_id| {
+    if (scheduler.register_exec_user_pinned(entry_va, rebuild.root_phys, @intCast(text_len), rebuild.stack_va, scheduler.task_stack_size, kstack, @intCast(argc), argv_va, 0, pin)) |task_id| {
         // M32 WMS5 Gate 2 (claim 4278): a segmented (DSK3) image's writable
         // data+bss segment must be in the task's per-process uaccess
         // regions, like the dynamic-ELF path does below (the module-global
@@ -638,10 +638,13 @@ fn exec_file_impl(name: []const u8, args: []const []const u8, pin: ?usize, princ
             if (!scheduler.add_task_write_region(task_id, .{ .base = data_va, .len = data_mem_size })) return .pool_full;
         }
         _ = process.bind(proc_id, task_id);
-        // SMP: `exec -c<core>` — an explicit pin (null = unpinned plain
-        // exec; 0 = an explicit pin to CORE 0, secondary_ok off — claim
-        // 907).
-        if (pin) |p| _ = scheduler.pin_task(task_id, p);
+        // M70b (#1454): the pin is part of the registration (set while the
+        // task is still `.blocked`) and the task only becomes visible to
+        // the cores at publish — a parked remote core can claim it the
+        // instant it lands on a ring, so a post-publish `pin_task` would
+        // lose that race (observed: an `exec -c0` hammer running on a
+        // secondary forever).
+        scheduler.publish_task(task_id);
     } else {
         // Defensive rollback (the upfront slot check makes this
         // unreachable): the process reap frees its owned pages.
@@ -863,7 +866,7 @@ fn exec_static_elf_gap(
     // otherwise enter EL0 with x0=1 / x1=0 and rt0 would dereference argv
     // at address 0. Consistent contract: argc==0 <=> argv_va==0.
     const entry_argc: u64 = if (argv_va != 0) @intCast(argc) else 0;
-    if (scheduler.register_exec_user(entry_va, root_phys, @intCast(text_len_pages), stack_va, scheduler.task_stack_size, kstack, entry_argc, argv_va)) |task_id| {
+    if (scheduler.register_exec_user_pinned(entry_va, root_phys, @intCast(text_len_pages), stack_va, scheduler.task_stack_size, kstack, entry_argc, argv_va, 0, pin)) |task_id| {
         // Middle (rodata) segments are readable through syscalls; the
         // writable data segment is readable AND writable. The text and
         // stack regions were set by register_exec_user itself.
@@ -883,7 +886,8 @@ fn exec_static_elf_gap(
         // Go linker places headers one page below -T), so re-point it.
         scheduler.set_task_text_region(task_id, seg0.vaddr, text_len_pages);
         _ = process.bind(proc_id, task_id);
-        if (pin) |p| _ = scheduler.pin_task(task_id, p);
+        // M70b (#1454): pin-before-publish — see the flat-image path above.
+        scheduler.publish_task(task_id);
     } else {
         _ = process.reap(proc_id);
         return .pool_full;
@@ -1173,7 +1177,7 @@ fn exec_dynamic_elf(
     app_timers.reset(proc_id);
 
     const kstack: []u8 = @as(*[scheduler.task_stack_size]u8, @ptrFromInt(kstack_phys))[0..];
-    if (scheduler.register_exec_user_auxv(interp_entry_va, root_phys, @intCast(text_len), stack_va, frame_off, kstack, @intCast(argc), 0, frame_va + 24)) |task_id| {
+    if (scheduler.register_exec_user_pinned(interp_entry_va, root_phys, @intCast(text_len), stack_va, frame_off, kstack, @intCast(argc), 0, frame_va + 24, pin)) |task_id| {
         if (data_mem_size > 0) {
             if (!scheduler.add_task_read_region(task_id, .{ .base = data_va, .len = data_mem_size })) return .pool_full;
             if (!scheduler.add_task_write_region(task_id, .{ .base = data_va, .len = data_mem_size })) return .pool_full;
@@ -1186,8 +1190,8 @@ fn exec_dynamic_elf(
         }
         if (!scheduler.add_task_read_region(task_id, .{ .base = lib_va, .len = lib_pages * alloc.page_size })) return .pool_full;
         _ = process.bind(proc_id, task_id);
-        // SMP: `exec -c<core>` — an explicit pin (claim 907, see above).
-        if (pin) |p| _ = scheduler.pin_task(task_id, p);
+        // M70b (#1454): pin-before-publish — see the flat-image path above.
+        scheduler.publish_task(task_id);
     } else {
         _ = process.reap(proc_id);
         return .pool_full;

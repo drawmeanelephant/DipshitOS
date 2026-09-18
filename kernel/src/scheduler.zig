@@ -479,10 +479,13 @@ pub const ReadyRing = struct {
 pub var ready_rings: [smp.max_cores]ReadyRing = [_]ReadyRing{.{}} ** smp.max_cores;
 
 /// The ring a task's `ready` membership lives on: its pin core when
-/// pinned, else the wake target (M70b #1454: the least-loaded online
-/// core — was: always ring 0, the any-core default home).
+/// pinned, ring 0 for every core-0-only task (`secondary_ok` off — the
+/// kernel tasks and the `exec -c0` / WM-registration pin semantics), else
+/// the wake target (M70b #1454: the least-loaded online core — was: always
+/// ring 0, the any-core default home).
 fn home_ring_of(id: usize) usize {
     if (tasks[id].pin_core != 0) return tasks[id].pin_core;
+    if (!tasks[id].secondary_ok) return 0;
     return wake_target_core();
 }
 
@@ -1165,7 +1168,9 @@ pub fn register_exec_user(
     argc: u64,
     argv_va: u64,
 ) ?usize {
-    return register_exec_user_auxv(entry_va, root_phys, text_len, stack_va, stack_len, kstack, argc, argv_va, 0);
+    const id = register_exec_user_pinned(entry_va, root_phys, text_len, stack_va, stack_len, kstack, argc, argv_va, 0, null) orelse return null;
+    publish_task(id);
+    return id;
 }
 
 pub fn register_exec_user_auxv(
@@ -1179,13 +1184,55 @@ pub fn register_exec_user_auxv(
     argv_va: u64,
     auxv_va: u64,
 ) ?usize {
+    const id = register_exec_user_pinned(entry_va, root_phys, text_len, stack_va, stack_len, kstack, argc, argv_va, auxv_va, null) orelse return null;
+    publish_task(id);
+    return id;
+}
+
+/// The exec registration, pin-aware and publish-safe (M70b #1454). The
+/// whole TCB build happens with the task `.blocked` OFF the rings, and
+/// every field that affects placement (pin_core / secondary_ok) is FINAL
+/// before the caller publishes it with `publish_task`. With wake targeting
+/// a parked remote core can claim the task the moment it lands on a ring
+/// (the SGI nudge makes that immediate), so a pin applied after publish
+/// loses the race — observed live as `exec -c0 SMPEV.BIN` being claimed by
+/// a parked secondary mid-exec and then stuck on that core (its own
+/// preemption returns it to that core's ring, and pinned tasks are never
+/// stolen). The spawn_thread path (ADR 0027) already builds under one
+/// sched_lock hold for exactly this reason; this is the same discipline
+/// for the exec seam.
+///
+/// Pin semantics = `pin_task`'s: `null`/any-core — `secondary_ok` on;
+/// `p > 0` — pinned to that secondary (`secondary_ok` on); `p == 0` —
+/// pinned to CORE 0 only (`secondary_ok` off; the claim-907 console rule).
+/// The task stays `.blocked` and must be published by the CALLER (after
+/// the process bind), or torn down on failure.
+pub fn register_exec_user_pinned(
+    entry_va: u64,
+    root_phys: u64,
+    text_len: u64,
+    stack_va: u64,
+    stack_len: u64,
+    kstack: []u8,
+    argc: u64,
+    argv_va: u64,
+    auxv_va: u64,
+    pin: ?usize,
+) ?usize {
     const sp_el0 = stack_va + stack_len;
-    const id = spawn("user-exec", entry_va, spsr_el0t_irqs, kstack, root_phys, sp_el0) orelse return null;
-    // Claim 9498: unpinned user tasks may run on ANY core (the console TX
-    // is locked — claim 2369 — and the userspace-service gate serializes
-    // their syscalls). `exec -c<core>` / the WM registration pin after
-    // this via `pin_task`.
-    tasks[id].secondary_ok = true;
+    sched_lock_acquire();
+    defer sched_lock_release();
+    const id = alloc_task_locked("user-exec", entry_va, spsr_el0t_irqs, kstack, root_phys, sp_el0) orelse return null;
+    if (pin) |p| {
+        tasks[id].pin_core = p;
+        tasks[id].secondary_ok = (p != 0);
+    } else {
+        // Claim 9498: unpinned user tasks may run on ANY core (the console TX
+        // is locked — claim 2369 — and the userspace-service gate serializes
+        // their syscalls). `exec -c<core>` / the WM registration pin via the
+        // `pin` argument instead of a post-publish `pin_task`.
+        tasks[id].secondary_ok = true;
+    }
     tasks[id].regions = .{
         .text = .{ .base = userspace.text_va, .len = text_len },
         .stack = .{ .base = stack_va, .len = stack_len },
@@ -1198,6 +1245,20 @@ pub fn register_exec_user_auxv(
     _ = exceptions.frame_write(frame, 1, argv_va);
     _ = exceptions.frame_write(frame, 2, auxv_va);
     return id;
+}
+
+/// Publish a task registered `.blocked` (register_exec_user_pinned, or any
+/// alloc_task_locked build): flip to ready and push to its home ring. The
+/// placement fields must already be final — this is the point of no
+/// return (a remote parked core can claim the task the instant it lands).
+/// The wake-funnel side effects (per-core resched request + parked-target
+/// SGI nudge) fire from push_home_locked exactly as for spawn.
+pub fn publish_task(id: usize) void {
+    sched_lock_acquire();
+    defer sched_lock_release();
+    if (id >= max_tasks or tasks[id].state != .blocked) return;
+    tasks[id].state = .ready;
+    push_home_locked(id);
 }
 
 /// Restrict task `id` to a single core (claim 9498: a RESTRICTION over
