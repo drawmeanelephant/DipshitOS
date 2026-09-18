@@ -2,8 +2,11 @@
 # load, both show running with distinct tasks/stacks, the boot
 # payload stays exited, both run the EL0 flow twice each with a
 # worker advance mid-flight, both exit/reap exactly twice.
-# Mirrors tools/verify-live-concurrent.sh (claim 0826). No
-# --script-expect (the full window must elapse for both programs).
+# Mirrors tools/verify-live-concurrent.sh (claim 0826). M64a (#1438):
+# --script-after forwards the script once the boot payload has exited
+# (procs must see it gone); --script-expect ends on the script's own
+# last line. The claim-4912 tail covers both USER.BIN lifetimes so the
+# run no longer sits on --timeout 60 waiting for transcript '<none>'.
 
 vgate_name live-concurrent "two concurrent user address spaces on VZ"
 vgate_share seed
@@ -18,7 +21,7 @@ procs
 echo rx-concurrent-ok
 EOF
 
-vgate_run 01 -- --script '$RUN_DIR/script.txt' --script-after 'tasks user-el0 exited status=7' --timeout 60
+vgate_run 01 -- --script '$RUN_DIR/script.txt' --script-after 'tasks user-el0 exited status=7' --script-expect 'rx-concurrent-ok' --script-expect-tail 20 --timeout 60
 
 vgate_assert 01 serial-exact 'VirelaiOS kernel has seized control.' 1
 vgate_assert 01 serial-count 'USER.BIN' 2
@@ -39,8 +42,9 @@ bad = [(n, c, w) for n, c, w in bad if c != w]
 if bad:
     sys.exit("FAIL: concurrent counts off: %s" % bad)
 # The procs snapshot: exactly TWO running USER.BIN rows, distinct
-# executor tasks + distinct stack VAs.
-rows = [l for l in lines if re.search(r"procs: id=[0-9]+ name=USER.BIN state=running", l)]
+# executor tasks + distinct stack VAs. M50 (#1135) put uid/caps
+# between name and state — same rows, same fact (live-scale #1426).
+rows = [l for l in lines if re.search(r"procs: id=[0-9]+ name=USER.BIN\b.* state=running", l)]
 if len(rows) != 2:
     sys.exit("FAIL: running USER.BIN rows=%d, want 2" % len(rows))
 tasks, stacks = [], []
@@ -56,7 +60,7 @@ if len(set(tasks)) != 2:
 if len(set(stacks)) != 2:
     sys.exit("FAIL: stack VAs not distinct: %s" % stacks)
 # The boot payload's process is still exited (not yet reaped).
-if "name=user-el0 state=exited" not in ser:
+if not any(re.search(r"procs: id=[0-9]+ name=user-el0\b.* state=exited", l) for l in lines):
     sys.exit("FAIL: boot payload process not exited")
 # Interleave: a worker advance strictly between the FIRST sleep and
 # the LAST wake (sleeps/awakes interleave on serial by construction).
