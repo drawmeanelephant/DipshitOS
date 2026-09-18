@@ -168,3 +168,162 @@ func TestAudioChunkPartialOnError(t *testing.T) {
 		t.Fatalf("confirmed = %d want %d (only the drained periods)", got, want)
 	}
 }
+
+// The four audio rows are ADR 0007 slots 42-45, i.e. the kernel's numbering.
+// A binding that called the wrong row looks identical on the host (every raw
+// call is -ENOSYS there) and only misbehaves on the guest, so the numbers are
+// pinned rather than trusted — the same argument as TestAudioInfoWireSize.
+func TestAudioSlotNumbers(t *testing.T) {
+	rows := []struct {
+		name string
+		got  uintptr
+		want uintptr
+	}{
+		{"SlotAudioInfo", SlotAudioInfo, 42},
+		{"SlotAudioPlay", SlotAudioPlay, 43},
+		{"SlotAudioVolume", SlotAudioVolume, 44},
+		{"SlotAudioMute", SlotAudioMute, 45},
+	}
+	for _, r := range rows {
+		if r.got != r.want {
+			t.Fatalf("%s = %d want %d", r.name, r.got, r.want)
+		}
+	}
+	if AudioVolumeMax != 100 {
+		t.Fatalf("AudioVolumeMax = %d want 100 (slot 44's bound, ADR 0007 row 44)", AudioVolumeMax)
+	}
+}
+
+// AudioVolume must SEND the caller's value unchanged, even when it is out of
+// range. The kernel's EINVAL is the documented answer ("honest refusal, no
+// silent clamping"); a clamp here would turn a caller's bug into silent
+// success, and this is the only place that property is observable without a
+// device — the audio rows route through the hookable gateway, so the fake
+// kernel below sees the actual argument.
+func TestAudioVolumeNoClamp(t *testing.T) {
+	var gotNum, gotArg uintptr
+	calls := 0
+	prev := SetSyscallHookForTest(func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
+		calls++
+		gotNum, gotArg = num, a0
+		return -ErrEINVAL // what the kernel answers for vol > AudioVolumeMax
+	})
+	defer SetSyscallHookForTest(prev)
+
+	n, err := AudioVolume(AudioVolumeMax + 1)
+	if calls != 1 {
+		t.Fatalf("slot 44 called %d times want 1", calls)
+	}
+	if gotNum != SlotAudioVolume {
+		t.Fatalf("called slot %d want %d", gotNum, SlotAudioVolume)
+	}
+	if gotArg != AudioVolumeMax+1 {
+		t.Fatalf("AudioVolume sent %d want %d unchanged: clamping would hide the kernel's EINVAL",
+			gotArg, AudioVolumeMax+1)
+	}
+	if n != 0 || err != errno(ErrEINVAL) {
+		t.Fatalf("AudioVolume(over) = %d, %v want 0, EINVAL", n, err)
+	}
+}
+
+// The in-range path returns the kernel's echo, and sends the same number it
+// was given: the app's marker prints this value, so it must be the kernel's
+// answer rather than our own restatement of the argument.
+func TestAudioVolumeEcho(t *testing.T) {
+	var gotArg uintptr
+	prev := SetSyscallHookForTest(func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
+		gotArg = a0
+		return 40 // the kernel echoes the accepted volume
+	})
+	defer SetSyscallHookForTest(prev)
+
+	n, err := AudioVolume(40)
+	if err != nil {
+		t.Fatalf("AudioVolume(40) err = %v want nil", err)
+	}
+	if gotArg != 40 {
+		t.Fatalf("slot 44 arg = %d want 40", gotArg)
+	}
+	if n != 40 {
+		t.Fatalf("AudioVolume(40) = %d want the kernel's echo 40", n)
+	}
+	// The bound itself is in range: AudioVolumeMax is a legal volume, not an
+	// error, and pinning that keeps an off-by-one out of the app's arithmetic.
+	if _, err := AudioVolume(AudioVolumeMax); err != nil {
+		t.Fatalf("AudioVolume(AudioVolumeMax) err = %v want nil", err)
+	}
+}
+
+// A negative volume is out of range by construction. It is passed through as
+// its two's-complement value — which the kernel refuses as out-of-range —
+// rather than being rejected, clamped or silently converted here: one refusal
+// path, in the kernel, is easier to reason about than two.
+func TestAudioVolumeNegativePassedThrough(t *testing.T) {
+	var gotArg uintptr
+	prev := SetSyscallHookForTest(func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
+		gotArg = a0
+		return -ErrEINVAL
+	})
+	defer SetSyscallHookForTest(prev)
+
+	if _, err := AudioVolume(-1); err != errno(ErrEINVAL) {
+		t.Fatalf("AudioVolume(-1) err = %v want EINVAL", err)
+	}
+	if gotArg != ^uintptr(0) {
+		t.Fatalf("AudioVolume(-1) sent %#x want the two's-complement value %#x", gotArg, ^uintptr(0))
+	}
+}
+
+// AudioMute marshals exactly 1/0 — never another int — and surfaces the
+// kernel's refusal. Nothing else about a bool needs proving; the point is that
+// the wire carries the kernel's two states and no third.
+func TestAudioMuteMapping(t *testing.T) {
+	cases := []struct {
+		name string
+		arg  bool
+		want uintptr
+	}{
+		{"muted", true, 1},
+		{"unmuted", false, 0},
+	}
+	for _, c := range cases {
+		var gotNum, gotArg uintptr
+		calls := 0
+		prev := SetSyscallHookForTest(func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
+			calls++
+			gotNum, gotArg = num, a0
+			return 0 // slot 45 returns 0 on success
+		})
+		err := AudioMute(c.arg)
+		SetSyscallHookForTest(prev)
+		if err != nil {
+			t.Fatalf("%s: AudioMute err = %v want nil", c.name, err)
+		}
+		if calls != 1 || gotNum != SlotAudioMute {
+			t.Fatalf("%s: called slot %d %d times want %d once", c.name, gotNum, calls, SlotAudioMute)
+		}
+		if gotArg != c.want {
+			t.Fatalf("%s: slot 45 arg = %d want %d", c.name, gotArg, c.want)
+		}
+	}
+
+	prev := SetSyscallHookForTest(func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
+		return -ErrEINVAL
+	})
+	defer SetSyscallHookForTest(prev)
+	if err := AudioMute(true); err != errno(ErrEINVAL) {
+		t.Fatalf("refused AudioMute err = %v want EINVAL", err)
+	}
+}
+
+// Host: the two new rows degrade exactly like the rest of the seam (no hook,
+// so the raw gateway answers -ENOSYS) — an app that runs the host suite must
+// not see a panic or a fabricated success.
+func TestAudioVolumeMuteHostFails(t *testing.T) {
+	if n, err := AudioVolume(50); n != 0 || err != errno(ErrENOSYS) {
+		t.Fatalf("host AudioVolume = %d, %v want 0, ENOSYS", n, err)
+	}
+	if err := AudioMute(true); err != errno(ErrENOSYS) {
+		t.Fatalf("host AudioMute = %v want ENOSYS", err)
+	}
+}
