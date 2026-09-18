@@ -78,16 +78,18 @@ src = os.path.join(".build", "go", "GONET.ELF")
 if not os.path.exists(src):
     sys.exit("GONET.ELF missing (expected " + src + ") - build it first: just go-gonet")
 shutil.copy(src, os.path.join(share, "GONET.ELF"))
-govinet = os.path.join(".build", "go", "GOVINET.ELF")
-if not os.path.exists(govinet):
-    sys.exit("GOVINET.ELF missing (expected " + govinet + ") - build it first: just go-govinet")
-shutil.copy(govinet, os.path.join(share, "GOVINET.ELF"))
+for name in ("GOVINET.ELF", "GOVIDNS.ELF"):
+    src2 = os.path.join(".build", "go", name)
+    if not os.path.exists(src2):
+        sys.exit(name + " missing (expected " + src2 + ") - build it first: just go-govinet")
+    shutil.copy(src2, os.path.join(share, name))
 share_file = os.path.join(share, "GONET.SHARE")
 with open(share_file, "w") as f:
     f.write("gonet-share-hello\n")
-print("staged GONET.ELF (%d bytes), GOVINET.ELF (%d bytes) and GONET.SHARE (%d bytes)"
+print("staged GONET.ELF (%d bytes), GOVINET.ELF (%d bytes), GOVIDNS.ELF (%d bytes), GONET.SHARE (%d bytes)"
       % (os.path.getsize(os.path.join(share, "GONET.ELF")),
          os.path.getsize(os.path.join(share, "GOVINET.ELF")),
+         os.path.getsize(os.path.join(share, "GOVIDNS.ELF")),
          os.path.getsize(share_file)))
 PY
 
