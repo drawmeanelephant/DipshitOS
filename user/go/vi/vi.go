@@ -78,6 +78,9 @@ const (
 	SlotIPCSend      uintptr = 5
 	SlotIPCRecv      uintptr = 6
 	SlotProcs        uintptr = 7
+	SlotUDPListen    uintptr = 9 // M67a (#1446): the N6 UDP seam — DNS transport
+	SlotUDPSend      uintptr = 10
+	SlotUDPRecv      uintptr = 11
 	SlotWinOpen      uintptr = 12
 	SlotWinFill      uintptr = 13
 	SlotWinPresent   uintptr = 14
