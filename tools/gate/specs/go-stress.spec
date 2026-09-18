@@ -19,16 +19,20 @@
 # inside the program's write itself.
 #
 # Kernel-effect ties (python over the `syscalls` report): sys_mmap grew
-# (the mem phase extends the sbrk break through slot 63) within the
-# per-process max_mmap_regions=16 budget; sys_futex contention (slot 74);
-# sys_thread ≥ 2 (multi-M runtime, M65c).
+# (the mem phase extends the sbrk break through slot 63); its ceiling is
+# the kernel's loud-refusal budget (max_mmap_regions=16) — observed 8 on
+# the landed roster, with the region count depending on allocator
+# chunking the fixture does not control, so the ceiling enforces the
+# budget rather than an allocator invariant. sys_futex ≥ floor (slot-74
+# contention); sys_thread ≥ 2 (multi-M runtime, M65c).
 #
 # HOST PREREQUISITE (not hermetic — see tools/go/README.md):
 # `just go-toolchain` must have produced .build/go/GOSTRESS.ELF.
 #
-# exec-order: assert-proven -- each run is a single exec; script2 waits
-# on the program's `go-stress done` line and the asserts read the
-# program's own lines, so a green run always proves it ran.
+# exec-order: assert-proven -- runs 01/02 are a single exec whose script2
+# waits on the program's `go-stress done` line; run 03 (bad argv) ends on
+# the program's own FAIL marker. All asserts read the program's lines, so
+# a green run always proves it ran.
 
 vgate_name go-stress "M70a2 #1469: seeded GOOS=virelai runtime stress (gc/chan/timer/futex/mem/churn) on VZ"
 vgate_share seed
@@ -42,14 +46,20 @@ vgate_file script-seed.txt <<'EOF'
 exec GOSTRESS.ELF 0x9e3779b97f4a7c15
 EOF
 
+vgate_file script-bad.txt <<'EOF'
+exec GOSTRESS.ELF bogus
+EOF
+
 vgate_file script2.txt <<'EOF'
 syscalls
 echo gostress-held-window
 EOF
 
 # Pinned corpus, 4 seeds × 17 lines (8 iteration markers + 8 phase-ok
-# detail lines + 1 seed-ok line), in exact program order. Regenerate with
-# the fixture, never by loosening an assert.
+# detail lines + 1 seed-ok line), in exact program order. The `procs=`
+# line and the closing `done` marker are deliberately NOT in the pin —
+# they are asserted separately below. Regenerate with the fixture, never
+# by loosening an assert.
 vgate_file pins.txt <<'EOF'
 go-stress seed=0x9e3779b97f4a7c15 iter=1 phase=timer
 go-stress seed=0x9e3779b97f4a7c15 iter=1 phase=timer n=6 maxms=14 ok
@@ -215,3 +225,18 @@ for i, want in enumerate(pins[:17]):
     pos = idx + len(want)
 print("go-stress run 02: argv replay reproduced the pinned seed sequence")
 PY
+
+# Bad-argv path (card-explicit contract): an unparseable seed prints the
+# FAIL line and withholds the `done` marker, so a failed seeded run can
+# never be mistaken for a clean one — the run's red comes from the
+# missing anchor, and here the FAIL line itself ends the boot. The
+# fixture's exit status stays 0; the gate reads the lines, not the
+# status. No syscalls report needed for this run.
+vgate_run 03 -- --script '$RUN_DIR/script-bad.txt' --script-expect 'go-stress FAIL argv=bogus' --timeout 120
+
+vgate_assert 03 serial-contains 'exec: loaded GOSTRESS.ELF'
+vgate_assert 03 serial-contains 'go-stress FAIL argv=bogus'
+vgate_assert 03 serial-absent 'go-stress done'
+vgate_assert 03 serial-absent 'fatal error:'
+vgate_assert 03 serial-absent '[EXC] parking:'
+vgate_assert 03 serial-absent 'exited status=139'

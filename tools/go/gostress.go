@@ -28,14 +28,15 @@
 //   futex  — 4..24 goroutines × 10..40 sync.Mutex increments (lock_sema
 //            → slot 74) with an exact counter invariant, optionally a
 //            park-all-then-wake round on an unbuffered channel.
-//   mem    — a 2..3-step staircase of 256/384/512 KiB blocks (256 KiB
-//            steps), live across a runtime.GC(), then verified. This
-//            forces fresh sbrk break growth (mem_sbrk.go → sys_mmap
-//            slot 63) while staying inside the kernel's per-process
-//            max_mmap_regions budget (16) — heap growth is monotone on
-//            an sbrk platform, so every growth event costs one region.
+//   mem    — a 2..3-step staircase whose block sizes grow base×(j+1)
+//            from a 256..512 KiB base (e.g. 384/768/1152 KiB), live
+//            across a runtime.GC(), then verified. This forces fresh
+//            sbrk break growth (mem_sbrk.go → sys_mmap slot 63) while
+//            staying inside the kernel's per-process max_mmap_regions
+//            budget (16) — heap growth is monotone on an sbrk platform,
+//            so every growth event costs one region.
 //   churn  — goroutine exec/exit churn: 20..60 goroutines each run a
-//            0..49-frame recursive body (48 B frames, so the deeper ones
+//            3..49-frame recursive body (48 B frames, so the deeper ones
 //            cross the 2 KiB initial stack and go through morestack /
 //            newstack) and exit; exact counter invariant. "exec/exit" is
 //            goroutine execution/exit — the runtime exposes no
@@ -368,9 +369,7 @@ func phaseChurn(r *strng) (string, string) {
 				runtime.Gosched()
 			}
 			d := depth + (k % 3) - 1
-			if churnFrame(d, byte(k)) < 0 {
-				return
-			}
+			_ = churnFrame(d, byte(k))
 			atomic.AddUint64(&counter, 1)
 		}(i)
 	}
@@ -437,11 +436,12 @@ func parseSeed(s string) (uint64, bool) {
 		if d >= base {
 			return 0, false
 		}
-		nv := v*base + d
-		if nv < v {
+		// Overflow check strong enough for the full uint64 range: if
+		// v*base+d would wrap, refuse rather than accept a wrapped seed.
+		if v > (^uint64(0)-d)/base {
 			return 0, false
 		}
-		v = nv
+		v = v*base + d
 	}
 	return v, true
 }
