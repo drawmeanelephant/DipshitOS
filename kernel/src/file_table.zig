@@ -340,14 +340,53 @@ pub fn parse_path(raw: []const u8) ?ParsedPath {
 }
 
 // ---------------------------------------------------------------------------
+// M66a (#1443): honest HF-status → errno mapping.
+//
+// The HF reply statuses (virtio_file.zig) land on the frozen ADR 0007 error
+// rows so a Go app can branch on what actually happened. The four statuses a
+// /host path can hit map to four DISTINCT rows — not_found → ENOENT (-6),
+// is_dir → EINVAL (-1, a directory is not a writable file), exists → -9 (the
+// file-domain EEXIST row the MODE_DIR mkdir path pinned in M25 Lane B; the
+// ErrorCode enum names this magnitude ENXIO in the device domains), and
+// handle-full → ENOSPC (-5, the same resource-exhausted row as the guest's
+// own full handle table). A residual host error (status 4 — the share
+// refused the I/O) stays EINVAL, the closest honest row in the frozen enum.
+// Pure and host-testable; the path ops route through `hf_open_errno`.
+pub fn hf_open_errno(st: u8) i64 {
+    return switch (st) {
+        virtio_file.st_ok => 0,
+        virtio_file.st_not_found => -6, // ENOENT
+        virtio_file.st_is_dir => -1, // EINVAL: a directory is not a writable file
+        virtio_file.st_exists => -9, // file-domain EEXIST (M25 Lane B)
+        virtio_file.st_handle => -5, // ENOSPC: the host's 8-slot table is full
+        else => -1, // host error / truncated
+    };
+}
+
+/// The handle-carrying ops (WRITE/TRUNCATE/FSYNC) only ever see ok, a dead
+/// or unknown host handle, and the residual host error. A handle the guest
+/// still holds but the host no longer knows is EBADF — the fd's other end is
+/// gone — not EINVAL, and never ENOSPC (nothing is exhausted; the slot the
+/// handle named is simply not there).
+pub fn hf_handle_errno(st: u8) i64 {
+    return switch (st) {
+        virtio_file.st_ok => 0,
+        virtio_file.st_handle => -2, // EBADF
+        else => -1, // host error
+    };
+}
+
+// ---------------------------------------------------------------------------
 // File Handle Operations (Card F1)
 // ---------------------------------------------------------------------------
 
 /// Open a file for `pid` with given `flags`.
 /// Returns fd (0..7) on success, or negative error code:
-/// - `-1` (`EINVAL`): Invalid flags, bad path syntax, traversal attempted
+/// - `-1` (`EINVAL`): Invalid flags, bad path syntax, traversal attempted,
+///   is-dir (M66a: HF status 2), a residual host error
 /// - `-2` (`EBADF`): Not applicable for open
-/// - `-5` (`ENOSPC`): Handle table full (8 open handles)
+/// - `-5` (`ENOSPC`): Handle table full — the guest's 8 open handles, or the
+///   host's 8 (M66a: HF status 6 rides the same row)
 /// - `-6` (`ENOENT`): File not found and MODE_CREATE not set (or no share)
 /// - `-8` (`ENAMETOOLONG`): Path length > 64
 /// - `-9` (`EEXIST`): MODE_DIR create and the name already exists
@@ -432,11 +471,7 @@ pub fn open(pid: u64, path_bytes: []const u8, flags: u32) i64 {
     // stateless (vf STAT for the size, vf READ at the guest cursor).
     if ((flags & MODE_DIR) != 0) {
         const md = virtio_file.mkdir(subpath);
-        if (md == virtio_file.st_exists) return -9; // EEXIST
-        if (md != virtio_file.st_ok) return switch (md) {
-            virtio_file.st_not_found => -6,
-            else => -1,
-        };
+        if (md != virtio_file.st_ok) return hf_open_errno(md); // exists → EEXIST, not_found → ENOENT
         handles[pid][slot] = .{
             .in_use = true,
             .partition = .host,
@@ -453,8 +488,7 @@ pub fn open(pid: u64, path_bytes: []const u8, flags: u32) i64 {
         if ((flags & MODE_APPEND) != 0) oflags |= virtio_file.open_flag_append;
         var h: u16 = 0;
         const ost = virtio_file.open(subpath, oflags, &h);
-        if (ost == virtio_file.st_not_found) return -6; // ENOENT (no create)
-        if (ost != virtio_file.st_ok) return -1; // EINVAL (host error / handle limit)
+        if (ost != virtio_file.st_ok) return hf_open_errno(ost); // M66a: not_found/is_dir/handle-full stay distinct
         if ((flags & MODE_APPEND) == 0) {
             // Replace semantics: a fresh write-open truncates. A failed
             // truncate is honest (the handle is closed; nothing leaked).
@@ -599,10 +633,15 @@ pub fn write(pid: u64, fd: u64, in_buf: []const u8) i64 {
         const take = @min(in_buf.len - off, virtio_file.write_chunk_max);
         var written: u64 = 0;
         const st = virtio_file.write(h.host_handle, in_buf[off .. off + take], &written);
-        if (st != virtio_file.st_ok) {
-            // A partial write already advanced the host cursor; the guest
-            // mirror reflects only confirmed bytes — honest accounting.
-            return if (off > 0) @intCast(off) else -1;
+        if (st != virtio_file.st_ok or written == 0) {
+            // Honest accounting (M66a): the guest mirror advances by the
+            // host-CONFIRMED count only, so a mid-stream failure reports the
+            // confirmed prefix — a short write, never a corrupt stream — and
+            // a first-chunk failure maps the HF status (a dead host handle is
+            // EBADF). A confirmed zero with ok status can never advance the
+            // stream; stop instead of spinning.
+            if (off > 0) return @intCast(off);
+            return if (st == virtio_file.st_ok) -1 else hf_handle_errno(st);
         }
         off += @intCast(written);
         h.cursor += @intCast(written);
@@ -680,12 +719,14 @@ pub fn delete(pid: u64, path_bytes: []const u8) i64 {
     if (parsed.partition == .host and !hostAllowed(pid, parsed.path[0..parsed.parsed_len()], .delete)) return -7; // EACCES
     if (!virtio_file.available()) return -6;
     const subpath = parsed.path[0..parsed.parsed_len()];
-    // M34 HF5 (issue #739): host deletes route to the channel.
+    // M34 HF5 (issue #739): host deletes route to the channel. M66a: the
+    // host's refusal (a non-empty directory is host status 4, never a
+    // missing path) is EINVAL, not ENOENT — the channel was there and
+    // said no.
     const rc: i64 = switch (virtio_file.delete(subpath)) {
         virtio_file.st_ok => 0,
         virtio_file.st_not_found => -6,
-        virtio_file.st_is_dir => -1,
-        else => -6,
+        else => -1,
     };
     // M50 TS2: drop the metadata in the same transaction (persist on change).
     if (rc == 0 and trust.remove(.host, subpath)) _ = persist_trust();
@@ -712,11 +753,14 @@ pub fn rename(pid: u64, old_bytes: []const u8, new_bytes: []const u8) i64 {
     }
     if (!virtio_file.available()) return -6;
     // M34 HF5 (issue #739): host renames route to the channel (stateless
-    // NUL-framed RENAME; the host overwrites the target, like FAT).
+    // NUL-framed RENAME; the host overwrites nothing — a live target is
+    // status 5). M66a: exists maps to the file-domain EEXIST row (-9), the
+    // same row the MODE_DIR mkdir path pinned, not a bare EINVAL.
     const rc: i64 = switch (virtio_file.rename(oldp, newp)) {
         virtio_file.st_ok => 0,
         virtio_file.st_not_found => -6,
-        else => -1, // exists/host error — no EEXIST row in the frozen ABI
+        virtio_file.st_exists => -9,
+        else => -1,
     };
     // M50 TS2: move the metadata with the file (persist on change).
     if (rc == 0 and old.partition == .host and trust.rename_meta(.host, oldp, .host, newp)) _ = persist_trust();
@@ -734,13 +778,29 @@ pub fn truncate(pid: u64, fd: u64, new_size: u32) i64 {
     if (h.is_dir) return -7; // M25 Lane B: never truncate through a dir handle
     // M50 TS2 (ADR 0024 D4): the host-share ownership/mode gate for resize.
     if (h.partition == .host and !hostAllowed(pid, h.path[0..h.path_len], .write)) return -7; // EACCES
-    // M34 HF5 (issue #739): host truncate rides the host handle.
+    // M34 HF5 (issue #739): host truncate rides the host handle. M66a: the
+    // status maps honestly (a dead host handle is EBADF); the host clamps
+    // its own cursor to the new size, mirrored below.
     if (!h.host_handle_valid) return -7; // EACCES
     const st = virtio_file.truncate(h.host_handle, new_size);
-    if (st != virtio_file.st_ok) return -1; // EINVAL (host error)
+    if (st != virtio_file.st_ok) return hf_handle_errno(st);
     h.size = new_size;
     if (h.cursor > new_size) h.cursor = new_size;
     return 0;
+}
+
+/// M66a (#1443): FSYNC the handle's host side (slot 77 — ADR 0007
+/// amendment; the HF op calls synchronize() on the host's live fd, so the
+/// bytes are durable before the app trusts them). A `.host` write handle
+/// syncs through the channel; handles with no host-side dirty state
+/// (stateless read handles, read-only `.usb`, `.tty`) are honest no-ops.
+pub fn sync(pid: u64, fd: u64) i64 {
+    if (pid >= process.max_processes or fd >= max_handles_per_process) return -2;
+    const h = &handles[pid][fd];
+    if (!h.in_use) return -2; // EBADF
+    if (h.partition != .host) return 0; // no host-side state to push
+    if (!h.host_handle_valid) return 0; // stateless read handle: nothing to sync
+    return hf_handle_errno(virtio_file.fsync(h.host_handle));
 }
 
 /// Free bytes on a volume. M34 HF6 (issue #740): the ESP/DATA partitions
@@ -849,6 +909,48 @@ test "file_table: mutating ops validate pids, paths, and volumes (claim 5801)" {
     try std.testing.expectEqual(@as(i64, -2), truncate(1, 0, 4));
 }
 
+test "file_table: M66a HF-status mapping keeps the four rows distinct" {
+    // Open-path: the four statuses a /host path can hit are four errno rows.
+    try std.testing.expectEqual(@as(i64, 0), hf_open_errno(virtio_file.st_ok));
+    try std.testing.expectEqual(@as(i64, -6), hf_open_errno(virtio_file.st_not_found));
+    try std.testing.expectEqual(@as(i64, -1), hf_open_errno(virtio_file.st_is_dir));
+    try std.testing.expectEqual(@as(i64, -9), hf_open_errno(virtio_file.st_exists));
+    try std.testing.expectEqual(@as(i64, -5), hf_open_errno(virtio_file.st_handle));
+    // The residual host error is the closest honest row (EINVAL) and never
+    // collides with the named four's ENOENT/EEXIST/ENOSPC.
+    try std.testing.expectEqual(@as(i64, -1), hf_open_errno(virtio_file.st_host_error));
+    try std.testing.expectEqual(@as(i64, -1), hf_open_errno(virtio_file.st_truncated));
+    // Handle-carrying ops: a dead host handle is EBADF, not ENOSPC.
+    try std.testing.expectEqual(@as(i64, 0), hf_handle_errno(virtio_file.st_ok));
+    try std.testing.expectEqual(@as(i64, -2), hf_handle_errno(virtio_file.st_handle));
+    try std.testing.expectEqual(@as(i64, -1), hf_handle_errno(virtio_file.st_host_error));
+}
+
+test "file_table: sync refuses a dead fd, no-ops for stateless handles" {
+    init();
+    try std.testing.expectEqual(@as(i64, -2), sync(1, 0)); // EBADF: closed fd
+    try std.testing.expectEqual(@as(i64, -2), sync(process.max_processes, 0));
+
+    // A host WRITE handle syncs through the channel — which the host-test
+    // binary does not have, so the fsync reports the residual host error
+    // (EINVAL) instead of pretending durability.
+    init();
+    handles[3][0] = .{
+        .in_use = true,
+        .partition = .host,
+        .flags = MODE_WRITE,
+        .host_handle = 2,
+        .host_handle_valid = true,
+    };
+    try std.testing.expectEqual(@as(i64, -1), sync(3, 0));
+
+    // A host handle WITHOUT a host write handle (stateless read handle) has
+    // nothing to push: an honest no-op even with no channel.
+    init();
+    handles[3][0] = .{ .in_use = true, .partition = .host, .flags = MODE_READ };
+    try std.testing.expectEqual(@as(i64, 0), sync(3, 0));
+}
+
 test "file_table: /dev/tty routes to the process's terminal device (#1072)" {
     init();
     const pid: u64 = 3;
@@ -874,6 +976,9 @@ test "file_table: /dev/tty routes to the process's terminal device (#1072)" {
     var in: [8]u8 = undefined;
     try std.testing.expectEqual(@as(i64, 3), read(pid, @intCast(fd), &in));
     try std.testing.expectEqualStrings("key", in[0..3]);
+
+    // M66a: a `.tty` handle has no host-side state — sync is an honest no-op.
+    try std.testing.expectEqual(@as(i64, 0), sync(pid, @intCast(fd)));
 
     // A second open reuses the SAME controlling terminal.
     const fd2 = open(pid, "tty", MODE_READ | MODE_WRITE);

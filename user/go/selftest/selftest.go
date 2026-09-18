@@ -93,6 +93,27 @@ const (
 	listedPath = listDir + "/listed.txt"
 	listOk     = outDir + "/file-list.ok"
 
+	// M66a hardening pack (#1443). Same discipline: per-case paths, one
+	// receipt each, and a .copy wherever bytes came back.
+	appendPath = outDir + "/append.txt"
+	appendCopy = outDir + "/append.copy"
+	appendOk   = outDir + "/file-append.ok"
+
+	bigwritePath = outDir + "/bigwrite.txt"
+	bigwriteCopy = outDir + "/bigwrite.copy"
+	bigwriteOk   = outDir + "/file-bigwrite.ok"
+
+	clampPath = outDir + "/clamp.txt"
+	clampCopy = outDir + "/clamp.copy"
+	clampOk   = outDir + "/file-clamp.ok"
+
+	fsyncPath = outDir + "/fsync.txt"
+	fsyncOk   = outDir + "/file-fsync.ok"
+
+	errMissing = outDir + "/errors-absent.txt"
+	errDir     = outDir + "/ERR"
+	errOk      = outDir + "/file-errors.ok"
+
 	// M61e window receipt (issue #1385), in the card's shape: the id the
 	// kernel assigned, the geometry the KERNEL reports for that window, and
 	// the present verdict.
@@ -113,6 +134,22 @@ const (
 
 	listMarkerBody = "goself list marker\n"
 	deleteBody     = "goself delete me\n"
+
+	// M66a (#1443): the hardening pack's bodies, same one-expression rule.
+	// bigwrite is far beyond one sys_file_write call (the kernel's stage cap
+	// is 2048 B per call — fileWriteMax), so its write only lands through the
+	// confirmed-count chunk loop.
+	appendBaseUnits = 3
+	appendMoreUnits = 2
+	bigwriteUnits   = 3500 // 73,500 B → 36 sys_file_write calls at the cap
+	clampUnits      = 40
+	clampKeptUnits  = 5
+	clampExtraUnits = 3
+	fsyncUnits      = 7
+
+	// fileWriteMax mirrors the kernel's sys_file_write stage cap
+	// (handle_file_write refuses count > 2048 with -ENOSPC).
+	fileWriteMax = 2048
 )
 
 // roundtripPayload / truncatePayload / truncateKept are the byte bodies above
@@ -120,6 +157,16 @@ const (
 func roundtripPayload() []byte { return []byte(strings.Repeat(fileUnit, roundtripUnits)) }
 func truncatePayload() []byte  { return []byte(strings.Repeat(fileUnit, truncateUnits)) }
 func truncateKept() []byte     { return []byte(strings.Repeat(fileUnit, truncateKeeps)) }
+
+// The M66a bodies: base+more for the append case, the 73,500-byte big-write
+// body, full/kept/extra for the clamp case, and the fsync case's body.
+func appendBasePayload() []byte { return []byte(strings.Repeat(fileUnit, appendBaseUnits)) }
+func appendMorePayload() []byte { return []byte(strings.Repeat(fileUnit, appendMoreUnits)) }
+func bigwritePayload() []byte   { return []byte(strings.Repeat(fileUnit, bigwriteUnits)) }
+func clampFull() []byte         { return []byte(strings.Repeat(fileUnit, clampUnits)) }
+func clampKept() []byte         { return []byte(strings.Repeat(fileUnit, clampKeptUnits)) }
+func clampExtra() []byte        { return []byte(strings.Repeat(fileUnit, clampExtraUnits)) }
+func fsyncPayload() []byte      { return []byte(strings.Repeat(fileUnit, fsyncUnits)) }
 
 // syscalls is the slice of the ADR 0010 file ABI (plus the clock) the cases
 // use, as function fields so tests can fake every one of them. M61d added the
@@ -135,6 +182,7 @@ type syscalls struct {
 	read     func(h uint32, buf []byte) (int, int64)
 	write    func(h uint32, b []byte) (int, int64)
 	truncate func(h uint32, size uint32) int64
+	sync     func(h uint32) int64
 	remove   func(path string) int64
 	list     func(path string, buf []vi.DirEntry) (int, int64)
 	close    func(h uint32)
@@ -180,6 +228,7 @@ func guestSyscalls() syscalls {
 		read:     vi.FileRead,
 		write:    vi.FileWrite,
 		truncate: vi.FileTruncate,
+		sync:     vi.FileSync,
 		remove:   vi.FileDelete,
 		list:     vi.DirList,
 		close:    vi.FileClose,
@@ -225,6 +274,15 @@ func cases() []testCase {
 		{id: "file-truncate", run: caseFileTruncate},
 		{id: "file-delete", run: caseFileDelete},
 		{id: "file-list", run: caseFileList},
+		// M66a (#1443): the hardening pack — append-at-EOF, a write far
+		// beyond one syscall, the truncate clamp, the durability verb, and
+		// the honest error rows — inserted before the window case so the
+		// M61d report prefix stays untouched.
+		{id: "file-append", run: caseFileAppend},
+		{id: "file-bigwrite", run: caseFileBigwrite},
+		{id: "file-clamp", run: caseFileClamp},
+		{id: "file-fsync", run: caseFileFsync},
+		{id: "file-errors", run: caseFileErrors},
 		// M61e (#1385): the window receipt — appended last so the M61d report
 		// prefix is untouched (the report is byte-compared).
 		{id: "window", run: caseWindow},
@@ -622,6 +680,252 @@ func caseFileList(s *syscalls) error {
 }
 
 // ---------------------------------------------------------------------------
+// M66a (#1443): the file-semantics hardening pack
+// ---------------------------------------------------------------------------
+//
+// The card's semantics, each proven the ADR 0031 way — the guest writes its
+// receipts and the bytes it READ, the host byte-compares them on macOS:
+// append-at-EOF, a write far beyond one syscall (chunked by confirmed
+// counts), the truncate clamp, the fsync durability verb, and the honest
+// error rows.
+
+// caseFileAppend: write a base body with the replace semantics, then REOPEN
+// with ModeAppend — no create — and write more. The append write must land
+// AFTER the base: the host's append cursor is EOF. A dropped append flag
+// anywhere below the ABI would replace the file instead, and the read-back
+// would be the delta alone.
+func caseFileAppend(s *syscalls) error {
+	s.mkdir(outDir)
+	base, more := appendBasePayload(), appendMorePayload()
+	if _, err := writeFile(s, appendPath, base); err != nil {
+		return err
+	}
+	h, rc := s.open(appendPath, vi.ModeWrite|vi.ModeAppend)
+	if rc < 0 {
+		return errors.New("append open rc=" + strconv.FormatInt(rc, 10))
+	}
+	werr := writeAll(s, uint32(h), more)
+	s.close(uint32(h))
+	if werr != nil {
+		return werr
+	}
+	want := append(append([]byte{}, base...), more...)
+	got, err := readFile(s, appendPath, len(want)+1)
+	if err != nil {
+		return err
+	}
+	match := bytes.Equal(got, want)
+	if cerr := copyBytes(s, appendCopy, got); cerr != nil {
+		return cerr
+	}
+	line := "case file-append path=OUT/append.txt base=" + strconv.Itoa(len(base)) +
+		" more=" + strconv.Itoa(len(more)) + " bytes=" + strconv.Itoa(len(got)) +
+		" match=" + yesNo(match)
+	if rerr := writeReceipt(s, appendOk, line); rerr != nil {
+		return rerr
+	}
+	if !match {
+		return errors.New("append read back " + strconv.Itoa(len(got)) + "B, want " +
+			strconv.Itoa(len(want)) + "B")
+	}
+	return nil
+}
+
+// caseFileBigwrite: a body far beyond one sys_file_write call — the kernel
+// refuses count > 2048 (-ENOSPC), so this write only lands through the
+// confirmed-count chunk loop (writeAll). The read-back and the .copy must
+// equal the payload byte-for-byte: a chunk that resumed at the wrong offset,
+// or a confirmed count that lied, shows up as a mismatch the host sees.
+func caseFileBigwrite(s *syscalls) error {
+	s.mkdir(outDir)
+	want := bigwritePayload()
+	if _, err := writeFile(s, bigwritePath, want); err != nil {
+		return err
+	}
+	got, err := readFile(s, bigwritePath, len(want)+1)
+	if err != nil {
+		return err
+	}
+	match := bytes.Equal(got, want)
+	if cerr := copyBytes(s, bigwriteCopy, got); cerr != nil {
+		return cerr
+	}
+	calls := (len(want) + fileWriteMax - 1) / fileWriteMax
+	line := "case file-bigwrite path=OUT/bigwrite.txt bytes=" + strconv.Itoa(len(want)) +
+		" calls=" + strconv.Itoa(calls) + " match=" + yesNo(match)
+	if rerr := writeReceipt(s, bigwriteOk, line); rerr != nil {
+		return rerr
+	}
+	switch {
+	case len(got) != len(want):
+		return errors.New("read back " + strconv.Itoa(len(got)) + "B of " + strconv.Itoa(len(want)) + "B")
+	case !match:
+		return errors.New("bigwrite read back differs at " + strconv.Itoa(firstDiff(got, want)))
+	}
+	return nil
+}
+
+// firstDiff is the offset of the first differing byte (the payload length
+// when equal), so a chunk-boundary bug names where the stream went wrong.
+func firstDiff(a, b []byte) int {
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	for i := 0; i < n; i++ {
+		if a[i] != b[i] {
+			return i
+		}
+	}
+	return n
+}
+
+// caseFileClamp: the truncate clamp. Write 40 units, shrink the SAME handle
+// to 5 units, then write 3 more through the still-open handle: the host
+// clamps its cursor to the new size, so the extra bytes land at the clamp
+// point and the file is kept+extra (8 units). Without the clamp the write
+// would resume at the old cursor — a hole past EOF — and the read-back would
+// be neither the length nor the bytes expected.
+func caseFileClamp(s *syscalls) error {
+	s.mkdir(outDir)
+	full, kept, extra := clampFull(), clampKept(), clampExtra()
+	h, rc := s.open(clampPath, vi.ModeWrite|vi.ModeCreate)
+	if rc < 0 {
+		return errors.New("open rc=" + strconv.FormatInt(rc, 10))
+	}
+	werr := writeAll(s, uint32(h), full)
+	trc := int64(0)
+	if werr == nil {
+		trc = s.truncate(uint32(h), uint32(len(kept)))
+	}
+	var xerr error
+	if werr == nil && trc == 0 {
+		xerr = writeAll(s, uint32(h), extra)
+	}
+	s.close(uint32(h))
+	if werr != nil {
+		return werr
+	}
+	if trc < 0 {
+		return errors.New("truncate rc=" + strconv.FormatInt(trc, 10))
+	}
+	if xerr != nil {
+		return xerr
+	}
+	want := append(append([]byte{}, kept...), extra...)
+	got, err := readFile(s, clampPath, len(want)+1)
+	if err != nil {
+		return err
+	}
+	match := bytes.Equal(got, want)
+	if cerr := copyBytes(s, clampCopy, got); cerr != nil {
+		return cerr
+	}
+	line := "case file-clamp path=OUT/clamp.txt wrote=" + strconv.Itoa(len(full)) +
+		" kept=" + strconv.Itoa(len(kept)) + " extra=" + strconv.Itoa(len(extra)) +
+		" bytes=" + strconv.Itoa(len(got)) + " match=" + yesNo(match)
+	if rerr := writeReceipt(s, clampOk, line); rerr != nil {
+		return rerr
+	}
+	switch {
+	case len(got) != len(want):
+		return errors.New("after clamp read " + strconv.Itoa(len(got)) + "B, want " +
+			strconv.Itoa(len(want)) + "B")
+	case !match:
+		return errors.New("clamp kept the wrong bytes")
+	}
+	return nil
+}
+
+// caseFileFsync: the durability verb. Write a body, FSYNC the open handle
+// (0 = the host pushed its live fd), close, then fsync the CLOSED fd — the
+// honest EBADF, proving the verb is checked and not a stub. The host
+// byte-compares fsync.txt, so a success code without the bytes cannot pass.
+func caseFileFsync(s *syscalls) error {
+	s.mkdir(outDir)
+	want := fsyncPayload()
+	h, rc := s.open(fsyncPath, vi.ModeWrite|vi.ModeCreate)
+	if rc < 0 {
+		return errors.New("open rc=" + strconv.FormatInt(rc, 10))
+	}
+	werr := writeAll(s, uint32(h), want)
+	frc := int64(0)
+	if werr == nil {
+		frc = s.sync(uint32(h))
+	}
+	s.close(uint32(h))
+	if werr != nil {
+		return werr
+	}
+	if frc < 0 {
+		return errors.New("fsync rc=" + strconv.FormatInt(frc, 10))
+	}
+	// No open has happened since the close, so the slot is still free and
+	// the kernel must refuse the verb with EBADF.
+	crc := s.sync(uint32(h))
+	line := "case file-fsync path=OUT/fsync.txt bytes=" + strconv.Itoa(len(want)) +
+		" fsync=" + strconv.FormatInt(frc, 10) + " closed=" + strconv.FormatInt(crc, 10)
+	if rerr := writeReceipt(s, fsyncOk, line); rerr != nil {
+		return rerr
+	}
+	if crc != -2 {
+		return errors.New("fsync on a closed fd rc=" + strconv.FormatInt(crc, 10))
+	}
+	return nil
+}
+
+// caseFileErrors: the honest error rows, each observed through the ABI on a
+// path this case owns: a missing open is ENOENT (-6), a second create of the
+// same directory is the file-domain EEXIST (-9), a WRITE open of that
+// directory is is-dir EINVAL (-1), and the 9th concurrent open — the
+// caller's 8-handle table being full — is ENOSPC (-5). The receipt records
+// all four codes; the kernel's hf_open_errno pins the same rows host-side.
+func caseFileErrors(s *syscalls) error {
+	s.mkdir(outDir)
+	_, mrc := s.open(errMissing, vi.ModeRead)
+	if rc := s.mkdir(errDir); rc != 0 {
+		return errors.New("mkdir ERR rc=" + strconv.FormatInt(rc, 10))
+	}
+	_, erc := s.open(errDir, vi.ModeWrite|vi.ModeCreate|vi.ModeDir)
+	_, drc := s.open(errDir, vi.ModeWrite)
+	// Hold the caller's 8 handles; the 9th open has no slot. Each open here
+	// is also a host write handle, so the loop is the honest way to reach
+	// the table cap from EL0.
+	hs := make([]int64, 0, 9)
+	fullRC := int64(0)
+	for i := 0; i < 9; i++ {
+		h, rc := s.open(errDir+"/h"+strconv.Itoa(i), vi.ModeWrite|vi.ModeCreate)
+		if rc < 0 {
+			fullRC = rc
+			break
+		}
+		hs = append(hs, h)
+	}
+	for i, h := range hs {
+		s.close(uint32(h))
+		// Keep the share tidy: the probe files have no evidence value.
+		s.remove(errDir + "/h" + strconv.Itoa(i))
+	}
+	line := "case file-errors missing=" + strconv.FormatInt(mrc, 10) +
+		" exists=" + strconv.FormatInt(erc, 10) + " isdir=" + strconv.FormatInt(drc, 10) +
+		" ninth=" + strconv.FormatInt(fullRC, 10)
+	if werr := writeReceipt(s, errOk, line); werr != nil {
+		return werr
+	}
+	switch {
+	case mrc != vi.ErrFileNotFound:
+		return errors.New("missing open rc=" + strconv.FormatInt(mrc, 10) + ", want -6")
+	case erc != vi.ErrFileExists:
+		return errors.New("double mkdir rc=" + strconv.FormatInt(erc, 10) + ", want -9")
+	case drc != vi.ErrFileIsDir:
+		return errors.New("dir write-open rc=" + strconv.FormatInt(drc, 10) + ", want -1")
+	case fullRC != vi.ErrFileHandleFull:
+		return errors.New("ninth open rc=" + strconv.FormatInt(fullRC, 10) + ", want -5")
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
 // M61e (#1385): the window receipt
 // ---------------------------------------------------------------------------
 
@@ -708,13 +1012,20 @@ func writeReceipt(s *syscalls, path string, line string) error {
 	return err
 }
 
-// writeAll writes b through an OPEN handle, looping until every byte is
-// accepted: FileWrite is one kernel call and may accept fewer bytes than
-// offered (the kernel stages bounded chunks).
+// writeAll writes b through an OPEN handle, chunked to the kernel's
+// 2048-byte sys_file_write stage cap (a larger count is refused -ENOSPC)
+// and advancing only by the CONFIRMED count each call reports — FileWrite
+// may accept fewer bytes than offered, and the next chunk resumes exactly
+// where the kernel confirmed (M66a: a partial write never corrupts the
+// stream).
 func writeAll(s *syscalls, h uint32, b []byte) error {
 	written := 0
 	for written < len(b) {
-		n, rc := s.write(h, b[written:])
+		take := len(b) - written
+		if take > fileWriteMax {
+			take = fileWriteMax
+		}
+		n, rc := s.write(h, b[written:written+take])
 		if rc < 0 || n <= 0 {
 			return errors.New("write rc=" + strconv.FormatInt(rc, 10))
 		}
