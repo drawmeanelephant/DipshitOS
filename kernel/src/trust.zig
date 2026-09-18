@@ -185,7 +185,7 @@ fn secretDenies(want: Want) bool {
 
 fn defaultMode(partition: file_table.Partition, want: Want) u16 {
     return switch (partition) {
-        .usb => usb_mode,
+        .usb, .usb_fat => usb_mode, // M70f F1: a USB volume is read-only too
         .tty => 0o666, // unreachable: tty returns allow early
         .host => if (want == .list) default_dir_mode else default_file_mode,
     };
@@ -227,7 +227,7 @@ pub fn check(actor: Actor, partition: file_table.Partition, path: []const u8, wa
 /// secret flag. Existence and path syntax are the caller's business.
 pub fn set_mode(actor: Actor, partition: file_table.Partition, path: []const u8, mode: u16) SetResult {
     if (partition == .tty) return .einval; // device semantics
-    if (partition == .usb) return .eacces; // fixed read-only 0444
+    if (partition == .usb or partition == .usb_fat) return .eacces; // fixed read-only 0444
     if (mode > 0o777) return .einval;
     if (path.len == 0 or path.len > max_path_len) return .einval;
 
