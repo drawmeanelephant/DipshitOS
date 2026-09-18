@@ -120,8 +120,8 @@ test "scheduler: register_worker builds a valid synthetic frame" {
     while (i < frame_bytes) : (i += 8) {
         try std.testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, @as(*const [8]u8, @ptrFromInt(t.sp + i)), .little));
     }
-    // #1426: the pool is shell + idle + worker + TEN user slots (13/13);
-    // a registration beyond that budget fails (bounded).
+    // #1426/#1442: the pool is shell + idle + worker + (max_tasks-3) user
+    // slots (16/16 after M65d); a registration beyond that budget fails.
     try std.testing.expectEqual(@as(usize, 2), register_user(0x3333, 0).?);
     var next: usize = 3;
     while (next < idle_id) : (next += 1) {
@@ -562,8 +562,8 @@ test "scheduler: two live user scheduler.tasks coexist with their own roots and 
     const kstack_b = exec_kstack_pool[0][0..];
     const user_b = register_exec_user(0x4000, root_b, 64, 0x1a400000, 8192, kstack_b, 0, 0).?;
     try std.testing.expectEqual(@as(usize, 3), user_b);
-    // #1426: fill remaining user slots so the capacity gate is observable
-    // at max_tasks (shell + worker + idle + TEN user tasks).
+    // #1426/#1442: fill remaining user slots so the capacity gate is
+    // observable at max_tasks (shell + worker + idle + 13 user tasks).
     var fill: usize = 0;
     while (has_free_slot()) : (fill += 1) {
         const kstack = exec_kstack_pool[1 + fill][0..];
@@ -1196,6 +1196,48 @@ test "scheduler: a wake before preemption is armed requests nothing" {
     try std.testing.expect(scheduler.resched_requested);
     try std.testing.expectEqual(@as(u64, 1), scheduler.resched_requests);
     discharge_resched(0);
+}
+
+test "scheduler: M65d max_tasks is 3 kernel + 3×4 Ms + 1 spare (#1442)" {
+    // Same headroom reasoning as #1426, re-derived for M:N:
+    //   kernel fixed     = shell + worker + idle = 3
+    //   seating runtimes = GOTABWM + two hosted ELFs = 3
+    //   Ms/runtime       = GOMAXPROCS=2 Ps + sysmon + template = 4 (ADR 0027 D6)
+    //   occupied         = 3 + 12 = 15
+    //   spare            = 1
+    //   max_tasks        = 16; idle_id stays max_tasks-1
+    const kernel_fixed: usize = 3;
+    const seating_runtimes: usize = 3;
+    const ms_at_gomaxprocs_2: usize = 4;
+    const spare: usize = 1;
+    try std.testing.expectEqual(kernel_fixed + seating_runtimes * ms_at_gomaxprocs_2 + spare, max_tasks);
+    try std.testing.expectEqual(max_tasks - 1, idle_id);
+    try std.testing.expectEqual(@as(usize, 13), max_tasks - kernel_fixed);
+}
+
+test "scheduler: seating 3 runtimes × 4 Ms leaves one spare then fills (#1442)" {
+    _ = init();
+    _ = register_worker(0x2000).?;
+    try std.testing.expectEqual(@as(usize, 2), register_user(0x3000, 0).?);
+    const go_ms: usize = 12; // 3 runtimes × 4 Ms
+    var fill: usize = 0;
+    var last_root: u64 = 0;
+    while (fill < go_ms - 1) : (fill += 1) {
+        const kstack = exec_kstack_pool[fill][0..];
+        const entry: u64 = 0x4000 + fill * 0x1000;
+        const stack_va: u64 = 0x1a400000 + fill * 0x100000;
+        last_root = (mmu.build_user_root(userspace.text_va, 0x1000, 64, stack_va, 0x3000, 8192) orelse
+            return error.TestUnexpectedResult);
+        _ = register_exec_user(entry, last_root, 64, stack_va, 8192, kstack, 0, 0) orelse
+            return error.TestUnexpectedResult;
+    }
+    try std.testing.expectEqual(@as(usize, 3 + go_ms), scheduler.task_count); // 15 occupied
+    try std.testing.expect(has_free_slot()); // the #1426-style spare
+    const spare_kstack = exec_kstack_pool[go_ms - 1][0..];
+    try std.testing.expect(register_exec_user(0x9000, last_root, 64, 0x2a400000, 8192, spare_kstack, 0, 0) != null);
+    try std.testing.expectEqual(max_tasks, scheduler.task_count);
+    try std.testing.expect(!has_free_slot());
+    try std.testing.expect(register_worker(0) == null);
 }
 
 // NOTE: there is deliberately no source-level "is it wired?" guard test here.

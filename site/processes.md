@@ -17,8 +17,8 @@ exchange bytes through kernel mailboxes.
 zombie per iteration, the exited descriptor stays visible in `procs` with its
 status kept, and the allocator pages return at the reap.
 
-- `exec <file> [args...]` loads and spawns; capacity is bounded (13-slot
-  pool: shell + worker + ten EL0 slots + idle).
+- `exec <file> [args...]` loads and spawns; capacity is bounded (16-slot
+  pool: shell + worker + thirteen EL0 slots + idle).
 - `kill <pid|name>` force-terminates with status 137 — the kernel owns
   lifetime, not the program.
 - `procs` prints the table; `tasks` prints scheduler slots and states.
@@ -42,8 +42,8 @@ status kept, and the allocator pages return at the reap.
   byte-exact `peer: got ping N` echoes.
 - **Wait** — `verify-live-wait` shows two blocked tasks while the target is
   still `running`, then the status propagates.
-- **Scale** — `verify-live-scale` runs ten user programs at once and
-  refuses an eleventh at the 13/13 pool (`pool_full`).
+- **Scale** — `verify-live-scale` runs ten user programs at once inside
+  the 16-slot pool (thirteen EL0 user slots after M65d / #1442).
 
 <Aside kind="info">
 
