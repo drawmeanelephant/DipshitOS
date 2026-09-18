@@ -1,7 +1,7 @@
 # live-tabwm-alttab.spec -- M42 UX hardening round 2 (2026-09-05, claim #1011, ADR 0018 addendum)
 # class-B gate: TABWM's Alt-Tab parity (WMS6 Gate A semantics over the tab list).
 #
-# ONE headless boot with --screen (GPU armed) + --via-virtio (the HID chord
+# TWO headless boots with --screen (GPU armed) + --via-virtio (the HID chord
 # transport). TABWM starts, then TWO apps exec into two tabs (TOP id=2,
 # NOTEPAD id=3 - the last mirror activates, so NOTEPAD owns the tab).
 # After `notepad: ready` the runner injects the REAL Alt+Tab chord
@@ -26,12 +26,11 @@
 # `open: id=3` registration and TABWM's mirror-synced
 # `tabwm: tab-switch idx=1 id=3`.
 #
-# Single-chord leg only: the runner's chord vocabulary (hidChord in
-# host/vm-runner/Sources/VMRunner/main.swift) maps `alt-tab` but has NO
-# `ctrl-tab` / `alt-shift-tab` token (the ctrl-<x> pattern covers letters
-# only), so a returning Ctrl+Tab leg would loud-fail the runner. The
-# Ctrl+Tab policy parity is covered by the class-A suite (alt_tab_next is
-# the SAME helper both chords route through).
+# Boot 02 (M63r #1424): the same pairing with `--input-chords "ctrl-tab"`.
+# hidChord now maps that token (Ctrl + Tab usage 0x2B); a missing map
+# used to abort CHORD-SEQ. Guest Ctrl+Tab uses activate_tab (not the
+# ALT_TAB marker); this boot only proves the runner typed the chord.
+# Ctrl+Tab policy parity with Alt+Tab is still class-A (alt_tab_next).
 
 vgate_name live-tabwm-alttab "M42 UX r2: TABWM Alt-Tab parity (WMS6 Gate A chord -> alt_tab_next -> kernel ALT_TAB commit)"
 vgate_share seed
@@ -47,6 +46,12 @@ vgate_file script3.txt <<'EOF'
 dui
 wm
 echo alttab-ok
+EOF
+
+vgate_file script3-ctrl.txt <<'EOF'
+dui
+wm
+echo ctrl-tab-ok
 EOF
 
 vgate_run 01 -- \
@@ -84,3 +89,17 @@ assert re.search(r'key_fan=[1-9][0-9]*', ser), "key_fan check failed (chord not 
 # Kernel-side commit proof: TOP (id 2) holds kernel focus after the chord.
 assert re.search(r'dui: windows=6 focused=2', ser), "focused-window check failed"
 PY
+
+vgate_run 02 -- \
+    --screen '$RUN_DIR/screen-02' \
+    --via-virtio --cvc-snap \
+    --script '$RUN_DIR/script.txt' \
+    --input-chords "ctrl-tab" --input-chords-after "notepad: ready" --input-chords-delay 2 \
+    --script3 '$RUN_DIR/script3-ctrl.txt' --script3-after "notepad: ready" --script3-delay 10 \
+    --script-expect "ctrl-tab-ok" --timeout 260
+
+vgate_assert 02 serial-contains 'VirelaiOS kernel has seized control.'
+vgate_assert 02 serial-contains 'tabwm: registered'
+vgate_assert 02 serial-contains 'notepad: ready'
+vgate_assert 02 output-contains 'CHORD-SEQ: typed "ctrl-tab"'
+vgate_assert 02 serial-absent '[EXC] parking:'
