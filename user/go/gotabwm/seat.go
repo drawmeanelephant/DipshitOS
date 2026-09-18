@@ -54,8 +54,9 @@ const (
 const blankRGB uint32 = 0x1A1E2E
 
 // maxTicks bounds the composite loop so a boot can never hang (~1 tick/s).
-// Three Go runtimes (this seat + two clients) fit max_tasks=13 (#1426;
-// each runtime is 3 kernel tasks: primary + sysmon + helper). A
+// Three Go runtimes (this seat + two clients) fit max_tasks=16 (M65d /
+// #1442: 3 kernel + 3×4 Ms + 1 spare). GOMAXPROCS=1 still fits (3 kernel
+// tasks each: primary + sysmon + helper). A
 // `--pointer-virtio` click is 3 messages × 2.5 s; pointerClickHold is that
 // budget in ticks. maxTicks must cover hostTicks + hidChordHold + the
 // two-tab choreography (9) so M63 HID (click, type-in, drag, chords)
