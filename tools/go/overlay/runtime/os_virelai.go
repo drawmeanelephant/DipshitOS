@@ -20,13 +20,16 @@ import (
 // in x8, args in x0-x5 and the result in x0 (negative = the kernel's own
 // errno encoding, ADR 0007) — see kernel/src/syscall.zig.
 //
-// Phase 0b (ADR 0027, ACCEPTED 2026-09-12): the runtime is MULTI-THREADED.
+// Phase 0b (ADR 0027) / M65c (#1441): the runtime is MULTI-THREADED.
 // Slot 73 sys_thread maps every Go M onto a kernel task bound to the M's
 // process (newosproc passes mp.g0.stack.hi / runtime.mstart / mp); slot 74
 // sys_futex backs lock_sema.go's semasleep/semawakeup instead of the
-// phase-0a yield-spin. Every proc.go fork delta is RETIRED — proc.go is
-// byte-identical to upstream (patch_proc.py is deleted). Async preemption
-// stays OFF (preemptMSupported = false; signals are phase 0c).
+// phase-0a yield-spin. Every proc.go fork delta is RETIRED — apply.sh
+// reverses leftover 0a gates on an existing fork (haveSysmon, canCreateM,
+// template thread, spare-M handoffs, dolock/dounlockOSThread, stopm) so
+// proc.go is byte-identical to upstream (patch_proc.py stays deleted).
+// Async preemption stays OFF (preemptMSupported = false; a call-free
+// tight loop delays STW, shared with wasip1). Signals are phase 0c.
 //
 // Memory uses the runtime's sbrk platform (mem_sbrk.go, build-tagged for
 // virelai): the heap grows contiguously from firstmoduledata.end via
@@ -189,12 +192,13 @@ func getCPUCount() int32 {
 // Per-GOOS extensions of m (runtime2.go embeds mOS) and the unused
 // signal-stack type (plan9/wasm shape — no signals exist on virelai).
 type mOS struct {
-	// lock_sema.go's semaphore slot (the openbsd shape, userspace-only:
-	// single-threaded phase 0a never contends; semasleep yields).
+	// lock_sema.go's semaphore slot (the openbsd shape). Slot 74
+	// sys_futex parks the task while waitsemacount is 0; semawakeup
+	// increments and wakes one peer. Contended Ms are the 0b default.
 	waitsemacount uint32
 }
 
-// gsignalStack is unused on virelai (no signal delivery in phase 0a).
+// gsignalStack is unused on virelai (no async signals; 0c is synchronous).
 type gsignalStack struct{}
 
 // ---- lock_sema.go's required semaphore primitives (futex-backed) ----
@@ -441,7 +445,9 @@ func newosproc0(stacksize uintptr, fn unsafe.Pointer) {
 const preemptMSupported = false
 
 func preemptM(mp *m) {
-	// No async preemption (no signals); cooperative safe points only.
+	// No async preemption (no signals). STW stays cooperative: a
+	// call-free tight loop delays it — the same caveat as wasip1
+	// (ADR 0027 D5 / M65c).
 }
 
 // sbrk backs the mem_sbrk.go platform layer: grow the break to bl+n by

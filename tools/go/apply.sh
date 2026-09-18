@@ -7,7 +7,8 @@
 # tree; the toolchain sources ship in the distribution). This script:
 #   1. copies the stock GOROOT into $FORK_DIR (once),
 #   2. copies the overlay files from tools/go/overlay/ into it,
-#   3. applies the six small source edits (declarative, idempotent),
+#   3. applies the small source edits (declarative, idempotent), including
+#      reversing leftover phase-0a proc.go deltas on an existing fork (M65c),
 #   4. commits the patch as a git delta for reviewability.
 #
 # Re-running is safe: existing overlay/edit state is detected and kept.
@@ -88,11 +89,162 @@ if ! head -6 "$F/runtime/lock_sema.go" | grep -q virelai; then
     edits=$((edits+1)); log "patched runtime/lock_sema.go (build tag)"
 fi
 
-# ADR 0027 (ACCEPTED 2026-09-12): the phase-0a proc.go deltas are RETIRED —
-# haveSysmon restores to the upstream form, canCreateM/dolock/dounlock/
-# stopm/newosproc gates are gone, and patch_proc.py is deleted. proc.go is
-# byte-identical to upstream again; threads ride kernel slot 73 and the
-# futex backs lock_sema via os_virelai.go.
+# --- 3f. runtime/proc.go: retire leftover ADR 0026 D5 single-M deltas --
+# ADR 0027 D5 / M65c (#1441): #1214 deleted patch_proc.py and stopped
+# *applying* the 0a gates, but never reversed them. An existing
+# ../go-virelai fork therefore stays single-M (haveSysmon off, canCreateM,
+# template thread skipped, spare-M handoffs dropped, dolock/dounlock
+# bookkeeping-only, stopm yields) until wiped. Invert 32400aa0's 3f +
+# patch_proc.py in place. Idempotent: a stock or already-restored proc.go
+# (no "virelai") is a no-op. Fresh copies never have these deltas.
+#
+# Exact reverses: haveSysmon → `GOARCH != "wasm"`; drop canCreateM;
+# startTemplateThread / dolockOSThread / dounlockOSThread wasm-only;
+# startTheWorld spare-M `else { newm }`; drop startm's `!canCreateM`
+# early return; drop stopm's virelai osyield. After this, proc.go has
+# zero virelai mentions — threads ride overlay newosproc (slot 73) and
+# lock_sema parks on slot 74 via os_virelai.go.
+restored="$(python3 - "$F/runtime/proc.go" <<'PYEOF'
+import re
+import sys
+
+p = sys.argv[1]
+s = open(p).read()
+if "virelai" not in s:
+    print("clean")
+    raise SystemExit(0)
+
+n = 0
+
+def note(name):
+    global n
+    n += 1
+    print("restore_proc: reversed " + name, file=sys.stderr)
+
+s2, c = re.subn(
+    r'^const haveSysmon = GOARCH != "wasm" && GOOS != "virelai".*$',
+    'const haveSysmon = GOARCH != "wasm"',
+    s,
+    count=1,
+    flags=re.M,
+)
+if c:
+    s = s2
+    note("haveSysmon")
+
+# patch_proc.py splices canCreateM after the haveSysmon *anchor*
+# (no comment), so the 3f comment hitchhikes onto the canCreateM line.
+s2, c = re.subn(
+    r'^const canCreateM = GOARCH != "wasm" && GOOS != "virelai".*\n',
+    "",
+    s,
+    count=1,
+    flags=re.M,
+)
+if c:
+    s = s2
+    note("canCreateM")
+
+old = """func startTemplateThread() {
+	if GOARCH == "wasm" || GOOS == "virelai" { // no threads on wasm or virelai yet
+		return
+	}"""
+new = """func startTemplateThread() {
+	if GOARCH == "wasm" { // no threads on wasm yet
+		return
+	}"""
+if old in s:
+    s = s.replace(old, new, 1)
+    note("startTemplateThread")
+
+old = """		} else if canCreateM {
+			// Start M to run P.  Do not start another M below.
+			newm(nil, p, -1)
+		} else {
+			// issue #1163 phase 0a: no kernel thread_create yet; the
+			// single-P invariant keeps this path unreachable.
+			p.m = 0
+		}"""
+new = """		} else {
+			// Start M to run P.  Do not start another M below.
+			newm(nil, p, -1)
+		}"""
+if old in s:
+    s = s.replace(old, new, 1)
+    note("startTheWorld")
+
+old = """	nmp := mget()
+	if nmp == nil && !canCreateM {
+		// issue #1163 phase 0a: no kernel thread_create yet. Drop the
+		// handoff; the single-M scheduler retries on its next pass.
+		releasem(mp)
+		return
+	}
+	if nmp == nil {
+		// No M is available, we must drop sched.lock and call newm."""
+new = """	nmp := mget()
+	if nmp == nil {
+		// No M is available, we must drop sched.lock and call newm."""
+if old in s:
+    s = s.replace(old, new, 1)
+    note("startm")
+
+old = """func dolockOSThread() {
+	if GOARCH == "wasm" || GOOS == "virelai" {
+		return // no threads on wasm or virelai yet (issue #1163 phase 0a)
+	}"""
+new = """func dolockOSThread() {
+	if GOARCH == "wasm" {
+		return // no threads on wasm yet
+	}"""
+if old in s:
+    s = s.replace(old, new, 1)
+    note("dolockOSThread")
+
+old = """func dounlockOSThread() {
+	if GOARCH == "wasm" || GOOS == "virelai" {
+		return // no threads on wasm or virelai yet (issue #1163 phase 0a)
+	}"""
+new = """func dounlockOSThread() {
+	if GOARCH == "wasm" {
+		return // no threads on wasm yet
+	}"""
+if old in s:
+    s = s.replace(old, new, 1)
+    note("dounlockOSThread")
+
+old = """func stopm() {
+	if GOOS == "virelai" {
+		// issue #1163 phase 0a: the single M must never park — nothing
+		// else exists to wake it (no sysmon, no second thread). Yield to
+		// the kernel scheduler and let the caller retry findRunnable.
+		// Removed with slot 72.
+		osyield()
+		return
+	}
+	gp := getg()"""
+new = """func stopm() {
+	gp := getg()"""
+if old in s:
+    s = s.replace(old, new, 1)
+    note("stopm")
+
+if "virelai" in s:
+    i = s.index("virelai")
+    sys.exit(
+        "restore_proc: leftover virelai in proc.go after known reverses:\n"
+        + s[max(0, i - 80) : i + 80]
+    )
+open(p, "w").write(s)
+print("retired")
+PYEOF
+)"
+if [ "$restored" = "retired" ]; then
+    edits=$((edits+1)); log "restored runtime/proc.go (retired leftover 0a single-M deltas, M65c)"
+elif [ "$restored" != "clean" ]; then
+    echo "apply: unexpected restore_proc status: $restored" >&2
+    exit 1
+fi
 
 # --- 3f2. runtime/tls_arm64.h: the virelai TLS case --------------------
 # Pure-Go arm64 keeps g in R28 (load_g/save_g return immediately for

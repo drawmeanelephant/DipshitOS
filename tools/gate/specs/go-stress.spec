@@ -1,5 +1,6 @@
-# go-stress.spec -- issue #1227: GOOS=virelai 0b breadth (GC / channel /
-# timer / futex) past the N=8 D6 baseline.
+# go-stress.spec -- issue #1227 / M65c (#1441): GOOS=virelai 0b breadth
+# (GC / channel / timer / futex) past the N=8 D6 baseline, on the
+# compiled default GOMAXPROCS (no env pin — numCPUStartup = 2).
 #
 # The fixture (tools/go/gostress.go) prints one completion line per phase
 # so this run is assert-proven by program output, not a script echo:
@@ -9,8 +10,8 @@
 #   4. futex — 32 goroutines × 50 mutex increments (counter=1600) plus
 #      park-all-then-wake; N=32 is past goroutines.go's N=8
 #
-# `set GOMAXPROCS=2` is the ADR 0027 D6 default via the #1226 envp knob
-# (numCPUStartup stays 2; this proves the override still lands on 2).
+# M65c drops `set GOMAXPROCS=2` so this gate proves the compiled default
+# (ADR 0027 D6). `go-args` keeps GOMAXPROCS=1 as the env-override proof.
 #
 # HOST PREREQUISITE (not hermetic — see tools/go/README.md):
 # `just go-toolchain` must have produced .build/go/GOSTRESS.ELF.
@@ -24,7 +25,6 @@ vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 
 vgate_file script.txt <<'EOF'
-set GOMAXPROCS=2
 exec GOSTRESS.ELF
 EOF
 
