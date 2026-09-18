@@ -77,7 +77,7 @@ func startConnFake(t *testing.T) *connFake {
 	f := &connFake{}
 	prev := SetSyscallHookForTest(f.hook)
 	t.Cleanup(func() { SetSyscallHookForTest(prev) })
-	t.Cleanup(func() { clientLive = nil })
+	t.Cleanup(func() { slotHeld.Store(false) })
 	return f
 }
 
@@ -111,7 +111,7 @@ func TestDial_NameResolvesThenConnects(t *testing.T) {
 		return f.hook(num, a0, a1, a2, a3)
 	})
 	defer SetSyscallHookForTest(prev)
-	t.Cleanup(func() { dnsPortBound = false; clientLive = nil })
+	t.Cleanup(func() { dnsPortBound = false; slotHeld.Store(false) })
 
 	c, err := Dial("myhost.local", 8080)
 	if err != nil {
@@ -130,7 +130,8 @@ func TestDial_SecondLiveDialIsBusy(t *testing.T) {
 	// The kernel keeps ONE TCP socket per process; the second live Dial
 	// must fail in userland WITHOUT touching the connect slot.
 	f := startConnFake(t)
-	if _, err := Dial("10.0.0.2", 8080); err != nil {
+	c1, err := Dial("10.0.0.2", 8080)
+	if err != nil {
 		t.Fatalf("first Dial: %v", err)
 	}
 	if _, err := Dial("10.0.0.3", 8081); !errors.Is(err, ErrConnBusy) {
@@ -140,7 +141,7 @@ func TestDial_SecondLiveDialIsBusy(t *testing.T) {
 		t.Fatalf("connect called %d times, want 1 (the busy check is userland)", f.connectCalls)
 	}
 	// Close-then-Dial is the legal reconnect path.
-	if err := clientLive.Close(); err != nil {
+	if err := c1.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	if f.closeCalls != 1 {
@@ -161,6 +162,118 @@ func TestDial_PortZeroRefused(t *testing.T) {
 	}
 	if f.connectCalls != 0 {
 		t.Fatalf("port 0 reached the kernel (%d calls)", f.connectCalls)
+	}
+}
+
+func TestDial_ZeroIPIsTheServerAddress(t *testing.T) {
+	// The kernel treats ip == 0 as PASSIVE open (listen mode), and server
+	// sockets are an explicit M67a non-goal: Dial must refuse 0.0.0.0 in
+	// userland, before the seam can open one.
+	f := startConnFake(t)
+	if _, err := Dial("0.0.0.0", 8080); !errors.Is(err, ErrServerDial) {
+		t.Fatalf("Dial(0.0.0.0) = %v, want ErrServerDial", err)
+	}
+	if f.connectCalls != 0 {
+		t.Fatalf("the zero address reached the kernel (%d calls)", f.connectCalls)
+	}
+}
+
+func TestDial_DNSResolvingToZeroRefused(t *testing.T) {
+	// The same guard covers the resolved path: a (hostile) reply naming
+	// 0.0.0.0 as the A record must not turn a name dial into a server.
+	dns := &dnsFake{}
+	dns.recvScript = func(int) []byte {
+		return udpDgram(DNSPort, dnsReplyFor(dns.sentQuery, [4]byte{0, 0, 0, 0}))
+	}
+	f := &connFake{}
+	prev := SetSyscallHookForTest(func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
+		if num == SlotUDPListen || num == SlotUDPSend || num == SlotUDPRecv {
+			return dns.hook(num, a0, a1, a2, a3)
+		}
+		return f.hook(num, a0, a1, a2, a3)
+	})
+	defer SetSyscallHookForTest(prev)
+	t.Cleanup(func() { dnsPortBound = false; slotHeld.Store(false) })
+
+	if _, err := Dial("zero.host", 8080); !errors.Is(err, ErrServerDial) {
+		t.Fatalf("Dial of a name resolving to 0.0.0.0 = %v, want ErrServerDial", err)
+	}
+	if f.connectCalls != 0 {
+		t.Fatalf("the resolved zero address reached the kernel (%d calls)", f.connectCalls)
+	}
+}
+
+func TestDial_ConcurrentDialsStaySingle(t *testing.T) {
+	// Programs run concurrent goroutines (the fixtures' own heartbeat), so
+	// two racing Dials must not both pass the nil check: exactly one wins
+	// the socket, the rest see the busy bound — and the kernel sees ONE
+	// connect.
+	f := startConnFake(t)
+	const n = 4
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			_, err := Dial("10.0.0.2", 8080)
+			errs <- err
+		}()
+	}
+	wins, busy := 0, 0
+	for i := 0; i < n; i++ {
+		switch err := <-errs; err {
+		case nil:
+			wins++
+		case ErrConnBusy:
+			busy++
+		default:
+			t.Fatalf("unexpected Dial error: %v", err)
+		}
+	}
+	if wins != 1 || busy != n-1 {
+		t.Fatalf("racing Dials = %d wins / %d busy, want 1 / %d", wins, busy, n-1)
+	}
+	if f.connectCalls != 1 {
+		t.Fatalf("connect called %d times, want exactly 1", f.connectCalls)
+	}
+}
+
+func TestClose_FailureKeepsTheSlotClaimed(t *testing.T) {
+	// On a kernel close refusal the socket is still live in-kernel: the
+	// userland slot must stay claimed, or the next Dial would eat a
+	// confusing EINVAL from the seam instead of the honest busy bound.
+	f := startConnFake(t)
+	c, _ := Dial("10.0.0.2", 8080)
+	closeScript := []int64{-ErrEACCES, 0} // first Close refused, second: idle → 0
+	f.other = 0
+	prev := SetSyscallHookForTest(func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
+		if num == SlotTCPClose {
+			rc := closeScript[0]
+			closeScript = closeScript[1:]
+			if len(closeScript) == 0 {
+				closeScript = []int64{0}
+			}
+			f.closeCalls++
+			return rc
+		}
+		t.Fatalf("unexpected slot %d", num)
+		return -ErrENOSYS
+	})
+	defer SetSyscallHookForTest(prev)
+
+	if err := c.Close(); !errors.Is(err, error(errno(ErrEACCES))) {
+		t.Fatalf("refused Close = %v, want Errno(EACCES)", err)
+	}
+	if !slotHeld.Load() {
+		t.Fatal("a refused Close must NOT release the one-socket slot")
+	}
+	if _, err := Dial("10.0.0.3", 8081); !errors.Is(err, ErrConnBusy) {
+		t.Fatalf("Dial after a refused Close = %v, want ErrConnBusy", err)
+	}
+	// The kernel's "nothing owned" row (idle → 0) DOES release.
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close on an idle socket = %v, want nil", err)
+	}
+	if slotHeld.Load() {
+		t.Fatal("an accepted Close must release the slot")
 	}
 }
 
@@ -219,7 +332,7 @@ func TestSend_AdvancesByConfirmedCounts(t *testing.T) {
 		return 0
 	})
 	defer SetSyscallHookForTest(prev)
-	t.Cleanup(func() { clientLive = nil })
+	t.Cleanup(func() { slotHeld.Store(false) })
 
 	c, err := Dial("10.0.0.2", 8080)
 	if err != nil {
@@ -349,7 +462,7 @@ func TestClose_ClearsTheLiveSlot(t *testing.T) {
 	if err := c.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if clientLive == c {
+	if slotHeld.Load() {
 		t.Fatal("Close must clear the one-socket slot")
 	}
 	if err := c.Close(); err != nil {

@@ -32,8 +32,9 @@ func heartbeat(stop *bool, count *int) {
 }
 
 func fail(msg string) {
-	vsys.Print("govinet: FAIL ")
-	vsys.Println(msg)
+	// One console write: another task's output can otherwise split the
+	// marker across serial lines (observed with the smp scheduler lines).
+	vsys.Println("govinet: FAIL " + msg)
 	vsys.Exit(1)
 }
 
