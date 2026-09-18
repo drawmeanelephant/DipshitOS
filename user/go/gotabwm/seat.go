@@ -50,7 +50,10 @@ const (
 const blankRGB uint32 = 0x1A1E2E
 
 // maxTicks bounds the composite loop so a boot can never hang (~1 tick/s).
-const maxTicks = 12
+// Two slow Go ELFs cannot share the 11-slot pool with this seat (each
+// Go runtime is 3 kernel tasks: primary + sysmon + helper). maxTicks=18
+// still leaves 9 choreography ticks if a single Go client declares late.
+const maxTicks = 18
 
 // maxEvents bounds the wait loop regardless of which kinds arrive (the tick is
 // the only expected one — no input is driven — but the bound keeps a spurious
