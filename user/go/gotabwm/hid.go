@@ -1,4 +1,4 @@
-// GOTABWM.ELF — M63b–d (issues #1420/#1421/#1422): chords, rail click, drag-reorder.
+// GOTABWM.ELF — M63b–e (issues #1420–#1423): chords, rail click/drag, type-in.
 //
 // Frozen table on #1418 (no new ADR, no new kernel cmd, no ctrl-tab):
 //
@@ -6,6 +6,7 @@
 //	alt-tab       -> FocusTab + WmctlTaskbarClick (cmd 12), wrapping
 //	rail click    -> top strip, equal-width cells, same TASKBAR+FocusTab
 //	rail drag     -> press/release over different cells → existing Reorder()
+//	ordinary keys -> ignored here (ADR 0009: KEY_DOWN still reaches the app)
 //
 // Markers print only after the mutation/syscall that made them true.
 // Ctrl+W is not bound (it collides with the editor). Ctrl+Tab waits on M63r.
@@ -25,8 +26,8 @@ const (
 )
 
 // hidChordHold is how many composite ticks the two-tab choreography waits
-// after first seeing n>=2, so a `--pointer-virtio` rail drag (4×2.5 s)
-// and `--input-chords 'ctrl-shift-p,alt-tab'` land before auto reorder/pin.
+// after first seeing n>=2, so a rail click (3×2.5 s), `--input-string`
+// into GOEDIT, and `--input-chords` land before auto reorder/pin.
 const hidChordHold = 20
 
 // pointerDragHold is one `--pointer-virtio 'x,y,d;x,y,u'` (4 messages × 2.5 s).

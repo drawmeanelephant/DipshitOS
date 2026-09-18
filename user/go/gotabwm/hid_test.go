@@ -96,6 +96,16 @@ func TestHandleWmKeyIgnoresCtrlWAndCtrlTab(t *testing.T) {
 	if id != 3 {
 		t.Fatalf("Ctrl+Tab (M63r) must not cycle, focus=%d", id)
 	}
+	// Ordinary characters are the app's KEY_DOWN path (M63e). The seat
+	// still sees kind 21, but must not treat them as chords.
+	handleWmKey(vi.Event{Kind: vi.EvWmKey, Arg0: 0x1B}) // HID 'x'
+	if tabs.At(0).Pinned || tabs.At(1).Pinned {
+		t.Fatal("printable x must not pin")
+	}
+	id, _ = tabs.Focused()
+	if id != 3 {
+		t.Fatalf("printable x must not cycle, focus=%d", id)
+	}
 }
 
 func TestHandleWmKeyAltTabNeedsKernel(t *testing.T) {
