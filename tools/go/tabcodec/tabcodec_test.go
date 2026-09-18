@@ -14,14 +14,14 @@ import (
 func ip(i int) *int { return &i }
 
 // goldenA is the exact state the Zig test TWM/ST1 builds in
-// user/src/tabwm.zig: tabs "Calc" (pinned, bin CALC.BIN) and "Files"
+// user/src/tabwm.zig: tabs "Calc" (pinned, bin GOCALC.ELF) and "Files"
 // (frozen, group tools), active index 0, seq 7.
 func goldenA() State {
 	return State{
 		Active: ip(0),
 		Seq:    7,
 		Tabs: []Tab{
-			{Title: "Calc", Flags: FlagPinned, Bin: "CALC.BIN"},
+			{Title: "Calc", Flags: FlagPinned, Bin: "GOCALC.ELF"},
 			{Title: "Files", Flags: FlagFrozen, Group: "tools"},
 		},
 	}
@@ -31,11 +31,11 @@ func goldenA() State {
 // frozen layout in user/src/tabwm.zig (NOT emitted by this package):
 //
 //	header     02 01 02 07 00 00     version=2 | active+1=1 | count=2 | seq=7 LE | prefs=0
-//	record 0   "Calc" + 28x00 | 01 | 12x00 | "CALC.BIN" + 16x00
+//	record 0   "Calc" + 28x00 | 01 | 12x00 | "GOCALC.ELF" + 14x00
 //	record 1   "Files" + 27x00 | 02 | "tools" + 7x00 | 24x00
 //	           (6 + 69 + 69 = 144 bytes)
 const goldenAHex = "02010207000043616c630000000000000000000000000000000000000000000000000000000001000000000000000000" +
-	"00000043414c432e42494e0000000000000000000000000000000046696c657300000000000000000000000000000000" +
+	"000000474f43414c432e454c46000000000000000000000000000046696c657300000000000000000000000000000000" +
 	"000000000000000000000002746f6f6c7300000000000000000000000000000000000000000000000000000000000000"
 
 func goldenABytes(t *testing.T) []byte {
@@ -75,7 +75,7 @@ func TestGoldenAEncodeParity(t *testing.T) {
 	if got[6+TitleMax] != FlagPinned {
 		t.Fatalf("record 0 flags at offset %d = %#x, want %#x", 6+TitleMax, got[6+TitleMax], FlagPinned)
 	}
-	if string(got[6+TitleMax+1+GroupMax:6+TitleMax+1+GroupMax+8]) != "CALC.BIN" {
+	if string(got[6+TitleMax+1+GroupMax:6+TitleMax+1+GroupMax+10]) != "GOCALC.ELF" {
 		t.Fatalf("record 0 bin misplaced")
 	}
 	if string(got[75:80]) != "Files" { // record 1 starts at 6+69 = 75

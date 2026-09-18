@@ -1,6 +1,6 @@
 // GOTABWM.ELF - M57c (issue #1318): the Go seat hosts UNMODIFIED Zig apps.
 //
-// This is the card that makes the seat real. A Zig app (CALC.BIN, NOTEPAD.BIN)
+// This is the card that makes the seat real. A leftover Zig app (NOTEPAD.BIN)
 // links lib/tabapp.zig, opens its own window, then declares itself to the
 // running WM over the WM_RPC mailbox and waits for the ack. It discovers the WM
 // purely by process name (abi.zig wm_proc_names), which M57c extended with
@@ -25,9 +25,9 @@
 //	loop ends                   gotabwm: host done
 //
 // The ack is the M56b wire (wmclient.go / wnd_core.zig): kind | 0x80, id, seq,
-// applied. The app's own "calc: tab-aware (full-viewport)" proves the ack
-// carried applied=1; "calc: resize relayout" / "notepad: resize relayout"
-// proves the full-viewport proposal reached it; "calc: win_close" proves the
+// applied. The hosted Go calc's "gocalc: declare accepted" proves the ack
+// carried applied=1; "gocalc: present" / "notepad: resize relayout"
+// proves the full-viewport proposal reached it; "gocalc: close" proves the
 // close did.
 package main
 

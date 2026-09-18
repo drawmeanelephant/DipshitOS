@@ -70,7 +70,7 @@ fi
 # --- 2. seed the persistent share (idempotent; never clobbers user files) ---
 mkdir -p "$SHARE"
 
-# The compiled app bundle (CALC.BIN, TABWM.BIN, LD.SO, ...).
+# The compiled app bundle (GOCALC.ELF, TABWM.BIN, LD.SO, ...).
 if [ -d "$ROOT/zig-out/bin" ]; then
     cp -R "$ROOT/zig-out/bin/." "$SHARE/" 2>/dev/null || true
 fi

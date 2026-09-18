@@ -709,9 +709,8 @@ fn topic_body(name: []const u8) ?[]const u8 {
     }
     if (std.mem.eql(u8, name, "calc")) {
         return "calc\n" ++
-            "  64-bit Programmer, Scientific, and Basic calculator modes (CALC.BIN).\n" ++
-            "  Base conversions (HEX/DEC/OCT/BIN), bitwise logic (AND/OR/XOR/NOT/SHL/SHR),\n" ++
-            "  scientific functions (trig, exp, log), and persistent calculation history.\n";
+            "  64-bit integer calculator (GOCALC.ELF): digits, + - * /, equals, clear.\n" ++
+            "  `calc history` prints saved calculation history from calc_hst.txt on the host share.\n";
     }
     if (std.mem.eql(u8, name, "system")) {
         return "system\n" ++
@@ -1228,17 +1227,9 @@ fn cmd_calc(m: *Monitor, args: []const []const u8) ExecError {
         if (got > 0 and buf[got - 1] != '\n') m.console.puts("\n");
         return .none;
     }
-    // M24 K11 (issue #375) — Lane B shared-file insertion (Rule 4, one
-    // self-contained commit): any non-`history` argument is an expression
-    // for CALC.BIN's CLI mode; hand the args over verbatim. CALC.BIN
-    // evaluates, prints "<expr> = <result>", and exits — no GUI window.
-    // A no-args or `calc history` invocation never reaches this path.
-    if (args.len >= 1 and esp_exec.max_exec_args >= args.len) {
-        switch (esp_exec.exec_file("CALC.BIN", args)) {
-            .ok => return .none,
-            else => {}, // fall through to the honest error below
-        }
-    }
+    // M62h: Zig CALC.BIN (and its CLI `calc <expr>` path) is gone. GOCALC.ELF
+    // is GUI-only and treats argv[1] as a result-file path, so do not exec it
+    // with an expression. Fall through to the honest unknown-subcommand error.
     err_prefix(m);
     m.console.puts("unknown calc subcommand: ");
     m.console.print_line(args[0]);
@@ -7386,7 +7377,7 @@ fn cmd_wnd(m: *Monitor, args: []const []const u8) ExecError {
     if (args.len >= 1 and std.mem.eql(u8, args[0], "start")) {
         // The bootstrap: launch the long-lived WM server. Go through the
         // exec seam DIRECTLY with a fixed file name — the same pattern as
-        // `calc`'s exec_file("CALC.BIN", args) (a direct string literal,
+        // `calc`'s old exec_file (a direct string literal,
         // no argv indirection): an argv handoff to cmd_exec showed garbage
         // in the exec error path under ReleaseSmall, so this is the honest,
         // proven shape. WND.BIN becomes process WND.BIN on the ESP.

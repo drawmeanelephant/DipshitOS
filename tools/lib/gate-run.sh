@@ -114,7 +114,7 @@ gate_arm_share() {
 gate_seed_share() {
     [ -n "$RUN_DIR" ] || { echo "gate-run: gate_seed_share called before gate_begin" >&2; exit 1; }
     gate_arm_share
-    # 1. The compiled app bundle (USER.BIN, CALC.BIN, DESKTOP.BIN, ...).
+    # 1. The compiled app bundle (USER.BIN, GOCALC.ELF, DESKTOP.BIN, ...).
     if [ -d zig-out/bin ]; then
         cp -R zig-out/bin/. "$SHARE/" 2>/dev/null || true
     fi

@@ -4634,7 +4634,7 @@ test "tabwm: compute_tab_viewport centering and full bleed" {
     try std.testing.expectEqual(@as(u32, 512), vp_fixed.w);
     try std.testing.expectEqual(@as(u32, 384), vp_fixed.h);
 
-    // 4. Fixed size window (260x340, e.g. CALC.BIN) centers cleanly:
+    // 4. Fixed size window (260x340, e.g. a leftover Zig client) centers cleanly:
     // x = 180 + (1100 - 260) / 2 = 180 + 420 = 600
     // y = 0 + (720 - 340) / 2 = 190
     var tab_calc = Tab{
@@ -4819,7 +4819,7 @@ test "tabwm: declare_fullscreen on an inactive tab defers the proposal (M42 SX2)
 fn overlay_seed_catalog() void {
     overlay_count = 3;
     const seeds = [_]struct { bin: []const u8, label: []const u8 }{
-        .{ .bin = "CALC.BIN", .label = "64-bit Calc" },
+        .{ .bin = "GOCALC.ELF", .label = "64-bit Calc" },
         .{ .bin = "NOTEPAD.BIN", .label = "Text Editor" },
         .{ .bin = "TOP.BIN", .label = "Task Manager" },
     };
@@ -4857,10 +4857,9 @@ test "tabwm: god-menu overlay keys — filter, select, launch, dismiss (M42 SX5)
     resetForTest();
     overlay_seed_catalog();
     overlay_open = true;
-    // 'e' extends the filter ("e" hits "64-bit Calc"? no — label+bin
-    // contains 'e' in "Text Editor"/"Task Manager"/"...Calc"? Calc has no
-    // 'e'... "64-bit Calc" + "CALC.BIN" has none; Editor + Manager do.
-    _ = overlay_key(0x08); // 'e'
+    // 'r' extends the filter: "Text Editor"/"Task Manager" contain 'r';
+    // "64-bit Calc" + "GOCALC.ELF" do not.
+    _ = overlay_key(0x15); // 'r'
     try std.testing.expectEqual(@as(usize, 2), overlay_filtered_count);
     // Backspace clears back to 3 hits.
     _ = overlay_key(0x2a);
@@ -4904,7 +4903,7 @@ test "tabwm: god-menu overlay accepts digits, minus, period in the filter (M42 S
     _ = overlay_key(0x17); // t
     try std.testing.expectEqual(@as(usize, 6), overlay_filter_len);
     overlay_refresh_filter();
-    // Exactly one hit: "64-bit Calc" (CALC.BIN).
+    // Exactly one hit: "64-bit Calc" (GOCALC.ELF).
     try std.testing.expectEqual(@as(usize, 1), overlay_filtered_count);
     overlay_dismiss();
 }
@@ -5795,10 +5794,10 @@ test "tabwm: M48 markers are pinned (BT1–BT6)" {
 test "tabwm: duplicate active tab re-execs its recorded bin (M48/BT1)" {
     resetForTest();
     _ = manager.add_or_update_tab(2, "Calc");
-    manager.tabs[0].set_bin("CALC.BIN");
+    manager.tabs[0].set_bin("GOCALC.ELF");
     activate_tab(0);
     try std.testing.expect(duplicate_active_tab());
-    try std.testing.expectEqualStrings("CALC.BIN", pending_launch_bin[0..pending_launch_bin_len]);
+    try std.testing.expectEqualStrings("GOCALC.ELF", pending_launch_bin[0..pending_launch_bin_len]);
 
     // No recorded bin (a self-opened window) -> honest no-op.
     _ = manager.add_or_update_tab(3, "Mystery");
@@ -5879,15 +5878,15 @@ test "tabwm: pinning sorts pinned tabs first (M48/BT3)" {
 
 test "tabwm: manifest group parsing + dock pin adoption (M48/BT3)" {
     resetForTest();
-    const text = "# c\nCALC.BIN | Calc | c | dock=true | group=System\nNOTEPAD.BIN | Editor | n | group=Office\n";
-    try std.testing.expectEqualStrings("System", manifest_group_for(text, "CALC.BIN"));
+    const text = "# c\nGOCALC.ELF | Calc | c | dock=true | group=System\nNOTEPAD.BIN | Editor | n | group=Office\n";
+    try std.testing.expectEqualStrings("System", manifest_group_for(text, "GOCALC.ELF"));
     try std.testing.expectEqualStrings("Office", manifest_group_for(text, "NOTEPAD.BIN"));
     try std.testing.expectEqualStrings("", manifest_group_for(text, "MISSING.BIN"));
 
     // The launch handshake carries bin + group + dock-pin; the mirror adopts
     // them onto the new tab.
-    pending_launch_bin_len = 8;
-    @memcpy(pending_launch_bin[0..8], "CALC.BIN");
+    pending_launch_bin_len = 10;
+    @memcpy(pending_launch_bin[0..10], "GOCALC.ELF");
     pending_launch_group_len = 6;
     @memcpy(pending_launch_group[0..6], "System");
     pending_launch_pinned = true;
@@ -5911,7 +5910,7 @@ test "tabwm: START surface summons, shares the catalog, and launches (M48/BT4)" 
     overlay_sel = 0;
     try std.testing.expect(overlay_launch_selected());
     try std.testing.expect(!start_open);
-    try std.testing.expectEqualStrings("CALC.BIN", pending_launch_bin[0..pending_launch_bin_len]);
+    try std.testing.expectEqualStrings("GOCALC.ELF", pending_launch_bin[0..pending_launch_bin_len]);
 
     // Escape dismisses; the two catalog surfaces are mutually exclusive.
     start_summon();
@@ -6200,8 +6199,8 @@ test "tabwm: .tabs v2 round-trips pinned, frozen, group, and bin (TWM/ST1)" {
     manager.tabs[1].frozen = true;
     @memcpy(manager.tabs[1].group[0..5], "tools");
     manager.tabs[1].group_len = 5;
-    @memcpy(manager.tabs[0].bin[0..8], "CALC.BIN");
-    manager.tabs[0].bin_len = 8;
+    @memcpy(manager.tabs[0].bin[0..10], "GOCALC.ELF");
+    manager.tabs[0].bin_len = 10;
     activate_tab(0);
     tabs_seq = 7;
     var buf: [tabs_v2_max_bytes]u8 = undefined;
@@ -6216,7 +6215,7 @@ test "tabwm: .tabs v2 round-trips pinned, frozen, group, and bin (TWM/ST1)" {
     try std.testing.expect((st.flags[0] & tab_flag_pinned) != 0);
     try std.testing.expect((st.flags[1] & tab_flag_frozen) != 0);
     try std.testing.expectEqualStrings("tools", st.groups[1][0..st.group_lens[1]]);
-    try std.testing.expectEqualStrings("CALC.BIN", st.bins[0][0..st.bin_lens[0]]);
+    try std.testing.expectEqualStrings("GOCALC.ELF", st.bins[0][0..st.bin_lens[0]]);
 }
 
 test "tabwm: a v2 state re-applies pinned/frozen/group/bin and order (TWM/ST2)" {
@@ -6227,8 +6226,8 @@ test "tabwm: a v2 state re-applies pinned/frozen/group/bin and order (TWM/ST2)" 
     @memcpy(st.titles[0][0..4], "Calc");
     st.title_lens[0] = 4;
     st.flags[0] = tab_flag_pinned;
-    @memcpy(st.bins[0][0..8], "CALC.BIN");
-    st.bin_lens[0] = 8;
+    @memcpy(st.bins[0][0..10], "GOCALC.ELF");
+    st.bin_lens[0] = 10;
     @memcpy(st.titles[1][0..5], "Files");
     st.title_lens[1] = 5;
     st.flags[1] = tab_flag_frozen;
@@ -6241,7 +6240,7 @@ test "tabwm: a v2 state re-applies pinned/frozen/group/bin and order (TWM/ST2)" 
     try std.testing.expect(maybe_apply_persisted_tabs());
     try std.testing.expectEqualStrings("Calc", manager.tabs[0].get_title());
     try std.testing.expect(manager.tabs[0].pinned);
-    try std.testing.expectEqualStrings("CALC.BIN", manager.tabs[0].get_bin());
+    try std.testing.expectEqualStrings("GOCALC.ELF", manager.tabs[0].get_bin());
     try std.testing.expectEqualStrings("Files", manager.tabs[1].get_title());
     try std.testing.expect(manager.tabs[1].frozen);
     try std.testing.expectEqualStrings("tools", manager.tabs[1].group[0..manager.tabs[1].group_len]);

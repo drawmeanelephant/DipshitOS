@@ -36,7 +36,7 @@ gofmt -l . && go vet ./...
 
 `testdata/golden-a.tabs` and `goldenAHex` in `tabcodec_test.go` are **derived
 by hand from the frozen layout** above, for the exact state the Zig test
-`TWM/ST1` builds (tabs `Calc` + `Files`, tab 0 pinned with bin `CALC.BIN`,
+`TWM/ST1` builds (tabs `Calc` + `Files`, tab 0 pinned with bin `GOCALC.ELF`,
 tab 1 frozen with group `tools`, active 0, seq 7 → 144 bytes).
 
 The Zig serializer is not callable from a host Go test (it lives in the

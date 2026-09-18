@@ -23,7 +23,7 @@ EOF
 vgate_file script-B1.txt <<'EOF'
 wnd start
 exec NOTEPAD.BIN
-exec CALC.BIN
+exec TOP.BIN
 EOF
 
 vgate_file s2-B1.txt <<'EOF'
@@ -41,7 +41,7 @@ EOF
 vgate_file script-B2.txt <<'EOF'
 wnd start
 exec NOTEPAD.BIN
-exec CALC.BIN
+exec TOP.BIN
 EOF
 
 vgate_file s2-B2.txt <<'EOF'
@@ -64,7 +64,7 @@ vgate_assert A serial-contains 'dui taskbar: ws=1 entries=0'
 vgate_assert A serial-contains 'dui taskbar: ws=0 entries=1'
 vgate_assert A serial-absent '[EXC] parking:'
 
-vgate_run B1 -- --screen '$RUN_DIR/screen' --via-virtio --cvc-snap --script '$RUN_DIR/script-B1.txt' --script2 '$RUN_DIR/s2-B1.txt' --script2-after 'calc: ready' --script2-delay 20 --pointer-virtio '120,710,c' --pointer-virtio-after 'taskbar-go' --script3 '$RUN_DIR/s3-B1.txt' --script3-after 'taskbar-go' --script3-delay 20 --script-expect 'taskbar-b1-done' --timeout 300
+vgate_run B1 -- --screen '$RUN_DIR/screen' --via-virtio --cvc-snap --script '$RUN_DIR/script-B1.txt' --script2 '$RUN_DIR/s2-B1.txt' --script2-after 'top: ready' --script2-delay 20 --pointer-virtio '120,710,c' --pointer-virtio-after 'taskbar-go' --script3 '$RUN_DIR/s3-B1.txt' --script3-after 'taskbar-go' --script3-delay 20 --script-expect 'taskbar-b1-done' --timeout 300
 
 vgate_assert B1 serial-contains 'wnd: taskbar id=2 restore=0'
 vgate_assert B1 python <<'PY'
@@ -76,7 +76,7 @@ PY
 vgate_assert B1 serial-contains 'wnd: present'
 vgate_assert B1 serial-absent '[EXC] parking:'
 
-vgate_run B2 -- --screen '$RUN_DIR/screen' --via-virtio --cvc-snap --script '$RUN_DIR/script-B2.txt' --script2 '$RUN_DIR/s2-B2.txt' --script2-after 'calc: ready' --script2-delay 20 --pointer-virtio '120,710,c' --pointer-virtio-after 'taskbar-go' --script3 '$RUN_DIR/s3-B2.txt' --script3-after 'taskbar-go' --script3-delay 20 --script-expect 'taskbar-b2-done' --timeout 300
+vgate_run B2 -- --screen '$RUN_DIR/screen' --via-virtio --cvc-snap --script '$RUN_DIR/script-B2.txt' --script2 '$RUN_DIR/s2-B2.txt' --script2-after 'top: ready' --script2-delay 20 --pointer-virtio '120,710,c' --pointer-virtio-after 'taskbar-go' --script3 '$RUN_DIR/s3-B2.txt' --script3-after 'taskbar-go' --script3-delay 20 --script-expect 'taskbar-b2-done' --timeout 300
 
 vgate_assert B2 serial-contains 'wnd: taskbar id=2 restore=1'
 vgate_assert B2 python <<'PY'

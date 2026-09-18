@@ -1,24 +1,23 @@
 # go-wm-default.spec -- M59 (issue #1298) class-B gate: the boot-default flip.
 #
 # Boot 01 carries NO `wm` setting, so the compiled default seats the GO desktop
-# (GOTABWM.ELF) from the shell idle, and the leftover Zig CALC.BIN is hosted by
-# it (declare -> focus -> full viewport -> close) -- the same app-side markers
-# the M57c interop and TABWM parity gates assert, reached here by DEFAULT
-# rather than by an explicit `exec GOTABWM.ELF`. The run then persists
-# `settings set wm tabwm`.
+# (GOTABWM.ELF) from the shell idle, and GOCALC.ELF is hosted by it (declare ->
+# focus -> full viewport -> close). Zig CALC.BIN is gone (M62h / #1406). The
+# run then persists `settings set wm tabwm`.
 #
 # Boot 02 proves the flip is a SETTING, not a hardcode: the same share boots
 # the Zig TABWM seat -- the fallback the card requires to stay reachable.
 #
 # HOST PREREQUISITE (fails the gate honestly when missing):
 #   bash tools/go/build-gotabwm.sh   ->  .build/go/GOTABWM.ELF
+#   bash tools/go/build-gocalc.sh    ->  .build/go/GOCALC.ELF
 #
 # exec-order: assert-proven -- each run ends on a marker only its script
 # prints, and every stage gate is anchored on guest output the kernel, the
 # seat or the hosted app produced (`gotabwm: win focus`, `gotabwm: win gone`,
 # `gotabwm: host done`, `tabwm: registered`).
 
-vgate_name go-wm-default "issue #1298 M59: a DEFAULT boot seats the Go desktop (GOTABWM.ELF hosting a leftover Zig app) and `settings set wm tabwm` keeps the Zig fallback reachable"
+vgate_name go-wm-default "issue #1298 M59: a DEFAULT boot seats the Go desktop (GOTABWM.ELF hosting GOCALC.ELF) and settings set wm tabwm keeps the Zig fallback reachable"
 vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 
@@ -31,11 +30,12 @@ dui focus 0
 EOF
 
 # Boot 01, stage 2: forwarded once the window phase is finished, i.e. the seat
-# is in its WM_RPC serve loop. `wm` reports the live seat; then the UNMODIFIED
-# Zig app is exec'd under it.
+# is in its WM_RPC serve loop. `wm` reports the live seat; then GOCALC.ELF
+# is exec'd under it.
 vgate_file script2.txt <<'EOF'
+set GOMAXPROCS=1
 wm
-exec CALC.BIN
+exec GOCALC.ELF
 EOF
 
 # Boot 01, stage 3: the hosted app is done. Persist the fallback seat so boot
@@ -57,6 +57,13 @@ if not os.path.exists(src):
 shutil.copy(src, os.path.join(share, "GOTABWM.ELF"))
 print("staged GOTABWM.ELF into share (%d bytes)" %
       os.path.getsize(os.path.join(share, "GOTABWM.ELF")))
+src = os.path.join(".build", "go", "GOCALC.ELF")
+if not os.path.exists(src):
+    sys.exit("GOCALC.ELF missing (expected " + src + ") - build it first: "
+             "bash tools/go/build-gocalc.sh")
+shutil.copy(src, os.path.join(share, "GOCALC.ELF"))
+print("staged GOCALC.ELF into share (%d bytes)" %
+      os.path.getsize(os.path.join(share, "GOCALC.ELF")))
 # No SETTINGS.TXT: boot 01 must run on the COMPILED default. That is the
 # whole point -- staging a settings file here would test the setting, not
 # the flip.
@@ -99,15 +106,15 @@ vgate_assert 01 serial-contains 'gotabwm: win blur'
 vgate_assert 01 serial-contains 'gotabwm: win close'
 vgate_assert 01 serial-contains 'gotabwm: win gone'
 
-# --- the DEFAULT seat hosts a leftover Zig app -----------------------------
-vgate_assert 01 serial-contains 'exec: loaded CALC.BIN'
+# --- the DEFAULT seat hosts GOCALC.ELF --------------------------------------
+vgate_assert 01 serial-contains 'exec: loaded GOCALC.ELF'
 vgate_assert 01 serial-contains 'gotabwm: rpc declare id='
-vgate_assert 01 serial-contains 'calc: tab-aware (full-viewport)'
+vgate_assert 01 serial-contains 'gocalc: declare accepted'
 vgate_assert 01 serial-contains 'gotabwm: host focus id='
 vgate_assert 01 serial-contains 'gotabwm: host view id='
-vgate_assert 01 serial-contains 'calc: resize relayout'
+vgate_assert 01 serial-contains 'gocalc: present'
 vgate_assert 01 serial-contains 'gotabwm: host close id='
-vgate_assert 01 serial-contains 'calc: win_close'
+vgate_assert 01 serial-contains 'gocalc: close'
 vgate_assert 01 serial-contains 'gotabwm: host done'
 
 # --- the flip is a setting: the persisted fallback seat wins ----------------

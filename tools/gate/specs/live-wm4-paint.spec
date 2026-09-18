@@ -7,7 +7,7 @@ vgate_runner_flags -Xswiftc -DSPIKE
 vgate_file script-A.txt <<'EOF'
 wnd start
 exec NOTEPAD.BIN
-exec CALC.BIN
+exec TOP.BIN
 EOF
 
 vgate_file s2-A.txt <<'EOF'
@@ -28,7 +28,7 @@ wm
 echo wm4-b-go
 EOF
 
-vgate_run A -- --screen '$RUN_DIR/screen' --via-virtio --cvc-snap --snapshot-out '$RUN_DIR/snap-A' --script '$RUN_DIR/script-A.txt' --script2 '$RUN_DIR/s2-A.txt' --script2-after 'calc: ready' --script2-delay 20 --snapshot-after 'wm4-a-go' --script-expect 'wm4-a-go' --timeout 260
+vgate_run A -- --screen '$RUN_DIR/screen' --via-virtio --cvc-snap --snapshot-out '$RUN_DIR/snap-A' --script '$RUN_DIR/script-A.txt' --script2 '$RUN_DIR/s2-A.txt' --script2-after 'top: ready' --script2-delay 20 --snapshot-after 'wm4-a-go' --script-expect 'wm4-a-go' --timeout 260
 
 vgate_assert A serial-contains 'wnd: rest-alpha=240'
 vgate_assert A python <<'PY'

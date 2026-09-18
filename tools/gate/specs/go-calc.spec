@@ -5,7 +5,7 @@
 # user/go/calc is a tabapp client: init -> declare (kind-8 WM_RPC) -> present
 # -> accept injected keystrokes (Win_DOWN arg1 is the Unicode codepoint) ->
 # evaluate -> write /host/CALC/RESULT.TXT -> WIN_CLOSE exits. Zig CALC.BIN
-# stays; kernel untouched. Not CALC's programmer-mode feature list.
+# is gone (M62h / #1406). Kernel untouched. Not CALC's programmer-mode feature list.
 #
 # The load-bearing evidence is NOT only the app's own markers: the run's last
 # assert reads the share file back ON THE HOST and requires it to equal the

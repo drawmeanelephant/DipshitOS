@@ -586,8 +586,8 @@ test "action registry: active app contextual scoping" {
     try std.testing.expectEqual(@as(usize, 2), count);
 
     // Switch active app: previous active_app commands pruned
-    reg.set_active_app("CALC.BIN");
-    try std.testing.expectEqualStrings("CALC.BIN", reg.get_active_app());
+    reg.set_active_app("GOCALC.ELF");
+    try std.testing.expectEqualStrings("GOCALC.ELF", reg.get_active_app());
 
     count = reg.get_section_commands(.active_app, &active_cmds);
     try std.testing.expectEqual(@as(usize, 0), count);

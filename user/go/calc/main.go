@@ -1,6 +1,6 @@
-// Command calc is the Go calculator (CALC.BIN successor): a usable 64-bit
+// Command calc is the Go calculator (Zig CALC.BIN successor): a usable 64-bit
 // integer calc (digits, + - * /, equals, clear), full-viewport inside Zig
-// TABWM via user/go/tabapp. Zig CALC.BIN stays (M60 deletes it later). Not
+// TABWM via user/go/tabapp. Zig CALC.BIN is gone (M62h / #1406). Not
 // CALC's programmer-mode feature list. Kernel untouched. No new Zig app.
 //
 // Every marker below is printed only AFTER its syscall returned, so the

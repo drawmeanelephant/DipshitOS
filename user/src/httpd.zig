@@ -556,7 +556,7 @@ test "httpd: mime_for_path maps known extensions" {
     try std.testing.expectEqualStrings("image/png", mime_for_path("icon.png"));
     try std.testing.expectEqualStrings("image/qoi", mime_for_path("pic.qoi"));
     try std.testing.expectEqualStrings("image/bmp", mime_for_path("screen.bmp"));
-    try std.testing.expectEqualStrings("application/octet-stream", mime_for_path("CALC.BIN"));
+    try std.testing.expectEqualStrings("application/octet-stream", mime_for_path("VIEW.BIN"));
 }
 
 test "httpd: format_api_status contains valid JSON keys" {

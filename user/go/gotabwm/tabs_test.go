@@ -36,7 +36,7 @@ func TestTabMarkerShapes(t *testing.T) {
 
 func TestGuessBinShippingTitles(t *testing.T) {
 	cases := []struct{ title, want string }{
-		{"Calc", "CALC.BIN"},
+		{"Calc", "GOCALC.ELF"},
 		{"Notepad", "NOTEPAD.BIN"},
 		{"Edit", "GOEDIT.ELF"},
 		{"Term", "GOTERM.ELF"},
@@ -351,7 +351,7 @@ func TestLayoutFileBodyTwoPane(t *testing.T) {
 	if len(lines) != 2 {
 		t.Fatalf("lines = %d want 2: %q", len(lines), body)
 	}
-	want0 := "tab=3 bin=CALC.BIN x=0 y=0 w=640 h=720 focus=1 split=v"
+	want0 := "tab=3 bin=GOCALC.ELF x=0 y=0 w=640 h=720 focus=1 split=v"
 	want1 := "tab=4 bin=NOTEPAD.BIN x=640 y=0 w=640 h=720 focus=0 split=v"
 	if lines[0] != want0 || lines[1] != want1 {
 		t.Fatalf("got\n %q\n %q\nwant\n %q\n %q", lines[0], lines[1], want0, want1)
@@ -359,7 +359,7 @@ func TestLayoutFileBodyTwoPane(t *testing.T) {
 	if s.Unsplit() {
 		body = layoutFileBody(&s, 1280, 720)
 		lines = strings.Split(strings.TrimSuffix(string(body), "\n"), "\n")
-		if len(lines) != 2 || lines[0] != "tab=3 bin=CALC.BIN x=0 y=0 w=1280 h=720 focus=1 split=none" {
+		if len(lines) != 2 || lines[0] != "tab=3 bin=GOCALC.ELF x=0 y=0 w=1280 h=720 focus=1 split=none" {
 			t.Fatalf("unsplit dump = %q", body)
 		}
 	}

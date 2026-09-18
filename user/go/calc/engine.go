@@ -1,4 +1,4 @@
-// Integer calculator engine: the CALC.BIN path people actually hit.
+// Integer calculator engine: the calculator path people actually hit.
 //
 // Checked 64-bit add/sub/mul/div, left-to-right pending-op chaining, repeat
 // last op on a bare '=', overflow and divide-by-zero → ERROR (never a silent

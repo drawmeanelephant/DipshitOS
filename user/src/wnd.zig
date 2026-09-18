@@ -802,7 +802,7 @@ pub fn app_verb_for(name: []const u8, out: []u8) usize {
     return n;
 }
 
-/// Bin filename behind an app verb (`calc` → `CALC.BIN`), or null when the
+/// Bin filename behind an app verb (`gocalc` → `GOCALC.ELF`), or null when the
 /// manifest yielded nothing (host tests) or the verb is unknown.
 pub fn god_menu_bin_for(verb: []const u8) ?[]const u8 {
     var i: usize = 0;
@@ -1176,7 +1176,7 @@ pub fn execute_god_menu_command(cmd: Command) void {
     } else if (std.mem.eql(u8, cmd.verb, "notepad")) {
         _ = ui.exec_program("NOTEPAD.BIN");
     } else if (std.mem.eql(u8, cmd.verb, "calc")) {
-        _ = ui.exec_program("CALC.BIN");
+        _ = ui.exec_program("GOCALC.ELF");
     } else if (std.mem.eql(u8, cmd.verb, "file")) {
         _ = ui.exec_program("FILE.BIN");
     } else if (std.mem.eql(u8, cmd.verb, "top")) {
@@ -3138,8 +3138,8 @@ test "wnd: dq1 app verb stems and bin lookup" {
     var vbuf: [24]u8 = undefined;
     var n = app_verb_for("NOTEPAD.BIN", &vbuf);
     try std.testing.expectEqualStrings("notepad", vbuf[0..n]);
-    n = app_verb_for("CALC.BIN", &vbuf);
-    try std.testing.expectEqualStrings("calc", vbuf[0..n]);
+    n = app_verb_for("GOCALC.ELF", &vbuf);
+    try std.testing.expectEqualStrings("gocalc", vbuf[0..n]);
     n = app_verb_for("FILE", &vbuf);
     try std.testing.expectEqualStrings("file", vbuf[0..n]);
     n = app_verb_for("", &vbuf);
@@ -3149,16 +3149,16 @@ test "wnd: dq1 app verb stems and bin lookup" {
 
     // Empty table (host: manifest never loads) resolves nothing.
     god_menu_app_count = 0;
-    try std.testing.expect(god_menu_bin_for("calc") == null);
+    try std.testing.expect(god_menu_bin_for("gocalc") == null);
 
     // A loaded entry resolves verb → bin.
-    @memcpy(god_menu_app_verbs[0][0..4], "calc");
-    god_menu_app_verb_lens[0] = 4;
-    @memcpy(god_menu_app_bins[0][0..8], "CALC.BIN");
-    god_menu_app_bin_lens[0] = 8;
+    @memcpy(god_menu_app_verbs[0][0..6], "gocalc");
+    god_menu_app_verb_lens[0] = 6;
+    @memcpy(god_menu_app_bins[0][0..10], "GOCALC.ELF");
+    god_menu_app_bin_lens[0] = 10;
     god_menu_app_count = 1;
-    const bin = god_menu_bin_for("calc").?;
-    try std.testing.expectEqualStrings("CALC.BIN", bin);
+    const bin = god_menu_bin_for("gocalc").?;
+    try std.testing.expectEqualStrings("GOCALC.ELF", bin);
     try std.testing.expect(god_menu_bin_for("nope") == null);
     god_menu_app_count = 0;
 }
@@ -3166,7 +3166,7 @@ test "wnd: dq1 app verb stems and bin lookup" {
 test "wnd: dq1 selection over a 22-entry manifest caps at 16, dock-first" {
     // Mirror image/apps.txt shape: 8 dock + dup stems past the cutoff.
     var parsed: [22]sexiburger.MenuApp = undefined;
-    const names = [_][]const u8{ "CALC.BIN", "NOTEPAD.BIN", "TOP.BIN", "KEYTEST.BIN", "TYPE.BIN", "DIR.BIN", "FETCH.BIN", "CHAT.BIN", "FILE.BIN", "SETTINGS.BIN", "EDIT.BIN", "SYSMON.BIN", "HTTPD.BIN", "DYNAPP.ELF", "CALC.ELF", "NOTEPAD.ELF", "FILE.ELF", "DESKTOP.ELF", "ZC.BIN", "SEXIBURG.BIN", "VIEW.BIN", "SEXITEST.BIN" };
+    const names = [_][]const u8{ "GOCALC.ELF", "NOTEPAD.BIN", "TOP.BIN", "KEYTEST.BIN", "TYPE.BIN", "DIR.BIN", "FETCH.BIN", "CHAT.BIN", "FILE.BIN", "SETTINGS.BIN", "EDIT.BIN", "SYSMON.BIN", "HTTPD.BIN", "DYNAPP.ELF", "GOCALC.ELF", "NOTEPAD.ELF", "FILE.ELF", "DESKTOP.ELF", "ZC.BIN", "SEXIBURG.BIN", "VIEW.BIN", "SEXITEST.BIN" };
     const descs = [_][]const u8{ "Calc", "Editor", "Tasks", "Keys", "Type", "Dir", "Fetch", "Chat", "Files", "Settings", "Edit", "Sysmon", "Http", "Dyn", "Calc2", "Edit2", "Files2", "Desk", "Zc", "Sexi", "View", "Stest" };
     for (names, 0..) |nm, i| {
         parsed[i] = .{ .name = nm, .desc = descs[i], .dock = i == 0 or i == 1 or i == 2 or i == 8 or i == 9 or i == 11 or i == 13 or i == 19 };
@@ -3174,11 +3174,11 @@ test "wnd: dq1 selection over a 22-entry manifest caps at 16, dock-first" {
     const count = select_god_menu_apps(&parsed);
     try std.testing.expectEqual(@as(usize, 16), count);
     // All 8 dock entries survive (incl. SEXIBURG past the old cutoff).
-    for ([_][]const u8{ "calc", "notepad", "top", "file", "settings", "sysmon", "dynapp", "sexiburg" }) |verb| {
+    for ([_][]const u8{ "gocalc", "notepad", "top", "file", "settings", "sysmon", "dynapp", "sexiburg" }) |verb| {
         try std.testing.expect(god_menu_bin_for(verb) != null);
     }
     // Duplicate stems resolve to the FIRST (BIN) entry.
-    try std.testing.expectEqualStrings("CALC.BIN", god_menu_bin_for("calc").?);
+    try std.testing.expectEqualStrings("GOCALC.ELF", god_menu_bin_for("gocalc").?);
     try std.testing.expectEqualStrings("NOTEPAD.BIN", god_menu_bin_for("notepad").?);
     // Nondock tail fills the rest; entries past the cap are absent.
     try std.testing.expect(god_menu_bin_for("desktop") != null);
