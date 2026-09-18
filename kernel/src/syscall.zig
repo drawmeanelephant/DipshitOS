@@ -111,10 +111,12 @@ pub const slot_count: usize = 128;
 /// sys_file_mode; TS5 (#1139): slot 70 is sys_secret_get; TS4 (#1138):
 /// slot 71 is sys_tty_net_auth; M51 SSH-P1 (#1166, ADR 0025 D5):
 /// slot 72 is sys_getrandom; ADR 0027 (#1214 round 2): slots 73/74 are
-/// sys_thread/sys_futex; issue #1228 (phase 0c): slot 75 is sys_exnotify.
+/// sys_thread/sys_futex; issue #1228 (phase 0c): slot 75 is sys_exnotify;
+/// issue #1163 (phase 2): slot 76 is sys_sock_ready; M66a (#1443): slot 77
+/// is sys_file_sync.
 /// `implemented_count` is the number of
 /// registered rows (rows 0..implemented_count-1).
-pub const implemented_count: usize = 77;
+pub const implemented_count: usize = 78;
 /// Card G6 (claim 0487) follow-on (slot 18): the fixed `sys_win_get` shape —
 /// four u32 LE words (x, y, w, h), 16 bytes, marshaled per call and copy_out'd
 /// through uaccess (the procs snapshot pattern).
@@ -367,6 +369,13 @@ pub const sys_exnotify: u64 = 75;
 // op 0 poll / op 1 park-until-ready-or-deadline. See the ADR 0007
 // append-only amendment (2026-09-15, phase 2).
 pub const sys_sock_ready: u64 = 76;
+// M66a (#1443): slot 77 — sys_file_sync(fd). ADR 0007 append-only
+// amendment (2026-09-18): the HF3 FSYNC op (0x08) existed only below the
+// syscall seam (kernel-internal consumers); this row hands the durability
+// verb to EL0 so a Go app can push its /host writes to the host's live fd
+// before it trusts them. One argument (the fd); no ops. See the ADR 0007
+// amendment + file_table.sync.
+pub const sys_file_sync: u64 = 77;
 /// The fixed per-call fill cap of slot 72 (ADR 0025 D5: "capped at a bounded
 /// maximum"). 256 matches `write_cap` — enough for an ephemeral X25519
 /// secret (32 B), a KEXINIT cookie (16 B), or a burst of per-packet padding,
@@ -548,6 +557,8 @@ pub fn ensure_table() *const [slot_count]Entry {
         table_storage[sys_file_rename] = .{ .name = "sys_file_rename", .handler = handle_file_rename };
         table_storage[sys_file_truncate] = .{ .name = "sys_file_truncate", .handler = handle_file_truncate };
         table_storage[sys_file_free] = .{ .name = "sys_file_free", .handler = handle_file_free };
+        // M66a (#1443): slot 77 — the EL0 durability verb (file_table.sync).
+        table_storage[sys_file_sync] = .{ .name = "sys_file_sync", .handler = handle_file_sync };
         table_storage[sys_clipboard_set] = .{ .name = "sys_clipboard_set", .handler = handle_clipboard_set };
         table_storage[sys_clipboard_get] = .{ .name = "sys_clipboard_get", .handler = handle_clipboard_get };
         table_storage[sys_timer_set] = .{ .name = "sys_timer_set", .handler = handle_timer_set };
@@ -641,7 +652,7 @@ fn doms_of(number: u64) u5 {
     const k: u5 = svclock.dom_bit(.kernel);
     return switch (number) {
         sys_udp_listen, sys_udp_send, sys_udp_recv, sys_tcp_connect, sys_tcp_send, sys_tcp_recv, sys_tcp_close, sys_sock_ready, sys_ping_send, sys_ping_poll, sys_net_stats => n,
-        sys_file_open, sys_file_read, sys_file_write, sys_file_close, sys_dir_list, sys_file_delete, sys_file_rename, sys_file_truncate, sys_file_free => f,
+        sys_file_open, sys_file_read, sys_file_write, sys_file_close, sys_dir_list, sys_file_delete, sys_file_rename, sys_file_truncate, sys_file_free, sys_file_sync => f,
         sys_exec => f | k,
         sys_win_open, sys_win_fill, sys_win_present, sys_win_close, sys_win_move, sys_win_raise, sys_win_get, sys_win_query, sys_win_set_visible, sys_win_fill_batch, sys_win_resize, 48, sys_win_raise_front, sys_win_lower_back, 52, sys_win_set_unsaved, sys_win_set_title, sys_drag_read, sys_font_size => w,
         sys_ipc_send, sys_ipc_recv, sys_poll_event, sys_wait_event, sys_timer_set, sys_timer_cancel, sys_notify, sys_wmctl => e,
@@ -1854,6 +1865,18 @@ fn handle_file_free(args: Args, _: *exceptions.VectorFrame) u64 {
     const res = file_table.free_space(pid, volume);
     if (res < 0) return @bitCast(res);
     return @intCast(res);
+}
+
+/// M66a (#1443): slot 77 — sys_file_sync(fd): FSYNC the handle's host side
+/// (the HF op calls synchronize() on the host's live fd). EBADF for a dead
+/// fd; the stateless/read-only handles are honest no-ops (file_table.sync).
+fn handle_file_sync(args: Args, _: *exceptions.VectorFrame) u64 {
+    const fd = args[0];
+    if (fd >= file_table.max_handles_per_process) return error_result(.ebadf);
+    const pid = process.find_by_task(scheduler.current_id()) orelse return error_result(.einval);
+    const res = file_table.sync(pid, fd);
+    if (res < 0) return @bitCast(res);
+    return 0;
 }
 
 /// M50 TS2 (#1136, ADR 0024 D3/D4/D10): slot 69 —

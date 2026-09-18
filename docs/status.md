@@ -80,6 +80,7 @@ any, are on the GitHub tracker.
 | 61 | Guest self-test (#1380) | `GOSELF.ELF` runs in-OS cases and writes `/host/SELFTEST/…` (report + intake copies + file-ABI receipts + window receipt); host only boots it and byte-compares via `share-equals`/`share-contains`; ADR 0031/0032 | ✅ 2026-09-17 |
 | 63 | GOTABWM HID (#1418) | Boot-default seat drains kind 19/21; pin/Alt+Tab; rail click; type into GOEDIT (share `seed-line\nXYZ`); HID drag-reorder is `go-wm-hid` run 02 (not `go-wm-tabs` M62d choreography). Dual path ADR 0009. Runner `ctrl-tab` is hidChord (#1424). | ✅ 2026-09-18 (`go-wm-hid` 2/2, `go-wm-seat` 2/2, `go-wm-tabs` 3/3, `go-wm-default` 2/2) |
 | 65 | Go threads (ADR 0027) | M65a–d landed (#1472/#1473/#1474/#1475), ADR 0007 slots 73/74 frozen, max_tasks 16 (3 + 3×4 + 1 spare) | ✅ 2026-09-18 (`go-wm-tabs` 3/3, `go-wm-seat` 2/2, `live-scale` 1/1) |
+| 66 | Go owns files (storage depth) | M66a (#1443): `/host` as a surface Go can trust — honest HF error rows (`hf_open_errno`/`hf_handle_errno`: not-found/is-dir/exists/handle-full), fsync at EL0 (slot 77, ADR 0007 amendment), `vi.FileWriteAll` confirmed-count chunking, GOSELF append/bigwrite/clamp/fsync/errors receipts. Next: M66b settings persistence, M66c Go NOTEPAD. | 🔄 2026-09-18 (M66a) |
 
 > M40 (the gate-fleet consolidation, issue #934, done 2026-09-06) was a tooling
 > workstream, not a product milestone; M36 was skipped.

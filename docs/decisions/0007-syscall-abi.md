@@ -1299,3 +1299,28 @@ peer answers the SYN then goes dark): the bounded read FAILS CLOSED
 heartbeat line still appears AFTER the fail-closed line. Additive static
 checks (mask for idle/established/closed, EAGAIN without a socket, `want == 0`
 rejected) are host-side in `user/go/vsys`
+
+## Amendment (2026-09-18, M66a #1443 — the file-durability seam)
+
+**Slot 77: `sys_file_sync(fd)`.** The HF3 FSYNC op (0x08) has existed on the
+host file channel since M34, but only below the syscall seam: the kernel
+called it internally (and never on behalf of userland), so an EL0 app had no
+durability verb — close flushed the host's `FileHandle` implicitly, and
+nothing told the app when its `/host` bytes were on the device. M66a makes
+`/host` a surface Go apps can trust, which requires the app to *own* the
+durability point. Slot 77 is that verb, one argument (the fd), no ops.
+
+Semantics (kernel/src/file_table.zig `sync`): a `.host` handle with a live
+host write handle rides the channel's FSYNC (the host calls `synchronize()`
+on the live fd); handles with no host-side dirty state — stateless read
+handles, read-only `.usb`, `.tty` — are honest no-ops (0); a dead fd is
+EBADF; a dead host handle maps HF status 6 to EBADF via the M66a
+`hf_handle_errno` row. The reply is 0 or a negative `ErrorCode`; the file
+domain is the `file` service-domain lock, like the other file rows.
+
+The same card pins the HF-status → errno rows for the whole file surface
+(`hf_open_errno`/`hf_handle_errno`): not-found → ENOENT, is-dir → EINVAL,
+exists → the file-domain `-9` EEXIST row (the M25 Lane B convention; the
+ErrorCode enum names this magnitude ENXIO in the device domains), and
+handle-full → ENOSPC. No existing row moved except rename-target-exists,
+which was EINVAL and is now the honest `-9`.

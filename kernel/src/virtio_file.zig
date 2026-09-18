@@ -795,6 +795,10 @@ pub fn write_whole(path: []const u8, data: []const u8) u8 {
         var written: u64 = 0;
         const wst = write(h, data[off .. off + take], &written);
         if (wst != st_ok) return wst;
+        // M66a: the loop advances by the host-CONFIRMED count only; a
+        // confirmed zero can never advance the stream, so refuse honestly
+        // instead of spinning.
+        if (written == 0) return st_host_error;
         off += @intCast(written);
     }
     return st_ok;
@@ -837,6 +841,11 @@ pub fn write_pattern(handle: u16, n: u64) WritePatternResult {
         const st = write(handle, vf_write_pattern_buf[0..take], &written);
         if (st != st_ok) {
             res.status = st;
+            return res;
+        }
+        // M66a: confirmed-zero cannot advance the pattern — refuse, don't spin.
+        if (written == 0) {
+            res.status = st_host_error;
             return res;
         }
         res.total += written;

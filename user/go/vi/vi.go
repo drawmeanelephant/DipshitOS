@@ -44,6 +44,23 @@ func svc0(num uintptr) int64 {
 	return syscall0(num)
 }
 
+// svc1/svc3 are the file-ABI rows' gateways (M66a): the file surface routes
+// through the hook too, so a host test can inject a fake kernel for the
+// whole ADR 0010 surface, not just TCP.
+func svc1(num uintptr, a0 uintptr) int64 {
+	if syscallHook != nil {
+		return syscallHook(num, a0, 0, 0, 0)
+	}
+	return syscall1(num, a0)
+}
+
+func svc3(num uintptr, a0, a1, a2 uintptr) int64 {
+	if syscallHook != nil {
+		return syscallHook(num, a0, a1, a2, 0)
+	}
+	return syscall3(num, a0, a1, a2)
+}
+
 // ADR 0007 slot numbers (kernel/src/syscall.zig, mirrored by
 // user/src/lib/ui/abi.zig). Adding a row here must match that table.
 const (
@@ -80,6 +97,7 @@ const (
 	SlotTime         uintptr = 66
 	SlotTtyAttach    uintptr = 67
 	SlotSockReady    uintptr = 76
+	SlotFileSync     uintptr = 77 // M66a (#1443): the ADR 0007 durability row
 )
 
 // sys_tty_attach front-end selectors (ADR 0020 slot 67).
@@ -117,6 +135,27 @@ const (
 	ModeAppend uint32 = 0x0008
 	ModeDir    uint32 = 0x0010
 )
+
+// File-domain error rows (M66a #1443): what an ADR 0010 file call returns
+// for the HF statuses a /host path can hit, per the kernel's hf_open_errno
+// (kernel/src/file_table.zig). The four rows are DISTINCT so a caller can
+// branch on what actually happened: not-found → ENOENT, is-dir → EINVAL (a
+// directory is not a writable file), exists → -9 (the file-domain EEXIST
+// row the MODE_DIR mkdir path pinned since M25 — the errno table above
+// names this magnitude ENXIO in the device domains), handle-full → ENOSPC
+// (the caller's own 8-handle table full, or the host's).
+const (
+	ErrFileNotFound   int64 = -ErrENOENT // HF status 1
+	ErrFileIsDir      int64 = -ErrEINVAL // HF status 2
+	ErrFileExists     int64 = -9         // HF status 5 (file-domain EEXIST)
+	ErrFileHandleFull int64 = -ErrENOSPC // HF status 6 / guest table full
+)
+
+// fileWriteChunk mirrors the kernel's sys_file_write stage cap
+// (handle_file_write refuses count > 2048 with -ENOSPC): FileWriteAll
+// chunks at this size, so a large write is a run of honest syscalls that
+// each advance by the CONFIRMED count, never one refused call.
+const fileWriteChunk = 2048
 
 // Event kinds (ADR 0009).
 const (
@@ -350,7 +389,7 @@ func FileOpen(path string, flags uint32) (int64, int64) {
 	if path == "" {
 		return -1, -ErrEINVAL
 	}
-	r := syscall3(SlotFileOpen, strPtr(path), uintptr(len(path)), uintptr(flags))
+	r := svc3(SlotFileOpen, strPtr(path), uintptr(len(path)), uintptr(flags))
 	return r, r
 }
 
@@ -359,7 +398,7 @@ func FileRead(h uint32, buf []byte) (int, int64) {
 	if len(buf) == 0 {
 		return 0, 0
 	}
-	r := syscall3(SlotFileRead, uintptr(h), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+	r := svc3(SlotFileRead, uintptr(h), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
 	if r < 0 {
 		return 0, r
 	}
@@ -371,7 +410,7 @@ func FileWrite(h uint32, b []byte) (int, int64) {
 	if len(b) == 0 {
 		return 0, 0
 	}
-	r := syscall3(SlotFileWrite, uintptr(h), uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)))
+	r := svc3(SlotFileWrite, uintptr(h), uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)))
 	if r < 0 {
 		return 0, r
 	}
@@ -379,7 +418,36 @@ func FileWrite(h uint32, b []byte) (int, int64) {
 }
 
 // FileClose closes a handle.
-func FileClose(h uint32) { _ = syscall1(SlotFileClose, uintptr(h)) }
+func FileClose(h uint32) { _ = svc1(SlotFileClose, uintptr(h)) }
+
+// FileWriteAll writes b through an OPEN handle, chunked to the kernel's
+// 2048-byte stage cap and advancing ONLY by the confirmed count each call
+// reports — a partial write can never corrupt the stream, because the next
+// chunk resumes exactly where the kernel confirmed (M66a). Returns
+// (bytes accepted, result): n == len(b) with r >= 0 on success, a short n
+// after a mid-stream failure (the confirmed prefix is durable), or
+// (0, r < 0) when the first chunk failed.
+func FileWriteAll(h uint32, b []byte) (int, int64) {
+	written := 0
+	for written < len(b) {
+		take := len(b) - written
+		if take > fileWriteChunk {
+			take = fileWriteChunk
+		}
+		n, r := FileWrite(h, b[written:written+take])
+		if r < 0 {
+			return written, r
+		}
+		if n <= 0 {
+			// A zero-count acceptance cannot advance the stream; refuse
+			// instead of spinning (the kernel never reports one for a
+			// non-empty chunk, so this is a defensive stop).
+			return written, -ErrEINVAL
+		}
+		written += n
+	}
+	return written, 0
+}
 
 // MaxFileBytes caps any file the browser will load (a page, not a download).
 const MaxFileBytes = 256 * 1024
@@ -428,21 +496,32 @@ func FileExists(path string) bool {
 	return true
 }
 
-// FileAppend creates-or-appends and writes b. Returns false on any error.
+// FileAppend creates-or-appends and writes b (M66a: chunked through
+// FileWriteAll, so rows longer than the kernel's 2048-byte write stage land
+// whole). Returns false on any error.
 func FileAppend(path string, b []byte) bool {
 	h, r := FileOpen(path, ModeWrite|ModeCreate|ModeAppend)
 	if r < 0 {
 		return false
 	}
 	defer FileClose(uint32(h))
-	n, wr := FileWrite(uint32(h), b)
+	n, wr := FileWriteAll(uint32(h), b)
 	return wr >= 0 && n == len(b)
 }
 
 // FileTruncate resizes an open handle to size bytes (slot 36) — the
 // compaction half of the ledger rewrite path.
 func FileTruncate(h uint32, size uint32) int64 {
-	return syscall2(SlotFileTruncate, uintptr(h), uintptr(size))
+	return svc2(SlotFileTruncate, uintptr(h), uintptr(size))
+}
+
+// FileSync pushes the handle's host-side state to durability (slot 77, the
+// M66a ADR 0007 amendment): the HF FSYNC op calls synchronize() on the
+// host's live fd, so the bytes are on the device before the caller trusts
+// them. Returns 0 on success; a closed or bad fd is -EBADF; stateless
+// read handles are honest no-ops.
+func FileSync(h uint32) int64 {
+	return svc1(SlotFileSync, uintptr(h))
 }
 
 // FileDelete removes a file by path (slot 34).
@@ -450,7 +529,7 @@ func FileDelete(path string) int64 {
 	if path == "" {
 		return -ErrEINVAL
 	}
-	return syscall2(SlotFileDelete, strPtr(path), uintptr(len(path)))
+	return svc2(SlotFileDelete, strPtr(path), uintptr(len(path)))
 }
 
 // Exec loads name from the host share into a fresh process and returns its

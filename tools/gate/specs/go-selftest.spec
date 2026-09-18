@@ -91,6 +91,32 @@
 # deliberately truncated `report.expected` reddens the run naming share-equals,
 # and an unarmed share FAILs rather than skipping (recorded on #1386).
 #
+# M66a (#1443) extends the file-ABI pack with the hardening semantics, each
+# one the ADR 0031 way (guest writes receipts + the bytes it READ, the host
+# byte-compares them here on macOS):
+#
+#   * file-append    — write a base body, REOPEN with MODE_APPEND (no
+#                      create), write more: the append write must land at
+#                      EOF, so append.txt is base+more (105 B). A dropped
+#                      append flag replaces the file and the read-back is
+#                      the delta alone.
+#   * file-bigwrite  — a 73,500-byte body, far beyond the kernel's
+#                      2048-byte sys_file_write stage cap: it only lands
+#                      through the confirmed-count chunk loop, and
+#                      bigwrite.txt + bigwrite.copy must be byte-exact.
+#   * file-clamp     — write 840 B, shrink the SAME handle to 105 B, write
+#                      63 B more through the still-open handle: the host's
+#                      truncate clamps its cursor, so clamp.txt is kept+extra
+#                      (168 B). Without the clamp the write resumes past EOF
+#                      and the read-back is neither the length nor the bytes.
+#   * file-fsync     — the durability verb (slot 77, ADR 0007 amendment):
+#                      fsync=0 on the open handle, closed=-2 (the honest
+#                      EBADF) on the closed one; fsync.txt is byte-compared.
+#   * file-errors    — the honest error rows, each observed on the share:
+#                      missing=-6 (ENOENT), exists=-9 (the file-domain
+#                      EEXIST row), isdir=-1 (a WRITE open of a directory),
+#                      ninth=-5 (the 8-handle table full).
+#
 # The report fixture below is byte-exact on purpose — the report is
 # deterministic (ADR 0031). Adding a case updates the fixture, the
 # share-contains case count, and want_summary in the python block.
@@ -124,8 +150,13 @@ case file-roundtrip pass
 case file-truncate pass
 case file-delete pass
 case file-list pass
+case file-append pass
+case file-bigwrite pass
+case file-clamp pass
+case file-fsync pass
+case file-errors pass
 case window pass
-summary cases=9 failed=0
+summary cases=14 failed=0
 EOF
 
 # The canonical intake fixture as the spec seeds it (see the setup hook). The
@@ -182,6 +213,11 @@ vgate_assert 01 serial-contains 'selftest: case file-roundtrip pass'
 vgate_assert 01 serial-contains 'selftest: case file-truncate pass'
 vgate_assert 01 serial-contains 'selftest: case file-delete pass'
 vgate_assert 01 serial-contains 'selftest: case file-list pass'
+vgate_assert 01 serial-contains 'selftest: case file-append pass'
+vgate_assert 01 serial-contains 'selftest: case file-bigwrite pass'
+vgate_assert 01 serial-contains 'selftest: case file-clamp pass'
+vgate_assert 01 serial-contains 'selftest: case file-fsync pass'
+vgate_assert 01 serial-contains 'selftest: case file-errors pass'
 vgate_assert 01 serial-contains 'selftest: case window pass'
 # The files were written BEFORE the summary (ADR 0031 ordering).
 vgate_assert 01 serial-contains 'selftest: report /host/SELFTEST/REPORT.txt n='
@@ -207,7 +243,7 @@ vgate_assert 01 share-equals SELFTEST/IN/fixture.txt intake-fixture.expected
 # share-contains is the substring kind: the guest's own summary count. Weaker
 # than the python's byte-exact summary.txt compare below, and kept deliberately
 # as the kind's pilot in a real gate.
-vgate_assert 01 share-contains SELFTEST/OUT/summary.txt 'summary cases=9 failed=0'
+vgate_assert 01 share-contains SELFTEST/OUT/summary.txt 'summary cases=14 failed=0'
 
 # The load-bearing assert: the copies and the receipts on the host's own
 # filesystem must be byte-exact, the share's directory state must agree with
@@ -238,6 +274,10 @@ unit = b"goself file abi line\n"
 roundtrip_body = unit * 25          # 525 B, written then read back whole
 truncate_full = unit * 40           # 840 B written, then shrunk
 truncate_kept = unit * 5            # 105 B expected after the shrink
+append_body = unit * 5              # 105 B: base 3 units + 2 appended at EOF
+bigwrite_body = unit * 3500         # 73,500 B: 36 sys_file_write calls at the cap
+clamp_body = unit * 8               # 168 B: kept 5 + extra 3 at the clamp point
+fsync_body = unit * 7               # 147 B, fsync'd through slot 77 before close
 
 # The window, from the outside: the app's tabapp.Config at open, and the
 # tab-aware content viewport TABWM proposes afterwards
@@ -246,7 +286,7 @@ win_open_rect = (32, 32, 640, 400)
 win_viewport_w = 1100
 win_viewport_h = 720
 
-want_summary = b"summary cases=9 failed=0\n"
+want_summary = b"summary cases=14 failed=0\n"
 want_hello = b"goself smoke\n"
 want_intake_receipt = b"case intake path=IN/fixture.txt bytes=25 match=yes\n"
 want_altered_receipt = b"case intake-altered path=IN/altered.txt bytes=25 differs=yes\n"
@@ -257,6 +297,14 @@ want_truncate_receipt = (b"case file-truncate path=OUT/truncate.txt wrote=840 ke
 want_delete_receipt = b"case file-delete path=OUT/deleted.txt delete=0 reopen=-6\n"
 want_list_receipt = (b"case file-list dir=OUT/LIST file=listed.txt "
                      b"first=seen second=absent\n")
+want_append_receipt = (b"case file-append path=OUT/append.txt base=63 more=42 "
+                       b"bytes=105 match=yes\n")
+want_bigwrite_receipt = (b"case file-bigwrite path=OUT/bigwrite.txt bytes=73500 "
+                         b"calls=36 match=yes\n")
+want_clamp_receipt = (b"case file-clamp path=OUT/clamp.txt wrote=840 kept=105 "
+                      b"extra=63 bytes=168 match=yes\n")
+want_fsync_receipt = b"case file-fsync path=OUT/fsync.txt bytes=147 fsync=0 closed=-2\n"
+want_errors_receipt = b"case file-errors missing=-6 exists=-9 isdir=-1 ninth=-5\n"
 
 st = os.path.join(share, "SELFTEST")
 out = os.path.join(st, "OUT")
@@ -296,6 +344,20 @@ require(os.path.join(out, "file-delete.ok"), want_delete_receipt, "DELETE RECEIP
 require(os.path.join(out, "file-list.ok"), want_list_receipt, "LIST RECEIPT")
 require(os.path.join(out, "roundtrip.copy"), roundtrip_body, "ROUNDTRIP COPY")
 require(os.path.join(out, "truncated.copy"), truncate_kept, "TRUNCATED COPY")
+# M66a: one receipt per hardening case, the bytes each case READ beside it,
+# and the share state the syscalls left behind.
+require(os.path.join(out, "file-append.ok"), want_append_receipt, "APPEND RECEIPT")
+require(os.path.join(out, "file-bigwrite.ok"), want_bigwrite_receipt, "BIGWRITE RECEIPT")
+require(os.path.join(out, "file-clamp.ok"), want_clamp_receipt, "CLAMP RECEIPT")
+require(os.path.join(out, "file-fsync.ok"), want_fsync_receipt, "FSYNC RECEIPT")
+require(os.path.join(out, "file-errors.ok"), want_errors_receipt, "ERRORS RECEIPT")
+require(os.path.join(out, "append.copy"), append_body, "APPEND COPY")
+require(os.path.join(out, "bigwrite.copy"), bigwrite_body, "BIGWRITE COPY")
+require(os.path.join(out, "clamp.copy"), clamp_body, "CLAMP COPY")
+require(os.path.join(out, "append.txt"), append_body, "APPEND FILE")
+require(os.path.join(out, "bigwrite.txt"), bigwrite_body, "BIGWRITE FILE")
+require(os.path.join(out, "clamp.txt"), clamp_body, "CLAMP FILE")
+require(os.path.join(out, "fsync.txt"), fsync_body, "FSYNC FILE")
 
 # The guest's claims, cross-checked against the filesystem its syscalls left
 # behind. These are independent of the receipts: the receipts say what the case
@@ -385,12 +447,23 @@ for name, path in (("intake.txt", os.path.join(out, "intake.txt")),
                    ("file-list.ok", os.path.join(out, "file-list.ok")),
                    ("roundtrip.copy", os.path.join(out, "roundtrip.copy")),
                    ("truncated.copy", os.path.join(out, "truncated.copy")),
+                   ("file-append.ok", os.path.join(out, "file-append.ok")),
+                   ("file-bigwrite.ok", os.path.join(out, "file-bigwrite.ok")),
+                   ("file-clamp.ok", os.path.join(out, "file-clamp.ok")),
+                   ("file-fsync.ok", os.path.join(out, "file-fsync.ok")),
+                   ("file-errors.ok", os.path.join(out, "file-errors.ok")),
+                   ("append.copy", os.path.join(out, "append.copy")),
+                   ("bigwrite.copy", os.path.join(out, "bigwrite.copy")),
+                   ("clamp.copy", os.path.join(out, "clamp.copy")),
                    ("window.txt", os.path.join(out, "window.txt"))):
     shutil.copy(path, "artifacts/go-selftest-share-%s%s" % (name, suffix))
 print("host read-back byte-exact: file-ABI evidence roundtrip.copy %d B, "
-      "truncated.copy %d B; OUT/deleted.txt absent, OUT/LIST empty, "
-      "OUT/truncate.txt holds the %d-byte prefix"
-      % (len(roundtrip_body), len(truncate_kept), len(truncate_kept)))
+      "truncated.copy %d B; bigwrite.copy %d B across 36 confirmed-count "
+      "chunks; OUT/deleted.txt absent, OUT/LIST empty, "
+      "OUT/truncate.txt holds the %d-byte prefix, OUT/append.txt base+more, "
+      "OUT/clamp.txt kept+extra at the clamp point, OUT/fsync.txt durable"
+      % (len(roundtrip_body), len(truncate_kept), len(bigwrite_body),
+         len(truncate_kept)))
 print("window receipt agreed with the kernel and the WM: win=%d (kernel `open:`, "
       "app `goself: open`, WM `tab-switch`); kernel open rect %r; read-back "
       "geometry %dx%d (the tab-aware viewport, not the open rect)"

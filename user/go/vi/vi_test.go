@@ -219,3 +219,132 @@ func TestTtyAttachHostFails(t *testing.T) {
 		t.Fatalf("host TtyAttachWindow = %d want -ENOSYS", r)
 	}
 }
+
+// M66a (#1443): the file-domain error rows, the fsync binding, and the
+// chunked write helper.
+
+func TestFileErrorRows(t *testing.T) {
+	if ErrFileNotFound != -6 || ErrFileIsDir != -1 || ErrFileExists != -9 || ErrFileHandleFull != -5 {
+		t.Fatalf("file rows = %d/%d/%d/%d want -6/-1/-9/-5",
+			ErrFileNotFound, ErrFileIsDir, ErrFileExists, ErrFileHandleFull)
+	}
+	if SlotFileSync != 77 {
+		t.Fatalf("SlotFileSync = %d want 77", SlotFileSync)
+	}
+	// The chunk size IS the kernel's sys_file_write stage cap: a larger
+	// count is refused with -ENOSPC (handle_file_write).
+	if fileWriteChunk != 2048 {
+		t.Fatalf("fileWriteChunk = %d want 2048", fileWriteChunk)
+	}
+}
+
+// FileWriteAll chunks to the kernel's stage cap and advances by the count
+// each call CONFIRMS: a 5000-byte body is 2048/2048/904 on the wire.
+func TestFileWriteAllChunksByConfirmedCounts(t *testing.T) {
+	var calls []int
+	prev := SetSyscallHookForTest(func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
+		if num != SlotFileWrite {
+			t.Fatalf("slot %d, want file_write", num)
+		}
+		count := int(a2)
+		if count > 2048 {
+			return -ErrENOSPC
+		}
+		calls = append(calls, count)
+		return int64(count)
+	})
+	defer SetSyscallHookForTest(prev)
+
+	body := make([]byte, 5000)
+	for i := range body {
+		body[i] = byte(i)
+	}
+	n, r := FileWriteAll(3, body)
+	if r != 0 || n != len(body) {
+		t.Fatalf("FileWriteAll = %d, %d want %d, 0", n, r, len(body))
+	}
+	if len(calls) != 3 || calls[0] != 2048 || calls[1] != 2048 || calls[2] != 904 {
+		t.Fatalf("chunk plan = %v, want 2048/2048/904", calls)
+	}
+}
+
+// A mid-stream failure reports the CONFIRMED prefix (the caller can resume
+// at n without corrupting the stream); a first-chunk failure reports (0, r).
+func TestFileWriteAllSurfacesPartialWrites(t *testing.T) {
+	calls := 0
+	prev := SetSyscallHookForTest(func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
+		calls++
+		if calls == 2 {
+			return -ErrEBADF // the kernel reports a dead handle mid-stream
+		}
+		return int64(a2)
+	})
+	defer SetSyscallHookForTest(prev)
+
+	body := make([]byte, 4096)
+	if n, r := FileWriteAll(1, body); r != -ErrEBADF || n != 2048 {
+		t.Fatalf("mid-stream = %d, %d want 2048, -2", n, r)
+	}
+
+	prev2 := SetSyscallHookForTest(func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
+		return -ErrENOSPC
+	})
+	defer SetSyscallHookForTest(prev2)
+	if n, r := FileWriteAll(1, body); r != -ErrENOSPC || n != 0 {
+		t.Fatalf("first-chunk = %d, %d want 0, -5", n, r)
+	}
+}
+
+// A zero-count acceptance cannot advance the stream; the helper stops
+// instead of spinning (the kernel never reports one for a non-empty chunk,
+// so this guards the loop, not the kernel).
+func TestFileWriteAllStopsOnAZeroCount(t *testing.T) {
+	prev := SetSyscallHookForTest(func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
+		return 0
+	})
+	defer SetSyscallHookForTest(prev)
+	if n, r := FileWriteAll(1, []byte("x")); r >= 0 || n != 0 {
+		t.Fatalf("zero-count = %d, %d want 0, <0", n, r)
+	}
+}
+
+func TestFileSyncBinding(t *testing.T) {
+	prev := SetSyscallHookForTest(func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
+		if num != SlotFileSync {
+			t.Fatalf("slot %d, want file_sync", num)
+		}
+		if a0 != 4 {
+			t.Fatalf("fd arg = %d want 4", a0)
+		}
+		return 0
+	})
+	defer SetSyscallHookForTest(prev)
+	if r := FileSync(4); r != 0 {
+		t.Fatalf("FileSync = %d want 0", r)
+	}
+}
+
+// FileAppend must chunk: a row longer than the kernel's 2048-byte write
+// stage lands whole instead of failing with -ENOSPC.
+func TestFileAppendWritesLongRows(t *testing.T) {
+	prev := SetSyscallHookForTest(func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
+		switch num {
+		case SlotFileOpen:
+			return 1
+		case SlotFileWrite:
+			if int(a2) > 2048 {
+				return -ErrENOSPC
+			}
+			return int64(a2)
+		case SlotFileClose:
+			return 0
+		}
+		t.Fatalf("unexpected slot %d", num)
+		return 0
+	})
+	defer SetSyscallHookForTest(prev)
+
+	if !FileAppend("/host/SELFTEST/OUT/long.txt", make([]byte, 9000)) {
+		t.Fatal("FileAppend failed on a 9000-byte row")
+	}
+}

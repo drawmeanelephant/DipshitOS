@@ -35,6 +35,8 @@ type fakeFS struct {
 	listStale    bool // deleted paths: removed from the table, still listed
 	ghosts       []string
 
+	failSync bool // fsync reports the residual host error (M66a)
+
 	winID         int       // the id the shell would have bound (-1 = open failed)
 	winGeometry   [8]uint32 // the record sys_win_query answers with
 	winQueryErr   bool      // query fails
@@ -90,6 +92,7 @@ func (f *fakeFS) syscalls() *syscalls {
 		read:     f.read,
 		write:    f.writeGuarded,
 		truncate: f.truncate,
+		sync:     f.syncHandle,
 		remove:   f.remove,
 		list:     f.list,
 		close: func(h uint32) {
@@ -239,10 +242,28 @@ const (
 	flagModeRead   = 0x0001
 	flagModeWrite  = 0x0002
 	flagModeCreate = 0x0004
+	flagModeAppend = 0x0008
 	flagModeDir    = 0x0010
 )
 
+// syncHandle mirrors file_table.sync: EBADF for a dead handle, the residual
+// host error under the fault switch, an honest 0 for a live handle (M66a).
+func (f *fakeFS) syncHandle(h uint32) int64 {
+	if _, ok := f.handles[int64(h)]; !ok {
+		return -2 // EBADF
+	}
+	if f.failSync {
+		return -1
+	}
+	return 0
+}
+
 func (f *fakeFS) open(path string, flags uint32) (int64, int64) {
+	// The kernel's 8-slot handle table (max_handles_per_process): the 9th
+	// concurrent open is ENOSPC before any path work (M66a).
+	if len(f.handles) >= 8 {
+		return 0, -5
+	}
 	switch {
 	case flags&flagModeDir != 0:
 		// The kernel's open validates MODE_DIR against
@@ -261,7 +282,12 @@ func (f *fakeFS) open(path string, flags uint32) (int64, int64) {
 		if f.denyWrite || (f.denyPath != "" && f.denyPath == path) {
 			return 0, -2
 		}
-		f.files[path] = nil // ADR 0010 replace semantics
+		if f.dirs[path] {
+			return 0, -1 // is-dir: a directory is not a writable file (M66a)
+		}
+		if flags&flagModeAppend == 0 {
+			f.files[path] = nil // ADR 0010 replace semantics
+		} // an append handle keeps the body: writes land at EOF
 		f.next++
 		f.handles[f.next] = path
 		f.hflags[f.next] = flags
@@ -308,18 +334,23 @@ func (f *fakeFS) write(h uint32, b []byte) (int, int64) {
 	if !ok {
 		return 0, -2
 	}
+	if len(b) > fileWriteMax {
+		return 0, -5 // the kernel's sys_file_write stage cap (M66a)
+	}
 	f.files[p] = append(f.files[p], b...)
 	return len(b), int64(len(b))
 }
 
-// wantReport is the byte-exact report after M61e: the M61f `share-equals`
+// wantReport is the byte-exact report after M66a: the M61f `share-equals`
 // fixture shape, and the report the go-selftest spec requires on the share.
 // Adding a case updates this and the spec together.
 const wantReport = "case intake pass\ncase intake-altered pass\n" +
 	"case clock-monotonic pass\ncase file-write pass\n" +
 	"case file-roundtrip pass\ncase file-truncate pass\n" +
-	"case file-delete pass\ncase file-list pass\ncase window pass\n" +
-	"summary cases=9 failed=0\n"
+	"case file-delete pass\ncase file-list pass\n" +
+	"case file-append pass\ncase file-bigwrite pass\ncase file-clamp pass\n" +
+	"case file-fsync pass\ncase file-errors pass\ncase window pass\n" +
+	"summary cases=14 failed=0\n"
 
 // seedFixtures is the host's half of the intake contract: IN/fixture.txt holds
 // the canonical body, IN/altered.txt the altered one (ADR 0031 D2).
@@ -333,8 +364,8 @@ func TestRunCasesAllPassAndReportBytes(t *testing.T) {
 	seedFixtures(fs)
 	rs := runCases(fs.syscalls())
 
-	if len(rs) != 9 {
-		t.Fatalf("cases = %d, want 9", len(rs))
+	if len(rs) != 14 {
+		t.Fatalf("cases = %d, want 14", len(rs))
 	}
 	for _, r := range rs {
 		if !r.ok {
@@ -344,7 +375,7 @@ func TestRunCasesAllPassAndReportBytes(t *testing.T) {
 	if got := string(renderReport(rs)); got != wantReport {
 		t.Fatalf("report bytes:\n got %q\nwant %q", got, wantReport)
 	}
-	if got := string(renderSummary(rs)); got != "summary cases=9 failed=0\n" {
+	if got := string(renderSummary(rs)); got != "summary cases=14 failed=0\n" {
 		t.Fatalf("summary = %q", got)
 	}
 	if got := fs.files[helloPath]; !bytes.Equal(got, []byte(helloPayload)) {
@@ -406,7 +437,7 @@ func TestIntakeFailsOnAMutatedSeed(t *testing.T) {
 	if !strings.Contains(report, "case intake fail fixture mismatch") {
 		t.Fatalf("report lacks the intake failure: %q", report)
 	}
-	if !strings.Contains(report, "summary cases=9 failed=2") {
+	if !strings.Contains(report, "summary cases=14 failed=2") {
 		t.Fatalf("report summary wrong: %q", report)
 	}
 	if got := fs.files[intakeCopy]; !bytes.Equal(got, []byte(intakeAltered)) {
@@ -433,10 +464,10 @@ func TestIntakeFailsWhenTheFixtureIsMissing(t *testing.T) {
 	if got := string(fs.files[alteredReceipt]); !strings.Contains(got, "bytes=0 err=open rc=-6") {
 		t.Fatalf("altered receipt = %q", got)
 	}
-	// The report is still complete: 9 cases, the 2 intake ones failed (the
+	// The report is still complete: 14 cases, the 2 intake ones failed (the
 	// clock, file and window cases do not read IN/).
 	report := string(renderReport(rs))
-	if !strings.Contains(report, "summary cases=9 failed=2") {
+	if !strings.Contains(report, "summary cases=14 failed=2") {
 		t.Fatalf("report summary wrong: %q", report)
 	}
 	if lines := strings.Count(report, "\n"); lines != len(rs)+1 {
@@ -447,7 +478,8 @@ func TestIntakeFailsWhenTheFixtureIsMissing(t *testing.T) {
 // ---------------------------------------------------------------------------
 // M61e (#1385): the window receipt
 // ---------------------------------------------------------------------------
-// Index map after M61e: … 7 file-list · 8 window.
+// Index map after M66a: … 7 file-list · 8 file-append · 9 file-bigwrite ·
+// 10 file-clamp · 11 file-fsync · 12 file-errors · 13 window.
 
 // The receipt carries the KERNEL's geometry from the query, which is NOT what
 // the app asked for at open: if the case restated its request, the w/h here
@@ -458,8 +490,8 @@ func TestWindowReceiptCarriesTheKernelsGeometry(t *testing.T) {
 	fs := newFakeFS()
 	seedFixtures(fs)
 	rs := runCases(fs.syscalls())
-	if !rs[8].ok || rs[8].id != "window" {
-		t.Fatalf("window should have passed, got %+v", rs[8])
+	if !rs[13].ok || rs[13].id != "window" {
+		t.Fatalf("window should have passed, got %+v", rs[13])
 	}
 	wantLine := "case window win=2 w=1100 h=720 present=ok\n"
 	if got := string(fs.files[windowReceipt]); got != wantLine {
@@ -479,8 +511,8 @@ func TestWindowReceiptFollowsTheQueryWhereverItPoints(t *testing.T) {
 	seedFixtures(fs)
 	fs.winGeometry = [8]uint32{32, 32, winReqW, winReqH, 0, 1, 1, 0}
 	rs := runCases(fs.syscalls())
-	if !rs[8].ok {
-		t.Fatalf("window should have passed, got %+v", rs[8])
+	if !rs[13].ok {
+		t.Fatalf("window should have passed, got %+v", rs[13])
 	}
 	wantLine := "case window win=2 w=640 h=400 present=ok\n"
 	if got := string(fs.files[windowReceipt]); got != wantLine {
@@ -495,11 +527,11 @@ func TestWindowFailsWithoutAWindow(t *testing.T) {
 	seedFixtures(fs)
 	fs.winID = -1
 	rs := runCases(fs.syscalls())
-	if rs[8].ok {
-		t.Fatalf("window passed with no window, got %+v", rs[8])
+	if rs[13].ok {
+		t.Fatalf("window passed with no window, got %+v", rs[13])
 	}
-	if !strings.Contains(rs[8].detail, "no window") {
-		t.Fatalf("detail = %q", rs[8].detail)
+	if !strings.Contains(rs[13].detail, "no window") {
+		t.Fatalf("detail = %q", rs[13].detail)
 	}
 	if _, ok := fs.files[windowReceipt]; ok {
 		t.Fatal("a window-less run still wrote a receipt")
@@ -522,11 +554,11 @@ func TestWindowNamesEachRefusal(t *testing.T) {
 			seedFixtures(fs)
 			tc.break_(fs)
 			rs := runCases(fs.syscalls())
-			if rs[8].ok {
-				t.Fatalf("window passed with %s refused, got %+v", tc.name, rs[8])
+			if rs[13].ok {
+				t.Fatalf("window passed with %s refused, got %+v", tc.name, rs[13])
 			}
-			if !strings.Contains(rs[8].detail, tc.want) {
-				t.Fatalf("detail = %q, want %q", rs[8].detail, tc.want)
+			if !strings.Contains(rs[13].detail, tc.want) {
+				t.Fatalf("detail = %q, want %q", rs[13].detail, tc.want)
 			}
 		})
 	}
@@ -539,11 +571,11 @@ func TestWindowCatchesAnEmptyWindow(t *testing.T) {
 	seedFixtures(fs)
 	fs.winGeometry = [8]uint32{0, 0, 0, 0, 0, 1, 1, 0}
 	rs := runCases(fs.syscalls())
-	if rs[8].ok {
-		t.Fatalf("window passed on an empty window, got %+v", rs[8])
+	if rs[13].ok {
+		t.Fatalf("window passed on an empty window, got %+v", rs[13])
 	}
-	if !strings.Contains(rs[8].detail, "query reports an empty window: 0x0") {
-		t.Fatalf("detail = %q", rs[8].detail)
+	if !strings.Contains(rs[13].detail, "query reports an empty window: 0x0") {
+		t.Fatalf("detail = %q", rs[13].detail)
 	}
 	// The receipt still holds what was measured, so the host sees the zeros.
 	if got := string(fs.files[windowReceipt]); got != "case window win=2 w=0 h=0 present=ok\n" {
@@ -632,7 +664,7 @@ func TestFileWriteCaseFailsWhenTheWriteIsRefused(t *testing.T) {
 	if !strings.Contains(report, "case file-write fail ") {
 		t.Fatalf("report lacks the fail detail: %q", report)
 	}
-	if !strings.Contains(report, "summary cases=9 failed=1") {
+	if !strings.Contains(report, "summary cases=14 failed=1") {
 		t.Fatalf("report summary wrong: %q", report)
 	}
 }
@@ -948,5 +980,223 @@ func TestMkdirRowNeedsCreateAndWrite(t *testing.T) {
 	}
 	if _, rc := fs.open(listDir, flagModeWrite|flagModeCreate|flagModeDir); rc != -9 {
 		t.Fatalf("second create rc = %d, want -9 (EEXIST)", rc)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// M66a (#1443): the file-semantics hardening pack
+// ---------------------------------------------------------------------------
+//
+// Index map after M66a: … 7 file-list · 8 file-append · 9 file-bigwrite ·
+// 10 file-clamp · 11 file-fsync · 12 file-errors · 13 window.
+
+// Append-at-EOF: the reopened append write lands AFTER the base body. If the
+// append flag were dropped anywhere below the ABI, the open would replace
+// the file and the read-back would be the delta alone — which this catches.
+func TestFileAppendLandsAfterTheBase(t *testing.T) {
+	fs := newFakeFS()
+	seedFixtures(fs)
+	rs := runCases(fs.syscalls())
+	if !rs[8].ok || rs[8].id != "file-append" {
+		t.Fatalf("file-append should have passed, got %+v", rs[8])
+	}
+	want := append(append([]byte{}, appendBasePayload()...), appendMorePayload()...)
+	if len(want) != 105 {
+		t.Fatalf("append body = %d B, want 105 (3+2 units)", len(want))
+	}
+	if got := fs.files[appendPath]; !bytes.Equal(got, want) {
+		t.Fatalf("append.txt = %d B, want base+more", len(got))
+	}
+	if got := fs.files[appendCopy]; !bytes.Equal(got, want) {
+		t.Fatalf("append.copy diverges from the read-back")
+	}
+	wantLine := "case file-append path=OUT/append.txt base=63 more=42 bytes=105 match=yes\n"
+	if got := string(fs.files[appendOk]); got != wantLine {
+		t.Fatalf("append receipt = %q, want %q", got, wantLine)
+	}
+}
+
+// An append-open must NOT apply the replace semantics: the body written
+// before the append-open has to survive byte-for-byte.
+func TestFileAppendOpenKeepsTheBody(t *testing.T) {
+	fs := newFakeFS()
+	base := []byte("base body\n")
+	if _, err := writeFile(fs.syscalls(), appendPath, base); err != nil {
+		t.Fatalf("writeFile: %v", err)
+	}
+	h, rc := fs.open(appendPath, flagModeWrite|flagModeAppend)
+	if rc < 0 {
+		t.Fatalf("append open rc = %d", rc)
+	}
+	if got := fs.files[appendPath]; !bytes.Equal(got, base) {
+		t.Fatalf("append-open replaced the body: %q", got)
+	}
+	n, rc2 := fs.write(uint32(h), []byte("more\n"))
+	if rc2 < 0 || n != 5 {
+		t.Fatalf("append write = %d, %d", n, rc2)
+	}
+	fs.syscalls().close(uint32(h))
+	want := append(append([]byte{}, base...), []byte("more\n")...)
+	if got := fs.files[appendPath]; !bytes.Equal(got, want) {
+		t.Fatalf("append.txt = %q, want %q", got, want)
+	}
+}
+
+// The big write is far beyond one sys_file_write call: it only lands through
+// the confirmed-count chunk loop, and the read-back must be byte-exact.
+func TestFileBigwriteChunksThroughTheStageCap(t *testing.T) {
+	fs := newFakeFS()
+	seedFixtures(fs)
+	rs := runCases(fs.syscalls())
+	if !rs[9].ok || rs[9].id != "file-bigwrite" {
+		t.Fatalf("file-bigwrite should have passed, got %+v", rs[9])
+	}
+	want := bigwritePayload()
+	if len(want) != 73500 {
+		t.Fatalf("bigwrite payload = %d B, want 73500 (3500 units)", len(want))
+	}
+	if got := fs.files[bigwritePath]; !bytes.Equal(got, want) {
+		t.Fatalf("bigwrite.txt = %d B, want the payload", len(got))
+	}
+	if got := fs.files[bigwriteCopy]; !bytes.Equal(got, want) {
+		t.Fatalf("bigwrite.copy diverges from the read-back")
+	}
+	wantLine := "case file-bigwrite path=OUT/bigwrite.txt bytes=73500 calls=36 match=yes\n"
+	if got := string(fs.files[bigwriteOk]); got != wantLine {
+		t.Fatalf("bigwrite receipt = %q, want %q", got, wantLine)
+	}
+}
+
+// The fake enforces the kernel's 2048-byte stage cap, so a writeAll that
+// stopped chunking would fail every case with a payload over the cap — and
+// a raw writeAll call with a 3000-byte body must surface the refusal.
+func TestWriteAllRespectsTheStageCap(t *testing.T) {
+	fs := newFakeFS()
+	err := writeAll(fs.syscalls(), 1, make([]byte, 3000))
+	if err == nil || !strings.Contains(err.Error(), "write rc=-2") {
+		// handle 1 is not open: the loop's first call hits EBADF before the
+		// cap matters — the point is that a refusal surfaces, not a spin.
+		t.Fatalf("writeAll on a dead handle = %v, want a write rc error", err)
+	}
+	s := fs.syscalls()
+	h, rc := s.open("cap.txt", flagModeWrite|flagModeCreate)
+	if rc < 0 {
+		t.Fatalf("open rc = %d", rc)
+	}
+	if err := writeAll(s, uint32(h), make([]byte, 3000)); err != nil {
+		t.Fatalf("writeAll: %v", err)
+	}
+	s.close(uint32(h))
+	if got := fs.files["cap.txt"]; len(got) != 3000 {
+		t.Fatalf("cap.txt = %d B, want 3000", len(got))
+	}
+}
+
+// The clamp: write, shrink the SAME handle, write more — the extra lands at
+// the clamp point, so the file is kept+extra and nothing else.
+func TestFileClampWriteLandsAtTheClampPoint(t *testing.T) {
+	fs := newFakeFS()
+	seedFixtures(fs)
+	rs := runCases(fs.syscalls())
+	if !rs[10].ok || rs[10].id != "file-clamp" {
+		t.Fatalf("file-clamp should have passed, got %+v", rs[10])
+	}
+	want := append(append([]byte{}, clampKept()...), clampExtra()...)
+	if len(want) != 168 {
+		t.Fatalf("clamped body = %d B, want 168 (5+3 units)", len(want))
+	}
+	if got := fs.files[clampPath]; !bytes.Equal(got, want) {
+		t.Fatalf("clamp.txt = %d B, want kept+extra", len(got))
+	}
+	if got := fs.files[clampCopy]; !bytes.Equal(got, want) {
+		t.Fatalf("clamp.copy diverges from the read-back")
+	}
+	wantLine := "case file-clamp path=OUT/clamp.txt wrote=840 kept=105 extra=63 bytes=168 match=yes\n"
+	if got := string(fs.files[clampOk]); got != wantLine {
+		t.Fatalf("clamp receipt = %q, want %q", got, wantLine)
+	}
+}
+
+// A refused truncate fails the clamp case too — the extra write must not
+// happen after a shrink that never landed.
+func TestFileClampFailsWhenTheShrinkIsRefused(t *testing.T) {
+	fs := newFakeFS()
+	seedFixtures(fs)
+	fs.denyTruncate = true
+	rs := runCases(fs.syscalls())
+	if rs[10].ok {
+		t.Fatalf("file-clamp passed with a refused shrink, got %+v", rs[10])
+	}
+	if !strings.Contains(rs[10].detail, "truncate rc=-7") {
+		t.Fatalf("detail = %q", rs[10].detail)
+	}
+}
+
+// The durability verb: fsync on the open handle is 0, on the closed fd is
+// the honest EBADF, and a host refusal fails the case by its code.
+func TestFileFsyncRefusesAClosedFd(t *testing.T) {
+	fs := newFakeFS()
+	seedFixtures(fs)
+	rs := runCases(fs.syscalls())
+	if !rs[11].ok || rs[11].id != "file-fsync" {
+		t.Fatalf("file-fsync should have passed, got %+v", rs[11])
+	}
+	if got := fs.files[fsyncPath]; !bytes.Equal(got, fsyncPayload()) {
+		t.Fatalf("fsync.txt = %d B, want the payload", len(got))
+	}
+	wantLine := "case file-fsync path=OUT/fsync.txt bytes=147 fsync=0 closed=-2\n"
+	if got := string(fs.files[fsyncOk]); got != wantLine {
+		t.Fatalf("fsync receipt = %q, want %q", got, wantLine)
+	}
+
+	fs2 := newFakeFS()
+	seedFixtures(fs2)
+	fs2.failSync = true
+	rs2 := runCases(fs2.syscalls())
+	if rs2[11].ok {
+		t.Fatal("file-fsync passed while the host refused the sync")
+	}
+	if !strings.Contains(rs2[11].detail, "fsync rc=-1") {
+		t.Fatalf("detail = %q", rs2[11].detail)
+	}
+}
+
+// The honest error rows, each observed through the fake's kernel-shaped ABI.
+func TestFileErrorsRowsAreHonest(t *testing.T) {
+	fs := newFakeFS()
+	seedFixtures(fs)
+	rs := runCases(fs.syscalls())
+	if !rs[12].ok || rs[12].id != "file-errors" {
+		t.Fatalf("file-errors should have passed, got %+v", rs[12])
+	}
+	wantLine := "case file-errors missing=-6 exists=-9 isdir=-1 ninth=-5\n"
+	if got := string(fs.files[errOk]); got != wantLine {
+		t.Fatalf("errors receipt = %q, want %q", got, wantLine)
+	}
+	// The probe handles and files are cleaned up: only the receipt remains.
+	for _, p := range fs.handles {
+		t.Fatalf("handle still open on %s", p)
+	}
+	for name := range fs.files {
+		if strings.HasPrefix(name, errDir+"/h") {
+			t.Fatalf("probe file %s survived", name)
+		}
+	}
+}
+
+// Every M66a case leaves a receipt, one `case …` line each.
+func TestEveryM66aCaseWritesAReceipt(t *testing.T) {
+	fs := newFakeFS()
+	seedFixtures(fs)
+	runCases(fs.syscalls())
+	for _, path := range []string{appendOk, bigwriteOk, clampOk, fsyncOk, errOk} {
+		got, ok := fs.files[path]
+		if !ok {
+			t.Fatalf("receipt %s missing", path)
+		}
+		line := string(got)
+		if !strings.HasPrefix(line, "case ") || strings.Count(line, "\n") != 1 || !strings.HasSuffix(line, "\n") {
+			t.Fatalf("receipt %s = %q, want one 'case …' line", path, line)
+		}
 	}
 }
