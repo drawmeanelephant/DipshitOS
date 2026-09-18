@@ -1,4 +1,4 @@
-# go-wm-tabs.spec -- M62b–h + #1426 (issues #1400–#1406/#1426)
+# go-wm-tabs.spec -- M62b–h + #1426 + M66b (issues #1400–#1406/#1426/#1444)
 # class-B gate: GOTABWM tab strip, split, pin, session, LAYOUT.txt, then two
 # shipping Go ELFs as tabs. Boot 01 hosts GOCALC.ELF + leftover NOTEPAD.BIN
 # (Zig CALC.BIN is gone, M62h / #1406). Boot 03 hosts GOEDIT.ELF + GOTERM.ELF:
@@ -16,6 +16,11 @@
 # Seed wm=none and exec GOTABWM.ELF like go-wm-seat. No HID. No framebuffer
 # golden. Do not overload go-wm-seat or go-wm-default. Boot 01 `reorder 0->1`
 # is M62d auto-choreography; HID press/release Reorder() is go-wm-hid run 02.
+#
+# M66b (#1444): SESSION.TABS and LAYOUT.txt are written through the
+# crash-safe replace-write (vi.WriteFileSafe: temp + fsync + rename, never
+# an in-place truncate), and each boot decodes the seeded SETTINGS.TXT —
+# `gotabwm: settings wm=none` is the seat's read of the schema-v2 file.
 #
 # HOST PREREQUISITE (fails the gate honestly when missing):
 #   bash tools/go/build-gotabwm.sh   ->  .build/go/GOTABWM.ELF
@@ -152,6 +157,8 @@ vgate_run 01 -- \
 vgate_assert 01 serial-contains 'VirelaiOS kernel has seized control.'
 vgate_assert 01 serial-contains 'exec: loaded GOTABWM.ELF'
 vgate_assert 01 serial-contains 'gotabwm: registered'
+# M66b (#1444): the seat decoded the seeded schema-v2 SETTINGS.TXT (wm=none).
+vgate_assert 01 serial-contains 'gotabwm: settings wm=none'
 vgate_assert 01 serial-contains 'exec: loaded GOCALC.ELF'
 vgate_assert 01 serial-contains 'exec: loaded NOTEPAD.BIN'
 # Two clients on the strip, rail painted, one focused.
@@ -344,6 +351,7 @@ vgate_run 02 -- \
 vgate_assert 02 serial-contains 'VirelaiOS kernel has seized control.'
 vgate_assert 02 serial-contains 'exec: loaded GOTABWM.ELF'
 vgate_assert 02 serial-contains 'gotabwm: registered'
+vgate_assert 02 serial-contains 'gotabwm: settings wm=none'
 vgate_assert 02 serial-contains 'gotabwm: session load n=2'
 vgate_assert 02 serial-contains 'gotabwm: session titles=Calc,Notepad pin=1,0 active=0'
 vgate_assert 02 serial-contains 'gotabwm: order ids='
@@ -405,6 +413,7 @@ vgate_run 03 -- \
 vgate_assert 03 serial-contains 'VirelaiOS kernel has seized control.'
 vgate_assert 03 serial-contains 'exec: loaded GOTABWM.ELF'
 vgate_assert 03 serial-contains 'gotabwm: registered'
+vgate_assert 03 serial-contains 'gotabwm: settings wm=none'
 vgate_assert 03 serial-contains 'exec: loaded GOEDIT.ELF'
 vgate_assert 03 serial-contains 'exec: loaded GOTERM.ELF'
 vgate_assert 03 serial-contains 'goedit: open id='

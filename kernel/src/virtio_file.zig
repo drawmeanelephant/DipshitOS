@@ -801,6 +801,9 @@ pub fn write_whole(path: []const u8, data: []const u8) u8 {
         if (written == 0) return st_host_error;
         off += @intCast(written);
     }
+    // M66b (#1444): every write_whole caller is a persistence consumer —
+    // push the bytes to the device before the close flushes and frees.
+    if (fsync(h) != st_ok) return st_host_error;
     return st_ok;
 }
 

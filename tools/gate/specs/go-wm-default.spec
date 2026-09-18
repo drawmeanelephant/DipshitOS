@@ -9,6 +9,14 @@
 # the Zig TABWM seat -- the fallback the card requires to stay reachable.
 # M63f (#1463): re-verified green after GOTABWM maxTicks 48. No HID here.
 #
+# M66b (#1444): boots 03/04 add the corrupt-settings story. Boot 03 stages
+# real corruption (the monitor's vf verbs overwrite SETTINGS.TXT with
+# probe-pattern garbage); boot 04 boots on it -- the kernel refuses the
+# file whole (one honest line, compiled defaults, the Go seat again), the
+# seat's own decode reports `gotabwm: settings bad`, and the closing
+# `settings set` heals the file through the crash-safe save (temp + fsync
+# + delete/rename). The healed bytes are byte-compared on the host.
+#
 # HOST PREREQUISITE (fails the gate honestly when missing):
 #   bash tools/go/build-gotabwm.sh   ->  .build/go/GOTABWM.ELF
 #   bash tools/go/build-gocalc.sh    ->  .build/go/GOCALC.ELF
@@ -148,3 +156,86 @@ vgate_assert 02 serial-contains 'tabwm: registered pid='
 vgate_assert 02 serial-contains 'rx-m59-fallback-ok'
 vgate_assert 02 serial-absent '[EXC] parking:'
 vgate_assert 02 serial-absent 'exited status=139'
+
+# --- M66b (#1444): corrupt settings fail closed, then heal ------------------
+# Boot 03 stages the corruption the M66b design exists for: the monitor's
+# `vf` verbs overwrite SETTINGS.TXT with 64 probe-pattern bytes -- the exact
+# shape a partial in-place write used to leave (binary garbage, no valid
+# `#v` header). Handle 0 is the first host write handle of a fresh boot.
+# The boot itself seated the Zig tabwm (run 01's persisted `wm=tabwm`).
+vgate_file script-03.txt <<'EOF'
+vf open SETTINGS.TXT
+vf truncate 0 0
+vf write 0 64
+vf close 0
+echo rx-m66b-corrupt-staged
+EOF
+
+vgate_run 03 -- \
+    --screen '$RUN_DIR/screen-03' \
+    --script '$RUN_DIR/script-03.txt' \
+    --script-expect 'rx-m66b-corrupt-staged' --timeout 300
+
+vgate_assert 03 serial-contains 'wm: autostart tabwm (settings wm=tabwm)'
+vgate_assert 03 serial-contains 'vf: open SETTINGS.TXT h=0'
+vgate_assert 03 serial-contains 'vf: truncate 0 size=0 ok'
+vgate_assert 03 serial-contains 'vf: write 0 n=64 wrote=64 chunks=1'
+vgate_assert 03 serial-contains 'vf: close 0 ok'
+vgate_assert 03 serial-contains 'rx-m66b-corrupt-staged'
+vgate_assert 03 serial-absent '[EXC] parking:'
+vgate_assert 03 serial-absent 'exited status=139'
+
+# Boot 04 boots ON the corrupt file. The kernel refuses it whole (no valid
+# schema header -> one honest line, compiled defaults), so the compiled
+# default seats the GO desktop again, and the seat's own decode reports the
+# corruption and runs on defaults -- corrupt-fails-closed, never a boot
+# failure. The closing `settings set` then heals the file through the
+# crash-safe save (temp + fsync + delete/rename, never an in-place
+# truncate), and the share assert below byte-compares the healed bytes.
+vgate_file script-04.txt <<'EOF'
+settings set wm tabwm
+echo rx-m66b-corrupt-ok
+EOF
+
+vgate_run 04 -- \
+    --screen '$RUN_DIR/screen-04' \
+    --script '$RUN_DIR/script-04.txt' \
+    --script-after 'gotabwm: settings bad' \
+    --script-expect 'rx-m66b-corrupt-ok' --timeout 300
+
+vgate_assert 04 serial-contains 'settings: SETTINGS.TXT refused (defaults in force)'
+vgate_assert 04 serial-contains 'wm: autostart gotabwm (settings wm=gotabwm)'
+vgate_assert 04 serial-contains 'gotabwm: registered'
+vgate_assert 04 serial-contains 'gotabwm: settings bad'
+vgate_assert 04 serial-contains 'settings: wm=tabwm (persisted)'
+vgate_assert 04 serial-contains 'rx-m66b-corrupt-ok'
+vgate_assert 04 serial-absent '[EXC] parking:'
+vgate_assert 04 serial-absent 'exited status=139'
+
+# The healed file, byte-exact: the kernel's serializer over the compiled
+# default table with wm=tabwm (settings.zig init() order; the `prompt`
+# row's trailing space is part of the value). `share-equals` lifts the
+# compared file into evidence automatically.
+vgate_file settings-healed.expected <<'EOF'
+#v2
+hostname=virelai
+prompt=virelai> 
+theme=dark
+scrollback=1000
+shadow=off
+focus_follows_mouse=off
+shell=monitor
+wm=tabwm
+EOF
+
+vgate_assert 04 share-equals SETTINGS.TXT settings-healed.expected
+# The publish consumed its temp: a crash-safe save leaves no SETTINGS.TXT.tmp
+# on the share (the rename is the publish).
+vgate_assert 04 python <<'PY'
+import os, sys
+share = os.environ["VG_SHARE"]
+stale = os.path.join(share, "SETTINGS.TXT.tmp")
+if os.path.exists(stale):
+    sys.exit("SETTINGS.TXT.tmp survived the publish - the rename did not run")
+print("crash-safe publish left no SETTINGS.TXT.tmp on the share")
+PY
