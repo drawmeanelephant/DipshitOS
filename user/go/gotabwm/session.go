@@ -112,4 +112,5 @@ func loadSession() {
 	vi.ConsoleLine(MarkerSessionLoad + vi.Itoa64(int64(tabs.Count())))
 	vi.ConsoleLine(MarkerSessionTitles + sessionTitlesLine(&tabs))
 	dumpOrder()
+	_ = writeLayoutFile()
 }

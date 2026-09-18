@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"virelai/vi"
@@ -16,6 +17,7 @@ func TestTabMarkerShapes(t *testing.T) {
 		{MarkerSplit, "gotabwm: split "},
 		{MarkerUnsplit, "gotabwm: unsplit"},
 		{MarkerLayout, "gotabwm: layout "},
+		{MarkerLayoutFile, "gotabwm: layout file="},
 		{MarkerPane, "gotabwm: pane "},
 		{MarkerPin, "gotabwm: pin "},
 		{MarkerReorder, "gotabwm: reorder "},
@@ -297,6 +299,42 @@ func TestSplitRectsIntegerAndMin(t *testing.T) {
 	fullA, fullB, ok := SplitRects(SplitNone, 1280, 720)
 	if !ok || fullA != FullRect(1280, 720) || fullB != fullA {
 		t.Fatalf("SplitNone %+v %+v ok=%v", fullA, fullB, ok)
+	}
+}
+
+func TestLayoutFileBodyTwoPane(t *testing.T) {
+	var s TabStrip
+	if !s.OpenTab(3, "Calc") || !s.OpenTab(4, "Notepad") {
+		t.Fatal("OpenTab")
+	}
+	if !s.SplitV() {
+		t.Fatal("SplitV")
+	}
+	_ = s.FocusTab(3)
+	body := layoutFileBody(&s, 1280, 720)
+	if len(body) == 0 || body[len(body)-1] != '\n' {
+		t.Fatalf("must be LF-terminated, got %q", body)
+	}
+	for _, c := range body {
+		if c == '\r' {
+			t.Fatal("CR in LAYOUT.txt")
+		}
+	}
+	lines := strings.Split(strings.TrimSuffix(string(body), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("lines = %d want 2: %q", len(lines), body)
+	}
+	want0 := "tab=3 bin=CALC.BIN x=0 y=0 w=640 h=720 focus=1 split=v"
+	want1 := "tab=4 bin=NOTEPAD.BIN x=640 y=0 w=640 h=720 focus=0 split=v"
+	if lines[0] != want0 || lines[1] != want1 {
+		t.Fatalf("got\n %q\n %q\nwant\n %q\n %q", lines[0], lines[1], want0, want1)
+	}
+	if s.Unsplit() {
+		body = layoutFileBody(&s, 1280, 720)
+		lines = strings.Split(strings.TrimSuffix(string(body), "\n"), "\n")
+		if len(lines) != 2 || lines[0] != "tab=3 bin=CALC.BIN x=0 y=0 w=1280 h=720 focus=1 split=none" {
+			t.Fatalf("unsplit dump = %q", body)
+		}
 	}
 }
 

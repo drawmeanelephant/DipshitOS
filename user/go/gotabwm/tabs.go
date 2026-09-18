@@ -1,6 +1,6 @@
-// GOTABWM.ELF — M62b–e (issues #1400/#1401/#1402/#1403): an in-process tab
-// strip with a two-pane constrained split, pin, reorder, and `.tabs` v2
-// session save/restore.
+// GOTABWM.ELF — M62b–f (issues #1400–#1404): an in-process tab strip
+// with a two-pane constrained split, pin, reorder, `.tabs` v2 session,
+// and a headless LAYOUT.txt dump.
 //
 // OpenTab / CloseTab / FocusTab / SplitH / SplitV / Unsplit / Pin / Unpin /
 // Reorder are a pure state machine: no syscalls, no WM_RPC. The seat hooks
@@ -51,6 +51,7 @@ const (
 	MarkerSplit         = "gotabwm: split "
 	MarkerUnsplit       = "gotabwm: unsplit"
 	MarkerLayout        = "gotabwm: layout "
+	MarkerLayoutFile    = "gotabwm: layout file="
 	MarkerPane          = "gotabwm: pane "
 	MarkerPin           = "gotabwm: pin "
 	MarkerReorder       = "gotabwm: reorder "
@@ -412,6 +413,8 @@ func uabs(a, b uint32) uint32 {
 }
 
 // layoutLine is one ADR 0033 LAYOUT.txt surface line (no trailing LF).
+// bin is a single token: a space or newline would break bin=\S+ and the
+// one-line-per-tab dump. Gate titles are app-controlled (CALC.BIN etc.).
 func layoutLine(id uint32, bin string, r Rect, focus bool, kind SplitKind) string {
 	if bin == "" {
 		bin = "-"

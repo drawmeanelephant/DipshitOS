@@ -28,6 +28,7 @@ func TestInteropMarkerShapes(t *testing.T) {
 		{MarkerSplit, "gotabwm: split "},
 		{MarkerUnsplit, "gotabwm: unsplit"},
 		{MarkerLayout, "gotabwm: layout "},
+		{MarkerLayoutFile, "gotabwm: layout file="},
 		{MarkerPane, "gotabwm: pane "},
 		{MarkerPin, "gotabwm: pin "},
 		{MarkerReorder, "gotabwm: reorder "},
