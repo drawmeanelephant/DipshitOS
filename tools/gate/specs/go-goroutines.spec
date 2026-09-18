@@ -1,10 +1,10 @@
-# go-goroutines.spec -- ADR 0027 D6 (issue #1214 round 2): the phase-0b
-# threads proof for GOOS=virelai.
+# go-goroutines.spec -- ADR 0027 D6 / M65c (#1441): the compiled-default
+# GOMAXPROCS proof for GOOS=virelai (no env pin — numCPUStartup = 2).
 #
 # The fixture (tools/go/goroutines.go) runs N=8 goroutines (N >
-# GOMAXPROCS=2): each bumps an atomic counter and sends on a buffered
-# channel; main drains 8 completions and prints the done line with
-# counter == n. This exercises the whole ADR 0027 chain on real VZ:
+# compiled GOMAXPROCS=2): each bumps an atomic counter and sends on a
+# buffered channel; main drains 8 completions and prints the done line
+# with counter == n. This exercises the whole ADR 0027 chain on real VZ:
 #   1. slot 73 sys_thread op 0 — newosproc maps Ms onto same-process
 #      kernel tasks (mp.g0.stack.hi / trampoline / mp), sysmon + GC Ms
 #      included;
