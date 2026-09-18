@@ -315,8 +315,14 @@ final class VFWireTests: XCTestCase {
     /// path: every path it ACCEPTS must land inside the share root, and the
     /// shapes it refuses stay refused.
     func testFuzz13ResolveSubpathConfinesEveryAcceptedPathUnderRoot() throws {
+        // Deterministic root on purpose: F2's failure messages quote the
+        // resolved path, so a UUID root would make a red log unreplayable
+        // verbatim. The name is per-suite-fixed, and XCTest runs these in one
+        // process serially, so there is nothing to collide with; a stale copy
+        // from an interrupted run is removed first.
         let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("vf-fuzz-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("vf-fuzz-share-root", isDirectory: true)
+        try? FileManager.default.removeItem(at: root)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let canonicalRoot = root.resolvingSymlinksInPath().path
@@ -325,7 +331,7 @@ final class VFWireTests: XCTestCase {
         var refused = 0
         for seed in Self.fuzzSeeds {
             var fuzz = Fuzz(seed: seed)
-            for _ in 0..<512 {
+            for iteration in 0..<512 {
                 var path = ""
                 for _ in 0..<fuzz.below(48) {
                     switch fuzz.below(8) {
@@ -345,11 +351,12 @@ final class VFWireTests: XCTestCase {
                 }
                 accepted += 1
                 let landed = resolved.resolvingSymlinksInPath().path
+                let where_ = "seed 0x\(String(seed, radix: 16)) iteration \(iteration)"
                 XCTAssertTrue(
                     landed == canonicalRoot || landed.hasPrefix(canonicalRoot + "/"),
-                    "accepted path escaped the share root: \"\(path)\" -> \(landed)"
+                    "\(where_): accepted path escaped the share root: \"\(path)\" -> \(landed)"
                 )
-                XCTAssertFalse(path.hasPrefix("/"), "absolute path accepted: \"\(path)\"")
+                XCTAssertFalse(path.hasPrefix("/"), "\(where_): absolute path accepted: \"\(path)\"")
             }
         }
         XCTAssertGreaterThan(accepted, 0, "the corpus must exercise accepted paths too")
