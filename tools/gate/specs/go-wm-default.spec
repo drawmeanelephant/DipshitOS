@@ -7,6 +7,7 @@
 #
 # Boot 02 proves the flip is a SETTING, not a hardcode: the same share boots
 # the Zig TABWM seat -- the fallback the card requires to stay reachable.
+# M63f (#1463): re-verified green after GOTABWM maxTicks 48. No HID here.
 #
 # HOST PREREQUISITE (fails the gate honestly when missing):
 #   bash tools/go/build-gotabwm.sh   ->  .build/go/GOTABWM.ELF
