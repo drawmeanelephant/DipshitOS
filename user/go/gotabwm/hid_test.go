@@ -134,6 +134,18 @@ func TestPointerDownEdge(t *testing.T) {
 	}
 }
 
+func TestPointerUpEdge(t *testing.T) {
+	if pointerUpEdge(0, 0) || pointerUpEdge(hidBtnLeft, 0) {
+		t.Fatal("hover/press must not be an up edge")
+	}
+	if !pointerUpEdge(0, hidBtnLeft) {
+		t.Fatal("release must be an up edge")
+	}
+	if pointerUpEdge(hidBtnLeft, hidBtnLeft) {
+		t.Fatal("held must not look like an up")
+	}
+}
+
 func TestRailCellAtTwoTabs(t *testing.T) {
 	const w, n, h = 1280, 2, 22
 	if i, ok := railCellAt(320, 10, w, n, h); !ok || i != 0 {
@@ -205,14 +217,17 @@ func TestHandleWmPointerDownEdgeOnly(t *testing.T) {
 	saved := tabs
 	savedHosted := hostedApp
 	savedBtn := prevPtrButtons
+	savedDrag := railDragFrom
 	defer func() {
 		tabs = saved
 		hostedApp = savedHosted
 		prevPtrButtons = savedBtn
+		railDragFrom = savedDrag
 	}()
 	tabs = TabStrip{}
 	hostedApp = 0
 	prevPtrButtons = 0
+	railDragFrom = -1
 	if !tabs.OpenTab(3, "A") || !tabs.OpenTab(4, "B") {
 		t.Fatal("OpenTab")
 	}
@@ -227,5 +242,89 @@ func TestHandleWmPointerDownEdgeOnly(t *testing.T) {
 	}
 	if prevPtrButtons != 0 {
 		t.Fatalf("up must clear prevPtrButtons, got %#x", prevPtrButtons)
+	}
+	if railDragFrom != -1 {
+		t.Fatalf("same-cell release must clear railDragFrom, got %d", railDragFrom)
+	}
+	if tabs.At(0).ID != 3 || tabs.At(1).ID != 4 {
+		t.Fatal("same-cell click must not reorder")
+	}
+}
+
+func TestRailDragReordersTwoTabs(t *testing.T) {
+	saved := tabs
+	savedHosted := hostedApp
+	savedBtn := prevPtrButtons
+	savedDrag := railDragFrom
+	defer func() {
+		tabs = saved
+		hostedApp = savedHosted
+		prevPtrButtons = savedBtn
+		railDragFrom = savedDrag
+	}()
+	tabs = TabStrip{}
+	hostedApp = 0
+	prevPtrButtons = 0
+	railDragFrom = -1
+	if !tabs.OpenTab(3, "A") || !tabs.OpenTab(4, "B") {
+		t.Fatal("OpenTab")
+	}
+	_ = tabs.FocusTab(4)
+	down := uint32(320) | uint32(10)<<16
+	up := uint32(960) | uint32(10)<<16
+	handleWmPointer(vi.Event{Kind: vi.EvWmPointer, Arg0: down, Flags: uint16(hidBtnLeft)})
+	handleWmPointer(vi.Event{Kind: vi.EvWmPointer, Arg0: up, Flags: uint16(hidBtnLeft)})
+	handleWmPointer(vi.Event{Kind: vi.EvWmPointer, Arg0: up, Flags: 0})
+	if tabs.At(0).ID != 4 || tabs.At(1).ID != 3 {
+		t.Fatalf("drag 0→1 left ids=%d,%d want 4,3", tabs.At(0).ID, tabs.At(1).ID)
+	}
+	id, _ := tabs.Focused()
+	if id != 4 {
+		t.Fatalf("focus follows by id: got %d want 4", id)
+	}
+	if railDragFrom != -1 {
+		t.Fatalf("release must clear railDragFrom, got %d", railDragFrom)
+	}
+}
+
+func TestRailDragMissesClientAreaAndSameCell(t *testing.T) {
+	saved := tabs
+	savedHosted := hostedApp
+	savedDrag := railDragFrom
+	defer func() {
+		tabs = saved
+		hostedApp = savedHosted
+		railDragFrom = savedDrag
+	}()
+	tabs = TabStrip{}
+	hostedApp = 0
+	railDragFrom = -1
+	if !tabs.OpenTab(3, "A") || !tabs.OpenTab(4, "B") {
+		t.Fatal("OpenTab")
+	}
+	_ = tabs.FocusTab(4)
+	beginRailDrag(640, 360)
+	if railDragFrom != -1 {
+		t.Fatal("client-area press must not arm a drag")
+	}
+	if endRailDrag(960, 10) {
+		t.Fatal("unarmed release must not reorder")
+	}
+	beginRailDrag(320, 10)
+	if railDragFrom != 0 {
+		t.Fatalf("rail press armed %d want 0", railDragFrom)
+	}
+	if endRailDrag(320, 10) {
+		t.Fatal("same-cell release must not reorder")
+	}
+	if tabs.At(0).ID != 3 || tabs.At(1).ID != 4 {
+		t.Fatal("same-cell mutated order")
+	}
+	beginRailDrag(320, 10)
+	if endRailDrag(640, 360) {
+		t.Fatal("release off the rail must not reorder")
+	}
+	if tabs.At(0).ID != 3 {
+		t.Fatal("off-rail release mutated order")
 	}
 }

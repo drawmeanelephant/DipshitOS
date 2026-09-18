@@ -1,16 +1,16 @@
-# go-wm-hid.spec -- M63a–c (issues #1419/#1420/#1421) class-B gate: GOTABWM
-# drains WM pointer/key, handles pin/Alt+Tab, and rail-click focuses a tab.
+# go-wm-hid.spec -- M63a–d (issues #1419/#1420/#1421/#1422) class-B gate:
+# GOTABWM drains WM pointer/key, pin/Alt+Tab, rail-click, and drag-reorder.
 #
 # Seed wm=none, exec GOTABWM.ELF (explicit seat, not the boot-default path).
-# SPIKE + --via-virtio. After `gotabwm: rail n=2`, `--pointer-virtio` clicks
-# the unfocused top-rail cell (M63a drain + M63c hit-test). Then
-# `--input-chords 'ctrl-shift-p,alt-tab'` after the rail-click marker (M63b).
-# Markers print after the Pin()/TASKBAR syscall that made them true.
-# No drag, no close-x. Do not overload go-wm-seat / go-wm-tabs.
+# SPIKE + --via-virtio. After `gotabwm: rail n=2`, `--pointer-virtio`
+# `320,10,d;960,10,u`: press the unfocused cell (M63c click) and release
+# over the other cell (M63d Reorder). Then `--input-chords` after the
+# reorder marker so pin/Alt+Tab do not land mid-drag. No close-x, no
+# pin-glyph. Do not overload go-wm-seat / go-wm-tabs.
 #
 # Two equal-width cells on a 1280 rail: tab 0 is [0,640) center (320,10),
 # tab 1 is [640,1280) center (960,10). The last declare is focused (tab 1),
-# so the click that moves focus is tab 0 at 320,10. Zig's left-rail
+# so the drag that moves focus then flips order is 320→960. Zig's left-rail
 # (158,70) is the wrong target. Pane rects include y=0; the rail wins.
 
 # HOST PREREQUISITE (fails the gate honestly when missing):
@@ -21,9 +21,9 @@
 # exec-order: assert-proven -- the run ends on `rx-gotabwm-hid-ok`, which only
 # the script prints, and every stage gate waits on guest output the program
 # produces (`gotabwm: win focus`, `gotabwm: rail n=2`, `gotabwm: rail-click`,
-# `wm: unregistered, shim resumed`).
+# `gotabwm: reorder `, `wm: unregistered, shim resumed`).
 
-vgate_name go-wm-hid "issues #1419/#1420/#1421 M63a-c: GOTABWM rail click + pin/Alt+Tab on VZ"
+vgate_name go-wm-hid "issues #1419/#1420/#1421/#1422 M63a-d: GOTABWM rail drag-reorder on VZ"
 vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 
@@ -87,10 +87,10 @@ vgate_run 01 -- \
     --script '$RUN_DIR/script.txt' \
     --script2 '$RUN_DIR/script2.txt' \
     --script2-after 'gotabwm: win focus' \
-    --pointer-virtio '320,10,c' \
+    --pointer-virtio '320,10,d;960,10,u' \
     --pointer-virtio-after 'gotabwm: rail n=2' \
     --input-chords 'ctrl-shift-p,alt-tab' \
-    --input-chords-after 'gotabwm: rail-click id=' \
+    --input-chords-after 'gotabwm: reorder ' \
     --script3 '$RUN_DIR/script3.txt' \
     --script3-after 'wm: unregistered, shim resumed' \
     --script-expect 'rx-gotabwm-hid-ok' --timeout 300
@@ -104,6 +104,7 @@ vgate_assert 01 serial-contains 'gotabwm: rail'
 vgate_assert 01 serial-contains 'gotabwm: rail n=2'
 vgate_assert 01 serial-contains 'gotabwm: ptr'
 vgate_assert 01 serial-contains 'gotabwm: rail-click id='
+vgate_assert 01 serial-contains 'gotabwm: reorder 0->1'
 vgate_assert 01 serial-contains 'gotabwm: key'
 vgate_assert 01 serial-contains 'gotabwm: pin id='
 vgate_assert 01 serial-contains 'gotabwm: alt-tab id='
@@ -120,6 +121,7 @@ order_re = re.compile(
     r"^gotabwm: order ids=(\d+),(\d+) pin=(\d),(\d) focus=(\d+)$")
 rail2_re = re.compile(r"^gotabwm: rail n=2 focus=(\d+)$")
 click_re = re.compile(r"^gotabwm: rail-click id=(\d+)$")
+reorder_re = re.compile(r"^gotabwm: reorder (\d+)->(\d+)$")
 
 def first_after(prefix):
     for i, line in enumerate(ser):
@@ -158,10 +160,26 @@ if click_o.group(1) != click_id:
     sys.exit("clicked cell 0 but order left id=%s want %s: %s" % (
         click_o.group(1), click_id, click_o.group(0)))
 
+def first_match_after(rx, start):
+    for i, line in enumerate(ser[start + 1:], start + 1):
+        m = rx.match(line)
+        if m:
+            return i, m
+    sys.exit("missing /%s/ after index %d" % (rx.pattern, start))
+
+reo_i, reo_m = first_match_after(reorder_re, click_i)
+if reo_m.group(1) != "0" or reo_m.group(2) != "1":
+    sys.exit("HID drag must be 0->1, got %s->%s" % (
+        reo_m.group(1), reo_m.group(2)))
+reo_o = first_order_after(reo_i)
+if (reo_o.group(1), reo_o.group(2)) != (click_o.group(2), click_o.group(1)):
+    sys.exit("drag did not flip ids: click=%s drag=%s" % (
+        click_o.group(0), reo_o.group(0)))
+
 pin_i = first_after("gotabwm: pin id=")
 alt_i = first_after("gotabwm: alt-tab id=")
-if pin_i <= click_i:
-    sys.exit("pin must follow rail-click (click@%d pin@%d)" % (click_i, pin_i))
+if pin_i <= reo_i:
+    sys.exit("pin must follow rail drag (reorder@%d pin@%d)" % (reo_i, pin_i))
 if alt_i <= pin_i:
     sys.exit("alt-tab marker must follow pin (pin@%d alt-tab@%d)" % (pin_i, alt_i))
 
@@ -174,6 +192,7 @@ if alt_o.group(5) == pin_o.group(5):
         pin_o.group(5), pin_o.group(0), alt_o.group(0)))
 if "1" not in (alt_o.group(3), alt_o.group(4)):
     sys.exit("pin bit lost after alt-tab: %s" % alt_o.group(0))
-print("rail-click id=%s (was focus %s) then pin %s then focus %s -> %s" % (
-    click_id, rail_m.group(1), pin_o.group(0), pin_o.group(5), alt_o.group(5)))
+print("rail-click id=%s (was focus %s) drag %s then pin %s then focus %s -> %s" % (
+    click_id, rail_m.group(1), reo_o.group(0), pin_o.group(0),
+    pin_o.group(5), alt_o.group(5)))
 PY
