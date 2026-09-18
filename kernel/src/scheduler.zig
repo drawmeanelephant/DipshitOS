@@ -667,8 +667,28 @@ pub var sched_lock = spinlock.Spinlock.init();
 /// wakes waiters by mutating the same ring.
 var sched_lock_holder: usize = smp.max_cores;
 
+/// M70b (#1454) measurement, landed BEFORE any placement change: how hot
+/// the wake/TCB `sched_lock` actually runs on real cores. `acquires`
+/// sizes the traffic (every spawn/wake/exit holds it), `contended` how
+/// often the first cmpxchg found it held, `spins` the wasted attempts.
+/// Plain BSS counters (`+%=`): two cores racing lose an increment now
+/// and then — the signal this card needs is orders of magnitude above
+/// that noise. Printed by the monitor `smp` command as observed data;
+/// never a pass/fail threshold.
+pub var sched_lock_acquires: u64 = 0;
+pub var sched_lock_contended: u64 = 0;
+pub var sched_lock_spins: u64 = 0;
+
 fn sched_lock_acquire() void {
-    sched_lock.lock();
+    if (!sched_lock.try_lock()) {
+        sched_lock_contended +%= 1;
+        while (true) {
+            if (sched_lock.try_lock()) break;
+            sched_lock_spins +%= 1;
+            if (comptime builtin.cpu.arch == .aarch64) asm volatile ("yield");
+        }
+    }
+    sched_lock_acquires +%= 1;
     sched_lock_holder = smp.core_id();
 }
 
@@ -2485,6 +2505,7 @@ pub fn tick() void {
     // spans the rotation below — only this timekeeping beat.
     if (c == 0 and evk_taken != null and sched_lock.try_lock()) {
         sched_lock_holder = smp.core_id();
+        sched_lock_acquires +%= 1; // M70b: the tick's try-acquire is traffic too
         on_tick();
         sched_lock_release();
     }

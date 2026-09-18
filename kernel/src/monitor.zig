@@ -4501,6 +4501,15 @@ fn cmd_smp(m: *Monitor, args: []const []const u8) ExecError {
         }
         m.console.puts("\n");
     }
+    // M70b (#1454): contention evidence for the wake/TCB sched_lock —
+    // observed data read at the measurement point, never a threshold.
+    m.console.puts("smp: sched-lock acquires=");
+    m.console.print_u64(scheduler.sched_lock_acquires);
+    m.console.puts(" contended=");
+    m.console.print_u64(scheduler.sched_lock_contended);
+    m.console.puts(" spins=");
+    m.console.print_u64(scheduler.sched_lock_spins);
+    m.console.puts("\n");
     return .none;
 }
 
