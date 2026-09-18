@@ -25,6 +25,8 @@ exec WASM.BIN HELLO.WASM
 echo rx-wasm-hello
 exec WASM.BIN WC.WASM
 echo rx-w5-wc
+exec WASM.BIN TRIO.WASM
+echo rx-m70e-trio
 exec WASM.BIN WINAPP.WASM
 echo rx-w3-win
 EOF
@@ -81,6 +83,14 @@ shutil.copy("user/src/wasm-corpus/wc.wasm", os.path.join(share, "WC.WASM"))
 shutil.copy("tests/wc-fixture.txt", os.path.join(share, "WC.TXT"))
 shutil.copy("user/src/wasm-corpus/nl.wasm", os.path.join(share, "NL.WASM"))
 
+# M70e (#1457): the contract v2 author-proof module (file + window + timers)
+# and its input file. Trio carries a `virelai.abi` section, so §9.2 requires
+# a manifest row: `gen` writes one from the delivered bytes.
+shutil.copy("user/src/wasm-corpus/trio.wasm", os.path.join(share, "TRIO.WASM"))
+with open(os.path.join(share, "TRIO.TXT"), "wb") as f:
+    f.write(b"trio fixture: 40 bytes exactly. 1234abcd")  # exactly 40 B
+subprocess.run(["python3", "tools/wasm-manifest.py", "gen", share], check=True)
+
 # 4. FILE.TXT
 with open(os.path.join(share, "FILE.TXT"), "wb") as f:
     f.write(b"w3-filerocks!!!\n" * 32)
@@ -94,6 +104,16 @@ vgate_assert 01 serial-contains 'tasks user-exec exited status=55'
 vgate_assert 01 serial-contains 'rx-wasm-hello'
 vgate_assert 01 serial-contains 'w3: win open='
 vgate_assert 01 serial-contains 'w3: win ok'
+# M70e (#1457): the v2 module ran under §9.2 admission (its row was generated
+# from the delivered bytes above), and its file/window/timer results are the
+# kernel's answers: 40 bytes read, the geometry read BACK through win_get,
+# and the longest-timer arm cancelled before it can fire.
+vgate_assert 01 serial-contains 'trio: bytes=40'
+vgate_assert 01 serial-contains 'trio: win rect=40,40,96,48'
+vgate_assert 01 serial-contains 'trio: timers armed=1 canceled=1'
+vgate_assert 01 serial-contains 'trio: ok'
+vgate_assert 01 serial-contains 'tasks user-exec exited status=40'
+vgate_assert 01 serial-contains 'rx-m70e-trio'
 # The winapp now holds its window open (polling win_query) until script3's
 # `dui close 2` releases it (issue #1020: the old spin-count hold collapsed
 # to milliseconds once the interpreter outgrew its calibration, so the

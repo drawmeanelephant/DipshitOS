@@ -2468,6 +2468,12 @@ pub fn build(b: *std.Build) void {
         "user/src/lib/ssh/channel.zig",
         "user/src/lib/ssh/cli.zig",
         "user/src/el0exec.zig",
+        // M70e (#1457): the wasm loader's own test blocks (41 before the
+        // contract-v2 negatives) had no runner — the module was only built as
+        // WASM.BIN, so nothing in the fleet executed them. Registering the
+        // module as a host test root is what makes the §9 capability and
+        // admission negatives evidence rather than prose.
+        "user/src/wasm.zig",
         // X.509 layer (card TLS13-C3): the strict DER reader, the certificate
         // parser, PEM decoding and hostname/identity matching. None of these
         "user/tests/ui/ui_test.zig",

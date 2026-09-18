@@ -18,6 +18,9 @@
 //! so the EL0 stack never carries it.
 
 const std = @import("std");
+// Contract v2 delivery admission (§9.2) verifies the manifest row's SHA-256
+// against the module bytes. The in-tree hash is the same one lib/ssh uses.
+const sha256 = @import("lib/crypto/sha256.zig");
 
 // ---------------------------------------------------------------------------
 // Bounds (the zc discipline: fixed arrays, no heap)
@@ -116,45 +119,121 @@ const Frozen = struct {
     pc: u8,
     params: [6]ValType,
     rc: u8,
+    cap: Cap,
+};
+
+// ---------------------------------------------------------------------------
+// Contract v2 — declared capabilities (docs/wasm-import-contract.md §9)
+// ---------------------------------------------------------------------------
+/// The capability a frozen import belongs to. A module carrying a
+/// `virelai.abi` custom section (contract v2) must declare every capability
+/// whose imports it uses; validation fails closed with `UndeclaredCapability`
+/// otherwise. A module with NO such section is contract v1: the gate does not
+/// apply, which is what keeps v2 strictly additive — every M35 fixture and
+/// every already-authored module loads exactly as before.
+pub const Cap = enum(u8) {
+    debug,
+    file,
+    window,
+    audio,
+    timer,
+    memory,
+    process,
+
+    /// The wire spelling in the `capabilities=` / `caps=` directives.
+    pub fn name(c: Cap) []const u8 {
+        return switch (c) {
+            .debug => "debug",
+            .file => "file",
+            .window => "window",
+            .audio => "audio",
+            .timer => "timer",
+            .memory => "memory",
+            .process => "process",
+        };
+    }
+
+    pub fn parse(s: []const u8) ?Cap {
+        inline for (@typeInfo(Cap).@"enum".fields) |f| {
+            if (std.mem.eql(u8, s, f.name)) return @enumFromInt(f.value);
+        }
+        return null;
+    }
+};
+
+/// A declared capability set: one bit per capability, fixed width, no heap.
+pub const Caps = packed struct(u8) {
+    debug: bool = false,
+    file: bool = false,
+    window: bool = false,
+    audio: bool = false,
+    timer: bool = false,
+    memory: bool = false,
+    process: bool = false,
+    _reserved: u1 = 0,
+
+    pub fn has(c: Caps, cap: Cap) bool {
+        return switch (cap) {
+            .debug => c.debug,
+            .file => c.file,
+            .window => c.window,
+            .audio => c.audio,
+            .timer => c.timer,
+            .memory => c.memory,
+            .process => c.process,
+        };
+    }
+
+    pub fn set(c: *Caps, cap: Cap) void {
+        switch (cap) {
+            .debug => c.debug = true,
+            .file => c.file = true,
+            .window => c.window = true,
+            .audio => c.audio = true,
+            .timer => c.timer = true,
+            .memory => c.memory = true,
+            .process => c.process = true,
+        }
+    }
 };
 const frozen_imports = [_]Frozen{
     // W2 debug pair (contract §7: env.write / env.exit shim)
-    .{ .name = "write", .pc = 3, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
-    .{ .name = "exit", .pc = 1, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 0 },
+    .{ .name = "write", .pc = 3, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1, .cap = .debug },
+    .{ .name = "exit", .pc = 1, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 0, .cap = .debug },
     // §5.1 file — slots 23–27 + 34–37
-    .{ .name = "file_open", .pc = 3, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
-    .{ .name = "file_read", .pc = 3, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
-    .{ .name = "file_write", .pc = 3, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
-    .{ .name = "file_close", .pc = 1, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
-    .{ .name = "dir_list", .pc = 4, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
-    .{ .name = "file_delete", .pc = 2, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
-    .{ .name = "file_rename", .pc = 4, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
-    .{ .name = "file_truncate", .pc = 2, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
-    .{ .name = "file_free", .pc = 1, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
+    .{ .name = "file_open", .pc = 3, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1, .cap = .file },
+    .{ .name = "file_read", .pc = 3, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1, .cap = .file },
+    .{ .name = "file_write", .pc = 3, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1, .cap = .file },
+    .{ .name = "file_close", .pc = 1, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1, .cap = .file },
+    .{ .name = "dir_list", .pc = 4, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1, .cap = .file },
+    .{ .name = "file_delete", .pc = 2, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1, .cap = .file },
+    .{ .name = "file_rename", .pc = 4, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1, .cap = .file },
+    .{ .name = "file_truncate", .pc = 2, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1, .cap = .file },
+    .{ .name = "file_free", .pc = 1, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1, .cap = .file },
     // §5.2 window — slots 12–20
-    .{ .name = "win_open", .pc = 4, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
-    .{ .name = "win_fill", .pc = 6, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
-    .{ .name = "win_present", .pc = 1, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
-    .{ .name = "win_close", .pc = 1, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
-    .{ .name = "win_move", .pc = 3, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
-    .{ .name = "win_raise", .pc = 1, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
-    .{ .name = "win_get", .pc = 2, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
-    .{ .name = "win_query", .pc = 2, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
-    .{ .name = "win_set_visible", .pc = 2, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
+    .{ .name = "win_open", .pc = 4, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1, .cap = .window },
+    .{ .name = "win_fill", .pc = 6, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1, .cap = .window },
+    .{ .name = "win_present", .pc = 1, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1, .cap = .window },
+    .{ .name = "win_close", .pc = 1, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1, .cap = .window },
+    .{ .name = "win_move", .pc = 3, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1, .cap = .window },
+    .{ .name = "win_raise", .pc = 1, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1, .cap = .window },
+    .{ .name = "win_get", .pc = 2, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1, .cap = .window },
+    .{ .name = "win_query", .pc = 2, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1, .cap = .window },
+    .{ .name = "win_set_visible", .pc = 2, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1, .cap = .window },
     // §5.3 audio — slots 42–45
-    .{ .name = "audio_info", .pc = 1, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
-    .{ .name = "audio_play", .pc = 2, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
-    .{ .name = "audio_volume", .pc = 1, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
-    .{ .name = "audio_mute", .pc = 1, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
+    .{ .name = "audio_info", .pc = 1, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1, .cap = .audio },
+    .{ .name = "audio_play", .pc = 2, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1, .cap = .audio },
+    .{ .name = "audio_volume", .pc = 1, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1, .cap = .audio },
+    .{ .name = "audio_mute", .pc = 1, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1, .cap = .audio },
     // §5.4 timers — slots 40/41
-    .{ .name = "timer_set", .pc = 1, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
-    .{ .name = "timer_cancel", .pc = 0, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
+    .{ .name = "timer_set", .pc = 1, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1, .cap = .timer },
+    .{ .name = "timer_cancel", .pc = 0, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1, .cap = .timer },
     // §5.5 mmap — slot 63 over the wasm arena (munmap 64, same row)
-    .{ .name = "mmap", .pc = 4, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
-    .{ .name = "munmap", .pc = 2, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
+    .{ .name = "mmap", .pc = 4, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1, .cap = .memory },
+    .{ .name = "munmap", .pc = 2, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1, .cap = .memory },
     // §5.6/5.7 processes + wait
-    .{ .name = "procs", .pc = 2, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
-    .{ .name = "wait", .pc = 1, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1 },
+    .{ .name = "procs", .pc = 2, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1, .cap = .process },
+    .{ .name = "wait", .pc = 1, .params = .{ .i32, .i32, .i32, .i32, .i32, .i32 }, .rc = 1, .cap = .process },
 };
 
 fn checkFrozenImport(m: *const Module, imp: *const Import) ValidationError!void {
@@ -172,10 +251,191 @@ fn checkFrozenImport(m: *const Module, imp: *const Import) ValidationError!void 
             // i32-lane Value the body reads through the i64 lane (stale
             // stack in the high bits) — contract §5 signatures are exact.
             if (f.rc == 1 and ft.results[0] != .i32) return error.ImportSignature;
+            // Contract v2 (§9): a module that declares its ABI revision must
+            // also declare the capability this import belongs to. A v1 module
+            // (no `virelai.abi` section) is exempt — that is the additive rule.
+            if (m.abi_declared and !m.caps.has(f.cap)) return error.UndeclaredCapability;
             return;
         }
     }
     return error.UnknownImport;
+}
+
+/// Contract v2 custom-section name and the revision this loader implements.
+pub const abi_section_name = "virelai.abi";
+pub const abi_current_revision: u8 = 2;
+
+/// Contract v2 `virelai.abi` custom section (§9): ASCII, one directive per
+/// line, `#` comments and blank lines ignored.
+///
+///     virelai.abi=2
+///     capabilities=file,window,timer
+///
+/// `virelai.abi=<n>` is required and must be 1 or 2 — a higher revision is
+/// `UnsupportedAbiRevision` (fail closed: an unknown revision may mean
+/// imports this loader would mis-dispatch). `capabilities=` is optional, and
+/// OMITTING it is how a module declares "no capabilities"; each listed name
+/// must be a §9 capability spelling. Anything else in the payload, a
+/// duplicate directive, or a second `virelai.abi` section is `BadAbiSection`.
+fn parseAbiSection(m: *Module, r: *Reader) ParseError!void {
+    if (m.abi_declared) return error.BadAbiSection; // duplicate section
+    var declared: Caps = .{};
+    var revision: ?u8 = null;
+    var lines = std.mem.splitScalar(u8, r.bytes[r.pos..], '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0 or line[0] == '#') continue;
+        if (std.mem.startsWith(u8, line, "virelai.abi=")) {
+            if (revision != null) return error.BadAbiSection; // duplicate directive
+            const v = line["virelai.abi=".len..];
+            if (v.len == 0 or v.len > 3) return error.BadAbiSection;
+            revision = std.fmt.parseUnsigned(u8, v, 10) catch return error.BadAbiSection;
+            continue;
+        }
+        if (std.mem.startsWith(u8, line, "capabilities=")) {
+            const list = line["capabilities=".len..];
+            if (list.len == 0) return error.BadAbiSection; // omit the line instead
+            var names = std.mem.splitScalar(u8, list, ',');
+            while (names.next()) |n| {
+                const cap = Cap.parse(n) orelse return error.BadAbiSection;
+                declared.set(cap);
+            }
+            continue;
+        }
+        return error.BadAbiSection; // unknown directive
+    }
+    const rev = revision orelse return error.BadAbiSection; // revision is required
+    if (rev < 1) return error.BadAbiSection;
+    if (rev > abi_current_revision) return error.UnsupportedAbiRevision;
+    m.abi_declared = true;
+    m.abi_revision = rev;
+    m.caps = declared;
+}
+
+/// The capabilities a module's imports actually exercise: the union of the
+/// `cap` field of every frozen import it declares. The manifest admission
+/// check (and its host tests) compare this against the row's granted set.
+pub fn usedCaps(m: *const Module) Caps {
+    var used: Caps = .{};
+    for (m.imports[0..m.import_count]) |imp| {
+        if (imp.kind != .func) continue;
+        for (frozen_imports) |f| {
+            if (std.mem.eql(u8, imp.name, f.name)) used.set(f.cap);
+        }
+    }
+    return used;
+}
+
+// ---------------------------------------------------------------------------
+// Contract v2 — host-share delivery manifest (§9.2)
+// ---------------------------------------------------------------------------
+/// The manifest the guest reads. Its FORMAT is normative in
+/// docs/wasm-import-contract.md §9.2, not here; the tool in tools/ writes it.
+pub const manifest_path = "/host/WASM.TXT";
+
+/// One row: `NAME.WASM | <bytes> | <64 hex chars> | abi=<n> | caps=<a,b,c>`
+/// (`caps=none` for the empty set). Blank lines and `#` comments are ignored.
+pub const ManifestRow = struct {
+    name: []const u8,
+    bytes: u64,
+    digest: [32]u8,
+    abi: u8,
+    caps: Caps,
+
+    /// Strict, and deliberately so: a row that does not parse returns null,
+    /// and the caller refuses the module. A malformed row is
+    /// indistinguishable from a missing one — nothing about a delivery is
+    /// guessed at.
+    pub fn parse(line: []const u8) ?ManifestRow {
+        var fields = std.mem.splitScalar(u8, line, '|');
+        const name = std.mem.trim(u8, fields.next() orelse return null, " \t");
+        const size_s = std.mem.trim(u8, fields.next() orelse return null, " \t");
+        const digest_s = std.mem.trim(u8, fields.next() orelse return null, " \t");
+        const abi_s = std.mem.trim(u8, fields.next() orelse return null, " \t");
+        const caps_s = std.mem.trim(u8, fields.next() orelse return null, " \t");
+        if (fields.next() != null) return null; // exactly five fields
+        if (name.len == 0 or name.len > 64) return null;
+        const size = std.fmt.parseUnsigned(u64, size_s, 10) catch return null;
+        if (digest_s.len != 64) return null;
+        var digest: [32]u8 = undefined;
+        for (0..32) |i| {
+            digest[i] = std.fmt.parseUnsigned(u8, digest_s[i * 2 .. i * 2 + 2], 16) catch return null;
+        }
+        if (!std.mem.startsWith(u8, abi_s, "abi=")) return null;
+        const abi = std.fmt.parseUnsigned(u8, abi_s["abi=".len..], 10) catch return null;
+        if (abi == 0 or abi > abi_current_revision) return null;
+        if (!std.mem.startsWith(u8, caps_s, "caps=")) return null;
+        const list = caps_s["caps=".len..];
+        var caps: Caps = .{};
+        if (!std.mem.eql(u8, list, "none")) {
+            if (list.len == 0) return null;
+            var names = std.mem.splitScalar(u8, list, ',');
+            while (names.next()) |nm| {
+                const cap = Cap.parse(nm) orelse return null;
+                caps.set(cap);
+            }
+        }
+        return .{ .name = name, .bytes = size, .digest = digest, .abi = abi, .caps = caps };
+    }
+};
+
+pub const AdmitFailure = enum {
+    ok,
+    no_row, // the module is v2 but the share does not vouch for it
+    size, // byte length differs from the row
+    digest, // SHA-256 differs from the row
+    revision, // declared ABI revision differs from the row
+    capability, // the module uses a capability the row does not grant
+};
+
+/// The §9.2 admission decision — pure, so the host tests and the guest run
+/// the identical rule. `used` is `usedCaps(module)`; `digest` is SHA-256 over
+/// the module bytes. A row may grant MORE than the module uses (an operator
+/// may pre-provision a module's next revision); it may never grant less.
+pub fn admit(row: ?ManifestRow, size: u64, digest: [32]u8, abi: u8, used: Caps) AdmitFailure {
+    const r = row orelse return .no_row;
+    if (r.bytes != size) return .size;
+    if (!std.mem.eql(u8, &r.digest, &digest)) return .digest;
+    if (r.abi != abi) return .revision;
+    inline for (@typeInfo(Cap).@"enum".fields) |f| {
+        const cap: Cap = @enumFromInt(f.value);
+        if (used.has(cap) and !r.caps.has(cap)) return .capability;
+    }
+    return .ok;
+}
+
+/// ASCII case-insensitive row-name match: the share is 8.3-uppercase by
+/// convention while the exec name is whatever the user typed.
+fn manifestNameMatches(row_name: []const u8, name: []const u8) bool {
+    if (row_name.len != name.len) return false;
+    for (row_name, name) |a, b| {
+        if (std.ascii.toUpper(a) != std.ascii.toUpper(b)) return false;
+    }
+    return true;
+}
+
+var g_manifest_buf: [4096]u8 = undefined;
+
+/// Read `manifest_path` and return the row for `name`, or null — a missing
+/// file, no matching row, and an unparseable row are the same refusal.
+fn findManifestRow(name: []const u8) ?ManifestRow {
+    const fd = file_open(manifest_path, MODE_READ);
+    if (fd < 0) return null;
+    var len: usize = 0;
+    while (len < g_manifest_buf.len) {
+        const r = file_read(@intCast(fd), g_manifest_buf[len..]);
+        if (r <= 0) break;
+        len += @intCast(r);
+    }
+    _ = file_close(@intCast(fd));
+    var lines = std.mem.splitScalar(u8, g_manifest_buf[0..len], '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0 or line[0] == '#') continue;
+        const row = ManifestRow.parse(line) orelse continue;
+        if (manifestNameMatches(row.name, name)) return row;
+    }
+    return null;
 }
 
 /// Active element segment (flag 0x00 form only; table 0).
@@ -227,6 +487,11 @@ pub const Module = struct {
     data_count: u16 = 0,
     has_datacount: bool = false, // DataCount section (id 12) present
     data_count_decl: u16 = 0, // value from that section (memory.init index cap)
+    /// Contract v2 state from the optional `virelai.abi` custom section (§9).
+    /// `abi_declared == false` is a v1 module: the capability gate is skipped.
+    abi_declared: bool = false,
+    abi_revision: u8 = 1, // 1 = undeclared (legacy), else the declared revision
+    caps: Caps = .{},
 };
 
 // ---------------------------------------------------------------------------
@@ -251,6 +516,8 @@ pub const ParseError = error{
     TooManyLocals,
     CodeCountMismatch,
     TrailingBytes, // non-empty bytes after a section payload
+    BadAbiSection, // `virelai.abi` payload malformed, duplicate, or unknown directive
+    UnsupportedAbiRevision, // `virelai.abi=<n>` names a revision past contract v2
 };
 
 pub const ValidationError = ParseError || error{
@@ -278,6 +545,7 @@ pub const ValidationError = ParseError || error{
     UnknownImportModule, // import module != "env" (W3: WASI etc. always rejected)
     UnknownImport, // import name not in the frozen env.* surface (W3)
     ImportSignature, // frozen name with a non-contract param/result shape (W3)
+    UndeclaredCapability, // v2 module used an import whose capability it did not declare (§9)
     MultiValueBlock, // blocktype with a type index (multi-value)
     StackOverflow,
 };
@@ -384,8 +652,15 @@ pub fn parseInto(m: *Module, bytes: []const u8) ParseError!void {
     var prev_id: u8 = 0;
     while (r.pos < r.bytes.len) {
         const id = try r.u8_();
-        if (id == 0) { // custom section: skip payload
-            _ = try r.take(try r.uleb());
+        if (id == 0) { // custom section: parse `virelai.abi` (§9), skip the rest
+            const csize = try r.uleb();
+            const payload_pos = r.pos;
+            const payload = try r.take(csize);
+            var cr = Reader{ .bytes = payload, .base = payload_pos };
+            // A custom section whose NAME is unreadable is still skipped, as
+            // before — only the section we own fails the module.
+            const cname = cr.name() catch continue;
+            if (std.mem.eql(u8, cname, abi_section_name)) try parseAbiSection(m, &cr);
             continue;
         }
         if (id > 12) return error.UnknownSection;
@@ -3130,8 +3405,36 @@ pub export fn _start(argc: usize, argv: ?[*]const [32]u8) callconv(.c) noreturn 
     _ = file_close(@intCast(fd));
     if (n == 0) fail("wasm: empty module\n", 4);
 
-    parseInto(&g_module, g_mod_buf[0..n]) catch fail("wasm: parse error\n", 10);
-    validate(&g_module) catch fail("wasm: validate error\n", 11);
+    // Contract v2 (§9) refusals are NAMED on the serial, with their own exit
+    // status: a module rejected by the ABI gate is a named refusal, never a
+    // trap inside the interpreter (M70e deliverable 4).
+    parseInto(&g_module, g_mod_buf[0..n]) catch |e| switch (e) {
+        error.UnsupportedAbiRevision => fail("wasm: abi: unsupported revision\n", 14),
+        error.BadAbiSection => fail("wasm: abi: bad virelai.abi section\n", 15),
+        else => fail("wasm: parse error\n", 10),
+    };
+    validate(&g_module) catch |e| switch (e) {
+        error.UndeclaredCapability => fail("wasm: abi: undeclared capability\n", 16),
+        else => fail("wasm: validate error\n", 11),
+    };
+
+    // §9.2 delivery admission: a v2 module runs only when the host share
+    // vouches for it — same bytes, same revision, no capability escalation.
+    // A v1 module (no `virelai.abi` section) keeps the legacy drop-and-exec
+    // path: that is what makes v2 additive rather than a migration.
+    if (g_module.abi_declared) {
+        var digest: [32]u8 = undefined;
+        sha256.sha256(&digest, g_mod_buf[0..n]);
+        const row = findManifestRow(name);
+        switch (admit(row, n, digest, g_module.abi_revision, usedCaps(&g_module))) {
+            .ok => {},
+            .no_row => fail("wasm: manifest: no row\n", 17),
+            .size => fail("wasm: manifest: size mismatch\n", 18),
+            .digest => fail("wasm: manifest: digest mismatch\n", 19),
+            .revision => fail("wasm: manifest: abi revision mismatch\n", 20),
+            .capability => fail("wasm: manifest: capability not granted\n", 21),
+        }
+    }
 
     // Linear memory: mmap'd (M29 anonymous, zero-filled COW), never .bss.
     const store_len: usize = max_mem_pages * page_size; // 2 MiB hard cap (D2)
@@ -4099,4 +4402,289 @@ test "xl: rustc-authored nl fixture runs in-guest byte-exact (pinned)" {
         if (cl.id == .file_read and cl.a[0] == 0) reads += 1;
     }
     try testing.expect(reads >= 5);
+}
+
+// ---------------------------------------------------------------------------
+// M70e (#1457) — contract v2: the `virelai.abi` custom section (§9).
+// Host-decidable sandbox negatives in the same style as the W3 block above:
+// hand-built module bytes through parse + validate. The delivery/manifest
+// half (missing row, length/digest/revision mismatch, capability escalation)
+// is host-testable too and lives with the admission code below.
+// ---------------------------------------------------------------------------
+
+/// Minimal module builder for the §9 fixtures — fixed buffers, no heap.
+const ModBuilder = struct {
+    buf: []u8,
+    len: usize = 0,
+
+    fn raw(bs: *ModBuilder, bytes: []const u8) void {
+        @memcpy(bs.buf[bs.len..][0..bytes.len], bytes);
+        bs.len += bytes.len;
+    }
+    fn byte(bs: *ModBuilder, v: u8) void {
+        bs.buf[bs.len] = v;
+        bs.len += 1;
+    }
+    fn uleb(bs: *ModBuilder, v: usize) void {
+        var x = v;
+        while (true) {
+            var b: u8 = @intCast(x & 0x7f);
+            x >>= 7;
+            if (x != 0) b |= 0x80;
+            bs.byte(b);
+            if (x == 0) break;
+        }
+    }
+    fn name(bs: *ModBuilder, s: []const u8) void {
+        bs.uleb(s.len);
+        bs.raw(s);
+    }
+    fn section(bs: *ModBuilder, id: u8, payload: []const u8) void {
+        bs.byte(id);
+        bs.uleb(payload.len);
+        bs.raw(payload);
+    }
+};
+
+var abi_scratch: [1024]u8 = undefined;
+
+/// A module importing exactly `env.file_open` `(i32,i32,i32)->i32`, with one
+/// memory, plus the optional `virelai.abi` custom section (emitted twice when
+/// `dupe` — the duplicate-section refusal).
+fn abiFixtureOpts(abi_text: ?[]const u8, dupe: bool) []const u8 {
+    var sec: [512]u8 = undefined;
+    var b = ModBuilder{ .buf = &abi_scratch };
+    b.raw("\x00asm\x01\x00\x00\x00");
+    if (abi_text) |t| {
+        var sb = ModBuilder{ .buf = &sec };
+        sb.name(abi_section_name);
+        sb.raw(t);
+        b.section(0, sec[0..sb.len]); // custom before type: legal anywhere
+        if (dupe) b.section(0, sec[0..sb.len]);
+    }
+    {
+        var sb = ModBuilder{ .buf = &sec };
+        sb.uleb(1);
+        sb.byte(0x60);
+        sb.uleb(3);
+        sb.raw(&[_]u8{ 0x7f, 0x7f, 0x7f });
+        sb.uleb(1);
+        sb.byte(0x7f);
+        b.section(1, sec[0..sb.len]);
+    }
+    {
+        var sb = ModBuilder{ .buf = &sec };
+        sb.uleb(1);
+        sb.name("env");
+        sb.name("file_open");
+        sb.byte(0x00); // func
+        sb.uleb(0); // type index
+        b.section(2, sec[0..sb.len]);
+    }
+    {
+        var sb = ModBuilder{ .buf = &sec };
+        sb.uleb(1);
+        sb.byte(0x00);
+        sb.uleb(1);
+        b.section(5, sec[0..sb.len]);
+    }
+    return abi_scratch[0..b.len];
+}
+
+fn abiFixture(abi_text: ?[]const u8) []const u8 {
+    return abiFixtureOpts(abi_text, false);
+}
+
+test "v2 (§9): a declared revision + capabilities gate the imports used" {
+    var m = try parse(abiFixture("virelai.abi=2\ncapabilities=file\n"));
+    try testing.expect(m.abi_declared);
+    try testing.expectEqual(@as(u8, 2), m.abi_revision);
+    try testing.expect(m.caps.has(.file));
+    try testing.expect(!m.caps.has(.window));
+    try validate(&m); // file_open is covered by the declared `file`
+
+    // The SAME module with the capability it uses omitted fails closed.
+    var m2 = try parse(abiFixture("virelai.abi=2\ncapabilities=debug\n"));
+    try testing.expectError(error.UndeclaredCapability, validate(&m2));
+
+    // ...and so does declaring v2 with no `capabilities=` line at all, which
+    // is the empty set (omitting the line is how a module declares "none").
+    var m3 = try parse(abiFixture("virelai.abi=2\n"));
+    try testing.expectError(error.UndeclaredCapability, validate(&m3));
+}
+
+test "v2 (§9): a revision past the contract fails closed before start" {
+    try testing.expectError(error.UnsupportedAbiRevision, parse(abiFixture("virelai.abi=3\ncapabilities=file\n")));
+    try testing.expectError(error.UnsupportedAbiRevision, parse(abiFixture("virelai.abi=99\n")));
+    // v1 is still accepted: additive, not breaking.
+    var m = try parse(abiFixture("virelai.abi=1\ncapabilities=file\n"));
+    try testing.expectEqual(@as(u8, 1), m.abi_revision);
+    try validate(&m);
+}
+
+test "v2 (§9): a malformed section is a named refusal, never a guess" {
+    // an unknown directive — an attempt to smuggle a new key past the loader
+    try testing.expectError(error.BadAbiSection, parse(abiFixture("virelai.abi=2\ncapabilities=file\nvm_escape=yes\n")));
+    // a capability spelling outside §9
+    try testing.expectError(error.BadAbiSection, parse(abiFixture("virelai.abi=2\ncapabilities=net\n")));
+    // an empty list (the way to declare none is to omit the line)
+    try testing.expectError(error.BadAbiSection, parse(abiFixture("virelai.abi=2\ncapabilities=\n")));
+    // a padded name is a DIFFERENT name, not a sloppy match
+    try testing.expectError(error.BadAbiSection, parse(abiFixture("virelai.abi=2\ncapabilities= file\n")));
+    // revision missing / unparseable / repeated, and a duplicate section
+    try testing.expectError(error.BadAbiSection, parse(abiFixture("capabilities=file\n")));
+    try testing.expectError(error.BadAbiSection, parse(abiFixture("virelai.abi=two\n")));
+    try testing.expectError(error.BadAbiSection, parse(abiFixture("virelai.abi=2\nvirelai.abi=2\n")));
+    try testing.expectError(error.BadAbiSection, parse(abiFixtureOpts("virelai.abi=2\ncapabilities=file\n", true)));
+}
+
+test "v2 (§9): a v1 module (no section) is untouched, and usedCaps still reports" {
+    // The frozen M35 corpus carries no `virelai.abi` section: it must parse,
+    // validate and report an empty DECLARED set — that is what makes v2
+    // additive rather than a break of every authored module.
+    var m = try parse(abiFixture(null));
+    try testing.expect(!m.abi_declared);
+    try testing.expectEqual(@as(u8, 1), m.abi_revision);
+    try testing.expect(!m.caps.has(.file));
+    try validate(&m);
+    // usedCaps is derived from the imports, not from the declaration.
+    try testing.expect(usedCaps(&m).has(.file));
+    try testing.expect(!usedCaps(&m).has(.audio));
+}
+
+test "v2 (§9): a module past max_imports is refused (32 is the ceiling)" {
+    var sec: [4096]u8 = undefined;
+    var b = ModBuilder{ .buf = &abi_scratch };
+    b.raw("\x00asm\x01\x00\x00\x00");
+    {
+        var sb = ModBuilder{ .buf = &sec };
+        sb.uleb(1);
+        sb.byte(0x60);
+        sb.uleb(3);
+        sb.raw(&[_]u8{ 0x7f, 0x7f, 0x7f });
+        sb.uleb(1);
+        sb.byte(0x7f);
+        b.section(1, sec[0..sb.len]);
+    }
+    {
+        var sb = ModBuilder{ .buf = &sec };
+        sb.uleb(max_imports + 1);
+        for (0..max_imports + 1) |_| {
+            sb.name("env");
+            sb.name("file_open");
+            sb.byte(0x00);
+            sb.uleb(0);
+        }
+        b.section(2, sec[0..sb.len]);
+    }
+    try testing.expectError(error.TooManyEntries, parse(abi_scratch[0..b.len]));
+}
+
+test "v2 (§9): the cap table covers every capability, and every frozen import maps once" {
+    // A drift guard: a frozen import added without a capability would make the
+    // v2 gate unenforceable for that name, and an unused Cap would mean §9
+    // documents a capability nothing needs.
+    var reachable: [@typeInfo(Cap).@"enum".fields.len]bool = @splat(false);
+    for (frozen_imports) |f| reachable[@intFromEnum(f.cap)] = true;
+    for (reachable) |r| try testing.expect(r);
+}
+
+test "v2 (§9.2): manifest rows parse strictly, and a malformed row is not guessed" {
+    const fixture = abiFixture("virelai.abi=2\ncapabilities=file\n");
+    var digest: [32]u8 = undefined;
+    sha256.sha256(&digest, fixture);
+    var text_buf: [256]u8 = undefined;
+    const line = try std.fmt.bufPrint(&text_buf, "abi.wasm | {d} | {x} | abi=2 | caps=file", .{ fixture.len, digest });
+    const row = ManifestRow.parse(line).?;
+    try testing.expectEqualStrings("abi.wasm", row.name);
+    try testing.expectEqual(@as(u64, fixture.len), row.bytes);
+    try testing.expectEqualSlices(u8, &digest, &row.digest);
+    try testing.expectEqual(@as(u8, 2), row.abi);
+    try testing.expect(row.caps.has(.file));
+    try testing.expect(!row.caps.has(.debug));
+    // The exec name is compared case-insensitively, and only in full.
+    try testing.expect(manifestNameMatches(row.name, "ABI.WASM"));
+    try testing.expect(!manifestNameMatches(row.name, "ABI.WAS"));
+
+    // short digest / non-hex / missing field / six fields / unknown capability
+    try testing.expect(ManifestRow.parse("ABI.WASM | 12 | ab | abi=2 | caps=file") == null);
+    try testing.expect(ManifestRow.parse("ABI.WASM | 12 | 00112233445566778899aabbccddeeff00112233445566778899aabbccddeefg | abi=2 | caps=file") == null);
+    try testing.expect(ManifestRow.parse("ABI.WASM | 12 | 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff | abi=2") == null);
+    try testing.expect(ManifestRow.parse("ABI.WASM | 12 | 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff | abi=2 | caps=file | extra") == null);
+    try testing.expect(ManifestRow.parse("ABI.WASM | 12 | 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff | abi=2 | caps=net") == null);
+    try testing.expect(ManifestRow.parse("ABI.WASM | 12 | 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff | abi=2 | caps=") == null);
+    // a revision row outside the contract is not a delivery we can honour
+    try testing.expect(ManifestRow.parse("ABI.WASM | 12 | 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff | abi=3 | caps=file") == null);
+    // `caps=none` is the explicit empty set (and NOT the same as an empty list)
+    const none = ManifestRow.parse("ABI.WASM | 12 | 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff | abi=2 | caps=none").?;
+    try testing.expect(!none.caps.has(.file));
+}
+
+test "v2 (§9.2): admission refuses an unvouched, altered, or escalated module" {
+    const fixture = abiFixture("virelai.abi=2\ncapabilities=file\n");
+    var m = try parse(fixture);
+    const used = usedCaps(&m);
+    var digest: [32]u8 = undefined;
+    sha256.sha256(&digest, fixture);
+    const row = ManifestRow{ .name = "ABI.WASM", .bytes = fixture.len, .digest = digest, .abi = 2, .caps = .{ .file = true } };
+    try testing.expectEqual(AdmitFailure.ok, admit(row, fixture.len, digest, 2, used));
+
+    // One flipped byte in the module is a different delivery.
+    var altered = digest;
+    altered[31] ^= 0x01;
+    try testing.expectEqual(AdmitFailure.digest, admit(row, fixture.len, altered, 2, used));
+    try testing.expectEqual(AdmitFailure.size, admit(row, fixture.len + 1, digest, 2, used));
+    try testing.expectEqual(AdmitFailure.revision, admit(row, fixture.len, digest, 1, used));
+    try testing.expectEqual(AdmitFailure.no_row, admit(null, fixture.len, digest, 2, used));
+
+    // Capability escalation: a valid row that grants `debug` while the module's
+    // imports need `file` is REFUSED, not silently widened.
+    const narrow = ManifestRow{ .name = "ABI.WASM", .bytes = fixture.len, .digest = digest, .abi = 2, .caps = .{ .debug = true } };
+    try testing.expectEqual(AdmitFailure.capability, admit(narrow, fixture.len, digest, 2, used));
+    // Pre-provisioning (a row granting more than the module uses) is allowed.
+    const wide = ManifestRow{ .name = "ABI.WASM", .bytes = fixture.len, .digest = digest, .abi = 2, .caps = .{ .file = true, .window = true } };
+    try testing.expectEqual(AdmitFailure.ok, admit(wide, fixture.len, digest, 2, used));
+}
+
+test "v2 (§9): the author-proof corpus apps declare exactly what they use" {
+    // trio.c (file + window + timers) and ticker.c (timer only) were written
+    // from §5 + §9 alone — the §7 provenance rule made executable. Both carry
+    // the section, so both are subject to §9.1 validation AND §9.2 admission.
+    const trio = @embedFile("wasm-corpus/trio.wasm");
+    var mt = try parse(trio);
+    try validate(&mt);
+    try testing.expect(mt.abi_declared);
+    try testing.expectEqual(@as(u8, 2), mt.abi_revision);
+    const used_trio = usedCaps(&mt);
+    try testing.expect(used_trio.has(.file));
+    try testing.expect(used_trio.has(.window));
+    try testing.expect(used_trio.has(.timer));
+    try testing.expect(used_trio.has(.debug));
+    try testing.expect(!used_trio.has(.audio));
+    // The declaration must cover what the imports need, or the app would
+    // refuse itself at validation.
+    inline for (@typeInfo(Cap).@"enum".fields) |f| {
+        const cap: Cap = @enumFromInt(f.value);
+        try testing.expect(!used_trio.has(cap) or mt.caps.has(cap));
+    }
+
+    const ticker = @embedFile("wasm-corpus/ticker.wasm");
+    var mk = try parse(ticker);
+    try validate(&mk);
+    try testing.expect(mk.abi_declared);
+    const used_ticker = usedCaps(&mk);
+    // The narrow-capability proof: ticker asks for nothing it does not use.
+    try testing.expect(used_ticker.has(.timer));
+    try testing.expect(used_ticker.has(.debug));
+    try testing.expect(!used_ticker.has(.file));
+    try testing.expect(!used_ticker.has(.window));
+
+    // §9.2 on the REAL bytes: a row generated from the module admits it; the
+    // same delivery with no row is refused, which is the live gate's `no_row`
+    // case seen host-side.
+    var digest: [32]u8 = undefined;
+    sha256.sha256(&digest, trio);
+    const row = ManifestRow{ .name = "TRIO.WASM", .bytes = trio.len, .digest = digest, .abi = 2, .caps = mt.caps };
+    try testing.expectEqual(AdmitFailure.ok, admit(row, trio.len, digest, 2, used_trio));
+    try testing.expectEqual(AdmitFailure.no_row, admit(null, trio.len, digest, 2, used_trio));
 }

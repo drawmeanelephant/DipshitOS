@@ -216,6 +216,45 @@ entry path (`#1333`'s class); `virtio_file.stat`'s inline `[size][type]` field
 parse, which is only reachable through the queue-5 transport; and the host
 runner's request parse in `main.swift`, which is not VZ-free.
 
+## Contract v2 — capabilities and delivery admission (M70e, issue #1457)
+
+`docs/wasm-import-contract.md` **§9** is normative; this is how it is verified.
+
+- **`user/src/wasm.zig` unit tests (class A, `zig build test`).** The module
+  now registers as a host test root. Before M70e, nothing in the fleet ran its
+  41 test blocks: the file was only ever built as `WASM.BIN`, and it was
+  absent from `build.zig`'s test-source list, so `zig test user/src/wasm.zig`
+  was a hand-run habit rather than a gate. The §9 cases cover a declared
+  revision + capability set gating the imports actually used, an unsupported
+  revision failing closed before start, every malformed-section shape, a v1
+  module (no section) staying untouched, a module past `max_imports`, and a
+  drift guard that every capability is reachable from the frozen list. The
+  §9.2 cases parse manifest rows strictly and pin the admission order
+  (`no_row` → `size` → `digest` → `revision` → `capability`), including a row
+  granting more than the module uses (allowed) and one granting less (refused).
+- **`live-wasm-abi.spec` (class B, one boot).** The refusal surface live, each
+  a named serial line with its own exit status: unsupported revision `14`,
+  undeclared capability `16`, no row `17`, size `18`, digest `19`, capability
+  escalation `21` — plus the two paths that must keep working: a v2 module
+  whose row was generated from the delivered bytes (`TRIO.WASM`), and a v1
+  module that runs with no row at all (`WC.WASM`, the additivity promise).
+- **`live-wasm.spec`** gained the positive v2 phase: the stamped corpus
+  module, delivered with a manifest row, asserting its file/window/timer
+  results and exit status 40 (its byte count).
+- **`tools/wasm-manifest.py`** is the delivery tool — `stamp` (add/replace the
+  §9.1 section), `gen` (write `WASM.TXT` from the modules present), `check`
+  (re-verify every row against every file). It reads the name→capability
+  mapping OUT of `user/src/wasm.zig`, so the tool and the loader cannot
+  disagree about which capability owns an import.
+
+**Observed while gating this:** nine `exec WASM.BIN …` commands injected in a
+single script produce nine runs but **eight** `tasks user-exec exited status=`
+reports — the monitor collapses a report when the next run reaps before the
+previous is drained, and the dropped one is the first (trio's `status=40`).
+The admission spec therefore asserts the refusal statuses, all of which
+survive, and the staged `live-wasm.spec` asserts the app's own exit status.
+Re-runs reproduced the same drop.
+
 ## Verification sequence
 
 1. Print the detected tool versions.
