@@ -58,8 +58,8 @@ const blankRGB uint32 = 0x1A1E2E
 // each runtime is 3 kernel tasks: primary + sysmon + helper). A
 // `--pointer-virtio` click is 3 messages × 2.5 s; pointerClickHold is that
 // budget in ticks. maxTicks must cover hostTicks + hidChordHold + the
-// two-tab choreography (9) so M63 HID (click, type-in, chords) lands
-// before auto pin/close.
+// two-tab choreography (9) so M63 HID (click, type-in, drag, chords)
+// lands before auto pin/close. Type-in and drag are separate boots.
 const maxTicks = 48
 
 // pointerClickHold is how many composite ticks one `--pointer-virtio` click

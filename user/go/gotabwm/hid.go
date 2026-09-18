@@ -26,8 +26,9 @@ const (
 )
 
 // hidChordHold is how many composite ticks the two-tab choreography waits
-// after first seeing n>=2, so a rail click (3×2.5 s), `--input-string`
-// into GOEDIT, and `--input-chords` land before auto reorder/pin.
+// after first seeing n>=2, so a rail click (3×2.5 s), a press/release drag
+// (pointerDragHold), `--input-string` into GOEDIT, and `--input-chords`
+// land before auto reorder/pin. The type-in and drag boots are separate.
 const hidChordHold = 20
 
 // pointerDragHold is one `--pointer-virtio 'x,y,d;x,y,u'` (4 messages × 2.5 s).
