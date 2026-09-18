@@ -168,8 +168,11 @@ func TestVerticalMovesClampColumns(t *testing.T) {
 	if b.Line() != 3 || b.Col() != 2 {
 		t.Fatalf("down from a clamped column: %d/%d want 3/2 (the clamped column, not 10)", b.Line(), b.Col())
 	}
-	if !b.Up() || b.Line() != 2 {
-		t.Fatalf("Up = %v line=%d want true line=2", b.Up(), b.Line())
+	if !b.Up() {
+		t.Fatal("Up from line 3 refused")
+	}
+	if b.Line() != 2 {
+		t.Fatalf("Up landed on line %d want 2", b.Line())
 	}
 	if !b.Up() || b.Line() != 1 {
 		t.Fatalf("Up to the first line = %d want 1", b.Line())
@@ -346,5 +349,60 @@ func TestSetCursorClamps(t *testing.T) {
 	b.SetCursor(99)
 	if b.Cursor() != 3 {
 		t.Fatalf("cursor = %d want 3", b.Cursor())
+	}
+}
+
+// Delete at the end of a line takes the '\n' the caret sits on, so the next
+// line joins upward. It is the mirror of Backspace at the start of a line
+// (covered above) and it was the untested half: Delete-at-EOL is the deletion
+// that changes the line count, and the caret must NOT move -- the byte after it
+// slid into its place.
+func TestDeleteAtEndOfLineJoins(t *testing.T) {
+	b := NewBuffer()
+	b.Load([]byte("ab\ncd\n"))
+	b.SetCursor(2) // the '\n' after "ab"
+	if !b.Delete() {
+		t.Fatal("Delete refused at the end of a line")
+	}
+	if got := text(b); got != "abcd\n" {
+		t.Fatalf("after deleting the newline: %q want %q", got, "abcd\n")
+	}
+	if b.Line() != 1 || b.Col() != 2 {
+		t.Fatalf("caret = %d/%d want 1/2 (Delete never moves it)", b.Line(), b.Col())
+	}
+	// At the very end there is no byte to take, and nothing may change. The
+	// buffer now ends with the newline the join left behind, so the caret's
+	// home at offset 5 is the start of an empty second line.
+	b.SetCursor(b.Len())
+	if b.Delete() {
+		t.Fatal("Delete at the end of the buffer reported a change")
+	}
+	if b.Line() != 2 || b.Col() != 0 {
+		t.Fatalf("caret after the join = %d/%d want 2/0", b.Line(), b.Col())
+	}
+	if got := text(b); got != "abcd\n" {
+		t.Fatalf("Delete at the end changed the buffer: %q", got)
+	}
+}
+
+// UTF-8 asymmetry, pinned so a later change is a decision rather than an
+// accident. The engine is BYTEWISE: a loaded 'é' is two bytes, the horizontals
+// step over each one, and the caret can therefore sit inside a codepoint. That
+// is safe here only because input cannot create one -- insertionFor accepts
+// ASCII only (TestInsertionFor pins 0x80 and the control codes), so no edit the
+// app performs can split a codepoint it accepted. A rune-aware caret means
+// changing both halves together, and this is where that argument lives.
+func TestUTF8IsBytewise(t *testing.T) {
+	b := NewBuffer()
+	b.Load([]byte("é"))
+	if b.Len() != 2 {
+		t.Fatalf("Len = %d want 2: é is two bytes and the engine counts bytes", b.Len())
+	}
+	b.SetCursor(0)
+	if !b.Right() || b.Cursor() != 1 {
+		t.Fatalf("Right = %d want 1: the horizontals move by byte", b.Cursor())
+	}
+	if got := text(b); got != "é" {
+		t.Fatalf("the bytewise caret re-joined the two bytes as %q want %q", got, "é")
 	}
 }

@@ -15,10 +15,15 @@
 // to reconcile them with the Zig app's coverage:
 //
 //   - The file is loaded at STARTUP and saved with Ctrl-S (and automatically on
-//     WIN_CLOSE when the buffer is dirty, so a tab that is closed cannot lose
-//     what was typed). The Zig notepad drove load/save from buttons; buttons
-//     are not part of this card, and auto-save-on-close is the version that
-//     cannot lose data.
+//     WIN_CLOSE when the buffer is dirty, so closing a tab does not silently
+//     drop what was typed). The Zig notepad drove load/save from buttons;
+//     buttons are not part of this card, and auto-save-on-close is the version
+//     that cannot lose an edit by forgetting to save.
+//     What that does NOT buy, because the wording matters: vi.WriteFileSafe
+//     publishes delete-then-rename, so a crash inside that window leaves
+//     notes.txt ABSENT rather than half-written, and the next boot opens an
+//     empty notepad. "Never half-written" is the guarantee here; "cannot lose
+//     data" would be an overstatement.
 //   - Long lines are CLIPPED at the right edge rather than wrapped (see
 //     Buffer.View). Wrapping would make one logical line two rows, and the
 //     caret's row a function of the canvas width.
@@ -56,19 +61,20 @@ const (
 
 // Marker vocabulary. Each one is printed only after the call that earns it.
 const (
-	markerOpen    = "note: open id="
-	markerAccept  = "note: declare accepted"
-	markerRefuse  = "note: declare refused"
-	markerLoaded  = "note: loaded ok n="
-	markerMiss    = "note: load miss "
-	markerLoadErr = "note: load error "
-	markerSaved   = "note: saved ok n="
-	markerSaveErr = "note: save error "
-	markerCursor  = "note: cursor line="
-	markerResize  = "note: resize relayout"
-	markerClose   = "note: win_close"
-	markerOK      = "note OK"
-	markerOpenErr = "note: error open "
+	markerOpen     = "note: open id="
+	markerAccept   = "note: declare accepted"
+	markerRefuse   = "note: declare refused"
+	markerLoaded   = "note: loaded ok n="
+	markerMiss     = "note: load miss "
+	markerLoadErr  = "note: load error "
+	markerSaved    = "note: saved ok n="
+	markerSaveErr  = "note: save error "
+	markerCursor   = "note: cursor line="
+	markerResize   = "note: resize relayout"
+	markerClose    = "note: win_close"
+	markerPresents = "note: presents n="
+	markerOK       = "note OK"
+	markerOpenErr  = "note: error open "
 )
 
 // Frame geometry and the palette, both matching GOEDIT's frame so the two text
@@ -120,6 +126,12 @@ type app struct {
 	top   int
 	dirty bool
 	f     vi.Filler
+
+	// presents counts the frames this app has put on the scanout. Draw and
+	// present are separate calls, so the only way a gate can tell a filled frame
+	// that was never presented (which looks identical in the serial) from a
+	// painted one is a number the app reports itself.
+	presents int
 }
 
 func main() {
@@ -159,10 +171,16 @@ func main() {
 		case tabapp.ActionClosed:
 			vi.ConsoleLine(markerClose)
 			// Dirty text is saved on the way out: a closed tab must not be a
-			// lost edit. The marker says what happened either way.
-			if a.dirty {
-				vi.ConsoleLine(a.save())
+			// lost edit. The decision is a call so the host can assert it --
+			// the close itself exits the process, which is why the live run
+			// can only ever observe the clean case.
+			if line := a.closeSave(); line != "" {
+				vi.ConsoleLine(line)
 			}
+			// One line, not one per frame: the seat spec pairs this count with
+			// its own relayout count, which is the check that catches a draw
+			// path that fills a batch and forgets to present it.
+			vi.ConsoleLine(markerPresents + vi.Itoa64(int64(a.presents)))
 			vi.ConsoleLine(markerOK)
 			a.ta.CloseAndExit(0)
 		case tabapp.ActionResized:
@@ -170,8 +188,11 @@ func main() {
 			a.draw()
 			vi.ConsoleLine(markerResize)
 		case tabapp.ActionNone:
+			// Dirty is set by key() itself, on the mutating arms only: the
+			// loop cannot distinguish a save (frame change, not an edit)
+			// from typing, and setting it here re-dirtied the buffer on
+			// Ctrl-S and dirtied it on a plain arrow press.
 			if a.key(ev) {
-				a.dirty = true
 				a.top = a.buf.Follow(a.top, a.rowsIn())
 				a.draw()
 			}
@@ -185,6 +206,18 @@ func main() {
 // -ENOSYS and nothing panics.
 func (a *app) load() string {
 	data, rc := vi.ReadFileAll(a.path, readMax)
+	return a.loadMarker(data, rc)
+}
+
+// loadMarker is the decision load() makes from what the file channel returned,
+// split out because the channel is the one part of this path the host cannot
+// drive: the host answers -ENOSYS to every read, so the absent-file outcome and
+// the over-bound outcome were unreachable from a test while the decision was
+// inlined. Order matters (a negative rc is a refusal even when it carries
+// bytes) and so does the bound: truncation needs the buffer filled EXACTLY at
+// MaxBytes and MORE handed over, which readMax = MaxBytes+1 is what makes
+// observable at all.
+func (a *app) loadMarker(data []byte, rc int64) string {
 	if rc < 0 {
 		// A missing file is the ordinary first-run case, not an error: an
 		// empty notepad is a working notepad. Anything else is reported.
@@ -200,6 +233,18 @@ func (a *app) load() string {
 		return markerLoaded + vi.Itoa64(int64(n)) + " truncated at " + vi.Itoa64(int64(MaxBytes))
 	}
 	return markerLoaded + vi.Itoa64(int64(n))
+}
+
+// closeSave is the save-on-close decision, split out so the host can assert it:
+// the process exits from inside the close path (CloseAndExit), so a test that
+// drives the loop has no way to observe what the close did. It returns the
+// marker to print, or "" when the buffer is clean and the file must be left
+// untouched.
+func (a *app) closeSave() string {
+	if !a.dirty {
+		return ""
+	}
+	return a.save()
 }
 
 // save writes the buffer and returns the marker to print. It is the one place
@@ -262,10 +307,16 @@ func (a *app) colsIn() int {
 	return cols
 }
 
-// key feeds one event to the buffer and reports whether the frame changed.
+// key feeds one event to the buffer and reports whether the frame changed. A
+// frame change is NOT the same as a dirty buffer: Ctrl-S repaints the chrome
+// (the `*` goes away) without editing anything, and the arrows move the caret
+// without editing anything. So the dirty bit is set here, by the mutating arms
+// alone -- see edit().
+//
 // Ctrl-S saves; printable symbols insert; Return breaks the line; backspace and
-// delete remove; the arrows and Tab move. Every other chord belongs to the WM
-// and is left alone.
+// delete remove; the arrows move the caret. Tab inserts nothing (insertionFor
+// rejects it, because the WM owns that chord) despite reading like a text key.
+// Every other chord belongs to the WM and is left alone.
 func (a *app) key(ev vi.Event) bool {
 	if ev.Kind != vi.EvKeyDown {
 		return false
@@ -289,15 +340,25 @@ func (a *app) key(ev vi.Event) bool {
 		return a.buf.Down()
 	}
 	if ev.Arg1 == codeBackspace {
-		return a.buf.Backspace()
+		return a.edit(a.buf.Backspace())
 	}
 	if ev.Arg1 == codeDelete {
-		return a.buf.Delete()
+		return a.edit(a.buf.Delete())
 	}
 	if b, ok := insertionFor(ev); ok {
-		return a.buf.Insert(b)
+		return a.edit(a.buf.Insert(b))
 	}
 	return false
+}
+
+// edit records a buffer mutation: the frame changed and the buffer is now
+// dirty, which is what the chrome's `*` shows and what the close path acts on.
+// Movement deliberately does not come through here, and neither does save.
+func (a *app) edit(changed bool) bool {
+	if changed {
+		a.dirty = true
+	}
+	return changed
 }
 
 // isSave reports whether the event is the Ctrl-S chord. Both spellings of 's'
@@ -408,4 +469,11 @@ func (a *app) draw() {
 		"  bytes " + vi.Itoa64(int64(a.buf.Len())) + "/" + vi.Itoa64(int64(MaxBytes))
 	a.drawText(textOrigin, h-statusH, status, colDim)
 	_ = a.f.Flush()
+	// Present puts the batch on the scanout. Without it the app fills its own
+	// back-buffer and NOTHING reaches the compositor -- and the serial looks
+	// identical, which is why the count below exists. GOEDIT presents after
+	// every draw for the same reason. Every draw path ends here, so each frame
+	// is presented exactly once.
+	a.ta.Present()
+	a.presents++
 }
