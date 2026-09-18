@@ -11,6 +11,7 @@ func TestSlotNumbers(t *testing.T) {
 	want := map[uintptr]string{
 		1: "write", 2: "yield", 3: "exit", 4: "sleep",
 		5: "ipc_send", 6: "ipc_recv", 7: "procs",
+		9: "udp_listen", 10: "udp_send", 11: "udp_recv",
 		12: "win_open", 13: "win_fill", 14: "win_present", 15: "win_close",
 		19: "win_query", 21: "poll_event", 22: "wait_event",
 		23: "file_open", 24: "file_read", 25: "file_write", 26: "file_close", 27: "dir_list",
@@ -23,6 +24,7 @@ func TestSlotNumbers(t *testing.T) {
 	got := map[uintptr]string{
 		SlotWrite: "write", SlotYield: "yield", SlotExit: "exit", SlotSleep: "sleep",
 		SlotIPCSend: "ipc_send", SlotIPCRecv: "ipc_recv", SlotProcs: "procs",
+		SlotUDPListen: "udp_listen", SlotUDPSend: "udp_send", SlotUDPRecv: "udp_recv",
 		SlotWinOpen: "win_open", SlotWinFill: "win_fill", SlotWinPresent: "win_present",
 		SlotWinClose: "win_close", SlotWinQuery: "win_query",
 		SlotPollEvent: "poll_event", SlotWaitEvent: "wait_event",
