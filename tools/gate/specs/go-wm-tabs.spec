@@ -6,6 +6,7 @@
 # both bins. Two concurrent Go clients under this Go seat do not fit
 # scheduler.max_tasks=11 (observed GOTABWM+GOEDIT = 9/11; GOTERM's sysmon
 # then hits `newosproc: sys_thread create failed`). Kernel untouched.
+# Follow-up #1426: second Go tab after a pool/task-budget change.
 #
 # THREE vgate_runs share one seeded host share (`vgate_share seed`):
 #   01  CALC+NOTEPAD; pin-stay writes SESSION.TABS; last unsplit writes
