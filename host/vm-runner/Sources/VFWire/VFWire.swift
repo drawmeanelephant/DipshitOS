@@ -242,12 +242,16 @@ public enum VFWire {
         return out
     }
 
-    /// RENAME payload: [from][0x00][to] (paths are NUL-free by
-    /// construction). nil for over-long or empty paths.
+    /// RENAME payload: [from][0x00][to]. nil for over-long or empty paths,
+    /// or a path smuggling a NUL — the frame separator must be unambiguous
+    /// (`serveRename` splits on the FIRST NUL, so an embedded one would move
+    /// the boundary). CLONE always checked this; the M70a fuzz sweep caught
+    /// RENAME not checking it (2026-09-18), and the two now agree.
     public static func buildRenamePayload(from: String, to: String) -> [UInt8]? {
         let f = Array(from.utf8)
         let t = Array(to.utf8)
-        guard !f.isEmpty, !t.isEmpty, f.count <= pathMax, t.count <= pathMax else { return nil }
+        guard !f.isEmpty, !t.isEmpty, f.count <= pathMax, t.count <= pathMax,
+              !f.contains(0), !t.contains(0) else { return nil }
         var out = f
         out.append(0)
         out.append(contentsOf: t)
