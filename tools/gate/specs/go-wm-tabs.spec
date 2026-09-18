@@ -1,34 +1,32 @@
-# go-wm-tabs.spec -- M62b–f (issues #1400/#1401/#1402/#1403/#1404) class-B gate:
-# GOTABWM tab strip, constrained two-pane split, pin + reorder,
-# `.tabs` v2 session save/restore, then LAYOUT.txt. Two tabapp clients
-# (leftover Zig CALC + NOTEPAD) declare over WM_RPC; the rail paints with
-# n=2; unpinned reorder; pin stays left across focus; SplitV then Unsplit
-# then SplitH then Unsplit; applied pane rects match the LAYOUT.txt dump;
-# unsplit restores full-viewport; close of a pinned tab is allowed; last
-# close leaves an empty desktop, seat still registered until exit.
+# go-wm-tabs.spec -- M62b–g (issues #1400/#1401/#1402/#1403/#1404/#1405)
+# class-B gate: GOTABWM tab strip, split, pin, session, LAYOUT.txt, then a
+# shipping Go ELF as a tab. Boots 01–02 keep leftover Zig CALC+NOTEPAD.
+# Boot 03 hosts GOEDIT.ELF + leftover NOTEPAD.BIN: both declared, focus
+# switch, both alive, close one without killing the seat, LAYOUT.txt names
+# both bins. Two concurrent Go clients under this Go seat do not fit
+# scheduler.max_tasks=11 (observed GOTABWM+GOEDIT = 9/11; GOTERM's sysmon
+# then hits `newosproc: sys_thread create failed`). Kernel untouched.
 #
-# TWO vgate_runs share one seeded host share (`vgate_share seed`):
-#   01  CALC+NOTEPAD under GOTABWM; pin-stay writes /host/SESSION.TABS
-#       (`.tabs` v2). Last two-tab unsplit writes /host/SELFTEST/LAYOUT.txt
-#       (closed before the serial line that names it). Closes still run so
-#       M62b–d asserts hold.
-#   02  GOTABWM only. Loads the session; rail titles/order/pin/active match;
-#       LAYOUT.txt is rewritten for the restored strip.
+# THREE vgate_runs share one seeded host share (`vgate_share seed`):
+#   01  CALC+NOTEPAD; pin-stay writes SESSION.TABS; last unsplit writes
+#       LAYOUT.txt (closed before the serial line that names it).
+#   02  GOTABWM only. Restores the session; then drops SESSION.TABS.
+#   03  GOEDIT+NOTEPAD, empty strip. Same two-tab choreography.
 #
-# Seed wm=none and exec GOTABWM.ELF like go-wm-seat: this is the Go seat,
-# not Zig TABWM. Do not overload go-wm-seat or go-wm-default. Kernel
-# untouched. No HID. No framebuffer golden.
+# Seed wm=none and exec GOTABWM.ELF like go-wm-seat. No HID. No framebuffer
+# golden. Do not overload go-wm-seat or go-wm-default.
 #
 # HOST PREREQUISITE (fails the gate honestly when missing):
 #   bash tools/go/build-gotabwm.sh   ->  .build/go/GOTABWM.ELF
+#   bash tools/go/build-goedit.sh    ->  .build/go/GOEDIT.ELF
 #
 # exec-order: assert-proven -- each run ends on a marker only its script
-# prints (`rx-gotabwm-tabs-ok` / `rx-gotabwm-session-ok`). Stage gates wait
-# on guest output (`gotabwm: win focus`, `wm: unregistered, shim resumed`).
-# Boot 02 still needs `dui focus 0` after win focus so the window phase
-# can finish before SESSION.TABS is loaded.
+# prints (`rx-gotabwm-tabs-ok` / `rx-gotabwm-session-ok` / `rx-gotabwm-apps-ok`).
+# Stage gates wait on guest output (`gotabwm: win focus`,
+# `wm: unregistered, shim resumed`). Boot 03 uses GOMAXPROCS=1 so GOEDIT's
+# extra Ms stay inside the leftover pool slots.
 
-vgate_name go-wm-tabs "issues #1400–#1404 M62b–f: GOTABWM tabs + split + pin + session + LAYOUT.txt on VZ"
+vgate_name go-wm-tabs "issues #1400–#1405 M62b–g: GOTABWM tabs + session + LAYOUT.txt + GOEDIT on VZ"
 vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 
@@ -63,6 +61,27 @@ wm
 echo rx-gotabwm-session-ok
 EOF
 
+# Boot 03: one shipping Go ELF (GOEDIT) plus leftover Zig NOTEPAD. Two
+# Go runtimes already fill 9/11 of the task pool; a third (GOTERM/GOCALC)
+# cannot create sysmon. GOMAXPROCS=1 is the exec envp knob (#1226).
+vgate_file script-03.txt <<'EOF'
+set GOMAXPROCS=1
+wm
+exec GOTABWM.ELF
+EOF
+
+vgate_file script2-03.txt <<'EOF'
+dui focus 0
+exec GOEDIT.ELF
+exec NOTEPAD.BIN
+EOF
+
+vgate_file script3-03.txt <<'EOF'
+wm
+dui
+echo rx-gotabwm-apps-ok
+EOF
+
 vgate_setup_python <<'PY'
 import os, shutil, sys
 rd = os.environ["RUN_DIR"]
@@ -74,6 +93,19 @@ if not os.path.exists(src):
 shutil.copy(src, os.path.join(share, "GOTABWM.ELF"))
 print("staged GOTABWM.ELF into share (%d bytes)" %
       os.path.getsize(os.path.join(share, "GOTABWM.ELF")))
+src = os.path.join(".build", "go", "GOEDIT.ELF")
+if not os.path.exists(src):
+    sys.exit("GOEDIT.ELF missing (expected " + src + ") - build it first: "
+             "bash tools/go/build-goedit.sh")
+shutil.copy(src, os.path.join(share, "GOEDIT.ELF"))
+print("staged GOEDIT.ELF into share (%d bytes)" %
+      os.path.getsize(os.path.join(share, "GOEDIT.ELF")))
+ed = os.path.join(share, "EDIT")
+os.makedirs(ed, exist_ok=True)
+seed = os.path.join(ed, "SEED.TXT")
+with open(seed, "wb") as f:
+    f.write(b"seed-line\n")
+print("seeded %s (%d bytes)" % (seed, os.path.getsize(seed)))
 # Explicit opt-in, same as go-wm-seat: the compiled default is already the
 # Go seat (M59). Seed wm=none so this boot proves the tab strip on an
 # executed GOTABWM, not the autostart path.
@@ -326,6 +358,13 @@ if bins != ["CALC.BIN", "NOTEPAD.BIN"]:
 if parsed[0].group(8) != "none" or parsed[1].group(8) != "none":
     sys.exit("restore dump must be unsplit")
 print("LAYOUT.txt restore n=2 ids=256,257 unsplit")
+# Boot 03 must not restore Calc/Notepad placeholders.
+stale = os.path.join(os.environ["VG_SHARE"], "SESSION.TABS")
+try:
+    os.remove(stale)
+except FileNotFoundError:
+    sys.exit("SESSION.TABS missing after restore (boot 02)")
+print("cleared SESSION.TABS for boot 03")
 PY
 vgate_assert 02 serial-contains 'gotabwm: host done'
 vgate_assert 02 serial-contains 'gotabwm: close'
@@ -333,3 +372,86 @@ vgate_assert 02 serial-contains 'gotabwm OK'
 vgate_assert 02 serial-contains 'rx-gotabwm-session-ok'
 vgate_assert 02 serial-absent '[EXC] parking:'
 vgate_assert 02 serial-absent 'exited status=139'
+
+vgate_run 03 -- \
+    --screen '$RUN_DIR/screen-03' \
+    --script '$RUN_DIR/script-03.txt' \
+    --script2 '$RUN_DIR/script2-03.txt' \
+    --script2-after 'gotabwm: win focus' \
+    --script3 '$RUN_DIR/script3-03.txt' \
+    --script3-after 'wm: unregistered, shim resumed' \
+    --script-expect 'rx-gotabwm-apps-ok' --timeout 300
+
+vgate_assert 03 serial-contains 'VirelaiOS kernel has seized control.'
+vgate_assert 03 serial-contains 'exec: loaded GOTABWM.ELF'
+vgate_assert 03 serial-contains 'gotabwm: registered'
+vgate_assert 03 serial-contains 'exec: loaded GOEDIT.ELF'
+vgate_assert 03 serial-contains 'exec: loaded NOTEPAD.BIN'
+vgate_assert 03 serial-contains 'goedit: open id='
+vgate_assert 03 serial-contains 'goedit: declare accepted'
+vgate_assert 03 serial-contains 'goedit: present'
+vgate_assert 03 serial-contains 'goedit: read /host/EDIT/SEED.TXT n=10'
+vgate_assert 03 serial-contains 'notepad: tab-aware (full-viewport)'
+vgate_assert 03 serial-count 'gotabwm: tab open id=' 2
+vgate_assert 03 serial-contains 'gotabwm: rail n=2 focus='
+vgate_assert 03 serial-contains 'gotabwm: tab focus id='
+vgate_assert 03 serial-absent 'gotabwm: session load n='
+vgate_assert 03 python <<'PY'
+import os, sys
+ser = open(os.environ["VG_SER"], errors="replace").read()
+edit = ser.find("goedit: present")
+note = ser.find("notepad: tab-aware (full-viewport)")
+close = ser.find("gotabwm: tab close id=")
+if edit < 0 or note < 0:
+    sys.exit("missing app syscall markers")
+if close < 0:
+    sys.exit("no tab close")
+if not (edit < close and note < close):
+    sys.exit("an app was closed before both were alive (edit=%d note=%d close=%d)" %
+             (edit, note, close))
+print("GOEDIT present and NOTEPAD tab-aware before first tab close")
+PY
+vgate_assert 03 serial-contains 'gotabwm: layout file=/host/SELFTEST/LAYOUT.txt'
+vgate_assert 03 share-contains SELFTEST/LAYOUT.txt 'bin=GOEDIT.ELF'
+vgate_assert 03 share-contains SELFTEST/LAYOUT.txt 'bin=NOTEPAD.BIN'
+vgate_assert 03 python <<'PY'
+import os, re, sys
+p = os.path.join(os.environ["VG_SHARE"], "SELFTEST/LAYOUT.txt")
+raw = open(p, "rb").read()
+if b"\r" in raw or not raw.endswith(b"\n"):
+    sys.exit("LAYOUT.txt encoding")
+line_re = re.compile(
+    r"^tab=(\d+) bin=(\S+) x=(\d+) y=(\d+) w=(\d+) h=(\d+) focus=([01]) split=(none|h|v)$")
+lines = raw.decode("utf-8").splitlines()
+if len(lines) != 2:
+    sys.exit("LAYOUT.txt has %d lines, want 2" % len(lines))
+parsed = []
+for line in lines:
+    m = line_re.match(line)
+    if not m:
+        sys.exit("bad LAYOUT line: %r" % line)
+    parsed.append(m.groups())
+bins = {parsed[0][1], parsed[1][1]}
+if bins != {"GOEDIT.ELF", "NOTEPAD.BIN"}:
+    sys.exit("bins %s want GOEDIT.ELF and NOTEPAD.BIN" % (bins,))
+for row in parsed:
+    if row[2:6] != ("0", "0", "1280", "720") or row[7] != "none":
+        sys.exit("last dump must be unsplit full-viewport, got %s" % (row,))
+foci = {parsed[0][6], parsed[1][6]}
+if foci != {"0", "1"}:
+    sys.exit("need one focused tab, focus bits %s" % (foci,))
+print("LAYOUT.txt n=2 unsplit 1280x720 bins=GOEDIT.ELF,NOTEPAD.BIN")
+PY
+vgate_assert 03 serial-count 'gotabwm: tab close id=' 2
+vgate_assert 03 serial-contains 'gotabwm: rail n=1 focus='
+vgate_assert 03 serial-contains 'gotabwm: tabs empty'
+vgate_assert 03 serial-contains 'goedit: close'
+vgate_assert 03 serial-contains 'notepad: win_close'
+vgate_assert 03 serial-contains 'gotabwm: host done'
+vgate_assert 03 serial-contains 'gotabwm: close'
+vgate_assert 03 serial-contains 'gotabwm OK'
+vgate_assert 03 serial-contains 'wm: unregistered, shim resumed'
+vgate_assert 03 serial-contains 'rx-gotabwm-apps-ok'
+vgate_assert 03 serial-absent '[EXC] parking:'
+vgate_assert 03 serial-absent 'exited status=139'
+vgate_assert 03 serial-absent 'newosproc: sys_thread create failed'

@@ -34,6 +34,33 @@ func TestTabMarkerShapes(t *testing.T) {
 	}
 }
 
+func TestGuessBinShippingTitles(t *testing.T) {
+	cases := []struct{ title, want string }{
+		{"Calc", "CALC.BIN"},
+		{"Notepad", "NOTEPAD.BIN"},
+		{"Edit", "GOEDIT.ELF"},
+		{"Term", "GOTERM.ELF"},
+		{"Other", "Other"},
+	}
+	for _, c := range cases {
+		if got := guessBin(c.title); got != c.want {
+			t.Fatalf("guessBin(%q) = %q want %q", c.title, got, c.want)
+		}
+	}
+	var s TabStrip
+	if !s.OpenTab(3, "Edit") || !s.OpenTab(4, "Notepad") {
+		t.Fatal("OpenTab")
+	}
+	if s.At(0).Bin != "GOEDIT.ELF" || s.At(1).Bin != "NOTEPAD.BIN" {
+		t.Fatalf("bins %q %q", s.At(0).Bin, s.At(1).Bin)
+	}
+	body := layoutFileBody(&s, 1280, 720)
+	got := string(body)
+	if !strings.Contains(got, "bin=GOEDIT.ELF") || !strings.Contains(got, "bin=NOTEPAD.BIN") {
+		t.Fatalf("LAYOUT body missing live bins: %q", body)
+	}
+}
+
 func TestOpenCloseFocusMachine(t *testing.T) {
 	var s TabStrip
 	if s.Count() != 0 {

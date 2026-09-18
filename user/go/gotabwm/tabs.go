@@ -1,6 +1,6 @@
-// GOTABWM.ELF — M62b–f (issues #1400–#1404): an in-process tab strip
+// GOTABWM.ELF — M62b–g (issues #1400–#1405): an in-process tab strip
 // with a two-pane constrained split, pin, reorder, `.tabs` v2 session,
-// and a headless LAYOUT.txt dump.
+// a headless LAYOUT.txt dump, and a shipping Go ELF as a tab (GOEDIT).
 //
 // OpenTab / CloseTab / FocusTab / SplitH / SplitV / Unsplit / Pin / Unpin /
 // Reorder are a pure state machine: no syscalls, no WM_RPC. The seat hooks
@@ -28,7 +28,7 @@ const RailHeight = 22
 type Tab struct {
 	ID     uint32
 	Title  string
-	Bin    string // `.tabs` v2 bin field (CALC.BIN / NOTEPAD.BIN from title)
+	Bin    string // `.tabs` v2 bin field (guessBin from the declared title)
 	Pinned bool   // FlagPinned (0x01); pinned tabs sit at the left of the rail
 }
 
@@ -81,6 +81,10 @@ func guessBin(title string) string {
 		return "CALC.BIN"
 	case "Notepad":
 		return "NOTEPAD.BIN"
+	case "Edit":
+		return "GOEDIT.ELF"
+	case "Term":
+		return "GOTERM.ELF"
 	default:
 		return title
 	}

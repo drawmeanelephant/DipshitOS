@@ -61,7 +61,9 @@ var (
 // hostTicks is how long the seat hosts a SINGLE app before closing it —
 // enough composite ticks for the app to declare, take the viewport and relayout.
 // Two tabs skip this countdown and use the strip choreography in seat.go.
-const hostTicks = 3
+// M62g: GOEDIT starts slower than leftover Zig CALC/NOTEPAD, so the
+// second declare needs more than three ticks or the first tab is closed.
+const hostTicks = 8
 
 // hostTicksLeft counts down while exactly one tab is open; the composite
 // loop closes that tab when it reaches zero (go-wm-seat / go-wm-default).
