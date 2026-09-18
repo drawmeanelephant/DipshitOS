@@ -2141,7 +2141,7 @@ if let s = inputChords {
     } else if chordsViaView {
         print("  input-chords: ENABLED (milestone eight card U2, claim 1809) — typing \(s.debugDescription) into the VZVirtualMachineView (--chords-view forces the view path despite the armed custom-virtio INPUT queue; \(inputChordsDelay) s per keystroke) after \"\(inputChordsAfter ?? "userspace: el0=1")\"")
     } else {
-        print("  input-chords: ENABLED (milestone eight card U2, claim 1809) — typing \(s.debugDescription) into the view after \"\(inputChordsAfter ?? "userspace: el0=1")\" (keyDown + keyUp per chord: printable chars, return/up/down/left/right/home/end/delete/tab, ctrl-a..ctrl-z, ctrl-shift-a..ctrl-shift-z; \(inputChordsDelay) s per keystroke)")
+        print("  input-chords: ENABLED (milestone eight card U2, claim 1809) — typing \(s.debugDescription) into the view after \"\(inputChordsAfter ?? "userspace: el0=1")\" (keyDown + keyUp per chord: printable chars, return/up/down/left/right/home/end/delete/tab, alt-tab, ctrl-tab, ctrl-shift-tab, alt-shift-tab, ctrl-a..ctrl-z, ctrl-shift-a..ctrl-shift-z; \(inputChordsDelay) s per keystroke)")
     }
 }
 if viaVirtioEnabled {
@@ -3343,6 +3343,9 @@ func macChord(_ token: String) -> (UInt16, NSEvent.ModifierFlags, String)? {
     case "ctrl-space": return (0x31, [.control], " ") // M37 DQ1: the God Menu summon chord
     case "tab": return (0x30, [], "\t")
     case "alt-tab": return (0x30, [.option], "\t") // WMS6 Gate A: Option+Tab
+    case "alt-shift-tab": return (0x30, [.option, .shift], "\t")
+    case "ctrl-tab": return (0x30, [.control], "\t") // M63r #1424
+    case "ctrl-shift-tab": return (0x30, [.control, .shift], "\t")
     case "up": return (0x7E, [], "\u{F700}")
     case "down": return (0x7D, [], "\u{F701}")
     case "left": return (0x7B, [], "\u{F702}")
@@ -5285,6 +5288,11 @@ enum CustomVirtioSpike {
         // WMS6 Gate A (issue #626): a real Alt+Tab chord over the HID channel
         // (LAlt modifier + Tab usage) — the WM's alt-tab policy hook.
         case "alt-tab": return (hidModAlt, 0x2B)
+        case "alt-shift-tab": return (hidModAlt | hidModShift, 0x2B)
+        // M63r (#1424): Ctrl+Tab / Ctrl+Shift+Tab were missing — the
+        // ctrl-<letter> / ctrl-shift-<letter> patterns are letters only.
+        case "ctrl-tab": return (hidModCtrl, 0x2B)
+        case "ctrl-shift-tab": return (hidModCtrl | hidModShift, 0x2B)
         case "escape": return (0, 0x29)
         case "up": return (0, 0x52)
         case "down": return (0, 0x51)
