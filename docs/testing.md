@@ -255,6 +255,60 @@ The admission spec therefore asserts the refusal statuses, all of which
 survive, and the staged `live-wasm.spec` asserts the app's own exit status.
 Re-runs reproduced the same drop.
 
+## USB volumes — a read-only FAT32 reader over the M43 block seam (M70f F1, issue #1458)
+
+The frozen decision (on the card, D1) is **read-only FAT32**, not a
+Virelai-private on-disk layout: the gate's own MSD corpus is a FAT32 volume
+built by the *host*, so the reader has an independent oracle, while a private
+format's only verifier would be our own writer. It is a new module, not a
+`fat.zig` restoration — no writes, no format, no mount machinery, no DATA
+partition, no boot/EFI volume, no allocator, and it never re-arms virtio-blk.
+
+- **`kernel/src/fat32_ro.zig` unit tests (class A, `zig build test`).** The
+  module imports only `std` and takes a `SectorSource` (function pointer +
+  context), so every structural path is host-testable against an in-memory
+  image built in the test: MBR signature/slot parsing, FAT32 BPB validation
+  (a FAT16-shaped BPB, a conflicting type string, a non-power-of-two cluster
+  size, an out-of-range root cluster, and a 1024-byte-sector volume are each
+  refused by name), directory listing with the volume-label/deleted/`.`/`..`
+  rows skipped, LFN assembly gated by the 8.3 checksum, a three-cluster chain
+  read byte-exact in deliberately ragged chunks, the streaming/one-shot FNV
+  identity, and the broken-chain cases (early EOC, out-of-range cluster, the
+  reserved bad marker, a self-loop, a zero first cluster) which must stop at
+  the last byte the disk held rather than fabricate or hang.
+- **`kernel/src/file_table.zig` unit tests (class A).** `usb<N>/<path>` routes
+  to the volume partition, `usb5`..`usb9` are refused instead of silently
+  becoming host files, `usb1x.txt` still stays one, and with no device attached
+  every volume open/listing is an honest `ENOENT`; mutating flags, `set_mode`,
+  `delete` and `rename` are refused before any sector is read (the delete
+  guard also closes a latent path where a device subpath could reach the host
+  channel).
+- **`live-usb-block.spec` (class B, one boot, 198 s).** The staged disk is a
+  12 MiB MBR image: partition 1 is a hand-built FAT32 volume (`PROBE.TXT`,
+  120 B; `DOCS/NOTE.TXT`, 5000 B across clusters 5→6→7) and partition 2 is a
+  deliberately non-FAT32 type (`0x83`). The boot proves the MBR walk
+  (`usb vol` geometry, per-slot `absent`/`reason=type` answers), root and
+  subdirectory listings, and two **whole-file** byte proofs: `PROBE.TXT`
+  prints all 120 bytes with `sum=0x133d22a5`, and `NOTE.TXT` prints a bounded
+  256 of 5000 with `sum=0x52e785f5` — the checksum is what makes the
+  multi-cluster claim, and the spec's setup python recomputes both values so a
+  content edit fails at staging instead of producing a mysterious mismatch.
+  The honest refusals are observed live (`partition 2 is not a readable FAT32
+  volume (not-fat32)`, `no such MBR partition`, `not found`, a directory read
+  by `usb cat`, a file listed by `usb ls`), and `BLKD.BIN` proves the same
+  bytes twice from EL0 — raw (`.usb`, phase 1, the M43 regression) and through
+  the file-table `usb1/PROBE.TXT` handle (phase 2), asserting 120 bytes then
+  EOF and exiting 2 with its own line on anything else.
+
+**Observed limits, recorded rather than hidden:** VZ's `--usb-msd` is the only
+attachment path, so "a real stick in a real port" is unprovable here; the
+reader speaks 512-byte sectors and FAT32 only (no FAT12/16/exFAT/NTFS) and is
+read-only; LFN code units are taken as their low byte, and a name longer than
+31 bytes is truncated in the frozen 40-byte `DirEntry` row (`usb ls` prints it
+whole); the volume label comes from the BPB only. The `usb vol|ls|cat` verbs
+are deliberately absent from the monitor's `usb` help catalog while the M65d
+claim (#1442) owns the three fixtures that pin that string.
+
 ## Verification sequence
 
 1. Print the detected tool versions.

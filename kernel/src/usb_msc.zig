@@ -17,6 +17,10 @@
 
 const std = @import("std");
 const xhci = @import("xhci.zig");
+// M70f F1 (issue #1458): the read-only FAT32 reader lives above this module in
+// the storage stack, so the SECTOR SOURCE adapter belongs here — the block seam
+// keeps its single owner (this file) and the reader stays hardware-free.
+const fat32_ro = @import("fat32_ro.zig");
 
 pub const cbw_len = 31;
 pub const csw_len = 13;
@@ -287,6 +291,20 @@ pub fn capacity() ?Capacity {
     const got: usize = 8 - @min(cr.residue, 8);
     if (got < 8) return null;
     return parseCapacity(cbuf[0..got]);
+}
+
+/// M70f F1 (issue #1458): the `fat32_ro.SectorSource` over the BOT/SCSI pipe —
+/// one 512-byte READ(10) per sector, exactly what `.usb` reads already do. A
+/// failed transfer is a false return, which the reader turns into `error.Io`
+/// (or a latched `broken` mid-file) rather than a fabricated sector.
+pub fn source() fat32_ro.SectorSource {
+    return .{ .ctx = null, .readFn = sourceRead };
+}
+
+fn sourceRead(ctx: ?*anyopaque, lba: u32, out: *[fat32_ro.sector_len]u8) bool {
+    _ = ctx;
+    if (!present()) return false;
+    return read_sector(lba, out[0..]).ok;
 }
 
 /// Read one 512-byte logical sector at `lba` into `buf` (must hold

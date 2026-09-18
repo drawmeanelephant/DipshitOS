@@ -2404,6 +2404,7 @@ pub fn build(b: *std.Build) void {
         "kernel/src/events.zig",
         "kernel/src/exec.zig",
         "kernel/src/exceptions.zig",
+        "kernel/src/fat32_ro.zig",
         "kernel/src/font8x8.zig",
         "kernel/src/gic.zig",
         "kernel/src/handoff.zig",

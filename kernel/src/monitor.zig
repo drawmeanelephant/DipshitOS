@@ -47,6 +47,7 @@ pub const fbtext = @import("text.zig"); // milestone six card G2 (claim 3194): f
 pub const xhci = @import("xhci.zig"); // milestone seven card I1 (claim 4272): the XHCI host-controller transport behind `usb`
 pub const input = @import("input.zig"); // milestone seven card I3 (claim 6050): the keyboard/pointer event FIFO behind `input`
 pub const usb_msc = @import("usb_msc.zig"); // M43 card U2 (issue #1033): BOT + minimal SCSI over the U1 bulk engine (`usb msc`)
+pub const fat32_ro = @import("fat32_ro.zig"); // M70f F1 (issue #1458): the read-only FAT32 volume reader behind `usb vol|ls|cat`
 pub const driving_award = @import("driving_award.zig"); // milestone six card G5 (claim 1543): Driving Award, the window manager behind `dui`
 pub const wm_server = @import("wm_server.zig"); // M32 WMS2 (issue #622): the render-server register behind `wm`
 pub const settings = @import("settings.zig"); // milestone eight card U8 (claim 2649): persistent settings engine
@@ -376,7 +377,7 @@ pub fn ensure_registry() []const Command {
             .{ .name = "forensics", .help = "last-words recorder: on|off|dump|reset (off by default)", .usage = "forensics [on|off|dump|reset]", .category = .system, .max_args = 1, .handler = cmd_forensics },
             .{ .name = "tour", .help = "guided tour of the system for new users", .usage = "tour", .category = .machine_identity, .handler = cmd_welcome },
             .{ .name = "uaccess", .help = "user-memory copy diagnostics (valid, fault, recovery)", .usage = "uaccess", .category = .memory_state, .handler = cmd_uaccess },
-            .{ .name = "usb", .help = "XHCI host controller: `usb` transport report, `usb devices` enumerated devices, `usb report` last HID report, `usb bulk [probe ...]` bulk engine (U1), `usb msc [probe] [lba]` mass-storage BOT/SCSI probe (U2), `usb rescan` polled lifecycle rescan (U4), `usb detach [slot]` administrative detach (U4)", .usage = "usb [devices|report|bulk [probe ...]|msc [probe] [lba]|rescan|detach [slot]]", .category = .graphics_input, .handler = cmd_usb },
+            .{ .name = "usb", .help = "XHCI host controller: `usb` transport report, `usb devices` enumerated devices, `usb report` last HID report, `usb bulk [probe ...]` bulk engine (U1), `usb msc [probe] [lba]` mass-storage BOT/SCSI probe (U2), `usb vol` MBR partition + FAT32 volume enumeration, `usb ls <vol>[/<dir>]` volume directory listing, `usb cat <vol>/<path> [<max>]` read-only file read (full byte count + FNV-1a 32 of every byte) (M70f F1), `usb rescan` polled lifecycle rescan (U4), `usb detach [slot]` administrative detach (U4)", .usage = "usb [devices|report|bulk [probe ...]|msc [probe] [lba]|vol|ls <vol>[/<dir>]|cat <vol>/<path> [<max>]|rescan|detach [slot]]", .category = .graphics_input, .handler = cmd_usb },
             .{ .name = "uname", .help = "compact system identity", .usage = "uname", .category = .machine_identity, .handler = cmd_uname },
             .{ .name = "version", .help = "display build information", .usage = "version", .category = .machine_identity, .handler = cmd_version },
             .{ .name = "vf", .dom = svclock.dom_bit(.file), .help = "host file channel (M34): 'vf ls/cat/mkdir/rm/mv <path>' read + mutate a macOS share over custom-virtio queue 5; 'vf open/close/write/truncate/fsync <h>' manage write handles (8-slot host cursor table)", .usage = "vf [ls [<path>]|cat <path>|mkdir <path>|rm <path>|mv <from> <to>|open <path> [append]|close <h>|write <h> <n>|truncate <h> <n>|fsync <h>]", .category = .storage, .max_args = 4, .handler = cmd_vf },
@@ -3162,6 +3163,10 @@ fn cmd_usb(m: *Monitor, args: []const []const u8) ExecError {
     if (args.len > 0 and std.mem.eql(u8, args[0], "report")) return cmd_usb_report(m, args);
     if (args.len > 0 and std.mem.eql(u8, args[0], "bulk")) return cmd_usb_bulk(m, args);
     if (args.len > 0 and std.mem.eql(u8, args[0], "msc")) return cmd_usb_msc(m, args);
+    // M70f F1 (issue #1458): the read-only FAT32 volume surface.
+    if (args.len > 0 and std.mem.eql(u8, args[0], "vol")) return cmd_usb_vol(m, args);
+    if (args.len > 0 and std.mem.eql(u8, args[0], "ls")) return cmd_usb_ls(m, args);
+    if (args.len > 0 and std.mem.eql(u8, args[0], "cat")) return cmd_usb_cat(m, args);
     if (args.len > 0 and std.mem.eql(u8, args[0], "rescan")) return cmd_usb_rescan(m);
     if (args.len > 0 and std.mem.eql(u8, args[0], "detach")) return cmd_usb_detach(m, args);
     if (!xhci.xhci_ready) {
@@ -3534,6 +3539,321 @@ fn botStageName(s: usb_msc.Stage) []const u8 {
         .csw_signature => "csw_sig",
         .csw_tag => "csw_tag",
     };
+}
+
+// ---------------------------------------------------------------------------
+// M70f F1 (issue #1458): read-only FAT32 volumes on the M43 block seam.
+//
+// `usb vol` enumerates the MBR and reports each slot's volume geometry,
+// `usb ls` lists a volume directory, and `usb cat` reads a file printing a
+// bounded prefix plus the FULL byte count and an FNV-1a 32 of every byte. The
+// checksum is what makes a byte-exact claim for a file too large to dump: the
+// gate's host-side builder stages the content and pins the same value. Nothing
+// here writes to the volume.
+// ---------------------------------------------------------------------------
+
+/// One sector scratch for the `usb cat` chain walk: the monitor console path is
+/// single-threaded (one command at a time), so a static is safe here.
+var usb_cat_sector: [fat32_ro.sector_len]u8 align(64) = undefined;
+
+fn printHexByte(m: *Monitor, b: u8) void {
+    const digits = "0123456789abcdef";
+    m.console.putc(digits[b >> 4]);
+    m.console.putc(digits[b & 0xf]);
+}
+
+/// The BPB's 11-byte volume label, trailing padding trimmed (`-` when blank).
+fn printVolumeLabel(m: *Monitor, label: [11]u8) void {
+    var n: usize = label.len;
+    while (n > 0 and (label[n - 1] == ' ' or label[n - 1] == 0)) n -= 1;
+    if (n == 0) {
+        m.console.puts("-");
+        return;
+    }
+    m.console.puts(label[0..n]);
+}
+
+/// Accept both `1/PROBE.TXT` and `usb1/PROBE.TXT` spellings of a volume path.
+fn canonicalVolumePath(buf: *[file_table.max_path_len]u8, arg: []const u8) ?[]const u8 {
+    if (arg.len == 0 or arg.len > buf.len) return null;
+    if (file_table.usbVolumeForm(arg) != null) {
+        @memcpy(buf[0..arg.len], arg);
+        return buf[0..arg.len];
+    }
+    if (arg[0] < '1' or arg[0] > '4') return null;
+    if (arg.len > 1 and arg[1] != '/') return null;
+    const need = arg.len + 3;
+    if (need > buf.len) return null;
+    @memcpy(buf[0..3], "usb");
+    @memcpy(buf[3..need], arg);
+    return buf[0..need];
+}
+
+const UsbVolume = struct {
+    src: fat32_ro.SectorSource = .{ .ctx = null, .readFn = unusableSource },
+    parsed: file_table.ParsedPath = .{ .partition = .usb_fat, .path = [_]u8{0} ** file_table.max_path_len, .path_len = 0 },
+    vol: fat32_ro.Volume = .{},
+
+    fn unusableSource(_: ?*anyopaque, _: u32, _: *[fat32_ro.sector_len]u8) bool {
+        return false;
+    }
+};
+
+/// Resolve `<vol>[/path]` down to a mounted volume. Every failure mode is a
+/// printed line plus `null` — the caller prints nothing of its own, so the
+/// transcript always says exactly why.
+fn openUsbVolume(m: *Monitor, arg: []const u8, out: *UsbVolume) bool {
+    var path_buf: [file_table.max_path_len]u8 = undefined;
+    const canonical = canonicalVolumePath(&path_buf, arg) orelse {
+        m.console.print_line("usb: path must be <vol>[/<dir>] or usb<vol>[/<dir>] with vol 1..4");
+        return false;
+    };
+    const parsed = file_table.parse_path(canonical) orelse {
+        m.console.print_line("usb: path is not a valid volume path");
+        return false;
+    };
+    if (parsed.partition != .usb_fat) {
+        m.console.print_line("usb: path is not a volume path");
+        return false;
+    }
+    if (!xhci.xhci_ready or !usb_msc.present()) {
+        m.console.print_line("usb: no bulk-capable device");
+        return false;
+    }
+    const cap = usb_msc.capacity() orelse {
+        m.console.print_line("usb: READ CAPACITY(10) failed");
+        return false;
+    };
+    if (cap.block_len != usb_msc.block_len) {
+        m.console.print_line("usb: device does not use 512-byte sectors");
+        return false;
+    }
+    const src = usb_msc.source();
+    const row = fat32_ro.partitionAt(src, parsed.usb_index) catch |err| {
+        switch (err) {
+            error.NoPartition => m.console.print_line("usb: no such MBR partition"),
+            error.NoMbr => m.console.print_line("usb: no MBR (no 0xaa55 signature at LBA 0)"),
+            else => m.console.print_line("usb: LBA 0 read failed"),
+        }
+        return false;
+    };
+    if (@as(u64, row.start_lba) + row.sectors > @as(u64, cap.last_lba) + 1) {
+        m.console.print_line("usb: partition extends past the end of the device");
+        return false;
+    }
+    out.vol = fat32_ro.mount(src, row.start_lba, row.sectors) catch |err| {
+        m.console.puts("usb: partition ");
+        m.console.print_u64(parsed.usb_index);
+        m.console.puts(" is not a readable FAT32 volume (");
+        m.console.puts(switch (err) {
+            error.NotFat32 => "not-fat32",
+            error.BadBpb => "bad-bpb",
+            else => "read-error",
+        });
+        m.console.print_line(")");
+        return false;
+    };
+    out.src = src;
+    out.parsed = parsed;
+    return true;
+}
+
+/// `usb vol [<n>]` — the MBR walk and each slot's FAT32 geometry. Three
+/// distinct honest answers: an empty slot, a slot whose type is not FAT32, and
+/// a slot that declares FAT32 but does not parse.
+fn cmd_usb_vol(m: *Monitor, args: []const []const u8) ExecError {
+    _ = args;
+    if (!xhci.xhci_ready) {
+        m.console.print_line("usb vol: no XHCI device");
+        return .none;
+    }
+    if (!usb_msc.present()) {
+        m.console.print_line("usb vol: no bulk-capable device");
+        return .none;
+    }
+    const src = usb_msc.source();
+    var table: [fat32_ro.max_partitions]?fat32_ro.PartitionRow = .{ null, null, null, null };
+    fat32_ro.readMbr(src, &table) catch |err| {
+        switch (err) {
+            error.NoMbr => m.console.print_line("usb vol: no MBR (no 0xaa55 signature at LBA 0)"),
+            else => m.console.print_line("usb vol: LBA 0 read failed"),
+        }
+        return .none;
+    };
+    var populated: u64 = 0;
+    for (table) |row| {
+        if (row != null) populated += 1;
+    }
+    m.console.puts("usb vol: partitions=");
+    m.console.print_u64(populated);
+    m.console.puts("\n");
+    for (table, 0..) |row, i| {
+        if (row == null) {
+            m.console.puts("usb vol: part=");
+            m.console.print_u64(i + 1);
+            m.console.puts(" absent\n");
+            continue;
+        }
+        const r = row.?;
+        m.console.puts("usb vol: part=");
+        m.console.print_u64(i + 1);
+        m.console.puts(" boot=");
+        m.console.print_u64(if (r.bootable) 1 else 0);
+        m.console.puts(" type=0x");
+        printHexByte(m, r.part_type);
+        m.console.puts(" start_lba=");
+        m.console.print_u64(r.start_lba);
+        m.console.puts(" sectors=");
+        m.console.print_u64(r.sectors);
+        if (!r.isFat32Type()) {
+            m.console.puts(" fat=0 reason=type\n");
+            continue;
+        }
+        const vol = fat32_ro.mount(src, r.start_lba, r.sectors) catch |err| {
+            m.console.puts(" fat=0 reason=");
+            m.console.print_line(switch (err) {
+                error.NotFat32 => "bpb-not-fat32",
+                error.BadBpb => "bpb-inconsistent",
+                else => "read-error",
+            });
+            continue;
+        };
+        m.console.puts(" fat=1 label=");
+        if (vol.has_label) printVolumeLabel(m, vol.label) else m.console.puts("-");
+        m.console.puts(" cluster_bytes=");
+        m.console.print_u64(vol.cluster_bytes);
+        m.console.puts(" clusters=");
+        m.console.print_u64(vol.cluster_count);
+        m.console.puts(" root_cluster=");
+        m.console.print_u64(vol.root_cluster);
+        m.console.puts("\n");
+    }
+    return .none;
+}
+
+/// `usb ls <vol>[/<dir>]` — list a FAT32 directory (the volume root by
+/// default). Names print whole; the frozen 40-byte `DirEntry` row the file ABI
+/// hands to EL0 truncates at 31 bytes, which is stated in the docs, not hidden.
+fn cmd_usb_ls(m: *Monitor, args: []const []const u8) ExecError {
+    if (args.len < 2) {
+        m.console.print_line("usb ls: usage: usb ls <vol>[/<dir>]");
+        return .invalid_argument;
+    }
+    var v = UsbVolume{};
+    if (!openUsbVolume(m, args[1], &v)) return .invalid_argument;
+    var dir: fat32_ro.Entry = undefined;
+    fat32_ro.lookup(v.src, v.vol, v.parsed.path[0..v.parsed.parsed_len()], &dir) catch |err| {
+        m.console.puts("usb ls: ");
+        m.console.print_line(switch (err) {
+            error.NotFound => "not found",
+            error.NotDir => "a path component is not a directory",
+            error.BadChain => "the directory chain is unusable",
+            else => "read failed",
+        });
+        return .invalid_argument;
+    };
+    if (!dir.isDir()) {
+        m.console.print_line("usb ls: is a file (use `usb cat`)");
+        return .invalid_argument;
+    }
+    m.console.puts("usb ls: vol=");
+    m.console.print_u64(v.parsed.usb_index);
+    m.console.puts(" path=");
+    if (v.parsed.parsed_len() == 0) m.console.puts("/") else m.console.puts(v.parsed.path[0..v.parsed.parsed_len()]);
+    m.console.puts(" label=");
+    if (v.vol.has_label) printVolumeLabel(m, v.vol.label) else m.console.puts("-");
+    m.console.puts("\n");
+    var iter = fat32_ro.dirIter(v.src, v.vol, dir.first_cluster);
+    var n: u64 = 0;
+    while (iter.next()) |e| {
+        n += 1;
+        m.console.puts("usb ls: ");
+        m.console.puts(e.nameSlice());
+        m.console.puts(" size=");
+        m.console.print_u64(e.size);
+        m.console.puts(" dir=");
+        m.console.print_u64(if (e.isDir()) 1 else 0);
+        m.console.puts(" cluster=");
+        m.console.print_u64(e.first_cluster);
+        m.console.puts(" attr=0x");
+        printHexByte(m, e.attr);
+        m.console.puts("\n");
+    }
+    m.console.puts("usb ls: entries=");
+    m.console.print_u64(n);
+    m.console.puts(" broken=");
+    m.console.print_u64(if (iter.broken) 1 else 0);
+    m.console.puts("\n");
+    return .none;
+}
+
+/// `usb cat <vol>/<path> [<max-print>]` — read the whole file, print at most
+/// `max-print` bytes (default 256), and always report the full byte count plus
+/// an FNV-1a 32 of every byte read. A short read (broken chain) is reported as
+/// `broken=1` with the bytes actually obtained — never padded.
+fn cmd_usb_cat(m: *Monitor, args: []const []const u8) ExecError {
+    if (args.len < 2) {
+        m.console.print_line("usb cat: usage: usb cat <vol>/<path> [<max-print>]");
+        return .invalid_argument;
+    }
+    var max_print: u64 = 256;
+    if (args.len > 2) max_print = std.fmt.parseInt(u64, args[2], 0) catch 256;
+    var v = UsbVolume{};
+    if (!openUsbVolume(m, args[1], &v)) return .invalid_argument;
+    var e: fat32_ro.Entry = undefined;
+    fat32_ro.lookup(v.src, v.vol, v.parsed.path[0..v.parsed.parsed_len()], &e) catch |err| {
+        m.console.puts("usb cat: ");
+        m.console.print_line(switch (err) {
+            error.NotFound => "not found",
+            error.NotDir => "a path component is not a directory",
+            error.BadChain => "the directory chain is unusable",
+            else => "read failed",
+        });
+        return .invalid_argument;
+    };
+    if (e.isDir()) {
+        m.console.print_line("usb cat: is a directory (use `usb ls`)");
+        return .invalid_argument;
+    }
+    m.console.puts("usb cat: vol=");
+    m.console.print_u64(v.parsed.usb_index);
+    m.console.puts(" path=");
+    m.console.puts(v.parsed.path[0..v.parsed.parsed_len()]);
+    m.console.puts(" size=");
+    m.console.print_u64(e.size);
+    m.console.puts("\n");
+    var reader = fat32_ro.FileReader.init(v.vol, e);
+    var buf: [256]u8 = undefined;
+    var fnv = fat32_ro.Fnv{};
+    var total: u64 = 0;
+    var printed: u64 = 0;
+    var ends_newline = true;
+    while (true) {
+        const n = fat32_ro.readFile(v.src, &reader, &buf, &usb_cat_sector);
+        if (n == 0) break;
+        fnv.update(buf[0..n]);
+        total += n;
+        var off: usize = 0;
+        while (off < n and printed < max_print) {
+            m.console.putc(buf[off]);
+            ends_newline = buf[off] == '\n';
+            off += 1;
+            printed += 1;
+        }
+    }
+    if (printed > 0 and !ends_newline) m.console.putc('\n');
+    m.console.puts("usb cat: read=");
+    m.console.print_u64(total);
+    m.console.puts(" sum=");
+    m.console.print_hex(fnv.digest());
+    m.console.puts(" printed=");
+    m.console.print_u64(printed);
+    m.console.puts(" of ");
+    m.console.print_u64(total);
+    m.console.puts(" broken=");
+    m.console.print_u64(if (reader.broken) 1 else 0);
+    m.console.puts("\n");
+    return .none;
 }
 
 /// `usb rescan` — the U4 (M43 card U4) polled lifecycle rescan: diff PORTSC

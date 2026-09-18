@@ -29,6 +29,10 @@ const virtio_file = @import("virtio_file.zig");
 // disk behind the U2 BOT/SCSI driver — a READ-ONLY block device for now
 // (the card's bounded first consumer).
 const usb_msc = @import("usb_msc.zig");
+// M70f F1 (issue #1458): the `.usb_fat` partition is a READ-ONLY FAT32 file on
+// the same block seam. `fat32_ro.zig` is pure (a sector source in, bytes out);
+// the adapter is `usb_msc.source()`, so SCSI stays owned by one module.
+const fat32_ro = @import("fat32_ro.zig");
 // #1072 (ADR 0020): the terminal seam. `/dev/tty` is a virtual device handle
 // routed to this process's controlling terminal (open/read/write reuse the
 // frozen file ABI — no new syscall slot).
@@ -74,6 +78,11 @@ pub const Partition = enum {
     /// `usb:`), a READ-ONLY raw block device. Reads are 512-byte SCSI
     /// sectors through `usb_msc`; there is no directory or metadata layer.
     usb,
+    /// M70f F1 (issue #1458): a READ-ONLY file inside the FAT32 volume on MBR
+    /// partition `<N>` (`usb<N>/<path>`, N = 1..4; `usb<N>` alone is the
+    /// volume root, a directory). No write, create, rename, delete or chmod
+    /// path exists — the reader cannot mutate a volume.
+    usb_fat,
     /// #1072 (ADR 0020): the virtual terminal device (`/dev/tty`) — a
     /// process's controlling terminal, backed by `terminal.zig`. Not a
     /// path on any filesystem; `open` special-cases the name.
@@ -102,12 +111,19 @@ pub const FileHandle = struct {
     /// #1072 (ADR 0020): for a `.tty` handle, the `terminal.zig` registry
     /// index this fd reads/writes.
     term_handle: u8 = 0,
+    /// M70f F1 (issue #1458): an open `.usb_fat` file's sequential reader over
+    /// the volume's FAT chain (geometry + position + bytes remaining). Only
+    /// meaningful when `partition == .usb_fat`.
+    usb_file: fat32_ro.FileReader = .{},
 };
 
 pub const ParsedPath = struct {
     partition: Partition,
     path: [max_path_len]u8,
     path_len: u8,
+    /// M70f F1 (issue #1458): the 1-based MBR partition index a `.usb_fat`
+    /// path selects (0 for every other partition).
+    usb_index: u8 = 0,
 
     pub fn parsed_len(self: ParsedPath) usize {
         return self.path_len;
@@ -144,6 +160,15 @@ pub fn controlling_terminal(pid: u64) ?usize {
 /// M43 U3: one sector scratch for `.usb` reads (BOT is one transfer at a
 /// time; a sub-sector read still pulls a whole 512-byte sector here).
 var usb_sector: [usb_msc.block_len]u8 align(64) = undefined;
+
+/// M70f F1 (issue #1458): the sector scratch for `.usb_fat` chain reads. It
+/// carries the SAME single-reader assumption `usb_sector` already has: file
+/// syscalls hold the `.file` service-domain lock (see `syscall.zig`) and the
+/// monitor runs one console command at a time, so a `.usb` reader and a
+/// `.usb_fat` reader never share a scratch — they are separate buffers on
+/// purpose, and the BOT engine refuses a second transfer on an armed
+/// direction in any case.
+var usb_fat_sector: [fat32_ro.sector_len]u8 align(64) = undefined;
 
 pub fn init() void {
     for (&handles) |*proc_handles| {
@@ -232,7 +257,8 @@ pub fn set_mode(pid: u64, path_bytes: []const u8, mode: u16) i64 {
     if (path_bytes.len == 0 or path_bytes.len > max_path_len) return -1;
     const parsed = parse_path(path_bytes) orelse return -1;
     if (parsed.partition == .tty) return -1; // device semantics
-    if (parsed.partition == .usb) return -7; // fixed read-only
+    // `.usb` and `.usb_fat` are fixed read-only 0444 for every actor.
+    if (parsed.partition == .usb or parsed.partition == .usb_fat) return -7;
     if (!virtio_file.available()) return -6;
     const subpath = parsed.path[0..parsed.parsed_len()];
     var st = virtio_file.StatResult{};
@@ -250,6 +276,27 @@ pub fn set_mode(pid: u64, path_bytes: []const u8, mode: u16) i64 {
 // ---------------------------------------------------------------------------
 // Path Parsing, Canonicalization & Volume Routing (Card F2)
 // ---------------------------------------------------------------------------
+
+/// M70f F1 (issue #1458): the `usb<N>[:/]` volume form. Returns the 1-based
+/// partition digit and the path remainder; null when the text is not that form
+/// (so `usbx.txt` stays a host file, the same boundary rule as `host`/`usb`).
+pub const UsbVolumeForm = struct { index: u8, rest: []const u8 };
+
+pub fn usbVolumeForm(subpath: []const u8) ?UsbVolumeForm {
+    if (subpath.len < 4) return null;
+    if (!std.ascii.eqlIgnoreCase(subpath[0..3], "usb")) return null;
+    const d = subpath[3];
+    if (d < '1' or d > '9') return null;
+    var rest_at: usize = 4;
+    if (subpath.len > 4) {
+        if (subpath[4] == '/' or subpath[4] == ':') {
+            rest_at = 5;
+        } else {
+            return null; // `usb1x` is still a host file
+        }
+    }
+    return .{ .index = d - '0', .rest = subpath[rest_at..] };
+}
 
 /// Parse and normalize userland path, routing to the host share partition.
 /// Rejects directory traversal attempts (`..`) and paths exceeding `max_path_len`.
@@ -273,6 +320,7 @@ pub fn parse_path(raw: []const u8) ?ParsedPath {
     }
 
     var partition: Partition = .host;
+    var usb_index: u8 = 0;
     var subpath = raw;
 
     // Strip leading slashes for prefix detection
@@ -293,6 +341,15 @@ pub fn parse_path(raw: []const u8) ?ParsedPath {
     } else if (subpath.len == 4 and std.ascii.eqlIgnoreCase(subpath[0..4], "host")) {
         partition = .host;
         subpath = "";
+    } else if (usbVolumeForm(subpath)) |vf| {
+        // M70f F1 (issue #1458): `usb<N>[/path]` is a read-only FAT32 volume on
+        // MBR partition N. `usb5`..`usb9` name a slot the MBR cannot have: the
+        // whole path is refused (EINVAL) rather than silently re-read as a host
+        // file, so a typo fails loudly instead of opening the wrong volume.
+        if (vf.index > 4) return null;
+        partition = .usb_fat;
+        usb_index = vf.index;
+        subpath = vf.rest;
     } else if (subpath.len >= 4 and std.ascii.eqlIgnoreCase(subpath[0..4], "usb/")) {
         // M43 U3 (issue #1034): the raw USB mass-storage block device.
         partition = .usb;
@@ -336,6 +393,7 @@ pub fn parse_path(raw: []const u8) ?ParsedPath {
         .partition = partition,
         .path = out,
         .path_len = @intCast(out_len),
+        .usb_index = usb_index,
     };
 }
 
@@ -414,9 +472,51 @@ pub fn open(pid: u64, path_bytes: []const u8, flags: u32) i64 {
         return @intCast(slot);
     }
 
+    // M70f F1 (issue #1458): a READ-ONLY file inside MBR partition N's FAT32
+    // volume. The error split is deliberate and part of the surface:
+    //   -6 ENOENT — no device, no such partition, no such file;
+    //   -1 EINVAL — the partition exists but is not a readable FAT32 volume,
+    //                the path is the volume root (a directory), or its chain
+    //                is unusable.
+    // Nothing here writes: every mutating flag is refused before a single
+    // sector is read.
+    if (parsed.partition == .usb_fat) {
+        if ((flags & (MODE_WRITE | MODE_CREATE | MODE_APPEND | MODE_DIR)) != 0) return -1;
+        const cap = usb_msc.capacity() orelse return -6;
+        if (cap.block_len != usb_msc.block_len) return -6; // only 512-B sectors
+        const src = usb_msc.source();
+        const row = fat32_ro.partitionAt(src, parsed.usb_index) catch return -6;
+        // A partition that claims sectors the device does not have is not a
+        // volume this guest may read from.
+        if (@as(u64, row.start_lba) + row.sectors > @as(u64, cap.last_lba) + 1) return -1;
+        const vol = fat32_ro.mount(src, row.start_lba, row.sectors) catch |err| switch (err) {
+            error.NotFat32, error.BadBpb => return -1,
+            else => return -6,
+        };
+        const subpath = parsed.path[0..parsed.parsed_len()];
+        if (subpath.len == 0) return -1; // the volume root is a directory
+        var e: fat32_ro.Entry = undefined;
+        fat32_ro.lookup(src, vol, subpath, &e) catch |err| switch (err) {
+            error.NotFound, error.NotDir, error.Io => return -6,
+            else => return -1,
+        };
+        if (e.isDir()) return -1; // a directory has no byte stream
+        handles[pid][slot] = .{
+            .in_use = true,
+            .partition = .usb_fat,
+            .flags = flags,
+            .cursor = 0,
+            .size = e.size,
+            .path = parsed.path,
+            .path_len = parsed.path_len,
+            .usb_file = fat32_ro.FileReader.init(vol, e),
+        };
+        return @intCast(slot);
+    }
+
     // M50 TS2 (ADR 0024 D4): the ownership/mode gate, after parse_path and
-    // before any virtio_file access. `.usb` was handled above and `.tty`
-    // before parse_path; every path here is `.host`.
+    // before any virtio_file access. `.usb`/`.usb_fat` were handled above and
+    // `.tty` before parse_path; every path here is `.host`.
     if (!hostAllowed(pid, parsed.path[0..parsed.parsed_len()], trustWant(flags))) return -7; // EACCES
 
     if (!virtio_file.available()) return -6; // ENOENT (no host file channel)
@@ -540,6 +640,17 @@ pub fn read(pid: u64, fd: u64, out_buf: []u8) i64 {
         return @intCast(total);
     }
 
+    // M70f F1 (issue #1458): `.usb_fat` reads walk the FAT chain from the
+    // handle's own reader state (geometry + position + bytes remaining). A
+    // broken chain stops the read at the last byte the disk actually held
+    // (`usb_file.broken`); it never pads, repeats or invents content.
+    if (h.partition == .usb_fat) {
+        const src = usb_msc.source();
+        const n = fat32_ro.readFile(src, &h.usb_file, out_buf, &usb_fat_sector);
+        h.cursor += @intCast(n);
+        return @intCast(n);
+    }
+
     if (!virtio_file.available()) return -6;
 
     // M34 HF4: the host share is stateless — each chunk is one vf READ
@@ -639,6 +750,46 @@ pub fn dir_list(pid: u64, path_bytes: []const u8, out_entries: []DirEntry) i64 {
     // M50 TS2 (ADR 0024 D4): the host-share ownership/mode gate for listing.
     if (parsed.partition == .host and !hostAllowed(pid, parsed.path[0..parsed.path_len], .list)) return -7; // EACCES
 
+    // M70f F1 (issue #1458): listing a `.usb_fat` path reads the FAT32
+    // directory chain, one sector at a time, straight into the caller's rows.
+    // Names longer than the frozen 40-byte `DirEntry` row's 31 bytes are
+    // truncated here (`usb ls` prints them whole); a file path is EINVAL,
+    // an absent one ENOENT.
+    if (parsed.partition == .usb_fat) {
+        const cap = usb_msc.capacity() orelse return -6;
+        if (cap.block_len != usb_msc.block_len) return -6;
+        const src = usb_msc.source();
+        const row = fat32_ro.partitionAt(src, parsed.usb_index) catch return -6;
+        const vol = fat32_ro.mount(src, row.start_lba, row.sectors) catch |err| switch (err) {
+            error.NotFat32, error.BadBpb => return -1,
+            else => return -6,
+        };
+        var dir: fat32_ro.Entry = undefined;
+        fat32_ro.lookup(src, vol, parsed.path[0..parsed.parsed_len()], &dir) catch |err| switch (err) {
+            error.NotFound, error.Io => return -6,
+            error.NotDir => return -1,
+            else => return -1,
+        };
+        if (!dir.isDir()) return -1;
+        var iter = fat32_ro.dirIter(src, vol, dir.first_cluster);
+        var n: usize = 0;
+        while (true) {
+            if (n >= out_entries.len) break;
+            const e = iter.next() orelse break;
+            var de = DirEntry{
+                .name = [_]u8{0} ** 32,
+                .size = e.size,
+                .is_dir = if (e.isDir()) 1 else 0,
+                .reserved = .{ 0, 0, 0 },
+            };
+            const nlen = @min(e.name_len, 31);
+            @memcpy(de.name[0..nlen], e.name[0..nlen]);
+            out_entries[n] = de;
+            n += 1;
+        }
+        return @intCast(n);
+    }
+
     if (!virtio_file.available()) return -6;
 
     const subpath = parsed.path[0..parsed.path_len];
@@ -674,10 +825,15 @@ pub fn delete(pid: u64, path_bytes: []const u8) i64 {
     if (pid >= process.max_processes) return -1;
     if (path_bytes.len == 0 or path_bytes.len > max_path_len) return -1;
     const parsed = parse_path(path_bytes) orelse return -1;
+    // M70f F1 (issue #1458): only the host share is mutable through this
+    // table. A device path (`.usb`, `.usb_fat`, `.tty`) is refused by name —
+    // without this guard the subpath would be handed to the host channel,
+    // i.e. `rm usb1/x` would have acted on the share's `x`.
+    if (parsed.partition != .host) return -1;
     // M50 TS2 (ADR 0024 D4/D8): the ownership/mode gate — a secret-class
     // path is denied delete through the file ABI for every actor. Only the
     // `.host` table is keyed by paths; `.usb`/`.tty` are not mode-governed.
-    if (parsed.partition == .host and !hostAllowed(pid, parsed.path[0..parsed.parsed_len()], .delete)) return -7; // EACCES
+    if (!hostAllowed(pid, parsed.path[0..parsed.parsed_len()], .delete)) return -7; // EACCES
     if (!virtio_file.available()) return -6;
     const subpath = parsed.path[0..parsed.parsed_len()];
     // M34 HF5 (issue #739): host deletes route to the channel.
@@ -701,6 +857,7 @@ pub fn rename(pid: u64, old_bytes: []const u8, new_bytes: []const u8) i64 {
     const old = parse_path(old_bytes) orelse return -1;
     const new = parse_path(new_bytes) orelse return -1;
     if (old.partition != new.partition) return -1; // cross-partition unsupported
+    if (old.partition != .host) return -1; // M70f F1: devices are read-only
     const oldp = old.path[0..old.parsed_len()];
     const newp = new.path[0..new.parsed_len()];
     // M50 TS2 (ADR 0024 D4/D8): the ownership/mode gate on BOTH ends — a
@@ -809,6 +966,68 @@ test "file_table: the usb volume is read-only and absent without a device" {
     try std.testing.expectEqual(@as(i64, -6), open(0, "usb", MODE_READ));
     // A host handle still opens exactly as before (regression guard).
     try std.testing.expectEqual(@as(i64, -6), open(0, "hello.txt", MODE_READ)); // no host channel on the host
+}
+
+test "file_table: M70f volume paths route to .usb_fat and refuse the impossible" {
+    // `usb<N>[/<path>]` and `usb<N>:<path>` select MBR partition N (1..4).
+    const p1 = parse_path("usb1").?;
+    try std.testing.expectEqual(Partition.usb_fat, p1.partition);
+    try std.testing.expectEqual(@as(u8, 1), p1.usb_index);
+    try std.testing.expectEqual(@as(u8, 0), p1.path_len);
+    const p2 = parse_path("usb2/PROBE.TXT").?;
+    try std.testing.expectEqual(Partition.usb_fat, p2.partition);
+    try std.testing.expectEqual(@as(u8, 2), p2.usb_index);
+    try std.testing.expectEqualStrings("PROBE.TXT", p2.path[0..p2.path_len]);
+    // Case-insensitive, leading-slash tolerant, and the `:` form collapses the
+    // same way the host prefixes do.
+    const p3 = parse_path("/USB3:DOCS/NOTE.TXT").?;
+    try std.testing.expectEqual(Partition.usb_fat, p3.partition);
+    try std.testing.expectEqual(@as(u8, 3), p3.usb_index);
+    try std.testing.expectEqualStrings("DOCS/NOTE.TXT", p3.path[0..p3.path_len]);
+
+    // The whole-disk raw device keeps its exact previous meaning.
+    try std.testing.expectEqual(Partition.usb, parse_path("usb").?.partition);
+    try std.testing.expectEqual(Partition.usb, parse_path("usb:").?.partition);
+    try std.testing.expectEqual(Partition.usb, parse_path("/usb/").?.partition);
+
+    // A slot the MBR cannot have is refused outright (loud, not a host read);
+    // text that is not the volume form stays a host file, boundary rule intact.
+    try std.testing.expect(parse_path("usb5") == null);
+    try std.testing.expect(parse_path("usb9/x") == null);
+    try std.testing.expectEqual(Partition.host, parse_path("usb1x.txt").?.partition);
+    try std.testing.expectEqual(Partition.host, parse_path("usb10.txt").?.partition);
+    try std.testing.expectEqual(Partition.host, parse_path("usb0").?.partition);
+
+    const f1 = usbVolumeForm("usb1").?;
+    try std.testing.expectEqual(@as(u8, 1), f1.index);
+    try std.testing.expectEqual(@as(usize, 0), f1.rest.len);
+    const f4 = usbVolumeForm("USB4/a/b.txt").?;
+    try std.testing.expectEqual(@as(u8, 4), f4.index);
+    try std.testing.expectEqualStrings("a/b.txt", f4.rest);
+    try std.testing.expect(usbVolumeForm("usb") == null);
+    try std.testing.expect(usbVolumeForm("usb0") == null);
+    try std.testing.expect(usbVolumeForm("usb ") == null);
+}
+
+test "file_table: M70f volume handles are read-only and honest with no device" {
+    init();
+    // Mutating flags are refused before a single sector is read.
+    try std.testing.expectEqual(@as(i64, -1), open(0, "usb1/PROBE.TXT", MODE_WRITE));
+    try std.testing.expectEqual(@as(i64, -1), open(0, "usb1/PROBE.TXT", MODE_READ | MODE_CREATE));
+    try std.testing.expectEqual(@as(i64, -1), open(0, "usb1/PROBE.TXT", MODE_READ | MODE_APPEND));
+    // With no MSC enumerated every volume path is an honest ENOENT — including
+    // the root, which is not a byte stream in any case.
+    try std.testing.expectEqual(@as(i64, -6), open(0, "usb1", MODE_READ));
+    try std.testing.expectEqual(@as(i64, -6), open(0, "usb1/PROBE.TXT", MODE_READ));
+    var rows: [4]DirEntry = undefined;
+    try std.testing.expectEqual(@as(i64, -6), dir_list(0, "usb1", rows[0..]));
+    try std.testing.expectEqual(@as(i64, -6), dir_list(0, "usb1/DOCS", rows[0..]));
+    // A volume is never mode-governed, and never mutable through this table:
+    // the subpath must not leak into the host channel.
+    try std.testing.expectEqual(@as(i64, -7), set_mode(0, "usb1/PROBE.TXT", 0o600));
+    try std.testing.expectEqual(@as(i64, -1), delete(0, "usb1/PROBE.TXT"));
+    try std.testing.expectEqual(@as(i64, -1), delete(0, "usb"));
+    try std.testing.expectEqual(@as(i64, -1), rename(0, "usb1/a.txt", "usb1/b.txt"));
 }
 
 test "file_table: handle allocation, bounds, and lifecycle reset" {
