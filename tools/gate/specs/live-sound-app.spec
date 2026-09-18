@@ -13,8 +13,9 @@
 # the soundless arms. What it does NOT do is play this 14-note melody, and the
 # python block below asserts that melody's exact per-note byte counts
 # (96000/192000). Retiring JINGLE.BIN would therefore drop a CONTENT fixture,
-# not merely a binary, and the card's rule is that a retirement which silently
-# drops coverage is worse than two extra binaries.
+# not merely a binary. ADR 0030 (`go-is-el0`) fixes the policy for exactly this:
+# "Deletions are one binary at a time, each independently revertible. No flag
+# day." A retirement that silently drops coverage is not available under it.
 #
 # The user/src/chime.zig half IS covered: slots 44/45 and the muted-drain
 # identity now run from Go in live-sound-control.spec run 02. A coverage answer

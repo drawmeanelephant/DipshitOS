@@ -29,7 +29,8 @@ EOF
 # The honest limit: mute=0 here is the app's `mute off` OR just the default, and
 # those are indistinguishable, so this run does NOT claim the app's mute call is
 # visible in kernel state. What it shows is the volume (40 could only have come
-# from the app; the boot default is 50) plus the app's own mute accounting,
+# from the app; the kernel's default is 100, virtio_snd.zig:256, observed as
+# `sound: vol=100 mute=0` in live-sound-device) plus the app's own mute accounting,
 # which the counter rows in go-fart.spec pin to two real calls.
 vgate_file script3.txt <<'EOF'
 exec FART.ELF
@@ -107,7 +108,7 @@ vgate_assert 02 serial-contains 'fart: mute off'
 vgate_assert 02 serial-absent 'CLAMPED'
 vgate_assert 02 serial-contains 'fart: done'
 # Kernel state, read back through the monitor: 40 can only have come from the
-# app's slot-44 call (the boot default is 50).
+# app's slot-44 call (the kernel's default is 100, not 40).
 vgate_assert 02 serial-contains 'sound: vol=40 mute=0'
 vgate_assert 02 serial-contains '44 sys_audio_volume calls=2'
 vgate_assert 02 serial-contains '45 sys_audio_mute calls=2'

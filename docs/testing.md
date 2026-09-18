@@ -363,9 +363,10 @@ quietly re-scoped.
   the check was skipped.
 - `live-sound-control.spec` (2/2, 41 s) run 02 boots the Go app and then reads
   the kernel state back through the **monitor**: `sound: vol=40 mute=0`, where 40
-  could only have come from the app (the boot default is 50). That is state
-  observed through a path the app does not control, which its own markers cannot
-  give.
+  could only have come from the app (the kernel's default is 100 —
+  `virtio_snd.zig:256 stream_volume`, observed as `sound: vol=100 mute=0` in
+  `live-sound-device` on a boot that sets nothing). That is state observed
+  through a path the app does not control, which its own markers cannot give.
 - `live-sound-playback.spec` (1/1, 28 s) asserts the accounting identity as
   ARITHMETIC rather than as a verbatim line: `submitted == drained == frames * 8`
   with `frames == 300 ms × 48 kHz`, so a consistent-but-wrong pair cannot pass.
@@ -379,9 +380,12 @@ bounded chunking over the 64 KiB per-call bound, per-note accounting and the
 syscall counters — from Go, in both the `--sound` and soundless arms. It does
 not play JINGLE's 14-note melody, and that spec's python asserts the melody's
 exact per-note byte counts (96000/192000), so retiring `JINGLE.BIN` would drop a
-CONTENT fixture, not merely a binary. CHIME's half is covered (slots 44/45 plus
-the muted-drain identity, above), but a coverage answer is not a retirement, and
-nothing is deleted by this card.
+CONTENT fixture, not merely a binary. That is the policy ADR 0030 (`go-is-el0`)
+fixes — "Deletions are one binary at a time, each independently revertible. No
+flag day." — and a retirement that silently dropped coverage is not available
+under it. CHIME's half *is* covered (slots 44/45 plus the muted-drain identity,
+above), but a coverage answer is not a retirement, and nothing is deleted by
+this card.
 
 **Named limits, so a green run is not read as more than it is.**
 

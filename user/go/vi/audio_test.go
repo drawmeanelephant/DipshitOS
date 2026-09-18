@@ -226,18 +226,20 @@ func TestAudioVolumeNoClamp(t *testing.T) {
 	}
 }
 
-// The in-range path returns the kernel's echo, and sends the same number it
-// was given: the app's marker prints this value, so it must be the kernel's
-// answer rather than our own restatement of the argument.
+// The in-range path sends the number it was given and returns the KERNEL's
+// answer. Those are two different properties, and the second is the one worth
+// proving: the app's marker prints this value, so a binding that restated its
+// own argument would make every `echo=` in the gate a tautology.
 func TestAudioVolumeEcho(t *testing.T) {
 	var gotArg uintptr
+
+	// The ordinary case: the kernel echoes what it accepted.
 	prev := SetSyscallHookForTest(func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
 		gotArg = a0
-		return 40 // the kernel echoes the accepted volume
+		return 40
 	})
-	defer SetSyscallHookForTest(prev)
-
 	n, err := AudioVolume(40)
+	SetSyscallHookForTest(prev)
 	if err != nil {
 		t.Fatalf("AudioVolume(40) err = %v want nil", err)
 	}
@@ -247,10 +249,36 @@ func TestAudioVolumeEcho(t *testing.T) {
 	if n != 40 {
 		t.Fatalf("AudioVolume(40) = %d want the kernel's echo 40", n)
 	}
+
+	// And the one that separates the two: a kernel answer that is NOT the
+	// argument. (7 is absurd as a volume and is not supposed to be plausible --
+	// the property under test is that the value came back from the syscall at
+	// all. A binding returning its own argument passes the case above and fails
+	// here, which is exactly the mutation a marker-based gate cannot see.)
+	prev = SetSyscallHookForTest(func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
+		gotArg = a0
+		return 7
+	})
+	n, err = AudioVolume(60)
+	SetSyscallHookForTest(prev)
+	if err != nil {
+		t.Fatalf("AudioVolume(60) err = %v want nil", err)
+	}
+	if gotArg != 60 {
+		t.Fatalf("slot 44 arg = %d want 60 (passed through unchanged)", gotArg)
+	}
+	if n != 7 {
+		t.Fatalf("AudioVolume(60) = %d want the kernel's 7: the return value is not being taken from the syscall", n)
+	}
+
 	// The bound itself is in range: AudioVolumeMax is a legal volume, not an
 	// error, and pinning that keeps an off-by-one out of the app's arithmetic.
-	if _, err := AudioVolume(AudioVolumeMax); err != nil {
-		t.Fatalf("AudioVolume(AudioVolumeMax) err = %v want nil", err)
+	prev = SetSyscallHookForTest(func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
+		return int64(a0)
+	})
+	defer SetSyscallHookForTest(prev)
+	if got, err := AudioVolume(AudioVolumeMax); err != nil || got != AudioVolumeMax {
+		t.Fatalf("AudioVolume(AudioVolumeMax) = %d, %v want %d, nil", got, err, AudioVolumeMax)
 	}
 }
 
@@ -287,24 +315,30 @@ func TestAudioMuteMapping(t *testing.T) {
 		{"unmuted", false, 0},
 	}
 	for _, c := range cases {
-		var gotNum, gotArg uintptr
-		calls := 0
-		prev := SetSyscallHookForTest(func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
-			calls++
-			gotNum, gotArg = num, a0
-			return 0 // slot 45 returns 0 on success
+		// A subtest per case so the hook is restored by defer even when an
+		// assertion fails: an inline restore leaks the fake kernel into every
+		// later case in the file, which turns one failure into a confusing
+		// cascade.
+		t.Run(c.name, func(t *testing.T) {
+			var gotNum, gotArg uintptr
+			calls := 0
+			prev := SetSyscallHookForTest(func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
+				calls++
+				gotNum, gotArg = num, a0
+				return 0 // slot 45 returns 0 on success
+			})
+			defer SetSyscallHookForTest(prev)
+
+			if err := AudioMute(c.arg); err != nil {
+				t.Fatalf("AudioMute err = %v want nil", err)
+			}
+			if calls != 1 || gotNum != SlotAudioMute {
+				t.Fatalf("called slot %d %d times want %d once", gotNum, calls, SlotAudioMute)
+			}
+			if gotArg != c.want {
+				t.Fatalf("slot 45 arg = %d want %d", gotArg, c.want)
+			}
 		})
-		err := AudioMute(c.arg)
-		SetSyscallHookForTest(prev)
-		if err != nil {
-			t.Fatalf("%s: AudioMute err = %v want nil", c.name, err)
-		}
-		if calls != 1 || gotNum != SlotAudioMute {
-			t.Fatalf("%s: called slot %d %d times want %d once", c.name, gotNum, calls, SlotAudioMute)
-		}
-		if gotArg != c.want {
-			t.Fatalf("%s: slot 45 arg = %d want %d", c.name, gotArg, c.want)
-		}
 	}
 
 	prev := SetSyscallHookForTest(func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
