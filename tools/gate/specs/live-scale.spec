@@ -1,4 +1,5 @@
-# live-scale.spec -- pool scale at the 13-slot budget: counter + up
+# live-scale.spec -- pool scale at the 16-slot budget (M65d / #1442;
+# GOMAXPROCS=1 seating still fits): counter + up
 # to nine USER.BINs live at once (>= 6 running rows, all-distinct
 # tasks/stacks), every load runs the EL0 flow, the worker advances
 # mid-span, and EITHER the eleventh exec is refused OR every exec fit

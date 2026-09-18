@@ -79,7 +79,7 @@ any, are on the GitHub tracker.
 | 60 | Starve Zig EL0 (#1297) | No new `user/src/*.zig` apps (ADR 0030). Leftovers deleted: `EDIT.BIN` → `GOEDIT.ELF` (gate `go-edit`); `FILE.BIN` → `GOFILES.ELF` (gate `go-files`, #1374); `CALC.BIN` → `GOCALC.ELF` (gate `go-calc`, #1378, deleted M62h / #1406). Further Zig EL0 deletions are later cards. TLS stays `FETCHS.BIN` / `lib/tls`; SSH stays `SSH.BIN`. | 🔄 2026-09-17 (policy + EDIT/FILE/CALC deletions) |
 | 61 | Guest self-test (#1380) | `GOSELF.ELF` runs in-OS cases and writes `/host/SELFTEST/…` (report + intake copies + file-ABI receipts + window receipt); host only boots it and byte-compares via `share-equals`/`share-contains`; ADR 0031/0032 | ✅ 2026-09-17 |
 | 63 | GOTABWM HID (#1418) | Boot-default seat drains kind 19/21; pin/Alt+Tab; rail click; type into GOEDIT (share `seed-line\nXYZ`); HID drag-reorder is `go-wm-hid` run 02 (not `go-wm-tabs` M62d choreography). Dual path ADR 0009. Runner `ctrl-tab` is hidChord (#1424). | ✅ 2026-09-18 (`go-wm-hid` 2/2, `go-wm-seat` 2/2, `go-wm-tabs` 3/3, `go-wm-default` 2/2) |
-| 65 | Go threads (ADR 0027) | Slot 73/74 host tests (M65a/b). M65c leftover 0a reverse. M65d `max_tasks` 13→16 (3×4 Ms + kernel + spare). | 🔄 2026-09-18 |
+| 65 | Go threads (ADR 0027) | M65a–d landed (#1472/#1473/#1474/#1475), ADR 0007 slots 73/74 frozen, max_tasks 16 (3 + 3×4 + 1 spare) | ✅ 2026-09-18 (`go-wm-tabs` 3/3, `go-wm-seat` 2/2, `live-scale` 1/1) |
 
 > M40 (the gate-fleet consolidation, issue #934, done 2026-09-06) was a tooling
 > workstream, not a product milestone; M36 was skipped.
@@ -95,7 +95,7 @@ The only threads not closed:
 | Thread | State / next step | Cards |
 |--------|-------------------|-------|
 | **Go runtime port — `GOOS=virelai`** | Phase 0a–0c + phase 2 netpoll + 2.1 EL0 clock landed (#1187/#1196/#1221/#1230/#1231/#1228/#1350/#1359). | #1163 |
-| **M65 — Go threads (ADR 0027)** | M65a–c landed (#1472/#1473/#1474). M65d: `max_tasks` 13→16 for M:N seating. | #1433 |
+| **M65 — Go threads (ADR 0027)** | M65a–d landed (#1472/#1473/#1474/#1475), ADR 0007 slots 73/74 frozen, max_tasks 16 (3 + 3×4 + 1 spare) | #1433 |
 | **M58 — Move the apps you touch** | M58a–f landed: files, GOEDIT (`go-edit`), GOTERM (`go-term`, #1307), fetch, FART. `GOCALC.ELF` (gate `go-calc`, #1378) is the CALC successor. Full-viewport via tabapp in Zig TABWM. | |
 | **M60 leftovers** | Policy recorded; `EDIT.BIN`, `FILE.BIN`, and `CALC.BIN` gone. Remaining Zig EL0 (NOTEPAD, TABWM, SH, TLS/SSH helpers) deletes one binary per card when its Go successor is VZ-green. | |
 | **EL0 `sys_exec` caller survival** | AddrSpaceSpec + argv on slot 28; class-B `live-el0-exec` | #1333 |
