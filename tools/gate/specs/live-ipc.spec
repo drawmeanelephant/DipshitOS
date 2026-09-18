@@ -4,8 +4,12 @@
 # before echo); the mbox invariant holds; both stay running, never
 # exit. The pool-full ninth-exec refusal is DIAGNOSTIC in legacy
 # (scheduler race) -- recorded nowhere, not asserted here either.
-# Mirrors tools/verify-live-ipc.sh (claims 5965/3179). No
-# --script-expect (the full window must elapse).
+# Mirrors tools/verify-live-ipc.sh (claims 5965/3179). M64a (#1438):
+# --script-after forwards script 1 once the boot payload has exited
+# (start-forward, not the 60s end wait). --script2-after still waits
+# on the first peer echo. --script-expect ends on script 2's own last
+# line so the run does not sit on --timeout 60 waiting for transcript
+# '<none>'. The tail is the IPC burst window (peak 5..8) after the echo.
 
 vgate_name live-ipc "mailbox ping/echo flow between live processes on VZ"
 vgate_share seed
@@ -33,7 +37,7 @@ exec USER.BIN
 echo rx-ipc-ok
 EOF
 
-vgate_run 01 -- --cpus 1 --script '$RUN_DIR/script1.txt' --script-after 'tasks user-el0 exited status=7' --script2 '$RUN_DIR/script2.txt' --script2-after 'peer: got ping 1' --timeout 60
+vgate_run 01 -- --cpus 1 --script '$RUN_DIR/script1.txt' --script-after 'tasks user-el0 exited status=7' --script2 '$RUN_DIR/script2.txt' --script2-after 'peer: got ping 1' --script-expect 'rx-ipc-ok' --script-expect-tail 25 --timeout 60
 
 vgate_assert 01 serial-exact 'VirelaiOS kernel has seized control.' 1
 vgate_assert 01 serial-count 'PEER.BIN' 2
@@ -47,9 +51,10 @@ import os, re, sys
 ser = open(os.environ["VG_SER"], errors="replace").read()
 lines = ser.splitlines()
 # Two live processes at phase 1: distinct tasks + distinct stacks.
+# M50 (#1135) put uid/caps between name and state — same rows, same fact.
 def first_row(name):
     for l in lines:
-        if re.search(r"procs: id=[0-9]+ name=%s state=running" % name, l):
+        if re.search(r"procs: id=[0-9]+ name=%s\b.* state=running" % name, l):
             return l
     return None
 pr, cr = first_row("PEER.BIN"), first_row("COUNTER.BIN")
@@ -121,8 +126,8 @@ if not (cp == 0 and cs == 0 and cr == 0):
 # Both STILL running at the final read; neither ever exited.
 if first_row("PEER.BIN") is None or first_row("COUNTER.BIN") is None:
     sys.exit("FAIL: final running rows absent")
-if (sum(1 for l in lines if "name=PEER.BIN state=exited" in l) != 0 or
-        sum(1 for l in lines if "name=COUNTER.BIN state=exited" in l) != 0):
+if (sum(1 for l in lines if re.search(r"name=PEER.BIN\b.* state=exited", l)) != 0 or
+        sum(1 for l in lines if re.search(r"name=COUNTER.BIN\b.* state=exited", l)) != 0):
     sys.exit("FAIL: a party exited")
 print("ipc flow + mbox + liveness ok (peak=%d)" % peak)
 PY
