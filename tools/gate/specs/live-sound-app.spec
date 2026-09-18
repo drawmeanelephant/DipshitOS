@@ -3,6 +3,24 @@
 # for negotiated state (FLOAT 19 / 48000 7 / stereo 2), then plays 14 notes of
 # "Twinkle Twinkle Little Star" via sys_audio_play (slots 42/43) in bounded chunks,
 # followed by the syscalls report.
+#
+# M70f2 (#1476) EVALUATED RETIRING THIS APP in favour of the Go successor
+# (FART.ELF, user/go/fart) and did NOT, because the successor does not cover
+# what this spec asserts. The comparison, assertion by assertion: the Go app
+# covers the EL0 seam (slot 42's negotiated state), bounded chunking over the
+# 64 KiB per-call bound, per-note play accounting and the kernel's own syscall
+# counters -- go-fart.spec asserts all of them, from Go, in both the --sound and
+# the soundless arms. What it does NOT do is play this 14-note melody, and the
+# python block below asserts that melody's exact per-note byte counts
+# (96000/192000). Retiring JINGLE.BIN would therefore drop a CONTENT fixture,
+# not merely a binary. ADR 0030 (`go-is-el0`) fixes the policy for exactly this:
+# "Deletions are one binary at a time, each independently revertible. No flag
+# day." A retirement that silently drops coverage is not available under it.
+#
+# The user/src/chime.zig half IS covered: slots 44/45 and the muted-drain
+# identity now run from Go in live-sound-control.spec run 02. A coverage answer
+# is not a retirement, though, and nothing is deleted by this card. The decision
+# record is on issue #1476.
 
 vgate_name live-sound-app "M15 A3 EL0 audio seam on VZ"
 vgate_share seed

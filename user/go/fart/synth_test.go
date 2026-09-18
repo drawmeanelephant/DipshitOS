@@ -411,6 +411,134 @@ func TestBlipFlutter(t *testing.T) {
 	}
 }
 
+// A note is a TONE, not a rasp: no glide, no flutter, no air, and it must not
+// clip. The muted-drain A/B submits this buffer twice, so "a note" being a
+// clean signal is what makes the digest on both halves meaningful.
+func TestNoteIsTone(t *testing.T) {
+	b := NoteBlip(mutedToneHz, phaseMS)
+	if b.StartHz != b.EndHz {
+		t.Fatalf("note glides %v -> %v: that is a blip, not a note", b.StartHz, b.EndHz)
+	}
+	if b.Depth != 0 || b.Noise != 0 {
+		t.Fatalf("note carries flutter %.2f / air %.2f: the rasp belongs to the blip", b.Depth, b.Noise)
+	}
+	if b.MS != phaseMS {
+		t.Fatalf("note ms = %d want %d", b.MS, phaseMS)
+	}
+
+	pcm := synthTone(vzInfo(), b, vzHz)
+	if pcm == nil {
+		t.Fatal("synthTone refused the VZ geometry")
+	}
+	x := mono(pcm, len(pcm)/8)
+	peak := 0.0
+	for _, v := range x {
+		if a := math.Abs(v); a > peak {
+			peak = a
+		}
+	}
+	if peak >= 0.999 {
+		t.Fatalf("note peak %.4f is clipped", peak)
+	}
+	if peak < 0.1 {
+		t.Fatalf("note peak %.4f is inaudibly quiet", peak)
+	}
+
+	// Measured, not assumed: the samples have to carry the pitch the parameter
+	// names. A note whose Hz never reached the oscillator would still pass every
+	// length assertion in this file.
+	win := int(vzHz) * 40 / 1000
+	got := pitchHz(x, win, win, 20, 400, vzHz)
+	if got < mutedToneHz*0.95 || got > mutedToneHz*1.05 {
+		t.Fatalf("note sounds at %.1f Hz, want %d Hz", got, mutedToneHz)
+	}
+}
+
+// vzInfo is the negotiated state the three live sound gates pin (FLOAT /
+// stereo / 48 kHz), as slot 42 reports it.
+func vzInfo() vi.AudioInfo {
+	return vi.AudioInfo{Format: vzFormat, Rate: vzRate, Channels: vzChannels, PeriodBytes: vi.AudioPeriodBytes, MaxLen: vi.AudioMaxLen}
+}
+
+// The arithmetic the M70f2 phases then assert on the VM, pinned on the host so
+// a parameter change fails here rather than on the gate. The syscall total is
+// the load-bearing one: it is the number the spec re-pins, and it must be the
+// sum of the four play phases (blip + unmuted + muted + sequence).
+func TestM70f2Arithmetic(t *testing.T) {
+	blip := synthTone(vzInfo(), DefaultBlip, vzHz)
+	tone := synthTone(vzInfo(), NoteBlip(mutedToneHz, phaseMS), vzHz)
+	if blip == nil || tone == nil {
+		t.Fatal("synthesis refused")
+	}
+	if got := chunkCount(len(tone)); got != 24 {
+		t.Fatalf("a %d ms note is %d chunks want 24", phaseMS, got)
+	}
+	if len(tone) != 96000 {
+		t.Fatalf("note bytes = %d want 96000", len(tone))
+	}
+
+	notes := 0
+	for _, n := range sequenceNotes {
+		pcm := synthTone(vzInfo(), NoteBlip(n.Hz, n.MS), vzHz)
+		if pcm == nil {
+			t.Fatalf("note %v refused", n)
+		}
+		notes += chunkCount(len(pcm))
+	}
+	if want := 24 * len(sequenceNotes); notes != want {
+		t.Fatalf("sequence chunks = %d want %d", notes, want)
+	}
+
+	// Per-note submission is not the same shape as one concatenated buffer:
+	// 4 x 24 = 96 calls, where the concatenation would be 94. The app prints
+	// the former because that is what the kernel's counter will show.
+	concat := chunkCount(96000 * len(sequenceNotes))
+	if concat == notes {
+		t.Fatalf("per-note and concatenated chunking agree (%d): the distinction the sequence marker documents has gone", concat)
+	}
+
+	total := chunkCount(len(blip)) + 2*chunkCount(len(tone)) + notes
+	if total != 196 {
+		t.Fatalf("slot-43 calls = %d want 196 (blip 52 + unmuted 24 + muted 24 + sequence 96)", total)
+	}
+}
+
+// A sequence of notes that are all the same bytes would pass every count
+// assertion above while being one note repeated. Different pitches have to
+// produce different samples.
+func TestSequenceNotesDiffer(t *testing.T) {
+	seen := map[uint32]int{}
+	for i, n := range sequenceNotes {
+		pcm := synthTone(vzInfo(), NoteBlip(n.Hz, n.MS), vzHz)
+		if pcm == nil {
+			t.Fatalf("note %d refused", i)
+		}
+		h := digest(pcm)
+		if prev, dup := seen[h]; dup {
+			t.Fatalf("notes %d (%.0f Hz) and %d (%.0f Hz) are byte-identical", prev, sequenceNotes[prev].Hz, i, n.Hz)
+		}
+		seen[h] = i
+	}
+}
+
+// synthTone refuses a geometry it cannot encode instead of returning a buffer
+// of zeros — the phases branch on nil, so this is their refusal path.
+func TestSynthToneRefuses(t *testing.T) {
+	bad := []vi.AudioInfo{
+		{Format: vi.AudioFmtNone, Channels: 2},
+		{Format: vi.AudioFmtFloat, Channels: 0},
+		{Format: 9, Channels: 2},
+	}
+	for _, info := range bad {
+		if pcm := synthTone(info, NoteBlip(mutedToneHz, phaseMS), vzHz); pcm != nil {
+			t.Fatalf("fmt %d ch %d: returned %d bytes", info.Format, info.Channels, len(pcm))
+		}
+	}
+	if pcm := synthTone(vzInfo(), NoteBlip(mutedToneHz, phaseMS), 0); pcm != nil {
+		t.Fatal("rate 0 with no Hz: returned bytes")
+	}
+}
+
 // The air layer is a layer: turning Noise off must change the samples, and the
 // default has to stay a subtle floor rather than a noise record.
 func TestBlipAir(t *testing.T) {

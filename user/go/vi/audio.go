@@ -30,6 +30,16 @@ import "unsafe"
 // ready=0 with format/rate = 0xff. Slot 43 is where the honest refusal
 // surfaces — ENXIO, the typed ErrNoAudioDevice — and that is what an app
 // reports ("documented, not a failure" in the card's words).
+//
+// All four slots go through the HOOKABLE gateway (svc1/svc2 in vi.go) rather
+// than the raw assembly, the same seam M66a (#1443) opened for the file
+// surface. That is what lets a host test pin what this binding SENDS, not just
+// what it returns: in particular that an out-of-range volume is handed to the
+// kernel to refuse rather than quietly clamped here.
+//
+// M70f2 (#1476) adds slots 44/45 to this file, so the audio seam stays one
+// place: 42/43 were already here and FART.ELF imports it. Splitting the four
+// rows across `vi` and `vsys` would make one subsystem span two packages.
 
 // AudioInfo is the 16-byte negotiated playback state (slot 42's out struct).
 type AudioInfo struct {
@@ -60,6 +70,12 @@ const (
 	AudioMaxLen      = 64 * 1024 // virtio_snd.audio_max_len
 )
 
+// AudioVolumeMax is the kernel's gain bound: slot 44 accepts 0..100 inclusive
+// (virtio_snd's audio_volume, ADR 0007 row 44). It is exported so an app's
+// marker, the spec's assertion and this binding all state the same number
+// instead of three copies of 100.
+const AudioVolumeMax = 100
+
 // ErrNoAudioDevice is the kernel's ENXIO: no sound device is attached (the
 // default VM without `--sound`), or the device refused a submission. Slot 42
 // cannot report it (a soundless device is a successful call with Ready == 0);
@@ -76,7 +92,7 @@ var ErrNoAudioDevice = errno(ErrENXIO)
 // refusal (EINVAL for a non-process caller), the error is the kernel's code.
 func AudioQuery() (AudioInfo, error) {
 	var out AudioInfo
-	r := syscall1(SlotAudioInfo, uintptr(unsafe.Pointer(&out)))
+	r := svc1(SlotAudioInfo, uintptr(unsafe.Pointer(&out)))
 	if r < 0 {
 		return AudioInfo{}, errno(-r)
 	}
@@ -109,7 +125,7 @@ func AudioPlay(pcm []byte) (int, error) {
 // audioPlayPeriod is one slot-43 call for one period-sized chunk. len(chunk)
 // is always ≥ 1: the chunker never calls it for an empty range.
 func audioPlayPeriod(chunk []byte) (int, error) {
-	r := syscall2(SlotAudioPlay, uintptr(unsafe.Pointer(&chunk[0])), uintptr(len(chunk)))
+	r := svc2(SlotAudioPlay, uintptr(unsafe.Pointer(&chunk[0])), uintptr(len(chunk)))
 	if r < 0 {
 		return 0, errno(-r)
 	}
@@ -117,6 +133,56 @@ func audioPlayPeriod(chunk []byte) (int, error) {
 		return int(r), ErrNoAudioDevice
 	}
 	return int(r), nil
+}
+
+// AudioVolume sets the kernel-side stream gain (slot 44) and returns the
+// volume the kernel echoed back.
+//
+// The gain applies at the TX submit choke point — the same knob `beep` and the
+// boot chime share — so it changes what a LATER AudioPlay produces and never a
+// period already submitted.
+//
+// Out-of-range is the KERNEL's refusal, not ours. ADR 0007 row 44 reads
+// "`EINVAL` for a non-process caller or an out-of-range value (honest refusal,
+// no silent clamping)", and this binding passes vol through unchanged so the
+// caller sees that EINVAL. Clamping to AudioVolumeMax here would convert a
+// caller's bug — or an attempt to overdrive a shared stream — into silent
+// success, which is the exact behavior the row exists to prevent. A negative
+// vol is passed as its two's-complement value: out of range by construction,
+// and refused the same way.
+func AudioVolume(vol int) (int, error) {
+	r := svc1(SlotAudioVolume, uintptr(vol))
+	if r < 0 {
+		return 0, errno(-r)
+	}
+	return int(r), nil
+}
+
+// AudioMute sets the kernel-side mute state (slot 45): muted true zeroes every
+// sample the TX path submits; false restores the gain the last AudioVolume
+// set.
+//
+// Mute is NOT a stop. The stream lifecycle and the accounting are untouched,
+// so a muted AudioPlay confirms the same byte count as an unmuted one and the
+// samples still drain. That identity is the reason a Go consumer exists at all
+// (the go-fart gate asserts it): "silent" must never become "short", because
+// a short return is how this seam reports a device refusal
+// (ErrNoAudioDevice) — a mute that shortened the return would be
+// indistinguishable from a broken device.
+//
+// muted is marshalled as exactly 1 or 0; the kernel refuses anything else with
+// EINVAL, and deciding what a third state would mean is not this binding's job
+// (hence a bool in the signature rather than an int).
+func AudioMute(muted bool) error {
+	arg := uintptr(0)
+	if muted {
+		arg = 1
+	}
+	r := svc1(SlotAudioMute, arg)
+	if r < 0 {
+		return errno(-r)
+	}
+	return nil
 }
 
 // audioChunks splits n bytes into AudioPeriodBytes-sized [off,end) ranges and

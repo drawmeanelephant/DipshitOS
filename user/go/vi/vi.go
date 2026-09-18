@@ -92,6 +92,8 @@ const (
 	SlotFileTruncate uintptr = 36
 	SlotAudioInfo    uintptr = 42
 	SlotAudioPlay    uintptr = 43
+	SlotAudioVolume  uintptr = 44
+	SlotAudioMute    uintptr = 45
 	SlotWinFillBatch uintptr = 46
 	SlotMmap         uintptr = 63
 	SlotTime         uintptr = 66
