@@ -283,7 +283,7 @@ partition, no boot/EFI volume, no allocator, and it never re-arms virtio-blk.
   `delete` and `rename` are refused before any sector is read (the delete
   guard also closes a latent path where a device subpath could reach the host
   channel).
-- **`live-usb-block.spec` (class B, one boot, 198 s).** The staged disk is a
+- **`live-usb-block.spec` (class B, one boot).** The staged disk is a
   12 MiB MBR image: partition 1 is a hand-built FAT32 volume (`PROBE.TXT`,
   120 B; `DOCS/NOTE.TXT`, 5000 B across clusters 5→6→7) and partition 2 is a
   deliberately non-FAT32 type (`0x83`). The boot proves the MBR walk
@@ -305,9 +305,25 @@ attachment path, so "a real stick in a real port" is unprovable here; the
 reader speaks 512-byte sectors and FAT32 only (no FAT12/16/exFAT/NTFS) and is
 read-only; LFN code units are taken as their low byte, and a name longer than
 31 bytes is truncated in the frozen 40-byte `DirEntry` row (`usb ls` prints it
-whole); the volume label comes from the BPB only. The `usb vol|ls|cat` verbs
-are deliberately absent from the monitor's `usb` help catalog while the M65d
-claim (#1442) owns the three fixtures that pin that string.
+whole); the volume label comes from the BPB only; `usb cat` prints at most 4096
+bytes and scans at most 1 MiB, reporting `capped=1` when the bound rather than
+the file ended the read. The `usb vol|ls|cat` verbs are in the monitor's `usb`
+help catalog, and the three fixtures that pin that string —
+`kernel/src/shell.zig`'s exact-transcript test, `tests/transcript-console.txt`,
+`kernel/tests/monitor_test.zig` — were updated in the same change (that fixture
+near-miss is documented below).
+
+**Chain safety is a rule here, not a hope.** Three shapes are refused rather
+than served: a chain that points at itself stops immediately; a cyclic table
+(A → B → A) is caught because the chain must END where the file's size says it
+does (one extra FAT read at EOF — without it a cycle serves real clusters until
+the byte count runs out and looks like a clean read); and a directory walk is
+bounded by the volume's own cluster count, so a terminator-less cyclic
+directory ends as a broken chain instead of spinning `usb ls` on the
+single-threaded shell path. Each case latches `broken` and keeps only the bytes
+the disk actually held, asserted by unit cases for the self-loop, a two-cluster
+cycle, a healthy control chain, and a cyclic directory (plus early EOC, the
+reserved bad marker, and a zero first cluster).
 
 ## Verification sequence
 

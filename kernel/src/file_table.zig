@@ -476,8 +476,8 @@ pub fn open(pid: u64, path_bytes: []const u8, flags: u32) i64 {
     // volume. The error split is deliberate and part of the surface:
     //   -6 ENOENT — no device, no such partition, no such file;
     //   -1 EINVAL — the partition exists but is not a readable FAT32 volume,
-    //                the path is the volume root (a directory), or its chain
-    //                is unusable.
+    //                the path is the volume root (a directory), a path
+    //                component that is a file, or an unusable chain.
     // Nothing here writes: every mutating flag is refused before a single
     // sector is read.
     if (parsed.partition == .usb_fat) {
@@ -497,7 +497,10 @@ pub fn open(pid: u64, path_bytes: []const u8, flags: u32) i64 {
         if (subpath.len == 0) return -1; // the volume root is a directory
         var e: fat32_ro.Entry = undefined;
         fat32_ro.lookup(src, vol, subpath, &e) catch |err| switch (err) {
-            error.NotFound, error.NotDir, error.Io => return -6,
+            error.NotFound, error.Io => return -6,
+            // A path that goes THROUGH a file is a structural error, not a
+            // missing one — `dir_list` answers `-1` for the same shape.
+            error.NotDir => return -1,
             else => return -1,
         };
         if (e.isDir()) return -1; // a directory has no byte stream
@@ -760,6 +763,9 @@ pub fn dir_list(pid: u64, path_bytes: []const u8, out_entries: []DirEntry) i64 {
         if (cap.block_len != usb_msc.block_len) return -6;
         const src = usb_msc.source();
         const row = fat32_ro.partitionAt(src, parsed.usb_index) catch return -6;
+        // The same end-of-device guard `open` applies: a partition table may
+        // not send this guest past the disk it was handed.
+        if (@as(u64, row.start_lba) + row.sectors > @as(u64, cap.last_lba) + 1) return -1;
         const vol = fat32_ro.mount(src, row.start_lba, row.sectors) catch |err| switch (err) {
             error.NotFat32, error.BadBpb => return -1,
             else => return -6,

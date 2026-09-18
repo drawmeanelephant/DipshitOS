@@ -3556,6 +3556,14 @@ fn botStageName(s: usb_msc.Stage) []const u8 {
 /// single-threaded (one command at a time), so a static is safe here.
 var usb_cat_sector: [fat32_ro.sector_len]u8 align(64) = undefined;
 
+/// `usb cat` bounds. A print bound keeps the serial readable; the scan bound
+/// keeps a bogus file size (the FAT's size field is a u32 an image author
+/// controls) from holding the shell for hours of BOT round trips — 1 MiB is
+/// 2048 sector transfers. A scan that stops at the cap says `capped=1`
+/// rather than presenting a partial read as the whole file.
+const usb_cat_max_print_bytes: u64 = 4096;
+const usb_cat_max_bytes: u64 = 1 << 20;
+
 fn printHexByte(m: *Monitor, b: u8) void {
     const digits = "0123456789abcdef";
     m.console.putc(digits[b >> 4]);
@@ -3787,10 +3795,11 @@ fn cmd_usb_ls(m: *Monitor, args: []const []const u8) ExecError {
     return .none;
 }
 
-/// `usb cat <vol>/<path> [<max-print>]` — read the whole file, print at most
-/// `max-print` bytes (default 256), and always report the full byte count plus
-/// an FNV-1a 32 of every byte read. A short read (broken chain) is reported as
-/// `broken=1` with the bytes actually obtained — never padded.
+/// `usb cat <vol>/<path> [<max-print>]` — read the file, print at most
+/// `max-print` bytes (default 256, clamped to 4096), and always report the byte
+/// count plus an FNV-1a 32 of every byte read. A short read (broken chain) is
+/// reported as `broken=1` with the bytes actually obtained — never padded — and
+/// a scan stopped by the 1 MiB bound reports `capped=1`.
 fn cmd_usb_cat(m: *Monitor, args: []const []const u8) ExecError {
     if (args.len < 2) {
         m.console.print_line("usb cat: usage: usb cat <vol>/<path> [<max-print>]");
@@ -3798,6 +3807,7 @@ fn cmd_usb_cat(m: *Monitor, args: []const []const u8) ExecError {
     }
     var max_print: u64 = 256;
     if (args.len > 2) max_print = std.fmt.parseInt(u64, args[2], 0) catch 256;
+    if (max_print > usb_cat_max_print_bytes) max_print = usb_cat_max_print_bytes;
     var v = UsbVolume{};
     if (!openUsbVolume(m, args[1], &v)) return .invalid_argument;
     var e: fat32_ro.Entry = undefined;
@@ -3828,8 +3838,9 @@ fn cmd_usb_cat(m: *Monitor, args: []const []const u8) ExecError {
     var total: u64 = 0;
     var printed: u64 = 0;
     var ends_newline = true;
-    while (true) {
-        const n = fat32_ro.readFile(v.src, &reader, &buf, &usb_cat_sector);
+    while (total < usb_cat_max_bytes) {
+        const want: usize = @intCast(@min(@as(u64, buf.len), usb_cat_max_bytes - total));
+        const n = fat32_ro.readFile(v.src, &reader, buf[0..want], &usb_cat_sector);
         if (n == 0) break;
         fnv.update(buf[0..n]);
         total += n;
@@ -3841,6 +3852,9 @@ fn cmd_usb_cat(m: *Monitor, args: []const []const u8) ExecError {
             printed += 1;
         }
     }
+    // A scan that stopped with bytes still claimed is a cap stop, not a clean
+    // end — say so instead of presenting a partial read as the whole file.
+    const capped = reader.remaining > 0 and !reader.broken;
     if (printed > 0 and !ends_newline) m.console.putc('\n');
     m.console.puts("usb cat: read=");
     m.console.print_u64(total);
@@ -3852,6 +3866,8 @@ fn cmd_usb_cat(m: *Monitor, args: []const []const u8) ExecError {
     m.console.print_u64(total);
     m.console.puts(" broken=");
     m.console.print_u64(if (reader.broken) 1 else 0);
+    m.console.puts(" capped=");
+    m.console.print_u64(if (capped) 1 else 0);
     m.console.puts("\n");
     return .none;
 }

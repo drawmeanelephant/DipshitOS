@@ -215,7 +215,7 @@ PY
 # Boot with only the MSD attached; the shell drives the volume surface and then
 # exec's the EL0 consumer from the host share. No HID device, so `input: armed`
 # must be absent, and the MSD lives on its own controller (M43 U6, [observed]).
-vgate_run 01 -- --script '$RUN_DIR/script.txt' --script-after "virelai>" --usb-msd '$RUN_DIR/msd.img' --timeout 180
+vgate_run 01 -- --script '$RUN_DIR/script.txt' --script-after "virelai>" --usb-msd '$RUN_DIR/msd.img' --timeout 240
 
 vgate_assert 01 serial-contains 'VirelaiOS kernel has seized control.'
 
@@ -245,14 +245,14 @@ vgate_assert 01 serial-contains 'rx-usb-ls-docs'
 # --- M70f F1: byte-exact reads, whole-file checksums. ----------------------
 vgate_assert 01 serial-contains 'usb cat: vol=1 path=PROBE.TXT size=120'
 vgate_assert 01 serial-contains 'usb-bulk-probe'
-vgate_assert 01 serial-contains 'usb cat: read=120 sum=0x00000000133d22a5 printed=120 of 120 broken=0'
+vgate_assert 01 serial-contains 'usb cat: read=120 sum=0x00000000133d22a5 printed=120 of 120 broken=0 capped=0'
 vgate_assert 01 serial-contains 'rx-usb-cat-probe'
 # 5000 bytes across clusters 5 -> 6 -> 7: the checksum covers every byte, so a
 # bounded print still proves the whole chain was walked correctly.
 vgate_assert 01 serial-contains 'usb cat: vol=1 path=DOCS/NOTE.TXT size=5000'
 vgate_assert 01 serial-contains 'fatchain-0000'
 vgate_assert 01 serial-contains 'fatchain-0017'
-vgate_assert 01 serial-contains 'usb cat: read=5000 sum=0x0000000052e785f5 printed=256 of 5000 broken=0'
+vgate_assert 01 serial-contains 'usb cat: read=5000 sum=0x0000000052e785f5 printed=256 of 5000 broken=0 capped=0'
 vgate_assert 01 serial-contains 'rx-usb-cat-note'
 
 # --- M70f F1: the honest refusals (observed, not asserted in prose). -------

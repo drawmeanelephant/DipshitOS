@@ -27,9 +27,15 @@
 //!     bytes wide, so truncation is a property of the ABI, not a choice here;
 //!   * the volume label comes from the BPB only (a root-directory label entry
 //!     is skipped, not merged);
-//!   * a chain that ends early, points out of range, or hits a bad marker
-//!     stops the read at the last good byte and latches `broken` — never a
-//!     hang, never invented bytes.
+//!   * a chain that ends early, points out of range, hits a bad marker, points
+//!     at itself, cycles, or fails to END where the file's size says it does
+//!     stops at the last byte the disk actually held and latches `broken` —
+//!     never a hang, never invented bytes. The EOF check is what makes that
+//!     true for a cyclic table (A -> B -> A), which would otherwise keep
+//!     serving real clusters until the byte count ran out and look clean;
+//!   * a directory walk is bounded by the volume's own cluster count, so a
+//!     terminator-less cyclic directory ends as a broken chain instead of
+//!     spinning the caller (the monitor's `usb ls` is the shell thread).
 
 const std = @import("std");
 
@@ -229,8 +235,11 @@ pub fn mount(src: SectorSource, base_lba: u32, volume_sectors: u32) Error!Volume
     if (total == 0) return error.BadBpb;
     if (volume_sectors != 0 and volume_sectors < total) total = volume_sectors;
 
-    const overhead: u32 = @as(u32, reserved) + @as(u32, fat_sectors) * nfats;
-    if (total <= overhead) return error.BadBpb;
+    // 64-bit here on purpose: `fat_sectors * nfats` overflows u32 for a
+    // hostile BPB, and a wrapped `overhead` is a wrapped geometry check.
+    const overhead64: u64 = @as(u64, reserved) + @as(u64, fat_sectors) * @as(u64, nfats);
+    if (overhead64 >= @as(u64, total)) return error.BadBpb;
+    const overhead: u32 = @intCast(overhead64);
     const data_sectors = total - overhead;
     const cluster_count = data_sectors / spc;
     if (cluster_count == 0) return error.BadBpb;
@@ -415,6 +424,11 @@ pub const DirIter = struct {
     sector_valid: bool = false,
     done: bool = false,
     broken: bool = false,
+    /// Clusters walked so far. A directory chain is bounded by the volume's
+    /// own cluster count, so a cyclic table (A -> B -> A with no 0x00
+    /// terminator) ends as a broken chain instead of wedging the console —
+    /// the monitor's `usb ls` loop is on the single-threaded shell path.
+    clusters_walked: u32 = 0,
     /// LFN assembly state.
     lfn: [max_name]u8 = [_]u8{0} ** max_name,
     lfn_len: u8 = 0,
@@ -533,6 +547,16 @@ pub const DirIter = struct {
             if (self.sector_in_cluster >= self.vol.sectors_per_cluster) {
                 switch (fatNext(self.src, self.vol.fat_start_lba, self.cluster, self.vol.maxCluster(), &self.sector)) {
                     .next => |n| {
+                        // A directory chain may not point at itself, and no
+                        // directory can span more clusters than the volume
+                        // holds: either one is a broken chain, not a long
+                        // listing.
+                        if (n == self.cluster or self.clusters_walked >= self.vol.cluster_count) {
+                            self.broken = true;
+                            self.done = true;
+                            return false;
+                        }
+                        self.clusters_walked += 1;
                         self.cluster = n;
                         self.sector_in_cluster = 0;
                     },
@@ -553,14 +577,16 @@ pub const DirIter = struct {
             self.done = true;
             return false;
         };
-        const lba_abs = lba + self.sector_in_cluster;
+        // 64-bit: `lba + sector_in_cluster` wraps in u32 before any range
+        // check could see it.
+        const lba_abs: u64 = @as(u64, lba) + self.sector_in_cluster;
         // `fatNext` reuses `sector` as its own scratch, so read after it.
         if (lba_abs > std.math.maxInt(u32)) {
             self.broken = true;
             self.done = true;
             return false;
         }
-        if (!self.src.read(lba_abs, &self.sector)) {
+        if (!self.src.read(@intCast(lba_abs), &self.sector)) {
             self.broken = true;
             self.done = true;
             return false;
@@ -630,8 +656,13 @@ pub const FileReader = struct {
     cluster: u32 = 0,
     cluster_off: u32 = 0,
     remaining: u32 = 0,
-    /// Set when the chain ended before `remaining` reached 0, or a bad marker
-    /// / out-of-range cluster / I/O failure stopped the read.
+    /// Set once the first byte has been served (a zero-length file never
+    /// touches the FAT, so it has no chain to verify).
+    started: bool = false,
+    /// Set once the chain's end has been checked against the file's size.
+    ended: bool = false,
+    /// Set when the chain ended before `remaining` reached 0, pointed at
+    /// itself, cycled, or failed to end where the size says it does.
     broken: bool = false,
 
     pub fn init(vol: Volume, e: Entry) FileReader {
@@ -660,6 +691,12 @@ pub fn readFile(src: SectorSource, r: *FileReader, out: []u8, scratch: *[sector_
         if (r.cluster_off >= r.cluster_bytes) {
             switch (fatNext(src, r.fat_start_lba, r.cluster, r.max_cluster, scratch)) {
                 .next => |n| {
+                    // A chain that points at itself never advances, so it can
+                    // only ever repeat one cluster's bytes.
+                    if (n == r.cluster) {
+                        r.broken = true;
+                        break;
+                    }
                     r.cluster = n;
                     r.cluster_off = 0;
                 },
@@ -691,6 +728,22 @@ pub fn readFile(src: SectorSource, r: *FileReader, out: []u8, scratch: *[sector_
         total += take;
         r.cluster_off += take;
         r.remaining -= take;
+        r.started = true;
+    }
+
+    // The chain must END where the file's size says it does. Without this a
+    // cyclic table (A -> B -> A) keeps serving real on-disk clusters until
+    // `remaining` runs out and reports a clean read of bytes that were never
+    // this file — the opposite of the guarantee every caller relies on. One
+    // extra FAT read at EOF makes the guarantee true. An I/O failure here does
+    // not cast doubt on bytes already copied, so it is not latched; a chain
+    // that continues past the size is.
+    if (!r.broken and r.started and r.remaining == 0 and !r.ended) {
+        r.ended = true;
+        switch (fatNext(src, r.fat_start_lba, r.cluster, r.max_cluster, scratch)) {
+            .eoc, .io => {},
+            .next, .bad => r.broken = true,
+        }
     }
     return total;
 }
@@ -1093,13 +1146,32 @@ test "fat32_ro: broken chains stop honestly instead of inventing bytes" {
     try std.testing.expectEqual(@as(usize, 1024), readFile(src, &r, out[0..], &scratch));
     try std.testing.expect(r.broken);
 
-    // (d) A self-loop is bounded by the file size (never a hang) and reads the
-    // repeated cluster; the reader reports it as a normal full read.
+    // (d) A chain that points at itself stops immediately with `broken`: the
+    // bytes past the first cluster were never this file's content, and
+    // reporting them as a clean 2500-byte read would be inventing content.
     img.setFat(5, 5);
     r = FileReader.init(vol, e);
-    const looped = readFile(src, &r, out[0..], &scratch);
-    try std.testing.expectEqual(@as(usize, 2500), looped);
-    try std.testing.expectEqual(@as(u32, 0), r.remaining);
+    try std.testing.expectEqual(@as(usize, 1024), readFile(src, &r, out[0..], &scratch));
+    try std.testing.expect(r.broken);
+    try std.testing.expectEqual(@as(u32, 2500 - 1024), r.remaining);
+
+    // (d2) A two-cluster cycle (5 -> 6 -> 5) is caught by the end-of-chain
+    // check: every byte copied was real, but the chain does not end where the
+    // size says it does, so the read is broken rather than silently clean.
+    img.setFat(5, 6);
+    img.setFat(6, 5);
+    r = FileReader.init(vol, e);
+    try std.testing.expectEqual(@as(usize, 2500), readFile(src, &r, out[0..], &scratch));
+    try std.testing.expect(r.broken);
+
+    // (d3) The control: restoring a well-formed chain reads the same bytes and
+    // is NOT broken — the check is not a blanket refusal.
+    img.setFat(5, 6);
+    img.setFat(6, 7);
+    img.setFat(7, 0x0fffffff);
+    r = FileReader.init(vol, e);
+    try std.testing.expectEqual(@as(usize, 2500), readFile(src, &r, out[0..], &scratch));
+    try std.testing.expect(!r.broken);
 
     // (e) A zero first cluster reads nothing at all.
     var empty = e;
@@ -1107,6 +1179,56 @@ test "fat32_ro: broken chains stop honestly instead of inventing bytes" {
     var re = FileReader.init(vol, empty);
     try std.testing.expectEqual(@as(usize, 0), readFile(src, &re, out[0..], &scratch));
     try std.testing.expect(re.broken);
+}
+
+test "fat32_ro: a cyclic directory chain ends broken instead of hanging" {
+    var img = try TestImage.build(std.testing.allocator);
+    defer std.testing.allocator.free(img.bytes);
+    const src = img.source();
+    const vol = try mount(src, 8, TestImage.vol_sectors);
+
+    // Clusters 4 and 8 hold 32 live entries each (a 1 KiB cluster is two
+    // sectors) and carry no 0x00 terminator, so the walk can only end via the
+    // FAT — exactly the shape that used to spin forever.
+    var i: u32 = 0;
+    while (i < 64) : (i += 1) {
+        const cl: u32 = if (i < 32) 4 else 8;
+        const slot: u32 = i % 32;
+        const lba = img.clusterSector(cl, slot / @as(u32, entries_per_sector));
+        img.dirEntry(lba, slot % entries_per_sector, "LOOP    BIN", attr_archive, 3, 1);
+    }
+
+    // (a) A self-loop ends immediately, latched broken.
+    img.setFat(4, 4);
+    var iter = dirIter(src, vol, 4);
+    var n: usize = 0;
+    while (iter.next() != null) n += 1;
+    try std.testing.expect(iter.broken);
+    try std.testing.expectEqual(@as(usize, 32), n);
+
+    // (b) A two-cluster cycle (4 -> 8 -> 4) is bounded by the volume's own
+    // cluster count: it terminates, and it is latched broken rather than
+    // reported as a very long listing.
+    img.setFat(4, 8);
+    img.setFat(8, 4);
+    iter = dirIter(src, vol, 4);
+    n = 0;
+    while (iter.next() != null) n += 1;
+    try std.testing.expect(iter.broken);
+    try std.testing.expect(n <= @as(usize, TestImage.cluster_count + 1) * 32);
+
+    // Both reach `lookup` as a broken chain, not as "not found": the caller
+    // must be able to tell a damaged volume from a missing name.
+    var e: Entry = undefined;
+    try std.testing.expectError(error.BadChain, lookup(src, vol, "DOCS/NOPE.TXT", &e));
+    img.setFat(4, 4);
+    try std.testing.expectError(error.BadChain, lookup(src, vol, "DOCS/NOPE.TXT", &e));
+
+    // The healthy case still lists and resolves (the guard is not a blanket
+    // refusal of multi-cluster directories).
+    img.setFat(4, 0x0fffffff);
+    try lookup(src, vol, "DOCS", &e);
+    try std.testing.expect(e.isDir());
 }
 
 test "fat32_ro: long file names are assembled and checksum-gated" {
