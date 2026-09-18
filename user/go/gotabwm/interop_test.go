@@ -34,6 +34,7 @@ func TestInteropMarkerShapes(t *testing.T) {
 		{MarkerReorder, "gotabwm: reorder "},
 		{MarkerOrder, "gotabwm: order "},
 		{MarkerAltTab, "gotabwm: alt-tab id="},
+		{MarkerRailClick, "gotabwm: rail-click id="},
 		{MarkerSessionWrite, "gotabwm: session write n="},
 		{MarkerSessionLoad, "gotabwm: session load n="},
 		{MarkerSessionTitles, "gotabwm: session titles="},

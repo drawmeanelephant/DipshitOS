@@ -96,7 +96,7 @@ The only threads not closed:
 | **M58 — Move the apps you touch** | M58a–f landed: files, GOEDIT (`go-edit`), GOTERM (`go-term`, #1307), fetch, FART. `GOCALC.ELF` (gate `go-calc`, #1378) is the CALC successor. Full-viewport via tabapp in Zig TABWM. | |
 | **M60 leftovers** | Policy recorded; `EDIT.BIN`, `FILE.BIN`, and `CALC.BIN` gone. Remaining Zig EL0 (NOTEPAD, TABWM, SH, TLS/SSH helpers) deletes one binary per card when its Go successor is VZ-green. | |
 | **EL0 `sys_exec` caller survival** | AddrSpaceSpec + argv on slot 28; class-B `live-el0-exec` | #1333 |
-| **M63 — GOTABWM HID** | Drain kinds 19/21 at the Go seat (gate `go-wm-hid`). Chords / rail click / drag / capstone follow. | #1418 |
+| **M63 — GOTABWM HID** | Drain kinds 19/21; pin/Alt+Tab; rail click focuses a tab (gate `go-wm-hid`). Drag / capstone follow. | #1418 |
 
 ## Gate status
 

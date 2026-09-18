@@ -1,29 +1,36 @@
-// GOTABWM.ELF — M63b (issue #1420): kind-21 WM_KEY chords.
+// GOTABWM.ELF — M63b/c (issues #1420/#1421): kind-21 chords + kind-19 rail click.
 //
 // Frozen table on #1418 (no new ADR, no new kernel cmd, no ctrl-tab):
 //
 //	ctrl-shift-p  -> Pin() the focused tab
 //	alt-tab       -> FocusTab + WmctlTaskbarClick (cmd 12), wrapping
+//	rail click    -> top strip, equal-width cells, same TASKBAR+FocusTab
 //
 // Markers print only after the mutation/syscall that made them true.
 // Ctrl+W is not bound (it collides with the editor). Ctrl+Tab waits on M63r.
+// Close-x and drag-reorder are later cards. Client-area clicks are ignored.
 package main
 
 import "virelai/vi"
 
 const (
-	MarkerAltTab = "gotabwm: alt-tab id="
+	MarkerAltTab    = "gotabwm: alt-tab id="
+	MarkerRailClick = "gotabwm: rail-click id="
 
 	// USB HID keyboard usages (the kernel's WM_KEY arg0).
 	hidUsageP   uint8 = 0x13
 	hidUsageTab uint8 = 0x2B
+	hidBtnLeft  uint8 = 0x01
 )
 
 // hidChordHold is how many composite ticks the two-tab choreography waits
-// after first seeing n>=2, so `--input-chords 'ctrl-shift-p,alt-tab'` can
-// land before auto reorder/pin/close. Virtio chords pace at 0.25 s/stroke
-// plus a 1 s settle; 8 ticks at 1 Hz is the same budget as pointerClickHold.
-const hidChordHold = 8
+// after first seeing n>=2, so a `--pointer-virtio` rail click (3×2.5 s)
+// and `--input-chords 'ctrl-shift-p,alt-tab'` land before auto reorder/pin.
+const hidChordHold = 16
+
+// prevPtrButtons is the last kind-19 flags low byte; rail click is a left
+// down edge, matching Zig TABWM.
+var prevPtrButtons uint8
 
 func handleWmKey(e vi.Event) {
 	usage := uint8(e.Arg0)
@@ -77,6 +84,17 @@ func applyAltTab(shift bool) bool {
 		return false
 	}
 	id := tabs.At(i).ID
+	if !focusHosted(id) {
+		return false
+	}
+	vi.ConsoleLine(MarkerAltTab + vi.Itoa64(int64(id)))
+	vi.ConsoleLine(MarkerTabFocus + vi.Itoa64(int64(id)))
+	vi.ConsoleLine(MarkerHostFocus + vi.Itoa64(int64(id)))
+	dumpOrder()
+	return true
+}
+
+func focusHosted(id uint32) bool {
 	if id == 0 {
 		return false
 	}
@@ -87,7 +105,63 @@ func applyAltTab(shift bool) bool {
 		return false
 	}
 	hostedApp = id
-	vi.ConsoleLine(MarkerAltTab + vi.Itoa64(int64(id)))
+	return true
+}
+
+func handleWmPointer(e vi.Event) {
+	px := e.Arg0 & 0xffff
+	py := e.Arg0 >> 16
+	btn := uint8(e.Flags & 0xff)
+	down := pointerDownEdge(btn, prevPtrButtons)
+	prevPtrButtons = btn
+	if !down {
+		return
+	}
+	_ = applyRailClick(px, py)
+}
+
+func pointerDownEdge(btn, prev uint8) bool {
+	return btn&hidBtnLeft != 0 && prev&hidBtnLeft == 0
+}
+
+// railCellAt is the top-strip hit-test (M63c). Equal-width cells matching
+// paintRail (`cellW = width/n`, min 48). py must be in the rail; the rail
+// wins over any pane whose rect includes y=0. Close-x is not a target.
+func railCellAt(px, py uint32, width, n, stripH int) (int, bool) {
+	if n <= 0 || width <= 0 || stripH <= 0 || py >= uint32(stripH) {
+		return 0, false
+	}
+	cellW := width / n
+	if cellW < 48 {
+		cellW = 48
+	}
+	i := int(px) / cellW
+	if i < 0 {
+		return 0, false
+	}
+	if i >= n {
+		i = n - 1
+	}
+	return i, true
+}
+
+func applyRailClick(px, py uint32) bool {
+	n := tabs.Count()
+	i, ok := railCellAt(px, py, vi.ScanoutWidth, n, RailHeight)
+	if !ok {
+		return false
+	}
+	id := tabs.At(i).ID
+	if id == 0 {
+		return false
+	}
+	if fid, focused := tabs.Focused(); focused && fid == id {
+		return false
+	}
+	if !focusHosted(id) {
+		return false
+	}
+	vi.ConsoleLine(MarkerRailClick + vi.Itoa64(int64(id)))
 	vi.ConsoleLine(MarkerTabFocus + vi.Itoa64(int64(id)))
 	vi.ConsoleLine(MarkerHostFocus + vi.Itoa64(int64(id)))
 	dumpOrder()
