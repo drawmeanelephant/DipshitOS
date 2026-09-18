@@ -57,9 +57,9 @@ const blankRGB uint32 = 0x1A1E2E
 // Three Go runtimes (this seat + two clients) fit max_tasks=13 (#1426;
 // each runtime is 3 kernel tasks: primary + sysmon + helper). A
 // `--pointer-virtio` click is 3 messages × 2.5 s; pointerClickHold is that
-// budget in ticks. maxTicks must cover hostTicks + the two-tab choreography
-// (9) and still have room for one click after `gotabwm: rail` (M63a).
-const maxTicks = 28
+// budget in ticks. maxTicks must cover hostTicks + hidChordHold + the
+// two-tab choreography (9) so M63b chords land before auto pin/close.
+const maxTicks = 40
 
 // pointerClickHold is how many composite ticks one `--pointer-virtio` click
 // needs at the 1 Hz kind-18 heartbeat (3 messages × 2.5 s, rounded up).
@@ -161,6 +161,10 @@ func main() {
 			if !stripSawTwo {
 				stripSawTwo = true
 				stripStep = 0
+				stripHoldLeft = hidChordHold
+			}
+			if stripHoldLeft > 0 {
+				stripHoldLeft--
 			} else {
 				stripStep++
 				switch stripStep {
@@ -224,8 +228,13 @@ func main() {
 // dropped (hit-test is a later card). Any other kind is the pre-M63a
 // ignore-non-tick path. Only EvCompositeTick returns true.
 func consumeSeatEvent(e vi.Event) bool {
-	if m := hidMarker(e.Kind); m != "" {
-		vi.ConsoleLine(m)
+	if e.Kind == vi.EvWmPointer {
+		vi.ConsoleLine(MarkerPtr)
+		return false
+	}
+	if e.Kind == vi.EvWmKey {
+		vi.ConsoleLine(MarkerKey)
+		handleWmKey(e)
 		return false
 	}
 	return e.Kind == vi.EvCompositeTick

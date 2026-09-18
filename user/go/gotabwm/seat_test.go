@@ -21,6 +21,7 @@ func TestMarkerShapes(t *testing.T) {
 		{MarkerPresent, "gotabwm: present"},
 		{MarkerClose, "gotabwm: close"},
 		{MarkerOK, "gotabwm OK"},
+		{MarkerAltTab, "gotabwm: alt-tab id="},
 	}
 	for _, c := range cases {
 		if c.got != c.want {
@@ -45,8 +46,14 @@ func TestLoopBounds(t *testing.T) {
 	if pointerClickHold < 8 {
 		t.Fatalf("pointerClickHold = %d: a 3×2.5s click does not fit", pointerClickHold)
 	}
+	if hidChordHold < 8 {
+		t.Fatalf("hidChordHold = %d: ctrl-shift-p + alt-tab do not fit before auto-pin", hidChordHold)
+	}
 	if maxTicks < pointerClickHold {
 		t.Fatalf("maxTicks %d < pointerClickHold %d: a click expires mid-sequence", maxTicks, pointerClickHold)
+	}
+	if maxTicks < hidChordHold {
+		t.Fatalf("maxTicks %d < hidChordHold %d: chords expire mid-sequence", maxTicks, hidChordHold)
 	}
 }
 

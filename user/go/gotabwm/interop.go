@@ -78,6 +78,7 @@ var (
 	stripClosedOne bool
 	stripDone      bool
 	stripStep      int // two-tab: rail → reorder → pin → V → unsplit → H → unsplit → close pinned → close last
+	stripHoldLeft  int // M63b: ticks left before stripStep advances
 )
 
 // serviceRPC drains the seat's mailbox and services every queued WM_RPC
@@ -258,4 +259,5 @@ func noteStripOpen() {
 	stripSawTwo = false
 	stripClosedOne = false
 	stripStep = 0
+	stripHoldLeft = 0
 }
