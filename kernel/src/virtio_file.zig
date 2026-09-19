@@ -909,6 +909,9 @@ pub const LiveWireReport = struct {
     available: bool = false,
     stat_ok: bool = false,
     stat_size: u64 = 0,
+    /// Successful `exchange_raw` replies only. A null wait (timeout / no
+    /// device) must not count — `decoded=32` is the gate's proof the
+    /// mutated STAT actually came back.
     decoded: usize = 0,
     violations: usize = 0,
 };
@@ -970,8 +973,8 @@ pub fn fuzz_live_wire(seed: u64) LiveWireReport {
         @memcpy(vf_req_buf[0..ncopy], req[0..ncopy]);
         const n = exchange_raw(vf_req_buf[0..ncopy], vf_reply_buf[0..]);
         vf_lock.unlock(saved);
-        r.decoded += 1;
         const got = n orelse continue;
+        r.decoded += 1;
         const input = vf_reply_buf[0..got];
         const rep = decode_reply(input);
         const in_lo = @intFromPtr(input.ptr);

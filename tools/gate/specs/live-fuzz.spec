@@ -2,8 +2,8 @@
 # syscall sweep plus live HF-wire STAT/mutations on queue 5.
 #
 # Distinct boot proof from live-hardening (window isolation vs a seeded
-# trap-path corpus). Guest work is the `fuzz roster` command; bounded
-# well under M70a D2's 30 s in-fleet cap. Assert-proven: the run reads
+# trap-path corpus). Guest work is the `fuzz roster` command; typically
+# well under; 90s timeout covers host stalls. Assert-proven: the run reads
 # the program's own `seed=0x… ok` / `fuzz: caller-not-moved ok` /
 # `fuzz: done` lines, not a script echo.
 #

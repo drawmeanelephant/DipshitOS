@@ -142,53 +142,6 @@ fn exit(status: u64) noreturn {
     while (true) {}
 }
 
-fn hex_digit(v: u8) u8 {
-    return if (v < 10) '0' + v else 'a' + (v - 10);
-}
-
-fn write_hex_u64(v: u64) void {
-    var buf: [16]u8 = undefined;
-    var n: usize = 0;
-    var shift: u6 = 60;
-    var started = false;
-    while (true) {
-        const nib: u8 = @truncate((v >> shift) & 0xf);
-        if (nib != 0 or started or shift == 0) {
-            started = true;
-            buf[n] = hex_digit(nib);
-            n += 1;
-        }
-        if (shift == 0) break;
-        shift -= 4;
-    }
-    write(buf[0..n]);
-}
-
-fn write_dec_u64(v: u64) void {
-    if (v == 0) {
-        write("0");
-        return;
-    }
-    var buf: [20]u8 = undefined;
-    var n: usize = 0;
-    var x = v;
-    while (x > 0) {
-        n += 1;
-        buf[20 - n] = '0' + @as(u8, @truncate(x % 10));
-        x /= 10;
-    }
-    write(buf[20 - n ..]);
-}
-
-fn write_i64(v: i64) void {
-    if (v < 0) {
-        write("-");
-        write_dec_u64(@as(u64, @intCast(-v)));
-    } else {
-        write_dec_u64(@as(u64, @intCast(v)));
-    }
-}
-
 fn eql(a: []const u8, b: []const u8) bool {
     if (a.len != b.len) return false;
     return std.mem.eql(u8, a, b);
@@ -203,7 +156,7 @@ fn value_return_slot(slot: u64) bool {
     return switch (slot) {
         0, // sys_ping: echoes the payload u64 (high bit set is still a value)
         41, // sys_timer_cancel: 1 when a pending timer was canceled
-        44, // sys_audio_volume: returns the applied 0..100 gain
+        44, // sys_audio_volume: 0..100 gain (handle_audio_volume). Host oracle omits 44 — its corpora never land a small-vol success; do not drop this row to "match" host.
         63, // sys_mmap: mapped address
         66, // sys_time: wall clock seconds
         => true,
@@ -244,14 +197,11 @@ fn skip_slot(slot: u64) bool {
 }
 
 fn report_violation(seed: u64, slot: u64, result: i64) void {
-    write(fuzz_violation_tag);
-    write(" seed=0x");
-    write_hex_u64(seed);
-    write(" slot=");
-    write_dec_u64(slot);
-    write(" result=");
-    write_i64(result);
-    write("\n");
+    var buf: [96]u8 = undefined;
+    const line = std.fmt.bufPrint(&buf, "{s} seed=0x{x} slot={d} result={d}\n", .{
+        fuzz_violation_tag, seed, slot, result,
+    }) catch "fuzz: VIOLATION\n";
+    write(line);
 }
 
 fn hostile_tuple(which: usize) [6]u64 {
@@ -300,19 +250,12 @@ fn sweep_one_seed(seed: u64, violations: *usize, dispatched: *usize) void {
             }
         }
     }
-    write("seed=0x");
-    write_hex_u64(seed);
-    write(if (violations.* == 0) " ok dispatched=" else " FAIL dispatched=");
-    write_dec_u64(dispatched.*);
-    write(" errno=");
-    write_dec_u64(hist_errno);
-    write(" zero=");
-    write_dec_u64(hist_zero);
-    write(" value=");
-    write_dec_u64(hist_value);
-    write(" violations=");
-    write_dec_u64(violations.*);
-    write("\n");
+    var buf: [160]u8 = undefined;
+    const tag: []const u8 = if (violations.* == 0) "ok" else "FAIL";
+    const line = std.fmt.bufPrint(&buf, "seed=0x{x} {s} dispatched={d} errno={d} zero={d} value={d} violations={d}\n", .{
+        seed, tag, dispatched.*, hist_errno, hist_zero, hist_value, violations.*,
+    }) catch "seed=0x?\n";
+    write(line);
 }
 
 fn buffer_phase(violations: *usize) void {
@@ -328,11 +271,9 @@ fn buffer_phase(violations: *usize) void {
         }
         if (result == -3) faulted += 1 else empty += 1;
     }
-    write("fuzz: buffer EFAULT=");
-    write_dec_u64(faulted);
-    write(" empty=");
-    write_dec_u64(empty);
-    write("\n");
+    var buf: [64]u8 = undefined;
+    const line = std.fmt.bufPrint(&buf, "fuzz: buffer EFAULT={d} empty={d}\n", .{ faulted, empty }) catch "fuzz: buffer EFAULT=\n";
+    write(line);
 }
 
 /// Copy the survived marker through a stack buffer so a smashed high
