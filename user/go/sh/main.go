@@ -58,6 +58,8 @@ const (
 	markerAttach   = "gosh: attached"
 	markerPrompt   = "gosh: prompt"
 	markerLine     = "gosh: line "
+	markerMonitor  = "gosh: monitor"
+	markerMonErr   = "gosh: monitor failed"
 	markerClose    = "gosh: close"
 	markerOK       = "gosh OK"
 	markerOpenErr  = "gosh: error open "
@@ -208,7 +210,7 @@ func runSession(fd uint32, ta *tabapp.TabApp) {
 		vi.ConsoleLine(markerLine + ln)
 		_, act := sh.RunLine(ln)
 		if act != actionContinue {
-			shutdown(ta, fd, sh.Status())
+			leave(ta, fd, sh, act)
 		}
 	}
 
@@ -229,7 +231,7 @@ func runSession(fd uint32, ta *tabapp.TabApp) {
 			vi.ConsoleLine(markerLine + ev.Line)
 			_, act := sh.RunLine(ev.Line)
 			if act != actionContinue {
-				shutdown(ta, fd, sh.Status())
+				leave(ta, fd, sh, act)
 			}
 		case evEOF:
 			shutdown(ta, fd, 0)
@@ -274,7 +276,28 @@ func runSession(fd uint32, ta *tabapp.TabApp) {
 	}
 }
 
+// leave ends the session for the line that asked to leave. The monitor
+// handover is reported only AFTER the detach syscall returned, so the console
+// log says why the shell gave the console back rather than only that it
+// closed, and a marker can never claim a handover that did not happen — the
+// gate sequences its `version` type on `gosh: monitor`, so a failed detach
+// would otherwise type into a shell still holding the console. SH.BIN printed
+// the same marker; live-sh-monitor sequences on it.
+func leave(ta *tabapp.TabApp, fd uint32, sh *Shell, act action) {
+	if act == actionMonitor {
+		if r := vi.TtyAttach(vi.TtyDetach); r == 0 {
+			vi.ConsoleLine(markerMonitor)
+		} else {
+			vi.ConsoleLine(markerMonErr)
+		}
+	}
+	shutdown(ta, fd, sh.Status())
+}
+
 func shutdown(ta *tabapp.TabApp, fd uint32, status int) {
+	// Detach again when leave already did it for the monitor handover: the
+	// kernel's selector 0 is idempotent (it just clears the front-end), so
+	// the second call only keeps this the single exit path.
 	_ = vi.TtyAttach(vi.TtyDetach)
 	vi.FileClose(fd)
 	vi.ConsoleLine(markerClose)

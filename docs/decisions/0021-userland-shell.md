@@ -71,6 +71,16 @@ detaches). `SH.BIN` runs an optional `STARTUP.SH` and adopts the persisted
 `prompt`. The class-B `live-shell-default` gate proves `shell=sh` lands in
 `SH.BIN` and the untouched default lands in the monitor.
 
+**Amended 2026-09-19** (M68b, #1450): the seat now execs `GOSH.ELF serial` —
+the Go shell's serial front-end, which shares the engine, editor and startup
+contract with its window path (ADR 0030/H1). The settings VALUE stays `sh`:
+it names the seat, not the binary, so a persisted `SETTINGS.TXT` needs no
+schema migration, and the boot default (`monitor`) is untouched. The kernel
+execs the image by name in `login_handoff`; `live-shell-default` (boot-login
+prompt adoption) and `live-sh-monitor` (the `monitor` escape back to the raw
+console) are retargeted and green on VZ. `SH.BIN` still exists and still runs
+on demand — its deletion is the rest of #1450.
+
 ### D6. One shared userland terminal library
 A `lib/tty.zig` (read/write `/dev/tty`, raw-ish line buffering, history,
 completion) is shared by `SH.BIN` and the front-ends so behaviour cannot drift

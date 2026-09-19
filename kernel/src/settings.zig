@@ -160,8 +160,9 @@ pub fn get_hostname() []const u8 {
 }
 
 /// M45 SH8 (#1084, ADR 0021 D5): the boot login shell. `"monitor"` (the
-/// default) keeps the raw-console monitor; `"sh"` hands the console to
-/// `SH.BIN` at boot.
+/// default) keeps the raw-console monitor; `"sh"` hands the console to the
+/// shell seat at boot (the Go shell `GOSH.ELF` since M68b, #1450 — the value
+/// names the seat, not the binary).
 pub fn login_shell() []const u8 {
     return get("shell") orelse "monitor";
 }
