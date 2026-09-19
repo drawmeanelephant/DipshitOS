@@ -17,6 +17,16 @@ before sending the payload (Python stdlib hmac/hashlib, no new dependency).
 Exit codes: 0 success; 1 expectation/timeout/connect failure; 2 usage.
 --expect-fail inverts the connect result (0 iff the connect is refused or
 times out) for negative gates such as "no listener".
+
+M70g G2 (#1459): the hardened bridge tells a second client
+`console-tcp: busy` and closes. `--retry-busy` treats that as "not yet"
+and reconnects until --connect-timeout (a client waiting its turn);
+without it the busy line is just captured (a client asserting the
+refusal). `--hold S` keeps the connection open S seconds after the payload
+before the normal read loop, so a spec can pin "client A still connected
+while B connects". A send that fails because the bridge closed first (an
+oversized line is refused mid-stream by design) is logged, not fatal: the
+capture still records what the bridge said.
 """
 
 import argparse
@@ -67,8 +77,33 @@ def wait_marker(path, marker, timeout):
     return False
 
 
-def connect(host, port, timeout):
-    """Retry-connect for up to `timeout` seconds. Returns a socket or None."""
+BUSY_LINE = b"console-tcp: busy"
+
+
+def bridge_busy(s):
+    """M70g G2: peek (bounded, 0.5 s) for the bridge's `console-tcp: busy`
+    line. Returns True when the bridge refused us; the socket is then
+    closed. On an idle no-secret bridge nothing arrives, so a --retry-busy
+    connect costs a fixed 0.5 s — fine for a gate, noted for the reader."""
+    s.settimeout(0.5)
+    try:
+        head = s.recv(len(BUSY_LINE) + 1, socket.MSG_PEEK)
+    except socket.timeout:
+        return False
+    except OSError:
+        return False
+    finally:
+        s.settimeout(None)
+    if head.startswith(BUSY_LINE):
+        s.close()
+        return True
+    return False
+
+
+def connect(host, port, timeout, retry_busy=False):
+    """Retry-connect for up to `timeout` seconds. Returns a socket or None.
+    With retry_busy, a connection the bridge answers `console-tcp: busy`
+    counts as not-yet and is retried."""
     deadline = time.time() + timeout
     last = None
     while time.time() < deadline:
@@ -77,11 +112,16 @@ def connect(host, port, timeout):
         try:
             s.connect((host, port))
             s.settimeout(None)
-            return s
         except OSError as e:
             last = e
             s.close()
             time.sleep(0.25)
+            continue
+        if retry_busy and bridge_busy(s):
+            last = "busy"
+            time.sleep(0.25)
+            continue
+        return s
     log(f"connect {host}:{port} failed after {timeout:.0f}s ({last})")
     return None
 
@@ -156,6 +196,8 @@ def main():
     ap.add_argument("--expect", default=None)
     ap.add_argument("--expect-fail", action="store_true")
     ap.add_argument("--hmac-secret", default=None)
+    ap.add_argument("--retry-busy", action="store_true")
+    ap.add_argument("--hold", type=float, default=0.0)
     ap.add_argument("--timeout", type=float, default=20.0)
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
@@ -188,7 +230,7 @@ def main():
         log(f"marker {args.after!r} not seen in {ser} within {args.after_timeout:.0f}s")
         sys.exit(1)
 
-    s = connect(host, port, args.connect_timeout)
+    s = connect(host, port, args.connect_timeout, retry_busy=args.retry_busy)
     if s is None:
         with open(out, "wb") as f:
             f.write(b"<connect failed>\n")
@@ -202,7 +244,17 @@ def main():
 
     payload = load_payload(args)
     if payload:
-        s.sendall(payload)
+        try:
+            s.sendall(payload)
+        except OSError as e:
+            # The bridge may refuse mid-stream by design (oversized line);
+            # what it said is still in the receive buffer for the capture.
+            log(f"send interrupted ({e}); reading what the peer said")
+
+    if args.hold > 0:
+        # Stay connected (and quiet) so a concurrent client meets a busy
+        # bridge; anything the guest says meanwhile is still captured.
+        time.sleep(args.hold)
 
     capture = bytearray()
     expect = args.expect.encode("utf-8", "replace") if args.expect else None

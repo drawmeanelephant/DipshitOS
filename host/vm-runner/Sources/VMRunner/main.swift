@@ -13,7 +13,9 @@
 //         [--timeout <s|0>] (0 = run until Ctrl-C) [--expect <line>] [--terminal-marker <line>]
 //         [--cpus <n>] (claim 907: VCPU count, default 2 — the four-core
 //          four-domain stress gate boots 4)
-//         [--console] [--console-tcp [host:]port] [--debug-input] [--dump-marker <file>]
+//         [--console] [--console-tcp [host:]port[:secret]] [--console-tcp-secret-file <path>]
+//          (M70g G2 #1459: secret from a file's first line, never argv)
+//         [--debug-input] [--dump-marker <file>]
 //         [--nvram-console <file>] [--script <file>]
 //         [--script-after <text>] [--script-expect <text>]
 //         [--script-expect-tail <s>] (claim 4912: hold the VM this long
@@ -390,7 +392,10 @@ var consoleTCPBind: String = "127.0.0.1"
 // `VIRELAIOS-AUTH/1 hmac-sha256 <hex-challenge>` line and requires
 // `hex(HMAC-SHA256(secret, domain || 0x00 || challenge))` as the client's
 // first line; on mismatch it writes `console-tcp: auth failed` and closes.
+// M70g G2 (#1459): `--console-tcp-secret-file <path>` reads the secret's
+// first line from a file instead, so it never sits in the process list.
 var consoleTCPSecret: String?
+var consoleTCPSecretFromFile: String?
 var debugInput = false
 var markerDumpPath: String?
 var nvramConsolePath: String?
@@ -813,10 +818,23 @@ while idx < arguments.count {
         default:
             break
         }
-        guard parsed else { fail("--console-tcp: invalid spec '\(spec)' (want [host:]port[:secret])") }
+        // M70g G2 (#1459): never echo the spec back — it may carry the secret.
+        guard parsed else { fail("--console-tcp: invalid spec (want [host:]port[:secret])") }
         if consoleTCPBind.isEmpty { consoleTCPBind = "127.0.0.1" }
         if consoleTCPSecret?.isEmpty == true { consoleTCPSecret = nil }
         consoleMode = true
+        idx += 2
+    } else if arg == "--console-tcp-secret-file", idx + 1 < arguments.count {
+        // M70g G2 (#1459): the bridge secret from a file (first line, CR/LF
+        // trimmed) so it is visible neither in `ps` nor in any log line.
+        let path = arguments[idx + 1]
+        guard let raw = FileManager.default.contents(atPath: path) else {
+            fail("--console-tcp-secret-file: cannot read '\(path)'")
+        }
+        let firstLine = raw.split(separator: 0x0a, maxSplits: 1, omittingEmptySubsequences: false).first ?? Data()
+        let trimmed = firstLine.last == 0x0d ? firstLine.dropLast() : firstLine
+        guard !trimmed.isEmpty else { fail("--console-tcp-secret-file: '\(path)' has an empty first line") }
+        consoleTCPSecretFromFile = String(decoding: trimmed, as: UTF8.self)
         idx += 2
     } else if arg == "--debug-input" {
         debugInput = true
@@ -1501,6 +1519,19 @@ if netTcpConnectGuestIP != nil, netCapturePath == nil {
 if netNatEnabled, netCapturePath != nil {
     fail("--net-nat is mutually exclusive with --net (one network device per guest for now).")
 }
+// M70g G2 (#1459): the bridge secret comes from the file OR the inline spec,
+// never both; the file form is preferred because argv is world-readable.
+if let fileSecret = consoleTCPSecretFromFile {
+    guard consoleTCPPort != nil else {
+        fail("--console-tcp-secret-file requires --console-tcp.")
+    }
+    guard consoleTCPSecret == nil else {
+        fail("--console-tcp-secret-file: the --console-tcp spec already carries an inline secret; use one or the other.")
+    }
+    consoleTCPSecret = fileSecret
+} else if consoleTCPSecret != nil {
+    FileHandle.standardError.write(Data("WARNING: --console-tcp: an inline secret is visible in the process list; prefer --console-tcp-secret-file <path>\n".utf8))
+}
 // Card G6 set_visible follow-on (claim 0487): the marker-driven capture
 // writes into the `--screen <base>` filename, so it requires the flag.
 if screenshotAfter != nil, screenshotPath == nil {
@@ -2075,8 +2106,10 @@ if consoleMode {
     print("  serial log: \(serialLogPath)  (guest output teed to terminal + log)")
     print("  interactive input: enabled — stdin → serial attachment (fileHandleForReading non-nil)")
     if let port = consoleTCPPort {
-        let auth = consoleTCPSecret != nil ? ", HMAC-SHA256 challenge-response required" : ""
-        print("  console-tcp: \(consoleTCPBind):\(port) — remote console bridge (plaintext; #1066 Stage 0\(auth))")
+        let auth = consoleTCPSecret != nil
+            ? ", HMAC-SHA256 challenge-response required (secret from \(consoleTCPSecretFromFile != nil ? "file" : "argv"))"
+            : ""
+        print("  console-tcp: \(consoleTCPBind):\(port) — remote console bridge (plaintext; #1066 Stage 0\(auth); one client at a time, extra clients told busy)")
     }
     print("  NOTE: guest RX is the polled virtio receive queue (claim 6684) — host bytes reach the kernel via the serial attachment")
     print("  controls: Ctrl-C ends the session and restores the terminal; Backspace/Enter are forwarded raw (no host line editing)")
@@ -3034,28 +3067,195 @@ func netTcpAuthAnswer(challenge payload: [UInt8]) -> [UInt8]? {
     return Array((hexString(Array(mac)) + "\n").utf8)
 }
 
-// #1066 Stage 0 (issue #1066): the TCP console bridge. One client at a
-// time; the listen loop accepts a connection, forwards its bytes into the
-// guest serial input pipe, and re-accepts after the client leaves. Guest
-// output reaches every connected client through `consoleTCPEmit` (called
-// from the output tee).
+// #1066 Stage 0 (issue #1066) + M70g G2 (#1459, ADR 0022 D2 amendment): the
+// TCP console bridge. Still ONE client at a time, but the policy is now
+// explicit and every open end is bounded:
+//   * the accept loop keeps accepting while a client is served and answers
+//     every extra connection `console-tcp: busy` + close (it no longer hangs
+//     in the listen backlog); serving runs on its own serial queue;
+//   * pre-auth reads carry a deadline (a connected-but-silent client — the
+//     half-open shape — is dropped with `console-tcp: auth timeout`);
+//   * the MAC compare is CryptoKit's constant-time check, never String ==;
+//   * post-auth input is bounded per line (`console-tcp: line too long`);
+//   * guest output reaches the client through `consoleTCPEmit` (the output
+//     tee) under SO_SNDTIMEO — a client that stops reading is dropped, never
+//     allowed to stall the tee; SO_KEEPALIVE probes a vanished peer;
+//   * a client that dies mid-line has its partial line cancelled in the
+//     guest (Ctrl-C — lineedit echoes `^C` and clears) so the next client
+//     starts at a clean prompt — M52's no-zombie-seat lesson.
+// Only `tcpClientFD`/`tcpClientServing` are shared; both live under the lock.
 var tcpClientFD: Int32 = -1
+var tcpClientServing = false
 let tcpClientLock = NSLock()
+let consoleTCPServeQueue = DispatchQueue(label: "virelaios.console-tcp.client")
+/// Pre-auth deadline (ms): a client that never answers the challenge is dropped.
+let consoleTCPAuthTimeoutMs = 10_000
+/// Post-auth input bound: bytes without CR/LF before the client is dropped.
+/// 4x the guest line editor's buffer (kernel/src/lineedit.zig `max_line` =
+/// 256) — the guest refuses the excess anyway; this bounds the pump itself.
+let consoleTCPLineMax = 1024
+/// Output stall bound (s): a client whose socket send blocks this long is dropped.
+let consoleTCPSendTimeoutSec = 2
+
+func consoleTCPSay(_ msg: String) {
+    print("  console-tcp: \(msg)")
+    FileHandle.standardOutput.synchronizeFile()
+}
+
+/// Write every byte (EINTR-safe). False on error or SO_SNDTIMEO expiry.
+func consoleTCPWriteAll(_ fd: Int32, _ bytes: [UInt8]) -> Bool {
+    var off = 0
+    while off < bytes.count {
+        let w = bytes.withUnsafeBufferPointer { write(fd, $0.baseAddress! + off, bytes.count - off) }
+        if w < 0 && errno == EINTR { continue }
+        if w <= 0 { return false }
+        off += w
+    }
+    return true
+}
 
 func consoleTCPEmit(_ data: Data) {
+    // The whole write happens UNDER the lock: the serving loop clears
+    // tcpClientFD under the same lock before it closes, so guest output can
+    // never land on a recycled fd number that now belongs to a fresh (and
+    // possibly still unauthenticated) client. The hold is bounded by
+    // SO_SNDTIMEO (2 s), which is also the stall bound below.
     tcpClientLock.lock()
+    defer { tcpClientLock.unlock() }
     let fd = tcpClientFD
-    tcpClientLock.unlock()
     guard fd >= 0 else { return }
-    data.withUnsafeBytes { raw in
-        guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return }
-        var off = 0
-        while off < data.count {
-            let w = write(fd, base + off, data.count - off)
-            if w <= 0 { break }
-            off += w
-        }
+    if !consoleTCPWriteAll(fd, [UInt8](data)) {
+        // The send timed out or the peer is gone: drop the client rather
+        // than let it stall the guest-output tee. shutdown() wakes the
+        // serving loop's read, which then closes the fd.
+        tcpClientFD = -1
+        shutdown(fd, SHUT_RDWR)
+        consoleTCPSay("client stalled (output not drained within \(consoleTCPSendTimeoutSec) s; client dropped)")
     }
+}
+
+/// Read one byte before `deadline`: 1 = byte, 0 = EOF, -1 = error, -2 = timeout.
+func consoleTCPReadByteTimed(_ fd: Int32, _ byte: inout UInt8, deadline: DispatchTime) -> Int {
+    while true {
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard deadline.uptimeNanoseconds > now else { return -2 }
+        let remainMs = min((deadline.uptimeNanoseconds - now) / 1_000_000, UInt64(Int32.max))
+        var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        let pr = poll(&pfd, 1, Int32(remainMs))
+        if pr < 0 { if errno == EINTR { continue }; return -1 }
+        if pr == 0 { return -2 }
+        let r = read(fd, &byte, 1)
+        if r < 0 && errno == EINTR { continue }
+        return r
+    }
+}
+
+func consoleTCPEndServing() {
+    tcpClientLock.lock(); tcpClientServing = false; tcpClientLock.unlock()
+}
+
+/// Serve one accepted client to completion (auth, pump, teardown).
+func consoleTCPServe(_ c: Int32) {
+    var tv = timeval(tv_sec: consoleTCPSendTimeoutSec, tv_usec: 0)
+    _ = setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+    // Keepalive so a peer that vanished without a FIN (network drop, host
+    // sleep) is detected: first probe after 15 s idle, then 3 x 5 s.
+    var on: Int32 = 1
+    _ = setsockopt(c, SOL_SOCKET, SO_KEEPALIVE, &on, socklen_t(MemoryLayout<Int32>.size))
+    var kaIdle: Int32 = 15
+    _ = setsockopt(c, IPPROTO_TCP, TCP_KEEPALIVE, &kaIdle, socklen_t(MemoryLayout<Int32>.size))
+    var kaIntvl: Int32 = 5
+    _ = setsockopt(c, IPPROTO_TCP, TCP_KEEPINTVL, &kaIntvl, socklen_t(MemoryLayout<Int32>.size))
+    var kaCnt: Int32 = 3
+    _ = setsockopt(c, IPPROTO_TCP, TCP_KEEPCNT, &kaCnt, socklen_t(MemoryLayout<Int32>.size))
+
+    if let secret = consoleTCPSecret {
+        // M50 TS4 (#1138, ADR 0024 D7): HMAC-SHA256 challenge-response. Send
+        // a fresh 32-byte challenge line, read the client's one-line hex MAC
+        // under the pre-auth deadline, and verify it in constant time. No
+        // secret configured => byte-identical to the pre-TS4 bridge.
+        var challenge = [UInt8](repeating: 0, count: 32)
+        for i in 0..<challenge.count { challenge[i] = UInt8.random(in: 0...255) }
+        let challengeLine = "VIRELAIOS-AUTH/1 hmac-sha256 " + hexString(challenge) + "\n"
+        _ = consoleTCPWriteAll(c, Array(challengeLine.utf8))
+        let deadline = DispatchTime.now() + .milliseconds(consoleTCPAuthTimeoutMs)
+        var line = [UInt8]()
+        var newline = false
+        var timedOut = false
+        var one: UInt8 = 0
+        while line.count <= 160 {
+            let r = consoleTCPReadByteTimed(c, &one, deadline: deadline)
+            if r == -2 { timedOut = true; break }
+            if r <= 0 { break }
+            if one == 0x0a { newline = true; break }
+            if one == 0x0d { continue }
+            line.append(one)
+        }
+        if timedOut {
+            _ = consoleTCPWriteAll(c, Array("console-tcp: auth timeout\n".utf8))
+            close(c)
+            consoleTCPEndServing()
+            consoleTCPSay("auth timeout (no answer within \(consoleTCPAuthTimeoutMs / 1000) s; still listening)")
+            return
+        }
+        var message = Data("VIRELAIOS-AUTH/1 hmac-sha256".utf8)
+        message.append(0)
+        message.append(contentsOf: challenge)
+        let key = SymmetricKey(data: Data(secret.utf8))
+        let mac = newline ? hexDecode(String(decoding: line, as: UTF8.self)) : nil
+        let ok = mac.map { HMAC<SHA256>.isValidAuthenticationCode($0, authenticating: message, using: key) } ?? false
+        guard ok else {
+            _ = consoleTCPWriteAll(c, Array("console-tcp: auth failed\n".utf8))
+            close(c)
+            consoleTCPEndServing()
+            consoleTCPSay("auth failed (MAC mismatch; still listening)")
+            return
+        }
+        consoleTCPSay("client authenticated")
+    }
+    tcpClientLock.lock(); tcpClientFD = c; tcpClientLock.unlock()
+    consoleTCPSay("client connected")
+    var buf = [UInt8](repeating: 0, count: 4096)
+    var lineLen = 0 // bytes of the guest's current line (since the last CR/LF)
+    var dropReason: String?
+    while true {
+        var n: Int
+        repeat { n = read(c, &buf, buf.count) } while n < 0 && errno == EINTR
+        if n <= 0 { break }
+        var overflow = false
+        for i in 0..<n {
+            if buf[i] == 0x0a || buf[i] == 0x0d {
+                lineLen = 0
+            } else {
+                lineLen += 1
+                if lineLen > consoleTCPLineMax { overflow = true; break }
+            }
+        }
+        if overflow {
+            // Nothing from the offending chunk reaches the guest.
+            _ = consoleTCPWriteAll(c, Array("console-tcp: line too long\n".utf8))
+            dropReason = "line too long (> \(consoleTCPLineMax) bytes without a newline; client dropped)"
+            break
+        }
+        let data = Data(bytes: buf, count: n)
+        do { try consoleInputPipe.fileHandleForWriting.write(contentsOf: data) } catch { break }
+    }
+    tcpClientLock.lock()
+    if tcpClientFD == c { tcpClientFD = -1 }
+    tcpClientLock.unlock()
+    close(c)
+    // Free the seat BEFORE the cancel below so the next client is admitted
+    // as soon as the socket is gone; its bytes queue behind the cancel on
+    // this serial queue, so ordering into the guest is preserved.
+    consoleTCPEndServing()
+    let midLine = lineLen > 0
+    if midLine {
+        // Leave no zombie seat state: cancel the partial line sitting in the
+        // guest's editor so the next client starts at a clean prompt.
+        try? consoleInputPipe.fileHandleForWriting.write(contentsOf: Data([0x03]))
+    }
+    if let dropReason { consoleTCPSay(dropReason) }
+    consoleTCPSay("client disconnected" + (midLine ? " mid-line (partial line cancelled with ^C)" : "") + " (still listening)")
 }
 
 func startTCPConsoleBridge(port: UInt16, bindHost: String) {
@@ -3082,70 +3282,32 @@ func startTCPConsoleBridge(port: UInt16, bindHost: String) {
             close(s)
             return
         }
-        guard listen(s, 1) == 0 else {
+        // Backlog > 1 so concurrent connectors are ACCEPTED and refused
+        // explicitly (`busy`) instead of silently SYN-dropped.
+        guard listen(s, 4) == 0 else {
             FileHandle.standardError.write(Data("WARNING: --console-tcp: listen failed (errno=\(errno))\n".utf8))
             close(s)
             return
         }
-        print("  console-tcp: listening on \(bindHost):\(port) — connect with `nc \(bindHost) \(port)`")
-        FileHandle.standardOutput.synchronizeFile()
+        consoleTCPSay("listening on \(bindHost):\(port) — connect with `nc \(bindHost) \(port)`")
         while true {
             var caddr = sockaddr()
             var clen = socklen_t(MemoryLayout<sockaddr>.size)
             let c = accept(s, &caddr, &clen)
             if c < 0 { if errno == EINTR { continue }; break }
-            if let secret = consoleTCPSecret {
-                // M50 TS4 (#1138, ADR 0024 D7): the bridge now runs
-                // HMAC-SHA256 challenge-response. Send a fresh 32-byte
-                // challenge line, read the client's one-line hex MAC, and
-                // compare the hex HMAC computed with CryptoKit. No secret
-                // configured => byte-identical to the pre-TS4 bridge.
-                var challenge = [UInt8](repeating: 0, count: 32)
-                for i in 0..<challenge.count { challenge[i] = UInt8.random(in: 0...255) }
-                let challengeLine = "VIRELAIOS-AUTH/1 hmac-sha256 " + hexString(challenge) + "\n"
-                _ = challengeLine.withCString { write(c, $0, strlen($0)) }
-                var line = [UInt8]()
-                var newline = false
-                var one = [UInt8](repeating: 0, count: 1)
-                while line.count <= 160 {
-                    var r: Int
-                    repeat { r = read(c, &one, 1) } while r < 0 && errno == EINTR
-                    if r <= 0 { break }
-                    if one[0] == 0x0a { newline = true; break }
-                    if one[0] == 0x0d { continue }
-                    line.append(one[0])
-                }
-                var message = Data("VIRELAIOS-AUTH/1 hmac-sha256".utf8)
-                message.append(0)
-                message.append(contentsOf: challenge)
-                let key = SymmetricKey(data: Data(secret.utf8))
-                let expected = hexString(Array(HMAC<SHA256>.authenticationCode(for: message, using: key)))
-                guard newline, String(decoding: line, as: UTF8.self) == expected else {
-                    let msg = "console-tcp: auth failed\n"
-                    _ = msg.withCString { write(c, $0, strlen($0)) }
-                    close(c)
-                    print("  console-tcp: auth failed (MAC mismatch; still listening)")
-                    FileHandle.standardOutput.synchronizeFile()
-                    continue
-                }
-                print("  console-tcp: client authenticated")
-                FileHandle.standardOutput.synchronizeFile()
+            tcpClientLock.lock()
+            let busy = tcpClientServing
+            if !busy { tcpClientServing = true }
+            tcpClientLock.unlock()
+            if busy {
+                // ADR 0022 D2 (M70g amendment): one client at a time, and
+                // the second one is TOLD so — no backlog limbo.
+                _ = consoleTCPWriteAll(c, Array("console-tcp: busy\n".utf8))
+                close(c)
+                consoleTCPSay("second client refused (busy; one client at a time)")
+                continue
             }
-            tcpClientLock.lock(); tcpClientFD = c; tcpClientLock.unlock()
-            print("  console-tcp: client connected")
-            FileHandle.standardOutput.synchronizeFile()
-            var buf = [UInt8](repeating: 0, count: 1024)
-            while true {
-                var n: Int
-                repeat { n = read(c, &buf, buf.count) } while n < 0 && errno == EINTR
-                if n <= 0 { break }
-                let data = Data(bytes: buf, count: n)
-                do { try consoleInputPipe.fileHandleForWriting.write(contentsOf: data) } catch { break }
-            }
-            tcpClientLock.lock(); if tcpClientFD == c { tcpClientFD = -1 }; tcpClientLock.unlock()
-            close(c)
-            print("  console-tcp: client disconnected (still listening)")
-            FileHandle.standardOutput.synchronizeFile()
+            consoleTCPServeQueue.async { consoleTCPServe(c) }
         }
         close(s)
     }

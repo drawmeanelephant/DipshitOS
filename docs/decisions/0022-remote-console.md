@@ -51,14 +51,42 @@ a barrier against accidental exposure, **not** a cryptographic control.
   guest serial input attachment; guest output → every connected client).
   `nc`/`telnet`/`socat` all work; a terminal client may need `--crlf` (the
   guest RX accepts CR or LF).
-- **Single client at a time.** A second connection waits in the listen
-  backlog; the bridge re-accepts after the client disconnects.
+- **Single client at a time.** ~~A second connection waits in the listen
+  backlog; the bridge re-accepts after the client disconnects.~~ **Amended
+  by M70g G2 (2026-09-18, #1459):** the accept loop keeps accepting while a
+  client is served and answers every extra connection `console-tcp: busy\n`
+  then closes it — no backlog limbo, the refusal is observable. The seat is
+  freed the moment the served socket closes.
+- **Bounded open ends (M70g G2, #1459).** Pre-auth: a client that does not
+  answer the challenge within **10 s** is dropped with `console-tcp: auth
+  timeout\n` (the connected-but-mute shape of a half-open peer); the MAC
+  compare is CryptoKit's constant-time check, never a string equality.
+  Post-auth input: more than **1024 bytes without CR/LF** (4× the guest line
+  editor's 256-byte `max_line`) is refused with `console-tcp: line too long\n`
+  and the client is dropped; nothing from the offending read reaches the
+  guest. Output: the client socket carries `SO_SNDTIMEO` = 2 s, and a client
+  that stops draining is dropped rather than allowed to stall the guest-output
+  tee; `SO_KEEPALIVE` (15 s idle, 3 × 5 s probes) detects a peer that vanished
+  without a FIN. Keepalive is configured, not gate-observed (no gate can drop
+  packets); the auth deadline is the gated proxy.
+- **Teardown leaves no zombie seat state (M52's lesson).** When a client
+  disconnects — for any reason — with a partial line outstanding (bytes since
+  its last CR/LF), the bridge writes one `0x03` (Ctrl-C) into the guest
+  serial input; `lineedit.zig` echoes `^C\r\n` and clears the line, so the
+  next client starts at a clean prompt. Serial evidence: `<partial>^C`.
 - **Bind address:** `[host:]port`, default `127.0.0.1`; `0.0.0.0` exposes it
   to the LAN (the operator's explicit choice).
 - **Optional bridge secret:** `[host:]port:secret`. When set, the bridge
   requires the client's **first line** to equal `secret`; on mismatch it
   writes `console-tcp: auth failed\n` and closes the client (relistening). On
   match the line is consumed and the rest of the stream is bridged.
+  (M50 TS4 replaced the equality with the HMAC challenge-response, ADR 0024
+  D7.) **M70g G2 (#1459):** `--console-tcp-secret-file <path>` supplies the
+  secret from a file's first line so it never appears in the process list;
+  it is mutually exclusive with the inline form, which now warns on stderr.
+  The bridge never echoes the spec or the secret into any log line (a bad
+  spec fails without quoting it); `live-remote-console` run 03 pins that the
+  secret text is absent from runner output.
 - **Boot default unchanged:** `--console-tcp` is a runner flag; without it the
   VM and every existing gate are byte-identical.
 
@@ -177,6 +205,7 @@ door.
 - Replace the shared secret with an HMAC/Ed25519 challenge over the same seam
   (M50 #1138; requires M47 crypto #1113).
 - Multiple concurrent remote sessions (needs a multi-connection TCP stack).
+  The host bridge stays single-client by decision (D2, M70g amendment).
 - A `settings` key for a persistent listen port / allowlist (surfaced as a
   follow-up; the CLI is the v1 mechanism).
 - Rate-limiting / lockout after repeated failed secrets.
