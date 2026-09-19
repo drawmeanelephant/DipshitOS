@@ -1,6 +1,7 @@
 package vi
 
 import (
+	"sync/atomic"
 	"unsafe"
 
 	"virelai/vsys"
@@ -47,6 +48,13 @@ var (
 	ErrPeerGone = errString("vi: peer closed the connection")
 )
 
+// ErrServerDial: a dial to the all-zeros address. The kernel treats
+// ip == 0 as PASSIVE open (listen mode, kernel/src/syscall.zig
+// handle_tcp_connect), and server sockets / inbound are an explicit M67a
+// non-goal — so Dial refuses the address in userland before the seam can
+// open one. A hostile DNS reply resolving to 0.0.0.0 hits the same guard.
+var ErrServerDial = errString("vi: 0.0.0.0 is the passive-open address — Dial refuses it (no server sockets)")
+
 // errString is a constant error carried as a string (the mirror of vsys's
 // sentinel style; the errno type covers kernel codes, these cover the
 // userland contract).
@@ -54,12 +62,24 @@ type errString string
 
 func (e errString) Error() string { return string(e) }
 
-// clientLive is the process's one live Conn (nil when none) — the
-// enforcement point for the one-socket bound.
-var clientLive *Conn
+// slotHeld is the one-socket bound's enforcement point. The claim is a
+// CAS on an atomic bool, NOT a sync.Mutex: a racing Dial must never slip
+// a second socket past the check (programs run heartbeat goroutines, so
+// Dial-vs-Dial is a live race), and the sync package costs ~3 KiB of text
+// — enough to push the gate fixtures out of the kernel's fixed text gap.
+// Dial claims before touching the seam (a racing Dial's CAS fails and it
+// sees the busy bound) and releases on every failure path; Close releases
+// only after the kernel confirms (a refusal leaves the socket live
+// in-kernel, so the slot must stay claimed). Identity needs no second
+// variable: only the successful Close of the OWNING Conn sets its open
+// flag false before releasing, and a released Conn cannot re-release.
+var slotHeld atomic.Bool
 
 // Conn is one outbound TCP connection. Create it with Dial; it is the
-// process's only live socket until Close.
+// process's only live socket until Close. Concurrent Dial and Close calls
+// are safe (the slotHeld CAS arbitrates); a single Conn's Recv/Send/Close
+// are not — one goroutine owns the traffic, the same contract vsys.Conn
+// states.
 type Conn struct {
 	ip       [4]byte
 	port     uint16
@@ -76,10 +96,10 @@ type Conn struct {
 // (dialed directly) or a name (resolved via ResolveDNS against
 // DefaultDNSServer first). The kernel's connect blocks until the handshake
 // lands or its 30 s timeout expires; a refusal maps to the kernel's errno.
+// The argument checks and the resolution are pure userland work and run
+// before the claim; the CAS guards only the seam, so a racing Dial can
+// never slip a second connect past it.
 func Dial(host string, port uint16) (*Conn, error) {
-	if clientLive != nil && clientLive.open {
-		return nil, ErrConnBusy
-	}
 	if port == 0 {
 		return nil, errno(ErrEINVAL)
 	}
@@ -91,13 +111,18 @@ func Dial(host string, port uint16) (*Conn, error) {
 		}
 		ip = resolved
 	}
+	if ip == ([4]byte{}) {
+		return nil, ErrServerDial
+	}
+	if !slotHeld.CompareAndSwap(false, true) {
+		return nil, ErrConnBusy
+	}
 	rc := svc2(SlotTCPConnect, ipv4Word(ip), uintptr(port))
 	if rc < 0 {
+		slotHeld.Store(false)
 		return nil, errno(-rc)
 	}
-	c := &Conn{ip: ip, port: port, open: true}
-	clientLive = c
-	return c, nil
+	return &Conn{ip: ip, port: port, open: true}, nil
 }
 
 // IP returns the peer's address (the resolved one when Dial was given a
@@ -117,7 +142,7 @@ func (c *Conn) Port() uint16 {
 	return c.port
 }
 
-// SetRecvDeadline bounds a blocking Recv by a wall-clock budget in
+// SetRecvDeadline bounds a blocking Recv by a monotonic budget in
 // nanoseconds, measured on Nanos. ns <= 0 clears the deadline and restores
 // DefaultRecvBudgetNs. A bounded recv is what makes a peer that goes dark
 // fail closed instead of parking forever.
@@ -223,21 +248,24 @@ func (c *Conn) Recv(p []byte) (int, error) {
 	}
 }
 
-// Close tears the connection down (FIN, slot 33) and clears the process's
-// live slot, so a later Dial is legal again. Close on an already-closed
-// (or nil) Conn is a no-op.
+// Close tears the connection down (FIN, slot 33). The userland slot is
+// released ONLY when the kernel confirms: on a refusal (the kernel keeps
+// the socket — its only close error is EACCES, not-owner) the slot stays
+// claimed so the next Dial fails with the honest busy bound instead of a
+// confusing EINVAL from the seam. The kernel returns 0 for "nothing
+// owned" (idle), which releases too. Close on an already-closed (or nil)
+// Conn is a no-op.
 func (c *Conn) Close() error {
 	if c == nil || !c.open {
 		return nil
-	}
-	c.open = false
-	if clientLive == c {
-		clientLive = nil
 	}
 	rc := svc0(SlotTCPClose)
 	if rc < 0 {
 		return errno(-rc)
 	}
+	c.open = false
+	slotHeld.Store(false) // identity needs no check: c.open was still true,
+	// and only the owner's conn can be open (Dial cannot succeed while held)
 	return nil
 }
 

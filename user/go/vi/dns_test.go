@@ -30,6 +30,13 @@ type dnsFake struct {
 	sentIP      uint32
 	sentPort    uintptr
 	sentQuery   []byte
+	// now stamps every seam event with a sequence number so a test can pin
+	// ORDER (e.g. the reply port is bound before the query goes out), not
+	// just counts.
+	listenSeq int
+	sendSeq   int
+	recvSeq   int
+	now       int
 	// recvScript maps the 1-based recv call to the datagram to deliver (nil
 	// = empty ring, rc 0). A nil script always returns 0.
 	recvScript func(call int) []byte
@@ -40,15 +47,21 @@ func (f *dnsFake) hook(num uintptr, a0, a1, a2, a3 uintptr) int64 {
 	case SlotUDPListen:
 		f.listenCalls++
 		f.listenPort = a0
+		f.now++
+		f.listenSeq = f.now
 		return 0
 	case SlotUDPSend:
 		f.sendCalls++
 		f.sentIP = uint32(a0)
 		f.sentPort = a1
 		f.sentQuery = hookBytes(a2, a3)
+		f.now++
+		f.sendSeq = f.now
 		return int64(a3)
 	case SlotUDPRecv:
 		f.recvCalls++
+		f.now++
+		f.recvSeq = f.now
 		if f.recvScript == nil {
 			return 0
 		}
@@ -121,10 +134,16 @@ func TestResolveDNS_QueryFraming(t *testing.T) {
 		t.Fatalf("resolved %v, want 93.184.216.34", ip)
 	}
 	// The reply port is bound BEFORE the query goes out: an unbound port
-	// drops the datagram, so listen-then-send is the only legal order.
+	// drops the datagram, so listen-then-send is the only legal order —
+	// pinned by sequence, not just by counts (a send-before-listen would
+	// still leave listenCalls == 1).
 	if f.listenCalls != 1 || f.listenPort != udpSourcePort {
 		t.Fatalf("listen = %d calls on port %d, want 1 call on %d",
 			f.listenCalls, f.listenPort, udpSourcePort)
+	}
+	if f.listenSeq == 0 || f.sendSeq == 0 || f.listenSeq >= f.sendSeq {
+		t.Fatalf("event order = listen#%d, send#%d, want listen before send",
+			f.listenSeq, f.sendSeq)
 	}
 	if f.sentIP != 0x0a000002 || f.sentPort != DNSPort {
 		t.Fatalf("send = %08x:%d, want 0a000002:53", f.sentIP, f.sentPort)
@@ -289,5 +308,52 @@ func TestParseDNSReply_MalformedAndUnanswered(t *testing.T) {
 	// A different ID is not our reply.
 	if _, err := parseDNSReply(udpDgram(DNSPort, full), id+1); !errors.Is(err, errNotOurs) {
 		t.Fatalf("mismatched ID = %v, want errNotOurs", err)
+	}
+}
+
+func TestParseDNSReply_HostileVectors(t *testing.T) {
+	query, id, err := buildDNSQuery("myhost.local")
+	if err != nil {
+		t.Fatalf("buildDNSQuery: %v", err)
+	}
+	full := dnsReplyFor(query, [4]byte{10, 0, 0, 2})
+
+	// SERVFAIL (2) and REFUSED (5) are honest failures, never a zero IP.
+	for _, rcode := range []byte{2, 5} {
+		r := append([]byte(nil), full...)
+		r[3] = 0x80 | rcode
+		if _, err := parseDNSReply(udpDgram(DNSPort, r), id); !errors.Is(err, ErrDNSFailed) {
+			t.Fatalf("rcode %d = %v, want ErrDNSFailed", rcode, err)
+		}
+	}
+	// TC = 1: the reply was cut off in transit — refuse, never guess.
+	tc := append([]byte(nil), full...)
+	tc[2] |= 0x02
+	if _, err := parseDNSReply(udpDgram(DNSPort, tc), id); !errors.Is(err, ErrDNSFailed) {
+		t.Fatalf("TC=1 = %v, want ErrDNSFailed", err)
+	}
+	// A host claiming 65535 answers runs off the copied datagram: the
+	// bounds check fires before any record is trusted.
+	many := append([]byte(nil), full[:12]...)
+	many = append(many, query[12:]...) // the echoed question
+	many[6], many[7] = 0xff, 0xff      // ANCOUNT = 65535
+	many = append(many, 0xC0, 0x0C, 0x00, 0x01, 0x00, 0x01, 0, 0, 1, 0x2C, 0, 4, 1, 2, 3, 4)
+	if _, err := parseDNSReply(udpDgram(DNSPort, many), id); !errors.Is(err, ErrDNSFailed) {
+		t.Fatalf("ANCOUNT=65535 = %v, want ErrDNSFailed", err)
+	}
+	// A compression pointer that points at ITSELF: the walker skips two
+	// bytes without following it, so the parse terminates.
+	selfPtr := append([]byte(nil), full[:12]...)
+	selfPtr = append(selfPtr, query[12:]...)
+	selfPtr[6], selfPtr[7] = 0x00, 0x01   // ANCOUNT = 1
+	selfPtr = append(selfPtr, 0xC0, 0x0C, // a name pointer at offset 12: itself
+		0x00, 0x01, 0x00, 0x01, 0, 0, 1, 0x2C, 0, 4, 1, 2, 3, 4)
+	ip, err := parseDNSReply(udpDgram(DNSPort, selfPtr), id)
+	if err != nil || ip != [4]byte{1, 2, 3, 4} {
+		t.Fatalf("self-pointer name = (%v, %v), want 1.2.3.4 with no error", ip, err)
+	}
+	// A datagram too short to hold a DNS header is a stray, not a failure.
+	if _, err := parseDNSReply(udpDgram(DNSPort, []byte{0, 1, 2, 3, 4, 5}), id); !errors.Is(err, errNotOurs) {
+		t.Fatalf("short datagram = %v, want errNotOurs", err)
 	}
 }

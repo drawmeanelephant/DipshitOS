@@ -59,14 +59,14 @@ func main() {
 	}
 	vsys.Println("govinet: vidns connected")
 
-	req := "GET / HTTP/1.0\r\nHost: myhost.local\r\n\r\n"
-	if n, err := conn.Send([]byte(req)); err != nil {
+	n, err := conn.Send([]byte("GET / HTTP/1.0\r\nHost: myhost.local\r\n\r\n"))
+	if err != nil {
 		die("send", err)
-	} else {
-		vsys.Println("govinet: vidns sent n=" + vsys.Itoa64(int64(n)))
 	}
+	vsys.Println("govinet: vidns sent n=" + vsys.Itoa64(int64(n)))
 
-	conn.SetRecvDeadline(2_000_000_000) // 2 s: fail closed on a dark peer
+	// No explicit deadline: Recv's DefaultRecvBudgetNs (30 s) bounds a dark
+	// peer — and every byte of text matters inside the kernel's fixed gap.
 	total := 0
 	buf := make([]byte, vi.TCPPayloadMax)
 	for {

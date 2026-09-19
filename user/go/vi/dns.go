@@ -163,10 +163,15 @@ func ResolveDNS(name string, server [4]byte, budgetNs int64) ([4]byte, error) {
 	}
 }
 
+// dnsIDSeq turns over on every query: a fast retry must not reuse the ID
+// the clock alone would hand it (two Nanos() reads can land in the same
+// tick), so the counter is mixed into the low bits.
+var dnsIDSeq uint32
+
 // buildDNSQuery encodes an RFC 1035 A-record query for name. The query
 // must fit ONE datagram (header + QNAME + QTYPE/QCLASS <= udpPayloadMax) —
-// anything longer is refused, never truncated onto the wire. The ID is
-// derived from the monotonic clock; the reply must echo it.
+// anything longer is refused, never truncated onto the wire. The reply
+// must echo the ID.
 func buildDNSQuery(name string) ([]byte, uint16, error) {
 	if name == "" {
 		return nil, 0, ErrNameTooLong
@@ -189,7 +194,8 @@ func buildDNSQuery(name string) ([]byte, uint16, error) {
 		return nil, 0, ErrNameTooLong
 	}
 
-	id := uint16(Nanos())
+	dnsIDSeq++
+	id := uint16(Nanos()) ^ uint16(dnsIDSeq)
 	query := make([]byte, 0, 12+len(qname)+4)
 	query = append(query, byte(id>>8), byte(id))
 	query = append(query, 0x01, 0x00)                         // flags: RD (recursion desired)
@@ -202,10 +208,11 @@ func buildDNSQuery(name string) ([]byte, uint16, error) {
 }
 
 // parseDNSReply parses one received datagram (8-byte UDP header + DNS
-// message) and extracts the first A record whose message echoes id. ok is
-// false for a datagram that is not our reply (wrong source port, wrong ID,
-// not a response) — the caller keeps waiting. A genuine failure (rcode,
-// truncation, no A record) is an error.
+// message) and extracts the first A record whose message echoes id.
+// errNotOurs marks a datagram that is not our reply (too short, wrong
+// source port, wrong ID, not a response) — the caller consumes it and
+// keeps waiting. A genuine failure (rcode, TC, truncation, no A record)
+// is an error.
 func parseDNSReply(dgram []byte, id uint16) (ip [4]byte, err error) {
 	if len(dgram) < 8+12 {
 		// Shorter than a UDP header + DNS header: not a DNS reply at all.
@@ -222,6 +229,12 @@ func parseDNSReply(dgram []byte, id uint16) (ip [4]byte, err error) {
 	flags := uint16(msg[2])<<8 | uint16(msg[3])
 	if flags&0x8000 == 0 {
 		return ip, errNotOurs // QR = 0: a query, not a response
+	}
+	if flags&0x0200 != 0 {
+		// TC = 1: the server's reply did not fit its transport, and the
+		// kernel clamps the datagram at 72 bytes anyway — what we hold may
+		// be missing records. Refusing is honest; guessing is not.
+		return ip, ErrDNSFailed
 	}
 	switch rcode := int(flags & 0x000F); rcode {
 	case 0:
@@ -243,6 +256,12 @@ func parseDNSReply(dgram []byte, id uint16) (ip [4]byte, err error) {
 			return ip, ErrDNSFailed
 		}
 	}
+	// Walk EVERY answer the header claims: a message whose answer section
+	// runs past the bytes we actually received has lied about its own
+	// section (or the kernel clamped it) — refuse whole, never trust a
+	// record that happens to sit inside the prefix.
+	var firstA [4]byte
+	haveA := false
 	for i := 0; i < ancount; i++ {
 		if off, err = dnsSkipName(msg, off); err != nil {
 			return ip, err
@@ -257,11 +276,17 @@ func parseDNSReply(dgram []byte, id uint16) (ip [4]byte, err error) {
 			if off+4 > len(msg) {
 				return ip, ErrDNSFailed
 			}
-			return [4]byte{msg[off], msg[off+1], msg[off+2], msg[off+3]}, nil
+			if !haveA {
+				firstA = [4]byte{msg[off], msg[off+1], msg[off+2], msg[off+3]}
+				haveA = true
+			}
 		}
 		off += rdlen // not an A record (e.g. CNAME): skip it
 	}
-	return ip, ErrDNSFailed // answered, but no A record
+	if !haveA {
+		return ip, ErrDNSFailed // answered, but no A record
+	}
+	return firstA, nil
 }
 
 // dnsSkipName walks one (possibly compressed) name: a compression pointer

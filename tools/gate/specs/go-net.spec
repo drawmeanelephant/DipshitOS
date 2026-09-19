@@ -38,7 +38,8 @@
 # a silent guest (go-hello.spec's pattern).
 #
 # HOST PREREQUISITE (fails the gate honestly when missing):
-#   just go-gonet + just go-govinet -> .build/go/GONET.ELF, .build/go/GOVINET.ELF
+#   just go-gonet + just go-govinet
+#     -> .build/go/GONET.ELF, .build/go/GOVINET.ELF, .build/go/GOVIDNS.ELF
 #
 # WEB.ELF is NOT touched by this change (a follow-up may switch it to
 # net.Conn); this gate never execs it.
@@ -177,7 +178,7 @@ vgate_assert 04 serial-contains 'govinet: viloop bound'
 vgate_assert 04 serial-contains 'govinet: viloop sent n=4'
 vgate_assert 04 serial-contains 'govinet: viloop echoed n=12'
 vgate_assert 04 serial-contains 'gonet OK'
-vgate_assert 04 serial-absent 'gonet: viloop no echo'
+vgate_assert 04 serial-absent 'govinet: viloop no echo'
 vgate_assert 04 serial-absent 'govinet: FAIL'
 
 # Run 05 -- the closed-port drop: 8081 has no responder, so the connect
