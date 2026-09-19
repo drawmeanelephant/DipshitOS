@@ -3607,11 +3607,20 @@ var park_stack: [64 * 1024]u8 align(16) = undefined;
 
 // ---------------------------------------------------------------------------
 // M45 SH8 (#1084, ADR 0021 D5): the boot login seam. When `settings shell=sh`
-// the monitor hands the raw console to SH.BIN at boot: it execs SH.BIN (which
-// opens /dev/tty and attaches the serial front-end) and stops reading the
-// console itself, so the terminal pump owns the RX. The default `monitor` is
-// byte-identical. If SH.BIN exits/detaches, the monitor resumes.
+// the monitor hands the raw console to the login shell at boot: it execs it
+// (which opens /dev/tty and attaches the serial front-end) and stops reading
+// the console itself, so the terminal pump owns the RX. The default `monitor`
+// is byte-identical. If the shell exits/detaches, the monitor resumes.
+//
+// M68b (#1450): the seat moved from SH.BIN to the Go shell, so the image name
+// and the argument that selects its serial front-end live in one pair here.
+// The settings VALUE stays `sh` — it names the shell seat, not the binary, and
+// changing it would be a SETTINGS.TXT schema change for every persisted
+// share.
 // ---------------------------------------------------------------------------
+const login_shell_image = "GOSH.ELF";
+const login_shell_arg = "serial";
+
 var login_relinquished = false;
 var login_was_attached = false;
 /// M49 SD1 (#1128): the login shell's pid, so the monitor can reclaim the
@@ -3630,29 +3639,38 @@ pub fn login_should_resume(attached_now: bool, was_attached: bool, owner_alive: 
     return !owner_alive;
 }
 
-/// True when `pid` still names a live `SH.BIN` in the process registry. The
-/// name check guards against slot reuse by an unrelated program while the
+/// True when `pid` still names a live login shell in the process registry.
+/// The name check guards against slot reuse by an unrelated program while the
 /// console is relinquished.
 fn login_owner_alive(pid: usize) bool {
     const info = process.info(pid) orelse return false;
     if (info.state == .exited) return false;
-    return std.mem.eql(u8, info.name, "SH.BIN");
+    return std.mem.eql(u8, info.name, login_shell_image);
 }
 
 /// The pending boot login. Called once, after `.virelairc`, before the loop.
 fn login_handoff(mon: *monitor.Monitor) void {
     if (!settings.login_shell_is_sh()) return;
-    switch (exec_mod.exec_file("SH.BIN", &[_][]const u8{})) {
+    // The args array is built at runtime rather than passed as an anonymous
+    // comptime literal. Observed on VZ: with `&[_][]const u8{login_shell_arg}`
+    // the pack put six bytes into argv slot 1 that appear nowhere in
+    // KERNEL.BIN (stable across the pack, the exec, and the guest's own read),
+    // so GOSH never saw `serial` and fell through to its window path. This
+    // form packs `serial` correctly — the same shape every other caller uses,
+    // since their args come from a parsed line. Follow-up owed on #1450.
+    var login_args: [1][]const u8 = undefined;
+    login_args[0] = login_shell_arg;
+    switch (exec_mod.exec_file(login_shell_image, &login_args)) {
         .ok => {
             login_relinquished = true;
             login_was_attached = false;
             login_pid = exec_mod.last_exec_pid();
-            mon.console.puts("login: shell=sh -> SH.BIN\n");
+            mon.console.puts("login: shell=sh -> GOSH.ELF serial\n");
         },
         else => {
             // Honest fallback: the share/image is unavailable — keep the
             // monitor rather than leaving the console ownerless.
-            mon.console.puts("login: shell=sh but SH.BIN unavailable; staying in the monitor\n");
+            mon.console.puts("login: shell=sh but GOSH.ELF unavailable; staying in the monitor\n");
         },
     }
 }
@@ -3717,11 +3735,11 @@ fn park_body(mon: *monitor.Monitor) callconv(.c) void {
         }
         if (start < rc.len) handle_line(mon, rc[start..rc.len]);
     }
-    // M45 SH8: hand the console to SH.BIN when `settings shell=sh`.
+    // M45 SH8: hand the console to the login shell when `settings shell=sh`.
     login_handoff(mon);
     while (true) {
         // While the login shell owns the serial console, the monitor must
-        // NOT read it (the terminal pump feeds SH.BIN's /dev/tty instead).
+        // NOT read it (the terminal pump feeds the shell's /dev/tty instead).
         if (login_console_relinquished(mon) or shell.poll() == .idle) {
             // Claim 9187: the timer is serviced only through the IRQ path.
             // Claim 7948's main-loop comparator poll raced real delivery

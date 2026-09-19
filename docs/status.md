@@ -99,7 +99,7 @@ The only threads not closed:
 |--------|-------------------|-------|
 | **Go runtime port — `GOOS=virelai`** | Phase 0a–0c + phase 2 netpoll + 2.1 EL0 clock landed (#1187/#1196/#1221/#1230/#1231/#1228/#1350/#1359). | #1163 |
 | **M58 — Move the apps you touch** | M58a–f landed: files, GOEDIT (`go-edit`), GOTERM (`go-term`, #1307), fetch, FART. `GOCALC.ELF` (gate `go-calc`, #1378) is the CALC successor. Full-viewport via tabapp in Zig TABWM. | |
-| **M60 leftovers** | Policy recorded; `EDIT.BIN`, `FILE.BIN`, `CALC.BIN`, and (M66c/#1485, PR #1495) `NOTEPAD.BIN` are gone. `TABWM.BIN` is **retained by decision** (ADR 0034 / M68c #1451) as the `settings set wm tabwm` fallback — frozen, bug-fix only. Still open, one binary per card: `SH.BIN` (#1450 — GOSH lacks its serial front-end, `whoami`/`id`/`secrets`, `net`, and the M19 scripting depth `live-sh5` asserts). | #1450 |
+| **M60 leftovers** | Policy recorded; `EDIT.BIN`, `FILE.BIN`, `CALC.BIN`, and (M66c/#1485, PR #1495) `NOTEPAD.BIN` are gone. `TABWM.BIN` is **retained by decision** (ADR 0034 / M68c #1451) as the `settings set wm tabwm` fallback — frozen, bug-fix only. Still open, one binary per card: `SH.BIN` (#1450 — GOSH now carries the serial front-end, the M50 trust verbs and the M19 scripting depth, all merged; the boot login seat execs `GOSH.ELF serial` (PR #1502); remaining: the `net` verb + delegated handshake, then the delete). | #1450 |
 | **EL0 `sys_exec` caller survival** | AddrSpaceSpec + argv on slot 28; class-B `live-el0-exec` | #1333 |
 
 ## Gate status

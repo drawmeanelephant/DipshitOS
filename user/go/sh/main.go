@@ -58,6 +58,7 @@ const (
 	markerAttach   = "gosh: attached"
 	markerPrompt   = "gosh: prompt"
 	markerLine     = "gosh: line "
+	markerMonitor  = "gosh: monitor"
 	markerClose    = "gosh: close"
 	markerOK       = "gosh OK"
 	markerOpenErr  = "gosh: error open "
@@ -208,7 +209,7 @@ func runSession(fd uint32, ta *tabapp.TabApp) {
 		vi.ConsoleLine(markerLine + ln)
 		_, act := sh.RunLine(ln)
 		if act != actionContinue {
-			shutdown(ta, fd, sh.Status())
+			leave(ta, fd, sh, act)
 		}
 	}
 
@@ -229,7 +230,7 @@ func runSession(fd uint32, ta *tabapp.TabApp) {
 			vi.ConsoleLine(markerLine + ev.Line)
 			_, act := sh.RunLine(ev.Line)
 			if act != actionContinue {
-				shutdown(ta, fd, sh.Status())
+				leave(ta, fd, sh, act)
 			}
 		case evEOF:
 			shutdown(ta, fd, 0)
@@ -272,6 +273,17 @@ func runSession(fd uint32, ta *tabapp.TabApp) {
 			shutdown(ta, fd, 0)
 		}
 	}
+}
+
+// leave ends the session for the line that asked to leave. The monitor
+// handover is announced BEFORE the detach, so the console log says why the
+// shell is giving the console back rather than only that it closed — SH.BIN
+// printed the same marker, and live-sh-monitor sequences on it.
+func leave(ta *tabapp.TabApp, fd uint32, sh *Shell, act action) {
+	if act == actionMonitor {
+		vi.ConsoleLine(markerMonitor)
+	}
+	shutdown(ta, fd, sh.Status())
 }
 
 func shutdown(ta *tabapp.TabApp, fd uint32, status int) {

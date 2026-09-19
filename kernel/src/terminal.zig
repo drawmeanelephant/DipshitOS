@@ -3,7 +3,7 @@
 //! A **terminal** is a bounded, hardware-free session buffer: an output ring
 //! the owner process writes to, an input queue a front-end fills, and an
 //! exclusive attach state naming the front-end (the raw serial console, a
-//! TABWM window, a TCP/SSH session). It is the thing `SH.BIN`, `TERM.BIN`,
+//! TABWM window, a TCP/SSH session). It is the thing `GOSH.ELF`, `TERM.BIN`,
 //! and remote sessions all sit on — see ADR 0020.
 //!
 //! Pure by construction: fixed arrays, no allocation, no hardware, no
