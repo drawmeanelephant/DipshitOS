@@ -103,6 +103,18 @@ func StyleFor(tag string) Style {
 		return Style{Size: 1, Color: ColorText}
 	case "img":
 		return Style{Size: 1, Color: ColorMuted, MarginTop: 4, MarginBottom: 8}
+	case "form":
+		return Style{Size: 1, Color: ColorText, MarginTop: 4, MarginBottom: 8}
+	case "fieldset":
+		return Style{Size: 1, Color: ColorText, MarginTop: 6, MarginBottom: 8, Indent: 4}
+	case "legend":
+		return Style{Size: 1, Bold: true, Color: ColorText, MarginBottom: 4}
+	case "label":
+		return Style{Size: 1, Color: ColorText}
+	case "input", "textarea", "select", "button":
+		return Style{Size: 1, Color: ColorText, Bg: ColorSurface, MarginBottom: 4}
+	case "address":
+		return Style{Size: 1, Color: ColorMuted, MarginTop: 4, MarginBottom: 8}
 	case "script", "style", "head", "title", "meta", "link", "template", "noscript":
 		return Style{Skip: true}
 	}

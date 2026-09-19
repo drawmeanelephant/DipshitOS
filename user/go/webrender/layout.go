@@ -142,6 +142,10 @@ func (b *builder) walkChildren(n *Node, st Style, indent int) {
 			b.hardBreak()
 			continue
 		}
+		if c.Tag == "input" {
+			b.emitControl(c)
+			continue
+		}
 		if BlockElement(c.Tag) {
 			b.block(c, es, indent)
 			continue
@@ -168,6 +172,10 @@ func (b *builder) inlineElement(e *Node, st Style, indent int, inherited string)
 		}
 		if c.Tag == "br" {
 			b.hardBreak()
+			continue
+		}
+		if c.Tag == "input" {
+			b.emitControl(c)
 			continue
 		}
 		if BlockElement(c.Tag) {
@@ -226,6 +234,10 @@ func (b *builder) block(e *Node, st Style, indent int) {
 		b.emitImage(e, left, inner)
 	case "table":
 		b.emitTable(e, left, inner)
+	case "input", "textarea", "select", "button":
+		b.lineX = left
+		b.emitControl(e)
+		b.lineX = 0
 	default:
 		b.lineX = left
 		b.walkChildren(e, st, left)
@@ -446,19 +458,17 @@ func (b *builder) emitPre(e *Node, left, inner int) {
 	if stride < 8 {
 		stride = 8
 	}
-	cols := inner / b.t.Advance(monoSt)
-	if cols < 1 {
-		cols = 1
-	}
 	box := Item{Kind: ItemRect, X: left, Y: b.y, W: inner, H: len(lines)*stride + 6, Bg: ColorSurface}
 	b.items = append(b.items, box)
 	ty := b.y + 3
+	// A 72-column RFC line must survive a 512px viewport: paint clips, the
+	// line is not destroyed. Ellipsis is only for a hostile run that would
+	// otherwise become one unbounded item (ADR 0028 D6).
+	const maxPreRunes = 256
 	for _, ln := range lines {
-		// Truncation stays visible (ADR 0028 D6) and stays on a rune boundary,
-		// so a multi-byte character is never cut in half.
-		if rs := []rune(ln); len(rs) > cols {
-			if cols > 1 {
-				ln = string(rs[:cols-1]) + "\u2026"
+		if rs := []rune(ln); len(rs) > maxPreRunes {
+			if maxPreRunes > 1 {
+				ln = string(rs[:maxPreRunes-1]) + "\u2026"
 			} else {
 				ln = "\u2026"
 			}
@@ -480,15 +490,26 @@ func (b *builder) emitImage(e *Node, left, inner int) {
 	if label == "" {
 		label = "img"
 	}
+	hintW, hintH := attrPx(e, "width"), attrPx(e, "height")
 	// ADR 0028 S3: an <img> whose bytes the app can supply is decoded and drawn
-	// at its intrinsic size, capped to the content box. A missing, undecodable,
-	// or unresolvable image keeps the labeled placeholder box — visible, never
-	// blank (D5's rule, applied to the one element whose failure is silent).
+	// at its intrinsic size, capped to the content box. HTML width/height are
+	// source hints (D2: a page cannot restyle itself; attributes are not a
+	// cascade). A missing, undecodable, or unresolvable image keeps the labeled
+	// placeholder box — visible, never blank (D5).
 	if b.images != nil {
 		if src := e.Attr("src"); src != "" {
 			if data, ok := b.images(src); ok {
 				if img, err := DecodeImage(data); err == nil && img != nil {
 					w, h := img.Width, img.Height
+					if hintW > 0 && hintH > 0 {
+						w, h = hintW, hintH
+					} else if hintW > 0 && w > 0 {
+						h = h * hintW / w
+						w = hintW
+					} else if hintH > 0 && h > 0 {
+						w = w * hintH / h
+						h = hintH
+					}
 					if w > inner && w > 0 {
 						h = h * inner / w
 						w = inner
@@ -504,12 +525,47 @@ func (b *builder) emitImage(e *Node, left, inner int) {
 		}
 	}
 	w := inner
-	if w > 96 {
+	if hintW > 0 {
+		w = hintW
+	}
+	if w > inner {
+		w = inner
+	}
+	if w > 96 && hintW == 0 {
 		w = 96
 	}
 	h := 40
+	if hintH > 0 {
+		h = hintH
+	}
+	if w < 1 {
+		w = 1
+	}
+	if h < 1 {
+		h = 1
+	}
 	b.items = append(b.items, Item{Kind: ItemImage, X: left, Y: b.y, W: w, H: h, Text: label, Color: ColorMuted})
 	b.y += h
+}
+
+func attrPx(e *Node, name string) int {
+	v := strings.TrimSpace(e.Attr(name))
+	v = strings.TrimSuffix(strings.ToLower(v), "px")
+	if v == "" {
+		return 0
+	}
+	n := 0
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		if c < '0' || c > '9' {
+			return 0
+		}
+		n = n*10 + int(c-'0')
+		if n > 4096 {
+			return 4096
+		}
+	}
+	return n
 }
 
 func (b *builder) emitTable(e *Node, left, inner int) {
@@ -536,51 +592,197 @@ func (b *builder) emitTable(e *Node, left, inner int) {
 	if colw < 8 {
 		colw = 8
 	}
+	lh := b.t.LineHeight(Style{Size: 1})
 	startY := b.y
+	outerRight := b.right
 	for _, r := range rows {
 		rowTop := b.y
-		maxLines := 1
-		savedRight := b.right
-		for c := 0; c < len(r.cells); c++ {
+		rowBottom := rowTop
+		ncells := len(r.cells)
+		if ncells > cols {
+			ncells = cols
+		}
+		for c := 0; c < ncells; c++ {
 			cell := r.cells[c]
 			st := StyleFor(cell.tag)
 			st.Bold = st.Bold || r.header
 			cx := left + c*(colw+gutter)
 			cy := rowTop + 2
-			b.lineX = cx
 			cellRight := cx + colw
-			if cellRight > b.right {
-				cellRight = b.right
+			if cellRight > outerRight {
+				cellRight = outerRight
 			}
-			b.right, savedRight = cellRight, b.right
+			b.y = cy
+			b.lineX = cx
+			b.right = cellRight
 			b.pushText(cell.text, st, "")
-			before := b.y
 			b.flushInline()
-			n := 0
-			for _, it := range b.items {
-				if it.Kind == ItemText && it.Y >= cy-2 {
-					n++
-				}
+			if b.y > rowBottom {
+				rowBottom = b.y
 			}
-			_ = n
-			if lines := (b.y - cy) / b.t.LineHeight(Style{Size: 1}); lines > maxLines {
-				maxLines = lines
-			}
-			if b.y < before {
-				b.y = before
-			}
-			b.right = savedRight
+			b.right = outerRight
+			b.lineX = 0
 		}
-		h := maxLines*b.t.LineHeight(Style{Size: 1}) + 5
-		b.y = rowTop + h
+		if rowBottom < rowTop+lh+4 {
+			rowBottom = rowTop + lh + 4
+		}
+		b.y = rowBottom + 3
 		if r.header {
 			b.items = append(b.items, Item{Kind: ItemRule, X: left, Y: b.y - 1, W: cols*colw + gutter*(cols-1), H: 1, Color: ColorRule})
 		}
 	}
 	if b.y == startY {
-		b.y += b.t.LineHeight(Style{Size: 1})
+		b.y += lh
 	}
 	b.lineX = 0
+}
+
+// emitControl paints a static form control (ADR 0028 D2: display only).
+func (b *builder) emitControl(e *Node) {
+	if e.Tag == "input" && strings.EqualFold(e.Attr("type"), "hidden") {
+		return
+	}
+	b.flushInline()
+	if b.cap() {
+		return
+	}
+	left := b.lineX
+	inner := b.right - left
+	if inner < 16 {
+		inner = 16
+	}
+	lh := b.t.LineHeight(Style{Size: 1})
+	typ := strings.ToLower(e.Attr("type"))
+	label := controlLabel(e, typ)
+	switch {
+	case e.Tag == "input" && (typ == "checkbox" || typ == "radio"):
+		// Replaced inline: the 8px box sits on the current line and the
+		// surrounding <label> text continues beside it. The value attribute
+		// is not painted — it would duplicate the caption.
+		box := 8
+		x := left
+		b.items = append(b.items, Item{Kind: ItemRect, X: x, Y: b.y + 1, W: box, H: box, Bg: ColorSurface})
+		b.items = append(b.items, Item{Kind: ItemRule, X: x, Y: b.y + 1, W: box, H: 1, Color: ColorRule})
+		b.items = append(b.items, Item{Kind: ItemRule, X: x, Y: b.y + box, W: box, H: 1, Color: ColorRule})
+		b.items = append(b.items, Item{Kind: ItemRule, X: x, Y: b.y + 1, W: 1, H: box, Color: ColorRule})
+		b.items = append(b.items, Item{Kind: ItemRule, X: x + box - 1, Y: b.y + 1, W: 1, H: box, Color: ColorRule})
+		b.lineX = x + box + 4
+		return
+	default:
+		w, h := inner, lh+6
+		if e.Tag == "textarea" {
+			h = lh*3 + 6
+		}
+		if e.Tag == "input" && typ != "submit" && typ != "button" && typ != "reset" {
+			if w > 160 {
+				w = 160
+			}
+		} else if e.Tag == "button" || typ == "submit" || typ == "reset" || typ == "button" {
+			need := b.t.Measure(label, Style{Size: 1}) + 16
+			if need < w {
+				w = need
+			}
+			if w < 32 {
+				w = 32
+			}
+		} else if e.Tag == "select" {
+			if w > 160 {
+				w = 160
+			}
+		}
+		if w > inner {
+			w = inner
+		}
+		b.items = append(b.items, Item{Kind: ItemRect, X: left, Y: b.y, W: w, H: h, Bg: ColorSurface})
+		b.items = append(b.items, Item{Kind: ItemRule, X: left, Y: b.y, W: w, H: 1, Color: ColorRule})
+		b.items = append(b.items, Item{Kind: ItemRule, X: left, Y: b.y + h - 1, W: w, H: 1, Color: ColorRule})
+		b.items = append(b.items, Item{Kind: ItemRule, X: left, Y: b.y, W: 1, H: h, Color: ColorRule})
+		b.items = append(b.items, Item{Kind: ItemRule, X: left + w - 1, Y: b.y, W: 1, H: h, Color: ColorRule})
+		if label != "" {
+			st := Style{Size: 1, Color: ColorText}
+			tx := label
+			cols := (w - 8) / b.t.Advance(st)
+			if cols < 1 {
+				cols = 1
+			}
+			if rs := []rune(tx); len(rs) > cols {
+				tx = string(rs[:cols])
+			}
+			b.items = append(b.items, Item{Kind: ItemText, X: left + 4, Y: b.y + 3, W: b.t.Measure(tx, st), H: lh, Text: tx, Size: 1, Color: ColorText})
+		}
+		b.y += h + 2
+	}
+	b.lineX = 0
+}
+
+func controlLabel(e *Node, typ string) string {
+	switch e.Tag {
+	case "button":
+		if t := collapseWS(rawText(e)); t != "" {
+			return t
+		}
+		return "button"
+	case "textarea":
+		if t := rawText(e); strings.TrimSpace(t) != "" {
+			return collapseWS(t)
+		}
+		if p := e.Attr("placeholder"); p != "" {
+			return p
+		}
+		if n := e.Attr("name"); n != "" {
+			return n
+		}
+		return "textarea"
+	case "select":
+		if t := selectLabel(e); t != "" {
+			return t
+		}
+		if n := e.Attr("name"); n != "" {
+			return n
+		}
+		return "select"
+	}
+	if v := e.Attr("value"); v != "" {
+		return v
+	}
+	if p := e.Attr("placeholder"); p != "" {
+		return p
+	}
+	if n := e.Attr("name"); n != "" {
+		return n
+	}
+	if typ != "" {
+		return typ
+	}
+	return "input"
+}
+
+func selectLabel(e *Node) string {
+	var selected, first string
+	var walk func(*Node)
+	walk = func(n *Node) {
+		for _, c := range n.Children {
+			if c.Kind != KindElement {
+				continue
+			}
+			if c.Tag == "option" {
+				t := collapseWS(rawText(c))
+				if first == "" {
+					first = t
+				}
+				if c.HasAttr("selected") {
+					selected = t
+				}
+				continue
+			}
+			walk(c)
+		}
+	}
+	walk(e)
+	if selected != "" {
+		return selected
+	}
+	return first
 }
 
 type tableRow struct {

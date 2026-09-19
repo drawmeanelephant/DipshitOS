@@ -1,6 +1,9 @@
 # live-doc-web.spec -- M-web S3–S6: img, click-nav, fetch, publish (issues #1204–#1207)
+# plus M70d shard 1 (#1456): one UA-table corpus page DOC.BIN can open.
 #
-# One spec, four boots (one exec each). S1/S2 stay live-doc / live-doc-tables.
+# One spec, five boots (one exec each). S1/S2 stay live-doc / live-doc-tables.
+# ADR 0028 D2 is frozen: no JS, no CSS cascade. The corpus page is chosen
+# because it is readable from the compiled-in UA table alone.
 
 vgate_name live-doc-web "M-web S3–S6: img, nav, fetch, publish"
 vgate_share seed
@@ -14,6 +17,7 @@ shutil.copy("zig-out/bin/DOC.BIN", share)
 shutil.copy("tests/oliver-spike/img.html", os.path.join(share, "IMG.HTML"))
 shutil.copy("tests/oliver-spike/nav.html", os.path.join(share, "NAV.HTML"))
 shutil.copy("tests/oliver-spike/next.html", os.path.join(share, "NEXT.HTML"))
+shutil.copy("user/go/webrender/testdata/corpus/cern-home.html", os.path.join(share, "CORPUS.HTML"))
 
 def write_qoi(path, w, h, rgb):
     buf = bytearray(b"qoif")
@@ -53,6 +57,10 @@ EOF
 
 vgate_file script-pub.txt <<'EOF'
 exec DOC.BIN /host/PAGE.HTML
+EOF
+
+vgate_file script-corpus.txt <<'EOF'
+exec DOC.BIN /host/CORPUS.HTML
 EOF
 
 # --- boot 01: S3 <img> QOI blit + missing-src placeholder ---
@@ -188,4 +196,36 @@ n = sum(1 for yy in range(Y + 18, Y + 80)
         if ink(px(xx, yy)))
 assert n >= 20, f"published h1 ink {n}"
 print("live-doc-web 04 publish pixels ok")
+PY
+
+# --- boot 05: M70d shard 1 corpus page (CERN first-website hub; UA table only) ---
+vgate_run 05 -- \
+    --screen '$RUN_DIR/screen' \
+    --via-virtio --cvc-snap \
+    --snapshot-out '$RUN_DIR/snap-05' \
+    --script '$RUN_DIR/script-corpus.txt' \
+    --snapshot-after "doc: settled" \
+    --script-expect "doc: settled" --timeout 120
+
+vgate_assert 05 serial-contains 'doc: open id='
+vgate_assert 05 serial-contains 'doc: parse nodes='
+vgate_assert 05 serial-contains 'doc: probe h1='
+vgate_assert 05 serial-contains 'doc: settled'
+vgate_assert 05 serial-absent 'doc: error'
+vgate_assert 05 serial-absent '[EXC] parking:'
+vgate_assert 05 snapshot 'snap-05-*.raw' <<'PY'
+import sys
+data = open(sys.argv[1], "rb").read()
+w = 1280
+def px(x, y):
+    k = (y * w + x) * 4
+    return (data[k + 2], data[k + 1], data[k])
+def ink(c):
+    return c[0] > 200 and c[1] > 200 and c[2] > 200
+X, Y = 40, 28
+n = sum(1 for yy in range(Y + 18, Y + 100)
+        for xx in range(X + 10, X + 480)
+        if ink(px(xx, yy)))
+assert n >= 16, f"corpus h1 ink {n}"
+print("live-doc-web 05 corpus pixels ok")
 PY
