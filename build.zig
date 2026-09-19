@@ -1380,29 +1380,12 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_ttyed.step);
 
     // ------------------------------------------------------------------
-    // Guest: SH.BIN (M45 SH2 — issue #1078, ADR 0021 D2/D3). The userland
-    // shell: opens /dev/tty, attaches the serial front-end, prompts, reads
-    // lines through the SH1 editor, and dispatches builtins + external
-    // share apps (PATH-like candidate resolution, foreground sys_wait).
+    // M68b (#1450): SH.BIN is RETIRED with user/src/sh.zig. Its Go successor
+    // is GOSH.ELF (user/go/sh, built by tools/go/build-gosh.sh) — a host-share
+    // ELF, not an in-image Zig program, so there is no build step to replace
+    // this one. The last two SH.BIN-running specs (live-remote, live-remote-
+    // auth2) retargeted onto `GOSH.ELF net` in the same card.
     // ------------------------------------------------------------------
-    const sh_prog = b.addExecutable(.{
-        .name = "user-sh",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("user/src/sh.zig"),
-            .target = kernel_target,
-            .optimize = .ReleaseSmall,
-        }),
-    });
-    sh_prog.linker_script = b.path("user/linker-segmented.ld");
-    const sh_step = b.step("sh", "Build the M45 SH2 userland shell (zig-out/bin/SH.BIN) — DSK3 segmented (writable .data/.bss)");
-    const sh_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
-    sh_elf2bin.addFileArg(sh_prog.getEmittedBin());
-    const sh_bin = sh_elf2bin.addOutputFileArg("SH.BIN");
-    sh_elf2bin.has_side_effects = true;
-    sh_elf2bin.stdio = .inherit;
-    sh_step.dependOn(&sh_elf2bin.step);
-    const install_sh = b.addInstallFileWithDir(sh_bin, .bin, "SH.BIN");
-    b.getInstallStep().dependOn(&install_sh.step);
 
     // ------------------------------------------------------------------
     // Guest: TERM.BIN (M45 SH6 — issue #1082, ADR 0020 Amendment A). The

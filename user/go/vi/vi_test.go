@@ -214,6 +214,18 @@ func TestTtyAttachSelectors(t *testing.T) {
 	if TtyDetach != 0 || TtySerial != 1 || TtyWindow != 2 || TtyNet != 3 {
 		t.Fatalf("selectors = %d/%d/%d/%d want 0/1/2/3", TtyDetach, TtySerial, TtyWindow, TtyNet)
 	}
+	if SlotTtyNetAuth != 71 {
+		t.Fatalf("SlotTtyNetAuth = %d want 71", SlotTtyNetAuth)
+	}
+	if NetSchemeOpen != 0 || NetSchemeHMAC != 1 || NetSchemeEd25519 != 2 {
+		t.Fatalf("schemes = %d/%d/%d want 0/1/2", NetSchemeOpen, NetSchemeHMAC, NetSchemeEd25519)
+	}
+	if NetAuthOpChallenge != 0 || NetAuthOpResponse != 1 || NetAuthOpVerdict != 2 {
+		t.Fatalf("ops = %d/%d/%d want 0/1/2", NetAuthOpChallenge, NetAuthOpResponse, NetAuthOpVerdict)
+	}
+	if NetChallengeLen != 32 || NetAuthLineMax != 160 {
+		t.Fatalf("net-auth geometry = %d/%d want 32/160", NetChallengeLen, NetAuthLineMax)
+	}
 }
 
 func TestTtyAttachHostFails(t *testing.T) {
@@ -222,6 +234,13 @@ func TestTtyAttachHostFails(t *testing.T) {
 	}
 	if r := TtyAttachWindow(1); r != -ErrENOSYS {
 		t.Fatalf("host TtyAttachWindow = %d want -ENOSYS", r)
+	}
+	if r := TtyAttachNet(2323, NetSchemeOpen, 0); r != -ErrENOSYS {
+		t.Fatalf("host TtyAttachNet = %d want -ENOSYS", r)
+	}
+	var buf [32]byte
+	if r := TtyNetAuth(NetAuthOpChallenge, buf[:]); r != -ErrENOSYS {
+		t.Fatalf("host TtyNetAuth = %d want -ENOSYS", r)
 	}
 }
 
