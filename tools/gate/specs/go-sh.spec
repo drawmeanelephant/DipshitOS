@@ -43,7 +43,10 @@ EOF
 # it runs the named ELF; the -c child form is GOSH's own headless mode
 # (no window, no tty, exits with the line's status). Two children, in this
 # order: the foreground `exit 7` pins exec+wait status propagation through
-# $?; the background `sleep 2` cycles the job table (jobs -> fg). A THIRD
+# $?; the background `echo nested-child-ok` cycles the job table
+# (jobs -> fg) AND proves a child's own console output reaches the serial
+# log -- the old `sleep 2` there printed nothing, which is why the
+# `nested-child-ok` assert below could never fire. A THIRD
 # sequential exec from one EL0 parent currently dies in the Go runtime's
 # own schedinit (observed twice: "refill of span with reusable pointers"
 # -> fatal exit 2) -- surfaced by this card, documented on #1449, follow-up
@@ -56,7 +59,7 @@ echo V=$GREET > /host/GOSHVARS.TXT
 echo alpha-beta | grep alpha > /host/GOSHPIPE.TXT
 exec GOSH.ELF -c "exit 7"
 echo rc=$? > /host/GOSHRC.TXT
-exec GOSH.ELF -c "sleep 2" &
+exec GOSH.ELF -c "echo nested-child-ok" &
 jobs
 fg 1
 echo jobrc=$? > /host/GOSHJOB.TXT
@@ -76,16 +79,17 @@ print("staged GOSH.ELF (%d bytes) + STARTUP.SH into share" %
       os.path.getsize(os.path.join(share, "GOSH.ELF")))
 PY
 
-# Typed at the prompt: `echo abc`, two backspaces and a z turn it into
-# `echo az`, then Up recalls it and x appends -> `echo azx`, the marker the
-# stage gate waits on.
+# Typed at the prompt -- THREE submitted lines, because `gosh: line ` is
+# emitted on submit only: `echo abc` is typed and returned; Up recalls it,
+# two backspaces and a z turn it into `echo az`, returned; Up recalls THAT
+# and x appends -> `echo azx`, the marker the stage gate waits on.
 vgate_run 01 -- \
     --screen '$RUN_DIR/screen' \
     --via-virtio \
     --script '$RUN_DIR/script.txt' \
     --script2 '$RUN_DIR/script2.txt' \
     --script2-after 'tabwm: sidebar-rendered' \
-    --input-chords 'e,c,h,o,space,a,b,c,backspace,backspace,z,return,up,x,return' \
+    --input-chords 'e,c,h,o,space,a,b,c,return,up,backspace,backspace,z,return,up,x,return' \
     --input-chords-after 'gosh: prompt' \
     --script3 '$RUN_DIR/script3.txt' \
     --script3-after 'gosh: line echo azx' \
@@ -105,13 +109,15 @@ vgate_assert 01 serial-contains 'gosh: attached'
 # as the same `gosh: line ` markers a typed line gets.
 vgate_assert 01 serial-contains 'gosh: line echo gosh-startup-ran'
 vgate_assert 01 serial-contains 'gosh: prompt'
-# The headless child ran (its output is console, so serial-visible), and
-# the background job cycled through the reaper with a zero exit.
+# The background Go child's own console output is serial-visible (its
+# `echo` is the only source of this marker), and the job cycled through
+# the reaper with a zero exit.
 vgate_assert 01 serial-contains 'nested-child-ok'
 vgate_assert 01 serial-contains 'gosh: job 1 pid='
 vgate_assert 01 serial-contains 'gosh: job 1 done exit=0'
-# The interactive editor: a fresh line, a backspace edit, a history recall
-# edited by one character.
+# The interactive editor, one marker per submitted line: a fresh line, a
+# line edited with real Backspace keystrokes after an Up recall, and a
+# second recall edited by one character.
 vgate_assert 01 serial-contains 'gosh: line echo abc'
 vgate_assert 01 serial-contains 'gosh: line echo az'
 vgate_assert 01 serial-contains 'gosh: line echo azx'

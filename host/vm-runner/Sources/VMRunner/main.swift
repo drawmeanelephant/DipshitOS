@@ -3515,6 +3515,7 @@ func macChord(_ token: String) -> (UInt16, NSEvent.ModifierFlags, String)? {
     case "home": return (0x73, [], "\u{F729}")
     case "end": return (0x77, [], "\u{F72B}")
     case "delete": return (0x75, [], "\u{F728}")
+    case "backspace": return (0x33, [], "\u{7F}") // M68a (#1449): macOS keycode 0x33 = Delete/Backspace; 0x7F is the byte a terminal expects
     case "pageup": return (0x74, [], "\u{F72C}")
     case "pagedown": return (0x79, [], "\u{F72D}")
     case "escape": return (0x35, [], "\u{1B}")
@@ -5463,6 +5464,14 @@ enum CustomVirtioSpike {
         case "home": return (0, 0x4A)
         case "end": return (0, 0x4D)
         case "delete": return (0, 0x4C)
+        // M68a (#1449): `backspace` was missing from BOTH chord tables, so
+        // any spec that edits a typed line (type, delete a char, type over
+        // it) failed the whole sequence with "no HID mapping for chord
+        // 'backspace'" and injected NOTHING — the go-sh gate then sat at its
+        // prompt for its full 240 s deadline. Usage 0x2A is the guest
+        // keymap's Backspace (kernel/src/input.zig maps it to byte 0x08),
+        // so this behaves exactly like the physical key.
+        case "backspace": return (0, 0x2A)
         case "pageup": return (0, 0x4B)
         case "pagedown": return (0, 0x4E)
         // WM2 mission-control overview (Self-hosting Lane 1, issue #707
