@@ -40,6 +40,16 @@ That is the negative result this card records; the spec asserts the trap.
 VGATE_NO_BUILD=1 bash tools/gate/vgate.sh tests/js-wasm-measure/run-under-wasm.spec
 ```
 
+Control (same day): `-Wl,-z,stack-size=65536` still traps. That flag is not
+a frozen cap; if the 8 KiB C stack had been the cause, eval would have
+printed. It did not. `__stack_pointer` was observed `i32.const 8192` vs
+`65536`. Spec: `run-stack64k.spec`.
+
+```bash
+STACK_SIZE=65536 bash tests/js-wasm-measure/measure.sh
+VGATE_NO_BUILD=1 bash tools/gate/vgate.sh tests/js-wasm-measure/run-stack64k.spec
+```
+
 ## What was tried and did not produce a module under the caps
 
 See the table in ADR 0028's M70d amendment. Short form: Duktape / MuJS /
@@ -54,4 +64,5 @@ MicroQuickJS need `setjmp` (wasm EH; `WASM.BIN` has none) and their native
 | `measure.sh` | compile Elk against the contract line + these stubs |
 | `elk_driver.c` | eval `1+2*3`, `v_write` the result, `v_exit(0)` |
 | `stubs.c` + `include/` | freestanding crumbs so `-nostdlib` links |
-| `run-under-wasm.spec` | optional one-shot VZ run; not discovered by `fleet.sh` |
+| `run-under-wasm.spec` | optional one-shot VZ run (8 KiB stack); not in the fleet |
+| `run-stack64k.spec` | 64 KiB stack control; still traps |

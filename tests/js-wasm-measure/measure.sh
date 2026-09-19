@@ -14,6 +14,16 @@ if [ ! -f "$ELK/elk.c" ]; then
     exit 2
 fi
 
+# STACK_SIZE is the wasm-ld C stack, not a frozen interpreter cap.
+# Default 8192 is the original measurement; 65536 is the control that
+# falsifies stack exhaustion as the exec trap.
+STACK_SIZE="${STACK_SIZE:-8192}"
+if [ "$STACK_SIZE" = 8192 ]; then
+    DEST="$OUT/elk.wasm"
+else
+    DEST="$OUT/elk-stack${STACK_SIZE}.wasm"
+fi
+
 zig cc -target wasm32-freestanding -nostdlib -ffreestanding \
     -fno-sanitize=undefined -g0 -Os -DNDEBUG \
     -isystem "$ROOT/tests/js-wasm-measure/include" \
@@ -23,11 +33,11 @@ zig cc -target wasm32-freestanding -nostdlib -ffreestanding \
     -Wl,--export=_start \
     -Wl,--initial-memory=131072 \
     -Wl,--max-memory=2097152 \
-    -Wl,-z,stack-size=8192 \
+    -Wl,-z,stack-size="$STACK_SIZE" \
     -Wl,--strip-all \
     "$ROOT/tests/js-wasm-measure/elk_driver.c" \
     "$ROOT/tests/js-wasm-measure/stubs.c" \
     "$ELK/elk.c" \
-    -o "$OUT/elk.wasm"
+    -o "$DEST"
 
-python3 "$ROOT/tests/wasm-spike/wasm-inspect.py" "$OUT/elk.wasm"
+python3 "$ROOT/tests/wasm-spike/wasm-inspect.py" "$DEST"

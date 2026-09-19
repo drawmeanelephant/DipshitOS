@@ -1,14 +1,11 @@
-# One-shot VZ measurement: the Elk module inspects clean, then traps.
-# NOT a fleet member. Reproduce:
-#   bash tests/js-wasm-measure/measure.sh
-#   VGATE_NO_BUILD=1 bash tools/gate/vgate.sh tests/js-wasm-measure/run-under-wasm.spec
+# Control: same Elk driver, wasm-ld C stack 64 KiB instead of 8 KiB.
+# NOT a fleet member. Observed 2026-09-19: still traps (exit 3). The 8 KiB
+# stack is falsified as the cause; remaining inference is max_frames=32.
 #
-# Observed 2026-09-19: `exec WASM.BIN ELK.WASM` prints `wasm: trap during exec`
-# and exits 3. Control with `-Wl,-z,stack-size=65536` still traps (see
-# run-stack64k.spec), so the 8 KiB C stack is not the cause. Remaining
-# inference: `max_frames = 32`.
+#   STACK_SIZE=65536 bash tests/js-wasm-measure/measure.sh
+#   VGATE_NO_BUILD=1 bash tools/gate/vgate.sh tests/js-wasm-measure/run-stack64k.spec
 
-vgate_name live-browser-js-measure "M70d #1456: Elk under WASM.BIN traps (measurement)"
+vgate_name live-browser-js-stack64k "M70d #1456: Elk stack-size=64KiB control still traps"
 vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 vgate_repeat 1 BOOTS
@@ -30,9 +27,9 @@ if not os.path.exists(wasm_bin):
     sys.exit("ERROR: zig-out/bin/WASM.BIN missing — zig build first")
 shutil.copy(wasm_bin, os.path.join(share, "WASM.BIN"))
 
-elk = "artifacts/js-wasm-measure/build/elk.wasm"
+elk = "artifacts/js-wasm-measure/build/elk-stack65536.wasm"
 if not os.path.exists(elk):
-    sys.exit("ERROR: " + elk + " missing — bash tests/js-wasm-measure/measure.sh")
+    sys.exit("ERROR: " + elk + " missing — STACK_SIZE=65536 bash tests/js-wasm-measure/measure.sh")
 shutil.copy(elk, os.path.join(share, "ELK.WASM"))
 PY
 

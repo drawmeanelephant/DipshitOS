@@ -148,6 +148,23 @@ byte caps.
 The guest does not print a trap class. **Inferred:** Elk's recursive C eval
 exceeds `max_frames = 32`. Inspect-clean is not execute-clean.
 
+### Control: 64 KiB C stack (not a frozen cap)
+
+The original link line used `-Wl,-z,stack-size=8192`. That is a wasm-ld
+layout flag inside the 2 MiB linear-memory allowance, not an interpreter
+cap, so stack exhaustion was an unfalsified alternative to `max_frames`.
+
+Same compile 2026-09-19 with `-Wl,-z,stack-size=65536`:
+
+- module still **22763 B**, inspector PASS, `env.write`+`env.exit`, memory 2/32
+- binaries differ: global 0 `i32.const` **8192** vs **65536** (`__stack_pointer`)
+- `VGATE_NO_BUILD=1 bash tools/gate/vgate.sh tests/js-wasm-measure/run-stack64k.spec`
+  **PASS 1/1** on VZ, asserting the same trap: `wasm: trap during exec` /
+  `tasks user-exec exited status=3`
+
+The 8 KiB C stack is **falsified** as the cause. Remaining inference is
+`max_frames = 32`. A 64 KiB stack would have been a free fix; it is not.
+
 ### What this does not change
 
 - The renderer is unchanged. No cascade. No renderer-side JS.
