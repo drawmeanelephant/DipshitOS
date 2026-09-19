@@ -133,6 +133,21 @@ echo "=== vgate $VGATE_NAME: $VGATE_DESC ==="
 echo "spec: $SPEC"
 echo "revision: $REVISION branch=$BRANCH dirty-files=$DIRTY"
 
+# --- guest ELF freshness (issue #1503) ---------------------------------------
+# Exists-only copy of .build/go/GOSH.ELF (and GOSSHD.ELF, PR #1508) boots
+# whatever this worktree last built by hand. Fail closed HERE -- before
+# zig build / VM boot -- so a foreign binary is a named ensure-guest-elf
+# error rather than a behavioral red or a false green. fleet.sh `ensure`s
+# once per invocation (hash-cached); this check is then a cache hit.
+while IFS= read -r _guest_elf_app; do
+    [ -n "$_guest_elf_app" ] || continue
+    if ! bash "$ROOT/tools/go/ensure-guest-elf.sh" check "$_guest_elf_app"; then
+        echo "vgate: refusing to boot a stale or missing ${_guest_elf_app}.ELF (issue #1503)" >&2
+        VGATE_COMPLETED=1
+        exit 1
+    fi
+done < <(bash "$ROOT/tools/go/ensure-guest-elf.sh" needed-by "$SPEC")
+
 # --- one shared build preamble (never per gate) ------------------------------
 if [ "${VGATE_NO_BUILD:-0}" = "1" ]; then
     echo "vgate: skipping build preamble (VGATE_NO_BUILD=1)"

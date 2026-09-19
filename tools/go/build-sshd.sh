@@ -68,3 +68,9 @@ if slack < need:
              % (mem, slack, need))
 print("build-sshd: argv+envp slack ok (memsz %#x, slack %#x bytes)" % (mem, slack))
 PY
+
+# Issue #1503: stamp source+elf hashes so class-B setup can refuse a
+# leftover GOSSHD.ELF by name (same exists-only staging as GOSH, PR #1508).
+case "$NAME" in
+    GOSH|GOSSHD) ENSURE_GUEST_ELF_ROOT="$REPO" bash "$REPO/tools/go/ensure-guest-elf.sh" stamp "$NAME" "$OUT" ;;
+esac
