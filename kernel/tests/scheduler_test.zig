@@ -42,11 +42,13 @@ const process = scheduler.process;
 const reap = scheduler.reap;
 const reap_one_zombie = scheduler.reap_one_zombie;
 const register_exec_user = scheduler.register_exec_user;
+const register_exec_user_pinned = scheduler.register_exec_user_pinned;
+const publish_task = scheduler.publish_task;
 const register_user = scheduler.register_user;
 const register_worker = scheduler.register_worker;
 const request_kill = scheduler.request_kill;
 const request_report = scheduler.request_report;
-const request_resched = scheduler.request_resched;
+const request_resched_on = scheduler.request_resched_on;
 // The pure half of the rotation's discharge. `tick` itself reads
 // ELR_EL1/SPSR_EL1 and cannot be called from a host test process.
 const discharge_resched = scheduler.discharge_resched;
@@ -297,6 +299,34 @@ test "scheduler: register_exec_user passes argc and argv VA through the x0/x1 fr
     const frame2: *exceptions.VectorFrame = @ptrFromInt(scheduler.tasks[id2].sp);
     try std.testing.expectEqual(@as(u64, 0), exceptions.frame_read(frame2, 0));
     try std.testing.expectEqual(@as(u64, 0), exceptions.frame_read(frame2, 1));
+}
+
+test "scheduler: exec registration is invisible to wake_expired until publish_task (M70b)" {
+    // The M70b review blocker: a fresh pool slot's `wakeup_tick` defaults
+    // to 0, and `wake_expired` reads any blocked non-waiter with
+    // `tick_count >= wakeup_tick` as an EXPIRED sleep. Exec builds across
+    // two sched_lock holds with a lock-free gap (regions/bind happen
+    // between them) and IRQ masking is per-core, so an AP exec's gap and
+    // core 0's tick interleave — pre-fix the tick published the half-built
+    // task (and the M70b SGI nudge handed it to a parked AP before the
+    // build completed). The registration sentinel-shields the task; only
+    // `publish_task` makes it visible to the clock.
+    _ = init();
+    start();
+    const kstack = &exec_kstack_pool[1];
+    const id = register_exec_user_pinned(userspace.text_va, 0x4000_0000, 100, 0x8000_0000, 8192, kstack, 0, 0, 0, null).?;
+    try std.testing.expect(is_blocked(id));
+    // A full on_tick beat runs the wake_expired scan — pre-fix it
+    // published the task right here.
+    on_tick();
+    try std.testing.expect(is_blocked(id));
+    check_ready_membership();
+    // Publish makes it visible: home ring (single online core → ring 0),
+    // ready state, and the clock sentinel cleared.
+    publish_task(id);
+    try std.testing.expect(!is_blocked(id));
+    try std.testing.expect(scheduler.ready_rings[0].contains(id));
+    check_ready_membership();
 }
 
 test "scheduler: round-robin alternates and round-trips saved context" {
@@ -1104,12 +1134,12 @@ test "scheduler: a wake through the ready-ring funnel raises a reschedule reques
     start();
     // Explicit reset: these are module globals and the host test binary runs
     // every scheduler test in one process.
-    scheduler.resched_requested = false;
+    for (&scheduler.resched_requested) |*r| r.* = false;
     scheduler.resched_requests = 0;
     scheduler.resched_coalesced = 0;
     scheduler.resched_discharged = 0;
 
-    try std.testing.expect(!scheduler.resched_requested);
+    try std.testing.expect(!scheduler.resched_requested[0]);
     try std.testing.expectEqual(@as(u64, 0), scheduler.resched_requests);
 
     try std.testing.expect(yield_current()); // shell -> worker
@@ -1121,7 +1151,7 @@ test "scheduler: a wake through the ready-ring funnel raises a reschedule reques
     // for input would report the comparator hot for the whole wait.
     try std.testing.expect(sleep_current(1));
     try std.testing.expect(is_blocked(2));
-    try std.testing.expect(!scheduler.resched_requested);
+    try std.testing.expect(!scheduler.resched_requested[0]);
     try std.testing.expectEqual(@as(u64, 0), scheduler.resched_requests);
     check_ready_membership();
 
@@ -1129,11 +1159,13 @@ test "scheduler: a wake through the ready-ring funnel raises a reschedule reques
     // this runs inside `tick`'s `on_tick`, so the rotation from the SAME beat
     // discharges the request and the tick-driven wake is served for free; here
     // `on_tick` is driven standalone, which is what leaves the request
-    // observable to the test.
+    // observable to the test. (With M70b wake targeting the wake still lands
+    // on ring 0 here: the host test boots with only core 0 online, so the
+    // targeting scan skips every offline core.)
     on_tick();
     try std.testing.expect(!is_blocked(2));
     try std.testing.expect(scheduler.ready_rings[0].contains(2));
-    try std.testing.expect(scheduler.resched_requested);
+    try std.testing.expect(scheduler.resched_requested[0]);
     try std.testing.expectEqual(@as(u64, 1), scheduler.resched_requests);
     check_ready_membership();
 
@@ -1141,22 +1173,23 @@ test "scheduler: a wake through the ready-ring funnel raises a reschedule reques
     // rather than counted again. Two more demands leave `requests` at 1 — this
     // is what would cap a wake burst at one extra preemption, and it is why a
     // burst cannot turn the comparator into a storm if the pull is ever added.
-    request_resched();
-    request_resched();
+    request_resched_on(0);
+    request_resched_on(0);
     try std.testing.expectEqual(@as(u64, 1), scheduler.resched_requests);
     try std.testing.expectEqual(@as(u64, 2), scheduler.resched_coalesced);
 
-    // A SECONDARY core's rotation must not swallow core 0's outstanding
-    // request — only core 0 ever raises one, so only core 0 may clear it.
+    // A core only ever clears ITS OWN outstanding request (M70b: the request
+    // is per-core — the pre-M70b core-0-only gate is subsumed by this, since
+    // a core can only raise requests on cores whose ring took a wake).
     discharge_resched(1);
-    try std.testing.expect(scheduler.resched_requested);
+    try std.testing.expect(scheduler.resched_requested[0]);
     try std.testing.expectEqual(@as(u64, 0), scheduler.resched_discharged);
 
     // The core-0 rotation does discharge it. (This is the pure half of `tick`;
     // that `tick` calls it at its tail, on the path that actually rotated, is
     // asserted at the source level below.)
     discharge_resched(0);
-    try std.testing.expect(!scheduler.resched_requested);
+    try std.testing.expect(!scheduler.resched_requested[0]);
     try std.testing.expectEqual(@as(u64, 1), scheduler.resched_discharged);
 
     // Discharge must leave the mechanism ARMED, not latched off: the next wake
@@ -1167,10 +1200,128 @@ test "scheduler: a wake through the ready-ring funnel raises a reschedule reques
     try std.testing.expect(yield_current()); // worker -> user
     try std.testing.expectEqual(@as(usize, 2), scheduler.current[0]);
     try std.testing.expect(sleep_current(1));
-    try std.testing.expect(!scheduler.resched_requested);
+    try std.testing.expect(!scheduler.resched_requested[0]);
     on_tick();
     try std.testing.expectEqual(@as(u64, 2), scheduler.resched_requests);
     check_ready_membership();
+}
+
+// ---------------------------------------------------------------------------
+// M70b (#1454): wake targeting + the per-core resched request + the
+// RESCHEDULE SGI nudge. Host tests boot with only core 0 online
+// (`smp.core_online[1..3] == false`), which is exactly the offline-gating
+// property the live 1/2-core boots rely on: the tests that need the
+// multi-core shape bring the other cores online explicitly and restore
+// them afterwards.
+// ---------------------------------------------------------------------------
+
+test "scheduler: wake targeting — least-loaded online core, caller wins ties (M70b)" {
+    _ = init();
+    // Bring every core online (deferred restore: the rest of the suite
+    // relies on the single-core boot shape — and `init` resets only
+    // current[0], so the fake per-core currents must be restored too).
+    scheduler.smp.core_online[1] = true;
+    scheduler.smp.core_online[2] = true;
+    scheduler.smp.core_online[3] = true;
+    defer scheduler.smp.core_online[1] = false;
+    defer scheduler.smp.core_online[2] = false;
+    defer scheduler.smp.core_online[3] = false;
+    defer scheduler.current[1] = idle_id;
+    defer scheduler.current[2] = idle_id;
+    defer scheduler.current[3] = idle_id;
+
+    // Core 0 executes the shell (current[0] = 0 -> load 1); the rest are
+    // parked with EMPTY rings — a parked core is load 0, the most attractive
+    // target, which is exactly the point of the heuristic: wake onto an idle
+    // core. The first minimal load cyclically after the caller is core 1.
+    try std.testing.expectEqual(@as(usize, 1), scheduler.wake_target_core());
+
+    // A running task on core 1: loads c0=1, c1=1, c2=0, c3=0 → the first
+    // minimal after the caller is still core 2.
+    scheduler.current[1] = 4;
+    try std.testing.expectEqual(@as(usize, 2), scheduler.wake_target_core());
+
+    // A ring member on core 3 too: c2 stays the unique minimum.
+    scheduler.ready_rings[3].push(6);
+    try std.testing.expectEqual(@as(usize, 2), scheduler.wake_target_core());
+
+    // Load core 2 to parity: c0=1, c1=1, c2=1, c3=1 → caller wins the tie.
+    scheduler.current[2] = 4;
+    try std.testing.expectEqual(@as(usize, 0), scheduler.wake_target_core());
+
+    // OFFLINE gating: with core 0 loaded to 2 (extra ring member), core 1
+    // is at the strict minimum; take core 1 offline and the scan must skip
+    // it — the next minimum is the c2/c3 tie (load 1 each), won by the
+    // lower index, never an offline core.
+    scheduler.ready_rings[0].push(7);
+    try std.testing.expectEqual(@as(usize, 1), scheduler.wake_target_core());
+    scheduler.smp.core_online[1] = false;
+    try std.testing.expectEqual(@as(usize, 2), scheduler.wake_target_core());
+}
+
+test "scheduler: the wake funnel places unpinned wakes on the target ring, nudges a parked target, and raises a PER-CORE request (M70b)" {
+    _ = init();
+    // `init` resets only current[0]; normalize the secondaries explicitly
+    // so this test pins its own precondition.
+    scheduler.current[1] = idle_id;
+    scheduler.current[2] = idle_id;
+    scheduler.current[3] = idle_id;
+    const worker = register_worker(0x1111).?; // slot 1; spawn lands on ring 0 (cores 1-3 offline)
+    start();
+    for (&scheduler.resched_requested) |*r| r.* = false;
+    scheduler.resched_requests = 0;
+    scheduler.resched_coalesced = 0;
+    scheduler.resched_discharged = 0;
+    // The wake counters accumulate across the whole test binary — snapshot
+    // baselines instead of assuming zeros.
+    const wake_remote0 = scheduler.wake_remote;
+    const wake_local0 = scheduler.wake_local;
+    const wake_nudges0 = scheduler.wake_nudges;
+    scheduler.smp.core_online[1] = true;
+    scheduler.smp.core_online[2] = true;
+    scheduler.smp.core_online[3] = true;
+    defer scheduler.smp.core_online[1] = false;
+    defer scheduler.smp.core_online[2] = false;
+    defer scheduler.smp.core_online[3] = false;
+
+    // Loads with the worker off its ring: c0=1 (shell), c1=c2=c3=0 → the
+    // first minimal after the caller (0) is core 1.
+    try std.testing.expect(scheduler.ready_rings[0].remove(worker));
+    scheduler.push_home_locked(worker);
+    try std.testing.expect(scheduler.ready_rings[1].contains(worker));
+    try std.testing.expect(!scheduler.ready_rings[0].contains(worker));
+    // Remote wake to a PARKED target: nudged (send_ipi is a no-op on the
+    // host) and a request raised ON THE TARGET, not on core 0.
+    try std.testing.expectEqual(wake_remote0 + 1, scheduler.wake_remote);
+    try std.testing.expectEqual(wake_local0, scheduler.wake_local);
+    try std.testing.expectEqual(wake_nudges0 + 1, scheduler.wake_nudges);
+    try std.testing.expect(scheduler.resched_requested[1]);
+    try std.testing.expect(!scheduler.resched_requested[0]);
+
+    // The target's rotation discharges its own request; core 0's discharge
+    // cannot clear it.
+    discharge_resched(0);
+    try std.testing.expect(scheduler.resched_requested[1]);
+    try std.testing.expectEqual(@as(u64, 0), scheduler.resched_discharged);
+    discharge_resched(1);
+    try std.testing.expect(!scheduler.resched_requested[1]);
+    try std.testing.expectEqual(@as(u64, 1), scheduler.resched_discharged);
+    check_ready_membership();
+
+    // Every core busy (running-load 1 everywhere) → the caller's own core
+    // wins the tie: a LOCAL wake, no nudge.
+    scheduler.current[1] = 4;
+    scheduler.current[2] = 4;
+    scheduler.current[3] = 4;
+    defer scheduler.current[1] = idle_id;
+    defer scheduler.current[2] = idle_id;
+    defer scheduler.current[3] = idle_id;
+    try std.testing.expect(scheduler.ready_rings[1].remove(worker));
+    scheduler.push_home_locked(worker);
+    try std.testing.expect(scheduler.ready_rings[0].contains(worker));
+    try std.testing.expectEqual(wake_local0 + 1, scheduler.wake_local);
+    try std.testing.expectEqual(wake_nudges0 + 1, scheduler.wake_nudges); // unchanged
+    try std.testing.expect(scheduler.resched_requested[0]);
 }
 
 test "scheduler: a wake before preemption is armed requests nothing" {
@@ -1181,19 +1332,19 @@ test "scheduler: a wake before preemption is armed requests nothing" {
     _ = init();
     _ = register_worker(0x2000).?;
     _ = register_user(0x3000, 0).?;
-    scheduler.resched_requested = false;
+    for (&scheduler.resched_requested) |*r| r.* = false;
     scheduler.resched_requests = 0;
     try std.testing.expect(!enabled());
 
-    request_resched();
-    try std.testing.expect(!scheduler.resched_requested);
+    request_resched_on(0);
+    try std.testing.expect(!scheduler.resched_requested[0]);
     try std.testing.expectEqual(@as(u64, 0), scheduler.resched_requests);
 
     // ...and the identical call IS live once preemption is armed, so the guard
     // is a gate and not a permanently dead path.
     start();
-    request_resched();
-    try std.testing.expect(scheduler.resched_requested);
+    request_resched_on(0);
+    try std.testing.expect(scheduler.resched_requested[0]);
     try std.testing.expectEqual(@as(u64, 1), scheduler.resched_requests);
     discharge_resched(0);
 }

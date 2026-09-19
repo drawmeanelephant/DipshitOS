@@ -13,7 +13,18 @@ exec -c1 SMPFILE.BIN
 exec -c2 SMPNET.BIN
 exec -c3 SMPWIN.BIN
 exec -c0 SMPEV.BIN
+smp
 echo rx-smpst-ok
+EOF
+
+# M70b (#1454) measurement points. `smp` appears three times in a run:
+# the boot report (pre-load), the script-queue's trailing `smp` — it runs
+# as soon as the four exec CALLS return, i.e. the hammers are loaded and
+# only starting, so its counters are early-window — and script2's `smp`,
+# fired after the first `smpnet` heartbeat with all four hammers
+# mid-load. The contention reading quotes the script2 report.
+vgate_file script2.txt <<'EOF'
+smp
 EOF
 
 # The FILE hammer's fixture (the READ side of its round trips): legacy
@@ -26,7 +37,7 @@ with open(os.path.join(share, "STRESS.TXT"), "wb") as f:
     f.write(b"smpst stress fixture 0123456789abcdefghi")
 PYEOF
 
-vgate_run 01 -- --cpus 4 --screen '$RUN_DIR/screen' --net '$RUN_DIR/cap.bin' --script '$RUN_DIR/script.txt' --script-after "tasks user-el0 exited status=7" --timeout 60
+vgate_run 01 -- --cpus 4 --screen '$RUN_DIR/screen' --net '$RUN_DIR/cap.bin' --script '$RUN_DIR/script.txt' --script-after "tasks user-el0 exited status=7" --script2 '$RUN_DIR/script2.txt' --script2-after "smpnet: hb=" --timeout 60
 
 vgate_assert 01 serial-contains 'VirelaiOS kernel has seized control.'
 vgate_assert 01 serial-contains 'smp: cores=4 online=4'
@@ -49,5 +60,9 @@ vgate_assert 01 serial-contains 'smp: secondary runs='
 vgate_assert 01 serial-contains 'task=SMPFILE.BIN'
 vgate_assert 01 serial-contains 'task=SMPNET.BIN'
 vgate_assert 01 serial-contains 'task=SMPWIN.BIN'
+# M70b (#1454): the trailing `smp` runs after all four hammers exited, so
+# the sched-lock contention line reflects the whole 4-core stress window.
+# The line's PRESENCE is the invariant; its values are observed data.
+vgate_assert 01 serial-contains 'smp: sched-lock acquires='
 vgate_assert 01 serial-contains 'rx-smpst-ok'
 vgate_assert 01 serial-absent '[EXC] parking:'

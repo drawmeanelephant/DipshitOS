@@ -63,6 +63,11 @@ vgate_assert 01 serial-contains 'go-goroutines procs=2'
 vgate_assert 01 serial-contains 'go-goroutines done n=8 counter=8'
 vgate_assert 01 serial-contains 'task=GOROUT.ELF'
 vgate_assert 01 serial-contains 'smp: secondary runs='
+# M70b (#1454): the held-window `smp` runs after the whole goroutine run,
+# so its sched-lock line covers the futex/spawn wake storm — the heavier
+# sched_lock probe alongside live-smp-stress. Presence is the invariant;
+# the values are observed data.
+vgate_assert 01 serial-contains 'smp: sched-lock acquires='
 vgate_assert 01 serial-absent '[EXC] parking:'
 vgate_assert 01 serial-absent 'exited status=139'
 

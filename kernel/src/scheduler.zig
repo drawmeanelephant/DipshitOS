@@ -93,7 +93,7 @@ const tombstone = @import("tombstone.zig");
 const symbol = @import("symbol.zig");
 const serial_ring = @import("serial_ring.zig"); // Arc5 #243: serial snapshot for tombstones
 const virtio_file = @import("virtio_file.zig"); // Arc5 #243: tombstone write through the host file channel (HF6: the DATA partition is gone)
-const smp = @import("smp.zig");
+pub const smp = @import("smp.zig");
 const spinlock = @import("spinlock.zig");
 const forensics = @import("forensics.zig"); // #1278: last-words recorder (inert unless `forensics on`)
 
@@ -479,9 +479,61 @@ pub const ReadyRing = struct {
 pub var ready_rings: [smp.max_cores]ReadyRing = [_]ReadyRing{.{}} ** smp.max_cores;
 
 /// The ring a task's `ready` membership lives on: its pin core when
-/// pinned, else ring 0 (the any-core default home).
+/// pinned, ring 0 for every core-0-only task (`secondary_ok` off — the
+/// kernel tasks and the `exec -c0` / WM-registration pin semantics), else
+/// the wake target (M70b #1454: the least-loaded online core — was: always
+/// ring 0, the any-core default home).
 fn home_ring_of(id: usize) usize {
-    return if (tasks[id].pin_core != 0) tasks[id].pin_core else 0;
+    if (tasks[id].pin_core != 0) return tasks[id].pin_core;
+    if (!tasks[id].secondary_ok) return 0;
+    return wake_target_core();
+}
+
+/// Ring members that are REAL work: the core-0 ring permanently hosts the
+/// idle fallback (slot max_tasks-1, the always-ready reaper), and counting
+/// it would bias every wake away from core 0 by one phantom task. The
+/// members array is slot-sorted and idle is the largest slot, so it can
+/// only ever be the last member of ring 0.
+fn ring_work_count(c: usize) usize {
+    const ring = &ready_rings[c];
+    // Snapshot once: this runs unlocked on every unpinned wake, and a
+    // concurrent claim between loads could otherwise drop `count` to 0
+    // and underflow the `members[n - 1]` index (M70b review).
+    const n = ring.count;
+    if (c == 0 and n > 0 and ring.members[n - 1] == idle_id) return n - 1;
+    return n;
+}
+
+/// M70b #1454 deliverable 2 — wake targeting. The least-loaded ONLINE
+/// core, scanned cyclically from the CALLER (ties keep the earlier scan
+/// index, so an equal-load wake stays on the caller: no cross-core
+/// traffic without a load reason). Load = the target ring's real-work
+/// member count (`ring_work_count` — the core-0 idle fallback does not
+/// count) plus one for the task the core is currently executing; a parked
+/// core with an empty ring is load 0 — the most attractive target, which
+/// is the point. The reads are racy BY DESIGN (plain aligned loads, no
+/// locks): this is a placement heuristic, not an invariant — a stale
+/// count mis-places one wake, it never loses one (the push itself takes
+/// the target ring's lock, and the dequeue side still claims over the
+/// merged view). Offline cores are skipped, so on a 1- or 2-VCPU boot —
+/// and in every host test, where only core 0 is online — every unpinned
+/// wake lands on ring 0 exactly as before this card.
+pub fn wake_target_core() usize {
+    const from: usize = smp.core_id();
+    var best: usize = from;
+    var best_load: usize = std.math.maxInt(usize);
+    var i: usize = 0;
+    while (i < smp.max_cores) : (i += 1) {
+        const c = (from + i) % smp.max_cores;
+        if (!smp.core_online[c]) continue;
+        const load = ring_work_count(c) + @intFromBool(current[c] != idle_id);
+        if (load < best_load) {
+            best_load = load;
+            best = c;
+        }
+    }
+    // Core 0 is online from `init` on, so the scan always finds a core.
+    return best;
 }
 
 /// Drop `id` from whichever ring holds it (cross-ring remove — the
@@ -547,11 +599,31 @@ pub fn rotation_unlock(lk: RingLockPair) void {
 
 /// Push `id` onto its home ring under that ring's lock (the wake/scan
 /// paths — callers hold sched_lock; ring locks are the innermost).
-fn push_home_locked(id: usize) void {
+/// Pub for the host tests; production callers are the wake/scan paths.
+pub fn push_home_locked(id: usize) void {
+    const caller = smp.core_id();
     const home = home_ring_of(id);
     const daif = ring_locks[home].lock();
     ready_rings[home].push(id);
     ring_locks[home].unlock(daif);
+    // M70b #1454: the wake lands on the least-loaded online core. A
+    // remote PARKED target is nudged with the RESCHEDULE SGI — its
+    // handler runs the same seam as tick's parked branch (capture the
+    // WFE frame, claim, apply), so the woken task starts immediately
+    // instead of waiting up to the 1 Hz PPI. A busy target needs no
+    // nudge: its own next rotation picks the task up in slot order,
+    // exactly the pre-targeting cadence. send_ipi is a no-op on the
+    // host and pre-SMP boots; the counters feed the `smp:` report as
+    // observed data.
+    if (home != caller) {
+        wake_remote +%= 1;
+        if (home != 0 and smp.core_online[home] and current[home] == idle_id) {
+            wake_nudges +%= 1;
+            smp.send_ipi(@intCast(home), smp.SGI_IPI_RESCHEDULE);
+        }
+    } else {
+        wake_local +%= 1;
+    }
     // This is the single blocked->ready funnel, so it is also the single place a
     // rotation can become owed. Placed AFTER the ring unlock so nothing can
     // observe a half-pushed ring; the task is already runnable and visible to
@@ -561,7 +633,7 @@ fn push_home_locked(id: usize) void {
     // the preempted task back with a direct `ready_rings[c].push`. Routing it
     // through here would make every rotation request the next one, which is
     // exactly the unbounded feedback the nudge was parked for.
-    request_resched();
+    request_resched_on(home);
     // #1278: this is the wake funnel, so it is where a dying boot's trace shows
     // whether the task that matters ever became runnable. `note` is a per-core
     // counter and one BSS slot when recording is off it returns on its first
@@ -667,8 +739,28 @@ pub var sched_lock = spinlock.Spinlock.init();
 /// wakes waiters by mutating the same ring.
 var sched_lock_holder: usize = smp.max_cores;
 
+/// M70b (#1454) measurement, landed BEFORE any placement change: how hot
+/// the wake/TCB `sched_lock` actually runs on real cores. `acquires`
+/// sizes the traffic (every spawn/wake/exit holds it), `contended` how
+/// often the first cmpxchg found it held, `spins` the wasted attempts.
+/// Plain BSS counters (`+%=`): two cores racing lose an increment now
+/// and then — the signal this card needs is orders of magnitude above
+/// that noise. Printed by the monitor `smp` command as observed data;
+/// never a pass/fail threshold.
+pub var sched_lock_acquires: u64 = 0;
+pub var sched_lock_contended: u64 = 0;
+pub var sched_lock_spins: u64 = 0;
+
 fn sched_lock_acquire() void {
-    sched_lock.lock();
+    if (!sched_lock.try_lock()) {
+        sched_lock_contended +%= 1;
+        while (true) {
+            if (sched_lock.try_lock()) break;
+            sched_lock_spins +%= 1;
+            if (comptime builtin.cpu.arch == .aarch64) asm volatile ("yield");
+        }
+    }
+    sched_lock_acquires +%= 1;
     sched_lock_holder = smp.core_id();
 }
 
@@ -819,12 +911,26 @@ pub var user_timer_preemptions: u64 align(8) linksection(user_stack_section) = 0
 // demand now means that when that defect is fixed, the win can be attributed to
 // a measured number of owed rotations rather than asserted.
 
-/// A task became runnable while another is executing, so a rotation is OWED.
+/// M70b #1454 wake-placement evidence (lossy BSS counters, drained by the
+/// monitor `smp` command as observed data): `wake_local` — the target was
+/// the calling core; `wake_remote` — a remote ring took the task; of
+/// those, `wake_nudges` went to a parked (WFE) target that got the
+/// RESCHEDULE SGI.
+pub var wake_local: u64 = 0;
+pub var wake_remote: u64 = 0;
+pub var wake_nudges: u64 = 0;
+
+/// A task became runnable while another is executing, so a rotation is OWED
+/// on the core whose ring took it.
 ///
-/// The flag is the coalescing rule: at most one request is outstanding between
-/// rotations, so a burst of wakes costs one extra preemption rather than one per
-/// wake. Cleared by every rotation on core 0 (the tail of `tick`).
-pub var resched_requested: bool = false;
+/// The flag is the coalescing rule: at most one request is outstanding per
+/// core between rotations, so a burst of wakes costs one extra preemption
+/// rather than one per wake. Cleared by every rotation on the core that owns
+/// it (the tail of `tick`). M70b #1454 made this PER-CORE — before it, a wake
+/// anywhere raised a core-0-only request, because every wake landed on ring 0;
+/// with wake targeting the request belongs to the core whose ring received
+/// the task.
+pub var resched_requested: [smp.max_cores]bool = [_]bool{false} ** smp.max_cores;
 /// Requests that owed a rotation (one per wake that found none already owed).
 pub var resched_requests: u64 = 0;
 /// Requests that arrived while one was already owed — the coalesced surplus.
@@ -834,29 +940,25 @@ pub var resched_coalesced: u64 = 0;
 /// Rotations that discharged a request.
 pub var resched_discharged: u64 = 0;
 
-/// A task just became runnable while another is executing: record that a
-/// rotation is owed. Called from the wake funnel (`push_home_locked`), so it
-/// covers every blocked->ready transition — event pushes (`sys_wait_event`),
-/// process-exit waiters, futex wakes, spawn, and the app-timer/WM-pacing fires
-/// inside `on_tick`.
+/// A task just became runnable onto core `core`'s ring: record that a
+/// rotation is owed there. Called from the wake funnel (`push_home_locked`),
+/// so it covers every blocked->ready transition — event pushes
+/// (`sys_wait_event`), process-exit waiters, futex wakes, spawn, and the
+/// app-timer/WM-pacing fires inside `on_tick`.
 ///
 /// Pure BSS writes: safe in the SVC, IRQ and lock-held contexts those paths run
 /// in. No console, no allocation, no lock — and, load-bearing for this split, no
 /// comparator write, so it cannot interrupt anything.
 ///
-/// Deliberately narrow:
-///   * a no-op until preemption is armed (`start`), so boot-time wakes do not
-///     count against a shell loop that is not running yet;
-///   * core 0 only — that is the core whose PPI carries the shell/desktop
-///     rotation, so it is the only core whose rotations can discharge one.
-pub fn request_resched() void {
+/// Deliberately narrow: a no-op until preemption is armed (`start`), so
+/// boot-time wakes do not count against a shell loop that is not running yet.
+pub fn request_resched_on(core: usize) void {
     if (!enabled_flag) return;
-    if (smp.core_id() != 0) return;
-    if (resched_requested) {
+    if (resched_requested[core]) {
         resched_coalesced +%= 1;
         return;
     }
-    resched_requested = true;
+    resched_requested[core] = true;
     resched_requests +%= 1;
 }
 
@@ -867,13 +969,47 @@ pub fn request_resched() void {
 /// test cannot call it, while the coalescing rule is precisely what a host test
 /// must be able to pin.
 ///
-/// Core-gated: only core 0 ever raises a request, so a secondary core's rotation
-/// must not swallow core 0's pending one.
+/// Per-core (M70b #1454): a core only ever clears its own outstanding request —
+/// a secondary's rotation cannot swallow core 0's, and core 0 cannot swallow a
+/// secondary's.
 pub fn discharge_resched(c: usize) void {
-    if (c == 0 and resched_requested) {
-        resched_requested = false;
+    if (resched_requested[c]) {
+        resched_requested[c] = false;
         resched_discharged +%= 1;
     }
+}
+
+/// M70b #1454 — the scheduler half of the RESCHEDULE SGI (the wake-target
+/// nudge). Called from main.zig's irq_dispatch right after `smp.handle_sgi`,
+/// so smp.zig keeps no scheduler dependency. A PARKED secondary (current ==
+/// idle, interrupted out of its WFE loop) runs exactly the seam tick's parked
+/// branch runs: capture the WFE frame, claim a successor over the rings, and
+/// apply it — the vector stub then erets straight into the woken task, which
+/// is the whole point of the nudge (sub-tick wake latency instead of up to
+/// the 1 Hz PPI). A core already running a task — and core 0, which parks in
+/// its bounded-spin idle loop, never WFE — only records the request; its own
+/// next rotation picks the new work up in slot order as before. No console,
+/// no allocation, no unbounded spinning.
+pub fn ipi_reschedule() void {
+    if (comptime builtin.cpu.arch != .aarch64) return;
+    if (!scheduling_active()) return;
+    const c = smp.core_id();
+    if (c == 0 or current[c] != idle_id) {
+        request_resched_on(c);
+        return;
+    }
+    var elr: u64 = 0;
+    var spsr: u64 = 0;
+    asm volatile ("mrs %[v], elr_el1"
+        : [v] "=r" (elr),
+    );
+    asm volatile ("mrs %[v], spsr_el1"
+        : [v] "=r" (spsr),
+    );
+    park_sp[c] = exceptions.resume_frame[c];
+    park_elr[c] = elr;
+    park_spsr[c] = spsr;
+    if (claim_and_stage(c, idle_id)) apply_pending();
 }
 /// The idle task's static stack (BSS, like every other kernel global).
 var idle_stack: [task_stack_size]u8 align(16) = undefined;
@@ -897,6 +1033,19 @@ pub fn init() usize {
     cooperative_yields = 0;
     exits = 0;
     enabled_flag = false;
+    // M70b (#1454): the counters are BSS-zero (monotonic) on a live boot,
+    // but the host test binary runs every test in one process — reset with
+    // the rest so no test inherits another's wake/contention history.
+    sched_lock_acquires = 0;
+    sched_lock_contended = 0;
+    sched_lock_spins = 0;
+    wake_local = 0;
+    wake_remote = 0;
+    wake_nudges = 0;
+    resched_requests = 0;
+    resched_coalesced = 0;
+    resched_discharged = 0;
+    for (&resched_requested) |*r| r.* = false;
     @memset(&report_pending, false);
     exit_report_head = 0;
     exit_report_count = 0;
@@ -1036,7 +1185,9 @@ pub fn register_exec_user(
     argc: u64,
     argv_va: u64,
 ) ?usize {
-    return register_exec_user_auxv(entry_va, root_phys, text_len, stack_va, stack_len, kstack, argc, argv_va, 0);
+    const id = register_exec_user_pinned(entry_va, root_phys, text_len, stack_va, stack_len, kstack, argc, argv_va, 0, null) orelse return null;
+    publish_task(id);
+    return id;
 }
 
 pub fn register_exec_user_auxv(
@@ -1050,13 +1201,65 @@ pub fn register_exec_user_auxv(
     argv_va: u64,
     auxv_va: u64,
 ) ?usize {
+    const id = register_exec_user_pinned(entry_va, root_phys, text_len, stack_va, stack_len, kstack, argc, argv_va, auxv_va, null) orelse return null;
+    publish_task(id);
+    return id;
+}
+
+/// The exec registration, pin-aware and publish-safe (M70b #1454). The
+/// whole TCB build happens with the task `.blocked` OFF the rings, and
+/// every field that affects placement (pin_core / secondary_ok) is FINAL
+/// before the caller publishes it with `publish_task`. With wake targeting
+/// a parked remote core can claim the task the moment it lands on a ring
+/// (the SGI nudge makes that immediate), so a pin applied after publish
+/// loses the race — observed live as `exec -c0 SMPEV.BIN` being claimed by
+/// a parked secondary mid-exec and then stuck on that core (its own
+/// preemption returns it to that core's ring, and pinned tasks are never
+/// stolen). The spawn_thread path (ADR 0027) already builds under one
+/// sched_lock hold for exactly this reason; this is the same discipline
+/// for the exec seam.
+///
+/// Pin semantics = `pin_task`'s: `null`/any-core — `secondary_ok` on;
+/// `p > 0` — pinned to that secondary (`secondary_ok` on); `p == 0` —
+/// pinned to CORE 0 only (`secondary_ok` off; the claim-907 console rule).
+/// The task stays `.blocked` and must be published by the CALLER (after
+/// the process bind), or torn down on failure.
+pub fn register_exec_user_pinned(
+    entry_va: u64,
+    root_phys: u64,
+    text_len: u64,
+    stack_va: u64,
+    stack_len: u64,
+    kstack: []u8,
+    argc: u64,
+    argv_va: u64,
+    auxv_va: u64,
+    pin: ?usize,
+) ?usize {
     const sp_el0 = stack_va + stack_len;
-    const id = spawn("user-exec", entry_va, spsr_el0t_irqs, kstack, root_phys, sp_el0) orelse return null;
-    // Claim 9498: unpinned user tasks may run on ANY core (the console TX
-    // is locked — claim 2369 — and the userspace-service gate serializes
-    // their syscalls). `exec -c<core>` / the WM registration pin after
-    // this via `pin_task`.
-    tasks[id].secondary_ok = true;
+    sched_lock_acquire();
+    defer sched_lock_release();
+    const id = alloc_task_locked("user-exec", entry_va, spsr_el0t_irqs, kstack, root_phys, sp_el0) orelse return null;
+    // M70b review blocker: a fresh slot's `wakeup_tick` defaults to 0, and
+    // `wake_expired` reads any blocked non-waiter with `tick_count >=
+    // wakeup_tick` as an expired sleep — exec builds across TWO sched_lock
+    // holds with a lock-free gap (regions/bind happen between them), and
+    // IRQ masking is per-core, so on an AP exec core 0's tick could fire in
+    // that gap and publish the half-built task (post-M70b the SGI nudge
+    // hands it to a parked AP before the build completes). Sentinel it
+    // "wait forever" until `publish_task` makes the task visible; the
+    // single-hold builders (spawn, spawn_thread) never expose a gap.
+    tasks[id].wakeup_tick = std.math.maxInt(u64);
+    if (pin) |p| {
+        tasks[id].pin_core = p;
+        tasks[id].secondary_ok = (p != 0);
+    } else {
+        // Claim 9498: unpinned user tasks may run on ANY core (the console TX
+        // is locked — claim 2369 — and the userspace-service gate serializes
+        // their syscalls). `exec -c<core>` / the WM registration pin via the
+        // `pin` argument instead of a post-publish `pin_task`.
+        tasks[id].secondary_ok = true;
+    }
     tasks[id].regions = .{
         .text = .{ .base = userspace.text_va, .len = text_len },
         .stack = .{ .base = stack_va, .len = stack_len },
@@ -1069,6 +1272,24 @@ pub fn register_exec_user_auxv(
     _ = exceptions.frame_write(frame, 1, argv_va);
     _ = exceptions.frame_write(frame, 2, auxv_va);
     return id;
+}
+
+/// Publish a task registered `.blocked` (register_exec_user_pinned, or any
+/// alloc_task_locked build): flip to ready and push to its home ring. The
+/// placement fields must already be final — this is the point of no
+/// return (a remote parked core can claim the task the instant it lands).
+/// The wake-funnel side effects (per-core resched request + parked-target
+/// SGI nudge) fire from push_home_locked exactly as for spawn. The
+/// registration's "wait forever" `wakeup_tick` sentinel is cleared here:
+/// from this point the task is the wake_expired clock's to manage (a
+/// later `sys_sleep`/futex deadline overwrites it).
+pub fn publish_task(id: usize) void {
+    sched_lock_acquire();
+    defer sched_lock_release();
+    if (id >= max_tasks or tasks[id].state != .blocked) return;
+    tasks[id].wakeup_tick = 0;
+    tasks[id].state = .ready;
+    push_home_locked(id);
 }
 
 /// Restrict task `id` to a single core (claim 9498: a RESTRICTION over
@@ -2483,10 +2704,18 @@ pub fn tick() void {
     // here — skipped => one 1 s cadence loss (the pre-existing skip
     // semantic; claim 9498). Claim 881 slice 3: sched_lock no longer
     // spans the rotation below — only this timekeeping beat.
-    if (c == 0 and evk_taken != null and sched_lock.try_lock()) {
-        sched_lock_holder = smp.core_id();
-        on_tick();
-        sched_lock_release();
+    if (c == 0 and evk_taken != null) {
+        if (sched_lock.try_lock()) {
+            sched_lock_holder = smp.core_id();
+            sched_lock_acquires +%= 1; // M70b: the tick's try-acquire is traffic too
+            on_tick();
+            sched_lock_release();
+        } else {
+            // M70b review: a failed try IS a contention observation —
+            // without this, `contended=0` could hide exactly the cadence
+            // losses the skip semantic exists for.
+            sched_lock_contended +%= 1;
+        }
     }
     var elr: u64 = 0;
     var spsr: u64 = 0;

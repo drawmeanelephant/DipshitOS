@@ -66,13 +66,16 @@ gate-list:
 # Provision the GOOS=virelai Go toolchain + gate fixtures (issue #1163;
 # idempotent — apply.sh and the host make.bash pass run only when
 # missing). HOST PREREQUISITE for the go-hello / go-args / go-goroutines /
-# go-stress / go-panic / go-win class-B gates: `just verify-vz` includes them, and they refuse
+# go-stress / go-panic / go-win / go-net (govinet/govidns) /
+# live-smp-scale class-B gates:
+# `just verify-vz` includes them, and they refuse
 # to run (honestly) until this has produced .build/go/{GOHELLO,GOARGS,
-# GOROUT,GOSTRESS,GOPANIC,GOWIN}.ELF on this machine. First run takes several minutes
+# GOROUT,GOSTRESS,GOPANIC,GOWIN,GOVINET,GOVIDNS,GOSCALE}.ELF on this
+# machine. First run takes several minutes
 # (one Go make.bash pass; the second cross-std pass is phase-2 opt-in via
 # GOVIRELAI_STD=1).
 go-toolchain:
-    bash tools/go/build-go.sh tools/go/hello.go tools/go/goargs.go tools/go/goroutines.go tools/go/gostress.go tools/go/gopanic.go tools/go/gowin.go tools/go/gonet.go tools/go/govinet.go tools/go/govidns.go
+    bash tools/go/build-go.sh tools/go/hello.go tools/go/goargs.go tools/go/goroutines.go tools/go/gostress.go tools/go/gopanic.go tools/go/gowin.go tools/go/gonet.go tools/go/govinet.go tools/go/govidns.go tools/go/smpscale.go
 
 # Build the phase-2 netpoll + os.File/net.Conn fixture (issue #1163):
 # .build/go/GONET.ELF. HOST PREREQUISITE for the go-net class-B gate.

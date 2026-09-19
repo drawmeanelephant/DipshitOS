@@ -61,6 +61,7 @@ const mmu = @import("mmu.zig");
 // + `read_into` stream a dropped `.ELF` into `program`.
 const virtio_file = @import("virtio_file.zig");
 const scheduler = @import("scheduler.zig");
+const smp = @import("smp.zig");
 const userspace = @import("userspace.zig");
 // Milestone four (claim 2665): the seeded CSPRNG supplies the randomized
 // user stack VA (the seed's real ASLR consumer).
@@ -158,6 +159,11 @@ pub const ExecResult = enum {
     /// The process registry holds only live (created/running) processes —
     /// no free slot and no exited descriptor to recycle.
     process_full,
+    /// The `exec -c<core>` pin names a core that is not online (M70b
+    /// review): a task pinned to an offline core's ring is unreachable —
+    /// `steal_eligible` rejects it on every online core, and that core
+    /// never comes up to claim it. Honest refusal beats a stranded task.
+    bad_core,
     // M22 D1 (issue #324): honest ELF refusals, one per failure class.
     /// Structurally invalid ELF (bad header, truncated table, entry outside
     /// the initialized text).
@@ -340,6 +346,13 @@ pub fn exec_file_pinned_as(name: []const u8, args: []const []const u8, pin: usiz
 fn exec_file_impl(name: []const u8, args: []const []const u8, pin: ?usize, principal: process.Principal) ExecResult {
     defer clear_envp();
     if (args.len > max_exec_args) return .too_many_args;
+    // M70b review: an offline pin would strand the task forever — pinned
+    // tasks bypass every offline gate on the dequeue side (steal_eligible
+    // rejects them on every other core). The choke point covers every
+    // caller, not just the monitor's own -c parse.
+    if (pin) |p| {
+        if (p >= smp.max_cores or !smp.core_online[p]) return .bad_core;
+    }
     if (name.len == 0) return .not_found;
 
     // M34 HF6 (issue #740): the host share is the ONLY app source — the
@@ -623,7 +636,7 @@ fn exec_file_impl(name: []const u8, args: []const []const u8, pin: ?usize, princ
     events.reset(proc_id);
     file_table.reset_process(proc_id);
     app_timers.reset(proc_id); // claim 7323: a recycled pid inherits no stale app timer
-    if (scheduler.register_exec_user(entry_va, rebuild.root_phys, @intCast(text_len), rebuild.stack_va, scheduler.task_stack_size, kstack, @intCast(argc), argv_va)) |task_id| {
+    if (scheduler.register_exec_user_pinned(entry_va, rebuild.root_phys, @intCast(text_len), rebuild.stack_va, scheduler.task_stack_size, kstack, @intCast(argc), argv_va, 0, pin)) |task_id| {
         // M32 WMS5 Gate 2 (claim 4278): a segmented (DSK3) image's writable
         // data+bss segment must be in the task's per-process uaccess
         // regions, like the dynamic-ELF path does below (the module-global
@@ -638,10 +651,13 @@ fn exec_file_impl(name: []const u8, args: []const []const u8, pin: ?usize, princ
             if (!scheduler.add_task_write_region(task_id, .{ .base = data_va, .len = data_mem_size })) return .pool_full;
         }
         _ = process.bind(proc_id, task_id);
-        // SMP: `exec -c<core>` — an explicit pin (null = unpinned plain
-        // exec; 0 = an explicit pin to CORE 0, secondary_ok off — claim
-        // 907).
-        if (pin) |p| _ = scheduler.pin_task(task_id, p);
+        // M70b (#1454): the pin is part of the registration (set while the
+        // task is still `.blocked`) and the task only becomes visible to
+        // the cores at publish — a parked remote core can claim it the
+        // instant it lands on a ring, so a post-publish `pin_task` would
+        // lose that race (observed: an `exec -c0` hammer running on a
+        // secondary forever).
+        scheduler.publish_task(task_id);
     } else {
         // Defensive rollback (the upfront slot check makes this
         // unreachable): the process reap frees its owned pages.
@@ -863,7 +879,7 @@ fn exec_static_elf_gap(
     // otherwise enter EL0 with x0=1 / x1=0 and rt0 would dereference argv
     // at address 0. Consistent contract: argc==0 <=> argv_va==0.
     const entry_argc: u64 = if (argv_va != 0) @intCast(argc) else 0;
-    if (scheduler.register_exec_user(entry_va, root_phys, @intCast(text_len_pages), stack_va, scheduler.task_stack_size, kstack, entry_argc, argv_va)) |task_id| {
+    if (scheduler.register_exec_user_pinned(entry_va, root_phys, @intCast(text_len_pages), stack_va, scheduler.task_stack_size, kstack, entry_argc, argv_va, 0, pin)) |task_id| {
         // Middle (rodata) segments are readable through syscalls; the
         // writable data segment is readable AND writable. The text and
         // stack regions were set by register_exec_user itself.
@@ -883,7 +899,8 @@ fn exec_static_elf_gap(
         // Go linker places headers one page below -T), so re-point it.
         scheduler.set_task_text_region(task_id, seg0.vaddr, text_len_pages);
         _ = process.bind(proc_id, task_id);
-        if (pin) |p| _ = scheduler.pin_task(task_id, p);
+        // M70b (#1454): pin-before-publish — see the flat-image path above.
+        scheduler.publish_task(task_id);
     } else {
         _ = process.reap(proc_id);
         return .pool_full;
@@ -1173,7 +1190,7 @@ fn exec_dynamic_elf(
     app_timers.reset(proc_id);
 
     const kstack: []u8 = @as(*[scheduler.task_stack_size]u8, @ptrFromInt(kstack_phys))[0..];
-    if (scheduler.register_exec_user_auxv(interp_entry_va, root_phys, @intCast(text_len), stack_va, frame_off, kstack, @intCast(argc), 0, frame_va + 24)) |task_id| {
+    if (scheduler.register_exec_user_pinned(interp_entry_va, root_phys, @intCast(text_len), stack_va, frame_off, kstack, @intCast(argc), 0, frame_va + 24, pin)) |task_id| {
         if (data_mem_size > 0) {
             if (!scheduler.add_task_read_region(task_id, .{ .base = data_va, .len = data_mem_size })) return .pool_full;
             if (!scheduler.add_task_write_region(task_id, .{ .base = data_va, .len = data_mem_size })) return .pool_full;
@@ -1186,8 +1203,8 @@ fn exec_dynamic_elf(
         }
         if (!scheduler.add_task_read_region(task_id, .{ .base = lib_va, .len = lib_pages * alloc.page_size })) return .pool_full;
         _ = process.bind(proc_id, task_id);
-        // SMP: `exec -c<core>` — an explicit pin (claim 907, see above).
-        if (pin) |p| _ = scheduler.pin_task(task_id, p);
+        // M70b (#1454): pin-before-publish — see the flat-image path above.
+        scheduler.publish_task(task_id);
     } else {
         _ = process.reap(proc_id);
         return .pool_full;
@@ -1608,6 +1625,12 @@ test "exec: pinned exec routes the spawned task to exactly one core" {
     arm_allocator();
     _ = mmu.build_user_root(userspace.text_va, 0x1000, 64, userspace.stack_va, 0x2000, 8192) orelse return error.TestUnexpectedResult;
     _ = scheduler.init();
+    // M70b: a pin naming an OFFLINE core is refused (.bad_core) — a task
+    // pinned to an offline core's ring is unreachable. Bring core 1
+    // online so the routing below exercises the pin on a live core
+    // (deferred restore: the rest of the suite boots single-core).
+    scheduler.smp.core_online[1] = true;
+    defer scheduler.smp.core_online[1] = false;
     _ = scheduler.register_worker(0x2000);
     _ = scheduler.register_user(0x3000, 0);
     scheduler.start();
@@ -1617,6 +1640,9 @@ test "exec: pinned exec routes the spawned task to exactly one core" {
     try std.testing.expect(scheduler.reap(2));
     const img = dsk1("smp1: hello\n", dsk1_header_size, dsk1_header_size + 12);
     test_seed("SMP1.BIN", img[0 .. dsk1_header_size + 12]);
+    // M70b review: an offline pin is honestly refused — core 2 is within
+    // range but not online here (core 1 was brought online above).
+    try std.testing.expectEqual(ExecResult.bad_core, exec_file_pinned("SMP1.BIN", &.{}, 2));
     try std.testing.expectEqual(ExecResult.ok, exec_file_pinned("SMP1.BIN", &.{}, 1));
     const pinned = scheduler.task_info(2).?;
     try std.testing.expectEqualStrings("user-exec", pinned.name);
