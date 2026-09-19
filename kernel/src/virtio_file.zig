@@ -894,6 +894,103 @@ pub const StreamCksum = struct {
 };
 
 // ---------------------------------------------------------------------------
+// M70a-live (#1466): live queue-5 wire corpus
+// ---------------------------------------------------------------------------
+
+/// Same four seeds as `kernel/tests/fuzz_test.zig` / `user/src/el0exec.zig`.
+pub const fuzz_seeds = [_]u64{
+    0x5eed_0001,
+    0x1337_2026,
+    0xdead_beef_cafe,
+    0x0f0f_1234_5678,
+};
+
+pub const LiveWireReport = struct {
+    available: bool = false,
+    stat_ok: bool = false,
+    stat_size: u64 = 0,
+    /// Successful `exchange_raw` replies only. A null wait (timeout / no
+    /// device) must not count — `decoded=32` is the gate's proof the
+    /// mutated STAT actually came back.
+    decoded: usize = 0,
+    violations: usize = 0,
+};
+
+/// STAT a known file through queue 5 (the named gap: inline `[size u64le][type]`
+/// parse), then submit seeded mutations of a STAT request and decode whatever
+/// comes back fail-closed. Host tests with `test_share` only exercise STAT;
+/// they never touch the device. Reply-byte mutations stay host-side (PR #1464):
+/// the guest cannot rewrite a reply the host generated.
+pub fn fuzz_live_wire(seed: u64) LiveWireReport {
+    var r = LiveWireReport{};
+    if (builtin.is_test) {
+        if (test_share == null) return r;
+        r.available = true;
+        var st = StatResult{};
+        if (stat("USER.BIN", &st) == st_ok) {
+            r.stat_ok = true;
+            r.stat_size = st.size;
+        }
+        return r;
+    }
+    if (!available()) return r;
+    r.available = true;
+    var st = StatResult{};
+    if (stat("USER.BIN", &st) == st_ok) {
+        r.stat_ok = true;
+        r.stat_size = st.size;
+    }
+
+    var prng = std.Random.DefaultPrng.init(seed ^ 0x9e37_79b9_7f4a_7c15);
+    const rand = prng.random();
+    var req: [request_hdr_len + path_max]u8 = undefined;
+    const path: []const u8 = "USER.BIN";
+    var iter: usize = 0;
+    while (iter < 32) : (iter += 1) {
+        const encoded = encode_request(op_stat, 0, path, &req) orelse continue;
+        var len = encoded;
+        switch (iter % 4) {
+            0 => {
+                var flips: usize = 1 + rand.uintLessThan(usize, 3);
+                while (flips > 0) : (flips -= 1) req[rand.uintLessThan(usize, encoded)] = rand.int(u8);
+            },
+            1 => len = rand.uintLessThan(usize, encoded + 1),
+            2 => {
+                if (encoded < req.len) {
+                    req[encoded] = rand.int(u8);
+                    len = encoded + 1;
+                }
+            },
+            else => {
+                if (len >= request_hdr_len) {
+                    req[2] = rand.int(u8);
+                    req[3] = rand.int(u8);
+                }
+            },
+        }
+        const saved = vf_lock.lock();
+        const ncopy = @min(len, vf_req_buf.len);
+        @memcpy(vf_req_buf[0..ncopy], req[0..ncopy]);
+        const n = exchange_raw(vf_req_buf[0..ncopy], vf_reply_buf[0..]);
+        vf_lock.unlock(saved);
+        const got = n orelse continue;
+        r.decoded += 1;
+        const input = vf_reply_buf[0..got];
+        const rep = decode_reply(input);
+        const in_lo = @intFromPtr(input.ptr);
+        const in_hi = in_lo + input.len;
+        const data_lo = @intFromPtr(rep.data.ptr);
+        if (data_lo < in_lo or data_lo + rep.data.len > in_hi) r.violations += 1;
+        if (input.len < reply_hdr_len) {
+            if (rep.status != st_host_error or rep.dlen != 0 or rep.data.len != 0 or !rep.clamped) r.violations += 1;
+        } else if (rep.status > st_handle) {
+            r.violations += 1;
+        }
+    }
+    return r;
+}
+
+// ---------------------------------------------------------------------------
 // Host tests (G1–G6 from issue #735)
 // ---------------------------------------------------------------------------
 
@@ -1188,4 +1285,24 @@ test "virtio_file: clean_path strips leading slashes" {
     try testing.expectEqualStrings("EFI", clean_path("/EFI"));
     try testing.expectEqualStrings("EFI/BOOT", clean_path("///EFI/BOOT"));
     try testing.expectEqualStrings("KERNEL.BIN", clean_path("KERNEL.BIN"));
+}
+
+test "virtio_file: live-wire report is honest without a device" {
+    const r = fuzz_live_wire(0x5eed_0001);
+    try testing.expect(!r.available);
+    try testing.expectEqual(@as(usize, 0), r.decoded);
+    try testing.expectEqual(@as(usize, 0), r.violations);
+}
+
+test "virtio_file: live-wire STAT path via test_share" {
+    const fixture = [_]TestFile{
+        .{ .name = "USER.BIN", .data = "xx" },
+    };
+    set_test_share(&fixture);
+    defer set_test_share(null);
+    const r = fuzz_live_wire(0x5eed_0001);
+    try testing.expect(r.available);
+    try testing.expect(r.stat_ok);
+    try testing.expectEqual(@as(u64, 2), r.stat_size);
+    try testing.expectEqual(@as(usize, 0), r.decoded);
 }

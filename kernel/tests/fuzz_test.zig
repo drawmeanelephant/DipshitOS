@@ -49,13 +49,14 @@
 //! the card comment rather than asserted on (see `reviewed_answer`).
 //!
 //! Honest limits (M70a D5 — do not read more into a green run than this):
-//!   * This is the *host* half. The live half (a seeded sweep running inside
-//!     the guest against the real EL0 entry path) is not here; `#1333`'s
-//!     caller-fault needed the EL0 seam, which host `dispatch` calls cannot
-//!     reach.
-//!   * `virtio_file.stat`'s inline `[size u64le][type]` field parse is only
-//!     reachable through the live queue-5 transport, so it is not covered by
-//!     this corpus.
+//!   * This is the *host* half. The live half is the monitor `fuzz` command
+//!     plus gate `live-fuzz` (#1466): an EL0 sweep through `EL0EXEC.BIN`,
+//!     the caller-not-moved spawn, and queue-5 STAT + mutated requests.
+//!     Host `dispatch` still cannot observe the trap path; that is why the
+//!     live gate exists.
+//!   * Reply-byte mutations of the fixtures stay here (the guest cannot
+//!     rewrite a reply the host generated). Request mutations replay on
+//!     the live channel.
 //!   * The host runner's *request* parse lives in `main.swift`
 //!     (`VMRouter.handleFileRequest`), which is not VZ-free. Only the pure
 //!     `VFWire` half is fuzzed from Swift.
