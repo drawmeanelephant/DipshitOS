@@ -78,14 +78,11 @@ vgate_assert 01 serial-contains 'chime: vol=50 mute=0'
 vgate_assert 01 serial-contains 'chime: done'
 vgate_assert 01 serial-contains 'tasks user-exec exited status=0'
 vgate_assert 01 serial-contains 'sound: vol=50 mute=0'
-# The slot census is NOT this spec's subject (sound control is). This line
-# pinned `implemented=68` while kernel/src/syscall.zig declares
-# `implemented_count = 78`, so it had been RED ON MAIN -- in a class-B spec CI
-# does not run, which is how a drifted pin survives. (live-net-udp-syscall.spec
-# pins the same stale 68 and is left alone here: different file, different
-# card.) Asserted as the SHAPE the repo's composition specs already use
-# (live-m14/m15-composition), so the next slot to land breaks the census at
-# its source instead of breaking a sound spec.
+# The slot census is NOT this spec's subject (sound control is). Asserted as
+# the SHAPE the composition specs already use (`implemented=`), so the next
+# slot to land breaks the census at its source instead of breaking a sound
+# spec. Exact-count siblings (live-wmctl-register, live-win-*, live-net-udp-syscall)
+# pin `syscalls: slots=64 implemented=78` from the VZ serial.
 vgate_assert 01 serial-contains 'syscalls: slots=64 implemented='
 vgate_assert 01 serial-contains '44 sys_audio_volume calls=1'
 vgate_assert 01 serial-contains '45 sys_audio_mute calls=1'

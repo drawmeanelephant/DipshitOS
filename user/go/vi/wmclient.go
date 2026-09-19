@@ -116,6 +116,34 @@ func (m WmRpc) TitleString() string {
 	return string(m.Title[:n])
 }
 
+// wmMailWaitTicks bounds one WM_RPC ack wait. Each miss parks one scheduler
+// tick (slot 4 sys_sleep; 1 s on VZ) so a silent seat cannot burn millions
+// of yield-spins inside tabapp.Init (#1489). The first probe is immediate —
+// a WM that has already replied never sleeps. Expiry is false (honest
+// refusal; DeclareFullscreen callers already handle it).
+const wmMailWaitTicks = 8
+
+// waitWmRpcAck polls the caller's inbox for a matching WM_RPC ack. A silent
+// mailbox parks between probes and returns (_, false) when the tick budget
+// runs out; it never yield-spins.
+func waitWmRpcAck(seq uint8) (WmRpc, bool) {
+	var raw [WmRpcMax]byte
+	for tick := uint64(0); tick < wmMailWaitTicks; tick++ {
+		n, _ := IpcRecv(raw[:])
+		if n >= 38 {
+			rep, ok := DecodeWmRpc(raw[:n])
+			if ok && rep.Kind&WmRpcReplyFlag != 0 && rep.Seq == seq {
+				return rep, true
+			}
+		}
+		if tick+1 >= wmMailWaitTicks {
+			return WmRpc{}, false
+		}
+		_ = svc1(SlotSleep, 1)
+	}
+	return WmRpc{}, false
+}
+
 // WmMailRequest sends one WM_RPC request to the registered WM and polls the
 // CALLER's own inbox for the matching ack. It returns whether the WM applied
 // it. A missing WM seat or a bounded-poll timeout returns false (honest — the
@@ -141,18 +169,11 @@ func WmMailRequest(kind uint8, id uint32, x, y, w, h uint16, title, selfName str
 	if IpcSend(peers.WM, frame) < 0 {
 		return false
 	}
-	var raw [WmRpcMax]byte
-	for tries := 0; tries < 2_000_000; tries++ {
-		n, _ := IpcRecv(raw[:])
-		if n >= 38 {
-			rep, ok := DecodeWmRpc(raw[:n])
-			if ok && rep.Kind&WmRpcReplyFlag != 0 && rep.Seq == req.Seq {
-				return rep.Applied != 0
-			}
-		}
-		Yield()
+	rep, ok := waitWmRpcAck(req.Seq)
+	if !ok {
+		return false
 	}
-	return false
+	return rep.Applied != 0
 }
 
 // DeclareFullscreen asks the WM to make this tab full-viewport eligible (kind
@@ -189,18 +210,11 @@ func PollNav(winID uint32, selfName string) (string, bool) {
 	if IpcSend(peers.WM, frame) < 0 {
 		return "", false
 	}
-	var raw [WmRpcMax]byte
-	for tries := 0; tries < 2_000_000; tries++ {
-		n, _ := IpcRecv(raw[:])
-		if n >= 38 {
-			rep, ok := DecodeWmRpc(raw[:n])
-			if ok && rep.Kind&WmRpcReplyFlag != 0 && rep.Seq == req.Seq && rep.Applied != 0 {
-				return rep.TitleString(), true
-			}
-		}
-		Yield()
+	rep, ok := waitWmRpcAck(req.Seq)
+	if !ok || rep.Applied == 0 {
+		return "", false
 	}
-	return "", false
+	return rep.TitleString(), true
 }
 
 // WmAction is what a tab client's event dispatch decided to do.

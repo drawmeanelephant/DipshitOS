@@ -462,6 +462,22 @@ awk '/^VGATE_COMPLETED=1$/{c=NR} /=== result ===/{r=NR} END{exit !(c && r && c <
     && ok "VGATE_COMPLETED is set before the result block (a real FAIL keeps rc=1)" \
     || bad "VGATE_COMPLETED must be set before the result block, or every FAIL reads as 2"
 
+# Issue #1503: a stale .build/go/GOSH.ELF must die in the harness as a named
+# build error, not at VM boot as a behavioral assert. The check is in vgate.sh
+# (fail closed) and must run before zig build; fleet.sh is the one rebuild.
+if grep -q 'ensure-guest-elf.sh' tools/gate/vgate.sh; then
+    ok "vgate.sh calls ensure-guest-elf.sh (issue #1503)"
+else
+    bad "vgate.sh must fail closed on a stale GOSH.ELF / GOSSHD.ELF"
+fi
+check_line="$(grep -n 'ensure-guest-elf.sh' tools/gate/vgate.sh | head -1 | cut -d: -f1)"
+zig_line="$(grep -n '^    zig build$' tools/gate/vgate.sh | head -1 | cut -d: -f1)"
+if [ -n "$check_line" ] && [ -n "$zig_line" ] && [ "$check_line" -lt "$zig_line" ]; then
+    ok "guest-ELF freshness is checked before zig build (line $check_line < $zig_line)"
+else
+    bad "ensure-guest-elf check must run before zig build (check=$check_line zig=$zig_line)"
+fi
+
 # --- the real probe: it must build, and carry the right entitlement --------
 echo
 echo "── the shipped probe (no stubs) ──"

@@ -93,9 +93,9 @@ vgate_assert 01 serial-contains 'udp: send err -1'
 vgate_assert 01 serial-contains 'procs UDP.BIN exited status=17'
 vgate_assert 01 serial-contains 'tasks user-exec exited status=17'
 vgate_assert 01 serial-contains 'tasks user-exec reaped'
-# implemented=68 per kernel/src/syscall.zig (slots landed post-M12;
-# the legacy script's =61 is red-at-HEAD drift -- legacy runs 3/4 here).
-vgate_assert 01 serial-contains 'syscalls: slots=64 implemented=68'
+# Census observed on VZ: `syscalls: slots=64 implemented=78` (kernel
+# implemented_count; host tests pin the same line). The M32-era pin was 68.
+vgate_assert 01 serial-contains 'syscalls: slots=64 implemented=78'
 vgate_assert 01 serial-contains 'net udp: rx=2,tx=2,loop=1,drop=0'
 vgate_assert 01 serial-contains ' udp=rx=2,tx=2,loop=1,drop=0'
 vgate_assert 01 serial-contains 'net-udp-ok'

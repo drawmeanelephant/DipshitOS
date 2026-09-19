@@ -49,6 +49,13 @@
 #   z3a  multi-file pair (2 sources)        3 markers, ORDERED, exit 72
 #   z3b  stdz app + glue + 3 lib modules    2 markers, ORDERED, exit 72,
 #        OUT.TXT must equal REPORT.EXP byte-exact (sha256)
+#   s3   M70c S3 dialect lift (issue #1455): `break` / `continue` in all
+#        three loop forms + nested loops + the defer unwind on `break` —
+#        10 markers, ORDERED, exit 72. Not a ladder rung: this shrinks the Z4a
+#        dialect boundary rather than adding a step to it. Its last marker is
+#        "s3-all-ok", not "s3-ok", because the runner echoes "rx-s3-ok" after
+#        the exec — a marker that is a substring of that line would be
+#        satisfied by the echo alone.
 #   big  ONE source file >2048 B (the snake in a single file; the
 #        multi-read proof for zc's source arena) — 4 markers, ORDERED,
 #        exit 72; every marker string lives past byte 2048 of the source,
@@ -131,6 +138,7 @@ case_def() {
         z2b) echo "z2b|run|72|z2b-start z2b-fnptr-ok z2b-in-if z2b-defer-if z2b-after-if z2b-defer-a z2b-defer-b z2b-ret-ok|" ;;
         z3a) echo "z3a|run|72|z3a-start z3a-cross-ok z3a-lib-ok|" ;;
         z3b) echo "z3b|run|72|z3b-start z3b-ok|" ;;
+        s3) echo "s3|run|72|s3-start s3-while-break s3-while-continue s3-range-break s3-range-continue s3-array-continue s3-nested-break s3-defer-break s3-loop-exit s3-all-ok|" ;;
         big) echo "big|run|72|snake-up snake-wait snake-move snake-over|snake-up|snake-wait|snake-move|snake-over" ;;
         *) echo "" ;;
     esac
@@ -151,11 +159,12 @@ case_sources() {
         z2b) echo "Z2B.Z tests/zc-corpus/z2b-defer-fnptr.z" ;;
         z3a) echo "Z3AM.Z tests/zc-corpus/z3a-multifile.z"; echo "Z3AL.Z tests/zc-corpus/z3a-lib.z" ;;
         z3b) echo "APP.Z tests/zc-corpus/z3b-stdz.z"; echo "LABELS.Z tests/zc-corpus/z3b-labels.z"; echo "FMT.Z user/src/lib/stdz/fmt.zig"; echo "BUILDER.Z user/src/lib/stdz/string_builder.zig"; echo "RING.Z user/src/lib/stdz/ring.zig" ;;
+        s3) echo "S3.Z tests/zc-corpus/s3-break.z" ;;
         big) echo "BIG.Z tests/zc-corpus/big-snake.z" ;;
     esac
 }
 
-ALL_CASES="$(for c in z05 vl6 z1a z1b z1c z1d z1e z1f z2a z2b z3a z3b snk big; do echo "$c"; done)"
+ALL_CASES="$(for c in z05 vl6 z1a z1b z1c z1d z1e z1f z2a z2b z3a z3b s3 snk big; do echo "$c"; done)"
 
 # Which cases to run: all, or the CASES/argv filter (validated against the table).
 cases_selected() {
