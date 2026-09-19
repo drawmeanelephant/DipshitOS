@@ -107,6 +107,7 @@ const (
 	SlotAudioMute    uintptr = 45
 	SlotWinFillBatch uintptr = 46
 	SlotMmap         uintptr = 63
+	SlotGetRandom    uintptr = 72 // M51 (ADR 0025 D5): sys_getrandom
 	SlotTime         uintptr = 66
 	SlotTtyAttach    uintptr = 67
 	SlotSockReady    uintptr = 76
@@ -254,6 +255,22 @@ func Exit(status int) {
 // Time returns wall-clock unix seconds (negative when the firmware gave no
 // boot epoch).
 func Time() int64 { return syscall0(SlotTime) }
+
+// Random fills p from the kernel CSPRNG (slot 72 sys_getrandom, ADR 0025 D5).
+// The kernel clamps each call to 256 bytes and returns the count actually
+// written; Random loops for the rest. Entropy is read-only and
+// capability-free — it can only advance the stream, never weaken it. Host
+// builds return -ENOSYS through the errno.
+func Random(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	r := svc2(SlotGetRandom, bytePtr(p), uintptr(len(p)))
+	if r < 0 {
+		return 0, errno(-r)
+	}
+	return int(r), nil
+}
 
 // TtyAttach attaches or detaches the caller's controlling terminal (opened
 // as /dev/tty) to a front-end (ADR 0020 slot 67). frontEnd is TtyDetach (0),
