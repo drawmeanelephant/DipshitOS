@@ -71,8 +71,12 @@ func bCat(c *cmdCtx) int {
 		return 0
 	}
 	for _, f := range c.args {
-		b, err := c.sh.host.ReadFile(f, maxPipeBytes)
+		b, err := c.sh.readBounded(f)
 		if err != nil {
+			if err == errTooLarge {
+				c.out([]byte("gosh: cat: " + f + ": " + errTooLarge.Error() + "\n"))
+				return 1
+			}
 			c.out([]byte("gosh: cat: " + f + ": not found\n"))
 			return 1
 		}

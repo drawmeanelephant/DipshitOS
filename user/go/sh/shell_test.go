@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 )
@@ -367,6 +368,95 @@ func TestEngineParseRefusals(t *testing.T) {
 	}
 }
 
+// TestEngineBlankLineIsANoOp pins the documented contract: a blank or
+// comment-only line leaves $? alone and prints nothing. parsePlan calls zero
+// tokens an empty command, so the guard has to run before it — otherwise a
+// bare Return clobbers $? and prints an error.
+func TestEngineBlankLineIsANoOp(t *testing.T) {
+	h := newFakeHost()
+	run, sh := session(h)
+	if st := run("echo marker"); st != 0 {
+		t.Fatalf("setup status = %d, want 0", st)
+	}
+	h.out = nil
+	for _, line := range []string{"", "   ", "\t", "# just a comment", "   # indented comment"} {
+		if st := run(line); st != 0 {
+			t.Fatalf("%q status = %d, want 0 ($? unchanged)", line, st)
+		}
+	}
+	if got := h.outString(); got != "" {
+		t.Fatalf("blank lines printed %q", got)
+	}
+	if sh.Status() != 0 {
+		t.Fatalf("$? = %d, want 0", sh.Status())
+	}
+}
+
+// TestEngineOversizeInputFailsLoud pins the refusal that replaced silent
+// truncation: an input past the 4 KiB buffer fails the line instead of
+// handing the command short input that still exits 0.
+func TestEngineOversizeInputFailsLoud(t *testing.T) {
+	h := newFakeHost()
+	h.files["BIG.TXT"] = bytes.Repeat([]byte("x"), maxPipeBytes+1)
+	run, _ := session(h)
+	if st := run("wc -l < BIG.TXT"); st != 1 {
+		t.Fatalf("oversize redirect status = %d, want 1", st)
+	}
+	if got := h.outString(); !strings.Contains(got, "input exceeds the 4096-byte buffer") {
+		t.Fatalf("oversize redirect output = %q", got)
+	}
+	h.out = nil
+	if st := run("cat BIG.TXT"); st != 1 {
+		t.Fatalf("oversize cat status = %d, want 1", st)
+	}
+	if got := h.outString(); !strings.Contains(got, "input exceeds the 4096-byte buffer") {
+		t.Fatalf("oversize cat output = %q", got)
+	}
+	// A file exactly at the bound is still accepted.
+	h.files["OK.TXT"] = bytes.Repeat([]byte("y"), maxPipeBytes)
+	h.out = nil
+	out, st := toolOut(t, h, "wc -c OK.TXT")
+	if st != 0 || strings.TrimSpace(out) != "4096 OK.TXT" {
+		t.Fatalf("at-bound read = (%q, %d)", out, st)
+	}
+}
+
+// TestEnginePipeStageOverflow pins the second loud refusal: a left stage
+// that outgrows the kernel's 4 KiB pipe fails the line before the pipe is
+// touched, so the right stage never computes on a clipped hand-off.
+func TestEnginePipeStageOverflow(t *testing.T) {
+	h := newFakeHost()
+	h.files["A.TXT"] = bytes.Repeat([]byte("a"), 3000)
+	h.files["B.TXT"] = bytes.Repeat([]byte("b"), 3000)
+	run, _ := session(h)
+	if st := run("cat A.TXT B.TXT | wc -c"); st != 1 {
+		t.Fatalf("overflowing pipeline status = %d, want 1", st)
+	}
+	if got := h.outString(); !strings.Contains(got, "pipe stage output exceeds") {
+		t.Fatalf("overflowing pipeline output = %q", got)
+	}
+}
+
+// TestBoundedCapture pins the mechanism both refusals ride on: it stops at
+// the limit, records the overflow once, and stops appending.
+func TestBoundedCapture(t *testing.T) {
+	var c boundedCapture
+	c.lim = 8
+	c.write([]byte("1234"))
+	c.write([]byte("5678")) // exactly at the limit: still accepted
+	if c.over || string(c.buf) != "12345678" {
+		t.Fatalf("at-limit capture = (%q, over=%v)", c.buf, c.over)
+	}
+	c.write([]byte("9"))
+	if !c.over {
+		t.Fatal("overflow not recorded")
+	}
+	c.write([]byte("more"))
+	if string(c.buf) != "12345678" {
+		t.Fatalf("overflow grew the buffer: %q", c.buf)
+	}
+}
+
 // TestEngineExecPrefix pins the monitor-vocabulary exec: `exec NAME args`
 // runs NAME (and backgrounds with &), without replacing the shell.
 func TestEngineExecPrefix(t *testing.T) {
@@ -375,8 +465,8 @@ func TestEngineExecPrefix(t *testing.T) {
 	if st := run("exec GOHELLO"); st != 43 {
 		t.Fatalf("exec status = %d, want 43", st)
 	}
-	if !strings.Contains(h.outString(), "") {
-		t.Fatalf("unexpected output: %q", h.outString())
+	if got := h.outString(); got != "" {
+		t.Fatalf("unexpected output: %q", got)
 	}
 	// Background through the prefix takes the job path.
 	_, sh := session(h)

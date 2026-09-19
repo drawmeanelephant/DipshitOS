@@ -16,6 +16,12 @@ import "strings"
 // dup-collapsed, no persistence).
 const historyMax = 64
 
+// maxLineBytes bounds one interactive line. The startup contract's per-file
+// cap is the same 2048 (main.go maxStartupBytes), so a staged line can never
+// trip it. Past it the editor answers with a bell instead of growing the
+// buffer -- and the O(n) repaint per keystroke -- without bound.
+const maxLineBytes = 2048
+
 // History is the session line ring: dup-collapsed, bounded, in-memory only
 // (the monitor's HISTORY.TXT persistence is deliberately out of scope).
 type History struct {
@@ -250,6 +256,9 @@ func (e *Editor) keyGround(b byte) ([]byte, EditEvent) {
 	if b < 0x20 || b >= 0x7f {
 		return nil, EditEvent{} // other control bytes are not text
 	}
+	if len(e.buf) >= maxLineBytes {
+		return []byte{0x07}, EditEvent{} // line full: bell, no insert
+	}
 	// Printable: insert at the cursor.
 	e.buf = append(e.buf, 0)
 	copy(e.buf[e.cur+1:], e.buf[e.cur:])
@@ -362,17 +371,11 @@ func (e *Editor) keyTab() ([]byte, EditEvent) {
 	}
 	prefix := commonPrefix(cands)
 	if len(prefix) > len(word) {
-		e.buf = insertAt(e.buf, e.cur, []byte(prefix[len(word):]))
-		e.cur += len(prefix) - len(word)
-		e.lastTab = false
-		return e.paint(), EditEvent{}
+		return e.ins([]byte(prefix[len(word):]))
 	}
 	if len(cands) == 1 && strings.HasSuffix(cands[0], " ") {
 		// A command candidate: complete it with a trailing space.
-		e.buf = insertAt(e.buf, e.cur, []byte(cands[0][len(word):]))
-		e.cur += len(cands[0]) - len(word)
-		e.lastTab = false
-		return e.paint(), EditEvent{}
+		return e.ins([]byte(cands[0][len(word):]))
 	}
 	if e.lastTab {
 		e.lastTab = false
@@ -381,6 +384,18 @@ func (e *Editor) keyTab() ([]byte, EditEvent) {
 	}
 	e.lastTab = true
 	return []byte{0x07}, EditEvent{} // bell: candidates exist but need another Tab
+}
+
+// ins inserts ins at the cursor unless that would pass the line cap, in
+// which case it answers with a bell and leaves the line alone.
+func (e *Editor) ins(ins []byte) ([]byte, EditEvent) {
+	if len(e.buf)+len(ins) > maxLineBytes {
+		return []byte{0x07}, EditEvent{}
+	}
+	e.buf = insertAt(e.buf, e.cur, ins)
+	e.cur += len(ins)
+	e.lastTab = false
+	return e.paint(), EditEvent{}
 }
 
 // insertAt inserts ins into buf at index at (0 <= at <= len(buf)).

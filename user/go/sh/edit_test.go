@@ -227,3 +227,32 @@ func TestHistoryBound(t *testing.T) {
 		t.Fatalf("history bound = %d, want %d", len(h.Entries()), historyMax)
 	}
 }
+
+// TestEditorLineCap pins the interactive line bound: past maxLineBytes a
+// keystroke answers with a bell instead of growing the buffer, and Tab
+// completion cannot slip past the cap either.
+func TestEditorLineCap(t *testing.T) {
+	e := NewEditor("gosh> ", &History{})
+	feedE(e, strings.Repeat("x", maxLineBytes))
+	if len(e.buf) != maxLineBytes {
+		t.Fatalf("line = %d bytes, want %d", len(e.buf), maxLineBytes)
+	}
+	out := feedE(e, "y")
+	if len(e.buf) != maxLineBytes {
+		t.Fatalf("line grew past the cap: %d bytes", len(e.buf))
+	}
+	if !strings.Contains(out, "\x07") {
+		t.Fatalf("overflow keystroke = %q, want a bell", out)
+	}
+	// A completion that would pass the cap is refused the same way.
+	e2 := NewEditor("gosh> ", &History{})
+	e2.Complete = func(word string, first bool) []string { return []string{word + strings.Repeat("z", 64)} }
+	feedE(e2, strings.Repeat("q", maxLineBytes))
+	out = feedE(e2, "\t")
+	if len(e2.buf) != maxLineBytes {
+		t.Fatalf("completion grew past the cap: %d bytes", len(e2.buf))
+	}
+	if !strings.Contains(out, "\x07") {
+		t.Fatalf("capped completion = %q, want a bell", out)
+	}
+}

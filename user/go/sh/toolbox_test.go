@@ -126,6 +126,34 @@ func TestToolboxTest(t *testing.T) {
 	}
 }
 
+// TestToolboxCutEmptyDelim pins the empty-delimiter refusal: `cut -d ""`
+// tokenizes to a genuine empty word (quoting makes a word, not a separator),
+// so reading byte 0 of it would panic the shell on a typed line.
+func TestToolboxCutEmptyDelim(t *testing.T) {
+	h := newFakeHost()
+	out, st := toolOut(t, h, `printf 'a:b\n' | cut -d "" -f 1`)
+	if st != 2 {
+		t.Fatalf(`cut -d "" status = %d, want 2`, st)
+	}
+	if !strings.Contains(out, "-d needs one delimiter character") {
+		t.Fatalf(`cut -d "" message = %q`, out)
+	}
+	// The same empty word reached through a variable is refused too
+	// (an unset or empty variable expands to a real empty argument).
+	h2 := newFakeHost()
+	run, _ := session(h2)
+	if st := run("set E="); st != 0 {
+		t.Fatalf("set status = %d", st)
+	}
+	h2.out = nil
+	if st := run(`printf 'a:b\n' | cut -d $E -f 1`); st != 2 {
+		t.Fatalf(`cut -d $E status = %d, want 2`, st)
+	}
+	if got := h2.outString(); !strings.Contains(got, "-d needs one delimiter character") {
+		t.Fatalf(`cut -d $E message = %q`, got)
+	}
+}
+
 // TestToolboxNegatives pins the usage refusals.
 func TestToolboxNegatives(t *testing.T) {
 	h := newFakeHost()

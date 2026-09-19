@@ -21,6 +21,63 @@ const maxPipeBytes = 4096
 // table holds 4; GOSH allows 8 — still bounded, honest refusal past it).
 const maxJobs = 8
 
+// maxRedirectBytes bounds one `>` capture. The engine must not import vi,
+// so this mirrors vi.MaxFileBytes (256 KiB): past it the line fails loudly
+// instead of growing the guest heap without bound.
+const maxRedirectBytes = 256 * 1024
+
+// boundedCapture collects a command's output up to lim bytes and records
+// whether the producer ran past it, so the caller can fail the line loudly
+// rather than write a silently clipped file or hand a pipe stage short
+// input (the kernel's atomic pipe refusal would never fire).
+type boundedCapture struct {
+	buf  []byte
+	lim  int
+	over bool
+}
+
+func (c *boundedCapture) write(b []byte) {
+	if c.over {
+		return
+	}
+	if len(c.buf)+len(b) > c.lim {
+		c.over = true
+		return
+	}
+	c.buf = append(c.buf, b...)
+}
+
+// errTooLarge is the bounded-read refusal: silent truncation is worse than
+// an error, because the command would compute on short input and still
+// exit 0.
+var errTooLarge = errors.New("input exceeds the 4096-byte buffer")
+
+// readBounded reads at most maxPipeBytes of path, refusing a larger file.
+func (s *Shell) readBounded(path string) ([]byte, error) {
+	b, err := s.host.ReadFile(path, maxPipeBytes+1)
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > maxPipeBytes {
+		return nil, errTooLarge
+	}
+	return b, nil
+}
+
+// readInput reads one redirect's input file, printing its own refusal.
+func (s *Shell) readInput(path string) ([]byte, bool) {
+	b, err := s.readBounded(path)
+	switch {
+	case err == errTooLarge:
+		s.host.Out([]byte("gosh: " + path + ": " + errTooLarge.Error() + "\n"))
+		return nil, false
+	case err != nil:
+		s.host.Out([]byte("gosh: " + path + ": not found\n"))
+		return nil, false
+	}
+	return b, true
+}
+
 // action tells the glue what to do after the current line.
 type action int
 
@@ -186,10 +243,21 @@ func (s *Shell) RunLine(line string) (int, action) {
 		}
 		return r
 	}, line)
+	if len(line) > maxLineBytes {
+		s.fail("line exceeds " + vsys.Itoa64(maxLineBytes) + " bytes")
+		return 1, actionContinue
+	}
 	toks, err := tokenize(line)
 	if err != nil {
 		s.fail(err.Error())
 		return 1, actionContinue
+	}
+	if len(toks) == 0 {
+		// Blank, whitespace-only, or comment-only: a no-op that leaves $?
+		// alone, exactly as this function documents. The guard has to live
+		// here — parsePlan reports zero tokens as an empty command, so the
+		// error would fire before the p.left check below could catch it.
+		return s.status, actionContinue
 	}
 	p, err := parsePlan(toks, s.env, s.status)
 	if err != nil {
@@ -197,6 +265,9 @@ func (s *Shell) RunLine(line string) (int, action) {
 		return 1, actionContinue
 	}
 	if len(p.left) == 0 {
+		// Unreachable as the code stands (a zero-token line returned above,
+		// and parsePlan refuses a plan with no command word); kept because
+		// it is what makes the p.left[0] reads below safe.
 		return s.status, actionContinue
 	}
 	if p.left[0] == "exec" && len(p.left) > 1 {
@@ -261,17 +332,17 @@ func (s *Shell) runSingle(p *plan) (int, action) {
 	args := p.left[1:]
 	var stdin []byte
 	if p.in != nil {
-		b, err := s.host.ReadFile(p.in.path, maxPipeBytes)
-		if err != nil {
-			s.host.Out([]byte("gosh: " + p.in.path + ": not found\n"))
+		b, ok := s.readInput(p.in.path)
+		if !ok {
 			return 1, actionContinue
 		}
 		stdin = b
 	}
-	var capture []byte
+	var cap boundedCapture
+	cap.lim = maxRedirectBytes
 	sink := func(b []byte) { s.host.Out(b) }
 	if p.out != nil {
-		sink = func(b []byte) { capture = append(capture, b...) }
+		sink = cap.write
 	}
 	var st int
 	var act action
@@ -289,7 +360,11 @@ func (s *Shell) runSingle(p *plan) (int, action) {
 		return st, act
 	}
 	if p.out != nil {
-		if err := s.host.WriteFile(p.out.path, capture, p.out.append); err != nil {
+		if cap.over {
+			s.host.Out([]byte("gosh: " + p.out.path + ": output exceeds the " + vsys.Itoa64(maxRedirectBytes) + "-byte redirect buffer\n"))
+			return 1, actionContinue
+		}
+		if err := s.host.WriteFile(p.out.path, cap.buf, p.out.append); err != nil {
 			s.host.Out([]byte("gosh: " + p.out.path + ": write failed\n"))
 			return 1, actionContinue
 		}
@@ -321,27 +396,29 @@ func (s *Shell) runPipeline(p *plan) (int, action) {
 	}
 	var stdin []byte
 	if p.in != nil {
-		b, err := s.host.ReadFile(p.in.path, maxPipeBytes)
-		if err != nil {
-			s.host.Out([]byte("gosh: " + p.in.path + ": not found\n"))
+		b, ok := s.readInput(p.in.path)
+		if !ok {
 			return 1, actionContinue
 		}
 		stdin = b
 	}
-	var capture []byte
+	var stage boundedCapture
+	stage.lim = maxPipeBytes
 	fn := builtins[lname]
 	if fn == nil {
 		fn = tools[lname]
 	}
-	st, act := s.runBuiltin(lname, &cmdCtx{sh: s, args: p.left[1:], stdin: stdin, out: func(b []byte) {
-		if len(capture)+len(b) <= maxPipeBytes {
-			capture = append(capture, b...)
-		}
-	}})
+	st, act := s.runBuiltin(lname, &cmdCtx{sh: s, args: p.left[1:], stdin: stdin, out: stage.write})
 	if act != actionContinue {
 		return st, act
 	}
-	if err := s.host.PipeWrite(capture); err != nil {
+	if stage.over {
+		// Writing the clipped capture would hand the right stage short
+		// input that still reports success, so the line fails instead.
+		s.host.Out([]byte("gosh: pipe stage output exceeds the " + vsys.Itoa64(maxPipeBytes) + "-byte pipe buffer\n"))
+		return 1, actionContinue
+	}
+	if err := s.host.PipeWrite(stage.buf); err != nil {
 		s.host.Out([]byte("gosh: pipe write failed\n"))
 		return 1, actionContinue
 	}
@@ -355,17 +432,22 @@ func (s *Shell) runPipeline(p *plan) (int, action) {
 		s.host.Out([]byte("gosh: a piped command must be a builtin or tool (an external app would not read the pipe)\n"))
 		return 1, actionContinue
 	}
-	var rcapture []byte
+	var rcap boundedCapture
+	rcap.lim = maxRedirectBytes
 	rsink := func(b []byte) { s.host.Out(b) }
 	if p.out != nil {
-		rsink = func(b []byte) { rcapture = append(rcapture, b...) }
+		rsink = rcap.write
 	}
 	rst, ract := s.runBuiltin(rname, &cmdCtx{sh: s, args: p.right[1:], stdin: rightStdin, out: rsink})
 	if ract != actionContinue {
 		return rst, ract
 	}
 	if p.out != nil {
-		if err := s.host.WriteFile(p.out.path, rcapture, p.out.append); err != nil {
+		if rcap.over {
+			s.host.Out([]byte("gosh: " + p.out.path + ": output exceeds the " + vsys.Itoa64(maxRedirectBytes) + "-byte redirect buffer\n"))
+			return 1, actionContinue
+		}
+		if err := s.host.WriteFile(p.out.path, rcap.buf, p.out.append); err != nil {
 			s.host.Out([]byte("gosh: " + p.out.path + ": write failed\n"))
 			return 1, actionContinue
 		}

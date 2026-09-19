@@ -1,22 +1,18 @@
 # go-sh.spec -- M68a (issue #1449) class-B gate: GOSH, the Go shell, hosts
 # the M49 daily-use bar as a tabapp window in Zig TABWM. The seeded
 # STARTUP.SH drives the scripting subset through the same engine a typed
-# line uses: env/variables ($GREET, $?), one pipe, and > redirects -- each
-# file read back ON THE HOST so a success marker without bytes cannot pass
-# -- a foreground exec of a Go ELF (GOSH itself, headless -c) whose exit
-# status is captured through $?, and a background job cycled through
-# jobs/fg (the serial markers `gosh: job 1 pid=` / `gosh: job 1 done
-# exit=`). Then the harness types at the prompt: a fresh line, a backspace
-# edit, and an Up-arrow recall edited with one more character -- each
-# visible as a `gosh: line ` marker.
+# line uses: env/variables, one pipe, and > redirects (each read back ON
+# THE HOST, byte-equal), a foreground exec whose status arrives through $?,
+# and a background job cycled through jobs/fg. Then the harness types at
+# the prompt: a fresh line, a Backspace edit, and an Up-arrow recall edited
+# by one character -- each visible as its own `gosh: line ` marker.
 #
 # HOST PREREQUISITE (fails the gate honestly when missing):
 #   bash tools/go/build-gosh.sh   ->  .build/go/GOSH.ELF
 #
 # exec-order: assert-proven -- the run ends on `rx-gosh-ok`, which only the
-# stage script prints, and the stage gate waits on the editor marker
-# `gosh: line echo azx` that only the typed recall can produce; a shell
-# that never ran cannot pass.
+# stage script prints, and the stage gate waits on `gosh: line echo ay`,
+# which only the typed recall can produce; a shell that never ran cannot pass.
 
 vgate_name go-sh "issue #1449 M68a: GOSH runs the M49 bar as a tab (exec, pipe, redirect, jobs/fg, editing) on VZ"
 vgate_share seed
@@ -81,18 +77,21 @@ PY
 
 # Typed at the prompt -- THREE submitted lines, because `gosh: line ` is
 # emitted on submit only: `echo abc` is typed and returned; Up recalls it,
-# two backspaces and a z turn it into `echo az`, returned; Up recalls THAT
-# and x appends -> `echo azx`, the marker the stage gate waits on.
+# two backspaces and a z turn it into `echo az`, returned; Up recalls THAT,
+# a backspace removes the z and a y makes it `echo ay`, the marker the stage
+# gate waits on. The third line is deliberately NOT `echo azx`: `echo az`
+# would be a prefix of it, and no substring-tolerant assert can then tell the
+# two recall lines apart (see the marker assert below).
 vgate_run 01 -- \
     --screen '$RUN_DIR/screen' \
     --via-virtio \
     --script '$RUN_DIR/script.txt' \
     --script2 '$RUN_DIR/script2.txt' \
     --script2-after 'tabwm: sidebar-rendered' \
-    --input-chords 'e,c,h,o,space,a,b,c,return,up,backspace,backspace,z,return,up,x,return' \
+    --input-chords 'e,c,h,o,space,a,b,c,return,up,backspace,backspace,z,return,up,backspace,y,return' \
     --input-chords-after 'gosh: prompt' \
     --script3 '$RUN_DIR/script3.txt' \
-    --script3-after 'gosh: line echo azx' \
+    --script3-after 'gosh: line echo ay' \
     --script-expect 'rx-gosh-ok' --timeout 240
 
 vgate_assert 01 serial-contains 'VirelaiOS kernel has seized control.'
@@ -109,26 +108,48 @@ vgate_assert 01 serial-contains 'gosh: attached'
 # as the same `gosh: line ` markers a typed line gets.
 vgate_assert 01 serial-contains 'gosh: line echo gosh-startup-ran'
 vgate_assert 01 serial-contains 'gosh: prompt'
-# The background Go child's own console output is serial-visible (its
-# `echo` is the only source of this marker), and the job cycled through
-# the reaper with a zero exit.
-vgate_assert 01 serial-contains 'nested-child-ok'
 vgate_assert 01 serial-contains 'gosh: job 1 pid='
 vgate_assert 01 serial-contains 'gosh: job 1 done exit=0'
-# The interactive editor, one marker per submitted line: a fresh line, a
-# line edited with real Backspace keystrokes after an Up recall, and a
-# second recall edited by one character.
-vgate_assert 01 serial-contains 'gosh: line echo abc'
-vgate_assert 01 serial-contains 'gosh: line echo az'
-vgate_assert 01 serial-contains 'gosh: line echo azx'
+# The four markers neither existing kind can carry honestly -- the child's own
+# console output and the three typed lines -- matched at LINE START by a
+# python hook:
+#  * `serial-exact` (whole line) is unusable for a guest CONSOLE line. The
+#    guest's console write races the kernel's own log writes, which land on
+#    the tail of the same serial line. Observed 1 run in 8:
+#    `gosh: line echo azsmp: steal runs=50 task=GOSH.ELF from=0` -- the marker
+#    was printed and grep -x counted 0.
+#  * `serial-contains` cannot carry them either: the staged line
+#    `gosh: line exec GOSH.ELF -c "echo nested-child-ok" &` contains the
+#    child's marker, and `gosh: line echo az` is a substring of
+#    `gosh: line echo azx` -- both would pass with no work done.
+# Anchoring at ^ excludes every line that merely CONTAINS the text (the
+# parent's staged line starts with `gosh: line exec`), and tolerating a tail
+# keeps the interleaved case passing. The typed markers are prefix-free, so no
+# marker can be satisfied by another marker's line.
+vgate_assert 01 python <<'PY'
+import os, re, sys
+
+ser = open(os.environ["VG_SER"], errors="replace").read()
+wants = {
+    "nested-child-ok": "the background child's own console output",
+    "gosh: line echo abc": "typed line 1 (a fresh line, submitted)",
+    "gosh: line echo az": "typed line 2 (Up recall, two Backspaces, z)",
+    "gosh: line echo ay": "typed line 3 (Up recall of echo az, Backspace, y)",
+}
+missing = [w for w in wants if not re.search(r"(?m)^" + re.escape(w), ser)]
+if missing:
+    sys.exit("marker(s) never printed at line start: " + ", ".join(
+        "%s (%s)" % (w, wants[w]) for w in missing))
+PY
 vgate_assert 01 serial-contains 'gosh: close'
 vgate_assert 01 serial-contains 'gosh OK'
 vgate_assert 01 serial-contains 'rx-gosh-ok'
 vgate_assert 01 serial-absent '[EXC] parking:'
 vgate_assert 01 serial-absent 'exited status=139'
-# The scripting subset's byte proof ON THE HOST: a marker that reported
-# success without writing the bytes cannot pass these.
-vgate_assert 01 share-contains GOSHVARS.TXT 'V=hello-vars'
-vgate_assert 01 share-contains GOSHPIPE.TXT 'alpha-beta'
-vgate_assert 01 share-contains GOSHRC.TXT 'rc=7'
-vgate_assert 01 share-contains GOSHJOB.TXT 'jobrc=0'
+# The scripting subset's byte proof ON THE HOST, byte-EQUAL rather than
+# contains -- `rc=7` would also have matched `rc=70`. The share files carry
+# the trailing newline the typed echo wrote, hence the $'...' literals.
+vgate_assert 01 share-equals GOSHVARS.TXT $'V=hello-vars\n'
+vgate_assert 01 share-equals GOSHPIPE.TXT $'alpha-beta\n'
+vgate_assert 01 share-equals GOSHRC.TXT $'rc=7\n'
+vgate_assert 01 share-equals GOSHJOB.TXT $'jobrc=0\n'

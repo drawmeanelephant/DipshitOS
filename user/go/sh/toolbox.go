@@ -28,9 +28,13 @@ func toolInput(c *cmdCtx, files []string) ([]byte, int) {
 	}
 	var all []byte
 	for _, f := range files {
-		b, err := c.sh.host.ReadFile(f, maxPipeBytes)
+		b, err := c.sh.readBounded(f)
 		if err != nil {
-			c.out([]byte("gosh: " + c.args[0] + ": " + f + ": not found\n"))
+			if err == errTooLarge {
+				c.out([]byte("gosh: " + c.args[0] + ": " + f + ": " + errTooLarge.Error() + "\n"))
+			} else {
+				c.out([]byte("gosh: " + c.args[0] + ": " + f + ": not found\n"))
+			}
 			return nil, 1
 		}
 		all = append(all, b...)
@@ -276,6 +280,14 @@ func tCut(c *cmdCtx) int {
 		switch {
 		case a == "-d" && i+1 < len(c.args):
 			i++
+			if len(c.args[i]) == 0 {
+				// `cut -d ""` tokenizes to a genuine empty word (quoting
+				// makes a word, not a separator), so indexing byte 0 here
+				// would panic the shell on a typed line. GNU cut refuses the
+				// same argument.
+				c.out([]byte("gosh: cut: -d needs one delimiter character\n"))
+				return 2
+			}
 			delim = c.args[i][0]
 		case a == "-f" && i+1 < len(c.args):
 			i++
