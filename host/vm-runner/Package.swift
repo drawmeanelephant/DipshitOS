@@ -31,11 +31,11 @@ let package = Package(
             name: "VFWire",
             path: "Sources/VFWire"
         ),
-        // M51 SSH5 (#1172): the minimal SSH-2 server the runner hosts behind
-        // `--net-tcp-respond …:ssh` — the hand-rolled OpenSSH cipher
-        // (chacha20-poly1305@openssh.com), curve25519-sha256 KEX, pinned
-        // ssh-ed25519 host/user keys, one session exec. Pure Swift/CryptoKit,
-        // zero Virtualization imports, so `swift test` runs without a VM.
+        // M51 SSH5 (#1172) / M70g G1 (#1491): the minimal SSH-2 server the
+        // runner hosts behind `--net-tcp-respond …:ssh`, plus the matching
+        // client behind `--net-tcp-connect …:ssh`. Hand-rolled OpenSSH
+        // cipher, curve25519-sha256 KEX, pinned ssh-ed25519 keys, one
+        // session exec. Pure Swift/CryptoKit, zero Virtualization imports.
         .target(
             name: "VSSH",
             path: "Sources/VSSH"

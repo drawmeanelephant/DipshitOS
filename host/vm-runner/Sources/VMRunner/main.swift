@@ -112,13 +112,14 @@
 //          SSH.BIN negotiates with real OpenSSH. The documented manual
 //          check, never a CI gate.
 //          Requires --net. OFF by default: the default VM is unchanged.)
-//         [--net-tcp-connect <guest-ip>:<port>[:<payload-file>]]
+//         [--net-tcp-connect <guest-ip>:<port>[:<payload-file>|ssh]]
 //          [--net-tcp-connect-after <text>]
 //          [--net-tcp-connect-close-after <text>]
 //          [--net-tcp-connect-secret <s>] (M50 TS4: answer the guest's
 //           VIRELAIOS-AUTH/1 challenge with HMAC-SHA256(s))
 //          [--net-tcp-connect-mac <hex>] (M50 TS4 replay: send this
 //           pre-recorded MAC line instead of computing one)
+//          [--net-tcp-connect-ssh-exec <cmd>] [--net-tcp-connect-ssh-user <name>]
 //          (M45 SH7, issue #1083,
 //          ADR 0020 Amendment B: the host INITIATES an inbound TCP
 //          connection TO a guest listener — the reverse of
@@ -127,7 +128,10 @@
 //          fixed ISN 0x54321098, sends the payload file's bytes, captures
 //          the guest shell's reply, and closes with a FIN — the guest
 //          auto-detaches on disconnect. <close-after> (optional) delays the
-//          FIN until the reply contains that text. Requires --net. OFF by
+//          FIN until the reply contains that text. M70g G1 (#1491): a
+//          `:ssh` suffix speaks the ADR 0025 D2 profile as a client
+//          (VSSH.SSHClient) against the in-guest GOSSHD.ELF, paced one
+//          ≤192-byte segment per guest ACK. Requires --net. OFF by
 //          default: every existing gate is byte-identical.)
 //         [--net-nat] (milestone five card N7, claim 4678: attach one
 //          VZVirtioNetworkDeviceConfiguration with a
@@ -671,6 +675,23 @@ var netTcpConnectCloseAfter: String?
 // fresh challenge must fail).
 var netTcpConnectSecret: String?
 var netTcpConnectMac: String?
+// M70g G1 (#1491): `--net-tcp-connect …:ssh` — the runner-hosted SSH-2
+// client that dials the in-guest GOSSHD.ELF. TX is paced one ≤192-byte
+// segment per guest ACK (the guest kernel RX is a single slot).
+var netTcpConnectSSHMode = false
+var netTcpConnectSSHUserSeed: [UInt8] = SSHFixtures.hex(SSHFixtures.userKeySeedHex) ?? []
+var netTcpConnectSSHHostPin: [UInt8] = SSHFixtures.hex(SSHFixtures.hostPublicKeyHex) ?? []
+var netTcpConnectSSHUser = "alice"
+var netTcpConnectSSHExec = "echo VIRELAI-SSH-SERVER-OK"
+var netTcpConnectSSHClient: SSHClient?
+var netTcpConnectSSHTx: [UInt8] = []
+var netTcpConnectSSHTxOffset = 0
+// False until the guest Recv's the first SSH chunk and emits bytes. The
+// kernel ACKs a segment as soon as it lands in the one-slot RX buffer
+// (tcp.zig syn_received / established), so a bare ACK or SYN-ACK
+// retransmit must NOT release the next ≤192-byte chunk — that overflow
+// is dropped and never ACKed. Guest data is the Recv-happened signal.
+var netTcpConnectSSHGuestDataSeen = false
 var netTcpConnectState: UInt8 = 0 // 0 idle, 1 synSent, 2 established, 3 closed, 4 finSent, 5 awaitingChallenge
 var netTcpConnRecvText: String = ""
 let netTcpCliIsn: UInt32 = 0x10203040
@@ -1162,13 +1183,24 @@ while idx < arguments.count {
         netTcpConnectGuestIP = parts
         netTcpConnectPort = port
         if halves.count == 3, !halves[2].isEmpty {
-            let payloadPath = String(halves[2])
-            do {
-                netTcpConnectPayload = [UInt8](try Data(contentsOf: URL(fileURLWithPath: payloadPath)))
-            } catch {
-                fail("--net-tcp-connect could not read payload file '\(payloadPath)': \(error).")
+            if halves[2] == "ssh" {
+                // M70g G1 (#1491): host SSH-2 client against GOSSHD.ELF.
+                netTcpConnectSSHMode = true
+            } else {
+                let payloadPath = String(halves[2])
+                do {
+                    netTcpConnectPayload = [UInt8](try Data(contentsOf: URL(fileURLWithPath: payloadPath)))
+                } catch {
+                    fail("--net-tcp-connect could not read payload file '\(payloadPath)': \(error).")
+                }
             }
         }
+        idx += 2
+    } else if arg == "--net-tcp-connect-ssh-exec", idx + 1 < arguments.count {
+        netTcpConnectSSHExec = arguments[idx + 1]
+        idx += 2
+    } else if arg == "--net-tcp-connect-ssh-user", idx + 1 < arguments.count {
+        netTcpConnectSSHUser = arguments[idx + 1]
         idx += 2
     } else if arg == "--net-tcp-connect-after", idx + 1 < arguments.count {
         netTcpConnectAfter = arguments[idx + 1]
@@ -1604,6 +1636,12 @@ if netTcpRespondRelayMode, netTcpRespondRelayPort == nil {
 if netTcpConnectGuestIP != nil, netCapturePath == nil {
     fail("--net-tcp-connect requires --net (the client frames are written into the SAME attachment's socket).")
 }
+if netTcpConnectSSHMode {
+    guard SSHFixtures.cipherSelfCheck() else {
+        fail("--net-tcp-connect :ssh cipher self-check FAILED (the OpenSSH PROTOCOL.chacha20poly1305 pinned vector did not reproduce). Refusing to arm the SSH client.")
+    }
+    print("NET-TCP-CONNECT-SSH: cipher self-check ok (OpenSSH PROTOCOL.chacha20poly1305 pinned vector, seq 7, tag \(SSHFixtures.opensshVectorTagHex))")
+}
 // Milestone five card N7 (claim 4678): `--net-nat` is mutually exclusive
 // with `--net` — one network device per guest for now (the flag
 // validation shape: a clear fail, like the responder requirements above).
@@ -1951,6 +1989,26 @@ if let netCapturePath {
                     if isSynAck {
                         netTcpCliAck = seq &+ 1
                         netTcpCliSeq = netTcpCliIsn &+ 1
+                        if netTcpConnectSSHMode {
+                            let cfg = SSHClient.Config(
+                                userKeySeed: netTcpConnectSSHUserSeed,
+                                hostPublicKey: netTcpConnectSSHHostPin,
+                                user: netTcpConnectSSHUser,
+                                execCommand: netTcpConnectSSHExec
+                            )
+                            let client = SSHClient(config: cfg)
+                            client.logSink = { line in print("SSH-CLI: \(line)") }
+                            netTcpConnectSSHClient = client
+                            netTcpConnectSSHTx = client.start()
+                            netTcpConnectSSHTxOffset = 0
+                            netTcpConnectSSHGuestDataSeen = false
+                            netTcpConnectState = 2
+                            if !netTcpConnectSSHSendChunk(guestIP, guestPort) {
+                                let replyLen = buildTcpFrameExplicit(&reply, netTcpGuestMAC, [0x02, 0x00, 0x00, 0x00, 0x00, 0x02], netTcpCliSrcIP, guestIP, netTcpCliPort, guestPort, netTcpCliSeq, netTcpCliAck, 0x10, [])
+                                try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<replyLen]))
+                            }
+                            print("NET-TCP-CONNECT: handshake complete (server ISN 0x\(hex32(seq)), ack 0x\(hex32(netTcpCliAck))); SSH client started")
+                        } else {
                         // M50 TS4 (#1138, ADR 0024 D6): in auth mode the
                         // guest mints + sends its challenge once the
                         // connection is ESTABLISHED, so the handshake ACK
@@ -1965,6 +2023,7 @@ if let netCapturePath {
                             print("NET-TCP-CONNECT: handshake complete (server ISN 0x\(hex32(seq)), ack 0x\(hex32(netTcpCliAck))); awaiting the VIRELAIOS-AUTH/1 challenge")
                         } else {
                             print("NET-TCP-CONNECT: handshake complete (server ISN 0x\(hex32(seq)), ack 0x\(hex32(netTcpCliAck))); sent \(netTcpConnectPayload.count)-byte payload")
+                        }
                         }
                     } else if isRst {
                         netTcpConnectState = 3
@@ -2012,6 +2071,46 @@ if let netCapturePath {
                         try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<replyLen]))
                         netTcpConnectState = 3
                         print("NET-TCP-CONNECT: the guest sent FIN; ACKed and closed")
+                    } else if netTcpConnectSSHMode {
+                        if (flags & 0x02) != 0 {
+                            // SYN-ACK retransmit after ESTABLISHED. Re-ACK
+                            // only — another SSH chunk would overflow RX.
+                            let replyLen = buildTcpFrameExplicit(&reply, netTcpGuestMAC, [0x02, 0x00, 0x00, 0x00, 0x00, 0x02], netTcpCliSrcIP, guestIP, netTcpCliPort, guestPort, netTcpCliSeq, netTcpCliAck, 0x10, [])
+                            try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<replyLen]))
+                            print("NET-TCP-CONNECT-SSH: re-ACK SYN-ACK retransmit")
+                        } else {
+                            var fresh: [UInt8] = []
+                            if !payload.isEmpty {
+                                fresh = netTcpConnectSSHAccept(seq, payload)
+                                if !fresh.isEmpty {
+                                    netTcpConnectSSHGuestDataSeen = true
+                                    if let client = netTcpConnectSSHClient {
+                                        netTcpConnectSSHTx.append(contentsOf: client.feed(fresh))
+                                    }
+                                }
+                            }
+                            // Pace further chunks only after the guest has
+                            // Recv'd (it then emits SSH bytes). Bare ACKs
+                            // of the handshake chunk land while RX is full.
+                            if netTcpConnectSSHGuestDataSeen {
+                                if !netTcpConnectSSHSendChunk(guestIP, guestPort) {
+                                    if !payload.isEmpty {
+                                        let replyLen = buildTcpFrameExplicit(&reply, netTcpGuestMAC, [0x02, 0x00, 0x00, 0x00, 0x00, 0x02], netTcpCliSrcIP, guestIP, netTcpCliPort, guestPort, netTcpCliSeq, netTcpCliAck, 0x10, [])
+                                        try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<replyLen]))
+                                    }
+                                }
+                            } else if !payload.isEmpty {
+                                let replyLen = buildTcpFrameExplicit(&reply, netTcpGuestMAC, [0x02, 0x00, 0x00, 0x00, 0x00, 0x02], netTcpCliSrcIP, guestIP, netTcpCliPort, guestPort, netTcpCliSeq, netTcpCliAck, 0x10, [])
+                                try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<replyLen]))
+                            }
+                            if let client = netTcpConnectSSHClient, client.isClosed, netTcpConnectSSHTx.isEmpty {
+                                let finLen = buildTcpFrameExplicit(&reply, netTcpGuestMAC, [0x02, 0x00, 0x00, 0x00, 0x00, 0x02], netTcpCliSrcIP, guestIP, netTcpCliPort, guestPort, netTcpCliSeq, netTcpCliAck, 0x11, [])
+                                try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<finLen]))
+                                netTcpCliSeq = netTcpCliSeq &+ 1
+                                netTcpConnectState = 4
+                                print("NET-TCP-CONNECT-SSH: session done; sent FIN")
+                            }
+                        }
                     } else if !payload.isEmpty {
                         netTcpCliAck = seq &+ UInt32(payload.count)
                         var text = ""
@@ -2335,6 +2434,9 @@ if let hostIP = netTcpRespondHostIP, let hostPort = netTcpRespondHostPort {
 if let guestIP = netTcpConnectGuestIP, let guestPort = netTcpConnectPort {
     let ipText = guestIP.map(String.init).joined(separator: ".")
     print("  net-tcp-connect: ENABLED (M45 SH7, issue #1083, ADR 0020 Amendment B) — the host initiates an INBOUND TCP connection to the guest listener \(ipText):\(guestPort) (client port \(netTcpCliPort), ISN 0x\(hex32(netTcpCliIsn)), guest server ISN 0x\(hex32(netTcpGuestSrvIsn))) after \"\(netTcpConnectAfter ?? "sh: remote")\"\(netTcpConnectPayload.isEmpty ? "" : ", \(netTcpConnectPayload.count)-byte payload")")
+    if netTcpConnectSSHMode {
+        print("NET-TCP-CONNECT-SSH: ENABLED (M70g G1, #1491) user=\(netTcpConnectSSHUser) exec=\(netTcpConnectSSHExec.debugDescription) hostpin=\(SSHFixtures.hexString(netTcpConnectSSHHostPin))")
+    }
 }
 if netNatEnabled {
     print("  net-nat: ENABLED (milestone five card N7, claim 4678) — VZNATNetworkDeviceAttachment attached (host router + NAT; no capture file — guest-observed counters are the gate's evidence)")
@@ -4373,6 +4475,7 @@ func startNetTcpConnect() {
             if let text = try? String(contentsOf: serialURL, encoding: .utf8), text.contains(marker) {
                 netTcpCliSeq = netTcpCliIsn
                 netTcpCliAck = 0
+                netTcpConnectSSHGuestDataSeen = false
                 netTcpConnectState = 1
                 var syn = [UInt8](repeating: 0, count: 4096)
                 let len = buildTcpFrameExplicit(&syn, netTcpGuestMAC, [0x02, 0x00, 0x00, 0x00, 0x00, 0x02], netTcpCliSrcIP, guestIP, netTcpCliPort, guestPort, netTcpCliIsn, 0, 0x02, [])
@@ -4954,6 +5057,52 @@ func netTcpRespondSSHSendChunk(_ reply: inout [UInt8], _ buf: [UInt8], _ n: Int,
     if end >= total {
         netTcpRespondSSHTx.removeAll(keepingCapacity: true)
         netTcpRespondSSHTxOffset = 0
+    }
+    return true
+}
+
+// Advance netTcpCliAck over in-order guest payload and return the new
+// bytes. Retransmits and out-of-order segments are dropped: feeding them
+// into SSHClient concatenates a second copy of the identification line
+// onto a partial KEXINIT and the client fails closed (observed on the
+// first live-ssh-server run as "malformed KEXINIT").
+func netTcpConnectSSHAccept(_ seq: UInt32, _ payload: [UInt8]) -> [UInt8] {
+    if payload.isEmpty { return [] }
+    let delta = Int32(bitPattern: seq &- netTcpCliAck)
+    if delta > 0 {
+        print("NET-TCP-CONNECT-SSH: dropped out-of-order seq 0x\(hex32(seq)) want 0x\(hex32(netTcpCliAck))")
+        return []
+    }
+    let skip = Int(netTcpCliAck &- seq)
+    if skip >= payload.count {
+        print("NET-TCP-CONNECT-SSH: ignored retransmit seq 0x\(hex32(seq)) (acked through 0x\(hex32(netTcpCliAck)))")
+        return []
+    }
+    let fresh = skip == 0 ? payload : Array(payload[skip...])
+    netTcpCliAck = netTcpCliAck &+ UInt32(fresh.count)
+    print("NET-TCP-CONNECT-SSH: received \(fresh.count) byte(s)")
+    return fresh
+}
+
+// M70g G1 (#1491): pace one ≤192-byte segment of the SSH client's output
+// toward the guest. Same contract as netTcpRespondSSHSendChunk: the guest
+// kernel RX is a single 192-byte slot with no reassembly.
+func netTcpConnectSSHSendChunk(_ guestIP: [UInt8], _ guestPort: UInt16) -> Bool {
+    guard netTcpConnectSSHMode else { return false }
+    let total = netTcpConnectSSHTx.count
+    let off = netTcpConnectSSHTxOffset
+    guard off < total else { return false }
+    let end = min(off + netTcpRespondPacketChunk, total)
+    let chunk = Array(netTcpConnectSSHTx[off..<end])
+    var reply = [UInt8](repeating: 0, count: 4096)
+    let replyLen = buildTcpFrameExplicit(&reply, netTcpGuestMAC, [0x02, 0x00, 0x00, 0x00, 0x00, 0x02], netTcpCliSrcIP, guestIP, netTcpCliPort, guestPort, netTcpCliSeq, netTcpCliAck, 0x10, chunk)
+    try? netCaptureReadSocket!.write(contentsOf: Data(reply[0..<replyLen]))
+    netTcpCliSeq = netTcpCliSeq &+ UInt32(chunk.count)
+    netTcpConnectSSHTxOffset = end
+    print("NET-TCP-CONNECT-SSH: sent \(chunk.count) bytes (\(end)/\(total), seq 0x\(hex32(netTcpCliSeq &- UInt32(chunk.count))))")
+    if end >= total {
+        netTcpConnectSSHTx.removeAll(keepingCapacity: true)
+        netTcpConnectSSHTxOffset = 0
     }
     return true
 }

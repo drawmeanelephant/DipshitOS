@@ -648,4 +648,55 @@ final class VSSHTests: XCTestCase {
             Array(wrong.publicKey.rawRepresentation), hex(SSHFixtures.wrongUserPublicKeyHex)
         )
     }
+
+    func testClientAndServerRoundTrip() throws {
+        let server = SSHServer(config: serverConfig())
+        server.logSink = { _ in }
+        let client = SSHClient(config: SSHClient.Config(
+            userKeySeed: hex(SSHFixtures.userKeySeedHex),
+            hostPublicKey: hex(SSHFixtures.hostPublicKeyHex),
+            user: "alice",
+            execCommand: "uname -a",
+            cookieOverride: hex("0102030405060708090a0b0c0d0e0f00"),
+            ephemeralOverride: hex(Self.aliceSecretHex)
+        ))
+        var c2s = client.start()
+        var loops = 0
+        while loops < 32 {
+            let s2c = server.feed(c2s)
+            c2s = client.feed(s2c)
+            loops += 1
+            if c2s.isEmpty && (server.isClosed || client.isClosed) { break }
+            if c2s.isEmpty && s2c.isEmpty { break }
+        }
+        XCTAssertFalse(client.failed, "client events: \(client.events)")
+        XCTAssertFalse(server.phase == .failed, "server events: \(server.events)")
+        XCTAssertEqual(client.exitStatus, 0)
+        XCTAssertEqual(client.stdout, Array("VIRELAI-SSH5-OK\n".utf8))
+        XCTAssertTrue(client.events.contains { $0.contains("publickey accepted") })
+        XCTAssertTrue(client.events.contains { $0.contains("exit-status=0") })
+        XCTAssertTrue(server.events.contains { $0.contains("publickey accepted") })
+        XCTAssertTrue(server.events.contains { $0.contains("exec command=uname -a") })
+    }
+
+    func testClientRejectsUnknownHostKey() throws {
+        var cfg = serverConfig()
+        // Serve a different host key than the client pins.
+        cfg.hostKeySeed = hex(SSHFixtures.wrongUserKeySeedHex)
+        let server = SSHServer(config: cfg)
+        let client = SSHClient(config: SSHClient.Config(
+            userKeySeed: hex(SSHFixtures.userKeySeedHex),
+            hostPublicKey: hex(SSHFixtures.hostPublicKeyHex),
+            user: "alice",
+            execCommand: "uname -a"
+        ))
+        var c2s = client.start()
+        for _ in 0 ..< 16 {
+            let s2c = server.feed(c2s)
+            c2s = client.feed(s2c)
+            if client.failed { break }
+        }
+        XCTAssertTrue(client.failed)
+        XCTAssertTrue(client.events.contains { $0.contains("host key does not match pin") })
+    }
 }

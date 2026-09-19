@@ -7,12 +7,14 @@ import (
 	"virelai/vsys"
 )
 
-// The M67a socket surface (#1446): dial/send/recv over the kernel's TCP
-// slots 30-33, with DNS name resolution in front of the dial (dns.go).
-// Zero kernel work — every call lands on an existing ADR 0007 row; the
-// kernel keeps its ONE-TCP-socket-per-process law (kernel/src/tcp.zig is a
-// process-wide singleton keyed by tcp.owner_pid) and this type mirrors it
-// so a second live Dial fails in userland before the kernel has to.
+// The M67a/M70g socket surface (#1446, #1491): dial/send/recv over the
+// kernel's TCP slots 30-33, with DNS name resolution in front of the dial
+// (dns.go), plus Listen over the same slot-30 passive-open (ip==0) that
+// httpd.zig already uses. Zero kernel work — every call lands on an
+// existing ADR 0007 row; the kernel keeps its ONE-TCP-socket-per-process
+// law (kernel/src/tcp.zig is a process-wide singleton keyed by
+// tcp.owner_pid) and this type mirrors it so a second live Dial or Listen
+// fails in userland before the kernel has to.
 //
 // Blocking semantics: Dial's connect waits IN the kernel (slot 30 parks the
 // caller until ESTABLISHED or the kernel's 30 s connect timeout); Recv is
@@ -50,10 +52,10 @@ var (
 
 // ErrServerDial: a dial to the all-zeros address. The kernel treats
 // ip == 0 as PASSIVE open (listen mode, kernel/src/syscall.zig
-// handle_tcp_connect), and server sockets / inbound are an explicit M67a
-// non-goal — so Dial refuses the address in userland before the seam can
-// open one. A hostile DNS reply resolving to 0.0.0.0 hits the same guard.
-var ErrServerDial = errString("vi: 0.0.0.0 is the passive-open address — Dial refuses it (no server sockets)")
+// handle_tcp_connect). Dial refuses the address in userland so a
+// hostile DNS reply resolving to 0.0.0.0 cannot accidentally open a
+// listener; Listen is the inbound path (M70g G1, #1491).
+var ErrServerDial = errString("vi: 0.0.0.0 is the passive-open address — Dial refuses it; use Listen")
 
 // errString is a constant error carried as a string (the mirror of vsys's
 // sentinel style; the errno type covers kernel codes, these cover the
@@ -81,10 +83,11 @@ var slotHeld atomic.Bool
 // are not — one goroutine owns the traffic, the same contract vsys.Conn
 // states.
 type Conn struct {
-	ip       [4]byte
-	port     uint16
-	open     bool
-	peerGone bool
+	ip        [4]byte
+	port      uint16
+	open      bool
+	listening bool
+	peerGone  bool
 	// deadlineAt is an ABSOLUTE monotonic deadline in Nanos() nanoseconds
 	// for Recv (0 = unset — DefaultRecvBudgetNs applies). Absolute, so a
 	// budget shorter than one scheduler tick is not rounded up to a whole
@@ -123,6 +126,57 @@ func Dial(host string, port uint16) (*Conn, error) {
 		return nil, errno(-rc)
 	}
 	return &Conn{ip: ip, port: port, open: true}, nil
+}
+
+// Listen passively opens port (slot 30, ip==0). The kernel's TCP is a
+// single-connection machine: one listen_port, one handshake, one RX
+// slot. Accept waits until that handshake reaches ESTABLISHED. Close
+// releases the process-wide socket so the next Listen or Dial can run.
+func Listen(port uint16) (*Conn, error) {
+	if port == 0 {
+		return nil, errno(ErrEINVAL)
+	}
+	if !slotHeld.CompareAndSwap(false, true) {
+		return nil, ErrConnBusy
+	}
+	rc := svc2(SlotTCPConnect, 0, uintptr(port))
+	if rc < 0 {
+		slotHeld.Store(false)
+		return nil, errno(-rc)
+	}
+	return &Conn{port: port, open: true, listening: true}, nil
+}
+
+// Accept waits until the listened socket is ESTABLISHED. Bit 1 of the
+// readiness mask is writable-when-established; bit 0 is readable (the
+// peer's first segment may land before we observe writable). A bounded
+// wait fails closed rather than parking forever.
+func (c *Conn) Accept() error {
+	if c == nil || !c.open {
+		return ErrConnClosed
+	}
+	if !c.listening {
+		return nil
+	}
+	deadline := Nanos() + DefaultRecvBudgetNs
+	for polls := 0; ; polls++ {
+		mask, rc := TCPReady()
+		if rc < 0 {
+			if -rc == ErrEAGAIN {
+				return ErrConnClosed
+			}
+			return errno(-rc)
+		}
+		// Established (writable) or the peer already sent bytes/FIN.
+		if mask&3 != 0 {
+			c.listening = false
+			return nil
+		}
+		if Nanos() >= deadline || polls >= maxRecvPolls {
+			return errno(ErrETIMEDOUT)
+		}
+		svc1(SlotSleep, 1)
+	}
 }
 
 // IP returns the peer's address (the resolved one when Dial was given a

@@ -93,6 +93,11 @@ go-govinet:
 go-gosh:
     bash tools/go/build-gosh.sh
 
+# Build the M70g G1 in-guest SSH-2 server (#1491): .build/go/GOSSHD.ELF.
+# HOST PREREQUISITE for the live-ssh-server class-B gate.
+go-sshd:
+    bash tools/go/build-sshd.sh
+
 # Compile the AArch64 UEFI application and kernel image (class A — zig build)
 build:
     zig build
