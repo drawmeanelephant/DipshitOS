@@ -37,7 +37,7 @@ func TestTabMarkerShapes(t *testing.T) {
 func TestGuessBinShippingTitles(t *testing.T) {
 	cases := []struct{ title, want string }{
 		{"Calc", "GOCALC.ELF"},
-		{"Notepad", "NOTEPAD.BIN"},
+		{"Notepad", "NOTE.ELF"},
 		{"Edit", "GOEDIT.ELF"},
 		{"Term", "GOTERM.ELF"},
 		{"Other", "Other"},
@@ -51,12 +51,12 @@ func TestGuessBinShippingTitles(t *testing.T) {
 	if !s.OpenTab(3, "Edit") || !s.OpenTab(4, "Notepad") {
 		t.Fatal("OpenTab")
 	}
-	if s.At(0).Bin != "GOEDIT.ELF" || s.At(1).Bin != "NOTEPAD.BIN" {
+	if s.At(0).Bin != "GOEDIT.ELF" || s.At(1).Bin != "NOTE.ELF" {
 		t.Fatalf("bins %q %q", s.At(0).Bin, s.At(1).Bin)
 	}
 	body := layoutFileBody(&s, 1280, 720)
 	got := string(body)
-	if !strings.Contains(got, "bin=GOEDIT.ELF") || !strings.Contains(got, "bin=NOTEPAD.BIN") {
+	if !strings.Contains(got, "bin=GOEDIT.ELF") || !strings.Contains(got, "bin=NOTE.ELF") {
 		t.Fatalf("LAYOUT body missing live bins: %q", body)
 	}
 }
@@ -352,7 +352,7 @@ func TestLayoutFileBodyTwoPane(t *testing.T) {
 		t.Fatalf("lines = %d want 2: %q", len(lines), body)
 	}
 	want0 := "tab=3 bin=GOCALC.ELF x=0 y=0 w=640 h=720 focus=1 split=v"
-	want1 := "tab=4 bin=NOTEPAD.BIN x=640 y=0 w=640 h=720 focus=0 split=v"
+	want1 := "tab=4 bin=NOTE.ELF x=640 y=0 w=640 h=720 focus=0 split=v"
 	if lines[0] != want0 || lines[1] != want1 {
 		t.Fatalf("got\n %q\n %q\nwant\n %q\n %q", lines[0], lines[1], want0, want1)
 	}

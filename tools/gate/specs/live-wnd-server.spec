@@ -2,6 +2,14 @@
 # M52 card 2 (#1239): run 02 holds a WM-DECIDED capture (the tray tooltip,
 # cmd 8) and then kills the WM — the seat release must drop it, so the
 # resumed shim never inherits a modality it no longer decides.
+# M66c (#1445): the client is NOTE.ELF, NOTEPAD.BIN's Go successor. The
+# lifecycle vocabulary is shared by design (`note:` mirrors `notepad:`), so the
+# assertions below moved by prefix alone. NOTEPAD.BIN is still built and still
+# covered: five specs assert behaviour only the Zig app has (find/goto, theme
+# tokens, the clipboard self-demo, the unsaved-decline contract), so retiring it
+# is its own card rather than something this retarget assumes.
+#
+# HOST PREREQUISITE: bash tools/go/build-note.sh -> .build/go/NOTE.ELF
 
 vgate_name live-wnd-server "M32 WMS3: long-lived EL0 WM server on VZ"
 vgate_share seed
@@ -26,7 +34,19 @@ wnd start
 echo rx-wnd-server-ok
 EOF
 
-vgate_run 01 -- --screen '$RUN_DIR/screen' --script '$RUN_DIR/script.txt' --script2 '$RUN_DIR/script2.txt' --script2-after 'wnd: present' --script3 '$RUN_DIR/script3.txt' --script3-after 'tasks user-exec reaped' --script-expect 'rx-wnd-server-ok' --timeout 120
+vgate_setup_python <<'PY'
+import os, shutil, sys
+rd = os.environ["RUN_DIR"]
+share = os.environ.get("VG_SHARE") or os.path.join(rd, "share")
+src = os.path.join(".build", "go", "NOTE.ELF")
+if not os.path.exists(src):
+    sys.exit("NOTE.ELF missing (expected " + src + ") - build it first: "
+             "bash tools/go/build-note.sh")
+shutil.copy(src, os.path.join(share, "NOTE.ELF"))
+print("staged NOTE.ELF into share (%d bytes)" % os.path.getsize(os.path.join(share, "NOTE.ELF")))
+PY
+
+vgate_run 01 -- --screen '$RUN_DIR/screen' --script '$RUN_DIR/script.txt' --script2 '$RUN_DIR/script2.txt' --script2-after 'wnd: present' --script3 '$RUN_DIR/script3.txt' --script3-after 'tasks user-exec reaped' --script-expect 'rx-wnd-server-ok' --timeout 180
 
 vgate_assert 01 serial-contains 'VirelaiOS kernel has seized control.'
 vgate_assert 01 serial-count 'wm: none (shim compositing)' 2
@@ -47,7 +67,7 @@ vgate_assert 01 serial-absent '[EXC] parking:'
 vgate_file script-c.txt <<'EOF'
 wm
 wnd start
-exec NOTEPAD.BIN
+exec NOTE.ELF
 EOF
 
 vgate_file s2-c.txt <<'EOF'

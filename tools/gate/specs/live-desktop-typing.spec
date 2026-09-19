@@ -1,8 +1,13 @@
 # live-desktop-typing.spec -- issue #563: keys reach desktop-launched GUI app on VZ
 #
-# M60 / #1297: retargeted off Zig EDIT.BIN (deleted) onto leftover NOTEPAD.BIN.
-# One Down from the launcher head (CALC) selects NOTEPAD; typed glyphs must
-# land in the notepad text surface.
+# M60 / #1297: retargeted off Zig EDIT.BIN (deleted) onto the editor app.
+# M66c (#1445): that app is NOTE.ELF now, the Go successor. One Down from the
+# launcher head (GOCALC.ELF) selects it -- the launcher reads the share's
+# APPS.TXT, which gate-run copies from image/apps.txt, so the selection follows
+# the manifest rather than a hardcoded name. Typed glyphs must land in the
+# NOTE.ELF text surface.
+#
+# HOST PREREQUISITE: bash tools/go/build-note.sh -> .build/go/NOTE.ELF
 vgate_name live-desktop-typing "issue #563: keys reach desktop-launched GUI app on VZ"
 vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
@@ -19,6 +24,17 @@ tasks
 echo desktop-typing-sweep-done
 EOF
 
+vgate_setup_python <<'PY'
+import os, shutil, sys
+share = os.environ.get("VG_SHARE") or os.path.join(os.environ["RUN_DIR"], "share")
+src = os.path.join(".build", "go", "NOTE.ELF")
+if not os.path.exists(src):
+    sys.exit("NOTE.ELF missing (expected " + src + ") - build it first: "
+             "bash tools/go/build-note.sh")
+shutil.copy(src, os.path.join(share, "NOTE.ELF"))
+print("staged NOTE.ELF into share (%d bytes)" % os.path.getsize(os.path.join(share, "NOTE.ELF")))
+PY
+
 vgate_run A -- \
     --display --screen '$RUN_DIR/gpu-screen' \
     --via-virtio \
@@ -26,7 +42,7 @@ vgate_run A -- \
     --input-chords "down,return" \
     --input-chords-after "desktop: menu ready" \
     --input-string "abcde" \
-    --input-string-after "notepad: ready" \
+    --input-string-after "note: ready" \
     --script2 '$RUN_DIR/script2.txt' \
     --script2-after "timer heartbeat ticks=35" \
     --screenshot-after "timer heartbeat ticks=30" \
@@ -34,8 +50,8 @@ vgate_run A -- \
     --timeout 150
 
 vgate_assert A serial-contains "desktop: menu ready"
-vgate_assert A serial-contains "desktop: launch NOTEPAD.BIN pid=2"
-vgate_assert A serial-contains "notepad: ready"
+vgate_assert A serial-contains "desktop: launch NOTE.ELF pid=2"
+vgate_assert A serial-contains "note: ready"
 vgate_assert A serial-contains "input: armed=0 fifo=0/64 dropped=0 events=7"
 vgate_assert A serial-contains "dui: windows=6 focused=3"
 vgate_assert A serial-absent "[EXC] parking:"
@@ -44,8 +60,8 @@ vgate_assert A python <<'PY'
 import os, re
 ser = open(os.environ["VG_SER"]).read()
 assert ser.count("desktop: select app") >= 1, f"fewer than 1 select-app markers: {ser.count('desktop: select app')}"
-assert re.search(r'dui\[[0-9]*\]: user user rect=56,56,512,384', ser), "NOTEPAD window rect missing"
-assert "owner=2" in ser, "NOTEPAD window owner=2 missing"
+assert re.search(r'dui\[[0-9]*\]: user user rect=56,56,512,384', ser), "NOTE.ELF window rect missing"
+assert "owner=2" in ser, "NOTE.ELF window owner=2 missing"
 PY
 
 vgate_assert A snapshot 'gpu-screen-after' <<'PY'
@@ -92,7 +108,9 @@ def px(x, y):
     k = (y * w + x) * bpp
     return out[k], out[k+1], out[k+2]
 
-# NOTEPAD text surface is native (6,36,244,150) inside a window at (56,56).
+# NOTE.ELF text surface: native (6,36,244,150) inside a window at (56,56).
+# NOTE.ELF keeps the Zig notepad's native 512x384 declaration (note.natW/natH),
+# so this region is inherited rather than re-derived.
 glyphs = 0
 for y in range(90, 210, 2):
     for x in range(60, 310, 2):

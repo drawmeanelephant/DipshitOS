@@ -80,7 +80,7 @@ func TestSessionRoundTripTabcodec(t *testing.T) {
 	if decoded.Tabs[1].Title != "Notepad" || decoded.Tabs[1].Flags&tabcodec.FlagPinned != 0 {
 		t.Fatalf("record 1 = %+v", decoded.Tabs[1])
 	}
-	if decoded.Tabs[0].Bin != "GOCALC.ELF" || decoded.Tabs[1].Bin != "NOTEPAD.BIN" {
+	if decoded.Tabs[0].Bin != "GOCALC.ELF" || decoded.Tabs[1].Bin != "NOTE.ELF" {
 		t.Fatalf("bins %q %q", decoded.Tabs[0].Bin, decoded.Tabs[1].Bin)
 	}
 	ai, aok := decoded.ActiveIndex()
@@ -109,7 +109,7 @@ func TestApplyStateRestoresTitlesPinActive(t *testing.T) {
 	if restored.At(0).Title != "Calc" || !restored.At(0).Pinned || restored.At(0).Bin != "GOCALC.ELF" {
 		t.Fatalf("tab 0 = %+v", restored.At(0))
 	}
-	if restored.At(1).Title != "Notepad" || restored.At(1).Pinned || restored.At(1).Bin != "NOTEPAD.BIN" {
+	if restored.At(1).Title != "Notepad" || restored.At(1).Pinned || restored.At(1).Bin != "NOTE.ELF" {
 		t.Fatalf("tab 1 = %+v", restored.At(1))
 	}
 	if restored.focus != 1 {
