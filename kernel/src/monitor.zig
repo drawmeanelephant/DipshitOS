@@ -295,7 +295,7 @@ pub const Command = struct {
 /// grows it 54 -> 55 (`sym`). Milestone twenty-two D5 (issue #328)
 /// grows it 55 -> 56 (`strace`). Milestone twenty-two D6 (issue #329)
 /// grows it 56 -> 57 (`ps`).
-pub const registry_count: usize = 76; // 51 + sh/calc + `font` (M20 U1) + sym/strace/ps (M22 D3/D5/D6) + `type` (M19 P1) + `mktemp` (M19 P16) + stat/find/dmesg/time/which/inventory (M22 D8/D12/D13/D16) + du (M25 F4) + screenshot/shortcuts (M27 G27/G29) + smp (M28) + `wm` (M32 WMS2, issue #622) + `wnd` (M32 WMS3, issue #623) + `vf` (M34 HF1+HF2, issues #735/#736) + `sexiburger` (Milestone 19, issue #677) + `tabwm` (M39 TWM1, issue #928) + `secrets` (M50 TS5, issue #1139) + `forensics` (#1278, the last-words recorder)
+pub const registry_count: usize = 77; // 76 + `fuzz` (M70a-live #1466)
 
 /// `sym <file>` reads at most this many bytes for on-disk symtab inspection
 /// (M22 D3). ELF symbol tables live near the file tail; 64 KiB covers every
@@ -332,6 +332,7 @@ pub fn ensure_registry() []const Command {
             .{ .name = "elephant", .help = "operational mascot diagnostics", .usage = "elephant", .category = .machine_identity, .handler = cmd_elephant },
             .{ .name = "sexiburger", .help = "operational mascot diagnostics (the Sexipus burger)", .usage = "sexiburger", .category = .machine_identity, .handler = cmd_sexiburger },
             .{ .name = "exec", .dom = svclock.dom_bit(.file), .help = "load a user program from the host share and enter it at EL0", .usage = "exec [-c<core>] [-u<uid>] [<file> [arg...]]", .category = .tasks_processes, .max_args = 2 + esp_exec.max_exec_args, .handler = cmd_exec },
+            .{ .name = "fuzz", .dom = svclock.dom_bit(.file), .help = "seeded EL0 syscall sweep plus live HF-wire corpus (M70a #1466)", .usage = "fuzz <seed|roster>", .category = .tasks_processes, .min_args = 1, .max_args = 1, .handler = cmd_fuzz },
             .{ .name = "fault", .help = "trigger a synchronous exception (diagnostic)", .usage = "fault", .category = .memory_state, .handler = cmd_fault },
             .{ .name = "handoff", .help = "display boot-to-kernel ABI data", .usage = "handoff", .category = .memory_state, .handler = cmd_handoff },
             .{ .name = "help", .help = "grouped command catalog and per-command/per-topic help", .usage = "help [<command>|<topic>]", .category = .system, .max_args = 1, .handler = cmd_help },
@@ -7139,6 +7140,54 @@ fn cmd_spawn(m: *Monitor, args: []const []const u8) ExecError {
         m.console.puts("spawn: pool full or demo already running\n");
     }
     return .none;
+}
+
+// ---------------------------------------------------------------------------
+// M70a-live (#1466): seeded EL0 fuzz + live queue-5 wire corpus
+// ---------------------------------------------------------------------------
+
+fn cmd_fuzz(m: *Monitor, args: []const []const u8) ExecError {
+    const token = args[0];
+    const is_roster = std.mem.eql(u8, token, "roster");
+    if (!is_roster) {
+        _ = parseInt(token) catch {
+            err_line(m, "fuzz: seed must be roster or an integer (0x… hex or decimal)");
+            return .invalid_argument;
+        };
+    }
+
+    if (!virtio_file.available()) {
+        m.console.print_line("fuzz: wire skipped (no queue-5)");
+    } else {
+        var first_stat = true;
+        const run_one = struct {
+            fn go(mon: *Monitor, seed: u64, print_stat: *bool) void {
+                const r = virtio_file.fuzz_live_wire(seed);
+                if (print_stat.*) {
+                    print_stat.* = false;
+                    var sbuf: [96]u8 = undefined;
+                    const sl = std.fmt.bufPrint(&sbuf, "fuzz: wire-stat USER.BIN ok={d} size={d}\n", .{
+                        @intFromBool(r.stat_ok),
+                        r.stat_size,
+                    }) catch "fuzz: wire-stat USER.BIN\n";
+                    mon.console.puts(sl);
+                }
+                var buf: [128]u8 = undefined;
+                const line = std.fmt.bufPrint(&buf, "fuzz: wire seed=0x{x} decoded={d} violations={d}\n", .{
+                    seed, r.decoded, r.violations,
+                }) catch "fuzz: wire\n";
+                mon.console.puts(line);
+            }
+        }.go;
+        if (is_roster) {
+            for (virtio_file.fuzz_seeds) |seed| run_one(m, seed, &first_stat);
+        } else {
+            const seed = parseInt(token) catch 0;
+            run_one(m, seed, &first_stat);
+        }
+    }
+
+    return cmd_exec(m, &.{ "EL0EXEC.BIN", "fuzz", token });
 }
 
 // ---------------------------------------------------------------------------

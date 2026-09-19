@@ -27,6 +27,7 @@ memory / machine state
   uaccess     user-memory copy diagnostics (valid, fault, recovery)
 tasks / processes
   exec        load a user program from the host share and enter it at EL0
+  fuzz        seeded EL0 syscall sweep plus live HF-wire corpus (M70a #1466)
   kill        terminate a running process (kernel-owned lifetime)
   mbox        per-process IPC mailbox: pending messages and drain counters
   procs       process registry: image, address space, lifecycle, exit status

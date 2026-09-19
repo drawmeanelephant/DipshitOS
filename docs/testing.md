@@ -211,10 +211,20 @@ module makes the Zig 0.16 build runner mark that run step `w` and echo
 build exits 0 (observed 2026-09-18 with a five-line probe module). Print only
 when there is a violation to report.
 
-**Named gaps** (do not read a green run as coverage of these): the live EL0
-entry path (`#1333`'s class); `virtio_file.stat`'s inline `[size][type]` field
-parse, which is only reachable through the queue-5 transport; and the host
-runner's request parse in `main.swift`, which is not VZ-free.
+**Named gaps** (do not read a green host run as coverage of these): the host
+runner's request parse in `main.swift`, which is not VZ-free. Reply-byte
+mutations of `tests/vf-*.bin` stay host-side (the guest cannot rewrite a
+reply the host generated).
+
+**Live half (M70a-live #1466 / M70a3 #1470, gate `live-fuzz`):** the monitor
+command `fuzz roster` (or `fuzz <seed>`) STAT-proves `virtio_file.stat`'s
+inline `[size][type]` parse on queue 5, submits 32 mutated STAT requests
+per seed, then execs `EL0EXEC.BIN fuzz …` so the `(slot, args)` sweep, the
+buffer-contract split, and a successful `sys_exec` of `USER.BIN` all run
+from EL0. The program prints `seed=0x… ok` per seed, `fuzz: caller-not-moved
+ok`, and `fuzz: done`. Skip list (live-only): yield/exit/sleep/wait/
+udp_recv/wait_event/kill/tcp_connect/tcp_recv/setrlimit/thread/futex/
+sock_ready. Write is skipped so hostile buffers cannot spray the serial.
 
 ## Contract v2 — capabilities and delivery admission (M70e, issue #1457)
 

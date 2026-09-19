@@ -4185,6 +4185,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  uaccess     user-memory copy diagnostics (valid, fault, recovery)\n" ++
         "tasks / processes\n" ++
         "  exec        load a user program from the host share and enter it at EL0\n" ++
+        "  fuzz        seeded EL0 syscall sweep plus live HF-wire corpus (M70a #1466)\n" ++
         "  kill        terminate a running process (kernel-owned lifetime)\n" ++
         "  mbox        per-process IPC mailbox: pending messages and drain counters\n" ++
         "  procs       process registry: image, address space, lifecycle, exit status\n" ++
