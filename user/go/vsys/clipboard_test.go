@@ -54,13 +54,28 @@ func TestClipboardSetStagesAndTruncates(t *testing.T) {
 		t.Fatalf("ClipboardSet = (%d,%d) want (11,11)", n, rc)
 	}
 
+	// A body past the bound (the kernel's own buffer holds 512, so this is the
+	// 257..512 band that WOULD fit down at the slot) is truncated at the staging
+	// bound with no error at all: the caller's only signal is the returned count
+	// against len(p). Pin that silence, because it is the failure mode a caller
+	// hits by accident.
 	long := make([]byte, ClipboardMax+64)
 	for i := range long {
 		long[i] = 'x'
 	}
-	ClipboardSet(long)
+	fakeKernel(t, func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
+		gotLen = a1
+		return int64(a1) // the kernel stores every byte it is handed
+	})
+	n, rc = ClipboardSet(long)
 	if gotLen != uintptr(ClipboardMax) {
 		t.Fatalf("over-long set passed len %d want the bound %d", gotLen, ClipboardMax)
+	}
+	if n != ClipboardMax || rc < 0 {
+		t.Fatalf("over-long set = (%d,%d) want (%d,>=0)", n, rc, ClipboardMax)
+	}
+	if n >= len(long) {
+		t.Fatalf("truncation must be visible in the count: got %d for %d bytes", n, len(long))
 	}
 
 	fakeKernel(t, func(num uintptr, a0, a1, a2, a3 uintptr) int64 { return -ErrEINVAL })

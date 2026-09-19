@@ -23,8 +23,9 @@ scheduler, EL0 + syscalls), processes (IPC, wait, kill), networking
 (virtio-net → ARP → IPv4/ICMP → UDP → DHCP → TCP), graphics (framebuffer →
 Road Pops terminal → Driving Award window manager), input (USB XHCI + HID),
 usability, app events, the userland filesystem, the desktop platform
-(`CALC.BIN`, `NOTEPAD.BIN`, `TOP.BIN`, `GOFILES.ELF`, `DESKTOP.BIN`; the editor
-is the Go `NOTE.ELF` since M66c, and Zig `NOTEPAD.BIN` is retired), network
+(`CALC.BIN`, `NOTEPAD.BIN`, `TOP.BIN`, `GOFILES.ELF`, `DESKTOP.BIN` — of that
+M11 set the calculator and the editor are now the Go `GOCALC.ELF` / `NOTE.ELF`,
+with Zig `CALC.BIN` retired in M62h and Zig `NOTEPAD.BIN` in M66c), network
 apps, shared services (clipboard + app timers), audio, kernel consolidation,
 desktop completeness and the post-M17 arcs, and the M18–M27 experience layer
 (terminal & shell depth, shell programming, text rendering & Unicode, window

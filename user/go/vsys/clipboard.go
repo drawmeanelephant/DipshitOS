@@ -23,7 +23,9 @@ package vsys
 //     runtime: cannot allocate memory` inside mallocinit, i.e. a dead app, not a
 //     diagnosable error. 512 bytes of extra BSS moved GOEDIT.ELF from
 //     `mem_size mod 4096 = 1520` to 2064 and killed it, so a slot wrapper has no
-//     business spending image bytes it does not need.
+//     business spending image bytes it does not need. Those two figures are the
+//     live observation on the 2026-09-19 tree, hand-measured (memsz mod 4096 per
+//     ELF, see #1495 review): illustrative, not gate-pinned.
 //   - There is no `error` here for the same reason: an interface value drags
 //     the errno strings and their itab into the image's data segment, and every
 //     byte there is slack the argv block above needs.
@@ -39,9 +41,12 @@ const (
 	SlotClipboardGet uintptr = 39
 	// ClipboardMax is the largest transfer this package makes: the size of the
 	// staging buffer it shares with the console. It is NOT the kernel's buffer
-	// bound (kernel/src/clipboard.zig holds 512 bytes); a caller that needs to
-	// move more than this has to make its own uaccess-valid region and call the
-	// slot directly.
+	// bound (kernel/src/clipboard.zig holds 512 bytes), and the truncation at
+	// this bound is SILENT — a 257..512 byte body sets fine and reads back 256,
+	// with no error, because the kernel accepted everything it was handed. So a
+	// caller whose body can exceed this must compare the returned count against
+	// len(p) (that is why ClipboardSet returns it) and transfer the rest
+	// through its own uaccess-valid region via the slot, or accept the loss.
 	ClipboardMax = len(virConsoleStaging)
 )
 

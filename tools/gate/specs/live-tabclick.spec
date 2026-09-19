@@ -2,11 +2,12 @@
 #
 # M66c (#1485): the Zig notepad is retired; the tab HOST here is TOP.BIN, a
 # Zig tab-aware app that still ships. The subject is the strip's HIT-TEST
-# geometry and its cells, which is app-agnostic — but the cell layout is not:
-# with the Go client as the host the attach lands the child in the other cell
-# (observed on VZ: boot A's cell-body click still activated the child, while
-# boot B's × click and boot C's drag never detached — the coordinates below
-# were derived from a Zig host's strip). Same host as live-tabstrip.spec.
+# geometry and its cells, which is app-agnostic — but the coordinates are not:
+# they are derived from the host's own rect. TOP declares 40,40 512x384
+# (user/src/top.zig), so the strip is y 56..78 (host_y + title_bar_h 16) and
+# its two cells are x 40..296 (container) / 296..552 (attached child), because
+# paint_tab_strip lays the container's cell first. Same host and geometry as
+# live-tabstrip.spec.
 
 vgate_name live-tabclick "M37 DQ3 tab mouse interaction: click switches, × detaches, drag detaches"
 vgate_share seed
@@ -27,12 +28,12 @@ vgate_run A -- \
     --screen '$RUN_DIR/screen' \
     --via-virtio --cvc-snap \
     --script '$RUN_DIR/script-A.txt' \
-    --pointer-virtio "440,82,c" --pointer-virtio-after "tabhold: cycled" \
+    --pointer-virtio "424,67,c" --pointer-virtio-after "tabhold: cycled" \
     --script-expect "tabhold: done" --timeout 240
 
-# The click targets cell 1, which the strip always paints as the child
-# (container first — see paint_tab_strip), so it must activate the ATTACHED
-# window. Its id varies with open census (TABHOLD can be 2 or 3 — see
+# The click targets cell 1 (0-indexed), which the strip always paints as the
+# child (container first — see paint_tab_strip), i.e. x 296..552 for the host
+# above; its centre is 424. Its id varies with open census (TABHOLD can be 2 or 3 — see
 # live-tabstrip.spec), so parse the child from THIS boot's attach line and
 # require the click activated exactly that id.
 vgate_assert A python <<'PY'
@@ -63,7 +64,7 @@ vgate_run B -- \
     --screen '$RUN_DIR/screen' \
     --via-virtio --cvc-snap \
     --script '$RUN_DIR/script-A.txt' \
-    --pointer-virtio "561,82,c" --pointer-virtio-after "tabhold: cycled" \
+    --pointer-virtio "545,66,c" --pointer-virtio-after "tabhold: cycled" \
     --script-expect "tabhold: done" --timeout 240
 
 # Same census tolerance as boot A: the × click must detach the attached
@@ -96,7 +97,7 @@ vgate_run C -- \
     --screen '$RUN_DIR/screen' \
     --via-virtio --cvc-snap \
     --script '$RUN_DIR/script-A.txt' \
-    --pointer-virtio "440,82,d;440,200,u" --pointer-virtio-after "tabhold: cycled" \
+    --pointer-virtio "424,67,d;424,185,u" --pointer-virtio-after "tabhold: cycled" \
     --script-expect "tabhold: done" --timeout 240
 
 vgate_assert C serial-contains "wnd: tab-drag"

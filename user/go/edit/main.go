@@ -31,10 +31,29 @@
 // runtime's FIRST sys_mmap is refused and the app dies with `fatal error:
 // runtime: cannot allocate memory` inside mallocinit. Every referenced string
 // literal costs 16 bytes of that segment, and this app's budget is 240 bytes
-// (measured, not guessed: memsz 0x2f610 mod 4096 = 1552 against the 1792 wall).
+// (hand-measured on the 2026-09-19 tree, NOT gate-pinned: memsz 0x2f610 mod
+// 4096 = 1552 against the 1792 wall — treat the exact figure as illustrative
+// and re-measure before betting image bytes on it).
 // The selfdemo needs ~192 of them, so it lives in a purpose-built probe,
 // user/go/compose, whose own budget is ~1 KB. Take this file over the wall and
 // the app stops booting, silently.
+//
+// Find/goto parity with the Zig app it replaced is CHORD-DEEP, deliberately and
+// in writing (M66c review, #1495). The four deltas, so nobody re-litigates them
+// as regressions:
+//
+//   - there is no case-sensitivity toggle, and the search is case-SENSITIVE
+//     (matchAt is a byte compare). The Zig app was case-insensitive with a
+//     compile-time constant and no live coverage for a toggle, so this is a
+//     real behaviour delta, pinned by `TestFindIsCaseSensitive` in
+//     edit_test.go rather than left to prose.
+//   - the find/goto bars are not sticky: they close on a hit or a miss instead
+//     of staying open for the next search.
+//   - a miss keeps the caret where it was and prints `miss`; it does not
+//     re-anchor or wrap.
+//   - replace, match highlighting and the status-line "Line X of Y" are absent.
+//     The Zig side had them; the live gate (`live-text-search`) never asserted
+//     them, so no live coverage moved -- but they did not come across.
 //
 // What this is NOT: EDIT.BIN's feature list. The buffer is a byte slice with a
 // caret, find is a forward substring search, and there is no selection, undo,
@@ -301,7 +320,13 @@ func (e *editor) key(ev vi.Event) bool {
 		return e.barKey(ev, e.runGoto)
 	}
 	if isSave(ev) {
-		e.save()
+		// A failed Ctrl-S leaves the app alive and the buffer dirty: the
+		// error marker is the receipt, and the next Ctrl-S tries again.
+		// (Only the dialog's Save choice treats failure as terminal --
+		// there the user asked to publish and close.)
+		if !e.save() {
+			return true
+		}
 		return true
 	}
 	if ev.Flags&modCtrl != 0 {
@@ -408,11 +433,19 @@ func (e *editor) runGoto() {
 // order - the save reports first, then the dialog response, then the clean
 // close - so the gate's stage marker keeps meaning the bytes are on the share.
 func (e *editor) unsavedExit(ev vi.Event) {
+	published := true
 	if ev.Arg0 == 0 {
-		e.save()
+		published = e.save()
 	}
 	vi.ConsoleLine(markerUnsaved)
 	vi.ConsoleLine(markerClose)
+	if !published {
+		// The dialog promised to save, and the save failed. Exiting 0 here
+		// would be data loss wearing a clean status (M66c review, #1495):
+		// the error marker above is the receipt, and the non-zero exit is
+		// what lets a caller tell the two apart.
+		e.ta.CloseAndExit(1)
+	}
 	vi.ConsoleLine(markerOK)
 	e.ta.CloseAndExit(0)
 }
@@ -480,34 +513,35 @@ func (e *editor) markDirty() {
 	vi.ConsoleLine(markerDirty)
 }
 
-// save writes the whole buffer back to the path (MODE_CREATE|MODE_WRITE,
-// then truncate to the written length so a shorter edit cannot leave a
-// tail). FileWrite is one kernel call (capped at 2048 B), so a longer
-// buffer is looped. Reports the byte count it wrote.
-func (e *editor) save() {
-	h, rc := vi.FileOpen(e.path, vi.ModeWrite|vi.ModeCreate)
-	if rc < 0 {
+// save publishes the whole buffer to the path and reports whether the bytes
+// are on the share.
+//
+// M66c review (#1495): the first version of this function was in-place
+// (FileOpen + a FileWrite loop + FileTruncate), which is parity with the Zig
+// app it replaced but the wrong side of the milestone: M66b's whole point is
+// that a `/host` write is a PUBLISH, not an overwrite. M66a/M66b landed
+// vi.WriteFileSafe (temp + fsync + delete + rename, fail-closed, no in-place
+// truncation of the live path) exactly so the M66 apps inherit it, and the app
+// carrying the unsaved-decline contract is the worst place to keep a
+// half-write window: the dialog's Save choice is what a user reaches for when
+// they are already afraid of losing the buffer.
+//
+// The publish is one call, so there is no partial-write branch to report:
+// WriteFileSafe either puts the whole body at the path or removes its temp and
+// returns the failing step's negative code. The marker keeps the Zig shape
+// (`goedit: saved <path> n=<bytes>`) because the gates parse it.
+//
+// Failure is REPORTED and not swallowed: the error marker is printed here (the
+// only place this app writes) and the false return is what the callers use to
+// decide whether they may report a clean exit.
+func (e *editor) save() bool {
+	if rc := vi.WriteFileSafe(e.path, e.buf); rc < 0 {
 		vi.ConsoleLine(markerSaveErr + e.path + " " + vi.Itoa64(rc))
-		return
+		return false
 	}
-	written := 0
-	for written < len(e.buf) {
-		n, wrc := vi.FileWrite(uint32(h), e.buf[written:])
-		if wrc < 0 || n <= 0 {
-			vi.FileClose(uint32(h))
-			vi.ConsoleLine(markerSaveErr + e.path + " " + vi.Itoa64(wrc))
-			return
-		}
-		written += n
-	}
-	if trc := vi.FileTruncate(uint32(h), uint32(written)); trc < 0 {
-		vi.FileClose(uint32(h))
-		vi.ConsoleLine(markerSaveErr + e.path + " " + vi.Itoa64(trc))
-		return
-	}
-	vi.FileClose(uint32(h))
 	e.dirty = false
-	vi.ConsoleLine(markerSaved + e.path + " n=" + vi.Itoa64(int64(written)))
+	vi.ConsoleLine(markerSaved + e.path + " n=" + vi.Itoa64(int64(len(e.buf))))
+	return true
 }
 
 // findMarker is the find bar's serial result, in the Zig app's exact shape:
