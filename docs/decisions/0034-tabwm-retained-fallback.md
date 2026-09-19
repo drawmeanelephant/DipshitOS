@@ -68,6 +68,12 @@ bug-fix only), and no decision about any other binary (M68's non-goals).
   `go-files`, `go-tabapp`, `go-selftest`, `go-term`, `go-sh`). Deleting
   retires the first four and re-hosts the other eight — real work, real risk,
   no new capability.
+
+  Eleven of the twelve are on `main` today: the eighth hosted gate, `go-sh`
+  (M68a #1449), names `TABWM.BIN` only on PR #1493, which is still open. If
+  that spec loses the reference before it lands, the count is eleven and
+  nothing in this decision changes — the split is still four retiring and
+  seven re-hosting, and the cost asymmetry below is unaffected.
 - **It would leave the desktop with one implementation.** The Go seat is the
   default; the Zig seat is the only other renderer that has ever held slot 65.
   Keeping a frozen second seat is cheap. Rediscovering one after deleting it

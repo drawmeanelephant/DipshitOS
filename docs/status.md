@@ -98,7 +98,6 @@ The only threads not closed:
 | Thread | State / next step | Cards |
 |--------|-------------------|-------|
 | **Go runtime port — `GOOS=virelai`** | Phase 0a–0c + phase 2 netpoll + 2.1 EL0 clock landed (#1187/#1196/#1221/#1230/#1231/#1228/#1350/#1359). | #1163 |
-| **M65 — Go threads (ADR 0027)** | M65a–d landed (#1472/#1473/#1474/#1475), ADR 0007 slots 73/74 frozen, max_tasks 16 (3 + 3×4 + 1 spare) | #1433 |
 | **M58 — Move the apps you touch** | M58a–f landed: files, GOEDIT (`go-edit`), GOTERM (`go-term`, #1307), fetch, FART. `GOCALC.ELF` (gate `go-calc`, #1378) is the CALC successor. Full-viewport via tabapp in Zig TABWM. | |
 | **M60 leftovers** | Policy recorded; `EDIT.BIN`, `FILE.BIN`, `CALC.BIN` gone. `TABWM.BIN` is **retained by decision** (ADR 0034 / M68c #1451) as the `settings set wm tabwm` fallback — frozen, bug-fix only. Still open, one binary per card: `SH.BIN` (#1450 — GOSH lacks its serial front-end, `whoami`/`id`/`secrets`, `net`, and the M19 scripting depth `live-sh5` asserts) and `NOTEPAD.BIN` (#1485 — five feature specs un-homed). | #1450, #1485 |
 | **EL0 `sys_exec` caller survival** | AddrSpaceSpec + argv on slot 28; class-B `live-el0-exec` | #1333 |
