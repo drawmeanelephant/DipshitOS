@@ -1,0 +1,57 @@
+# js-wasm-measure — M70d #1456, the bounded-subset measurement
+
+NOT a shipped app and NOT a fleet gate (GF6: gates live under
+`tools/gate/specs/`). This directory is the reproducible host measurement
+for "does an existing JS engine compiled to `wasm32-freestanding` fit
+`WASM.BIN`?".
+
+The three interpreter caps, from `docs/wasm-import-contract.md` and
+`user/src/wasm.zig`:
+
+1. module size ≤ 64 KiB (`max_module_size`)
+2. linear memory ≤ 32 pages / 2 MiB
+3. imports are frozen `env.*` only (no WASI, no wasm exception-handling)
+
+`python3 tests/wasm-spike/wasm-inspect.py <module.wasm>` is the inspector.
+
+## Reproduce Elk (the only engine that produced a contract-clean module)
+
+Elk is AGPL; this tree is proprietary (`LICENSE`). Do not vendor it. Clone
+it into the gitignored `artifacts/` tree and compile:
+
+```bash
+git clone --depth 1 https://github.com/cesanta/elk.git artifacts/js-wasm-measure/elk
+# observed SHA: 71a86fa2fef146696be9ae66715bf3f91d0a5f2c
+bash tests/js-wasm-measure/measure.sh
+python3 tests/wasm-spike/wasm-inspect.py artifacts/js-wasm-measure/build/elk.wasm
+```
+
+Observed 2026-09-19 on this host (`zig` 0.16.0 from Homebrew): **22763 B**,
+`env.write` + `env.exit` only, memory min=2 / max=32 pages. Inspector PASS.
+
+A one-shot guest run (not in the fleet) is
+`tests/js-wasm-measure/run-under-wasm.spec`. Observed on VZ the same day:
+the module loads and validates, then **`wasm: trap during exec` / exit 3**.
+`WASM.BIN`'s `max_frames = 32` is too shallow for Elk's recursive C eval.
+That is the negative result this card records; the spec asserts the trap.
+
+```bash
+# after measure.sh has produced elk.wasm and `zig build` has WASM.BIN
+VGATE_NO_BUILD=1 bash tools/gate/vgate.sh tests/js-wasm-measure/run-under-wasm.spec
+```
+
+## What was tried and did not produce a module under the caps
+
+See the table in ADR 0028's M70d amendment. Short form: Duktape / MuJS /
+MicroQuickJS need `setjmp` (wasm EH; `WASM.BIN` has none) and their native
+`-Os` objects are already 359–666 KiB; QuickJS and mjs are not
+`wasm32-freestanding`; TinyJS is C++ with exceptions.
+
+## Files
+
+| file | what |
+|---|---|
+| `measure.sh` | compile Elk against the contract line + these stubs |
+| `elk_driver.c` | eval `1+2*3`, `v_write` the result, `v_exit(0)` |
+| `stubs.c` + `include/` | freestanding crumbs so `-nostdlib` links |
+| `run-under-wasm.spec` | optional one-shot VZ run; not discovered by `fleet.sh` |
