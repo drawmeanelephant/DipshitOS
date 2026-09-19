@@ -13,6 +13,7 @@ help networking
 help windows
 help storage
 help graphics
+help editor
 help syscalls
 echo help-live-ok
 EOF
@@ -30,5 +31,7 @@ vgate_assert 01 serial-contains 'virtio-net (DID 0x1041), flag-gated'
 vgate_assert 01 serial-contains 'owns the window registry'
 vgate_assert 01 serial-contains 'The macOS host share (custom-virtio queue 5'
 vgate_assert 01 serial-contains '1280x720 B8G8R8X8, 2D blits only'
+vgate_assert 01 serial-contains 'Text editing in a TABWM tab: GOEDIT.ELF, and NOTE.ELF'
+vgate_assert 01 serial-absent 'Full-screen and windowed text editing via'
 vgate_assert 01 serial-contains 'syscalls - numbered syscall table'
 vgate_assert 01 serial-contains 'help-live-ok'
