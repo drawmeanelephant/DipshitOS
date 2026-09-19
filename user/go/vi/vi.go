@@ -115,6 +115,7 @@ const (
 	SlotPrincipal    uintptr = 68 // M50 TS1: the read-only identity report (trust.go)
 	SlotFileMode     uintptr = 69 // M50 TS2: owner-only chmod (trust.go)
 	SlotSecretGet    uintptr = 70 // M50 TS5: the caller's secret entries (trust.go)
+	SlotTtyNetAuth   uintptr = 71 // M50 TS4: delegated net-auth (GOSH handshake)
 	SlotSockReady    uintptr = 76
 	SlotFileSync     uintptr = 77 // M66a (#1443): the ADR 0007 durability row
 )
@@ -125,6 +126,22 @@ const (
 	TtySerial uint64 = 1
 	TtyWindow uint64 = 2
 	TtyNet    uint64 = 3
+)
+
+// sys_tty_attach selector-3 auth schemes (ADR 0024 D6, a2 of slot 67).
+const (
+	NetSchemeOpen    uint64 = 0
+	NetSchemeHMAC    uint64 = 1
+	NetSchemeEd25519 uint64 = 2
+)
+
+// sys_tty_net_auth ops (ADR 0007 slot 71).
+const (
+	NetAuthOpChallenge uint64 = 0
+	NetAuthOpResponse  uint64 = 1
+	NetAuthOpVerdict   uint64 = 2
+	NetChallengeLen           = 32
+	NetAuthLineMax            = 160
 )
 
 // Kernel error codes (ADR 0007 D3): the MAGNITUDES of the kernel's
@@ -290,6 +307,29 @@ func TtyAttach(frontEnd uint64) int64 {
 // into that window; the caller draws no pixels. Host builds return -ENOSYS.
 func TtyAttachWindow(windowID int) int64 {
 	return syscall2(SlotTtyAttach, uintptr(TtyWindow), uintptr(windowID))
+}
+
+// TtyAttachNet attaches the net front-end (selector 3): LISTEN on port
+// through the kernel's single bounded TCP seam, with the chosen auth
+// scheme (0 open, 1 hmac-sha256, 2 ed25519) and an optional source-IP
+// allowlist (big-endian IPv4 u32; 0 = any). The credential is NEVER an
+// argument — the process reads it from the TS5 store and votes through
+// TtyNetAuth (slot 71). Host builds return -ENOSYS.
+func TtyAttachNet(port uint16, scheme uint64, allowIP uint32) int64 {
+	return syscall6(SlotTtyAttach, uintptr(TtyNet), uintptr(port), uintptr(scheme), 0, uintptr(allowIP), 0)
+}
+
+// TtyNetAuth is one slot-71 step of the delegated challenge-response
+// handshake. op 0 copies the fresh 32-byte challenge OUT (returns 32, or 0
+// before it is minted); op 1 copies the buffered client reply line OUT
+// (hex length, 0 when none); op 2 reads the one-byte verdict IN (0 reject,
+// 1 accept). Host builds return -ENOSYS.
+func TtyNetAuth(op uint64, buf []byte) int64 {
+	var p uintptr
+	if len(buf) > 0 {
+		p = uintptr(unsafe.Pointer(&buf[0]))
+	}
+	return syscall3(SlotTtyNetAuth, uintptr(op), p, uintptr(len(buf)))
 }
 
 // WinOpen opens a user window and returns (id, rawResult).

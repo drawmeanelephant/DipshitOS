@@ -547,3 +547,102 @@ func TestSearchAcceptedLineStillSubmits(t *testing.T) {
 		t.Fatalf("buf = %q, want post-search typing in a fresh line", e.buf)
 	}
 }
+
+// TestSearchCancelRestoresMidLineCursor: cancel puts the draft back with the
+// cursor where it sat, not only at end-of-line (TestSearchCancelRestoresTheDraft
+// types to the end). A search must not lose a mid-line edit position.
+func TestSearchCancelRestoresMidLineCursor(t *testing.T) {
+	h := &History{}
+	h.Push("status43")
+	e := NewEditor("gosh> ", h)
+	feedE(e, "abcdef")
+	feedE(e, "\x1b[D\x1b[D\x1b[D") // cursor between c and d
+	if e.cur != 3 {
+		t.Fatalf("setup cur = %d want 3", e.cur)
+	}
+	drainFeed(e, "\x12status")
+	out := feedE(e, "\x1b")
+	if e.searching {
+		t.Fatal("cancel left search mode on")
+	}
+	if string(e.buf) != "abcdef" || e.cur != 3 {
+		t.Fatalf("cancel restored %q cur %d, want abcdef at 3", e.buf, e.cur)
+	}
+	if !strings.Contains(out, "abcdef") {
+		t.Fatalf("cancel paint = %q, want the draft", out)
+	}
+}
+
+// TestSearchCancelMidChunkDefersRemainder: an accept or cancel that ends
+// search mid-chunk must hold the rest for the ground loop, the same path
+// `Ctrl+R query CR CR` uses to accept then submit. Without the deferral the
+// trailing bytes would vanish.
+func TestSearchCancelMidChunkDefersRemainder(t *testing.T) {
+	h := &History{}
+	h.Push("status43")
+	e := NewEditor("gosh> ", h)
+	feedE(e, "half")
+	_, ev := e.Feed([]byte("\x12st\x1bXYZ"))
+	if ev.Kind != evNone {
+		t.Fatalf("cancel chunk produced event %d", ev.Kind)
+	}
+	if !e.searching {
+		t.Fatal("Ctrl+R did not enter search")
+	}
+	if !e.Pending() {
+		t.Fatal("Ctrl+R dropped the rest of the chunk")
+	}
+	// Drain: query bytes, then Esc ends search and holds XYZ.
+	for e.Pending() && e.searching {
+		_, ev = e.Feed(nil)
+		if ev.Kind != evNone {
+			t.Fatalf("drain produced event %d", ev.Kind)
+		}
+	}
+	if e.searching {
+		t.Fatal("cancel left search mode on")
+	}
+	if string(e.buf) != "half" {
+		t.Fatalf("buf after cancel = %q want the draft", e.buf)
+	}
+	if !e.Pending() {
+		t.Fatal("cancel dropped the trailing ground bytes")
+	}
+	_, ev = e.Feed(nil)
+	if ev.Kind != evNone {
+		t.Fatalf("deferred typing produced event %d", ev.Kind)
+	}
+	if string(e.buf) != "halfXYZ" {
+		t.Fatalf("deferred typing = %q want halfXYZ", e.buf)
+	}
+}
+
+// TestSearchCtrlRMidChunkDefersQuery: Ctrl+R that arrives with query bytes
+// in the same chunk must not insert those bytes into the line. The rest of
+// the chunk is the query, consumed on the next Feed.
+func TestSearchCtrlRMidChunkDefersQuery(t *testing.T) {
+	h := &History{}
+	h.Push("status43")
+	e := NewEditor("gosh> ", h)
+	feedE(e, "hello")
+	_, ev := e.Feed([]byte("\x12status"))
+	if ev.Kind != evNone {
+		t.Fatalf("Ctrl+R chunk produced event %d", ev.Kind)
+	}
+	if !e.searching {
+		t.Fatal("Ctrl+R did not enter search")
+	}
+	if string(e.buf) != "hello" {
+		t.Fatalf("buf = %q, query bytes leaked into the line", e.buf)
+	}
+	if !e.Pending() {
+		t.Fatal("Ctrl+R dropped the query bytes")
+	}
+	e.Feed(nil)
+	if string(e.query) != "status" {
+		t.Fatalf("query = %q want status", e.query)
+	}
+	if string(e.buf) != "status43" {
+		t.Fatalf("buf = %q want the match loaded", e.buf)
+	}
+}

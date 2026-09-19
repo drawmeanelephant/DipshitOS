@@ -16,11 +16,10 @@
 //
 // `GOSH.ELF serial` takes the SERIAL front-end instead (step 3 becomes
 // `sys_tty_attach(1)`, no window and no tabapp — the console the kernel
-// monitor hands over, exactly the front-end SH.BIN used). The engine,
-// editor and startup contract are identical; only the front-end owner
-// changes. This is what M68b (#1450) needs: a shell whose own output,
-// prompts and typed bytes are serial-visible again, so the shell gates keep
-// asserting against the console instead of a window grid.
+// monitor hands over). `GOSH.ELF net [port] [open]` takes the NET front-end
+// (selector 3) with the delegated HMAC challenge-response handshake, the
+// last SH.BIN surface M68b (#1450) ports. The engine, editor and startup
+// contract are identical; only the front-end owner changes.
 //
 // Every marker is printed in a single console write (SMP-heartbeat safe)
 // and only AFTER its syscall returned, so the class-B gate's asserts can
@@ -65,6 +64,13 @@ const (
 	markerOpenErr  = "gosh: error open "
 	markerTtyErr   = "gosh: no /dev/tty"
 	markerAttachEr = "gosh: attach failed"
+	markerRemote   = "gosh: remote on "
+	markerAuthOpen = "gosh: remote auth=open"
+	markerAuthHMAC = "gosh: remote auth=hmac-sha256"
+	markerAuthEd   = "gosh: remote auth=ed25519"
+	markerNetRefus = "gosh: net refused: no credential (pass 'open' for the insecure mode)"
+	markerNetFail  = "gosh: remote attach failed"
+	markerNetBad   = "gosh: net refused: "
 )
 
 func main() {
@@ -72,6 +78,13 @@ func main() {
 	if line, headless := headlessLine(args); headless {
 		runHeadless(line)
 		return
+	}
+	if na, ok, err := parseNetArgs(args); ok {
+		runNet(na)
+		return
+	} else if err != "" {
+		vi.ConsoleLine(markerNetBad + err)
+		vi.Exit(2)
 	}
 	if hasArg(args, "serial") {
 		runSerial()
@@ -167,7 +180,7 @@ func runTab() {
 		ta.CloseAndExit(2)
 	}
 	vi.ConsoleLine(markerAttach)
-	runSession(fd, ta)
+	runSession(fd, ta, nil)
 }
 
 // runSerial attaches the SERIAL front-end (ADR 0020 selector 1) instead of a
@@ -191,14 +204,65 @@ func runSerial() {
 		vi.Exit(2)
 	}
 	vi.ConsoleLine(markerAttach)
-	runSession(fd, nil)
+	runSession(fd, nil, nil)
+}
+
+// runNet attaches the NET front-end (ADR 0020 selector 3): LISTEN on the
+// asked port, with the delegated challenge-response handshake unless `open`
+// was explicit. The engine, editor and startup contract are the serial
+// path's; only the front-end owner changes. Fail closed: no credential and
+// no `open` refuses to listen.
+func runNet(na netArgs) {
+	vi.ConsoleLine(markerReady)
+
+	h, rc := vi.FileOpen(ttyPath, vi.ModeRead|vi.ModeWrite)
+	if rc < 0 {
+		vi.ConsoleLine(markerTtyErr)
+		vi.Exit(1)
+	}
+	fd := uint32(h)
+	vi.ConsoleLine(markerTty)
+
+	scheme := vi.NetSchemeOpen
+	var auth *netAuth
+	if !na.open {
+		sch, ok := selectScheme(storeGet)
+		if !ok {
+			vi.FileClose(fd)
+			vi.ConsoleLine(markerNetRefus)
+			vi.Exit(2)
+		}
+		scheme = sch
+	}
+	if r := vi.TtyAttachNet(na.port, scheme, 0); r != 0 {
+		vi.FileClose(fd)
+		vi.ConsoleLine(markerNetFail)
+		vi.Exit(2)
+	}
+	if scheme != vi.NetSchemeOpen {
+		auth = sysNetAuth(scheme)
+	}
+	vi.ConsoleLine(markerRemote + vi.Itoa64(int64(na.port)))
+	switch scheme {
+	case vi.NetSchemeOpen:
+		vi.ConsoleLine(markerAuthOpen)
+	case vi.NetSchemeHMAC:
+		vi.ConsoleLine(markerAuthHMAC)
+	default:
+		vi.ConsoleLine(markerAuthEd)
+	}
+	runSession(fd, nil, auth)
 }
 
 // runSession is the shared startup contract + editor loop. ta is nil on the
-// serial front-end: there is no window, so no window events are polled — the
-// console's own input path delivers the bytes FileRead returns.
-func runSession(fd uint32, ta *tabapp.TabApp) {
-	hst := &goshHost{fd: fd}
+// serial and net front-ends: there is no window, so no window events are
+// polled — the console's own input path (serial) or the kernel's net pump
+// (selector 3) delivers the bytes FileRead returns. auth is the delegated
+// handshake, live only in net mode and only when a credential is in force;
+// one step per loop turn, including idle, because the challenge is not a
+// tty byte.
+func runSession(fd uint32, ta *tabapp.TabApp, auth *netAuth) {
+	hst := &goshHost{fd: fd, tty: true}
 	hist := &History{}
 	sh := NewShell(hst, hist)
 	editor := NewEditor(loadPrompt(), hist)
@@ -242,6 +306,7 @@ func runSession(fd uint32, ta *tabapp.TabApp) {
 
 	var readBuf [64]byte
 	for {
+		auth.step()
 		n, _ := vi.FileRead(fd, readBuf[:])
 		if n > 0 {
 			handle(editor.Feed(readBuf[:n]))
@@ -384,17 +449,20 @@ func completeFn(host *goshHost) func(string, bool) []string {
 	}
 }
 
-// goshHost is the Host seam over vi. In tab mode fd is the tty handle and
-// Out paints the grid; headless it is 0 and Out buffers console lines.
+// goshHost is the Host seam over vi. When tty is set, Out writes the
+// attached /dev/tty (serial, window, or net — the kernel pumps the right
+// front-end). Headless, Out buffers console lines. fd 0 is a valid kernel
+// file handle (the first open), so it cannot mean "no tty".
 type goshHost struct {
 	fd      uint32
+	tty     bool
 	lineBuf []byte
 }
 
 func (g *goshHost) Marker(line string) { vi.ConsoleLine(line) }
 
 func (g *goshHost) Out(b []byte) {
-	if g.fd != 0 {
+	if g.tty {
 		writeTTY(g.fd, b)
 		return
 	}
@@ -411,7 +479,7 @@ func (g *goshHost) Out(b []byte) {
 
 // flushOut drains a trailing partial line at headless exit.
 func (g *goshHost) flushOut() {
-	if g.fd == 0 && len(g.lineBuf) > 0 {
+	if !g.tty && len(g.lineBuf) > 0 {
 		vi.ConsoleLine(string(g.lineBuf))
 		g.lineBuf = nil
 	}
@@ -578,7 +646,7 @@ func (g *goshHost) ListDir() []string {
 }
 
 func (g *goshHost) ReadTTYLine() (string, bool) {
-	if g.fd == 0 {
+	if !g.tty {
 		return "", false
 	}
 	var acc []byte
