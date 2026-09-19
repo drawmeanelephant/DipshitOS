@@ -61,6 +61,7 @@ const mmu = @import("mmu.zig");
 // + `read_into` stream a dropped `.ELF` into `program`.
 const virtio_file = @import("virtio_file.zig");
 const scheduler = @import("scheduler.zig");
+const smp = @import("smp.zig");
 const userspace = @import("userspace.zig");
 // Milestone four (claim 2665): the seeded CSPRNG supplies the randomized
 // user stack VA (the seed's real ASLR consumer).
@@ -158,6 +159,11 @@ pub const ExecResult = enum {
     /// The process registry holds only live (created/running) processes —
     /// no free slot and no exited descriptor to recycle.
     process_full,
+    /// The `exec -c<core>` pin names a core that is not online (M70b
+    /// review): a task pinned to an offline core's ring is unreachable —
+    /// `steal_eligible` rejects it on every online core, and that core
+    /// never comes up to claim it. Honest refusal beats a stranded task.
+    bad_core,
     // M22 D1 (issue #324): honest ELF refusals, one per failure class.
     /// Structurally invalid ELF (bad header, truncated table, entry outside
     /// the initialized text).
@@ -340,6 +346,13 @@ pub fn exec_file_pinned_as(name: []const u8, args: []const []const u8, pin: usiz
 fn exec_file_impl(name: []const u8, args: []const []const u8, pin: ?usize, principal: process.Principal) ExecResult {
     defer clear_envp();
     if (args.len > max_exec_args) return .too_many_args;
+    // M70b review: an offline pin would strand the task forever — pinned
+    // tasks bypass every offline gate on the dequeue side (steal_eligible
+    // rejects them on every other core). The choke point covers every
+    // caller, not just the monitor's own -c parse.
+    if (pin) |p| {
+        if (p >= smp.max_cores or !smp.core_online[p]) return .bad_core;
+    }
     if (name.len == 0) return .not_found;
 
     // M34 HF6 (issue #740): the host share is the ONLY app source — the
@@ -1612,6 +1625,12 @@ test "exec: pinned exec routes the spawned task to exactly one core" {
     arm_allocator();
     _ = mmu.build_user_root(userspace.text_va, 0x1000, 64, userspace.stack_va, 0x2000, 8192) orelse return error.TestUnexpectedResult;
     _ = scheduler.init();
+    // M70b: a pin naming an OFFLINE core is refused (.bad_core) — a task
+    // pinned to an offline core's ring is unreachable. Bring core 1
+    // online so the routing below exercises the pin on a live core
+    // (deferred restore: the rest of the suite boots single-core).
+    scheduler.smp.core_online[1] = true;
+    defer scheduler.smp.core_online[1] = false;
     _ = scheduler.register_worker(0x2000);
     _ = scheduler.register_user(0x3000, 0);
     scheduler.start();
@@ -1621,6 +1640,9 @@ test "exec: pinned exec routes the spawned task to exactly one core" {
     try std.testing.expect(scheduler.reap(2));
     const img = dsk1("smp1: hello\n", dsk1_header_size, dsk1_header_size + 12);
     test_seed("SMP1.BIN", img[0 .. dsk1_header_size + 12]);
+    // M70b review: an offline pin is honestly refused — core 2 is within
+    // range but not online here (core 1 was brought online above).
+    try std.testing.expectEqual(ExecResult.bad_core, exec_file_pinned("SMP1.BIN", &.{}, 2));
     try std.testing.expectEqual(ExecResult.ok, exec_file_pinned("SMP1.BIN", &.{}, 1));
     const pinned = scheduler.task_info(2).?;
     try std.testing.expectEqualStrings("user-exec", pinned.name);

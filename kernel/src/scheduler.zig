@@ -496,8 +496,12 @@ fn home_ring_of(id: usize) usize {
 /// only ever be the last member of ring 0.
 fn ring_work_count(c: usize) usize {
     const ring = &ready_rings[c];
-    if (c == 0 and ring.count > 0 and ring.members[ring.count - 1] == idle_id) return ring.count - 1;
-    return ring.count;
+    // Snapshot once: this runs unlocked on every unpinned wake, and a
+    // concurrent claim between loads could otherwise drop `count` to 0
+    // and underflow the `members[n - 1]` index (M70b review).
+    const n = ring.count;
+    if (c == 0 and n > 0 and ring.members[n - 1] == idle_id) return n - 1;
+    return n;
 }
 
 /// M70b #1454 deliverable 2 — wake targeting. The least-loaded ONLINE
@@ -1029,6 +1033,19 @@ pub fn init() usize {
     cooperative_yields = 0;
     exits = 0;
     enabled_flag = false;
+    // M70b (#1454): the counters are BSS-zero (monotonic) on a live boot,
+    // but the host test binary runs every test in one process — reset with
+    // the rest so no test inherits another's wake/contention history.
+    sched_lock_acquires = 0;
+    sched_lock_contended = 0;
+    sched_lock_spins = 0;
+    wake_local = 0;
+    wake_remote = 0;
+    wake_nudges = 0;
+    resched_requests = 0;
+    resched_coalesced = 0;
+    resched_discharged = 0;
+    for (&resched_requested) |*r| r.* = false;
     @memset(&report_pending, false);
     exit_report_head = 0;
     exit_report_count = 0;
@@ -1223,6 +1240,16 @@ pub fn register_exec_user_pinned(
     sched_lock_acquire();
     defer sched_lock_release();
     const id = alloc_task_locked("user-exec", entry_va, spsr_el0t_irqs, kstack, root_phys, sp_el0) orelse return null;
+    // M70b review blocker: a fresh slot's `wakeup_tick` defaults to 0, and
+    // `wake_expired` reads any blocked non-waiter with `tick_count >=
+    // wakeup_tick` as an expired sleep — exec builds across TWO sched_lock
+    // holds with a lock-free gap (regions/bind happen between them), and
+    // IRQ masking is per-core, so on an AP exec core 0's tick could fire in
+    // that gap and publish the half-built task (post-M70b the SGI nudge
+    // hands it to a parked AP before the build completes). Sentinel it
+    // "wait forever" until `publish_task` makes the task visible; the
+    // single-hold builders (spawn, spawn_thread) never expose a gap.
+    tasks[id].wakeup_tick = std.math.maxInt(u64);
     if (pin) |p| {
         tasks[id].pin_core = p;
         tasks[id].secondary_ok = (p != 0);
@@ -1252,11 +1279,15 @@ pub fn register_exec_user_pinned(
 /// placement fields must already be final — this is the point of no
 /// return (a remote parked core can claim the task the instant it lands).
 /// The wake-funnel side effects (per-core resched request + parked-target
-/// SGI nudge) fire from push_home_locked exactly as for spawn.
+/// SGI nudge) fire from push_home_locked exactly as for spawn. The
+/// registration's "wait forever" `wakeup_tick` sentinel is cleared here:
+/// from this point the task is the wake_expired clock's to manage (a
+/// later `sys_sleep`/futex deadline overwrites it).
 pub fn publish_task(id: usize) void {
     sched_lock_acquire();
     defer sched_lock_release();
     if (id >= max_tasks or tasks[id].state != .blocked) return;
+    tasks[id].wakeup_tick = 0;
     tasks[id].state = .ready;
     push_home_locked(id);
 }
@@ -2673,11 +2704,18 @@ pub fn tick() void {
     // here — skipped => one 1 s cadence loss (the pre-existing skip
     // semantic; claim 9498). Claim 881 slice 3: sched_lock no longer
     // spans the rotation below — only this timekeeping beat.
-    if (c == 0 and evk_taken != null and sched_lock.try_lock()) {
-        sched_lock_holder = smp.core_id();
-        sched_lock_acquires +%= 1; // M70b: the tick's try-acquire is traffic too
-        on_tick();
-        sched_lock_release();
+    if (c == 0 and evk_taken != null) {
+        if (sched_lock.try_lock()) {
+            sched_lock_holder = smp.core_id();
+            sched_lock_acquires +%= 1; // M70b: the tick's try-acquire is traffic too
+            on_tick();
+            sched_lock_release();
+        } else {
+            // M70b review: a failed try IS a contention observation —
+            // without this, `contended=0` could hide exactly the cadence
+            // losses the skip semantic exists for.
+            sched_lock_contended +%= 1;
+        }
     }
     var elr: u64 = 0;
     var spsr: u64 = 0;

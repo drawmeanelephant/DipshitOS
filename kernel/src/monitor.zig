@@ -7198,6 +7198,15 @@ fn cmd_exec(m: *Monitor, args: []const []const u8) ExecError {
                 m.console.puts("\n");
                 return .invalid_argument;
             }
+            // M70b review: an offline core is rejected up front — a task
+            // pinned to an offline core's ring is unreachable (steal
+            // rejects it everywhere else, and the core never claims).
+            if (!smp.core_online[value]) {
+                err_prefix(m);
+                var cbuf: [96]u8 = undefined;
+                m.console.puts(std.fmt.bufPrint(&cbuf, "-c<core>: core {d} is not online (smp: cores={d})\n", .{ value, smp.num_cores }) catch "-c<core>: core is not online\n");
+                return .invalid_argument;
+            }
             pinned = true;
             pin = value;
         } else if (flag == 'u') {
@@ -7318,6 +7327,13 @@ fn cmd_exec(m: *Monitor, args: []const []const u8) ExecError {
         .no_args_room => {
             err_prefix(m);
             m.console.print_line("image leaves no room for the argv block (256 bytes)");
+            return .invalid_argument;
+        },
+        // M70b review: defensive backstop for the -c parse above (the
+        // exec-file choke point refuses an offline pin for every caller).
+        .bad_core => {
+            err_prefix(m);
+            m.console.print_line("-c<core>: core is not online");
             return .invalid_argument;
         },
         // M22 D1 (issue #324): honest ELF refusals.

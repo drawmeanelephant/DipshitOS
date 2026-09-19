@@ -17,11 +17,12 @@ smp
 echo rx-smpst-ok
 EOF
 
-# M70b (#1454) measurement window: the script queue above runs the second
-# `smp` as soon as the execs are QUEUED (the hammers keep running after
-# exec returns), so the contention line that matters is this one — fired
-# by a second input stream after the first heartbeat, i.e. with all four
-# hammers mid-load on 4 cores.
+# M70b (#1454) measurement points. `smp` appears three times in a run:
+# the boot report (pre-load), the script-queue's trailing `smp` — it runs
+# as soon as the four exec CALLS return, i.e. the hammers are loaded and
+# only starting, so its counters are early-window — and script2's `smp`,
+# fired after the first `smpnet` heartbeat with all four hammers
+# mid-load. The contention reading quotes the script2 report.
 vgate_file script2.txt <<'EOF'
 smp
 EOF

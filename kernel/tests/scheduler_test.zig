@@ -42,6 +42,8 @@ const process = scheduler.process;
 const reap = scheduler.reap;
 const reap_one_zombie = scheduler.reap_one_zombie;
 const register_exec_user = scheduler.register_exec_user;
+const register_exec_user_pinned = scheduler.register_exec_user_pinned;
+const publish_task = scheduler.publish_task;
 const register_user = scheduler.register_user;
 const register_worker = scheduler.register_worker;
 const request_kill = scheduler.request_kill;
@@ -297,6 +299,34 @@ test "scheduler: register_exec_user passes argc and argv VA through the x0/x1 fr
     const frame2: *exceptions.VectorFrame = @ptrFromInt(scheduler.tasks[id2].sp);
     try std.testing.expectEqual(@as(u64, 0), exceptions.frame_read(frame2, 0));
     try std.testing.expectEqual(@as(u64, 0), exceptions.frame_read(frame2, 1));
+}
+
+test "scheduler: exec registration is invisible to wake_expired until publish_task (M70b)" {
+    // The M70b review blocker: a fresh pool slot's `wakeup_tick` defaults
+    // to 0, and `wake_expired` reads any blocked non-waiter with
+    // `tick_count >= wakeup_tick` as an EXPIRED sleep. Exec builds across
+    // two sched_lock holds with a lock-free gap (regions/bind happen
+    // between them) and IRQ masking is per-core, so an AP exec's gap and
+    // core 0's tick interleave — pre-fix the tick published the half-built
+    // task (and the M70b SGI nudge handed it to a parked AP before the
+    // build completed). The registration sentinel-shields the task; only
+    // `publish_task` makes it visible to the clock.
+    _ = init();
+    start();
+    const kstack = &exec_kstack_pool[1];
+    const id = register_exec_user_pinned(userspace.text_va, 0x4000_0000, 100, 0x8000_0000, 8192, kstack, 0, 0, 0, null).?;
+    try std.testing.expect(is_blocked(id));
+    // A full on_tick beat runs the wake_expired scan — pre-fix it
+    // published the task right here.
+    on_tick();
+    try std.testing.expect(is_blocked(id));
+    check_ready_membership();
+    // Publish makes it visible: home ring (single online core → ring 0),
+    // ready state, and the clock sentinel cleared.
+    publish_task(id);
+    try std.testing.expect(!is_blocked(id));
+    try std.testing.expect(scheduler.ready_rings[0].contains(id));
+    check_ready_membership();
 }
 
 test "scheduler: round-robin alternates and round-trips saved context" {
