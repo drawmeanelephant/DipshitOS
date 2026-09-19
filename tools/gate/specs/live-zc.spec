@@ -10,6 +10,7 @@ import os, shutil
 # Setup hooks get RUN_DIR (not VG_SHARE); the seeded share lives there.
 share = os.path.join(os.environ["RUN_DIR"], "share")
 shutil.copy("tests/zc-corpus/z3b-stdz.z", os.path.join(share, "APP.Z"))
+shutil.copy("tests/zc-corpus/s3-break.z", os.path.join(share, "S3.Z"))
 shutil.copy("tests/zc-corpus/z3b-labels.z", os.path.join(share, "LABELS.Z"))
 shutil.copy("user/src/lib/stdz/fmt.zig", os.path.join(share, "FMT.Z"))
 shutil.copy("user/src/lib/stdz/string_builder.zig", os.path.join(share, "BUILDER.Z"))
@@ -31,7 +32,26 @@ exec MAIN.ELF
 echo rx-zc-ok
 EOF
 
+# M70c S3 (issue #1455): the dialect lift's in-guest leg. Same compile+exec
+# shape as run 01, on tests/zc-corpus/s3-break.z — the compiler is asked to
+# lower `break`/`continue` and the RUN is what proves the jumps land where the
+# fixture's self-checks say they must. The two spin guards are asserted ABSENT
+# by name: if `continue` in a `for` skipped the step, the program reports
+# itself rather than hanging the gate on a timeout.
+vgate_file script3.txt <<'EOF'
+ls
+strace exec ZC.BIN S3.Z S3.ELF
+EOF
+
+vgate_file script4.txt <<'EOF'
+ls
+exec S3.ELF
+echo rx-s3-ok
+EOF
+
 vgate_run 01 -- --script '$RUN_DIR/script.txt' --script-after "tasks user-el0 exited status=7" --script2 '$RUN_DIR/script2.txt' --script2-after "zc: successfully compiled in-guest" --script-expect "tasks user-exec exited status=72" --timeout 90
+
+vgate_run 02 -- --script '$RUN_DIR/script3.txt' --script-after "tasks user-el0 exited status=7" --script2 '$RUN_DIR/script4.txt' --script2-after "zc: successfully compiled in-guest" --script-expect "tasks user-exec exited status=72" --timeout 90
 
 vgate_assert 01 serial-contains "VirelaiOS kernel has seized control."
 vgate_assert 01 serial-contains "APP.Z"
@@ -45,6 +65,41 @@ vgate_assert 01 serial-contains "tasks user-exec reaped"
 vgate_assert 01 serial-contains "rx-zc-ok"
 vgate_assert 01 serial-contains "smp: secondary runs="
 vgate_assert 01 serial-absent "[EXC] parking:"
+vgate_assert 02 serial-contains "S3.Z"
+vgate_assert 02 serial-contains "zc: successfully compiled in-guest"
+vgate_assert 02 serial-contains "exec: loaded S3.ELF size="
+vgate_assert 02 serial-contains "tasks user-exec exited status=72"
+vgate_assert 02 serial-contains "s3-start"
+vgate_assert 02 serial-contains "s3-while-break"
+vgate_assert 02 serial-contains "s3-while-continue"
+vgate_assert 02 serial-contains "s3-range-break"
+vgate_assert 02 serial-contains "s3-range-continue"
+vgate_assert 02 serial-contains "s3-array-continue"
+vgate_assert 02 serial-contains "s3-nested-break"
+vgate_assert 02 serial-contains "s3-defer-break"
+vgate_assert 02 serial-contains "s3-loop-exit"
+vgate_assert 02 serial-contains "s3-all-ok"
+vgate_assert 02 serial-absent "s3-range-continue-spin"
+vgate_assert 02 serial-absent "s3-array-continue-spin"
+vgate_assert 02 serial-absent "[EXC] parking:"
+vgate_assert 02 python <<'PY'
+import os
+ser = open(os.environ["VG_SER"]).read()
+names = ["s3-start", "s3-while-break", "s3-while-continue", "s3-range-break",
+         "s3-range-continue", "s3-array-continue", "s3-nested-break",
+         "s3-defer-break", "s3-loop-exit", "s3-all-ok"]
+last = -1
+for name in names:
+    idx = ser.find(name)
+    assert idx != -1, "missing marker %s" % name
+    assert idx > last, "marker out of order: %s" % name
+    last = idx
+# Each phase prints its marker exactly once, so a marker reached twice would
+# mean the compiler ran a loop body it should not have.
+for name in names:
+    assert ser.count(name) == 1, "marker %s appears %d times" % (name, ser.count(name))
+PY
+
 vgate_assert 01 python <<'PY'
 import os
 share = os.environ["VG_SHARE"]

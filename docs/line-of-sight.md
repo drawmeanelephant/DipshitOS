@@ -131,6 +131,7 @@ hygiene cards + the #706/#707 umbrellas below.
 | **Z3b — stdz subset** | #759 | fmt (u64→dec/hex), string builder, ring buffer in `lib/`, compiled in | a stdz-using program ships as an app | adds: the first reusable library |
 | **Z4a — Corpus parity (compile)** | #760 | a fixture corpus of `.z` sources; every source compiles with host `zig 0.16` (compile-only) AND guest `zc` (compile + run), behavior pinned | corpus green on both sides | the "dual-compile" gate, made real |
 | **Z4b — Behavioral parity (run)** | #761 | where host 0.16 output can run — needs a **host link contract** (linker script + target recipe; the loader is already ELF64-class-agnostic, so no kernel seam) — byte-equivalent behavior | dual-run comparison on the contract | the top of the ladder; explicitly a negotiation, not assumed |
+| **S3 — Dialect lift** (post-ladder) | #1455 | shrink the boundary the ladder drew: `break`/`continue` in `while`/`for`, with the body's open defers unwound on the jump | `live-zc` run 02 + `tests/zc-corpus/s3-break.z` (`s3` in the corpus dual-run) | removes: the "break/continue are non-goals" bound. Not a rung — a lift; the corpus and this boundary move together |
 
 **Honest notes on the ladder:**
 
@@ -244,10 +245,17 @@ pins, so behavior is byte-equivalent across the two compilers. This is the
   `anytype`-widened so pointer args type-check under host Zig), multi-file
   flat-namespace compile (Z3a), and the stdz modules (fmt/string
   builder/ring — Z3b) compiled in from source.
+- `break`/`continue` in `while` and both `for` forms — the M70c S3 lift
+  (2026-09-19, issue #1455). `break` leaves the innermost loop; `continue`
+  re-tests a `while`'s condition but runs a `for`'s **step**, because a
+  range/array loop's increment sits at the bottom of the body. Both run every
+  defer still open inside the body, the same LIFO unwind a fallthrough
+  performs. Fixture: `tests/zc-corpus/s3-break.z` (`live-zc` run 02, plus the
+  corpus dual-run).
 
 **Non-goals** (host Zig parses them; `zc` does not — compile errors, and
 the fixture corpus must not use them): `comptime`, `std`, error sets,
-`break`/`continue`, compound assignment (`+=` etc. — write `i = i + 1`),
+compound assignment (`+=` etc. — write `i = i + 1`),
 `%` (emulate as `x - (x / 10) * 10`), `else if` (nest ifs), method-call
 syntax, any `@import` other than the magic `"zc"` name (the multi-file
 namespace is flat by design). Dialect-internal caps the gate enforces:
@@ -266,6 +274,24 @@ move together. The corpus gate's first in-guest sweep caught one drift:
 `z1b-arrays.z` used `+=` (never in the dialect — its zc.zig unit twin
 always used `i = i + 1`), which the Z0.5-era host checks could not see
 (host Zig accepts `+=`); fixed to the supported form in Z4a.
+
+**What still blocks full Zig 0.16 (M70c S3's record, 2026-09-19).** The
+ladder's own top rung is landed — host `zig 0.16` and in-guest `zc` agree on
+the corpus, dual-run (Z4b) — and S3 shrank the boundary by one bound
+(`break`/`continue`). The remaining distance is the non-goals above, and it
+splits in two. Observed in `user/src/zc.zig`: it contains no comptime
+evaluator, no error-set or `try`/`catch` tokens, and no module graph beyond
+the magic `"zc"` name, so *dialect parity* is not reachable by writing more
+fixtures — those three are a different kind of work and nothing in the fleet
+exercises them. The mechanical remainder is unimplemented rather than hard:
+`%` is a three-instruction lowering on the `/` path that already emits `udiv`
+(`parseMultiplicative` in `zc.zig`), compound assignment and `else if` are
+parse-level sugar, and
+method-call syntax is a rewrite. One gap is worth naming because it bit this
+card's own fixture: Zig's keyword forms `or`/`and` are **not** in the dialect
+(`||`/`&&` are) — host Zig accepts both, so only the in-guest leg catches it.
+None of these is scheduled: the boundary moves when a fixture needs it, which
+is why this lift came from a loop-control bound.
 
 **Sequencing note (historical):** #749 (Z0.5) landed first — the dialect
 unlock with the host-shim contract pinned in its body — #708 (VL6) rode

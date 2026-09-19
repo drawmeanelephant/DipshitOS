@@ -1,0 +1,211 @@
+const zc = @import("zc");
+
+// M70c S3 corpus fixture (issue #1455): `break` / `continue`, the two
+// loop-control statements the Z4a dialect boundary (docs/line-of-sight.md)
+// listed as non-goals. This file parses under host `zig 0.16` (the gate builds
+// it with the Z4b link contract, which forces full semantic analysis of every
+// body) AND compiles + runs in-guest with ZC.BIN, and it is the behavioral half
+// of the dual-run: the host-built ELF must assert the same pins.
+//
+// What each phase pins, and what a wrong lowering would do instead:
+//
+//   1. while + break    — the loop ends at the limit, not at its condition.
+//                         A `break` that fell through (or jumped past the
+//                         defers) shows up as the wrong sum.
+//   2. while + continue — the increment sits ABOVE the `continue`, so the
+//                         skipped iteration counts once and the loop still
+//                         terminates. Jumping to the body instead of the
+//                         condition would re-run the increment: sum 62, not 51.
+//   3. for (range) + break.
+//   4. for (range) + continue — THE sharp one. A `for`'s increment lives at the
+//                         bottom of the body, so `continue` must target the
+//                         step, not the condition; aiming at the condition
+//                         would never advance the index. The loop is guarded
+//                         so that mistake reports a named marker + exit 1
+//                         instead of hanging the gate on a timeout.
+//   5. for (array) + continue — the same rule through the other lowering.
+//   6. nested loops     — `break` leaves the INNER loop only: the outer loop
+//                         must still run to completion.
+//   7. defer + break    — a `break` unwinds the defer scopes still open inside
+//                         the body (the if-body's defer here), the same LIFO
+//                         unwind a fallthrough performs. Skipping them leaves
+//                         the counter 100 short.
+//
+// Deterministic serial markers (asserted in order by verify-zc-corpus.sh):
+//   s3-start → s3-while-break → s3-while-continue → s3-range-break →
+//   s3-range-continue → s3-array-continue → s3-nested-break → s3-defer-break →
+//   s3-loop-exit → s3-all-ok, then exit status 72. A run that exits 1 anywhere
+//   is a failure, and the spin guards print their own marker before doing so.
+//
+// The final marker is deliberately NOT "s3-ok": the gate echoes "rx-s3-ok"
+// after the exec, so a marker that is a substring of that line would be found
+// in the log even if the program never printed it (the vacuous-assert trap
+// from the M68b review).
+
+// A `while` whose only exit is a `break` (the condition is never reached).
+fn sum_until(limit: u64) u64 {
+    var i: u64 = 0;
+    var acc: u64 = 0;
+    while (i < 1000) {
+        if (i == limit) {
+            break;
+        }
+        acc = acc + i;
+        i = i + 1;
+    }
+    return acc;
+}
+
+pub fn main() void {
+    zc.print("s3-start\n");
+
+    // 1. while + break: 0+1+2+3+4 = 10, and the loop stopped early (i == 5).
+    if (sum_until(5) != 10) {
+        zc.exit(1);
+    }
+    zc.print("s3-while-break\n");
+
+    // 2. while + continue: 1+2+3+5+6+7+8+9+10 = 51 (4 skipped), i == 10.
+    var i: u64 = 0;
+    var kept: u64 = 0;
+    while (i < 10) {
+        i = i + 1;
+        if (i == 4) {
+            continue;
+        }
+        kept = kept + i;
+    }
+    if (kept != 51) {
+        zc.exit(1);
+    }
+    if (i != 10) {
+        zc.exit(1);
+    }
+    zc.print("s3-while-continue\n");
+
+    // 3. range `for` + break: 0+1+2+3+4 = 10.
+    var total: u64 = 0;
+    for (0..100) |k| {
+        if (k == 5) {
+            break;
+        }
+        total = total + k;
+    }
+    if (total != 10) {
+        zc.exit(1);
+    }
+    zc.print("s3-range-break\n");
+
+    // 4. range `for` + continue: the step must still run — 0+1+3+5 = 9 over
+    //    exactly 6 iterations. Guarded so a skipped step is a named failure.
+    var skips: u64 = 0;
+    var visited: u64 = 0;
+    for (0..6) |k| {
+        visited = visited + 1;
+        if (visited > 64) {
+            zc.print("s3-range-continue-spin\n");
+            zc.exit(1);
+        }
+        if (k == 2) {
+            continue;
+        }
+        if (k == 4) {
+            continue;
+        }
+        skips = skips + k;
+    }
+    if (visited != 6) {
+        zc.exit(1);
+    }
+    if (skips != 9) {
+        zc.exit(1);
+    }
+    zc.print("s3-range-continue\n");
+
+    // 5. array `for` + continue: 1+2+4+5 = 12 with the element capture live.
+    var arr: [5]u64 = undefined;
+    arr[0] = 1;
+    arr[1] = 2;
+    arr[2] = 3;
+    arr[3] = 4;
+    arr[4] = 5;
+    var asum: u64 = 0;
+    var steps: u64 = 0;
+    for (arr, 0..) |v, idx| {
+        steps = steps + 1;
+        if (steps > 64) {
+            zc.print("s3-array-continue-spin\n");
+            zc.exit(1);
+        }
+        if (idx == 2) {
+            continue;
+        }
+        asum = asum + v;
+    }
+    if (steps != 5) {
+        zc.exit(1);
+    }
+    if (asum != 12) {
+        zc.exit(1);
+    }
+    zc.print("s3-array-continue\n");
+
+    // 6. nested loops: the inner `break` leaves the inner loop; the outer loop
+    //    runs all 4 iterations and the inner body accumulates 0+1+2+3 = 6 hits.
+    var outer: u64 = 0;
+    var hits: u64 = 0;
+    for (0..4) |a| {
+        for (0..4) |b| {
+            if (b == a) {
+                break;
+            }
+            hits = hits + 1;
+        }
+        outer = outer + 1;
+    }
+    if (outer != 4) {
+        zc.exit(1);
+    }
+    if (hits != 6) {
+        zc.exit(1);
+    }
+    zc.print("s3-nested-break\n");
+
+    // 7. `break` unwinds the open defer scopes. The if-body's defer is
+    //    registered, the `break` runs it, and the pre-break work counts once:
+    //    1 (k=0) + 1 (k=1) + 100 (the defer on k=2) = 102.
+    var dcount: u64 = 0;
+    for (0..10) |k| {
+        if (k == 2) {
+            defer dcount = dcount + 100;
+            break;
+        }
+        dcount = dcount + 1;
+    }
+    if (dcount != 102) {
+        zc.exit(1);
+    }
+    zc.print("s3-defer-break\n");
+
+    // ...and the loop BODY's own scope defers run on a `break` too, exactly
+    // once per iteration, `break` iterating included: 3.
+    var body_defers: u64 = 0;
+    var iterations: u64 = 0;
+    while (iterations < 10) {
+        defer body_defers = body_defers + 1;
+        iterations = iterations + 1;
+        if (iterations == 3) {
+            break;
+        }
+    }
+    if (body_defers != 3) {
+        zc.exit(1);
+    }
+    if (iterations != 3) {
+        zc.exit(1);
+    }
+    zc.print("s3-loop-exit\n");
+
+    zc.print("s3-all-ok\n");
+    zc.exit(72);
+}

@@ -2441,6 +2441,11 @@ pub fn build(b: *std.Build) void {
         // module as a host test root is what makes the §9 capability and
         // admission negatives evidence rather than prose.
         "user/src/wasm.zig",
+        // M70c S3 (#1455): same gap in the in-guest compiler — zc.zig's own
+        // test blocks (45 before the break/continue ones) were only ever
+        // compiled into ZC.BIN, so nothing in the fleet ran them. The compiler
+        // that the Z4 corpus gate trusts was the least-tested module in it.
+        "user/src/zc.zig",
         // X.509 layer (card TLS13-C3): the strict DER reader, the certificate
         // parser, PEM decoding and hostname/identity matching. None of these
         "user/tests/ui/ui_test.zig",
@@ -2497,6 +2502,12 @@ pub fn build(b: *std.Build) void {
     // build option of THAT root only — the checked-in bytes cannot drift from
     // what the fuzz corpus feeds the decoders, and the kernel image never
     // carries fixture data.
+    // M70c S3 (#1455): the zc corpus fixture, embedded as a build option of
+    // the zc test root only, for the same reason — the source the class-B gate
+    // stages must be the source the in-guest compiler is unit-tested against.
+    const zc_corpus_options = b.addOptions();
+    zc_corpus_options.addOption([]const u8, "s3_break", @embedFile("tests/zc-corpus/s3-break.z"));
+
     const fuzz_fixture_options = b.addOptions();
     fuzz_fixture_options.addOption([]const u8, "vf_pattern_32k", @embedFile("tests/vf-pattern-32k.bin"));
     fuzz_fixture_options.addOption([]const u8, "vf_req_read", @embedFile("tests/vf-req-read.bin"));
@@ -2606,6 +2617,10 @@ pub fn build(b: *std.Build) void {
         // The fuzz root is the only one that reads the wire fixtures.
         if (std.mem.eql(u8, src_path, "kernel/tests/fuzz_test.zig")) {
             test_mod.addOptions("fuzz_fixtures", fuzz_fixture_options);
+        }
+        // Likewise the zc root is the only one that reads the corpus fixture.
+        if (std.mem.eql(u8, src_path, "user/src/zc.zig")) {
+            test_mod.addOptions("zc_corpus_fixtures", zc_corpus_options);
         }
         // kex.zig reaches `rng` (module-mapped), which imports the mapped
         // `ui` module. kex.zig itself does not import `ui`, so leave the
