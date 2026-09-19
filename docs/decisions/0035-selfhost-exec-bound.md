@@ -39,9 +39,9 @@ re-measure commands are at the end.
 
 | bound | value | where |
 | --- | --- | --- |
-| exec staging | **2 MiB fixed whole-file buffer**; a larger image is refused `too_large` | `kernel/src/exec.zig:100` (`exec_program_max`), `:184` (`var program: [exec_program_max]u8`), `parse_dsk3` `image_size > buf.len` |
+| exec staging | **2 MiB fixed whole-file buffer**, and there are **two** of them — `program` and `interp_program` (the PT_INTERP/LD.SO path), **4 MiB of .bss** against the 11 MiB budget; a larger image is refused `too_large` | `kernel/src/exec.zig:100` (`exec_program_max`), `:184`,`:186` (both `[exec_program_max]u8`), `parse_dsk3` `image_size > buf.len` |
 | ELF load bound | 2 MiB **total PT_LOAD memory**, ≤3 PT_LOADs | `kernel/src/elf.zig:164`,`:167` (`load_max` — "mirrors `exec.exec_program_max`, the shared staging buffer bound") |
-| GOOS=virelai link recipe | text 0x10000..0x80000 (**448 KiB**), rodata →0x110000, data at 0x110000 | `tools/go/build-go.sh`'s layout guard (the guard exists because a shifted layout "loads but misbehaves on target") |
+| GOOS=virelai link recipe | text base 0x10000 with its end ≤0x80000 (**448 KiB** of text), rodata base 0x80000 with its end ≤0x110000, data base 0x110000 | `tools/go/build-go.sh`'s layout guard (the guard exists because a shifted layout "loads but misbehaves on target") |
 | gap vaddr bound | every gap segment's vaddr below `gap_base_max` = 0x1000_0000 | `kernel/src/elf.zig:158` |
 | page tables | fixed **512×4 KiB (2 MiB) .bss carve-out, never reclaimed** — a *total-roots* budget | `kernel/src/mmu.zig:66-71`; `tables_used()`/`tables_capacity()` at `:146` |
 | kernel .bss budget | 11,534,336 B (11.0 MiB) | ADR 0013 D3.1, `tools/verify-bss-budget.sh` |
@@ -70,8 +70,10 @@ re-measure commands are at the end.
 
 **S1 and S2 are blocked. The precise blocked step:** the guest cannot `exec`
 a program larger than `exec_program_max` (2 MiB), the loader stages the whole
-file through a static array of exactly that size, and `cmd/compile` is more
-than an order of magnitude larger than the bound *before* stripping. Running
+file through a static array of exactly that size (two of them, in fact —
+`program` plus the interpreter's `interp_program`, so 4 MiB of .bss is spent
+on staging before any image is read), and `cmd/compile` is more than an order
+of magnitude larger than the bound *before* stripping. Running
 the toolchain in-guest therefore needs a capability that does not exist today:
 **a streamed, per-process-aperture exec path** that does not copy the whole
 image through fixed storage, plus page tables that are not drawn from a fixed
