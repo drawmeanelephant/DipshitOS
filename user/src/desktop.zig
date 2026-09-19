@@ -39,7 +39,7 @@ pub const AppEntry = struct {
 /// then the ESP, so adding an app means a manifest line, not a recompile.
 pub const installed_apps = [_]AppEntry{
     .{ .name = "GOCALC.ELF", .desc = "64-bit Calc", .status = "GUI Active", .icon = 'c' },
-    .{ .name = "NOTEPAD.BIN", .desc = "Text Editor", .status = "Host Share", .icon = 'n' },
+    .{ .name = "NOTE.ELF", .desc = "Text Editor", .status = "Host Share", .icon = 'n' },
     .{ .name = "TOP.BIN", .desc = "Task Manager", .status = "sys_procs", .icon = 't' },
     .{ .name = "KEYTEST.BIN", .desc = "HID Input", .status = "USB Events", .icon = 'k' },
     .{ .name = "TYPE.BIN", .desc = "File Reader", .status = "Host Share", .icon = 'f' },
@@ -458,7 +458,7 @@ pub export fn _start() callconv(.c) noreturn {
 test "desktop: installed application catalog metadata" {
     try std.testing.expectEqual(@as(usize, 9), installed_apps.len);
     try std.testing.expectEqualStrings("GOCALC.ELF", installed_apps[0].name);
-    try std.testing.expectEqualStrings("NOTEPAD.BIN", installed_apps[1].name);
+    try std.testing.expectEqualStrings("NOTE.ELF", installed_apps[1].name);
     try std.testing.expectEqualStrings("TOP.BIN", installed_apps[2].name);
     try std.testing.expectEqualStrings("KEYTEST.BIN", installed_apps[3].name);
     try std.testing.expectEqualStrings("FETCH.BIN", installed_apps[6].name);
@@ -472,7 +472,7 @@ test "desktop: manifest cap holds the full 9-app catalog incl FILE.BIN (card B4)
     // truncation — FILE.BIN must be the ninth entry and reachable.
     const text =
         "GOCALC.ELF | 64-bit Calc | c\n" ++
-        "NOTEPAD.BIN | Text Editor | n\n" ++
+        "NOTE.ELF | Text Editor | n\n" ++
         "TOP.BIN | Task Manager | t\n" ++
         "KEYTEST.BIN | HID Input | k\n" ++
         "TYPE.BIN | File Reader | f\n" ++
@@ -493,7 +493,7 @@ test "desktop: parse_manifest reads NAME | Display | icon lines (claim 8877)" {
         "# comment line\n" ++
         "\n" ++
         "GOCALC.ELF | 64-bit Calc | c\n" ++
-        "NOTEPAD.BIN | Text Editor | n\n" ++
+        "NOTE.ELF | Text Editor | n\n" ++
         "  TOP.BIN  |  Task Manager  |  t  \n" ++
         "# another comment\n" ++
         "CHAT.BIN | P2P Net Chat | m";
@@ -503,7 +503,7 @@ test "desktop: parse_manifest reads NAME | Display | icon lines (claim 8877)" {
     try std.testing.expectEqualStrings("GOCALC.ELF", out[0].name);
     try std.testing.expectEqualStrings("64-bit Calc", out[0].desc);
     try std.testing.expectEqual(@as(u8, 'c'), out[0].icon);
-    try std.testing.expectEqualStrings("NOTEPAD.BIN", out[1].name);
+    try std.testing.expectEqualStrings("NOTE.ELF", out[1].name);
     try std.testing.expectEqualStrings("Text Editor", out[1].desc);
     try std.testing.expectEqual(@as(u8, 'n'), out[1].icon);
     // Whitespace around fields is trimmed

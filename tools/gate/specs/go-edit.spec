@@ -4,7 +4,8 @@
 # user/go/edit is a tabapp client: init -> declare (kind-8 WM_RPC) -> read the
 # seeded /host/EDIT/SEED.TXT -> accept injected keystrokes into the buffer
 # (Win_DOWN arg1 is the Unicode codepoint) -> Ctrl-S writes the buffer back ->
-# WIN_CLOSE exits. Zig EDIT.BIN is gone (M60 / #1297); NOTEPAD.BIN is leftover. Kernel untouched.
+# WIN_CLOSE exits. Zig EDIT.BIN is gone (M60 / #1297) and so is the Zig notepad
+# (M66c / #1485); this gate pins the Go editor that replaced EDIT.BIN. Kernel untouched.
 #
 # The load-bearing evidence is NOT only the app's own markers: the run's last
 # assert reads the share file back ON THE HOST and requires it to equal the

@@ -1,10 +1,10 @@
 # live-wnd6-dock-drain.spec -- WMS6 Gate D: shim and WM-driven dock click
-# M66c (#1445): the client is NOTE.ELF, NOTEPAD.BIN's Go successor. The
+# M66c (#1445 retarget, #1485 retirement): the client is NOTE.ELF, the Go
+# successor to the Zig notepad, and the Zig binary itself is now GONE. The
 # lifecycle vocabulary is shared by design (`note:` mirrors `notepad:`), so the
-# assertions below moved by prefix alone. NOTEPAD.BIN is still built and still
-# covered: five specs assert behaviour only the Zig app has (find/goto, theme
-# tokens, the clipboard self-demo, the unsaved-decline contract), so retiring it
-# is its own card rather than something this retarget assumes.
+# assertions below moved by prefix alone. The coverage that app alone had moved
+# to GOEDIT.ELF (find/goto, the unsaved-decline contract) or GOCOMP.ELF (its
+# clipboard+timer composition); the theme-token boots were retired with it.
 #
 # HOST PREREQUISITE: bash tools/go/build-note.sh -> .build/go/NOTE.ELF
 

@@ -84,12 +84,15 @@ bug-fix only), and no decision about any other binary (M68's non-goals).
 
 ## Consequences
 
-- **M60's ledger now reads:** deleted `EDIT`/`FILE`/`CALC`; **retained
-  `TABWM`** (this ADR); still open — `SH.BIN` (#1450, M68b: GOSH has no serial
-  front-end, no `whoami`/`id`/`secrets`, no `net`, and not the M19 scripting
-  depth `live-sh5` asserts) and `NOTEPAD.BIN` (#1485, M66c-followup: five
-  feature specs still need a home). **M60 closes when those two rows settle** —
-  which is why #1451's "close M60" half is deferred rather than declared done.
+- **M60's ledger now reads:** deleted `EDIT`/`FILE`/`CALC`, and `NOTEPAD.BIN`
+  settled the same way in the M66c follow-on that landed alongside this ADR
+  (#1485, PR #1495 — its five feature specs got homes rather than retirements:
+  GOEDIT find/goto, GOEDIT's `WIN_UNSAVED` arm, and the purpose-built
+  `GOCOMP.ELF` composition probe). **Retained `TABWM`** (this ADR); still open —
+  `SH.BIN` (#1450, M68b: GOSH has no serial front-end, no `whoami`/`id`/`secrets`,
+  no `net`, and not the M19 scripting depth `live-sh5` asserts). **M60 closes
+  when that row settles** — which is why #1451's "close M60" half is deferred
+  rather than declared done.
 - The seat matrix is final unless a later ADR supersedes this one:
   `gotabwm` (default) | `tabwm` (Zig fallback, frozen) | `none` (shim-only).
 - Revisiting this requires all of: a schema change with a `wm=tabwm`

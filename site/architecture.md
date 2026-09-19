@@ -74,7 +74,7 @@ Three rules show up everywhere:
 | Events | keyboard/pointer/window events routed to focused EL0 apps (`sys_poll_event`/`sys_wait_event`), plus `TIMER` events from the app-timer facility |
 | Shared services | the machine-global clipboard (slots 38/39) + per-process app timers (slots 40/41) |
 | Dynamic linking | freestanding `LD.SO` runtime linker, `LIBUI.SO`/`LIBFONT.SO`, W^X multi-aperture userland (M30/M31) |
-| Desktop | the zero-heap `ui.zig` widget toolkit + CALC/NOTEPAD/TOP/DESKTOP/FILE applications |
+| Desktop | the zero-heap `ui.zig` widget toolkit + CALC/TOP/DESKTOP applications, with the editor and file manager now in Go (`NOTE.ELF`, `GOFILES.ELF`) |
 
 <Aside kind="note">
 

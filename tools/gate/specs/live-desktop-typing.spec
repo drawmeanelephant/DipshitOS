@@ -117,6 +117,6 @@ for y in range(90, 210, 2):
         r, g, b = px(x, y)
         if min(r, g, b) > 170 or (g > 140 and r < 120 and b < 120) or (g > r + 30 and g > b + 30):
             glyphs += 1
-print("glyph samples in NOTEPAD text region: %d" % glyphs)
+print("glyph samples in NOTE.ELF text region: %d" % glyphs)
 assert glyphs >= 50, f"too few glyph pixels: {glyphs}"
 PY

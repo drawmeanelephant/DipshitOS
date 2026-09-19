@@ -25,9 +25,10 @@ func applySwapUnpinned() bool {
 }
 
 // applyPinStay pins Calc when that title is on the strip so SESSION.TABS
-// is Calc-left regardless of which client declared first (Zig NOTEPAD
-// often beats GOCALC.ELF to WM_RPC). Without a Calc tab (boot 03
-// GOEDIT+NOTEPAD) it pins the right-hand tab. Then it focuses the other
+// is Calc-left regardless of which client declared first (the text client —
+// the Zig notepad then, NOTE.ELF since M66c — often beats GOCALC.ELF to
+// WM_RPC). Without a Calc tab (boot 03 GOEDIT+NOTE.ELF) it pins the
+// right-hand tab. Then it focuses the other
 // tab so pin-left is dumped twice, and restores focus to the pinned tab
 // so the M62e snapshot's active index is 0.
 func applyPinStay() bool {

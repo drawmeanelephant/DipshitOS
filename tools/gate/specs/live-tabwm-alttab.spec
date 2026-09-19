@@ -3,8 +3,8 @@
 #
 # TWO headless boots with --screen (GPU armed) + --via-virtio (the HID chord
 # transport). TABWM starts, then TWO apps exec into two tabs (TOP id=2,
-# NOTEPAD id=3 - the last mirror activates, so NOTEPAD owns the tab).
-# After `notepad: ready` the runner injects the REAL Alt+Tab chord
+# NOTE.ELF id=3 - the last mirror activates, so NOTE.ELF owns the tab).
+# After `note: ready` the runner injects the REAL Alt+Tab chord
 # (`--input-chords "alt-tab"` = LAlt modifier + Tab usage 0x2B, the WMS6
 # Gate A vocabulary): the kernel fans the raw chord to the WM's kind-21
 # stream; TABWM's handler proposes the next tab via the SAME alt_tab_next
@@ -20,10 +20,10 @@
 # kernel-side truth; the target keeps its applied viewport). The
 # kernel-side proof that the commit LANDED is script3's `dui` row
 # (`dui: windows=6 focused=2` - TOP, id 2, holds kernel focus after the
-# chord) plus the kernel's own alt_tab= counter. NOTE: NOTEPAD's own
-# `notepad: open id=2` marker HARDCODES id=2 (user/src/notepad.zig), so
-# the authoritative tab-order evidence here is the kernel's
-# `open: id=3` registration and TABWM's mirror-synced
+# chord) plus the kernel's own alt_tab= counter. NOTE: the retired Zig
+# notepad printed a HARDCODED open marker; its Go successor NOTE.ELF (M66c
+# #1485) prints the real id, but the authoritative tab-order evidence here is
+# the kernel's `open: id=3` registration and TABWM's mirror-synced
 # `tabwm: tab-switch idx=1 id=3`.
 #
 # Boot 02 (M63r #1424): the same pairing with `--input-chords "ctrl-tab"`.
@@ -39,8 +39,20 @@ vgate_runner_flags -Xswiftc -DSPIKE
 vgate_file script.txt <<'EOF'
 tabwm start
 exec TOP.BIN
-exec NOTEPAD.BIN
+exec NOTE.ELF
 EOF
+
+vgate_setup_python <<'PY'
+import os, shutil, sys
+rd = os.environ["RUN_DIR"]
+share = os.environ.get("VG_SHARE") or os.path.join(rd, "share")
+src = os.path.join(".build", "go", "NOTE.ELF")
+if not os.path.exists(src):
+    sys.exit("NOTE.ELF missing (expected " + src + ") - build it first: "
+             "bash tools/go/build-note.sh")
+shutil.copy(src, os.path.join(share, "NOTE.ELF"))
+print("staged NOTE.ELF into share (%d bytes)" % os.path.getsize(os.path.join(share, "NOTE.ELF")))
+PY
 
 vgate_file script3.txt <<'EOF'
 dui
@@ -58,23 +70,22 @@ vgate_run 01 -- \
     --screen '$RUN_DIR/screen' \
     --via-virtio --cvc-snap \
     --script '$RUN_DIR/script.txt' \
-    --input-chords "alt-tab" --input-chords-after "notepad: ready" --input-chords-delay 2 \
+    --input-chords "alt-tab" --input-chords-after "note: ready" --input-chords-delay 2 \
     --script3 '$RUN_DIR/script3.txt' --script3-after "tabwm: alt-tab id=2" --script3-delay 10 \
     --script-expect "alttab-ok" --timeout 260
 
 vgate_assert 01 serial-contains 'VirelaiOS kernel has seized control.'
 vgate_assert 01 serial-contains 'tabwm: registered'
 vgate_assert 01 serial-contains 'tabwm: sidebar-rendered'
-# Two tabs: TOP first (id=2, tab-aware full viewport), NOTEPAD second
+# Two tabs: TOP first (id=2, tab-aware full viewport), NOTE.ELF second
 # (id=3) - the last mirror activates.
 vgate_assert 01 serial-contains 'top: tab-aware (full-viewport)'
 # The kernel registered the second user window as id=3 and TABWM's
-# mirror synced it into tab row 1 (notepad's own open marker hardcodes
-# id=2 - see the header note).
+# mirror synced it into tab row 1.
 vgate_assert 01 serial-contains 'open: id=3 owner=3'
 vgate_assert 01 serial-contains 'tabwm: tab-switch idx=1 id=3'
-vgate_assert 01 serial-contains 'notepad: ready'
-# The chord: TABWM proposed TOP (the tab before the active NOTEPAD row)
+vgate_assert 01 serial-contains 'note: ready'
+# The chord: TABWM proposed TOP (the tab before the active NOTE.ELF row)
 # and the kernel applied the commit.
 vgate_assert 01 serial-contains 'tabwm: alt-tab id=2'
 # The kernel ALT_TAB counter moved (the monitor prints ` alt_tab=` inside
@@ -94,12 +105,12 @@ vgate_run 02 -- \
     --screen '$RUN_DIR/screen-02' \
     --via-virtio --cvc-snap \
     --script '$RUN_DIR/script.txt' \
-    --input-chords "ctrl-tab" --input-chords-after "notepad: ready" --input-chords-delay 2 \
-    --script3 '$RUN_DIR/script3-ctrl.txt' --script3-after "notepad: ready" --script3-delay 10 \
+    --input-chords "ctrl-tab" --input-chords-after "note: ready" --input-chords-delay 2 \
+    --script3 '$RUN_DIR/script3-ctrl.txt' --script3-after "note: ready" --script3-delay 10 \
     --script-expect "ctrl-tab-ok" --timeout 260
 
 vgate_assert 02 serial-contains 'VirelaiOS kernel has seized control.'
 vgate_assert 02 serial-contains 'tabwm: registered'
-vgate_assert 02 serial-contains 'notepad: ready'
+vgate_assert 02 serial-contains 'note: ready'
 vgate_assert 02 output-contains 'CHORD-SEQ: typed "ctrl-tab"'
 vgate_assert 02 serial-absent '[EXC] parking:'

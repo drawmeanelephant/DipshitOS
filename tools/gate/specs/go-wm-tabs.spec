@@ -1,14 +1,14 @@
 # go-wm-tabs.spec -- M62b–h + #1426 + M66b (issues #1400–#1406/#1426/#1444)
 # class-B gate: GOTABWM tab strip, split, pin, session, LAYOUT.txt, then two
-# shipping Go ELFs as tabs. Boot 01 hosts GOCALC.ELF + leftover NOTEPAD.BIN
-# (Zig CALC.BIN is gone, M62h / #1406). Boot 03 hosts GOEDIT.ELF + GOTERM.ELF:
+# shipping Go ELFs as tabs. Boot 01 hosts GOCALC.ELF + NOTE.ELF
+# (Zig CALC.BIN is gone, M62h / #1406; Zig NOTEPAD.BIN is gone, M66c / #1485). Boot 03 hosts GOEDIT.ELF + GOTERM.ELF:
 # both declared, focus switch, both alive, close one without killing the
 # seat, LAYOUT.txt names both bins. scheduler.max_tasks=16 (M65d / #1442:
 # 3 kernel + 3×4 Ms + 1 spare). The GOMAXPROCS=1 path still fits
 # (GOTABWM+GOEDIT+GOTERM = 9 Ms + kernel 3; idle stays max_tasks-1).
 #
 # THREE vgate_runs share one seeded host share (`vgate_share seed`):
-#   01  GOCALC+NOTEPAD; pin-stay writes SESSION.TABS; last unsplit writes
+#   01  GOCALC+NOTE.ELF; pin-stay writes SESSION.TABS; last unsplit writes
 #       LAYOUT.txt (closed before the serial line that names it).
 #   02  GOTABWM only. Restores the session; then drops SESSION.TABS.
 #   03  GOEDIT+GOTERM, empty strip. Same two-tab choreography.
@@ -33,12 +33,12 @@
 # Stage gates wait on guest output (`gotabwm: win focus`,
 # `wm: unregistered, shim resumed`). Boot 03 uses GOMAXPROCS=1 so each Go
 # runtime stays at 3 kernel tasks (primary + sysmon + helper).
-# M66c (#1445): the client is NOTE.ELF, NOTEPAD.BIN's Go successor. The
+# M66c (#1445 retarget, #1485 retirement): the client is NOTE.ELF, the Go
+# successor to the Zig notepad, and the Zig binary itself is now GONE. The
 # lifecycle vocabulary is shared by design (`note:` mirrors `notepad:`), so the
-# assertions below moved by prefix alone. NOTEPAD.BIN is still built and still
-# covered: five specs assert behaviour only the Zig app has (find/goto, theme
-# tokens, the clipboard self-demo, the unsaved-decline contract), so retiring it
-# is its own card rather than something this retarget assumes.
+# assertions below moved by prefix alone. The coverage that app alone had moved
+# to GOEDIT.ELF (find/goto, the unsaved-decline contract) or GOCOMP.ELF (its
+# clipboard+timer composition); the theme-token boots were retired with it.
 #
 # HOST PREREQUISITE: bash tools/go/build-note.sh -> .build/go/NOTE.ELF
 

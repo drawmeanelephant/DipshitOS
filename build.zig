@@ -670,30 +670,13 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_blkd.step);
 
     // ------------------------------------------------------------------
-    // Guest: fifteenth ESP user program (milestone eleven, card A3 — claim 3234)
-    // NOTEPAD.BIN. Interactive graphical text editor with /data persistence.
-    // DSK3 segmented (writable .data/.bss — the WMS9 fill-batcher global needs
-    // the RW data+bss aperture; observed live: NOTEPAD data-aborted on the flat
-    // DSK1 mapping at its .bss tail once draw primitives batched fills).
+    // M66c (#1485): NOTEPAD.BIN (the fifteenth ESP program, M11 A3 claim 3234)
+    // is RETIRED with user/src/notepad.zig. Its Go successor is NOTE.ELF
+    // (user/go/note, built by tools/go/build-note.sh) — a host-share ELF, not
+    // an in-image Zig program, so there is no build step to replace this one.
+    // The five specs that were its last exclusive coverage moved to NOTE.ELF
+    // or retired in the same card.
     // ------------------------------------------------------------------
-    const notepad_prog = b.addExecutable(.{
-        .name = "user-notepad",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("user/src/notepad.zig"),
-            .target = kernel_target,
-            .optimize = .ReleaseSmall,
-        }),
-    });
-    notepad_prog.linker_script = b.path("user/linker-segmented.ld");
-    const notepad_step = b.step("notepad", "Build the fifteenth ESP user program (zig-out/bin/NOTEPAD.BIN) — DSK3 segmented (writable .data/.bss)");
-    const notepad_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
-    notepad_elf2bin.addFileArg(notepad_prog.getEmittedBin());
-    const notepad_bin = notepad_elf2bin.addOutputFileArg("NOTEPAD.BIN");
-    notepad_elf2bin.has_side_effects = true;
-    notepad_elf2bin.stdio = .inherit;
-    notepad_step.dependOn(&notepad_elf2bin.step);
-    const install_notepad = b.addInstallFileWithDir(notepad_bin, .bin, "NOTEPAD.BIN");
-    b.getInstallStep().dependOn(&install_notepad.step);
 
     // ------------------------------------------------------------------
     // Guest: sixteenth ESP user program (milestone eleven, card A4 — claim 0680)

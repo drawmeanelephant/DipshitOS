@@ -1,7 +1,9 @@
-// Command note is Zig NOTEPAD.BIN's Go successor: M66c (issue #1445). A small
-// notepad — open, edit, save — full-viewport inside the tabbed desktop through
-// user/go/tabapp, over the M66a-hardened file surface. The card's shape is
-// M62h (#1406, CALC.BIN -> GOCALC.ELF) applied to the other leftover binary.
+// Command note is the Go successor to the Zig notepad: M66c (issue #1445), and
+// as of #1485 the ONLY text-app client — the Zig binary and user/src/notepad.zig
+// are deleted. A small notepad — open, edit, save — full-viewport inside the
+// tabbed desktop through user/go/tabapp, over the M66a-hardened file surface.
+// The card's shape is M62h (#1406, CALC.BIN -> GOCALC.ELF) applied to the other
+// leftover binary.
 //
 // It is deliberately NOT an editor: no find/replace, no selection, no undo.
 // GOEDIT.ELF owns that arms race. What this app must have is the three things

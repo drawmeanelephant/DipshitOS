@@ -1,4 +1,20 @@
 # live-tabstrip.spec -- M37 DQ2 tab-strip chrome (issue #840)
+#
+# M66c (#1485): the Zig notepad is retired. The tab HOST here is TOP.BIN —
+# the spec's subject is the kernel/WM tab-strip CHROME, which is app-agnostic,
+# and under a WM seat the Go client is not a usable host: with NOTE.ELF as the
+# tab host the scanout carried NO chrome at all (observed: zero (71,85,105)
+# border/trough pixels anywhere), which is undiagnosed — the client's surface
+# ends up full-viewport under the WM seat, but that is a hypothesis, not a
+# finding. TOP.BIN is a Zig tab-aware app that still ships, and TABHOLD
+# attaches to it the same way it attached to the notepad (`own_id==2 -> 3`).
+#
+# GEOMETRY (M66c review, #1495): the pixel scan below is derived from the
+# HOST's declaration, and TOP declares 40,40 512x384 (user/src/top.zig), not
+# the retired app's 56,56. The first version of this retarget kept X,SY=56,72,
+# which put nearly every sample outside TOP's strip — the scan has to follow
+# the rect: strip = (host_x .. host_x+host_w), y = host_y + title_bar_h ..
+# +tab_bar_height (kernel/src/wnd_core.zig: title_bar_h 16, tab_bar_height 22).
 
 vgate_name live-tabstrip "M37 DQ2 tab-strip chrome: attached tabs paint visible strip"
 vgate_share seed
@@ -6,7 +22,7 @@ vgate_runner_flags -Xswiftc -DSPIKE
 
 vgate_file script-A.txt <<'EOF'
 wnd start
-exec NOTEPAD.BIN
+exec TOP.BIN
 exec TABHOLD.BIN
 EOF
 
@@ -20,12 +36,13 @@ vgate_run A -- \
 
 # vgate_assert A serial-contains "wnd: tab-attach child=3 parent=2"
 # Census-tolerant form: the attach's child/parent ids depend on window-open
-# order. Kernel ids are free-slot order from user_window_id_base=2, and
-# NOTEPAD's M42 SX4 open waits on a host theme-sync round trip before
-# win_open — so TABHOLD's instant open can land id 2 with NOTEPAD id 3
-# (the regression that redded this gate) or the legacy order. WND prints
-# `wnd: tab-attach` ONLY on a successful attach, so its existence with
-# child != parent is the proof: TABHOLD attached to NOTEPAD, never itself.
+# order. Kernel ids are free-slot order from user_window_id_base=2, and the
+# retired Zig notepad's M42 SX4 open waited on a host theme-sync round trip
+# before win_open — that regression could land TABHOLD at id 2 with the text
+# client at id 3. Under NOTE.ELF either order is still possible, so the check
+# stays census-based: WND prints `wnd: tab-attach` ONLY on a successful
+# attach, so its existence with child != parent is the proof: TABHOLD
+# attached to the text client, never itself.
 vgate_assert A python <<'PY'
 import os, re, sys
 ser = open(os.environ["VG_SER"]).read()
@@ -34,7 +51,7 @@ if not m:
     print("tab-attach line missing", file=sys.stderr)
     sys.exit(1)
 a, b = int(m.group(1)), int(m.group(2))
-# The burst census is exactly {2,3}: NOTEPAD + TABHOLD are the only window
+# The burst census is exactly {2,3}: TOP.BIN + TABHOLD are the only window
 # openers (WND opens none), so a valid attach is child!=parent within it.
 if not (2 <= a <= 3 and 2 <= b <= 3 and a != b):
     print(f"attach ids not the two-window census: child={a} parent={b}", file=sys.stderr)
@@ -52,7 +69,7 @@ assert len(data) == W * H * 4, f"snapshot size {len(data)}"
 def px(x, y):
     k = (y * W + x) * 4
     return (data[k + 2], data[k + 1], data[k])
-X, SY, SW = 56, 72, 512
+X, SY, SW = 40, 56, 512
 TROUGH = (0x47, 0x55, 0x69)
 CELLBG = (0x1a, 0x2b, 0x3c)
 ACCENT = (0x3b, 0x82, 0xf6)

@@ -1,8 +1,9 @@
 // GOTABWM.ELF - M57c (issue #1318): the Go seat hosts UNMODIFIED Zig apps.
 //
-// This is the card that makes the seat real. A leftover Zig app (NOTEPAD.BIN)
-// links lib/tabapp.zig, opens its own window, then declares itself to the
-// running WM over the WM_RPC mailbox and waits for the ack. It discovers the WM
+// This is the card that makes the seat real. The client under test is the Go
+// editor NOTE.ELF (it replaced the Zig notepad, which #1485 deleted): it rides
+// user/go/tabapp, opens its own window, then declares itself to the running WM
+// over the WM_RPC mailbox and waits for the ack. It discovers the WM
 // purely by process name (abi.zig wm_proc_names), which M57c extended with
 // GOTABWM.ELF - the same additive step M42 SX3 took for TABWM.BIN. No app
 // source change, no port: the same binaries that run under TABWM run here.
@@ -62,7 +63,8 @@ var (
 // enough composite ticks for the app to declare, take the viewport and relayout,
 // plus one `--pointer-virtio` click (pointerClickHold). Two tabs skip this
 // countdown and use the strip choreography in seat.go.
-// M62g: GOEDIT starts slower than leftover Zig CALC/NOTEPAD, so the
+// M62g: GOEDIT starts slower than the other clients (the Zig CALC/NOTEPAD pair
+// when this was written; both are Go apps now — GOCALC.ELF/NOTE.ELF), so the
 // second declare needs more than three ticks or the first tab is closed.
 const hostTicks = 16
 

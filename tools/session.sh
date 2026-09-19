@@ -161,7 +161,8 @@ cat <<EOF
 A 1280x720 VM window is opening. Since M59 (issue #1298) the boot default is
 the GO seat (GOTABWM.ELF). It is deliberately thin today — M57 proved the seat
 and the Zig-app interop, not a desktop you live in: it paints the desktop,
-takes focus, hosts the leftover Zig apps (CALC, NOTEPAD), then exits. There is
+takes focus, hosts the shipped apps (GOCALC.ELF, NOTE.ELF — both Go since
+M62h/M66c), then exits. There is
 no sidebar, launcher or tab window yet; those are still the Zig TABWM seat.
 
   * for the older tabbed desktop (sidebar + launcher + terminal window):
