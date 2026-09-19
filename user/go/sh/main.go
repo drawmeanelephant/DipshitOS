@@ -14,6 +14,14 @@
 //     shell engine; children exec on the M64b-fixed slot-28 seam
 //  6. WIN_CLOSE / `monitor` / Ctrl-D -> detach, close
 //
+// `GOSH.ELF serial` takes the SERIAL front-end instead (step 3 becomes
+// `sys_tty_attach(1)`, no window and no tabapp — the console the kernel
+// monitor hands over, exactly the front-end SH.BIN used). The engine,
+// editor and startup contract are identical; only the front-end owner
+// changes. This is what M68b (#1450) needs: a shell whose own output,
+// prompts and typed bytes are serial-visible again, so the shell gates keep
+// asserting against the console instead of a window grid.
+//
 // Every marker is printed in a single console write (SMP-heartbeat safe)
 // and only AFTER its syscall returned, so the class-B gate's asserts can
 // only pass if the shell actually ran. `GOSH.ELF -c LINE` runs one line
@@ -58,11 +66,27 @@ const (
 )
 
 func main() {
-	if line, headless := headlessLine(vi.Args()); headless {
+	args := vi.Args()
+	if line, headless := headlessLine(args); headless {
 		runHeadless(line)
 		return
 	}
+	if hasArg(args, "serial") {
+		runSerial()
+		return
+	}
 	runTab()
+}
+
+// hasArg reports whether the argv carries word. The exec seam may supply
+// argv[0] at either position (see headlessLine), so both are searched.
+func hasArg(args []string, word string) bool {
+	for _, a := range args {
+		if a == word {
+			return true
+		}
+	}
+	return false
 }
 
 // argvEnvpGuard pads the writable segment's bss so its end keeps at least
@@ -141,12 +165,42 @@ func runTab() {
 		ta.CloseAndExit(2)
 	}
 	vi.ConsoleLine(markerAttach)
+	runSession(fd, ta)
+}
 
+// runSerial attaches the SERIAL front-end (ADR 0020 selector 1) instead of a
+// window: the same session over the console the kernel monitor hands over,
+// which is the presentation SH.BIN had and what the M68b shell gates assert
+// against. No tabapp, no declare, no /host share for a window.
+func runSerial() {
+	vi.ConsoleLine(markerReady)
+
+	h, rc := vi.FileOpen(ttyPath, vi.ModeRead|vi.ModeWrite)
+	if rc < 0 {
+		vi.ConsoleLine(markerTtyErr)
+		vi.Exit(1)
+	}
+	fd := uint32(h)
+	vi.ConsoleLine(markerTty)
+
+	if r := vi.TtyAttach(vi.TtySerial); r != 0 {
+		vi.FileClose(fd)
+		vi.ConsoleLine(markerAttachEr)
+		vi.Exit(2)
+	}
+	vi.ConsoleLine(markerAttach)
+	runSession(fd, nil)
+}
+
+// runSession is the shared startup contract + editor loop. ta is nil on the
+// serial front-end: there is no window, so no window events are polled — the
+// console's own input path delivers the bytes FileRead returns.
+func runSession(fd uint32, ta *tabapp.TabApp) {
+	hst := &goshHost{fd: fd}
 	hist := &History{}
-	host := &goshHost{fd: fd}
-	sh := NewShell(host, hist)
+	sh := NewShell(hst, hist)
 	editor := NewEditor(loadPrompt(), hist)
-	editor.Complete = completeFn(host)
+	editor.Complete = completeFn(hst)
 
 	// The startup contract (M49 SD2): STARTUP.SH, then PROFILE.SH, silent
 	// when either is missing, every line through the same engine.
@@ -161,29 +215,47 @@ func runTab() {
 	_, _ = vi.FileWrite(fd, editor.Repaint())
 	vi.ConsoleLine(markerPrompt)
 
+	// handle applies one editor outcome. Feed returns at most one event per
+	// call and holds the remainder of its chunk, so the loop below keeps
+	// feeding until the editor has nothing left: the serial front-end can
+	// deliver several whole lines in a single read, and a burst that stops
+	// after its first line would leave the rest typed but never run.
+	handle := func(out []byte, ev EditEvent) {
+		if len(out) > 0 {
+			writeTTY(fd, out)
+		}
+		switch ev.Kind {
+		case evSubmit:
+			vi.ConsoleLine(markerLine + ev.Line)
+			_, act := sh.RunLine(ev.Line)
+			if act != actionContinue {
+				shutdown(ta, fd, sh.Status())
+			}
+		case evEOF:
+			shutdown(ta, fd, 0)
+		case evCancel:
+			// The editor already painted ^C and the fresh prompt.
+		}
+	}
+
 	var readBuf [64]byte
 	for {
 		n, _ := vi.FileRead(fd, readBuf[:])
 		if n > 0 {
-			out, ev := editor.Feed(readBuf[:n])
-			if len(out) > 0 {
-				writeTTY(fd, out)
-			}
-			switch ev.Kind {
-			case evSubmit:
-				vi.ConsoleLine(markerLine + ev.Line)
-				_, act := sh.RunLine(ev.Line)
-				if act != actionContinue {
-					shutdown(ta, fd, sh.Status())
-				}
-			case evEOF:
-				shutdown(ta, fd, 0)
-			case evCancel:
-				// The editor already painted ^C and the fresh prompt.
-			}
+			handle(editor.Feed(readBuf[:n]))
+		}
+		for editor.Pending() {
+			handle(editor.Feed(nil))
 		}
 
 		sh.ReapJobs()
+
+		if ta == nil {
+			if n <= 0 {
+				vi.Sleep(1)
+			}
+			continue
+		}
 
 		ev, r, ok := vi.PollEventRaw()
 		if !ok {
@@ -207,6 +279,11 @@ func shutdown(ta *tabapp.TabApp, fd uint32, status int) {
 	vi.FileClose(fd)
 	vi.ConsoleLine(markerClose)
 	vi.ConsoleLine(markerOK)
+	if ta == nil {
+		// Serial: the detach handed the console back to the kernel monitor,
+		// and there is no window to close — exiting IS the handover.
+		vi.Exit(status)
+	}
 	ta.CloseAndExit(status)
 }
 
@@ -389,9 +466,45 @@ func (g *goshHost) PipeReadAll() ([]byte, error) {
 func (g *goshHost) ReadFile(path string, max int) ([]byte, error) {
 	b, r := vi.ReadFileAll(path, max)
 	if r < 0 {
+		// Carry the kernel's own errno name: an ownership denial (EACCES)
+		// and an absent file (ENOENT) are different facts, and the M50
+		// trust gates assert which one the shell reported.
+		if name := vi.ErrnoName(r); name != "" {
+			return nil, &openError{path: path, name: name}
+		}
 		return nil, errNotFound
 	}
 	return b, nil
+}
+
+// Principal is the caller's identity (slot 68) for `whoami`/`id`.
+func (g *goshHost) Principal() (uint32, uint32, bool) { return vi.Principal() }
+
+// Chmod is the owner-only mode change (slot 69).
+func (g *goshHost) Chmod(path string, mode uint16) error {
+	r := vi.FileMode(path, mode)
+	if r < 0 {
+		if name := vi.ErrnoName(r); name != "" {
+			return &openError{path: path, name: name}
+		}
+		return errNotFound
+	}
+	return nil
+}
+
+// SecretNames reads the caller's store entry NAMES (slot 70). The values are
+// deliberately not carried through this seam.
+func (g *goshHost) SecretNames() ([]string, bool) {
+	var recs [vi.SecretEntriesMax]vi.SecretRecord
+	n, r := vi.SecretList(recs[:])
+	if r < 0 {
+		return nil, false
+	}
+	out := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		out = append(out, recs[i].KeyString())
+	}
+	return out, true
 }
 
 func (g *goshHost) WriteFile(path string, b []byte, appendMode bool) error {
@@ -414,6 +527,13 @@ func (g *goshHost) WriteFile(path string, b []byte, appendMode bool) error {
 func (g *goshHost) Chdir(path string) error {
 	var entries [1]vi.DirEntry
 	if _, r := vi.DirList(path, entries[:]); r < 0 {
+		// Carry the kernel's errno for the same reason ReadFile does: a
+		// missing directory, a path that is a file, and an ownership denial
+		// on the share's list gate are three different facts, and folding
+		// them into one "not a directory" message hides two of them.
+		if name := vi.ErrnoName(r); name != "" {
+			return &openError{path: path, name: name}
+		}
 		return errNotFound
 	}
 	return nil
