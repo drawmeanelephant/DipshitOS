@@ -417,8 +417,9 @@ pinned `syscalls: slots=64 implemented=68` while `kernel/src/syscall.zig`
 declares `implemented_count = 78`, so the assert had been RED ON MAIN, in a
 class-B spec CI does not run, with no unit test pinning the census. It is now
 asserted as the SHAPE the composition specs already use (`implemented=`), with
-the exact number left to the kernel source. `live-net-udp-syscall.spec` pins the
-same stale 68 and is left alone here (different card).
+the exact number left to the kernel source. The exact-count siblings
+(`live-wmctl-register`, `live-win-syscall`/`move`/`close`, `live-net-udp-syscall`)
+pin `syscalls: slots=64 implemented=78` from the VZ serial.
 
 ## Verification sequence
 
