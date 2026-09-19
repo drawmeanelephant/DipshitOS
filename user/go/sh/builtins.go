@@ -50,12 +50,45 @@ func init() {
 		// secret store's names. Same verbs and the same output text as the
 		// Zig shell, so the M50 gates retarget without weakening an assert.
 		"whoami": bWhoami, "id": bID, "chmod": bChmod, "secrets": bSecrets,
+		// M19 scripting (slice 4 of #1450): the control-flow verbs, and the
+		// source that runs a file's lines in this shell.
+		"true": bTrue, "false": bFalse, "source": bSource, ".": bSource,
+		"break": bBreak, "continue": bContinue,
 	}
 }
 
 // uidSystem is the kernel's system principal (ADR 0024 D1). Duplicated here
 // so the engine's output text does not depend on the guest syscall package.
 const uidSystem = 0
+
+// bTrue and bFalse are the M19 conditions: no output, just the status (the
+// Zig shell registered both). for/while/if read that status.
+func bTrue(c *cmdCtx) int  { return 0 }
+func bFalse(c *cmdCtx) int { return 1 }
+
+// bSource records a source request rather than running anything: sourcing
+// needs the run loop, not a command, so the engine resolves the file after
+// the line finishes (runSegment -> runSource). Only the name travels here.
+func bSource(c *cmdCtx) int {
+	if len(c.args) != 1 {
+		c.out([]byte("gosh: source: usage: source FILE\n"))
+		return 2
+	}
+	c.sh.sourceReq = c.args[0]
+	return 0
+}
+
+// bBreak and bContinue raise the loop flags that runBody/runFor/runWhile
+// clear at the top of each iteration.
+func bBreak(c *cmdCtx) int {
+	c.sh.loopBreak = true
+	return 0
+}
+
+func bContinue(c *cmdCtx) int {
+	c.sh.loopCont = true
+	return 0
+}
 
 // bWhoami prints the caller's principal, exactly as the Zig shell did:
 // `uid=<n> user` (or `system`), and a refusal when the seam cannot answer.
