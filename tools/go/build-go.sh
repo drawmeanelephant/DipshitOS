@@ -71,15 +71,17 @@ for prog in "${@:-$REPO/tools/go/hello.go}"; do
         gopanic)    base="GOPANIC" ;;
         gowin)      base="GOWIN" ;;
         gonet)      base="GONET" ;;
+        govinet)    base="GOVINET" ;;
+        govidns)    base="GOVIDNS" ;;
     esac
     out="$out_dir/${GO_BUILD_NAME:-$base}.ELF"
     # The gap loader gives a program a FIXED text aperture, so image size is
-    # a correctness constraint: GONET (a bigger program than the other
-    # fixtures) links with symbols stripped (-s -w) to stay inside the text
-    # gap. < GO_LDFLAGS_VALUE defaults to the historical "-w".
+    # a correctness constraint: GONET/GOVINET/GOVIDNS (bigger programs than
+    # the other fixtures) link with symbols stripped (-s -w) to stay inside
+    # the text gap. < GO_LDFLAGS_VALUE defaults to the historical "-w".
     strip="-w"
     case "$base" in
-        GONET) strip="-s -w" ;;
+        GONET | GOVINET | GOVIDNS) strip="-s -w" ;;
     esac
     log "building $prog -> $out (ldflags: $strip)"
     GOOS=virelai GOARCH=arm64 go build -o "$out" \

@@ -11,18 +11,20 @@ func TestSlotNumbers(t *testing.T) {
 	want := map[uintptr]string{
 		1: "write", 2: "yield", 3: "exit", 4: "sleep",
 		5: "ipc_send", 6: "ipc_recv", 7: "procs",
+		9: "udp_listen", 10: "udp_send", 11: "udp_recv",
 		12: "win_open", 13: "win_fill", 14: "win_present", 15: "win_close",
 		19: "win_query", 21: "poll_event", 22: "wait_event",
 		23: "file_open", 24: "file_read", 25: "file_write", 26: "file_close", 27: "dir_list",
 		28: "exec",
 		30: "tcp_connect", 31: "tcp_send", 32: "tcp_recv", 33: "tcp_close",
-		34: "file_delete", 36: "file_truncate",
+		34: "file_delete", 35: "file_rename", 36: "file_truncate",
 		42: "audio_info", 43: "audio_play",
 		46: "win_fill_batch", 63: "mmap", 66: "time", 67: "tty_attach",
 	}
 	got := map[uintptr]string{
 		SlotWrite: "write", SlotYield: "yield", SlotExit: "exit", SlotSleep: "sleep",
 		SlotIPCSend: "ipc_send", SlotIPCRecv: "ipc_recv", SlotProcs: "procs",
+		SlotUDPListen: "udp_listen", SlotUDPSend: "udp_send", SlotUDPRecv: "udp_recv",
 		SlotWinOpen: "win_open", SlotWinFill: "win_fill", SlotWinPresent: "win_present",
 		SlotWinClose: "win_close", SlotWinQuery: "win_query",
 		SlotPollEvent: "poll_event", SlotWaitEvent: "wait_event",
@@ -30,7 +32,8 @@ func TestSlotNumbers(t *testing.T) {
 		SlotFileClose: "file_close", SlotDirList: "dir_list", SlotExec: "exec",
 		SlotTCPConnect: "tcp_connect", SlotTCPSend: "tcp_send", SlotTCPRecv: "tcp_recv",
 		SlotTCPClose: "tcp_close", SlotFileDelete: "file_delete",
-		SlotFileTruncate: "file_truncate", SlotAudioInfo: "audio_info",
+		SlotFileRename: "file_rename", SlotFileTruncate: "file_truncate",
+		SlotAudioInfo: "audio_info",
 		SlotAudioPlay: "audio_play", SlotWinFillBatch: "win_fill_batch",
 		SlotMmap: "mmap", SlotTime: "time", SlotTtyAttach: "tty_attach",
 	}
@@ -346,5 +349,181 @@ func TestFileAppendWritesLongRows(t *testing.T) {
 
 	if !FileAppend("/host/SELFTEST/OUT/long.txt", make([]byte, 9000)) {
 		t.Fatal("FileAppend failed on a 9000-byte row")
+	}
+}
+
+// M66b (#1444): the rename binding and the crash-safe replace-write.
+
+// hookStr rebuilds a path argument the fake kernel received. The pointer is
+// the one strPtr handed the seam (still live inside the call), so this is
+// the same contract the guest assembly reads through — test-only.
+func hookStr(a0, a1 uintptr) string {
+	if a0 == 0 || a1 == 0 {
+		return ""
+	}
+	return string(unsafe.Slice((*byte)(unsafe.Pointer(a0)), a1))
+}
+
+// WriteFileSafe's publish order is the contract: open the .tmp, write,
+// FSYNC, close, delete the live file, rename the temp over it. The fsync
+// and the rename are what make a crash leave either the old bytes or no
+// file — never a partial one.
+func TestWriteFileSafePublishesByRename(t *testing.T) {
+	var seq []uintptr
+	prev := SetSyscallHookForTest(func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
+		seq = append(seq, num)
+		switch num {
+		case SlotFileOpen:
+			if got := hookStr(a0, a1); got != "/host/SET.TXT.tmp" {
+				t.Fatalf("open = %q, want the temp path", got)
+			}
+			if a2 != uintptr(ModeWrite|ModeCreate) {
+				t.Fatalf("open flags = %#x", a2)
+			}
+			return 1
+		case SlotFileWrite:
+			return int64(a2)
+		case SlotFileSync, SlotFileClose:
+			return 0
+		case SlotFileDelete:
+			if got := hookStr(a0, a1); got != "/host/SET.TXT" {
+				t.Fatalf("delete = %q, want the live path", got)
+			}
+			return 0
+		case SlotFileRename:
+			if got := hookStr(a0, a1); got != "/host/SET.TXT.tmp" {
+				t.Fatalf("rename from = %q, want the temp", got)
+			}
+			if got := hookStr(a2, a3); got != "/host/SET.TXT" {
+				t.Fatalf("rename to = %q, want the live path", got)
+			}
+			return 0
+		}
+		t.Fatalf("unexpected slot %d", num)
+		return 0
+	})
+	defer SetSyscallHookForTest(prev)
+
+	if rc := WriteFileSafe("/host/SET.TXT", []byte("#v2\nwm=none\n")); rc != 0 {
+		t.Fatalf("WriteFileSafe = %d, want 0", rc)
+	}
+	want := []uintptr{SlotFileOpen, SlotFileWrite, SlotFileSync, SlotFileClose, SlotFileDelete, SlotFileRename}
+	if len(seq) != len(want) {
+		t.Fatalf("call seq = %v, want %v", seq, want)
+	}
+	for i, w := range want {
+		if seq[i] != w {
+			t.Fatalf("call seq = %v, want %v", seq, want)
+		}
+	}
+}
+
+// Every failure path removes the temp and reports the failing code: the
+// live file is left exactly as it was (old bytes or absent), never partial.
+func TestWriteFileSafeFailureLeavesNoTemp(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		fail  uintptr // the slot that fails
+		check func(*testing.T, []uintptr)
+	}{
+		{"write", SlotFileWrite, func(t *testing.T, seq []uintptr) {
+			if seq[len(seq)-1] != SlotFileDelete {
+				t.Fatalf("last call = %d, want the temp delete", seq[len(seq)-1])
+			}
+		}},
+		{"sync", SlotFileSync, func(t *testing.T, seq []uintptr) {
+			if seq[len(seq)-1] != SlotFileDelete {
+				t.Fatalf("last call = %d, want the temp delete", seq[len(seq)-1])
+			}
+		}},
+		{"rename", SlotFileRename, func(t *testing.T, seq []uintptr) {
+			// delete(live) -> rename fails -> delete(temp): two deletes.
+			if seq[len(seq)-1] != SlotFileDelete || seq[len(seq)-2] != SlotFileRename {
+				t.Fatalf("tail = %v, want rename then temp delete", seq[len(seq)-2:])
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var seq []uintptr
+			prev := SetSyscallHookForTest(func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
+				seq = append(seq, num)
+				if num == tc.fail {
+					return -ErrEACCES
+				}
+				switch num {
+				case SlotFileOpen:
+					return 1
+				case SlotFileWrite:
+					return int64(a2)
+				case SlotFileDelete:
+					return 0
+				case SlotFileSync, SlotFileClose, SlotFileRename:
+					return 0
+				}
+				t.Fatalf("unexpected slot %d", num)
+				return 0
+			})
+			defer SetSyscallHookForTest(prev)
+
+			if rc := WriteFileSafe("/host/SET.TXT", []byte("body")); rc != -ErrEACCES {
+				t.Fatalf("WriteFileSafe = %d, want -7", rc)
+			}
+			tc.check(t, seq)
+		})
+	}
+}
+
+// An absent live file is not a publish failure: the delete reports ENOENT
+// and the rename proceeds (first save on a fresh share).
+func TestWriteFileSafeFirstSaveHasNothingToDelete(t *testing.T) {
+	var seq []uintptr
+	prev := SetSyscallHookForTest(func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
+		seq = append(seq, num)
+		if num == SlotFileDelete {
+			return ErrFileNotFound // nothing live yet
+		}
+		switch num {
+		case SlotFileOpen:
+			return 1
+		case SlotFileWrite:
+			return int64(a2)
+		case SlotFileSync, SlotFileClose, SlotFileRename:
+			return 0
+		}
+		t.Fatalf("unexpected slot %d", num)
+		return 0
+	})
+	defer SetSyscallHookForTest(prev)
+
+	if rc := WriteFileSafe("/host/SET.TXT", []byte("body")); rc != 0 {
+		t.Fatalf("WriteFileSafe = %d, want 0", rc)
+	}
+	if seq[len(seq)-1] != SlotFileRename {
+		t.Fatalf("last call = %d, want the rename", seq[len(seq)-1])
+	}
+}
+
+func TestFileRenameBinding(t *testing.T) {
+	prev := SetSyscallHookForTest(func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
+		if num != SlotFileRename {
+			t.Fatalf("slot %d, want file_rename", num)
+		}
+		if got := hookStr(a0, a1); got != "/host/A" {
+			t.Fatalf("from = %q", got)
+		}
+		if got := hookStr(a2, a3); got != "/host/B" {
+			t.Fatalf("to = %q", got)
+		}
+		return 0
+	})
+	defer SetSyscallHookForTest(prev)
+	if r := FileRename("/host/A", "/host/B"); r != 0 {
+		t.Fatalf("FileRename = %d, want 0", r)
+	}
+	if r := FileRename("", "/host/B"); r != -ErrEINVAL {
+		t.Fatalf("empty from = %d, want -1", r)
+	}
+	if r := FileRename("/host/A", ""); r != -ErrEINVAL {
+		t.Fatalf("empty to = %d, want -1", r)
 	}
 }

@@ -1,26 +1,40 @@
-# go-stress.spec -- issue #1227 / M65c (#1441): GOOS=virelai 0b breadth
-# (GC / channel / timer / futex) past the N=8 D6 baseline, on the
-# compiled default GOMAXPROCS (no env pin — numCPUStartup = 2).
+# go-stress.spec -- M70a2 (#1469, parent #1453): seeded randomized
+# GOOS=virelai runtime stress on the compiled default GOMAXPROCS (no env
+# pin — numCPUStartup = 2, ADR 0027 D6). Supersedes the #1227 fixed
+# four-phase shape.
 #
-# The fixture (tools/go/gostress.go) prints one completion line per phase
-# so this run is assert-proven by program output, not a script echo:
-#   1. GC — 120 × 64 KiB churn, 8 live retainers, two runtime.GC() cycles
-#   2. channel fan-out — 8 workers, 32 jobs, recv=32 sum=992
-#   3. timer pacing — 8 × time.Sleep(10ms), elapsed >= 10ms
-#   4. futex — 32 goroutines × 50 mutex increments (counter=1600) plus
-#      park-all-then-wake; N=32 is past goroutines.go's N=8
+# The fixture (tools/go/gostress.go) runs 4 fixed seeds × 8 iterations;
+# each iteration draws shape (gc / chan / timer / futex / mem / churn)
+# and parameters from an in-tree splitmix64 seeded by the seed — no
+# wall-clock, no host entropy (M70a D1); bounded guest time (D2). Run 02
+# replays the first roster seed via argv. pins.txt is the pinned corpus:
+# the exact deterministic line sequence per seed. A generator, PRNG or
+# roster change regenerates it deliberately in the same PR; a crash on
+# any seed fails the run.
 #
-# M65c drops `set GOMAXPROCS=2` so this gate proves the compiled default
-# (ADR 0027 D6). `go-args` keeps GOMAXPROCS=1 as the env-override proof.
+# Matching is ordered-substring with an advancing cursor, NOT whole-line:
+# the runtime writes a line's text and newline as separate writes, and
+# the shell idle-loop reporters (smp/timer/userspace) interleave between
+# them, so kernel fragments can sit inside a serial line — but never
+# inside the program's write itself.
+#
+# Kernel-effect ties (python over the `syscalls` report): sys_mmap grew
+# (the mem phase extends the sbrk break through slot 63); its ceiling is
+# the kernel's loud-refusal budget (max_mmap_regions=16) — observed 8 on
+# the landed roster, with the region count depending on allocator
+# chunking the fixture does not control, so the ceiling enforces the
+# budget rather than an allocator invariant. sys_futex ≥ floor (slot-74
+# contention); sys_thread ≥ 2 (multi-M runtime, M65c).
 #
 # HOST PREREQUISITE (not hermetic — see tools/go/README.md):
 # `just go-toolchain` must have produced .build/go/GOSTRESS.ELF.
 #
-# exec-order: assert-proven -- --script2-after waits on the program's
-# `go-stress done` line, then script2's echo ends the run; asserts read
-# the program's own phase lines, so a green run always proves it ran.
+# exec-order: assert-proven -- runs 01/02 are a single exec whose script2
+# waits on the program's `go-stress done` line; run 03 (bad argv) ends on
+# the program's own FAIL marker. All asserts read the program's lines, so
+# a green run always proves it ran.
 
-vgate_name go-stress "issue #1227: GOOS=virelai GC/channel/timer/futex stress on VZ"
+vgate_name go-stress "M70a2 #1469: seeded GOOS=virelai runtime stress (gc/chan/timer/futex/mem/churn) on VZ"
 vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 
@@ -28,9 +42,93 @@ vgate_file script.txt <<'EOF'
 exec GOSTRESS.ELF
 EOF
 
+vgate_file script-seed.txt <<'EOF'
+exec GOSTRESS.ELF 0x9e3779b97f4a7c15
+EOF
+
+vgate_file script-bad.txt <<'EOF'
+exec GOSTRESS.ELF bogus
+EOF
+
 vgate_file script2.txt <<'EOF'
 syscalls
 echo gostress-held-window
+EOF
+
+# Pinned corpus, 4 seeds × 17 lines (8 iteration markers + 8 phase-ok
+# detail lines + 1 seed-ok line), in exact program order. The `procs=`
+# line and the closing `done` marker are deliberately NOT in the pin —
+# they are asserted separately below. Regenerate with the fixture, never
+# by loosening an assert.
+vgate_file pins.txt <<'EOF'
+go-stress seed=0x9e3779b97f4a7c15 iter=1 phase=timer
+go-stress seed=0x9e3779b97f4a7c15 iter=1 phase=timer n=6 maxms=14 ok
+go-stress seed=0x9e3779b97f4a7c15 iter=2 phase=futex
+go-stress seed=0x9e3779b97f4a7c15 iter=2 phase=futex g=17 iters=34 counter=578 ok
+go-stress seed=0x9e3779b97f4a7c15 iter=3 phase=chan
+go-stress seed=0x9e3779b97f4a7c15 iter=3 phase=chan fan workers=8 jobs=38 ok
+go-stress seed=0x9e3779b97f4a7c15 iter=4 phase=churn
+go-stress seed=0x9e3779b97f4a7c15 iter=4 phase=churn g=51 depth=37 ok
+go-stress seed=0x9e3779b97f4a7c15 iter=5 phase=mem
+go-stress seed=0x9e3779b97f4a7c15 iter=5 phase=mem steps=2 top=512KiB ok
+go-stress seed=0x9e3779b97f4a7c15 iter=6 phase=gc
+go-stress seed=0x9e3779b97f4a7c15 iter=6 phase=gc allocs=49 live=4 cycles=1 ok
+go-stress seed=0x9e3779b97f4a7c15 iter=7 phase=gc
+go-stress seed=0x9e3779b97f4a7c15 iter=7 phase=gc allocs=56 live=4 cycles=1 ok
+go-stress seed=0x9e3779b97f4a7c15 iter=8 phase=chan
+go-stress seed=0x9e3779b97f4a7c15 iter=8 phase=chan chain stages=4 vals=5 ok
+go-stress seed=0x9e3779b97f4a7c15 ok
+go-stress seed=0xa0761d6478bd642f iter=1 phase=mem
+go-stress seed=0xa0761d6478bd642f iter=1 phase=mem steps=3 top=1152KiB ok
+go-stress seed=0xa0761d6478bd642f iter=2 phase=gc
+go-stress seed=0xa0761d6478bd642f iter=2 phase=gc allocs=58 live=4 cycles=2 ok
+go-stress seed=0xa0761d6478bd642f iter=3 phase=churn
+go-stress seed=0xa0761d6478bd642f iter=3 phase=churn g=33 depth=19 ok
+go-stress seed=0xa0761d6478bd642f iter=4 phase=chan
+go-stress seed=0xa0761d6478bd642f iter=4 phase=chan fan workers=8 jobs=29 ok
+go-stress seed=0xa0761d6478bd642f iter=5 phase=timer
+go-stress seed=0xa0761d6478bd642f iter=5 phase=timer n=5 maxms=14 ok
+go-stress seed=0xa0761d6478bd642f iter=6 phase=futex
+go-stress seed=0xa0761d6478bd642f iter=6 phase=futex g=24 iters=15 counter=360 ok
+go-stress seed=0xa0761d6478bd642f iter=7 phase=futex
+go-stress seed=0xa0761d6478bd642f iter=7 phase=futex g=24 iters=40 counter=960 parkwake=1 ok
+go-stress seed=0xa0761d6478bd642f iter=8 phase=chan
+go-stress seed=0xa0761d6478bd642f iter=8 phase=chan fan workers=6 jobs=18 ok
+go-stress seed=0xa0761d6478bd642f ok
+go-stress seed=0xe7037ed1a0b428db iter=1 phase=mem
+go-stress seed=0xe7037ed1a0b428db iter=1 phase=mem steps=3 top=1152KiB ok
+go-stress seed=0xe7037ed1a0b428db iter=2 phase=futex
+go-stress seed=0xe7037ed1a0b428db iter=2 phase=futex g=6 iters=31 counter=186 parkwake=1 ok
+go-stress seed=0xe7037ed1a0b428db iter=3 phase=chan
+go-stress seed=0xe7037ed1a0b428db iter=3 phase=chan fan workers=5 jobs=38 ok
+go-stress seed=0xe7037ed1a0b428db iter=4 phase=gc
+go-stress seed=0xe7037ed1a0b428db iter=4 phase=gc allocs=48 live=4 cycles=2 ok
+go-stress seed=0xe7037ed1a0b428db iter=5 phase=churn
+go-stress seed=0xe7037ed1a0b428db iter=5 phase=churn g=43 depth=16 ok
+go-stress seed=0xe7037ed1a0b428db iter=6 phase=timer
+go-stress seed=0xe7037ed1a0b428db iter=6 phase=timer n=3 maxms=8 ok
+go-stress seed=0xe7037ed1a0b428db iter=7 phase=gc
+go-stress seed=0xe7037ed1a0b428db iter=7 phase=gc allocs=52 live=3 cycles=2 ok
+go-stress seed=0xe7037ed1a0b428db iter=8 phase=mem
+go-stress seed=0xe7037ed1a0b428db iter=8 phase=mem steps=2 top=512KiB ok
+go-stress seed=0xe7037ed1a0b428db ok
+go-stress seed=0xc0ffee iter=1 phase=churn
+go-stress seed=0xc0ffee iter=1 phase=churn g=48 depth=7 ok
+go-stress seed=0xc0ffee iter=2 phase=gc
+go-stress seed=0xc0ffee iter=2 phase=gc allocs=41 live=3 cycles=1 ok
+go-stress seed=0xc0ffee iter=3 phase=chan
+go-stress seed=0xc0ffee iter=3 phase=chan chain stages=3 vals=5 ok
+go-stress seed=0xc0ffee iter=4 phase=futex
+go-stress seed=0xc0ffee iter=4 phase=futex g=23 iters=37 counter=851 ok
+go-stress seed=0xc0ffee iter=5 phase=timer
+go-stress seed=0xc0ffee iter=5 phase=timer n=3 maxms=14 ok
+go-stress seed=0xc0ffee iter=6 phase=mem
+go-stress seed=0xc0ffee iter=6 phase=mem steps=2 top=768KiB ok
+go-stress seed=0xc0ffee iter=7 phase=mem
+go-stress seed=0xc0ffee iter=7 phase=mem steps=2 top=1024KiB ok
+go-stress seed=0xc0ffee iter=8 phase=futex
+go-stress seed=0xc0ffee iter=8 phase=futex g=21 iters=23 counter=483 parkwake=1 ok
+go-stress seed=0xc0ffee ok
 EOF
 
 vgate_setup_python <<'PY'
@@ -50,13 +148,26 @@ vgate_run 01 -- --script '$RUN_DIR/script.txt' --script2 '$RUN_DIR/script2.txt' 
 
 vgate_assert 01 serial-contains 'exec: loaded GOSTRESS.ELF'
 vgate_assert 01 serial-contains 'go-stress procs=2'
-vgate_assert 01 serial-contains 'go-stress gc allocs=120 live=8'
-vgate_assert 01 serial-contains 'go-stress chan fan=32 recv=32 sum=992'
-vgate_assert 01 serial-contains 'go-stress timer n=8 ok'
-vgate_assert 01 serial-contains 'go-stress futex n=32 counter=1600'
 vgate_assert 01 serial-contains 'go-stress done'
+vgate_assert 01 serial-absent 'go-stress FAIL'
+vgate_assert 01 serial-absent 'fatal error:'
 vgate_assert 01 serial-absent '[EXC] parking:'
 vgate_assert 01 serial-absent 'exited status=139'
+
+vgate_assert 01 python <<'PY'
+import os, sys
+ser = open(os.environ["VG_SER"], errors="replace").read()
+pins = [l for l in open(os.path.join(os.environ["RUN_DIR"], "pins.txt"))
+        .read().splitlines() if l]
+pos = 0
+for i, want in enumerate(pins):
+    idx = ser.find(want, pos)
+    if idx < 0:
+        sys.exit("FAIL: pin %d/%d missing or out of order:\n  %s"
+                 % (i + 1, len(pins), want))
+    pos = idx + len(want)
+print("go-stress run 01: pinned corpus matched in order (%d lines)" % len(pins))
+PY
 
 vgate_assert 01 python <<'PY'
 import os, re, sys
@@ -73,7 +184,59 @@ if n_thread is None:
 if n_thread < 2:
     sys.exit("FAIL: sys_thread calls >= 2 required, got %d" % n_thread)
 n_futex = calls(74)
-if n_futex is None or n_futex < 8:
-    sys.exit("FAIL: sys_futex contention expected (>= 8 calls), got %s" % n_futex)
-print("go-stress python asserts OK: sys_thread=%d sys_futex=%d" % (n_thread, n_futex))
+if n_futex is None or n_futex < 50:
+    sys.exit("FAIL: sys_futex contention expected (>= 50 calls), got %s" % n_futex)
+n_mmap = calls(63)
+if n_mmap is None:
+    sys.exit("FAIL: no sys_mmap row in the syscalls report")
+if n_mmap < 2:
+    sys.exit("FAIL: sys_mmap growth expected (>= 2 calls), got %s" % n_mmap)
+if n_mmap > 16:
+    sys.exit("FAIL: sys_mmap calls %d exceeds the per-process "
+             "max_mmap_regions budget (16)" % n_mmap)
+print("go-stress python asserts OK: sys_thread=%d sys_futex=%d sys_mmap=%d"
+      % (n_thread, n_futex, n_mmap))
 PY
+
+vgate_run 02 -- --script '$RUN_DIR/script-seed.txt' --script2 '$RUN_DIR/script2.txt' --script2-after 'go-stress done' --script-expect 'gostress-held-window' --timeout 120
+
+vgate_assert 02 serial-contains 'exec: loaded GOSTRESS.ELF'
+vgate_assert 02 serial-contains 'go-stress procs=2'
+vgate_assert 02 serial-contains 'go-stress done'
+vgate_assert 02 serial-absent 'go-stress FAIL'
+vgate_assert 02 serial-absent 'fatal error:'
+vgate_assert 02 serial-absent '[EXC] parking:'
+vgate_assert 02 serial-absent 'exited status=139'
+
+# Same-seed-twice determinism, second boot: the argv replay of seed
+# 0x9e3779b97f4a7c15 must reproduce run 01's first 17 pinned lines in
+# order (the seed's full sequence).
+vgate_assert 02 python <<'PY'
+import os, sys
+ser = open(os.environ["VG_SER"], errors="replace").read()
+pins = [l for l in open(os.path.join(os.environ["RUN_DIR"], "pins.txt"))
+        .read().splitlines() if l]
+pos = 0
+for i, want in enumerate(pins[:17]):
+    idx = ser.find(want, pos)
+    if idx < 0:
+        sys.exit("FAIL: replay pin %d/17 missing or out of order:\n  %s"
+                 % (i + 1, want))
+    pos = idx + len(want)
+print("go-stress run 02: argv replay reproduced the pinned seed sequence")
+PY
+
+# Bad-argv path (card-explicit contract): an unparseable seed prints the
+# FAIL line and withholds the `done` marker, so a failed seeded run can
+# never be mistaken for a clean one — the run's red comes from the
+# missing anchor, and here the FAIL line itself ends the boot. The
+# fixture's exit status stays 0; the gate reads the lines, not the
+# status. No syscalls report needed for this run.
+vgate_run 03 -- --script '$RUN_DIR/script-bad.txt' --script-expect 'go-stress FAIL argv=bogus' --timeout 120
+
+vgate_assert 03 serial-contains 'exec: loaded GOSTRESS.ELF'
+vgate_assert 03 serial-contains 'go-stress FAIL argv=bogus'
+vgate_assert 03 serial-absent 'go-stress done'
+vgate_assert 03 serial-absent 'fatal error:'
+vgate_assert 03 serial-absent '[EXC] parking:'
+vgate_assert 03 serial-absent 'exited status=139'

@@ -325,6 +325,91 @@ the disk actually held, asserted by unit cases for the self-loop, a two-cluster
 cycle, a healthy control chain, and a cyclic directory (plus early EOC, the
 reserved bad marker, and a zero first cluster).
 
+## Go audio — volume/mute and the muted-drain identity (M70f2, issue #1476)
+
+M70f2 is the Go half of the audio arc, and it exists because the card that
+commissioned it was written on a stale premise: M58e/M58f had already shipped
+`user/go/vi/audio.go` (slots 42/43) and `FART.ELF` three days earlier. What was
+genuinely missing was slots **44/45** — `audio_volume`/`audio_mute`, which no Go
+program could reach — and a Go consumer that asserts the properties
+`user/src/chime.zig` proved from Zig. The card is corrected in place rather than
+quietly re-scoped.
+
+**What is verified, and how.**
+
+- `AudioVolume`/`AudioMute` in `user/go/vi/audio.go` (host: `go test ./vi`,
+  14/14 audio cases). The audio rows now go through the hookable gateway
+  (`svc1`/`svc2`, the seam M66a opened for the file surface), so the host suite
+  can inject a fake kernel and pin what the binding **sends**:
+  `TestAudioVolumeNoClamp` asserts an out-of-range volume reaches the kernel
+  unchanged, `TestAudioMuteMapping` pins the 1/0 wire, and
+  `TestAudioVolumeNegativePassedThrough` pins the two's-complement pass-through.
+  Before this the whole file called the raw assembly, so the only
+  host-testable half was the chunker.
+- `go-fart.spec` (2/2 runs, 38 s) grew three phases and cross-checks all four
+  against the kernel's single counter: `43 sys_audio_play calls=196` =
+  52 (blip) + 24 (unmuted) + 24 (muted) + 96 (sequence). The blip's markers and
+  digest are byte-identical to M58f's; only the total moved, and the spec's
+  python sums the phases instead of trusting one number.
+- The **muted-drain identity** is an A/B: one 250 ms tone (96000 bytes)
+  submitted unmuted, then muted, both confirming 96000. Asserting it as an
+  equality between two identical submissions is the point — a mute that
+  shortened the return would be indistinguishable from `ErrNoAudioDevice`,
+  which is this seam's device-refusal signal.
+- **The no-clamp rule is observed from EL0**: `fart: vol over=101 err=EINVAL`.
+  The app prints `CLAMPED` instead if the kernel ever starts accepting an
+  out-of-range gain, and both `go-fart.spec` and `live-sound-control.spec`
+  assert that marker ABSENT — so a green run says the refusal happened, not that
+  the check was skipped.
+- `live-sound-control.spec` (2/2, 41 s) run 02 boots the Go app and then reads
+  the kernel state back through the **monitor**: `sound: vol=40 mute=0`, where 40
+  could only have come from the app (the kernel's default is 100 —
+  `virtio_snd.zig:256 stream_volume`, observed as `sound: vol=100 mute=0` in
+  `live-sound-device` on a boot that sets nothing). That is state observed
+  through a path the app does not control, which its own markers cannot give.
+- `live-sound-playback.spec` (1/1, 28 s) asserts the accounting identity as
+  ARITHMETIC rather than as a verbatim line: `submitted == drained == frames * 8`
+  with `frames == 300 ms × 48 kHz`, so a consistent-but-wrong pair cannot pass.
+- `live-sound-app.spec` (1/1, 45 s) is behaviorally unchanged and carries the
+  retirement decision as a comment.
+
+**The M60 one-binary-per-card question, answered.** `JINGLE.BIN` and
+`CHIME.BIN` were **not** retired, and the comparison is recorded assertion by
+assertion in `live-sound-app.spec`. The Go successor covers the EL0 seam,
+bounded chunking over the 64 KiB per-call bound, per-note accounting and the
+syscall counters — from Go, in both the `--sound` and soundless arms. It does
+not play JINGLE's 14-note melody, and that spec's python asserts the melody's
+exact per-note byte counts (96000/192000), so retiring `JINGLE.BIN` would drop a
+CONTENT fixture, not merely a binary. That is the policy ADR 0030 (`go-is-el0`)
+fixes — "Deletions are one binary at a time, each independently revertible. No
+flag day." — and a retirement that silently dropped coverage is not available
+under it. CHIME's half *is* covered (slots 44/45 plus the muted-drain identity,
+above), but a coverage answer is not a retirement, and nothing is deleted by
+this card.
+
+**Named limits, so a green run is not read as more than it is.**
+
+- **The waveform is not observable.** Nothing here captures what the device
+  receives (host-side capture is a non-goal of the card), so "muted" is
+  evidenced as an accounting identity plus kernel state — never as measured
+  silence. A device that drained the samples without zeroing them would pass
+  every assertion above.
+- The loudness a volume setting produces is not measured either: only the bound
+  (0..100), the echo, and the kernel-state read-back are.
+- `43 sys_audio_play calls=` counts the run's whole session, so the spec's
+  python sums the phases deliberately; a future phase must be added to that sum
+  rather than absorbed into a re-pin.
+- These four specs are class B (VZ + `--sound`), so they run where the class-B
+  fleet runs and not on every push.
+
+**One pre-existing failure found and fixed here.** `live-sound-control.spec`
+pinned `syscalls: slots=64 implemented=68` while `kernel/src/syscall.zig`
+declares `implemented_count = 78`, so the assert had been RED ON MAIN, in a
+class-B spec CI does not run, with no unit test pinning the census. It is now
+asserted as the SHAPE the composition specs already use (`implemented=`), with
+the exact number left to the kernel source. `live-net-udp-syscall.spec` pins the
+same stale 68 and is left alone here (different card).
+
 ## Verification sequence
 
 1. Print the detected tool versions.

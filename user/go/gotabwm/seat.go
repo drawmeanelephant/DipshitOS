@@ -103,6 +103,13 @@ func main() {
 	vi.ConsoleLine(MarkerDraw)
 	vi.ConsoleLine(MarkerHolding)
 
+	// M66b (#1444): decode /host/SETTINGS.TXT (schema v2) BEFORE any phase
+	// that waits on the harness (the window choreography would otherwise
+	// sit between boot and the decode). Missing is silent; corrupt fails
+	// closed — one marker line, then the seat runs on its own defaults. A
+	// marker only after its syscall returned.
+	loadSettings()
+
 	// 5. The seat's OWN window lifecycle (M57b, issue #1317): open a Go
 	//    window, submit a chrome descriptor and a kernel-clamped rect, take
 	//    focus and lose it, close through the WM seam, and leave a window

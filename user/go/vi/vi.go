@@ -44,9 +44,9 @@ func svc0(num uintptr) int64 {
 	return syscall0(num)
 }
 
-// svc1/svc3 are the file-ABI rows' gateways (M66a): the file surface routes
-// through the hook too, so a host test can inject a fake kernel for the
-// whole ADR 0010 surface, not just TCP.
+// svc1/svc3/svc4 are the file-ABI rows' gateways (M66a/M66b): the file
+// surface routes through the hook too, so a host test can inject a fake
+// kernel for the whole ADR 0010 surface, not just TCP.
 func svc1(num uintptr, a0 uintptr) int64 {
 	if syscallHook != nil {
 		return syscallHook(num, a0, 0, 0, 0)
@@ -61,6 +61,13 @@ func svc3(num uintptr, a0, a1, a2 uintptr) int64 {
 	return syscall3(num, a0, a1, a2)
 }
 
+func svc4(num uintptr, a0, a1, a2, a3 uintptr) int64 {
+	if syscallHook != nil {
+		return syscallHook(num, a0, a1, a2, a3)
+	}
+	return syscall4(num, a0, a1, a2, a3)
+}
+
 // ADR 0007 slot numbers (kernel/src/syscall.zig, mirrored by
 // user/src/lib/ui/abi.zig). Adding a row here must match that table.
 const (
@@ -71,6 +78,9 @@ const (
 	SlotIPCSend      uintptr = 5
 	SlotIPCRecv      uintptr = 6
 	SlotProcs        uintptr = 7
+	SlotUDPListen    uintptr = 9 // M67a (#1446): the N6 UDP seam — DNS transport
+	SlotUDPSend      uintptr = 10
+	SlotUDPRecv      uintptr = 11
 	SlotWinOpen      uintptr = 12
 	SlotWinFill      uintptr = 13
 	SlotWinPresent   uintptr = 14
@@ -89,9 +99,12 @@ const (
 	SlotTCPRecv      uintptr = 32
 	SlotTCPClose     uintptr = 33
 	SlotFileDelete   uintptr = 34
+	SlotFileRename   uintptr = 35
 	SlotFileTruncate uintptr = 36
 	SlotAudioInfo    uintptr = 42
 	SlotAudioPlay    uintptr = 43
+	SlotAudioVolume  uintptr = 44
+	SlotAudioMute    uintptr = 45
 	SlotWinFillBatch uintptr = 46
 	SlotMmap         uintptr = 63
 	SlotTime         uintptr = 66
@@ -522,6 +535,61 @@ func FileTruncate(h uint32, size uint32) int64 {
 // read handles are honest no-ops.
 func FileSync(h uint32) int64 {
 	return svc1(SlotFileSync, uintptr(h))
+}
+
+// FileRename renames oldPath to newPath (slot 35). The host publishes with
+// a moveItem and REFUSES a live target (the file-domain EEXIST, -9), so a
+// rename-over never silently replaces — WriteFileSafe sequences delete then
+// rename instead (M66b).
+func FileRename(oldPath, newPath string) int64 {
+	if oldPath == "" || newPath == "" {
+		return -ErrEINVAL
+	}
+	return svc4(SlotFileRename, strPtr(oldPath), uintptr(len(oldPath)),
+		strPtr(newPath), uintptr(len(newPath)))
+}
+
+// WriteFileSafe replaces path with b crash-safe (M66b #1444): the body is
+// written to a sacrificial temp beside the target, fsync'd through slot 77
+// BEFORE close, and published — the live path is never truncated in place,
+// so no failure or crash can leave a PARTIAL file behind. The HF rename is
+// no-overwrite, so the publish is delete-then-rename: from the delete on,
+// the honest failure mode for the target is ABSENT, which every reader
+// treats as defaults (corrupt-fails-closed) — never garbage. The temp is
+// the one file that may be truncated in place (it is the sacrificial
+// copy), and an orphan temp from a crash between its close and the
+// publish is simply replaced by the next safe write — nothing removes it
+// at boot. Returns 0, or the negative kernel code of the step that failed;
+// every failure removes the temp.
+func WriteFileSafe(path string, b []byte) int64 {
+	if path == "" {
+		return -ErrEINVAL
+	}
+	tmp := path + ".tmp"
+	h, r := FileOpen(tmp, ModeWrite|ModeCreate)
+	if r < 0 {
+		return r
+	}
+	if _, wr := FileWriteAll(uint32(h), b); wr < 0 {
+		FileClose(uint32(h))
+		_ = FileDelete(tmp)
+		return wr
+	}
+	if rc := FileSync(uint32(h)); rc < 0 {
+		FileClose(uint32(h))
+		_ = FileDelete(tmp)
+		return rc
+	}
+	FileClose(uint32(h))
+	if rc := FileDelete(path); rc < 0 && rc != ErrFileNotFound {
+		_ = FileDelete(tmp)
+		return rc
+	}
+	if rc := FileRename(tmp, path); rc < 0 {
+		_ = FileDelete(tmp)
+		return rc
+	}
+	return 0
 }
 
 // FileDelete removes a file by path (slot 34).

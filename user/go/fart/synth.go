@@ -56,6 +56,44 @@ var DefaultBlip = Blip{
 	Harmonics:    6,
 }
 
+// NoteBlip is one note of the sequence (M70f2, issue #1476): the same
+// synthesis with the fart switched off — no glide, no flutter, no air — so one
+// Blip type covers both the rasp and a plain tone.
+//
+// Reusing synthBlip rather than growing a second oscillator is deliberate: the
+// sequence then goes through the code path M58f's pinned digest already covers,
+// so a note's digest means the same thing a blip's does ("exactly these
+// samples"), and there is no second DSP implementation to audit.
+func NoteBlip(hz float64, ms uint32) Blip {
+	return Blip{
+		MS:        ms,
+		StartHz:   hz,
+		EndHz:     hz, // no glide: this is a tone, not a raspberry
+		Depth:     0,
+		Noise:     0,
+		AttackMS:  8,
+		ReleaseMS: 40,
+		Amplitude: 0.35, // headroom under the 1/h harmonic sum
+		Harmonics: 3,
+	}
+}
+
+// synthTone builds one note at the negotiated format: the buffer an app hands
+// to sys_audio_play. It returns nil for a geometry the kernel cannot have
+// negotiated or a rate with no Hz — the callers report that rather than
+// submitting a buffer of zeros, which is what an ignored error would ship.
+func synthTone(info vi.AudioInfo, b Blip, hz uint32) []byte {
+	fb, ok := frameBytes(info.Format, info.Channels)
+	if !ok || hz == 0 {
+		return nil
+	}
+	pcm := make([]byte, int(framesFor(b.MS, hz)*fb))
+	if !synthBlip(pcm, b, info.Format, info.Channels, hz) {
+		return nil
+	}
+	return pcm
+}
+
 // rateHz maps a negotiated RATE_* code to Hz (0 = a code this app cannot
 // synthesize). The numbering is the kernel's (kernel/src/virtio_snd.zig
 // snd_rate_hz), the same table user/src/jingle.zig carries.

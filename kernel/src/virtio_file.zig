@@ -714,8 +714,11 @@ pub fn truncate(handle: u16, size: u64) u8 {
     return decode_reply(vf_reply_buf[0..n]).status;
 }
 
-/// RENAME/overwrite `from` → `to` on the host share (stateless).
-/// NUL-separated payload (paths are NUL-free by construction).
+/// RENAME `from` → `to` on the host share (stateless). The host publishes
+/// with a moveItem and REFUSES a live target (st_exists — the rename is
+/// no-overwrite), so a replace is the caller's delete-then-rename sequence
+/// (M66b #1444: the crash-safe save's publish step). NUL-separated payload
+/// (paths are NUL-free by construction).
 pub fn rename(raw_from: []const u8, raw_to: []const u8) u8 {
     const from = clean_path(raw_from);
     const to = clean_path(raw_to);
@@ -801,6 +804,9 @@ pub fn write_whole(path: []const u8, data: []const u8) u8 {
         if (written == 0) return st_host_error;
         off += @intCast(written);
     }
+    // M66b (#1444): every write_whole caller is a persistence consumer —
+    // push the bytes to the device before the close flushes and frees.
+    if (fsync(h) != st_ok) return st_host_error;
     return st_ok;
 }
 
