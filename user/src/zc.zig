@@ -171,6 +171,8 @@ const TokenKind = enum {
     keyword_enum,
     keyword_for,
     keyword_switch,
+    keyword_break,
+    keyword_continue,
     ident,
     number,
     string_lit,
@@ -363,6 +365,8 @@ const Tokenizer = struct {
                     if (std.mem.eql(u8, text, "while")) return Token{ .kind = .keyword_while, .text = text, .line = self.line };
                     if (std.mem.eql(u8, text, "for")) return Token{ .kind = .keyword_for, .text = text, .line = self.line };
                     if (std.mem.eql(u8, text, "switch")) return Token{ .kind = .keyword_switch, .text = text, .line = self.line };
+                    if (std.mem.eql(u8, text, "break")) return Token{ .kind = .keyword_break, .text = text, .line = self.line };
+                    if (std.mem.eql(u8, text, "continue")) return Token{ .kind = .keyword_continue, .text = text, .line = self.line };
                     if (std.mem.eql(u8, text, "return")) return Token{ .kind = .keyword_return, .text = text, .line = self.line };
                     if (std.mem.eql(u8, text, "defer")) return Token{ .kind = .keyword_defer, .text = text, .line = self.line };
                     if (std.mem.eql(u8, text, "struct")) return Token{ .kind = .keyword_struct, .text = text, .line = self.line };
@@ -867,6 +871,96 @@ fn emitOpenScopeDefers(p: *Parser) anyerror!void {
         d -= 1;
         try emitScopeDefers(p, d);
     }
+}
+
+// ---------------------------------------------------------------------------
+// M70c S3 (issue #1455): `break` / `continue` — the two loop-control
+// statements the Z4a dialect boundary listed as non-goals.
+//
+// A compile-time loop stack. Each `while`/`for` pushes the defer scope it
+// opened for its body plus two patch lists: where its `break` jumps land (the
+// loop exit) and where its `continue` jumps land. The target pc is not known
+// when the statement is compiled — for a `for` the target is the step BELOW
+// the body — so both kinds park a placeholder `b` and are back-patched by
+// `patchLoop` once the loop's shape is final.
+//
+// Two semantics ride on the loop stack rather than on a label:
+//   * both jumps run every defer still open inside the body (innermost scope
+//     first, the body's own scope included), so a `break` cannot skip a
+//     cleanup — the same LIFO unwind a body fallthrough performs;
+//   * `continue` targets the *condition* for `while` but the *step* for a
+//     `for`, because a range/array loop's increment lives at the bottom of
+//     the body. Jumping to the condition instead would skip the increment and
+//     spin forever (the `s3` corpus fixture pins this behaviorally).
+// ---------------------------------------------------------------------------
+const LoopCtx = struct {
+    /// Defer scope this loop opened for its body (`pushDeferScope`d before
+    /// `pushLoop`). A `break`/`continue` unwinds every scope at or inside it.
+    scope_idx: usize,
+    break_patches: [16]usize,
+    break_count: usize,
+    continue_patches: [16]usize,
+    continue_count: usize,
+};
+
+var loop_stack: [8]LoopCtx = undefined;
+var loop_depth: usize = 0;
+
+fn pushLoop(scope_idx: usize) anyerror!void {
+    if (loop_depth >= loop_stack.len) return error.CompileError;
+    loop_stack[loop_depth] = LoopCtx{
+        .scope_idx = scope_idx,
+        .break_patches = undefined,
+        .break_count = 0,
+        .continue_patches = undefined,
+        .continue_count = 0,
+    };
+    loop_depth += 1;
+}
+
+fn recordLoopJump(is_break: bool, jump_idx: usize) anyerror!void {
+    const ctx = &loop_stack[loop_depth - 1];
+    const list = if (is_break) &ctx.break_patches else &ctx.continue_patches;
+    const count = if (is_break) &ctx.break_count else &ctx.continue_count;
+    if (count.* >= list.len) return error.CompileError;
+    list[count.*] = jump_idx;
+    count.* += 1;
+}
+
+fn patchBranch(idx: usize, target: usize) void {
+    const offset = @as(i32, @intCast(target)) - @as(i32, @intCast(idx));
+    std.mem.writeInt(u32, code[idx..][0..4], enc_b(offset), .little);
+}
+
+/// Back-patch this loop's parked jumps and pop it. `continue_pc` is the loop's
+/// re-entry point (its condition for `while`, its step for a `for`).
+fn patchLoop(continue_pc: usize, exit_pc: usize) void {
+    loop_depth -= 1;
+    const ctx = &loop_stack[loop_depth];
+    var i: usize = 0;
+    while (i < ctx.break_count) : (i += 1) patchBranch(ctx.break_patches[i], exit_pc);
+    i = 0;
+    while (i < ctx.continue_count) : (i += 1) patchBranch(ctx.continue_patches[i], continue_pc);
+}
+
+/// Compile `break` / `continue`: unwind this loop body's open defer scopes,
+/// then park one unconditional branch for `patchLoop` to aim.
+fn compileLoopJump(p: *Parser, is_break: bool) anyerror!void {
+    const tok = p.advance();
+    if (loop_depth == 0) {
+        print_err(if (is_break) "break outside a loop" else "continue outside a loop", tok.line, tok.text);
+        return error.CompileError;
+    }
+    const loop_scope = loop_stack[loop_depth - 1].scope_idx;
+    var d = defer_scope_depth;
+    while (d > loop_scope) {
+        d -= 1;
+        try emitScopeDefers(p, d);
+    }
+    _ = p.accept(.semicolon) or p.accept(.comma);
+    const jump_idx = code_len;
+    emit(0);
+    try recordLoopJump(is_break, jump_idx);
 }
 
 /// Consume tokens up to and including the parameter list's closing paren,
@@ -2103,14 +2197,18 @@ fn compileStatement(p: *Parser) anyerror!void {
             emit(0);
             _ = try p.expect(.l_brace);
             try pushDeferScope();
+            try pushLoop(defer_scope_depth - 1);
             while (p.peek() != .r_brace and p.peek() != .eof) try compileStatement(p);
             _ = try p.expect(.r_brace);
             // Z2b: the while-body's defers run at the end of every iteration.
             try emitScopeDefers(p, defer_scope_depth - 1);
-            popDeferScope();
             const jump_back_offset = @as(i32, @intCast(start_pc)) - @as(i32, @intCast(code_len));
             emit(enc_b(jump_back_offset));
             const end_pc = code_len;
+            // M70c S3: `continue` re-tests the condition (start_pc); `break`
+            // lands past the back-branch (end_pc).
+            patchLoop(start_pc, end_pc);
+            popDeferScope();
             const end_offset_bytes = @as(i32, @intCast(end_pc - end_branch_idx));
             std.mem.writeInt(u32, code[end_branch_idx..][0..4], enc_b_cond(.eq, end_offset_bytes), .little);
         },
@@ -2176,13 +2274,17 @@ fn compileStatement(p: *Parser) anyerror!void {
 
                 _ = try p.expect(.l_brace);
                 try pushDeferScope();
+                try pushLoop(defer_scope_depth - 1);
                 while (p.peek() != .r_brace and p.peek() != .eof) try compileStatement(p);
                 _ = try p.expect(.r_brace);
                 // Z2b: the loop-body's defers run at the end of every iteration.
                 try emitScopeDefers(p, defer_scope_depth - 1);
                 popDeferScope();
 
-                // Step: idx += 1
+                // Step: idx += 1. M70c S3: this is a `for` loop's `continue`
+                // target — aiming at the condition instead would skip the
+                // increment and spin forever.
+                const step_pc = code_len;
                 emit(enc_ldr(19, 0, @intCast(idx_offset / 8)));
                 emit(enc_add_imm(0, 0, 1));
                 emit(enc_str(19, 0, @intCast(idx_offset / 8)));
@@ -2191,6 +2293,7 @@ fn compileStatement(p: *Parser) anyerror!void {
                 emit(enc_b(jump_back));
 
                 const exit_pc = code_len;
+                patchLoop(step_pc, exit_pc);
                 const exit_offset_bytes = @as(i32, @intCast(exit_pc - exit_branch_idx));
                 std.mem.writeInt(u32, code[exit_branch_idx..][0..4], enc_b_cond(.cs, exit_offset_bytes), .little);
             } else {
@@ -2279,13 +2382,17 @@ fn compileStatement(p: *Parser) anyerror!void {
 
                 _ = try p.expect(.l_brace);
                 try pushDeferScope();
+                try pushLoop(defer_scope_depth - 1);
                 while (p.peek() != .r_brace and p.peek() != .eof) try compileStatement(p);
                 _ = try p.expect(.r_brace);
                 // Z2b: the loop-body's defers run at the end of every iteration.
                 try emitScopeDefers(p, defer_scope_depth - 1);
                 popDeferScope();
 
-                // Step: idx += 1
+                // Step: idx += 1. M70c S3: this is a `for` loop's `continue`
+                // target — aiming at the condition instead would skip the
+                // increment and spin forever.
+                const step_pc = code_len;
                 emit(enc_ldr(19, 0, @intCast(idx_offset / 8)));
                 emit(enc_add_imm(0, 0, 1));
                 emit(enc_str(19, 0, @intCast(idx_offset / 8)));
@@ -2294,12 +2401,15 @@ fn compileStatement(p: *Parser) anyerror!void {
                 emit(enc_b(jump_back));
 
                 const exit_pc = code_len;
+                patchLoop(step_pc, exit_pc);
                 const exit_offset_bytes = @as(i32, @intCast(exit_pc - exit_branch_idx));
                 std.mem.writeInt(u32, code[exit_branch_idx..][0..4], enc_b_cond(.cs, exit_offset_bytes), .little);
             }
 
             locals_count = saved_locals_count;
         },
+        .keyword_break => try compileLoopJump(p, true),
+        .keyword_continue => try compileLoopJump(p, false),
         .keyword_return => {
             _ = p.advance();
             const has_value = p.peek() != .semicolon and p.peek() != .comma;
@@ -3907,4 +4017,245 @@ test "zc: Z3b stdz-shaped multi-file compile — fmt + builder + ring + app" {
     try testing.expect(functions[lookupFunc("sb_u64").?].address > 0);
     try testing.expect(functions[lookupFunc("ring_put").?].address > 0);
     try testing.expect(functions[lookupFunc("main").?].address > 0);
+}
+
+// ---------------------------------------------------------------------------
+// M70c S3 (issue #1455): `break` / `continue`.
+//
+// The behavioral pins are the corpus gate's (tests/zc-corpus/s3-break.z runs
+// in-guest AND as the Z4b host-built dual-run leg). What a host-side test can
+// add on top of "it compiles" is where the parked jumps were actually aimed,
+// so these decode the emitted `b` words rather than trusting the count.
+// ---------------------------------------------------------------------------
+
+const Branch = struct { idx: usize, target: usize };
+
+/// Test-only: the absolute BYTE index a plain `b` at byte index `idx` targets,
+/// or null when the word is not a `b`. zc's branch offsets are byte deltas from
+/// the branch's own address, so decoding one shows the real jump target.
+fn bTarget(idx: usize) ?usize {
+    const word = std.mem.readInt(u32, code[idx..][0..4], .little);
+    if ((word >> 26) != 0b000101) return null;
+    var imm: i64 = @intCast(word & 0x03FF_FFFF);
+    if ((imm & 0x0200_0000) != 0) imm -= 0x0400_0000; // sign-extend imm26
+    const target = @as(i64, @intCast(idx)) + imm * 4;
+    if (target < 0) return null;
+    return @intCast(target);
+}
+
+/// Test-only: every plain `b` the last compile emitted, in emission order.
+fn collectBranches(out: []Branch) usize {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < code_len) : (i += 4) {
+        if (bTarget(i)) |t| {
+            out[n] = Branch{ .idx = i, .target = t };
+            n += 1;
+        }
+    }
+    return n;
+}
+
+/// Test-only: how many `svc` instructions the last compile emitted.
+fn svcCount() usize {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < code_len) : (i += 4) {
+        const w = std.mem.readInt(u32, code[i..][0..4], .little);
+        if ((w & 0xFFE0_001F) == 0xD400_0001) n += 1;
+    }
+    return n;
+}
+
+test "zc: S3 break leaves the loop — the parked jump targets the loop exit" {
+    const src =
+        \\const zc = @import("zc");
+        \\pub fn main() void {
+        \\    var i: u64 = 0;
+        \\    while (i < 10) {
+        \\        if (i == 3) {
+        \\            break;
+        \\        }
+        \\        i = i + 1;
+        \\    }
+        \\    zc.exit(72);
+        \\}
+    ;
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
+    var branches: [16]Branch = undefined;
+    const n = collectBranches(&branches);
+    // The loop's own back-edge is the only BACKWARD jump here.
+    var back: ?Branch = null;
+    var backward: usize = 0;
+    for (branches[0..n]) |b| {
+        if (b.target < b.idx) {
+            backward += 1;
+            back = b;
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), backward);
+    // ...and exactly one forward jump aims at the instruction right after it:
+    // the `break`, not the if's end-branch (which lands inside the body).
+    var at_exit: usize = 0;
+    for (branches[0..n]) |b| {
+        if (b.target == back.?.idx + 4) at_exit += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), at_exit);
+}
+
+test "zc: S3 continue in a while re-tests the condition (same target as the back-edge)" {
+    const src =
+        \\const zc = @import("zc");
+        \\pub fn main() void {
+        \\    var i: u64 = 0;
+        \\    while (i < 10) {
+        \\        i = i + 1;
+        \\        if (i == 4) {
+        \\            continue;
+        \\        }
+        \\    }
+        \\    zc.exit(72);
+        \\}
+    ;
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
+    var branches: [16]Branch = undefined;
+    const n = collectBranches(&branches);
+    var backward: usize = 0;
+    var target: usize = 0;
+    for (branches[0..n]) |b| {
+        if (b.target < b.idx) {
+            backward += 1;
+            target = b.target;
+        }
+    }
+    // Two backward jumps — the loop back-edge and the `continue` — and BOTH
+    // must land on the condition test, or the loop would skip its re-test.
+    try testing.expectEqual(@as(usize, 2), backward);
+    const cond_pc = branches[0..n][0].target;
+    _ = cond_pc;
+    var same_target: usize = 0;
+    for (branches[0..n]) |b| {
+        if (b.target == target) same_target += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), same_target);
+}
+
+test "zc: S3 continue in a for lands on the step, not the loop top" {
+    // A body of exactly `continue` keeps the emitted branch list unambiguous:
+    // no `if`, and so none of the plain `b`s a comparison's 0/1
+    // materialization emits — the two branches found below ARE the loop's own
+    // control transfers.
+    const src =
+        \\const zc = @import("zc");
+        \\pub fn main() void {
+        \\    for (0..6) |k| {
+        \\        _ = k;
+        \\        continue;
+        \\    }
+        \\    zc.exit(72);
+        \\}
+    ;
+    const bytes = try compile(src);
+    try testing.expect(bytes > 0);
+    var branches: [16]Branch = undefined;
+    const n = collectBranches(&branches);
+    var back_idx: usize = 0;
+    var back_target: usize = 0;
+    var backward: usize = 0;
+    var forward: usize = 0;
+    var fwd_target: usize = 0;
+    for (branches[0..n]) |b| {
+        if (b.target < b.idx) {
+            backward += 1;
+            back_idx = b.idx;
+            back_target = b.target;
+        } else {
+            forward += 1;
+            fwd_target = b.target;
+        }
+    }
+    // A `for` has no back-edge a `continue` can reuse: its increment sits at
+    // the BOTTOM of the body, so `continue` is a FORWARD jump. (The `while`
+    // case above is the mirror image — backward, onto the condition.) Exactly
+    // one backward jump is therefore the loop's own back-edge; aiming
+    // `continue` at the loop top instead would make this 2.
+    try testing.expectEqual(@as(usize, 1), backward);
+    try testing.expectEqual(@as(usize, 1), forward);
+    // The step is the three-instruction (ldr/add/str) increment immediately
+    // before the back-edge, so `continue` must land exactly there: strictly
+    // past the loop top, strictly inside the loop, and on the step's own
+    // address. The loop top is the bug that would spin forever; past the
+    // back-edge is the bug that would exit the loop.
+    try testing.expect(fwd_target > back_target);
+    try testing.expect(fwd_target < back_idx);
+    try testing.expectEqual(back_idx - 12, fwd_target);
+}
+
+test "zc: S3 break and continue outside a loop are diagnostics" {
+    const brk =
+        \\const zc = @import("zc");
+        \\pub fn main() void {
+        \\    break;
+        \\    zc.exit(72);
+        \\}
+    ;
+    try testing.expectError(error.CompileError, compile(brk));
+    const cont =
+        \\const zc = @import("zc");
+        \\pub fn main() void {
+        \\    if (1 == 1) {
+        \\        continue;
+        \\    }
+        \\    zc.exit(72);
+        \\}
+    ;
+    try testing.expectError(error.CompileError, compile(cont));
+}
+
+test "zc: S3 break emits the body's registered defers on the break path" {
+    // Two programs that differ ONLY by one `defer` in the loop body. That
+    // defer is emitted twice — once on the `break` path, once at the body's
+    // (unreachable) fallthrough end — so the compile carries exactly two more
+    // SVC words than the same loop without it. A `break` that skipped the
+    // unwind would carry one, i.e. the delta would be 1 and this fails. The
+    // subtraction rather than an absolute count keeps the assertion about the
+    // break path and not about how many syscalls a builtin happens to lower to.
+    const with_defer =
+        \\const zc = @import("zc");
+        \\pub fn main() void {
+        \\    while (1 == 1) {
+        \\        defer zc.print("d\n");
+        \\        break;
+        \\    }
+        \\    zc.exit(72);
+        \\}
+    ;
+    _ = try compile(with_defer);
+    const with_count = svcCount();
+    const without_defer =
+        \\const zc = @import("zc");
+        \\pub fn main() void {
+        \\    while (1 == 1) {
+        \\        break;
+        \\    }
+        \\    zc.exit(72);
+        \\}
+    ;
+    _ = try compile(without_defer);
+    const without_count = svcCount();
+    try testing.expect(without_count >= 1); // main still exits
+    try testing.expectEqual(without_count + 2, with_count);
+}
+
+test "zc: S3 corpus fixture compiles in-guest (tests/zc-corpus/s3-break.z)" {
+    // The fixture arrives through the `zc_corpus_fixtures` build option
+    // (build.zig embeds tests/zc-corpus/s3-break.z), so a fixture edit that
+    // stops compiling under zc fails HERE instead of costing a boot to
+    // discover, and the file the gate stages cannot drift from the file this
+    // test compiles.
+    const fixtures = @import("zc_corpus_fixtures");
+    const bytes = try compile(fixtures.s3_break);
+    try testing.expect(bytes > 0);
 }
