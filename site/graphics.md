@@ -47,7 +47,8 @@ text inputs, list views — pure static BSS, no allocation) on top of the
 window seam, and four applications on top of that: `CALC.BIN` (calculator),
 `NOTEPAD.BIN` (editor), `TOP.BIN` (process monitor with click-to-kill), and
 the `DESKTOP.BIN` launcher — later a file manager (now `GOFILES.ELF`;
-Zig `FILE.BIN` deleted in M60). Windows and clicks reach these apps as events through
+Zig `FILE.BIN` deleted in M60) and a Go editor (`NOTE.ELF`, `user/go/note`;
+Zig `NOTEPAD.BIN` deleted in M66c, #1485). Windows and clicks reach these apps as events through
 milestone nine's per-process event queues (`sys_poll_event`/`sys_wait_event`).
 
 <Aside kind="info">

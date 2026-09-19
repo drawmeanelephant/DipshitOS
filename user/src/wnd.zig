@@ -1174,7 +1174,9 @@ pub fn execute_god_menu_command(cmd: Command) void {
         // DQ1 dynamic app (or a fallback verb matching a loaded entry).
         _ = ui.exec_program(bin);
     } else if (std.mem.eql(u8, cmd.verb, "notepad")) {
-        _ = ui.exec_program("NOTEPAD.BIN");
+        // M66c (#1485): the Zig app is retired; the fallback verb runs its Go
+        // successor. Manifest-driven verbs (the normal path) come from APPS.TXT.
+        _ = ui.exec_program("NOTE.ELF");
     } else if (std.mem.eql(u8, cmd.verb, "calc")) {
         _ = ui.exec_program("GOCALC.ELF");
     } else if (std.mem.eql(u8, cmd.verb, "file")) {

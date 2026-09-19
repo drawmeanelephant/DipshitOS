@@ -36,7 +36,7 @@ Every milestone through **thirty-one** has landed and closed:
 | Usability & HIG | ADR 0008: grouped `help`, line editing + history, one error contract, window chrome, `sysinfo`, persistent settings | Done |
 | Events | Per-process event queues: keyboard/pointer/window events to focused EL0 apps (`sys_poll_event`/`sys_wait_event`) | Done |
 | User filesystem ABI | Per-process file table, `/esp/` + `/data/` routing, file syscalls (slots 23–27), storage utilities | Done |
-| Desktop platform | ADR 0011: zero-heap `ui.zig` widget toolkit + `CALC.BIN`, `NOTEPAD.BIN`, `TOP.BIN`, `DESKTOP.BIN` launcher | Done |
+| Desktop platform | ADR 0011: zero-heap `ui.zig` widget toolkit + `CALC.BIN`, `NOTEPAD.BIN`, `TOP.BIN`, `DESKTOP.BIN` launcher (Zig `NOTEPAD.BIN` since retired — the editor is the Go `NOTE.ELF`, M66c) | Done |
 | Network apps | TCP syscall seam (slots 30–33), RFC 1035 DNS, `TCP.BIN`/`FETCH.BIN`/`CHAT.BIN` | Done |
 | Files & applications | Mutating filesystem seam (slots 34–37), `APPS.TXT` manifest, graphical data browser (now `GOFILES.ELF`), desktop composition | Done |
 | Shared services | Clipboard + app timers + composition capstone + isolation hardening (slots 38–41) | Done |
@@ -99,9 +99,9 @@ A single boot of VirelaiOS gets you, in order:
 - USB keyboard input, enumerated over a real XHCI controller, typing into the
   terminal.
 - A graphical desktop: the `DESKTOP.BIN` launcher with a working calculator
-  (`CALC.BIN`), a persistent text editor (`NOTEPAD.BIN`), a click-to-kill
-  process monitor (`TOP.BIN`), and a file browser over the host share
-  (`GOFILES.ELF`).
+  (`CALC.BIN`), a persistent text editor (`NOTE.ELF`, the Go editor that
+  replaced Zig `NOTEPAD.BIN` in M66c), a click-to-kill process monitor
+  (`TOP.BIN`), and a file browser over the host share (`GOFILES.ELF`).
 - Userland network applications: an HTTP/1.0 client (`FETCH.BIN`), a
   peer-to-peer graphical chat app (`CHAT.BIN`), and an in-guest HTTP/1.1 web
   server (`HTTPD.BIN`) that serves the guest's own files to the host.

@@ -1,7 +1,7 @@
 # go-wm-seat.spec -- M57a/b/c (issues #1313/#1317/#1318) class-B gate: a Go WM
 # (GOTABWM.ELF) registers the kernel render-server seat (slot 65), composites a
 # blank desktop, manages its OWN Go windows, and HOSTS GOCALC.ELF (M62h)
-# plus leftover Zig NOTEPAD.BIN.
+# plus NOTE.ELF (M66c; the Zig notepad it replaced is deleted in #1485).
 #
 # M57a: REGISTER (slot 65 cmd 1), the seam-B scanout grant, and a REQUEST_PRESENT
 # loop paced by the kind-18 COMPOSITE_TICK. M57b: the seat's own window
@@ -32,12 +32,12 @@
 # script prints, and every stage gate waits on guest output the program, the
 # kernel and the hosted app produce (`gotabwm: win focus`,
 # `wm: unregistered, shim resumed`).
-# M66c (#1445): the client is NOTE.ELF, NOTEPAD.BIN's Go successor. The
+# M66c (#1445 retarget, #1485 retirement): the client is NOTE.ELF, the Go
+# successor to the Zig notepad, and the Zig binary itself is now GONE. The
 # lifecycle vocabulary is shared by design (`note:` mirrors `notepad:`), so the
-# assertions below moved by prefix alone. NOTEPAD.BIN is still built and still
-# covered: five specs assert behaviour only the Zig app has (find/goto, theme
-# tokens, the clipboard self-demo, the unsaved-decline contract), so retiring it
-# is its own card rather than something this retarget assumes.
+# assertions below moved by prefix alone. The coverage that app alone had moved
+# to GOEDIT.ELF (find/goto, the unsaved-decline contract) or GOCOMP.ELF (its
+# clipboard+timer composition); the theme-token boots were retired with it.
 #
 # HOST PREREQUISITE: bash tools/go/build-note.sh -> .build/go/NOTE.ELF
 
@@ -180,9 +180,9 @@ vgate_assert 01 serial-count 'dui[4]: user' 1
 vgate_assert 01 serial-absent '[EXC] parking:'
 vgate_assert 01 serial-absent 'exited status=139'
 
-# --- M57c run 02: leftover Zig NOTEPAD -----------------------------------
-# Same choreography, a leftover Zig tab-aware app. If GOCALC hosts and
-# NOTEPAD does not (or vice versa) the interop would be app-specific.
+# --- M57c run 02: the Go editor NOTE.ELF ---------------------------------
+# Same choreography, a Go tab-aware app. If GOCALC hosts and NOTE.ELF does
+# not (or vice versa) the interop would be app-specific.
 vgate_file script-02.txt <<'EOF'
 set GOMAXPROCS=1
 wm

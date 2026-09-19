@@ -1,10 +1,20 @@
 # live-tabwm-unsaved.spec -- M42 UX hardening round 2 (2026-09-05, claim #1011, ADR 0018 addendum)
 # class-B gate: TABWM's unsaved-changes dialog (dirty tab close interception) end to end.
 #
+# M66c follow-on (#1485): the CLIENT is GOEDIT.ELF, not the deleted Zig
+# notepad. The dialog, the kernel's DIALOG actions and TABWM's decisions are
+# unchanged; what moved with the app is its vocabulary and its own close status:
+# `goedit: win_unsaved` (the dialog's Save choice reaching the owner),
+# `goedit: saved ` (the buffer published first), `goedit: close` + `goedit OK`
+# (the clean exit). GOEDIT's window opens at (32,32) rather than the Zig app's
+# (56,56), but both pointer targets here are chrome, not client rects: the tab
+# close box in the WM strip (158, 70) and the dialog buttons at their fixed
+# 1280x720 centres - Save (580,390), Don't Save (660,390).
+#
 # TWO headless boots with --screen (GPU armed) + --via-virtio (the cv INPUT
 # transport for pointer injection). Both boots follow the live-wnd8-unsaved-drain
-# seeding pattern: `dui unsaved 2 1` dirties NOTEPAD.BIN headless (the kernel
-# fans mirror bit 12 to the registered WM), and both follow the live-tabwm-close
+# seeding pattern: `dui unsaved 2 1` dirties the client headless (the kernel fans
+# mirror bit 12 to the registered WM), and both follow the live-tabwm-close
 # injection pattern: one click on the active tab's close box (158, 70) - row 0
 # y 58..96, close 'x' x 148..168 - which TABWM now routes through the close
 # DECISION point (request_close_tab): the tab is DIRTY, so NO close happens -
@@ -21,21 +31,24 @@
 # 540,310): Save center (580,390), Don't Save center (660,390), Cancel (715,390).
 #
 # Boot A (SAVE path): click Save (580,390) -> `tabwm: unsaved-save` ->
-#   DIALOG action 4: the kernel posts WIN_UNSAVED to NOTEPAD (it saves:
-#   `notepad: saved ok`); TABWM then closes the tab via WMCTL_WIN_CLOSE
-#   (`tabwm: win-close id=2 closed=1` - the window is still registered
-#   when cmd 13 lands, since the owner has not processed WIN_UNSAVED
-#   yet). OBSERVED save-path semantics (2026-09-05 hardware): NOTEPAD
-#   treats WIN_UNSAVED as save-and-exit - `notepad: win_unsaved` then
-#   `notepad: exiting 43` - so the kernel's WIN_CLOSE push goes
-#   unconsumed and `notepad: win_close` belongs to the DISCARD path
-#   (boot B), where the kernel's user_close inside DIALOG 5 is the only
-#   close. script3 reads the WM counters (` dialog=`).
+#   DIALOG action 4: the kernel posts WIN_UNSAVED to the client, which publishes
+#   the buffer (`goedit: saved /host/EDIT/SEED.TXT n=10`) and exits; TABWM then
+#   closes the tab via WMCTL_WIN_CLOSE (`tabwm: win-close id=2 closed=1` - the
+#   window is still registered when cmd 13 lands, since the owner has not
+#   processed WIN_UNSAVED yet). The client's own order is save, then
+#   `goedit: win_unsaved`, then the clean exit - so the kernel's WIN_CLOSE push
+#   goes unconsumed and `goedit: close` belongs to the DISCARD path (boot B),
+#   where the kernel's user_close inside DIALOG 5 is the only close. script3
+#   reads the WM counters (` dialog=`).
 # Boot B (DISCARD path): click Don't Save (660,390) -> `tabwm: unsaved-discard`
 #   -> DIALOG action 5: the KERNEL's user_close releases the window - NO local
-#   TABWM close, NO save marker (absent-asserted) - NOTEPAD gets WIN_CLOSE and
-#   exits; script3's `dui` proves the registry row released (`dui: windows=4`,
-#   the four fixed layers only).
+#   TABWM close, NO save marker (absent-asserted, the contract that makes the
+#   dialog mean anything) - the client gets WIN_CLOSE and exits; script3's `dui`
+#   proves the registry row released (`dui: windows=4`, the four fixed layers
+#   only).
+#
+# HOST PREREQUISITE (fails the gate honestly when missing):
+#   bash tools/go/build-goedit.sh   ->  .build/go/GOEDIT.ELF
 
 vgate_name live-tabwm-unsaved "M42 UX r2: TABWM unsaved-changes dialog (dirty close interception, save + discard paths)"
 vgate_share seed
@@ -43,7 +56,7 @@ vgate_runner_flags -Xswiftc -DSPIKE
 
 vgate_file script.txt <<'EOF'
 tabwm start
-exec NOTEPAD.BIN
+exec GOEDIT.ELF
 EOF
 
 vgate_file script2.txt <<'EOF'
@@ -63,26 +76,45 @@ wm
 echo discard-ok
 EOF
 
+vgate_setup_python <<'PY'
+import os, shutil, sys
+rd = os.environ["RUN_DIR"]
+share = os.environ.get("VG_SHARE") or os.path.join(rd, "share")
+src = os.path.join(".build", "go", "GOEDIT.ELF")
+if not os.path.exists(src):
+    sys.exit("GOEDIT.ELF missing (expected " + src + ") - build it first: "
+             "bash tools/go/build-goedit.sh")
+shutil.copy(src, os.path.join(share, "GOEDIT.ELF"))
+ed = os.path.join(share, "EDIT")
+os.makedirs(ed, exist_ok=True)
+seed = os.path.join(ed, "SEED.TXT")
+with open(seed, "wb") as f:
+    f.write(b"seed-line\n")
+print("staged GOEDIT.ELF into share (%d bytes) and %s (%d bytes)" %
+      (os.path.getsize(os.path.join(share, "GOEDIT.ELF")), seed, os.path.getsize(seed)))
+PY
+
 # --- boot A: the SAVE path ---
 vgate_run save -- \
     --screen '$RUN_DIR/screen' \
     --via-virtio --cvc-snap \
     --script '$RUN_DIR/script.txt' \
-    --script2 '$RUN_DIR/script2.txt' --script2-after "notepad: ready" --script2-delay 15 \
+    --script2 '$RUN_DIR/script2.txt' --script2-after "goedit: present" --script2-delay 15 \
     --pointer-virtio "158,70,c;580,390,c" --pointer-virtio-after "dirty-go" \
-    --script3 '$RUN_DIR/script3-save.txt' --script3-after "notepad: saved ok" --script3-delay 20 \
+    --script3 '$RUN_DIR/script3-save.txt' --script3-after "goedit: saved " --script3-delay 20 \
     --script-expect "unsaved-ok" --timeout 260
 
 # The dirty close was INTERCEPTED: dialog opened, no immediate close.
 vgate_assert save serial-contains 'tabwm: unsaved-dialog id=2'
 # The Save choice: marker FIRST, then DIALOG 4 (kernel posts WIN_UNSAVED).
 vgate_assert save serial-contains 'tabwm: unsaved-save'
-vgate_assert save serial-contains 'notepad: saved ok'
+# The client published the seeded 10 bytes before it went anywhere.
+vgate_assert save serial-contains 'goedit: saved /host/EDIT/SEED.TXT n=10'
 # The WM closed the tab through the kernel seam (the save-path asymmetry;
 # the owner exits on WIN_UNSAVED before consuming the WIN_CLOSE push).
 vgate_assert save serial-contains 'tabwm: win-close id=2 closed=1'
-vgate_assert save serial-contains 'notepad: win_unsaved'
-vgate_assert save serial-contains 'notepad: exiting 43'
+vgate_assert save serial-contains 'goedit: win_unsaved'
+vgate_assert save serial-contains 'goedit OK'
 # The kernel DIALOG counters moved (script3's `wm` counter line prints
 # ` dialog=` among the WM counters - NOT `wm: dialog=`).
 vgate_assert save serial-contains ' dialog='
@@ -99,18 +131,21 @@ vgate_run discard -- \
     --screen '$RUN_DIR/screen' \
     --via-virtio --cvc-snap \
     --script '$RUN_DIR/script.txt' \
-    --script2 '$RUN_DIR/script2.txt' --script2-after "notepad: ready" --script2-delay 15 \
+    --script2 '$RUN_DIR/script2.txt' --script2-after "goedit: present" --script2-delay 15 \
     --pointer-virtio "158,70,c;660,390,c" --pointer-virtio-after "dirty-go" \
-    --script3 '$RUN_DIR/script3-discard.txt' --script3-after "notepad: exiting 43" --script3-delay 20 \
+    --script3 '$RUN_DIR/script3-discard.txt' --script3-after "goedit OK" --script3-delay 20 \
     --script-expect "discard-ok" --timeout 260
 
 vgate_assert discard serial-contains 'tabwm: unsaved-dialog id=2'
 # The Don't Save choice: the KERNEL closes the window inside DIALOG 5.
 vgate_assert discard serial-contains 'tabwm: unsaved-discard'
-vgate_assert discard serial-contains 'notepad: win_close'
-vgate_assert discard serial-contains 'notepad: exiting 43'
+vgate_assert discard serial-contains 'goedit: close'
+vgate_assert discard serial-contains 'goedit OK'
 # The kernel registry released the window: the four fixed layers only.
 vgate_assert discard serial-contains 'dui: windows=4'
-# The asymmetry, negatively proven: the save marker never fires on this boot.
+# The asymmetry, negatively proven: NEITHER the save marker NOR the dialog's
+# own response fires on this boot - "Don't Save" means the bytes stay unpublished.
 vgate_assert discard serial-absent 'tabwm: unsaved-save'
+vgate_assert discard serial-absent 'goedit: saved '
+vgate_assert discard serial-absent 'goedit: win_unsaved'
 vgate_assert discard serial-absent '[EXC] parking:'

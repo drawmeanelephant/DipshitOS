@@ -1,16 +1,16 @@
 # live-tabwm-close.spec -- M42 UX hardening (2026-09-05, claim #1008 / ADR 0018 D2)
 # class-B gate: the TABWM tab-close seam end to end on real VZ hardware.
 #
-# M66c (#1445): the client is NOTE.ELF, the Go successor to NOTEPAD.BIN. The
+# M66c (#1445 retarget, #1485 retirement): the client is NOTE.ELF, the Go
+# successor to the Zig notepad, and the Zig binary itself is now GONE. The
 # lifecycle vocabulary is SHARED BY DESIGN (`note:` mirrors `notepad:`), so every
 # assertion below moved by prefix alone. The WINDOW ID is the exception -- it is
 # whatever the Go app is granted, so the close seam is checked by parsing the id
 # this boot's own `note: open id=` reports rather than naming a literal.
 #
-# NOTEPAD.BIN still exists, and five specs still assert behaviour only the Zig
-# app has (find/goto, theme tokens, the clipboard self-demo, the unsaved-decline
-# contract), so its retirement is its own card rather than something this
-# retarget silently assumes.
+# The coverage that app alone had moved to GOEDIT.ELF (find/goto, the
+# unsaved-decline contract) or GOCOMP.ELF (its clipboard+timer composition); the
+# theme-token boots were retired with it.
 #
 # One headless boot with --screen (GPU armed) + --via-virtio (the cv INPUT
 # transport for pointer injection). The choreography:

@@ -1,4 +1,12 @@
 # live-tabclick.spec -- M37 DQ3 tab mouse interaction (issue #839)
+#
+# M66c (#1485): the Zig notepad is retired; the tab HOST here is TOP.BIN, a
+# Zig tab-aware app that still ships. The subject is the strip's HIT-TEST
+# geometry and its cells, which is app-agnostic — but the cell layout is not:
+# with the Go client as the host the attach lands the child in the other cell
+# (observed on VZ: boot A's cell-body click still activated the child, while
+# boot B's × click and boot C's drag never detached — the coordinates below
+# were derived from a Zig host's strip). Same host as live-tabstrip.spec.
 
 vgate_name live-tabclick "M37 DQ3 tab mouse interaction: click switches, × detaches, drag detaches"
 vgate_share seed
@@ -10,7 +18,7 @@ vgate_allow_rc C 0 1
 
 vgate_file script-A.txt <<'EOF'
 wnd start
-exec NOTEPAD.BIN
+exec TOP.BIN
 exec TABHOLD.BIN
 EOF
 

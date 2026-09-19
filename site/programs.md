@@ -27,7 +27,7 @@ dynamic executables and shared libraries listed below):
 | `TYPE.BIN` | `user/src/type.zig` | `sys_file_open`/`read`/`close` — dump a file |
 | `DIR.BIN` | `user/src/dir.zig` | `sys_dir_list` — list a directory |
 | `CALC.BIN` | `user/src/calc.zig` | the graphical calculator (checked arithmetic, repeat, memory) |
-| `NOTEPAD.BIN` | `user/src/notepad.zig` | the graphical editor, load/save `/data/notes.txt`, scrollable viewport |
+| `NOTEPAD.BIN` | `user/src/notepad.zig` | the graphical editor, load/save `/data/notes.txt`, scrollable viewport — M66c (#1485): RETIRED, `user/src/notepad.zig` deleted; the editor is the Go `NOTE.ELF` (`user/go/note`) |
 | `TOP.BIN` | `user/src/top.zig` | the graphical process monitor with click-to-kill (`sys_kill`) |
 | `DESKTOP.BIN` | `user/src/desktop.zig` | the launcher: manifests the app catalog (`APPS.TXT`) and `sys_exec`s apps |
 | `TCP.BIN` | `user/src/tcp_client.zig` | the TCP syscall seam: connect, send, receive echo, close, exit 18 |

@@ -1,11 +1,18 @@
 # live-chrome.spec -- M20 U4 window chrome metrics + close click on VZ
+#
+# M66c (#1485): the Zig notepad is retired; the client is NOTE.ELF (Go). It
+# declares the same 56,56 512x384 rect, so every chrome coordinate (including
+# boot C's close-glyph click at 558,64) is unchanged. Only the app-painted
+# client colour differs, and the `note:` prefix replaces `notepad:`.
+#
+# HOST PREREQUISITE: bash tools/go/build-note.sh -> .build/go/NOTE.ELF
 
 vgate_name live-chrome "M20 U4 -- window chrome metrics + close click on VZ"
 vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 
 vgate_file script-A.txt <<'EOF'
-exec NOTEPAD.BIN
+exec NOTE.ELF
 EOF
 
 vgate_file s2-A.txt <<'EOF'
@@ -17,7 +24,7 @@ echo done-a
 EOF
 
 vgate_file script-B.txt <<'EOF'
-exec NOTEPAD.BIN
+exec NOTE.ELF
 EOF
 
 vgate_file s2-B.txt <<'EOF'
@@ -30,8 +37,20 @@ echo done-b
 EOF
 
 vgate_file script-C.txt <<'EOF'
-exec NOTEPAD.BIN
+exec NOTE.ELF
 EOF
+
+vgate_setup_python <<'PY'
+import os, shutil, sys
+rd = os.environ["RUN_DIR"]
+share = os.environ.get("VG_SHARE") or os.path.join(rd, "share")
+src = os.path.join(".build", "go", "NOTE.ELF")
+if not os.path.exists(src):
+    sys.exit("NOTE.ELF missing (expected " + src + ") - build it first: "
+             "bash tools/go/build-note.sh")
+shutil.copy(src, os.path.join(share, "NOTE.ELF"))
+print("staged NOTE.ELF into share (%d bytes)" % os.path.getsize(os.path.join(share, "NOTE.ELF")))
+PY
 
 # --- boot A: FOCUSED window chrome (ring + title + close glyph) ---
 vgate_run A -- \
@@ -39,7 +58,7 @@ vgate_run A -- \
     --via-virtio --cvc-snap \
     --snapshot-out '$RUN_DIR/snap-A' \
     --script '$RUN_DIR/script-A.txt' \
-    --script2 '$RUN_DIR/s2-A.txt' --script2-after "notepad: ready" --script2-delay 15 \
+    --script2 '$RUN_DIR/s2-A.txt' --script2-after "note: ready" --script2-delay 15 \
     --script3 '$RUN_DIR/s3-A.txt' --script3-after "chrome-a" --script3-delay 25 \
     --snapshot-after "chrome-a" \
     --script-expect "done-a" --timeout 150
@@ -70,7 +89,7 @@ vgate_run B -- \
     --via-virtio --cvc-snap \
     --snapshot-out '$RUN_DIR/snap-B' \
     --script '$RUN_DIR/script-B.txt' \
-    --script2 '$RUN_DIR/s2-B.txt' --script2-after "notepad: ready" --script2-delay 15 \
+    --script2 '$RUN_DIR/s2-B.txt' --script2-after "note: ready" --script2-delay 15 \
     --script3 '$RUN_DIR/s3-B.txt' --script3-after "chrome-b" --script3-delay 30 \
     --snapshot-after "chrome-b" \
     --script-expect "done-b" --timeout 150
@@ -85,7 +104,10 @@ def px(x, y):
     return (data[k + 2], data[k + 1], data[k])
 BORDER = (0x47, 0x55, 0x69)
 TITLE  = (0x1a, 0x2b, 0x3c)
-CLIENT = (0x18, 0x20, 0x26)
+# The client's own page fill (NOTE.ELF paints 0x101418 below its chrome row).
+# rest-alpha 240 blends it a shade toward the desktop, which the ±6 tolerance
+# below already absorbs.
+CLIENT = (0x10, 0x14, 0x18)
 X, Y, W, H = 56, 56, 512, 384
 fails = []
 def near(c, want, tol=6):
@@ -123,9 +145,9 @@ vgate_run C -- \
     --screen '$RUN_DIR/screen' \
     --via-virtio --cvc-snap \
     --script '$RUN_DIR/script-C.txt' \
-    --pointer-virtio "320,360,c;558,64,c" --pointer-virtio-after "notepad: ready" \
-    --script-expect "notepad: win_close" --timeout 150
+    --pointer-virtio "320,360,c;558,64,c" --pointer-virtio-after "note: ready" \
+    --script-expect "note: win_close" --timeout 150
 
-vgate_assert C serial-contains "notepad: win_close"
+vgate_assert C serial-contains "note: win_close"
 vgate_assert C output-contains "PTR-CV-SEQ"
 vgate_assert C serial-absent "[EXC] parking:"

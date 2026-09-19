@@ -80,10 +80,9 @@ func guessBin(title string) string {
 	case "Calc":
 		return "GOCALC.ELF"
 	case "Notepad":
-		// M66c (#1445): the text editor this shell restores is the Go
-		// successor, NOTE.ELF. The Zig NOTEPAD.BIN still exists for the five
-		// specs that assert behaviour only it has, but it is no longer the
-		// app a restored "Notepad" tab names.
+		// M66c (#1445, completed by #1485): the text editor this shell
+		// restores is the Go app, NOTE.ELF. The Zig binary is deleted, so
+		// this is now the only app a restored "Notepad" tab can name.
 		return "NOTE.ELF"
 	case "Edit":
 		return "GOEDIT.ELF"

@@ -19,6 +19,12 @@ func TestEditMarkerShapes(t *testing.T) {
 		{markerSaveErr, "goedit: save error "},
 		{markerClose, "goedit: close"},
 		{markerOK, "goedit OK"},
+		// M66c follow-on (#1485): the M20 U3 and M42 UX r2 markers that moved
+		// here from the deleted Zig app. (The M14 S3 composition markers live in
+		// user/go/compose - see this file's header for the data-budget reason.)
+		{markerFind, "goedit: find '"},
+		{markerGoto, "goedit: goto line="},
+		{markerUnsaved, "goedit: win_unsaved"},
 	}
 	for _, c := range cases {
 		if c.got != c.want {
@@ -101,6 +107,183 @@ func TestBufferEdits(t *testing.T) {
 	e.buf = e.buf[:0]
 	if e.backspace() {
 		t.Fatal("backspace on an empty buffer must be a no-op")
+	}
+}
+
+// M20 U3 (#1485): the two composed marker lines the live gate greps, built
+// from the same helpers runFind/runGoto use. The gate's documents are the
+// fixtures here, so a drift in either the ordinal/lines rule OR the marker
+// text fails on the host instead of live.
+func TestFindAndGotoMarkers(t *testing.T) {
+	// The live walk types exactly this document
+	// (`h,e,l,l,o,return,w,o,r,l,d,return,t,e,x,t`).
+	doc := []byte("hello\nworld\ntext")
+	total, ordinal, off := findFrom(doc, []byte("wor"), len(doc))
+	if total != 1 || ordinal != 1 || off != 6 {
+		t.Fatalf("find 'wor' = (total=%d ordinal=%d off=%d) want (1,1,6)", total, ordinal, off)
+	}
+	if got, want := findMarker([]byte("wor"), ordinal, total), "goedit: find 'wor' hit=1/1"; got != want {
+		t.Fatalf("find marker = %q want %q", got, want)
+	}
+	if got, want := findMissMarker([]byte("zzz")), "goedit: find 'zzz' no-match"; got != want {
+		t.Fatalf("find miss marker = %q want %q", got, want)
+	}
+
+	// Ctrl-G 2 on the same document: line 2 starts at offset 6 ("hello\n").
+	if got := lineOffset(doc, 2); got != 6 {
+		t.Fatalf("lineOffset(doc, 2) = %d want 6", got)
+	}
+	if got, want := gotoMarker(2, 6), "goedit: goto line=2 offset=6"; got != want {
+		t.Fatalf("goto marker = %q want %q", got, want)
+	}
+	if got, want := gotoMissMarker(9, 3), "goedit: goto line=9 miss lines=3"; got != want {
+		t.Fatalf("goto miss marker = %q want %q", got, want)
+	}
+}
+
+// findFrom: the forward search, the ordinal among ALL matches, and the wrap to
+// the first match when nothing is at or after the caret.
+func TestFindFrom(t *testing.T) {
+	doc := []byte("one two one two")
+	// From the caret at the end, the search wraps to the first match.
+	if total, ord, off := findFrom(doc, []byte("one"), len(doc)); total != 2 || ord != 1 || off != 0 {
+		t.Fatalf("wrapped find = (%d,%d,%d) want (2,1,0)", total, ord, off)
+	}
+	// A caret AT the second match's start lands on it and reports ordinal 2:
+	// the rule is "the first match at or after the caret".
+	if total, ord, off := findFrom(doc, []byte("one"), 8); total != 2 || ord != 2 || off != 8 {
+		t.Fatalf("second-match find = (%d,%d,%d) want (2,2,8)", total, ord, off)
+	}
+	// A caret INSIDE a match is past that match's start, so with no match left
+	// to run to the search wraps to the first one (the same rule, not a second
+	// one) - which is what makes a repeat Return re-report the same single
+	// match instead of inventing one.
+	if total, ord, off := findFrom(doc, []byte("one"), 9); total != 2 || ord != 1 || off != 0 {
+		t.Fatalf("in-match find = (%d,%d,%d) want (2,1,0)", total, ord, off)
+	}
+	// Matches do not overlap: "aba" holds ONE "aba", not a sliding pair.
+	if total, _, _ := findFrom([]byte("ababa"), []byte("aba"), 0); total != 1 {
+		t.Fatalf("non-overlapping total = %d want 1", total)
+	}
+	// No match, empty pattern, and a pattern longer than the buffer.
+	if _, _, off := findFrom(doc, []byte("zzz"), 0); off != -1 {
+		t.Fatalf("no-match off = %d want -1", off)
+	}
+	if total, _, off := findFrom(doc, nil, 0); total != 0 || off != -1 {
+		t.Fatalf("empty pattern = (%d,%d) want (0,-1)", total, off)
+	}
+	if total, _, off := findFrom([]byte("ab"), []byte("abc"), 0); total != 0 || off != -1 {
+		t.Fatalf("long pattern = (%d,%d) want (0,-1)", total, off)
+	}
+}
+
+// countLines/lineOffset/parseLine are the goto bar's rule set, and the edge
+// cases are the ones the Zig app pinned: an empty buffer is one line, a
+// trailing newline opens a final empty line, and line 1 starts at 0.
+func TestGotoRules(t *testing.T) {
+	if got := countLines(nil); got != 1 {
+		t.Fatalf("countLines(empty) = %d want 1", got)
+	}
+	if got := countLines([]byte("a\nb\n")); got != 3 {
+		t.Fatalf("countLines(a\\nb\\n) = %d want 3", got)
+	}
+	if got := lineOffset([]byte("a\nb\nc"), 3); got != 4 {
+		t.Fatalf("lineOffset(line 3) = %d want 4", got)
+	}
+	if got := lineOffset([]byte("a\nb"), 1); got != 0 {
+		t.Fatalf("lineOffset(line 1) = %d want 0", got)
+	}
+	if got := lineOffset([]byte("a\nb"), 3); got != -1 {
+		t.Fatalf("lineOffset(beyond) = %d want -1", got)
+	}
+	ok := []struct {
+		in   string
+		want int
+	}{
+		{"2", 2},
+		{"10", 10},
+		{"00012", 12},
+		{"99999", 99999},
+	}
+	for _, c := range ok {
+		got, good := parseLine([]byte(c.in))
+		if !good || got != c.want {
+			t.Fatalf("parseLine(%q) = (%d,%v) want (%d,true)", c.in, got, good, c.want)
+		}
+	}
+	bad := []string{"", "0", "x", "2x", "100000", "123456"}
+	for _, in := range bad {
+		if got, good := parseLine([]byte(in)); good {
+			t.Fatalf("parseLine(%q) = (%d,true) want refused", in, got)
+		}
+	}
+}
+
+// The caret makes insert/backspace splice at the caret instead of only at the
+// tail. The go-edit gate's typed characters must still land at the END of the
+// seed (load puts the caret there), so both directions are pinned.
+func TestCaretEditing(t *testing.T) {
+	e := &editor{buf: []byte("abc"), cur: 1}
+	if !e.insert('X') {
+		t.Fatal("insert at the caret must report an edit")
+	}
+	if string(e.buf) != "aXbc" || e.cur != 2 {
+		t.Fatalf("insert = (%q,cur=%d) want (\"aXbc\",2)", e.buf, e.cur)
+	}
+	if !e.backspace() {
+		t.Fatal("backspace at the caret must report an edit")
+	}
+	if string(e.buf) != "abc" || e.cur != 1 {
+		t.Fatalf("backspace = (%q,cur=%d) want (\"abc\",1)", e.buf, e.cur)
+	}
+	// The append-at-the-end path load() sets up: the gate types into a seed.
+	e.buf, e.cur = []byte("seed-line\n"), len("seed-line\n")
+	for _, b := range []byte("XYZ") {
+		e.insert(b)
+	}
+	if string(e.buf) != "seed-line\nXYZ" {
+		t.Fatalf("typed buffer = %q want \"seed-line\\nXYZ\"", e.buf)
+	}
+	// A caret left past a shrunken buffer (a hand-built editor) is clamped,
+	// not a panic.
+	e.cur = 99
+	if e.backspace() && len(e.buf) == 0 {
+		t.Fatal("a clamped caret must have removed the last byte")
+	}
+}
+
+// The bar chords own the keyboard from any mode, and a bar swallows text
+// instead of editing the document.
+func TestBarOwnsTheKeyboard(t *testing.T) {
+	down := func(arg1 uint32, flags uint16) vi.Event {
+		return vi.Event{Kind: vi.EvKeyDown, Flags: flags, Arg1: arg1}
+	}
+	// The caret sits at the end of the document, the way load() leaves it.
+	e := &editor{buf: []byte("body"), cur: len("body")}
+	if !e.key(down(keyF, modCtrl)) || e.mode != modeFind {
+		t.Fatalf("ctrl-f must open the find bar (mode=%d)", e.mode)
+	}
+	for _, c := range []uint32{'w', 'o', 'r'} {
+		if !e.key(down(c, 0)) {
+			t.Fatalf("typing %q into the bar must repaint", rune(c))
+		}
+	}
+	if string(e.bar) != "wor" {
+		t.Fatalf("bar = %q want \"wor\"", e.bar)
+	}
+	if string(e.buf) != "body" {
+		t.Fatalf("the bar must not edit the document: buf = %q", e.buf)
+	}
+	// The bar chords switch bars directly, so Ctrl-G after a find is not text.
+	if !e.key(down(keyG, modCtrl)) || e.mode != modeGoto || len(e.bar) != 0 {
+		t.Fatalf("ctrl-g must switch to a fresh goto bar (mode=%d bar=%q)", e.mode, e.bar)
+	}
+	// Escape dismisses it and returns the keyboard to the document.
+	if !e.key(down(codeEscape, 0)) || e.mode != modeEdit {
+		t.Fatalf("escape must dismiss the bar (mode=%d)", e.mode)
+	}
+	if !e.key(down('q', 0)) || string(e.buf) != "bodyq" {
+		t.Fatalf("the document must own the keyboard again: buf = %q", e.buf)
 	}
 }
 

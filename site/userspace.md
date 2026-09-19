@@ -35,7 +35,7 @@ runtime-built **128-slot** table. **Sixty-five slots are implemented**
 | 29 | `kill` | terminate a running EL0 program (TOP.BIN's Kill button) |
 | 30–33 | `tcp_connect` / `tcp_send` / `tcp_recv` / `tcp_close` | bounded TCP from EL0 |
 | 34–37 | `file_delete` / `file_rename` / `file_truncate` / `file_free` | mutate the DATA filesystem from EL0 |
-| 38/39 | `clipboard_set` / `clipboard_get` | the machine-global shared clipboard (NOTEPAD copy/cut/paste) |
+| 38/39 | `clipboard_set` / `clipboard_get` | the machine-global shared clipboard (the text apps' copy/paste) |
 | 40/41 | `timer_set` / `timer_cancel` | one countdown timer per process, posting `TIMER` events |
 | 42/43 | `audio_info` / `audio_play` | the EL0 audio seam: learn the negotiated PCM state, play bounded chunks |
 | 44/45 | `audio_volume` / `audio_mute` | bounded, process-only sound-state control |

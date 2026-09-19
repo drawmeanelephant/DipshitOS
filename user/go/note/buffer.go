@@ -1,5 +1,5 @@
 // The notepad's text buffer, caret and view model: M66c (issue #1445), the Go
-// successor to Zig NOTEPAD.BIN.
+// successor to the Zig notepad that #1485 retired.
 //
 // Deliberately import-free. The editing surface is where the bugs live (line
 // joins, column memory across lines, the caret at a clip boundary), so it is

@@ -1986,18 +1986,18 @@ test "monitor: sound volume/mute drive the bounded stream state (claim 9297)" {
 test "monitor: which resolves builtin, monitor, app, and not-found names (D16)" {
     test_reset_share();
     defer virtio_file.set_test_share(null);
-    test_seed_share("NOTEPAD.BIN", "x");
+    test_seed_share("NOTE.ELF", "x");
 
     var env = TestEnv.init();
     var mon = env.monitor();
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "which", "type" }));
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "which", "stat" }));
-    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "which", "NOTEPAD.BIN" }));
+    try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "which", "NOTE.ELF" }));
     try std.testing.expectEqual(ExecError.none, exec(&mon, &.{ "which", "nope.bin" }));
     const out = env.mock.contents();
     try std.testing.expect(std.mem.indexOf(u8, out, "type: shell builtin") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "stat: monitor command") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "NOTEPAD.BIN: host-share application") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "NOTE.ELF: host-share application") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "nope.bin: not found") != null);
 }
 
