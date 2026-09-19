@@ -166,15 +166,84 @@ func TestDial_PortZeroRefused(t *testing.T) {
 }
 
 func TestDial_ZeroIPIsTheServerAddress(t *testing.T) {
-	// The kernel treats ip == 0 as PASSIVE open (listen mode), and server
-	// sockets are an explicit M67a non-goal: Dial must refuse 0.0.0.0 in
-	// userland, before the seam can open one.
+	// The kernel treats ip == 0 as PASSIVE open (listen mode). Dial must
+	// refuse 0.0.0.0 in userland so a hostile DNS reply cannot open a
+	// listener; Listen is the inbound path.
 	f := startConnFake(t)
 	if _, err := Dial("0.0.0.0", 8080); !errors.Is(err, ErrServerDial) {
 		t.Fatalf("Dial(0.0.0.0) = %v, want ErrServerDial", err)
 	}
 	if f.connectCalls != 0 {
 		t.Fatalf("the zero address reached the kernel (%d calls)", f.connectCalls)
+	}
+}
+
+func TestListen_PassiveOpenOnZeroIP(t *testing.T) {
+	f := startConnFake(t)
+	c, err := Listen(2222)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	if f.connectCalls != 1 || f.connectIP != 0 || f.connectPort != 2222 {
+		t.Fatalf("connect = %d calls to %08x:%d, want 1 call to 0:2222",
+			f.connectCalls, f.connectIP, f.connectPort)
+	}
+	if !c.listening {
+		t.Fatal("Listen did not mark the Conn as listening")
+	}
+	if _, err := Dial("10.0.0.2", 8080); !errors.Is(err, ErrConnBusy) {
+		t.Fatalf("Dial while listening = %v, want ErrConnBusy", err)
+	}
+	if f.connectCalls != 1 {
+		t.Fatalf("Dial while listening reached the kernel (%d calls)", f.connectCalls)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := Dial("10.0.0.2", 8080); err != nil {
+		t.Fatalf("Dial after Listen+Close: %v", err)
+	}
+}
+
+func TestListen_PortZeroRefused(t *testing.T) {
+	f := startConnFake(t)
+	if _, err := Listen(0); !errors.Is(err, error(errno(ErrEINVAL))) {
+		t.Fatalf("Listen(0) = %v, want EINVAL", err)
+	}
+	if f.connectCalls != 0 {
+		t.Fatalf("Listen(0) reached the kernel (%d calls)", f.connectCalls)
+	}
+}
+
+func TestAccept_WaitsUntilEstablished(t *testing.T) {
+	f := startConnFake(t)
+	c, err := Listen(2222)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	// First two probes still listening (mask 0); third is established
+	// (writable bit 1). Accept must park between probes rather than
+	// spinning, and must not touch recv.
+	f.probeScript = func(call int) int64 {
+		if call >= 3 {
+			return 2
+		}
+		return 0
+	}
+	if err := c.Accept(); err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	if c.listening {
+		t.Fatal("Accept left the Conn in listening state")
+	}
+	if f.probeCalls < 3 {
+		t.Fatalf("probes = %d, want at least 3", f.probeCalls)
+	}
+	if f.sleeps < 2 {
+		t.Fatalf("sleeps = %d, want parks between empty probes", f.sleeps)
+	}
+	if f.recvCalls != 0 {
+		t.Fatalf("Accept recv'd %d times, want 0", f.recvCalls)
 	}
 }
 
