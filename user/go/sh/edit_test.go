@@ -341,3 +341,209 @@ func TestEditorLoneEscDoesNotEatTheNextByte(t *testing.T) {
 		t.Fatalf("cur = %d want 1 after ESC [ D", e3.cur)
 	}
 }
+
+// --- reverse-i-search (M45 SH3), retargeted into GOSH by M68b (#1450) ------
+
+// drainFeed feeds a chunk the way the session loop does -- one Feed, then
+// Feed(nil) until the editor holds nothing -- and collects every submitted
+// line. This is the contract the serial front-end needs (a burst can carry
+// several lines), and it is the only way search acceptance can be observed.
+func drainFeed(e *Editor, s string) (string, []string) {
+	w, ev := e.Feed([]byte(s))
+	out := string(w)
+	var lines []string
+	if ev.Kind == evSubmit {
+		lines = append(lines, ev.Line)
+	}
+	for e.Pending() {
+		var next []byte
+		next, ev = e.Feed(nil)
+		out += string(next)
+		if ev.Kind == evSubmit {
+			lines = append(lines, ev.Line)
+		}
+	}
+	return out, lines
+}
+
+// TestSearchGateChoreography walks the exact byte sequence live-sh-complete
+// stages: run a command, then Ctrl+R + "status" + Enter (accept) + Enter
+// (submit), and asserts the recall-and-rerun the gate counts.
+func TestSearchGateChoreography(t *testing.T) {
+	e := NewEditor("gosh> ", &History{})
+	e.Complete = func(word string, first bool) []string {
+		if strings.HasPrefix("help", word) {
+			return []string{"help "}
+		}
+		return nil
+	}
+	// The gate runs `status43`, completes `hel` -> `help` and runs it.
+	drainFeed(e, "status43\r")
+	drainFeed(e, "hel\t\r")
+
+	out, lines := drainFeed(e, "\x12status\r\r")
+	if !strings.Contains(out, "reverse-i-search") {
+		t.Fatalf("paint = %q, want the reverse-i-search prompt", out)
+	}
+	if len(lines) != 1 || lines[0] != "status43" {
+		t.Fatalf("submitted %q, want exactly one status43 recall", lines)
+	}
+	// The recalled line went through the engine again, so "status43" appears
+	// twice in the ring -- which is the gate's whole point (it counts
+	// `status43: alive` twice).
+	if h := e.hist.Entries(); len(h) != 3 || h[0] != "status43" || h[1] != "help " || h[2] != "status43" {
+		t.Fatalf("history = %q, want [status43 hel-p-completed status43]", h)
+	}
+}
+
+// TestSearchPaintShowsTheMatch pins what the user sees: the query, the
+// newest-first substring match, and the match loaded as the live line.
+func TestSearchPaintShowsTheMatch(t *testing.T) {
+	h := &History{}
+	h.Push("alpha-one")
+	h.Push("beta-two")
+	h.Push("alpha-three") // newest containing "alpha"
+	e := NewEditor("gosh> ", h)
+	feedE(e, "draft")
+	out := feedE(e, "\x12")
+	if !strings.Contains(out, "(reverse-i-search)`_`: (no match)") {
+		t.Fatalf("empty-query paint = %q", out)
+	}
+	out = feedE(e, "a")
+	if !strings.Contains(out, "(reverse-i-search)`a`: alpha-three") {
+		t.Fatalf("first-byte paint = %q", out)
+	}
+	if string(e.buf) != "alpha-three" {
+		t.Fatalf("buf = %q, want the match loaded", e.buf)
+	}
+	out = feedE(e, "lpha")
+	if !strings.Contains(out, "(reverse-i-search)`alpha`: alpha-three") {
+		t.Fatalf("paint = %q", out)
+	}
+	// A query that matches nothing says so and leaves the line as it was.
+	out = feedE(e, "zz")
+	if !strings.Contains(out, "(no match)") {
+		t.Fatalf("no-match paint = %q", out)
+	}
+	if string(e.buf) != "alpha-three" {
+		t.Fatalf("buf = %q, want the previous match kept", e.buf)
+	}
+}
+
+// TestSearchCancelRestoresTheDraft: Esc and Ctrl-C both put the line back the
+// way it was before Ctrl+R, so a search can never lose work.
+func TestSearchCancelRestoresTheDraft(t *testing.T) {
+	h := &History{}
+	h.Push("status43")
+	for _, cancel := range []string{"\x1b", "\x03"} {
+		e := NewEditor("gosh> ", h)
+		feedE(e, "half-typed")
+		drainFeed(e, "\x12status")
+		if string(e.buf) != "status43" {
+			t.Fatalf("mid-search buf = %q", e.buf)
+		}
+		out := feedE(e, cancel)
+		if e.searching {
+			t.Fatalf("cancel %q left search mode on", cancel)
+		}
+		if string(e.buf) != "half-typed" || e.cur != len("half-typed") {
+			t.Fatalf("cancel %q restored %q (cur %d), want half-typed", cancel, e.buf, e.cur)
+		}
+		if !strings.Contains(out, "half-typed") {
+			t.Fatalf("cancel %q paint = %q, want the draft repainted", cancel, out)
+		}
+	}
+}
+
+// TestSearchBackspaceTrimsTheQuery: Backspace edits the QUERY, not the line,
+// and re-runs the match on the shorter query.
+func TestSearchBackspaceTrimsTheQuery(t *testing.T) {
+	h := &History{}
+	h.Push("status43")
+	h.Push("status99")
+	e := NewEditor("gosh> ", h)
+	drainFeed(e, "\x12status")
+	if string(e.buf) != "status99" {
+		t.Fatalf("buf = %q want the newest match", e.buf)
+	}
+	out := feedE(e, "\x7f")
+	if !strings.Contains(out, "(reverse-i-search)`statu") {
+		t.Fatalf("paint = %q, want the trimmed query", out)
+	}
+	for len(e.query) > 1 { // trim down to a single byte
+		feedE(e, "\x7f")
+	}
+	out = feedE(e, "\x7f") // 1 -> 0: the query is empty and nothing matches
+	if len(e.query) != 0 {
+		t.Fatalf("query = %q want empty", e.query)
+	}
+	if !strings.Contains(out, "(reverse-i-search)`_`: (no match)") {
+		t.Fatalf("paint at the empty query = %q", out)
+	}
+	// One backspace past empty is a no-op with NO repaint, exactly as SH.BIN's
+	// search_handle does it (query_len 0 -> return without redraw).
+	if got := feedE(e, "\x7f"); got != "" {
+		t.Fatalf("backspace past empty painted %q, want nothing", got)
+	}
+	if len(e.query) != 0 {
+		t.Fatalf("backspace past empty left query %q", e.query)
+	}
+}
+
+// TestSearchQueryIsBounded: the query buffer does not grow without limit.
+func TestSearchQueryIsBounded(t *testing.T) {
+	e := NewEditor("gosh> ", &History{})
+	feedE(e, "\x12")
+	feedE(e, strings.Repeat("q", maxSearchQuery))
+	if len(e.query) != maxSearchQuery {
+		t.Fatalf("query = %d bytes want %d", len(e.query), maxSearchQuery)
+	}
+	out := feedE(e, "q")
+	if len(e.query) != maxSearchQuery {
+		t.Fatalf("query grew past the cap: %d", len(e.query))
+	}
+	if !strings.Contains(out, "\x07") {
+		t.Fatalf("overflow paint = %q, want a bell", out)
+	}
+}
+
+// TestSearchAcceptedLineStillSubmits: after an accept, the NEXT return
+// submits, and the editor is back in ground mode (typed characters land in
+// the line again rather than feeding a query).
+func TestSearchAcceptedLineStillSubmits(t *testing.T) {
+	h := &History{}
+	h.Push("echo hi")
+	e := NewEditor("gosh> ", h)
+	// Ctrl+R + query leaves the match loaded while search mode is still on.
+	drainFeed(e, "\x12echo")
+	if string(e.buf) != "echo hi" {
+		t.Fatalf("buf = %q want the match loaded mid-search", e.buf)
+	}
+	if !e.searching {
+		t.Fatal("query entry left search mode on by itself")
+	}
+	// The FIRST Return accepts the recall and must NOT also submit it.
+	w, lines := drainFeed(e, "\r")
+	if e.searching {
+		t.Fatal("accept left search mode on")
+	}
+	if len(lines) != 0 {
+		t.Fatalf("accept also submitted %q", lines)
+	}
+	if string(e.buf) != "echo hi" {
+		t.Fatalf("buf = %q want the accepted recall", e.buf)
+	}
+	if !strings.Contains(w, "gosh> ") {
+		t.Fatalf("accept paint = %q, want the prompt repainted", w)
+	}
+	// The SECOND Return submits the recalled line, like any accepted line.
+	_, lines = drainFeed(e, "\r")
+	if len(lines) != 1 || lines[0] != "echo hi" {
+		t.Fatalf("after accept, Return submitted %q, want the recall", lines)
+	}
+	// Ground mode again: typing edits the fresh line.
+	feedE(e, "X")
+	if string(e.buf) != "X" {
+		t.Fatalf("buf = %q, want post-search typing in a fresh line", e.buf)
+	}
+}

@@ -22,6 +22,11 @@ const historyMax = 64
 // buffer -- and the O(n) repaint per keystroke -- without bound.
 const maxLineBytes = 2048
 
+// maxSearchQuery bounds one reverse-i-search query. SH.BIN's editor bounded
+// its own query buffer; a longer query is simply not extended rather than
+// being allowed to grow without limit.
+const maxSearchQuery = 64
+
 // History is the session line ring: dup-collapsed, bounded, in-memory only
 // (the monitor's HISTORY.TXT persistence is deliberately out of scope).
 type History struct {
@@ -85,6 +90,13 @@ type Editor struct {
 	csiParam int    // accumulated CSI parameter
 	csiGotP  bool   // saw at least one parameter digit
 	pending  []byte // unread input after a submit cut a chunk short
+	// reverse-i-search (M45 SH3): while searching, every byte feeds the
+	// query matcher instead of the line, and the draft line is held so a
+	// cancel can put it back. Mirrors user/src/lib/tty.zig's search_* set.
+	searching bool
+	query     []byte
+	draft     []byte
+	draftCur  int
 	// Complete proposes candidates for the word being completed. first
 	// marks the command word (start of the line).
 	Complete func(word string, first bool) []string
@@ -134,6 +146,24 @@ func (e *Editor) Feed(chunk []byte) ([]byte, EditEvent) {
 	if len(e.pending) > 0 {
 		chunk = append(e.pending, chunk...)
 		e.pending = nil
+	}
+	if e.searching {
+		// Search mode owns the byte stream (SH.BIN's feed does the same). An
+		// accept or cancel ends it mid-chunk, and the REST of the chunk is
+		// deferred to the ground loop -- which is what lets a staged
+		// `Ctrl+R query CR CR` accept the recall and then submit it.
+		var out []byte
+		for i := 0; i < len(chunk); i++ {
+			w, finished := e.searchByte(chunk[i])
+			out = append(out, w...)
+			if finished {
+				if i+1 < len(chunk) {
+					e.pending = append([]byte{}, chunk[i+1:]...)
+				}
+				return out, EditEvent{}
+			}
+		}
+		return out, EditEvent{}
 	}
 	var out []byte
 	for i := 0; i < len(chunk); i++ {
@@ -191,6 +221,17 @@ func (e *Editor) Feed(chunk []byte) ([]byte, EditEvent) {
 			}
 			return out, ev
 		}
+		if e.searching {
+			// Ctrl+R took over mid-chunk: the rest of this chunk belongs to
+			// the query, not to the line. Defer it (the search branch at the
+			// top of Feed consumes it on the next call) — without this, a
+			// staged `Ctrl+R status` inserts "status" into the line and
+			// searches for nothing.
+			if i+1 < len(chunk) {
+				e.pending = append([]byte{}, chunk[i+1:]...)
+			}
+			return out, EditEvent{}
+		}
 	}
 	return out, EditEvent{}
 }
@@ -201,6 +242,107 @@ func (e *Editor) Feed(chunk []byte) ([]byte, EditEvent) {
 // several whole lines in one read) must keep calling Feed — with a nil chunk
 // — until this is false, or the rest of the burst sits unread forever.
 func (e *Editor) Pending() bool { return len(e.pending) > 0 }
+
+// -- reverse-i-search (M45 SH3, SH.BIN's search_* semantics) --------------
+
+// searchEnter opens reverse-i-search, saving the draft line for a cancel.
+// Returns the paint for the search prompt.
+func (e *Editor) searchEnter() []byte {
+	e.draft = append(e.draft[:0], e.buf...)
+	e.draftCur = e.cur
+	e.searching = true
+	e.query = e.query[:0]
+	return e.searchPaint()
+}
+
+// searchPaint renders `(reverse-i-search)`query`: match` and loads the match
+// as the live line, so an accept needs no further swap. An empty query shows
+// `_` and cannot match, exactly as SH.BIN's redraw does.
+func (e *Editor) searchPaint() []byte {
+	shown := string(e.query)
+	if shown == "" {
+		shown = "_"
+	}
+	out := []byte("\r\n(reverse-i-search)`" + shown + "`: ")
+	if m, ok := e.searchMatch(string(e.query)); ok {
+		out = append(out, m...)
+		e.buf = append(e.buf[:0], m...)
+		e.cur = len(e.buf)
+	} else {
+		out = append(out, "(no match)"...)
+	}
+	// The search line is its own paint; the next ground paint starts from a
+	// clean slate rather than overwriting a tail it never measured.
+	e.lastLen = 0
+	e.lastTab = false
+	return out
+}
+
+// searchMatch finds the NEWEST history entry containing query (a substring
+// match, newest-first, the same rule SH.BIN used). An empty query matches
+// nothing rather than everything.
+func (e *Editor) searchMatch(query string) (string, bool) {
+	if query == "" || e.hist == nil {
+		return "", false
+	}
+	ents := e.hist.Entries() // oldest first
+	for i := len(ents) - 1; i >= 0; i-- {
+		if strings.Contains(ents[i], query) {
+			return ents[i], true
+		}
+	}
+	return "", false
+}
+
+// searchByte handles one byte in search mode, returning the bytes to write
+// and whether search mode ended (accept or cancel).
+//
+// Three bytes are deliberately NOT handled, and the map is one-way on
+// purpose: a repeat Ctrl+R (0x12) is IGNORED, so search is newest-match-only
+// rather than walking to older hits — `tty.zig`'s search byte handler ignores
+// 0x12 in search mode the same way, so there is no walk state to port. Ctrl+G
+// (0x07) is ignored too: only Enter/Esc/Ctrl-C leave search mode, in both
+// codebases. Every other control byte is not query text.
+//
+// One deliberate DIVERGENCE from the reference: a full query rings the bell
+// (`0x07`) instead of dropping the byte silently, so the bound is visible to
+// the person typing. The bound itself is the same (maxSearchQuery).
+func (e *Editor) searchByte(b byte) ([]byte, bool) {
+	switch {
+	case b == 0x1b, b == 0x03: // Esc / Ctrl-C: cancel and restore the draft
+		return e.searchExit(false), true
+	case b == '\r', b == '\n': // Enter: accept the current match
+		return e.searchExit(true), true
+	case b == 0x7f, b == 0x08: // Backspace: trim the query
+		if n := len(e.query); n > 0 {
+			e.query = e.query[:n-1]
+			return e.searchPaint(), false
+		}
+		return nil, false
+	case b == 0x0c: // Ctrl-L: ignored inside search (SH.BIN's behavior)
+		return nil, false
+	case b >= 0x20 && b != 0x7f: // a query byte
+		if len(e.query) >= maxSearchQuery {
+			return []byte{0x07}, false // query full: bell, no append
+		}
+		e.query = append(e.query, b)
+		return e.searchPaint(), false
+	}
+	return nil, false // other control bytes are not query text
+}
+
+// searchExit leaves search mode. On accept the line keeps whatever the last
+// match loaded; on cancel the saved draft comes back. It repaints either way,
+// so the caller never has to.
+func (e *Editor) searchExit(accept bool) []byte {
+	e.searching = false
+	if !accept {
+		e.buf = append(e.buf[:0], e.draft...)
+		e.cur = e.draftCur
+	}
+	e.lastLen = 0
+	return append([]byte("\r\n"), e.paint()...)
+}
 
 // keyGround handles one non-CSI byte in the ground state.
 func (e *Editor) keyGround(b byte) ([]byte, EditEvent) {
@@ -250,6 +392,8 @@ func (e *Editor) keyGround(b byte) ([]byte, EditEvent) {
 	case 0x0c: // Ctrl-L: clear the screen and repaint
 		e.lastTab = false
 		return append([]byte("\x1b[2J\x1b[H"), e.paint()...), EditEvent{}
+	case 0x12: // Ctrl+R: reverse-i-search through history (M45 SH3)
+		return e.searchEnter(), EditEvent{}
 	case 0x03: // Ctrl-C: abandon the line
 		e.buf = e.buf[:0]
 		e.cur = 0
