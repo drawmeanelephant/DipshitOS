@@ -2,9 +2,9 @@
 # retargeted to GOSH by M68b (#1450).
 #
 # `settings shell=sh` boots into the shell seat (the M45 SH8 login seam). The
-# typed `monitor` builtin announces the handover, detaches the serial
-# front-end, closes /dev/tty, and exits; the kernel monitor observes the
-# detach and resumes reading the raw console — `version` answers with
+# typed `monitor` builtin detaches the serial front-end, then announces
+# `gosh: monitor`, closes /dev/tty and exits; the kernel monitor observes the
+# detach and resumes reading the raw console, so `version` answers with
 # `virelai-kernel`. This proves the login shell is not a one-way door. Boot
 # default (no SETTINGS.TXT) stays the monitor; the existing live-sh* gates
 # cover it.
@@ -57,9 +57,16 @@ vgate_assert 01 serial-contains 'gosh: ready'
 vgate_assert 01 serial-contains 'gosh: attached'
 vgate_assert 01 serial-contains 'gosh: monitor'
 vgate_assert 01 serial-contains 'virelai-kernel'
+# The detach is checked: the failure marker would mean the handover did not
+# happen and `version` met a still-attached shell.
+vgate_assert 01 serial-absent 'gosh: monitor failed'
 vgate_assert 01 serial-absent '\[EXC\]'
 vgate_assert 01 serial-absent '[EXC] parking:'
 
+# The `version` type is sequenced on `gosh: monitor`, which GOSH prints only
+# AFTER the checked detach returned: waiting on it waits for a COMPLETED
+# handover. The python assert pins the other half — `version` must never reach
+# GOSH, so the race names itself instead of only failing on a missing string.
 vgate_assert 01 python <<'PY'
 import os
 ser = open(os.environ["VG_SER"], errors="replace").read()
@@ -69,5 +76,10 @@ i_ver = ser.find("virelai-kernel")
 assert i_ready >= 0 and i_mon >= 0 and i_ver >= 0, "missing marker(s)"
 assert i_ready < i_mon < i_ver, f"wrong order ready={i_ready} monitor={i_mon} version={i_ver}"
 assert "login: shell=sh -> GOSH.ELF serial" in ser, "the login handoff did not run"
+# The race the positive assert alone would only report as a missing string:
+# after the handover GOSH must stop running lines, so `version` was read by
+# the kernel monitor and not typed into a shell that still held the console.
+assert "gosh: line version" not in ser, "version went to GOSH, not the monitor"
+assert "gosh: monitor failed" not in ser, "the detach did not complete"
 print("monitor escape ordering OK: gosh: ready < gosh: monitor < virelai-kernel")
 PY
