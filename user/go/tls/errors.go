@@ -8,7 +8,10 @@ import "errors"
 
 var (
 	// Transport errors (the vi.Conn seam reports these through the client).
-	errTransport = errors.New("tls: transport failed")
+	errTransport      = errors.New("tls: transport failed")
+	errStreamClosed   = errors.New("tls: peer closed")
+	errStreamTimeout  = errors.New("tls: peer timeout")
+	errStreamOverflow = errors.New("tls: TCP stash overflow")
 
 	// Record layer.
 	errRecordTooLarge   = errors.New("tls: record too large")
@@ -59,3 +62,42 @@ var (
 	// Trust store.
 	errNoTrustAnchor = errors.New("tls: trust anchor missing or bad")
 )
+
+// chainValidationError carries the ADR 0029 D4 verdict so callers can tell
+// hostname_mismatch from expired from no_path_to_root (the live-tls13
+// negatives). Unwrap keeps errors.Is(..., ErrChainValidationFailed) working.
+type chainValidationError struct {
+	res validationResult
+}
+
+func (e chainValidationError) Error() string {
+	return ErrChainValidationFailed.Error() + ": " + e.res.String()
+}
+
+func (e chainValidationError) Unwrap() error { return ErrChainValidationFailed }
+
+func validationOf(err error) (validationResult, bool) {
+	var c chainValidationError
+	if errors.As(err, &c) {
+		return c.res, true
+	}
+	return 0, false
+}
+
+// IsHostnameMismatch reports a fail-closed wrong-name handshake.
+func IsHostnameMismatch(err error) bool {
+	res, ok := validationOf(err)
+	return ok && res == resultHostnameMismatch
+}
+
+// IsExpired reports a fail-closed expired (or not-yet-valid) chain.
+func IsExpired(err error) bool {
+	res, ok := validationOf(err)
+	return ok && (res == resultExpired || res == resultNotYetValid)
+}
+
+// IsNoPathToRoot reports a fail-closed chain that does not reach an anchor.
+func IsNoPathToRoot(err error) bool {
+	res, ok := validationOf(err)
+	return ok && res == resultNoPathToRoot
+}

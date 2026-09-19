@@ -7,12 +7,14 @@
 //
 // Usage:  exec WEB.ELF /host/PAGE.HTML     (file channel)
 //
-//	exec WEB.ELF http://10.0.0.2/    (TCP fetch; IP literals only)
+//	exec WEB.ELF http://10.0.0.2/     (TCP fetch; IP literals only)
+//	exec WEB.ELF https://10.0.0.2:24533/  (in-process TLS; fixture SNI)
 package main
 
 import (
 	"strings"
 
+	"virelai/tls"
 	"virelai/vi"
 	"virelai/webrender"
 )
@@ -95,6 +97,11 @@ const (
 const (
 	maxRedirects   = 5
 	readDeadlineMs = 30000
+
+	// fixtureSNI is the AutoClaw test-leaf name the runner TLS responder
+	// serves. IP-literal https uses this SNI; production roots are a later
+	// card. Public-internet hostnames stay a dns refuse.
+	fixtureSNI = "leaf.example.com"
 )
 
 // HistoryPersistence is where visits are appended (inspectable text, one
@@ -421,11 +428,12 @@ func (a *app) navigate(target, from string) {
 
 	switch kind := classifyTarget(resolved); kind {
 	case "https":
-		// TLS is not implemented on this OS yet: there is no trust store and
-		// no record layer in userland. Refuse loudly. The one thing this
-		// must never do is fall back to plain TCP — the request would leave
-		// the machine in the clear while the address bar said https.
-		a.finishError("https", resolved, from)
+		u, ok := webrender.ParseURL(resolved)
+		if !ok || !u.IsIP {
+			a.finishError("url", resolved, from)
+			return
+		}
+		a.startHTTPS(u)
 	case "dns":
 		// No resolver in this slice: refuse rather than hang or guess.
 		a.finishError("dns", resolved, from)
@@ -452,12 +460,19 @@ func (a *app) navigate(target, from string) {
 // pure function: the "never send an https request in the clear" decision is
 // the one thing here that must be unit-testable without a socket.
 //
-//	kinds: "https" (refused), "dns" (hostname, no resolver), "url" (malformed),
-//	       "http" (fetchable), "file" (file channel)
+//	kinds: "https" (TLS fetch, IP literal), "dns" (hostname), "url" (malformed),
+//	       "http" (cleartext fetch), "file" (file channel)
 func classifyTarget(resolved string) string {
 	low := strings.ToLower(resolved)
 	switch {
 	case strings.HasPrefix(low, "https://"):
+		u, ok := webrender.ParseURL(resolved)
+		if !ok {
+			return "url"
+		}
+		if !u.IsIP {
+			return "dns"
+		}
 		return "https"
 	case strings.HasPrefix(low, "http://"):
 		u, ok := webrender.ParseHTTPURL(resolved)
@@ -504,6 +519,57 @@ func (a *app) startHTTP(u webrender.URL) {
 	a.loading = true
 	a.loadEnd = vi.Nanos() + readDeadlineMs*1_000_000
 	vi.ConsoleLine(markerFetch + u.Host + u.Path)
+}
+
+// startHTTPS dials in-process (tls.Dial over vi.Dial), sends the GET, and
+// reads the response on this goroutine. Single-goroutine fetch: no M65
+// follow-up. Concurrent fetch would need one — vi.Conn is one-owner and the
+// kernel allows one TCP socket per process.
+func (a *app) startHTTPS(u webrender.URL) {
+	sni := fixtureSNI
+	if !u.IsIP {
+		sni = u.Host
+	}
+	conn, err := tls.Dial(u.Host, u.Port, sni)
+	if err != nil {
+		a.finishError("tls", a.target, a.loadFrom)
+		return
+	}
+	req := webrender.FormatGetRequestWithCookies(sni, u.Path, a.cookieHeaderFor(u.Host, u.Path))
+	if _, err := conn.Write([]byte(req)); err != nil {
+		_ = conn.Close()
+		a.offlineOr("tls")
+		return
+	}
+	vi.ConsoleLine(markerFetch + u.Host + u.Path)
+	buf, err := readTLSConn(conn, vi.MaxFileBytes)
+	_ = conn.Close()
+	if err != nil && len(buf) == 0 {
+		a.offlineOr("tls")
+		return
+	}
+	a.loadURL = u
+	a.loadBuf = buf
+	a.loading = false
+	a.finishResponse(true)
+}
+
+func readTLSConn(c *tls.TLSConn, capn int) ([]byte, error) {
+	tmp := make([]byte, 16384)
+	var out []byte
+	for len(out) < capn {
+		n, err := c.Read(tmp)
+		if n > 0 {
+			out = append(out, tmp[:n]...)
+		}
+		if err != nil || n == 0 {
+			if len(out) > 0 {
+				return out, nil
+			}
+			return out, err
+		}
+	}
+	return out, nil
 }
 
 // responseNeed returns the response framing of a buffer:
@@ -647,6 +713,10 @@ func (a *app) loadStep() {
 // error page.
 func (a *app) completeLoad() {
 	vi.TCPClose()
+	a.finishResponse(false)
+}
+
+func (a *app) finishResponse(viaTLS bool) {
 	a.loading = false
 	head, body, ok := webrender.SplitHTTPResponse(a.loadBuf)
 	if !ok {
@@ -670,10 +740,14 @@ func (a *app) completeLoad() {
 		}
 		a.loadSeen[key] = true
 		a.loadHops++
-		a.target = "http://" + key
+		a.target = formatNavURL(next)
 		vi.ConsoleLine(markerRedirect + itoa(a.loadHops) + " " + a.target)
 		if !next.IsIP {
 			a.finishError("dns", a.target, a.loadFrom)
+			return
+		}
+		if next.Scheme == "https" || (viaTLS && next.Scheme != "http") {
+			a.startHTTPS(next)
 			return
 		}
 		a.startHTTP(next)
@@ -694,6 +768,21 @@ func (a *app) completeLoad() {
 	}
 	a.cacheStore(a.target, body)
 	a.afterLoad(a.loadFrom)
+}
+
+func formatNavURL(u webrender.URL) string {
+	scheme := u.Scheme
+	if scheme == "" {
+		scheme = "http"
+	}
+	def := uint16(80)
+	if scheme == "https" {
+		def = 443
+	}
+	if u.Port != 0 && u.Port != def {
+		return scheme + "://" + u.Host + ":" + itoa(int(u.Port)) + u.Path
+	}
+	return scheme + "://" + u.Host + u.Path
 }
 
 // cancelLoad stops an in-flight load (Stop / Escape / X).
@@ -1100,8 +1189,8 @@ func resolveInput(in string) (string, string) {
 	low := strings.ToLower(s)
 	switch {
 	case strings.HasPrefix(low, "http://"), strings.HasPrefix(low, "https://"):
-		// Scheme-shaped: hand it on unresolved so classifyTarget can refuse
-		// https explicitly (and say why) rather than the classifier never
+		// Scheme-shaped: hand it on unresolved so classifyTarget can pick
+		// https (TLS) vs dns vs url rather than the classifier never
 		// seeing it.
 		return s, "http"
 	case strings.Contains(low, "://"):
@@ -1128,7 +1217,19 @@ func isSchemeAlpha(s string) bool {
 
 // relativeTo resolves an href found on a page against the page's own target.
 func relativeTo(base, href string) string {
-	if strings.HasPrefix(strings.ToLower(href), "http://") {
+	low := strings.ToLower(href)
+	if strings.HasPrefix(low, "http://") || strings.HasPrefix(low, "https://") {
+		return href
+	}
+	if strings.HasPrefix(strings.ToLower(base), "https://") {
+		if strings.HasPrefix(href, "/") {
+			if u, ok := webrender.ParseURL(base); ok {
+				return "https://" + u.Host + href
+			}
+		}
+		if resolved, ok := webrender.ResolveHref(base, href); ok {
+			return resolved
+		}
 		return href
 	}
 	if strings.HasPrefix(strings.ToLower(base), "http://") {
@@ -1229,9 +1330,11 @@ func errorMessage(kind, target string) string {
 	case "http":
 		return "The server answered with a non-200 status."
 	case "scheme":
-		return "Only http:// and the local file channel are supported."
+		return "Only http://, https://, and the local file channel are supported."
 	case "https":
-		return "https:// refused: this OS has no TLS trust store yet. Nothing was sent in the clear."
+		return "https:// refused: hostname is not an IP literal. Nothing was sent in the clear."
+	case "tls":
+		return "TLS handshake failed (fail closed). Nothing was sent in the clear."
 	case "cancelled":
 		return "Load stopped before the server answered."
 	case "redirect":

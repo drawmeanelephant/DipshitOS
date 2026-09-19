@@ -2,17 +2,17 @@ package main
 
 import "virelai/vi"
 
-// GOTGIT.ELF — git-over-https clone (issue #1337 / ADR 0029). HTTPS is the
-// Zig helper FETCHS.BIN; this process never opens a TCP socket and never
-// sends a cleartext GET. No push.
+// GOTGIT.ELF — git-over-https clone (issue #1337 / M67b #1447 / ADR 0029).
+// HTTPS is in-process tls.Dial over vi.Dial. FETCHS.BIN is not referenced.
+// Never a cleartext GET. No push.
 
 const (
 	appName = "GOTGIT.ELF"
 
 	markerStart  = "gotgit: start"
 	markerURL    = "gotgit: url "
-	markerHelper = "gotgit: helper "
-	markerPid    = "gotgit: helper pid="
+	markerDial   = "gotgit: dial "
+	markerHS     = "gotgit: handshake ok"
 	markerRefs   = "gotgit: refs "
 	markerWant   = "gotgit: want "
 	markerPack   = "gotgit: pack objects="
@@ -29,9 +29,6 @@ const (
 	// file_table MODE_DIR create returns -9 (EEXIST). ADR 0007 maps
 	// magnitude 9 to ENXIO; vi has no ErrEXIST.
 	errExist = int64(-9)
-
-	// FETCHS.BIN success is exit_status 42 (user/src/fetchs.zig).
-	fetchsOK = int64(42)
 )
 
 // argvPad keeps the Go sbrk heap from overlapping the kernel's argv+envp
@@ -95,30 +92,18 @@ func startArgs() (url, dest string) {
 }
 
 func clone(tgt target, dest, gitDir string) bool {
-	pathF, ok := joinPath(gitDir, "P")
-	if !ok {
-		return fail("path file")
-	}
-	outF, ok := joinPath(gitDir, "O")
-	if !ok {
-		return fail("out file")
-	}
-	bodyF, ok := joinPath(gitDir, "B")
-	if !ok {
-		return fail("body file")
+	repo := repoPath(tgt)
+	sni := tgt.SNI
+	if sni == "" {
+		sni = defaultSNI
 	}
 
-	repo := repoPath(tgt)
-	if !writeFile(pathF, []byte(infoRefsPath(repo))) {
-		return fail("write path")
+	vi.ConsoleLine(markerDial + tgt.Host + " " + portString(tgt.Port) + " " + sni + " GET")
+	resp, err := httpsRequest(tgt, "GET", infoRefsPath(repo), nil)
+	if err != nil {
+		return fail("https GET " + err.Error())
 	}
-	if !runHelper(tgt, "GET", pathF, outF, "") {
-		return false
-	}
-	resp, rok := readFile(outF)
-	if !rok {
-		return fail("read refs")
-	}
+	vi.ConsoleLine(markerHS)
 	_, body, err := splitHTTP(resp)
 	if err != nil {
 		return fail("http refs")
@@ -134,19 +119,12 @@ func clone(tgt target, dest, gitDir string) bool {
 	}
 	vi.ConsoleLine(markerWant + want.Name + " " + hexEncode(want.SHA[:]))
 
-	if !writeFile(pathF, []byte(uploadPackPath(repo))) {
-		return fail("write post path")
+	vi.ConsoleLine(markerDial + tgt.Host + " " + portString(tgt.Port) + " " + sni + " POST")
+	resp, err = httpsRequest(tgt, "POST", uploadPackPath(repo), wantBody(want.SHA))
+	if err != nil {
+		return fail("https POST " + err.Error())
 	}
-	if !writeFile(bodyF, wantBody(want.SHA)) {
-		return fail("write want")
-	}
-	if !runHelper(tgt, "POST", pathF, outF, bodyF) {
-		return false
-	}
-	resp, rok = readFile(outF)
-	if !rok {
-		return fail("read pack")
-	}
+	vi.ConsoleLine(markerHS)
 	_, body, err = splitHTTP(resp)
 	if err != nil {
 		return fail("http pack")
@@ -172,65 +150,7 @@ func clone(tgt target, dest, gitDir string) bool {
 	if !checkout(dest, objs, want.SHA) {
 		return fail("checkout")
 	}
-	// Transfer scratch (path/out/body). Not .git/index or config:
-	// #1337 is object store + checkout, not a working-tree clone.
-	_ = vi.FileDelete(pathF)
-	_ = vi.FileDelete(outF)
-	_ = vi.FileDelete(bodyF)
 	return true
-}
-
-func runHelper(tgt target, method, pathF, outF, bodyF string) bool {
-	plan, ok := planHelper(tgt, method, pathF, outF, bodyF)
-	if !ok {
-		return fail("plan " + method)
-	}
-	line := markerHelper + plan.Name
-	for _, a := range plan.Args {
-		line += " " + a
-	}
-	vi.ConsoleLine(line)
-	pid, err := vi.Exec(plan.Name, plan.Args...)
-	if err != nil {
-		return fail("exec " + method)
-	}
-	vi.ConsoleLine(markerPid + vi.Itoa64(pid))
-	st := waitPID(pid)
-	if st < 0 {
-		return fail("wait " + method)
-	}
-	// 0 is accepted when waitPID observes the pid gone after ProcExited.
-	if method != "" && st != 0 && st != fetchsOK {
-		return fail("helper status " + vi.Itoa64(st))
-	}
-	return true
-}
-
-func waitPID(pid int64) int64 {
-	var rows [16]vi.ProcRow
-	deadline := vi.Nanos() + 120*int64(1e9)
-	seen := false
-	for vi.Nanos() < deadline {
-		n, rc := vi.Procs(rows[:])
-		if rc >= 0 {
-			found := false
-			for i := 0; i < n; i++ {
-				if int64(rows[i].PID) != pid {
-					continue
-				}
-				found = true
-				seen = true
-				if rows[i].State == vi.ProcExited {
-					return int64(rows[i].ExitStatus)
-				}
-			}
-			if seen && !found {
-				return 0
-			}
-		}
-		vi.Yield()
-	}
-	return -1
 }
 
 func noteObjects(objs []gitObj) bool {

@@ -27,7 +27,7 @@ const (
 	objOfsDelta = 6
 	objRefDelta = 7
 	// One object and the HTTP response that carries the pack share the
-	// 256 KiB guest file-read cap (vi.MaxFileBytes / FETCHS phaseRead).
+	// 256 KiB guest file-read cap (vi.MaxFileBytes).
 	maxObjSize = 256 * 1024
 )
 

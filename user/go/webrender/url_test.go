@@ -42,6 +42,24 @@ func TestParseHTTPURL(t *testing.T) {
 	}
 }
 
+func TestParseURLHTTPS(t *testing.T) {
+	u, ok := ParseURL("https://10.0.0.2:24533/")
+	if !ok || u.Scheme != "https" || u.Host != "10.0.0.2" || u.Port != 24533 || u.Path != "/" || !u.IsIP {
+		t.Fatalf("got %+v ok=%v", u, ok)
+	}
+	def, ok := ParseURL("https://10.0.0.2/")
+	if !ok || def.Port != 443 || def.Scheme != "https" {
+		t.Fatalf("default https port = %+v ok=%v", def, ok)
+	}
+	if _, ok := ParseURL("https://"); ok {
+		t.Fatal("empty https host accepted")
+	}
+	http, ok := ParseURL("http://10.0.0.2/")
+	if !ok || http.Scheme != "http" || http.Port != 80 {
+		t.Fatalf("http via ParseURL = %+v ok=%v", http, ok)
+	}
+}
+
 func TestParseIPv4Rejects(t *testing.T) {
 	bad := []string{"", "1", "1.2.3", "1.2.3.4.5", "256.0.0.1", "1.2.3.999", "1.2.3.a", " 1.2.3.4", "1..2.3"}
 	for _, s := range bad {

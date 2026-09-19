@@ -1,18 +1,25 @@
 package main
 
-// HTTPS helper plan for GOTGIT. Same rule as GOFETCH (M58d / #1308): an
-// https URL never becomes a cleartext TCP GET. FETCHS.BIN owns the socket
-// and the handshake. Extra argv slots carry method + share paths for the
-// request-target, response, and POST body (31-byte argv cap).
+import (
+	"virelai/tls"
+	"virelai/vi"
+)
+
+// HTTPS for GOTGIT (M67b / #1447). An https URL never becomes a cleartext
+// TCP GET. The process dials in-process via tls.Dial over vi.Dial.
+// FETCHS.BIN is not referenced. Sequential GET then POST: one TCP socket
+// per process, so the first conn is Closed before the second Dial.
 
 const (
-	helperName   = "FETCHS.BIN"
 	defaultSNI   = "leaf.example.com"
 	defaultHTTPS = uint16(443)
 	kindHTTPS    = "https"
 	kindHTTP     = "http"
 	kindDNS      = "dns"
 	kindURL      = "url"
+
+	tlsRecordBuf = 16384
+	tlsBodyCap   = vi.MaxFileBytes
 )
 
 type target struct {
@@ -23,11 +30,6 @@ type target struct {
 	Path string
 	IPv4 [4]byte
 	SNI  string
-}
-
-type helperPlan struct {
-	Name string
-	Args []string
 }
 
 func classify(raw string) target {
@@ -101,34 +103,53 @@ func repoPath(t target) string {
 	return p
 }
 
-func planHelper(t target, method, pathFile, outFile, bodyFile string) (helperPlan, bool) {
-	if t.Kind != kindHTTPS {
-		return helperPlan{}, false
-	}
-	if method != "GET" && method != "POST" {
-		return helperPlan{}, false
-	}
+func wouldSendCleartext(t target) bool {
+	return t.Kind == kindHTTP
+}
+
+func httpsRequest(t target, method, path string, body []byte) ([]byte, error) {
 	sni := t.SNI
 	if sni == "" {
 		sni = defaultSNI
 	}
-	args := []string{t.Host, portString(t.Port), sni, method, pathFile, outFile}
-	if bodyFile != "" {
-		args = append(args, bodyFile)
+	c, err := tls.Dial(t.Host, t.Port, sni)
+	if err != nil {
+		return nil, err
 	}
-	for _, a := range args {
-		if len(a) > 31 {
-			return helperPlan{}, false
+	defer c.Close()
+	req := method + " " + path + " HTTP/1.0\r\nHost: " + sni + "\r\n"
+	if method == "POST" {
+		req += "Content-Type: application/x-git-upload-pack-request\r\n"
+		req += "Content-Length: " + uitoa(uint64(len(body))) + "\r\n"
+	}
+	req += "Connection: close\r\n\r\n"
+	if _, err := c.Write([]byte(req)); err != nil {
+		return nil, err
+	}
+	if len(body) > 0 {
+		if _, err := c.Write(body); err != nil {
+			return nil, err
 		}
 	}
-	if len(args) > 8 {
-		return helperPlan{}, false
-	}
-	return helperPlan{Name: helperName, Args: args}, true
+	return readTLS(c, tlsBodyCap)
 }
 
-func wouldSendCleartext(t target) bool {
-	return t.Kind == kindHTTP
+func readTLS(c *tls.TLSConn, capn int) ([]byte, error) {
+	tmp := make([]byte, tlsRecordBuf)
+	var out []byte
+	for len(out) < capn {
+		n, err := c.Read(tmp)
+		if n > 0 {
+			out = append(out, tmp[:n]...)
+		}
+		if err != nil || n == 0 {
+			if len(out) > 0 {
+				return out, nil
+			}
+			return out, err
+		}
+	}
+	return out, nil
 }
 
 func lowerASCII(s string) string {

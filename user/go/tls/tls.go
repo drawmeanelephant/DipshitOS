@@ -8,27 +8,58 @@ package tls
 
 import "virelai/vi"
 
-// viTransport bridges vi.Conn to the client's transport. One goroutine owns
-// the traffic, the same contract vi.Conn states.
+// viTransport bridges the kernel TCP seam to the client's byte-stream
+// transport. It does not use vi.Conn.Recv/Send: Recv waits on slot 76
+// without draining virtio, and Send does not drain between 192-byte
+// segments. The stream adapter (stream.go, the FETCHS.BIN contract) is
+// what makes a live handshake complete on this kernel.
 type viTransport struct {
 	conn *vi.Conn
+	st   tcpStream
 }
 
-func (t *viTransport) read(p []byte) (int, error) {
-	// Recv is blocking-with-poll with the bounded default budget: a peer
-	// that goes dark fails closed instead of parking forever.
-	return t.conn.Recv(p)
+func newVITransport(conn *vi.Conn) *viTransport {
+	t := &viTransport{conn: conn}
+	t.st.recv = t.kernelRecv
+	t.st.send = t.kernelSend
+	t.st.peekEOF = t.kernelEOF
+	t.st.buf = make([]byte, streamStashCap)
+	return t
 }
+
+func (t *viTransport) kernelRecv(p []byte) (int, error) {
+	n, rc := vi.TCPRecv(p)
+	if rc < 0 {
+		return 0, errTransport
+	}
+	return n, nil
+}
+
+func (t *viTransport) kernelSend(p []byte) (int, error) {
+	n, rc := vi.TCPSend(p)
+	if rc < 0 {
+		return 0, errTransport
+	}
+	if n == 0 && len(p) > 0 {
+		return 0, errTransport
+	}
+	return n, nil
+}
+
+func (t *viTransport) kernelEOF() bool {
+	mask, rc := vi.TCPReady()
+	return rc >= 0 && mask&1 != 0
+}
+
+func (t *viTransport) read(p []byte) (int, error) { return t.st.read(p) }
 
 func (t *viTransport) write(p []byte) (int, error) {
-	n, err := t.conn.Send(p)
+	n, err := t.st.write(p)
 	if err != nil {
-		return 0, err
+		return n, err
 	}
 	if n != len(p) {
-		// Send advances only by confirmed counts and returns nil error only
-		// when the whole buffer was accepted.
-		return 0, errTransport
+		return n, errTransport
 	}
 	return n, nil
 }
@@ -56,7 +87,7 @@ func Dial(addr string, port uint16, serverName string) (*TLSConn, error) {
 		serverName = addr
 	}
 	c := &TLSConn{conn: conn}
-	c.cl = newClient(&viTransport{conn: conn}, serverName, vi.Time(), viRandom, true)
+	c.cl = newClient(newVITransport(conn), serverName, vi.Time(), viRandom, true)
 	if err := c.cl.handshake(); err != nil {
 		_ = conn.Close()
 		return nil, err

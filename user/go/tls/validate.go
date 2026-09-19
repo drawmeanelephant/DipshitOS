@@ -28,6 +28,42 @@ const (
 	resultHostnameMismatch
 )
 
+// String is the Zig Result tag name (validate.zig), the serial grep target
+// for the live-tls13-equivalent negatives.
+func (r validationResult) String() string {
+	switch r {
+	case resultValid:
+		return "valid"
+	case resultParseError:
+		return "parse_error"
+	case resultNoPathToRoot:
+		return "no_path_to_root"
+	case resultSignatureVerificationFailed:
+		return "signature_verification_failed"
+	case resultExpired:
+		return "expired"
+	case resultNotYetValid:
+		return "not_yet_valid"
+	case resultNotACA:
+		return "not_a_ca"
+	case resultPathLengthExceeded:
+		return "path_length_exceeded"
+	case resultKeyUsageMissingKeyCertSign:
+		return "key_usage_missing_key_cert_sign"
+	case resultEKUNotServerAuth:
+		return "eku_not_server_auth"
+	case resultUnknownCriticalExtension:
+		return "unknown_critical_extension"
+	case resultUnsupportedSignatureAlgorithm:
+		return "unsupported_signature_algorithm"
+	case resultNameConstraintViolation:
+		return "name_constraint_violation"
+	case resultHostnameMismatch:
+		return "hostname_mismatch"
+	}
+	return "unknown"
+}
+
 // sigAlgAllowed reports whether TLS 1.3 permits the algorithm for
 // certificates. Ed25519 is classified but not verifiable in this client, so
 // it is excluded here (fail closed with a specific code, not a signature

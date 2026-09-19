@@ -1,19 +1,19 @@
-// Command fetch is the M58d (issue #1308) Go HTTPS consumer: GET https://
-// via the in-tree Zig TLS helper (FETCHS.BIN / ADR 0029). Zero crypto in
-// this process. Full-viewport via tabapp inside Zig TABWM when that seat
-// is running; declare is best-effort so a raw-window live-web boot still
+// Command fetch is the M67b (issue #1447) Go HTTPS consumer: GET https://
+// in-process via virelai/tls over vi.Dial (ADR 0029). FETCHS.BIN is not
+// exec'd. Full-viewport via tabapp inside Zig TABWM when that seat is
+// running; declare is best-effort so a raw-window live-web boot still
 // works.
 //
-// Usage: exec GOFETCH.ELF https://10.0.0.2:24533/
+// Usage: exec GOFETCH.ELF https://10.0.0.2:24533/ [sni [expect-fail]]
 //
-// The helper owns the TCP socket and the handshake. This program only
-// classifies the URL, execs FETCHS.BIN with IP/port/SNI, and prints
-// markers. An https URL is never rewritten to http and never armed as a
-// cleartext GET.
+// expect-fail is name|expired|chain: the handshake must fail closed (the
+// live-tls13-equivalent negatives). An https URL is never rewritten to
+// http and never armed as a cleartext GET.
 package main
 
 import (
 	"virelai/tabapp"
+	"virelai/tls"
 	"virelai/vi"
 	"virelai/widgets"
 )
@@ -24,16 +24,20 @@ const (
 	natW     = 512
 	natH     = 384
 
-	markerOpen    = "gofetch: open id="
-	markerDeclare = "gofetch: declare accepted"
-	markerURL     = "gofetch: url "
-	markerHelper  = "gofetch: helper "
-	markerPid     = "gofetch: helper pid="
-	markerPresent = "gofetch: present"
-	markerReady   = "gofetch: ready"
-	markerClose   = "gofetch: close"
-	markerOK      = "gofetch OK"
-	markerError   = "gofetch: error "
+	markerOpen       = "gofetch: open id="
+	markerDeclare    = "gofetch: declare accepted"
+	markerURL        = "gofetch: url "
+	markerDial       = "gofetch: dial "
+	markerHandshake  = "gofetch: handshake ok"
+	markerHSErr      = "gofetch: handshake error "
+	markerFailClosed = "gofetch: fail-closed "
+	markerSent       = "gofetch: request sent"
+	markerBody       = "gofetch: body complete"
+	markerPresent    = "gofetch: present"
+	markerReady      = "gofetch: ready"
+	markerClose      = "gofetch: close"
+	markerOK         = "gofetch OK"
+	markerError      = "gofetch: error "
 
 	keyEscape = 0x29
 	keyQ      = 0x14
@@ -51,6 +55,8 @@ var argvPad [2048]byte
 type app struct {
 	ta     *tabapp.TabApp
 	url    string
+	sni    string
+	expect string
 	status string
 	title  widgets.Text
 	body   widgets.Text
@@ -71,7 +77,8 @@ func main() {
 		vi.ConsoleLine("gofetch: declare refused")
 	}
 
-	a := &app{ta: ta, url: startURL(), status: "starting"}
+	url, sni, expect := startArgs()
+	a := &app{ta: ta, url: url, sni: sni, expect: expect, status: "starting"}
 	vi.ConsoleLine(markerURL + a.url)
 	a.draw()
 	a.ta.Present()
@@ -107,33 +114,93 @@ func main() {
 	}
 }
 
-func startURL() string {
+func startArgs() (url, sni, expect string) {
 	args := vi.Args()
+	url = "https://10.0.0.2/"
 	if len(args) > 1 && args[1] != "" {
-		return args[1]
+		url = args[1]
 	}
-	return "https://10.0.0.2/"
+	if len(args) > 2 {
+		sni = args[2]
+	}
+	if len(args) > 3 {
+		expect = args[3]
+	}
+	return url, sni, expect
 }
 
 func (a *app) runFetch() {
 	tgt := Classify(a.url)
 	if WouldSendCleartext(tgt) {
-		a.fail(KindHTTPS, "cleartext refused")
+		a.fail(KindHTTP, "cleartext refused")
 		return
 	}
-	plan, ok := PlanHelper(tgt)
+	plan, ok := PlanDial(tgt)
 	if !ok {
 		a.fail(tgt.Kind, a.url)
 		return
 	}
-	vi.ConsoleLine(markerHelper + plan.Name + " " + plan.Args[0] + " " + plan.Args[1] + " " + plan.Args[2])
-	pid, err := vi.Exec(plan.Name, plan.Args...)
+	if a.sni != "" {
+		plan.SNI = a.sni
+	}
+	vi.ConsoleLine(markerDial + plan.Addr + " " + portString(plan.Port) + " " + plan.SNI)
+	conn, err := httpsDial(plan.Addr, plan.Port, plan.SNI)
 	if err != nil {
-		a.fail("exec", err.Error())
+		vi.ConsoleLine(markerHSErr + err.Error())
+		if failClosedMatches(a.expect, err) {
+			vi.ConsoleLine(markerFailClosed + a.expect)
+			a.status = "fail-closed " + a.expect
+			return
+		}
+		a.fail("tls", err.Error())
 		return
 	}
-	vi.ConsoleLine(markerPid + vi.Itoa64(pid))
-	a.status = "helper pid " + vi.Itoa64(pid)
+	if a.expect == "name" || a.expect == "expired" || a.expect == "chain" {
+		_ = conn.Close()
+		a.fail("tls", "expected fail-closed "+a.expect)
+		return
+	}
+	vi.ConsoleLine(markerHandshake)
+	body, err := httpsGetOn(conn, plan.SNI, plan.Path)
+	_ = conn.Close()
+	if err != nil {
+		a.fail("tls", err.Error())
+		return
+	}
+	vi.ConsoleLine(markerSent)
+	writeBody(body)
+	vi.ConsoleLine(markerBody)
+	a.status = "ok " + vi.Itoa64(int64(len(body))) + " bytes"
+}
+
+func failClosedMatches(expect string, err error) bool {
+	switch expect {
+	case "name":
+		return tls.IsHostnameMismatch(err)
+	case "expired":
+		return tls.IsExpired(err)
+	case "chain":
+		return tls.IsNoPathToRoot(err)
+	}
+	return false
+}
+
+func writeBody(body []byte) {
+	// Print the HTTP response to the serial so the gate can see the
+	// responder's pinned body (live-web-https-ok / live-tls13-ok).
+	start := 0
+	for i := 0; i <= len(body); i++ {
+		if i == len(body) || body[i] == '\n' {
+			line := body[start:i]
+			if len(line) > 0 && line[len(line)-1] == '\r' {
+				line = line[:len(line)-1]
+			}
+			if len(line) > 0 {
+				vi.ConsoleLine(string(line))
+			}
+			start = i + 1
+		}
+	}
 }
 
 func (a *app) fail(kind, detail string) {

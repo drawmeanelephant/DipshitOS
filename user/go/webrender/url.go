@@ -11,9 +11,9 @@ package webrender
 
 import "strings"
 
-// URL is a parsed HTTP URL (the only scheme the browser fetches).
+// URL is a parsed HTTP(S) URL.
 type URL struct {
-	Scheme string // "http" when parsed
+	Scheme string // "http" or "https"
 	Host   string
 	Port   uint16
 	Path   string
@@ -23,6 +23,9 @@ type URL struct {
 
 // IsHTTPURL reports whether s starts with http:// (case-insensitive).
 func IsHTTPURL(s string) bool { return len(s) >= 7 && strings.EqualFold(s[:7], "http://") }
+
+// IsHTTPSURL reports whether s starts with https:// (case-insensitive).
+func IsHTTPSURL(s string) bool { return len(s) >= 8 && strings.EqualFold(s[:8], "https://") }
 
 // IsExternalURL reports whether s is an absolute URL the browser cannot load
 // from the local file channel.
@@ -36,7 +39,18 @@ func ParseHTTPURL(raw string) (URL, bool) {
 	if !IsHTTPURL(raw) {
 		return URL{}, false
 	}
-	rest := raw[7:]
+	return parseHostPortPath(raw[7:], "http", 80)
+}
+
+// ParseURL parses http:// or https://. HTTPS defaults to port 443.
+func ParseURL(raw string) (URL, bool) {
+	if IsHTTPSURL(raw) {
+		return parseHostPortPath(raw[8:], "https", 443)
+	}
+	return ParseHTTPURL(raw)
+}
+
+func parseHostPortPath(rest, scheme string, defPort uint16) (URL, bool) {
 	if rest == "" {
 		return URL{}, false
 	}
@@ -47,7 +61,7 @@ func ParseHTTPURL(raw string) (URL, bool) {
 	if hostEnd == 0 {
 		return URL{}, false
 	}
-	u := URL{Scheme: "http", Port: 80}
+	u := URL{Scheme: scheme, Port: defPort}
 	u.Host = rest[:hostEnd]
 	pathAt := hostEnd
 	if hostEnd < len(rest) && rest[hostEnd] == ':' {
@@ -269,20 +283,30 @@ func LocationHeader(head string) string {
 }
 
 // ResolveRedirect resolves a Location value against the URL that produced it.
-// A Location may be absolute (http://...), root-relative (/x), or relative
-// (x, ../x). Returns ok=false when the result is not an http URL we can use.
+// A Location may be absolute (http(s)://...), root-relative (/x), or relative
+// (x, ../x). Returns ok=false when the result is not an http(s) URL we can use.
 func ResolveRedirect(from URL, location string) (URL, bool) {
 	if location == "" {
 		return URL{}, false
+	}
+	if u, ok := ParseURL(location); ok {
+		return u, true
 	}
 	if IsHTTPURL(location) {
 		return ParseHTTPURL(location)
 	}
 	if strings.HasPrefix(location, "//") {
 		// Protocol-relative: keep the scheme we already have.
+		if from.Scheme == "https" {
+			return ParseURL("https:" + location)
+		}
 		return ParseHTTPURL("http:" + location)
 	}
-	base := "http://" + from.Host
+	scheme := from.Scheme
+	if scheme == "" {
+		scheme = "http"
+	}
+	base := scheme + "://" + from.Host
 	if from.Path != "" && from.Path != "/" {
 		if i := strings.LastIndexByte(from.Path, '/'); i >= 0 {
 			base += from.Path[:i+1]
@@ -296,14 +320,14 @@ func ResolveRedirect(from URL, location string) (URL, bool) {
 	if !ok {
 		return URL{}, false
 	}
-	return ParseHTTPURL(resolved)
+	return ParseURL(resolved)
 }
 
 // ResolveHrefForRedirect is ResolveHref specialised for absolute http bases.
 func ResolveHrefForRedirect(base, href string) (string, bool) {
 	if strings.HasPrefix(href, "/") {
-		if u, ok := ParseHTTPURL(base); ok {
-			return "http://" + u.Host + href, true
+		if u, ok := ParseURL(base); ok {
+			return u.Scheme + "://" + u.Host + href, true
 		}
 		return "", false
 	}

@@ -8,13 +8,14 @@ import (
 	"virelai/webrender"
 )
 
-// The security-critical decision: an https target is refused before any
-// socket exists, so a page can never be fetched in the clear while the
-// address bar claims https.
-func TestClassifyTargetRefusesHTTPS(t *testing.T) {
+// The security-critical decision: an https hostname is refused as dns
+// (public internet is out of scope); an https IP literal is a TLS fetch,
+// never a cleartext GET.
+func TestClassifyTargetHTTPS(t *testing.T) {
 	cases := []struct{ in, want string }{
-		{"https://example.com/", "https"},
+		{"https://example.com/", "dns"},
 		{"HTTPS://10.0.0.2/x", "https"},
+		{"https://10.0.0.2:24533/", "https"},
 		{"http://example.com/", "dns"},
 		{"http://10.0.0.2/", "http"},
 		{"http://10.0.0.2:8080/x", "http"},
@@ -30,19 +31,29 @@ func TestClassifyTargetRefusesHTTPS(t *testing.T) {
 	}
 }
 
-// A refused https target must not reach the fetch path at all: navigate()
-// must land on the error page with kind "https".
-func TestHTTPSNeverFetches(t *testing.T) {
+// A hostname https target must not reach the fetch path: navigate() lands
+// on the error page with kind "dns". An IP-literal https target on the host
+// (no syscall seam) fails closed as "tls", never as a cleartext load.
+func TestHTTPSNeverFetchesCleartext(t *testing.T) {
 	a := &app{hist: newHistory()}
 	a.navigate("https://example.com/", "")
-	if a.errKind != "https" {
-		t.Fatalf("errKind = %q want https", a.errKind)
+	if a.errKind != "dns" {
+		t.Fatalf("hostname errKind = %q want dns", a.errKind)
 	}
 	if a.loading {
-		t.Fatal("an https refusal must not start a load")
+		t.Fatal("an https hostname must not start a load")
 	}
-	if a.errMsg == "" {
-		t.Fatal("https refusal must explain itself")
+
+	b := &app{hist: newHistory()}
+	b.navigate("https://10.0.0.2/", "")
+	if b.errKind != "tls" {
+		t.Fatalf("IP-literal errKind = %q want tls (host Dial is ENOSYS)", b.errKind)
+	}
+	if b.loading {
+		t.Fatal("a failed TLS dial must not leave a load armed")
+	}
+	if b.errMsg == "" {
+		t.Fatal("tls failure must explain itself")
 	}
 }
 

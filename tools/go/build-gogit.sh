@@ -3,6 +3,8 @@
 # build-gogit.sh -- build the git-over-https client (user/go/git) with the
 # GOOS=virelai fork toolchain. Output: .build/go/GOTGIT.ELF
 #
+# HTTPS is in-process (virelai/tls over vi.Dial). FETCHS.BIN is not linked.
+#
 # Usage: bash tools/go/build-gogit.sh
 #
 # Imports are written as `virelai/...` so the host `go test ./...` run (module
