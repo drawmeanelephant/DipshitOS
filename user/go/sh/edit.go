@@ -189,6 +189,13 @@ func (e *Editor) Feed(chunk []byte) ([]byte, EditEvent) {
 	return out, EditEvent{}
 }
 
+// Pending reports whether the editor is still holding input that arrived
+// after a submit in the same chunk. Feed returns at most one event per call,
+// so a caller that reads a *burst* of bytes (the serial front-end can return
+// several whole lines in one read) must keep calling Feed — with a nil chunk
+// — until this is false, or the rest of the burst sits unread forever.
+func (e *Editor) Pending() bool { return len(e.pending) > 0 }
+
 // keyGround handles one non-CSI byte in the ground state.
 func (e *Editor) keyGround(b byte) ([]byte, EditEvent) {
 	switch b {

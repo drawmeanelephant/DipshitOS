@@ -228,6 +228,50 @@ func TestHistoryBound(t *testing.T) {
 	}
 }
 
+// TestEditorBurstDrain pins the serial front-end's burst contract: one read
+// can carry several whole lines (the class-B harness types its script in a
+// single burst), Feed returns at most one event and holds the rest, so the
+// session loop must feed with a nil chunk until Pending() is false. Without
+// that drain every line after the first is typed but never run, which is
+// exactly how the retargeted live-sh gate failed.
+func TestEditorBurstDrain(t *testing.T) {
+	e := NewEditor("gosh> ", &History{})
+	burst := "echo abc\rcd /data\recho PWD=$PWD\rstatus43\r\x1b[A\r"
+	out, ev := e.Feed([]byte(burst))
+	if len(out) == 0 {
+		t.Fatal("burst produced no tty output")
+	}
+	if ev.Kind != evSubmit || ev.Line != "echo abc" {
+		t.Fatalf("first event = kind %d line %q, want submit %q", ev.Kind, ev.Line, "echo abc")
+	}
+	if !e.Pending() {
+		t.Fatal("editor dropped the rest of the burst instead of holding it")
+	}
+	var lines []string
+	for e.Pending() {
+		_, ev = e.Feed(nil)
+		if ev.Kind != evSubmit {
+			t.Fatalf("drained event = kind %d, want submit", ev.Kind)
+		}
+		lines = append(lines, ev.Line)
+	}
+	want := []string{"cd /data", "echo PWD=$PWD", "status43", "status43"}
+	if len(lines) != len(want) {
+		t.Fatalf("drained %d lines %q, want %d", len(lines), lines, len(want))
+	}
+	for i := range want {
+		if lines[i] != want[i] {
+			t.Fatalf("drained line %d = %q, want %q", i, lines[i], want[i])
+		}
+	}
+	// History took every *distinct* line in order, including the recall --
+	// Push collapses a dup of the last entry, so the Up-recall of status43
+	// does not add a fifth.
+	if h := e.hist.Entries(); len(h) != 4 || h[3] != "status43" {
+		t.Fatalf("history = %q, want four entries ending in status43", h)
+	}
+}
+
 // TestEditorLineCap pins the interactive line bound: past maxLineBytes a
 // keystroke answers with a bell instead of growing the buffer, and Tab
 // completion cannot slip past the cap either.
