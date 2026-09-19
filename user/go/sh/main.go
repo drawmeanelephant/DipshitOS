@@ -527,6 +527,13 @@ func (g *goshHost) WriteFile(path string, b []byte, appendMode bool) error {
 func (g *goshHost) Chdir(path string) error {
 	var entries [1]vi.DirEntry
 	if _, r := vi.DirList(path, entries[:]); r < 0 {
+		// Carry the kernel's errno for the same reason ReadFile does: a
+		// missing directory, a path that is a file, and an ownership denial
+		// on the share's list gate are three different facts, and folding
+		// them into one "not a directory" message hides two of them.
+		if name := vi.ErrnoName(r); name != "" {
+			return &openError{path: path, name: name}
+		}
 		return errNotFound
 	}
 	return nil

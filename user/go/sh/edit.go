@@ -147,8 +147,14 @@ func (e *Editor) Feed(chunk []byte) ([]byte, EditEvent) {
 				e.csiParam, e.csiGotP = 0, false
 				continue
 			}
-			e.state = edGround // lone ESC: ignore
-			continue
+			// A lone ESC (or ESC followed by anything but '[') is not a
+			// sequence this keymap consumes. Drop the ESC and treat THIS byte
+			// as ground input: eating it would mean Escape followed by typing
+			// a character silently loses the character. The kernel's keymap
+			// emits ESC [ X for every arrow/Home/End, so no SS3-style sequence
+			// (`ESC O A`) reaches here to be misread as text.
+			e.state = edGround
+			w, ev = e.keyGround(b)
 		case edCSI:
 			switch {
 			case b >= '0' && b <= '9':

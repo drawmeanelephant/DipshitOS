@@ -300,3 +300,44 @@ func TestEditorLineCap(t *testing.T) {
 		t.Fatalf("capped completion = %q, want a bell", out)
 	}
 }
+
+// A lone ESC must not eat the next character. Escape followed by anything but
+// '[' is not a sequence this keymap consumes, so the ESC is dropped and the
+// character is ground input -- otherwise pressing Escape and then typing
+// silently loses the keystroke. The kernel's keymap emits ESC [ X for every
+// arrow/Home/End, so nothing legitimate arrives in the lone-ESC shape.
+func TestEditorLoneEscDoesNotEatTheNextByte(t *testing.T) {
+	e := NewEditor("gosh> ", &History{})
+	// ESC in its own chunk: the editor parks in the escape state.
+	if _, ev := e.Feed([]byte{0x1b}); ev.Kind != evNone {
+		t.Fatalf("bare ESC produced event %d", ev.Kind)
+	}
+	// The next byte must land in the line, not vanish.
+	out, ev := e.Feed([]byte("x"))
+	if ev.Kind != evNone {
+		t.Fatalf("typing after ESC produced event %d", ev.Kind)
+	}
+	if string(e.buf) != "x" {
+		t.Fatalf("buf = %q want \"x\": the byte after a lone ESC was dropped", e.buf)
+	}
+	if !strings.Contains(string(out), "x") {
+		t.Fatalf("repaint = %q, want the character painted", out)
+	}
+	// ESC inside a chunk behaves the same way.
+	e2 := NewEditor("gosh> ", &History{})
+	feedE(e2, "ab")
+	repaint := feedE(e2, "\x1bcd")
+	if string(e2.buf) != "abcd" {
+		t.Fatalf("buf = %q want \"abcd\"", e2.buf)
+	}
+	if !strings.Contains(repaint, "abcd") {
+		t.Fatalf("repaint = %q, want abcd", repaint)
+	}
+	// And the real sequences still work: ESC [ D is one cursor-left.
+	e3 := NewEditor("gosh> ", &History{})
+	feedE(e3, "ab")
+	feedE(e3, "\x1b[D")
+	if e3.cur != 1 {
+		t.Fatalf("cur = %d want 1 after ESC [ D", e3.cur)
+	}
+}

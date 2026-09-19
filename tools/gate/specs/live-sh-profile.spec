@@ -35,12 +35,13 @@ PY
 
 vgate_setup_python <<'PY'
 import os
-run = os.environ["RUN_DIR"]
-with open(os.path.join(run, "share", "STARTUP.SH"), "w") as f:
+rd = os.environ["RUN_DIR"]
+share = os.environ.get("VG_SHARE") or os.path.join(rd, "share")
+with open(os.path.join(share, "STARTUP.SH"), "w") as f:
     f.write("echo START-UP\n")
-with open(os.path.join(run, "share", "PROFILE.SH"), "w") as f:
+with open(os.path.join(share, "PROFILE.SH"), "w") as f:
     f.write("echo PRO-FILE\n")
-with open(os.path.join(run, "edit.bin"), "wb") as f:
+with open(os.path.join(rd, "edit.bin"), "wb") as f:
     f.write(b"echo profile-done\r")
 PY
 

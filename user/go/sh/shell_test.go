@@ -32,6 +32,8 @@ type fakeHost struct {
 	denied         map[string]string // path -> errno name for an open refusal
 	chmoded        map[string]uint16 // path -> the mode the shell forwarded
 	chmodErr       map[string]string // path -> errno name for a denied chmod
+	chdirErr       map[string]string // path -> errno name for a denied cd
+	chdirPlain     bool              // Chdir fails with a plain (no-errno) error
 }
 
 func newFakeHost() *fakeHost {
@@ -71,9 +73,17 @@ func (f *fakeHost) Marker(line string)           { f.markers = append(f.markers,
 func (f *fakeHost) Out(b []byte)                 { f.out = append(f.out, b...) }
 func (f *fakeHost) PipeWrite(b []byte) error     { f.pipe = append(f.pipe[:0], b...); return nil }
 func (f *fakeHost) PipeReadAll() ([]byte, error) { return f.pipe, nil }
-func (f *fakeHost) Chdir(string) error           { return nil }
-func (f *fakeHost) ListDir() []string            { return []string{"DATA.TXT", "GOSH.ELF", "NOTES"} }
-func (f *fakeHost) SleepSeconds(n int)           { f.sleeps = append(f.sleeps, n) }
+func (f *fakeHost) Chdir(path string) error {
+	if name, ok := f.chdirErr[path]; ok {
+		return &openError{path: path, name: name}
+	}
+	if f.chdirPlain {
+		return errNotFound
+	}
+	return nil
+}
+func (f *fakeHost) ListDir() []string  { return []string{"DATA.TXT", "GOSH.ELF", "NOTES"} }
+func (f *fakeHost) SleepSeconds(n int) { f.sleeps = append(f.sleeps, n) }
 
 func (f *fakeHost) RunExternal(name string, args []string) (int64, error) {
 	if f.missing[name] {
@@ -688,5 +698,45 @@ func TestParseOctMode(t *testing.T) {
 		if got, ok := parseOctMode(bad); ok {
 			t.Fatalf("parseOctMode(%q) = %o accepted", bad, got)
 		}
+	}
+}
+
+// cd must not fold three different failures into one message: the reviewer of
+// PR #1496 caught that a missing directory, a path that is a file, and an
+// ownership denial on the share's list gate all printed "not a directory".
+// The kernel's errno now travels, and the plain fallback is the fake-only shape.
+func TestCdNamesTheErrno(t *testing.T) {
+	h := newFakeHost()
+	run, _ := session(h)
+	if st := run("cd /data"); st != 0 {
+		t.Fatalf("cd /data status = %d want 0", st)
+	}
+
+	h.out = nil
+	h.chdirErr = map[string]string{"/secret": "EACCES", "/gone": "ENOENT"}
+	if st := run("cd /secret"); st != 1 {
+		t.Fatalf("denied cd status = %d want 1", st)
+	}
+	if got := h.outString(); got != "gosh: cd: /secret: EACCES\n" {
+		t.Fatalf("denied cd = %q want the kernel's errno", got)
+	}
+
+	h.out = nil
+	if st := run("cd /gone"); st != 1 {
+		t.Fatalf("missing cd status = %d want 1", st)
+	}
+	if got := h.outString(); got != "gosh: cd: /gone: ENOENT\n" {
+		t.Fatalf("missing cd = %q", got)
+	}
+
+	// The generic message survives only for a seam with no errno to report.
+	h.out = nil
+	h.chdirErr = nil
+	h.chdirPlain = true
+	if st := run("cd anything"); st != 1 {
+		t.Fatalf("plain cd status = %d want 1", st)
+	}
+	if got := h.outString(); got != "gosh: cd: anything: not a directory\n" {
+		t.Fatalf("plain cd = %q", got)
 	}
 }

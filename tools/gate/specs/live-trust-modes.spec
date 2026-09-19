@@ -18,7 +18,7 @@ vgate_runner_flags -Xswiftc -DSPIKE
 # The EL1h monitor session: prove the DIRECT-CONSUMER seam first (the monitor
 # is uid_system + CAP_FS_ANY, yet a secret read is denied) at BOTH the `vf
 # cat` verb and the kernel `sh <script>` loader, then hand the console to
-# SH.BIN for the EL0 file-ABI session.
+# GOSH (serial front-end) for the EL0 file-ABI session.
 vgate_file script.txt <<'EOF'
 vf cat SECRETS.TXT
 sh SECRETS.TXT
@@ -39,8 +39,8 @@ PY
 
 vgate_setup_python <<'PY'
 import os
-run = os.environ["RUN_DIR"]
-share = os.path.join(run, "share")
+rd = os.environ["RUN_DIR"]
+share = os.environ.get("VG_SHARE") or os.path.join(rd, "share")
 # Host-seeded files + OWNERS.TXT (`#v1`; uid_system = 0).
 open(os.path.join(share, "TARGET.TXT"), "w").write("ts2-owner-content\n")
 open(os.path.join(share, "PLAIN.TXT"), "w").write("ts2-plain-content\n")
@@ -50,9 +50,15 @@ open(os.path.join(share, "OWNERS.TXT"), "w").write(
     "TARGET.TXT\t600\t0\t-\n"
     "SECRETS.TXT\t600\t0\tsecret\n"
 )
-# The EL0 shell session; CR (0x0d) submits on this seam.
-open(os.path.join(run, "edit.bin"), "wb").write(
+# The EL0 shell session; CR (0x0d) submits on this seam. TARGET.TXT is read
+# BOTH ways (a direct `cat FILE` argument and a `< FILE` redirect) so the
+# denial message is pinned on both paths, and GONE.TXT does not exist, which
+# pins the production shape of an ordinary missing file: the message must
+# carry the kernel's ENOENT rather than a generic "not found".
+open(os.path.join(rd, "edit.bin"), "wb").write(
+    b"cat TARGET.TXT\r"
     b"cat < TARGET.TXT\r"
+    b"cat < GONE.TXT\r"
     b"cat < PLAIN.TXT\r"
     b"chmod 600 PLAIN.TXT\r"
     b"cat < SECRETS.TXT\r"
@@ -71,8 +77,13 @@ vgate_run 01 -- --script '$RUN_DIR/script.txt' \
 # (`vf cat`), and the kernel `sh <script>` content loader is denied too.
 vgate_assert 01 serial-contains 'vf cat: SECRETS.TXT: permission denied'
 vgate_assert 01 serial-contains 'sh: SECRETS.TXT: permission denied'
-# EL0 file ABI: owner mismatch (uid_system-owned 0600, caller uid_user).
-vgate_assert 01 serial-contains 'gosh: cannot open TARGET.TXT: EACCES'
+# EL0 file ABI: owner mismatch (uid_system-owned 0600, caller uid_user). The
+# count is 2 on purpose -- `cat TARGET.TXT` and `cat < TARGET.TXT` are
+# different code paths in the shell (bCat's own open vs the redirect's), and
+# each must report the same kernel errno.
+vgate_assert 01 serial-count 'gosh: cannot open TARGET.TXT: EACCES' 2
+# An ordinary missing file names the real errno too (not a generic fallback).
+vgate_assert 01 serial-contains 'gosh: cannot open GONE.TXT: ENOENT'
 # Default policy: the unlisted file reads (the empty/absent table behavior).
 vgate_assert 01 serial-contains 'ts2-plain-content'
 # Owner chmod succeeds and persists.

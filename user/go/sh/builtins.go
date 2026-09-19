@@ -201,7 +201,11 @@ func bCd(c *cmdCtx) int {
 		target = c.args[0]
 	}
 	if err := c.sh.host.Chdir(target); err != nil {
-		c.out([]byte("gosh: cd: " + target + ": not a directory\n"))
+		if oe, denial := deniedAs(err); denial {
+			c.out([]byte("gosh: cd: " + oe.path + ": " + oe.name + "\n"))
+		} else {
+			c.out([]byte("gosh: cd: " + target + ": not a directory\n"))
+		}
 		return 1
 	}
 	c.sh.env.Set("PWD", target)

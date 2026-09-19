@@ -18,8 +18,8 @@ vgate_runner_flags -Xswiftc -DSPIKE
 
 # The EL1h monitor session: prove the direct-consumer seam first (`vf cat`
 # is denied even for uid_system + CAP_FS_ANY), then the monitor `secrets`
-# name listing, then hand the console to SH.BIN for the EL0 file-ABI +
-# sys_secret_get session.
+# name listing, then hand the console to GOSH (serial front-end) for the EL0
+# file-ABI + sys_secret_get session.
 vgate_file script.txt <<'EOF'
 secrets
 vf cat SECRETS.TXT
@@ -40,8 +40,8 @@ PY
 
 vgate_setup_python <<'PY'
 import os
-run = os.environ["RUN_DIR"]
-share = os.path.join(run, "share")
+rd = os.environ["RUN_DIR"]
+share = os.environ.get("VG_SHARE") or os.path.join(rd, "share")
 # Host-seeded secret store. A 64-char value (a 32-byte Ed25519 seed in hex)
 # is the canonical max; a short marker value proves serial-absence loudly.
 open(os.path.join(share, "SECRETS.TXT"), "w").write(
@@ -49,7 +49,7 @@ open(os.path.join(share, "SECRETS.TXT"), "w").write(
     "netkey\t1000\tTS5-TOPSECRET-VALUE\n"
 )
 # The EL0 shell session; CR (0x0d) submits on this seam.
-open(os.path.join(run, "edit.bin"), "wb").write(
+open(os.path.join(rd, "edit.bin"), "wb").write(
     b"secrets\r"
     b"cat < SECRETS.TXT\r"
     b"echo ts5-done\r"
