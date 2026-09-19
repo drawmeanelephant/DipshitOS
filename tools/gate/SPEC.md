@@ -32,6 +32,10 @@ vgate_client TAG -- FLAGS...       # (M46 RC2 #1069) a during-run TCP client:
                                    # --expect TEXT, --expect-fail,
                                    # --hmac-secret S (M50 TS4: answer the
                                    #   --console-tcp HMAC challenge),
+                                   # --retry-busy (M70g G2 #1459: a
+                                   #   `console-tcp: busy` answer is retried
+                                   #   until --connect-timeout), --hold S
+                                   #   (stay connected S s after the payload),
                                    # --timeout S, --connect-timeout S,
                                    # --after-timeout S, --out FILE.
                                    # Capture: $RUN_DIR/client-TAG.out
@@ -98,7 +102,11 @@ Rules:
   `artifacts/NAME-client-TAG.{out,log}`). A client that cannot connect within
   its timeout exits non-zero — so "no listener ⇒ run fails" is the negative
   default; `--expect-fail` inverts that for a gate asserting refusal. A spec
-  may declare several clients for one run (each is waited on).
+  may declare several clients for one run, but **only the last-declared
+  client's exit code is enforced** and the default capture/log names are
+  shared (observed 2026-09-18, M70g G2): give earlier clients their own
+  `--out` and pin them with `python`/`serial-*`/`output-contains` asserts
+  (`live-console-tcp` run 03 is the pattern).
 - `VGATE_NO_BUILD=1` skips the build preamble (dev iteration only).
   It is only valid when the already-built runner matches the spec's
   `vgate_runner_flags` (plain vs `-DSPIKE`): a stale-variant binary fails
