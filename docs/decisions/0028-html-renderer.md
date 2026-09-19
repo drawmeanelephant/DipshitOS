@@ -1,12 +1,13 @@
 # ADR 0028: In-guest HTML rendering (M-web slice 1)
 
-- Status: ACCEPTED (slice 1 design)
+- Status: ACCEPTED (slice 1 design); amended M70d #1456 2026-09-19
 - Date: 2026-09-12
 - Issue: #1200 (design card + slice 1), umbrella #1201
 - Related: ADR 0009 (app events), ADR 0010 (userland storage), ADR 0011
   (desktop platform), ADR 0016 (pixel ownership), ADR 0013 D3.1 (.bss budget),
   ADR 0026 (Go runtime port — numbering note below), M40 GF6 (gate rules),
-  `docs/html-renderer-scoping.md` (the design card this ADR fixes)
+  `docs/html-renderer-scoping.md` (the design card this ADR fixes),
+  M70d #1456 (JS-in-WASM measurement), `docs/wasm-import-contract.md`
 
 ## Context
 
@@ -39,6 +40,10 @@ style table (per-tag size/margins/indent/mono flags). A page cannot change its
 own presentation. This is a permanent property of the arc, not a slice-1
 shortcut: if pages later need styling, the answer is a rendering *hint* in the
 source (as Markdown tooling already produces), not a cascade in the guest.
+**Amended M70d #1456 (2026-09-19):** scripting also does not land as a
+`wasm32-freestanding` guest under `WASM.BIN`. The measurement is Amendment A
+below; raising interpreter caps (`max_module_size`, `max_frames`, wasm EH) to
+admit an engine is a **new ADR**, not a silent follow-on.
 
 **D3 — parse → layout → paint are separate modules, two of them pure.**
 `lib/html/parse.zig` (bytes → flat node array) and `lib/html/layout.zig`
@@ -89,7 +94,88 @@ behaviour lands without a pixel probe.
   fallback to the 8×8 bitmap would change metrics. The spec asserts the
   typography markers alongside the pixel probes for that reason.
 - Network, JS, and cascade stay out by rule (D2, D7), so the "browser" framing
-  cannot be used to smuggle unbounded scope into a slice.
+  cannot be used to smuggle unbounded scope into a slice. M70d measured the
+  "JS as a WASM module" escape hatch and closed it under the frozen caps
+  (Amendment A).
 - EDIT's inline wrap chunking remains a local implementation; NOTEPAD's tested
   `TextLayout` rule is the shared reference. Unifying them is a cleanup card,
   not a prerequisite.
+
+## Amendment A — M70d #1456: JS does not fit the sandbox
+
+Date: 2026-09-19. Card: #1456 deliverables 2–3 (a bounded JS subset as a
+`wasm32-freestanding` module under `WASM.BIN`, measured before promising).
+A negative result closes the card. Host: `zig` 0.16.0 (Homebrew), macOS 27.2
+arm64, VZ `hv_vm_create -> HV_SUCCESS`.
+
+The frozen interpreter caps (not re-decided here):
+
+- module ≤ 64 KiB (`user/src/wasm.zig` `max_module_size`)
+- linear memory ≤ 32 pages / 2 MiB (contract §2 D2)
+- frozen `env.*` only, no WASI, no wasm exception handling
+- call depth `max_frames = 32`
+
+Bounded subset under test: eval a few-byte script (`1+2*3`), console
+round-trip, no timers, no DOM, no network. No engine written from scratch.
+Harness: `tests/js-wasm-measure/` (not a fleet gate). Inspector:
+`tests/wasm-spike/wasm-inspect.py`.
+
+### Observed compiles
+
+| Engine | Ref | License | What was observed |
+|---|---|---|---|
+| Elk | `cesanta/elk` `71a86fa` | AGPL | `zig cc -target wasm32-freestanding -nostdlib -Os`: **22763 B** module, `env.write`+`env.exit` only, memory min=2 / max=32. Inspector **PASS**. |
+| MicroQuickJS | `bellard/mquickjs` `203d5bb` | MIT | Native `gcc -Os` `mquickjs.o` **666384 B**. `wasm32-wasi` compile refused (`setjmp.h` requires wasm EH). |
+| Duktape | 2.7.0 tarball | MIT | Native `cc -Os` `duktape.o` **428992 B**. `wasm32-wasi` refused on the same wasm-EH `setjmp`. |
+| MuJS | `ccxvii/mujs` `8a32c39` | ISC | Native `cc -Os` amalgam `.o` **359184 B**. `wasm32-wasi` refused on wasm-EH `setjmp`. GitHub clone is README-only (migrated to Codeberg). |
+| QuickJS | `bellard/quickjs` `04be246` | MIT | `quickjs.c` is 2033048 B of C; freestanding compile dies on libc headers (`inttypes.h` `include_next`). |
+| mjs | `cesanta/mjs` `cf375c4` | GPL-2 | `#error CS_PLATFORM` / POSIX headers; not freestanding. |
+| TinyJS | `gfwilliams/tiny-js` `8214477` | MIT | C++ (`std::string`/`vector`) plus exceptions; `-fno-exceptions` does not compile. |
+
+Elk is the only engine that produced a contract-clean module under the three
+byte caps.
+
+### Observed guest run (Elk)
+
+`VGATE_NO_BUILD=1 bash tools/gate/vgate.sh tests/js-wasm-measure/run-under-wasm.spec`
+**PASS 1/1** on VZ, asserting the trap (not a successful eval):
+
+- VF-FILE read of `ELK.WASM` size=22763, full read
+- no `wasm: module too large` / parse / validate / instantiate trap
+- serial: `wasm: trap during exec`
+- `tasks user-exec exited status=3` (the interpreter's trap-during-exec exit)
+
+The guest does not print a trap class. **Inferred:** Elk's recursive C eval
+exceeds `max_frames = 32`. Inspect-clean is not execute-clean.
+
+### Control: 64 KiB C stack (not a frozen cap)
+
+The original link line used `-Wl,-z,stack-size=8192`. That is a wasm-ld
+layout flag inside the 2 MiB linear-memory allowance, not an interpreter
+cap, so stack exhaustion was an unfalsified alternative to `max_frames`.
+
+Same compile 2026-09-19 with `-Wl,-z,stack-size=65536`:
+
+- module still **22763 B**, inspector PASS, `env.write`+`env.exit`, memory 2/32
+- binaries differ: global 0 `i32.const` **8192** vs **65536** (`__stack_pointer`)
+- `VGATE_NO_BUILD=1 bash tools/gate/vgate.sh tests/js-wasm-measure/run-stack64k.spec`
+  **PASS 1/1** on VZ, asserting the same trap: `wasm: trap during exec` /
+  `tasks user-exec exited status=3`
+
+The 8 KiB C stack is **falsified** as the cause. Remaining inference is
+`max_frames = 32`. A 64 KiB stack would have been a free fix; it is not.
+
+### What this does not change
+
+- The renderer is unchanged. No cascade. No renderer-side JS.
+- No additive `env.*` names. Elk needed only `write` and `exit`, already frozen.
+- No `live-browser-js.spec` in the fleet: that spec is for a module that runs.
+  The measurement spec lives next to the harness and is not discovered by
+  `fleet.sh`.
+- Elk is AGPL; this tree is proprietary (`LICENSE`). It is not vendored. Even
+  a future ADR that deepens `max_frames` would still have to pick an engine
+  this license can carry.
+
+Raising `max_module_size`, `max_frames`, or adding wasm EH/WASI to admit
+MicroQuickJS/Duktape/MuJS is a new interpreter ADR. This card does not do it.
+
