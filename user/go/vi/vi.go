@@ -106,6 +106,8 @@ const (
 	SlotAudioVolume  uintptr = 44
 	SlotAudioMute    uintptr = 45
 	SlotWinFillBatch uintptr = 46
+	SlotPipeRead     uintptr = 56 // M19 P1: the kernel pipe read (M68a wrapper)
+	SlotPipeWrite    uintptr = 57 // M19 P1: the kernel pipe write (M68a wrapper)
 	SlotMmap         uintptr = 63
 	SlotTime         uintptr = 66
 	SlotTtyAttach    uintptr = 67
