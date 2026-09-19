@@ -7,6 +7,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -231,4 +232,109 @@ func TestScrollShiftsContent(t *testing.T) {
 	if same == len(top.px) {
 		t.Fatal("scrolling did not move content")
 	}
+}
+
+func corpusImages() ImageResolver {
+	dir := "testdata/corpus"
+	return func(src string) ([]byte, bool) {
+		base := filepath.Base(src)
+		if q := strings.IndexByte(base, '?'); q >= 0 {
+			base = base[:q]
+		}
+		candidates := []string{base}
+		if !strings.Contains(base, ".") {
+			candidates = append(candidates, base+".png")
+		}
+		for _, name := range candidates {
+			b, err := os.ReadFile(filepath.Join(dir, name))
+			if err == nil {
+				return b, true
+			}
+		}
+		return nil, false
+	}
+}
+
+func renderCorpus(t *testing.T, name string, w, h int) (*Layout, *fb) {
+	t.Helper()
+	doc := ParseHTML(mustReadTestdata(t, "testdata/corpus/"+name))
+	l := LayoutDocument(doc, w, nil, corpusImages())
+	f := newFB(w, h, ColorPageBg)
+	Paint(l, f, 0, 0, w, h, 0)
+	return l, f
+}
+
+func layoutText(l *Layout) string {
+	var b []byte
+	for _, it := range l.Items {
+		if it.Kind == ItemText && it.Text != "" {
+			b = append(b, it.Text...)
+			b = append(b, ' ')
+		}
+	}
+	return string(b)
+}
+
+func TestGoldenCorpusPages(t *testing.T) {
+	// Real pages the guest can fetch, pinned 2026-09-19. Author CSS is skipped
+	// (ADR 0028 D2); goldens are the UA-table rendering, not Chrome.
+	cases := []struct {
+		html   string
+		golden string
+		want   []string
+	}{
+		{"example-org.html", "corpus-example-org", []string{"Example Domain", "Learn more"}},
+		{"cern-home.html", "corpus-cern-home", []string{"first website", "Browse the first website"}},
+		{"cern-theproject.html", "corpus-cern-theproject", []string{"World Wide Web", "What's out there?"}},
+		{"httpbin-html.html", "corpus-httpbin-html", []string{"Herman Melville", "Ahab"}},
+		{"httpbin-forms.html", "corpus-httpbin-forms", []string{"Customer name", "Submit order"}},
+		{"rfc20.html", "corpus-rfc20", []string{"Network Working Group", "ASCII"}},
+		{"iana-reserved.html", "corpus-iana-reserved", []string{"IANA-managed Reserved Domains", "example.com"}},
+		{"w3-styleguide.html", "corpus-w3-styleguide", []string{"Style Guide", "webmaster"}},
+		{"w3-png.html", "corpus-w3-png", []string{"Portable Network Graphics", "image/png"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.html, func(t *testing.T) {
+			l, f := renderCorpus(t, tc.html, 512, 384)
+			got := layoutText(l)
+			for _, want := range tc.want {
+				if !strings.Contains(got, want) {
+					t.Fatalf("corpus %s lost %q; laid out %q", tc.html, want, trunc(got, 400))
+				}
+			}
+			if ink := f.count(func(v uint32) bool { return v != ColorPageBg }); ink < 80 {
+				t.Fatalf("corpus %s painted too little ink: %d", tc.html, ink)
+			}
+			if tc.html == "w3-png.html" {
+				decoded := 0
+				for _, it := range l.Items {
+					if it.Kind == ItemImage && it.Img != nil {
+						decoded++
+					}
+				}
+				if decoded < 3 {
+					t.Fatalf("w3-png decoded %d PNG <img>s, want the three pinned files", decoded)
+				}
+			}
+			if tc.html == "httpbin-forms.html" {
+				boxes := 0
+				for _, it := range l.Items {
+					if it.Kind == ItemRect && it.Bg == ColorSurface {
+						boxes++
+					}
+				}
+				if boxes < 4 {
+					t.Fatalf("httpbin-forms static controls = %d", boxes)
+				}
+			}
+			checkGolden(t, tc.golden, f)
+		})
+	}
+}
+
+func trunc(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }

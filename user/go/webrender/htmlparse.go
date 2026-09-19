@@ -91,7 +91,19 @@ func BlockElement(tag string) bool {
 	case "html", "body", "div", "p", "h1", "h2", "h3", "h4", "h5", "h6",
 		"ul", "ol", "li", "pre", "blockquote", "hr", "table", "thead", "tbody",
 		"tr", "td", "th", "dl", "dt", "dd", "img", "section", "article", "header",
-		"footer", "main", "nav", "aside", "figure", "figcaption", "form", "center":
+		"footer", "main", "nav", "aside", "figure", "figcaption", "form", "center",
+		"fieldset", "legend", "textarea", "button", "select", "address":
+		return true
+	}
+	return false
+}
+
+// FormControl reports whether tag is a static form control. These are
+// replaced boxes (value/placeholder/label), never interactive — there is
+// no form submission and no cascade (ADR 0028 D2).
+func FormControl(tag string) bool {
+	switch tag {
+	case "input", "textarea", "select", "button":
 		return true
 	}
 	return false
