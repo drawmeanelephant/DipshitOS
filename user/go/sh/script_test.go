@@ -5,6 +5,7 @@
 package main
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -160,15 +161,28 @@ func TestParseIf(t *testing.T) {
 }
 
 func TestParseFor(t *testing.T) {
-	st, ok := parseFor("for n in a b c; do echo ITEM-$n; done")
-	if !ok || st.varName != "n" || len(st.words) != 3 || st.words[0] != "a" || st.words[2] != "c" {
-		t.Fatalf("parse = %+v ok=%v", st, ok)
+	st, ok, tooMany := parseFor("for n in a b c; do echo ITEM-$n; done")
+	if !ok || tooMany || st.varName != "n" || len(st.words) != 3 || st.words[0] != "a" || st.words[2] != "c" {
+		t.Fatalf("parse = %+v ok=%v tooMany=%v", st, ok, tooMany)
 	}
 	if st.body != "echo ITEM-$n" {
 		t.Fatalf("body = %q", st.body)
 	}
-	if _, ok = parseFor("for n in a b; echo bad; done"); ok {
+	if _, ok, _ = parseFor("for n in a b; echo bad; done"); ok {
 		t.Fatal("missing do must not parse")
+	}
+	// Past forWordMax the word list is REFUSED, not truncated: the reference
+	// filled its [16] array and dropped the tail, silently running a
+	// different loop than the one written.
+	words := ""
+	for i := 0; i < forWordMax; i++ {
+		words += " w" + string(rune('a'+i))
+	}
+	if _, ok, tooMany = parseFor("for n in" + words + "; do echo x; done"); !ok || tooMany {
+		t.Fatalf("at the bound: ok=%v tooMany=%v", ok, tooMany)
+	}
+	if _, _, tooMany = parseFor("for n in" + words + " one-more; do echo x; done"); !tooMany {
+		t.Fatal("one word past forWordMax must report tooMany")
 	}
 }
 
@@ -183,8 +197,11 @@ func TestParseWhile(t *testing.T) {
 }
 
 func TestSplitCommands(t *testing.T) {
-	got := splitCommands("  echo a ; echo b ;; echo c ")
+	got, tooMany := splitCommands("  echo a ; echo b ;; echo c ")
 	want := []string{"echo a", "echo b", "echo c"}
+	if tooMany {
+		t.Fatal("three commands must not report tooMany")
+	}
 	if len(got) != len(want) {
 		t.Fatalf("split = %q", got)
 	}
@@ -193,8 +210,23 @@ func TestSplitCommands(t *testing.T) {
 			t.Fatalf("split[%d] = %q, want %q", i, got[i], want[i])
 		}
 	}
-	if len(splitCommands("  ; ; ")) != 0 {
+	if empty, _ := splitCommands("  ; ; "); len(empty) != 0 {
 		t.Fatal("empty commands must be dropped")
+	}
+	// Past bodyCmdsMax the body is REFUSED, not truncated: the reference ran
+	// its first 16 commands and dropped the rest without a word.
+	body := ""
+	for i := 0; i < bodyCmdsMax; i++ {
+		if i > 0 {
+			body += "; "
+		}
+		body += "echo c" + strconv.Itoa(i)
+	}
+	if at, tm := splitCommands(body); len(at) != bodyCmdsMax || tm {
+		t.Fatalf("at the bound: %d commands tooMany=%v", len(at), tm)
+	}
+	if over, tm := splitCommands(body + "; echo one-more"); !tm {
+		t.Fatalf("one command past bodyCmdsMax must report tooMany (got %d commands)", len(over))
 	}
 }
 
@@ -249,7 +281,7 @@ func TestIsFuncDefLine(t *testing.T) {
 }
 
 func TestParseCaseAndMatch(t *testing.T) {
-	st, ok := parseCase("case $X in a) echo A;; b|c) echo BC;; *) echo OTHER;; esac")
+	st, ok, _ := parseCase("case $X in a) echo A;; b|c) echo BC;; *) echo OTHER;; esac")
 	if !ok || st.subject != "$X" || len(st.arms) != 3 {
 		t.Fatalf("parse = %+v ok=%v", st, ok)
 	}
@@ -257,9 +289,21 @@ func TestParseCaseAndMatch(t *testing.T) {
 		t.Fatalf("arms = %+v", st.arms)
 	}
 	for _, bad := range []string{"case x", "case in esac", "if x; then y; fi", "case x in esac"} {
-		if _, ok := parseCase(bad); ok {
+		if _, ok, _ := parseCase(bad); ok {
 			t.Errorf("malformed case parsed: %q", bad)
 		}
+	}
+	// Past caseArmMax the arm list is REFUSED, not truncated: the reference
+	// stopped filling its [8] array and ignored every later arm.
+	arms := ""
+	for i := 0; i < caseArmMax; i++ {
+		arms += " p" + strconv.Itoa(i) + ") echo a;;"
+	}
+	if st, ok, tm := parseCase("case x in" + arms + " esac"); !ok || tm || len(st.arms) != caseArmMax {
+		t.Fatalf("at the bound: arms=%d ok=%v tooMany=%v", len(st.arms), ok, tm)
+	}
+	if _, _, tm := parseCase("case x in" + arms + " one-more) echo a;; esac"); !tm {
+		t.Fatal("one arm past caseArmMax must report tooMany")
 	}
 	matches := []struct {
 		pat, subj string
@@ -607,6 +651,60 @@ func TestEngineWhileAndCap(t *testing.T) {
 	}
 }
 
+// TestEngineBoundsRefuseLoudly pins the slice-4 review fix: the three fixed
+// arrays the reference simply stopped filling (a body's commands, a `for` word
+// list, a `case` arm list) now REFUSE the line instead of quietly running a
+// truncated version of it. Both halves matter: the line reports, AND none of
+// the body runs — a refusal that had already executed 16 commands would be a
+// silent truncation with a message attached.
+func TestEngineBoundsRefuseLoudly(t *testing.T) {
+	h := newFakeHost()
+	run, sh := session(h)
+
+	cmds := ""
+	for i := 0; i <= bodyCmdsMax; i++ {
+		if i > 0 {
+			cmds += "; "
+		}
+		cmds += "echo BODY" + strconv.Itoa(i)
+	}
+	if st := run("if true; then " + cmds + "; fi"); st != 2 {
+		t.Fatalf("over-long body status = %d, want 2", st)
+	}
+	if got := h.outString(); !strings.Contains(got, "body too long") {
+		t.Fatalf("over-long body was not reported: %q", got)
+	} else if strings.Contains(got, "BODY0") {
+		t.Fatalf("a refused body ran anyway: %q", got)
+	}
+	if sh.Status() != 2 {
+		t.Fatalf("$? after a refused body = %d, want 2", sh.Status())
+	}
+
+	h.out = nil
+	words := ""
+	for i := 0; i <= forWordMax; i++ {
+		words += " w" + strconv.Itoa(i)
+	}
+	if st := run("for n in" + words + "; do echo LOOP-$n; done"); st != 2 {
+		t.Fatalf("over-long word list status = %d, want 2", st)
+	}
+	if got := h.outString(); !strings.Contains(got, "for word list too long") || strings.Contains(got, "LOOP-") {
+		t.Fatalf("over-long word list: %q", got)
+	}
+
+	h.out = nil
+	arms := ""
+	for i := 0; i <= caseArmMax; i++ {
+		arms += " p" + strconv.Itoa(i) + ") echo ARM;;"
+	}
+	if st := run("case x in" + arms + " esac"); st != 2 {
+		t.Fatalf("over-long arm list status = %d, want 2", st)
+	}
+	if got := h.outString(); !strings.Contains(got, "case has too many arms") || strings.Contains(got, "ARM") {
+		t.Fatalf("over-long arm list: %q", got)
+	}
+}
+
 // TestEngineRefusalSetsStatus pins one deliberate change from slice 4: a
 // refused line now leaves $? describing the refusal. It used to return 1
 // while leaving the previous $? in place, so `echo $?` after a bad line
@@ -627,6 +725,10 @@ func TestEngineRefusalSetsStatus(t *testing.T) {
 // run through the engine against a faked share. It exists because the gate
 // costs a VM run to answer the same question: if the tools lane has a gap,
 // this test names the missing marker in a second instead.
+//
+// KEEP IN SYNC WITH tools/gate/specs/live-sh-tools.spec: the script below is a
+// COPY of the spec's vgate_file, not a shared source, so editing the spec
+// leaves this test green against the OLD script and the drift is silent.
 func TestEngineToolsScriptEndToEnd(t *testing.T) {
 	h := newFakeHost()
 	h.files["DATA.TXT"] = []byte("beta\nalpha\ngamma\n")
@@ -668,6 +770,10 @@ func TestEngineToolsScriptEndToEnd(t *testing.T) {
 // TestEngineScriptEndToEnd is the live-sh5 script, run through the engine:
 // the gate's own asserts, host-testable, so a regression here is caught
 // without a VM.
+//
+// KEEP IN SYNC WITH tools/gate/specs/live-sh5.spec: the script below is a COPY
+// of the spec's vgate_file, not a shared source, so editing the spec leaves
+// this test green against the OLD script and the drift is silent.
 func TestEngineScriptEndToEnd(t *testing.T) {
 	h := newFakeHost()
 	h.files["SCRIPT.SH"] = []byte(strings.Join([]string{

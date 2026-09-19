@@ -399,19 +399,24 @@ func findKeyword(text, kw string) (int, bool) {
 }
 
 // splitCommands splits a `;`-separated body into trimmed, non-empty commands,
-// bounded to bodyCmdsMax (sh.zig runBody's buffer).
-func splitCommands(body string) []string {
-	var out []string
+// bounded to bodyCmdsMax (sh.zig runBody's buffer). Past the bound the
+// reference ran the first 16 and silently dropped the rest; here `tooMany`
+// reports it and the body does not run at all (the same loud shape the chain,
+// while and source bounds use — see shell.go's refusal notes).
+func splitCommands(body string) (cmds []string, tooMany bool) {
 	start := 0
 	for i := 0; i <= len(body); i++ {
 		if i == len(body) || body[i] == ';' {
-			if cmd := trimSpace(body[start:i]); cmd != "" && len(out) < bodyCmdsMax {
-				out = append(out, cmd)
+			if cmd := trimSpace(body[start:i]); cmd != "" {
+				if len(cmds) >= bodyCmdsMax {
+					return cmds, true
+				}
+				cmds = append(cmds, cmd)
 			}
 			start = i + 1
 		}
 	}
-	return out
+	return cmds, false
 }
 
 // stripPrefix removes a leading keyword and one following separator.
@@ -500,34 +505,37 @@ type forStmt struct {
 // forWordMax mirrors For.words' [16] bound in script.zig.
 const forWordMax = 16
 
-func parseFor(line string) (forStmt, bool) {
+// parseFor reports `tooMany` when the word list is longer than forWordMax:
+// the reference filled its [16] array and dropped the tail silently, so a
+// `for w in a b c …` past the bound ran a different loop than the one written.
+func parseFor(line string) (forStmt, bool, bool) {
 	if !strings.HasPrefix(line, "for") {
-		return forStmt{}, false
+		return forStmt{}, false, false
 	}
 	rest := stripPrefix(line, "for")
 	inPos, ok := findKeyword(rest, "in")
 	if !ok {
-		return forStmt{}, false
+		return forStmt{}, false, false
 	}
 	varName := trimSpace(rest[:inPos])
 	if varName == "" {
-		return forStmt{}, false
+		return forStmt{}, false, false
 	}
 	afterIn := rest[inPos+2:]
 	doPos, ok := findKeyword(afterIn, "do")
 	if !ok {
-		return forStmt{}, false
+		return forStmt{}, false, false
 	}
 	wordsStr := afterIn[:doPos]
 	afterDo := afterIn[doPos+2:]
 	bodyAndDone := afterDo[skipWordAndSpace(afterDo):]
 	donePos, ok := findKeyword(bodyAndDone, "done")
 	if !ok {
-		return forStmt{}, false
+		return forStmt{}, false, false
 	}
 	st := forStmt{varName: varName, body: trimSemi(bodyAndDone[:donePos])}
 	ws := 0
-	for ws < len(wordsStr) && len(st.words) < forWordMax {
+	for ws < len(wordsStr) {
 		for ws < len(wordsStr) && (isSpaceByte(wordsStr[ws]) || wordsStr[ws] == ';') {
 			ws++
 		}
@@ -538,10 +546,13 @@ func parseFor(line string) (forStmt, bool) {
 		for we < len(wordsStr) && !isSpaceByte(wordsStr[we]) && wordsStr[we] != ';' {
 			we++
 		}
+		if len(st.words) >= forWordMax {
+			return forStmt{}, false, true
+		}
 		st.words = append(st.words, wordsStr[ws:we])
 		ws = we
 	}
-	return st, true
+	return st, true, false
 }
 
 // whileStmt is a parsed `while COND; do BODY; done`.
@@ -686,12 +697,12 @@ func (t *funcTable) find(name string) *progFunc {
 // define installs def, replacing a same-named entry. It reports false for an
 // empty body or a full table (matching script.zig FuncTable.define).
 func (t *funcTable) define(def funcDef) bool {
-	body := splitCommands(def.body)
-	if len(body) == 0 {
+	body, tooMany := splitCommands(def.body)
+	// REFUSED, not truncated: the reference kept its first func_cmds_max
+	// commands and dropped the rest, so a long function silently did part of
+	// what it said. The caller reports `fn: bad definition`.
+	if tooMany || len(body) == 0 || len(body) > funcCmdsMax {
 		return false
-	}
-	if len(body) > funcCmdsMax {
-		body = body[:funcCmdsMax]
 	}
 	f := t.find(def.name)
 	if f == nil {
@@ -722,31 +733,34 @@ type caseStmt struct {
 
 // parseCase parses a bounded single-line `case`. Arms are split on `;;`; a
 // pattern may hold `|` alternatives. It reports false for a malformed line or
-// one with no arms (script.zig parseCase).
-func parseCase(line string) (caseStmt, bool) {
+// one with no arms (script.zig parseCase), and `tooMany` when the arm list is
+// longer than caseArmMax: the reference stopped filling its [8] array and
+// silently ignored every arm past it, so the `case` could not match what was
+// written.
+func parseCase(line string) (caseStmt, bool, bool) {
 	if !strings.HasPrefix(line, "case") {
-		return caseStmt{}, false
+		return caseStmt{}, false, false
 	}
 	rest := stripPrefix(line, "case")
 	inPos, ok := findKeyword(rest, "in")
 	if !ok {
-		return caseStmt{}, false
+		return caseStmt{}, false, false
 	}
 	subject := trimSpace(rest[:inPos])
 	if subject == "" {
-		return caseStmt{}, false
+		return caseStmt{}, false, false
 	}
 	afterIn := rest[inPos+2:]
 	esacPos, ok := findKeyword(afterIn, "esac")
 	if !ok {
-		return caseStmt{}, false
+		return caseStmt{}, false, false
 	}
 	armsText := trimSemi(afterIn[:esacPos])
 
 	var c caseStmt
 	c.subject = subject
 	i := 0
-	for i < len(armsText) && len(c.arms) < caseArmMax {
+	for i < len(armsText) {
 		for i < len(armsText) && (armsText[i] == ';' || isSpaceByte(armsText[i])) {
 			i++
 		}
@@ -756,6 +770,9 @@ func parseCase(line string) (caseStmt, bool) {
 		rel := strings.IndexByte(armsText[i:], ')')
 		if rel < 0 {
 			break
+		}
+		if len(c.arms) >= caseArmMax {
+			return caseStmt{}, false, true
 		}
 		pattern := trimSpace(armsText[i : i+rel])
 		bodyStart := i + rel + 1
@@ -774,9 +791,9 @@ func parseCase(line string) (caseStmt, bool) {
 		i = bodyStart + sep + 2
 	}
 	if len(c.arms) == 0 {
-		return caseStmt{}, false
+		return caseStmt{}, false, false
 	}
-	return c, true
+	return c, true, false
 }
 
 // caseMatch reports whether pattern matches subject: `|` separates

@@ -360,13 +360,24 @@ func (s *Shell) runLine(raw string, depth int) (int, action) {
 	if st, ok := parseIf(substituted); ok {
 		return s.runIf(st, depth)
 	}
-	if f, ok := parseFor(substituted); ok {
+	// A `for` word list or `case` arm list past its bound is REFUSED rather
+	// than truncated: the reference filled its fixed array and dropped the
+	// tail, which silently ran a different loop / matched nothing.
+	if f, ok, tooMany := parseFor(substituted); tooMany {
+		s.fail("for word list too long (at most " + vsys.Itoa64(forWordMax) + " words)")
+		s.status = 2
+		return 2, actionContinue
+	} else if ok {
 		return s.runFor(f, depth)
 	}
 	if w, ok := parseWhile(substituted); ok {
 		return s.runWhile(w, depth)
 	}
-	if c, ok := parseCase(substituted); ok {
+	if c, ok, tooMany := parseCase(substituted); tooMany {
+		s.fail("case has too many arms (at most " + vsys.Itoa64(caseArmMax) + ")")
+		s.status = 2
+		return 2, actionContinue
+	} else if ok {
 		return s.runCase(c, depth)
 	}
 	segs, ops, tooMany := chainSplit(substituted)
@@ -471,6 +482,14 @@ func (s *Shell) runSegment(line string, depth int) (int, action) {
 // collecting, the terminal otherwise. Diagnostics deliberately do not come
 // through here (they call host.Out directly), so a substitution can never
 // swallow the message explaining why it is empty.
+//
+// One deliberate DIVERGENCE from the reference is recorded here because this
+// is the distinction that bites later: `fn: ok` is a success NOTICE, and it
+// does ride this path, so a definition performed inside a substitution
+// captures it instead of printing it to the session — the reference wrote it
+// straight to the session. Treating it as command output is what a real
+// shell's `$( )` does; a script that relied on seeing `fn: ok` on screen
+// during a substitution was relying on the reference's behaviour.
 func (s *Shell) out(b []byte) {
 	if s.capture != nil {
 		*s.capture = append(*s.capture, b...)
@@ -537,7 +556,17 @@ func trimEndBytes(b []byte, cut ...byte) []byte {
 // reports whether `break` ended the body and whether the last command asked
 // to leave the shell (`continue` ends one iteration without a break).
 func (s *Shell) runBody(body string, depth int) (int, bool, action) {
-	for _, cmd := range splitCommands(body) {
+	cmds, tooMany := splitCommands(body)
+	if tooMany {
+		// REFUSED, not truncated: the reference ran its first 16 commands and
+		// dropped the rest silently, so half a body executed without a word.
+		// Nothing runs here, and `broke` stops a loop after reporting once
+		// instead of repeating the refusal every iteration.
+		s.fail("body too long (at most " + vsys.Itoa64(bodyCmdsMax) + " commands)")
+		s.status = 2
+		return 2, true, actionContinue
+	}
+	for _, cmd := range cmds {
 		st, act := s.runLine(cmd, depth)
 		if act != actionContinue {
 			return st, false, act
