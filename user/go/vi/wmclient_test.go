@@ -2,6 +2,7 @@ package vi
 
 import (
 	"testing"
+	"time"
 	"unsafe"
 )
 
@@ -130,5 +131,184 @@ func TestWmRpcKindConstants(t *testing.T) {
 		if p.got != p.want {
 			t.Fatalf("kind = %d want %d", p.got, p.want)
 		}
+	}
+}
+
+// wmMailFake is a scripted kernel for the WM_RPC client: a process table
+// with a live seat, a send that succeeds, and a recv that is either empty
+// or a scripted ack. Slot 4 (sys_sleep) is counted so a silent seat is
+// pinned as a tick-bounded park, not a yield-spin.
+type wmMailFake struct {
+	sendCalls  int
+	recvCalls  int
+	sleepCalls int
+	procsCalls int
+	sendTarget uint32
+	// reply, when set, is copied into the caller's recv buffer starting at
+	// the replyAt-th recv (1-based). recvCalls < replyAt returns empty.
+	reply   []byte
+	replyAt int
+}
+
+func namedProc(pid uint64, name string) ProcRow {
+	r := ProcRow{PID: pid, State: ProcRunning}
+	copy(r.NameBuf[:], name)
+	return r
+}
+
+func (f *wmMailFake) hook(num uintptr, a0, a1, a2, a3 uintptr) int64 {
+	switch num {
+	case SlotProcs:
+		f.procsCalls++
+		buf := hookBytes(a0, a1)
+		rows := []ProcRow{
+			namedProc(3, "GOTABWM.ELF"),
+			namedProc(9, "NOTE.ELF"),
+		}
+		n := 0
+		for _, r := range rows {
+			off := n * ProcRowSize
+			if off+ProcRowSize > len(buf) {
+				break
+			}
+			putU64(buf[off:], r.PID)
+			putU64(buf[off+8:], r.State)
+			putU64(buf[off+16:], r.ExitStatus)
+			copy(buf[off+24:], r.NameBuf[:])
+			n++
+		}
+		return int64(n)
+	case SlotIPCSend:
+		f.sendCalls++
+		f.sendTarget = uint32(a0)
+		return int64(a2)
+	case SlotIPCRecv:
+		f.recvCalls++
+		if f.reply != nil && f.replyAt > 0 && f.recvCalls >= f.replyAt {
+			dst := hookBytes(a0, a1)
+			copy(dst, f.reply)
+			return int64(len(f.reply))
+		}
+		return 0
+	case SlotSleep:
+		f.sleepCalls++
+		return 0
+	}
+	return -ErrENOSYS
+}
+
+func startWmMailFake(t *testing.T) *wmMailFake {
+	t.Helper()
+	f := &wmMailFake{}
+	prev := SetSyscallHookForTest(f.hook)
+	t.Cleanup(func() { SetSyscallHookForTest(prev) })
+	return f
+}
+
+func TestWmMailWaitTicksIsATickBound(t *testing.T) {
+	// A two-million-iteration yield loop is not a tick bound (#1489).
+	if wmMailWaitTicks < 2 || wmMailWaitTicks > 32 {
+		t.Fatalf("wmMailWaitTicks = %d want a small scheduler-tick budget", wmMailWaitTicks)
+	}
+}
+
+// A live WM pid that never acks must refuse in a handful of parks, not hang
+// inside a million-iteration yield-spin. This is the live-wm1 path: WinOpen
+// succeeded, DeclareFullscreen blocked tabapp.Init until the gate timed out.
+func TestWmMailRequestSilentSeatRefuses(t *testing.T) {
+	f := startWmMailFake(t)
+	start := time.Now()
+	if WmMailRequest(WmRpcKindDeclareFullscreen, 4, 0, 0, 0, 0, "T", "NOTE.ELF", 1) {
+		t.Fatal("silent seat must refuse, not succeed")
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("silent-seat wait hung: %v", elapsed)
+	}
+	if f.sendCalls != 1 || f.sendTarget != 3 {
+		t.Fatalf("send = %d to pid %d, want 1 to WM pid 3", f.sendCalls, f.sendTarget)
+	}
+	if f.recvCalls != wmMailWaitTicks {
+		t.Fatalf("recv probes = %d want %d (one per tick)", f.recvCalls, wmMailWaitTicks)
+	}
+	if f.sleepCalls != wmMailWaitTicks-1 {
+		t.Fatalf("parks = %d want %d (sys_sleep between probes, not after the last)", f.sleepCalls, wmMailWaitTicks-1)
+	}
+	if DeclareFullscreen(4, "T", "NOTE.ELF") {
+		t.Fatal("DeclareFullscreen must surface the refusal")
+	}
+}
+
+func TestWmMailRequestAckApplied(t *testing.T) {
+	f := startWmMailFake(t)
+	rep := WmRpc{Kind: WmRpcKindDeclareFullscreen | WmRpcReplyFlag, ID: 4, Seq: 1, Applied: 1}
+	f.reply = rep.Encode()
+	f.replyAt = 1
+	if !WmMailRequest(WmRpcKindDeclareFullscreen, 4, 0, 0, 0, 0, "T", "NOTE.ELF", 1) {
+		t.Fatal("applied ack should succeed")
+	}
+	if f.recvCalls != 1 {
+		t.Fatalf("recv probes = %d want 1 (first probe takes a ready ack)", f.recvCalls)
+	}
+	if f.sleepCalls != 0 {
+		t.Fatalf("parks = %d want 0 when the ack is already in the inbox", f.sleepCalls)
+	}
+}
+
+func TestWmMailRequestAckRefused(t *testing.T) {
+	f := startWmMailFake(t)
+	rep := WmRpc{Kind: WmRpcKindDeclareFullscreen | WmRpcReplyFlag, ID: 4, Seq: 1, Applied: 0}
+	f.reply = rep.Encode()
+	f.replyAt = 1
+	if WmMailRequest(WmRpcKindDeclareFullscreen, 4, 0, 0, 0, 0, "T", "NOTE.ELF", 1) {
+		t.Fatal("applied=0 ack is a refusal")
+	}
+	if f.sleepCalls != 0 {
+		t.Fatalf("parks = %d want 0", f.sleepCalls)
+	}
+}
+
+func TestWmMailRequestAckAfterPark(t *testing.T) {
+	f := startWmMailFake(t)
+	rep := WmRpc{Kind: WmRpcKindDeclareFullscreen | WmRpcReplyFlag, ID: 4, Seq: 1, Applied: 1}
+	f.reply = rep.Encode()
+	f.replyAt = 3
+	if !WmMailRequest(WmRpcKindDeclareFullscreen, 4, 0, 0, 0, 0, "T", "NOTE.ELF", 1) {
+		t.Fatal("ack after two empty probes should succeed")
+	}
+	if f.recvCalls != 3 {
+		t.Fatalf("recv probes = %d want 3", f.recvCalls)
+	}
+	if f.sleepCalls != 2 {
+		t.Fatalf("parks = %d want 2", f.sleepCalls)
+	}
+}
+
+func TestPollNavSilentSeatRefuses(t *testing.T) {
+	f := startWmMailFake(t)
+	start := time.Now()
+	if path, ok := PollNav(4, "NOTE.ELF"); ok || path != "" {
+		t.Fatalf("silent PollNav = (%q, %v) want empty refusal", path, ok)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("silent PollNav hung: %v", elapsed)
+	}
+	if f.recvCalls != wmMailWaitTicks || f.sleepCalls != wmMailWaitTicks-1 {
+		t.Fatalf("PollNav wait = %d probes / %d parks, want %d / %d",
+			f.recvCalls, f.sleepCalls, wmMailWaitTicks, wmMailWaitTicks-1)
+	}
+}
+
+func TestPollNavAckReturnsPath(t *testing.T) {
+	f := startWmMailFake(t)
+	rep := WmRpc{Kind: WmRpcKindNavPoll | WmRpcReplyFlag, ID: 4, Seq: 7, Applied: 1}
+	rep.SetTitle("/host")
+	f.reply = rep.Encode()
+	f.replyAt = 1
+	path, ok := PollNav(4, "NOTE.ELF")
+	if !ok || path != "/host" {
+		t.Fatalf("PollNav = (%q, %v) want (/host, true)", path, ok)
+	}
+	if f.sleepCalls != 0 {
+		t.Fatalf("parks = %d want 0", f.sleepCalls)
 	}
 }
