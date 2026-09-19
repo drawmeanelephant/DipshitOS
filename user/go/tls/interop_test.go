@@ -30,7 +30,7 @@ func buildTestChain(t *testing.T, dnsNames ...string) ([]byte, tls.Certificate) 
 		t.Fatal(err)
 	}
 	caTmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
+		SerialNumber:          big.NewInt(1),
 		Subject:               pkix.Name{CommonName: "interop test root"},
 		NotBefore:             time.Now().Add(-time.Hour),
 		NotAfter:              time.Now().Add(time.Hour),
@@ -53,12 +53,12 @@ func buildTestChain(t *testing.T, dnsNames ...string) ([]byte, tls.Certificate) 
 	}
 	leafTmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(2),
-		Subject:     pkix.Name{CommonName: dnsNames[0]},
-		NotBefore:   time.Now().Add(-time.Hour),
-		NotAfter:    time.Now().Add(time.Hour),
-		DNSNames:    dnsNames,
-		KeyUsage:    x509.KeyUsageDigitalSignature,
-		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		Subject:      pkix.Name{CommonName: dnsNames[0]},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		DNSNames:     dnsNames,
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}
 	leafDER, err := x509.CreateCertificate(rand.Reader, leafTmpl, caCert, &leafKey.PublicKey, caKey)
 	if err != nil {

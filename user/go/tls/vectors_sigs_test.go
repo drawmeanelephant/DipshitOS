@@ -1,26 +1,14 @@
 // Code generated from user/src/lib/tls/ecdsa_vectors.zig and rsa_vectors.zig
 // (OpenSSL-generated keys/signatures, each asserted to verify — and the
 // mutated case not to — before the source file was written). DO NOT EDIT.
+//
+// The curve PARAMETERS this file used to declare (curveParams,
+// curveP256params, curveP384params) now live in ecdsa_params.go: production
+// code in ecdsa.go/validate.go depends on them, and a _test.go declaration is
+// not visible to a plain `go build`, so the package only compiled under
+// `go test`. The generator should emit them into the production file.
 
 package tls
-
-type curveParams struct{ p, b, n, gx, gy string }
-
-var curveP256params = curveParams{
-	p:  "00ffffffff00000001000000000000000000000000ffffffffffffffffffffffff",
-	b:  "5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b",
-	n:  "00ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551",
-	gx: "6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296",
-	gy: "4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5",
-}
-
-var curveP384params = curveParams{
-	p:  "00fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeffffffff0000000000000000ffffffff",
-	b:  "00b3312fa7e23ee7e4988e056be3f82d19181d9c6efe8141120314088f5013875ac656398d8a2ed19d2a85c8edd3ec2aef",
-	n:  "00ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52973",
-	gx: "aa87ca22be8b05378eb1c71ef320ad746e1d3b628ba79b9859f741e082542a385502f25dbf55296c3a545e3872760ab7",
-	gy: "3617de4a96262c6f5d9e98bf9292dc29f8f41dbd289a147ce9da3113b5f0b8c00a60b1ce1d7e819d7a431d7c90ea0e5f",
-}
 
 type ecdsaSigCase struct{ label, curve, hash, msg, pubx, puby, r, s, sig string }
 
