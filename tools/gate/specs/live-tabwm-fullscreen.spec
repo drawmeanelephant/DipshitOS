@@ -2,6 +2,14 @@
 #
 # M62h: Zig CALC.BIN is gone. Boot A execs leftover NOTEPAD.BIN. Boot B's
 # god-menu types "64-bit" and launches GOCALC.ELF from APPS.TXT.
+# M66c (#1445): the client is NOTE.ELF, NOTEPAD.BIN's Go successor. The
+# lifecycle vocabulary is shared by design (`note:` mirrors `notepad:`), so the
+# assertions below moved by prefix alone. NOTEPAD.BIN is still built and still
+# covered: five specs assert behaviour only the Zig app has (find/goto, theme
+# tokens, the clipboard self-demo, the unsaved-decline contract), so retiring it
+# is its own card rather than something this retarget assumes.
+#
+# HOST PREREQUISITE: bash tools/go/build-note.sh -> .build/go/NOTE.ELF
 
 vgate_name live-tabwm-fullscreen "M42 SX5: Sexiburger tabbed desktop as PRIMARY manager"
 vgate_share seed
@@ -17,7 +25,7 @@ echo boot-a-idle
 EOF
 
 vgate_file script2-A.txt <<'EOF'
-exec NOTEPAD.BIN
+exec NOTE.ELF
 EOF
 
 vgate_file script3-A.txt <<'EOF'
@@ -52,17 +60,29 @@ print("staged GOCALC.ELF into share (%d bytes)" %
 PY
 
 # Flake #1063: script3 runs AFTER the functional completion marker
-# (`notepad: resize relayout`), so its `dui`/`echo` round trip is the LAST
+# (`note: resize relayout`), so its `dui`/`echo` round trip is the LAST
 # thing before --script-expect.
-vgate_run A -- --screen '$RUN_DIR/screen' --script '$RUN_DIR/script-A.txt' --script2 '$RUN_DIR/script2-A.txt' --script2-after 'tabwm: sidebar-rendered' --script3 '$RUN_DIR/script3-A.txt' --script3-after 'notepad: resize relayout' --script-expect 'rx-m42-ok' --timeout 90
+vgate_setup_python <<'PY'
+import os, shutil, sys
+rd = os.environ["RUN_DIR"]
+share = os.environ.get("VG_SHARE") or os.path.join(rd, "share")
+src = os.path.join(".build", "go", "NOTE.ELF")
+if not os.path.exists(src):
+    sys.exit("NOTE.ELF missing (expected " + src + ") - build it first: "
+             "bash tools/go/build-note.sh")
+shutil.copy(src, os.path.join(share, "NOTE.ELF"))
+print("staged NOTE.ELF into share (%d bytes)" % os.path.getsize(os.path.join(share, "NOTE.ELF")))
+PY
+
+vgate_run A -- --screen '$RUN_DIR/screen' --script '$RUN_DIR/script-A.txt' --script2 '$RUN_DIR/script2-A.txt' --script2-after 'tabwm: sidebar-rendered' --script3 '$RUN_DIR/script3-A.txt' --script3-after 'note: resize relayout' --script-expect 'rx-m42-ok' --timeout 180
 
 vgate_assert A serial-contains 'VirelaiOS kernel has seized control.'
 vgate_assert A serial-contains 'wm: autostart tabwm (settings wm=tabwm)'
 vgate_assert A serial-contains 'tabwm: registered'
 vgate_assert A serial-contains 'tabwm: sidebar-rendered'
-vgate_assert A serial-contains 'notepad: open id=2'
-vgate_assert A serial-contains 'notepad: tab-aware (full-viewport)'
-vgate_assert A serial-contains 'notepad: resize relayout'
+vgate_assert A serial-contains 'note: open id=2'
+vgate_assert A serial-contains 'note: tab-aware (full-viewport)'
+vgate_assert A serial-contains 'note: resize relayout'
 vgate_assert A serial-contains 'tabwm: tab-switch'
 vgate_assert A serial-contains 'rx-m42-ok'
 vgate_assert A serial-absent '\[EXC\]'

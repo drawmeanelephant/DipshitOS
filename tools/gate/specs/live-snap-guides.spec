@@ -1,4 +1,12 @@
 # live-snap-guides.spec -- M37 DQ5 window snap guides (issue #837)
+# M66c (#1445): the client is NOTE.ELF, NOTEPAD.BIN's Go successor. The
+# lifecycle vocabulary is shared by design (`note:` mirrors `notepad:`), so the
+# assertions below moved by prefix alone. NOTEPAD.BIN is still built and still
+# covered: five specs assert behaviour only the Zig app has (find/goto, theme
+# tokens, the clipboard self-demo, the unsaved-decline contract), so retiring it
+# is its own card rather than something this retarget assumes.
+#
+# HOST PREREQUISITE: bash tools/go/build-note.sh -> .build/go/NOTE.ELF
 
 vgate_name live-snap-guides "M37 DQ5 window snap guides"
 vgate_share seed
@@ -10,7 +18,7 @@ vgate_allow_rc C 0 1
 
 vgate_file script-base.txt <<'EOF'
 wnd start
-exec NOTEPAD.BIN
+exec NOTE.ELF
 EOF
 
 vgate_file s2-A.txt <<'EOF'
@@ -28,13 +36,25 @@ echo done-c
 EOF
 
 # --- boot A: near-edge hold -> snap preview outline ---
+vgate_setup_python <<'PY'
+import os, shutil, sys
+rd = os.environ["RUN_DIR"]
+share = os.environ.get("VG_SHARE") or os.path.join(rd, "share")
+src = os.path.join(".build", "go", "NOTE.ELF")
+if not os.path.exists(src):
+    sys.exit("NOTE.ELF missing (expected " + src + ") - build it first: "
+             "bash tools/go/build-note.sh")
+shutil.copy(src, os.path.join(share, "NOTE.ELF"))
+print("staged NOTE.ELF into share (%d bytes)" % os.path.getsize(os.path.join(share, "NOTE.ELF")))
+PY
+
 vgate_run A -- \
     --screen '$RUN_DIR/screen' \
     --via-virtio --cvc-snap \
     --snapshot-out '$RUN_DIR/snap-A' \
     --script '$RUN_DIR/script-base.txt' \
     --script2 '$RUN_DIR/s2-A.txt' --script2-after "wnd: snap-settled" --script2-delay 30 \
-    --pointer-virtio "60,64,d;10,300" --pointer-virtio-after "notepad: ready" \
+    --pointer-virtio "60,64,d;10,300" --pointer-virtio-after "note: ready" \
     --snapshot-after "wnd: snap-settled" \
     --script-expect "done-a" --timeout 240
 
@@ -83,7 +103,7 @@ vgate_run B -- \
     --via-virtio --cvc-snap \
     --script '$RUN_DIR/script-base.txt' \
     --script2 '$RUN_DIR/s2-B.txt' --script2-after "wnd: drop" --script2-delay 8 \
-    --pointer-virtio "60,64,d;10,300,u" --pointer-virtio-after "notepad: ready" \
+    --pointer-virtio "60,64,d;10,300,u" --pointer-virtio-after "note: ready" \
     --script-expect "done-b" --timeout 240
 
 vgate_assert B serial-contains "wnd: snap"
@@ -106,7 +126,7 @@ vgate_run C -- \
     --snapshot-out '$RUN_DIR/snap-C' \
     --script '$RUN_DIR/script-base.txt' \
     --script2 '$RUN_DIR/s2-C.txt' --script2-after "wnd: drag" --script2-delay 20 \
-    --pointer-virtio "60,64,d;500,300" --pointer-virtio-after "notepad: ready" \
+    --pointer-virtio "60,64,d;500,300" --pointer-virtio-after "note: ready" \
     --snapshot-after "wnd: drag" \
     --script-expect "done-c" --timeout 240
 

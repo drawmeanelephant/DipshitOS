@@ -1,4 +1,12 @@
 # live-wnd6-tray-drain.spec -- WMS6 Gate E: kernel-derived tray clock and WM-driven tray
+# M66c (#1445): the client is NOTE.ELF, NOTEPAD.BIN's Go successor. The
+# lifecycle vocabulary is shared by design (`note:` mirrors `notepad:`), so the
+# assertions below moved by prefix alone. NOTEPAD.BIN is still built and still
+# covered: five specs assert behaviour only the Zig app has (find/goto, theme
+# tokens, the clipboard self-demo, the unsaved-decline contract), so retiring it
+# is its own card rather than something this retarget assumes.
+#
+# HOST PREREQUISITE: bash tools/go/build-note.sh -> .build/go/NOTE.ELF
 
 vgate_name live-wnd6-tray-drain "WMS6 Gate E: kernel-derived and WM-driven tray"
 vgate_share seed
@@ -11,7 +19,7 @@ EOF
 
 vgate_file script-B.txt <<'EOF'
 wnd start
-exec NOTEPAD.BIN
+exec NOTE.ELF
 EOF
 
 vgate_file s2-B.txt <<'EOF'
@@ -28,6 +36,18 @@ echo tray-done
 EOF
 
 # --- boot A: shim regression (no WM) ---
+vgate_setup_python <<'PY'
+import os, shutil, sys
+rd = os.environ["RUN_DIR"]
+share = os.environ.get("VG_SHARE") or os.path.join(rd, "share")
+src = os.path.join(".build", "go", "NOTE.ELF")
+if not os.path.exists(src):
+    sys.exit("NOTE.ELF missing (expected " + src + ") - build it first: "
+             "bash tools/go/build-note.sh")
+shutil.copy(src, os.path.join(share, "NOTE.ELF"))
+print("staged NOTE.ELF into share (%d bytes)" % os.path.getsize(os.path.join(share, "NOTE.ELF")))
+PY
+
 vgate_run A -- \
     --screen '$RUN_DIR/screen' \
     --via-virtio --cvc-snap \
@@ -47,7 +67,7 @@ vgate_run B -- \
     --screen '$RUN_DIR/screen' \
     --via-virtio --cvc-snap \
     --script '$RUN_DIR/script-B.txt' \
-    --script2 '$RUN_DIR/s2-B.txt' --script2-after "notepad: ready" --script2-delay 15 \
+    --script2 '$RUN_DIR/s2-B.txt' --script2-after "note: ready" --script2-delay 15 \
     --script3 '$RUN_DIR/s3-B.txt' --script3-after "tray-go" --script3-delay 20 \
     --script-expect "tray-done" --timeout 240
 

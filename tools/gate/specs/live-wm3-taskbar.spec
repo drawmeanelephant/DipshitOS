@@ -1,11 +1,19 @@
 # live-wm3-taskbar.spec -- M32 WM3 (Lane 1, #707): taskbar shows per-window entries, workspace-aware
+# M66c (#1445): the client is NOTE.ELF, NOTEPAD.BIN's Go successor. The
+# lifecycle vocabulary is shared by design (`note:` mirrors `notepad:`), so the
+# assertions below moved by prefix alone. NOTEPAD.BIN is still built and still
+# covered: five specs assert behaviour only the Zig app has (find/goto, theme
+# tokens, the clipboard self-demo, the unsaved-decline contract), so retiring it
+# is its own card rather than something this retarget assumes.
+#
+# HOST PREREQUISITE: bash tools/go/build-note.sh -> .build/go/NOTE.ELF
 
 vgate_name live-wm3-taskbar "M32 WM3: taskbar per-window entries, workspace-aware"
 vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 
 vgate_file script-A.txt <<'EOF'
-exec NOTEPAD.BIN
+exec NOTE.ELF
 EOF
 
 vgate_file s2-A.txt <<'EOF'
@@ -22,7 +30,7 @@ EOF
 
 vgate_file script-B1.txt <<'EOF'
 wnd start
-exec NOTEPAD.BIN
+exec NOTE.ELF
 exec TOP.BIN
 EOF
 
@@ -40,7 +48,7 @@ EOF
 
 vgate_file script-B2.txt <<'EOF'
 wnd start
-exec NOTEPAD.BIN
+exec NOTE.ELF
 exec TOP.BIN
 EOF
 
@@ -56,7 +64,19 @@ wm
 echo taskbar-b2-done
 EOF
 
-vgate_run A -- --screen '$RUN_DIR/screen' --via-virtio --cvc-snap --script '$RUN_DIR/script-A.txt' --script2 '$RUN_DIR/s2-A.txt' --script2-after 'notepad: ready' --script2-delay 20 --script-expect 'echo taskbar-a-go' --timeout 260
+vgate_setup_python <<'PY'
+import os, shutil, sys
+rd = os.environ["RUN_DIR"]
+share = os.environ.get("VG_SHARE") or os.path.join(rd, "share")
+src = os.path.join(".build", "go", "NOTE.ELF")
+if not os.path.exists(src):
+    sys.exit("NOTE.ELF missing (expected " + src + ") - build it first: "
+             "bash tools/go/build-note.sh")
+shutil.copy(src, os.path.join(share, "NOTE.ELF"))
+print("staged NOTE.ELF into share (%d bytes)" % os.path.getsize(os.path.join(share, "NOTE.ELF")))
+PY
+
+vgate_run A -- --screen '$RUN_DIR/screen' --via-virtio --cvc-snap --script '$RUN_DIR/script-A.txt' --script2 '$RUN_DIR/s2-A.txt' --script2-after 'note: ready' --script2-delay 20 --script-expect 'echo taskbar-a-go' --timeout 260
 
 vgate_assert A serial-contains 'dui taskbar: entry=0 id=2 focused=1 minimized=0'
 vgate_assert A serial-contains 'dui taskbar: entry=0 id=2 focused=0 minimized=1'

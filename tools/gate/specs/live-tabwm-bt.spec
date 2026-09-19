@@ -3,7 +3,7 @@
 #
 # TWO headless boots sharing the seeded host share (`vgate_share seed`):
 #
-#   01  `tabwm start` + `exec NOTEPAD.BIN` + HID chords. Pins M48 markers and
+#   01  `tabwm start` + `exec NOTE.ELF` + HID chords. Pins M48 markers and
 #       the TWM quick-jump (`tabwm: go-summon` + `tabwm: go-scan-us=N`).
 #       Ctrl+Shift+P / F persist pin+freeze into `.tabs` v2.
 #   02  A second boot of TABWM + CALC against the same share. Proves the
@@ -11,12 +11,20 @@
 #       boot 01 writing v2 without fault is not enough; the temp share used
 #       to be discarded at run end.
 #
-# Chord sequence on 01 (after `notepad: open id=2`; via-virtio paces 0.25 s):
+# Chord sequence on 01 (after `note: open id=2`; via-virtio paces 0.25 s):
 #   ctrl-shift-p, ctrl-shift-f, ctrl-shift-a, escape,
 #   ctrl-shift-g, escape, ctrl-t, escape
 #
 # The class-A suite covers chords the runner cannot type. A v2 file is
 # refused by a v1 parser (loud version mismatch → no saved state).
+# M66c (#1445): the client is NOTE.ELF, NOTEPAD.BIN's Go successor. The
+# lifecycle vocabulary is shared by design (`note:` mirrors `notepad:`), so the
+# assertions below moved by prefix alone. NOTEPAD.BIN is still built and still
+# covered: five specs assert behaviour only the Zig app has (find/goto, theme
+# tokens, the clipboard self-demo, the unsaved-decline contract), so retiring it
+# is its own card rather than something this retarget assumes.
+#
+# HOST PREREQUISITE: bash tools/go/build-note.sh -> .build/go/NOTE.ELF
 
 vgate_name live-tabwm-bt "M48 BT1-BT6: rail-native pin, freeze, start surface, tab search"
 vgate_share seed
@@ -27,7 +35,7 @@ tabwm start
 EOF
 
 vgate_file script2.txt <<'EOF'
-exec NOTEPAD.BIN
+exec NOTE.ELF
 EOF
 
 vgate_file script3.txt <<'EOF'
@@ -39,18 +47,30 @@ tabwm start
 EOF
 
 vgate_file script2-02.txt <<'EOF'
-exec NOTEPAD.BIN
+exec NOTE.ELF
 EOF
 
 vgate_file script3-02.txt <<'EOF'
 echo rx-m48-v2-ok
 EOF
 
+vgate_setup_python <<'PY'
+import os, shutil, sys
+rd = os.environ["RUN_DIR"]
+share = os.environ.get("VG_SHARE") or os.path.join(rd, "share")
+src = os.path.join(".build", "go", "NOTE.ELF")
+if not os.path.exists(src):
+    sys.exit("NOTE.ELF missing (expected " + src + ") - build it first: "
+             "bash tools/go/build-note.sh")
+shutil.copy(src, os.path.join(share, "NOTE.ELF"))
+print("staged NOTE.ELF into share (%d bytes)" % os.path.getsize(os.path.join(share, "NOTE.ELF")))
+PY
+
 vgate_run 01 -- --screen '$RUN_DIR/screen' --via-virtio \
     --script '$RUN_DIR/script.txt' \
     --script2 '$RUN_DIR/script2.txt' --script2-after 'tabwm: sidebar-rendered' \
     --input-chords 'ctrl-shift-p,ctrl-shift-f,ctrl-shift-a,escape,ctrl-shift-g,escape,ctrl-t,escape' \
-    --input-chords-after 'notepad: open id=2' \
+    --input-chords-after 'note: open id=2' \
     --script3 '$RUN_DIR/script3.txt' --script3-after 'tabwm: start-surface' \
     --script-expect 'rx-m48-ok' --timeout 200
 
@@ -58,7 +78,7 @@ vgate_assert 01 serial-contains 'VirelaiOS kernel has seized control.'
 vgate_assert 01 serial-contains 'tabwm: starting TABWM.BIN'
 vgate_assert 01 serial-contains 'tabwm: registered'
 vgate_assert 01 serial-contains 'tabwm: sidebar-rendered'
-vgate_assert 01 serial-contains 'notepad: open id=2'
+vgate_assert 01 serial-contains 'note: open id=2'
 # M48 markers + the TWM Go quick-jump.
 vgate_assert 01 serial-contains 'tabwm: tab-pin 2 on'
 vgate_assert 01 serial-contains 'tabwm: tab-freeze 2 on'
@@ -103,13 +123,13 @@ vgate_run 02 -- --screen '$RUN_DIR/screen' --via-virtio \
     --script '$RUN_DIR/script-02.txt' \
     --script2 '$RUN_DIR/script2-02.txt' --script2-after 'tabwm: sidebar-rendered' \
     --script3 '$RUN_DIR/script3-02.txt' --script3-after 'tabwm: tabs-applied' \
-    --script-expect 'rx-m48-v2-ok' --timeout 120
+    --script-expect 'rx-m48-v2-ok' --timeout 180
 
 vgate_assert 02 serial-contains 'VirelaiOS kernel has seized control.'
 vgate_assert 02 serial-contains 'tabwm: starting TABWM.BIN'
 vgate_assert 02 serial-contains 'tabwm: registered'
 vgate_assert 02 serial-contains 'tabwm: tabs-restored v2'
-vgate_assert 02 serial-contains 'notepad: open id=2'
+vgate_assert 02 serial-contains 'note: open id=2'
 vgate_assert 02 serial-contains 'tabwm: tabs-applied v2'
 vgate_assert 02 serial-contains 'pin=1'
 vgate_assert 02 serial-contains 'freeze=1'

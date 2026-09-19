@@ -32,6 +32,14 @@
 # script prints, and every stage gate waits on guest output the program, the
 # kernel and the hosted app produce (`gotabwm: win focus`,
 # `wm: unregistered, shim resumed`).
+# M66c (#1445): the client is NOTE.ELF, NOTEPAD.BIN's Go successor. The
+# lifecycle vocabulary is shared by design (`note:` mirrors `notepad:`), so the
+# assertions below moved by prefix alone. NOTEPAD.BIN is still built and still
+# covered: five specs assert behaviour only the Zig app has (find/goto, theme
+# tokens, the clipboard self-demo, the unsaved-decline contract), so retiring it
+# is its own card rather than something this retarget assumes.
+#
+# HOST PREREQUISITE: bash tools/go/build-note.sh -> .build/go/NOTE.ELF
 
 vgate_name go-wm-seat "issues #1313/#1317/#1318 M57a+b+c: a Go WM registers the slot-65 seat and HOSTS GOCALC.ELF on VZ"
 vgate_share seed
@@ -91,6 +99,18 @@ print("staged GOCALC.ELF into share (%d bytes)" %
 with open(os.path.join(share, "SETTINGS.TXT"), "w") as f:
     f.write("#v2\nwm=none\n")
 print("seeded SETTINGS.TXT (wm=none: shim-only boot, explicit seat opt-in)")
+PY
+
+vgate_setup_python <<'PY'
+import os, shutil, sys
+rd = os.environ["RUN_DIR"]
+share = os.environ.get("VG_SHARE") or os.path.join(rd, "share")
+src = os.path.join(".build", "go", "NOTE.ELF")
+if not os.path.exists(src):
+    sys.exit("NOTE.ELF missing (expected " + src + ") - build it first: "
+             "bash tools/go/build-note.sh")
+shutil.copy(src, os.path.join(share, "NOTE.ELF"))
+print("staged NOTE.ELF into share (%d bytes)" % os.path.getsize(os.path.join(share, "NOTE.ELF")))
 PY
 
 vgate_run 01 -- \
@@ -171,7 +191,7 @@ EOF
 
 vgate_file script2-02.txt <<'EOF'
 dui focus 0
-exec NOTEPAD.BIN
+exec NOTE.ELF
 EOF
 
 vgate_file script3-02.txt <<'EOF'
@@ -189,15 +209,15 @@ vgate_run 02 -- \
     --script-expect 'rx-gotabwm-np-ok' --timeout 300
 
 vgate_assert 02 serial-contains 'exec: loaded GOTABWM.ELF'
-vgate_assert 02 serial-contains 'exec: loaded NOTEPAD.BIN'
+vgate_assert 02 serial-contains 'exec: loaded NOTE.ELF'
 # The same interop chain as CALC, for the second app.
 vgate_assert 02 serial-contains 'gotabwm: rpc declare id='
-vgate_assert 02 serial-contains 'notepad: tab-aware (full-viewport)'
+vgate_assert 02 serial-contains 'note: tab-aware (full-viewport)'
 vgate_assert 02 serial-contains 'gotabwm: host focus id='
 vgate_assert 02 serial-contains 'gotabwm: host view id='
-vgate_assert 02 serial-contains 'notepad: resize relayout'
+vgate_assert 02 serial-contains 'note: resize relayout'
 vgate_assert 02 serial-contains 'gotabwm: host close id='
-vgate_assert 02 serial-contains 'notepad: win_close'
+vgate_assert 02 serial-contains 'note: win_close'
 vgate_assert 02 serial-contains 'gotabwm: host done'
 vgate_assert 02 serial-contains 'wm: unregistered, shim resumed'
 vgate_assert 02 serial-contains 'dui: windows=4 focused='

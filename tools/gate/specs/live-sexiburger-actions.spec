@@ -1,4 +1,12 @@
 # live-sexiburger-actions.spec -- M19 Sexiburger Action Registry & Tab Model
+# M66c (#1445): the client is NOTE.ELF, NOTEPAD.BIN's Go successor. The
+# lifecycle vocabulary is shared by design (`note:` mirrors `notepad:`), so the
+# assertions below moved by prefix alone. NOTEPAD.BIN is still built and still
+# covered: five specs assert behaviour only the Zig app has (find/goto, theme
+# tokens, the clipboard self-demo, the unsaved-decline contract), so retiring it
+# is its own card rather than something this retarget assumes.
+#
+# HOST PREREQUISITE: bash tools/go/build-note.sh -> .build/go/NOTE.ELF
 
 vgate_name live-sexiburger-actions "M19 Sexiburger Action Registry & Tab Model"
 vgate_share seed
@@ -6,7 +14,7 @@ vgate_runner_flags -Xswiftc -DSPIKE
 
 vgate_file script-A.txt <<'EOF'
 wnd start
-exec NOTEPAD.BIN
+exec NOTE.ELF
 EOF
 
 vgate_file s2-A.txt <<'EOF'
@@ -21,11 +29,23 @@ sexiburger
 echo sexitest-done
 EOF
 
+vgate_setup_python <<'PY'
+import os, shutil, sys
+rd = os.environ["RUN_DIR"]
+share = os.environ.get("VG_SHARE") or os.path.join(rd, "share")
+src = os.path.join(".build", "go", "NOTE.ELF")
+if not os.path.exists(src):
+    sys.exit("NOTE.ELF missing (expected " + src + ") - build it first: "
+             "bash tools/go/build-note.sh")
+shutil.copy(src, os.path.join(share, "NOTE.ELF"))
+print("staged NOTE.ELF into share (%d bytes)" % os.path.getsize(os.path.join(share, "NOTE.ELF")))
+PY
+
 vgate_run A -- \
     --screen '$RUN_DIR/screen' \
     --via-virtio --cvc-snap \
     --script '$RUN_DIR/script-A.txt' \
-    --script2 '$RUN_DIR/s2-A.txt' --script2-after "notepad: ready" --script2-delay 6 \
+    --script2 '$RUN_DIR/s2-A.txt' --script2-after "note: ready" --script2-delay 6 \
     --script3 '$RUN_DIR/s3-A.txt' --script3-after "sexitest: done" --script3-delay 8 \
     --script-expect "sexitest-done" --timeout 240
 

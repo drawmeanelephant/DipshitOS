@@ -33,6 +33,14 @@
 # Stage gates wait on guest output (`gotabwm: win focus`,
 # `wm: unregistered, shim resumed`). Boot 03 uses GOMAXPROCS=1 so each Go
 # runtime stays at 3 kernel tasks (primary + sysmon + helper).
+# M66c (#1445): the client is NOTE.ELF, NOTEPAD.BIN's Go successor. The
+# lifecycle vocabulary is shared by design (`note:` mirrors `notepad:`), so the
+# assertions below moved by prefix alone. NOTEPAD.BIN is still built and still
+# covered: five specs assert behaviour only the Zig app has (find/goto, theme
+# tokens, the clipboard self-demo, the unsaved-decline contract), so retiring it
+# is its own card rather than something this retarget assumes.
+#
+# HOST PREREQUISITE: bash tools/go/build-note.sh -> .build/go/NOTE.ELF
 
 vgate_name go-wm-tabs "issues #1400–#1405/#1426: GOTABWM tabs + session + LAYOUT.txt + two Go ELFs on VZ"
 vgate_share seed
@@ -47,7 +55,7 @@ EOF
 vgate_file script2.txt <<'EOF'
 dui focus 0
 exec GOCALC.ELF
-exec NOTEPAD.BIN
+exec NOTE.ELF
 EOF
 
 vgate_file script3.txt <<'EOF'
@@ -145,6 +153,18 @@ if os.path.exists(stale):
     print("cleared stale SESSION.TABS")
 PY
 
+vgate_setup_python <<'PY'
+import os, shutil, sys
+rd = os.environ["RUN_DIR"]
+share = os.environ.get("VG_SHARE") or os.path.join(rd, "share")
+src = os.path.join(".build", "go", "NOTE.ELF")
+if not os.path.exists(src):
+    sys.exit("NOTE.ELF missing (expected " + src + ") - build it first: "
+             "bash tools/go/build-note.sh")
+shutil.copy(src, os.path.join(share, "NOTE.ELF"))
+print("staged NOTE.ELF into share (%d bytes)" % os.path.getsize(os.path.join(share, "NOTE.ELF")))
+PY
+
 vgate_run 01 -- \
     --screen '$RUN_DIR/screen' \
     --script '$RUN_DIR/script.txt' \
@@ -160,13 +180,13 @@ vgate_assert 01 serial-contains 'gotabwm: registered'
 # M66b (#1444): the seat decoded the seeded schema-v2 SETTINGS.TXT (wm=none).
 vgate_assert 01 serial-contains 'gotabwm: settings wm=none'
 vgate_assert 01 serial-contains 'exec: loaded GOCALC.ELF'
-vgate_assert 01 serial-contains 'exec: loaded NOTEPAD.BIN'
+vgate_assert 01 serial-contains 'exec: loaded NOTE.ELF'
 # Two clients on the strip, rail painted, one focused.
 vgate_assert 01 serial-count 'gotabwm: tab open id=' 2
 vgate_assert 01 serial-contains 'gotabwm: tab focus id='
 vgate_assert 01 serial-contains 'gotabwm: rail n=2 focus='
 vgate_assert 01 serial-contains 'gocalc: declare accepted'
-vgate_assert 01 serial-contains 'notepad: tab-aware (full-viewport)'
+vgate_assert 01 serial-contains 'note: tab-aware (full-viewport)'
 # M62d: reorder two unpinned tabs; pin jumps to the left and stays there
 # across a focus change. Order line names ids + pin bits (not LAYOUT.txt).
 # There is no kernel pin object: the first dump is Pin() on the strip; the
@@ -214,7 +234,7 @@ vgate_assert 01 serial-count 'gotabwm: unsplit' 2
 vgate_assert 01 serial-contains 'split=none'
 vgate_assert 01 serial-contains 'x=0 y=0 w=1280 h=720'
 vgate_assert 01 serial-contains 'gocalc: present'
-vgate_assert 01 serial-contains 'notepad: resize relayout'
+vgate_assert 01 serial-contains 'note: resize relayout'
 # Pair each layout dump with the applied pane line dumpTab prints next.
 # Every pair must match within 1 px (integer-half remainder).
 vgate_assert 01 python <<'PY'
@@ -256,7 +276,7 @@ vgate_assert 01 serial-count 'gotabwm: tab close id=' 2
 vgate_assert 01 serial-contains 'gotabwm: rail n=1 focus='
 vgate_assert 01 serial-contains 'gotabwm: tabs empty'
 vgate_assert 01 serial-contains 'gocalc: close'
-vgate_assert 01 serial-contains 'notepad: win_close'
+vgate_assert 01 serial-contains 'note: win_close'
 vgate_assert 01 serial-contains 'gotabwm: host done'
 vgate_assert 01 serial-contains 'gotabwm: close'
 vgate_assert 01 serial-contains 'gotabwm OK'
@@ -328,8 +348,8 @@ ids = {parsed[0][0], parsed[1][0]}
 if len(ids) != 2:
     sys.exit("tab ids not unique: %s" % (ids,))
 bins = {parsed[0][1], parsed[1][1]}
-if bins != {"GOCALC.ELF", "NOTEPAD.BIN"}:
-    sys.exit("bins %s want GOCALC.ELF and NOTEPAD.BIN" % (bins,))
+if bins != {"GOCALC.ELF", "NOTE.ELF"}:
+    sys.exit("bins %s want GOCALC.ELF and NOTE.ELF" % (bins,))
 for row in parsed:
     if row[2:6] != ("0", "0", "1280", "720") or row[7] != "none":
         sys.exit("last dump must be unsplit full-viewport, got %s" % (row,))
@@ -381,8 +401,8 @@ ids = [parsed[0].group(1), parsed[1].group(1)]
 if ids != ["256", "257"]:
     sys.exit("restored ids %s want 256,257 (sessionIDBase=0x100)" % ids)
 bins = [parsed[0].group(2), parsed[1].group(2)]
-if bins != ["GOCALC.ELF", "NOTEPAD.BIN"]:
-    sys.exit("bins %s" % bins)
+if bins != ["GOCALC.ELF", "NOTE.ELF"]:
+    sys.exit("bins %s want GOCALC.ELF, NOTE.ELF" % bins)
 if parsed[0].group(8) != "none" or parsed[1].group(8) != "none":
     sys.exit("restore dump must be unsplit")
 print("LAYOUT.txt restore n=2 ids=256,257 unsplit")

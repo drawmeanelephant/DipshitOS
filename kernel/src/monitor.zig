@@ -704,9 +704,10 @@ fn topic_body(name: []const u8) ?[]const u8 {
     }
     if (std.mem.eql(u8, name, "editor")) {
         return "editor\n" ++
-            "  Full-screen and windowed text editing via GOEDIT.ELF and NOTEPAD.BIN.\n" ++
-            "  Shortcuts: Ctrl+S save, Ctrl+O open, Ctrl+N new, Ctrl+Z undo, Ctrl+Y redo,\n" ++
-            "  Ctrl+F find, Ctrl+Q quit. Full clipboard integration on Ctrl+C/Ctrl+V/Ctrl+X.\n";
+            "  Text editing in a TABWM tab: GOEDIT.ELF, and NOTE.ELF -- the dock's\n" ++
+            "  editor. Both load a share file and save on Ctrl+S; printable keys insert,\n" ++
+            "  backspace/delete remove, Return breaks the line, and NOTE.ELF also takes\n" ++
+            "  the arrow keys and saves on close when dirty.\n";
     }
     if (std.mem.eql(u8, name, "calc")) {
         return "calc\n" ++

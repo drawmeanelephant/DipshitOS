@@ -7,9 +7,11 @@
 // GOEDIT.ELF owns that arms race. What this app must have is the three things
 // the seat gates assert of a hosted tab — it declares itself tab-aware, it
 // relayouts on WIN_RESIZE, and it closes cleanly on WIN_CLOSE — plus load/save.
-// The marker names are chosen to mirror the Zig app's (`note: resize relayout`,
-// `note: win_close`), because the retarget that deletes NOTEPAD.BIN should be a
-// prefix change in the seat specs, not a rewrite of what they assert.
+// The marker names mirror the Zig app's whole lifecycle vocabulary (`note:
+// ready`, `note: tab-aware (full-viewport)`, `note: settled`, `note: exiting`,
+// `note: win_close`, `note: resize relayout`), because the seat specs that
+// assert them today move to this app by prefix alone. See the marker block
+// below for the two places the vocabularies deliberately differ.
 //
 // Two deliberate behaviour choices, both recorded here because a retarget has
 // to reconcile them with the Zig app's coverage:
@@ -43,10 +45,26 @@ import (
 )
 
 const (
-	appName  = "NOTE.ELF"
-	appTitle = "Note"
+	appName = "NOTE.ELF"
+	// appTitle is the TITLE the app declares, and it is "Notepad" -- the Zig
+	// app's own title (user/src/notepad.zig `.title = "Notepad"`) -- because the
+	// seat's specs assert it (`gotabwm: session titles=Calc,Notepad`) and the
+	// session's bin field is guessed from it (gotabwm guessBin). Renaming the app
+	// is a spec retarget; sharing the title is what keeps that retarget a prefix
+	// change.
+	appTitle = "Notepad"
 	natW     = 512
 	natH     = 384
+	// natX/natY are the Zig app's declared window ORIGIN too
+	// (user/src/notepad.zig `window_x = 56`, `window_y = 56`). The desktop host
+	// honours the requested origin, so the fleet's rect assertions
+	// (`user user rect=56,56,512,384` in live-desktop-typing, live-wnd5-geometry
+	// and live-wnd8-ptr-drag-delete) and the screenshot text-region check keep
+	// describing the app instead of being re-derived. Every other Go app opens at
+	// 32,32; the notepad keeps its predecessor's origin deliberately, the same
+	// way it keeps the predecessor's native size and title.
+	natX = 56
+	natY = 56
 
 	// defaultPath is where the Zig notepad kept its text
 	// (user/src/notepad.zig `notes_path`), kept identical so the seat specs'
@@ -59,23 +77,42 @@ const (
 	readMax = MaxBytes + 1
 )
 
-// Marker vocabulary. Each one is printed only after the call that earns it.
+// Marker vocabulary. Each one is printed only after the call that earns it, and
+// the LIFECYCLE names mirror the Zig notepad's (`notepad: ready`, `notepad:
+// tab-aware (full-viewport)`, `notepad: settled`, `notepad: exiting 43`,
+// `notepad: win_close`, `notepad: resize relayout`). That shared vocabulary is
+// the point of the M66c retarget: the seat specs that assert them today move to
+// this app by PREFIX ALONE, so ~30 spec edits stay mechanical instead of
+// becoming a rewrite of what they assert.
+//
+// Two deliberate divergences, both stated where a reviewer would look for them:
+//   - the exit status is this app's own (0), not the Zig app's hardcoded 43.
+//   - `note: open id=` carries the real window id; the Zig app printed a fixed
+//     one.
 const (
-	markerOpen     = "note: open id="
-	markerAccept   = "note: declare accepted"
-	markerRefuse   = "note: declare refused"
-	markerLoaded   = "note: loaded ok n="
-	markerMiss     = "note: load miss "
-	markerLoadErr  = "note: load error "
-	markerSaved    = "note: saved ok n="
-	markerSaveErr  = "note: save error "
-	markerCursor   = "note: cursor line="
-	markerResize   = "note: resize relayout"
-	markerClose    = "note: win_close"
-	markerPresents = "note: presents n="
-	markerOK       = "note OK"
-	markerOpenErr  = "note: error open "
+	markerOpen        = "note: open id="
+	markerTabAware    = "note: tab-aware (full-viewport)"
+	markerNotTabAware = "note: not-tab-aware (shim or WND desktop)"
+	markerReady       = "note: ready"
+	markerSettled     = "note: settled"
+	markerExiting     = "note: exiting "
+	markerLoaded      = "note: loaded ok n="
+	markerMiss        = "note: load miss "
+	markerLoadErr     = "note: load error "
+	markerSaved       = "note: saved ok n="
+	markerSaveErr     = "note: save error "
+	markerCursor      = "note: cursor line="
+	markerResize      = "note: resize relayout"
+	markerClose       = "note: win_close"
+	markerPresents    = "note: presents n="
+	markerOK          = "note OK"
+	markerOpenErr     = "note: error open "
 )
+
+// settleTicks is how long the app lets the compositor run before it declares
+// itself settled, mirroring the Zig app's sleep_ticks(2) at the same point. It
+// is the same sys_sleep row, so these are scheduler ticks in both apps.
+const settleTicks = 2
 
 // Frame geometry and the palette, both matching GOEDIT's frame so the two text
 // apps look like the same desktop.
@@ -136,7 +173,7 @@ type app struct {
 
 func main() {
 	a := &app{buf: NewBuffer(), path: defaultPath, top: 1}
-	ta := tabapp.Init(tabapp.Config{Name: appName, Title: appTitle, X: 32, Y: 32, W: natW, H: natH})
+	ta := tabapp.Init(tabapp.Config{Name: appName, Title: appTitle, X: natX, Y: natY, W: natW, H: natH})
 	if ta == nil {
 		vi.ConsoleLine(markerOpenErr + "-1")
 		vi.Exit(1)
@@ -144,17 +181,24 @@ func main() {
 	a.ta = ta
 	vi.ConsoleLine(markerOpen + vi.Itoa64(int64(ta.Win)))
 	if ta.TabAware {
-		vi.ConsoleLine(markerAccept)
+		vi.ConsoleLine(markerTabAware)
 	} else {
 		// The WM refused the declaration (the shim / WND.BIN path): the app
 		// keeps its native presentation, which is the documented no-regression
 		// case, not a failure.
-		vi.ConsoleLine(markerRefuse)
+		vi.ConsoleLine(markerNotTabAware)
 	}
 
 	vi.ConsoleLine(a.load())
 	a.top = a.buf.Follow(a.top, a.rowsIn())
 	a.draw()
+	// ready means the first frame is BUILT AND PRESENTED, which is why it comes
+	// after draw() and not before: the seat specs release injected input here.
+	vi.ConsoleLine(markerReady)
+	// settled means the compositor has had a chance to pick that frame up, which
+	// is what the snapshot gates wait on.
+	vi.Sleep(settleTicks)
+	vi.ConsoleLine(markerSettled)
 	vi.ConsoleLine(a.cursorMarker())
 
 	for {
@@ -182,6 +226,9 @@ func main() {
 			// path that fills a batch and forgets to present it.
 			vi.ConsoleLine(markerPresents + vi.Itoa64(int64(a.presents)))
 			vi.ConsoleLine(markerOK)
+			// The seat specs wait on the exit marker before they read the kernel
+			// registry, so it has to be the LAST thing printed.
+			vi.ConsoleLine(markerExiting + vi.Itoa64(0))
 			a.ta.CloseAndExit(0)
 		case tabapp.ActionResized:
 			a.top = a.buf.Follow(a.top, a.rowsIn())
