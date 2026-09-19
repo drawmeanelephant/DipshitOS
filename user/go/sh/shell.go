@@ -26,6 +26,12 @@ const maxJobs = 8
 // instead of growing the guest heap without bound.
 const maxRedirectBytes = 256 * 1024
 
+// maxSourceBytes bounds one `source FILE`. SH.BIN read the first 2048 bytes
+// and said nothing about the rest; a file larger than the bound is refused
+// loudly here instead, because silently running half a script is exactly the
+// failure this shell refuses elsewhere (the 4 KiB pipe and redirect bounds).
+const maxSourceBytes = 8192
+
 // boundedCapture collects a command's output up to lim bytes and records
 // whether the producer ran past it, so the caller can fail the line loudly
 // rather than write a silently clipped file or hand a pipe stage short
@@ -265,6 +271,12 @@ type Shell struct {
 	nextN     int
 	exitReq   bool
 	monitorRq bool
+	// M19 scripting (slice 4 of #1450).
+	funcs     funcTable
+	sourceReq string  // set by the `source` builtin; runSegment resolves it
+	capture   *[]byte // non-nil while a `$(...)` is collecting output
+	loopBreak bool
+	loopCont  bool
 }
 
 // NewShell wires a fresh interpreter; hist may be shared with the editor.
@@ -277,32 +289,143 @@ func (s *Shell) Status() int { return s.status }
 
 // RunLine interprets one command line and returns (status, action). An
 // empty or comment-only line is a no-op that leaves $? alone.
-func (s *Shell) RunLine(line string) (int, action) {
-	line = strings.Map(func(r rune) rune {
-		if r == escMark {
-			return -1
+func (s *Shell) RunLine(line string) (int, action) { return s.runLine(line, 0) }
+
+// stripEscMarks removes the tokenizer's literal-byte sentinel from a raw
+// line. escMark only ever means "this byte was quoted" within one parse, so
+// a byte arriving from a file, a sourced script, or a program's captured
+// output must not be able to make the expander treat what follows as
+// literal. Byte-wise rather than rune-wise: an invalid UTF-8 byte is passed
+// through instead of being folded to U+FFFD.
+func stripEscMarks(line string) string {
+	if strings.IndexByte(line, escMark) < 0 {
+		return line
+	}
+	out := make([]byte, 0, len(line))
+	for i := 0; i < len(line); i++ {
+		if line[i] != escMark {
+			out = append(out, line[i])
 		}
-		return r
-	}, line)
+	}
+	return string(out)
+}
+
+// runLine is the M19 dispatcher (slice 4 of #1450): the ladder of
+// user/src/sh.zig runLine, in the same order — function definition, command
+// substitution, if/for/while/case, `;`/`&&`/`||` chains, then the
+// per-segment pipeline/redirect/simple path.
+func (s *Shell) runLine(raw string, depth int) (int, action) {
+	line := trimSpace(stripEscMarks(raw))
+	if line == "" {
+		return s.status, actionContinue
+	}
 	if len(line) > maxLineBytes {
 		s.fail("line exceeds " + vsys.Itoa64(maxLineBytes) + " bytes")
+		s.status = 1
 		return 1, actionContinue
 	}
-	toks, err := tokenize(line)
+	if depth > runDepthMax {
+		// The reference returned silently; a shell that stops without saying
+		// so turns a nesting bug into a mystery.
+		s.fail("script nesting exceeds " + vsys.Itoa64(runDepthMax) + " levels")
+		s.status = 2
+		return 2, actionContinue
+	}
+	if isFuncDefLine(line) {
+		// Faithful to sh.zig: a successful definition reports `fn: ok` and
+		// leaves $? alone; a refused one is the only failure.
+		rest := line[2:]
+		if len(line) > 2 && (line[2] == ' ' || line[2] == '\t') {
+			rest = line[3:]
+		}
+		def, ok := parseFuncDef(rest)
+		if !ok || !s.funcs.define(def) {
+			s.out([]byte("fn: bad definition\n"))
+			s.status = 1
+			return 1, actionContinue
+		}
+		s.out([]byte("fn: ok\n"))
+		return s.status, actionContinue
+	}
+	substituted := line
+	if !strings.HasPrefix(line, "for") && !strings.HasPrefix(line, "while") {
+		// A loop's body is expanded when each iteration runs it, so a
+		// for/while line is not substituted as a whole (sh.zig runLine).
+		var act action
+		substituted, act = s.commandSubst(line, depth)
+		if act != actionContinue {
+			return s.status, act
+		}
+	}
+	if st, ok := parseIf(substituted); ok {
+		return s.runIf(st, depth)
+	}
+	if f, ok := parseFor(substituted); ok {
+		return s.runFor(f, depth)
+	}
+	if w, ok := parseWhile(substituted); ok {
+		return s.runWhile(w, depth)
+	}
+	if c, ok := parseCase(substituted); ok {
+		return s.runCase(c, depth)
+	}
+	segs, ops, tooMany := chainSplit(substituted)
+	if tooMany {
+		s.fail("chain too long (at most " + vsys.Itoa64(chainMax) + " segments)")
+		s.status = 2
+		return 2, actionContinue
+	}
+	if len(ops) == 0 {
+		return s.runSegment(substituted, depth)
+	}
+	return s.runChain(segs, ops, depth)
+}
+
+// runChain runs `;`/`&&`/`||` segments left to right at equal precedence. A
+// skipped segment leaves $? untouched, so `false && echo NOPE` still reports
+// the failed condition.
+func (s *Shell) runChain(segs []string, ops []chainOp, depth int) (int, action) {
+	for i := range segs {
+		run := true
+		if i > 0 {
+			switch ops[i-1] {
+			case opAnd:
+				run = s.status == 0
+			case opOr:
+				run = s.status != 0
+			}
+		}
+		if !run || segs[i] == "" {
+			continue
+		}
+		st, act := s.runLine(segs[i], depth)
+		if act != actionContinue {
+			return st, act
+		}
+	}
+	return s.status, actionContinue
+}
+
+// runSegment executes one chain segment: arithmetic expansion, then the
+// pipeline/redirect/background path, then a deferred `source`.
+func (s *Shell) runSegment(line string, depth int) (int, action) {
+	toks, err := tokenize(arithExpand(line))
 	if err != nil {
 		s.fail(err.Error())
+		s.status = 1
 		return 1, actionContinue
 	}
 	if len(toks) == 0 {
 		// Blank, whitespace-only, or comment-only: a no-op that leaves $?
-		// alone, exactly as this function documents. The guard has to live
-		// here — parsePlan reports zero tokens as an empty command, so the
-		// error would fire before the p.left check below could catch it.
+		// alone. The guard has to live here — parsePlan reports zero tokens
+		// as an empty command, so the error would fire before the p.left
+		// check below could catch it.
 		return s.status, actionContinue
 	}
 	p, err := parsePlan(toks, s.env, s.status)
 	if err != nil {
 		s.fail(err.Error())
+		s.status = 1
 		return 1, actionContinue
 	}
 	if len(p.left) == 0 {
@@ -323,14 +446,256 @@ func (s *Shell) RunLine(line string) (int, action) {
 	var st int
 	var act action
 	if p.background {
-		st, act = s.runBackground(p)
+		st, act = s.runBackground(p, depth)
 	} else if len(p.right) > 0 {
 		st, act = s.runPipeline(p)
 	} else {
-		st, act = s.runSingle(p)
+		st, act = s.runSingle(p, depth)
 	}
 	s.status = st
-	return st, act
+	if act != actionContinue {
+		return st, act
+	}
+	// `source` needs the run loop rather than a command: the builtin only
+	// records the request, and the engine resolves it here (sh.zig's
+	// .source action).
+	if s.sourceReq != "" {
+		path := s.sourceReq
+		s.sourceReq = ""
+		return s.runSource(path, depth)
+	}
+	return st, actionContinue
+}
+
+// out writes COMMAND output — the capture buffer while a `$(...)` is
+// collecting, the terminal otherwise. Diagnostics deliberately do not come
+// through here (they call host.Out directly), so a substitution can never
+// swallow the message explaining why it is empty.
+func (s *Shell) out(b []byte) {
+	if s.capture != nil {
+		*s.capture = append(*s.capture, b...)
+		return
+	}
+	s.host.Out(b)
+}
+
+// commandSubst splices the first `$(cmd)` with cmd's captured output.
+//
+// Substitution is TEXTUAL and happens before the line is tokenized, which is
+// the reference's order (sh.zig runLine substitutes, then splits chains, then
+// runs the segment). Two consequences are worth knowing, because both differ
+// from a POSIX shell and neither is an accident here: the captured text is
+// re-tokenized, so it can introduce word splits AND operators (a substitution
+// that yields `a | b` becomes a pipeline stage), and `$(...)` inside single
+// quotes is substituted anyway. Making substitution word-scoped is a parser
+// change (the expander would have to run commands), deliberately not taken in
+// this slice; the retargeted gates assert none of the divergent cases.
+func (s *Shell) commandSubst(line string, depth int) (string, action) {
+	c, ok := locateCommandSubst(line)
+	if !ok {
+		return line, actionContinue
+	}
+	out, act := s.captureLine(c.inner, depth)
+	if act != actionContinue {
+		return line, act
+	}
+	return c.prefix + out + c.suffix, actionContinue
+}
+
+// captureLine runs one line with its output collected, returning that text
+// with trailing newlines trimmed (the reference's contract — `$(echo INNER)`
+// is `INNER`, not `INNER\n`).
+func (s *Shell) captureLine(line string, depth int) (string, action) {
+	var buf []byte
+	prev := s.capture
+	s.capture = &buf
+	_, act := s.runLine(line, depth)
+	s.capture = prev
+	return string(trimEndBytes(buf, '\n', '\r')), act
+}
+
+// trimEndBytes strips any trailing bytes in cut from b.
+func trimEndBytes(b []byte, cut ...byte) []byte {
+	end := len(b)
+	for end > 0 {
+		hit := false
+		for _, c := range cut {
+			if b[end-1] == c {
+				hit = true
+				break
+			}
+		}
+		if !hit {
+			break
+		}
+		end--
+	}
+	return b[:end]
+}
+
+// runBody runs a construct body's `;`-separated commands in order. It
+// reports whether `break` ended the body and whether the last command asked
+// to leave the shell (`continue` ends one iteration without a break).
+func (s *Shell) runBody(body string, depth int) (int, bool, action) {
+	for _, cmd := range splitCommands(body) {
+		st, act := s.runLine(cmd, depth)
+		if act != actionContinue {
+			return st, false, act
+		}
+		if s.loopBreak {
+			return st, true, actionContinue
+		}
+		if s.loopCont {
+			return st, false, actionContinue // end this iteration
+		}
+	}
+	return s.status, false, actionContinue
+}
+
+// runIf runs `if COND; then BODY; [else BODY;] fi`. The status left behind is
+// the branch that ran, or the condition's own when neither did.
+func (s *Shell) runIf(st ifStmt, depth int) (int, action) {
+	if stStr, act := s.runLine(st.cond, depth); act != actionContinue {
+		return stStr, act
+	}
+	if s.status == 0 {
+		_, _, act := s.runBody(st.thenBody, depth)
+		return s.status, act
+	}
+	if st.hasElse {
+		_, _, act := s.runBody(st.elseBody, depth)
+		return s.status, act
+	}
+	return s.status, actionContinue
+}
+
+// runFor runs `for VAR in W...; do BODY; done`, unsetting VAR afterwards
+// exactly as sh.zig did (the loop variable does not leak).
+func (s *Shell) runFor(st forStmt, depth int) (int, action) {
+	for _, w := range st.words {
+		s.env.Set(st.varName, w)
+		s.clearLoopFlags()
+		_, brk, act := s.runBody(st.body, depth)
+		if act != actionContinue {
+			return s.status, act
+		}
+		if brk {
+			break
+		}
+	}
+	s.env.Unset(st.varName)
+	s.clearLoopFlags()
+	return s.status, actionContinue
+}
+
+// runWhile runs `while COND; do BODY; done`, bounded to whileIterMax
+// iterations. The reference stopped silently at the bound; a forced stop is
+// reported and fails, because a loop that quietly ends is indistinguishable
+// from one that finished.
+func (s *Shell) runWhile(st whileStmt, depth int) (int, action) {
+	for i := 0; i < whileIterMax; i++ {
+		s.clearLoopFlags()
+		if cst, act := s.runLine(st.cond, depth); act != actionContinue {
+			return cst, act
+		}
+		if s.status != 0 {
+			s.clearLoopFlags()
+			return s.status, actionContinue
+		}
+		_, brk, act := s.runBody(st.body, depth)
+		if act != actionContinue {
+			return s.status, act
+		}
+		if brk {
+			s.clearLoopFlags()
+			return s.status, actionContinue
+		}
+	}
+	s.clearLoopFlags()
+	s.fail("while: iteration cap (" + vsys.Itoa64(whileIterMax) + ") reached")
+	s.status = 1
+	return 1, actionContinue
+}
+
+// runCase runs the first arm whose pattern matches the expanded subject. No
+// matching arm is a success (sh.zig runCase).
+func (s *Shell) runCase(st caseStmt, depth int) (int, action) {
+	subject := expand(token{kind: tokWord, text: st.subject}, s.env, s.status)
+	for _, arm := range st.arms {
+		if caseMatch(arm.pattern, subject) {
+			_, _, act := s.runBody(arm.body, depth)
+			return s.status, act
+		}
+	}
+	s.status = 0
+	return 0, actionContinue
+}
+
+// clearLoopFlags resets break/continue for the next iteration.
+func (s *Shell) clearLoopFlags() {
+	s.loopBreak = false
+	s.loopCont = false
+}
+
+// bindFuncArgs binds $0, $1..$N and the declared argument names for a call
+// (shell.zig bindFuncArgs). `args` excludes the command word, which is where
+// the reference's index arithmetic came from — there argv[0] WAS the function
+// name, so its argv[1] is this args[0].
+func (s *Shell) bindFuncArgs(f *progFunc, args []string) {
+	s.env.Set("0", f.name)
+	for i := 0; i < len(args) && i < funcArgMax; i++ {
+		s.env.Set(vsys.Itoa64(int64(i+1)), args[i])
+	}
+	for i := 0; i < len(args) && i < len(f.argNames); i++ {
+		s.env.Set(f.argNames[i], args[i])
+	}
+}
+
+// runFuncBody runs a function's pre-split body one command at a time at
+// depth+1 (sh.zig runFunction).
+func (s *Shell) runFuncBody(f *progFunc, depth int) (int, action) {
+	for _, cmd := range f.body {
+		st, act := s.runLine(cmd, depth+1)
+		if act != actionContinue {
+			return st, act
+		}
+	}
+	return s.status, actionContinue
+}
+
+// runSource runs a file's lines in this shell, CRLF-aware and silent about
+// blank lines (sh.zig runSource). Nesting is bounded and the bound is
+// reported rather than passed over.
+func (s *Shell) runSource(path string, depth int) (int, action) {
+	if depth > sourceDepthMax {
+		s.fail("source nesting exceeds " + vsys.Itoa64(sourceDepthMax) + " levels")
+		s.status = 2
+		return 2, actionContinue
+	}
+	b, err := s.host.ReadFile(path, maxSourceBytes+1)
+	if err != nil {
+		s.host.Out([]byte("gosh: source: " + strings.TrimPrefix(openDenial(path, err), "gosh: ")))
+		s.status = 1
+		return 1, actionContinue
+	}
+	if len(b) > maxSourceBytes {
+		s.host.Out([]byte("gosh: source: " + path + ": exceeds the " +
+			vsys.Itoa64(maxSourceBytes) + "-byte source buffer\n"))
+		s.status = 1
+		return 1, actionContinue
+	}
+	body := strings.ReplaceAll(string(b), "\r\n", "\n")
+	for _, ln := range strings.Split(body, "\n") {
+		ln = strings.TrimRight(ln, "\r")
+		if strings.TrimSpace(ln) == "" {
+			continue
+		}
+		st, act := s.runLine(ln, depth+1)
+		if act != actionContinue {
+			return st, act
+		}
+	}
+	return s.status, actionContinue
 }
 
 func (s *Shell) fail(msg string) {
@@ -368,7 +733,7 @@ func (s *Shell) runBuiltin(name string, c *cmdCtx) (int, action) {
 	return st, actionContinue
 }
 
-func (s *Shell) runSingle(p *plan) (int, action) {
+func (s *Shell) runSingle(p *plan, depth int) (int, action) {
 	name := p.left[0]
 	args := p.left[1:]
 	var stdin []byte
@@ -381,7 +746,7 @@ func (s *Shell) runSingle(p *plan) (int, action) {
 	}
 	var cap boundedCapture
 	cap.lim = maxRedirectBytes
-	sink := func(b []byte) { s.host.Out(b) }
+	sink := func(b []byte) { s.out(b) }
 	if p.out != nil {
 		sink = cap.write
 	}
@@ -391,6 +756,21 @@ func (s *Shell) runSingle(p *plan) (int, action) {
 	case 0, 1:
 		st, act = s.runBuiltin(name, &cmdCtx{sh: s, args: args, stdin: stdin, out: sink})
 	default:
+		if f := s.funcs.find(name); f != nil {
+			// A function resolves before the exec seam (sh.zig execute), so a
+			// definition shadows an external app of the same name. A builtin
+			// or tool still wins over a function, because classify ran first.
+			s.bindFuncArgs(f, args)
+			st, act = s.runFuncBody(f, depth)
+			break
+		}
+		if s.capture != nil {
+			// An external app writes fd 1 itself, so its output cannot be
+			// collected; say so rather than interleave it into a
+			// substitution (the reference's notice).
+			s.host.Out([]byte("gosh: cannot capture an external app's output yet\n"))
+			return 1, actionContinue
+		}
 		stv, err := s.runExternal(name, args)
 		st = stv
 		if err != nil {
@@ -475,7 +855,7 @@ func (s *Shell) runPipeline(p *plan) (int, action) {
 	}
 	var rcap boundedCapture
 	rcap.lim = maxRedirectBytes
-	rsink := func(b []byte) { s.host.Out(b) }
+	rsink := func(b []byte) { s.out(b) }
 	if p.out != nil {
 		rsink = rcap.write
 	}
@@ -496,13 +876,13 @@ func (s *Shell) runPipeline(p *plan) (int, action) {
 	return rst, actionContinue
 }
 
-func (s *Shell) runBackground(p *plan) (int, action) {
+func (s *Shell) runBackground(p *plan, depth int) (int, action) {
 	name := p.left[0]
 	if classify(name) != 2 {
 		// A builtin has nothing to background (it runs inside this
 		// process); say so and run it in the foreground instead.
 		s.host.Out([]byte("gosh: " + name + " is a builtin; & runs external apps only\n"))
-		return s.runSingle(&plan{left: p.left, in: p.in, out: p.out})
+		return s.runSingle(&plan{left: p.left, in: p.in, out: p.out}, depth)
 	}
 	if len(s.jobs) >= maxJobs {
 		s.host.Out([]byte("gosh: too many background jobs\n"))
