@@ -1,4 +1,5 @@
-# live-secrets.spec -- M50 TS5 class-B gate (issue #1139, ADR 0024 D8/D10).
+# live-secrets.spec -- M50 TS5 class-B gate (issue #1139, ADR 0024 D8/D10),
+# retargeted to GOSH by M68b (#1450).
 #
 # The secret store live, on one share with a host-seeded `SECRETS.TXT`
 # (`#v1`, one `key<TAB>uid<TAB>value` line): (1) the EL1h monitor's
@@ -22,8 +23,20 @@ vgate_runner_flags -Xswiftc -DSPIKE
 vgate_file script.txt <<'EOF'
 secrets
 vf cat SECRETS.TXT
-exec SH.BIN
+exec GOSH.ELF serial
 EOF
+
+vgate_setup_python <<'PY'
+import os, shutil, sys
+rd = os.environ["RUN_DIR"]
+share = os.environ.get("VG_SHARE") or os.path.join(rd, "share")
+src = os.path.join(".build", "go", "GOSH.ELF")
+if not os.path.exists(src):
+    sys.exit("GOSH.ELF missing (expected " + src + ") - build it first: "
+             "bash tools/go/build-gosh.sh")
+shutil.copy(src, os.path.join(share, "GOSH.ELF"))
+print("staged GOSH.ELF (%d bytes) into share" % os.path.getsize(src))
+PY
 
 vgate_setup_python <<'PY'
 import os
@@ -45,7 +58,7 @@ PY
 
 vgate_run 01 -- --script '$RUN_DIR/script.txt' \
     --script2 '$RUN_DIR/edit.bin' \
-    --script2-after 'sh: attached' \
+    --script2-after 'gosh: attached' \
     --script-expect 'ts5-done' \
     --script-expect-tail 16 \
     --timeout 90
@@ -58,7 +71,7 @@ vgate_assert 01 serial-count '  netkey' 2
 # holds by construction, so even with no OWNERS.TXT entry the file is denied).
 vgate_assert 01 serial-contains 'vf cat: SECRETS.TXT: permission denied'
 # EL0 file ABI: the only in-guest reader is sys_secret_get; cat is denied.
-vgate_assert 01 serial-contains 'sh: cannot open SECRETS.TXT: EACCES'
+vgate_assert 01 serial-contains 'gosh: cannot open SECRETS.TXT: EACCES'
 vgate_assert 01 serial-contains 'ts5-done'
 # Never-logged contract: the known VALUE never reaches the serial transcript,
 # while its NAME (above) does. Names travel; values do not.

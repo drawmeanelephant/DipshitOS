@@ -46,7 +46,111 @@ func init() {
 		"export": bExport, "read": bRead, "jobs": bJobs, "fg": bFg,
 		"history": bHistory, "help": bHelp, "exit": bExit, "monitor": bMonitor,
 		"sleep": bSleep, "clear": bClear,
+		// M50 trust surface (ADR 0024): identity, owner-only chmod, and the
+		// secret store's names. Same verbs and the same output text as the
+		// Zig shell, so the M50 gates retarget without weakening an assert.
+		"whoami": bWhoami, "id": bID, "chmod": bChmod, "secrets": bSecrets,
 	}
+}
+
+// uidSystem is the kernel's system principal (ADR 0024 D1). Duplicated here
+// so the engine's output text does not depend on the guest syscall package.
+const uidSystem = 0
+
+// bWhoami prints the caller's principal, exactly as the Zig shell did:
+// `uid=<n> user` (or `system`), and a refusal when the seam cannot answer.
+func bWhoami(c *cmdCtx) int {
+	uid, _, ok := c.sh.host.Principal()
+	if !ok {
+		c.out([]byte("whoami: no principal\n"))
+		return 1
+	}
+	c.out([]byte("uid=" + vsys.Itoa64(int64(uid)) + principalKind(uid) + "\n"))
+	return 0
+}
+
+// bID adds the capability mask; the M50 gate asserts it agrees with whoami.
+func bID(c *cmdCtx) int {
+	uid, caps, ok := c.sh.host.Principal()
+	if !ok {
+		c.out([]byte("id: no principal\n"))
+		return 1
+	}
+	c.out([]byte("uid=" + vsys.Itoa64(int64(uid)) + principalKind(uid) +
+		" caps=" + vsys.Itoa64(int64(caps)) + "\n"))
+	return 0
+}
+
+func principalKind(uid uint32) string {
+	if uid == uidSystem {
+		return " system"
+	}
+	return " user"
+}
+
+// bChmod forwards an owner-only mode change through slot 69. The kernel is
+// the authority on ownership and on the group triplet; the shell only parses
+// the octal mode and reports the kernel's own errno name.
+func bChmod(c *cmdCtx) int {
+	if len(c.args) < 2 {
+		c.out([]byte("chmod: usage: chmod MODE FILE\n"))
+		return 1
+	}
+	mode, ok := parseOctMode(c.args[0])
+	if !ok {
+		c.out([]byte("chmod: invalid mode (use octal, e.g. 600)\n"))
+		return 1
+	}
+	file := c.args[1]
+	if err := c.sh.host.Chmod(file, mode); err != nil {
+		if oe, denial := deniedAs(err); denial {
+			c.out([]byte("chmod: " + oe.path + ": " + oe.name + "\n"))
+		} else {
+			c.out([]byte("chmod: " + file + ": " + err.Error() + "\n"))
+		}
+		return 1
+	}
+	c.out([]byte("chmod: ok\n"))
+	return 0
+}
+
+// bSecrets lists the CALLER's store entry names (slot 70). Values never
+// travel through this seam, so the never-logged contract holds here too
+// (ADR 0024 D8).
+func bSecrets(c *cmdCtx) int {
+	names, ok := c.sh.host.SecretNames()
+	if !ok {
+		c.out([]byte("secrets: unavailable\n"))
+		return 1
+	}
+	if len(names) == 0 {
+		c.out([]byte("secrets: (none)\n"))
+		return 0
+	}
+	for _, n := range names {
+		c.out([]byte("  " + n + "\n"))
+	}
+	return 0
+}
+
+// parseOctMode parses a 1..4 digit octal mode (e.g. `600`, `0600`, `644`),
+// bounded to the permission bits. The kernel re-validates.
+func parseOctMode(s string) (uint16, bool) {
+	if len(s) == 0 || len(s) > 4 {
+		return 0, false
+	}
+	var v uint16
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if ch < '0' || ch > '7' {
+			return 0, false
+		}
+		v = v*8 + uint16(ch-'0')
+	}
+	if v > 0o777 {
+		return 0, false
+	}
+	return v, true
 }
 
 func bEcho(c *cmdCtx) int {
@@ -77,7 +181,7 @@ func bCat(c *cmdCtx) int {
 				c.out([]byte("gosh: cat: " + f + ": " + errTooLarge.Error() + "\n"))
 				return 1
 			}
-			c.out([]byte("gosh: cat: " + f + ": not found\n"))
+			c.out([]byte(openDenial(f, err)))
 			return 1
 		}
 		c.out(b)

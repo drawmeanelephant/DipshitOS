@@ -52,6 +52,27 @@ func (c *boundedCapture) write(b []byte) {
 // exit 0.
 var errTooLarge = errors.New("input exceeds the 4096-byte buffer")
 
+// openError is a file-ABI refusal that carries the KERNEL's errno name. The
+// M50 trust boundary makes the difference load-bearing: an ownership denial
+// (EACCES) and an absent file (ENOENT) are different facts, and a shell that
+// prints "not found" for both hides the whole trust surface from the user
+// (and from the gate that asserts it).
+type openError struct {
+	path string
+	name string
+}
+
+func (e *openError) Error() string { return e.name }
+
+// deniedAs reports err as an openError when it is one.
+func deniedAs(err error) (*openError, bool) {
+	var oe *openError
+	if errors.As(err, &oe) {
+		return oe, true
+	}
+	return nil, false
+}
+
 // readBounded reads at most maxPipeBytes of path, refusing a larger file.
 func (s *Shell) readBounded(path string) ([]byte, error) {
 	b, err := s.host.ReadFile(path, maxPipeBytes+1)
@@ -72,10 +93,20 @@ func (s *Shell) readInput(path string) ([]byte, bool) {
 		s.host.Out([]byte("gosh: " + path + ": " + errTooLarge.Error() + "\n"))
 		return nil, false
 	case err != nil:
-		s.host.Out([]byte("gosh: " + path + ": not found\n"))
+		s.host.Out([]byte(openDenial(path, err)))
 		return nil, false
 	}
 	return b, true
+}
+
+// openDenial renders a failed open the way the shell reports one: the
+// kernel's errno name when the seam supplied one, and the plain "not found"
+// fallback otherwise.
+func openDenial(path string, err error) string {
+	if oe, ok := deniedAs(err); ok {
+		return "gosh: cannot open " + oe.path + ": " + oe.name + "\n"
+	}
+	return "gosh: " + path + ": not found\n"
 }
 
 // action tells the glue what to do after the current line.
@@ -92,6 +123,16 @@ const (
 type Host interface {
 	// Marker prints a gate-observable lifecycle line (single write).
 	Marker(line string)
+	// Principal gives the calling process's identity (slot 68), or ok=false
+	// when the seam cannot answer. `whoami`/`id` print it.
+	Principal() (uid uint32, caps uint32, ok bool)
+	// Chmod applies the owner-only mode change (slot 69). The kernel is the
+	// authority; the shell only forwards the octal mode.
+	Chmod(path string, mode uint16) error
+	// SecretNames lists the CALLER's entry names from the secret store
+	// (slot 70). Values are deliberately not part of this seam: the shell
+	// prints names only (ADR 0024 D8).
+	SecretNames() ([]string, bool)
 	// Out writes command output (the tty grid in the glue's tab mode).
 	Out(b []byte)
 	// RunExternal tries the SH.BIN candidate names for name against the

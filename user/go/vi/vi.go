@@ -111,6 +111,9 @@ const (
 	SlotMmap         uintptr = 63
 	SlotTime         uintptr = 66
 	SlotTtyAttach    uintptr = 67
+	SlotPrincipal    uintptr = 68 // M50 TS1: the read-only identity report (trust.go)
+	SlotFileMode     uintptr = 69 // M50 TS2: owner-only chmod (trust.go)
+	SlotSecretGet    uintptr = 70 // M50 TS5: the caller's secret entries (trust.go)
 	SlotSockReady    uintptr = 76
 	SlotFileSync     uintptr = 77 // M66a (#1443): the ADR 0007 durability row
 )

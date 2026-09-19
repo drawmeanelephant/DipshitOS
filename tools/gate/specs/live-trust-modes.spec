@@ -1,4 +1,5 @@
-# live-trust-modes.spec -- M50 TS2 class-B gate (issue #1136, ADR 0024 D3/D4/D8).
+# live-trust-modes.spec -- M50 TS2 class-B gate (issue #1136, ADR 0024 D3/D4/D8),
+# retargeted to GOSH by M68b (#1450).
 #
 # The ownership/mode boundary live, on one share with a host-seeded
 # `OWNERS.TXT`: (1) a uid_system-owned 0600 file is EACCES for uid_user
@@ -21,8 +22,20 @@ vgate_runner_flags -Xswiftc -DSPIKE
 vgate_file script.txt <<'EOF'
 vf cat SECRETS.TXT
 sh SECRETS.TXT
-exec SH.BIN
+exec GOSH.ELF serial
 EOF
+
+vgate_setup_python <<'PY'
+import os, shutil, sys
+rd = os.environ["RUN_DIR"]
+share = os.environ.get("VG_SHARE") or os.path.join(rd, "share")
+src = os.path.join(".build", "go", "GOSH.ELF")
+if not os.path.exists(src):
+    sys.exit("GOSH.ELF missing (expected " + src + ") - build it first: "
+             "bash tools/go/build-gosh.sh")
+shutil.copy(src, os.path.join(share, "GOSH.ELF"))
+print("staged GOSH.ELF (%d bytes) into share" % os.path.getsize(src))
+PY
 
 vgate_setup_python <<'PY'
 import os
@@ -49,7 +62,7 @@ PY
 
 vgate_run 01 -- --script '$RUN_DIR/script.txt' \
     --script2 '$RUN_DIR/edit.bin' \
-    --script2-after 'sh: attached' \
+    --script2-after 'gosh: attached' \
     --script-expect 'ts2-done' \
     --script-expect-tail 16 \
     --timeout 90
@@ -59,13 +72,13 @@ vgate_run 01 -- --script '$RUN_DIR/script.txt' \
 vgate_assert 01 serial-contains 'vf cat: SECRETS.TXT: permission denied'
 vgate_assert 01 serial-contains 'sh: SECRETS.TXT: permission denied'
 # EL0 file ABI: owner mismatch (uid_system-owned 0600, caller uid_user).
-vgate_assert 01 serial-contains 'sh: cannot open TARGET.TXT: EACCES'
+vgate_assert 01 serial-contains 'gosh: cannot open TARGET.TXT: EACCES'
 # Default policy: the unlisted file reads (the empty/absent table behavior).
 vgate_assert 01 serial-contains 'ts2-plain-content'
 # Owner chmod succeeds and persists.
 vgate_assert 01 serial-contains 'chmod: ok'
 # Secret class: file-ABI read denied even though it is uid_system-owned 0600.
-vgate_assert 01 serial-contains 'sh: cannot open SECRETS.TXT: EACCES'
+vgate_assert 01 serial-contains 'gosh: cannot open SECRETS.TXT: EACCES'
 vgate_assert 01 serial-contains 'ts2-done'
 # The secret value never reaches the serial transcript.
 vgate_assert 01 serial-absent 'ts2-secret-value'

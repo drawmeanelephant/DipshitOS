@@ -21,10 +21,50 @@ type fakeHost struct {
 	released   int64 // the status WaitExternal returns
 	probeRuns  int   // ProbeExternal call counter
 	probeAfter int   // probes before the job reports exited
+
+	// M50 trust surface (ADR 0024). The zero value is "the kernel answered":
+	// uid_user with no caps, a readable store, and no ownership denials.
+	uid            uint32
+	caps           uint32
+	noPrincipal    bool              // slot 68 refuses (a host build's shape)
+	secNames       []string          // the caller's store entry names
+	secUnavailable bool              // slot 70 refuses
+	denied         map[string]string // path -> errno name for an open refusal
+	chmoded        map[string]uint16 // path -> the mode the shell forwarded
+	chmodErr       map[string]string // path -> errno name for a denied chmod
 }
 
 func newFakeHost() *fakeHost {
-	return &fakeHost{status: map[string]int64{}, missing: map[string]bool{}, files: map[string][]byte{}, released: 43, probeAfter: -1}
+	return &fakeHost{
+		status: map[string]int64{}, missing: map[string]bool{},
+		files: map[string][]byte{}, released: 43, probeAfter: -1,
+		uid: 1000,
+	}
+}
+
+func (f *fakeHost) Principal() (uint32, uint32, bool) {
+	if f.noPrincipal {
+		return 0, 0, false
+	}
+	return f.uid, f.caps, true
+}
+
+func (f *fakeHost) Chmod(path string, mode uint16) error {
+	if name, ok := f.chmodErr[path]; ok {
+		return &openError{path: path, name: name}
+	}
+	if f.chmoded == nil {
+		f.chmoded = map[string]uint16{}
+	}
+	f.chmoded[path] = mode
+	return nil
+}
+
+func (f *fakeHost) SecretNames() ([]string, bool) {
+	if f.secUnavailable {
+		return nil, false
+	}
+	return f.secNames, true
 }
 
 func (f *fakeHost) Marker(line string)           { f.markers = append(f.markers, line) }
@@ -57,6 +97,9 @@ func (f *fakeHost) ProbeExternal(pid int64) (int64, int) {
 func (f *fakeHost) SleepTick() { f.ticks = append(f.ticks, 1) }
 
 func (f *fakeHost) ReadFile(path string, max int) ([]byte, error) {
+	if name, ok := f.denied[path]; ok {
+		return nil, &openError{path: path, name: name}
+	}
 	if b, ok := f.files[path]; ok {
 		if len(b) > max {
 			return b[:max], nil
@@ -476,5 +519,174 @@ func TestEngineExecPrefix(t *testing.T) {
 	}
 	if len(h.markers) != 1 || !strings.HasPrefix(h.markers[0], "gosh: job 1 pid=") {
 		t.Fatalf("exec & markers = %v", h.markers)
+	}
+}
+
+// --- M50 trust surface (ADR 0024), retargeted into GOSH by M68b (#1450) ------
+
+// TestTrustPrincipal pins whoami/id against the seam: the same text the Zig
+// shell printed, because the M50 gate asserts it verbatim.
+func TestTrustPrincipal(t *testing.T) {
+	h := newFakeHost()
+	run, _ := session(h)
+	if st := run("whoami"); st != 0 {
+		t.Fatalf("whoami status = %d", st)
+	}
+	if got := h.outString(); got != "uid=1000 user\n" {
+		t.Fatalf("whoami = %q want uid=1000 user", got)
+	}
+	h.out = nil
+	if st := run("id"); st != 0 {
+		t.Fatalf("id status = %d", st)
+	}
+	if got := h.outString(); got != "uid=1000 user caps=0\n" {
+		t.Fatalf("id = %q want uid=1000 user caps=0", got)
+	}
+}
+
+// The system principal renders as `system`, and a seam that cannot answer is
+// an honest status 1 — never a fabricated uid 0 with no identity behind it.
+func TestTrustPrincipalSystemAndRefusal(t *testing.T) {
+	h := newFakeHost()
+	h.uid = 0
+	run, _ := session(h)
+	run("whoami")
+	if got := h.outString(); got != "uid=0 system\n" {
+		t.Fatalf("system whoami = %q", got)
+	}
+	h.out = nil
+	h.noPrincipal = true
+	if st := run("whoami"); st != 1 {
+		t.Fatalf("no-principal whoami status = %d want 1", st)
+	}
+	if got := h.outString(); got != "whoami: no principal\n" {
+		t.Fatalf("no-principal whoami = %q", got)
+	}
+	h.out = nil
+	if st := run("id"); st != 1 {
+		t.Fatalf("no-principal id status = %d want 1", st)
+	}
+	if got := h.outString(); got != "id: no principal\n" {
+		t.Fatalf("no-principal id = %q", got)
+	}
+}
+
+// TestTrustChmod pins the forwarding: the octal mode reaches the kernel, the
+// refusal carries the kernel's errno name, and bad input never reaches it.
+func TestTrustChmod(t *testing.T) {
+	h := newFakeHost()
+	run, _ := session(h)
+	if st := run("chmod 600 PLAIN.TXT"); st != 0 {
+		t.Fatalf("chmod status = %d", st)
+	}
+	if got := h.chmoded["PLAIN.TXT"]; got != 0o600 {
+		t.Fatalf("forwarded mode = %o want 600", got)
+	}
+	if got := h.outString(); got != "chmod: ok\n" {
+		t.Fatalf("chmod = %q", got)
+	}
+
+	h.out = nil
+	h.chmodErr = map[string]string{"TARGET.TXT": "EACCES"}
+	if st := run("chmod 600 TARGET.TXT"); st != 1 {
+		t.Fatalf("denied chmod status = %d want 1", st)
+	}
+	if got := h.outString(); got != "chmod: TARGET.TXT: EACCES\n" {
+		t.Fatalf("denied chmod = %q", got)
+	}
+
+	h.out = nil
+	if st := run("chmod 600"); st != 1 {
+		t.Fatalf("chmod usage status = %d want 1", st)
+	}
+	if got := h.outString(); got != "chmod: usage: chmod MODE FILE\n" {
+		t.Fatalf("chmod usage = %q", got)
+	}
+
+	h.out = nil
+	if st := run("chmod 9x9 PLAIN.TXT"); st != 1 {
+		t.Fatalf("bad-mode chmod status = %d want 1", st)
+	}
+	if got := h.outString(); got != "chmod: invalid mode (use octal, e.g. 600)\n" {
+		t.Fatalf("bad-mode chmod = %q", got)
+	}
+}
+
+// TestTrustSecrets pins the name-only listing: two-space indent per name,
+// `(none)` for an empty store, and a refusal when the slot will not answer.
+// A value must never appear here — this seam does not carry one.
+func TestTrustSecrets(t *testing.T) {
+	h := newFakeHost()
+	run, _ := session(h)
+	h.secNames = []string{"netkey", "other"}
+	if st := run("secrets"); st != 0 {
+		t.Fatalf("secrets status = %d", st)
+	}
+	if got := h.outString(); got != "  netkey\n  other\n" {
+		t.Fatalf("secrets = %q", got)
+	}
+
+	h.out = nil
+	h.secNames = nil
+	run("secrets")
+	if got := h.outString(); got != "secrets: (none)\n" {
+		t.Fatalf("empty secrets = %q", got)
+	}
+
+	h.out = nil
+	h.secUnavailable = true
+	if st := run("secrets"); st != 1 {
+		t.Fatalf("unavailable secrets status = %d want 1", st)
+	}
+	if got := h.outString(); got != "secrets: unavailable\n" {
+		t.Fatalf("unavailable secrets = %q", got)
+	}
+}
+
+// TestTrustOpenDenialNamesTheErrno pins the M50 gate's load-bearing message:
+// a denied open prints the KERNEL's errno, not a generic "not found", both
+// for `cat FILE` and for a `< FILE` redirect.
+func TestTrustOpenDenialNamesTheErrno(t *testing.T) {
+	h := newFakeHost()
+	h.denied = map[string]string{"TARGET.TXT": "EACCES", "SECRETS.TXT": "EACCES"}
+	run, _ := session(h)
+	if st := run("cat TARGET.TXT"); st != 1 {
+		t.Fatalf("denied cat status = %d want 1", st)
+	}
+	if got := h.outString(); got != "gosh: cannot open TARGET.TXT: EACCES\n" {
+		t.Fatalf("denied cat = %q", got)
+	}
+	h.out = nil
+	if st := run("cat < SECRETS.TXT"); st != 1 {
+		t.Fatalf("denied redirect status = %d want 1", st)
+	}
+	if got := h.outString(); got != "gosh: cannot open SECRETS.TXT: EACCES\n" {
+		t.Fatalf("denied redirect = %q", got)
+	}
+	// A genuinely absent file keeps the plain message.
+	h.out = nil
+	if st := run("cat < NOPE.TXT"); st != 1 {
+		t.Fatalf("absent redirect status = %d want 1", st)
+	}
+	if got := h.outString(); got != "gosh: NOPE.TXT: not found\n" {
+		t.Fatalf("absent redirect = %q", got)
+	}
+}
+
+// parseOctMode is the shell's half of the chmod contract: 1..4 octal digits
+// within the permission bits; the kernel re-validates and owns the group
+// triplet.
+func TestParseOctMode(t *testing.T) {
+	good := map[string]uint16{"600": 0o600, "0600": 0o600, "644": 0o644, "777": 0o777, "0": 0}
+	for in, want := range good {
+		got, ok := parseOctMode(in)
+		if !ok || got != want {
+			t.Fatalf("parseOctMode(%q) = %o/%v want %o", in, got, ok, want)
+		}
+	}
+	for _, bad := range []string{"", "8", "9x9", "10000", "800", "06000"} {
+		if got, ok := parseOctMode(bad); ok {
+			t.Fatalf("parseOctMode(%q) = %o accepted", bad, got)
+		}
 	}
 }

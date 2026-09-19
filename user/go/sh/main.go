@@ -466,9 +466,45 @@ func (g *goshHost) PipeReadAll() ([]byte, error) {
 func (g *goshHost) ReadFile(path string, max int) ([]byte, error) {
 	b, r := vi.ReadFileAll(path, max)
 	if r < 0 {
+		// Carry the kernel's own errno name: an ownership denial (EACCES)
+		// and an absent file (ENOENT) are different facts, and the M50
+		// trust gates assert which one the shell reported.
+		if name := vi.ErrnoName(r); name != "" {
+			return nil, &openError{path: path, name: name}
+		}
 		return nil, errNotFound
 	}
 	return b, nil
+}
+
+// Principal is the caller's identity (slot 68) for `whoami`/`id`.
+func (g *goshHost) Principal() (uint32, uint32, bool) { return vi.Principal() }
+
+// Chmod is the owner-only mode change (slot 69).
+func (g *goshHost) Chmod(path string, mode uint16) error {
+	r := vi.FileMode(path, mode)
+	if r < 0 {
+		if name := vi.ErrnoName(r); name != "" {
+			return &openError{path: path, name: name}
+		}
+		return errNotFound
+	}
+	return nil
+}
+
+// SecretNames reads the caller's store entry NAMES (slot 70). The values are
+// deliberately not carried through this seam.
+func (g *goshHost) SecretNames() ([]string, bool) {
+	var recs [vi.SecretEntriesMax]vi.SecretRecord
+	n, r := vi.SecretList(recs[:])
+	if r < 0 {
+		return nil, false
+	}
+	out := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		out = append(out, recs[i].KeyString())
+	}
+	return out, true
 }
 
 func (g *goshHost) WriteFile(path string, b []byte, appendMode bool) error {
