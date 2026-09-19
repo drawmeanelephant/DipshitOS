@@ -10,6 +10,15 @@
 //          a fresh post-restore serial query must recover a RAM-only clipboard
 //          marker. Supports only --overlay-base/--vars/--serial/--cpus/--timeout;
 //          needs --timeout in (0,600]. See docs/hardware-contract.md.)
+//          [--vz-restore-save <dir>] [--vz-restore-load <dir>] (M70g G3, #1459:
+//          restore beyond same-process — one process boots, stores the marker,
+//          saves state + the ASIF overlay + the marker into <dir> and exits;
+//          a NEW process restores from <dir> instead of booting and must
+//          recover the marker.) Device knobs --display/--input/--usb-msd/
+//          --custom-virtio are accepted under --vz-restore so their
+//          save/restore verdict can be measured (validateSaveRestoreSupport
+//          + the full cycle); a refusal is printed as `VZ-RESTORE:
+//          validateSaveRestoreSupport REFUSED ...` before the error exit.
 //         [--timeout <s|0>] (0 = run until Ctrl-C) [--expect <line>] [--terminal-marker <line>]
 //         [--cpus <n>] (claim 907: VCPU count, default 2 — the four-core
 //          four-domain stress gate boots 4)
@@ -372,6 +381,13 @@ var pointerRoute: String = "window"
 // the post (the claim-4993 observation).
 var pointerRequestTrust = false
 let vzRestore = arguments.contains("--vz-restore")
+// M70g G3 (#1459): restore beyond same-process. `--vz-restore-save <dir>`
+// boots, stores the RAM marker, saves the machine state + the ASIF overlay
+// + the marker into <dir> and EXITS; `--vz-restore-load <dir>` builds the
+// equivalent configuration in a NEW process, restores from <dir> instead of
+// booting, and must recover the marker by a fresh serial query.
+var vzRestoreSaveDir: String?
+var vzRestoreLoadDir: String?
 var cpuCount = 2
 var timeout: TimeInterval = 30
 var timeoutExplicit = false
@@ -688,10 +704,15 @@ var idx = arguments.count > 1 && arguments[1].hasPrefix("--") ? 1 : 2
 while idx < arguments.count {
     let arg = arguments[idx]
     if vzRestore, arg.hasPrefix("--") {
-        guard ["--vz-restore", "--overlay-base", "--vars", "--serial", "--cpus", "--timeout"].contains(arg) else {
-            fail("--vz-restore is a standalone headless save/restore probe; supports only --overlay-base, --vars, --serial, --cpus, and --timeout.")
+        // M70g G3 (#1459): the probe also takes the save/load directory and
+        // the device knobs whose save/restore support it measures.
+        let valued = ["--overlay-base", "--vars", "--serial", "--cpus", "--timeout",
+                      "--vz-restore-save", "--vz-restore-load", "--usb-msd"]
+        let bare = ["--vz-restore", "--display", "--input", "--custom-virtio"]
+        guard valued.contains(arg) || bare.contains(arg) else {
+            fail("--vz-restore is a standalone headless save/restore probe; supports only --overlay-base, --vars, --serial, --cpus, --timeout, --vz-restore-save/--vz-restore-load <dir>, and the device knobs --display, --input, --usb-msd, --custom-virtio.")
         }
-        if arg != "--vz-restore" {
+        if valued.contains(arg) {
             guard idx + 1 < arguments.count, !arguments[idx + 1].hasPrefix("--") else {
                 fail("--vz-restore: \(arg) requires a value.")
             }
@@ -775,6 +796,12 @@ while idx < arguments.count {
         idx += 1
     } else if arg == "--vz-restore" {
         idx += 1
+    } else if arg == "--vz-restore-save", idx + 1 < arguments.count {
+        vzRestoreSaveDir = arguments[idx + 1]
+        idx += 2
+    } else if arg == "--vz-restore-load", idx + 1 < arguments.count {
+        vzRestoreLoadDir = arguments[idx + 1]
+        idx += 2
     } else if arg == "--cpus", idx + 1 < arguments.count {
         guard let n = Int(arguments[idx + 1]), n >= 1, n <= 8 else {
             fail("--cpus requires a count in 1...8, got '\(arguments[idx + 1])'.")
@@ -1283,6 +1310,13 @@ guard osVersion.majorVersion >= 27 else {
 if vzRestore, !timeout.isFinite || timeout <= 0 || timeout > 600 {
     fail("--vz-restore requires --timeout in (0, 600] seconds; it never runs unbounded.")
 }
+// M70g G3 (#1459): the cross-process pair is two processes with one role each.
+if vzRestoreSaveDir != nil || vzRestoreLoadDir != nil {
+    guard vzRestore else { fail("--vz-restore-save/--vz-restore-load require --vz-restore.") }
+    guard vzRestoreSaveDir == nil || vzRestoreLoadDir == nil else {
+        fail("--vz-restore-save and --vz-restore-load are mutually exclusive (one process saves, another loads).")
+    }
+}
 
 let overlayMode = overlayBasePath != nil
 let diskURL = URL(fileURLWithPath: diskImagePath)
@@ -1312,6 +1346,36 @@ let config = VZVirtualMachineConfiguration()
 config.bootLoader = bootLoader
 config.memorySize = 256 * 1024 * 1024
 config.cpuCount = cpuCount
+// M70g G3 (#1459): a saved machine state is bound to the platform's
+// machineIdentifier (VZGenericPlatformConfiguration.h: "When a virtual machine
+// is saved to disk then loaded again, the machineIdentifier must match the
+// machineIdentifier of the saved virtual machine"). VZ mints a random one per
+// configuration, so the SAVE process persists its identifier and the LOAD
+// process adopts it. Observed 2026-09-18 without this: restoreMachineStateFrom
+// in a new process fails VZErrorRestore (12) "invalid argument". The default
+// VM (and the same-process probe) keeps VZ's implicit platform, byte-identical.
+if vzRestoreSaveDir != nil || vzRestoreLoadDir != nil {
+    let platform = VZGenericPlatformConfiguration()
+    if let load = vzRestoreLoadDir {
+        let idURL = URL(fileURLWithPath: load, isDirectory: true).appendingPathComponent("machine-id.bin")
+        guard let data = FileManager.default.contents(atPath: idURL.path),
+              let id = VZGenericMachineIdentifier(dataRepresentation: data) else {
+            fail("--vz-restore-load: no valid machine-id.bin in '\(load)' (run --vz-restore-save first).")
+        }
+        platform.machineIdentifier = id
+        print("  platform: machineIdentifier adopted from \(idURL.path) (--vz-restore-load)")
+    } else if let save = vzRestoreSaveDir {
+        let dir = URL(fileURLWithPath: save, isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try platform.machineIdentifier.dataRepresentation.write(to: dir.appendingPathComponent("machine-id.bin"))
+        } catch {
+            fail("--vz-restore-save: could not persist the machine identifier into '\(save)': \(error)")
+        }
+        print("  platform: machineIdentifier persisted to \(dir.appendingPathComponent("machine-id.bin").path) (--vz-restore-save)")
+    }
+    config.platform = platform
+}
 
 do {
     if let base = overlayBasePath {
@@ -1327,18 +1391,45 @@ do {
         guard FileManager.default.fileExists(atPath: baseURL.path) else {
             fail("Overlay base image not found at '\(base)'.")
         }
-        let stackDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("virelai-overlay-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: stackDir, withIntermediateDirectories: true)
-        overlayCleanupPath = stackDir.path
         let diskBase = try DiskImage(opening: .open(url: baseURL, mode: .readOnly))
-        let layer = ASIFCreationConfiguration.layer(
-            url: stackDir.appendingPathComponent("overlay.asif"),
-            type: .overlay(blockCount: Int(diskBase.blockCount)))
-        let stacked = try diskBase.appending(layer)
-        let attachment = try VZDiskImageStorageDeviceAttachment(diskImage: stacked)
-        config.storageDevices = [VZVirtioBlockDeviceConfiguration(attachment: attachment)]
-        print("  disk: \(base) (base, read-only) + throwaway ASIF overlay in \(stackDir.path)")
+        if let load = vzRestoreLoadDir {
+            // M70g G3 (#1459): the LOAD process must see the disk exactly as
+            // the SAVE process left it, so it re-opens the overlay that
+            // process persisted instead of creating a fresh one.
+            let overlayURL = URL(fileURLWithPath: load, isDirectory: true).appendingPathComponent("overlay.asif")
+            guard FileManager.default.fileExists(atPath: overlayURL.path) else {
+                fail("--vz-restore-load: no overlay.asif in '\(load)' (run --vz-restore-save first).")
+            }
+            let overlay = try DiskImage(opening: .open(url: overlayURL, mode: .readWrite))
+            let stacked = try diskBase.appending(overlay)
+            let attachment = try VZDiskImageStorageDeviceAttachment(diskImage: stacked)
+            config.storageDevices = [VZVirtioBlockDeviceConfiguration(attachment: attachment)]
+            print("  disk: \(base) (base, read-only) + persisted ASIF overlay \(overlayURL.path) (--vz-restore-load)")
+        } else {
+            let stackDir: URL
+            if let save = vzRestoreSaveDir {
+                // M70g G3 (#1459): the overlay outlives this process — no
+                // cleanup; the load process (or a failed run's post-mortem)
+                // owns it.
+                stackDir = URL(fileURLWithPath: save, isDirectory: true)
+            } else {
+                stackDir = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("virelai-overlay-\(UUID().uuidString)", isDirectory: true)
+                overlayCleanupPath = stackDir.path
+            }
+            try FileManager.default.createDirectory(at: stackDir, withIntermediateDirectories: true)
+            let layer = ASIFCreationConfiguration.layer(
+                url: stackDir.appendingPathComponent("overlay.asif"),
+                type: .overlay(blockCount: Int(diskBase.blockCount)))
+            let stacked = try diskBase.appending(layer)
+            let attachment = try VZDiskImageStorageDeviceAttachment(diskImage: stacked)
+            config.storageDevices = [VZVirtioBlockDeviceConfiguration(attachment: attachment)]
+            if vzRestoreSaveDir != nil {
+                print("  disk: \(base) (base, read-only) + persisted ASIF overlay in \(stackDir.path) (--vz-restore-save; kept for the load process)")
+            } else {
+                print("  disk: \(base) (base, read-only) + throwaway ASIF overlay in \(stackDir.path)")
+            }
+        }
 #else
         fail("--overlay-base needs an SDK with DiskImageKit (macOS 27+); this binary was built without it.")
 #endif
@@ -2020,10 +2111,20 @@ if customVirtioEnabled {
 do { try config.validate() } catch { fail("Invalid VM configuration: \(error)") }
 if vzRestore {
 #if arch(arm64)
+    // M70g G3 (#1459): name the attached extras so a verdict line is
+    // self-describing when it lands in docs/hardware-contract.md.
+    var vzRestoreExtras: [String] = []
+    if displayMode { vzRestoreExtras.append("virtio-gpu") }
+    if inputMode { vzRestoreExtras.append("usb-hid(xhci)") }
+    if usbMsdPath != nil { vzRestoreExtras.append("usb-msd(xhci)") }
+    if customVirtioEnabled { vzRestoreExtras.append("custom-virtio") }
+    let vzRestoreDevices = vzRestoreExtras.isEmpty ? "headless-base" : vzRestoreExtras.joined(separator: ",")
+    print("VZ-RESTORE: devices=\(vzRestoreDevices) mode=\(vzRestoreLoadDir != nil ? "load" : vzRestoreSaveDir != nil ? "save" : "same-process")")
     do {
         try config.validateSaveRestoreSupport()
         print("VZ-RESTORE: validateSaveRestoreSupport passed; \(ProcessInfo.processInfo.operatingSystemVersionString), arm64")
     } catch {
+        print("VZ-RESTORE: validateSaveRestoreSupport REFUSED devices=\(vzRestoreDevices) error=\(error as NSError)")
         fail("--vz-restore validateSaveRestoreSupport failed: \(error as NSError). No snapshot or reboot fallback.")
     }
 #else
@@ -2240,6 +2341,15 @@ if netNatEnabled {
 }
 
 runner.queue.async {
+    if vzRestore, let load = vzRestoreLoadDir {
+        // M70g G3 (#1459): the load process never boots — it restores the
+        // other process's saved state into this fresh VZVirtualMachine.
+        let probe = VZRestoreProbe(vm: runner.vm, queue: runner.queue, serialURL: serialURL,
+                                   input: consoleInputPipe.fileHandleForWriting, timeout: timeout,
+                                   mode: .load(URL(fileURLWithPath: load, isDirectory: true)))
+        probe.startFromSavedState()
+        return
+    }
     runner.vm.start { result in
         if case .failure(let error) = result {
             restoreTerminal()
@@ -2248,8 +2358,10 @@ runner.queue.async {
         }
         vmDidStart = true
         if vzRestore {
+            let mode: VZRestoreProbe.Mode = vzRestoreSaveDir.map { .save(URL(fileURLWithPath: $0, isDirectory: true)) } ?? .sameProcess
             let probe = VZRestoreProbe(vm: runner.vm, queue: runner.queue, serialURL: serialURL,
-                                       input: consoleInputPipe.fileHandleForWriting, timeout: timeout)
+                                       input: consoleInputPipe.fileHandleForWriting, timeout: timeout,
+                                       mode: mode)
             probe.start()
         }
     }

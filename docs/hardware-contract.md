@@ -368,11 +368,43 @@ Non-PCI platform facts:
   (26B5086k), arm64, Xcode 27.0 (27A266a). `--vz-restore` passes
   `validateSaveRestoreSupport`, then `pause` → `saveMachineStateTo` → `stop`
   → `restoreMachineStateFrom` → `resume`; a fresh serial query recovers the
-  RAM-only clipboard UUID (`live-vz-restore`). Proven only for same-process,
-  same-host headless EFI/disk/serial/entropy, including the ASIF overlay;
-  graphics/custom-virtio/USB and cross-process/host portability are unproven.
-  Saved state is deleted on success; failures may leave it beside the serial log
-  until enclosing temporary-directory cleanup. This is not a framebuffer snapshot.
+  RAM-only clipboard UUID (`live-vz-restore`). Same-process, same-host
+  headless EFI/disk/serial/entropy, including the ASIF overlay. Saved state is
+  deleted on success; failures may leave it beside the serial log until
+  enclosing temporary-directory cleanup. This is not a framebuffer snapshot.
+  **M70g G3 (#1459) — [observed] 2026-09-18, same host/build, `live-vz-restore`
+  runs `save`/`load`/`gpu`/`usb`/`msd`/`cvc`:**
+  - **Cross-process restore works.** `--vz-restore-save <dir>` (process A)
+    saves state + the ASIF overlay + the marker and exits; `--vz-restore-load
+    <dir>` (process B, a fresh `VZVirtualMachine`) restores without booting —
+    B's serial log carries no kernel banner — resumes, and a fresh serial query
+    recovers the RAM-only marker A stored. **VZ enforces one identity fact:**
+    the `VZGenericPlatformConfiguration.machineIdentifier` must be the saved
+    one (persisted as `machine-id.bin`); with VZ's per-configuration random
+    identifier the restore fails `VZErrorRestore` (12) "invalid argument". The
+    measurement reused the same EFI variable store file and the overlay the
+    save process persisted; a mismatched store or a fresh overlay was **not
+    tried** (**[inferred]** they would also have to match).
+  - **virtio-gpu attached (`--display`, headless, no view): full cycle PASS.**
+  - **USB HID keyboard+pointer on XHCI (`--input`): full cycle PASS.**
+  - **USB mass storage on XHCI (`--usb-msd`): mixed.** `validateSaveRestoreSupport`
+    and the save pass every time; the restore PASSED 8 of 9 measurement cycles
+    and failed once, under the gate harness, with `VZErrorRestore` (12)
+    "permission denied" at `restoreMachineStateFrom` — not reproduced by the
+    backing file's shape (sparse vs. zero-filled), its location (`/tmp` vs.
+    `/var/folders`), or a preceding `--input` boot. That count is a
+    measurement-session observation whose per-cycle logs are not retained; the
+    refusal is not deliberately reproducible, so `live-vz-restore` run `msd`
+    pins the deterministic half hard and accepts exactly those two cycle
+    outcomes.
+  - **custom-virtio attached: VZ REFUSES** at `validateSaveRestoreSupport`:
+    `VZErrorDomain Code=2 "Unsupported custom virtio device in configuration."`
+    Every configuration carrying the custom-virtio device (input queue, host
+    file channel, snapshot channel, structured console) is therefore
+    unsaveable on macOS 27.2; the gate run `cvc` pins the refusal verbatim so
+    a release that lifts it fails loudly.
+  - **Not measured:** cross-host and cross-macOS-version portability of a
+    saved state (one host available). Nothing here promises them.
 - Config used: 256 MiB RAM, 2 vCPUs, optional virtio-gpu/sound/net devices
   (flag-gated; the default VM stays byte-identical without flags).
 - The project targets Apple silicon / Virtualization.framework only; there
