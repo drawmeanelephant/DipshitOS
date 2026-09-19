@@ -1,0 +1,390 @@
+package main
+
+import (
+	"strings"
+	"testing"
+)
+
+// fakeHost is the engine's test kernel: externals resolve to canned exit
+// statuses, files live in a map, the pipe is a byte buffer, and a released
+// channel lets tests drive background-job reaping deterministically.
+type fakeHost struct {
+	markers    []string
+	out        []byte
+	status     map[string]int64 // external name -> exit status (pid is fixed)
+	missing    map[string]bool  // names that must fail to load
+	files      map[string][]byte
+	pipe       []byte
+	sleeps     []int
+	ticks      []int
+	released   int64 // the status WaitExternal returns
+	probeRuns  int   // ProbeExternal call counter
+	probeAfter int   // probes before the job reports exited
+}
+
+func newFakeHost() *fakeHost {
+	return &fakeHost{status: map[string]int64{}, missing: map[string]bool{}, files: map[string][]byte{}, released: 43, probeAfter: -1}
+}
+
+func (f *fakeHost) Marker(line string)           { f.markers = append(f.markers, line) }
+func (f *fakeHost) Out(b []byte)                 { f.out = append(f.out, b...) }
+func (f *fakeHost) PipeWrite(b []byte) error     { f.pipe = append(f.pipe[:0], b...); return nil }
+func (f *fakeHost) PipeReadAll() ([]byte, error) { return f.pipe, nil }
+func (f *fakeHost) Chdir(string) error           { return nil }
+func (f *fakeHost) ListDir() []string            { return []string{"DATA.TXT", "GOSH.ELF", "NOTES"} }
+func (f *fakeHost) SleepSeconds(n int)           { f.sleeps = append(f.sleeps, n) }
+
+func (f *fakeHost) RunExternal(name string, args []string) (int64, error) {
+	if f.missing[name] {
+		return 0, errNotFound
+	}
+	return 7, nil // the pid is irrelevant to the engine contract
+}
+
+func (f *fakeHost) WaitExternal(pid int64) (int64, error) {
+	return f.released, nil
+}
+
+func (f *fakeHost) ProbeExternal(pid int64) (int64, int) {
+	f.probeRuns++
+	if f.probeAfter >= 0 && f.probeRuns > f.probeAfter {
+		return f.released, probeExited
+	}
+	return -1, probeRunning
+}
+
+func (f *fakeHost) SleepTick() { f.ticks = append(f.ticks, 1) }
+
+func (f *fakeHost) ReadFile(path string, max int) ([]byte, error) {
+	if b, ok := f.files[path]; ok {
+		if len(b) > max {
+			return b[:max], nil
+		}
+		return b, nil
+	}
+	return nil, errNotFound
+}
+
+func (f *fakeHost) WriteFile(path string, b []byte, appendMode bool) error {
+	if appendMode {
+		f.files[path] = append(f.files[path], b...)
+	} else {
+		f.files[path] = append([]byte{}, b...)
+	}
+	return nil
+}
+
+func (f *fakeHost) ReadTTYLine() (string, bool) { return "typed", true }
+
+func (f *fakeHost) outString() string { return string(f.out) }
+
+// session starts one Shell and runs every line of a scenario through it,
+// the way a real session keeps its env and job table across lines.
+func session(h *fakeHost) (func(string) int, *Shell) {
+	sh := NewShell(h, &History{})
+	return func(line string) int {
+		st, _ := sh.RunLine(line)
+		return st
+	}, sh
+}
+
+// TestEngineVarsAndStatus pins the env/variables subset end to end.
+func TestEngineVarsAndStatus(t *testing.T) {
+	h := newFakeHost()
+	run, _ := session(h)
+	if st := run("set GREET=hello-vars"); st != 0 {
+		t.Fatalf("set status = %d", st)
+	}
+	if st := run("echo V=$GREET"); st != 0 {
+		t.Fatalf("echo status = %d", st)
+	}
+	if got := h.outString(); !strings.Contains(got, "V=hello-vars\n") {
+		t.Fatalf("output = %q, want V=hello-vars", got)
+	}
+	h.out = nil
+	run("echo BRACED=${GREET} DIRECT=$UNSET_EMPTY")
+	if got := h.outString(); got != "BRACED=hello-vars DIRECT=\n" {
+		t.Fatalf("braced/unset expansion = %q", got)
+	}
+	// $? reports the previous line's status.
+	run("printenv NOPE")
+	h.out = nil
+	run("echo RC=$?")
+	if got := h.outString(); got != "RC=1\n" {
+		t.Fatalf("$? after failed printenv = %q, want RC=1", got)
+	}
+	// Single quotes protect the variable reference.
+	h.out = nil
+	run("echo 'NO $GREET'")
+	if got := h.outString(); got != "NO $GREET\n" {
+		t.Fatalf("single-quoted protection = %q", got)
+	}
+}
+
+// TestEnginePipeline pins the sequential hand-off: left capture goes
+// through the kernel pipe and arrives as the right side's stdin.
+func TestEnginePipeline(t *testing.T) {
+	h := newFakeHost()
+	run, _ := session(h)
+	if st := run("echo alpha-beta | grep alpha"); st != 0 {
+		t.Fatalf("pipeline status = %d", st)
+	}
+	if got := h.outString(); got != "alpha-beta\n" {
+		t.Fatalf("pipeline output = %q, want alpha-beta", got)
+	}
+	if string(h.pipe) != "alpha-beta\n" {
+		t.Fatalf("pipe hand-off = %q, want the left capture", h.pipe)
+	}
+	h.out = nil
+	run("printf 'a\\nb\\nc' | sort")
+	if got := h.outString(); got != "a\nb\nc\n" {
+		t.Fatalf("sort over pipe = %q", got)
+	}
+}
+
+// TestEnginePipelineRefusals pins the honest refusals around externals in
+// a pipeline (the EL0 console can not be captured).
+func TestEnginePipelineRefusals(t *testing.T) {
+	h := newFakeHost()
+	h.missing["NOTHING.ELF"] = true
+	run, _ := session(h)
+	if st := run("echo x | NOTHING"); st != 1 {
+		t.Fatalf("external right side status = %d, want 1", st)
+	}
+	if !strings.Contains(h.outString(), "would not read the pipe") {
+		t.Fatalf("right-side refusal = %q", h.outString())
+	}
+	h = newFakeHost()
+	h.missing["NOTHING.ELF"] = true
+	run, _ = session(h)
+	if st := run("NOTHING | grep x"); st != 1 {
+		t.Fatalf("external left side status = %d, want 1", st)
+	}
+	if !strings.Contains(h.outString(), "cannot capture an external app") {
+		t.Fatalf("left-side refusal = %q", h.outString())
+	}
+}
+
+// TestEngineRedirect pins >, >> and < through the file seam, including the
+// pipe-plus-redirect combination the gate reads back on the host.
+func TestEngineRedirect(t *testing.T) {
+	h := newFakeHost()
+	run, _ := session(h)
+	run("echo redirect-payload > /host/OUT.TXT")
+	if got := string(h.files["/host/OUT.TXT"]); got != "redirect-payload\n" {
+		t.Fatalf("> write = %q", got)
+	}
+	run("echo more >> /host/OUT.TXT")
+	if got := string(h.files["/host/OUT.TXT"]); got != "redirect-payload\nmore\n" {
+		t.Fatalf(">> append = %q", got)
+	}
+	h.out = nil
+	run("cat < /host/OUT.TXT")
+	if got := h.outString(); got != "redirect-payload\nmore\n" {
+		t.Fatalf("< read = %q", got)
+	}
+	// A missing input file is an honest status 1 with a message.
+	h.out = nil
+	if st := run("cat < /host/NOPE.TXT"); st != 1 {
+		t.Fatalf("missing < status = %d", st)
+	}
+	if !strings.Contains(h.outString(), "not found") {
+		t.Fatalf("missing < message = %q", h.outString())
+	}
+	// A redirect combined with a pipe writes the right side's capture.
+	run("echo alpha-beta | wc -c > /host/WC.TXT")
+	if got := string(h.files["/host/WC.TXT"]); got != "11\n" {
+		t.Fatalf("pipe + > = %q, want 11", got)
+	}
+}
+
+// TestEngineExternals pins the exec/wait seam: the not-found 127 and the
+// status propagation into $?.
+func TestEngineExternals(t *testing.T) {
+	h := newFakeHost()
+	h.missing["GHOST"] = true
+	run, _ := session(h)
+	if st := run("GHOST"); st != 127 {
+		t.Fatalf("not-found status = %d, want 127", st)
+	}
+	if !strings.Contains(h.outString(), "GHOST: not found") {
+		t.Fatalf("not-found message = %q", h.outString())
+	}
+	if st := run("GOHELLO"); st != 43 {
+		t.Fatalf("external status = %d, want the fake's 43", st)
+	}
+	h.out = nil
+	run("echo RC=$?")
+	if got := h.outString(); got != "RC=43\n" {
+		t.Fatalf("$? after external = %q", got)
+	}
+}
+
+// TestEngineJobs pins the background cycle: `exec X &` records a job with
+// a marker, jobs shows it running, fg blocks by polling between ticks
+// until the child reports exited, reports exactly once, and propagates
+// the status into $?.
+func TestEngineJobs(t *testing.T) {
+	h := newFakeHost()
+	h.probeAfter = 2 // two running probes, then exited
+	_, sh := session(h)
+	_, _ = sh.RunLine("GOSH.ELF -c sleep 2 &")
+	if len(h.markers) != 1 || !strings.HasPrefix(h.markers[0], "gosh: job 1 pid=") {
+		t.Fatalf("bg marker = %v", h.markers)
+	}
+	if len(sh.jobs) != 1 {
+		t.Fatalf("job table = %d, want 1", len(sh.jobs))
+	}
+	st, _ := sh.RunLine("jobs")
+	if st != 0 || !strings.Contains(h.outString(), "[1] running: GOSH.ELF -c sleep 2") {
+		t.Fatalf("jobs output = %q (status %d)", h.outString(), st)
+	}
+	h.out = nil
+	st, act := sh.RunLine("fg 1")
+	if act != actionContinue || st != 43 {
+		t.Fatalf("fg = (%d, %v), want (43, continue)", st, act)
+	}
+	if len(h.ticks) == 0 {
+		t.Fatalf("fg did not poll between ticks")
+	}
+	if !strings.Contains(h.outString(), "[1] Done: GOSH.ELF -c sleep 2 (exit=43)") {
+		t.Fatalf("fg report = %q", h.outString())
+	}
+	if len(sh.jobs) != 0 {
+		t.Fatalf("job not reaped: %d left", len(sh.jobs))
+	}
+	h.out = nil
+	st, _ = sh.RunLine("echo RC=$?")
+	if st != 0 || !strings.Contains(h.outString(), "RC=43\n") {
+		t.Fatalf("$? after fg = %q (status %d)", h.outString(), st)
+	}
+	h.out = nil
+	if st, _ = sh.RunLine("fg 9"); st != 1 {
+		t.Fatalf("fg 9 status = %d, want 1", st)
+	}
+	if !strings.Contains(h.outString(), "fg: no such job") {
+		t.Fatalf("fg 9 message = %q", h.outString())
+	}
+}
+
+// TestEngineReapMarker pins the exactly-once done marker from the main
+// loop's reaper (the gate's serial evidence for the jobs/fg cycle), and
+// that jobs drops the finished entry after reporting it.
+func TestEngineReapMarker(t *testing.T) {
+	h := newFakeHost()
+	h.probeAfter = 1
+	_, sh := session(h)
+	_, _ = sh.RunLine("GOSH.ELF -c echo nested &")
+	sh.ReapJobs() // still running: no done marker yet
+	if len(h.markers) != 1 {
+		t.Fatalf("markers = %v, want only the pid marker", h.markers)
+	}
+	sh.ReapJobs() // the child reports exited
+	if len(h.markers) != 2 {
+		t.Fatalf("markers = %v, want pid + done", h.markers)
+	}
+	if h.markers[1] != "gosh: job 1 done exit=43" {
+		t.Fatalf("done marker = %q", h.markers[1])
+	}
+	st, _ := sh.RunLine("jobs")
+	if st != 0 || !strings.Contains(h.outString(), "[1] Done:") {
+		t.Fatalf("jobs output = %q (status %d)", h.outString(), st)
+	}
+	if len(sh.jobs) != 0 {
+		t.Fatalf("jobs did not drop the finished entry")
+	}
+}
+
+// TestEngineBuiltinAmp pins the honest builtin-background refusal.
+func TestEngineBuiltinAmp(t *testing.T) {
+	h := newFakeHost()
+	run, _ := session(h)
+	st := run("echo hi &")
+	if st != 0 {
+		t.Fatalf("builtin & status = %d", st)
+	}
+	if !strings.Contains(h.outString(), "is a builtin; & runs external apps only") {
+		t.Fatalf("builtin & message = %q", h.outString())
+	}
+	if !strings.Contains(h.outString(), "hi\n") {
+		t.Fatalf("builtin & did not run in the foreground: %q", h.outString())
+	}
+}
+
+// TestEngineExitAndMonitor pins the two shell-lifecycle actions.
+func TestEngineExitAndMonitor(t *testing.T) {
+	h := newFakeHost()
+	_, sh := session(h)
+	st, act := sh.RunLine("exit 7")
+	if act != actionExit || st != 7 {
+		t.Fatalf("exit 7 = (%d, %v), want (7, exit)", st, act)
+	}
+	st, act = sh.RunLine("monitor")
+	if act != actionMonitor || st != 0 {
+		t.Fatalf("monitor = (%d, %v), want (0, monitor)", st, act)
+	}
+}
+
+// TestEngineReadPinsStdin pins `read VAR` over bound and unbound stdin.
+func TestEngineReadPinsStdin(t *testing.T) {
+	h := newFakeHost()
+	h.files["/host/WORDS.TXT"] = []byte("beta\n")
+	run, _ := session(h)
+	run("read RV < /host/WORDS.TXT")
+	h.out = nil
+	run("echo READ=$RV")
+	if got := h.outString(); got != "READ=beta\n" {
+		t.Fatalf("read over redirect = %q", got)
+	}
+	h.out = nil
+	run("read UNBOUND")
+	run("echo U=$UNBOUND")
+	if got := h.outString(); !strings.Contains(got, "U=typed\n") {
+		t.Fatalf("read from tty = %q", got)
+	}
+}
+
+// TestEngineParseRefusals pins the grammar's honest refusals.
+func TestEngineParseRefusals(t *testing.T) {
+	cases := []struct{ line, want string }{
+		{"echo a | wc | wc", "only one pipe per line"},
+		{"echo a > /x > /y", "one output redirect per line"},
+		{"echo a > ", "> needs a file path"},
+		{"echo a & noise", "& must end the line"},
+		{"echo a > /x &", "& runs one external app"},
+		{"| wc", "empty command"},
+	}
+	for _, tc := range cases {
+		h := newFakeHost()
+		run, _ := session(h)
+		st := run(tc.line)
+		if st != 1 {
+			t.Fatalf("%q status = %d, want 1", tc.line, st)
+		}
+		if !strings.Contains(h.outString(), tc.want) {
+			t.Fatalf("%q message = %q, want %q", tc.line, h.outString(), tc.want)
+		}
+	}
+}
+
+// TestEngineExecPrefix pins the monitor-vocabulary exec: `exec NAME args`
+// runs NAME (and backgrounds with &), without replacing the shell.
+func TestEngineExecPrefix(t *testing.T) {
+	h := newFakeHost()
+	run, _ := session(h)
+	if st := run("exec GOHELLO"); st != 43 {
+		t.Fatalf("exec status = %d, want 43", st)
+	}
+	if !strings.Contains(h.outString(), "") {
+		t.Fatalf("unexpected output: %q", h.outString())
+	}
+	// Background through the prefix takes the job path.
+	_, sh := session(h)
+	_, _ = sh.RunLine(`exec GOSH.ELF -c "sleep 2" &`)
+	if len(sh.jobs) != 1 {
+		t.Fatalf("exec & job table = %d, want 1", len(sh.jobs))
+	}
+	if len(h.markers) != 1 || !strings.HasPrefix(h.markers[0], "gosh: job 1 pid=") {
+		t.Fatalf("exec & markers = %v", h.markers)
+	}
+}

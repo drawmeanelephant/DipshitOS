@@ -105,7 +105,7 @@ func Procs(dst []ProcRow) (int, int64) {
 		return 0, 0
 	}
 	buf := make([]byte, len(dst)*ProcRowSize)
-	r := syscall2(SlotProcs, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+	r := svc2(SlotProcs, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
 	if r < 0 {
 		return 0, r
 	}

@@ -88,6 +88,11 @@ go-gonet:
 go-govinet:
     bash tools/go/build-go.sh tools/go/govinet.go tools/go/govidns.go
 
+# Build the M68a Go shell (#1449): .build/go/GOSH.ELF. HOST PREREQUISITE
+# for the go-sh class-B gate.
+go-gosh:
+    bash tools/go/build-gosh.sh
+
 # Compile the AArch64 UEFI application and kernel image (class A — zig build)
 build:
     zig build
