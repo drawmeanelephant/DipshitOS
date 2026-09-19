@@ -938,7 +938,7 @@ func (c *client) finishHandshake() error {
 		res := validateChain(c.leafDER, c.intermediates, store, []byte(c.host), c.now)
 		c.lastValidation = res
 		if res != resultValid {
-			return ErrChainValidationFailed
+			return chainValidationError{res: res}
 		}
 	}
 

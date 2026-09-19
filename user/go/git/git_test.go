@@ -250,7 +250,7 @@ func TestSidebandExtractPack(t *testing.T) {
 	}
 }
 
-func TestPlanHelperNeverCleartext(t *testing.T) {
+func TestHTTPSNeverCleartext(t *testing.T) {
 	https := classify("https://10.0.0.2:24541/g.git")
 	if https.Kind != kindHTTPS || https.Path != "/g.git" {
 		t.Fatalf("classify = %+v", https)
@@ -258,28 +258,15 @@ func TestPlanHelperNeverCleartext(t *testing.T) {
 	if wouldSendCleartext(https) {
 		t.Fatal("https flagged cleartext")
 	}
-	plan, ok := planHelper(https, "GET", "/host/G/.git/P", "/host/G/.git/O", "")
-	if !ok || plan.Name != helperName {
-		t.Fatalf("plan = %+v ok=%v", plan, ok)
-	}
-	if len(plan.Args) != 6 || plan.Args[3] != "GET" {
-		t.Fatalf("args = %v", plan.Args)
+	if https.SNI != defaultSNI || https.Port != 24541 {
+		t.Fatalf("dial fields = %+v", https)
 	}
 	http := classify("http://10.0.0.2/g.git")
 	if !wouldSendCleartext(http) {
 		t.Fatal("http must be cleartext")
 	}
-	if _, ok := planHelper(http, "GET", "/host/G/.git/P", "/host/G/.git/O", ""); ok {
-		t.Fatal("http produced a helper plan")
-	}
-	post, ok := planHelper(https, "POST", "/host/G/.git/P", "/host/G/.git/O", "/host/G/.git/B")
-	if !ok || post.Args[3] != "POST" || post.Args[6] != "/host/G/.git/B" {
-		t.Fatalf("post plan = %v", post.Args)
-	}
-	for _, a := range post.Args {
-		if len(a) > 31 {
-			t.Fatalf("argv slot %q exceeds 31", a)
-		}
+	if http.Kind == kindHTTPS {
+		t.Fatal("http must not classify as https")
 	}
 }
 
@@ -320,7 +307,9 @@ func TestMarkers(t *testing.T) {
 		{markerTree, "gotgit: tree "},
 		{markerCommit, "gotgit: commit "},
 		{markerDelta, "gotgit: delta"},
-		{helperName, "FETCHS.BIN"},
+		{markerDial, "gotgit: dial "},
+		{markerHS, "gotgit: handshake ok"},
+		{defaultSNI, "leaf.example.com"},
 	}
 	for _, c := range cases {
 		if c.got != c.want {

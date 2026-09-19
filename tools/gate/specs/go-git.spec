@@ -1,8 +1,8 @@
-# go-git.spec -- issue #1337: GOTGIT.ELF clones a tiny fixture repo over
-# HTTPS via FETCHS.BIN (ADR 0029 git-over-https half).
+# go-git.spec -- issue #1337 / M67b #1447: GOTGIT.ELF clones a tiny fixture
+# repo over HTTPS in-process (tls.Dial over vi.Dial, ADR 0029).
 #
-# Smart HTTP against a real `git http-backend` on the host, TLS 1.3 only,
-# the Zig helper owns the socket. Never a cleartext GET. Kernel untouched.
+# Smart HTTP against a real `git http-backend` on the host, TLS 1.3 only.
+# Never a cleartext GET. FETCHS.BIN is not exec'd. Kernel untouched.
 # Proves a known blob/tree/commit lands on the guest share. The fixture
 # HELLO is large enough that `git repack` emits a depth-1 delta so class-B
 # actually runs ofs/ref-delta resolution (host tests cover the codec).
@@ -13,12 +13,12 @@
 # vgate_run to expand a generated host port).
 #
 # HOST PREREQUISITE: bash tools/go/build-gogit.sh -> .build/go/GOTGIT.ELF
-# plus `git` on PATH. FETCHS.BIN comes from `zig build` (the harness).
+# plus `git` on PATH.
 #
 # exec-order: assert-proven -- the run ends on `gotgit OK`, which only the
 # program prints after objects and HELLO are on the share.
 
-vgate_name go-git "issue #1337: GOTGIT.ELF clones over TLS via FETCHS.BIN from git http-backend"
+vgate_name go-git "issue #1337/#1447: GOTGIT.ELF clones over in-process TLS from git http-backend"
 vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 
@@ -35,8 +35,8 @@ run = os.environ["RUN_DIR"]
 share = os.environ.get("VG_SHARE") or os.path.join(run, "share")
 os.makedirs(share, exist_ok=True)
 # Guest-facing TCP 24541 is the runner --net-tcp-respond pin (same family
-# as live-tls13). A crashed run can leave python on that port; FETCHS then
-# handshakes with a half-dead peer (AlertReceived). Per-run bind(:0) would
+# as live-tls13). A crashed run can leave python on that port; the guest
+# then handshakes with a half-dead peer (AlertReceived). Per-run bind(:0) would
 # need vgate_run to expand a generated host port, which this card does not
 # add. The kill is leftover hygiene and will collide with a concurrent
 # go-git in another worktree on the same pin.
@@ -48,11 +48,7 @@ gogit = os.path.join(".build", "go", "GOTGIT.ELF")
 if not os.path.exists(gogit):
     sys.exit("GOTGIT.ELF missing (expected " + gogit + ") - build it first: "
              "bash tools/go/build-gogit.sh")
-fetchs = os.path.join("zig-out", "bin", "FETCHS.BIN")
-if not os.path.exists(fetchs):
-    sys.exit("FETCHS.BIN missing at %s -- run 'zig build' first" % fetchs)
 shutil.copy(gogit, os.path.join(share, "GOTGIT.ELF"))
-shutil.copy(fetchs, os.path.join(share, "FETCHS.BIN"))
 
 git = shutil.which("git")
 if not git:
@@ -217,9 +213,8 @@ proc = subprocess.Popen(
     [sys.executable, wrapper, chain, key, root, git],
     stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
 time.sleep(0.2)
-print("go-git: staged GOTGIT.ELF (%d) FETCHS.BIN (%d); git-https pid=%d" % (
-    os.path.getsize(os.path.join(share, "GOTGIT.ELF")),
-    os.path.getsize(os.path.join(share, "FETCHS.BIN")), proc.pid))
+print("go-git: staged GOTGIT.ELF (%d); git-https pid=%d" % (
+    os.path.getsize(os.path.join(share, "GOTGIT.ELF")), proc.pid))
 PY
 
 vgate_run 01 -- --net '$RUN_DIR/cap.bin' --net-arp-respond 10.0.0.2 \
@@ -230,10 +225,10 @@ vgate_assert 01 serial-contains 'VirelaiOS kernel has seized control.'
 vgate_assert 01 serial-contains 'exec: loaded GOTGIT.ELF'
 vgate_assert 01 serial-contains 'gotgit: start'
 vgate_assert 01 serial-contains 'gotgit: url https://10.0.0.2:24541/g.git'
-vgate_assert 01 serial-contains 'gotgit: helper FETCHS.BIN 10.0.0.2 24541 leaf.example.com GET'
-vgate_assert 01 serial-contains 'fetchs: handshake ok'
-vgate_assert 01 serial-contains 'fetchs: method GET'
-vgate_assert 01 serial-contains 'fetchs: method POST'
+vgate_assert 01 serial-contains 'gotgit: dial 10.0.0.2 24541 leaf.example.com GET'
+vgate_assert 01 serial-contains 'gotgit: handshake ok'
+vgate_assert 01 serial-count 'gotgit: handshake ok' 2
+vgate_assert 01 serial-contains 'gotgit: dial 10.0.0.2 24541 leaf.example.com POST'
 vgate_assert 01 serial-contains 'gotgit: refs '
 vgate_assert 01 serial-contains 'gotgit: want '
 vgate_assert 01 serial-contains 'gotgit: pack objects='
@@ -244,6 +239,7 @@ vgate_assert 01 serial-contains 'gotgit: checkout HELLO'
 vgate_assert 01 serial-contains 'gotgit: delta'
 vgate_assert 01 serial-contains 'gotgit OK'
 vgate_assert 01 serial-absent 'gotgit: error'
+vgate_assert 01 serial-absent 'FETCHS.BIN'
 vgate_assert 01 serial-absent 'GET / HTTP'
 vgate_assert 01 serial-absent '[EXC] parking:'
 vgate_assert 01 python <<'PY'

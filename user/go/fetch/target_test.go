@@ -42,26 +42,18 @@ func TestClassifyRefusesHostnameAndHTTP(t *testing.T) {
 	}
 }
 
-func TestPlanHelperIsFETCHSOnly(t *testing.T) {
+func TestPlanDialHTTPS(t *testing.T) {
 	tHTTPS := Classify("https://10.0.0.2:24533/")
-	plan, ok := PlanHelper(tHTTPS)
+	plan, ok := PlanDial(tHTTPS)
 	if !ok {
-		t.Fatal("https IP literal must produce a helper plan")
+		t.Fatal("https IP literal must produce a dial plan")
 	}
-	if plan.Name != HelperName {
-		t.Fatalf("helper name = %q want %s", plan.Name, HelperName)
-	}
-	if len(plan.Args) != 3 || plan.Args[0] != "10.0.0.2" || plan.Args[1] != "24533" || plan.Args[2] != DefaultSNI {
-		t.Fatalf("helper args = %v", plan.Args)
-	}
-	for _, arg := range plan.Args {
-		if len(arg) > 31 {
-			t.Fatalf("argv slot %q exceeds the 31-byte exec cap", arg)
-		}
+	if plan.Addr != "10.0.0.2" || plan.Port != 24533 || plan.SNI != DefaultSNI || plan.Path != "/" {
+		t.Fatalf("dial plan = %+v", plan)
 	}
 }
 
-func TestPlanHelperRefusesNonHTTPS(t *testing.T) {
+func TestPlanDialRefusesNonHTTPS(t *testing.T) {
 	for _, in := range []string{
 		"http://10.0.0.2/",
 		"https://example.com/",
@@ -69,8 +61,8 @@ func TestPlanHelperRefusesNonHTTPS(t *testing.T) {
 		"/host/PAGE.HTML",
 		"",
 	} {
-		if plan, ok := PlanHelper(Classify(in)); ok {
-			t.Fatalf("Classify(%q) produced a helper plan %+v", in, plan)
+		if plan, ok := PlanDial(Classify(in)); ok {
+			t.Fatalf("Classify(%q) produced a dial plan %+v", in, plan)
 		}
 	}
 }
@@ -81,7 +73,6 @@ func TestHTTPSNeverPlansCleartext(t *testing.T) {
 		"https://10.0.0.2/",
 		"HTTPS://10.0.0.2/x",
 		"https://example.com/",
-		"http://10.0.0.2/",
 	}
 	for _, in := range inputs {
 		tgt := Classify(in)
@@ -89,15 +80,17 @@ func TestHTTPSNeverPlansCleartext(t *testing.T) {
 			t.Fatalf("%q would send cleartext", in)
 		}
 		if tgt.Kind == KindHTTPS {
-			if _, ok := PlanHelper(tgt); !ok {
-				t.Fatalf("%q is https but has no helper plan", in)
+			if _, ok := PlanDial(tgt); !ok {
+				t.Fatalf("%q is https but has no dial plan", in)
 			}
 		}
-		if tgt.Kind == KindHTTP {
-			if _, ok := PlanHelper(tgt); ok {
-				t.Fatalf("http URL %q must not be rewritten onto the TLS helper", in)
-			}
-		}
+	}
+	http := Classify("http://10.0.0.2/")
+	if !WouldSendCleartext(http) {
+		t.Fatal("http URL must be classified as cleartext")
+	}
+	if _, ok := PlanDial(http); ok {
+		t.Fatal("http URL must not be rewritten onto the TLS dial")
 	}
 }
 
@@ -111,4 +104,45 @@ func TestPortString(t *testing.T) {
 	if got := portString(65535); got != "65535" {
 		t.Fatalf("portString(65535) = %q", got)
 	}
+}
+
+func TestFailClosedMatchesRequiresSpecificVerdict(t *testing.T) {
+	if failClosedMatches("name", errStr("ETIMEDOUT")) {
+		t.Fatal("a timeout must not count as fail-closed name")
+	}
+	if failClosedMatches("expired", errStr("tls: transport failed")) {
+		t.Fatal("a transport error must not count as expired")
+	}
+	if failClosedMatches("", errStr("x")) {
+		t.Fatal("empty expect")
+	}
+}
+
+type errStr string
+
+func (e errStr) Error() string { return string(e) }
+
+func TestMarkersHaveNoFETCHS(t *testing.T) {
+	for _, s := range []string{
+		markerDial, markerHandshake, markerHSErr, markerFailClosed,
+		markerSent, markerBody, markerOK, markerError,
+	} {
+		if containsFETCHS(s) {
+			t.Fatalf("marker %q still names FETCHS.BIN", s)
+		}
+	}
+}
+
+func containsFETCHS(s string) bool {
+	return len(s) >= 10 && (s == "FETCHS.BIN" ||
+		len(s) >= 10 && (indexOf(s, "FETCHS.BIN") >= 0))
+}
+
+func indexOf(s, sub string) int {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return i
+		}
+	}
+	return -1
 }

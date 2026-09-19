@@ -7,6 +7,9 @@
 # Usage: bash tools/go/build-web.sh [dir-under-user/go] [NAME]
 #   Default: browser -> .build/go/BROWSER.ELF
 #
+# HTTPS consumers (fetch, browser) import virelai/tls and dial in-process.
+# Do not stage FETCHS.BIN for those apps.
+#
 # Imports are written as `virelai/...` so the module path and the GOPATH path
 # agree: the host `go test ./...` run uses user/go/go.mod, and this script
 # points GOPATH at a temp dir with user/go linked as $GOPATH/src/virelai.

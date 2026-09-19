@@ -1,24 +1,24 @@
-// Target classification for the M58d Go HTTPS consumer (issue #1308).
+// Target classification for the M67b Go HTTPS consumer (issue #1447).
 //
 // The load-bearing rule is pure and host-tested: an https URL never turns
-// into a cleartext TCP GET. The only success path is a helper plan that
-// execs the in-tree Zig TLS client (FETCHS.BIN). DNS is not this card —
-// a hostname is a defined error, not a resolve-and-hope.
+// into a cleartext TCP GET. The only success path is an in-process TLS 1.3
+// dial (virelai/tls over vi.Dial). DNS hostnames are a defined error, not
+// a resolve-and-hope — the live target is the runner TLS responder at an
+// IP literal. FETCHS.BIN is not referenced.
 package main
 
 import "strings"
 
 const (
-	// HelperName is the Zig TLS 1.3 consumer already on main (ADR 0029).
-	HelperName = "FETCHS.BIN"
-	// DefaultSNI matches FETCHS.BIN / the pinned fixture leaf.
+	// DefaultSNI matches the pinned fixture leaf the runner responder
+	// serves (leaf.example.com, AutoClaw test CA).
 	DefaultSNI = "leaf.example.com"
 	// DefaultHTTPSPort is the TLS port when the URL omits one.
 	DefaultHTTPSPort uint16 = 443
 )
 
 // Kind is what Classify decided. "https" is the only kind that may produce
-// a helper plan; every other kind is a refuse, never a silent downgrade.
+// a dial plan; every other kind is a refuse, never a silent downgrade.
 const (
 	KindHTTPS = "https"
 	KindHTTP  = "http"
@@ -40,11 +40,13 @@ type Target struct {
 // Kind is a string so serial markers can print it without a table.
 type Kind = string
 
-// HelperPlan is what vi.Exec gets. There is no TCP field on purpose: a
-// compile-time reminder that this consumer does not own a socket.
-type HelperPlan struct {
-	Name string
-	Args []string
+// DialPlan is the in-process TLS dial: address, port, SNI, request-target.
+// There is no helper-exec field on purpose: this consumer owns the socket.
+type DialPlan struct {
+	Addr string
+	Port uint16
+	SNI  string
+	Path string
 }
 
 // Classify decides what raw is. It never rewrites https:// to http://.
@@ -108,29 +110,29 @@ func parseHTTPS(t Target, rest string) Target {
 	return t
 }
 
-// PlanHelper returns the FETCHS.BIN argv for an https IP-literal target.
-// Any other kind yields ok=false and a zero plan — including http, so a
-// caller that only execs when ok cannot send an https URL in the clear.
-func PlanHelper(t Target) (HelperPlan, bool) {
+// PlanDial returns the in-process TLS dial for an https IP-literal target.
+// Any other kind yields ok=false — including http, so a caller that only
+// dials when ok cannot send an https URL in the clear.
+func PlanDial(t Target) (DialPlan, bool) {
 	if t.Kind != KindHTTPS {
-		return HelperPlan{}, false
+		return DialPlan{}, false
 	}
 	sni := t.SNI
 	if sni == "" {
 		sni = DefaultSNI
 	}
-	return HelperPlan{
-		Name: HelperName,
-		Args: []string{t.Host, portString(t.Port), sni},
-	}, true
+	path := t.Path
+	if path == "" {
+		path = "/"
+	}
+	return DialPlan{Addr: t.Host, Port: t.Port, SNI: sni, Path: path}, true
 }
 
-// WouldSendCleartext is the fail-closed pin: this consumer never opens a
-// TCP socket of its own, so an https (or any) target cannot leave in the
-// clear from Go. The Zig helper speaks TLS over TCP in its own process.
+// WouldSendCleartext is true only for a classified http:// URL. This
+// consumer never opens a cleartext socket: http is refused, https goes
+// through tls.Dial.
 func WouldSendCleartext(t Target) bool {
-	_ = t
-	return false
+	return t.Kind == KindHTTP
 }
 
 func parseIPv4(text string) ([4]byte, bool) {
