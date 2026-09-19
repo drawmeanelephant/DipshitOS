@@ -78,8 +78,15 @@ it names the seat, not the binary, so a persisted `SETTINGS.TXT` needs no
 schema migration, and the boot default (`monitor`) is untouched. The kernel
 execs the image by name in `login_handoff`; `live-shell-default` (boot-login
 prompt adoption) and `live-sh-monitor` (the `monitor` escape back to the raw
-console) are retargeted and green on VZ. `SH.BIN` still exists and still runs
-on demand — its deletion is the rest of #1450.
+console) are retargeted and green on VZ.
+
+**Amended 2026-09-19** (M68b, #1450, final slice): `SH.BIN` is deleted.
+`GOSH.ELF` is the user-facing shell on every front-end the Zig binary hosted
+(serial, window, and `net [port] [open]` with the delegated HMAC
+challenge-response handshake). `TERM.BIN` still exists as the Zig window
+front-end; remote attach is `GOSH.ELF net`. The login argv array stays a
+named runtime-built array (an anonymous comptime literal packed garbage
+bytes; mechanism unisolated).
 
 ### D6. One shared userland terminal library
 A `lib/tty.zig` (read/write `/dev/tty`, raw-ish line buffering, history,
