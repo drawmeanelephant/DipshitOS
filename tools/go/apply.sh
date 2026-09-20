@@ -472,6 +472,92 @@ if ! have "$F/os/dir_unix.go" 'runtime.GOOS != "virelai"'; then
     edits=$((edits+1)); log "patched os/dir_unix.go (zero-inode skip includes virelai)"
 fi
 
+# --- 3g8. exclude the FIPS 140 DRBG scratch buffer for virelai ----------
+# Why a tag edit and not a capability: cmd/compile links
+# crypto/internal/fips140 -> ... -> crypto/internal/fips140/drbg, and
+# drbg/entropy_fips140.go declares a 32 MiB scratch buffer unconditionally
+# for every non-wasm platform:
+#
+#     var memory entropy.ScratchBuffer    exactly 33,554,432 B, .noptrbss
+#
+# The buffer is demand-backed and costs nothing unless the FIPS module runs
+# (upstream says so itself), but the kernel's exec acceptance bound
+# (elf.zig load_max, 32 MiB) sums EVERY PT_LOAD memsz — so it charges that
+# address space as if it were memory and refuses cmd/compile with
+# segment_too_large. Measured: 58,254,964 B of memsz, of which 33,554,432 is
+# this one object; without it the image is 23.56 MiB.
+#
+# This follows upstream's own answer, but GATED. The same file's comment
+# says the buffer "usually doesn't cost much, except on Wasm, due to the way
+# the linear memory works. FIPS 140-3 mode is not supported on Wasm, so we
+# just use a build tag to exclude it. (Could also exclude other platforms
+# that does not support FIPS 140-3 mode, but as the BSS variable doesn't
+# cost much, don't bother.)"
+#
+# The obvious generalisation — exclude it for GOOS=virelai outright — is
+# WRONG here, and the difference matters. wasm's exclusion is a GOOS-wide
+# property of wasm; a virelai guest is instead expected to keep a WORKING
+# crypto/rand, since M47/M67 landed TLS and DNS on it. Neutering the entropy
+# source GOOS-wide to shrink two toolchain binaries would regress that. So
+# the pair of edits below is scoped to an opt-in build tag that ONLY the
+# cmd/compile and cmd/link recipe passes: the default GOOS=virelai path keeps
+# entropy_fips140.go — the real source and its scratch buffer — and nothing
+# about ordinary guest binaries changes.
+#
+# Measured before choosing that shape (go list -deps): crypto/rand and
+# crypto/tls are ABSENT from both closures while fips140/drbg is present,
+# reached through crypto/internal/fips140 rather than through crypto/rand:
+#
+#     cmd/compile: crypto/rand=0  crypto/tls=0  fips140/drbg=1
+#     cmd/link:    crypto/rand=0  crypto/tls=0  fips140/drbg=1
+#
+# So the DRBG is dead weight in exactly these two images, and the stub below
+# is not on their happy path. If it ever were called it PANICS — a loud
+# failure, never a silent degradation.
+#
+# The exclusion has to be paired with a stub, or the package has no
+# getEntropy at all: entropy_fips140.go is the ONLY definition of it (rand.go
+# calls it at lines 26 and 73), which is what the GOOS-wide first attempt
+# surfaced:
+#
+#     rand.go:26:21: undefined: getEntropy
+#     rand.go:73:16: undefined: getEntropy
+#
+# The stub can NOT be upstream's entropy_wasm.go, and the reason is worth
+# recording because it looks like it should work. A Go file's GOOS/GOARCH
+# SUFFIX and its //go:build line are BOTH enforced — they AND together — so
+# entropy_wasm.go's `_wasm` NAME pins it to wasm whatever its build line
+# says. Widening that line to include virelai is compiled by nothing and
+# leaves getEntropy undefined. Measured, not assumed: with the widened line
+# and -tags virelaitoolchain the build still reported
+#
+#     rand.go:26:21: undefined: getEntropy
+#
+# The stub is therefore its own overlay file, drbg/entropy_virelai.go, whose
+# `_virelai` suffix supplies the GOOS half and whose //go:build line supplies
+# the opt-in half. Only cmd/compile and cmd/link are built with that tag.
+#
+# Self-healing, as the helpers above are: an earlier revision of this block
+# applied a GOOS-wide `&& !virelai` here and a (useless) `|| virelai` on
+# entropy_wasm.go, so both are normalised back FIRST and cannot compound.
+drbg_dir="$F/crypto/internal/fips140/drbg"
+drbg_entropy="$drbg_dir/entropy_fips140.go"
+drbg_stub="$drbg_dir/entropy_wasm.go"
+# entropy_fips140.go: strip only the LEGACY bare form. The clause added below
+# is written `!(virelai && virelaitoolchain)`, where a paren follows the `!`,
+# so this pattern cannot match it — that is exactly why it is parenthesised
+# rather than left bare. Stripping the gated form here would make apply.sh
+# oscillate: remove, re-add, report an edit on every run.
+gsed -i '/^\/\/go:build/ s/ \&\& !virelai//g' "$drbg_entropy"
+# entropy_wasm.go: BOTH forms go, because nothing is added back here — so
+# there is no oscillation to risk.
+gsed -i -e '/^\/\/go:build/ s/ || (virelai \&\& virelaitoolchain)//g' \
+        -e '/^\/\/go:build/ s/ || virelai//g' "$drbg_stub"
+if ! tag_has "$drbg_entropy" 'virelaitoolchain'; then
+    gsed -i '0,/^\/\/go:build /s#^//go:build \(.*\)$#//go:build \1 \&\& !(virelai \&\& virelaitoolchain)#' "$drbg_entropy"
+    edits=$((edits+1)); log "patched crypto/internal/fips140/drbg/entropy_fips140.go (toolchain-only exclude: 32 MiB FIPS scratch buffer vs load_max)"
+fi
+
 # --- 3h. runtime/netpoll.go: enable the poller CORE for virelai --------
 # Issue #1163 phase 2. The platform-independent poller core (netpollblock/
 # unblock, netpollready, the deadline machinery) is tagged

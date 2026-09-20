@@ -56,11 +56,66 @@ func SendmsgN(fd int, p, oob []byte, to Sockaddr, flags int) (n int, err error) 
 	return 0, ENOSYS
 }
 
-// Pread/Pwrite would need a seek slot to address an offset; the kernel's file
-// channel is cursor-based (sequential, and its cursor is the kernel's own),
-// so an offset read is refused rather than silently turned into a sequential
-// one — that mistake returns the WRONG BYTES instead of an error.
-func Pread(fd int, p []byte, offset int64) (n int, err error)  { return 0, ENOSYS }
+// The Inet4/Inet6 specializations are the LINKNAME TARGETS of
+// internal/syscall/unix/net.go, which `internal/poll` imports and which
+// apply.sh deliberately selects for this GOOS (its FD type names
+// unix.RecvfromInet4 and friends whether or not a socket can exist). Stock
+// declares these eight in syscall/syscall_unix.go, a file tagged `unix` —
+// which this GOOS never selects, so without them the link fails with
+// "relocation target syscall.recvfromInet4 not defined". They are named here
+// to match those linknames exactly, unexported and with the stock signatures,
+// because a linkname is matched by NAME and shape, not by package boundary.
+//
+// Each returns ENOSYS exactly as its generic sibling above does, and for the
+// same reason: stock's versions differ only in that they decode the peer
+// address out of a RawSockaddr buffer after a successful call, and there is
+// no call here to succeed. Returning a zero n would read as EOF on a socket
+// that cannot exist, so the refusal is the honest answer. `from` and `to`
+// are left untouched for the same reason — writing them would report a peer
+// that was never contacted.
+func recvfromInet4(fd int, p []byte, flags int, from *SockaddrInet4) (n int, err error) {
+	return 0, ENOSYS
+}
+
+func recvfromInet6(fd int, p []byte, flags int, from *SockaddrInet6) (n int, err error) {
+	return 0, ENOSYS
+}
+
+func recvmsgInet4(fd int, p, oob []byte, flags int, from *SockaddrInet4) (n, oobn int, recvflags int, err error) {
+	return 0, 0, 0, ENOSYS
+}
+
+func recvmsgInet6(fd int, p, oob []byte, flags int, from *SockaddrInet6) (n, oobn int, recvflags int, err error) {
+	return 0, 0, 0, ENOSYS
+}
+
+func sendmsgNInet4(fd int, p, oob []byte, to *SockaddrInet4, flags int) (n int, err error) {
+	return 0, ENOSYS
+}
+
+func sendmsgNInet6(fd int, p, oob []byte, to *SockaddrInet6, flags int) (n int, err error) {
+	return 0, ENOSYS
+}
+
+func sendtoInet4(fd int, p []byte, flags int, to *SockaddrInet4) (err error) {
+	return ENOSYS
+}
+
+func sendtoInet6(fd int, p []byte, flags int, to *SockaddrInet6) (err error) {
+	return ENOSYS
+}
+
+// Pread lives in fs_virelai.go: the port answers positional reads from the
+// shadow it keeps for each real handle (M70c-S1T, issue #1543), because the
+// toolchain's readers and writers both need a position and the kernel's file
+// channel is cursor-only.
+//
+// Pwrite stays refused. Staging a positional WRITE would need a handle the
+// port can rewind and rewrite, which only exists for a handle it opened
+// itself for writing; a caller that hands the port an inherited fd and asks
+// for an offset write is refused rather than guessed at. Nothing in the
+// toolchain path does that (cmd/link writes through bio.Writer's Seek, which
+// fs_virelai.go's Seek implements).
 func Pwrite(fd int, p []byte, offset int64) (n int, err error) { return 0, ENOSYS }
 
 // No socket seam exists, so the connection-shaped errors cannot be produced

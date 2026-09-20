@@ -7,8 +7,11 @@
 // The shape of the mapping, and why it is not a POSIX emulation:
 //
 //   - **Handles are the kernel's** (8 per process, slots 23-26/34-36/77).
-//     A handle carries a cursor; there is no pread/pwrite, so this is a
-//     sequential port and Seek reports ENOSYS instead of pretending.
+//     A handle carries a cursor and nothing else: no seek, no pread, no
+//     pwrite. Seeking is therefore answered from a per-handle shadow this
+//     port keeps (see "positional I/O" below) — the toolchain's archive
+//     reader and object writer both need it, and the kernel has no slot that
+//     could provide it (issue #1543).
 //   - **Directories are not handles.** sys_dir_list takes a PATH plus a row
 //     buffer, so `Open` on a directory returns a synthetic fd from
 //     `dirFdBase` and ReadDirent resolves it back to the path. A caller
@@ -69,6 +72,232 @@ func OpenFlags(fd int) int {
 		return virFdFlags[fd]
 	}
 	return 0
+}
+
+// ----- positional I/O over a cursor-only handle (M70c-S1T, issue #1543) -----
+//
+// The kernel's handle is a cursor and nothing else: slots 23-27, 34-36 and 77
+// have no seek, no pread and no pwrite. An appends-only or streams-only
+// caller never notices, which is how this port stayed honest while reporting
+// Seek as ENOSYS. The Go toolchain notices. Observed on VZ while compiling
+// tools/go/hello.go in the guest (M70c-S1T):
+//
+//	compile: seeking in output [0, 1]: seek /host/GPKG_runtime.a:
+//	function not implemented
+//
+// That is cmd/internal/bio's Offset() asking a package archive where it is,
+// after which cmd/internal/archive seeks to member offsets; the object writer
+// seeks too (cmd/compile/internal/gc/obj.go patches the archive header after
+// writing the members). So the port keeps a shadow of what each real handle
+// has moved, plus the caller's logical position:
+//
+//	virShadow[fd] — the bytes moved through the handle, from offset 0. The
+//	                kernel cursor is virCursor[fd], so the shadow covers
+//	                everything the device can no longer rewind to.
+//	virCursor[fd] — bytes the kernel has delivered or accepted.
+//	virPos[fd]    — the position Read/Write/Seek move, which the kernel's
+//	                cursor stops tracking the moment a seek happens.
+//
+// The shadow is bounded by virShadowMax. Past that bound the port stops
+// retaining and keeps streaming a purely sequential reader — the common case,
+// and the one the #1504 transfer measurement exercises — while REFUSING a
+// positional request it can no longer answer rather than serving bytes from
+// the wrong offset.
+//
+// Writes are staged in the shadow and pushed to the handle at Fsync/Close,
+// because a patch (seek back, write, seek forward) cannot be applied to a
+// cursor-only device. That cost is named rather than hidden: a writer's file
+// lives in memory until it closes, and a process that dies without closing
+// loses it. cmd/compile closes its object; cmd/link closes its output.
+const virShadowMax = 16 << 20
+
+var (
+	virShadow  [8][]byte
+	virCursor  [8]int64
+	virPos     [8]int64
+	virWrite   [8]bool // opened for writing: its bytes are staged
+	virFlushed [8]bool // the staged bytes are already on the handle
+)
+
+// shadowed reports whether fd is a real file handle this port opened. The
+// console and inherited handles are not: they have no position to keep, and
+// Read/Write keep their unchanged sequential path for them.
+func shadowed(fd int) bool {
+	return fd >= 0 && fd < len(virFdPaths) && virFdPaths[fd] != ""
+}
+
+func virReset(fd int) {
+	if fd < 0 || fd >= len(virShadow) {
+		return
+	}
+	virShadow[fd] = nil
+	virCursor[fd] = 0
+	virPos[fd] = 0
+	virWrite[fd] = false
+	virFlushed[fd] = false
+}
+
+// virKeep appends to the shadow while it has room. Dropping the tail past
+// the cap is what makes the bound a bound; virRetained reports how far the
+// shadow can still be trusted.
+func virKeep(fd int, b []byte) {
+	room := virShadowMax - len(virShadow[fd])
+	if room <= 0 {
+		return
+	}
+	if len(b) > room {
+		b = b[:room]
+	}
+	virShadow[fd] = append(virShadow[fd], b...)
+}
+
+// virRetained is how much of [0, cursor) the shadow can still serve.
+func virRetained(fd int) int64 {
+	n := int64(len(virShadow[fd]))
+	if n > virCursor[fd] {
+		n = virCursor[fd]
+	}
+	return n
+}
+
+// virPull advances the kernel cursor to `target`, retaining what it reads
+// while the shadow has room. A result short of target means the handle ended
+// first (EOF at the caller).
+func virPull(fd int, target int64, scratch []byte) (int64, error) {
+	for virCursor[fd] < target {
+		want := target - virCursor[fd]
+		if want > int64(len(scratch)) {
+			want = int64(len(scratch))
+		}
+		r := svc3(virSysRead, uintptr(fd), uintptr(unsafe.Pointer(&scratch[0])), uintptr(want))
+		if r < 0 {
+			return virCursor[fd], errnoErr(errOf(r))
+		}
+		if r == 0 {
+			break
+		}
+		n := int64(r)
+		virKeep(fd, scratch[:n])
+		virCursor[fd] += n
+	}
+	return virCursor[fd], nil
+}
+
+// virSize is the handle's size for SEEK_END: what a writer has staged, or the
+// share's own row for a reader (there is no size query on a handle, so this is
+// the same parent-row route Stat takes).
+func virSize(fd int) (int64, error) {
+	if virWrite[fd] {
+		return int64(len(virShadow[fd])), nil
+	}
+	p, ok := fdPath(fd)
+	if !ok {
+		return 0, EBADF
+	}
+	st, err := statPath(p)
+	if err != nil {
+		return 0, err
+	}
+	return st.Size, nil
+}
+
+// virFlush pushes a staged write onto the handle in order. It is the only
+// route a staged byte has to the device, and it runs once: after it the
+// handle cannot be rewound, so only appends are answerable.
+func virFlush(fd int) error {
+	if !virWrite[fd] || virFlushed[fd] || len(virShadow[fd]) == 0 {
+		return nil
+	}
+	buf := virShadow[fd]
+	for off := 0; off < len(buf); {
+		chunk := buf[off:]
+		if len(chunk) > virIOChunkMax {
+			chunk = chunk[:virIOChunkMax]
+		}
+		r := svc3(virSysWrite, uintptr(fd), uintptr(unsafe.Pointer(&chunk[0])), uintptr(len(chunk)))
+		if r < 0 {
+			return errnoErr(errOf(r))
+		}
+		if r == 0 {
+			return EIO
+		}
+		off += int(r)
+	}
+	virCursor[fd] = int64(len(buf))
+	virFlushed[fd] = true
+	return nil
+}
+
+// virWriteTo stages a write at the handle's logical position. It cannot go
+// straight to the device, because the caller may seek back and patch it —
+// which is exactly what the object writer does.
+func virWriteTo(fd int, p []byte) (int, error) {
+	if !virWrite[fd] {
+		// A read-open handle: the kernel owns that refusal (EBADF).
+		if len(p) > virIOChunkMax {
+			p = p[:virIOChunkMax]
+		}
+		r := svc3(virSysWrite, uintptr(fd), uintptr(unsafe.Pointer(&p[0])), uintptr(len(p)))
+		if r < 0 {
+			return 0, errnoErr(errOf(r))
+		}
+		return int(r), nil
+	}
+	if virFlushed[fd] {
+		if virPos[fd] != virCursor[fd] {
+			return 0, ENOSYS
+		}
+		if len(p) > virIOChunkMax {
+			p = p[:virIOChunkMax]
+		}
+		r := svc3(virSysWrite, uintptr(fd), uintptr(unsafe.Pointer(&p[0])), uintptr(len(p)))
+		if r < 0 {
+			return 0, errnoErr(errOf(r))
+		}
+		virCursor[fd] += int64(r)
+		virPos[fd] = virCursor[fd]
+		return int(r), nil
+	}
+	pos := virPos[fd]
+	end := pos + int64(len(p))
+	if end > virShadowMax {
+		return 0, ENOSYS
+	}
+	buf := virShadow[fd]
+	if int64(len(buf)) < end {
+		// Growing past what was written creates a hole, which reads as
+		// zeros — the same thing the file will contain.
+		buf = append(buf, make([]byte, end-int64(len(buf)))...)
+	}
+	copy(buf[pos:], p)
+	virShadow[fd] = buf
+	virPos[fd] = end
+	return len(p), nil
+}
+
+// Pread reads at an offset without moving the logical position, out of the
+// same shadow the sequential path builds. It never rewinds the kernel cursor;
+// it moves it forward only to reach bytes it has not pulled yet.
+func Pread(fd int, p []byte, offset int64) (n int, err error) {
+	if _, ok := dirFdFor(fd); ok {
+		return 0, EISDIR
+	}
+	if !shadowed(fd) || offset < 0 {
+		return 0, ENOSYS
+	}
+	if len(p) == 0 {
+		return 0, nil
+	}
+	scratch := make([]byte, virIOChunkMax)
+	if want := offset + int64(len(p)); want > virCursor[fd] {
+		if _, err := virPull(fd, want, scratch); err != nil {
+			return 0, err
+		}
+	}
+	if offset >= virRetained(fd) {
+		return 0, nil // the handle ended before that offset
+	}
+	return copy(p, virShadow[fd][offset:]), nil
 }
 
 func fdPath(fd int) (string, bool) {
@@ -225,6 +454,11 @@ func Open(path string, mode int, perm uint32) (fd int, err error) {
 	}
 	fd = int(r)
 	rememberFd(fd, path, mode)
+	// This handle is now one the port can position (see "positional I/O"):
+	// a write-open is stageable. The kernel truncated the file on a fresh
+	// write-open WITHOUT MODE_APPEND, so the shadow starts where it does.
+	virReset(fd)
+	virWrite[fd] = flags&(kmodeWrite|kmodeAppend) != 0
 	// O_TRUNC needs no second call: the kernel's write-open WITHOUT
 	// MODE_APPEND already has replace semantics (file_table.open: "a fresh
 	// write-open truncates"), so the open itself emptied the file. Calling the
@@ -304,12 +538,51 @@ func isDir(path string) bool {
 // 2048 bytes, so a short read is normal and is not an error (only writing
 // can lose data). A zero return means EOF: the kernel's read is
 // level-triggered at the handle's cursor and reports 0 at the end.
+//
+// When the handle's logical position is behind what the port has already
+// moved, the bytes come from the shadow and the kernel is not touched (see
+// "positional I/O" below).
 func Read(fd int, p []byte) (n int, err error) {
 	if _, ok := dirFdFor(fd); ok {
 		return 0, EISDIR
 	}
 	if len(p) == 0 {
 		return 0, nil
+	}
+	if !shadowed(fd) {
+		if len(p) > virIOChunkMax {
+			p = p[:virIOChunkMax]
+		}
+		r := svc3(virSysRead, uintptr(fd), uintptr(unsafe.Pointer(&p[0])), uintptr(len(p)))
+		if r < 0 {
+			return 0, errnoErr(errOf(r))
+		}
+		return int(r), nil
+	}
+
+	var scratch [virIOChunkMax]byte
+	pos := virPos[fd]
+	// The position is inside what the kernel has already delivered but
+	// outside what the shadow retained (it is capped). Those bytes are gone
+	// from the port's view: refusing is the only honest answer.
+	if pos < virCursor[fd] && pos >= virRetained(fd) {
+		return 0, ENOSYS
+	}
+	if pos > virCursor[fd] {
+		// A forward skip: the bytes go through the kernel and only the ones
+		// inside the retained window are kept.
+		if _, err := virPull(fd, pos, scratch[:]); err != nil {
+			return 0, err
+		}
+	}
+	if pos < virRetained(fd) {
+		avail := virRetained(fd) - pos
+		if int64(len(p)) > avail {
+			p = p[:int(avail)]
+		}
+		n = copy(p, virShadow[fd][pos:])
+		virPos[fd] = pos + int64(n)
+		return n, nil
 	}
 	if len(p) > virIOChunkMax {
 		p = p[:virIOChunkMax]
@@ -318,7 +591,13 @@ func Read(fd int, p []byte) (n int, err error) {
 	if r < 0 {
 		return 0, errnoErr(errOf(r))
 	}
-	return int(r), nil
+	if r > 0 {
+		n = int(r)
+		virKeep(fd, p[:n])
+		virCursor[fd] += int64(n)
+		virPos[fd] = pos + int64(n)
+	}
+	return n, nil
 }
 
 // Write moves up to one kernel write and reports the short write, which is
@@ -350,6 +629,9 @@ func Write(fd int, p []byte) (n int, err error) {
 		}
 		return int(r), nil
 	}
+	if shadowed(fd) {
+		return virWriteTo(fd, p)
+	}
 	if len(p) > virIOChunkMax {
 		p = p[:virIOChunkMax]
 	}
@@ -365,11 +647,17 @@ func Close(fd int) error {
 		virDirs[i] = dirHandle{}
 		return nil
 	}
+	// A staged write reaches the device here: the handle cannot be rewound,
+	// so this is its only entry point (documented at virFlush).
+	if err := virFlush(fd); err != nil {
+		return err
+	}
 	r := svc1(virSysClose, uintptr(fd))
 	if fd >= 0 && fd < len(virFdPaths) {
 		virFdPaths[fd] = ""
 		virFdFlags[fd] = 0
 	}
+	virReset(fd)
 	if r < 0 {
 		return errnoErr(errOf(r))
 	}
@@ -381,6 +669,11 @@ func Close(fd int) error {
 func Fsync(fd int) error {
 	if _, ok := dirFdFor(fd); ok {
 		return nil
+	}
+	// An fsync of a staged write means "get it on the device now" — which is
+	// exactly the flush, so it happens before the kernel is asked to sync.
+	if err := virFlush(fd); err != nil {
+		return err
 	}
 	r := svc1(virSysFileSync, uintptr(fd))
 	if r < 0 {
@@ -398,6 +691,18 @@ func Ftruncate(fd int, length int64) error {
 	if length < 0 || length > 0xffffffff {
 		return EINVAL
 	}
+	// A staged write is truncated where the caller sees it: the device will
+	// only be told at the flush, so truncating the device underneath the
+	// shadow would hand the next read the untruncated bytes.
+	if shadowed(fd) && virWrite[fd] && !virFlushed[fd] {
+		if int64(len(virShadow[fd])) > length {
+			virShadow[fd] = virShadow[fd][:length]
+		}
+		if virPos[fd] > length {
+			virPos[fd] = length
+		}
+		return nil
+	}
 	r := svc2(virSysTruncate, uintptr(fd), uintptr(length))
 	if r < 0 {
 		return errnoErr(errOf(r))
@@ -412,10 +717,42 @@ func Truncate(path string, length int64) error {
 	return ENOSYS
 }
 
-// Seek is ENOSYS. Handles carry a kernel cursor, there is no by-offset
-// read or write, and a Seek that silently did nothing would hand a caller
-// the wrong bytes.
-func Seek(fd int, offset int64, whence int) (int64, error) { return 0, ENOSYS }
+// Seek moves the handle's LOGICAL position (see "positional I/O" above).
+// The kernel's cursor is not moved by it, so seeking is free until bytes are
+// actually read, and a backwards seek over bytes the shadow retained costs no
+// syscall at all.
+func Seek(fd int, offset int64, whence int) (int64, error) {
+	if _, ok := dirFdFor(fd); ok {
+		return 0, EISDIR
+	}
+	if !shadowed(fd) {
+		// A handle this port did not open (the console) has no position to
+		// keep: an offset means nothing there, and the sequential path is
+		// already the right one.
+		return 0, ENOSYS
+	}
+	var base int64
+	switch whence {
+	case 0: // io.SeekStart
+		base = 0
+	case 1: // io.SeekCurrent
+		base = virPos[fd]
+	case 2: // io.SeekEnd
+		sz, err := virSize(fd)
+		if err != nil {
+			return 0, err
+		}
+		base = sz
+	default:
+		return 0, EINVAL
+	}
+	target := base + offset
+	if target < 0 {
+		return 0, EINVAL
+	}
+	virPos[fd] = target
+	return target, nil
+}
 
 func Dup(fd int) (int, error)          { return -1, ENOSYS }
 func Dup3(oldfd, newfd, flags int) error { return ENOSYS }

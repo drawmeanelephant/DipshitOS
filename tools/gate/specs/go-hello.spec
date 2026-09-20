@@ -12,10 +12,17 @@
 # removes checked from the host's copy of the share afterwards. The aperture
 # that used to refuse this image is fixed in the runtime's break base, and the
 # run also pins the two port bugs it caught (ADR 0035 amendment 4).
+# Runs 06-08 (M70c-S1T, #1543): the guest's OWN cmd/compile and cmd/link build
+# tools/go/hello.go in the guest (object -> ELF), and the ELF the guest linked
+# runs and prints the pinned lines. The in-guest memory samples (run 06/07) are
+# the ADR 0035 D6 figure: reported, not asserted, because a footprint is a
+# property of the machine.
 # HOST PREREQUISITE: `.build/go/{GOHELLO,GOBIG,GOREAD,GOSYSCALL}.ELF` must exist
 # first via `bash tools/go/build-go.sh tools/go/hello.go tools/go/gobig.go
 # tools/go/goread.go tools/go/gosyscall.go` (fork prerequisites in
-# tools/go/README.md); the setup hook says the same.
+# tools/go/README.md); runs 06-08 additionally need `bash tools/go/build-gotool.sh`
+# (the GOOS=virelai toolchain images) and `bash tools/go/stage-selfhost.sh`
+# (the import config + package archives the guest's linker resolves against).
 # exec-order: assert-proven — a run cannot go green without the program's own output. See tools/gate/SPEC.md.
 
 vgate_name go-hello "issue #1163 GOOS=virelai phase 0a: gc Go runtime first target on VZ"
@@ -316,3 +323,221 @@ if left:
 print("os layer: %d B hashed 0x%08x; os.Mkdir/WriteFile/ReadDir/Stat/Remove reached the share"
       % (n, h))
 PY
+
+# --- M70c-S1T (issue #1543): the guest builds, with its own toolchain --------
+#
+# The chain is three boots because the monitor's `exec` returns immediately
+# (tools/gate/SPEC.md): the share carries the intermediate between runs, and
+# each run ends on the guest's own exit-status line, which the scheduler prints
+# (`procs <name> exited status=<n>`). The intermediate is a real artifact of
+# the guest: run 07 links the object run 06 compiled, and run 08 executes the
+# ELF run 07 produced.
+#
+# The argv is what the kernel's 8x32-byte block allows (kernel/src/exec.zig
+# max_exec_args/arg_slot_bytes), which is why the flags are terse and the
+# import config is one flat file in the share; tools/go/stage-selfhost.sh
+# checks those lines against the budget before a boot is spent on them.
+vgate_file script6.txt <<'EOF'
+exec GOCMDCOMPILE.ELF -o /host/HELLO.o -importcfg /host/GOIMPORT.CFG /host/HELLO.GO
+EOF
+
+vgate_file script7.txt <<'EOF'
+sysinfo
+EOF
+
+vgate_file script8.txt <<'EOF'
+sysinfo
+syscalls
+echo selfhost-compile-done
+EOF
+
+vgate_file script9.txt <<'EOF'
+exec GOCMDLINK.ELF -importcfg /host/GOIMPORT.CFG -tmpdir /host -o /host/HELLO2.ELF /host/HELLO.o
+EOF
+
+vgate_file script10.txt <<'EOF'
+sysinfo
+EOF
+
+vgate_file script11.txt <<'EOF'
+sysinfo
+syscalls
+echo selfhost-link-done
+EOF
+
+vgate_file script12.txt <<'EOF'
+exec HELLO2.ELF
+EOF
+
+# Runs 06-08's staging: the toolchain images, and the import config + package
+# archives the guest's linker resolves symbols against. Both are host
+# prerequisites with their own scripts, so this fails closed with the script
+# to run rather than booting a guest that cannot find its inputs.
+vgate_setup_python <<'PY'
+import os, shutil, sys
+share = os.path.join(os.environ["RUN_DIR"], "share")
+tools = [".build/go/GOCMDCOMPILE.ELF", ".build/go/GOCMDLINK.ELF"]
+stage = ".build/go/selfhost"
+if not os.path.isdir(stage):
+    sys.exit("%s missing - run: bash tools/go/stage-selfhost.sh" % stage)
+for src in tools:
+    if not os.path.exists(src):
+        sys.exit("%s missing - run: bash tools/go/build-gotool.sh" % src)
+    shutil.copy(src, os.path.join(share, os.path.basename(src)))
+    print("staged %s (%d bytes)" % (os.path.basename(src), os.path.getsize(src)))
+n = total = 0
+for name in sorted(os.listdir(stage)):
+    if name.startswith("."):
+        continue
+    src = os.path.join(stage, name)
+    shutil.copy(src, os.path.join(share, name))
+    n += 1
+    total += os.path.getsize(src)
+print("staged %d selfhost files (%.2f MiB): import config + archives + HELLO.GO"
+      % (n, total / 1048576.0))
+# The chain assumes the share survives between runs and that run 07 links what
+# run 06 wrote; both are checked by the asserts below, not assumed here.
+for stale in ("HELLO.o", "HELLO2.ELF"):
+    p = os.path.join(share, stale)
+    if os.path.exists(p):
+        os.remove(p)
+        print("removed stale %s from a previous gate run" % stale)
+PY
+
+# Run 06: the guest's cmd/compile compiles the pinned hello. It prints nothing
+# on success, so the evidence is the object it wrote (read back on macOS) and
+# its own exit status. The object is an ar archive whose header line names the
+# target it was compiled for: `go object virelai arm64 go1.27.1 ...` is not a
+# line a copied binary or a no-op compile can produce.
+vgate_run 06 -- --script '$RUN_DIR/script6.txt' --script2 '$RUN_DIR/script7.txt' --script2-after 'exec: loaded GOCMDCOMPILE.ELF' --script3 '$RUN_DIR/script8.txt' --script3-after 'procs GOCMDCOMPILE.ELF exited status=0' --script-expect 'selfhost-compile-done' --timeout 300
+
+vgate_assert 06 serial-contains 'VirelaiOS kernel has seized control.'
+vgate_assert 06 serial-contains 'exec: loaded GOCMDCOMPILE.ELF'
+vgate_assert 06 serial-contains 'procs GOCMDCOMPILE.ELF exited status=0'
+vgate_assert 06 serial-absent '[EXC] parking:'
+vgate_assert 06 serial-absent 'cannot allocate memory'
+vgate_assert 06 serial-absent 'panic:'
+vgate_assert 06 python <<'PY'
+import os, re, sys
+share = os.environ.get("VG_SHARE") or os.path.join(os.environ["RUN_DIR"], "share")
+obj = os.path.join(share, "HELLO.o")
+if not os.path.exists(obj):
+    sys.exit("FAIL: the in-guest compile produced no object at " + obj)
+raw = open(obj, "rb").read()
+if len(raw) < 1024:
+    sys.exit("FAIL: HELLO.o is only %d bytes" % len(raw))
+if not raw.startswith(b"!<arch>"):
+    sys.exit("FAIL: HELLO.o is not an ar archive; first bytes %r" % raw[:16])
+for want in (b"go object virelai arm64 ", b"__.PKGDEF", b"_go_.o", b"main.main"):
+    if want not in raw:
+        sys.exit("FAIL: HELLO.o has no %r" % want)
+hdr = re.search(rb"go object [^\n]{0,64}", raw)
+print("in-guest compile: HELLO.o %d bytes (ar archive); header %r"
+      % (len(raw), hdr.group(0).decode()))
+ser = open(os.environ["VG_SER"], errors="replace").read()
+samples = re.findall(r"allocator:\s+armed=(\d) total=(0x[0-9a-f]+) free=(0x[0-9a-f]+) "
+                     r"excluded=(0x[0-9a-f]+) regions=(0x[0-9a-f]+)", ser)
+for i, (armed, total, free, excl, regions) in enumerate(samples):
+    t, f = int(total, 16), int(free, 16)
+    if f > t:
+        sys.exit("FAIL: allocator sample %d has free > total" % i)
+    print("guest frames at sample %d: used=%d of %d (%d KiB of %d KiB) on a %d-page guest"
+          % (i, t - f, t, (t - f) * 4, t * 4, 65215))
+m = re.search(r"\s63 sys_mmap calls=(\d+)", ser)
+print("in-guest compile sys_mmap calls: %s" % (m.group(1) if m else "not reported"))
+PY
+
+# Run 07: the guest's cmd/link links that object into an ELF, resolving
+# symbols out of the package archives staged in the share. The host then holds
+# the result to the SAME loader rules the kernel enforces before run 08 is
+# allowed to execute it — segment count, sum of memsz, gap ceiling, W^X order,
+# entry-inside-segment-0 and the argv+envp page slack.
+vgate_run 07 -- --script '$RUN_DIR/script9.txt' --script2 '$RUN_DIR/script10.txt' --script2-after 'exec: loaded GOCMDLINK.ELF' --script3 '$RUN_DIR/script11.txt' --script3-after 'procs GOCMDLINK.ELF exited status=0' --script-expect 'selfhost-link-done' --timeout 900
+
+vgate_assert 07 serial-contains 'exec: loaded GOCMDLINK.ELF'
+vgate_assert 07 serial-contains 'procs GOCMDLINK.ELF exited status=0'
+vgate_assert 07 serial-absent '[EXC] parking:'
+vgate_assert 07 serial-absent 'cannot allocate memory'
+vgate_assert 07 serial-absent 'panic:'
+vgate_assert 07 python <<'PY'
+import os, re, struct, sys
+share = os.environ.get("VG_SHARE") or os.path.join(os.environ["RUN_DIR"], "share")
+elf = os.path.join(share, "HELLO2.ELF")
+if not os.path.exists(elf):
+    sys.exit("FAIL: the in-guest link produced nothing at " + elf)
+d = open(elf, "rb").read()
+if d[:4] != b"\x7fELF" or d[4] != 2 or d[5] != 1:
+    sys.exit("FAIL: HELLO2.ELF is not a 64-bit little-endian ELF")
+if struct.unpack_from("<H", d, 0x12)[0] != 183:
+    sys.exit("FAIL: HELLO2.ELF is not AArch64")
+MAX, GAP, NEED_SLACK = 33554432, 0x1000_0000, 0x908
+entry = struct.unpack_from("<Q", d, 0x18)[0]
+phoff = struct.unpack_from("<Q", d, 0x20)[0]
+phes = struct.unpack_from("<H", d, 0x36)[0]
+pnum = struct.unpack_from("<H", d, 0x38)[0]
+segs = []
+for i in range(pnum):
+    t, fl, off, va, pa, fsz, msz, al = struct.unpack_from("<IIQQQQQQ", d, phoff + i * phes)
+    if t == 1:
+        segs.append((fl, va, fsz, msz))
+segs.sort(key=lambda s: s[1])
+fails = []
+if not segs:
+    fails.append("no PT_LOAD segments")
+if len(segs) > 3:
+    fails.append("%d PT_LOAD > max_segments 3" % len(segs))
+total = sum(s[3] for s in segs)
+if total > MAX:
+    fails.append("sum memsz %d > load_max" % total)
+for fl, va, fsz, msz in segs:
+    if va + msz > GAP:
+        fails.append("segment at %#x crosses gap_base_max" % va)
+    if va & 4095:
+        fails.append("segment at %#x unaligned" % va)
+if segs and segs[0][0] & 2:
+    fails.append("segment 0 writable")
+if segs and not (segs[-1][0] & 2):
+    fails.append("last segment not writable")
+if segs and not (segs[0][1] <= entry < segs[0][1] + segs[0][2]):
+    fails.append("entry %#x not in segment 0 initialized bytes" % entry)
+slack = (-segs[-1][3]) % 4096 if segs else 0
+if slack < NEED_SLACK:
+    fails.append("writable page slack %d < %#x (argv+envp block)" % (slack, NEED_SLACK))
+if len(d) > MAX:
+    fails.append("file %d > exec_image_max" % len(d))
+print("in-guest link: HELLO2.ELF %d bytes, %d segments, memsz %d (%#x), slack %#x"
+      % (len(d), len(segs), total, total, slack))
+ser = open(os.environ["VG_SER"], errors="replace").read()
+for i, (armed, t, f, excl, regions) in enumerate(re.findall(
+        r"allocator:\s+armed=(\d) total=(0x[0-9a-f]+) free=(0x[0-9a-f]+) "
+        r"excluded=(0x[0-9a-f]+) regions=(0x[0-9a-f]+)", ser)):
+    t, f = int(t, 16), int(f, 16)
+    print("guest frames at sample %d: used=%d of %d (%d KiB of %d KiB)"
+          % (i, t - f, t, (t - f) * 4, t * 4))
+if fails:
+    for f in fails:
+        print("FAIL: " + f)
+    sys.exit(1)
+print("HELLO2.ELF satisfies every loader rule the kernel enforces")
+PY
+
+# Run 08: the binary the GUEST produced runs on the kernel. This is the
+# end-to-end claim of the card: compile in-guest, link in-guest, execute the
+# result. The pinned lines are the fixture's own vocabulary (phase 0a's
+# runtime surface: console, sbrk heap growth, a GC cycle).
+#
+# No `procs HELLO2.ELF exited status=0` assert here: the run stops ON the
+# program's last pinned line, which is printed before the process is reaped,
+# so the exit line races the stop rather than reporting on the program. The
+# absent-exception asserts are what rule out a crash.
+vgate_run 08 -- --script '$RUN_DIR/script12.txt' --script-expect 'virelai-go OK' --timeout 300
+
+vgate_assert 08 serial-contains 'exec: loaded HELLO2.ELF'
+vgate_assert 08 serial-contains 'hello from virelai'
+vgate_assert 08 serial-contains 'GOOS=virelai GOARCH=arm64 gc runtime alive'
+vgate_assert 08 serial-contains 'heap: wrote 1048576 bytes'
+vgate_assert 08 serial-contains 'gc: cycle completed'
+vgate_assert 08 serial-contains 'virelai-go OK'
+vgate_assert 08 serial-absent '[EXC] parking:'
+vgate_assert 08 serial-absent 'exited status=139'
+vgate_assert 08 serial-absent 'cannot allocate memory'
