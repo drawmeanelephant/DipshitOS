@@ -460,53 +460,18 @@ vgate_assert 07 serial-absent '[EXC] parking:'
 vgate_assert 07 serial-absent 'cannot allocate memory'
 vgate_assert 07 serial-absent 'panic:'
 vgate_assert 07 python <<'PY'
-import os, re, struct, sys
+import os, re, sys
+sys.path.insert(0, os.path.join("tools", "lib"))
+import elf_rules
 share = os.environ.get("VG_SHARE") or os.path.join(os.environ["RUN_DIR"], "share")
 elf = os.path.join(share, "HELLO2.ELF")
 if not os.path.exists(elf):
     sys.exit("FAIL: the in-guest link produced nothing at " + elf)
-d = open(elf, "rb").read()
-if d[:4] != b"\x7fELF" or d[4] != 2 or d[5] != 1:
-    sys.exit("FAIL: HELLO2.ELF is not a 64-bit little-endian ELF")
-if struct.unpack_from("<H", d, 0x12)[0] != 183:
-    sys.exit("FAIL: HELLO2.ELF is not AArch64")
-MAX, GAP, NEED_SLACK = 33554432, 0x1000_0000, 0x908
-entry = struct.unpack_from("<Q", d, 0x18)[0]
-phoff = struct.unpack_from("<Q", d, 0x20)[0]
-phes = struct.unpack_from("<H", d, 0x36)[0]
-pnum = struct.unpack_from("<H", d, 0x38)[0]
-segs = []
-for i in range(pnum):
-    t, fl, off, va, pa, fsz, msz, al = struct.unpack_from("<IIQQQQQQ", d, phoff + i * phes)
-    if t == 1:
-        segs.append((fl, va, fsz, msz))
-segs.sort(key=lambda s: s[1])
-fails = []
-if not segs:
-    fails.append("no PT_LOAD segments")
-if len(segs) > 3:
-    fails.append("%d PT_LOAD > max_segments 3" % len(segs))
-total = sum(s[3] for s in segs)
-if total > MAX:
-    fails.append("sum memsz %d > load_max" % total)
-for fl, va, fsz, msz in segs:
-    if va + msz > GAP:
-        fails.append("segment at %#x crosses gap_base_max" % va)
-    if va & 4095:
-        fails.append("segment at %#x unaligned" % va)
-if segs and segs[0][0] & 2:
-    fails.append("segment 0 writable")
-if segs and not (segs[-1][0] & 2):
-    fails.append("last segment not writable")
-if segs and not (segs[0][1] <= entry < segs[0][1] + segs[0][2]):
-    fails.append("entry %#x not in segment 0 initialized bytes" % entry)
-slack = (-segs[-1][3]) % 4096 if segs else 0
-if slack < NEED_SLACK:
-    fails.append("writable page slack %d < %#x (argv+envp block)" % (slack, NEED_SLACK))
-if len(d) > MAX:
-    fails.append("file %d > exec_image_max" % len(d))
-print("in-guest link: HELLO2.ELF %d bytes, %d segments, memsz %d (%#x), slack %#x"
-      % (len(d), len(segs), total, total, slack))
+# ONE copy of the kernel's loader rules, shared with live-selfhost-go.spec run 01
+# (tools/lib/elf_rules.py): a rule that drifted in one spec would pass an image
+# the kernel then refuses, far from the check that lied.
+receipt, fails = elf_rules.check_file(elf, "HELLO2.ELF")
+print("in-guest link: " + receipt)
 ser = open(os.environ["VG_SER"], errors="replace").read()
 for i, (armed, t, f, excl, regions) in enumerate(re.findall(
         r"allocator:\s+armed=(\d) total=(0x[0-9a-f]+) free=(0x[0-9a-f]+) "

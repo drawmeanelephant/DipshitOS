@@ -118,6 +118,10 @@ cp "$REPO/$SRC_REL" "$OUT_DIR/HELLO.GO"
 # share paths the guest passes are what make these lines longer than a normal
 # command line. Both commands stay inside the budget by construction, but that
 # is a claim; this asserts it.
+#
+# KEEP IN SYNC with tools/go/selfhost.go's `steps`: those are the lines the
+# in-guest driver actually runs, and this list is their mirror. A change to one
+# without the other makes this check pass for the wrong reason.
 python3 - <<'PY'
 MAX_ARGS = 8          # kernel/src/exec.zig max_exec_args
 MAX_LEN = 32 - 1      # arg_slot_bytes, minus the NUL
