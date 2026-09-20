@@ -17,12 +17,21 @@
 # runs and prints the pinned lines. The in-guest memory samples (run 06/07) are
 # the ADR 0035 D6 figure: reported, not asserted, because a footprint is a
 # property of the machine.
+# Runs 09-10 (M69e, #1532): the DAILY LOOP, and the only boots here where a
+# compiler runs because of the guest's own action. Run 09 has the guest author
+# a Go source on /host with the monitor's `write` verb; the Mac compiles THAT
+# file between the two boots (a python hook on run 09, so the compile sits
+# after the edit and before the run); run 10 executes the image the Mac built
+# from the guest's own bytes. The guest never sees a compiler - both runs
+# assert the host's own receipt line absent from their serial.
 # HOST PREREQUISITE: `.build/go/{GOHELLO,GOBIG,GOREAD,GOSYSCALL}.ELF` must exist
 # first via `bash tools/go/build-go.sh tools/go/hello.go tools/go/gobig.go
 # tools/go/goread.go tools/go/gosyscall.go` (fork prerequisites in
 # tools/go/README.md); runs 06-08 additionally need `bash tools/go/build-gotool.sh`
 # (the GOOS=virelai toolchain images) and `bash tools/go/stage-selfhost.sh`
 # (the import config + package archives the guest's linker resolves against).
+# Runs 09-10 need only that same fork toolchain: the harness compiles in the
+# gate, and refuses (before any boot) when `$GO_FORK_DIR/bin/go` is missing.
 # exec-order: assert-proven — a run cannot go green without the program's own output. See tools/gate/SPEC.md.
 
 vgate_name go-hello "issue #1163 GOOS=virelai phase 0a: gc Go runtime first target on VZ"
@@ -506,3 +515,177 @@ vgate_assert 08 serial-contains 'virelai-go OK'
 vgate_assert 08 serial-absent '[EXC] parking:'
 vgate_assert 08 serial-absent 'exited status=139'
 vgate_assert 08 serial-absent 'cannot allocate memory'
+
+# --- M69e (issue #1532): the daily loop, one boot per step --------------------
+#
+# The card's loop is edit -> compile -> run, and unlike the selfhost chain above
+# the STEPS ARE SEQUENCED: the harness evaluates a run's asserts between runs,
+# so run 09's hook compiles the file the guest just wrote and run 10 runs the
+# result. What the guest authored is a ONE-LINE program (it has to be: the
+# monitor's `write` joins its arguments and appends no newline), so the loop
+# fixture lives on the share instead of in `tools/go/` - there is nothing to
+# keep in sync, and no new demo app.
+#
+# D1 (the compiler is the Mac) is pinned rather than promised: the compile's
+# receipt line `loop: host-built ...` is printed by the HOST into the gate log,
+# and both runs assert that line absent from their own serial, so a future
+# version that types a compiler banner into the guest console fails here.
+#
+# Run 09 writes, and stops on the monitor's own persistence report. That report
+# carries the byte count, which the hook holds to the file it reads on macOS -
+# the guest's claim about its edit and the host's copy of it have to agree.
+vgate_file script13.txt <<'EOF'
+write LOOP.GO 'package main; func main() { println("loop-m69e: guest-authored source") }'
+EOF
+
+# Run 10 is the run half: the image exists only because the hook on run 09 built
+# it from that same file, and the hook deletes any earlier LOOP.ELF first, so a
+# share left over from a previous gate run cannot satisfy this boot. The run
+# stops on the SCHEDULER's exit line for the program (printed after its last
+# write, unlike the program's own line, which only marks the print).
+vgate_file script14.txt <<'EOF'
+exec LOOP.ELF
+EOF
+
+# The fork must be provisioned BEFORE a boot, not built inside one: no
+# make.bash in a gate (the rule tools/go/README.md states). Two files of the
+# previous gate run cannot leak into this one.
+vgate_setup_python <<'PY'
+import os, sys
+share = os.path.join(os.environ["RUN_DIR"], "share")
+repo = os.getcwd()
+fork = os.environ.get("GO_FORK_DIR") or os.path.join(os.path.dirname(repo), "go-virelai")
+for need in (os.path.join(fork, "bin", "go"), os.path.join(fork, "src", "runtime")):
+    if not os.path.exists(need):
+        sys.exit("the M69e loop runs (09/10) compile with the fork toolchain on the "
+                 "host, and %s is missing - run: bash tools/go/build-go.sh "
+                 "tools/go/hello.go (fork prerequisites in tools/go/README.md)" % need)
+for stale in ("LOOP.GO", "LOOP.ELF"):
+    p = os.path.join(share, stale)
+    if os.path.exists(p):
+        os.remove(p)
+        print("removed stale %s: run 09 must author it and run 10 must run the Mac's build of it" % stale)
+print("loop: runs 09/10 stage no guest compiler - the Mac builds between the two boots")
+PY
+
+vgate_run 09 -- --script '$RUN_DIR/script13.txt' --script-expect 'write: ok (persisted' --timeout 120
+
+vgate_assert 09 serial-contains 'VirelaiOS kernel has seized control.'
+vgate_assert 09 serial-absent ': not persisted - '
+vgate_assert 09 serial-absent 'unterminated quote'
+vgate_assert 09 serial-absent '[EXC] parking:'
+vgate_assert 09 serial-absent 'build-go:'
+vgate_assert 09 serial-absent 'loop: host-built'
+# The harness's own share reader (not the hook below) sees the guest's file,
+# and lifts it into evidence: artifacts/go-hello-share-LOOP.GO is the bytes the
+# Mac compiled in this very run.
+vgate_assert 09 share-contains LOOP.GO 'func main()'
+vgate_assert 09 python <<'PY'
+import hashlib, os, re, subprocess, sys, time
+share = os.environ.get("VG_SHARE") or os.path.join(os.environ["RUN_DIR"], "share")
+ser = open(os.environ["VG_SER"], errors="replace").read()
+src = os.path.join(share, "LOOP.GO")
+if not os.path.exists(src):
+    sys.exit("FAIL: the guest wrote no /host/LOOP.GO - there is nothing for the Mac to compile")
+raw = open(src, "rb").read()
+if not raw.startswith(b"package main"):
+    sys.exit("FAIL: the guest's file is not a Go program; it starts %r" % raw[:24])
+if b"func main()" not in raw:
+    sys.exit("FAIL: the guest's file has no func main()")
+# The tokenizer's job, checked rather than trusted: the guest's own persistence
+# report carries a byte count, and it has to be the size of the file on macOS.
+m = re.search(r"write: ok \(persisted (\d+) bytes", ser)
+if not m:
+    sys.exit("FAIL: no `write: ok (persisted N bytes to the host share)` line")
+if int(m.group(1)) != len(raw):
+    sys.exit("FAIL: the guest reported %s persisted bytes but the share holds %d "
+             "- the write did not land as authored" % (m.group(1), len(raw)))
+# `go build` wants a lowercase .go extension; the share's convention is
+# uppercase, so the compile takes a byte-verified copy. The claim is about
+# bytes, and the copy is compared, not assumed.
+work = os.path.join(os.environ["RUN_DIR"], "loop-src")
+os.makedirs(work, exist_ok=True)
+comp = os.path.join(work, "loop.go")
+open(comp, "wb").write(raw)
+if open(comp, "rb").read() != raw:
+    sys.exit("FAIL: the compile input is not byte-identical to the guest's file")
+elf = os.path.join(share, "LOOP.ELF")
+if os.path.exists(elf):
+    os.remove(elf)
+    print("loop: removed a pre-existing LOOP.ELF - run 10 must execute this build")
+env = dict(os.environ)
+env["GO_BUILD_OUT"] = share
+env["GO_BUILD_NAME"] = "LOOP"
+env["GO_STRICT_LAYOUT"] = "1"   # a shifted segment is a failure, not a warning
+t0 = time.time()
+try:
+    p = subprocess.run(["bash", "tools/go/build-go.sh", comp], env=env,
+                       capture_output=True, text=True, timeout=900)
+except subprocess.TimeoutExpired:
+    sys.exit("FAIL: the host build of the guest's own source did not finish in 900 s")
+for line in ((p.stdout or "") + (p.stderr or "")).splitlines():
+    print("  build-go| " + line)
+if p.returncode != 0:
+    sys.exit("FAIL: the Mac could not build the guest's own source (rc=%d); an "
+             "in-guest build is NOT the loop this card claims" % p.returncode)
+if not os.path.exists(elf):
+    sys.exit("FAIL: build-go.sh reported success but wrote no " + elf)
+eb = open(elf, "rb").read()
+if eb[:4] != b"\x7fELF":
+    sys.exit("FAIL: LOOP.ELF is not an ELF image; first bytes %r" % eb[:8])
+if os.path.getmtime(elf) < t0 or len(eb) < 1 << 16:
+    sys.exit("FAIL: LOOP.ELF predates this compile or is too small to be a Go image (%d bytes)" % len(eb))
+# The image has to carry the literal the guest's source names: that is what
+# makes run 10's own output a statement about the guest's bytes rather than
+# about a binary that happened to be in the share.
+mm = re.search(r'println\("([^"]*)"\)', raw.decode(errors="replace"))
+if not mm:
+    sys.exit("FAIL: the guest's program prints no string literal for run 10 to hold it to")
+marker = mm.group(1)
+if marker.encode() not in eb:
+    sys.exit("FAIL: the image the Mac just built does not contain %r, the literal the "
+             "guest's own source names" % marker)
+open(os.path.join(os.environ["RUN_DIR"], "loop-marker.txt"), "w").write(marker)
+print("loop: the guest's file is %r" % raw.decode())
+print("loop: host-built GOOS=virelai LOOP.ELF %d bytes from the guest's own /host/LOOP.GO "
+      "%d bytes sha256=%s (not from any staged fixture)"
+      % (len(eb), len(raw), hashlib.sha256(raw).hexdigest()))
+print("loop: the source names %r and that literal is in the image" % marker)
+PY
+
+vgate_run 10 -- --script '$RUN_DIR/script14.txt' --script-expect 'procs LOOP.ELF exited status=0' --timeout 180
+
+vgate_assert 10 serial-contains 'exec: loaded LOOP.ELF'
+vgate_assert 10 serial-contains 'procs LOOP.ELF exited status=0'
+vgate_assert 10 serial-contains-file loop-marker.txt
+vgate_assert 10 serial-absent '[EXC] parking:'
+vgate_assert 10 serial-absent 'exited status=139'
+vgate_assert 10 serial-absent 'build-go:'
+vgate_assert 10 serial-absent 'loop: host-built'
+vgate_assert 10 python <<'PY'
+import os, re, sys
+# The chain closes here, with no literal of its own: the expectation is read
+# back off the file the GUEST wrote, so these two boots cannot drift into
+# agreeing because a string was pasted twice in this spec.
+ser = open(os.environ["VG_SER"], errors="replace").read()
+share = os.environ.get("VG_SHARE") or os.path.join(os.environ["RUN_DIR"], "share")
+src = os.path.join(share, "LOOP.GO")
+if not os.path.exists(src):
+    sys.exit("FAIL: the guest's own /host/LOOP.GO is gone from the share")
+raw = open(src, "rb").read().decode(errors="replace")
+mm = re.search(r'println\("([^"]*)"\)', raw)
+if not mm:
+    sys.exit("FAIL: the guest's source names no literal to hold the run to")
+marker = mm.group(1)
+if not re.search("^" + re.escape(marker) + "$", ser, re.M):
+    sys.exit("FAIL: no whole line %r in run 10's serial - the guest ran an image that "
+             "does not print the literal its own source names" % marker)
+# D1: the compile is the Mac's, and its receipts are the host's. A version that
+# typed a build banner into the guest console fails right here.
+for leak in ("build-go:", "loop: host-built"):
+    if leak in ser:
+        sys.exit("FAIL: %r appears in run 10's serial - the compile is the Mac's, and "
+                 "the guest's console must not say otherwise" % leak)
+print("run 10 printed the guest's own literal %r as a whole line, with no compiler "
+      "banner in its serial" % marker)
+PY

@@ -716,6 +716,19 @@ The M69a beat asserts serial markers, so neither is visible to it.
 > for `.build/go/GOSELFHOST.ELF`, the in-guest driver. All three refuse by name
 > rather than boot a guest that cannot find its inputs.
 >
+> **The daily loop (M69e, issue #1532)** is the one class-B place where the
+> harness itself compiles, and it is deliberate. `go-hello` runs 09-10 have the
+> guest author `/host/LOOP.GO` with the monitor's `write` verb; the python hook
+> on run 09 — evaluated *between* the two boots — builds that file on the Mac
+> with `bash tools/go/build-go.sh`, and run 10 executes the image. No guest
+> compiler is staged for these runs, and the host's receipt
+> (`loop: host-built GOOS=virelai …`) is printed into the gate log, not the
+> guest's serial: both runs assert it absent there. The hook refuses **before
+> any boot** when `$GO_FORK_DIR/bin/go` is missing, so the "do not auto-build
+> the fork inside a gate" rule above still holds — the fork must be provisioned
+> by `just go-toolchain` first, like every other Go gate. The same loop driven
+> by hand is `tools/go/README.md` → *Daily loop*.
+>
 > The class-B fleet is **discovered, not listed** (M40 GF5, issue #940):
 > every `tools/gate/specs/*.spec` plus the four legacy class-B scripts
 > (`bad-handoff`, `marker`, `nvram-console`, `host-console`), exactly as
