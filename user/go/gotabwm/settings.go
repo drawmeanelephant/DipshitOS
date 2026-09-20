@@ -21,6 +21,7 @@ package main
 import (
 	"strings"
 
+	"virelai/theme"
 	"virelai/vi"
 )
 
@@ -44,6 +45,7 @@ type setting struct {
 const (
 	MarkerSettingsWM  = "gotabwm: settings wm="
 	MarkerSettingsBad = "gotabwm: settings bad"
+	MarkerTokens      = "gotabwm: tokens "
 )
 
 // parseSettingsTXT decodes a schema-v2 SETTINGS.TXT body. The first line
@@ -163,5 +165,19 @@ func loadSettings() {
 	if v, found := getSetting(ss, "wm"); found {
 		wm = v
 	}
+	if v, found := getSetting(ss, "theme"); found {
+		_ = theme.Set(v)
+	}
 	vi.ConsoleLine(MarkerSettingsWM + wm + " keys=" + vi.Itoa64(int64(len(ss))))
+}
+
+// emitTokens prints the serial token probe go-wm-hid greps. Same shape as
+// Zig `emit_tokens_marker` so a pixel/serial probe can pin one OS look.
+func emitTokens() {
+	t := theme.Current
+	vi.ConsoleLine(MarkerTokens + "theme=" + theme.Name() +
+		" bg=" + theme.Hex6(t.Bg) +
+		" surface=" + theme.Hex6(t.Surface) +
+		" border=" + theme.Hex6(t.Border) +
+		" accent=" + theme.Hex6(t.Accent))
 }

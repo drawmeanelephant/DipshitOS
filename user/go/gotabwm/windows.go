@@ -22,6 +22,7 @@
 package main
 
 import (
+	"virelai/theme"
 	"virelai/vi"
 )
 
@@ -192,16 +193,17 @@ func fillBorderChrome(desc []byte) {
 	for i := range desc {
 		desc[i] = 0
 	}
-	putU32LE(desc[0:], 0x01)      // kind: chrome_border (zero is refused)
-	putU32LE(desc[4:], 0x00)      // flags: no reserved bits set
-	putU32LE(desc[8:], 0x3a7bd5)  // border_rgb
-	putU32LE(desc[12:], 0x6b7280) // border_unfocus_rgb
-	putU32LE(desc[16:], 0x1a1e2e) // title_bg_rgb
-	putU32LE(desc[20:], 0xf0f0f0) // title_fg_rgb
-	putU32LE(desc[24:], 0x3a7bd5) // ring_rgb
-	putU32LE(desc[28:], 0xe05a5a) // close_rgb
-	putU32LE(desc[32:], 0x9aa0a6) // min_rgb
-	putU32LE(desc[36:], 0x9aa0a6) // pin_rgb
+	tok := theme.Current
+	putU32LE(desc[0:], 0x01)        // kind: chrome_border (zero is refused)
+	putU32LE(desc[4:], 0x00)        // flags: no reserved bits set
+	putU32LE(desc[8:], tok.Accent)  // border_rgb
+	putU32LE(desc[12:], tok.Border) // border_unfocus_rgb
+	putU32LE(desc[16:], tok.Bg)     // title_bg_rgb
+	putU32LE(desc[20:], tok.Text)   // title_fg_rgb
+	putU32LE(desc[24:], tok.Accent) // ring_rgb
+	putU32LE(desc[28:], tok.Danger) // close_rgb
+	putU32LE(desc[32:], tok.Muted)  // min_rgb
+	putU32LE(desc[36:], tok.Muted)  // pin_rgb
 }
 
 // putU32LE stores v little-endian at b (b must have at least 4 bytes).

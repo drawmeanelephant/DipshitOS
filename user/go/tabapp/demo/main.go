@@ -9,6 +9,7 @@ package main
 
 import (
 	"virelai/tabapp"
+	"virelai/theme"
 	"virelai/vi"
 	"virelai/widgets"
 )
@@ -67,34 +68,32 @@ func draw(ta *tabapp.TabApp) {
 	var f vi.Filler
 	w, h := uint32(ta.W), uint32(ta.H)
 	// Clear the whole canvas.
-	f.Rect(ta.Win, 0, 0, w, h, 0x101418)
+	tok := theme.Current
+	f.Rect(ta.Win, 0, 0, w, h, tabapp.FillRGB())
 
 	cv := &widgetCanvas{f: &f, win: ta.Win, ta: ta}
 	title := &widgets.Text{
-		R:     scaleR(ta, widgets.Rect{X: 8, Y: 8, W: int(natW) - 16, H: 20}),
+		R:     scaleR(ta, widgets.Rect{X: tok.PadMD, Y: tok.PadMD, W: int(natW) - 2*tok.PadMD, H: 20}),
 		Label: appTitle,
-		Fg:    0xffffff,
-		Bg:    0x1e2430,
+		Fg:    tok.Text,
+		Bg:    tok.Surface,
 	}
 	title.Draw(cv)
 
 	btn := &widgets.Button{
-		R:        scaleR(ta, widgets.Rect{X: 8, Y: int(natH) - 44, W: 96, H: 28}),
-		Label:    "Close",
-		Face:     0x2a3340,
-		Border:   0x5a6a80,
-		LabelRGB: 0xe0e8f0,
+		R:     scaleR(ta, widgets.Rect{X: tok.PadMD, Y: int(natH) - 44, W: 96, H: 28}),
+		Label: "Close",
 	}
 	btn.Draw(cv)
 
 	list := &widgets.List{
-		R:     scaleR(ta, widgets.Rect{X: 8, Y: 36, W: int(natW) - 16, H: int(natH) - 88}),
+		R:     scaleR(ta, widgets.Rect{X: tok.PadMD, Y: 36, W: int(natW) - 2*tok.PadMD, H: int(natH) - 88}),
 		Items: []string{"alpha", "beta", "gamma"},
 		RowH:  22,
 		Sel:   0,
-		Fg:    0xd8e0e8,
-		Bg:    0x161c24,
-		SelBg: 0x2c3a4c,
+		Fg:    tok.Ink,
+		Bg:    tok.ChromeBg,
+		SelBg: tok.Selection,
 	}
 	list.Draw(cv)
 

@@ -148,4 +148,7 @@ func TestSettingsMarkerShapes(t *testing.T) {
 	if MarkerSettingsWM != "gotabwm: settings wm=" {
 		t.Fatalf("wm marker = %q", MarkerSettingsWM)
 	}
+	if MarkerTokens != "gotabwm: tokens " {
+		t.Fatalf("tokens marker = %q", MarkerTokens)
+	}
 }

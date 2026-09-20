@@ -42,6 +42,7 @@ package main
 
 import (
 	"virelai/tabapp"
+	"virelai/theme"
 	"virelai/vi"
 	"virelai/webrender/font"
 )
@@ -127,14 +128,6 @@ const (
 	statusH    = 12
 )
 
-var (
-	colChromeBg = uint32(0x1e2430)
-	colPageBg   = uint32(0x101418)
-	colInk      = uint32(0xe6edf3)
-	colDim      = uint32(0x8b98a8)
-	colCaret    = uint32(0xffd75f)
-)
-
 // Key codes. ADR 0009 row 1: arg0 is the HID usage / keycode and arg1 is the
 // decoded symbol, so the arrows are read from arg0 (as user/src/notepad.zig
 // reads them) and printable input from arg1 (as GOEDIT does).
@@ -174,7 +167,24 @@ type app struct {
 	presents int
 }
 
+func loadGuestTheme() {
+	b, r := vi.ReadFileAll("/host/SETTINGS.TXT", 2048)
+	if r < 0 || b == nil {
+		return
+	}
+	_ = theme.ApplySettings(b)
+}
+
+// argvHeadroom wraps this image's writable memsz%4096 back into (0, 1792]
+// after importing virelai/theme (remainder 2160 observed). Same wall as
+// GOEDIT's header: a remainder above 1792 makes sbrk's first mmap collide
+// and mallocinit die.
+var argvHeadroom [2192]byte
+
+func init() { argvHeadroom[0] = 0 }
+
 func main() {
+	loadGuestTheme()
 	a := &app{buf: NewBuffer(), path: defaultPath, top: 1}
 	ta := tabapp.Init(tabapp.Config{Name: appName, Title: appTitle, X: natX, Y: natY, W: natW, H: natH})
 	if ta == nil {
@@ -489,21 +499,22 @@ func (a *app) draw() {
 	if w <= 0 || h <= 0 {
 		w, h = natW, natH
 	}
-	a.fill(0, 0, w, chromeH, colChromeBg)
-	a.fill(0, chromeH, w, h-chromeH, colPageBg)
+	tok := theme.Current
+	a.fill(0, 0, w, chromeH, tok.Surface)
+	a.fill(0, chromeH, w, h-chromeH, tok.Bg)
 
 	title := appTitle + "  " + a.path
 	if a.dirty {
 		title += " *"
 	}
-	a.drawText(textOrigin, 8, title, colInk)
+	a.drawText(textOrigin, 8, title, tok.Ink)
 
 	rows := a.rowsIn()
 	a.top = a.buf.Follow(a.top, rows)
 	cols := a.colsIn()
 	y := chromeH + 4
 	for _, row := range a.buf.View(a.top, rows, cols) {
-		a.drawText(textOrigin, y, row.Text, colInk)
+		a.drawText(textOrigin, y, row.Text, tok.Ink)
 		if row.Col >= 0 {
 			// The caret, drawn after the glyphs so it is never painted over.
 			// A caret past the clip sits on the edge: the clip is the view's
@@ -513,14 +524,14 @@ func (a *app) draw() {
 			if col > cols {
 				col = cols
 			}
-			a.fill(textOrigin+col*font.Advance(1), y, caretW, 8, colCaret)
+			a.fill(textOrigin+col*font.Advance(1), y, caretW, 8, tok.Caret)
 		}
 		y += lineH
 	}
 
 	status := "line " + vi.Itoa64(int64(a.buf.Line())) + ":" + vi.Itoa64(int64(a.buf.Col())) +
 		"  bytes " + vi.Itoa64(int64(a.buf.Len())) + "/" + vi.Itoa64(int64(MaxBytes))
-	a.drawText(textOrigin, h-statusH, status, colDim)
+	a.drawText(textOrigin, h-statusH, status, tok.Muted)
 	_ = a.f.Flush()
 	// Present puts the batch on the scanout. Without it the app fills its own
 	// back-buffer and NOTHING reaches the compositor -- and the serial looks

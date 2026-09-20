@@ -9,6 +9,7 @@ package main
 
 import (
 	"virelai/tabapp"
+	"virelai/theme"
 	"virelai/vi"
 	"virelai/widgets"
 )
@@ -57,7 +58,16 @@ type app struct {
 	keys       [padRows * padCols]widgets.Button
 }
 
+func loadGuestTheme() {
+	b, r := vi.ReadFileAll("/host/SETTINGS.TXT", 2048)
+	if r < 0 || b == nil {
+		return
+	}
+	_ = theme.ApplySettings(b)
+}
+
 func main() {
+	loadGuestTheme()
 	path := defaultPath
 	if args := vi.Args(); len(args) > 1 && len(args[1]) > 0 {
 		path = args[1]
@@ -113,18 +123,36 @@ func (a *app) handle(ev vi.Event) bool {
 	switch ev.Kind {
 	case vi.EvKeyDown:
 		return a.key(ev)
-	case vi.EvMouseDown:
-		if ev.Flags&vi.BtnLeft == 0 {
-			return false
-		}
-		x, y := int(ev.Arg0), int(ev.Arg1)
-		for i := range a.keys {
-			if a.keys[i].HitTest(x, y) {
-				return a.press(padLabels[i/padCols][i%padCols])
-			}
-		}
+	case vi.EvMouseMove, vi.EvMouseUp, vi.EvMouseDown:
+		return a.pointer(ev)
 	}
 	return false
+}
+
+func (a *app) pointer(ev vi.Event) bool {
+	x, y := int(ev.Arg0), int(ev.Arg1)
+	down := ev.Kind == vi.EvMouseDown && ev.Flags&vi.BtnLeft != 0
+	changed := false
+	hit := -1
+	for i := range a.keys {
+		h := a.keys[i].HitTest(x, y)
+		if a.keys[i].Hovered != h {
+			a.keys[i].Hovered = h
+			changed = true
+		}
+		p := down && h
+		if a.keys[i].Pressed != p {
+			a.keys[i].Pressed = p
+			changed = true
+		}
+		if h {
+			hit = i
+		}
+	}
+	if down && hit >= 0 {
+		return a.press(padLabels[hit/padCols][hit%padCols]) || changed
+	}
+	return changed
 }
 
 func (a *app) key(ev vi.Event) bool {
@@ -258,27 +286,27 @@ func (a *app) writeResult(line string) bool {
 
 func (a *app) layout() {
 	ta := a.ta
+	tok := theme.Current
 	a.disp = widgets.Text{
-		R:     scaleR(ta, widgets.Rect{X: 8, Y: 8, W: int(natW) - 16, H: 48}),
+		R:     scaleR(ta, widgets.Rect{X: tok.PadMD, Y: tok.PadMD, W: int(natW) - 2*tok.PadMD, H: 48}),
 		Label: a.eng.Display(),
-		Fg:    0xe6edf3,
-		Bg:    0x1e2430,
+		Fg:    tok.Ink,
+		Bg:    tok.Surface,
 	}
 	const (
 		btnW = 118
 		btnH = 68
-		gap  = 8
-		x0   = 8
-		y0   = 64
 	)
+	gap := tok.PadMD
+	x0 := tok.PadMD
+	y0 := 64
 	for r := 0; r < padRows; r++ {
 		for c := 0; c < padCols; c++ {
 			a.keys[r*padCols+c] = widgets.Button{
-				R:        scaleR(ta, widgets.Rect{X: x0 + c*(btnW+gap), Y: y0 + r*(btnH+gap), W: btnW, H: btnH}),
-				Label:    padLabels[r][c],
-				Face:     0x2a3340,
-				Border:   0x5a6a80,
-				LabelRGB: 0xe0e8f0,
+				R:       scaleR(ta, widgets.Rect{X: x0 + c*(btnW+gap), Y: y0 + r*(btnH+gap), W: btnW, H: btnH}),
+				Label:   padLabels[r][c],
+				Hovered: a.keys[r*padCols+c].Hovered,
+				Pressed: a.keys[r*padCols+c].Pressed,
 			}
 		}
 	}
@@ -287,7 +315,7 @@ func (a *app) layout() {
 func (a *app) draw() {
 	a.layout()
 	var f vi.Filler
-	f.Rect(a.ta.Win, 0, 0, a.ta.W, a.ta.H, 0x101418)
+	f.Rect(a.ta.Win, 0, 0, a.ta.W, a.ta.H, tabapp.FillRGB())
 	cv := &widgetCanvas{f: &f, win: a.ta.Win}
 	a.disp.Draw(cv)
 	for i := range a.keys {

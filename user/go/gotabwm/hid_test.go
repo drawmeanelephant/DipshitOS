@@ -13,6 +13,12 @@ func TestHidUsagesMatchRunner(t *testing.T) {
 	if hidUsageTab != 0x2B {
 		t.Fatalf("hidUsageTab = %#x want 0x2B (USB HID Tab)", hidUsageTab)
 	}
+	if hidUsageSpace != 0x2C {
+		t.Fatalf("hidUsageSpace = %#x want 0x2C (USB HID Space)", hidUsageSpace)
+	}
+	if hidUsageEnter != 0x28 || hidUsageEscape != 0x29 || hidUsageBksp != 0x2A {
+		t.Fatal("enter/esc/bksp HID usages drifted")
+	}
 }
 
 func TestAltTabNextPolicy(t *testing.T) {
@@ -336,5 +342,83 @@ func TestRailDragMissesClientAreaAndSameCell(t *testing.T) {
 	}
 	if tabs.At(0).ID != 3 {
 		t.Fatal("off-rail release mutated order")
+	}
+}
+
+func TestHidUsageCharLetters(t *testing.T) {
+	if c, ok := hidUsageChar(0x06); !ok || c != 'c' {
+		t.Fatalf("HID c = %q ok=%v", c, ok)
+	}
+	if c, ok := hidUsageChar(0x04); !ok || c != 'a' {
+		t.Fatalf("HID a = %q ok=%v", c, ok)
+	}
+	if c, ok := hidUsageChar(0x0f); !ok || c != 'l' {
+		t.Fatalf("HID l = %q ok=%v", c, ok)
+	}
+	if _, ok := hidUsageChar(hidUsageEnter); ok {
+		t.Fatal("enter is not a filter char")
+	}
+}
+
+func TestLauncherCtrlSpaceToggleAndFilter(t *testing.T) {
+	saved := launch
+	defer func() { launch = saved }()
+	launch = launcherState{}
+	handleWmKey(vi.Event{Kind: vi.EvWmKey, Flags: vi.ModCtrl, Arg0: uint32(hidUsageSpace)})
+	if !launch.open {
+		t.Fatal("ctrl-space must open the launcher")
+	}
+	launch.catalog = []AppEntry{
+		{Bin: "GOCALC.ELF", Label: "64-bit Calc"},
+		{Bin: "NOTE.ELF", Label: "Text Editor"},
+	}
+	launch.refresh()
+	handleWmKey(vi.Event{Kind: vi.EvWmKey, Arg0: 0x06}) // c
+	handleWmKey(vi.Event{Kind: vi.EvWmKey, Arg0: 0x04}) // a
+	handleWmKey(vi.Event{Kind: vi.EvWmKey, Arg0: 0x0f}) // l
+	handleWmKey(vi.Event{Kind: vi.EvWmKey, Arg0: 0x06}) // c
+	if launch.filter != "calc" {
+		t.Fatalf("filter = %q want calc", launch.filter)
+	}
+	if len(launch.filtered) != 1 || launch.catalog[launch.filtered[0]].Bin != "GOCALC.ELF" {
+		t.Fatalf("filtered = %v", launch.filtered)
+	}
+	handleWmKey(vi.Event{Kind: vi.EvWmKey, Arg0: uint32(hidUsageEscape)})
+	if launch.open {
+		t.Fatal("escape must dismiss")
+	}
+}
+
+func TestLauncherFilterIgnoresStickyCtrl(t *testing.T) {
+	saved := launch
+	defer func() { launch = saved }()
+	launch = launcherState{
+		open:     true,
+		catalog:  []AppEntry{{Bin: "GOCALC.ELF", Label: "64-bit Calc"}},
+		filtered: []int{0},
+	}
+	handleWmKey(vi.Event{Kind: vi.EvWmKey, Flags: vi.ModCtrl, Arg0: 0x06}) // c, ctrl still down
+	handleWmKey(vi.Event{Kind: vi.EvWmKey, Arg0: 0x04})                    // a
+	if launch.filter != "ca" {
+		t.Fatalf("sticky-ctrl filter = %q want ca", launch.filter)
+	}
+}
+
+func TestLaunchRowAtHitsFirstRow(t *testing.T) {
+	saved := launch
+	defer func() { launch = saved }()
+	launch = launcherState{
+		open:     true,
+		catalog:  []AppEntry{{Bin: "GOCALC.ELF", Label: "64-bit Calc"}},
+		filtered: []int{0},
+	}
+	cx := uint32(launchX + 20)
+	cy := uint32(launchY + launchHdr + 2)
+	i, ok := launchRowAt(cx, cy)
+	if !ok || i != 0 {
+		t.Fatalf("row at (%d,%d) = %d ok=%v", cx, cy, i, ok)
+	}
+	if _, ok := launchRowAt(10, 10); ok {
+		t.Fatal("outside panel must miss")
 	}
 }

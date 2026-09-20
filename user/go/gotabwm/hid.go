@@ -43,6 +43,9 @@ var (
 )
 
 func handleWmKey(e vi.Event) {
+	if handleLauncherKey(e) {
+		return
+	}
 	usage := uint8(e.Arg0)
 	ctrl := e.Flags&vi.ModCtrl != 0
 	shift := e.Flags&vi.ModShift != 0
@@ -125,6 +128,18 @@ func handleWmPointer(e vi.Event) {
 	down := pointerDownEdge(btn, prevPtrButtons)
 	up := pointerUpEdge(btn, prevPtrButtons)
 	prevPtrButtons = btn
+	if launch.open {
+		if down {
+			i, ok := launchRowAt(px, py)
+			if !ok {
+				dismissLauncher()
+				return
+			}
+			launch.sel = i
+			execSelected()
+		}
+		return
+	}
 	if down {
 		beginRailDrag(px, py)
 		_ = applyRailClick(px, py)

@@ -14,7 +14,11 @@
 // 1280×720 scanout. Integer math; the kernel clamp stays authoritative.
 package main
 
-import "unsafe"
+import (
+	"unsafe"
+
+	"virelai/theme"
+)
 
 // MaxTabs is the `.tabs` v2 / ADR 0033 cap.
 const MaxTabs = 16
@@ -93,11 +97,9 @@ func guessBin(title string) string {
 	}
 }
 
-const (
-	railIdleRGB  uint32 = 0x2E3448
-	railFocusRGB uint32 = 0x3A7BD5
-	railGapRGB   uint32 = 0x1A1E2E
-)
+func railIdleRGB() uint32  { return theme.Current.BtnIdle }
+func railFocusRGB() uint32 { return theme.Current.Accent }
+func railGapRGB() uint32   { return theme.Current.Bg }
 
 // Count is how many tabs are currently open.
 func (s *TabStrip) Count() int { return s.count }
@@ -488,7 +490,7 @@ func paintRail(scan []byte, width, height, stripH int, ts *TabStrip) int {
 	}
 	pix := unsafe.Slice((*uint32)(unsafe.Pointer(&scan[0])), pixN)
 	// Trough behind the cells (matches the blank desktop so a gap is a gap).
-	written := fillRect(pix, width, maxH, 0, 0, width, stripH, railGapRGB)
+	written := fillRect(pix, width, maxH, 0, 0, width, stripH, railGapRGB())
 	cellW := width / n
 	if cellW < 48 {
 		cellW = 48
@@ -506,9 +508,9 @@ func paintRail(scan []byte, width, height, stripH int, ts *TabStrip) int {
 		if w <= 1 {
 			continue
 		}
-		rgb := railIdleRGB
+		rgb := railIdleRGB()
 		if ts.At(i).ID == focus {
-			rgb = railFocusRGB
+			rgb = railFocusRGB()
 		}
 		// 1px trough on the left, like kernel paint_tab_strip.
 		written += fillRect(pix, width, maxH, x+1, 0, w-1, stripH, rgb)
