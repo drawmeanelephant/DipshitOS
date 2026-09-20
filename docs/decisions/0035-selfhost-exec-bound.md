@@ -898,3 +898,30 @@ shared waiter, the `--spawn` measurement) it is 3 PT_LOAD, memsz 1,252,164
 `tools/lib/elf_rules.py`, the same checker the two class-B specs run. The loop
 also presumes ~15 MiB of archives in the share, which is the ingredient that
 makes it a guest-side build rather than a guest-side invocation.
+
+## Amendment 9 — what M70c (#1455) left opt-in, and why that is the acceptance
+
+`cmd/compile`, `cmd/link`, the in-guest loop and the `live-selfhost-go` gate all
+landed (#1543/PR #1551, #1544/PR #1552, `live-zc`'s S3 in PR #1511), and the card
+closes on its own stated end: the gate is green. One deliverable is deliberately
+NOT taken as written — its deliverable 1 says `GOVIRELAI_STD=1` "becomes the
+normal path", and pass 2 (a fork-local `GOOS=virelai make.bash` std install)
+is still opt-in in `tools/go/build-go.sh`.
+
+The reason is that pass 2 is not on the acceptance's path. What the acceptance
+asks for — the guest compiles, links and runs a guest program with its own tool
+binaries — is reached through the `GOOS=virelai` port overlay (which is what
+makes the default `GOOS=virelai` build of the toolchain images work at all) and
+through `tools/go/stage-selfhost.sh`, whose own comment states the fact: the
+`go list -export` closure "works on a fork whose std was only ever compiled,
+never installed to pkg/". Nothing in the loop reads a fork-local virelai
+`pkg/`; it reads the staged source and the staged archives.
+
+So the flip buys the loop nothing and costs every guest fixture, because
+`build-go.sh` is their default path and pass 2 would add a full std build to
+every invocation. The blast radius is the guest build surface, not this card.
+A later card that needs a virelai `pkg/` tree (an in-guest `go` driving builds,
+say) owns the flip and the fork rebuild it implies. D4's boundary is unchanged:
+the toolchain payload stays host-staged, and the one boot that still runs the
+loop's product is a consequence of the uncharacterised third child in amendment
+8, not of the toolchain's provenance.
