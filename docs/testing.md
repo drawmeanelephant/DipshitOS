@@ -421,6 +421,47 @@ the exact number left to the kernel source. The exact-count siblings
 (`live-wmctl-register`, `live-win-syscall`/`move`/`close`, `live-net-udp-syscall`)
 pin `syscalls: slots=64 implemented=78` from the VZ serial.
 
+## Daily-driver beat (M69a, issue #1528)
+
+`go-dogfood` is the one fixed path that boots the **default** Go seat (no `wm`
+override anywhere) and drives the apps a human would touch. Two boots, one
+beat; every stage is released by the previous stage's own marker, so the serial
+order is the beat order:
+
+| boot | stages | markers, asserted in order |
+|------|--------|----------------------------|
+| 01 | `exec GOSH.ELF`, then `exec NOTE.ELF` | `dogfood: seat` < `dogfood: gosh` < `dogfood: note` < `dogfood: ok` |
+| 02 | `exec GOCALC.ELF`, then `exec WEB.ELF /host/DOGFOOD.HTML` | `dogfood: seat` < `dogfood: calc` < `dogfood: page` < `dogfood: ok` |
+
+- **The markers are guest-owned.** Each is printed by the program it is about
+  — the seat (`seat` after registration *and* the one-seat probe; `ok` at
+  host-done, and only when that boot actually hosted a tab), GOSH / NOTE /
+  GOCALC on their **accepted-declare** path, WEB on the first frame of a
+  laid-out page reaching the scanout. No staged line and no harness echo can
+  produce one, and the spec asserts them at **line start and in order**, with
+  the other half of the beat required to be absent from the run.
+- **The beat is two boots because of two observed limits**, both spelled out
+  in the spec header: the runner forwards at most three command phases per
+  boot (`--script` / `--script2` / `--script3`), and the kernel holds three Go
+  runtimes live — the seat plus two clients (M65d / #1442). A third concurrent
+  Go client is the wall `go-sh.spec` also stops short of (#1449).
+- **The browser is attached, not declared.** WEB sends WM_RPC kind 5 (attach)
+  rather than kind 8 (declare_fullscreen) so the page keeps the 512x384
+  geometry the `live-web*` gates pin. Attach is also what makes the page
+  visible on this seat: the seat paints the blank desktop only while its strip
+  is empty, and that fill sits above user windows.
+- **Host prerequisites** — build the five guest ELFs first; the spec refuses a
+  missing one by name: `bash tools/go/build-gotabwm.sh`, `build-gosh.sh`,
+  `build-note.sh`, `build-gocalc.sh`, `build-web.sh browser WEB`. The page is
+  the pinned fixture `user/go/browser/testdata/gate-page.html`, staged as
+  `/host/DOGFOOD.HTML` — no new fixture.
+
+**M69b (screenshots) subscribes to the same markers:** hang
+`--screenshot-after` on `dogfood: note` (boot 01: shell + editor on the seat)
+and on `dogfood: page` (boot 02: calculator + a rendered page); `dogfood: ok`
+marks the boot's hosted phase finished, i.e. after the seat's close
+choreography.
+
 ## Verification sequence
 
 1. Print the detected tool versions.
