@@ -547,9 +547,11 @@ pin `syscalls: slots=64 implemented=78` from the VZ serial.
 > **Host prerequisites (class B):** the Go-runtime gates (`go-hello`,
 > `go-args`, `go-goroutines`, `go-stress`, `go-panic`) are NOT hermetic — they exec
 > `.build/go/GOHELLO.ELF` + `.build/go/GOARGS.ELF` + `.build/go/GOROUT.ELF`
-> + `.build/go/GOSTRESS.ELF` + `.build/go/GOPANIC.ELF`, and refuse to run (honestly, with the build
+> + `.build/go/GOSTRESS.ELF` + `.build/go/GOPANIC.ELF` (and `go-hello` also
+> `.build/go/GOBIG.ELF` + `.build/go/GOREAD.ELF`, its M70c-K/M70c fixtures),
+> and refuse to run (honestly, with the build
 > hint) until `just go-toolchain` has provisioned this machine (it builds
-> ALL FIVE fixtures). The recipe is idempotent; the first run takes several
+> all of them). The recipe is idempotent; the first run takes several
 > minutes (one Go make.bash pass — the cross-std pass is phase-2 opt-in
 > via `GOVIRELAI_STD=1`). Do not auto-build the fork inside a gate
 > (rejected in review — see `tools/go/README.md`).
