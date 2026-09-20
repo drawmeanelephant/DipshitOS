@@ -586,3 +586,116 @@ just gate go-hello
 grep -a 'goread:' artifacts/go-hello-serial-04.log
 grep -a 'gosyscall:' artifacts/go-hello-serial-05.log
 ```
+
+## Amendment 5 — M70c-S1T (#1543): the acceptance bound, and a toolchain-scoped FIPS gate
+
+Recorded late: #1543 was closed before its amendment was written, and the
+measurement below is the whole reason that card existed, so it is kept here
+rather than lost. Everything in this section is OBSERVED except where it says
+otherwise; no VZ run was made, so no boot claim is made.
+
+`cmd/compile` and `cmd/link` were made to LINK for GOOS=virelai by closing
+three overlay gaps — the vendored x/telemetry `mmapFile`/`munmapFile` pair,
+eight `syscall.recvfromInet4`-style linkname targets, and `syscall.Exec`.
+Linking was not the wall. `elf.load_max` / `exec.exec_image_max` (32 MiB)
+bounds the SUM of every PT_LOAD `memsz` (`elf.zig:548-552`, reached on the
+streamed path via `exec.zig:447` -> `parse_head`), and the entire excess was
+ONE symbol:
+
+    33554432  crypto/internal/fips140/drbg.memory   (.noptrbss)
+
+Measured, stripped (`-s -w`):
+
+| image | sum of memsz | verdict |
+|---|---|---|
+| cmd/compile, default | 58,254,964 (55.56 MiB) | refused |
+| cmd/link, default | 39,895,972 (38.05 MiB) | refused |
+
+That buffer is demand-backed and free unless the FIPS module runs — upstream
+says so in the file itself — so the bound was charging ADDRESS SPACE as
+memory. The two GOOS-wide levers were tried and rejected: `GOEXPERIMENT=nofips140`
+does not exist in Go 1.27.1 (`unknown GOEXPERIMENT fips140`), and `GOFIPS140`
+already defaults to `off` (an explicit `off` build is byte-identical to the
+default, md5 `39eb4f6becf69c447bd1f06c2d961655`). A GOOS-wide build-tag
+exclusion would neutre `crypto/rand` for every guest binary and regress the
+landed M47/M67 TLS work, so it was not taken either.
+
+The shape taken instead: an opt-in `virelaitoolchain` tag, passed only when
+building the two toolchain images, which excludes `drbg/entropy_fips140.go`
+and selects a stub for `getEntropy`. Measured with the tag ON — cmd/compile
+24,693,668 (23.55 MiB) and cmd/link 6,334,572 (6.04 MiB), both inside the
+bound, and both passing EVERY `parse_impl` rule rather than just the bound.
+With the tag OFF the numbers are unchanged to the byte, so apps keep the real
+source and its buffer. `.noptrbss` falls 32.088 MiB -> 0.088 MiB and the
+`drbg.memory` symbol disappears.
+
+Two side findings, both measured, both worth keeping:
+
+- A Go file's GOOS/GOARCH SUFFIX and its `//go:build` line are BOTH enforced.
+  Upstream's `entropy_wasm.go` therefore cannot be reused for virelai: `_wasm`
+  pins it to wasm whatever its build line says, and widening that line to
+  include virelai compiled nothing and still reported `undefined: getEntropy`.
+  The stub is a separate file because of this, not by preference.
+- `cmd/link`'s writable segment is GEOMETRICALLY unfit to be exec'd with
+  arguments: it left only 0x350 bytes of page slack, under the 0x908 the
+  kernel's argv+envp block needs, so its first mmap was refused in
+  mallocinit. Fixed by the same device `user/go/sh` uses — an
+  `argvEnvpGuard` bss pad, added for this GOOS as an overlay file,
+  `cmd/link/argvguard_virelai.go`. Measured after the pad: writable memsz
+  0x69cb0 -> 0x6a690, slack 0x350 -> **0x970** (2416 >= 0x908).
+  `cmd/compile` needed no pad (0x298668, slack 0x998 = 2456) but its margin is
+  only 144 bytes, so the toolchain recipe ASSERTS the invariant for BOTH images
+  rather than trusting a comment. Both images now pass every loader rule AND
+  the slack rule.
+
+Also recorded here: the linker emits segment 0 at 0x10000, not
+`elf.text_base` (0x400000), and the loader accepts it — `parse_impl` sets
+`gap_layout` when `raws[0].vaddr != expected_base` and maps every segment at
+its declared vaddr. "Shifted-is-legal" needs no explicit `-T`/`-R` for a
+GOOS=virelai binary. The module header at `elf.zig:14` still claims segment 0
+MUST equal `text_base`; that line is stale against both the code and every
+emitted binary.
+
+## Amendment 6 — M70c-S2 (#1544): the in-guest build loop needs NO new spawn slot
+
+Deliverable 0 of this card is a spike decided and RECORDED before any driver
+code, choosing between (a) seat/sh-sequenced execs with `/host` handoff and
+(b) a new ADR 0007 spawn slot. The answer is (a) — and the reason is that (b)
+already exists, so nothing needs to be built to get it.
+
+Observed in-tree: the guest has spawn-and-wait today. `sys_exec` (slot 28)
+loads the named program from the share into a fresh process slot and spawns it
+at EL0; `sys_wait` (slot 8) "blocks the caller until the target process exits
+and returns its status — bounded, kernel-owned; NOT POSIX wait (no zombies, no
+fds)". `user/go/vi` already wraps that pair as `vi.Exec(name, args...)`, and
+the M68a Go shell uses exactly it: `user/go/sh/main.go:635` calls `vi.Exec`,
+and `shell.go:825`'s `runExternal` "spawns name in the foreground and waits".
+A guest-side driver can therefore sequence compile -> link with no kernel
+change at all.
+
+So NO ADR 0007 slot is filed for this card. The kernel split that this card
+reserved is not needed — which is the strongest form of the rule the card set:
+not smuggled, and not required.
+
+What the chosen shape costs, named now rather than discovered later:
+
+- `os/exec` stays ENOSYS by design, so `cmd/go` cannot drive the build. The
+  driver is a guest program calling `vi.Exec` (compile, then link), which is
+  what the card's "GOTOOLCHAIN=local offline driver" means — offline because
+  nothing fetches a toolchain, not because a flag says so.
+- No descriptor inheritance and no in-memory state between steps: every exec
+  is a FRESH process, so intermediates (the .o, then the linked ELF) cross the
+  steps as files on `/host`. That IS the handoff.
+- argv is bounded (8 args, 31 chars + NUL each) and the concurrent user-slot
+  pool is 4, reaped by the kernel. A bounded three-step loop fits; a general
+  recursive build would not.
+- (b) is rejected in full rather than deferred: a spawn slot plus a ported
+  `os/exec` would buy descriptor inheritance and let `cmd/go` drive, which is
+  the eventual shape for a genuinely self-hosting toolchain — but that is a
+  kernel ABI change made to satisfy a three-step loop the existing pair
+  already covers.
+
+Dependencies for the driver, stated so the next agent does not have to
+rediscover them: the toolchain-scoped FIPS gate (so the images clear
+`load_max`) and the `cmd/link` argv+envp pad. Both are amendment 5, and both
+were cleared on the #1543 branch before this spike was written.
