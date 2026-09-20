@@ -305,6 +305,70 @@ the original verdict:
 The old reason (the guest's exec seam cannot hold it) is retired; the current
 one is that the guest cannot yet compile the toolchain's own source for itself.
 
+### Amendment 3 — M70c-S1P (#1525): the ported `syscall`/`os` build, and the link windows become the next wall
+
+Observed on the fork, same toolchain, after the port landed
+(`tools/go/overlay/{syscall,internal/syscall/unix,internal/poll,time,os}`):
+
+```
+$ GOOS=virelai GOARCH=arm64 go build fmt      # exit 0 — no output
+$ GOOS=virelai GOARCH=arm64 go build os       # exit 0
+```
+
+That is the S1/S2 prerequisite the section above names, so `fmt` — and with it
+`os`, `path/filepath`, `go/ast` — now **compiles** for this GOOS. What the
+guest runs is a different claim, and the card's fixture (`tools/go/gosyscall.go`)
+settles it the hard way: it **builds, links, loads and starts** —
+`exec: loaded GOSYSCALL.ELF size=0x98194 … datapages=51` — and then dies in
+`runtime.mallocinit`:
+
+```
+fatal error: runtime: cannot allocate memory
+runtime.throw({0xb4404?, 0x0?})
+	runtime/panic.go:1243
+runtime.persistentalloc1(0x100, 0x0?, 0x1b01c0)
+	runtime/malloc.go:2363
+… runtime.mheap.init → runtime.mallocinit → runtime.rt0_go
+```
+
+Why, and this is the finding that outlives the card: **any image that imports
+`os` no longer fits the link recipe's windows.** Measured
+(`tools/go/build-go.sh`'s guard, `tools/go/gosyscall.go` with `os` only, no
+`fmt`):
+
+```
+text ends 0x92fc4 > 0x80000; rodata base 0xa0000 != 0x80000;
+rodata ends 0x149558 > 0x110000; data base 0x150000 != 0x110000
+```
+
+448 KiB of text was a runtime-only budget. The Go linker then shifts the later
+segments, the kernel faithfully maps them at their declared vaddrs (#1504's
+gap streaming) — and the runtime's sbrk heap starts at
+`memRound(firstmoduledata.end)`, which for the shifted layout is page-rounded
+into the **loaded data aperture**, so the kernel's `mmap_collides` check
+(system 1214's rule: a mapping may never alias a region the process owns)
+refuses the process's first heap mapping. The unshifted images did not hit this
+by geometry, not by design: their data aperture ends exactly where the linked
+`end` rounds to.
+
+Consequences, stated as constraints rather than guesses:
+
+- **The recipe's apertures, not the port, are now the gate**, filed as **#1540**
+  (M70c-S1L). Widening them (explicit link bases) or making the break's base
+  page-safe relative to the loader's aperture end is that card's work; until then
+  no in-guest fixture that imports `os` can pass, which is why `go-hello` has no
+  std-fixture run.
+- **`cmd/compile` is ~40x past the text window** (448 KiB here vs 27 MB of
+  host `cmd/compile`), so this wall has to come down for S1/S2 regardless of
+  which std packages they link.
+- **Link-time gaps are invisible to `go build`.** The port's first link failure
+  was `os.(*File).Write: relocation target os.sigpipe not defined` — the
+  virelai runtime's `os_sigpipe` had never carried its `//go:linkname`, and no
+  earlier fixture used `os`, so nothing had ever referenced the symbol. Fixed
+  in the same card; the general lesson is that "`go build fmt` succeeds" is a
+  **compile-time** claim and must not be read as "a guest program using `fmt`
+  runs".
+
 ### The transfer half, measured
 
 The card's other half — "measure the honest transfer and `mmap` story" — now
