@@ -81,6 +81,36 @@ non-zero) when the system versions win. Fix with
 `brew install bash gnu-sed jq yq &&` fix PATH, then re-source. Safe and
 idempotent — run it from your login/agent startup once per session.
 
+## Agent harness discipline
+
+The issue tracker is cross-session handoff, not a live feed. Time spent
+filing, polling, or narrating on GitHub is time not spent on the card.
+
+- **No micro-issues.** A card is a landable unit: scoped deliverable +
+  verification. Split a card only when each shard is independently claimable
+  by a different agent with disjoint `Touches` (the M63/M65 pattern).
+  Anything you notice while holding a card that fits inside its `Touches`
+  and its verification bar goes into that card as a fixup commit — not a
+  new issue. Filing an issue costs every other agent a coordination read;
+  a sub-day fix in files you already touch never earns one.
+- **Never file an issue for work you are about to do in the same session.**
+  Claim or code. If it cannot be claimed (no landable scope, no
+  verification), it is a todo in your own task list, not a tracker entry.
+- **After `gh pr create`: stop watching.** Post the evidence comment, link
+  the PR, and return to code. Do not poll `gh pr checks`, do not watch
+  Actions, do not loop `sleep` + `gh` waiting for lights: 0 class-B gates
+  run in CI (see `docs/status.md`) — your local gate runs are the evidence,
+  and the reference-host runs happen without you. One status read when you
+  resume next session is the entire budget.
+- **Incorporate feedback by coding.** When review comments arrive, answer
+  with commits on the branch, not comment threads. A reply without code is
+  owed only when the feedback is rejected — and then it states the
+  technical reason once, not a negotiation.
+- **Heartbeats are for days, not minutes.** Append progress comments when
+  the state actually changes across sessions, not as a liveblog of a
+  single session. Nobody's gate reads your narration; everybody's gate
+  reads your `Touches`.
+
 ## Multiagent coordination rules
 
 Multiple agents and humans develop this repo in parallel. Claims are GitHub

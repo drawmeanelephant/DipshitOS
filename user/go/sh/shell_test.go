@@ -740,3 +740,185 @@ func TestCdNamesTheErrno(t *testing.T) {
 		t.Fatalf("plain cd = %q", got)
 	}
 }
+
+// --- M69f2 (#1538): the ADR 0008 D1 grouped help catalog ------------------
+
+// helpContains is a tiny membership test (no slices package in this GOOS).
+func helpContains(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
+// TestHelpCatalogMatchesVerbTables is the drift guard: the catalog is data
+// beside the builtin and toolbox tables, so it must describe exactly the
+// verbs that exist -- one row per builtin, one per tool, one for `exec` --
+// and no row may name a verb this shell cannot run.
+func TestHelpCatalogMatchesVerbTables(t *testing.T) {
+	for name := range builtins {
+		if _, ok := helpCatalog[name]; !ok {
+			t.Errorf("builtin %q has no help catalog row", name)
+		}
+	}
+	for name := range tools {
+		if _, ok := helpCatalog[name]; !ok {
+			t.Errorf("tool %q has no help catalog row", name)
+		}
+	}
+	if _, ok := helpCatalog[helpExternal]; !ok {
+		t.Errorf("external %q has no help catalog row", helpExternal)
+	}
+	for name, e := range helpCatalog {
+		_, isBuiltin := builtins[name]
+		_, isTool := tools[name]
+		if !isBuiltin && !isTool && name != helpExternal {
+			t.Errorf("help catalog row %q names no verb this shell can run", name)
+		}
+		if !helpContains(helpGroups, e.group) && e.group != "tools" && e.group != "externals" {
+			t.Errorf("help catalog row %q has unknown group %q", name, e.group)
+		}
+		if e.usage == "" || e.blurb == "" {
+			t.Errorf("help catalog row %q is missing usage/blurb", name)
+		}
+	}
+}
+
+// TestHelpCatalogIsGrouped pins the no-argument page: `builtins:` stays the
+// FIRST line (live-sh-complete / live-sh4 sequence their typed `help` on it),
+// there is more than one group section, and every runnable name appears.
+func TestHelpCatalogIsGrouped(t *testing.T) {
+	h := newFakeHost()
+	run, _ := session(h)
+	if st := run("help"); st != 0 {
+		t.Fatalf("help status = %d want 0", st)
+	}
+	got := h.outString()
+	lines := strings.Split(strings.TrimSuffix(got, "\n"), "\n")
+	if len(lines) == 0 || lines[0] != "builtins:" {
+		t.Fatalf("help first line = %q, want %q", lines[0], "builtins:")
+	}
+	sections := 0
+	for _, g := range helpGroups {
+		if strings.Contains(got, "\n  "+g+": ") {
+			sections++
+		}
+	}
+	if sections < 2 {
+		t.Fatalf("help printed %d group sections, want >= 2:\n%s", sections, got)
+	}
+	if err := helpMustBeUnique(got); err != "" {
+		t.Fatalf("%s\n%s", err, got)
+	}
+	for name := range builtins {
+		if !strings.Contains(got, name) {
+			t.Errorf("help catalog omits builtin %q", name)
+		}
+	}
+	for name := range tools {
+		if !strings.Contains(got, name) {
+			t.Errorf("help catalog omits tool %q", name)
+		}
+	}
+}
+
+// helpMustBeUnique fails when a name is listed twice inside the builtin
+// group block -- the "exactly once" half of the card's deliverable 1.
+func helpMustBeUnique(catalog string) string {
+	seen := map[string]int{}
+	for _, ln := range strings.Split(catalog, "\n") {
+		if !strings.HasPrefix(ln, "  ") || !strings.Contains(ln, ": ") {
+			continue
+		}
+		body := ln[strings.Index(ln, ": ")+2:]
+		for _, name := range strings.Fields(body) {
+			seen[name]++
+		}
+	}
+	for name, n := range seen {
+		if n > 1 {
+			return "help catalog lists " + name + " " + itoaSmall(n) + " times"
+		}
+	}
+	return ""
+}
+
+func itoaSmall(n int) string {
+	if n < 10 {
+		return string(rune('0' + n))
+	}
+	return "n"
+}
+
+// TestHelpVerbPage pins one builtin page byte-for-byte and one tool page, so
+// a rewrite of the catalog cannot silently drop the usage line ADR 0008 D1
+// requires.
+func TestHelpVerbPage(t *testing.T) {
+	h := newFakeHost()
+	run, _ := session(h)
+	if st := run("help echo"); st != 0 {
+		t.Fatalf("help echo status = %d want 0", st)
+	}
+	want := "echo \u2014 write ARG... separated by single spaces and a newline\n" +
+		"usage: echo [ARG...]\n" +
+		"The engine expands $VAR, ${VAR} and $? before echo runs.\n"
+	if got := h.outString(); got != want {
+		t.Fatalf("help echo =\n%q\nwant\n%q", got, want)
+	}
+
+	h.out = nil
+	if st := run("help grep"); st != 0 {
+		t.Fatalf("help grep status = %d want 0", st)
+	}
+	if got := h.outString(); !strings.Contains(got, "usage: grep [-i] PATTERN [FILE...]\n") {
+		t.Fatalf("help grep = %q, missing the tool usage line", got)
+	}
+}
+
+// TestHelpGroupPageAndUnknownVerb pins `help identity` (group) and ADR 0008
+// D3's unknown-verb shape, which must not be a dump of everything.
+func TestHelpGroupPageAndUnknownVerb(t *testing.T) {
+	h := newFakeHost()
+	run, _ := session(h)
+	if st := run("help identity"); st != 0 {
+		t.Fatalf("help identity status = %d want 0", st)
+	}
+	if got, want := h.outString(), "identity: chmod id secrets whoami\n"; got != want {
+		t.Fatalf("help identity = %q want %q", got, want)
+	}
+
+	h.out = nil
+	if st := run("help nosuchverb"); st != 1 {
+		t.Fatalf("help nosuchverb status = %d want 1", st)
+	}
+	if got, want := h.outString(), "unknown command 'nosuchverb' \u2014 try 'help'\n"; got != want {
+		t.Fatalf("help nosuchverb = %q want %q", got, want)
+	}
+
+	h.out = nil
+	if st := run("help one two"); st != 2 {
+		t.Fatalf("help misuse status = %d want 2", st)
+	}
+	if got := h.outString(); !strings.Contains(got, "usage: help [CMD|GROUP]\n") {
+		t.Fatalf("help misuse = %q, missing the D3 usage line", got)
+	}
+}
+
+// TestHelpNamesNoDeletedBinaries is #1538 D2 inverted: a help page must never
+// advertise a binary M60 deleted (the NOTEPAD.BIN chord lesson).
+func TestHelpNamesNoDeletedBinaries(t *testing.T) {
+	dead := []string{"NOTEPAD.BIN", "EDIT.BIN", "CALC.BIN", "SH.BIN", "TABWM.BIN"}
+	texts := map[string]string{"catalog": helpCatalogText()}
+	for name, e := range helpCatalog {
+		texts[name] = name + " | " + e.usage + " | " + e.blurb + " | " + e.notes
+	}
+	for _, d := range dead {
+		for name, text := range texts {
+			if strings.Contains(text, d) {
+				t.Errorf("help page %q names deleted binary %q", name, d)
+			}
+		}
+	}
+}
