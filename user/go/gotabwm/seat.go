@@ -47,6 +47,14 @@ const (
 	MarkerPresent    = "gotabwm: present"
 	MarkerClose      = "gotabwm: close"
 	MarkerOK         = "gotabwm OK"
+	// M69a (issue #1528): the dogfood beat's own two markers, owned by
+	// go-dogfood.spec. MarkerDogfoodSeat is the DEFAULT seat announcing it owns
+	// the desktop (printed once the registration AND the one-seat probe both
+	// returned). MarkerDogfoodOK closes the boot's hosted phase: it is printed
+	// at host-done only when this boot actually hosted a tab (dogfoodHosted),
+	// so a bare seat boot can never claim the beat.
+	MarkerDogfoodSeat = "dogfood: seat"
+	MarkerDogfoodOK   = "dogfood: ok"
 )
 
 // blankRGB is the blank desktop's colour, packed 0x00RRGGBB as the fill seam
@@ -89,6 +97,11 @@ func main() {
 		vi.Exit(3)
 	}
 	vi.ConsoleLine(MarkerSeatTaken)
+
+	// M69a (#1528): the default seat is live and exclusive. The dogfood beat
+	// gates its first exec on this line, so it must come after both the
+	// registration and the one-seat probe succeeded.
+	vi.ConsoleLine(MarkerDogfoodSeat)
 
 	// 3. Map the scanout (seam B compose-N target) — full-frame, seat-only.
 	scan, err := vi.MmapScanout()
@@ -217,6 +230,13 @@ func main() {
 		}
 	}
 	vi.ConsoleLine(MarkerHostDone)
+
+	// M69a (#1528): the beat's closing marker for THIS boot. Gated on the
+	// latch, not on tabs.Count(): the close choreography empties the strip
+	// before host-done. A boot that hosted nothing prints nothing.
+	if dogfoodHosted {
+		vi.ConsoleLine(MarkerDogfoodOK)
+	}
 
 	// 6. Clean exit. The kernel's exit path unregisters the seat.
 	vi.ConsoleLine(MarkerClose)

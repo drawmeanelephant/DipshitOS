@@ -26,6 +26,11 @@ const (
 	winY = 28
 	winW = 512
 	winH = 384
+
+	// The name the WM peer lookup resolves this process by, and the tab title
+	// the rail shows. M69a (#1528).
+	appName  = "WEB.ELF"
+	appTitle = "Web"
 )
 
 // Chrome geometry (all inside the app's own surface).
@@ -89,6 +94,10 @@ const (
 	// looking slightly wrong in a screenshot.
 	markerFonts = "web: fonts "
 	markerText  = "web: text "
+	// M69a (#1528): go-dogfood.spec's ordered marker -- printed once, on the
+	// first frame of a LAID-OUT page reaching the scanout (a.lay != nil), so it
+	// means "this page rendered", not "the app started".
+	markerDogfoodPage = "dogfood: page"
 )
 
 // Load bounds. The response read is bounded three ways so a bad network
@@ -162,6 +171,8 @@ type app struct {
 	lastFills  int
 	logPaint   bool
 	loggedPoll bool
+	// dogfoodPage is the once-only latch for markerDogfoodPage (M69a #1528).
+	dogfoodPage bool
 
 	// In-flight HTTP load. The loop steps the socket instead of blocking
 	// inside navigate(), so Stop/cancel and window-close stay live during a
@@ -248,6 +259,14 @@ func main() {
 	vi.ConsoleLine(markerFonts + engine.Name() + " ui=" + uiState + " mono=" + monoState)
 	vi.ConsoleLine(markerText + textProbeString(engine))
 	vi.ConsoleLine(markerOpen + itoa(id))
+	// M69a (#1528): the dogfood beat's browser TAB. Best-effort ATTACH (kind 5)
+	// rather than declare_fullscreen (kind 8): attach lands the page on the
+	// seat's strip WITHOUT proposing the full viewport, so the page keeps the
+	// 512x384 geometry the live-web gates pin while the seat stops blanking the
+	// scanout (it paints the blank desktop only while its strip is empty, and
+	// that fill sits ABOVE user windows). With no seat -- the shell shim, WND
+	// desktop, or no WM at all -- nothing answers and this app is unchanged.
+	vi.WmMailRequest(vi.WmRpcKindAttachTab, uint32(id), 0, 0, 0, 0, appTitle, appName, 2)
 	// The store inventory is read from disk at boot: it is how the gate sees
 	// that a previous run's rows persisted.
 	vi.ConsoleLine(a.storeSummary())
@@ -1114,6 +1133,12 @@ func (a *app) render() {
 	a.lastFills = processed
 	vi.WinPresent(a.win)
 	a.tPaint = vi.Nanos() - t0
+	// M69a (#1528): the page is on the wire. Once only, and only for a real
+	// laid-out page (the error page paints with a.lay == nil).
+	if !a.dogfoodPage && a.lay != nil {
+		a.dogfoodPage = true
+		vi.ConsoleLine(markerDogfoodPage)
+	}
 	if a.logPaint {
 		vi.ConsoleLine(markerPaint + itoa(itemsOf(a)) + " fills=" + itoa(processed))
 		a.logPaint = false

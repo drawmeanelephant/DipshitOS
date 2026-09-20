@@ -57,6 +57,12 @@ const (
 var (
 	tabs      TabStrip
 	hostedApp uint32
+	// dogfoodHosted (M69a, issue #1528) latches at the first tab this boot
+	// put on the strip -- the declare and attach paths both set it. It is the
+	// honesty gate for `dogfood: ok`: the seat closes its tabs before
+	// host-done, so the strip is empty again by then and the latch is the only
+	// record that this boot hosted anything at all.
+	dogfoodHosted bool
 )
 
 // hostTicks is how long the seat hosts a SINGLE app before closing it —
@@ -119,6 +125,7 @@ func applyRPC(req vi.WmRpc) bool {
 	case vi.WmRpcKindDeclareFullscreen: // 8, the path lib/tabapp.zig uses
 		if tabs.OpenTab(id, req.TitleString()) {
 			noteStripOpen()
+			dogfoodHosted = true
 			vi.ConsoleLine(MarkerTabOpen + vi.Itoa64(int64(id)))
 		}
 		hostedApp = id
@@ -149,6 +156,7 @@ func applyRPC(req vi.WmRpc) bool {
 	case vi.WmRpcKindAttachTab: // 5
 		if tabs.OpenTab(id, req.TitleString()) {
 			noteStripOpen()
+			dogfoodHosted = true
 			vi.ConsoleLine(MarkerTabOpen + vi.Itoa64(int64(id)))
 		}
 		// Same host-state sync as declare: an attach-without-declare client

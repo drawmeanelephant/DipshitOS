@@ -21,6 +21,7 @@ const (
 
 	markerOpen    = "gocalc: open id="
 	markerDeclare = "gocalc: declare accepted"
+	markerDogfood = "dogfood: calc" // M69a (#1528): go-dogfood.spec's marker
 	markerPresent = "gocalc: present"
 	markerResult  = "gocalc: result "
 	markerSaveErr = "gocalc: save error "
@@ -70,6 +71,9 @@ func main() {
 	vi.ConsoleLine(markerOpen + vi.Itoa64(int64(ta.Win)))
 	if ta.TabAware {
 		vi.ConsoleLine(markerDeclare)
+		// M69a (#1528): printed only on the accepted-declare path -- the
+		// calculator is HOSTED by a WM seat, not merely running.
+		vi.ConsoleLine(markerDogfood)
 	} else {
 		vi.ConsoleLine("gocalc: declare refused")
 	}
