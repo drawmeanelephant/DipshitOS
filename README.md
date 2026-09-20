@@ -17,7 +17,16 @@ to GitHub Pages).
 
 ## Status
 
-Every milestone through **thirty-one** has landed and closed — the boot
+Every milestone through **M70** has landed and closed as of 2026-09-20, and
+the **boot default is the Go seat**: `GOTABWM.ELF` autostarts and hosts Go EL0
+clients over the `WM_RPC` tab contract, with Zig `TABWM.BIN` retained by
+decision as the `settings set wm tabwm` fallback. The tracker is open and
+active (the M69 daily-driver floor; the M70 moonshots).
+[`docs/status.md`](docs/status.md) is the canonical accounting and the readable
+summary is the
+[documentation site](https://drawmeanelephant.github.io/DipshitOS/).
+
+The first thirty-one milestones — the boot
 pipeline, the interactive `virelai>` monitor, userspace (allocator,
 scheduler, EL0 + syscalls), processes (IPC, wait, kill), networking
 (virtio-net → ARP → IPv4/ICMP → UDP → DHCP → TCP), graphics (framebuffer →
@@ -49,11 +58,12 @@ Also landed: an in-guest HTTP/1.1 web server (`HTTPD.BIN`, TCP passive open,
 claim 0750), offline preflight for the M26 network apps (N13/N14), and a
 wall-clock bounding fix for `sys_tcp_connect` (#613).
 
-**Right now:** every GitHub milestone is closed and the issue tracker is at
-**zero open issues** — the repo sits between milestones, with no M32 defined
-yet. The canonical, always-current accounting is
-[`docs/status.md`](docs/status.md); the readable summary is the
-[documentation site](https://drawmeanelephant.github.io/DipshitOS/).
+**Right now:** the boot default is the Go seat, and the Go toolchain runs
+in-guest — a single boot autostarts `GOTABWM.ELF` and hosts Go clients as tabs
+(the shell `GOSH.ELF`, the editor `NOTE.ELF`), and the guest's own
+`cmd/compile` + `cmd/link` build and run the pinned hello program
+(`live-selfhost-go`). Everything since M31 is one row per milestone in
+[`docs/status.md`](docs/status.md); this README does not duplicate that table.
 
 ## Quick start
 
