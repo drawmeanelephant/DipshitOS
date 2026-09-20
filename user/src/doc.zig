@@ -556,9 +556,10 @@ fn drawError(win: u32, cr: Rect) void {
 ///   * the ink each weight paints for one glyph at the body size, with the
 ///     synthetic strike's ink beside it. Inter matches ADVANCES across weights,
 ///     so a width probe cannot see Bold; ink can. A real Bold face is heavier
-///     than Regular and lighter than the strike that doubles it, so
-///     `regular < bold < strike` holds only when the face is real — exactly
-///     what "this <strong> is not the double-strike story" means.
+///     than Regular; at heading size it is also heavier than the 1-px strike
+///     that doubles Regular (`regular < strike < bold` at 24 px). That is the
+///     opposite relation to the Go WEB row, which is why this probe publishes
+///     both sizes instead of borrowing that tree's inequality.
 fn typographyProbe() void {
     const probe_ch = 'n';
     const probe_size: u32 = 14;
