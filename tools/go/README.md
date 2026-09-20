@@ -40,7 +40,7 @@ tracking each release. The maintenance surface here is deliberately tiny:
 
 ```bash
 bash tools/go/apply.sh            # create/patch the fork (../go-virelai)
-just go-toolchain                  # builds .build/go/{GOHELLO,GOARGS,GOROUT,GOSTRESS,GOPANIC,GOBIG,GOREAD,GOSYSCALL}.ELF
+just go-toolchain                  # builds .build/go/{GOHELLO,GOARGS,GOROUT,GOSTRESS,GOPANIC,GOBIG,GOREAD,GOSYSCALL,GOSELFHOST}.ELF
 just gate go-hello                 # class-B VZ gate: execs it, asserts serial
 just gate go-args                  # class-B VZ gate: raw-ELF argv + envp / GOMAXPROCS
 just gate go-goroutines            # class-B VZ gate: threads/futex + cross-core

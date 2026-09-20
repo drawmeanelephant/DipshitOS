@@ -782,7 +782,7 @@ is 0xf90 with the new pad. `cmd/compile` needed a pad of its own (0x9b0;
 slack 0xdd8) for the same reason, so BOTH images now carry one. The toolchain
 build (`tools/go/build-gotool.sh`) asserts every loader rule and the slack
 from the linked ELF, and `tools/go/stage-selfhost.sh` asserts the guest's argv
-lines againstthe kernel's 8x32-byte budget, so neither failure mode costs a boot again.
+lines against the kernel's 8x32-byte budget, so neither failure mode costs a boot again.
 
 ## Amendment 8 — M70c-S2 (#1544): the build loop runs in the guest, and its third child does not
 
@@ -810,9 +810,10 @@ with a `go object virelai arm64` header, HELLO2.ELF 1,684,249 bytes, 3 PT_LOAD,
 sum memsz 1,224,708, slack 0xf50), checked on macOS against every loader rule,
 and the gate's second boot executes the result and asserts its pinned lines.
 
-**The wall, and it is a real one: a THIRD sequential exec from one EL0 parent
-dies.** The loop was written with three children — compile, link, run the
-product — and the third died with the guest's own tombstone:
+**The wall, and a correction to it: a THIRD sequential exec from one EL0 parent
+died once and has not died again.** The loop was written with three children —
+compile, link, run the product — and the third died with the guest's own
+tombstone:
 
     fault: HELLO2.ELF far=0x0000000047c29000 ec=0x24 pc=0x000000000007c528 esr=0x000000009200004f
     procs HELLO2.ELF exited status=139
@@ -832,11 +833,68 @@ second boot. A genuinely self-hosting toolchain still needs that third child to
 survive (and then `os/exec`'s spawn-and-inherit story, so `cmd/go` can drive at
 all). Both are named here rather than discovered by the next agent.
 
+**The measurement that corrected the claim above.** PR #1552's review asked the
+right question: BOTH known third-child deaths used a Go child (go-sh's children
+are `GOSH.ELF`; this loop's third was the linked product, itself a Go program),
+so "a third sequential exec from one EL0 parent" and "a third live Go runtime"
+predict the same tombstone and nothing in the record separated them.
+`tools/go/selfhost.go` gained an argv-gated measurement for it —
+`--spawn <image> <count> [expected-status]`, plus `--after-loop` to put the
+spawns behind the loop's own two children. It is off by default and no spec
+asserts its verdict (pinning a bug's present shape into a class-B gate would
+freeze it); the one-off trial lives in the gitignored `artifacts/`. Four boots
+answered it:
+
+| boot | children of the one EL0 parent | observed |
+|---|---|---|
+| 01 | 3 x Zig `STATUS43.BIN` (non-Go, exits 43) | 43 / 43 / 43 — 3-of-3 survived |
+| 02 | 3 x Go `GOHELLO.ELF` (exits 0) | 0 / 0 / 0 — 3-of-3 survived |
+| 03 | `cmd/compile` (24 MiB) then `cmd/link`, then 1 x Zig child | 2,000 ms + 9,006 ms, then 43 |
+| 04 | `cmd/compile`, `cmd/link`, then the PRODUCT (the original failing shape) | 2,000 ms + 16,005 ms, then **status=0** |
+
+So the child COUNT is not the rule, the child's LANGUAGE is not the rule, and
+the once-observed death did not reproduce in the exact configuration that
+produced it. What that leaves is narrower and less satisfying than either
+hypothesis: the failure is intermittent, or something between the two heads
+fixed it — one boot per configuration cannot separate those, and neither
+`#1449`'s two original observations nor the tombstone above are withdrawn,
+because they happened. **The honest statement is the narrow one: a third child
+died once and has not died again; the wall is uncharacterised, not eliminated.**
+The consequence for this card is a design note, not an excuse: the spec keeps
+two children plus a monitor `exec` for the run because that shape is proven
+green, not because three children are known to fail — and a single-boot
+three-child loop is now feasible, and is the first thing to try once #1449 has
+an owner. The report is posted on #1449.
+
+One thing the measurement does NOT establish, stated because it is readable
+both ways from the log: a step's `status=0` is a **liveness observation, not
+proof**. The wait rule counts a pid that was seen running and then left the
+registry as status 0 (`vi/proc.go`), which is also what a child that crashed
+and was reaped between polls looks like. What proves the steps worked is
+downstream and checked on the host — `HELLO.o`'s ar header names the virelai
+target, and the product satisfies every loader rule before the second boot runs
+it; in the measurement above, the Zig child returning its own 43 is the strong
+half (a status the kernel could only have got from the program itself).
+
+The driver's per-step wait budget is 600 s. It is a ceiling, not a prediction
+(the measured steps are 2,000 ms and 14,016 ms), and it is deliberately BELOW
+the gate's own `--timeout 900` for that boot: at the 900 s this first shipped
+with, the driver's ceiling and the harness's kill expired together, so "wait
+budget expired" was unreachable by construction and a reader would have got two
+competing deadlines instead of an answer.
+
 Two costs of the driver itself, named rather than hidden: it links `vi`
-(`Exec`/`Wait`/`Probe` are that package's surface, `vsys` has no spawn), so
+(`Exec`, `WaitBudget` and `Probe` are that package's surface — the wait rule
+lives there ONCE and the driver passes its longer ceiling in, rather than
+carrying a second copy that a fix in `vi` could not reach; `vsys` has no
+spawn), so
 `build-go.sh`'s gap-layout guard WARNs on it exactly as it does for
 GOREAD/GOSYSCALL — the image nonetheless passes every loader rule the kernel
-enforces (3 PT_LOAD, memsz 1,244,044, slack 0xbb0), which is what the gate
-checks; and the loop presumes ~15 MiB of archives in the share, which is the
-ingredient that makes it a guest-side build rather than a guest-side
-invocation.
+enforces, which is what the gate checks — and those numbers move with the file,
+so they are re-measured rather than remembered: at this amendment's first head
+it was 3 PT_LOAD, memsz 1,244,044, slack 0xbb0, and with the review fixups (the
+shared waiter, the `--spawn` measurement) it is 3 PT_LOAD, memsz 1,252,164
+(0x131b44), slack 0xb90 — every rule passing in both, read with
+`tools/lib/elf_rules.py`, the same checker the two class-B specs run. The loop
+also presumes ~15 MiB of archives in the share, which is the ingredient that
+makes it a guest-side build rather than a guest-side invocation.
