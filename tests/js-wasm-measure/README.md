@@ -31,19 +31,24 @@ Observed 2026-09-19 on this host (`zig` 0.16.0 from Homebrew): **22763 B**,
 
 A one-shot guest run (not in the fleet) is
 `tests/js-wasm-measure/run-under-wasm.spec`. Observed on VZ the same day:
-the module loads and validates, then **`wasm: trap during exec` / exit 3**.
-`WASM.BIN`'s `max_frames = 32` is too shallow for Elk's recursive C eval.
-That is the negative result this card records; the spec asserts the trap.
+the module loads and validates, then **traps / exit 3**. `max_frames = 32`
+was the initial inference for the cause; M70d #1518 then put the class on
+the serial and corrected it — the observed line is
+`wasm: trap during exec kind=stack_overflow module=ELK.WASM offset=0x1980`.
+The binding cap is the **control stack** (`max_ctl = 64`, with 16 live
+frames at the trap), not `max_frames`; see ADR 0028 amendment A1. That is
+the negative result this card records; the spec asserts the named trap.
 
 ```bash
 # after measure.sh has produced elk.wasm and `zig build` has WASM.BIN
 VGATE_NO_BUILD=1 bash tools/gate/vgate.sh tests/js-wasm-measure/run-under-wasm.spec
 ```
 
-Control (same day): `-Wl,-z,stack-size=65536` still traps. That flag is not
-a frozen cap; if the 8 KiB C stack had been the cause, eval would have
-printed. It did not. `__stack_pointer` was observed `i32.const 8192` vs
-`65536`. Spec: `run-stack64k.spec`.
+Control (same day): `-Wl,-z,stack-size=65536` still traps with the same
+class (`kind=stack_overflow`). That flag is not a frozen cap; if the 8 KiB C
+stack had been the cause, eval would have printed. It did not.
+`__stack_pointer` was observed `i32.const 8192` vs `65536`. Spec:
+`run-stack64k.spec`.
 
 ```bash
 STACK_SIZE=65536 bash tests/js-wasm-measure/measure.sh

@@ -966,8 +966,10 @@ fn parseCode(m: *Module, r: *Reader, func_i: usize) ParseError!void {
             local_count += 1;
         }
     }
-    const body_start = r.pos;
-    const remain = body_size - (body_start - size_pos);
+    // absPos, not pos: the trap offset printed on the serial is a MODULE
+    // byte offset, and `r` reads a code-section payload slice (M70d #1518).
+    const body_start = r.absPos();
+    const remain = body_size - (r.pos - size_pos);
     m.funcs[func_i].body = try r.take(remain);
     m.funcs[func_i].local_types = local_types;
     m.funcs[func_i].local_count = local_count;
@@ -2877,6 +2879,21 @@ fn fail(msg: []const u8, status: u64) noreturn {
     sys_exit(status);
 }
 
+/// The exec-trap serial line (M70d #1518): the class, the module, and the
+/// module byte offset of the faulting instruction, in the `key=value` marker
+/// style. Before this, `exec WASM.BIN ELK.WASM` printed only
+/// `wasm: trap during exec`, so #1456 could not tell `call_depth` from
+/// `stack_overflow`. Null when `buf` cannot hold the line (the caller falls
+/// back to the unnamed form).
+const trap_line_len = 192;
+fn formatExecTrapLine(buf: []u8, trap: Trap) ?[]const u8 {
+    return std.fmt.bufPrint(
+        buf,
+        "wasm: trap during exec kind={s} module={s} offset=0x{x}\n",
+        .{ @tagName(trap.kind), trap.module, trap.offset },
+    ) catch null;
+}
+
 /// Host-test capture: when set, imports record their calls (id + args)
 /// and return canned values instead of reaching svc #0 (which a host test
 /// cannot execute). The W2 semantics carry: env.write copies into
@@ -3449,7 +3466,10 @@ pub export fn _start(argc: usize, argv: ?[*]const [32]u8) callconv(.c) noreturn 
     const entry = entryExport(&g_module) orelse fail("wasm: no entry export\n", 13);
     switch (call(&machine, &g_module, entry, &.{})) {
         .ret => sys_exit(0),
-        .trap => fail("wasm: trap during exec\n", 3),
+        .trap => |tr| {
+            var trap_line: [trap_line_len]u8 = undefined;
+            fail(formatExecTrapLine(&trap_line, tr) orelse "wasm: trap during exec\n", 3);
+        },
     }
 }
 
@@ -3850,7 +3870,26 @@ test "exec: unreachable traps with module + offset" {
     try testing.expect(r == .trap);
     try testing.expectEqual(TrapKind.@"unreachable", r.trap.kind);
     try testing.expectEqualStrings("boom", r.trap.module);
-    try testing.expect(r.trap.offset > 0);
+    // The `unreachable` opcode is at byte 33 of the module (8 magic/version +
+    // type 6 + func 4 + export 10 + code id/size + count + body size +
+    // locals count) — a MODULE offset, not an offset into the code-section
+    // payload (M70d #1518).
+    try testing.expectEqual(@as(usize, 33), r.trap.offset);
+}
+
+test "exec trap line names the class, module and offset (#1518)" {
+    var buf: [trap_line_len]u8 = undefined;
+    const line = formatExecTrapLine(&buf, .{
+        .kind = .call_depth,
+        .module = "ELK.WASM",
+        .offset = 0x1a2b,
+    }) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings(
+        "wasm: trap during exec kind=call_depth module=ELK.WASM offset=0x1a2b\n",
+        line,
+    );
+    var tiny: [8]u8 = undefined;
+    try testing.expect(formatExecTrapLine(&tiny, .{ .kind = .bounds, .module = "m", .offset = 0 }) == null);
 }
 
 test "exec: div by zero traps (i32.div_s)" {

@@ -142,11 +142,25 @@ byte caps.
 
 - VF-FILE read of `ELK.WASM` size=22763, full read
 - no `wasm: module too large` / parse / validate / instantiate trap
-- serial: `wasm: trap during exec`
+- serial: `wasm: trap during exec kind=stack_overflow module=ELK.WASM offset=0x1980`
 - `tasks user-exec exited status=3` (the interpreter's trap-during-exec exit)
 
-The guest does not print a trap class. **Inferred:** Elk's recursive C eval
-exceeds `max_frames = 32`. Inspect-clean is not execute-clean.
+At measurement time the guest did not print a trap class, so **inferred:**
+Elk's recursive C eval exceeds `max_frames = 32`. Inspect-clean is not
+execute-clean.
+
+### A1 — M70d #1518, same day: the class, observed
+
+The exec-trap path now prints `kind=`, `module=`, and the module byte offset
+(card #1518; spec `tools/gate/specs/live-wasm-trap.spec`). The inference is
+**corrected, not confirmed**: the class is `stack_overflow`, not `call_depth`.
+Re-running the same pinned module through the interpreter's host capture seam
+(`-OReleaseFast`) records the state at the trap: `frame_len=16`
+(`max_frames = 32` never reached), `ctl_len=64` (`max_ctl = 64` full), `sp=3`
+(the operand stack is nearly empty). The binding cap is the **control stack**;
+offset `0x1980` is a `block` opcode. Whether `max_frames` would also bind
+after any `max_ctl` raise is unmeasured — do not carry the old
+`max_frames = 32` cause forward as fact.
 
 ### Control: 64 KiB C stack (not a frozen cap)
 
@@ -159,11 +173,14 @@ Same compile 2026-09-19 with `-Wl,-z,stack-size=65536`:
 - module still **22763 B**, inspector PASS, `env.write`+`env.exit`, memory 2/32
 - binaries differ: global 0 `i32.const` **8192** vs **65536** (`__stack_pointer`)
 - `VGATE_NO_BUILD=1 bash tools/gate/vgate.sh tests/js-wasm-measure/run-stack64k.spec`
-  **PASS 1/1** on VZ, asserting the same trap: `wasm: trap during exec` /
-  `tasks user-exec exited status=3`
+  **PASS 1/1** on VZ, asserting the same named trap:
+  `wasm: trap during exec kind=stack_overflow module=ELK.WASM offset=0x1980` /
+  `tasks user-exec exited status=3` (A1)
 
-The 8 KiB C stack is **falsified** as the cause. Remaining inference is
-`max_frames = 32`. A 64 KiB stack would have been a free fix; it is not.
+The 8 KiB C stack is **falsified** as the cause. The remaining inference was
+`max_frames = 32`; A1 observed the control-stack cap instead (`ctl_len = 64`
+with 16 live frames), so `max_frames` is not the cap that fired for this
+module either. A 64 KiB stack would have been a free fix; it is not.
 
 ### What this does not change
 
