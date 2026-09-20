@@ -48,6 +48,28 @@ F="$FORK_DIR/src"
 edits=0
 have() { grep -qF "$2" "$1" 2>/dev/null; }
 
+# tag_has <file> <term> -- does the file's //go:build line mention <term>?
+#
+# The tag guards below must ask the build line ITSELF, never a fixed head(1)
+# window. sys_cloexec.go is the case that proved it: its //go:build sits on
+# line 8 behind a two-line comment, so the old `head -6` guard never saw the
+# `|| virelai` it had just appended and added another on EVERY run — the
+# shared fork's line had grown to 29 copies of the term. Idempotence is a
+# property this script advertises (tools/go/README.md) and the M70c cards
+# depend on, so the guard has to read exactly the line it edits.
+tag_has() { grep -m1 '^//go:build' "$1" 2>/dev/null | grep -q -- "$2"; }
+
+# tag_dedupe <file> -- collapse terms repeated by that old fixed-window guard,
+# so one run of this script REPAIRS a fork an earlier revision polluted rather
+# than only declining to add more. Purely textual and confined to the
+# //go:build line: "|| virelai || virelai ..." becomes "|| virelai".
+tag_dedupe() {
+    gsed -i \
+        -e '/^\/\/go:build/ s/\(|| virelai\)\( || virelai\)\+/\1/g' \
+        -e '/^\/\/go:build/ s/\(\&\& !virelai\)\( \&\& !virelai\)\+/\1/g' \
+        "$1" 2>/dev/null || true
+}
+
 # --- 2. overlay files (new, GOOS-gated) --------------------------------
 log "copying overlay files"
 ( cd "$REPO/tools/go/overlay" && find . -type f | while read -r f; do
@@ -97,13 +119,13 @@ if ! have "$F/cmd/internal/objabi/head.go" 'case "virelai":'; then
 fi
 
 # --- 3d. runtime/mem_sbrk.go: the sbrk memory platform -----------------
-if ! head -6 "$F/runtime/mem_sbrk.go" | grep -q virelai; then
+if ! tag_has "$F/runtime/mem_sbrk.go" virelai; then
     gsed -i 's#^//go:build plan9 || wasm$#//go:build plan9 || wasm || virelai#' "$F/runtime/mem_sbrk.go"
     edits=$((edits+1)); log "patched runtime/mem_sbrk.go (build tag)"
 fi
 
 # --- 3e. runtime/lock_sema.go: spinning semaphores (no OS primitives) --
-if ! head -6 "$F/runtime/lock_sema.go" | grep -q virelai; then
+if ! tag_has "$F/runtime/lock_sema.go" virelai; then
     gsed -i 's#^//go:build aix || darwin || netbsd || openbsd || plan9 || solaris || windows$#//go:build aix || darwin || netbsd || openbsd || plan9 || solaris || windows || virelai#' "$F/runtime/lock_sema.go"
     edits=$((edits+1)); log "patched runtime/lock_sema.go (build tag)"
 fi
@@ -286,7 +308,8 @@ fi
 # --- 3g. exclude virelai from generic-tag files it must not match ------
 # Appends "&& !virelai" to the //go:build line; each reason inline.
 vir_exclude() {  # <file> <reason>
-    if ! head -8 "$F/runtime/$1" | grep -q virelai; then
+    tag_dedupe "$F/runtime/$1"
+    if ! tag_has "$F/runtime/$1" virelai; then
         gsed -i '0,/^\/\/go:build /s#^//go:build \(.*\)$#//go:build \1 \&\& !virelai#' "$F/runtime/$1"
         edits=$((edits+1)); log "patched runtime/$1 (exclude virelai: $2)"
     fi
@@ -316,7 +339,8 @@ fi
 # behaviour is being invented here — only the tag. A file whose helpers the
 # port supplies as stubs (e.g. no net, no pidfd) says so at that stub.
 vir_include() {  # <path-under-src> <reason>
-    if ! head -6 "$F/$1" | grep -q virelai; then
+    tag_dedupe "$F/$1"
+    if ! tag_has "$F/$1" virelai; then
         gsed -i '0,/^\/\/go:build /s#^//go:build \(.*\)$#//go:build \1 || virelai#' "$F/$1"
         edits=$((edits+1)); log "patched $1 (include virelai: $2)"
     fi
@@ -327,7 +351,8 @@ vir_include() {  # <path-under-src> <reason>
 # redeclaration. Reversing keeps apply.sh the single source of truth for the
 # fork's tags instead of depending on which revision ran last.
 vir_exclude() {  # <path-under-src> <why this port cannot use it>
-    if head -6 "$F/$1" | grep -q '|| virelai'; then
+    tag_dedupe "$F/$1"
+    if tag_has "$F/$1" '|| virelai'; then
         gsed -i '0,/^\/\/go:build /s#^//go:build \(.*\) || virelai$#//go:build \1#' "$F/$1"
         edits=$((edits+1)); log "reverted $1 (virelai must not select it: $2)"
     fi
@@ -453,7 +478,7 @@ fi
 # "unix || (js && wasm) || wasip1 || windows"; virelai must join that set or
 # the overlay's netpoll platform hooks have no core to plug into. The core
 # itself is stock — this only widens the build tag.
-if ! head -6 "$F/runtime/netpoll.go" | grep -q virelai; then
+if ! tag_has "$F/runtime/netpoll.go" virelai; then
     gsed -i 's#^//go:build unix || (js && wasm) || wasip1 || windows$#//go:build unix || (js \&\& wasm) || wasip1 || windows || virelai#' "$F/runtime/netpoll.go"
     edits=$((edits+1)); log "patched runtime/netpoll.go (enable poller core for virelai)"
 fi
