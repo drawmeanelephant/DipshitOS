@@ -37,8 +37,10 @@
 # HOST PREREQUISITE (fails the gate honestly when missing):
 #   .build/go/WEB.ELF  --  bash tools/go/build-web.sh browser WEB
 #
-# The faces are seeded by `vgate_share seed` (tools/lib/gate-run.sh), the same
-# files the Zig userland loads: /host/INTER.TTF and /host/FIRACODE.TTF.
+# The faces are seeded by `vgate_share seed` (tools/lib/gate-run.sh). Share
+# names frozen by M69d #1531 D1: /host/INTER.TTF, /host/INTERB.TTF,
+# /host/INTERI.TTF, /host/FIRACODE.TTF. Boot 01/02 require Bold so <strong>
+# cannot be the old Regular+1px strike; boot 03 deletes every face.
 
 vgate_name live-web-ttf "issue #1346: WEB.ELF paints real TrueType (Inter) on the oliver fixture, falls back to the 8x8 grid when the face is gone, and renders tables/images/links"
 vgate_share seed
@@ -56,6 +58,8 @@ EOF
 # the `vf ls` line below is there so the transcript shows the deletion.
 vgate_file script-nofont.txt <<'EOF'
 vf rm INTER.TTF
+vf rm INTERB.TTF
+vf rm INTERI.TTF
 vf rm FIRACODE.TTF
 vf ls
 exec WEB.ELF /host/OLIVER.HTML
@@ -83,7 +87,9 @@ for y in range(H):
 out += bytes([0, 0, 0, 0, 0, 0, 0, 1])
 with open(os.path.join(share, "SWATCH.QOI"), "wb") as fh:
     fh.write(bytes(out))
-page = (b"<h4>Depth</h4>"
+page = (b"<p>MMMMMMMM</p>"
+        b"<p><strong>MMMMMMMM</strong></p>"
+        b"<h4>Depth</h4>"
         b"<table><thead><tr><th>Left</th><th>Right</th></tr></thead>"
         b"<tbody><tr><td>one</td><td>two</td></tr></tbody></table>"
         b"<p>An image:</p><img src=\"SWATCH.QOI\" alt=\"swatch\">"
@@ -109,7 +115,7 @@ fixture = os.path.join("tests", "oliver-spike", "expect.html")
 if not os.path.exists(fixture):
     sys.exit("oliver fixture missing at " + fixture)
 shutil.copy(fixture, os.path.join(share, "OLIVER.HTML"))
-for face in ("INTER.TTF", "FIRACODE.TTF"):
+for face in ("INTER.TTF", "INTERB.TTF", "INTERI.TTF", "FIRACODE.TTF"):
     p = os.path.join(share, face)
     if not os.path.exists(p):
         sys.exit("gate 01 needs the seeded face " + p)
@@ -155,6 +161,9 @@ vgate_assert 01 serial-contains ' mono-lineh=17'
 vgate_assert 01 serial-contains ' adv-i=3'
 vgate_assert 01 serial-contains ' adv-W=13'
 vgate_assert 01 serial-contains ' adv-space=4'
+vgate_assert 01 serial-contains ' bold-face=yes'
+vgate_assert 01 serial-contains ' bold-heavier=yes'
+vgate_assert 01 serial-contains ' italic-face=yes'
 vgate_assert 01 serial-absent 'proportional=no'
 vgate_assert 01 serial-absent 'adv-i=8'
 
@@ -321,8 +330,55 @@ if accent < 20:
 for i, n in enumerate(sw):
     if n < 100:
         fails.append("swatch quadrant %d had %d px: the QOI image did not decode" % (i, n))
+
+# M69d #1531: the first two inked bands are Regular M×8 then <strong> M×8.
+# A Regular+1px strike widens the whole run by 1px; Inter Bold is designed
+# wider and heavier, so span-delta > 1 and bold ink exceeds regular ink.
+rows = []
+for yy in range(CY, CY + CH):
+    n = 0
+    for xx in range(CX, CX + CW):
+        if not near(px(X + xx, Y + yy), PAGE_BG, 12):
+            n += 1
+    rows.append(n)
+bands = []
+i = 0
+while i < len(rows):
+    if rows[i] == 0:
+        i += 1
+        continue
+    start = i
+    while i < len(rows) and rows[i] > 0:
+        i += 1
+    minx = maxx = None
+    band_ink = 0
+    for yy in range(CY + start, CY + i):
+        for xx in range(CX, CX + CW):
+            if not near(px(X + xx, Y + yy), PAGE_BG, 12):
+                band_ink += 1
+                if minx is None or xx < minx:
+                    minx = xx
+                if maxx is None or xx > maxx:
+                    maxx = xx
+    span = 0 if minx is None else (maxx - minx + 1)
+    bands.append((start, i, span, band_ink))
+print("live-web-ttf 02 strong-probe bands[:4]=%s" % (bands[:4],))
+if len(bands) < 2:
+    fails.append("need Regular then Strong M-bands, got %d" % len(bands))
+else:
+    rspan, bspan = bands[0][2], bands[1][2]
+    rink, bink = bands[0][3], bands[1][3]
+    print("live-web-ttf 02 strong: regular-span=%d bold-span=%d regular-ink=%d bold-ink=%d"
+          % (rspan, bspan, rink, bink))
+    # Inter matches advances across weights, so span may be equal. The
+    # Regular+1px strike is the one that is *exactly* 1px wider. Real Bold
+    # is heavier (more ink) without that 1px shift.
+    if bspan - rspan == 1:
+        fails.append("strong span %d vs regular %d is exactly +1px: the synthetic strike, not Inter Bold" % (bspan, rspan))
+    if bink <= rink:
+        fails.append("strong ink %d is not heavier than regular %d" % (bink, rink))
 assert not fails, "WEB-TTF-DEPTH-FAILS: " + "; ".join(fails)
-print("live-web-ttf 02 ok: table rule, link accent, and all four decoded image colours on screen")
+print("live-web-ttf 02 ok: table rule, link accent, decoded image, and Inter Bold != Regular+1px")
 PY
 # --- boot 03: the faces removed over the host file channel ----------------
 vgate_run 03 -- \
@@ -341,6 +397,8 @@ vgate_run 03 -- \
 # The fallback is announced, not hidden.
 vgate_assert 03 serial-contains 'web: fonts bitmap8x8 ui=missing mono=missing'
 vgate_assert 03 serial-contains 'web: text face=bitmap8x8 proportional=no'
+vgate_assert 03 serial-contains ' bold-face=no'
+vgate_assert 03 serial-contains ' italic-face=no'
 vgate_assert 03 serial-contains ' adv-i=8'
 vgate_assert 03 serial-contains ' adv-W=8'
 vgate_assert 03 serial-contains ' h1-lineh=18'

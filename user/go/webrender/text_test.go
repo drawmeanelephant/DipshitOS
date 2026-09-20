@@ -13,8 +13,10 @@ import (
 // The two faces the desktop loads. Both are committed fixtures; a missing one
 // fails the test rather than skipping it.
 const (
-	interFixture = "../../../image/fonts/Inter-Regular.ttf"
-	firaFixture  = "../../../image/fonts/FiraCode-Regular.ttf"
+	interFixture       = "../../../image/fonts/Inter-Regular.ttf"
+	interBoldFixture   = "../../../image/fonts/Inter-Bold.ttf"
+	interItalicFixture = "../../../image/fonts/Inter-Italic.ttf"
+	firaFixture        = "../../../image/fonts/FiraCode-Regular.ttf"
 )
 
 func loadFonts(t *testing.T) Fonts {
@@ -23,16 +25,30 @@ func loadFonts(t *testing.T) Fonts {
 	if err != nil {
 		t.Fatalf("Inter fixture is required by these tests: %v", err)
 	}
+	bold, err := os.ReadFile(interBoldFixture)
+	if err != nil {
+		t.Fatalf("Inter Bold fixture is required by these tests: %v", err)
+	}
+	italic, err := os.ReadFile(interItalicFixture)
+	if err != nil {
+		t.Fatalf("Inter Italic fixture is required by these tests: %v", err)
+	}
 	mono, err := os.ReadFile(firaFixture)
 	if err != nil {
 		t.Fatalf("Fira Code fixture is required by these tests: %v", err)
 	}
-	f := NewFonts(ui, mono)
+	f := LoadFonts(FontFiles{UI: ui, Mono: mono, Bold: bold, Italic: italic})
 	if f.UI == nil {
-		t.Fatal("NewFonts dropped the Inter face")
+		t.Fatal("LoadFonts dropped the Inter face")
 	}
 	if f.Mono == nil {
-		t.Fatal("NewFonts dropped the Fira Code face")
+		t.Fatal("LoadFonts dropped the Fira Code face")
+	}
+	if f.Bold == nil {
+		t.Fatal("LoadFonts dropped the Inter Bold face")
+	}
+	if f.Italic == nil {
+		t.Fatal("LoadFonts dropped the Inter Italic face")
 	}
 	return f
 }
@@ -451,4 +467,158 @@ func TestGoldenOlivierFixtureWithTrueType(t *testing.T) {
 		t.Fatal("the TrueType render is pixel-identical to the bitmap fallback: no face was used")
 	}
 	checkGolden(t, "oliver-truetype", f)
+}
+
+func loadRegularOnly(t *testing.T) Fonts {
+	t.Helper()
+	ui, err := os.ReadFile(interFixture)
+	if err != nil {
+		t.Fatalf("Inter fixture: %v", err)
+	}
+	f := NewFonts(ui, nil)
+	if f.UI == nil || f.Bold != nil {
+		t.Fatal("Regular-only fixture must parse UI and leave Bold absent")
+	}
+	return f
+}
+
+// TestBoldFaceIsNotSyntheticStrike is the host twin of the class-B strong
+// probe. Inter matches advances across weights, so Measure cannot tell Bold
+// from Regular; the stems can, and a Regular+1px strike cannot reproduce them.
+func TestBoldFaceIsNotSyntheticStrike(t *testing.T) {
+	fonts := loadFonts(t)
+	only := loadRegularOnly(t)
+	reg := Style{Size: 1, Color: ColorText}
+	bold := Style{Size: 1, Bold: true, Color: ColorText}
+	regW := fonts.Measure("MMMMMMMM", reg)
+	boldW := fonts.Measure("MMMMMMMM", bold)
+	synthW := only.Measure("MMMMMMMM", bold)
+	t.Logf("Measure M×8: regular=%d bold-face=%d synthetic-style=%d (Inter keeps advances matched)", regW, boldW, synthW)
+	if synthW != only.Measure("MMMMMMMM", reg) {
+		t.Fatal("synthetic bold must not change Measure (it is a paint-only +1px strike)")
+	}
+	if !fonts.BoldHeavier() {
+		t.Fatal("Inter Bold 'n' coverage must exceed Regular; otherwise the face is not Bold")
+	}
+
+	const w, h = 240, 40
+	realBold, _ := renderText(t, fonts, "<p><strong>MMMMMMMM</strong></p>", w, h)
+	regular, _ := renderText(t, fonts, "<p>MMMMMMMM</p>", w, h)
+	synth, _ := renderText(t, only, "<p><strong>MMMMMMMM</strong></p>", w, h)
+	rmin, rmax, rink := inkExtent(regular, w, h, ColorPageBg)
+	bmin, bmax, bink := inkExtent(realBold, w, h, ColorPageBg)
+	_, _, synthInk := inkExtent(synth, w, h, ColorPageBg)
+	rspan, bspan := rmax-rmin+1, bmax-bmin+1
+	diffSynth, diffReg := 0, 0
+	for i := range realBold.px {
+		if realBold.px[i] != synth.px[i] {
+			diffSynth++
+		}
+		if realBold.px[i] != regular.px[i] {
+			diffReg++
+		}
+	}
+	t.Logf("M×8: regular span=%d ink=%d; bold span=%d ink=%d; synthetic ink=%d; diff vs synth=%d vs regular=%d",
+		rspan, rink, bspan, bink, synthInk, diffSynth, diffReg)
+	if diffSynth == 0 {
+		t.Fatal("real Inter Bold painted identically to Regular+1px synthetic strike")
+	}
+	if diffReg == 0 {
+		t.Fatal("real Inter Bold painted identically to Regular: the Bold face was not used")
+	}
+	if bspan-rspan == 1 {
+		t.Fatal("Bold span is exactly Regular+1px: that is the synthetic strike, not a real face")
+	}
+	if bink <= rink {
+		t.Errorf("Bold ink %d is not heavier than Regular %d", bink, rink)
+	}
+}
+
+// TestItalicFaceIsSelectedForEmphasis: <em> with a loaded Italic face must
+// not be Regular-in-accent-color. Same accent colour, Italic true vs false,
+// the glyphs themselves differ.
+func TestItalicFaceIsSelectedForEmphasis(t *testing.T) {
+	fonts := loadFonts(t)
+	stReg := Style{Size: 1, Color: ColorAccent}
+	stEm := Style{Size: 1, Italic: true, Color: ColorAccent}
+	if fonts.face(stEm) != fonts.Italic {
+		t.Fatal("an italic style must select the Italic face when it is loaded")
+	}
+	const w, h, text = 200, 32, "emphasis"
+	reg := newFB(w, h, ColorPageBg)
+	em := newFB(w, h, ColorPageBg)
+	clip := Clip{X: 0, Y: 0, W: w, H: h}
+	fonts.Paint(reg, 4, 4, text, stReg, ColorAccent, clip)
+	fonts.Paint(em, 4, 4, text, stEm, ColorAccent, clip)
+	diff := 0
+	for i := range reg.px {
+		if reg.px[i] != em.px[i] {
+			diff++
+		}
+	}
+	t.Logf("italic vs regular (same accent colour): %d px differ", diff)
+	if diff == 0 {
+		t.Fatal("<em> painted Regular glyphs; the Italic face was not used")
+	}
+}
+
+// TestH1BandWithBoldFace logs the host-side h1 band so the class-B probe can
+// be re-pinned if Inter Bold changes the oliver heading's width.
+func TestH1BandWithBoldFace(t *testing.T) {
+	fonts := loadFonts(t)
+	f, _ := renderText(t, fonts, "<h1>VirelaiOS wasm channel</h1>", 496, 80)
+	minx, maxx, ink := inkExtent(f, 496, 80, ColorPageBg)
+	span := 0
+	if minx >= 0 {
+		span = maxx - minx + 1
+	}
+	rows := 0
+	in := false
+	for y := 0; y < 80; y++ {
+		on := false
+		for x := 0; x < 496; x++ {
+			if f.at(x, y) != ColorPageBg {
+				on = true
+				break
+			}
+		}
+		if on {
+			if !in {
+				rows++
+				in = true
+			}
+		} else {
+			in = false
+		}
+	}
+	// Count contiguous first band height.
+	first, last := -1, -1
+	for y := 0; y < 80; y++ {
+		on := false
+		for x := 0; x < 496; x++ {
+			if f.at(x, y) != ColorPageBg {
+				on = true
+				break
+			}
+		}
+		if on {
+			if first < 0 {
+				first = y
+			}
+			last = y
+		} else if first >= 0 {
+			break
+		}
+	}
+	bandH := 0
+	if first >= 0 {
+		bandH = last - first + 1
+	}
+	t.Logf("h1 'VirelaiOS wasm channel': span=%d bandH=%d ink=%d (gate 01 previously Regular+1px span=294 height=20)", span, bandH, ink)
+	if span < 200 || span > 400 {
+		t.Errorf("implausible h1 span %d", span)
+	}
+	if bandH < 14 {
+		t.Errorf("h1 band height %d is too short", bandH)
+	}
 }

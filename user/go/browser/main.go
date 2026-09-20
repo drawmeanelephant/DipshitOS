@@ -217,7 +217,12 @@ const (
 	// already on the share — the only path where the browser owns the whole
 	// delay. A network page also waits on the peer, and that wait is reported
 	// separately (wait-ms) and never counted as browser cost.
-	budgetStartupMs = 1500
+	//
+	// M69d #1531 loads four faces (~1.5 MiB) through the kernel's 2048-byte
+	// sys_file_read cap (~750 calls). Observed live-web-ttf 01: startup=3027ms
+	// with Bold+Italic, vs the previous two-face 1500ms budget. 4000ms is the
+	// same loose bar for four faces; parse/layout/paint budgets are unchanged.
+	budgetStartupMs = 4000
 	budgetRenderMs  = 400 // parse + layout + paint of a page
 	budgetParseMs   = 120
 	budgetLayoutMs  = 120

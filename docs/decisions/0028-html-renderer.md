@@ -1,6 +1,6 @@
 # ADR 0028: In-guest HTML rendering (M-web slice 1)
 
-- Status: ACCEPTED (slice 1 design); amended M70d #1456 2026-09-19
+- Status: ACCEPTED (slice 1 design); amended M70d #1456 2026-09-19; amended M69d #1531 2026-09-20
 - Date: 2026-09-12
 - Issue: #1200 (design card + slice 1), umbrella #1201
 - Related: ADR 0009 (app events), ADR 0010 (userland storage), ADR 0011
@@ -53,11 +53,15 @@ so tests use a stub metric. Only `doc.zig` touches `ui` drawing. This is the
 same shape as the repo's other testable subsystems, and it is what makes the
 renderer's behaviour assertable without a VM.
 
-**D4 — No bold or italic faces exist, so the stylesheet synthesizes.**
-`ui.init_fonts` loads exactly `/host/INTER.TTF` (UI) and `/host/FIRACODE.TTF`
-(mono, fixed size 13). `<strong>` renders as synthetic bold (a second 1-px
-strike) and `<em>` takes the accent color. Both are recorded as revisitable:
-vendoring a bold/italic face replaces the trick with no other change.
+**D4 — Emphasis uses real faces when they are staged, and synthesizes only as fallback.**
+Share names (frozen M69d #1531 D1): `/host/INTER.TTF` Regular, `/host/INTERB.TTF`
+Bold, `/host/FIRACODE.TTF` mono, optional `/host/INTERI.TTF` Italic.
+**Amended M69d #1531 (2026-09-20):** Go WEB selects Inter Bold for `<strong>` /
+headings when `INTERB.TTF` parsed; the 1-px second strike is dead on that path
+and remains only when Bold is absent. Inter-4.1 extras ships `Inter-Italic.ttf`,
+staged as `/host/INTERI.TTF`; `<em>` selects it (accent colour stays). Zig
+`ui.init_fonts` still loads Regular + mono until #1536 consumes these same
+names. Amendment B records the observed files.
 
 **D5 — Unknown elements degrade to their text content.** Unsupported tags
 (and malformed markup) are flattened into the enclosing block in document
@@ -195,4 +199,39 @@ module either. A 64 KiB stack would have been a free fix; it is not.
 
 Raising `max_module_size`, `max_frames`, or adding wasm EH/WASI to admit
 MicroQuickJS/Duktape/MuJS is a new interpreter ADR. This card does not do it.
+
+## Amendment B — M69d #1531: Inter Bold (and Italic) are real faces
+
+Date: 2026-09-20. Card: #1531. Host: Inter 4.1 extras TTF (`rsms/inter` v4.1),
+SIL OFL 1.1 (`image/fonts/OFL-Inter.txt`). Regular already in-tree at
+`image/fonts/Inter-Regular.ttf` byte-matches `extras/ttf/Inter-Regular.ttf`
+(411,640 bytes).
+
+### Observed files
+
+| Face | Source (Inter-4.1 extras) | In-tree | Share name | Bytes |
+|---|---|---|---|---|
+| Regular | `extras/ttf/Inter-Regular.ttf` | `image/fonts/Inter-Regular.ttf` | `/host/INTER.TTF` | 411,640 |
+| Bold | `extras/ttf/Inter-Bold.ttf` | `image/fonts/Inter-Bold.ttf` | `/host/INTERB.TTF` | 420,428 |
+| Italic | `extras/ttf/Inter-Italic.ttf` | `image/fonts/Inter-Italic.ttf` | `/host/INTERI.TTF` | 417,388 |
+| Mono | (Fira Code, unchanged) | `image/fonts/FiraCode-Regular.ttf` | `/host/FIRACODE.TTF` | 289,624 |
+
+Italic **was** in the same extras tree Regular already used, so D2 of the card
+requires it. No other family's italic was fetched. Fira Code Bold was not
+vendored.
+
+Inter keeps glyph **advances** matched across Regular and Bold (observed:
+`Measure("MMMMMMMM")` is 96px for both at body size). The discriminator is
+stem coverage / ink, not width: Regular M×8 paints 440 ink px, Bold 592, a
+Regular+1px strike 664. `Fonts.BoldHeavier()` and `live-web-ttf` boot 02 pin
+that.
+
+### What this does not change
+
+- No font system, no variable axes, no user-installable faces, no new syscall
+  (card D3).
+- Zig `ui.init_fonts` / DOC.BIN is **#1536** (waits on these share names).
+- `<em>` keeps the accent colour; the Italic face supplies the slant.
+- Bitmap 8×8 fallback still synthesizes bold with a 1-px strike, because that
+  face has no Bold counterpart. The TrueType path does not.
 

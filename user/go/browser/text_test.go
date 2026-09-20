@@ -18,9 +18,17 @@ func browserFonts(t *testing.T) webrender.Fonts {
 	if err != nil {
 		t.Fatalf("Fira Code fixture: %v", err)
 	}
-	f := webrender.NewFonts(ui, mono)
-	if f.UI == nil || f.Mono == nil {
-		t.Fatal("NewFonts dropped a face")
+	bold, err := os.ReadFile("../../../image/fonts/Inter-Bold.ttf")
+	if err != nil {
+		t.Fatalf("Inter Bold fixture: %v", err)
+	}
+	italic, err := os.ReadFile("../../../image/fonts/Inter-Italic.ttf")
+	if err != nil {
+		t.Fatalf("Inter Italic fixture: %v", err)
+	}
+	f := webrender.LoadFonts(webrender.FontFiles{UI: ui, Mono: mono, Bold: bold, Italic: italic})
+	if f.UI == nil || f.Mono == nil || f.Bold == nil || f.Italic == nil {
+		t.Fatal("LoadFonts dropped a face")
 	}
 	return f
 }
@@ -40,6 +48,9 @@ func TestTextProbeOnTrueType(t *testing.T) {
 		"adv-i=3",
 		"adv-W=13",
 		"adv-space=4",
+		"bold-face=yes",
+		"bold-heavier=yes",
+		"italic-face=yes",
 	} {
 		if !strings.Contains(probe, want) {
 			t.Errorf("probe is missing %q\n  got: %s", want, probe)
@@ -62,6 +73,8 @@ func TestTextProbeOnBitmap(t *testing.T) {
 		"adv-i=8",
 		"adv-W=8",
 		"adv-space=8",
+		"bold-face=no",
+		"italic-face=no",
 	} {
 		if !strings.Contains(probe, want) {
 			t.Errorf("bitmap probe is missing %q\n  got: %s", want, probe)
@@ -129,7 +142,12 @@ func TestReadWholeFileIsBoundedAndSafe(t *testing.T) {
 // TestMaxFontBytesHoldsBothShippedFaces: the cap must actually fit the fixtures,
 // or the guest would fall back and the gate would (correctly) fail.
 func TestMaxFontBytesHoldsBothShippedFaces(t *testing.T) {
-	for _, p := range []string{"../../../image/fonts/Inter-Regular.ttf", "../../../image/fonts/FiraCode-Regular.ttf"} {
+	for _, p := range []string{
+		"../../../image/fonts/Inter-Regular.ttf",
+		"../../../image/fonts/Inter-Bold.ttf",
+		"../../../image/fonts/Inter-Italic.ttf",
+		"../../../image/fonts/FiraCode-Regular.ttf",
+	} {
 		st, err := os.Stat(p)
 		if err != nil {
 			t.Fatalf("%s: %v", p, err)
@@ -154,7 +172,7 @@ func TestResolveImageRefusesNetworkAndMissingSources(t *testing.T) {
 // TestTextProbeIsLanguageStable guards the field names the gate greps.
 func TestTextProbeIsLanguageStable(t *testing.T) {
 	probe := textProbeString(browserFonts(t))
-	for _, f := range []string{"face=", "proportional=", "body-lineh=", "h1-lineh=", "mono-lineh=", "adv-i=", "adv-W=", "adv-space="} {
+	for _, f := range []string{"face=", "proportional=", "body-lineh=", "h1-lineh=", "mono-lineh=", "adv-i=", "adv-W=", "adv-space=", "bold-face=", "bold-heavier=", "italic-face="} {
 		if !strings.Contains(probe, f) {
 			t.Errorf("probe lost field %q: %s", f, probe)
 		}

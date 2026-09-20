@@ -26,6 +26,7 @@ type Item struct {
 	Size   int // font scale (logical; the engine maps it to a pixel size)
 	Mono   bool
 	Bold   bool
+	Italic bool
 	Color  uint32
 	Bg     uint32
 	Target string // link target, when the run is inside an <a href>
@@ -251,6 +252,7 @@ func mergeInline(parent, child Style) Style {
 	out := child
 	out.Mono = child.Mono || parent.Mono
 	out.Bold = child.Bold || parent.Bold
+	out.Italic = child.Italic || parent.Italic
 	if out.Color == 0 {
 		out.Color = parent.Color
 	}
@@ -423,7 +425,7 @@ func (b *builder) flushInline() {
 		}
 		b.items = append(b.items, Item{
 			Kind: ItemText, X: x, Y: y, W: sg.w, H: lh,
-			Text: sg.text, Size: sg.st.Size, Mono: sg.st.Mono, Bold: sg.st.Bold,
+			Text: sg.text, Size: sg.st.Size, Mono: sg.st.Mono, Bold: sg.st.Bold, Italic: sg.st.Italic,
 			Color: color, Target: sg.target,
 		})
 		if sg.target != "" && len(b.links) < MaxItems {

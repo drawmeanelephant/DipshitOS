@@ -23,7 +23,8 @@ const (
 type Style struct {
 	Size         int    // font scale: 1 => 8px, 2 => 16px
 	Mono         bool   // fixed-width face
-	Bold         bool   // synthetic bold (double strike, as in the Zig renderer)
+	Bold         bool   // Inter Bold when loaded; else a 1-px synthetic strike
+	Italic       bool   // Inter Italic when loaded; else the UI face
 	Align        int    // 0 left, 1 center
 	MarginTop    int    // px before the block
 	MarginBottom int    // px after the block
@@ -90,7 +91,7 @@ func StyleFor(tag string) Style {
 	case "strong", "b":
 		return Style{Size: 1, Bold: true, Color: ColorText}
 	case "em", "i":
-		return Style{Size: 1, Color: ColorAccent}
+		return Style{Size: 1, Italic: true, Color: ColorAccent}
 	case "small":
 		return Style{Size: 1, Color: ColorMuted}
 	case "table":
