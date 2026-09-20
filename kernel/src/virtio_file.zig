@@ -127,6 +127,12 @@ pub const max_file_handles: usize = 8;
 /// fit the request nicely under the u16 length field AND stay within the
 /// 32 KiB reply-cap symmetry (a chunked write never needs a large reply).
 pub const write_chunk_max: usize = reply_cap - reply_hdr_len - handle_len;
+/// The most payload a READ reply can carry — the host bounds a read reply
+/// by the queue's reply buffer. The test override serves at most this much
+/// per call too, so host tests exercise the same round-trip loop the
+/// hardware path does (M70c-K, issue #1504: a 9 MiB image is a few hundred
+/// exchanges, and a test that served it in one call would prove nothing).
+pub const read_chunk_max: usize = reply_cap - reply_hdr_len;
 
 pub const dir_type_file: u8 = 0;
 pub const dir_type_dir: u8 = 1;
@@ -282,6 +288,12 @@ pub const TestFile = struct {
     /// HF6: a seeded DIRECTORY (stat reports is_dir; list emits a dir row
     /// with size 0) — the shell pipe/transcript tests seed EFI etc.
     is_dir: bool = false,
+    /// STAT reports this size while `data` stays shorter — a file that
+    /// changed between the STAT and the READ that follows it. Real: the
+    /// share is a live host directory, so a half-written file is the
+    /// normal failure this models (M70c-K, issue #1504: the streamed load
+    /// must refuse rather than map a half-filled segment).
+    stat_size: ?u64 = null,
 };
 /// A caller-owned static table (never a stack literal: the slice must
 /// outlive the setter). `null` restores hardware mode; an empty slice
@@ -514,7 +526,7 @@ pub fn stat(raw_path: []const u8, out: *StatResult) u8 {
         for (files) |f| {
             if (std.mem.eql(u8, f.name, path)) {
                 out.status = st_ok;
-                out.size = if (f.is_dir) 0 else f.data.len;
+                out.size = if (f.is_dir) 0 else (f.stat_size orelse f.data.len);
                 out.is_dir = f.is_dir;
                 return st_ok;
             }
@@ -581,7 +593,10 @@ pub fn read_chunk(raw_path: []const u8, offset: u64, out: []u8) ReadChunkResult 
         const data = test_lookup(path) orelse return .{ .status = st_not_found, .bytes = 0 };
         if (offset >= data.len) return .{ .status = st_ok, .bytes = 0 };
         const src = data[@intCast(offset)..];
-        const take = @min(src.len, out.len);
+        // Mirror the wire bound: one reply carries at most `read_chunk_max`
+        // payload bytes, so a caller streaming a larger region loops
+        // exactly as it does against the real host.
+        const take = @min(@min(src.len, out.len), read_chunk_max);
         @memcpy(out[0..take], src[0..take]);
         return .{ .status = st_ok, .bytes = take };
     }
@@ -601,6 +616,31 @@ pub fn read_chunk(raw_path: []const u8, offset: u64, out: []u8) ReadChunkResult 
     return .{ .status = st_ok, .bytes = take };
 }
 
+/// Stream `out.len` bytes starting at FILE `offset` into `out` across READ
+/// round trips (each reply carries ≤ `reply_cap - reply_hdr_len` data
+/// bytes, so a 9 MiB range is a few hundred exchanges and never has to
+/// exist as one buffer). Returns the byte count (`out.len`), or null when
+/// the file is absent, the transport fails, or the file ENDS EARLY —
+/// a short read is a refusal, never a half-filled destination.
+///
+/// M70c-K (issue #1504): this is the streamed-exec primitive — a segment's
+/// payload is read straight into the physical pages that will be mapped.
+/// `read_into` is the whole-file special case of it.
+pub fn read_at_into(raw_path: []const u8, offset: u64, out: []u8) ?usize {
+    const path = clean_path(raw_path);
+    if (!available()) return null;
+    if (out.len == 0) return 0;
+    var off = offset;
+    var done: usize = 0;
+    while (done < out.len) {
+        const rc = read_chunk(path, off, out[done..]);
+        if (rc.status != st_ok or rc.bytes == 0) return null;
+        done += rc.bytes;
+        off += rc.bytes;
+    }
+    return done;
+}
+
 /// Stream a whole file into `out` across READ round trips (each reply
 /// carries ≤ `reply_cap - reply_hdr_len` data bytes, so a >32 KiB file
 /// needs multiple exchanges). `size` from a prior STAT bounds the loop; a
@@ -612,15 +652,7 @@ pub fn read_chunk(raw_path: []const u8, offset: u64, out: []u8) ReadChunkResult 
 pub fn read_into(path: []const u8, size: u64, out: []u8) ?usize {
     if (!available()) return null;
     if (size > out.len) return null;
-    var offset: u64 = 0;
-    var total: usize = 0;
-    while (total < size) {
-        const rc = read_chunk(path, offset, out[total..]);
-        if (rc.status != st_ok or rc.bytes == 0) return null;
-        total += rc.bytes;
-        offset += rc.bytes;
-    }
-    return total;
+    return read_at_into(path, 0, out[0..@intCast(size)]);
 }
 
 /// STAT + whole-file read in one call (the kernel-side consumers'
@@ -1276,6 +1308,50 @@ test "virtio_file: read_chunk and read_into copy-out under test_share" {
     try testing.expect(n != null);
     try testing.expectEqual(@as(usize, 38), n.?);
     try testing.expectEqualStrings("Hello, world of safe concurrent reads!", whole[0..n.?]);
+}
+
+test "virtio_file: read_at_into streams a region larger than one reply" {
+    // M70c-K (issue #1504): the streamed loader reads a segment straight
+    // from the file at its own offset. This pins the primitive it uses:
+    // a 3-reply region starting at a NON-zero offset arrives byte-exact
+    // (so a stale cursor or a short final exchange cannot pass), and an
+    // offset past the end of the file refuses instead of returning a
+    // short buffer.
+    const total = read_chunk_max * 3 + 7;
+    // A uniform fill with distinct bytes at every reply boundary: a skipped,
+    // duplicated, or offset-shifted exchange moves one of them, and the
+    // whole-region compare below catches anything softer.
+    const fixture_bytes = comptime blk: {
+        var b = [_]u8{0xA5} ** total;
+        b[0] = 0x11;
+        b[read_chunk_max - 1] = 0x22; // last byte of reply 1
+        b[read_chunk_max] = 0x33; // first byte of reply 2
+        b[read_chunk_max * 2] = 0x44; // first byte of reply 3
+        b[total - 1] = 0x55;
+        break :blk b;
+    };
+    const fixture = [_]TestFile{.{ .name = "BIG.BIN", .data = &fixture_bytes }};
+    set_test_share(&fixture);
+    defer set_test_share(null);
+
+    var out: [total]u8 = undefined;
+    const got = read_at_into("BIG.BIN", 0, &out);
+    try testing.expect(got != null);
+    try testing.expectEqual(@as(usize, total), got.?);
+    try testing.expectEqualSlices(u8, &fixture_bytes, &out);
+
+    // An offset INSIDE the file, read across several replies.
+    var mid: [read_chunk_max * 2]u8 = undefined;
+    const off: usize = 11;
+    const got_mid = read_at_into("BIG.BIN", @intCast(off), &mid);
+    try testing.expect(got_mid != null);
+    try testing.expectEqual(@as(usize, mid.len), got_mid.?);
+    try testing.expectEqualSlices(u8, fixture_bytes[off..][0..mid.len], &mid);
+
+    // Past the end: null, never a short buffer.
+    var over: [8]u8 = undefined;
+    try testing.expectEqual(@as(?usize, null), read_at_into("BIG.BIN", total - 4, &over));
+    try testing.expectEqual(@as(?usize, null), read_at_into("NOPE.BIN", 0, &over));
 }
 
 test "virtio_file: clean_path strips leading slashes" {

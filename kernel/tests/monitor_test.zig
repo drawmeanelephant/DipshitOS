@@ -1780,6 +1780,294 @@ test "exec: single-segment gap image owns no data alias (issue #1163 I1)" {
     try std.testing.expectEqual(@as(u64, 0), info.data_phys);
 }
 
+// ---------------------------------------------------------------------------
+// M70c-K (issue #1504): a gap-layout ELF larger than the 2 MiB staging
+// buffer is loaded by STREAMING its segments straight from the share into
+// the pages that get mapped. These tests pin the three acceptance shapes:
+// a multi-MiB image loads (and its far-from-the-header bytes really arrive
+// at the mapped page), a file that ends before its own header promises is
+// refused by name, and a shape that still needs staging keeps its refusal.
+// ---------------------------------------------------------------------------
+
+/// RAM for the streamed-load fixture: 8 MiB of pages (the image is ~3 MiB
+/// of PT_LOAD memory plus the 192 KiB task stack and its kernel twin).
+var big_test_ram: [2048 * 4096]u8 align(4096) = undefined;
+
+/// Arm the physical allocator over `ram` (the shape kernel_main sets up at
+/// boot: one conventional-memory descriptor).
+fn arm_allocator(ram: []u8) !void {
+    var descs = [_]memmap.MemoryDescriptor{
+        .{ .type = .conventional_memory, .physical_start = @intFromPtr(ram.ptr), .virtual_start = 0, .number_of_pages = ram.len / 4096, .attribute = 0 },
+    };
+    const view = memmap.MapView.init(std.mem.asBytes(&descs), @sizeOf(memmap.MemoryDescriptor), descs.len);
+    try std.testing.expect(alloc.init(view, &.{}));
+}
+
+/// M70c-K fixture: an ELF32 with three PT_LOADs in the Go linker's
+/// R+X / R / RW shape and a ~3 MiB read-only middle segment.
+///
+/// `contiguous` moves that middle segment flush against segment 0's memory
+/// end, which makes the image a CONTIGUOUS shape — the streamed path must
+/// not take it (it still needs the staging buffer), so the exec refuses it.
+///
+/// `drop_tail` returns the header and program headers only, i.e. a file
+/// that ends long before the 3 MiB its own header promises.
+///
+/// The banner bytes (`MARK`) sit 1 MiB into the middle segment's payload —
+/// far outside the 16 KiB header window, so finding them in the mapped
+/// page is proof the payload was streamed from the right file offset.
+const big_elf_ro_vaddr: u64 = 0x40_2000;
+const big_elf_ro_filesz: usize = 0x30_0000;
+const big_elf_ro_off: usize = 0x1000;
+const big_elf_ro_marker: usize = 0x10_0000; // 1 MiB into the payload
+/// Offset of the banner inside the DATA segment's payload (which starts at
+/// `big_elf_ro_off + big_elf_ro_filesz` in the file).
+const big_elf_data_marker: usize = 0x40;
+const big_elf_mark = [8]u8{ 'M', '7', '0', 'c', 'K', '!', '!', '!' };
+const big_elf_file_size: usize = big_elf_ro_off + big_elf_ro_filesz + 0x100;
+
+/// The fixture buffer (module-level: a 3 MiB array must not land on a test
+/// thread's stack).
+var big_elf_image: [big_elf_file_size]u8 align(4096) = undefined;
+
+fn fill_big_gap_elf(comptime contiguous: bool) void {
+    const img = &big_elf_image;
+    @memset(img[0..], 0);
+    const magic4 = [4]u8{ 0x7f, 'E', 'L', 'F' };
+    @memcpy(img[0..4], &magic4);
+    img[4] = 1; // ELF32
+    img[5] = 1; // little-endian
+    img[6] = 1; // EV_CURRENT
+    std.mem.writeInt(u16, img[16..18], 2, .little); // ET_EXEC
+    std.mem.writeInt(u16, img[18..20], 0xB7, .little); // EM_AARCH64
+    std.mem.writeInt(u32, img[20..24], 1, .little); // e_version
+    std.mem.writeInt(u32, img[24..28], 0x40_0000, .little); // e_entry (at the code)
+    std.mem.writeInt(u32, img[28..32], 52, .little); // e_phoff
+    std.mem.writeInt(u16, img[40..42], 52, .little); // e_ehsize
+    std.mem.writeInt(u16, img[42..44], 32, .little); // e_phentsize
+    std.mem.writeInt(u16, img[44..46], 3, .little); // e_phnum
+    // phdr 0 @52: text R+X at the fixed aperture (the kernel text base).
+    std.mem.writeInt(u32, img[52..56], 1, .little); // PT_LOAD
+    std.mem.writeInt(u32, img[56..60], 148, .little); // p_offset
+    std.mem.writeInt(u32, img[60..64], 0x40_0000, .little); // p_vaddr
+    std.mem.writeInt(u32, img[68..72], 0x100, .little); // p_filesz
+    std.mem.writeInt(u32, img[72..76], 0x1000, .little); // p_memsz
+    std.mem.writeInt(u32, img[76..80], 5, .little); // PF_R | PF_X
+    // phdr 1 @84: the ~3 MiB read-only middle segment.
+    const ro_vaddr: u32 = if (contiguous) 0x40_1000 else @intCast(big_elf_ro_vaddr);
+    std.mem.writeInt(u32, img[84..88], 1, .little);
+    std.mem.writeInt(u32, img[88..92], big_elf_ro_off, .little);
+    std.mem.writeInt(u32, img[92..96], ro_vaddr, .little);
+    std.mem.writeInt(u32, img[100..104], @intCast(big_elf_ro_filesz), .little);
+    std.mem.writeInt(u32, img[104..108], @intCast(big_elf_ro_filesz), .little);
+    std.mem.writeInt(u32, img[108..112], 4, .little); // PF_R
+    // phdr 2 @116: data RW. The contiguous variant sits flush against the
+    // read-only segment's memory end (0x401000 + 0x300000); the gap variant
+    // leaves one page between them.
+    const data_vaddr: u32 = if (contiguous) 0x70_1000 else 0x70_3000;
+    std.mem.writeInt(u32, img[116..120], 1, .little);
+    std.mem.writeInt(u32, img[120..124], @intCast(big_elf_ro_off + big_elf_ro_filesz), .little);
+    std.mem.writeInt(u32, img[124..128], data_vaddr, .little);
+    std.mem.writeInt(u32, img[132..136], 0x100, .little); // p_filesz
+    std.mem.writeInt(u32, img[136..140], 0x2000, .little); // p_memsz (bss tail)
+    std.mem.writeInt(u32, img[140..144], 6, .little); // PF_R | PF_W
+    // Segment 0's code (mov x0, #42; ret) and the marker deep inside the
+    // read-only segment's payload.
+    std.mem.writeInt(u32, img[148..152], 0xD2800540, .little);
+    std.mem.writeInt(u32, img[152..156], 0xD65F03C0, .little);
+    @memcpy(img[big_elf_ro_off + big_elf_ro_marker ..][0..big_elf_mark.len], &big_elf_mark);
+    // The same banner inside the LAST (data) segment's payload, which sits
+    // ~3 MiB into the file — the region whose mapped page this test can
+    // read back through `ProcessInfo.data_phys`.
+    @memcpy(img[big_elf_ro_off + big_elf_ro_filesz + big_elf_data_marker ..][0..big_elf_mark.len], &big_elf_mark);
+}
+
+/// Page counts the loader must take for this fixture: 1 text + 768 rodata +
+/// 2 data + the argv/envp headroom page + the 192 KiB (48-page) task stack
+/// and its kernel twin.
+const big_elf_pages = 1 + (big_elf_ro_filesz / 4096) + 2 + 1 + 48 + 48;
+
+test "exec: a 3 MiB gap ELF streams from the share into its mapped pages (M70c-K #1504)" {
+    try arm_allocator(&big_test_ram);
+    fill_big_gap_elf(false);
+    const img = big_elf_image[0..];
+    // The fixture must really be too big for the staging buffer, or this
+    // test would silently exercise the staged path instead.
+    try std.testing.expect(img.len > esp_exec.exec_program_max);
+
+    test_reset_share();
+    defer virtio_file.set_test_share(null);
+    test_seed_share("BIG.ELF", img);
+
+    const free_before = alloc.stats().free_pages;
+    _ = scheduler.init();
+    try std.testing.expectEqual(esp_exec.ExecResult.ok, esp_exec.exec_file("BIG.ELF", &.{}));
+    const pid = esp_exec.last_exec_pid().?;
+    const info = process.info(pid).?;
+    try std.testing.expectEqual(@as(u64, 1), info.text_pages);
+    try std.testing.expectEqual(@as(u64, 3), info.data_pages); // 2 image pages + the argv/envp headroom page
+
+    // The image is BIG: every segment was really allocated (the 768-page
+    // read-only segment is the only way this delta can come out right).
+    try std.testing.expectEqual(free_before - big_elf_pages, alloc.stats().free_pages);
+    // Its declared-vaddr aperture covers the read-only payload and STOPS at
+    // the image's end — the page between it and the data segment is a real
+    // gap, exactly as the linker laid it out.
+    try std.testing.expect(process.mmap_collides(pid, big_elf_ro_vaddr, big_elf_ro_filesz));
+    try std.testing.expect(!process.mmap_collides(pid, big_elf_ro_vaddr + big_elf_ro_filesz, 4096));
+
+    // The byte-level proof: the banner sits 3 MiB into the file, far outside
+    // the 16 KiB header window, and it is in the page the load mapped (the
+    // identity map makes `data_phys` a readable host pointer). The whole
+    // data payload matches the file, so the streamed reads neither skipped
+    // nor duplicated one. (The read-only segment's bytes are proven the same
+    // way by the class-B gate, which runs an image that reads its own
+    // globals — there is no host-side seam that exposes those pages.)
+    const data_bytes: [*]const u8 = @ptrFromInt(info.data_phys);
+    try std.testing.expectEqualSlices(u8, &big_elf_mark, data_bytes[big_elf_data_marker..][0..big_elf_mark.len]);
+    try std.testing.expectEqualSlices(u8, img[big_elf_ro_off + big_elf_ro_filesz ..][0..0x100], data_bytes[0..0x100]);
+
+    // The `exec` reply's `head=` prints these bytes, so a streamed load must
+    // report THIS image's first instruction, not the staging buffer's
+    // leftovers from an earlier exec.
+    try std.testing.expectEqualSlices(u8, img[148..156], &esp_exec.head());
+}
+
+test "exec: a file that shrinks under the loader is refused image_truncated (M70c-K #1504)" {
+    try arm_allocator(&big_test_ram);
+    fill_big_gap_elf(false);
+    const free_before = alloc.stats().free_pages;
+    // The share is a LIVE host directory, so the interesting truncation is
+    // not a file that was always short (the header check refuses that) but
+    // one that changes between STAT and the streamed READ: STAT reports the
+    // whole 3 MiB while only the first 4 KiB is on the volume. That is
+    // exactly what an interrupted copy looks like, and it is the ONLY path
+    // to `image_truncated` — the refusal must come from the segment read
+    // hitting EOF, never from mapping what did arrive.
+    var shrank = [_]virtio_file.TestFile{.{ .name = "TRUNC.ELF", .data = big_elf_image[0..0x1000], .stat_size = big_elf_file_size }};
+    virtio_file.set_test_share(&shrank);
+    defer virtio_file.set_test_share(null);
+
+    _ = scheduler.init();
+    try std.testing.expectEqual(esp_exec.ExecResult.image_truncated, esp_exec.exec_file("TRUNC.ELF", &.{}));
+    // The refused load left nothing behind: the page segment 0 had already
+    // taken is back in the allocator, and no process was created (a leak
+    // here would be invisible until the pool emptied, so it is asserted).
+    try std.testing.expectEqual(free_before, alloc.stats().free_pages);
+    try std.testing.expectEqual(@as(usize, 0), process.count());
+}
+
+test "exec: a file that was always short is refused image_truncated (M70c-K #1504)" {
+    try arm_allocator(&big_test_ram);
+    fill_big_gap_elf(false);
+    const free_before = alloc.stats().free_pages;
+    // The same short payload WITHOUT the STAT lie. This file is 4 KiB, so it
+    // never enters the streamed path at all — it is the staged parse that
+    // refuses it, because its header promises 3 MiB of payload the file does
+    // not hold. The refusal is deliberately the SAME name as the streamed
+    // shrink above: both are "this file ends before its own header says it
+    // does", and a caller should not have to know which check noticed. What
+    // is pinned here is that the two detections of one condition agree, and
+    // that neither is confused with a size refusal.
+    test_reset_share();
+    defer virtio_file.set_test_share(null);
+    test_seed_share("SHORT.ELF", big_elf_image[0..0x1000]);
+
+    _ = scheduler.init();
+    try std.testing.expectEqual(esp_exec.ExecResult.image_truncated, esp_exec.exec_file("SHORT.ELF", &.{}));
+    try std.testing.expectEqual(free_before, alloc.stats().free_pages);
+    try std.testing.expectEqual(@as(usize, 0), process.count());
+}
+
+test "exec: a file past the acceptance bound is refused image_too_large (M70c-K #1504)" {
+    try arm_allocator(&big_test_ram);
+    const free_before = alloc.stats().free_pages;
+    // The bound the streamed path DOES have: the file itself. The content is
+    // the small valid three-segment image, so every shape check would pass
+    // and the ONLY reason to refuse is the file's size — which the fake STAT
+    // reports as one byte past `exec_image_max`. It is asserted separately
+    // from the staging bound because the messages differ (acceptance bound
+    // vs staging buffer), and a caller reading the log must be able to tell
+    // "the loader does not take files this big" from "this shape cannot be
+    // staged".
+    const img = small_contiguous_three_segment_elf();
+    var oversized = [_]virtio_file.TestFile{.{ .name = "HUGE.ELF", .data = img[0..], .stat_size = esp_exec.exec_image_max + 1 }};
+    virtio_file.set_test_share(&oversized);
+    defer virtio_file.set_test_share(null);
+
+    _ = scheduler.init();
+    try std.testing.expectEqual(esp_exec.ExecResult.image_too_large, esp_exec.exec_file("HUGE.ELF", &.{}));
+    try std.testing.expectEqual(free_before, alloc.stats().free_pages);
+    try std.testing.expectEqual(@as(usize, 0), process.count());
+}
+
+test "exec: an oversized CONTIGUOUS ELF keeps its refusal (M70c-K #1504)" {
+    try arm_allocator(&big_test_ram);
+    // Same size, but the middle segment sits flush against segment 0, so
+    // this is the contiguous shape — it still has to transit the staging
+    // buffer, and `staging_too_large` is the honest answer (the streamed
+    // path is for gap layouts only).
+    fill_big_gap_elf(true);
+    test_reset_share();
+    defer virtio_file.set_test_share(null);
+    test_seed_share("FLAT.ELF", big_elf_image[0..]);
+
+    _ = scheduler.init();
+    try std.testing.expectEqual(esp_exec.ExecResult.staging_too_large, esp_exec.exec_file("FLAT.ELF", &.{}));
+    // Refused, not partially loaded: nothing ran and no pages were taken.
+    try std.testing.expectEqual(@as(usize, 0), process.count());
+}
+
+/// A SMALL three-segment image in the CONTIGUOUS shape (each segment flush
+/// against the previous one's memory end, segment 0 at the fixed text
+/// aperture). Nothing about it is odd to the parser, but the staging path
+/// only ever copies [text][data] — so before the M70c-K guard this image
+/// loaded "successfully" with its rodata and data segments missing.
+fn small_contiguous_three_segment_elf() [0x2100]u8 {
+    var img = [_]u8{0} ** 0x2100;
+    const magic4 = [4]u8{ 0x7f, 'E', 'L', 'F' };
+    @memcpy(img[0..4], &magic4);
+    img[4] = 1; // ELF32
+    img[5] = 1; // little-endian
+    img[6] = 1;
+    std.mem.writeInt(u16, img[16..18], 2, .little);
+    std.mem.writeInt(u16, img[18..20], 0xB7, .little);
+    std.mem.writeInt(u32, img[20..24], 1, .little);
+    std.mem.writeInt(u32, img[24..28], 0x40_0000, .little); // e_entry
+    std.mem.writeInt(u32, img[28..32], 52, .little); // e_phoff
+    std.mem.writeInt(u16, img[42..44], 32, .little);
+    std.mem.writeInt(u16, img[44..46], 3, .little);
+    const offs = [_]u32{ 148, 0x1000, 0x2000 };
+    const vaddrs = [_]u32{ 0x40_0000, 0x40_1000, 0x40_2000 };
+    const flags = [_]u32{ 5, 4, 6 }; // R+X, R, RW
+    for (offs, vaddrs, flags, 0..) |off, va, fl, i| {
+        const rec = 52 + i * 32;
+        std.mem.writeInt(u32, img[rec..][0..4], 1, .little); // PT_LOAD
+        std.mem.writeInt(u32, img[rec + 4 ..][0..4], off, .little);
+        std.mem.writeInt(u32, img[rec + 8 ..][0..4], va, .little);
+        std.mem.writeInt(u32, img[rec + 16 ..][0..4], 0x100, .little); // p_filesz
+        std.mem.writeInt(u32, img[rec + 20 ..][0..4], 0x1000, .little); // p_memsz
+        std.mem.writeInt(u32, img[rec + 24 ..][0..4], fl, .little);
+    }
+    std.mem.writeInt(u32, img[148..152], 0xD2800540, .little);
+    std.mem.writeInt(u32, img[152..156], 0xD65F03C0, .little);
+    return img;
+}
+
+test "exec: a small contiguous three-segment image is refused, never partly loaded (M70c-K #1504)" {
+    try arm_allocator(&big_test_ram);
+    const free_before = alloc.stats().free_pages;
+    var img = small_contiguous_three_segment_elf();
+    test_reset_share();
+    defer virtio_file.set_test_share(null);
+    test_seed_share("FLAT3.ELF", img[0..]);
+
+    _ = scheduler.init();
+    try std.testing.expectEqual(esp_exec.ExecResult.staging_too_large, esp_exec.exec_file("FLAT3.ELF", &.{}));
+    try std.testing.expectEqual(free_before, alloc.stats().free_pages);
+    try std.testing.expectEqual(@as(usize, 0), process.count());
+}
+
 test "monitor: ls lists the host-share files deterministically" {
     test_reset_share();
     defer virtio_file.set_test_share(null);

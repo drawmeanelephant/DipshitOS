@@ -407,6 +407,17 @@ Non-PCI platform facts:
     saved state (one host available). Nothing here promises them.
 - Config used: 256 MiB RAM, 2 vCPUs, optional virtio-gpu/sound/net devices
   (flag-gated; the default VM stays byte-identical without flags).
+- **A large image is not a RAM problem by itself, and the guest does not
+  stage it.** [observed] `GOBIG.ELF` — a real stripped `GOOS=virelai` Go
+  binary of 9,502,880 B, 8,416,224 B of that one initialized `.data`
+  payload — execs in-guest and reads its own bytes back from 1, 4 and 8 MiB
+  into that payload (`go-hello` run 02, `datapages=2097`). The payload
+  crosses the host file channel in 32 KiB replies; the loader maps exactly
+  the image's declared segments (`text`/`rodata`/`data`, W^X) and holds no
+  whole-file buffer for that shape — the 2 MiB staging array is only for
+  DSK1/DSK3/contiguous-ELF/PT_INTERP images, which are still refused past
+  it. The image-independent ceiling is the physical allocator: 256 MiB of
+  guest RAM, against a 32 MiB acceptance bound on the file.
 - The project targets Apple silicon / Virtualization.framework only; there
   is no QEMU path.
 

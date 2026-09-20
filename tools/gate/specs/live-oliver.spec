@@ -389,7 +389,7 @@ PY
 # (monitor.zig err_prefix + the honest-ELF refusals), never `exec: loaded ...`.
 vgate_assert 01 serial-absent 'error: '
 vgate_assert 01 serial-absent 'not found on the host share'
-vgate_assert 01 serial-absent 'image larger than the'
+vgate_assert 01 serial-absent 'image too large'
 vgate_assert 01 serial-absent 'leaves no room for the argv block'
 vgate_assert 01 serial-absent '[EXC] parking:'
 vgate_assert 02 serial-absent 'error: '

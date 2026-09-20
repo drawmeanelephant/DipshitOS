@@ -11,8 +11,14 @@
 //!
 //! Exec is the monitor command `exec [<file>]` (default `USER.BIN`):
 //!
-//!   1. Read the file into a fixed 4 KiB BSS staging buffer (bounded).
-//!   2. Validate the DSK1 header (magic, entry offset, image size).
+//!   1. Read the file (bounded). Two shapes: DSK1/DSK3/contiguous-ELF and
+//!      PT_INTERP files transit the whole-file 2 MiB staging buffer
+//!      (`exec_program_max`); a gap-layout static ELF — every GOOS=virelai
+//!      Go binary — is instead parsed from a 16 KiB header window and has
+//!      each segment STREAMED straight from the share into the pages that
+//!      get mapped, so it is bounded by `exec_image_max` (32 MiB) and the
+//!      guest's memory rather than by that array (M70c-K, issue #1504).
+//!   2. Validate the header (magic, entry offset, image size).
 //!   3. Gate on CAPACITY (claim 0826 — the old `user_root_in_use` gate is
 //!      gone: a second program loads and runs while the first is alive):
 //!      the pool's free slot (checked FIRST, so a full pool never leaks
@@ -91,13 +97,36 @@ const elf_mod = @import("elf.zig");
 // loaded image's .symtab on every ELF exec, cleared on every other exec.
 const symbol = @import("symbol.zig");
 
-/// Fixed load buffer. A program larger than this is rejected honestly
-/// (`too_large`). Milestone sixteen C1 (claim 3805) lifted this from the
-/// original 16 KiB bound. Issue #1163 (GOOS=virelai phase 0a): 512 KiB →
-/// 1 MiB — the gc Go runtime's first images exceed 512 KiB even stripped
-/// (`-s -w`); the gap-layout path copies per segment straight out of this
-/// buffer, so it must hold the whole file.
+/// The STAGED load buffer: the DSK1/DSK3/contiguous-ELF paths still read
+/// the whole file through this array, so an image of those shapes larger
+/// than it is refused honestly (`staging_too_large`). Milestone sixteen C1 (claim
+/// 3805) lifted it from the original 16 KiB bound; issue #1163
+/// (GOOS=virelai phase 0a) took it 512 KiB → 1 MiB and then 2 MiB because
+/// the gc Go runtime's first images exceed that even stripped (`-s -w`).
+///
+/// M70c-K (issue #1504) is what this bound is no longer: the gap-layout
+/// ELF path (every GOOS=virelai Go binary) STREAMS its segments straight
+/// from the file into their mapped pages and never stages the file at all,
+/// so for those shapes this is not a bound. What bounds an image now is
+/// `exec_image_max` below.
 pub const exec_program_max: usize = 2 * 1024 * 1024;
+/// M70c-K (issue #1504): the acceptance bound — the largest image file the
+/// loader will take, whatever its format. A file past it is refused
+/// `image_too_large` up front, by name, so the caller sees "bigger than the
+/// loader accepts" rather than a confusing allocator failure later. 32 MiB
+/// admits the 27 MB `cmd/compile` with headroom while leaving the 256 MiB
+/// guest room for the image's own heap; the true ceiling above this one is
+/// the physical allocator (`out_of_memory` when the segments cannot be
+/// backed), which is a memory-plan question, not a loader one.
+pub const exec_image_max: usize = 32 * 1024 * 1024;
+/// The header window a streamed load reads first: an ELF header, its
+/// program-header table (≤ 3 records), and a PT_INTERP path — or a
+/// DSK1/DSK3 header. Segment PAYLOADS are never staged here; they are
+/// streamed straight into the pages that get mapped.
+pub const header_window: usize = 16 * 1024;
+/// The one fixed buffer the streamed path needs (16 KiB of BSS, versus the
+/// 2 MiB the staged path keeps for its own shapes).
+var head_buf: [header_window]u8 align(4096) = undefined;
 /// Card 3e (claim 4636): the bounded argv block — at most 8 args, each in
 /// a 32-byte slot (31 chars + NUL terminator), 256 bytes total. Packed into
 /// the process's OWN text page right after the loaded content (the text
@@ -137,8 +166,18 @@ pub const ExecResult = enum {
     no_disk,
     /// The named file is absent from the volume (or is a directory).
     not_found,
-    /// The image (or the file) exceeds the fixed 4 KiB load buffer.
-    too_large,
+    /// The FILE itself is larger than the loader accepts at all
+    /// (`exec_image_max`, 32 MiB since M70c-K / #1504). Named separately
+    /// from `staging_too_large` so the caller can tell "bigger than this
+    /// loader takes" from "too big for the path this shape needs": the
+    /// streamed gap-layout path is bounded by this one only.
+    image_too_large,
+    /// This image's shape must transit the 2 MiB staging buffer
+    /// (`exec_program_max`) — DSK1, DSK3, the contiguous ELF layout, a
+    /// PT_INTERP image, or a four-segment image — and does not fit it.
+    /// Distinct from `image_too_large`: a gap-layout Go binary of the same
+    /// size streams and is accepted (M70c-K, issue #1504).
+    staging_too_large,
     /// Not a DSK1 flat program image.
     bad_magic,
     /// entry_offset outside the loaded content.
@@ -177,6 +216,15 @@ pub const ExecResult = enum {
     /// A segment escapes the load bound/buffer, overlaps the other, or
     /// breaks the W^X / placement contract.
     segment_too_large,
+    /// M70c-K (issue #1504): the file ends before the bytes its own header
+    /// promises — a truncated copy. Detected twice, reported once: the
+    /// header-window parse refuses a payload range past the volume's STAT
+    /// size (`elf.file_too_short`), and, if the file shrinks between that
+    /// check and the read, the streamed segment read hits EOF. Either way
+    /// no half-filled segment is ever mapped. Distinct from the size
+    /// refusals (this file is small enough — it is incomplete) and from
+    /// `not_found` (the file is present).
+    image_truncated,
 };
 
 /// The loaded program image (BSS, page-aligned so the user root can map the
@@ -233,10 +281,19 @@ pub fn loaded() ?LoadedInfo {
     };
 }
 
+/// The first 8 bytes of the LOADED CONTENT for a STREAMED image (M70c-K,
+/// issue #1504). That path never touches `program`, so recording them here
+/// is what keeps `head()` from reporting another image's staging bytes.
+var streamed_head: [8]u8 = [_]u8{0} ** 8;
+var streamed_head_valid: bool = false;
+
 /// The first 8 bytes of the LOADED CONTENT (the stripped image's first
 /// instruction). Diagnostic: the `exec` reply prints them so a live run can
-/// confirm the exact bytes that will execute at EL0.
+/// confirm the exact bytes that will execute at EL0. For the staged shapes
+/// those bytes are the staging buffer's; a streamed image answers from the
+/// page its segment 0 was read into.
 pub fn head() [8]u8 {
+    if (streamed_head_valid) return streamed_head;
     var out: [8]u8 = undefined;
     @memcpy(out[0..8], program[0..8]);
     return out;
@@ -345,6 +402,9 @@ pub fn exec_file_pinned_as(name: []const u8, args: []const []const u8, pin: usiz
 
 fn exec_file_impl(name: []const u8, args: []const []const u8, pin: ?usize, principal: process.Principal) ExecResult {
     defer clear_envp();
+    // `head()` reports the newest load; a staged exec answers from the
+    // staging buffer, so clear the streamed snapshot until one takes one.
+    streamed_head_valid = false;
     if (args.len > max_exec_args) return .too_many_args;
     // M70b review: an offline pin would strand the task forever — pinned
     // tasks bypass every offline gate on the dequeue side (steal_eligible
@@ -368,7 +428,54 @@ fn exec_file_impl(name: []const u8, args: []const []const u8, pin: ?usize, princ
     if (!virtio_file.available()) return .no_disk;
     var st = virtio_file.StatResult{};
     if (virtio_file.stat(name, &st) != virtio_file.st_ok or st.is_dir) return .not_found;
-    if (st.size > program.len) return .too_large;
+    if (st.size > exec_image_max) return .image_too_large;
+    if (st.size < dsk1_header_size) return .bad_magic;
+
+    // M70c-K (issue #1504): a file too big for the staging buffer is no
+    // longer refused outright. `exec_program_max` is a bound of the STAGED
+    // shapes below, where the whole file transits `program`; a gap-layout
+    // static ELF — every GOOS=virelai Go binary — can instead be loaded by
+    // streaming each segment straight from the file into the pages that
+    // will be mapped, so its size is bounded by the guest's memory rather
+    // than by that array. Read the header window and ask whether this file
+    // is that shape; every other oversized file keeps the old refusal, and
+    // every file that FITS the staging buffer keeps the old path exactly
+    // (byte-identical, one channel read, no extra probe).
+    if (st.size > program.len) {
+        const head_len = read_head(name, @intCast(@min(st.size, header_window))) orelse return .not_found;
+        if (head_len >= 4 and std.mem.readInt(u32, head_buf[0..4], .little) == elf_magic) {
+            if (elf_mod.parse_head(head_buf[0..head_len], st.size, elf_mod.text_base)) |image| {
+                if (image.gap_layout and image.interp == null) {
+                    // M22 D3: crash-trace names follow the program — the
+                    // streamed path cannot harvest them from a file it
+                    // never stages (the .symtab sits behind a file offset
+                    // the header window does not hold), so a streamed image
+                    // has no kernel symbol names. A Go binary's own
+                    // traceback is unaffected; stated in the M70c-K PR and
+                    // in the docs.
+                    symbol.reset();
+                    return exec_static_elf_gap(name, args, .streamed, image, pin, principal);
+                }
+                // The shape parses and is under `load_max`, but it is a
+                // STAGED shape: DSK1/DSK3 are not ELF at all, a contiguous
+                // ELF is copied through `program`, and a PT_INTERP image
+                // needs `interp_program` too. Say which bound it missed.
+                return .staging_too_large;
+            } else |err| {
+                // A file whose own header promises bytes the file does not
+                // hold is an incomplete copy, not an oversized image.
+                if (err == error.file_too_short) return .image_truncated;
+                // Any other parse failure falls through to the size refusal:
+                // the file was already past `exec_image_max`? no — past the
+                // staging buffer, which is all an oversized file of an
+                // unusable shape ever got told before this change (the old
+                // code refused on size alone, before any parse). Naming a
+                // parse error here would be new information; leaving it out
+                // keeps the refusal as informative as it was.
+            }
+        }
+        return .staging_too_large;
+    }
     const got = virtio_file.read_into(name, st.size, &program) orelse return .not_found;
 
     if (got < dsk1_header_size) return .bad_magic;
@@ -392,8 +499,8 @@ fn exec_file_impl(name: []const u8, args: []const []const u8, pin: ?usize, princ
         dsk1_magic => {
             entry_off = std.mem.readInt(u64, program[8..16], .little);
             image_size = std.mem.readInt(u64, program[16..24], .little);
-            if (image_size > program.len) return .too_large;
-            if (image_size > got) return .too_large; // truncated read — file bigger than the buffer
+            if (image_size > program.len) return .staging_too_large;
+            if (image_size > got) return .staging_too_large; // truncated read — file bigger than the buffer
             if (entry_off < dsk1_header_size or entry_off >= image_size) return .bad_entry;
             text_size = @intCast(image_size - dsk1_header_size);
         },
@@ -411,6 +518,13 @@ fn exec_file_impl(name: []const u8, args: []const []const u8, pin: ?usize, princ
         },
         elf_magic => {
             const image = elf_mod.parse(program[0..got]) catch |err| return elf_exec_error(err);
+            // M70c-K (issue #1504): `load_max` is the acceptance bound now
+            // (32 MiB, `exec.exec_image_max`), but THIS path still copies
+            // [text][data] through the 2 MiB staging buffer, so a shape it
+            // cannot hold is refused by name here instead of tripping a
+            // slice past the end of the array. Only the streamed gap path
+            // above is exempt from the staging bound.
+            if (elf_mod.mem_total(image) > exec_program_max) return .staging_too_large;
             // M22 D3 (issue #326): crash-report symbol names follow the
             // program — every exec starts from an empty table, then this
             // image's .symtab repopulates it. Harvest BEFORE staging
@@ -435,8 +549,17 @@ fn exec_file_impl(name: []const u8, args: []const []const u8, pin: ?usize, princ
                 // represent them. The gap path maps every segment at its
                 // DECLARED vaddr (aperture machinery from the dynamic
                 // path); symbols were already collected above.
-                return exec_static_elf_gap(name, args, program[0..got], image, pin, principal);
+                return exec_static_elf_gap(name, args, .{ .staged = program[0..got] }, image, pin, principal);
             }
+
+            // The CONTIGUOUS staging contract below represents exactly
+            // [text][data]: a third segment has nowhere to go in the buffer
+            // and would simply be left out, so such an image is refused by
+            // name instead of running with its rodata or data missing.
+            // (Gap-layout images — every GOOS=virelai Go binary — never
+            // reach here: the branch above maps all three of their
+            // segments, streamed or staged.)
+            if (image.segment_count > 2) return .staging_too_large;
 
             const seg0 = image.segments[0];
             // The loader contract (elf.zig): segment 0 sits at
@@ -670,6 +793,34 @@ fn exec_file_impl(name: []const u8, args: []const []const u8, pin: ?usize, princ
     return .ok;
 }
 
+/// Read UP TO `limit` bytes of `name` into `head_buf` and report how many
+/// arrived: the loader's head probe. Unlike `virtio_file.read_at_into` a
+/// short file is not a failure here — the header window only has to hold
+/// the ELF header and the program-header table, and a file that vanished or
+/// shrank mid-flight is diagnosed by the caller (a parse that cannot
+/// complete, or a streamed segment read that hits EOF). Returns null only
+/// when the channel itself refuses.
+fn read_head(name: []const u8, limit: usize) ?usize {
+    var done: usize = 0;
+    while (done < limit) {
+        const rc = virtio_file.read_chunk(name, done, head_buf[done..limit]);
+        if (rc.status != virtio_file.st_ok) return null;
+        if (rc.bytes == 0) break; // EOF: parse what actually arrived
+        done += rc.bytes;
+    }
+    return done;
+}
+
+/// Where a gap-layout ELF's segment payloads come from. `staged` is the
+/// classic path (the whole file is in `program`); `streamed` is M70c-K
+/// (issue #1504): each segment is read straight from the file into the
+/// pages that will be mapped, so image size is bounded by the guest's
+/// memory rather than by a staging array.
+const ImageSource = union(enum) {
+    staged: []const u8,
+    streamed,
+};
+
 /// Issue #1163 (GOOS=virelai phase 0a): static-ELF GAP layout — every
 /// PT_LOAD is mapped at its DECLARED page-aligned vaddr (segment 0 at the
 /// fixed text aperture, `elf.text_base`), with the parser-enforced W^X
@@ -680,10 +831,17 @@ fn exec_file_impl(name: []const u8, args: []const []const u8, pin: ?usize, princ
 /// contract — the block (prepended program name + args) packs into the
 /// writable segment's reserved tail page, and the GOOS rt0 stub converts
 /// it to a SysV char* array for rt0_go.
+///
+/// M70c-K (issue #1504): `src` selects where each segment's payload comes
+/// from. `streamed` is the whole point of the card — segment bytes go from
+/// the file channel straight into the physical pages that are about to be
+/// mapped, so there is no per-image staging buffer and the declared-vaddr
+/// aperture machinery below is untouched by the change (the page count and
+/// placement of a given image are identical either way).
 fn exec_static_elf_gap(
     name: []const u8,
     args: []const []const u8,
-    prog_buf: []const u8,
+    src: ImageSource,
     image: elf_mod.Image,
     pin: ?usize,
     principal: process.Principal,
@@ -709,6 +867,10 @@ fn exec_static_elf_gap(
     var seg_phys: [elf_mod.max_segments]u64 = .{0} ** elf_mod.max_segments;
     var seg_pages: [elf_mod.max_segments]u64 = .{0} ** elf_mod.max_segments;
     var allocated: usize = 0;
+    const streaming = switch (src) {
+        .streamed => true,
+        .staged => false,
+    };
     while (allocated < image.segment_count) : (allocated += 1) {
         const seg = image.segments[allocated];
         var pages: u64 = (seg.mem_size + alloc.page_size - 1) / alloc.page_size;
@@ -727,8 +889,33 @@ fn exec_static_elf_gap(
         seg_phys[allocated] = phys;
         seg_pages[allocated] = pages;
         const dst: [*]u8 = @ptrFromInt(phys);
-        if (seg.file_size > 0) @memcpy(dst[0..seg.file_size], prog_buf[seg.file_offset..][0..seg.file_size]);
+        if (seg.file_size > 0) {
+            const payload = dst[0..seg.file_size];
+            if (streaming) {
+                if (virtio_file.read_at_into(name, seg.file_offset, payload) == null) {
+                    // The file is shorter than its own header promises (or
+                    // the channel died): free everything this load took and
+                    // refuse by name — never map a half-filled segment.
+                    var j: usize = 0;
+                    while (j <= allocated) : (j += 1) {
+                        if (seg_pages[j] > 0) _ = alloc.free_pages(seg_phys[j], seg_pages[j]);
+                    }
+                    return .image_truncated;
+                }
+            } else {
+                @memcpy(payload, src.staged[seg.file_offset..][0..seg.file_size]);
+            }
+        }
         if (seg.mem_size > seg.file_size) @memset(dst[seg.file_size..seg.mem_size], 0);
+    }
+    // `head()` is a diagnostic the `exec` reply prints: for a streamed image
+    // take it from the page segment 0 was just read into, so the line reports
+    // THIS image's first instruction rather than the staging buffer's
+    // leftovers (M70c-K, issue #1504).
+    if (streaming and image.segments[0].file_size >= 8) {
+        const text_src: [*]const u8 = @ptrFromInt(seg_phys[0]);
+        @memcpy(&streamed_head, text_src[0..8]);
+        streamed_head_valid = true;
     }
 
     const stack_pages: u64 = (scheduler.task_stack_size + alloc.page_size - 1) / alloc.page_size;
@@ -1221,6 +1408,10 @@ fn elf_exec_error(err: elf_mod.Error) ExecResult {
         error.truncated,
         error.bad_phdr,
         => .bad_elf,
+        // M70c-K (issue #1504): the file ends before the bytes its own
+        // header promises. One name for both detections (this parse-time
+        // one and the streamed read hitting EOF).
+        error.file_too_short => .image_truncated,
         error.unsupported_class,
         error.unsupported_endian,
         error.unsupported_machine,
@@ -1338,11 +1529,15 @@ pub fn parse_dsk3(buf: []const u8, got: usize) union(enum) { ok: Segments, err: 
     const text_size: usize = @intCast(std.mem.readInt(u64, buf[24..32], .little));
     const data_file_size: usize = @intCast(std.mem.readInt(u64, buf[32..40], .little));
     const data_mem_size: usize = @intCast(std.mem.readInt(u64, buf[40..48], .little));
-    if (image_size > buf.len) return .{ .err = .too_large };
-    if (image_size > got) return .{ .err = .too_large }; // truncated read
+    // Order matters: a declared image that did not ARRIVE is a truncated
+    // file (the same condition the ELF path names), while one that arrived
+    // in full but does not fit the staging buffer is a staging-bound
+    // refusal. "Incomplete" is the more specific truth of the two.
+    if (image_size > got) return .{ .err = .image_truncated }; // truncated read
+    if (image_size > buf.len) return .{ .err = .staging_too_large };
     if (image_size != dsk3_header_size + text_size + data_file_size) return .{ .err = .bad_magic };
-    if (text_size == 0 or text_size > exec_program_max) return .{ .err = .too_large };
-    if (data_mem_size < data_file_size or data_mem_size > exec_program_max) return .{ .err = .too_large };
+    if (text_size == 0 or text_size > exec_program_max) return .{ .err = .staging_too_large };
+    if (data_mem_size < data_file_size or data_mem_size > exec_program_max) return .{ .err = .staging_too_large };
     if (entry_off < dsk3_header_size or entry_off >= dsk3_header_size + text_size) return .{ .err = .bad_entry };
     return .{ .ok = .{
         .entry_off = entry_off,
@@ -1456,7 +1651,7 @@ test "exec: DSK1 header parse rejects bad magic, entry, and oversize images" {
     // image_size beyond the fixed buffer.
     const oversize = dsk1("xx", 24, exec_program_max + 1);
     test_seed("USER.BIN", oversize[0 .. 24 + 2]);
-    try std.testing.expectEqual(ExecResult.too_large, exec_file("USER.BIN", &.{}));
+    try std.testing.expectEqual(ExecResult.staging_too_large, exec_file("USER.BIN", &.{}));
 }
 
 test "exec: no disk is reported honestly" {
@@ -1489,20 +1684,21 @@ test "exec: DSK3 header validation pins the segment bounds (claim 3805)" {
     var zero_text = buf;
     std.mem.writeInt(u64, zero_text[24..32], 0, .little);
     std.mem.writeInt(u64, zero_text[16..24], dsk3_header_size + 0 + 8, .little);
-    try std.testing.expectEqual(ExecResult.too_large, parse_dsk3(&zero_text, got).err);
+    try std.testing.expectEqual(ExecResult.staging_too_large, parse_dsk3(&zero_text, got).err);
 
     // BSS must not be smaller than the initialized data.
     var bad_bss = buf;
     std.mem.writeInt(u64, bad_bss[40..48], 4, .little);
-    try std.testing.expectEqual(ExecResult.too_large, parse_dsk3(&bad_bss, got).err);
+    try std.testing.expectEqual(ExecResult.staging_too_large, parse_dsk3(&bad_bss, got).err);
 
     // The entry must land inside the RX region.
     var bad_entry = buf;
     std.mem.writeInt(u64, bad_entry[8..16], dsk3_header_size + 4096, .little); // == text end
     try std.testing.expectEqual(ExecResult.bad_entry, parse_dsk3(&bad_entry, got).err);
 
-    // A truncated read (got < image_size) is an honest too_large.
-    try std.testing.expectEqual(ExecResult.too_large, parse_dsk3(&buf, dsk3_header_size + 4096 + 4).err);
+    // A truncated read (got < image_size) is an honest truncated-image
+    // refusal, not a size one: the bytes the header promised never arrived.
+    try std.testing.expectEqual(ExecResult.image_truncated, parse_dsk3(&buf, dsk3_header_size + 4096 + 4).err);
 }
 
 test "exec: ok path loads, validates, builds the root, and spawns the task" {

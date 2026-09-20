@@ -71,11 +71,12 @@ gate-list:
 # `just verify-vz` includes them, and they refuse
 # to run (honestly) until this has produced .build/go/{GOHELLO,GOARGS,
 # GOROUT,GOSTRESS,GOPANIC,GOWIN,GOVINET,GOVIDNS,GOSCALE}.ELF on this
-# machine. First run takes several minutes
-# (one Go make.bash pass; the second cross-std pass is phase-2 opt-in via
-# GOVIRELAI_STD=1).
+# machine — plus GOBIG.ELF (M70c-K #1504: the 9.5 MiB image go-hello run 02
+# streams, which the old 2 MiB staging bound refused). First run takes
+# several minutes (one Go make.bash pass; the second cross-std pass is
+# phase-2 opt-in via GOVIRELAI_STD=1).
 go-toolchain:
-    bash tools/go/build-go.sh tools/go/hello.go tools/go/goargs.go tools/go/goroutines.go tools/go/gostress.go tools/go/gopanic.go tools/go/gowin.go tools/go/gonet.go tools/go/govinet.go tools/go/govidns.go tools/go/smpscale.go
+    bash tools/go/build-go.sh tools/go/hello.go tools/go/goargs.go tools/go/goroutines.go tools/go/gostress.go tools/go/gopanic.go tools/go/gowin.go tools/go/gonet.go tools/go/govinet.go tools/go/govidns.go tools/go/smpscale.go tools/go/gobig.go
 
 # Build the phase-2 netpoll + os.File/net.Conn fixture (issue #1163):
 # .build/go/GONET.ELF. HOST PREREQUISITE for the go-net class-B gate.

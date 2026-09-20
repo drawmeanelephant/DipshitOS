@@ -7327,12 +7327,25 @@ fn cmd_exec(m: *Monitor, args: []const []const u8) ExecError {
             m.console.print_line(": not found on the host share (must be a DSK1/DSK3/ELF image)");
             return .invalid_argument;
         },
-        .too_large => {
+        // M70c-K (issue #1504): the two size refusals name the bound each
+        // one crossed, so a log says WHY the image was refused: a file past
+        // the acceptance bound is refused whatever its shape, while a shape
+        // that must be STAGED is capped by the staging buffer (the streamed
+        // gap-layout path is not).
+        .image_too_large => {
             err_prefix(m);
             m.console.puts(name);
-            m.console.puts(": image larger than the ");
+            m.console.puts(": image too large (acceptance bound ");
+            m.console.print_hex(esp_exec.exec_image_max);
+            m.console.print_line(" bytes)");
+            return .invalid_argument;
+        },
+        .staging_too_large => {
+            err_prefix(m);
+            m.console.puts(name);
+            m.console.puts(": image too large for the ");
             m.console.print_hex(esp_exec.exec_program_max);
-            m.console.print_line("-byte load buffer");
+            m.console.print_line("-byte staging buffer (only a gap-layout static ELF streams past it)");
             return .invalid_argument;
         },
         .bad_magic => {
@@ -7415,6 +7428,17 @@ fn cmd_exec(m: *Monitor, args: []const []const u8) ExecError {
             err_prefix(m);
             m.console.puts(name);
             m.console.print_line(": segment too large or bad segment layout");
+            return .invalid_argument;
+        },
+        // M70c-K (issue #1504): the streamed load reads each segment's
+        // bytes straight from the file, so a file that ends before its own
+        // header promises is refused BY NAME instead of mapping a
+        // half-filled segment (distinct from `too_large`, which is about
+        // what the loader accepts, and from `not_found`).
+        .image_truncated => {
+            err_prefix(m);
+            m.console.puts(name);
+            m.console.print_line(": truncated image (file ends before the bytes its header promises)");
             return .invalid_argument;
         },
     }

@@ -27,10 +27,12 @@
 //!   * e_entry must land inside segment 0's INITIALIZED bytes (file range);
 //!     it is reported relative to segment 0's p_vaddr because the staging
 //!     strip re-bases the content at the aperture base.
-//!   * Bounded: p_memsz >= p_filesz per segment, file ranges inside the
-//!     read buffer, non-overlapping ordered file ranges, and total load
-//!     size <= `load_max` (mirrors `exec.exec_program_max`, the shared
-//!     staging buffer bound).
+//!   * Bounded: p_memsz >= p_filesz per segment, non-overlapping ordered
+//!     file ranges, and total load size <= `load_max` (the acceptance
+//!     bound, `exec.exec_image_max`). The FILE ranges are validated
+//!     against the caller-supplied file size — the read buffer on the
+//!     staged path, the STAT size on the streamed one (`parse_head`,
+//!     M70c-K / issue #1504).
 //!
 //! No dynamic linking, no sections, no relocations, no libc/POSIX.
 
@@ -156,12 +158,19 @@ pub const page_alignment: u64 = 4096;
 /// the CSPRNG) — the bound exists to keep images below the bump region,
 /// not below any fixed stack VA.
 pub const gap_base_max: u64 = 0x1000_0000;
-/// Total load bound — mirrors `exec.exec_program_max` (the shared staging
-/// buffer). A program whose PT_LOAD memory exceeds this is rejected.
-/// Issue #1163: raised from 512 KiB — the gc Go runtime's first images
-/// exceed the old bound even `-s -w`-stripped (GOHELLO.ELF is 1.06 MiB of
-/// file / 1.21 MiB of PT_LOAD memory).
-pub const load_max: usize = 2 * 1024 * 1024;
+/// Total load bound — mirrors `exec.exec_image_max` (the largest image the
+/// loader will accept at all). A program whose PT_LOAD memory exceeds this
+/// is rejected. Issue #1163: raised from 512 KiB — the gc Go runtime's
+/// first images exceed the old bound even `-s -w`-stripped (GOHELLO.ELF is
+/// 1.06 MiB of file / 1.21 MiB of PT_LOAD memory). M70c-K (issue #1504):
+/// raised from 2 MiB to match the streamed loader, which no longer stages
+/// the whole file, so the load bound is no longer a buffer size. 32 MiB is
+/// the bound `exec.exec_image_max` states: it admits the 27 MB
+/// `cmd/compile` with headroom and still leaves the 256 MiB guest room for
+/// the image's own heap. (This constant used to mirror
+/// `exec.exec_program_max`, the 2 MiB staging buffer; that buffer is now
+/// only the fast path's bound, not the acceptance bound.)
+pub const load_max: usize = 32 * 1024 * 1024;
 /// At most three PT_LOAD segments: text + optional RO rodata + data
 /// (issue #1163 — the Go linker's R+X / R / RW layout).
 pub const max_segments: usize = 3;
@@ -184,8 +193,14 @@ pub const Error = error{
     no_load_segments,
     /// More than `max_segments` PT_LOAD segments.
     too_many_segments,
-    /// A segment's file range escapes the buffer, p_memsz < p_filesz, or
-    /// the total load exceeds `load_max`.
+    /// A segment's FILE range escapes the file the caller described: the
+    /// header promises initialized bytes the file does not hold. Detected
+    /// identically on both paths — the staged one describes the bytes it
+    /// read, the streamed one the volume's STAT size (M70c-K / #1504) — so
+    /// the caller reports it as one named condition, a truncated image,
+    /// rather than as a vague "bad segment".
+    file_too_short,
+    /// p_memsz < p_filesz, or the total load exceeds `load_max`.
     segment_too_large,
     /// Two segments' FILE ranges overlap (the staging copy is forward-only
     /// and requires ordered, disjoint source ranges).
@@ -393,15 +408,47 @@ const RawSegment = struct {
     flags: u32,
 };
 
+/// The total PT_LOAD MEMORY the plan maps (initialized bytes plus the
+/// zero-filled BSS tails of every segment). Callers use it for their own
+/// bounds: `exec_file` still refuses a STAGED shape that would not fit the
+/// staging buffer even though `load_max` now admits it (M70c-K, issue
+/// #1504 — only the streamed gap path is exempt from that buffer).
+pub fn mem_total(image: Image) u64 {
+    var total: u64 = 0;
+    for (image.segments[0..image.segment_count]) |seg| total += seg.mem_size;
+    return total;
+}
+
 /// Parse + validate an ELF executable image. `buf` holds the whole file as
 /// read from the volume. On success returns the bounded load plan.
 pub fn parse(buf: []const u8) Error!Image {
-    return parse_at(buf, text_base);
+    return parse_impl(buf, buf.len, text_base);
 }
 
 /// Parse + validate an ELF image with an optional expected base address.
 /// If `expected_base` is null, segment 0's declared vaddr is accepted.
 pub fn parse_at(buf: []const u8, expected_base: ?u64) Error!Image {
+    return parse_impl(buf, buf.len, expected_base);
+}
+
+/// M70c-K (issue #1504): parse from a HEADER WINDOW.
+///
+/// `buf` must hold the ELF header, the program-header table, and — for a
+/// dynamic image — the PT_INTERP path; the segment PAYLOAD ranges are
+/// validated against `file_size` (the volume's STAT size) instead of the
+/// window, because a streamed load never stages them. The returned plan's
+/// `Segment.file_offset`s are FILE offsets, so the caller streams each
+/// segment from there. Everything else (ordering, disjointness, W^X,
+/// placement, the total-load bound, entry-in-text) is the same contract
+/// `parse` enforces — this is a second entry point, not a weaker one.
+pub fn parse_head(buf: []const u8, file_size: u64, expected_base: ?u64) Error!Image {
+    // A window larger than the file would let a segment validate against
+    // bytes that do not exist.
+    if (file_size < buf.len) return error.truncated;
+    return parse_impl(buf, file_size, expected_base);
+}
+
+fn parse_impl(buf: []const u8, file_size: u64, expected_base: ?u64) Error!Image {
     // e_ident needs 16 bytes; the shortest header table (ELF32) ends at
     // byte 44 with phentsize/phnum at 42/44 — checked below per class.
     if (!is_elf(buf)) return error.not_elf;
@@ -495,7 +542,11 @@ pub fn parse_at(buf: []const u8, expected_base: ?u64) Error!Image {
     var total_mem: u64 = 0;
     for (raws[0..count]) |r| {
         if (r.memsz < r.filesz) return error.segment_too_large;
-        if (r.offset > buf.len or r.filesz > buf.len - r.offset) return error.segment_too_large;
+        // The payload range is validated against the FILE, not `buf`: the
+        // staged path passes the whole file (file_size == buf.len, so this
+        // is the old check exactly), while a streamed load passes only a
+        // header window and streams the payload straight from the file.
+        if (r.offset > file_size or r.filesz > file_size - r.offset) return error.file_too_short;
         total_mem += r.memsz;
         if (total_mem > load_max) return error.segment_too_large;
     }
@@ -731,11 +782,15 @@ test "elf: rejects truncated headers and tables" {
 }
 
 test "elf: rejects out-of-range and oversized segments" {
-    // p_filesz pointing past the buffer.
+    // p_filesz pointing past the buffer: the header promises bytes the
+    // buffer (i.e. the file, on the staged path) does not hold, so the
+    // refusal is the truncation one. M70c-K (#1504) split it out of
+    // `segment_too_large` because a caller must be able to say "truncated"
+    // rather than "bad segment".
     var oob = elf32_one(&[_]u8{0} ** 4, 0x400000, 0, 0, 5);
     std.mem.writeInt(u32, oob[68..72], 9999, .little);
     std.mem.writeInt(u32, oob[72..76], 9999, .little);
-    try testing.expectError(error.segment_too_large, parse(&oob));
+    try testing.expectError(error.file_too_short, parse(&oob));
 
     // memsz < filesz (BSS smaller than the initialized part).
     var neg_bss = elf32_one(&[_]u8{0} ** 4, 0x400000, 0, 0, 5);
@@ -960,6 +1015,91 @@ test "elf: three-segment gap layout (Go linker shape) parses with declared vaddr
     std.mem.writeInt(u32, four[168..172], 4, .little);
     std.mem.writeInt(u32, four[172..176], 6, .little);
     try testing.expectError(error.too_many_segments, parse(&four));
+}
+
+test "elf: parse_head validates a streamed image against its FILE size, not the window" {
+    // M70c-K (issue #1504): the streamed loader reads only a header window
+    // and streams each segment from the file. This image's rodata payload
+    // is 3 MiB and lies entirely outside the 148-byte header window, so the
+    // STAGED contract cannot validate it — while parse_head can, because it
+    // is told the file's real size.
+    var img = [_]u8{0} ** 256;
+    @memcpy(img[0..4], &magic);
+    img[4] = 1; // ELF32
+    img[5] = 1;
+    img[6] = 1;
+    std.mem.writeInt(u16, img[18..20], em_aarch64, .little);
+    std.mem.writeInt(u32, img[20..24], 1, .little);
+    std.mem.writeInt(u32, img[24..28], 0x400000, .little); // entry
+    std.mem.writeInt(u32, img[28..32], 52, .little); // e_phoff
+    std.mem.writeInt(u16, img[42..44], 32, .little);
+    std.mem.writeInt(u16, img[44..46], 3, .little);
+    // phdr 0 @52: text R+X, file 0x100, vaddr 0x400000, filesz/memsz 0x1000
+    std.mem.writeInt(u32, img[52..56], pt_load, .little);
+    std.mem.writeInt(u32, img[56..60], 0x100, .little);
+    std.mem.writeInt(u32, img[60..64], 0x400000, .little);
+    std.mem.writeInt(u32, img[68..72], 0x1000, .little);
+    std.mem.writeInt(u32, img[72..76], 0x1000, .little);
+    std.mem.writeInt(u32, img[76..80], 5, .little); // R+X
+    // phdr 1 @84: rodata R, file 0x2000, vaddr 0x402000, filesz 3 MiB
+    std.mem.writeInt(u32, img[84..88], pt_load, .little);
+    std.mem.writeInt(u32, img[88..92], 0x2000, .little);
+    std.mem.writeInt(u32, img[92..96], 0x402000, .little);
+    std.mem.writeInt(u32, img[100..104], 0x300000, .little);
+    std.mem.writeInt(u32, img[104..108], 0x300000, .little);
+    std.mem.writeInt(u32, img[108..112], 4, .little); // R
+    // phdr 2 @116: data RW, file 0x302000, vaddr 0x702000, bss tail
+    std.mem.writeInt(u32, img[116..120], pt_load, .little);
+    std.mem.writeInt(u32, img[120..124], 0x302000, .little);
+    std.mem.writeInt(u32, img[124..128], 0x702000, .little);
+    std.mem.writeInt(u32, img[132..136], 0x1000, .little);
+    std.mem.writeInt(u32, img[136..140], 0x2000, .little);
+    std.mem.writeInt(u32, img[140..144], 6, .little); // RW
+
+    const file_size: u64 = 0x303000; // 3 MiB + 12 KiB
+
+    // The STAGED parse cannot validate this image: the payload is not in
+    // the buffer, so the file-range check fires (`file_too_short` — from
+    // a streamed caller's point of view the buffer simply is not the file).
+    // That is the bound K1 removes, and pinning it here keeps the two
+    // contracts distinct.
+    try testing.expectError(error.file_too_short, parse(&img));
+
+    // ...while the streamed parse accepts it and reports FILE offsets for
+    // the caller to stream from.
+    const image = try parse_head(&img, file_size, text_base);
+    try testing.expect(image.gap_layout);
+    try testing.expectEqual(@as(usize, 3), image.segment_count);
+    try testing.expectEqual(@as(usize, 0x2000), image.segments[1].file_offset);
+    try testing.expectEqual(@as(usize, 0x300000), image.segments[1].file_size);
+    try testing.expectEqual(@as(u64, 0x702000), image.segments[2].vaddr);
+
+    // A segment that escapes the FILE is still refused — the bound moved
+    // from "fits the buffer" to "fits the file", it did not disappear.
+    // This is the shape a half-copied image presents, so the refusal has
+    // its own name (`file_too_short` → `image_truncated` at the exec seam).
+    try testing.expectError(error.file_too_short, parse_head(&img, 0x302000, text_base));
+    // A window larger than the file it claims to describe → refused.
+    try testing.expectError(error.truncated, parse_head(&img, img.len - 1, text_base));
+
+    // The total-load bound is the acceptance bound now (`load_max`), and it
+    // is what refuses a payload that is merely too big to MAP even when the
+    // file really does hold it: every FILE range below is valid, so the
+    // refusal can only come from the total-load check.
+    var huge = img;
+    const big: u32 = load_max + 1;
+    std.mem.writeInt(u32, huge[100..104], big, .little); // seg1 filesz
+    std.mem.writeInt(u32, huge[104..108], big, .little); // seg1 memsz
+    std.mem.writeInt(u32, huge[120..124], 0x2000 + big, .little); // seg2 offset (ordered, disjoint)
+    std.mem.writeInt(u32, huge[124..128], 0x2403000, .little); // seg2 vaddr (page-aligned, above seg1)
+    try testing.expectError(error.segment_too_large, parse_head(&huge, 0x2000 + big + 0x1000, text_base));
+
+    // And a 3 MiB image is now accepted where the old 2 MiB bound refused
+    // it — that raise is the card's whole point, so it is pinned:
+    // `mem_total` is what a staged caller still bounds against.
+    const big_img = try parse_head(&img, file_size, text_base);
+    try testing.expectEqual(@as(u64, 0x1000 + 0x300000 + 0x2000), mem_total(big_img));
+    try testing.expect(mem_total(big_img) > 2 * 1024 * 1024);
 }
 
 test "elf: collect_symbols reads a hand-built symtab" {

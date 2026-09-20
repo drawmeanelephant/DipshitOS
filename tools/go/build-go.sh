@@ -73,6 +73,7 @@ for prog in "${@:-$REPO/tools/go/hello.go}"; do
         gonet)      base="GONET" ;;
         govinet)    base="GOVINET" ;;
         govidns)    base="GOVIDNS" ;;
+        gobig)      base="GOBIG" ;;
     esac
     out="$out_dir/${GO_BUILD_NAME:-$base}.ELF"
     # The gap loader gives a program a FIXED text aperture, so image size is
@@ -81,7 +82,11 @@ for prog in "${@:-$REPO/tools/go/hello.go}"; do
     # the text gap. < GO_LDFLAGS_VALUE defaults to the historical "-w".
     strip="-w"
     case "$base" in
-        GONET | GOVINET | GOVIDNS) strip="-s -w" ;;
+        # GOBIG is the M70c-K (#1504) >8 MiB fixture: fully stripped, and
+        # still past the bound on its initialized payload alone (8.0 MiB of
+        # .data), so the "stripped Go ELF" in that card's acceptance is
+        # literal.
+        GONET | GOVINET | GOVIDNS | GOBIG) strip="-s -w" ;;
     esac
     log "building $prog -> $out (ldflags: $strip)"
     GOOS=virelai GOARCH=arm64 go build -o "$out" \
