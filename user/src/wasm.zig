@@ -609,20 +609,29 @@ const Reader = struct {
         }
     }
 
-    /// Signed LEB128 i64 (i32.const reads this then truncates).
+    /// Signed LEB128 i64 (i32.const reads this then truncates). At most 10
+    /// bytes: the 10th byte carries bit 63, so a continuation bit there is
+    /// malformed. (`shift` must be wider than u6: 63 + 7 wraps, which
+    /// panicked safe builds, decoded canonical 10-byte negative constants
+    /// as -64 in release builds, and made the old guard unreachable —
+    /// issue #1519.)
     fn sleb(r: *Reader) ParseError!i64 {
         var result: i64 = 0;
-        var shift: u6 = 0;
+        var shift: usize = 0;
         var b: u8 = 0;
+        var count: u8 = 0;
         while (true) {
-            if (shift >= 64) return error.MalformedLeb;
             b = try r.u8_();
-            result |= @as(i64, @intCast(b & 0x7F)) << shift;
+            result |= @as(i64, @intCast(b & 0x7F)) << @intCast(shift);
+            count += 1;
             shift += 7;
             if (b & 0x80 == 0) break;
+            if (count >= 10) return error.MalformedLeb;
         }
         if (shift < 64 and (b & 0x40) != 0) {
-            result |= -(@as(i64, 1) << @intCast(shift));
+            // -%: at shift 63 the operand is i64 min, whose unary minus
+            // overflows in safe builds (the OR mask is identical).
+            result |= -%(@as(i64, 1) << @intCast(shift));
         }
         return result;
     }
@@ -3486,6 +3495,23 @@ test "parse: rejects bad magic/version" {
 test "parse: rejects truncated and unknown sections" {
     try testing.expectError(error.Truncated, parse("\x00asm\x01\x00\x00\x00\x01\x0A"));
     try testing.expectError(error.UnknownSection, parse("\x00asm\x01\x00\x00\x00\x63\x00"));
+}
+
+test "parse: sleb decodes 10-byte i64s and rejects an 11th byte (#1519)" {
+    // Canonical i64 min: 9 continuation bytes + 0x7f. The old u6 `shift`
+    // wrapped 63 + 7 — safe builds panicked, release builds decoded -64.
+    var min = Reader{ .bytes = "\x80\x80\x80\x80\x80\x80\x80\x80\x80\x7f" };
+    try testing.expectEqual(std.math.minInt(i64), try min.sleb());
+    // A 9-byte negative lands its sign at bit 63: `-(i64 1 << 63)` is unary
+    // minus overflow; -% keeps the OR mask bit-exact.
+    var neg9 = Reader{ .bytes = "\x80\x80\x80\x80\x80\x80\x80\x80\x40" };
+    try testing.expectEqual(@as(i64, -4611686018427387904), try neg9.sleb());
+    // The pinned Elk-style positive 10-byte constant.
+    var big = Reader{ .bytes = "\x80\x80\x80\x80\x80\x80\xc0\xf9\xff\x00" };
+    try testing.expectEqual(@as(i64, 0x7ff3000000000000), try big.sleb());
+    // 11 bytes is over-long for i64; the old guard could never fire.
+    var long = Reader{ .bytes = "\x80\x80\x80\x80\x80\x80\x80\x80\x80\x80\x00" };
+    try testing.expectError(error.MalformedLeb, long.sleb());
 }
 
 test "w4: f64 type section parses + validates (W4 acceptance)" {
