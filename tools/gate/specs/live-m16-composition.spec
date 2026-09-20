@@ -40,7 +40,7 @@ vgate_assert 01 serial-absent '[EXC] parking:'
 vgate_assert 01 serial-contains 'counter: alive'
 vgate_assert 01 serial-contains 'exec: loaded COUNTER.BIN size='
 vgate_assert 01 serial-count 'exec: loaded USER.BIN size=' 7
-vgate_assert 01 serial-contains 'resources: tasks=11/11'
+vgate_assert 01 serial-contains 'resources: tasks=11/16'
 vgate_assert 01 serial-contains 'resources: procs=11/16'
 vgate_assert 01 serial-contains 'resources: tables='
 vgate_assert 01 serial-contains 'procs: id='
@@ -48,13 +48,13 @@ vgate_assert 01 serial-contains 'm16-composition-live-ok'
 vgate_assert 01 python <<'PY'
 import os, re, sys
 ser = open(os.environ["VG_SER"]).read()
-if not re.search(r'procs:\s+id=\d+\s+name=GLOBALS\.BIN\s+state=exited\s+.*exit=42', ser):
+if not re.search(r'procs:\s+id=\d+\s+name=GLOBALS\.BIN\s+uid=\d+\s+caps=\d+\s+state=exited\s+.*exit=42', ser):
     print("missing GLOBALS.BIN exited status 42", file=sys.stderr); sys.exit(1)
 if not re.search(r'fault:\s+GUARD\.BIN\s+far=0x[0-9a-f]+\s+ec=0x24', ser):
     print("missing GUARD.BIN fault ec=0x24", file=sys.stderr); sys.exit(1)
-if not re.search(r'procs:\s+id=\d+\s+name=GUARD\.BIN\s+state=exited\s+.*exit=139', ser):
+if not re.search(r'procs:\s+id=\d+\s+name=GUARD\.BIN\s+uid=\d+\s+caps=\d+\s+state=exited\s+.*exit=139', ser):
     print("missing GUARD.BIN exited status 139", file=sys.stderr); sys.exit(1)
-rows = re.findall(r'procs:\s+id=\d+\s+name=(?:COUNTER|USER)\.BIN\s+state=running\s+task=(\d+)\s+stack=(0x[0-9a-f]+)', ser)
+rows = re.findall(r'procs:\s+id=\d+\s+name=(?:COUNTER|USER)\.BIN\s+uid=\d+\s+caps=\d+\s+state=running\s+task=(\d+)\s+stack=(0x[0-9a-f]+)', ser)
 if len(rows) != 8:
     print(f"expected 8 running rows, got {len(rows)}", file=sys.stderr); sys.exit(1)
 tasks = set(r[0] for r in rows)
