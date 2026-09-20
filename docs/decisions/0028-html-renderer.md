@@ -60,8 +60,9 @@ Bold, `/host/FIRACODE.TTF` mono, optional `/host/INTERI.TTF` Italic.
 headings when `INTERB.TTF` parsed; the 1-px second strike is dead on that path
 and remains only when Bold is absent. Inter-4.1 extras ships `Inter-Italic.ttf`,
 staged as `/host/INTERI.TTF`; `<em>` selects it (accent colour stays). Zig
-`ui.init_fonts` still loads Regular + mono until #1536 consumes these same
-names. Amendment B records the observed files.
+`ui.init_fonts` and DOC.BIN consume the same four names as of M69d2 (#1536),
+which is also where the 1-px strike became a fallback on that tree. Amendment B
+records the observed files and both trees' measurements.
 
 **D5 — Unknown elements degrade to their text content.** Unsupported tags
 (and malformed markup) are flattened into the enclosing block in document
@@ -226,11 +227,49 @@ stem coverage / ink, not width: Regular M×8 paints 440 ink px, Bold 592, a
 Regular+1px strike 664. `Fonts.BoldHeavier()` and `live-web-ttf` boot 02 pin
 that.
 
+### The Zig consumer (M69d2, #1536)
+
+Same share names, same shape — `ui.init_fonts` loads four faces through one
+helper (`loadFace`) and every face gets its own `GlyphCache`, because the cache
+keys an entry by **codepoint alone** (`font_ttf.zig: ascii_entries`); two faces
+sharing one cache would paint whichever was rendered first. `DOC.BIN` paints a
+bold run with Inter Bold and an `<em>` run with Inter Italic (the accent colour
+stays, and Bold still wins where both apply — there is no Bold-Italic face, the
+same rule Go WEB uses). The 1-px second strike survives only as the fallback for
+a missing Bold face, which is what `typography: Inter Italic absent, em keeps
+accent` reports for Italic.
+
+Measured in-guest by that app's own probe (`typography: ink`, painted pixels at
+the painter's 96/255 coverage cut; `diff` = pixels where the Bold mask disagrees
+with the strike that doubles Regular), `live-doc` runs 01 vs 04:
+
+| size | Regular | Bold (real) | 1-px strike | Bold vs strike (`diff`) |
+|---|---|---|---|---|
+| 14 px (body) | 21 | 38 | 36 | 2 |
+| 24 px (heading) | 64 | 111 | 89 | 26 |
+| 14 px, `INTERB.TTF` removed | 21 | 36 (=strike) | 36 | 0 |
+
+Two things this records that the Go row's numbers do not say:
+
+- The metric differs: Go's row counts ink on a RENDERED surface at body size
+  (440/592/664 for `M`×8), while the Zig probe counts mask pixels at the
+  painter's own cut. At the same nominal body size, Zig measures the real Bold
+  face as **heavier** than the strike (38 vs 36), the opposite relation to the
+  Go row — which is why `live-doc` asserts `bold > regular` at body size and
+  `bold > strike` at 24 px, rather than the one direction that happened to hold
+  on the other tree.
+- At 14 px the real face and the synthetic strike are within **2 px** of each
+  other, so the old behaviour was nearly invisible at body size and only became
+  a design question at heading sizes. Card D2 (a missing Bold face is a failed
+  card, not a silent fallback) is what keeps the difference honest.
+
 ### What this does not change
 
 - No font system, no variable axes, no user-installable faces, no new syscall
   (card D3).
-- Zig `ui.init_fonts` / DOC.BIN is **#1536** (waits on these share names).
+- No cache redesign: `GlyphCache` still keys by codepoint alone, so one cache
+  still serves one size. DOC's probe therefore rasterizes each measured size
+  into a local cache rather than reading the size through the app's own.
 - `<em>` keeps the accent colour; the Italic face supplies the slant.
 - Bitmap 8×8 fallback still synthesizes bold with a 1-px strike, because that
   face has no Bold counterpart. The TrueType path does not.
