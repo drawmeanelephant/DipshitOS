@@ -1,7 +1,9 @@
 # live-kill.spec -- the kernel owns process lifetime: the
 # never-exiting COUNTER.BIN is force-terminated (status 137), its
-# markers stop at the kill line, 17 pages return, and a re-exec lands
-# in the freed slot. No --script-expect (the full window must elapse).
+# markers stop at the kill line, 97 pages return (1 text + 48 user-stack
+# + 48 kernel-stack at the 192 KiB task_stack_size from #1336), and a
+# re-exec lands in the freed slot. No --script-expect (the full window
+# must elapse).
 # Mirrors tools/verify-live-kill.sh (claim 7786, card 3c).
 
 vgate_name live-kill "kill COUNTER.BIN: status 137, page recovery, slot reuse on VZ"
@@ -64,7 +66,8 @@ if before < 1 or after != 0:
 # Legacy -qE: the exited/reaped registry row with the real status.
 if not re.search(r"name=COUNTER.BIN uid=\d+ caps=\d+ state=exited task=reaped .*exit=137", ser):
     sys.exit("FAIL: no COUNTER.BIN exited/reaped row")
-# Page recovery: phase-3 free = phase-1 free + 17 (M25 stack size).
+# Page recovery: phase-3 free = phase-1 free + 97 (1 text + 48 user
+# stack + 48 kernel stack at the 192 KiB task_stack_size from #1336).
 frees = []
 for l in lines:
     if "pages: armed=1 total=" in l:
@@ -73,7 +76,7 @@ for l in lines:
             frees.append(int(m.group(1), 16))
 if len(frees) < 2:
     sys.exit("FAIL: fewer than 2 pages reads")
-if frees[1] != frees[0] + 17:
+if frees[1] != frees[0] + 97:
     sys.exit("FAIL: page recovery off first=%d second=%d" % (frees[0], frees[1]))
 # Slot reuse: the phase-1 counter task id = the phase-3 USER.BIN id.
 def tid(name):
