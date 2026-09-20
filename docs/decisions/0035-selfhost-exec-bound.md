@@ -355,9 +355,10 @@ Consequences, stated as constraints rather than guesses:
 
 - **The recipe's apertures, not the port, are now the gate**, filed as **#1540**
   (M70c-S1L). Widening them (explicit link bases) or making the break's base
-  page-safe relative to the loader's aperture end is that card's work; until then
-  no in-guest fixture that imports `os` can pass, which is why `go-hello` has no
-  std-fixture run.
+  page-safe relative to the loader's aperture end is that card's work. Until it
+  lands, no in-guest fixture that imports `os` can pass, which is why
+  `go-hello` had no std-fixture run at this point — **amendment 4 has both the
+  resolution and the correction to the diagnosis below**.
 - **`cmd/compile` is ~40x past the text window** (448 KiB here vs 27 MB of
   host `cmd/compile`), so this wall has to come down for S1/S2 regardless of
   which std packages they link.
@@ -404,21 +405,135 @@ fixture that counts a chunk without folding it fails the hash half with the
 byte/call line still exact; one that stops 1 MiB short fails the byte/call
 half — with runs 01–03 green in both cases.
 
+## Amendment 4 — M70c-S1L (#1540): the std fixture RUNS, and the wall was neither the port nor the linker
+
+Observed on VZ, `go-hello` **run 05** (class B, `tools/go/gosyscall.go`):
+
+```
+exec: loaded GOSYSCALL.ELF size=0x98644 entry=0x807e0 datapages=51
+gosyscall: os mkdir ok
+gosyscall: os write PAYLOAD.TXT bytes 32
+gosyscall: os write SECOND.TXT bytes 24
+gosyscall: os readback PAYLOAD.TXT ok bytes 32
+gosyscall: read 2048
+gosyscall: second read 1 byte 0
+gosyscall: stat size 9502880 isdir false
+gosyscall: fstat size 9502880
+gosyscall: raw dirent bytes 80
+gosyscall: absent no such file or directory
+gosyscall: os bytes 9502880 hash 0x7eb82998
+gosyscall: os stat size 9502880 isdir false
+gosyscall: os stat PAYLOAD.TXT size 32 isdir false
+gosyscall: os dir entries 2 files 2 dirs 0
+gosyscall: os remove ok 2
+gosyscall: os dir entries 0 files 0 dirs 0
+gosyscall: GOSYSCALL OK
+```
+
+`0x7eb82998` is the host's own FNV-1a 32 of the staged 9.5 MiB image,
+recomputed off the share (the 64-bit sum in run 04 is a different fold of the
+same file). The host also checks from its side that the guest's `os.Mkdir`
+landed in the share and that the two `os.Remove` calls really took the files
+away. So "the standard library drives this kernel" is now observed bytes, not a
+compile exit code. Negative controls, each run before landing: with the runtime
+floor below removed the run dies in `mallocinit` with `cannot allocate memory`
+(runs 01–04 still pass); with one byte dropped from the guest's fold the host's
+hash assert fails while every other line still matches.
+
+### What the wall actually was (amendment 3 was one step off)
+
+Amendment 3 read the `mallocinit` death as "the shifted layout puts the sbrk base
+inside the loaded data aperture". The aperture half is right; **the segment shift
+is a coincidence, not the cause.** The two rules that collide are:
+
+- the kernel reserves the writable segment's extra tail page for the packed
+  argv+envp block and protects the data aperture *through that block*: the
+  collision span is `max(pageRound(mem_size), align8(mem_size) + 2304)`
+  (`process.zig mmap_collides`; `exec.zig` packs 8×32 + 16×128 = 2304 B there);
+- the runtime starts its heap at `memRound(firstmoduledata.end)`, i.e. at
+  `round_up(mem_size)` — which is INSIDE that span whenever the block reaches
+  past the page-rounded image end: `mem_size mod 4096 > 4096 − 2304 = 1792`.
+
+Runs 01–04 pass because their data segments leave `r = 688` and `r = 1072` of
+slack; the std fixture has `r = 3280`. Measured across every `GOOS=virelai`
+image built in this worktree, GOSYSCALL is the **only** one on the wrong side of
+that boundary — every other has `r ≤ 1520`.
+
+None of this was unknown: `user/go/sh/main.go` and `user/go/sshd/main.go` each
+carry an `argvEnvpGuard` padding array for exactly this refusal ("adjust this
+array's size when it trips"), and `tools/go/build-gosh.sh` asserts the same
+boundary from the linked ELF (`slack ≥ 0x908`). So the mechanism was understood
+and worked around **per program, by hand**. What #1540 changes is who owns the
+rule: the runtime, once, instead of every new std program having to discover the
+boundary and pad its bss to sit on the right side of it. The pads and that
+assert stay — harmless, and they name the invariant if it ever regresses — but
+they are no longer what keeps a Go program alive. That is the difference between
+a 1792/4096 coin flip and a rule.
+
+### The fix, on the runtime side
+
+`initBlocFloor` (`overlay/runtime/os_virelai.go`) starts the break on the page
+after the block the kernel packed, using the block VA the rt0 stub records
+before it converts that block to rt0_go's SysV array. Raising the floor only
+ever skips the block's own page — the only thing living there — so an image
+whose slack already clears the block is byte-for-byte unchanged, which is why
+runs 01–04 stayed green.
+
+**Widening the recipe was not needed**, and that is a finding: the loader maps
+each segment at its declared vaddr (#1504), so a shifted image is legal — only
+the break base was unguarded. Explicit link bases remain useful for the S1/S2
+40× text gap (`cmd/compile` vs the 448 KiB window) and are that card's business,
+not this one's.
+
+### Two port bugs the fixture caught that no earlier gate could
+
+Amendment 3's own warning — "`go build fmt` is a compile-time claim" — came true
+twice, and both bugs were in the **port**, not the kernel:
+
+1. **The POSIX→kernel open-flag translation was wrong.** `kernelOpenFlags`
+   passed the POSIX word through: a read-only open sends `O_RDONLY = 0`, which
+   `file_table.open` refuses (`flags == 0`, and `MODE_READ` is `0x1`), while
+   `O_CREAT = 0x40` is not a MODE bit at all. The port now keeps a separate
+   MODE_* word (`kmodeRead`/`kmodeWrite`/`kmodeCreate`/`kmodeAppend`/`kmodeDir`)
+   and translates; it failed closed with EINVAL, which is why it was visible
+   immediately.
+2. **`O_TRUNC` was implemented by calling the port's by-path `Truncate`, which
+   is an honest `ENOSYS`** (slot 36 is handle-addressed) — so every
+   `os.WriteFile` failed with ENOSYS. The kernel's write-open already truncates
+   (replace semantics), so the call was both broken and unnecessary; removed,
+   with the reason at the site.
+
+Both survived #1525's review as "the thing to press on" and both are precisely
+what the missing in-guest run would have caught — the case for run 05 existing.
+
+### A found limit, named rather than papered over
+
+`Stat` has no slot: the port answers from a row on the entry's PARENT. That
+listing has **no cursor and the kernel clamps one call to 16 rows**, and this
+gate's share (the seeded app bundle) holds ~30 entries — so
+`os.Stat("/host/GOBIG.ELF")` returned ENOENT for a file that was right there.
+The port now falls back to what the ABI can still say: listing the path itself
+proves a directory, otherwise it opens the file and reads to EOF to learn its
+size. Correct, and **O(size)** — stated in the port and here rather than hidden
+(a `stat` verb, or a listing cursor, is a kernel-surface card, not this one).
+
 ### Still unmeasured, and why
 
 **`compile`+`link` peak RSS in-guest** — unchanged from K3, and unmeasurable for
-the same reason: it needs the toolchain to run in-guest, i.e. #1525 first. It
-remains an acceptance criterion on #1455; the host-side figures in the table
-above are still the best available upper bound. **Transfer throughput is no
-longer unmeasured.**
+the same reason: it needs the toolchain to run in-guest, which needs S1/S2 to be
+possible at all. It remains an acceptance criterion on #1455; the host-side
+figures in the table above are still the best available upper bound. **Transfer
+throughput is no longer unmeasured**, and the std layer is now *executed*, not
+merely compiled.
 
 ### Card split, as it now stands
 
 | piece | card | state |
 | --- | --- | --- |
 | streamed exec + per-process text aperture + the RAM floor | #1504 (M70c-K) | **landed** (PR #1523, `1e757d15`) |
-| the `GOOS=virelai` `syscall`/`os` port | **#1525** (M70c-S1P) | **filed, unclaimed — the blocker** |
-| S1/S2 (toolchain in-guest, in-guest build loop) | #1455 | blocked on #1525; the transfer half measured (run 04) |
+| the `GOOS=virelai` `syscall`/`os` port | **#1525** (M70c-S1P) | **landed** (PR #1541) |
+| the std fixture runs (`go-hello` run 05) | **#1540** (M70c-S1L) | **landed** (this amendment) |
+| S1/S2 (toolchain in-guest, in-guest build loop) | #1455 | unblocked in principle: the std layer builds AND executes; the 40× text gap is the remaining structural work |
 | S3 (Zig dialect capstone) | #1455, riding `live-zc` | **landed** (PR #1511) |
 | multi-MB durable staging | #1434 (M66) | cards landed; index issue open |
 
@@ -437,20 +552,37 @@ grep -n -A4 'FIXED text aperture' tools/go/build-go.sh  # the 448 KiB recipe win
 size -m "$(go env GOROOT)/pkg/tool/$(go env GOOS)_$(go env GOARCH)/compile"
 cp "$(go env GOROOT)/pkg/tool/darwin_arm64/compile" /tmp/c && strip -x /tmp/c && ls -l /tmp/c
 
-# the exact GOOS=virelai figures (opt-in cross-std pass). Amendment 2: this
-# FAILS today — the fork has no virelai syscall/os at all, so it is the step
-# that stays an inference until #1525 lands.
+# the exact GOOS=virelai figures (opt-in cross-std pass). Since #1525 the port
+# exists and std closes except `net`/`net/internal/socktest` (no socket slots)
+# and `internal/testenv` (test support wants a per-GOOS Sigquit) — run
+# `GOOS=virelai go build std` to see the current list rather than trusting this
+# comment.
 GOVIRELAI_STD=1 bash tools/go/build-go.sh
 cd "${GO_FORK_DIR:-../go-virelai}/src" && GOOS=virelai GOARCH=arm64 go build \
     -ldflags "-s -w" -o /tmp/compile-virelai cmd/compile && ls -l /tmp/compile-virelai
 
-# the port-layer gap, one package in
+# the port layer, one package in (amendment 3+
+# `apply.sh` installs it; both of these are rc=0 since #1525)
 export GOROOT="${GO_FORK_DIR:-../go-virelai}"; export PATH="$GOROOT/bin:$PATH"
-GOOS=virelai GOARCH=arm64 GOTOOLCHAIN=local go build -o /dev/null fmt   # rc!=0 today
-GOOS=virelai GOARCH=arm64 GOTOOLCHAIN=local go build -o /dev/null os    # same
+GOOS=virelai GOARCH=arm64 GOTOOLCHAIN=local go build -o /dev/null fmt
+GOOS=virelai GOARCH=arm64 GOTOOLCHAIN=local go build -o /dev/null os
+
+# the aperture arithmetic amendment 4 is about, per built image: the data
+# segment's page slack (r <= 1792 clears the kernel's argv+envp block, and the
+# runtime walks past it either way since #1540)
+python3 - .build/go/GOSYSCALL.ELF <<'EOF'
+import struct, sys
+d = open(sys.argv[1], "rb").read()
+phoff, phes, phnum = struct.unpack_from("<Q", d, 32)[0], struct.unpack_from("<H", d, 54)[0], struct.unpack_from("<H", d, 56)[0]
+segs = [struct.unpack_from("<IIQQQQQQ", d, phoff + i * phes)[4:7] for i in range(phnum)]
+last = [s for s in segs if struct.unpack_from("<I", d, phoff + segs.index(s) * phes)[0] == 1][-1]
+print("data va=%#x mem_size=%#x slack=%d" % (last[0], last[1], last[1] % 4096))
+EOF
 
 # the transfer numbers (class B; run 04 of go-hello asserts the byte count,
-# the call arithmetic and the hash, and prints the rate)
+# the call arithmetic and the hash, and prints the rate) and the std layer's
+# run (run 05: the host recomputes the 32-bit hash and checks the share)
 just gate go-hello
 grep -a 'goread:' artifacts/go-hello-serial-04.log
+grep -a 'gosyscall:' artifacts/go-hello-serial-05.log
 ```
