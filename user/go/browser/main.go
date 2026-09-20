@@ -266,6 +266,9 @@ func main() {
 	// scanout (it paints the blank desktop only while its strip is empty, and
 	// that fill sits ABOVE user windows). With no seat -- the shell shim, WND
 	// desktop, or no WM at all -- nothing answers and this app is unchanged.
+	// seq 2 is this app's own request id (the ack mirrors it); the browser
+	// sends exactly this one WM request, so it does not join the shared ladder
+	// DeclareFullscreen/DeclareNav/PollNav use.
 	vi.WmMailRequest(vi.WmRpcKindAttachTab, uint32(id), 0, 0, 0, 0, appTitle, appName, 2)
 	// The store inventory is read from disk at boot: it is how the gate sees
 	// that a previous run's rows persisted.
