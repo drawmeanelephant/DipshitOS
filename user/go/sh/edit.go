@@ -27,8 +27,10 @@ const maxLineBytes = 2048
 // being allowed to grow without limit.
 const maxSearchQuery = 64
 
-// History is the session line ring: dup-collapsed, bounded, in-memory only
-// (the monitor's HISTORY.TXT persistence is deliberately out of scope).
+// History is the recall ring: dup-collapsed, bounded to historyMax, and
+// persisted across boots through the share (M69f1 / #1537, History.Load).
+// The monitor's HISTORY.TXT is a different file with a different owner; it
+// is never read or written from here.
 type History struct {
 	entries []string
 }
@@ -52,6 +54,29 @@ func (h *History) Entries() []string {
 	out := make([]string, len(h.entries))
 	copy(out, h.entries)
 	return out
+}
+
+// Load seeds the ring from a persisted history file (M69f1 / #1537): UTF-8,
+// LF, one command per line, oldest first -- the shape saveHistory writes.
+// Two deliberate tolerances:
+//
+//   - a truncated last line (no trailing LF, which is what a half-finished
+//     append looks like on the share) is SKIPPED rather than costing the
+//     whole file, so a single bad append cannot silently erase recall;
+//   - each line goes through Push, so an empty or consecutively-duplicated
+//     entry is dropped by exactly the rule the live session uses.
+func (h *History) Load(data []byte) {
+	text := strings.ReplaceAll(string(data), "\r\n", "\n")
+	if !strings.HasSuffix(text, "\n") {
+		i := strings.LastIndexByte(text, '\n')
+		if i < 0 {
+			return // only a partial line: nothing recoverable
+		}
+		text = text[:i+1]
+	}
+	for _, ln := range strings.Split(strings.TrimSuffix(text, "\n"), "\n") {
+		h.Push(strings.TrimRight(ln, "\r"))
+	}
 }
 
 // evKind is what one Feed produced.
