@@ -23,19 +23,17 @@
 // is not a linker. This pad restores the invariant the same way user/go/sh's
 // argvEnvpGuard does (that variable's comment is the long-form of this one).
 //
-// cmd/compile does NOT carry a pad: its writable memsz is 0x298668, slack
-// 0x998 (2456) >= 0x908. That margin is only 144 bytes, so the toolchain
-// build recipe ASSERTS the invariant for both images rather than trusting
-// this comment — if a future change trips it, the build says so by name
-// instead of the guest dying mysteriously in mallocinit.
-//
-// The size is chosen against the measured slack, not guessed: 848 + 0x9b0
-// lands the segment's remainder at 0x660, i.e. 2464 bytes of slack, which
-// clears 0x908 with room to spare. If the toolchain recipe's assert ever
-// trips, this is the array to resize.
+// The size is chosen against MEASURED slack, not guessed, and re-measured
+// after every change that moves bss: slack(-pad) = 0x790, so a pad of
+// 0x11b0 lands the segment's remainder at 0xFF0, clearing 0x908 with 1768
+// bytes to spare. cmd/compile carries the same guard in its own overlay file
+// with its own measured size. The toolchain recipe (tools/go/build-gotool.sh)
+// ASSERTS the invariant for both images rather than trusting this comment —
+// if a future change trips it, the build says so by name instead of the
+// guest dying mysteriously in mallocinit. This array is what to resize.
 package main
 
-var argvEnvpGuard [0x9b0]byte
+var argvEnvpGuard [0x11b0]byte
 
 func init() {
 	// A store with a runtime-computed value keeps the pad in the bss: the
