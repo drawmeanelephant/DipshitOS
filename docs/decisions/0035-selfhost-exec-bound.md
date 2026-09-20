@@ -494,8 +494,9 @@ twice, and both bugs were in the **port**, not the kernel:
    passed the POSIX word through: a read-only open sends `O_RDONLY = 0`, which
    `file_table.open` refuses (`flags == 0`, and `MODE_READ` is `0x1`), while
    `O_CREAT = 0x40` is not a MODE bit at all. The port now keeps a separate
-   MODE_* word (`kRead/kWrite/kCreate/kAppend/kDir`) and translates; it failed
-   closed with EINVAL, which is why it was visible immediately.
+   MODE_* word (`kmodeRead`/`kmodeWrite`/`kmodeCreate`/`kmodeAppend`/`kmodeDir`)
+   and translates; it failed closed with EINVAL, which is why it was visible
+   immediately.
 2. **`O_TRUNC` was implemented by calling the port's by-path `Truncate`, which
    is an honest `ENOSYS`** (slot 36 is handle-addressed) — so every
    `os.WriteFile` failed with ENOSYS. The kernel's write-open already truncates
