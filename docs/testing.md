@@ -466,11 +466,106 @@ order is the beat order:
   the pinned fixture `user/go/browser/testdata/gate-page.html`, staged as
   `/host/DOGFOOD.HTML` — no new fixture.
 
-**M69b (screenshots) subscribes to the same markers:** hang
-`--screenshot-after` on `dogfood: note` (boot 01: shell + editor on the seat)
-and on `dogfood: page` (boot 02: calculator + a rendered page); `dogfood: ok`
-marks the boot's hosted phase finished, i.e. after the seat's close
-choreography.
+M69a's own header used to promise that M69b would hang `--screenshot-after`
+*on* these markers. M69b measured that and it is wrong — see the next section.
+
+## Screenshot corpus (M69b, issue #1529)
+
+The images the site embeds are captures of **this repository's own boot**,
+produced by the runner's framebuffer path — no phone camera, no stock art. The
+pinned corpus is `site/index.assets/`: `screenshot.png` (the hero), `gosh.png`,
+`note.png`, `gocalc.png`, `web.png`, each 2560x1440 (the 1280x720 scanout at
+2x) and each one boot of the default Go seat.
+
+**What the capture waits on, and why it is not the app's paint marker.**
+`--screenshot-after <marker>` fires once, on the first serial text containing
+`<marker>`, into `<--screen base>-after`. Capturing on the app's *own* marker
+(`gosh: prompt`, `note: settled`, `gocalc: present`, `dogfood: page`) yields a
+**pre-relayout** frame — measured 2026-09-20: the seat opens the tab, resizes
+the client's view, and the client repaints a moment later (`note: resize
+relayout`), so the early frame is window chrome over a black surface; and
+before the seat's desktop fill lands, what is on the scanout is still kernel
+console text. So the capture marker is a script echo the runner types N
+seconds *after* the guest's marker (`--scriptN-delay`): still a serial marker
+(deterministic, not a wall-clock frame pick), just late enough to be the
+finished frame.
+
+| capture | release marker (guest-owned) | capture marker | settle |
+|---------|------------------------------|----------------|--------|
+| `screenshot.png` (hero) | `note: settled`, GOSH already up | `shot-desktop` | 8 s |
+| `gosh.png` | `gosh: prompt` | `shot-gosh` | 8 s |
+| `note.png` | `note: settled` | `shot-note` | 8 s |
+| `gocalc.png` | `gocalc: present` | `shot-gocalc` | 8 s |
+| `web.png` | `dogfood: page` | `shot-web` | 8 s |
+
+**Reproducing one of them** (web — the other four differ only in the exec line,
+the release marker and the names). Every flag is a pre-existing runner flag;
+M69b added no capture machinery, and no spec:
+
+```bash
+zig build && zig build image
+swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE
+codesign --force --sign - --entitlements host/vm-runner/entitlements.plist \
+    host/vm-runner/.build/release/VMRunner
+bash tools/go/build-gotabwm.sh && bash tools/go/build-gosh.sh \
+  && bash tools/go/build-note.sh && bash tools/go/build-gocalc.sh \
+  && bash tools/go/build-web.sh browser WEB
+
+# the share: gate_seed_share's ingredients (tools/lib/gate-run.sh step 1-5)
+SHARE=/tmp/m69b-share; rm -rf "$SHARE"; mkdir -p "$SHARE"
+cp -R zig-out/bin/. "$SHARE/"
+cp .build/go/{GOTABWM,GOSH,NOTE,GOCALC,WEB}.ELF "$SHARE/"
+cp user/go/browser/testdata/gate-page.html "$SHARE/DOGFOOD.HTML"
+cp image/apps.txt "$SHARE/APPS.TXT"; cp image/WALLPAPER.QOI "$SHARE/"
+# the M69d faces: without them the seat's chrome has no UI font to render with
+cp image/fonts/Inter-Regular.ttf "$SHARE/INTER.TTF"
+cp image/fonts/Inter-Bold.ttf "$SHARE/INTERB.TTF"
+cp image/fonts/Inter-Italic.ttf "$SHARE/INTERI.TTF"
+cp image/fonts/FiraCode-Regular.ttf "$SHARE/FIRACODE.TTF"
+
+printf 'set GOMAXPROCS=1\nexec WEB.ELF /host/DOGFOOD.HTML\n' > /tmp/m69b-1.txt
+printf 'echo shot-web\n' > /tmp/m69b-2.txt
+printf 'echo shot-web-done\n' > /tmp/m69b-3.txt
+
+rm -f /tmp/m69b-vars.bin   # REMOVE, never truncate: an empty store is EINVAL
+date -u '+captured %Y-%m-%dT%H:%M:%SZ; revision'
+git rev-parse HEAD
+host/vm-runner/.build/release/VMRunner \
+    --overlay-base artifacts/disk.img --vars /tmp/m69b-vars.bin \
+    --cvc-file "$SHARE" --serial /tmp/m69b-web.serial.log \
+    --screen /tmp/m69b-web --screenshot-after shot-web \
+    --script /tmp/m69b-1.txt  --script-after  'dogfood: seat' \
+    --script2 /tmp/m69b-2.txt --script2-after 'dogfood: page' --script2-delay 8 \
+    --script3 /tmp/m69b-3.txt --script3-after 'shot-web' \
+    --script-expect shot-web-done --timeout 90
+mv /tmp/m69b-web-after site/index.assets/web.png
+```
+
+Details that cost time to learn, all observed here:
+
+- The capture is written to `<--screen base>-after` — the marker label is
+always `after`, so the file is renamed per boot. `--screenshot-after` fails
+closed without `--screen`.
+- `--script-expect` is checked *before* `--screenshot-after` in the same poll
+tick, so the capture token and the expect token must differ (`shot-web` vs
+`shot-web-done`) — one token doing both ends the run before the capture.
+- The runner prints which route produced the PNG:
+  `capture path: ScreenCaptureKit (composited window, WxH px)` or
+  `capture path: cacheDisplay fallback`. This host has no Screen Recording TCC
+grant (`SCShareableContent failed: … code=-3801`), so the committed corpus is
+the **cacheDisplay** render — the same guest framebuffer, same 2560x1440.
+- The guest's serial log is evidence, not a fixture: it is saved under the
+gitignored `artifacts/`, and the capture is greppable to its marker there
+  (`shot-web` appears in the log, and each file's release marker preceding it).
+
+**Two things the corpus shows that no gate asserts** (both reported on #1529 as
+observed, neither diagnosed there): `gosh.png` is the *empty* tab — GOTABWM
+opens and presents it (`gotabwm: tab open id=3`, `host view id=3`, one
+`present`) while GOSH's own `gosh: prompt` is green, and the surface holds no
+pixels; and kernel console text (`ks worker advances=…`) is on the scanout
+wherever no window covers it, growing with how long the boot has run (~2.8% of
+sampled pixels at 3 s, ~5.8% at 20 s in the web boot; none in the hero boot).
+The M69a beat asserts serial markers, so neither is visible to it.
 
 ## Verification sequence
 

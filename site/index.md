@@ -22,7 +22,11 @@ see [[evidence]].
 
 ## Current status
 
-Every milestone through **thirty-one** has landed and closed:
+Every milestone through **M70** has landed and closed (2026-09-20). The table
+below is the first thirty-one — the arc this site grew alongside; the
+always-current accounting for everything since is
+[`docs/status.md`](https://github.com/drawmeanelephant/DipshitOS/blob/main/docs/status.md)
+and [[roadmap]]:
 
 | Milestone | What it is | Status |
 |-----------|-----------|--------|
@@ -58,12 +62,15 @@ Every milestone through **thirty-one** has landed and closed:
 | Dynamic linking | Freestanding `LD.SO` + `LIBUI.SO`/`LIBFONT.SO`, W^X multi-aperture isolation (M30) | Done |
 | Dyn-linking ecosystem | `CALC.ELF`/`NOTEPAD.ELF`/`FILE.ELF`/`DESKTOP.ELF`, runtime `dlopen`/`dlsym` (M31) | Done |
 
-The full, always-current accounting lives in the repository's
-[`docs/status.md`](https://github.com/drawmeanelephant/DipshitOS/blob/main/docs/status.md).
-
-Every GitHub milestone is closed and the issue tracker is at **zero open
-issues** (2026-08-28) — the project sits between milestones, with no M32
-defined yet.
+**The boot default is the Go seat.** A single boot autostarts `GOTABWM.ELF`,
+which hosts Go EL0 clients — the shell `GOSH.ELF`, the editor `NOTE.ELF`, the
+calculator `GOCALC.ELF`, the browser `WEB.ELF` — as tabs over the `WM_RPC`
+contract; Zig `TABWM.BIN` is retained by decision (ADR 0034) as the
+`settings set wm tabwm` fallback. The tracker is **open and active** — the
+daily-driver floor (M69) and the moonshot arcs (M70) are in flight (the Go
+toolchain now builds and runs programs in-guest, `live-selfhost-go`) — so read
+[`docs/status.md`](https://github.com/drawmeanelephant/DipshitOS/blob/main/docs/status.md)
+for what is landed today instead of a date-stamped claim from this page.
 
 <Aside kind="info">
 
@@ -112,11 +119,27 @@ A single boot of VirelaiOS gets you, in order:
 - Sound: a virtio-snd device, PCM playback from EL0, a boot chime, and a
   melody app that plays Twinkle Twinkle Little Star.
 
-![A live VirelaiOS boot: the Road Pops terminal showing the boot banner and an echoed session, with the Driving Award clock overlay in the top-right corner](index.assets/screenshot.png "A live VirelaiOS boot")
+![A live VirelaiOS boot: the Go seat GOTABWM with its tab strip across the top and the Go editor NOTE.ELF hosting a document in the tab below](index.assets/screenshot.png "A live VirelaiOS boot")
 
-*A live boot captured by the ScreenCaptureKit evidence path: Road Pops renders
-real echoed commands on screen while the Driving Award clock overlay composites
-in the top-right corner.*
+*A live boot, captured by the runner's own framebuffer path — one boot,
+`--screen` + `--screenshot-after` waiting on a guest marker, 2560x1440 (the
+1280x720 scanout at 2x). The default **Go seat** `GOTABWM.ELF` is hosting the
+Go editor `NOTE.ELF`, which loaded `/host/notes.txt` out of the host share. No
+phone camera and no stock art; `docs/testing.md` has the recipe.*
+
+| | |
+|---|---|
+| ![GOSH on the Go seat](index.assets/gosh.png) | ![NOTE on the Go seat](index.assets/note.png) |
+| ![GOCALC on the Go seat](index.assets/gocalc.png) | ![WEB rendering a page in-guest](index.assets/web.png) |
+
+*The rest of the corpus, captured through the same path, one boot each: the
+shell `GOSH.ELF`, the editor, the calculator, and the browser rendering a page
+in-guest. Two things the pixels show that no gate asserts — `GOSH.ELF`'s tab
+holds no pixels even though the shell's own markers are green (observed on
+[#1529](https://github.com/drawmeanelephant/DipshitOS/issues/1529), not yet
+diagnosed), and kernel console text is on the scanout wherever no window
+covers it. Regenerate them with `docs/testing.md`; the PNGs are the pinned
+fixtures, the serial logs are not committed.*
 
 ## What it runs on
 
