@@ -105,11 +105,17 @@ func sendtoInet6(fd int, p []byte, flags int, to *SockaddrInet6) (err error) {
 	return ENOSYS
 }
 
-// Pread/Pwrite would need a seek slot to address an offset; the kernel's file
-// channel is cursor-based (sequential, and its cursor is the kernel's own),
-// so an offset read is refused rather than silently turned into a sequential
-// one — that mistake returns the WRONG BYTES instead of an error.
-func Pread(fd int, p []byte, offset int64) (n int, err error)  { return 0, ENOSYS }
+// Pread lives in fs_virelai.go: the port answers positional reads from the
+// shadow it keeps for each real handle (M70c-S1T, issue #1543), because the
+// toolchain's readers and writers both need a position and the kernel's file
+// channel is cursor-only.
+//
+// Pwrite stays refused. Staging a positional WRITE would need a handle the
+// port can rewind and rewrite, which only exists for a handle it opened
+// itself for writing; a caller that hands the port an inherited fd and asks
+// for an offset write is refused rather than guessed at. Nothing in the
+// toolchain path does that (cmd/link writes through bio.Writer's Seek, which
+// fs_virelai.go's Seek implements).
 func Pwrite(fd int, p []byte, offset int64) (n int, err error) { return 0, ENOSYS }
 
 // No socket seam exists, so the connection-shaped errors cannot be produced
