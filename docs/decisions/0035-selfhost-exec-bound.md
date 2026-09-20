@@ -9,6 +9,11 @@
   ADR 0030 (Go is EL0), `docs/line-of-sight.md` (the Z0.5–Z4 ladder),
   #1434 (M66 — durable multi-MB staging, still open)
 
+> **Superseded in part by Amendment 2 (below):** the kernel capability this
+> verdict names landed as #1504, and S1/S2 are now blocked on a Go-side port
+> (`syscall`/`os` for `GOOS=virelai`, card #1525). The measurement below —
+> "the verdict does not depend on it" — still stands.
+>
 > **The verdict, up front: M70c's S1/S2 are blocked on a kernel capability,
 > not on the Go side.** The guest stages every program through a fixed 2 MiB
 > whole-file buffer, and the host's own `cmd/compile` carries 20.66 MB of code
@@ -247,6 +252,112 @@ headroom) with the 16 KiB header window in place; the two 2 MiB staging
 arrays stay, because the staged shapes still need them. ADR 0013 D3.1 is
 unchanged.
 
+## Amendment 2 — M70c (#1455): the exec blocker is retired, the port layer is the blocker
+
+#1504 landed (PR #1523, merge `1e757d15`): the gap-layout path streams, its
+acceptance bound is 32 MiB, and a 9.5 MiB `GOOS=virelai` image execs on VZ. The
+"precise blocked step" named in the verdict above — *the guest cannot `exec` a
+program larger than `exec_program_max`* — is **closed**. This amendment records
+the two things the card's S1/S2 still wait on: the step that blocks them now,
+and the transfer measurement the card asked for first and never got.
+
+### The new blocked step: there is no `syscall`/`os` port for `GOOS=virelai`
+
+Observed on the fork (Go 1.27.1, `GOROOT=../go-virelai`):
+
+```
+$ GOOS=virelai GOARCH=arm64 go build -o /dev/null fmt
+# syscall
+../go-virelai/src/syscall/syscall.go:50:15: undefined: EINVAL
+../go-virelai/src/syscall/syscall.go:80:11: undefined: Timespec
+../go-virelai/src/syscall/syscall.go:85:11: undefined: Timeval
+# internal/poll
+../go-virelai/src/internal/poll/fd_mutex.go:212:11: undefined: FD
+```
+
+`fmt` is the smallest interesting target; `os`, `path/filepath`, `go/ast` and
+every `cmd/*` package sit behind the same two. The fork's virelai-tagged files
+are **runtime only** — `runtime/{os,signal,netpoll}_virelai.go`,
+`runtime/{sys,rt0}_virelai_arm64.s`, `internal/goos/zgoos_virelai.go`, plus the
+`mem_sbrk`/`lock_sema`/`stubs*` tag lists — and `src/syscall`/`src/os` carry
+nothing for this GOOS. Three consequences, and the first two are sharper than
+the original verdict:
+
+- **`GOVIRELAI_STD=1` cannot build.** S1's "cross-std on by default" half is
+  not a flag flip: a full `GOOS=virelai make.bash` starts by compiling
+  `syscall` for a GOOS with no `syscall` type/const surface. The re-measure
+  command in the section below (`GOVIRELAI_STD=1 bash tools/go/build-go.sh`)
+  fails one package in.
+- **No toolchain binary for `GOOS=virelai` can be produced today at all** —
+  not "it builds but cannot run", which is what the original verdict
+  described. So the `cmd/compile`-size row above stays an **inference** (a
+  GOOS swap exchanges the runtime/OS layer, a small fraction of the binary),
+  and the size gate S1 needs cannot be closed by building it.
+- **The fix is a port, not a knob.** `build-go.sh` already names its shape
+  ("the syscall/os port layer (the wasip1 mirror)"):
+  `syscall/syscall_wasip1.go`, `fs_wasip1.go`, `net_wasip1.go`,
+  `internal/poll/fd_wasip1.go` and the `os` glue — hand-written file-ABI
+  plumbing, which here means ADR 0010's file surface over the ADR 0007 slots
+  the kernel already serves. Filed as its own card, **#1525** (M70c-S1P);
+  S1/S2 wait on it.
+
+**D4 stands, for a new reason.** The toolchain payload stays host-produced.
+The old reason (the guest's exec seam cannot hold it) is retired; the current
+one is that the guest cannot yet compile the toolchain's own source for itself.
+
+### The transfer half, measured
+
+The card's other half — "measure the honest transfer and `mmap` story" — now
+has both numbers. The `mmap` half is K1's (`datapages=2097` for an 8.4 MiB
+payload, run 02). The transfer half is `go-hello` **run 04**: `GOREAD.ELF`
+reads a 9.5 MiB `GOOS=virelai` image back out of the host share end to end with
+nothing staged in between, and the host recomputes both the byte count and the
+FNV-1a hash of the bytes the guest actually read.
+
+| transfer, observed on VZ (2 vCPU, 256 MiB) | value |
+| --- | --- |
+| EL0 read cap | **2048 B per `sys_file_read`** (`kernel/src/syscall.zig`: `@min(count, 2048)`), against a **32 KiB** wire reply cap (`virtio_file.reply_cap`) — so a payload is served in ~15× more calls than the wire would allow |
+| payload read | **9,502,880 B in 4,641 calls**, largest single call **2048** — exactly `ceil(bytes/2048)`, i.e. every call moved a full chunk (run 2: identical) |
+| elapsed | **298,379 µs** (run 2: **311,010 µs**) |
+| goodput | **31,101 KiB/s** (run 2: 29,838) ≈ **30 MB/s**, **~15,300 calls/s** |
+| per call | **64,292 ns** (run 2: 67,013) — one virtio round trip; the guest-side fold is under 4 % of it |
+| hash | FNV-1a 64 of the bytes READ = the same file hashed on macOS (`0x7085f0327a474278`) |
+
+**What it means for S1/S2 — arithmetic, labelled as extrapolation:** a
+27,061,906 B `cmd/compile` is ~13,200 calls at this cap ≈ **0.85 s** of channel
+time (`27,061,906 × 298,379 / 9,502,880` µs; this measures the rate, not that
+file). Writes are capped identically (2048 B per `sys_file_write`), so a few MB
+of object output is ~0.2 s. **Transfer is not the blocker.** At the ABI's own
+cap a toolchain-scale payload costs well under a second per pass, and the
+whole-file-buffer shape the old verdict worried about is not needed to read one
+— bounded memory and the existing offset-carrying READ are enough.
+
+A widened cap would show up as a changed call count in run 04, which is
+asserted: the run's exact line (`bytes <n> calls <ceil(n/2048)> max 2048`) is a
+deliberate tripwire, because these numbers are what S1's cost estimate rests
+on. Both halves of that assert were shown able to fail before landing — a
+fixture that counts a chunk without folding it fails the hash half with the
+byte/call line still exact; one that stops 1 MiB short fails the byte/call
+half — with runs 01–03 green in both cases.
+
+### Still unmeasured, and why
+
+**`compile`+`link` peak RSS in-guest** — unchanged from K3, and unmeasurable for
+the same reason: it needs the toolchain to run in-guest, i.e. #1525 first. It
+remains an acceptance criterion on #1455; the host-side figures in the table
+above are still the best available upper bound. **Transfer throughput is no
+longer unmeasured.**
+
+### Card split, as it now stands
+
+| piece | card | state |
+| --- | --- | --- |
+| streamed exec + per-process text aperture + the RAM floor | #1504 (M70c-K) | **landed** (PR #1523, `1e757d15`) |
+| the `GOOS=virelai` `syscall`/`os` port | **#1525** (M70c-S1P) | **filed, unclaimed — the blocker** |
+| S1/S2 (toolchain in-guest, in-guest build loop) | #1455 | blocked on #1525; the transfer half measured (run 04) |
+| S3 (Zig dialect capstone) | #1455, riding `live-zc` | **landed** (PR #1511) |
+| multi-MB durable staging | #1434 (M66) | cards landed; index issue open |
+
 ## Re-measuring (so the next agent does not have to take this on faith)
 
 ```bash
@@ -262,10 +373,20 @@ grep -n -A4 'FIXED text aperture' tools/go/build-go.sh  # the 448 KiB recipe win
 size -m "$(go env GOROOT)/pkg/tool/$(go env GOOS)_$(go env GOARCH)/compile"
 cp "$(go env GOROOT)/pkg/tool/darwin_arm64/compile" /tmp/c && strip -x /tmp/c && ls -l /tmp/c
 
-# the exact GOOS=virelai figures (opt-in cross-std pass; the fork has no
-# virelai std yet, so this is the step that turns the inference into an
-# observation)
+# the exact GOOS=virelai figures (opt-in cross-std pass). Amendment 2: this
+# FAILS today — the fork has no virelai syscall/os at all, so it is the step
+# that stays an inference until #1525 lands.
 GOVIRELAI_STD=1 bash tools/go/build-go.sh
 cd "${GO_FORK_DIR:-../go-virelai}/src" && GOOS=virelai GOARCH=arm64 go build \
     -ldflags "-s -w" -o /tmp/compile-virelai cmd/compile && ls -l /tmp/compile-virelai
+
+# the port-layer gap, one package in
+export GOROOT="${GO_FORK_DIR:-../go-virelai}"; export PATH="$GOROOT/bin:$PATH"
+GOOS=virelai GOARCH=arm64 GOTOOLCHAIN=local go build -o /dev/null fmt   # rc!=0 today
+GOOS=virelai GOARCH=arm64 GOTOOLCHAIN=local go build -o /dev/null os    # same
+
+# the transfer numbers (class B; run 04 of go-hello asserts the byte count,
+# the call arithmetic and the hash, and prints the rate)
+just gate go-hello
+grep -a 'goread:' artifacts/go-hello-serial-04.log
 ```

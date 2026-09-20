@@ -74,6 +74,7 @@ for prog in "${@:-$REPO/tools/go/hello.go}"; do
         govinet)    base="GOVINET" ;;
         govidns)    base="GOVIDNS" ;;
         gobig)      base="GOBIG" ;;
+        goread)     base="GOREAD" ;;
     esac
     out="$out_dir/${GO_BUILD_NAME:-$base}.ELF"
     # The gap loader gives a program a FIXED text aperture, so image size is
@@ -87,6 +88,9 @@ for prog in "${@:-$REPO/tools/go/hello.go}"; do
         # .data), so the "stripped Go ELF" in that card's acceptance is
         # literal.
         GONET | GOVINET | GOVIDNS | GOBIG) strip="-s -w" ;;
+        # M70c (#1455): the share-read measurement fixture. It links the whole
+        # `vi` surface, which is what puts it in this class.
+        GOREAD) strip="-s -w" ;;
     esac
     log "building $prog -> $out (ldflags: $strip)"
     GOOS=virelai GOARCH=arm64 go build -o "$out" \
