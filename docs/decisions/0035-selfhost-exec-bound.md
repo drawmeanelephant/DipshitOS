@@ -39,8 +39,8 @@ re-measure commands are at the end.
 
 | bound | value | where |
 | --- | --- | --- |
-| exec staging | **2 MiB fixed whole-file buffer**, and there are **two** of them — `program` and `interp_program` (the PT_INTERP/LD.SO path), **4 MiB of .bss** against the 11 MiB budget; a larger image is refused `too_large` | `kernel/src/exec.zig:100` (`exec_program_max`), `:184`,`:186` (both `[exec_program_max]u8`), `parse_dsk3` `image_size > buf.len` |
-| ELF load bound | 2 MiB **total PT_LOAD memory**, ≤3 PT_LOADs | `kernel/src/elf.zig:164`,`:167` (`load_max` — "mirrors `exec.exec_program_max`, the shared staging buffer bound") |
+| exec staging | **2 MiB fixed whole-file buffer**, and there are **two** of them — `program` and `interp_program` (the PT_INTERP/LD.SO path), **4 MiB of .bss** — plus the 16 KiB header window the streamed path adds; the *staged* shapes (DSK1/DSK3/contiguous ELF/PT_INTERP) are still bounded by that buffer. Since K1 the gap-layout ELF path **streams** and is bounded instead by `exec_image_max` = 32 MiB (see the amendment) | `kernel/src/exec.zig` (`exec_program_max`, `exec_image_max`, `header_window`), `parse_dsk3` `image_size > buf.len` |
+| ELF load bound | **32 MiB total PT_LOAD memory** (K1 raised it from 2 MiB; it no longer mirrors the staging buffer — the streamed path is not a buffer), ≤3 PT_LOADs | `kernel/src/elf.zig` (`load_max`, `max_segments`) |
 | GOOS=virelai link recipe | text base 0x10000 with its end ≤0x80000 (**448 KiB** of text), rodata base 0x80000 with its end ≤0x110000, data base 0x110000 | `tools/go/build-go.sh`'s layout guard (the guard exists because a shifted layout "loads but misbehaves on target") |
 | gap vaddr bound | every gap segment's vaddr below `gap_base_max` = 0x1000_0000 | `kernel/src/elf.zig:158` |
 | page tables | fixed **512×4 KiB (2 MiB) .bss carve-out, never reclaimed** — a *total-roots* budget | `kernel/src/mmu.zig:66-71`; `tables_used()`/`tables_capacity()` at `:146` |
@@ -49,7 +49,7 @@ re-measure commands are at the end.
 | host `cmd/compile` | **27,061,906 B**, of which `__TEXT` (code+rodata) **20,660,224 B**; `strip -x` → 25,233,584 B (−6.8%) | measured 2026-09-19, Go 1.27.1, darwin/arm64 |
 | host `cmd/link` | 6,878,850 B — `__TEXT` 5,423,104 B; `strip -x` → 6,503,808 B | same |
 | host `cmd/asm` | 5,341,682 B | same |
-| largest in-guest Go program today | `GOSH.ELF` at 1,376,416 B — a real shell, and it already uses 66% of the file bound | `.build/go/GOSH.ELF` |
+| largest in-guest Go program today | `GOBIG.ELF` at **9,502,880 B** (the K1 fixture — 8,416,224 B of it one initialized `.data` payload); before K1 the largest was `GOSH.ELF` at 1,376,416 B, 66% of the old file bound | `.build/go/` |
 | file-channel transfer | 32 KiB reply cap, **stateless offset-carrying READ**, paths ≤255 B | `docs/host-file-channel-scoping.md` |
 
 ### What is observed and what is inferred
@@ -146,6 +146,106 @@ without an ADR 0007 amendment; no .bss budget change without amending ADR
 GOOS=virelai code shape or the boot default; no in-guest `go test`, no module
 resolution, no self-hosting the kernel, no replacing `zc`, no `cgo`; and no
 attempt at S1/S2 code until #1504 lands.
+
+## Amendment — K1 (M70c-K, #1504)
+
+This amendment is part of the change that lands K1; it records what changes
+and what is still open. The decision text above is history and stays as
+written (its card-split table is the pre-landing state: since then S3 landed
+as PR #1511 and #1504 was claimed). K2 — the aperture bound — is the same
+change: `elf.load_max` moved with the loader. K3 is not; see below.
+
+**What the loader does now.** The gap-layout static ELF path — every
+`GOOS=virelai` Go binary — no longer stages the file. The loader reads a
+16 KiB header window, parses the plan from it (`elf.parse_head` validates
+segment *payload* ranges against the file's STAT size instead of a buffer),
+then streams each segment straight from the host share into the physical
+pages that will be mapped. Every other shape (DSK1, DSK3, the contiguous ELF
+layout, PT_INTERP) keeps the staged path exactly — same one-read behaviour,
+same `exec_program_max` bound. One pre-existing hole closed on the way: a
+*contiguous* three-segment image used to reach the staging copy that only
+represents `[text][data]`, i.e. it loaded with its rodata and data silently
+missing; it is now refused.
+
+**The refusals name the bound, not "too large".** One old name,
+`ExecResult.too_large`, covered three different truths — and the monitor
+printed one buffer bound for all of them, so a reader could not tell which
+limit an image had crossed. It is now three:
+
+| result | means | monitor line |
+| --- | --- | --- |
+| `image_too_large` | the FILE is past `exec_image_max` (32 MiB), whatever its shape | `error: <name>: image too large (acceptance bound 0x0000000002000000 bytes)` |
+| `staging_too_large` | the shape must transit the 2 MiB staging buffer (DSK1, DSK3, contiguous ELF, PT_INTERP) and does not fit | `error: <name>: image too large for the 0x0000000000200000-byte staging buffer (only a gap-layout static ELF streams past it)` |
+| `image_truncated` | the file ends before the bytes its own header promises | `error: <name>: truncated image (file ends before the bytes its header promises)` |
+
+The truncation condition has **two detections and one name**, deliberately:
+the header-window parse refuses a segment whose payload range escapes the
+volume's STAT size (`elf.file_too_short`), and — if the file changes between
+that parse and the load — the streamed segment read hits EOF. Which check
+noticed is not the caller's problem; the DSK3 path reports it the same way
+(a declared image that never arrived is `image_truncated`). No path ever
+maps a half-filled segment.
+
+**Observed acceptance (VZ, class B).** `go-hello` run 02 execs
+`GOBIG.ELF` — a real stripped `GOOS=virelai` Go image of 9,502,880 B whose
+last segment carries 8,416,224 B of initialized data — and the program
+prints a banner it reads back at runtime from 1, 4 and 8 MiB into that
+payload (`A B C E D`, `big: sum 335`), with the kernel reporting
+`datapages=2097`. Run 01 (the 1.19 MiB `GOHELLO.ELF`, staged) is unchanged
+and still green. Run 03 execs two real fixtures made from that image —
+`XL.ELF` (34 MiB, past the acceptance bound) and `TRUNC.ELF` (its first
+4 MiB, laid out so its data segment is cut off) — and asserts each refusal
+by its own message, in order, with neither reporting a successful load.
+
+**Both new run shapes were shown able to fail.** Aiming the streamed read
+4096 bytes past each segment's own file offset (a one-line mutation): run
+02 **FAILs** on `big: banner A B C E D` (and the load marker stays green —
+the banner is what catches a read that succeeds against the wrong bytes),
+while run 01 and run 03 stay green. Replacing the acceptance bound with the
+staging bound in the size refusal (a one-line mutation): run 03 **FAILs**
+by name, `XL.ELF: image too large (acceptance bound` = 0 and
+`serial-absent 'staging buffer'` = 0, while run 01/02 stay green. Both
+reverted; the gate then reports 3/3 again. Host tests cover the same path
+with the channel's real 32 KiB reply bound pinned (`read_chunk`'s test
+override now clamps like the wire does).
+
+**K3 is not satisfiable yet, and not because of this card.** It measures
+`compile`+`link` peak RSS *in-guest*, which needs the toolchain to run
+in-guest — i.e. S1/S2 themselves. The host-side figures in the table remain
+the best available upper bound, and the RSS figure stays an acceptance
+criterion on #1455's S1/S2, not on #1504.
+
+**D7 (page-gate hygiene).** K1 does not change how many pages any existing
+shape takes: the streamed path maps exactly the declared segments, the
+staged path is untouched, and the acceptance run reports the fixture's own
+page counts (`datapages=2097`; the host test pins the exact delta,
+1 + 768 + 2 + 1 + 48 + 48). The loader/exec regression set is green *on this
+change*: `live-elf`, `live-exec`, `live-el0-exec`, `live-m16-image`,
+`live-scale`, `live-oliver` (7/7) and `go-hello` (3/3).
+
+Five further gates D7 names are **red on the base commit already**, for
+reasons this change does not touch. Each was re-run at `81ebaa9d` with the
+work stashed (`dirty-files=0`) and then on this change; each fails
+identically both times, which is the evidence — the short cause notes below
+are context, not a diagnosis this card owes:
+
+| gate | observed failure (same at base and on this change) | note |
+| --- | --- | --- |
+| `live-long-lived` | `FAIL: running rows absent` | its `procs: id=… state=running` regex predates the `uid=`/`caps=` columns |
+| `live-m16-resources` | `expected 8 running COUNTER rows, got 0` | same regex, same columns |
+| `live-kill` | `page recovery off first=61844 second=61941` | a pinned `+17`-page recovery that predates the 192 KiB task stack (observed `97` = 1 text + 48 stack + 48 kernel stack) |
+| `live-m16-guards` | `procs GUARD.BIN exited status=1` where the spec wants `139` | `GUARD.BIN`'s 36 KiB step predates the same stack growth, so it exits through its own closed-guard-gap branch instead of faulting |
+| `live-m16-composition` | `missing GLOBALS.BIN exited status 42`, `serial-count [exec: loaded USER.BIN size=]=0 (min 7)` | its scripted composition stops before its later phases |
+
+None of the five is re-derived or loosened here, and none may be: a large
+image is not going to be made to pass by relaxing a page or row gate. They
+are answered as one card instead — **#1522** (re-derive or retire, with the
+measurement in its own PR).
+
+**`.bss` gate:** green, `12,020,408 B / 13,631,488 B` (1,611,080 B
+headroom) with the 16 KiB header window in place; the two 2 MiB staging
+arrays stay, because the staged shapes still need them. ADR 0013 D3.1 is
+unchanged.
 
 ## Re-measuring (so the next agent does not have to take this on faith)
 
