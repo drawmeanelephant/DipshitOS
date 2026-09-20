@@ -19,25 +19,44 @@
 #     four phases. Putting two execs in one phase would leave their declare
 #     order to the scheduler, and an ordered assert on a race is a flake, not
 #     evidence.
-#  2. The kernel's task budget holds THREE Go runtimes live at once -- the seat
-#     plus two clients (M65d / #1442: 3 kernel + 3x4 Ms + 1 spare; see the
-#     maxTicks note in user/go/gotabwm/seat.go). A third concurrent Go CLIENT is
-#     the documented wall in go-sh.spec / #1449. So each boot stages two client
-#     apps, which is also the shape go-wm-default (one app) and go-wm-tabs (two)
-#     already prove.
+#  2. The seat's PROVEN envelope is three Go runtimes: itself plus two clients
+#     (M65d / #1442: 3 kernel + 3x4 Ms + 1 spare; see the maxTicks note in
+#     user/go/gotabwm/seat.go). That is an envelope, not a documented failure --
+#     four live Go runtimes have not been tried, and #1449 is the record of a
+#     different shape entirely (a THIRD SEQUENTIAL exec from one EL0 parent,
+#     which M70c-S2 then measured as unreproduced at its head). So each boot
+#     stages two client apps, which is also the shape go-wm-default (one app)
+#     and go-wm-tabs (two) already prove. Reason 1 alone is a hard limit; this
+#     one is the conservative choice inside a proven envelope, and is labelled
+#     as such rather than cited as a wall.
 #
 # The beat is therefore a tour of the default seat: shell+editor together,
 # then calculator+browser together. All four apps, one seat, same share.
 #
+# What each marker actually proves -- stated precisely, because the obvious
+# reading of the app markers is stronger than the wire supports:
+#
 #   dogfood: seat   the seat's own line, after registration AND the one-seat
 #                   probe returned: the DEFAULT seat owns the desktop.
-#   dogfood: gosh   GOSH, on the accepted-declare path only (hosted, not
-#   dogfood: note   merely running). Same for NOTE, and for GOCALC's `calc`.
+#   dogfood: gosh   the APP, on its accepted-declare path only. Read this for
+#   dogfood: note   what it is: the seat ANSWERED the declare with the ack's
+#   dogfood: calc   applied bit set, i.e. a WM seat is there and the app is on
+#                   it -- NOT proof that a tab opened. gotabwm's applyRPC acks
+#                   applied=1 on this path whether or not tabs.OpenTab took
+#                   (interop.go), and the app cannot see the difference, so
+#                   these three lines must not be asked to carry the hosting.
 #   dogfood: page   WEB, once, on the first frame of a LAID-OUT page reaching
 #                   the scanout -- the page rendered.
 #   dogfood: ok     the seat's host-done line, printed only when this boot
-#                   actually hosted a tab (the dogfoodHosted latch): the boot's
-#                   slice ran to completion.
+#                   actually hosted a tab: the dogfoodHosted latch is set by a
+#                   successful tabs.OpenTab alone (interop.go).
+#
+# HOSTING is therefore pinned where the kernel-side truth lives: the seat's own
+# `gotabwm: tab open id=` counter, asserted at TWO per boot below -- the idiom
+# go-wm-tabs.spec uses for the same two-tab property. Without that count the
+# gate could regress to one hosted app per boot and still pass, since one tab
+# sets the latch that `dogfood: ok` hangs on and every app marker above would
+# still fire.
 #
 # The browser is attached with WM_RPC kind 5 (attach), not kind 8
 # (declare_fullscreen), so the page keeps the 512x384 geometry the live-web
@@ -50,7 +69,9 @@
 #   bash tools/go/build-gosh.sh           ->  .build/go/GOSH.ELF
 #   bash tools/go/build-note.sh           ->  .build/go/NOTE.ELF
 #   bash tools/go/build-gocalc.sh         ->  .build/go/GOCALC.ELF
-#   bash tools/go/build-web.sh browser WEB->  .build/go/WEB.ELF
+#   bash tools/go/build-web.sh browser    ->  .build/go/WEB.ELF (the name the
+#                                             app claims to the WM; the script
+#                                             defaults it now)
 #   (the page is the pinned fixture user/go/browser/testdata/gate-page.html,
 #    staged as /host/DOGFOOD.HTML; no new fixture)
 #
@@ -147,11 +168,19 @@ vgate_assert 01 serial-contains 'dogfood: note'
 vgate_assert 01 serial-contains 'gotabwm: host done'
 vgate_assert 01 serial-contains 'dogfood: ok'
 vgate_assert 01 serial-contains 'rx-dogfood-01-ok'
-# The Zig fallback seat never ran here: this is the Go seat, by absence too.
+# THE central property of this gate, and the one no app marker can carry: TWO
+# tabs opened on the one strip. Read `gotabwm: tab open id=` (printed only when
+# tabs.OpenTab returned true) at least twice -- the idiom go-wm-tabs.spec uses
+# (lines 185/446). Without it, a regression to one hosted app per boot would
+# pass every assert above: one OpenTab sets the dogfoodHosted latch `dogfood:
+# ok` hangs on, and each app's own marker fires off the ack alone.
+vgate_assert 01 serial-count 'gotabwm: tab open id=' 2
+# The Zig fallback seat's autostart line is what this rules out at runtime (the
+# line-start check in the python block covers its own marker). It guards the
+# compiled `wm_default` constant rather than the seat's behaviour, so read it as
+# "the default was compiled in", not as "the fallback engine ran".
 # NOT `serial-absent 'tabwm: registered'`: that is a SUBSTRING match (grep -F)
-# and `gotabwm: registered` contains it, so the assert could never pass. The
-# autostart line is unique to the fallback, and the line-start check in the
-# python block below covers the Zig seat's own marker.
+# and `gotabwm: registered` contains it, so the assert could never pass.
 vgate_assert 01 serial-absent 'wm: autostart tabwm'
 vgate_assert 01 serial-absent '[EXC] parking:'
 vgate_assert 01 serial-absent 'exited status=139'
@@ -190,8 +219,33 @@ print("boot 01 order ok: " + " < ".join(want) +
       " (and the calculator/browser half is absent)")
 PY
 
+# D1, re-checked between the boots (the staging guard only saw the pre-run
+# share). Boot 01 must not have left a `wm` row behind: the moment it does, boot
+# 02 tests the SETTING while every assert it makes still passes.
+vgate_assert 01 python <<'PY'
+import os, sys
+share = os.environ.get("VG_SHARE") or os.path.join(os.environ["RUN_DIR"], "share")
+p = os.path.join(share, "SETTINGS.TXT")
+if os.path.exists(p):
+    rows = [l for l in open(p, errors="replace").read().splitlines()
+            if l.strip().startswith("wm=")]
+    if rows:
+        sys.exit("FAIL: boot 01 persisted a `wm` row (%s) - boot 02 would boot "
+                 "the SETTING, not the compiled default seat" % rows)
+    print("between the boots: SETTINGS.TXT exists and carries no `wm` row, so "
+          "boot 02 boots the compiled default")
+else:
+    print("between the boots: no SETTINGS.TXT on the share at all, so boot 02 "
+          "boots the compiled default")
+PY
+
 # --- boot 02: the calculator and the browser on the same default seat -------
-# Same share, same compiled default: boot 01 persisted no `wm` row.
+# Same share, same compiled default. D1 says the seat is the COMPILED default
+# and not a setting, and boot 02 is the boot where that could silently stop
+# being true: if anything ever began persisting a `wm` row, boot 01 would write
+# it, boot 02 would boot from the setting, and every assert in this run would
+# still pass. So the share is re-checked BETWEEN the two boots rather than
+# trusting the staging guard, which only ever saw the pre-run share.
 vgate_file script-02a.txt <<'EOF'
 set GOMAXPROCS=1
 exec GOCALC.ELF
@@ -241,6 +295,9 @@ vgate_assert 02 serial-contains 'gotabwm: tab open id='
 vgate_assert 02 serial-contains 'gotabwm: host done'
 vgate_assert 02 serial-contains 'dogfood: ok'
 vgate_assert 02 serial-contains 'rx-dogfood-02-ok'
+# Two tabs again -- the calculator's declare and the browser's attach. See boot
+# 01 for why this count, and not the app markers, is the hosting proof.
+vgate_assert 02 serial-count 'gotabwm: tab open id=' 2
 # See boot 01: `tabwm: registered` is a substring of `gotabwm: registered`.
 vgate_assert 02 serial-absent 'wm: autostart tabwm'
 vgate_assert 02 serial-absent '[EXC] parking:'

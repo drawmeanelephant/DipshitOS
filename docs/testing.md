@@ -440,11 +440,21 @@ order is the beat order:
   laid-out page reaching the scanout. No staged line and no harness echo can
   produce one, and the spec asserts them at **line start and in order**, with
   the other half of the beat required to be absent from the run.
-- **The beat is two boots because of two observed limits**, both spelled out
-  in the spec header: the runner forwards at most three command phases per
-  boot (`--script` / `--script2` / `--script3`), and the kernel holds three Go
-  runtimes live — the seat plus two clients (M65d / #1442). A third concurrent
-  Go client is the wall `go-sh.spec` also stops short of (#1449).
+- **The beat is two boots for one hard reason and one conservative one**, both
+  spelled out in the spec header. Hard: the runner forwards at most three
+  command phases per boot (`--script` / `--script2` / `--script3`), and four
+  phase-gated execs need four. Conservative: the seat's *proven* envelope is
+  three Go runtimes — itself plus two clients (M65d / #1442) — so each boot
+  stages two client apps, the shape `go-wm-default` (one) and `go-wm-tabs`
+  (two) already prove. Four live Go runtimes have not been tried; that is an
+  envelope, not a wall, and `#1449` is a different shape (a third *sequential*
+  exec from one EL0 parent, which M70c-S2 measured as unreproduced).
+- **Hosting is pinned by the seat's counter, not by the app markers.** Each
+  app's `dogfood:` line rides the accept-declare ACK, and `gotabwm`'s
+  `applyRPC` acks `applied=1` on that path whether or not a tab opened, so the
+  app cannot tell — the spec therefore asserts `gotabwm: tab open id=` **twice**
+  per boot (the `go-wm-tabs` idiom). `dogfood: ok` is the stronger one: its
+  latch is set by a successful `tabs.OpenTab` alone.
 - **The browser is attached, not declared.** WEB sends WM_RPC kind 5 (attach)
   rather than kind 8 (declare_fullscreen) so the page keeps the 512x384
   geometry the `live-web*` gates pin. Attach is also what makes the page
