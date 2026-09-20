@@ -17,8 +17,9 @@ package vi
 //   - recv always reads the CALLER's own ring (the kernel resolves the pid
 //     from the current task), so there is no self-pid argument on the wire.
 //
-// On the host every call degrades to -ENOSYS (vi_host.go), which is what
-// keeps these paths unit-testable off the guest.
+// On the host every call degrades to -ENOSYS (vi_host.go) unless a test
+// installs syscallHook — the same inject-a-fake-kernel seam the TCP path
+// uses. That is what keeps these paths unit-testable off the guest.
 
 import "unsafe"
 
@@ -74,7 +75,7 @@ func IpcSend(target uint32, b []byte) int64 {
 	if len(b) > MailboxMessageMax {
 		b = b[:MailboxMessageMax]
 	}
-	return syscall3(SlotIPCSend, uintptr(target), uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)))
+	return svc3(SlotIPCSend, uintptr(target), uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)))
 }
 
 // IpcRecv copies the caller's own oldest mailbox message into buf (slot 6),
@@ -89,7 +90,7 @@ func IpcRecv(buf []byte) (int, int64) {
 	if len(buf) > MailboxMessageMax {
 		buf = buf[:MailboxMessageMax]
 	}
-	r := syscall2(SlotIPCRecv, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+	r := svc2(SlotIPCRecv, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
 	if r < 0 {
 		return 0, r
 	}

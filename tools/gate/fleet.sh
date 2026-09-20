@@ -33,7 +33,9 @@
 #                     vgate.sh exactly as documented in tools/gate/SPEC.md.
 #
 # Environment: VIRELAI_GATE_SUFFIX, VGATE_NO_BUILD, BOOTS honored by
-# vgate.sh; fleet.sh adds nothing of its own.
+# vgate.sh. Before running selected specs, fleet.sh hash-checks (and
+# rebuilds if needed) .build/go/GOSH.ELF / GOSSHD.ELF once per invocation
+# (issue #1503) so a leftover hand-built binary cannot reach a guest.
 #
 # Dev-shell note (the one canonical PATH paragraph): fleet members need the
 # modern Homebrew toolchain exactly like CI — /opt/homebrew/bin FIRST and
@@ -133,6 +135,26 @@ fleet_select() {
     fleet_match "$want"
 }
 
+fleet_ensure_guest_elfs() {
+    # Issue #1503: rebuild GOSH.ELF / GOSSHD.ELF at most once per fleet
+    # invocation when a selected spec stages them. Hash-cached inside
+    # ensure-guest-elf.sh — a matching stamp is a no-op, so this is not a
+    # per-spec Go rebuild.
+    local id spec app seen=" "
+    for id in "$@"; do
+        [ "$(fleet_kind "$id")" = spec ] || continue
+        spec="$SPEC_DIR/$id.spec"
+        [ -f "$spec" ] || continue
+        while IFS= read -r app; do
+            [ -n "$app" ] || continue
+            case "$seen" in *" $app "*) continue ;; esac
+            seen="$seen$app "
+            echo "fleet: ensure ${app}.ELF (issue #1503, hash-cached)"
+            bash "$ROOT/tools/go/ensure-guest-elf.sh" ensure "$app"
+        done < <(bash "$ROOT/tools/go/ensure-guest-elf.sh" needed-by "$spec")
+    done
+}
+
 fleet_run() {
     # Run the given ids/patterns sequentially; continue past failures;
     # summary at the end; nonzero rc iff anything failed.
@@ -145,6 +167,7 @@ fleet_run() {
 
     local failed=() n=0 rc start
     echo "=== fleet run: $total member(s): ${sel[*]}"
+    fleet_ensure_guest_elfs "${sel[@]}"
     for id in "${sel[@]}"; do
         n=$((n + 1))
         echo

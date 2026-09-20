@@ -77,3 +77,10 @@ if slack < need:
              % (mem, slack, need))
 print("build-gosh: argv+envp slack ok (memsz %#x, slack %#x bytes)" % (mem, slack))
 PY
+
+# Issue #1503: a hand-built ELF with no stamp is indistinguishable from a
+# leftover from another branch. Stamp source+elf hashes so class-B setup
+# can refuse a mismatch by name instead of booting it.
+case "$NAME" in
+    GOSH|GOSSHD) ENSURE_GUEST_ELF_ROOT="$REPO" bash "$REPO/tools/go/ensure-guest-elf.sh" stamp "$NAME" "$OUT" ;;
+esac

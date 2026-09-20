@@ -1,0 +1,35 @@
+webrender fidelity corpus — pinned 2026-09-19
+ADR 0028 D2: no JavaScript, no CSS cascade. Author <style> and
+<link rel=stylesheet> are skipped (StyleFor Skip). A page that needs a
+cascade is a named non-goal, not a workaround.
+
+IN (UA-table; the guest can fetch these bytes):
+
+  example-org.html      https://example.org/
+  cern-home.html        https://info.cern.ch/
+  cern-theproject.html  http://info.cern.ch/hypertext/WWW/TheProject.html
+  httpbin-html.html     https://httpbin.org/html
+  httpbin-forms.html    https://httpbin.org/forms/post
+  rfc20.html            https://www.rfc-editor.org/rfc/rfc20.html
+  iana-reserved.html    https://www.iana.org/domains/reserved
+  w3-styleguide.html    https://www.w3.org/Provider/Style/Overview.html
+  w3-png.html           https://www.w3.org/Graphics/PNG/
+  interaction.png       https://www.w3.org/Icons/interaction.png
+  png_48.png            https://www.w3.org/Graphics/PNG/png_48.png
+  graphics_48x48.png    https://www.w3.org/Icons/WWW/graphics_48x48.png
+
+NON-GOALS (cascade and/or renderer-side JS — not worked around):
+
+  https://en.wikipedia.org/wiki/HTML
+      Vector skin, infoboxes, 18 <style> blocks (798 KiB fetch).
+  https://www.w3.org/
+      Modern W3C homepage: class-based layout, 157 ".png" refs in the
+      document, not a UA-table page.
+  https://neverssl.com/
+      Load-bearing CSS (header/notice) plus a JS redirect; noscript is
+      skipped by the UA table, so the designed page is empty.
+  https://www.w3.org/MarkUp/Wilbur/
+      class="warning" colours are a cascade.
+  https://news.ycombinator.com/
+      Table layout is in-model, but the homepage mutates hourly and was
+      not pinned as a golden.

@@ -609,20 +609,29 @@ const Reader = struct {
         }
     }
 
-    /// Signed LEB128 i64 (i32.const reads this then truncates).
+    /// Signed LEB128 i64 (i32.const reads this then truncates). At most 10
+    /// bytes: the 10th byte carries bit 63, so a continuation bit there is
+    /// malformed. (`shift` must be wider than u6: 63 + 7 wraps, which
+    /// panicked safe builds, decoded canonical 10-byte negative constants
+    /// as -64 in release builds, and made the old guard unreachable —
+    /// issue #1519.)
     fn sleb(r: *Reader) ParseError!i64 {
         var result: i64 = 0;
-        var shift: u6 = 0;
+        var shift: usize = 0;
         var b: u8 = 0;
+        var count: u8 = 0;
         while (true) {
-            if (shift >= 64) return error.MalformedLeb;
             b = try r.u8_();
-            result |= @as(i64, @intCast(b & 0x7F)) << shift;
+            result |= @as(i64, @intCast(b & 0x7F)) << @intCast(shift);
+            count += 1;
             shift += 7;
             if (b & 0x80 == 0) break;
+            if (count >= 10) return error.MalformedLeb;
         }
         if (shift < 64 and (b & 0x40) != 0) {
-            result |= -(@as(i64, 1) << @intCast(shift));
+            // -%: at shift 63 the operand is i64 min, whose unary minus
+            // overflows in safe builds (the OR mask is identical).
+            result |= -%(@as(i64, 1) << @intCast(shift));
         }
         return result;
     }
@@ -966,8 +975,10 @@ fn parseCode(m: *Module, r: *Reader, func_i: usize) ParseError!void {
             local_count += 1;
         }
     }
-    const body_start = r.pos;
-    const remain = body_size - (body_start - size_pos);
+    // absPos, not pos: the trap offset printed on the serial is a MODULE
+    // byte offset, and `r` reads a code-section payload slice (M70d #1518).
+    const body_start = r.absPos();
+    const remain = body_size - (r.pos - size_pos);
     m.funcs[func_i].body = try r.take(remain);
     m.funcs[func_i].local_types = local_types;
     m.funcs[func_i].local_count = local_count;
@@ -2877,6 +2888,21 @@ fn fail(msg: []const u8, status: u64) noreturn {
     sys_exit(status);
 }
 
+/// The exec-trap serial line (M70d #1518): the class, the module, and the
+/// module byte offset of the faulting instruction, in the `key=value` marker
+/// style. Before this, `exec WASM.BIN ELK.WASM` printed only
+/// `wasm: trap during exec`, so #1456 could not tell `call_depth` from
+/// `stack_overflow`. Null when `buf` cannot hold the line (the caller falls
+/// back to the unnamed form).
+const trap_line_len = 192;
+fn formatExecTrapLine(buf: []u8, trap: Trap) ?[]const u8 {
+    return std.fmt.bufPrint(
+        buf,
+        "wasm: trap during exec kind={s} module={s} offset=0x{x}\n",
+        .{ @tagName(trap.kind), trap.module, trap.offset },
+    ) catch null;
+}
+
 /// Host-test capture: when set, imports record their calls (id + args)
 /// and return canned values instead of reaching svc #0 (which a host test
 /// cannot execute). The W2 semantics carry: env.write copies into
@@ -3449,7 +3475,10 @@ pub export fn _start(argc: usize, argv: ?[*]const [32]u8) callconv(.c) noreturn 
     const entry = entryExport(&g_module) orelse fail("wasm: no entry export\n", 13);
     switch (call(&machine, &g_module, entry, &.{})) {
         .ret => sys_exit(0),
-        .trap => fail("wasm: trap during exec\n", 3),
+        .trap => |tr| {
+            var trap_line: [trap_line_len]u8 = undefined;
+            fail(formatExecTrapLine(&trap_line, tr) orelse "wasm: trap during exec\n", 3);
+        },
     }
 }
 
@@ -3466,6 +3495,23 @@ test "parse: rejects bad magic/version" {
 test "parse: rejects truncated and unknown sections" {
     try testing.expectError(error.Truncated, parse("\x00asm\x01\x00\x00\x00\x01\x0A"));
     try testing.expectError(error.UnknownSection, parse("\x00asm\x01\x00\x00\x00\x63\x00"));
+}
+
+test "parse: sleb decodes 10-byte i64s and rejects an 11th byte (#1519)" {
+    // Canonical i64 min: 9 continuation bytes + 0x7f. The old u6 `shift`
+    // wrapped 63 + 7 — safe builds panicked, release builds decoded -64.
+    var min = Reader{ .bytes = "\x80\x80\x80\x80\x80\x80\x80\x80\x80\x7f" };
+    try testing.expectEqual(std.math.minInt(i64), try min.sleb());
+    // A 9-byte negative lands its sign at bit 63: `-(i64 1 << 63)` is unary
+    // minus overflow; -% keeps the OR mask bit-exact.
+    var neg9 = Reader{ .bytes = "\x80\x80\x80\x80\x80\x80\x80\x80\x40" };
+    try testing.expectEqual(@as(i64, -4611686018427387904), try neg9.sleb());
+    // The pinned Elk-style positive 10-byte constant.
+    var big = Reader{ .bytes = "\x80\x80\x80\x80\x80\x80\xc0\xf9\xff\x00" };
+    try testing.expectEqual(@as(i64, 0x7ff3000000000000), try big.sleb());
+    // 11 bytes is over-long for i64; the old guard could never fire.
+    var long = Reader{ .bytes = "\x80\x80\x80\x80\x80\x80\x80\x80\x80\x80\x00" };
+    try testing.expectError(error.MalformedLeb, long.sleb());
 }
 
 test "w4: f64 type section parses + validates (W4 acceptance)" {
@@ -3850,7 +3896,26 @@ test "exec: unreachable traps with module + offset" {
     try testing.expect(r == .trap);
     try testing.expectEqual(TrapKind.@"unreachable", r.trap.kind);
     try testing.expectEqualStrings("boom", r.trap.module);
-    try testing.expect(r.trap.offset > 0);
+    // The `unreachable` opcode is at byte 33 of the module (8 magic/version +
+    // type 6 + func 4 + export 10 + code id/size + count + body size +
+    // locals count) — a MODULE offset, not an offset into the code-section
+    // payload (M70d #1518).
+    try testing.expectEqual(@as(usize, 33), r.trap.offset);
+}
+
+test "exec trap line names the class, module and offset (#1518)" {
+    var buf: [trap_line_len]u8 = undefined;
+    const line = formatExecTrapLine(&buf, .{
+        .kind = .call_depth,
+        .module = "ELK.WASM",
+        .offset = 0x1a2b,
+    }) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings(
+        "wasm: trap during exec kind=call_depth module=ELK.WASM offset=0x1a2b\n",
+        line,
+    );
+    var tiny: [8]u8 = undefined;
+    try testing.expect(formatExecTrapLine(&tiny, .{ .kind = .bounds, .module = "m", .offset = 0 }) == null);
 }
 
 test "exec: div by zero traps (i32.div_s)" {
