@@ -3,11 +3,18 @@ package tabapp
 import (
 	"testing"
 
+	"virelai/theme"
 	"virelai/vi"
 )
 
 // On the host every vi call degrades, so Init reports the honest failure
 // rather than fabricating a window.
+func TestFillRGBIsThemeBg(t *testing.T) {
+	if FillRGB() != theme.Current.Bg {
+		t.Fatalf("FillRGB %#x want %#x", FillRGB(), theme.Current.Bg)
+	}
+}
+
 func TestInitHostFails(t *testing.T) {
 	if ta := Init(Config{Name: "T.ELF", Title: "T", W: 100, H: 100}); ta != nil {
 		t.Fatalf("host Init = %+v want nil", ta)

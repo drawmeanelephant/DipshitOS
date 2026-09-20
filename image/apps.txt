@@ -1,25 +1,17 @@
-# VirelaiOS app manifest (M13 B2, claim 8877; M15 C4 dock flag). NAME.BIN | Display Name | icon | dock=true
+# VirelaiOS app manifest (M69c2 #1535). NAME | Display Name | icon | dock=true
+# Shipping EL0 apps only. The Go seat's daily set is docked. TABWM.BIN is
+# the named Zig fallback (ADR 0034), not a default dock target.
 GOCALC.ELF | 64-bit Calc | c | dock=true
 NOTE.ELF | Text Editor | n | dock=true
-TOP.BIN | Task Manager | t | dock=true
-KEYTEST.BIN | HID Input | k
-TYPE.BIN | File Reader | f
-DIR.BIN | Directory List | d
-FETCH.BIN | HTTP/1.0 Client | w
-CHAT.BIN | P2P Net Chat | m
-SETTINGS.BIN | Settings | s | dock=true
-SYSMON.BIN | System Monitor | y | dock=true
-HTTPD.BIN | HTTP Web Server | h
-DYNAPP.ELF | Dynamic App | l | dock=true
-CALC.ELF | Dynamic Calc | c
-NOTEPAD.ELF | Dynamic Editor | n
-FILE.ELF | Dynamic Files | b
-DESKTOP.ELF | Dynamic Desktop | d
-ZC.BIN | Zig Compiler | z
-SEXIBURG.BIN | Sexiburger | x | dock=true
-VIEW.BIN | Image Viewer | v
+GOEDIT.ELF | Code Editor | e | dock=true
+GOFILES.ELF | Files | f | dock=true
+GOTERM.ELF | Terminal | t | dock=true
+WEB.ELF | Web | w | dock=true
+GOSH.ELF | Shell | s
+TOP.BIN | Task Manager | p
+SYSMON.BIN | System Monitor | y
+SETTINGS.BIN | Settings | g
 DOC.BIN | Document Viewer | o
-SEXITEST.BIN | Sexitest | x
-TABWM.BIN | Tabbed Desktop | w | dock=true
-
-
+VIEW.BIN | Image Viewer | v
+ZC.BIN | Zig Compiler | z
+TABWM.BIN | Tabbed Desktop | m

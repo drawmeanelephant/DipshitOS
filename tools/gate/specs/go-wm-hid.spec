@@ -1,9 +1,9 @@
 # go-wm-hid.spec -- M63a–e (issues #1419–#1423) class-B gate: GOTABWM HID
-# capstone. Drain pointer/key, pin/Alt+Tab, rail click, type into GOEDIT,
-# and a second boot that keeps the M63d HID drag live.
+# capstone, plus M69c/c2 (#1530/#1535): token serial/pixel probe and the
+# Ctrl+Space launcher from an honest APPS.TXT.
 #
 # Seed wm=none, exec GOTABWM.ELF (explicit seat, not the boot-default path).
-# SPIKE + --via-virtio. Pairing is GOEDIT+GOTERM (#1405).
+# SPIKE + --via-virtio. Pairing is GOEDIT+GOTERM (#1405) on runs 01/02.
 #
 # Run 01: last declare is GOTERM (right cell, focused). After `rail n=2`,
 # click `(320,10)` so TASKBAR focuses GOEDIT. `--input-string 'XYZ'` waits
@@ -15,6 +15,15 @@
 # Pin/Alt+Tab stay on run 01; this boot is the HID drag leg. go-wm-tabs
 # `reorder 0->1` is M62d choreography, not this path.
 #
+# Run 03: seat only (no GOEDIT/GOTERM — three Go runtimes is the #1449 wall).
+# `dui focus 0` after `gotabwm: win focus` supplies the M57b blur (same
+# handshake as go-wm-seat). After `gotabwm: present`, Ctrl+Space opens the
+# APPS.TXT launcher, type `calc` + Enter execs GOCALC.ELF as a hosted tab.
+# Tokens marker pins the dark table (same shape as sysmon: tokens). A GPU
+# pixel of compose-N is not what --cvc-snap returns on this seat-only boot
+# (observed: 0x101418 boot fill / terminal bg). live-tokens owns window
+# pixels. The catalog must not offer NOTEPAD.ELF / CALC.BIN.
+#
 # Two equal-width cells on a 1280 rail: tab 0 [0,640)=(320,10), tab 1
 # [640,1280)=(960,10). Zig's left-rail (158,70) is the wrong target.
 # Pane rects include y=0. No client-area mouse. No edit/term rewrite.
@@ -23,6 +32,7 @@
 #   bash tools/go/build-gotabwm.sh   ->  .build/go/GOTABWM.ELF
 #   bash tools/go/build-goedit.sh    ->  .build/go/GOEDIT.ELF
 #   bash tools/go/build-goterm.sh    ->  .build/go/GOTERM.ELF
+#   bash tools/go/build-gocalc.sh    ->  .build/go/GOCALC.ELF
 #
 # exec-order: assert-proven -- each run ends on a script-only marker
 # (`rx-gotabwm-hid-ok` / `rx-gotabwm-hid-drag-ok`), and every stage gate
@@ -83,6 +93,13 @@ if not os.path.exists(src):
 shutil.copy(src, os.path.join(share, "GOTERM.ELF"))
 print("staged GOTERM.ELF into share (%d bytes)" %
       os.path.getsize(os.path.join(share, "GOTERM.ELF")))
+src = os.path.join(".build", "go", "GOCALC.ELF")
+if not os.path.exists(src):
+    sys.exit("GOCALC.ELF missing (expected " + src + ") - build it first: "
+             "bash tools/go/build-gocalc.sh")
+shutil.copy(src, os.path.join(share, "GOCALC.ELF"))
+print("staged GOCALC.ELF into share (%d bytes)" %
+      os.path.getsize(os.path.join(share, "GOCALC.ELF")))
 ed = os.path.join(share, "EDIT")
 os.makedirs(ed, exist_ok=True)
 seed = os.path.join(ed, "SEED.TXT")
@@ -310,4 +327,84 @@ if (reo_o.group(1), reo_o.group(2)) != (click_o.group(2), click_o.group(1)):
         click_o.group(0), reo_o.group(0)))
 print("HID drag rail-click id=%s (was focus %s) flip %s" % (
     click_id, rail_m.group(1), reo_o.group(0)))
+PY
+
+vgate_file script2-launch.txt <<'EOF'
+dui focus 0
+EOF
+
+vgate_file script3-launch.txt <<'EOF'
+wm
+dui
+echo rx-gotabwm-launch-ok
+EOF
+
+vgate_run 03 -- \
+    --screen '$RUN_DIR/screen-03' \
+    --via-virtio \
+    --script '$RUN_DIR/script.txt' \
+    --script2 '$RUN_DIR/script2-launch.txt' \
+    --script2-after 'gotabwm: win focus' \
+    --input-chords 'ctrl-space,c,a,l,c,return' \
+    --input-chords-after 'gotabwm: present' \
+    --script3 '$RUN_DIR/script3-launch.txt' \
+    --script3-after 'wm: unregistered, shim resumed' \
+    --script-expect 'rx-gotabwm-launch-ok' --timeout 300
+
+vgate_assert 03 serial-contains 'VirelaiOS kernel has seized control.'
+vgate_assert 03 serial-contains 'exec: loaded GOTABWM.ELF'
+vgate_assert 03 serial-contains 'gotabwm: registered'
+vgate_assert 03 serial-contains 'gotabwm: tokens theme=dark bg=0x182026 surface=0x222d35 border=0x334155 accent=0x3b82f6'
+vgate_assert 03 serial-contains 'gotabwm: present'
+vgate_assert 03 serial-contains 'gotabwm: launcher open n='
+vgate_assert 03 serial-contains 'gotabwm: launcher filter q=calc n='
+vgate_assert 03 serial-contains 'gotabwm: launcher exec GOCALC.ELF'
+vgate_assert 03 serial-contains 'gotabwm: launcher dismiss'
+vgate_assert 03 serial-contains 'gocalc: declare accepted'
+vgate_assert 03 serial-contains 'gotabwm: close'
+vgate_assert 03 serial-contains 'gotabwm OK'
+vgate_assert 03 serial-contains 'wm: unregistered, shim resumed'
+vgate_assert 03 serial-contains 'rx-gotabwm-launch-ok'
+vgate_assert 03 serial-absent 'NOTEPAD.ELF'
+vgate_assert 03 serial-absent 'CALC.BIN'
+vgate_assert 03 serial-absent '[EXC] parking:'
+vgate_assert 03 serial-absent 'exited status=139'
+vgate_assert 03 python <<'PY'
+import os, sys
+share = os.environ["VG_SHARE"]
+manifest = open(os.path.join(share, "APPS.TXT"), errors="replace").read()
+bins = []
+for line in manifest.splitlines():
+    s = line.strip()
+    if not s or s.startswith("#") or "|" not in s:
+        continue
+    bins.append(s.split("|", 1)[0].strip())
+need = {"GOCALC.ELF", "NOTE.ELF", "GOEDIT.ELF", "GOFILES.ELF", "WEB.ELF"}
+if not need.issubset(set(bins)):
+    sys.exit("APPS.TXT missing daily set: %s" % sorted(need - set(bins)))
+if "GOSH.ELF" not in bins and "GOTERM.ELF" not in bins:
+    sys.exit("APPS.TXT missing GOSH.ELF and GOTERM.ELF")
+for bad in ("NOTEPAD.ELF", "CALC.BIN", "CALC.ELF", "FILE.ELF", "DESKTOP.ELF"):
+    if bad in bins:
+        sys.exit("APPS.TXT still offers %s" % bad)
+if "TABWM.BIN" in bins:
+    # named fallback is allowed; dock=true is not
+    for line in manifest.splitlines():
+        if line.strip().startswith("TABWM.BIN") and "dock=true" in line:
+            sys.exit("TABWM.BIN must not be a default dock target")
+ser = open(os.environ["VG_SER"], errors="replace").read().splitlines()
+def first_after(prefix):
+    for i, line in enumerate(ser):
+        if line.startswith(prefix):
+            return i
+    sys.exit("missing %s" % prefix)
+open_i = first_after("gotabwm: launcher open n=")
+filt_i = first_after("gotabwm: launcher filter q=calc n=")
+exec_i = first_after("gotabwm: launcher exec GOCALC.ELF")
+if filt_i <= open_i:
+    sys.exit("filter must follow open (open@%d filter@%d)" % (open_i, filt_i))
+if exec_i <= filt_i:
+    sys.exit("exec must follow filter (filter@%d exec@%d)" % (filt_i, exec_i))
+print("launcher open@%d filter@%d exec@%d catalog honest" % (
+    open_i, filt_i, exec_i))
 PY

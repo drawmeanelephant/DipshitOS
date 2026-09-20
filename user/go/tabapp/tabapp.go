@@ -18,7 +18,10 @@
 // logic stays plain unit-test surface.
 package tabapp
 
-import "virelai/vi"
+import (
+	"virelai/theme"
+	"virelai/vi"
+)
 
 // Config opens/starts a tab app. Name is THIS process's own executable name
 // (the WM ack-routing needs it); Title is the tab title.
@@ -134,3 +137,6 @@ func Scale(r Rect, fromW, fromH, toW, toH uint32) Rect {
 func (t *TabApp) Layout(r Rect, fromW, fromH uint32) Rect {
 	return Scale(r, fromW, fromH, t.W, t.H)
 }
+
+// FillRGB is the full-viewport clear colour from the Go token table (M69c).
+func FillRGB() uint32 { return theme.Current.Bg }

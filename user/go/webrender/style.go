@@ -1,19 +1,21 @@
 package webrender
 
-// Theme colors — the VirelaiOS desktop tokens the rest of the userland uses
-// (user/src/lib/ui/theme.zig, dark scheme). The browser chrome and the page
-// default share them so the window reads as one surface.
-const (
-	ColorPageBg    uint32 = 0x182026
-	ColorSurface   uint32 = 0x222d35
-	ColorText      uint32 = 0xe6edf3
-	ColorMuted     uint32 = 0x8b98a5
-	ColorAccent    uint32 = 0x3b82f6
-	ColorRule      uint32 = 0x2e3a44
-	ColorChromeBg  uint32 = 0x11171c
-	ColorChromeInk uint32 = 0xe6edf3
-	ColorError     uint32 = 0xef4444
-	ColorOK        uint32 = 0x3fb950
+import "virelai/theme"
+
+// Theme colors — imported from virelai/theme (M69c #1530) so WEB chrome and
+// the page default share the same table GOTABWM/NOTE/widgets draw from.
+// Assigned from Dark so the webrender goldens stay on the dark boot default.
+var (
+	ColorPageBg    = theme.Dark.Bg
+	ColorSurface   = theme.Dark.Surface
+	ColorText      = theme.Dark.Ink
+	ColorMuted     = theme.Dark.InkMuted
+	ColorAccent    = theme.Dark.Accent
+	ColorRule      = theme.Dark.Rule
+	ColorChromeBg  = theme.Dark.ChromeBg
+	ColorChromeInk = theme.Dark.Ink
+	ColorError     = theme.Dark.Danger
+	ColorOK        = theme.Dark.Ok
 )
 
 // Style is the resolved presentation of one element. There is exactly one

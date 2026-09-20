@@ -14,6 +14,8 @@
 // can record and the guest can back with vi.Filler.
 package widgets
 
+import "virelai/theme"
+
 // Rect is an axis-aligned rectangle in integer canvas coordinates. Right and
 // Bottom are exclusive, matching the compositor's left-inclusive convention.
 type Rect struct{ X, Y, W, H int }
@@ -135,12 +137,19 @@ func (t *Text) Draw(c Canvas) {
 
 // Button is a labelled, framed control. Its Bounds is the OUTER framing rect —
 // the same rect HitTest tests, so the border is grabbable.
+//
+// Face/Border/LabelRGB of 0 mean "use the theme table". Hover/press/focus
+// colours always come from the table (M69c #1530). Apps that already have
+// pointer events set Hovered/Pressed; this package does not add an event ABI.
 type Button struct {
 	R        Rect
 	Label    string
 	Face     uint32
 	Border   uint32
 	LabelRGB uint32
+	Hovered  bool
+	Pressed  bool
+	Focused  bool
 }
 
 // Bounds is the outer frame.
@@ -154,12 +163,41 @@ func (b *Button) Draw(c Canvas) {
 	if b.R.Empty() {
 		return
 	}
-	c.FillRect(b.R, b.Border)
-	inner := b.R.Inset(1)
+	face, border, label := b.colors()
+	c.FillRect(b.R, border)
+	inner := b.R.Inset(theme.Current.BorderW)
 	if !inner.Empty() {
-		c.FillRect(inner, b.Face)
-		drawGlyphRun(c, inner, b.Label, b.LabelRGB)
+		c.FillRect(inner, face)
+		drawGlyphRun(c, inner, b.Label, label)
 	}
+}
+
+// colors resolves idle/hover/press/focus from the token table. A non-zero
+// Face/Border/LabelRGB is an idle override (existing callers keep their hex
+// until they migrate); hover/press/focus still take contrast from the table.
+func (b *Button) colors() (face, border, label uint32) {
+	t := theme.Current
+	face, border, label = t.BtnIdle, t.Border, t.Text
+	if b.Face != 0 {
+		face = b.Face
+	}
+	if b.Border != 0 {
+		border = b.Border
+	}
+	if b.LabelRGB != 0 {
+		label = b.LabelRGB
+	}
+	switch {
+	case b.Pressed:
+		face = t.BtnPressed
+		border = t.Accent
+	case b.Hovered:
+		face = t.BtnHover
+		border = t.Accent
+	case b.Focused:
+		border = t.Accent
+	}
+	return face, border, label
 }
 
 // --- List -------------------------------------------------------------------

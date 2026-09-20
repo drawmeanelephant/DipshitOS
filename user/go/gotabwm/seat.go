@@ -29,6 +29,7 @@ package main
 import (
 	"unsafe"
 
+	"virelai/theme"
 	"virelai/vi"
 )
 
@@ -59,7 +60,7 @@ const (
 
 // blankRGB is the blank desktop's colour, packed 0x00RRGGBB as the fill seam
 // takes it (the scanout stores it B,G,R,X).
-const blankRGB uint32 = 0x1A1E2E
+func blankRGB() uint32 { return theme.Current.Bg }
 
 // maxTicks bounds the composite loop so a boot can never hang (~1 tick/s).
 // Three Go runtimes (this seat + two clients) fit max_tasks=16 (M65d /
@@ -112,7 +113,7 @@ func main() {
 	vi.ConsoleLine(MarkerScanout)
 
 	// 4. Composite the blank desktop.
-	_ = paintBlank(scan, blankRGB)
+	_ = paintBlank(scan, blankRGB())
 	vi.ConsoleLine(MarkerDraw)
 	vi.ConsoleLine(MarkerHolding)
 
@@ -122,6 +123,7 @@ func main() {
 	// closed — one marker line, then the seat runs on its own defaults. A
 	// marker only after its syscall returned.
 	loadSettings()
+	emitTokens()
 
 	// 5. The seat's OWN window lifecycle (M57b, issue #1317): open a Go
 	//    window, submit a chrome descriptor and a kernel-clamped rect, take
@@ -160,10 +162,13 @@ func main() {
 		// sits above it, so a full-frame blank paint would overpaint the client.
 		// With tabs, paint only the rail band.
 		if tabs.Count() == 0 {
-			_ = paintBlank(scan, blankRGB)
+			_ = paintBlank(scan, blankRGB())
 		} else {
 			_ = paintRail(scan, vi.ScanoutWidth, vi.ScanoutHeight, RailHeight, &tabs)
 			markRail()
+		}
+		if launch.open {
+			_ = paintLauncher(scan, vi.ScanoutWidth, vi.ScanoutHeight)
 		}
 		if vi.WmctlRequestPresent() == 0 {
 			presents++
@@ -266,6 +271,13 @@ func consumeSeatEvent(e vi.Event) bool {
 	if e.Kind == vi.EvWmKey {
 		vi.ConsoleLine(MarkerKey)
 		handleWmKey(e)
+		// Yield only when the launcher is closed: a hosted client (GOEDIT
+		// ctrl-s) needs a tick to drain KEY_DOWN before the next virtio
+		// chord. While the launcher is open, Sleep would drop the next
+		// type-to-filter report (observed: first `c` of `calc` vanished).
+		if !launch.open {
+			vi.Sleep(1)
+		}
 		return false
 	}
 	return e.Kind == vi.EvCompositeTick

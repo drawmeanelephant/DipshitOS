@@ -1,0 +1,167 @@
+// Package theme is the M69c (#1530) Go token table. Shipping Go widgets
+// and chrome import this instead of scattering hex. Values for dark match
+// user/src/lib/ui/theme.zig THEME_DARK (bg/surface/border/accent/buttons)
+// and CHROME_DARK caret/on-accent; light matches THEME_LIGHT. Tokens are
+// data, not a framework: no animation, no layout engine. Zig theme.zig stays.
+package theme
+
+// Tokens is one complete palette plus the spacing/border scale. Padding
+// and border contrast come from here, never from a one-off hex in an app.
+type Tokens struct {
+	Bg, Surface, Border           uint32
+	Text, Muted, Accent           uint32
+	BtnIdle, BtnHover, BtnPressed uint32
+	Success, Danger, Warning      uint32
+	OnAccent                      uint32
+	Caret, Selection, Gutter      uint32
+	// Ink / ChromeBg / Rule / Ok are the Go chrome extras NOTE and WEB
+	// already painted. They live on the table so those apps import one
+	// package rather than keep a parallel hex list.
+	Ink, ChromeBg, Rule, Ok    uint32
+	InkMuted                   uint32
+	PadXS, PadSM, PadMD, PadLG int
+	BorderW, FocusW            int
+}
+
+// Dark is the boot-default palette. Hexes are byte-identical to Zig
+// THEME_DARK / CHROME_DARK for bg, surface, border, text, muted, accent,
+// buttons, danger, caret, on-accent.
+var Dark = Tokens{
+	Bg:         0x182026,
+	Surface:    0x222d35,
+	Border:     0x334155,
+	Text:       0xffffff,
+	Muted:      0x94a3b8,
+	Accent:     0x3b82f6,
+	BtnIdle:    0x2d3748,
+	BtnHover:   0x4a5568,
+	BtnPressed: 0x1a202c,
+	Success:    0x22c55e,
+	Danger:     0xef4444,
+	Warning:    0xf59e0b,
+	OnAccent:   0xffffff,
+	Caret:      0x3b82f6,
+	Selection:  0x2a4460,
+	Gutter:     0x0b0e11,
+	Ink:        0xe6edf3,
+	InkMuted:   0x8b98a5,
+	ChromeBg:   0x11171c,
+	Rule:       0x2e3a44,
+	Ok:         0x3fb950,
+	PadXS:      2,
+	PadSM:      4,
+	PadMD:      8,
+	PadLG:      16,
+	BorderW:    1,
+	FocusW:     2,
+}
+
+// Light matches Zig THEME_LIGHT / CHROME_LIGHT. Applied when a Go client
+// reads schema-v2 `theme=light` from SETTINGS.TXT. No amber: no Go reader
+// of `theme=amber` exists yet (#1530 D3-adjacent).
+var Light = Tokens{
+	Bg:         0xf1f5f9,
+	Surface:    0xffffff,
+	Border:     0xcbd5e1,
+	Text:       0x0f172a,
+	Muted:      0x64748b,
+	Accent:     0x2563eb,
+	BtnIdle:    0xe2e8f0,
+	BtnHover:   0xcbd5e1,
+	BtnPressed: 0x94a3b8,
+	Success:    0x16a34a,
+	Danger:     0xdc2626,
+	Warning:    0xd97706,
+	OnAccent:   0xffffff,
+	Caret:      0x2563eb,
+	Selection:  0xbfdbfe,
+	Gutter:     0xe5e7eb,
+	Ink:        0x0f172a,
+	InkMuted:   0x64748b,
+	ChromeBg:   0xe2e8f0,
+	Rule:       0xcbd5e1,
+	Ok:         0x16a34a,
+	PadXS:      2,
+	PadSM:      4,
+	PadMD:      8,
+	PadLG:      16,
+	BorderW:    1,
+	FocusW:     2,
+}
+
+// Current is the active table. Boot default is Dark.
+var Current = Dark
+
+// Name is "dark" or "light" for the active table.
+func Name() string {
+	if Current.Bg == Light.Bg && Current.Accent == Light.Accent {
+		return "light"
+	}
+	return "dark"
+}
+
+// Set selects dark or light by the schema-v2 `theme=` value. Unknown names
+// are refused so a typo cannot silently invent a third palette.
+func Set(name string) bool {
+	switch name {
+	case "dark":
+		Current = Dark
+		return true
+	case "light":
+		Current = Light
+		return true
+	default:
+		return false
+	}
+}
+
+// ParseSettings returns the last `theme=dark|light` value in a SETTINGS.TXT
+// body, or "" when none is present. Amber is ignored (no Go reader).
+func ParseSettings(buf []byte) string {
+	i := 0
+	found := ""
+	for i < len(buf) {
+		eol := i
+		for eol < len(buf) && buf[eol] != '\n' {
+			eol++
+		}
+		line := buf[i:eol]
+		if len(line) > 6 && string(line[:6]) == "theme=" {
+			val := string(line[6:])
+			if len(val) > 0 && val[len(val)-1] == '\r' {
+				val = val[:len(val)-1]
+			}
+			if val == "dark" || val == "light" {
+				found = val
+			}
+		}
+		if eol < len(buf) {
+			i = eol + 1
+		} else {
+			break
+		}
+	}
+	return found
+}
+
+// ApplySettings sets Current from a SETTINGS.TXT body. Missing/unknown is
+// a no-op (Dark stays the boot default).
+func ApplySettings(buf []byte) bool {
+	name := ParseSettings(buf)
+	if name == "" {
+		return false
+	}
+	return Set(name)
+}
+
+// Hex6 formats v as 0xRRGGBB (six digits, no alpha). Guest-safe: no fmt.
+func Hex6(v uint32) string {
+	const digits = "0123456789abcdef"
+	var b [8]byte
+	b[0], b[1] = '0', 'x'
+	for i := 7; i >= 2; i-- {
+		b[i] = digits[v&0xf]
+		v >>= 4
+	}
+	return string(b[:])
+}

@@ -1,6 +1,10 @@
 package widgets
 
-import "testing"
+import (
+	"testing"
+
+	"virelai/theme"
+)
 
 // recordingCanvas captures every fill so a test can prove Draw read the same
 // rects HitTest uses.
@@ -57,6 +61,37 @@ func TestButtonHitTestAgreement(t *testing.T) {
 	}
 	if w.HitTest(80, 30) {
 		t.Fatal("right edge is exclusive")
+	}
+}
+
+func TestButtonThemeStates(t *testing.T) {
+	w := &Button{R: Rect{0, 0, 40, 16}, Label: "OK"}
+	idleF, idleB, _ := w.colors()
+	if idleF != theme.Current.BtnIdle || idleB != theme.Current.Border {
+		t.Fatalf("idle face/border %#x/%#x", idleF, idleB)
+	}
+	w.Hovered = true
+	_, hoverB, _ := w.colors()
+	if hoverB != theme.Current.Accent {
+		t.Fatalf("hover border %#x want accent", hoverB)
+	}
+	w.Pressed = true
+	pressF, pressB, _ := w.colors()
+	if pressF != theme.Current.BtnPressed || pressB != theme.Current.Accent {
+		t.Fatalf("press %#x/%#x", pressF, pressB)
+	}
+	c := &recordingCanvas{}
+	w.Draw(c)
+	if len(c.fills) == 0 || c.fills[0].rgb != theme.Current.Accent {
+		t.Fatalf("press draw border fill = %+v", c.fills)
+	}
+}
+
+func TestButtonIdleOverrideKeepsHex(t *testing.T) {
+	w := &Button{R: Rect{0, 0, 20, 10}, Face: 0x222222, Border: 0x888888, LabelRGB: 0xffffff}
+	face, border, label := w.colors()
+	if face != 0x222222 || border != 0x888888 || label != 0xffffff {
+		t.Fatalf("idle override lost: %#x %#x %#x", face, border, label)
 	}
 }
 

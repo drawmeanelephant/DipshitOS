@@ -3,6 +3,7 @@ package main
 import (
 	"testing"
 
+	"virelai/theme"
 	"virelai/vi"
 )
 
@@ -23,6 +24,12 @@ func TestMarkerShapes(t *testing.T) {
 		{MarkerOK, "gotabwm OK"},
 		{MarkerAltTab, "gotabwm: alt-tab id="},
 		{MarkerRailClick, "gotabwm: rail-click id="},
+		{MarkerTokens, "gotabwm: tokens "},
+		{MarkerLaunchOpen, "gotabwm: launcher open n="},
+		{MarkerLaunchFilter, "gotabwm: launcher filter q="},
+		{MarkerLaunchExec, "gotabwm: launcher exec "},
+		{MarkerLaunchDismiss, "gotabwm: launcher dismiss"},
+		{MarkerLaunchMissing, "gotabwm: launcher missing "},
 	}
 	for _, c := range cases {
 		if c.got != c.want {
@@ -32,8 +39,11 @@ func TestMarkerShapes(t *testing.T) {
 }
 
 func TestBlankColourIs24Bit(t *testing.T) {
-	if blankRGB&0xFF000000 != 0 {
-		t.Fatalf("blankRGB %#x sets the X byte; the scanout is B8G8R8X8", blankRGB)
+	if blankRGB()&0xFF000000 != 0 {
+		t.Fatalf("blankRGB %#x sets the X byte; the scanout is B8G8R8X8", blankRGB())
+	}
+	if blankRGB() != theme.Current.Bg {
+		t.Fatalf("blankRGB %#x want theme.Bg %#x", blankRGB(), theme.Current.Bg)
 	}
 }
 
