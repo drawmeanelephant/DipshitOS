@@ -106,6 +106,12 @@ filing, polling, or narrating on GitHub is time not spent on the card.
   with commits on the branch, not comment threads. A reply without code is
   owed only when the feedback is rejected — and then it states the
   technical reason once, not a negotiation.
+- **Never write a closing keyword next to an issue number unless you mean
+  it.** GitHub auto-closes on `close`/`fix`/`resolve #N` and does **not**
+  honour negation — "this PR does not close #N" closes #N (observed
+  2026-09-20: #1547's body closed #1543 one second after merge). To leave
+  a card open, write "leaves #N open". `Closes #N` appears exactly once:
+  in the landing PR of the claimed card, nowhere else.
 - **Heartbeats are for days, not minutes.** Append progress comments when
   the state actually changes across sessions, not as a liveblog of a
   single session. Nobody's gate reads your narration; everybody's gate
