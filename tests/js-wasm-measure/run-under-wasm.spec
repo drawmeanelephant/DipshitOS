@@ -3,10 +3,13 @@
 #   bash tests/js-wasm-measure/measure.sh
 #   VGATE_NO_BUILD=1 bash tools/gate/vgate.sh tests/js-wasm-measure/run-under-wasm.spec
 #
-# Observed 2026-09-19: `exec WASM.BIN ELK.WASM` prints `wasm: trap during exec`
-# and exits 3. Control with `-Wl,-z,stack-size=65536` still traps (see
-# run-stack64k.spec), so the 8 KiB C stack is not the cause. Remaining
-# inference: `max_frames = 32`.
+# Observed 2026-09-19: `exec WASM.BIN ELK.WASM` prints
+# `wasm: trap during exec kind=stack_overflow module=ELK.WASM offset=0x1980`
+# and exits 3. Control with `-Wl,-z,stack-size=65536` still traps the same
+# way (see run-stack64k.spec), so the 8 KiB C stack is not the cause. The
+# named class is the interpreter's control stack (`max_ctl = 64`), with only
+# 16 live frames at the trap — NOT `max_frames = 32` (M70d #1518; ADR 0028
+# amendment A1).
 
 vgate_name live-browser-js-measure "M70d #1456: Elk under WASM.BIN traps (measurement)"
 vgate_share seed
@@ -40,6 +43,7 @@ vgate_run 01 -- --script '$RUN_DIR/script.txt' --script-after "tasks user-el0 ex
 
 vgate_assert 01 serial-contains 'VirelaiOS kernel has seized control.'
 vgate_assert 01 serial-contains 'wasm: trap during exec'
+vgate_assert 01 serial-contains 'wasm: trap during exec kind=stack_overflow module=ELK.WASM offset=0x'
 vgate_assert 01 serial-contains 'tasks user-exec exited status=3'
 vgate_assert 01 serial-absent 'wasm: module too large'
 vgate_assert 01 serial-absent 'wasm: parse error'

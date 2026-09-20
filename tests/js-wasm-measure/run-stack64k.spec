@@ -1,6 +1,8 @@
 # Control: same Elk driver, wasm-ld C stack 64 KiB instead of 8 KiB.
-# NOT a fleet member. Observed 2026-09-19: still traps (exit 3). The 8 KiB
-# stack is falsified as the cause; remaining inference is max_frames=32.
+# NOT a fleet member. Observed 2026-09-19: still traps (exit 3) with the same
+# named class, `kind=stack_overflow` — the 8 KiB stack is falsified as the
+# cause. The cap that binds is the control stack (`max_ctl = 64`), not
+# `max_frames` (M70d #1518; ADR 0028 amendment A1).
 #
 #   STACK_SIZE=65536 bash tests/js-wasm-measure/measure.sh
 #   VGATE_NO_BUILD=1 bash tools/gate/vgate.sh tests/js-wasm-measure/run-stack64k.spec
@@ -37,6 +39,7 @@ vgate_run 01 -- --script '$RUN_DIR/script.txt' --script-after "tasks user-el0 ex
 
 vgate_assert 01 serial-contains 'VirelaiOS kernel has seized control.'
 vgate_assert 01 serial-contains 'wasm: trap during exec'
+vgate_assert 01 serial-contains 'wasm: trap during exec kind=stack_overflow module=ELK.WASM offset=0x'
 vgate_assert 01 serial-contains 'tasks user-exec exited status=3'
 vgate_assert 01 serial-absent 'wasm: module too large'
 vgate_assert 01 serial-absent 'wasm: parse error'
