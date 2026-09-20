@@ -420,7 +420,22 @@ vir_include internal/syscall/unix/nofollow_posix.go   "ELOOP for O_NOFOLLOW"
 # whether or not a socket can exist here.
 vir_include internal/syscall/unix/net.go              "Inet4/Inet6 poll wrappers"
 
-# --- 3g6. os/dir_unix.go's zero-inode skip (issue #1525) ---------------
+# --- 3g6. the rest of std, so `go build std` closes (issue #1525) ------
+# Measured after the first pass: six packages refused, and four of them
+# wanted nothing but the tag (the other two are `net` and its socktest
+# helper, which have no slots to call at all — a net port is its own arc,
+# it is not a missing include).
+vir_include path/filepath/path_unix.go        "Separator/Join/Abs/SplitList"
+vir_include os/exec/lp_unix.go                "LookPath + ErrNotFound (search works; spawn still refuses)"
+vir_include os/signal/signal_unix.go          "numSig/signum (no delivery; watchers see nothing)"
+vir_include os/user/lookup_unix.go            "/etc/passwd-shaped lookup (guest has none: honest error)"
+vir_include os/user/listgroups_unix.go        "group listing on the same file"
+vir_include crypto/internal/sysrand/rand_getrandom.go "read() over unix.GetRandom"
+# GetRandom itself comes from the overlay (getrandom_virelai.go) rather than
+# the stock Linux file, which reaches for a raw SYS_GETRANDOM trap number.
+vir_exclude internal/syscall/unix/getrandom.go "Linux trap numbers; port supplies GetRandom"
+
+# --- 3g7. os/dir_unix.go's zero-inode skip (issue #1525) ---------------
 # dir_unix.go drops a directory row whose inode is 0 unless the GOOS is
 # linux or wasip1, because some filesystems report 0 for real files. This
 # filesystem is one of them: an EL0 directory row (sys_dir_list) carries a
