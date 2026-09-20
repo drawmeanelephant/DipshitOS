@@ -1,17 +1,14 @@
 # go-hello.spec -- issue #1163, GOOS=virelai phase 0a: the gc Go runtime
-# runs on VirelaiOS — and (M70c-K, issue #1504) a Go image too big for the
-# 2 MiB staging buffer is STREAMED into its mapped pages instead of refused.
-#
-# Run 01: svc #0 console, sbrk heap over demand-backed sys_mmap, a GC
-# cycle, CNTPCT_EL0 time. Run 02: the >9 MiB GOBIG.ELF, whose banner is
-# read back at runtime from 1/4/8 MiB into the streamed payload. Run 03:
-# the two refusals by name — a file past the acceptance bound and a file
-# that ends before its own header promises. All on real VZ hardware.
+# runs on VirelaiOS. Runs 01-03 (M70c-K, #1504): svc #0 console + sbrk heap +
+# GC; a >9 MiB image STREAMED into its mapped pages; the two refusals by name.
+# Run 04 (M70c, #1455): the guest reads that same 9.5 MiB from the share
+# end to end at the ABI's 2048-byte read cap — bytes, call count and FNV hash
+# asserted against the file on macOS, the rate reported (ADR 0035 measures it).
 #
 # HOST PREREQUISITE (fails honestly when missing): not hermetic —
-# `.build/go/{GOHELLO,GOBIG}.ELF` must exist first, via `bash
-# tools/go/build-go.sh tools/go/hello.go tools/go/gobig.go` (fork
-# prerequisites in tools/go/README.md); the setup hook says the same.
+# `.build/go/{GOHELLO,GOBIG,GOREAD}.ELF` must exist first, via `bash
+# tools/go/build-go.sh tools/go/hello.go tools/go/gobig.go tools/go/goread.go`
+# (fork prerequisites in tools/go/README.md); the setup hook says the same.
 # exec-order: assert-proven — a run cannot go green without the program's own output. See tools/gate/SPEC.md.
 
 vgate_name go-hello "issue #1163 GOOS=virelai phase 0a: gc Go runtime first target on VZ"
@@ -36,14 +33,25 @@ exec XL.ELF
 exec TRUNC.ELF
 EOF
 
+# M70c (#1455) run 04: GOREAD.ELF reads GOBIG.ELF back out of the share, end
+# to end, at the guest SDK's own chunk size (vsys.MaxFileIOBytes = the kernel's
+# 2048-byte per-call read cap). It hashes every byte as it arrives and prints
+# what that cost; the host recomputes the hash and the call arithmetic over the
+# file it staged. Nothing here is timing-dependent — the rate is reported, not
+# asserted.
+vgate_file script4.txt <<'EOF'
+exec GOREAD.ELF /host/GOBIG.ELF
+EOF
+
 vgate_setup_python <<'PY'
 import os, shutil, sys
 share = os.path.join(os.environ["RUN_DIR"], "share")
-srcs = [".build/go/GOHELLO.ELF", ".build/go/GOBIG.ELF"]
+srcs = [".build/go/GOHELLO.ELF", ".build/go/GOBIG.ELF", ".build/go/GOREAD.ELF"]
 missing = [p for p in srcs if not os.path.exists(p)]
 if missing:
     sys.exit("%s missing — build the fork binaries first: "
              "bash tools/go/build-go.sh tools/go/hello.go tools/go/gobig.go "
+             "tools/go/goread.go "
              "(fork prerequisites in tools/go/README.md)" % ", ".join(missing))
 for src in srcs:
     dst = os.path.join(share, os.path.basename(src))
@@ -153,4 +161,60 @@ pages = int(m.group(1))
 if pages < 2048:
     sys.exit("FAIL: datapages=%d; an 8 MiB data segment needs >= 2048 pages" % pages)
 print("streamed 8 MiB data segment mapped: datapages=%d" % pages)
+PY
+
+# M70c (#1455) run 04: the transfer half of the card's "measure the honest
+# transfer and mmap story" — the guest reads a multi-MB file out of the host
+# share with nothing staged in between.
+#
+# The assert is the guest's own byte stream, held to the file on macOS: the
+# exact byte count, the call count the kernel's 2048-byte per-call read cap
+# implies (ceil(bytes/2048) — reachable only if a call really moves 2048 B),
+# and the FNV-1a hash of the bytes READ. A short read, a dropped chunk, a
+# read from the wrong offset or a page of zeros all produce a different hash,
+# and none of them can be printed into place. The rate is extracted and
+# reported (it lands in this run's log, which is what ADR 0035 quotes); it is
+# deliberately NOT asserted, because a throughput is a property of the machine.
+vgate_run 04 -- --script '$RUN_DIR/script4.txt' --script-expect 'goread: GOREAD OK' --timeout 300
+
+vgate_assert 04 serial-contains 'VirelaiOS kernel has seized control.'
+vgate_assert 04 serial-contains 'exec: loaded GOREAD.ELF'
+vgate_assert 04 serial-contains 'goread: GOREAD OK'
+vgate_assert 04 serial-absent 'goread: FAIL'
+vgate_assert 04 serial-absent '[EXC] parking:'
+vgate_assert 04 serial-absent 'exited status=139'
+vgate_assert 04 python <<'PY'
+import os, re, sys
+share = os.environ.get("VG_SHARE") or os.path.join(os.environ["RUN_DIR"], "share")
+src = os.path.join(share, "GOBIG.ELF")
+if not os.path.exists(src):
+    sys.exit("FAIL: the fixture run 04 reads is missing: " + src)
+n = os.path.getsize(src)
+calls = (n + 2047) // 2048  # one kernel read call moves at most 2048 bytes
+h = 0xcbf29ce484222325
+with open(src, "rb") as fh:
+    while True:
+        b = fh.read(1 << 20)
+        if not b:
+            break
+        for byte in b:
+            h = ((h ^ byte) * 0x100000001b3) & 0xFFFFFFFFFFFFFFFF
+ser = open(os.environ["VG_SER"], errors="replace").read()
+want = "goread: file /host/GOBIG.ELF bytes %d calls %d max 2048" % (n, calls)
+if want not in ser:
+    sys.exit("FAIL: the guest's exact read line is absent.\n  want: %r\n"
+             "  (a shorter call count means the kernel moved more than 2048 B per "
+             "read, or the file the guest read is not the file on macOS)" % want)
+if ("goread: fnv 0x%016x" % h) not in ser:
+    sys.exit("FAIL: the guest hashed different bytes than the file on macOS "
+             "(want 0x%016x)" % h)
+m = re.search(r"goread: rate us (\d+) kib_s (\d+) ns_call (\d+)", ser)
+if not m:
+    sys.exit("FAIL: no `goread: rate` line — the measurement did not report")
+us, kib, ns = (int(x) for x in m.groups())
+if us <= 0 or kib <= 0 or ns <= 0:
+    sys.exit("FAIL: the rate line is zero: " + m.group(0))
+print("read %d B from the share in %d calls at the 2048-byte cap: %d us -> %d KiB/s (%d ns/call)"
+      % (n, calls, us, kib, ns))
+print("fnv 0x%016x matches the file on macOS" % h)
 PY

@@ -418,6 +418,15 @@ Non-PCI platform facts:
   DSK1/DSK3/contiguous-ELF/PT_INTERP images, which are still refused past
   it. The image-independent ceiling is the physical allocator: 256 MiB of
   guest RAM, against a 32 MiB acceptance bound on the file.
+- **A guest read of the host share costs one round trip per 2 KiB, and runs
+  at ~30 MB/s.** [observed] `go-hello` run 04 has the guest read a 9,502,880 B
+  image out of the share end to end: 4,641 `sys_file_read` calls (exactly
+  `ceil(bytes/2048)`), 298,379 µs, ~31,100 KiB/s, 64,292 ns per call measured
+  from EL0 with CNTPCT_EL0. The 2048-byte per-call cap is the EL0 surface's
+  (`kernel/src/syscall.zig`), not the wire's — `virtio_file.reply_cap` is
+  32 KiB — so a payload is served in ~15× more round trips than the wire
+  would need. Writes are capped the same way (2048 B). `mmap` story:
+  ADR 0035.
 - The project targets Apple silicon / Virtualization.framework only; there
   is no QEMU path.
 

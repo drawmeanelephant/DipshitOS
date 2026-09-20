@@ -47,9 +47,10 @@ for p in (r"peer: sees [0-9]+ COUNTER.BIN running",
     if not re.search(p, ser):
         sys.exit("FAIL: ERE absent: %s" % p)
 # Monitor's own read: both running, distinct tasks + stacks.
+# Procs rows grew uid/caps (M50) between name and state.
 def first_row(name):
     for l in lines:
-        if re.search(r"procs: id=[0-9]+ name=%s state=running" % name, l):
+        if re.search(r"procs: id=[0-9]+ name=%s uid=\d+ caps=\d+ state=running" % name, l):
             return l
     return None
 pr, cr = first_row("PEER.BIN"), first_row("COUNTER.BIN")
@@ -78,8 +79,8 @@ if echoes[-1] > sends[-1]:
 # Both STILL running; neither ever exited (exact-zero counts).
 if first_row("PEER.BIN") is None or first_row("COUNTER.BIN") is None:
     sys.exit("FAIL: final running rows absent")
-if (sum(1 for l in lines if "name=PEER.BIN state=exited" in l) != 0 or
-        sum(1 for l in lines if "name=COUNTER.BIN state=exited" in l) != 0):
+if (sum(1 for l in lines if re.search(r"name=PEER\.BIN uid=\d+ caps=\d+ state=exited", l)) != 0 or
+        sum(1 for l in lines if re.search(r"name=COUNTER\.BIN uid=\d+ caps=\d+ state=exited", l)) != 0):
     sys.exit("FAIL: a party exited")
 print("procs-syscall snapshot + flow ok")
 PY
