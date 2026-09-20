@@ -7,24 +7,26 @@ import (
 	"virelai/webrender"
 )
 
-// Text plumbing for the browser: load the two faces the Zig userland loads,
-// pick a text engine, and republish what was chosen on the serial line so a
-// gate can assert the page is not silently back on the 8x8 grid.
+// Text plumbing for the browser: load the faces the share stages, pick a text
+// engine, and republish what was chosen on the serial line so a gate can assert
+// the page is not silently back on the 8x8 grid.
 
-// The faces, at the same share paths the Zig userland probes
-// (user/src/lib/ui/draw.zig init_fonts: /host/INTER.TTF, /host/FIRACODE.TTF).
-// The gate seeds them with tools/lib/gate-run.sh's `vgate_share seed`.
+// Share names frozen by M69d #1531 D1. Zig ui.init_fonts (#1536) consumes the
+// same paths; this card only reads them.
 const (
-	fontUIPath   = "/host/INTER.TTF"
-	fontMonoPath = "/host/FIRACODE.TTF"
+	fontUIPath     = "/host/INTER.TTF"
+	fontBoldPath   = "/host/INTERB.TTF"
+	fontItalicPath = "/host/INTERI.TTF"
+	fontMonoPath   = "/host/FIRACODE.TTF"
 )
 
-// maxFontBytes bounds one face read. Inter ships at 411,640 bytes and Fira
-// Code at 289,624, so 512 KiB holds both with room for a slightly larger
-// licensed build. It is deliberately NOT vi.MaxFileBytes (256 KiB): that cap is
-// a policy for the browser's PAGE loads, and reusing it here silently truncated
-// Inter in half and dropped the renderer back onto the bitmap. A face past this
-// bound fails to parse and the renderer falls back — visible, never blank.
+// maxFontBytes bounds one face read. Inter Regular is 411,640 bytes, Bold
+// 420,428, Italic 417,388, Fira Code 289,624 — 512 KiB holds each with room
+// for a slightly larger licensed build. It is deliberately NOT vi.MaxFileBytes
+// (256 KiB): that cap is a policy for the browser's PAGE loads, and reusing it
+// here silently truncated Inter in half and dropped the renderer back onto the
+// bitmap. A face past this bound fails to parse and the renderer falls back —
+// visible, never blank.
 const maxFontBytes = 512 * 1024
 
 // maxImageBytes bounds one <img> read from the share.
@@ -58,13 +60,15 @@ func readWholeFile(path string, max int) []byte {
 	return out
 }
 
-// loadTextEngine loads both faces and returns the engine to render with. Any
-// failure (a missing face, a short read, a rejected font) simply leaves that
-// face out, which is how the renderer reaches its documented fallback.
+// loadTextEngine loads the staged faces and returns the engine to render with.
+// Any failure (a missing face, a short read, a rejected font) simply leaves
+// that face out, which is how the renderer reaches its documented fallback.
 func loadTextEngine() (webrender.Fonts, string, string) {
 	ui := readWholeFile(fontUIPath, maxFontBytes)
 	mono := readWholeFile(fontMonoPath, maxFontBytes)
-	f := webrender.NewFonts(ui, mono)
+	bold := readWholeFile(fontBoldPath, maxFontBytes)
+	italic := readWholeFile(fontItalicPath, maxFontBytes)
+	f := webrender.LoadFonts(webrender.FontFiles{UI: ui, Mono: mono, Bold: bold, Italic: italic})
 	uiState := "truetype"
 	if f.UI == nil {
 		uiState = "missing"
@@ -92,6 +96,18 @@ func textProbeString(t webrender.TextEngine) string {
 	body := webrender.Style{Size: 1, Color: webrender.ColorText}
 	h1 := webrender.Style{Size: 2, Color: webrender.ColorText}
 	mono := webrender.Style{Size: 1, Mono: true}
+	boldFace, boldHeavier, italicFace := "no", "no", "no"
+	if f, ok := t.(webrender.Fonts); ok {
+		if f.Bold != nil {
+			boldFace = "yes"
+			if f.BoldHeavier() {
+				boldHeavier = "yes"
+			}
+		}
+		if f.Italic != nil {
+			italicFace = "yes"
+		}
+	}
 	return "face=" + t.Name() +
 		" proportional=" + boolStr(t.Proportional()) +
 		" body-lineh=" + itoa(t.LineHeight(body)) +
@@ -99,7 +115,10 @@ func textProbeString(t webrender.TextEngine) string {
 		" mono-lineh=" + itoa(t.LineHeight(mono)) +
 		" adv-i=" + itoa(t.Measure("i", body)) +
 		" adv-W=" + itoa(t.Measure("W", body)) +
-		" adv-space=" + itoa(t.Measure(" ", body))
+		" adv-space=" + itoa(t.Measure(" ", body)) +
+		" bold-face=" + boldFace +
+		" bold-heavier=" + boldHeavier +
+		" italic-face=" + italicFace
 }
 
 // resolveImage supplies <img> bytes to the renderer. Layout never reads a file

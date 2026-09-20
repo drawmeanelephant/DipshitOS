@@ -137,11 +137,23 @@ gate_seed_share() {
     if [ -f image/WALLPAPER.QOI ]; then
         cp image/WALLPAPER.QOI "$SHARE/WALLPAPER.QOI"
     fi
-    # 5. TrueType fonts (Inter for UI, Fira Code for Monospace / terminal).
+    # 5. TrueType fonts (Inter Regular/Bold/Italic for UI, Fira Code for mono).
+    # Share names frozen by M69d #1531 D1: INTER.TTF, INTERB.TTF, INTERI.TTF,
+    # FIRACODE.TTF. Zig ui.init_fonts (#1536) consumes the same names.
     if [ -f image/fonts/Inter-Regular.ttf ]; then
         cp image/fonts/Inter-Regular.ttf "$SHARE/INTER.TTF"
     elif [ -f FONTS-CHOOSE/Inter-4.1/extras/ttf/Inter-Regular.ttf ]; then
         cp FONTS-CHOOSE/Inter-4.1/extras/ttf/Inter-Regular.ttf "$SHARE/INTER.TTF"
+    fi
+    if [ -f image/fonts/Inter-Bold.ttf ]; then
+        cp image/fonts/Inter-Bold.ttf "$SHARE/INTERB.TTF"
+    elif [ -f FONTS-CHOOSE/Inter-4.1/extras/ttf/Inter-Bold.ttf ]; then
+        cp FONTS-CHOOSE/Inter-4.1/extras/ttf/Inter-Bold.ttf "$SHARE/INTERB.TTF"
+    fi
+    if [ -f image/fonts/Inter-Italic.ttf ]; then
+        cp image/fonts/Inter-Italic.ttf "$SHARE/INTERI.TTF"
+    elif [ -f FONTS-CHOOSE/Inter-4.1/extras/ttf/Inter-Italic.ttf ]; then
+        cp FONTS-CHOOSE/Inter-4.1/extras/ttf/Inter-Italic.ttf "$SHARE/INTERI.TTF"
     fi
     if [ -f image/fonts/FiraCode-Regular.ttf ]; then
         cp image/fonts/FiraCode-Regular.ttf "$SHARE/FIRACODE.TTF"

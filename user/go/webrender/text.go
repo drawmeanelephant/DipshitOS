@@ -56,30 +56,81 @@ const (
 
 // Fonts is the TrueType-backed engine. The zero value has no faces and behaves
 // exactly like Bitmap, so a renderer that failed to load anything still paints.
+//
+// Bold and Italic are optional. When they are present, Style.Bold / Style.Italic
+// select them; when they are absent, Bold falls back to a 1-px second strike
+// and Italic falls back to the UI face (ADR 0028 D4, amended M69d #1531).
 type Fonts struct {
-	UI   *ttf.Face // Inter (proportional)
-	Mono *ttf.Face // Fira Code (monospace)
+	UI     *ttf.Face // Inter Regular (proportional)
+	Mono   *ttf.Face // Fira Code (monospace)
+	Bold   *ttf.Face // Inter Bold; optional
+	Italic *ttf.Face // Inter Italic; optional
 }
 
-// NewFonts parses the two optional faces. A face that fails to parse is simply
-// absent — the caller reports it, the renderer falls back, and nothing panics.
+// FontFiles is the byte source for LoadFonts. Any field may be empty or
+// unparseable; the corresponding face is then simply absent.
+type FontFiles struct {
+	UI, Mono, Bold, Italic []byte
+}
+
+func parseOptionalFace(b []byte) *ttf.Face {
+	if len(b) == 0 {
+		return nil
+	}
+	face, err := ttf.Parse(b)
+	if err != nil {
+		return nil
+	}
+	return face
+}
+
+// NewFonts parses the two original faces. Prefer LoadFonts when Bold/Italic
+// bytes are available; this wrapper stays so existing call sites keep compiling.
 func NewFonts(ui, mono []byte) Fonts {
-	var f Fonts
-	if len(ui) > 0 {
-		if face, err := ttf.Parse(ui); err == nil {
-			f.UI = face
-		}
+	return LoadFonts(FontFiles{UI: ui, Mono: mono})
+}
+
+// LoadFonts parses each optional face. A face that fails to parse is simply
+// absent — the caller reports it, the renderer falls back, and nothing panics.
+func LoadFonts(files FontFiles) Fonts {
+	return Fonts{
+		UI:     parseOptionalFace(files.UI),
+		Mono:   parseOptionalFace(files.Mono),
+		Bold:   parseOptionalFace(files.Bold),
+		Italic: parseOptionalFace(files.Italic),
 	}
-	if len(mono) > 0 {
-		if face, err := ttf.Parse(mono); err == nil {
-			f.Mono = face
-		}
-	}
-	return f
 }
 
 // Loaded reports whether any TrueType face is available.
-func (f Fonts) Loaded() bool { return f.UI != nil || f.Mono != nil }
+func (f Fonts) Loaded() bool {
+	return f.UI != nil || f.Mono != nil || f.Bold != nil || f.Italic != nil
+}
+
+func glyphCover(face *ttf.Face, r rune, px int) int {
+	if face == nil {
+		return 0
+	}
+	m, _, err := face.Glyph(face.GlyphIndex(r), px)
+	if err != nil || m.Empty() {
+		return 0
+	}
+	n := 0
+	for _, a := range m.Alpha {
+		n += int(a)
+	}
+	return n
+}
+
+// BoldHeavier reports whether Inter Bold's stems cover more than Regular at
+// body size. Inter matches advances across weights, so Measure cannot tell
+// Bold from Regular; a 1-px synthetic strike cannot raise coverage this way.
+func (f Fonts) BoldHeavier() bool {
+	if f.UI == nil || f.Bold == nil {
+		return false
+	}
+	px := f.px(Style{Size: 1})
+	return glyphCover(f.Bold, 'n', px) > glyphCover(f.UI, 'n', px)
+}
 
 // Proportional reports whether the engine has real per-glyph advances.
 func (f Fonts) Proportional() bool { return f.UI != nil }
@@ -98,11 +149,18 @@ func (f Fonts) Name() string {
 }
 
 // face is the face a style renders with: the monospace face for a mono style
-// that has one, otherwise the UI face. nil means "no TrueType face for this
-// style" and the caller falls back to the bitmap.
+// that has one, otherwise Bold/Italic when requested and loaded, otherwise the
+// UI face. nil means "no TrueType face for this style" and the caller falls
+// back to the bitmap. There is no Bold-Italic face; Bold wins if both are set.
 func (f Fonts) face(st Style) *ttf.Face {
 	if st.Mono && f.Mono != nil {
 		return f.Mono
+	}
+	if st.Bold && f.Bold != nil {
+		return f.Bold
+	}
+	if st.Italic && f.Italic != nil {
+		return f.Italic
 	}
 	return f.UI
 }
@@ -175,9 +233,9 @@ func (f Fonts) Paint(s Surface, x, top int, text string, st Style, rgb uint32, c
 		}
 		if !m.Empty() {
 			blitMask(s, c, pen+m.BearingX, baseline-m.BearingY, m, rgb)
-			if st.Bold {
-				// No bold face exists; a second strike one pixel over is the
-				// same synthetic bold the Zig renderer uses.
+			if st.Bold && f.Bold == nil {
+				// No bold face loaded: keep the 1-px second strike. Dead
+				// when INTERB.TTF parsed (M69d #1531).
 				blitMask(s, c, pen+m.BearingX+1, baseline-m.BearingY, m, rgb)
 			}
 		}
