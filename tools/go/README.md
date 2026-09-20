@@ -41,7 +41,8 @@ tracking each release. The maintenance surface here is deliberately tiny:
 ```bash
 bash tools/go/apply.sh            # create/patch the fork (../go-virelai)
 just go-toolchain                  # builds .build/go/{GOHELLO,GOARGS,GOROUT,GOSTRESS,GOPANIC,GOBIG,GOREAD,GOSYSCALL,GOSELFHOST}.ELF
-just gate go-hello                 # class-B VZ gate: execs it, asserts serial
+just gate go-hello                 # class-B VZ gate: fixtures (runs 01-05), the guest's
+                                   #   own toolchain (06-08), the daily loop (09-10)
 just gate go-args                  # class-B VZ gate: raw-ELF argv + envp / GOMAXPROCS
 just gate go-goroutines            # class-B VZ gate: threads/futex + cross-core
 just gate go-stress                # class-B VZ gate: GC / channel / timer / futex breadth
@@ -62,6 +63,38 @@ The fork lives OUTSIDE the repo (`../go-virelai` by default; `--fork-dir`
 or `GO_FORK_DIR` to move it) — it is a build artifact; this directory is
 the reviewable patch series. `GOTOOLCHAIN=local` is exported by
 `build-go.sh` so cmd/go can never silently swap back to a stock toolchain.
+
+## Daily loop (M69e, issue #1532)
+
+Everything above is a build manual. This is the product loop it serves, and it
+has three steps — **the middle one is not the guest's**:
+
+1. **Edit.** In GOSH, or in NOTE/GOEDIT, write a `.go` file into `/host` (the
+   share). From a boot script the monitor's own verb does it:
+   `write LOOP.GO 'package main; func main() { println("hi") }'` — it joins its
+   arguments, appends no newline, and reports the bytes it persisted.
+2. **Compile — on the Mac.** `bash tools/go/build-go.sh <program.go>` (or
+   `just go-toolchain` for the pinned fixtures), then the ELF is in the share.
+   The guest did not compile it, and nothing may suggest it did.
+3. **Run.** `exec LOOP.ELF` on the guest console, or the same line inside GOSH.
+   The image is read out of the share at load time.
+
+`go-hello` runs 09-10 are this loop as a class-B gate, and they sequence it:
+run 09 has the guest author `/host/LOOP.GO`, the spec's python hook on run 09
+builds **that file** on the Mac (asserts are evaluated between runs, so the
+compile really does sit after the edit and before the run), and run 10 executes
+the image the Mac built from the guest's own bytes. The host prints
+`loop: host-built GOOS=virelai LOOP.ELF …` into the gate log; the hook refuses
+when `$GO_FORK_DIR/bin/go` is missing, so no `make.bash` runs inside a gate.
+Both runs assert that receipt absent from the guest's serial, which is how D1
+("the compiler is the Mac") is pinned rather than promised.
+
+**What is still not the loop**: a guest-driven `go build`. M70c S1/S2 landed
+(#1543/#1544): the guest's own `cmd/compile` and `cmd/link` build and link
+`tools/go/hello.go` (`go-hello` runs 06-08, `live-selfhost-go`), but their
+inputs — the import config and the 29 package archives — are staged by the host
+into the share (`tools/go/stage-selfhost.sh`), and a `go` command driving that
+from inside the guest is a later card (ADR 0035 amendment 9).
 
 ## Phase map (issue #1163 / #1194)
 
