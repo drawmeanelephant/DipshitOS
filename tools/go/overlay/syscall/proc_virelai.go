@@ -79,6 +79,28 @@ func StartProcess(argv0 string, argv []string, attr *ProcAttr) (pid int, handle 
 	return 0, 0, ENOSYS
 }
 
+// Exec has no slot either, and the nearest thing is NOT a stand-in for it.
+//
+// `syscall.Exec` is execve: replace THIS process's image and never return on
+// success. The kernel does have an exec seam — sys_exec, slot 28 (ADR 0007)
+// — but its documented job is to load a program into a FRESH process slot and
+// spawn it at EL0, i.e. it is a spawn, not a replace. Forwarding to it would
+// produce a child while the caller kept running its old image, which is the
+// opposite of what the caller asked for; that is a lie with a plausible-
+// looking pid attached, not an implementation. Returning ENOSYS tells the
+// truth: this GOOS has no way to become another program.
+//
+// The one caller reached in practice is cmd/link's execArchive, which shells
+// out to an external archiver only for cgo/external linking. Nothing on the
+// virelai path takes that branch, so this is a link-time symbol that the
+// in-guest compile never calls — the same shape as StartProcess above.
+//
+// (Stock's version lives in syscall/exec_unix.go, tagged `unix`, which this
+// GOOS does not select.)
+func Exec(argv0 string, argv []string, envv []string) (err error) {
+	return ENOSYS
+}
+
 // Wait4 has no slot: the guest's process table is read through sys_procs
 // (slot 22) and reaped by the kernel, not by a wait4-shaped call.
 func Wait4(pid int, wstatus *WaitStatus, options int, rusage *Rusage) (wpid int, err error) {
