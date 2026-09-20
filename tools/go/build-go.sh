@@ -76,6 +76,8 @@ for prog in "${@:-$REPO/tools/go/hello.go}"; do
         gobig)      base="GOBIG" ;;
         goread)     base="GOREAD" ;;
         gosyscall)  base="GOSYSCALL" ;;
+        # M70c-S2 (#1544): the in-guest build-loop driver.
+        selfhost)   base="GOSELFHOST" ;;
     esac
     out="$out_dir/${GO_BUILD_NAME:-$base}.ELF"
     # The gap loader gives a program a FIXED text aperture, so image size is
@@ -95,6 +97,9 @@ for prog in "${@:-$REPO/tools/go/hello.go}"; do
         # M70c-S1P (#1525): the syscall-layer fixture — the std `syscall`
         # package for GOOS=virelai, which is smaller than `vi` but not small.
         GOSYSCALL) strip="-s -w" ;;
+        # M70c-S2 (#1544): the driver links `vi` (Exec/Wait/Probe) and `vsys`,
+        # the same order of surface GOREAD links.
+        GOSELFHOST) strip="-s -w" ;;
     esac
     log "building $prog -> $out (ldflags: $strip)"
     GOOS=virelai GOARCH=arm64 go build -o "$out" \
