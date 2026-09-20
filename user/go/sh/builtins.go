@@ -3,6 +3,7 @@
 package main
 
 import (
+	"sort"
 	"strings"
 
 	"virelai/vsys"
@@ -405,13 +406,176 @@ func bHistory(c *cmdCtx) int {
 	return 0
 }
 
+// --- ADR 0008 D1 discovery for the guest verbs (#1538) -------------------
+//
+// The milestone-eight ADR pinned a grouped catalog, `help <cmd>` and topic
+// pages for the kernel monitor. GOSH's `help` was one concatenated line of
+// names -- fine for a gate grep, useless when you are sitting in the shell.
+// The table below is that catalog for the verbs this shell actually runs.
+//
+// It is DATA, not a second command table: a class-A test pins that every
+// builtin, every toolbox tool and the one external has exactly one row, and
+// that every row names a verb that exists, so the catalog cannot drift away
+// from the tables it describes.
+
+// helpEntry is one catalog row: the group `help` lists the verb under, the
+// D1 usage string, and the one-line blurb `help <cmd>` prints.
+type helpEntry struct {
+	group string
+	usage string
+	blurb string
+	// notes is the extra description line `help <cmd>` appends (D1's "a few
+	// lines of description"). Empty for most verbs.
+	notes string
+}
+
+// helpGroups fixes the catalog's section order. A group with no members is
+// skipped, so a build with a trimmed table still prints a coherent catalog.
+var helpGroups = []string{"shell", "files", "environment", "scripts", "jobs", "identity"}
+
+// helpExternal is the one non-builtin verb that gets a row: `exec` is
+// resolved by the engine's parser, not by the builtin map, and it is where a
+// daily user looks for "how do I run a program".
+const helpExternal = "exec"
+
+// subsetBlurb is the scripting subset's one-line contract (M68a). Kept
+// verbatim: it describes what the engine really runs.
+const subsetBlurb = "one pipe per line, > >> < redirects, $VAR ${VAR} $?"
+
+var helpCatalog = map[string]helpEntry{
+	// shell
+	"clear":   {group: "shell", usage: "clear", blurb: "clear the tty screen"},
+	"echo":    {group: "shell", usage: "echo [ARG...]", blurb: "write ARG... separated by single spaces and a newline", notes: "The engine expands $VAR, ${VAR} and $? before echo runs."},
+	"exit":    {group: "shell", usage: "exit [STATUS]", blurb: "leave GOSH with STATUS (the last status when omitted)"},
+	"help":    {group: "shell", usage: "help [CMD|GROUP]", blurb: "the grouped catalog, or one verb's usage and description"},
+	"history": {group: "shell", usage: "history", blurb: "list this session's submitted lines, oldest first"},
+	"monitor": {group: "shell", usage: "monitor", blurb: "hand the console back to the kernel monitor"},
+
+	// files
+	"cat":    {group: "files", usage: "cat [FILE...]", blurb: "write FILE... (the bound stdin when none is named)"},
+	"cd":     {group: "files", usage: "cd [DIR]", blurb: "change the working directory (checked against the share)"},
+	"pwd":    {group: "files", usage: "pwd", blurb: "print the working directory"},
+	"read":   {group: "files", usage: "read VAR", blurb: "read one line into VAR, preferring the bound stdin"},
+	"source": {group: "files", usage: "source FILE", blurb: "run FILE's lines in this shell"},
+	".":      {group: "files", usage: ". FILE", blurb: "run FILE's lines in this shell (source)"},
+
+	// environment
+	"env":      {group: "environment", usage: "env", blurb: "list the environment as NAME=VALUE"},
+	"printenv": {group: "environment", usage: "printenv [NAME...]", blurb: "print the named variables' values"},
+	"set":      {group: "environment", usage: "set [NAME=VALUE]", blurb: "set a variable, or list the environment", notes: "`set -o` is refused: this shell has one fixed editing model, no vi mode."},
+	"unset":    {group: "environment", usage: "unset NAME", blurb: "remove one variable"},
+	"export":   {group: "environment", usage: "export [NAME=VALUE]", blurb: "set a variable and pass it to executed children"},
+
+	// scripts
+	"true":     {group: "scripts", usage: "true", blurb: "succeed (status 0)"},
+	"false":    {group: "scripts", usage: "false", blurb: "fail (status 1)"},
+	"break":    {group: "scripts", usage: "break", blurb: "leave the innermost for/while loop"},
+	"continue": {group: "scripts", usage: "continue", blurb: "skip to the innermost loop's next iteration"},
+
+	// jobs
+	"jobs":  {group: "jobs", usage: "jobs", blurb: "list the shell's jobs (done jobs are reaped as they are shown)"},
+	"fg":    {group: "jobs", usage: "fg N", blurb: "bring job N to the foreground and wait for it"},
+	"sleep": {group: "jobs", usage: "sleep SECONDS", blurb: "park the shell for SECONDS (0..60)"},
+
+	// identity (ADR 0024)
+	"whoami":  {group: "identity", usage: "whoami", blurb: "print the caller's principal"},
+	"id":      {group: "identity", usage: "id", blurb: "print the caller's principal and capability mask"},
+	"chmod":   {group: "identity", usage: "chmod MODE FILE", blurb: "owner-only mode change on FILE"},
+	"secrets": {group: "identity", usage: "secrets", blurb: "list the caller's store entry names (values stay in the kernel)"},
+
+	// tools (M49 SD3 multicall set; usages mirror the mistyped-invocation text)
+	"wc":     {group: "tools", usage: "wc [-l|-w|-c] [FILE...]", blurb: "count lines, words and bytes"},
+	"head":   {group: "tools", usage: "head [-n LINES] [FILE...]", blurb: "write the first LINES of each input"},
+	"tail":   {group: "tools", usage: "tail [-n LINES] [FILE...]", blurb: "write the last LINES of each input"},
+	"grep":   {group: "tools", usage: "grep [-i] PATTERN [FILE...]", blurb: "write the lines that match PATTERN (-i folds case)"},
+	"sort":   {group: "tools", usage: "sort [-r] [-u] [FILE...]", blurb: "sort lines (-r reverses, -u removes duplicates)"},
+	"cut":    {group: "tools", usage: "cut -f LIST [-d C] [FILE...]", blurb: "select fields by LIST ('-d C' sets the delimiter, tab by default)"},
+	"printf": {group: "tools", usage: "printf FORMAT [ARGS...]", blurb: "write FORMAT with %s/%d/%% substitutions"},
+	"test":   {group: "tools", usage: "test EXPR", blurb: "evaluate EXPR and set $? (no output)"},
+	"[":      {group: "tools", usage: "[ EXPR ]", blurb: "evaluate EXPR and set $? (the closing ] is required)"},
+
+	// externals
+	helpExternal: {group: "externals", usage: "exec NAME [args...]", blurb: "(& backgrounds it; jobs/fg track it)"},
+}
+
+// helpGroupNames lists one group's verbs, sorted, or nil when the group is
+// empty or unknown.
+func helpGroupNames(group string) []string {
+	var out []string
+	for name, e := range helpCatalog {
+		if e.group == group {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// helpCatalogText renders the D1 grouped catalog. The leading `builtins:`
+// line is load-bearing: live-sh-complete and live-sh4 both sequence their
+// typed `help` on it, so it stays the first line of the catalog.
+func helpCatalogText() string {
+	var b strings.Builder
+	b.WriteString("builtins:\n")
+	for _, g := range helpGroups {
+		names := helpGroupNames(g)
+		if len(names) == 0 {
+			continue
+		}
+		b.WriteString("  " + g + ": " + strings.Join(names, " ") + "\n")
+	}
+	b.WriteString("tools: " + strings.Join(toolNames(), " ") + "\n")
+	e := helpCatalog[helpExternal]
+	b.WriteString("externals: " + e.usage + "  " + e.blurb + "\n")
+	b.WriteString("subset: " + subsetBlurb + "\n")
+	b.WriteString("help <cmd> for one verb, help <group> for one group\n")
+	return b.String()
+}
+
+// helpOne prints one verb's page, one group's member list, or the D3
+// unknown-verb shape. The order matters: a verb name always wins over a
+// group name, so `help jobs` is the builtin and `help identity` the group.
+func helpOne(c *cmdCtx, name string) int {
+	if e, ok := helpCatalog[name]; ok {
+		var b strings.Builder
+		b.WriteString(name + " \u2014 " + e.blurb + "\n")
+		b.WriteString("usage: " + e.usage + "\n")
+		if e.notes != "" {
+			b.WriteString(e.notes + "\n")
+		}
+		c.out([]byte(b.String()))
+		return 0
+	}
+	if names := helpGroupNames(name); names != nil {
+		c.out([]byte(name + ": " + strings.Join(names, " ") + "\n"))
+		return 0
+	}
+	if name == "tools" {
+		c.out([]byte("tools: " + strings.Join(toolNames(), " ") + "\n"))
+		return 0
+	}
+	if name == "externals" {
+		c.out([]byte("externals: " + helpCatalog[helpExternal].usage + "\n"))
+		return 0
+	}
+	c.out([]byte("unknown command '" + name + "' \u2014 try 'help'\n"))
+	return 1
+}
+
+// bHelp is D1 discovery: a grouped catalog with no argument, one verb's
+// usage and description with a name, and D3's unknown-verb shape for a name
+// that is neither a verb nor a group.
 func bHelp(c *cmdCtx) int {
-	c.out([]byte(
-		"builtins: " + strings.Join(builtinNames(), " ") + "\n" +
-			"tools: " + strings.Join(toolNames(), " ") + "\n" +
-			"externals: exec NAME [args...]  (& backgrounds it; jobs/fg track it)\n" +
-			"subset: one pipe per line, > >> < redirects, $VAR ${VAR} $?\n"))
-	return 0
+	switch len(c.args) {
+	case 0:
+		c.out([]byte(helpCatalogText()))
+		return 0
+	case 1:
+		return helpOne(c, c.args[0])
+	default:
+		c.out([]byte("usage: help [CMD|GROUP]\n  hint: try 'help' for the grouped catalog\n"))
+		return 2
+	}
 }
 
 func bExit(c *cmdCtx) int {
