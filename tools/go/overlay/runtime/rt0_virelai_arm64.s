@@ -26,6 +26,10 @@ TEXT _rt0_arm64_virelai(SB),NOSPLIT|NOFRAME,$0-0
 have_args:
 	MOVD	R0, R2         // argc
 	MOVD	R1, R3         // argv block VA
+	// Issue #1540: keep the block's own VA. osinit derives the heap's floor
+	// from it (the kernel protects the data aperture through this block, so
+	// the break must start past it). R1/R3 stay free for the conversion.
+	MOVD	R1, runtime·virArgvBlockBase(SB)
 	ADD	$256, R3, R8   // envp block VA (argv 8*32)
 
 	// Count non-empty env slots (16 × 128 B). Empty = first byte 0.

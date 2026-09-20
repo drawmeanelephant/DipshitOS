@@ -139,9 +139,23 @@ func direntType(buf []byte) (uint8, bool) {
 
 // ----- the file calls ------------------------------------------------------
 
-// Open opens path with the kernel's own flag bits (O_RDONLY/O_WRONLY/
-// O_CREATE/O_APPEND/O_DIR). A read-only open of a directory yields a
+// Open opens path (the kernel word is built by kernelOpenFlags above; it is
+// NOT the POSIX block). A read-only open of a directory yields a
 // synthetic fd that ReadDirent can list; every other open is the kernel's.
+// The KERNEL's own open flag word (kernel/src/file_table.zig MODE_*). It is
+// NOT the POSIX block above: MODE_READ is 0x1, there is no zero-valued
+// "read" (the kernel refuses flags == 0 outright), the create/append/dir
+// bits are small and packed, and any bit outside the five is refused with
+// EINVAL. Getting this wrong is the one translation error the port cannot
+// paper over, so the two words live apart and the names never collide.
+const (
+	kmodeRead   = 0x1
+	kmodeWrite  = 0x2
+	kmodeCreate = 0x4
+	kmodeAppend = 0x8
+	kmodeDir    = 0x10
+)
+
 // kernelOpenFlags translates the POSIX word Open is handed into the kernel's
 // MODE_* bits, and reports the two flags the kernel's open slot cannot carry:
 // truncation (its own slot) and O_EXCL (checked by the caller).
@@ -153,27 +167,30 @@ func direntType(buf []byte) (uint8, bool) {
 func kernelOpenFlags(mode int) (kernel uint32, trunc, excl bool) {
 	switch mode & (O_WRONLY | O_RDWR) {
 	case O_WRONLY:
-		kernel = O_WRONLY
+		kernel = kmodeWrite
 	case O_RDWR:
-		kernel = O_RDWR
+		kernel = kmodeRead | kmodeWrite
 	default:
-		kernel = O_RDONLY
+		// POSIX O_RDONLY is 0: a zero word is the read-only open, and the
+		// kernel's MODE_READ is what it has to become. Passing the POSIX 0
+		// through is the mistake this function exists to prevent.
+		kernel = kmodeRead
 	}
 	if mode&O_CREAT != 0 {
-		kernel |= O_CREATE
+		kernel |= kmodeCreate
 	}
 	if mode&O_APPEND != 0 {
-		kernel |= O_APPEND
+		kernel |= kmodeAppend
 	}
 	if mode&O_DIRECTORY != 0 {
-		kernel |= O_DIR
+		kernel |= kmodeDir
 	}
 	return kernel, mode&O_TRUNC != 0, mode&O_EXCL != 0
 }
 
 func Open(path string, mode int, perm uint32) (fd int, err error) {
 	flags, trunc, excl := kernelOpenFlags(mode)
-	if excl && flags&O_CREATE != 0 {
+	if excl && flags&kmodeCreate != 0 {
 		// Not atomic: the open slot has no exclusive-create mode, so the
 		// refusal is a probe followed by the create. Named as a gap in the
 		// port's header rather than left silent.
@@ -187,8 +204,9 @@ func Open(path string, mode int, perm uint32) (fd int, err error) {
 	// directory is the kernel's business (MODE_DIR creation). The probe
 	// cannot produce a wrong answer — any failure falls through to the real
 	// open — and it is one syscall, which is cheaper than the ambiguity of
-	// a dir handle that reads as empty.
-	if flags == O_RDONLY || flags == (O_RDONLY|O_DIR) {
+	// a dir handle that reads as empty. `flags` here is already the kernel
+	// word, so the comparison is against MODE_READ/MODE_DIR, not O_RDONLY.
+	if flags == kmodeRead || flags == (kmodeRead|kmodeDir) {
 		if isDir(path) {
 			return newDirFd(path)
 		}
@@ -207,16 +225,13 @@ func Open(path string, mode int, perm uint32) (fd int, err error) {
 	}
 	fd = int(r)
 	rememberFd(fd, path, mode)
-	if trunc && flags&(O_WRONLY|O_RDWR) != 0 {
-		// O_TRUNC on an existing file: the open slot cannot express it, so
-		// the handle is opened and then emptied through the truncate slot.
-		// A failure here closes the handle, so the caller never receives a
-		// live fd it believes is empty.
-		if terr := Truncate(path, 0); terr != nil {
-			Close(fd)
-			return -1, terr
-		}
-	}
+	// O_TRUNC needs no second call: the kernel's write-open WITHOUT
+	// MODE_APPEND already has replace semantics (file_table.open: "a fresh
+	// write-open truncates"), so the open itself emptied the file. Calling the
+	// port's by-path Truncate here is what made every os.WriteFile fail with
+	// ENOSYS — that function is an honest refusal (slot 36 is
+	// handle-addressed), and this route never needed it.
+	_ = trunc
 	return fd, nil
 }
 
@@ -440,7 +455,7 @@ func Mkdir(path string, perm uint32) error {
 		return EINVAL
 	}
 	r := svc3(virSysFileOpen, uintptr(unsafe.Pointer(&virPathStaging[0])), uintptr(n),
-		uintptr(O_WRONLY|O_CREATE|O_DIR))
+		uintptr(kmodeWrite|kmodeCreate|kmodeDir))
 	if r < 0 {
 		return errnoErr(errOf(r))
 	}
@@ -506,13 +521,22 @@ func Fchown(fd int, uid, gid int) error    { return ENOSYS }
 // 16 (virDirRowsMax), and the listing ALWAYS starts at the first entry —
 // there is no cursor in the ABI, which is what makes a >16-entry directory
 // unenumerable (see ReadDirent).
+// An EMPTY dir means the share root: the kernel reads path_len == 0 as
+// "list the root" (handle_dir_list copies the path in only when there is
+// one), which is also how the guest SDK lists it. Passed through instead of
+// resolved because resolvePath("") is an error by contract — and a
+// root-level entry (splitParent leaves "" for "<root>/NAME") is exactly the
+// case this exists for.
 func listRows(dir string, max int) ([]Dirent, error) {
 	if max <= 0 || max > virDirRowsMax {
 		max = virDirRowsMax
 	}
-	n := stagedAbs(dir)
-	if n < 0 {
-		return nil, EINVAL
+	n := 0
+	if dir != "" {
+		n = stagedAbs(dir)
+		if n < 0 {
+			return nil, EINVAL
+		}
 	}
 	rows := make([]Dirent, max)
 	r := svc4(virSysDirList, uintptr(unsafe.Pointer(&virPathStaging[0])), uintptr(n),
@@ -553,6 +577,16 @@ func (d *Dirent) dir() bool { return d.IsDir != 0 }
 // no stat-by-path slot, and a listing row carries exactly the two facts
 // this kernel can report (size, directory bit), so Stat is a parent lookup
 // rather than a fabrication. The share root is the one path with no parent.
+//
+// The parent route has a hard limit, and the port has to name it: the
+// listing has NO cursor and the kernel clamps one call to 16 rows, so a
+// parent with more than 16 entries cannot describe every child — the gate
+// share has ~30, which is why the first std fixture to call Stat on
+// /host/GOBIG.ELF read ENOENT for a file that was right there. The fallback
+// below is the ABI's other half: ask the PATH itself whether it lists (that
+// is a directory), and otherwise read the file to EOF and count. The row
+// route is tried first because it is one syscall; the reading route costs
+// O(size) and only ever runs where the row cannot exist.
 func statPath(path string) (Stat_t, error) {
 	var st Stat_t
 	abs, err := resolvePath(path)
@@ -580,7 +614,54 @@ func statPath(path string) (Stat_t, error) {
 			return st, nil
 		}
 	}
-	return st, ENOENT
+	if _, derr := listRows(abs, 1); derr == nil {
+		// It lists, so it is a directory; this kernel reports no size for
+		// one, and inventing a number would be worse than zero.
+		st.Mode = virModeDir
+		st.ModeSetBy = 1
+		return st, nil
+	}
+	return statByReading(abs)
+}
+
+// statByReading derives a file's size the only other way this ABI allows:
+// open it read-only, read to EOF, count the bytes. Used when the parent's
+// first 16 rows do not contain the entry (see statPath). The handle is the
+// kernel's own open — not Open(), which would probe for a directory and
+// remember a handle the caller never sees — and it is closed before
+// returning, whatever happens.
+func statByReading(abs string) (Stat_t, error) {
+	var st Stat_t
+	n := stagedPath(abs)
+	if n < 0 {
+		if len(abs) > virPathMax {
+			return st, ENAMETOOLONG
+		}
+		return st, EINVAL
+	}
+	r := svc3(virSysFileOpen, uintptr(unsafe.Pointer(&virPathStaging[0])), uintptr(n), uintptr(kmodeRead))
+	if r < 0 {
+		return st, errnoErr(errOf(r))
+	}
+	fd := int(r)
+	var buf [virIOChunkMax]byte
+	var total int64
+	for {
+		k := svc3(virSysRead, uintptr(fd), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+		if k < 0 {
+			_ = svc1(virSysClose, uintptr(fd))
+			return st, errnoErr(errOf(k))
+		}
+		if k == 0 {
+			break
+		}
+		total += k
+	}
+	_ = svc1(virSysClose, uintptr(fd))
+	st.Size = total
+	st.Mode = virModeFile
+	st.ModeSetBy = 1
+	return st, nil
 }
 
 func Stat(path string, st *Stat_t) error {
