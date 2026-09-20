@@ -556,6 +556,20 @@ pin `syscalls: slots=64 implemented=78` from the VZ serial.
 > via `GOVIRELAI_STD=1`). Do not auto-build the fork inside a gate
 > (rejected in review — see `tools/go/README.md`).
 >
+> **The in-guest build gates** follow the same rule with two more host
+> prerequisites, because they make the guest build with its own toolchain
+> (M70c-S1T #1543, M70c-S2 #1544): `bash tools/go/build-gotool.sh` produces
+> `.build/go/{GOCMDCOMPILE,GOCMDLINK}.ELF` (the GOOS=virelai toolchain images,
+> built with the opt-in `virelaitoolchain` gate and asserted against every
+> loader rule the kernel enforces), and `bash tools/go/stage-selfhost.sh`
+> stages what the guest cannot produce for itself — the import config naming
+> export data for the pinned fixture's closure, those 29 package archives
+> (14.82 MiB), and the pinned source — into `.build/go/selfhost/`. `go-hello`
+> runs 06-08 and `live-selfhost-go` are the gates that consume them, and
+> `live-selfhost-go` also needs `bash tools/go/build-go.sh tools/go/selfhost.go`
+> for `.build/go/GOSELFHOST.ELF`, the in-guest driver. All three refuse by name
+> rather than boot a guest that cannot find its inputs.
+>
 > The class-B fleet is **discovered, not listed** (M40 GF5, issue #940):
 > every `tools/gate/specs/*.spec` plus the four legacy class-B scripts
 > (`bad-handoff`, `marker`, `nvram-console`, `host-console`), exactly as

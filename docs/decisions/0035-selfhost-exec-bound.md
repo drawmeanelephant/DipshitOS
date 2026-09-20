@@ -782,5 +782,61 @@ is 0xf90 with the new pad. `cmd/compile` needed a pad of its own (0x9b0;
 slack 0xdd8) for the same reason, so BOTH images now carry one. The toolchain
 build (`tools/go/build-gotool.sh`) asserts every loader rule and the slack
 from the linked ELF, and `tools/go/stage-selfhost.sh` asserts the guest's argv
-lines against the kernel's 8x32-byte budget, so neither failure mode costs a
-boot again.
+lines againstthe kernel's 8x32-byte budget, so neither failure mode costs a boot again.
+
+## Amendment 8 — M70c-S2 (#1544): the build loop runs in the guest, and its third child does not
+
+Amendment 7 proved the three steps work when the MONITOR drives them (go-hello
+runs 06-08, one boot each) and amendment 6 chose the shape for driving them
+from inside the guest. This is that driver, measured.
+
+`tools/go/selfhost.go` (`GOSELFHOST.ELF`) runs the loop in ONE boot: it spawns
+the guest's `cmd/compile`, waits, spawns the guest's `cmd/link`, waits, and
+checks both statuses. Nothing fetches a toolchain — GOTOOLCHAIN=local is
+literal for a guest with no `go` command — and every byte it reads is staged in
+`/host` by `tools/go/stage-selfhost.sh`.
+
+Observed, `tools/gate/specs/live-selfhost-go.spec` (class B, 2/2 runs):
+
+| step | status | elapsed |
+|---|---|---|
+| `cmd/compile` (hello.go -> HELLO.o) | 0 | 2,000 ms |
+| `cmd/link` (HELLO.o -> HELLO2.ELF) | 0 | 14,016 ms |
+
+The link dominates because it reads 14.82 MiB of package archives out of the
+share at the EL0 2048-byte read cap; the compile reads one archive's export
+data. The products are the same ones amendment 7 measured (HELLO.o 7,248 bytes
+with a `go object virelai arm64` header, HELLO2.ELF 1,684,249 bytes, 3 PT_LOAD,
+sum memsz 1,224,708, slack 0xf50), checked on macOS against every loader rule,
+and the gate's second boot executes the result and asserts its pinned lines.
+
+**The wall, and it is a real one: a THIRD sequential exec from one EL0 parent
+dies.** The loop was written with three children — compile, link, run the
+product — and the third died with the guest's own tombstone:
+
+    fault: HELLO2.ELF far=0x0000000047c29000 ec=0x24 pc=0x000000000007c528 esr=0x000000009200004f
+    procs HELLO2.ELF exited status=139
+
+The child was executing its own code (its entry is in the same text aperture as
+the driver's) and took a level-3 permission fault on a data access at ~1.2 GiB,
+one second in. This is the wall `go-sh.spec` already documents for Go children
+— "A THIRD sequential exec from one EL0 parent currently dies in the Go
+runtime's own schedinit (observed twice: refill of span with reusable pointers
+-> fatal exit 2) ... follow-up owed to the runtime/kernel owners" (issue
+#1449) — but with a DIFFERENT symptom, and this amendment claims only what it
+saw: two independent observations, one wall, not yet a root cause.
+
+What it costs the milestone: the loop is two children plus one monitor `exec`
+for the product, so the build is guest-sequenced and the run is the gate's
+second boot. A genuinely self-hosting toolchain still needs that third child to
+survive (and then `os/exec`'s spawn-and-inherit story, so `cmd/go` can drive at
+all). Both are named here rather than discovered by the next agent.
+
+Two costs of the driver itself, named rather than hidden: it links `vi`
+(`Exec`/`Wait`/`Probe` are that package's surface, `vsys` has no spawn), so
+`build-go.sh`'s gap-layout guard WARNs on it exactly as it does for
+GOREAD/GOSYSCALL — the image nonetheless passes every loader rule the kernel
+enforces (3 PT_LOAD, memsz 1,244,044, slack 0xbb0), which is what the gate
+checks; and the loop presumes ~15 MiB of archives in the share, which is the
+ingredient that makes it a guest-side build rather than a guest-side
+invocation.
