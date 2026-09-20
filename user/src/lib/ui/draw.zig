@@ -164,68 +164,128 @@ pub fn draw_rect_outline(win_id: u32, rect: Rect, thickness: u32, rgb: u32) void
 // Typography & Font Engine (Inter for UI, Fira Code for Monospace)
 // ---------------------------------------------------------------------------
 
+/// Which face slot a run paints with. Distinct from `FaceStyle` because a
+/// style can be *wanted* while its face is absent: the slot is the storage and
+/// the style is the request.
+pub const FaceSlot = enum(u2) { regular, bold, italic, mono };
+
+/// M69d2 (#1536): the weight a run asks for. `bold`/`italic` mean the face the
+/// share staged for that weight; when it is absent the painter falls back to
+/// Regular (and, for bold, keeps the 1-px second strike). The fallback is what
+/// the app's typography probe reports, so it is visible, never silent.
+pub const FaceStyle = enum { regular, bold, italic };
+
+pub const FaceSelection = struct {
+    face: ?*const TrueTypeFace,
+    cache: *TrueTypeFace.GlyphCache,
+};
+
 pub var active_ui_font: ?*const TrueTypeFace = null;
+pub var active_ui_bold_font: ?*const TrueTypeFace = null;
+pub var active_ui_italic_font: ?*const TrueTypeFace = null;
 pub var active_mono_font: ?*const TrueTypeFace = null;
 pub var active_ui_cache: TrueTypeFace.GlyphCache = .{};
+pub var active_ui_bold_cache: TrueTypeFace.GlyphCache = .{};
+pub var active_ui_italic_cache: TrueTypeFace.GlyphCache = .{};
 pub var active_mono_cache: TrueTypeFace.GlyphCache = .{};
 var static_inter_face: TrueTypeFace = undefined;
+var static_inter_bold_face: TrueTypeFace = undefined;
+var static_inter_italic_face: TrueTypeFace = undefined;
 var static_fira_face: TrueTypeFace = undefined;
 
 pub var fonts_initialized: bool = false;
+
+/// One face read. Staged bytes: Inter Regular 411,640, Bold 420,428, Italic
+/// 417,388, Fira Code 289,624 — 1 MiB holds each with room for a rebuild.
+const face_max_bytes: u64 = 1024 * 1024;
+
+/// A face parses in place over the mmap'd bytes it borrows, so each slot needs
+/// its own storage that outlives the load.
+fn slotStorage(slot: FaceSlot) *TrueTypeFace {
+    return switch (slot) {
+        .regular => &static_inter_face,
+        .bold => &static_inter_bold_face,
+        .italic => &static_inter_italic_face,
+        .mono => &static_fira_face,
+    };
+}
+
+fn setSlot(slot: FaceSlot, face: *const TrueTypeFace) void {
+    switch (slot) {
+        .regular => active_ui_font = face,
+        .bold => active_ui_bold_font = face,
+        .italic => active_ui_italic_font = face,
+        .mono => active_mono_font = face,
+    }
+}
+
+/// The loaded face for a slot, or null when the share did not stage one.
+pub fn slotFace(slot: FaceSlot) ?*const TrueTypeFace {
+    return switch (slot) {
+        .regular => active_ui_font,
+        .bold => active_ui_bold_font,
+        .italic => active_ui_italic_font,
+        .mono => active_mono_font,
+    };
+}
+
+pub fn slotCache(slot: FaceSlot) *TrueTypeFace.GlyphCache {
+    return switch (slot) {
+        .regular => &active_ui_cache,
+        .bold => &active_ui_bold_cache,
+        .italic => &active_ui_italic_cache,
+        .mono => &active_mono_cache,
+    };
+}
+
+/// The face and cache a style paints with: the requested weight when the share
+/// staged it, otherwise Regular. (The glyph cache is keyed by codepoint alone,
+/// which is why every face needs its own.)
+pub fn selectFace(style: FaceStyle) FaceSelection {
+    const want: FaceSlot = switch (style) {
+        .regular => .regular,
+        .bold => .bold,
+        .italic => .italic,
+    };
+    if (slotFace(want)) |face| return .{ .face = face, .cache = slotCache(want) };
+    return .{ .face = active_ui_font, .cache = &active_ui_cache };
+}
+
+/// Read one staged face and parse it into its slot. A failure leaves the slot
+/// empty — the app keeps rendering on whatever else loaded (ADR 0028 D4), and
+/// its typography probe is what tells a gate which faces are real.
+fn loadFace(path: []const u8, slot: FaceSlot) void {
+    const fd = file_open(path, MODE_READ);
+    if (fd < 0) return;
+    const handle: u32 = @intCast(fd);
+    defer file_close(handle);
+
+    const va = mmap(0, face_max_bytes, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE | MAP_POPULATE);
+    if (va == 0) return;
+    const ptr: [*]u8 = @ptrFromInt(@as(usize, @intCast(va)));
+    var total_read: usize = 0;
+    while (total_read < face_max_bytes) {
+        const chunk = file_read(handle, ptr[total_read..face_max_bytes]);
+        if (chunk <= 0) break;
+        total_read += @intCast(chunk);
+    }
+    if (total_read <= 1024) return;
+    const face = TrueTypeFace.init(ptr[0..total_read]) catch return;
+    slotStorage(slot).* = face;
+    setSlot(slot, slotStorage(slot));
+}
 
 pub fn init_fonts() bool {
     if (fonts_initialized) return active_ui_font != null;
     fonts_initialized = true;
 
-    // Probe /host/INTER.TTF
-    const fd_inter = file_open("/host/INTER.TTF", MODE_READ);
-    if (fd_inter >= 0) {
-        const handle: u32 = @intCast(fd_inter);
-        defer file_close(handle);
-
-        const max_bytes: u64 = 1024 * 1024;
-        const va = mmap(0, max_bytes, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE | MAP_POPULATE);
-        if (va > 0) {
-            const ptr: [*]u8 = @ptrFromInt(@as(usize, @intCast(va)));
-            var total_read: usize = 0;
-            while (total_read < max_bytes) {
-                const chunk = file_read(handle, ptr[total_read..max_bytes]);
-                if (chunk <= 0) break;
-                total_read += @intCast(chunk);
-            }
-            if (total_read > 1024) {
-                if (TrueTypeFace.init(ptr[0..total_read])) |face| {
-                    static_inter_face = face;
-                    active_ui_font = &static_inter_face;
-                } else |_| {}
-            }
-        }
-    }
-
-    // Probe /host/FIRACODE.TTF
-    const fd_fira = file_open("/host/FIRACODE.TTF", MODE_READ);
-    if (fd_fira >= 0) {
-        const handle: u32 = @intCast(fd_fira);
-        defer file_close(handle);
-
-        const max_bytes: u64 = 1024 * 1024;
-        const va = mmap(0, max_bytes, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE | MAP_POPULATE);
-        if (va > 0) {
-            const ptr: [*]u8 = @ptrFromInt(@as(usize, @intCast(va)));
-            var total_read: usize = 0;
-            while (total_read < max_bytes) {
-                const chunk = file_read(handle, ptr[total_read..max_bytes]);
-                if (chunk <= 0) break;
-                total_read += @intCast(chunk);
-            }
-            if (total_read > 1024) {
-                if (TrueTypeFace.init(ptr[0..total_read])) |face| {
-                    static_fira_face = face;
-                    active_mono_font = &static_fira_face;
-                } else |_| {}
-            }
-        }
-    }
+    loadFace("/host/INTER.TTF", .regular);
+    loadFace("/host/FIRACODE.TTF", .mono);
+    // M69d2 (#1536) D1: the share names M69d (#1531) froze. Bold is what
+    // retires the synthetic 1-px second strike; Italic is optional, and its
+    // absence is reported so the two stories stay distinguishable.
+    loadFace("/host/INTERB.TTF", .bold);
+    loadFace("/host/INTERI.TTF", .italic);
 
     if (active_ui_font != null) {
         write_console("typography: Inter TrueType font loaded\n");
@@ -233,8 +293,177 @@ pub fn init_fonts() bool {
     if (active_mono_font != null) {
         write_console("typography: Fira Code TrueType font loaded\n");
     }
+    if (active_ui_bold_font != null) {
+        write_console("typography: Inter Bold TrueType font loaded\n");
+    }
+    if (active_ui_italic_font != null) {
+        write_console("typography: Inter Italic TrueType font loaded\n");
+    } else {
+        write_console("typography: Inter Italic absent, em keeps accent\n");
+    }
 
     return active_ui_font != null;
+}
+
+// ---------------------------------------------------------------------------
+// Ink probes (M69d2, #1536)
+//
+// The point of a real Bold face is that it is NOT the 1-px second strike the
+// fallback draws, and the masks are where that is measurable: Inter matches
+// ADVANCES across weights (a width probe cannot see Bold), and both a strike
+// and a Bold face add ink (so ink alone cannot either). What separates them is
+// the SHAPE — the strike is Regular unioned with itself shifted one pixel, and
+// a real face is not that. These probes are the Zig mirror of the Go side's
+// glyphCover/BoldHeavier and its render-and-diff test (#1531); the metric here
+// is painted PIXELS at the painter's own coverage cut.
+// ---------------------------------------------------------------------------
+
+/// The cut `draw_alpha_mask` uses to turn a mask into spans: a pixel at or
+/// above it is painted. Every probe below counts at this cut, so the numbers
+/// describe pixels the guest actually lights.
+pub const ink_cut: u8 = 96;
+
+/// One glyph's mask as the probes read it.
+pub const MaskView = struct { w: usize, h: usize, alpha: []const u8 };
+
+/// Painted pixels in one glyph mask.
+pub fn litPixels(alpha: []const u8) u32 {
+    var n: u32 = 0;
+    for (alpha) |a| {
+        if (a >= ink_cut) n += 1;
+    }
+    return n;
+}
+
+/// Painted pixels of the synthetic strike: the union of the mask and the same
+/// mask translated one pixel right — exactly what `doc.zig` draws twice when no
+/// Bold face is staged. The union is over the box WIDENED by one column, since
+/// the shifted copy can light a pixel past the mask's own width.
+pub fn strikeUnion(w: usize, h: usize, alpha: []const u8) u32 {
+    if (w == 0 or h == 0) return 0;
+    var n: u32 = 0;
+    var y: usize = 0;
+    while (y < h) : (y += 1) {
+        var x: usize = 0;
+        while (x <= w) : (x += 1) {
+            const here = if (x < w and y * w + x < alpha.len) alpha[y * w + x] >= ink_cut else false;
+            const left = if (x > 0 and y * w + x - 1 < alpha.len) alpha[y * w + x - 1] >= ink_cut else false;
+            if (here or left) n += 1;
+        }
+    }
+    return n;
+}
+
+/// Materialize the strike's mask (Regular ∪ Regular-shifted-right) into `dst`.
+/// Null when `dst` cannot hold the box — the strike is one column wider than
+/// the mask it doubles, and the returned view carries that width so a caller
+/// comparing it with another mask strides each one by its OWN width.
+pub fn strikeMaskInto(dst: []u8, src: MaskView) ?MaskView {
+    if (src.w == 0 or src.h == 0) return null;
+    const ow = src.w + 1;
+    const box = ow * src.h;
+    if (dst.len < box) return null;
+    @memset(dst[0..box], 0);
+    var y: usize = 0;
+    while (y < src.h) : (y += 1) {
+        var x: usize = 0;
+        while (x <= src.w) : (x += 1) {
+            const here = if (x < src.w and y * src.w + x < src.alpha.len) src.alpha[y * src.w + x] >= ink_cut else false;
+            const left = if (x > 0 and y * src.w + x - 1 < src.alpha.len) src.alpha[y * src.w + x - 1] >= ink_cut else false;
+            if (here or left) dst[y * ow + x] = 255;
+        }
+    }
+    return .{ .w = ow, .h = src.h, .alpha = dst[0..box] };
+}
+
+/// Pixels on which two masks disagree, treated as ink/not-ink at `ink_cut` over
+/// the union of their boxes. Each mask is read with its OWN width (the strike is
+/// a column wider than the glyph it doubles), so the comparison is pixel-for-
+/// pixel rather than byte-for-byte. A run drawn with the fallback strike scores
+/// 0 against the strike — which is what makes "this <strong> is not the double
+/// strike" a number in the app's own serial line rather than a claim in a
+/// comment.
+pub fn maskDiff(a: MaskView, b: MaskView) u32 {
+    const w = @max(a.w, b.w);
+    const h = @max(a.h, b.h);
+    var n: u32 = 0;
+    var y: usize = 0;
+    while (y < h) : (y += 1) {
+        var x: usize = 0;
+        while (x < w) : (x += 1) {
+            const la = if (x < a.w and y < a.h) a.alpha[y * a.w + x] >= ink_cut else false;
+            const lb = if (x < b.w and y < b.h) b.alpha[y * b.w + x] >= ink_cut else false;
+            if (la != lb) n += 1;
+        }
+    }
+    return n;
+}
+
+/// Ink of a slot's glyph at a pixel size, in painted pixels. 0 when the slot is
+/// empty or the glyph does not rasterize: the caller reports that rather than
+/// inventing a number.
+pub fn glyphInk(slot: FaceSlot, ch: u8, size: u32) u32 {
+    const view = glyphMask(slot, ch, size) orelse return 0;
+    return litPixels(view.alpha);
+}
+
+/// A slot's glyph mask, or null when the slot is empty / the glyph does not
+/// rasterize.
+pub fn glyphMask(slot: FaceSlot, ch: u8, size: u32) ?MaskView {
+    const face = slotFace(slot) orelse return null;
+    const cache = slotCache(slot);
+    const entry = cache.get_or_render(face, ch, size) orelse return null;
+    if (entry.width == 0 or entry.height == 0) return null;
+    return .{ .w = entry.width, .h = entry.height, .alpha = cache.glyph_alpha(entry) };
+}
+
+/// Ink the synthetic strike would produce for a slot's glyph — the number a
+/// regular-only build would publish as its "bold".
+pub fn strikeInk(slot: FaceSlot, ch: u8, size: u32) u32 {
+    const view = glyphMask(slot, ch, size) orelse return 0;
+    return strikeUnion(view.w, view.h, view.alpha);
+}
+
+/// Lean in sixteenths of a pixel: 16 x (bottom band's ink centre x - top band's
+/// ink centre x). A stem that leans RIGHT has its top to the right of its
+/// bottom, so the score is NEGATIVE; an upright stem scores ~0. Fixed point
+/// because a lean at body size is a fraction of a pixel, and the comparison is
+/// always the SAME glyph across faces, so the number is about the lean and not
+/// about the glyph's shape (Inter Italic 'l'@14 measures -21 against Roman 0).
+pub fn maskSkew16(w: usize, h: usize, alpha: []const u8) i32 {
+    if (w == 0 or h == 0) return 0;
+    const band: usize = if (h >= 3) h / 3 else 1;
+    var top_n: i64 = 0;
+    var top_sum: i64 = 0;
+    var bot_n: i64 = 0;
+    var bot_sum: i64 = 0;
+    var y: usize = 0;
+    while (y < h) : (y += 1) {
+        const is_top = y < band;
+        const is_bot = y >= h - band;
+        if (!is_top and !is_bot) continue;
+        var x: usize = 0;
+        while (x < w) : (x += 1) {
+            const i = y * w + x;
+            if (i >= alpha.len) break;
+            if (alpha[i] < ink_cut) continue;
+            if (is_top) {
+                top_n += 1;
+                top_sum += @intCast(x);
+            } else {
+                bot_n += 1;
+                bot_sum += @intCast(x);
+            }
+        }
+    }
+    if (top_n == 0 or bot_n == 0) return 0;
+    return @intCast(@divTrunc(16 * (bot_sum * top_n - top_sum * bot_n), top_n * bot_n));
+}
+
+/// Lean of a slot's glyph, from its cached mask.
+pub fn glyphSkew16(slot: FaceSlot, ch: u8, size: u32) i32 {
+    const view = glyphMask(slot, ch, size) orelse return 0;
+    return maskSkew16(view.w, view.h, view.alpha);
 }
 
 pub fn draw_alpha_mask(win_id: u32, x: i32, y: i32, w: usize, h: usize, alpha: []const u8, fg_rgb: u32) void {
@@ -422,12 +651,21 @@ pub fn measure_text_sized(text: []const u8, size: u32) u32 {
 }
 
 pub fn draw_text_sized(win_id: u32, text: []const u8, x: u32, y: u32, size: u32, fg_rgb: u32) void {
+    draw_text_sized_styled(win_id, text, x, y, size, .regular, fg_rgb);
+}
+
+/// Draw a run with the face its style asks for (M69d2, #1536). When that face
+/// is absent the run is drawn with Regular — the caller decides whether to add
+/// the synthetic strike, because that decision is the app's documented fallback
+/// and its typography probe reports which path it took.
+pub fn draw_text_sized_styled(win_id: u32, text: []const u8, x: u32, y: u32, size: u32, style: FaceStyle, fg_rgb: u32) void {
+    const sel = selectFace(style);
     var cur_x = x;
-    if (active_ui_font) |face| {
+    if (sel.face) |face| {
         const base_y: i32 = @intCast((size * 10) / 14);
         for (text) |ch| {
-            if (active_ui_cache.get_or_render(face, ch, size)) |entry| {
-                const alpha = active_ui_cache.glyph_alpha(entry);
+            if (sel.cache.get_or_render(face, ch, size)) |entry| {
+                const alpha = sel.cache.glyph_alpha(entry);
                 const gx = @as(i32, @intCast(cur_x)) + entry.bearing_x;
                 const gy = @as(i32, @intCast(y)) + (base_y - entry.bearing_y);
                 draw_alpha_mask(win_id, gx, gy, entry.width, entry.height, alpha, fg_rgb);

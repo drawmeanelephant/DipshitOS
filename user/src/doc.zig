@@ -548,6 +548,92 @@ fn drawError(win: u32, cr: Rect) void {
     }
 }
 
+/// M69d2 (#1536) D1/D2: what this page is really drawn with, as facts a gate
+/// can hold it to. Two lines, both cheap and deterministic:
+///
+///   * which faces the share actually staged (`bold=0` is the failure mode the
+///     card forbids passing);
+///   * the ink each weight paints for one glyph at the body size, with the
+///     synthetic strike's ink beside it. Inter matches ADVANCES across weights,
+///     so a width probe cannot see Bold; ink can. A real Bold face is heavier
+///     than Regular; at heading size it is also heavier than the 1-px strike
+///     that doubles Regular (`regular < strike < bold` at 24 px). That is the
+///     opposite relation to the Go WEB row, which is why this probe publishes
+///     both sizes instead of borrowing that tree's inequality.
+fn typographyProbe() void {
+    const probe_ch = 'n';
+    const probe_size: u32 = 14;
+
+    var fbuf: [80]u8 = undefined;
+    const fline = std.fmt.bufPrint(&fbuf, "typography: faces ui={d} bold={d} italic={d} mono={d}\n", .{
+        @intFromBool(ui.slotFace(.regular) != null),
+        @intFromBool(ui.slotFace(.bold) != null),
+        @intFromBool(ui.slotFace(.italic) != null),
+        @intFromBool(ui.slotFace(.mono) != null),
+    }) catch "typography: faces\n";
+    ui.write_console(fline);
+
+    // Ink, masks and the discriminator, at TWO sizes because they are not
+    // equally informative. `bold` is what <strong> paints on THIS boot: the
+    // Bold face when it loaded, else the strike the fallback draws twice.
+    // `diff` is how many pixels the Bold mask disagrees with that strike: 0
+    // means the two ARE the same story, which is the failure this card is
+    // about (D2). 14 px is DOC's body size (what <strong> in this page really
+    // paints) and is the awkward one — the old synthetic strike lands within
+    // 2 px of the real face there. 24 px is a heading size, where the weights
+    // separate plainly. Both numbers are published so a gate can hold the page
+    // to the first and the claim to the second.
+    for ([_]u32{ 14, 24 }) |size| {
+        // Local caches, on purpose. The shared GlyphCache keys an entry by
+        // CODEPOINT ALONE (font_ttf.zig: ascii_entries), so asking it for the
+        // same glyph at a second size hands back the first size's mask and the
+        // second line would silently repeat the first. Rasterizing per size
+        // here measures the FACES, which is what this probe is about; the
+        // page's own runs go through the app cache either way.
+        var reg_cache: ui.TrueTypeFace.GlyphCache = .{};
+        var bold_cache: ui.TrueTypeFace.GlyphCache = .{};
+        var reg_view: ?ui.MaskView = null;
+        if (ui.slotFace(.regular)) |face| {
+            if (reg_cache.get_or_render(face, probe_ch, size)) |e| {
+                reg_view = .{ .w = e.width, .h = e.height, .alpha = reg_cache.glyph_alpha(e) };
+            }
+        }
+        var bold_view: ?ui.MaskView = null;
+        if (ui.slotFace(.bold)) |face| {
+            if (bold_cache.get_or_render(face, probe_ch, size)) |e| {
+                bold_view = .{ .w = e.width, .h = e.height, .alpha = bold_cache.glyph_alpha(e) };
+            }
+        }
+        const regular = if (reg_view) |v| ui.litPixels(v.alpha) else 0;
+        const strike = if (reg_view) |v| ui.strikeUnion(v.w, v.h, v.alpha) else 0;
+        const bold = if (bold_view) |v| ui.litPixels(v.alpha) else strike;
+        var diff: u32 = 0;
+        if (bold_view) |bv| {
+            var strike_buf: [4096]u8 = undefined;
+            if (reg_view) |rv| {
+                if (ui.strikeMaskInto(&strike_buf, rv)) |strike_view| {
+                    diff = ui.maskDiff(strike_view, bv);
+                }
+            }
+        }
+        var ibuf: [96]u8 = undefined;
+        const iline = std.fmt.bufPrint(&ibuf, "typography: ink n@{d} regular={d} bold={d} strike={d} diff={d}\n", .{
+            size, regular, bold, strike, diff,
+        }) catch "typography: ink\n";
+        ui.write_console(iline);
+    }
+
+    // The <em> half, in sixteenths of a pixel: how far the ink's centre moves
+    // from the top band to the bottom. Same glyph on both faces, so the number
+    // is about the lean and not the glyph. 0/0 means the Italic slot is empty
+    // and <em> is accent colour only.
+    var sbuf: [80]u8 = undefined;
+    const sline = std.fmt.bufPrint(&sbuf, "typography: skew l@{d} roman={d} italic={d}\n", .{
+        probe_size, ui.glyphSkew16(.regular, 'l', probe_size), ui.glyphSkew16(.italic, 'l', probe_size),
+    }) catch "typography: skew\n";
+    ui.write_console(sline);
+}
+
 fn drawPage(win: u32, cr: Rect) void {
     const ink = ui.theme_text_primary();
     const accent = ui.theme_accent();
@@ -631,8 +717,17 @@ fn drawPage(win: u32, cr: Rect) void {
                     }
                     ui.draw_text_mono(win, slice, sx, y, color);
                 } else {
-                    ui.draw_text_sized(win, slice, sx, y, sp.size, color);
-                    if (sp.flags.bold or b.tag == .th or b.tag == .dt) {
+                    // M69d2 (#1536): real faces when the share staged them.
+                    // Bold: Inter Bold. When it did not load, keep the 1-px
+                    // second strike the path always used — that fallback is
+                    // what `typographyProbe` reports, and live-doc fails on it
+                    // (card D2). Italic: Inter Italic for <em>; the accent
+                    // colour stays either way. Bold wins if both are set (no
+                    // Bold-Italic face exists — same rule as Go WEB).
+                    const bold_run = sp.flags.bold or b.tag == .th or b.tag == .dt;
+                    const style: ui.FaceStyle = if (bold_run) .bold else if (sp.flags.em) .italic else .regular;
+                    ui.draw_text_sized_styled(win, slice, sx, y, sp.size, style, color);
+                    if (bold_run and ui.slotFace(.bold) == null) {
                         ui.draw_text_sized(win, slice, sx + 1, y, sp.size, color);
                     }
                     if (sp.flags.link) {
@@ -809,6 +904,7 @@ pub export fn _start(argc: usize, argv: ?[*]const [32]u8) callconv(.c) noreturn 
         st.win, st.win_w, st.win_h,
     }) catch "doc: open\n";
     ui.write_console(oline);
+    typographyProbe();
 
     if (path_len == 0) {
         fail(.missing, "doc: error missing\n");

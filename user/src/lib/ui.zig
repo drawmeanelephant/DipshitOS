@@ -334,6 +334,25 @@ pub const draw_text_centered = draw.draw_text_centered;
 pub const draw_text_centered_large = draw.draw_text_centered_large;
 pub const draw_text_large = draw.draw_text_large;
 pub const draw_text_mono = draw.draw_text_mono;
+// M69d2 (#1536): the weight-aware text path and its ink probes. The probes are
+// what a gate asserts on when "real Inter Bold" has to be distinguishable from
+// the 1-px synthetic strike the fallback draws.
+pub const FaceSlot = draw.FaceSlot;
+pub const FaceStyle = draw.FaceStyle;
+pub const draw_text_sized_styled = draw.draw_text_sized_styled;
+pub const glyphInk = draw.glyphInk;
+pub const glyphMask = draw.glyphMask;
+pub const glyphSkew16 = draw.glyphSkew16;
+pub const ink_cut = draw.ink_cut;
+pub const litPixels = draw.litPixels;
+pub const MaskView = draw.MaskView;
+pub const maskDiff = draw.maskDiff;
+pub const maskSkew16 = draw.maskSkew16;
+pub const slotFace = draw.slotFace;
+pub const slotCache = draw.slotCache;
+pub const strikeInk = draw.strikeInk;
+pub const strikeMaskInto = draw.strikeMaskInto;
+pub const strikeUnion = draw.strikeUnion;
 pub const fill_batcher = &draw.fill_batcher;
 pub const flush_fills = draw.flush_fills;
 pub const fonts_initialized = &draw.fonts_initialized;
