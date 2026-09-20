@@ -50,7 +50,7 @@ if sum(1 for l in lines if re.search(r"user-exec.*state=blocked", l)) < 2:
 wl = next((i for i, l in enumerate(lines) if "ipc: waiting pid=1" in l), None)
 sl = next((i for i, l in enumerate(lines) if "ipc: saw pid=1 status=43" in l), None)
 rls = [i for i, l in enumerate(lines)
-       if re.search(r"procs: id=[0-9]+ name=STATUS43.BIN state=running", l)]
+       if re.search(r"procs: id=[0-9]+ name=STATUS43.BIN uid=\d+ caps=\d+ state=running", l)]
 if wl is None or sl is None or not rls:
     sys.exit("FAIL: wait/saw/running-row absent wl=%s sl=%s rows=%d" % (wl, sl, len(rls)))
 if not (wl < rls[-1] < sl):

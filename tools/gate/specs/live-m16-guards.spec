@@ -3,9 +3,9 @@
 # guard pages + per-segment permissions + the hostile-EL0-refused proof,
 # verified on real Apple silicon Virtualization.framework hardware.
 #
-# GUARD.BIN (the hostile program) prints its alive marker, then steps 12 KiB
-# below its stack top — landing 4 KiB BELOW the stack bottom, in the guard
-# page the user root leaves unmapped. The store takes a real EL0 data abort
+# GUARD.BIN (the hostile program) prints its alive marker, then steps 196 KiB
+# below its stack top — landing 4 KiB BELOW the stack bottom (192 KiB stack
+# from #1336), in the guard page the user root leaves unmapped. The store takes a real EL0 data abort
 # (ESR EC 0x24); the kernel's fault dispatcher REAPS the process (status 139,
 
 vgate_name live-m16-guards "claim 8403 (Milestone 16, Card C2) class-B gate:"
@@ -29,6 +29,6 @@ vgate_assert 01 serial-absent '[EXC] parking:'
 vgate_assert 01 serial-contains 'tasks user-exec exited status=139'
 vgate_assert 01 serial-contains 'procs GUARD.BIN exited status=139'
 vgate_assert 01 serial-contains 'counter: alive'
-vgate_assert 01 serial-contains 'name=COUNTER.BIN state=running'
-vgate_assert 01 serial-contains 'name=GUARD.BIN state=exited'
+vgate_assert 01 serial-contains 'name=COUNTER.BIN uid=1000 caps=0 state=running'
+vgate_assert 01 serial-contains 'name=GUARD.BIN uid=1000 caps=0 state=exited'
 vgate_assert 01 serial-contains 'guards-live-ok'

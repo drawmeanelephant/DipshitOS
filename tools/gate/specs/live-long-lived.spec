@@ -2,7 +2,8 @@
 # peers: its markers span the whole log (first before the first USER
 # exit, last after the last), three USER.BINs load/exit/reap exactly
 # three times each, and the pages delta is exactly one live USER.BIN
-# (17). No --script-expect (the full window must elapse).
+# (97 = 1 text + 48 user-stack + 48 kernel-stack pages at the 192 KiB
+# task_stack_size from #1336). No --script-expect (the full window must elapse).
 # Mirrors tools/verify-live-long-lived.sh (claim 4613). The stale
 # "exactly TWO loads" comment is ignored -- the code requires 3.
 
@@ -67,9 +68,10 @@ if mks and exits:
 elif sum(1 for l in lines if "procs COUNTER.BIN exited" in l) != 0:
     sys.exit("FAIL: counter exited")
 # Both running at once, distinct executor tasks.
+# M50 (#1135) added uid=/caps= columns between name= and state=.
 def first_row(name):
     for l in lines:
-        if re.search(r"procs: id=[0-9]+ name=%s state=running" % name, l):
+        if re.search(r"procs: id=[0-9]+ name=%s uid=\d+ caps=\d+ state=running" % name, l):
             return l
     return None
 cr, ur = first_row("COUNTER.BIN"), first_row("USER.BIN")
@@ -80,10 +82,11 @@ ut = re.search(r".*task=([0-9]+).*", ur)
 if not ct or not ut or ct.group(1) == ut.group(1):
     sys.exit("FAIL: tasks not distinct")
 # The exited USER.BIN row exists (procs table keeps it).
-if "name=USER.BIN state=exited" not in ser:
+if not re.search(r"name=USER\.BIN uid=\d+ caps=\d+ state=exited", ser):
     sys.exit("FAIL: no exited USER.BIN row")
-# Pages: >= 2 reads, phase-2 free = phase-1 free - 17 (one more live
-# USER.BIN; a leak would drop further).
+# Pages: >= 2 reads, phase-2 free = phase-1 free - 97 (one more live
+# USER.BIN: 1 text + 48 user-stack + 48 kernel-stack pages at the 192 KiB
+# task_stack_size from #1336; a leak would drop further).
 frees = []
 for l in lines:
     if "pages: armed=1 total=" in l:
@@ -92,8 +95,8 @@ for l in lines:
             frees.append(int(m.group(1), 16))
 if len(frees) < 2:
     sys.exit("FAIL: fewer than 2 pages reads")
-if frees[0] - frees[1] != 17:
-    sys.exit("FAIL: pages delta %d, want 17" % (frees[0] - frees[1]))
+if frees[0] - frees[1] != 97:
+    sys.exit("FAIL: pages delta %d, want 97" % (frees[0] - frees[1]))
 # The counter runs at the FINAL procs read.
 last = [l for l in lines if re.search(r"procs: id=[0-9]+ name=COUNTER.BIN", l)]
 if not last or "state=running" not in last[-1]:
