@@ -6,7 +6,11 @@
 # through its core. A scripted burst proves the core live: `echo` (builtin),
 # `cd /data` + `$PWD` expansion, external `status43` resolved
 # case-insensitively (status43 -> STATUS43.BIN) and run foreground, then
-# Up-history re-runs it (status43: alive twice). Markers are single writes.
+# Up-history re-runs it (status43: alive twice). M69f2 (#1538) adds the
+# discovery half of the M49 bar: `help` (grouped catalog, ADR 0008 D1),
+# `help <cmd>` (usage + description) and the D3 unknown-verb shape, all
+# typed at the same prompt so a shell that never ran cannot pass them.
+# Markers are single writes.
 # `GOSH.ELF serial` is the Go front-end owner of that console
 # (sys_tty_attach selector 1, ADR 0020), so every assert is unchanged except
 # the binary and its marker prefix. Boot default unchanged.
@@ -44,9 +48,12 @@ PY
 vgate_setup_python <<'PY'
 import os
 run = os.environ["RUN_DIR"]
-# echo sh-echo-ok; cd /data; echo PWD=$PWD; run status43; then Up + Enter to
-# recall and re-run the last command from history.
-seq = b"echo sh-echo-ok\rcd /data\recho PWD=$PWD\rstatus43\r\x1b[A\r"
+# echo sh-echo-ok; cd /data; echo PWD=$PWD; the M69f2 help trio (the
+# grouped catalog, one verb page, one unknown verb); run status43; then Up
+# + Enter to recall and re-run the last command from history.
+seq = (b"echo sh-echo-ok\rcd /data\recho PWD=$PWD\r"
+       b"help\rhelp printf\rhelp nosuchverb\r"
+       b"status43\r\x1b[A\r")
 with open(os.path.join(run, "edit.bin"), "wb") as f:
     f.write(seq)
 PY
@@ -60,5 +67,14 @@ vgate_assert 01 serial-contains 'sh-echo-ok'
 vgate_assert 01 serial-contains 'PWD=/data'
 vgate_assert 01 serial-contains 'status43: alive'
 vgate_assert 01 serial-count 'status43: alive' 2
+# M69f2 (#1538): the catalog keeps `builtins:` as its first line, carries
+# more than one group section, and `help <cmd>` prints the D1 usage line;
+# an unknown name gets the D3 shape rather than a dump of everything.
+vgate_assert 01 serial-contains 'builtins:'
+vgate_assert 01 serial-contains 'shell: clear echo exit help history monitor'
+vgate_assert 01 serial-contains 'identity: chmod id secrets whoami'
+vgate_assert 01 serial-contains 'usage: printf FORMAT [ARGS...]'
+vgate_assert 01 serial-contains 'subset: one pipe per line'
+vgate_assert 01 serial-contains "unknown command 'nosuchverb'"
 vgate_assert 01 serial-absent '\[EXC\]'
 vgate_assert 01 serial-absent '[EXC] parking:'
