@@ -699,3 +699,88 @@ Dependencies for the driver, stated so the next agent does not have to
 rediscover them: the toolchain-scoped FIPS gate (so the images clear
 `load_max`) and the `cmd/link` argv+envp pad. Both are amendment 5, and both
 were cleared on the #1543 branch before this spike was written.
+
+## Amendment 7 — M70c-S1T (#1543): the guest builds its own hello, and the wall moved to the file position
+
+Amendment 5 recorded the measurements that made the toolchain LINK; it made
+no boot claim (no VZ run had been made). This amendment is the boot evidence.
+All of it is OBSERVED on VZ through `tools/gate/specs/go-hello.spec` runs
+06-08 (class B), each run one `exec` because the monitor's `exec` returns
+immediately and the share carries the intermediate.
+
+**D3 — the images exec with arguments.** `-V=full` is the assertion because
+its output is the binary's own `argv[0]` plus the toolchain version, so the
+line cannot appear unless the image loaded, ran at EL0, and had an argument
+vector delivered: `GOCMDCOMPILE.ELF version go1.27.1` and
+`GOCMDLINK.ELF version go1.27.1`, both with `procs <name> exited status=0`.
+
+**D4 — the guest builds the pinned hello with its own toolchain.**
+
+- Run 06, in-guest compile: `HELLO.o` (7,248 bytes) appears in the share, an
+  ar archive whose header line reads
+  `go object virelai arm64 go1.27.1 GOARM64=v8.0 X:regabiwrappers,regabiargs,`,
+  holding `__.PKGDEF` and `_go_.o`. That header names the TARGET; a copied
+  binary or a compile that silently did nothing cannot produce it.
+- Run 07, in-guest link: `HELLO2.ELF` (1,684,249 bytes, 3 PT_LOAD,
+  sum memsz 1,224,708 = 0x12b004, writable page slack 0xf50). The host holds
+  the product to EVERY rule `elf.zig`'s `parse_impl` enforces — segment count,
+  the `load_max` sum, `gap_base_max`, page alignment, W^X order,
+  entry-inside-segment-0 — plus the argv+envp slack, before run 08 may execute
+  it. This is the first binary produced INSIDE the guest checked against the
+  kernel's acceptance geometry.
+- Run 08: that ELF runs and prints the fixture's own vocabulary —
+  `hello from virelai`, `heap: wrote 1048576 bytes`, `gc: cycle completed`,
+  `virelai-go OK` — with no exception and no `cannot allocate memory`.
+
+**The wall this moved to, and it was not memory.** The first in-guest compile
+exited status 1 with the guest's own words:
+
+    compile: seeking in output [0, 1]: seek /host/GPKG_runtime.a: function not implemented
+
+`cmd/internal/bio` seeks to read package archives (`Offset()`, then
+`cmd/internal/archive`'s member offsets) and `cmd/compile/internal/gc/obj.go`
+seeks on the object it is WRITING (it patches the archive header after the
+members). The kernel has no seek, no pread and no pwrite: a handle is a cursor
+(slots 23-27, 34-36, 77). So the port grew a positional layer
+(`tools/go/overlay/syscall/fs_virelai.go`): a per-handle shadow of the bytes
+moved from offset 0, the kernel cursor, and the caller's logical position.
+Reads behind the cursor are served from the shadow; reads at it are fetched;
+writes are STAGED and pushed at `Fsync`/`Close`, because a patch (seek back,
+write, seek forward) cannot be applied to a device that only appends.
+`Pread` is answered from the same shadow; `Pwrite` stays refused.
+
+This was a port change, not a kernel change: no slot was added and no ABI
+moved. The bounds are named rather than hidden: the shadow retains 16 MiB per
+handle and a positional request it can no longer answer returns ENOSYS instead
+of bytes from the wrong offset; a writer whose process dies without closing
+loses what it staged. Both are outside what this toolchain does.
+
+**D5 — the in-guest memory figure (this ADR's D6 question).** The kernel
+exposes no peak-page ledger, so this is a SAMPLE, taken by typing the
+monitor's `sysinfo` allocator line from a stage-gated script while the
+process ran — not a peak:
+
+| process | guest frames used (sampled) | vs the guest |
+|---|---|---|
+| in-guest `cmd/compile` | 8,372 of 65,215 (33,488 KiB of 260,860 KiB) | sampled twice, identical |
+| in-guest `cmd/link` | 18,483 then 32,843 of 65,215 (73,932 then 131,372 KiB) | the larger of the two |
+
+So a 256 MiB guest HOLDS this toolchain: the link is the heavier of the pair,
+and it finished with 32,372 of the guest's 65,215 frames still free. The
+caveats are the ones that matter for anyone re-measuring. First, these are
+samples, not a peak: the compile's two samples are identical, so its footprint
+had already returned by both, which BOUNDS the compile rather than peaking it,
+and a true peak needs a kernel-side ledger that does not exist (named here as
+the gap, not worked around). Second, samples move — the same runs in the
+standalone trial peaked higher (the link's second sample was 38,611 frames,
+154,444 KiB), which is what a sample taken at a different instant does.
+
+**Two mechanical bounds, both measured, both needed a second look.** The
+`cmd/link` argv+envp pad from amendment 5 had to be resized (0x9b0 -> 0x11b0)
+because adding port code moves the bss: measured slack fell 0x970 -> 0x790 and
+is 0xf90 with the new pad. `cmd/compile` needed a pad of its own (0x9b0;
+slack 0xdd8) for the same reason, so BOTH images now carry one. The toolchain
+build (`tools/go/build-gotool.sh`) asserts every loader rule and the slack
+from the linked ELF, and `tools/go/stage-selfhost.sh` asserts the guest's argv
+lines against the kernel's 8x32-byte budget, so neither failure mode costs a
+boot again.
