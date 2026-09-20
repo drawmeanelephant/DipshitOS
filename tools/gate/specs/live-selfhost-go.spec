@@ -7,15 +7,21 @@
 # GOTOOLCHAIN=local is literal for a guest with no `go` command, and every byte
 # the loop reads is staged in the share.
 #
-# TWO boots, and the second one is not a convenience. The loop's third
-# sequential child — the product — dies on this GOOS today: observed in run 01
-# as `fault: HELLO2.ELF far=0x47c29000 ec=0x24 esr=0x9200004f`, status 139.
-# That is the same wall go-sh.spec already documents ("A THIRD sequential exec
-# from one EL0 parent currently dies in the Go runtime's own schedinit ...
-# follow-up owed to the runtime/kernel owners", issue #1449) with a different
-# symptom, so this spec does not claim the product can be a third child: the
-# BUILD is the guest's own two-child loop, and the RUN is one monitor `exec` of
-# what the loop produced (the same execution go-hello run 08 performs).
+# TWO boots, and the shape is conservative rather than forced. The product as a
+# third child died ONCE (run 01: `fault: HELLO2.ELF far=0x47c29000 ec=0x24
+# esr=0x9200004f`, status 139) — the wall go-sh.spec documents for Go children
+# ("A THIRD sequential exec from one EL0 parent currently dies in the Go
+# runtime's own schedinit ... follow-up owed to the runtime/kernel owners",
+# issue #1449) with a different symptom. It does NOT reproduce at this head:
+# the driver's argv-gated measurement (tools/go/selfhost.go `--spawn`, off by
+# default) ran three children of EITHER kind 3/3, and the exact failing
+# configuration — loop, then the product as the third child — came back
+# status=0 (four boots; the matrix is ADR 0035 amendment 8). So the BUILD stays
+# the guest's own two-child loop and the RUN stays one monitor `exec` of what it
+# produced (the same execution go-hello run 08 performs) because this shape is
+# PROVEN green, not because a third child is known to fail. A one-boot
+# three-child loop is feasible and is the first thing to try once #1449 is
+# characterised.
 #
 # HOST PREREQUISITE (fails the gate honestly when missing):
 #   bash tools/go/build-go.sh tools/go/selfhost.go   -> .build/go/GOSELFHOST.ELF
@@ -98,7 +104,9 @@ vgate_assert 01 serial-absent 'exited status=139'
 # (a build time is a property of the machine, so it is not asserted, the same
 # way go-hello run 04 reports its transfer rate).
 vgate_assert 01 python <<'PY'
-import os, re, struct, sys
+import os, re, sys
+sys.path.insert(0, os.path.join("tools", "lib"))
+import elf_rules
 share = os.environ.get("VG_SHARE") or os.path.join(os.environ["RUN_DIR"], "share")
 
 obj = os.path.join(share, "HELLO.o")
@@ -114,49 +122,12 @@ for want in (b"__.PKGDEF", b"_go_.o", b"main.main"):
 elf = os.path.join(share, "HELLO2.ELF")
 if not os.path.exists(elf):
     sys.exit("FAIL: the loop produced no ELF at " + elf)
-d = open(elf, "rb").read()
-if d[:4] != b"\x7fELF" or d[4] != 2 or d[5] != 1:
-    sys.exit("FAIL: HELLO2.ELF is not a 64-bit little-endian ELF")
-if struct.unpack_from("<H", d, 0x12)[0] != 183:
-    sys.exit("FAIL: HELLO2.ELF is not AArch64")
-MAX, GAP, NEED_SLACK = 33554432, 0x1000_0000, 0x908
-entry = struct.unpack_from("<Q", d, 0x18)[0]
-phoff = struct.unpack_from("<Q", d, 0x20)[0]
-phes = struct.unpack_from("<H", d, 0x36)[0]
-pnum = struct.unpack_from("<H", d, 0x38)[0]
-segs = []
-for i in range(pnum):
-    t, fl, off, va, pa, fsz, msz, al = struct.unpack_from("<IIQQQQQQ", d, phoff + i * phes)
-    if t == 1:
-        segs.append((fl, va, fsz, msz))
-segs.sort(key=lambda s: s[1])
-fails = []
-if not segs:
-    fails.append("no PT_LOAD segments")
-if len(segs) > 3:
-    fails.append("%d PT_LOAD > max_segments 3" % len(segs))
-total = sum(s[3] for s in segs)
-if total > MAX:
-    fails.append("sum memsz %d > load_max" % total)
-for fl, va, fsz, msz in segs:
-    if va + msz > GAP:
-        fails.append("segment at %#x crosses gap_base_max" % va)
-    if va & 4095:
-        fails.append("segment at %#x unaligned" % va)
-if segs and segs[0][0] & 2:
-    fails.append("segment 0 writable")
-if segs and not (segs[-1][0] & 2):
-    fails.append("last segment not writable")
-if segs and not (segs[0][1] <= entry < segs[0][1] + segs[0][2]):
-    fails.append("entry %#x not in segment 0 initialized bytes" % entry)
-slack = (-segs[-1][3]) % 4096 if segs else 0
-if slack < NEED_SLACK:
-    fails.append("writable page slack %d < %#x (argv+envp block)" % (slack, NEED_SLACK))
-if len(d) > MAX:
-    fails.append("file %d > exec_image_max" % len(d))
-print("loop products: HELLO.o %d bytes (virelai object), HELLO2.ELF %d bytes, "
-      "%d segments, memsz %d (%#x), slack %#x"
-      % (len(raw), len(d), len(segs), total, total, slack))
+# ONE copy of the kernel's loader rules, shared with go-hello.spec run 07
+# (tools/lib/elf_rules.py). A rule that drifted in one spec would pass an
+# image the kernel then refuses, far from the check that lied.
+receipt, fails = elf_rules.check_file(elf, "HELLO2.ELF")
+print("loop products: HELLO.o %d bytes (virelai object), %s"
+      % (len(raw), receipt))
 ser = open(os.environ["VG_SER"], errors="replace").read()
 for label in ("compile", "link"):
     m = re.search(r"selfhost: %s \S+ status=(\d+) ms=(\d+)" % label, ser)
