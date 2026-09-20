@@ -55,6 +55,25 @@ log "copying overlay files"
     cp "$f" "$FORK_DIR/src/$f"
 done )
 
+# --- 2b. prune stale overlay files --------------------------------------
+# The copy above is additive, so a file an earlier revision of the overlay
+# ADDED and a later one deleted lingers in the fork forever — where it either
+# shadows the current code or, as one did, collides with a stock declaration
+# (overlay/os/sigpipe_virelai.go vs os/file_unix.go's `func sigpipe()`). The
+# prune is deliberately narrow: it deletes only files matching the overlay's
+# own naming convention (*_virelai*), and only inside directories the overlay
+# mirrors, so nothing else in the distribution can be touched by it.
+( cd "$REPO/tools/go/overlay" && find . -type d | while read -r d; do
+    rel_dir="${d#./}"; [ "$d" = "." ] && rel_dir="."
+    for f in "$FORK_DIR/src/$rel_dir"/*_virelai*.go "$FORK_DIR/src/$rel_dir"/*_virelai*.s; do
+        [ -e "$f" ] || continue
+        rel="${f#"$FORK_DIR/src/"}"
+        if [ ! -e "$REPO/tools/go/overlay/$rel" ]; then
+            rm -f "$f"; log "pruned stale overlay file $rel"
+        fi
+    done
+done )
+
 # --- 3a. internal/syslist/syslist.go: KnownOS --------------------------
 if ! have "$F/internal/syslist/syslist.go" '"virelai"'; then
     gsed -i 's/\t"wasip1":    true,/\t"wasip1":    true,\n\t"virelai":   true,/' "$F/internal/syslist/syslist.go"
@@ -287,6 +306,145 @@ if ! have "$F/internal/platform/zosarch.go" '{"virelai", "arm64"}'; then
     gsed -i 's|^\t{"wasip1", "wasm"},$|\t{"virelai", "arm64"},\n\t{"wasip1", "wasm"},|' "$F/internal/platform/zosarch.go"
     gsed -i 's|^\t{"wasip1", "wasm"}:     {},$|\t{"virelai", "arm64"}:   {},\n\t{"wasip1", "wasm"}:     {},|' "$F/internal/platform/zosarch.go"
     edits=$((edits+1)); log "patched internal/platform/zosarch.go"
+fi
+
+# --- 3g2. the syscall/os port (issue #1525, M70c-S1P) ------------------
+# Appends "|| virelai" to a //go:build line so a stock file that is already
+# written against a GOOS-provided syscall surface compiles for virelai too.
+# Each entry must be justified: the file is stock POSIX-shaped code whose
+# calls land in overlay/syscall/syscall_virelai.go|fs_virelai.go, so no
+# behaviour is being invented here — only the tag. A file whose helpers the
+# port supplies as stubs (e.g. no net, no pidfd) says so at that stub.
+vir_include() {  # <path-under-src> <reason>
+    if ! head -6 "$F/$1" | grep -q virelai; then
+        gsed -i '0,/^\/\/go:build /s#^//go:build \(.*\)$#//go:build \1 || virelai#' "$F/$1"
+        edits=$((edits+1)); log "patched $1 (include virelai: $2)"
+    fi
+}
+# The exact reverse of vir_include, for a file an earlier revision DID
+# include: its helpers are ones this port must supply itself (a runtime
+# linkname target, a syscall-number table), so selecting it twice would be a
+# redeclaration. Reversing keeps apply.sh the single source of truth for the
+# fork's tags instead of depending on which revision ran last.
+vir_exclude() {  # <path-under-src> <why this port cannot use it>
+    if head -6 "$F/$1" | grep -q '|| virelai'; then
+        gsed -i '0,/^\/\/go:build /s#^//go:build \(.*\) || virelai$#//go:build \1#' "$F/$1"
+        edits=$((edits+1)); log "reverted $1 (virelai must not select it: $2)"
+    fi
+}
+# dirent.go: the Dirent parse helpers (readInt + ParseDirent) over THIS
+# GOOS's Dirent, which is the kernel's own 40-byte sys_dir_list row.
+vir_include syscall/dirent.go "dirent parse helpers"
+# timestruct.go: Timespec/Timeval <-> nanoseconds, pure arithmetic.
+vir_include syscall/timestruct.go "timespec arithmetic"
+# env_unix.go: Setenv/Unsetenv/Clearenv over the runtime's env block
+# (issue #1226 gave the guest a real envp; this exposes it as os.Environ).
+vir_include syscall/env_unix.go "environment block"
+
+# --- 3g3. internal/poll for virelai (issue #1525, M70c-S1P) --------------
+# `os` is a thin shell over internal/poll's FD; none of poll's platform
+# files select for an unknown GOOS, so the package has no FD type at all.
+# These are the same files wasip1 compiles (fd_wasip1.go stands in for
+# fd_unixjs.go there because WASI lacks dup): virelai takes the POSIX
+# shapes, since the ADR 0007 slots are descriptor-based.
+vir_include internal/poll/fd_posix.go          "FD lock/close helpers"
+# fd_unix.go is the FD struct + Read/Write/Close over syscall.Read/Write.
+vir_include internal/poll/fd_unix.go           "FD core"
+# fd_unixjs.go supplies SysFile, dupCloseOnExecOld (ForkLock+Dup),
+# Fchdir and Seek — the four things fd_wasip1.go reimplements for WASI.
+vir_include internal/poll/fd_unixjs.go         "SysFile/dup/fchdir/seek"
+vir_include internal/poll/fd_poll_runtime.go   "poller binding (runtime_poll*)"
+vir_include internal/poll/fd_fsync_posix.go    "fd sync"
+vir_include internal/poll/fstatat_unix.go      "fstatat on an FD"
+vir_include internal/poll/errno_unix.go        "errno translation"
+vir_include internal/poll/hook_unix.go         "CloseFunc/AcceptFunc hooks"
+vir_include internal/poll/sys_cloexec.go       "accept() cloexec fallback"
+
+# --- 3g4. time's TZ database plumbing (issue #1525) --------------------
+# sys_unix.go: the open/read/close/seek helpers zoneinfo_read.go calls.
+vir_include time/sys_unix.go "zoneinfo file access"
+# zoneinfo_unix.go: platformZoneSources + initLocal. The guest has no TZ
+# database in any of the search paths, so initLocal falls back to UTC —
+# which is the guest's actual clock (ADR 0021: no RTC, uptime seconds).
+vir_include time/zoneinfo_unix.go "platform TZ lookup"
+
+# --- 3g5. os for virelai (issue #1525, M70c-S1P) -----------------------
+# The unix-tagged half of `os`: path resolution, file handles over
+# internal/poll, rename/unlink/mkdir, the Root API, dirent walking. Each
+# call lands in the overlay syscall package; nothing is reimplemented.
+vir_include os/dir_unix.go        "directory iteration"
+vir_include os/exec_posix.go      "Process basics"
+vir_include os/exec_unix.go       "fork/exec plumbing"
+vir_include os/file_open_unix.go  "openFileNolog"
+vir_include os/file_posix.go      "File helpers"
+vir_include os/file_unix.go       "File core"
+vir_include os/path_unix.go       "path handling"
+vir_include os/pidfd_other.go     "pidfd stubs (no pidfd slot)"
+vir_include os/removeall_at.go    "RemoveAll via openat"
+vir_include os/removeall_unix.go  "removeAllFrom"
+vir_include os/root_openat.go     "Root API over openat"
+vir_include os/root_unix.go       "Root API"
+vir_include os/stat_unix.go       "Stat/Lstat/Fstat"
+vir_include os/zero_copy_posix.go "copy_file_range fallback"
+# eloop_other.go: how a failed O_NOFOLLOW open is recognised as ELOOP.
+vir_include os/eloop_other.go    "ELOOP classification"
+# statat_unix.go: File.lstatatNolog, the per-entry stat a directory walk
+# does (the rows carry a name, not a FileInfo).
+vir_include os/statat_unix.go    "per-entry lstat during readdir"
+# sys_unix.go: the constants each unix GOOS answers about itself
+# (supportsCloseOnExec). Stock says true, and true is right here for a
+# consequence-free reason: the port accepts O_CLOEXEC and ignores it because
+# nothing at EL0 inherits a descriptor table, and os only consults this
+# constant to decide whether it must simulate cloexec another way.
+vir_include os/sys_unix.go "supportsCloseOnExec"
+# internal/filepathlite: os's own path plumbing (Separator, Base, Dir) — the
+# filepath and os packages both read it instead of duplicating the rules.
+vir_include internal/filepathlite/path_unix.go "path separators/rules"
+
+vir_exclude internal/syscall/unix/fcntl_unix.go "port supplies Fcntl (no runtime.fcntl here)"
+vir_exclude internal/syscall/unix/nonblocking_unix.go "port supplies IsNonblock"
+vir_exclude internal/syscall/unix/utimes.go "port supplies Utimensat (linkname target absent)"
+
+# internal/syscall/unix: the helpers `os` imports from there (Faccessat,
+# Nofollow). The *at() family, Fcntl and IsNonblock come from the overlay's
+# own at_virelai.go|fcntl_virelai.go instead, because the stock files route
+# them through runtime.fcntl or a per-GOOS syscall-number table this port
+# does not have. net.go is deliberately absent: it exists for `net`, which
+# has no slots here yet.
+vir_include internal/syscall/unix/constants.go        "R_OK/W_OK/X_OK + NoFollowErrno"
+vir_include internal/syscall/unix/eaccess.go          "Eaccess via faccessat"
+vir_include internal/syscall/unix/nofollow_posix.go   "ELOOP for O_NOFOLLOW"
+# net.go: the eight Inet4/Inet6 wrappers internal/poll's FD calls on the
+# socket methods it compiles. They forward to the overlay's Recvfrom/Sendto/
+# Recvmsg/SendmsgN (all ENOSYS), so the wrappers exist because poll names them
+# whether or not a socket can exist here.
+vir_include internal/syscall/unix/net.go              "Inet4/Inet6 poll wrappers"
+
+# --- 3g6. the rest of std, so `go build std` closes (issue #1525) ------
+# Measured after the first pass: six packages refused, and four of them
+# wanted nothing but the tag (the other two are `net` and its socktest
+# helper, which have no slots to call at all — a net port is its own arc,
+# it is not a missing include).
+vir_include path/filepath/path_unix.go        "Separator/Join/Abs/SplitList"
+vir_include os/exec/lp_unix.go                "LookPath + ErrNotFound (search works; spawn still refuses)"
+vir_include os/signal/signal_unix.go          "numSig/signum (no delivery; watchers see nothing)"
+vir_include os/user/lookup_unix.go            "/etc/passwd-shaped lookup (guest has none: honest error)"
+vir_include os/user/listgroups_unix.go        "group listing on the same file"
+vir_include crypto/internal/sysrand/rand_getrandom.go "read() over unix.GetRandom"
+# GetRandom itself comes from the overlay (getrandom_virelai.go) rather than
+# the stock Linux file, which reaches for a raw SYS_GETRANDOM trap number.
+vir_exclude internal/syscall/unix/getrandom.go "Linux trap numbers; port supplies GetRandom"
+
+# --- 3g7. os/dir_unix.go's zero-inode skip (issue #1525) ---------------
+# dir_unix.go drops a directory row whose inode is 0 unless the GOOS is
+# linux or wasip1, because some filesystems report 0 for real files. This
+# filesystem is one of them: an EL0 directory row (sys_dir_list) carries a
+# name, a size and an is-dir bit and NO inode number, so the port reports 0
+# honestly (overlay/os/dirent_virelai.go) and has to be added to that list —
+# the same reason wasip1 is in it.
+if ! have "$F/os/dir_unix.go" 'runtime.GOOS != "virelai"'; then
+    gsed -i 's#runtime.GOOS != "wasip1" {#runtime.GOOS != "wasip1" \&\& runtime.GOOS != "virelai" {#' "$F/os/dir_unix.go"
+    edits=$((edits+1)); log "patched os/dir_unix.go (zero-inode skip includes virelai)"
 fi
 
 # --- 3h. runtime/netpoll.go: enable the poller CORE for virelai --------

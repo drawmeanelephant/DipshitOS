@@ -69,6 +69,20 @@ func sigblock(exiting bool)      {}
 func minit()                     {}
 func unminit()                   {}
 func mdestroy(mp *m)             {}
+// os_sigpipe backs os's bodyless declaration `func sigpipe()` in
+// os/file_unix.go, which os.File.Write reaches through epipecheck when a
+// write to stdout/stderr fails with EPIPE. The //go:linkname is what makes
+// this function BE that symbol: without it the declaration links against
+// nothing and the guest dies at link time with
+//
+//	os.(*File).Write: relocation target os.sigpipe not defined
+//
+// which is a link-time gap a `go build os` cannot see (found by the M70c-S1P
+// in-guest fixture, #1525). The body is empty on purpose: nothing here
+// delivers signals, so there is no SIGPIPE to raise and the EPIPE the writer
+// already has is the entire report.
+//
+//go:linkname os_sigpipe os.sigpipe
 func os_sigpipe()                {}
 func setProcessCPUProfiler(hz int32) {}
 func setThreadCPUProfiler(hz int32)  {}

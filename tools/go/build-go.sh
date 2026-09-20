@@ -75,6 +75,7 @@ for prog in "${@:-$REPO/tools/go/hello.go}"; do
         govidns)    base="GOVIDNS" ;;
         gobig)      base="GOBIG" ;;
         goread)     base="GOREAD" ;;
+        gosyscall)  base="GOSYSCALL" ;;
     esac
     out="$out_dir/${GO_BUILD_NAME:-$base}.ELF"
     # The gap loader gives a program a FIXED text aperture, so image size is
@@ -91,6 +92,9 @@ for prog in "${@:-$REPO/tools/go/hello.go}"; do
         # M70c (#1455): the share-read measurement fixture. It links the whole
         # `vi` surface, which is what puts it in this class.
         GOREAD) strip="-s -w" ;;
+        # M70c-S1P (#1525): the syscall-layer fixture — the std `syscall`
+        # package for GOOS=virelai, which is smaller than `vi` but not small.
+        GOSYSCALL) strip="-s -w" ;;
     esac
     log "building $prog -> $out (ldflags: $strip)"
     GOOS=virelai GOARCH=arm64 go build -o "$out" \

@@ -4,10 +4,16 @@
 # Run 04 (M70c, #1455): the guest reads that same 9.5 MiB from the share
 # end to end at the ABI's 2048-byte read cap — bytes, call count and FNV hash
 # asserted against the file on macOS, the rate reported (ADR 0035 measures it).
-#
-# HOST PREREQUISITE (fails honestly when missing): not hermetic —
-# `.build/go/{GOHELLO,GOBIG,GOREAD}.ELF` must exist first, via `bash
-# tools/go/build-go.sh tools/go/hello.go tools/go/gobig.go tools/go/goread.go`
+# There is deliberately NO std-fixture run here. #1525 ported the GOOS=virelai
+# std `syscall`/`os` packages, so `GOOS=virelai go build fmt` exits 0 and
+# tools/go/gosyscall.go (the os-based fixture) builds and LOADS on VZ — but
+# every image importing `os` outgrows this recipe's windows (measured: os-only
+# text ends 0x92fc4 > the 0x80000 text window), the shifted layout puts the
+# runtime's sbrk base inside the loaded data aperture, and the guest dies in
+# mallocinit with "cannot allocate memory". The run comes back with that
+# blocker, filed as #1540 (M70c-S1L).
+# HOST PREREQUISITE: `.build/go/{GOHELLO,GOBIG,GOREAD}.ELF` must exist first via
+# `bash tools/go/build-go.sh tools/go/hello.go tools/go/gobig.go tools/go/goread.go`
 # (fork prerequisites in tools/go/README.md); the setup hook says the same.
 # exec-order: assert-proven — a run cannot go green without the program's own output. See tools/gate/SPEC.md.
 
