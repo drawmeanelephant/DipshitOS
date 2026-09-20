@@ -57,6 +57,7 @@ const (
 	markerReady    = "gosh: ready"
 	markerOpen     = "gosh: open id="
 	markerDeclare  = "gosh: declare accepted"
+	markerDogfood  = "dogfood: gosh" // M69a (#1528): go-dogfood.spec's marker
 	markerTty      = "gosh: tty"
 	markerAttach   = "gosh: attached"
 	markerPrompt   = "gosh: prompt"
@@ -170,6 +171,10 @@ func runTab() {
 	vi.ConsoleLine(markerOpen + vi.Itoa64(int64(ta.Win)))
 	if ta.TabAware {
 		vi.ConsoleLine(markerDeclare)
+		// M69a (#1528): the dogfood beat's ordered marker, printed only on the
+		// accepted-declare path, so it means "a WM seat hosts this shell" and
+		// never fires on the shim/refused path.
+		vi.ConsoleLine(markerDogfood)
 	} else {
 		vi.ConsoleLine("gosh: declare refused")
 	}

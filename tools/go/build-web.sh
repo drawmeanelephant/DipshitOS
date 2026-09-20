@@ -5,7 +5,15 @@
 # runtime fixtures.
 #
 # Usage: bash tools/go/build-web.sh [dir-under-user/go] [NAME]
-#   Default: browser -> .build/go/BROWSER.ELF
+#   Default: browser -> .build/go/WEB.ELF, fetch -> .build/go/GOFETCH.ELF
+#
+# The default NAME is not cosmetic: an app looks itself up by its executable
+# name to find the WM (vi.WmPeers), so a binary built under a name the app does
+# not claim resolves no self and its WM request returns false BEFORE sending --
+# a silent no-op with no log line. Both apps below pin their own name in
+# source (appName in user/go/browser/main.go, user/go/fetch/main.go), so the
+# default has to match it; anything else gets the uppercased directory, exactly
+# as before.
 #
 # HTTPS consumers (fetch, browser) import virelai/tls and dial in-process.
 # Do not stage FETCHS.BIN for those apps.
@@ -19,7 +27,12 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FORK_DIR="${GO_FORK_DIR:-$(dirname "$REPO")/go-virelai}"
 DIR="${1:-browser}"
-NAME="${2:-$(printf '%s' "$DIR" | tr '[:lower:]' '[:upper:]')}"
+case "$DIR" in
+    browser) DEFAULT_NAME=WEB ;;
+    fetch)   DEFAULT_NAME=GOFETCH ;;
+    *)       DEFAULT_NAME="$(printf '%s' "$DIR" | tr '[:lower:]' '[:upper:]')" ;;
+esac
+NAME="${2:-$DEFAULT_NAME}"
 MAX_BYTES=2097152 # kernel/src/exec.zig exec_program_max
 
 log() { printf 'build-web: %s\n' "$*"; }

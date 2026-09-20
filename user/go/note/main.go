@@ -95,6 +95,7 @@ const (
 	markerOpen        = "note: open id="
 	markerTabAware    = "note: tab-aware (full-viewport)"
 	markerNotTabAware = "note: not-tab-aware (shim or WND desktop)"
+	markerDogfood     = "dogfood: note" // M69a (#1528): go-dogfood.spec's marker
 	markerReady       = "note: ready"
 	markerSettled     = "note: settled"
 	markerExiting     = "note: exiting "
@@ -184,6 +185,9 @@ func main() {
 	vi.ConsoleLine(markerOpen + vi.Itoa64(int64(ta.Win)))
 	if ta.TabAware {
 		vi.ConsoleLine(markerTabAware)
+		// M69a (#1528): printed only on the accepted-declare path -- the
+		// editor is HOSTED by a WM seat, not merely running.
+		vi.ConsoleLine(markerDogfood)
 	} else {
 		// The WM refused the declaration (the shim / WND.BIN path): the app
 		// keeps its native presentation, which is the documented no-regression

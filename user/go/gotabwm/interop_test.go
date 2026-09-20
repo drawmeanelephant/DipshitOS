@@ -39,11 +39,48 @@ func TestInteropMarkerShapes(t *testing.T) {
 		{MarkerSessionLoad, "gotabwm: session load n="},
 		{MarkerSessionTitles, "gotabwm: session titles="},
 		{MarkerSessionBad, "gotabwm: session bad"},
+		{MarkerDogfoodSeat, "dogfood: seat"},
+		{MarkerDogfoodOK, "dogfood: ok"},
 	}
 	for _, c := range cases {
 		if c.got != c.want {
 			t.Fatalf("marker = %q want %q", c.got, c.want)
 		}
+	}
+}
+
+// M69a (#1528): the dogfood latch. `dogfood: ok` hangs off it because the
+// close choreography empties the strip BEFORE host-done, and it is the only
+// record left that this boot hosted anything. A request the seat refuses must
+// not latch it, or a boot that hosted nothing could still claim the beat.
+func TestDogfoodHostedLatch(t *testing.T) {
+	savedTabs, savedHosted, savedLatch := tabs, hostedApp, dogfoodHosted
+	savedHostTicks, savedStep, savedHold := hostTicksLeft, stripStep, stripHoldLeft
+	savedSawTwo, savedClosed, savedDone := stripSawTwo, stripClosedOne, stripDone
+	defer func() {
+		tabs, hostedApp, dogfoodHosted = savedTabs, savedHosted, savedLatch
+		hostTicksLeft, stripStep, stripHoldLeft = savedHostTicks, savedStep, savedHold
+		stripSawTwo, stripClosedOne, stripDone = savedSawTwo, savedClosed, savedDone
+	}()
+	tabs, hostedApp, dogfoodHosted = TabStrip{}, 0, false
+	stripSawTwo, stripClosedOne, stripDone, stripStep, stripHoldLeft = false, false, false, 0, 0
+
+	// A refused kind (raise with no registered window on the host) must not
+	// latch the beat.
+	if applyRPC(vi.WmRpc{Kind: vi.WmRpcKindRaise, ID: 9, Seq: 1}) {
+		t.Fatal("raise applied on the host; the test proves nothing")
+	}
+	if dogfoodHosted {
+		t.Fatal("a refused request latched dogfoodHosted")
+	}
+
+	req := vi.WmRpc{Kind: vi.WmRpcKindDeclareFullscreen, ID: 7, Seq: 1}
+	req.SetTitle("Calc")
+	if !applyRPC(req) {
+		t.Fatal("declare refused")
+	}
+	if !dogfoodHosted {
+		t.Fatal("declare did not latch dogfoodHosted: `dogfood: ok` could never print")
 	}
 }
 
