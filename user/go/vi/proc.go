@@ -66,11 +66,22 @@ func Probe(pid int64) (int64, int) {
 // counts as status 0 (reaped and recycled — the same contract go-git's
 // waitPID pins). A pid that never appears at all burns the budget into
 // ErrWaitGone rather than blocking forever.
-func Wait(pid int64) (int64, error) {
+func Wait(pid int64) (int64, error) { return WaitBudget(pid, waitBudgetNs) }
+
+// WaitBudget is Wait with a caller-chosen ceiling (M70c-S2, issue #1544). The
+// in-guest build-loop driver (tools/go/selfhost.go) waits on a linker that
+// reads ~15 MiB of package archives out of the share at the 2048-byte EL0 read
+// cap — a workload no shell's foreground child has — and needing a longer
+// ceiling must not cost a second copy of the rule below: "seen running, then
+// gone => status 0" is a contract that is easy to get wrong twice, and a fix
+// here would silently not reach the copy. Same poll spacing, same
+// reaped-and-recycled rule, same ErrWaitGone for a pid that never appears;
+// only the deadline moves.
+func WaitBudget(pid int64, budgetNs int64) (int64, error) {
 	if pid <= 0 {
 		return -1, errno(ErrEINVAL)
 	}
-	deadline := Nanos() + waitBudgetNs
+	deadline := Nanos() + budgetNs
 	seen := false
 	for Nanos() < deadline {
 		st, state := Probe(pid)

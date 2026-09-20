@@ -99,6 +99,37 @@ func TestWaitNeverSeen(t *testing.T) {
 	}
 }
 
+// M70c-S2 (#1544): the in-guest build-loop driver needs a longer ceiling than
+// a shell's foreground child, and that must not become a second copy of the
+// wait rule. This pins that WaitBudget honours ITS argument while Wait keeps
+// reading the package budget -- if the parameter were ignored (or read the
+// global), both waits below would burn the same deadline and the second one
+// would come back with a status instead of ErrWaitGone.
+func TestWaitBudgetUsesItsArgument(t *testing.T) {
+	shrinkBudget(t, int64(2)*int64(1e9)) // package budget: generous
+	rowsp := []ProcRow{{PID: 5, State: ProcExited, ExitStatus: 9}}
+	installHook(t, func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
+		if num == SlotYield {
+			return 0
+		}
+		return fakeProcs(t, &rowsp)(num, a0, a1, a2, a3)
+	})
+	// The explicit ceiling is what decides: a never-seen pid with a 5 ms budget
+	// fails while the package budget still stands at 2 s.
+	if _, err := WaitBudget(3, int64(5)*int64(1e6)); !errors.Is(err, ErrWaitGone) {
+		t.Fatalf("WaitBudget(3, 5ms) err = %v, want ErrWaitGone", err)
+	}
+	// ...and the same call with the package's own budget still sees the row, so
+	// the 5 ms above was the argument and not a broken probe hook.
+	st, err := WaitBudget(5, int64(2)*int64(1e9))
+	if err != nil || st != 9 {
+		t.Fatalf("WaitBudget(5, 2s) = (%d, %v), want (9, nil)", st, err)
+	}
+	if waitBudgetNs != int64(2)*int64(1e9) {
+		t.Fatalf("WaitBudget wrote the package budget: %d", waitBudgetNs)
+	}
+}
+
 // TestWaitKernelErrorKeepsPolling pins that a transient kernel error from
 // the registry read does not end the wait.
 func TestWaitKernelErrorKeepsPolling(t *testing.T) {
