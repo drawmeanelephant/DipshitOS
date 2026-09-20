@@ -1817,3 +1817,176 @@ test "m39 ui2: measure_text_sized returns sensible metrics" {
     const w = measure_text_sized("Virelai", 14);
     try std.testing.expect(w > 20);
 }
+
+// ---------------------------------------------------------------------------
+// M69d2 (#1536): real Inter Bold/Italic vs the synthetic emphasis
+// ---------------------------------------------------------------------------
+
+/// The vendored faces (M69d #1531) or the upstream extras tree they came from,
+/// exactly like font_ttf.zig's own loader.
+fn loadFaceBytes(io: anytype, allocator: std.mem.Allocator, name: []const u8) ![]u8 {
+    var buf: [128]u8 = undefined;
+    const vendored = try std.fmt.bufPrint(&buf, "image/fonts/{s}", .{name});
+    return std.Io.Dir.cwd().readFileAlloc(io, vendored, allocator, std.Io.Limit.limited(2 * 1024 * 1024)) catch {
+        const fallback = try std.fmt.bufPrint(&buf, "FONTS-CHOOSE/Inter-4.1/extras/ttf/{s}", .{name});
+        return std.Io.Dir.cwd().readFileAlloc(io, fallback, allocator, std.Io.Limit.limited(2 * 1024 * 1024));
+    };
+}
+
+test "m69d2: strikeUnion is the mask unioned with itself shifted one pixel" {
+    // One lit column (x=0) in both rows of a 3x2 mask: two lit pixels, and the
+    // shift lights one more per row — never more, never fewer.
+    const lit = [_]u8{ 255, 0, 0, 255, 0, 0 };
+    try std.testing.expectEqual(@as(u32, 4), draw.strikeUnion(3, 2, lit[0..]));
+    // Under the painter's own coverage cut, nothing is ink at all.
+    const faint = [_]u8{ 95, 0, 0, 95, 0, 0 };
+    try std.testing.expectEqual(@as(u32, 0), draw.strikeUnion(3, 2, faint[0..]));
+    // A solid block is unchanged by the shift except at its right edge.
+    const solid = [_]u8{ 255, 255, 0, 255, 255, 0 };
+    try std.testing.expectEqual(@as(u32, 6), draw.strikeUnion(3, 2, solid[0..]));
+}
+
+test "m69d2: maskSkew16 separates a lean from upright" {
+    // 4x6, one ink column per band. A "/" stem (top right, bottom left) leans
+    // RIGHT and scores negative; its mirror "\" scores positive.
+    var slash = [_]u8{0} ** 24;
+    slash[1] = 255; // y=0, x=1  (top, right)
+    slash[4 + 1] = 255; // y=1, x=1
+    slash[4 * 4] = 255; // y=4, x=0  (bottom, left)
+    slash[5 * 4] = 255; // y=5, x=0
+    try std.testing.expectEqual(@as(i32, -16), draw.maskSkew16(4, 6, slash[0..]));
+    var backslash = [_]u8{0} ** 24;
+    backslash[0] = 255; // y=0, x=0
+    backslash[4] = 255; // y=1, x=0
+    backslash[4 * 4 + 1] = 255; // y=4, x=1
+    backslash[5 * 4 + 1] = 255; // y=5, x=1
+    try std.testing.expectEqual(@as(i32, 16), draw.maskSkew16(4, 6, backslash[0..]));
+    // The same ink in the same column top and bottom is upright.
+    var upright = [_]u8{0} ** 24;
+    upright[0] = 255;
+    upright[4] = 255;
+    upright[4 * 4] = 255;
+    upright[5 * 4] = 255;
+    try std.testing.expectEqual(@as(i32, 0), draw.maskSkew16(4, 6, upright[0..]));
+}
+
+test "m69d2: strikeMaskInto materializes what strikeUnion counts" {
+    const lit = [_]u8{ 255, 0, 0, 255, 0, 0 }; // one column, two rows
+    const src = draw.MaskView{ .w = 3, .h = 2, .alpha = lit[0..] };
+    var buf: [64]u8 = undefined;
+    const strike = draw.strikeMaskInto(&buf, src) orelse return error.NoStrike;
+    try std.testing.expectEqual(@as(usize, 4), strike.w);
+    try std.testing.expectEqual(draw.strikeUnion(3, 2, lit[0..]), draw.litPixels(strike.alpha));
+    // The strike against its own source: the two disagree exactly on the
+    // column the shift adds, which is where the extra stroke shows.
+    try std.testing.expectEqual(@as(u32, 2), draw.maskDiff(strike, src));
+    // And a mask compared with itself is always a match.
+    try std.testing.expectEqual(@as(u32, 0), draw.maskDiff(strike, strike));
+    // A buffer one byte short of the widened box is refused, not overrun.
+    var small: [7]u8 = undefined;
+    try std.testing.expect(draw.strikeMaskInto(&small, src) == null);
+}
+
+test "m69d2: Inter Bold is not the 1-px strike, and is heavier than Regular" {
+    const allocator = std.testing.allocator;
+    var io_impl = std.Io.Threaded.init_single_threaded;
+    const io = io_impl.io();
+
+    const reg_bytes = try loadFaceBytes(io, allocator, "Inter-Regular.ttf");
+    defer allocator.free(reg_bytes);
+    const bold_bytes = try loadFaceBytes(io, allocator, "Inter-Bold.ttf");
+    defer allocator.free(bold_bytes);
+
+    const regular = try TrueTypeFace.init(reg_bytes);
+    const bold = try TrueTypeFace.init(bold_bytes);
+
+    var reg_cache: TrueTypeFace.GlyphCache = .{};
+    var bold_cache: TrueTypeFace.GlyphCache = .{};
+    const size: u32 = 14;
+
+    const reg_entry = reg_cache.get_or_render(&regular, 'n', size) orelse return error.NoGlyph;
+    const bold_entry = bold_cache.get_or_render(&bold, 'n', size) orelse return error.NoGlyph;
+    const reg_alpha = reg_cache.glyph_alpha(reg_entry);
+    const bold_alpha = bold_cache.glyph_alpha(bold_entry);
+
+    const reg_ink = draw.litPixels(reg_alpha);
+    const bold_ink = draw.litPixels(bold_alpha);
+    const strike_ink = draw.strikeUnion(reg_entry.width, reg_entry.height, reg_alpha);
+
+    // Inter matches advances across weights in DESIGN units (M69d #1531 measured
+    // "M" at 96 px for both); at 14 px the rounded pixel advances can differ by
+    // one, which is why the ink/mask probe, not a width probe, is what
+    // distinguishes the faces.
+    try std.testing.expect(@max(reg_entry.advance_width, bold_entry.advance_width) -
+        @min(reg_entry.advance_width, bold_entry.advance_width) <= 1);
+    try std.testing.expect(bold_ink > reg_ink);
+    try std.testing.expect(strike_ink >= reg_ink);
+
+    // The card's claim, as a number: the Bold face is NOT the strike that
+    // doubles Regular, so their masks disagree on real pixels. A regular-only
+    // build publishes diff=0 here — the strike it draws twice IS that strike.
+    const reg_view = draw.MaskView{ .w = reg_entry.width, .h = reg_entry.height, .alpha = reg_alpha };
+    const bold_view = draw.MaskView{ .w = bold_entry.width, .h = bold_entry.height, .alpha = bold_alpha };
+    var strike_buf: [1024]u8 = undefined;
+    const strike = draw.strikeMaskInto(&strike_buf, reg_view) orelse return error.NoStrike;
+    const diff = draw.maskDiff(strike, bold_view);
+    try std.testing.expect(diff > 0);
+    // The strike against ITSELF is a match: the "is this the double strike?"
+    // question therefore has a measurable answer, and the fallback answers it 0.
+    try std.testing.expectEqual(@as(u32, 0), draw.maskDiff(strike, strike));
+    try std.testing.expectEqual(@as(u32, 0), draw.maskDiff(reg_view, reg_view));
+    // The RELATIONS the gate reads, pinned where they can be read without a VM.
+    // The exact pixel counts are what the running guest publishes (live-doc
+    // boot 01: 14 px regular 21 / bold 38 / strike 36 diff 2; 24 px 64 / 111 /
+    // 89 diff 26). At 14 px the real face and the old synthetic strike are
+    // within 2 px of each other — close enough that the strike went unnoticed —
+    // so the robust relation is the 24 px one, which is why the probe publishes
+    // both sizes.
+    try std.testing.expect(reg_ink > 0 and bold_ink > 0 and strike_ink > 0 and diff > 0);
+    {
+        const size24: u32 = 24;
+        var r24: TrueTypeFace.GlyphCache = .{};
+        var b24: TrueTypeFace.GlyphCache = .{};
+        const re24 = r24.get_or_render(&regular, 'n', size24) orelse return error.NoGlyph;
+        const be24 = b24.get_or_render(&bold, 'n', size24) orelse return error.NoGlyph;
+        const rv24 = draw.MaskView{ .w = re24.width, .h = re24.height, .alpha = r24.glyph_alpha(re24) };
+        const bv24 = draw.MaskView{ .w = be24.width, .h = be24.height, .alpha = b24.glyph_alpha(be24) };
+        var buf24: [4096]u8 = undefined;
+        const st24 = draw.strikeMaskInto(&buf24, rv24) orelse return error.NoStrike;
+        try std.testing.expect(draw.litPixels(bv24.alpha) > draw.litPixels(st24.alpha));
+        try std.testing.expect(draw.maskDiff(st24, bv24) > 8);
+    }
+}
+
+test "m69d2: Inter Italic leans where Inter Regular stands upright" {
+    const allocator = std.testing.allocator;
+    var io_impl = std.Io.Threaded.init_single_threaded;
+    const io = io_impl.io();
+
+    const reg_bytes = try loadFaceBytes(io, allocator, "Inter-Regular.ttf");
+    defer allocator.free(reg_bytes);
+    const ital_bytes = try loadFaceBytes(io, allocator, "Inter-Italic.ttf");
+    defer allocator.free(ital_bytes);
+
+    const regular = try TrueTypeFace.init(reg_bytes);
+    const italic = try TrueTypeFace.init(ital_bytes);
+
+    var reg_cache: TrueTypeFace.GlyphCache = .{};
+    var ital_cache: TrueTypeFace.GlyphCache = .{};
+    const size: u32 = 14;
+
+    const reg_entry = reg_cache.get_or_render(&regular, 'l', size) orelse return error.NoGlyph;
+    const ital_entry = ital_cache.get_or_render(&italic, 'l', size) orelse return error.NoGlyph;
+
+    const reg_skew = draw.maskSkew16(reg_entry.width, reg_entry.height, reg_cache.glyph_alpha(reg_entry));
+    const ital_skew = draw.maskSkew16(ital_entry.width, ital_entry.height, ital_cache.glyph_alpha(ital_entry));
+
+    // The SAME glyph on both faces, so the difference is the lean and not the
+    // glyph's shape. Roman 'l' is an upright stem: its ink centre is at the same
+    // x top and bottom (measured 0). Italic 'l' leans right, so its ink centre
+    // moves left as the stem descends (measured -21, i.e. ~1.3 px over 14 px of
+    // em) — the sign of a real slanted face rather than an upright one.
+    try std.testing.expect(@max(reg_skew, -reg_skew) <= 8);
+    try std.testing.expect(ital_skew < -16);
+    try std.testing.expect(ital_skew < reg_skew - 8);
+}
