@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -644,5 +645,58 @@ func TestSearchCtrlRMidChunkDefersQuery(t *testing.T) {
 	}
 	if string(e.buf) != "status43" {
 		t.Fatalf("buf = %q want the match loaded", e.buf)
+	}
+}
+
+// --- M69f1 (#1537): the persistent-recall file shape ---------------------
+
+// TestHistoryLoadReadsOldestFirst pins the format saveHistory writes: UTF-8,
+// LF, one command per line, oldest first.
+func TestHistoryLoadReadsOldestFirst(t *testing.T) {
+	var h History
+	h.Load([]byte("one\ntwo\nthree\n"))
+	if got, want := strings.Join(h.Entries(), ","), "one,two,three"; got != want {
+		t.Fatalf("entries = %q want %q", got, want)
+	}
+}
+
+// TestHistoryLoadSkipsTruncatedTail: a half-written append (no trailing LF)
+// costs one line, never the whole file.
+func TestHistoryLoadSkipsTruncatedTail(t *testing.T) {
+	var h History
+	h.Load([]byte("one\ntwo\npar"))
+	if got, want := strings.Join(h.Entries(), ","), "one,two"; got != want {
+		t.Fatalf("entries = %q want %q", got, want)
+	}
+}
+
+// TestHistoryLoadTolerances: the empty file, a lone partial line, CRLF input
+// and blank lines all reduce to the same ring the session would have built.
+func TestHistoryLoadTolerances(t *testing.T) {
+	var h History
+	h.Load(nil)
+	if got := h.Entries(); len(got) != 0 {
+		t.Fatalf("empty load = %q want no entries", got)
+	}
+	h.Load([]byte("partial"))
+	if got := h.Entries(); len(got) != 0 {
+		t.Fatalf("partial-only load = %q want no entries", got)
+	}
+	h.Load([]byte("one\r\n\r\ntwo\r\n"))
+	if got, want := strings.Join(h.Entries(), ","), "one,two"; got != want {
+		t.Fatalf("crlf load = %q want %q", got, want)
+	}
+}
+
+// TestHistoryLoadIsBounded: the file cannot grow the ring past historyMax.
+func TestHistoryLoadIsBounded(t *testing.T) {
+	var body []byte
+	for i := 0; i < historyMax*2; i++ {
+		body = append(body, []byte(fmt.Sprintf("line-%03d\n", i))...)
+	}
+	var h History
+	h.Load(body)
+	if got := len(h.Entries()); got != historyMax {
+		t.Fatalf("ring after load = %d entries want %d", got, historyMax)
 	}
 }

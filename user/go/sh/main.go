@@ -47,8 +47,12 @@ const (
 	startupPath     = "/host/STARTUP.SH"
 	profilePath     = "/host/PROFILE.SH"
 	maxStartupBytes = 2048 // the startup contract's per-file cap
-	ticksPerSecond  = 100  // the scheduler tick is ~10 ms (kernel timer @ ~100 Hz)
-	ttyWriteMax     = 1024 // under the kernel's 2048-byte file-write stage cap
+	// M69f1 (#1537): the shell's own persistent history. NOT the monitor's
+	// HISTORY.TXT -- mixing the kernel actor's `virelai>` verbs into GOSH's
+	// Up-arrow recall would be worse than no persistence at all.
+	histPath       = "/host/GOSH-HISTORY.TXT"
+	ticksPerSecond = 100  // the scheduler tick is ~10 ms (kernel timer @ ~100 Hz)
+	ttyWriteMax    = 1024 // under the kernel's 2048-byte file-write stage cap
 
 	markerReady    = "gosh: ready"
 	markerOpen     = "gosh: open id="
@@ -71,6 +75,10 @@ const (
 	markerNetRefus = "gosh: net refused: no credential (pass 'open' for the insecure mode)"
 	markerNetFail  = "gosh: remote attach failed"
 	markerNetBad   = "gosh: net refused: "
+	// M69f1 (#1537) D3: persistence is best-effort. ONE line, once, and the
+	// session continues -- a share that refuses the write must not end a
+	// shell.
+	markerHistFail = "gosh: history not persisted"
 )
 
 func main() {
@@ -278,6 +286,12 @@ func runSession(fd uint32, ta *tabapp.TabApp, auth *netAuth) {
 		}
 	}
 
+	// M69f1 (#1537): seed recall from the share AFTER the startup contract
+	// and BEFORE the first prompt, so the startup lines never enter recall
+	// and the first Up arrow lands on the last line the user really typed.
+	sink := &historySink{}
+	loadHistory(hst, hist, sink)
+
 	_, _ = vi.FileWrite(fd, editor.Repaint())
 	vi.ConsoleLine(markerPrompt)
 
@@ -293,6 +307,7 @@ func runSession(fd uint32, ta *tabapp.TabApp, auth *netAuth) {
 		switch ev.Kind {
 		case evSubmit:
 			vi.ConsoleLine(markerLine + ev.Line)
+			saveHistory(hst, hist, ev.Line, sink)
 			_, act := sh.RunLine(ev.Line)
 			if act != actionContinue {
 				leave(ta, fd, sh, act)
@@ -386,6 +401,106 @@ func writeTTY(fd uint32, b []byte) {
 		}
 		b = b[n:]
 	}
+}
+
+// --- M69f1 (#1537): persistent recall -------------------------------------
+//
+// The monitor's HISTORY.TXT (M18 T4) belongs to the kernel actor; GOSH's
+// recall was session-only, so a reboot cost the Up arrow. This is the
+// shell's own file on the same share: a different name, the same
+// one-line-per-entry LF shape, so a human can cat it and neither writer can
+// clobber the other.
+
+// maxHistoryBytes bounds the load. The writer keeps the file inside the ring
+// bound, so a larger file is not ours: refuse it whole instead of parsing a
+// prefix of somebody else's data. historyMax lines of maxLineBytes is the
+// worst case the ring can produce.
+const maxHistoryBytes = historyMax * maxLineBytes
+
+// histStore is the slice of the host seam persistence needs. *goshHost is
+// the real one; the host tests drive saveHistory/loadHistory with their
+// fakeHost through this interface.
+type histStore interface {
+	ReadFile(path string, max int) ([]byte, error)
+	WriteFile(path string, b []byte, appendMode bool) error
+}
+
+// historySink is the write side's state: the last line appended (the ring's
+// dup rule, carried across boots) and how many appends have landed since the
+// file was last rewritten whole.
+type historySink struct {
+	last     string
+	appended int
+	warned   bool // the one-line failure report is emitted at most once
+}
+
+// loadHistory seeds the ring from the share. A missing file is an empty
+// ring, not an error; a read failure is treated the same way (D3: the file
+// is a convenience, and a share that cannot answer must not stop the boot).
+func loadHistory(st histStore, h *History, s *historySink) {
+	b, err := st.ReadFile(histPath, maxHistoryBytes)
+	if err != nil || len(b) == 0 {
+		return
+	}
+	h.Load(b)
+	if e := h.Entries(); len(e) > 0 {
+		s.last = e[len(e)-1]
+	}
+}
+
+// saveHistory appends one submitted line and keeps the file inside the ring
+// bound (D2). Runs AFTER the editor pushed the line into the ring, so the
+// ring is the writer's source of truth: once the appends alone would push
+// the file past the bound, it is rewritten whole from the ring, which has
+// already dropped the oldest lines.
+func saveHistory(st histStore, h *History, line string, s *historySink) {
+	// Idempotent: the editor already pushed this line when it submitted, so
+	// this is a no-op in the shell and the reason the function is honest on
+	// its own in a test.
+	h.Push(line)
+	if line == "" || line == s.last {
+		return
+	}
+	if s.appended >= historyMax {
+		// The ring already holds this line (the editor pushes on submit), so
+		// the rewrite IS the append: compact and stop. From here the file is
+		// rewritten to the ring's own contents, which is the bound D2 asks
+		// for -- at most historyMax lines, never an unbounded append log.
+		if err := writeHistoryFile(st, h); err != nil {
+			s.warn()
+			return
+		}
+		s.last = line
+		s.appended = len(h.Entries())
+		return
+	}
+	if err := st.WriteFile(histPath, []byte(line+"\n"), true); err != nil {
+		s.warn()
+		return
+	}
+	s.last = line
+	s.appended++
+}
+
+// writeHistoryFile replaces the file with the ring's contents (write-open
+// truncates, kernel/src/file_table.zig: "a fresh write-open truncates").
+func writeHistoryFile(st histStore, h *History) error {
+	var b []byte
+	for _, ln := range h.Entries() {
+		b = append(b, ln...)
+		b = append(b, '\n')
+	}
+	return st.WriteFile(histPath, b, false)
+}
+
+// warn reports a persistence failure ONCE, on one serial line, and never
+// ends the session (D3).
+func (s *historySink) warn() {
+	if s.warned {
+		return
+	}
+	s.warned = true
+	vi.ConsoleLine(markerHistFail)
 }
 
 // loadPrompt adopts the SETTINGS.TXT `prompt` key (SH.BIN's SH8 behavior).

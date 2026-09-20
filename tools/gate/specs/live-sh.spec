@@ -15,6 +15,13 @@
 # (sys_tty_attach selector 1, ADR 0020), so every assert is unchanged except
 # the binary and its marker prefix. Boot default unchanged.
 #
+#
+# Run 02 is the M69f1 (#1537) persistent-recall beat: the SAME share boots
+# again and ONE Up arrow (plus Enter) recalls the last line run 01
+# submitted. Run 02 types no command text at all, so `status43: alive` in
+# its log can only come from a line read back off /host/GOSH-HISTORY.TXT
+# and then executed -- which is the whole card.
+#
 # HOST PREREQ: bash tools/go/build-gosh.sh -> .build/go/GOSH.ELF
 
 vgate_name live-sh "#1078 SH2 userland shell: builtins, cd, external app + Up-history over /dev/tty"
@@ -56,6 +63,10 @@ seq = (b"echo sh-echo-ok\rcd /data\recho PWD=$PWD\r"
        b"status43\r\x1b[A\r")
 with open(os.path.join(run, "edit.bin"), "wb") as f:
     f.write(seq)
+# Run 02 types Up + Enter and NOTHING else: the recalled line must come
+# from the persisted file, not from this byte sequence.
+with open(os.path.join(run, "recall.bin"), "wb") as f:
+    f.write(b"\x1b[A\r")
 PY
 
 vgate_run 01 -- --screen '$RUN_DIR/screen' --script '$RUN_DIR/script.txt' --script2 '$RUN_DIR/edit.bin' --script2-after 'gosh: attached' --script-expect 'status43: alive' --script-expect-tail 16 --timeout 90
@@ -78,3 +89,22 @@ vgate_assert 01 serial-contains 'subset: one pipe per line'
 vgate_assert 01 serial-contains "unknown command 'nosuchverb'"
 vgate_assert 01 serial-absent '\[EXC\]'
 vgate_assert 01 serial-absent '[EXC] parking:'
+# M69f1 (#1537): the submitted lines are on the share in ring order, one
+# per line, oldest first -- and it is GOSH's own file, not the monitor's.
+vgate_assert 01 share-equals GOSH-HISTORY.TXT $'echo sh-echo-ok\ncd /data\necho PWD=$PWD\nhelp\nhelp printf\nhelp nosuchverb\nstatus43\n'
+
+# --- Run 02: the same share, a new boot, one Up arrow -------------------
+# Nothing but the chord is typed, so `status43: alive` here is a line read
+# back from /host/GOSH-HISTORY.TXT and run. serial-count 1 also proves it
+# ran exactly once (the paint on Up writes `status43`; only an execution
+# writes `status43: alive`).
+vgate_run 02 -- --screen '$RUN_DIR/screen2' --script '$RUN_DIR/script.txt' --script2 '$RUN_DIR/recall.bin' --script2-after 'gosh: attached' --script-expect 'status43: alive' --script-expect-tail 8 --timeout 90
+
+vgate_assert 02 serial-contains 'VirelaiOS kernel has seized control.'
+vgate_assert 02 serial-contains 'gosh: ready'
+vgate_assert 02 serial-contains 'gosh: attached'
+vgate_assert 02 serial-contains 'gosh: prompt'
+vgate_assert 02 serial-contains 'status43: alive'
+vgate_assert 02 serial-count 'status43: alive' 1
+vgate_assert 02 serial-absent '\[EXC\]'
+vgate_assert 02 serial-absent '[EXC] parking:'

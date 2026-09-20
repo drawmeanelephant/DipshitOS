@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -34,6 +35,7 @@ type fakeHost struct {
 	chmodErr       map[string]string // path -> errno name for a denied chmod
 	chdirErr       map[string]string // path -> errno name for a denied cd
 	chdirPlain     bool              // Chdir fails with a plain (no-errno) error
+	writeErr       bool              // every WriteFile refuses (M69f1 #1537 D3)
 }
 
 func newFakeHost() *fakeHost {
@@ -120,6 +122,9 @@ func (f *fakeHost) ReadFile(path string, max int) ([]byte, error) {
 }
 
 func (f *fakeHost) WriteFile(path string, b []byte, appendMode bool) error {
+	if f.writeErr {
+		return errWriteFailed
+	}
 	if appendMode {
 		f.files[path] = append(f.files[path], b...)
 	} else {
@@ -920,5 +925,125 @@ func TestHelpNamesNoDeletedBinaries(t *testing.T) {
 				t.Errorf("help page %q names deleted binary %q", name, d)
 			}
 		}
+	}
+}
+
+// --- M69f1 (#1537): persistence at the host seam -------------------------
+//
+// saveHistory is called with the engine's ring AFTER the editor pushed the
+// submitted line (main.go's evSubmit); these tests drive the same order.
+
+// TestHistoryPersistsAcrossSessions is the save/load story: session 2's ring
+// is seeded from the file session 1 wrote, and the file carries the ring's
+// own shape (one line per entry, oldest first, dup-collapsed).
+func TestHistoryPersistsAcrossSessions(t *testing.T) {
+	h := newFakeHost()
+
+	// Session 1: nothing on the share yet.
+	first := &History{}
+	s1 := &historySink{}
+	loadHistory(h, first, s1)
+	if got := first.Entries(); len(got) != 0 {
+		t.Fatalf("first session started with %q; want empty", got)
+	}
+	for _, ln := range []string{"echo one", "echo two", "echo two", "help echo"} {
+		first.Push(ln)
+		saveHistory(h, first, ln, s1)
+	}
+	if got, want := string(h.files[histPath]), "echo one\necho two\nhelp echo\n"; got != want {
+		t.Fatalf("history file = %q want %q", got, want)
+	}
+
+	// Session 2: a fresh process (fresh ring, fresh sink) recalls it.
+	second := &History{}
+	s2 := &historySink{}
+	loadHistory(h, second, s2)
+	if got, want := strings.Join(second.Entries(), ","), "echo one,echo two,help echo"; got != want {
+		t.Fatalf("second session ring = %q want %q", got, want)
+	}
+	// The newest line is last, so one Up arrow recalls it (the M18 T4 shape).
+	ents := second.Entries()
+	if ents[len(ents)-1] != "help echo" {
+		t.Fatalf("newest recall entry = %q want %q", ents[len(ents)-1], "help echo")
+	}
+	// And a re-submit of that same line is not written twice.
+	saveHistory(h, second, "help echo", s2)
+	if got, want := string(h.files[histPath]), "echo one\necho two\nhelp echo\n"; got != want {
+		t.Fatalf("re-submit rewrote the file: %q", got)
+	}
+}
+
+// TestHistoryFileStaysBounded: past the ring bound the file is rewritten from
+// the ring instead of growing an unbounded append log.
+func TestHistoryFileStaysBounded(t *testing.T) {
+	h := newFakeHost()
+	hist := &History{}
+	sink := &historySink{}
+	for i := 0; i < historyMax*4; i++ {
+		ln := fmt.Sprintf("cmd-%03d", i)
+		hist.Push(ln)
+		saveHistory(h, hist, ln, sink)
+	}
+	lines := strings.Count(string(h.files[histPath]), "\n")
+	if lines > historyMax {
+		t.Fatalf("history file holds %d lines; the ring bound is %d", lines, historyMax)
+	}
+	if lines == 0 {
+		t.Fatal("history file is empty after 4x the bound in submits")
+	}
+}
+
+// TestHistoryLoadToleratesMissingFile pins D1/D3: a missing or unreadable
+// share file is an empty ring, never an error and never a session end.
+func TestHistoryLoadToleratesMissingFile(t *testing.T) {
+	h := newFakeHost()
+	hist := &History{}
+	sink := &historySink{}
+	h.denied = map[string]string{histPath: "EACCES"}
+	loadHistory(h, hist, sink)
+	if got := hist.Entries(); len(got) != 0 {
+		t.Fatalf("denied load = %q want empty", got)
+	}
+	// A share that refuses the write reports once and keeps the session: the
+	// ring still holds the line, so recall works even without the file.
+	h2 := newFakeHost()
+	h2.writeErr = true
+	hist2 := &History{}
+	sink2 := &historySink{}
+	hist2.Push("echo x")
+	saveHistory(h2, hist2, "echo x", sink2)
+	if !sink2.warned {
+		t.Fatal("a refused write did not latch the one-line report")
+	}
+	if got, want := strings.Join(hist2.Entries(), ","), "echo x"; got != want {
+		t.Fatalf("in-session recall after a refused write = %q want %q", got, want)
+	}
+}
+
+// TestHistoryWarnIsPrintedOnce: D3's one-line report, not one per keystroke.
+func TestHistoryWarnIsPrintedOnce(t *testing.T) {
+	s := &historySink{}
+	s.warn()
+	s.warn()
+	if !s.warned {
+		t.Fatal("warn did not latch")
+	}
+}
+
+// TestHistoryDoesNotTouchTheMonitorFile pins D1: the shell's file is its own,
+// and the monitor's HISTORY.TXT is never written.
+func TestHistoryDoesNotTouchTheMonitorFile(t *testing.T) {
+	h := newFakeHost()
+	hist := &History{}
+	sink := &historySink{}
+	for _, ln := range []string{"echo a", "echo b"} {
+		hist.Push(ln)
+		saveHistory(h, hist, ln, sink)
+	}
+	if _, ok := h.files["/host/HISTORY.TXT"]; ok {
+		t.Fatal("saveHistory wrote the monitor's HISTORY.TXT")
+	}
+	if _, ok := h.files[histPath]; !ok {
+		t.Fatal("saveHistory did not write " + histPath)
 	}
 }
