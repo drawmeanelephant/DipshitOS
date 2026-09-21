@@ -20,8 +20,9 @@ to GitHub Pages).
 Every milestone through **M70** has landed and closed as of 2026-09-20, and
 the **boot default is the Go seat**: `GOTABWM.ELF` autostarts and hosts Go EL0
 clients over the `WM_RPC` tab contract, with Zig `TABWM.BIN` retained by
-decision as the `settings set wm tabwm` fallback. The tracker is open and
-active (the M69 daily-driver floor; the M70 moonshots).
+decision as the `settings set wm tabwm` fallback. The tracker is open:
+**M71 seat honesty** ([#1559](https://github.com/drawmeanelephant/DipshitOS/issues/1559))
+and **M72 Charm TUI** ([#1578](https://github.com/drawmeanelephant/DipshitOS/issues/1578)).
 [`docs/status.md`](docs/status.md) is the canonical accounting and the readable
 summary is the
 [documentation site](https://drawmeanelephant.github.io/DipshitOS/).
