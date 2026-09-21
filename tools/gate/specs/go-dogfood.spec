@@ -78,6 +78,14 @@
 # M69b subscribes to the same six markers for its `--screenshot-after`; see
 # docs/testing.md.
 #
+# M69g (#1558) adds a THIRD boot: GOSH ALONE on the same default Go seat,
+# captured after a settle, with a PIXEL assert on its first terminal line.
+# The two boots above are marker-only by design; a tab that renders nothing is
+# invisible to every one of them, which is exactly how #1558 escaped. Boot 03
+# is the falsifiable half — the seed, the seat and the shell are the same, and
+# only GOSH is hosted, so the captured frame's tab region is the shell's own
+# pixels and nothing else.
+#
 # exec-order: assert-proven -- every phase gate is anchored on guest output
 # (the seat's or an app's own marker) and each run ends on a marker only its
 # stage script prints (`rx-dogfood-01-ok` / `rx-dogfood-02-ok`).
@@ -329,4 +337,113 @@ if re.search(r"(?m)^tabwm: registered", ser):
     sys.exit("the Zig TABWM seat registered: this is not the default Go seat")
 print("boot 02 order ok: " + " < ".join(want) +
       " (and the shell/editor half is absent)")
+PY
+
+# --- boot 03: the shell tab's PIXELS on the default seat (M69g, #1558) ------
+# Same compiled default seat, same share, GOSH alone. The capture is released
+# by a MONITOR echo 4 s after `gosh: prompt` (the M69b recipe: the prompt is
+# written to the tty, and the compositor paints it on the next composite), so
+# the frame holds a settled tab rather than the boot frame.
+#
+# What the marker asserts is the geometry, not just "it ran": GOSH declares
+# full-viewport, so its window is the whole scanout, and the kernel draws a
+# window-bound terminal's grid starting at its title-band height (16 device
+# rows). The shell's fresh prompt is therefore the ONLY text on the first
+# grid line, at device y 16..23. Before the #1558 fix GOTABWM's own 96x64
+# client-death probe window (8,8,96,64) painted its chrome over that band and
+# the region held no terminal-green pixels at all (measured: 55, all of it
+# anti-aliasing from the probe's own white title text); with the fix it holds
+# the prompt (measured: 578 across repeats).
+vgate_file script-03a.txt <<'EOF'
+set GOMAXPROCS=1
+exec GOSH.ELF
+EOF
+
+vgate_file script-03b.txt <<'EOF'
+echo shot-gosh-pixels
+EOF
+
+vgate_file script-03c.txt <<'EOF'
+echo rx-dogfood-03-ok
+EOF
+
+vgate_run 03 -- \
+    --screen '$RUN_DIR/screen-03' \
+    --screenshot-after 'shot-gosh-pixels' \
+    --script '$RUN_DIR/script-03a.txt' \
+    --script-after 'dogfood: seat' \
+    --script2 '$RUN_DIR/script-03b.txt' \
+    --script2-after 'gosh: prompt' --script2-delay 4 \
+    --script3 '$RUN_DIR/script-03c.txt' \
+    --script3-after 'shot-gosh-pixels' \
+    --script-expect 'rx-dogfood-03-ok' --timeout 300
+
+vgate_assert 03 serial-contains 'dogfood: seat'
+vgate_assert 03 serial-contains 'gotabwm: tab open id='
+vgate_assert 03 serial-contains 'gosh: prompt'
+vgate_assert 03 serial-contains 'rx-dogfood-03-ok'
+vgate_assert 03 serial-absent 'wm: autostart tabwm'
+vgate_assert 03 serial-absent '[EXC] parking:'
+
+# THE pixel assert. Scale the capture (the window capture is 2x the 1280x720
+# scanout) instead of pinning counts to one backing scale, and count only
+# GREEN-dominant pixels: the probe window's chrome that used to occupy this
+# band is white-on-grey, so a chrome-green tint cannot pass this by accident.
+vgate_assert 03 snapshot 'screen-03-after' <<'PY'
+import sys, zlib, struct
+path = sys.argv[1]
+d = open(path, 'rb').read()
+assert d[:8] == b'\x89PNG\r\n\x1a\n', "not a PNG"
+pos = 8; idat = b''; w = h = ct = 0
+while pos < len(d):
+    ln, typ = struct.unpack('>I4s', d[pos:pos+8])
+    data = d[pos+8:pos+8+ln]
+    if typ == b'IHDR':
+        w, h, bd, ct = struct.unpack('>IIBB', data[:10])
+    elif typ == b'IDAT':
+        idat += data
+    pos += 12 + ln
+raw = zlib.decompress(idat)
+bpp = 4 if ct == 6 else 3
+stride = w * bpp
+out = bytearray(); prev = bytearray(stride); i = 0
+for y in range(h):
+    f = raw[i]; i += 1
+    line = bytearray(raw[i:i+stride]); i += stride
+    if f == 1:
+        for x in range(bpp, stride): line[x] = (line[x] + line[x-bpp]) & 0xff
+    elif f == 2:
+        for x in range(stride): line[x] = (line[x] + prev[x]) & 0xff
+    elif f == 3:
+        for x in range(stride):
+            a = line[x-bpp] if x >= bpp else 0
+            line[x] = (line[x] + ((a + prev[x]) >> 1)) & 0xff
+    elif f == 4:
+        for x in range(stride):
+            a = line[x-bpp] if x >= bpp else 0
+            b = prev[x]; c = prev[x-bpp] if x >= bpp else 0
+            p = a + b - c
+            pa, pb, pc = abs(p-a), abs(p-b), abs(p-c)
+            pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
+            line[x] = (line[x] + pr) & 0xff
+    out += line
+    prev = line
+
+def px(x, y):
+    k = (y * w + x) * bpp
+    return out[k], out[k+1], out[k+2]
+
+scale = w / 1280.0
+# The tab's first terminal line: device rows 17..22 (inside the 8-row grid
+# cell that starts at the kernel's 16-row title band), columns 1..55 — the
+# "gosh> " prompt and its block cursor.
+green = 0
+for y in range(int(17 * scale), int(23 * scale)):
+    for x in range(int(1 * scale), int(56 * scale)):
+        r, g, b = px(x, y)
+        if g > r + 30 and g > b + 30:
+            green += 1
+print("terminal-green pixels on the tab's first line: %d" % green)
+assert green >= 200, ("GOSH's tab shows no prompt text (%d green pixels on "
+                      "the first terminal line) - the tab is blank" % green)
 PY
