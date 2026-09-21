@@ -7,9 +7,9 @@ GOEDIT.ELF | Code Editor | e | dock=true
 GOFILES.ELF | Files | f | dock=true
 GOTERM.ELF | Terminal | t | dock=true
 WEB.ELF | Web | w | dock=true
+PULSE.ELF | Pulse | u | dock=true
 GOSH.ELF | Shell | s
-TOP.BIN | Task Manager | p
-SYSMON.BIN | System Monitor | y
+GOTOP.ELF | Top | p | dock=true
 GOSET.ELF | Settings | g
 DOC.BIN | Document Viewer | o
 VIEW.BIN | Image Viewer | v

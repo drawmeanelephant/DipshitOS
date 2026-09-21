@@ -1,5 +1,5 @@
 # live-sys-kill.spec -- claim 7604 (slot 29 sys_kill): EL0 process termination.
-# TOP.BIN terminates COUNTER.BIN via 'k' key; verifies exit status 137,
+# GOTOP.ELF terminates COUNTER.BIN via 'k' key; verifies exit status 137,
 # no counter execution after kill, and sys_kill calls=1.
 
 vgate_name live-sys-kill "claim 7604: EL0 process termination on VZ"
@@ -9,7 +9,7 @@ vgate_repeat 1 BOOTS
 
 vgate_file script1.txt <<'EOF'
 exec COUNTER.BIN
-exec TOP.BIN
+exec GOTOP.ELF
 EOF
 
 vgate_file script2.txt <<'EOF'
@@ -17,6 +17,20 @@ procs
 syscalls
 echo done-sys-kill
 EOF
+
+# HOST PREREQUISITE (fails the gate honestly when missing):
+#   bash tools/go/build-gotop.sh   ->  .build/go/GOTOP.ELF
+vgate_setup_python <<'PY'
+import os, shutil, sys
+rd = os.environ["RUN_DIR"]
+share = os.environ.get("VG_SHARE") or os.path.join(rd, "share")
+src = os.path.join(".build", "go", "GOTOP.ELF")
+if not os.path.exists(src):
+    sys.exit("GOTOP.ELF missing (expected " + src + ") - build it first: "
+             "bash tools/go/build-gotop.sh")
+shutil.copy(src, os.path.join(share, "GOTOP.ELF"))
+print("staged GOTOP.ELF into share (%d bytes)" % os.path.getsize(os.path.join(share, "GOTOP.ELF")))
+PY
 
 vgate_run 01 -- --display --input --script '$RUN_DIR/script1.txt' --script-after 'tasks user-el0 exited status=7' --input-string 'k' --input-string-after 'top: ready' --script2 '$RUN_DIR/script2.txt' --script2-after 'tasks user-exec exited status=137' --script-expect 'done-sys-kill' --timeout 75
 
@@ -50,6 +64,6 @@ if counter_after > 0:
     sys.exit(f"counter executed {counter_after} times after kill")
 if not re.search(r"procs: id=1 name=COUNTER\.BIN uid=\d+ caps=\d+ state=exited .*exit=137", content):
     sys.exit("procs line for killed COUNTER.BIN missing or invalid")
-if not re.search(r"procs: id=2 name=TOP\.BIN uid=\d+ caps=\d+ state=running", content):
-    sys.exit("procs line for TOP.BIN missing or invalid")
+if not re.search(r"procs: id=2 name=GOTOP\.ELF uid=\d+ caps=\d+ state=running", content):
+    sys.exit("procs line for GOTOP.ELF missing or invalid")
 PY

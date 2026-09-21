@@ -13,18 +13,33 @@ vgate_runner_flags -Xswiftc -DSPIKE
 
 # M66c (#1485): the CLIENT execs first and the desktop LAST, or the desktop
 # never holds focus. The Return chord below goes to the FOCUSED window, and
-# NOTE.ELF's window now lands after DESKTOP's (the Go runtime start is slower
+# NOTE.ELF's window lands after DESKTOP's (the Go runtime start is slower
 # than a Zig app's open), so exec'ing all three in one burst left NOTE.ELF
 # focused and the menu chord went to it (observed: `desktop: menu ready`, the
 # chord typed, no launch). Waiting on the client's own READY marker before the
 # other two exec is what makes DESKTOP's window the newest — and therefore the
 # focused — one.
+#
+# M71g (#1566) MEASURED the same race in the other direction and fixed it: with
+# GOTOP.ELF (Go) exec'd in the same burst as the Zig DESKTOP.BIN, the GO window
+# landed LAST — `open: id=3 owner=3` (DESKTOP) then `open: id=4 owner=2`
+# (GOTOP), so GOTOP held focus and the Return chord went to the task manager
+# (observed: `desktop: menu ready`, chord typed, `desktop: launch GOCALC.ELF`
+# zero times, run timed out). The two Go clients therefore exec in the FIRST
+# burst (their order follows exec order, and neither can steal focus from a
+# window that opens later), and DESKTOP.BIN waits for NOTE.ELF's own `note:
+# ready`. Focus itself is not re-asserted: `desktop: launch GOCALC.ELF` is
+# printed only by DESKTOP's own menu handler, so a chord delivered to any other
+# window leaves it absent and the run fails — the launch marker IS the
+# focus proof (there is no free script stage to snapshot `dui` before it).
 vgate_file script.txt <<'EOF'
+exec GOTOP.ELF
 exec NOTE.ELF
 EOF
 
+# DESKTOP.BIN is exec'd only once both Go clients are up: a Zig window opened
+# after a Go window is the newest, which is what focus follows.
 vgate_file script2.txt <<'EOF'
-exec TOP.BIN
 exec DESKTOP.BIN
 EOF
 
@@ -46,6 +61,20 @@ for name, script in apps:
     shutil.copy(src, os.path.join(share, name))
     print("staged %s into share (%d bytes)"
           % (name, os.path.getsize(os.path.join(share, name))))
+PY
+
+# HOST PREREQUISITE (fails the gate honestly when missing):
+#   bash tools/go/build-gotop.sh   ->  .build/go/GOTOP.ELF
+vgate_setup_python <<'PY'
+import os, shutil, sys
+rd = os.environ["RUN_DIR"]
+share = os.environ.get("VG_SHARE") or os.path.join(rd, "share")
+src = os.path.join(".build", "go", "GOTOP.ELF")
+if not os.path.exists(src):
+    sys.exit("GOTOP.ELF missing (expected " + src + ") - build it first: "
+             "bash tools/go/build-gotop.sh")
+shutil.copy(src, os.path.join(share, "GOTOP.ELF"))
+print("staged GOTOP.ELF into share (%d bytes)" % os.path.getsize(os.path.join(share, "GOTOP.ELF")))
 PY
 
 vgate_run A -- \

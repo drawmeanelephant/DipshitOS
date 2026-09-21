@@ -31,7 +31,7 @@ EOF
 vgate_file script-B1.txt <<'EOF'
 wnd start
 exec NOTE.ELF
-exec TOP.BIN
+exec GOTOP.ELF
 EOF
 
 vgate_file s2-B1.txt <<'EOF'
@@ -49,7 +49,7 @@ EOF
 vgate_file script-B2.txt <<'EOF'
 wnd start
 exec NOTE.ELF
-exec TOP.BIN
+exec GOTOP.ELF
 EOF
 
 vgate_file s2-B2.txt <<'EOF'
@@ -74,6 +74,20 @@ if not os.path.exists(src):
              "bash tools/go/build-note.sh")
 shutil.copy(src, os.path.join(share, "NOTE.ELF"))
 print("staged NOTE.ELF into share (%d bytes)" % os.path.getsize(os.path.join(share, "NOTE.ELF")))
+PY
+
+# HOST PREREQUISITE (fails the gate honestly when missing):
+#   bash tools/go/build-gotop.sh   ->  .build/go/GOTOP.ELF
+vgate_setup_python <<'PY'
+import os, shutil, sys
+rd = os.environ["RUN_DIR"]
+share = os.environ.get("VG_SHARE") or os.path.join(rd, "share")
+src = os.path.join(".build", "go", "GOTOP.ELF")
+if not os.path.exists(src):
+    sys.exit("GOTOP.ELF missing (expected " + src + ") - build it first: "
+             "bash tools/go/build-gotop.sh")
+shutil.copy(src, os.path.join(share, "GOTOP.ELF"))
+print("staged GOTOP.ELF into share (%d bytes)" % os.path.getsize(os.path.join(share, "GOTOP.ELF")))
 PY
 
 vgate_run A -- --screen '$RUN_DIR/screen' --via-virtio --cvc-snap --script '$RUN_DIR/script-A.txt' --script2 '$RUN_DIR/s2-A.txt' --script2-after 'note: ready' --script2-delay 20 --script-expect 'echo taskbar-a-go' --timeout 260

@@ -2,7 +2,7 @@
 # class-B gate: TABWM's Alt-Tab parity (WMS6 Gate A semantics over the tab list).
 #
 # TWO headless boots with --screen (GPU armed) + --via-virtio (the HID chord
-# transport). TABWM starts, then TWO apps exec into two tabs (TOP id=2,
+# transport). TABWM starts, then TWO apps exec into two tabs (GOTOP id=2,
 # NOTE.ELF id=3 - the last mirror activates, so NOTE.ELF owns the tab).
 # After `note: ready` the runner injects the REAL Alt+Tab chord
 # (`--input-chords "alt-tab"` = LAlt modifier + Tab usage 0x2B, the WMS6
@@ -38,7 +38,7 @@ vgate_runner_flags -Xswiftc -DSPIKE
 
 vgate_file script.txt <<'EOF'
 tabwm start
-exec TOP.BIN
+exec GOTOP.ELF
 exec NOTE.ELF
 EOF
 
@@ -65,6 +65,20 @@ dui
 wm
 echo ctrl-tab-ok
 EOF
+
+# HOST PREREQUISITE (fails the gate honestly when missing):
+#   bash tools/go/build-gotop.sh   ->  .build/go/GOTOP.ELF
+vgate_setup_python <<'PY'
+import os, shutil, sys
+rd = os.environ["RUN_DIR"]
+share = os.environ.get("VG_SHARE") or os.path.join(rd, "share")
+src = os.path.join(".build", "go", "GOTOP.ELF")
+if not os.path.exists(src):
+    sys.exit("GOTOP.ELF missing (expected " + src + ") - build it first: "
+             "bash tools/go/build-gotop.sh")
+shutil.copy(src, os.path.join(share, "GOTOP.ELF"))
+print("staged GOTOP.ELF into share (%d bytes)" % os.path.getsize(os.path.join(share, "GOTOP.ELF")))
+PY
 
 vgate_run 01 -- \
     --screen '$RUN_DIR/screen' \

@@ -22,7 +22,7 @@ set GOMAXPROCS=1
 exec WINLOOP.BIN
 exec VIEW.BIN
 exec NOTE.ELF
-exec TOP.BIN
+exec GOTOP.ELF
 exec DESKTOP.BIN
 EOF
 
@@ -46,8 +46,16 @@ EOF
 # DEVCONS.BIN (Zig) takes the eighth slot, keeping this spec's actual claim (a
 # WM holding EIGHT concurrent pool-backed user windows) intact.
 vgate_file script2.txt <<'EOF'
+# M71f (#1565) took this slot from SETTINGS.BIN to DEVCONS.BIN; M71g (#1566)
+takes the NEXT one from SYSMON.BIN to RESMON.BIN. The two cards collide here:
+both had to name a Zig substitute for a retired app, and two Go runtimes do
+not fit the 16-slot task pool beside NOTE.ELF (see the note above). RESMON.BIN
+is the Zig resident that reports the same resource story SYSMON.BIN did, and
+it opens exactly ONE window -- measured, and the reason M21DEMO.BIN was not
+used: it opens two (m21demo: open-a id=2 / open-b id=3), which would make
+this a nine-window burst and quietly break the claim below.
 exec DEVCONS.BIN
-exec SYSMON.BIN
+exec RESMON.BIN
 exec PS.BIN
 EOF
 
@@ -75,6 +83,20 @@ PY
 # sweep ran before NOTE.ELF had printed a single `note:` line. Waiting on the
 # marker under test is also the correct choreography: the app decides when the
 # boot may proceed, and its own `note: ready` assert below stays honest.
+# HOST PREREQUISITE (fails the gate honestly when missing):
+#   bash tools/go/build-gotop.sh   ->  .build/go/GOTOP.ELF
+vgate_setup_python <<'PY'
+import os, shutil, sys
+rd = os.environ["RUN_DIR"]
+share = os.environ.get("VG_SHARE") or os.path.join(rd, "share")
+src = os.path.join(".build", "go", "GOTOP.ELF")
+if not os.path.exists(src):
+    sys.exit("GOTOP.ELF missing (expected " + src + ") - build it first: "
+             "bash tools/go/build-gotop.sh")
+shutil.copy(src, os.path.join(share, "GOTOP.ELF"))
+print("staged GOTOP.ELF into share (%d bytes)" % os.path.getsize(os.path.join(share, "GOTOP.ELF")))
+PY
+
 vgate_run 01 -- --display --input --screen '$RUN_DIR/gpu-screen' --script '$RUN_DIR/script.txt' --script-after "tasks user-el0 exited status=7" --script2 '$RUN_DIR/script2.txt' --script2-after "note: ready" --script3 '$RUN_DIR/script3.txt' --script3-after "ps: ready" --script-expect "done-wm1-sweep" --timeout 150
 
 vgate_assert 01 serial-contains 'winloop: open id=2'
@@ -83,7 +105,7 @@ vgate_assert 01 serial-contains 'note: ready'
 vgate_assert 01 serial-contains 'top: ready'
 vgate_assert 01 serial-contains 'desktop: ready'
 vgate_assert 01 serial-contains 'devcons: ready'
-vgate_assert 01 serial-contains 'sysmon: ready'
+vgate_assert 01 serial-contains 'resmon: ready'
 vgate_assert 01 serial-contains 'ps: ready'
 vgate_assert 01 serial-contains '12 sys_win_open calls=8'
 vgate_assert 01 serial-contains 'dui: windows=12 '
