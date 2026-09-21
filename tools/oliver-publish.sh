@@ -2,7 +2,8 @@
 # oliver-publish.sh — M-web S6 host-side batch (issue #1207).
 #
 # Turns a directory of Markdown into a sibling HTML tree that DOC.BIN can
-# view and HTTPD.BIN can serve. Oliver itself is a guest binary
+# view and GOHTTPD.ELF can serve (M71l / #1571 retired the Zig HTTPD.BIN).
+# Oliver itself is a guest binary
 # (tests/oliver-spike/OLIVER.BIN); this script does the host-side staging:
 #
 #   1. Copy every .md/.MD/.txt/.markdown into OUT_DIR (share-shaped names).
