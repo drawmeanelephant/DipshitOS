@@ -3855,6 +3855,11 @@ fn terminalColours(style: terminal.CellStyle) struct { fg: u32, bg: u32 } {
     if (terminal.styleBold(style)) {
         if (fg_index) |colour| {
             if (colour < 8) fg_index = colour + 8;
+        } else {
+            // The historical default is terminal-green rather than ANSI
+            // colour 7. Give `SGR 1` on that default a visible bright-green
+            // rendition too, instead of recording an inert bold bit.
+            fg_index = 10;
         }
     }
     return .{
