@@ -138,3 +138,54 @@ any future large Go image at once.
     btmath: OK
 
 and the guest wrote `/host/BTMATH/SESSION.TXT`, read back on the host.
+
+## Verifying it — inside the guest, with no shell
+
+VirelaiOS has no bash, no `sh`, no libc and no Unix tooling. Nothing this app
+needs is on that side of the line: `BTMATH.ELF` is a **static ELF with no
+`PT_INTERP`** — no dynamic loader, no libc — and its entire OS surface is six
+calls into the guest SDK:
+
+| call | used for |
+|---|---|
+| `vi.Console` / `vi.ConsoleLine` | frames and markers, straight to the kernel console |
+| `vi.FileOpen` / `vi.FileWriteAll` / `vi.FileClose` | the session record in the host share |
+| `vi.Exit` | the exit status |
+
+No `exec`, no fork, no `PATH` lookup, no `#!/bin/sh`. So the proof runs *in*
+the guest — you type one line at the `virelai>` monitor and read the verdict
+off the console:
+
+    virelai> exec BTMATH.ELF --selftest
+
+The app plays the scripted session through Bubble Tea and then checks its own
+results, printing one line per check:
+
+    btmath: selftest begin checks=12
+    btmath: selftest rounds got=5 want=5 PASS
+    btmath: selftest score got=65 want=65 PASS
+    ...
+    btmath: selftest RESULT PASS checks=12 failed=0
+
+Exit status 0 on PASS, 1 on any failure, so it also works unattended in a gate.
+`--selftest` adds no dependency: it is the same binary, the same seams.
+
+**Inert dependency code, disclosed.** Two vendored files — `charm.land/bubbletea/v2/exec.go`
+(`tea.ExecProcess`) and `github.com/charmbracelet/colorprofile/env.go` — reference
+`os/exec`, and both are compiled in unconditionally. Neither is called by this
+app or anywhere on Bubble Tea's own render/input path, so nothing forks; but the
+code is present, and if it were ever invoked on VirelaiOS it would fail. Stated
+rather than hidden.
+
+**Host-side scripts are build tooling, not runtime.** `tools/go/build-btmath.sh`
+and the gate spec are bash because every build and gate in this repository is;
+they compile the artifact and boot the VM from macOS. They are never needed
+inside the guest, and nothing they do is required for the app to run.
+
+### What each layer proves
+
+| Layer | Command | Runs where | Proves |
+|---|---|---|---|
+| Self-check | `exec BTMATH.ELF --selftest` | **in the guest** | the app plays the session and its results are what it claims |
+| Gate | `just gate go-btmath` | macOS + VZ | the same, on a real boot, plus a host-side read of the record |
+| Build | `bash tools/go/build-btmath.sh` | macOS | the artifact compiles for `GOOS=virelai` |

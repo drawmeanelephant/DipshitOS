@@ -24,7 +24,7 @@ vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 
 vgate_file script.txt <<'EOF'
-exec BTMATH.ELF
+exec BTMATH.ELF --selftest
 EOF
 
 vgate_setup_python <<'PY'
@@ -58,6 +58,14 @@ vgate_assert 01 serial-contains 'Session over. Final score 65.'
 vgate_assert 01 serial-contains 'btmath: saved '
 vgate_assert 01 serial-contains 'btmath: round played=5 score=65 correct=3 wrong=2'
 vgate_assert 01 serial-contains 'btmath: OK'
+# The app checks its own results IN the guest and prints the verdict to the
+# guest console. No shell, no Unix tool and no host-side script is involved:
+# this line is produced by BTMATH.ELF running inside VirelaiOS.
+vgate_assert 01 serial-contains 'btmath: selftest begin checks=12'
+vgate_assert 01 serial-contains 'btmath: selftest score got=65 want=65 PASS'
+vgate_assert 01 serial-contains 'btmath: selftest frame-wrong got=Not quite: 5, not 6. want=present PASS'
+vgate_assert 01 serial-contains 'btmath: selftest record-written got=SESSION.TXT want=written PASS'
+vgate_assert 01 serial-contains 'btmath: selftest RESULT PASS checks=12 failed=0'
 vgate_assert 01 serial-absent '[EXC] parking:'
 vgate_assert 01 serial-absent 'exited status=139'
 
