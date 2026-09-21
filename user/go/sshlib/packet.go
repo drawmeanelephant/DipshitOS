@@ -1,22 +1,22 @@
-package main
+package sshlib
 
 const (
 	pktLenField = 4
 	pktBlock    = 8
 	pktMinPad   = 4
-	pktMaxTotal = 35000
+	PktMaxTotal = 35000
 )
 
-type pktAlign int
+type PktAlign int
 
 const (
-	alignPlain pktAlign = iota
-	alignAEAD
+	AlignPlain PktAlign = iota
+	AlignAEAD
 )
 
-func paddingLen(payloadLen int, a pktAlign) int {
+func PaddingLen(payloadLen int, a PktAlign) int {
 	base := 1 + payloadLen
-	if a == alignPlain {
+	if a == AlignPlain {
 		base = pktLenField + 1 + payloadLen
 	}
 	pad := pktBlock - (base % pktBlock)
@@ -26,21 +26,22 @@ func paddingLen(payloadLen int, a pktAlign) int {
 	return pad
 }
 
-func pktAligned(packetLength uint32, a pktAlign) bool {
+func PktAligned(packetLength uint32, a PktAlign) bool {
 	pl := int(packetLength)
-	if a == alignPlain {
+	if a == AlignPlain {
 		return (pktLenField+pl)%pktBlock == 0
 	}
 	return pl%pktBlock == 0
 }
 
-func encodePacket(payload, pad []byte, a pktAlign) ([]byte, bool) {
-	if len(pad) != paddingLen(len(payload), a) {
+func EncodePacket(payload, pad []byte, a PktAlign) ([]byte, bool) {
+	min := PaddingLen(len(payload), a)
+	if len(pad) < min || (len(pad)-min)%pktBlock != 0 {
 		return nil, false
 	}
 	packetLength := 1 + len(payload) + len(pad)
 	total := pktLenField + packetLength
-	if total > pktMaxTotal {
+	if total > PktMaxTotal {
 		return nil, false
 	}
 	out := make([]byte, total)
@@ -54,17 +55,17 @@ func encodePacket(payload, pad []byte, a pktAlign) ([]byte, bool) {
 	return out, true
 }
 
-func decodePacket(frame []byte, a pktAlign) ([]byte, bool) {
+func DecodePacket(frame []byte, a PktAlign) ([]byte, bool) {
 	if len(frame) < 5 {
 		return nil, false
 	}
 	packetLength := uint32(frame[0])<<24 | uint32(frame[1])<<16 | uint32(frame[2])<<8 | uint32(frame[3])
 	padding := int(frame[4])
 	pl := int(packetLength)
-	if pl > pktMaxTotal-pktLenField || pl < 1+pktMinPad {
+	if pl > PktMaxTotal-pktLenField || pl < 1+pktMinPad {
 		return nil, false
 	}
-	if !pktAligned(packetLength, a) || padding < pktMinPad || padding > pl-1 {
+	if !PktAligned(packetLength, a) || padding < pktMinPad || padding > pl-1 {
 		return nil, false
 	}
 	total := pktLenField + pl

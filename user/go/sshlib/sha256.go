@@ -9,7 +9,7 @@
 // vectors and a host-stdlib cross-check in sha_test.go — stock Go's audited
 // implementation is the independent source ADR 0029 D2 requires.
 
-package main
+package sshlib
 
 // sha256K is the FIPS 180-4 §4.2.2 round-constant table (the first 32 bits of
 // the fractional parts of the cube roots of the first 64 primes).
@@ -24,21 +24,21 @@ var sha256K = [64]uint32{
 	0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 }
 
-type sha256Digest struct {
+type SHA256Digest struct {
 	h  [8]uint32
 	x  [64]byte
 	nx int
 	n  uint64
 }
 
-func sha256Init() sha256Digest {
-	return sha256Digest{h: [8]uint32{
+func SHA256Init() SHA256Digest {
+	return SHA256Digest{h: [8]uint32{
 		0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
 		0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 	}}
 }
 
-func (d *sha256Digest) write(p []byte) {
+func (d *SHA256Digest) write(p []byte) {
 	d.n += uint64(len(p))
 	if d.nx > 0 {
 		take := 64 - d.nx
@@ -63,7 +63,7 @@ func (d *sha256Digest) write(p []byte) {
 	}
 }
 
-func (d *sha256Digest) sum() [32]byte {
+func (d *SHA256Digest) sum() [32]byte {
 	// Padding (FIPS 180-4 §5.1.1): 0x80, zeros to 56 mod 64, then the 64-bit
 	// big-endian bit length. padLen is 1..64 so one 64-byte buffer suffices.
 	cp := *d
@@ -91,13 +91,13 @@ func (d *sha256Digest) sum() [32]byte {
 	return out
 }
 
-func sha256Sum(p []byte) [32]byte {
-	d := sha256Init()
+func SHA256Sum(p []byte) [32]byte {
+	d := SHA256Init()
 	d.write(p)
 	return d.sum()
 }
 
-func (d *sha256Digest) block(p []byte) {
+func (d *SHA256Digest) block(p []byte) {
 	var w [64]uint32
 	for i := 0; i < 16; i++ {
 		w[i] = uint32(p[4*i])<<24 | uint32(p[4*i+1])<<16 | uint32(p[4*i+2])<<8 | uint32(p[4*i+3])
@@ -139,7 +139,7 @@ func rotr32(x uint32, n uint) uint32 {
 func hmacSha256(key, msg []byte) [32]byte {
 	var k [64]byte
 	if len(key) > 64 {
-		hashed := sha256Sum(key)
+		hashed := SHA256Sum(key)
 		copy(k[:], hashed[:])
 	} else {
 		copy(k[:], key)
@@ -147,14 +147,14 @@ func hmacSha256(key, msg []byte) [32]byte {
 	for i := range k {
 		k[i] ^= 0x36
 	}
-	inner := sha256Init()
+	inner := SHA256Init()
 	inner.write(k[:])
 	inner.write(msg)
 	ik := inner.sum()
 	for i := range k {
 		k[i] ^= 0x36 ^ 0x5c
 	}
-	outer := sha256Init()
+	outer := SHA256Init()
 	outer.write(k[:])
 	outer.write(ik[:])
 	return outer.sum()

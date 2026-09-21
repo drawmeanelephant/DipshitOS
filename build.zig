@@ -806,50 +806,12 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_sshpacket.step);
 
     // ------------------------------------------------------------------
-    // Guest: SSH.BIN — M51 SSH4 (#1171, ADR 0025 D1/D2/D6/D7). The SSH-2
-    // client: KEX + userauth + the encrypted packet transport + a session
-    // channel, `exec`-one-shot or interactive `shell`. DSK3 segmented (the
-    // transport's bounded rx/tx/msg buffers are static .bss, ADR 0025 D6).
-    // No kernel change and no new syscall slot.
+    // M71j (#1569): SSH.BIN is RETIRED with user/src/ssh.zig. EL0 SSH-2
+    // client is GOSSH.ELF (user/go/ssh, primitives in user/go/sshlib).
+    // lib/ssh/wire.zig + packet.zig + stream.zig stay as the SSHPACKET.BIN
+    // stream-adapter proof (live-ssh-packet). There is no Zig client build
+    // step to replace this one.
     // ------------------------------------------------------------------
-    const ssh_ui_mod = b.createModule(.{
-        .root_source_file = b.path("user/src/lib/ui.zig"),
-        .target = kernel_target,
-        .optimize = .ReleaseSmall,
-    });
-    const ssh_crypto_mod = b.createModule(.{
-        .root_source_file = b.path("user/src/lib/crypto.zig"),
-        .target = kernel_target,
-        .optimize = .ReleaseSmall,
-    });
-    const ssh_rng_mod = b.createModule(.{
-        .root_source_file = b.path("user/src/lib/rng.zig"),
-        .target = kernel_target,
-        .optimize = .ReleaseSmall,
-    });
-    ssh_rng_mod.addImport("ui", ssh_ui_mod);
-    const ssh_mod = b.createModule(.{
-        .root_source_file = b.path("user/src/ssh.zig"),
-        .target = kernel_target,
-        .optimize = .ReleaseSmall,
-    });
-    ssh_mod.addImport("ui", ssh_ui_mod);
-    ssh_mod.addImport("crypto", ssh_crypto_mod);
-    ssh_mod.addImport("rng", ssh_rng_mod);
-    const ssh_prog = b.addExecutable(.{
-        .name = "user-ssh",
-        .root_module = ssh_mod,
-    });
-    ssh_prog.linker_script = b.path("user/linker-segmented.ld");
-    const ssh_step = b.step("ssh", "Build the M51 SSH4 client (zig-out/bin/SSH.BIN) — DSK3 segmented");
-    const ssh_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
-    ssh_elf2bin.addFileArg(ssh_prog.getEmittedBin());
-    const ssh_bin = ssh_elf2bin.addOutputFileArg("SSH.BIN");
-    ssh_elf2bin.has_side_effects = true;
-    ssh_elf2bin.stdio = .inherit;
-    ssh_step.dependOn(&ssh_elf2bin.step);
-    const install_ssh = b.addInstallFileWithDir(ssh_bin, .bin, "SSH.BIN");
-    b.getInstallStep().dependOn(&install_ssh.step);
 
     // ------------------------------------------------------------------
     // M71k (#1570): FETCHS.BIN (the HTTPS consumer, ADR 0029, cards
@@ -2379,11 +2341,6 @@ pub fn build(b: *std.Build) void {
         "user/src/lib/ssh/wire.zig",
         "user/src/lib/ssh/packet.zig",
         "user/src/lib/ssh/stream.zig",
-        "user/src/lib/ssh/kex.zig",
-        "user/src/lib/ssh/userauth.zig",
-        "user/src/lib/ssh/transport.zig",
-        "user/src/lib/ssh/channel.zig",
-        "user/src/lib/ssh/cli.zig",
         "user/src/el0exec.zig",
         // M70e (#1457): the wasm loader's own test blocks (41 before the
         // contract-v2 negatives) had no runner — the module was only built as
@@ -2572,12 +2529,7 @@ pub fn build(b: *std.Build) void {
         if (std.mem.eql(u8, src_path, "user/src/zc.zig")) {
             test_mod.addOptions("zc_corpus_fixtures", zc_corpus_options);
         }
-        // kex.zig reaches `rng` (module-mapped), which imports the mapped
-        // `ui` module. kex.zig itself does not import `ui`, so leave the
-        // mapping off this test root (nothing here needs it).
-        if (!std.mem.eql(u8, src_path, "user/src/lib/ssh/kex.zig")) {
-            test_mod.addImport("ui", ui_mod);
-        }
+        test_mod.addImport("ui", ui_mod);
         test_mod.addImport("crypto", crypto_mod);
         test_mod.addImport("rng", rng_mod);
         test_mod.addImport("helpers", helpers_mod);

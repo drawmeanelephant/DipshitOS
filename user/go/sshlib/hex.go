@@ -1,6 +1,6 @@
-package main
+package sshlib
 
-func parseHex(s string) ([]byte, bool) {
+func ParseHex(s string) ([]byte, bool) {
 	if len(s)%2 != 0 {
 		return nil, false
 	}
@@ -19,9 +19,9 @@ func parseHex(s string) ([]byte, bool) {
 	return out, true
 }
 
-func parseHex32(s string) ([32]byte, bool) {
+func ParseHex32(s string) ([32]byte, bool) {
 	var out [32]byte
-	b, ok := parseHex(s)
+	b, ok := ParseHex(s)
 	if !ok || len(b) != 32 {
 		return out, false
 	}
@@ -41,7 +41,7 @@ func nibble(c byte) (byte, bool) {
 	return 0, false
 }
 
-func encodeHex(b []byte) string {
+func EncodeHex(b []byte) string {
 	const digits = "0123456789abcdef"
 	out := make([]byte, len(b)*2)
 	for i, v := range b {
@@ -51,7 +51,7 @@ func encodeHex(b []byte) string {
 	return string(out)
 }
 
-func wipe(b []byte) {
+func Wipe(b []byte) {
 	for i := range b {
 		b[i] = 0
 	}

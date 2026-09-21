@@ -1,6 +1,6 @@
-package main
+package sshlib
 
-func hashString(h *sha256Digest, s []byte) {
+func hashString(h *SHA256Digest, s []byte) {
 	var lenBuf [4]byte
 	n := uint32(len(s))
 	lenBuf[0] = byte(n >> 24)
@@ -11,8 +11,8 @@ func hashString(h *sha256Digest, s []byte) {
 	h.write(s)
 }
 
-func exchangeHash(vc, vs, ic, isI, ks, qc, qs, kMpint []byte) [32]byte {
-	h := sha256Init()
+func ExchangeHash(vc, vs, ic, isI, ks, qc, qs, kMpint []byte) [32]byte {
+	h := SHA256Init()
 	hashString(&h, vc)
 	hashString(&h, vs)
 	hashString(&h, ic)
@@ -24,9 +24,9 @@ func exchangeHash(vc, vs, ic, isI, ks, qc, qs, kMpint []byte) [32]byte {
 	return h.sum()
 }
 
-func deriveKey(length int, kMpint, h []byte, letter byte, sessionID []byte) []byte {
+func DeriveKey(length int, kMpint, h []byte, letter byte, sessionID []byte) []byte {
 	out := make([]byte, 0, length)
-	first := sha256Init()
+	first := SHA256Init()
 	first.write(kMpint)
 	first.write(h)
 	first.write([]byte{letter})
@@ -34,7 +34,7 @@ func deriveKey(length int, kMpint, h []byte, letter byte, sessionID []byte) []by
 	sum := first.sum()
 	out = append(out, sum[:]...)
 	for len(out) < length {
-		next := sha256Init()
+		next := SHA256Init()
 		next.write(kMpint)
 		next.write(h)
 		next.write(out)
@@ -44,7 +44,7 @@ func deriveKey(length int, kMpint, h []byte, letter byte, sessionID []byte) []by
 	return out[:length]
 }
 
-func mpint(raw []byte) []byte {
+func Mpint(raw []byte) []byte {
 	start := 0
 	for start < len(raw) && raw[start] == 0 {
 		start++
@@ -53,7 +53,7 @@ func mpint(raw []byte) []byte {
 	if len(body) > 0 && body[0]&0x80 != 0 {
 		body = append([]byte{0}, body...)
 	}
-	var w sshWriter
-	w.str(body)
-	return w.b
+	var w Writer
+	w.Str(body)
+	return w.B
 }

@@ -1,5 +1,6 @@
 # live-ssh-negative.spec -- M51 SSH5 (#1172, ADR 0025 D8) class-B negatives
-# (three runs, one shared fixture share).
+# (three runs, one shared fixture share), retargeted onto GOSSH.ELF by
+# M71j (#1569).
 #
 # 01 unknown host-key pin: the responder presents a DIFFERENT pinned host
 #    key (RFC 8032 TEST 3) than the client's KNOWN_HOSTS pin (TEST 1); the
@@ -9,16 +10,18 @@
 # 03 tampered MAC: the responder flips one bit of the first encrypted tag;
 #    the guest's AEAD open must fail closed (protocol rc=8).
 # All runs: serial-absent '[EXC] parking:'.
+#
+# HOST PREREQ:
+#   bash tools/go/build-ssh.sh -> .build/go/GOSSH.ELF
 
-vgate_name live-ssh-negative "M51 SSH5: unknown host pin refused, wrong user key rejected, tampered MAC disconnected"
+vgate_name live-ssh-negative "M71j: GOSSH.ELF unknown host pin refused, wrong user key rejected, tampered MAC disconnected"
 vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
-vgate_fmt user/src/*.zig user/src/lib/ssh/*.zig build.zig
 
 vgate_file script-1.txt <<'EOF'
 net ip 10.0.0.1
 net arp 10.0.0.2
-exec SSH.BIN alice@10.0.0.2:2222 VIRELAI-GATE-EXEC
+exec GOSSH.ELF alice@10.0.0.2:2222 VIRELAI-GATE-EXEC
 echo ssh-launched
 EOF
 
@@ -28,9 +31,13 @@ echo ssh-negative-done
 EOF
 
 vgate_setup_python <<'PY'
-import os
+import os, shutil, sys
 run = os.environ["RUN_DIR"]
-share = os.path.join(run, "share")
+share = os.environ.get("VG_SHARE") or os.path.join(run, "share")
+src = os.path.join(".build", "go", "GOSSH.ELF")
+if not os.path.exists(src):
+    sys.exit("GOSSH.ELF missing (expected " + src + ") - build it first: bash tools/go/build-ssh.sh")
+shutil.copy(src, os.path.join(share, "GOSSH.ELF"))
 os.makedirs(os.path.join(share, "SSH"), exist_ok=True)
 # The honest client fixtures: TEST 2 seed, TEST 1 host pin. Each run varies
 # only the RESPONDER's pinned keys (or the tamper knob), not the share.
@@ -42,6 +49,7 @@ open(os.path.join(share, "SSH", "KNOWN_HOSTS"), "w").write(
     "#v1\n"
     "10.0.0.2\t2222\tssh-ed25519\td75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a\n"
 )
+print("staged GOSSH.ELF (%d bytes)" % os.path.getsize(os.path.join(share, "GOSSH.ELF")))
 PY
 
 # 01: the responder's host key is TEST 3 (pin mismatch -> exit 4).

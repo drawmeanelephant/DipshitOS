@@ -67,11 +67,11 @@ func main() {
 	vi.ConsoleLine(markerAccepted)
 
 	srv := newServer(serverConfig{
-		hostSeed: seed,
-		keys:     keys,
-		run:      runGosh,
-		log:      logLine,
-		entropy:  fillRandom,
+		HostSeed: seed,
+		Keys:     keys,
+		Run:      runGosh,
+		Log:      logLine,
+		Entropy:  fillRandom,
 	})
 	wipe(seed[:])
 

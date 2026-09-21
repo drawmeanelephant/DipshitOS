@@ -9,7 +9,7 @@
 // verification paths in this package operate on public data and are not
 // constant-time.
 
-package main
+package sshlib
 
 import "math/bits"
 
@@ -308,10 +308,10 @@ func feInvert(z, x *fe51) {
 	*z = acc
 }
 
-// x25519 computes the RFC 7748 scalar multiplication of point by scalar.
+// X25519 computes the RFC 7748 scalar multiplication of point by scalar.
 // ok is false when the shared secret came out all-zero (a small-order peer
 // point); callers must treat that as a failure.
-func x25519(scalar, point [32]byte) ([32]byte, bool) {
+func X25519(scalar, point [32]byte) ([32]byte, bool) {
 	// Clamp the scalar (RFC 7748 §5).
 	var e [32]byte
 	copy(e[:], scalar[:])
@@ -374,9 +374,9 @@ func x25519(scalar, point [32]byte) ([32]byte, bool) {
 	return res, ok
 }
 
-// x25519Base computes the scalar multiplication with the base point 9.
-func x25519Base(scalar [32]byte) ([32]byte, bool) {
+// X25519Base computes the scalar multiplication with the base point 9.
+func X25519Base(scalar [32]byte) ([32]byte, bool) {
 	var base [32]byte
 	base[0] = 9
-	return x25519(scalar, base)
+	return X25519(scalar, base)
 }

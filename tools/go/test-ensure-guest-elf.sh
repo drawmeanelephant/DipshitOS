@@ -195,6 +195,10 @@ got="$(printf '%s' "$CASE_OUT" | LC_ALL=C sort | tr '\n' ' ')"
 [ "$CASE_RC" = 0 ] && [ "$got" = "GOSH GOSSHD " ] && ok "live-ssh-server.spec needs GOSH and GOSSHD" \
     || bad "live-ssh-server.spec needed-by want GOSH+GOSSHD, got rc=$CASE_RC out=$(printf %s "$CASE_OUT" | tr '\n' '|')"
 
+run needed-by "$ROOT/tools/gate/specs/live-ssh-endpoint.spec"
+[ "$CASE_RC" = 0 ] && [ "$CASE_OUT" = "GOSSH" ] && ok "live-ssh-endpoint.spec needs GOSSH" \
+    || bad "live-ssh-endpoint.spec needed-by want GOSSH, got rc=$CASE_RC out=$(printf %s "$CASE_OUT" | tr '\n' '|')"
+
 run needed-by "$ROOT/tools/gate/specs/live-secrets.spec"
 [ "$CASE_RC" = 0 ] && [ "$CASE_OUT" = "GOSH" ] && ok "live-secrets.spec (os.path.join form) needs GOSH" \
     || bad "live-secrets.spec needed-by want GOSH, got rc=$CASE_RC out=$(printf %s "$CASE_OUT" | tr '\n' '|')"
@@ -245,10 +249,16 @@ if grep -q 'ensure-guest-elf.sh" stamp' "$ROOT/tools/go/build-sshd.sh" \
 else
     bad "build-sshd.sh must stamp GOSSHD.ELF so a hand-build is considered fresh"
 fi
+if grep -q 'ensure-guest-elf.sh" stamp' "$ROOT/tools/go/build-ssh.sh" \
+   || grep -q 'ensure-guest-elf.sh stamp' "$ROOT/tools/go/build-ssh.sh"; then
+    ok "build-ssh.sh writes the stamp after a successful link"
+else
+    bad "build-ssh.sh must stamp GOSSH.ELF so a hand-build is considered fresh"
+fi
 
 echo
 if [ "$FAIL" = 0 ]; then
-    echo "test-ensure-guest-elf: PASS — $PASS case(s): stale/missing/foreign GOSH.ELF and GOSSHD.ELF fail as named ensure-guest-elf errors, cache hits skip the builder, needed-by matches the GOSH/GOSSHD specs."
+    echo "test-ensure-guest-elf: PASS — $PASS case(s): stale/missing/foreign GOSH.ELF and GOSSHD.ELF fail as named ensure-guest-elf errors, cache hits skip the builder, needed-by matches the GOSH/GOSSHD/GOSSH specs."
     exit 0
 fi
 echo "test-ensure-guest-elf: FAIL — $FAIL of $((PASS + FAIL)) case(s) failed."
