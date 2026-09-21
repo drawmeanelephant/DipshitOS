@@ -1,8 +1,11 @@
 // GOTABWM.ELF — M63b–e (issues #1420–#1423): chords, rail click/drag, type-in.
 //
-// Frozen table on #1418 (no new ADR, no new kernel cmd, no ctrl-tab):
+// Frozen table on #1418 (no new ADR, no new kernel cmd, no ctrl-tab), plus
+// M71d (#1563) BT1 reopen/duplicate:
 //
 //	ctrl-shift-p  -> Pin() the focused tab
+//	ctrl-shift-t  -> reopen the most recently closed tab (re-exec its bin)
+//	ctrl-shift-d  -> duplicate the focused tab (re-exec its bin)
 //	alt-tab       -> FocusTab + WmctlTaskbarClick (cmd 12), wrapping
 //	rail click    -> top strip, equal-width cells, same TASKBAR+FocusTab
 //	rail drag     -> press/release over different cells → existing Reorder()
@@ -11,6 +14,11 @@
 // Markers print only after the mutation/syscall that made them true.
 // Ctrl+W is not bound (it collides with the editor). Ctrl+Tab waits on M63r.
 // Close-x, sash, and hover-preview are later cards. Client-area is ignored.
+//
+// M71d pick: Ctrl+Shift+T / Ctrl+Shift+D are Zig TABWM's own BT1 bindings
+// (user/src/tabwm.zig:151/:427). They are free on GOTABWM — the only
+// ctrl-shift chord bound here is ctrl-shift-p, and Ctrl+T (Zig's "+ New
+// tab") is not bound at all on this seat, whose launcher is Ctrl+Space.
 package main
 
 import "virelai/vi"
@@ -18,12 +26,26 @@ import "virelai/vi"
 const (
 	MarkerAltTab    = "gotabwm: alt-tab id="
 	MarkerRailClick = "gotabwm: rail-click id="
+	// M71d (#1563): the BT1 chord outcomes. <bin> is the re-exec'd executable,
+	// matching Zig's `tabwm: reopen <bin>` / `tabwm: duplicate <bin>`.
+	MarkerReopen           = "gotabwm: reopen "
+	MarkerDuplicate        = "gotabwm: duplicate "
+	MarkerReopenMissing    = "gotabwm: reopen missing "
+	MarkerDuplicateMissing = "gotabwm: duplicate missing "
 
 	// USB HID keyboard usages (the kernel's WM_KEY arg0).
+	hidUsageD   uint8 = 0x07 // 'd'
 	hidUsageP   uint8 = 0x13
+	hidUsageT   uint8 = 0x17 // 't'
 	hidUsageTab uint8 = 0x2B
 	hidBtnLeft  uint8 = 0x01
 )
+
+// execApp is the exec seam for the BT1 chords. It is vi.Exec in the guest;
+// the indirection exists because vi.Exec calls the raw syscall4 gateway and so
+// bypasses vi's host-test syscall hook, which would leave the chord -> re-exec
+// path unobservable off the guest.
+var execApp = vi.Exec
 
 // hidChordHold is how many composite ticks the two-tab choreography waits
 // after first seeing n>=2, so a rail click (3×2.5 s), a press/release drag
@@ -54,9 +76,48 @@ func handleWmKey(e vi.Event) {
 		_ = applyAltTab(shift)
 		return
 	}
-	if ctrl && shift && !alt && usage == hidUsageP {
-		_ = applyHidPin()
+	if ctrl && shift && !alt {
+		switch usage {
+		case hidUsageP:
+			_ = applyHidPin()
+		case hidUsageT:
+			_ = applyReopen()
+		case hidUsageD:
+			_ = applyDuplicate()
+		}
 	}
+}
+
+// applyReopen is Zig TABWM reopen_last_closed(): pop the bounded LIFO, skip
+// entries with no recorded bin, and re-exec the executable as a new hosted
+// tab. A tab the seat never spawned has no bin and is an honest no-op.
+func applyReopen() bool {
+	c, ok := tabs.ReopenLastClosed()
+	if !ok {
+		return false
+	}
+	if _, err := execApp(c.Bin); err != nil {
+		vi.ConsoleLine(MarkerReopenMissing + c.Bin)
+		return false
+	}
+	vi.ConsoleLine(MarkerReopen + c.Bin)
+	return true
+}
+
+// applyDuplicate is Zig TABWM duplicate_active_tab(): re-exec the focused
+// tab's executable so it joins as a new tab. Honest no-op when nothing is
+// focused or the focused tab has no recorded bin.
+func applyDuplicate() bool {
+	bin, ok := tabs.DuplicateFocused()
+	if !ok {
+		return false
+	}
+	if _, err := execApp(bin); err != nil {
+		vi.ConsoleLine(MarkerDuplicateMissing + bin)
+		return false
+	}
+	vi.ConsoleLine(MarkerDuplicate + bin)
+	return true
 }
 
 // altTabNext is Zig TABWM's alt_tab_next: the tab after `focus`, wrapping.

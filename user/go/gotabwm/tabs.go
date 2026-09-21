@@ -42,6 +42,25 @@ type TabStrip struct {
 	count int
 	focus int // index into tabs[0:count]; ignored when count == 0
 	split SplitKind
+	// M71d (#1563, M48 BT1): the bounded reopen LIFO. closed is a fixed
+	// array and closedCount is monotonic, exactly like Zig tabwm.closed_count,
+	// so the ring is BSS/fixed with no heap catalog of every close (D2).
+	// closedLive is how many entries are still live (<= MaxTabs): Zig's
+	// recently_closed_at only guards k < max_tabs, so once closed_count exceeds
+	// the ring, reopen walks back over slots a later close already overwrote
+	// and hands out evicted entries. The live counter makes the bound real.
+	// Only Bin and Title are kept — never a window id — so reopen re-execs the
+	// executable rather than cloning a process (D1).
+	closed      [MaxTabs]ClosedTab
+	closedCount int
+	closedLive  int
+}
+
+// ClosedTab is one reopen-LIFO entry: the executable and title recorded when
+// the tab closed. Zig tabwm.ClosedTab minus the window id.
+type ClosedTab struct {
+	Bin   string
+	Title string
 }
 
 // The tab-strip marker lines the class-B gate greps. Exported so tabs_test.go
@@ -154,6 +173,11 @@ func (s *TabStrip) CloseTab(id uint32) bool {
 	if i < 0 {
 		return false
 	}
+	// M71d (#1563, M48 BT1): record the closed tab in the bounded reopen
+	// LIFO before it is shifted out of the strip. Zig push_closed_tab runs at
+	// the same close decision point, so every close path (HID, RPC detach,
+	// choreography) feeds the ring through this one seam.
+	s.recordClosed(s.tabs[i])
 	for j := i; j+1 < s.count; j++ {
 		s.tabs[j] = s.tabs[j+1]
 	}
@@ -173,6 +197,57 @@ func (s *TabStrip) CloseTab(id uint32) bool {
 		s.split = SplitNone
 	}
 	return true
+}
+
+// recordClosed pushes t onto the bounded reopen LIFO. Bounded: at most MaxTabs
+// entries are live and the oldest is overwritten (D2).
+func (s *TabStrip) recordClosed(t Tab) {
+	s.closed[s.closedCount%MaxTabs] = ClosedTab{Bin: t.Bin, Title: t.Title}
+	s.closedCount++
+	if s.closedLive < MaxTabs {
+		s.closedLive++
+	}
+}
+
+// RecentlyClosed returns the k-th most recently closed tab (0 = most recent),
+// or false when the ring holds fewer than k+1 live entries.
+func (s *TabStrip) RecentlyClosed(k int) (ClosedTab, bool) {
+	if k < 0 || k >= s.closedLive {
+		return ClosedTab{}, false
+	}
+	return s.closed[(s.closedCount-1-k)%MaxTabs], true
+}
+
+// ReopenLastClosed pops the most recently closed tab and returns it for the
+// caller to re-exec. Entries with no recorded bin are popped and skipped —
+// Zig's rule: a tab the WM never spawned cannot be rebuilt, so the next press
+// tries an older one. False when the ring holds nothing reopenable.
+func (s *TabStrip) ReopenLastClosed() (ClosedTab, bool) {
+	for s.closedLive > 0 {
+		c := s.closed[(s.closedCount-1)%MaxTabs]
+		s.closedCount--
+		s.closedLive--
+		if c.Bin == "" {
+			continue
+		}
+		return c, true
+	}
+	return ClosedTab{}, false
+}
+
+// DuplicateFocused returns the focused tab's executable so the caller can
+// re-exec it as a new tab. Honest no-op (false) when nothing is focused or
+// the focused tab has no recorded bin. Zig duplicate_active_tab.
+func (s *TabStrip) DuplicateFocused() (string, bool) {
+	id, ok := s.Focused()
+	if !ok {
+		return "", false
+	}
+	i := s.index(id)
+	if i < 0 || s.tabs[i].Bin == "" {
+		return "", false
+	}
+	return s.tabs[i].Bin, true
 }
 
 // FocusTab makes id the focused tab. Returns false when id is not open.

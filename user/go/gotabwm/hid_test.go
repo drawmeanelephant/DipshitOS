@@ -10,6 +10,12 @@ func TestHidUsagesMatchRunner(t *testing.T) {
 	if hidUsageP != 0x13 {
 		t.Fatalf("hidUsageP = %#x want 0x13 (USB HID 'p')", hidUsageP)
 	}
+	if hidUsageT != 0x17 {
+		t.Fatalf("hidUsageT = %#x want 0x17 (USB HID 't')", hidUsageT)
+	}
+	if hidUsageD != 0x07 {
+		t.Fatalf("hidUsageD = %#x want 0x07 (USB HID 'd')", hidUsageD)
+	}
 	if hidUsageTab != 0x2B {
 		t.Fatalf("hidUsageTab = %#x want 0x2B (USB HID Tab)", hidUsageTab)
 	}
@@ -18,6 +24,87 @@ func TestHidUsagesMatchRunner(t *testing.T) {
 	}
 	if hidUsageEnter != 0x28 || hidUsageEscape != 0x29 || hidUsageBksp != 0x2A {
 		t.Fatal("enter/esc/bksp HID usages drifted")
+	}
+}
+
+// execRecorder swaps the chord exec seam for one that records every bin and
+// acks it, so the chord -> re-exec path is observable off the guest.
+func execRecorder() (*[]string, func()) {
+	execs := &[]string{}
+	prev := execApp
+	execApp = func(name string, args ...string) (int64, error) {
+		*execs = append(*execs, name)
+		return 42, nil
+	}
+	return execs, func() { execApp = prev }
+}
+
+func TestHandleWmKeyReopenChordReexecsLastClosed(t *testing.T) {
+	saved := tabs
+	defer func() { tabs = saved }()
+	tabs = TabStrip{}
+	if !tabs.OpenTab(3, "Calc") || !tabs.OpenTab(4, "Edit") {
+		t.Fatal("OpenTab")
+	}
+	if !tabs.CloseTab(3) {
+		t.Fatal("CloseTab Calc")
+	}
+	execs, restore := execRecorder()
+	defer restore()
+
+	handleWmKey(vi.Event{Kind: vi.EvWmKey, Flags: vi.ModCtrl | vi.ModShift, Arg0: uint32(hidUsageT)})
+	if len(*execs) != 1 || (*execs)[0] != "GOCALC.ELF" {
+		t.Fatalf("ctrl-shift-t execs = %v want [GOCALC.ELF]", *execs)
+	}
+	// The LIFO is drained by the reopen: a second press is an honest no-op,
+	// not a second exec.
+	handleWmKey(vi.Event{Kind: vi.EvWmKey, Flags: vi.ModCtrl | vi.ModShift, Arg0: uint32(hidUsageT)})
+	if len(*execs) != 1 {
+		t.Fatalf("second ctrl-shift-t must not exec again: %v", *execs)
+	}
+	// Ctrl+Shift+T must not have re-opened the tab on the strip by itself:
+	// the reopened app declares and joins as a fresh tab (D1, a re-exec).
+	if _, ok := tabs.Focused(); !ok {
+		t.Fatal("Edit should still be focused")
+	}
+}
+
+func TestHandleWmKeyDuplicateChordReexecsFocused(t *testing.T) {
+	saved := tabs
+	defer func() { tabs = saved }()
+	tabs = TabStrip{}
+	// Focus a tab with a recorded bin, then a tab with none: duplicate must
+	// follow the focus, and an honest no-op is a no-op with no exec at all.
+	if !tabs.OpenTab(4, "Edit") {
+		t.Fatal("OpenTab Edit")
+	}
+	execs, restore := execRecorder()
+	defer restore()
+
+	handleWmKey(vi.Event{Kind: vi.EvWmKey, Flags: vi.ModCtrl | vi.ModShift, Arg0: uint32(hidUsageD)})
+	if len(*execs) != 1 || (*execs)[0] != "GOEDIT.ELF" {
+		t.Fatalf("ctrl-shift-d execs = %v want [GOEDIT.ELF]", *execs)
+	}
+	// Duplicate does not add a tab itself (the new window declares over RPC).
+	if tabs.Count() != 1 {
+		t.Fatalf("count = %d want 1", tabs.Count())
+	}
+}
+
+func TestHandleWmKeyIgnoresUnboundCtrlShiftKeys(t *testing.T) {
+	saved := tabs
+	defer func() { tabs = saved }()
+	tabs = TabStrip{}
+	if !tabs.OpenTab(4, "Edit") {
+		t.Fatal("OpenTab")
+	}
+	execs, restore := execRecorder()
+	defer restore()
+	// ctrl-shift-x is not a GOTABWM chord and must not reach the ring or the
+	// duplicate path.
+	handleWmKey(vi.Event{Kind: vi.EvWmKey, Flags: vi.ModCtrl | vi.ModShift, Arg0: 0x1B})
+	if len(*execs) != 0 {
+		t.Fatalf("ctrl-shift-x exec'd: %v", *execs)
 	}
 }
 

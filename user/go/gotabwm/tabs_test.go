@@ -170,6 +170,128 @@ func TestMaxTabsCap(t *testing.T) {
 	}
 }
 
+func TestReopenRingRecordsAndReopensLIFO(t *testing.T) {
+	var s TabStrip
+	if _, ok := s.ReopenLastClosed(); ok {
+		t.Fatal("an empty ring must not reopen")
+	}
+	if !s.OpenTab(3, "Calc") || !s.OpenTab(4, "Edit") {
+		t.Fatal("OpenTab")
+	}
+	if !s.CloseTab(3) {
+		t.Fatal("CloseTab Calc")
+	}
+	c, ok := s.RecentlyClosed(0)
+	if !ok || c.Bin != "GOCALC.ELF" || c.Title != "Calc" {
+		t.Fatalf("ring top = %+v ok=%v want GOCALC.ELF/Calc", c, ok)
+	}
+	if !s.CloseTab(4) {
+		t.Fatal("CloseTab Edit")
+	}
+	// LIFO: the most recent close comes back first.
+	top, ok := s.ReopenLastClosed()
+	if !ok || top.Bin != "GOEDIT.ELF" {
+		t.Fatalf("reopen #1 = %+v ok=%v want GOEDIT.ELF", top, ok)
+	}
+	next, ok := s.ReopenLastClosed()
+	if !ok || next.Bin != "GOCALC.ELF" {
+		t.Fatalf("reopen #2 = %+v ok=%v want GOCALC.ELF", next, ok)
+	}
+	if _, ok := s.ReopenLastClosed(); ok {
+		t.Fatal("ring must be drained after two reopens")
+	}
+	// Reopen is a re-exec, not a re-open: the strip stays empty until the
+	// re-exec'd window declares and joins as a fresh tab (D1).
+	if s.Count() != 0 {
+		t.Fatalf("strip count = %d want 0", s.Count())
+	}
+}
+
+func TestReopenRingIsBounded(t *testing.T) {
+	var s TabStrip
+	for i := 0; i < MaxTabs+3; i++ {
+		id := uint32(100 + i)
+		if !s.OpenTab(id, "Edit") {
+			t.Fatalf("OpenTab %d", id)
+		}
+		if !s.CloseTab(id) {
+			t.Fatalf("CloseTab %d", id)
+		}
+	}
+	// The counter is monotonic (Zig closed_count) but the ring only exposes
+	// MaxTabs entries: the oldest three were overwritten.
+	if s.closedCount != MaxTabs+3 {
+		t.Fatalf("closedCount = %d want %d", s.closedCount, MaxTabs+3)
+	}
+	if _, ok := s.RecentlyClosed(MaxTabs); ok {
+		t.Fatal("ring must expose at most MaxTabs entries")
+	}
+	if c, ok := s.RecentlyClosed(MaxTabs - 1); !ok || c.Bin != "GOEDIT.ELF" {
+		t.Fatalf("oldest live entry = %+v ok=%v", c, ok)
+	}
+	n := 0
+	for {
+		if _, ok := s.ReopenLastClosed(); !ok {
+			break
+		}
+		n++
+		if n > MaxTabs+1 {
+			t.Fatal("reopen never drained: bounded ring leaked")
+		}
+	}
+	if n != MaxTabs {
+		t.Fatalf("reopened %d entries want %d (bounded ring)", n, MaxTabs)
+	}
+}
+
+func TestReopenSkipsUnreopenableEntries(t *testing.T) {
+	var s TabStrip
+	// OpenTab with an empty title records no bin (guessBin("") == ""), which
+	// is Zig's "a tab this WM never spawned" entry.
+	if !s.OpenTab(7, "") || !s.OpenTab(8, "Calc") {
+		t.Fatal("OpenTab")
+	}
+	if !s.CloseTab(7) || !s.CloseTab(8) {
+		t.Fatal("closes")
+	}
+	c, ok := s.ReopenLastClosed()
+	if !ok || c.Bin != "GOCALC.ELF" {
+		t.Fatalf("reopen = %+v ok=%v want GOCALC.ELF", c, ok)
+	}
+	// The bin-less entry was popped on the way, not returned.
+	if _, ok := s.ReopenLastClosed(); ok {
+		t.Fatal("unreopenable entry must be popped, not returned")
+	}
+}
+
+func TestDuplicateFocusedHonestNoop(t *testing.T) {
+	var s TabStrip
+	if _, ok := s.DuplicateFocused(); ok {
+		t.Fatal("an empty strip must not duplicate")
+	}
+	if !s.OpenTab(3, "Calc") || !s.OpenTab(4, "Edit") {
+		t.Fatal("OpenTab")
+	}
+	if !s.FocusTab(4) {
+		t.Fatal("FocusTab")
+	}
+	bin, ok := s.DuplicateFocused()
+	if !ok || bin != "GOEDIT.ELF" {
+		t.Fatalf("duplicate = %q ok=%v want GOEDIT.ELF", bin, ok)
+	}
+	// Duplicate is a re-exec: the strip is unchanged until the clone declares.
+	if s.Count() != 2 {
+		t.Fatalf("count = %d want 2", s.Count())
+	}
+	var e TabStrip
+	if !e.OpenTab(9, "") {
+		t.Fatal("OpenTab empty title")
+	}
+	if _, ok := e.DuplicateFocused(); ok {
+		t.Fatal("a tab without a recorded bin must not duplicate")
+	}
+}
+
 func TestNextIDWraps(t *testing.T) {
 	var s TabStrip
 	if _, ok := s.NextID(); ok {
