@@ -7,6 +7,7 @@ GOEDIT.ELF | Code Editor | e | dock=true
 GOFILES.ELF | Files | f | dock=true
 GOTERM.ELF | Terminal | t | dock=true
 WEB.ELF | Web | w | dock=true
+PULSE.ELF | Pulse | u | dock=true
 GOSH.ELF | Shell | s
 GOTOP.ELF | Top | p | dock=true
 GOSET.ELF | Settings | g
