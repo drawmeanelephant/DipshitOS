@@ -59,6 +59,7 @@ const road_pops = @import("road_pops.zig"); // milestone six card G3 (claim 1574
 const xhci = @import("xhci.zig"); // milestone seven card I1 (claim 4272): the XHCI host-controller transport (keyboard/pointer live behind it)
 const input = @import("input.zig"); // milestone seven card I3 (claim 6050): the keyboard/pointer event FIFO + keycode decode feeding Road Pops
 const driving_award = @import("driving_award.zig"); // milestone six card G5 (claim 1543): Driving Award, the window manager (Road Pops is window 0; a clock overlay is window 1)
+const wm_server = @import("wm_server.zig"); // M32 WMS2: skip the kernel terminal composite once a userland seat owns the scanout (#1592)
 const smp = @import("smp.zig"); // milestone twenty-eight (claim 6438): SMP secondary core bringup and IPI
 
 // Road Pops (claim 1574) framebuffer-text target: G2's text layer through
@@ -74,6 +75,11 @@ fn rp_text_put_bytes(_: *anyopaque, bytes: []const u8) void {
     driving_award.mark_terminal_dirty();
 }
 fn rp_text_present(_: *anyopaque) void {
+    // The kernel .terminal window is full-screen (driving_award.arm), so a
+    // console present marks the whole scanout dirty. After a userland WM
+    // registers, that blit paints kernel console ink into pixels the seat
+    // owns (#1592 / M69b). Same registered() guard as the clock drain.
+    if (wm_server.registered()) return;
     _ = driving_award.composite();
 }
 fn rp_text_clear(_: *anyopaque) void {

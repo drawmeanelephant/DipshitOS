@@ -3890,8 +3890,11 @@ fn park_body(mon: *monitor.Monitor) callconv(.c) void {
             // self-toggles it (Ctrl+Shift+A is WM-only now).
             // Claim 1574 (milestone six G3): Road Pops — one full-frame
             // present per dirty output batch (the card-3d drain pattern).
-            // No-op when the tee is unarmed (default VM) or clean.
-            road_pops.drain();
+            // No-op when the tee is unarmed (default VM) or clean. #1592:
+            // the present callback is driving_award.composite with no
+            // other owner check; skip the drain once a WM owns the scanout
+            // (same guard as the clock composite two statements later).
+            if (!wm_server.registered()) road_pops.drain();
             // Card G5 (claim 1543): Driving Award — refresh the clock
             // window from the 1 Hz generic timer and composite any dirty
             // windows. This is the clock-only present path (the tee's
