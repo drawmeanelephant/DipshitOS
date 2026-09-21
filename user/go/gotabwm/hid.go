@@ -6,6 +6,7 @@
 //	ctrl-shift-p  -> Pin() the focused tab
 //	ctrl-shift-t  -> reopen the most recently closed tab (re-exec its bin)
 //	ctrl-shift-d  -> duplicate the focused tab (re-exec its bin)
+//	ctrl-shift-f  -> toggle the focused tab's frozen BADGE (M71e / #1564)
 //	alt-tab       -> FocusTab + WmctlTaskbarClick (cmd 12), wrapping
 //	rail click    -> top strip, equal-width cells, same TASKBAR+FocusTab
 //	rail drag     -> press/release over different cells → existing Reorder()
@@ -19,6 +20,10 @@
 // (user/src/tabwm.zig:151/:427). They are free on GOTABWM — the only
 // ctrl-shift chord bound here is ctrl-shift-p, and Ctrl+T (Zig's "+ New
 // tab") is not bound at all on this seat, whose launcher is Ctrl+Space.
+//
+// M71e pick: Ctrl+Shift+F is Zig TABWM's own freeze binding (user/src/
+// tabwm.zig:1448). It is a BADGE there too — Zig checks `frozen` in no close
+// path — so the port keeps that shape rather than inventing a lock.
 package main
 
 import "virelai/vi"
@@ -35,6 +40,7 @@ const (
 
 	// USB HID keyboard usages (the kernel's WM_KEY arg0).
 	hidUsageD   uint8 = 0x07 // 'd'
+	hidUsageF   uint8 = 0x09 // 'f'; M71e (#1564) freeze-badge toggle
 	hidUsageP   uint8 = 0x13
 	hidUsageT   uint8 = 0x17 // 't'
 	hidUsageTab uint8 = 0x2B
@@ -84,8 +90,38 @@ func handleWmKey(e vi.Event) {
 			_ = applyReopen()
 		case hidUsageD:
 			_ = applyDuplicate()
+		case hidUsageF:
+			_ = applyFreezeToggle()
 		}
+		return
 	}
+	// M71e (#1564): Enter on an empty strip is the start surface's keyboard
+	// affordance — it summons the same launcher the panel points at.
+	if !ctrl && !shift && !alt && usage == hidUsageEnter && tabs.Count() == 0 {
+		openLauncher()
+	}
+}
+
+// applyFreezeToggle is Zig TABWM freeze_toggle: flip the frozen badge on the
+// focused tab and report which way it went. M71e (#1564) is deliberate about
+// the shape — this is a BADGE, not a lock: Zig checks `frozen` nowhere in its
+// close path, and neither does GOTABWM, so a frozen tab still closes.
+func applyFreezeToggle() bool {
+	id, ok := tabs.Focused()
+	if !ok {
+		return false
+	}
+	if tabs.Freeze(id) {
+		vi.ConsoleLine(MarkerFreeze + vi.Itoa64(int64(id)) + " on")
+		dumpOrder()
+		return true
+	}
+	if tabs.Thaw(id) {
+		vi.ConsoleLine(MarkerThaw + vi.Itoa64(int64(id)))
+		dumpOrder()
+		return true
+	}
+	return false
 }
 
 // applyReopen is Zig TABWM reopen_last_closed(): pop the bounded LIFO, skip
@@ -202,6 +238,14 @@ func handleWmPointer(e vi.Event) {
 		return
 	}
 	if down {
+		// M71e (#1564): on an empty strip the start surface is the click
+		// target. Checked before the rail so it cannot be shadowed by a
+		// rail cell that happens to span the point (the rail has no cells
+		// when the strip is empty, so this is belt-and-braces).
+		if tabs.Count() == 0 && startSurfaceHit(px, py) {
+			openLauncher()
+			return
+		}
 		beginRailDrag(px, py)
 		_ = applyRailClick(px, py)
 		return

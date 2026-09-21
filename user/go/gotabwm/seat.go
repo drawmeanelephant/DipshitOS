@@ -164,6 +164,9 @@ func main() {
 		// With tabs, paint only the rail band.
 		if tabs.Count() == 0 {
 			_ = paintBlank(scan, blankRGB())
+			// M71e (#1564): an empty strip is still a desktop. The start
+			// surface goes over the blank fill and logs its marker once.
+			startSurfaceTick(scan)
 		} else {
 			_ = paintRail(scan, vi.ScanoutWidth, vi.ScanoutHeight, RailHeight, &tabs)
 			markRail()

@@ -16,6 +16,9 @@ func TestHidUsagesMatchRunner(t *testing.T) {
 	if hidUsageD != 0x07 {
 		t.Fatalf("hidUsageD = %#x want 0x07 (USB HID 'd')", hidUsageD)
 	}
+	if hidUsageF != 0x09 {
+		t.Fatalf("hidUsageF = %#x want 0x09 (USB HID 'f')", hidUsageF)
+	}
 	if hidUsageTab != 0x2B {
 		t.Fatalf("hidUsageTab = %#x want 0x2B (USB HID Tab)", hidUsageTab)
 	}
@@ -24,6 +27,50 @@ func TestHidUsagesMatchRunner(t *testing.T) {
 	}
 	if hidUsageEnter != 0x28 || hidUsageEscape != 0x29 || hidUsageBksp != 0x2A {
 		t.Fatal("enter/esc/bksp HID usages drifted")
+	}
+}
+
+// M71e (#1564): ctrl-shift-f flips the frozen badge on the focused tab, and
+// only on the focused tab. It is a badge — the tab stays closable, which the
+// second half pins so nobody quietly turns this into a lock.
+func TestHandleWmKeyFreezeToggle(t *testing.T) {
+	saved := tabs
+	defer func() { tabs = saved }()
+	tabs = TabStrip{}
+	if !tabs.OpenTab(3, "Calc") || !tabs.OpenTab(4, "Edit") {
+		t.Fatal("OpenTab")
+	}
+	if !tabs.FocusTab(4) {
+		t.Fatal("FocusTab")
+	}
+	chord := func() {
+		handleWmKey(vi.Event{Kind: vi.EvWmKey, Flags: vi.ModCtrl | vi.ModShift, Arg0: uint32(hidUsageF)})
+	}
+	chord()
+	if !tabs.At(1).Frozen || tabs.At(0).Frozen {
+		t.Fatalf("first ctrl-shift-f froze the wrong tab: %+v %+v", tabs.At(0), tabs.At(1))
+	}
+	if n := tabs.FrozenCount(); n != 1 {
+		t.Fatalf("FrozenCount = %d want 1", n)
+	}
+	chord()
+	if tabs.At(1).Frozen {
+		t.Fatal("second ctrl-shift-f must thaw the focused tab")
+	}
+	if n := tabs.FrozenCount(); n != 0 {
+		t.Fatalf("FrozenCount = %d want 0 after thaw", n)
+	}
+	// The badge is not a lock: a frozen tab still closes (Zig has no frozen
+	// check in its close path, and neither may this seat).
+	chord()
+	if !tabs.At(1).Frozen {
+		t.Fatal("third chord should freeze again")
+	}
+	if !tabs.CloseTab(4) {
+		t.Fatal("a frozen tab must still close — freeze is a badge, not a lock")
+	}
+	if tabs.Count() != 1 {
+		t.Fatalf("count = %d want 1", tabs.Count())
 	}
 }
 

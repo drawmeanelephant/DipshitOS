@@ -12,6 +12,7 @@ import (
 	"unsafe"
 
 	"virelai/theme"
+	"virelai/vi"
 	"virelai/webrender/font"
 )
 
@@ -184,6 +185,98 @@ func TestPaintChromeStaysInsideTheRectAndUsesTokens(t *testing.T) {
 	}
 	if muted == 0 {
 		t.Fatal("status line has no Muted pixels")
+	}
+}
+
+// M71e (#1564): the empty-strip start surface. Pure half: geometry, tokens,
+// and the click target — no guest call.
+func TestStartSurfaceRectAndHit(t *testing.T) {
+	if MarkerStartSurface != "gotabwm: start-surface" {
+		t.Fatalf("MarkerStartSurface = %q", MarkerStartSurface)
+	}
+	x, y, w, h := startSurfaceRect(1280, 720)
+	if w != StartW || h != StartH {
+		t.Fatalf("startSurfaceRect size = %dx%d want %dx%d", w, h, StartW, StartH)
+	}
+	if x != (1280-w)/2 || y != (720-h)/2 {
+		t.Fatalf("startSurfaceRect origin = %d,%d not centred", x, y)
+	}
+	if w+2*chromeInset > 1280 || h+2*chromeInset > 720 {
+		t.Fatalf("panel %dx%d leaves no edge inset", w, h)
+	}
+	// A scanout too small shrinks the panel, then gives up with the zero rect.
+	if _, _, w, h := startSurfaceRect(200, 40); w != 200-2*chromeInset || h != 40-2*chromeInset {
+		t.Errorf("small scanout panel = %dx%d want shrunk", w, h)
+	}
+	if x, y, w, h := startSurfaceRect(10, 10); w != 0 || h != 0 || x != 0 || y != 0 {
+		t.Errorf("tiny scanout rect = %d,%d %dx%d want zero", x, y, w, h)
+	}
+
+	// The click target is exactly the panel, excluding its far edge.
+	vx, vy, vw, vh := startSurfaceRect(vi.ScanoutWidth, vi.ScanoutHeight)
+	if !startSurfaceHit(uint32(vx), uint32(vy)) {
+		t.Fatal("top-left of the panel must hit")
+	}
+	if !startSurfaceHit(uint32(vx+vw-1), uint32(vy+vh-1)) {
+		t.Fatal("bottom-right inside the panel must hit")
+	}
+	if startSurfaceHit(uint32(vx+vw), uint32(vy)) || startSurfaceHit(uint32(vx), uint32(vy+vh)) {
+		t.Fatal("the far edges are outside the panel")
+	}
+	if startSurfaceHit(0, 0) && vx != 0 {
+		t.Fatal("0,0 must miss a centred panel")
+	}
+}
+
+func TestPaintStartSurfaceUsesTokens(t *testing.T) {
+	const w, h = 1280, 720
+	scan := make([]byte, w*h*4)
+	tok := theme.Current
+	for i := 0; i < len(scan)/4; i++ {
+		asUint32(scan)[i] = theme.Light.Success
+	}
+	if paintStartSurface(scan, w, h) == 0 {
+		t.Fatal("paintStartSurface painted nothing")
+	}
+	pix := asUint32(scan)
+	x, y, pw, ph := startSurfaceRect(w, h)
+	var panel, accent, ink, muted int
+	for row := 0; row < h; row++ {
+		for col := 0; col < w; col++ {
+			v := pix[row*w+col]
+			inRect := col >= x && col < x+pw && row >= y && row < y+ph
+			if !inRect {
+				if v != theme.Light.Success {
+					t.Fatalf("paintStartSurface wrote outside the panel at %d,%d", col, row)
+				}
+				continue
+			}
+			switch v & 0xffffff {
+			case tok.Surface:
+				panel++
+			case tok.Accent:
+				accent++
+			case tok.Ink:
+				ink++
+			case tok.InkMuted:
+				muted++
+			}
+		}
+	}
+	if panel == 0 {
+		t.Fatal("start panel is not Surface")
+	}
+	if accent != 2*ph {
+		t.Fatalf("start accent rule = %d pixels want %d", accent, 2*ph)
+	}
+	if ink == 0 {
+		t.Fatal("start surface title has no Ink pixels")
+	}
+	if muted == 0 {
+		t.Fatal("start surface hint has no InkMuted pixels")
+	}
+	if n := paintStartSurface(nil, 0, 0); n != 0 {
+		t.Errorf("degenerate scanout painted %d pixels", n)
 	}
 }
 

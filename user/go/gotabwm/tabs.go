@@ -3,9 +3,9 @@
 // a headless LAYOUT.txt dump, and a shipping Go ELF as a tab (GOEDIT).
 //
 // OpenTab / CloseTab / FocusTab / SplitH / SplitV / Unsplit / Pin / Unpin /
-// Reorder are a pure state machine: no syscalls, no WM_RPC. The seat hooks
-// each successful mutation with the kernel primitive that made it true,
-// then prints a marker.
+// Reorder / Freeze / Thaw are a pure state machine: no syscalls, no WM_RPC.
+// The seat hooks each successful mutation with the kernel primitive that
+// made it true, then prints a marker.
 //
 // Close of the focused tab moves focus to the neighbour that shifts into
 // its slot (Zig TABWM remove_tab). Close of the last tab leaves the strip
@@ -28,12 +28,27 @@ const MaxTabs = 16
 // TABWM paints into a window.
 const RailHeight = 22
 
+// M71e (#1564): the frozen badge's geometry. Zig paints a '~' glyph at x=132
+// (tabwm.zig:3339); this rail is solid cells with no glyphs, so the badge is
+// a Warning-coloured block inset at the cell's right edge instead.
+const (
+	railBadgeW     = 4
+	railBadgeInset = 4
+)
+
 // Tab is one strip entry. ID is the kernel window id the client declared.
 type Tab struct {
 	ID     uint32
 	Title  string
 	Bin    string // `.tabs` v2 bin field (guessBin from the declared title)
 	Pinned bool   // FlagPinned (0x01); pinned tabs sit at the left of the rail
+	// Frozen is FlagFrozen (0x02). M71e (#1564): Zig's BT6 frozen is a
+	// STATUS BADGE (docs/march-m39-tabbed-desktop.md labels it "a frozen
+	// status badge (Ctrl+Shift+F)", and tabwm.zig's field comment calls it
+	// "future demand-paging freeze"). It is deliberately NOT a lock: Zig
+	// has no frozen check anywhere in its close path, so GOTABWM refuses
+	// nothing on a frozen tab either. The badge just rides the rail.
+	Frozen bool
 }
 
 // TabStrip is the in-process tab list. The zero value is empty (unsplit).
@@ -83,17 +98,66 @@ const (
 	MarkerSessionLoad   = "gotabwm: session load n="
 	MarkerSessionTitles = "gotabwm: session titles="
 	MarkerSessionBad    = "gotabwm: session bad"
+	// M71e (#1564): the frozen-badge chord outcomes and the restore count.
+	// Zig's shapes are `tabwm: tab-freeze <id> on|off` and `freeze=<n>` on
+	// its tabs-applied line; these follow GOTABWM's own pin style
+	// (`gotabwm: pin id=<n> on`) instead of the Zig spelling.
+	MarkerFreeze        = "gotabwm: freeze id="
+	MarkerThaw          = "gotabwm: thaw id="
+	MarkerSessionFreeze = "gotabwm: session freeze n="
 )
 
-// FlagPinned is `.tabs` v2 bit 0 — the same value as tabcodec.FlagPinned
-// / tabwm.tab_flag_pinned. Frozen/dock stay unused (M62d non-goal).
-const FlagPinned uint8 = 0x01
+// FlagPinned / FlagFrozen are `.tabs` v2 bits 0 and 1 — the same values as
+// tabcodec.FlagPinned / tabcodec.FlagFrozen / tabwm.tab_flag_pinned /
+// tabwm.tab_flag_frozen. Dock (0x04) stays unused (M62d non-goal).
+const (
+	FlagPinned uint8 = 0x01
+	FlagFrozen uint8 = 0x02
+)
 
-func pinFlag(t Tab) uint8 {
+// tabFlags packs a tab's persisted flag byte. M71e (#1564): frozen joined
+// pinned so the byte round-trips through `.tabs` v2 as tabcodec defines it.
+func tabFlags(t Tab) uint8 {
+	var f uint8
 	if t.Pinned {
-		return FlagPinned
+		f |= FlagPinned
 	}
-	return 0
+	if t.Frozen {
+		f |= FlagFrozen
+	}
+	return f
+}
+
+// Freeze sets FlagFrozen on id. False when id is missing or already frozen.
+// A badge, not a lock: closing a frozen tab is still allowed (Zig parity).
+func (s *TabStrip) Freeze(id uint32) bool {
+	i := s.index(id)
+	if i < 0 || s.tabs[i].Frozen {
+		return false
+	}
+	s.tabs[i].Frozen = true
+	return true
+}
+
+// Thaw clears FlagFrozen on id. False when id is missing or not frozen.
+func (s *TabStrip) Thaw(id uint32) bool {
+	i := s.index(id)
+	if i < 0 || !s.tabs[i].Frozen {
+		return false
+	}
+	s.tabs[i].Frozen = false
+	return true
+}
+
+// FrozenCount is how many tabs carry the frozen badge (the restore line's n).
+func (s *TabStrip) FrozenCount() int {
+	n := 0
+	for i := 0; i < s.count; i++ {
+		if s.tabs[i].Frozen {
+			n++
+		}
+	}
+	return n
 }
 
 // guessBin fills the `.tabs` v2 bin field from a declared title. WM_RPC
@@ -116,9 +180,10 @@ func guessBin(title string) string {
 	}
 }
 
-func railIdleRGB() uint32  { return theme.Current.BtnIdle }
-func railFocusRGB() uint32 { return theme.Current.Accent }
-func railGapRGB() uint32   { return theme.Current.Bg }
+func railIdleRGB() uint32   { return theme.Current.BtnIdle }
+func railFocusRGB() uint32  { return theme.Current.Accent }
+func railGapRGB() uint32    { return theme.Current.Bg }
+func railFrozenRGB() uint32 { return theme.Current.Warning }
 
 // Count is how many tabs are currently open.
 func (s *TabStrip) Count() int { return s.count }
@@ -589,6 +654,18 @@ func paintRail(scan []byte, width, height, stripH int, ts *TabStrip) int {
 		}
 		// 1px trough on the left, like kernel paint_tab_strip.
 		written += fillRect(pix, width, maxH, x+1, 0, w-1, stripH, rgb)
+		// M71e (#1564): the frozen badge, inset at the cell's right edge and
+		// painted after the cell fill so it reads on both idle and focused
+		// cells. A badge only — nothing about the tab's behaviour changes.
+		if ts.At(i).Frozen {
+			bw := railBadgeW
+			if bw > w-2 {
+				bw = w - 2
+			}
+			if bw > 0 && stripH > 2*railBadgeInset {
+				written += fillRect(pix, width, maxH, x+w-1-bw, railBadgeInset, bw, stripH-2*railBadgeInset, railFrozenRGB())
+			}
+		}
 	}
 	return written
 }
