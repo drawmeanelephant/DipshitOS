@@ -1,0 +1,131 @@
+# go-charmhello.spec -- M72c: an actual Bubble Tea v2 Model consumes HID keys
+# from a bound /dev/tty and writes its ANSI View into the kernel-painted grid.
+# The capture is the default GOTABWM scanout (not reconstructed ANSI): the
+# post-HID frame must be 2560x1440 and carry both the Tea title and PAUSED
+# colour. Charm modules stay in the host module cache; no vendor tree exists.
+#
+# exec-order: assert-proven -- input waits for the app's ready marker, capture
+# waits for its post-key repaint marker, and the close waits for `dui`.
+
+vgate_name go-charmhello "M72c: Bubble Tea v2 Model on a bound tty, real HID input and default-seat scanout pixels"
+vgate_share seed
+vgate_runner_flags -Xswiftc -DSPIKE
+
+vgate_file script.txt <<'EOF'
+exec CHARMHELLO.ELF
+EOF
+
+vgate_file script2.txt <<'EOF'
+dui
+EOF
+
+vgate_file script3.txt <<'EOF'
+dui close 2
+EOF
+
+vgate_setup_python <<'PY'
+import os, shutil, sys
+run = os.environ["RUN_DIR"]
+share = os.environ.get("VG_SHARE") or os.path.join(run, "share")
+src = os.path.join(".build", "go", "CHARMHELLO.ELF")
+if not os.path.exists(src):
+    sys.exit("CHARMHELLO.ELF missing (build it first: bash tools/go/build-charmhello.sh)")
+shutil.copy(src, os.path.join(share, "CHARMHELLO.ELF"))
+print("staged CHARMHELLO.ELF into share (%d bytes)" % os.path.getsize(src))
+PY
+
+vgate_run 01 -- \
+    --screen '$RUN_DIR/charmhello-screen' \
+    --input --via-virtio \
+    --script '$RUN_DIR/script.txt' \
+    --input-chords 'space' \
+    --input-chords-after 'charmhello: ready' \
+    --screenshot-after 'charmhello: repainted' \
+    --script2 '$RUN_DIR/script2.txt' \
+    --script2-after 'charmhello: repainted' \
+    --script3 '$RUN_DIR/script3.txt' \
+    --script3-after 'dui: windows=' \
+    --script-expect 'charmhello: close' --timeout 240
+
+vgate_assert 01 serial-contains 'VirelaiOS kernel has seized control.'
+vgate_assert 01 serial-contains 'exec: loaded CHARMHELLO.ELF'
+vgate_assert 01 serial-contains 'charmhello: open id='
+vgate_assert 01 serial-contains 'charmhello: attached'
+vgate_assert 01 serial-contains 'charmhello: painted'
+vgate_assert 01 serial-contains 'charmhello: ready'
+vgate_assert 01 serial-contains 'charmhello: key space'
+vgate_assert 01 serial-contains 'charmhello: repainted'
+vgate_assert 01 serial-contains 'dui[4]: user user rect='
+vgate_assert 01 serial-contains 'charmhello: close'
+vgate_assert 01 serial-contains 'charmhello OK'
+vgate_assert 01 serial-absent 'SESSION.TXT.FRAMES'
+vgate_assert 01 serial-absent '[EXC] parking:'
+vgate_assert 01 serial-absent 'exited status=139'
+
+# The screenshot marker is an app marker emitted after the bound-tty write
+# and a scheduler yield. It is not a monitor `script-expect` echo. Decode the
+# host scanout itself: title magenta proves Tea's View, while PAUSED yellow
+# proves the injected space HID key reached tea.Model.Update before capture.
+vgate_assert 01 snapshot 'charmhello-screen-after' <<'PY'
+import struct, sys, zlib
+
+d = open(sys.argv[1], "rb").read()
+assert d[:8] == b"\x89PNG\r\n\x1a\n", "not a PNG scanout"
+pos = 8
+idat = b""
+w = h = ct = 0
+while pos < len(d):
+    n, typ = struct.unpack(">I4s", d[pos:pos + 8])
+    chunk = d[pos + 8:pos + 8 + n]
+    if typ == b"IHDR":
+        w, h, depth, ct = struct.unpack(">IIBB", chunk[:10])
+        assert depth == 8, "unexpected PNG depth"
+    elif typ == b"IDAT":
+        idat += chunk
+    pos += 12 + n
+assert (w, h) == (2560, 1440), "wanted 2560x1440 scanout, got %dx%d" % (w, h)
+bpp = 4 if ct == 6 else 3
+raw = zlib.decompress(idat)
+stride = w * bpp
+out = bytearray()
+prev = bytearray(stride)
+i = 0
+for _ in range(h):
+    filt = raw[i]
+    i += 1
+    row = bytearray(raw[i:i + stride])
+    i += stride
+    if filt == 1:
+        for x in range(bpp, stride):
+            row[x] = (row[x] + row[x - bpp]) & 0xff
+    elif filt == 2:
+        for x in range(stride):
+            row[x] = (row[x] + prev[x]) & 0xff
+    elif filt == 3:
+        for x in range(stride):
+            left = row[x - bpp] if x >= bpp else 0
+            row[x] = (row[x] + ((left + prev[x]) >> 1)) & 0xff
+    elif filt == 4:
+        for x in range(stride):
+            left = row[x - bpp] if x >= bpp else 0
+            up = prev[x]
+            up_left = prev[x - bpp] if x >= bpp else 0
+            p = left + up - up_left
+            pa, pb, pc = abs(p - left), abs(p - up), abs(p - up_left)
+            row[x] = (row[x] + (left if pa <= pb and pa <= pc else up if pb <= pc else up_left)) & 0xff
+    out += row
+    prev = row
+
+magenta = yellow = 0
+for y in range(h):
+    for x in range(w):
+        k = (y * w + x) * bpp
+        r, g, b = out[k], out[k + 1], out[k + 2]
+        if r > 160 and 60 < g < 190 and b > 160:
+            magenta += 1
+        if r > 200 and g > 200 and b < 120:
+            yellow += 1
+print("Bubble Tea scanout: magenta=%d paused-yellow=%d" % (magenta, yellow))
+assert magenta >= 100, "Bubble Tea title colour absent from scanout"
+assert yellow >= 40, "HID space did not produce PAUSED state in scanout"
+PY
