@@ -568,8 +568,8 @@ bash tools/charmhello-tape.sh
 ```
 
 The driver builds and seeds the real default Go seat, injects a HID `space`
-into `CHARMHELLO.ELF`, waits for its repaint marker plus a host-side settle
-marker, and saves `charmhello-{5s,10s,15s,after}.png` under
+into `CHARMHELLO.ELF`, captures `after` on the app's repaint marker before
+GOTABWM can reap the single hosted tab, and saves `charmhello-{5s,10s,15s,after}.png` under
 `artifacts/charmhello-tape/<timestamp>/`. They are 2560×1440 scanout captures,
 not ANSI frame reconstruction. If host ImageMagick is installed, the same
 frames are also encoded as `charmhello.gif`; otherwise the PNG sequence is the

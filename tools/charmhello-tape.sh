@@ -72,16 +72,16 @@ cat >"$OUT/close.txt" <<'EOF'
 dui close 2
 EOF
 
-# The input chord is real HID. It flips the Tea model to PAUSED. The app's
-# repaint marker releases the settle script; only that delayed host marker
-# releases --screenshot-after (M69b: an app marker itself is pre-relayout).
-# Keeping the guest alive past 15 seconds yields the runner's 5/10/15-second
-# scanout frames as a re-runnable tape sequence.
+# The input chord is real HID. It flips the Tea model to PAUSED. Capture the
+# `-after` frame immediately on that repaint marker: GOTABWM may reap a single
+# hosted tab after its idle lifetime, so a later host settle marker is too late
+# for this application's proof. The delayed settle/close path remains solely
+# to retain the runner's 5/10/15-second scanout sequence.
 rm -f "$OUT/vars.bin"
 host/vm-runner/.build/release/VMRunner \
     --overlay-base artifacts/disk.img --vars "$OUT/vars.bin" \
     --cvc-file "$SHARE" --serial "$OUT/serial.log" \
-    --screen "$OUT/charmhello.png" --screenshot-after tape-settled \
+    --screen "$OUT/charmhello.png" --screenshot-after 'charmhello: repainted' \
     --input --via-virtio \
     --script "$OUT/boot.txt" \
     --input-chords space --input-chords-after 'charmhello: ready' \
