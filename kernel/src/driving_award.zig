@@ -4202,8 +4202,24 @@ pub fn paint_scene() virtio_gpu.CmdResult {
     scene_dirty = false;
     const start = repaint_start() orelse return .ok;
     scene_dirty = true;
+    // M71c (#1562): while a registered seat owns the scanout, the kernel
+    // composites NONE of its own fixed desktop layer — the full-screen
+    // Road Pops terminal window, the wallpaper gradient, the taskbar and
+    // the dock. The seat writes its own desktop + chrome straight into the
+    // same framebuffer (wm_server.scanout_bind maps gpu_fb_phys), so a
+    // kernel blit here would double-draw over it. The tee calls this on
+    // every dirty console batch (the monitor's `tasks worker advances=`
+    // line keeps it permanently dirty), which is why the kernel terminal
+    // used to land ON TOP of the seat: measured 2026-09-21 (#1562), the
+    // captured frame held the kernel's console-green text and none of the
+    // seat's pixels. This gate does NOT skip composite()'s transfer+flush
+    // (scene_dirty stays true), so the tee's present still PUBLISHES
+    // whatever is already in the framebuffer — the seat's compose-N stores.
+    // The damage is consumed; the backlog composites once the seat
+    // unregisters and wm_owns_user_layer clears.
+    const seat_owns_layer = wm_owns_user_layer;
     // Step 9: render the wallpaper gradient BEFORE windows so it is the background.
-    if (start <= 1) {
+    if (start <= 1 and !seat_owns_layer) {
         // The wallpaper is at index 1 (after tray migration); if it or anything below is dirty, render gradient.
         const fb: [*]u8 = @ptrCast(&virtio_gpu.gpu_fb);
         const stride = virtio_gpu.fb_width * 4;
@@ -4229,6 +4245,17 @@ pub fn paint_scene() virtio_gpu.CmdResult {
         // Wallpaper is rendered via the gradient path above.
         if (w.kind == .wallpaper) {
             w.dirty = false;
+            continue;
+        }
+        // M71c (#1562): the kernel's own fixed desktop layer (its full-screen
+        // terminal window, wallpaper, taskbar, dock) is the seat's job while
+        // a registered seat owns the scanout — skip the blit, consume the
+        // damage. User windows are NOT skipped here: the migrated ones are
+        // already gated by `wm_owns_user_layer` above, and an unmigrated
+        // kernel-rendered user window (a hosted tty band) still paints.
+        if (seat_owns_layer and (w.kind == .terminal or w.kind == .taskbar or w.kind == .dock)) {
+            w.dirty = false;
+            w.damaged = false;
             continue;
         }
         // M33 SB5 (claim 7397): while the registered WM owns the user layer

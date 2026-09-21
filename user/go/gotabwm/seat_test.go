@@ -72,17 +72,22 @@ func TestLoopBounds(t *testing.T) {
 }
 
 // paintBlank must fill EVERY pixel (a partial fill is the "frame is right on
-// one half" bug), and must ignore a trailing sub-pixel remainder.
+// one half" bug), and must ignore a trailing sub-pixel remainder. The scanout
+// is B,G,R,X and paintBlank forces X opaque (M71c #1562: a 6-hex token leaves
+// X=0, which the host display honours as alpha and hides every seat pixel), so
+// a 6-hex token comes back with 0xff in the top byte.
 func TestPaintBlankFillsEveryPixel(t *testing.T) {
 	const pix = 1024
+	const token = 0x112233
+	const want = token | 0xff000000
 	buf := make([]byte, pix*4)
-	if got := paintBlank(buf, 0x11223344); got != pix {
+	if got := paintBlank(buf, token); got != pix {
 		t.Fatalf("paintBlank returned %d want %d", got, pix)
 	}
 	for i := 0; i < pix; i++ {
 		v := uint32(buf[i*4]) | uint32(buf[i*4+1])<<8 | uint32(buf[i*4+2])<<16 | uint32(buf[i*4+3])<<24
-		if v != 0x11223344 {
-			t.Fatalf("pixel %d = %#x want 0x11223344", i, v)
+		if v != want {
+			t.Fatalf("pixel %d = %#x want %#x (opaque X)", i, v, want)
 		}
 	}
 }

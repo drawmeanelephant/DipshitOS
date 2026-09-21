@@ -9,6 +9,7 @@
 //	paint the blank desktop         -> gotabwm: draw
 //	seat held, awaiting ticks       -> gotabwm: holding seat
 //	COMPOSITE_TICK (kind 18)        -> gotabwm: tick
+//	paint the clock/status chrome   -> gotabwm: clock-source / gotabwm: clock
 //	WM_POINTER (kind 19)            -> gotabwm: ptr
 //	WM_KEY (kind 21)                -> gotabwm: key
 //	vi.WmctlRequestPresent (65/3)   -> gotabwm: present
@@ -167,6 +168,11 @@ func main() {
 			_ = paintRail(scan, vi.ScanoutWidth, vi.ScanoutHeight, RailHeight, &tabs)
 			markRail()
 		}
+		// M71c (#1562): the seat's own clock/status panel, repainted every
+		// tick AFTER whatever desktop layer this tick painted, so it sits
+		// above a hosted client (a tab's window is the whole scanout). It
+		// also emits the one-shot clock-source marker.
+		chromeTick(scan, uint64(ticks))
 		if launch.open {
 			_ = paintLauncher(scan, vi.ScanoutWidth, vi.ScanoutHeight)
 		}
@@ -307,8 +313,12 @@ func paintBlank(scan []byte, rgb uint32) int {
 		return 0
 	}
 	pix := unsafe.Slice((*uint32)(unsafe.Pointer(&scan[0])), n)
+	// B,G,R,X scanout: the X byte must be opaque (the kernel writes 0xff
+	// there too). A 6-hex token leaves it 0x00, which the host display
+	// honours as alpha — that is why a seated scanout used to show the
+	// kernel's opaque layer and none of the seat's. M71c (#1562).
 	for i := range pix {
-		pix[i] = rgb
+		pix[i] = rgb | 0xff000000
 	}
 	return n
 }

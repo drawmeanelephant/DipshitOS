@@ -538,7 +538,13 @@ func fillRect(pix []uint32, width, height, x, y, w, h int, rgb uint32) int {
 			if idx < 0 || idx >= len(pix) {
 				continue
 			}
-			pix[idx] = rgb
+			// The scanout is B,G,R,X and the X byte must be opaque: the
+			// kernel's own stores write 0xff there (virtio_gpu.gpu_fb), and
+			// a 6-hex token leaves it 0x00 — which the host display honours
+			// as alpha, hiding every seat pixel. M71c (#1562), measured:
+			// with X=0 the seated frame showed only the kernel's opaque
+			// splash, the seat's fill and chrome invisible.
+			pix[idx] = rgb | 0xff000000
 			n++
 		}
 	}
