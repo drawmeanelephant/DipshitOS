@@ -230,10 +230,12 @@ func TestPaintRailFillsStripOnly(t *testing.T) {
 	if left == right {
 		t.Fatalf("focused and idle cells are the same colour %#x", left)
 	}
-	if right != railFocusRGB() {
+	// fillRect forces the scanout's X byte opaque (M71c #1562), so compare
+	// the colour with that byte masked off.
+	if right&0xffffff != railFocusRGB() {
 		t.Fatalf("focused cell %#x want %#x", right, railFocusRGB())
 	}
-	if left != railIdleRGB() {
+	if left&0xffffff != railIdleRGB() {
 		t.Fatalf("idle cell %#x want %#x", left, railIdleRGB())
 	}
 }

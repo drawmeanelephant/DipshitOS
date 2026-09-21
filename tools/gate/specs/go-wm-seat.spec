@@ -28,10 +28,19 @@
 #   bash tools/go/build-gotabwm.sh   ->  .build/go/GOTABWM.ELF
 #   bash tools/go/build-gocalc.sh    ->  .build/go/GOCALC.ELF
 #
-# exec-order: assert-proven -- the run ends on `rx-gotabwm-ok`, which only the
-# script prints, and every stage gate waits on guest output the program, the
-# kernel and the hosted app produce (`gotabwm: win focus`,
-# `wm: unregistered, shim resumed`).
+# exec-order: assert-proven -- each run ends on a marker only its script prints
+# (`rx-gotabwm-ok`, `rx-gotabwm-np-ok`, `rx-gotabwm-chrome-ok`), and every stage
+# gate waits on guest output the program, the kernel and the hosted app produce
+# (`gotabwm: win focus`, `gotabwm: present`, `wm: unregistered, shim resumed`).
+#
+# M71c (#1562) adds run 03: the seat's OWN clock/status chrome, on an EMPTY
+# strip. Run 01/02 host a full-viewport client that the kernel repaints every
+# tick, which covers the bottom-right panel; with no client exec'd the panel is
+# the seat's last write and is stable in the capture. The capture is timed to
+# `gotabwm: present` because the tick loop is paint -> chromeTick -> present, so
+# that marker is the first moment the frame is both painted and flushed
+# (capturing on `gotabwm: clock` races the flush and reads a black resource --
+# measured 2026-09-21).
 # M66c (#1445 retarget, #1485 retirement): the client is NOTE.ELF, the Go
 # successor to the Zig notepad, and the Zig binary itself is now GONE. The
 # lifecycle vocabulary is shared by design (`note:` mirrors `notepad:`), so the
@@ -223,3 +232,157 @@ vgate_assert 02 serial-contains 'wm: unregistered, shim resumed'
 vgate_assert 02 serial-contains 'dui: windows=4 focused='
 vgate_assert 02 serial-absent '[EXC] parking:'
 vgate_assert 02 serial-absent 'exited status=139'
+
+# --- M71c (#1562) run 03: the seat's own clock/status chrome ----------------
+# The seat is opted in and NO client is exec'd, so the strip is empty: the seat
+# paints the full-frame blank desktop plus its panel, and nothing covers
+# either. `dui focus 0` still runs because the seat's window phase blocks until
+# it loses focus (the M57b choreography).
+vgate_file script-03.txt <<'EOF'
+set GOMAXPROCS=1
+wm
+exec GOTABWM.ELF
+EOF
+
+vgate_file script2-03.txt <<'EOF'
+dui focus 0
+EOF
+
+vgate_file script3-03.txt <<'EOF'
+echo rx-gotabwm-chrome-ok
+EOF
+
+vgate_run 03 -- \
+    --screen '$RUN_DIR/screen-03' \
+    --screenshot-after 'rx-gotabwm-chrome-ok' \
+    --script '$RUN_DIR/script-03.txt' \
+    --script2 '$RUN_DIR/script2-03.txt' \
+    --script2-after 'gotabwm: win focus' \
+    --script3 '$RUN_DIR/script3-03.txt' \
+    --script3-after 'gotabwm: present' \
+    --script-expect 'rx-gotabwm-chrome-ok' --timeout 300
+
+vgate_assert 03 serial-contains 'gotabwm: registered'
+vgate_assert 03 serial-contains 'gotabwm: scanout'
+vgate_assert 03 serial-contains 'gotabwm: holding seat'
+vgate_assert 03 serial-absent 'gotabwm: tab open id='
+vgate_assert 03 serial-absent '[EXC] parking:'
+vgate_assert 03 serial-absent 'exited status=139'
+
+# The face and its source: the marker is one-shot and comes after the seat
+# registered, so a gate never has to guess which of VZ's three cases (kernel
+# EFI epoch / host `.clock` / uptime) this boot is in.
+vgate_assert 03 serial-contains 'gotabwm: clock-source '
+vgate_assert 03 python <<'PY'
+import os, re, sys
+ser = open(os.environ["VG_SER"], errors="replace").read()
+src = re.search(r"(?m)^gotabwm: clock-source (kernel|host|uptime)$", ser)
+if not src:
+    sys.exit("no well-formed gotabwm: clock-source line (want kernel|host|uptime)")
+face = re.search(r"(?m)^gotabwm: clock (\d\d):(\d\d):(\d\d)$", ser)
+if not face:
+    sys.exit("no well-formed gotabwm: clock HH:MM:SS line")
+h, mi, sec = (int(g) for g in face.groups())
+if mi > 59 or sec > 59:
+    sys.exit("clock face out of range: %s" % face.group(0))
+if h > 99:
+    sys.exit("clock hours past 99: %s" % face.group(0))
+reg = ser.find("gotabwm: registered")
+src_i, face_i = src.start(), face.start()
+if not (0 <= reg < src_i < face_i):
+    sys.exit("clock markers out of order (registered=%d source=%d face=%d)"
+             % (reg, src_i, face_i))
+if ser.count("gotabwm: clock-source ") != 1:
+    sys.exit("the clock-source marker is one-shot, saw %d"
+             % ser.count("gotabwm: clock-source "))
+print("clock source=%s face=%02d:%02d:%02d (one-shot, after registered)"
+      % (src.group(1), h, mi, sec))
+PY
+
+# THE chrome pixel assert: the panel's own rect on the SAME frame. The rect is
+# chromeRect(1280,720) = ChromeW 148 x ChromeH 20 inset 8 -> (1124,692); the
+# probe scales with the capture. Thresholds are the seat's own tokens, and the
+# exclusion is the point: the blank desktop is theme Bg (0x182026) and the
+# kernel terminal is 0x101418 with 0x00ff00 text, so neither can satisfy a
+# ChromeBg-modal panel with no console-green in it. Reported margins came in at
+# modal 7848/11840 pixels and >= 3 distinct colours (measured 2026-09-21).
+vgate_assert 03 snapshot 'screen-03-after' <<'PY'
+import sys, zlib, struct
+from collections import Counter
+path = sys.argv[1]
+d = open(path, 'rb').read()
+assert d[:8] == b'\x89PNG\r\n\x1a\n', "not a PNG"
+pos = 8; idat = b''; w = h = ct = 0
+while pos < len(d):
+    ln, typ = struct.unpack('>I4s', d[pos:pos+8])
+    data = d[pos+8:pos+8+ln]
+    if typ == b'IHDR':
+        w, h, bd, ct = struct.unpack('>IIBB', data[:10])
+    elif typ == b'IDAT':
+        idat += data
+    pos += 12 + ln
+raw = zlib.decompress(idat)
+bpp = 4 if ct == 6 else 3
+stride = w * bpp
+out = bytearray(); prev = bytearray(stride); i = 0
+for y in range(h):
+    f = raw[i]; i += 1
+    line = bytearray(raw[i:i+stride]); i += stride
+    if f == 1:
+        for x in range(bpp, stride): line[x] = (line[x] + line[x-bpp]) & 0xff
+    elif f == 2:
+        for x in range(stride): line[x] = (line[x] + prev[x]) & 0xff
+    elif f == 3:
+        for x in range(stride):
+            a = line[x-bpp] if x >= bpp else 0
+            line[x] = (line[x] + ((a + prev[x]) >> 1)) & 0xff
+    elif f == 4:
+        for x in range(stride):
+            a = line[x-bpp] if x >= bpp else 0
+            b = prev[x]; c = prev[x-bpp] if x >= bpp else 0
+            p = a + b - c
+            pa, pb, pc = abs(p-a), abs(p-b), abs(p-c)
+            pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
+            line[x] = (line[x] + pr) & 0xff
+    out += line
+    prev = line
+
+def px(x, y):
+    k = (y * w + x) * bpp
+    return out[k], out[k+1], out[k+2]
+
+scale = w / 1280.0
+x0, y0, pw, ph = 1124, 692, 148, 20
+# seat theme tokens: ChromeBg 0x11171c, Ink 0xe6edf3; the kernel terminal is
+# 0x101418 bg with 0x00ff00 text. The capture applies a small colour-space
+# shift, hence the tolerances below (measured: ChromeBg reads 0x12171c).
+chrome_bg = (0x11, 0x17, 0x1c)
+modal = Counter(); ink = green = total = 0
+for y in range(int(y0 * scale), int((y0 + ph) * scale)):
+    for x in range(int(x0 * scale), int((x0 + pw) * scale)):
+        r, g, b = px(x, y)
+        total += 1
+        modal[(r, g, b)] += 1
+        if min(r, g, b) >= 150:
+            ink += 1
+        if g > 150 and r < 120 and b < 120:
+            green += 1
+best, best_n = modal.most_common(1)[0]
+dist = max(abs(best[0]-chrome_bg[0]), abs(best[1]-chrome_bg[1]),
+           abs(best[2]-chrome_bg[2]))
+print("panel rect %dx%d (%d px): modal=#%02x%02x%02x n=%d distinct=%d "
+      "ink=%d console-green=%d"
+      % (int(pw*scale), int(ph*scale), total,
+         best[0], best[1], best[2], best_n, len(modal), ink, green))
+assert dist <= 4, ("the panel rect is not the seat's ChromeBg (modal #%02x%02x%02x "
+                   "is %d off 0x11171c) - the panel was not painted"
+                   % (best[0], best[1], best[2], dist))
+assert best_n >= 3000, ("only %d/%d panel-rect pixels are ChromeBg - the panel "
+                        "is not covering its rect" % (best_n, total))
+assert len(modal) >= 3, ("the panel rect holds only %d colour(s) - no rule and "
+                         "no glyphs, so the chrome is a bare fill" % len(modal))
+assert ink >= 20, ("only %d ink-white pixels in the panel rect - the clock face "
+                   "did not paint" % ink)
+assert green == 0, ("%d console-green pixels inside the panel rect - the kernel's "
+                    "terminal is compositing over the seat's scanout" % green)
+PY

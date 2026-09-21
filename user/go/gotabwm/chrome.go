@@ -1,0 +1,283 @@
+// GOTABWM.ELF — M71c (#1562): the seat's own clock and status chrome.
+//
+// Zig TABWM painted a bottom status tray (a clock plus theme badges). The Go
+// seat painted a blank fill and, with tabs, a rail band — so sitting in the
+// default desktop there was no time and no identity anywhere on the scanout.
+// This file is that chrome: a bounded panel in the bottom-right, painted by
+// the seat itself on every COMPOSITE_TICK and repainted after whatever
+// desktop layer the tick painted, so it sits above a hosted client (a tab's
+// window covers the whole scanout).
+//
+// D1 (this card): chrome is the SEAT, not a hosted app — nothing is exec'd.
+// D2: no RTC. VZ exposes none and the kernel has no time-of-day source of
+// its own, so the honest sources are, in order:
+//
+//	kernel  slot 66 (sys_time): the boot EFI GetTime epoch advanced by 1 Hz
+//	        uptime — the authoritative wall clock. The kernel answers
+//	        ENOSYS when the firmware gave no epoch.
+//	host    /host/.clock: the session launcher's seconds-since-local-
+//	        midnight (tools/session.sh). The same file, and the same
+//	        fallback order, Zig TABWM used.
+//	uptime  the seat's own tick counter — honest, and named as uptime
+//	        rather than dressed up as wall time.
+//
+// The one-shot `gotabwm: clock-source <name>` line says which source won, so
+// a gate never has to guess, and `gotabwm: clock HH:MM:SS` carries the face.
+//
+// Text uses the same 8x8 VirelaiOS face NOTE/GOEDIT paint with
+// (virelai/webrender/font) — that leaf package, not webrender's layout half,
+// which GOEDIT's header records as too heavy for a guest ELF.
+package main
+
+import (
+	"unsafe"
+
+	"virelai/theme"
+	"virelai/vi"
+	"virelai/webrender/font"
+)
+
+// The chrome marker lines the class-B gate greps. Exported constants so
+// chrome_test.go pins the exact shapes (the repo pins gate grep targets this
+// way in user/src/tabwm.zig and user/go/gotabwm/tabs.go).
+const (
+	MarkerClock       = "gotabwm: clock "
+	MarkerClockSource = "gotabwm: clock-source "
+)
+
+// clockEpochPath is the session launcher's wall-time file: the host's LOCAL
+// time at boot, as seconds since midnight. Absent in a gate boot (no session
+// launcher), which is exactly the uptime fallback.
+const (
+	clockEpochPath = "/host/.clock"
+	clockMaxBytes  = 64
+)
+
+// Chrome geometry: a bottom-right panel, inset from the scanout edge so its
+// pixels never collide with a capture's own edge frame (observed in M71b:
+// the PNG carries a 6px border at full capture scale).
+const (
+	ChromeH     = 20 // panel height: the 8px face plus chromePad above and below
+	ChromeW     = 148
+	chromeInset = 8
+	chromePad   = 6
+	chromeScale = 1 // the 8x8 face at 1x: an 8px advance, no scaling
+)
+
+// statusText is the seat's one-line identity in the panel (D1: the seat names
+// itself; nothing is exec'd to draw it).
+const statusText = "GOTABWM"
+
+// clockFace is what the panel shows for a tick, plus the source name the
+// one-shot marker reports.
+type clockFace struct {
+	h, m, s int
+	source  string
+}
+
+// chromeLogged guards the one-shot clock markers (the gate greps the
+// transition, not a per-tick flood).
+var chromeLogged bool
+
+// chromeTick repaints the panel for this tick and emits the clock markers
+// once, after the first successful paint. Painting and logging live together
+// so a caller cannot print the marker without having painted the panel.
+func chromeTick(scan []byte, ticks uint64) {
+	face := clockNow(ticks)
+	text := formatClock(face.h, face.m, face.s)
+	_ = paintChrome(scan, vi.ScanoutWidth, vi.ScanoutHeight, text)
+	if chromeLogged {
+		return
+	}
+	chromeLogged = true
+	vi.ConsoleLine(MarkerClockSource + face.source)
+	vi.ConsoleLine(MarkerClock + text)
+}
+
+// clockNow resolves the face from the honest sources in D2's order.
+func clockNow(ticks uint64) clockFace {
+	if ep, ok := kernelEpoch(); ok {
+		h, m, s := clockHMS(0, ep, true)
+		return clockFace{h: h, m: m, s: s, source: "kernel"}
+	}
+	if ep, ok := hostEpoch(); ok {
+		h, m, s := clockHMS(ticks, ep, true)
+		return clockFace{h: h, m: m, s: s, source: "host"}
+	}
+	h, m, s := clockHMS(ticks, 0, false)
+	return clockFace{h: h, m: m, s: s, source: "uptime"}
+}
+
+// kernelEpoch is sys_time (slot 66): Unix wall-clock seconds, already
+// advanced by 1 Hz uptime, or no epoch at all. Folded to
+// seconds-since-midnight for the face.
+func kernelEpoch() (uint32, bool) {
+	v := vi.Time()
+	if v <= 0 {
+		return 0, false
+	}
+	return uint32(v % 86400), true
+}
+
+// hostEpoch is /host/.clock, seconds since local midnight.
+func hostEpoch() (uint32, bool) {
+	b, r := vi.ReadFileAll(clockEpochPath, clockMaxBytes)
+	if r < 0 || b == nil {
+		return 0, false
+	}
+	return parseClockEpoch(b)
+}
+
+// parseClockEpoch parses a decimal seconds-since-midnight value (0..86399)
+// from a `.clock` body. Surrounding whitespace is tolerated; junk, an empty
+// value, and anything at or past 24h are refused. Pure — host-testable, and
+// the same contract tabwm.zig's parse_clock_epoch states.
+func parseClockEpoch(b []byte) (uint32, bool) {
+	i, n := 0, len(b)
+	for i < n && isClockWS(b[i]) {
+		i++
+	}
+	var val uint32
+	digits := 0
+	for i < n && b[i] >= '0' && b[i] <= '9' {
+		if digits >= 6 {
+			return 0, false // more than 999999 is not a valid value
+		}
+		val = val*10 + uint32(b[i]-'0')
+		digits++
+		i++
+	}
+	if digits == 0 {
+		return 0, false
+	}
+	for ; i < n; i++ {
+		if !isClockWS(b[i]) {
+			return 0, false
+		}
+	}
+	if val >= 86400 {
+		return 0, false
+	}
+	return val, true
+}
+
+func isClockWS(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
+}
+
+// clockHMS is the face at elapsed seconds: time-of-day when an epoch
+// (seconds since local midnight) is known, wrapping at 24h; uptime from
+// 00:00 when it is not, with hours counting past 24. Pure — the same rule
+// tabwm.zig's clock_hms uses, so the two seats agree on one clock contract.
+func clockHMS(elapsed uint64, epoch uint32, haveEpoch bool) (h, m, s int) {
+	total := elapsed
+	if haveEpoch {
+		total = (uint64(epoch) + elapsed) % 86400
+		h = int((total / 3600) % 24)
+	} else {
+		h = int(total / 3600)
+	}
+	return h, int((total / 60) % 60), int(total % 60)
+}
+
+// formatClock is "HH:MM:SS", zero-padded. Guest-safe: no fmt.
+func formatClock(h, m, s int) string {
+	var b [8]byte
+	put2 := func(at, v int) {
+		if v < 0 {
+			v = 0
+		}
+		if v > 99 {
+			v = 99
+		}
+		b[at] = byte('0' + v/10)
+		b[at+1] = byte('0' + v%10)
+	}
+	put2(0, h)
+	b[2] = ':'
+	put2(3, m)
+	b[5] = ':'
+	put2(6, s)
+	return string(b[:])
+}
+
+// chromeRect is the panel's rect on a width x height scanout: bottom-right,
+// chromeInset from each edge so it sits inside any capture frame. Pure. A
+// scanout too small for the inset shrinks the panel; one too small even for
+// that returns the zero rect (the caller paints nothing).
+func chromeRect(width, height int) (x, y, w, h int) {
+	w, h = ChromeW, ChromeH
+	if width < w+2*chromeInset {
+		w = width - 2*chromeInset
+	}
+	if height < h+2*chromeInset {
+		h = height - 2*chromeInset
+	}
+	if w <= 0 || h <= 0 || width <= 0 || height <= 0 {
+		return 0, 0, 0, 0
+	}
+	return width - chromeInset - w, height - chromeInset - h, w, h
+}
+
+// chromeTextOrigin is the top-left of the clock glyph grid inside the panel:
+// past the 2px accent rule and its gap.
+func chromeTextOrigin(x, y int) (int, int) { return x + 6, y + chromePad }
+
+// drawText8 paints text with the VirelaiOS 8x8 face, coalescing each row's
+// lit run into one fill — the NOTE/GOEDIT idiom, and the reason a whole clock
+// costs a bounded number of rects instead of one per lit pixel.
+func drawText8(pix []uint32, width, maxH, x, y int, text string, rgb uint32) int {
+	written, cx := 0, x
+	for i := 0; i < len(text); i++ {
+		g := font.Glyph8(rune(text[i]))
+		for row := 0; row < 8; row++ {
+			bits := g[row]
+			for col := 0; col < 8; {
+				if bits&(1<<uint(col)) == 0 {
+					col++
+					continue
+				}
+				run := 1
+				for col+run < 8 && bits&(1<<uint(col+run)) != 0 {
+					run++
+				}
+				written += fillRect(pix, width, maxH, cx+col, y+row, run, 1, rgb)
+				col += run
+			}
+		}
+		cx += font.Advance(chromeScale)
+	}
+	return written
+}
+
+// paintChrome paints the seat's clock/status panel and returns the pixel
+// count written. Tokens only (M69c) — no hex lives here. Pure: it edits the
+// caller's scanout slice and touches nothing else, which is what the host
+// test pins.
+func paintChrome(scan []byte, width, height int, clock string) int {
+	if width <= 0 || height <= 0 || len(scan) < 4 {
+		return 0
+	}
+	x, y, w, h := chromeRect(width, height)
+	if w <= 0 || h <= 0 {
+		return 0
+	}
+	pixN := len(scan) / 4
+	pix := unsafe.Slice((*uint32)(unsafe.Pointer(&scan[0])), pixN)
+	maxH := pixN / width
+	if maxH <= 0 {
+		return 0
+	}
+	tok := theme.Current
+	written := fillRect(pix, width, maxH, x, y, w, h, tok.ChromeBg)
+	written += fillRect(pix, width, maxH, x, y, w, tok.BorderW, tok.Rule)
+	// A 2px accent rule on the panel's left edge is the seat's identity
+	// mark, painted after the border so it spans the full panel height. It
+	// is also the pixel probe's blue anchor: the desktop fill and the
+	// terminal's green text are neither accent-blue nor ink-white.
+	written += fillRect(pix, width, maxH, x, y, 2, h, tok.Accent)
+	tx, ty := chromeTextOrigin(x, y)
+	written += drawText8(pix, width, maxH, tx, ty, clock, tok.Ink)
+	written += drawText8(pix, width, maxH, tx+font.Measure(clock, chromeScale)+8, ty, statusText, tok.Muted)
+	return written
+}
