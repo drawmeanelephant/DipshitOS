@@ -893,6 +893,10 @@ fn runPrintf(argv: []const []const u8, out: Writer) u8 {
                         'n' => out.write("\n"),
                         't' => out.write("\t"),
                         'r' => out.write("\r"),
+                        // `printf '\e[31m'` is the bounded way a
+                        // window-tty program can emit an ANSI CSI sequence
+                        // without a special syscall.
+                        'e' => out.write("\x1b"),
                         '\\' => out.write("\\"),
                         '0' => out.write(&[_]u8{0}),
                         else => {
@@ -1273,6 +1277,10 @@ test "toolbox: printf substitutes, escapes, and repeats the format" {
     const argv4 = [_][]const u8{ "printf", "100%%\n" };
     _ = run(.printf, &argv4, stdinStream(""), Mem.host(), cap.writer());
     try std.testing.expectEqualStrings("100%\n", cap.contents());
+    cap.reset();
+    const argv5 = [_][]const u8{ "printf", "\\e[31mred\\e[0m" };
+    _ = run(.printf, &argv5, stdinStream(""), Mem.host(), cap.writer());
+    try std.testing.expectEqualStrings("\x1b[31mred\x1b[0m", cap.contents());
 }
 
 test "toolbox: a line longer than the cap is consumed but truncated" {
