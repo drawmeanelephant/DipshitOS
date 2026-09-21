@@ -16,8 +16,10 @@
 //!      (`exec_program_max`); a gap-layout static ELF — every GOOS=virelai
 //!      Go binary — is instead parsed from a 16 KiB header window and has
 //!      each segment STREAMED straight from the share into the pages that
-//!      get mapped, so it is bounded by `exec_image_max` (32 MiB) and the
-//!      guest's memory rather than by that array (M70c-K, issue #1504).
+//!      get mapped, so it is bounded by `exec_image_max` (32 MiB) on the file
+//!      and by `elf.map_max` (64 MiB) on what it maps, rather than by that
+//!      array (M70c-K, issue #1504; the mapped bound split out of the file
+//!      bound in M72a, issue #1579).
 //!   2. Validate the header (magic, entry offset, image size).
 //!   3. Gate on CAPACITY (claim 0826 — the old `user_root_in_use` gate is
 //!      gone: a second program loads and runs while the first is alive):
@@ -108,7 +110,8 @@ const symbol = @import("symbol.zig");
 /// ELF path (every GOOS=virelai Go binary) STREAMS its segments straight
 /// from the file into their mapped pages and never stages the file at all,
 /// so for those shapes this is not a bound. What bounds an image now is
-/// `exec_image_max` below.
+/// `exec_image_max` below, plus the parser's own `elf.map_max` on what the
+/// image MAPS (M72a, issue #1579).
 pub const exec_program_max: usize = 2 * 1024 * 1024;
 /// M70c-K (issue #1504): the acceptance bound — the largest image file the
 /// loader will take, whatever its format. A file past it is refused
@@ -118,7 +121,18 @@ pub const exec_program_max: usize = 2 * 1024 * 1024;
 /// guest room for the image's own heap; the true ceiling above this one is
 /// the physical allocator (`out_of_memory` when the segments cannot be
 /// backed), which is a memory-plan question, not a loader one.
+///
+/// M72a (issue #1579): this is a bound on the FILE, and it is not the whole
+/// story — an image may be small on disk and map far more than it stores,
+/// because `.bss`/`.noptrbss` costs no file bytes. That second quantity is
+/// bounded by `elf.map_max` (64 MiB), which the parser enforces on both
+/// paths and which this module reports as `map_too_large`.
 pub const exec_image_max: usize = 32 * 1024 * 1024;
+/// M72a (issue #1579): the parser's bound on what an image MAPS
+/// (`elf.map_max`, 64 MiB), restated here so every caller that names a
+/// loader bound — the monitor's refusals, the class-B fixtures — reads them
+/// all from one module instead of reaching into the parser.
+pub const map_max: usize = elf_mod.map_max;
 /// The header window a streamed load reads first: an ELF header, its
 /// program-header table (≤ 3 records), and a PT_INTERP path — or a
 /// DSK1/DSK3 header. Segment PAYLOADS are never staged here; they are
@@ -178,6 +192,14 @@ pub const ExecResult = enum {
     /// Distinct from `image_too_large`: a gap-layout Go binary of the same
     /// size streams and is accepted (M70c-K, issue #1504).
     staging_too_large,
+    /// The image's own headers promise more MAPPED memory than this loader
+    /// will back (`elf.map_max`, 64 MiB since M72a / #1579: every mapped
+    /// page is allocated and zero-filled before EL0 runs, so the bound is
+    /// RAM). A name of its own because neither size refusal is what
+    /// happened: the file is inside the acceptance bound and its shape would
+    /// have streamed, and it is a large zero-filled `.bss`/`.noptrbss` (a
+    /// 32 MiB FIPS scratch buffer, say) that crossed the line.
+    map_too_large,
     /// Not a DSK1 flat program image.
     bad_magic,
     /// entry_offset outside the loaded content.
@@ -465,6 +487,13 @@ fn exec_file_impl(name: []const u8, args: []const []const u8, pin: ?usize, princ
                 // A file whose own header promises bytes the file does not
                 // hold is an incomplete copy, not an oversized image.
                 if (err == error.file_too_short) return .image_truncated;
+                // M72a (issue #1579): an image whose headers promise more
+                // mapped memory than `elf.map_max` is refused by THAT
+                // bound's name. The fall-through below would have told this
+                // file it was "too large for the 0x200000-byte staging
+                // buffer (only a gap-layout static ELF streams past it)" —
+                // about a gap-layout static ELF that would have streamed.
+                if (err == error.map_too_large) return .map_too_large;
                 // Any other parse failure falls through to the size refusal:
                 // the file was already past `exec_image_max`? no — past the
                 // staging buffer, which is all an oversized file of an
@@ -518,13 +547,23 @@ fn exec_file_impl(name: []const u8, args: []const []const u8, pin: ?usize, princ
         },
         elf_magic => {
             const image = elf_mod.parse(program[0..got]) catch |err| return elf_exec_error(err);
-            // M70c-K (issue #1504): `load_max` is the acceptance bound now
-            // (32 MiB, `exec.exec_image_max`), but THIS path still copies
+            // M70c-K (issue #1504): the acceptance bound is the PARSER's
+            // (`elf.load_max` on the initialized bytes, `elf.map_max` on the
+            // mapping), but the CONTIGUOUS shapes below still copy
             // [text][data] through the 2 MiB staging buffer, so a shape it
             // cannot hold is refused by name here instead of tripping a
-            // slice past the end of the array. Only the streamed gap path
-            // above is exempt from the staging bound.
-            if (elf_mod.mem_total(image) > exec_program_max) return .staging_too_large;
+            // slice past the end of the array.
+            //
+            // M72a (issue #1579): the GAP shape is not one of those shapes.
+            // `exec_static_elf_gap` takes its pages from the physical
+            // allocator and copies only each segment's FILE bytes out of
+            // `program`, so what a gap image loads through this buffer is
+            // `got`, already proven ≤ `program.len`. Charging `mem_total`
+            // here (which adds every segment's BSS) refused a ≤2 MiB Go
+            // binary that maps 50 MiB, with the same false "staging buffer"
+            // message; a gap image's mapping is bounded by `elf.map_max`
+            // instead.
+            if (!image.gap_layout and elf_mod.mem_total(image) > exec_program_max) return .staging_too_large;
             // M22 D3 (issue #326): crash-report symbol names follow the
             // program — every exec starts from an empty table, then this
             // image's .symtab repopulates it. Harvest BEFORE staging
@@ -1419,6 +1458,10 @@ fn elf_exec_error(err: elf_mod.Error) ExecResult {
         error.no_load_segments => .no_pt_load,
         error.too_many_segments => .too_many_segments,
         error.bad_entry => .bad_entry,
+        // M72a (issue #1579): the mapped-memory bound has its own name on
+        // this side too, so the refusal a caller sees matches the bound the
+        // image crossed.
+        error.map_too_large => .map_too_large,
         error.segment_too_large,
         error.overlapping_segments,
         error.writable_text,

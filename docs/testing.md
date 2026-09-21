@@ -558,14 +558,24 @@ the **cacheDisplay** render — the same guest framebuffer, same 2560x1440.
 gitignored `artifacts/`, and the capture is greppable to its marker there
   (`shot-web` appears in the log, and each file's release marker preceding it).
 
-**Two things the corpus shows that no gate asserts** (both reported on #1529 as
-observed, neither diagnosed there): `gosh.png` is the *empty* tab — GOTABWM
-opens and presents it (`gotabwm: tab open id=3`, `host view id=3`, one
-`present`) while GOSH's own `gosh: prompt` is green, and the surface holds no
-pixels; and kernel console text (`ks worker advances=…`) is on the scanout
-wherever no window covers it, growing with how long the boot has run (~2.8% of
-sampled pixels at 3 s, ~5.8% at 20 s in the web boot; none in the hero boot).
-The M69a beat asserts serial markers, so neither is visible to it.
+**One of the two things this corpus exposed is now asserted; the other is still
+not** (both were reported on #1529 as observed, neither diagnosed there).
+
+`gosh.png` is the *pre-fix* empty tab: GOTABWM opens and presents it
+(`gotabwm: tab open id=3`, `host view id=3`, one `present`) while GOSH's own
+`gosh: prompt` is green. M69g (#1558) measured the cause — the seat's own 96x64
+client-death probe window painted its chrome over the tab's first terminal line,
+a band that held **55** terminal-green pixels (all of them anti-aliasing from
+the probe's white title text) and holds **578** after the fix. `go-dogfood`
+**boot 03** now asserts that region directly (`green >= 200`, so a blank tab
+fails the gate instead of passing silently). The committed `gosh.png` is a
+capture from before that fix, so it still shows the empty band.
+
+Still asserted by nothing: kernel console text (`ks worker advances=…`) sitting
+on the scanout wherever no window covers it, growing with how long the boot has
+run (~2.8% of sampled pixels at 3 s, ~5.8% at 20 s in the web boot; none in the
+hero boot). A serial-marker beat cannot see it; M71b (#1561) is the card that
+makes the seat own the scanout.
 
 ## Verification sequence
 

@@ -134,11 +134,18 @@ phone camera and no stock art; `docs/testing.md` has the recipe.*
 
 *The rest of the corpus, captured through the same path, one boot each: the
 shell `GOSH.ELF`, the editor, the calculator, and the browser rendering a page
-in-guest. Two things the pixels show that no gate asserts — `GOSH.ELF`'s tab
-holds no pixels even though the shell's own markers are green (observed on
-[#1529](https://github.com/drawmeanelephant/DipshitOS/issues/1529), not yet
-diagnosed), and kernel console text is on the scanout wherever no window
-covers it. Regenerate them with `docs/testing.md`; the PNGs are the pinned
+in-guest. The pixels exposed two things the markers could not see. The first —
+`GOSH.ELF`'s tab holding no pixels while the shell's own markers were green
+(observed on
+[#1529](https://github.com/drawmeanelephant/DipshitOS/issues/1529)) — was
+diagnosed and fixed by M69g
+([#1558](https://github.com/drawmeanelephant/DipshitOS/issues/1558)): the
+seat's own client-death probe window painted its chrome over the tab's first
+line, a band holding 55 terminal-green pixels before the fix and 578 after, and
+`go-dogfood` boot 03 now fails on a blank tab. `gosh.png` above is therefore a
+capture from **before** that fix. The second — kernel console text on the
+scanout wherever no window covers it — is still true and still asserted by
+nothing. Regenerate them with `docs/testing.md`; the PNGs are the pinned
 fixtures, the serial logs are not committed.*
 
 ## What it runs on

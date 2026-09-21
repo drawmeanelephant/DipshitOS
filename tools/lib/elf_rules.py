@@ -11,8 +11,15 @@ A rule that drifts in one copy is worse than a rule that is missing: the host
 would pass an image the kernel then refuses, and the failure would surface as a
 boot-time refusal far from the check that lied. The constants below mirror
 ``kernel/src/exec.zig`` (``exec_image_max``/``load_max``, ``max_segments``, the
-argv+envp block) and ``kernel/src/elf.zig`` (``gap_base_max``) -- KEEP IN SYNC
-with THOSE, not with a sibling spec.
+argv+envp block) and ``kernel/src/elf.zig`` (``load_max``, ``map_max``,
+``gap_base_max``) -- KEEP IN SYNC with THOSE, not with a sibling spec.
+
+M72a (#1579) SPLIT that rule: the loader bounds INITIALIZED bytes (``Σ filesz``)
+by ``load_max`` and MAPPED bytes (``Σ memsz``, which it eagerly allocates and
+zeroes) by ``map_max``. This copy charged ``Σ memsz`` against the 32 MiB file
+bound, so it refused -- from the host, before any boot -- exactly the images
+the kernel had just learned to accept, which is the drift this module exists to
+prevent.
 
 Usage from a spec's ``vgate_assert <tag> python`` body::
 
@@ -30,8 +37,11 @@ Usage from a spec's ``vgate_assert <tag> python`` body::
 
 import struct
 
-# kernel/src/exec.zig exec_image_max / load_max: 32 MiB.
+# kernel/src/exec.zig exec_image_max / elf.load_max: 32 MiB, charged on the
+# file (and on Σ filesz, which cannot exceed it).
 MAX_IMAGE = 33554432
+# kernel/src/elf.zig map_max: 64 MiB, charged on Σ memsz (M72a #1579).
+MAP_MAX = 67108864
 # kernel/src/elf.zig gap_base_max: no segment may reach into the kernel/hole.
 GAP_BASE_MAX = 0x1000_0000
 # The argv+envp block the kernel packs into the data segment's tail page
@@ -93,9 +103,12 @@ def check(data):
         fails.append("no PT_LOAD segments")
     if len(segs) > MAX_SEGMENTS:
         fails.append("%d PT_LOAD > max_segments %d" % (len(segs), MAX_SEGMENTS))
+    total_file = sum(s[2] for s in segs)
+    if total_file > MAX_IMAGE:
+        fails.append("sum filesz %d > load_max %d" % (total_file, MAX_IMAGE))
     total = sum(s[3] for s in segs)
-    if total > MAX_IMAGE:
-        fails.append("sum memsz %d > load_max" % total)
+    if total > MAP_MAX:
+        fails.append("sum memsz %d > map_max %d" % (total, MAP_MAX))
     for fl, va, fsz, msz in segs:
         if va + msz > GAP_BASE_MAX:
             fails.append("segment at %#x crosses gap_base_max" % va)
@@ -121,7 +134,9 @@ def check(data):
 
 def describe(name, data, segs, total, slack):
     """The one-line receipt both specs print: bytes, segment count, sum memsz
-    (decimal and hex) and the writable-slack figure."""
+    (decimal and hex) and the writable-slack figure. ``memsz`` is the MAPPED
+    total, the one ``map_max`` bounds; the file bound applies to the file and
+    to Σ filesz (not printed here -- the file size is)."""
     return ("%s %d bytes, %d segments, memsz %d (%#x), slack %#x"
             % (name, len(data), len(segs), total, total, slack))
 

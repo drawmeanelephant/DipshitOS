@@ -1647,27 +1647,13 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_sysmon.step);
 
     // ------------------------------------------------------------------
-    // Guest: forty-fifth ESP user program (Claim 0750) HTTPD.BIN.
-    // In-guest HTTP/1.1 web server and status dashboard daemon.
+    // M71l (#1571): HTTPD.BIN (the forty-fifth ESP program, Claim 0750) is
+    // RETIRED with user/src/httpd.zig. Its Go successor is GOHTTPD.ELF
+    // (user/go/httpd, built by tools/go/build-gohttpd.sh) — a host-share ELF,
+    // not an in-image Zig program, so there is no build step to replace this
+    // one. The live-httpd spec stages GOHTTPD.ELF and keeps the same passive
+    // open probe (the monitor's tcp=listen).
     // ------------------------------------------------------------------
-    const httpd_prog = b.addExecutable(.{
-        .name = "user-httpd",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("user/src/httpd.zig"),
-            .target = kernel_target,
-            .optimize = .ReleaseSmall,
-        }),
-    });
-    httpd_prog.linker_script = b.path("user/linker.ld");
-    const httpd_step = b.step("httpd", "Build the forty-fifth ESP user program (zig-out/bin/HTTPD.BIN)");
-    const httpd_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
-    httpd_elf2bin.addFileArg(httpd_prog.getEmittedBin());
-    const httpd_bin = httpd_elf2bin.addOutputFileArg("HTTPD.BIN");
-    httpd_elf2bin.has_side_effects = true;
-    httpd_elf2bin.stdio = .inherit;
-    httpd_step.dependOn(&httpd_elf2bin.step);
-    const install_httpd = b.addInstallFileWithDir(httpd_bin, .bin, "HTTPD.BIN");
-    b.getInstallStep().dependOn(&install_httpd.step);
 
     // ------------------------------------------------------------------
     // Guest: Dynamic Linker & Shared Libraries (Milestone 30, claim 7921)
