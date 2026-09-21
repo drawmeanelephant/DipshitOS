@@ -170,7 +170,7 @@ fn isoFrom(secs: i64, buf: []u8) []const u8 {
     const md = yd.calculateMonthDay();
     const ds = es.getDaySeconds();
     return std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
-        yd.year, md.month.numeric(), md.day_index + 1,
+        yd.year,              md.month.numeric(),      md.day_index + 1,
         ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute(),
     }) catch "1970-01-01T00:00:00Z";
 }
@@ -300,7 +300,7 @@ pub fn main(init: std.process.Init.Minimal) !u8 {
         const t1 = monoMs();
         var d: [128]u8 = undefined;
         const detail = std.fmt.bufPrint(&d, "handshake failed: {s} (validation={s}, roots={d}, inter={d}, leaf_issuer_cn={s})", .{
-            @errorName(e), @tagName(client.last_validation), store.rootCount(), client.peer_intermediate_len,
+            @errorName(e),                                                                                  @tagName(client.last_validation), store.rootCount(), client.peer_intermediate_len,
             if (client.last_cert_error) |ce| @errorName(ce) else (client.server_cert.issuer_cn orelse "?"),
         }) catch "handshake failed";
         ledger(peer, peer_version, endpoint, servername, now_iso, "handshake_failed", detail, t1 - t0, 0, command);

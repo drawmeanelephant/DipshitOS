@@ -2,13 +2,13 @@
 //
 // The phase is an exec argument (the go-net runs exec one phase each):
 //
-//   viloop   — the loopback bar: a datagram to the guest's OWN address
-//              returns to its own listen ring without touching the device
-//              (through the vi UDP seam, slots 9/10/11).
-//   viclosed — the closed-port drop: a connect to a port nobody answers
-//              refuses with the kernel's 30 s connect-timeout EINVAL while
-//              the heartbeat keeps printing (the order proof, for a
-//              BLOCKING Dial — the M65 pacing live).
+//	viloop   — the loopback bar: a datagram to the guest's OWN address
+//	           returns to its own listen ring without touching the device
+//	           (through the vi UDP seam, slots 9/10/11).
+//	viclosed — the closed-port drop: a connect to a port nobody answers
+//	           refuses with the kernel's 30 s connect-timeout EINVAL while
+//	           the heartbeat keeps printing (the order proof, for a
+//	           BLOCKING Dial — the M65 pacing live).
 //
 // It shares the fixture family with GONET.ELF (phase 2) and GOVIDNS.ELF
 // (DNS round trip): the kernel's fixed text gap (exec.zig) is a hard size

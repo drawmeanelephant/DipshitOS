@@ -17,7 +17,7 @@
 // cmd/link failed it as linked. Measured on the tag-ON image
 // (check: the writable memsz page slack, tools/go/build-gosh.sh's rule):
 //
-//     writable memsz = 0x69cb0 (433,328)  page slack = 0x350 (848)  need 0x908
+//	writable memsz = 0x69cb0 (433,328)  page slack = 0x350 (848)  need 0x908
 //
 // 848 < 2312, so an exec WITH arguments refuses; a linker with no arguments
 // is not a linker. This pad restores the invariant the same way user/go/sh's

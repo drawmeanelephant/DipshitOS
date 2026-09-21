@@ -1,16 +1,16 @@
 // GOOS=virelai phase 0c probe (issue #1228): fault delivery to panic.
 //
 // Three serial-ordered phases, each printing one exact completion line:
-//   1. main goroutine forces a REAL data abort (a load from unmapped
-//      0x8 through an opaque pointer, so the compiler cannot rewrite it
-//      into an explicit nil panic), recovers, and reports the
-//      runtime.Error text — proves kernel delivery + recover().
-//   2. the same fault on a worker goroutine (a different M / kernel
-//      task) — proves delivery is per-thread, not main-only.
-//   3. a fault whose deferred probe walks runtime.CallersFrames BEFORE
-//      recovering: finding runtime.sigpanic + the faulting function in
-//      the frames proves the unwinder crosses the injected sigpanic
-//      frame (the traceback machinery, in-process, exit still 0).
+//  1. main goroutine forces a REAL data abort (a load from unmapped
+//     0x8 through an opaque pointer, so the compiler cannot rewrite it
+//     into an explicit nil panic), recovers, and reports the
+//     runtime.Error text — proves kernel delivery + recover().
+//  2. the same fault on a worker goroutine (a different M / kernel
+//     task) — proves delivery is per-thread, not main-only.
+//  3. a fault whose deferred probe walks runtime.CallersFrames BEFORE
+//     recovering: finding runtime.sigpanic + the faulting function in
+//     the frames proves the unwinder crosses the injected sigpanic
+//     frame (the traceback machinery, in-process, exit still 0).
 //
 // Zero standard-library OS imports — runtime only. os/time are phase 2.
 package main

@@ -69,6 +69,7 @@ func sigblock(exiting bool)      {}
 func minit()                     {}
 func unminit()                   {}
 func mdestroy(mp *m)             {}
+
 // os_sigpipe backs os's bodyless declaration `func sigpipe()` in
 // os/file_unix.go, which os.File.Write reaches through epipecheck when a
 // write to stdout/stderr fails with EPIPE. The //go:linkname is what makes
@@ -83,7 +84,7 @@ func mdestroy(mp *m)             {}
 // already has is the entire report.
 //
 //go:linkname os_sigpipe os.sigpipe
-func os_sigpipe()                {}
+func os_sigpipe()                    {}
 func setProcessCPUProfiler(hz int32) {}
 func setThreadCPUProfiler(hz int32)  {}
 

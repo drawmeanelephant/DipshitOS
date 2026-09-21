@@ -48,21 +48,21 @@ const (
 	virSysExit         = 3
 	virSysConsoleWrite = 1
 	virSysFileOpen     = 23
-	virSysRead     = 24
-	virSysWrite    = 25
-	virSysClose    = 26
-	virSysDirList  = 27
-	virSysDelete   = 34
-	virSysRename   = 35
-	virSysTruncate = 36
-	virSysMmap     = 63
-	virSysTime     = 66
-	virSysFileMode = 69
-	virSysRandom   = 72
-	virSysThread   = 73
-	virSysFutex    = 74
-	virSysExNotify = 75
-	virSysFileSync = 77
+	virSysRead         = 24
+	virSysWrite        = 25
+	virSysClose        = 26
+	virSysDirList      = 27
+	virSysDelete       = 34
+	virSysRename       = 35
+	virSysTruncate     = 36
+	virSysMmap         = 63
+	virSysTime         = 66
+	virSysFileMode     = 69
+	virSysRandom       = 72
+	virSysThread       = 73
+	virSysFutex        = 74
+	virSysExNotify     = 75
+	virSysFileSync     = 77
 )
 
 // Open flags, in their POSIX (linux/arm64) numbering, because that is the
@@ -110,28 +110,28 @@ const (
 // the same shape (mode 040000|0755 for a directory, 0100000|0644 for a
 // file), which is what makes os's fileInfo mapping a straight copy.
 const (
-	S_IFMT      = 0o170000
-	S_IFSOCK    = 0o140000
-	S_IFLNK     = 0o120000
-	S_IFREG     = 0o100000
-	S_IFBLK     = 0o060000
-	S_IFDIR     = 0o040000
-	S_IFCHR     = 0o020000
-	S_IFIFO     = 0o010000
-	S_ISUID     = 0o4000
-	S_ISGID     = 0o2000
-	S_ISVTX     = 0o1000
-	DT_UNKNOWN  = 0
-	DT_FIFO     = 1
-	DT_CHR      = 2
-	DT_DIR      = 4
-	DT_BLK      = 6
-	DT_REG      = 8
-	DT_LNK      = 10
-	DT_SOCK     = 12
-	SEEK_SET    = 0
-	SEEK_CUR    = 1
-	SEEK_END    = 2
+	S_IFMT     = 0o170000
+	S_IFSOCK   = 0o140000
+	S_IFLNK    = 0o120000
+	S_IFREG    = 0o100000
+	S_IFBLK    = 0o060000
+	S_IFDIR    = 0o040000
+	S_IFCHR    = 0o020000
+	S_IFIFO    = 0o010000
+	S_ISUID    = 0o4000
+	S_ISGID    = 0o2000
+	S_ISVTX    = 0o1000
+	DT_UNKNOWN = 0
+	DT_FIFO    = 1
+	DT_CHR     = 2
+	DT_DIR     = 4
+	DT_BLK     = 6
+	DT_REG     = 8
+	DT_LNK     = 10
+	DT_SOCK    = 12
+	SEEK_SET   = 0
+	SEEK_CUR   = 1
+	SEEK_END   = 2
 )
 
 const (
@@ -196,7 +196,7 @@ const (
 // to the number so a wrong code is visible rather than plausible.
 var errorstr = [...]string{
 	0:  "no error",
-	1:  "invalid argument",  // EINVAL / file domain EISDIR
+	1:  "invalid argument", // EINVAL / file domain EISDIR
 	2:  "bad file descriptor",
 	3:  "bad address",
 	4:  "function not implemented",
@@ -269,11 +269,11 @@ func svc6(n, a1, a2, a3, a4, a5 uintptr) int64 {
 	r, _ := virginSvc(n, a1, a2, a3, a4, a5)
 	return r
 }
-func svc0(n uintptr) int64                        { return svc6(n, 0, 0, 0, 0, 0) }
-func svc1(n, a1 uintptr) int64                    { return svc6(n, a1, 0, 0, 0, 0) }
-func svc2(n, a1, a2 uintptr) int64                { return svc6(n, a1, a2, 0, 0, 0) }
-func svc3(n, a1, a2, a3 uintptr) int64            { return svc6(n, a1, a2, a3, 0, 0) }
-func svc4(n, a1, a2, a3, a4 uintptr) int64        { return svc6(n, a1, a2, a3, a4, 0) }
+func svc0(n uintptr) int64                 { return svc6(n, 0, 0, 0, 0, 0) }
+func svc1(n, a1 uintptr) int64             { return svc6(n, a1, 0, 0, 0, 0) }
+func svc2(n, a1, a2 uintptr) int64         { return svc6(n, a1, a2, 0, 0, 0) }
+func svc3(n, a1, a2, a3 uintptr) int64     { return svc6(n, a1, a2, a3, 0, 0) }
+func svc4(n, a1, a2, a3, a4 uintptr) int64 { return svc6(n, a1, a2, a3, a4, 0) }
 func errOf(r int64) Errno {
 	if r < 0 {
 		return Errno(-r)
@@ -422,12 +422,12 @@ const (
 // actually assigns: uid_user, gid 1000 (ADR 0024 D1), and pid 0 means
 // "this process did not ask".
 
-func Getpid() int   { return 0 }
-func Getppid() int  { return 0 }
-func Getuid() int   { return 1000 } // uid_user (ADR 0024 D1)
-func Geteuid() int  { return 1000 }
-func Getgid() int   { return 1000 }
-func Getegid() int  { return 1000 }
+func Getpid() int  { return 0 }
+func Getppid() int { return 0 }
+func Getuid() int  { return 1000 } // uid_user (ADR 0024 D1)
+func Geteuid() int { return 1000 }
+func Getgid() int  { return 1000 }
+func Getegid() int { return 1000 }
 func Umask(mask int) int {
 	return 0 // no mode model at EL0; a caller's mask changes nothing
 }
@@ -451,13 +451,13 @@ const (
 	RLIMIT_NPROC      = 7
 	RLIMIT_RSS        = 8
 	RLIMIT_MEMLOCK    = 9
-	RLIMIT_LOCKS       = 10
-	RLIMIT_SIGPENDING  = 11
-	RLIMIT_MSGQUEUE    = 12
-	RLIMIT_NICE        = 13
-	RLIMIT_RTPRIO      = 14
-	RLIMIT_RTTIME      = 15
-	RLIM_INFINITY      = ^uint64(0)
+	RLIMIT_LOCKS      = 10
+	RLIMIT_SIGPENDING = 11
+	RLIMIT_MSGQUEUE   = 12
+	RLIMIT_NICE       = 13
+	RLIMIT_RTPRIO     = 14
+	RLIMIT_RTTIME     = 15
+	RLIM_INFINITY     = ^uint64(0)
 )
 
 func Getrlimit(which int, lim *Rlimit) error { return ENOSYS }

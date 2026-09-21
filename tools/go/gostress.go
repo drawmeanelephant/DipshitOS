@@ -14,34 +14,35 @@
 //
 // Phases (one iteration line printed BEFORE the phase runs, one `… ok`
 // detail line after it completes, so a red log names the failing phase):
-//   gc     — churn of 40..80 × 64..128 KiB blocks against a retained live
-//            set, then 1..2 explicit runtime.GC() cycles (STW at
-//            cooperative safe points, sweep through the sbrk free list),
-//            then verify the retained bytes.
-//   chan   — either a worker-pool fan-out (2..8 workers × 8..40 jobs,
-//            exact sum invariant) or a 2..6-stage unbuffered pipeline
-//            carrying 2..5 values (exact stage-arithmetic invariant);
-//            both exercise close-cascade drain paths.
-//   timer  — 2..6 goroutines sleeping mixed 4..14 ms durations through
-//            runtime.VirelaiSleep (sysmon + timer heap); elapsed must
-//            cover the longest sleep. Invariant only — no thresholds.
-//   futex  — 4..24 goroutines × 10..40 sync.Mutex increments (lock_sema
-//            → slot 74) with an exact counter invariant, optionally a
-//            park-all-then-wake round on an unbuffered channel.
-//   mem    — a 2..3-step staircase whose block sizes grow base×(j+1)
-//            from a 256..512 KiB base (e.g. 384/768/1152 KiB), live
-//            across a runtime.GC(), then verified. This forces fresh
-//            sbrk break growth (mem_sbrk.go → sys_mmap slot 63) while
-//            staying inside the kernel's per-process max_mmap_regions
-//            budget (16) — heap growth is monotone on an sbrk platform,
-//            so every growth event costs one region.
-//   churn  — goroutine exec/exit churn: 20..60 goroutines each run a
-//            3..49-frame recursive body (48 B frames, so the deeper ones
-//            cross the 2 KiB initial stack and go through morestack /
-//            newstack) and exit; exact counter invariant. "exec/exit" is
-//            goroutine execution/exit — the runtime exposes no
-//            fork/exec/wait seam (ADR 0027), and a process-exec seam
-//            would be a runtime change, which this card rules out.
+//
+//	gc     — churn of 40..80 × 64..128 KiB blocks against a retained live
+//	         set, then 1..2 explicit runtime.GC() cycles (STW at
+//	         cooperative safe points, sweep through the sbrk free list),
+//	         then verify the retained bytes.
+//	chan   — either a worker-pool fan-out (2..8 workers × 8..40 jobs,
+//	         exact sum invariant) or a 2..6-stage unbuffered pipeline
+//	         carrying 2..5 values (exact stage-arithmetic invariant);
+//	         both exercise close-cascade drain paths.
+//	timer  — 2..6 goroutines sleeping mixed 4..14 ms durations through
+//	         runtime.VirelaiSleep (sysmon + timer heap); elapsed must
+//	         cover the longest sleep. Invariant only — no thresholds.
+//	futex  — 4..24 goroutines × 10..40 sync.Mutex increments (lock_sema
+//	         → slot 74) with an exact counter invariant, optionally a
+//	         park-all-then-wake round on an unbuffered channel.
+//	mem    — a 2..3-step staircase whose block sizes grow base×(j+1)
+//	         from a 256..512 KiB base (e.g. 384/768/1152 KiB), live
+//	         across a runtime.GC(), then verified. This forces fresh
+//	         sbrk break growth (mem_sbrk.go → sys_mmap slot 63) while
+//	         staying inside the kernel's per-process max_mmap_regions
+//	         budget (16) — heap growth is monotone on an sbrk platform,
+//	         so every growth event costs one region.
+//	churn  — goroutine exec/exit churn: 20..60 goroutines each run a
+//	         3..49-frame recursive body (48 B frames, so the deeper ones
+//	         cross the 2 KiB initial stack and go through morestack /
+//	         newstack) and exit; exact counter invariant. "exec/exit" is
+//	         goroutine execution/exit — the runtime exposes no
+//	         fork/exec/wait seam (ADR 0027), and a process-exec seam
+//	         would be a runtime change, which this card rules out.
 //
 // The kernel-effect counterpart is asserted by the go-stress gate spec
 // from the `syscalls` report: sys_mmap (heap growth), sys_futex
@@ -334,7 +335,7 @@ func phaseFutex(r *strng) (string, string) {
 // sys_mmap budget shared with every other phase (an sbrk platform never
 // returns break memory, so each growth event is permanent).
 func phaseMem(r *strng) (string, string) {
-	steps := 2 + r.below(2)              // 2..3
+	steps := 2 + r.below(2)               // 2..3
 	base := (2 + r.below(3)) * 128 * 1024 // 256/384/512 KiB
 	var blocks [][]byte
 	for j := 0; j < steps; j++ {
