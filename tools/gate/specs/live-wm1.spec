@@ -20,7 +20,7 @@ vgate_runner_flags -Xswiftc -DSPIKE
 vgate_file script.txt <<'EOF'
 set GOMAXPROCS=1
 exec WINLOOP.BIN
-exec VIEW.BIN
+exec TERM.BIN
 exec NOTE.ELF
 exec GOTOP.ELF
 exec DESKTOP.BIN
@@ -77,6 +77,24 @@ shutil.copy(src, os.path.join(share, "NOTE.ELF"))
 print("staged NOTE.ELF into share (%d bytes)" % os.path.getsize(os.path.join(share, "NOTE.ELF")))
 PY
 
+# M71h (#1567): the third window is NOT GOVIEW.ELF, and the reason is measured,
+# not stylistic. Zig VIEW.BIN sat here, so the obvious retarget was the Go
+# successor -- and on the board this spec carried before M71g (#1566) it PASSES
+# (two Go runtimes, eight windows). On the MERGED board it does not, because
+# M71g put GOTOP.ELF into the same burst: three Go runtimes do not fit the
+# 16-slot task pool, so the EIGHTH window never starts and the pool says so --
+#   error: no free scheduler pool slot
+# measured with all seven earlier windows up: `ps: ready` never printed,
+# `user rect=`=7, `12 sys_win_open calls=7`, pool refusals=1, zero exceptions
+# (artifacts/m71h-probe3-report.txt; that throwaway instrument was deleted with
+# the measurement, no orphan spec ships). The same burst with Zig TERM.BIN in
+# this slot keeps the claim: 8 user rects, devcons/resmon/ps all ready, zero
+# pool refusals, zero `sys_thread` failures (artifacts/m71h-probe2-report.txt,
+# and this spec's own run). So the slot takes a Zig client -- the terminal, the
+# most everyday app among the remaining Zig programs -- and the viewer's own
+# coverage lives where it belongs: live-image-viewer (QOI decode + both error
+# surfaces) and go-wm-seat run 04 (hosted as a full-viewport tab by the seat).
+
 # M66c (#1485): script2 waits on the Go client's own READY marker, not just on
 # DESKTOP's. NOTE.ELF is the third of eight execs and its Go runtime start is the
 # long pole in this burst — observed: with the old `desktop: ready` gate the
@@ -100,8 +118,11 @@ PY
 vgate_run 01 -- --display --input --screen '$RUN_DIR/gpu-screen' --script '$RUN_DIR/script.txt' --script-after "tasks user-el0 exited status=7" --script2 '$RUN_DIR/script2.txt' --script2-after "note: ready" --script3 '$RUN_DIR/script3.txt' --script3-after "ps: ready" --script-expect "done-wm1-sweep" --timeout 150
 
 vgate_assert 01 serial-contains 'winloop: open id=2'
-vgate_assert 01 serial-contains 'view: ready'
+# M71h (#1567): VIEW.BIN's own `view: ready` assert is gone with the binary.
+# Its window's slot is the Zig terminal now (see the pool measurement above),
+# and the viewer is covered by live-image-viewer and go-wm-seat run 04.
 vgate_assert 01 serial-contains 'note: ready'
+vgate_assert 01 serial-contains 'term: ready'
 vgate_assert 01 serial-contains 'top: ready'
 vgate_assert 01 serial-contains 'desktop: ready'
 vgate_assert 01 serial-contains 'devcons: ready'
