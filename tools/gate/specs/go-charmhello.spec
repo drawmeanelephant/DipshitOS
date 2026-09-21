@@ -32,6 +32,11 @@ if not os.path.exists(src):
     sys.exit("CHARMHELLO.ELF missing (build it first: bash tools/go/build-charmhello.sh)")
 shutil.copy(src, os.path.join(share, "CHARMHELLO.ELF"))
 print("staged CHARMHELLO.ELF into share (%d bytes)" % os.path.getsize(src))
+psrc = os.path.join(".build", "go", "PULSE.ELF")
+if not os.path.exists(psrc):
+    sys.exit("PULSE.ELF missing (build it first: bash tools/go/build-pulse.sh)")
+shutil.copy(psrc, os.path.join(share, "PULSE.ELF"))
+print("staged PULSE.ELF into share (%d bytes)" % os.path.getsize(psrc))
 PY
 
 vgate_run 01 -- \
@@ -128,4 +133,115 @@ for y in range(h):
 print("Bubble Tea scanout: magenta=%d paused-yellow=%d" % (magenta, yellow))
 assert magenta >= 100, "Bubble Tea title colour absent from scanout"
 assert yellow >= 40, "HID space did not produce PAUSED state in scanout"
+PY
+
+# M72 pulse (#1609): the same Bubble Tea harness, but the Model reads the
+# real sys_procs seam (slot 7) on its 1 Hz timer and renders the Processes
+# tab after a real HID '2' key. PULSE.ELF is staged by the setup block above.
+vgate_file pulsescript.txt <<'EOF'
+exec PULSE.ELF
+EOF
+
+vgate_file pulsescript2.txt <<'EOF'
+dui
+EOF
+
+vgate_file pulsescript3.txt <<'EOF'
+dui close 2
+EOF
+
+vgate_run 02 -- \
+    --screen '$RUN_DIR/pulse-screen' \
+    --input --via-virtio \
+    --script '$RUN_DIR/pulsescript.txt' \
+    --input-chords '2' \
+    --input-chords-after 'pulse: ready' \
+    --screenshot-after 'pulse: key 2' \
+    --script2 '$RUN_DIR/pulsescript2.txt' \
+    --script2-after 'pulse: key 2' \
+    --script3 '$RUN_DIR/pulsescript3.txt' \
+    --script3-after 'dui: windows=' \
+    --script-expect 'pulse: close' --timeout 240
+
+vgate_assert 02 serial-contains 'exec: loaded PULSE.ELF'
+vgate_assert 02 serial-contains 'pulse: open id='
+vgate_assert 02 serial-contains 'pulse: attached'
+vgate_assert 02 serial-contains 'pulse: painted'
+vgate_assert 02 serial-contains 'pulse: ready'
+vgate_assert 02 serial-contains 'pulse: procs '
+vgate_assert 02 serial-contains 'pulse: key 2'
+vgate_assert 02 serial-contains 'pulse: repainted'
+vgate_assert 02 serial-contains 'pulse: close'
+vgate_assert 02 serial-contains 'pulse OK'
+vgate_assert 02 serial-absent '[EXC] parking:'
+vgate_assert 02 serial-absent 'exited status=139'
+
+# The screenshot barrier is the `pulse: key 2` marker itself: main.go emits
+# it only after the key has been processed *and* the new model painted, so
+# the frame must show the Processes tab: magenta title (Tea's View) and the
+# cyan tab bar. Waiting on `pulse: repainted` would race the 1 Hz timer,
+# which emits the same marker on every tick. The `pulse: procs` serial
+# marker proves the rows came from the real slot-7 seam, not canned data.
+vgate_assert 02 snapshot 'pulse-screen-after' <<'PY'
+import struct, sys, zlib
+
+d = open(sys.argv[1], "rb").read()
+assert d[:8] == b"\x89PNG\r\n\x1a\n", "not a PNG scanout"
+pos = 8
+idat = b""
+w = h = ct = 0
+while pos < len(d):
+    n, typ = struct.unpack(">I4s", d[pos:pos + 8])
+    chunk = d[pos + 8:pos + 8 + n]
+    if typ == b"IHDR":
+        w, h, depth, ct = struct.unpack(">IIBB", chunk[:10])
+        assert depth == 8, "unexpected PNG depth"
+    elif typ == b"IDAT":
+        idat += chunk
+    pos += 12 + n
+assert (w, h) == (2560, 1440), "wanted 2560x1440 scanout, got %dx%d" % (w, h)
+bpp = 4 if ct == 6 else 3
+raw = zlib.decompress(idat)
+stride = w * bpp
+out = bytearray()
+prev = bytearray(stride)
+i = 0
+for _ in range(h):
+    filt = raw[i]
+    i += 1
+    row = bytearray(raw[i:i + stride])
+    i += stride
+    if filt == 1:
+        for x in range(bpp, stride):
+            row[x] = (row[x] + row[x - bpp]) & 0xff
+    elif filt == 2:
+        for x in range(stride):
+            row[x] = (row[x] + prev[x]) & 0xff
+    elif filt == 3:
+        for x in range(stride):
+            left = row[x - bpp] if x >= bpp else 0
+            row[x] = (row[x] + ((left + prev[x]) >> 1)) & 0xff
+    elif filt == 4:
+        for x in range(stride):
+            left = row[x - bpp] if x >= bpp else 0
+            up = prev[x]
+            up_left = prev[x - bpp] if x >= bpp else 0
+            p = left + up - up_left
+            pa, pb, pc = abs(p - left), abs(p - up), abs(p - up_left)
+            row[x] = (row[x] + (left if pa <= pb and pa <= pc else up if pb <= pc else up_left)) & 0xff
+    out += row
+    prev = row
+
+magenta = cyan = 0
+for y in range(h):
+    for x in range(w):
+        k = (y * w + x) * bpp
+        r, g, b = out[k], out[k + 1], out[k + 2]
+        if r > 160 and 60 < g < 190 and b > 160:
+            magenta += 1
+        if r < 120 and g > 150 and b > 180:
+            cyan += 1
+print("Pulse scanout: magenta=%d cyan=%d" % (magenta, cyan))
+assert magenta >= 100, "Pulse title colour absent from scanout"
+assert cyan >= 60, "Pulse tab bar absent from scanout"
 PY
