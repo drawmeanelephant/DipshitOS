@@ -1081,27 +1081,12 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_spin.step);
 
     // ------------------------------------------------------------------
-    // Guest: thirtieth ESP user program (Issue #214 — GUI settings panel)
-    // SETTINGS.BIN. Reads/writes /data/SETTINGS.TXT through M10 file seam.
+    // M71f (#1565): the Zig settings panel SETTINGS.BIN is RETIRED here.
+    // The panel is GOSET.ELF (user/go/settings), built by
+    // tools/go/build-goset.sh like every other Go guest app. One binary per
+    // card (ADR 0030): no `settings` step, no zig-out/bin/SETTINGS.BIN, so
+    // the only way to launch Settings is the Go panel in image/apps.txt.
     // ------------------------------------------------------------------
-    const settings_prog = b.addExecutable(.{
-        .name = "user-settings",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("user/src/settings_panel.zig"),
-            .target = kernel_target,
-            .optimize = .ReleaseSmall,
-        }),
-    });
-    settings_prog.linker_script = b.path("user/linker-segmented.ld");
-    const settings_step = b.step("settings", "Build the thirtieth ESP user program (zig-out/bin/SETTINGS.BIN) — DSK3 segmented (writable .data/.bss)");
-    const settings_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
-    settings_elf2bin.addFileArg(settings_prog.getEmittedBin());
-    const settings_bin = settings_elf2bin.addOutputFileArg("SETTINGS.BIN");
-    settings_elf2bin.has_side_effects = true;
-    settings_elf2bin.stdio = .inherit;
-    settings_step.dependOn(&settings_elf2bin.step);
-    const install_settings = b.addInstallFileWithDir(settings_bin, .bin, "SETTINGS.BIN");
-    b.getInstallStep().dependOn(&install_settings.step);
 
     // ------------------------------------------------------------------
     // Guest: thirty-first ESP user program (M22 D2 — issue #325) ASM.BIN.

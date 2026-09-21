@@ -4,13 +4,21 @@
 # NOTE.ELF (Go). The lifecycle vocabulary is shared by design (`note:` mirrors
 # `notepad:`), so the assertions below moved by prefix alone.
 #
-# HOST PREREQUISITE: bash tools/go/build-note.sh -> .build/go/NOTE.ELF
+# HOST PREREQUISITE (fails the gate honestly when missing):
+#   bash tools/go/build-note.sh   ->  .build/go/NOTE.ELF
 
 vgate_name live-wm1 "Lane 1 WM1: eight concurrent pool-backed user windows on VZ"
 vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 
+# M71f (#1565): GOMAXPROCS=1 for the whole burst. The eight-window burst is at
+# the task-pool wall (scheduler.max_tasks = 16, M65d/#1442): at the compiled
+# default GOMAXPROCS=2 a Go runtime is 4 Ms, so seven Zig windows + NOTE.ELF's 4
+# + the kernel's 3 already sit at 14. Pinning 1 (3 Ms/runtime -- the repo's own
+# "WM specs still pin GOMAXPROCS=1", kernel/src/scheduler.zig) keeps the burst
+# cheap enough to have headroom for a Go runtime's transient syscall-spawned M.
 vgate_file script.txt <<'EOF'
+set GOMAXPROCS=1
 exec WINLOOP.BIN
 exec VIEW.BIN
 exec NOTE.ELF
@@ -18,9 +26,27 @@ exec TOP.BIN
 exec DESKTOP.BIN
 EOF
 
-# M60 / #1374: Zig FILE.BIN deleted; leftover SETTINGS.BIN fills the eighth window.
+# M60 / #1374: Zig FILE.BIN deleted; a leftover Zig app fills the eighth window.
+#
+# M71f (#1565): SETTINGS.BIN is deleted, and the eighth window is NOT its Go
+# successor. This spec's burst already carries NOTE.ELF (a Go runtime); a second
+# one does NOT fit the 16-slot task pool and the guest runtime dies before it
+# opens a window -- measured, not guessed:
+#   * with GOSET.ELF as the eighth window, the Go runtime throws
+#     `runtime.newosproc: sys_thread create failed` (task pool refused the
+#     extra M) at the compiled GOMAXPROCS, and at GOMAXPROCS=1 it spins
+#     without one syscall (7 windows, no `goset:` marker, `sys_thread`=4).
+#   * GOSET.ELF alone, and GOSET.ELF beside NOTE.ELF on a lighter boot, both
+#     pass (measured with throwaway single-run specs; the reports are
+#     artifacts/m71f-goset-isolate-report.txt and
+#     artifacts/m71f-twogo-report.txt, and both instruments were deleted
+#     before this landed -- no orphan spec ships).
+# So the panel is re-homed to the boot that needs it -- go-wm-default boot 01,
+# the DEFAULT seat, where the panel writes `wm=tabwm` and the bytes are pinned.
+# DEVCONS.BIN (Zig) takes the eighth slot, keeping this spec's actual claim (a
+# WM holding EIGHT concurrent pool-backed user windows) intact.
 vgate_file script2.txt <<'EOF'
-exec SETTINGS.BIN
+exec DEVCONS.BIN
 exec SYSMON.BIN
 exec PS.BIN
 EOF
@@ -56,7 +82,7 @@ vgate_assert 01 serial-contains 'view: ready'
 vgate_assert 01 serial-contains 'note: ready'
 vgate_assert 01 serial-contains 'top: ready'
 vgate_assert 01 serial-contains 'desktop: ready'
-vgate_assert 01 serial-contains 'settings: ready'
+vgate_assert 01 serial-contains 'devcons: ready'
 vgate_assert 01 serial-contains 'sysmon: ready'
 vgate_assert 01 serial-contains 'ps: ready'
 vgate_assert 01 serial-contains '12 sys_win_open calls=8'

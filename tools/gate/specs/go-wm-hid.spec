@@ -24,6 +24,10 @@
 # (observed: 0x101418 boot fill / terminal bg). live-tokens owns window
 # pixels. The catalog must not offer NOTEPAD.ELF / CALC.BIN.
 #
+# M71f (#1565): the same catalogue assert now covers the settings panel --
+# GOSET.ELF must be offered and the retired SETTINGS.BIN must not, so the
+# deletion cannot be quietly undone by an APPS.TXT row.
+#
 # Run 04 (M71d / #1563, M48 BT1): seat-only. One client (GOCALC.ELF via
 # script2), whose single-tab path auto-closes it after hostTicks, recording the
 # bin in the reopen LIFO. The chord batch then fires on that close marker:
@@ -387,12 +391,18 @@ for line in manifest.splitlines():
     if not s or s.startswith("#") or "|" not in s:
         continue
     bins.append(s.split("|", 1)[0].strip())
-need = {"GOCALC.ELF", "NOTE.ELF", "GOEDIT.ELF", "GOFILES.ELF", "WEB.ELF"}
+need = {"GOCALC.ELF", "NOTE.ELF", "GOEDIT.ELF", "GOFILES.ELF", "WEB.ELF",
+        # M71f (#1565): the settings panel is the Go GOSET.ELF now, so the
+        # catalogue must carry it -- and must NOT offer the retired Zig
+        # SETTINGS.BIN (also in the forbidden list below), which is the whole
+        # point of the deletion: no path may launch the dead panel.
+        "GOSET.ELF"}
 if not need.issubset(set(bins)):
     sys.exit("APPS.TXT missing daily set: %s" % sorted(need - set(bins)))
 if "GOSH.ELF" not in bins and "GOTERM.ELF" not in bins:
     sys.exit("APPS.TXT missing GOSH.ELF and GOTERM.ELF")
-for bad in ("NOTEPAD.ELF", "CALC.BIN", "CALC.ELF", "FILE.ELF", "DESKTOP.ELF"):
+for bad in ("NOTEPAD.ELF", "CALC.BIN", "CALC.ELF", "FILE.ELF", "DESKTOP.ELF",
+            "SETTINGS.BIN"):
     if bad in bins:
         sys.exit("APPS.TXT still offers %s" % bad)
 if "TABWM.BIN" in bins:
