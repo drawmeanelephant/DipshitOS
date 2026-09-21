@@ -161,6 +161,7 @@ const remove_user_at = driving_award.remove_user_at;
 const render_clock_content = driving_award.render_clock_content;
 const render_preview = driving_award.render_preview;
 const render_splash = driving_award.render_splash;
+const render_terminal_screen = driving_award.render_terminal_screen;
 const repaint_start = driving_award.repaint_start;
 const resize_active = driving_award.resize_active;
 const resize_current_id = driving_award.resize_current_id;
@@ -198,6 +199,7 @@ const taskbar_entry_dimmed_rgb = driving_award.taskbar_entry_dimmed_rgb;
 const taskbar_h = driving_award.taskbar_h;
 const taskbar_y = driving_award.taskbar_y;
 const terminal_focused = driving_award.terminal_focused;
+const terminal = driving_award.terminal;
 const test_arena = driving_award.test_arena;
 const theme_letter = driving_award.theme_letter;
 const tile_master_pct = driving_award.tile_master_pct;
@@ -536,6 +538,32 @@ test "driving_award: render_clock_content paints the title bar and body colors" 
     // Body background: navy (a pixel inside, away from text/border).
     try std.testing.expectEqual(@as(u8, 0x2e), buf[(170 * W + 300) * 4 + 0]); // B of 0x0a1a2e
     try std.testing.expectEqual(@as(u8, 0x1a), buf[(170 * W + 300) * 4 + 1]); // G
+}
+
+test "driving_award: terminal presentation paints ANSI cell backgrounds" {
+    const W = 80;
+    const H = 32;
+    var buf: [W * H * 4]u8 = undefined;
+    var screen = terminal.Screen{};
+    screen.feed("\x1b[41m \x1b[0m\x1b[?25l");
+    const window = Window{
+        .id = 2,
+        .title = "term",
+        .x = 0,
+        .y = 0,
+        .w = W,
+        .h = H,
+        .kind = .user,
+        .visible = true,
+        .dirty = true,
+    };
+    render_terminal_screen(&buf, &window, &screen);
+    const pixel: usize = @as(usize, @intCast(geom.title_bar_h)) * W * 4;
+    // ANSI 41 is 0xcd3131, stored B8G8R8X8.
+    try std.testing.expectEqual(@as(u8, 0x31), buf[pixel + 0]);
+    try std.testing.expectEqual(@as(u8, 0x31), buf[pixel + 1]);
+    try std.testing.expectEqual(@as(u8, 0xcd), buf[pixel + 2]);
+    try std.testing.expectEqual(@as(u8, 0xff), buf[pixel + 3]);
 }
 
 test "driving_award: blit_rect copies a sub-rect at the destination offset" {

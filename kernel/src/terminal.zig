@@ -92,17 +92,62 @@ pub const grid_lines: usize = 128;
 /// #1132). Pure: fixed arrays, no allocation, host-testable.
 pub const Point = struct { line: usize, col: usize };
 
+/// A terminal cell stores one of the ANSI 16 colours, or the presentation
+/// default (16), for both foreground and background plus the bold bit.
+///
+/// The grid deliberately keeps this compact instead of retaining arbitrary
+/// RGB values: the window terminal is a bounded 8x8 presentation surface,
+/// and the M72b contract freezes 16-colour SGR rather than a truecolour ABI.
+pub const CellStyle = u16;
+pub const default_colour: u8 = 16;
+pub const default_cell_style: CellStyle = @as(CellStyle, default_colour) |
+    (@as(CellStyle, default_colour) << 5);
+
+pub fn styleForeground(style: CellStyle) ?u8 {
+    const colour: u8 = @truncate(style & 0x1f);
+    return if (colour == default_colour) null else colour;
+}
+
+pub fn styleBackground(style: CellStyle) ?u8 {
+    const colour: u8 = @truncate((style >> 5) & 0x1f);
+    return if (colour == default_colour) null else colour;
+}
+
+pub fn styleBold(style: CellStyle) bool {
+    return (style & (@as(CellStyle, 1) << 10)) != 0;
+}
+
 pub const Screen = struct {
     cells: [grid_lines][grid_cols]u8 = [_][grid_cols]u8{[_]u8{' '} ** grid_cols} ** grid_lines,
+    styles: [grid_lines][grid_cols]CellStyle = [_][grid_cols]CellStyle{[_]CellStyle{default_cell_style} ** grid_cols} ** grid_lines,
     lens: [grid_lines]usize = [_]usize{0} ** grid_lines,
     /// Number of lines in use (>= 1); grows to `grid_lines` then scrolls.
     used: usize = 1,
     /// The cursor's line (0..used-1) and column.
     cur: usize = 0,
     col: usize = 0,
-    /// Minimal CSI state: 0 normal, 1 ESC, 2 ESC [.
+    /// The alternate screen is a second bounded grid, not an allocation.
+    /// Entering DECSET 47/1049 swaps the primary into this storage and clears
+    /// the active grid; DECRST swaps it back unchanged.
+    alt_cells: [grid_lines][grid_cols]u8 = [_][grid_cols]u8{[_]u8{' '} ** grid_cols} ** grid_lines,
+    alt_styles: [grid_lines][grid_cols]CellStyle = [_][grid_cols]CellStyle{[_]CellStyle{default_cell_style} ** grid_cols} ** grid_lines,
+    alt_lens: [grid_lines]usize = [_]usize{0} ** grid_lines,
+    alt_used: usize = 1,
+    alt_cur: usize = 0,
+    alt_col: usize = 0,
+    alt_view: usize = 0,
+    alt_style: CellStyle = default_cell_style,
+    alt_active: bool = false,
+    /// CSI state: 0 normal, 1 ESC, 2 CSI.
     esc_state: u8 = 0,
-    esc_param: u32 = 0,
+    csi_params: [8]u16 = [_]u16{0} ** 8,
+    csi_count: usize = 0,
+    csi_private: bool = false,
+    /// Current SGR rendition. It is presentation state, never terminal-object
+    /// bytes, so serial and network front-ends remain byte-for-byte unchanged.
+    style: CellStyle = default_cell_style,
+    /// DECTCEM (`CSI ? 25 h/l`) controls only the painted block cursor.
+    cursor_visible: bool = true,
     /// M49 SD5 (#1132): the effective column count (8..grid_cols). A window
     /// resize reflows the grid to the new client width.
     cols: usize = grid_cols,
@@ -119,6 +164,7 @@ pub const Screen = struct {
 
     fn clearLine(self: *Screen, i: usize) void {
         @memset(&self.cells[i], ' ');
+        @memset(&self.styles[i], default_cell_style);
         self.lens[i] = 0;
     }
 
@@ -132,6 +178,7 @@ pub const Screen = struct {
             var i: usize = 0;
             while (i + 1 < grid_lines) : (i += 1) {
                 self.cells[i] = self.cells[i + 1];
+                self.styles[i] = self.styles[i + 1];
                 self.lens[i] = self.lens[i + 1];
             }
             self.clearLine(grid_lines - 1);
@@ -152,29 +199,185 @@ pub const Screen = struct {
         self.clearSelection();
     }
 
-    /// Feed one output byte. Control bytes drive the cursor; a minimal
-    /// `ESC [ <param> <final>` is consumed (`2J` clears, `H` homes).
+    fn putCell(self: *Screen, b: u8, style: CellStyle) void {
+        if (self.col >= self.cols) self.newline();
+        self.cells[self.cur][self.col] = b;
+        self.styles[self.cur][self.col] = style;
+        if (self.col + 1 > self.lens[self.cur]) self.lens[self.cur] = self.col + 1;
+        self.col += 1;
+        self.view = 0;
+    }
+
+    fn setForeground(self: *Screen, colour: u8) void {
+        self.style = (self.style & ~@as(CellStyle, 0x1f)) | colour;
+    }
+
+    fn setBackground(self: *Screen, colour: u8) void {
+        self.style = (self.style & ~(@as(CellStyle, 0x1f) << 5)) | (@as(CellStyle, colour) << 5);
+    }
+
+    fn setBold(self: *Screen, on: bool) void {
+        const bit = @as(CellStyle, 1) << 10;
+        if (on) self.style |= bit else self.style &= ~bit;
+    }
+
+    fn resetCsi(self: *Screen) void {
+        self.csi_params = [_]u16{0} ** self.csi_params.len;
+        self.csi_count = 1;
+        self.csi_private = false;
+    }
+
+    fn csiParam(self: *const Screen, index: usize, fallback: u16) u16 {
+        if (index >= self.csi_count) return fallback;
+        const value = self.csi_params[index];
+        return if (value == 0) fallback else value;
+    }
+
+    fn eraseLine(self: *Screen, mode: u16) void {
+        const start: usize = switch (mode) {
+            1 => 0,
+            2 => 0,
+            else => @min(self.col, self.cols),
+        };
+        const end: usize = switch (mode) {
+            1 => @min(self.col + 1, self.cols),
+            else => self.cols,
+        };
+        var c = start;
+        while (c < end) : (c += 1) {
+            self.cells[self.cur][c] = ' ';
+            self.styles[self.cur][c] = default_cell_style;
+        }
+        if (mode == 2) {
+            self.lens[self.cur] = 0;
+        } else if (mode == 0 and start < self.lens[self.cur]) {
+            self.lens[self.cur] = start;
+        }
+    }
+
+    fn eraseDisplay(self: *Screen, mode: u16) void {
+        switch (mode) {
+            1 => {
+                var row: usize = 0;
+                while (row < self.cur) : (row += 1) self.clearLine(row);
+                self.eraseLine(1);
+            },
+            2, 3 => self.clearScreen(),
+            else => {
+                self.eraseLine(0);
+                var row = self.cur + 1;
+                while (row < self.used) : (row += 1) self.clearLine(row);
+            },
+        }
+    }
+
+    fn moveCursor(self: *Screen, row_one_based: u16, col_one_based: u16) void {
+        const row = @min(@as(usize, row_one_based - 1), grid_lines - 1);
+        const column = @min(@as(usize, col_one_based - 1), self.cols - 1);
+        while (self.used <= row) {
+            self.clearLine(self.used);
+            self.used += 1;
+        }
+        self.cur = row;
+        self.col = column;
+    }
+
+    fn swapAlternate(self: *Screen) void {
+        var row: usize = 0;
+        while (row < grid_lines) : (row += 1) {
+            std.mem.swap([grid_cols]u8, &self.cells[row], &self.alt_cells[row]);
+            std.mem.swap([grid_cols]CellStyle, &self.styles[row], &self.alt_styles[row]);
+        }
+        std.mem.swap([grid_lines]usize, &self.lens, &self.alt_lens);
+        std.mem.swap(usize, &self.used, &self.alt_used);
+        std.mem.swap(usize, &self.cur, &self.alt_cur);
+        std.mem.swap(usize, &self.col, &self.alt_col);
+        std.mem.swap(usize, &self.view, &self.alt_view);
+        std.mem.swap(CellStyle, &self.style, &self.alt_style);
+    }
+
+    fn setAlternate(self: *Screen, enabled: bool) void {
+        if (self.alt_active == enabled) return;
+        self.swapAlternate();
+        self.alt_active = enabled;
+        self.clearSelection();
+        if (enabled) {
+            self.clearScreen();
+            self.style = default_cell_style;
+        }
+    }
+
+    fn applySgr(self: *Screen) void {
+        var i: usize = 0;
+        while (i < self.csi_count) : (i += 1) {
+            const param = self.csi_params[i];
+            switch (param) {
+                0 => self.style = default_cell_style,
+                1 => self.setBold(true),
+                22 => self.setBold(false),
+                30...37 => self.setForeground(@intCast(param - 30)),
+                39 => self.setForeground(default_colour),
+                40...47 => self.setBackground(@intCast(param - 40)),
+                49 => self.setBackground(default_colour),
+                90...97 => self.setForeground(@intCast(param - 90 + 8)),
+                100...107 => self.setBackground(@intCast(param - 100 + 8)),
+                else => {},
+            }
+        }
+    }
+
+    fn dispatchCsi(self: *Screen, final: u8) void {
+        const p0 = self.csiParam(0, 0);
+        if (self.csi_private) {
+            if (p0 == 47 or p0 == 1049) {
+                if (final == 'h') self.setAlternate(true);
+                if (final == 'l') self.setAlternate(false);
+            }
+            if (p0 == 25) {
+                if (final == 'h') self.cursor_visible = true;
+                if (final == 'l') self.cursor_visible = false;
+            }
+            return;
+        }
+        switch (final) {
+            'm' => self.applySgr(),
+            'H', 'f' => self.moveCursor(self.csiParam(0, 1), self.csiParam(1, 1)),
+            'J' => self.eraseDisplay(p0),
+            'K' => self.eraseLine(p0),
+            else => {},
+        }
+    }
+
+    /// Feed one output byte. CSI is intentionally bounded to the sequences
+    /// a window TUI needs; unsupported sequences are consumed, never painted.
     pub fn putByte(self: *Screen, b: u8) void {
         switch (self.esc_state) {
             0 => {},
             1 => {
+                self.esc_state = 0;
                 if (b == '[') {
                     self.esc_state = 2;
-                    self.esc_param = 0;
-                } else {
-                    self.esc_state = 0;
+                    self.resetCsi();
                 }
                 return;
             },
             2 => {
                 if (b >= '0' and b <= '9') {
-                    self.esc_param = self.esc_param *% 10 +% (b - '0');
+                    const last = self.csi_count - 1;
+                    self.csi_params[last] = self.csi_params[last] *% 10 +% (b - '0');
                     return;
                 }
-                if (b >= 0x3a and b <= 0x3f) return; // parameter separators
+                if (b == ';') {
+                    if (self.csi_count < self.csi_params.len) self.csi_count += 1;
+                    return;
+                }
+                if (b == '?' and self.csi_count == 1 and self.csi_params[0] == 0) {
+                    self.csi_private = true;
+                    return;
+                }
+                if (b >= 0x20 and b <= 0x3f) return; // unsupported intermediates
                 self.esc_state = 0;
-                if (b == 'J' and self.esc_param == 2) self.clearScreen();
-                if (b == 'H') self.col = 0;
+                self.dispatchCsi(b);
                 return;
             },
             else => self.esc_state = 0,
@@ -193,11 +396,7 @@ pub const Screen = struct {
             0x07 => {}, // bell — silent
             else => {
                 if (b < 0x20 or b == 0x7f) return;
-                if (self.col >= self.cols) self.newline();
-                self.cells[self.cur][self.col] = b;
-                if (self.col + 1 > self.lens[self.cur]) self.lens[self.cur] = self.col + 1;
-                self.col += 1;
-                self.view = 0;
+                self.putCell(b, self.style);
             },
         }
     }
@@ -226,6 +425,11 @@ pub const Screen = struct {
 
     pub fn columns(self: *const Screen) usize {
         return self.cols;
+    }
+
+    pub fn styleAt(self: *const Screen, line_index: usize, col_index: usize) CellStyle {
+        if (line_index >= self.used or col_index >= self.cols) return default_cell_style;
+        return self.styles[line_index][col_index];
     }
 
     // -- M49 SD5 (#1132): scrollback view -----------------------------------
@@ -284,6 +488,7 @@ pub const Screen = struct {
         while (i < self.used) : (i += 1) {
             const len = @min(self.lens[i], grid_cols);
             @memcpy(reflow_lines[count][0..len], self.cells[i][0..len]);
+            @memcpy(reflow_styles[count][0..len], self.styles[i][0..len]);
             reflow_lens[count] = len;
             count += 1;
         }
@@ -300,8 +505,11 @@ pub const Screen = struct {
         // Re-feed the kept logical lines at the new width.
         var n: usize = 0;
         while (n < count) : (n += 1) {
-            self.feed(reflow_lines[n][0..reflow_lens[n]]);
-            if (n + 1 < count) self.feed("\n");
+            var cell: usize = 0;
+            while (cell < reflow_lens[n]) : (cell += 1) {
+                self.putCell(reflow_lines[n][cell], reflow_styles[n][cell]);
+            }
+            if (n + 1 < count) self.newline();
         }
     }
 
@@ -387,6 +595,7 @@ pub const Screen = struct {
 /// M49 SD5: reflow scratch (module BSS — the grid is too large for the task
 /// stacks). One reflow at a time (the paint/idle path), documented bound.
 var reflow_lines: [grid_lines][grid_cols]u8 = undefined;
+var reflow_styles: [grid_lines][grid_cols]CellStyle = undefined;
 var reflow_lens: [grid_lines]usize = undefined;
 
 /// The consumer that renders output and supplies input. Exclusive per
@@ -1345,6 +1554,64 @@ test "terminal: screen scrolls past the line bound and clears on CSI 2J" {
     s.feed("\x1b[2J\x1b[Hx");
     try std.testing.expectEqual(@as(usize, 1), s.lineCount());
     try std.testing.expectEqualStrings("x", s.line(0));
+}
+
+test "terminal: CSI SGR and CUP preserve per-cell attributes" {
+    var s = Screen{};
+    // A Bubble-Tea-shaped paint burst: clear, position, set SGR, paint, reset.
+    s.feed("\x1b[2J\x1b[3;4H\x1b[31mR\x1b[1;44;97mB\x1b[0mN");
+    try std.testing.expectEqualStrings("   RBN", s.line(2));
+    try std.testing.expectEqual(@as(usize, 2), s.cursorLine());
+    try std.testing.expectEqual(@as(usize, 6), s.cursorCol());
+
+    const red = s.styleAt(2, 3);
+    try std.testing.expectEqual(@as(?u8, 1), styleForeground(red));
+    try std.testing.expectEqual(@as(?u8, null), styleBackground(red));
+    try std.testing.expect(!styleBold(red));
+
+    const bright = s.styleAt(2, 4);
+    try std.testing.expectEqual(@as(?u8, 15), styleForeground(bright));
+    try std.testing.expectEqual(@as(?u8, 4), styleBackground(bright));
+    try std.testing.expect(styleBold(bright));
+
+    const reset = s.styleAt(2, 5);
+    try std.testing.expectEqual(@as(?u8, null), styleForeground(reset));
+    try std.testing.expectEqual(@as(?u8, null), styleBackground(reset));
+    try std.testing.expect(!styleBold(reset));
+}
+
+test "terminal: CSI EL and ED erase only their declared regions" {
+    var s = Screen{};
+    s.feed("abcdef\x1b[1;4H\x1b[K");
+    try std.testing.expectEqualStrings("abc", s.line(0));
+
+    s.feed("\x1b[2Jkeep");
+    try std.testing.expectEqual(@as(usize, 1), s.lineCount());
+    try std.testing.expectEqualStrings("keep", s.line(0));
+
+    s.feed("\x1b[1;3H\x1b[1J");
+    try std.testing.expectEqualStrings("   p", s.line(0));
+}
+
+test "terminal: alternate screen restores the primary grid and DECTCEM hides the cursor" {
+    var s = Screen{};
+    s.feed("primary");
+    s.feed("\x1b[?1049halt\x1b[?25l");
+    try std.testing.expect(s.alt_active);
+    try std.testing.expectEqualStrings("alt", s.line(0));
+    try std.testing.expect(!s.cursor_visible);
+
+    s.feed("\x1b[?1049l");
+    try std.testing.expect(!s.alt_active);
+    try std.testing.expectEqualStrings("primary", s.line(0));
+    s.feed("\x1b[?25h");
+    try std.testing.expect(s.cursor_visible);
+}
+
+test "terminal: unsupported CSI is swallowed rather than painted" {
+    var s = Screen{};
+    s.feed("before\x1b[999zafter");
+    try std.testing.expectEqualStrings("beforeafter", s.line(0));
 }
 
 test "terminal: window binding is exclusive per terminal and per window" {

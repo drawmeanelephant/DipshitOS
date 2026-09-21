@@ -3837,6 +3837,32 @@ pub fn render_clock_content(buf: [*]u8, stride: usize, w: usize, h: usize, ticks
 /// bytes were already drained into the grid (file_table's write path); this
 /// turns the grid into the window's pixels, and the compositor blits it on
 /// its cadence (the deferred-present discipline).
+const ansi_palette = [_]u32{
+    0x000000, 0xcd3131, 0x0dbc79, 0xe5e510,
+    0x2472c8, 0xbc3fbc, 0x11a8cd, 0xe5e5e5,
+    0x666666, 0xf14c4c, 0x23d18b, 0xf5f543,
+    0x3b8eea, 0xd670d6, 0x29b8db, 0xffffff,
+};
+
+fn terminalColour(index: ?u8, fallback: u32) u32 {
+    const colour = index orelse return fallback;
+    if (colour >= ansi_palette.len) return fallback;
+    return ansi_palette[colour];
+}
+
+fn terminalColours(style: terminal.CellStyle) struct { fg: u32, bg: u32 } {
+    var fg_index = terminal.styleForeground(style);
+    if (terminal.styleBold(style)) {
+        if (fg_index) |colour| {
+            if (colour < 8) fg_index = colour + 8;
+        }
+    }
+    return .{
+        .fg = terminalColour(fg_index, fbtext.fg_rgb),
+        .bg = terminalColour(terminal.styleBackground(style), fbtext.bg_rgb),
+    };
+}
+
 pub fn render_terminal_screen(dst: [*]u8, w: *const Window, scr: *const terminal.Screen) void {
     const wu: usize = @intCast(w.w);
     const hu: usize = @intCast(w.h);
@@ -3858,26 +3884,29 @@ pub fn render_terminal_screen(dst: [*]u8, w: *const Window, scr: *const terminal
     while (r < rows) : (r += 1) {
         const line = scr.line(first + r);
         var c: usize = 0;
-        while (c < cols and c < line.len) : (c += 1) {
+        while (c < cols) : (c += 1) {
+            const colours = terminalColours(scr.styleAt(first + r, c));
             // M49 SD5: selected cells invert (fg on bg).
             if (scr.inSelection(first + r, c)) {
-                fill_rect(dst, stride, c * 8, y0 + r * 8, 8, 8, fbtext.fg_rgb);
-                draw_glyph(dst, stride, c * 8, y0 + r * 8, line[c], fbtext.bg_rgb);
-            } else {
-                draw_glyph(dst, stride, c * 8, y0 + r * 8, line[c], fbtext.fg_rgb);
+                fill_rect(dst, stride, c * 8, y0 + r * 8, 8, 8, colours.fg);
+                if (c < line.len) draw_glyph(dst, stride, c * 8, y0 + r * 8, line[c], colours.bg);
+            } else if (colours.bg != fbtext.bg_rgb or c < line.len) {
+                fill_rect(dst, stride, c * 8, y0 + r * 8, 8, 8, colours.bg);
+                if (c < line.len) draw_glyph(dst, stride, c * 8, y0 + r * 8, line[c], colours.fg);
             }
         }
     }
     // The block cursor: invert the cell the shell's line editor is at —
     // only while following the tail (a scrolled-back view has no cursor).
     const cl = scr.cursorLine();
-    if (view == 0 and cl >= first and cl - first < rows) {
+    if (scr.cursor_visible and view == 0 and cl >= first and cl - first < rows) {
         const cc = scr.cursorCol();
         if (cc < cols) {
             const cy = y0 + (cl - first) * 8;
-            fill_rect(dst, stride, cc * 8, cy, 8, 8, fbtext.fg_rgb);
+            const colours = terminalColours(scr.styleAt(cl, cc));
+            fill_rect(dst, stride, cc * 8, cy, 8, 8, colours.fg);
             const line = scr.line(cl);
-            if (cc < line.len) draw_glyph(dst, stride, cc * 8, cy, line[cc], fbtext.bg_rgb);
+            if (cc < line.len) draw_glyph(dst, stride, cc * 8, cy, line[cc], colours.bg);
         }
     }
 }

@@ -2,7 +2,8 @@
 
 Status: **ACCEPTED** · Date: 2026-09-10 · amended 2026-09-11 (Amendment A,
 the window front-end — M45 card SH6, #1082; Amendment B, the net/remote
-front-end — M45 card SH7, #1083) · Milestone: M44 (next focus) ·
+front-end — M45 card SH7, #1083), 2026-09-21 (Amendment C, M72b window VT,
+#1580) · Milestone: M44 (next focus) ·
 Issue **#1072** · Claims **#1073** (object + ABI) and **#1075** (pump + pilot)
 
 > The object (`kernel/src/terminal.zig`), the `/dev/tty` device-fd routing
@@ -349,3 +350,37 @@ net-binding/pump tests.
   today the seam is a single connection at a time.
 - Listener bind-address/port policy and a `settings` key (deferred to SH8).
 - The host-client runner seam's exact deterministic ISN/pacing contract.
+
+---
+
+# Amendment C — bounded window VT presentation (M72b, #1580)
+
+Status: **ACCEPTED** · Date: 2026-09-21. D1 remains binding: terminal
+objects carry bytes only. This amendment extends only the kernel-owned
+presentation grid for a terminal attached to a window; serial and network
+front-ends still observe precisely the output bytes their owner wrote.
+
+## Decision
+
+- Each window-grid cell carries a bounded ANSI foreground, background, and
+  bold rendition. The frozen surface is the ANSI 16-colour palette:
+  SGR reset/bold (`0`, `1`, `22`), normal/bright foreground (`30–37`,
+  `90–97`), and normal/bright background (`40–47`, `100–107`). Truecolour is
+  deliberately not a cell-format or ABI promise.
+- The fixed CSI decoder consumes CUP (`H`/`f`), EL/ED (`K`/`J`), those SGR
+  forms, DECSET/DECRST alternate screen (`?47`, `?1049`), and DECTCEM cursor
+  visibility (`?25`). Other CSI sequences remain consumed rather than
+  rendered as glyphs.
+- The alternate screen is a second fixed grid stored beside the primary grid:
+  no allocation, no pty, no new syscall, and no terminal-object state leaks
+  into a different front-end. Entering it preserves the primary grid; leaving
+  it restores that grid.
+- The compositor continues to use the existing 8×8 glyph raster. It paints
+  each cell's background then glyph foreground, and inverts those two colours
+  for the existing selection/cursor affordances.
+
+## Consequences
+
+Charm-sized TUI output can now be demonstrated on a **bound window tty** via
+the real framebuffer. This does not change the boot default or make Road Pops
+share the decoder; Road Pops remains outside this amendment.
