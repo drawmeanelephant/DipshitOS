@@ -594,16 +594,19 @@ capture from before that fix, so it still shows the empty band.
 console text (`ks worker advances=…`) sits on the scanout wherever no window
 covers it in the **shim web boot**. Re-measured in `live-web` boot 13 (#1592,
 2026-09-21, macOS 27.2 / arm64, VZ): after `web: settled`, the band below
-WEB.ELF's 40,28 512×384 window held **5.758% console-green at +3 s and
-5.625% at +20 s** (82792 samples; the M69b ~5.8% 20 s figure, already at
+WEB.ELF's 40,28 512×384 window held **5.734% console-green at +3 s and
+5.612% at +20 s** (82792 samples; the M69b ~5.8% 20 s figure, already at
 plateau). That boot does not stage `GOTABWM.ELF`, so it is shim compositing
-(`wm: autostart gotabwm: GOTABWM.ELF not on the share`). The leak is the
-kernel `.terminal` blit: `road_pops.drain()` and `rp_text_present` called
-`driving_award.composite()` with no `wm_server.registered()` check. Those
-paths now skip once a userland seat is registered. The default-seat probe
-(GOSH tab) is `go-wm-console-ink` (#1561) and asserts console-green = 0.
-`live-web` boot 13 PIXEL-asserts the shim band (2–12%) so a blank capture
-cannot pass. A serial-marker beat cannot see this.
+(`wm: autostart gotabwm: GOTABWM.ELF not on the share`) and the full-screen
+kernel terminal is the desktop. `live-web` boot 13 PIXEL-asserts that shim
+band (2–12%) so a blank capture cannot pass. A seated boot is a different
+fact: `paint_scene` already skips the terminal, taskbar, and dock blits
+while the seat owns the layer (M71c, #1562) and the tee's present still
+flushes, which is what publishes the seat's pixels. Skipping that present
+outright leaves the pre-seat console frame in the region the seat does not
+repaint (measured 1789 console-green pixels). The default-seat probe is
+`go-wm-console-ink` (#1561) and asserts console-green = 0. A serial-marker
+beat cannot see this.
 
 ## Verification sequence
 

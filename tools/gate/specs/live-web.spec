@@ -635,12 +635,13 @@ PY
 # M69b numbers came from this shape. Observed 2026-09-21 on this spec's
 # first boot-13 run (macOS 27.2 / arm64, VZ): after web: settled, the
 # band below WEB.ELF's 40,28 512x384 window held console-green
-# 4767/82792 (5.758%) at +3 s and 4657/82792 (5.625%) at +20 s -- the
+# 4747/82792 (5.734%) at +3 s and 4646/82792 (5.612%) at +20 s -- the
 # M69b ~5.8% 20 s figure, already at plateau. Kernel fg_rgb = 0x00ff00.
-# The leak is road_pops.drain / rp_text_present compositing the
-# full-screen .terminal window. Those calls now skip when
-# wm_server.registered(); this boot has no seat, so the ink remains and
-# this probe pins it. The seated invariant is go-wm-console-ink (#1561).
+# There is no seat, so paint_scene still blits the full-screen terminal
+# and this probe pins that ink. A seated boot is go-wm-console-ink
+# (#1561): paint_scene skips the terminal blit while the seat owns the
+# layer (M71c) but the present must still flush. Skipping the drain
+# outright leaves the pre-seat console frame (measured 1789 green pixels).
 vgate_file script-ink-3s.txt <<'EOF'
 echo web-ink-3s
 EOF
@@ -739,8 +740,8 @@ a = measure(load("ink-0.raw"), "3s")
 b = measure(load("ink-1.raw"), "20s")
 # Shim web boot: the full-screen kernel terminal is the desktop behind WEB.
 # Pin the M69b ~5.8% console-green so a blank capture cannot pass and a
-# seated paint cannot silently replace this measurement. go-wm-console-ink
-# holds console-green=0 once a WM is registered (#1561 / the #1592 blit).
+# seated paint cannot silently replace this measurement. The seated
+# console-green=0 probe is go-wm-console-ink (#1561).
 for label, m in (("3s", a), ("20s", b)):
     tot, interior, green = m
     pct = 100.0 * green / tot if tot else 0.0

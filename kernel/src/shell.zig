@@ -3891,10 +3891,11 @@ fn park_body(mon: *monitor.Monitor) callconv(.c) void {
             // Claim 1574 (milestone six G3): Road Pops — one full-frame
             // present per dirty output batch (the card-3d drain pattern).
             // No-op when the tee is unarmed (default VM) or clean. #1592:
-            // the present callback is driving_award.composite with no
-            // other owner check; skip the drain once a WM owns the scanout
-            // (same guard as the clock composite two statements later).
-            if (!wm_server.registered()) road_pops.drain();
+            // keep draining after a seat registers. paint_scene skips the
+            // kernel terminal blit while the seat owns the layer (M71c);
+            // the present still has to flush, or the pre-seat console frame
+            // stays on the pixels the seat does not repaint.
+            road_pops.drain();
             // Card G5 (claim 1543): Driving Award — refresh the clock
             // window from the 1 Hz generic timer and composite any dirty
             // windows. This is the clock-only present path (the tee's
