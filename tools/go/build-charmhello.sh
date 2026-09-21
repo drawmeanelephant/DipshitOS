@@ -25,10 +25,26 @@ export PATH="$FORK_DIR/bin:$PATH"
 export GOTOOLCHAIN=local
 export CGO_ENABLED=0
 
+# Charm is intentionally NOT a dependency of the SDK's user/go/go.mod:
+# `user/go/ttf` guards that module against broad desktop dependencies. Start
+# with a gitignored cache module, then build through a transient modfile beside
+# the SDK's own go.mod (Go requires a -modfile to live in that directory).
+WORK_DIR="$REPO/.build/charmhello-work"
+MODFILE="$WORK_DIR/go.mod"
+rm -rf "$WORK_DIR"
+mkdir -p "$WORK_DIR"
+cat >"$MODFILE" <<EOF
+module charmhello-build
+
+go 1.27
+
+require charm.land/bubbletea/v2 ${VERSION}
+EOF
+
 # Fetch only declared Go modules into the host module cache. The app build
 # remains module-mode so Charm's transitive packages resolve there; no source
 # from that cache is committed or vendored into the guest tree.
-( cd "$REPO/user/go" && go mod download "charm.land/bubbletea/v2@${VERSION}" )
+( cd "$WORK_DIR" && go mod download "charm.land/bubbletea/v2@${VERSION}" )
 
 MOD_DIR="$(go env GOMODCACHE)/charm.land/bubbletea/v2@${VERSION}"
 [ -f "$MOD_DIR/termios_other.go" ] || {
@@ -41,17 +57,22 @@ MOD_DIR="$(go env GOMODCACHE)/charm.land/bubbletea/v2@${VERSION}"
 # this is still a module-cache build, not an in-tree vendor copy, and makes
 # the two Virelai-only files visible to the compiler without mutating Charm.
 STAGE="$REPO/.build/charmhello-module"
-rm -rf "$STAGE"
+if [ -d "$STAGE" ]; then
+    # Module-cache sources are intentionally read-only. `cp -a` preserves
+    # that mode, so make a prior staged copy removable before refreshing it.
+    chmod -R u+w "$STAGE"
+    rm -rf "$STAGE"
+fi
 mkdir -p "$STAGE"
 cp -a "$MOD_DIR/." "$STAGE/"
+chmod -R u+w "$STAGE"
 
 OVERLAY="$REPO/.build/charmhello-overlay.json"
-MODFILE="$REPO/.build/charmhello.mod"
 mkdir -p "$(dirname "$OVERLAY")" "$REPO/.build/go"
-python3 - "$STAGE" "$REPO" "$OVERLAY" "$MODFILE" <<'PY'
+python3 - "$STAGE" "$REPO" "$OVERLAY" <<'PY'
 import json, os, sys
 
-module, repo, out, modfile = sys.argv[1:]
+module, repo, out = sys.argv[1:]
 replace = {
     # These originals are selected for an unknown GOOS; the overlay changes
     # their build tags and supplies the four Program platform hooks without
@@ -61,21 +82,22 @@ replace = {
 }
 with open(out, "w") as f:
     json.dump({"Replace": replace}, f, sort_keys=True)
-
-source = open(os.path.join(repo, "user/go/go.mod")).read()
-source = source.replace(
-    "replace virelai/tools/go/tabcodec => ../../tools/go/tabcodec",
-    "replace virelai/tools/go/tabcodec => " + os.path.join(repo, "tools/go/tabcodec"),
-)
-source += "\nreplace charm.land/bubbletea/v2 => " + module + "\n"
-with open(modfile, "w") as f:
-    f.write(source)
 PY
+
+TEMP_MOD="$REPO/user/go/.charmhello.mod"
+TEMP_SUM="${TEMP_MOD%.mod}.sum"
+cp "$REPO/user/go/go.mod" "$TEMP_MOD"
+cat >>"$TEMP_MOD" <<EOF
+
+require charm.land/bubbletea/v2 ${VERSION}
+replace charm.land/bubbletea/v2 => $STAGE
+EOF
+trap 'rm -f "$TEMP_MOD" "$TEMP_SUM"' EXIT
 
 OUT="$REPO/.build/go/$NAME.ELF"
 log "building virelai/charmhello with Bubble Tea ${VERSION} -> $OUT"
 ( cd "$REPO/user/go" &&
-    GOOS=virelai GOARCH=arm64 go build -mod=mod -modfile "$MODFILE" -overlay "$OVERLAY" \
+    GOOS=virelai GOARCH=arm64 go build -mod=mod -modfile "$TEMP_MOD" -overlay "$OVERLAY" \
         -ldflags "-s -w" -o "$OUT" ./charmhello )
 
 SIZE="$(stat -f%z "$OUT" 2>/dev/null || stat -c%s "$OUT")"

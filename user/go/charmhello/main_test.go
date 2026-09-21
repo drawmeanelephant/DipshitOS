@@ -1,3 +1,5 @@
+//go:build virelai || charmhello
+
 package main
 
 import (

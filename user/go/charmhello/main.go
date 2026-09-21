@@ -1,3 +1,5 @@
+//go:build virelai || charmhello
+
 // Command charmhello is M72c's deliberately small Bubble Tea program.
 //
 // It does not run Bubble Tea's host Program loop: the Virelai port has no
