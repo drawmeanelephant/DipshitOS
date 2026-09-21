@@ -1187,6 +1187,43 @@ test "driving_award: WM4 rest alpha — policy fallback, override, v1 default, c
     try std.testing.expectEqual(@as(u32, 0x00ff00), px.at(fb, stride, w2.x + 100, w2.y + 100));
 }
 
+test "driving_award: M69g (#1558) a fully covered window's chrome is not painted over the cover" {
+    arm();
+    // The covered window: the 96x64 shape GOTABWM's client-death probe leaves
+    // open at (8,8) for the whole session.
+    try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(8, 8, 96, 64, 7));
+    // The cover: a full-viewport client on top (GOSH's tab).
+    try std.testing.expectEqual(UserOpenResult{ .opened = 3 }, user_open(0, 0, 1280, 720, 8));
+    // Both faded in (the rest-alpha blend is complete), the cover focused and
+    // therefore opaque — an opaque cover really does hide the window under it.
+    find_user_window(2).?.fade_phase = 0;
+    find_user_window(3).?.fade_phase = 0;
+    try std.testing.expect(user_fill(3, 0, 0, 1280, 720, 0x123456));
+    try std.testing.expect(user_present(3));
+    try std.testing.expect(user_present(2));
+    _ = composite();
+    const stride = virtio_gpu.fb_width * 4;
+    const fb: [*]u8 = @ptrCast(&virtio_gpu.gpu_fb);
+    const px = struct {
+        fn at(f: [*]u8, st: usize, x: usize, y: usize) u32 {
+            const o = y * st + x * 4;
+            return @as(u32, f[o + 2]) << 16 | @as(u32, f[o + 1]) << 8 | f[o];
+        }
+    };
+    // Inside the covered window's own chrome that the cover's chrome does not
+    // also own — its left and bottom border pixels — the value must be the
+    // COVER's content, never the buried window's border/title bar.
+    try std.testing.expectEqual(@as(u32, 0x123456), px.at(fb, stride, 8, 8 + 40));
+    try std.testing.expectEqual(@as(u32, 0x123456), px.at(fb, stride, 8 + 40, 8 + 63));
+    // Not a blanket "skip chrome": raise the small window and its chrome is
+    // back (and it is no longer covered, so it is legitimately visible).
+    try std.testing.expect(user_raise(2));
+    find_user_window(2).?.fade_phase = 0;
+    try std.testing.expect(user_present(2));
+    _ = composite();
+    try std.testing.expect(px.at(fb, stride, 8, 8 + 40) != 0x123456);
+}
+
 test "driving_award: WM3 taskbar_click restores a minimized entry, focuses a visible one" {
     arm();
     try std.testing.expectEqual(UserOpenResult{ .opened = 2 }, user_open(64, 64, 512, 384, 7));

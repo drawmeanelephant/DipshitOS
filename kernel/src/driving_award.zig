@@ -3966,15 +3966,7 @@ pub fn paint(w: *Window) void {
             // area at that alpha (the chrome is drawn opaque afterwards,
             // so the WMS4 chrome pixel parity is untouched). No policy /
             // no WM / focused = 256, byte-identical to v1.
-            const alpha: u16 = if (w.fade_phase == 1)
-                if (w.fade_tick < fade_half_frames) 64 // 25%
-                else if (w.fade_tick < fade_half_frames * 2) 128 // 50%
-                else 256 // fully opaque (fade complete)
-            else blk: {
-                const rest = wm_rest_alpha(w.id);
-                if (w.id != focused_id and rest < 256) break :blk @intCast(rest);
-                break :blk 256;
-            };
+            const alpha: u16 = client_alpha(w);
             if (alpha < 256) {
                 blit_rect_alpha(
                     @ptrCast(&virtio_gpu.gpu_fb),
@@ -4593,6 +4585,47 @@ pub fn effective_chrome(w: *const Window) geom.ChromeDesc {
     };
 }
 
+/// Arc4 #239 / WM4 (issue #707 card 4): the blend alpha a window's CLIENT
+/// area is painted at this frame (256 = fully opaque). Shared by `paint`
+/// (the blit) and `chrome_occluded` — only an OPAQUE cover can hide a
+/// window's chrome. Pure.
+fn client_alpha(w: *const Window) u16 {
+    if (w.fade_phase == 1) {
+        if (w.fade_tick < fade_half_frames) return 64; // 25%
+        if (w.fade_tick < fade_half_frames * 2) return 128; // 50%
+        return 256; // fully opaque (fade complete)
+    }
+    const rest = wm_rest_alpha(w.id);
+    if (w.id != focused_id and rest < 256) return @intCast(rest);
+    return 256;
+}
+
+/// M69g (#1558): whether a user window is COMPLETELY covered by a higher
+/// opaque user window. The compositor blits window CONTENT in z-order, so a
+/// full-viewport client really does hide every window under it — but the
+/// chrome pass runs AFTER the whole stack, so without this check a hidden
+/// window paints its title bar and border straight over the covering
+/// client's content. GOTABWM's own 96x64 client-death probe window did
+/// exactly that over GOSH's tab, hiding the shell's first terminal line (the
+/// only line a fresh prompt has). Chrome that cannot be seen is not drawn.
+/// Pure over the registry.
+fn chrome_occluded(i: usize) bool {
+    const w = &windows[i];
+    if (w.kind != .user) return false;
+    var j = i + 1;
+    while (j < win_count) : (j += 1) {
+        const o = &windows[j];
+        if (o.kind != .user or !o.visible) continue;
+        if (!workspace_visible(o)) continue;
+        if (client_alpha(o) < 256) continue; // a translucent cover lets chrome through
+        if (o.x > w.x or o.y > w.y) continue;
+        if (@as(u64, o.x) + o.w < @as(u64, w.x) + w.w) continue;
+        if (@as(u64, o.y) + o.h < @as(u64, w.y) + w.h) continue;
+        return true;
+    }
+    return false;
+}
+
 /// Card U5/U4: the chrome pass, drawn on the framebuffer AFTER the window
 /// paints and BEFORE the transfer — user title bars, the focus ring on the
 /// focused window, and the pointer cursor. Chrome never touches a window's
@@ -4614,6 +4647,9 @@ pub fn draw_chrome() void {
         if (w.kind != .user or !w.visible) continue;
         // Arc4 #241: skip chrome for windows not in the current workspace.
         if (!workspace_visible(w)) continue;
+        // M69g (#1558): a fully covered window is not visible, so its chrome
+        // must not be painted over the covering window's content.
+        if (chrome_occluded(i)) continue;
         // M32 WMS4: the chrome LOOK (elements + colors) is the WM's
         // descriptor; the shim's own rules are just the default descriptor.
         const ch = effective_chrome(w);

@@ -8,7 +8,8 @@
 # actually runs ofs/ref-delta resolution (host tests cover the codec).
 # Not a fully usable clone: no .git/index or config (#1337 is object store
 # + checkout). Guest-facing TCP 24541 is the runner --net-tcp-respond pin
-# (same family as live-tls13). A leftover listener on that port is killed
+# (the TLS fixture family live-web boot 12 now owns, M71k #1570). A leftover
+# listener on that port is killed
 # in setup (collides with a concurrent go-git; per-run bind(:0) needs
 # vgate_run to expand a generated host port).
 #
@@ -34,8 +35,9 @@ import os, shutil, subprocess, sys, time
 run = os.environ["RUN_DIR"]
 share = os.environ.get("VG_SHARE") or os.path.join(run, "share")
 os.makedirs(share, exist_ok=True)
-# Guest-facing TCP 24541 is the runner --net-tcp-respond pin (same family
-# as live-tls13). A crashed run can leave python on that port; the guest
+# Guest-facing TCP 24541 is the runner --net-tcp-respond pin (the fixture
+# family live-web boot 12 now owns, M71k #1570). A crashed run can leave
+# python on that port; the guest
 # then handshakes with a half-dead peer (AlertReceived). Per-run bind(:0) would
 # need vgate_run to expand a generated host port, which this card does not
 # add. The kill is leftover hygiene and will collide with a concurrent

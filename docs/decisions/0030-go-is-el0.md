@@ -3,13 +3,15 @@
 - Status: ACCEPTED
 - Date: 2026-09-15
 - Amended: 2026-09-16 (M60 / #1297 — no new Zig EL0 apps; first leftover `EDIT.BIN` deleted)
+- Amended: 2026-09-21 (M71k / #1570 — the EL0 HTTPS consumer is Go; `FETCHS.BIN` deleted, `lib/tls` is host-side interop)
 - Issue: #1293 (this document), umbrella #1292, M60 #1297
 - Related: ADR 0001 (Zig as guest language — narrowed here), ADR 0007
   (syscall ABI; kernel changes still ride amendments of that file only),
   ADR 0015 (userland WM seat / slot 65), ADR 0020 (terminal seam),
   ADR 0021 (userland shell; the interactive shell moves to Go later, the
   kernel monitor stays), ADR 0026 (GOOS=virelai), ADR 0028 (HTML — already
-  a Go consumer in M54), ADR 0029 (TLS stays a Zig helper)
+  a Go consumer in M54), ADR 0029 (TLS 1.3 client — Go owns the EL0
+  consumer since M71k)
 
 > Product split, not a vibe: **VZ is the hypervisor. Zig is the guest
 > kernel. Go is EL0.** This ADR is docs-only. It carries the M56–M60 card
@@ -61,9 +63,10 @@ embeds them.
   Never a `LIBUI` clone, never a second competing toolkit.
 - No new `user/src/*.zig` apps (GUI or otherwise). In force as of M60
   (#1297); see the amendment below. Zig kernel stays.
-- No porting crypto "because pivot": TLS stays a Zig *helper*
-  (`FETCHS.BIN` / `lib/tls` over TCP, ADR 0029) and SSH stays `SSH.BIN`
-  until their own cards exist.
+- No porting crypto "because pivot". TLS was a Zig *helper*
+  (`FETCHS.BIN` / `lib/tls` over TCP, ADR 0029) until M71k (#1570) deleted
+  the EL0 binary: HTTPS is Go in-process and `lib/tls` survives only as
+  host-side interop. SSH stays `SSH.BIN` until M71j (#1569).
 - No `settings set wm` / boot-default flip before M59. AGENTS.md's
   "do not change the boot default" rule yields only on that card. **#1298 is
   that card, and it has landed**: the compiled `wm` default is `gotabwm`, so
@@ -118,7 +121,7 @@ change.
 | M58c | Go terminal front-end (ADR 0020) | #1307 | `go-term` on VZ: attach, a typed line / shell marker, close. No new tty syscall. |
 | M58d | Go fetch over the Zig TLS helper | #1308 | HTTPS via the Zig helper; never a cleartext GET. No Go crypto. DNS is not this card. |
 | **M59** | Explicit default flip | #1298 | The **only** card allowed to move the boot default. `settings set wm gotabwm` persists; Zig TABWM remains the fallback. Touches include `kernel/src/shell.zig` (that is where the WM boot default lives), not only a settings panel. Gate: flip → reboot → Go WM hosting a leftover Zig app. Depends on M57 (second seat proven) and at least one leftover Zig app hosted under it. **Landed:** `wm` is a schema-v2 settings key whose compiled default is `gotabwm`; the shell-idle autostart resolves the seat through it (`gotabwm` → `GOTABWM.ELF`, `tabwm` → `TABWM.BIN`, `none` → shim), `tools/session.sh` stages the Go seat and lets the default apply, and `go-wm-default` proves the default boot on VZ (boot 01: no `wm` key → the Go seat hosts CALC; boot 02: the persisted `wm=tabwm` → the Zig seat). A boot whose share carries no seat binary says so and stays shim-only instead of faking a desktop. |
-| **M60** | Starve Zig EL0 | #1297 | Policy in force (amendment below): no new `user/src/*.zig` apps. First leftover gone: `EDIT.BIN` → `GOEDIT.ELF` (gate `go-edit`). Further deletions are later cards. TLS stays `FETCHS.BIN` / `lib/tls`; SSH stays `SSH.BIN`. No flag day. |
+| **M60** | Starve Zig EL0 | #1297 | Policy in force (amendment below): no new `user/src/*.zig` apps. First leftover gone: `EDIT.BIN` → `GOEDIT.ELF` (gate `go-edit`). Further deletions are later cards. TLS stays `FETCHS.BIN` / `lib/tls`; SSH stays `SSH.BIN` (both superseded later: TLS deleted in M71k #1570; SSH is M71j #1569). No flag day. |
 
 Superseded drafts (closed, do not claim): original M56/M57 leaves
 #1300–#1304; both-seats M58 drafts #1309, #1310, #1312, #1320.
@@ -146,7 +149,8 @@ The no-new-Zig-apps rule is now policy, not just a pivot-era restraint:
   monitor. New userland is Go (`GOOS=virelai` ELF). Leftover Zig EL0 is
   something you `exec`, then delete.
 - TLS stays a Zig helper: `FETCHS.BIN` / `lib/tls` (ADR 0029). Do not
-  port crypto "because pivot."
+  port crypto "because pivot." **Superseded by the M71k amendment below:**
+  the EL0 binary is gone and `lib/tls` is host-side interop only.
 - SSH stays `SSH.BIN` (ADR 0025) until its own Go card.
 - Deletions are one binary at a time, each independently revertible. No
   flag day. Boot default does not move here (M59 already flipped it).
@@ -161,5 +165,35 @@ TABWM remain hosted leftovers; TLS/SSH remain helpers.
   and later.
 - Whether the interactive shell (`SH.BIN`) flips in this arc or after
   M60. D2 says "eventually"; no card above moves it.
-- Go ports of TLS or SSH.
+- Go ports of TLS or SSH. (TLS landed in M67b and retired the helper in
+  M71k; the SSH client is M71j #1569.)
 - Deleting Zig TABWM (M60, after the default has already flipped).
+
+## Amendment (M71k / #1570, 2026-09-21) — the TLS helper retires
+
+M67 demoted `FETCHS.BIN`: `go-fetch-https`, `live-web` boot 12 and
+`go-git` all prove HTTPS in-process over `user/go/tls`. M71k deletes the
+EL0 binary. The last thing keeping it in the tree was its own gate.
+
+- **The EL0 HTTPS consumer is Go.** `GOFETCH.ELF` and `WEB.ELF` dial
+  through `user/go/tls`; the name / expired / chain negatives are pinned
+  by `go-fetch-https`. `FETCHS.BIN` and `user/src/fetchs.zig` are gone,
+  with the `fetchs` build step.
+- **`lib/tls` stays, and it is not a library Go links.** Its `vectors/`
+  (`tlsresponder.py`, `fx/`) are consumed by the `live-web` and
+  `go-fetch-https` class-B gates, and `interop_driver.zig` +
+  `vectors/run_interop.sh` still exercise the Zig client against real
+  peers on the host. Nothing in the guest links it, so it is not a second
+  shipped TLS stack — it is test apparatus.
+- **The gate retired with the binary.** `live-tls13.spec` is gone; its
+  probe is `live-web` boot 12 (same responder script, port and fixture
+  identity). The negotiated-suite assertion that spec uniquely carried
+  is enforced in code on the Go path rather than echoed: `user/go/tls`
+  offers exactly one suite (`client.go` `suiteOffered = 0x1301`) and
+  rejects any other ServerHello choice (`client.go:574`), pinned by
+  `client_test.go`. A green handshake cannot hide a different suite, so
+  no marker is owed.
+- **The "no porting crypto" rule is unchanged.** The Go TLS client was
+  written for its own card (M67b), not derived from `lib/tls`.
+
+SSH remains `SSH.BIN` until M71j (#1569) does the same for it.
