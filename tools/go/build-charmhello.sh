@@ -14,6 +14,15 @@ MAX_BYTES=$((32 * 1024 * 1024)) # M72a load_max: initialized ELF bytes.
 
 log() { printf 'build-charmhello: %s\n' "$*"; }
 
+# MIT/BSD attribution for the Charm modules linked into the ELF lives in
+# user/go/charmhello/THIRD-PARTY.txt (sources stay in the module cache, so
+# the notice has to ship separately). A version bump without re-resolving
+# that file must fail here, not silently ship stale notices.
+if ! grep -q "bubbletea/v2 ${VERSION}" "$REPO/user/go/charmhello/THIRD-PARTY.txt"; then
+    log "FAIL: THIRD-PARTY.txt does not pin Bubble Tea ${VERSION}; re-resolve and update it"
+    exit 1
+fi
+
 if [ ! -x "$FORK_DIR/bin/go" ]; then
     log "missing fork toolchain at $FORK_DIR/bin/go"
     log "provision it once with: bash tools/go/apply.sh && just go-toolchain"
