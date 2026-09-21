@@ -2,10 +2,10 @@
 #
 # The process-privilege gate live, in two boots on one seeded share:
 # (1) the EL1h monitor ADMIN-SPAWNS a uid_system probe (`exec -u0
-# COUNTER.BIN`; `procs` reads uid=0 caps=3), a uid_user TOP.BIN tries to
+# COUNTER.BIN`; `procs` reads uid=0 caps=3), a uid_user GOTOP.ELF tries to
 # kill it cross-principal and gets EACCES (-7) from slot 29's gate — and
 # the probe keeps running after the denial, so nothing was armed;
-# (2) the boot default unchanged: a uid_user TOP.BIN kills a uid_user
+# (2) the boot default unchanged: a uid_user GOTOP.ELF kills a uid_user
 # COUNTER.BIN (same-uid) exactly as before — success, status 137, markers
 # stop. The admin spawn is monitor-only: EL0 has no principal argument.
 
@@ -18,7 +18,7 @@ vgate_repeat 1 BOOTS
 vgate_file script1.txt <<'EOF'
 exec -u0 COUNTER.BIN
 procs
-exec TOP.BIN
+exec GOTOP.ELF
 EOF
 
 # After the denied kill: a final procs row + the syscall counter, then stop.
@@ -27,6 +27,20 @@ procs
 syscalls
 echo trust-caps-denied
 EOF
+
+# HOST PREREQUISITE (fails the gate honestly when missing):
+#   bash tools/go/build-gotop.sh   ->  .build/go/GOTOP.ELF
+vgate_setup_python <<'PY'
+import os, shutil, sys
+rd = os.environ["RUN_DIR"]
+share = os.environ.get("VG_SHARE") or os.path.join(rd, "share")
+src = os.path.join(".build", "go", "GOTOP.ELF")
+if not os.path.exists(src):
+    sys.exit("GOTOP.ELF missing (expected " + src + ") - build it first: "
+             "bash tools/go/build-gotop.sh")
+shutil.copy(src, os.path.join(share, "GOTOP.ELF"))
+print("staged GOTOP.ELF into share (%d bytes)" % os.path.getsize(os.path.join(share, "GOTOP.ELF")))
+PY
 
 vgate_run 01 -- --display --input \
     --script '$RUN_DIR/script1.txt' \
@@ -70,7 +84,7 @@ PY
 # Boot 02: the boot-default control — same-uid kill still works.
 vgate_file script3.txt <<'EOF'
 exec COUNTER.BIN
-exec TOP.BIN
+exec GOTOP.ELF
 EOF
 
 vgate_file script4.txt <<'EOF'

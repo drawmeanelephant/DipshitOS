@@ -28,6 +28,10 @@
 # GOSET.ELF must be offered and the retired SETTINGS.BIN must not, so the
 # deletion cannot be quietly undone by an APPS.TXT row.
 #
+# M71g (#1566): and the process monitor -- GOTOP.ELF must be offered while
+# TOP.BIN and SYSMON.BIN must not, so the same deletion of the two Zig
+# programs cannot be silently undone by a manifest row either.
+#
 # Run 04 (M71d / #1563, M48 BT1): seat-only. One client (GOCALC.ELF via
 # script2), whose single-tab path auto-closes it after hostTicks, recording the
 # bin in the reopen LIFO. The chord batch then fires on that close marker:
@@ -396,13 +400,18 @@ need = {"GOCALC.ELF", "NOTE.ELF", "GOEDIT.ELF", "GOFILES.ELF", "WEB.ELF",
         # catalogue must carry it -- and must NOT offer the retired Zig
         # SETTINGS.BIN (also in the forbidden list below), which is the whole
         # point of the deletion: no path may launch the dead panel.
-        "GOSET.ELF"}
+        "GOSET.ELF",
+        # M71g (#1566): TOP.BIN and SYSMON.BIN are retired into the one Go
+        # GOTOP.ELF, so the catalogue must carry it and must NOT still offer
+        # either Zig program (both in the forbidden list below) -- the
+        # deletion cannot be quietly undone by an APPS.TXT row.
+        "GOTOP.ELF"}
 if not need.issubset(set(bins)):
     sys.exit("APPS.TXT missing daily set: %s" % sorted(need - set(bins)))
 if "GOSH.ELF" not in bins and "GOTERM.ELF" not in bins:
     sys.exit("APPS.TXT missing GOSH.ELF and GOTERM.ELF")
 for bad in ("NOTEPAD.ELF", "CALC.BIN", "CALC.ELF", "FILE.ELF", "DESKTOP.ELF",
-            "SETTINGS.BIN"):
+            "SETTINGS.BIN", "TOP.BIN", "SYSMON.BIN"):
     if bad in bins:
         sys.exit("APPS.TXT still offers %s" % bad)
 if "TABWM.BIN" in bins:

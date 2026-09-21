@@ -1,17 +1,18 @@
 # live-tabstrip.spec -- M37 DQ2 tab-strip chrome (issue #840)
 #
-# M66c (#1485): the Zig notepad is retired. The tab HOST here is TOP.BIN —
+# M71g (#1566): the tab HOST here is GOTOP.ELF (Go, the successor to Zig
+# TOP.BIN) —
 # the spec's subject is the kernel/WM tab-strip CHROME, which is app-agnostic,
 # and under a WM seat the Go client is not a usable host: with NOTE.ELF as the
 # tab host the scanout carried NO chrome at all (observed: zero (71,85,105)
 # border/trough pixels anywhere), which is undiagnosed — the client's surface
 # ends up full-viewport under the WM seat, but that is a hypothesis, not a
-# finding. TOP.BIN is a Zig tab-aware app that still ships, and TABHOLD
-# attaches to it the same way it attached to the notepad (`own_id==2 -> 3`).
+# finding. GOTOP.ELF is a tab-aware app that declares TOP's own rect, and
+# TABHOLD attaches to it the same way it attached to the notepad (`own_id==2 -> 3`).
 #
 # GEOMETRY (M66c review, #1495): the pixel scan below is derived from the
-# HOST's declaration, and TOP declares 40,40 512x384 (user/src/top.zig), not
-# the retired app's 56,56. The first version of this retarget kept X,SY=56,72,
+# HOST's declaration, and GOTOP declares 40,40 512x384 (user/go/top/main.go),
+# not the retired app's 56,56. The first version of this retarget kept X,SY=56,72,
 # which put nearly every sample outside TOP's strip — the scan has to follow
 # the rect: strip = (host_x .. host_x+host_w), y = host_y + title_bar_h ..
 # +tab_bar_height (kernel/src/wnd_core.zig: title_bar_h 16, tab_bar_height 22).
@@ -20,17 +21,43 @@ vgate_name live-tabstrip "M37 DQ2 tab-strip chrome: attached tabs paint visible 
 vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 
+# M71g (#1566): the two openers are SPLIT across script stages. Measured on
+# the first retarget attempt: as one burst, TABHOLD.BIN (Zig, opens in
+# milliseconds) reached the kernel's tab-attach BEFORE the Go client's window
+# existed — `wnd: tab-attach child=2 parent=3` landed ahead of
+# `open: id=3 owner=2` — and the container then composited nothing at all (the
+# frame carried the desktop fill and no client pixels anywhere). Exec'ing
+# TABHOLD only after the client's own `top: ready` puts the attach after the
+# container exists, which is the order these coordinates were derived from.
 vgate_file script-A.txt <<'EOF'
 wnd start
-exec TOP.BIN
+exec GOTOP.ELF
+EOF
+
+vgate_file script2-A.txt <<'EOF'
 exec TABHOLD.BIN
 EOF
+
+# HOST PREREQUISITE (fails the gate honestly when missing):
+#   bash tools/go/build-gotop.sh   ->  .build/go/GOTOP.ELF
+vgate_setup_python <<'PY'
+import os, shutil, sys
+rd = os.environ["RUN_DIR"]
+share = os.environ.get("VG_SHARE") or os.path.join(rd, "share")
+src = os.path.join(".build", "go", "GOTOP.ELF")
+if not os.path.exists(src):
+    sys.exit("GOTOP.ELF missing (expected " + src + ") - build it first: "
+             "bash tools/go/build-gotop.sh")
+shutil.copy(src, os.path.join(share, "GOTOP.ELF"))
+print("staged GOTOP.ELF into share (%d bytes)" % os.path.getsize(os.path.join(share, "GOTOP.ELF")))
+PY
 
 vgate_run A -- \
     --screen '$RUN_DIR/screen' \
     --via-virtio --cvc-snap \
     --snapshot-out '$RUN_DIR/snap-A' \
     --script '$RUN_DIR/script-A.txt' \
+    --script2 '$RUN_DIR/script2-A.txt' --script2-after "top: ready" \
     --snapshot-after "tabhold: cycled" \
     --script-expect "tabhold: done" --timeout 240
 
@@ -51,7 +78,7 @@ if not m:
     print("tab-attach line missing", file=sys.stderr)
     sys.exit(1)
 a, b = int(m.group(1)), int(m.group(2))
-# The burst census is exactly {2,3}: TOP.BIN + TABHOLD are the only window
+# The burst census is exactly {2,3}: GOTOP.ELF + TABHOLD are the only window
 # openers (WND opens none), so a valid attach is child!=parent within it.
 if not (2 <= a <= 3 and 2 <= b <= 3 and a != b):
     print(f"attach ids not the two-window census: child={a} parent={b}", file=sys.stderr)

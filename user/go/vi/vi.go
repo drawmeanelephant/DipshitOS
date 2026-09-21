@@ -94,6 +94,7 @@ const (
 	SlotFileClose    uintptr = 26
 	SlotDirList      uintptr = 27
 	SlotExec         uintptr = 28
+	SlotKill         uintptr = 29 // M71g: sys_kill, the EL0 process-termination seam
 	SlotTCPConnect   uintptr = 30
 	SlotTCPSend      uintptr = 31
 	SlotTCPRecv      uintptr = 32
@@ -106,6 +107,7 @@ const (
 	SlotAudioVolume  uintptr = 44
 	SlotAudioMute    uintptr = 45
 	SlotWinFillBatch uintptr = 46
+	SlotNetStats     uintptr = 62 // M71g: the sys_net_stats snapshot (netstats.go)
 	SlotPipeRead     uintptr = 56 // M19 P1: the kernel pipe read (M68a wrapper)
 	SlotPipeWrite    uintptr = 57 // M19 P1: the kernel pipe write (M68a wrapper)
 	SlotMmap         uintptr = 63
@@ -252,8 +254,19 @@ func Console(s string) {
 	}
 }
 
-// ConsoleLine writes s followed by a newline.
+// ConsoleLine writes s followed by a newline IN ONE sys_write when the line
+// fits in a chunk. Two writes would let a concurrent task's console output be
+// spliced into the middle of the line — measured on VZ under the TABWM seat:
+// GOTOP's `top: kill pid=1` came back as
+// `top: kill pid=1smp: secondary runs=25 task=GOTOP.ELF`, which breaks every
+// exact-match assertion and, worse, misreports the process being killed. Lines
+// longer than one chunk keep the chunked path (a long line is not atomic
+// either way).
 func ConsoleLine(s string) {
+	if len(s) < writeChunk {
+		Console(s + "\n")
+		return
+	}
 	Console(s)
 	Console("\n")
 }

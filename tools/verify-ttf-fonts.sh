@@ -56,9 +56,11 @@ PATH="/opt/homebrew/opt/gnu-sed/libexec/gnubin:/opt/homebrew/bin:$PATH" zig test
 # 3. Assert userland compilation with font subsystem
 echo
 echo "[3/3] Compiling userland with font engine integrated"
-# M60 / #1297: EDIT.BIN is gone; M66c (#1485): the Zig notepad is gone too,
-# so the font-engine compiles are DESKTOP.BIN + SYSMON.BIN.
-PATH="/opt/homebrew/opt/gnu-sed/libexec/gnubin:/opt/homebrew/bin:$PATH" zig build desktop sysmon
+# M60 / #1297: EDIT.BIN is gone; M66c (#1485): the Zig notepad is gone too.
+# M71g (#1566): SYSMON.BIN is gone as well (GOTOP.ELF is Go and never touches
+# the Zig font engine), so the font-engine compiles are DESKTOP.BIN + DEVCONS.BIN
+# -- the two remaining font-heavy Zig apps.
+PATH="/opt/homebrew/opt/gnu-sed/libexec/gnubin:/opt/homebrew/bin:$PATH" zig build desktop devcons
 
 echo
 echo "=== verify-ttf-fonts: PASS (Inter & Fira Code TrueType engine verified) ==="

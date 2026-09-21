@@ -679,28 +679,13 @@ pub fn build(b: *std.Build) void {
     // ------------------------------------------------------------------
 
     // ------------------------------------------------------------------
-    // Guest: sixteenth ESP user program (milestone eleven, card A4 — claim 0680)
-    // TOP.BIN. Graphical task manager & process monitor.
-    // DSK3 segmented (writable .data/.bss — the WMS9 fill-batcher global).
+    // M71g (#1566): TOP.BIN (the sixteenth ESP program, claim 0680) is RETIRED
+    // with user/src/top.zig. Its Go successor is GOTOP.ELF (user/go/top, built
+    // by tools/go/build-gotop.sh) — a host-share ELF like GOFILES.ELF, not an
+    // in-image Zig program, so there is no build step to replace this one. The
+    // twelve specs that exec'd TOP.BIN stage GOTOP.ELF instead; GOTOP keeps the
+    // `top:` marker vocabulary, so their assertions moved by binary name.
     // ------------------------------------------------------------------
-    const top_prog = b.addExecutable(.{
-        .name = "user-top",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("user/src/top.zig"),
-            .target = kernel_target,
-            .optimize = .ReleaseSmall,
-        }),
-    });
-    top_prog.linker_script = b.path("user/linker-segmented.ld");
-    const top_step = b.step("top", "Build the sixteenth ESP user program (zig-out/bin/TOP.BIN) — DSK3 segmented (writable .data/.bss)");
-    const top_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
-    top_elf2bin.addFileArg(top_prog.getEmittedBin());
-    const top_bin = top_elf2bin.addOutputFileArg("TOP.BIN");
-    top_elf2bin.has_side_effects = true;
-    top_elf2bin.stdio = .inherit;
-    top_step.dependOn(&top_elf2bin.step);
-    const install_top = b.addInstallFileWithDir(top_bin, .bin, "TOP.BIN");
-    b.getInstallStep().dependOn(&install_top.step);
 
     // ------------------------------------------------------------------
     // Guest: seventeenth ESP user program (milestone eleven, card A5 — claim 2427)
@@ -1571,27 +1556,15 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_netprof.step);
 
     // ------------------------------------------------------------------
-    // Guest: forty-fourth ESP user program (M27 G6 — issue #449) SYSMON.BIN.
-    // System Monitor Dashboard: overview, processes, storage/net, 1 Hz timer.
+    // M71g (#1566): SYSMON.BIN (the forty-fourth ESP program, M27 G6 — issue
+    // #449) is RETIRED with user/src/sysmon.zig. It and TOP.BIN were one piece
+    // of product — "see what is running" — so one Go successor replaces both:
+    // GOTOP.ELF (user/go/top, tools/go/build-gotop.sh), whose network tab
+    // carries the slot-62 counters SYSMON reported. Two specs lost their Zig
+    // font/theme host with it: live-typography moved to DEVCONS.BIN (the
+    // remaining font-heavy Zig app) and live-tokens' SYSMON runs retired with a
+    // named coverage note (DEVCONS' A5/B5 still pin the same kernel table).
     // ------------------------------------------------------------------
-    const sysmon_prog = b.addExecutable(.{
-        .name = "user-sysmon",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("user/src/sysmon.zig"),
-            .target = kernel_target,
-            .optimize = .ReleaseSmall,
-        }),
-    });
-    sysmon_prog.linker_script = b.path("user/linker-segmented.ld");
-    const sysmon_step = b.step("sysmon", "Build the forty-fourth ESP user program (zig-out/bin/SYSMON.BIN) — DSK3 segmented (writable .data/.bss)");
-    const sysmon_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
-    sysmon_elf2bin.addFileArg(sysmon_prog.getEmittedBin());
-    const sysmon_bin = sysmon_elf2bin.addOutputFileArg("SYSMON.BIN");
-    sysmon_elf2bin.has_side_effects = true;
-    sysmon_elf2bin.stdio = .inherit;
-    sysmon_step.dependOn(&sysmon_elf2bin.step);
-    const install_sysmon = b.addInstallFileWithDir(sysmon_bin, .bin, "SYSMON.BIN");
-    b.getInstallStep().dependOn(&install_sysmon.step);
 
     // ------------------------------------------------------------------
     // M71l (#1571): HTTPD.BIN (the forty-fifth ESP program, Claim 0750) is
