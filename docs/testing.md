@@ -576,8 +576,9 @@ frames are also encoded as `charmhello.gif`; otherwise the PNG sequence is the
 portable tape output. `bash tools/charmhello-tape.sh --dry-run` prints the
 output location without building or booting.
 
-**One of the two things this corpus exposed is now asserted; the other is still
-not** (both were reported on #1529 as observed, neither diagnosed there).
+**One of the two things this corpus exposed is now asserted; the other is
+asserted in `live-web` boot 13 and `go-wm-console-ink`.** Both were reported
+on #1529 as observed, neither diagnosed there.
 
 `gosh.png` is the *pre-fix* empty tab: GOTABWM opens and presents it
 (`gotabwm: tab open id=3`, `host view id=3`, one `present`) while GOSH's own
@@ -589,11 +590,23 @@ the probe's white title text) and holds **578** after the fix. `go-dogfood`
 fails the gate instead of passing silently). The committed `gosh.png` is a
 capture from before that fix, so it still shows the empty band.
 
-Still asserted by nothing: kernel console text (`ks worker advances=…`) sitting
-on the scanout wherever no window covers it, growing with how long the boot has
-run (~2.8% of sampled pixels at 3 s, ~5.8% at 20 s in the web boot; none in the
-hero boot). A serial-marker beat cannot see it; M71b (#1561) is the card that
-makes the seat own the scanout.
+**The console-ink half is now asserted, in both boots it named.** Kernel
+console text (`ks worker advances=…`) sits on the scanout wherever no window
+covers it in the **shim web boot**. Re-measured in `live-web` boot 13 (#1592,
+2026-09-21, macOS 27.2 / arm64, VZ): after `web: settled`, the band below
+WEB.ELF's 40,28 512×384 window held **5.734% console-green at +3 s and
+5.612% at +20 s** (82792 samples; the M69b ~5.8% 20 s figure, already at
+plateau). That boot does not stage `GOTABWM.ELF`, so it is shim compositing
+(`wm: autostart gotabwm: GOTABWM.ELF not on the share`) and the full-screen
+kernel terminal is the desktop. `live-web` boot 13 PIXEL-asserts that shim
+band (2–12%) so a blank capture cannot pass. A seated boot is a different
+fact: `paint_scene` already skips the terminal, taskbar, and dock blits
+while the seat owns the layer (M71c, #1562) and the tee's present still
+flushes, which is what publishes the seat's pixels. Skipping that present
+outright leaves the pre-seat console frame in the region the seat does not
+repaint (measured 1789 console-green pixels). The default-seat probe is
+`go-wm-console-ink` (#1561) and asserts console-green = 0. A serial-marker
+beat cannot see this.
 
 ## Verification sequence
 

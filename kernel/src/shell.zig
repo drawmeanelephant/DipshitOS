@@ -3890,7 +3890,11 @@ fn park_body(mon: *monitor.Monitor) callconv(.c) void {
             // self-toggles it (Ctrl+Shift+A is WM-only now).
             // Claim 1574 (milestone six G3): Road Pops — one full-frame
             // present per dirty output batch (the card-3d drain pattern).
-            // No-op when the tee is unarmed (default VM) or clean.
+            // No-op when the tee is unarmed (default VM) or clean. #1592:
+            // keep draining after a seat registers. paint_scene skips the
+            // kernel terminal blit while the seat owns the layer (M71c);
+            // the present still has to flush, or the pre-seat console frame
+            // stays on the pixels the seat does not repaint.
             road_pops.drain();
             // Card G5 (claim 1543): Driving Award — refresh the clock
             // window from the 1 Hz generic timer and composite any dirty

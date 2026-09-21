@@ -74,6 +74,12 @@ fn rp_text_put_bytes(_: *anyopaque, bytes: []const u8) void {
     driving_award.mark_terminal_dirty();
 }
 fn rp_text_present(_: *anyopaque) void {
+    // #1592: do not skip this present once a seat is registered. M71c
+    // already refuses the terminal/taskbar/dock blit inside paint_scene
+    // while the seat owns the layer, and this composite's transfer+flush
+    // is what publishes the seat's pixels. Skipping the present leaves the
+    // pre-seat console frame on the uncovered scanout (measured: 1789
+    // console-green pixels, go-wm-console-ink FAIL).
     _ = driving_award.composite();
 }
 fn rp_text_clear(_: *anyopaque) void {

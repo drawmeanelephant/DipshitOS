@@ -3,7 +3,8 @@
 # GOFETCH.ELF HTTPS in-process (vi.Dial + tls.Dial, ADR 0029).
 #
 # Boots, one exec each, each ending on a marker the PROGRAM prints
-# (never a script echo):
+# (never a script echo), plus boot 13 which holds the VM for the M69b
+# console-ink re-measure (#1592):
 #   01 local page renders (parse/layout markers + scanout pixel probes)
 #   02 a pointer click on an in-page link navigates (history + second page)
 #   03 http:// fetch over the host TCP responder (no public internet)
@@ -22,6 +23,12 @@
 #      rejects any other ServerHello choice (client.go:574), pinned by
 #      client_test.go -- so a green `gofetch: handshake ok` cannot hide a
 #      different suite. No new marker is owed.
+#   13 M69b (#1529) claimed kernel console ink in the uncovered scanout
+#      of THIS boot (~2.8% at 3 s, ~5.8% at 20 s). M71b measured the
+#      default-seat GOSH boot and did not reproduce. Re-measured here
+#      (shim; GOTABWM.ELF is not staged): ~5.8% console-green at +3 s
+#      and +20 s after web: settled. Two host delays fire kind-4
+#      snapshots; the sampler pins that shim band. Seated = go-wm-console-ink.
 #
 # HOST PREREQUISITE (fails honestly when missing):
 #   .build/go/WEB.ELF     -- `bash tools/go/build-web.sh browser WEB`
@@ -620,4 +627,127 @@ assert "gofetch: helper" not in ser, "the Zig TLS helper was exec'd"
 assert "gofetch: tcp" not in ser, "Go opened a cleartext TCP socket"
 assert "GET / HTTP" not in ser, "a cleartext GET was logged"
 print("live-web 12 https in-process ok (GOFETCH tls.Dial, body, no FETCHS)")
+PY
+
+# --- boot 13: M69b console-ink re-measure in the web boot (#1592) ----------
+# live-web 01-12 are shim-compositing (GOTABWM.ELF is not on the share;
+# serial: "wm: autostart gotabwm: GOTABWM.ELF not on the share"). The
+# M69b numbers came from this shape. Observed 2026-09-21 on this spec's
+# first boot-13 run (macOS 27.2 / arm64, VZ): after web: settled, the
+# band below WEB.ELF's 40,28 512x384 window held console-green
+# 4747/82792 (5.734%) at +3 s and 4646/82792 (5.612%) at +20 s -- the
+# M69b ~5.8% 20 s figure, already at plateau. Kernel fg_rgb = 0x00ff00.
+# There is no seat, so paint_scene still blits the full-screen terminal
+# and this probe pins that ink. A seated boot is go-wm-console-ink
+# (#1561): paint_scene skips the terminal blit while the seat owns the
+# layer (M71c) but the present must still flush. Skipping the drain
+# outright leaves the pre-seat console frame (measured 1789 green pixels).
+vgate_file script-ink-3s.txt <<'EOF'
+echo web-ink-3s
+EOF
+
+vgate_file script-ink-20s.txt <<'EOF'
+echo web-ink-20s
+echo web-ink-done
+EOF
+
+vgate_run 13 -- \
+    --screen '$RUN_DIR/screen' \
+    --via-virtio --cvc-snap \
+    --snapshot-out '$RUN_DIR/ink' \
+    --script '$RUN_DIR/script-local.txt' \
+    --script2 '$RUN_DIR/script-ink-3s.txt' --script2-after "web: settled" --script2-delay 3 \
+    --snapshot-after "web-ink-3s" \
+    --script3 '$RUN_DIR/script-ink-20s.txt' --script3-after "web-ink-3s" --script3-delay 17 \
+    --snapshot-after "web-ink-20s" \
+    --script-expect "web-ink-done" --timeout 180
+
+vgate_assert 13 serial-contains 'web: settled'
+vgate_assert 13 serial-contains 'web-ink-3s'
+vgate_assert 13 serial-contains 'web-ink-20s'
+vgate_assert 13 serial-contains 'web-ink-done'
+vgate_assert 13 serial-absent '[EXC] parking:'
+vgate_assert 13 snapshot 'ink-0.raw' <<'PY'
+import os, sys
+# First frame (3 s after settled). Shared sampler is below in the python
+# assert so both frames are reported together; this check only proves the
+# kind-4 stream wrote a 1280x720 BGRX scanout.
+data = open(sys.argv[1], "rb").read()
+assert len(data) == 1280 * 720 * 4, "3s scanout size %d" % len(data)
+print("live-web 13 3s snapshot %d bytes" % len(data))
+PY
+vgate_assert 13 snapshot 'ink-1.raw' <<'PY'
+import sys
+data = open(sys.argv[1], "rb").read()
+assert len(data) == 1280 * 720 * 4, "20s scanout size %d" % len(data)
+print("live-web 13 20s snapshot %d bytes" % len(data))
+PY
+vgate_assert 13 python <<'PY'
+import os, sys
+
+W, H = 1280, 720
+# WEB.ELF window is 40,28 512x384; sample the band the window cannot cover.
+Y0, STEP = 450, 2
+PAGE_BG = (0x18, 0x20, 0x26)
+
+def load(name):
+    path = os.path.join(os.environ["RUN_DIR"], name)
+    data = open(path, "rb").read()
+    if len(data) != W * H * 4:
+        sys.exit("%s size %d, want %d" % (name, len(data), W * H * 4))
+    return data
+
+def px(data, x, y):
+    k = (y * W + x) * 4
+    return data[k + 2], data[k + 1], data[k]
+
+def near(c, want, tol=6):
+    return all(abs(a - b) <= tol for a, b in zip(c, want))
+
+def ink(rgb):
+    return max(rgb) >= 100
+
+def console_ink(rgb):
+    r, g, b = rgb
+    return g > 150 and r < 160 and b < 160
+
+def measure(data, label):
+    # Live-capture check: the WEB page fill at the declared window, or any
+    # brighter ink there, so a blank/failed stream cannot pass.
+    win = 0
+    for yy in range(28 + 52, 28 + 200, STEP):
+        for xx in range(40 + 10, 40 + 400, STEP):
+            rgb = px(data, xx, yy)
+            if near(rgb, PAGE_BG) or ink(rgb):
+                win += 1
+    tot = interior = green = 0
+    for yy in range(Y0, H - 8, STEP):
+        for xx in range(8, W - 8, STEP):
+            rgb = px(data, xx, yy)
+            tot += 1
+            if ink(rgb):
+                interior += 1
+                if console_ink(rgb):
+                    green += 1
+    print("live-web 13 %s: window-page-bg=%d uncovered sampled=%d ink=%d (%.3f%%) console-green=%d (%.3f%%)"
+          % (label, win, tot, interior, 100.0 * interior / tot if tot else 0.0,
+             green, 100.0 * green / tot if tot else 0.0))
+    if win < 200:
+        sys.exit("FAIL: %s capture has no WEB window paint -- a blank scanout cannot prove the uncovered region" % label)
+    return tot, interior, green
+
+a = measure(load("ink-0.raw"), "3s")
+b = measure(load("ink-1.raw"), "20s")
+# Shim web boot: the full-screen kernel terminal is the desktop behind WEB.
+# Pin the M69b ~5.8% console-green so a blank capture cannot pass and a
+# seated paint cannot silently replace this measurement. The seated
+# console-green=0 probe is go-wm-console-ink (#1561).
+for label, m in (("3s", a), ("20s", b)):
+    tot, interior, green = m
+    pct = 100.0 * green / tot if tot else 0.0
+    if green == 0:
+        sys.exit("FAIL: %s uncovered band has 0 console-green -- this shim web boot previously measured ~5.8%% (M69b / #1592)" % label)
+    if pct < 2.0 or pct > 12.0:
+        sys.exit("FAIL: %s console-green %.3f%% outside the pinned shim band 2-12%% (M69b ~5.8%%)" % (label, pct))
+print("live-web 13 console-ink: shim web boot still carries kernel console green in the uncovered band (M69b reproduced; seated probe is go-wm-console-ink)")
 PY
