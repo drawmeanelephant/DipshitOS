@@ -15,9 +15,12 @@
 // entropy_fips140.go — which declares a 32 MiB .noptrbss scratch buffer — is
 // linked into cmd/compile and cmd/link even though crypto/rand and crypto/tls
 // are ABSENT from both closures (measured with go list -deps: crypto/rand=0,
-// crypto/tls=0, fips140/drbg=1). The kernel's exec acceptance bound
-// (elf.zig load_max tint) sums EVERY PT_LOAD memsz, so it charges that
-// address space as memory and refuses the image with segment_too_large.
+// crypto/tls=0, fips140/drbg=1). The kernel's exec acceptance bound used to be
+// a single `elf.zig` `load_max` that summed EVERY PT_LOAD memsz, so it refused
+// these images with segment_too_large. M72a (#1579) split that bound: `map_max`
+// (64 MiB) now charges the mapped total, the measured 58,254,964 B of memsz
+// fits, and this stub's exclusion is a gate kept for the closure it was
+// validated in rather than a bound that forbids the real entropy source.
 // apply.sh therefore excludes entropy_fips140.go under this same tag, and
 // that exclusion is what creates the hole this file fills: entropy_fips140.go
 // is the ONLY definition of getEntropy, which rand.go calls at lines 26 and

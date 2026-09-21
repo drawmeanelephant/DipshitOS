@@ -480,12 +480,17 @@ fi
 #
 #     var memory entropy.ScratchBuffer    exactly 33,554,432 B, .noptrbss
 #
-# The buffer is demand-backed and costs nothing unless the FIPS module runs
-# (upstream says so itself), but the kernel's exec acceptance bound
-# (elf.zig load_max, 32 MiB) sums EVERY PT_LOAD memsz — so it charges that
-# address space as if it were memory and refuses cmd/compile with
+# Upstream calls the buffer lazy (it is written only when the FIPS module
+# runs), but that laziness is not this kernel's: the gap loader allocates and
+# zero-fills EVERY mapped page before EL0 runs, so the 32 MiB scratch buffer
+# is 32 MiB of guest RAM in whatever image carries it. What the kernel
+# bounded, when this gate was written, was the sum of every PT_LOAD memsz
+# against a single 32 MiB acceptance bound — so cmd/compile was refused with
 # segment_too_large. Measured: 58,254,964 B of memsz, of which 33,554,432 is
-# this one object; without it the image is 23.56 MiB.
+# this one object; without it the image is 23.56 MiB. M72a (#1579) split that
+# bound (`load_max` on the INITIALIZED bytes, `map_max` = 64 MiB on the
+# MAPPED ones), so this image now fits with the real entropy source; the
+# gate is unchanged here and its retirement is a separate decision.
 #
 # This follows upstream's own answer, but GATED. The same file's comment
 # says the buffer "usually doesn't cost much, except on Wasm, due to the way

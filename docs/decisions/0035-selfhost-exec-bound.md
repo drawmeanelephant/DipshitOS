@@ -45,7 +45,7 @@ re-measure commands are at the end.
 | bound | value | where |
 | --- | --- | --- |
 | exec staging | **2 MiB fixed whole-file buffer**, and there are **two** of them — `program` and `interp_program` (the PT_INTERP/LD.SO path), **4 MiB of .bss** — plus the 16 KiB header window the streamed path adds; the *staged* shapes (DSK1/DSK3/contiguous ELF/PT_INTERP) are still bounded by that buffer. Since K1 the gap-layout ELF path **streams** and is bounded instead by `exec_image_max` = 32 MiB (see the amendment) | `kernel/src/exec.zig` (`exec_program_max`, `exec_image_max`, `header_window`), `parse_dsk3` `image_size > buf.len` |
-| ELF load bound | **32 MiB total PT_LOAD memory** (K1 raised it from 2 MiB; it no longer mirrors the staging buffer — the streamed path is not a buffer), ≤3 PT_LOADs | `kernel/src/elf.zig` (`load_max`, `max_segments`) |
+| ELF bounds | **two, since M72a (#1579)**: `load_max` = **32 MiB of INITIALIZED bytes** (`Σ p_filesz`, what comes off the volume) and `map_max` = **64 MiB of MAPPED bytes** (`Σ p_memsz`, which this loader really allocates and zeroes — a RAM budget, not a reservation). K1 raised the single 32 MiB total from 2 MiB; the split exists because zero-initialized `.bss`/`.noptrbss` costs no file bytes, so charging it against a bound named for the file refused images the file could not even hold. ≤3 PT_LOADs | `kernel/src/elf.zig` (`load_max`, `map_max`, `max_segments`) |
 | GOOS=virelai link recipe | text base 0x10000 with its end ≤0x80000 (**448 KiB** of text), rodata base 0x80000 with its end ≤0x110000, data base 0x110000 | `tools/go/build-go.sh`'s layout guard (the guard exists because a shifted layout "loads but misbehaves on target") |
 | gap vaddr bound | every gap segment's vaddr below `gap_base_max` = 0x1000_0000 | `kernel/src/elf.zig:158` |
 | page tables | fixed **512×4 KiB (2 MiB) .bss carve-out, never reclaimed** — a *total-roots* budget | `kernel/src/mmu.zig:66-71`; `tables_used()`/`tables_capacity()` at `:146` |
@@ -542,7 +542,7 @@ merely compiled.
 ```bash
 # the guest walls
 sed -n '95,110p;180,190p' kernel/src/exec.zig          # exec_program_max, the buffer
-sed -n '155,170p' kernel/src/elf.zig                   # load_max, max_segments, gap_base_max
+sed -n '158,203p' kernel/src/elf.zig                   # gap_base_max, load_max, map_max, max_segments
 sed -n '64,72p;144,155p' kernel/src/mmu.zig            # the fixed table carve-out
 bash tools/verify-bss-budget.sh                        # 11,534,336 B, observed value in the log
 grep -n memorySize host/vm-runner/Sources/VMRunner/main.swift
@@ -724,7 +724,7 @@ vector delivered: `GOCMDCOMPILE.ELF version go1.27.1` and
 - Run 07, in-guest link: `HELLO2.ELF` (1,684,249 bytes, 3 PT_LOAD,
   sum memsz 1,224,708 = 0x12b004, writable page slack 0xf50). The host holds
   the product to EVERY rule `elf.zig`'s `parse_impl` enforces — segment count,
-  the `load_max` sum, `gap_base_max`, page alignment, W^X order,
+  the `load_max`/`map_max` sums, `gap_base_max`, page alignment, W^X order,
   entry-inside-segment-0 — plus the argv+envp slack, before run 08 may execute
   it. This is the first binary produced INSIDE the guest checked against the
   kernel's acceptance geometry.
@@ -925,3 +925,94 @@ say) owns the flip and the fork rebuild it implies. D4's boundary is unchanged:
 the toolchain payload stays host-staged, and the one boot that still runs the
 loop's product is a consequence of the uncharacterised third child in amendment
 8, not of the toolchain's provenance.
+
+## Amendment 10 — M72a (#1579): the acceptance bound splits into a file bound and a memory bound
+
+The bound this ADR declares in its table ("ELF load bound") was one number
+charged on `Σ p_memsz` (`kernel/src/elf.zig`, `load_max`). That made it a bound
+on MAPPED memory wearing the name of a bound on file bytes, and it refused every
+Go image carrying a large zero-initialized global, because `.bss`/`.noptrbss`
+adds no file bytes at all: `crypto/internal/fips140/drbg`'s `var memory
+entropy.ScratchBuffer` is 33,554,432 B of it (`crypto/internal/entropy/v1.0.0`,
+`type ScratchBuffer [1 << 25]byte`), and it is in the closure of every
+Charm-sized binary.
+
+The card's premise — "demand-backed BSS is not charged as if it were resident" —
+does not hold in this tree and the bound could therefore not simply be dropped.
+This loader *eagerly* allocates and zeroes every mapped page
+(`exec_static_elf_gap`: `alloc_pages(ceil(memsz / page_size))`, then a fill of
+`[filesz..memsz]`), so `Σ memsz` is the RAM an image takes out of the pool before
+its first instruction. A 1 GiB `.bss` accepted here would have become an
+`.out_of_memory` a moment later instead of a named refusal.
+
+Two bounds, each named for what it charges:
+
+| bound | charges | value | error (`elf.zig`) | `ExecResult` |
+| --- | --- | --- | --- | --- |
+| `load_max` | `Σ p_filesz` — the bytes read off the volume | 32 MiB (unchanged) | `segment_too_large` | `image_too_large` / `staging_too_large` as before |
+| `map_max` | `Σ p_memsz` — the pages allocated and zeroed | **64 MiB** | `map_too_large` (new) | `map_too_large` (new) |
+
+`load_max` is now a parser-level invariant rather than the operative bound: the
+segment file ranges are disjoint and inside the file (both still enforced), so
+`Σ filesz ≤ file size ≤ exec_image_max` (32 MiB) for any caller that bounds the
+file too. It stays because `parse`/`parse_head` are public entry points that do
+not. **64 MiB** for `map_max` is frozen here against the pool rather than
+against taste: `sysinfo`'s allocator line reads `free=0xde0b` (56,843 pages,
+222.0 MiB) on a fresh boot and `free=0xb68c` (46,732 pages, 182.5 MiB) with the
+boot apps up, so the bound admits a 2× FIPS scratch buffer plus the largest
+Charm-sized image seen while leaving the image's own heap most of the guest.
+
+Both totals are charged in the same loop as the per-segment checks, before any
+placement check, so an oversized mapping is refused by the bound that names
+MEMORY and never as `gap_too_high` (a statement about address space).
+
+### What else moved, and why
+
+* The oversized-file branch in `exec.zig` maps a parse error to its own name. It
+  used to fall through to `.staging_too_large`, whose message —
+  "…too large for the 0x200000-byte staging buffer (only a gap-layout static ELF
+  streams past it)" — was printed about exactly that shape: a gap-layout static
+  ELF that would have streamed. The new line says the map bound instead.
+* The staged ELF branch's `mem_total(image) > exec_program_max` charge is now
+  scoped to the shapes that really transit the buffer. `exec_static_elf_gap`
+  copies only each segment's FILE bytes (already proven ≤ `program.len`), so a
+  ≤2 MiB go binary whose segments map 50 MiB was being refused by the same false
+  "staging buffer" sentence.
+* `tools/lib/elf_rules.py` — the one host copy the two class-B specs
+  (`go-hello` run 07, `live-selfhost-go` run 01) run against a GUEST-BUILT ELF —
+  charged `Σ memsz` against `load_max`. Left alone it would have refused, from
+  the host and before any boot, images the kernel had just been taught to accept;
+  it now mirrors both bounds.
+* The FIPS toolchain gate (`tools/go/build-gotool.sh`, `tools/go/apply.sh`) is
+  KEPT, and `build-gotool.sh`'s rule check splits with the loader's. These two
+  images' measured `Σ memsz` is 58,254,964 B, which fits the new bound by
+  arithmetic — that is an inference, not a result: the unexcluded build has not
+  been booted, and retiring the gate is its own decision with its own evidence.
+
+### Evidence (observed, on this branch)
+
+`go-hello` **PASS 12/12 runs** (102 s, all of runs 01-10 re-run as regression):
+
+* run 11 — `tools/go/goloadbss.go`, 9,582,729 B on disk with `Σ filesz`
+  9,451,012 B and `Σ memsz` 51,559,756 B (its RW segment: `filesz` 8,416,256,
+  `memsz` 50,525,000, i.e. 42,108,744 B of `.noptrbss`). The old bound refused it
+  as `segment_too_large`; it now execs and prints its own banner, reading the
+  first and last byte of that 40 MiB tail back (`loadbss: scratch ends 1 2`), and
+  the guest's `datapages=12337` equals `ceil(RW p_memsz / 4096) + 1` computed on
+  the host from the same file — the argv+envp page included, so the mapping is
+  held to the image's own headers rather than to a magic constant.
+* run 12 — the same bytes with the RW `p_memsz` rewritten to 1 GiB:
+  `HUGEBSS.ELF: image maps too much memory (map bound 0x0000000004000000 bytes;
+  every PT_LOAD page is allocated and zeroed)`, with `serial-absent 'staging
+  buffer'` and a `sysinfo` after it proving the monitor kept reading.
+
+Class A: `zig build test` green — 4,185 tests, including the elf.zig loader tests
+(they admit the 40 MiB-`.bss` gap fixture and refuse its 1 GiB twin as
+`map_too_large`, asserting the refusal comes before placement) and a
+`kernel/tests/monitor_test.zig` case for the newly scoped staged path (a
+gap-layout image of 0x2100 B whose writable segment declares 3 MiB now EXECS on
+the staged path with `datapages=769` and a free-page delta of 867, where the old
+buffer charge refused it as `staging_too_large`). `zig fmt --check` clean, `just
+verify-portable` exit 0
+including `verify-bss-budget` (.bss 12,020,408 B / 13,631,488 B). Targeted class-B
+regressions for the changed exec seam: `live-el0-exec` 1/1, `live-exec` 1/1.

@@ -74,6 +74,9 @@ for prog in "${@:-$REPO/tools/go/hello.go}"; do
         govinet)    base="GOVINET" ;;
         govidns)    base="GOVIDNS" ;;
         gobig)      base="GOBIG" ;;
+        # M72a (#1579): the >32 MiB-`.noptrbss` fixture for the loader's
+        # mapped-memory bound (`go-hello` run 11).
+        goloadbss)  base="GOLOADBSS" ;;
         goread)     base="GOREAD" ;;
         gosyscall)  base="GOSYSCALL" ;;
         # M70c-S2 (#1544): the in-guest build-loop driver.
