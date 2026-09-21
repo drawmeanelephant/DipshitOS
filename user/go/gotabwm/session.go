@@ -96,6 +96,11 @@ func loadSession() {
 	stripDone = true
 	vi.ConsoleLine(MarkerSessionLoad + vi.Itoa64(int64(tabs.Count())))
 	vi.ConsoleLine(MarkerSessionTitles + sessionTitlesLine(&tabs))
+	// M71e (#1564): how many restored tabs came back carrying the frozen
+	// badge — the observable that the flag survived the round-trip. A
+	// separate line, not a field on the titles line above: that line's exact
+	// shape is asserted by go-wm-tabs run 02.
+	vi.ConsoleLine(MarkerSessionFreeze + vi.Itoa64(int64(tabs.FrozenCount())))
 	dumpOrder()
 	_ = writeLayoutFile()
 }

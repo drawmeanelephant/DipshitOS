@@ -7,11 +7,19 @@
 # 3 kernel + 3×4 Ms + 1 spare). The GOMAXPROCS=1 path still fits
 # (GOTABWM+GOEDIT+GOTERM = 9 Ms + kernel 3; idle stays max_tasks-1).
 #
-# THREE vgate_runs share one seeded host share (`vgate_share seed`):
+# SIX vgate_runs share one seeded host share (`vgate_share seed`):
 #   01  GOCALC+NOTE.ELF; pin-stay writes SESSION.TABS; last unsplit writes
 #       LAYOUT.txt (closed before the serial line that names it).
 #   02  GOTABWM only. Restores the session; then drops SESSION.TABS.
 #   03  GOEDIT+GOTERM, empty strip. Same two-tab choreography.
+#   04  M71e (#1564): GOCALC+NOTE.ELF, ctrl-shift-f freezes the focused tab
+#       before the pin-stay snapshot, so the frozen bit lands in SESSION.TABS.
+#   05  M71e (#1564): seat only, empty strip, no click. The start surface is
+#       asserted as PIXELS on a settled frame (capture keyed to an rx marker,
+#       not to `gotabwm: present` - the host grab races the guest present).
+#   06  M71e (#1564): seat only, empty strip. A click on the panel opens the
+#       launcher the surface advertises (serial only; the launcher covers the
+#       panel, so run 05 owns the pixel assertion).
 #
 # Seed wm=none and exec GOTABWM.ELF like go-wm-seat. No HID. No framebuffer
 # golden. Do not overload go-wm-seat or go-wm-default. Boot 01 `reorder 0->1`
@@ -42,7 +50,7 @@
 #
 # HOST PREREQUISITE: bash tools/go/build-note.sh -> .build/go/NOTE.ELF
 
-vgate_name go-wm-tabs "issues #1400–#1405/#1426: GOTABWM tabs + session + LAYOUT.txt + two Go ELFs on VZ"
+vgate_name go-wm-tabs "issues #1400–#1405/#1426 + #1564: GOTABWM tabs, session, LAYOUT.txt, frozen badge, start surface on VZ"
 vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 
@@ -506,3 +514,333 @@ vgate_assert 03 serial-contains 'rx-gotabwm-apps-ok'
 vgate_assert 03 serial-absent '[EXC] parking:'
 vgate_assert 03 serial-absent 'exited status=139'
 vgate_assert 03 serial-absent 'newosproc: sys_thread create failed'
+
+# Run 04 must start on an EMPTY strip: run 03's two-tab choreography writes
+# SESSION.TABS (M62e), and a later boot that restores it adds placeholder
+# tabs AND sets stripDone. Same clear go-wm-tabs already does before run 03.
+vgate_assert 03 python <<'PY'
+import os, sys
+stale = os.path.join(os.environ["VG_SHARE"], "SESSION.TABS")
+if os.path.exists(stale):
+    os.remove(stale)
+    print("cleared SESSION.TABS for run 04")
+PY
+
+# ---------------------------------------------------------------------------
+# Run 04 (M71e / #1564, M48 BT6): the frozen badge, end to end.
+#
+# Two clients as in run 01, because the session write lives in the two-tab
+# pin-stay choreography — that is what puts the flag on disk. The chord fires
+# on `gocalc: declare accepted`, well inside the choreography's hidChordHold
+# (20 ticks) before case 2 writes SESSION.TABS, so the badge is already set
+# when the file is written. `ctrl-shift-f` is Zig's BT6 binding; GOTABWM has
+# no conflicting ctrl-shift chord other than ctrl-shift-p.
+#
+# This is a BADGE, not a lock: the run also asserts the frozen tab is still
+# closed by the ordinary choreography (the `tab close` count below), because
+# Zig's close path checks `frozen` nowhere and GOTABWM must not start.
+vgate_file script-04.txt <<'EOF'
+set GOMAXPROCS=1
+wm
+exec GOTABWM.ELF
+EOF
+
+vgate_file script2-04.txt <<'EOF'
+dui focus 0
+exec GOCALC.ELF
+exec NOTE.ELF
+EOF
+
+vgate_file script3-04.txt <<'EOF'
+wm
+dui
+echo rx-gotabwm-freeze-ok
+EOF
+
+vgate_run 04 -- \
+    --screen '$RUN_DIR/screen-04' \
+    --via-virtio \
+    --script '$RUN_DIR/script-04.txt' \
+    --script2 '$RUN_DIR/script2-04.txt' \
+    --script2-after 'gotabwm: win focus' \
+    --input-chords 'ctrl-shift-f' \
+    --input-chords-after 'gocalc: declare accepted' \
+    --script3 '$RUN_DIR/script3-04.txt' \
+    --script3-after 'wm: unregistered, shim resumed' \
+    --script-expect 'rx-gotabwm-freeze-ok' --timeout 300
+
+vgate_assert 04 serial-contains 'exec: loaded GOTABWM.ELF'
+vgate_assert 04 serial-contains 'gotabwm: registered'
+vgate_assert 04 serial-contains 'gotabwm: freeze id='
+vgate_assert 04 serial-absent 'gotabwm: thaw id='
+vgate_assert 04 serial-contains 'gotabwm: session write n=2'
+vgate_assert 04 serial-count 'gotabwm: tab close id=' 2
+vgate_assert 04 serial-contains 'gotabwm: tabs empty'
+vgate_assert 04 serial-contains 'gotabwm OK'
+vgate_assert 04 serial-contains 'wm: unregistered, shim resumed'
+vgate_assert 04 serial-contains 'rx-gotabwm-freeze-ok'
+vgate_assert 04 serial-absent '[EXC] parking:'
+vgate_assert 04 serial-absent 'exited status=139'
+vgate_assert 04 python <<'PY'
+import os, sys
+# The frozen bit must actually be ON DISK: this is the half of the card that
+# was missing (the codec knew 0x02; GOTABWM dropped it on encode AND decode).
+# Offsets match tabsv2.go: header 6, record 69, title 32 -> flags at 6+32=38
+# for record 0 and 6+69+32=107 for record 1.
+p = os.path.join(os.environ["VG_SHARE"], "SESSION.TABS")
+try:
+    b = open(p, "rb").read()
+except FileNotFoundError:
+    sys.exit("SESSION.TABS missing on the share")
+if len(b) < 6 + 69 * 2:
+    sys.exit("SESSION.TABS too short: %d bytes" % len(b))
+if b[0] != 2 or b[2] != 2:
+    sys.exit("version=%d count=%d want 2/2" % (b[0], b[2]))
+flags = [b[38], b[107]]
+frozen = [i for i, f in enumerate(flags) if f & 0x02]
+if len(frozen) != 1:
+    sys.exit("want exactly one frozen record, flags=%s" % [hex(f) for f in flags])
+title = b[6:38] if frozen[0] == 0 else b[75:107]
+title = title.split(b"\x00", 1)[0].decode()
+print("SESSION.TABS flags=%s frozen record=%d title=%s" % (
+    [hex(f) for f in flags], frozen[0], title))
+PY
+
+# Run 05 needs the same empty strip as run 04 (run 04 just wrote a session).
+vgate_assert 04 python <<'PY'
+import os, sys
+stale = os.path.join(os.environ["VG_SHARE"], "SESSION.TABS")
+if os.path.exists(stale):
+    os.remove(stale)
+    print("cleared SESSION.TABS for run 05")
+PY
+
+# ---------------------------------------------------------------------------
+# Run 05 (M71e / #1564): the empty-strip start surface, as PIXELS.
+#
+# Seat-only, no client, no click. The seat paints the surface on every tick
+# with an empty strip and prints `gotabwm: start-surface` once. The screenshot
+# is taken at the rx marker below, NOT at `gotabwm: present`: the host's
+# framebuffer grab races the guest's present, so a capture keyed to that line
+# reads the pre-paint buffer about half the time (observed 2026-09-21 — two
+# runs with identical serial, one showing Bg across the whole panel rect and
+# one Surface). Triggering script3 from `gotabwm: present` and capturing on its
+# echo puts many ticks between the paint and the grab, which is the idiom
+# go-wm-seat run 03 already uses.
+#
+# The panel rect is centred: (1280-336)/2=472, (720-76)/2=322.
+vgate_file script-05.txt <<'EOF'
+set GOMAXPROCS=1
+wm
+exec GOTABWM.ELF
+EOF
+
+vgate_file script2-05.txt <<'EOF'
+dui focus 0
+EOF
+
+vgate_file script3-05.txt <<'EOF'
+wm
+dui
+echo rx-gotabwm-start-ok
+EOF
+
+vgate_run 05 -- \
+    --screen '$RUN_DIR/screen-05' \
+    --screenshot-after 'rx-gotabwm-start-ok' \
+    --via-virtio \
+    --script '$RUN_DIR/script-05.txt' \
+    --script2 '$RUN_DIR/script2-05.txt' \
+    --script2-after 'gotabwm: win focus' \
+    --script3 '$RUN_DIR/script3-05.txt' \
+    --script3-after 'gotabwm: present' \
+    --script-expect 'rx-gotabwm-start-ok' --timeout 300
+
+vgate_assert 05 serial-contains 'gotabwm: registered'
+vgate_assert 05 serial-contains 'gotabwm: start-surface'
+vgate_assert 05 serial-absent 'gotabwm: session load n='
+vgate_assert 05 serial-absent 'gotabwm: tab open id='
+# No click in this run: the frame must be the bare empty-strip desktop.
+vgate_assert 05 serial-absent 'gotabwm: launcher open n='
+vgate_assert 05 serial-absent 'gotabwm: ptr'
+# This run ends at the rx marker (the seat never exits), so no `gotabwm OK`
+# and no `wm: unregistered` here: run 06 owns both, because its script3 fires
+# on the seat's exit rather than on `gotabwm: present`.
+vgate_assert 05 serial-contains 'rx-gotabwm-start-ok'
+vgate_assert 05 serial-absent '[EXC] parking:'
+vgate_assert 05 serial-absent 'exited status=139'
+vgate_assert 05 python <<'PY'
+import os, sys
+ser = open(os.environ["VG_SER"], errors="replace").read().splitlines()
+surf = next((i for i, l in enumerate(ser) if l == "gotabwm: start-surface"), -1)
+rx = next((i for i, l in enumerate(ser) if l == "rx-gotabwm-start-ok"), -1)
+if surf < 0:
+    sys.exit("no start-surface marker")
+if rx <= surf:
+    sys.exit("rx marker precedes the surface paint (surf@%d rx@%d)" % (surf, rx))
+print("start-surface@%d, capture marker@%d (%d lines later)" % (surf, rx, rx - surf))
+PY
+# The glob must name the MARKER capture, not the periodic one: `--screenshot-after`
+# writes `<base>-after.png` while the fixed 5/10/15 s captures write
+# `<base>-<t>s.png`. The 15s frame is taken AFTER the click opened the launcher,
+# whose own panel covers the start surface (observed 2026-09-21).
+vgate_assert 05 snapshot 'screen-05-after*' <<'PY'
+import sys, zlib, struct
+from collections import Counter
+path = sys.argv[1]
+d = open(path, "rb").read()
+if d[:8] != b"\x89PNG\r\n\x1a\n":
+    sys.exit("not a PNG")
+pos = 8; idat = b""; w = h = ct = 0
+while pos < len(d):
+    ln, typ = struct.unpack(">I4s", d[pos:pos+8])
+    data = d[pos+8:pos+8+ln]
+    if typ == b"IHDR":
+        w, h, bd, ct = struct.unpack(">IIBB", data[:10])
+    elif typ == b"IDAT":
+        idat += data
+    pos += 12 + ln
+raw = zlib.decompress(idat)
+bpp = 4 if ct == 6 else 3
+stride = w * bpp
+out = bytearray(); prev = bytearray(stride); i = 0
+for y in range(h):
+    f = raw[i]; i += 1
+    line = bytearray(raw[i:i+stride]); i += stride
+    if f == 1:
+        for x in range(bpp, stride): line[x] = (line[x] + line[x-bpp]) & 0xff
+    elif f == 2:
+        for x in range(stride): line[x] = (line[x] + prev[x]) & 0xff
+    elif f == 3:
+        for x in range(stride):
+            a = line[x-bpp] if x >= bpp else 0
+            line[x] = (line[x] + ((a + prev[x]) >> 1)) & 0xff
+    elif f == 4:
+        for x in range(stride):
+            a = line[x-bpp] if x >= bpp else 0
+            b = prev[x]; c = prev[x-bpp] if x >= bpp else 0
+            p = a + b - c
+            pa, pb, pc = abs(p-a), abs(p-b), abs(p-c)
+            pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
+            line[x] = (line[x] + pr) & 0xff
+    out += line
+    prev = line
+def px(x, y):
+    k = (y * w + x) * bpp
+    return out[k], out[k+1], out[k+2]
+def near(rgb, token, tol=3):
+    return all(abs(a - b) <= tol for a, b in zip(rgb, token))
+# Tokens (theme.Dark): Surface 0x222d35, Bg 0x182026, Accent 0x3b82f6.
+# The capture applies a small colour-space shift, hence tol=3 (measured in
+# M71c: ChromeBg 0x11171c read back as 0x12171c).
+surface = (0x22, 0x2d, 0x35)
+bg = (0x18, 0x20, 0x26)
+accent = (0x3b, 0x82, 0xf6)
+scale = w / 1280.0
+x0, y0, pw, ph = 472, 322, 336, 76
+panel = Counter()
+for y in range(int(y0 * scale), int((y0 + ph) * scale)):
+    for x in range(int(x0 * scale), int((x0 + pw) * scale)):
+        panel[px(x, y)] += 1
+if not panel:
+    sys.exit("empty panel rect")
+modal, mn = panel.most_common(1)[0]
+if not near(modal, surface):
+    sys.exit("panel modal %r is not Surface %r" % (modal, surface))
+# The desktop outside the panel (and clear of the bottom-right chrome panel)
+# must still be the blank Bg fill — the surface is painted OVER it, not instead.
+desk = Counter()
+for y in range(int(420 * scale), int(520 * scale)):
+    for x in range(int(80 * scale), int(400 * scale)):
+        desk[px(x, y)] += 1
+dmodal, _ = desk.most_common(1)[0]
+if not near(dmodal, bg):
+    sys.exit("desktop modal %r is not Bg %r" % (dmodal, bg))
+# The 2px accent rule on the panel's left edge is the seat's identity mark and
+# the pixel anchor that proves this is seat chrome, not a hosted app window.
+#
+# It is tested by BLUE DOMINANCE, not a token match: the capture's shift is
+# large on saturated blue (measured 2026-09-21: Accent 0x3b82f6 = (59,130,246)
+# reads back as (78,128,238) at the rule's centre — +19 red — because a 2px
+# rule at scale 2 lands on fractional pixels and blends with its neighbours).
+# Nothing else on this frame is blue-dominant: Bg and Surface are dark grey
+# and the text is near-white.
+n = 0
+for y in range(int((y0 + 2) * scale), int((y0 + ph - 2) * scale)):
+    r, g, b = px(int((x0 + 0.5) * scale), y)
+    if b > 150 and b > r + 40 and b > g + 40:
+        n += 1
+if n == 0:
+    sys.exit("no accent rule on the start surface's left edge")
+print("start surface: panel modal %r (%d px), desktop %r, accent rule %d rows" % (
+    modal, mn, dmodal, n))
+PY
+
+# ---------------------------------------------------------------------------
+# Run 06 (M71e / #1564): the surface's affordance — the panel IS the click
+# target. Run 05 proves the pixels; this run proves the hit-test, and it carries
+# no pixel assertion of its own because the launcher it opens covers the panel
+# (launchX=240 launchW=800 vs the panel's 472..808 x 322..398). Serial only,
+# so the present-race that forced run 05 onto an rx marker cannot bite here.
+vgate_assert 05 python <<'PY'
+import os, sys
+stale = os.path.join(os.environ["VG_SHARE"], "SESSION.TABS")
+if os.path.exists(stale):
+    os.remove(stale)
+    print("cleared SESSION.TABS for run 06")
+PY
+
+vgate_file script-06.txt <<'EOF'
+set GOMAXPROCS=1
+wm
+exec GOTABWM.ELF
+EOF
+
+vgate_file script2-06.txt <<'EOF'
+dui focus 0
+EOF
+
+vgate_file script3-06.txt <<'EOF'
+wm
+dui
+echo rx-gotabwm-start-click-ok
+EOF
+
+vgate_run 06 -- \
+    --screen '$RUN_DIR/screen-06' \
+    --via-virtio \
+    --script '$RUN_DIR/script-06.txt' \
+    --script2 '$RUN_DIR/script2-06.txt' \
+    --script2-after 'gotabwm: win focus' \
+    --pointer-virtio '640,360,c' \
+    --pointer-virtio-after 'gotabwm: present' \
+    --script3 '$RUN_DIR/script3-06.txt' \
+    --script3-after 'wm: unregistered, shim resumed' \
+    --script-expect 'rx-gotabwm-start-click-ok' --timeout 300
+
+vgate_assert 06 serial-contains 'gotabwm: registered'
+vgate_assert 06 serial-contains 'gotabwm: start-surface'
+vgate_assert 06 serial-absent 'gotabwm: session load n='
+vgate_assert 06 serial-absent 'gotabwm: tab open id='
+vgate_assert 06 serial-contains 'gotabwm: ptr'
+# The click at 640,360 lands inside the panel rect (472..808 x 322..398) and
+# opens the launcher the surface advertises.
+vgate_assert 06 serial-contains 'gotabwm: launcher open n='
+vgate_assert 06 serial-contains 'gotabwm OK'
+vgate_assert 06 serial-contains 'wm: unregistered, shim resumed'
+vgate_assert 06 serial-contains 'rx-gotabwm-start-click-ok'
+vgate_assert 06 serial-absent '[EXC] parking:'
+vgate_assert 06 serial-absent 'exited status=139'
+vgate_assert 06 python <<'PY'
+import os, sys
+ser = open(os.environ["VG_SER"], errors="replace").read().splitlines()
+surf = next((i for i, l in enumerate(ser) if l == "gotabwm: start-surface"), -1)
+launch = next((i for i, l in enumerate(ser) if l.startswith("gotabwm: launcher open n=")), -1)
+if surf < 0:
+    sys.exit("no start-surface marker")
+if launch < 0:
+    sys.exit("the click did not open the launcher")
+if launch <= surf:
+    sys.exit("launcher opened before the surface was painted (surf@%d launch@%d)" % (surf, launch))
+print("start-surface@%d then launcher open@%d" % (surf, launch))
+PY

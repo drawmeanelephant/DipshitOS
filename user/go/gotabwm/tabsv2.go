@@ -54,7 +54,7 @@ func (s *TabStrip) encodeTabsV2(seq uint16) ([]byte, bool) {
 	for i := 0; i < n; i++ {
 		t0 := s.tabs[i]
 		off += putFixed(buf[off:off+tabsV2TitleMax], t0.Title)
-		buf[off] = pinFlag(t0)
+		buf[off] = tabFlags(t0)
 		off++
 		off += putFixed(buf[off:off+tabsV2GroupMax], "")
 		off += putFixed(buf[off:off+tabsV2BinMax], t0.Bin)
@@ -66,6 +66,9 @@ type tabsV2Record struct {
 	Title  string
 	Bin    string
 	Pinned bool
+	// M71e (#1564): the frozen badge round-trips too. The codec already
+	// defines bit 0x02; GOTABWM dropped it on both encode and decode.
+	Frozen bool
 }
 
 func decodeTabsV2(b []byte) (seq uint16, recs []tabsV2Record, active int, hasActive bool, ok bool) {
@@ -97,6 +100,7 @@ func decodeTabsV2(b []byte) (seq uint16, recs []tabsV2Record, active int, hasAct
 		recs[i].Title = readFixed(b[off : off+tabsV2TitleMax])
 		off += tabsV2TitleMax
 		recs[i].Pinned = b[off]&FlagPinned != 0
+		recs[i].Frozen = b[off]&FlagFrozen != 0
 		off++
 		off += tabsV2GroupMax // group unused
 		recs[i].Bin = readFixed(b[off : off+tabsV2BinMax])
@@ -125,6 +129,7 @@ func (s *TabStrip) applyTabsV2(raw []byte) (uint16, bool) {
 		// empty: a generic `.tabs` file must round-trip, not grow a guessed bin.
 		s.tabs[i].Bin = recs[i].Bin
 		s.tabs[i].Pinned = recs[i].Pinned
+		s.tabs[i].Frozen = recs[i].Frozen
 	}
 	if hasActive && active >= 0 && active < s.count {
 		s.focus = active

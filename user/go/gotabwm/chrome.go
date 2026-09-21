@@ -43,6 +43,9 @@ import (
 const (
 	MarkerClock       = "gotabwm: clock "
 	MarkerClockSource = "gotabwm: clock-source "
+	// M71e (#1564): the empty-strip start surface, painted by the seat (D2:
+	// seat chrome, never DESKTOP.BIN).
+	MarkerStartSurface = "gotabwm: start-surface"
 )
 
 // clockEpochPath is the session launcher's wall-time file: the host's LOCAL
@@ -280,4 +283,99 @@ func paintChrome(scan []byte, width, height int, clock string) int {
 	written += drawText8(pix, width, maxH, tx, ty, clock, tok.Ink)
 	written += drawText8(pix, width, maxH, tx+font.Measure(clock, chromeScale)+8, ty, statusText, tok.Muted)
 	return written
+}
+
+// --- M71e (#1564): the empty-strip start surface ---------------------------
+//
+// An empty strip used to leave nothing on the canvas but the blank desktop
+// fill, so a seat with no tabs had no home affordance at all. This paints one
+// bounded panel over the blank fill, from M69c tokens, and is the click/
+// Enter target that summons the M69c2 launcher.
+//
+// Deliberately NOT a port of Zig's BT4 grid. Zig's `draw_start_surface`
+// (user/src/tabwm.zig:3441) is a rail-native apps GRID summoned by Ctrl+T /
+// the `+ New tab` pill; it is not an empty-strip state, and GOTABWM has no
+// Ctrl+T binding. The card asked for the empty-strip reading, so this is seat
+// chrome that names the seat and points at the launcher GOTABWM already owns.
+const (
+	StartW       = 336
+	StartH       = 76
+	startPad     = 12
+	startLineGap = 14
+)
+
+// startHint points at the real affordance. The launcher chord is a fact of
+// this seat (hid.go / launcher.go), not a label invented here.
+const startHint = "Ctrl+Space: apps"
+
+// startSurfaceLogged guards the one-shot marker, exactly like chromeLogged.
+var startSurfaceLogged bool
+
+// startSurfaceRect is the panel's rect: centred, inset from every edge so it
+// clears a capture's own ~6px frame (the M71b/M71c lesson). Pure. A scanout
+// too small shrinks the panel and then gives up with the zero rect.
+func startSurfaceRect(width, height int) (x, y, w, h int) {
+	w, h = StartW, StartH
+	if width < w+2*chromeInset {
+		w = width - 2*chromeInset
+	}
+	if height < h+2*chromeInset {
+		h = height - 2*chromeInset
+	}
+	if w <= 0 || h <= 0 || width <= 0 || height <= 0 {
+		return 0, 0, 0, 0
+	}
+	return (width - w) / 2, (height - h) / 2, w, h
+}
+
+// paintStartSurface paints the panel and returns the pixel count written.
+// Tokens only (M69c) — no hex lives here. Pure: it edits the caller's
+// scanout slice and touches nothing else, which is what the host test pins.
+func paintStartSurface(scan []byte, width, height int) int {
+	if width <= 0 || height <= 0 || len(scan) < 4 {
+		return 0
+	}
+	x, y, w, h := startSurfaceRect(width, height)
+	if w <= 0 || h <= 0 {
+		return 0
+	}
+	pixN := len(scan) / 4
+	pix := unsafe.Slice((*uint32)(unsafe.Pointer(&scan[0])), pixN)
+	maxH := pixN / width
+	if maxH <= 0 {
+		return 0
+	}
+	tok := theme.Current
+	written := fillRect(pix, width, maxH, x, y, w, h, tok.Surface)
+	written += fillRect(pix, width, maxH, x, y, w, tok.BorderW, tok.Border)
+	// The same 2px accent rule the clock panel carries: one seat identity.
+	written += fillRect(pix, width, maxH, x, y, 2, h, tok.Accent)
+	tx, ty := x+startPad, y+startPad
+	written += drawText8(pix, width, maxH, tx, ty, statusText, tok.Ink)
+	written += drawText8(pix, width, maxH, tx, ty+startLineGap, startHint, tok.InkMuted)
+	return written
+}
+
+// startSurfaceTick paints the start surface for this tick and emits the
+// one-shot marker only after a paint actually wrote pixels — the chromeTick
+// discipline, so the marker can never outrun the paint.
+func startSurfaceTick(scan []byte) {
+	if paintStartSurface(scan, vi.ScanoutWidth, vi.ScanoutHeight) == 0 {
+		return
+	}
+	if startSurfaceLogged {
+		return
+	}
+	startSurfaceLogged = true
+	vi.ConsoleLine(MarkerStartSurface)
+}
+
+// startSurfaceHit reports whether a scanout point falls inside the start
+// surface panel — the click target that opens the launcher.
+func startSurfaceHit(px, py uint32) bool {
+	x, y, w, h := startSurfaceRect(vi.ScanoutWidth, vi.ScanoutHeight)
+	if w <= 0 || h <= 0 {
+		return false
+	}
+	return int(px) >= x && int(px) < x+w && int(py) >= y && int(py) < y+h
 }

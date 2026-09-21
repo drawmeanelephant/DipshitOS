@@ -292,6 +292,126 @@ func TestDuplicateFocusedHonestNoop(t *testing.T) {
 	}
 }
 
+func TestFreezeMarkerShapes(t *testing.T) {
+	cases := []struct{ got, want string }{
+		{MarkerFreeze, "gotabwm: freeze id="},
+		{MarkerThaw, "gotabwm: thaw id="},
+		{MarkerSessionFreeze, "gotabwm: session freeze n="},
+	}
+	for _, c := range cases {
+		if c.got != c.want {
+			t.Fatalf("marker = %q want %q", c.got, c.want)
+		}
+	}
+}
+
+// M71e (#1564): Freeze/Thaw are a flag machine on an existing tab (D1), and
+// deliberately NOT a lock — Zig checks `frozen` nowhere in its close path.
+func TestFreezeThawMachine(t *testing.T) {
+	var s TabStrip
+	if s.Freeze(1) {
+		t.Fatal("Freeze on an empty strip must be false")
+	}
+	if s.Thaw(1) {
+		t.Fatal("Thaw on an empty strip must be false")
+	}
+	if !s.OpenTab(3, "Calc") || !s.OpenTab(4, "Edit") {
+		t.Fatal("OpenTab")
+	}
+	if !s.Freeze(4) {
+		t.Fatal("Freeze Edit")
+	}
+	if !s.At(1).Frozen || s.At(0).Frozen {
+		t.Fatalf("wrong tab frozen: %+v %+v", s.At(0), s.At(1))
+	}
+	if s.Freeze(4) {
+		t.Fatal("Freeze is idempotent: a second call must report no change")
+	}
+	if s.Freeze(99) {
+		t.Fatal("Freeze of a missing id must be false")
+	}
+	if n := s.FrozenCount(); n != 1 {
+		t.Fatalf("FrozenCount = %d want 1", n)
+	}
+	if !s.Thaw(4) {
+		t.Fatal("Thaw Edit")
+	}
+	if s.Thaw(4) {
+		t.Fatal("Thaw is idempotent")
+	}
+	if n := s.FrozenCount(); n != 0 {
+		t.Fatalf("FrozenCount = %d want 0", n)
+	}
+	// Freeze must not disturb pin, focus, order, or closability.
+	s.Freeze(3)
+	if !s.FocusTab(3) {
+		t.Fatal("FocusTab")
+	}
+	if id, ok := s.Focused(); !ok || id != 3 {
+		t.Fatalf("focus = %d ok=%v", id, ok)
+	}
+	if !s.CloseTab(3) {
+		t.Fatal("a frozen tab must still close (badge, not lock)")
+	}
+}
+
+// The frozen badge rides the rail: the frozen cell carries Warning pixels and
+// a thawed one carries none.
+func TestPaintRailFrozenBadge(t *testing.T) {
+	const w, h = 200, 40
+	scan := make([]byte, w*h*4)
+	pix := asUint32(scan)
+	var s TabStrip
+	if !s.OpenTab(3, "Calc") {
+		t.Fatal("OpenTab")
+	}
+	thawed := paintRail(scan, w, h, RailHeight, &s)
+	if n := countRGB(pix, w, RailHeight, railFrozenRGB()); n != 0 {
+		t.Fatalf("a thawed rail painted %d badge pixels", n)
+	}
+	// Clear and re-paint with the badge on.
+	for i := range pix {
+		pix[i] = 0
+	}
+	if !s.Freeze(3) {
+		t.Fatal("Freeze")
+	}
+	frozen := paintRail(scan, w, h, RailHeight, &s)
+	badge := countRGB(pix, w, RailHeight, railFrozenRGB())
+	if badge == 0 {
+		t.Fatal("a frozen rail painted no Warning badge pixels")
+	}
+	if frozen <= thawed {
+		t.Fatalf("frozen rail wrote %d pixels, thawed %d — the badge must add pixels", frozen, thawed)
+	}
+	// The badge is inset from the band's top and bottom, so it never touches
+	// the rail's edges (it reads on both idle and focused cells).
+	for row := 0; row < h; row++ {
+		for col := 0; col < w; col++ {
+			if pix[row*w+col]&0xffffff != railFrozenRGB() {
+				continue
+			}
+			if row == 0 || row == RailHeight-1 {
+				t.Fatalf("badge pixel at rail edge row=%d", row)
+			}
+		}
+	}
+}
+
+// countRGB counts pixels matching rgb across the top `rows` rows of a
+// width-strided word buffer.
+func countRGB(pix []uint32, width, rows int, rgb uint32) int {
+	n := 0
+	for row := 0; row < rows; row++ {
+		for col := 0; col < width; col++ {
+			if row*width+col < len(pix) && pix[row*width+col]&0xffffff == rgb {
+				n++
+			}
+		}
+	}
+	return n
+}
+
 func TestNextIDWraps(t *testing.T) {
 	var s TabStrip
 	if _, ok := s.NextID(); ok {

@@ -39,7 +39,7 @@ func stripToTabcodec(s TabStrip) tabcodec.State {
 		t0 := s.At(i)
 		st.Tabs[i] = tabcodec.Tab{
 			Title: t0.Title,
-			Flags: pinFlag(t0),
+			Flags: tabFlags(t0),
 			Bin:   t0.Bin,
 		}
 	}
@@ -146,6 +146,81 @@ func TestApplyPreservesEmptyBin(t *testing.T) {
 	}
 	if got.Tabs[0].Bin != "" {
 		t.Fatalf("re-encode bin = %q want empty", got.Tabs[0].Bin)
+	}
+}
+
+// M71e (#1564): the frozen badge is `.tabs` v2 bit 0x02, and it must survive
+// BOTH directions — the guest must write it where tabcodec reads it, and it
+// must come back when a writer set it.
+func TestFrozenBadgeRoundTripsTabcodec(t *testing.T) {
+	if FlagFrozen != tabcodec.FlagFrozen {
+		t.Fatalf("FlagFrozen = %#x tabcodec.FlagFrozen = %#x", FlagFrozen, tabcodec.FlagFrozen)
+	}
+	if FlagFrozen != 0x02 {
+		t.Fatalf("FlagFrozen = %#x want 0x02 (the frozen bit)", FlagFrozen)
+	}
+	// Guest -> tabcodec: freeze the second tab and check the byte tabcodec sees.
+	s := pinnedCalcNotepad(t)
+	if !s.Freeze(4) {
+		t.Fatal("Freeze Notepad")
+	}
+	st := stripToTabcodec(s)
+	st.Seq = 1
+	want, err := tabcodec.Encode(st)
+	if err != nil {
+		t.Fatalf("tabcodec.Encode: %v", err)
+	}
+	got, ok := s.encodeTabsV2(1)
+	if !ok {
+		t.Fatal("encodeTabsV2")
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("frozen guest bytes != tabcodec\n got %x\nwant %x", got, want)
+	}
+	decoded, err := tabcodec.Decode(got)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if decoded.Tabs[1].Flags&tabcodec.FlagFrozen == 0 {
+		t.Fatalf("record 1 flags %#x has no frozen bit", decoded.Tabs[1].Flags)
+	}
+	if decoded.Tabs[0].Flags&tabcodec.FlagFrozen != 0 {
+		t.Fatalf("record 0 flags %#x must stay thawed", decoded.Tabs[0].Flags)
+	}
+
+	// tabcodec -> guest: a file written by the other language restores frozen.
+	foreign := tabcodec.State{Tabs: []tabcodec.Tab{
+		{Title: "Calc", Flags: tabcodec.FlagPinned | tabcodec.FlagFrozen, Bin: "GOCALC.ELF"},
+		{Title: "Notepad", Bin: "NOTE.ELF"},
+	}}
+	raw, err := tabcodec.Encode(foreign)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	var restored TabStrip
+	if _, ok := restored.applyTabsV2(raw); !ok {
+		t.Fatal("applyTabsV2")
+	}
+	if !restored.At(0).Frozen || !restored.At(0).Pinned {
+		t.Fatalf("tab 0 = %+v want pinned+frozen", restored.At(0))
+	}
+	if restored.At(1).Frozen {
+		t.Fatalf("tab 1 = %+v want thawed", restored.At(1))
+	}
+	if n := restored.FrozenCount(); n != 1 {
+		t.Fatalf("FrozenCount = %d want 1", n)
+	}
+	// A re-encode reproduces the same flag byte (the round-trip is lossless).
+	out, ok := restored.encodeTabsV2(0)
+	if !ok {
+		t.Fatal("re-encode")
+	}
+	again, err := tabcodec.Decode(out)
+	if err != nil {
+		t.Fatalf("Decode re-encode: %v", err)
+	}
+	if again.Tabs[0].Flags != (tabcodec.FlagPinned | tabcodec.FlagFrozen) {
+		t.Fatalf("re-encode flags %#x want pinned|frozen", again.Tabs[0].Flags)
 	}
 }
 
