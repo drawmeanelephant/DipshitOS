@@ -10,7 +10,7 @@ WEB.ELF | Web | w | dock=true
 GOSH.ELF | Shell | s
 TOP.BIN | Task Manager | p
 SYSMON.BIN | System Monitor | y
-SETTINGS.BIN | Settings | g
+GOSET.ELF | Settings | g
 DOC.BIN | Document Viewer | o
 VIEW.BIN | Image Viewer | v
 ZC.BIN | Zig Compiler | z

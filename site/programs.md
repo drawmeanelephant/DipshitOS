@@ -47,7 +47,7 @@ dynamic executables and shared libraries listed below):
 | `RESMON.BIN` | `user/src/resmon.zig` | M22 D10: the resource monitor |
 | `DEVCONS.BIN` | `user/src/devcons.zig` | M22 D14: the developer console |
 | `EDIT.BIN` | `user/src/edit.zig` | M23: the text editor (E1–E25: undo/redo, goto, tabs, syntax, console split) |
-| `SETTINGS.BIN` | `user/src/settings_panel.zig` | the persistent settings panel |
+| `SETTINGS.BIN` | `user/src/settings_panel.zig` | the persistent settings panel — M71f (#1565): RETIRED, `user/src/settings_panel.zig` deleted; the panel is the Go `GOSET.ELF` (`user/go/settings`), writing the same schema-v2 `SETTINGS.TXT` the seat reads |
 | `M21DEMO.BIN` | `user/src/m21demo.zig` | M21 W1/W2 tiling + master-detail gate payload |
 | `SPIN.BIN` | `user/src/spin.zig` | Arc5 #246: the hostile-consumer (CPU) test |
 | `SYSMON.BIN` | `user/src/sysmon.zig` | M27 G6: the system monitor dashboard |
