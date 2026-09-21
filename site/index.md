@@ -66,9 +66,9 @@ and [[roadmap]]:
 which hosts Go EL0 clients — the shell `GOSH.ELF`, the editor `NOTE.ELF`, the
 calculator `GOCALC.ELF`, the browser `WEB.ELF` — as tabs over the `WM_RPC`
 contract; Zig `TABWM.BIN` is retained by decision (ADR 0034) as the
-`settings set wm tabwm` fallback. The tracker is **open and active** — the
-daily-driver floor (M69) and the moonshot arcs (M70) are in flight (the Go
-toolchain now builds and runs programs in-guest, `live-selfhost-go`) — so read
+`settings set wm tabwm` fallback. The tracker is **open** — M71 seat honesty
+and M72 Charm TUI (window tty + a scanout-proven Bubble Tea hello). The Go
+toolchain already builds and runs programs in-guest (`live-selfhost-go`). Read
 [`docs/status.md`](https://github.com/drawmeanelephant/DipshitOS/blob/main/docs/status.md)
 for what is landed today instead of a date-stamped claim from this page.
 

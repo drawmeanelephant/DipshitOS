@@ -53,10 +53,8 @@ the `sys_tcp_connect` wall-clock fix (issue #613, claim 2572).
 
 ## Current
 
-**There is no active milestone.** Every GitHub milestone is closed, the issue
-tracker is at **zero open issues** (2026-08-28), and no claim is active on a
-branch — the project sits between milestones, with no M32 defined yet. The
-canonical answer to "what's next" lives in the repository's
+M69 and M70 are closed (GitHub milestones 51 and 49). Open product path:
+**M71 seat honesty** (#1559) and **M72 Charm TUI** (#1578). Canonical table:
 `docs/status.md`.
 
 Honest-bound edges that remain planned regardless of milestone:
