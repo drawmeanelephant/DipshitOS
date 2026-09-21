@@ -167,4 +167,3 @@ const ImplementsGetwd = true
 // ESRCH: "no such process". Nothing here produces it (there is no signal or
 // wait path), but os/exec_unix.go compares against it.
 const ESRCH Errno = 40
-

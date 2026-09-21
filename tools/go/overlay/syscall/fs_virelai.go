@@ -38,10 +38,10 @@ import "unsafe"
 const dirFdBase = 1 << 20
 
 type dirHandle struct {
-	path   string // the share path this fd lists
-	live   bool
-	rows   int // rows already delivered
-	sat    bool // the last window filled completely (there may be more)
+	path string // the share path this fd lists
+	live bool
+	rows int  // rows already delivered
+	sat  bool // the last window filled completely (there may be more)
 }
 
 var virDirs [8]dirHandle
@@ -428,7 +428,6 @@ func Open(path string, mode int, perm uint32) (fd int, err error) {
 		}
 	}
 
-
 	// Directory probe. Read-only opens only: a write/create open of a
 	// directory is the kernel's business (MODE_DIR creation). The probe
 	// cannot produce a wrong answer — any failure falls through to the real
@@ -483,7 +482,7 @@ func Openat(dirfd int, path string, mode int, perm uint32) (fd int, err error) {
 }
 
 const (
-	AT_FDCWD = -0x64
+	AT_FDCWD            = -0x64
 	AT_SYMLINK_NOFOLLOW = 0x100 // accepted and ignored: no symlinks exist
 )
 
@@ -754,11 +753,11 @@ func Seek(fd int, offset int64, whence int) (int64, error) {
 	return target, nil
 }
 
-func Dup(fd int) (int, error)          { return -1, ENOSYS }
-func Dup3(oldfd, newfd, flags int) error { return ENOSYS }
-func Fcntl(fd int, cmd int, arg int) (int, error) { return -1, ENOSYS }
+func Dup(fd int) (int, error)                           { return -1, ENOSYS }
+func Dup3(oldfd, newfd, flags int) error                { return ENOSYS }
+func Fcntl(fd int, cmd int, arg int) (int, error)       { return -1, ENOSYS }
 func FcntlFlock(fd uintptr, cmd int, lk *Flock_t) error { return ENOSYS }
-func SetNonblock(fd int, nonblocking bool) error { return nil }
+func SetNonblock(fd int, nonblocking bool) error        { return nil }
 
 // Flock_t exists for os/exec's shape; locking is not a kernel capability.
 type Flock_t struct {
@@ -843,14 +842,14 @@ func Rename(from, to string) error {
 	return nil
 }
 
-func Link(oldpath, newpath string) error  { return ENOSYS }
-func Symlink(oldpath, newpath string) error { return ENOSYS }
+func Link(oldpath, newpath string) error                  { return ENOSYS }
+func Symlink(oldpath, newpath string) error               { return ENOSYS }
 func Readlink(path string, buf []byte) (n int, err error) { return 0, EINVAL }
-func Chmod(path string, mode uint32) error { return ENOSYS }
-func Chown(path string, uid, gid int) error { return ENOSYS }
-func Lchown(path string, uid, gid int) error { return ENOSYS }
-func Fchmod(fd int, mode uint32) error     { return ENOSYS }
-func Fchown(fd int, uid, gid int) error    { return ENOSYS }
+func Chmod(path string, mode uint32) error                { return ENOSYS }
+func Chown(path string, uid, gid int) error               { return ENOSYS }
+func Lchown(path string, uid, gid int) error              { return ENOSYS }
+func Fchmod(fd int, mode uint32) error                    { return ENOSYS }
+func Fchown(fd int, uid, gid int) error                   { return ENOSYS }
 
 // ----- stat --------------------------------------------------------------
 

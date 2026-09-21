@@ -108,7 +108,7 @@ func main() {
 
 	// The hash of the bytes READ (never of a constant), for the host to
 	// recompute over the file it staged.
-	println("goread: fnv 0x"+hex64(hash))
+	println("goread: fnv 0x" + hex64(hash))
 
 	// The measurement itself. A rate is a machine observation, not a verdict,
 	// so the gate never asserts these numbers — they are recorded in ADR 0035.

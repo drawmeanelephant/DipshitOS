@@ -58,7 +58,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Ensure the claim:stale label exists
         run: gh label create "claim:stale" --description "Claim idle 14+ days (staleness sweep); removed on the next human update" --color FBCA04 2>/dev/null || true
@@ -85,7 +85,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Remove claim:stale if this is human activity
         run: bash tools/status/unlabel-guard.sh
