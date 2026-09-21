@@ -12,7 +12,16 @@
 #      handshake, never a GET; no silent downgrade)
 #   12 GOFETCH.ELF https in-process against the runner TLS responder
 #      (IP/port/SNI = 10.0.0.2:24533 leaf.example.com). FETCHS.BIN is not
-#      exec'd.
+#      exec'd. This boot INHERITS the live-tls13 probe, retired in M71k
+#      (#1570): same responder script, same port, same fixture identity.
+#      The retired spec grew the probe from "GOFETCH works" to "a guest
+#      process reached a real TLS 1.3 peer"; here that is the same act.
+#      It also asserted the negotiated suite as a serial marker. On the Go
+#      path that is enforced in code rather than echoed: user/go/tls
+#      offers exactly one suite (client.go `suiteOffered = 0x1301`) and
+#      rejects any other ServerHello choice (client.go:574), pinned by
+#      client_test.go -- so a green `gofetch: handshake ok` cannot hide a
+#      different suite. No new marker is owed.
 #
 # HOST PREREQUISITE (fails honestly when missing):
 #   .build/go/WEB.ELF     -- `bash tools/go/build-web.sh browser WEB`
@@ -144,8 +153,9 @@ PY
 vgate_setup_python <<'PY'
 # Boot 12: TLS 1.3 responder on the same fixture identity the Go shelf
 # vendors (leaf.example.com, AutoClaw test CA). Bound to loopback:24533 and
-# reached through the runner's :relay, matching live-tls13. Long deadline
-# because this spec has many boots before 12.
+# reached through the runner's :relay -- the probe retired from live-tls13
+# in M71k (#1570); this boot is its coverage. Long deadline because this
+# spec has many boots before 12.
 import os, subprocess, sys
 rd = os.environ["RUN_DIR"]
 cfx = os.path.join("user", "src", "lib", "tls", "vectors", "fx")
@@ -572,6 +582,9 @@ PY
 # The host TLS 1.3 fixture peer (setup hook) is relayed at 10.0.0.2:24533.
 # GOFETCH dials in-process via tls.Dial; FETCHS.BIN is not exec'd. The
 # handshake and GET complete in this process (single goroutine).
+# M71k (#1570): FETCHS.BIN no longer exists, so the serial-absent probe
+# below can no longer be proven "by a binary that is not built" -- it is
+# the identity the retired live-tls13 spec named.
 vgate_run 12 -- \
     --screen '$RUN_DIR/screen' \
     --via-virtio --cvc-snap \

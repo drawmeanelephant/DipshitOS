@@ -1,10 +1,11 @@
 # go-fetch-https.spec -- M67c #1448: pin in-process HTTPS (M67b) and
-# demote FETCHS.BIN to an unreferenced fallback.
+# demote FETCHS.BIN to an unreferenced fallback (deleted outright in M71k #1570).
 #
 # GOFETCH.ELF dials the runner TLS responder (tlsresponder.py +
 # --net-tcp-respond :relay) with the vendored AutoClaw fixture CA.
-# Public-internet endpoints are out of scope. FETCHS.BIN is still built
-# (reachable) and is not staged or exec'd (unreferenced). Negatives
+# Public-internet endpoints are out of scope. No Zig TLS helper is built any
+# more (M71k #1570 deleted FETCHS.BIN); nothing is staged or exec'd for the
+# Go apps. Negatives
 # (wrong name, expired, bad chain) each fail closed; none hang.
 #
 # HOST PREREQUISITE: bash tools/go/build-web.sh fetch GOFETCH
@@ -50,11 +51,10 @@ if not os.path.exists(gofetch):
     sys.exit("GOFETCH.ELF missing (expected " + gofetch + ") - build it first: "
              "bash tools/go/build-web.sh fetch GOFETCH")
 shutil.copy(gofetch, os.path.join(share, "GOFETCH.ELF"))
-# Demotion: FETCHS.BIN stays built (zig-out) but is not staged for Go apps.
-fetchs = os.path.join("zig-out", "bin", "FETCHS.BIN")
-print("go-fetch-https: staged GOFETCH.ELF (%d); FETCHS.BIN reachable=%s staged=no" % (
-    os.path.getsize(os.path.join(share, "GOFETCH.ELF")),
-    "yes" if os.path.exists(fetchs) else "no-zig-out"))
+# M71k (#1570): the Zig TLS helper is deleted outright, so there is no
+# FETCHS.BIN left to un-stage. Nothing was ever staged for the Go apps.
+print("go-fetch-https: staged GOFETCH.ELF (%d); no Zig TLS helper exists" %
+      os.path.getsize(os.path.join(share, "GOFETCH.ELF")))
 
 for port in (24550, 24551, 24552, 24553):
     subprocess.run(["sh", "-c", "lsof -ti tcp:%d | xargs kill -9" % port],
