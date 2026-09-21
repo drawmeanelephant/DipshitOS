@@ -77,7 +77,10 @@ for y in range(66, 446, 2):
             bright += 1
 print(f"term client region: fg={fg} bg={bg} red={red} blue_bg={blue_bg} bright={bright}")
 assert bg >= 200, f"terminal background not present (bg={bg})"
-assert fg >= 60, f"terminal shell glyphs not rendered (fg={fg})"
+# `2J` deliberately erases the echoed printf command. At this steady-state
+# snapshot only the fresh prompt is terminal-green (observed 40 pixels on VZ),
+# so 20 is a twofold safety margin rather than the old pre-clear count.
+assert fg >= 20, f"terminal shell glyphs not rendered (fg={fg})"
 assert red >= 10, f"ANSI red foreground not painted (red={red})"
 assert blue_bg >= 10, f"ANSI blue background not painted (blue_bg={blue_bg})"
 assert bright >= 10, f"ANSI bright/bold foreground not painted (bright={bright})"

@@ -147,6 +147,9 @@ pub const Screen = struct {
     /// bytes, so serial and network front-ends remain byte-for-byte unchanged.
     style: CellStyle = default_cell_style,
     /// DECTCEM (`CSI ? 25 h/l`) controls only the painted block cursor.
+    /// Unlike grid content and rendition, this terminal-mode bit is shared
+    /// across primary and alternate screens: changing cursor visibility while
+    /// an alternate screen is active remains in effect after it is restored.
     cursor_visible: bool = true,
     /// M49 SD5 (#1132): the effective column count (8..grid_cols). A window
     /// resize reflows the grid to the new client width.
