@@ -9,18 +9,24 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/colorprofile"
 
+	"virelai/tabapp"
 	"virelai/vi"
 )
 
 // main wires Bubble Tea to the VirelaiOS seams and reports the outcome through
 // console markers. With --selftest it then checks its own results and prints a
-// machine-readable verdict to the guest console, so the proof is produced
-// inside the guest rather than on the machine that built it.
+// machine-readable verdict, so the proof is produced inside the guest.
+//
+// --window sends the frames to a real TABWM window instead of the console: the
+// kernel paints its tty grid into the window, so the app is visible on the
+// guest's own screen (and therefore in a VM framebuffer capture). Input stays
+// the scripted key source either way, which keeps the run deterministic.
 func main() {
 	rounds, seed := defaultRounds, int64(defaultSeed)
 	keys, out := defaultKeys, defaultOut
 	width, height := 80, 24
-	sinkStdout, selfTest := false, false
+	sinkStdout, selfTest, windowed := false, false, false
+	keyDelayMs := 90
 
 	args := os.Args[1:]
 	for i := 0; i < len(args); i++ {
@@ -56,13 +62,44 @@ func main() {
 			sinkStdout = next() == "stdout"
 		case "--selftest":
 			selfTest = true
+		case "--window":
+			windowed = true
+		case "--key-delay":
+			if n, err := strconv.Atoi(next()); err == nil && n >= 0 {
+				keyDelayMs = n
+			}
 		}
 	}
 
 	sink := consoleWriter{}
+	var ta *tabapp.TabApp
+	var ttyFD int64 = -1
 	if sinkStdout {
 		sink.alt = os.Stdout
 		mirror = os.Stdout
+	}
+	if windowed {
+		ta = tabapp.Init(tabapp.Config{
+			Name: "BTMATH.ELF", Title: "Bubble Math",
+			X: 80, Y: 60, W: 900, H: 520,
+		})
+		if ta == nil {
+			note("btmath: window open failed")
+			vi.Exit(3)
+		}
+		h, rc := vi.FileOpen("/dev/tty", vi.ModeRead|vi.ModeWrite)
+		if rc < 0 {
+			note("btmath: no /dev/tty")
+			ta.CloseAndExit(4)
+		}
+		ttyFD = h
+		if r := vi.TtyAttachWindow(ta.Win); r != 0 {
+			note("btmath: tty attach failed")
+			vi.FileClose(uint32(h))
+			ta.CloseAndExit(5)
+		}
+		sink.alt = windowWriter{w: fdWriter(ttyFD)}
+		note("btmath: window id=" + strconv.Itoa(ta.Win))
 	}
 
 	note(markerStart)
@@ -71,7 +108,7 @@ func main() {
 	// a size, and it cannot detect colour support either. Both are declared.
 	program := tea.NewProgram(
 		newModel(seed, rounds),
-		tea.WithInput(&keyScript{keys: parseKeys(keys), delay: 90 * time.Millisecond}),
+		tea.WithInput(&keyScript{keys: parseKeys(keys), delay: time.Duration(keyDelayMs) * time.Millisecond}),
 		tea.WithOutput(sink),
 		tea.WithColorProfile(colorprofile.TrueColor),
 		tea.WithWindowSize(width, height),
@@ -80,6 +117,13 @@ func main() {
 	final, err := program.Run()
 	if err != nil {
 		note("btmath: run error " + err.Error())
+	}
+	if windowed {
+		_ = vi.TtyAttach(vi.TtyDetach)
+		vi.FileClose(uint32(ttyFD))
+		note("btmath: window closed")
+	}
+	if err != nil {
 		vi.Exit(1)
 	}
 
@@ -97,32 +141,54 @@ func main() {
 		" wrong=" + strconv.Itoa(played.incorrect))
 	note(markerQuit)
 
+	rc := 0
 	if selfTest {
-		rc := runSelfTest(played, ok)
+		rc = runSelfTest(played, ok)
 		if rc == 0 {
 			note(markerOK)
 		}
-		vi.Exit(rc)
+	} else if !ok {
+		rc = 2
+	} else {
+		note(markerOK)
 	}
-	if !ok {
-		vi.Exit(2)
+	if windowed {
+		ta.CloseAndExit(rc)
 	}
-	note(markerOK)
-	vi.Exit(0)
+	vi.Exit(rc)
+}
+
+// fdWriter writes straight to an open guest file descriptor (the tty).
+type fdWriter int64
+
+func (f fdWriter) Write(p []byte) (int, error) {
+	n, _ := vi.FileWriteAll(uint32(f), p)
+	return n, nil
+}
+
+// windowWriter clears the tty grid before each frame. The kernel's grid stores
+// plain bytes and handles CSI J/H only, so a clear-then-draw is what makes
+// Bubble Tea's successive frames replace one another instead of piling up.
+type windowWriter struct{ w interface{ Write([]byte) (int, error) } }
+
+func (w windowWriter) Write(p []byte) (int, error) {
+	if _, err := w.w.Write([]byte("\x1b[2J")); err != nil {
+		return 0, err
+	}
+	return w.w.Write(p)
 }
 
 // runSelfTest checks the session the guest just played against the documented
 // outcome and prints one line per check. It runs IN the guest: the console is
 // the evidence, and a reviewer reads the verdict without leaving the OS.
 //
-// Exit status: 0 all checks passed, 1 any failed. Nothing here needs a shell,
-// a Unix tool, or any host-side script.
+// Exit status: 0 all checks passed, 1 any failed. Nothing here needs a shell.
 func runSelfTest(m model, saved bool) int {
 	type check struct {
-		name string
-		got  string
-		want string
-		ok   bool
+		name     string
+		got      string
+		want     string
+		ok       bool
 	}
 	frames := strings.Join(m.frames, "\n")
 	has := func(s string) bool { return strings.Contains(frames, s) }
