@@ -8,11 +8,11 @@
 # ELF and either rebuilds (ensure) or refuses (check).
 #
 # Usage:
-#   bash tools/go/ensure-guest-elf.sh check     GOSH|GOSSHD
-#   bash tools/go/ensure-guest-elf.sh ensure    GOSH|GOSSHD
-#   bash tools/go/ensure-guest-elf.sh stamp     GOSH|GOSSHD [elf-path]
+#   bash tools/go/ensure-guest-elf.sh check     GOSH|GOSSHD|GOSSH
+#   bash tools/go/ensure-guest-elf.sh ensure    GOSH|GOSSHD|GOSSH
+#   bash tools/go/ensure-guest-elf.sh stamp     GOSH|GOSSHD|GOSSH [elf-path]
 #   bash tools/go/ensure-guest-elf.sh needed-by <spec>
-#   bash tools/go/ensure-guest-elf.sh hash      GOSH|GOSSHD
+#   bash tools/go/ensure-guest-elf.sh hash      GOSH|GOSSHD|GOSSH
 #
 # check:   fail closed with a named ensure-guest-elf error if missing/stale
 #          (no rebuild — that is what vgate.sh calls before zig build / boot).
@@ -27,6 +27,7 @@
 #   ENSURE_GUEST_ELF_TOOLCHAIN    override the toolchain id mixed into the hash
 #   ENSURE_GUEST_ELF_BUILD_GOSH   override the GOSH builder (tests)
 #   ENSURE_GUEST_ELF_BUILD_GOSSHD override the GOSSHD builder (tests)
+#   ENSURE_GUEST_ELF_BUILD_GOSSH  override the GOSSH builder (tests)
 #
 set -euo pipefail
 
@@ -51,6 +52,7 @@ args = sys.argv[4:]
 APPS = {
     "GOSH": "tools/go/build-gosh.sh",
     "GOSSHD": "tools/go/build-sshd.sh",
+    "GOSSH": "tools/go/build-ssh.sh",
 }
 
 
@@ -73,7 +75,7 @@ def stamp_path(app):
 
 def builder_rel(app):
     if app not in APPS:
-        die("ensure-guest-elf: unknown app %s (want GOSH or GOSSHD)" % app, 2)
+        die("ensure-guest-elf: unknown app %s (want GOSH, GOSSHD, or GOSSH)" % app, 2)
     return APPS[app]
 
 
@@ -246,7 +248,7 @@ if cmd == "needed-by":
         text = open(path, "r", encoding="utf-8", errors="replace").read()
     except OSError as e:
         die("ensure-guest-elf: cannot read spec %s: %s" % (path, e), 2)
-    for app in ("GOSH", "GOSSHD"):
+    for app in ("GOSH", "GOSSHD", "GOSSH"):
         if spec_needs(text, app):
             sys.stdout.write(app + "\n")
     sys.exit(0)
@@ -278,8 +280,8 @@ PY
 
 require_app() {
     case "${1:-}" in
-        GOSH|GOSSHD) ;;
-        *) usage "check|ensure|stamp GOSH|GOSSHD" ;;
+        GOSH|GOSSHD|GOSSH) ;;
+        *) usage "check|ensure|stamp GOSH|GOSSHD|GOSSH" ;;
     esac
 }
 
@@ -300,7 +302,14 @@ run_builder() {
                 bash "$ROOT/tools/go/build-sshd.sh"
             fi
             ;;
-        *) usage "ensure GOSH|GOSSHD" ;;
+        GOSSH)
+            if [ -n "${ENSURE_GUEST_ELF_BUILD_GOSSH:-}" ]; then
+                bash -c "$ENSURE_GUEST_ELF_BUILD_GOSSH"
+            else
+                bash "$ROOT/tools/go/build-ssh.sh"
+            fi
+            ;;
+        *) usage "ensure GOSH|GOSSHD|GOSSH" ;;
     esac
 }
 
@@ -338,5 +347,5 @@ case "$cmd" in
         python_helper stamp "$1"
         python_helper check "$1"
         ;;
-    *) usage "check|ensure|stamp GOSH|GOSSHD | needed-by <spec> | hash GOSH|GOSSHD" ;;
+    *) usage "check|ensure|stamp GOSH|GOSSHD|GOSSH | needed-by <spec> | hash GOSH|GOSSHD|GOSSH" ;;
 esac

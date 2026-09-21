@@ -6,14 +6,14 @@
 // HAZARD (ADR 0025 D4): the IETF draft names K_1/K_2 inverted relative to
 // OpenSSH. K_2 is key[0:32] (AEAD); K_1 is key[32:64] (length).
 
-package main
+package sshlib
 
 const (
 	chachaKeyLen   = 32
 	chachaNonceLen = 8
 	chachaBlockLen = 64
-	polyTagLen     = 16
-	sshCipherKey   = 64
+	PolyTagLen     = 16
+	CipherKeyLen   = 64
 	sshLengthLen   = 4
 )
 
@@ -45,7 +45,7 @@ func quarterRound(s *[16]uint32, a, b, c, d int) {
 	s[b] = rotl32(s[b], 7)
 }
 
-func chachaBlock(key []byte, counter uint64, nonce []byte) [chachaBlockLen]byte {
+func ChaChaBlock(key []byte, counter uint64, nonce []byte) [chachaBlockLen]byte {
 	var state [16]uint32
 	state[0] = 0x61707865
 	state[1] = 0x3320646e
@@ -81,7 +81,7 @@ func chachaXOR(in, key []byte, counter uint64, nonce []byte) []byte {
 	ctr := counter
 	off := 0
 	for off < len(in) {
-		ks := chachaBlock(key, ctr, nonce)
+		ks := ChaChaBlock(key, ctr, nonce)
 		ctr++
 		take := chachaBlockLen
 		if take > len(in)-off {
@@ -95,7 +95,7 @@ func chachaXOR(in, key []byte, counter uint64, nonce []byte) []byte {
 	return out
 }
 
-func poly1305Tag(message, key []byte) [16]byte {
+func Poly1305Tag(message, key []byte) [16]byte {
 	var r [5]uint32
 	r[0] = load32LE(key[0:]) & 0x3ffffff
 	r[1] = (load32LE(key[3:]) >> 2) & 0x3ffff03
@@ -225,50 +225,50 @@ func seqNonce(seq uint64) [8]byte {
 	}
 }
 
-type sshCipher struct {
-	key [sshCipherKey]byte
+type Cipher struct {
+	Key [CipherKeyLen]byte
 }
 
-func (c *sshCipher) polyKey(seq uint64) [32]byte {
+func (c *Cipher) polyKey(seq uint64) [32]byte {
 	nonce := seqNonce(seq)
-	block := chachaBlock(c.key[0:32], 0, nonce[:])
+	block := ChaChaBlock(c.Key[0:32], 0, nonce[:])
 	var out [32]byte
 	copy(out[:], block[:32])
 	return out
 }
 
-func (c *sshCipher) decryptLength(enc []byte, seq uint64) uint32 {
+func (c *Cipher) DecryptLength(enc []byte, seq uint64) uint32 {
 	nonce := seqNonce(seq)
-	plain := chachaXOR(enc[:4], c.key[32:64], 0, nonce[:])
+	plain := chachaXOR(enc[:4], c.Key[32:64], 0, nonce[:])
 	return uint32(plain[0])<<24 | uint32(plain[1])<<16 | uint32(plain[2])<<8 | uint32(plain[3])
 }
 
-func (c *sshCipher) seal(plaintext []byte, seq uint64) (ct, tag []byte) {
+func (c *Cipher) Seal(plaintext []byte, seq uint64) (ct, tag []byte) {
 	nonce := seqNonce(seq)
 	ct = make([]byte, len(plaintext))
-	encLen := chachaXOR(plaintext[:4], c.key[32:64], 0, nonce[:])
+	encLen := chachaXOR(plaintext[:4], c.Key[32:64], 0, nonce[:])
 	copy(ct[:4], encLen)
-	encBody := chachaXOR(plaintext[4:], c.key[0:32], 1, nonce[:])
+	encBody := chachaXOR(plaintext[4:], c.Key[0:32], 1, nonce[:])
 	copy(ct[4:], encBody)
 	pkey := c.polyKey(seq)
-	t := poly1305Tag(ct, pkey[:])
+	t := Poly1305Tag(ct, pkey[:])
 	tag = t[:]
 	return ct, append([]byte(nil), tag...)
 }
 
-func (c *sshCipher) open(ciphertext, tag []byte, seq uint64) []byte {
+func (c *Cipher) Open(ciphertext, tag []byte, seq uint64) []byte {
 	if len(ciphertext) < 4 || len(tag) != 16 {
 		return nil
 	}
 	pkey := c.polyKey(seq)
-	expect := poly1305Tag(ciphertext, pkey[:])
+	expect := Poly1305Tag(ciphertext, pkey[:])
 	var got [16]byte
 	copy(got[:], tag)
 	if !ctEq16(expect, got) {
 		return nil
 	}
 	nonce := seqNonce(seq)
-	plainLen := chachaXOR(ciphertext[:4], c.key[32:64], 0, nonce[:])
-	plainBody := chachaXOR(ciphertext[4:], c.key[0:32], 1, nonce[:])
+	plainLen := chachaXOR(ciphertext[:4], c.Key[32:64], 0, nonce[:])
+	plainBody := chachaXOR(ciphertext[4:], c.Key[0:32], 1, nonce[:])
 	return append(plainLen, plainBody...)
 }

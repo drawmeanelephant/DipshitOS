@@ -5,7 +5,7 @@
 // Field arithmetic reuses the Curve25519 fe51 limbs in x25519.go. Pinned to
 // RFC 8032 §7.1 TEST 1–3.
 
-package main
+package sshlib
 
 import "math/bits"
 
@@ -29,7 +29,7 @@ func init() {
 }
 
 func feFromLEHex(s string) fe51 {
-	b, ok := parseHex(s)
+	b, ok := ParseHex(s)
 	if !ok || len(b) != 32 {
 		panic("ed25519: bad field constant")
 	}
@@ -325,13 +325,13 @@ func add256to512(x [8]uint64, y [4]uint64) [8]uint64 {
 	return x
 }
 
-func edDerivePublic(seed [32]byte) [32]byte {
+func EdDerivePublic(seed [32]byte) [32]byte {
 	h := sha512Sum(seed[:])
 	a := clampScalar(h[:])
 	return edEncode(edScalarMult(edBasePoint(), a[:]))
 }
 
-func edSign(msg []byte, seed [32]byte) [64]byte {
+func EdSign(msg []byte, seed [32]byte) [64]byte {
 	h := sha512Sum(seed[:])
 	a := clampScalar(h[:])
 	bp := edBasePoint()
@@ -358,14 +358,14 @@ func edSign(msg []byte, seed [32]byte) [64]byte {
 	var sig [64]byte
 	copy(sig[:32], rEnc[:])
 	copy(sig[32:], sBytes[:])
-	wipe(h[:])
-	wipe(a[:])
-	wipe(rBytes[:])
-	wipe(kBytes[:])
+	Wipe(h[:])
+	Wipe(a[:])
+	Wipe(rBytes[:])
+	Wipe(kBytes[:])
 	return sig
 }
 
-func edVerify(sig [64]byte, msg []byte, pk [32]byte) bool {
+func EdVerify(sig [64]byte, msg []byte, pk [32]byte) bool {
 	aPoint, ok := edDecompress(pk)
 	if !ok {
 		return false

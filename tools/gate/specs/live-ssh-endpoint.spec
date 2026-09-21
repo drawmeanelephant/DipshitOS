@@ -1,6 +1,7 @@
-# live-ssh-endpoint.spec -- M51 SSH5 (#1172, ADR 0025 D8) class-B positive.
+# live-ssh-endpoint.spec -- M51 SSH5 (#1172, ADR 0025 D8) class-B positive,
+# retargeted onto GOSSH.ELF by M71j (#1569).
 #
-# The guest client SSH.BIN dials the runner-hosted minimal SSH-2 responder
+# The guest client GOSSH.ELF dials the runner-hosted minimal SSH-2 responder
 # (`--net-tcp-respond 10.0.0.2:2222:ssh`): curve25519-sha256 KEX against a
 # pinned ssh-ed25519 host key (RFC 8032 TEST 1), publickey auth with the
 # TS5 `ssh-user-ed25519` seed (RFC 8032 TEST 2), one session channel, one
@@ -8,16 +9,18 @@
 # KEX/auth/exec log. TX is paced one encrypted <=192-byte segment per guest
 # ACK (the guest kernel RX is a single 192-byte slot). Hermetic via --net.
 # Class B (Apple silicon VZ).
+#
+# HOST PREREQ:
+#   bash tools/go/build-ssh.sh -> .build/go/GOSSH.ELF
 
-vgate_name live-ssh-endpoint "M51 SSH5: SSH.BIN KEX+publickey+exec against the runner's pinned SSH-2 responder"
+vgate_name live-ssh-endpoint "M71j: GOSSH.ELF KEX+publickey+exec against the runner's pinned SSH-2 responder"
 vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
-vgate_fmt user/src/*.zig user/src/lib/ssh/*.zig build.zig
 
 vgate_file script-1.txt <<'EOF'
 net ip 10.0.0.1
 net arp 10.0.0.2
-exec SSH.BIN alice@10.0.0.2:2222 VIRELAI-GATE-EXEC
+exec GOSSH.ELF alice@10.0.0.2:2222 VIRELAI-GATE-EXEC
 echo ssh-launched
 EOF
 
@@ -27,9 +30,13 @@ echo ssh-endpoint-done
 EOF
 
 vgate_setup_python <<'PY'
-import os
+import os, shutil, sys
 run = os.environ["RUN_DIR"]
-share = os.path.join(run, "share")
+share = os.environ.get("VG_SHARE") or os.path.join(run, "share")
+src = os.path.join(".build", "go", "GOSSH.ELF")
+if not os.path.exists(src):
+    sys.exit("GOSSH.ELF missing (expected " + src + ") - build it first: bash tools/go/build-ssh.sh")
+shutil.copy(src, os.path.join(share, "GOSSH.ELF"))
 os.makedirs(os.path.join(share, "SSH"), exist_ok=True)
 # RFC 8032 §7.1 TEST 2 seed: the client identity (the responder pins TEST 2).
 open(os.path.join(share, "SECRETS.TXT"), "w").write(
@@ -41,6 +48,7 @@ open(os.path.join(share, "SSH", "KNOWN_HOSTS"), "w").write(
     "#v1\n"
     "10.0.0.2\t2222\tssh-ed25519\td75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a\n"
 )
+print("staged GOSSH.ELF (%d bytes)" % os.path.getsize(os.path.join(share, "GOSSH.ELF")))
 PY
 
 vgate_run 01 -- --net '$RUN_DIR/cap.bin' --net-arp-respond 10.0.0.2 \

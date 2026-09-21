@@ -103,6 +103,11 @@ go-gosh:
 go-sshd:
     bash tools/go/build-sshd.sh
 
+# Build the M71j in-guest SSH-2 client (#1569): .build/go/GOSSH.ELF.
+# HOST PREREQUISITE for the live-ssh-endpoint/negative/nocred class-B gates.
+go-ssh:
+    bash tools/go/build-ssh.sh
+
 # Compile the AArch64 UEFI application and kernel image (class A — zig build)
 build:
     zig build

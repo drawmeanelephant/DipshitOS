@@ -4,6 +4,7 @@
 - Date: 2026-09-15
 - Amended: 2026-09-16 (M60 / #1297 — no new Zig EL0 apps; first leftover `EDIT.BIN` deleted)
 - Amended: 2026-09-21 (M71k / #1570 — the EL0 HTTPS consumer is Go; `FETCHS.BIN` deleted, `lib/tls` is host-side interop)
+- Amended: 2026-09-21 (M71j / #1569 — the EL0 SSH-2 client is Go; `SSH.BIN` deleted, `lib/ssh` wire/packet/stream stay for SSHPACKET.BIN)
 - Issue: #1293 (this document), umbrella #1292, M60 #1297
 - Related: ADR 0001 (Zig as guest language — narrowed here), ADR 0007
   (syscall ABI; kernel changes still ride amendments of that file only),
@@ -66,7 +67,9 @@ embeds them.
 - No porting crypto "because pivot". TLS was a Zig *helper*
   (`FETCHS.BIN` / `lib/tls` over TCP, ADR 0029) until M71k (#1570) deleted
   the EL0 binary: HTTPS is Go in-process and `lib/tls` survives only as
-  host-side interop. SSH stays `SSH.BIN` until M71j (#1569).
+  host-side interop. SSH was `SSH.BIN` until M71j (#1569) deleted it:
+  the EL0 client is `GOSSH.ELF` over `user/go/sshlib`; `lib/ssh`
+  wire/packet/stream stay for `SSHPACKET.BIN`.
 - No `settings set wm` / boot-default flip before M59. AGENTS.md's
   "do not change the boot default" rule yields only on that card. **#1298 is
   that card, and it has landed**: the compiled `wm` default is `gotabwm`, so
@@ -166,7 +169,7 @@ TABWM remain hosted leftovers; TLS/SSH remain helpers.
 - Whether the interactive shell (`SH.BIN`) flips in this arc or after
   M60. D2 says "eventually"; no card above moves it.
 - Go ports of TLS or SSH. (TLS landed in M67b and retired the helper in
-  M71k; the SSH client is M71j #1569.)
+  M71k; the SSH client landed in M71j #1569.)
 - Deleting Zig TABWM (M60, after the default has already flipped).
 
 ## Amendment (M71k / #1570, 2026-09-21) — the TLS helper retires
@@ -196,4 +199,23 @@ EL0 binary. The last thing keeping it in the tree was its own gate.
 - **The "no porting crypto" rule is unchanged.** The Go TLS client was
   written for its own card (M67b), not derived from `lib/tls`.
 
-SSH remains `SSH.BIN` until M71j (#1569) does the same for it.
+SSH remained `SSH.BIN` until M71j (#1569); see the amendment below.
+
+## Amendment (M71j / #1569, 2026-09-21) — the SSH client retires
+
+M51 shipped `SSH.BIN`. M70g G1 already moved the **server** to
+`GOSSHD.ELF`. M71j deletes the last M51 product binary.
+
+- **The EL0 SSH-2 client is Go.** `GOSSH.ELF` (`user/go/ssh/`) speaks
+  ADR 0025 D2 over `vi.Dial`. The three client gates
+  (`live-ssh-endpoint`, `live-ssh-negative`, `live-ssh-nocred`) stage
+  `.build/go/GOSSH.ELF`. `SSH.BIN` and `user/src/ssh.zig` are gone,
+  with the Zig client modules nothing else linked.
+- **`lib/ssh` wire/packet/stream stay.** `SSHPACKET.BIN` still proves
+  the stream adapter (`live-ssh-packet`). Same shape as `lib/tls`
+  after M71k: host-side / packet-layer proof, not a second shipped
+  client.
+- **The "no porting crypto" rule is unchanged.** The Go client reuses
+  `user/go/sshlib/` (split out of `user/go/sshd/` so GOSSHD and GOSSH
+  share one crate). ADR 0023 D2 stands.
+- **GOSSHD is not this card.** The in-guest server (#1491) stays.

@@ -51,24 +51,24 @@ func TestOpenSSHCipherPinnedVector(t *testing.T) {
 		"9b8b2b829dd18d2a35ff82d9")
 	wantTag := mustHex(t, "95349e855bf02c298ef775f2d1a7e8b8")
 	var c sshCipher
-	copy(c.key[:], key)
-	ct, tag := c.seal(plain, 7)
+	copy(c.Key[:], key)
+	ct, tag := c.Seal(plain, 7)
 	if !bytes.Equal(ct, wantCT) {
 		t.Fatalf("ciphertext =\n%s\nwant\n%s", encodeHex(ct), encodeHex(wantCT))
 	}
 	if !bytes.Equal(tag, wantTag) {
 		t.Fatalf("tag = %s want %s", encodeHex(tag), encodeHex(wantTag))
 	}
-	if c.decryptLength(ct[:4], 7) != 0x48 {
-		t.Fatalf("length = %d want 0x48", c.decryptLength(ct[:4], 7))
+	if c.DecryptLength(ct[:4], 7) != 0x48 {
+		t.Fatalf("length = %d want 0x48", c.DecryptLength(ct[:4], 7))
 	}
-	got := c.open(ct, tag, 7)
+	got := c.Open(ct, tag, 7)
 	if !bytes.Equal(got, plain) {
 		t.Fatalf("open mismatch")
 	}
 	bad := append([]byte(nil), tag...)
 	bad[0] ^= 1
-	if c.open(ct, bad, 7) != nil {
+	if c.Open(ct, bad, 7) != nil {
 		t.Fatal("tampered tag opened")
 	}
 }
@@ -200,29 +200,29 @@ func TestServerKexAuthExec(t *testing.T) {
 
 	var logs []string
 	srv := newServer(serverConfig{
-		hostSeed:  hostSeed,
-		keys:      []AuthKey{{User: "alice", Pub: userPub}},
-		cookie:    cookie,
-		ephemeral: bob[:],
-		run: func(cmd string) ([]byte, uint32, error) {
+		HostSeed:  hostSeed,
+		Keys:      []AuthKey{{User: "alice", Pub: userPub}},
+		Cookie:    cookie,
+		Ephemeral: bob[:],
+		Run: func(cmd string) ([]byte, uint32, error) {
 			if cmd != "echo VIRELAI-SSH-SERVER-OK" {
 				t.Fatalf("exec cmd = %q", cmd)
 			}
 			return []byte("VIRELAI-SSH-SERVER-OK\n"), 0, nil
 		},
-		log: func(s string) { logs = append(logs, s) },
+		Log: func(s string) { logs = append(logs, s) },
 	})
 
 	cl := newScripted(t, alice, userSeed)
 	out := srv.Feed(cl.hello())
 	cl.takePlain(t, out)
 	out = srv.Feed(cl.ecdhInit())
-	cl.finishKex(t, out, srv.hostPub)
+	cl.finishKex(t, out, srv.HostPub)
 
 	var w sshWriter
-	w.byte(msgServiceRequest)
-	w.strS(svcUserauth)
-	res := cl.feedEnc(t, srv.Feed(cl.packet(w.b)))
+	w.Byte(msgServiceRequest)
+	w.StrS(svcUserauth)
+	res := cl.feedEnc(t, srv.Feed(cl.packet(w.B)))
 	if len(res) != 1 || res[0][0] != msgServiceAccept {
 		t.Fatalf("service = %x", res)
 	}
@@ -234,35 +234,35 @@ func TestServerKexAuthExec(t *testing.T) {
 	}
 
 	w = sshWriter{}
-	w.byte(msgChannelOpen)
-	w.strS(chanSession)
-	w.u32(0)
-	w.u32(1 << 17)
-	w.u32(32768)
-	res = cl.feedEnc(t, srv.Feed(cl.packet(w.b)))
+	w.Byte(msgChannelOpen)
+	w.StrS(chanSession)
+	w.U32(0)
+	w.U32(1 << 17)
+	w.U32(32768)
+	res = cl.feedEnc(t, srv.Feed(cl.packet(w.B)))
 	if len(res) != 1 || res[0][0] != msgChannelConfirm {
 		t.Fatalf("open = %x", res)
 	}
 
 	w = sshWriter{}
-	w.byte(msgChannelReq)
-	w.u32(serverChanID)
-	w.strS(reqExec)
-	w.boolVal(true)
-	w.strS("echo VIRELAI-SSH-SERVER-OK")
-	res = cl.feedEnc(t, srv.Feed(cl.packet(w.b)))
+	w.Byte(msgChannelReq)
+	w.U32(serverChanID)
+	w.StrS(reqExec)
+	w.BoolVal(true)
+	w.StrS("echo VIRELAI-SSH-SERVER-OK")
+	res = cl.feedEnc(t, srv.Feed(cl.packet(w.B)))
 	if len(res) < 5 {
 		t.Fatalf("exec responses = %d logs=%v", len(res), logs)
 	}
 	if res[0][0] != msgChannelOK {
 		t.Fatalf("exec ok = %x", res[0])
 	}
-	r := sshReader{b: res[1]}
-	if b, _ := r.byte(); b != msgChannelData {
+	r := sshReader{B: res[1]}
+	if b, _ := r.Byte(); b != msgChannelData {
 		t.Fatalf("data type %d", b)
 	}
-	_, _ = r.u32()
-	body, ok := r.str()
+	_, _ = r.U32()
+	body, ok := r.Str()
 	if !ok || string(body) != "VIRELAI-SSH-SERVER-OK\n" {
 		t.Fatalf("stdout = %q", body)
 	}
@@ -279,22 +279,22 @@ func TestServerRejectsUnknownKey(t *testing.T) {
 	bob := mustHex32(t, "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb")
 
 	srv := newServer(serverConfig{
-		hostSeed:  hostSeed,
-		keys:      []AuthKey{{User: "alice", Pub: goodPub}},
-		cookie:    bytes.Repeat([]byte{0xf0}, 16),
-		ephemeral: bob[:],
-		run:       func(string) ([]byte, uint32, error) { return nil, 0, nil },
+		HostSeed:  hostSeed,
+		Keys:      []AuthKey{{User: "alice", Pub: goodPub}},
+		Cookie:    bytes.Repeat([]byte{0xf0}, 16),
+		Ephemeral: bob[:],
+		Run:       func(string) ([]byte, uint32, error) { return nil, 0, nil },
 	})
 	cl := newScripted(t, alice, wrongSeed)
 	out := srv.Feed(cl.hello())
 	cl.takePlain(t, out)
 	out = srv.Feed(cl.ecdhInit())
-	cl.finishKex(t, out, srv.hostPub)
+	cl.finishKex(t, out, srv.HostPub)
 
 	var w sshWriter
-	w.byte(msgServiceRequest)
-	w.strS(svcUserauth)
-	_ = cl.feedEnc(t, srv.Feed(cl.packet(w.b)))
+	w.Byte(msgServiceRequest)
+	w.StrS(svcUserauth)
+	_ = cl.feedEnc(t, srv.Feed(cl.packet(w.B)))
 	res := cl.feedEnc(t, srv.Feed(cl.publickey(t, "alice")))
 	if len(res) != 1 || res[0][0] != msgUserauthFail {
 		t.Fatalf("wrong key = %x", res)
@@ -308,22 +308,22 @@ func TestServerRejectsTamperedMAC(t *testing.T) {
 	alice := mustHex32(t, "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")
 	bob := mustHex32(t, "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb")
 	srv := newServer(serverConfig{
-		hostSeed:  hostSeed,
-		keys:      []AuthKey{{User: "alice", Pub: userPub}},
-		cookie:    bytes.Repeat([]byte{0xf0}, 16),
-		ephemeral: bob[:],
-		run:       func(string) ([]byte, uint32, error) { return nil, 0, nil },
+		HostSeed:  hostSeed,
+		Keys:      []AuthKey{{User: "alice", Pub: userPub}},
+		Cookie:    bytes.Repeat([]byte{0xf0}, 16),
+		Ephemeral: bob[:],
+		Run:       func(string) ([]byte, uint32, error) { return nil, 0, nil },
 	})
 	cl := newScripted(t, alice, userSeed)
 	out := srv.Feed(cl.hello())
 	cl.takePlain(t, out)
 	out = srv.Feed(cl.ecdhInit())
-	cl.finishKex(t, out, srv.hostPub)
+	cl.finishKex(t, out, srv.HostPub)
 
 	var w sshWriter
-	w.byte(msgServiceRequest)
-	w.strS(svcUserauth)
-	pkt := cl.packet(w.b)
+	w.Byte(msgServiceRequest)
+	w.StrS(svcUserauth)
+	pkt := cl.packet(w.B)
 	pkt[len(pkt)-1] ^= 0x01
 	_ = srv.Feed(pkt)
 	if !srv.Failed() {
@@ -351,21 +351,21 @@ func newScripted(t *testing.T, eph, userSeed [32]byte) *scripted {
 
 func (c *scripted) hello() []byte {
 	var w sshWriter
-	w.byte(msgKexInit)
-	w.raw(bytes.Repeat([]byte{0x01}, 16))
-	w.nameList([]string{kexCurve, kexCurveAlias})
-	w.nameList([]string{algoEd25519})
-	w.nameList([]string{cipherOpenSSH})
-	w.nameList([]string{cipherOpenSSH})
-	w.nameList(nil)
-	w.nameList(nil)
-	w.nameList([]string{compNone})
-	w.nameList([]string{compNone})
-	w.nameList(nil)
-	w.nameList(nil)
-	w.boolVal(false)
-	w.u32(0)
-	c.iC = append([]byte(nil), w.b...)
+	w.Byte(msgKexInit)
+	w.Raw(bytes.Repeat([]byte{0x01}, 16))
+	w.NameList([]string{kexCurve, kexCurveAlias})
+	w.NameList([]string{algoEd25519})
+	w.NameList([]string{cipherOpenSSH})
+	w.NameList([]string{cipherOpenSSH})
+	w.NameList(nil)
+	w.NameList(nil)
+	w.NameList([]string{compNone})
+	w.NameList([]string{compNone})
+	w.NameList(nil)
+	w.NameList(nil)
+	w.BoolVal(false)
+	w.U32(0)
+	c.iC = append([]byte(nil), w.B...)
 	pad := bytes.Repeat([]byte{0x21}, paddingLen(len(c.iC), alignPlain))
 	frame, ok := encodePacket(c.iC, pad, alignPlain)
 	if !ok {
@@ -400,10 +400,10 @@ func (c *scripted) ecdhInit() []byte {
 		c.t.Fatal("qC")
 	}
 	var w sshWriter
-	w.byte(msgKexECDHInit)
-	w.str(qC[:])
-	pad := bytes.Repeat([]byte{0x22}, paddingLen(len(w.b), alignPlain))
-	frame, ok := encodePacket(w.b, pad, alignPlain)
+	w.Byte(msgKexECDHInit)
+	w.Str(qC[:])
+	pad := bytes.Repeat([]byte{0x22}, paddingLen(len(w.B), alignPlain))
+	frame, ok := encodePacket(w.B, pad, alignPlain)
 	if !ok {
 		c.t.Fatal("encode ecdh")
 	}
@@ -433,12 +433,12 @@ func (c *scripted) finishKex(t *testing.T, out []byte, hostPub [32]byte) {
 	if len(c.iS) == 0 {
 		t.Fatal("missing server KEXINIT")
 	}
-	r := sshReader{b: payloads[0]}
-	if b, _ := r.byte(); b != msgKexECDHReply {
+	r := sshReader{B: payloads[0]}
+	if b, _ := r.Byte(); b != msgKexECDHReply {
 		t.Fatal("not ecdh reply")
 	}
-	kS, _ := r.str()
-	qS, _ := r.str()
+	kS, _ := r.Str()
+	qS, _ := r.Str()
 	if payloads[1][0] != msgNewKeys {
 		t.Fatal("missing newkeys")
 	}
@@ -454,9 +454,9 @@ func (c *scripted) finishKex(t *testing.T, out []byte, hostPub [32]byte) {
 		[]byte("SSH-2.0-VirelaiOS_1.0"), []byte(identLine),
 		c.iC, c.iS, kS, qC[:], qS, kMpint,
 	)
-	kr := sshReader{b: kS}
-	_, _ = kr.strUTF8()
-	pub, _ := kr.str()
+	kr := sshReader{B: kS}
+	_, _ = kr.StrUTF8()
+	pub, _ := kr.Str()
 	var host [32]byte
 	copy(host[:], pub)
 	if host != hostPub {
@@ -465,8 +465,8 @@ func (c *scripted) finishKex(t *testing.T, out []byte, hostPub [32]byte) {
 	c.session = h[:]
 	keyC2S := deriveKey(sshCipherKey, kMpint, h[:], 'C', h[:])
 	keyS2C := deriveKey(sshCipherKey, kMpint, h[:], 'D', h[:])
-	copy(c.send.key[:], keyC2S)
-	copy(c.recv.key[:], keyS2C)
+	copy(c.send.Key[:], keyC2S)
+	copy(c.recv.Key[:], keyS2C)
 	c.sendSeq = 3
 	c.recvSeq = 3
 	pad := bytes.Repeat([]byte{0x23}, paddingLen(1, alignPlain))
@@ -491,7 +491,7 @@ func (c *scripted) packet(payload []byte) []byte {
 		if !ok {
 			c.t.Fatal("encode enc")
 		}
-		ct, tag := c.send.seal(frame, c.sendSeq)
+		ct, tag := c.send.Seal(frame, c.sendSeq)
 		c.sendSeq++
 		return append(nk, append(ct, tag...)...)
 	}
@@ -500,7 +500,7 @@ func (c *scripted) packet(payload []byte) []byte {
 	if !ok {
 		c.t.Fatal("encode enc")
 	}
-	ct, tag := c.send.seal(frame, c.sendSeq)
+	ct, tag := c.send.Seal(frame, c.sendSeq)
 	c.sendSeq++
 	return append(ct, tag...)
 }
@@ -510,7 +510,7 @@ func (c *scripted) feedEnc(t *testing.T, b []byte) [][]byte {
 	c.rx = append(c.rx, b...)
 	var out [][]byte
 	for len(c.rx) >= 4 {
-		length := int(c.recv.decryptLength(c.rx[:4], c.recvSeq))
+		length := int(c.recv.DecryptLength(c.rx[:4], c.recvSeq))
 		if length < 5 {
 			break
 		}
@@ -519,7 +519,7 @@ func (c *scripted) feedEnc(t *testing.T, b []byte) [][]byte {
 		if len(c.rx) < wire {
 			break
 		}
-		plain := c.recv.open(c.rx[:ctLen], c.rx[ctLen:wire], c.recvSeq)
+		plain := c.recv.Open(c.rx[:ctLen], c.rx[ctLen:wire], c.recvSeq)
 		if plain == nil {
 			t.Fatal("open failed")
 		}
@@ -538,29 +538,29 @@ func (c *scripted) publickey(t *testing.T, user string) []byte {
 	t.Helper()
 	pub := edDerivePublic(c.userSeed)
 	var kb sshWriter
-	kb.strS(algoEd25519)
-	kb.str(pub[:])
+	kb.StrS(algoEd25519)
+	kb.Str(pub[:])
 	var signed sshWriter
-	signed.str(c.session)
-	signed.byte(msgUserauthReq)
-	signed.strS(user)
-	signed.strS(svcConnection)
-	signed.strS(methodPubKey)
-	signed.boolVal(true)
-	signed.strS(algoEd25519)
-	signed.str(kb.b)
-	sig := edSign(signed.b, c.userSeed)
+	signed.Str(c.session)
+	signed.Byte(msgUserauthReq)
+	signed.StrS(user)
+	signed.StrS(svcConnection)
+	signed.StrS(methodPubKey)
+	signed.BoolVal(true)
+	signed.StrS(algoEd25519)
+	signed.Str(kb.B)
+	sig := edSign(signed.B, c.userSeed)
 	var sb sshWriter
-	sb.strS(algoEd25519)
-	sb.str(sig[:])
+	sb.StrS(algoEd25519)
+	sb.Str(sig[:])
 	var auth sshWriter
-	auth.byte(msgUserauthReq)
-	auth.strS(user)
-	auth.strS(svcConnection)
-	auth.strS(methodPubKey)
-	auth.boolVal(true)
-	auth.strS(algoEd25519)
-	auth.str(kb.b)
-	auth.str(sb.b)
-	return c.packet(auth.b)
+	auth.Byte(msgUserauthReq)
+	auth.StrS(user)
+	auth.StrS(svcConnection)
+	auth.StrS(methodPubKey)
+	auth.BoolVal(true)
+	auth.StrS(algoEd25519)
+	auth.Str(kb.B)
+	auth.Str(sb.B)
+	return c.packet(auth.B)
 }
