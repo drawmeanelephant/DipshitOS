@@ -7348,6 +7348,20 @@ fn cmd_exec(m: *Monitor, args: []const []const u8) ExecError {
             m.console.print_line("-byte staging buffer (only a gap-layout static ELF streams past it)");
             return .invalid_argument;
         },
+        // M72a (issue #1579): the third size refusal, and the one a large
+        // zero-filled `.bss`/`.noptrbss` crosses. It says MEMORY, because
+        // that is what the bound is: the loader allocates and zero-fills
+        // every mapped page, so this image is refused for what it would
+        // have taken out of the guest, not for its size on disk and not for
+        // a buffer it would never have transited.
+        .map_too_large => {
+            err_prefix(m);
+            m.console.puts(name);
+            m.console.puts(": image maps too much memory (map bound ");
+            m.console.print_hex(esp_exec.map_max);
+            m.console.print_line(" bytes; every PT_LOAD page is allocated and zeroed)");
+            return .invalid_argument;
+        },
         .bad_magic => {
             err_prefix(m);
             m.console.puts(name);

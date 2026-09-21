@@ -28,11 +28,12 @@
 //!     it is reported relative to segment 0's p_vaddr because the staging
 //!     strip re-bases the content at the aperture base.
 //!   * Bounded: p_memsz >= p_filesz per segment, non-overlapping ordered
-//!     file ranges, and total load size <= `load_max` (the acceptance
-//!     bound, `exec.exec_image_max`). The FILE ranges are validated
-//!     against the caller-supplied file size — the read buffer on the
-//!     staged path, the STAT size on the streamed one (`parse_head`,
-//!     M70c-K / issue #1504).
+//!     file ranges, total INITIALIZED bytes <= `load_max`, and total MAPPED
+//!     bytes <= `map_max` (matching `exec.exec_image_max` on the file and
+//!     the loader's own RAM budget on the mapping — M72a, issue #1579).
+//!     The FILE ranges are validated against the caller-supplied file size
+//!     — the read buffer on the staged path, the STAT size on the streamed
+//!     one (`parse_head`, M70c-K / issue #1504).
 //!
 //! No dynamic linking, no sections, no relocations, no libc/POSIX.
 
@@ -158,19 +159,45 @@ pub const page_alignment: u64 = 4096;
 /// the CSPRNG) — the bound exists to keep images below the bump region,
 /// not below any fixed stack VA.
 pub const gap_base_max: u64 = 0x1000_0000;
-/// Total load bound — mirrors `exec.exec_image_max` (the largest image the
-/// loader will accept at all). A program whose PT_LOAD memory exceeds this
-/// is rejected. Issue #1163: raised from 512 KiB — the gc Go runtime's
-/// first images exceed the old bound even `-s -w`-stripped (GOHELLO.ELF is
+/// Acceptance bound on an image's INITIALIZED bytes: the sum of every
+/// PT_LOAD `p_filesz`, i.e. exactly the bytes the loader reads off the
+/// volume. Issue #1163: raised from 512 KiB — the gc Go runtime's first
+/// images exceed the old bound even `-s -w`-stripped (GOHELLO.ELF is
 /// 1.06 MiB of file / 1.21 MiB of PT_LOAD memory). M70c-K (issue #1504):
 /// raised from 2 MiB to match the streamed loader, which no longer stages
-/// the whole file, so the load bound is no longer a buffer size. 32 MiB is
-/// the bound `exec.exec_image_max` states: it admits the 27 MB
-/// `cmd/compile` with headroom and still leaves the 256 MiB guest room for
-/// the image's own heap. (This constant used to mirror
-/// `exec.exec_program_max`, the 2 MiB staging buffer; that buffer is now
-/// only the fast path's bound, not the acceptance bound.)
+/// the whole file, so the load bound is no longer a buffer size.
+///
+/// M72a (issue #1579): this constant used to be charged on the sum of every
+/// PT_LOAD `p_memsz`, which made it a bound on MAPPED memory wearing the
+/// name of a bound on file bytes — and that refused every Go image carrying
+/// a large `.noptrbss`, because a zero-initialized global adds no file bytes
+/// at all (`crypto/internal/fips140/drbg`'s `var memory
+/// entropy.ScratchBuffer` is 32 MiB of it — `crypto/internal/entropy/v1.0.0`,
+/// `type ScratchBuffer [1 << 25]byte`). The mapped bound is now `map_max`;
+/// this one charges what it says.
+///
+/// What that leaves: the segment FILE ranges are disjoint and inside the file
+/// (both enforced below), so `Σ filesz ≤ file size ≤ exec.exec_image_max`
+/// (32 MiB) — for a caller that bounds the file too, this check is a
+/// parser-level invariant. It stays because `parse`/`parse_head` are public
+/// entry points that do not.
 pub const load_max: usize = 32 * 1024 * 1024;
+/// Bound on the address space an image may MAP — the sum of every PT_LOAD
+/// `p_memsz` (each segment's initialized bytes plus its zero-filled
+/// `.bss`/`.noptrbss` tail). Charged by `parse_impl` before any placement
+/// check, so an oversized BSS is refused by a bound that names MEMORY rather
+/// than by `gap_too_high`.
+///
+/// This is not a notional reservation. `exec_static_elf_gap` allocates and
+/// zeroes every mapped page before EL0 runs (`alloc_pages(ceil(memsz /
+/// page_size))`, then a fill of `[filesz..memsz]`), so this bound is a RAM
+/// budget, not an address-space courtesy. 64 MiB is 2× the 32 MiB FIPS
+/// scratch buffer: it admits the largest known Go images (a Charm-sized
+/// binary is ~37 MB of `memsz`, and `go-hello` run 11's fixture is ~48 MB)
+/// and leaves most of the measured pool for the image's own heap — `sysinfo`
+/// on VZ reports `free=0xde0b` (56,843 pages, 222.0 MiB) on a fresh boot and
+/// `free=0xb68c` (46,732 pages, 182.5 MiB) with the boot apps up.
+pub const map_max: usize = 64 * 1024 * 1024;
 /// At most three PT_LOAD segments: text + optional RO rodata + data
 /// (issue #1163 — the Go linker's R+X / R / RW layout).
 pub const max_segments: usize = 3;
@@ -200,8 +227,14 @@ pub const Error = error{
     /// the caller reports it as one named condition, a truncated image,
     /// rather than as a vague "bad segment".
     file_too_short,
-    /// p_memsz < p_filesz, or the total load exceeds `load_max`.
+    /// p_memsz < p_filesz, or the total INITIALIZED bytes exceed `load_max`.
     segment_too_large,
+    /// The image's total MAPPED bytes (`Σ p_memsz`) exceed `map_max`. A name
+    /// of its own, distinct from `segment_too_large`, because the bound it
+    /// crosses is about memory the loader will allocate: a large zero-filled
+    /// `.bss`/`.noptrbss` is admitted by the other bound and refused by this
+    /// one (M72a, issue #1579).
+    map_too_large,
     /// Two segments' FILE ranges overlap (the staging copy is forward-only
     /// and requires ordered, disjoint source ranges).
     overlapping_segments,
@@ -409,10 +442,12 @@ const RawSegment = struct {
 };
 
 /// The total PT_LOAD MEMORY the plan maps (initialized bytes plus the
-/// zero-filled BSS tails of every segment). Callers use it for their own
-/// bounds: `exec_file` still refuses a STAGED shape that would not fit the
-/// staging buffer even though `load_max` now admits it (M70c-K, issue
-/// #1504 — only the streamed gap path is exempt from that buffer).
+/// zero-filled BSS tails of every segment) — the same quantity `parse_impl`
+/// bounds by `map_max`. Callers use it for their own bounds: `exec_file`
+/// still refuses a STAGED shape that would not fit the staging buffer even
+/// though the parser admits it (M70c-K, issue #1504 — only the streamed gap
+/// path is exempt from that buffer; M72a, #1579 — a GAP shape is exempt too,
+/// because only its FILE bytes transit that buffer).
 pub fn mem_total(image: Image) u64 {
     var total: u64 = 0;
     for (image.segments[0..image.segment_count]) |seg| total += seg.mem_size;
@@ -538,8 +573,14 @@ fn parse_impl(buf: []const u8, file_size: u64, expected_base: ?u64) Error!Image 
     }
     if (count == 0) return error.no_load_segments;
 
-    // Per-segment bounds + flags.
-    var total_mem: u64 = 0;
+    // Per-segment bounds + flags. Two totals, because they answer two
+    // different questions: the INITIALIZED bytes the loader reads off the
+    // volume (`load_max`) and the bytes the loader will MAP (`map_max`).
+    // Both are checked here, before placement, so a 1 GiB `.bss` is refused
+    // by the bound that names memory and not by `gap_too_high` (M72a,
+    // issue #1579).
+    var total_file: u64 = 0;
+    var total_map: u64 = 0;
     for (raws[0..count]) |r| {
         if (r.memsz < r.filesz) return error.segment_too_large;
         // The payload range is validated against the FILE, not `buf`: the
@@ -547,8 +588,10 @@ fn parse_impl(buf: []const u8, file_size: u64, expected_base: ?u64) Error!Image 
         // is the old check exactly), while a streamed load passes only a
         // header window and streams the payload straight from the file.
         if (r.offset > file_size or r.filesz > file_size - r.offset) return error.file_too_short;
-        total_mem += r.memsz;
-        if (total_mem > load_max) return error.segment_too_large;
+        total_file += r.filesz;
+        if (total_file > load_max) return error.segment_too_large;
+        total_map += r.memsz;
+        if (total_map > map_max) return error.map_too_large;
     }
     if (raws[0].flags & pf_w != 0) return error.writable_text;
     // Contiguous shape: segment 1 (the last) must be writable. In the gap
@@ -797,10 +840,23 @@ test "elf: rejects out-of-range and oversized segments" {
     std.mem.writeInt(u32, neg_bss[72..76], 2, .little); // memsz < filesz (4)
     try testing.expectError(error.segment_too_large, parse(&neg_bss));
 
-    // Total load above load_max.
-    var huge = elf32_one(&[_]u8{0} ** 4, 0x400000, 0, 0, 5);
-    std.mem.writeInt(u32, huge[72..76], load_max + 1, .little);
-    try testing.expectError(error.segment_too_large, parse(&huge));
+    // M72a (issue #1579): a large zero-filled BSS is ADMITTED. It costs no
+    // file bytes (`memsz - filesz`), which is why the old rule — which
+    // charged the mapped total against a bound named for the file — refused
+    // every Go image carrying one:
+    var bss_ok = elf32_one(&[_]u8{0} ** 4, 0x400000, 0, 0, 5);
+    const forty_mib: u32 = 40 * 1024 * 1024;
+    std.mem.writeInt(u32, bss_ok[72..76], forty_mib, .little); // memsz ≫ filesz
+    const bss_image = try parse(&bss_ok);
+    try testing.expectEqual(@as(usize, forty_mib), bss_image.segments[0].mem_size);
+    try testing.expect(mem_total(bss_image) > load_max); // past the old bound, still legal
+
+    // ...but the mapped total is still bounded, and by its own name: this
+    // loader allocates and zeroes every mapped page, so a 1 GiB BSS cannot
+    // be a way to dodge the acceptance bound.
+    var too_much = elf32_one(&[_]u8{0} ** 4, 0x400000, 0, 0, 5);
+    std.mem.writeInt(u32, too_much[72..76], @intCast(map_max + 1), .little);
+    try testing.expectError(error.map_too_large, parse(&too_much));
 }
 
 test "elf: enforces W^X segment flags and placement contract" {
@@ -1082,10 +1138,10 @@ test "elf: parse_head validates a streamed image against its FILE size, not the 
     // A window larger than the file it claims to describe → refused.
     try testing.expectError(error.truncated, parse_head(&img, img.len - 1, text_base));
 
-    // The total-load bound is the acceptance bound now (`load_max`), and it
-    // is what refuses a payload that is merely too big to MAP even when the
-    // file really does hold it: every FILE range below is valid, so the
-    // refusal can only come from the total-load check.
+    // The acceptance bound is on INITIALIZED bytes (`load_max`, charged on
+    // Σ filesz since M72a / #1579), and it is what refuses a payload the
+    // file really does hold but the loader will not read: every FILE range
+    // below stays valid, so the refusal can only come from that check.
     var huge = img;
     const big: u32 = load_max + 1;
     std.mem.writeInt(u32, huge[100..104], big, .little); // seg1 filesz
@@ -1094,8 +1150,32 @@ test "elf: parse_head validates a streamed image against its FILE size, not the 
     std.mem.writeInt(u32, huge[124..128], 0x2403000, .little); // seg2 vaddr (page-aligned, above seg1)
     try testing.expectError(error.segment_too_large, parse_head(&huge, 0x2000 + big + 0x1000, text_base));
 
+    // M72a (issue #1579): the card's shape — the Go linker's [R+X][R][RW]
+    // layout whose LAST segment carries 40 MiB of `.noptrbss`. The file is
+    // unchanged (zero-initialized bytes are not in it), so this is the image
+    // the old `memsz`-charged bound refused as `segment_too_large` and this
+    // tree admits. `mem_total` is what a staged caller still bounds against.
+    var big_bss = img;
+    const forty_mib: u32 = 40 * 1024 * 1024;
+    std.mem.writeInt(u32, big_bss[136..140], 0x1000 + forty_mib, .little); // seg2 memsz
+    const bss_image = try parse_head(&big_bss, file_size, text_base);
+    try testing.expect(bss_image.gap_layout);
+    try testing.expectEqual(@as(u64, 0x1000 + 0x300000 + 0x1000 + forty_mib), mem_total(bss_image));
+    try testing.expect(mem_total(bss_image) > load_max);
+
+    // The mapped bound speaks for itself, and BEFORE placement: this image's
+    // declared end is far above `gap_base_max` (asserted), so a loader that
+    // checked placement first would say `gap_too_high` — about address
+    // space. The refusal must name MEMORY, because that is what the bound is
+    // (every mapped page is allocated and zeroed).
+    var giga_bss = img;
+    const one_gib: u32 = 1 << 30;
+    std.mem.writeInt(u32, giga_bss[136..140], one_gib, .little); // seg2 memsz
+    try testing.expect(@as(u64, 0x702000) + one_gib > gap_base_max);
+    try testing.expectError(error.map_too_large, parse_head(&giga_bss, file_size, text_base));
+
     // And a 3 MiB image is now accepted where the old 2 MiB bound refused
-    // it — that raise is the card's whole point, so it is pinned:
+    // it — that raise is M70c-K's point, and it stays pinned:
     // `mem_total` is what a staged caller still bounds against.
     const big_img = try parse_head(&img, file_size, text_base);
     try testing.expectEqual(@as(u64, 0x1000 + 0x300000 + 0x2000), mem_total(big_img));

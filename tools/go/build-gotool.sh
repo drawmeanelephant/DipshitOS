@@ -10,11 +10,18 @@
 #
 # Why the gate: crypto/internal/fips140 pulls crypto/internal/fips140/drbg
 # into both closures, whose entropy_fips140.go declares a 32 MiB .noptrbss
-# scratch buffer. elf.load_max bounds the SUM of every PT_LOAD memsz, so the
-# default build is refused with segment_too_large. The gate excludes that
-# file (and supplies a stub) ONLY for these two images; ordinary guest
-# binaries are untouched and keep the real entropy source.
-# See ADR 0035 amendment 5.
+# scratch buffer. When this gate was written the kernel had ONE acceptance
+# bound and it summed every PT_LOAD memsz, so the default build was refused
+# with segment_too_large. M72a (#1579) split that bound: `load_max` charges
+# the INITIALIZED bytes (Σ filesz) and `map_max` (64 MiB) the MAPPED ones —
+# these two images' measured Σ memsz (58,254,964 B) now fits both WITH the
+# real entropy source, though that has not been booted and is an inference,
+# not a result. The gate stays: it is the shape these two closures were
+# validated in, and retiring it is its own decision with its own evidence,
+# not a side effect of the split.
+# The gate excludes that file (and supplies a stub) ONLY for these two
+# images; ordinary guest binaries are untouched and keep the real entropy
+# source. See ADR 0035 amendment 5.
 
 set -euo pipefail
 
@@ -22,6 +29,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FORK_DIR="${GO_FORK_DIR:-$(dirname "$REPO")/go-virelai}"
 TAG="virelaitoolchain"
 MAX_BYTES=33554432  # kernel/src/exec.zig exec_image_max (and elf.load_max)
+MAP_MAX=67108864    # kernel/src/elf.zig map_max (M72a #1579: the MAPPED bound)
 
 log() { printf 'build-gotool: %s\n' "$*"; }
 
@@ -85,9 +93,16 @@ for path in sys.argv[1:]:
         fails.append("file %d > exec_image_max %d" % (len(d), MAX_BYTES))
     if len(segs) > MAX_SEG:
         fails.append("%d PT_LOAD > max_segments %d" % (len(segs), MAX_SEG))
+    # M72a (#1579): two bounds, matching the loader's. `load_max` charges the
+    # INITIALIZED bytes (Σ filesz) and `MAP_MAX` the MAPPED ones (Σ memsz);
+    # charging memsz against the file bound is what made a large `.noptrbss`
+    # a refusal.
+    total_file = sum(s["fsz"] for s in segs)
+    if total_file > MAX_BYTES:
+        fails.append("sum filesz %d > load_max %d" % (total_file, MAX_BYTES))
     total = sum(s["msz"] for s in segs)
-    if total > MAX_BYTES:
-        fails.append("sum memsz %d > load_max %d" % (total, MAX_BYTES))
+    if total > MAP_MAX:
+        fails.append("sum memsz %d > map_max %d" % (total, MAP_MAX))
     for s in segs:
         if s["va"] + s["msz"] > GAP_MAX:
             fails.append("segment at %#x crosses gap_base_max" % s["va"])

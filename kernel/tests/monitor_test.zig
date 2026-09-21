@@ -2068,6 +2068,49 @@ test "exec: a small contiguous three-segment image is refused, never partly load
     try std.testing.expectEqual(@as(usize, 0), process.count());
 }
 
+/// M72a (#1579): the SAME small three-segment image in the GAP shape — each
+/// later segment one page clear of the previous one's memory end — with the
+/// writable segment's `p_memsz` raised to 3 MiB, so the image's MAPPED total
+/// (~3.01 MiB) is past the 2 MiB staging buffer while its FILE (0x2100 B) is
+/// nowhere near it.
+fn small_gap_three_segment_elf() [0x2100]u8 {
+    var img = small_contiguous_three_segment_elf();
+    std.mem.writeInt(u32, img[52 + 1 * 32 + 8 ..][0..4], 0x40_2000, .little); // seg1 vaddr: a gap
+    std.mem.writeInt(u32, img[52 + 2 * 32 + 8 ..][0..4], 0x40_4000, .little); // seg2 vaddr: a gap
+    std.mem.writeInt(u32, img[52 + 2 * 32 + 20 ..][0..4], 0x30_0000, .little); // seg2 memsz: 3 MiB
+    return img;
+}
+
+test "exec: a STAGED gap image is bounded by map_max, not by the staging buffer (M72a #1579)" {
+    try arm_allocator(&big_test_ram);
+    const free_before = alloc.stats().free_pages;
+    var img = small_gap_three_segment_elf();
+    test_reset_share();
+    defer virtio_file.set_test_share(null);
+    test_seed_share("GAP3.ELF", img[0..]);
+
+    _ = scheduler.init();
+    // What is large here is the writable segment's MAPPED size, not anything
+    // that transits the buffer: the file is 0x2100 B, every segment's FILE
+    // bytes are inside it, and the gap path copies exactly those. Charging
+    // `mem_total` against `exec_program_max` refused this image with a
+    // message about a buffer no part of it fills (the second instance of the
+    // lie the map bound replaced); the mapped total is `elf.map_max`'s to
+    // bound, and 3 MiB is well inside it.
+    try std.testing.expectEqual(esp_exec.ExecResult.ok, esp_exec.exec_file("GAP3.ELF", &.{}));
+    const pid = esp_exec.last_exec_pid().?;
+    const info = process.info(pid).?;
+    // 768 pages of writable segment + the page the argv/envp block is packed
+    // into. Middle segments are not counted in either figure.
+    try std.testing.expectEqual(@as(u64, 769), info.data_pages);
+    try std.testing.expectEqual(@as(u64, 1), info.text_pages);
+    // And every one of those pages was REALLY taken: text + the one rodata
+    // page + the 769 writable pages + the 192 KiB task stack and its kernel
+    // twin. A loader that "accepted" the image without mapping its declared
+    // tail would show a delta short by 768 pages.
+    try std.testing.expectEqual(free_before - (1 + 1 + 769 + 48 + 48), alloc.stats().free_pages);
+}
+
 test "monitor: ls lists the host-share files deterministically" {
     test_reset_share();
     defer virtio_file.set_test_share(null);

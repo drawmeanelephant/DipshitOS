@@ -17,6 +17,20 @@
 # runs and prints the pinned lines. The in-guest memory samples (run 06/07) are
 # the ADR 0035 D6 figure: reported, not asserted, because a footprint is a
 # property of the machine.
+# Runs 11-12 (M72a, #1579): the loader's TWO bounds, on one real Go image —
+# a `gobig.go`-shaped file plus 40 MiB of `.noptrbss` (the shape
+# `crypto/internal/fips140/drbg`'s 32 MiB `entropy.ScratchBuffer` gives every
+# Charm-sized binary). That image once refused as `segment_too_large`, because
+# the single acceptance bound charged MAPPED bytes: zero-initialized bytes cost
+# no file bytes, so an image the file could not even hold was refused for
+# being big on disk. Run 11 pins the fix — the 9.1 MiB file maps 49 MiB and
+# EXECS, reading both ends of its 40 MiB tail back, with `datapages=` held to
+# the image's own headers on the host. Run 12 pins that the bound MOVED rather
+# than disappeared: the same bytes with `p_memsz` rewritten to 1 GiB are still
+# refused, by a message that names the mapped-memory bound and never says
+# "staging buffer" (the lie the old fall-through told about this exact shape).
+# HOST PREREQUISITE, in addition to the list below:
+# `.build/go/GOLOADBSS.ELF` (`just go-toolchain` builds it).
 # Runs 09-10 (M69e, #1532): the DAILY LOOP, and the only boots here where a
 # compiler runs because of the guest's own action. Run 09 has the guest author
 # a Go source on /host with the monitor's `write` verb; the Mac compiles THAT
@@ -77,13 +91,14 @@ vgate_setup_python <<'PY'
 import os, shutil, sys
 share = os.path.join(os.environ["RUN_DIR"], "share")
 srcs = [".build/go/GOHELLO.ELF", ".build/go/GOBIG.ELF", ".build/go/GOREAD.ELF",
-        ".build/go/GOSYSCALL.ELF"]
+        ".build/go/GOSYSCALL.ELF", ".build/go/GOLOADBSS.ELF"]
 missing = [p for p in srcs if not os.path.exists(p)]
 if missing:
     sys.exit("%s missing — build the fork binaries first: "
              "bash tools/go/build-go.sh tools/go/hello.go tools/go/gobig.go "
-             "tools/go/goread.go tools/go/gosyscall.go "
-             "(fork prerequisites in tools/go/README.md)" % ", ".join(missing))
+             "tools/go/goloadbss.go tools/go/goread.go tools/go/gosyscall.go "
+             "(or `just go-toolchain`; fork prerequisites in tools/go/README.md)"
+             % ", ".join(missing))
 for src in srcs:
     dst = os.path.join(share, os.path.basename(src))
     shutil.copy(src, dst)
@@ -688,4 +703,168 @@ for leak in ("build-go:", "loop: host-built"):
                  "the guest's console must not say otherwise" % leak)
 print("run 10 printed the guest's own literal %r as a whole line, with no compiler "
       "banner in its serial" % marker)
+PY
+# ---------------------------------------------------------------------------
+# M72a (issue #1579) runs 11-12: the mapped-memory bound, on a real Go image.
+# Two boots, because the two halves are different questions and one boot
+# cannot order them: a program's output is asynchronous to the next monitor
+# line, so the refusal (parse-time) would land before the fixture's banner.
+# Each run therefore waits on its OWN causal marker.
+# ---------------------------------------------------------------------------
+
+# Run 11: the image the old bound refused EXECS. The wait is the program's
+# own final line, so a loader that refused the file cannot go green here.
+vgate_file script15.txt <<'EOF'
+exec GOLOADBSS.ELF
+EOF
+
+# Run 12: ...and the bound MOVED, it did not disappear. The wait is the
+# sysinfo header AFTER the refusal, so this run also proves the monitor kept
+# reading input (a refusal that parked the monitor cannot pass), and its
+# allocator line is where the log's free-page number comes from.
+vgate_file script16.txt <<'EOF'
+exec HUGEBSS.ELF
+sysinfo
+EOF
+
+vgate_setup_python <<'PY'
+import os, struct, sys
+
+# Host-side self-checks before any boot, so these runs cannot go green on a
+# fixture that lost the shape it exists to have: the file must be too big to
+# stage (that is what makes the exec STREAM) and its writable segment must
+# carry at least 40 MiB of `.bss` (that is what the old bound refused).
+share = os.path.join(os.environ["RUN_DIR"], "share")
+path = os.path.join(share, "GOLOADBSS.ELF")
+if not os.path.exists(path):
+    sys.exit("GOLOADBSS.ELF missing - bash tools/go/build-go.sh tools/go/goloadbss.go")
+d = open(path, "rb").read()
+if len(d) <= 2 << 20:
+    sys.exit("GOLOADBSS.ELF is only %d B - under the 2 MiB staging buffer, so the exec would "
+             "take the STAGED path and this run would prove nothing about the streamed one"
+             % len(d))
+phoff = struct.unpack_from("<Q", d, 32)[0]
+phes = struct.unpack_from("<H", d, 54)[0]
+phnum = struct.unpack_from("<H", d, 56)[0]
+rw = None
+tot_mem = 0
+for i in range(phnum):
+    o = phoff + i * phes
+    t, fl, off, va, pa, fsz, msz, al = struct.unpack_from("<IIQQQQQQ", d, o)
+    if t != 1:
+        continue
+    tot_mem += msz
+    if fl & 2:
+        rw = (o, va, fsz, msz)
+if rw is None:
+    sys.exit("GOLOADBSS.ELF has no writable PT_LOAD segment")
+ro, rva, rfsz, rmsz = rw
+if rmsz - rfsz < 40 << 20:
+    sys.exit("GOLOADBSS.ELF's writable segment holds only %d bytes of .bss; this fixture needs "
+             ">= 40 MiB for the mapped bound to be the one it crosses" % (rmsz - rfsz))
+if tot_mem <= 32 << 20:
+    sys.exit("GOLOADBSS.ELF maps %d B - the old memsz-charged bound would have admitted it, so "
+             "it pins nothing" % tot_mem)
+print("staged GOLOADBSS.ELF %d B: RW filesz=%d memsz=%d (.bss %.2f MiB), total mapped %.2f MiB, "
+      "headers say %d pages"
+      % (len(d), rfsz, rmsz, (rmsz - rfsz) / 1048576.0, tot_mem / 1048576.0,
+         (rmsz + 4095) // 4096 + 1))
+
+# The negative twin for run 12: the SAME bytes with the writable segment's
+# p_memsz rewritten to 1 GiB. Nothing else moves, so the refusal can only
+# come from the mapped-memory bound - the XL.ELF precedent, patching the
+# field under test instead of padding the file.
+huge = bytearray(d)
+struct.pack_into("<Q", huge, ro + 40, 1 << 30)   # p_memsz
+open(os.path.join(share, "HUGEBSS.ELF"), "wb").write(huge)
+print("staged HUGEBSS.ELF: the same image with RW p_memsz = 1 GiB")
+PY
+
+vgate_run 11 -- --script '$RUN_DIR/script15.txt' --script-expect 'virelai-go loadbss OK' --timeout 300
+
+# The 9.1 MiB file maps 48 MiB and RUNS: its own banner, and both ends of the
+# 40 MiB tail read back (the program writes byte 0 and byte scratchBytes-1
+# and prints them), so a short mapping faults or prints the wrong byte.
+vgate_assert 11 serial-contains 'exec: loaded GOLOADBSS.ELF'
+vgate_assert 11 serial-contains 'loadbss: blob bytes 8388608 scratch bytes 41943040'
+vgate_assert 11 serial-contains 'loadbss: banner A B C E D'
+vgate_assert 11 serial-contains 'loadbss: scratch ends 1 2'
+vgate_assert 11 serial-contains 'virelai-go loadbss OK'
+vgate_assert 11 serial-absent '[EXC] parking:'
+vgate_assert 11 serial-absent 'exited status=139'
+
+# The mapping is held to the image's own headers: the guest's `datapages=` is
+# compared with ceil(RW p_memsz / 4096) + 1 (the one extra page the gap
+# loader reserves for argv + envp), computed here from the file that was
+# staged. That is the axis the card moved - a bound on MAPPED bytes - so it
+# is asserted as a number, not as "it ran".
+vgate_assert 11 python <<'PY'
+import os, re, struct, sys
+
+ser = open(os.environ["VG_SER"], errors="replace").read()
+share = os.environ.get("VG_SHARE") or os.path.join(os.environ["RUN_DIR"], "share")
+d = open(os.path.join(share, "GOLOADBSS.ELF"), "rb").read()
+phoff = struct.unpack_from("<Q", d, 32)[0]
+phes = struct.unpack_from("<H", d, 54)[0]
+phnum = struct.unpack_from("<H", d, 56)[0]
+expected = None
+rw_fsz = rw_msz = 0
+for i in range(phnum):
+    o = phoff + i * phes
+    t, fl, off, va, pa, fsz, msz, al = struct.unpack_from("<IIQQQQQQ", d, o)
+    if t == 1 and fl & 2:
+        rw_fsz, rw_msz = fsz, msz
+        expected = (msz + 4095) // 4096 + 1
+if expected is None:
+    sys.exit("FAIL: the staged GOLOADBSS.ELF has no writable PT_LOAD segment")
+m = re.search(r"exec: loaded GOLOADBSS\.ELF .*datapages=(\d+)", ser)
+if not m:
+    sys.exit("FAIL: no `exec: loaded GOLOADBSS.ELF ... datapages=` line")
+got = int(m.group(1))
+if got != expected:
+    sys.exit("FAIL: the guest mapped %d pages but the image's writable segment declares %d "
+             "(%d B of memsz) - the mapping did not follow the headers" % (got, expected, rw_msz))
+if got < 10240:
+    sys.exit("FAIL: %d pages is under the 40 MiB the fixture's .bss needs" % got)
+print("mapped %d pages of a %d B file: RW filesz=%d memsz=%d (%.2f MiB of .bss) followed the "
+      "headers, and the program read both ends of it back"
+      % (got, len(d), rw_fsz, rw_msz, (rw_msz - rw_fsz) / 1048576.0))
+PY
+
+vgate_run 12 -- --script '$RUN_DIR/script16.txt' --script-expect 'VirelaiOS AArch64 support snapshot' --timeout 300
+
+# The refusal NAMES the bound it crossed, and `staging buffer` is absent on
+# purpose: that sentence is what the old fall-through printed about this very
+# shape, and it was false (the image is a gap-layout static ELF; it would
+# have streamed). The 9.1 MiB file is under the acceptance bound either way,
+# so only the mapped total can refuse it.
+vgate_assert 12 serial-contains 'HUGEBSS.ELF: image maps too much memory (map bound'
+vgate_assert 12 serial-absent 'exec: loaded HUGEBSS.ELF'
+vgate_assert 12 serial-absent 'staging buffer'
+vgate_assert 12 serial-absent 'HUGEBSS.ELF: image too large'
+vgate_assert 12 serial-absent '[EXC] parking:'
+vgate_assert 12 serial-absent 'exited status=139'
+# Reported, not asserted: a free-page count is a property of the machine
+# (ADR 0035 D6's footprint samples), and the point of printing it is that the
+# number is in the log rather than in a sentence somewhere.
+vgate_assert 12 serial-contains 'allocator:  armed=1'
+vgate_assert 12 python <<'PY'
+import os, re, sys
+
+ser = open(os.environ["VG_SER"], errors="replace").read()
+bad_at = ser.find("HUGEBSS.ELF: image maps too much memory")
+info_at = ser.find("VirelaiOS AArch64 support snapshot")
+if bad_at == -1:
+    sys.exit("FAIL: no refusal naming the mapped-memory bound")
+if info_at < bad_at:
+    sys.exit("FAIL: sysinfo printed BEFORE the refusal - the script's order did not hold "
+             "(refusal=%d sysinfo=%d)" % (bad_at, info_at))
+if "staging buffer" in ser:
+    sys.exit("FAIL: the refusal mentioned a staging buffer - the image is a gap-layout static "
+             "ELF and no part of it was staged")
+free = re.findall(r"allocator:  armed=1 total=0x[0-9a-f]+ free=0x([0-9a-f]+)", ser)
+if not free:
+    sys.exit("FAIL: no allocator line in the serial")
+print("the 1 GiB twin was refused by the map bound, and the monitor kept reading "
+      "(free=0x%s pages after the refusal)" % free[-1])
 PY

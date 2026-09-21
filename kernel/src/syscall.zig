@@ -2474,7 +2474,10 @@ fn handle_exec(args: Args, _: *exceptions.VectorFrame) u64 {
             // value (unreachable in practice) degrades to 0.
             break :blk @as(u64, if (esp_exec.last_exec_pid()) |new_pid| @intCast(new_pid) else 0);
         },
-        .no_disk, .image_too_large, .staging_too_large, .bad_magic, .bad_entry, .no_args_room, .too_many_args => error_result(.einval),
+        // M72a (issue #1579): `map_too_large` joins the size refusals — an
+        // image whose headers promise more mapped memory than the loader
+        // backs is the caller's bad image, like the other two bounds.
+        .no_disk, .image_too_large, .staging_too_large, .map_too_large, .bad_magic, .bad_entry, .no_args_room, .too_many_args => error_result(.einval),
         // M70b: a pin naming an offline core is the caller's bad argument.
         .bad_core => error_result(.einval),
         // M22 D1 (issue #324): ELF refusals are the caller's bad image.
