@@ -124,3 +124,32 @@ func TestResolveInput(t *testing.T) {
 		}
 	}
 }
+
+func TestArgvTargetJoinsSlotsAndReadsHandoff(t *testing.T) {
+	got, file := argvTarget([]string{"WEB.ELF", "http://10.0.0.2/"})
+	if file || got != "http://10.0.0.2/" {
+		t.Fatalf("single arg = %q file=%v", got, file)
+	}
+	// 31-byte slots, the kernel's cap, reassembled with no separator.
+	long := "https://example.com/posts/1-a-long-article-slug"
+	var slots []string
+	slots = append(slots, "WEB.ELF")
+	for i := 0; i < len(long); i += 31 {
+		j := i + 31
+		if j > len(long) {
+			j = len(long)
+		}
+		slots = append(slots, long[i:j])
+	}
+	got, file = argvTarget(slots)
+	if file || got != long {
+		t.Fatalf("joined = %q file=%v slots=%d", got, file, len(slots)-1)
+	}
+	path, file := argvTarget([]string{"WEB.ELF", "@/host/RSS.LINK"})
+	if !file || path != "/host/RSS.LINK" {
+		t.Fatalf("@path = %q file=%v", path, file)
+	}
+	if urlFromHandoff([]byte(long+"\n")) != long {
+		t.Fatal("handoff file must yield the first line")
+	}
+}

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel>
+    <title>Virelai Test Feed</title>
+    <link>http://10.0.0.2/</link>
+    <description>A deterministic RSS 2.0 fixture.</description>
+    <item>
+      <title>First Post</title>
+      <link>http://10.0.0.2/posts/1</link>
+      <description>Hello from the first post.</description>
+      <pubDate>Mon, 21 Sep 2026 12:00:00 GMT</pubDate>
+      <guid isPermaLink="false">urn:test:1</guid>
+    </item>
+    <item>
+      <title>Second Post</title>
+      <link>http://10.0.0.2/posts/2</link>
+      <content:encoded><![CDATA[<p>Body of the second post.</p>]]></content:encoded>
+      <pubDate>Tue, 22 Sep 2026 09:30:00 GMT</pubDate>
+      <guid isPermaLink="false">urn:test:2</guid>
+    </item>
+  </channel>
+</rss>

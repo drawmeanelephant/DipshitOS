@@ -9,6 +9,11 @@
 //
 //	exec WEB.ELF http://10.0.0.2/     (TCP fetch; IP literals only)
 //	exec WEB.ELF https://10.0.0.2:24533/  (in-process TLS; fixture SNI)
+//	exec WEB.ELF @/host/RSS.LINK      (first line of that file is the page)
+//
+// Exec keeps 31 bytes of each argument. A longer URL is split across
+// consecutive arguments (joined with no separator) or, when it will not fit
+// in eight slots, written to a file and passed as @path.
 package main
 
 import (
@@ -240,12 +245,41 @@ const (
 	budgetPaintMs   = 250
 )
 
+// argvTarget joins exec arguments into the page to open. args[0] is the
+// program name. Later slots are concatenated because vi.Exec stores at most
+// 31 bytes in each. A target that starts with '@' is a path; the first line
+// of that file is the page (urlFromHandoff).
+func argvTarget(args []string) (target string, fromFile bool) {
+	if len(args) < 2 {
+		return "", false
+	}
+	joined := strings.Join(args[1:], "")
+	if strings.HasPrefix(joined, "@") && len(joined) > 1 {
+		return joined[1:], true
+	}
+	return joined, false
+}
+
+// urlFromHandoff is the first line of an @path file, trimmed.
+func urlFromHandoff(body []byte) string {
+	s := string(body)
+	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
+		s = s[:i]
+	}
+	return strings.TrimSpace(s)
+}
+
 func main() {
 	t0 := vi.Nanos()
 	args := vi.Args()
-	target := ""
-	if len(args) > 1 {
-		target = args[1]
+	target, fromFile := argvTarget(args)
+	if fromFile {
+		b, rc := vi.ReadFileAll(target, 8192)
+		if rc < 0 || len(b) == 0 {
+			target = ""
+		} else {
+			target = urlFromHandoff(b)
+		}
 	}
 
 	id, rc := vi.WinOpen(winX, winY, winW, winH)

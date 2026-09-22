@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Virelai Atom Fixture</title>
+  <link rel="alternate" href="http://10.0.0.2/atom"/>
+  <link rel="self" href="http://10.0.0.2/atom.xml"/>
+  <updated>2026-09-22T10:00:00Z</updated>
+  <entry>
+    <title>Atom One</title>
+    <link rel="alternate" href="http://10.0.0.2/atom/1"/>
+    <id>tag:virelai,2026:1</id>
+    <updated>2026-09-21T08:00:00Z</updated>
+    <summary>First Atom entry.</summary>
+  </entry>
+  <entry>
+    <title>Atom Two</title>
+    <link rel="alternate" href="http://10.0.0.2/atom/2"/>
+    <id>tag:virelai,2026:2</id>
+    <published>2026-09-22T10:00:00Z</published>
+    <content>Second Atom entry body.</content>
+  </entry>
+</feed>
