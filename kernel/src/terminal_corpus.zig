@@ -15,8 +15,9 @@
 //!         the SGR-depth group and rewrote the old "extended SGR params
 //!         are ignored" row — that flip is exactly what a behaviour
 //!         change looks like here;
-//!       * M73i (mouse modes) appends mode rows to the modes group next to
-//!         the pinned `?2004h` private-mode row;
+//!       * M73i (mouse modes) landed its mode rows in the modes group next
+//!         to the `?2004h` private-mode row — flags live in terminal.zig's
+//!         mode-table test; these rows pin consumed-and-unpainted;
 //!       * UTF-8 decode rows (M73a-1's policy) live in the decode group —
 //!         that card landed before this corpus existed, so its behaviour is
 //!         pinned here now.
@@ -501,14 +502,26 @@ const mode_cases = [_]Case{
         .alt = false,
     },
     .{
-        // A private mode with no arm is consumed and paints nothing.
+        // A private mode with no grid arm is consumed and paints nothing.
         // ?2004 (bracketed paste) has terminal-object state since M73e but
-        // is grid-invisible here; M73i appends its mouse-mode rows beside
-        // this one.
-        .name = "unknown private mode is consumed, state untouched (M73i hook)",
+        // is grid-invisible here.
+        .name = "private mode with object state is consumed, grid untouched (M73e)",
         .input = "\x1b[?2004hA",
         .lines = &.{"A"},
         .cursor = .{ 0, 1 },
+        .visible = true,
+        .alt = false,
+        .rendition = .{},
+    },
+    .{
+        // M73i: all four mouse DECSET modes are consumed and never paint.
+        // The flags themselves are pinned in terminal.zig's mode-table test
+        // (mouse DECSET modes track independently, default off).
+        .name = "mouse tracking modes are consumed, grid untouched (M73i)",
+        .input = "\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006hM\n" ++
+            "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l!",
+        .lines = &.{ "M", "!" },
+        .cursor = .{ 1, 1 },
         .visible = true,
         .alt = false,
         .rendition = .{},

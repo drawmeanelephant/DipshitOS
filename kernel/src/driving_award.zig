@@ -424,7 +424,7 @@ var term_sel_dragging: bool = false;
 
 /// M49 SD5 (#1132): the terminal window under the pointer and the grid cell
 /// (absolute line + column) it maps to, or null. Searches topmost first.
-const TermHit = struct { win_id: u8, line: usize, col: usize };
+const TermHit = struct { win_id: u8, line: usize, col: usize, row: usize };
 
 fn terminalHitAt(px: u32, py: u32) ?TermHit {
     var wi: usize = win_count;
@@ -440,9 +440,22 @@ fn terminalHitAt(px: u32, py: u32) ?TermHit {
         const first: usize = if (scr.used > scr.view + rows_visible) scr.used - scr.view - rows_visible else 0;
         const row: usize = (py - top_y) / 8;
         const col: usize = (px - w.x) / 8;
-        return .{ .win_id = w.id, .line = first + row, .col = col };
+        return .{ .win_id = w.id, .line = first + row, .col = col, .row = row };
     }
     return null;
+}
+
+/// M73i (#1635): does mouse tracking own this pointer position? Plain
+/// (no Shift held) AND over a bound window with `?1000/1002/1003` on.
+/// Every decision — report vs selection — asks this at ITS OWN coordinates:
+/// the press latch and the cursor can disagree for one tick, and a per-tick
+/// "did I just report?" flag cannot arbitrate between them. Shift — or
+/// modes off — always leaves the pointer local (selection stays exact).
+fn mouseOwnsAt(px: u32, py: u32) bool {
+    if ((input.report().kb_mods & 0x22) != 0) return false; // L/R shift held
+    const mh = terminalHitAt(px, py) orelse return false;
+    const s = terminal.screenForWindow(mh.win_id) orelse return false;
+    return s.mouse_1000 or s.mouse_1002 or s.mouse_1003;
 }
 
 /// M32 WMS8 Gate 6 (issue #628): title-bar drag + snap-on-drop state is
@@ -3330,12 +3343,75 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
         // window's client area. Selection is model-only here (terminal.zig);
         // Ctrl+Shift+C copies it (input.zig). The click below still focuses
         // the window. The press latch survives a whole injected drag being
-        // drained in one pass (last-write-wins state would lose the down).
+        // drained in one pass (last-write-wins state would lose the down).        // M73i (#1635): mouse tracking owns a plain pointer over a bound
+        // window — the app gets the report, selection stays local, and
+        // Shift (or modes off) hands everything back to the local path.
+        // The report resolves at the cursor; `mouseOwnsAt` arbitrates each
+        // selection site below at that site's own coordinates.
+        if (mouseOwnsAt(cursor_x, cursor_y)) {
+            if (terminalHitAt(cursor_x, cursor_y)) |mh| {
+                if (terminal.screenForWindow(mh.win_id)) |mscr| {
+                    if (terminal.windowTerminal(mh.win_id)) |mtt| {
+                        var kind: ?terminal.MouseKind = null;
+                        var btn: u8 = 0;
+                        if (left_pressed) {
+                            kind = .press;
+                            btn = 0;
+                        } else if (right_pressed) {
+                            kind = .press;
+                            btn = 2;
+                        } else if (left_released) {
+                            kind = .release;
+                            btn = 0;
+                        } else if (right_released) {
+                            kind = .release;
+                            btn = 2;
+                        } else if (moved and (cur_left or cur_right)) {
+                            kind = .drag;
+                            btn = if (cur_left) 0 else 2;
+                        } else if (moved) {
+                            kind = .motion;
+                            btn = 0;
+                        }
+                        if (kind) |k| {
+                            if (terminal.mouseReports(
+                                mscr.mouse_1000,
+                                mscr.mouse_1002,
+                                mscr.mouse_1003,
+                                k,
+                            )) {
+                                var enc: [24]u8 = undefined;
+                                const n = terminal.encodeMouse(
+                                    mscr.mouse_1006,
+                                    k,
+                                    btn,
+                                    @intCast(mh.col + 1),
+                                    @intCast(mh.row + 1),
+                                    @intCast(mscr.cols),
+                                    &enc,
+                                );
+                                if (n > 0) {
+                                    if (k == .motion or k == .drag) {
+                                        _ = mtt.stageMouseMotion(enc[0..n]);
+                                    } else {
+                                        _ = mtt.pushMouse(enc[0..n]);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         var press_handled = false;
         if (input.take_press()) |p| {
             const px = map_pointer_axis(p.x, virtio_gpu.fb_width);
             const py = map_pointer_axis(p.y, virtio_gpu.fb_height);
-            if (terminalHitAt(px, py)) |hit| {
+            if (mouseOwnsAt(px, py)) {
+                // The latched press belongs to the app: consume it, suppress
+                // the stale-cursor begin below, let the report path deliver.
+                press_handled = true;
+            } else if (terminalHitAt(px, py)) |hit| {
                 if (terminal.screenForWindow(hit.win_id)) |scr| {
                     scr.beginSelection(hit.line, hit.col);
                     press_handled = true;
@@ -3357,7 +3433,7 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
                 }
             }
         }
-        if (left_pressed and !press_handled) {
+        if (!mouseOwnsAt(cursor_x, cursor_y) and left_pressed and !press_handled) {
             if (terminalHitAt(cursor_x, cursor_y)) |hit| {
                 if (terminal.screenForWindow(hit.win_id)) |scr| {
                     scr.beginSelection(hit.line, hit.col);
@@ -3365,14 +3441,14 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
                     klog.line("dui: term sel begin\n");
                 }
             }
-        } else if (cur_left and term_sel_dragging) {
+        } else if (!mouseOwnsAt(cursor_x, cursor_y) and cur_left and term_sel_dragging) {
             if (terminalHitAt(cursor_x, cursor_y)) |hit| {
                 if (terminal.screenForWindow(hit.win_id)) |scr| {
                     scr.extendSelection(hit.line, hit.col);
                 }
             }
         }
-        if (left_released and term_sel_dragging) {
+        if (!mouseOwnsAt(cursor_x, cursor_y) and left_released and term_sel_dragging) {
             // Land the final endpoint on the release position, then close
             // the selection (the gate's copy chord waits for this line).
             if (terminalHitAt(cursor_x, cursor_y)) |hit| {
