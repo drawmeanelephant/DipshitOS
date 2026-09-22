@@ -384,9 +384,15 @@ func (e *Editor) keyGround(b byte) ([]byte, EditEvent) {
 		e.lastLen = 0
 		e.hist.Push(line)
 		e.lastTab = false
-		// The next prompt is part of the same write so the grid never
-		// shows an unprompted line.
-		return append(out, e.paint()...), EditEvent{Kind: EvSubmit, Line: line}
+		// M73d (#1628): submit echoes ONLY the newline. The next prompt
+		// belongs AFTER the command's output — the reference shell loop
+		// (user/src/lib/shell.zig, SH.BIN/TERM.BIN) prints it after
+		// execution, and painting it here put `gosh> ` at the head of the
+		// output block: observed the live-term-depth selection then began
+		// `gosh> LINE-00 ...` (+6 bytes = 395 vs the gate's 389) while a
+		// screen-clearing command erased the prompt with nothing to
+		// repaint it. Front-ends write the prompt after RunLine returns.
+		return out, EditEvent{Kind: EvSubmit, Line: line}
 	case 0x7f, 0x08: // DEL / backspace
 		return e.keyBackspace()
 	case 0x01: // Ctrl-A

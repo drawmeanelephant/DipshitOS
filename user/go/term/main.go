@@ -39,8 +39,16 @@ import (
 const (
 	appName  = "GOTERM.ELF"
 	appTitle = "Term"
-	natW     = 512
-	natH     = 384
+	// M73d (#1628): the classic terminal rect — 640x400 at 64,48 is
+	// 80 grid columns, exactly the kernel grid's default, so
+	// syncWindowCols never reflows (Screen.reflow early-outs when
+	// cols is unchanged). A narrower window (512) forced an 80->64
+	// reflow of live history; observed 2026-09-22: the window kept
+	// showing pre-clear rows after a typed line while the grid itself
+	// had the fresh content — repaint gap that retired TERM.BIN
+	// (always 640) never hit and every 512px tabapp client did.
+	natW = 640
+	natH = 400
 
 	ttyPath = "/dev/tty"
 
@@ -81,8 +89,8 @@ func main() {
 	ta := tabapp.Init(tabapp.Config{
 		Name:  appName,
 		Title: appTitle,
-		X:     32,
-		Y:     32,
+		X:     64,
+		Y:     48,
 		W:     natW,
 		H:     natH,
 	})
@@ -162,6 +170,18 @@ func runSession(ta *tabapp.TabApp, fd uint32) {
 			if act != shlib.ActionContinue {
 				leave(ta, fd, sh, act)
 			}
+			// M73d (#1628): the editor's submit echo is a bare \r\n; the
+			// fresh prompt is this post-execution write — the reference
+			// shell loop's order (SH.BIN/TERM.BIN printed after running),
+			// without which a screen-clearing command (`ESC[2J`) erased
+			// the pre-painted prompt with nothing to repaint it:
+			// observed 2026-09-22 the steady-state grid held RED/box/TC
+			// rows but no prompt (fg=16 against the gate's threshold 20).
+			// At the cursor, no CR — a CR repaint would overwrite the
+			// truecolour row's cells (the M73h assert scans x64..79 of
+			// grid row 2), where the shell loop's bare prompt lands at
+			// x>=80 as the original gate observed.
+			_, _ = vi.FileWrite(fd, []byte(loadPrompt()))
 		case shlib.EvEOF:
 			shutdown(ta, fd, 0)
 		case shlib.EvCancel:

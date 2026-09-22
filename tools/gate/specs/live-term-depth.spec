@@ -1,24 +1,42 @@
-# live-term-depth.spec -- M49 card SD5 class-B gate (issue #1132).
+# live-term-depth.spec -- M49 card SD5 class-B gate (issue #1132),
+# retargeted by M73d (#1628) onto GOTERM.ELF (the Zig TERM.BIN retires
+# into M60's leftovers; markers move `term:` -> `goterm:` by prefix alone,
+# the M66c/NOTE pattern — no assertion dropped).
 #
-# TERM.BIN first-class window terminal: a share script prints 30 numbered
+# GOTERM first-class window terminal: a share script prints 30 numbered
 # lines into the kernel presentation grid, the host pointer (custom-virtio
 # kind-2, guest pixels) drag-selects a row in the window's client area, and
-# the Ctrl+Shift+C chord copies the selection into the shared clipboard.
-# The monitor `clip` command then prints the copied bytes on the serial
-# console — observed selection/copy. M73e (#1629) adds the reverse: the
-# wide drag selects all 30 rows (389 B > the old 256 B input queue),
+# the Ctrl+Shift+C chord copies the selection into the shared clipboard —
+# all kernel-side for ANY tty-bound window (kernel/src/input.zig chord
+# table, driving_award.zig selection), which is what makes this a front-end
+# swap. The monitor `clip` command then prints the copied bytes on the
+# serial console — observed selection/copy. M73e (#1629) adds the reverse:
+# the wide drag selects all 30 rows (389 B > the old 256 B input queue),
 # Ctrl+Shift+V pastes it back through the bound tty (bracketed, DECSET
-# 2004), and the editor runs every pasted line — tail line included. Reflow/scrollback math is class-A
-# (kernel/src/terminal.zig tests) with the paint-path width sync.
-# Boot default is unchanged (the serial console still belongs to the
-# monitor while TERM.BIN owns only its window).
+# 2004), and the editor runs every pasted line — tail line included. Reflow/
+# scrollback math is class-A (kernel/src/terminal.zig tests) with the
+# paint-path width sync. Boot default is unchanged (the serial console
+# still belongs to the monitor while GOTERM owns only its window).
+# M73d geometry: this gate boots WITHOUT GOTABWM.ELF (shim compositing,
+# GOTERM's kind-8 declare refused — the plain .user window still paints)
+# at the classic terminal rect 64,48,640,400 — the SAME rect TERM.BIN
+# declared, so the original drag coordinates stand untranslated: line1
+# col0 -> line30 col79 = exactly the 30 BIG.SH rows (389 B) the copy
+# asserts count.
+#
+# HOST PREREQUISITE (fails the gate honestly when missing):
+#   bash tools/go/build-gotabwm.sh   ->  .build/go/GOTABWM.ELF (the seat —
+#     same reason as live-term: without it the boot falls back to shim
+#     compositing and GOTERM's declare is refused)
+#   bash tools/go/build-goterm.sh   ->  .build/go/GOTERM.ELF
 
-vgate_name live-term-depth "#1132 SD5: TERM.BIN pointer selection + Ctrl+Shift+C copy through the kernel grid"
+vgate_name live-term-depth "#1132 SD5 + M73d #1628: GOTERM pointer selection + Ctrl+Shift+C copy through the kernel grid"
 vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 
 vgate_file script.txt <<'EOF'
-exec TERM.BIN
+set GOMAXPROCS=1
+exec GOTERM.ELF
 EOF
 
 vgate_file clip.txt <<'EOF'
@@ -27,9 +45,16 @@ clip
 EOF
 
 vgate_setup_python <<'PY'
-import os
+import os, shutil, sys
 run = os.environ["RUN_DIR"]
 share = os.path.join(run, "share")
+for name, how in (("GOTERM.ELF", "build-goterm.sh"),):
+    src = os.path.join(".build", "go", name)
+    if not os.path.exists(src):
+        sys.exit(name + " missing (expected " + src + ") - build it first: "
+                 "bash tools/go/" + how)
+    shutil.copy(src, os.path.join(share, name))
+    print("staged %s into share (%d bytes)" % (name, os.path.getsize(src)))
 lines = ["echo LINE-%02d pppp" % i for i in range(30)]
 with open(os.path.join(share, "BIG.SH"), "w") as f:
     f.write("\n".join(lines) + "\n")
@@ -38,20 +63,20 @@ PY
 vgate_run 01 -- --display --input --via-virtio --screen '$RUN_DIR/screen' \
     --script '$RUN_DIR/script.txt' \
     --input-string 'source BIG.SH'$'\n' \
-    --input-string-after 'term: attached' \
+    --input-string-after 'goterm: attached' \
     --pointer-virtio "68,76;68,76,d;696,308;696,308,u" \
-    --pointer-virtio-after 'term: line source BIG.SH' \
+    --pointer-virtio-after 'goterm: line source BIG.SH' \
     --input-chords "ctrl-shift-c,ctrl-shift-v,return,e,c,h,o,space,a,f,t,e,r,return" \
     --input-chords-after 'dui: term sel end' \
     --script2 '$RUN_DIR/clip.txt' \
-    --script2-after 'term: line echo after' \
+    --script2-after 'goterm: line echo after' \
     --script-expect 'clip: LINE-00' \
     --timeout 150
 
-vgate_assert 01 serial-contains 'term: ready'
-vgate_assert 01 serial-contains 'term: attached'
-vgate_assert 01 serial-contains 'term: line source BIG.SH'
-vgate_assert 01 serial-contains 'term: done status=0'
+vgate_assert 01 serial-contains 'goterm: ready'
+vgate_assert 01 serial-contains 'goterm: attached'
+vgate_assert 01 serial-contains 'goterm: line source BIG.SH'
+vgate_assert 01 serial-contains 'goterm: done status=0'
 vgate_assert 01 serial-contains 'tty: copy 389 bytes'
 vgate_assert 01 serial-contains 'clip: LINE-00'
 vgate_assert 01 serial-absent '\[EXC\]'
@@ -60,13 +85,13 @@ vgate_assert 01 serial-absent '[EXC] parking:'
 vgate_assert 01 python <<'PY'
 import os
 ser = open(os.environ["VG_SER"], errors="replace").read()
-i_done = ser.find("term: done status=0")
+i_done = ser.find("goterm: done status=0")
 i_copy = ser.find("tty: copy ")
 i_clip = ser.find("clip: LINE-00")
 assert i_done >= 0, "BIG.SH did not finish"
 assert i_copy > i_done, f"copy marker not after the script (done={i_done} copy={i_copy})"
 assert i_clip > i_copy, f"clip read not after the copy (copy={i_copy} clip={i_clip})"
-print("selection/copy ordering OK: term done < tty copy < clip read")
+print("selection/copy ordering OK: goterm done < tty copy < clip read")
 PY
 
 # M73f-2 (#1632): the monitor `tty` line prints the ADR 0020 D1 drop
@@ -100,7 +125,7 @@ assert n > 256, f"paste must exceed the old 256 B queue (got {n})"
 i_copy = ser.find("tty: copy ")
 i_paste = ser.find(m.group(0))
 assert i_copy >= 0 and i_paste > i_copy, f"paste not after copy (copy={i_copy} paste={i_paste})"
-for seg in ("term: line LINE-00 pppp", "term: line LINE-14 pppp", "term: line LINE-29 pppp"):
+for seg in ("goterm: line LINE-00 pppp", "goterm: line LINE-14 pppp", "goterm: line LINE-29 pppp"):
     assert seg in ser, f"{seg} missing — paste lost bytes"
 print(f"paste OK: {n} bytes; LINE-00..LINE-29 all reached the editor")
 PY

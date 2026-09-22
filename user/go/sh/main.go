@@ -297,6 +297,13 @@ func runSession(fd uint32, ta *tabapp.TabApp, auth *shlib.NetAuth) {
 			if act != shlib.ActionContinue {
 				leave(ta, fd, sh, act)
 			}
+			// M73d (#1628): the editor's submit echo is a bare \r\n now;
+			// the front-end paints the fresh prompt AFTER the command's
+			// output — the reference shell loop's order (SH.BIN/TERM.BIN),
+			// and what keeps a screen-clearing command from erasing the
+			// prompt with nothing to repaint it. At the cursor, no CR: a
+			// CR repaint would overwrite output that ended mid-row.
+			_, _ = vi.FileWrite(fd, []byte(loadPrompt()))
 		case shlib.EvEOF:
 			shutdown(ta, fd, 0)
 		case shlib.EvCancel:

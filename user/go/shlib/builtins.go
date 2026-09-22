@@ -484,15 +484,14 @@ var helpCatalog = map[string]helpEntry{
 	"secrets": {group: "identity", usage: "secrets", blurb: "list the caller's store entry names (values stay in the kernel)"},
 
 	// tools (M49 SD3 multicall set; usages mirror the mistyped-invocation text)
-	"wc":     {group: "tools", usage: "wc [-l|-w|-c] [FILE...]", blurb: "count lines, words and bytes"},
-	"head":   {group: "tools", usage: "head [-n LINES] [FILE...]", blurb: "write the first LINES of each input"},
-	"tail":   {group: "tools", usage: "tail [-n LINES] [FILE...]", blurb: "write the last LINES of each input"},
-	"grep":   {group: "tools", usage: "grep [-i] PATTERN [FILE...]", blurb: "write the lines that match PATTERN (-i folds case)"},
-	"sort":   {group: "tools", usage: "sort [-r] [-u] [FILE...]", blurb: "sort lines (-r reverses, -u removes duplicates)"},
-	"cut":    {group: "tools", usage: "cut -f LIST [-d C] [FILE...]", blurb: "select fields by LIST ('-d C' sets the delimiter, tab by default)"},
-	"printf": {group: "tools", usage: "printf FORMAT [ARGS...]", blurb: "write FORMAT with %s/%d/%% substitutions"},
-	"test":   {group: "tools", usage: "test EXPR", blurb: "evaluate EXPR and set $? (no output)"},
-	"[":      {group: "tools", usage: "[ EXPR ]", blurb: "evaluate EXPR and set $? (the closing ] is required)"},
+	"wc":   {group: "tools", usage: "wc [-l|-w|-c] [FILE...]", blurb: "count lines, words and bytes"},
+	"head": {group: "tools", usage: "head [-n LINES] [FILE...]", blurb: "write the first LINES of each input"},
+	"tail": {group: "tools", usage: "tail [-n LINES] [FILE...]", blurb: "write the last LINES of each input"},
+	"grep": {group: "tools", usage: "grep [-i] PATTERN [FILE...]", blurb: "write the lines that match PATTERN (-i folds case)"},
+	"sort": {group: "tools", usage: "sort [-r] [-u] [FILE...]", blurb: "sort lines (-r reverses, -u removes duplicates)"},
+	"cut":  {group: "tools", usage: "cut -f LIST [-d C] [FILE...]", blurb: "select fields by LIST ('-d C' sets the delimiter, tab by default)"}, "printf": {group: "tools", usage: "printf FORMAT [ARGS...]", blurb: `write FORMAT with %s/%d/%% substitutions and the escapes \n \t \r \e \xHH \\ \0 (unknown escapes stay literal)`},
+	"test": {group: "tools", usage: "test EXPR", blurb: "evaluate EXPR and set $? (no output)"},
+	"[":    {group: "tools", usage: "[ EXPR ]", blurb: "evaluate EXPR and set $? (the closing ] is required)"},
 
 	// externals: the verb, then the Go net CLIs a daily user reaches from
 	// this prompt by name (M71n #1573 — `exec GOTGIT.ELF` and `exec

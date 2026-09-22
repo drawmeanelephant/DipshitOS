@@ -42,8 +42,10 @@ func TestEditorTyping(t *testing.T) {
 	}
 }
 
-// TestEditorSubmit pins the submit protocol: \r\n, the pushed history, the
-// next prompt in the same write, and Ctrl-C / Ctrl-D.
+// TestEditorSubmit pins the submit protocol: a bare \r\n (M73d #1628:
+// the next prompt is the FRONT-END's post-RunLine write, the reference
+// shell loop's order — not part of the submit echo), the pushed history,
+// and Ctrl-C / Ctrl-D.
 func TestEditorSubmit(t *testing.T) {
 	h := &History{}
 	e := NewEditor("gosh> ", h)
@@ -51,8 +53,8 @@ func TestEditorSubmit(t *testing.T) {
 	if ev.Kind != EvSubmit || ev.Line != "echo hi" {
 		t.Fatalf("submit event = %+v", ev)
 	}
-	if !strings.Contains(string(out), "\r\n\rgosh> ") {
-		t.Fatalf("submit repaint = %q", out)
+	if !strings.HasSuffix(string(out), "\r\n") {
+		t.Fatalf("submit repaint = %q, want to end bare at CRLF (no prompt after it)", out)
 	}
 	if len(h.Entries()) != 1 || h.Entries()[0] != "echo hi" {
 		t.Fatalf("history = %v", h.Entries())

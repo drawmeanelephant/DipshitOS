@@ -350,7 +350,31 @@ func parseFieldList(s string) ([]int, bool) {
 	return out, true
 }
 
-// tPrintf implements %s, %d and %%, plus \n \t \\ in the format.
+// printfHexNibble reads a hex nibble at index i, reporting whether one
+// sits there (bounds-safe: \x at the end of the format is not a pair).
+func printfHexNibble(s string, i int) (byte, bool) {
+	if i < 0 || i >= len(s) {
+		return 0, false
+	}
+	switch ch := s[i]; {
+	case ch >= '0' && ch <= '9':
+		return ch - '0', true
+	case ch >= 'a' && ch <= 'f':
+		return ch - 'a' + 10, true
+	case ch >= 'A' && ch <= 'F':
+		return ch - 'A' + 10, true
+	default:
+		return 0, false
+	}
+}
+
+// tPrintf implements %s, %d and %%, plus the escape set of the retired Zig
+// toolbox (user/src/lib/toolbox.zig runPrintf): \n \t \r \e \xHH \\ \0,
+// any other backslash escape staying literal. \e and \xHH are the bounded
+// way a typed line emits ANSI CSI sequences and UTF-8 rune bytes — M73a-2
+// (#1631) added them to the Zig tool; shlib lacked them until M73d (#1628),
+// observed 2026-09-22: live-term's whole SGR burst reached GOTERM as
+// literal text, so the grid never cleared and never painted the burst.
 func tPrintf(c *cmdCtx) int {
 	if len(c.args) == 0 {
 		c.out([]byte("gosh: printf FORMAT [ARGS...]\n"))
@@ -371,6 +395,23 @@ func tPrintf(c *cmdCtx) int {
 					b.WriteByte('\n')
 				case 't':
 					b.WriteByte('\t')
+				case 'r':
+					b.WriteByte('\r')
+				case 'e':
+					b.WriteByte(0x1b)
+				case 'x':
+					hi, ok1 := printfHexNibble(fmt_, i+1)
+					lo, ok2 := printfHexNibble(fmt_, i+2)
+					if ok1 && ok2 {
+						b.WriteByte(hi<<4 | lo)
+						i += 2
+					} else {
+						// Not a hex pair: emit `\x` literally (Zig parity).
+						b.WriteByte('\\')
+						b.WriteByte('x')
+					}
+				case '0':
+					b.WriteByte(0)
 				case '\\':
 					b.WriteByte('\\')
 				default:
