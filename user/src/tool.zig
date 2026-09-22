@@ -24,7 +24,13 @@ const toolbox = @import("lib/toolbox.zig");
 pub const ready_marker: []const u8 = "tool: ready\n";
 pub const done_marker: []const u8 = "tool: done status=";
 pub const max_args: usize = 12;
-pub const arg_bytes: usize = 32;
+// M71m (#1572) grew the kernel's argv slots to 256 B (kernel/src/exec.zig
+// arg_slot_bytes) and this stayed 32 -- so every argument past argv[0]
+// read zero padding inside slot 0. Observed #1648: `exec TOOL.BIN wc -l
+// DATA.TXT` arrived as two empty strings (`wc: : no such file`, done
+// status=1), which never matched the gate's `tool: done status=0` chain
+// trigger and kept live-sh-tools red. Must mirror exec.zig exactly.
+pub const arg_bytes: usize = 256;
 
 fn pipeStream() toolbox.Stream {
     const S = struct {

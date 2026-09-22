@@ -16,7 +16,7 @@
 # We source this at session start so EVERY agent checks ONCE whether it is
 # about to run bash 3.2 and BSD sed -- and bitches loudly when it is.
 #
-# IT DOES THREE THINGS
+# IT DOES FOUR THINGS
 # --------------------
 #   1. Ensures the Homebrew bin dir is FIRST on PATH (defensively re-prepends
 #      it; does *not* clobber anything else on your PATH).
@@ -25,6 +25,10 @@
 #   3. Verbosely, in red, complains when it detects the system build -- and
 #      returns non-zero from this file so a strict caller (an agent harness,
 #      CI, `set -e` wrapper) can fail hard.
+#   4. Diffs the GOOS=virelai toolchain FORK COPY against tools/go/overlay/
+#      (issue #1648): a fork left behind by an overlay change builds every
+#      Go ELF against the OLD runtime -- gates red for a reason no spec
+#      prints. `bash tools/go/apply.sh` re-syncs it in place.
 #
 # It is safe to source repeatedly: it is idempotent and only writes STDOUT
 # when something is wrong (or when VERBOSE=1).
@@ -187,6 +191,38 @@ check_yq() {
     return 0
 }
 
+check_go_overlay() {
+    # Issue #1648: the GOOS=virelai fork is a COPY, not a checkout --
+    # tools/go/apply.sh provisions it once and then copies tools/go/overlay/
+    # into it. When the overlay moves forward (a runtime/kernel contract
+    # change like M71m's 256->4096-B argv block) and nobody re-runs
+    # apply.sh, every Go ELF silently builds against the OLD runtime: a
+    # pre-M71m fork under the M71m kernel kills every arg-carrying exec in
+    # mallocinit and turns the whole shell fleet red with no spec naming the
+    # cause (observed #1648: fork runtime files dated Sep 20, M71m merged
+    # Sep 21). Cmp each overlay file against the fork's copy.
+    local _repo _fork _f _stale
+    _repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)" || return 0
+    [ -d "$_repo/tools/go/overlay" ] || return 0
+    # Same fork every build script resolves ("$(dirname "$REPO")/go-virelai");
+    # GO_FORK_DIR overrides it exactly like they do.
+    _fork="${GO_FORK_DIR:-$(dirname "$_repo")/go-virelai}"
+    [ -d "$_fork/src" ] || return 0   # not provisioned yet: the build scripts will
+    _stale=""
+    for _f in $(cd "$_repo/tools/go/overlay" && find . -type f | sed 's|^\./||'); do
+        cmp -s "$_repo/tools/go/overlay/$_f" "$_fork/src/$_f" 2>/dev/null || _stale="$_stale $_f"
+    done
+    [ -n "$_stale" ] || return 0
+    _ENV_OK=0
+    env_crit ""
+    env_crit "  ✘  go fork overlay drift -- Go ELFs will build against the WRONG runtime."
+    env_crit "      fork:   $_fork"
+    env_crit "      stale: $_stale"
+    env_crit "      fix:    bash tools/go/apply.sh    # re-copy tools/go/overlay/ into the fork"
+    env_crit ""
+    return 0
+}
+
 # ---- the driver --------------------------------------------------------------
 env_check_all() {
     _ENV_OK=1; _ENV_RANTED=0
@@ -228,6 +264,7 @@ env_check_all() {
     check_sed
     check_jq
     check_yq
+    check_go_overlay
 
     if [ "$_ENV_OK" = 1 ]; then
         [ "${VERBOSE:-0}" = 1 ] && env_good "env-check: all modern Homebrew tool versions confirmed ✓"
@@ -235,8 +272,10 @@ env_check_all() {
     else
         env_crit ""
         env_crit "  ─────────────────────────────────────────────────────────"
-        env_crit "   ONE OR MORE TOOLS ABOVE ARE THE SYSTEM/DISASTER VERSIONS."
-        env_crit "   brew install bash gnu-sed jq yq && fix your PATH, then re-source."
+        env_crit "   ONE OR MORE CHECKS ABOVE FAILED."
+        env_crit "   toolchain: brew install bash gnu-sed jq yq && fix your PATH."
+        env_crit "   go fork:   bash tools/go/apply.sh  (re-copy tools/go/overlay/)."
+        env_crit "   Then re-source this file."
         env_crit "  ─────────────────────────────────────────────────────────"
         env_crit ""
         return 1

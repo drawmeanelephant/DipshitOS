@@ -1428,18 +1428,51 @@ test "process: mmap regions and dynamic page tracking" {
     try std.testing.expect(reap(pid));
 }
 
-test "process: mmap_collides protects the argv block on a page-aligned data segment (issue #1214 review)" {
+test "process: mmap_collides pins the M71m argv-block geometry for any image alignment (issue #1214 review, #1648)" {
     init();
+    // M71m (#1572): the packed argv+envp block is 8x256 + 16x128 = 4096
+    // bytes (this fixture pinned the pre-M71m 256-B assumption until #1648
+    // called it out). exec.zig places the block at align8(mem_size) and
+    // sizes the segment to cover it; the data aperture extends through
+    // argv_end_va (mmap_collides below); the GOOS=virelai runtime floors
+    // its sbrk break at memRound(argv_va + 4096) (tools/go/overlay/
+    // runtime/os_virelai.go initBlocFloor). The rule #1648 burned a
+    // session on: for EITHER image alignment that floor is >= argv_end_va
+    // -- the heap opens at or past the protected span, never inside it.
+    // The asserts pin both halves: protection runs exactly through
+    // argv_end_va, and the floor page is always free.
     const data_va: u64 = 0x50_0000;
+    // r = 0: image ends page-aligned; block ON the headroom page;
+    // argv_end page-aligned; the runtime floor == argv_end.
     const pid = create_as("ARGV.BIN", .{}, .{
         .data_va = data_va,
         .data_len = 0x2000, // exactly page-aligned: block starts ON the headroom page
-        .argv_end_va = data_va + 0x2000 + 256,
+        .argv_end_va = data_va + 0x2000 + 4096,
     }, .{}, .{}).?;
     // The headroom page carrying the argv block is a collision...
     try std.testing.expect(mmap_collides(pid, data_va + 0x2000, 4096));
-    // ...the range past the block is not (the sbrk heap starts there)...
+    // ...and the runtime's floor (== argv_end here) opens the heap exactly
+    // where the protection ends.
     try std.testing.expect(!mmap_collides(pid, data_va + 0x2000 + 4096, 4096));
+    // r > 0: image ends mid-page; the block reaches past the page-rounded
+    // image end and the aperture with it; the floor (memRound(argv_end))
+    // is the NEXT page. This is the alignment where a stale sub-page
+    // mirror of the block size put the floor INSIDE the span and killed
+    // mallocinit (observed #1648).
+    const pid_r = create_as("ARGVX.BIN", .{}, .{
+        .data_va = data_va,
+        .data_len = 0x2100, // r = 0x100: block at align8(mem_size) spills a page
+        .argv_end_va = data_va + 0x2100 + 4096, // = data + 0x3100
+    }, .{}, .{}).?;
+    // Protection runs through argv_end_va -- including the spill page's
+    // first 0x100 bytes...
+    try std.testing.expect(mmap_collides(pid_r, data_va + 0x2100, 4096));
+    try std.testing.expect(mmap_collides(pid_r, data_va + 0x3000, 4096));
+    // ...and the runtime's floor page (memRound(argv_end) = data+0x4000)
+    // is never inside the span: the heap can open there.
+    const heap_floor = (data_va + 0x3100 + 4095) & ~@as(u64, 4095);
+    try std.testing.expectEqual(@as(u64, data_va + 0x4000), heap_floor);
+    try std.testing.expect(!mmap_collides(pid_r, heap_floor, 4096));
     // ...and without a block the rounded image span is the whole bound.
     const pid2 = create_as("NOARGV.BIN", .{}, .{
         .data_va = data_va,
