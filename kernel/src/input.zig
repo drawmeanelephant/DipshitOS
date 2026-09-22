@@ -520,13 +520,34 @@ pub fn decode_keyboard_report(rep: []const u8) void {
                 //   Shift+Home / Shift+End           jump to oldest / tail
                 //   Ctrl+Shift+C                     copy the selection
                 //   Ctrl+Shift+V                     paste the clipboard into the tty
-                if (k == 0x4b) { // PageUp
-                    if (scr) |s| s.scrollBy(8);
-                    events += 1;
-                    continue;
-                }
-                if (k == 0x4e) { // PageDown
-                    if (scr) |s| s.scrollBy(-8);
+                if (k == 0x4b or k == 0x4e) { // PageUp / PageDown
+                    const up = (k == 0x4b);
+                    var wheel_ok = false;
+                    if (scr) |s| {
+                        // M73i (#1635): with mouse tracking on, PageUp/
+                        // PageDown report `CSI 64/65` (xterm wheel) instead
+                        // of scrolling the view; Shift — or modes off —
+                        // keeps local scroll-by-8 byte-identically. The
+                        // report sits at the cursor cell (pointer-cell
+                        // coords need the WM geometry seam — future note).
+                        if ((s.mouse_1000 or s.mouse_1002 or s.mouse_1003) and !shift) {
+                            var enc: [24]u8 = undefined;
+                            const n = terminal.encodeMouse(
+                                s.mouse_1006,
+                                .wheel,
+                                if (up) 0 else 1,
+                                @intCast(s.cursorCol() + 1),
+                                @intCast(s.cursorLine() + 1),
+                                @intCast(s.cols),
+                                &enc,
+                            );
+                            if (n > 0) {
+                                _ = tt.pushMouse(enc[0..n]);
+                                wheel_ok = true;
+                            }
+                        }
+                        if (!wheel_ok) s.scrollBy(if (up) 8 else -8);
+                    }
                     events += 1;
                     continue;
                 }
