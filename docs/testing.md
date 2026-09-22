@@ -796,6 +796,23 @@ beat cannot see this.
 > `just check-env`) verifies the same thing and complains loudly when the
 > 2007-era system bash/sed win instead.
 
+## Go SDK class-A loop (the `user/go` module)
+
+`cd user/go && go test ./...` is the SDK's class-A loop, and two things about
+it are load-bearing rather than incidental:
+
+- The module's single require, `virelai/tools/go/tabcodec`, is an **in-repo**
+  module reached by a relative `replace` to `../../tools/go/tabcodec` (M62d) —
+  not a fetched dependency. `virelai/ttf`'s import guard permits exactly that
+  shape and still refuses a fetched one; `TestGoModGuardFixtures` keeps the
+  refusal firing (#1607).
+- `user/go/pulse` keeps its snapshot/row types (`types.go`) and the pure
+  `derive.go` layer untagged, so the guest poller, the host stub and the pure
+  layer all build with no tag and `./...` runs the pure layer's cases; only the
+  Charm-dependent model/update/view files sit behind the `pulse` tag (host
+  run: `go test -tags pulse ./pulse/` over the module-cache Charm the transient
+  modfile in `tools/go/build-pulse.sh` names) (#1611).
+
 ## Gate fleet (M40 GF1–GF5, issues #934–#940)
 
 - **No new `tools/verify-*.sh` files.** New gates arrive as vgate specs

@@ -4,6 +4,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -495,7 +496,10 @@ func TestGlyphOutOfRange(t *testing.T) {
 
 // TestNoForbiddenImports is the dependency guard: this package must stay
 // stdlib-only so it compiles for the guest, and must never grow a
-// golang.org/x/image or cgo dependency.
+// golang.org/x/image or cgo dependency. Its go.mod half allows a require
+// only when a replace points at a path inside this repository (user/go
+// requires tools/go/tabcodec that way); TestGoModGuardFixtures keeps that
+// distinction from becoming a hole.
 func TestNoForbiddenImports(t *testing.T) {
 	entries, err := os.ReadDir(".")
 	if err != nil {
@@ -539,10 +543,177 @@ func TestNoForbiddenImports(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read ../go.mod: %v", err)
 	}
-	if strings.Contains(string(mod), "golang.org/x/") {
-		t.Errorf("user/go/go.mod references golang.org/x:\n%s", mod)
+	for _, issue := range goModIssues(string(mod), "..") {
+		t.Errorf("user/go/go.mod %s:\n%s", issue, mod)
 	}
-	if strings.Contains(string(mod), "require") {
-		t.Errorf("user/go/go.mod grew a dependency block:\n%s", mod)
+}
+
+// goModIssues is the go.mod half of the import guard as a pure function, so
+// its fixtures can prove it still refuses a fetched dependency. It returns
+// one message per violation.
+//
+// A require is allowed only when a replace maps it to a relative path that
+// stays inside this repository: tools/go/tabcodec is a sibling in-repo module
+// (M62d, #1402), not a dependency. A require with no replace, a remote
+// replace, an absolute target, and any target outside the repository all
+// still fail — relaxing the in-repo case must not become a hole. modDir is
+// the directory holding go.mod; relative replace targets resolve against it.
+func goModIssues(mod, modDir string) []string {
+	var issues []string
+	if strings.Contains(mod, "golang.org/x/") {
+		issues = append(issues, "references golang.org/x")
+	}
+
+	var requires []string
+	replaces := map[string]string{}
+	block := ""
+	for _, raw := range strings.Split(mod, "\n") {
+		line := raw
+		if i := strings.Index(line, "//"); i >= 0 {
+			line = line[:i]
+		}
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		kind, entry := block, fields
+		if block == "" {
+			if fields[0] != "require" && fields[0] != "replace" {
+				continue
+			}
+			kind, entry = fields[0], fields[1:]
+			if len(entry) == 1 && entry[0] == "(" {
+				block = kind
+				continue
+			}
+		} else if fields[0] == ")" {
+			block = ""
+			continue
+		}
+		switch kind {
+		case "require":
+			if len(entry) > 0 {
+				requires = append(requires, entry[0])
+			}
+		case "replace":
+			for i, tok := range entry {
+				if tok == "=>" && i > 0 && i+1 < len(entry) {
+					replaces[entry[0]] = entry[i+1]
+					break
+				}
+			}
+		}
+	}
+
+	root := repoRootOf(modDir)
+	for _, req := range requires {
+		target, ok := replaces[req]
+		if !ok {
+			issues = append(issues, "requires "+req+" with no replace (a fetched dependency?)")
+			continue
+		}
+		if !relativePathInside(target, modDir, root) {
+			issues = append(issues, "requires "+req+" satisfied only by "+target+", not a relative path inside this repository")
+		}
+	}
+	return issues
+}
+
+// relativePathInside reports whether target, resolved against modDir, is a
+// relative path that stays inside root.
+func relativePathInside(target, modDir, root string) bool {
+	if !strings.HasPrefix(target, "./") && !strings.HasPrefix(target, "../") {
+		return false
+	}
+	abs, err := filepath.Abs(filepath.Join(modDir, target))
+	if err != nil {
+		return false
+	}
+	abs = filepath.Clean(abs)
+	return abs == root || strings.HasPrefix(abs, root+string(filepath.Separator))
+}
+
+// repoRootOf returns dir's repository root: the nearest ancestor holding a
+// .git entry (a directory in a clone, a file in a worktree). Without a git
+// checkout (an exported tree) it falls back to the module's grandparent, the
+// layout this guard is written for (user/go/go.mod inside the repository).
+func repoRootOf(dir string) string {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		abs = filepath.Clean(dir)
+	}
+	for d := abs; ; {
+		if _, err := os.Lstat(filepath.Join(d, ".git")); err == nil {
+			return d
+		}
+		parent := filepath.Dir(d)
+		if parent == d {
+			return filepath.Clean(filepath.Join(abs, "..", ".."))
+		}
+		d = parent
+	}
+}
+
+// TestGoModGuardFixtures keeps the go.mod half of the guard honest: the
+// in-repo replace user/go/go.mod actually carries must pass, and every
+// fetched shape must still fail. A relaxation that stops refusing these
+// fixtures is a hole, not a cleanup.
+func TestGoModGuardFixtures(t *testing.T) {
+	cases := []struct {
+		name     string
+		mod      string
+		wantFail bool
+	}{
+		{
+			"in-repo relative replace is allowed",
+			"module virelai\n\ngo 1.27\n\nrequire virelai/tools/go/tabcodec v0.0.0\n\nreplace virelai/tools/go/tabcodec => ../../tools/go/tabcodec\n",
+			false,
+		},
+		{
+			"block form in-repo replace is allowed",
+			"module virelai\n\ngo 1.27\n\nrequire (\n\tvirelai/tools/go/tabcodec v0.0.0\n)\n\nreplace (\n\tvirelai/tools/go/tabcodec => ../../tools/go/tabcodec\n)\n",
+			false,
+		},
+		{
+			"external require with no replace fails",
+			"module virelai\n\ngo 1.27\n\nrequire github.com/x/y v1.0.0\n",
+			true,
+		},
+		{
+			"external require with a remote replace fails",
+			"module virelai\n\ngo 1.27\n\nrequire github.com/x/y v1.0.0\n\nreplace github.com/x/y => github.com/z/y v1.0.0\n",
+			true,
+		},
+		{
+			"absolute replace target fails",
+			"module virelai\n\ngo 1.27\n\nrequire github.com/x/y v1.0.0\n\nreplace github.com/x/y => /tmp/x\n",
+			true,
+		},
+		{
+			"replace escaping the repository fails",
+			"module virelai\n\ngo 1.27\n\nrequire github.com/x/y v1.0.0\n\nreplace github.com/x/y => ../../../../outside\n",
+			true,
+		},
+		{
+			"one fetched require among several fails",
+			"module virelai\n\ngo 1.27\n\nrequire (\n\tvirelai/tools/go/tabcodec v0.0.0\n\tgithub.com/x/y v1.0.0\n)\n\nreplace virelai/tools/go/tabcodec => ../../tools/go/tabcodec\n",
+			true,
+		},
+		{
+			"golang.org/x is refused",
+			"module virelai\n\ngo 1.27\n\nrequire golang.org/x/image v0.0.0\n",
+			true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			issues := goModIssues(tc.mod, "..")
+			if tc.wantFail && len(issues) == 0 {
+				t.Fatalf("guard accepted a dependency it must refuse:\n%s", tc.mod)
+			}
+			if !tc.wantFail && len(issues) != 0 {
+				t.Fatalf("guard refused an in-repo module: %v\n%s", issues, tc.mod)
+			}
+		})
 	}
 }
