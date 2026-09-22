@@ -11,9 +11,10 @@
 //!     untouched (a regression turns the corpus red in host-seconds).
 //!   - A card that deliberately changes behaviour changes its rows in the
 //!     SAME PR. Existing hooks:
-//!       * the SGR row "unknown/extended SGR params are ignored" is what
-//!         M73h (256-colour/truecolour) rewrites when `38;5`/`38;2` gain
-//!         meaning, and it appends underline/italic/reverse rows beside it;
+//!       * M73h (256-colour/truecolour, Amendment E) LANDED its rows in
+//!         the SGR-depth group and rewrote the old "extended SGR params
+//!         are ignored" row — that flip is exactly what a behaviour
+//!         change looks like here;
 //!       * M73i (mouse modes) appends mode rows to the modes group next to
 //!         the pinned `?2004h` private-mode row;
 //!       * UTF-8 decode rows (M73a-1's policy) live in the decode group —
@@ -40,14 +41,24 @@ const Rendition = struct {
     bold: bool = false,
 };
 
-/// A style spot-check at a cell; `default_exact` additionally asserts the
-/// cell style is byte-identical to `default_cell_style`.
+/// A style spot-check at a cell. `fg`/`bg` are the PALETTE accessors
+/// (null = default or truecolour — the rgb fields pin which);
+/// `fg_rgb`/`bg_rgb` assert `Screen.rgbAt` (null = this cell stores no
+/// RGB, the correct default for every palette/default row);
+/// `default_exact` additionally asserts the cell style is byte-identical
+/// to `default_cell_style`.
 const StyleSpot = struct {
     row: usize,
     col: usize,
     fg: ?u8 = null,
     bg: ?u8 = null,
     bold: bool = false,
+    dim: bool = false,
+    italic: bool = false,
+    underline: bool = false,
+    reverse: bool = false,
+    fg_rgb: ?t.Rgb = null,
+    bg_rgb: ?t.Rgb = null,
     default_exact: bool = false,
 };
 
@@ -107,6 +118,29 @@ fn run(c: Case) !void {
         try std.testing.expectEqual(x.fg, t.styleForeground(st));
         try std.testing.expectEqual(x.bg, t.styleBackground(st));
         try std.testing.expectEqual(x.bold, t.styleBold(st));
+        try std.testing.expectEqual(x.dim, t.styleDim(st));
+        try std.testing.expectEqual(x.italic, t.styleItalic(st));
+        try std.testing.expectEqual(x.underline, t.styleUnderline(st));
+        try std.testing.expectEqual(x.reverse, t.styleReverse(st));
+        const side = s.rgbAt(x.row, x.col);
+        if (x.fg_rgb) |want| {
+            try std.testing.expectEqual(t.rgb_colour, st.fg);
+            const got = side.fg.?;
+            try std.testing.expectEqual(want.r, got.r);
+            try std.testing.expectEqual(want.g, got.g);
+            try std.testing.expectEqual(want.b, got.b);
+        } else {
+            try std.testing.expectEqual(@as(?t.Rgb, null), side.fg);
+        }
+        if (x.bg_rgb) |want| {
+            try std.testing.expectEqual(t.rgb_colour, st.bg);
+            const got = side.bg.?;
+            try std.testing.expectEqual(want.r, got.r);
+            try std.testing.expectEqual(want.g, got.g);
+            try std.testing.expectEqual(want.b, got.b);
+        } else {
+            try std.testing.expectEqual(@as(?t.Rgb, null), side.bg);
+        }
         if (x.default_exact) try std.testing.expectEqual(t.default_cell_style, st);
     }
 }
@@ -380,16 +414,17 @@ const sgr_cases = [_]Case{
         .rendition = .{},
     },
     .{
-        // TODAY'S parser: params without an arm (4=underline, 5/6 flicker,
-        // 7=reverse, 38/48 colour selectors, 99) are consumed and leave the
-        // rendition alone. M73h REWRITES this row when 38;5/38;2 gain
-        // meaning and appends underline/italic/reverse rows beside it.
-        .name = "unknown and extended SGR params are ignored (M73h hook)",
+        // REWRITTEN BY M73h — the contract in action. The old row pinned
+        // `4` and `38;5;99` as ignored; now `4` sets the underline flag
+        // and `38;5;99` stores index 99. Params still without an arm
+        // (bare 5/6 flicker, 99) remain consumed-and-ignored — see the
+        // SGR-depth group.
+        .name = "4 sets underline and 38;5;99 stores index 99 (M73h flip)",
         .input = "\x1b[4;38;5;99mA",
         .lines = &.{"A"},
         .cursor = .{ 0, 1 },
-        .styles = &.{.{ .row = 0, .col = 0, .default_exact = true }},
-        .rendition = .{},
+        .styles = &.{.{ .row = 0, .col = 0, .fg = 99, .underline = true }},
+        .rendition = .{ .fg = 99 },
     },
 };
 
@@ -653,4 +688,115 @@ const utf8_cases = [_]Case{
 
 test "terminal corpus: UTF-8 decode (M73a-1 policy)" {
     try runAll(&utf8_cases);
+}
+
+// ---------------------------------------------------------------------------
+// Group H — SGR depth (M73h #1634, ADR 0020 Amendment E): xterm 256,
+// truecolour side arrays, the attribute flags, and their resets. The
+// 16-colour groups above must stay untouched — old sequences, identical
+// cells (their green run is the pixel-parity proof).
+// ---------------------------------------------------------------------------
+
+const sgr_depth_cases = [_]Case{
+    .{
+        .name = "38;5/48;5 store xterm indices in the u9 slots",
+        .input = "\x1b[38;5;196mA\x1b[48;5;21mB",
+        .lines = &.{"AB"},
+        .cursor = .{ 0, 2 },
+        .styles = &.{
+            .{ .row = 0, .col = 0, .fg = 196 },
+            .{ .row = 0, .col = 1, .fg = 196, .bg = 21 },
+        },
+    },
+    .{
+        // The default sentinel moved to 256 precisely so this index can
+        // be a real colour instead of reading as "default".
+        .name = "38;5;16 is a real colour (the old sentinel moved to 256)",
+        .input = "\x1b[38;5;16mX",
+        .lines = &.{"X"},
+        .cursor = .{ 0, 1 },
+        .styles = &.{.{ .row = 0, .col = 0, .fg = 16 }},
+    },
+    .{
+        .name = "38;2/48;2 stores exact truecolour in the side arrays",
+        .input = "\x1b[38;2;255;128;71;48;2;17;34;51mX",
+        .lines = &.{"X"},
+        .cursor = .{ 0, 1 },
+        .styles = &.{.{
+            .row = 0,
+            .col = 0,
+            .fg_rgb = .{ .r = 255, .g = 128, .b = 71 },
+            .bg_rgb = .{ .r = 17, .g = 34, .b = 51 },
+        }},
+    },
+    .{
+        // 39/49 return the slots to default: the cell stops being rgb
+        // (rgbAt gates on the slot) and is byte-exact default again.
+        .name = "39/49 drop back to default after truecolour",
+        .input = "\x1b[38;2;1;2;3mA\x1b[39;49mB",
+        .lines = &.{"AB"},
+        .cursor = .{ 0, 2 },
+        .styles = &.{
+            .{ .row = 0, .col = 0, .fg_rgb = .{ .r = 1, .g = 2, .b = 3 } },
+            .{ .row = 0, .col = 1, .default_exact = true },
+        },
+    },
+    .{
+        .name = "dim/italic/underline/reverse set on write, cleared by their resets",
+        .input = "\x1b[2;3;4;7mA\x1b[22;23;24;27mB",
+        .lines = &.{"AB"},
+        .cursor = .{ 0, 2 },
+        .styles = &.{
+            .{ .row = 0, .col = 0, .dim = true, .italic = true, .underline = true, .reverse = true },
+            .{ .row = 0, .col = 1 },
+        },
+    },
+    .{
+        .name = "SGR 0 clears flags byte-exactly (not just colours)",
+        .input = "\x1b[1;4;31mA\x1b[0mB",
+        .lines = &.{"AB"},
+        .cursor = .{ 0, 2 },
+        .styles = &.{
+            .{ .row = 0, .col = 0, .fg = 1, .bold = true, .underline = true },
+            .{ .row = 0, .col = 1, .default_exact = true },
+        },
+    },
+    .{
+        // 12 params: truecolour fg (5) + 256 bg (2) + four flags — this
+        // overflowed the old [8] and silently dropped the tail.
+        .name = "a 12-param line fits the widened csi_params",
+        .input = "\x1b[1;4;7;3;38;2;1;2;3;48;5;9mX",
+        .lines = &.{"X"},
+        .cursor = .{ 0, 1 },
+        .styles = &.{.{
+            .row = 0,
+            .col = 0,
+            .fg = null,
+            .bg = 9,
+            .bold = true,
+            .italic = true,
+            .underline = true,
+            .reverse = true,
+            .fg_rgb = .{ .r = 1, .g = 2, .b = 3 },
+        }},
+    },
+    .{
+        // Three invalid forms in one line: out-of-range index (999),
+        // truncated rgb (`38;2;31` — the tail is DROPPED, never re-read
+        // as SGR 31), and the ITU colon form (digits collapse into one
+        // unknown param). All three leave the rendition alone.
+        .name = "invalid selectors are ignored, tails dropped, colon form unsupported",
+        .input = "\x1b[38;5;999mA\x1b[38;2;31mB\x1b[38:5:9mC",
+        .lines = &.{"ABC"},
+        .cursor = .{ 0, 3 },
+        .styles = &.{
+            .{ .row = 0, .col = 0, .default_exact = true },
+            .{ .row = 0, .col = 1, .default_exact = true },
+            .{ .row = 0, .col = 2, .default_exact = true },
+        },
+    },
+};
+
+test "terminal corpus: SGR depth — 256, truecolour, attributes (M73h)" {
+    try runAll(&sgr_depth_cases);
 }

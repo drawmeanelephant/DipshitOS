@@ -540,6 +540,203 @@ test "driving_award: render_clock_content paints the title bar and body colors" 
     try std.testing.expectEqual(@as(u8, 0x1a), buf[(170 * W + 300) * 4 + 1]); // G
 }
 
+// ---------------------------------------------------------------------------
+// M73h (#1634): rendition depth — theme defaults, the resolver, and the
+// three new paint paths (exact truecolour, underline stroke, italic shear).
+// ---------------------------------------------------------------------------
+
+test "driving_award: terminal theme defaults pin the source and dark byte-parity" {
+    const save = driving_award.theme_id;
+    defer driving_award.theme_id = save;
+    // Dark = the boot theme = the pre-M73h hardcoded text constants
+    // (fbtext.fg_rgb 0x00ff00 / fbtext.bg_rgb 0x101418). Byte-parity with
+    // every existing pixel gate lives in these two numbers.
+    driving_award.theme_id = 0;
+    var d = driving_award.terminalThemeDefaults();
+    try std.testing.expectEqual(@as(u32, 0x00ff00), d.fg);
+    try std.testing.expectEqual(@as(u32, 0x101418), d.bg);
+    // Light and amber resolve differently — pinned values (#207).
+    driving_award.theme_id = 1;
+    d = driving_award.terminalThemeDefaults();
+    try std.testing.expectEqual(@as(u32, 0x353b45), d.fg);
+    try std.testing.expectEqual(@as(u32, 0xf5f6f8), d.bg);
+    driving_award.theme_id = 2;
+    d = driving_award.terminalThemeDefaults();
+    try std.testing.expectEqual(@as(u32, 0xffd27f), d.fg);
+    try std.testing.expectEqual(@as(u32, 0x0a1a2e), d.bg);
+}
+
+test "driving_award: terminalRendition resolves rgb, reverse, dim, and flags" {
+    const tr = driving_award.terminalRendition;
+    // Truecolour passes through exactly (both channels, side arrays first).
+    var scr = terminal.Screen{};
+    scr.feed("\x1b[38;2;255;128;71;48;2;17;34;51m");
+    var r = tr(scr.style, scr.fg_rgb_cur, scr.bg_rgb_cur);
+    try std.testing.expectEqual(@as(u32, 0xff8047), r.fg);
+    try std.testing.expectEqual(@as(u32, 0x112233), r.bg);
+    // Reverse SWAPS the resolved channels (xterm semantics) and carries
+    // the draw flags through. ansi_palette: 1 = 0xcd3131, 4 = 0x2472c8.
+    var s2 = terminal.Screen{};
+    s2.feed("\x1b[31;44m\x1b[7;3;4m");
+    r = tr(s2.style, s2.fg_rgb_cur, s2.bg_rgb_cur);
+    try std.testing.expectEqual(@as(u32, 0x2472c8), r.fg);
+    try std.testing.expectEqual(@as(u32, 0xcd3131), r.bg);
+    try std.testing.expectEqual(true, r.italic);
+    try std.testing.expectEqual(true, r.underline);
+    // Dim scales the resolved foreground to 2/3: bold+31 → ansi[9]
+    // 0xf14c4c → (241·2/3, 76·2/3, 76·2/3) = (160, 50, 50) = 0xa03232.
+    var s3 = terminal.Screen{};
+    s3.feed("\x1b[1;31m\x1b[2m");
+    r = tr(s3.style, s3.fg_rgb_cur, s3.bg_rgb_cur);
+    try std.testing.expectEqual(@as(u32, 0xa03232), r.fg);
+    // Default + bold on the DARK theme keeps the legacy bright-green
+    // rendition (ansi[10] = 0x23d18b); default alone is the theme colour.
+    const save = driving_award.theme_id;
+    defer driving_award.theme_id = save;
+    driving_award.theme_id = 0;
+    var s4 = terminal.Screen{};
+    s4.feed("\x1b[1m");
+    r = tr(s4.style, s4.fg_rgb_cur, s4.bg_rgb_cur);
+    try std.testing.expectEqual(@as(u32, 0x23d18b), r.fg);
+    try std.testing.expectEqual(@as(u32, 0x101418), r.bg);
+    const s5 = terminal.Screen{};
+    r = tr(s5.style, s5.fg_rgb_cur, s5.bg_rgb_cur);
+    try std.testing.expectEqual(@as(u32, 0x00ff00), r.fg);
+}
+
+test "driving_award: a 38;2 cell paints its exact RGB on the scanout" {
+    const W = 80;
+    const H = 32;
+    var buf: [W * H * 4]u8 = undefined;
+    var screen = terminal.Screen{};
+    screen.feed("\x1b[38;2;255;128;71mX\x1b[0m\x1b[?25l");
+    const window = Window{
+        .id = 2,
+        .title = "term",
+        .x = 0,
+        .y = 0,
+        .w = W,
+        .h = H,
+        .kind = .user,
+        .visible = true,
+        .dirty = true,
+    };
+    render_terminal_screen(&buf, &window, &screen);
+    // Cell (0,0) = x0..7, y(title_bar)..+7; count exact 0xff8047 ink
+    // (buffer is B8G8R8X8: B@0, G@1, R@2).
+    const y0: usize = geom.title_bar_h;
+    var hits: usize = 0;
+    var y: usize = y0;
+    while (y < y0 + 8) : (y += 1) {
+        var x: usize = 0;
+        while (x < 8) : (x += 1) {
+            const k = (y * W + x) * 4;
+            if (buf[k + 2] == 0xff and buf[k + 1] == 0x80 and buf[k] == 0x47) hits += 1;
+        }
+    }
+    try std.testing.expect(hits >= 4);
+}
+
+test "driving_award: SGR 4 underline strokes the bottom row of even a blank cell" {
+    const W = 80;
+    const H = 32;
+    var plain_buf: [W * H * 4]u8 = undefined;
+    var und_buf: [W * H * 4]u8 = undefined;
+    const save = driving_award.theme_id;
+    defer driving_award.theme_id = save;
+    driving_award.theme_id = 0; // default fg = 0x00ff00 (exact ink check)
+    var plain = terminal.Screen{};
+    plain.feed(" \x1b[?25l");
+    var und = terminal.Screen{};
+    und.feed("\x1b[4m \x1b[0m\x1b[?25l");
+    const window = Window{
+        .id = 2,
+        .title = "term",
+        .x = 0,
+        .y = 0,
+        .w = W,
+        .h = H,
+        .kind = .user,
+        .visible = true,
+        .dirty = true,
+    };
+    render_terminal_screen(&plain_buf, &window, &plain);
+    render_terminal_screen(&und_buf, &window, &und);
+    const y0: usize = geom.title_bar_h;
+    // The blank glyph draws nothing — only the underline paints row 7.
+    // Default fg on dark = 0x00ff00 (B8G8R8X8: B=0x00, G=0xff, R=0x00).
+    var plain_ink: usize = 0;
+    var x: usize = 0;
+    while (x < 8) : (x += 1) {
+        const k = ((y0 + 7) * W + x) * 4;
+        if (plain_buf[k + 1] == 0xff and plain_buf[k + 2] == 0x00 and plain_buf[k] == 0x00) plain_ink += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 0), plain_ink);
+    var und_ink: usize = 0;
+    x = 0;
+    while (x < 8) : (x += 1) {
+        const k = ((y0 + 7) * W + x) * 4;
+        if (und_buf[k + 1] == 0xff and und_buf[k + 2] == 0x00 and und_buf[k] == 0x00) und_ink += 1;
+    }
+    try std.testing.expect(und_ink >= 6);
+    // No bleed into the neighbouring cell's row.
+    var n_ext: usize = 0;
+    x = 8;
+    while (x < 16) : (x += 1) {
+        const k = ((y0 + 7) * W + x) * 4;
+        if (und_buf[k + 1] == 0xff and und_buf[k + 2] == 0x00) n_ext += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 0), n_ext);
+}
+
+test "driving_award: SGR 3 italic shears the glyph without bleeding columns" {
+    const W = 80;
+    const H = 32;
+    var plain_buf: [W * H * 4]u8 = undefined;
+    var it_buf: [W * H * 4]u8 = undefined;
+    var plain = terminal.Screen{};
+    plain.feed("M\x1b[?25l");
+    var it = terminal.Screen{};
+    it.feed("\x1b[3mM\x1b[0m\x1b[?25l");
+    const window = Window{
+        .id = 2,
+        .title = "term",
+        .x = 0,
+        .y = 0,
+        .w = W,
+        .h = H,
+        .kind = .user,
+        .visible = true,
+        .dirty = true,
+    };
+    render_terminal_screen(&plain_buf, &window, &plain);
+    render_terminal_screen(&it_buf, &window, &it);
+    // The shear moved pixels (buffers differ) and ink still exists.
+    try std.testing.expect(!std.mem.eql(u8, &plain_buf, &it_buf));
+    const y0: usize = geom.title_bar_h;
+    var ink: usize = 0;
+    var y: usize = y0;
+    while (y < y0 + 8) : (y += 1) {
+        var x: usize = 0;
+        while (x < 8) : (x += 1) {
+            const k = (y * W + x) * 4;
+            if (plain_buf[k + 1] != it_buf[k + 1] or plain_buf[k + 2] != it_buf[k + 2]) ink += 1;
+        }
+    }
+    try std.testing.expect(ink > 0);
+    // Cell 1 (x8..15) is an untouched blank: nothing bled right of cell 0.
+    var bleed: usize = 0;
+    y = y0;
+    while (y < y0 + 8) : (y += 1) {
+        var x: usize = 8;
+        while (x < 16) : (x += 1) {
+            const k = (y * W + x) * 4;
+            if (it_buf[k + 1] == 0xff and it_buf[k + 2] == 0x00) bleed += 1; // green ink
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), bleed);
+}
+
 test "driving_award: terminal presentation paints ANSI cell backgrounds" {
     const W = 80;
     const H = 32;
@@ -666,7 +863,7 @@ test "driving_award: a wide rune spans both cells once and never bleeds past its
     // The continuation cell alone draws nothing (the base owns the pair).
     var lone: [8 * 8 * 4]u8 = undefined;
     @memset(&lone, 0);
-    driving_award.draw_cell_glyph(&lone, 32, 0, 0, s.cellAt(0, 1), 0xffffff, true);
+    driving_award.draw_cell_glyph(&lone, 32, 0, 0, s.cellAt(0, 1), 0xffffff, true, false);
     try std.testing.expectEqual(@as(usize, 0), ink_count(&lone, 32, 0, 0, 8, 8, 0xffffff));
 }
 

@@ -3724,21 +3724,30 @@ pub fn rune_cell_rows(cell: terminal.Cell) [8]u8 {
 /// wide base is stretched 2× so ONE glyph spans both cells of its pair —
 /// `wide` is the caller's clipped pair check, and a continuation cell
 /// draws nothing (the base owns the pair: no double-draw, no shift).
-pub fn draw_cell_glyph(buf: [*]u8, stride: usize, x0: usize, y0: usize, cell: terminal.Cell, rgb: u32, wide: bool) void {
+pub fn draw_cell_glyph(buf: [*]u8, stride: usize, x0: usize, y0: usize, cell: terminal.Cell, rgb: u32, wide: bool, italic: bool) void {
     if (cell.cont != 0) return;
-    if (cell.mark == 0 and cell.base >= 0x20 and cell.base <= 0x7e) {
+    // Byte-identical ASCII fast path when NOT italic (M72b pixel parity).
+    if (!italic and cell.mark == 0 and cell.base >= 0x20 and cell.base <= 0x7e) {
         draw_glyph(buf, stride, x0, y0, @intCast(cell.base), rgb);
         return;
     }
+    // Italic ASCII flows through the same lookup (`glyph_for` returns the
+    // SAME font8x8 bitmap for 0x20..0x7E), then gets sheared below.
     const rows = rune_cell_rows(cell);
     var gy: usize = 0;
     while (gy < 8) : (gy += 1) {
         const bits = rows[gy];
+        // M73h: fake italic — the top rows shift right up to 2px, the
+        // bottom row none. A pixel that would leave the cell is DROPPED
+        // (no column bleed: the pixel gates pin x extents).
+        const xoff: usize = if (italic) (7 - gy) / 3 else 0;
         var gx: usize = 0;
         while (gx < 8) : (gx += 1) {
             if (font.row_pixel(bits, gx)) {
-                put_px(buf, stride, x0 + gx, y0 + gy, rgb);
-                if (wide) put_px(buf, stride, x0 + gx + 8, y0 + gy, rgb);
+                if (gx + xoff < 8) {
+                    put_px(buf, stride, x0 + gx + xoff, y0 + gy, rgb);
+                    if (wide) put_px(buf, stride, x0 + gx + xoff + 8, y0 + gy, rgb);
+                }
             }
         }
     }
@@ -3885,28 +3894,76 @@ const ansi_palette = [_]u32{
     0x3b8eea, 0xd670d6, 0x29b8db, 0xffffff,
 };
 
-fn terminalColour(index: ?u8, fallback: u32) u32 {
-    const colour = index orelse return fallback;
-    if (colour >= ansi_palette.len) return fallback;
-    return ansi_palette[colour];
+/// M73h (#1634): one palette index → RGB. 0..=15 keep the paint-local
+/// `ansi_palette` (pixel parity for old sequences); 16..=255 come from
+/// the canonical xterm table in terminal.zig.
+fn terminalColour(index: u8) u32 {
+    if (index < ansi_palette.len) return ansi_palette[index];
+    return rgbToU32(terminal.xterm256Rgb(index));
 }
 
-fn terminalColours(style: terminal.CellStyle) struct { fg: u32, bg: u32 } {
-    var fg_index = terminal.styleForeground(style);
-    if (terminal.styleBold(style)) {
-        if (fg_index) |colour| {
-            if (colour < 8) fg_index = colour + 8;
-        } else {
-            // The historical default is terminal-green rather than ANSI
-            // colour 7. Give `SGR 1` on that default a visible bright-green
-            // rendition too, instead of recording an inert bold bit.
-            fg_index = 10;
-        }
-    }
-    return .{
-        .fg = terminalColour(fg_index, fbtext.fg_rgb),
-        .bg = terminalColour(terminal.styleBackground(style), fbtext.bg_rgb),
+fn rgbToU32(c: terminal.Rgb) u32 {
+    return (@as(u32, c.r) << 16) | (@as(u32, c.g) << 8) | c.b;
+}
+
+/// M73h (#1634, dim SGR 2): reduce each channel to 2/3 intensity.
+fn dimRgb(c: u32) u32 {
+    const r = ((c >> 16) & 0xff) * 2 / 3;
+    const g = ((c >> 8) & 0xff) * 2 / 3;
+    const b = (c & 0xff) * 2 / 3;
+    return (r << 16) | (g << 8) | b;
+}
+
+/// M73h (#1634, deliverable 3): what the terminal's DEFAULT colour slots
+/// (256) resolve to — the desktop theme, the same `theme_id` source the
+/// chrome accessors read (#207). Dark (the boot theme) is BYTE-IDENTICAL
+/// to the pre-M73h hardcoded `fbtext.fg_rgb`/`fbtext.bg_rgb`, so every
+/// existing pixel gate stays valid; pinned by driving_award_test.
+pub fn terminalThemeDefaults() struct { fg: u32, bg: u32 } {
+    return switch (theme_id) {
+        1 => .{ .fg = 0x353b45, .bg = 0xf5f6f8 }, // light: slate ink on paper
+        2 => .{ .fg = 0xffd27f, .bg = 0x0a1a2e }, // amber: warm text on navy
+        else => .{ .fg = fbtext.fg_rgb, .bg = fbtext.bg_rgb }, // dark == legacy
     };
+}
+
+/// M73h: what one cell paints as — both channels resolved to RGB
+/// (truecolour side arrays > palette/xterm > theme default), then
+/// reverse swaps them (xterm semantics: the FLAG is stored, the swap
+/// happens here), then dim scales the foreground. `italic`/`underline`
+/// pass through for the draw path.
+pub const Rendition = struct { fg: u32, bg: u32, italic: bool, underline: bool };
+
+pub fn terminalRendition(style: terminal.CellStyle, fg_side: ?terminal.Rgb, bg_side: ?terminal.Rgb) Rendition {
+    const theme = terminalThemeDefaults();
+    var fg: u32 = undefined;
+    if (style.fg == terminal.rgb_colour) {
+        fg = rgbToU32(fg_side orelse .{});
+    } else if (terminal.styleForeground(style)) |colour| {
+        fg = terminalColour(colour);
+        if (terminal.styleBold(style) and colour < 8) fg = terminalColour(colour + 8);
+    } else if (terminal.styleBold(style) and theme_id != 1 and theme_id != 2) {
+        // The historical default is terminal-green rather than ANSI
+        // colour 7. Give `SGR 1` on that default a visible bright-green
+        // rendition too (dark theme only — byte parity with the pre-M73h
+        // gates; light/amber keep their theme foreground).
+        fg = ansi_palette[10];
+    } else {
+        fg = theme.fg;
+    }
+    var bg: u32 = if (style.bg == terminal.rgb_colour)
+        rgbToU32(bg_side orelse .{})
+    else if (terminal.styleBackground(style)) |colour|
+        terminalColour(colour)
+    else
+        theme.bg;
+    if (terminal.styleReverse(style)) {
+        const tmp = fg;
+        fg = bg;
+        bg = tmp;
+    }
+    if (terminal.styleDim(style)) fg = dimRgb(fg);
+    return .{ .fg = fg, .bg = bg, .italic = style.italic, .underline = style.underline };
 }
 
 pub fn render_terminal_screen(dst: [*]u8, w: *const Window, scr: *const terminal.Screen) void {
@@ -3937,13 +3994,14 @@ pub fn render_terminal_screen(dst: [*]u8, w: *const Window, scr: *const terminal
         var c: usize = 0;
         while (c < cols) : (c += 1) {
             const cell = scr.cellAt(ri, c);
-            const colours = terminalColours(scr.styleAt(ri, c));
+            const side = scr.rgbAt(ri, c);
+            const colours = terminalRendition(scr.styleAt(ri, c), side.fg, side.bg);
             const x = c * 8;
             const wide = fbtext.char_width(cell.base) >= 2 and c + 1 < cols;
             // M49 SD5: selected cells invert (fg on bg).
             if (scr.inSelection(ri, c)) {
                 fill_rect(dst, stride, x, ry, 8, 8, colours.fg);
-                if (c < line.len) draw_cell_glyph(dst, stride, x, ry, cell, colours.bg, wide);
+                if (c < line.len) draw_cell_glyph(dst, stride, x, ry, cell, colours.bg, wide, colours.italic);
             } else if (cell.cont != 0) {
                 // The wide base already filled this cell's half of the pair
                 // and stroked its glyph across both cells; a continuation
@@ -3952,7 +4010,14 @@ pub fn render_terminal_screen(dst: [*]u8, w: *const Window, scr: *const terminal
                 // A wide base fills (and strokes) its whole pair in one pass.
                 const span: usize = if (wide) 16 else 8;
                 fill_rect(dst, stride, x, ry, span, 8, colours.bg);
-                if (c < line.len) draw_cell_glyph(dst, stride, x, ry, cell, colours.fg, wide);
+                if (c < line.len) draw_cell_glyph(dst, stride, x, ry, cell, colours.fg, wide, colours.italic);
+            }
+            // M73h: underline strokes the cell's bottom row (the base owns
+            // its whole pair — a continuation skips so the line draws
+            // once, wide or not).
+            if (colours.underline and cell.cont == 0) {
+                const u_span: usize = if (wide) 16 else 8;
+                fill_rect(dst, stride, x, ry + 7, u_span, 1, colours.fg);
             }
         }
     }
@@ -3963,12 +4028,13 @@ pub fn render_terminal_screen(dst: [*]u8, w: *const Window, scr: *const terminal
         const cc = scr.cursorCol();
         if (cc < cols) {
             const cy = y0 + (cl - first) * 8;
-            const colours = terminalColours(scr.styleAt(cl, cc));
+            const c_side = scr.rgbAt(cl, cc);
+            const colours = terminalRendition(scr.styleAt(cl, cc), c_side.fg, c_side.bg);
             fill_rect(dst, stride, cc * 8, cy, 8, 8, colours.fg);
             const line = scr.line(cl);
             const cell = scr.cellAt(cl, cc);
             const wide = fbtext.char_width(cell.base) >= 2 and cc + 1 < cols;
-            if (cc < line.len) draw_cell_glyph(dst, stride, cc * 8, cy, cell, colours.bg, wide);
+            if (cc < line.len) draw_cell_glyph(dst, stride, cc * 8, cy, cell, colours.bg, wide, colours.italic);
         }
     }
 }

@@ -3,7 +3,8 @@
 Status: **ACCEPTED** · Date: 2026-09-10 · amended 2026-09-11 (Amendment A,
 the window front-end — M45 card SH6, #1082; Amendment B, the net/remote
 front-end — M45 card SH7, #1083), 2026-09-21 (Amendment C, M72b window VT,
-#1580), 2026-09-22 (Amendment D, M73a-1 rune cells, #1625) · Milestone: M44
+#1580), 2026-09-22 (Amendment D, M73a-1 rune cells, #1625), 2026-09-22
+(Amendment E, M73h rendition depth, #1634) · Milestone: M44
 (next focus) ·
 Issue **#1072** · Claims **#1073** (object + ABI) and **#1075** (pump + pilot)
 
@@ -443,3 +444,66 @@ composed text). Rendering those pixels is M73a-2's explicit scope — this
 amendment changes storage and tests, not the compositor. BSS grows by one
 word per cell across both grids plus the reflow snapshot; the landing
 PR's `tools/verify-bss-budget.sh` run is the recorded evidence.
+
+# Amendment E — rendition depth: 256-colour, truecolour, attributes (M73h, #1634)
+
+Status: **ACCEPTED** · Date: 2026-09-22. D1 remains binding: terminal
+objects still carry bytes only; this amendment changes the window-bound
+**presentation rendition** and where "default" resolves from.
+**It supersedes Amendment C's 16-colour `CellStyle` freeze** (the M72b
+promise of "16 colours rather than a truecolour ABI"): Charm apps emit
+`38;5;n`, `38;2;r;g;b`, underline, italic, reverse, and dim, and a frozen
+u16 silently discarded all of it. Amendment D (rune cells) is untouched —
+cells gain colours, not runes.
+
+## Decision
+
+- `CellStyle` widens `u16` → `packed struct(u32)`: `fg: u9`, `bg: u9`
+  colour slots + five flag bits (bold, dim, italic, underline, reverse);
+  nine pad bits unused (blink/overline/strike are non-goals — storage
+  would be free, paint is not).
+- A slot holds: `0..=255` an xterm 256 index; `256` the presentation
+  default; `257` the truecolour marker. The default moved 16 → 256
+  precisely so `38;5;16` can be a real colour instead of the sentinel.
+- Truecolour RGB cannot ride the style word (two 24-bit channels need
+  74 bits — over u32 and over u64), so RGB lives in **per-cell side
+  arrays** (`fg_rgb`/`bg_rgb`, primary + alternate), written by
+  `putRune` from the current rendition state, swapped with the alternate
+  grid, and carried across reflow with their cells. The measured
+  alternative — a per-screen style pool indexed by the u16 — saves ~600
+  KiB but needs eviction, and eviction recolours live cells on slot
+  reuse: rejected as order-dependent and a determinism hazard for the
+  VT corpus. The chosen design costs **+81,920 B `.bss`** (reflow
+  scratch: measured `verify-bss-budget` PASS, 1,438,984 B headroom) and
+  ~+640 KiB `.data` (the four Screens' style/rgb arrays — those arrays
+  have always lived in `.data` because their defaults are non-zero).
+- Parse: SGR 2/3/4/7 gain arms (dim/italic/underline/reverse) with
+  22/23/24/27 resets (22 clears bold AND dim); `38`/`48` consume their
+  trailing params (`5;n`, `2;r;g;b`) in one index walk — invalid,
+  out-of-range, or truncated selectors leave the slot unchanged, and a
+  truncated tail is dropped rather than re-read as standalone SGRs. The
+  ITU colon sub-parameter form has no arm (digits collapse into one
+  unknown param and are ignored — pinned by the corpus). `csi_params`
+  widens 8 → 16 so a truecolour fg + bg + attributes fit one sequence.
+- Resolution stays presentation-side (D1/D3 hold — no syscall, no ABI):
+  the paint layer resolves slots → RGB in order — truecolour side
+  array, `ansi_palette` (0..=15, byte-parity with every existing pixel
+  gate) then the canonical xterm cube/grayscale table (16..=255), then
+  the **desktop theme** for slot 256 — the same `theme_id` source the
+  chrome reads (#207). Dark (the boot theme) is byte-identical to the
+  pre-M73h `fbtext.fg_rgb`/`bg_rgb`. Reverse swaps the resolved
+  channels at paint time; dim scales the foreground to 2/3.
+- Draw: underline strokes the cell's bottom row (the base owns its
+  whole pair); italic is a raster shear — top rows shift right up to
+  2 px and a pixel that would leave the cell is dropped, because the
+  pixel gates pin column extents.
+
+## Consequences
+
+Colour-coded TUI output (PULSE accents, RSS links, syntax highlighting)
+shows what the app asked for instead of collapsing to defaults. Old
+sequences paint byte-identical: 16-colour palette, dark-theme defaults,
+and the ASCII fast path are all preserved — `zig build test` plus the
+extended `live-term` snapshot (an exact-RGB `38;2`/`48;2` cell) are the
+evidence. Palette *theming* (choosing colours in settings) stays wave 2
+— this amendment only names what "default" resolves to.
