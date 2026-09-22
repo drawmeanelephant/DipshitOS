@@ -11,7 +11,6 @@ PULSE.ELF | Pulse | u | dock=true
 GOSH.ELF | Shell | s
 GOTOP.ELF | Top | p | dock=true
 GOSET.ELF | Settings | g
-DOC.BIN | Document Viewer | o
 GOVIEW.ELF | Image Viewer | v
 ZC.BIN | Zig Compiler | z
 TABWM.BIN | Tabbed Desktop | m

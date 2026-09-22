@@ -1324,3 +1324,85 @@ exists → the file-domain `-9` EEXIST row (the M25 Lane B convention; the
 ErrorCode enum names this magnitude ENXIO in the device domains), and
 handle-full → ENOSPC. No existing row moved except rename-target-exists,
 which was EINVAL and is now the honest `-9`.
+
+## Amendment (2026-09-21, M71m #1572 — slot 28 argv: 31 bytes is measured, and it is already the envelope's maximum)
+
+**Append-only.** No slot, argument, result, error code, or `implemented_count`
+changes. This amendment records a measurement and the decision it forces; the
+card's code half is owed to a follow-on (see *Decision*).
+
+Context. M71m (#1572) exists to lift the card-3e per-arg 31-byte truncation
+(`pack_args`: `take = @min(arg.len, arg_slot_bytes - 1)`), because GOSSHD wraps
+every session command through `SSH/EXEC.IN` + `GOSH.ELF -c 'source
+SSH/EXEC.IN'` to stay under it. The card's deliverable 1 is explicit: measure
+the honest bound against the tail-page rule and record the number here — *do
+not guess*.
+
+**Observed (in tree, at 66bdbbbb).** The block is `max_exec_args` 8 ×
+`arg_slot_bytes` 32 = `arg_block_bytes` 256, then `max_exec_envs` 16 ×
+`env_slot_bytes` 128 = `env_block_bytes` 2048 — **2304 B** total, placed at
+`block_off = align8(last_seg.mem_size)` and refused with `.no_args_room` when it
+does not fit the last segment's allocated pages (`exec_static_elf_gap`,
+kernel/src/exec.zig). The builders assert `slack >= 0x908` (the block plus its
+8-byte alignment step): build-gosh.sh, build-gohttpd.sh, build-goping.sh.
+
+**Observed (measured; `p_memsz` of each image's writable PT_LOAD):**
+
+| image | W `p_memsz` | `r` = memsz mod 4096 | slack = 4096 − r | spare over `0x908` |
+| --- | --- | --- | --- | --- |
+| GOFETCH.ELF | 0x33188 | 392 | 3704 | 1392 |
+| GOPING.ELF | 0x30350 | 848 | 3248 | 936 |
+| GOSH.ELF | 0x326b0 | **1712** | **2384** | **72** |
+
+GOSH — the `-c` consumer this card is about — clears the asserted need by **72
+bytes**.
+
+**Derived (read from the code; not measured on VZ).** Two rules govern the
+block, and which one binds is the heart of this measurement:
+
+1. the runtime's break floor — `initBlocFloor` moves the sbrk break to
+   `memRound(virArgvBlockBase + virArgBlockBytes + virEnvBlockBytes)`
+   (tools/go/overlay/runtime/os_virelai.go), whose two constants restate the
+   kernel's 8×32 and 16×128;
+2. the tail-page slack the builders assert, which is the constraint ADR 0035
+   amendment 4 derived from the pre-#1540 break base (`memRound(image end)`).
+
+Under (2), an `s`-byte slot needs `8s + 2048 <= 4096 − r`, i.e.
+**`s <= (2048 − r)/8`**: the bound is a property of *the image*, not of the
+ABI. GOSH's r = 1712 admits **s <= 42** — 41 usable bytes, and not a round
+number: a 40-byte slot (39 usable + NUL) fits the tightest observed image with
+only 16 bytes to spare, and 42 is the exact ceiling. `s = 64` needs
+`r <= 1536` (GOSH already fails); `s = 256`, the card's 255-byte target, needs
+`r <= 0` (all three fail). The envelope also *shrinks* as the slot grows:
+today's 31 bytes is safe exactly while `r <= 1792` — ADR 0035 amendment 4 names
+that as a 1792/4096 coincidence, not design — a 40-byte slot cuts it to
+`r <= 1728`, and 64 to `r <= 1536`. **There is therefore no fixed in-page lift
+that does not take argument support away from images that have it today**, and
+none at all that leaves the observed images any headroom.
+
+The one rule that *would* admit the 4096-byte block (`s = 256`) is the loader's
+page fit alone: with the writable segment's flat `pages += 1`,
+`seg_pages = ceil(memsz/4096) + 1` leaves `8192 − r` bytes past
+`align8(memsz)` when r > 0 (6480 for GOSH) and exactly 4096 when r = 0. Which
+rule actually binds for a 4096-byte block — that is, whether `initBlocFloor`
+fully replaces the slack assertion, including for an image whose block spills
+past `memRound(memsz)` — is **not resolvable by reading the tree**. It is a VZ
+measurement, and the follow-on card owes it.
+
+**Decision (the card's D3, applied).** The lift does not fit the tail page, so
+the card stops at the measurement and reports the number instead of absorbing a
+page-cost change by surprise; this amendment is its landing half. Concretely:
+`pack_args` keeps its 31-byte truncation (31 is the maximum that holds the
+documented `r <= 1792` envelope, so nothing lifts without the page decision);
+GOSSHD's `SSH/EXEC.IN` wrap stays, because the command line it carries is
+longer than any slot the current rule can hold; and the follow-on owns one of
+two designs, to be picked by measurement — (a) page the block
+(`pages` sized from `block_off + arg_block + env_block`, slot lifted to 255,
+an over-long arg **refused**, never chopped), or (b) keep the ABI and lift
+the slot only to the 42 bytes the tightest observed image supports (and to
+nothing at all if that image's segment grows by one aligned word).
+
+**Non-goals, restated.** No `wait`/`bg`. No `argc` growth past 8. No envp
+rewrite: the 2048-byte envp block stays as packed even though halving it would
+buy argv room, because that is a different ABI discussion. No third-child fix
+(#1449).
