@@ -2,7 +2,7 @@
 // line-plan parser. This file (and shell.go, toolbox.go, edit.go) holds no
 // syscall knowledge — the M68a scripting subset is host-testable here, and
 // main.go wires the single Host seam to the vi calls.
-package main
+package shlib
 
 import (
 	"errors"

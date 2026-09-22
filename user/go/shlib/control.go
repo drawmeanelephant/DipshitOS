@@ -5,7 +5,7 @@
 //
 // Pure code: no syscalls, no Host. The evaluator lives in shell.go; this file
 // only turns text into structures, exactly as script.zig did.
-package main
+package shlib
 
 import (
 	"strings"

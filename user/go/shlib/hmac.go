@@ -4,7 +4,7 @@
 // TLS package (ADR 0029 is #1447's) and because crypto/sha256 does not
 // build under GOOS=virelai (fork syscall/internal/poll gap; the same reason
 // user/go/git/sha1.go is in-tree).
-package main
+package shlib
 
 var sha256K = [64]uint32{
 	0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,

@@ -2,7 +2,7 @@
 // cut, test, [, printf) as pure in-process tools. Running in-process is the
 // point — it is what makes their output pipe- and redirect-visible, exactly
 // as SH.BIN's toolbox works. Everything here is host-testable.
-package main
+package shlib
 
 import (
 	"sort"

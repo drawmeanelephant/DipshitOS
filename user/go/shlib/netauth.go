@@ -8,7 +8,7 @@
 // challenge. Ed25519 is selected when that is the only stored credential so
 // the kernel frames the right scheme, but verify fails closed: there is no
 // in-tree Go Ed25519, and this card does not add a new primitive.
-package main
+package shlib
 
 import "virelai/vi"
 
@@ -19,7 +19,7 @@ const (
 	hexDigits  = "0123456789abcdef"
 )
 
-type netAuth struct {
+type NetAuth struct {
 	scheme        uint64
 	challengeFn   func([]byte) int64
 	responseFn    func([]byte) int64
@@ -32,8 +32,8 @@ type netAuth struct {
 	keyLen        int
 }
 
-func sysNetAuth(scheme uint64) *netAuth {
-	return &netAuth{
+func SysNetAuth(scheme uint64) *NetAuth {
+	return &NetAuth{
 		scheme:      scheme,
 		challengeFn: func(out []byte) int64 { return vi.TtyNetAuth(vi.NetAuthOpChallenge, out) },
 		responseFn:  func(out []byte) int64 { return vi.TtyNetAuth(vi.NetAuthOpResponse, out) },
@@ -44,11 +44,11 @@ func sysNetAuth(scheme uint64) *netAuth {
 			}
 			return vi.TtyNetAuth(vi.NetAuthOpVerdict, b[:])
 		},
-		getFn: storeGet,
+		getFn: StoreGet,
 	}
 }
 
-func storeGet(name string, out []byte) int {
+func StoreGet(name string, out []byte) int {
 	var recs [vi.SecretEntriesMax]vi.SecretRecord
 	n, r := vi.SecretList(recs[:])
 	if r < 0 {
@@ -68,9 +68,9 @@ func storeGet(name string, out []byte) int {
 	return -1
 }
 
-// selectScheme prefers hmac-sha256, then ed25519, else none. Reads no
+// SelectScheme prefers hmac-sha256, then ed25519, else none. Reads no
 // secret beyond a length probe.
-func selectScheme(get func(name string, out []byte) int) (uint64, bool) {
+func SelectScheme(get func(name string, out []byte) int) (uint64, bool) {
 	var probe [1]byte
 	defer wipe(probe[:])
 	if get(keyHMAC, probe[:]) >= 0 {
@@ -82,7 +82,7 @@ func selectScheme(get func(name string, out []byte) int) (uint64, bool) {
 	return 0, false
 }
 
-func (a *netAuth) step() {
+func (a *NetAuth) Step() {
 	if a == nil || a.done || a.scheme == vi.NetSchemeOpen {
 		return
 	}
@@ -107,7 +107,7 @@ func (a *netAuth) step() {
 	a.done = true
 }
 
-func (a *netAuth) verify(reply []byte) bool {
+func (a *NetAuth) verify(reply []byte) bool {
 	switch a.scheme {
 	case vi.NetSchemeHMAC:
 		if len(reply) != 64 {

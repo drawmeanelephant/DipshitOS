@@ -1,4 +1,4 @@
-package main
+package shlib
 
 import (
 	"strings"
@@ -12,7 +12,7 @@ func toolOut(t *testing.T, h *fakeHost, line string) (string, int) {
 	h.out = nil
 	sh := NewShell(h, &History{})
 	st, act := sh.RunLine(line)
-	if act != actionContinue {
+	if act != ActionContinue {
 		t.Fatalf("%q: unexpected action", line)
 	}
 	return h.outString(), st

@@ -7,7 +7,7 @@
 // seam. Pure code; main.go feeds it tty bytes and writes back what it
 // returns. Covered keymap: arrows, Home/End, Delete, Ctrl-A/E/K/U/W/L/C/D,
 // Backspace, Tab completion, and Up/Down history.
-package main
+package shlib
 
 import "strings"
 
@@ -57,7 +57,7 @@ func (h *History) Entries() []string {
 }
 
 // Load seeds the ring from a persisted history file (M69f1 / #1537): UTF-8,
-// LF, one command per line, oldest first -- the shape saveHistory writes.
+// LF, one command per line, oldest first -- the shape SaveHistory writes.
 // Two deliberate tolerances:
 //
 //   - a truncated last line (no trailing LF, which is what a half-finished
@@ -84,15 +84,15 @@ type evKind int
 
 const (
 	evNone evKind = iota
-	evSubmit
-	evEOF    // Ctrl-D on an empty line
-	evCancel // Ctrl-C: the line was abandoned
+	EvSubmit
+	EvEOF    // Ctrl-D on an empty line
+	EvCancel // Ctrl-C: the line was abandoned
 )
 
 // EditEvent carries at most one editor outcome per Feed.
 type EditEvent struct {
 	Kind evKind
-	Line string // for evSubmit, without the newline
+	Line string // for EvSubmit, without the newline
 }
 
 // editor CSI decode states.
@@ -386,7 +386,7 @@ func (e *Editor) keyGround(b byte) ([]byte, EditEvent) {
 		e.lastTab = false
 		// The next prompt is part of the same write so the grid never
 		// shows an unprompted line.
-		return append(out, e.paint()...), EditEvent{Kind: evSubmit, Line: line}
+		return append(out, e.paint()...), EditEvent{Kind: EvSubmit, Line: line}
 	case 0x7f, 0x08: // DEL / backspace
 		return e.keyBackspace()
 	case 0x01: // Ctrl-A
@@ -426,10 +426,10 @@ func (e *Editor) keyGround(b byte) ([]byte, EditEvent) {
 		e.lastLen = 0
 		e.lastTab = false
 		out := append([]byte("^C\r\n"), e.paint()...)
-		return out, EditEvent{Kind: evCancel}
+		return out, EditEvent{Kind: EvCancel}
 	case 0x04: // Ctrl-D on an empty line: EOF
 		if len(e.buf) == 0 {
-			return nil, EditEvent{Kind: evEOF}
+			return nil, EditEvent{Kind: EvEOF}
 		}
 		return nil, EditEvent{}
 	case '\t':

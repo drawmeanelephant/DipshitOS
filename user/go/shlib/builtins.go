@@ -1,6 +1,6 @@
 // GOSH's builtin table — the daily-use set SH.BIN offered (M49 bar), minus
 // the M68a non-goals (no vi-mode set -o, no functions/arith/conditionals).
-package main
+package shlib
 
 import (
 	"sort"
@@ -533,7 +533,7 @@ func helpCatalogText() string {
 		}
 		b.WriteString("  " + g + ": " + strings.Join(names, " ") + "\n")
 	}
-	b.WriteString("tools: " + strings.Join(toolNames(), " ") + "\n")
+	b.WriteString("tools: " + strings.Join(ToolNames(), " ") + "\n")
 	// The externals section lists the verb AND the app names a user can type
 	// (M71n #1573); `help <name>` gives any row's usage and description.
 	b.WriteString("externals: " + strings.Join(helpGroupNames("externals"), " ") + "\n")
@@ -561,7 +561,7 @@ func helpOne(c *cmdCtx, name string) int {
 		return 0
 	}
 	if name == "tools" {
-		c.out([]byte("tools: " + strings.Join(toolNames(), " ") + "\n"))
+		c.out([]byte("tools: " + strings.Join(ToolNames(), " ") + "\n"))
 		return 0
 	}
 	// `help externals` is served by the group branch above (the group is never

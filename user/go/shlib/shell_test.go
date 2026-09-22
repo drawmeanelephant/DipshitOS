@@ -1,4 +1,4 @@
-package main
+package shlib
 
 import (
 	"bytes"
@@ -55,7 +55,7 @@ func (f *fakeHost) Principal() (uint32, uint32, bool) {
 
 func (f *fakeHost) Chmod(path string, mode uint16) error {
 	if name, ok := f.chmodErr[path]; ok {
-		return &openError{path: path, name: name}
+		return &OpenError{path: path, name: name}
 	}
 	if f.chmoded == nil {
 		f.chmoded = map[string]uint16{}
@@ -77,10 +77,10 @@ func (f *fakeHost) PipeWrite(b []byte) error     { f.pipe = append(f.pipe[:0], b
 func (f *fakeHost) PipeReadAll() ([]byte, error) { return f.pipe, nil }
 func (f *fakeHost) Chdir(path string) error {
 	if name, ok := f.chdirErr[path]; ok {
-		return &openError{path: path, name: name}
+		return &OpenError{path: path, name: name}
 	}
 	if f.chdirPlain {
-		return errNotFound
+		return ErrNotFound
 	}
 	return nil
 }
@@ -89,7 +89,7 @@ func (f *fakeHost) SleepSeconds(n int) { f.sleeps = append(f.sleeps, n) }
 
 func (f *fakeHost) RunExternal(name string, args []string) (int64, error) {
 	if f.missing[name] {
-		return 0, errNotFound
+		return 0, ErrNotFound
 	}
 	return 7, nil // the pid is irrelevant to the engine contract
 }
@@ -110,7 +110,7 @@ func (f *fakeHost) SleepTick() { f.ticks = append(f.ticks, 1) }
 
 func (f *fakeHost) ReadFile(path string, max int) ([]byte, error) {
 	if name, ok := f.denied[path]; ok {
-		return nil, &openError{path: path, name: name}
+		return nil, &OpenError{path: path, name: name}
 	}
 	if b, ok := f.files[path]; ok {
 		if len(b) > max {
@@ -118,12 +118,12 @@ func (f *fakeHost) ReadFile(path string, max int) ([]byte, error) {
 		}
 		return b, nil
 	}
-	return nil, errNotFound
+	return nil, ErrNotFound
 }
 
 func (f *fakeHost) WriteFile(path string, b []byte, appendMode bool) error {
 	if f.writeErr {
-		return errWriteFailed
+		return ErrWriteFailed
 	}
 	if appendMode {
 		f.files[path] = append(f.files[path], b...)
@@ -300,7 +300,7 @@ func TestEngineJobs(t *testing.T) {
 	}
 	h.out = nil
 	st, act := sh.RunLine("fg 1")
-	if act != actionContinue || st != 43 {
+	if act != ActionContinue || st != 43 {
 		t.Fatalf("fg = (%d, %v), want (43, continue)", st, act)
 	}
 	if len(h.ticks) == 0 {
@@ -375,11 +375,11 @@ func TestEngineExitAndMonitor(t *testing.T) {
 	h := newFakeHost()
 	_, sh := session(h)
 	st, act := sh.RunLine("exit 7")
-	if act != actionExit || st != 7 {
+	if act != ActionExit || st != 7 {
 		t.Fatalf("exit 7 = (%d, %v), want (7, exit)", st, act)
 	}
 	st, act = sh.RunLine("monitor")
-	if act != actionMonitor || st != 0 {
+	if act != ActionMonitor || st != 0 {
 		t.Fatalf("monitor = (%d, %v), want (0, monitor)", st, act)
 	}
 }
@@ -455,7 +455,7 @@ func TestEngineBlankLineIsANoOp(t *testing.T) {
 // handing the command short input that still exits 0.
 func TestEngineOversizeInputFailsLoud(t *testing.T) {
 	h := newFakeHost()
-	h.files["BIG.TXT"] = bytes.Repeat([]byte("x"), maxPipeBytes+1)
+	h.files["BIG.TXT"] = bytes.Repeat([]byte("x"), MaxPipeBytes+1)
 	run, _ := session(h)
 	if st := run("wc -l < BIG.TXT"); st != 1 {
 		t.Fatalf("oversize redirect status = %d, want 1", st)
@@ -471,7 +471,7 @@ func TestEngineOversizeInputFailsLoud(t *testing.T) {
 		t.Fatalf("oversize cat output = %q", got)
 	}
 	// A file exactly at the bound is still accepted.
-	h.files["OK.TXT"] = bytes.Repeat([]byte("y"), maxPipeBytes)
+	h.files["OK.TXT"] = bytes.Repeat([]byte("y"), MaxPipeBytes)
 	h.out = nil
 	out, st := toolOut(t, h, "wc -c OK.TXT")
 	if st != 0 || strings.TrimSpace(out) != "4096 OK.TXT" {
@@ -960,8 +960,8 @@ func TestHelpNamesNoDeletedBinaries(t *testing.T) {
 
 // --- M69f1 (#1537): persistence at the host seam -------------------------
 //
-// saveHistory is called with the engine's ring AFTER the editor pushed the
-// submitted line (main.go's evSubmit); these tests drive the same order.
+// SaveHistory is called with the engine's ring AFTER the editor pushed the
+// submitted line (edit.go's EvSubmit); these tests drive the same order.
 
 // TestHistoryPersistsAcrossSessions is the save/load story: session 2's ring
 // is seeded from the file session 1 wrote, and the file carries the ring's
@@ -971,14 +971,14 @@ func TestHistoryPersistsAcrossSessions(t *testing.T) {
 
 	// Session 1: nothing on the share yet.
 	first := &History{}
-	s1 := &historySink{}
-	loadHistory(h, first, s1)
+	s1 := &HistorySink{}
+	LoadHistory(h, first, s1)
 	if got := first.Entries(); len(got) != 0 {
 		t.Fatalf("first session started with %q; want empty", got)
 	}
 	for _, ln := range []string{"echo one", "echo two", "echo two", "help echo"} {
 		first.Push(ln)
-		saveHistory(h, first, ln, s1)
+		SaveHistory(h, first, ln, s1)
 	}
 	if got, want := string(h.files[histPath]), "echo one\necho two\nhelp echo\n"; got != want {
 		t.Fatalf("history file = %q want %q", got, want)
@@ -986,8 +986,8 @@ func TestHistoryPersistsAcrossSessions(t *testing.T) {
 
 	// Session 2: a fresh process (fresh ring, fresh sink) recalls it.
 	second := &History{}
-	s2 := &historySink{}
-	loadHistory(h, second, s2)
+	s2 := &HistorySink{}
+	LoadHistory(h, second, s2)
 	if got, want := strings.Join(second.Entries(), ","), "echo one,echo two,help echo"; got != want {
 		t.Fatalf("second session ring = %q want %q", got, want)
 	}
@@ -997,7 +997,7 @@ func TestHistoryPersistsAcrossSessions(t *testing.T) {
 		t.Fatalf("newest recall entry = %q want %q", ents[len(ents)-1], "help echo")
 	}
 	// And a re-submit of that same line is not written twice.
-	saveHistory(h, second, "help echo", s2)
+	SaveHistory(h, second, "help echo", s2)
 	if got, want := string(h.files[histPath]), "echo one\necho two\nhelp echo\n"; got != want {
 		t.Fatalf("re-submit rewrote the file: %q", got)
 	}
@@ -1008,11 +1008,11 @@ func TestHistoryPersistsAcrossSessions(t *testing.T) {
 func TestHistoryFileStaysBounded(t *testing.T) {
 	h := newFakeHost()
 	hist := &History{}
-	sink := &historySink{}
+	sink := &HistorySink{}
 	for i := 0; i < historyMax*4; i++ {
 		ln := fmt.Sprintf("cmd-%03d", i)
 		hist.Push(ln)
-		saveHistory(h, hist, ln, sink)
+		SaveHistory(h, hist, ln, sink)
 	}
 	lines := strings.Count(string(h.files[histPath]), "\n")
 	if lines > historyMax {
@@ -1028,9 +1028,9 @@ func TestHistoryFileStaysBounded(t *testing.T) {
 func TestHistoryLoadToleratesMissingFile(t *testing.T) {
 	h := newFakeHost()
 	hist := &History{}
-	sink := &historySink{}
+	sink := &HistorySink{}
 	h.denied = map[string]string{histPath: "EACCES"}
-	loadHistory(h, hist, sink)
+	LoadHistory(h, hist, sink)
 	if got := hist.Entries(); len(got) != 0 {
 		t.Fatalf("denied load = %q want empty", got)
 	}
@@ -1039,9 +1039,9 @@ func TestHistoryLoadToleratesMissingFile(t *testing.T) {
 	h2 := newFakeHost()
 	h2.writeErr = true
 	hist2 := &History{}
-	sink2 := &historySink{}
+	sink2 := &HistorySink{}
 	hist2.Push("echo x")
-	saveHistory(h2, hist2, "echo x", sink2)
+	SaveHistory(h2, hist2, "echo x", sink2)
 	if !sink2.warned {
 		t.Fatal("a refused write did not latch the one-line report")
 	}
@@ -1052,7 +1052,7 @@ func TestHistoryLoadToleratesMissingFile(t *testing.T) {
 
 // TestHistoryWarnIsPrintedOnce: D3's one-line report, not one per keystroke.
 func TestHistoryWarnIsPrintedOnce(t *testing.T) {
-	s := &historySink{}
+	s := &HistorySink{}
 	s.warn()
 	s.warn()
 	if !s.warned {
@@ -1065,15 +1065,15 @@ func TestHistoryWarnIsPrintedOnce(t *testing.T) {
 func TestHistoryDoesNotTouchTheMonitorFile(t *testing.T) {
 	h := newFakeHost()
 	hist := &History{}
-	sink := &historySink{}
+	sink := &HistorySink{}
 	for _, ln := range []string{"echo a", "echo b"} {
 		hist.Push(ln)
-		saveHistory(h, hist, ln, sink)
+		SaveHistory(h, hist, ln, sink)
 	}
 	if _, ok := h.files["/host/HISTORY.TXT"]; ok {
-		t.Fatal("saveHistory wrote the monitor's HISTORY.TXT")
+		t.Fatal("SaveHistory wrote the monitor's HISTORY.TXT")
 	}
 	if _, ok := h.files[histPath]; !ok {
-		t.Fatal("saveHistory did not write " + histPath)
+		t.Fatal("SaveHistory did not write " + histPath)
 	}
 }
