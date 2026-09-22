@@ -292,6 +292,16 @@ vgate_run 02 -- \
     --snapshot-after "web: navigated" \
     --script-expect "web: nav-ready" --timeout 120
 
+# #1586: EVERY boot that launches WEB asserts the absence, not just the old
+# 01/03/11. The guest printed `web: budget over startup ...` in all thirteen
+# WEB boots for months while only three looked, which is why the red set
+# looked load-driven. Measured then: startup=10048ms (7013ms of it vi.WmPeers
+# retrying for a WM seat that does not exist on the shim path, 3022ms the four
+# faces). After the fix: startup=3029-3054ms, so the absence is true everywhere
+# and a real regression trips it in whichever boot it happens. Boot 12 is
+# deliberately NOT asserted: it launches GOFETCH, not WEB, and prints no
+# `web:` line at all (an absence there could only ever be vacuous).
+vgate_assert 02 serial-absent 'web: budget over'
 vgate_assert 02 serial-contains 'web: settled'
 vgate_assert 02 serial-contains 'web: ev kind=3'
 vgate_assert 02 serial-contains 'web: nav /host/NEXT.HTML'
@@ -378,6 +388,7 @@ vgate_run 04 -- \
     --snapshot-after "web: repaint" \
     --script-expect "web: ready" --timeout 120
 
+vgate_assert 04 serial-absent 'web: budget over'
 vgate_assert 04 serial-contains 'web: open id='
 vgate_assert 04 serial-contains 'web: error file'
 vgate_assert 04 serial-contains 'web: settled'
@@ -416,6 +427,7 @@ vgate_run 05 -- \
     --snapshot-after "web: repaint" \
     --script-expect "web: ready" --timeout 120
 
+vgate_assert 05 serial-absent 'web: budget over'
 vgate_assert 05 serial-contains 'web: url https://10.0.0.2:80/'
 vgate_assert 05 serial-contains 'web: error tls'
 vgate_assert 05 serial-contains 'web: ready'
@@ -443,6 +455,7 @@ vgate_run 06 -- \
     --snapshot-after "web: repaint" \
     --script-expect "web: ready" --timeout 120
 
+vgate_assert 06 serial-absent 'web: budget over'
 vgate_assert 06 serial-contains 'web: error dns'
 vgate_assert 06 serial-contains 'web: ready'
 vgate_assert 06 serial-absent 'web: fetch '
@@ -458,6 +471,7 @@ vgate_run 07 -- \
     --snapshot-after "web: repaint" \
     --script-expect "web: ready" --timeout 120
 
+vgate_assert 07 serial-absent 'web: budget over'
 vgate_assert 07 serial-contains 'web: error url'
 vgate_assert 07 serial-contains 'web: ready'
 vgate_assert 07 serial-absent 'web: fetch '
@@ -479,6 +493,7 @@ vgate_run 08 -- \
     --snapshot-after "web: repaint" \
     --script-expect "web: ready" --timeout 180
 
+vgate_assert 08 serial-absent 'web: budget over'
 vgate_assert 08 serial-absent '[EXC] parking:'
 vgate_assert 08 serial-contains 'web: fetch 10.0.0.2/'
 vgate_assert 08 python <<'PY'
@@ -504,6 +519,7 @@ vgate_run 09 -- \
     --snapshot-after "web: repaint" \
     --script-expect "web: download " --timeout 180
 
+vgate_assert 09 serial-absent 'web: budget over'
 vgate_assert 09 serial-contains 'web: stores '
 vgate_assert 09 serial-contains 'web: cache store '
 vgate_assert 09 serial-contains 'web: download '
@@ -544,6 +560,7 @@ vgate_run 10 -- \
     --snapshot-after "web: repaint" \
     --script-expect "web: ready" --timeout 180
 
+vgate_assert 10 serial-absent 'web: budget over'
 vgate_assert 10 serial-contains 'web: offline http://10.0.0.2/'
 vgate_assert 10 serial-contains 'web: settled'
 vgate_assert 10 serial-absent 'web: error tcp'
@@ -700,6 +717,7 @@ vgate_run 13 -- \
     --snapshot-after "web-ink-20s" \
     --script-expect "web-ink-done" --timeout 180
 
+vgate_assert 13 serial-absent 'web: budget over'
 vgate_assert 13 serial-contains 'web: settled'
 vgate_assert 13 serial-contains 'web-ink-3s'
 vgate_assert 13 serial-contains 'web-ink-20s'
@@ -807,6 +825,7 @@ vgate_run 14 -- \
     --snapshot-after "web: repaint" \
     --script-expect "web: ready" --timeout 180
 
+vgate_assert 14 serial-absent 'web: budget over'
 vgate_assert 14 serial-contains 'web: url /host/CORPUS.HTML'
 vgate_assert 14 serial-contains 'web: parse nodes='
 vgate_assert 14 serial-contains 'web: layout blocks='

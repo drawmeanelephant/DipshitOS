@@ -138,26 +138,41 @@ type WmSeat struct {
 // at a time (sys_wmctl REGISTER is one-seat), so matching either is safe.
 var WMProcNames = [...]string{"WND.BIN", "TABWM.BIN", "GOTABWM.ELF"}
 
+// wmPeersScanAttempts bounds the `sys_procs` re-reads (M56d #1315). It is
+// kept at the historical 8, but only a persistently suspect scan can spend
+// them now: an intact scan returns on the spot.
+const wmPeersScanAttempts = 8
+
 // WmPeers finds the WM pid and this process's pid in a single `sys_procs`
-// scan (the M56a `wm_peers` helper). A zero field means "not found" (no WM
-// seat, or this process is not yet in the table). Only RUNNING rows match.
-// WmPeers finds the WM pid and this process\'s pid in a single `sys_procs`
 // scan (the M56a `wm_peers` helper). A zero field means "not found". Only
 // RUNNING rows with a non-empty name match.
 //
-// The scan is RETRIED: on the guest `sys_procs` intermittently returns its row
-// count while the name bytes read back zeroed (observed on VZ, alternating
-// scans), which would otherwise make a declare silently fail. The retry is
-// bounded and yields between attempts; on the host (every syscall -ENOSYS) it
-// is a cheap no-op that still returns the zero seat.
+// A scan that reads back INTACT (no RUNNING row whose name bytes came back
+// zeroed) and knows this process is TRUSTED: a missing WM then means there is
+// genuinely no seat, and the answer stands. Only a SUSPECT scan is retried --
+// on the guest `sys_procs` intermittently returns its row count while the name
+// bytes read back zeroed (observed on VZ, alternating scans; M56d #1315), and
+// the row that got zeroed may be the WM's own, so a suspect scan cannot answer
+// "no seat" at all.
+//
+// That distinction is not cosmetic. Between attempts the loop yields, and on
+// VZ a yield parks the caller until the next scheduler tick, which is a full
+// second (kernel/src/timer.zig `period_ns` = 1e9). Retrying the no-seat answer
+// therefore cost ~7 s per call (#1586) -- twice per browser boot, which is
+// most of the 10 s that put WEB over its startup budget on EVERY boot while
+// only three boots asserted it. A suspect scan gets one immediate re-read
+// first, because the flake alternates per scan; only a persistent one pays a
+// tick. On the host (every syscall -ENOSYS) the loop is a cheap no-op that
+// still returns the zero seat.
 func WmPeers(selfName string) WmSeat {
 	var out WmSeat
 	if selfName == "" {
 		return out
 	}
 	rows := make([]ProcRow, 64)
-	for attempt := 0; attempt < 8; attempt++ {
+	for attempt := 0; attempt < wmPeersScanAttempts; attempt++ {
 		out = WmSeat{}
+		suspect := false
 		if n, r := Procs(rows); r > 0 && n > 0 {
 			for i := 0; i < n; i++ {
 				if rows[i].State != ProcRunning {
@@ -165,6 +180,10 @@ func WmPeers(selfName string) WmSeat {
 				}
 				name := rows[i].Name()
 				if name == "" {
+					// A RUNNING row with no readable name: the M56d flake.
+					// This row could BE the WM seat, so this scan cannot
+					// answer "no seat".
+					suspect = true
 					continue
 				}
 				if out.Self == 0 && name == selfName {
@@ -180,8 +199,15 @@ func WmPeers(selfName string) WmSeat {
 				}
 			}
 		}
-		if out.WM != 0 && out.Self != 0 {
+		// Both peers resolved (the seat answered for itself), or an intact
+		// scan that knows this process (so the seat answer is the truth).
+		if out.Self != 0 && (out.WM != 0 || !suspect) {
 			return out
+		}
+		if attempt == 0 {
+			// The flake alternates per scan, so one immediate re-read lands
+			// an intact scan far more often than a tick-long sleep would.
+			continue
 		}
 		Yield()
 	}

@@ -229,15 +229,25 @@ func (v virender) Fill(x, y, w, h int, rgb uint32) {
 // regression (an accidental O(n^2), a fetch on the render path), not to
 // micro-benchmark.
 const (
-	// budgetStartupMs is "cold start to a published frame" for a page that is
-	// already on the share — the only path where the browser owns the whole
-	// delay. A network page also waits on the peer, and that wait is reported
-	// separately (wait-ms) and never counted as browser cost.
+	// budgetStartupMs is the cold-start cost the BROWSER owns for a page that
+	// is already on the share: main() entry to navigate(), i.e. argv + window +
+	// the face loads. It is NOT "cold start to a published frame" — that is
+	// settle-ms, which reuses this same bar below. A network page also waits on
+	// the peer; that wait is reported separately (wait-ms) and never counted as
+	// browser cost.
 	//
 	// M69d #1531 loads four faces (~1.5 MiB) through the kernel's 2048-byte
-	// sys_file_read cap (~750 calls). Observed live-web-ttf 01: startup=3027ms
-	// with Bold+Italic, vs the previous two-face 1500ms budget. 4000ms is the
-	// same loose bar for four faces; parse/layout/paint budgets are unchanged.
+	// sys_file_read cap (~750 calls). Measured on the reference host after
+	// #1586: startup=3025ms (fonts=3022ms of it, every other phase 0-1ms) and
+	// 3029-3054ms across the fourteen live-web boots — i.e. this bar is a
+	// FONT-LOAD bar. #1586 removed 7013ms of WM-seat retry that used to sit in
+	// this window on every boot with no seat (the shim path), which is what held
+	// the number at ~10048ms and printed a budget-over line in every WEB boot
+	// (13 of the 14; boot 12 launches GOFETCH) while only three boots asserted
+	// its absence. The same four faces read 3027ms before that retry existed.
+	// 4000ms stays the loose bar for four faces: a structural regression (faces
+	// read twice, a fetch on the render path) still trips it, with ~1s of
+	// headroom over the measured cost. parse/layout/paint budgets are unchanged.
 	budgetStartupMs = 4000
 	budgetRenderMs  = 400 // parse + layout + paint of a page
 	budgetParseMs   = 120
