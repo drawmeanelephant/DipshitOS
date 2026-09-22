@@ -31,6 +31,10 @@ const csprng = @import("csprng.zig");
 // 1 Hz generic timer so the half-open accept timeout (#1105) advances while a
 // net-bound shell waits for its first client.
 const timer = @import("timer.zig");
+// M73a-1 (#1625, ADR 0020 Amendment D): the grid stores decoded rune
+// cells, so width/combining policy comes from the same `text` helpers the
+// painter uses.
+const text = @import("text.zig");
 
 /// Output ring capacity (bytes the owner has written, awaiting a front-end).
 pub const out_capacity: usize = 4096;
@@ -87,10 +91,69 @@ pub const grid_lines: usize = 128;
 
 /// A bounded character grid with scrollback for one window-bound terminal.
 /// Bytes fed from the output ring are laid out (CR/LF/BS/TAB, a minimal CSI
-/// clear/home), wrapping at `cols` and scrolling one line at a time. A
-/// window resize reflows the stored lines to the new column count (M49 SD5
-/// #1132). Pure: fixed arrays, no allocation, host-testable.
+/// clear/home), wrapping at `cols` and scrolling one line at a time. Bytes
+/// >= 0x80 are UTF-8-decoded into **rune cells** (M73a-1 #1625): wide
+/// pairs, combining overlays, U+FFFD for ill-formed input. A window resize
+/// reflows the stored lines to the new column count (M49 SD5 #1132) —
+/// placement-aware, so a pair never splits. Pure: fixed arrays, no
+/// allocation, host-testable.
 pub const Point = struct { line: usize, col: usize };
+
+/// M73a-1 (#1625, ADR 0020 Amendment D): one grid cell as presentation
+/// state. `base` is the rune anchored here (U+0000..U+10FFFF), `mark` an
+/// optional combining overlay on that rune (0 = none), and `cont` marks the
+/// right half of a double-width pair — its `base` is always 0 and the glyph
+/// lives in the cell to the left. Packed (43 bits) so the 80x128 grids and
+/// the reflow snapshot stay contiguous.
+pub const Cell = packed struct {
+    base: u21 = ' ',
+    mark: u21 = 0,
+    cont: u1 = 0,
+};
+
+/// The erased/initial cell: a blank, unmarked, glyph-owning cell.
+pub const empty_cell: Cell = .{};
+
+fn utf8Len(cp: u21) usize {
+    if (cp < 0x80) return 1;
+    if (cp < 0x800) return 2;
+    if (cp < 0x10000) return 3;
+    return 4;
+}
+
+/// Encode one rune at `dst[out..]`; null when the whole rune does not fit
+/// (selection copy never writes a truncated UTF-8 sequence).
+fn encodeOne(dst: []u8, out: usize, cp: u21) ?usize {
+    const n = utf8Len(cp);
+    if (out + n > dst.len) return null;
+    if (n == 1) {
+        dst[out] = @intCast(cp);
+        return out + 1;
+    } else if (n == 2) {
+        dst[out] = 0xc0 | @as(u8, @intCast(cp >> 6));
+        dst[out + 1] = 0x80 | @as(u8, @intCast(cp & 0x3f));
+        return out + 2;
+    } else if (n == 3) {
+        dst[out] = 0xe0 | @as(u8, @intCast(cp >> 12));
+        dst[out + 1] = 0x80 | @as(u8, @intCast((cp >> 6) & 0x3f));
+        dst[out + 2] = 0x80 | @as(u8, @intCast(cp & 0x3f));
+        return out + 3;
+    }
+    dst[out] = 0xf0 | @as(u8, @intCast(cp >> 18));
+    dst[out + 1] = 0x80 | @as(u8, @intCast((cp >> 12) & 0x3f));
+    dst[out + 2] = 0x80 | @as(u8, @intCast((cp >> 6) & 0x3f));
+    dst[out + 3] = 0x80 | @as(u8, @intCast(cp & 0x3f));
+    return out + 4;
+}
+
+/// Encode a cell's base then its overlay as UTF-8, all-or-nothing.
+fn encodeCell(dst: []u8, out: usize, cell: Cell) ?usize {
+    const total = utf8Len(cell.base) + (if (cell.mark != 0) utf8Len(cell.mark) else 0);
+    if (out + total > dst.len) return null;
+    var i = encodeOne(dst, out, cell.base).?;
+    if (cell.mark != 0) i = encodeOne(dst, i, cell.mark).?;
+    return i;
+}
 
 /// A terminal cell stores one of the ANSI 16 colours, or the presentation
 /// default (16), for both foreground and background plus the bold bit.
@@ -118,7 +181,7 @@ pub fn styleBold(style: CellStyle) bool {
 }
 
 pub const Screen = struct {
-    cells: [grid_lines][grid_cols]u8 = [_][grid_cols]u8{[_]u8{' '} ** grid_cols} ** grid_lines,
+    cells: [grid_lines][grid_cols]Cell = [_][grid_cols]Cell{[_]Cell{empty_cell} ** grid_cols} ** grid_lines,
     styles: [grid_lines][grid_cols]CellStyle = [_][grid_cols]CellStyle{[_]CellStyle{default_cell_style} ** grid_cols} ** grid_lines,
     lens: [grid_lines]usize = [_]usize{0} ** grid_lines,
     /// Number of lines in use (>= 1); grows to `grid_lines` then scrolls.
@@ -129,7 +192,7 @@ pub const Screen = struct {
     /// The alternate screen is a second bounded grid, not an allocation.
     /// Entering DECSET 47/1049 swaps the primary into this storage and clears
     /// the active grid; DECRST swaps it back unchanged.
-    alt_cells: [grid_lines][grid_cols]u8 = [_][grid_cols]u8{[_]u8{' '} ** grid_cols} ** grid_lines,
+    alt_cells: [grid_lines][grid_cols]Cell = [_][grid_cols]Cell{[_]Cell{empty_cell} ** grid_cols} ** grid_lines,
     alt_styles: [grid_lines][grid_cols]CellStyle = [_][grid_cols]CellStyle{[_]CellStyle{default_cell_style} ** grid_cols} ** grid_lines,
     alt_lens: [grid_lines]usize = [_]usize{0} ** grid_lines,
     alt_used: usize = 1,
@@ -143,6 +206,13 @@ pub const Screen = struct {
     csi_params: [8]u16 = [_]u16{0} ** 8,
     csi_count: usize = 0,
     csi_private: bool = false,
+    /// M73a-1 (#1625): the in-flight UTF-8 sequence, if any. `utf_need` is
+    /// the continuation bytes still expected (0 = idle), `utf_acc` the
+    /// partial codepoint, `utf_len` the total sequence length (for the
+    /// overlong/surrogate/range check at completion).
+    utf_need: u8 = 0,
+    utf_acc: u32 = 0,
+    utf_len: u8 = 0,
     /// Current SGR rendition. It is presentation state, never terminal-object
     /// bytes, so serial and network front-ends remain byte-for-byte unchanged.
     style: CellStyle = default_cell_style,
@@ -166,7 +236,7 @@ pub const Screen = struct {
     }
 
     fn clearLine(self: *Screen, i: usize) void {
-        @memset(&self.cells[i], ' ');
+        @memset(&self.cells[i], empty_cell);
         @memset(&self.styles[i], default_cell_style);
         self.lens[i] = 0;
     }
@@ -202,12 +272,60 @@ pub const Screen = struct {
         self.clearSelection();
     }
 
-    fn putCell(self: *Screen, b: u8, style: CellStyle) void {
-        if (self.col >= self.cols) self.newline();
-        self.cells[self.cur][self.col] = b;
+    /// M73a-1 (#1625): place one rune. Width comes from `text.char_width`:
+    /// a double-width rune takes base + continuation cells and never splits
+    /// across a wrap; a zero-width rune overlays its mark onto the base
+    /// behind the cursor (stepping over a continuation cell), with no base
+    /// behind it pinned to U+FFFD, and ignorable zero-width runes dropped
+    /// without a cell. `mark` is only non-zero for the reflow re-feed,
+    /// which restores a stored overlay verbatim. A write that would split
+    /// a wide pair repairs the pair first.
+    fn putRune(self: *Screen, cp: u21, mark: u21, style: CellStyle) void {
+        const width: usize = text.char_width(cp);
+        if (width == 0) {
+            if (text.is_zero_width_ignorable(cp)) return; // no cell, cursor unchanged
+            if (self.col == 0) {
+                self.putRune(0xFFFD, 0, style); // no base behind: pin to U+FFFD
+                return;
+            }
+            var base_col = self.col - 1;
+            if (base_col > 0 and self.cells[self.cur][base_col].cont != 0) base_col -= 1;
+            if (self.cells[self.cur][base_col].cont != 0) {
+                // A continuation at column 0 would be corrupt; be honest.
+                self.putRune(0xFFFD, 0, style);
+                return;
+            }
+            self.cells[self.cur][base_col].mark = cp; // one overlay slot: last wins
+            self.view = 0;
+            return;
+        }
+        if (width == 2 and self.col + 2 > self.cols) {
+            self.newline();
+        } else if (self.col >= self.cols) {
+            self.newline();
+        }
+        // Pair repair: a continuation cell we overwrite loses its base, and
+        // a continuation cell just past the written range belonged to a
+        // base we are replacing. Clear the orphan rather than leave a
+        // torn half-pair for the painter.
+        if (self.col > 0 and self.cells[self.cur][self.col].cont != 0) {
+            self.cells[self.cur][self.col - 1] = empty_cell;
+            self.styles[self.cur][self.col - 1] = default_cell_style;
+        }
+        if (self.col + width < grid_cols and self.cells[self.cur][self.col + width].cont != 0) {
+            self.cells[self.cur][self.col + width] = empty_cell;
+            self.styles[self.cur][self.col + width] = default_cell_style;
+        }
+        self.cells[self.cur][self.col] = .{ .base = cp, .mark = mark, .cont = 0 };
         self.styles[self.cur][self.col] = style;
-        if (self.col + 1 > self.lens[self.cur]) self.lens[self.cur] = self.col + 1;
-        self.col += 1;
+        if (width == 2) {
+            self.cells[self.cur][self.col + 1] = empty_cell;
+            self.cells[self.cur][self.col + 1].cont = 1;
+            self.styles[self.cur][self.col + 1] = style;
+        }
+        const end = self.col + width;
+        if (end > self.lens[self.cur]) self.lens[self.cur] = end;
+        self.col = end;
         self.view = 0;
     }
 
@@ -237,18 +355,22 @@ pub const Screen = struct {
     }
 
     fn eraseLine(self: *Screen, mode: u16) void {
-        const start: usize = switch (mode) {
+        var start: usize = switch (mode) {
             1 => 0,
             2 => 0,
             else => @min(self.col, self.cols),
         };
-        const end: usize = switch (mode) {
+        var end: usize = switch (mode) {
             1 => @min(self.col + 1, self.cols),
             else => self.cols,
         };
+        // M73a-1: never erase half a wide pair — extend the range over any
+        // pair edge the requested range would split.
+        if (start > 0 and self.cells[self.cur][start].cont != 0) start -= 1;
+        if (end < grid_cols and self.cells[self.cur][end].cont != 0) end += 1;
         var c = start;
         while (c < end) : (c += 1) {
-            self.cells[self.cur][c] = ' ';
+            self.cells[self.cur][c] = empty_cell;
             self.styles[self.cur][c] = default_cell_style;
         }
         if (mode == 2) {
@@ -288,7 +410,7 @@ pub const Screen = struct {
     fn swapAlternate(self: *Screen) void {
         var row: usize = 0;
         while (row < grid_lines) : (row += 1) {
-            std.mem.swap([grid_cols]u8, &self.cells[row], &self.alt_cells[row]);
+            std.mem.swap([grid_cols]Cell, &self.cells[row], &self.alt_cells[row]);
             std.mem.swap([grid_cols]CellStyle, &self.styles[row], &self.alt_styles[row]);
         }
         std.mem.swap([grid_lines]usize, &self.lens, &self.alt_lens);
@@ -353,7 +475,22 @@ pub const Screen = struct {
 
     /// Feed one output byte. CSI is intentionally bounded to the sequences
     /// a window TUI needs; unsupported sequences are consumed, never painted.
+    /// Bytes >= 0x80 are UTF-8-decoded into the grid (M73a-1 #1625); an
+    /// ill-formed sequence becomes U+FFFD, never a raw byte.
     pub fn putByte(self: *Screen, b: u8) void {
+        // M73a-1: a pending UTF-8 sequence continues here (b is a
+        // continuation byte) or fails: one U+FFFD for the truncated
+        // sequence, then this byte is processed fresh as if idle (an ESC
+        // after a half-sequence still starts an escape).
+        if (self.utf_need > 0) {
+            if ((b & 0xc0) == 0x80) {
+                self.utfContinue(b);
+                return;
+            }
+            self.utf_need = 0;
+            self.utf_len = 0;
+            self.putRune(0xFFFD, 0, self.style);
+        }
         switch (self.esc_state) {
             0 => {},
             1 => {
@@ -399,9 +536,45 @@ pub const Screen = struct {
             0x07 => {}, // bell — silent
             else => {
                 if (b < 0x20 or b == 0x7f) return;
-                self.putCell(b, self.style);
+                if (b < 0x80) {
+                    self.putRune(b, 0, self.style);
+                } else {
+                    self.utfStart(b);
+                }
             },
         }
+    }
+
+    /// M73a-1: start a UTF-8 sequence — C2..F4 are well-formed leads; a
+    /// stray continuation byte or an invalid lead (C0/C1, F5..FF) is one
+    /// U+FFFD.
+    fn utfStart(self: *Screen, b: u8) void {
+        if (b < 0xc2 or b > 0xf4) {
+            self.putRune(0xFFFD, 0, self.style);
+            return;
+        }
+        self.utf_need = if (b < 0xe0) @as(u8, 1) else if (b < 0xf0) 2 else 3;
+        self.utf_acc = if (b < 0xe0) b & 0x1f else if (b < 0xf0) b & 0x0f else b & 0x07;
+        self.utf_len = self.utf_need + 1;
+    }
+
+    /// M73a-1: accumulate a continuation byte; at the last byte validate
+    /// the whole sequence (overlong, surrogate, and above U+10FFFF each
+    /// fail as one U+FFFD for the sequence, not one per byte).
+    fn utfContinue(self: *Screen, b: u8) void {
+        self.utf_acc = (self.utf_acc << 6) | @as(u32, b & 0x3f);
+        self.utf_need -= 1;
+        if (self.utf_need > 0) return;
+        const cp = self.utf_acc;
+        const ok = switch (self.utf_len) {
+            2 => cp >= 0x80,
+            3 => cp >= 0x800 and !(cp >= 0xd800 and cp <= 0xdfff),
+            4 => cp >= 0x10000 and cp <= 0x10ffff,
+            else => false,
+        };
+        self.utf_len = 0;
+        const rune: u21 = if (ok) @intCast(cp) else 0xFFFD;
+        self.putRune(rune, 0, self.style);
     }
 
     pub fn feed(self: *Screen, bytes: []const u8) void {
@@ -412,10 +585,28 @@ pub const Screen = struct {
         return self.used;
     }
 
-    /// The rendered bytes of line `i` (empty for an out-of-range line).
+    /// The ASCII projection of line `i` (empty for an out-of-range line):
+    /// base runes U+0000..U+007F as themselves; continuation cells and any
+    /// non-ASCII rune project to one 0x00 byte (the renderer already skips
+    /// <0x20 and >0x7E, so rune cells draw nothing until M73a-2's painter
+    /// reads `cellAt`). The length is still the cell count (`lens`), so
+    /// column indices line up. Module scratch: consume the result before
+    /// the next call.
     pub fn line(self: *const Screen, i: usize) []const u8 {
         if (i >= self.used) return &.{};
-        return self.cells[i][0..self.lens[i]];
+        const n = self.lens[i];
+        for (0..n) |c| {
+            const cell = self.cells[i][c];
+            line_scratch[c] = if (cell.cont != 0 or cell.base >= 0x80) 0 else @intCast(cell.base);
+        }
+        return line_scratch[0..n];
+    }
+
+    /// The real cell at (line, col) — M73a-1's presentation truth for the
+    /// painter, tests, and anyone who needs runes rather than bytes.
+    pub fn cellAt(self: *const Screen, line_index: usize, col_index: usize) Cell {
+        if (line_index >= self.used or col_index >= grid_cols) return empty_cell;
+        return self.cells[line_index][col_index];
     }
 
     pub fn cursorLine(self: *const Screen) usize {
@@ -458,10 +649,25 @@ pub const Screen = struct {
 
     // -- M49 SD5 (#1132): resize reflow -------------------------------------
 
-    /// The number of grid rows needed for `len` bytes at `cols` columns
-    /// (at least one row, even for an empty line).
-    fn wrappedRows(len: usize, cols: usize) usize {
-        return @max(@as(usize, 1), (len + cols - 1) / cols);
+    /// The number of grid rows the cells of one logical line occupy at
+    /// `cols` columns — placement-aware (M73a-1): wide pairs never split,
+    /// so a pair that meets the last free column wraps early (at least one
+    /// row, even for an empty line).
+    fn wrappedRows(cells_in: []const Cell, cols: usize) usize {
+        if (cells_in.len == 0) return 1;
+        var rows: usize = 1;
+        var col: usize = 0;
+        for (cells_in) |cell| {
+            if (cell.cont != 0) continue;
+            const w: usize = if (text.char_width(cell.base) >= 2) 2 else 1;
+            if (col + w > cols) {
+                rows += 1;
+                col = w;
+            } else {
+                col += w;
+            }
+        }
+        return rows;
     }
 
     /// Reflow the stored lines to `new_cols` columns. The buffer is fixed;
@@ -478,14 +684,14 @@ pub const Screen = struct {
         var kept: usize = 0;
         var first: usize = self.used;
         while (first > 0) {
-            const k = wrappedRows(self.lens[first - 1], c);
+            const k = wrappedRows(self.cells[first - 1][0..self.lens[first - 1]], c);
             if (kept + k > grid_lines) break;
             kept += k;
             first -= 1;
         }
 
-        // Snapshot the kept lines (module BSS scratch: the grid is ~10 KiB,
-        // too much for IRQ/Task stacks).
+        // Snapshot the kept lines (module BSS scratch: the rune-cell grid
+        // is ~80 KiB, too much for IRQ/Task stacks).
         var count: usize = 0;
         var i: usize = first;
         while (i < self.used) : (i += 1) {
@@ -510,7 +716,9 @@ pub const Screen = struct {
         while (n < count) : (n += 1) {
             var cell: usize = 0;
             while (cell < reflow_lens[n]) : (cell += 1) {
-                self.putCell(reflow_lines[n][cell], reflow_styles[n][cell]);
+                const src = reflow_lines[n][cell];
+                if (src.cont != 0) continue; // its base re-creates the pair
+                self.putRune(src.base, src.mark, reflow_styles[n][cell]);
             }
             if (n + 1 < count) self.newline();
         }
@@ -567,9 +775,12 @@ pub const Screen = struct {
         return true;
     }
 
-    /// Copy the selected region into `dst` (lines joined by `\n`, endpoints
-    /// inclusive; the region is clamped to the line lengths). Returns the
-    /// byte count; 0 when there is no selection.
+    /// Copy the selected region into `dst` as UTF-8 (lines joined by `\n`,
+    /// endpoints inclusive; the region is clamped to the line lengths).
+    /// A wide glyph copies once even when only one of its two cells is in
+    /// the selection, and a combining overlay rides its base. Returns the
+    /// byte count; 0 when there is no selection. Whole runes only — a rune
+    /// that does not fit the remaining room ends the copy.
     pub fn copySelection(self: *const Screen, dst: []u8) usize {
         const a = self.sel_anchor orelse return 0;
         const b = self.sel_cursor orelse return 0;
@@ -578,13 +789,21 @@ pub const Screen = struct {
         var out: usize = 0;
         var row = start.line;
         while (row <= end.line) : (row += 1) {
-            const text = self.line(row);
-            const from = if (row == start.line) @min(start.col, text.len) else 0;
-            const to = if (row == end.line) @min(end.col, text.len) else text.len;
-            if (to > from and out < dst.len) {
-                const n = @min(to - from, dst.len - out);
-                @memcpy(dst[out..][0..n], text[from..][0..n]);
-                out += n;
+            const len = if (row < self.used) self.lens[row] else 0;
+            const from = if (row == start.line) @min(start.col, len) else 0;
+            const to = if (row == end.line) @min(end.col, len) else len;
+            var c = from;
+            while (c < to) : (c += 1) {
+                const cell = self.cells[row][c];
+                if (cell.cont != 0) {
+                    // The selection starts inside a wide glyph: emit the
+                    // whole glyph once — its base lies just outside.
+                    if (c == from and c > 0) {
+                        out = encodeCell(dst, out, self.cells[row][c - 1]) orelse break;
+                    }
+                    continue; // never a second copy of an emitted glyph
+                }
+                out = encodeCell(dst, out, cell) orelse break;
             }
             if (row < end.line and out < dst.len) {
                 dst[out] = '\n';
@@ -597,7 +816,11 @@ pub const Screen = struct {
 
 /// M49 SD5: reflow scratch (module BSS — the grid is too large for the task
 /// stacks). One reflow at a time (the paint/idle path), documented bound.
-var reflow_lines: [grid_lines][grid_cols]u8 = undefined;
+var reflow_lines: [grid_lines][grid_cols]Cell = undefined;
+
+/// M73a-1 (#1625): `line()`'s ASCII projection scratch (module BSS). One
+/// consumer at a time — the paint path reads a line and moves on.
+var line_scratch: [grid_cols]u8 = undefined;
 var reflow_styles: [grid_lines][grid_cols]CellStyle = undefined;
 var reflow_lens: [grid_lines]usize = undefined;
 
@@ -2090,4 +2313,201 @@ test "terminal: copySelectionToClipboard is a no-op without a window binding" {
     for (&terminals) |*t| t.reset();
     try std.testing.expectEqual(@as(usize, 0), copySelectionToClipboard(42));
     for (&terminals) |*t| t.reset();
+}
+
+// ---------------------------------------------------------------------------
+// M73a-1 (#1625): rune cells — UTF-8 decode, wide pairs, overlays, UTF-8 copy
+// ---------------------------------------------------------------------------
+
+test "terminal: grid stores ASCII as a single cell and projects it unchanged" {
+    var s = Screen{};
+    s.feed("A");
+    const cell = s.cellAt(0, 0);
+    try std.testing.expectEqual(@as(u21, 'A'), cell.base);
+    try std.testing.expectEqual(@as(u21, 0), cell.mark);
+    try std.testing.expectEqual(@as(u1, 0), cell.cont);
+    try std.testing.expectEqualStrings("A", s.line(0));
+}
+
+test "terminal: 2-, 3-, and 4-byte UTF-8 decodes to one rune cell" {
+    var s = Screen{};
+    s.feed("\xc3\xa9"); // U+00E9 e-acute (2-byte, narrow)
+    try std.testing.expectEqual(@as(u21, 0xE9), s.cellAt(0, 0).base);
+    try std.testing.expectEqual(@as(usize, 1), s.cursorCol());
+    s.feed("\xe2\x82\xac"); // U+20AC euro (3-byte, narrow)
+    try std.testing.expectEqual(@as(u21, 0x20AC), s.cellAt(0, 1).base);
+    try std.testing.expectEqual(@as(usize, 2), s.cursorCol());
+    s.feed("\xf0\x9f\x98\x80"); // U+1F600 grin (4-byte, wide)
+    try std.testing.expectEqual(@as(u21, 0x1F600), s.cellAt(0, 2).base);
+    try std.testing.expectEqual(@as(u1, 1), s.cellAt(0, 3).cont);
+    try std.testing.expectEqual(@as(usize, 4), s.cursorCol());
+    try std.testing.expectEqual(@as(usize, 4), s.line(0).len); // lens counts cells
+    // The ASCII projection skips rune cells; M73a-2's painter reads cellAt.
+    try std.testing.expectEqualStrings("\x00\x00\x00\x00", s.line(0));
+}
+
+test "terminal: ill-formed UTF-8 is one U+FFFD per bad sequence, never a raw byte" {
+    var s = Screen{};
+    s.feed("\x80"); // stray continuation
+    try std.testing.expectEqual(@as(u21, 0xFFFD), s.cellAt(0, 0).base);
+    s.feed("\xc0\x80"); // C0 is not a lead: two bad bytes, two FFFDs
+    try std.testing.expectEqual(@as(u21, 0xFFFD), s.cellAt(0, 1).base);
+    try std.testing.expectEqual(@as(u21, 0xFFFD), s.cellAt(0, 2).base);
+    s.feed("\xff"); // invalid lead
+    try std.testing.expectEqual(@as(u21, 0xFFFD), s.cellAt(0, 3).base);
+    // Truncated tail: one FFFD, then the offending byte reprocessed fresh.
+    s.feed("\xc3");
+    s.feed("x");
+    try std.testing.expectEqual(@as(u21, 0xFFFD), s.cellAt(0, 4).base);
+    try std.testing.expectEqual(@as(u21, 'x'), s.cellAt(0, 5).base);
+    s.feed("\xe0\x80\x80"); // overlong NUL fails as one sequence
+    try std.testing.expectEqual(@as(u21, 0xFFFD), s.cellAt(0, 6).base);
+    try std.testing.expectEqual(@as(usize, 7), s.cursorCol());
+    s.feed("\xed\xa0\x80"); // UTF-16 surrogate
+    try std.testing.expectEqual(@as(u21, 0xFFFD), s.cellAt(0, 7).base);
+    s.feed("\xf4\x90\x80\x80"); // above U+10FFFF
+    try std.testing.expectEqual(@as(u21, 0xFFFD), s.cellAt(0, 8).base);
+    // A well-formed sequence still decodes after all that.
+    s.feed("\xc3\xa9");
+    try std.testing.expectEqual(@as(u21, 0xE9), s.cellAt(0, 9).base);
+}
+
+test "terminal: a wide pair occupies two cells and never splits across a wrap" {
+    var s = Screen{};
+    s.feed("\xe4\xbd\xa0"); // U+4F60 (wide)
+    try std.testing.expectEqual(@as(u21, 0x4F60), s.cellAt(0, 0).base);
+    try std.testing.expectEqual(@as(u1, 1), s.cellAt(0, 1).cont);
+    try std.testing.expectEqual(@as(usize, 2), s.cursorCol());
+    try std.testing.expectEqual(@as(usize, 2), s.line(0).len);
+    // Park the cursor in the last column; a wide glyph wraps, never splits.
+    var i: usize = 0;
+    while (i < 77) : (i += 1) s.feed("a");
+    try std.testing.expectEqual(@as(usize, 79), s.cursorCol());
+    s.feed("\xe4\xbd\xa0");
+    try std.testing.expectEqual(@as(usize, 1), s.cursorLine());
+    try std.testing.expectEqual(@as(usize, 2), s.cursorCol());
+    try std.testing.expectEqual(@as(u21, 0x4F60), s.cellAt(1, 0).base);
+    try std.testing.expectEqual(@as(u1, 1), s.cellAt(1, 1).cont);
+    // The last cell of line 0 was never half-written.
+    try std.testing.expectEqual(@as(u1, 0), s.cellAt(0, 79).cont);
+}
+
+test "terminal: overwriting or erasing a pair edge repairs the pair" {
+    var s = Screen{};
+    s.feed("\xe4\xbd\xa0a"); // [0]=wide base [1]=cont [2]=a
+    s.feed("\x1b[1;2H"); // cursor onto the continuation cell
+    s.feed("x"); // narrow overwrite of the right half clears the base
+    try std.testing.expectEqual(@as(u21, 'x'), s.cellAt(0, 1).base);
+    try std.testing.expectEqual(@as(u21, ' '), s.cellAt(0, 0).base);
+    try std.testing.expectEqual(@as(u1, 0), s.cellAt(0, 0).cont);
+    try std.testing.expectEqual(@as(u21, 'a'), s.cellAt(0, 2).base);
+
+    var s2 = Screen{};
+    s2.feed("\xe4\xbd\xa0a");
+    s2.feed("\r");
+    s2.feed("y"); // overwriting the base clears its orphaned continuation
+    try std.testing.expectEqual(@as(u21, 'y'), s2.cellAt(0, 0).base);
+    try std.testing.expectEqual(@as(u21, ' '), s2.cellAt(0, 1).base);
+    try std.testing.expectEqual(@as(u1, 0), s2.cellAt(0, 1).cont);
+
+    // EL0 from the middle of a pair extends over the whole pair.
+    var s3 = Screen{};
+    s3.feed("\xe4\xbd\xa0a");
+    s3.feed("\x1b[1;2H\x1b[0K");
+    try std.testing.expectEqual(@as(u21, ' '), s3.cellAt(0, 0).base);
+    try std.testing.expectEqual(@as(u21, ' '), s3.cellAt(0, 1).base);
+    try std.testing.expectEqual(@as(u1, 0), s3.cellAt(0, 0).cont);
+}
+
+test "terminal: combining marks overlay the base behind the cursor" {
+    var s = Screen{};
+    s.feed("e\xcc\x81"); // e + U+0301 acute
+    try std.testing.expectEqual(@as(u21, 'e'), s.cellAt(0, 0).base);
+    try std.testing.expectEqual(@as(u21, 0x301), s.cellAt(0, 0).mark);
+    try std.testing.expectEqual(@as(usize, 1), s.cursorCol());
+    try std.testing.expectEqual(@as(usize, 1), s.line(0).len);
+    // One overlay slot per cell: a second mark is last-wins.
+    s.feed("\xcc\x80"); // U+0300
+    try std.testing.expectEqual(@as(u21, 0x300), s.cellAt(0, 0).mark);
+    try std.testing.expectEqual(@as(usize, 1), s.cursorCol());
+    // A mark after a wide glyph rides the wide base (step over the cont).
+    s.feed("\xe4\xbd\xa0\xcd\x82"); // 你 + U+0342
+    try std.testing.expectEqual(@as(u21, 0x4F60), s.cellAt(0, 1).base);
+    try std.testing.expectEqual(@as(u21, 0x342), s.cellAt(0, 1).mark);
+    try std.testing.expectEqual(@as(u1, 1), s.cellAt(0, 2).cont);
+    try std.testing.expectEqual(@as(usize, 3), s.cursorCol());
+    // A mark with no base behind it pins to U+FFFD — never a bare mark cell.
+    var s2 = Screen{};
+    s2.feed("\xcc\x81");
+    try std.testing.expectEqual(@as(u21, 0xFFFD), s2.cellAt(0, 0).base);
+    try std.testing.expectEqual(@as(usize, 1), s2.cursorCol());
+    // Ignorable zero-width runes are dropped: no cell, cursor unchanged.
+    var s3 = Screen{};
+    s3.feed("a\xe2\x80\x8bb"); // a + ZWSP + b
+    try std.testing.expectEqual(@as(usize, 2), s3.cursorCol());
+    try std.testing.expectEqualStrings("ab", s3.line(0));
+}
+
+test "terminal: reflow keeps wide pairs intact at the new width" {
+    var s = Screen{};
+    s.feed("abcdefghi\xe4\xbd\xa0"); // 9 narrow + wide pair
+    _ = s.setCols(8);
+    try std.testing.expectEqual(@as(usize, 8), s.cols);
+    try std.testing.expectEqual(@as(usize, 2), s.lineCount());
+    try std.testing.expectEqualStrings("abcdefgh", s.line(0));
+    try std.testing.expectEqual(@as(u21, 'i'), s.cellAt(1, 0).base);
+    try std.testing.expectEqual(@as(u21, 0x4F60), s.cellAt(1, 1).base);
+    try std.testing.expectEqual(@as(u1, 1), s.cellAt(1, 2).cont);
+    try std.testing.expectEqual(@as(usize, 3), s.line(1).len);
+    // Pair invariant across the whole grid: every continuation has a wide
+    // base immediately to its left.
+    var row: usize = 0;
+    while (row < s.used) : (row += 1) {
+        var c: usize = 0;
+        while (c < grid_cols) : (c += 1) {
+            const cell = s.cellAt(row, c);
+            if (cell.cont == 0) continue;
+            try std.testing.expect(c > 0);
+            try std.testing.expect(text.char_width(s.cellAt(row, c - 1).base) >= 2);
+        }
+    }
+}
+
+test "terminal: selection copies UTF-8 runes once, overlays included" {
+    var s = Screen{};
+    s.feed("a\xe4\xbd\xa0" ++ "b"); // [0]=a [1]=wide base [2]=cont [3]=b
+    var buf: [64]u8 = undefined;
+    s.beginSelection(0, 0);
+    s.extendSelection(0, 4);
+    const n = s.copySelection(&buf);
+    try std.testing.expectEqualStrings("a\xe4\xbd\xa0" ++ "b", buf[0..n]);
+    // Selection starts on the continuation cell: whole glyph, once.
+    s.beginSelection(0, 2);
+    s.extendSelection(0, 3);
+    const n2 = s.copySelection(&buf);
+    try std.testing.expectEqualStrings("\xe4\xbd\xa0", buf[0..n2]);
+    // Selection covers only the base: one copy, no continuation bytes.
+    s.beginSelection(0, 1);
+    s.extendSelection(0, 2);
+    const n3 = s.copySelection(&buf);
+    try std.testing.expectEqualStrings("\xe4\xbd\xa0", buf[0..n3]);
+    // A combining overlay rides its base as real UTF-8.
+    var s2 = Screen{};
+    s2.feed("e\xcc\x81");
+    s2.beginSelection(0, 0);
+    s2.extendSelection(0, 1);
+    const m = s2.copySelection(&buf);
+    try std.testing.expectEqualStrings("e\xcc\x81", buf[0..m]);
+}
+
+test "terminal: the alternate screen swap carries rune cells verbatim" {
+    var s = Screen{};
+    s.feed("e\xcc\x81");
+    s.feed("\x1b[?1049h");
+    s.feed("\xe4\xbd\xa0");
+    try std.testing.expectEqual(@as(u21, 0x4F60), s.cellAt(0, 0).base);
+    s.feed("\x1b[?1049l");
+    try std.testing.expectEqual(@as(u21, 'e'), s.cellAt(0, 0).base);
+    try std.testing.expectEqual(@as(u21, 0x301), s.cellAt(0, 0).mark);
+    try std.testing.expectEqual(@as(usize, 1), s.cursorCol());
 }

@@ -3,7 +3,8 @@
 Status: **ACCEPTED** · Date: 2026-09-10 · amended 2026-09-11 (Amendment A,
 the window front-end — M45 card SH6, #1082; Amendment B, the net/remote
 front-end — M45 card SH7, #1083), 2026-09-21 (Amendment C, M72b window VT,
-#1580) · Milestone: M44 (next focus) ·
+#1580), 2026-09-22 (Amendment D, M73a-1 rune cells, #1625) · Milestone: M44
+(next focus) ·
 Issue **#1072** · Claims **#1073** (object + ABI) and **#1075** (pump + pilot)
 
 > The object (`kernel/src/terminal.zig`), the `/dev/tty` device-fd routing
@@ -384,3 +385,61 @@ front-ends still observe precisely the output bytes their owner wrote.
 Charm-sized TUI output can now be demonstrated on a **bound window tty** via
 the real framebuffer. This does not change the boot default or make Road Pops
 share the decoder; Road Pops remains outside this amendment.
+
+---
+
+# Amendment D — rune cells: the grid stores decoded text (M73a-1, #1625)
+
+Status: **ACCEPTED** · Date: 2026-09-22. D1 remains binding: terminal
+objects still carry bytes only; this amendment changes what the
+window-bound **presentation grid** stores after the bytes are laid out.
+Amendment C's 16-colour `CellStyle` freeze is untouched — cells gain
+runes, not colours.
+
+## Decision
+
+- A grid cell is a packed presentation record
+  `Cell{ base: u21, mark: u21, cont: u1 }` (64 bits): the rune anchored at
+  this column, an optional combining overlay on that rune, and the
+  continuation flag for the right half of a double-width pair (its `base`
+  is 0; the glyph lives in the cell to the left). `line()`'s callers that
+  need pixels use the new `cellAt()`.
+- Output bytes are UTF-8-decoded in `putByte` (state 0 only — CSI stays
+  byte-parsed). Decode policy, exactly:
+  - a well-formed 2/3/4-byte sequence becomes its codepoint in one cell
+    (`text.char_width` decides the width);
+  - a stray continuation byte or an invalid lead (80–C1, F5–FF) is one
+    U+FFFD;
+  - a truncated tail is one U+FFFD, then the offending byte is
+    reprocessed fresh (an ESC after a half-sequence still starts an
+    escape);
+  - a completed sequence that is overlong, a surrogate, or above
+    U+10FFFF is one U+FFFD for the whole sequence, not one per byte.
+- Width and overlay policy come from the existing `text.zig` helpers:
+  a wide rune occupies base + continuation and never splits across a
+  wrap (the cursor wraps first); a zero-width ignorable (ZWJ/ZWSP/
+  variation selector) is dropped without a cell or cursor movement; a
+  combining rune overlays the base behind the cursor (stepping over a
+  continuation cell), and with no base behind it pins to U+FFFD. One
+  overlay slot per cell — last wins.
+- Pair integrity is an invariant, not a convention: a write that would
+  split a pair repairs it (the orphan half is cleared), `eraseLine`
+  extends over a split edge, and reflow re-feeds whole runes so a
+  resize can never desync `lens` from the cells.
+- `line(i)` becomes an **ASCII projection** (bases ≤ U+007F as
+  themselves; continuation and non-ASCII cells as one 0x00 byte, with
+  `lens` still counting cells): legacy consumers and ASCII transcripts
+  stay byte-identical, and the renderer's existing `<0x20 / >0x7E`
+  skip simply draws nothing for rune cells until M73a-2's painter
+  reads `cellAt()`.
+- `copySelection` emits UTF-8 (base then overlay): a wide glyph copies
+  once even when only one of its two cells is selected, and a rune is
+  never truncated mid-sequence.
+
+## Consequences
+
+The grid can hold what TUI apps actually emit (box drawing, CJK, emoji,
+composed text). Rendering those pixels is M73a-2's explicit scope — this
+amendment changes storage and tests, not the compositor. BSS grows by one
+word per cell across both grids plus the reflow snapshot; the landing
+PR's `tools/verify-bss-budget.sh` run is the recorded evidence.
