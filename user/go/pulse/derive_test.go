@@ -1,5 +1,3 @@
-//go:build virelai || pulse
-
 package main
 
 import (

@@ -39,45 +39,9 @@ func (t tab) name() string {
 	return "?"
 }
 
-// Sort columns for the process table.
-type sortCol int
-
-const (
-	sortPID sortCol = iota
-	sortName
-	sortState
-)
-
-func (c sortCol) name() string {
-	switch c {
-	case sortPID:
-		return "pid"
-	case sortName:
-		return "name"
-	case sortState:
-		return "state"
-	}
-	return "?"
-}
-
-// procInfo is one display-ready process row.
-type procInfo struct {
-	pid   uint64
-	name  string
-	state uint64
-}
-
-// snapshot is one 1 Hz poll of everything the UI shows. On the guest it is
-// filled from real syscalls (snapshot.go); on the host it is canned
-// (snapshot_host.go) so the model, update and view stay testable.
-type snapshot struct {
-	uptimeNs int64
-	procs    []procInfo
-	dataFree int64
-	espFree  int64
-	tcpOpen  bool
-	taken    bool
-}
+// procInfo, snapshot and sortCol live in types.go: they are untagged there
+// because the host stub and the pure derive layer must see them without the
+// pulse tag (see that file's header).
 
 type model struct {
 	tab       tab

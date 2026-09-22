@@ -1,6 +1,8 @@
-//go:build virelai || pulse
-
 package main
+
+// Untagged on purpose: this layer is pure (no tea, no syscalls), so it is the
+// part of pulse the default `go test ./...` class-A run exercises; the
+// Charm-dependent model/update/view files stay behind `virelai || pulse`.
 
 import (
 	"sort"
