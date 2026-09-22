@@ -519,6 +519,7 @@ pub fn decode_keyboard_report(rep: []const u8) void {
                 //   PageUp/PageDown + Shift+Up/Down  scroll the view
                 //   Shift+Home / Shift+End           jump to oldest / tail
                 //   Ctrl+Shift+C                     copy the selection
+                //   Ctrl+Shift+V                     paste the clipboard into the tty
                 if (k == 0x4b) { // PageUp
                     if (scr) |s| s.scrollBy(8);
                     events += 1;
@@ -554,6 +555,18 @@ pub fn decode_keyboard_report(rep: []const u8) void {
                     var msg: [48]u8 = undefined;
                     const m = std.fmt.bufPrint(&msg, "tty: copy {d} bytes\n", .{copied}) catch "tty: copy\n";
                     klog.line(m);
+                    events += 1;
+                    continue;
+                }
+                if (ctrl and shift and k == 0x19) { // Ctrl+Shift+V (HID 'v')
+                    // M73e (#1629): the reverse of copy — the clipboard
+                    // lands in the bound tty's input queue in one push,
+                    // wrapped in `\e[200~ … \e[201~` when the app asked
+                    // for DECSET 2004 (GOSH requests it at startup).
+                    const pasted = terminal.pasteFromClipboard(driving_award.focused_window_id());
+                    var pmsg: [48]u8 = undefined;
+                    const pm = std.fmt.bufPrint(&pmsg, "tty: paste {d} bytes\n", .{pasted}) catch "tty: paste\n";
+                    klog.line(pm);
                     events += 1;
                     continue;
                 }

@@ -5,7 +5,10 @@
 # kind-2, guest pixels) drag-selects a row in the window's client area, and
 # the Ctrl+Shift+C chord copies the selection into the shared clipboard.
 # The monitor `clip` command then prints the copied bytes on the serial
-# console — observed selection/copy. Reflow/scrollback math is class-A
+# console — observed selection/copy. M73e (#1629) adds the reverse: the
+# wide drag selects all 30 rows (389 B > the old 256 B input queue),
+# Ctrl+Shift+V pastes it back through the bound tty (bracketed, DECSET
+# 2004), and the editor runs every pasted line — tail line included. Reflow/scrollback math is class-A
 # (kernel/src/terminal.zig tests) with the paint-path width sync.
 # Boot default is unchanged (the serial console still belongs to the
 # monitor while TERM.BIN owns only its window).
@@ -27,7 +30,7 @@ vgate_setup_python <<'PY'
 import os
 run = os.environ["RUN_DIR"]
 share = os.path.join(run, "share")
-lines = ["echo LINE-%02d" % i for i in range(30)]
+lines = ["echo LINE-%02d pppp" % i for i in range(30)]
 with open(os.path.join(share, "BIG.SH"), "w") as f:
     f.write("\n".join(lines) + "\n")
 PY
@@ -36,9 +39,9 @@ vgate_run 01 -- --display --input --via-virtio --screen '$RUN_DIR/screen' \
     --script '$RUN_DIR/script.txt' \
     --input-string 'source BIG.SH'$'\n' \
     --input-string-after 'term: attached' \
-    --pointer-virtio "68,76;68,76,d;124,76;124,76,u" \
+    --pointer-virtio "68,76;68,76,d;696,308;696,308,u" \
     --pointer-virtio-after 'term: line source BIG.SH' \
-    --input-chords "ctrl-shift-c,e,c,h,o,space,a,f,t,e,r,return" \
+    --input-chords "ctrl-shift-c,ctrl-shift-v,return,e,c,h,o,space,a,f,t,e,r,return" \
     --input-chords-after 'dui: term sel end' \
     --script2 '$RUN_DIR/clip.txt' \
     --script2-after 'term: line echo after' \
@@ -49,7 +52,7 @@ vgate_assert 01 serial-contains 'term: ready'
 vgate_assert 01 serial-contains 'term: attached'
 vgate_assert 01 serial-contains 'term: line source BIG.SH'
 vgate_assert 01 serial-contains 'term: done status=0'
-vgate_assert 01 serial-contains 'tty: copy 7 bytes'
+vgate_assert 01 serial-contains 'tty: copy 389 bytes'
 vgate_assert 01 serial-contains 'clip: LINE-00'
 vgate_assert 01 serial-absent '\[EXC\]'
 vgate_assert 01 serial-absent '[EXC] parking:'
@@ -58,7 +61,7 @@ vgate_assert 01 python <<'PY'
 import os
 ser = open(os.environ["VG_SER"], errors="replace").read()
 i_done = ser.find("term: done status=0")
-i_copy = ser.find("tty: copy 7 bytes")
+i_copy = ser.find("tty: copy ")
 i_clip = ser.find("clip: LINE-00")
 assert i_done >= 0, "BIG.SH did not finish"
 assert i_copy > i_done, f"copy marker not after the script (done={i_done} copy={i_copy})"
@@ -74,9 +77,30 @@ import os, re
 ser = open(os.environ["VG_SER"], errors="replace").read()
 m = re.search(r"tty\[\d+\]: out_dropped=\d+ in_dropped=\d+", ser)
 assert m, "tty drop-counter line missing from serial"
-i_copy = ser.find("tty: copy 7 bytes")
+i_copy = ser.find("tty: copy ")
 assert i_copy >= 0, "copy marker missing (precondition)"
 i_tty = ser.find(m.group(0))
 assert i_tty > i_copy, f"tty line not after activity (copy={i_copy} tty={i_tty})"
 print(f"drop-counter line OK: {m.group(0)} (after copy activity)")
+PY
+
+# M73e (#1629): the reverse direction — Ctrl+Shift+V pastes the >256 B
+# selection back through the bound tty. The marker's byte count must
+# exceed the old 256 B queue (the raised in_capacity + DECSET 2004 wrap
+# are what make that land), and every pasted line — including the tail
+# LINE-29, which only survives if NOTHING was dropped — must reach the
+# editor and run.
+vgate_assert 01 python <<'PY'
+import os, re
+ser = open(os.environ["VG_SER"], errors="replace").read()
+m = re.search(r"tty: paste (\d+) bytes", ser)
+assert m, "paste marker missing from serial"
+n = int(m.group(1))
+assert n > 256, f"paste must exceed the old 256 B queue (got {n})"
+i_copy = ser.find("tty: copy ")
+i_paste = ser.find(m.group(0))
+assert i_copy >= 0 and i_paste > i_copy, f"paste not after copy (copy={i_copy} paste={i_paste})"
+for seg in ("term: line LINE-00 pppp", "term: line LINE-14 pppp", "term: line LINE-29 pppp"):
+    assert seg in ser, f"{seg} missing — paste lost bytes"
+print(f"paste OK: {n} bytes; LINE-00..LINE-29 all reached the editor")
 PY
