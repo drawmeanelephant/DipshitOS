@@ -1406,3 +1406,33 @@ nothing at all if that image's segment grows by one aligned word).
 rewrite: the 2048-byte envp block stays as packed even though halving it would
 buy argv room, because that is a different ABI discussion. No third-child fix
 (#1449).
+
+## Amendment (2026-09-21, M71m #1572 — slot 28 argv is 255 bytes, refused past that)
+
+**Append-only.** No new slot number, no new syscall argument, no `implemented_count`
+change. This amendment is the code half the measurement above deferred. It
+supersedes that amendment's *Decision*: design (a) is what landed.
+
+**What was measured, by reading the loader, then checked on the class-B
+gate.** The gap loader already reserved one extra writable page
+(`pages += 1`) and `initBlocFloor` already starts the break at
+`memRound(argv base + arg bytes + env bytes)`. A 4096-byte block
+(8 × 256 + 16 × 128) placed at `align8(mem_size)` fits in that page:
+exactly 4096 bytes when `mem_size` is page-aligned, and `8192 − r` bytes
+past the image otherwise. Sizing `pages` from `block_off + arg_block +
+env_block` is that same one page for this block — not a second page, and
+not a tail-slack requirement. The builders' `slack >= 0x908` check stays;
+it is stricter than the loader now needs, and images that already clear
+it keep clearing it.
+
+**Contract.** Slot 28's argv block is 8 slots × 256 bytes, NUL-terminated,
+255 bytes usable. `pack_args` and `vi.Exec` **refuse** a longer argument
+(`arg_too_long` → `EINVAL`). They do not chop. `argc > 8` is still
+`too_many_args`. The Go entry stub (`rt0_virelai_arm64.s`) strides argv
+by 256 and finds envp at `+2048`. `virArgBlockBytes` is `8*256`, so the
+heap floor stays past the block when it spills out of the image's last
+page.
+
+**GOSSHD.** A session command is `GOSH.ELF -c '<command> > SSH/EXEC.OUT'`
+when that one slot fits. `SSH/EXEC.IN` is gone. A line that does not fit
+is refused.

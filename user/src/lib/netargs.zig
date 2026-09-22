@@ -13,7 +13,7 @@
 //! listen unless `open` is passed explicitly — the documented insecure
 //! trusted-network mode that reproduces M46's accept-immediately behavior.
 //! Fail closed by default. The argv block is the kernel's card-3e
-//! 32-byte-per-slot packaging (`argc` in x0, block VA in x1).
+//! packaging (`argc` in x0, block VA in x1): 256-byte slots since M71m.
 
 const std = @import("std");
 
@@ -26,9 +26,9 @@ pub const Args = struct {
     open: bool = false,
 };
 
-/// Read one 32-byte NUL-terminated argv slot from the kernel-packaged block.
+/// Read one 256-byte NUL-terminated argv slot from the kernel-packaged block.
 pub fn argSlot(block: [*]const u8, i: usize) []const u8 {
-    const slot = (block + i * 32)[0..32];
+    const slot = (block + i * 256)[0..256];
     var n: usize = 0;
     while (n < slot.len and slot[n] != 0) n += 1;
     return slot[0..n];
@@ -58,10 +58,10 @@ pub fn parse(argc: u64, argv_va: u64) ?Args {
 }
 
 test "netargs: parse defaults, port, and the explicit open mode" {
-    var block = [_]u8{0} ** 128;
+    var block = [_]u8{0} ** (3 * 256);
     const write = struct {
         fn f(b: []u8, i: usize, s: []const u8) void {
-            @memcpy(b[i * 32 ..][0..s.len], s);
+            @memcpy(b[i * 256 ..][0..s.len], s);
         }
     }.f;
     // Just `net` -> default port, auth required (fail closed).

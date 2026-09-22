@@ -2457,7 +2457,7 @@ fn handle_exec(args: Args, _: *exceptions.VectorFrame) u64 {
         var i: usize = 0;
         while (i < n) : (i += 1) {
             const slot = arg_block[i * esp_exec.arg_slot_bytes ..][0..esp_exec.arg_slot_bytes];
-            const end = std.mem.indexOfScalar(u8, slot, 0) orelse (esp_exec.arg_slot_bytes - 1);
+            const end = std.mem.indexOfScalar(u8, slot, 0) orelse return error_result(.einval);
             arg_slices[i] = slot[0..end];
         }
         exec_args = arg_slices[0..n];
@@ -2477,7 +2477,7 @@ fn handle_exec(args: Args, _: *exceptions.VectorFrame) u64 {
         // M72a (issue #1579): `map_too_large` joins the size refusals — an
         // image whose headers promise more mapped memory than the loader
         // backs is the caller's bad image, like the other two bounds.
-        .no_disk, .image_too_large, .staging_too_large, .map_too_large, .bad_magic, .bad_entry, .no_args_room, .too_many_args => error_result(.einval),
+        .no_disk, .image_too_large, .staging_too_large, .map_too_large, .bad_magic, .bad_entry, .no_args_room, .too_many_args, .arg_too_long => error_result(.einval),
         // M70b: a pin naming an offline core is the caller's bad argument.
         .bad_core => error_result(.einval),
         // M22 D1 (issue #324): ELF refusals are the caller's bad image.

@@ -243,9 +243,9 @@ pub fn parse_args_slices(args: []const []const u8) ?DnsArgs {
 // ---------------------------------------------------------------------------
 
 fn cli_arg(block: [*]u8, i: usize) []const u8 {
-    const slot = block + i * 32;
+    const slot = block + i * 256;
     var len: usize = 0;
-    while (len < 32 and slot[len] != 0) len += 1;
+    while (len < 256 and slot[len] != 0) len += 1;
     return slot[0..len];
 }
 

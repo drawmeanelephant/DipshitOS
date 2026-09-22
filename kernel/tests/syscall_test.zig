@@ -1658,7 +1658,9 @@ test "syscall: slot 28 sys_exec success preserves the caller task (issue #1333)"
     try std.testing.expectEqual(@as(usize, 2), scheduler.current_id());
     try std.testing.expectEqual(@as(?usize, 0), process.find_by_task(2));
 
-    var wire: [40]u8 = [_]u8{0} ** 40;
+    // Path (8) plus one argv slot (exec.arg_slot_bytes, 256). The kernel
+    // copies the whole slot; a short buffer is EFAULT.
+    var wire: [8 + 256]u8 = [_]u8{0} ** (8 + 256);
     @memcpy(wire[0..8], "USER.BIN");
     @memcpy(wire[8..13], "alpha");
     const wire_addr = @intFromPtr(&wire);

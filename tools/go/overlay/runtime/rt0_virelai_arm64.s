@@ -5,12 +5,12 @@
 // envp wired in issue #1226).
 //
 // The kernel's exec entry contract (card 3e) passes R0 = argc and R1 = the
-// argv BLOCK VA — eight 32-byte NUL-terminated string slots, NOT a SysV
+// argv BLOCK VA — eight 256-byte NUL-terminated string slots, NOT a SysV
 // char* array. The envp block (issue #1226) sits immediately after argv:
 // sixteen 128-byte KEY=VALUE slots. rt0_go wants R0 = argc, R1 = argv
 // (pointer array) in the Unix layout argv…/NULL/envp…/NULL. This stub
 // converts: it reserves (argc+1+envc+1)*8 bytes below SP, fills argv[i]
-// = argv_block + i*32, then the non-empty env slots. SP stays the g0
+// = argv_block + i*256, then the non-empty env slots. SP stays the g0
 // stack top for rt0_go's stack-bounds setup; the array lives below it
 // and is read-only input from here on.
 
@@ -30,7 +30,7 @@ have_args:
 	// from it (the kernel protects the data aperture through this block, so
 	// the break must start past it). R1/R3 stay free for the conversion.
 	MOVD	R1, runtime·virArgvBlockBase(SB)
-	ADD	$256, R3, R8   // envp block VA (argv 8*32)
+	ADD	$2048, R3, R8 // envp block VA (argv 8*256)
 
 	// Count non-empty env slots (16 × 128 B). Empty = first byte 0.
 	MOVD	$0, R7         // envc
@@ -59,7 +59,7 @@ count_done:
 build_argv:
 	CMP	R2, R5
 	BHS	argv_done
-	LSL	$5, R5, R6     // i*32: argv slot stride
+	LSL	$8, R5, R6     // i*256: argv slot stride
 	ADD	R3, R6, R6     // &argv_slot[i]
 	MOVD	R6, (R4)(R5<<3)
 	ADD	$1, R5, R5

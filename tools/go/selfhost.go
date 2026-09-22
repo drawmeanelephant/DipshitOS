@@ -48,7 +48,7 @@
 // is a virelai object, HELLO2.ELF satisfies every loader rule, its pinned lines
 // run.
 //
-// Every argv line below is checked against the kernel's 8 x 32-byte argv block
+// Every argv line below is checked against the kernel's 8 x 256-byte argv block
 // (kernel/src/exec.zig max_exec_args / arg_slot_bytes) by
 // tools/go/stage-selfhost.sh, so an over-long flag fails on the host instead of
 // failing here as a truncated path.
