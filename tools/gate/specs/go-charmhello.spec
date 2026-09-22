@@ -46,8 +46,10 @@ vgate_run 01 -- \
     --input-chords 'space' \
     --input-chords-after 'charmhello: ready' \
     --screenshot-after 'charmhello: repainted' \
+    --pointer-virtio '60,76,c' \
+    --pointer-virtio-after 'charmhello: key space' \
     --script2 '$RUN_DIR/script2.txt' \
-    --script2-after 'charmhello: repainted' \
+    --script2-after 'charmhello: mouse b=32' \
     --script3 '$RUN_DIR/script3.txt' \
     --script3-after 'dui: windows=' \
     --script-expect 'charmhello: close' --timeout 240
@@ -60,6 +62,21 @@ vgate_assert 01 serial-contains 'charmhello: painted'
 vgate_assert 01 serial-contains 'charmhello: ready'
 vgate_assert 01 serial-contains 'charmhello: key space'
 vgate_assert 01 serial-contains 'charmhello: repainted'
+
+# M73i (#1635): the app enabled ?1000/?1006 on its screen, so a plain click
+# over its client area is reported TWICE — press `b=0` then release `b=32`,
+# SGR `x/y` 1-based cells — and is never consumed by kernel selection.
+# Geometry is observed, not assumed: `dui[4]` prints rect=32,32,640,400 and
+# the title is 16 px, so the client origin is (32, 48); the click pixel
+# (60, 76) is the 8x8 cell at col 3, row 3 (0-based) -> x=4 y=4. Choreography
+# is deterministic: the click fires after the space chord and the `dui`
+# script only runs after the RELEASE marker, so the window is alive for the
+# whole pair. `term sel` never appearing on this run is the
+# selection-precedence half of the contract (Shift keeps local selection).
+vgate_assert 01 serial-contains 'charmhello: mouse b=0 x=4 y=4'
+vgate_assert 01 serial-contains 'charmhello: mouse b=32 x=4 y=4'
+vgate_assert 01 serial-absent 'dui: term sel begin'
+vgate_assert 01 serial-absent 'dui: term sel end'
 vgate_assert 01 serial-contains 'dui[4]: user user rect='
 vgate_assert 01 serial-contains 'charmhello: close'
 vgate_assert 01 serial-contains 'charmhello OK'
