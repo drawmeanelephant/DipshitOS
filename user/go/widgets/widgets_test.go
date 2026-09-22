@@ -186,6 +186,45 @@ func TestLayoutHelpers(t *testing.T) {
 	}
 }
 
+// 'H' is two stems and a crossbar (font8x8 0x33 / 0x3f). A solid cell per
+// rune — the old placeholder — paints one tall rectangle and has no gap, so
+// this fails if text goes back to being a horizontal bar.
+func TestGlyphRunPaintsLettersNotBars(t *testing.T) {
+	w := &Text{R: Rect{0, 0, 80, 24}, Label: "H", Fg: 0xffffff, Bg: 0x101010}
+	c := &recordingCanvas{}
+	w.Draw(c)
+	var glyph []Rect
+	for _, f := range c.fills {
+		if f.rgb != w.Fg {
+			continue
+		}
+		if f.r.H != 1 {
+			t.Fatalf("glyph fill is %dpx tall: a bar, not a scanline %+v", f.r.H, f.r)
+		}
+		glyph = append(glyph, f.r)
+	}
+	if len(glyph) == 0 {
+		t.Fatal("'H' painted no ink")
+	}
+	// First ink row of 'H' is 0x33: two stems, a gap between them.
+	y0 := glyph[0].Y
+	var runs int
+	var prevRight int
+	for _, r := range glyph {
+		if r.Y != y0 {
+			break
+		}
+		if runs > 0 && r.X < prevRight {
+			t.Fatalf("row fills overlap: %+v", glyph)
+		}
+		runs++
+		prevRight = r.X + r.W
+	}
+	if runs != 2 {
+		t.Fatalf("'H' top row has %d run(s), want the two stems", runs)
+	}
+}
+
 func TestRectHelpers(t *testing.T) {
 	r := Rect{10, 10, 20, 20}
 	if !r.Contains(10, 10) || r.Contains(30, 10) || r.Contains(10, 30) {

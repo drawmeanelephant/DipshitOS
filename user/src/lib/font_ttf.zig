@@ -1029,15 +1029,37 @@ pub const TrueTypeFace = struct {
 // Unit tests
 // ---------------------------------------------------------------------------
 
+/// The four faces vendored under image/fonts/ (ADR 0028 amendment B). A missing
+/// file fails the test — there is no FONTS-CHOOSE/ fallback that would hide it.
 fn load_test_font(io: anytype, name: []const u8, allocator: std.mem.Allocator) ![]u8 {
-    if (std.mem.eql(u8, name, "inter")) {
-        return std.Io.Dir.cwd().readFileAlloc(io, "image/fonts/Inter-Regular.ttf", allocator, std.Io.Limit.limited(2 * 1024 * 1024)) catch {
-            return std.Io.Dir.cwd().readFileAlloc(io, "FONTS-CHOOSE/Inter-4.1/extras/ttf/Inter-Regular.ttf", allocator, std.Io.Limit.limited(2 * 1024 * 1024));
-        };
-    } else {
-        return std.Io.Dir.cwd().readFileAlloc(io, "image/fonts/FiraCode-Regular.ttf", allocator, std.Io.Limit.limited(2 * 1024 * 1024)) catch {
-            return std.Io.Dir.cwd().readFileAlloc(io, "FONTS-CHOOSE/Fira_Code_v6.2/ttf/FiraCode-Regular.ttf", allocator, std.Io.Limit.limited(2 * 1024 * 1024));
-        };
+    const path: []const u8 = if (std.mem.eql(u8, name, "inter"))
+        "image/fonts/Inter-Regular.ttf"
+    else if (std.mem.eql(u8, name, "inter-bold"))
+        "image/fonts/Inter-Bold.ttf"
+    else if (std.mem.eql(u8, name, "inter-italic"))
+        "image/fonts/Inter-Italic.ttf"
+    else if (std.mem.eql(u8, name, "fira"))
+        "image/fonts/FiraCode-Regular.ttf"
+    else
+        return error.UnknownFont;
+    return std.Io.Dir.cwd().readFileAlloc(io, path, allocator, std.Io.Limit.limited(2 * 1024 * 1024));
+}
+
+test "TrueTypeFace opens the four vendored faces" {
+    const allocator = std.testing.allocator;
+    var io_impl = std.Io.Threaded.init_single_threaded;
+    const io = io_impl.io();
+
+    const names = [_][]const u8{ "inter", "inter-bold", "inter-italic", "fira" };
+    const want_upem = [_]u16{ 2048, 2048, 2048, 1950 };
+    for (names, want_upem) |name, upem| {
+        const data = try load_test_font(io, name, allocator);
+        defer allocator.free(data);
+        const face = try TrueTypeFace.init(data);
+        try std.testing.expectEqual(upem, face.units_per_em);
+        try std.testing.expect(face.num_glyphs > 100);
+        try std.testing.expect(face.glyph_index('A') > 0);
+        try std.testing.expect(face.glyph_index('n') > 0);
     }
 }
 
