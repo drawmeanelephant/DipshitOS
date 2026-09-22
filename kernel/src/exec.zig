@@ -45,16 +45,16 @@
 //!      user tasks cannot share the static one (a second task's vector
 //!      frame would clobber the first's saved context).
 //!
-//! Card 3e (claim 4636): `exec <file> [arg...]` packs a bounded argv block
-//! (8 args × 32 B, NUL-terminated, per-arg 31-byte truncation) into the
-//! process's OWN text page right after the loaded content — the text leaf
-//! is already EL0 read-only (W^X), so the block is a READ-ONLY leaf with
-//! zero extra pages (the per-program 5-page budget and every exact-count
-//! page gate stay untouched). The text aperture extends over the block
-//! (uaccess reads it, copy_out to it faults), and `_start` receives argc
+//! Card 3e (claim 4636), lifted by M71m (#1572): `exec <file> [arg...]`
+//! packs a bounded argv block (8 args × 256 B, NUL-terminated, 255 bytes
+//! usable, an over-long arg refused) into the process image. The flat DSK1
+//! path still packs it into the process's OWN text page right after the
+//! content — the text leaf is already EL0 read-only (W^X), so that block
+//! is a READ-ONLY leaf. The gap-layout ELF path sizes the writable
+//! segment's pages to cover the block (ADR 0007). `_start` receives argc
 //! in x0 + the block VA in x1 (an entry-contract extension, NOT a syscall;
-//! ADR 0007 frozen). More than 8 args is an honest refusal; a no-args exec
-//! is byte-identical to earlier cards.
+//! ADR 0007). More than 8 args, or one arg longer than 255 bytes, is an
+//! honest refusal; a no-args exec packs nothing.
 //!
 //! The syscall/uaccess apertures are per process (armed at SVC entry from
 //! the task's TCB, claim 0826), so `sys_write` bounds follow whichever
@@ -141,20 +141,19 @@ pub const header_window: usize = 16 * 1024;
 /// The one fixed buffer the streamed path needs (16 KiB of BSS, versus the
 /// 2 MiB the staged path keeps for its own shapes).
 var head_buf: [header_window]u8 align(4096) = undefined;
-/// Card 3e (claim 4636): the bounded argv block — at most 8 args, each in
-/// a 32-byte slot (31 chars + NUL terminator), 256 bytes total. Packed into
-/// the process's OWN text page right after the loaded content (the text
-/// leaf is already EL0 read-only, W^X), so the block is a READ-ONLY leaf
-/// with ZERO extra pages — the per-program 5-page budget and every
-/// exact-count page gate stay untouched.
+/// Card 3e (claim 4636), slot size lifted by M71m (#1572): at most 8 args,
+/// each in a 256-byte slot (255 chars + NUL). An arg that does not fit is
+/// refused (`arg_too_long`), never chopped. The gap-layout ELF loader
+/// covers the resulting 2048-byte argv block plus the 2048-byte envp block
+/// by sizing the writable segment's pages from the block end.
 pub const max_exec_args: usize = 8;
-pub const arg_slot_bytes: usize = 32;
-pub const arg_block_bytes: usize = max_exec_args * arg_slot_bytes; // 256
+pub const arg_slot_bytes: usize = 256;
+pub const arg_block_bytes: usize = max_exec_args * arg_slot_bytes; // 2048
 /// Issue #1226 (GOOS=virelai envp half): a bounded envp block packed
 /// immediately after the gap-path argv block. 16 slots × 128 B holds the
 /// kernel shell's whole `env_max` table as `KEY=VALUE` (name ≤ 32, val ≤
-/// 64). Still fits the gap path's one extra writable page (argv 256 +
-/// envp 2048 = 2304 < 4096). DSK1/contiguous ELF paths do not pack envp
+/// 64). The gap path sizes the writable segment to cover argv 2048 +
+/// envp 2048 = 4096 (one page past the image). DSK1/contiguous ELF paths do not pack envp
 /// — same scope as the B2 argv gap-only contract.
 pub const max_exec_envs: usize = 16;
 pub const env_slot_bytes: usize = 128;
@@ -212,8 +211,11 @@ pub const ExecResult = enum {
     /// More than `max_exec_args` arguments were given (card 3e) — an
     /// honest refusal, never silent truncation of the arg list.
     too_many_args,
-    /// The image leaves no room for the 256-byte argv block in its 4 KiB
-    /// text page (content + block would overflow the page).
+    /// One argument is longer than `arg_slot_bytes - 1` (M71m #1572).
+    /// Refused, never chopped.
+    arg_too_long,
+    /// The image leaves no room for the argv block in its text page
+    /// (the flat DSK1 path: content + block would overflow the page).
     no_args_room,
     /// The fixed page-table carve-out cannot hold another user-root clone.
     table_full,
@@ -321,17 +323,17 @@ pub fn head() [8]u8 {
     return out;
 }
 
-/// Pack `args` into a fixed argv block (card 3e): every slot is 32 bytes,
-/// NUL-terminated (the block is zeroed first); a string longer than 31
-/// bytes is TRUNCATED to 31 + terminator (documented + host-tested). The
-/// caller has already bounded `args.len` to `max_exec_args`. Returns the
-/// packed arg count.
-pub fn pack_args(args: []const []const u8, block: []u8) usize {
+/// Pack `args` into a fixed argv block (card 3e, M71m #1572): every slot
+/// is 256 bytes, NUL-terminated (the block is zeroed first). A string
+/// longer than 255 bytes is refused (`error.ArgTooLong`), never chopped.
+/// The caller has already bounded `args.len` to `max_exec_args`. Returns
+/// the packed arg count.
+pub fn pack_args(args: []const []const u8, block: []u8) error{ArgTooLong}!usize {
     @memset(block, 0);
     for (args, 0..) |arg, i| {
+        if (arg.len >= arg_slot_bytes) return error.ArgTooLong;
         const slot = block[i * arg_slot_bytes ..][0..arg_slot_bytes];
-        const take = @min(arg.len, arg_slot_bytes - 1);
-        @memcpy(slot[0..take], arg[0..take]);
+        @memcpy(slot[0..arg.len], arg);
     }
     return args.len;
 }
@@ -428,6 +430,9 @@ fn exec_file_impl(name: []const u8, args: []const []const u8, pin: ?usize, princ
     // staging buffer, so clear the streamed snapshot until one takes one.
     streamed_head_valid = false;
     if (args.len > max_exec_args) return .too_many_args;
+    for (args) |arg| {
+        if (arg.len >= arg_slot_bytes) return .arg_too_long;
+    }
     // M70b review: an offline pin would strand the task forever — pinned
     // tasks bypass every offline gate on the dequeue side (steal_eligible
     // rejects them on every other core). The choke point covers every
@@ -663,7 +668,7 @@ fn exec_file_impl(name: []const u8, args: []const []const u8, pin: ?usize, princ
             const block_off = (content_len + 7) & ~@as(usize, 7);
             const page_limit = if (content_len == 0) alloc.page_size else ((content_len + alloc.page_size - 1) / alloc.page_size) * alloc.page_size;
             if (block_off + arg_block_bytes > page_limit or block_off + arg_block_bytes > exec_program_max) return .no_args_room;
-            _ = pack_args(args, program[block_off..][0..arg_block_bytes]);
+            _ = pack_args(args, program[block_off..][0..arg_block_bytes]) catch return .arg_too_long;
             text_len = block_off + arg_block_bytes;
             argv_va = userspace.text_va + block_off;
         } else if (magic == dsk3_magic) {
@@ -677,7 +682,7 @@ fn exec_file_impl(name: []const u8, args: []const []const u8, pin: ?usize, princ
             // read-only-argv property is DSK1-specific).
             argv_data_off = data_mem_size;
             if (text_size + data_mem_size + arg_block_bytes > exec_program_max) return .no_args_room;
-            _ = pack_args(args, program[text_size + argv_data_off ..][0..arg_block_bytes]);
+            _ = pack_args(args, program[text_size + argv_data_off ..][0..arg_block_bytes]) catch return .arg_too_long;
             data_mem_size += arg_block_bytes;
             argv_va = userspace.text_va + text_size + argv_data_off;
         } else {
@@ -913,10 +918,19 @@ fn exec_static_elf_gap(
     while (allocated < image.segment_count) : (allocated += 1) {
         const seg = image.segments[allocated];
         var pages: u64 = (seg.mem_size + alloc.page_size - 1) / alloc.page_size;
-        // B2: reserve one extra page on the writable segment for the argv
-        // + envp blocks (256 + 2048 bytes always fit one page past the
-        // image end).
-        if (allocated == image.segment_count - 1 and argc > 0) pages += 1;
+        // M71m (#1572): the argv+envp block is 8×256 + 16×128 = 4096 bytes,
+        // placed at align8(mem_size). Size this segment to cover that end
+        // instead of requiring the block to fit in the image's own tail
+        // slack. For a 4096-byte block the cover is one page past the
+        // image: exactly 4096 bytes when mem_size is page-aligned, and
+        // 8192 − r bytes past align8(mem_size) otherwise
+        // (r = mem_size mod 4096).
+        if (allocated == image.segment_count - 1 and argc > 0) {
+            const block_off: u64 = (seg.mem_size + 7) & ~@as(u64, 7);
+            const need: u64 = block_off + arg_block_bytes + env_block_bytes;
+            const cover: u64 = (need + alloc.page_size - 1) / alloc.page_size;
+            if (cover > pages) pages = cover;
+        }
         if (pages == 0) continue;
         const phys = alloc.alloc_pages(pages) orelse {
             var j: usize = 0;
@@ -989,7 +1003,15 @@ fn exec_static_elf_gap(
         if (block_off + arg_block_bytes + env_block_bytes > last_pages * alloc.page_size) return .no_args_room;
         const block_dst: [*]u8 = @ptrFromInt(last_phys + block_off);
         @memset(block_dst[0..arg_block_bytes], 0);
-        _ = pack_args(argv_list[0..argc], block_dst[0..arg_block_bytes]);
+        _ = pack_args(argv_list[0..argc], block_dst[0..arg_block_bytes]) catch {
+            var j: usize = 0;
+            while (j < image.segment_count) : (j += 1) {
+                if (seg_pages[j] > 0) _ = alloc.free_pages(seg_phys[j], seg_pages[j]);
+            }
+            _ = alloc.free_pages(stack_phys, stack_pages);
+            _ = alloc.free_pages(kstack_phys, kstack_pages);
+            return .arg_too_long;
+        };
         argv_va = last_seg.vaddr + block_off;
         const env_dst: [*]u8 = @ptrFromInt(last_phys + block_off + arg_block_bytes);
         @memset(env_dst[0..env_block_bytes], 0);
@@ -2335,25 +2357,28 @@ test "exec: kill reaps a permanent occupant — pages return, the slot is re-exe
     try std.testing.expectEqual(@as(u64, 137), process.info(1).?.exit_status);
 }
 
-test "exec: argv packing shape, per-arg truncation, and block VA" {
-    // Card 3e (claim 4636): the block is 8 slots × 32 bytes, zeroed,
-    // NUL-terminated, packed right after the content in the process's own
-    // text page. pack_args is pure — the shape is pinned without a disk.
+test "exec: argv packing shape, per-arg refusal, and block VA" {
+    // Card 3e, M71m (#1572): the block is 8 slots × 256 bytes, zeroed,
+    // NUL-terminated. pack_args is pure — the shape is pinned without a disk.
     var block: [arg_block_bytes]u8 = undefined;
-    const n = pack_args(&.{ "alpha", "beta", "gamma" }, &block);
+    const n = try pack_args(&.{ "alpha", "beta", "gamma" }, &block);
     try std.testing.expectEqual(@as(usize, 3), n);
-    try std.testing.expectEqualStrings("alpha", block[0..32][0..5]);
+    try std.testing.expectEqualStrings("alpha", block[0..5]);
     try std.testing.expectEqual(@as(u8, 0), block[5]);
-    try std.testing.expectEqualStrings("beta", block[32..64][0..4]);
-    try std.testing.expectEqualStrings("gamma", block[64..96][0..5]);
-    for (block[96..]) |b| try std.testing.expectEqual(@as(u8, 0), b);
+    try std.testing.expectEqualStrings("beta", block[arg_slot_bytes..][0..4]);
+    try std.testing.expectEqualStrings("gamma", block[2 * arg_slot_bytes ..][0..5]);
+    for (block[2 * arg_slot_bytes + 5 ..]) |b| try std.testing.expectEqual(@as(u8, 0), b);
 
-    // A 40-byte arg is truncated to 31 chars + NUL (documented, honest).
-    const long = "x" ** 40;
-    const n2 = pack_args(&.{long}, &block);
+    // A 255-byte arg fills the slot and keeps its NUL. One more byte is
+    // refused — the old 31-byte chop is gone.
+    const exact = "y" ** (arg_slot_bytes - 1);
+    const n2 = try pack_args(&.{exact}, &block);
     try std.testing.expectEqual(@as(usize, 1), n2);
-    for (block[0..31]) |b| try std.testing.expectEqual(@as(u8, 'x'), b);
-    try std.testing.expectEqual(@as(u8, 0), block[31]);
+    for (block[0 .. arg_slot_bytes - 1]) |b| try std.testing.expectEqual(@as(u8, 'y'), b);
+    try std.testing.expectEqual(@as(u8, 0), block[arg_slot_bytes - 1]);
+
+    const too = "x" ** arg_slot_bytes;
+    try std.testing.expectError(error.ArgTooLong, pack_args(&.{too}, &block));
 
     // The block VA sits right after the content, 8-aligned, inside the
     // text page; an image that nearly fills the page leaves no room.
@@ -2391,14 +2416,19 @@ test "exec: more than 8 args is refused honestly (too_many_args)" {
     try std.testing.expectEqual(ExecResult.too_many_args, exec_file("USER.BIN", &args));
 }
 
+test "exec: an argument longer than 255 bytes is refused (arg_too_long)" {
+    // M71m (#1572): checked before any disk work, same as too_many_args.
+    virtio_file.set_test_share(null);
+    const long = "x" ** arg_slot_bytes;
+    try std.testing.expectEqual(ExecResult.arg_too_long, exec_file("USER.BIN", &.{long}));
+}
+
 test "exec: the argv-block room guard is exact at the 4 KiB page boundary" {
-    // Card 3e: the block needs 256 bytes after the content in the same
-    // 4 KiB page. The guard is defensive — the ESP/FAT write path caps
-    // files at 2048 bytes, so content + block always fits through the real
-    // write path — but the boundary is pinned exactly: content 3840 leaves
-    // the block at the page end (fits), content 3841 does not.
-    try std.testing.expect(userspace.text_va + 3840 == argv_va_for(3840));
-    try std.testing.expectEqual(@as(u64, 0), argv_va_for(3841));
+    // The flat DSK1 path packs a 2048-byte argv block after the content
+    // in the same 4 KiB page. content 2048 leaves the block exactly at
+    // the page end (fits); content 2049 aligns up to 2056 and does not.
+    try std.testing.expect(userspace.text_va + 2048 == argv_va_for(2048));
+    try std.testing.expectEqual(@as(u64, 0), argv_va_for(2049));
     try std.testing.expectEqual(@as(u64, 0), argv_va_for(4095));
 }
 

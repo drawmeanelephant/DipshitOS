@@ -104,7 +104,7 @@ export fn _start() callconv(.naked) noreturn {
         \\mov x27, xzr // wait target pid (card 4c: argv[1], default none)
         \\mov x28, xzr // wait-done flag (the wait runs ONCE)
         \\cbz x20, 6f // no args: no target, no wait (claim-4613 behavior)
-        \\// Parse argv[0] (the first 32-byte slot) as a decimal pid.
+        \\// Parse argv[0] (the first 256-byte slot) as a decimal pid.
         \\mov x25, x21
         \\mov x26, #32
         \\mov x10, #10
@@ -119,12 +119,12 @@ export fn _start() callconv(.naked) noreturn {
         \\subs x26, x26, #1
         \\b.ne 10b
         \\11:
-        \\// Card 4c: parse argv[1] (the SECOND 32-byte slot) as the wait
+        \\// Card 4c: parse argv[1] (the SECOND 256-byte slot) as the wait
         \\// target pid (only when a second argument was given).
         \\cmp x20, #2
         \\b.lo 6f
         \\mov x25, x21
-        \\add x25, x25, #32
+        \\add x25, x25, #256
         \\mov x26, #32
         \\mov x10, #10
         \\12:

@@ -479,7 +479,7 @@ test "ui: parse_procs decodes 40-byte snapshot rows" {
 
 test "ui: exec argv card-3e bounds (issue #1333)" {
     try std.testing.expectEqual(@as(usize, 8), exec_max_args);
-    try std.testing.expectEqual(@as(usize, 32), exec_arg_slot_bytes);
+    try std.testing.expectEqual(@as(usize, 256), exec_arg_slot_bytes);
     try std.testing.expectEqual(@as(i64, -1), exec_program(""));
     try std.testing.expectEqual(@as(i64, -1), exec_program_args("X.BIN", &[_][]const u8{ "a", "b", "c", "d", "e", "f", "g", "h", "i" }));
 }

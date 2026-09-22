@@ -25,7 +25,7 @@
 # tools/gate/specs/go-hello.spec runs 06-08).
 #
 # It also SELF-CHECKS the kernel's argv budget (kernel/src/exec.zig:
-# max_exec_args = 8, arg_slot_bytes = 32) against the exact command lines the
+# max_exec_args = 8, arg_slot_bytes = 256) against the exact command lines the
 # guest runs, so an over-long flag is a failure here rather than a boot cycle
 # that dies in `too_many_args`/`no_args_room`.
 #
@@ -114,7 +114,7 @@ PY
 cp "$REPO/$SRC_REL" "$OUT_DIR/HELLO.GO"
 
 # --- 2. the guest's argv, checked against the kernel's budget -----------------
-# The kernel's exec copies argv into a fixed 8-slot x 32-byte block, and the
+# The kernel's exec copies argv into a fixed 8-slot x 256-byte block, and the
 # share paths the guest passes are what make these lines longer than a normal
 # command line. Both commands stay inside the budget by construction, but that
 # is a claim; this asserts it.
@@ -124,7 +124,7 @@ cp "$REPO/$SRC_REL" "$OUT_DIR/HELLO.GO"
 # without the other makes this check pass for the wrong reason.
 python3 - <<'PY'
 MAX_ARGS = 8          # kernel/src/exec.zig max_exec_args
-MAX_LEN = 32 - 1      # arg_slot_bytes, minus the NUL
+MAX_LEN = 256 - 1    # arg_slot_bytes, minus the NUL
 # Verified on the host twin (GOOS=darwin, same flag shapes): `-p` is not
 # needed — the go command passes it, but compile defaults the path from the
 # input file, and the link step resolves main.main from the object's package

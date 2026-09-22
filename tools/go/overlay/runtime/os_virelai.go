@@ -176,10 +176,10 @@ func exitThread(wait *atomic.Uint32) {
 var virArgvBlockBase uintptr
 
 // The kernel's argv/envp block sizes (kernel/src/exec.zig):
-// arg_block_bytes = max_exec_args(8) x arg_slot_bytes(32),
+// arg_block_bytes = max_exec_args(8) x arg_slot_bytes(256),
 // env_block_bytes = max_exec_envs(16) x env_slot_bytes(128).
 const (
-	virArgBlockBytes = 8 * 32
+	virArgBlockBytes = 8 * 256
 	virEnvBlockBytes = 16 * 128
 )
 
@@ -201,31 +201,17 @@ func osinit() {
 }
 
 // initBlocFloor raises the initial break past the memory the KERNEL packed
-// into the image's own data aperture (M70c-S1L, issue #1540).
+// into the image's own data aperture (M70c-S1L, issue #1540; M71m #1572
+// grew the argv half to 8×256).
 //
-// initBloc() starts the heap at memRound(firstmoduledata.end) — the
-// page-rounded end of the image — which is what the kernel's gap loader
-// calls the writable segment's "headroom page": it allocates one page past
-// the image for the argv+envp block and protects the data aperture through
-// that block (process.zig mmap_collides: the span is
-// max(pageRound(mem_size), align8(mem_size) + arg_block + env_block)).
-// Those two rules agree only when the image's own page slack is at least the
-// block size: with mem_size mod 4096 = r, the span is the page-rounded end
-// when 4096-r >= 2304, i.e. when r <= 1792 — and the block reaches past
-// memRound(end) whenever it is not. Then the FIRST mapping sbrk asks for is
-// refused EINVAL, memAlloc returns nil, and the process dies in
-// mallocinit's very first persistentalloc with "cannot allocate memory".
-//
-// That is not a hypothetical: go-hello runs 01-04 pass because their data
-// segments happen to leave r = 688 and r = 1072 of slack (it is a 1792/4096
-// coincidence, not design), and the std fixture — which is merely bigger —
-// has r = 3280 and died exactly there on VZ.
-//
-// So the base is derived from what the kernel actually packed instead of
-// from the image's arithmetic: start the heap on the page after the argv+
-// envp block. The floor only ever moves bloc UP over the block's own page
-// (the only thing on it), so a program whose slack already clears the block
-// is byte-for-byte unchanged — which is why runs 01-04 keep passing.
+// initBloc() starts the heap at memRound(firstmoduledata.end). The loader
+// maps the writable segment through align8(mem_size)+virArgBlockBytes+
+// virEnvBlockBytes, which for this 4096-byte block is one page past the
+// image. That block, placed at align8(mem_size), ends past memRound(end),
+// so the break has to start on the page after the block. Otherwise the
+// first mapping sbrk asks for is refused EINVAL and mallocinit dies with
+// "cannot allocate memory". The two constants above must match the kernel
+// or the floor lands inside the block.
 func initBlocFloor() {
 	if virArgvBlockBase == 0 || virArgvBlockBase < firstmoduledata.end {
 		// No block this runtime knows about (argc == 0), or a shape where
@@ -420,8 +406,8 @@ func VirelaiSleep(ns int64) {
 }
 
 // goenvs builds os.Args and the environment from the exec entry contract
-// (issue #1163 B2 + #1226): the kernel packs argv as 32-byte slots and
-// envp as 128-byte KEY=VALUE slots; the rt0 stub hands rt0_go a SysV
+// (issue #1163 B2 + #1226, slot stride M71m #1572): the kernel packs argv
+// as 256-byte slots and envp as 128-byte KEY=VALUE slots; the rt0 stub hands rt0_go a SysV
 // char* array (argv…/NULL/envp…/NULL), so argc/argv are the plain SysV
 // shapes runtime.args stored. gogetenv("GOMAXPROCS") then drives
 // schedinit's override — numCPUStartup stays 2 (ADR 0027 D6).

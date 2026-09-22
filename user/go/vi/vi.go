@@ -677,23 +677,31 @@ func FileDelete(path string) int64 {
 	return svc2(SlotFileDelete, strPtr(path), uintptr(len(path)))
 }
 
+// ExecMaxArgs is the kernel's max_exec_args (kernel/src/exec.zig).
+// ExecArgMax is the usable bytes of one slot (arg_slot_bytes - 1). A longer
+// argument is refused; the kernel does not chop it.
+const (
+	ExecMaxArgs = 8
+	ExecArgMax  = 255
+	execSlot    = ExecArgMax + 1
+)
+
 // Exec loads name from the host share into a fresh process and returns its
-// pid (ADR 0007 slot 28). args is the card-3e argv list (at most 8 strings,
-// each truncated to 31 bytes + NUL); a missing list is argc=0.
+// pid (ADR 0007 slot 28). args is the card-3e argv list (at most ExecMaxArgs
+// strings, each at most ExecArgMax bytes); a missing list is argc=0.
 func Exec(name string, args ...string) (int64, error) {
 	if name == "" {
 		return 0, errno(ErrEINVAL)
 	}
-	if len(args) > 8 {
+	if len(args) > ExecMaxArgs {
 		return 0, errno(ErrEINVAL)
 	}
-	var block [256]byte
+	var block [ExecMaxArgs * execSlot]byte
 	for i, a := range args {
-		n := len(a)
-		if n > 31 {
-			n = 31
+		if len(a) > ExecArgMax {
+			return 0, errno(ErrEINVAL)
 		}
-		copy(block[i*32:], a[:n])
+		copy(block[i*execSlot:], a)
 	}
 	var argvPtr uintptr
 	if len(args) > 0 {

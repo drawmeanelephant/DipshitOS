@@ -7401,9 +7401,16 @@ fn cmd_exec(m: *Monitor, args: []const []const u8) ExecError {
             m.console.print_line(")");
             return .invalid_argument;
         },
+        .arg_too_long => {
+            err_prefix(m);
+            m.console.puts("argument longer than ");
+            m.console.print_u64(esp_exec.arg_slot_bytes - 1);
+            m.console.print_line(" bytes");
+            return .invalid_argument;
+        },
         .no_args_room => {
             err_prefix(m);
-            m.console.print_line("image leaves no room for the argv block (256 bytes)");
+            m.console.print_line("image leaves no room for the argv block");
             return .invalid_argument;
         },
         // M70b review: defensive backstop for the -c parse above (the

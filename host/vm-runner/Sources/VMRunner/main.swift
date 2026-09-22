@@ -682,7 +682,7 @@ var netTcpConnectSSHMode = false
 var netTcpConnectSSHUserSeed: [UInt8] = SSHFixtures.hex(SSHFixtures.userKeySeedHex) ?? []
 var netTcpConnectSSHHostPin: [UInt8] = SSHFixtures.hex(SSHFixtures.hostPublicKeyHex) ?? []
 var netTcpConnectSSHUser = "alice"
-var netTcpConnectSSHExec = "echo VIRELAI-SSH-SERVER-OK"
+var netTcpConnectSSHExec = "echo VIRELAI-SSH-SERVER-OK-ARGV2"
 var netTcpConnectSSHClient: SSHClient?
 var netTcpConnectSSHTx: [UInt8] = []
 var netTcpConnectSSHTxOffset = 0

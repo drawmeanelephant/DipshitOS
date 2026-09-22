@@ -37,7 +37,7 @@ const enoent: i64 = -6;
 
 const slot_count: u64 = 128;
 const past_namespace: u64 = 64;
-const arg_slot_bytes: usize = 32;
+const arg_slot_bytes: usize = 256;
 const unmapped: u64 = 0x1_2000_0000;
 
 /// Same roster as `kernel/tests/fuzz_test.zig` (M70a D1).
@@ -298,7 +298,7 @@ fn spawn_phase(violations: *usize) void {
 
     const child = "USER.BIN";
     const arg = "alpha";
-    var block: [32]u8 = [_]u8{0} ** 32;
+    var block: [arg_slot_bytes]u8 = [_]u8{0} ** arg_slot_bytes;
     @memcpy(block[0..arg.len], arg);
     const pid = svc4(sys_exec, @intFromPtr(child.ptr), child.len, @intFromPtr(&block), 1);
     if (pid < 0) {
@@ -399,7 +399,7 @@ fn run() noreturn {
 
     const child = "USER.BIN";
     const arg = "alpha";
-    var block: [32]u8 = [_]u8{0} ** 32;
+    var block: [arg_slot_bytes]u8 = [_]u8{0} ** arg_slot_bytes;
     @memcpy(block[0..arg.len], arg);
     const pid = svc4(sys_exec, @intFromPtr(child.ptr), child.len, @intFromPtr(&block), 1);
     if (pid < 0) {

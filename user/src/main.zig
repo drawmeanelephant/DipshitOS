@@ -40,7 +40,7 @@ export fn _start() callconv(.naked) noreturn {
         \\10:
         \\cmp x9, x10
         \\b.hs 9f
-        \\lsl x12, x9, #5 // slot = argv_va + i*32
+        \\lsl x12, x9, #8 // slot = argv_va + i*256
         \\add x12, x11, x12
         \\// Build "user: arg=<n>\n" in a 64-byte stack scratch and emit it
         \\// in ONE sys_write: three separate writes (prefix, arg, newline)
@@ -53,7 +53,7 @@ export fn _start() callconv(.naked) noreturn {
         \\ldrh w16, [x15, #8] // "g="
         \\strh w16, [sp, #8]
         \\add x15, sp, #10 // arg destination (after the 10-byte prefix)
-        \\mov x13, xzr // len = strlen(slot), bounded by the 32-byte slot
+        \\mov x13, xzr // len = strlen(slot); the 64-byte scratch holds 31 chars
         \\12:
         \\ldrb w14, [x12, x13]
         \\cbz w14, 13f

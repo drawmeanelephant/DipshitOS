@@ -357,8 +357,8 @@ PY
 # the guest: run 07 links the object run 06 compiled, and run 08 executes the
 # ELF run 07 produced.
 #
-# The argv is what the kernel's 8x32-byte block allows (kernel/src/exec.zig
-# max_exec_args/arg_slot_bytes), which is why the flags are terse and the
+# The argv is what the kernel's 8x256-byte block allows (kernel/src/exec.zig
+# max_exec_args/arg_slot_bytes; 255 bytes usable per arg, M71m #1572), which is why the flags are terse and the
 # import config is one flat file in the share; tools/go/stage-selfhost.sh
 # checks those lines against the budget before a boot is spent on them.
 vgate_file script6.txt <<'EOF'

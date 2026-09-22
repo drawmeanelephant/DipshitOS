@@ -32,7 +32,7 @@ public final class SSHClient {
             userKeySeed: [UInt8],
             hostPublicKey: [UInt8],
             user: String = "alice",
-            execCommand: String = "echo VIRELAI-SSH-SERVER-OK",
+            execCommand: String = "echo VIRELAI-SSH-SERVER-OK-ARGV2",
             cookieOverride: [UInt8]? = nil,
             ephemeralOverride: [UInt8]? = nil,
             versionLine: String = "SSH-2.0-VirelaiOS_1.0"
@@ -467,6 +467,9 @@ public final class SSHClient {
             _ = try? r.bool()
             if name == SSHServer.requestExitStatus, let st = try? r.uint32() {
                 exitStatus = st
+                let text = String(decoding: stdout, as: UTF8.self)
+                    .trimmingCharacters(in: .newlines)
+                log("stdout \(text)")
                 log("exit-status=\(st)")
             }
         case SSHServer.msgChannelEof:

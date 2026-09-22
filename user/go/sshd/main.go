@@ -17,9 +17,7 @@ const (
 	defaultPort    = 2222
 	hostSecretName = "ssh-host-ed25519"
 	authKeysPath   = "SSH/AUTHORIZED_KEYS"
-	execInPath     = "SSH/EXEC.IN"
 	execOutPath    = "SSH/EXEC.OUT"
-	goshSourceArg  = "source SSH/EXEC.IN"
 	markerListen   = "sshd: listen "
 	markerAccepted = "sshd: accepted"
 	markerKex      = "sshd: kex-ok"
@@ -270,12 +268,14 @@ func runGosh(cmd string) ([]byte, uint32, error) {
 	if cmd == "" || strings.ContainsAny(cmd, "\n\r") {
 		return nil, 1, errString("bad exec")
 	}
-	_ = vi.FileDelete(execOutPath)
-	script := cmd + " > " + execOutPath + "\n"
-	if rc := vi.WriteFileSafe(execInPath, []byte(script)); rc < 0 {
-		return nil, 1, errString("exec-in")
+	// The redirect is how this process reads the child's stdout back onto
+	// the SSH channel. The whole line is one argv slot; over-long is refused.
+	line := cmd + " > " + execOutPath
+	if len(line) > vi.ExecArgMax {
+		return nil, 1, errString("exec line")
 	}
-	pid, err := vi.Exec("GOSH.ELF", "-c", goshSourceArg)
+	_ = vi.FileDelete(execOutPath)
+	pid, err := vi.Exec("GOSH.ELF", "-c", line)
 	if err != nil {
 		return nil, 127, err
 	}
