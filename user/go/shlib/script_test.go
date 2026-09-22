@@ -2,7 +2,7 @@
 // control.go and the engine paths it drives. The parser cases mirror the
 // tests in user/src/lib/script.zig case for case, so a retargeted gate is
 // asserting semantics that were already pinned in the reference.
-package main
+package shlib
 
 import (
 	"strconv"

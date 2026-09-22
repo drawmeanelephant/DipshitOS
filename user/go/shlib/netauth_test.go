@@ -1,4 +1,4 @@
-package main
+package shlib
 
 import (
 	"bytes"
@@ -56,14 +56,14 @@ func TestNetAuthHMACPinnedVectorAcceptsAndWipes(t *testing.T) {
 		keyName:   keyHMAC,
 		keyValue:  []byte("s3cret"),
 	}
-	a := &netAuth{
+	a := &NetAuth{
 		scheme:      vi.NetSchemeHMAC,
 		challengeFn: s.challengeFn,
 		responseFn:  s.responseFn,
 		verdictFn:   s.verdictFn,
 		getFn:       s.getFn,
 	}
-	a.step()
+	a.Step()
 	if s.verdict == nil || !*s.verdict {
 		t.Fatalf("verdict = %v want accept", s.verdict)
 	}
@@ -89,8 +89,8 @@ func TestNetAuthWrongMACAndMissingKeyReject(t *testing.T) {
 		keyName:   keyHMAC,
 		keyValue:  []byte("s3cret"),
 	}
-	a := &netAuth{scheme: vi.NetSchemeHMAC, challengeFn: s.challengeFn, responseFn: s.responseFn, verdictFn: s.verdictFn, getFn: s.getFn}
-	a.step()
+	a := &NetAuth{scheme: vi.NetSchemeHMAC, challengeFn: s.challengeFn, responseFn: s.responseFn, verdictFn: s.verdictFn, getFn: s.getFn}
+	a.Step()
 	if s.verdict == nil || *s.verdict {
 		t.Fatalf("wrong MAC verdict = %v want reject", s.verdict)
 	}
@@ -100,8 +100,8 @@ func TestNetAuthWrongMACAndMissingKeyReject(t *testing.T) {
 		keyName:   "other-key",
 		keyValue:  []byte("s3cret"),
 	}
-	a2 := &netAuth{scheme: vi.NetSchemeHMAC, challengeFn: s2.challengeFn, responseFn: s2.responseFn, verdictFn: s2.verdictFn, getFn: s2.getFn}
-	a2.step()
+	a2 := &NetAuth{scheme: vi.NetSchemeHMAC, challengeFn: s2.challengeFn, responseFn: s2.responseFn, verdictFn: s2.verdictFn, getFn: s2.getFn}
+	a2.Step()
 	if s2.verdict == nil || *s2.verdict {
 		t.Fatalf("missing key verdict = %v want reject", s2.verdict)
 	}
@@ -114,8 +114,8 @@ func TestNetAuthCapturedHandshakeDoesNotReplay(t *testing.T) {
 		keyName:   keyHMAC,
 		keyValue:  []byte("s3cret"),
 	}
-	a := &netAuth{scheme: vi.NetSchemeHMAC, challengeFn: s.challengeFn, responseFn: s.responseFn, verdictFn: s.verdictFn, getFn: s.getFn}
-	a.step()
+	a := &NetAuth{scheme: vi.NetSchemeHMAC, challengeFn: s.challengeFn, responseFn: s.responseFn, verdictFn: s.verdictFn, getFn: s.getFn}
+	a.Step()
 	if s.verdict == nil || *s.verdict {
 		t.Fatalf("stale MAC verdict = %v want reject", s.verdict)
 	}
@@ -137,27 +137,27 @@ func TestSelectSchemePrefersHMAC(t *testing.T) {
 		return -1
 	}
 	none := func(name string, out []byte) int { return -1 }
-	if sch, ok := selectScheme(hmacOnly); !ok || sch != vi.NetSchemeHMAC {
+	if sch, ok := SelectScheme(hmacOnly); !ok || sch != vi.NetSchemeHMAC {
 		t.Fatalf("hmac = %d ok=%v", sch, ok)
 	}
-	if sch, ok := selectScheme(edOnly); !ok || sch != vi.NetSchemeEd25519 {
+	if sch, ok := SelectScheme(edOnly); !ok || sch != vi.NetSchemeEd25519 {
 		t.Fatalf("ed25519 = %d ok=%v", sch, ok)
 	}
-	if _, ok := selectScheme(none); ok {
+	if _, ok := SelectScheme(none); ok {
 		t.Fatal("empty store selected a scheme")
 	}
 }
 
 func TestNetAuthOpenNeverTouchesSeams(t *testing.T) {
 	s := &testSeam{challenge: sequentialChallenge(0)}
-	a := &netAuth{scheme: vi.NetSchemeOpen, challengeFn: s.challengeFn, responseFn: s.responseFn, verdictFn: s.verdictFn, getFn: s.getFn}
-	a.step()
+	a := &NetAuth{scheme: vi.NetSchemeOpen, challengeFn: s.challengeFn, responseFn: s.responseFn, verdictFn: s.verdictFn, getFn: s.getFn}
+	a.Step()
 	if s.verdict != nil || a.done || s.challengeN != 0 {
 		t.Fatalf("open touched the seam: verdict=%v done=%v reads=%d", s.verdict, a.done, s.challengeN)
 	}
 }
 
 func TestNetAuthNilStepIsSafe(t *testing.T) {
-	var a *netAuth
-	a.step()
+	var a *NetAuth
+	a.Step()
 }

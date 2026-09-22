@@ -1,4 +1,4 @@
-package main
+package shlib
 
 import (
 	"fmt"
@@ -48,7 +48,7 @@ func TestEditorSubmit(t *testing.T) {
 	h := &History{}
 	e := NewEditor("gosh> ", h)
 	out, ev := e.Feed([]byte("echo hi\r"))
-	if ev.Kind != evSubmit || ev.Line != "echo hi" {
+	if ev.Kind != EvSubmit || ev.Line != "echo hi" {
 		t.Fatalf("submit event = %+v", ev)
 	}
 	if !strings.Contains(string(out), "\r\n\rgosh> ") {
@@ -59,7 +59,7 @@ func TestEditorSubmit(t *testing.T) {
 	}
 	// Ctrl-C abandons the line with ^C and a fresh prompt.
 	out, ev = e.Feed([]byte("junk\x03"))
-	if ev.Kind != evCancel || !strings.Contains(string(out), "^C\r\n") {
+	if ev.Kind != EvCancel || !strings.Contains(string(out), "^C\r\n") {
 		t.Fatalf("ctrl-c = (%q, %+v)", out, ev)
 	}
 	// Ctrl-D on an empty line is EOF; on a non-empty line it is ignored.
@@ -68,7 +68,7 @@ func TestEditorSubmit(t *testing.T) {
 		t.Fatalf("ctrl-d non-empty = %+v", ev)
 	}
 	_, ev = e.Feed([]byte("\x7f\x04"))
-	if ev.Kind != evEOF {
+	if ev.Kind != EvEOF {
 		t.Fatalf("ctrl-d empty = %+v", ev)
 	}
 }
@@ -102,7 +102,7 @@ func TestEditorHistory(t *testing.T) {
 	}
 	// The submitted recall is exact (the gate's history proof).
 	_, ev := e.Feed([]byte("\x1b[A\r"))
-	if ev.Kind != evSubmit || ev.Line != "two" {
+	if ev.Kind != EvSubmit || ev.Line != "two" {
 		t.Fatalf("recalled submit = %+v", ev)
 	}
 }
@@ -242,7 +242,7 @@ func TestEditorBurstDrain(t *testing.T) {
 	if len(out) == 0 {
 		t.Fatal("burst produced no tty output")
 	}
-	if ev.Kind != evSubmit || ev.Line != "echo abc" {
+	if ev.Kind != EvSubmit || ev.Line != "echo abc" {
 		t.Fatalf("first event = kind %d line %q, want submit %q", ev.Kind, ev.Line, "echo abc")
 	}
 	if !e.Pending() {
@@ -251,7 +251,7 @@ func TestEditorBurstDrain(t *testing.T) {
 	var lines []string
 	for e.Pending() {
 		_, ev = e.Feed(nil)
-		if ev.Kind != evSubmit {
+		if ev.Kind != EvSubmit {
 			t.Fatalf("drained event = kind %d, want submit", ev.Kind)
 		}
 		lines = append(lines, ev.Line)
@@ -353,14 +353,14 @@ func drainFeed(e *Editor, s string) (string, []string) {
 	w, ev := e.Feed([]byte(s))
 	out := string(w)
 	var lines []string
-	if ev.Kind == evSubmit {
+	if ev.Kind == EvSubmit {
 		lines = append(lines, ev.Line)
 	}
 	for e.Pending() {
 		var next []byte
 		next, ev = e.Feed(nil)
 		out += string(next)
-		if ev.Kind == evSubmit {
+		if ev.Kind == EvSubmit {
 			lines = append(lines, ev.Line)
 		}
 	}
@@ -650,7 +650,7 @@ func TestSearchCtrlRMidChunkDefersQuery(t *testing.T) {
 
 // --- M69f1 (#1537): the persistent-recall file shape ---------------------
 
-// TestHistoryLoadReadsOldestFirst pins the format saveHistory writes: UTF-8,
+// TestHistoryLoadReadsOldestFirst pins the format SaveHistory writes: UTF-8,
 // LF, one command per line, oldest first.
 func TestHistoryLoadReadsOldestFirst(t *testing.T) {
 	var h History

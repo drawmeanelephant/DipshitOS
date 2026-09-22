@@ -1,9 +1,17 @@
-// GOSH's execution engine: the environment table, the job table (real
-// background jobs — the M65c goroutine-to-guest-thread mapping makes the
-// EL1 monitor's `exec &`/`jobs`/`fg` machine available at EL0 for the first
-// time), the builtin set, and the pipe/redirect execution paths. Pure code:
-// every kernel touch goes through the Host seam that main.go implements.
-package main
+// Package shlib is the GOSH shell core (M73b, issue #1626): the execution
+// engine — the environment table, the job table (real background jobs — the
+// M65c goroutine-to-guest-thread mapping makes the EL1 monitor's
+// `exec &`/`jobs`/`fg` machine available at EL0 for the first time), the
+// builtin set, and the pipe/redirect execution paths — plus the line editor,
+// the parser and control flow, the toolbox, the history file at the host
+// seam, and the net-auth verifier. It is the importable half of GOSH: no
+// `package main`, and no per-process mutable globals (shell state lives in
+// the Shell/Editor/History values the caller drives; the builtin/tool/help
+// tables are write-once registries filled by init).
+//
+// Pure code: every kernel touch goes through the Host seam the front-end
+// implements (user/go/sh's goshHost over vi; the host tests' fakeHost).
+package shlib
 
 import (
 	"errors"
@@ -13,9 +21,9 @@ import (
 	"virelai/vsys"
 )
 
-// maxPipeBytes mirrors the kernel's single 4 KiB pipe buffer: a pipeline
+// MaxPipeBytes mirrors the kernel's single 4 KiB pipe buffer: a pipeline
 // hand-off carries at most that much (kernel/src/pipe.zig pipe_capacity).
-const maxPipeBytes = 4096
+const MaxPipeBytes = 4096
 
 // maxJobs is the background-job table bound (the EL1 monitor's bg_jobs
 // table holds 4; GOSH allows 8 — still bounded, honest refusal past it).
@@ -58,34 +66,34 @@ func (c *boundedCapture) write(b []byte) {
 // exit 0.
 var errTooLarge = errors.New("input exceeds the 4096-byte buffer")
 
-// openError is a file-ABI refusal that carries the KERNEL's errno name. The
+// OpenError is a file-ABI refusal that carries the KERNEL's errno name. The
 // M50 trust boundary makes the difference load-bearing: an ownership denial
 // (EACCES) and an absent file (ENOENT) are different facts, and a shell that
 // prints "not found" for both hides the whole trust surface from the user
 // (and from the gate that asserts it).
-type openError struct {
+type OpenError struct {
 	path string
 	name string
 }
 
-func (e *openError) Error() string { return e.name }
+func (e *OpenError) Error() string { return e.name }
 
-// deniedAs reports err as an openError when it is one.
-func deniedAs(err error) (*openError, bool) {
-	var oe *openError
+// deniedAs reports err as an OpenError when it is one.
+func deniedAs(err error) (*OpenError, bool) {
+	var oe *OpenError
 	if errors.As(err, &oe) {
 		return oe, true
 	}
 	return nil, false
 }
 
-// readBounded reads at most maxPipeBytes of path, refusing a larger file.
+// readBounded reads at most MaxPipeBytes of path, refusing a larger file.
 func (s *Shell) readBounded(path string) ([]byte, error) {
-	b, err := s.host.ReadFile(path, maxPipeBytes+1)
+	b, err := s.host.ReadFile(path, MaxPipeBytes+1)
 	if err != nil {
 		return nil, err
 	}
-	if len(b) > maxPipeBytes {
+	if len(b) > MaxPipeBytes {
 		return nil, errTooLarge
 	}
 	return b, nil
@@ -115,13 +123,13 @@ func openDenial(path string, err error) string {
 	return "gosh: " + path + ": not found\n"
 }
 
-// action tells the glue what to do after the current line.
-type action int
+// Action tells the glue what to do after the current line.
+type Action int
 
 const (
-	actionContinue action = iota
-	actionExit            // exit [n]: leave the shell with the line's status
-	actionMonitor         // monitor: detach the front-end and return to the kernel monitor
+	ActionContinue Action = iota
+	ActionExit            // exit [n]: leave the shell with the line's status
+	ActionMonitor         // monitor: detach the front-end and return to the kernel monitor
 )
 
 // Host is the engine's single seam to the system (implemented over vi in
@@ -151,7 +159,7 @@ type Host interface {
 	ProbeExternal(pid int64) (int64, int)
 	// SleepTick parks the caller for one scheduler tick.
 	SleepTick()
-	// PipeWrite stores b in the kernel pipe (at most maxPipeBytes).
+	// PipeWrite stores b in the kernel pipe (at most MaxPipeBytes).
 	PipeWrite(b []byte) error
 	// PipeReadAll drains the kernel pipe (never blocks past what is in it).
 	PipeReadAll() ([]byte, error)
@@ -287,9 +295,9 @@ func NewShell(host Host, hist *History) *Shell {
 // Status reports the last line's exit status ($?).
 func (s *Shell) Status() int { return s.status }
 
-// RunLine interprets one command line and returns (status, action). An
+// RunLine interprets one command line and returns (status, Action). An
 // empty or comment-only line is a no-op that leaves $? alone.
-func (s *Shell) RunLine(line string) (int, action) { return s.runLine(line, 0) }
+func (s *Shell) RunLine(line string) (int, Action) { return s.runLine(line, 0) }
 
 // stripEscMarks removes the tokenizer's literal-byte sentinel from a raw
 // line. escMark only ever means "this byte was quoted" within one parse, so
@@ -314,22 +322,22 @@ func stripEscMarks(line string) string {
 // user/src/sh.zig runLine, in the same order — function definition, command
 // substitution, if/for/while/case, `;`/`&&`/`||` chains, then the
 // per-segment pipeline/redirect/simple path.
-func (s *Shell) runLine(raw string, depth int) (int, action) {
+func (s *Shell) runLine(raw string, depth int) (int, Action) {
 	line := trimSpace(stripEscMarks(raw))
 	if line == "" {
-		return s.status, actionContinue
+		return s.status, ActionContinue
 	}
 	if len(line) > maxLineBytes {
 		s.fail("line exceeds " + vsys.Itoa64(maxLineBytes) + " bytes")
 		s.status = 1
-		return 1, actionContinue
+		return 1, ActionContinue
 	}
 	if depth > runDepthMax {
 		// The reference returned silently; a shell that stops without saying
 		// so turns a nesting bug into a mystery.
 		s.fail("script nesting exceeds " + vsys.Itoa64(runDepthMax) + " levels")
 		s.status = 2
-		return 2, actionContinue
+		return 2, ActionContinue
 	}
 	if isFuncDefLine(line) {
 		// Faithful to sh.zig: a successful definition reports `fn: ok` and
@@ -342,18 +350,18 @@ func (s *Shell) runLine(raw string, depth int) (int, action) {
 		if !ok || !s.funcs.define(def) {
 			s.out([]byte("fn: bad definition\n"))
 			s.status = 1
-			return 1, actionContinue
+			return 1, ActionContinue
 		}
 		s.out([]byte("fn: ok\n"))
-		return s.status, actionContinue
+		return s.status, ActionContinue
 	}
 	substituted := line
 	if !strings.HasPrefix(line, "for") && !strings.HasPrefix(line, "while") {
 		// A loop's body is expanded when each iteration runs it, so a
 		// for/while line is not substituted as a whole (sh.zig runLine).
-		var act action
+		var act Action
 		substituted, act = s.commandSubst(line, depth)
-		if act != actionContinue {
+		if act != ActionContinue {
 			return s.status, act
 		}
 	}
@@ -366,7 +374,7 @@ func (s *Shell) runLine(raw string, depth int) (int, action) {
 	if f, ok, tooMany := parseFor(substituted); tooMany {
 		s.fail("for word list too long (at most " + vsys.Itoa64(forWordMax) + " words)")
 		s.status = 2
-		return 2, actionContinue
+		return 2, ActionContinue
 	} else if ok {
 		return s.runFor(f, depth)
 	}
@@ -376,7 +384,7 @@ func (s *Shell) runLine(raw string, depth int) (int, action) {
 	if c, ok, tooMany := parseCase(substituted); tooMany {
 		s.fail("case has too many arms (at most " + vsys.Itoa64(caseArmMax) + ")")
 		s.status = 2
-		return 2, actionContinue
+		return 2, ActionContinue
 	} else if ok {
 		return s.runCase(c, depth)
 	}
@@ -384,7 +392,7 @@ func (s *Shell) runLine(raw string, depth int) (int, action) {
 	if tooMany {
 		s.fail("chain too long (at most " + vsys.Itoa64(chainMax) + " segments)")
 		s.status = 2
-		return 2, actionContinue
+		return 2, ActionContinue
 	}
 	if len(ops) == 0 {
 		return s.runSegment(substituted, depth)
@@ -395,7 +403,7 @@ func (s *Shell) runLine(raw string, depth int) (int, action) {
 // runChain runs `;`/`&&`/`||` segments left to right at equal precedence. A
 // skipped segment leaves $? untouched, so `false && echo NOPE` still reports
 // the failed condition.
-func (s *Shell) runChain(segs []string, ops []chainOp, depth int) (int, action) {
+func (s *Shell) runChain(segs []string, ops []chainOp, depth int) (int, Action) {
 	for i := range segs {
 		run := true
 		if i > 0 {
@@ -410,40 +418,40 @@ func (s *Shell) runChain(segs []string, ops []chainOp, depth int) (int, action) 
 			continue
 		}
 		st, act := s.runLine(segs[i], depth)
-		if act != actionContinue {
+		if act != ActionContinue {
 			return st, act
 		}
 	}
-	return s.status, actionContinue
+	return s.status, ActionContinue
 }
 
 // runSegment executes one chain segment: arithmetic expansion, then the
 // pipeline/redirect/background path, then a deferred `source`.
-func (s *Shell) runSegment(line string, depth int) (int, action) {
+func (s *Shell) runSegment(line string, depth int) (int, Action) {
 	toks, err := tokenize(arithExpand(line))
 	if err != nil {
 		s.fail(err.Error())
 		s.status = 1
-		return 1, actionContinue
+		return 1, ActionContinue
 	}
 	if len(toks) == 0 {
 		// Blank, whitespace-only, or comment-only: a no-op that leaves $?
 		// alone. The guard has to live here — parsePlan reports zero tokens
 		// as an empty command, so the error would fire before the p.left
 		// check below could catch it.
-		return s.status, actionContinue
+		return s.status, ActionContinue
 	}
 	p, err := parsePlan(toks, s.env, s.status)
 	if err != nil {
 		s.fail(err.Error())
 		s.status = 1
-		return 1, actionContinue
+		return 1, ActionContinue
 	}
 	if len(p.left) == 0 {
 		// Unreachable as the code stands (a zero-token line returned above,
 		// and parsePlan refuses a plan with no command word); kept because
 		// it is what makes the p.left[0] reads below safe.
-		return s.status, actionContinue
+		return s.status, ActionContinue
 	}
 	if p.left[0] == "exec" && len(p.left) > 1 {
 		// The monitor's vocabulary: `exec NAME args...` runs NAME. It does
@@ -455,7 +463,7 @@ func (s *Shell) runSegment(line string, depth int) (int, action) {
 	s.exitReq = false
 	s.monitorRq = false
 	var st int
-	var act action
+	var act Action
 	if p.background {
 		st, act = s.runBackground(p, depth)
 	} else if len(p.right) > 0 {
@@ -464,18 +472,18 @@ func (s *Shell) runSegment(line string, depth int) (int, action) {
 		st, act = s.runSingle(p, depth)
 	}
 	s.status = st
-	if act != actionContinue {
+	if act != ActionContinue {
 		return st, act
 	}
 	// `source` needs the run loop rather than a command: the builtin only
 	// records the request, and the engine resolves it here (sh.zig's
-	// .source action).
+	// .source Action).
 	if s.sourceReq != "" {
 		path := s.sourceReq
 		s.sourceReq = ""
 		return s.runSource(path, depth)
 	}
-	return st, actionContinue
+	return st, ActionContinue
 }
 
 // out writes COMMAND output — the capture buffer while a `$(...)` is
@@ -509,22 +517,22 @@ func (s *Shell) out(b []byte) {
 // quotes is substituted anyway. Making substitution word-scoped is a parser
 // change (the expander would have to run commands), deliberately not taken in
 // this slice; the retargeted gates assert none of the divergent cases.
-func (s *Shell) commandSubst(line string, depth int) (string, action) {
+func (s *Shell) commandSubst(line string, depth int) (string, Action) {
 	c, ok := locateCommandSubst(line)
 	if !ok {
-		return line, actionContinue
+		return line, ActionContinue
 	}
 	out, act := s.captureLine(c.inner, depth)
-	if act != actionContinue {
+	if act != ActionContinue {
 		return line, act
 	}
-	return c.prefix + out + c.suffix, actionContinue
+	return c.prefix + out + c.suffix, ActionContinue
 }
 
 // captureLine runs one line with its output collected, returning that text
 // with trailing newlines trimmed (the reference's contract — `$(echo INNER)`
 // is `INNER`, not `INNER\n`).
-func (s *Shell) captureLine(line string, depth int) (string, action) {
+func (s *Shell) captureLine(line string, depth int) (string, Action) {
 	var buf []byte
 	prev := s.capture
 	s.capture = &buf
@@ -555,7 +563,7 @@ func trimEndBytes(b []byte, cut ...byte) []byte {
 // runBody runs a construct body's `;`-separated commands in order. It
 // reports whether `break` ended the body and whether the last command asked
 // to leave the shell (`continue` ends one iteration without a break).
-func (s *Shell) runBody(body string, depth int) (int, bool, action) {
+func (s *Shell) runBody(body string, depth int) (int, bool, Action) {
 	cmds, tooMany := splitCommands(body)
 	if tooMany {
 		// REFUSED, not truncated: the reference ran its first 16 commands and
@@ -564,27 +572,27 @@ func (s *Shell) runBody(body string, depth int) (int, bool, action) {
 		// instead of repeating the refusal every iteration.
 		s.fail("body too long (at most " + vsys.Itoa64(bodyCmdsMax) + " commands)")
 		s.status = 2
-		return 2, true, actionContinue
+		return 2, true, ActionContinue
 	}
 	for _, cmd := range cmds {
 		st, act := s.runLine(cmd, depth)
-		if act != actionContinue {
+		if act != ActionContinue {
 			return st, false, act
 		}
 		if s.loopBreak {
-			return st, true, actionContinue
+			return st, true, ActionContinue
 		}
 		if s.loopCont {
-			return st, false, actionContinue // end this iteration
+			return st, false, ActionContinue // end this iteration
 		}
 	}
-	return s.status, false, actionContinue
+	return s.status, false, ActionContinue
 }
 
 // runIf runs `if COND; then BODY; [else BODY;] fi`. The status left behind is
 // the branch that ran, or the condition's own when neither did.
-func (s *Shell) runIf(st ifStmt, depth int) (int, action) {
-	if stStr, act := s.runLine(st.cond, depth); act != actionContinue {
+func (s *Shell) runIf(st ifStmt, depth int) (int, Action) {
+	if stStr, act := s.runLine(st.cond, depth); act != ActionContinue {
 		return stStr, act
 	}
 	if s.status == 0 {
@@ -595,17 +603,17 @@ func (s *Shell) runIf(st ifStmt, depth int) (int, action) {
 		_, _, act := s.runBody(st.elseBody, depth)
 		return s.status, act
 	}
-	return s.status, actionContinue
+	return s.status, ActionContinue
 }
 
 // runFor runs `for VAR in W...; do BODY; done`, unsetting VAR afterwards
 // exactly as sh.zig did (the loop variable does not leak).
-func (s *Shell) runFor(st forStmt, depth int) (int, action) {
+func (s *Shell) runFor(st forStmt, depth int) (int, Action) {
 	for _, w := range st.words {
 		s.env.Set(st.varName, w)
 		s.clearLoopFlags()
 		_, brk, act := s.runBody(st.body, depth)
-		if act != actionContinue {
+		if act != ActionContinue {
 			return s.status, act
 		}
 		if brk {
@@ -614,41 +622,41 @@ func (s *Shell) runFor(st forStmt, depth int) (int, action) {
 	}
 	s.env.Unset(st.varName)
 	s.clearLoopFlags()
-	return s.status, actionContinue
+	return s.status, ActionContinue
 }
 
 // runWhile runs `while COND; do BODY; done`, bounded to whileIterMax
 // iterations. The reference stopped silently at the bound; a forced stop is
 // reported and fails, because a loop that quietly ends is indistinguishable
 // from one that finished.
-func (s *Shell) runWhile(st whileStmt, depth int) (int, action) {
+func (s *Shell) runWhile(st whileStmt, depth int) (int, Action) {
 	for i := 0; i < whileIterMax; i++ {
 		s.clearLoopFlags()
-		if cst, act := s.runLine(st.cond, depth); act != actionContinue {
+		if cst, act := s.runLine(st.cond, depth); act != ActionContinue {
 			return cst, act
 		}
 		if s.status != 0 {
 			s.clearLoopFlags()
-			return s.status, actionContinue
+			return s.status, ActionContinue
 		}
 		_, brk, act := s.runBody(st.body, depth)
-		if act != actionContinue {
+		if act != ActionContinue {
 			return s.status, act
 		}
 		if brk {
 			s.clearLoopFlags()
-			return s.status, actionContinue
+			return s.status, ActionContinue
 		}
 	}
 	s.clearLoopFlags()
 	s.fail("while: iteration cap (" + vsys.Itoa64(whileIterMax) + ") reached")
 	s.status = 1
-	return 1, actionContinue
+	return 1, ActionContinue
 }
 
 // runCase runs the first arm whose pattern matches the expanded subject. No
 // matching arm is a success (sh.zig runCase).
-func (s *Shell) runCase(st caseStmt, depth int) (int, action) {
+func (s *Shell) runCase(st caseStmt, depth int) (int, Action) {
 	subject := expand(token{kind: tokWord, text: st.subject}, s.env, s.status)
 	for _, arm := range st.arms {
 		if caseMatch(arm.pattern, subject) {
@@ -657,7 +665,7 @@ func (s *Shell) runCase(st caseStmt, depth int) (int, action) {
 		}
 	}
 	s.status = 0
-	return 0, actionContinue
+	return 0, ActionContinue
 }
 
 // clearLoopFlags resets break/continue for the next iteration.
@@ -682,36 +690,36 @@ func (s *Shell) bindFuncArgs(f *progFunc, args []string) {
 
 // runFuncBody runs a function's pre-split body one command at a time at
 // depth+1 (sh.zig runFunction).
-func (s *Shell) runFuncBody(f *progFunc, depth int) (int, action) {
+func (s *Shell) runFuncBody(f *progFunc, depth int) (int, Action) {
 	for _, cmd := range f.body {
 		st, act := s.runLine(cmd, depth+1)
-		if act != actionContinue {
+		if act != ActionContinue {
 			return st, act
 		}
 	}
-	return s.status, actionContinue
+	return s.status, ActionContinue
 }
 
 // runSource runs a file's lines in this shell, CRLF-aware and silent about
 // blank lines (sh.zig runSource). Nesting is bounded and the bound is
 // reported rather than passed over.
-func (s *Shell) runSource(path string, depth int) (int, action) {
+func (s *Shell) runSource(path string, depth int) (int, Action) {
 	if depth > sourceDepthMax {
 		s.fail("source nesting exceeds " + vsys.Itoa64(sourceDepthMax) + " levels")
 		s.status = 2
-		return 2, actionContinue
+		return 2, ActionContinue
 	}
 	b, err := s.host.ReadFile(path, maxSourceBytes+1)
 	if err != nil {
 		s.host.Out([]byte("gosh: source: " + strings.TrimPrefix(openDenial(path, err), "gosh: ")))
 		s.status = 1
-		return 1, actionContinue
+		return 1, ActionContinue
 	}
 	if len(b) > maxSourceBytes {
 		s.host.Out([]byte("gosh: source: " + path + ": exceeds the " +
 			vsys.Itoa64(maxSourceBytes) + "-byte source buffer\n"))
 		s.status = 1
-		return 1, actionContinue
+		return 1, ActionContinue
 	}
 	body := strings.ReplaceAll(string(b), "\r\n", "\n")
 	for _, ln := range strings.Split(body, "\n") {
@@ -720,11 +728,11 @@ func (s *Shell) runSource(path string, depth int) (int, action) {
 			continue
 		}
 		st, act := s.runLine(ln, depth+1)
-		if act != actionContinue {
+		if act != ActionContinue {
 			return st, act
 		}
 	}
-	return s.status, actionContinue
+	return s.status, ActionContinue
 }
 
 func (s *Shell) fail(msg string) {
@@ -743,8 +751,8 @@ func classify(name string) int {
 }
 
 // runBuiltin dispatches name to the builtin/tool table, translating the
-// exit/monitor requests into the returned action.
-func (s *Shell) runBuiltin(name string, c *cmdCtx) (int, action) {
+// exit/monitor requests into the returned Action.
+func (s *Shell) runBuiltin(name string, c *cmdCtx) (int, Action) {
 	fn := builtins[name]
 	if fn == nil {
 		fn = tools[name]
@@ -754,22 +762,22 @@ func (s *Shell) runBuiltin(name string, c *cmdCtx) (int, action) {
 	switch {
 	case s.exitReq:
 		s.exitReq = false
-		return st, actionExit
+		return st, ActionExit
 	case s.monitorRq:
 		s.monitorRq = false
-		return st, actionMonitor
+		return st, ActionMonitor
 	}
-	return st, actionContinue
+	return st, ActionContinue
 }
 
-func (s *Shell) runSingle(p *plan, depth int) (int, action) {
+func (s *Shell) runSingle(p *plan, depth int) (int, Action) {
 	name := p.left[0]
 	args := p.left[1:]
 	var stdin []byte
 	if p.in != nil {
 		b, ok := s.readInput(p.in.path)
 		if !ok {
-			return 1, actionContinue
+			return 1, ActionContinue
 		}
 		stdin = b
 	}
@@ -780,7 +788,7 @@ func (s *Shell) runSingle(p *plan, depth int) (int, action) {
 		sink = cap.write
 	}
 	var st int
-	var act action
+	var act Action
 	switch classify(name) {
 	case 0, 1:
 		st, act = s.runBuiltin(name, &cmdCtx{sh: s, args: args, stdin: stdin, out: sink})
@@ -798,25 +806,25 @@ func (s *Shell) runSingle(p *plan, depth int) (int, action) {
 			// collected; say so rather than interleave it into a
 			// substitution (the reference's notice).
 			s.host.Out([]byte("gosh: cannot capture an external app's output yet\n"))
-			return 1, actionContinue
+			return 1, ActionContinue
 		}
 		stv, err := s.runExternal(name, args)
 		st = stv
 		if err != nil {
-			act = actionContinue
+			act = ActionContinue
 		}
 	}
-	if act != actionContinue {
+	if act != ActionContinue {
 		return st, act
 	}
 	if p.out != nil {
 		if cap.over {
 			s.host.Out([]byte("gosh: " + p.out.path + ": output exceeds the " + vsys.Itoa64(maxRedirectBytes) + "-byte redirect buffer\n"))
-			return 1, actionContinue
+			return 1, ActionContinue
 		}
 		if err := s.host.WriteFile(p.out.path, cap.buf, p.out.append); err != nil {
 			s.host.Out([]byte("gosh: " + p.out.path + ": write failed\n"))
-			return 1, actionContinue
+			return 1, ActionContinue
 		}
 	}
 	return st, act
@@ -838,49 +846,49 @@ func (s *Shell) runExternal(name string, args []string) (int, error) {
 	return int(st), nil
 }
 
-func (s *Shell) runPipeline(p *plan) (int, action) {
+func (s *Shell) runPipeline(p *plan) (int, Action) {
 	lname := p.left[0]
 	if classify(lname) == 2 {
 		s.host.Out([]byte("gosh: cannot capture an external app's output yet\n"))
-		return 1, actionContinue
+		return 1, ActionContinue
 	}
 	var stdin []byte
 	if p.in != nil {
 		b, ok := s.readInput(p.in.path)
 		if !ok {
-			return 1, actionContinue
+			return 1, ActionContinue
 		}
 		stdin = b
 	}
 	var stage boundedCapture
-	stage.lim = maxPipeBytes
+	stage.lim = MaxPipeBytes
 	fn := builtins[lname]
 	if fn == nil {
 		fn = tools[lname]
 	}
 	st, act := s.runBuiltin(lname, &cmdCtx{sh: s, args: p.left[1:], stdin: stdin, out: stage.write})
-	if act != actionContinue {
+	if act != ActionContinue {
 		return st, act
 	}
 	if stage.over {
 		// Writing the clipped capture would hand the right stage short
 		// input that still reports success, so the line fails instead.
-		s.host.Out([]byte("gosh: pipe stage output exceeds the " + vsys.Itoa64(maxPipeBytes) + "-byte pipe buffer\n"))
-		return 1, actionContinue
+		s.host.Out([]byte("gosh: pipe stage output exceeds the " + vsys.Itoa64(MaxPipeBytes) + "-byte pipe buffer\n"))
+		return 1, ActionContinue
 	}
 	if err := s.host.PipeWrite(stage.buf); err != nil {
 		s.host.Out([]byte("gosh: pipe write failed\n"))
-		return 1, actionContinue
+		return 1, ActionContinue
 	}
 	rightStdin, err := s.host.PipeReadAll()
 	if err != nil {
 		s.host.Out([]byte("gosh: pipe read failed\n"))
-		return 1, actionContinue
+		return 1, ActionContinue
 	}
 	rname := p.right[0]
 	if classify(rname) == 2 {
 		s.host.Out([]byte("gosh: a piped command must be a builtin or tool (an external app would not read the pipe)\n"))
-		return 1, actionContinue
+		return 1, ActionContinue
 	}
 	var rcap boundedCapture
 	rcap.lim = maxRedirectBytes
@@ -889,23 +897,23 @@ func (s *Shell) runPipeline(p *plan) (int, action) {
 		rsink = rcap.write
 	}
 	rst, ract := s.runBuiltin(rname, &cmdCtx{sh: s, args: p.right[1:], stdin: rightStdin, out: rsink})
-	if ract != actionContinue {
+	if ract != ActionContinue {
 		return rst, ract
 	}
 	if p.out != nil {
 		if rcap.over {
 			s.host.Out([]byte("gosh: " + p.out.path + ": output exceeds the " + vsys.Itoa64(maxRedirectBytes) + "-byte redirect buffer\n"))
-			return 1, actionContinue
+			return 1, ActionContinue
 		}
 		if err := s.host.WriteFile(p.out.path, rcap.buf, p.out.append); err != nil {
 			s.host.Out([]byte("gosh: " + p.out.path + ": write failed\n"))
-			return 1, actionContinue
+			return 1, ActionContinue
 		}
 	}
-	return rst, actionContinue
+	return rst, ActionContinue
 }
 
-func (s *Shell) runBackground(p *plan, depth int) (int, action) {
+func (s *Shell) runBackground(p *plan, depth int) (int, Action) {
 	name := p.left[0]
 	if classify(name) != 2 {
 		// A builtin has nothing to background (it runs inside this
@@ -915,18 +923,18 @@ func (s *Shell) runBackground(p *plan, depth int) (int, action) {
 	}
 	if len(s.jobs) >= maxJobs {
 		s.host.Out([]byte("gosh: too many background jobs\n"))
-		return 1, actionContinue
+		return 1, ActionContinue
 	}
 	pid, err := s.host.RunExternal(name, p.left[1:])
 	if err != nil {
 		s.host.Out([]byte("gosh: " + name + ": not found\n"))
-		return 127, actionContinue
+		return 127, ActionContinue
 	}
 	s.nextN++
 	j := &Job{N: s.nextN, PID: pid, Display: strings.Join(p.left, " ")}
 	s.jobs = append(s.jobs, j)
 	s.host.Marker("gosh: job " + vsys.Itoa64(int64(j.N)) + " pid=" + vsys.Itoa64(pid))
-	return 0, actionContinue
+	return 0, ActionContinue
 }
 
 // ReapJobs probes every live background job once and reports finished ones
@@ -980,8 +988,8 @@ func (s *Shell) removeJob(j *Job) {
 var errNoJob = errors.New("fg: no such job")
 
 // names lists builtin and tool names (completion + help).
-func builtinNames() []string { return tableNames(builtins) }
-func toolNames() []string    { return tableNames(tools) }
+func BuiltinNames() []string { return tableNames(builtins) }
+func ToolNames() []string    { return tableNames(tools) }
 
 func tableNames(m map[string]func(*cmdCtx) int) []string {
 	out := make([]string, 0, len(m))
@@ -990,4 +998,22 @@ func tableNames(m map[string]func(*cmdCtx) int) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// ErrNotFound and ErrWriteFailed are the host seam's plain refusals: the
+// engine only reports them, so plain sentinels suffice. goshHost (the
+// front-end) and fakeHost (the tests) return these very values, so an
+// engine-side identity check still holds across the package line.
+var ErrNotFound = &shellError{"not found"}
+var ErrWriteFailed = &shellError{"write failed"}
+
+type shellError struct{ s string }
+
+func (e *shellError) Error() string { return e.s }
+
+// NewOpenError builds a file-ABI refusal that carries the KERNEL's errno
+// name (OpenError above). The front-end's host seam constructs it; the
+// fields stay private because only the engine renders them.
+func NewOpenError(path, name string) *OpenError {
+	return &OpenError{path: path, name: name}
 }

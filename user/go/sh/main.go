@@ -26,11 +26,17 @@
 // only pass if the shell actually ran. `GOSH.ELF -c LINE` runs one line
 // headless (no window, no tty, no startup) and exits with its status —
 // the composable child form the gate and scripts use.
+//
+// This file is the FRONT-END only (M73b, issue #1626): argv dispatch, the
+// three tty owners, the startup contract and the vi host seam. The engine,
+// editor, parser, builtins, toolbox, history persistence and net-auth core
+// live in virelai/shlib, importable by any front-end.
 package main
 
 import (
 	"strings"
 
+	"virelai/shlib"
 	"virelai/tabapp"
 	"virelai/vi"
 )
@@ -47,12 +53,8 @@ const (
 	startupPath     = "/host/STARTUP.SH"
 	profilePath     = "/host/PROFILE.SH"
 	maxStartupBytes = 2048 // the startup contract's per-file cap
-	// M69f1 (#1537): the shell's own persistent history. NOT the monitor's
-	// HISTORY.TXT -- mixing the kernel actor's `virelai>` verbs into GOSH's
-	// Up-arrow recall would be worse than no persistence at all.
-	histPath       = "/host/GOSH-HISTORY.TXT"
-	ticksPerSecond = 100  // the scheduler tick is ~10 ms (kernel timer @ ~100 Hz)
-	ttyWriteMax    = 1024 // under the kernel's 2048-byte file-write stage cap
+	ticksPerSecond  = 100  // the scheduler tick is ~10 ms (kernel timer @ ~100 Hz)
+	ttyWriteMax     = 1024 // under the kernel's 2048-byte file-write stage cap
 
 	markerReady    = "gosh: ready"
 	markerOpen     = "gosh: open id="
@@ -76,10 +78,6 @@ const (
 	markerNetRefus = "gosh: net refused: no credential (pass 'open' for the insecure mode)"
 	markerNetFail  = "gosh: remote attach failed"
 	markerNetBad   = "gosh: net refused: "
-	// M69f1 (#1537) D3: persistence is best-effort. ONE line, once, and the
-	// session continues -- a share that refuses the write must not end a
-	// shell.
-	markerHistFail = "gosh: history not persisted"
 )
 
 func main() {
@@ -88,7 +86,7 @@ func main() {
 		runHeadless(line)
 		return
 	}
-	if na, ok, err := parseNetArgs(args); ok {
+	if na, ok, err := shlib.ParseNetArgs(args); ok {
 		runNet(na)
 		return
 	} else if err != "" {
@@ -147,7 +145,7 @@ func headlessLine(args []string) (string, bool) {
 // status. No window, no tty attach, no startup scripts.
 func runHeadless(line string) {
 	h := &goshHost{}
-	sh := NewShell(h, &History{})
+	sh := shlib.NewShell(h, &shlib.History{})
 	st, _ := sh.RunLine(line)
 	h.flushOut()
 	vi.Exit(st)
@@ -225,7 +223,7 @@ func runSerial() {
 // was explicit. The engine, editor and startup contract are the serial
 // path's; only the front-end owner changes. Fail closed: no credential and
 // no `open` refuses to listen.
-func runNet(na netArgs) {
+func runNet(na shlib.NetArgs) {
 	vi.ConsoleLine(markerReady)
 
 	h, rc := vi.FileOpen(ttyPath, vi.ModeRead|vi.ModeWrite)
@@ -237,9 +235,9 @@ func runNet(na netArgs) {
 	vi.ConsoleLine(markerTty)
 
 	scheme := vi.NetSchemeOpen
-	var auth *netAuth
-	if !na.open {
-		sch, ok := selectScheme(storeGet)
+	var auth *shlib.NetAuth
+	if !na.Open {
+		sch, ok := shlib.SelectScheme(shlib.StoreGet)
 		if !ok {
 			vi.FileClose(fd)
 			vi.ConsoleLine(markerNetRefus)
@@ -247,15 +245,15 @@ func runNet(na netArgs) {
 		}
 		scheme = sch
 	}
-	if r := vi.TtyAttachNet(na.port, scheme, 0); r != 0 {
+	if r := vi.TtyAttachNet(na.Port, scheme, 0); r != 0 {
 		vi.FileClose(fd)
 		vi.ConsoleLine(markerNetFail)
 		vi.Exit(2)
 	}
 	if scheme != vi.NetSchemeOpen {
-		auth = sysNetAuth(scheme)
+		auth = shlib.SysNetAuth(scheme)
 	}
-	vi.ConsoleLine(markerRemote + vi.Itoa64(int64(na.port)))
+	vi.ConsoleLine(markerRemote + vi.Itoa64(int64(na.Port)))
 	switch scheme {
 	case vi.NetSchemeOpen:
 		vi.ConsoleLine(markerAuthOpen)
@@ -274,11 +272,11 @@ func runNet(na netArgs) {
 // handshake, live only in net mode and only when a credential is in force;
 // one step per loop turn, including idle, because the challenge is not a
 // tty byte.
-func runSession(fd uint32, ta *tabapp.TabApp, auth *netAuth) {
+func runSession(fd uint32, ta *tabapp.TabApp, auth *shlib.NetAuth) {
 	hst := &goshHost{fd: fd, tty: true}
-	hist := &History{}
-	sh := NewShell(hst, hist)
-	editor := NewEditor(loadPrompt(), hist)
+	hist := &shlib.History{}
+	sh := shlib.NewShell(hst, hist)
+	editor := shlib.NewEditor(loadPrompt(), hist)
 	editor.Complete = completeFn(hst)
 
 	// The startup contract (M49 SD2): STARTUP.SH, then PROFILE.SH, silent
@@ -286,7 +284,7 @@ func runSession(fd uint32, ta *tabapp.TabApp, auth *netAuth) {
 	for _, ln := range startupLines() {
 		vi.ConsoleLine(markerLine + ln)
 		_, act := sh.RunLine(ln)
-		if act != actionContinue {
+		if act != shlib.ActionContinue {
 			leave(ta, fd, sh, act)
 		}
 	}
@@ -294,8 +292,8 @@ func runSession(fd uint32, ta *tabapp.TabApp, auth *netAuth) {
 	// M69f1 (#1537): seed recall from the share AFTER the startup contract
 	// and BEFORE the first prompt, so the startup lines never enter recall
 	// and the first Up arrow lands on the last line the user really typed.
-	sink := &historySink{}
-	loadHistory(hst, hist, sink)
+	sink := &shlib.HistorySink{}
+	shlib.LoadHistory(hst, hist, sink)
 
 	_, _ = vi.FileWrite(fd, editor.Repaint())
 	vi.ConsoleLine(markerPrompt)
@@ -305,28 +303,28 @@ func runSession(fd uint32, ta *tabapp.TabApp, auth *netAuth) {
 	// feeding until the editor has nothing left: the serial front-end can
 	// deliver several whole lines in a single read, and a burst that stops
 	// after its first line would leave the rest typed but never run.
-	handle := func(out []byte, ev EditEvent) {
+	handle := func(out []byte, ev shlib.EditEvent) {
 		if len(out) > 0 {
 			writeTTY(fd, out)
 		}
 		switch ev.Kind {
-		case evSubmit:
+		case shlib.EvSubmit:
 			vi.ConsoleLine(markerLine + ev.Line)
-			saveHistory(hst, hist, ev.Line, sink)
+			shlib.SaveHistory(hst, hist, ev.Line, sink)
 			_, act := sh.RunLine(ev.Line)
-			if act != actionContinue {
+			if act != shlib.ActionContinue {
 				leave(ta, fd, sh, act)
 			}
-		case evEOF:
+		case shlib.EvEOF:
 			shutdown(ta, fd, 0)
-		case evCancel:
+		case shlib.EvCancel:
 			// The editor already painted ^C and the fresh prompt.
 		}
 	}
 
 	var readBuf [64]byte
 	for {
-		auth.step()
+		auth.Step()
 		n, _ := vi.FileRead(fd, readBuf[:])
 		if n > 0 {
 			handle(editor.Feed(readBuf[:n]))
@@ -368,8 +366,8 @@ func runSession(fd uint32, ta *tabapp.TabApp, auth *netAuth) {
 // gate sequences its `version` type on `gosh: monitor`, so a failed detach
 // would otherwise type into a shell still holding the console. SH.BIN printed
 // the same marker; live-sh-monitor sequences on it.
-func leave(ta *tabapp.TabApp, fd uint32, sh *Shell, act action) {
-	if act == actionMonitor {
+func leave(ta *tabapp.TabApp, fd uint32, sh *shlib.Shell, act shlib.Action) {
+	if act == shlib.ActionMonitor {
 		if r := vi.TtyAttach(vi.TtyDetach); r == 0 {
 			vi.ConsoleLine(markerMonitor)
 		} else {
@@ -406,106 +404,6 @@ func writeTTY(fd uint32, b []byte) {
 		}
 		b = b[n:]
 	}
-}
-
-// --- M69f1 (#1537): persistent recall -------------------------------------
-//
-// The monitor's HISTORY.TXT (M18 T4) belongs to the kernel actor; GOSH's
-// recall was session-only, so a reboot cost the Up arrow. This is the
-// shell's own file on the same share: a different name, the same
-// one-line-per-entry LF shape, so a human can cat it and neither writer can
-// clobber the other.
-
-// maxHistoryBytes bounds the load. The writer keeps the file inside the ring
-// bound, so a larger file is not ours: refuse it whole instead of parsing a
-// prefix of somebody else's data. historyMax lines of maxLineBytes is the
-// worst case the ring can produce.
-const maxHistoryBytes = historyMax * maxLineBytes
-
-// histStore is the slice of the host seam persistence needs. *goshHost is
-// the real one; the host tests drive saveHistory/loadHistory with their
-// fakeHost through this interface.
-type histStore interface {
-	ReadFile(path string, max int) ([]byte, error)
-	WriteFile(path string, b []byte, appendMode bool) error
-}
-
-// historySink is the write side's state: the last line appended (the ring's
-// dup rule, carried across boots) and how many appends have landed since the
-// file was last rewritten whole.
-type historySink struct {
-	last     string
-	appended int
-	warned   bool // the one-line failure report is emitted at most once
-}
-
-// loadHistory seeds the ring from the share. A missing file is an empty
-// ring, not an error; a read failure is treated the same way (D3: the file
-// is a convenience, and a share that cannot answer must not stop the boot).
-func loadHistory(st histStore, h *History, s *historySink) {
-	b, err := st.ReadFile(histPath, maxHistoryBytes)
-	if err != nil || len(b) == 0 {
-		return
-	}
-	h.Load(b)
-	if e := h.Entries(); len(e) > 0 {
-		s.last = e[len(e)-1]
-	}
-}
-
-// saveHistory appends one submitted line and keeps the file inside the ring
-// bound (D2). Runs AFTER the editor pushed the line into the ring, so the
-// ring is the writer's source of truth: once the appends alone would push
-// the file past the bound, it is rewritten whole from the ring, which has
-// already dropped the oldest lines.
-func saveHistory(st histStore, h *History, line string, s *historySink) {
-	// Idempotent: the editor already pushed this line when it submitted, so
-	// this is a no-op in the shell and the reason the function is honest on
-	// its own in a test.
-	h.Push(line)
-	if line == "" || line == s.last {
-		return
-	}
-	if s.appended >= historyMax {
-		// The ring already holds this line (the editor pushes on submit), so
-		// the rewrite IS the append: compact and stop. From here the file is
-		// rewritten to the ring's own contents, which is the bound D2 asks
-		// for -- at most historyMax lines, never an unbounded append log.
-		if err := writeHistoryFile(st, h); err != nil {
-			s.warn()
-			return
-		}
-		s.last = line
-		s.appended = len(h.Entries())
-		return
-	}
-	if err := st.WriteFile(histPath, []byte(line+"\n"), true); err != nil {
-		s.warn()
-		return
-	}
-	s.last = line
-	s.appended++
-}
-
-// writeHistoryFile replaces the file with the ring's contents (write-open
-// truncates, kernel/src/file_table.zig: "a fresh write-open truncates").
-func writeHistoryFile(st histStore, h *History) error {
-	var b []byte
-	for _, ln := range h.Entries() {
-		b = append(b, ln...)
-		b = append(b, '\n')
-	}
-	return st.WriteFile(histPath, b, false)
-}
-
-// warn reports a persistence failure ONCE, on one serial line, and never
-// ends the session (D3).
-func (s *historySink) warn() {
-	if s.warned {
-		return
-	}
-	s.warned = true
-	vi.ConsoleLine(markerHistFail)
 }
 
 // loadPrompt adopts the SETTINGS.TXT `prompt` key (SH.BIN's SH8 behavior).
@@ -551,7 +449,7 @@ func completeFn(host *goshHost) func(string, bool) []string {
 	return func(word string, first bool) []string {
 		var cands []string
 		if first {
-			for _, n := range append(append([]string{}, builtinNames()...), toolNames()...) {
+			for _, n := range append(append([]string{}, shlib.BuiltinNames()...), shlib.ToolNames()...) {
 				if strings.HasPrefix(n, word) {
 					cands = append(cands, n+" ")
 				}
@@ -641,7 +539,7 @@ func (g *goshHost) RunExternal(name string, args []string) (int64, error) {
 			return pid, nil
 		}
 	}
-	return 0, errNotFound
+	return 0, shlib.ErrNotFound
 }
 
 func (g *goshHost) WaitExternal(pid int64) (int64, error) { return vi.Wait(pid) }
@@ -661,7 +559,7 @@ func (g *goshHost) PipeWrite(b []byte) error {
 func (g *goshHost) PipeReadAll() ([]byte, error) {
 	var all []byte
 	buf := make([]byte, 512)
-	for len(all) < maxPipeBytes {
+	for len(all) < shlib.MaxPipeBytes {
 		n, err := vi.PipeRead(buf)
 		if err != nil {
 			return all, err
@@ -681,9 +579,9 @@ func (g *goshHost) ReadFile(path string, max int) ([]byte, error) {
 		// and an absent file (ENOENT) are different facts, and the M50
 		// trust gates assert which one the shell reported.
 		if name := vi.ErrnoName(r); name != "" {
-			return nil, &openError{path: path, name: name}
+			return nil, shlib.NewOpenError(path, name)
 		}
-		return nil, errNotFound
+		return nil, shlib.ErrNotFound
 	}
 	return b, nil
 }
@@ -696,9 +594,9 @@ func (g *goshHost) Chmod(path string, mode uint16) error {
 	r := vi.FileMode(path, mode)
 	if r < 0 {
 		if name := vi.ErrnoName(r); name != "" {
-			return &openError{path: path, name: name}
+			return shlib.NewOpenError(path, name)
 		}
-		return errNotFound
+		return shlib.ErrNotFound
 	}
 	return nil
 }
@@ -725,12 +623,12 @@ func (g *goshHost) WriteFile(path string, b []byte, appendMode bool) error {
 	}
 	h, r := vi.FileOpen(path, flags)
 	if r < 0 {
-		return errNotFound
+		return shlib.ErrNotFound
 	}
 	defer vi.FileClose(uint32(h))
 	written, r := vi.FileWriteAll(uint32(h), b)
 	if r < 0 || written != len(b) {
-		return errWriteFailed
+		return shlib.ErrWriteFailed
 	}
 	return nil
 }
@@ -743,9 +641,9 @@ func (g *goshHost) Chdir(path string) error {
 		// on the share's list gate are three different facts, and folding
 		// them into one "not a directory" message hides two of them.
 		if name := vi.ErrnoName(r); name != "" {
-			return &openError{path: path, name: name}
+			return shlib.NewOpenError(path, name)
 		}
-		return errNotFound
+		return shlib.ErrNotFound
 	}
 	return nil
 }
@@ -801,11 +699,3 @@ func (g *goshHost) SleepSeconds(n int) {
 // runs (observed on this exact binary: `runtime: cannot allocate memory`
 // during mheap.init). The build script asserts the invariant from the
 // linked ELF; adjust this array's size when it trips.
-
-// host errors (the engine only reports them, so plain sentinels suffice).
-var errNotFound = &shellError{"not found"}
-var errWriteFailed = &shellError{"write failed"}
-
-type shellError struct{ s string }
-
-func (e *shellError) Error() string { return e.s }
