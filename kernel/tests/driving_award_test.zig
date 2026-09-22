@@ -566,6 +566,137 @@ test "driving_award: terminal presentation paints ANSI cell backgrounds" {
     try std.testing.expectEqual(@as(u8, 0xff), buf[pixel + 3]);
 }
 
+// ---------------------------------------------------------------------------
+// M73a-2 (#1631): rune cells reach the scanout — pixel proofs
+// ---------------------------------------------------------------------------
+
+/// Count pixels in the rect whose B8G8R8X8 bytes equal `rgb` (the painter
+/// proofs below measure ink, never colour-class guesses).
+fn ink_count(buf: []const u8, stride: usize, x0: usize, y0: usize, w: usize, h: usize, rgb: u32) usize {
+    var n: usize = 0;
+    var y: usize = 0;
+    while (y < h) : (y += 1) {
+        var x: usize = 0;
+        while (x < w) : (x += 1) {
+            const k = (y0 + y) * stride + (x0 + x) * 4;
+            const r: u32 = buf[k + 2];
+            const g: u32 = buf[k + 1];
+            const b: u32 = buf[k];
+            if (r == ((rgb >> 16) & 0xff) and g == ((rgb >> 8) & 0xff) and b == (rgb & 0xff)) n += 1;
+        }
+    }
+    return n;
+}
+
+test "driving_award: an accented rune cell paints ink and the overlay changes the art (M73a-2 #1631)" {
+    const W = 96;
+    const H = 48;
+    const fg = driving_award.fbtext.fg_rgb;
+    const y0 = geom.title_bar_h;
+    var bare_buf: [W * H * 4]u8 = undefined;
+    var acc_buf: [W * H * 4]u8 = undefined;
+    @memset(&bare_buf, 0);
+    @memset(&acc_buf, 0);
+    const window = Window{ .id = 2, .title = "term", .x = 0, .y = 0, .w = W, .h = H, .kind = .user, .visible = true, .dirty = true };
+    var bare = terminal.Screen{};
+    bare.feed("\x1b[?25le");
+    render_terminal_screen(&bare_buf, &window, &bare);
+    var acc = terminal.Screen{};
+    acc.feed("\x1b[?25le\xcc\x81"); // e + U+0301 combining acute
+    render_terminal_screen(&acc_buf, &window, &acc);
+    const bare_ink = ink_count(&bare_buf, W * 4, 0, y0, 8, 8, fg);
+    const acc_ink = ink_count(&acc_buf, W * 4, 0, y0, 8, 8, fg);
+    // Both paint real ink (never blank), and the overlay changes the art.
+    try std.testing.expect(bare_ink > 4);
+    try std.testing.expect(acc_ink > 4);
+    try std.testing.expect(acc_ink != bare_ink);
+}
+
+test "driving_award: ASCII cells stay on the byte-identical font8x8 path (M72b parity, M73a-2 #1631)" {
+    const W = 96;
+    const H = 48;
+    const fg = driving_award.fbtext.fg_rgb;
+    const y0 = geom.title_bar_h;
+    var buf: [W * H * 4]u8 = undefined;
+    var exp: [W * H * 4]u8 = undefined;
+    @memset(&buf, 0);
+    @memset(&exp, 0);
+    const window = Window{ .id = 2, .title = "term", .x = 0, .y = 0, .w = W, .h = H, .kind = .user, .visible = true, .dirty = true };
+    var s = terminal.Screen{};
+    s.feed("\x1b[?25lA");
+    render_terminal_screen(&buf, &window, &s);
+    // The reference: the old byte path drawing the same glyph.
+    draw_glyph(&exp, W * 4, 0, y0, 'A', fg);
+    var y: usize = 0;
+    while (y < 8) : (y += 1) {
+        var x: usize = 0;
+        while (x < 8) : (x += 1) {
+            const k = (y0 + y) * W * 4 + x * 4;
+            if (ink_count(exp[k .. k + 4], W * 4, 0, 0, 1, 1, fg) == 1) {
+                try std.testing.expectEqual(@as(u32, fg & 0xff), @as(u32, buf[k])); // B
+                try std.testing.expectEqual(@as(u32, (fg >> 8) & 0xff), @as(u32, buf[k + 1])); // G
+                try std.testing.expectEqual(@as(u32, (fg >> 16) & 0xff), @as(u32, buf[k + 2])); // R
+            }
+        }
+    }
+    const exp_ink = ink_count(&exp, W * 4, 0, y0, 8, 8, fg);
+    try std.testing.expect(exp_ink > 4);
+    try std.testing.expectEqual(exp_ink, ink_count(&buf, W * 4, 0, y0, 8, 8, fg));
+}
+
+test "driving_award: a wide rune spans both cells once and never bleeds past its pair (M73a-2 #1631)" {
+    const W = 96;
+    const H = 48;
+    const fg = driving_award.fbtext.fg_rgb;
+    const y0 = geom.title_bar_h;
+    var buf: [W * H * 4]u8 = undefined;
+    @memset(&buf, 0);
+    const window = Window{ .id = 2, .title = "term", .x = 0, .y = 0, .w = W, .h = H, .kind = .user, .visible = true, .dirty = true };
+    var s = terminal.Screen{};
+    s.feed("\x1b[?25l\xe4\xbd\xa0"); // U+4F60: wide, unmapped -> FFFD art at cols 0-1
+    render_terminal_screen(&buf, &window, &s);
+    const left = ink_count(&buf, W * 4, 0, y0, 8, 8, fg);
+    const right = ink_count(&buf, W * 4, 8, y0, 8, 8, fg);
+    const past = ink_count(&buf, W * 4, 16, y0, 8, 8, fg);
+    // Real art in BOTH halves (the 2× stretch), byte-symmetric (painted
+    // once), and nothing at all past the pair (no column shift).
+    try std.testing.expect(left > 4);
+    try std.testing.expectEqual(left, right);
+    try std.testing.expectEqual(@as(usize, 0), past);
+    // The continuation cell alone draws nothing (the base owns the pair).
+    var lone: [8 * 8 * 4]u8 = undefined;
+    @memset(&lone, 0);
+    driving_award.draw_cell_glyph(&lone, 32, 0, 0, s.cellAt(0, 1), 0xffffff, true);
+    try std.testing.expectEqual(@as(usize, 0), ink_count(&lone, 32, 0, 0, 8, 8, 0xffffff));
+}
+
+test "driving_award: rune resolve — box art is real, FFFD and unmapped paint the fallback (M73a-2 #1631)" {
+    // PULSE's exact frame resolves to its own art, never the fallback.
+    const frame = [_]u21{ 0x250c, 0x2500, 0x2510, 0x2502, 0x2514, 0x2518 };
+    for (frame) |cp| {
+        const rows = driving_award.rune_cell_rows(.{ .base = cp });
+        try std.testing.expect(!std.mem.eql(u8, &rows, &driving_award.font_unicode.fffd_glyph));
+    }
+    // U+FFFD resolves to the real fallback art (never a skip)…
+    try std.testing.expect(std.mem.eql(
+        u8,
+        &driving_award.rune_cell_rows(.{ .base = 0xFFFD }),
+        &driving_award.font_unicode.fffd_glyph,
+    ));
+    // …and so does an unmapped CJK rune (wide: the fallback stretches).
+    try std.testing.expect(std.mem.eql(
+        u8,
+        &driving_award.rune_cell_rows(.{ .base = 0x4F60 }),
+        &driving_award.font_unicode.fffd_glyph,
+    ));
+    // ASCII resolves through font8x8 byte-exactly.
+    try std.testing.expect(std.mem.eql(
+        u8,
+        &driving_award.rune_cell_rows(.{ .base = 'A' }),
+        &driving_award.font.glyphs['A' - 0x20],
+    ));
+}
+
 test "driving_award: blit_rect copies a sub-rect at the destination offset" {
     const SW = 4;
     const DW = 10;
