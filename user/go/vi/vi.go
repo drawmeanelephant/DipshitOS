@@ -107,6 +107,8 @@ const (
 	SlotAudioVolume  uintptr = 44
 	SlotAudioMute    uintptr = 45
 	SlotWinFillBatch uintptr = 46
+	SlotPingSend     uintptr = 59 // M71n: sys_ping_send(ip) — one ICMP echo request
+	SlotPingPoll     uintptr = 60 // M71n: sys_ping_poll() — drain RX, report the last reply seq
 	SlotNetStats     uintptr = 62 // M71g: the sys_net_stats snapshot (netstats.go)
 	SlotPipeRead     uintptr = 56 // M19 P1: the kernel pipe read (M68a wrapper)
 	SlotPipeWrite    uintptr = 57 // M19 P1: the kernel pipe write (M68a wrapper)

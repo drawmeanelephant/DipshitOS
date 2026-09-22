@@ -7,13 +7,34 @@
 # note: legacy seeds the share for Run A only (B/C run gateless);
 # the spec seeds all runs (per-spec share mode) -- behavior-neutral
 # for network paths, validated by the equivalence runs.
+#
+# M71n (#1573) retargeted the ping rows to GOPING.ELF, the Go successor to
+# Zig PING.BIN (deleted with user/src/ping.zig). GOPING speaks the same
+# slots 59/60 and the same N13/N14 preflight (vi.NetPreflight is the Go twin
+# of user/src/lib/netstatus.zig), so the 0/2/3 exit contract is unchanged and
+# only the binary name moved. FETCH.BIN stays Zig (card non-goal).
+#
+# HOST PREREQUISITE (fails the gate honestly when missing):
+#   bash tools/go/build-goping.sh   ->  .build/go/GOPING.ELF
 
 vgate_name live-net-offline "offline + no-route preflight, online control on VZ"
 vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 
+vgate_setup_python <<'PY'
+import os, shutil, sys
+rd = os.environ["RUN_DIR"]
+share = os.environ.get("VG_SHARE") or os.path.join(rd, "share")
+src = os.path.join(".build", "go", "GOPING.ELF")
+if not os.path.exists(src):
+    sys.exit("GOPING.ELF missing (expected " + src + ") - build it first: "
+             "bash tools/go/build-goping.sh")
+shutil.copy(src, os.path.join(share, "GOPING.ELF"))
+print("staged GOPING.ELF into share (%d bytes)" % os.path.getsize(os.path.join(share, "GOPING.ELF")))
+PY
+
 vgate_file a1.txt <<'EOF'
-exec PING.BIN -c 3 10.0.0.2
+exec GOPING.ELF -c 3 10.0.0.2
 exec FETCH.BIN
 echo both-launched
 EOF
@@ -24,7 +45,7 @@ EOF
 
 vgate_file b1.txt <<'EOF'
 net ip 10.0.0.1
-exec PING.BIN -c 1 10.0.0.2
+exec GOPING.ELF -c 1 10.0.0.2
 echo ping-noroute-launched
 EOF
 
@@ -35,7 +56,7 @@ EOF
 vgate_file c1.txt <<'EOF'
 net ip 10.0.0.1
 net arp 10.0.0.2
-exec PING.BIN -c 3 10.0.0.2
+exec GOPING.ELF -c 3 10.0.0.2
 echo ping-online-launched
 EOF
 
@@ -48,7 +69,7 @@ echo online-ok
 EOF
 
 vgate_run A -- --script '$RUN_DIR/a1.txt' --script2 '$RUN_DIR/a2.txt' --script2-after 'offline — no IP address' --script-expect 'FETCH.BIN exited status=3' --timeout 90
-vgate_run B -- --net '$RUN_DIR/b-cap.bin' --script '$RUN_DIR/b1.txt' --script2 '$RUN_DIR/b2.txt' --script2-after 'ping-noroute-launched' --script-expect 'PING.BIN exited status=3' --timeout 90
+vgate_run B -- --net '$RUN_DIR/b-cap.bin' --script '$RUN_DIR/b1.txt' --script2 '$RUN_DIR/b2.txt' --script2-after 'ping-noroute-launched' --script-expect 'GOPING.ELF exited status=3' --timeout 90
 vgate_run C -- --net '$RUN_DIR/c-cap.bin' --net-arp-respond 10.0.0.2 --net-icmp-respond 10.0.0.2 --net-tcp-respond 10.0.0.2:80 --script '$RUN_DIR/c1.txt' --script2 '$RUN_DIR/c2.txt' --script2-after 'ping statistics' --script3 '$RUN_DIR/c3.txt' --script3-after 'fetch: starting' --script-expect 'FETCH.BIN exited status=42' --timeout 120
 
 vgate_assert A serial-contains 'ping: offline — no IP address'
@@ -60,8 +81,8 @@ import os, re, sys
 ser = open(os.environ["VG_SER"], errors="replace").read()
 # Legacy -cE >= 1 with the ([^0-9]|$) guard (status=2 must not match
 # status=20+, hex exit likewise).
-if sum(1 for _ in re.finditer(r"PING\.BIN exited status=2([^0-9]|$)|exit=0x0000000000000002", ser)) < 1:
-    sys.exit("FAIL: no PING.BIN exit-2")
+if sum(1 for _ in re.finditer(r"GOPING\.ELF exited status=2([^0-9]|$)|exit=0x0000000000000002", ser)) < 1:
+    sys.exit("FAIL: no GOPING.ELF exit-2")
 if sum(1 for _ in re.finditer(r"FETCH\.BIN exited status=3([^0-9]|$)|exit=0x0000000000000003", ser)) < 1:
     sys.exit("FAIL: no FETCH.BIN exit-3")
 # Fast exit: the bounded poll never ran -- no statistics footer.
@@ -77,8 +98,8 @@ vgate_assert B python <<'PY'
 import os, re, sys
 ser = open(os.environ["VG_SER"], errors="replace").read()
 # Legacy -cE >= 1 (guarded) + zero statistics lines (fast exit).
-if sum(1 for _ in re.finditer(r"PING\.BIN exited status=3([^0-9]|$)|exit=0x0000000000000003", ser)) < 1:
-    sys.exit("FAIL: no PING.BIN exit-3")
+if sum(1 for _ in re.finditer(r"GOPING\.ELF exited status=3([^0-9]|$)|exit=0x0000000000000003", ser)) < 1:
+    sys.exit("FAIL: no GOPING.ELF exit-3")
 if sum(1 for l in ser.splitlines() if "ping statistics" in l) != 0:
     sys.exit("FAIL: ping statistics present (not a fast exit)")
 print("offline B exit ok")
@@ -98,8 +119,8 @@ vgate_assert C python <<'PY'
 import os, re, sys
 ser = open(os.environ["VG_SER"], errors="replace").read()
 # Legacy -E pair: the exit-0 / exit-42 rows.
-if not re.search(r"PING\.BIN exited status=0|PING\.BIN.*exit=0x0000000000000000", ser):
-    sys.exit("FAIL: no PING.BIN exit-0 row")
+if not re.search(r"GOPING\.ELF exited status=0|GOPING\.ELF.*exit=0x0000000000000000", ser):
+    sys.exit("FAIL: no GOPING.ELF exit-0 row")
 if not re.search(r"FETCH\.BIN exited status=42|FETCH\.BIN.*exit=0x000000000000002a", ser):
     sys.exit("FAIL: no FETCH.BIN exit-42 row")
 print("offline C control ok")

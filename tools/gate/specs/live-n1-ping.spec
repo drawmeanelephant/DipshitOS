@@ -1,17 +1,37 @@
-# live-n1-ping.spec -- PING.BIN (exec'd) pings the host responder 3x
+# live-n1-ping.spec -- GOPING.ELF (exec'd) pings the host responder 3x
 # from EL0: header, three seq replies, statistics, zero loss, exit 0.
 # Mirrors tools/verify-live-n1-ping.sh (M26 N1, issue #399).
+#
+# M71n (#1573) retargeted this spec to the Go successor: Zig PING.BIN and
+# user/src/ping.zig are deleted, and GOPING.ELF (user/go/ping) speaks the
+# same slots 59/60 over the same ICMP path with PING.BIN's markers and exit
+# contract, so every assert below moved by binary name only.
+#
+# HOST PREREQUISITE (fails the gate honestly when missing):
+#   bash tools/go/build-goping.sh   ->  .build/go/GOPING.ELF
 
-vgate_name live-n1-ping "PING.BIN 3-packet ICMP round trip from EL0 on VZ"
+vgate_name live-n1-ping "GOPING.ELF 3-packet ICMP round trip from EL0 on VZ"
 vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 
 vgate_file script-1.txt <<'EOF'
 net ip 10.0.0.1
 net arp 10.0.0.2
-exec PING.BIN -c 3 10.0.0.2
+exec GOPING.ELF -c 3 10.0.0.2
 echo ping-launched
 EOF
+
+vgate_setup_python <<'PY'
+import os, shutil, sys
+rd = os.environ["RUN_DIR"]
+share = os.environ.get("VG_SHARE") or os.path.join(rd, "share")
+src = os.path.join(".build", "go", "GOPING.ELF")
+if not os.path.exists(src):
+    sys.exit("GOPING.ELF missing (expected " + src + ") - build it first: "
+             "bash tools/go/build-goping.sh")
+shutil.copy(src, os.path.join(share, "GOPING.ELF"))
+print("staged GOPING.ELF into share (%d bytes)" % os.path.getsize(os.path.join(share, "GOPING.ELF")))
+PY
 
 vgate_file script-2.txt <<'EOF'
 procs
@@ -35,7 +55,7 @@ ser = open(os.environ["VG_SER"], errors="replace").read()
 # Legacy -E pair: ARP resolved either way + the exit-0 reap row.
 if not re.search(r"net arp: (request for|resolved)", ser):
     sys.exit("FAIL: no ARP resolution line")
-if not re.search(r"PING.BIN.*state=exited.*0|PING.BIN\s+exit=0x0000000000000000", ser):
-    sys.exit("FAIL: no PING.BIN exit-0 row")
+if not re.search(r"GOPING\.ELF.*state=exited.*0|GOPING\.ELF\s+exit=0x0000000000000000", ser):
+    sys.exit("FAIL: no GOPING.ELF exit-0 row")
 print("ping arp + reap ok")
 PY

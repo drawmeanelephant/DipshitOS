@@ -1,10 +1,13 @@
 //! N13/N14 (march-m26): network preflight for userland net apps.
 //!
-//! PING.BIN and FETCH.BIN call `check()` (one `sys_net_stats` snapshot,
-//! slot 62 — the M26 N2 seam, zero new kernel surface) before their first
-//! network operation. The pure classifier below turns the snapshot into a
-//! diagnosis so the apps exit FAST with a human message instead of burning
-//! their bounded timeout / printing generic send failures.
+//! FETCH.BIN calls `check()` (one `sys_net_stats` snapshot, slot 62 — the
+//! M26 N2 seam, zero new kernel surface) before its first network operation.
+//! The pure classifier below turns the snapshot into a diagnosis so the app
+//! exits FAST with a human message instead of burning its bounded timeout /
+//! printing generic send failures. PING.BIN was the other caller until M71n
+//! (#1573) retired it: its Go successor GOPING.ELF reads the same snapshot
+//! through the Go twin, user/go/vi/netdiag.go, which pins the SAME message
+//! shapes this file renders.
 //!
 //! Honest bounds (mirror of the claim notes):
 //!   - Device-absence and IP-unset are INDISTINGUISHABLE from EL0: slot 62

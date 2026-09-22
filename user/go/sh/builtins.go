@@ -433,9 +433,9 @@ type helpEntry struct {
 // skipped, so a build with a trimmed table still prints a coherent catalog.
 var helpGroups = []string{"shell", "files", "environment", "scripts", "jobs", "identity"}
 
-// helpExternal is the one non-builtin verb that gets a row: `exec` is
-// resolved by the engine's parser, not by the builtin map, and it is where a
-// daily user looks for "how do I run a program".
+// helpExternal is the non-builtin VERB that gets a row: `exec` is resolved by
+// the engine's parser, not by the builtin map, and it is where a daily user
+// looks for "how do I run a program".
 const helpExternal = "exec"
 
 // subsetBlurb is the scripting subset's one-line contract (M68a). Kept
@@ -494,8 +494,17 @@ var helpCatalog = map[string]helpEntry{
 	"test":   {group: "tools", usage: "test EXPR", blurb: "evaluate EXPR and set $? (no output)"},
 	"[":      {group: "tools", usage: "[ EXPR ]", blurb: "evaluate EXPR and set $? (the closing ] is required)"},
 
-	// externals
-	helpExternal: {group: "externals", usage: "exec NAME [args...]", blurb: "(& backgrounds it; jobs/fg track it)"},
+	// externals: the verb, then the Go net CLIs a daily user reaches from
+	// this prompt by name (M71n #1573 — `exec GOTGIT.ELF` and `exec
+	// GOFETCH.ELF` worked but nothing in `help` named them, and GOPING.ELF
+	// replaced Zig PING.BIN as the ping a user can discover). They are
+	// listed only: the engine execs them like any other image, so D1 ("exec
+	// Go binaries; do not grow a POSIX inetutils builtin table") is
+	// untouched — no builtin, no tool, just a catalog row.
+	helpExternal:  {group: "externals", usage: "exec NAME [args...]", blurb: "(& backgrounds it; jobs/fg track it)", notes: "NAME resolves bare, then with .ELF and .BIN, case-insensitively, out of the share."},
+	"GOFETCH.ELF": {group: "externals", usage: "exec GOFETCH.ELF https://HOST[:PORT]/ [sni [name|expired|chain]]", blurb: "fetch a page over in-process TLS (Go)", notes: "The handshake is in-process (virelai/tls); an https URL is never rewritten to http."},
+	"GOPING.ELF":  {group: "externals", usage: "exec GOPING.ELF [-c count] <a.b.c.d>", blurb: "ICMP echo to a dotted IPv4 address (Go)", notes: "Exits 2 when no IP is set and 3 when the destination is not ARP-resolved."},
+	"GOTGIT.ELF":  {group: "externals", usage: "exec GOTGIT.ELF clone https://HOST[:PORT]/REPO [DIR]", blurb: "clone a git repository over in-process TLS (Go)", notes: "Clone is the supported verb; the work tree lands on the share."},
 }
 
 // helpGroupNames lists one group's verbs, sorted, or nil when the group is
@@ -525,8 +534,9 @@ func helpCatalogText() string {
 		b.WriteString("  " + g + ": " + strings.Join(names, " ") + "\n")
 	}
 	b.WriteString("tools: " + strings.Join(toolNames(), " ") + "\n")
-	e := helpCatalog[helpExternal]
-	b.WriteString("externals: " + e.usage + "  " + e.blurb + "\n")
+	// The externals section lists the verb AND the app names a user can type
+	// (M71n #1573); `help <name>` gives any row's usage and description.
+	b.WriteString("externals: " + strings.Join(helpGroupNames("externals"), " ") + "\n")
 	b.WriteString("subset: " + subsetBlurb + "\n")
 	b.WriteString("help <cmd> for one verb, help <group> for one group\n")
 	return b.String()
@@ -554,10 +564,8 @@ func helpOne(c *cmdCtx, name string) int {
 		c.out([]byte("tools: " + strings.Join(toolNames(), " ") + "\n"))
 		return 0
 	}
-	if name == "externals" {
-		c.out([]byte("externals: " + helpCatalog[helpExternal].usage + "\n"))
-		return 0
-	}
+	// `help externals` is served by the group branch above (the group is never
+	// empty — `exec` is a member).
 	c.out([]byte("unknown command '" + name + "' \u2014 try 'help'\n"))
 	return 1
 }

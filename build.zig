@@ -1334,29 +1334,14 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_tool.step);
 
     // ------------------------------------------------------------------
-    // Guest: thirty-fourth ESP user program (M26 N1 — issue #399) PING.BIN.
-    // Headless ICMP ping: sends echo requests, shows RTT + loss stats.
-    // Uses existing ICMP path (net ping) when available; falls back to
-    // simulated RTT for host tests. No window, no heap.
+    // M71n (#1573): PING.BIN (the thirty-fourth ESP program, M26 N1 — issue
+    // #399) is RETIRED with user/src/ping.zig. Its Go successor is GOPING.ELF
+    // (user/go/ping, built by tools/go/build-goping.sh) — a host-share ELF
+    // like GOTOP.ELF, not an in-image Zig program, so there is no build step
+    // to replace this one. live-n1-ping.spec and live-net-offline.spec stage
+    // GOPING.ELF instead; it keeps PING.BIN's markers and its 0/1/2/3 exit
+    // contract, so their assertions moved by binary name.
     // ------------------------------------------------------------------
-    const ping_prog = b.addExecutable(.{
-        .name = "user-ping",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("user/src/ping.zig"),
-            .target = kernel_target,
-            .optimize = .ReleaseSmall,
-        }),
-    });
-    ping_prog.linker_script = b.path("user/linker.ld");
-    const ping_step = b.step("ping", "Build the thirty-fourth ESP user program (zig-out/bin/PING.BIN)");
-    const ping_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
-    ping_elf2bin.addFileArg(ping_prog.getEmittedBin());
-    const ping_bin = ping_elf2bin.addOutputFileArg("PING.BIN");
-    ping_elf2bin.has_side_effects = true;
-    ping_elf2bin.stdio = .inherit;
-    ping_step.dependOn(&ping_elf2bin.step);
-    const install_ping = b.addInstallFileWithDir(ping_bin, .bin, "PING.BIN");
-    b.getInstallStep().dependOn(&install_ping.step);
 
     // ------------------------------------------------------------------
     // Guest: thirty-seventh ESP user program (M26 N2 — issue #400) NETSTAT.BIN.
