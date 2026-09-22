@@ -2032,28 +2032,15 @@ pub fn build(b: *std.Build) void {
     // ------------------------------------------------------------------
 
     // ------------------------------------------------------------------
-    // Guest: DOC.BIN — M-web in-guest HTML viewer (issues #1202–#1207, ADR 0028).
-    // DSK3 segmented (writable .data/.bss — parse/layout arenas + TabApp).
+    // M71i (#1568): DOC.BIN (the M-web in-guest HTML viewer, issues
+    // #1202–#1207, ADR 0028) is RETIRED with user/src/doc.zig. The EL0 HTML
+    // consumer is WEB.ELF (`user/go/browser`, built by
+    // tools/go/build-web.sh) — one renderer, per ADR 0030's dual-toolkit rule
+    // and the M71i amendment to ADR 0028 (D1/D3). `user/src/lib/html/`
+    // (parse/layout/url + their host tests) went with it: Go's
+    // `user/go/webrender` owns parse/layout/paint now, and it is host-tested
+    // harder than the Zig modules were (golden corpus, layout, text, url).
     // ------------------------------------------------------------------
-    const doc_prog = b.addExecutable(.{
-        .name = "user-doc",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("user/src/doc.zig"),
-            .target = kernel_target,
-            .optimize = .ReleaseSmall,
-        }),
-    });
-    doc_prog.linker_script = b.path("user/linker-segmented.ld");
-    const doc_step = b.step("doc", "Build the HTML document viewer (zig-out/bin/DOC.BIN) — DSK3 segmented (writable .data/.bss)");
-    const doc_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
-    doc_elf2bin.addFileArg(doc_prog.getEmittedBin());
-    const doc_bin = doc_elf2bin.addOutputFileArg("DOC.BIN");
-    doc_elf2bin.has_side_effects = true;
-    doc_elf2bin.stdio = .inherit;
-    doc_step.dependOn(&doc_elf2bin.step);
-    const install_doc = b.addInstallFileWithDir(doc_bin, .bin, "DOC.BIN");
-    doc_step.dependOn(&install_doc.step);
-    b.getInstallStep().dependOn(&install_doc.step);
 
     // ------------------------------------------------------------------
     // Guest: Sexiburger Action & Tab test app (Milestone 19 — issues #701, #705, #782)
@@ -2280,9 +2267,10 @@ pub fn build(b: *std.Build) void {
         "user/src/lib/script.zig",
         "user/src/lib/netauth.zig",
         "user/src/lib/crypto.zig",
-        "user/src/lib/html/parse.zig",
-        "user/src/lib/html/layout.zig",
-        "user/src/lib/html/url.zig",
+        // M71i (#1568): user/src/lib/html/{parse,layout,url}.zig are deleted
+        // with DOC.BIN — the modules' 21 host tests went with them, and the
+        // surviving renderer's own suites (user/go/webrender: htmlparse,
+        // layout, text, url, golden) carry the parse/layout claims.
         "user/src/lib/ssh/wire.zig",
         "user/src/lib/ssh/packet.zig",
         "user/src/lib/ssh/stream.zig",

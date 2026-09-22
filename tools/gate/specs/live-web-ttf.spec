@@ -34,6 +34,13 @@
 # on the host - the only in-view rules are the two link underlines). Boot 03 is
 # where table depth is visible.
 #
+# M71i (#1568): boot 04 INHERITS two rungs from the retired Zig specs --
+# live-doc-tables' `dl/dt/dd` (the S2 half DEPTH.HTML does not carry) and
+# live-doc-web boot 01's missing-`<img>` placeholder. Both are pinned HERE
+# rather than in a new spec: this file already owns S2/S3/S4 on the Go path,
+# and the card's rule is extend-don't-add. The S2 table rule, the S3 image
+# decode and the S4 link accent stay where boot 02 already pins them.
+#
 # HOST PREREQUISITE (fails the gate honestly when missing):
 #   .build/go/WEB.ELF  --  bash tools/go/build-web.sh browser WEB
 #
@@ -69,6 +76,10 @@ vgate_file script-depth.txt <<'EOF'
 exec WEB.ELF /host/DEPTH.HTML
 EOF
 
+vgate_file script-lists.txt <<'EOF'
+exec WEB.ELF /host/LISTS.HTML
+EOF
+
 vgate_setup_python <<'PY'
 # Boot 02's page and its image. The swatch carries four colours that appear
 # nowhere else on the page, so the pixel probe can assert the DECODE rather
@@ -96,8 +107,18 @@ page = (b"<p>MMMMMMMM</p>"
         b"<p><a href=\"NEXT.HTML\">a link</a></p>")
 with open(os.path.join(share, "DEPTH.HTML"), "wb") as fh:
     fh.write(page)
-print("boot 02 fixture: SWATCH.QOI %d bytes (%dx%d), DEPTH.HTML %d bytes"
-      % (len(out), W, H, len(page)))
+# M71i (#1568): boot 04's fixture -- the two structures the retired live-doc
+# specs pinned alone. `<dl>` is ADR 0028 S2 (tables AND definition lists) and
+# DEPTH.HTML does not carry it; the second <img> names a file that is not on
+# the share, which is the migration's other inherited probe: a missing source
+# is a VISIBLE placeholder box, never a blank (renderer rule D5).
+lists = (b"<h4>Lists</h4>"
+         b"<dl><dt>term</dt><dd>definition sits indented</dd></dl>"
+         b"<p><img src=\"NOPE.QOI\" alt=\"missing\"></p>")
+with open(os.path.join(share, "LISTS.HTML"), "wb") as fh:
+    fh.write(lists)
+print("boot 02 fixture: SWATCH.QOI %d bytes (%dx%d), DEPTH.HTML %d bytes, "
+      "LISTS.HTML %d bytes" % (len(out), W, H, len(page), len(lists)))
 PY
 
 vgate_setup_python <<'PY'
@@ -119,7 +140,8 @@ for face in ("INTER.TTF", "INTERB.TTF", "INTERI.TTF", "FIRACODE.TTF"):
     p = os.path.join(share, face)
     if not os.path.exists(p):
         sys.exit("gate 01 needs the seeded face " + p)
-print("staged WEB.ELF (%d bytes) + OLIVER.HTML + DEPTH.HTML; faces present: %s"
+print("staged WEB.ELF (%d bytes) + OLIVER.HTML + DEPTH.HTML + LISTS.HTML; "
+      "faces present: %s"
       % (os.path.getsize(os.path.join(share, "WEB.ELF")),
          ", ".join(sorted(f for f in os.listdir(share) if f.endswith(".TTF")))))
 PY
@@ -462,5 +484,105 @@ if span > 360:
     fails.append("fallback band span %d is wider than the grid can produce" % span)
 assert not fails, "WEB-TTF-FALLBACK-FAILS: " + "; ".join(fails)
 print("live-web-ttf 03 ok: faces gone -> grid metrics, page still painted")
+PY
+
+# --- boot 04: the two rungs inherited from the retired live-doc specs ----
+# M71i (#1568): `<dl>/<dt>/<dd>` (ADR 0028 S2, which live-doc-tables pinned
+# and DEPTH.HTML does not carry) and the missing-<img> placeholder (S3, from
+# live-doc-web boot 01). Both are asserted as RELATIONS the page cannot
+# satisfy by accident: the dd's ink starts further right than the dt's, and a
+# surface-filled box exists where the named file does not -- a box, not a
+# blank. Thresholds come from the measured run (the probe prints them).
+#
+# It runs LAST on purpose, after boot 03 has removed every face from the
+# share, so it renders in the 8x8 grid -- and neither claim depends on
+# typography: the indent is a layout property and the placeholder is a box.
+# That also makes this boot a second, incidental fallback render, which cost
+# nothing to get.
+vgate_run 04 -- \
+    --screen '$RUN_DIR/screen' \
+    --via-virtio --cvc-snap \
+    --snapshot-out '$RUN_DIR/snap-04' \
+    --script '$RUN_DIR/script-lists.txt' \
+    --snapshot-after "web: settled" \
+    --snapshot-after "web: repaint" \
+    --script-expect "web: ready" --timeout 120
+
+vgate_assert 04 serial-contains 'web: url /host/LISTS.HTML'
+vgate_assert 04 serial-contains 'web: parse nodes='
+vgate_assert 04 serial-contains 'web: layout blocks='
+vgate_assert 04 serial-contains 'web: settled'
+vgate_assert 04 serial-absent 'web: error'
+vgate_assert 04 serial-absent '[EXC] parking:'
+vgate_assert 04 snapshot 'snap-04-0.raw' <<'PY'
+import sys
+data = open(sys.argv[1], "rb").read()
+w = 1280
+X, Y, W, H = 40, 28, 512, 384
+# The window's own chrome sits above the page: a title band (y 28-43), the
+# title text (48-54) and a toolbar band (62-75) -- measured on this boot. The
+# page's client region is y 84 .. Y+H-40, with the status bar below it, so the
+# scan below starts under the chrome and ends above the bar. (The first draft
+# scanned the whole window and found the chrome instead of the page: the bands
+# it reported were the title/toolbar fills.)
+Y0, Y1 = Y + 56, Y + H - 40
+CL, CR = X + 6, X + W - 6
+def px(x, y):
+    k = (y * w + x) * 4
+    return (data[k + 2], data[k + 1], data[k])
+def near(c, want, tol=8):
+    return all(abs(a - b) <= tol for a, b in zip(c, want))
+PAGE_BG = (0x18, 0x20, 0x26)
+SURFACE = (0x22, 0x2d, 0x35)
+def ink(c):
+    return not near(c, PAGE_BG, 12)
+prof = []
+for yy in range(Y0, Y1):
+    prof.append(sum(1 for xx in range(CL, CR) if ink(px(xx, yy))))
+bands = []
+i = 0
+while i < len(prof):
+    if prof[i] == 0:
+        i += 1
+        continue
+    s = i
+    while i < len(prof) and prof[i] > 0:
+        i += 1
+    ys, ye = Y0 + s, Y0 + i - 1
+    lo = min(xx for xx in range(CL, CR)
+             if any(ink(px(xx, yy)) for yy in range(ys, ye + 1))) - X
+    hi = max(xx for xx in range(CL, CR)
+             if any(ink(px(xx, yy)) for yy in range(ys, ye + 1))) - X
+    surf = sum(1 for yy in range(ys, ye + 1) for xx in range(CL, CR)
+               if near(px(xx, yy), SURFACE))
+    bands.append((ys, ye, sum(prof[s:i]), lo, hi, surf))
+print("live-web-ttf 04 bands (y0,y1,ink,x0,x1,surface abs):")
+for b in bands:
+    print("   %s" % (b,))
+fails = []
+text_bands = [b for b in bands if b[5] < 100 and b[2] >= 50 and b[4] - b[3] < 220]
+if len(text_bands) < 3:
+    fails.append("expected h4 + dt + dd text bands, found %d" % len(text_bands))
+else:
+    dt, dd = text_bands[1], text_bands[2]
+    print("live-web-ttf 04 dl: dt y=%d x0=%d ink=%d, dd y=%d x0=%d ink=%d, indent=%d"
+          % (dt[0], dt[3], dt[2], dd[0], dd[3], dd[2], dd[3] - dt[3]))
+    if dt[1] >= dd[0]:
+        fails.append("dt (y%d-%d) does not precede dd (y%d-%d)" % (dt[0], dt[1], dd[0], dd[1]))
+    if dd[3] - dt[3] < 8:
+        fails.append("dd x0=%d is not indented past dt x0=%d (a definition list indents its term)"
+                     % (dd[3], dt[3]))
+boxes = [b for b in bands if b[5] >= 400]
+if not boxes:
+    fails.append("no surface-filled placeholder box: the missing <img> src must be VISIBLE, never blank")
+else:
+    box = boxes[0]
+    print("live-web-ttf 04 placeholder: %dx%d px surface=%d at y=%d"
+          % (box[4] - box[3] + 1, box[1] - box[0] + 1, box[5], box[0]))
+    if box[1] - box[0] < 8 or box[4] - box[3] < 16:
+        fails.append("placeholder box %dx%d is too small to be the undecoded image's box"
+                     % (box[4] - box[3] + 1, box[1] - box[0] + 1))
+assert not fails, "WEB-TTF-LISTS-FAILS: " + "; ".join(fails)
+print("live-web-ttf 04 ok: dl indents its definition, missing img still paints a box")
 PY
 

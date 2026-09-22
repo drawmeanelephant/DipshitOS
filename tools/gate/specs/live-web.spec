@@ -30,6 +30,29 @@
 #      and +20 s after web: settled. Two host delays fire kind-4
 #      snapshots; the sampler pins that shim band. Seated = go-wm-console-ink.
 #
+#  14 M71i (#1568) INHERITS the M70d (#1456) fidelity-corpus rung from the
+#      retired live-doc-web boot 05: CERN's first-website hub, the corpus's
+#      own pinned bytes, laid out from the UA table. No new renderer
+#      capability -- the point is that the rung survives its consumer.
+#
+# M71i (#1568): DOC.BIN and its three specs (live-doc, live-doc-tables,
+# live-doc-web) are RETIRED into WEB.ELF, because two HTML painters is the
+# dual toolkit ADR 0030 forbids. Nothing was dropped silently: every rung
+# those specs pinned is pinned here or in live-web-ttf, by the probe named
+# below. Rows marked "vacant at HEAD" are the ones the retired specs held
+# alone, so this card is where they move.
+#   S1 page render + pixels       boot 01 here; live-web-ttf boot 01
+#   S1 typography / faces         live-web-ttf 01 (real faces) vs 03 (grid)
+#   S1 missing / malformed page   boot 04 + boot 06/07 here (missing, dns,url)
+#   S2 tables + header rule       live-web-ttf boot 02
+#   S2 dl/dt/dd                   live-web-ttf boot 04 (vacant at HEAD)
+#   S3 <img> decode               live-web-ttf boot 02 (SWATCH quadrants)
+#   S3 missing-src placeholder    live-web-ttf boot 04 (vacant at HEAD)
+#   S4 click-nav                  boot 02 here
+#   S5 http fetch                 boot 03 here
+#   S6 oliver-publish page        boot 01 here + go-dogfood boot 02
+#   corpus (M70d #1456)           boot 14 here
+#
 # HOST PREREQUISITE (fails honestly when missing):
 #   .build/go/WEB.ELF     -- `bash tools/go/build-web.sh browser WEB`
 #   .build/go/GOFETCH.ELF -- `bash tools/go/build-web.sh fetch GOFETCH`
@@ -100,6 +123,10 @@ net arp 10.0.0.2
 exec GOFETCH.ELF https://10.0.0.2:24533/
 EOF
 
+vgate_file script-corpus.txt <<'EOF'
+exec WEB.ELF /host/CORPUS.HTML
+EOF
+
 vgate_setup_python <<'PY'
 # Boot 08 needs a peer that ACCEPTS the connection and never answers: the
 # browser must sit in its waiting state so the injected cancel key has a load
@@ -147,6 +174,17 @@ for src_name, dst_name in (("gate-page.html", "PAGE.HTML"), ("gate-next.html", "
                            ("hostile.html", "HOSTILE.HTML")):
     shutil.copy(os.path.join("user", "go", "browser", "testdata", src_name),
                 os.path.join(share, dst_name))
+# M71i (#1568): the M70d (#1456) fidelity-corpus page, inherited from the
+# retired live-doc-web boot 05 ("one UA-table corpus page the guest can
+# open"). It is a real page off the pinned corpus and the only thing that
+# keeps that rung asserted IN the guest now that its Zig consumer is gone;
+# the host-side golden tests (user/go/webrender/golden_test.go) pin all nine
+# corpus pages' layout, but they never boot the VM.
+corpus = os.path.join("user", "go", "webrender", "testdata", "corpus",
+                      "cern-home.html")
+if not os.path.exists(corpus):
+    sys.exit("corpus fixture missing at " + corpus)
+shutil.copy(corpus, os.path.join(share, "CORPUS.HTML"))
 print("staged WEB.ELF (%d bytes) + PAGE.HTML/NEXT.HTML" %
       os.path.getsize(os.path.join(share, "WEB.ELF")))
 gofetch = os.path.join(".build", "go", "GOFETCH.ELF")
@@ -750,4 +788,75 @@ for label, m in (("3s", a), ("20s", b)):
     if pct < 2.0 or pct > 12.0:
         sys.exit("FAIL: %s console-green %.3f%% outside the pinned shim band 2-12%% (M69b ~5.8%%)" % (label, pct))
 print("live-web 13 console-ink: shim web boot still carries kernel console green in the uncovered band (M69b reproduced; seated probe is go-wm-console-ink)")
+PY
+
+# --- boot 14: M70d shard 1 corpus page, on the surviving consumer --------
+# M71i (#1568): inherited from the retired live-doc-web boot 05. The fixture
+# (CERN's first-website hub) is the corpus's own pinned bytes, and the page is
+# readable from the compiled-in UA table alone -- no cascade, no script (ADR
+# 0028 D2). The probe asserts a multi-paragraph real page, not a marker: the
+# retired boot pinned 16 px of h1 ink, this one pins ink bands and text ink
+# inside the client box so a page that failed to lay out cannot pass on its
+# own `settled`.
+vgate_run 14 -- \
+    --screen '$RUN_DIR/screen' \
+    --via-virtio --cvc-snap \
+    --snapshot-out '$RUN_DIR/snap-14' \
+    --script '$RUN_DIR/script-corpus.txt' \
+    --snapshot-after "web: settled" \
+    --snapshot-after "web: repaint" \
+    --script-expect "web: ready" --timeout 180
+
+vgate_assert 14 serial-contains 'web: url /host/CORPUS.HTML'
+vgate_assert 14 serial-contains 'web: parse nodes='
+vgate_assert 14 serial-contains 'web: layout blocks='
+vgate_assert 14 serial-contains 'web: paint items='
+vgate_assert 14 serial-contains 'web: settled'
+vgate_assert 14 serial-contains 'web: ready'
+vgate_assert 14 serial-absent 'web: error'
+vgate_assert 14 serial-absent '[EXC] parking:'
+vgate_assert 14 snapshot 'snap-14-0.raw' <<'PY'
+import sys
+data = open(sys.argv[1], "rb").read()
+w = 1280
+X, Y = 40, 28
+CX, CY, CW, CH = 8, 50, 496, 322
+def px(x, y):
+    k = (y * w + x) * 4
+    return (data[k + 2], data[k + 1], data[k])
+def near(c, want, tol=6):
+    return all(abs(a - b) <= tol for a, b in zip(c, want))
+PAGE_BG = (0x18, 0x20, 0x26)
+INK = (0xe6, 0xed, 0xf3)
+ink = text = 0
+rows = []
+for yy in range(CY, CY + CH):
+    n = 0
+    for xx in range(CX, CX + CW):
+        c = px(X + xx, Y + yy)
+        if not near(c, PAGE_BG, 12):
+            n += 1
+            ink += 1
+        if near(c, INK, 12):
+            text += 1
+    rows.append(n)
+bands = 0
+i = 0
+while i < len(rows):
+    if rows[i] == 0:
+        i += 1
+        continue
+    bands += 1
+    while i < len(rows) and rows[i] > 0:
+        i += 1
+print("live-web 14 corpus: ink=%d text-ink=%d bands=%d" % (ink, text, bands))
+fails = []
+if ink < 1500:
+    fails.append("the corpus page painted only %d px" % ink)
+if text < 100:
+    fails.append("only %d px of text ink: the page did not lay out as prose" % text)
+if bands < 4:
+    fails.append("the corpus page produced %d ink bands: a multi-paragraph page was expected" % bands)
+assert not fails, "WEB-CORPUS-FAILS: " + "; ".join(fails)
+print("live-web 14 ok: the M70d corpus page opens on WEB.ELF")
 PY
