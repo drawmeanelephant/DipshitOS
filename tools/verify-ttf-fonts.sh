@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # verify-ttf-fonts.sh -- class A: TrueType font engine verification for
-# Inter (UI proportional font) and Fira Code (terminal / editor monospace font).
+# Inter Regular, Bold, and Italic, and Fira Code (monospace).
 #
 # Tests:
 #   1. TrueType SFNT table parser (head, maxp, hhea, hmtx, loca, glyf, cmap fmt 4 & 12).
@@ -26,27 +26,31 @@ GATE_LOG="artifacts/ttf-fonts-gate.txt"
 mkdir -p "$(dirname "$GATE_LOG")"
 exec > >(tee "$GATE_LOG") 2>&1
 
-echo "=== verify-ttf-fonts: TrueType Engine & Typography Verification (Inter + Fira Code) ==="
+echo "=== verify-ttf-fonts: TrueType Engine & Typography Verification (Inter Regular/Bold/Italic + Fira Code) ==="
 
-INTER_TTF="image/fonts/Inter-Regular.ttf"
-FIRA_TTF="image/fonts/FiraCode-Regular.ttf"
+# ADR 0028 amendment B byte sizes. A face that is present but the wrong file
+# fails here instead of only later, inside the parser.
+check_face() {
+    local path="$1" want="$2" label="$3" size
+    if [ ! -f "$path" ]; then
+        echo "FAIL: $label not found at $path" >&2
+        exit 1
+    fi
+    size=$(stat -f%z "$path" 2>/dev/null || stat -c%s "$path")
+    echo "  $label: $size bytes"
+    if [ "$size" != "$want" ]; then
+        echo "FAIL: $label is $size bytes, want $want (ADR 0028 amendment B)" >&2
+        exit 1
+    fi
+}
 
 # 1. Assert font files exist
 echo
 echo "[1/3] Verifying source TrueType font files in image/fonts/"
-if [ ! -f "$INTER_TTF" ]; then
-    echo "FAIL: Inter-Regular.ttf not found at $INTER_TTF" >&2
-    exit 1
-fi
-inter_size=$(stat -f%z "$INTER_TTF" 2>/dev/null || stat -c%s "$INTER_TTF")
-echo "  Inter-Regular.ttf: $inter_size bytes (OK)"
-
-if [ ! -f "$FIRA_TTF" ]; then
-    echo "FAIL: FiraCode-Regular.ttf not found at $FIRA_TTF" >&2
-    exit 1
-fi
-fira_size=$(stat -f%z "$FIRA_TTF" 2>/dev/null || stat -c%s "$FIRA_TTF")
-echo "  FiraCode-Regular.ttf: $fira_size bytes (OK)"
+check_face "image/fonts/Inter-Regular.ttf" 411640 "Inter-Regular.ttf"
+check_face "image/fonts/Inter-Bold.ttf" 420428 "Inter-Bold.ttf"
+check_face "image/fonts/Inter-Italic.ttf" 417388 "Inter-Italic.ttf"
+check_face "image/fonts/FiraCode-Regular.ttf" 289624 "FiraCode-Regular.ttf"
 
 # 2. Run unit tests for font_ttf.zig
 echo
@@ -63,4 +67,4 @@ echo "[3/3] Compiling userland with font engine integrated"
 PATH="/opt/homebrew/opt/gnu-sed/libexec/gnubin:/opt/homebrew/bin:$PATH" zig build desktop devcons
 
 echo
-echo "=== verify-ttf-fonts: PASS (Inter & Fira Code TrueType engine verified) ==="
+echo "=== verify-ttf-fonts: PASS (Inter Regular/Bold/Italic & Fira Code verified) ==="

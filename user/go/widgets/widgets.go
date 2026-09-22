@@ -14,7 +14,10 @@
 // can record and the guest can back with vi.Filler.
 package widgets
 
-import "virelai/theme"
+import (
+	"virelai/theme"
+	"virelai/webrender/font"
+)
 
 // Rect is an axis-aligned rectangle in integer canvas coordinates. Right and
 // Bottom are exclusive, matching the compositor's left-inclusive convention.
@@ -280,11 +283,14 @@ func (l *List) Draw(c Canvas) {
 	}
 }
 
-// drawGlyphRun paints one fixed-cell "glyph" per rune, clipped to the plate.
-// It is deliberately crude (6x8 cells) — a placeholder ink run, not a font,
-// so the widget's geometry stays the thing under test.
+// drawGlyphRun paints the VirelaiOS 8x8 face (the same bitmap NOTE uses),
+// clipped to the plate. Each lit run on a glyph row is one 1px-high fill.
+// A solid cell per rune reads as a horizontal bar the width of the line —
+// that is what the desktop was showing anywhere a Text, Button, or List
+// labelled itself.
 func drawGlyphRun(c Canvas, plate Rect, s string, rgb uint32) {
-	const cellW, cellH = 6, 8
+	const cellH = 8
+	cellW := font.Advance(1)
 	inner := plate.Inset(2)
 	if inner.Empty() {
 		return
@@ -294,12 +300,42 @@ func drawGlyphRun(c Canvas, plate Rect, s string, rgb uint32) {
 		y = inner.Y
 	}
 	i := 0
-	for range s {
+	for _, ch := range s {
 		x := inner.X + i*cellW
-		if x+cellW > inner.Right() {
+		if x >= inner.Right() {
 			break
 		}
-		c.FillRect(Rect{x, y, cellW - 2, cellH}, rgb)
+		g := font.Glyph8(ch)
+		for row := 0; row < cellH; row++ {
+			py := y + row
+			if py < inner.Y || py >= inner.Bottom() {
+				continue
+			}
+			bits := g[row]
+			col := 0
+			for col < 8 {
+				if bits&(1<<uint(col)) == 0 {
+					col++
+					continue
+				}
+				run := 1
+				for col+run < 8 && bits&(1<<uint(col+run)) != 0 {
+					run++
+				}
+				px, w := x+col, run
+				if px < inner.X {
+					w -= inner.X - px
+					px = inner.X
+				}
+				if px+w > inner.Right() {
+					w = inner.Right() - px
+				}
+				if w > 0 {
+					c.FillRect(Rect{X: px, Y: py, W: w, H: 1}, rgb)
+				}
+				col += run
+			}
+		}
 		i++
 	}
 }

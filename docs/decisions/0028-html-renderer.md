@@ -234,7 +234,7 @@ SIL OFL 1.1 (`image/fonts/OFL-Inter.txt`). Regular already in-tree at
 | Regular | `extras/ttf/Inter-Regular.ttf` | `image/fonts/Inter-Regular.ttf` | `/host/INTER.TTF` | 411,640 |
 | Bold | `extras/ttf/Inter-Bold.ttf` | `image/fonts/Inter-Bold.ttf` | `/host/INTERB.TTF` | 420,428 |
 | Italic | `extras/ttf/Inter-Italic.ttf` | `image/fonts/Inter-Italic.ttf` | `/host/INTERI.TTF` | 417,388 |
-| Mono | (Fira Code, unchanged) | `image/fonts/FiraCode-Regular.ttf` | `/host/FIRACODE.TTF` | 289,624 |
+| Mono | Fira Code, SIL OFL 1.1 (`image/fonts/OFL-FiraCode.txt`) | `image/fonts/FiraCode-Regular.ttf` | `/host/FIRACODE.TTF` | 289,624 |
 
 Italic **was** in the same extras tree Regular already used, so D2 of the card
 requires it. No other family's italic was fetched. Fira Code Bold was not
