@@ -111,24 +111,6 @@ func hasArg(args []string, word string) bool {
 	return false
 }
 
-// argvEnvpGuard pads the writable segment's bss so its end keeps at least
-// 0x908 bytes of distance to the segment's page end. The kernel packs the
-// argv+envp block (256 + 2048 bytes) into the image tail and extends the
-// data aperture's mmap-collision bound through it (kernel/src/process.zig
-// mmap_collides, issue #1214) — and the GOOS=virelai sbrk break starts at
-// memRound(moduledata.end), so a bss end that lands inside that bound
-// refuses the runtime's very first mmap and kills mallocinit before main
-// runs (observed on this exact binary: `runtime: cannot allocate memory`
-// during mheap.init). The build script asserts the invariant from the
-// linked ELF; adjust this array's size when it trips.
-var argvEnvpGuard [0x9b0]byte
-
-func init() {
-	// A store with a runtime-computed value keeps the pad in the bss (the
-	// linker dead-codes an unreferenced, constant-folded package var).
-	argvEnvpGuard[len(argvEnvpGuard)-1] = byte(len(argvEnvpGuard) & 0xff)
-}
-
 // headlessLine recognizes the `-c LINE` child form. argv[0] is the program
 // name when the spawner supplied one, so check both positions.
 func headlessLine(args []string) (string, bool) {
@@ -688,14 +670,3 @@ func (g *goshHost) ReadTTYLine() (string, bool) {
 func (g *goshHost) SleepSeconds(n int) {
 	vi.Sleep(uint64(n) * ticksPerSecond)
 }
-
-// argvEnvpGuard pads the writable segment's bss so its end keeps at least
-// 0x908 bytes of distance to the segment's page end. The kernel packs the
-// argv+envp block (256 + 2048 bytes) into the image tail and extends the
-// data aperture's mmap-collision bound through it (kernel/src/process.zig
-// mmap_collides, issue #1214) — and the GOOS=virelai sbrk break starts at
-// memRound(moduledata.end), so a bss end that lands inside that bound
-// refuses the runtime's very first mmap and kills mallocinit before main
-// runs (observed on this exact binary: `runtime: cannot allocate memory`
-// during mheap.init). The build script asserts the invariant from the
-// linked ELF; adjust this array's size when it trips.

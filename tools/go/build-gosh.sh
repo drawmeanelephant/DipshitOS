@@ -52,31 +52,17 @@ if [ "$SIZE" -gt "$MAX_BYTES" ]; then
 fi
 log "size ok (< $MAX_BYTES bytes)"
 
-# The kernel packs argv+envp (0x900 bytes) into the writable segment's tail
-# and protects it against the sbrk break (mmap_collides, issue #1214); the
-# runtime's break starts at the page-rounded bss end, so the bss must end
-# at least 0x900 bytes below the segment's page end or mallocinit dies on
-# its first mmap. Assert it from the linked ELF, naming the padding var.
-python3 - "$OUT" <<'PY'
-import struct, sys
-d = open(sys.argv[1], "rb").read()
-e_phoff, = struct.unpack_from("<Q", d, 0x20)
-e_phentsize, e_phnum = struct.unpack_from("<HH", d, 0x36)
-mem = 0
-for i in range(e_phnum):
-    off = e_phoff + i * e_phentsize
-    p_type, p_flags = struct.unpack_from("<II", d, off)
-    if p_type == 1 and (p_flags & 2):  # PT_LOAD, W — the writable segment
-        mem = struct.unpack_from("<Q", d, off + 40)[0]  # p_memsz
-slack = (-mem) % 4096
-need = 0x908  # the packed block (0x900) plus its 8-byte alignment step
-if slack < need:
-    sys.exit("build-gosh: writable segment memsz %#x leaves only %#x bytes of "
-             "page slack; the kernel's argv+envp protection needs >= %#x or the "
-             "runtime's first mmap is refused (grow user/go/sh argvEnvpGuard)"
-             % (mem, slack, need))
-print("build-gosh: argv+envp slack ok (memsz %#x, slack %#x bytes)" % (mem, slack))
-PY
+# Issue #1648: the argv+envp tail-slack assert that used to live here is
+# gone with its rule. It encoded the pre-M71m 2304-B block (need 0x908) and
+# the stale "grow user/go/sh argvEnvpGuard" remedy. Under M71m (#1572) the
+# block is 4096 B, exec.zig packs it at align8(mem_size) AND sizes the
+# segment to cover it, and the runtime floors the sbrk break at
+# memRound(argv_va + 4096) (overlay/runtime/os_virelai.go initBlocFloor),
+# which is >= argv_end_va for any image alignment. Binary-side page slack
+# never enters the rule; the invariant lives in exec.zig (cover), in the
+# host test beside process.zig's mmap_collides, and in the live-sh* gates
+# that boot a real GOSH through it. (The REAL trap that day was fork/overlay
+# drift, caught now by tools/env-check.sh -- same issue.)
 
 # Issue #1503: a hand-built ELF with no stamp is indistinguishable from a
 # leftover from another branch. Stamp source+elf hashes so class-B setup
