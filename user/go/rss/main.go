@@ -46,6 +46,7 @@ const (
 	markerAttach  = "rss: attached"
 	markerStorage = "rss: storage "
 	markerLoaded  = "rss: loaded feeds="
+	markerCache   = "rss: cache entries="
 	markerPainted = "rss: painted"
 	markerReady   = "rss: ready"
 	markerFetch   = "rss: fetch "
@@ -124,17 +125,15 @@ func main() {
 	} else {
 		vi.ConsoleLine("rss: no subscriptions yet (" + store.SubsFile + ")")
 	}
+	cache, _ := st.LoadCache()
 	if stt, err := st.LoadState(); err == nil {
 		m.A.Read = stt.Read
-		if stt.LastFeed != "" {
-			m.A.FeedTitle = stt.LastFeed
-		}
-	}
-	cache, _ := st.LoadCache()
-	if m.A.FeedTitle != "" {
-		if arts, ok := cache[m.A.FeedTitle]; ok && len(arts) > 0 {
-			m.A.Articles = arts // offline-ready: last known articles
-			m.A.View = app.ViewArticles
+		if url := app.CacheKey(stt.LastFeed, m.A.Subs); url != "" {
+			arts := cache[url]
+			m.A.RestoreFeed(url, m.A.Subs, arts)
+			if len(arts) > 0 {
+				vi.ConsoleLine(markerCache + vi.Itoa64(int64(len(arts))) + " first=" + arts[0].Title)
+			}
 		}
 	}
 	vi.ConsoleLine(markerLoaded + vi.Itoa64(int64(len(m.A.Subs))))
@@ -212,7 +211,11 @@ func discharge(m *ui.Model, st *store.Store, cache store.Cache) bool {
 		doFetch(m, st, cache, ef.FetchURL)
 	}
 	if ef.SaveState {
-		stt := store.State{Read: m.A.Read, LastFeed: m.A.FeedTitle}
+		last := m.A.FeedURL
+		if last == "" {
+			last = m.A.FeedTitle
+		}
+		stt := store.State{Read: m.A.Read, LastFeed: last}
 		if err := st.SaveState(stt); err != nil {
 			m.A.SetError(describe(err))
 		} else {
@@ -220,10 +223,18 @@ func discharge(m *ui.Model, st *store.Store, cache store.Cache) bool {
 		}
 	}
 	if ef.OpenLink != "" {
-		// The guest's browser is WEB.ELF; launch it best-effort and always make
-		// the link visible on the console so the action is never silent.
+		// vi.Exec keeps 31 bytes of each argument, which is shorter than an
+		// article URL. The full link is the file; WEB.ELF reads @path.
+		// The console line is the full URL either way.
 		vi.ConsoleLine("rss: open " + ef.OpenLink)
-		_, _ = vi.Exec("WEB.ELF", ef.OpenLink)
+		path, body, arg, ok := browserHandoff(ef.OpenLink)
+		if !ok {
+			m.A.SetError("Link is empty")
+		} else if rc := vi.WriteFileSafe(path, body); rc < 0 {
+			m.A.SetError("Could not hand the link to the browser")
+		} else {
+			_, _ = vi.Exec("WEB.ELF", arg)
+		}
 	}
 	return ef.Quit
 }

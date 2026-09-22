@@ -40,6 +40,8 @@ type Subscription struct {
 }
 
 // State is the read/unread and selection memory.
+// LastFeed is the feed URL, which is also the cache key. It is not the
+// display title: a title cannot look an article list back up.
 type State struct {
 	Read     map[string]bool
 	LastFeed string

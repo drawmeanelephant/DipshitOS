@@ -175,6 +175,11 @@ func guessBin(title string) string {
 		return "GOEDIT.ELF"
 	case "Term":
 		return "GOTERM.ELF"
+	case "RSS Reader":
+		// The reader declares this title (user/go/rss). The default arm would
+		// otherwise record the title itself as the binary, and a restored tab
+		// would look for a file named "RSS Reader".
+		return "RSS.ELF"
 	default:
 		return title
 	}

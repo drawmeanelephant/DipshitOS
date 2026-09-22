@@ -31,6 +31,9 @@ type Model struct {
 	Articles []feed.Article
 	Read     map[string]bool
 
+	// FeedURL is the cache key and the value persisted as LastFeed.
+	// FeedTitle is only the header text. A title is not a URL.
+	FeedURL    string
 	FeedTitle  string
 	FeedCursor int
 	ArtCursor  int
@@ -72,8 +75,17 @@ func New(width, height int) *Model {
 }
 
 // SetArticles installs a freshly fetched feed and moves to the article list.
+// url is kept even when title differs: the cache and the next refresh both
+// address the feed by URL.
 func (m *Model) SetArticles(url, title string, arts []feed.Article) {
-	m.FeedTitle = title
+	if url != "" {
+		m.FeedURL = url
+	}
+	if title != "" {
+		m.FeedTitle = title
+	} else if url != "" {
+		m.FeedTitle = url
+	}
 	m.Articles = arts
 	m.ArtCursor = 0
 	m.Scroll = 0
@@ -283,8 +295,11 @@ func (m *Model) page() int {
 }
 
 func (m *Model) currentURL() string {
+	if m.FeedURL != "" {
+		return m.FeedURL
+	}
 	for _, s := range m.Subs {
-		if s.Title == m.FeedTitle {
+		if s.Title != "" && s.Title == m.FeedTitle {
 			return s.URL
 		}
 	}
@@ -292,6 +307,51 @@ func (m *Model) currentURL() string {
 		return m.Subs[m.FeedCursor].URL
 	}
 	return ""
+}
+
+// CacheKey resolves a persisted last-feed token to the URL the cache is
+// keyed by. Tokens that are already a subscription URL pass through. A token
+// that matches a subscription title is the older on-disk shape (the title
+// was stored where the URL belongs) and resolves to that subscription's URL.
+func CacheKey(token string, subs []store.Subscription) string {
+	if token == "" {
+		return ""
+	}
+	for _, s := range subs {
+		if s.URL == token {
+			return s.URL
+		}
+	}
+	for _, s := range subs {
+		if s.Title == token && s.URL != "" {
+			return s.URL
+		}
+	}
+	return token
+}
+
+// RestoreFeed installs the last-opened feed and, when arts is non-empty, the
+// offline article list. Title is the matching subscription's title when one
+// exists, otherwise the URL.
+func (m *Model) RestoreFeed(url string, subs []store.Subscription, arts []feed.Article) {
+	if url == "" {
+		return
+	}
+	m.FeedURL = url
+	m.FeedTitle = url
+	for _, s := range subs {
+		if s.URL == url && s.Title != "" {
+			m.FeedTitle = s.Title
+			break
+		}
+	}
+	if len(arts) == 0 {
+		return
+	}
+	m.Articles = arts
+	m.ArtCursor = 0
+	m.Scroll = 0
+	m.View = ViewArticles
 }
 
 func (m *Model) isRead(a feed.Article) bool { return m.Read[store.ArticleKey(a)] }

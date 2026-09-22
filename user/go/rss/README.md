@@ -52,7 +52,7 @@ reader can still show articles when a refresh fails: the cache is the fallback.
 | `r` | refresh the selected feed |
 | `i` | re-read `RSS.OPML` from disk |
 | `m` | toggle read/unread on the selected article |
-| `o` | open the article link (`WEB.ELF`, best-effort; the link is always echoed to the console) |
+| `o` | open the article link in `WEB.ELF`. The URL is written to `/host/RSS.LINK` and the browser is exec'd with `@/host/RSS.LINK`, because an exec argument is capped at 31 bytes. The full link is always echoed to the console. |
 | PgUp / PgDn | page in the reader |
 | `q` or Ctrl-C | quit (state is saved) |
 
@@ -111,6 +111,9 @@ kernel change is required.
 - No enclosure/podcast playback, no images, no JavaScript-rendered or
   authenticated feeds.
 - Refresh is manual (`r`) by design: there is no background polling loop.
+- The HTTP client sends `Host` with a non-default port, decodes
+  `Transfer-Encoding: chunked`, and follows a short redirect chain. An https
+  URL is never followed onto cleartext. It does not decompress gzip.
 
 ## Third-party notices
 

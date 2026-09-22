@@ -192,6 +192,35 @@ func TestReloadAndRefresh(t *testing.T) {
 	}
 }
 
+func TestCacheRestoresByURLNotTitle(t *testing.T) {
+	url := "http://10.0.0.2:18099/feed.xml"
+	title := "Virelai Test Feed"
+	subs := subs(store.Subscription{Title: title, URL: url})
+	if got := CacheKey(url, subs); got != url {
+		t.Fatalf("CacheKey(url) = %q", got)
+	}
+	if got := CacheKey(title, subs); got != url {
+		t.Fatalf("CacheKey(title) = %q, want the URL", got)
+	}
+	m := New(80, 24)
+	m.Subs = subs
+	arts := []feed.Article{{Title: "Cached One", Link: "https://example.com/posts/1", GUID: "urn:cached:1"}}
+	m.RestoreFeed(CacheKey(title, subs), subs, arts)
+	if m.FeedURL != url || m.FeedTitle != title {
+		t.Fatalf("restored url=%q title=%q", m.FeedURL, m.FeedTitle)
+	}
+	if m.View != ViewArticles || len(m.Articles) != 1 || m.Articles[0].Title != "Cached One" {
+		t.Fatalf("offline list = %+v view=%v", m.Articles, m.View)
+	}
+	if ef := m.Apply(rune1('r')); ef.FetchURL != url {
+		t.Fatalf("refresh must use the URL, got %+v", ef)
+	}
+	m.SetArticles(url, title, arts)
+	if m.FeedURL != url {
+		t.Fatalf("SetArticles dropped the URL: %q", m.FeedURL)
+	}
+}
+
 func TestReaderWrapsAndStripsTags(t *testing.T) {
 	m := New(40, 24)
 	m.SetArticles("u", "t", []feed.Article{{
