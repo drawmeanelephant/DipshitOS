@@ -1,0 +1,625 @@
+// Command view is GOVIEW.ELF — the M71h (issue #1567) Go image viewer: open a
+// share image, paint it full-viewport inside the tabbed desktop, and stay open
+// on a missing or undecodable file (Zig VIEW.BIN's "don't panic" rule).
+//
+// It replaces Zig VIEW.BIN (M36 IMG5, #826). The decode is NOT a second
+// decoder: webrender.DecodeImage already owns the formats this project
+// decodes — QOI in-tree, PNG off the guest — and this app reuses it (D1).
+//
+// Every marker below is printed only AFTER the syscall it reports returned, so
+// the live-image-viewer gate's asserts can only pass if the app actually ran.
+package main
+
+import (
+	"errors"
+
+	"virelai/tabapp"
+	"virelai/theme"
+	"virelai/vi"
+	"virelai/webrender"
+	"virelai/webrender/font"
+)
+
+const (
+	appName  = "GOVIEW.ELF"
+	appTitle = "Image Viewer"
+
+	// exitQuit is VIEW.BIN's own exit status (view.zig exit_status): the gate
+	// asserts `user-exec exited status=43`, so the successor keeps it.
+	exitQuit = 43
+
+	// maxPathLen mirrors VIEW.BIN's argv bound ("argv slots are 32 bytes").
+	maxPathLen = 32
+
+	markerOpen        = "gview: open id="
+	markerTabAware    = "gview: tab-aware (full-viewport)"
+	markerNotTabAware = "gview: not-tab-aware (shim or WND desktop)"
+	markerOpenFailed  = "gview: failed to open window"
+	markerEmpty       = "gview: empty (no args)"
+	markerLoaded      = "gview: loaded "
+	markerTitleSet    = "gview: title set"
+	markerPresent     = "gview: present"
+	markerReady       = "gview: ready"
+	markerZoom        = "gview: zoom z="
+	markerPan         = "gview: pan ox="
+	markerQuit        = "gview: quit"
+	markerWinClose    = "gview: win_close"
+	markerResize      = "gview: resize relayout "
+	markerExiting     = "gview: exiting "
+	markerOpenErr     = "gview: open err"
+	markerReadErr     = "gview: read err"
+	markerTooLarge    = "gview: too large"
+	markerDecodeErr   = "gview: decode err"
+	markerUnsupported = "gview: unsupported "
+
+	markerOK = "goview OK"
+)
+
+// loadState is which step of the open→read→decode path failed. The markers are
+// emitted from this state, never from the error text, so a gate can assert the
+// reason without parsing a message.
+type loadState int
+
+const (
+	loadNone loadState = iota
+	loadFailedOpen
+	loadFailedRead
+	loadTooLarge
+	loadFailedDecode
+	loadUnsupported
+	loadOkay
+)
+
+type app struct {
+	ta   *tabapp.TabApp
+	name string
+	fm   format
+	st   loadState
+
+	img    *webrender.Image
+	iw, ih uint32
+
+	zoomIdx        int
+	ox, oy         uint32
+	titleAnnounced bool
+
+	drag           bool
+	dragX, dragY   int
+	dragOX, dragOY uint32
+
+	unsupportedTag string
+}
+
+func main() {
+	path := argPath()
+
+	// Header first, window second: the window is sized to the image before it
+	// opens, which is why the gate can assert `gview: open id=N 328x264` for a
+	// 160x120 fixture. VIEW.BIN read the same 24 bytes for the same reason.
+	var head []byte
+	if path != "" {
+		head = readHead(path)
+	}
+	iw, ih, haveDims := headerDims(head)
+	size := headerSize(head)
+	title := appTitle
+	if path != "" {
+		if haveDims {
+			title = composeTitle(basename(path), iw, ih, formatOfHeader(head), zoomTable[zoomDefaultIdx])
+		} else {
+			title = basename(path)
+		}
+	}
+
+	ta := tabapp.Init(tabapp.Config{
+		Name:  appName,
+		Title: title,
+		X:     windowX,
+		Y:     windowY,
+		W:     size.W,
+		H:     size.H,
+	})
+	if ta == nil {
+		vi.ConsoleLine(markerOpenFailed)
+		vi.Exit(1)
+	}
+	if ta.TabAware {
+		vi.ConsoleLine(markerTabAware)
+	} else {
+		vi.ConsoleLine(markerNotTabAware)
+	}
+	vi.ConsoleLine(markerOpen + vi.Itoa64(int64(ta.Win)) + " " + u32s(ta.W) + "x" + u32s(ta.H))
+
+	a := &app{ta: ta, name: basename(path), fm: formatOfHeader(head), zoomIdx: zoomDefaultIdx}
+
+	if path == "" {
+		vi.ConsoleLine(markerEmpty)
+	} else {
+		a.load(path)
+		a.reportLoad()
+	}
+
+	a.pushTitle()
+	a.draw()
+	a.ta.Present()
+	vi.ConsoleLine(markerPresent)
+	vi.ConsoleLine(markerReady)
+
+	a.eventLoop()
+
+	vi.ConsoleLine(markerExiting + vi.Itoa64(exitQuit))
+	a.ta.CloseAndExit(exitQuit)
+}
+
+// argPath is the file to open: the first argument after the program name
+// (`exec GOVIEW.ELF /host/TEST.QOI`). Empty when nothing was passed — VIEW.BIN's
+// clean empty state.
+func argPath() string {
+	args := vi.Args()
+	if len(args) < 2 {
+		return ""
+	}
+	return args[1]
+}
+
+// readHead peeks the first 24 bytes (QOI's 14-byte header, PNG's IHDR) without
+// decoding. Best-effort: an unreadable file simply yields no dimensions.
+func readHead(path string) []byte {
+	h, r := vi.FileOpen(path, vi.ModeRead)
+	if r < 0 {
+		return nil
+	}
+	defer vi.FileClose(uint32(h))
+	buf := make([]byte, 24)
+	n, rr := vi.FileRead(uint32(h), buf)
+	if rr < 0 || n <= 0 {
+		return nil
+	}
+	return buf[:n]
+}
+
+// load opens, reads and decodes path, recording the first step that failed.
+func (a *app) load(path string) {
+	// VIEW.BIN refused a path past the argv slot bound before touching the file.
+	if len(path) == 0 || len(path) > maxPathLen {
+		a.st = loadFailedOpen
+		return
+	}
+	if a.name == "" {
+		a.name = basename(path)
+	}
+	data, st := readImage(path)
+	if st != loadOkay {
+		a.st = st
+		return
+	}
+	im, err := webrender.DecodeImage(data)
+	if err != nil {
+		// "This format has no guest decoder" is a different fact from "these
+		// bytes are broken", and the app is the only place that can tell them
+		// apart for the user. See image_png_guest.go: PNG has no in-guest
+		// decoder because the fork's stdlib image/png drags in fmt/os.
+		if errors.Is(err, webrender.ErrImageUnsupported) {
+			a.st = loadUnsupported
+			a.unsupportedTag = formatOfHeader(data).tag()
+			return
+		}
+		a.st = loadFailedDecode
+		return
+	}
+	if im.Width*im.Height > pixelsMax {
+		a.st = loadTooLarge
+		return
+	}
+	a.img = im
+	a.iw, a.ih = uint32(im.Width), uint32(im.Height)
+	a.st = loadOkay
+	vi.ConsoleLine(markerLoaded + a.name + " " + u32s(a.iw) + "x" + u32s(a.ih) + " " +
+		a.fm.tag() + " bytes=" + vi.Itoa64(int64(len(data))))
+}
+
+// readImage reads at most fileMax bytes. The loop is ours rather than
+// vi.ReadFileAll's because ReadFileAll silently clamps `max` to
+// vi.MaxFileBytes (256 KiB): VIEW.BIN's own cap is 512 KiB, and a silent clamp
+// would turn "file too large" into "truncated, then a decode error".
+func readImage(path string) ([]byte, loadState) {
+	h, r := vi.FileOpen(path, vi.ModeRead)
+	if r < 0 {
+		return nil, loadFailedOpen
+	}
+	defer vi.FileClose(uint32(h))
+	out := make([]byte, 0, 8192)
+	buf := make([]byte, 4096)
+	for len(out) < fileMax {
+		n, rr := vi.FileRead(uint32(h), buf)
+		if rr < 0 {
+			return out, loadFailedRead
+		}
+		if n == 0 {
+			break
+		}
+		take := n
+		if len(out)+take > fileMax {
+			take = fileMax - len(out)
+		}
+		out = append(out, buf[:take]...)
+		if take < n {
+			break
+		}
+	}
+	// Exactly fileMax in hand: is there more? One more byte decides.
+	if len(out) == fileMax {
+		if n, rr := vi.FileRead(uint32(h), buf[:1]); rr >= 0 && n > 0 {
+			return out, loadTooLarge
+		}
+	}
+	return out, loadOkay
+}
+
+// reportLoad prints the one marker that names how the load ended.
+func (a *app) reportLoad() {
+	switch a.st {
+	case loadFailedOpen:
+		vi.ConsoleLine(markerOpenErr)
+	case loadFailedRead:
+		vi.ConsoleLine(markerReadErr)
+	case loadTooLarge:
+		vi.ConsoleLine(markerTooLarge)
+	case loadFailedDecode:
+		vi.ConsoleLine(markerDecodeErr)
+	case loadUnsupported:
+		tag := a.unsupportedTag
+		if tag == "" || tag == "???" {
+			tag = "format"
+		}
+		vi.ConsoleLine(markerUnsupported + tag)
+	}
+}
+
+func (a *app) zoom() uint32 { return zoomTable[a.zoomIdx] }
+
+func (a *app) viewport() viewport { return viewportRect(a.ta.W, a.ta.H) }
+
+func (a *app) eventLoop() {
+	for {
+		ev, r, ok := vi.PollEventRaw()
+		if !ok {
+			if r < 0 {
+				// The window is gone: there is nobody left to repaint for.
+				vi.ConsoleLine(markerWinClose)
+				vi.ConsoleLine(markerOK)
+				a.ta.CloseAndExit(exitQuit)
+			}
+			vi.Sleep(1)
+			continue
+		}
+		switch a.ta.Dispatch(ev) {
+		case tabapp.ActionClosed:
+			vi.ConsoleLine(markerWinClose)
+			vi.ConsoleLine(markerOK)
+			a.ta.CloseAndExit(exitQuit)
+		case tabapp.ActionResized:
+			// The canvas the WM granted, not the size we asked for: on the
+			// tabbed desktop this is the full viewport, and it is the only
+			// marker that proves the app relayouts to it (the `open` line
+			// above reports the request).
+			vi.ConsoleLine(markerResize + u32s(a.ta.W) + "x" + u32s(a.ta.H))
+			a.recenterClamp()
+			a.draw()
+			a.ta.Present()
+		case tabapp.ActionNone:
+			if a.handle(ev) {
+				a.draw()
+				a.ta.Present()
+			}
+		}
+	}
+}
+
+// handle returns whether the screen needs repainting.
+func (a *app) handle(ev vi.Event) bool {
+	switch ev.Kind {
+	case vi.EvKeyDown:
+		switch ev.Arg0 {
+		case keyZoomIn:
+			return a.applyZoom(zoomIn)
+		case keyZoomOut:
+			return a.applyZoom(zoomOut)
+		case keyReset:
+			return a.applyZoom(zoomReset)
+		case keyLeft:
+			return a.panBy(-1, 0)
+		case keyRight:
+			return a.panBy(1, 0)
+		case keyUp:
+			return a.panBy(0, -1)
+		case keyDown:
+			return a.panBy(0, 1)
+		case keyQuitQ, keyEscape:
+			vi.ConsoleLine(markerQuit)
+			a.ta.CloseAndExit(exitQuit)
+		}
+	case vi.EvMouseDown:
+		if ev.Flags&vi.BtnLeft == 0 {
+			return false
+		}
+		a.drag = true
+		a.dragX, a.dragY = int(ev.Arg0), int(ev.Arg1)
+		a.dragOX, a.dragOY = a.ox, a.oy
+	case vi.EvMouseMove:
+		if a.drag {
+			return a.dragPan(int(ev.Arg0), int(ev.Arg1))
+		}
+	case vi.EvMouseUp:
+		a.drag = false
+	}
+	return false
+}
+
+// pushTitle is VIEW.BIN's push_title: the window title carries the file, its
+// dimensions, the format tag and the zoom. VIEW announced the FIRST successful
+// push and re-pushed silently on every zoom change; so does this, through the
+// slot-61 wrapper (vi.WinSetTitle) — on the tabbed desktop the tab's own title
+// comes from the kind-8 declare instead, which is a separate path.
+func (a *app) pushTitle() {
+	if vi.WinSetTitle(a.ta.Win, a.titleText()) < 0 {
+		return
+	}
+	if !a.titleAnnounced {
+		a.titleAnnounced = true
+		vi.ConsoleLine(markerTitleSet)
+	}
+}
+
+// applyZoom steps the zoom table, re-clamps the pan and announces the new zoom.
+// Returns false when the table would not move (both ends), so nothing repaints.
+func (a *app) applyZoom(dir zoomDir) bool {
+	idx := stepZoom(a.zoomIdx, dir)
+	if idx == a.zoomIdx {
+		return false
+	}
+	a.zoomIdx = idx
+	a.recenterClamp()
+	vi.ConsoleLine(markerZoom + u32s(a.zoom()) + "%")
+	a.pushTitle()
+	return true
+}
+
+func (a *app) recenterClamp() {
+	if a.img == nil {
+		return
+	}
+	vp := a.viewport()
+	disp := displayedSize(a.iw, a.ih, a.zoom())
+	a.ox = clampOrigin(a.ox, a.iw, disp.W, vp.W)
+	a.oy = clampOrigin(a.oy, a.ih, disp.H, vp.H)
+}
+
+// panBy is VIEW.BIN's arrow pan: one display step is an eighth of the
+// viewport, converted to image pixels at the current zoom.
+func (a *app) panBy(ddx, ddy int32) bool {
+	if a.img == nil {
+		return false
+	}
+	vp := a.viewport()
+	disp := displayedSize(a.iw, a.ih, a.zoom())
+	sx := int32(maxU32(1, (vp.W*100/maxU32(1, disp.W))/8))
+	sy := int32(maxU32(1, (vp.H*100/maxU32(1, disp.H))/8))
+	nx := applyDelta(a.ox, ddx*sx, panMax(a.iw, disp.W, vp.W))
+	ny := applyDelta(a.oy, ddy*sy, panMax(a.ih, disp.H, vp.H))
+	if nx == a.ox && ny == a.oy {
+		return false
+	}
+	a.ox, a.oy = nx, ny
+	vi.ConsoleLine(markerPan + u32s(nx) + " oy=" + u32s(ny))
+	return true
+}
+
+// dragPan is VIEW.BIN's drag pan: display pixels dragged back into image
+// pixels at the current zoom, inverted (the image follows the pointer).
+func (a *app) dragPan(curX, curY int) bool {
+	if a.img == nil {
+		return false
+	}
+	vp := a.viewport()
+	disp := displayedSize(a.iw, a.ih, a.zoom())
+	ddx := (curX - a.dragX) * 100 / int(maxU32(1, disp.W))
+	ddy := (curY - a.dragY) * 100 / int(maxU32(1, disp.H))
+	nx := applyDelta(a.dragOX, int32(-ddx), panMax(a.iw, disp.W, vp.W))
+	ny := applyDelta(a.dragOY, int32(-ddy), panMax(a.ih, disp.H, vp.H))
+	if nx == a.ox && ny == a.oy {
+		return false
+	}
+	a.ox, a.oy = nx, ny
+	vi.ConsoleLine(markerPan + u32s(nx) + " oy=" + u32s(ny))
+	return true
+}
+
+// ---------------------------------------------------------------------------
+// Painting
+// ---------------------------------------------------------------------------
+
+// fillerSurface is the webrender.Surface the fill batcher implements: one
+// rect per span. Text goes through webrender.DrawText so the viewer shares the
+// seat's 8x8 face instead of carrying a second glyph table.
+type fillerSurface struct {
+	f   *vi.Filler
+	win int
+}
+
+func (s *fillerSurface) Fill(x, y, w, h int, rgb uint32) {
+	if w <= 0 || h <= 0 || x < 0 || y < 0 {
+		return
+	}
+	s.f.Rect(s.win, uint32(x), uint32(y), uint32(w), uint32(h), rgb)
+}
+
+func (a *app) draw() {
+	vp := a.viewport()
+	var f vi.Filler
+	surf := &fillerSurface{f: &f, win: a.ta.Win}
+	// Window ground: the token table's Bg, so a resize never shows garbage.
+	f.Rect(a.ta.Win, 0, 0, a.ta.W, a.ta.H, theme.Current.Bg)
+	a.drawBackdrop(surf, vp)
+	switch a.st {
+	case loadOkay:
+		a.blit(surf, vp)
+	case loadNone:
+		a.drawEmpty(surf, vp)
+	default:
+		a.drawError(surf, vp)
+	}
+	a.drawTitleBand(surf, vp)
+	a.drawStatus(surf, vp)
+	f.Flush()
+}
+
+// drawBackdrop is VIEW.BIN's checkerboard: transparent image pixels show it
+// through, so "the file painted nothing here" is visible rather than black.
+func (a *app) drawBackdrop(s *fillerSurface, vp viewport) {
+	const cell uint32 = 8
+	for cy := uint32(0); cy < vp.H; cy += cell {
+		for cx := uint32(0); cx < vp.W; cx += cell {
+			w := minU32(cell, vp.W-cx)
+			h := minU32(cell, vp.H-cy)
+			rgb := uint32(0x2a2a2a)
+			if (cx/cell+cy/cell)%2 != 0 {
+				rgb = 0x3a3a3a
+			}
+			s.Fill(int(vp.X+cx), int(vp.Y+cy), int(w), int(h), rgb)
+		}
+	}
+}
+
+// blit is a straight port of view.zig's blit_view: nearest-neighbour
+// crop+scale from the pan origin, one span per same-colour run, transparent
+// pixels skipped so the backdrop shows.
+func (a *app) blit(s *fillerSurface, vp viewport) {
+	if a.img == nil || a.iw == 0 || a.ih == 0 {
+		return
+	}
+	disp := displayedSize(a.iw, a.ih, a.zoom())
+	d := destLayout(vp, disp.W, disp.H)
+	if d.W == 0 || d.H == 0 {
+		return
+	}
+	imgW := uint32(a.img.Width)
+	for dy := uint32(0); dy < d.H; dy++ {
+		sy := a.oy + dy*a.ih/disp.H
+		if sy >= a.ih {
+			break
+		}
+		row := sy * imgW
+		for dx := uint32(0); dx < d.W; {
+			sx := a.ox + dx*a.iw/disp.W
+			if sx >= a.iw {
+				break
+			}
+			idx := row + sx
+			if idx >= uint32(len(a.img.Pix)) {
+				break
+			}
+			px := a.img.Pix[idx]
+			if px>>24 == 0 {
+				dx++
+				continue
+			}
+			rgb := px & 0x00ffffff
+			start := dx
+			dx++
+			for dx < d.W {
+				sx2 := a.ox + dx*a.iw/disp.W
+				if sx2 >= a.iw {
+					break
+				}
+				idx2 := row + sx2
+				if idx2 >= uint32(len(a.img.Pix)) {
+					break
+				}
+				px2 := a.img.Pix[idx2]
+				if px2>>24 == 0 || px2&0x00ffffff != rgb {
+					break
+				}
+				dx++
+			}
+			s.Fill(int(d.X+start), int(d.Y+dy), int(dx-start), 1, rgb)
+		}
+	}
+}
+
+// titleText is what both the window title bar and the in-window title band
+// show: the file and its facts when one is loaded, the app's name otherwise.
+func (a *app) titleText() string {
+	if a.name == "" {
+		return appTitle
+	}
+	if a.st == loadOkay {
+		return composeTitle(a.name, a.iw, a.ih, a.fm, a.zoom())
+	}
+	return a.name
+}
+
+func (a *app) drawTitleBand(s *fillerSurface, vp viewport) {
+	s.Fill(0, 0, int(a.ta.W), titleBandH, theme.Current.Surface)
+	s.Fill(0, titleBandH, int(a.ta.W), 1, theme.Current.Border)
+	clip := webrender.Clip{X: 0, Y: 0, W: int(a.ta.W), H: titleBandH}
+	webrender.DrawText(s, 4, 4, webrender.UpperASCII(a.titleText()), 1, false, theme.Current.Text, clip)
+}
+
+func (a *app) drawStatus(s *fillerSurface, vp viewport) {
+	barY := int(vp.Y + vp.H)
+	s.Fill(0, barY, int(a.ta.W), statusH, theme.Current.Surface)
+	text := u32s(a.zoom()) + "%  +/- zoom  0 reset  arrows/drag pan"
+	if a.st != loadOkay {
+		text = loadSummary(a.st, a.name)
+	}
+	clip := webrender.Clip{X: 0, Y: barY, W: int(a.ta.W), H: statusH}
+	webrender.DrawText(s, 4, barY+2, webrender.UpperASCII(text), 1, false, theme.Current.Muted, clip)
+}
+
+func (a *app) drawEmpty(s *fillerSurface, vp viewport) {
+	centred(s, vp, 1, appName, theme.Current.Text)
+	centred(s, vp, 2, "no image loaded", theme.Current.Muted)
+	centred(s, vp, 3, "exec GOVIEW.ELF /host/FILE.QOI", theme.Current.Muted)
+}
+
+func (a *app) drawError(s *fillerSurface, vp viewport) {
+	centred(s, vp, 1, "cannot open", theme.Current.Danger)
+	centred(s, vp, 2, loadSummary(a.st, a.name), theme.Current.Muted)
+	centred(s, vp, 3, "stay open - q quits", theme.Current.Muted)
+}
+
+// centred paints one line of the empty/error state. line 1 is the headline and
+// is drawn in the accent-adjacent slot, the rest are body text.
+func centred(s *fillerSurface, vp viewport, line int, text string, rgb uint32) {
+	shown := webrender.UpperASCII(text)
+	advance := font.Advance(1)
+	if advance < 1 {
+		advance = 1
+	}
+	width := advance * len(shown)
+	y := int(vp.Y+vp.H/4) + (line-1)*20
+	x := int(vp.X) + (int(vp.W)-width)/2
+	if x < 0 {
+		x = 0
+	}
+	clip := webrender.Clip{X: int(vp.X), Y: int(vp.Y), W: int(vp.W), H: int(vp.H)}
+	webrender.DrawText(s, x, y, shown, 1, false, rgb, clip)
+}
+
+// loadSummary names the failure the way VIEW.BIN's error page did.
+func loadSummary(st loadState, name string) string {
+	switch st {
+	case loadFailedOpen:
+		return "open failed " + name
+	case loadFailedRead:
+		return "read failed " + name
+	case loadTooLarge:
+		return "file too large " + name
+	case loadFailedDecode:
+		return "decode failed " + name
+	case loadUnsupported:
+		return "no guest decoder for this format " + name
+	}
+	return name
+}

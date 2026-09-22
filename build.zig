@@ -2020,29 +2020,16 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_sexiburg.step);
 
     // ------------------------------------------------------------------
-    // Guest: VIEW.BIN — the M36 IMG5 raster image viewer (issue #826,
-    // claim 4574). DSK3 segmented (writable .data/.bss — the fill batcher
-    // global and mmap'd buffer bookkeeping need the RW data+bss aperture).
+    // M71h (#1567): VIEW.BIN (the M36 IMG5 raster image viewer, issue #826,
+    // claim 4574) is RETIRED with user/src/view.zig. Its Go successor is
+    // GOVIEW.ELF (user/go/view, built by tools/go/build-goview.sh) — a
+    // host-share ELF like GOFILES.ELF, not an in-image Zig program, so there is
+    // no build step to replace this one. The live-image-viewer gate stages
+    // GOVIEW.ELF instead and keeps both fixtures: QOI decodes on the guest
+    // through webrender (reused, not re-vendored), PNG proves the honest error
+    // surface because the fork has no in-guest PNG decoder yet
+    // (user/go/webrender/image_png_guest.go).
     // ------------------------------------------------------------------
-    const view_prog = b.addExecutable(.{
-        .name = "user-view",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("user/src/view.zig"),
-            .target = kernel_target,
-            .optimize = .ReleaseSmall,
-        }),
-    });
-    view_prog.linker_script = b.path("user/linker-segmented.ld");
-    const view_step = b.step("view", "Build the image viewer (zig-out/bin/VIEW.BIN) — DSK3 segmented (writable .data/.bss)");
-    const view_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
-    view_elf2bin.addFileArg(view_prog.getEmittedBin());
-    const view_bin = view_elf2bin.addOutputFileArg("VIEW.BIN");
-    view_elf2bin.has_side_effects = true;
-    view_elf2bin.stdio = .inherit;
-    view_step.dependOn(&view_elf2bin.step);
-    const install_view = b.addInstallFileWithDir(view_bin, .bin, "VIEW.BIN");
-    view_step.dependOn(&install_view.step);
-    b.getInstallStep().dependOn(&install_view.step);
 
     // ------------------------------------------------------------------
     // Guest: DOC.BIN — M-web in-guest HTML viewer (issues #1202–#1207, ADR 0028).

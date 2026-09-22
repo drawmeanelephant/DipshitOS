@@ -50,7 +50,7 @@
 #
 # HOST PREREQUISITE: bash tools/go/build-note.sh -> .build/go/NOTE.ELF
 
-vgate_name go-wm-seat "issues #1313/#1317/#1318 M57a+b+c: a Go WM registers the slot-65 seat and HOSTS GOCALC.ELF on VZ"
+vgate_name go-wm-seat "issues #1313/#1317/#1318 M57a+b+c: a Go WM registers the slot-65 seat and HOSTS GOCALC.ELF/NOTE.ELF/GOVIEW.ELF on VZ"
 vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 
@@ -120,6 +120,22 @@ if not os.path.exists(src):
              "bash tools/go/build-note.sh")
 shutil.copy(src, os.path.join(share, "NOTE.ELF"))
 print("staged NOTE.ELF into share (%d bytes)" % os.path.getsize(os.path.join(share, "NOTE.ELF")))
+PY
+
+# M71h (#1567): run 04 hosts the image viewer, so stage it and the QOI fixture
+# it opens. HOST PREREQUISITE: bash tools/go/build-goview.sh -> .build/go/GOVIEW.ELF
+vgate_setup_python <<'PY'
+import os, shutil, sys
+rd = os.environ["RUN_DIR"]
+share = os.environ.get("VG_SHARE") or os.path.join(rd, "share")
+src = os.path.join(".build", "go", "GOVIEW.ELF")
+if not os.path.exists(src):
+    sys.exit("GOVIEW.ELF missing (expected " + src + ") - build it first: "
+             "bash tools/go/build-goview.sh")
+shutil.copy(src, os.path.join(share, "GOVIEW.ELF"))
+shutil.copy("tests/fixtures/qoi/viewer_160x120.qoi", os.path.join(share, "TEST.QOI"))
+print("staged GOVIEW.ELF into share (%d bytes) + TEST.QOI" %
+      os.path.getsize(os.path.join(share, "GOVIEW.ELF")))
 PY
 
 vgate_run 01 -- \
@@ -268,6 +284,69 @@ vgate_assert 03 serial-contains 'gotabwm: holding seat'
 vgate_assert 03 serial-absent 'gotabwm: tab open id='
 vgate_assert 03 serial-absent '[EXC] parking:'
 vgate_assert 03 serial-absent 'exited status=139'
+
+# --- M71h (#1567) run 04: the seat HOSTS GOVIEW.ELF ------------------------
+# The image viewer is a tabapp client, so its real home is the seat's strip,
+# and `gview: tab-aware (full-viewport)` plus the resize line are the app's own
+# half of deliverable 1 (paint full-viewport in GOTABWM). live-image-viewer
+# owns the decoding and both error surfaces; this run owns the hosting: the
+# declare is accepted, the canvas is the seat's own 1100x692 viewport, and the
+# seat closes the tab (its single-tab budget) and the app exits cleanly.
+vgate_file script-04.txt <<'EOF'
+set GOMAXPROCS=1
+wm
+exec GOTABWM.ELF
+EOF
+
+vgate_file script2-04.txt <<'EOF'
+dui focus 0
+exec GOVIEW.ELF /host/TEST.QOI
+EOF
+
+vgate_file script3-04.txt <<'EOF'
+dui
+echo rx-gotabwm-view-ok
+EOF
+
+vgate_run 04 -- \
+    --screen '$RUN_DIR/screen-04' \
+    --script '$RUN_DIR/script-04.txt' \
+    --script2 '$RUN_DIR/script2-04.txt' \
+    --script2-after 'gotabwm: win focus' \
+    --script3 '$RUN_DIR/script3-04.txt' \
+    --script3-after 'wm: unregistered, shim resumed' \
+    --script-expect 'rx-gotabwm-view-ok' --timeout 300
+
+vgate_assert 04 serial-contains 'exec: loaded GOTABWM.ELF'
+vgate_assert 04 serial-contains 'exec: loaded GOVIEW.ELF'
+vgate_assert 04 serial-contains 'gotabwm: rpc declare id='
+vgate_assert 04 serial-contains 'gview: tab-aware (full-viewport)'
+vgate_assert 04 serial-contains 'gview: loaded TEST.QOI 160x120 QOI bytes=340'
+vgate_assert 04 serial-contains 'gotabwm: host focus id='
+vgate_assert 04 serial-contains 'gotabwm: host view id='
+vgate_assert 04 serial-contains 'gview: resize relayout 1280x720'
+vgate_assert 04 serial-contains 'gotabwm: host close id='
+vgate_assert 04 serial-contains 'gview: win_close'
+# WIN_CLOSE is the path the seat drives, and Zig VIEW.BIN's rule for it is
+# `view: win_close` + exit 43 with no `exiting 43` line (that line belongs to
+# the app's own quit path). The status is the kernel's own report.
+vgate_assert 04 serial-contains 'tasks user-exec exited status=43'
+vgate_assert 04 serial-contains 'wm: unregistered, shim resumed'
+vgate_assert 04 serial-contains 'dui: windows='
+vgate_assert 04 serial-absent '[EXC] parking:'
+vgate_assert 04 serial-absent 'exited status=139'
+vgate_assert 04 python <<'PY'
+import os, re
+ser = open(os.environ["VG_SER"], errors="replace").read()
+# The request is the aspect-fitted 328x264; the GRANTED canvas is the seat's
+# scanout (1280x720), which is what "full-viewport" means here. Both must
+# appear, in that order, or the app never relayouted.
+req = ser.find("gview: open id")
+grant = ser.find("gview: resize relayout 1280x720")
+assert req >= 0 and grant >= 0, "missing the open or the granted-canvas marker"
+assert req < grant, "the resize marker must follow the open marker"
+assert re.search(r"gview: open id=[0-9]+ 328x264", ser), "open dimension check failed"
+PY
 
 # The face and its source: the marker is one-shot and comes after the seat
 # registered, so a gate never has to guess which of VZ's three cases (kernel
