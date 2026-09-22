@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # oliver-publish.sh — M-web S6 host-side batch (issue #1207).
 #
-# Turns a directory of Markdown into a sibling HTML tree that DOC.BIN can
+# Turns a directory of Markdown into a sibling HTML tree that WEB.ELF can
 # view and GOHTTPD.ELF can serve (M71l / #1571 retired the Zig HTTPD.BIN).
 # Oliver itself is a guest binary
 # (tests/oliver-spike/OLIVER.BIN); this script does the host-side staging:

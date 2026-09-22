@@ -336,8 +336,10 @@ pub fn litPixels(alpha: []const u8) u32 {
 }
 
 /// Painted pixels of the synthetic strike: the union of the mask and the same
-/// mask translated one pixel right — exactly what `doc.zig` draws twice when no
-/// Bold face is staged. The union is over the box WIDENED by one column, since
+/// mask translated one pixel right — exactly what a consumer draws twice when
+/// no Bold face is staged (Zig DOC.BIN did, and its probe read the union; M71i
+/// #1568 retired that app, so this is the helper's remaining meaning). The
+/// union is over the box WIDENED by one column, since
 /// the shifted copy can light a pixel past the mask's own width.
 pub fn strikeUnion(w: usize, h: usize, alpha: []const u8) u32 {
     if (w == 0 or h == 0) return 0;

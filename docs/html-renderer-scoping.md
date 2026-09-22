@@ -1,6 +1,12 @@
 # In-guest HTML renderer — scoping (M-web)
 
 - Status: **S3–S6 implementation** (stacked on S2) — img, click-nav, fetch, publish behind `live-doc-web`.
+- **Historical as of M71i #1568 (2026-09-21):** this document is the design
+  card that ADR 0028 fixes, and the app it describes (`DOC.BIN`,
+  `user/src/lib/html/`, the `live-doc*` specs) is deleted — the EL0 HTML
+  consumer is `WEB.ELF` over `user/go/webrender`. Read the design decisions
+  here; read ADR 0028 Amendment C for what shipped and where each rung's
+  probe lives now. The paths named below are the record, not the tree.
 - Claim: #1200 · Umbrella: #1201 · Slices: #1202 / #1203 / #1204 / #1205 / #1206 / #1207
 - Related: ADR 0010 (userland storage), ADR 0011 (desktop platform),
   ADR 0016 (pixel ownership), ADR 0009 (app events), `tools/gate/SPEC.md`

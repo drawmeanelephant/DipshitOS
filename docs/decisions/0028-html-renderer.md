@@ -1,6 +1,6 @@
 # ADR 0028: In-guest HTML rendering (M-web slice 1)
 
-- Status: ACCEPTED (slice 1 design); amended M70d #1456 2026-09-19; amended M69d #1531 2026-09-20
+- Status: ACCEPTED (slice 1 design); amended M70d #1456 2026-09-19; amended M69d #1531 2026-09-20; amended M71i #1568 2026-09-21 (the EL0 consumer is WEB.ELF)
 - Date: 2026-09-12
 - Issue: #1200 (design card + slice 1), umbrella #1201
 - Related: ADR 0009 (app events), ADR 0010 (userland storage), ADR 0011
@@ -34,6 +34,13 @@ check `docs/decisions/` and the open claims at push time.
 ordinary EL0 app over `lib/tabapp.zig`. No new syscalls, no kernel changes;
 the kernel never parses HTML. It stays inside the app's existing privileges
 (file channel, window back-buffer, events).
+**Amended M71i #1568 (2026-09-21):** the EL0 consumer is **`WEB.ELF`**
+(`user/go/browser` + `user/go/webrender`, a Go app on the host-share ELF path).
+`DOC.BIN` and `user/src/doc.zig` are **deleted** — two HTML painters was the
+dual toolkit ADR 0030 forbids, and the Go path already owned the features this
+ADR's ladder named (S1 render, S2 tables/dl, S3 images, S4 links, S5 fetch, S6
+publish). D1's *shape* is unchanged: still an ordinary EL0 app over the tab
+seam, no new syscalls, no kernel HTML.
 
 **D2 — No JavaScript, and no CSS cascade.** Styling is a single compiled-in UA
 style table (per-tag size/margins/indent/mono flags). A page cannot change its
@@ -52,6 +59,14 @@ admit an engine is a **new ADR**, not a silent follow-on.
 so tests use a stub metric. Only `doc.zig` touches `ui` drawing. This is the
 same shape as the repo's other testable subsystems, and it is what makes the
 renderer's behaviour assertable without a VM.
+**Amended M71i #1568 (2026-09-21):** `user/src/lib/html/` is **deleted** with
+its consumer, and so is its `zig build test` registration (21 host tests). The
+rule survives the language: `user/go/webrender` keeps parse
+(`htmlparse.go`), layout (`layout.go`) and paint (`paint.go`) as separate
+packages/files with their own host suites (`htmlparse_test.go`,
+`layout_test.go`, `text_test.go`, `url_test.go`, `golden_test.go` over the
+pinned corpus), so the renderer is still assertable without a VM. Nothing was
+left half-deleted: no orphaned module, no test with no runner.
 
 **D4 — Emphasis uses real faces when they are staged, and synthesizes only as fallback.**
 Share names (frozen M69d #1531 D1): `/host/INTER.TTF` Regular, `/host/INTERB.TTF`
@@ -85,6 +100,10 @@ existing FETCH/HTTP seam — the first network rung, explicitly last among the
 render features; S6 the publish workflow (batch oliver → share → DOC/HTTPD).
 Each rung is a declarative `tools/gate/specs/live-doc*.spec`; no renderer
 behaviour lands without a pixel probe.
+**Amended M71i #1568 (2026-09-21):** those three specs are retired with the
+app. The ladder is unchanged and every rung still has a pixel probe — it now
+lives on the surviving renderer: `live-web` boots 01–04/14 and `live-web-ttf`
+boots 01–04 (Amendment C carries the rung-by-rung map).
 
 ## Consequences
 
@@ -241,7 +260,10 @@ accent` reports for Italic.
 
 Measured in-guest by that app's own probe (`typography: ink`, painted pixels at
 the painter's 96/255 coverage cut; `diff` = pixels where the Bold mask disagrees
-with the strike that doubles Regular), `live-doc` runs 01 vs 04:
+with the strike that doubles Regular), `live-doc` runs 01 vs 04. (Both that app
+and those runs are gone as of M71i #1568 — the table below is kept as the
+record of the Zig tree, and the Go tree's own numbers are in the section above
+it.)
 
 | size | Regular | Bold (real) | 1-px strike | Bold vs strike (`diff`) |
 |---|---|---|---|---|
@@ -273,4 +295,44 @@ Two things this records that the Go row's numbers do not say:
 - `<em>` keeps the accent colour; the Italic face supplies the slant.
 - Bitmap 8×8 fallback still synthesizes bold with a 1-px strike, because that
   face has no Bold counterpart. The TrueType path does not.
+
+## Amendment C — M71i #1568: one renderer (DOC.BIN retires into WEB.ELF)
+
+**Decision.** The in-guest HTML consumer is `WEB.ELF`. Zig `DOC.BIN`,
+`user/src/doc.zig`, `user/src/lib/html/`, the `DOC.BIN` build step, its
+`image/apps.txt` row and its three specs (`live-doc`, `live-doc-tables`,
+`live-doc-web`) are deleted. D2 (no JS, no cascade) stands unchanged; D1 and D3
+are amended above for the consumer's language, not for the design.
+
+**Why this is not a capability loss.** The Go path already pinned every rung of
+D7's ladder, and the retired specs' probes moved onto it rather than
+vanishing. The map is the record — each row names the surviving probe:
+
+| Rung | Survivor |
+|---|---|
+| S1 local page + pixels | `live-web` boot 01; `live-web-ttf` boot 01 |
+| S1 typography / faces | `live-web-ttf` 01 (real faces) vs 03 (grid fallback) |
+| S1 missing / malformed page | `live-web` boots 04/06/07 (missing, dns, url) |
+| S2 tables + header rule | `live-web-ttf` boot 02 |
+| S2 `dl`/`dt`/`dd` | `live-web-ttf` boot 04 (vacant at HEAD; moved here) |
+| S3 `<img>` decode | `live-web-ttf` boot 02 (SWATCH quadrant colours) |
+| S3 missing-`src` placeholder | `live-web-ttf` boot 04 (vacant at HEAD; moved here) |
+| S4 click-nav | `live-web` boot 02 |
+| S5 `WEB.ELF <url>` | `live-web` boot 03 |
+| S6 oliver-publish page | `live-web` boot 01 + `go-dogfood` boot 02 |
+| M70d #1456 corpus page | `live-web` boot 14 (vacant at HEAD; moved here) |
+
+The two "vacant at HEAD" rows are the honest ones: `dl/dt/dd` and the
+in-guest corpus page were pinned by the retired specs ALONE, so they were
+re-pinned on WEB rather than noted as covered. The corpus additionally keeps
+its host-side golden suites (`user/go/webrender/golden_test.go`, nine pages).
+
+**Evidence.** `live-web` 14/14 and `live-web-ttf` 4/4 on VZ after the deletion,
+with `DOC.BIN` absent from the image and the manifest; `zig build` and
+`zig build test` green with the `lib/html` registration removed.
+
+**Consequences accepted.** The Zig host suites for parse/layout (21 tests) are
+deleted, not ported — the Go suites are the surviving assertion of the same
+modules. A future Zig HTML consumer would need a new ADR: this one now says the
+EL0 renderer is the Go one.
 
