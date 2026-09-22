@@ -28,7 +28,7 @@ EOF
 
 vgate_run 01 -- --display --input --via-virtio --screen '$RUN_DIR/screen' \
     --script '$RUN_DIR/script.txt' \
-    --input-string "printf '\\e[2J\\e[H\\e[31mRED\\e[0m \\e[1;44;97mBOLD\\e[0m\\n\\e[93m\\xE2\\x94\\x8C\\xE2\\x94\\x80\\xE2\\x94\\x90\\xE2\\x94\\x82\\xE2\\x94\\x94\\xE2\\x94\\x98 \\xC3\\xA9 \\xE4\\xBD\\xA0\\e[0m'"$'\n' \
+    --input-string "printf '\\e[2J\\e[H\\e[31mRED\\e[0m \\e[1;44;97mBOLD\\e[0m\\n\\e[93m\\xE2\\x94\\x8C\\xE2\\x94\\x80\\xE2\\x94\\x90\\xE2\\x94\\x82\\xE2\\x94\\x94\\xE2\\x94\\x98 \\xC3\\xA9 \\xE4\\xBD\\xA0\\e[0m\\n\\e[38;2;255;128;71;48;2;17;34;51mTC\\e[0m'"$'\n' \
     --input-string-after 'term: attached' \
     --cvc-snap --snapshot-after 'term: done' --snapshot-out '$RUN_DIR/snap' \
     --script2 '$RUN_DIR/script2.txt' \
@@ -107,4 +107,20 @@ assert accent >= 3, f"accented rune not painted (accent={accent})"
 assert wide >= 6, f"wide rune did not span its pair (wide={wide})"
 assert past == 0, f"pixels past the content cells: column shift (past={past})"
 print("PASS: frame runes, accented rune, and the wide pair painted with no column shift")
+
+# M73h (#1634): line 2 carries one truecolour pair — fg exactly
+# (255,128,71) on bg exactly (17,34,51), straight from the SGR side
+# arrays through the rendition resolver (ADR 0020 Amendment E). Cell 0..1
+# spans x 64..79; the prompt and cursor sit at x >= 80 (outside the scan).
+fg_exact = 0
+bg_exact = 0
+for y in range(80, 88):
+    for x in range(64, 80):
+        c = px(x, y)
+        if c == (255, 128, 71): fg_exact += 1
+        if c == (17, 34, 51): bg_exact += 1
+print(f"truecolour row: fg_exact={fg_exact} bg_exact={bg_exact}")
+assert fg_exact >= 4, f"38;2 cell not painted at exact RGB (fg_exact={fg_exact})"
+assert bg_exact >= 40, f"48;2 cell background not painted at exact RGB (bg_exact={bg_exact})"
+print("PASS: truecolour fg and bg painted at their exact RGB")
 PY

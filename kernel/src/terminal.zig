@@ -158,29 +158,119 @@ fn encodeCell(dst: []u8, out: usize, cell: Cell) ?usize {
     return i;
 }
 
-/// A terminal cell stores one of the ANSI 16 colours, or the presentation
-/// default (16), for both foreground and background plus the bold bit.
+/// A terminal cell's rendition — foreground/background colour slot plus
+/// attributes (M73h #1634, ADR 0020 Amendment E). This SUPERSEDES the
+/// M72b/Amendment-C 16-colour freeze: a compact u16 could not hold the
+/// selectors Charm apps actually emit (`38;5;n`, `38;2;r;g;b`, underline,
+/// italic, reverse, dim).
 ///
-/// The grid deliberately keeps this compact instead of retaining arbitrary
-/// RGB values: the window terminal is a bounded 8x8 presentation surface,
-/// and the M72b contract freezes 16-colour SGR rather than a truecolour ABI.
-pub const CellStyle = u16;
-pub const default_colour: u8 = 16;
-pub const default_cell_style: CellStyle = @as(CellStyle, default_colour) |
-    (@as(CellStyle, default_colour) << 5);
+/// `fg`/`bg` are 9-bit colour slots:
+///   0..=255  an xterm 256-colour index (`38;5;n`/`48;5;n`; 0..=15 also
+///            covers classic SGR 30-37/40-47/90-97/100-107);
+///   256      the presentation default — resolved at PAINT time from the
+///            desktop theme (#207 `theme_id`), never a stored RGB;
+///   257      truecolour: this cell's RGB rides in the side arrays
+///            (`fg_rgb`/`bg_rgb`) — one u32 cannot carry two 24-bit
+///            channels, so RGB swaps and reflows beside the style word
+///            (presentation state; ADR 0020 D1 holds, no new syscall).
+///
+/// `flags`: bold (SGR 1/22), dim (2/22), italic (3/23), underline (4/24),
+/// reverse (7/27 — resolved at paint by swapping the channels). Nine pad
+/// bits are unused: blink/overline/strike are M73h non-goals (storage
+/// would be free, paint is not).
+///
+/// Old sequences stay pixel-identical: SGR 30-37/40-47/90-97 still store
+/// 0..=15 and the paint side keeps `ansi_palette` for exactly those.
+pub const CellStyle = packed struct(u32) {
+    fg: colour_slot = default_colour,
+    bg: colour_slot = default_colour,
+    bold: bool = false,
+    dim: bool = false,
+    italic: bool = false,
+    underline: bool = false,
+    reverse: bool = false,
+    _pad: u9 = 0,
+};
 
+/// One colour slot in a `CellStyle`.
+pub const colour_slot = u9;
+/// The presentation-default slot (paint resolves it from the theme).
+/// Was 16 in the frozen u16 layout; u9 widens the space so index 16 is a
+/// real xterm colour (`38;5;16`) instead of the sentinel.
+pub const default_colour: colour_slot = 256;
+/// The truecolour marker: the cell's RGB rides in the side arrays.
+pub const rgb_colour: colour_slot = 257;
+/// A 24-bit colour as stored beside a truecolour cell (3 packed bytes).
+pub const Rgb = struct { r: u8 = 0, g: u8 = 0, b: u8 = 0 };
+
+/// The erased/initial RGB side value (matches `empty_cell`).
+pub const empty_rgb: Rgb = .{};
+
+pub const default_cell_style: CellStyle = .{};
+
+/// The palette index of a cell's foreground, or null for default AND for
+/// truecolour cells (callers wanting RGB use `Screen.rgbAt`).
 pub fn styleForeground(style: CellStyle) ?u8 {
-    const colour: u8 = @truncate(style & 0x1f);
-    return if (colour == default_colour) null else colour;
+    if (style.fg == default_colour or style.fg == rgb_colour) return null;
+    return @intCast(style.fg);
 }
 
+/// The palette index of a cell's background, or null for default AND for
+/// truecolour cells (callers wanting RGB use `Screen.rgbAt`).
 pub fn styleBackground(style: CellStyle) ?u8 {
-    const colour: u8 = @truncate((style >> 5) & 0x1f);
-    return if (colour == default_colour) null else colour;
+    if (style.bg == default_colour or style.bg == rgb_colour) return null;
+    return @intCast(style.bg);
 }
 
 pub fn styleBold(style: CellStyle) bool {
-    return (style & (@as(CellStyle, 1) << 10)) != 0;
+    return style.bold;
+}
+
+pub fn styleDim(style: CellStyle) bool {
+    return style.dim;
+}
+
+pub fn styleItalic(style: CellStyle) bool {
+    return style.italic;
+}
+
+pub fn styleUnderline(style: CellStyle) bool {
+    return style.underline;
+}
+
+pub fn styleReverse(style: CellStyle) bool {
+    return style.reverse;
+}
+
+/// M73h (#1634): the canonical xterm 256-colour table, total (no traps).
+/// 0..=15 are the canonical xterm ANSI colours — the PAINT side keeps its
+/// own `ansi_palette` for those (pixel parity for old sequences) and only
+/// calls this for 16..=255; 16..=231 is the 6×6×6 cube (levels 0, 95,
+/// 135, 175, 215, 255), 232..=255 the 24-step grayscale ramp
+/// (8 + 10·i). Spot-checked class-A.
+pub fn xterm256Rgb(index: u8) Rgb {
+    const ansi = [_]Rgb{
+        .{ .r = 0x00, .g = 0x00, .b = 0x00 }, .{ .r = 0xcd, .g = 0x00, .b = 0x00 },
+        .{ .r = 0x00, .g = 0xcd, .b = 0x00 }, .{ .r = 0xcd, .g = 0xcd, .b = 0x00 },
+        .{ .r = 0x00, .g = 0x00, .b = 0xee }, .{ .r = 0xcd, .g = 0x00, .b = 0xcd },
+        .{ .r = 0x00, .g = 0xcd, .b = 0xcd }, .{ .r = 0xe5, .g = 0xe5, .b = 0xe5 },
+        .{ .r = 0x7f, .g = 0x7f, .b = 0x7f }, .{ .r = 0xff, .g = 0x00, .b = 0x00 },
+        .{ .r = 0x00, .g = 0xff, .b = 0x00 }, .{ .r = 0xff, .g = 0xff, .b = 0x00 },
+        .{ .r = 0x5c, .g = 0x5c, .b = 0xff }, .{ .r = 0xff, .g = 0x00, .b = 0xff },
+        .{ .r = 0x00, .g = 0xff, .b = 0xff }, .{ .r = 0xff, .g = 0xff, .b = 0xff },
+    };
+    if (index < 16) return ansi[index];
+    if (index >= 232) {
+        const level: u8 = 8 + 10 * (index - 232);
+        return .{ .r = level, .g = level, .b = level };
+    }
+    const levels = [_]u8{ 0, 95, 135, 175, 215, 255 };
+    const n = index - 16;
+    return .{
+        .r = levels[n / 36],
+        .g = levels[(n / 6) % 6],
+        .b = levels[n % 6],
+    };
 }
 
 pub const Screen = struct {
@@ -204,9 +294,23 @@ pub const Screen = struct {
     alt_view: usize = 0,
     alt_style: CellStyle = default_cell_style,
     alt_active: bool = false,
+    /// M73h (#1634): truecolour channels per cell, primary and alternate.
+    /// Written by `putRune` from the current rendition state and read ONLY
+    /// for cells whose slot marks `rgb_colour`; swapped and reflowed with
+    /// their style arrays.
+    fg_rgb: [grid_lines][grid_cols]Rgb = [_][grid_cols]Rgb{[_]Rgb{empty_rgb} ** grid_cols} ** grid_lines,
+    bg_rgb: [grid_lines][grid_cols]Rgb = [_][grid_cols]Rgb{[_]Rgb{empty_rgb} ** grid_cols} ** grid_lines,
+    alt_fg_rgb: [grid_lines][grid_cols]Rgb = [_][grid_cols]Rgb{[_]Rgb{empty_rgb} ** grid_cols} ** grid_lines,
+    alt_bg_rgb: [grid_lines][grid_cols]Rgb = [_][grid_cols]Rgb{[_]Rgb{empty_rgb} ** grid_cols} ** grid_lines,
+    /// The current truecolour state (applies to FUTURE writes), mirrored
+    /// across the alternate swap exactly like `style`/`alt_style`.
+    fg_rgb_cur: Rgb = empty_rgb,
+    bg_rgb_cur: Rgb = empty_rgb,
+    alt_fg_rgb_cur: Rgb = empty_rgb,
+    alt_bg_rgb_cur: Rgb = empty_rgb,
     /// CSI state: 0 normal, 1 ESC, 2 CSI.
     esc_state: u8 = 0,
-    csi_params: [8]u16 = [_]u16{0} ** 8,
+    csi_params: [16]u16 = [_]u16{0} ** 16,
     csi_count: usize = 0,
     csi_private: bool = false,
     /// M73a-1 (#1625): the in-flight UTF-8 sequence, if any. `utf_need` is
@@ -246,6 +350,8 @@ pub const Screen = struct {
     fn clearLine(self: *Screen, i: usize) void {
         @memset(&self.cells[i], empty_cell);
         @memset(&self.styles[i], default_cell_style);
+        @memset(&self.fg_rgb[i], empty_rgb);
+        @memset(&self.bg_rgb[i], empty_rgb);
         self.lens[i] = 0;
     }
 
@@ -326,10 +432,14 @@ pub const Screen = struct {
         }
         self.cells[self.cur][self.col] = .{ .base = cp, .mark = mark, .cont = 0 };
         self.styles[self.cur][self.col] = style;
+        self.fg_rgb[self.cur][self.col] = self.fg_rgb_cur;
+        self.bg_rgb[self.cur][self.col] = self.bg_rgb_cur;
         if (width == 2) {
             self.cells[self.cur][self.col + 1] = empty_cell;
             self.cells[self.cur][self.col + 1].cont = 1;
             self.styles[self.cur][self.col + 1] = style;
+            self.fg_rgb[self.cur][self.col + 1] = self.fg_rgb_cur;
+            self.bg_rgb[self.cur][self.col + 1] = self.bg_rgb_cur;
         }
         const end = self.col + width;
         if (end > self.lens[self.cur]) self.lens[self.cur] = end;
@@ -337,17 +447,33 @@ pub const Screen = struct {
         self.view = 0;
     }
 
-    fn setForeground(self: *Screen, colour: u8) void {
-        self.style = (self.style & ~@as(CellStyle, 0x1f)) | colour;
+    fn setForeground(self: *Screen, colour: colour_slot) void {
+        self.style.fg = colour;
     }
 
-    fn setBackground(self: *Screen, colour: u8) void {
-        self.style = (self.style & ~(@as(CellStyle, 0x1f) << 5)) | (@as(CellStyle, colour) << 5);
+    fn setBackground(self: *Screen, colour: colour_slot) void {
+        self.style.bg = colour;
     }
 
     fn setBold(self: *Screen, on: bool) void {
-        const bit = @as(CellStyle, 1) << 10;
-        if (on) self.style |= bit else self.style &= ~bit;
+        self.style.bold = on;
+    }
+
+    // M73h: the remaining rendition flags (SGR 2/3/4/7 and their resets).
+    fn setDim(self: *Screen, on: bool) void {
+        self.style.dim = on;
+    }
+
+    fn setItalic(self: *Screen, on: bool) void {
+        self.style.italic = on;
+    }
+
+    fn setUnderline(self: *Screen, on: bool) void {
+        self.style.underline = on;
+    }
+
+    fn setReverse(self: *Screen, on: bool) void {
+        self.style.reverse = on;
     }
 
     fn resetCsi(self: *Screen) void {
@@ -380,6 +506,8 @@ pub const Screen = struct {
         while (c < end) : (c += 1) {
             self.cells[self.cur][c] = empty_cell;
             self.styles[self.cur][c] = default_cell_style;
+            self.fg_rgb[self.cur][c] = empty_rgb;
+            self.bg_rgb[self.cur][c] = empty_rgb;
         }
         if (mode == 2) {
             self.lens[self.cur] = 0;
@@ -427,6 +555,10 @@ pub const Screen = struct {
         std.mem.swap(usize, &self.col, &self.alt_col);
         std.mem.swap(usize, &self.view, &self.alt_view);
         std.mem.swap(CellStyle, &self.style, &self.alt_style);
+        std.mem.swap([grid_lines][grid_cols]Rgb, &self.fg_rgb, &self.alt_fg_rgb);
+        std.mem.swap([grid_lines][grid_cols]Rgb, &self.bg_rgb, &self.alt_bg_rgb);
+        std.mem.swap(Rgb, &self.fg_rgb_cur, &self.alt_fg_rgb_cur);
+        std.mem.swap(Rgb, &self.bg_rgb_cur, &self.alt_bg_rgb_cur);
     }
 
     fn setAlternate(self: *Screen, enabled: bool) void {
@@ -437,6 +569,8 @@ pub const Screen = struct {
         if (enabled) {
             self.clearScreen();
             self.style = default_cell_style;
+            self.fg_rgb_cur = empty_rgb;
+            self.bg_rgb_cur = empty_rgb;
         }
     }
 
@@ -447,16 +581,75 @@ pub const Screen = struct {
             switch (param) {
                 0 => self.style = default_cell_style,
                 1 => self.setBold(true),
-                22 => self.setBold(false),
+                2 => self.setDim(true),
+                3 => self.setItalic(true),
+                4 => self.setUnderline(true),
+                7 => self.setReverse(true),
+                22 => {
+                    self.setBold(false);
+                    self.setDim(false);
+                },
+                23 => self.setItalic(false),
+                24 => self.setUnderline(false),
+                27 => self.setReverse(false),
                 30...37 => self.setForeground(@intCast(param - 30)),
                 39 => self.setForeground(default_colour),
                 40...47 => self.setBackground(@intCast(param - 40)),
                 49 => self.setBackground(default_colour),
                 90...97 => self.setForeground(@intCast(param - 90 + 8)),
                 100...107 => self.setBackground(@intCast(param - 100 + 8)),
-                else => {},
+                // M73h extended selectors: each consumes its own trailing
+                // params so `1;38;5;196;48;2;1;2;3m` walks correctly.
+                38 => self.applyExtendedColour(&i, true),
+                48 => self.applyExtendedColour(&i, false),
+                else => {}, // unknown — consumed, rendition unchanged (pinned)
             }
         }
+    }
+
+    /// M73h (#1634): the `38`/`48` extended colour selector — `5;n` (xterm
+    /// 256) or `2;r;g;b` (truecolour). `i` points at the selector; its
+    /// arguments are consumed past it. Invalid, out-of-range, or
+    /// truncated forms leave the slot unchanged — never a
+    /// half-interpreted colour; a truncated tail drops the remaining
+    /// params (they cannot be trusted as standalone SGRs). The colon (ITU)
+    /// sub-parameter form has no parse arm: ':' lands in the intermediate
+    /// skip, the digits collapse into one unknown param, and the selector
+    /// is ignored (pinned by the corpus).
+    fn applyExtendedColour(self: *Screen, i: *usize, fg: bool) void {
+        const kind_i = i.* + 1;
+        if (kind_i >= self.csi_count) return; // bare `38`/`48` — ignore
+        i.* = kind_i;
+        const kind = self.csi_params[kind_i];
+        if (kind == 5) {
+            const n_i = kind_i + 1;
+            if (n_i >= self.csi_count) return; // truncated `38;5` — ignore
+            i.* = n_i;
+            const n = self.csi_params[n_i];
+            if (n <= 255) {
+                if (fg) self.setForeground(@intCast(n)) else self.setBackground(@intCast(n));
+            } // out of range: slot unchanged
+        } else if (kind == 2) {
+            const b_i = kind_i + 3;
+            if (b_i >= self.csi_count) {
+                i.* = self.csi_count - 1; // truncated rgb: drop the tail
+                return;
+            }
+            i.* = b_i;
+            const r = self.csi_params[kind_i + 1];
+            const g = self.csi_params[kind_i + 2];
+            const b = self.csi_params[b_i];
+            if (r <= 255 and g <= 255 and b <= 255) {
+                const rgb = Rgb{ .r = @intCast(r), .g = @intCast(g), .b = @intCast(b) };
+                if (fg) {
+                    self.style.fg = rgb_colour;
+                    self.fg_rgb_cur = rgb;
+                } else {
+                    self.style.bg = rgb_colour;
+                    self.bg_rgb_cur = rgb;
+                }
+            } // out of range: slot unchanged (mode NOT set)
+        } // any other kind: consumed and ignored
     }
 
     fn dispatchCsi(self: *Screen, final: u8) void {
@@ -638,6 +831,17 @@ pub const Screen = struct {
         return self.styles[line_index][col_index];
     }
 
+    /// M73h (#1634): the truecolour channels for a cell — null unless that
+    /// cell's slot marks `rgb_colour` (palette/default cells store no RGB).
+    pub fn rgbAt(self: *const Screen, line_index: usize, col_index: usize) struct { fg: ?Rgb, bg: ?Rgb } {
+        if (line_index >= self.used or col_index >= self.cols) return .{ .fg = null, .bg = null };
+        const st = self.styles[line_index][col_index];
+        return .{
+            .fg = if (st.fg == rgb_colour) self.fg_rgb[line_index][col_index] else null,
+            .bg = if (st.bg == rgb_colour) self.bg_rgb[line_index][col_index] else null,
+        };
+    }
+
     // -- M49 SD5 (#1132): scrollback view -----------------------------------
 
     /// Move the scrollback view by `delta` lines (positive = older). Clamped
@@ -710,6 +914,8 @@ pub const Screen = struct {
             const len = @min(self.lens[i], grid_cols);
             @memcpy(reflow_lines[count][0..len], self.cells[i][0..len]);
             @memcpy(reflow_styles[count][0..len], self.styles[i][0..len]);
+            @memcpy(reflow_fg_rgb[count][0..len], self.fg_rgb[i][0..len]);
+            @memcpy(reflow_bg_rgb[count][0..len], self.bg_rgb[i][0..len]);
             reflow_lens[count] = len;
             count += 1;
         }
@@ -730,7 +936,20 @@ pub const Screen = struct {
             while (cell < reflow_lens[n]) : (cell += 1) {
                 const src = reflow_lines[n][cell];
                 if (src.cont != 0) continue; // its base re-creates the pair
+                const width = text.char_width(src.base);
                 self.putRune(src.base, src.mark, reflow_styles[n][cell]);
+                if (width > 0) {
+                    // putRune left the cursor past the glyph it just wrote
+                    // (after a wrap that is column `width`); M73h: carry the
+                    // cell's truecolour channels to the same landing spot.
+                    const landed = self.col - width;
+                    self.fg_rgb[self.cur][landed] = reflow_fg_rgb[n][cell];
+                    self.bg_rgb[self.cur][landed] = reflow_bg_rgb[n][cell];
+                    if (width == 2) {
+                        self.fg_rgb[self.cur][landed + 1] = reflow_fg_rgb[n][cell];
+                        self.bg_rgb[self.cur][landed + 1] = reflow_bg_rgb[n][cell];
+                    }
+                }
             }
             if (n + 1 < count) self.newline();
         }
@@ -834,6 +1053,9 @@ var reflow_lines: [grid_lines][grid_cols]Cell = undefined;
 /// consumer at a time — the paint path reads a line and moves on.
 var line_scratch: [grid_cols]u8 = undefined;
 var reflow_styles: [grid_lines][grid_cols]CellStyle = undefined;
+/// M73h: reflow scratch for the truecolour side arrays (module BSS).
+var reflow_fg_rgb: [grid_lines][grid_cols]Rgb = undefined;
+var reflow_bg_rgb: [grid_lines][grid_cols]Rgb = undefined;
 var reflow_lens: [grid_lines]usize = undefined;
 
 /// The consumer that renders output and supplies input. Exclusive per
@@ -2660,4 +2882,173 @@ test "terminal: the alternate screen swap carries rune cells verbatim" {
     try std.testing.expectEqual(@as(u21, 'e'), s.cellAt(0, 0).base);
     try std.testing.expectEqual(@as(u21, 0x301), s.cellAt(0, 0).mark);
     try std.testing.expectEqual(@as(usize, 1), s.cursorCol());
+}
+
+// ---------------------------------------------------------------------------
+// M73h (#1634, ADR 0020 Amendment E): rendition depth — xterm 256,
+// truecolour side arrays, the new flags, and their resets. The 16-colour
+// behaviour tests above must stay green UNCHANGED.
+// ---------------------------------------------------------------------------
+
+test "terminal: SGR 38;5/48;5 store xterm 256 indices" {
+    var s = Screen{};
+    s.feed("\x1b[38;5;196mA\x1b[48;5;21mB");
+    try std.testing.expectEqual(@as(?u8, 196), styleForeground(s.styleAt(0, 0)));
+    try std.testing.expectEqual(@as(?u8, 21), styleBackground(s.styleAt(0, 1)));
+    try std.testing.expectEqual(@as(?u8, 196), styleForeground(s.styleAt(0, 1)));
+    // Index 16 must be a REAL colour, not the old sentinel: the u9 slot
+    // moved the default to 256 exactly so this cannot read as "default".
+    s.feed("\x1b[38;5;16mX");
+    try std.testing.expectEqual(@as(?u8, 16), styleForeground(s.styleAt(0, 2)));
+    // A palette cell stores no RGB (the rgbAt gate is the slot).
+    try std.testing.expectEqual(@as(?Rgb, null), s.rgbAt(0, 2).fg);
+}
+
+test "terminal: SGR 38;2/48;2 stores truecolour in the side arrays" {
+    var s = Screen{};
+    s.feed("\x1b[38;2;255;128;71;48;2;17;34;51mX");
+    try std.testing.expectEqual(rgb_colour, s.styleAt(0, 0).fg);
+    try std.testing.expectEqual(rgb_colour, s.styleAt(0, 0).bg);
+    // The accessor contract: truecolour reads as "no palette index" —
+    // paint callers check the slot first and fall through to rgbAt.
+    try std.testing.expectEqual(@as(?u8, null), styleForeground(s.styleAt(0, 0)));
+    const fg = s.rgbAt(0, 0).fg.?;
+    const bg = s.rgbAt(0, 0).bg.?;
+    try std.testing.expectEqual(@as(u8, 255), fg.r);
+    try std.testing.expectEqual(@as(u8, 128), fg.g);
+    try std.testing.expectEqual(@as(u8, 71), fg.b);
+    try std.testing.expectEqual(@as(u8, 17), bg.r);
+    try std.testing.expectEqual(@as(u8, 34), bg.g);
+    try std.testing.expectEqual(@as(u8, 51), bg.b);
+    // `39` returns the slot to default (rgb no longer applies).
+    s.feed("\x1b[39mY");
+    try std.testing.expectEqual(default_colour, s.styleAt(0, 1).fg);
+    try std.testing.expectEqual(@as(?Rgb, null), s.rgbAt(0, 1).fg);
+    // Out-of-range components never become a colour: the slot keeps its
+    // PREVIOUS value (still the rgb marker from the earlier 48;2) and the
+    // stored channels are untouched.
+    s.feed("\x1b[48;2;300;0;0mZ");
+    try std.testing.expectEqual(rgb_colour, s.styleAt(0, 2).bg);
+    const bg2 = s.rgbAt(0, 2).bg.?;
+    try std.testing.expectEqual(@as(u8, 17), bg2.r);
+    try std.testing.expectEqual(@as(u8, 34), bg2.g);
+    try std.testing.expectEqual(@as(u8, 51), bg2.b);
+}
+
+test "terminal: truecolour rides the alternate round trip" {
+    var s = Screen{};
+    s.feed("\x1b[38;2;10;20;30mA"); // primary: rgb A
+    s.feed("\x1b[?1049h");
+    s.feed("\x1b[38;2;40;50;60mB"); // alternate: rgb B
+    s.feed("\x1b[?1049l");
+    // The style word swapped back to the primary; if the rgb side arrays
+    // had NOT swapped with it, rgbAt here would report B's channels.
+    try std.testing.expectEqual(@as(u21, 'A'), s.cellAt(0, 0).base);
+    const fg = s.rgbAt(0, 0).fg.?;
+    try std.testing.expectEqual(@as(u8, 10), fg.r);
+    try std.testing.expectEqual(@as(u8, 20), fg.g);
+    try std.testing.expectEqual(@as(u8, 30), fg.b);
+    // The state mirror swapped too: the next write on the primary keeps
+    // rgb A even though the last 38;2 seen was B's.
+    s.feed("C");
+    try std.testing.expectEqual(@as(u8, 30), s.rgbAt(0, 1).fg.?.b);
+}
+
+test "terminal: truecolour rides a resize reflow" {
+    var s = Screen{};
+    s.feed("\x1b[38;2;9;8;7m");
+    s.feed("aaaaaaaaaaaaaaaaaaaaaaaaaa"); // 26 cells, all rgb-marked
+    _ = s.setCols(8); // reflow: rows of 8 — most cells change row
+    try std.testing.expectEqual(@as(u21, 'a'), s.cellAt(1, 1).base);
+    const fg = s.rgbAt(1, 1).fg.?; // landed mid-row after the re-feed
+    try std.testing.expectEqual(@as(u8, 9), fg.r);
+    try std.testing.expectEqual(@as(u8, 8), fg.g);
+    try std.testing.expectEqual(@as(u8, 7), fg.b);
+    // Erasing zeroes the side arrays, not just the slot.
+    s.feed("\x1b[1;1H\x1b[2K");
+    try std.testing.expectEqual(empty_rgb, s.fg_rgb[0][0]);
+    try std.testing.expectEqual(@as(?Rgb, null), s.rgbAt(0, 0).fg);
+}
+
+test "terminal: extended selectors consume their params; invalid forms are ignored" {
+    var s = Screen{};
+    // Index walk: flags AFTER a full selector still apply — this is the
+    // CURRENT rendition (no glyph written yet, so styleAt would be blank).
+    s.feed("\x1b[1;38;5;196;4m");
+    try std.testing.expectEqual(true, styleBold(s.style));
+    try std.testing.expectEqual(@as(?u8, 196), styleForeground(s.style));
+    try std.testing.expectEqual(true, styleUnderline(s.style));
+    // Out-of-range index: rendition unchanged.
+    s.feed("\x1b[38;5;999m");
+    try std.testing.expectEqual(@as(?u8, 196), styleForeground(s.style)); // rendition untouched
+    // Truncated rgb: the tail is DROPPED, never re-read as standalone
+    // SGRs (31 would have turned the foreground red).
+    s.feed("\x1b[38;2;31mX");
+    try std.testing.expectEqual(@as(?u8, 196), styleForeground(s.styleAt(0, 0)));
+    try std.testing.expectEqual(@as(u21, 'X'), s.cellAt(0, 0).base);
+    // A bare selector and an unknown kind are consumed, not painted.
+    s.feed("\x1b[38m\x1b[48;7mY");
+    try std.testing.expectEqual(@as(?u8, 196), styleForeground(s.styleAt(0, 1)));
+    try std.testing.expectEqual(@as(?u8, null), styleBackground(s.styleAt(0, 1)));
+    // The colon (ITU) sub-parameter form has no arm: digits collapse into
+    // one unknown param (3859) and everything stays unchanged.
+    s.feed("\x1b[38:5:9mZ");
+    try std.testing.expectEqual(@as(?u8, 196), styleForeground(s.styleAt(0, 2)));
+    try std.testing.expectEqual(@as(u21, 'Z'), s.cellAt(0, 2).base);
+}
+
+test "terminal: rendition flags 2/3/4/7 and their resets" {
+    var s = Screen{};
+    s.feed("\x1b[2;3;4;7mA");
+    try std.testing.expectEqual(true, styleDim(s.styleAt(0, 0)));
+    try std.testing.expectEqual(true, styleItalic(s.styleAt(0, 0)));
+    try std.testing.expectEqual(true, styleUnderline(s.styleAt(0, 0)));
+    try std.testing.expectEqual(true, styleReverse(s.styleAt(0, 0)));
+    try std.testing.expectEqual(false, styleBold(s.styleAt(0, 0)));
+    s.feed("\x1b[22;23;24;27mB");
+    try std.testing.expectEqual(false, styleDim(s.styleAt(0, 1)));
+    try std.testing.expectEqual(false, styleItalic(s.styleAt(0, 1)));
+    try std.testing.expectEqual(false, styleUnderline(s.styleAt(0, 1)));
+    try std.testing.expectEqual(false, styleReverse(s.styleAt(0, 1)));
+    // SGR 0 clears EVERYTHING — flags included, byte-exact default.
+    // (A and B above already consumed columns 0 and 1, so A' lands at 2
+    // and the reset cell B' at 3.)
+    s.feed("\x1b[1;4;31mA\x1b[0mB");
+    try std.testing.expectEqual(true, styleUnderline(s.styleAt(0, 2)));
+    try std.testing.expectEqual(default_cell_style, s.styleAt(0, 3));
+    try std.testing.expectEqual(false, styleBold(s.style));
+    try std.testing.expectEqual(false, styleUnderline(s.style));
+    try std.testing.expectEqual(@as(?u8, null), styleForeground(s.style));
+}
+
+test "terminal: xterm256Rgb spot-checks (cube + grayscale + ansi)" {
+    // Cube: index 16 = (0,0,0), 22 = level(1,0,0) = (0,95,0),
+    // 52 = level(1) on red = (95,0,0), 102 = (135,135,135), 231 = white.
+    try std.testing.expectEqual(Rgb{ .r = 0, .g = 0, .b = 0 }, xterm256Rgb(16));
+    try std.testing.expectEqual(Rgb{ .r = 0, .g = 95, .b = 0 }, xterm256Rgb(22));
+    try std.testing.expectEqual(Rgb{ .r = 95, .g = 0, .b = 0 }, xterm256Rgb(52));
+    try std.testing.expectEqual(Rgb{ .r = 135, .g = 135, .b = 135 }, xterm256Rgb(102));
+    try std.testing.expectEqual(Rgb{ .r = 255, .g = 255, .b = 255 }, xterm256Rgb(231));
+    // Grayscale ramp: 232 = 8, 255 = 8 + 10·23 = 238.
+    try std.testing.expectEqual(Rgb{ .r = 8, .g = 8, .b = 8 }, xterm256Rgb(232));
+    try std.testing.expectEqual(Rgb{ .r = 238, .g = 238, .b = 238 }, xterm256Rgb(255));
+    // 0..=15 are total (paint keeps its ansi_palette for these).
+    try std.testing.expectEqual(Rgb{ .r = 0xe5, .g = 0xe5, .b = 0xe5 }, xterm256Rgb(7));
+    try std.testing.expectEqual(Rgb{ .r = 0x00, .g = 0xff, .b = 0xff }, xterm256Rgb(14));
+}
+
+test "terminal: a 12-param SGR line fits the widened csi_params" {
+    // Before M73h this overflowed [8]: params 9.. dropped, so 48;5;9 was
+    // lost. 12 params now land in full.
+    var s = Screen{};
+    s.feed("\x1b[1;4;7;3;38;2;1;2;3;48;5;9mX");
+    try std.testing.expectEqual(true, styleBold(s.styleAt(0, 0)));
+    try std.testing.expectEqual(true, styleUnderline(s.styleAt(0, 0)));
+    try std.testing.expectEqual(true, styleReverse(s.styleAt(0, 0)));
+    try std.testing.expectEqual(true, styleItalic(s.styleAt(0, 0)));
+    const fg = s.rgbAt(0, 0).fg.?;
+    try std.testing.expectEqual(@as(u8, 1), fg.r);
+    try std.testing.expectEqual(@as(u8, 2), fg.g);
+    try std.testing.expectEqual(@as(u8, 3), fg.b);
+    try std.testing.expectEqual(@as(?u8, 9), styleBackground(s.styleAt(0, 0)));
 }
