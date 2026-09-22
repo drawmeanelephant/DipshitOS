@@ -273,6 +273,44 @@ pub fn xterm256Rgb(index: u8) Rgb {
     };
 }
 
+/// M73k (#1637): scrollback depth beyond the live grid. MEASURED against
+/// `tools/verify-bss-budget.sh`, not guessed: one history row is
+/// cells 80x8 + styles 80x4 + lens = 968 B (M73h widened CellStyle to
+/// u32 — that is what pushes the card's 512-line band down), and five
+/// banks are needed: one per terminal (`max_terminals`) plus ONE
+/// full-size reflow temp — an EXPANDING re-wrap cannot happen in place
+/// (it would write ahead of its own reads on a single ring), so reflow
+/// snapshots exactly like the grid's own `reflow_lines` path:
+///   5 * 256 * 968 = 1,239,040 B  ->  budget PASS (~195 KiB headroom).
+/// 256 = 2x the live screen depth per window, 1024 lines across the
+/// fleet. Rows carry the M73a-1 `Cell` repr + rendition; the RGB side
+/// arrays do NOT ride along (+480 B/row would blow the budget) —
+/// truecolour cells are coerced to the presentation default on push
+/// (stated honestly in the PR).
+pub const history_lines: usize = 256;
+
+/// One screen's history ring contents. Module BSS for the same reason as
+/// `reflow_lines`: far too large for a Screen's .data object or a stack.
+pub const HistoryBank = struct {
+    cells: [history_lines][grid_cols]Cell,
+    styles: [history_lines][grid_cols]CellStyle,
+    lens: [history_lines]usize,
+};
+
+/// Per-terminal history banks, linked to `screens[i]` by pointer identity.
+/// A Screen outside the registry (a local test value) has no bank and
+/// simply never accumulates history — existing tests stay byte-identical.
+var history_bank: [max_terminals]HistoryBank = undefined;
+/// The reflow snapshot (deliverable 3): one at a time, paint-path only.
+var history_temp: HistoryBank = undefined;
+
+fn histOf(s: *const Screen) ?*HistoryBank {
+    for (&screens, 0..) |*sc, i| {
+        if (sc == s) return &history_bank[i];
+    }
+    return null;
+}
+
 pub const Screen = struct {
     cells: [grid_lines][grid_cols]Cell = [_][grid_cols]Cell{[_]Cell{empty_cell} ** grid_cols} ** grid_lines,
     styles: [grid_lines][grid_cols]CellStyle = [_][grid_cols]CellStyle{[_]CellStyle{default_cell_style} ** grid_cols} ** grid_lines,
@@ -342,6 +380,38 @@ pub const Screen = struct {
     /// M49 SD5: the selection endpoints (absolute grid rows), if any.
     sel_anchor: ?Point = null,
     sel_cursor: ?Point = null,
+    /// M73k (#1637): history ring position for THIS screen — `hist_count`
+    /// surviving rows (0..history_lines), `hist_start` the oldest slot,
+    /// `hist_dropped` the total ever evicted. `u + hist_dropped` is a
+    /// line's STABLE absolute identity (unified indices shift when the
+    /// ring rotates; absolutes do not).
+    hist_count: usize = 0,
+    hist_start: usize = 0,
+    hist_dropped: u64 = 0,
+    /// M73k: kernel-side search — presentation state like selection,
+    /// never in the byte pipe (D1 holds). Normal screen only. Literal,
+    /// row-local, rune-aware, ASCII-case-insensitive (pinned by test).
+    search_active: bool = false,
+    search_pat: [32]u21 = [_]u21{0} ** 32,
+    search_len: usize = 0,
+    search_count: usize = 0,
+    search_row: usize = 0, // unified row of the current match
+    search_col: usize = 0, // start column of the current match
+    search_has_cur: bool = false,
+    /// The user's selection, saved while search owns `sel_*` for the
+    /// current-match highlight; restored on exit.
+    saved_sel_anchor: ?Point = null,
+    saved_sel_cursor: ?Point = null,
+    /// The row under the prompt bar, saved/restored through ABSOLUTE
+    /// identity (survives ring rotation and grid scroll; an evicted row
+    /// has nothing left to restore, so the restore skips it).
+    ov_cells: [grid_cols]Cell = [_]Cell{empty_cell} ** grid_cols,
+    ov_styles: [grid_cols]CellStyle = [_]CellStyle{default_cell_style} ** grid_cols,
+    ov_fg: [grid_cols]Rgb = [_]Rgb{empty_rgb} ** grid_cols,
+    ov_bg: [grid_cols]Rgb = [_]Rgb{empty_rgb} ** grid_cols,
+    ov_lens: usize = 0,
+    ov_abs: u64 = 0,
+    ov_valid: bool = false,
 
     pub fn reset(self: *Screen) void {
         self.* = .{};
@@ -358,25 +428,97 @@ pub const Screen = struct {
     fn newline(self: *Screen) void {
         if (self.cur + 1 < grid_lines) {
             self.cur += 1;
-            if (self.cur >= self.used) self.used = self.cur + 1;
+            const grew = (self.cur >= self.used);
+            if (grew) self.used = self.cur + 1;
             self.clearLine(self.cur);
+            if (grew) self.noteTailGrowth();
         } else {
-            // Scroll up one line, dropping the oldest (bounded scrollback).
+            // Scroll up one line. M73k (#1637): the evicted oldest row
+            // enters the history ring — pushed BEFORE the shift, which
+            // would otherwise overwrite row 0 and lose it (normal screen
+            // only — history belongs to the primary screen, pinned by
+            // test) — and a scrolled-back view PINS instead of snapping.
+            self.pushHistory();
             var i: usize = 0;
             while (i + 1 < grid_lines) : (i += 1) {
                 self.cells[i] = self.cells[i + 1];
                 self.styles[i] = self.styles[i + 1];
                 self.lens[i] = self.lens[i + 1];
+                // M73h fixup: the truecolour side arrays ride with their
+                // cells — otherwise a scroll repaints surviving rows
+                // with the wrong cell's rgb.
+                self.fg_rgb[i] = self.fg_rgb[i + 1];
+                self.bg_rgb[i] = self.bg_rgb[i + 1];
             }
             self.clearLine(grid_lines - 1);
             self.cur = grid_lines - 1;
             self.used = grid_lines;
+            self.noteTailGrowth();
         }
         self.col = 0;
-        self.view = 0;
+    }
+
+    /// M73k: the tail grew (line pushed to history, or a new grid row
+    /// materialised). While the reader is scrolled back the window's
+    /// BOTTOM must stay put: view counts from the tail, so bumping it by
+    /// the growth keeps `lineCount - view` — and the absolute identity
+    /// behind every unified row — exactly where it was. At view 0
+    /// nothing changes (the tail follows, as ever).
+    fn noteTailGrowth(self: *Screen) void {
+        if (self.view > 0) {
+            self.view += 1;
+            // Ring-full pushes do not grow lineCount: clamp so a pinned
+            // view can never outrange the stored space (bottom >= 0).
+            const max_view = self.lineCount() - 1;
+            if (self.view > max_view) self.view = max_view;
+        }
+    }
+
+    /// M73k: move the grid's evicted oldest row into this screen's ring.
+    /// Registry screens only (a local Screen has no bank and drops like
+    /// before — existing tests unchanged). RGB side arrays are coerced to
+    /// the presentation default: history does not store them (budget),
+    /// and a stale `rgb_colour` slot with no side data would paint black.
+    fn pushHistory(self: *Screen) void {
+        if (self.alt_active) return; // history belongs to the normal screen
+        const bank = histOf(self) orelse return;
+        var styles_row: [grid_cols]CellStyle = undefined;
+        for (0..grid_cols) |c| {
+            var st = self.styles[0][c];
+            if (st.fg == rgb_colour) st.fg = default_colour;
+            if (st.bg == rgb_colour) st.bg = default_colour;
+            styles_row[c] = st;
+        }
+        if (self.hist_count < history_lines) {
+            const slot = (self.hist_start + self.hist_count) % history_lines;
+            @memcpy(bank.cells[slot][0..], self.cells[0][0..]);
+            @memcpy(bank.styles[slot][0..], styles_row[0..]);
+            bank.lens[slot] = self.lens[0];
+            self.hist_count += 1;
+        } else {
+            // Ring full: overwrite the oldest slot and rotate — the same
+            // drop-oldest policy the grid itself has always used.
+            @memcpy(bank.cells[self.hist_start][0..], self.cells[0][0..]);
+            @memcpy(bank.styles[self.hist_start][0..], styles_row[0..]);
+            bank.lens[self.hist_start] = self.lens[0];
+            self.hist_start = (self.hist_start + 1) % history_lines;
+            self.hist_dropped += 1;
+        }
     }
 
     pub fn clearScreen(self: *Screen) void {
+        // M73k: a screen clear takes the whole space — history included —
+        // and any live search with it (its overlay row is about to vanish;
+        // restoring it later would resurrect pre-clear content). The ALT
+        // entry clear is the exception: it clears the freshly swapped-in
+        // alt grid, while the history belongs to the primary screen
+        // waiting underneath and must survive the round trip (pinned).
+        self.searchAbort();
+        if (!self.alt_active and histOf(self) != null) {
+            self.hist_count = 0;
+            self.hist_start = 0;
+            self.hist_dropped = 0;
+        }
         var i: usize = 0;
         while (i < grid_lines) : (i += 1) self.clearLine(i);
         self.used = 1;
@@ -410,8 +552,7 @@ pub const Screen = struct {
                 return;
             }
             self.cells[self.cur][base_col].mark = cp; // one overlay slot: last wins
-            self.view = 0;
-            return;
+            return; // M73k: writes never touch the view (pin-while-scrolled)
         }
         if (width == 2 and self.col + 2 > self.cols) {
             self.newline();
@@ -444,7 +585,6 @@ pub const Screen = struct {
         const end = self.col + width;
         if (end > self.lens[self.cur]) self.lens[self.cur] = end;
         self.col = end;
-        self.view = 0;
     }
 
     fn setForeground(self: *Screen, colour: colour_slot) void {
@@ -538,6 +678,7 @@ pub const Screen = struct {
         while (self.used <= row) {
             self.clearLine(self.used);
             self.used += 1;
+            self.noteTailGrowth(); // M73k: growth under a pinned view
         }
         self.cur = row;
         self.col = column;
@@ -563,6 +704,10 @@ pub const Screen = struct {
 
     fn setAlternate(self: *Screen, enabled: bool) void {
         if (self.alt_active == enabled) return;
+        // M73k: close a live search BEFORE the swap — its prompt row
+        // lives in the primary grid, and an abort after the swap would
+        // stash the prompt and ghost it on exit (pinned by test).
+        if (self.search_active) self.searchExit();
         self.swapAlternate();
         self.alt_active = enabled;
         self.clearSelection();
@@ -786,8 +931,20 @@ pub const Screen = struct {
         for (bytes) |b| self.putByte(b);
     }
 
+    /// M73k (#1637): the total surviving lines as ONE space — history
+    /// first (oldest at 0), then the grid. The painter's existing
+    /// `lineCount - view - rows` walk and `terminalHitAt`'s mirror both
+    /// index this, so history paints and hit-tests with zero walk edits.
+    /// Alt-screen: its own bounded world — history never shows there.
     pub fn lineCount(self: *const Screen) usize {
-        return self.used;
+        if (self.alt_active) return self.used;
+        return self.hist_count + self.used;
+    }
+
+    /// The unified row the cursor sits on — the PAINT-side index (the
+    /// corpus, wheel reports and search keep the grid-relative `cursorLine`).
+    pub fn cursorLineUnified(self: *const Screen) usize {
+        return if (self.alt_active) self.cur else self.hist_count + self.cur;
     }
 
     /// The ASCII projection of line `i` (empty for an out-of-range line):
@@ -798,20 +955,66 @@ pub const Screen = struct {
     /// column indices line up. Module scratch: consume the result before
     /// the next call.
     pub fn line(self: *const Screen, i: usize) []const u8 {
-        if (i >= self.used) return &.{};
-        const n = self.lens[i];
+        const row_cells = self.uCells(i) orelse return &.{};
+        const n = @min(self.uLen(i) orelse 0, grid_cols);
         for (0..n) |c| {
-            const cell = self.cells[i][c];
+            const cell = row_cells[c];
             line_scratch[c] = if (cell.cont != 0 or cell.base >= 0x80) 0 else @intCast(cell.base);
         }
         return line_scratch[0..n];
     }
 
+    /// M73k: resolve unified row `i` to its cells / length / rendition
+    /// (null = past the end). History rows come from this screen's bank,
+    /// grid rows shift by `hist_count`, the alt screen never has history.
+    fn uCells(self: *const Screen, i: usize) ?[]const Cell {
+        if (self.alt_active) {
+            if (i >= self.used) return null;
+            return &self.cells[i];
+        }
+        if (i < self.hist_count) {
+            const bank = histOf(self) orelse return null;
+            return &bank.cells[(self.hist_start + i) % history_lines];
+        }
+        const gr = i - self.hist_count;
+        if (gr >= self.used) return null;
+        return &self.cells[gr];
+    }
+
+    fn uLen(self: *const Screen, i: usize) ?usize {
+        if (self.alt_active) {
+            if (i >= self.used) return null;
+            return self.lens[i];
+        }
+        if (i < self.hist_count) {
+            const bank = histOf(self) orelse return null;
+            return bank.lens[(self.hist_start + i) % history_lines];
+        }
+        const gr = i - self.hist_count;
+        if (gr >= self.used) return null;
+        return self.lens[gr];
+    }
+
+    fn uStyles(self: *const Screen, i: usize) ?[]const CellStyle {
+        if (self.alt_active) {
+            if (i >= self.used) return null;
+            return &self.styles[i];
+        }
+        if (i < self.hist_count) {
+            const bank = histOf(self) orelse return null;
+            return &bank.styles[(self.hist_start + i) % history_lines];
+        }
+        const gr = i - self.hist_count;
+        if (gr >= self.used) return null;
+        return &self.styles[gr];
+    }
+
     /// The real cell at (line, col) — M73a-1's presentation truth for the
     /// painter, tests, and anyone who needs runes rather than bytes.
     pub fn cellAt(self: *const Screen, line_index: usize, col_index: usize) Cell {
-        if (line_index >= self.used or col_index >= grid_cols) return empty_cell;
-        return self.cells[line_index][col_index];
+        if (col_index >= grid_cols) return empty_cell;
+        const row_cells = self.uCells(line_index) orelse return empty_cell;
+        return row_cells[col_index];
     }
 
     pub fn cursorLine(self: *const Screen) usize {
@@ -827,18 +1030,23 @@ pub const Screen = struct {
     }
 
     pub fn styleAt(self: *const Screen, line_index: usize, col_index: usize) CellStyle {
-        if (line_index >= self.used or col_index >= self.cols) return default_cell_style;
-        return self.styles[line_index][col_index];
+        if (col_index >= self.cols) return default_cell_style;
+        const row_styles = self.uStyles(line_index) orelse return default_cell_style;
+        return row_styles[col_index];
     }
 
     /// M73h (#1634): the truecolour channels for a cell — null unless that
     /// cell's slot marks `rgb_colour` (palette/default cells store no RGB).
     pub fn rgbAt(self: *const Screen, line_index: usize, col_index: usize) struct { fg: ?Rgb, bg: ?Rgb } {
-        if (line_index >= self.used or col_index >= self.cols) return .{ .fg = null, .bg = null };
-        const st = self.styles[line_index][col_index];
+        // M73k: history rows store no RGB side arrays (push coerces those
+        // slots to the presentation default) — nulls are truthful there.
+        if (!self.alt_active and line_index < self.hist_count) return .{ .fg = null, .bg = null };
+        const gr = if (self.alt_active) line_index else line_index - self.hist_count;
+        if (gr >= self.used or col_index >= self.cols) return .{ .fg = null, .bg = null };
+        const st = self.styles[gr][col_index];
         return .{
-            .fg = if (st.fg == rgb_colour) self.fg_rgb[line_index][col_index] else null,
-            .bg = if (st.bg == rgb_colour) self.bg_rgb[line_index][col_index] else null,
+            .fg = if (st.fg == rgb_colour) self.fg_rgb[gr][col_index] else null,
+            .bg = if (st.bg == rgb_colour) self.bg_rgb[gr][col_index] else null,
         };
     }
 
@@ -847,16 +1055,22 @@ pub const Screen = struct {
     /// Move the scrollback view by `delta` lines (positive = older). Clamped
     /// to the stored range; 0 follows the tail.
     pub fn scrollBy(self: *Screen, delta: i32) void {
-        const max_view: i64 = if (self.used > 0) @intCast(self.used - 1) else 0;
+        // M73k: the stored range is now grid+history as one space.
+        const total = self.lineCount();
+        const max_view: i64 = if (total > 0) @intCast(total - 1) else 0;
         var v: i64 = @as(i64, @intCast(self.view)) + delta;
         if (v < 0) v = 0;
         if (v > max_view) v = max_view;
         self.view = @intCast(v);
+        // M73k: the prompt bar follows the window (its row is bottom-1).
+        if (self.search_active) self.searchDrawPrompt();
     }
 
-    /// Snap the view back to the tail (new output does this implicitly).
+    /// Snap the view back to the tail. M73k: new output no longer does
+    /// this implicitly — pin-while-scrolled; Shift+End still snaps.
     pub fn scrollReset(self: *Screen) void {
         self.view = 0;
+        if (self.search_active) self.searchDrawPrompt(); // M73k: bar follows
     }
 
     pub fn viewOffset(self: *const Screen) usize {
@@ -894,6 +1108,10 @@ pub const Screen = struct {
     pub fn reflow(self: *Screen, new_cols: usize) void {
         const c = @max(@as(usize, 8), @min(new_cols, grid_cols));
         if (c == self.cols) return;
+        // M73k: close any live search FIRST — its overlay row must be
+        // restored as the OLD content before rows re-lay out, and match
+        // coordinates cannot survive a re-wrap (resize closes the bar).
+        self.searchExit();
 
         // The oldest line that still fits, so the reflow drops from the top
         // exactly like new output would.
@@ -953,6 +1171,83 @@ pub const Screen = struct {
             }
             if (n + 1 < count) self.newline();
         }
+        self.reflowHistory(c);
+    }
+
+    /// M73k (#1637, deliverable 3): history re-wraps WITH the grid — the
+    /// same per-row `wrappedRows` policy and the same drop-oldest bound —
+    /// so grid and history can never disagree after a drag. A logical-
+    /// store/view-wrap alternative would break the paint walk's 1:1 row
+    /// mapping (that constraint is why this policy is THE policy). The
+    /// kept rows bounce through the temp bank because an EXPANDING
+    /// re-wrap cannot be done in place: on one ring it would overwrite
+    /// rows it has not read yet.
+    fn reflowHistory(self: *Screen, new_cols: usize) void {
+        if (self.hist_count == 0) return;
+        const bank = histOf(self) orelse {
+            self.hist_count = 0;
+            return;
+        };
+        // Pass 1 (read-only): newest-first, keep the longest suffix whose
+        // re-wrapped row count fits the ring — drop-oldest, like the grid.
+        var out_rows: usize = 0;
+        var hfirst: usize = self.hist_count;
+        while (hfirst > 0) {
+            const idx = hfirst - 1;
+            const slot = (self.hist_start + idx) % history_lines;
+            const k = wrappedRows(bank.cells[slot][0..bank.lens[slot]], new_cols);
+            if (out_rows + k > history_lines) break;
+            out_rows += k;
+            hfirst -= 1;
+        }
+        // Pass 2: snapshot the kept rows (forward) into the temp bank.
+        var m: usize = 0;
+        var i = hfirst;
+        while (i < self.hist_count) : (i += 1) {
+            const slot = (self.hist_start + i) % history_lines;
+            const len = bank.lens[slot];
+            @memcpy(history_temp.cells[m][0..len], bank.cells[slot][0..len]);
+            @memcpy(history_temp.styles[m][0..len], bank.styles[slot][0..len]);
+            history_temp.lens[m] = len;
+            m += 1;
+        }
+        // Pass 3: rebuild the ring at the new width. Direct cell
+        // placement (no decode): wide pairs stay together, a wrap that
+        // would split one lands early — the same rule as `wrappedRows`.
+        self.hist_count = 0;
+        self.hist_start = 0;
+        self.hist_dropped += hfirst;
+        var t: usize = 0;
+        while (t < m) : (t += 1) {
+            const len = history_temp.lens[t];
+            var oc: usize = 0; // output column on the current row
+            var ci: usize = 0;
+            while (ci < len) : (ci += 1) {
+                const src = history_temp.cells[t][ci];
+                if (src.cont != 0) continue; // its base already placed the pair
+                const w: usize = if (text.char_width(src.base) >= 2) 2 else 1;
+                if (oc + w > new_cols and oc > 0) {
+                    self.closeHistRow(bank, oc);
+                    oc = 0;
+                }
+                const slot = self.hist_count; // hist_start = 0 during rebuild
+                bank.cells[slot][oc] = src;
+                bank.styles[slot][oc] = history_temp.styles[t][ci];
+                if (w == 2 and ci + 1 < len) {
+                    bank.cells[slot][oc + 1] = history_temp.cells[t][ci + 1];
+                    bank.styles[slot][oc + 1] = history_temp.styles[t][ci + 1];
+                }
+                oc += w;
+            }
+            self.closeHistRow(bank, oc); // every input row ends one output row
+        }
+    }
+
+    /// Finish the ring row currently being rebuilt (`hist_count` grows
+    /// only when a row is complete, so a partial row is never visible).
+    fn closeHistRow(self: *Screen, bank: *HistoryBank, len: usize) void {
+        bank.lens[self.hist_count] = len;
+        self.hist_count += 1;
     }
 
     /// Set the effective column count, reflowing when it changes. Returns
@@ -1042,6 +1337,364 @@ pub const Screen = struct {
             }
         }
         return out;
+    }
+
+    // -- M73k (#1637): kernel-side search over grid + history ------------
+
+    /// The abstract keys the search bar consumes. input.zig maps HID keys
+    /// to these; tests construct them directly — which is also how a
+    /// RUNE enters the pattern (HID keys are ASCII; cells hold runes).
+    pub const SearchKey = union(enum) { ch: u21, backspace, enter, prev, esc };
+
+    pub fn searchActive(self: *const Screen) bool {
+        return self.search_active;
+    }
+
+    /// Open the bar: NORMAL screen only (alt returns false and changes
+    /// nothing — pinned). The user's selection is saved (search owns
+    /// `sel_*` for the current-match highlight until exit), and the view
+    /// lifts off the tail so live output never rewrites the overlay row
+    /// (single-line screens cannot lift — documented edge).
+    pub fn searchOpen(self: *Screen) bool {
+        if (self.alt_active) return false;
+        if (self.search_active) return true;
+        self.saved_sel_anchor = self.sel_anchor;
+        self.saved_sel_cursor = self.sel_cursor;
+        self.clearSelection();
+        self.search_active = true;
+        self.search_len = 0;
+        self.search_count = 0;
+        self.search_has_cur = false;
+        if (self.view == 0 and self.lineCount() > 1) self.view = 1;
+        self.searchDrawPrompt(); // positions + saves the overlay row too
+        return true;
+    }
+
+    /// Feed one key. Returns the match count to klog (`null` = nothing
+    /// changed — nav, esc, empty backspace; the `tty: copy`-style klog
+    /// mirror in input.zig fires only on a pattern change, and the empty
+    /// pattern is a no-op).
+    pub fn searchFeed(self: *Screen, key: SearchKey) ?usize {
+        if (!self.search_active) return null;
+        switch (key) {
+            .esc => {
+                self.searchExit();
+                return null;
+            },
+            .enter => {
+                if (self.search_count > 0) self.searchStep(1);
+                return null;
+            },
+            .prev => {
+                if (self.search_count > 0) self.searchStep(-1);
+                return null;
+            },
+            .backspace => {
+                if (self.search_len == 0) return null;
+                self.search_len -= 1;
+                self.searchRecompute();
+                self.searchDrawPrompt();
+                return if (self.search_len > 0) self.search_count else null;
+            },
+            .ch => |c| {
+                if (self.search_len >= self.search_pat.len) return null;
+                self.search_pat[self.search_len] = c;
+                self.search_len += 1;
+                self.searchRecompute();
+                self.searchDrawPrompt();
+                return self.search_count;
+            },
+        }
+    }
+
+    /// Exit (Esc): the overlay row and the user's selection come back,
+    /// state clears — and the VIEW STAYS where the match put it (the
+    /// card's "exits and restores the view at the match").
+    pub fn searchExit(self: *Screen) void {
+        if (!self.search_active) return;
+        self.searchRestoreOverlay();
+        self.sel_anchor = self.saved_sel_anchor;
+        self.sel_cursor = self.saved_sel_cursor;
+        self.searchAbort();
+    }
+
+    /// Abort without writing anything back (clearScreen): the row content
+    /// is about to vanish, so restoring it later would resurrect stale
+    /// pre-clear bytes.
+    fn searchAbort(self: *Screen) void {
+        self.search_active = false;
+        self.search_len = 0;
+        self.search_count = 0;
+        self.search_has_cur = false;
+        self.ov_valid = false;
+        self.saved_sel_anchor = null;
+        self.saved_sel_cursor = null;
+    }
+
+    // Row-local literal matcher: ASCII-case-insensitive, everything else
+    // exact. Rune-aware by construction — cells hold runes, the pattern
+    // holds runes, an accented match compares codepoint to codepoint.
+    // Matches NEVER cross row boundaries (v1, pinned): each row is its
+    // own haystack.
+    fn foldAscii(c: u21) u21 {
+        return if (c >= 'A' and c <= 'Z') c + 32 else c;
+    }
+
+    fn matchAt(row_cells: []const Cell, row_len: usize, col: usize, pat: []const u21) bool {
+        if (col + pat.len > row_len) return false;
+        var j: usize = 0;
+        while (j < pat.len) : (j += 1) {
+            if (foldAscii(row_cells[col + j].base) != foldAscii(pat[j])) return false;
+        }
+        return true;
+    }
+
+    /// M73k: the unified row the prompt bar currently covers — from the
+    /// STASH (absolute across ring rotation), not from `view`: during a
+    /// scan the bar still sits where the last draw left it.
+    fn stashedRow(self: *const Screen) ?usize {
+        if (!self.ov_valid) return null;
+        if (self.ov_abs < self.hist_dropped) return null;
+        return @intCast(self.ov_abs - self.hist_dropped);
+    }
+
+    /// Scan-time row view: the covered row yields its STASHED original
+    /// content — the live cells hold prompt chrome, which is neither the
+    /// user's data nor searchable (the count must see the real row under
+    /// the bar, and must never self-match the pattern the bar draws).
+    fn scanCells(self: *const Screen, row: usize) ?[]const Cell {
+        if (self.stashedRow()) |u| {
+            if (row == u) return self.ov_cells[0..];
+        }
+        return self.uCells(row);
+    }
+
+    fn scanLen(self: *const Screen, row: usize) ?usize {
+        if (self.stashedRow()) |u| {
+            if (row == u) return self.ov_lens;
+        }
+        return self.uLen(row);
+    }
+
+    /// Rescan the whole space: count every row-local occurrence, park the
+    /// current match on the FIRST (top-anchored incremental search), move
+    /// the view so it sits right above the prompt bar, and expose it via
+    /// the selection range so the existing inversion paint highlights it.
+    fn searchRecompute(self: *Screen) void {
+        self.search_count = 0;
+        self.search_has_cur = false;
+        self.clearSelection();
+        if (self.search_len == 0) return; // empty pattern = no-op
+        const pat = self.search_pat[0..self.search_len];
+        const total = self.lineCount();
+        var row: usize = 0;
+        var first: ?Point = null;
+        while (row < total) : (row += 1) {
+            const row_cells = self.scanCells(row) orelse continue;
+            const row_len = self.scanLen(row) orelse continue;
+            var c: usize = 0;
+            while (c + pat.len <= row_len) : (c += 1) {
+                if (matchAt(row_cells, row_len, c, pat)) {
+                    self.search_count += 1;
+                    if (first == null) first = .{ .line = row, .col = c };
+                    c += pat.len - 1; // non-overlapping occurrences
+                }
+            }
+        }
+        if (first) |f| {
+            self.search_row = f.line;
+            self.search_col = f.col;
+            self.search_has_cur = true;
+            self.searchHighlight();
+            self.searchScrollTo(f.line);
+        }
+    }
+
+    /// Next/prev with wrap-around — a linear walk over candidate start
+    /// positions (rows never contribute cross-row candidates).
+    fn searchStep(self: *Screen, dir: i32) void {
+        if (!self.search_has_cur or self.search_len == 0) return;
+        const pat = self.search_pat[0..self.search_len];
+        const total = self.lineCount();
+        if (total == 0) return;
+        var row: usize = self.search_row;
+        var col: usize = self.search_col;
+        var guard: usize = 0;
+        const guard_max = (history_lines + grid_lines) * grid_cols;
+        while (guard < guard_max) : (guard += 1) {
+            if (dir > 0) {
+                col += 1;
+                const rl = self.scanLen(row) orelse continue;
+                if (col + pat.len > rl) {
+                    row += 1;
+                    if (row >= total) row = 0;
+                    col = 0;
+                }
+            } else {
+                if (col == 0) {
+                    row = if (row == 0) total - 1 else row - 1;
+                    const rl = self.scanLen(row) orelse continue;
+                    col = if (rl >= pat.len) rl - pat.len else 0;
+                } else {
+                    col -= 1;
+                }
+            }
+            const row_cells = self.scanCells(row) orelse continue;
+            const row_len = self.scanLen(row) orelse continue;
+            if (col + pat.len > row_len) continue;
+            if (matchAt(row_cells, row_len, col, pat)) {
+                self.search_row = row;
+                self.search_col = col;
+                self.searchHighlight();
+                self.searchScrollTo(row);
+                return;
+            }
+        }
+    }
+
+    /// The current match IS the selection range while search is up —
+    /// `inSelection` treats the end column as inclusive, so the cursor
+    /// parks on the last cell of the match.
+    fn searchHighlight(self: *Screen) void {
+        if (!self.search_has_cur) return;
+        self.sel_anchor = .{ .line = self.search_row, .col = self.search_col };
+        self.sel_cursor = .{
+            .line = self.search_row,
+            .col = self.search_col + self.search_len - 1,
+        };
+    }
+
+    /// Park the match two rows above the window bottom — the row directly
+    /// above the prompt bar — without knowing the window's height (the
+    /// painter derives `first = lineCount - view - rows` from view alone).
+    fn searchScrollTo(self: *Screen, row: usize) void {
+        const total = self.lineCount();
+        var v: i64 = @as(i64, @intCast(total)) - @as(i64, @intCast(row)) - 2;
+        if (v < 0) v = 0;
+        const max_v: i64 = if (total > 0) @as(i64, @intCast(total - 1)) else 0;
+        if (v > max_v) v = max_v;
+        self.view = @intCast(v);
+    }
+
+    /// The bar's row: one above the window bottom (absolute-indexed via
+    /// `hist_dropped` so ring rotation and grid scroll cannot lose it).
+    fn searchOverlayRow(self: *const Screen) usize {
+        const total = self.lineCount();
+        const v = @min(self.view, total - 1);
+        return total - v - 1;
+    }
+
+    /// Restore whatever row the bar currently covers, then save the row
+    /// about to be covered — so as the view jumps between matches the
+    /// saved content FOLLOWS the bar (no prompt ghosts, no lost rows).
+    fn searchPositionOverlay(self: *Screen) void {
+        self.searchRestoreOverlay();
+        const u = self.searchOverlayRow();
+        const row_cells = self.uCells(u) orelse return;
+        const row_styles = self.uStyles(u) orelse return;
+        @memcpy(self.ov_cells[0..], row_cells[0..]);
+        @memcpy(self.ov_styles[0..], row_styles[0..]);
+        self.ov_lens = self.uLen(u) orelse 0;
+        if (!self.alt_active and u >= self.hist_count and (u - self.hist_count) < self.used) {
+            const gr = u - self.hist_count;
+            @memcpy(self.ov_fg[0..], self.fg_rgb[gr][0..]);
+            @memcpy(self.ov_bg[0..], self.bg_rgb[gr][0..]);
+        } else {
+            @memset(&self.ov_fg, empty_rgb);
+            @memset(&self.ov_bg, empty_rgb);
+        }
+        self.ov_abs = u + self.hist_dropped;
+        self.ov_valid = true;
+    }
+
+    fn searchRestoreOverlay(self: *Screen) void {
+        if (!self.ov_valid) return;
+        self.ov_valid = false;
+        if (self.ov_abs < self.hist_dropped) return; // the line was evicted
+        const u: usize = @intCast(self.ov_abs - self.hist_dropped);
+        if (self.alt_active) {
+            if (u >= self.used) return;
+            @memcpy(self.cells[u][0..], self.ov_cells[0..]);
+            @memcpy(self.styles[u][0..], self.ov_styles[0..]);
+            @memcpy(self.fg_rgb[u][0..], self.ov_fg[0..]);
+            @memcpy(self.bg_rgb[u][0..], self.ov_bg[0..]);
+            self.lens[u] = self.ov_lens;
+            return;
+        }
+        if (u < self.hist_count) {
+            const bank = histOf(self) orelse return;
+            const slot = (self.hist_start + u) % history_lines;
+            @memcpy(bank.cells[slot][0..], self.ov_cells[0..]);
+            @memcpy(bank.styles[slot][0..], self.ov_styles[0..]);
+            bank.lens[slot] = self.ov_lens;
+            return;
+        }
+        const gr = u - self.hist_count;
+        if (gr >= self.used) return;
+        @memcpy(self.cells[gr][0..], self.ov_cells[0..]);
+        @memcpy(self.styles[gr][0..], self.ov_styles[0..]);
+        @memcpy(self.fg_rgb[gr][0..], self.ov_fg[0..]);
+        @memcpy(self.bg_rgb[gr][0..], self.ov_bg[0..]);
+        self.lens[gr] = self.ov_lens;
+    }
+
+    /// Draw the prompt bar into the overlay row: `> pattern  (N)` or
+    /// `> pattern  no match` (the hint line — never an error), the whole
+    /// row reversed so the EXISTING inversion paint renders the bar with
+    /// zero painter changes.
+    fn searchDrawPrompt(self: *Screen) void {
+        if (self.alt_active) return;
+        self.searchPositionOverlay();
+        const u = self.searchOverlayRow();
+        var tgt_cells: *[grid_cols]Cell = undefined;
+        var tgt_styles: *[grid_cols]CellStyle = undefined;
+        var tgt_len: *usize = undefined;
+        if (u < self.hist_count) {
+            const bank = histOf(self) orelse return;
+            const slot = (self.hist_start + u) % history_lines;
+            tgt_cells = &bank.cells[slot];
+            tgt_styles = &bank.styles[slot];
+            tgt_len = &bank.lens[slot];
+        } else {
+            const gr = u - self.hist_count;
+            if (gr >= self.used) return;
+            tgt_cells = &self.cells[gr];
+            tgt_styles = &self.styles[gr];
+            tgt_len = &self.lens[gr];
+        }
+        const cols_n = self.cols;
+        var x: usize = 0;
+        const put = struct {
+            fn run(cells: *[grid_cols]Cell, pos: *usize, cols_n_: usize, ch: u21) void {
+                if (pos.* < cols_n_) {
+                    cells[pos.*] = .{ .base = ch, .mark = 0, .cont = 0 };
+                    pos.* += 1;
+                }
+            }
+        };
+        put.run(tgt_cells, &x, cols_n, '>');
+        put.run(tgt_cells, &x, cols_n, ' ');
+        for (self.search_pat[0..self.search_len]) |ch| put.run(tgt_cells, &x, cols_n, ch);
+        if (self.search_len > 0) {
+            if (self.search_count == 0) {
+                const hint = "  no match";
+                for (hint) |ch| put.run(tgt_cells, &x, cols_n, ch);
+            } else {
+                var num: [8]u8 = undefined;
+                const s = std.fmt.bufPrint(&num, "  ({d})", .{self.search_count}) catch "";
+                for (s) |ch| put.run(tgt_cells, &x, cols_n, ch);
+            }
+        }
+        while (x < cols_n) put.run(tgt_cells, &x, cols_n, ' ');
+        for (0..cols_n) |c| {
+            tgt_styles.*[c] = default_cell_style;
+            tgt_styles.*[c].reverse = true;
+        }
+        for (cols_n..grid_cols) |c| {
+            tgt_cells.*[c] = empty_cell;
+            tgt_styles.*[c] = default_cell_style;
+        }
+        tgt_len.* = cols_n;
     }
 };
 
@@ -2624,9 +3277,268 @@ test "terminal: scrollback view clamps to the stored range" {
     s.scrollBy(-100);
     try std.testing.expectEqual(@as(usize, 0), s.viewOffset());
     s.scrollBy(2);
-    // New output snaps the view back to the tail.
+    const bottom_before = s.lineCount() - s.viewOffset();
+    // M73k (#1637): PIN-while-scrolled — new output must not yank the
+    // reader back to the tail; the window's bottom stays put instead
+    // (chosen over snap: a deep log or an active search breaks under
+    // snap-on-output; Shift+End/scrollReset still snaps on demand).
     s.feed("four\n");
+    try std.testing.expectEqual(bottom_before, s.lineCount() - s.viewOffset());
+    try std.testing.expectEqual(@as(usize, 3), s.viewOffset());
+    // At view 0 the tail follows new output exactly as before.
+    s.scrollReset();
+    s.feed("five\n");
     try std.testing.expectEqual(@as(usize, 0), s.viewOffset());
+}
+
+test "terminal: history ring keeps lines past the grid, drops oldest (#1637)" {
+    for (&terminals) |*t| t.reset();
+    for (&screens) |*sc| sc.reset();
+    const h = create(7) orelse return error.TestUnexpectedResult;
+    const t = get(h).?;
+    try std.testing.expect(t.attachWindow(7));
+    const s = screenForWindow(7).?;
+    var i: usize = 0;
+    while (i < 140) : (i += 1) {
+        var b: [16]u8 = undefined;
+        const row = std.fmt.bufPrint(&b, "L{d:0>3}\n", .{i}) catch unreachable;
+        s.feed(row);
+    }
+    // 140 LFs + the final unterminated row = 141 surviving lines:
+    // 128 in the grid, the oldest 13 in the ring.
+    try std.testing.expectEqual(@as(usize, 141), s.lineCount());
+    try std.testing.expectEqual(@as(usize, 13), s.hist_count);
+    // The oldest line is reachable BELOW the old 128-line limit.
+    try std.testing.expectEqualStrings("L000", s.line(0));
+    // …and the newest: every feed ends in \n, so L139 sits at lineCount-2
+    // and index 140 is the cleared cursor row the last LF moved onto.
+    try std.testing.expectEqualStrings("L139", s.line(139));
+    try std.testing.expectEqualStrings("", s.line(140));
+    // Scroll back to the very top through the unified space.
+    s.scrollBy(100_000);
+    try std.testing.expectEqual(@as(usize, 140), s.viewOffset());
+    // Overflow: past history_lines the OLDEST drops (drop-oldest policy),
+    // lineCount saturates at history_lines + grid_lines.
+    i = 0;
+    while (i < 300) : (i += 1) {
+        var b: [16]u8 = undefined;
+        const row = std.fmt.bufPrint(&b, "Z{d:0>3}\n", .{i}) catch unreachable;
+        s.feed(row);
+    }
+    try std.testing.expectEqual(@as(usize, history_lines), s.hist_count);
+    try std.testing.expect(s.hist_dropped > 0);
+    try std.testing.expectEqual(
+        @as(usize, history_lines + grid_lines),
+        s.lineCount(),
+    );
+    try std.testing.expect(!(std.mem.eql(u8, s.line(0), "L000")));
+}
+
+test "terminal: history is normal-screen only; alt walks its own space (#1637)" {
+    for (&terminals) |*t| t.reset();
+    for (&screens) |*sc| sc.reset();
+    const h = create(7) orelse return error.TestUnexpectedResult;
+    const t = get(h).?;
+    try std.testing.expect(t.attachWindow(7));
+    const s = screenForWindow(7).?;
+    var i: usize = 0;
+    while (i < 140) : (i += 1) {
+        var b: [16]u8 = undefined;
+        const row = std.fmt.bufPrint(&b, "N{d:0>3}\n", .{i}) catch unreachable;
+        s.feed(row);
+    }
+    const hist_before = s.hist_count;
+    try std.testing.expect(hist_before > 0);
+    const lines_before = s.lineCount();
+    // Enter the alternate screen: its world is the alt grid, no history.
+    s.feed("\x1b[?1049h");
+    try std.testing.expectEqual(@as(usize, 1), s.lineCount());
+    try std.testing.expectEqual(@as(usize, 0), s.cursorLineUnified());
+    // Fill the alt grid far past 128 — history must NOT grow there.
+    i = 0;
+    while (i < 200) : (i += 1) s.feed("alt\n");
+    try std.testing.expectEqual(hist_before, s.hist_count);
+    try std.testing.expectEqual(@as(usize, grid_lines), s.lineCount());
+    // Leave: the primary space (with its history) comes back untouched.
+    s.feed("\x1b[?1049l");
+    try std.testing.expectEqual(lines_before, s.lineCount());
+    try std.testing.expectEqual(hist_before, s.hist_count);
+    try std.testing.expectEqualStrings("N000", s.line(0));
+}
+
+test "terminal: reflow re-wraps history with the grid, never disagreeing (#1637)" {
+    for (&terminals) |*t| t.reset();
+    for (&screens) |*sc| sc.reset();
+    const h = create(7) orelse return error.TestUnexpectedResult;
+    const t = get(h).?;
+    try std.testing.expect(t.attachWindow(7));
+    const s = screenForWindow(7).?;
+    // Long rows fill the grid and spill a batch into history.
+    var i: usize = 0;
+    while (i < 150) : (i += 1) {
+        var b: [96]u8 = undefined;
+        @memset(&b, 'x');
+        const row = std.fmt.bufPrint(&b, "row{d:0>3}" ++ "x" ** 72, .{i}) catch unreachable;
+        s.feed(row);
+        s.feed("\n");
+    }
+    try std.testing.expect(s.hist_count > 0);
+    // Shrink 80 -> 40: EVERY row, history and grid alike, must re-lay to
+    // <= 40 cells — that is the whole point of the shared policy.
+    _ = s.setCols(40);
+    try std.testing.expectEqual(@as(usize, 40), s.cols);
+    try std.testing.expect(s.lineCount() <= history_lines + grid_lines);
+    i = 0;
+    while (i < s.lineCount()) : (i += 1) {
+        const n = s.uLen(i) orelse continue;
+        try std.testing.expect(n <= 40);
+    }
+    // Back up: still consistent, still bounded.
+    _ = s.setCols(80);
+    try std.testing.expect(s.lineCount() <= history_lines + grid_lines);
+    i = 0;
+    while (i < s.lineCount()) : (i += 1) {
+        const n = s.uLen(i) orelse continue;
+        try std.testing.expect(n <= 80);
+    }
+}
+
+test "terminal: a pushed history row drops its RGB slots to default (#1637)" {
+    for (&terminals) |*t| t.reset();
+    for (&screens) |*sc| sc.reset();
+    const h = create(7) orelse return error.TestUnexpectedResult;
+    const t = get(h).?;
+    try std.testing.expect(t.attachWindow(7));
+    const s = screenForWindow(7).?;
+    s.feed("\x1b[48;2;10;20;30mCOLOURED\x1b[0m\n");
+    // Grid cell carries the truecolour slot…
+    const gr = s.hist_count; // unified index the row will land on after push
+    s.feed("\n"); // fill 127 more rows to force the push
+    var i: usize = 2;
+    while (i < grid_lines) : (i += 1) s.feed(".\n");
+    try std.testing.expect(s.hist_count > 0);
+    // …the stored history row does not: slot coerced, rgbAt truthful.
+    const st = s.styleAt(0, 0);
+    try std.testing.expect(st.bg != rgb_colour);
+    const side = s.rgbAt(0, 0);
+    try std.testing.expect(side.bg == null);
+    _ = gr;
+}
+
+test "terminal: scroll carries truecolour side arrays with the cells (#1637)" {
+    for (&terminals) |*t| t.reset();
+    for (&screens) |*sc| sc.reset();
+    const h = create(7) orelse return error.TestUnexpectedResult;
+    const t = get(h).?;
+    try std.testing.expect(t.attachWindow(7));
+    const s = screenForWindow(7).?;
+    s.feed("plain\n\x1b[48;2;10;20;30mTOP\x1b[0m\n");
+    // Scroll exactly once (registry screen — a local Screen{} has no
+    // history bank, so its ring never fills): the coloured row (grid
+    // row 1) moves to grid row 0 = unified row hist_count (1), side
+    // arrays in tow. Pre-M73k fix they stayed behind → default bg.
+    while (s.hist_count == 0) s.feed("x\n");
+    try std.testing.expectEqual(@as(usize, 1), s.hist_count);
+    const side = s.rgbAt(1, 0);
+    try std.testing.expectEqual(@as(u8, 10), side.bg.?.r);
+    try std.testing.expectEqual(@as(u8, 20), side.bg.?.g);
+    try std.testing.expectEqual(@as(u8, 30), side.bg.?.b);
+}
+
+test "terminal: search table — literal, case, rows, wrap, empty, alt (#1637)" {
+    var s = Screen{};
+    s.feed("top a\nb bottom\nthe Needle in HAY\nneedle rows\nnone here\n");
+    // Alt screen: the chord refuses — search/history are normal-screen only.
+    s.feed("\x1b[?1049h");
+    try std.testing.expect(!s.searchOpen());
+    try std.testing.expect(!s.searchActive());
+    s.feed("\x1b[?1049l");
+    // Open: empty pattern is a no-op (count 0, backspace at 0 = null).
+    try std.testing.expect(s.searchOpen());
+    try std.testing.expect(s.searchActive());
+    try std.testing.expectEqual(@as(usize, 0), s.search_count);
+    try std.testing.expect(s.searchFeed(.backspace) == null);
+    // Literal + ASCII-case-insensitive: "needle" hits Needle and needle
+    // ("none here" does not), first match parked, exposed as selection.
+    var n: ?usize = null;
+    for ("needle") |ch| n = s.searchFeed(.{ .ch = ch });
+    try std.testing.expectEqual(@as(usize, 2), n.?);
+    // First match is row 2 ("the Needle in HAY"), col 4; row 3
+    // ("needle rows") is the second — rows 0/1 carry no match.
+    try std.testing.expectEqual(@as(usize, 2), s.search_row);
+    try std.testing.expectEqual(@as(usize, 4), s.search_col);
+    try std.testing.expect(s.inSelection(2, 4));
+    try std.testing.expect(s.inSelection(2, 9)); // end col inclusive
+    try std.testing.expect(!s.inSelection(2, 10));
+    // Enter/prev walk with wrap-around (the bar's Shift+Enter sibling).
+    s.searchStep(1);
+    try std.testing.expectEqual(@as(usize, 3), s.search_row); // "needle rows"
+    try std.testing.expectEqual(@as(usize, 0), s.search_col);
+    s.searchStep(1);
+    try std.testing.expectEqual(@as(usize, 2), s.search_row); // wrapped
+    try std.testing.expectEqual(@as(usize, 4), s.search_col);
+    s.searchStep(-1);
+    try std.testing.expectEqual(@as(usize, 3), s.search_row); // wrapped back
+    // Matches do NOT cross row boundaries (v1): row 0 ends 'a', row 1
+    // starts 'b' — the pair "ab" exists only ACROSS the break.
+    var i: usize = 0;
+    while (i < 6) : (i += 1) _ = s.searchFeed(.backspace);
+    try std.testing.expect(s.searchFeed(.backspace) == null); // empty now
+    _ = s.searchFeed(.{ .ch = 'a' });
+    try std.testing.expectEqual(@as(usize, 0), s.searchFeed(.{ .ch = 'b' }).?);
+    try std.testing.expect(s.searchActive()); // no-match = hint, not error
+    try std.testing.expect(!s.search_has_cur); // nothing to highlight
+    _ = s.searchFeed(.esc);
+    try std.testing.expect(!s.searchActive());
+    // Alt switch with a LIVE search: the prompt must not ghost into the
+    // stashed primary grid (search closes cleanly before the swap).
+    try std.testing.expect(s.searchOpen());
+    _ = s.searchFeed(.{ .ch = 'a' });
+    try std.testing.expect(s.searchActive());
+    s.feed("\x1b[?1049h");
+    try std.testing.expect(!s.searchActive());
+    s.feed("\x1b[?1049l");
+    try std.testing.expect(!s.searchActive());
+    try std.testing.expectEqualStrings("top a", s.line(0));
+    try std.testing.expectEqualStrings("needle rows", s.line(3));
+}
+
+test "terminal: search overlay + user selection restore exactly (#1637)" {
+    var s = Screen{};
+    s.feed("row one\nrow two\nrow three\n");
+    s.beginSelection(1, 0);
+    s.extendSelection(1, 4);
+    try std.testing.expect(s.searchOpen()); // lifts view 0 -> 1
+    try std.testing.expectEqual(@as(usize, 1), s.viewOffset());
+    // The bar sits on the overlay row, drawn reversed through the grid.
+    const bar_u = s.searchOverlayRow();
+    try std.testing.expect(s.styleAt(bar_u, 0).reverse);
+    _ = s.searchFeed(.{ .ch = 'x' }); // no match here — bar shows hint
+    _ = s.searchFeed(.esc);
+    // The covered row's original content came back byte-for-byte… (the
+    // bar sits at total-view-1 = row 2 = "row three", proven by the
+    // reversed styleAt assert above).
+    try std.testing.expectEqualStrings("row three", s.line(bar_u));
+    // …the user's selection is restored…
+    try std.testing.expect(s.hasSelection());
+    try std.testing.expect(s.sel_anchor.?.line == 1 and s.sel_anchor.?.col == 0);
+    try std.testing.expect(s.sel_cursor.?.line == 1 and s.sel_cursor.?.col == 4);
+    // …and the view stays where the search left it ("at the match").
+    try std.testing.expectEqual(@as(usize, 1), s.viewOffset());
+}
+
+test "terminal: search is rune-aware — accented match, non-ASCII exact (#1637)" {
+    var s = Screen{};
+    s.feed("caf\u{e9} latte\n");
+    try std.testing.expect(s.searchOpen());
+    try std.testing.expectEqual(@as(usize, 1), s.searchFeed(.{ .ch = '\u{e9}' }).?);
+    try std.testing.expectEqual(@as(usize, 0), s.search_row);
+    try std.testing.expectEqual(@as(usize, 3), s.search_col);
+    _ = s.searchFeed(.esc);
+    // Case policy pin: folding is ASCII-only — \u{c9} does NOT match \u{e9}.
+    try std.testing.expect(s.searchOpen());
+    try std.testing.expectEqual(@as(usize, 0), s.searchFeed(.{ .ch = '\u{c9}' }).?);
+    _ = s.searchFeed(.esc);
 }
 
 test "terminal: selection copies across lines and normalizes direction" {

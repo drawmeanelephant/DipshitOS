@@ -437,7 +437,12 @@ fn terminalHitAt(px: u32, py: u32) ?TermHit {
         if (py < top_y or py >= w.y + w.h) continue;
         const scr = terminal.screenForWindow(w.id) orelse continue;
         const rows_visible: usize = if (w.h > user_title_h) ((w.h - user_title_h) / 8) else 1;
-        const first: usize = if (scr.used > scr.view + rows_visible) scr.used - scr.view - rows_visible else 0;
+        // M73k (#1637): `lineCount` is grid+history as one space — the
+        // mirror of the painter's `lineCount - view - rows` walk, so a
+        // click lands on the same row it paints (selection lives in
+        // unified indices too).
+        const total = scr.lineCount();
+        const first: usize = if (total > scr.view + rows_visible) total - scr.view - rows_visible else 0;
         const row: usize = (py - top_y) / 8;
         const col: usize = (px - w.x) / 8;
         return .{ .win_id = w.id, .line = first + row, .col = col };
@@ -4023,7 +4028,9 @@ pub fn render_terminal_screen(dst: [*]u8, w: *const Window, scr: *const terminal
     }
     // The block cursor: invert the cell the shell's line editor is at —
     // only while following the tail (a scrolled-back view has no cursor).
-    const cl = scr.cursorLine();
+    // M73k (#1637): unified index — with history, the grid-relative
+    // cursorLine would sit `hist_count` rows above its painted position.
+    const cl = scr.cursorLineUnified();
     if (scr.cursor_visible and view == 0 and cl >= first and cl - first < rows) {
         const cc = scr.cursorCol();
         if (cc < cols) {

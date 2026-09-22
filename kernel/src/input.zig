@@ -570,6 +570,43 @@ pub fn decode_keyboard_report(rep: []const u8) void {
                     events += 1;
                     continue;
                 }
+                // M73k (#1637): Ctrl+Shift+F opens the kernel search bar —
+                // same chrome-chord family as copy/paste (HID 'f' = 0x09).
+                // Normal screen only: searchOpen refuses on the alt screen
+                // (pinned class-A); the chord is still consumed there.
+                if (ctrl and shift and k == 0x09) {
+                    if (scr) |s| _ = s.searchOpen();
+                    events += 1;
+                    continue;
+                }
+                // M73k: while the bar is up, its keys are captured by the
+                // presentation and never reach the app's tty. Enter/next,
+                // Shift+Enter/prev, Esc exits, backspace edits, everything
+                // mappable types into the pattern; unmappable keys (arrows
+                // etc.) keep falling through to the normal path below.
+                if (scr) |s| {
+                    if (s.searchActive()) {
+                        var sk: ?terminal.Screen.SearchKey = null;
+                        if (k == 0x29) {
+                            sk = .esc;
+                        } else if (k == 0x28) {
+                            sk = if (shift) .prev else .enter;
+                        } else if (k == 0x2a) {
+                            sk = .backspace;
+                        } else if (hid_to_ascii(k, shift)) |ch| {
+                            sk = .{ .ch = ch };
+                        }
+                        if (sk) |key| {
+                            if (s.searchFeed(key)) |n| {
+                                var smsg: [48]u8 = undefined;
+                                const sm = std.fmt.bufPrint(&smsg, "tty: search: {d} matches\n", .{n}) catch "tty: search\n";
+                                klog.line(sm);
+                            }
+                            events += 1;
+                            continue;
+                        }
+                    }
+                }
                 var kout: [max_key_bytes]u8 = undefined;
                 const kn = hid_to_bytes(k, shift, ctrl, &kout);
                 if (kn > 0) {
