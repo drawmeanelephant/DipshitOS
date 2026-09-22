@@ -2,18 +2,28 @@ package main
 
 import "testing"
 
+// The marker values are gate contracts: go-term.spec asserts each of them
+// and go-wm-hid asserts `goterm: attached` (and the ABSENCE of
+// `goterm: line ` on a boot where nobody typed). Renaming any of these is
+// a spec change, not a refactor.
 func TestTermMarkerShapes(t *testing.T) {
 	cases := []struct{ got, want string }{
 		{markerOpen, "goterm: open id="},
 		{markerDeclare, "goterm: declare accepted"},
+		{markerReady, "goterm: ready"},
 		{markerTty, "goterm: tty"},
 		{markerAttach, "goterm: attached"},
 		{markerPrompt, "goterm: prompt"},
 		{markerLine, "goterm: line "},
+		{markerDone, "goterm: done status="},
 		{markerClose, "goterm: close"},
 		{markerOK, "goterm OK"},
+		{markerMonitor, "goterm: monitor"},
+		{markerMonErr, "goterm: monitor failed"},
+		{markerOpenErr, "goterm: error open "},
+		{markerTtyErr, "goterm: no /dev/tty"},
+		{markerAttErr, "goterm: attach failed"},
 		{ttyPath, "/dev/tty"},
-		{prompt, "goterm> "},
 	}
 	for _, c := range cases {
 		if c.got != c.want {
@@ -22,48 +32,70 @@ func TestTermMarkerShapes(t *testing.T) {
 	}
 }
 
-func TestLineBufSubmit(t *testing.T) {
-	var l lineBuf
-	typed := "echo hi"
-	for i := 0; i < len(typed); i++ {
-		if s, ok := l.feed(typed[i]); ok {
-			t.Fatalf("premature submit %q after %q", s, typed[:i+1])
+// The default prompt is the shell's own (the same `gosh> ` GOSH falls
+// back to); the live prompt comes from SETTINGS.TXT via
+// promptFromSettings, never from a hand-written constant in this app.
+func TestDefaultPromptIsTheShellFallback(t *testing.T) {
+	if defaultPrompt != "gosh> " {
+		t.Fatalf("defaultPrompt = %q want %q", defaultPrompt, "gosh> ")
+	}
+}
+
+func TestPromptFromSettings(t *testing.T) {
+	cases := []struct {
+		name, body, want string
+	}{
+		{"missing key falls back", "#v2\nwm=none\n", defaultPrompt},
+		{"empty body falls back", "", defaultPrompt},
+		{"empty value falls back", "prompt=\n", defaultPrompt},
+		{"whitespace value falls back", "prompt=   \n", defaultPrompt},
+		{"key wins with one trailing space", "prompt=sh$\n", "sh$ "},
+		{"value is trimmed", "prompt=  sh$  \n", "sh$ "},
+		{"first key wins", "prompt=one\nprompt=two\n", "one "},
+		{"indented key counts", "  prompt=term> \n", "term> "},
+		{"CRLF value carries no CR", "prompt=sh$\r\n", "sh$ "},
+		{"substring of another key is not the key", "xprompt=nope\n", defaultPrompt},
+	}
+	for _, c := range cases {
+		if got := promptFromSettings(c.body, defaultPrompt); got != c.want {
+			t.Errorf("%s: promptFromSettings(%q) = %q want %q", c.name, c.body, got, c.want)
 		}
 	}
-	s, ok := l.feed('\n')
-	if !ok || s != "echo hi" {
-		t.Fatalf("submit = (%q,%v) want (\"echo hi\", true)", s, ok)
-	}
-	if l.n != 0 {
-		t.Fatal("buffer must reset after submit")
-	}
 }
 
-func TestLineBufCR(t *testing.T) {
-	var l lineBuf
-	l.feed('x')
-	s, ok := l.feed('\r')
-	if !ok || s != "x" {
-		t.Fatalf("CR submit = (%q,%v) want (\"x\", true)", s, ok)
+func TestStartupLinesFrom(t *testing.T) {
+	cases := []struct {
+		name, body string
+		want       []string
+	}{
+		{"empty", "", nil},
+		{"blank only", "\n   \n\t\n", nil},
+		{
+			"CRLF folded, blanks dropped, order kept",
+			"echo one\r\n\r\n  \necho two\r\necho three",
+			[]string{"echo one", "echo two", "echo three"},
+		},
+		{
+			"lone CR terminated lines are trimmed",
+			"line one\r\nline two\r",
+			[]string{"line one", "line two"},
+		},
+		{
+			"content whitespace is preserved (the engine parses it)",
+			" echo  padded \n",
+			[]string{" echo  padded "},
+		},
 	}
-}
-
-func TestLineBufEmptyLine(t *testing.T) {
-	var l lineBuf
-	s, ok := l.feed('\n')
-	if !ok || s != "" {
-		t.Fatalf("empty submit = (%q,%v) want (\"\", true)", s, ok)
-	}
-}
-
-func TestLineBufCapsAtMax(t *testing.T) {
-	var l lineBuf
-	for i := 0; i < len(l.buf)+8; i++ {
-		if _, ok := l.feed('a'); ok {
-			t.Fatal("overflow must not submit")
+	for _, c := range cases {
+		got := startupLinesFrom(c.body)
+		if len(got) != len(c.want) {
+			t.Errorf("%s: got %d lines %q want %d %q", c.name, len(got), got, len(c.want), c.want)
+			continue
 		}
-	}
-	if l.n != len(l.buf) {
-		t.Fatalf("n = %d want %d", l.n, len(l.buf))
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("%s: line %d = %q want %q", c.name, i, got[i], c.want[i])
+			}
+		}
 	}
 }

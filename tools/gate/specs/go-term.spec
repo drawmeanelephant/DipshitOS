@@ -3,17 +3,37 @@
 # closes, full-viewport inside Zig TABWM.
 #
 # user/go/term is a tabapp client: init -> declare (kind-8 WM_RPC) -> open
-# /dev/tty -> sys_tty_attach(2, window_id) -> write a prompt through the tty
-# (kernel-painted grid, ADR 0020 A4) -> accept injected keystrokes into the
-# terminal input queue (A5) -> echo the line -> WIN_CLOSE detaches and exits.
+# /dev/tty -> sys_tty_attach(2, window_id) -> startup block through the tty
+# (M73c #1627: startup contract banner, SETTINGS prompt load, history load,
+# `goterm: ready`, first prompt painted by shlib's editor) -> injected
+# keystrokes (ADR 0020 A5) feed editor.Feed, and each EvSubmit runs the line
+# through shlib's Shell.RunLine -> WIN_CLOSE detaches and exits.
 # Zig TERM.BIN / SH.BIN are untouched; kernel untouched; no second renderer.
+#
+# M73c (#1627) execution proof: observed on the first reshaped run --
+# WINDOWED tty bytes never reach serial (ADR 0020 selector 2 paints the
+# window grid; only ConsoleLine lines are serial-observable), so output
+# text (live-sh's `PWD=/data` shape) can never vouch for execution here.
+# The proof is instead `goterm: done status=N`, printed by the app AFTER
+# Shell.RunLine returned, carrying the engine's OWN status: the typed line
+# `cd /data` yields status=0 only after host.Chdir verified the real
+# directory (term's cd checks sys_dir_list, same as GOSH; `data/` is
+# seeded in setup), and the negative control `cd /nosuchdir` yields a
+# nonzero status -- so neither marker can come from a constant, an echo
+# stub, or an unexecuted line. Chords are limited to characters both key
+# tables map (`$`, `%`, `>` are unmapped in macKey/hidUsage -- observed in
+# host/vm-runner main.swift), which is why the lines are cd forms typed
+# over --input-chords.
 #
 # HOST PREREQUISITE (fails the gate honestly when missing):
 #   bash tools/go/build-goterm.sh   ->  .build/go/GOTERM.ELF
 #
 # exec-order: assert-proven -- the run ends on `rx-goterm-ok`, which only the
 # script prints, and the stage gate that forwards the close waits on the app's
-# own `goterm: line `; a program that never ran cannot pass.
+# own second-line marker `goterm: line cd /nosuchdir`; a program that never
+# ran, or one that echoed without executing, cannot pass (the two
+# `goterm: done status=` markers carry engine-computed statuses 0 then
+# nonzero, and the ordering python asserts the whole chain).
 
 vgate_name go-term "issue #1307 M58c: a Go terminal attaches /dev/tty selector 2 in Zig TABWM on VZ"
 vgate_share seed
@@ -46,6 +66,10 @@ if not os.path.exists(src):
 shutil.copy(src, os.path.join(share, "GOTERM.ELF"))
 print("staged GOTERM.ELF into share (%d bytes)" %
       os.path.getsize(os.path.join(share, "GOTERM.ELF")))
+# The `cd /data` target must EXIST: term's cd verifies through sys_dir_list
+# (same as GOSH's), so the assert below would otherwise never fire.
+os.makedirs(os.path.join(share, "data"), exist_ok=True)
+print("seeded data/ for cd")
 PY
 
 vgate_run 01 -- \
@@ -54,10 +78,10 @@ vgate_run 01 -- \
     --script '$RUN_DIR/script.txt' \
     --script2 '$RUN_DIR/script2.txt' \
     --script2-after 'tabwm: sidebar-rendered' \
-    --input-chords 'e,c,h,o,space,h,i,return' \
+    --input-chords 'c,d,space,/,d,a,t,a,return,c,d,space,/,n,o,s,u,c,h,d,i,r,return' \
     --input-chords-after 'goterm: prompt' \
     --script3 '$RUN_DIR/script3.txt' \
-    --script3-after 'goterm: line ' \
+    --script3-after 'goterm: line cd /nosuchdir' \
     --script-expect 'rx-goterm-ok' --timeout 240
 
 vgate_assert 01 serial-contains 'VirelaiOS kernel has seized control.'
@@ -69,12 +93,62 @@ vgate_assert 01 serial-contains 'goterm: open id='
 vgate_assert 01 serial-contains 'goterm: declare accepted'
 vgate_assert 01 serial-contains 'goterm: tty'
 vgate_assert 01 serial-contains 'goterm: attached'
+# M73c: the shlib startup block announced itself before the first prompt.
+vgate_assert 01 serial-contains 'goterm: ready'
 # Prompt bytes went through /dev/tty so the kernel has something to paint.
 vgate_assert 01 serial-contains 'goterm: prompt'
-# The injected keystrokes reached the tty input queue and submitted a line.
-vgate_assert 01 serial-contains 'goterm: line echo hi'
+# The injected keystrokes reached the tty input queue and submitted two
+# lines, each announced by the app AFTER the editor cut it, each finished
+# with the engine-computed status AFTER RunLine returned.
+vgate_assert 01 serial-contains 'goterm: line cd /data'
+vgate_assert 01 serial-contains 'goterm: done status=0'
+vgate_assert 01 serial-contains 'goterm: line cd /nosuchdir'
 vgate_assert 01 serial-contains 'goterm: close'
 vgate_assert 01 serial-contains 'goterm OK'
 vgate_assert 01 serial-contains 'rx-goterm-ok'
 vgate_assert 01 serial-absent '[EXC] parking:'
 vgate_assert 01 serial-absent 'exited status=139'
+# THE execution proof + the whole chain in order: prompt, submit 1, its
+# done marker with status=0 (host.Chdir verified /data -- `data/` is
+# seeded), submit 2, its done marker with a NONZERO status (the negative
+# control: the status is the engine's, not a constant), then the
+# WIN_CLOSE teardown the harness only sends after submit 2's line marker.
+vgate_assert 01 python <<'PY'
+import os, re, sys
+ser = open(os.environ["VG_SER"], errors="replace").read().splitlines()
+done_re = re.compile(r"^goterm: done status=(-?\d+)$")
+
+def first_after(sub, start=0):
+    for i in range(start, len(ser)):
+        if sub in ser[i]:
+            return i
+    sys.exit("missing %r (after %d)" % (sub, start))
+
+def first_done_after(start):
+    for i in range(start, len(ser)):
+        m = done_re.match(ser[i].rstrip("\r"))
+        if m:
+            return i, int(m.group(1))
+    sys.exit("no done marker after %d" % start)
+
+ready_i = first_after("goterm: ready")
+prompt_i = first_after("goterm: prompt", ready_i)
+line1_i = first_after("goterm: line cd /data", prompt_i)
+done1_i, st1 = first_done_after(line1_i)
+if st1 != 0:
+    sys.exit("cd /data status=%d want 0 (dir not verified?)" % st1)
+line2_i = first_after("goterm: line cd /nosuchdir", done1_i)
+done2_i, st2 = first_done_after(line2_i)
+if st2 == 0:
+    sys.exit("cd /nosuchdir status=0: the status is not the engine's")
+# close is guaranteed after done2 (the app only polls window events after
+# its handle() finished). rx is guaranteed after the line2 marker (the
+# harness only types script3 once it sees that marker) but races close on
+# the console task -- observed: rx-goterm-ok lands BEFORE goterm: close --
+# so it is chained to line2, not to close.
+close_i = first_after("goterm: close", done2_i)
+rx_i = first_after("rx-goterm-ok", line2_i)
+print("order ok: ready@%d prompt@%d cd/data@%d status=%d "
+      "cd/nosuchdir@%d status=%d close@%d rx@%d" %
+      (ready_i, prompt_i, line1_i, st1, line2_i, st2, close_i, rx_i))
+PY
