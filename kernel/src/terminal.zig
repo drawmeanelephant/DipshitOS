@@ -11,7 +11,10 @@
 //! `/dev/tty` routing in `file_table.zig` is the next tranche).
 //!
 //! Overflow policy is explicit and counted:
-//!   * output full -> drop the OLDEST byte (`out_dropped`), so output flows;
+//!   * output full -> drop the OLDEST byte (`out_dropped`), so output flows
+//!     (serial/net). The window path never hits this: `writeWindow` streams
+//!     write→grid in ring-sized chunks (#1630, M73f-1), so a TUI frame
+//!     larger than the ring cannot drop;
 //!   * input full  -> drop the NEWEST byte (`in_dropped`), so a key burst
 //!     never evicts keys the owner has not read yet.
 
@@ -1156,6 +1159,31 @@ pub fn pumpWindowOutput(handle: usize) usize {
     return total;
 }
 
+/// #1630 (M73f-1): append `bytes` to a WINDOW-bound terminal without dropping.
+/// The ring is 4 KiB and a TUI frame can be larger; the window path drains
+/// into the grid as it writes, in chunks that always fit, so `out_dropped`
+/// stays 0. Serial/net keep the drop-oldest ring policy (non-goal). Returns
+/// bytes accepted (`bytes.len` when the handle is window-bound, else 0).
+pub fn writeWindow(handle: usize, bytes: []const u8) usize {
+    const t = get(handle) orelse return 0;
+    if (t.window_id == null) return 0;
+    var off: usize = 0;
+    while (off < bytes.len) {
+        const room = out_capacity - t.pendingOut();
+        if (room == 0) {
+            // Defensive: a leftover full ring must drain before we write.
+            // If it cannot, return the prefix accepted rather than spin.
+            if (pumpWindowOutput(handle) == 0) return off;
+            continue;
+        }
+        const take = @min(room, bytes.len - off);
+        _ = t.write(bytes[off..][0..take]);
+        _ = pumpWindowOutput(handle);
+        off += take;
+    }
+    return bytes.len;
+}
+
 /// #1082 (A4): the presentation grid bound to `window_id`, or null when the
 /// window is not a terminal front-end. `driving_award.paint` renders it.
 pub fn screenOf(window_id: u8) ?*const Screen {
@@ -1620,6 +1648,8 @@ test "terminal: output ring wraps and preserves order across fill/drain cycles" 
 }
 
 test "terminal: output overflow drops the OLDEST byte and counts it" {
+    // Serial/net still drop-oldest (M73f-1 non-goal). The window path's
+    // polarity lives in "a window write larger than the ring cannot drop".
     var t = Terminal{};
     var big: [out_capacity + 10]u8 = undefined;
     for (&big, 0..) |*b, i| b.* = @truncate(i);
@@ -1882,6 +1912,43 @@ test "terminal: window pump drains the output ring into the grid and screenOf fi
     _ = get(h2).?.write("x");
     try std.testing.expectEqual(@as(usize, 0), pumpWindowOutput(h2));
     try std.testing.expect(screenOf(99) == null);
+    for (&terminals) |*tt| tt.reset();
+    for (&screens) |*ss| ss.reset();
+}
+
+test "terminal: a window write larger than the ring cannot drop (M73f-1)" {
+    for (&terminals) |*tt| tt.reset();
+    for (&screens) |*ss| ss.reset();
+    const h = create(3) orelse return error.TestUnexpectedResult;
+    const t = get(h).?;
+    try std.testing.expect(t.attachWindow(7));
+
+    // Distinctive head and tail around a payload bigger than the 4 KiB ring.
+    const extra = 64;
+    var big: [out_capacity + extra]u8 = undefined;
+    @memcpy(big[0..4], "HEAD");
+    for (big[4 .. big.len - 4], 0..) |*b, i| b.* = 'A' + @as(u8, @intCast(i % 26));
+    @memcpy(big[big.len - 4 ..], "TAIL");
+
+    try std.testing.expectEqual(big.len, writeWindow(h, &big));
+    try std.testing.expectEqual(@as(u64, 0), t.out_dropped);
+    try std.testing.expectEqual(@as(usize, 0), t.pendingOut());
+
+    const scr = screenOf(7) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("HEAD", scr.line(0)[0..4]);
+    const last_off = big.len - 4;
+    const last_line = last_off / grid_cols;
+    const last_col = last_off % grid_cols;
+    try std.testing.expectEqual(@as(u21, 'T'), scr.cellAt(last_line, last_col).base);
+    try std.testing.expectEqual(@as(u21, 'A'), scr.cellAt(last_line, last_col + 1).base);
+    try std.testing.expectEqual(@as(u21, 'I'), scr.cellAt(last_line, last_col + 2).base);
+    try std.testing.expectEqual(@as(u21, 'L'), scr.cellAt(last_line, last_col + 3).base);
+
+    // An unbound handle does not consume (serial/net keep Terminal.write).
+    const h2 = create(4) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 0), writeWindow(h2, "nope"));
+    try std.testing.expectEqual(@as(usize, 0), get(h2).?.pendingOut());
+
     for (&terminals) |*tt| tt.reset();
     for (&screens) |*ss| ss.reset();
 }

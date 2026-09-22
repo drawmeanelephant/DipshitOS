@@ -717,21 +717,28 @@ pub fn write(pid: u64, fd: u64, in_buf: []const u8) i64 {
     // #1072 (ADR 0020): a `.tty` handle appends to the terminal's output
     // ring; the pump immediately drains it to the serial front-end. #1082
     // (Amendment A): a WINDOW-bound terminal drains into its presentation
-    // grid and marks the bound `.user` window damaged instead.
+    // grid and marks the bound `.user` window damaged instead. #1630
+    // (M73f-1): the window path streams write→grid in ring-sized chunks so
+    // a single write larger than the 4 KiB ring cannot drop; serial/net
+    // keep the drop-oldest ring policy.
     if (h.partition == .tty) {
         const t = terminal.get(h.term_handle) orelse return -2;
-        const n = t.write(in_buf);
         if (t.front_end == .net) {
+            const n = t.write(in_buf);
             // SH7 (#1083, Amendment B): drain the ring into TCP segments.
             _ = terminal.pumpNetOutput();
+            return @intCast(n);
         } else if (t.window_id) |wid| {
-            if (terminal.pumpWindowOutput(h.term_handle) > 0) {
+            const n = terminal.writeWindow(h.term_handle, in_buf);
+            if (n > 0) {
                 _ = driving_award.user_present(wid);
             }
+            return @intCast(n);
         } else {
+            const n = t.write(in_buf);
             _ = terminal.pumpRuntimeOutput();
+            return @intCast(n);
         }
-        return @intCast(n);
     }
 
     // M50 TS2 (ADR 0024 D4): the host-share ownership/mode gate for writes.
@@ -1213,4 +1220,38 @@ test "file_table: /dev/tty routes to the process's terminal device (#1072)" {
     // Process reset releases the terminal (owner death).
     reset_process(pid);
     try std.testing.expectEqual(@as(?*terminal.Terminal, null), terminal.get(th));
+}
+
+test "file_table: window tty write larger than the ring cannot drop (M73f-1)" {
+    init();
+    const pid: u64 = 3;
+    reset_process(pid);
+
+    const fd = open(pid, "/dev/tty", MODE_READ | MODE_WRITE);
+    try std.testing.expect(fd >= 0);
+    const th = handles[pid][@intCast(fd)].term_handle;
+    const t = terminal.get(th).?;
+    try std.testing.expect(t.attachWindow(7));
+
+    const extra = 64;
+    var big: [terminal.out_capacity + extra]u8 = undefined;
+    @memcpy(big[0..4], "HEAD");
+    for (big[4 .. big.len - 4], 0..) |*b, i| b.* = 'A' + @as(u8, @intCast(i % 26));
+    @memcpy(big[big.len - 4 ..], "TAIL");
+
+    try std.testing.expectEqual(@as(i64, @intCast(big.len)), write(pid, @intCast(fd), &big));
+    try std.testing.expectEqual(@as(u64, 0), t.out_dropped);
+    try std.testing.expectEqual(@as(usize, 0), t.pendingOut());
+
+    const scr = terminal.screenOf(7) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("HEAD", scr.line(0)[0..4]);
+    const last_off = big.len - 4;
+    const last_line = last_off / terminal.grid_cols;
+    const last_col = last_off % terminal.grid_cols;
+    try std.testing.expectEqual(@as(u21, 'T'), scr.cellAt(last_line, last_col).base);
+    try std.testing.expectEqual(@as(u21, 'A'), scr.cellAt(last_line, last_col + 1).base);
+    try std.testing.expectEqual(@as(u21, 'I'), scr.cellAt(last_line, last_col + 2).base);
+    try std.testing.expectEqual(@as(u21, 'L'), scr.cellAt(last_line, last_col + 3).base);
+
+    reset_process(pid);
 }
