@@ -107,6 +107,143 @@ func TestWmPeersHostEmpty(t *testing.T) {
 	}
 }
 
+// M56d (#1315) + #1586: the scan is retried ONLY while it is suspect, and the
+// number of SCANS is what a boot pays, because every retry is preceded by a
+// yield and on VZ a yield parks the caller until the next scheduler tick -- a
+// full second (kernel/src/timer.zig period_ns). So the five tests below pin
+// both directions of that policy by counting scans: a no-seat boot answers on
+// the first one, and the zeroed-name flake still gets its re-read.
+//
+// (Scans are counted rather than yields because Yield goes through syscall0
+// while the host-test hook intercepts the svc* family -- the proc_test.go
+// hooks' SlotYield branch is unreachable for the same reason.)
+
+// namedRow is a RUNNING row with readable name bytes.
+func namedRow(pid uint64, name string) ProcRow {
+	r := ProcRow{PID: pid, State: ProcRunning}
+	copy(r.NameBuf[:], name)
+	return r
+}
+
+// emitNamed writes rows into a sys_procs buffer WITH their names. The
+// proc_test.go fakeProcs helper deliberately leaves names zeroed (that is the
+// flake shape), so the intact cases need their own emitter.
+func emitNamed(a0, a1 uintptr, rows []ProcRow) int {
+	buf := unsafe.Slice((*byte)(unsafe.Pointer(a0)), a1)
+	n := 0
+	for _, r := range rows {
+		off := n * ProcRowSize
+		if off+ProcRowSize > len(buf) {
+			break
+		}
+		putU64(buf[off:], r.PID)
+		putU64(buf[off+8:], r.State)
+		putU64(buf[off+16:], r.ExitStatus)
+		copy(buf[off+24:off+24+ProcNameBytes], r.NameBuf[:])
+		n++
+	}
+	return n
+}
+
+// scanHook serves one proc table per SlotProcs call (the last table repeats)
+// and counts those calls: the scan count IS the cost, since every retry beyond
+// the first is preceded by a tick-costing yield.
+func scanHook(t *testing.T, tables ...[]ProcRow) *int {
+	t.Helper()
+	if len(tables) == 0 {
+		t.Fatal("scanHook needs at least one table")
+	}
+	scans := new(int)
+	call := 0
+	installHook(t, func(num uintptr, a0, a1, a2, a3 uintptr) int64 {
+		if num != SlotProcs {
+			return -ErrENOSYS
+		}
+		tbl := tables[len(tables)-1]
+		if call < len(tables) {
+			tbl = tables[call]
+		}
+		call++
+		*scans++
+		return int64(emitNamed(a0, a1, tbl))
+	})
+	return scans
+}
+
+// TestWmPeersNoSeatAnswersImmediately is the #1586 fix. The shim boot's table
+// was measured live: this app plus one other task, no WM-named row, readable on
+// every attempt. The honest answer "no seat" is available on the first scan, so
+// it must not cost a single yield.
+func TestWmPeersNoSeatAnswersImmediately(t *testing.T) {
+	scans := scanHook(t, []ProcRow{namedRow(1, "WEB.ELF"), namedRow(2, "GOSH.ELF")})
+	p := WmPeers("WEB.ELF")
+	if p.Self != 1 || p.WM != 0 {
+		t.Fatalf("WmPeers = %+v want self=1 wm=0", p)
+	}
+	if *scans != 1 {
+		t.Fatalf("no-seat scan read the table %d time(s), want 1 (each retry is a 1 s VZ tick)", *scans)
+	}
+}
+
+// TestWmPeersSeatResolvesOnFirstScan is the seat-present path every tab gate
+// rides: intact table, both peers found, no tick spent.
+func TestWmPeersSeatResolvesOnFirstScan(t *testing.T) {
+	scans := scanHook(t, []ProcRow{namedRow(1, "WEB.ELF"), namedRow(5, "GOTABWM.ELF")})
+	p := WmPeers("WEB.ELF")
+	if p.Self != 1 || p.WM != 5 {
+		t.Fatalf("WmPeers = %+v want self=1 wm=5", p)
+	}
+	if *scans != 1 {
+		t.Fatalf("seat scan read the table %d time(s), want 1", *scans)
+	}
+}
+
+// TestWmPeersZeroedScanRetriesWithoutTick keeps M56d's protection: the scan
+// whose name bytes read back zeroed still retries, and because the flake
+// alternates per scan the re-read is immediate -- no tick.
+func TestWmPeersZeroedScanRetriesWithoutTick(t *testing.T) {
+	zeroed := []ProcRow{{PID: 1, State: ProcRunning}, {PID: 3, State: ProcRunning}}
+	intact := []ProcRow{namedRow(1, "WEB.ELF"), namedRow(3, "TABWM.BIN")}
+	scans := scanHook(t, zeroed, intact)
+	p := WmPeers("WEB.ELF")
+	if p.Self != 1 || p.WM != 3 {
+		t.Fatalf("WmPeers = %+v want self=1 wm=3", p)
+	}
+	// Two scans, no tick: the flake alternates per scan, so the re-read is
+	// immediate (the old loop would have slept a tick before scanning again).
+	if *scans != 2 {
+		t.Fatalf("alternating flake read the table %d time(s), want 2", *scans)
+	}
+}
+
+// TestWmPeersSuspectScanWithBothPeersAnswers: a zeroed THIRD row does not
+// invalidate the two peers already read, so the answer still lands at once.
+func TestWmPeersSuspectScanWithBothPeersAnswers(t *testing.T) {
+	rows := []ProcRow{namedRow(1, "WEB.ELF"), namedRow(5, "WND.BIN"), {PID: 9, State: ProcRunning}}
+	scans := scanHook(t, rows)
+	p := WmPeers("WEB.ELF")
+	if p.Self != 1 || p.WM != 5 {
+		t.Fatalf("WmPeers = %+v want self=1 wm=5", p)
+	}
+	if *scans != 1 {
+		t.Fatalf("resolved peers still re-read the table %d time(s), want 1", *scans)
+	}
+}
+
+// TestWmPeersPersistentlySuspectIsBounded: a scan that never reads back stays
+// bounded (the M56d ceiling) instead of spinning forever.
+func TestWmPeersPersistentlySuspectIsBounded(t *testing.T) {
+	scans := scanHook(t, []ProcRow{{PID: 1, State: ProcRunning}})
+	p := WmPeers("WEB.ELF")
+	if p.Self != 0 || p.WM != 0 {
+		t.Fatalf("WmPeers = %+v want zero seat", p)
+	}
+	if *scans != wmPeersScanAttempts {
+		t.Fatalf("persistently suspect scan read the table %d time(s), want %d",
+			*scans, wmPeersScanAttempts)
+	}
+}
+
 // The errno table mirrors the kernel ErrorCode magnitudes
 // (kernel/src/syscall.zig) — this is the M56a defect fix (ENOENT/ENOSPC were
 // swapped and EEXIST aliased ENXIO before it).

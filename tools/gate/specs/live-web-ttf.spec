@@ -294,6 +294,14 @@ vgate_run 02 -- \
     --snapshot-after "web: repaint" \
     --script-expect "web: ready" --timeout 120
 
+# #1586: EVERY boot asserts the absence, not just boot 01. The
+# guest printed `web: budget over startup ...` in all fourteen boots for months
+# while only these three looked, which is why the red set looked load-driven.
+# Measured then: startup=10048ms (7013ms of it vi.WmPeers retrying a WM seat
+# that does not exist on the shim path, 3022ms the four faces). After the fix:
+# startup=3025ms, so the absence is now true everywhere and a real regression
+# trips it in whichever boot it happens.
+vgate_assert 02 serial-absent 'web: budget over'
 vgate_assert 02 serial-contains 'web: url /host/DEPTH.HTML'
 vgate_assert 02 serial-contains 'web: parse nodes='
 vgate_assert 02 serial-contains 'web: settled'
@@ -417,6 +425,7 @@ vgate_run 03 -- \
 # echoes the removal commands, which is why the evidence is the engine report
 # rather than a substring check on the listing.
 # The fallback is announced, not hidden.
+vgate_assert 03 serial-absent 'web: budget over'
 vgate_assert 03 serial-contains 'web: fonts bitmap8x8 ui=missing mono=missing'
 vgate_assert 03 serial-contains 'web: text face=bitmap8x8 proportional=no'
 vgate_assert 03 serial-contains ' bold-face=no'
@@ -499,15 +508,28 @@ PY
 # typography: the indent is a layout property and the placeholder is a box.
 # That also makes this boot a second, incidental fallback render, which cost
 # nothing to get.
+#
+# Issue #1586: ONE trigger, and it is the PACED present. WEB paints twice on
+# purpose: `web: settled` is the first paint, issued straight after the load,
+# and `web: repaint` is the same frame rendered again after settleRepaint's
+# `vi.Sleep(30)` -- whose comment records the reason ("a single present
+# immediately after a long blocking fetch could leave the scanout on the
+# pre-paint buffer"). The sibling boots assert `snap-0X-*.raw`, a glob, so
+# they read whichever stream landed last; this boot pinned the exact `-0`
+# file, i.e. the unpaced one. That frame is only ever final when something
+# else delayed the app: it passed while WEB still paid its WM-attach retry,
+# and failed the moment that retry was fixed. With a single trigger the file
+# name is deterministic again -- `snap-04-0.raw` is the paced frame -- so the
+# probe below is unchanged.
 vgate_run 04 -- \
     --screen '$RUN_DIR/screen' \
     --via-virtio --cvc-snap \
     --snapshot-out '$RUN_DIR/snap-04' \
     --script '$RUN_DIR/script-lists.txt' \
-    --snapshot-after "web: settled" \
     --snapshot-after "web: repaint" \
     --script-expect "web: ready" --timeout 120
 
+vgate_assert 04 serial-absent 'web: budget over'
 vgate_assert 04 serial-contains 'web: url /host/LISTS.HTML'
 vgate_assert 04 serial-contains 'web: parse nodes='
 vgate_assert 04 serial-contains 'web: layout blocks='
