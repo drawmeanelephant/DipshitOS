@@ -42,7 +42,7 @@ const text = @import("text.zig");
 /// Output ring capacity (bytes the owner has written, awaiting a front-end).
 pub const out_capacity: usize = 4096;
 /// Input queue capacity (bytes a front-end has pushed, awaiting the owner).
-pub const in_capacity: usize = 256;
+pub const in_capacity: usize = 1024;
 /// How many concurrent terminals the kernel tracks.
 pub const max_terminals: usize = 4;
 
@@ -224,6 +224,11 @@ pub const Screen = struct {
     /// across primary and alternate screens: changing cursor visibility while
     /// an alternate screen is active remains in effect after it is restored.
     cursor_visible: bool = true,
+    /// M73e (#1629): DECSET/DECRST `CSI ? 2004 h/l` — bracketed paste.
+    /// A paste pushed while this is set is wrapped in `\e[200~ … \e[201~`
+    /// so the receiving editor keeps paste content literal. Like DECTCEM
+    /// it is a terminal-mode bit: shared across primary/alternate screens.
+    bracketed_paste: bool = false,
     /// M49 SD5 (#1132): the effective column count (8..grid_cols). A window
     /// resize reflows the grid to the new client width.
     cols: usize = grid_cols,
@@ -464,6 +469,10 @@ pub const Screen = struct {
             if (p0 == 25) {
                 if (final == 'h') self.cursor_visible = true;
                 if (final == 'l') self.cursor_visible = false;
+            }
+            // M73e (#1629): bracketed-paste mode — tracked, never painted.
+            if (p0 == 2004) {
+                self.bracketed_paste = (final == 'h');
             }
             return;
         }
@@ -1224,6 +1233,27 @@ pub fn copySelectionToClipboard(window_id: u8) usize {
     return clipboard.set(buf[0..n]);
 }
 
+/// M73e (#1629): Ctrl+Shift+V — push the clipboard into the bound
+/// terminal's input queue, wrapped in `\e[200~ … \e[201~` when the app
+/// enabled DECSET 2004 (the shell requests it at startup). Returns the
+/// bytes accepted; `in_capacity` holds one full paste (512 B clipboard +
+/// 12 B markers), and any overflow is the queue's drop-newest +
+/// `in_dropped` — visible, never silent. Returns 0 when the window has no
+/// terminal or the clipboard is empty.
+pub fn pasteFromClipboard(window_id: u8) usize {
+    const t = windowTerminal(window_id) orelse return 0;
+    const s = screenForWindow(window_id) orelse return 0;
+    var content: [clipboard.capacity]u8 = undefined;
+    const n = clipboard.get(&content);
+    if (n == 0) return 0;
+    if (!s.bracketed_paste) return t.pushInput(content[0..n]);
+    var buf: [clipboard.capacity + 12]u8 = undefined;
+    @memcpy(buf[0..6], "\x1b[200~");
+    @memcpy(buf[6..][0..n], content[0..n]);
+    @memcpy(buf[6 + n ..][0..6], "\x1b[201~");
+    return t.pushInput(buf[0 .. 6 + n + 6]);
+}
+
 // ---------------------------------------------------------------------------
 // The net front-end pump (SH7 #1083, ADR 0020 Amendment B; M46 RC3 #1111,
 // ADR 0022; M50 TS4 #1138, ADR 0024 D6). The kernel's TCP seam is a single
@@ -1868,6 +1898,59 @@ test "terminal: unsupported CSI is swallowed rather than painted" {
     var s = Screen{};
     s.feed("before\x1b[999zafter");
     try std.testing.expectEqualStrings("beforeafter", s.line(0));
+}
+
+// M73e (#1629): DECSET 2004 state, the bracketed wrap, and the queue
+// contract a full clipboard paste needs.
+test "terminal: DECSET/DECRST 2004 tracks bracketed paste mode" {
+    var s = Screen{};
+    try std.testing.expect(!s.bracketed_paste);
+    s.feed("ok\x1b[?2004h");
+    try std.testing.expect(s.bracketed_paste);
+    try std.testing.expectEqualStrings("ok", s.line(0));
+    s.feed("\x1b[?2004l");
+    try std.testing.expect(!s.bracketed_paste);
+    // Mode bits survive an alternate-screen round trip (like DECTCEM).
+    s.feed("\x1b[?2004h\x1b[?1049h\x1b[?1049l");
+    try std.testing.expect(s.bracketed_paste);
+}
+
+test "terminal: pasteFromClipboard wraps per mode and lands intact (#1629)" {
+    for (&terminals) |*t| t.reset();
+    const payload = "LINE-00 pppp\nLINE-29 pppp";
+    _ = clipboard.set(payload);
+    const h = create(7) orelse return error.TestUnexpectedResult;
+    const t = get(h).?;
+    try std.testing.expect(t.attachWindow(7));
+    // Bracketed OFF: raw content, newline included.
+    screenForWindow(7).?.bracketed_paste = false;
+    try std.testing.expectEqual(payload.len, pasteFromClipboard(7));
+    var buf: [96]u8 = undefined;
+    try std.testing.expectEqual(payload.len, t.readInput(&buf));
+    try std.testing.expectEqualStrings(payload, buf[0..payload.len]);
+    // Bracketed ON: markers around the same bytes.
+    screenForWindow(7).?.feed("\x1b[?2004h");
+    _ = pasteFromClipboard(7);
+    const m = t.readInput(&buf);
+    const wrapped = "\x1b[200~" ++ payload ++ "\x1b[201~";
+    try std.testing.expectEqual(wrapped.len, m);
+    try std.testing.expectEqualStrings(wrapped, buf[0..m]);
+}
+
+test "terminal: a full-clipboard paste exceeds the old 256 B queue, dropping nothing (#1629)" {
+    var t = Terminal{};
+    var content: [clipboard.capacity]u8 = undefined;
+    @memset(&content, 'x');
+    var wrap: [clipboard.capacity + 12]u8 = undefined;
+    @memcpy(wrap[0..6], "\x1b[200~");
+    @memcpy(wrap[6..][0..clipboard.capacity], &content);
+    @memcpy(wrap[6 + clipboard.capacity ..][0..6], "\x1b[201~");
+    try std.testing.expectEqual(clipboard.capacity + 12, t.pushInput(&wrap));
+    try std.testing.expectEqual(@as(u64, 0), t.in_dropped);
+    try std.testing.expectEqual(clipboard.capacity + 12, t.pendingInput());
+    var buf: [clipboard.capacity + 16]u8 = undefined;
+    try std.testing.expectEqual(clipboard.capacity + 12, t.readInput(&buf));
+    try std.testing.expectEqualStrings(&wrap, buf[0 .. clipboard.capacity + 12]);
 }
 
 test "terminal: window binding is exclusive per terminal and per window" {
