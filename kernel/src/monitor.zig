@@ -39,6 +39,7 @@ pub const userspace = @import("userspace.zig"); // claim 5804: user-VA layout
 pub const virtio_file = @import("virtio_file.zig"); // M34 HF1+HF2 (issues #735/#736): the host file channel behind `vf`
 pub const csprng = @import("csprng.zig"); // milestone four (claim 2665): the seeded CSPRNG behind `random`
 pub const clipboard = @import("clipboard.zig"); // milestone fourteen (claim 0169): the shared kernel clipboard behind `clip`
+pub const terminal = @import("terminal.zig"); // M73f-2 (#1632): the tty seam behind `tty` (ADR 0020 D1 drop counters)
 pub const virtio_net = @import("virtio_net.zig"); // milestone five card N1 (claim 1373): the net transport behind `net`/`netsend`
 pub const virtio_gpu = @import("virtio_gpu.zig"); // milestone six card G1 (claim 6053): the gpu transport + framebuffer behind `screen`
 pub const virtio_snd = @import("virtio_snd.zig"); // milestone fifteen card A1 (claim 6140): the virtio-snd transport behind `sound`
@@ -295,7 +296,7 @@ pub const Command = struct {
 /// grows it 54 -> 55 (`sym`). Milestone twenty-two D5 (issue #328)
 /// grows it 55 -> 56 (`strace`). Milestone twenty-two D6 (issue #329)
 /// grows it 56 -> 57 (`ps`).
-pub const registry_count: usize = 77; // 76 + `fuzz` (M70a-live #1466)
+pub const registry_count: usize = 78; // 77 + `tty` (M73f-2 #1632)
 
 /// `sym <file>` reads at most this many bytes for on-disk symtab inspection
 /// (M22 D3). ELF symbol tables live near the file tail; 64 KiB covers every
@@ -374,6 +375,7 @@ pub fn ensure_registry() []const Command {
             .{ .name = "tasks", .help = "tick-driven task scheduler status", .usage = "tasks", .category = .tasks_processes, .handler = cmd_tasks },
             .{ .name = "smp", .help = "multiprocessor topology, online CPU cores, and per-core task state", .usage = "smp", .category = .tasks_processes, .handler = cmd_smp },
             .{ .name = "type", .help = "echo stdin (the pipe source) to stdout — the right half of `a | type`", .usage = "type", .category = .system, .handler = cmd_type },
+            .{ .name = "tty", .help = "terminal drop counters (ADR 0020 D1): out_dropped/in_dropped per bound tty ('tty' prints one line per terminal)", .usage = "tty", .category = .system, .handler = cmd_tty },
             .{ .name = "timer", .help = "interrupt controller + timer status", .usage = "timer", .category = .memory_state, .handler = cmd_timer },
             .{ .name = "forensics", .help = "last-words recorder: on|off|dump|reset (off by default)", .usage = "forensics [on|off|dump|reset]", .category = .system, .max_args = 1, .handler = cmd_forensics },
             .{ .name = "tour", .help = "guided tour of the system for new users", .usage = "tour", .category = .machine_identity, .handler = cmd_welcome },
@@ -2156,6 +2158,31 @@ fn cmd_color(m: *Monitor, args: []const []const u8) ExecError {
         return .none;
     }
     m.console.print_line("usage: color [on|off]");
+    return .none;
+}
+
+/// M73f-2 (#1632): the `tty` line — a pure fn so host tests pin the shape
+/// (`tty[<n>]: out_dropped=<n> in_dropped=<n>`), which the class-B serial
+/// assert then matches after real activity. No EL0 ABI (D5): the counters
+/// stay kernel-side and the monitor is their surface.
+pub fn fmtDropLine(buf: []u8, index: usize, out_dropped: u64, in_dropped: u64) []const u8 {
+    return std.fmt.bufPrint(buf, "tty[{d}]: out_dropped={d} in_dropped={d}\n", .{ index, out_dropped, in_dropped }) catch "tty: fmt overflow\n";
+}
+
+/// M73f-2 (#1632): print both ADR 0020 D1 drop counters for every bound
+/// terminal — cheap and on-demand, never per-tick. Reads the existing
+/// fields as-is (no getter, no syscall); prints nothing per-tick and
+/// `tty: none` when no terminal is allocated.
+fn cmd_tty(m: *Monitor, args: []const []const u8) ExecError {
+    _ = args;
+    var printed: usize = 0;
+    for (0..terminal.max_terminals) |h| {
+        const t = terminal.get(h) orelse continue;
+        var buf: [96]u8 = undefined;
+        m.console.puts(fmtDropLine(&buf, h, t.out_dropped, t.in_dropped));
+        printed += 1;
+    }
+    if (printed == 0) m.console.puts("tty: none\n");
     return .none;
 }
 

@@ -56,6 +56,7 @@ const elephant_lines = monitor.elephant_lines;
 const sexiburger_lines = monitor.sexiburger_lines;
 const net_dhcp_autonomous = monitor.net_dhcp_autonomous;
 const banner = monitor.banner;
+const fmtDropLine = monitor.fmtDropLine;
 
 // ===========================================================================
 // Tests (host-side; no hardware, no Virtualization.framework)
@@ -214,6 +215,26 @@ test "monitor: registry is well-formed" {
             try std.testing.expect(!std.mem.eql(u8, cmd.name, other.name));
         }
     }
+}
+
+// M73f-2 (#1632): the `tty` drop-counter line — pure formatter pinned for
+// shape and width; the class-B serial assert matches this line after real
+// activity, and the registry entry keeps it reachable from `help`.
+test "monitor: fmtDropLine shape + widths + registry entry (tty drop counters)" {
+    var buf: [96]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "tty[0]: out_dropped=0 in_dropped=0\n",
+        fmtDropLine(&buf, 0, 0, 0),
+    );
+    try std.testing.expectEqualStrings(
+        "tty[3]: out_dropped=18446744073709551615 in_dropped=4294967296\n",
+        fmtDropLine(&buf, 3, std.math.maxInt(u64), 4294967296),
+    );
+    var found = false;
+    for (ensure_registry()) |cmd| {
+        if (std.mem.eql(u8, cmd.name, "tty")) found = true;
+    }
+    try std.testing.expect(found);
 }
 
 test "monitor: every misusable command prints exactly the D3 misuse shape (registry walk)" {

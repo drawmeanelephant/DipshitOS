@@ -84,6 +84,7 @@ system
   sound       virtio-snd transport: device DID, class, status, control-queue state, device-config counts (jacks/streams/channel-maps), re-arm; stream-state control: 'sound volume <0-100>' and 'sound mute <on|off>'
   shutdown    request power-off
   type        echo stdin (the pipe source) to stdout — the right half of `a | type`
+  tty         terminal drop counters (ADR 0020 D1): out_dropped/in_dropped per bound tty ('tty' prints one line per terminal)
   forensics   last-words recorder: on|off|dump|reset (off by default)
   dmesg       system log viewer: last bytes of serial output (D12)
   time        command timing: measure elapsed ticks and wall-clock time (D13)

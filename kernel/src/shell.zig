@@ -798,9 +798,9 @@ pub fn shell_complete(line: []const u8, cursor: usize, index: usize) ?lineedit.C
             "procs",  "ps",         "random",   "reboot",     "repeat",  "resources", "roadpops",
             "screen", "screenshot", "settings", "sexiburger", "sh",      "shortcuts", "shutdown",
             "smp",    "sound",      "spawn",    "stat",       "strace",  "sym",       "syscalls",
-            "tabwm",  "tasks",      "text",     "time",       "timer",   "tour",      "type",
-            "uname",  "usb",        "version",  "vf",         "welcome", "which",     "wm",
-            "wnd",    "write",
+            "tabwm",  "tasks",      "text",     "time",       "timer",   "tour",      "tty",
+            "type",   "uname",      "usb",      "version",    "vf",      "welcome",   "which",
+            "wm",     "wnd",        "write",
         }) |cmd_name| completion_match(prefix, cmd_name);
 
         var fi: usize = 0;
@@ -872,9 +872,9 @@ pub fn shell_complete(line: []const u8, cursor: usize, index: usize) ?lineedit.C
                 "procs",  "ps",         "random",   "reboot",     "repeat",  "resources", "roadpops",
                 "screen", "screenshot", "settings", "sexiburger", "sh",      "shortcuts", "shutdown",
                 "smp",    "sound",      "spawn",    "stat",       "strace",  "sym",       "syscalls",
-                "tabwm",  "tasks",      "text",     "time",       "timer",   "tour",      "type",
-                "uname",  "usb",        "version",  "vf",         "welcome", "which",     "wm",
-                "wnd",    "write",
+                "tabwm",  "tasks",      "text",     "time",       "timer",   "tour",      "tty",
+                "type",   "uname",      "usb",      "version",    "vf",      "welcome",   "which",
+                "wm",     "wnd",        "write",
             }) |cmd_name| completion_match(prefix, cmd_name);
             var list_res: virtio_file.ListResult = .{};
             if (virtio_file.list("", &list_res) == virtio_file.st_ok) {
@@ -892,9 +892,9 @@ pub fn shell_complete(line: []const u8, cursor: usize, index: usize) ?lineedit.C
                 "procs",  "ps",         "random",   "reboot",     "repeat",  "resources", "roadpops",
                 "screen", "screenshot", "settings", "sexiburger", "sh",      "shortcuts", "shutdown",
                 "smp",    "sound",      "spawn",    "stat",       "strace",  "sym",       "syscalls",
-                "tabwm",  "tasks",      "text",     "time",       "timer",   "tour",      "type",
-                "uname",  "usb",        "version",  "vf",         "welcome", "which",     "wm",
-                "wnd",    "write",
+                "tabwm",  "tasks",      "text",     "time",       "timer",   "tour",      "tty",
+                "type",   "uname",      "usb",      "version",    "vf",      "welcome",   "which",
+                "wm",     "wnd",        "write",
             }) |cmd_name| completion_match(prefix, cmd_name);
             inline for (&.{
                 "system",  "memory_state", "tasks_processes",  "graphics_input",
@@ -4264,6 +4264,7 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         "  sound       virtio-snd transport: device DID, class, status, control-queue state, device-config counts (jacks/streams/channel-maps), re-arm; stream-state control: 'sound volume <0-100>' and 'sound mute <on|off>'\n" ++
         "  shutdown    request power-off\n" ++
         "  type        echo stdin (the pipe source) to stdout — the right half of `a | type`\n" ++
+        "  tty         terminal drop counters (ADR 0020 D1): out_dropped/in_dropped per bound tty ('tty' prints one line per terminal)\n" ++
         "  forensics   last-words recorder: on|off|dump|reset (off by default)\n" ++
         "  dmesg       system log viewer: last bytes of serial output (D12)\n" ++
         "  time        command timing: measure elapsed ticks and wall-clock time (D13)\n" ++

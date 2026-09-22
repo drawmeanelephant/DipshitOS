@@ -19,6 +19,7 @@ exec TERM.BIN
 EOF
 
 vgate_file clip.txt <<'EOF'
+tty
 clip
 EOF
 
@@ -63,4 +64,19 @@ assert i_done >= 0, "BIG.SH did not finish"
 assert i_copy > i_done, f"copy marker not after the script (done={i_done} copy={i_copy})"
 assert i_clip > i_copy, f"clip read not after the copy (copy={i_copy} clip={i_clip})"
 print("selection/copy ordering OK: term done < tty copy < clip read")
+PY
+
+# M73f-2 (#1632): the monitor `tty` line prints the ADR 0020 D1 drop
+# counters. Assert the SHAPE after real activity — not zero: honest values
+# until M73f-1/the acceptance card, where M73z pins 0/0 after a repaint.
+vgate_assert 01 python <<'PY'
+import os, re
+ser = open(os.environ["VG_SER"], errors="replace").read()
+m = re.search(r"tty\[\d+\]: out_dropped=\d+ in_dropped=\d+", ser)
+assert m, "tty drop-counter line missing from serial"
+i_copy = ser.find("tty: copy 7 bytes")
+assert i_copy >= 0, "copy marker missing (precondition)"
+i_tty = ser.find(m.group(0))
+assert i_tty > i_copy, f"tty line not after activity (copy={i_copy} tty={i_tty})"
+print(f"drop-counter line OK: {m.group(0)} (after copy activity)")
 PY
