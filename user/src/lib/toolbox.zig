@@ -897,6 +897,21 @@ fn runPrintf(argv: []const []const u8, out: Writer) u8 {
                         // window-tty program can emit an ANSI CSI sequence
                         // without a special syscall.
                         'e' => out.write("\x1b"),
+                        // M73a-2 (#1631): `\xHH` emits one raw byte — the
+                        // only ASCII-typable way to get UTF-8 rune bytes
+                        // (box frames, accents, CJK) onto a bound tty,
+                        // since the gate runner types keyboard ASCII.
+                        'x' => {
+                            const hi = if (i + 1 < fmt.len) hexNibble(fmt[i + 1]) else null;
+                            const lo = if (i + 2 < fmt.len) hexNibble(fmt[i + 2]) else null;
+                            if (hi != null and lo != null) {
+                                out.write(&[_]u8{(hi.? << 4) | lo.?});
+                                i += 2;
+                            } else {
+                                // Not a hex pair: emit `\x` literally.
+                                out.write(&[_]u8{ '\\', 'x' });
+                            }
+                        },
                         '\\' => out.write("\\"),
                         '0' => out.write(&[_]u8{0}),
                         else => {
@@ -961,6 +976,15 @@ fn runPrintf(argv: []const []const u8, out: Writer) u8 {
         if (argi >= argv.len or argi == before) break;
     }
     return 0;
+}
+
+fn hexNibble(c: u8) ?u8 {
+    return switch (c) {
+        '0'...'9' => c - '0',
+        'a'...'f' => c - 'a' + 10,
+        'A'...'F' => c - 'A' + 10,
+        else => null,
+    };
 }
 
 fn writeSigned(out: Writer, s: []const u8) void {
@@ -1281,6 +1305,20 @@ test "toolbox: printf substitutes, escapes, and repeats the format" {
     const argv5 = [_][]const u8{ "printf", "\\e[31mred\\e[0m" };
     _ = run(.printf, &argv5, stdinStream(""), Mem.host(), cap.writer());
     try std.testing.expectEqualStrings("\x1b[31mred\x1b[0m", cap.contents());
+}
+
+test "toolbox: printf \\xHH emits raw bytes (M73a-2 #1631)" {
+    var cap = Capture{};
+    // The typed line is keyboard ASCII only (the gate runner is a keyboard);
+    // \xHH is how UTF-8 rune bytes reach the tty: ┌ = E2 94 8C, é = C3 A9.
+    const argv = [_][]const u8{ "printf", "\\xE2\\x94\\x8C-\\xC3\\xA9\\n" };
+    _ = run(.printf, &argv, stdinStream(""), Mem.host(), cap.writer());
+    try std.testing.expectEqualStrings("\xe2\x94\x8c-\xc3\xa9\n", cap.contents());
+    cap.reset();
+    // A bad or truncated pair is literal, never a swallowed tail.
+    const argv2 = [_][]const u8{ "printf", "a\\xZZb\\x4" };
+    _ = run(.printf, &argv2, stdinStream(""), Mem.host(), cap.writer());
+    try std.testing.expectEqualStrings("a\\xZZb\\x4", cap.contents());
 }
 
 test "toolbox: a line longer than the cap is consumed but truncated" {

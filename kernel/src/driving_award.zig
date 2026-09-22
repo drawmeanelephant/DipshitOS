@@ -43,6 +43,7 @@ pub const builtin = @import("builtin");
 pub const alloc = @import("alloc.zig"); // WM1 (#707, claim 919): pool-backed user back-buffers
 pub const memmap = @import("memmap.zig"); // WM1: the test-pool descriptor (is_test only)
 pub const font = @import("font8x8.zig");
+pub const font_unicode = @import("font_unicode.zig"); // M73a-2 (#1631): the shared codepoint→glyph table + U+FFFD fallback art
 pub const input = @import("input.zig"); // card U4 (claim 4993): the pointer reports
 pub const virtio_gpu = @import("virtio_gpu.zig");
 pub const fbtext = @import("text.zig");
@@ -3703,6 +3704,46 @@ pub fn draw_string(buf: [*]u8, stride: usize, x0: usize, y0: usize, s: []const u
     for (s, 0..) |c, i| draw_glyph(buf, stride, x0 + i * 8, y0, c, rgb);
 }
 
+/// M73a-2 (#1631): resolve one terminal rune cell to its 8x8 rows — the
+/// shared M20 lookup (`text.glyph_for` → `font_unicode`), the pinned
+/// fallback (unmapped or ill-formed art is U+FFFD, never a skip), and
+/// part 1's overlay policy OR'd onto the base.
+pub fn rune_cell_rows(cell: terminal.Cell) [8]u8 {
+    const base = fbtext.glyph_for(cell.base) orelse &font_unicode.fffd_glyph;
+    var rows = base.*;
+    if (cell.mark != 0) {
+        if (font_unicode.combining_overlay(cell.mark)) |ov| {
+            for (0..8) |i| rows[i] |= ov[i];
+        }
+    }
+    return rows;
+}
+
+/// M73a-2 (#1631): paint one rune cell at (x0, y0). ASCII with no
+/// overlay keeps the byte-identical font8x8 path (M72b pixel parity); a
+/// wide base is stretched 2× so ONE glyph spans both cells of its pair —
+/// `wide` is the caller's clipped pair check, and a continuation cell
+/// draws nothing (the base owns the pair: no double-draw, no shift).
+pub fn draw_cell_glyph(buf: [*]u8, stride: usize, x0: usize, y0: usize, cell: terminal.Cell, rgb: u32, wide: bool) void {
+    if (cell.cont != 0) return;
+    if (cell.mark == 0 and cell.base >= 0x20 and cell.base <= 0x7e) {
+        draw_glyph(buf, stride, x0, y0, @intCast(cell.base), rgb);
+        return;
+    }
+    const rows = rune_cell_rows(cell);
+    var gy: usize = 0;
+    while (gy < 8) : (gy += 1) {
+        const bits = rows[gy];
+        var gx: usize = 0;
+        while (gx < 8) : (gx += 1) {
+            if (font.row_pixel(bits, gx)) {
+                put_px(buf, stride, x0 + gx, y0 + gy, rgb);
+                if (wide) put_px(buf, stride, x0 + gx + 8, y0 + gy, rgb);
+            }
+        }
+    }
+}
+
 /// Step 6 (Issue #206): draw one 8×16 glyph at (x0, y0). Uses the 2×-stretched
 /// glyph table for titles and headings. Non-printable bytes are skipped.
 pub fn draw_glyph_16(buf: [*]u8, stride: usize, x0: usize, y0: usize, c: u8, rgb: u32) void {
@@ -3887,17 +3928,31 @@ pub fn render_terminal_screen(dst: [*]u8, w: *const Window, scr: *const terminal
     const first = if (bottom > rows) bottom - rows else 0;
     var r: usize = 0;
     while (r < rows) : (r += 1) {
-        const line = scr.line(first + r);
+        const ri = first + r;
+        // M73a-2 (#1631): `line()` is the length gate (lens, in cells) and
+        // the byte source for the ASCII fast path; the real content comes
+        // from `cellAt` — runes, overlays, and wide pairs included.
+        const line = scr.line(ri);
+        const ry = y0 + r * 8;
         var c: usize = 0;
         while (c < cols) : (c += 1) {
-            const colours = terminalColours(scr.styleAt(first + r, c));
+            const cell = scr.cellAt(ri, c);
+            const colours = terminalColours(scr.styleAt(ri, c));
+            const x = c * 8;
+            const wide = fbtext.char_width(cell.base) >= 2 and c + 1 < cols;
             // M49 SD5: selected cells invert (fg on bg).
-            if (scr.inSelection(first + r, c)) {
-                fill_rect(dst, stride, c * 8, y0 + r * 8, 8, 8, colours.fg);
-                if (c < line.len) draw_glyph(dst, stride, c * 8, y0 + r * 8, line[c], colours.bg);
+            if (scr.inSelection(ri, c)) {
+                fill_rect(dst, stride, x, ry, 8, 8, colours.fg);
+                if (c < line.len) draw_cell_glyph(dst, stride, x, ry, cell, colours.bg, wide);
+            } else if (cell.cont != 0) {
+                // The wide base already filled this cell's half of the pair
+                // and stroked its glyph across both cells; a continuation
+                // paints nothing of its own.
             } else if (colours.bg != fbtext.bg_rgb or c < line.len) {
-                fill_rect(dst, stride, c * 8, y0 + r * 8, 8, 8, colours.bg);
-                if (c < line.len) draw_glyph(dst, stride, c * 8, y0 + r * 8, line[c], colours.fg);
+                // A wide base fills (and strokes) its whole pair in one pass.
+                const span: usize = if (wide) 16 else 8;
+                fill_rect(dst, stride, x, ry, span, 8, colours.bg);
+                if (c < line.len) draw_cell_glyph(dst, stride, x, ry, cell, colours.fg, wide);
             }
         }
     }
@@ -3911,7 +3966,9 @@ pub fn render_terminal_screen(dst: [*]u8, w: *const Window, scr: *const terminal
             const colours = terminalColours(scr.styleAt(cl, cc));
             fill_rect(dst, stride, cc * 8, cy, 8, 8, colours.fg);
             const line = scr.line(cl);
-            if (cc < line.len) draw_glyph(dst, stride, cc * 8, cy, line[cc], colours.bg);
+            const cell = scr.cellAt(cl, cc);
+            const wide = fbtext.char_width(cell.base) >= 2 and cc + 1 < cols;
+            if (cc < line.len) draw_cell_glyph(dst, stride, cc * 8, cy, cell, colours.bg, wide);
         }
     }
 }

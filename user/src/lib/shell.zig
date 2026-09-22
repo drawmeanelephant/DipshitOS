@@ -764,7 +764,12 @@ pub const RunRequest = struct {
 /// copied into fixed buffers (the shell's BSS), so the glue can build the
 /// `[]const []const u8` slice after the `Action` value lands.
 pub const tool_arg_max: usize = 12;
-pub const tool_arg_bytes: usize = 64;
+/// M73a-2 (#1631): one tool argument must hold what `tokenize` can hand
+/// out — slices run the whole `scratch` (`line_max * 2`) — so the fixed
+/// copy buffer matches it. At 64 this silently truncated (Buf.set's
+/// `@min`), cutting `printf '<long format>'` mid-sequence: observed as a
+/// frame row that stopped after its first rune on the live-term gate.
+pub const tool_arg_bytes: usize = line_max * 2;
 
 pub const ToolRequest = struct {
     tool: toolbox.Tool,
@@ -1585,6 +1590,22 @@ test "shell: classify maps the builtin boundary" {
 
 fn execLine(s: *Shell, line: []const u8) Action {
     return s.execute(line, &.{});
+}
+
+// M73a-2 (#1631): tool args used to land in a fixed 64-byte Buf whose
+// Buf.set silently truncates — `printf '<long format>'` was cut mid-frame
+// on the live-term gate (observed: fmtlen=64, 47 of 73 output bytes).
+// The copy buffer now matches `scratch`, so a full line's arg survives.
+test "shell: tool args keep a long printf format intact" {
+    var s = Shell.init();
+    const fmt = "\\e[2J\\e[31mRED\\e[0m \\e[1;44;97mBOLD\\e[0m\\n\\e[93m" ++
+        "\\xE2\\x94\\x8C\\xE2\\x94\\x80\\xE2\\x94\\x90\\xE2\\x94\\x82 pad pad pad";
+    try std.testing.expect(fmt.len > 64); // the old guillotine, pinned
+    var line: [line_max * 2]u8 = undefined;
+    const cmd = std.fmt.bufPrint(&line, "printf '{s}'", .{fmt}) catch unreachable;
+    const a = execLine(&s, cmd);
+    try std.testing.expect(a == .tool);
+    try std.testing.expectEqualStrings(fmt, a.tool.at(1));
 }
 
 test "shell: echo joins arguments and sets success" {
