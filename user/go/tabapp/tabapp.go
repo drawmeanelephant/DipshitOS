@@ -142,18 +142,22 @@ func (t *TabApp) Layout(r Rect, fromW, fromH uint32) Rect {
 // grid's cell dimensions — M73j's (#1636) agreement pin, mirrored from
 // the kernel's two formulas for the SAME rect:
 //
-//	cols = clamp(w/8, 8, 80)  — terminal.zig syncWindowCols -> setCols
-//	                            (the M49 SD5-effective column count)
-//	rows = (h-16)/8            — driving_award.zig rows_visible, the 16 px
-//	                            title band (wnd_core title_bar_h) is not
-//	                            client area; kernel's `else 1` below it
+//	cols = clamp(w/cellW, 8, 80) — terminal.zig syncWindowCols -> setCols
+//	                             (the M49 SD5-effective column count)
+//	rows = (h-16)/cellH           — driving_award.zig rows_visible, the 16 px
+//	                             title band (wnd_core title_bar_h) is not
+//	                             client area; kernel's `else 1` below it
+//
+// M73l (#1661): cellW/cellH mirror kernel/src/font_metrics.zig —
+// FiraCode at pixel size 13: advance 8, ascent+descent 16.
 //
 // The TUI contract is cells, never pixels: a consumer can only ask for
 // geometry the kernel grid will actually render. TestCellGridPinsKernel
 // pins both formulas class-A; the class-B size marker proves the live
 // event carries the same numbers.
 func CellGrid(w, h uint32) (cols, rows int) {
-	cols = int(w / 8)
+	const cellW, cellH = 8, 16
+	cols = int(w / cellW)
 	if cols < 8 {
 		cols = 8
 	}
@@ -162,7 +166,7 @@ func CellGrid(w, h uint32) (cols, rows int) {
 	}
 	rows = 1
 	if h > 16 {
-		rows = int((h - 16) / 8)
+		rows = int((h - 16) / cellH)
 	}
 	return cols, rows
 }

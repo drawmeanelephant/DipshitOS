@@ -44,6 +44,8 @@ pub const alloc = @import("alloc.zig"); // WM1 (#707, claim 919): pool-backed us
 pub const memmap = @import("memmap.zig"); // WM1: the test-pool descriptor (is_test only)
 pub const font = @import("font8x8.zig");
 pub const font_unicode = @import("font_unicode.zig"); // M73a-2 (#1631): the shared codepoint→glyph table + U+FFFD fallback art
+pub const font_metrics = @import("font_metrics.zig"); // M73l (#1661): THE cell geometry — no terminal geometry literal says 8
+pub const font_atlas = @import("font_atlas_data.zig"); // M73l (#1661): the generated FiraCode cell atlas
 pub const input = @import("input.zig"); // card U4 (claim 4993): the pointer reports
 pub const virtio_gpu = @import("virtio_gpu.zig");
 pub const fbtext = @import("text.zig");
@@ -424,9 +426,10 @@ var term_sel_dragging: bool = false;
 
 /// M49 SD5 (#1132): the terminal window under the pointer and the grid cell
 /// (absolute line + column) it maps to, or null. Searches topmost first.
-const TermHit = struct { win_id: u8, line: usize, col: usize, row: usize };
+/// M73l: pub — the geometry gate calls it directly.
+pub const TermHit = struct { win_id: u8, line: usize, col: usize, row: usize };
 
-fn terminalHitAt(px: u32, py: u32) ?TermHit {
+pub fn terminalHitAt(px: u32, py: u32) ?TermHit {
     var wi: usize = win_count;
     while (wi > 0) {
         wi -= 1;
@@ -436,15 +439,15 @@ fn terminalHitAt(px: u32, py: u32) ?TermHit {
         if (px < w.x or px >= w.x + w.w) continue;
         if (py < top_y or py >= w.y + w.h) continue;
         const scr = terminal.screenForWindow(w.id) orelse continue;
-        const rows_visible: usize = if (w.h > user_title_h) ((w.h - user_title_h) / 8) else 1;
+        const rows_visible: usize = if (w.h > user_title_h) ((w.h - user_title_h) / font_metrics.cell_h) else 1;
         // M73k (#1637): `lineCount` is grid+history as one space — the
         // mirror of the painter's `lineCount - view - rows` walk, so a
         // click lands on the same row it paints (selection lives in
         // unified indices too).
         const total = scr.lineCount();
         const first: usize = if (total > scr.view + rows_visible) total - scr.view - rows_visible else 0;
-        const row: usize = (py - top_y) / 8;
-        const col: usize = (px - w.x) / 8;
+        const row: usize = (py - top_y) / font_metrics.cell_h;
+        const col: usize = (px - w.x) / font_metrics.cell_w;
         return .{ .win_id = w.id, .line = first + row, .col = col, .row = row };
     }
     return null;
@@ -3800,38 +3803,90 @@ pub fn rune_cell_rows(cell: terminal.Cell) [8]u8 {
     return rows;
 }
 
-/// M73a-2 (#1631): paint one rune cell at (x0, y0). ASCII with no
-/// overlay keeps the byte-identical font8x8 path (M72b pixel parity); a
-/// wide base is stretched 2× so ONE glyph spans both cells of its pair —
-/// `wide` is the caller's clipped pair check, and a continuation cell
+/// M73l (#1661): paint one cell at (x0, y0). ASCII with no overlay
+/// paints from the FiraCode atlas — the face IS the cell now (8×16,
+/// 4-bit alpha over the cell fill); everything else keeps the composed
+/// 8×8 rune art, stretched ×1/×2 into the taller cell (no coverage
+/// regression). A wide base still spans both cells of its pair —
+/// `wide` is the caller's clipped pair check — and a continuation cell
 /// draws nothing (the base owns the pair: no double-draw, no shift).
 pub fn draw_cell_glyph(buf: [*]u8, stride: usize, x0: usize, y0: usize, cell: terminal.Cell, rgb: u32, wide: bool, italic: bool) void {
     if (cell.cont != 0) return;
-    // Byte-identical ASCII fast path when NOT italic (M72b pixel parity).
-    if (!italic and cell.mark == 0 and cell.base >= 0x20 and cell.base <= 0x7e) {
-        draw_glyph(buf, stride, x0, y0, @intCast(cell.base), rgb);
+    // M73l: the atlas path — M72b's byte-identical font8x8 fast path
+    // retires with the 8×8 cell (ADR 0020 Amendment F).
+    if (cell.mark == 0 and cell.base >= 0x20 and cell.base <= 0x7e) {
+        draw_atlas_glyph(buf, stride, x0, y0, cell.base, rgb, italic);
         return;
     }
-    // Italic ASCII flows through the same lookup (`glyph_for` returns the
-    // SAME font8x8 bitmap for 0x20..0x7E), then gets sheared below.
+    // Fallback: composed rows (rune/overlay path), nearest-neighbour
+    // ×1 horizontally and ×2 vertically (cell_h / 8) into the tall cell.
     const rows = rune_cell_rows(cell);
+    const sy_per: usize = font_metrics.cell_h / 8;
     var gy: usize = 0;
     while (gy < 8) : (gy += 1) {
         const bits = rows[gy];
-        // M73h: fake italic — the top rows shift right up to 2px, the
-        // bottom row none. A pixel that would leave the cell is DROPPED
-        // (no column bleed: the pixel gates pin x extents).
-        const xoff: usize = if (italic) (7 - gy) / 3 else 0;
-        var gx: usize = 0;
-        while (gx < 8) : (gx += 1) {
-            if (font.row_pixel(bits, gx)) {
-                if (gx + xoff < 8) {
-                    put_px(buf, stride, x0 + gx + xoff, y0 + gy, rgb);
-                    if (wide) put_px(buf, stride, x0 + gx + xoff + 8, y0 + gy, rgb);
+        var sy: usize = 0;
+        while (sy < sy_per) : (sy += 1) {
+            const dy = gy * sy_per + sy;
+            // M73h (Amendment E): fake italic — top rows shift right up
+            // to 2px, bottom none, same ≤2px rendition over the taller
+            // cell. A pixel that would leave the cell is DROPPED (no
+            // column bleed: the pixel gates pin x extents).
+            const xoff: usize = if (italic) italic_shear(dy) else 0;
+            var gx: usize = 0;
+            while (gx < 8) : (gx += 1) {
+                if (font.row_pixel(bits, gx)) {
+                    if (gx + xoff < font_metrics.cell_w) {
+                        put_px(buf, stride, x0 + gx + xoff, y0 + dy, rgb);
+                        if (wide) put_px(buf, stride, x0 + gx + xoff + font_metrics.cell_w, y0 + dy, rgb);
+                    }
                 }
             }
         }
     }
+}
+
+/// M73l: the ≤2px top shear, linear over the cell's height — dy 0 (cell
+/// top) shifts 2px right, dy cell_h-1 (bottom) shifts none.
+fn italic_shear(dy: usize) usize {
+    return ((font_metrics.cell_h - 1 - dy) * 2) / (font_metrics.cell_h - 1);
+}
+
+/// M73l: one atlas glyph, alpha-blended over the cell fill. Placement
+/// is baked into the fixture (baseline at `ascent` from the top), so
+/// this walks rows 0..cell_h and high/low nibbles per byte. Pixels the
+/// shear would push past the cell edge are dropped (M73h x-extent pin).
+fn draw_atlas_glyph(buf: [*]u8, stride: usize, x0: usize, y0: usize, cp: u21, rgb: u32, italic: bool) void {
+    const off: usize = (cp - font_atlas.first_cp) * font_atlas.glyph_bytes;
+    const row_stride = font_atlas.glyph_bytes / font_metrics.cell_h; // 4 bytes = 8px × 4-bit
+    var dy: usize = 0;
+    while (dy < font_metrics.cell_h) : (dy += 1) {
+        const xoff: usize = if (italic) italic_shear(dy) else 0;
+        const row = off + dy * row_stride;
+        var gx: usize = 0;
+        while (gx < font_metrics.cell_w) : (gx += 1) {
+            const byte = font_atlas.blob[row + gx / 2];
+            const lvl: u8 = if (@rem(gx, 2) == 0) byte >> 4 else byte & 0x0f;
+            if (lvl == 0) continue;
+            if (gx + xoff >= font_metrics.cell_w) continue;
+            put_alpha_px(buf, stride, x0 + gx + xoff, y0 + dy, rgb, lvl * 17);
+        }
+    }
+}
+
+/// M73l: blend one atlas pixel (alpha 0..255) over what the cell fill
+/// left. Level 15 lands exactly on fg (255/255 — no rounding slop for
+/// the golden pins), level 0 is never called.
+fn put_alpha_px(buf: [*]u8, stride: usize, x: usize, y: usize, rgb: u32, a: u16) void {
+    const off = y * stride + x * 4;
+    const inv: u16 = 255 - a;
+    const s_b: u16 = @truncate(rgb & 0xff);
+    const s_g: u16 = @truncate((rgb >> 8) & 0xff);
+    const s_r: u16 = @truncate((rgb >> 16) & 0xff);
+    buf[off] = @intCast((@as(u16, buf[off]) * inv + s_b * a) / 255);
+    buf[off + 1] = @intCast((@as(u16, buf[off + 1]) * inv + s_g * a) / 255);
+    buf[off + 2] = @intCast((@as(u16, buf[off + 2]) * inv + s_r * a) / 255);
+    buf[off + 3] = 0xff;
 }
 
 /// Step 6 (Issue #206): draw one 8×16 glyph at (x0, y0). Uses the 2×-stretched
@@ -4052,11 +4107,11 @@ pub fn render_terminal_screen(dst: [*]u8, w: *const Window, scr: *const terminal
     const hu: usize = @intCast(w.h);
     const stride = wu * 4;
     fill_rect(dst, stride, 0, 0, wu, hu, fbtext.bg_rgb);
-    const cols = @min(scr.columns(), wu / 8);
+    const cols = @min(scr.columns(), wu / font_metrics.cell_w);
     // The compositor draws the title bar over the top `title_bar_h` rows, so
     // the grid's first line starts below it (client-area origin).
     const y0: usize = @intCast(geom.title_bar_h);
-    const rows = if (hu > y0) (hu - y0) / 8 else 0;
+    const rows = if (hu > y0) (hu - y0) / font_metrics.cell_h else 0;
     if (cols == 0 or rows == 0) return;
     const total = scr.lineCount();
     // M49 SD5 (#1132): the scrollback view shifts the first visible line
@@ -4071,17 +4126,17 @@ pub fn render_terminal_screen(dst: [*]u8, w: *const Window, scr: *const terminal
         // the byte source for the ASCII fast path; the real content comes
         // from `cellAt` — runes, overlays, and wide pairs included.
         const line = scr.line(ri);
-        const ry = y0 + r * 8;
+        const ry = y0 + r * font_metrics.cell_h;
         var c: usize = 0;
         while (c < cols) : (c += 1) {
             const cell = scr.cellAt(ri, c);
             const side = scr.rgbAt(ri, c);
             const colours = terminalRendition(scr.styleAt(ri, c), side.fg, side.bg);
-            const x = c * 8;
+            const x = c * font_metrics.cell_w;
             const wide = fbtext.char_width(cell.base) >= 2 and c + 1 < cols;
             // M49 SD5: selected cells invert (fg on bg).
             if (scr.inSelection(ri, c)) {
-                fill_rect(dst, stride, x, ry, 8, 8, colours.fg);
+                fill_rect(dst, stride, x, ry, font_metrics.cell_w, font_metrics.cell_h, colours.fg);
                 if (c < line.len) draw_cell_glyph(dst, stride, x, ry, cell, colours.bg, wide, colours.italic);
             } else if (cell.cont != 0) {
                 // The wide base already filled this cell's half of the pair
@@ -4089,16 +4144,16 @@ pub fn render_terminal_screen(dst: [*]u8, w: *const Window, scr: *const terminal
                 // paints nothing of its own.
             } else if (colours.bg != fbtext.bg_rgb or c < line.len) {
                 // A wide base fills (and strokes) its whole pair in one pass.
-                const span: usize = if (wide) 16 else 8;
-                fill_rect(dst, stride, x, ry, span, 8, colours.bg);
+                const span: usize = if (wide) font_metrics.wide_cell_w else font_metrics.cell_w;
+                fill_rect(dst, stride, x, ry, span, font_metrics.cell_h, colours.bg);
                 if (c < line.len) draw_cell_glyph(dst, stride, x, ry, cell, colours.fg, wide, colours.italic);
             }
             // M73h: underline strokes the cell's bottom row (the base owns
             // its whole pair — a continuation skips so the line draws
             // once, wide or not).
             if (colours.underline and cell.cont == 0) {
-                const u_span: usize = if (wide) 16 else 8;
-                fill_rect(dst, stride, x, ry + 7, u_span, 1, colours.fg);
+                const u_span: usize = if (wide) font_metrics.wide_cell_w else font_metrics.cell_w;
+                fill_rect(dst, stride, x, ry + font_metrics.underline_row, u_span, 1, colours.fg);
             }
         }
     }
@@ -4110,10 +4165,10 @@ pub fn render_terminal_screen(dst: [*]u8, w: *const Window, scr: *const terminal
     if (scr.cursor_visible and view == 0 and cl >= first and cl - first < rows) {
         const cc = scr.cursorCol();
         if (cc < cols) {
-            const cy = y0 + (cl - first) * 8;
+            const cy = y0 + (cl - first) * font_metrics.cell_h;
             const c_side = scr.rgbAt(cl, cc);
             const colours = terminalRendition(scr.styleAt(cl, cc), c_side.fg, c_side.bg);
-            fill_rect(dst, stride, cc * 8, cy, 8, 8, colours.fg);
+            fill_rect(dst, stride, cc * font_metrics.cell_w, cy, font_metrics.cell_w, font_metrics.cell_h, colours.fg);
             const line = scr.line(cl);
             const cell = scr.cellAt(cl, cc);
             const wide = fbtext.char_width(cell.base) >= 2 and cc + 1 < cols;

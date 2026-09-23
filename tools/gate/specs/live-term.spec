@@ -124,6 +124,16 @@ for y in range(66, 446, 2):
             blue_bg += 1
         if r > 220 and g > 220 and b > 220:
             bright += 1
+# M73l (#1661): RED and BOLD sit on line 0 (y64..79 — client origin64
+# + one cell_h of 16). Their ink is antialiased now: only the top nibble
+# levels clear the exact-colour predicates (observed at the region stride:
+# red=3, bright=4 — sized for the retired 1-bit ink), so probe line 0 at
+# full resolution; the region loop above keeps fg/bg/blue_bg as before.
+for y in range(64, 80):
+    for x in range(64, 704):
+        r, g, b = px(x, y)
+        if r > 150 and g < 100 and b < 100: red += 1
+        if r > 220 and g > 220 and b > 220: bright += 1
 print(f"term client region: fg={fg} bg={bg} red={red} blue_bg={blue_bg} bright={bright}")
 assert bg >= 200, f"terminal background not present (bg={bg})"
 # `2J` deliberately erases the echoed printf command. At this steady-state
@@ -135,7 +145,8 @@ assert blue_bg >= 10, f"ANSI blue background not painted (blue_bg={blue_bg})"
 assert bright >= 10, f"ANSI bright/bold foreground not painted (bright={bright})"
 print("PASS: GOTERM window painted the typed ANSI SGR burst on the scanout")
 
-# M73a-2 (#1631): the typed frame row is grid line 1 -> y72..79, cells at
+# M73a-2 (#1631): the typed frame row is grid line 1 -> y80..95 (M73l
+# #1661: cell_h=16 — client origin 64 + 1 line), cells at
 # x = 64 + c*8 (window at 64,48 + 16px title). Bright yellow (\e[93m =
 # 0xf5f543): the light frame occupies cols 0..5, the accented e col 7, and
 # the wide unmapped rune spans cols 9..10. Nothing may paint past col 10
@@ -143,7 +154,7 @@ print("PASS: GOTERM window painted the typed ANSI SGR burst on the scanout")
 def is_yellow(p):
     r, g, b = p
     return r > 180 and g > 180 and b < 120
-band = [(x, y) for y in range(72, 80) for x in range(64, 704) if is_yellow(px(x, y))]
+band = [(x, y) for y in range(80, 96) for x in range(64, 704) if is_yellow(px(x, y))]
 yellow = len(band)
 border = sum(1 for x, y in band if x < 64 + 6 * 8)
 accent = sum(1 for x, y in band if 64 + 7 * 8 <= x < 64 + 8 * 8)
@@ -161,9 +172,10 @@ print("PASS: frame runes, accented rune, and the wide pair painted with no colum
 # (255,128,71) on bg exactly (17,34,51), straight from the SGR side
 # arrays through the rendition resolver (ADR 0020 Amendment E). Cell 0..1
 # spans x 64..79; the prompt and cursor sit at x >= 80 (outside the scan).
+# M73l (#1661): line 2 sits at y96..111 (client 64 + 2 * cell_h 16).
 fg_exact = 0
 bg_exact = 0
-for y in range(80, 88):
+for y in range(96, 112):
     for x in range(64, 80):
         c = px(x, y)
         if c == (255, 128, 71): fg_exact += 1

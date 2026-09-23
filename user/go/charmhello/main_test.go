@@ -38,9 +38,10 @@ func TestViewCarriesBoundedAnsiSurface(t *testing.T) {
 
 // TestSizeMsgPinsKernelCellMath is M73j's (#1636) deliverable-4 agreement
 // pin: for the same rect, sizeMsg's cells equal the kernel's formulas —
-// cols = clamp(w/8, 8, 80) (terminal.zig syncWindowCols -> setCols:975)
-// and rows = (h-16)/8 (driving_award.zig rows_visible:439, title_bar_h=16).
-// The card's prose said `rows=h/8`; the painted viewport does NOT include
+// cols = clamp(w/cellW, 8, 80) (terminal.zig syncWindowCols -> setCols:975)
+// and rows = (h-16)/cellH (driving_award.zig rows_visible:439, title_bar_h=16).
+// M73l (#1661): cellW=8, cellH=16 — FiraCode's advance at pixel size 13.
+// The card's prose said `rows=h/cellH`; the painted viewport does NOT include
 // the 16 px title band, so h/8 would hand a TUI two rows the grid never
 // renders — the measured kernel number is the one pinned here.
 func TestSizeMsgPinsKernelCellMath(t *testing.T) {
@@ -48,11 +49,11 @@ func TestSizeMsgPinsKernelCellMath(t *testing.T) {
 		w, h       uint32
 		cols, rows int
 	}{
-		{640, 400, 80, 48},  // charmhello's own rect: 640/8, (400-16)/8
-		{512, 384, 64, 46},  // the 512px tab: 512/8, (384-16)/8
-		{128, 64, 16, 6},    // the resize clamp floor: 128/8, (64-16)/8
-		{1024, 720, 80, 88}, // cols clamp: 1024/8=128 -> 80 (setCols)
-		{48, 40, 8, 3},      // cols clamp low: 48/8=6 -> 8 (setCols)
+		{640, 400, 80, 24},  // charmhello's own rect: 640/8, (400-16)/16
+		{512, 384, 64, 23},  // the 512px tab: 512/8, (384-16)/16
+		{128, 64, 16, 3},    // the resize clamp floor: 128/8, (64-16)/16
+		{1024, 720, 80, 44}, // cols clamp: 1024/8=128 -> 80 (setCols)
+		{48, 40, 8, 1},      // cols clamp low: 48/8=6 -> 8 (setCols)
 		{64, 16, 8, 1},      // no client area: kernel's `else 1` branch
 	}
 	for _, c := range cases {

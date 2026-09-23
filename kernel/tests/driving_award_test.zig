@@ -622,14 +622,15 @@ test "driving_award: a 38;2 cell paints its exact RGB on the scanout" {
         .dirty = true,
     };
     render_terminal_screen(&buf, &window, &screen);
-    // Cell (0,0) = x0..7, y(title_bar)..+7; count exact 0xff8047 ink
-    // (buffer is B8G8R8X8: B@0, G@1, R@2).
+    // Cell (0,0) = x0..cell_w-1, y(title_bar)..+cell_h-1; count exact
+    // 0xff8047 ink (buffer is B8G8R8X8: B@0, G@1, R@2). M73l: the cell
+    // is 8×16 — full-height rect, accessors not literals.
     const y0: usize = geom.title_bar_h;
     var hits: usize = 0;
     var y: usize = y0;
-    while (y < y0 + 8) : (y += 1) {
+    while (y < y0 + driving_award.font_metrics.cell_h) : (y += 1) {
         var x: usize = 0;
-        while (x < 8) : (x += 1) {
+        while (x < driving_award.font_metrics.cell_w) : (x += 1) {
             const k = (y * W + x) * 4;
             if (buf[k + 2] == 0xff and buf[k + 1] == 0x80 and buf[k] == 0x47) hits += 1;
         }
@@ -663,27 +664,29 @@ test "driving_award: SGR 4 underline strokes the bottom row of even a blank cell
     render_terminal_screen(&plain_buf, &window, &plain);
     render_terminal_screen(&und_buf, &window, &und);
     const y0: usize = geom.title_bar_h;
-    // The blank glyph draws nothing — only the underline paints row 7.
+    // The blank glyph draws nothing — only the underline paints the
+    // cell's bottom row (M73l: `underline_row` = cell_h-1, not 7).
     // Default fg on dark = 0x00ff00 (B8G8R8X8: B=0x00, G=0xff, R=0x00).
+    const uy = y0 + driving_award.font_metrics.underline_row;
     var plain_ink: usize = 0;
     var x: usize = 0;
-    while (x < 8) : (x += 1) {
-        const k = ((y0 + 7) * W + x) * 4;
+    while (x < driving_award.font_metrics.cell_w) : (x += 1) {
+        const k = (uy * W + x) * 4;
         if (plain_buf[k + 1] == 0xff and plain_buf[k + 2] == 0x00 and plain_buf[k] == 0x00) plain_ink += 1;
     }
     try std.testing.expectEqual(@as(usize, 0), plain_ink);
     var und_ink: usize = 0;
     x = 0;
-    while (x < 8) : (x += 1) {
-        const k = ((y0 + 7) * W + x) * 4;
+    while (x < driving_award.font_metrics.cell_w) : (x += 1) {
+        const k = (uy * W + x) * 4;
         if (und_buf[k + 1] == 0xff and und_buf[k + 2] == 0x00 and und_buf[k] == 0x00) und_ink += 1;
     }
     try std.testing.expect(und_ink >= 6);
-    // No bleed into the neighbouring cell's row.
+    // No bleed into the neighbouring cell's underline.
     var n_ext: usize = 0;
-    x = 8;
-    while (x < 16) : (x += 1) {
-        const k = ((y0 + 7) * W + x) * 4;
+    x = driving_award.font_metrics.cell_w;
+    while (x < driving_award.font_metrics.wide_cell_w) : (x += 1) {
+        const k = (uy * W + x) * 4;
         if (und_buf[k + 1] == 0xff and und_buf[k + 2] == 0x00) n_ext += 1;
     }
     try std.testing.expectEqual(@as(usize, 0), n_ext);
@@ -716,20 +719,20 @@ test "driving_award: SGR 3 italic shears the glyph without bleeding columns" {
     const y0: usize = geom.title_bar_h;
     var ink: usize = 0;
     var y: usize = y0;
-    while (y < y0 + 8) : (y += 1) {
+    while (y < y0 + driving_award.font_metrics.cell_h) : (y += 1) {
         var x: usize = 0;
-        while (x < 8) : (x += 1) {
+        while (x < driving_award.font_metrics.cell_w) : (x += 1) {
             const k = (y * W + x) * 4;
             if (plain_buf[k + 1] != it_buf[k + 1] or plain_buf[k + 2] != it_buf[k + 2]) ink += 1;
         }
     }
     try std.testing.expect(ink > 0);
-    // Cell 1 (x8..15) is an untouched blank: nothing bled right of cell 0.
+    // Cell 1 (x cell_w..2*cell_w) is an untouched blank: nothing bled right of cell 0.
     var bleed: usize = 0;
     y = y0;
-    while (y < y0 + 8) : (y += 1) {
-        var x: usize = 8;
-        while (x < 16) : (x += 1) {
+    while (y < y0 + driving_award.font_metrics.cell_h) : (y += 1) {
+        var x: usize = driving_award.font_metrics.cell_w;
+        while (x < driving_award.font_metrics.wide_cell_w) : (x += 1) {
             const k = (y * W + x) * 4;
             if (it_buf[k + 1] == 0xff and it_buf[k + 2] == 0x00) bleed += 1; // green ink
         }
@@ -801,44 +804,109 @@ test "driving_award: an accented rune cell paints ink and the overlay changes th
     var acc = terminal.Screen{};
     acc.feed("\x1b[?25le\xcc\x81"); // e + U+0301 combining acute
     render_terminal_screen(&acc_buf, &window, &acc);
-    const bare_ink = ink_count(&bare_buf, W * 4, 0, y0, 8, 8, fg);
-    const acc_ink = ink_count(&acc_buf, W * 4, 0, y0, 8, 8, fg);
+    const bare_ink = ink_count(&bare_buf, W * 4, 0, y0, driving_award.font_metrics.cell_w, driving_award.font_metrics.cell_h, fg);
+    const acc_ink = ink_count(&acc_buf, W * 4, 0, y0, driving_award.font_metrics.cell_w, driving_award.font_metrics.cell_h, fg);
     // Both paint real ink (never blank), and the overlay changes the art.
     try std.testing.expect(bare_ink > 4);
     try std.testing.expect(acc_ink > 4);
     try std.testing.expect(acc_ink != bare_ink);
 }
 
-test "driving_award: ASCII cells stay on the byte-identical font8x8 path (M72b parity, M73a-2 #1631)" {
+test "driving_award: ASCII cells paint the atlas fixture's own bytes (M73l #1661, Amendment F)" {
+    // The M72b byte-parity pin retired with the 8×8 cell: the ground
+    // truth for an ASCII cell is now the checked-in fixture itself.
+    // Every nibble decides its pixel — 15 lands on exact fg (a=255),
+    // 0 stays on the exact cell fill, mid levels blend off the fill.
     const W = 96;
     const H = 48;
     const fg = driving_award.fbtext.fg_rgb;
+    const bg = driving_award.fbtext.bg_rgb;
     const y0 = geom.title_bar_h;
     var buf: [W * H * 4]u8 = undefined;
-    var exp: [W * H * 4]u8 = undefined;
     @memset(&buf, 0);
-    @memset(&exp, 0);
     const window = Window{ .id = 2, .title = "term", .x = 0, .y = 0, .w = W, .h = H, .kind = .user, .visible = true, .dirty = true };
     var s = terminal.Screen{};
     s.feed("\x1b[?25lA");
     render_terminal_screen(&buf, &window, &s);
-    // The reference: the old byte path drawing the same glyph.
-    draw_glyph(&exp, W * 4, 0, y0, 'A', fg);
-    var y: usize = 0;
-    while (y < 8) : (y += 1) {
-        var x: usize = 0;
-        while (x < 8) : (x += 1) {
-            const k = (y0 + y) * W * 4 + x * 4;
-            if (ink_count(exp[k .. k + 4], W * 4, 0, 0, 1, 1, fg) == 1) {
-                try std.testing.expectEqual(@as(u32, fg & 0xff), @as(u32, buf[k])); // B
-                try std.testing.expectEqual(@as(u32, (fg >> 8) & 0xff), @as(u32, buf[k + 1])); // G
-                try std.testing.expectEqual(@as(u32, (fg >> 16) & 0xff), @as(u32, buf[k + 2])); // R
+    const m = driving_award.font_metrics;
+    const atlas = driving_award.font_atlas;
+    const off: usize = ('A' - atlas.first_cp) * atlas.glyph_bytes;
+    const row_stride = atlas.glyph_bytes / m.cell_h;
+    var lvl15: usize = 0;
+    var lvl0: usize = 0;
+    var mid: usize = 0;
+    var dy: usize = 0;
+    while (dy < m.cell_h) : (dy += 1) {
+        var gx: usize = 0;
+        while (gx < m.cell_w) : (gx += 1) {
+            const byte = atlas.blob[off + dy * row_stride + gx / 2];
+            const lvl: u8 = if (@rem(gx, 2) == 0) byte >> 4 else byte & 0x0f;
+            const k = ((y0 + dy) * W + gx) * 4;
+            const pr: u32 = buf[k + 2];
+            const pg: u32 = buf[k + 1];
+            const pb: u32 = buf[k];
+            if (lvl == 15) {
+                try std.testing.expectEqual(@as(u32, (fg >> 16) & 0xff), pr);
+                try std.testing.expectEqual(@as(u32, (fg >> 8) & 0xff), pg);
+                try std.testing.expectEqual(@as(u32, fg & 0xff), pb);
+                lvl15 += 1;
+            } else if (lvl == 0) {
+                try std.testing.expectEqual(@as(u32, (bg >> 16) & 0xff), pr);
+                try std.testing.expectEqual(@as(u32, (bg >> 8) & 0xff), pg);
+                try std.testing.expectEqual(@as(u32, bg & 0xff), pb);
+                lvl0 += 1;
+            } else {
+                // Blended off the fill: never still the raw fill (bright
+                // fg vs dark fill — ≥17/255 moves the fg channel).
+                try std.testing.expect(pr != ((bg >> 16) & 0xff) or pg != ((bg >> 8) & 0xff) or pb != (bg & 0xff));
+                mid += 1;
             }
         }
     }
-    const exp_ink = ink_count(&exp, W * 4, 0, y0, 8, 8, fg);
-    try std.testing.expect(exp_ink > 4);
-    try std.testing.expectEqual(exp_ink, ink_count(&buf, W * 4, 0, y0, 8, 8, fg));
+    // Census floors for 'A' at pixel size 13 (observed 6/≈40/≈80 —
+    // generous margins over the antialiased diagonal ink).
+    try std.testing.expect(lvl15 >= 4);
+    try std.testing.expect(mid >= 8);
+    try std.testing.expect(lvl0 >= 60);
+}
+
+test "driving_award: terminal hit-test resolves cells at the M73l metrics (8×16)" {
+    // Deliverable 4: a click lands on the row it paints. Under the
+    // stale /8 a click one-and-a-bit cells down resolved to row 2;
+    // every number below is derived from the accessors, not literals.
+    arm();
+    const m = driving_award.font_metrics;
+    const o = user_open(300, 300, 240, 128, 7); // title 16 + exactly 7 rows of 16
+    const id: u8 = switch (o) {
+        .opened => |i| i,
+        else => return error.TestUnexpectedResult,
+    };
+    defer _ = user_close(id);
+    const h = terminal.create(null) orelse return error.TestUnexpectedResult;
+    const t = terminal.get(h).?;
+    try std.testing.expect(t.attachWindow(id));
+    terminal.syncWindowCols(id, 240);
+    try std.testing.expectEqual(@as(usize, 30), terminal.screenForWindow(id).?.columns());
+    const top: usize = 300 + driving_award.user_title_h; // client origin
+    // One cell + 2px down, one cell + 1px right: row 1 / col 1 (the
+    // pre-M73l /8 would have said row 2).
+    const hit1 = driving_award.terminalHitAt(309, @intCast(top + m.cell_h + 2)).?;
+    try std.testing.expectEqual(id, hit1.win_id);
+    try std.testing.expectEqual(@as(usize, 1), hit1.row);
+    try std.testing.expectEqual(@as(usize, 1), hit1.col);
+    try std.testing.expectEqual(hit1.row, hit1.line); // empty screen: line == row
+    // Visible rows in the client area: (128 - title) / cell_h.
+    const rows_vis: usize = (128 - driving_award.user_title_h) / @as(usize, m.cell_h);
+    try std.testing.expectEqual(@as(usize, 7), rows_vis);
+    // The last painted row still resolves inside the window.
+    const last = driving_award.terminalHitAt(304, @intCast(top + (rows_vis - 1) * m.cell_h + 5)).?;
+    try std.testing.expectEqual(id, last.win_id);
+    try std.testing.expectEqual(@as(usize, 6), last.row);
+    // Column maths at the accessors: 2·cell_w + 3 in, col 2 out; the
+    // first 3px below the origin is still row 0.
+    const c2 = driving_award.terminalHitAt(300 + 2 * m.cell_w + 3, @intCast(top + 3)).?;
+    try std.testing.expectEqual(@as(usize, 2), c2.col);
+    try std.testing.expectEqual(@as(usize, 0), c2.row);
 }
 
 test "driving_award: a wide rune spans both cells once and never bleeds past its pair (M73a-2 #1631)" {

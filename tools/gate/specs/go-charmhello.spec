@@ -51,7 +51,7 @@ vgate_run 01 -- \
     --input-string 'r' \
     --input-string-after 'charmhello: mouse b=32' \
     --script2 '$RUN_DIR/script2.txt' \
-    --script2-after 'charmhello: size 64x46' \
+    --script2-after 'charmhello: size 64x23' \
     --script3 '$RUN_DIR/script3.txt' \
     --script3-after 'dui: windows=' \
     --script-expect 'charmhello: close' --timeout 240
@@ -64,8 +64,9 @@ vgate_assert 01 serial-contains 'charmhello: painted'
 vgate_assert 01 serial-contains 'charmhello: ready'
 # M73j (#1636): the INITIAL tea.WindowSizeMsg — the first frame paints at
 # the declared rect's real cells (640x400 -> clamp(640/8)=80 cols,
-# (400-16)/8=48 rows), so a TUI's first frame is measured, not a guess.
-vgate_assert 01 serial-contains 'charmhello: size 80x48'
+# (400-16)/16=24 rows; M73l #1661 cell_h=16), so a TUI's first frame is
+# measured, not a guess.
+vgate_assert 01 serial-contains 'charmhello: size 80x24'
 vgate_assert 01 serial-contains 'charmhello: key space'
 vgate_assert 01 serial-contains 'charmhello: repainted'
 
@@ -74,24 +75,25 @@ vgate_assert 01 serial-contains 'charmhello: repainted'
 # SGR `x/y` 1-based cells — and is never consumed by kernel selection.
 # Geometry is observed, not assumed: `dui[4]` prints rect=32,32,640,400 and
 # the title is 16 px, so the client origin is (32, 48); the click pixel
-# (60, 76) is the 8x8 cell at col 3, row 3 (0-based) -> x=4 y=4. Choreography
+# (60, 76) is the 8x16 cell at col 3, row 1 (0-based; M73l #1661 cell_h=16)
+# -> x=4 y=2. Choreography
 # is deterministic: the click fires after the space chord and the `dui`
 # script only runs after the RELEASE marker, so the window is alive for the
 # whole pair. `term sel` never appearing on this run is the
 # selection-precedence half of the contract (Shift keeps local selection).
-vgate_assert 01 serial-contains 'charmhello: mouse b=0 x=4 y=4'
-vgate_assert 01 serial-contains 'charmhello: mouse b=32 x=4 y=4'
+vgate_assert 01 serial-contains 'charmhello: mouse b=0 x=4 y=2'
+vgate_assert 01 serial-contains 'charmhello: mouse b=32 x=4 y=2'
 vgate_assert 01 serial-absent 'dui: term sel begin'
 vgate_assert 01 serial-absent 'dui: term sel end'
 # M73j (#1636): after the click, the runner types `r` -> the app calls
 # sys_win_resize(512,384) (owner seam, works under the seat where the
 # kernel's grip path is WM-gated) -> WIN_RESIZE(arg0=512,arg1=384) ->
-# tabapp ActionResized -> tea.WindowSizeMsg{64,46} in CELLS
-# (512/8, (384-16)/8) -> repaint + this marker. The startup marker above
+# tabapp ActionResized -> tea.WindowSizeMsg{64,23} in CELLS
+# (512/8, (384-16)/16 — M73l #1661 cell_h=16) -> repaint + this marker. The startup marker above
 # proves the initial message; this one proves the live resize path, and
 # script2 only runs off it, so `dui`'s rect line describes the RESIZED
 # window (the rect assert stays prefix-only by design).
-vgate_assert 01 serial-contains 'charmhello: size 64x46'
+vgate_assert 01 serial-contains 'charmhello: size 64x23'
 vgate_assert 01 serial-contains 'dui[4]: user user rect='
 vgate_assert 01 serial-contains 'charmhello: close'
 vgate_assert 01 serial-contains 'charmhello OK'
