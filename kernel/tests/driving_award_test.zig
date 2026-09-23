@@ -604,6 +604,108 @@ test "driving_award: terminalRendition resolves rgb, reverse, dim, and flags" {
     try std.testing.expectEqual(@as(u32, 0x00ff00), r.fg);
 }
 
+// ---------------------------------------------------------------------------
+// M73m (#1662): the palette the USER chose. Data + chain only — no new
+// resolution seam: theme_id 3 (= custom) prefers the three custom fields,
+// every other accessor falls through its EXISTING switch arm, and the M73h
+// pins above stay green untouched.
+// ---------------------------------------------------------------------------
+
+test "driving_award: a custom palette resolves exactly and never paints garbage (M73m)" {
+    const save_id = driving_award.theme_id;
+    const save_fg = driving_award.custom_fg;
+    const save_bg = driving_award.custom_bg;
+    const save_accent = driving_award.custom_accent;
+    defer {
+        driving_award.theme_id = save_id;
+        driving_award.custom_fg = save_fg;
+        driving_award.custom_bg = save_bg;
+        driving_award.custom_accent = save_accent;
+    }
+    // Fresh-image state: dark, byte-identical (the M73h pin above holds).
+    driving_award.theme_id = 0;
+    var d = driving_award.terminalThemeDefaults();
+    try std.testing.expectEqual(@as(u32, 0x00ff00), d.fg);
+    try std.testing.expectEqual(@as(u32, 0x101418), d.bg);
+    // custom with NOTHING written resolves to the same dark values: the
+    // compiled defaults are dark by construction — never garbage, never an
+    // uninitialized colour.
+    driving_award.theme_id = driving_award.theme_id_custom;
+    d = driving_award.terminalThemeDefaults();
+    try std.testing.expectEqual(@as(u32, 0x00ff00), d.fg);
+    try std.testing.expectEqual(@as(u32, 0x101418), d.bg);
+    // The user's own colours: exact RGB through the M73h resolver.
+    driving_award.custom_fg = 0x20ff9e;
+    driving_award.custom_bg = 0x0b1020;
+    driving_award.custom_accent = 0xff7733;
+    d = driving_award.terminalThemeDefaults();
+    try std.testing.expectEqual(@as(u32, 0x20ff9e), d.fg);
+    try std.testing.expectEqual(@as(u32, 0x0b1020), d.bg);
+    // Chrome: the two accent accessors follow the user's accent; every other
+    // accessor falls through to the dark arm (a switch, never an index —
+    // theme_id 3 can never read past a two-entry table).
+    try std.testing.expectEqual(@as(u32, 0xff7733), focus_ring());
+    try std.testing.expectEqual(@as(u32, 0xff7733), taskbar_entry_active());
+    try std.testing.expectEqual(@as(u32, 0x1a2b3c), user_title_bg());
+    try std.testing.expectEqual(@as(u32, 0x0f172a), taskbar_bg());
+    try std.testing.expectEqual(@as(u32, 0x000000), shadow_color());
+    // A default cell with SGR 1 keeps the custom foreground: the legacy
+    // bright-green rendition is DARK-only, so a custom palette is never
+    // overridden by it (the dark pin above still expects green).
+    var s = terminal.Screen{};
+    s.feed("\x1b[1m");
+    const r = driving_award.terminalRendition(s.style, s.fg_rgb_cur, s.bg_rgb_cur);
+    try std.testing.expectEqual(@as(u32, 0x20ff9e), r.fg);
+    try std.testing.expectEqual(@as(u32, 0x0b1020), r.bg);
+}
+
+test "driving_award: the store resolves the palette into the resolver (M73m)" {
+    const save_id = driving_award.theme_id;
+    const save_fg = driving_award.custom_fg;
+    const save_bg = driving_award.custom_bg;
+    const save_accent = driving_award.custom_accent;
+    defer {
+        driving_award.theme_id = save_id;
+        driving_award.custom_fg = save_fg;
+        driving_award.custom_bg = save_bg;
+        driving_award.custom_accent = save_accent;
+        settings.reset();
+        _ = settings.set("theme", "dark");
+    }
+    settings.reset();
+    _ = settings.set("theme", "custom");
+    _ = settings.set("palette_fg", "20ff9e");
+    _ = settings.set("palette_bg", "0b1020");
+    _ = settings.set("palette_accent", "ff7733");
+    try std.testing.expectEqual(@as(u8, driving_award.theme_id_custom), driving_award.theme_id);
+    var d = driving_award.terminalThemeDefaults();
+    try std.testing.expectEqual(@as(u32, 0x20ff9e), d.fg);
+    try std.testing.expectEqual(@as(u32, 0x0b1020), d.bg);
+    try std.testing.expectEqual(@as(u32, 0xff7733), focus_ring());
+    // Back to a preset: dark again, byte-identical to the legacy constants.
+    _ = settings.set("theme", "dark");
+    try std.testing.expectEqual(@as(u8, 0), driving_award.theme_id);
+    d = driving_award.terminalThemeDefaults();
+    try std.testing.expectEqual(@as(u32, 0x00ff00), d.fg);
+    try std.testing.expectEqual(@as(u32, 0x101418), d.bg);
+    try std.testing.expectEqual(@as(u32, 0x3b82f6), focus_ring());
+}
+
+test "driving_award: a palette write dirties every window for the next repaint (M73m)" {
+    arm();
+    _ = user_open(64, 64, 320, 200, 7);
+    // Start from a settled frame: nothing dirty.
+    var i: usize = 0;
+    while (i < driving_award.count()) : (i += 1) driving_award.windows[i].dirty = false;
+    driving_award.mark_palette_dirty();
+    // EVERY window is dirty now — the live-apply contract: the next
+    // composite re-resolves each paint-time colour (no reboot, no re-exec).
+    i = 0;
+    while (i < driving_award.count()) : (i += 1) {
+        try std.testing.expect(driving_award.windows[i].dirty);
+    }
+}
+
 test "driving_award: a 38;2 cell paints its exact RGB on the scanout" {
     const W = 80;
     const H = 32;

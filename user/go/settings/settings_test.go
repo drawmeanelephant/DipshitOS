@@ -282,10 +282,13 @@ func TestNextCyclesTheVocabulary(t *testing.T) {
 	if got := Next(vocab, "amber"); got != "gotabwm" {
 		t.Fatalf("outside value -> %q (want the top)", got)
 	}
-	// The Go seat's own reader has no amber palette (user/go/theme.Set
-	// refuses it), so the panel must not offer one.
-	if tv, _ := Vocab("theme"); !hasOnly(tv, "dark", "light") {
-		t.Fatalf("theme vocabulary = %v, want exactly dark|light", tv)
+	// M73m (#1662): the theme cycle is the preset chooser — the three
+	// built-in presets the kernel resolves plus `custom` (the user's own
+	// colours). The Go seat's chrome still only KNOWS dark|light; theme.Set
+	// refuses the rest, so an amber/custom row leaves the Go chrome on its
+	// current tokens while the kernel terminal takes the choice.
+	if tv, _ := Vocab("theme"); !hasOnly(tv, "dark", "light", "amber", "custom") {
+		t.Fatalf("theme vocabulary = %v, want exactly dark|light|amber|custom", tv)
 	}
 	if _, ok := Vocab("not_a_key"); ok {
 		t.Fatal("unknown key has a vocabulary")
@@ -302,6 +305,114 @@ func hasOnly(vocab []string, want ...string) bool {
 		}
 	}
 	return true
+}
+
+// ---------------------------------------------------------------------------
+// M73m (#1662): the custom-palette keys — the accepted set, the value
+// grammar, and the defaults mirrored from the kernel source.
+// ---------------------------------------------------------------------------
+
+// PaletteKeys are accepted-but-NOT-seeded keys, so they must stay OUT of the
+// KnownKeys mirror (a seeded key would change the default table, and the
+// default SETTINGS.TXT byte shape, that go-wm-default pins) while their
+// defaults stay step-for-step with kernel/src/settings.zig.
+func TestPaletteKeysMirrorTheKernelDefaults(t *testing.T) {
+	if len(PaletteKeys) != 3 {
+		t.Fatalf("PaletteKeys = %d rows, want 3", len(PaletteKeys))
+	}
+	for _, k := range PaletteKeys {
+		if _, known := Known(k.Name); known {
+			t.Fatalf("%s must not be a KnownKeys row (the kernel does not seed it)", k.Name)
+		}
+		if !Editable(k.Name) {
+			t.Fatalf("%s is not editable — the panel could not choose colours", k.Name)
+		}
+		if _, ok := Colour(k.Default); !ok {
+			t.Fatalf("default %q for %s is not six hex digits", k.Default, k.Name)
+		}
+	}
+	if Editable("not_a_key") {
+		t.Fatal("an unknown key is editable")
+	}
+
+	// Read the kernel's `pub const palette_*_default: u32 = ...` and resolve
+	// `text.fg_rgb`/`text.bg_rgb` against text.zig — the same drift guard the
+	// KnownKeys mirror applies, one level over.
+	settingsSrc, err := os.ReadFile("../../../kernel/src/settings.zig")
+	if err != nil {
+		t.Fatalf("read kernel/src/settings.zig: %v (in-tree only)", err)
+	}
+	textSrc, err := os.ReadFile("../../../kernel/src/text.zig")
+	if err != nil {
+		t.Fatalf("read kernel/src/text.zig: %v (in-tree only)", err)
+	}
+	textConsts := map[string]string{}
+	reText := regexp.MustCompile(`pub const (fg|bg)_rgb: u32 = (0x[0-9a-fA-F]+);`)
+	for _, m := range reText.FindAllStringSubmatch(string(textSrc), -1) {
+		textConsts[m[1]+"_rgb"] = m[2]
+	}
+	re := regexp.MustCompile(`pub const palette_(fg|bg|accent)_default: u32 = ([^;]+);`)
+	got := map[string]string{}
+	for _, m := range re.FindAllStringSubmatch(string(settingsSrc), -1) {
+		val := strings.TrimSpace(m[2])
+		if !strings.HasPrefix(val, "0x") { // `text.fg_rgb` / `text.bg_rgb`
+			name := strings.TrimPrefix(val, "text.")
+			resolved, ok := textConsts[name]
+			if !ok {
+				t.Fatalf("kernel default for palette_%s is %s, which this test cannot resolve", m[1], val)
+			}
+			val = resolved
+		}
+		got[m[1]] = val
+	}
+	if len(got) != len(PaletteKeys) {
+		t.Fatalf("kernel palette defaults parsed = %d, want %d", len(got), len(PaletteKeys))
+	}
+	for _, k := range PaletteKeys {
+		name := strings.TrimPrefix(k.Name, "palette_")
+		want, ok := got[name]
+		if !ok {
+			t.Errorf("kernel carries no palette_%s_default", name)
+			continue
+		}
+		if v, _ := Colour(k.Default); fmtHex(v) != strings.ToLower(strings.TrimPrefix(want, "0x")) {
+			t.Errorf("palette_%s default = 0x%s, kernel %s", name, k.Default, want)
+		}
+	}
+}
+
+// fmtHex is the six-digit lowercase form the comparison wants.
+func fmtHex(v uint32) string {
+	const d = "0123456789abcdef"
+	b := make([]byte, 6)
+	for i := 5; i >= 0; i-- {
+		b[i] = d[v&0xf]
+		v >>= 4
+	}
+	return string(b)
+}
+
+// The palette value grammar, mirrored from the kernel's parse_hex6: exactly
+// six hex digits, case-insensitive, no 0x — everything else refused.
+func TestValidColourMirrorsTheKernelGrammar(t *testing.T) {
+	good := []string{"00ff00", "101418", "3b82f6", "20FF9E", "abcdef"}
+	for _, v := range good {
+		if !ValidColour(v) {
+			t.Errorf("ValidColour(%q) = false, want true", v)
+		}
+	}
+	bad := []string{"", "00ff9", "00ff001", "00ff0z", "0x00ff00", " ff0000", "ff0000\n"}
+	for _, v := range bad {
+		if ValidColour(v) {
+			t.Errorf("ValidColour(%q) = true, want false", v)
+		}
+	}
+	if c, ok := Colour("20ff9e"); !ok || c != 0x20ff9e {
+		t.Fatalf("Colour(20ff9e) = %#x ok=%v", c, ok)
+	}
+	if c, ok := Colour("20FF9E"); !ok || c != 0x20ff9e {
+		t.Fatalf("Colour(20FF9E) = %#x ok=%v (case must not matter)", c, ok)
+	}
 }
 
 // A corrupt decode is refused by Save: the panel must never launder a file the

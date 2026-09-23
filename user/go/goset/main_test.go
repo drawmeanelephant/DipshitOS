@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"virelai/settings"
@@ -107,13 +108,14 @@ func TestPanelCyclesOnlyKnownVocabularies(t *testing.T) {
 	if v, _ := settings.Get(a.disp, "wm"); v != "gotabwm" {
 		t.Fatalf("wm = %q after the step back", v)
 	}
-	// The Zig panel offered `amber`; the Go seat's reader refuses it, so the
-	// panel's theme cycle must never produce it.
+	// M73m (#1662): the theme cycle is the PRESET chooser — the three
+	// built-ins plus `custom`, four steps back to where it started.
 	a.sel = rowOf(t, a, "theme")
-	for i := 0; i < 4; i++ {
+	want := []string{"light", "amber", "custom", "dark"}
+	for _, w := range want {
 		a.cycle(1)
-		if v, _ := settings.Get(a.disp, "theme"); v != "dark" && v != "light" {
-			t.Fatalf("theme cycle produced %q", v)
+		if v, _ := settings.Get(a.disp, "theme"); v != w {
+			t.Fatalf("theme cycle step: got %q, want %q", v, w)
 		}
 	}
 	// hostname is free text: no vocabulary, no invented value.
@@ -162,4 +164,65 @@ func rowOf(t *testing.T, a *panel, key string) int {
 	}
 	t.Fatalf("no row for %q in %+v", key, a.disp)
 	return -1
+}
+
+// M73m (#1662): the palette surface. A default panel is UNCHANGED (eight
+// rows, keys=8 — go-wm-default pins it); choosing `custom` reveals the three
+// colour rows with the compiled dark defaults, they are typed-editable as
+// six hex digits, and a malformed value never reaches the table.
+func TestPaletteSurfaceRevealsTheColoursOnCustom(t *testing.T) {
+	a := newPanel(nil)
+	if len(a.disp) != len(settings.KnownKeys) {
+		t.Fatalf("default rows = %d, want the kernel's %d (palette rows are NOT default rows)",
+			len(a.disp), len(settings.KnownKeys))
+	}
+	for _, k := range settings.PaletteKeys {
+		if _, ok := settings.Get(a.disp, k.Name); ok {
+			t.Fatalf("%s shown while theme is a preset", k.Name)
+		}
+	}
+	// Choose custom: the three rows appear, holding the compiled defaults.
+	a.set("theme", "custom")
+	for _, k := range settings.PaletteKeys {
+		v, ok := settings.Get(a.disp, k.Name)
+		if !ok || v != k.Default {
+			t.Fatalf("%s row = %q ok=%v, want the default %q", k.Name, v, ok, k.Default)
+		}
+	}
+	if got := a.summary(); got != "keys=11 wm=gotabwm theme=custom" {
+		t.Fatalf("summary = %q", got)
+	}
+	// The palette rows are first-class: never the "(kept)" marker (that is
+	// the label for a key the kernel table does not carry).
+	for _, l := range a.labels() {
+		if strings.Contains(l, "palette_") && strings.Contains(l, "(kept)") {
+			t.Fatalf("palette row marked not-editable: %q", l)
+		}
+	}
+	// Typed edit: six hex digits apply...
+	a.input = "palette_fg=20ff9e"
+	a.applyInput()
+	if v, _ := settings.Get(a.disp, "palette_fg"); v != "20ff9e" {
+		t.Fatalf("palette_fg = %q, want 20ff9e", v)
+	}
+	// ...anything else is named and dropped, table untouched.
+	for _, bad := range []string{"palette_fg=zzz", "palette_bg=0x112233", "palette_accent=12345"} {
+		a.input = bad
+		a.applyInput()
+		if a.input != "" {
+			t.Fatalf("input not consumed: %q", a.input)
+		}
+	}
+	if v, _ := settings.Get(a.disp, "palette_fg"); v != "20ff9e" {
+		t.Fatalf("a refused colour changed palette_fg to %q", v)
+	}
+	if v, _ := settings.Get(a.disp, "palette_bg"); v != settings.PaletteKeys[1].Default {
+		t.Fatalf("palette_bg = %q, want the untouched default", v)
+	}
+	// And an unknown key is still dropped (the card-D1 rule holds).
+	a.input = "not_a_key=1"
+	a.applyInput()
+	if _, ok := settings.Get(a.disp, "not_a_key"); ok {
+		t.Fatal("unknown key landed in the table")
+	}
 }

@@ -7,7 +7,12 @@
 //! Keys supported:
 //!   - `hostname`: system host identifier (default: "virelai")
 //!   - `prompt`: interactive shell prompt string (default: "virelai> ")
-//!   - `theme`: UI visual color accent (default: "default")
+//!   - `theme`: UI visual color accent (default "dark"; M73m #1662 grows
+//!     the ternary to include "custom" — the user's own palette)
+//!   - `palette_fg` / `palette_bg` / `palette_accent`: the custom palette
+//!     (six hex digits RRGGBB) that `theme=custom` resolves to — accepted
+//!     keys like `color`/`font_size`, NOT seeded by init(), so a fresh
+//!     table and a fresh SETTINGS.TXT stay byte-identical (M73m #1662)
 //!   - `scrollback`: terminal scrollback buffer lines (default: "1000")
 //!   - `shell`: boot login shell, "monitor"|"sh" (default: "monitor")
 //!   - `wm`: boot window-manager seat, "gotabwm"|"tabwm"|"none"
@@ -44,7 +49,13 @@
 //! Schema (keys, types, defaults, valid values):
 //!   hostname   string  "virelai"     1..32 chars, system host identifier
 //!   prompt     string  "virelai> "   1..64 chars, interactive shell prompt
-//!   theme      string  "dark"        "dark"|"light"|"amber", UI color accent
+//!   theme      string  "dark"        "dark"|"light"|"amber"|"custom", the
+//!                                   palette the terminal resolves at paint
+//!                                   time (M73m #1662 added "custom")
+//!   palette_fg string  "00ff00"      six hex digits RRGGBB: the custom
+//!   palette_bg string  "101418"      palette `theme=custom` resolves to
+//!   palette_accent string "3b82f6"   (accepted keys, not seeded rows —
+//!                                   defaults are the compiled dark colours)
 //!   scrollback string  "1000"        positive integer, terminal scrollback lines
 //!   color      string  "on"          "on"|"off", ANSI terminal colors in shell
 //!   shadow     string  "off"         "on"|"off", M37 DQ4 compositor drop-shadow
@@ -251,22 +262,90 @@ pub const ThemeColors = struct {
     success: u32,
 };
 
-/// Retrieve active theme identifier: 0=dark, 1=light, 2=amber.
+/// Retrieve active theme identifier: 0=dark, 1=light, 2=amber, 3=custom.
 pub fn get_theme_id() u8 {
     const val = get("theme") orelse "dark";
     if (std.mem.eql(u8, val, "light")) return 1;
     if (std.mem.eql(u8, val, "amber")) return 2;
+    // M73m (#1662): the fourth name. Anything unrecognized is dark — a
+    // stored typo never invents an id the resolver would guess at.
+    if (std.mem.eql(u8, val, "custom")) return driving_award.theme_id_custom;
     return 0; // dark / default
 }
 
-/// Set active theme by ID: 0=dark, 1=light, 2=amber.
+/// Set active theme by ID: 0=dark, 1=light, 2=amber, 3=custom.
 pub fn set_theme_id(id: u8) void {
     const name: []const u8 = switch (id) {
         1 => "light",
         2 => "amber",
+        3 => "custom",
         else => "dark",
     };
     _ = set("theme", name);
+}
+
+// -------------------------------------------------------------------------
+// M73m (#1662): the palette BEYOND the ternary — `theme=custom` plus the
+// user's own fg/bg/accent, stored as plain key=value rows like everything
+// else in this file.
+//
+// The three palette keys are ACCEPTED keys, not seeded rows: init() does not
+// set them (the `color`/`font_size` pattern), so a fresh settings table —
+// and the SETTINGS.TXT a fresh share carries — stays byte-identical to the
+// pre-M73m image (pinned by test). Value in force falls back PER KEY to the
+// compiled default, which is the DARK colour: a partial or invalid palette
+// resolves to dark, never to a half-read number or garbage.
+// ---------------------------------------------------------------------------
+
+/// The compiled custom-palette defaults: the dark terminal fg/bg (the same
+/// source `driving_award`'s `custom_*` fields default to) and dark's accent.
+pub const palette_fg_default: u32 = text.fg_rgb;
+pub const palette_bg_default: u32 = text.bg_rgb;
+pub const palette_accent_default: u32 = 0x3b82f6;
+
+/// Parse one stored palette colour: EXACTLY six hex digits (RRGGBB),
+/// case-insensitive, no `0x` prefix. Anything else is refused (null) so the
+/// apply side substitutes the compiled default rather than half-reading a
+/// number. Pure — host-tested.
+pub fn parse_hex6(val: []const u8) ?u32 {
+    if (val.len != 6) return null;
+    var v: u32 = 0;
+    for (val) |c| {
+        const d: u32 = switch (c) {
+            '0'...'9' => @as(u32, c - '0'),
+            'a'...'f' => @as(u32, c - 'a' + 10),
+            'A'...'F' => @as(u32, c - 'A' + 10),
+            else => return null,
+        };
+        v = (v << 4) | d;
+    }
+    return v;
+}
+
+fn palette_value(key: []const u8, fallback: u32) u32 {
+    const raw = get(key) orelse return fallback;
+    return parse_hex6(raw) orelse fallback;
+}
+
+/// The custom foreground in force (six hex digits, else the dark default).
+pub fn palette_fg() u32 {
+    return palette_value("palette_fg", palette_fg_default);
+}
+
+/// The custom background in force.
+pub fn palette_bg() u32 {
+    return palette_value("palette_bg", palette_bg_default);
+}
+
+/// The custom accent in force (chrome focus ring / active taskbar entry).
+pub fn palette_accent() u32 {
+    return palette_value("palette_accent", palette_accent_default);
+}
+
+fn is_palette_key(key: []const u8) bool {
+    return std.mem.eql(u8, key, "palette_fg") or
+        std.mem.eql(u8, key, "palette_bg") or
+        std.mem.eql(u8, key, "palette_accent");
 }
 
 /// Get the active theme color palette for UI rendering.
@@ -353,8 +432,11 @@ pub fn set(key: []const u8, val: []const u8) SetResult {
     ensure_init();
     const result = set_internal(key, val);
     // Step 7 (Issue #207): when theme is set, update the compositor's theme_id.
-    if (result == .ok and std.mem.eql(u8, key, "theme")) {
-        apply_theme(val);
+    // M73m (#1662): a palette key write resolves the SAME chain — the whole
+    // palette is resolved in one place and the desktop is marked dirty, so
+    // the next repaint shows what was just written (live apply).
+    if (result == .ok and (std.mem.eql(u8, key, "theme") or is_palette_key(key))) {
+        apply_palette();
     }
     // M20-U11 (claim 5127): debug_font is the text layer's dev setting.
     if (result == .ok and std.mem.eql(u8, key, "debug_font")) {
@@ -395,14 +477,32 @@ fn apply_debug_font(val: []const u8) void {
 }
 
 /// Apply a theme by name, updating driving_award.theme_id.
+/// M73m (#1662): `custom` is the fourth name (id 3, the store's own palette);
+/// an UNRECOGNIZED name lands on dark — deterministic at load and at set,
+/// never a stale id the resolver would guess past.
 fn apply_theme(name: []const u8) void {
-    if (std.mem.eql(u8, name, "dark") or std.mem.eql(u8, name, "default")) {
-        driving_award.theme_id = 0;
-    } else if (std.mem.eql(u8, name, "light")) {
+    if (std.mem.eql(u8, name, "light")) {
         driving_award.theme_id = 1;
     } else if (std.mem.eql(u8, name, "amber")) {
         driving_award.theme_id = 2;
+    } else if (std.mem.eql(u8, name, "custom")) {
+        driving_award.theme_id = driving_award.theme_id_custom;
+    } else {
+        driving_award.theme_id = 0; // dark, "default", or anything unrecognized
     }
+}
+
+/// M73m (#1662): the whole apply chain — resolve the store's palette into
+/// driving_award (theme id + the three custom RGB fields, each validated with
+/// a per-key fallback to the compiled dark default), then mark the desktop
+/// dirty so the NEXT REPAINT paints the choice. No reboot, no re-exec: the
+/// M73h resolver runs at paint time and reads exactly these fields.
+fn apply_palette() void {
+    apply_theme(get("theme") orelse "dark");
+    driving_award.custom_fg = palette_fg();
+    driving_award.custom_bg = palette_bg();
+    driving_award.custom_accent = palette_accent();
+    driving_award.mark_palette_dirty();
 }
 
 /// Parse a single `key=value` line into settings.
@@ -501,6 +601,12 @@ fn apply_bytes(bytes: []const u8) bool {
     if (file_version < current_version) {
         migrate(file_version);
     }
+    // M73m (#1662): the LOAD half of the apply chain — parse_line went
+    // through set_internal (no per-key applies), so resolve the persisted
+    // palette here, once, after the table is whole. A default image never
+    // reaches this line (no file), and a seeded default file carries
+    // theme=dark (id 0) — byte-identical either way.
+    apply_palette();
     return true;
 }
 
@@ -808,4 +914,110 @@ test "settings: font size getters and setters (M27 G21)" {
     set_font_size(0);
     try std.testing.expectEqual(@as(u8, 0), get_font_size());
     try std.testing.expectEqualStrings("small", get("font_size").?);
+}
+
+test "settings: the palette schema is additive — a fresh table stays dark (M73m #1662)" {
+    init();
+    // A fresh table carries NO palette rows and keeps theme=dark: the bytes
+    // a fresh share writes are byte-identical to the pre-M73m image, and a
+    // fresh image resolves exactly what it resolved before.
+    var buf: [2048]u8 = undefined;
+    const len = serialize(&buf);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..len], "palette_") == null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..len], "theme=dark\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..len], "theme=custom") == null);
+    try std.testing.expectEqual(@as(u8, 0), get_theme_id());
+    // The accepted keys still read back: unset = the compiled dark default.
+    try std.testing.expect(get("palette_fg") == null);
+    try std.testing.expectEqual(palette_fg_default, palette_fg());
+    try std.testing.expectEqual(palette_bg_default, palette_bg());
+    try std.testing.expectEqual(palette_accent_default, palette_accent());
+    // The value grammar: EXACTLY six hex digits, case-insensitive, no 0x.
+    try std.testing.expectEqual(@as(?u32, 0x20ff9e), parse_hex6("20ff9e"));
+    try std.testing.expectEqual(@as(?u32, 0x20FF9E), parse_hex6("20FF9E"));
+    try std.testing.expect(parse_hex6("20ff9") == null); // five digits
+    try std.testing.expect(parse_hex6("20ff9e0") == null); // seven
+    try std.testing.expect(parse_hex6("20ff9z") == null); // not hex
+    try std.testing.expect(parse_hex6("0x20ff9e") == null); // no prefix
+    try std.testing.expect(parse_hex6("") == null);
+    // The theme vocabulary grew a fourth name, and only a fourth.
+    try std.testing.expectEqual(SetResult.ok, set("theme", "custom"));
+    try std.testing.expectEqual(@as(u8, driving_award.theme_id_custom), get_theme_id());
+    init(); // restore defaults for the other tests
+    apply_palette();
+}
+
+test "settings: a custom palette round-trips store -> resolver -> exact RGB (M73m #1662)" {
+    init();
+    try std.testing.expectEqual(SetResult.ok, set("theme", "custom"));
+    try std.testing.expectEqual(SetResult.ok, set("palette_fg", "20ff9e"));
+    try std.testing.expectEqual(SetResult.ok, set("palette_bg", "0b1020"));
+    try std.testing.expectEqual(SetResult.ok, set("palette_accent", "ff7733"));
+    // The store's numbers land on the resolver EXACTLY (no rounding, no
+    // nearest-colour step) and the preset id became custom.
+    try std.testing.expectEqual(@as(u8, driving_award.theme_id_custom), driving_award.theme_id);
+    try std.testing.expectEqual(@as(u32, 0x20ff9e), driving_award.custom_fg);
+    try std.testing.expectEqual(@as(u32, 0x0b1020), driving_award.custom_bg);
+    try std.testing.expectEqual(@as(u32, 0xff7733), driving_award.custom_accent);
+    var d = driving_award.terminalThemeDefaults();
+    try std.testing.expectEqual(@as(u32, 0x20ff9e), d.fg);
+    try std.testing.expectEqual(@as(u32, 0x0b1020), d.bg);
+    // ...and they SURVIVE the bytes: serialize into a fresh table, then let
+    // the load path resolve them again (the round trip the card pins).
+    var buf: [2048]u8 = undefined;
+    const len = serialize(&buf);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..len], "theme=custom\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..len], "palette_fg=20ff9e\n") != null);
+    init(); // a fresh boot's compiled defaults...
+    apply_palette();
+    try std.testing.expectEqual(@as(u8, 0), driving_award.theme_id);
+    try std.testing.expectEqual(palette_fg_default, palette_fg());
+    try std.testing.expect(apply_bytes(buf[0..len])); // ...then the persisted bytes
+    try std.testing.expectEqual(@as(u8, 3), get_theme_id());
+    try std.testing.expectEqual(@as(u32, 0x20ff9e), palette_fg());
+    try std.testing.expectEqual(@as(u32, 0x0b1020), palette_bg());
+    try std.testing.expectEqual(@as(u32, 0xff7733), palette_accent());
+    try std.testing.expectEqual(@as(u8, driving_award.theme_id_custom), driving_award.theme_id);
+    try std.testing.expectEqual(@as(u32, 0x20ff9e), driving_award.custom_fg);
+    d = driving_award.terminalThemeDefaults();
+    try std.testing.expectEqual(@as(u32, 0x20ff9e), d.fg);
+    try std.testing.expectEqual(@as(u32, 0x0b1020), d.bg);
+    // Restore: the compiled defaults, dark, for the rest of the suite.
+    init();
+    apply_palette();
+    try std.testing.expectEqual(@as(u8, 0), driving_award.theme_id);
+}
+
+test "settings: a partial or invalid palette falls back safely (M73m #1662)" {
+    init();
+    // An invalid VALUE: the row stores (the key is valid), the colour is
+    // refused, and the compiled dark default stands — never a half-read
+    // number, never garbage.
+    try std.testing.expectEqual(SetResult.ok, set("theme", "custom"));
+    try std.testing.expectEqual(SetResult.ok, set("palette_fg", "zzzzzz"));
+    try std.testing.expectEqualStrings("zzzzzz", get("palette_fg").?); // stored...
+    try std.testing.expectEqual(palette_fg_default, palette_fg()); // ...refused
+    try std.testing.expectEqual(palette_fg_default, driving_award.custom_fg);
+    // A PARTIAL palette: only fg chosen, bg/accent keep their defaults, so
+    // the resolver still produces a complete pair.
+    try std.testing.expectEqual(SetResult.ok, set("palette_fg", "20ff9e"));
+    try std.testing.expectEqual(@as(u32, 0x20ff9e), driving_award.custom_fg);
+    try std.testing.expectEqual(palette_bg_default, driving_award.custom_bg);
+    try std.testing.expectEqual(palette_accent_default, driving_award.custom_accent);
+    // An unrecognized theme name lands on dark — deterministic at set AND at
+    // load, never a stale id the resolver would guess past.
+    try std.testing.expectEqual(SetResult.ok, set("theme", "bogus"));
+    try std.testing.expectEqual(@as(u8, 0), get_theme_id());
+    try std.testing.expectEqual(@as(u8, 0), driving_award.theme_id);
+    // A refused (headerless) load resolves NOTHING: the fresh compiled
+    // defaults are already in force and stay there (M66b's fail-closed).
+    init();
+    apply_palette();
+    try std.testing.expect(!apply_bytes("theme=custom\npalette_fg=20ff9e\n"));
+    try std.testing.expectEqual(@as(u8, 0), get_theme_id());
+    try std.testing.expectEqual(palette_fg_default, palette_fg());
+    try std.testing.expectEqual(@as(u8, 0), driving_award.theme_id);
+    // Restore defaults for the other tests.
+    init();
+    apply_palette();
 }

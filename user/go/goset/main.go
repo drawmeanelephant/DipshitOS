@@ -20,6 +20,16 @@
 //	⏎ alone      save the table as shown
 //	Esc          quit without saving
 //
+// M73m (#1662) adds the PALETTE surface: `theme` cycles the three built-in
+// presets plus `custom`, and choosing `custom` reveals the three colour rows
+// (palette_fg/palette_bg/palette_accent, six hex digits each) plus a live
+// swatch band — the colours are visible before they are saved. The kernel
+// resolves them at paint time (settings.zig's apply chain), so the terminal
+// repaints on the next frame after the store is written; the panel's own
+// chrome follows only presets (theme.Set knows dark|light and refuses the
+// rest, so an amber/custom choice leaves this window on its current tokens —
+// never a typo-invented palette).
+//
 // A save goes through the codec's crash-safe publish (vi.WriteFileSafe: temp +
 // fsync + delete/rename), never an in-place truncate. A CORRUPT file is
 // refused whole, exactly as the kernel and the seat refuse it: the panel names
@@ -85,13 +95,15 @@ type panel struct {
 	input  string
 	status string
 
-	rowsTxt  widgets.Text
-	headTxt  widgets.Text
-	inputTxt widgets.Text
-	statusT  widgets.Text
-	list     widgets.List
-	saveBtn  widgets.Button
-	quitBtn  widgets.Button
+	rowsTxt     widgets.Text
+	headTxt     widgets.Text
+	inputTxt    widgets.Text
+	statusT     widgets.Text
+	paletteTxt  widgets.Text
+	list        widgets.List
+	saveBtn     widgets.Button
+	quitBtn     widgets.Button
+	paletteSwat [3]widgets.Rect
 }
 
 func main() {
@@ -156,7 +168,28 @@ func newPanel(ta *tabapp.TabApp) *panel {
 		a.status = "type key=value + Enter to save"
 	}
 	vi.ConsoleLine(markerReady + a.summary() + " mode=" + a.mode())
+	// M73m: a file that already chose `custom` shows its colours as rows.
+	a.ensurePaletteRows()
 	return a
+}
+
+// ensurePaletteRows (M73m #1662) grows the display table with the three
+// custom-palette rows the moment `custom` is chosen — the colours the user is
+// choosing become visible, selectable rows. Idempotent, and it never REMOVES
+// a row (a palette written while custom stays visible and saved when the
+// theme cycles back: the kernel ignores those keys for any preset, so keeping
+// them costs nothing and keeps the user's colours around). While theme is a
+// preset the table is untouched, so a default panel still reports keys=8.
+func (a *panel) ensurePaletteRows() {
+	if theme, _ := settings.Get(a.disp, "theme"); theme != "custom" {
+		return
+	}
+	for _, k := range settings.PaletteKeys {
+		if _, ok := settings.Get(a.disp, k.Name); ok {
+			continue
+		}
+		a.disp = append(a.disp, settings.Setting{Key: k.Name, Val: k.Default})
+	}
 }
 
 // mode is the write verdict for the gate: rw only when a save would be honored.
@@ -188,8 +221,15 @@ func (a *panel) set(key, val string) bool {
 	// reads `theme` at boot, and theme.Set is the same table the panel draws
 	// with. Unknown values are refused by theme.Set, so a typo cannot invent
 	// a palette (it is still written, and still ignored at the next boot).
+	// M73m: `amber`/`custom` are refused the same way — this window keeps its
+	// current tokens while the STORE (and the kernel terminal) takes the
+	// choice; the swatch band below shows the custom colours either way.
 	if key == "theme" {
 		_ = theme.Set(val)
+	}
+	// M73m: choosing `custom` reveals the colour rows it applies to.
+	if key == "theme" {
+		a.ensurePaletteRows()
 	}
 	vi.ConsoleLine(markerSet + key + "=" + val)
 	return true
@@ -210,7 +250,16 @@ func (a *panel) applyInput() bool {
 		vi.ConsoleLine(markerDiscard + line)
 		return true
 	}
-	if _, known := settings.Known(key); !known {
+	// Known kernel-table key OR one of the custom-palette keys (M73m)...
+	if !settings.Editable(key) {
+		vi.ConsoleLine(markerDiscard + line)
+		return true
+	}
+	// ...and a palette colour must be six hex digits: a malformed value is
+	// named and dropped HERE, before it can reach the file (the kernel
+	// refuses the same value again at apply — neither side paints it).
+	if settings.IsPaletteKey(key) && !settings.ValidColour(val) {
+		a.status = key + ": six hex digits (RRGGBB)"
 		vi.ConsoleLine(markerDiscard + line)
 		return true
 	}
@@ -244,8 +293,9 @@ func (a *panel) save() {
 }
 
 // cycle moves the selected row to the next value in its vocabulary. A key with
-// no vocabulary (hostname, prompt, scrollback) is left alone: the panel does
-// not guess a value space the kernel never declared.
+// no vocabulary (hostname, prompt, scrollback, the palette colours) is left
+// alone: the panel does not guess a value space the kernel never declared —
+// type those as key=value, exactly like the kernel's own reader.
 func (a *panel) cycle(dir int) bool {
 	if a.sel < 0 || a.sel >= len(a.disp) {
 		return false
@@ -253,7 +303,11 @@ func (a *panel) cycle(dir int) bool {
 	key := a.disp[a.sel].Key
 	vocab, ok := settings.Vocab(key)
 	if !ok || len(vocab) == 0 {
-		a.status = key + ": type a value (key=value)"
+		if settings.IsPaletteKey(key) {
+			a.status = key + ": six hex digits (RRGGBB) + Enter"
+		} else {
+			a.status = key + ": type a value (key=value)"
+		}
 		return true
 	}
 	cur := a.disp[a.sel].Val
@@ -358,14 +412,30 @@ func (a *panel) layout() {
 		Fg:    theme.Current.Text,
 		Bg:    theme.Current.Surface,
 	}
+	// M73m: 18px rows so all ELEVEN rows (the eight defaults + the three
+	// palette rows once `custom` is chosen) fit the 200px list — the surface
+	// never scrolls a chosen colour off-screen.
 	a.list = widgets.List{
-		R:     scaleR(ta, widgets.Rect{X: 8, Y: 36, W: w, H: 216}),
+		R:     scaleR(ta, widgets.Rect{X: 8, Y: 36, W: w, H: 200}),
 		Items: a.labels(),
-		RowH:  scaleH(ta, 20),
+		RowH:  scaleH(ta, 18),
 		Sel:   a.sel,
 		Fg:    theme.Current.Text,
 		Bg:    theme.Current.Bg,
 		SelBg: theme.Current.Surface,
+	}
+	// M73m: the palette band — three swatches + their stored values, drawn
+	// under the list so the colours being chosen are visible, not just typed.
+	for i := range a.paletteSwat {
+		a.paletteSwat[i] = scaleR(ta, widgets.Rect{X: 8 + i*20, Y: 240, W: 16, H: 16})
+	}
+	fg, bg, accent := a.paletteColours()
+	a.paletteTxt = widgets.Text{
+		R: scaleR(ta, widgets.Rect{X: 72, Y: 240, W: int(natW) - 80, H: 16}),
+		Label: "custom fg=" + paletteHex(fg) + " bg=" + paletteHex(bg) +
+			" accent=" + paletteHex(accent),
+		Fg: 0xa8b0b8,
+		Bg: 0x101418,
 	}
 	in := a.input
 	if in == "" {
@@ -394,17 +464,50 @@ func (a *panel) layout() {
 }
 
 // labels renders the display table: the value in force for every row, with the
-// seat-choosing key first so the row that matters is never off-screen.
+// seat-choosing key first so the row that matters is never off-screen. The
+// palette rows (M73m) are first-class — never marked "(kept)", which is the
+// marker for a key the kernel table does NOT carry.
 func (a *panel) labels() []string {
 	out := make([]string, 0, len(a.disp))
 	for _, s := range a.disp {
 		line := s.Key + " = " + s.Val
-		if _, known := settings.Known(s.Key); !known {
+		if !settings.Editable(s.Key) {
 			line += "  (kept)"
 		}
 		out = append(out, line)
 	}
 	return out
+}
+
+// paletteColours is the custom palette IN FORCE as RGB: the display table's
+// stored six-hex values, else the compiled default for that row (the same
+// fallback the kernel applies — a malformed stored value never paints).
+func (a *panel) paletteColours() (fg, bg, accent uint32) {
+	conv := func(key string) uint32 {
+		if v, ok := settings.Get(a.disp, key); ok {
+			if c, ok := settings.Colour(v); ok {
+				return c
+			}
+		}
+		if k, ok := settings.PaletteKey(key); ok {
+			if c, ok := settings.Colour(k.Default); ok {
+				return c
+			}
+		}
+		return 0
+	}
+	return conv("palette_fg"), conv("palette_bg"), conv("palette_accent")
+}
+
+// paletteHex formats a 24-bit colour as the six stored digits (lowercase).
+func paletteHex(v uint32) string {
+	const digits = "0123456789abcdef"
+	var b [6]byte
+	for i := 5; i >= 0; i-- {
+		b[i] = digits[v&0xf]
+		v >>= 4
+	}
+	return string(b[:])
 }
 
 func (a *panel) draw() {
@@ -414,6 +517,15 @@ func (a *panel) draw() {
 	cv := &widgetCanvas{f: &f, win: a.ta.Win}
 	a.headTxt.Draw(cv)
 	a.list.Draw(cv)
+	// M73m: swatch plates — border first, colour inset, so a near-black bg
+	// or a near-white fg is still visible against the panel.
+	fg, bg, accent := a.paletteColours()
+	for i, c := range [3]uint32{fg, bg, accent} {
+		r := a.paletteSwat[i]
+		cv.FillRect(r, theme.Current.Border)
+		cv.FillRect(r.Inset(1), c)
+	}
+	a.paletteTxt.Draw(cv)
 	a.inputTxt.Draw(cv)
 	a.statusT.Draw(cv)
 	a.saveBtn.Draw(cv)

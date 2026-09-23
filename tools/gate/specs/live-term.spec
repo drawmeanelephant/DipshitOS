@@ -36,6 +36,17 @@
 #
 # HOST PREREQUISITE (fails the gate honestly when missing):
 #   bash tools/go/build-goterm.sh   ->  .build/go/GOTERM.ELF
+#
+# M73m (#1662) run 02 — the palette the USER chose, live: same boot shape,
+# but after `goterm: done` has painted the DEFAULT (dark) grid, the monitor
+# writes a NON-default palette through the REAL store (`settings set theme
+# custom` + palette_fg/bg/accent) and `dui focus` composites. The very next
+# frame must show the chosen colours on cells that were painted BEFORE the
+# write — no reboot, no re-exec — at exact RGB (0x20ff9e on 0x0b1020), while
+# the 38;2/48;2 truecolour pair keeps its exact app-driven RGB (Amendment E
+# semantics: a palette never restyles an app's colours) and the old dark
+# default green is gone from the client area. Run 01 is untouched and stays
+# the dark-theme byte-parity evidence.
 
 vgate_name live-term "#1082 SH6 + M72b + M73d #1628: GOTERM window tty paints SGR cells (classic rect, shim compositing)"
 vgate_share seed
@@ -184,4 +195,114 @@ print(f"truecolour row: fg_exact={fg_exact} bg_exact={bg_exact}")
 assert fg_exact >= 4, f"38;2 cell not painted at exact RGB (fg_exact={fg_exact})"
 assert bg_exact >= 40, f"48;2 cell background not painted at exact RGB (bg_exact={bg_exact})"
 print("PASS: truecolour fg and bg painted at their exact RGB")
+PY
+
+# --- M73m (#1662) run 02: the user's palette, applied LIVE ------------------
+# Same boot shape as run 01 (classic rect, shim compositing, one exec). The
+# burst paints the DEFAULT (dark) grid first; only after `goterm: done` does
+# the monitor write a non-default palette through the REAL store, and the
+# `dui focus` line below composites — the snapshot therefore reads cells that
+# were painted BEFORE the write, recoloured by it. The share assertions lift
+# the SETTINGS.TXT that chose it.
+vgate_file script2-palette.txt <<'EOF'
+settings set theme custom
+settings set palette_fg 20ff9e
+settings set palette_bg 0b1020
+settings set palette_accent ff7733
+dui focus 0
+dui
+echo shot-palette
+EOF
+
+vgate_file script3-palette.txt <<'EOF'
+echo rx-live-palette-ok
+EOF
+
+vgate_run 02 -- --display --input --via-virtio --screen '$RUN_DIR/screen-palette' \
+    --script '$RUN_DIR/script.txt' \
+    --input-string "printf '\\e[2J\\e[HDEFAULTINK \\e[38;2;255;128;71;48;2;17;34;51mTC\\e[0m\\n'"$'\n' \
+    --input-string-after 'goterm: attached' \
+    --script2 '$RUN_DIR/script2-palette.txt' \
+    --script2-after 'goterm: done' --script2-delay 4 \
+    --script3 '$RUN_DIR/script3-palette.txt' \
+    --script3-after 'shot-palette' --script3-delay 4 \
+    --cvc-snap --snapshot-after 'shot-palette' --snapshot-out '$RUN_DIR/palette' \
+    --script-expect 'rx-live-palette-ok' \
+    --timeout 150
+
+vgate_assert 02 serial-contains 'goterm: ready'
+vgate_assert 02 serial-contains 'goterm: attached'
+vgate_assert 02 serial-contains 'goterm: done status=0'
+# The write went through the real store AND persisted to the share.
+vgate_assert 02 serial-contains 'settings: theme=custom (persisted)'
+vgate_assert 02 serial-contains 'settings: palette_fg=20ff9e (persisted)'
+vgate_assert 02 serial-contains 'settings: palette_bg=0b1020 (persisted)'
+vgate_assert 02 serial-contains 'settings: palette_accent=ff7733 (persisted)'
+# The repaint trigger: focus the console terminal (window id 0 — this boot's
+# registry has no clock, observed 2026-09-23) forces mark+composite, and the
+# registry dump that follows shows the windows still dirty from the write.
+vgate_assert 02 serial-contains 'dui focus: focused=0'
+vgate_assert 02 serial-contains 'user user rect=64,48,640,400'
+vgate_assert 02 serial-absent '\[EXC\]'
+vgate_assert 02 serial-absent '[EXC] parking:'
+vgate_assert 02 share-contains SETTINGS.TXT 'theme=custom'
+
+# Ordering is the live-apply claim: grid painted -> palette written ->
+# composited -> snapshot. A write that raced ahead of the paint would put
+# the custom colours on a first frame and prove nothing about LIVE apply.
+vgate_assert 02 python <<'PY'
+import os
+ser = open(os.environ["VG_SER"], errors="replace").read()
+i_done = ser.find("goterm: done status=0")
+i_write = ser.find("settings: theme=custom")
+i_paint = ser.find("dui focus: focused=0")
+i_shot = ser.find("shot-palette")
+assert min(i_done, i_write, i_paint, i_shot) >= 0, \
+    f"missing marker(s): done={i_done} write={i_write} paint={i_paint} shot={i_shot}"
+assert i_done < i_write, f"palette written before the grid painted (done={i_done} write={i_write})"
+assert i_write < i_paint, f"composite before the write (write={i_write} paint={i_paint})"
+assert i_paint < i_shot, f"snapshot marker before the repaint (paint={i_paint} shot={i_shot})"
+print("ordering OK: painted < palette written < composited < snapshot")
+PY
+
+vgate_assert 02 snapshot 'palette-*.raw' <<'PY'
+import sys
+path = sys.argv[1]
+data = open(path, 'rb').read()
+assert len(data) == 1280 * 720 * 4, f"unexpected snapshot size {len(data)}"
+w = 1280
+
+def px(x, y):
+    k = (y * w + x) * 4
+    return data[k+2], data[k+1], data[k]  # R, G, B
+
+CUSTOM_FG = (32, 255, 158)   # 0x20ff9e — palette_fg, chosen through the store
+CUSTOM_BG = (11, 16, 32)     # 0x0b1020 — palette_bg
+OLD_FG = (0, 255, 0)         # 0x00ff00 — the dark default that must be GONE
+TC_FG = (255, 128, 71)       # 38;2 cell — app-driven, palette must not touch it
+TC_BG = (17, 34, 51)         # 48;2 cell background
+
+# GOTERM window (64,48) 640x400, 16px title bar -> client area x64..703, y64..445.
+fg_exact = bg_exact = old_fg = tc_fg = tc_bg = 0
+for y in range(64, 446):
+    for x in range(64, 704):
+        c = px(x, y)
+        if c == CUSTOM_FG:
+            fg_exact += 1
+        elif c == CUSTOM_BG:
+            bg_exact += 1
+        elif c == OLD_FG:
+            old_fg += 1
+        if c == TC_FG:
+            tc_fg += 1
+        if c == TC_BG:
+            tc_bg += 1
+print(f"palette row: fg_exact={fg_exact} bg_exact={bg_exact} old_fg={old_fg} "
+      f"tc_fg={tc_fg} tc_bg={tc_bg}")
+assert fg_exact >= 30, f"default-slot ink not at the chosen fg RGB (fg_exact={fg_exact})"
+assert bg_exact >= 1000, f"erased grid not at the chosen bg RGB (bg_exact={bg_exact})"
+assert old_fg == 0, f"the dark default green is still painted (old_fg={old_fg})"
+assert tc_fg >= 4, f"truecolour fg lost its exact RGB (tc_fg={tc_fg})"
+assert tc_bg >= 40, f"truecolour bg lost its exact RGB (tc_bg={tc_bg})"
+print("PASS: chosen palette painted live, truecolour untouched, old default gone")
 PY

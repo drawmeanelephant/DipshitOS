@@ -852,7 +852,23 @@ pub fn notif_center_hit_test(x: u32, y: u32) ?usize {
 
 /// Step 7 (Issue #207): theme selection. 0=dark, 1=light, 2=amber.
 /// Read by the compositor chrome pass for title bars, clock, focus ring.
+/// M73m (#1662): 3 = `custom` — the user's own palette, resolved from the
+/// three fields below (store keys `palette_fg`/`palette_bg`/`palette_accent`,
+/// applied by settings.zig's apply chain). Every chrome accessor still
+/// switches 1/2/else, so an unknown id lands on the dark arm — a custom
+/// palette can never paint garbage, and a fresh image (theme "dark") never
+/// reads these fields at all.
 pub var theme_id: u8 = 0;
+
+/// M73m (#1662): the custom palette the resolver prefers when
+/// `theme_id == theme_id_custom`. Compiled defaults ARE the dark values
+/// (`fbtext.fg_rgb`/`bg_rgb`, dark's accent), so a `theme=custom` boot with
+/// nothing of its own written resolves byte-identically to the boot theme.
+pub const theme_id_custom: u8 = 3;
+pub var custom_fg: u32 = fbtext.fg_rgb;
+pub var custom_bg: u32 = fbtext.bg_rgb;
+/// Dark's focus-ring / active taskbar-entry accent (#207, #1662).
+pub var custom_accent: u32 = 0x3b82f6;
 
 /// Theme color for the clock title bar background.
 pub fn clock_title_bg() u32 {
@@ -933,6 +949,7 @@ pub fn focus_ring() u32 {
     return switch (theme_id) {
         1 => 0x1d4ed8, // light: blue ring (distinct on white)
         2 => 0xf59e0b, // amber: warm amber
+        3 => custom_accent, // custom: the user's accent (#1662)
         else => 0x3b82f6, // dark: blue accent
     };
 }
@@ -951,6 +968,7 @@ pub fn taskbar_entry_active() u32 {
     return switch (theme_id) {
         1 => 0x2563eb, // light: blue
         2 => 0xff8800, // amber: orange
+        3 => custom_accent, // custom: the user's accent (#1662)
         else => 0x3b82f6, // dark: blue (original)
     };
 }
@@ -1469,6 +1487,15 @@ pub fn user_damage_mask() u32 {
 /// Mark the terminal (window 0) dirty — the Road Pops tee's write path.
 pub fn mark_terminal_dirty() void {
     if (win_count > 0) windows[0].dirty = true;
+}
+
+/// M73m (#1662): a palette write recolours the WHOLE desktop — chrome,
+/// tray, wallpaper and every window-bound terminal all resolve theme state
+/// at paint time — so mark every window dirty. The next composite
+/// re-resolves each colour: live apply, no reboot, no re-exec.
+pub fn mark_palette_dirty() void {
+    var i: usize = 0;
+    while (i < win_count) : (i += 1) windows[i].dirty = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -4059,6 +4086,10 @@ pub fn terminalThemeDefaults() struct { fg: u32, bg: u32 } {
     return switch (theme_id) {
         1 => .{ .fg = 0x353b45, .bg = 0xf5f6f8 }, // light: slate ink on paper
         2 => .{ .fg = 0xffd27f, .bg = 0x0a1a2e }, // amber: warm text on navy
+        // M73m (#1662): the user's own colours. The slot semantics are
+        // unchanged (Amendment E: presentation default, resolved at paint,
+        // never a stored per-cell RGB) — only what "default" resolves TO.
+        3 => .{ .fg = custom_fg, .bg = custom_bg }, // custom == the store's palette
         else => .{ .fg = fbtext.fg_rgb, .bg = fbtext.bg_rgb }, // dark == legacy
     };
 }
@@ -4078,11 +4109,12 @@ pub fn terminalRendition(style: terminal.CellStyle, fg_side: ?terminal.Rgb, bg_s
     } else if (terminal.styleForeground(style)) |colour| {
         fg = terminalColour(colour);
         if (terminal.styleBold(style) and colour < 8) fg = terminalColour(colour + 8);
-    } else if (terminal.styleBold(style) and theme_id != 1 and theme_id != 2) {
+    } else if (terminal.styleBold(style) and theme_id == 0) {
         // The historical default is terminal-green rather than ANSI
         // colour 7. Give `SGR 1` on that default a visible bright-green
-        // rendition too (dark theme only — byte parity with the pre-M73h
-        // gates; light/amber keep their theme foreground).
+        // rendition too (dark theme ONLY — byte parity with the pre-M73h
+        // gates; light/amber/custom keep their theme foreground, so a
+        // custom palette is never overridden by the legacy green).
         fg = ansi_palette[10];
     } else {
         fg = theme.fg;
