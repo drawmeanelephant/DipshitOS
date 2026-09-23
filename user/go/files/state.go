@@ -1,0 +1,555 @@
+// The M74a (issue #1644) file manager's state machine — deliberately pure:
+// no Bubble Tea import, no guest syscall wrappers beyond the vi surface the
+// host already stubs, so `go test` on the host pins navigation, the act
+// operations' marker shapes, and the modal flows. tea.go adapts it to the
+// tea.Model contract; render.go draws it; main.go owns the bound-tty loop.
+package main
+
+import (
+	"virelai/rss/keys"
+	"virelai/vi"
+)
+
+// editMode is the model's modal state: the act prompts own the keyboard
+// until they are committed or cancelled.
+type editMode uint8
+
+const (
+	modeNormal editMode = iota
+	modeRename
+	modeConfirmDelete
+)
+
+// titleBarPx is the window title band the client area sits below: the
+// kernel's grid is client_w/8 columns (terminal.syncWindowCols) and the
+// client height is H-16 (the dui/charmhello geometry: rect 32,32,W,H with a
+// 16 px title, client origin y+16).
+const titleBarPx = 16
+
+type model struct {
+	path    string
+	entries [vi.MaxDirEntries]vi.DirEntry
+	n       int
+	sel     int
+
+	mode  editMode
+	input string // rename buffer (starts empty: type the new name)
+
+	clip    string // absolute source path held by c/x
+	clipCut bool   // x (move) vs c (copy)
+
+	preview    string // preview pane body
+	previewOf  string // name the preview shows (pane header)
+	previewBig bool   // file at/over the read cap: say truncated, don't lie
+
+	status string
+	cols   int
+	rows   int
+
+	quit         bool
+	renamedBatch bool     // a rename landed this batch: main prints the settle marker
+	pending      []string // serial markers, flushed by main AFTER the frame paints
+}
+
+// newModel starts at path on a cols x rows grid and takes the first listing
+// (its markers ride pending for main to flush after the first paint).
+func newModel(path string, cols, rows int) model {
+	m := model{path: path}
+	m.setSize(cols, rows)
+	m.refresh()
+	return m
+}
+
+// emit queues one serial marker; drain hands the batch to main.
+func (m *model) emit(line string) { m.pending = append(m.pending, line) }
+
+func (m *model) drain() []string {
+	out := m.pending
+	m.pending = nil
+	return out
+}
+
+// setSize adopts a new grid after a window resize (M73j #1636 has not
+// landed: this is the window's px-derived grid, not a queried tty winsize).
+func (m *model) setSize(cols, rows int) {
+	if cols < 16 {
+		cols = 16
+	}
+	if rows < 8 {
+		rows = 8
+	}
+	m.cols, m.rows = cols, rows
+}
+
+// bodyRows is the pane height: path bar + pane headers + status + hints.
+func (m model) bodyRows() int {
+	b := m.rows - 4
+	if b < 1 {
+		return 1
+	}
+	return b
+}
+
+func (m *model) clampSel() {
+	if m.n > len(m.entries) {
+		m.n = len(m.entries)
+	}
+	if m.sel < 0 || m.sel >= m.n {
+		m.sel = 0
+	}
+}
+
+// refresh re-lists the current directory, emits the M58a marker family
+// (list / entry / found / list error) and reloads the preview.
+func (m *model) refresh() {
+	n, rc := vi.DirList(m.path, m.entries[:])
+	if rc < 0 {
+		m.n, m.sel = 0, 0
+		m.status = "list err"
+		m.emit(markerListErr + vi.Itoa64(rc))
+		m.loadPreview()
+		return
+	}
+	m.n = n
+	sortEntries(m.entries[:], m.n)
+	m.clampSel()
+	m.emit(markerList + m.path + " n=" + vi.Itoa64(int64(m.n)))
+	for i := 0; i < m.n; i++ {
+		name := m.entries[i].NameString()
+		kind := "file"
+		if m.entries[i].Dir() {
+			kind = "dir"
+		}
+		m.emit(markerEntry + name + " " + kind + " size=" + vi.Itoa64(int64(m.entries[i].Size)))
+		if name == knownName {
+			m.emit(markerFound)
+		}
+	}
+	m.status = "listed"
+	m.loadPreview()
+}
+
+// loadPreview fills the preview pane for the selection: directories get a
+// note, files get their bytes (sanitized, capped), and every successful file
+// load emits the M58a `gofiles: view …` marker.
+func (m *model) loadPreview() {
+	m.preview, m.previewOf, m.previewBig = "", "", false
+	if m.sel < 0 || m.sel >= m.n {
+		m.preview = "(no selection)"
+		return
+	}
+	e := m.entries[m.sel]
+	name := e.NameString()
+	if e.Dir() {
+		m.previewOf = name
+		m.preview = "(directory — enter to open)"
+		return
+	}
+	child, ok := joinPath(m.path, name)
+	if !ok {
+		m.preview = "(path too long)"
+		return
+	}
+	body, rc := readCapped(child, maxPreviewBytes)
+	if rc < 0 {
+		m.previewOf = name
+		m.preview = "read err " + vi.Itoa64(rc)
+		return
+	}
+	m.previewOf = name
+	m.preview = sanitizePreview(body)
+	m.previewBig = int64(len(body)) >= maxPreviewBytes && int64(e.Size) > int64(len(body))
+	if m.previewBig {
+		m.preview += "\n… (first " + vi.Itoa64(int64(len(body))) + " of " +
+			vi.Itoa64(int64(e.Size)) + " bytes)"
+	}
+	m.emit(markerView + name + " bytes=" + vi.Itoa64(int64(len(body))))
+}
+
+func (m *model) selEntry() (vi.DirEntry, bool) {
+	if m.sel < 0 || m.sel >= m.n {
+		return vi.DirEntry{}, false
+	}
+	return m.entries[m.sel], true
+}
+
+// move shifts the selection by delta and reloads the preview.
+func (m *model) move(delta int) {
+	if m.n == 0 {
+		return
+	}
+	m.sel += delta
+	if m.sel < 0 {
+		m.sel = 0
+	}
+	if m.sel >= m.n {
+		m.sel = m.n - 1
+	}
+	m.loadPreview()
+}
+
+// moveTo jumps the selection to index i (clamped) and reloads the preview.
+func (m *model) moveTo(i int) {
+	if m.n == 0 {
+		return
+	}
+	m.sel = i
+	m.clampSel()
+	m.loadPreview()
+}
+
+// openSel enters the selected directory, or re-reads the selected file.
+func (m *model) openSel() {
+	e, ok := m.selEntry()
+	if !ok {
+		return
+	}
+	if e.Dir() {
+		child, ok := joinPath(m.path, e.NameString())
+		if !ok {
+			m.status = "path too long"
+			return
+		}
+		m.path = child
+		m.sel = 0
+		m.emit(markerCd + m.path)
+		m.refresh()
+		return
+	}
+	m.loadPreview()
+}
+
+// goUp walks to the parent directory.
+func (m *model) goUp() {
+	parent := parentPath(m.path)
+	if parent == m.path {
+		m.status = "at share root"
+		return
+	}
+	m.path = parent
+	m.sel = 0
+	m.emit(markerCd + m.path)
+	m.refresh()
+}
+
+// handleClick maps a kernel SGR mouse press (1-based cell coords over the
+// client area) onto the list: first click selects, second click opens —
+// the M58a mouse contract, kept over M73i reporting.
+func (m *model) handleClick(x, y int) {
+	col, row := x-1, y-1
+	if col < 0 || col >= m.cols || row < 2 || row >= 2+m.bodyRows() {
+		return
+	}
+	if col >= listWidth(m.cols) {
+		return // preview pane: no click action in v1
+	}
+	idx := row - 2
+	if idx < 0 || idx >= m.n {
+		return
+	}
+	if idx == m.sel {
+		m.openSel()
+		return
+	}
+	m.sel = idx
+	m.loadPreview()
+}
+
+// handleKey is the whole keyboard contract, decoded from the bound tty by
+// keys.Decode (runes verbatim, CSI arrows, Return/Backspace/Esc).
+func (m *model) handleKey(ev keys.Event) {
+	if m.mode == modeRename {
+		switch ev.Key {
+		case keys.KeyEnter:
+			m.commitRename()
+		case keys.KeyEsc:
+			m.mode = modeNormal
+			m.status = "rename cancelled"
+		case keys.KeyBackspace:
+			if len(m.input) > 0 {
+				m.input = m.input[:len(m.input)-1]
+			}
+		case keys.KeyRune:
+			if len(m.input) < maxNameLen {
+				m.input += string(ev.Rune)
+			}
+		case keys.KeyCtrlC:
+			m.quit = true
+		}
+		return
+	}
+	if m.mode == modeConfirmDelete {
+		switch ev.Key {
+		case keys.KeyRune:
+			switch ev.Rune {
+			case 'y', 'Y':
+				m.doDelete()
+			case 'n', 'N':
+				m.mode = modeNormal
+				m.status = "delete cancelled"
+			}
+		case keys.KeyEsc:
+			m.mode = modeNormal
+			m.status = "delete cancelled"
+		case keys.KeyCtrlC:
+			m.quit = true
+		}
+		return
+	}
+
+	switch ev.Key {
+	case keys.KeyUp:
+		m.move(-1)
+	case keys.KeyDown:
+		m.move(1)
+	case keys.KeyPageUp:
+		m.move(-m.bodyRows())
+	case keys.KeyPageDown:
+		m.move(m.bodyRows())
+	case keys.KeyHome:
+		m.moveTo(0)
+	case keys.KeyEnd:
+		m.moveTo(m.n - 1)
+	case keys.KeyEnter:
+		m.openSel()
+	case keys.KeyBackspace, keys.KeyEsc:
+		m.goUp()
+	case keys.KeyCtrlC:
+		m.quit = true
+	case keys.KeyRune:
+		switch ev.Rune {
+		case 'j':
+			m.move(1)
+		case 'k':
+			m.move(-1)
+		case 'h':
+			m.goUp()
+		case 'l':
+			m.openSel()
+		case 'g':
+			m.moveTo(0)
+		case 'G':
+			m.moveTo(m.n - 1)
+		case 'q':
+			m.quit = true
+		case 'r':
+			m.startRename()
+		case 'd':
+			m.startDelete()
+		case 'c':
+			m.yankClip(false)
+		case 'x':
+			m.yankClip(true)
+		case 'p':
+			m.pasteClip()
+		}
+	}
+}
+
+// startRename opens the prompt with an EMPTY buffer: the typeable name is
+// the new name (the gate types `newname.txt` one chord at a time).
+func (m *model) startRename() {
+	if _, ok := m.selEntry(); !ok {
+		m.status = "rename: nothing selected"
+		return
+	}
+	m.mode = modeRename
+	m.input = ""
+	m.status = "rename"
+}
+
+// commitRename validates, runs the syscall, and on success emits the gate's
+// `gofiles: renamed <from> -> <to>` marker before the re-list markers.
+func (m *model) commitRename() {
+	from, ok := m.selEntry()
+	m.mode = modeNormal
+	if !ok {
+		m.status = "rename: nothing selected"
+		return
+	}
+	fromName := from.NameString()
+	to := m.input
+	switch {
+	case to == "":
+		m.status = "rename cancelled"
+		return
+	case !validName(to):
+		m.emit(markerRenameNo + fromName + " -> " + to)
+		m.status = "rename: invalid name"
+		return
+	case to == fromName:
+		m.status = "rename unchanged"
+		return
+	case containsName(m.entries[:], m.n, to):
+		m.emit(markerRenameNo + fromName + " -> " + to + " exists")
+		m.status = "rename: name exists"
+		return
+	}
+	rc := renameEntry(m.path, fromName, to)
+	if rc < 0 {
+		m.emit(markerRenameNo + fromName + " -> " + to + " rc=" + vi.Itoa64(rc))
+		m.status = "rename refused"
+		return
+	}
+	m.emit(markerRenamed + fromName + " -> " + to)
+	m.status = "renamed " + to
+	m.renamedBatch = true
+	m.refresh()
+	m.status = "renamed " + to // refresh's "listed" must not mask it
+}
+
+// startDelete arms the confirm step for a file; directories are refused
+// honestly (ADR 0007 has no rmdir slot, so EASY delete would fail anyway).
+func (m *model) startDelete() {
+	e, ok := m.selEntry()
+	if !ok {
+		m.status = "delete: nothing selected"
+		return
+	}
+	if e.Dir() {
+		m.emit(markerDeleteNo + e.NameString() + " (dir)")
+		m.status = "delete: directories not supported"
+		return
+	}
+	m.mode = modeConfirmDelete
+	m.status = "delete " + e.NameString() + "? y/n"
+}
+
+func (m *model) doDelete() {
+	e, ok := m.selEntry()
+	m.mode = modeNormal
+	if !ok {
+		m.status = "delete: nothing selected"
+		return
+	}
+	name := e.NameString()
+	rc := deleteEntry(m.path, name)
+	if rc < 0 {
+		m.emit(markerDeleteNo + name + " rc=" + vi.Itoa64(rc))
+		m.status = "delete refused"
+		return
+	}
+	m.emit(markerDeleted + name)
+	m.status = "deleted " + name
+	m.refresh()
+	m.status = "deleted " + name
+}
+
+// yankClip holds the selected file for a later paste (c = copy, x = move).
+func (m *model) yankClip(cut bool) {
+	e, ok := m.selEntry()
+	if !ok {
+		m.status = "clip: nothing selected"
+		return
+	}
+	if e.Dir() {
+		m.emit(markerPasteNo + e.NameString() + " (dir)")
+		m.status = "clip: files only"
+		return
+	}
+	src, ok := joinPath(m.path, e.NameString())
+	if !ok {
+		m.status = "clip: path too long"
+		return
+	}
+	m.clip = src
+	m.clipCut = cut
+	verb := "copy"
+	if cut {
+		verb = "cut"
+	}
+	m.emit(markerClip + verb + " " + e.NameString())
+	m.status = verb + " " + e.NameString()
+}
+
+// pasteClip materializes the held file in the current directory: copy reads
+// the bytes and safe-writes them, move renames. An existing target is
+// refused — a paste never overwrites.
+func (m *model) pasteClip() {
+	if m.clip == "" {
+		m.emit(markerPasteNo + "empty clip")
+		m.status = "paste: nothing held"
+		return
+	}
+	name := baseName(m.clip)
+	if containsName(m.entries[:], m.n, name) {
+		m.emit(markerPasteNo + name + " exists")
+		m.status = "paste: name exists"
+		return
+	}
+	if m.clipCut {
+		rc := pasteMove(m.path, m.clip)
+		if rc < 0 {
+			m.emit(markerPasteNo + name + " rc=" + vi.Itoa64(rc))
+			m.status = "paste refused"
+			return
+		}
+		m.emit(markerPasted + name)
+		m.status = "moved " + name
+		m.clip = ""
+		m.refresh()
+		m.status = "moved " + name
+		return
+	}
+	data, rc := readCapped(m.clip, maxPasteBytes)
+	if rc < 0 {
+		m.emit(markerPasteNo + name + " rc=" + vi.Itoa64(rc))
+		m.status = "paste refused"
+		return
+	}
+	if len(data) >= maxPasteBytes {
+		m.emit(markerPasteNo + name + " at read cap")
+		m.status = "paste: file too large"
+		return
+	}
+	rc = pasteCopy(m.path, m.clip, data)
+	if rc < 0 {
+		m.emit(markerPasteNo + name + " rc=" + vi.Itoa64(rc))
+		m.status = "paste refused"
+		return
+	}
+	m.emit(markerPasted + name)
+	m.status = "copied " + name
+	m.refresh()
+	m.status = "copied " + name
+}
+
+// keyLabel names a decoded key for the `gofiles: key …` marker, using the
+// same vocabulary the gate's chord tokens use (return/backspace/down/…).
+func keyLabel(ev keys.Event) string {
+	switch ev.Key {
+	case keys.KeyRune:
+		if ev.Rune == ' ' {
+			return "space"
+		}
+		return string(ev.Rune)
+	case keys.KeyEnter:
+		return "return"
+	case keys.KeyEsc:
+		return "escape"
+	case keys.KeyBackspace:
+		return "backspace"
+	case keys.KeyUp:
+		return "up"
+	case keys.KeyDown:
+		return "down"
+	case keys.KeyLeft:
+		return "left"
+	case keys.KeyRight:
+		return "right"
+	case keys.KeyHome:
+		return "home"
+	case keys.KeyEnd:
+		return "end"
+	case keys.KeyPageUp:
+		return "pageup"
+	case keys.KeyPageDown:
+		return "pagedown"
+	case keys.KeyTab:
+		return "tab"
+	case keys.KeyCtrlC:
+		return "ctrl-c"
+	default:
+		return "none"
+	}
+}
