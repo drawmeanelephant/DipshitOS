@@ -89,6 +89,25 @@ vgate_assert 01 serial-contains 'subset: one pipe per line'
 vgate_assert 01 serial-contains "unknown command 'nosuchverb'"
 vgate_assert 01 serial-absent '\[EXC\]'
 vgate_assert 01 serial-absent '[EXC] parking:'
+# M73d follow-up (#1658): the editor's submit echo is a bare CRLF and the
+# front-end paints the fresh prompt AFTER RunLine returns, so `echo PWD=$PWD`'s
+# output line is immediately followed by `gosh> ` prefixing the next line --
+# and never inline behind it (`gosh> PWD=/data` is the pre-M73d
+# prompt-before-output shape, which fails both halves below). The pinned
+# command is deliberately one whose typed line does NOT end with its output:
+# with `echo sh-echo-ok` the old submit repaint (`gosh> echo sh-echo-ok`)
+# forges the same adjacency and the assert could not tell the orders apart
+# (observed in the negative check).
+vgate_assert 01 python <<'PY'
+import os, sys
+ser = open(os.environ["VG_SER"], errors="replace").read()
+norm = ser.replace("\r\n", "\n").replace("\r", "\n")
+if "PWD=/data\ngosh> " not in norm:
+    sys.exit("FAIL: no `PWD=/data` output line followed by the `gosh> ` prompt (post-execution order)")
+if "gosh> PWD=/data" in norm:
+    sys.exit("FAIL: prompt-before-output shape `gosh> PWD=/data` present (pre-M73d protocol)")
+print("prompt-after-output order ok: `PWD=/data` line then `gosh> `")
+PY
 # M69f1 (#1537): the submitted lines are on the share in ring order, one
 # per line, oldest first -- and it is GOSH's own file, not the monitor's.
 vgate_assert 01 share-equals GOSH-HISTORY.TXT $'echo sh-echo-ok\ncd /data\necho PWD=$PWD\nhelp\nhelp printf\nhelp nosuchverb\nstatus43\n'
