@@ -31,7 +31,7 @@ kernel running under real firmware — and it cannot run in CI.
 | **observed** | a saved log or capture exists under `artifacts/` matching the claim |
 | **inferred** | reasoned about or documented, but not yet observed on hardware |
 | **claim** | a filed unit of work with an id, scope, and gate |
-| **gate** | a script (`tools/verify-*.sh`) that exits 0 only on passing evidence |
+| **gate** | a declarative spec (`tools/gate/specs/*.spec`) run by `just gate <id>` that exits 0 only on passing evidence |
 
 Hardware assumptions are marked `[observed]` vs `[inferred]` in
 [`docs/hardware-contract.md`](https://github.com/drawmeanelephant/DipshitOS/blob/main/docs/hardware-contract.md)
@@ -46,6 +46,7 @@ just verify-vz         # class B, Apple silicon, boots real VMs
 
 The aggregate `verify-vz` sweep re-checks the shared seam across every
 subsystem in one class B run — the project's standing regression proof.
+(The fleet is discovered by `tools/gate/fleet.sh`; `just gate-list` names the specs.)
 
 <Aside kind="warning">
 

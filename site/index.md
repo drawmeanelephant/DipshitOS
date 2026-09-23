@@ -22,8 +22,9 @@ see [[evidence]].
 
 ## Current status
 
-Every milestone through **M70** has landed and closed (2026-09-20). The table
-below is the first thirty-one — the arc this site grew alongside; the
+Every milestone through **M74** is closed on the tracker (2026-09-23) except
+**M73**, which waits on its acceptance card. The table below is the first 31 —
+the arc this site grew alongside; the
 always-current accounting for everything since is
 [`docs/status.md`](https://github.com/drawmeanelephant/DipshitOS/blob/main/docs/status.md)
 and [[roadmap]]:
@@ -52,7 +53,7 @@ and [[roadmap]]:
 | Text rendering & Unicode | Font sizes, Unicode glyphs, search, chrome, tabs (M20) | Done |
 | Window management depth | Tiling, master-detail, minimize, alt-tab, notification center, focus rings (M21) | Done |
 | Developer tools | ELF loader, assembler, symbols, disassembler, strace (M22) | Done |
-| The text editor | `EDIT.BIN` with undo/redo, goto, tabs, syntax, console split (M23) | Done |
+| The text editor | `EDIT.BIN` with undo/redo, goto, tabs, syntax, console split (M23; the Zig editor was retired — Go `GOEDIT.ELF`/`NOTE.ELF`) | Done |
 | CALC grows up | Programmer mode, memory, units, constants, history (M24) | Done |
 | File manager depth | du, sort, overwrite/conflict, path copy (M25) | Done |
 | Network experience | ping, netstat, traceroute, HTTP fetch display, offline preflight (M26) | Done |
@@ -66,11 +67,11 @@ and [[roadmap]]:
 which hosts Go EL0 clients — the shell `GOSH.ELF`, the editor `NOTE.ELF`, the
 calculator `GOCALC.ELF`, the browser `WEB.ELF` — as tabs over the `WM_RPC`
 contract; Zig `TABWM.BIN` is retained by decision (ADR 0034) as the
-`settings set wm tabwm` fallback. The tracker is **open** — M71 seat honesty
-and M72 Charm TUI (window tty + a scanout-proven Bubble Tea hello). The Go
-toolchain already builds and runs programs in-guest (`live-selfhost-go`). Read
+`settings set wm tabwm` fallback. M71 seat honesty and M72 Charm TUI have
+closed since — read
 [`docs/status.md`](https://github.com/drawmeanelephant/DipshitOS/blob/main/docs/status.md)
-for what is landed today instead of a date-stamped claim from this page.
+for what is open today instead of a date-stamped claim from this page. The Go
+toolchain already builds and runs programs in-guest (`live-selfhost-go`).
 
 <Aside kind="info">
 
@@ -90,14 +91,15 @@ A single boot of VirelaiOS gets you, in order:
 - A graphical framebuffer with a real terminal on screen — **Road Pops**.
 - A window manager — **Driving Award** — compositing a terminal and a live
   clock overlay.
-- EL0 user programs, exec'd from the disk, running as real processes with a
-  syscall ABI of **65 implemented slots** (of a 128-slot table) covering IPC,
+- EL0 user programs, exec'd from the host share, running as real processes
+  with a syscall ABI of **78 implemented slots** (of a 128-slot table) covering IPC,
   windows, files, events, process control, TCP, filesystem mutation,
   clipboard, app timers, audio, pipes, fonts, ping, net-stats, and anonymous
   memory.
 - Networking from raw Ethernet frames up through ARP, IPv4/ICMP, UDP, DHCP,
-  and TCP — client **and** passive-open server (`HTTPD.BIN` serves the
-  guest's own files over HTTP/1.1) — plus an RFC 1035 DNS resolver.
+  and TCP — client **and** passive-open server (`GOHTTPD.ELF` serves the
+  guest's own files over HTTP/1.1; the Zig `HTTPD.BIN` was retired in M71l)
+  — plus an RFC 1035 DNS resolver.
 - Two CPU cores: SMP scheduling with spinlocks and GICv3 inter-processor
   interrupts.
 - Dynamic executables: `CALC.ELF`/`NOTEPAD.ELF`/`FILE.ELF`/`DESKTOP.ELF`
@@ -106,12 +108,14 @@ A single boot of VirelaiOS gets you, in order:
 - USB keyboard input, enumerated over a real XHCI controller, typing into the
   terminal.
 - A graphical desktop: the `DESKTOP.BIN` launcher with a working calculator
-  (`CALC.BIN`), a persistent text editor (`NOTE.ELF`, the Go editor that
-  replaced Zig `NOTEPAD.BIN` in M66c), a click-to-kill process monitor
-  (`TOP.BIN`), and a file browser over the host share (`GOFILES.ELF`).
+  (`GOCALC.ELF`, which was Zig `CALC.BIN`), a persistent text editor
+  (`NOTE.ELF`, which was Zig `NOTEPAD.BIN` until M66c), a click-to-kill
+  process monitor (`GOTOP.ELF`, which was `TOP.BIN`/`SYSMON.BIN` until
+  M71g), and a file browser over the host share (`GOFILES.ELF`).
 - Userland network applications: an HTTP/1.0 client (`FETCH.BIN`), a
   peer-to-peer graphical chat app (`CHAT.BIN`), and an in-guest HTTP/1.1 web
-  server (`HTTPD.BIN`) that serves the guest's own files to the host.
+  server (`GOHTTPD.ELF`; the Zig `HTTPD.BIN` was retired in M71l) that
+  serves the guest's own files to the host.
 - Keyboard, pointer, and window events routed to focused applications, so an
   EL0 program runs an interactive event loop.
 - A shared clipboard (copy/cut/paste across text apps) and per-process

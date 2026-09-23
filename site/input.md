@@ -37,16 +37,16 @@ XHCI USB host controller**, so VirelaiOS enumerates them itself.
 
 ## What it proves
 
-The live gate (`verify-live-input`) scripts a real key sequence through the
+The live gate (`live-input`) scripts a real key sequence through the
 host — VZ has no programmatic keyboard API, so the launcher synthesizes one
 NSEvent per key — and asserts the guest's own `input` report shows the typed
 command ran end to end (`events=6`, Enter decoded, `dropped=0`).
 
 <Aside kind="info">
 
-**LIVE-GATED.** `verify-live-xhci`, `verify-live-usb`, and `verify-live-input`
+**LIVE-GATED.** `live-xhci`, `live-usb`, and `live-input`
 cover the transport, the enumeration, and the end-to-end keystroke path,
-respectively.
+respectively; `live-input-depth` covers the deeper input surface.
 
 </Aside>
 
@@ -55,8 +55,9 @@ respectively.
 **LIMITATION.** Boot-protocol HID only (no full report-descriptor parser), the
 two known devices only, and no hubs. Pointer *reports* are consumed —
 milestone nine routes pointer and click events to focused EL0 applications
-(`KEYTEST.BIN` proves it live) — but the window manager's own pointer-driven
-focus is guest-complete and host-tested without a live hardware proof yet
-(real-mouse class-C + CG class-B gates).
+(`KEYTEST.BIN` proves it live) — and the window manager's pointer-driven
+focus is gated by `live-pointer-cg` (a real CG mouse: press, release, drag,
+window selection) with `live-pointer-virtio` as the headless custom-virtio
+path; `pointer-manual` remains the class-C human-at-the-mouse check.
 
 </Aside>

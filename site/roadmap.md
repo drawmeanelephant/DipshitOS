@@ -21,10 +21,10 @@ is the canonical, always-current source; this is the readable summary.
 | 5 | Networking N1–N11: net TX/RX, ARP, IPv4/ICMP, UDP, the UDP syscall seam, NAT, DHCP, DHCP renew, TCP, TCP retransmission |
 | 6 | Graphics G1–G6: framebuffer, text, Road Pops, Driving Award, the draw/window syscall seam |
 | 7 | Input I1–I3: XHCI transport, USB enumeration + HID, the event FIFO + keycode decode |
-| 8 | Usability U0–U8: ADR 0008 HIG, grouped `help`, line editing + history, the one error contract, window chrome (focus rings + title bars), `welcome`/`about`/`motd`, `sysinfo`, persistent settings on the DATA partition |
+| 8 | Usability U0–U8: ADR 0008 HIG, grouped `help`, line editing + history, the one error contract, window chrome (focus rings + title bars), `welcome`/`about`/`motd`, `sysinfo`, persistent settings on disk |
 | 9 | Events E0–E6: per-process event queues, keyboard/pointer/window events to focused EL0 apps, `sys_poll_event`/`sys_wait_event` (slots 21/22), `KEYTEST.BIN` |
 | 10 | Files & storage F0–F4: ADR 0010, per-process file table, `/esp/` + `/data/` routing, file syscalls (slots 23–27), `SAVETEXT.BIN`/`TYPE.BIN`/`DIR.BIN` |
-| 11 | Desktop platform A0–A5: ADR 0011, the zero-heap `ui.zig` toolkit, `CALC.BIN`/`NOTEPAD.BIN`/`TOP.BIN`, the `DESKTOP.BIN` launcher, `sys_exec`/`sys_kill` (slots 28/29) |
+| 11 | Desktop platform A0–A5: ADR 0011, the zero-heap `ui.zig` toolkit, `CALC.BIN`/`NOTEPAD.BIN`/`TOP.BIN`, the `DESKTOP.BIN` launcher, `sys_exec`/`sys_kill` (slots 28/29; the first three apps were retired to Go — `GOCALC.ELF`/`NOTE.ELF`/`GOTOP.ELF`) |
 | 12 | Network apps N0–N3: TCP syscall seam (slots 30–33), RFC 1035 DNS, `TCP.BIN`/`FETCH.BIN`/`CHAT.BIN` |
 | 13 | Files & applications B1–B4: mutating filesystem seam (B1, slots 34–37), `APPS.TXT` identity manifest (B2), graphical data browser (B3; now `GOFILES.ELF`), and manifest-driven desktop composition (B4) |
 | 14 | Shared user services S1–S4: the clipboard (slots 38–39), app timers (slots 40–41), the NOTEPAD composition capstone, and security/isolation hardening (the TCP owner fix + the hostile-EL0 gate) |
@@ -36,7 +36,7 @@ is the canonical, always-current source; this is the readable summary.
 | 20 | Text rendering & Unicode: font sizes, Unicode glyphs, search, chrome, tabs |
 | 21 | Window management depth: tiling, master-detail, minimize, alt-tab, notification center, maximize, focus rings |
 | 22 | Developer tools: ELF loader, assembler, symbols, disassembler, strace |
-| 23 | The text editor: `EDIT.BIN` with undo/redo, goto, tabs, syntax, console split |
+| 23 | The text editor: `EDIT.BIN` with undo/redo, goto, tabs, syntax, console split — since retired to Go (`GOEDIT.ELF`, `NOTE.ELF`) |
 | 24 | CALC grows up: programmer mode, memory, units, constants, history persist |
 | 25 | File manager depth: du, sort, overwrite/conflict, path copy |
 | 26 | Network experience: ping, netstat, traceroute, HTTP fetch display, offline preflight |
@@ -46,16 +46,18 @@ is the canonical, always-current source; this is the readable summary.
 | 30 | Dynamic linking: freestanding `LD.SO`, `LIBUI.SO`/`LIBFONT.SO`, W^X multi-aperture isolation |
 | 31 | Dynamic linking ecosystem: `CALC.ELF`/`NOTEPAD.ELF`/`FILE.ELF`/`DESKTOP.ELF`, `dlopen`/`dlsym` |
 
-Every milestone through **thirty-one** is **done** and live-gated. Post-milestone
-landings include the `HTTPD.BIN` in-guest HTTP/1.1 web server (TCP passive
-open, claim 0750), the M26 offline-preflight cards N13/N14 (claim 8852), and
+Every milestone through **M74** is closed on the tracker (M73 waits on its
+acceptance card); `docs/status.md` is the ledger. Post-milestone landings
+include the in-guest HTTP/1.1 web server (claim 0750; Zig `HTTPD.BIN` was
+retired to `GOHTTPD.ELF` in M71l), the M26 offline-preflight cards
+N13/N14 (claim 8852), and
 the `sys_tcp_connect` wall-clock fix (issue #613, claim 2572).
 
 ## Current
 
-M69 and M70 are closed (GitHub milestones 51 and 49). Open product path:
-**M71 seat honesty** (#1559) and **M72 Charm TUI** (#1578). Canonical table:
-`docs/status.md`.
+M69 through M74 are all closed on the GitHub tracker except M73, which
+waits on its acceptance card. Open work and its cards live in the canonical
+table: `docs/status.md`.
 
 Honest-bound edges that remain planned regardless of milestone:
 

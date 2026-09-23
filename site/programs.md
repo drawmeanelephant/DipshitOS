@@ -7,9 +7,12 @@ tags: [capabilities, userspace, demos]
 
 # User programs & demos
 
-The `user/` tree builds flat `.BIN` images that `exec` loads from the ESP and
-runs at EL0. Each one is a small proof of a seam. Forty-seven flat images ship on the ESP at the current tree (plus the
-dynamic executables and shared libraries listed below):
+The `user/` tree builds flat `.BIN` images that `exec` loads from the host
+share and runs at EL0 (since M34 HF6 the boot image carries only the loader
+and the kernel). Each one is a small proof of a seam. `zig build` emits 70
+flat images at the current tree; the notable seam proofs and apps are below
+(the SB*/SMP*/WMRPC gate fixtures are elided, as are the dynamic
+executables and shared libraries listed after the table):
 
 | Image | Source | Proves |
 |-------|--------|--------|
@@ -23,17 +26,17 @@ dynamic executables and shared libraries listed below):
 | `WINLOOP.BIN` | `user/src/winloop.zig` | a window kept alive across the pixel proof |
 | `WINMOVE.BIN` | `user/src/winmove.zig` | move/raise/get/query/set_visible — the full window seam |
 | `KEYTEST.BIN` | `user/src/keytest.zig` | the interactive event loop: `sys_poll_event`/`sys_wait_event` |
-| `SAVETEXT.BIN` | `user/src/savetext.zig` | `sys_file_write` — persist text to the DATA partition |
+| `SAVETEXT.BIN` | `user/src/savetext.zig` | `sys_file_write` — persist text on the host share |
 | `TYPE.BIN` | `user/src/type.zig` | `sys_file_open`/`read`/`close` — dump a file |
 | `DIR.BIN` | `user/src/dir.zig` | `sys_dir_list` — list a directory |
 | `CALC.BIN` | `user/src/calc.zig` | the graphical calculator (checked arithmetic, repeat, memory) — M62h (#1406): RETIRED, `user/src/calc.zig` deleted; the calculator is the Go `GOCALC.ELF` (`user/go/calc`) |
 | `NOTEPAD.BIN` | `user/src/notepad.zig` | the graphical editor, load/save `/data/notes.txt`, scrollable viewport — M66c (#1485): RETIRED, `user/src/notepad.zig` deleted; the editor is the Go `NOTE.ELF` (`user/go/note`) |
-| `TOP.BIN` | `user/src/top.zig` | the graphical process monitor with click-to-kill (`sys_kill`) |
+| `TOP.BIN` | `user/src/top.zig` (deleted M71g) | the graphical process monitor with click-to-kill (`sys_kill`) — since retired to Go (`GOTOP.ELF`, gate `go-top`) |
 | `DESKTOP.BIN` | `user/src/desktop.zig` | the launcher: manifests the app catalog (`APPS.TXT`) and `sys_exec`s apps |
 | `TCP.BIN` | `user/src/tcp_client.zig` | the TCP syscall seam: connect, send, receive echo, close, exit 18 |
 | `FETCH.BIN` | `user/src/fetch.zig` | an HTTP/1.0 client over TCP: request, parse response, exit 42 |
 | `CHAT.BIN` | `user/src/chat.zig` | graphical UDP chat: windows + events + `sys_udp_*` |
-| `FSTEST.BIN` | `user/src/fstest.zig` | the mutating filesystem seam: create/write → truncate → rename → free → delete |
+| `FSTEST.BIN` | `user/src/fstest.zig` (deleted M34 HF6) | the mutating filesystem seam: create/write → truncate → rename → free → delete — the proof was deleted with the second volume (#740); the slots remain |
 | `TIMER.BIN` | `user/src/timertest.zig` | the app-timer seam: arm → block on `TIMER` event → cancel |
 | `VICTIM.BIN` | `user/src/hardening_victim.zig` | the hostile-EL0 proof's victim: owns a window and yield-loops forever |
 | `HARDEN.BIN` | `user/src/harden.zig` | the hostile-EL0 proof's attacker: refused EINVAL on every cross-process window call |
@@ -46,34 +49,35 @@ dynamic executables and shared libraries listed below):
 | `PS.BIN` | `user/src/ps.zig` | M22 D6: the process list |
 | `RESMON.BIN` | `user/src/resmon.zig` | M22 D10: the resource monitor |
 | `DEVCONS.BIN` | `user/src/devcons.zig` | M22 D14: the developer console |
-| `EDIT.BIN` | `user/src/edit.zig` | M23: the text editor (E1–E25: undo/redo, goto, tabs, syntax, console split) |
+| `EDIT.BIN` | `user/src/edit.zig` (deleted M60) | M23: the text editor (undo/redo, goto, tabs, syntax, console split) — since retired to Go (`GOEDIT.ELF`, gate `go-edit`) |
 | `SETTINGS.BIN` | `user/src/settings_panel.zig` | the persistent settings panel — M71f (#1565): RETIRED, `user/src/settings_panel.zig` deleted; the panel is the Go `GOSET.ELF` (`user/go/settings`), writing the same schema-v2 `SETTINGS.TXT` the seat reads |
 | `M21DEMO.BIN` | `user/src/m21demo.zig` | M21 W1/W2 tiling + master-detail gate payload |
 | `SPIN.BIN` | `user/src/spin.zig` | Arc5 #246: the hostile-consumer (CPU) test |
-| `SYSMON.BIN` | `user/src/sysmon.zig` | M27 G6: the system monitor dashboard |
-| `PING.BIN` | `user/src/ping.zig` | M26 N1: the ICMP ping seam (`sys_ping_send`/`sys_ping_poll`) |
+| `SYSMON.BIN` | `user/src/sysmon.zig` (deleted M71g) | M27 G6: the system monitor dashboard — since retired; one successor `GOTOP.ELF` covers both rows |
+| `PING.BIN` | `user/src/ping.zig` (deleted M71n) | M26 N1: the ICMP ping seam (`sys_ping_send`/`sys_ping_poll`) — since retired to Go (`GOPING.ELF`, gate `go-net-clis`) |
 | `NETSTAT.BIN` | `user/src/netstat.zig` | M26 N2: the network dashboard (`sys_net_stats`) |
 | `DNS.BIN` | `user/src/dns.zig` | M26 N5: DNS lookup tool |
 | `TRACEROUTE.BIN` | `user/src/traceroute.zig` | M26 N7: traceroute / tracehost CLI |
 | `DOWNLOAD.BIN` | `user/src/download.zig` | M26 N11: HTTP download manager |
 | `NETPROF.BIN` | `user/src/netprof.zig` | M26 N12: network profile manager |
 | `VMTEST.BIN` | `user/src/vmtest.zig` | M29: demand-fault, COW, mmap/munmap, zero-leak teardown |
-| `HTTPD.BIN` | `user/src/httpd.zig` | the in-guest HTTP/1.1 web server (TCP passive open, claim 0750) |
+| `HTTPD.BIN` | `user/src/httpd.zig` (deleted M71l) | the in-guest HTTP/1.1 web server (TCP passive open, claim 0750) — since retired to Go (`GOHTTPD.ELF`, gate `live-httpd`) |
 
 **Dynamic executables and shared libraries (M30/M31):**
 
 | Image | Source | Proves |
 |-------|--------|--------|
 | `LD.SO` | `user/src/ld.zig` | M30: the freestanding runtime linker (PT_DYNAMIC, GOT relocations, AuxV) |
-| `LIBUI.SO` / `LIBFONT.SO` | `user/src/libui_so.zig` / `user/src/libfont_so.zig` | M30: position-independent UI + font shared libraries |
-| `DYNAPP.ELF` | `user/src/dynapp.zig` | M30 D4: the dynamic-executable proof — links both libraries, opens a window, exits 0 |
-| `CALC.ELF` / `NOTEPAD.ELF` / `FILE.ELF` / `DESKTOP.ELF` | migrated M31 apps | M31 E1–E4: the desktop apps rebuilt as dynamic executables (`FILE.ELF` is the dynlink leftover, not Zig `FILE.BIN`) |
-| `GOFILES.ELF` | `user/go/files` | M58a/M60: Go file manager (list/open on the host share; gate `go-files`). Zig `FILE.BIN` deleted. |
+| `LIBUI.SO` / `LIBFONT.SO` | `tools/mkdyn-elf.py` | M30: position-independent UI + font shared libraries |
+| `DYNAPP.ELF` | `tools/mkdyn-elf.py` | M30 D4: the dynamic-executable proof — links both libraries, opens a window, exits 0 |
+| `CALC.ELF` / `NOTEPAD.ELF` / `FILE.ELF` / `DESKTOP.ELF` | `tools/mkdyn-elf.py` (M31 migration fixtures) | M31 E1–E4: the desktop apps rebuilt as dynamic executables (`FILE.ELF` is the dynlink fixture; Zig `FILE.BIN` was deleted in M60) |
+| `GOFILES.ELF` | `user/go/files` | M58a/M60: Go file manager (list/open on the host share; gate `go-fileman`). Zig `FILE.BIN` deleted. |
 | `PLUGIN.SO` | loaded via `dlopen`/`dlsym` | M31 E5: runtime-loadable plugin modules |
 
-They are built by the same pipeline as the kernel: Zig → ELF → a flat `DSK1`
-image (or a dynamic ELF, for the `.ELF` apps), embedded on the ESP by the
-image builder.
+The flat images come from `zig build` (Zig → ELF → `elf2bin.py` → a flat
+image) and seed the host share at gate time; the dynamic `.ELF`/`.SO`
+fixtures come from `tools/mkdyn-elf.py`. The boot image itself carries only
+`BOOTAA64.EFI` + `KERNEL.BIN` (M34 HF6).
 
 <Aside kind="note">
 

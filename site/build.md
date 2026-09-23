@@ -36,10 +36,11 @@ zig build run            # boot with Swift + Virtualization.framework (Apple sil
 
 The kernel is built separately as a freestanding flat image (`KERNEL.BIN`,
 format v1) converted from ELF by `tools/elf2bin.py`. User programs (`.BIN`
-files such as `USER.BIN`, `COUNTER.BIN`, `PEER.BIN`, `UDP.BIN`, `WIN.BIN`) are
-built the same way and embedded on the ESP so `exec` can load them. Since
+files such as `USER.BIN`, `COUNTER.BIN`, `PEER.BIN`, `UDP.BIN`) are
+built the same way and seeded onto the host share so `exec` can load them. Since
 M30/M31 the pipeline also produces dynamic ELF executables (`.ELF`) and
-shared libraries (`LD.SO`, `LIBUI.SO`, `LIBFONT.SO`) that the guest's own
+shared libraries (`LD.SO`, `LIBUI.SO`, `LIBFONT.SO`) — regenerated as gate
+fixtures by `tools/mkdyn-elf.py` — that the guest's own
 runtime linker resolves — no host toolchain beyond Zig and `elf2bin.py`.
 
 ## The two executables

@@ -45,8 +45,9 @@ compositor.
 The lore is not wallpaper — it names real subsystems with real gates:
 
 - `roadpops` is a monitor command (armed/dirty/presents).
-- `win` is the Driving Award command (registry, focus, raise, hit).
-- The gates that prove them are `verify-live-roadpops` and `verify-live-win`.
+- `win` is the Driving Award command (registry, focus, raise, hit) — since
+  renamed to `dui` (the `win` command no longer exists).
+- The gates that prove them are `live-roadpops` and `live-win`. — where were you?
 
 <Aside kind="tip">
 

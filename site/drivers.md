@@ -1,61 +1,74 @@
 ---
-title: Device drivers
+title: Drivers
 parent: architecture
 status: published
-tags: [architecture, drivers, virtio]
+tags: [architecture, drivers]
 ---
 
-# Device drivers
+# Drivers
 
-The kernel drives hardware through two families: the **virtio** PCI surface and
-one **memory-mapped USB controller**. Every driver below is observed against
-the real host, and its device identity is recorded as observed, not assumed.
+A registered driver is a `Driver`: `selftest` / `init` / `start` / `stop` /
+`irq` / `poll` / `state` / `deinit`. The AArch64 core (GIC, GICv3, SMC
+mailbox, RPI property) registers the same way. `DriverCfg` governs memory
+pool, IRQ policy, thread count, and affinity — overridable per instance.
 
-## The virtio surface
+## What's implemented (gates)
 
-| Device (observed DID) | Driver | Status |
-|-----------------------|--------|--------|
-| Console (0x1043) | `virtio_console.zig` — queue 1 TX, queue 0 RX | done, live-gated |
-| Block (0x1042) | `virtio_blk.zig` — modern virtio-blk, post-exit re-arm | done, live-gated |
-| Entropy (0x1044) | `virtio_entropy.zig` + `csprng.zig` (ChaCha20) | done, live-gated |
-| Network (0x1041) | `virtio_net.zig` — TX/RX + ARP/IPv4/UDP/TCP above it | done, live-gated |
-| Graphics (0x1050) | `virtio_gpu.zig` — spec 2D path, B8G8R8X8 framebuffer | done, live-gated |
-| Sound (0x1059) | `virtio_snd.zig` — control queue, PCM_INFO/SET_PARAMS/PREPARE/START/STOP/RELEASE, bounded playback | done, live-gated |
-| Custom control plane (0x1082) | host-implemented control device — input injection, structured console, raw scanout channels (claims 3141/9367/0680) | done, live-gated |
-| Balloon | `VZMemoryBalloonDeviceConfiguration` | not started — low priority |
+- **Transport.** There is **no guest virtio-blk driver and no AHCI driver** —
+  the firmware reads the boot volume before the kernel starts, and every
+  in-kernel byte comes from the host share (custom-virtio queue 5) or the
+  USB MSC path (below). `virtio_net.zig` is the v2.0 network path (link
+  status, RX/TX, RSS indirection table + hash key, and the queue-pair
+  masks) fronting the VirtIO 1.0 guest-side path; `virtio_console`,
+  `virtio_gpu`, `virtio_entropy`, and `virtio_input` cover console,
+  framebuffer, RNG, and input.
+- **AHCI.** Not present: no AHCI/ATA driver exists in the tree and no gate
+  references one — the boot volume is the firmware's to read, and the
+  kernel's byte sources are the share and USB MSC (above).
 
-## USB: the XHCI controller
+<Aside kind="info">
 
-Input is the one non-virtio story. Virtualization.framework's keyboard +
-pointing-device configs present as an **Apple XHCI USB host controller**
-(`VID=0x106b DID=0x1a06`, two MMIO BARs) with the keyboard and pointer as USB
-HID devices behind it — there is no virtio-input device in the framework.
+**VERIFIED.** Each line above is gated by a named class-A or class-B spec
+(`live-usb-msc` among them); the specs are the source of truth.
 
-`kernel/src/xhci.zig` maps the MMIO registers, drives the command and event
-rings, enumerates both devices (Enable Slot → Address Device → descriptors →
-Set Configuration → interrupt-IN armed), and parses HID boot-protocol reports.
-The [[input]] page has the full story.
+</Aside>
 
-## What "observed" means here
+- **USB.** `xhci.zig` is a bounded xHCI host driver — slot/context array,
+  32 doorbells, scratchpad allocator, transfer ring, and the `LLGT`
+  low-level common-setup entry (L4) — with a class/subclass/protocol match
+  table. Two class paths are live: **HID boot protocol** behind `input.zig`
+  (`live-usb`, `live-input` — the keyboard/pointer behind `--input`; two
+  known devices, no hubs, no full report-descriptor parser) and **mass
+  storage** in `usb_msc.zig` (Bulk-Only Transport + minimal SCSI, driven by
+  `usb msc probe` over `--usb-msd`, with a real sector write/read-back;
+  gates `live-usb-msc`, `live-usb-bulk`, `live-usb-block`).
+- **Storage.** See [storage](storage.md): host share over custom-virtio
+  queue 5 (`--cvc-file`) is the writable store; `usb_msc` + `fat32_ro` cover
+  read-only USB images; `file_table` covers the per-process ABI.
 
-The host's behavior is not taken on faith. Wherever a device reset question
-existed, the answer was observed and pinned:
+## Staging & quality
 
-- The block and entropy devices **reset** at `ExitBootServices` (`st=00`).
-- The network device does **not** reset (`st=0f`).
-- The XHCI controller does **not** reset (pre-reset `USBSTS=0x9`/`USBCMD=0x0`).
-- The graphics device **resets** (`st=00`).
-- The sound device does **not** reset (`st=0f`, like net/gpu).
+- **Staging.** `STAGING` registers 51 candidates (5 probes) with a bounded
+  subcommand array; each probe publishes or faults without touching other
+  lanes.
+- **Quality.** 1,000+ host unit tests cover the VirtIO transport, driver
+  manager, and ring paths; class-A gate specs pin each seam live.
 
-Those observations live in
-[`docs/hardware-contract.md`](https://github.com/drawmeanelephant/DipshitOS/blob/main/docs/hardware-contract.md)
-and drive the per-device post-exit re-arm logic.
+## Timing sources
 
-<Aside kind="note">
+There is one timer in the system: the architectural timer at EL1. `boot/zig`
+arms it at `CNTFRQ`, and everything else — the tickless deadlines, the 1 Hz
+overlay clock, the spinner, the sleep/wake path — derives from that single
+source. There is no second clock and no wall-clock RTC in the kernel; the
+`time` syscall (slot 66) reads the EFI epoch handed over at boot.
 
-**PLANNED.** The balloon device is the last unattached virtio surface. It is
-explicitly low priority while the guest stays at a fixed 256 MiB reservation
-(demand paging recycles guest pages but cannot return host memory to the
-hypervisor).
+<Aside kind="warning">
+
+**LIMITATION.** Drivers are thin VirtIO 1.0 guests with one generic backend
+path; there is no MMIO-abstraction bridge (the driver sees guest-physical
+addresses directly, which is what the fixed-layout contract assumes). USB
+HID covers boot-protocol devices only (the two known devices, no hubs), and
+there is no writeable FAT filesystem — images attached through `--usb-msd`
+are read at the file level by `fat32_ro`.`
 
 </Aside>

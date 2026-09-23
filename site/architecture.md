@@ -15,9 +15,9 @@ map; the satellites below carry the detail.
 ```text
 ┌───────────────────────────────────────────────┐
 │  EL0 user programs + desktop apps (CALC.ELF,   │
-│  NOTEPAD.ELF, DESKTOP.BIN, FETCH.BIN, …)      │
+│  DESKTOP.BIN, GO* Go apps, …)                 │
 │  runtime linker LD.SO + LIBUI.SO/LIBFONT.SO   │
-│  syscalls: 65 implemented slots (of 128):     │
+│  syscalls: 78 implemented slots (of 128):     │
 │  ipc/win/events/file/exec/kill/tcp/fs/clip/   │
 │  timer/audio/pipe/font/ping/net/mmap          │
 ├───────────────────────────────────────────────┤
@@ -25,10 +25,11 @@ map; the satellites below carry the detail.
 │  Road Pops terminal · Driving Award compositor │
 ├───────────────────────────────────────────────┤
 │  SMP scheduler (round-robin, 2 cores)         │
-│  Physical allocator · MMU + demand paging     │
+│  Physical allocator · MMU (identity map, no    │
+│  demand paging, no swap)                      │
 ├───────────────────────────────────────────────┤
-│  Drivers: virtio console/blk/entropy/gpu/net/ │
-│  snd/custom + USB XHCI + HID · GICv3 · timer │
+│  Drivers: virtio console/entropy/gpu/net/snd/  │
+│  custom + USB XHCI (HID + MSC) · GICv3 · timer │
 ├───────────────────────────────────────────────┤
 │  UEFI boot loader (BOOTAA64.EFI)              │
 └───────────────────────────────────────────────┘
@@ -61,13 +62,13 @@ Three rules show up everywhere:
 | Subsystem | What it does |
 |-----------|--------------|
 | Boot loader | loads `KERNEL.BIN`, writes `BOOTED.TXT`/`RC.TXT` evidence, jumps to the kernel |
-| MMU | identity-map TTBR0_EL1 tables (T0SZ=16), per-task user roots, EL1-only kernel overlay, demand paging + COW (M29) |
+| MMU | identity-map TTBR0_EL1 tables (T0SZ=16), per-task user roots, EL1-only kernel overlay, lazy `mmap` reservations (M29) — no swap |
 | Allocator | first-fit bitmap over the captured EFI map, with exclusion ranges |
 | Scheduler | tick-driven round-robin across 2 cores (SMP, M28); 11 slots (shell + worker + 8 EL0 + idle) |
 | Processes | bounded registry, lifecycle states, exit-status propagation, IPC mailboxes |
 | SMP | PSCI `CPU_ON` core bringup, per-core schedulers, spinlocks, GICv3 SGI IPIs (M28) |
-| Syscalls | ADR 0007: 128-slot table, 65 implemented, deterministic counters |
-| Networking | virtio-net → ARP → IPv4/ICMP → UDP → DHCP → DNS → TCP, plus a NAT mode and the EL0 TCP seam |
+| Syscalls | ADR 0007: 128-slot table, 78 implemented (0–77), deterministic counters |
+| Networking | virtio-net → ARP → IPv4/ICMP → UDP → DHCP → DNS → TCP (client + `GOHTTPD.ELF` passive-open server), plus a NAT mode and the EL0 TCP seam |
 | Graphics | virtio-gpu framebuffer → text → Road Pops → Driving Award compositor |
 | Audio | virtio-snd → PCM playback → `beep` → the EL0 audio seam (slots 42–45) |
 | Input | XHCI host controller → USB enumeration → HID boot protocol → event FIFO → per-process event queues |

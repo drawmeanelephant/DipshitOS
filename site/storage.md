@@ -7,63 +7,74 @@ tags: [capabilities, storage, fat]
 
 # Storage & filesystem
 
-Files live on the disk itself, in a FAT32 volume read and written through a
-virtio-blk transport — not in NVRAM variables or a host-side snapshot.
+Files live on the macOS **host share** — a folder served to the guest over
+the custom-virtio file channel — not in guest FAT volumes and not in NVRAM.
+Since M34 HF6 (issue #740) the boot image is a boot volume only: it embeds
+`EFI/BOOT/BOOTAA64.EFI` + `KERNEL.BIN` and nothing else; applications, data,
+and evidence all ride the share.
 
 ## The stack
 
-- **`virtio_blk.zig`** — a modern virtio-blk transport (DID 0x1042), re-armed
-  after `ExitBootServices` (the device resets there — observed).
-- **`fat.zig`** — GPT + FAT32 mount, list, read, and write over injected
-  sector I/O, with directory cluster chains and `/`-path resolution.
-- **Commands** — `ls [<dir>]`, `cat <file|path>`, `write <file> <bytes>`,
-  `mount <esp|data>`.
+- **`virtio_file.zig`** — the guest client for the host file channel:
+  custom-virtio queue 5 (`--cvc-file <host-dir>`), a request/reply wire
+  (`PROBE`/`LIST`/`READ`/`STAT` plus the HF3 mutation set — OPEN/CLOSE/
+  WRITE/TRUNCATE/FSYNC/RENAME/MKDIR/DELETE — and `CLONE` dedup) pinned
+  byte-for-byte by the class-A channel fixtures.
+- **`file_table.zig`** — the per-process 8-handle file table behind the file
+  syscalls (open/read/write/close/dir at slots 23–27, the mutating slots
+  34–37, and `file_sync` at 77), with paths canonicalized onto `/host/...`.
+- **`fat32_ro.zig`** — read-only FAT32 parsing for images attached through
+  the USB mass-storage seam (`--usb-msd <image>`): the guest can read files
+  off a USB disk image. The MSC block layer itself can write raw sectors
+  (the `usb msc probe` writes a gap sector — `live-usb-msc`), but there is
+  no writeable FAT filesystem; the guest's own writeable FAT driver went
+  with M34 HF6.
+- **Commands** — `ls [<dir>]`, `cat <file|path>`, `write <file> <text...>`,
+  `mount` (reports the armed host-share store).
 
-## Two volumes
+## One store: the share
 
-The disk image carries:
-
-- the **ESP** (`EFI/BOOT/BOOTAA64.EFI` + `KERNEL.BIN` + the user `.BIN`
-  programs), and
-- a second **DATA** FAT32 partition (36 MiB, Linux-FS type GUID) mounted by
-  `mount data`.
-
-A file written to the DATA volume persists across a real reboot on the disk
-itself — that is the live gate `verify-live-gfs`.
+There is one writable store — the host folder the runner was pointed at.
+`mount` reports it, `write` appends to it, and the host disk is the ground
+truth: a file written in-guest is a file on the Mac, byte for byte, across a
+reboot.
 
 ## The userland file ABI
 
 Milestone ten opened storage to EL0: a per-process file-handle table
-(`kernel/src/file_table.zig`, 8 static handles, reset at process lifecycle)
-behind the `sys_file_open`/`read`/`write`/`close` and `sys_dir_list` syscalls
-(slots 23–27), with path canonicalization routing `/esp/...` and `/data/...`
-to the right volume. `SAVETEXT.BIN`, `TYPE.BIN`, and `DIR.BIN` prove the
-seam; `NOTE.ELF` (the editor since M66c) and `GOFILES.ELF` use it for real work. Milestone thirteen's
-B1 card extended the seam with `sys_file_delete`/`rename`/`truncate`/`free`
-(slots 34–37) — proven live by `FSTEST.BIN`. The current file manager is
-`GOFILES.ELF` (gate `go-files`: list/open).
+(8 static handles, reset at process lifecycle) behind
+`sys_file_open`/`read`/`write`/`close` and `sys_dir_list` (slots 23–27).
+`SAVETEXT.BIN`, `TYPE.BIN`, and `DIR.BIN` prove the seam; `NOTE.ELF` (the
+editor since M66c) and `GOFILES.ELF` use it for real work. Milestone
+thirteen's B1 card extended it with `sys_file_delete`/`rename`/`truncate`/
+`free` (slots 34–37); the original `FSTEST.BIN` proof was deleted with the
+second volume (M34 HF6 #740), and the wire it exercised is now pinned
+byte-for-byte by the channel fixtures. The current file manager is
+`GOFILES.ELF` (gate `go-fileman`: list/open).
 
 ## Loading programs
 
-`exec <file> [args...]` reads a flat `DSK1` image through the same FAT path,
-strips its 24-byte header, rebuilds the user root around its page, and spawns
-it at EL0. The program images are embedded on the ESP by the image builder.
+`exec <file> [args...]` streams the flat image out of the share — the
+stateless `READ` op, at the honest 2 KiB EL0 read cap — strips its header,
+rebuilds the user root around its pages, and spawns it at EL0. Program
+images seed the share at build and gate time; they are not embedded in the
+boot image.
 
 <Aside kind="info">
 
-**VERIFIED.** `verify-live-fs` (ESP file window) and `verify-live-gfs` (the
-DATA partition, written and persisted across reboot) gate the storage path;
-`verify-live-exec` gates program loading, and `verify-live-user-fs` gates the
-userland file syscall ABI end to end.
+**VERIFIED.** `live-fs` (write/ls/cat persisting across a reboot onto the
+host disk) and `live-gfs` (the general store *is* the share) gate the
+storage path; `live-exec` gates program loading, and `live-user-fs` gates
+the userland file syscall ABI across two boots.
 
 </Aside>
 
 <Aside kind="warning">
 
-**LIMITATION.** FAT32 only, no directories-with-subdirectories write
-semantics beyond what the path resolver exposes, no journaling, and no block
-cache. The ABI covers delete, rename, truncate, and free (slots 34–37,
-milestone thirteen's B1 card), but it is a storage *driver* with a bounded
-file API, not a POSIX filesystem.
+**LIMITATION.** One host-backed store: no guest-side volume management, no
+journaling, no block cache, and a bounded direct-read cap (2 KiB per EL0
+call — larger reads loop). The ABI covers delete, rename, truncate, free,
+and fsync (slots 34–37 and 77), but it is a bounded file API, not a POSIX
+filesystem.
 
 </Aside>

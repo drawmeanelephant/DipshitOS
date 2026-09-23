@@ -10,13 +10,13 @@ What is actually landed and live-gated today — subsystem by subsystem. This is
 generated from the repository's own status, not from a roadmap. Where a
 capability is partial or hardware-specific, the page says so.
 
-- [[networking|Networking]] — raw Ethernet up through ARP, IPv4/ICMP, UDP, DHCP, DNS, and TCP (client + passive-open server, `HTTPD.BIN`), plus the TCP syscall seam.
+- [[networking|Networking]] — raw Ethernet up through ARP, IPv4/ICMP, UDP, DHCP, DNS, and TCP (client + passive-open server, `GOHTTPD.ELF`; Zig `HTTPD.BIN` retired in M71l), plus the TCP syscall seam.
 - [[graphics|Graphics]] — the framebuffer, the Road Pops terminal, and the Driving Award window manager with a window syscall seam.
 - [[input|Input]] — USB XHCI, HID enumeration, keyboard events, and pointer/click events routed to focused applications.
-- [[storage|Storage & filesystem]] — FAT32 over virtio-blk, ESP + a second data partition, and a userland file syscall ABI.
+- [[storage|Storage & filesystem]] — the host share over the custom-virtio file channel, a read-only FAT32 path for USB images (`--usb-msd`), and a userland file syscall ABI.
 - [[processes|Processes & IPC]] — concurrent EL0 programs, mailboxes, wait, kill, `sys_exec`/`sys_kill`.
-- [[programs|User programs & demos]] — 48 programs exec'd from the disk, from seam proofs to the desktop apps, plus dynamic `.ELF` executables.
-- **SMP & memory depth** — two CPU cores with per-core schedulers, spinlocks and GICv3 IPIs; demand paging, copy-on-write, and anonymous mmap.
+- [[programs|User programs & demos]] — 70 flat images built and exec'd from the host share, from seam proofs to the desktop apps, plus dynamic `.ELF` executables.
+- **SMP & memory depth** — two CPU cores with per-core schedulers, spinlocks and GICv3 IPIs; anonymous `mmap` with lazy reservations (M29) and no swap.
 - **Dynamic linking** — a freestanding `LD.SO` runtime linker, `LIBUI.SO`/`LIBFONT.SO` shared libraries, and `dlopen`/`dlsym` plugin loading.
 - **Shared services & sound** — a machine-global clipboard, per-process app timers that post `TIMER` events, and a virtio-snd audio pipeline from the device up to EL0 melody apps.
 
@@ -41,7 +41,7 @@ Put together, a single boot proves the whole stack in sequence:
 <Aside kind="tip">
 
 **LIVE-GATED.** The strongest single piece of evidence is the aggregate
-`verify-vz` sweep: a class B run that boots the VM and re-checks the shared
+`just verify-vz` aggregate sweep: a class B run that boots the VM and re-checks the shared
 seam across every subsystem. See [[live-gates]].
 
 </Aside>
