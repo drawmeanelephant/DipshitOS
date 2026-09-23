@@ -45,14 +45,22 @@ jobs:
       # lags behind the ledger is honest, so this never reds an unrelated
       # PR for staleness (M75a's sweep owns backward drift).
       #
-      #   1. Deleted-binary denylist (site/**): a .BIN that build.zig no
-      #      longer outputs may be named on the public site only on a line
-      #      carrying a historical marker. docs/ is deliberately exempt:
-      #      ADRs and march trackers quote old binaries AS history.
-      #   2. Never-lie-forward watermark: no page under site/ or docs/
-      #      (minus docs/archive/, the generated gate-fleet-inventory.md,
+      #   1. Deleted-binary denylist (site/** + README.md): a .BIN that
+      #      build.zig no longer outputs may be named on a public surface
+      #      only on a line carrying a historical marker. docs/ is
+      #      deliberately exempt: ADRs and march trackers quote old
+      #      binaries AS history.
+      #   1b. Stale gate-script names (site/** + README.md): the
+      #      verify-live-* scripts no longer exist (gates are specs under
+      #      tools/gate/specs/ run by `just gate <id>`), so naming one as
+      #      current is a forward lie. docs/testing.md's dated history
+      #      entries stay exempt for the same reason as (1).
+      #   2. Never-lie-forward watermark: no page under site/, README.md, or
+      #      docs/ (minus docs/archive/, the generated
+      #      gate-fleet-inventory.md,
       #      and docs/status.md — the source) may claim an M-number higher
-      #      than docs/status.md contains.
+      #      than docs/status.md contains. README may name an M-number only
+      #      once status.md carries it — link the issue until then.
       - name: Site truth guard (deleted binaries + milestone watermark)
         run: |
           python3 - <<'PY'
@@ -67,7 +75,11 @@ jobs:
           )
           marker = re.compile(r"retired|deleted|\bnow\b|\bwas\b|successor", re.I)
           bin_re = re.compile(r"\b([A-Z][A-Z0-9_]{1,24})\.BIN\b")
-          for path in sorted((root / "site").rglob("*.md")):
+          stale_re = re.compile(r"\bverify-live-[a-z0-9-]+")
+          public = sorted((root / "site").rglob("*.md")) + [root / "README.md"]
+          for path in public:
+              if not path.exists():
+                  continue
               for lineno, line in enumerate(path.read_text().splitlines(), 1):
                   for name in bin_re.findall(line):
                       if name in built or marker.search(line):
@@ -76,13 +88,19 @@ jobs:
                           f"{path}:{lineno}: names deleted {name}.BIN with no marker "
                           "(retired|deleted|now|was|successor)"
                       )
+                  for stale in stale_re.findall(line):
+                      fails.append(
+                          f"{path}:{lineno}: names {stale} — no such script; "
+                          "gates are specs (just gate <id>)"
+                      )
 
           # 2) watermark: max M-token in status.md bounds every other page
           status = (root / "docs" / "status.md").read_text()
           limit = max(int(m) for m in re.findall(r"\bM(\d{1,3})", status))
           skip = {"status.md", "gate-fleet-inventory.md"}
-          for base in (root / "site", root / "docs"):
-              for path in sorted(base.rglob("*.md")):
+          for base in (root / "site", root / "docs", root / "README.md"):
+              paths = sorted(base.rglob("*.md")) if base.is_dir() else [base]
+              for path in paths:
                   rel = path.relative_to(root)
                   if path.name in skip or "archive" in rel.parts:
                       continue
