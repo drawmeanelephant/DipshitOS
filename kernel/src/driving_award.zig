@@ -4620,6 +4620,17 @@ pub var scene_dirty: bool = false;
 /// established `!builtin.is_test` gating at ITS call sites (the WM path
 /// flushes via wm_server.request_present, which already gates).
 pub fn composite() virtio_gpu.CmdResult {
+    // M76a (#1674): while the splash hold stands, refuse the kernel
+    // present — no paint, no transfer, no flush, so the splash frame
+    // stays on the scanout while boot continues underneath. A seat that
+    // binds the scanout paints through its OWN present path (never
+    // suppressed); the first kernel present after the bind releases the
+    // hold and FALLS THROUGH, so the #1592 flush (the pre-seat console
+    // frame under the seat) still lands on the same call.
+    if (splash_hold) {
+        if (!wm_owns_user_layer) return .ok;
+        splash_hold = false;
+    }
     if (paint_scene() != .ok) return .not_ready;
     if (!scene_dirty) return .ok; // clean scene: no flush
     if (!virtio_gpu.gpu_ready) return .not_ready;
@@ -5375,6 +5386,133 @@ pub fn draw_chrome() void {
     }
 }
 
+// ---------------------------------------------------------------------------
+// M76a (#1674): the splash-to-seat handoff hold.
+//
+// render_splash leaves `splash_hold` standing: while it stands,
+// composite() refuses every kernel present (no transfer+flush), so the
+// splash frame stays exactly where the last flush put it — the tee keeps
+// writing the text layer into the framebuffer underneath, but the pixels
+// do not move until the handoff resolves. The hold ends on the first of:
+//
+//   * the seat binding the scanout (`wm_owns_user_layer`, set by
+//     wm_server.scanout_bind) — the seat paints through its OWN present
+//     path (wm_server.request_present), which is never suppressed, so the
+//     screen goes splash -> seat in one frame with zero kernel-art frames
+//     between. The serial ordering for that happy path is carried by the
+//     seat's own markers (go-dogfood: `wm: autostart` ->
+//     `gotabwm: registered` -> `gotabwm: seat-taken`).
+//   * the BOUND: `splash_bound_ticks` timer ticks (1 Hz) after the first
+//     idle evaluation — one honest klog line naming what was waited for,
+//     then Road Pops presents as before. The bound is stated in (and
+//     gated by) tools/gate/specs/live-roadpops.spec. Every no-seat
+//     outcome lands exactly as today, honestly and on time: share mode
+//     `none` (`GOTABWM.ELF not on the share`), `settings wm none`, and a
+//     seat that loads but never binds all reach the bound and say so.
+//
+// Headless boots never engage the hold: render_splash early-returns when
+// the gpu never armed, and the hold is only set on the path that actually
+// pushed a splash frame. No timing is tuned by feel — the bound is one
+// named constant, and the spec asserts both its arithmetic and its line.
+// The M59 invariant is untouched: this changes pixels only; the `wm` and
+// `shell` compiled defaults, the monitor, and the serial seam are all
+// exactly where they were (every line still reaches klog/uart first).
+// ---------------------------------------------------------------------------
+
+/// Whether the splash frame is still holding the scanout.
+pub var splash_hold: bool = false;
+/// The timer.ticks value of the first evaluation — the bound's anchor.
+var splash_anchor_tick: ?u64 = null;
+/// The bound: 1 Hz timer ticks after the anchor before the hold expires
+/// honestly. Stated and gated in tools/gate/specs/live-roadpops.spec.
+pub const splash_bound_ticks: u64 = 3;
+
+/// The deadline pump, called from drain(ticks) every idle iteration.
+/// First evaluation anchors the bound; the expiry prints ONE line.
+fn splash_eval(ticks: u64) void {
+    if (!splash_hold) return;
+    if (wm_owns_user_layer) {
+        splash_hold = false; // the seat bound the scanout: silent handoff
+        return;
+    }
+    const anchor = splash_anchor_tick orelse {
+        splash_anchor_tick = ticks;
+        return;
+    };
+    if (ticks < anchor + splash_bound_ticks) return;
+    splash_hold = false;
+    var buf: [96]u8 = undefined;
+    const line = std.fmt.bufPrint(
+        &buf,
+        "splash: seat present not observed within {d}s, continuing with Road Pops\n",
+        .{splash_bound_ticks},
+    ) catch return;
+    klog.line(line);
+}
+
+// Host tests pin the handoff state machine; the pixel half (the splash
+// actually holding the scanout) is gated live by live-roadpops (seatless
+// bound) and go-dogfood (happy-path handoff).
+var splash_test_log: [192]u8 = undefined;
+var splash_test_log_len: usize = 0;
+fn splash_test_capture(bytes: []const u8) void {
+    splash_test_log_len = @min(bytes.len, splash_test_log.len);
+    @memcpy(splash_test_log[0..splash_test_log_len], bytes[0..splash_test_log_len]);
+}
+
+test "splash hold: bound expires with one honest line" {
+    splash_hold = false;
+    splash_anchor_tick = null;
+    splash_test_log_len = 0;
+    // Headless (gpu never armed): render_splash must NOT engage the hold.
+    render_splash(1);
+    try std.testing.expect(!splash_hold);
+    klog.line_hook = splash_test_capture;
+    defer klog.line_hook = null;
+    // Engage, anchor on the first evaluation, hold through bound-1...
+    splash_hold = true;
+    splash_anchor_tick = null;
+    splash_eval(10);
+    try std.testing.expect(splash_hold);
+    try std.testing.expect(splash_anchor_tick == 10);
+    splash_eval(10 + splash_bound_ticks - 1);
+    try std.testing.expect(splash_hold);
+    // ...and expire exactly at anchor + bound, with the line.
+    splash_eval(10 + splash_bound_ticks);
+    try std.testing.expect(!splash_hold);
+    try std.testing.expect(splash_test_log_len > 0);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        splash_test_log[0..splash_test_log_len],
+        "seat present not observed within 3s",
+    ) != null);
+}
+
+test "splash hold: a seat that binds releases silently" {
+    splash_hold = true;
+    splash_anchor_tick = null;
+    splash_test_log_len = 0;
+    klog.line_hook = splash_test_capture;
+    defer klog.line_hook = null;
+    wm_owns_user_layer = true;
+    defer wm_owns_user_layer = false;
+    splash_eval(50);
+    try std.testing.expect(!splash_hold);
+    // The happy path never prints: the seat's own markers carry the chain.
+    try std.testing.expect(splash_test_log_len == 0);
+}
+
+test "splash hold: composite refuses kernel presents while held" {
+    splash_hold = true;
+    defer splash_hold = false;
+    const before = presents;
+    // Held: .ok WITHOUT painting or flushing — the splash frame survives
+    // on the scanout (the gpu flush half never runs: the guard returns
+    // before paint_scene, so this is host-test safe with no device).
+    try std.testing.expect(composite() == .ok);
+    try std.testing.expect(presents == before);
+}
+
 /// Step 13 (Issue #213): boot splash screen. Renders once into the framebuffer
 /// and pushes a transfer+flush. Shows the system name in 8×16 font, version,
 /// and a cycling progress indicator. Returns after `max_ticks` or when a
@@ -5426,6 +5564,12 @@ pub fn render_splash(max_ticks: u64) void {
         _ = virtio_gpu.gpu_transfer();
         _ = virtio_gpu.gpu_flush();
     }
+    // M76a (#1674): the splash frame is now the scanout's LAST flush —
+    // engage the handoff hold. Reached only on the armed+gpu-ready path
+    // (the early return above left every headless boot untouched), so a
+    // real splash was pushed and the hold may stand on it.
+    splash_hold = true;
+    splash_anchor_tick = null;
 }
 
 /// Refresh the tray clock from the 1 Hz generic timer and composite any dirty
@@ -5434,6 +5578,14 @@ pub fn render_splash(max_ticks: u64) void {
 /// the minute (or tick) advances; composite() also handles theme/clipboard.
 pub fn drain(ticks: u64) virtio_gpu.CmdResult {
     if (!armed_global) return .not_ready;
+    // M76a (#1674): the splash-hold deadline pump — every idle iteration
+    // while the shim composites. Anchors the bound on the first call,
+    // releases silently when the seat binds, expires honestly at the
+    // bound. While the hold stands, the clock/tray churn is skipped too:
+    // nothing may mark the scene dirty enough to matter — composite()
+    // refuses it anyway, and the seat's own presents are never suppressed.
+    splash_eval(ticks);
+    if (splash_hold) return .not_ready;
     var need = false;
     if (!tray_has_tick or ticks != tray_tick) {
         tray_has_tick = true;

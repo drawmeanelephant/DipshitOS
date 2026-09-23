@@ -805,8 +805,13 @@ fn kernel_main(base: u64, size: u64, st: *const SystemTable, handoff_rec: *Hando
                 // target (rp_text_present) routes through the compositor.
                 driving_award.arm();
                 // Step 13 (Issue #213): boot splash — render once before Road Pops
-                // takes over the terminal. Shows the system name + version for
-                // ~3 seconds (busy-wait, no timer at this boot stage).
+                // takes over the terminal. Shows the system name + version
+                // (busy-wait, no timer at this boot stage). M76a (#1674):
+                // the splash then HOLDS — render_splash leaves
+                // driving_award.splash_hold standing, so no kernel present
+                // reaches the scanout until the seat binds it (silent
+                // one-frame handoff) or the spec-stated bound expires (one
+                // honest klog line), and Road Pops takes the screen back.
                 driving_award.render_splash(3);
                 // Claim 0015, Road Pops edition: a Target struct literal
                 // with all-constant fields (ctx + &fn entries) is folded
