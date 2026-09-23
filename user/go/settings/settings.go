@@ -16,6 +16,12 @@
 // already knows (card D1) and writes only those. The mirror is pinned against
 // the kernel source by a host test, so a key added there and not here is a
 // failing test rather than a silent drift.
+//
+// M73m (#1662) grows the surface WITHOUT touching this table: the three
+// custom-palette keys below are accepted keys the kernel does not seed (the
+// `color`/`font_size` pattern), so a default table — and the SETTINGS.TXT a
+// fresh share carries — stays byte-identical to the pre-M73m image, and the
+// `keys=` a default panel reports does not move.
 package settings
 
 import (
@@ -81,12 +87,83 @@ type Key struct {
 var KnownKeys = []Key{
 	{Name: "hostname", Default: "virelai"},
 	{Name: "prompt", Default: "virelai> "},
-	{Name: "theme", Default: "dark", Vocab: []string{"dark", "light"}},
+	{Name: "theme", Default: "dark", Vocab: []string{"dark", "light", "amber", "custom"}},
 	{Name: "scrollback", Default: "1000"},
 	{Name: "shadow", Default: "off", Vocab: []string{"on", "off"}},
 	{Name: "focus_follows_mouse", Default: "off", Vocab: []string{"on", "off"}},
 	{Name: "shell", Default: "monitor", Vocab: []string{"monitor", "sh"}},
 	{Name: "wm", Default: "gotabwm", Vocab: []string{"gotabwm", "tabwm", "none"}},
+}
+
+// PaletteKeys are the M73m (#1662) custom-palette rows: the colours
+// `theme=custom` resolves to at paint time (the kernel's palette_fg /
+// palette_bg / palette_accent). They are NOT KnownKeys — the kernel does not
+// seed them either — so the mirror table above stays exactly the kernel's,
+// and a default panel stays `keys=8`. The panel reveals them as rows the
+// moment `custom` is chosen and accepts them as typed input at any time.
+// Defaults mirror kernel/src/settings.zig *_default (pinned by host test).
+var PaletteKeys = []Key{
+	{Name: "palette_fg", Default: "00ff00"},
+	{Name: "palette_bg", Default: "101418"},
+	{Name: "palette_accent", Default: "3b82f6"},
+}
+
+// PaletteKey returns the palette row for key (found=false otherwise).
+func PaletteKey(key string) (Key, bool) {
+	for _, k := range PaletteKeys {
+		if k.Name == key {
+			return k, true
+		}
+	}
+	return Key{}, false
+}
+
+// IsPaletteKey reports whether key is one of the custom-palette rows.
+func IsPaletteKey(key string) bool {
+	_, ok := PaletteKey(key)
+	return ok
+}
+
+// Editable is the panel's write gate: a kernel-table key or one of the
+// custom-palette keys. Anything else is named and dropped, never written.
+func Editable(key string) bool {
+	_, known := Known(key)
+	return known || IsPaletteKey(key)
+}
+
+// ValidColour is the palette value grammar, mirrored from the kernel's
+// `parse_hex6`: EXACTLY six hex digits, case-insensitive, no `0x` prefix.
+// Anything else is refused by the panel BEFORE it reaches the file — the
+// kernel refuses it again at apply (defence in depth: the applied colour is
+// never a half-read number).
+func ValidColour(val string) bool {
+	_, ok := Colour(val)
+	return ok
+}
+
+// Colour parses a stored palette colour (the ValidColour grammar) to 24-bit
+// RGB. found=false for anything the kernel would refuse.
+func Colour(val string) (uint32, bool) {
+	if len(val) != 6 {
+		return 0, false
+	}
+	var v uint32
+	for i := 0; i < 6; i++ {
+		c := val[i]
+		var d uint32
+		switch {
+		case c >= '0' && c <= '9':
+			d = uint32(c - '0')
+		case c >= 'a' && c <= 'f':
+			d = uint32(c-'a') + 10
+		case c >= 'A' && c <= 'F':
+			d = uint32(c-'A') + 10
+		default:
+			return 0, false
+		}
+		v = v<<4 | d
+	}
+	return v, true
 }
 
 // Known reports the kernel-table row for key.
