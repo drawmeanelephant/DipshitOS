@@ -1,16 +1,26 @@
-// Command files is the M58a (issue #1305) Go file manager: list / open /
-// navigate the host share, full-viewport inside Zig TABWM via user/go/tabapp.
-// Zig FILE.BIN is gone (M60 / #1374). No LIBUI — the three M56e widgets (text/button/list)
-// are the whole toolkit.
+//go:build virelai || fileman
+
+// Command files is GOFILES.ELF: the M74a (issue #1644) file manager TUI —
+// a Bubble Tea model over the bound /dev/tty inside Zig TABWM (evolved from
+// the M58a widget app, same identity, same manifest row).
 //
-// Every marker below is printed only AFTER its syscall returned, so the
-// go-files VZ gate's asserts can only pass if the app actually ran.
+// It does not run Bubble Tea's host Program loop: the Virelai port has no
+// POSIX tty or signals. Key bytes come from the kernel's bound /dev/tty
+// queue (CSI sequences decoded by virelai/rss/keys, ?1006 SGR mouse reports
+// split off first) and View's ANSI frame goes back into that bound tty.
+//
+// Marker discipline: a frame's markers are flushed only AFTER that frame is
+// painted and yielded, so every `gofiles: …` line the go-fileman gate waits
+// on describes a screen that already exists — the screenshot barrier can
+// never race the paint.
 package main
 
 import (
+	tea "charm.land/bubbletea/v2"
+
+	"virelai/rss/keys"
 	"virelai/tabapp"
 	"virelai/vi"
-	"virelai/widgets"
 )
 
 const (
@@ -19,39 +29,53 @@ const (
 	natW     = 512
 	natH     = 384
 
-	markerOpen    = "gofiles: open id="
-	markerDeclare = "gofiles: declare accepted"
-	markerList    = "gofiles: list "
-	markerEntry   = "gofiles: entry "
-	markerFound   = "gofiles: found KNOWN.TXT"
-	markerView    = "gofiles: view "
-	markerPresent = "gofiles: present"
-	markerClose   = "gofiles: close"
-	markerOK      = "gofiles OK"
-	markerListErr = "gofiles: list error "
-	markerCd      = "gofiles: cd "
-
-	keyEnter  = 0x28
-	keyEscape = 0x29
-	keyBacksp = 0x2a
-	keyDown   = 0x51
-	keyUp     = 0x52
+	ttyPath = "/dev/tty"
+	cellPx  = 8 // font8x8 cell: the kernel grid is client_px/8
 )
 
-type app struct {
-	ta       *tabapp.TabApp
-	path     string
-	entries  [vi.MaxDirEntries]vi.DirEntry
-	n        int
-	sel      int
-	status   string
-	preview  string
-	list     widgets.List
-	upBtn    widgets.Button
-	openBtn  widgets.Button
-	closeBtn widgets.Button
-	pathTxt  widgets.Text
-	statTxt  widgets.Text
+// gridOf maps the window rect onto the kernel's grid: cols = client width/8
+// (terminal.syncWindowCols), rows = (height - title bar)/8 (the dui/charm
+// geometry: rect W,H with a 16 px title above the client area).
+func gridOf(w, h uint32) (int, int) {
+	cols := int(w) / cellPx
+	ch := int(h)
+	if ch > titleBarPx {
+		ch -= titleBarPx
+	}
+	rows := ch / cellPx
+	return cols, rows
+}
+
+// paint writes one frame into the bound tty. A tty write marks the window
+// dirty; callers yield once before their markers so the markers describe a
+// painted frame. A two-pane frame is many KiB and sys_file_write refuses
+// count > 2048 with -ENOSPC, so the frame goes through vi.FileWriteAll —
+// the chunked-by-confirmed-count primitive term/sh use (M66a). Observed
+// failing on the first gate run: one big FileWrite returned -5 and the
+// app honestly exited status=4 before its first marker.
+func paint(fd uint32, m model) bool {
+	data := []byte(m.View().Content)
+	n, rc := vi.FileWriteAll(fd, data)
+	return rc >= 0 && n == len(data)
+}
+
+// flush prints the model's queued serial markers in order.
+func flush(m *model) {
+	for _, ln := range m.drain() {
+		vi.ConsoleLine(ln)
+	}
+}
+
+// settle yields then prints the rename-settle barrier: the screenshot at
+// `gofiles: renamed …` has this long to capture before the gate's close
+// script (triggered by this marker) tears the window down.
+func settle(m *model) {
+	if !m.renamedBatch {
+		return
+	}
+	m.renamedBatch = false
+	vi.Sleep(50) // hundreds of ms: the screenshot at the rename marker finishes first
+	vi.ConsoleLine(markerSettled)
 }
 
 func main() {
@@ -64,278 +88,242 @@ func main() {
 	if ta.TabAware {
 		vi.ConsoleLine(markerDeclare)
 	} else {
-		vi.ConsoleLine("gofiles: declare refused")
+		vi.ConsoleLine(markerDeclareNo)
 	}
 
-	a := &app{ta: ta, path: startPath(), sel: 0}
-	a.refresh()
-	a.autoOpenKnown()
-	a.draw()
-	a.ta.Present()
-	vi.ConsoleLine(markerPresent)
+	h, rc := vi.FileOpen(ttyPath, vi.ModeRead|vi.ModeWrite)
+	if rc < 0 {
+		vi.ConsoleLine("gofiles: no /dev/tty")
+		ta.CloseAndExit(2)
+	}
+	fd := uint32(h)
+	if vi.TtyAttachWindow(ta.Win) != 0 {
+		vi.FileClose(fd)
+		vi.ConsoleLine("gofiles: attach failed")
+		ta.CloseAndExit(3)
+	}
+	vi.ConsoleLine(markerAttach)
+	// M73i (#1635): enable xterm mouse reporting — ?1000 press/release
+	// edges, ?1006 SGR encoding — so rows are clickable. The kernel tracks
+	// the modes per screen (never painted).
+	if _, rcw := vi.FileWrite(fd, []byte("\x1b[?1000h\x1b[?1006h")); rcw < 0 {
+		vi.ConsoleLine("gofiles: mouse enable failed")
+	}
 
+	cols, rows := gridOf(ta.W, ta.H)
+	m := newModel(startPath(), cols, rows)
+	if !paint(fd, m) {
+		shutdown(ta, fd, 4)
+	}
+	vi.Sleep(2)
+	vi.ConsoleLine(markerPainted)
+	flush(&m)
+	vi.ConsoleLine(markerPresent)
+	vi.ConsoleLine(markerReady)
+
+	var in [64]byte
 	for {
-		ev, r, ok := vi.PollEventRaw()
-		if !ok {
-			if r < 0 {
+		// Keys and mouse reports: the tty read is non-blocking (0 when
+		// the queue is empty).
+		n, _ := vi.FileRead(fd, in[:])
+		if n > 0 {
+			if !feed(&m, fd, in[:n]) {
+				if m.quit {
+					shutdown(ta, fd, 0)
+				}
+				shutdown(ta, fd, 4)
+			}
+		}
+
+		// Window events: closed ends the session, resize re-derives the
+		// grid best-effort (M73j #1636 — a queried tty winsize — is the
+		// card that makes this exact after a drag).
+		progress := n > 0
+		for {
+			ev, result, ok := vi.PollEventRaw()
+			if !ok {
+				if result < 0 {
+					shutdown(ta, fd, 7)
+				}
 				break
 			}
+			progress = true
+			switch ta.Dispatch(ev) {
+			case tabapp.ActionClosed:
+				shutdown(ta, fd, 0)
+			case tabapp.ActionResized:
+				cols, rows := gridOf(ta.W, ta.H)
+				m.setSize(cols, rows)
+				if !paint(fd, m) {
+					shutdown(ta, fd, 4)
+				}
+				vi.Sleep(2)
+				flush(&m)
+				vi.ConsoleLine(markerResized + vi.Itoa64(int64(cols)) +
+					" h=" + vi.Itoa64(int64(rows)))
+				vi.ConsoleLine(markerRepaint)
+			}
+		}
+
+		if !progress {
 			vi.Sleep(1)
+		}
+	}
+}
+
+// mouseTail holds an unterminated SGR report across reads (the kernel
+// writes a report in one go, but a split must not leak bytes into the key
+// path — a stray 'q' would quit the manager).
+var mouseTail []byte
+
+// feed consumes one read chunk of tty bytes: SGR mouse reports are split
+// off first (ESC [ < … M|m), the rest decodes to key events. It returns
+// false when the caller must shut down (m.quit, or a paint failure).
+func feed(m *model, fd uint32, chunk []byte) bool {
+	var kbuf []byte
+	if len(mouseTail) > 0 {
+		kbuf = append(mouseTail, chunk...)
+		mouseTail = nil
+	} else {
+		kbuf = append(kbuf, chunk...)
+	}
+	for len(kbuf) > 0 {
+		if kbuf[0] == 0x1b && len(kbuf) >= 3 && kbuf[1] == '[' && kbuf[2] == '<' {
+			// A mouse report only exists in this shape; if the terminator
+			// has not arrived yet, hold the tail for the next read.
+			end := -1
+			for i := 3; i < len(kbuf); i++ {
+				if kbuf[i] == 'M' || kbuf[i] == 'm' {
+					end = i
+					break
+				}
+			}
+			if end < 0 {
+				if len(kbuf) > 80 { // runaway: never a report
+					mouseTail = nil
+					return true
+				}
+				mouseTail = append([]byte(nil), kbuf...)
+				return true
+			}
+			ok, b, x, y := parseSGRMouse(kbuf[:end+1])
+			kbuf = kbuf[end+1:]
+			if !ok {
+				continue
+			}
+			if !onMouse(m, fd, b, x, y) {
+				return false
+			}
 			continue
 		}
-		switch a.ta.Dispatch(ev) {
-		case tabapp.ActionClosed:
-			vi.ConsoleLine(markerClose)
-			vi.ConsoleLine(markerOK)
-			a.ta.CloseAndExit(0)
-		case tabapp.ActionResized:
-			a.draw()
-			a.ta.Present()
-		case tabapp.ActionNone:
-			if a.handle(ev) {
-				a.draw()
-				a.ta.Present()
-			}
-		}
-	}
-}
-
-func startPath() string {
-	args := vi.Args()
-	if len(args) > 1 && len(args[1]) > 0 && len(args[1]) <= maxPath {
-		return args[1]
-	}
-	return rootPath
-}
-
-func (a *app) refresh() {
-	n, rc := vi.DirList(a.path, a.entries[:])
-	if rc < 0 {
-		a.n = 0
-		a.sel = 0
-		a.status = "list err"
-		vi.ConsoleLine(markerListErr + vi.Itoa64(rc))
-		return
-	}
-	a.n = n
-	if a.sel >= a.n {
-		a.sel = 0
-	}
-	if a.sel < 0 {
-		a.sel = 0
-	}
-	vi.ConsoleLine(markerList + a.path + " n=" + vi.Itoa64(int64(a.n)))
-	for i := 0; i < a.n; i++ {
-		name := a.entries[i].NameString()
-		kind := "file"
-		if a.entries[i].Dir() {
-			kind = "dir"
-		}
-		vi.ConsoleLine(markerEntry + name + " " + kind + " size=" + vi.Itoa64(int64(a.entries[i].Size)))
-		if name == knownName {
-			vi.ConsoleLine(markerFound)
-		}
-	}
-	a.status = "listed"
-}
-
-func (a *app) autoOpenKnown() {
-	if !containsName(a.entries[:], a.n, knownName) {
-		return
-	}
-	child, ok := joinPath(a.path, knownName)
-	if !ok {
-		return
-	}
-	a.viewFile(child, knownName)
-}
-
-func (a *app) viewFile(path, name string) {
-	body, rc := vi.ReadFileAll(path, 512)
-	if rc < 0 {
-		a.status = "open err"
-		return
-	}
-	a.preview = clipPreview(body)
-	a.status = "view " + name
-	vi.ConsoleLine(markerView + name + " bytes=" + vi.Itoa64(int64(len(body))))
-}
-
-func clipPreview(body []byte) string {
-	const capN = 40
-	n := 0
-	for n < len(body) && n < capN && body[n] != '\n' && body[n] != '\r' {
-		n++
-	}
-	return string(body[:n])
-}
-
-func (a *app) openSelected() bool {
-	if a.n == 0 || a.sel < 0 || a.sel >= a.n {
-		return false
-	}
-	e := a.entries[a.sel]
-	name := e.NameString()
-	child, ok := joinPath(a.path, name)
-	if !ok {
-		return false
-	}
-	if e.Dir() {
-		a.path = child
-		a.sel = 0
-		a.preview = ""
-		vi.ConsoleLine(markerCd + a.path)
-		a.refresh()
-		return true
-	}
-	a.viewFile(child, name)
-	return true
-}
-
-func (a *app) goUp() bool {
-	parent := parentPath(a.path)
-	if parent == a.path {
-		return false
-	}
-	a.path = parent
-	a.sel = 0
-	a.preview = ""
-	vi.ConsoleLine(markerCd + a.path)
-	a.refresh()
-	return true
-}
-
-func (a *app) handle(ev vi.Event) bool {
-	switch ev.Kind {
-	case vi.EvKeyDown:
-		switch ev.Arg0 {
-		case keyDown:
-			if a.n > 0 && a.sel+1 < a.n {
-				a.sel++
-				return true
-			}
-		case keyUp:
-			if a.sel > 0 {
-				a.sel--
-				return true
-			}
-		case keyEnter:
-			return a.openSelected()
-		case keyBacksp, keyEscape:
-			return a.goUp()
-		}
-	case vi.EvMouseDown:
-		if ev.Flags&vi.BtnLeft == 0 {
-			return false
-		}
-		x, y := int(ev.Arg0), int(ev.Arg1)
-		if a.upBtn.HitTest(x, y) {
-			return a.goUp()
-		}
-		if a.closeBtn.HitTest(x, y) {
-			vi.ConsoleLine(markerClose)
-			vi.ConsoleLine(markerOK)
-			a.ta.CloseAndExit(0)
-		}
-		if a.openBtn.HitTest(x, y) {
-			return a.openSelected()
-		}
-		if i := a.list.ItemAt(x, y); i >= 0 {
-			if i == a.sel {
-				return a.openSelected()
-			}
-			a.sel = i
+		ev, used := keys.Decode(kbuf)
+		if used <= 0 {
 			return true
 		}
+		kbuf = kbuf[used:]
+		if ev.Key == keys.KeyNone {
+			continue
+		}
+		if !onKey(m, fd, ev) {
+			return false
+		}
 	}
-	return false
+	return true
 }
 
-func (a *app) layout() {
-	ta := a.ta
-	a.pathTxt = widgets.Text{
-		R:     scaleR(ta, widgets.Rect{X: 8, Y: 8, W: int(natW) - 16, H: 20}),
-		Label: a.path,
-		Fg:    0xffffff,
-		Bg:    0x1e2430,
+// onKey runs one key through the model, then paints and flushes: markers
+// for this key land only after its frame exists.
+func onKey(m *model, fd uint32, ev keys.Event) bool {
+	// Update has a VALUE receiver (the tea.Model contract): the returned
+	// model IS the state — discarding it makes every key a no-op (observed
+	// on the first gate run: `key return` printed, nothing navigated).
+	next, _ := m.Update(toTea(ev))
+	if nm, ok := next.(model); ok {
+		*m = nm
 	}
-	a.list = widgets.List{
-		R:     scaleR(ta, widgets.Rect{X: 8, Y: 32, W: int(natW) - 16, H: 288}),
-		Items: labelsOf(a.entries[:], a.n),
-		RowH:  scaleH(ta, 18),
-		Sel:   a.sel,
-		Fg:    0xd8e0e8,
-		Bg:    0x161c24,
-		SelBg: 0x2c3a4c,
+	if m.quit {
+		return false
 	}
-	a.upBtn = widgets.Button{
-		R:        scaleR(ta, widgets.Rect{X: 8, Y: 328, W: 56, H: 28}),
-		Label:    "Up",
-		Face:     0x2a3340,
-		Border:   0x5a6a80,
-		LabelRGB: 0xe0e8f0,
+	if !paint(fd, *m) {
+		return false
 	}
-	a.openBtn = widgets.Button{
-		R:        scaleR(ta, widgets.Rect{X: 72, Y: 328, W: 64, H: 28}),
-		Label:    "Open",
-		Face:     0x2a3340,
-		Border:   0x5a6a80,
-		LabelRGB: 0xe0e8f0,
-	}
-	a.closeBtn = widgets.Button{
-		R:        scaleR(ta, widgets.Rect{X: int(natW) - 104, Y: 328, W: 96, H: 28}),
-		Label:    "Close",
-		Face:     0x2a3340,
-		Border:   0x5a6a80,
-		LabelRGB: 0xe0e8f0,
-	}
-	stat := a.status
-	if a.preview != "" {
-		stat = a.status + " " + a.preview
-	}
-	a.statTxt = widgets.Text{
-		R:     scaleR(ta, widgets.Rect{X: 8, Y: 360, W: int(natW) - 16, H: 16}),
-		Label: stat,
-		Fg:    0xa8b0b8,
-		Bg:    0x101418,
-	}
+	vi.Sleep(1)
+	flush(m)
+	vi.ConsoleLine(markerKey + keyLabel(ev))
+	vi.ConsoleLine(markerRepaint)
+	settle(m)
+	return true
 }
 
-func (a *app) draw() {
-	a.layout()
-	var f vi.Filler
-	f.Rect(a.ta.Win, 0, 0, a.ta.W, a.ta.H, 0x101418)
-	cv := &widgetCanvas{f: &f, win: a.ta.Win}
-	a.pathTxt.Draw(cv)
-	a.list.Draw(cv)
-	a.upBtn.Draw(cv)
-	a.openBtn.Draw(cv)
-	a.closeBtn.Draw(cv)
-	a.statTxt.Draw(cv)
-	f.Flush()
-}
-
-type widgetCanvas struct {
-	f   *vi.Filler
-	win int
-}
-
-func (c *widgetCanvas) FillRect(r widgets.Rect, rgb uint32) {
-	if r.W <= 0 || r.H <= 0 {
-		return
+// onMouse handles one SGR report: releases only get their marker (charmhello
+// precedent), a left press goes through the model as a cell click.
+func onMouse(m *model, fd uint32, b, x, y int) bool {
+	pressed := b&32 == 0 && b&3 == 0 // left button, press edge
+	if pressed {
+		next, _ := m.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+		if nm, ok := next.(model); ok {
+			*m = nm
+		}
+		if m.quit {
+			return false
+		}
+		if !paint(fd, *m) {
+			return false
+		}
+		vi.Sleep(1)
+		flush(m)
+		vi.ConsoleLine(markerRepaint)
 	}
-	c.f.Rect(c.win, uint32(r.X), uint32(r.Y), uint32(r.W), uint32(r.H), rgb)
+	vi.ConsoleLine(markerMouse + vi.Itoa64(int64(b)) +
+		" x=" + vi.Itoa64(int64(x)) + " y=" + vi.Itoa64(int64(y)))
+	return true
 }
 
-func scaleR(ta *tabapp.TabApp, r widgets.Rect) widgets.Rect {
-	s := ta.Layout(tabapp.Rect{X: r.X, Y: r.Y, W: r.W, H: r.H}, natW, natH)
-	return widgets.Rect{X: s.X, Y: s.Y, W: s.W, H: s.H}
-}
-
-func scaleH(ta *tabapp.TabApp, h int) int {
-	s := ta.Layout(tabapp.Rect{X: 0, Y: 0, W: 1, H: h}, natW, natH)
-	if s.H < 1 {
-		return 1
+// parseSGRMouse reads ESC [ < b ; x ; y M|m — hand-rolled (no strconv): the
+// app only ever prints what the kernel sent. (M73i #1635 shape, as in
+// charmhello.)
+func parseSGRMouse(seq []byte) (bool, int, int, int) {
+	if len(seq) < 6 || seq[0] != 0x1b || seq[1] != '[' || seq[2] != '<' {
+		return false, 0, 0, 0
 	}
-	return s.H
+	var vals [3]int
+	idx := 0
+	cur := 0
+	digits := false
+	for i := 3; i < len(seq); i++ {
+		c := seq[i]
+		switch {
+		case c >= '0' && c <= '9':
+			cur = cur*10 + int(c-'0')
+			digits = true
+		case c == ';':
+			if !digits || idx >= 2 {
+				return false, 0, 0, 0
+			}
+			vals[idx] = cur
+			idx++
+			cur = 0
+			digits = false
+		case c == 'M' || c == 'm':
+			if !digits || idx != 2 {
+				return false, 0, 0, 0
+			}
+			vals[2] = cur
+			return true, vals[0], vals[1], vals[2]
+		default:
+			return false, 0, 0, 0
+		}
+	}
+	return false, 0, 0, 0
+}
+
+func shutdown(ta *tabapp.TabApp, fd uint32, status int) {
+	// Leave mouse reporting off, the alt screen, and show the cursor again
+	// before the window goes away.
+	_, _ = vi.FileWrite(fd, []byte("\x1b[?1000l\x1b[?1006l\x1b[?1049l\x1b[?25h"))
+	_ = vi.TtyAttach(vi.TtyDetach)
+	vi.FileClose(fd)
+	vi.ConsoleLine(markerClose)
+	vi.ConsoleLine(markerOK)
+	ta.CloseAndExit(status)
 }
