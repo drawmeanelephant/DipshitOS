@@ -2647,21 +2647,37 @@ fn cmd_subst(mon: *monitor.Monitor, raw: []const u8, out: []u8) []const u8 {
 
     const prefix = raw[0..dollar_lp];
     const suffix = raw[end + 1 ..];
+
+    // #1690: every copy is BOUNDED by out.len. subst_max_output equals
+    // out.len (lineedit.max_line), so prefix + capture + suffix overflows
+    // the buffer whenever the capture fills and the line carries any
+    // prefix at all — observed as a safe-mode panic at index 261 of 256
+    // from an 11-byte `clip $(help)`, and as an unchecked write past the
+    // stack buffer in the ReleaseSmall image. Structural bytes win:
+    // prefix and suffix (the command's own text around the substitution)
+    // are laid down first, each clamped, and the captured output is
+    // truncated to the room that is left — nothing is written out of
+    // bounds and the tail of the line is never silently dropped (the old
+    // suffix-only guard dropped it). A truncation is announced, in the
+    // family of the cmdsubst refusals above.
+    const plen = @min(prefix.len, out.len);
+    const slen = @min(suffix.len, out.len - plen);
+    const clen = @min(trimmed.len, out.len - plen - slen);
+    if (clen < trimmed.len) {
+        mon.console.print_line("cmdsubst: output truncated to fit the line buffer");
+    }
     var op: usize = 0;
-    // copy prefix
-    if (prefix.len > 0) {
-        @memcpy(out[op..][0..prefix.len], prefix);
-        op += prefix.len;
+    if (plen > 0) {
+        @memcpy(out[op..][0..plen], prefix[0..plen]);
+        op += plen;
     }
-    // copy trimmed captured output
-    if (trimmed.len > 0) {
-        @memcpy(out[op..][0..trimmed.len], trimmed);
-        op += trimmed.len;
+    if (clen > 0) {
+        @memcpy(out[op..][0..clen], trimmed[0..clen]);
+        op += clen;
     }
-    // copy suffix
-    if (suffix.len > 0 and op + suffix.len <= out.len) {
-        @memcpy(out[op..][0..suffix.len], suffix);
-        op += suffix.len;
+    if (slen > 0) {
+        @memcpy(out[op..][0..slen], suffix[0..slen]);
+        op += slen;
     }
     return out[0..op];
 }
@@ -4381,4 +4397,54 @@ test "shell: mock-fed end-to-end session produces the exact transcript" {
         .sub_path = "artifacts/m15-mock-transcript.txt",
         .data = mock.contents(),
     });
+}
+
+// #1690: the substitution copies are bounded to subst_buf. Before the
+// bound, `clip $(help)` panicked at index 261 of 256 in this safe-mode
+// build (prefix 5 + capture 256 > out.len 256) and wrote past the stack
+// buffer in the ReleaseSmall image. The pins: the run COMPLETES (an
+// out-of-bounds copy would abort this test before any assert runs), the
+// truncation notice fires, clip stores the byte-exact bounded line, and
+// the suffix survives to the end of the clipboard readback — structural
+// bytes are never dropped.
+test "shell: cmd_subst output is bounded to the line buffer (#1690)" {
+    var mock = console.MockConsole(16384){};
+    var shell = make_shell(&mock, make_view());
+    shell.boot();
+    _ = alloc.init(make_view(), &.{});
+    _ = scheduler.init();
+    userspace.init();
+    test_reset_share();
+    defer virtio_file.set_test_share(null);
+    // A 250-byte capture with no interior whitespace: one token, so the
+    // dispatch layer (17-token cap) passes it straight to clip. prefix
+    // "clip " (5) + suffix " TAILMARK" (10) reserve 15 bytes of the
+    // 256-byte buffer, so the capture truncates to 241 and clip stores
+    // 241 + 1 (join space) + 9 = 251 bytes — byte-exact.
+    test_seed_share("SUBSTBIG.TXT", "X" ** 250);
+    mock.feed("clip $(cat SUBSTBIG.TXT) TAILMARK\n");
+    mock.feed("clip\n"); // read the clipboard back
+    var rounds: usize = 0;
+    while (shell.poll() != .idle and rounds < 10000) : (rounds += 1) {}
+    const transcript = mock.contents();
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        transcript,
+        "cmdsubst: output truncated to fit the line buffer\n",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        transcript,
+        "clip: stored 251 bytes\n",
+    ) != null);
+    // No substitution refusal fired: this line is well-formed.
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "cmdsubst: unmatched") == null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "nested $(...)") == null);
+    // The readback is the last output before the final prompt and ends
+    // with the suffix — byte-anchored on the tail.
+    try std.testing.expect(std.mem.endsWith(
+        u8,
+        transcript,
+        "TAILMARK\nvirelai> ",
+    ));
 }
