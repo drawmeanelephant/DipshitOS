@@ -1319,29 +1319,11 @@ pub fn build(b: *std.Build) void {
     // ------------------------------------------------------------------
 
     // ------------------------------------------------------------------
-    // Guest: thirty-seventh ESP user program (M26 N2 — issue #400) NETSTAT.BIN.
-    // Network dashboard: interface / TCP / UDP / ARP / DHCP / counters,
-    // refreshed at 1 Hz from sys_net_stats (slot 62). Writable BSS
-    // snapshot -> SEGMENTED DSK3 image (the GLOBALS.BIN pattern).
+    // M78a (#1682): the network diagnostics are guest Go applications
+    // (GONETSTAT.ELF, GODNS.ELF, GOTRACEROUTE.ELF), built by
+    // tools/go/build-netdiag.sh and staged by their existing live specs.
+    // They are host-share ELFs, not in-image Zig programs.
     // ------------------------------------------------------------------
-    const netstat_prog = b.addExecutable(.{
-        .name = "user-netstat",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("user/src/netstat.zig"),
-            .target = kernel_target,
-            .optimize = .ReleaseSmall,
-        }),
-    });
-    netstat_prog.linker_script = b.path("user/linker-segmented.ld");
-    const netstat_step = b.step("netstat", "Build the thirty-seventh ESP user program (zig-out/bin/NETSTAT.BIN)");
-    const netstat_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
-    netstat_elf2bin.addFileArg(netstat_prog.getEmittedBin());
-    const netstat_bin = netstat_elf2bin.addOutputFileArg("NETSTAT.BIN");
-    netstat_elf2bin.has_side_effects = true;
-    netstat_elf2bin.stdio = .inherit;
-    netstat_step.dependOn(&netstat_elf2bin.step);
-    const install_netstat = b.addInstallFileWithDir(netstat_bin, .bin, "NETSTAT.BIN");
-    b.getInstallStep().dependOn(&install_netstat.step);
 
     // ------------------------------------------------------------------
     // Guest: thirty-fifth ESP user program (M22 D10 — issue #333) RESMON.BIN.
@@ -1424,29 +1406,6 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_m21demo.step);
 
     // ------------------------------------------------------------------
-    // Guest: fortieth ESP user program (M26 N5 — issue #403) DNS.BIN.
-    // RFC 1035 DNS A-record query CLI over UDP port 53.
-    // ------------------------------------------------------------------
-    const dns_prog = b.addExecutable(.{
-        .name = "user-dns",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("user/src/dns.zig"),
-            .target = kernel_target,
-            .optimize = .ReleaseSmall,
-        }),
-    });
-    dns_prog.linker_script = b.path("user/linker.ld");
-    const dns_step = b.step("dns", "Build the fortieth ESP user program (zig-out/bin/DNS.BIN)");
-    const dns_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
-    dns_elf2bin.addFileArg(dns_prog.getEmittedBin());
-    const dns_bin = dns_elf2bin.addOutputFileArg("DNS.BIN");
-    dns_elf2bin.has_side_effects = true;
-    dns_elf2bin.stdio = .inherit;
-    dns_step.dependOn(&dns_elf2bin.step);
-    const install_dns = b.addInstallFileWithDir(dns_bin, .bin, "DNS.BIN");
-    b.getInstallStep().dependOn(&install_dns.step);
-
-    // ------------------------------------------------------------------
     // Guest: forty-first ESP user program (M26 N11 — issue #438) DOWNLOAD.BIN.
     // HTTP file download manager saving response body to FAT32 storage.
     // ------------------------------------------------------------------
@@ -1468,29 +1427,6 @@ pub fn build(b: *std.Build) void {
     download_step.dependOn(&download_elf2bin.step);
     const install_download = b.addInstallFileWithDir(download_bin, .bin, "DOWNLOAD.BIN");
     b.getInstallStep().dependOn(&install_download.step);
-
-    // ------------------------------------------------------------------
-    // Guest: forty-second ESP user program (M26 N7 — issue #434) TRACEROUTE.BIN.
-    // ICMP route traceroute / path discovery CLI.
-    // ------------------------------------------------------------------
-    const traceroute_prog = b.addExecutable(.{
-        .name = "user-traceroute",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("user/src/traceroute.zig"),
-            .target = kernel_target,
-            .optimize = .ReleaseSmall,
-        }),
-    });
-    traceroute_prog.linker_script = b.path("user/linker.ld");
-    const traceroute_step = b.step("traceroute", "Build the forty-second ESP user program (zig-out/bin/TRACEROUTE.BIN)");
-    const traceroute_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
-    traceroute_elf2bin.addFileArg(traceroute_prog.getEmittedBin());
-    const traceroute_bin = traceroute_elf2bin.addOutputFileArg("TRACEROUTE.BIN");
-    traceroute_elf2bin.has_side_effects = true;
-    traceroute_elf2bin.stdio = .inherit;
-    traceroute_step.dependOn(&traceroute_elf2bin.step);
-    const install_traceroute = b.addInstallFileWithDir(traceroute_bin, .bin, "TRACEROUTE.BIN");
-    b.getInstallStep().dependOn(&install_traceroute.step);
 
     // ------------------------------------------------------------------
     // Guest: forty-third ESP user program (M26 N12 — issue #439) NETPROF.BIN.

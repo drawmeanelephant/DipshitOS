@@ -780,7 +780,7 @@ func TestHelpCatalogMatchesVerbTables(t *testing.T) {
 		_, isBuiltin := builtins[name]
 		_, isTool := tools[name]
 		// The externals group is the exception: it carries `exec` plus the
-		// app names it launches (M71n #1573), which are images the engine runs
+		// app names it launches (M71n/M78a), which are images the engine runs
 		// rather than entries in builtins/tools.
 		if !isBuiltin && !isTool && name != helpExternal && e.group != "externals" {
 			t.Errorf("help catalog row %q names no verb this shell can run", name)
@@ -914,11 +914,10 @@ func TestHelpGroupPageAndUnknownVerb(t *testing.T) {
 	}
 }
 
-// TestHelpNamesTheNetCLIs is M71n (#1573) deliverable 1: the Go net CLIs are
-// reachable by name in the grouped catalog, with a page each, and they live in
-// the externals group rather than the builtin/tool tables (D1).
+// TestHelpNamesTheNetCLIs pins discoverability for Go network CLIs in the
+// grouped catalog; each lives in externals, not the builtin/tool tables.
 func TestHelpNamesTheNetCLIs(t *testing.T) {
-	for _, name := range []string{"GOFETCH.ELF", "GOPING.ELF", "GOTGIT.ELF"} {
+	for _, name := range []string{"GOFETCH.ELF", "GOPING.ELF", "GONETSTAT.ELF", "GODNS.ELF", "GOTRACEROUTE.ELF", "GOTGIT.ELF"} {
 		e, ok := helpCatalog[name]
 		if !ok {
 			t.Errorf("net CLI %q has no help catalog row", name)
@@ -929,7 +928,7 @@ func TestHelpNamesTheNetCLIs(t *testing.T) {
 		}
 	}
 	catalog := helpCatalogText()
-	for _, name := range []string{"GOFETCH.ELF", "GOPING.ELF", "GOTGIT.ELF"} {
+	for _, name := range []string{"GOFETCH.ELF", "GOPING.ELF", "GONETSTAT.ELF", "GODNS.ELF", "GOTRACEROUTE.ELF", "GOTGIT.ELF"} {
 		if !strings.Contains(catalog, name) {
 			t.Errorf("the grouped catalog does not list %q", name)
 		}

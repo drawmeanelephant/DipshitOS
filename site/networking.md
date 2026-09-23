@@ -40,16 +40,20 @@ virtio-net transport, built in bounded fixed-BSS staging.
   `GOHTTPD.ELF` proves the server).
 - **DNS** — a bounded RFC 1035 resolver (`net dns <hostname>`) that queries
   port 53 and extracts A records, live-gated against a deterministic
-  `--net-dns-respond` answer.
+  `--net-dns-respond` answer; the Go `GODNS.ELF` also resolves A records over
+  the existing guest UDP syscall.
 - **NAT** — the launcher's `--net-nat` mode attaches a real
   `VZNATNetworkDeviceAttachment`; the guest pings the NAT gateway.
 - **HTTP server** — `GOHTTPD.ELF` accepts a connection on the passive-open
   listener and serves HTTP/1.1 over it; Zig `HTTPD.BIN` was retired to Go
   in M71l (gate `live-httpd`).
 - **Userland network apps** — `TCP.BIN` (echo client), `FETCH.BIN` (HTTP/1.0
-  client), `GOPING.ELF` (Zig `PING.BIN` retired in M71n), `NETSTAT.BIN`,
-  `TRACEROUTE.BIN`, and `CHAT.BIN`
-  (graphical UDP chat) run the seam end to end.
+  client), `GOPING.ELF` (Zig `PING.BIN` retired in M71n), `GONETSTAT.ELF`
+  (the slot-62 network dashboard), `GODNS.ELF` (UDP A-record lookup),
+  `GOTRACEROUTE.ELF` (bounded direct-peer ICMP echo diagnostic), and `CHAT.BIN`
+  (graphical UDP chat) run the seam end to end. The three Go diagnostics
+  replaced their Zig `.BIN` originals in M78a and are built with
+  `bash tools/go/build-netdiag.sh` before their live gates.
 
 <Aside kind="info">
 
@@ -62,6 +66,9 @@ translates the frames — that is the point of NAT.
 
 ## Honest bounds
 
+- `GOTRACEROUTE.ELF` is a peer reachability probe, not route discovery: the
+  current ICMP syscall has neither TTL selection nor time-exceeded responses.
+  Its `-m` option bounds attempts; it does not set a packet TTL.
 - TCP is **single-connection**: one client connect and one passive-open
   listener; no TCP loopback, no congestion control, fixed window 4096,
   payload ≤ 64 bytes in one segment.
