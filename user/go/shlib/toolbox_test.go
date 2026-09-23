@@ -164,3 +164,30 @@ func TestToolboxNegatives(t *testing.T) {
 		}
 	}
 }
+
+// TestToolboxPrintfEscapes pins printf's escape set to the retired Zig
+// toolbox's (user/src/lib/toolbox.zig runPrintf) — \n \t \r \e \\ \0 and
+// the \xHH raw byte M73a-2 (#1631) added there: the live-term burst is
+// typed as exactly these escapes, and M73d (#1628) observed GOTERM
+// receiving the whole format as literal text without them.
+func TestToolboxPrintfEscapes(t *testing.T) {
+	h := newFakeHost()
+	out, st := toolOut(t, h, "printf '\\e[2J\\e[31mRED\\e[0m\\n'")
+	if st != 0 || out != "\x1b[2J\x1b[31mRED\x1b[0m\n" {
+		t.Fatalf("csi burst = (%q, %d)", out, st)
+	}
+	out, _ = toolOut(t, h, "printf '\\xE2\\x94\\x8C \\xC3\\xA9'")
+	if out != "\xe2\x94\x8c \xc3\xa9" {
+		t.Fatalf("hex runes = %q", out)
+	}
+	out, _ = toolOut(t, h, "printf 'a\\rb\\0c\\td'")
+	if out != "a\rb\x00c\td" {
+		t.Fatalf("cr nul tab = %q", out)
+	}
+	// Not a hex pair and unknown escapes stay literal — both toolboxes
+	// agree, so a mistyped escape is visible text, never a dropped byte.
+	out, _ = toolOut(t, h, "printf '\\q \\xZZ \\x4'")
+	if out != `\q \xZZ \x4` {
+		t.Fatalf("literal escapes = %q", out)
+	}
+}

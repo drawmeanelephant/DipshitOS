@@ -1284,31 +1284,6 @@ pub fn build(b: *std.Build) void {
     // ------------------------------------------------------------------
 
     // ------------------------------------------------------------------
-    // Guest: TERM.BIN (M45 SH6 — issue #1082, ADR 0020 Amendment A). The
-    // terminal window front-end: opens a `.user` window, opens `/dev/tty`,
-    // attaches selector 2, and runs the shared shell core over the fd. The
-    // kernel renders the terminal grid into the window; no pixels from EL0.
-    // ------------------------------------------------------------------
-    const term_prog = b.addExecutable(.{
-        .name = "user-term",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("user/src/term.zig"),
-            .target = kernel_target,
-            .optimize = .ReleaseSmall,
-        }),
-    });
-    term_prog.linker_script = b.path("user/linker-segmented.ld");
-    const term_step = b.step("term", "Build the M45 SH6 terminal window front-end (zig-out/bin/TERM.BIN) — DSK3 segmented");
-    const term_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
-    term_elf2bin.addFileArg(term_prog.getEmittedBin());
-    const term_bin = term_elf2bin.addOutputFileArg("TERM.BIN");
-    term_elf2bin.has_side_effects = true;
-    term_elf2bin.stdio = .inherit;
-    term_step.dependOn(&term_elf2bin.step);
-    const install_term = b.addInstallFileWithDir(term_bin, .bin, "TERM.BIN");
-    b.getInstallStep().dependOn(&install_term.step);
-
-    // ------------------------------------------------------------------
     // Guest: TOOL.BIN (M49 SD3 — issue #1130). The standalone busybox-style
     // multicall over lib/toolbox.zig: argv[0] selects head/tail/wc/grep/
     // sort/cut/test/[/printf, the rest are its arguments, stdin is the

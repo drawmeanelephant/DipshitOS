@@ -1,45 +1,93 @@
-# live-term.spec -- M45 card SH6 class-B gate (issue #1082, ADR 0020 A).
+# live-term.spec -- M45 card SH6 class-B gate (issue #1082, ADR 0020 A),
+# retargeted by M73d (#1628) onto GOTERM.ELF — the canonical terminal; the
+# Zig TERM.BIN front-end retires into M60's leftovers (docs/status.md row 60).
 #
-# TERM.BIN (EL0) opens a .user window, opens /dev/tty, attaches the window
-# front-end via sys_tty_attach(2, id), and runs the shared shell core. The
-# kernel drains the terminal output ring into a bounded grid and renders it
-# into the bound window (A4); window keys are encoded by hid_to_bytes into
+# GOTERM.ELF (EL0, tabapp client) opens a .user window, opens /dev/tty,
+# attaches the window front-end via sys_tty_attach(2, id), and runs the
+# shared shlib core (M73c #1627). The seam this gate proves is unchanged:
+# the kernel drains the terminal output ring into a bounded grid and renders
+# it into the bound window (A4); window keys are encoded by hid_to_bytes into
 # the terminal input queue (A5); closing auto-detaches (A6). Boot default is
-# unchanged -- the monitor keeps the raw console and TERM.BIN never touches
+# unchanged -- the monitor keeps the raw console and GOTERM never touches
 # it. Markers are emitted in single writes (the SMP heartbeat splits lines).
+# GOTERM says `goterm:` where TERM.BIN said `term:`; every assertion below
+# moved by prefix alone (the M66c/NOTE precedent) — none dropped: the SGR
+# thresholds, the M73a-2 frame-rune proofs, and the M73h exact-RGB
+# truecolour proofs keep their ORIGINAL coordinates, because GOTERM declares
+# the classic terminal rect 64,48,640,400 — the rect TERM.BIN declared.
 #
-# This gate: exec TERM.BIN, type a bounded ANSI burst over the WM input seam,
-# observe the submitted line + exit status on serial, observe the window in
-# the dui registry, and decode a raw snapshot for painted SGR cells. M71a is
-# landed on this base, so this is the default GOTABWM seat — no `wm=tabwm`
-# fallback is requested here.
+# The rect is load-bearing, not cosmetic (observed 2026-09-22, M73d):
+# 640px = 80 grid columns = the kernel grid's default, so syncWindowCols
+# never reflows (Screen.reflow early-outs when cols is unchanged). A 512px
+# window forced an 80->64 reflow of live history and the window kept
+# painting PRE-clear rows while the grid itself held the fresh content —
+# the typed burst never reached the scanout. Retired TERM.BIN (always
+# 640) never reflowed; every 512px tabapp client did (GOSH and GOTERM both
+# went stale, control stayed green — the four-cell A/B).
+#
+# COMPOSITOR REGIME: this gate boots WITHOUT GOTABWM.ELF on the share, so
+# `wm: autostart` falls back to shim compositing and GOTERM's kind-8
+# declare is refused (asserted below; the plain .user window paints — the
+# pre-retirement gate ran this same regime: the old header's "default
+# GOTABWM seat" claim was aspirational, it never staged the binary).
+# Capture is the M69b settle recipe (go-dogfood run 03): a monitor echo
+# 4s after `goterm: done` releases --cvc-snap (a fresh guest capture), so
+# the frame holds settled output instead of the boot frame.
+#
+# HOST PREREQUISITE (fails the gate honestly when missing):
+#   bash tools/go/build-goterm.sh   ->  .build/go/GOTERM.ELF
 
-vgate_name live-term "#1082 SH6 + M72b: TERM.BIN window tty paints SGR cells (default GOTABWM seat)"
+vgate_name live-term "#1082 SH6 + M72b + M73d #1628: GOTERM window tty paints SGR cells (classic rect, shim compositing)"
 vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 
 vgate_file script.txt <<'EOF'
-exec TERM.BIN
+set GOMAXPROCS=1
+exec GOTERM.ELF
 EOF
 
 vgate_file script2.txt <<'EOF'
+echo shot-term-pixels
 dui
 EOF
+
+vgate_file script3.txt <<'EOF'
+echo rx-live-term-ok
+EOF
+
+vgate_setup_python <<'PY'
+import os, shutil, sys
+rd = os.environ["RUN_DIR"]
+share = os.environ.get("VG_SHARE") or os.path.join(rd, "share")
+for name, how in (("GOTERM.ELF", "build-goterm.sh"),):
+    src = os.path.join(".build", "go", name)
+    if not os.path.exists(src):
+        sys.exit(name + " missing (expected " + src + ") - build it first: "
+                 "bash tools/go/" + how)
+    shutil.copy(src, os.path.join(share, name))
+    print("staged %s into share (%d bytes)" % (name, os.path.getsize(src)))
+# Deliberately NOT staged: GOTABWM.ELF — this gate boots the shim
+# compositing regime (the header's evidence note); staging the seat would
+# move the window to full-viewport and change every pixel band below.
+PY
 
 vgate_run 01 -- --display --input --via-virtio --screen '$RUN_DIR/screen' \
     --script '$RUN_DIR/script.txt' \
     --input-string "printf '\\e[2J\\e[H\\e[31mRED\\e[0m \\e[1;44;97mBOLD\\e[0m\\n\\e[93m\\xE2\\x94\\x8C\\xE2\\x94\\x80\\xE2\\x94\\x90\\xE2\\x94\\x82\\xE2\\x94\\x94\\xE2\\x94\\x98 \\xC3\\xA9 \\xE4\\xBD\\xA0\\e[0m\\n\\e[38;2;255;128;71;48;2;17;34;51mTC\\e[0m'"$'\n' \
-    --input-string-after 'term: attached' \
-    --cvc-snap --snapshot-after 'term: done' --snapshot-out '$RUN_DIR/snap' \
+    --input-string-after 'goterm: attached' \
+    --cvc-snap --snapshot-after 'shot-term-pixels' --snapshot-out '$RUN_DIR/snap' \
     --script2 '$RUN_DIR/script2.txt' \
-    --script2-after 'term: done' \
-    --script-expect 'dui: windows=' \
-    --timeout 120
+    --script2-after 'goterm: done' --script2-delay 4 \
+    --script3 '$RUN_DIR/script3.txt' \
+    --script3-after 'shot-term-pixels' \
+    --script-expect 'rx-live-term-ok' \
+    --timeout 150
 
-vgate_assert 01 serial-contains 'term: ready'
-vgate_assert 01 serial-contains 'term: attached'
-vgate_assert 01 serial-contains 'term: line printf'
-vgate_assert 01 serial-contains 'term: done status=0'
+vgate_assert 01 serial-contains 'goterm: ready'
+vgate_assert 01 serial-contains 'goterm: attached'
+vgate_assert 01 serial-contains 'goterm: declare refused'
+vgate_assert 01 serial-contains 'goterm: line printf'
+vgate_assert 01 serial-contains 'goterm: done status=0'
 vgate_assert 01 serial-contains 'user user rect=64,48,640,400'
 vgate_assert 01 serial-absent '\[EXC\]'
 vgate_assert 01 serial-absent '[EXC] parking:'
@@ -55,8 +103,9 @@ def px(x, y):
     k = (y * w + x) * 4
     return data[k+2], data[k+1], data[k]  # R, G, B
 
-# The TERM window is at (64,48) 640x400; the compositor draws a 16px title
-# bar over the top, so the grid's glyphs live in the client area below it.
+# The GOTERM window is at (64,48) 640x400 — the classic terminal rect; the
+# compositor draws a 16px title bar over the top, so the grid's glyphs live
+# in the client area below it.
 fg = 0
 bg = 0
 red = 0
@@ -84,7 +133,7 @@ assert fg >= 20, f"terminal shell glyphs not rendered (fg={fg})"
 assert red >= 10, f"ANSI red foreground not painted (red={red})"
 assert blue_bg >= 10, f"ANSI blue background not painted (blue_bg={blue_bg})"
 assert bright >= 10, f"ANSI bright/bold foreground not painted (bright={bright})"
-print("PASS: TERM.BIN window painted the typed ANSI SGR burst on the scanout")
+print("PASS: GOTERM window painted the typed ANSI SGR burst on the scanout")
 
 # M73a-2 (#1631): the typed frame row is grid line 1 -> y72..79, cells at
 # x = 64 + c*8 (window at 64,48 + 16px title). Bright yellow (\e[93m =

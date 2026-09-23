@@ -4,6 +4,13 @@
 # NOTE.ELF (Go). The lifecycle vocabulary is shared by design (`note:` mirrors
 # `notepad:`), so the assertions below moved by prefix alone.
 #
+# M73d (#1628): the Zig terminal retires (TERM.BIN -> GOTERM.ELF), and the
+# third window keeps its ZIG slot: this burst is at the 16-slot task-pool
+# wall (M71f/M71h measurements below), and a third Go runtime beside
+# NOTE.ELF + GOTOP.ELF dies before the eighth window opens. CHAT.BIN takes
+# the slot — one `win_open`, resident, `chat: ready` — and it is the
+# everyday Zig app that had no other class-B gate, so wm1 asserts it now.
+#
 # HOST PREREQUISITE (fails the gate honestly when missing):
 #   bash tools/go/build-note.sh   ->  .build/go/NOTE.ELF
 
@@ -20,7 +27,7 @@ vgate_runner_flags -Xswiftc -DSPIKE
 vgate_file script.txt <<'EOF'
 set GOMAXPROCS=1
 exec WINLOOP.BIN
-exec TERM.BIN
+exec CHAT.BIN
 exec NOTE.ELF
 exec GOTOP.ELF
 exec DESKTOP.BIN
@@ -94,6 +101,10 @@ PY
 # most everyday app among the remaining Zig programs -- and the viewer's own
 # coverage lives where it belongs: live-image-viewer (QOI decode + both error
 # surfaces) and go-wm-seat run 04 (hosted as a full-viewport tab by the seat).
+# M73d (#1628) retires that terminal: the slot stays ZIG (the pool math
+# above is unchanged) and takes CHAT.BIN — one window, `chat: ready`,
+# resident — asserted by this spec's run below, which becomes chat's own
+# class-B proof (it had none).
 
 # M66c (#1485): script2 waits on the Go client's own READY marker, not just on
 # DESKTOP's. NOTE.ELF is the third of eight execs and its Go runtime start is the
@@ -122,7 +133,9 @@ vgate_assert 01 serial-contains 'winloop: open id=2'
 # Its window's slot is the Zig terminal now (see the pool measurement above),
 # and the viewer is covered by live-image-viewer and go-wm-seat run 04.
 vgate_assert 01 serial-contains 'note: ready'
-vgate_assert 01 serial-contains 'term: ready'
+# M73d (#1628): `term: ready` moved with the retired Zig terminal; CHAT.BIN
+# holds the slot (see the pool note above) and this is its own ready proof.
+vgate_assert 01 serial-contains 'chat: ready'
 vgate_assert 01 serial-contains 'top: ready'
 vgate_assert 01 serial-contains 'desktop: ready'
 vgate_assert 01 serial-contains 'devcons: ready'
