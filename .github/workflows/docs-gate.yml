@@ -40,6 +40,65 @@ jobs:
         with:
           fetch-depth: 1
 
+      # Content-truth guard (M75c, issue #1672). Two checks, one design
+      # choice: forbid lying FORWARD, never enforce freshness — a page that
+      # lags behind the ledger is honest, so this never reds an unrelated
+      # PR for staleness (M75a's sweep owns backward drift).
+      #
+      #   1. Deleted-binary denylist (site/**): a .BIN that build.zig no
+      #      longer outputs may be named on the public site only on a line
+      #      carrying a historical marker. docs/ is deliberately exempt:
+      #      ADRs and march trackers quote old binaries AS history.
+      #   2. Never-lie-forward watermark: no page under site/ or docs/
+      #      (minus docs/archive/, the generated gate-fleet-inventory.md,
+      #      and docs/status.md — the source) may claim an M-number higher
+      #      than docs/status.md contains.
+      - name: Site truth guard (deleted binaries + milestone watermark)
+        run: |
+          python3 - <<'PY'
+          import re, sys, pathlib
+
+          root = pathlib.Path(".")
+          fails = []
+
+          # 1) denylist: the built .BIN set is derived from build.zig itself
+          built = set(
+              re.findall(r'"([A-Z][A-Z0-9_]{0,24})\.BIN"', (root / "build.zig").read_text())
+          )
+          marker = re.compile(r"retired|deleted|\bnow\b|\bwas\b|successor", re.I)
+          bin_re = re.compile(r"\b([A-Z][A-Z0-9_]{1,24})\.BIN\b")
+          for path in sorted((root / "site").rglob("*.md")):
+              for lineno, line in enumerate(path.read_text().splitlines(), 1):
+                  for name in bin_re.findall(line):
+                      if name in built or marker.search(line):
+                          continue
+                      fails.append(
+                          f"{path}:{lineno}: names deleted {name}.BIN with no marker "
+                          "(retired|deleted|now|was|successor)"
+                      )
+
+          # 2) watermark: max M-token in status.md bounds every other page
+          status = (root / "docs" / "status.md").read_text()
+          limit = max(int(m) for m in re.findall(r"\bM(\d{1,3})", status))
+          skip = {"status.md", "gate-fleet-inventory.md"}
+          for base in (root / "site", root / "docs"):
+              for path in sorted(base.rglob("*.md")):
+                  rel = path.relative_to(root)
+                  if path.name in skip or "archive" in rel.parts:
+                      continue
+                  for lineno, line in enumerate(path.read_text().splitlines(), 1):
+                      for token in re.findall(r"\bM(\d{1,3})", line):
+                          if int(token) > limit:
+                              fails.append(
+                                  f"{path}:{lineno}: claims M{token} but docs/status.md stops at M{limit}"
+                              )
+
+          if fails:
+              print("\n".join(fails))
+              sys.exit(1)
+          print(f"truth guard ok: {len(built)} built .BIN names, milestone watermark M{limit}")
+          PY
+
       # The Boris revision is the single pin in .github/boris-pin.json,
       # shared with the Pages publish workflow: this gate always validates
       # the same toolchain that publishes.
