@@ -10,6 +10,34 @@
 
 vgate_name live-roadpops "claim 1574 (milestone six, card G3) class-B"
 
+# --- M76a (#1674): the splash-to-seat handoff --------------------------------
+# The splash frame HOLDS the scanout from render_splash until either the seat
+# binds the scanout (silent one-frame handoff — the go-dogfood chain carries
+# that half: `wm: autostart gotabwm (settings wm=gotabwm)` ->
+# `gotabwm: registered` -> `gotabwm: seat-taken`) or THE BOUND expires:
+# splash_bound_ticks = 3 timer ticks (1 Hz) after driving_award.splash_eval's
+# first idle evaluation (kernel/src/driving_award.zig — the bound is asserted
+# here, not tuned by feel). This run is share mode `none` — the seat program
+# is not on the share — so no seat can register and the timeout MUST fire.
+# Marker chain, in order, all on serial:
+#
+#   roadpops: armed target=fbtext               boot: splash pushed, hold on
+#   text: boot banner presented                 idle #1: the tee's first
+#                                               present — composed, held OFF
+#                                               the scanout (fbtext writes
+#                                               land in the fb, not the screen)
+#   wm: autostart gotabwm: ... not on the share idle #1: the seat question
+#                                               resolves — no seat can come
+#   splash: seat present not observed within    <= bound after idle #1: the
+#           3s, continuing with Road Pops        hold releases, honestly
+#
+# The snapshot below then decodes the NEWEST gpu-screen-* (the run's
+# --timeout 30 outlives the fixed 5/10/15 s captures, so that is -15s):
+# the terminal must own the screen again — banner AND live session glyphs —
+# proving no splash residue survived the bound. Headless boots (no gpu) and
+# a seat that binds inside the bound (seed-share runs: go-dogfood) never
+# print the timeout line — the handoff there is silent by design.
+
 vgate_file script.txt <<'EOF'
 echo ROADPOPS
 uname
@@ -130,5 +158,30 @@ if bc < 0.9:
     sys.exit("FAIL: the region below the terminal is not the background fill")
 
 print("PASS: the captured frame is a working terminal — banner AND live session glyphs over the dark background")
+PY
+
+# M76a (#1674): the seatless share printed the autostart miss AND the
+# bounded-timeout line — the hold released honestly instead of hanging.
+vgate_assert 01 serial-contains 'wm: autostart gotabwm'
+vgate_assert 01 serial-contains 'not on the share (shim compositing)'
+vgate_assert 01 serial-contains 'splash: seat present not observed within 3s, continuing with Road Pops'
+# The handoff ORDER chain: armed -> banner-present -> autostart-miss ->
+# timeout-line, each strictly after the last, straight from the serial log.
+vgate_assert 01 python <<'PY'
+import os, sys
+out = open(os.environ["VG_SER"], errors="replace").read()
+chain = [
+    "roadpops: armed target=fbtext",
+    "text: boot banner presented",
+    "wm: autostart gotabwm",
+    "splash: seat present not observed within 3s",
+]
+idx = [out.find(m) for m in chain]
+missing = [m for m, i in zip(chain, idx) if i < 0]
+if missing:
+    sys.exit("FAIL: handoff marker missing: %r" % missing)
+if idx != sorted(idx):
+    sys.exit("FAIL: handoff order wrong: %r" % list(zip(chain, idx)))
+print("handoff chain ordered: " + " -> ".join(chain))
 PY
 
