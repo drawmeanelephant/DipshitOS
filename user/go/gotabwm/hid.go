@@ -68,6 +68,10 @@ const pointerDragHold = 12
 var (
 	prevPtrButtons uint8
 	railDragFrom   = -1 // source cell, or -1 when no drag is armed
+	// contentDown tracks a pointer-down that went to the kernel as content
+	// (#1688): the matching release is content too, wherever it lands.
+	// Chrome downs (start surface, rail) never set it.
+	contentDown bool
 )
 
 func handleWmKey(e vi.Event) {
@@ -247,11 +251,30 @@ func handleWmPointer(e vi.Event) {
 			return
 		}
 		beginRailDrag(px, py)
+		_, onRail := railCellAt(px, py, vi.ScanoutWidth, tabs.Count(), RailHeight)
 		_ = applyRailClick(px, py)
+		if !onRail {
+			// #1688: not chrome — content for the kernel's local path
+			// (terminal text selection, mouse-tracking reports). The
+			// kernel derives press/release edges from this serialized
+			// stream itself; consumed chrome is never forwarded.
+			contentDown = true
+			vi.WmctlContentPtr(px, py, btn)
+		}
 		return
 	}
 	if up {
 		_ = endRailDrag(px, py)
+		if contentDown {
+			vi.WmctlContentPtr(px, py, btn)
+			contentDown = false
+		}
+		return
+	}
+	// #1688: motion is content too, unless it rides the rail chrome —
+	// the only pointer consumer here besides the launcher above.
+	if _, onRail := railCellAt(px, py, vi.ScanoutWidth, tabs.Count(), RailHeight); !onRail {
+		vi.WmctlContentPtr(px, py, btn)
 	}
 }
 

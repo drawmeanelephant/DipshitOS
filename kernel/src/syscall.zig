@@ -3250,6 +3250,19 @@ fn handle_wmctl(args: Args, _: *exceptions.VectorFrame) u64 {
             _ = scheduler.pin_task(scheduler.current_id(), 0);
             return 0;
         },
+        wm_server.wmctl_content_ptr => {
+            // #1688: the registered seat forwards one content pointer
+            // sample (a0 = x|(y<<16), a1 = button mask) for the kernel's
+            // local path — terminal text selection + mouse-tracking
+            // reports. Edges derive from the serialized stream in
+            // driving_award; consumed chrome never arrives here.
+            if (!wm_server.registered()) return error_result(.enosys);
+            if (wm_server.registered_pid() != pid) return error_result(.eacces);
+            const fwd_x: u32 = @as(u16, @truncate(args[1]));
+            const fwd_y: u32 = @truncate(args[1] >> 16);
+            driving_award.wm_content_pointer(fwd_x, fwd_y, @truncate(args[2]));
+            return 0;
+        },
         wm_server.wmctl_set_window => {
             // M32 WMS4 (issue #624): the WM submits a chrome descriptor.
             // M32 WMS5 (issue #625): the frozen ADR 0007 a1/a2 encoding

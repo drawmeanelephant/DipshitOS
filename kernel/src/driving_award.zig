@@ -3312,6 +3312,149 @@ pub fn mouse_buttons_to_flags(buttons: u8) u16 {
     return flags;
 }
 
+// #1688 (issue #1688): the CONTENT half of one pointer sample — mouse-
+// tracking report vs local text selection — with explicit coordinates and
+// explicit edge flags. Called twice in the system: from pointer_tick with
+// the raw virtio stream's edges (shim path — the pre-#1688 structure,
+// WMS5's no-compositing end-state untouched), and from wm_content_pointer
+// below with the registered seat's forwarded sample (slot-65 cmd 15).
+// mouseOwnsAt arbitrates at the sample's own coordinates exactly as the
+// local path always has; the selection guards lost only their redundant
+// `!mouseOwnsAt` conjunct, which the else makes implicit.
+fn content_pointer_pass(
+    nx: u32,
+    ny: u32,
+    moved: bool,
+    cur_left: bool,
+    cur_right: bool,
+    left_pressed: bool,
+    right_pressed: bool,
+    left_released: bool,
+    right_released: bool,
+    press_handled: bool,
+) void {
+    if (mouseOwnsAt(nx, ny)) {
+        if (terminalHitAt(nx, ny)) |mh| {
+            if (terminal.screenForWindow(mh.win_id)) |mscr| {
+                if (terminal.windowTerminal(mh.win_id)) |mtt| {
+                    var kind: ?terminal.MouseKind = null;
+                    var btn: u8 = 0;
+                    if (left_pressed) {
+                        kind = .press;
+                        btn = 0;
+                    } else if (right_pressed) {
+                        kind = .press;
+                        btn = 2;
+                    } else if (left_released) {
+                        kind = .release;
+                        btn = 0;
+                    } else if (right_released) {
+                        kind = .release;
+                        btn = 2;
+                    } else if (moved and (cur_left or cur_right)) {
+                        kind = .drag;
+                        btn = if (cur_left) 0 else 2;
+                    } else if (moved) {
+                        kind = .motion;
+                        btn = 0;
+                    }
+                    if (kind) |k| {
+                        if (terminal.mouseReports(
+                            mscr.mouse_1000,
+                            mscr.mouse_1002,
+                            mscr.mouse_1003,
+                            k,
+                        )) {
+                            var enc: [24]u8 = undefined;
+                            const n = terminal.encodeMouse(
+                                mscr.mouse_1006,
+                                k,
+                                btn,
+                                @intCast(mh.col + 1),
+                                @intCast(mh.row + 1),
+                                @intCast(mscr.cols),
+                                &enc,
+                            );
+                            if (n > 0) {
+                                if (k == .motion or k == .drag) {
+                                    _ = mtt.stageMouseMotion(enc[0..n]);
+                                } else {
+                                    _ = mtt.pushMouse(enc[0..n]);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        if (left_pressed and !press_handled) {
+            if (terminalHitAt(nx, ny)) |hit| {
+                if (terminal.screenForWindow(hit.win_id)) |scr| {
+                    scr.beginSelection(hit.line, hit.col);
+                    term_sel_dragging = true;
+                    klog.line("dui: term sel begin\n");
+                }
+            }
+        } else if (cur_left and term_sel_dragging) {
+            if (terminalHitAt(nx, ny)) |hit| {
+                if (terminal.screenForWindow(hit.win_id)) |scr| {
+                    scr.extendSelection(hit.line, hit.col);
+                }
+            }
+        }
+        if (left_released and term_sel_dragging) {
+            // Land the final endpoint on the release position, then close
+            // the selection (the gate's copy chord waits for this line).
+            if (terminalHitAt(nx, ny)) |hit| {
+                if (terminal.screenForWindow(hit.win_id)) |scr| {
+                    scr.extendSelection(hit.line, hit.col);
+                }
+            }
+            term_sel_dragging = false;
+            klog.line("dui: term sel end\n");
+        }
+    }
+}
+
+// #1688: the seat-serialized forward stream's own sample history. Press/
+// release edges and "moved" derive here exactly as prev_ptr_buttons and
+// the stream deltas do for the raw path in pointer_tick, so the content
+// pass cannot tell the two apart.
+var wm_fwd_prev_buttons: u8 = 0;
+var wm_fwd_prev_x: u32 = 0;
+var wm_fwd_prev_y: u32 = 0;
+
+/// #1688 (slot-65 cmd 15, wm_server.wmctl_content_ptr): the registered
+/// seat forwarded one pointer sample for the kernel's LOCAL content path —
+/// terminal text selection and mouse-tracking reports. Chrome the seat
+/// consumed (start surface, rail, launcher) is never forwarded, so this
+/// entry only ever sees content coordinates. Dormant with no seat: kernel
+/// terminal selection stays exactly where WMS5 left it.
+pub fn wm_content_pointer(x: u32, y: u32, buttons: u8) void {
+    if (!wm_owns_input) return;
+    const cur_left = (buttons & 0x01) != 0;
+    const cur_right = (buttons & 0x02) != 0;
+    const prev_left = (wm_fwd_prev_buttons & 0x01) != 0;
+    const prev_right = (wm_fwd_prev_buttons & 0x02) != 0;
+    const moved = (x != wm_fwd_prev_x or y != wm_fwd_prev_y);
+    wm_fwd_prev_buttons = buttons;
+    wm_fwd_prev_x = x;
+    wm_fwd_prev_y = y;
+    content_pointer_pass(
+        x,
+        y,
+        moved,
+        cur_left,
+        cur_right,
+        (!prev_left and cur_left),
+        (!prev_right and cur_right),
+        (prev_left and !cur_left),
+        (prev_right and !cur_right),
+        false, // the seat consumed chrome; no local press latch applies
+    );
+}
+
 /// Card U4 (claim 4993): the pointer tick — consume the pointer state from
 /// the input path (motion + click edges). Returns the newly focused window
 /// id when a CLICK landed on a window (D4: click = focus + raise), null
@@ -3378,66 +3521,14 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
         // window's client area. Selection is model-only here (terminal.zig);
         // Ctrl+Shift+C copies it (input.zig). The click below still focuses
         // the window. The press latch survives a whole injected drag being
-        // drained in one pass (last-write-wins state would lose the down).        // M73i (#1635): mouse tracking owns a plain pointer over a bound
+        // drained in one pass (last-write-wins state would lose the down).
+        // M73i (#1635): mouse tracking owns a plain pointer over a bound
         // window — the app gets the report, selection stays local, and
         // Shift (or modes off) hands everything back to the local path.
-        // The report resolves at the cursor; `mouseOwnsAt` arbitrates each
-        // selection site below at that site's own coordinates.
-        if (mouseOwnsAt(cursor_x, cursor_y)) {
-            if (terminalHitAt(cursor_x, cursor_y)) |mh| {
-                if (terminal.screenForWindow(mh.win_id)) |mscr| {
-                    if (terminal.windowTerminal(mh.win_id)) |mtt| {
-                        var kind: ?terminal.MouseKind = null;
-                        var btn: u8 = 0;
-                        if (left_pressed) {
-                            kind = .press;
-                            btn = 0;
-                        } else if (right_pressed) {
-                            kind = .press;
-                            btn = 2;
-                        } else if (left_released) {
-                            kind = .release;
-                            btn = 0;
-                        } else if (right_released) {
-                            kind = .release;
-                            btn = 2;
-                        } else if (moved and (cur_left or cur_right)) {
-                            kind = .drag;
-                            btn = if (cur_left) 0 else 2;
-                        } else if (moved) {
-                            kind = .motion;
-                            btn = 0;
-                        }
-                        if (kind) |k| {
-                            if (terminal.mouseReports(
-                                mscr.mouse_1000,
-                                mscr.mouse_1002,
-                                mscr.mouse_1003,
-                                k,
-                            )) {
-                                var enc: [24]u8 = undefined;
-                                const n = terminal.encodeMouse(
-                                    mscr.mouse_1006,
-                                    k,
-                                    btn,
-                                    @intCast(mh.col + 1),
-                                    @intCast(mh.row + 1),
-                                    @intCast(mscr.cols),
-                                    &enc,
-                                );
-                                if (n > 0) {
-                                    if (k == .motion or k == .drag) {
-                                        _ = mtt.stageMouseMotion(enc[0..n]);
-                                    } else {
-                                        _ = mtt.pushMouse(enc[0..n]);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // #1688: the report-or-selection decision itself lives in
+        // content_pointer_pass below — one body, called from here with the
+        // raw stream's edges and from wm_content_pointer with the registered
+        // seat's forwarded sample — so the two paths cannot diverge.
         var press_handled = false;
         if (input.take_press()) |p| {
             const px = map_pointer_axis(p.x, virtio_gpu.fb_width);
@@ -3468,32 +3559,18 @@ pub fn pointer_tick(st: input.PointerState, click: ?input.Click) ?u8 {
                 }
             }
         }
-        if (!mouseOwnsAt(cursor_x, cursor_y) and left_pressed and !press_handled) {
-            if (terminalHitAt(cursor_x, cursor_y)) |hit| {
-                if (terminal.screenForWindow(hit.win_id)) |scr| {
-                    scr.beginSelection(hit.line, hit.col);
-                    term_sel_dragging = true;
-                    klog.line("dui: term sel begin\n");
-                }
-            }
-        } else if (!mouseOwnsAt(cursor_x, cursor_y) and cur_left and term_sel_dragging) {
-            if (terminalHitAt(cursor_x, cursor_y)) |hit| {
-                if (terminal.screenForWindow(hit.win_id)) |scr| {
-                    scr.extendSelection(hit.line, hit.col);
-                }
-            }
-        }
-        if (!mouseOwnsAt(cursor_x, cursor_y) and left_released and term_sel_dragging) {
-            // Land the final endpoint on the release position, then close
-            // the selection (the gate's copy chord waits for this line).
-            if (terminalHitAt(cursor_x, cursor_y)) |hit| {
-                if (terminal.screenForWindow(hit.win_id)) |scr| {
-                    scr.extendSelection(hit.line, hit.col);
-                }
-            }
-            term_sel_dragging = false;
-            klog.line("dui: term sel end\n");
-        }
+        content_pointer_pass(
+            cursor_x,
+            cursor_y,
+            moved,
+            cur_left,
+            cur_right,
+            left_pressed,
+            right_pressed,
+            left_released,
+            right_released,
+            press_handled,
+        );
 
         // Step 5/6/7: drag + close + minimize handling on MOUSE_DOWN (left only).
         // M15 C4: dock handling must precede user windows — dock is at 0,0,24,700.
@@ -5606,4 +5683,91 @@ pub fn drain(ticks: u64) virtio_gpu.CmdResult {
     }
     if (need) _ = mark_dirty(255);
     return composite();
+}
+
+// #1688: line-hook capture for the forward's marker pins — the splash
+// capture pattern, but APPENDING: the begin and end lines must coexist in
+// one buffer to be pinned together.
+var wm_fwd_test_log: [512]u8 = undefined;
+var wm_fwd_test_log_len: usize = 0;
+
+fn wm_fwd_test_capture(bytes: []const u8) void {
+    const n = @min(bytes.len, wm_fwd_test_log.len - wm_fwd_test_log_len);
+    @memcpy(wm_fwd_test_log[wm_fwd_test_log_len..][0..n], bytes[0..n]);
+    wm_fwd_test_log_len += n;
+}
+
+test "wm content forward: a seat-forwarded drag runs local selection (#1688)" {
+    arm();
+    wm_owns_input = true;
+    defer {
+        wm_owns_input = false;
+        wm_fwd_prev_buttons = 0;
+        wm_fwd_prev_x = 0;
+        wm_fwd_prev_y = 0;
+        term_sel_dragging = false;
+    }
+    wm_fwd_test_log_len = 0;
+    klog.line_hook = wm_fwd_test_capture;
+    defer klog.line_hook = null;
+    const id = switch (user_open(64, 48, 640, 400, 9)) {
+        .opened => |i| i,
+        else => return error.TestUnexpectedResult,
+    };
+    defer _ = user_close(id);
+    const h = terminal.create(null).?;
+    defer terminal.release(h);
+    defer terminal.detachWindow(id);
+    try std.testing.expect(terminal.get(h).?.attachWindow(id));
+    // Press at (68,70): inside the client area (top_y = 48+16 = 64) —
+    // row 0, col 0. The seat-derived press edge must latch a drag...
+    wm_content_pointer(68, 70, 0x01);
+    try std.testing.expect(term_sel_dragging);
+    // ...a held sample at (700,140) — row 4, col 79 — extends...
+    wm_content_pointer(700, 140, 0x01);
+    // ...and the release edge closes it, end marker printed.
+    wm_content_pointer(700, 140, 0x00);
+    try std.testing.expect(!term_sel_dragging);
+    const cap = wm_fwd_test_log[0..wm_fwd_test_log_len];
+    try std.testing.expect(std.mem.indexOf(u8, cap, "dui: term sel begin") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cap, "dui: term sel end") != null);
+}
+
+test "wm content forward: dormant with no seat; chrome never begins selection (#1688)" {
+    arm();
+    wm_fwd_test_log_len = 0;
+    klog.line_hook = wm_fwd_test_capture;
+    defer klog.line_hook = null;
+    const id = switch (user_open(64, 48, 640, 400, 9)) {
+        .opened => |i| i,
+        else => return error.TestUnexpectedResult,
+    };
+    defer _ = user_close(id);
+    const h = terminal.create(null).?;
+    defer terminal.release(h);
+    defer terminal.detachWindow(id);
+    try std.testing.expect(terminal.get(h).?.attachWindow(id));
+    // (a) no seat: the identical drag is fully dormant — WMS5's state.
+    wm_owns_input = false;
+    wm_content_pointer(68, 70, 0x01);
+    wm_content_pointer(700, 140, 0x01);
+    wm_content_pointer(700, 140, 0x00);
+    try std.testing.expect(!term_sel_dragging);
+    // (b) seat on: chrome coordinates are never content — the title band
+    // (terminalHitAt skips below top_y) and points outside the window.
+    wm_owns_input = true;
+    defer {
+        wm_owns_input = false;
+        wm_fwd_prev_buttons = 0;
+        wm_fwd_prev_x = 0;
+        wm_fwd_prev_y = 0;
+        term_sel_dragging = false;
+    }
+    wm_content_pointer(100, 50, 0x01); // title band (48..63)
+    wm_content_pointer(100, 50, 0x00);
+    wm_content_pointer(10, 10, 0x01); // outside the window (dock corner)
+    wm_content_pointer(10, 10, 0x00);
+    try std.testing.expect(!term_sel_dragging);
+    const cap = wm_fwd_test_log[0..wm_fwd_test_log_len];
+    try std.testing.expect(std.mem.indexOf(u8, cap, "dui: term sel") == null);
 }
