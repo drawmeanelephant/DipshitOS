@@ -23,6 +23,14 @@ const (
 	// WmctlRequestPresentCmd is slot-65 subcommand 3: transfer+flush the
 	// scanout now and advance the kernel's present sequence/count.
 	WmctlRequestPresentCmd uint64 = 3
+	// WmctlContentPtrCmd is slot-65 subcommand 15 (#1688, ADR 0015
+	// additive, changelog 2026-09-23): forward one CONTENT pointer sample
+	// into the kernel's local path (terminal text selection + mouse-
+	// tracking reports). a0 = x|(y<<16), a1 = button mask (bit0 left,
+	// bit1 right); the kernel derives press/release edges from the
+	// seat-serialized stream itself. Chrome the seat consumed (start
+	// surface, rail, launcher) is never forwarded.
+	WmctlContentPtrCmd uint64 = 15
 
 	// M33MapShared is the frozen seam-B flag (ADR 0016, bit 16 of the mmap
 	// flags word): a shared-anonymous mapping. The scanout bind is one.
@@ -69,6 +77,17 @@ func WmctlRegister() int64 { return syscall1(SlotWmctl, uintptr(WmctlRegisterCmd
 // Returns 0 on success; -ENOSYS when no seat is registered; -EACCES from any
 // process other than the seat.
 func WmctlRequestPresent() int64 { return syscall1(SlotWmctl, uintptr(WmctlRequestPresentCmd)) }
+
+// WmctlContentPtr forwards one pointer sample for the kernel's local content
+// path — terminal text selection (M49 SD5) and mouse-tracking reports — the
+// path WMS5 made dormant under a seat. The seat calls it for every pointer
+// event that is not launcher or rail chrome; press/release edges derive from
+// this serialized stream itself, so the kernel cannot tell it from the raw
+// path. Host-safe: degrades to -ENOSYS off the guest like the rest of the SDK.
+func WmctlContentPtr(x, y uint32, buttons uint8) int64 {
+	return syscall6(SlotWmctl, uintptr(WmctlContentPtrCmd),
+		uintptr(uint32(x)|(y<<16)), uintptr(buttons), 0, 0, 0)
+}
 
 // MmapScanout maps the virtio-gpu framebuffer WRITABLE into the registered
 // WM's root — the compose-N target. Seat-only and full-frame only: the kernel

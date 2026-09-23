@@ -161,6 +161,20 @@ it (the render server already separates policy from blit).
   the **ADR 0007 slot 66 `sys_time`** in #1058 — a general-purpose epoch read
   is not a WM concern, so the WMCTL clock subcommand was dropped before
   either PR merged.)
+- 2026-09-23 — issue #1688: **additive WMCTL subcommand 15** (seat-gated like
+  every other subcommand; no existing opcode or arg layout changes — and the
+  number is the very one the note above left free).
+  `CONTENT_PTR` (`wmctl(cmd=15, x|(y<<16), buttons, 0, 0, 0)`) relays one
+  pointer sample from the registered seat into the kernel's LOCAL content
+  path — terminal text selection (M49 SD5) and mouse-tracking reports (M73i)
+  — the decision block WMS5 made dormant under a seat by returning from
+  `pointer_tick` before every selection site. Press/release edges derive from
+  the seat-serialized sample stream itself, so the content pass is
+  edge-identical to the raw path; chrome the seat consumed (start surface,
+  rail, launcher) is never forwarded, so the kernel only ever sees content
+  coordinates. Backs the M73z acceptance card #1638: without this forward,
+  `dui: term sel end` can never print in a seated boot and the >256 B
+  Ctrl+Shift+V paste chain is unreachable there.
 
 ## Open issues (left to implementing claims)
 

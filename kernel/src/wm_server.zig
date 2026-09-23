@@ -138,6 +138,18 @@ pub const wmctl_win_close: u64 = 13;
 /// carry title bytes can still name non-tabapp windows. Seat-gated
 /// (registered WM only), like every other WMCTL command.
 pub const wmctl_window_name: u64 = 14;
+/// #1688: CONTENT pointer forward (ADR 0015 additive — changelog entry
+/// 2026-09-23; numbering note there: the never-merged tray-clock 15 was
+/// dropped for `sys_time`, leaving 15 free until this card takes it).
+/// The registered seat relays pointer samples into the kernel's LOCAL
+/// content path — terminal text selection and mouse-tracking reports —
+/// which WMS5 made dormant under a seat by returning from `pointer_tick`
+/// before every selection site. Chrome (start surface, rail, launcher)
+/// is consumed seat-side and never forwarded. a0 = x|(y<<16), a1 =
+/// button mask (bit0 left, bit1 right); press/release edges derive from
+/// the seat-serialized sample stream itself. Seat-gated like every other
+/// subcommand; no existing opcode or arg layout changes.
+pub const wmctl_content_ptr: u64 = 15;
 /// OVERVIEW actions (a0).
 pub const overview_enter_action: u64 = 0;
 pub const overview_exit_action: u64 = 1;
