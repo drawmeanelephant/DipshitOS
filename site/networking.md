@@ -52,7 +52,7 @@ virtio-net transport, built in bounded fixed-BSS staging.
   (the slot-62 network dashboard), `GODNS.ELF` (UDP A-record lookup),
   `GOTRACEROUTE.ELF` (bounded direct-peer ICMP echo diagnostic), and `CHAT.BIN`
   (graphical UDP chat) run the seam end to end. The three Go diagnostics
-  replaced their Zig `.BIN` originals in M78a and are built with
+  replaced their Zig `.BIN` originals and are built with
   `bash tools/go/build-netdiag.sh` before their live gates.
 
 <Aside kind="info">

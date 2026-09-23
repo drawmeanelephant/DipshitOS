@@ -57,13 +57,17 @@ staged by their gates.
 | `SPIN.BIN` | `user/src/spin.zig` | Arc5 #246: the hostile-consumer (CPU) test |
 | `SYSMON.BIN` | `user/src/sysmon.zig` (deleted M71g) | M27 G6: the system monitor dashboard — since retired; one successor `GOTOP.ELF` covers both rows |
 | `PING.BIN` | `user/src/ping.zig` (deleted M71n) | M26 N1: the ICMP ping seam (`sys_ping_send`/`sys_ping_poll`) — since retired to Go (`GOPING.ELF`, gate `go-net-clis`) |
-| `NETSTAT.BIN` | `user/src/netstat.zig` (deleted M78a) | M26 N2: network dashboard — retired to Go (`GONETSTAT.ELF`, `user/go/netstat`, gate `live-netstat`) |
-| `DNS.BIN` | `user/src/dns.zig` (deleted M78a) | M26 N5: DNS lookup — retired to Go (`GODNS.ELF`, `user/go/dns`, gate `live-n5-dns`) |
-| `TRACEROUTE.BIN` | `user/src/traceroute.zig` (deleted M78a) | M26 N7: direct-peer ICMP diagnostic — retired to Go (`GOTRACEROUTE.ELF`, `user/go/traceroute`, gate `live-n7-traceroute`) |
+| `NETSTAT.BIN` | `user/src/netstat.zig` (deleted) | M26 N2: network dashboard — retired to Go (`GONETSTAT.ELF`, `user/go/netstat`, gate `live-netstat`) |
+| `DNS.BIN` | `user/src/dns.zig` (deleted) | M26 N5: DNS lookup — retired to Go (`GODNS.ELF`, `user/go/dns`, gate `live-n5-dns`) |
+| `TRACEROUTE.BIN` | `user/src/traceroute.zig` (deleted) | M26 N7: direct-peer ICMP diagnostic — retired to Go (`GOTRACEROUTE.ELF`, `user/go/traceroute`, gate `live-n7-traceroute`) |
+
 | `DOWNLOAD.BIN` | `user/src/download.zig` | M26 N11: HTTP download manager |
 | `NETPROF.BIN` | `user/src/netprof.zig` | M26 N12: network profile manager |
 | `VMTEST.BIN` | `user/src/vmtest.zig` | M29: demand-fault, COW, mmap/munmap, zero-leak teardown |
 | `HTTPD.BIN` | `user/src/httpd.zig` (deleted M71l) | the in-guest HTTP/1.1 web server (TCP passive open, claim 0750) — since retired to Go (`GOHTTPD.ELF`, gate `live-httpd`) |
+
+The three diagnostic apps' Zig implementations were replaced by Go in this
+change; their build recipe is `bash tools/go/build-netdiag.sh`.
 
 **Dynamic executables, Go ELFs, and shared libraries (M30/M31):**
 
@@ -74,9 +78,9 @@ staged by their gates.
 | `DYNAPP.ELF` | `tools/mkdyn-elf.py` | M30 D4: the dynamic-executable proof — links both libraries, opens a window, exits 0 |
 | `CALC.ELF` / `NOTEPAD.ELF` / `FILE.ELF` / `DESKTOP.ELF` | `tools/mkdyn-elf.py` (M31 migration fixtures) | M31 E1–E4: the desktop apps rebuilt as dynamic executables (`FILE.ELF` is the dynlink fixture; Zig `FILE.BIN` was deleted in M60) |
 | `GOFILES.ELF` | `user/go/files` | M58a/M60: Go file manager (list/open on the host share; gate `go-fileman`). Zig `FILE.BIN` deleted. |
-| `GONETSTAT.ELF` | `user/go/netstat` (`tools/go/build-netdiag.sh`) | M78a: slot-62 network dashboard; gate `live-netstat` |
-| `GODNS.ELF` | `user/go/dns` (`tools/go/build-netdiag.sh`) | M78a: UDP DNS A-record lookup; gate `live-n5-dns` |
-| `GOTRACEROUTE.ELF` | `user/go/traceroute` (`tools/go/build-netdiag.sh`) | M78a: bounded direct-peer ICMP echo reachability; gate `live-n7-traceroute` |
+| `GONETSTAT.ELF` | `user/go/netstat` (`tools/go/build-netdiag.sh`) | slot-62 network dashboard; gate `live-netstat` |
+| `GODNS.ELF` | `user/go/dns` (`tools/go/build-netdiag.sh`) | UDP DNS A-record lookup; gate `live-n5-dns` |
+| `GOTRACEROUTE.ELF` | `user/go/traceroute` (`tools/go/build-netdiag.sh`) | bounded direct-peer ICMP echo reachability; gate `live-n7-traceroute` |
 | `PLUGIN.SO` | loaded via `dlopen`/`dlsym` | M31 E5: runtime-loadable plugin modules |
 
 The flat images come from `zig build` (Zig → ELF → `elf2bin.py` → a flat
