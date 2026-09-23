@@ -32,18 +32,57 @@ const (
 	markerClose   = "charmhello: close"
 	markerOK      = "charmhello OK"
 	markerMouse   = "charmhello: mouse b="
+	markerSize    = "charmhello: size "
 )
+
+// M73j (#1636): the port's unit pin for tea.WindowSizeMsg — CELLS, never
+// pixels. Both numbers mirror kernel formulas for the SAME rect:
+//
+//	cols  = clamp(w/8, 8, 80)   — terminal.zig syncWindowCols -> setCols
+//	        (the M49 SD5-effective column count the grid reflows to)
+//	rows  = (h - 16)/8          — driving_award.zig rows_visible, the
+//	        16 px title band (wnd_core title_bar_h) is NOT client area
+//
+// A TUI can therefore never ask for geometry the grid will not render;
+// TestSizeMsgPinsKernelCellMath pins the agreement class-A.
+func sizeMsg(w, h uint32) tea.WindowSizeMsg {
+	cols := int(w / 8)
+	if cols < 8 {
+		cols = 8
+	}
+	if cols > 80 {
+		cols = 80
+	}
+	rows := 1 // kernel: `if (h > title) (h-title)/8 else 1`
+	if h > 16 {
+		rows = int((h - 16) / 8)
+	}
+	return tea.WindowSizeMsg{Width: cols, Height: rows}
+}
+
+func sizeMarker(m model) string {
+	return markerSize + vi.Itoa64(int64(m.cols)) + "x" + vi.Itoa64(int64(m.rows))
+}
 
 type model struct {
 	paused bool
 	keys   uint32
 	quit   bool
+	cols   int
+	rows   int
 }
 
 // Init is intentionally command-free: Virelai feeds key bytes below.
 func (model) Init() tea.Cmd { return nil }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// M73j (#1636): the size message arrives ONCE at startup (from the
+	// declared rect) and on every WIN_RESIZE (clamped w/h) — charm v2's
+	// documented WindowSizeMsg cadence, in cells.
+	if ws, ok := msg.(tea.WindowSizeMsg); ok {
+		m.cols, m.rows = ws.Width, ws.Height
+		return m, nil
+	}
 	key, ok := msg.(tea.KeyPressMsg)
 	if !ok {
 		return m, nil
@@ -69,7 +108,8 @@ func (m model) View() tea.View {
 			"\x1b[1;95m  VirelaiOS × Bubble Tea \x1b[0m\n\n" +
 			"\x1b[96m  bound /dev/tty · real tea.Model\x1b[0m\n\n" +
 			"  status: " + state + "\n" +
-			"  keys:   \x1b[1;97m" + vi.Itoa64(int64(m.keys)) + "\x1b[0m\n\n" +
+			"  keys:   \x1b[1;97m" + vi.Itoa64(int64(m.keys)) + "\x1b[0m\n" +
+			"  size:   \x1b[1;97m" + vi.Itoa64(int64(m.cols)) + "x" + vi.Itoa64(int64(m.rows)) + "\x1b[0m\n\n" +
 			"\x1b[90m  space toggles · q exits\x1b[0m\n",
 	)
 }
@@ -216,6 +256,11 @@ func main() {
 	}
 
 	m := model{}
+	// M73j (#1636): the INITIAL WindowSizeMsg — the first frame paints at
+	// the declared rect's real grid (640x400 -> 80x48), not a guess.
+	next, _ := m.Update(sizeMsg(ta.W, ta.H))
+	m = next.(model)
+	vi.ConsoleLine(sizeMarker(m))
 	if !paint(fd, m) {
 		shutdown(ta, fd, 4)
 	}
@@ -232,6 +277,13 @@ func main() {
 		m = next.(model)
 		if m.quit {
 			shutdown(ta, fd, 0)
+		}
+		if b == 'r' {
+			// M73j (#1636): the owner-side resize seam — sys_win_resize
+			// (slot 47) clamps + reflows and pushes WIN_RESIZE; the loop's
+			// ActionResized then delivers tea.WindowSizeMsg (512x384 ->
+			// 64x46 cells) with its serial marker, the class-B proof.
+			_ = vi.WinResize(ta.Win, 512, 384)
 		}
 		if !paint(fd, m) {
 			shutdown(ta, fd, 4)
@@ -282,8 +334,23 @@ func main() {
 			}
 			continue
 		}
-		if ta.Dispatch(ev) == tabapp.ActionClosed {
+		// M73j (#1636): tabapp.Dispatch already consumes WIN_RESIZE into
+		// ActionResized (arg0/arg1 = the clamped w/h both emit sites
+		// carry) — this used to fall through unhandled, so a resized
+		// window repainted at stale geometry forever. Size msg ->
+		// repaint -> serial marker with the NEW cells, the class-B seam.
+		switch ta.Dispatch(ev) {
+		case tabapp.ActionClosed:
 			shutdown(ta, fd, 0)
+		case tabapp.ActionResized:
+			next, _ := m.Update(sizeMsg(ev.Arg0, ev.Arg1))
+			m = next.(model)
+			if !paint(fd, m) {
+				shutdown(ta, fd, 4)
+			}
+			vi.Sleep(1)
+			vi.ConsoleLine(sizeMarker(m))
+			vi.ConsoleLine(markerRepaint)
 		}
 	}
 }
