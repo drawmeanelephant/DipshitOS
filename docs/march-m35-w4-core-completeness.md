@@ -2,11 +2,11 @@
 
 Prompt/plan for issue #765 (Milestone #22, M35 WASM core interpreter W1–W5).
 Owner: `buffy2` on `agent/buffy2/m35-w4-core-completeness` (claim 7395).
-Tracker: `docs/wasm-core-scoping.md` card table. Baseline: W3 merged
+Tracker: `docs/archive/wasm-core-scoping.md` card table. Baseline: W3 merged
 (PR #807); `user/src/wasm.zig` at 3,085 lines, integer subset only.
 
 > **STATUS: ✅ DONE 2026-09-02** — all slices landed and live-gated (see
-> `docs/wasm-core-scoping.md` "What W4 landed" and the claim log). The one
+> `docs/archive/wasm-core-scoping.md` "What W4 landed" and the claim log). The one
 > course-correction this plan did not foresee: the 0xA8–0xB1 region — plain
 > trapping trunc lives there; 0xAC/0xAD are i64 extends; 0xFC 0–7 are the
 > SATURATING forms clang actually emits — corrected in-slice and proven by

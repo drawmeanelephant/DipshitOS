@@ -136,7 +136,7 @@ non-Desktop/non-Net user programs.
 | `docs/testing.md` | testing policy |
 | `docs/gate-inventory.md` | gate classification |
 | `docs/roadmap.md` | milestone plan |
-| `docs/agent-concurrency-plan.md` | lane assignments |
+| `docs/archive/agent-concurrency-plan.md` | lane assignments (closed-arc plan, archived by #1671) |
 | `docs/TEAMS.md` | this file |
 
 **Owns:** Host tooling, CI, gate infrastructure, docs (except ADRs owned

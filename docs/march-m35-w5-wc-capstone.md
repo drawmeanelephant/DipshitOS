@@ -2,7 +2,7 @@
 
 Prompt/plan for issue #766 (Milestone #22, M35 WASM core interpreter W1–W5).
 Owner: `buffy2` on `agent/buffy2/m35-w5-wc-capstone` (claim 5883).
-Tracker: `docs/wasm-core-scoping.md` card table. Baseline: W4 done
+Tracker: `docs/archive/wasm-core-scoping.md` card table. Baseline: W4 done
 (claim 7395) — f32/f64, sign-ext proof, bulk-memory 0xFC 8–11, floatapp
 live-gated; `user/src/wasm.zig` 38/38 host tests.
 

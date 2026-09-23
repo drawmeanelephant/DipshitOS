@@ -11,7 +11,7 @@
 M43 was scoped 2026-09-06 (claim #1038) with the tracker at zero open issues —
 the first milestone planned from a fully-green board since M40. The theme was
 chosen by the user from the post-arc5 roadmap's "distant mountains"
-([`roadmap-post-arc5.md`](roadmap-post-arc5.md), "What this roadmap does NOT
+([`docs/archive/roadmap-post-arc5.md`](archive/roadmap-post-arc5.md), "What this roadmap does NOT
 cover"): most of that list has since been climbed (SMP → M28, VM depth → M29,
 dynamic linking → M30/M31, browser-class HTTP → `HTTPD.BIN`, claim 0750), and
 **USB-everything** is the last one that needs no new host capability — the
