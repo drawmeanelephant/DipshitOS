@@ -1,6 +1,7 @@
 package main
 
 import (
+	"virelai/git/gitread"
 	"virelai/tls"
 	"virelai/vi"
 )
@@ -120,7 +121,7 @@ func httpsRequest(t target, method, path string, body []byte) ([]byte, error) {
 	req := method + " " + path + " HTTP/1.0\r\nHost: " + sni + "\r\n"
 	if method == "POST" {
 		req += "Content-Type: application/x-git-upload-pack-request\r\n"
-		req += "Content-Length: " + uitoa(uint64(len(body))) + "\r\n"
+		req += "Content-Length: " + gitread.Uitoa(uint64(len(body))) + "\r\n"
 	}
 	req += "Connection: close\r\n\r\n"
 	if _, err := c.Write([]byte(req)); err != nil {
@@ -231,5 +232,5 @@ func parsePort(s string) (uint16, bool) {
 }
 
 func portString(p uint16) string {
-	return uitoa(uint64(p))
+	return gitread.Uitoa(uint64(p))
 }

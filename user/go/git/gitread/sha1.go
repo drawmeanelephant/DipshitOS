@@ -1,4 +1,4 @@
-package main
+package gitread
 
 // SHA-1 (FIPS 180-4) for git object IDs. crypto/sha1 is not imported: the
 // GOOS=virelai stdlib does not carry fmt/os, and this keeps hashing inside
@@ -86,7 +86,7 @@ func sha1Sum(msg []byte) [20]byte {
 
 const hexDigits = "0123456789abcdef"
 
-func hexEncode(b []byte) string {
+func HexEncode(b []byte) string {
 	out := make([]byte, len(b)*2)
 	for i, v := range b {
 		out[i*2] = hexDigits[v>>4]
@@ -95,17 +95,17 @@ func hexEncode(b []byte) string {
 	return string(out)
 }
 
-func hexDecode(s string) ([20]byte, bool) {
+func HexDecode(s string) ([20]byte, bool) {
 	var out [20]byte
 	if len(s) != 40 {
 		return out, false
 	}
 	for i := 0; i < 20; i++ {
-		hi, ok := fromHex(s[i*2])
+		hi, ok := FromHex(s[i*2])
 		if !ok {
 			return out, false
 		}
-		lo, ok := fromHex(s[i*2+1])
+		lo, ok := FromHex(s[i*2+1])
 		if !ok {
 			return out, false
 		}
@@ -114,7 +114,7 @@ func hexDecode(s string) ([20]byte, bool) {
 	return out, true
 }
 
-func fromHex(c byte) (byte, bool) {
+func FromHex(c byte) (byte, bool) {
 	switch {
 	case c >= '0' && c <= '9':
 		return c - '0', true

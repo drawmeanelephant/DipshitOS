@@ -1,0 +1,184 @@
+package gitread
+
+import (
+	"bytes"
+	"compress/zlib"
+	"crypto/sha1"
+	"testing"
+)
+
+func TestSHA1MatchesStdlib(t *testing.T) {
+	cases := [][]byte{
+		nil,
+		[]byte(""),
+		[]byte("abc"),
+		[]byte("hello, git\n"),
+		bytes.Repeat([]byte("x"), 1000),
+	}
+	for _, c := range cases {
+		got := sha1Sum(c)
+		want := sha1.Sum(c)
+		if got != want {
+			t.Fatalf("sha1(%q) = %x want %x", c, got, want)
+		}
+	}
+}
+
+func TestHexRoundTrip(t *testing.T) {
+	sum := sha1Sum([]byte("blob"))
+	s := HexEncode(sum[:])
+	if len(s) != 40 {
+		t.Fatalf("hex len %d", len(s))
+	}
+	back, ok := HexDecode(s)
+	if !ok || back != sum {
+		t.Fatalf("HexDecode(%q) = %x ok=%v", s, back, ok)
+	}
+	if _, ok := HexDecode("zz"); ok {
+		t.Fatal("bad hex accepted")
+	}
+}
+
+func TestInflateMatchesStdlibZlib(t *testing.T) {
+	payloads := [][]byte{
+		[]byte("hello, git\n"),
+		bytes.Repeat([]byte("The quick brown fox. "), 40),
+		[]byte{0, 1, 2, 3, 255},
+	}
+	for _, p := range payloads {
+		var buf bytes.Buffer
+		w := zlib.NewWriter(&buf)
+		if _, err := w.Write(p); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+		out := make([]byte, len(p)+8)
+		n, consumed, err := inflateZlib(buf.Bytes(), out)
+		if err != nil {
+			t.Fatalf("inflate %q: %v", p, err)
+		}
+		if n != len(p) || !bytes.Equal(out[:n], p) {
+			t.Fatalf("got %q want %q", out[:n], p)
+		}
+		if consumed != buf.Len() {
+			t.Fatalf("consumed %d want %d", consumed, buf.Len())
+		}
+	}
+}
+
+func TestZlibStoreRoundTrip(t *testing.T) {
+	p := []byte("hello, git\n")
+	z := zlibStore(p)
+	out := make([]byte, len(p)+4)
+	n, _, err := inflateZlib(z, out)
+	if err != nil || n != len(p) || !bytes.Equal(out[:n], p) {
+		t.Fatalf("store roundtrip n=%d err=%v got=%q", n, err, out[:n])
+	}
+}
+
+func TestDeltaCopyInsert(t *testing.T) {
+	base := []byte("hello, git\n")
+	target := []byte("hello, git!\n")
+	d := encodeDelta(base, target)
+	got, err := applyDelta(base, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, target) {
+		t.Fatalf("delta = %q want %q", got, target)
+	}
+}
+
+func TestPackRefDelta(t *testing.T) {
+	blob1 := GitObj{Type: ObjBlob, Data: []byte("hello, git\n")}
+	blob1.ID = HashObject(ObjBlob, blob1.Data)
+	blob2 := GitObj{Type: ObjBlob, Data: []byte("hello, git!\n")}
+	blob2.ID = HashObject(ObjBlob, blob2.Data)
+	tree := GitObj{Type: ObjTree, Data: encodeTree([]TreeEnt{{Mode: "100644", Name: "HELLO", ID: blob2.ID}})}
+	tree.ID = HashObject(ObjTree, tree.Data)
+	commitData := []byte("tree " + HexEncode(tree.ID[:]) + "\n" +
+		"author g <g@g> 1000000000 +0000\n" +
+		"committer g <g@g> 1000000000 +0000\n\nsecond\n")
+	commit := GitObj{Type: ObjCommit, Data: commitData}
+	commit.ID = HashObject(ObjCommit, commit.Data)
+
+	objs := []GitObj{blob1, blob2, tree, commit}
+	deltaFrom := []int{-1, 0, -1, -1}
+	pack := PackObjects(objs, deltaFrom, nil)
+	got, nDelta, err := ParsePack(pack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nDelta != 1 {
+		t.Fatalf("nDelta = %d want 1", nDelta)
+	}
+	if len(got) != 4 {
+		t.Fatalf("len = %d", len(got))
+	}
+	if got[1].ID != blob2.ID || !bytes.Equal(got[1].Data, blob2.Data) {
+		t.Fatalf("delta blob mismatch %x vs %x", got[1].ID, blob2.ID)
+	}
+	if got[2].ID != tree.ID || got[3].ID != commit.ID {
+		t.Fatalf("tree/commit ids")
+	}
+}
+
+func TestPackOfsDelta(t *testing.T) {
+	blob1 := GitObj{Type: ObjBlob, Data: []byte("hello, git\n")}
+	blob1.ID = HashObject(ObjBlob, blob1.Data)
+	blob2 := GitObj{Type: ObjBlob, Data: []byte("hello, git!\n")}
+	blob2.ID = HashObject(ObjBlob, blob2.Data)
+	objs := []GitObj{blob1, blob2}
+	pack := PackObjects(objs, []int{-1, 0}, []bool{false, true})
+	got, nDelta, err := ParsePack(pack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nDelta != 1 {
+		t.Fatalf("nDelta = %d want 1", nDelta)
+	}
+	if got[1].ID != blob2.ID || !bytes.Equal(got[1].Data, blob2.Data) {
+		t.Fatalf("ofs-delta blob mismatch")
+	}
+}
+
+func TestOfsRoundTrip(t *testing.T) {
+	for _, v := range []int{1, 2, 127, 128, 129, 1000, 20000} {
+		enc := encodeOfs(v)
+		off, n, err := readOfsDelta(enc)
+		if err != nil || n != len(enc) || off != v {
+			t.Fatalf("ofs %d: got %d n=%d err=%v enc=%x", v, off, n, err, enc)
+		}
+	}
+}
+
+func TestObjectPathFits(t *testing.T) {
+	id := HashObject(ObjBlob, []byte("hello, git!\n"))
+	p, ok := ObjectPath("/host/G/.git", id)
+	if !ok {
+		t.Fatal("object path refused")
+	}
+	if len(p) > maxPath {
+		t.Fatalf("path len %d > %d: %s", len(p), maxPath, p)
+	}
+	ents := ParseTree(encodeTree([]TreeEnt{{Mode: "100644", Name: "HELLO", ID: id}}))
+	if len(ents) != 1 || ents[0].Name != "HELLO" || ents[0].ID != id {
+		t.Fatalf("tree ents = %+v", ents)
+	}
+}
+
+func TestLooseObjectInflates(t *testing.T) {
+	o := GitObj{Type: ObjBlob, Data: []byte("hello, git\n")}
+	o.ID = HashObject(ObjBlob, o.Data)
+	z := LooseBytes(o)
+	out := make([]byte, 64)
+	n, _, err := inflateZlib(z, out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasPrefix(out[:n], []byte("blob ")) || !bytes.Contains(out[:n], o.Data) {
+		t.Fatalf("loose = %q", out[:n])
+	}
+}

@@ -1,4 +1,4 @@
-package main
+package gitread
 
 // Freestanding RFC 1951 DEFLATE + RFC 1950 zlib inflater, ported from
 // user/src/lib/flate.zig. compress/zlib pulls fmt/os on this GOOS, so the

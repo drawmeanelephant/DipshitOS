@@ -1,4 +1,4 @@
-package main
+package gitread
 
 // Git packfile v2: header, zlib-framed objects (including ofs/ref deltas),
 // SHA-1 trailer. Delta resolution is required — a pack with no delta would
@@ -20,18 +20,18 @@ var (
 )
 
 const (
-	objCommit   = 1
-	objTree     = 2
-	objBlob     = 3
-	objTag      = 4
-	objOfsDelta = 6
-	objRefDelta = 7
+	ObjCommit   = 1
+	ObjTree     = 2
+	ObjBlob     = 3
+	ObjTag      = 4
+	ObjOfsDelta = 6
+	ObjRefDelta = 7
 	// One object and the HTTP response that carries the pack share the
 	// 256 KiB guest file-read cap (vi.MaxFileBytes).
 	maxObjSize = 256 * 1024
 )
 
-type gitObj struct {
+type GitObj struct {
 	Type int
 	Data []byte
 	ID   [20]byte
@@ -39,28 +39,28 @@ type gitObj struct {
 
 func typeName(t int) string {
 	switch t {
-	case objCommit:
+	case ObjCommit:
 		return "commit"
-	case objTree:
+	case ObjTree:
 		return "tree"
-	case objBlob:
+	case ObjBlob:
 		return "blob"
-	case objTag:
+	case ObjTag:
 		return "tag"
 	default:
 		return "obj"
 	}
 }
 
-func hashObject(typ int, data []byte) [20]byte {
-	hdr := typeName(typ) + " " + uitoa(uint64(len(data))) + "\x00"
+func HashObject(typ int, data []byte) [20]byte {
+	hdr := typeName(typ) + " " + Uitoa(uint64(len(data))) + "\x00"
 	buf := make([]byte, len(hdr)+len(data))
 	copy(buf, hdr)
 	copy(buf[len(hdr):], data)
 	return sha1Sum(buf)
 }
 
-func uitoa(v uint64) string {
+func Uitoa(v uint64) string {
 	if v == 0 {
 		return "0"
 	}
@@ -90,7 +90,7 @@ type rawObj struct {
 	done    bool
 }
 
-func parsePack(buf []byte) ([]gitObj, int, error) {
+func ParsePack(buf []byte) ([]GitObj, int, error) {
 	if len(buf) < 32 {
 		return nil, 0, errPackTrunc
 	}
@@ -131,9 +131,9 @@ func parsePack(buf []byte) ([]gitObj, int, error) {
 	if err := resolveDeltas(raw); err != nil {
 		return nil, 0, err
 	}
-	out := make([]gitObj, len(raw))
+	out := make([]GitObj, len(raw))
 	for i := range raw {
-		out[i] = gitObj{Type: raw[i].typ, Data: raw[i].data, ID: raw[i].id}
+		out[i] = GitObj{Type: raw[i].typ, Data: raw[i].data, ID: raw[i].id}
 	}
 	return out, nDelta, nil
 }
@@ -150,7 +150,7 @@ func readOne(b []byte, absOff int) (rawObj, int, error) {
 	rest := b[hdrN:]
 	used := hdrN
 	switch typ {
-	case objOfsDelta:
+	case ObjOfsDelta:
 		back, n, err := readOfsDelta(rest)
 		if err != nil {
 			return rawObj{}, 0, err
@@ -159,7 +159,7 @@ func readOne(b []byte, absOff int) (rawObj, int, error) {
 		o.delta = true
 		rest = rest[n:]
 		used += n
-	case objRefDelta:
+	case ObjRefDelta:
 		if len(rest) < 20 {
 			return rawObj{}, 0, errPackTrunc
 		}
@@ -167,7 +167,7 @@ func readOne(b []byte, absOff int) (rawObj, int, error) {
 		o.delta = true
 		rest = rest[20:]
 		used += 20
-	case objCommit, objTree, objBlob, objTag:
+	case ObjCommit, ObjTree, ObjBlob, ObjTag:
 	default:
 		return rawObj{}, 0, errPackType
 	}
@@ -243,7 +243,7 @@ func resolveDeltas(raw []rawObj) error {
 				continue
 			}
 			if !raw[i].delta {
-				raw[i].id = hashObject(raw[i].typ, raw[i].data)
+				raw[i].id = HashObject(raw[i].typ, raw[i].data)
 				raw[i].done = true
 				progress = true
 				continue
@@ -258,7 +258,7 @@ func resolveDeltas(raw []rawObj) error {
 			}
 			raw[i].typ = base.typ
 			raw[i].data = out
-			raw[i].id = hashObject(raw[i].typ, out)
+			raw[i].id = HashObject(raw[i].typ, out)
 			raw[i].delta = false
 			raw[i].done = true
 			progress = true
@@ -273,7 +273,7 @@ func resolveDeltas(raw []rawObj) error {
 }
 
 func findBase(raw []rawObj, byOff map[int]int, o *rawObj) (*rawObj, bool) {
-	if o.typ == objOfsDelta || o.baseOff != 0 && o.baseSHA == [20]byte{} {
+	if o.typ == ObjOfsDelta || o.baseOff != 0 && o.baseSHA == [20]byte{} {
 		idx, ok := byOff[o.baseOff]
 		if !ok {
 			return nil, false
@@ -478,7 +478,7 @@ func encodeDelta(base, target []byte) []byte {
 	return out
 }
 
-func packObjects(objs []gitObj, deltaFrom []int, ofsDelta []bool) []byte {
+func PackObjects(objs []GitObj, deltaFrom []int, ofsDelta []bool) []byte {
 	var body []byte
 	offs := make([]int, len(objs))
 	for i, o := range objs {
@@ -490,13 +490,13 @@ func packObjects(objs []gitObj, deltaFrom []int, ofsDelta []bool) []byte {
 			useOfs := ofsDelta != nil && i < len(ofsDelta) && ofsDelta[i]
 			if useOfs {
 				back := offs[i] - offs[deltaFrom[i]]
-				body = append(body, encodePackHdr(objOfsDelta, len(d))...)
+				body = append(body, encodePackHdr(ObjOfsDelta, len(d))...)
 				body = append(body, encodeOfs(back)...)
 			} else {
-				body = append(body, encodePackHdr(objRefDelta, len(d))...)
+				body = append(body, encodePackHdr(ObjRefDelta, len(d))...)
 				id := base.ID
 				if id == [20]byte{} {
-					id = hashObject(base.Type, base.Data)
+					id = HashObject(base.Type, base.Data)
 				}
 				body = append(body, id[:]...)
 			}

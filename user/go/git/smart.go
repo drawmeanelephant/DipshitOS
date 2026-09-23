@@ -1,5 +1,7 @@
 package main
 
+import "virelai/git/gitread"
+
 // Smart HTTP (git-http-protocol): GET info/refs?service=git-upload-pack
 // then POST git-upload-pack with want/done. Push / receive-pack is out of
 // scope (#1337).
@@ -124,17 +126,8 @@ func indexBytes(b, sep []byte) int {
 	return -1
 }
 
-func hasPrefix(b []byte, p string) bool {
-	if len(b) < len(p) {
-		return false
-	}
-	for i := 0; i < len(p); i++ {
-		if b[i] != p[i] {
-			return false
-		}
-	}
-	return true
-}
+// The byte-prefix helper moved to virelai/git/gitread (M74b #1645): the
+// reader and the transport share one implementation.
 
 func parseInfoRefs(body []byte) ([]gitRef, error) {
 	var refs []gitRef
@@ -168,7 +161,7 @@ func parseRefLine(data []byte) (gitRef, bool) {
 	if len(data) < 41 || data[40] != ' ' {
 		return gitRef{}, false
 	}
-	sha, ok := hexDecode(string(data[:40]))
+	sha, ok := gitread.HexDecode(string(data[:40]))
 	if !ok {
 		return gitRef{}, false
 	}
@@ -204,7 +197,7 @@ func pickWant(refs []gitRef) (gitRef, bool) {
 }
 
 func wantBody(sha [20]byte) []byte {
-	line := "want " + hexEncode(sha[:]) + "\n"
+	line := "want " + gitread.HexEncode(sha[:]) + "\n"
 	out := pktEncodeString(line)
 	out = append(out, pktFlush()...)
 	out = append(out, pktEncodeString("done\n")...)
@@ -215,15 +208,15 @@ func extractPack(body []byte) ([]byte, error) {
 	var pack []byte
 	b := body
 	for len(b) >= 4 {
-		if hasPrefix(b, "PACK") {
+		if gitread.HasPrefix(b, "PACK") {
 			return b, nil
 		}
 		p, rest, err := pktRead(b)
 		if err != nil {
-			if hasPrefix(b, "PACK") {
+			if gitread.HasPrefix(b, "PACK") {
 				return b, nil
 			}
-			if len(pack) >= 4 && hasPrefix(pack, "PACK") {
+			if len(pack) >= 4 && gitread.HasPrefix(pack, "PACK") {
 				return pack, nil
 			}
 			return nil, errNoPack
@@ -240,20 +233,20 @@ func extractPack(body []byte) ([]byte, error) {
 		case 3:
 			return nil, smartErr("smart: upload-pack error")
 		default:
-			if hasPrefix(p.Data, "NAK") || hasPrefix(p.Data, "ACK") {
+			if gitread.HasPrefix(p.Data, "NAK") || gitread.HasPrefix(p.Data, "ACK") {
 				continue
 			}
-			if hasPrefix(p.Data, "PACK") {
+			if gitread.HasPrefix(p.Data, "PACK") {
 				pack = append(pack, p.Data...)
 				pack = append(pack, b...)
 				return pack, nil
 			}
 		}
 	}
-	if hasPrefix(pack, "PACK") {
+	if gitread.HasPrefix(pack, "PACK") {
 		return pack, nil
 	}
-	if hasPrefix(b, "PACK") {
+	if gitread.HasPrefix(b, "PACK") {
 		return b, nil
 	}
 	return nil, errNoPack
