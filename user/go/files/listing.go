@@ -1,9 +1,11 @@
-// Listing helpers for the M58a Go file manager (issue #1305).
+// Listing helpers for the M74a file manager (issue #1644, evolved from the
+// M58a app).
 //
-// Path join/parent, entry labels, and the "is this the known share file?"
-// check are plain functions so the host `go test` run can pin them without
-// a guest syscall. The 16-entry dir_list window and 64-byte path cap are
-// the kernel's (file_table.max_path_len / handle_dir_list).
+// Path join/parent/base, the dirs-first listing order, the start-directory
+// rule and the preview sanitizer are plain functions so the host `go test`
+// run can pin them without a guest syscall. The 16-entry dir_list window and
+// 64-byte path cap are the kernel's (file_table.max_path_len /
+// handle_dir_list).
 package main
 
 import "virelai/vi"
@@ -63,7 +65,20 @@ func parentPath(path string) string {
 	return out
 }
 
-// entryLabel is what the list widget shows: directories get a trailing slash.
+// baseName is the last path component ("" at the root).
+func baseName(path string) string {
+	if len(path) > 0 && path[len(path)-1] == '/' {
+		path = path[:len(path)-1]
+	}
+	for i := len(path) - 1; i >= 0; i-- {
+		if path[i] == '/' {
+			return path[i+1:]
+		}
+	}
+	return path
+}
+
+// entryLabel is what the list shows: directories get a trailing slash.
 func entryLabel(e vi.DirEntry) string {
 	n := e.NameString()
 	if n == "" {
@@ -88,7 +103,7 @@ func containsName(entries []vi.DirEntry, n int, name string) bool {
 	return false
 }
 
-// labelsOf builds the list-widget item slice for the first n entries.
+// labelsOf builds the list item slice for the first n entries.
 func labelsOf(entries []vi.DirEntry, n int) []string {
 	if n > len(entries) {
 		n = len(entries)
@@ -101,4 +116,65 @@ func labelsOf(entries []vi.DirEntry, n int) []string {
 		out[i] = entryLabel(entries[i])
 	}
 	return out
+}
+
+// sortEntries puts directories first, then files, each group by name — the
+// order the class-B gate pins (SUB before KNOWN.TXT) and the order that
+// makes "the first row is the directory to navigate into" deterministic
+// regardless of the share's on-disk order.
+func sortEntries(entries []vi.DirEntry, n int) {
+	if n > len(entries) {
+		n = len(entries)
+	}
+	// Insertion sort: n <= 16, stability irrelevant, no allocation.
+	for i := 1; i < n; i++ {
+		v := entries[i]
+		j := i - 1
+		for j >= 0 && entryLess(v, entries[j]) {
+			entries[j+1] = entries[j]
+			j--
+		}
+		entries[j+1] = v
+	}
+}
+
+// entryLess is the dirs-first, name-ascending order.
+func entryLess(a, b vi.DirEntry) bool {
+	if a.Dir() != b.Dir() {
+		return a.Dir()
+	}
+	return a.NameString() < b.NameString()
+}
+
+// startPath is the directory the manager opens at: argv[1] when the
+// launcher passed one (the gate execs `GOFILES.ELF /host/FM`), else the
+// host-share root. vi.Args() is empty on the host, so this pins to
+// rootPath there.
+func startPath() string {
+	args := vi.Args()
+	if len(args) > 1 && len(args[1]) > 0 && len(args[1]) <= maxPath {
+		return args[1]
+	}
+	return rootPath
+}
+
+// sanitizePreview turns raw file bytes into display text for the preview
+// pane: newlines are kept, tabs become spaces, and every other
+// non-printable byte becomes '·' so a binary file cannot smuggle escape
+// sequences into the frame (byte-wise by design — v1 previews text).
+func sanitizePreview(b []byte) string {
+	out := make([]byte, 0, len(b))
+	for _, c := range b {
+		switch {
+		case c == '\n':
+			out = append(out, '\n')
+		case c == '\t':
+			out = append(out, ' ')
+		case c >= 0x20 && c < 0x7f:
+			out = append(out, c)
+		default:
+			out = append(out, 0xc2, 0xb7) // '·' as UTF-8
+		}
+	}
+	return string(out)
 }
