@@ -1,5 +1,7 @@
 package main
 
+import "virelai/git/gitread"
+
 // Git pkt-line (gitprotocol.txt): a 4-byte lowercase hex length prefix
 // that includes itself, then payload. 0000 is flush. 0001 is delimiter.
 
@@ -51,7 +53,7 @@ func parseHex4(b []byte) (int, bool) {
 	}
 	n := 0
 	for i := 0; i < 4; i++ {
-		v, ok := fromHex(b[i])
+		v, ok := gitread.FromHex(b[i])
 		if !ok {
 			return 0, false
 		}

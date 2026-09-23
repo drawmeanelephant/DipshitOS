@@ -1,4 +1,4 @@
-package main
+package gitread
 
 // Loose object store + a root-tree checkout. Paths stay inside the kernel's
 // 64-byte cap (file_table.max_path_len): dest is a short share path like
@@ -6,9 +6,23 @@ package main
 // host `git status` in the checkout will look dirty; fsck/log are the
 // #1337 evidence.
 
+// HasPrefix reports whether b starts with the bytes of p. Shared by the
+// reader (commit/tree sniffing) and GOTGIT's transport (smart.go).
+func HasPrefix(b []byte, p string) bool {
+	if len(b) < len(p) {
+		return false
+	}
+	for i := 0; i < len(p); i++ {
+		if b[i] != p[i] {
+			return false
+		}
+	}
+	return true
+}
+
 const maxPath = 64
 
-func joinPath(dir, name string) (string, bool) {
+func JoinPath(dir, name string) (string, bool) {
 	if name == "" || name == "." || name == ".." {
 		return "", false
 	}
@@ -27,35 +41,35 @@ func joinPath(dir, name string) (string, bool) {
 	return out, true
 }
 
-func objectPath(gitDir string, id [20]byte) (string, bool) {
-	hex := hexEncode(id[:])
-	d, ok := joinPath(gitDir, "objects")
+func ObjectPath(gitDir string, id [20]byte) (string, bool) {
+	hex := HexEncode(id[:])
+	d, ok := JoinPath(gitDir, "objects")
 	if !ok {
 		return "", false
 	}
-	d, ok = joinPath(d, hex[:2])
+	d, ok = JoinPath(d, hex[:2])
 	if !ok {
 		return "", false
 	}
-	return joinPath(d, hex[2:])
+	return JoinPath(d, hex[2:])
 }
 
-func looseBytes(o gitObj) []byte {
-	hdr := typeName(o.Type) + " " + uitoa(uint64(len(o.Data))) + "\x00"
+func LooseBytes(o GitObj) []byte {
+	hdr := typeName(o.Type) + " " + Uitoa(uint64(len(o.Data))) + "\x00"
 	raw := make([]byte, len(hdr)+len(o.Data))
 	copy(raw, hdr)
 	copy(raw[len(hdr):], o.Data)
 	return zlibStore(raw)
 }
 
-type treeEnt struct {
+type TreeEnt struct {
 	Mode string
 	Name string
 	ID   [20]byte
 }
 
-func parseTree(data []byte) []treeEnt {
-	var ents []treeEnt
+func ParseTree(data []byte) []TreeEnt {
+	var ents []TreeEnt
 	i := 0
 	for i < len(data) {
 		sp := i
@@ -76,34 +90,34 @@ func parseTree(data []byte) []treeEnt {
 		name := string(data[sp+1 : nul])
 		var id [20]byte
 		copy(id[:], data[nul+1:nul+21])
-		ents = append(ents, treeEnt{Mode: mode, Name: name, ID: id})
+		ents = append(ents, TreeEnt{Mode: mode, Name: name, ID: id})
 		i = nul + 21
 	}
 	return ents
 }
 
-func commitTree(data []byte) ([20]byte, bool) {
+func CommitTree(data []byte) ([20]byte, bool) {
 	var id [20]byte
-	if !hasPrefix(data, "tree ") || len(data) < 5+40 {
+	if !HasPrefix(data, "tree ") || len(data) < 5+40 {
 		return id, false
 	}
 	hex := data[5:]
 	if len(hex) < 40 {
 		return id, false
 	}
-	return hexDecode(string(hex[:40]))
+	return HexDecode(string(hex[:40]))
 }
 
-func findObj(objs []gitObj, id [20]byte) (gitObj, bool) {
+func FindObj(objs []GitObj, id [20]byte) (GitObj, bool) {
 	for _, o := range objs {
 		if o.ID == id {
 			return o, true
 		}
 	}
-	return gitObj{}, false
+	return GitObj{}, false
 }
 
-func encodeTree(ents []treeEnt) []byte {
+func encodeTree(ents []TreeEnt) []byte {
 	var out []byte
 	for _, e := range ents {
 		out = append(out, []byte(e.Mode)...)
@@ -115,6 +129,6 @@ func encodeTree(ents []treeEnt) []byte {
 	return out
 }
 
-func isBlobMode(mode string) bool {
+func IsBlobMode(mode string) bool {
 	return mode == "100644" || mode == "100755" || mode == "644" || mode == "755"
 }

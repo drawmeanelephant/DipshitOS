@@ -1,6 +1,9 @@
 package main
 
-import "virelai/vi"
+import (
+	"virelai/git/gitread"
+	"virelai/vi"
+)
 
 // GOTGIT.ELF — git-over-https clone (issue #1337 / M67b #1447 / ADR 0029).
 // HTTPS is in-process tls.Dial over vi.Dial. FETCHS.BIN is not referenced.
@@ -57,7 +60,7 @@ func main() {
 		fail("mkdir dest")
 		return
 	}
-	gitDir, ok := joinPath(dest, ".git")
+	gitDir, ok := gitread.JoinPath(dest, ".git")
 	if !ok || !mkdirAll(gitDir) {
 		fail("mkdir git")
 		return
@@ -112,12 +115,12 @@ func clone(tgt target, dest, gitDir string) bool {
 	if err != nil {
 		return fail("parse refs")
 	}
-	vi.ConsoleLine(markerRefs + uitoa(uint64(len(refs))))
+	vi.ConsoleLine(markerRefs + gitread.Uitoa(uint64(len(refs))))
 	want, ok := pickWant(refs)
 	if !ok {
 		return fail("no want")
 	}
-	vi.ConsoleLine(markerWant + want.Name + " " + hexEncode(want.SHA[:]))
+	vi.ConsoleLine(markerWant + want.Name + " " + gitread.HexEncode(want.SHA[:]))
 
 	vi.ConsoleLine(markerDial + tgt.Host + " " + portString(tgt.Port) + " " + sni + " POST")
 	resp, err = httpsRequest(tgt, "POST", uploadPackPath(repo), wantBody(want.SHA))
@@ -133,11 +136,11 @@ func clone(tgt target, dest, gitDir string) bool {
 	if err != nil {
 		return fail("extract pack")
 	}
-	objs, nDelta, err := parsePack(pack)
+	objs, nDelta, err := gitread.ParsePack(pack)
 	if err != nil {
 		return fail("parse pack")
 	}
-	vi.ConsoleLine(markerPack + uitoa(uint64(len(objs))))
+	vi.ConsoleLine(markerPack + gitread.Uitoa(uint64(len(objs))))
 	if nDelta > 0 {
 		vi.ConsoleLine(markerDelta)
 	}
@@ -153,39 +156,39 @@ func clone(tgt target, dest, gitDir string) bool {
 	return true
 }
 
-func noteObjects(objs []gitObj) bool {
+func noteObjects(objs []gitread.GitObj) bool {
 	var blobs, trees, commits int
 	for _, o := range objs {
 		switch o.Type {
-		case objBlob:
+		case gitread.ObjBlob:
 			blobs++
-			vi.ConsoleLine(markerBlob + hexEncode(o.ID[:]))
-		case objTree:
+			vi.ConsoleLine(markerBlob + gitread.HexEncode(o.ID[:]))
+		case gitread.ObjTree:
 			trees++
-			vi.ConsoleLine(markerTree + hexEncode(o.ID[:]))
-		case objCommit:
+			vi.ConsoleLine(markerTree + gitread.HexEncode(o.ID[:]))
+		case gitread.ObjCommit:
 			commits++
-			vi.ConsoleLine(markerCommit + hexEncode(o.ID[:]))
+			vi.ConsoleLine(markerCommit + gitread.HexEncode(o.ID[:]))
 		}
 	}
 	return blobs > 0 && trees > 0 && commits > 0
 }
 
-func writeStore(gitDir string, objs []gitObj, want gitRef) bool {
-	objDir, ok := joinPath(gitDir, "objects")
+func writeStore(gitDir string, objs []gitread.GitObj, want gitRef) bool {
+	objDir, ok := gitread.JoinPath(gitDir, "objects")
 	if !ok || !mkdir(objDir) {
 		return false
 	}
-	refs, ok := joinPath(gitDir, "refs")
+	refs, ok := gitread.JoinPath(gitDir, "refs")
 	if !ok || !mkdir(refs) {
 		return false
 	}
-	heads, ok := joinPath(refs, "heads")
+	heads, ok := gitread.JoinPath(refs, "heads")
 	if !ok || !mkdir(heads) {
 		return false
 	}
 	for _, o := range objs {
-		p, ok := objectPath(gitDir, o.ID)
+		p, ok := gitread.ObjectPath(gitDir, o.ID)
 		if !ok {
 			return false
 		}
@@ -196,11 +199,11 @@ func writeStore(gitDir string, objs []gitObj, want gitRef) bool {
 		if !mkdir(p[:slash]) {
 			return false
 		}
-		if !writeFile(p, looseBytes(o)) {
+		if !writeFile(p, gitread.LooseBytes(o)) {
 			return false
 		}
 	}
-	headPath, ok := joinPath(gitDir, "HEAD")
+	headPath, ok := gitread.JoinPath(gitDir, "HEAD")
 	if !ok {
 		return false
 	}
@@ -216,18 +219,18 @@ func writeStore(gitDir string, objs []gitObj, want gitRef) bool {
 	if i := lastSlash(refName); i >= 0 {
 		leaf = refName[i+1:]
 	}
-	refPath, ok := joinPath(heads, leaf)
+	refPath, ok := gitread.JoinPath(heads, leaf)
 	if !ok {
 		return false
 	}
-	return writeFile(refPath, []byte(hexEncode(want.SHA[:])+"\n"))
+	return writeFile(refPath, []byte(gitread.HexEncode(want.SHA[:])+"\n"))
 }
 
-func checkout(dest string, objs []gitObj, commitID [20]byte) bool {
-	c, ok := findObj(objs, commitID)
-	if !ok || c.Type != objCommit {
+func checkout(dest string, objs []gitread.GitObj, commitID [20]byte) bool {
+	c, ok := gitread.FindObj(objs, commitID)
+	if !ok || c.Type != gitread.ObjCommit {
 		for _, o := range objs {
-			if o.Type == objCommit {
+			if o.Type == gitread.ObjCommit {
 				c = o
 				ok = true
 			}
@@ -236,25 +239,25 @@ func checkout(dest string, objs []gitObj, commitID [20]byte) bool {
 			return false
 		}
 	}
-	tid, ok := commitTree(c.Data)
+	tid, ok := gitread.CommitTree(c.Data)
 	if !ok {
 		return false
 	}
-	tree, ok := findObj(objs, tid)
-	if !ok || tree.Type != objTree {
+	tree, ok := gitread.FindObj(objs, tid)
+	if !ok || tree.Type != gitread.ObjTree {
 		return false
 	}
-	ents := parseTree(tree.Data)
+	ents := gitread.ParseTree(tree.Data)
 	wrote := false
 	for _, e := range ents {
-		if !isBlobMode(e.Mode) {
+		if !gitread.IsBlobMode(e.Mode) {
 			continue
 		}
-		blob, ok := findObj(objs, e.ID)
-		if !ok || blob.Type != objBlob {
+		blob, ok := gitread.FindObj(objs, e.ID)
+		if !ok || blob.Type != gitread.ObjBlob {
 			continue
 		}
-		p, ok := joinPath(dest, e.Name)
+		p, ok := gitread.JoinPath(dest, e.Name)
 		if !ok {
 			continue
 		}
