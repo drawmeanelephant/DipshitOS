@@ -35,14 +35,13 @@ const (
 	markerBrowse = "gohelp: browse"
 
 	// `/`-to-filter: one marker per edit (n = visible matches), then the
-	// clear. The gate pins `filter ec n=3` and `filter cleared n=41`.
+	// clear. The gate pins `filter ec n=3` and the 44-row catalog clear.
 	markerFilter        = "gohelp: filter "
 	markerFilterOn      = "gohelp: filter on"
 	markerFilterCleared = "gohelp: filter cleared n="
 
-	// markerSettled is printed one yield after the detail frame has been
-	// painted and its `gohelp: detail …` marker flushed: the gate's close
-	// script waits on it so the screenshot taken at the detail marker is
-	// never raced by the window teardown.
+	// markerSettled is printed after the detail frame has been painted and
+	// its `gohelp: detail …` marker flushed: the gate's close script waits on
+	// it so the screenshot at the detail marker is never raced by teardown.
 	markerSettled = "gohelp: settled after detail"
 )

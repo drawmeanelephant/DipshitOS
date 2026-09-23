@@ -502,8 +502,11 @@ var helpCatalog = map[string]helpEntry{
 	// untouched — no builtin, no tool, just a catalog row.
 	helpExternal:  {group: "externals", usage: "exec NAME [args...]", blurb: "(& backgrounds it; jobs/fg track it)", notes: "NAME resolves bare, then with .ELF and .BIN, case-insensitively, out of the share."},
 	"GOFETCH.ELF": {group: "externals", usage: "exec GOFETCH.ELF https://HOST[:PORT]/ [sni [name|expired|chain]]", blurb: "fetch a page over in-process TLS (Go)", notes: "The handshake is in-process (virelai/tls); an https URL is never rewritten to http."},
-	"GOPING.ELF":  {group: "externals", usage: "exec GOPING.ELF [-c count] <a.b.c.d>", blurb: "ICMP echo to a dotted IPv4 address (Go)", notes: "Exits 2 when no IP is set and 3 when the destination is not ARP-resolved."},
-	"GOTGIT.ELF":  {group: "externals", usage: "exec GOTGIT.ELF clone https://HOST[:PORT]/REPO [DIR]", blurb: "clone a git repository over in-process TLS (Go)", notes: "Clone is the supported verb; the work tree lands on the share."},
+	"GOPING.ELF":       {group: "externals", usage: "exec GOPING.ELF [-c count] <a.b.c.d>", blurb: "ICMP echo to a dotted IPv4 address (Go)", notes: "Exits 2 when no IP is set and 3 when the destination is not ARP-resolved."},
+	"GONETSTAT.ELF":    {group: "externals", usage: "exec GONETSTAT.ELF", blurb: "network interface and connection dashboard (Go)", notes: "Refreshes interface, DHCP, TCP, UDP, ARP and counters on the app timer."},
+	"GODNS.ELF":        {group: "externals", usage: "exec GODNS.ELF <hostname> [<server_ip>]", blurb: "resolve a DNS A record over UDP (Go)", notes: "The default resolver is 10.0.0.2; lookup failures exit nonzero."},
+	"GOTRACEROUTE.ELF": {group: "externals", usage: "exec GOTRACEROUTE.ELF [-m max_attempts] [-q probes] [<ip>]", blurb: "bounded ICMP echo reachability probe (Go)", notes: "The ICMP syscall reports echo replies only; this does not discover routes."},
+	"GOTGIT.ELF":       {group: "externals", usage: "exec GOTGIT.ELF clone https://HOST[:PORT]/REPO [DIR]", blurb: "clone a git repository over in-process TLS (Go)", notes: "Clone is the supported verb; the work tree lands on the share."},
 }
 
 // helpGroupNames lists one group's verbs, sorted, or nil when the group is
@@ -570,7 +573,7 @@ func helpCatalogText() string {
 	}
 	b.WriteString("tools: " + strings.Join(ToolNames(), " ") + "\n")
 	// The externals section lists the verb AND the app names a user can type
-	// (M71n #1573); `help <name>` gives any row's usage and description.
+	// (M71n/M78a); `help <name>` gives any row's usage and description.
 	b.WriteString("externals: " + strings.Join(helpGroupNames("externals"), " ") + "\n")
 	b.WriteString("subset: " + subsetBlurb + "\n")
 	b.WriteString("help <cmd> for one verb, help <group> for one group\n")

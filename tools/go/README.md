@@ -47,7 +47,12 @@ just gate go-args                  # class-B VZ gate: raw-ELF argv + envp / GOMA
 just gate go-goroutines            # class-B VZ gate: threads/futex + cross-core
 just gate go-stress                # class-B VZ gate: GC / channel / timer / futex breadth
 just gate go-panic                 # class-B VZ gate: fault delivery + recover + traceback
+bash tools/go/build-netdiag.sh     # builds GONETSTAT/GODNS/GOTRACEROUTE.ELF for M78a
 ```
+
+The network-diagnostics recipe requires the already provisioned GOOS=virelai
+fork. Its three live specs stage the prebuilt ELFs; it does not auto-build the
+fork inside gate runs.
 
 **The Go-runtime gates are not hermetic**: `just verify-vz` includes them,
 and each refuses to run (honest setup failure) until
