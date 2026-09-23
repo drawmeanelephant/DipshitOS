@@ -23,6 +23,7 @@ const console = @import("console.zig");
 const klog = @import("klog.zig");
 // M49 SD5 (#1132): copy a terminal selection into the shared clipboard.
 const clipboard = @import("clipboard.zig");
+const font_metrics = @import("font_metrics.zig"); // M73l (#1661): THE cell geometry — terminal literals never say 8
 // SH7 (#1083, ADR 0020 Amendment B): the net front-end pumps bytes between
 // a terminal and the kernel's single bounded TCP connection.
 const tcp = @import("tcp.zig");
@@ -2344,7 +2345,9 @@ pub fn screenForTerminal(t: *Terminal) ?*Screen {
 /// Called by the compositor before rendering (never in IRQ context).
 pub fn syncWindowCols(window_id: u8, pixel_w: u32) void {
     const s = screenForWindow(window_id) orelse return;
-    _ = s.setCols(@intCast(pixel_w / 8));
+    // M73l (#1661): cols come from the face's advance, not a literal —
+    // this is the winsize mirror every TUI (charm signals, tabapp) reads.
+    _ = s.setCols(@intCast(pixel_w / font_metrics.cell_w));
 }
 
 /// M49 SD5 (#1132): copy the window terminal's selection into the shared

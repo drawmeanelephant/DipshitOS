@@ -349,7 +349,8 @@ PY
 # full-viewport, so its window is the whole scanout, and the kernel draws a
 # window-bound terminal's grid starting at its title-band height (16 device
 # rows). The shell's fresh prompt is therefore the ONLY text on the first
-# grid line, at device y 16..23. Before the #1558 fix GOTABWM's own 96x64
+# grid line, at device y 16..31 (M73l #1661: cell_h=16 — was 16..23 at
+# 8px cells). Before the #1558 fix GOTABWM's own 96x64
 # client-death probe window (8,8,96,64) painted its chrome over that band and
 # the region held no terminal-green pixels at all (measured: 55, all of it
 # anti-aliasing from the probe's own white title text); with the fix it holds
@@ -434,11 +435,12 @@ def px(x, y):
     return out[k], out[k+1], out[k+2]
 
 scale = w / 1280.0
-# The tab's first terminal line: device rows 17..22 (inside the 8-row grid
-# cell that starts at the kernel's 16-row title band), columns 1..55 — the
+# The tab's first terminal line: device rows 17..29 (inside the 16-row
+# grid cell that starts at the kernel's 16-row title band — M73l #1661
+# cell_h=16), columns 1..55 — the
 # "gosh> " prompt and its block cursor.
 green = 0
-for y in range(int(17 * scale), int(23 * scale)):
+for y in range(int(17 * scale), int(30 * scale)):
     for x in range(int(1 * scale), int(56 * scale)):
         r, g, b = px(x, y)
         if g > r + 30 and g > b + 30:

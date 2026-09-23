@@ -3,7 +3,7 @@
 # into M60's leftovers; markers move `term:` -> `goterm:` by prefix alone,
 # the M66c/NOTE pattern — no assertion dropped).
 #
-# GOTERM first-class window terminal: a share script prints 30 numbered
+# GOTERM first-class window terminal: a share script prints 20 numbered
 # lines into the kernel presentation grid, the host pointer (custom-virtio
 # kind-2, guest pixels) drag-selects a row in the window's client area, and
 # the Ctrl+Shift+C chord copies the selection into the shared clipboard —
@@ -11,7 +11,7 @@
 # table, driving_award.zig selection), which is what makes this a front-end
 # swap. The monitor `clip` command then prints the copied bytes on the
 # serial console — observed selection/copy. M73e (#1629) adds the reverse:
-# the wide drag selects all 30 rows (389 B > the old 256 B input queue),
+# the wide drag selects all 20 rows (259 B > the old 256 B input queue),
 # Ctrl+Shift+V pastes it back through the bound tty (bracketed, DECSET
 # 2004), and the editor runs every pasted line — tail line included. Reflow/
 # scrollback math is class-A (kernel/src/terminal.zig tests) with the
@@ -20,9 +20,17 @@
 # M73d geometry: this gate boots WITHOUT GOTABWM.ELF (shim compositing,
 # GOTERM's kind-8 declare refused — the plain .user window still paints)
 # at the classic terminal rect 64,48,640,400 — the SAME rect TERM.BIN
-# declared, so the original drag coordinates stand untranslated: line1
-# col0 -> line30 col79 = exactly the 30 BIG.SH rows (389 B) the copy
-# asserts count.
+# declared. M73l (#1661, cell 8x16) re-anchors this gate: the 384 px
+# client fits 24 rows at cell_h=16 (was 48 at 8), so a 30-line script
+# would scroll LINE-00 out of the view and the drag could no longer
+# reach it. BIG.SH is 20 lines — still every line, total 22 <= 24 so
+# the view never scrolls and line1 stays visible. Both drag ends move:
+# y76 = row1 at cell_h=8 but row0 (the prompt line) at 16, so the start
+# becomes y84 (row1, client top y64) and the end y392 (row20) — line1
+# col0 -> line20 col79 = exactly the 20 BIG.SH rows (259 B, still > the
+# 256 B input queue the M73e assertion exists to prove) the copy
+# asserts count, with the prompt line excluded and `clip: LINE-00`
+# (not `clip: gosh> source ...`) back as the clipboard head.
 #
 # HOST PREREQUISITE (fails the gate honestly when missing):
 #   bash tools/go/build-gotabwm.sh   ->  .build/go/GOTABWM.ELF (the seat —
@@ -55,7 +63,7 @@ for name, how in (("GOTERM.ELF", "build-goterm.sh"),):
                  "bash tools/go/" + how)
     shutil.copy(src, os.path.join(share, name))
     print("staged %s into share (%d bytes)" % (name, os.path.getsize(src)))
-lines = ["echo LINE-%02d pppp" % i for i in range(30)]
+lines = ["echo LINE-%02d pppp" % i for i in range(20)]
 with open(os.path.join(share, "BIG.SH"), "w") as f:
     f.write("\n".join(lines) + "\n")
 PY
@@ -64,7 +72,7 @@ vgate_run 01 -- --display --input --via-virtio --screen '$RUN_DIR/screen' \
     --script '$RUN_DIR/script.txt' \
     --input-string 'source BIG.SH'$'\n' \
     --input-string-after 'goterm: attached' \
-    --pointer-virtio "68,76;68,76,d;696,308;696,308,u" \
+    --pointer-virtio "68,84;68,84,d;696,392;696,392,u" \
     --pointer-virtio-after 'goterm: line source BIG.SH' \
     --input-chords "ctrl-shift-c,ctrl-shift-v,return,e,c,h,o,space,a,f,t,e,r,return" \
     --input-chords-after 'dui: term sel end' \
@@ -77,7 +85,7 @@ vgate_assert 01 serial-contains 'goterm: ready'
 vgate_assert 01 serial-contains 'goterm: attached'
 vgate_assert 01 serial-contains 'goterm: line source BIG.SH'
 vgate_assert 01 serial-contains 'goterm: done status=0'
-vgate_assert 01 serial-contains 'tty: copy 389 bytes'
+vgate_assert 01 serial-contains 'tty: copy 259 bytes'
 vgate_assert 01 serial-contains 'clip: LINE-00'
 vgate_assert 01 serial-absent '\[EXC\]'
 vgate_assert 01 serial-absent '[EXC] parking:'
@@ -113,7 +121,7 @@ PY
 # selection back through the bound tty. The marker's byte count must
 # exceed the old 256 B queue (the raised in_capacity + DECSET 2004 wrap
 # are what make that land), and every pasted line — including the tail
-# LINE-29, which only survives if NOTHING was dropped — must reach the
+# LINE-19, which only survives if NOTHING was dropped — must reach the
 # editor and run.
 vgate_assert 01 python <<'PY'
 import os, re
@@ -125,7 +133,7 @@ assert n > 256, f"paste must exceed the old 256 B queue (got {n})"
 i_copy = ser.find("tty: copy ")
 i_paste = ser.find(m.group(0))
 assert i_copy >= 0 and i_paste > i_copy, f"paste not after copy (copy={i_copy} paste={i_paste})"
-for seg in ("goterm: line LINE-00 pppp", "goterm: line LINE-14 pppp", "goterm: line LINE-29 pppp"):
+for seg in ("goterm: line LINE-00 pppp", "goterm: line LINE-10 pppp", "goterm: line LINE-19 pppp"):
     assert seg in ser, f"{seg} missing — paste lost bytes"
-print(f"paste OK: {n} bytes; LINE-00..LINE-29 all reached the editor")
+print(f"paste OK: {n} bytes; LINE-00..LINE-19 all reached the editor")
 PY

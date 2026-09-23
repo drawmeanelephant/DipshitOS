@@ -8,16 +8,20 @@ import "virelai/vi"
 // (arg0 = w, arg1 = h — both kernel emit sites push the post-clamp number
 // the reflow used) onto CELLS, the TUI contract:
 //
-//	cols = clamp(w/8, 8, 80)  — terminal.zig syncWindowCols -> setCols
-//	rows = (h - 16)/8          — driving_award.zig rows_visible; the 16 px
-//	                            title band (wnd_core title_bar_h) is not
-//	                            client area; kernel's `else 1` below it
+//	cols = clamp(w/cellW, 8, 80) — terminal.zig syncWindowCols -> setCols
+//	rows = (h - 16)/cellH         — driving_award.zig rows_visible; the 16 px
+//	                               title band (wnd_core title_bar_h) is not
+//	                               client area; kernel's `else 1` below it
+//
+// M73l (#1661): cellW/cellH mirror kernel/src/font_metrics.zig — the
+// FiraCode advance at pixel size 13 is 8 wide, ascent+descent 16 tall.
 //
 // tabapp.CellGrid carries the canonical class-A pin (M73j #1636
 // TestCellGridPinsKernel); this five-line copy keeps the Charm module
 // dependency-free — keep the two in step.
 func cellsForRect(w, h uint32) (cols, rows int) {
-	cols = int(w / 8)
+	const cellW, cellH = 8, 16
+	cols = int(w / cellW)
 	if cols < 8 {
 		cols = 8
 	}
@@ -26,7 +30,7 @@ func cellsForRect(w, h uint32) (cols, rows int) {
 	}
 	rows = 1
 	if h > 16 {
-		rows = int((h - 16) / 8)
+		rows = int((h - 16) / cellH)
 	}
 	return cols, rows
 }

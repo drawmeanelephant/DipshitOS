@@ -38,24 +38,28 @@ const (
 // M73j (#1636): the port's unit pin for tea.WindowSizeMsg — CELLS, never
 // pixels. Both numbers mirror kernel formulas for the SAME rect:
 //
-//	cols  = clamp(w/8, 8, 80)   — terminal.zig syncWindowCols -> setCols
+//	cols  = clamp(w/cellW, 8, 80) — terminal.zig syncWindowCols -> setCols
 //	        (the M49 SD5-effective column count the grid reflows to)
-//	rows  = (h - 16)/8          — driving_award.zig rows_visible, the
+//	rows  = (h - 16)/cellH         — driving_award.zig rows_visible, the
 //	        16 px title band (wnd_core title_bar_h) is NOT client area
+//
+// M73l (#1661): cellW/cellH mirror kernel/src/font_metrics.zig —
+// FiraCode at pixel size 13: advance 8, ascent+descent 16.
 //
 // A TUI can therefore never ask for geometry the grid will not render;
 // TestSizeMsgPinsKernelCellMath pins the agreement class-A.
 func sizeMsg(w, h uint32) tea.WindowSizeMsg {
-	cols := int(w / 8)
+	const cellW, cellH = 8, 16
+	cols := int(w / cellW)
 	if cols < 8 {
 		cols = 8
 	}
 	if cols > 80 {
 		cols = 80
 	}
-	rows := 1 // kernel: `if (h > title) (h-title)/8 else 1`
+	rows := 1 // kernel: `if (h > title) (h-title)/cellH else 1`
 	if h > 16 {
-		rows = int((h - 16) / 8)
+		rows = int((h - 16) / cellH)
 	}
 	return tea.WindowSizeMsg{Width: cols, Height: rows}
 }
