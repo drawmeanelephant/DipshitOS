@@ -519,6 +519,42 @@ func helpGroupNames(group string) []string {
 	return out
 }
 
+// HelpRow is the public read-only shape of one catalog row (M74c #1646):
+// everything `help <cmd>` prints, without the printing. GOHELP.ELF renders
+// these rows directly, so the help browser cannot fork the shell's help
+// text — when GOSH's help changes, the browser follows (the class-A drift
+// test pins the map against the real tables, so both faces stay honest).
+type HelpRow struct {
+	Name  string
+	Group string
+	Usage string
+	Blurb string
+	Notes string
+}
+
+// HelpSections lists the catalog's sections in display order: the six D1
+// groups, then tools, then externals — helpCatalogText's order.
+func HelpSections() []string {
+	out := make([]string, 0, len(helpGroups)+2)
+	out = append(out, helpGroups...)
+	return append(out, "tools", "externals")
+}
+
+// HelpRows returns every catalog row ordered by HelpSections, then by name
+// within a section — the order `help` lists them. Single-sourced from
+// helpCatalog: there is no second table for the browser to drift onto.
+func HelpRows() []HelpRow {
+	rows := make([]HelpRow, 0, len(helpCatalog))
+	for _, g := range HelpSections() {
+		for _, name := range helpGroupNames(g) {
+			e := helpCatalog[name]
+			rows = append(rows, HelpRow{Name: name, Group: g, Usage: e.usage,
+				Blurb: e.blurb, Notes: e.notes})
+		}
+	}
+	return rows
+}
+
 // helpCatalogText renders the D1 grouped catalog. The leading `builtins:`
 // line is load-bearing: live-sh-complete and live-sh4 both sequence their
 // typed `help` on it, so it stays the first line of the catalog.
