@@ -1,23 +1,22 @@
 # go-wm-default.spec -- M59 (issue #1298) class-B gate: the boot-default flip.
 #
-# Boot 01 carries NO `wm` setting, so the compiled default seats the GO desktop
-# (GOTABWM.ELF) from the shell idle, and GOCALC.ELF is hosted by it (declare ->
-# focus -> full viewport -> close). Zig CALC.BIN is gone (M62h / #1406).
+# Boot 01 carries NO `wm` setting or SESSION.TABS: the compiled default seats
+# GOTABWM.ELF and M76b opens its first-boot GOSH workspace before the settings
+# and calculator runs. A marker and prompt-pixel capture pin the hosted
+# terminal. Zig CALC.BIN is gone (M62h / #1406).
 #
 # M71f (#1565): the run then persists `wm=tabwm` FROM THE GO PANEL. GOSET.ELF
-# is exec'd under the seat as its first hosted tab, typed into, and applies
+# is exec'd under the seat after the first-boot shell tab, typed into, and applies
 # `wm=tabwm` with one command line -- the panel publishes it crash-safe. That is
 # the card's premise repaired in place: on the DEFAULT seat, a Go UI changes the
 # seat. The published bytes are then compared to settings-healed.expected, the
 # same fixture boot 04's kernel-side save is pinned against, so the panel's
 # serializer and the kernel's must agree byte-for-byte.
 #
-# The panel is the FIRST hosted tab on purpose: it must be focused and typed
-# into early (the runner's --input-string watcher gives up after 40 s, well
-# before a second single-tab close cycle would finish). GOCALC.ELF is exec'd
-# after the panel's window closes and the strip empties, so each app owns the
-# strip alone -- no two-tab choreography, no SESSION.TABS snapshot, which would
-# otherwise change what boots 03/04 see.
+# The panel takes focus when its declare is accepted and is typed into before
+# the two-tab close choreography completes (the runner's --input-string
+# watcher gives up after 40 s). GOCALC.ELF starts after both tabs close, so it
+# gets the strip alone and cannot be captured by the M62e SESSION.TABS snapshot.
 #
 # Boot 02 proves the flip is a SETTING, not a hardcode: the same share boots
 # the Zig TABWM seat -- the fallback the card requires to stay reachable.
@@ -33,6 +32,7 @@
 #
 # HOST PREREQUISITE (fails the gate honestly when missing):
 #   bash tools/go/build-gotabwm.sh   ->  .build/go/GOTABWM.ELF
+#   bash tools/go/build-gosh.sh      ->  .build/go/GOSH.ELF (M76b first boot)
 #   bash tools/go/build-gocalc.sh    ->  .build/go/GOCALC.ELF
 #
 # exec-order: assert-proven -- every stage gate is anchored on guest output the
@@ -56,19 +56,20 @@ vgate_file script.txt <<'EOF'
 dui focus 0
 EOF
 
-# Boot 01, stage 2: forwarded once the window phase is finished, i.e. the seat
-# is in its WM_RPC serve loop. `wm` reports the live seat; then the Go panel
-# GOSET.ELF is exec'd under it and takes the (empty) strip as its only tab.
+# Boot 01, stage 2: after the first-boot GOSH prompt has had four seconds to
+# reach scanout, capture it and launch the settings panel. GOSH and GOSET share
+# the seat's proven two-client envelope; the seat closes both before stage 3.
 vgate_file script2.txt <<'EOF'
+echo M76B_FIRSTBOOT_CAPTURE
 set GOMAXPROCS=1
 wm
 exec GOSET.ELF
 EOF
 
-# Boot 01, stage 3: the panel's single-tab window has closed and the strip is
-# empty again, so GOCALC.ELF is exec'd as the M59 hosted-client proof -- again
-# as the strip's only tab. The save under test already happened in stage 2 and
-# was the PANEL's, never the monitor's `settings set`.
+# Boot 01, stage 3: the two-tab choreography has closed GOSH and GOSET, so
+# GOCALC.ELF is exec'd as the M59 hosted-client proof on an empty strip. The
+# save under test already happened in stage 2 and was the PANEL's, never the
+# monitor's `settings set`.
 vgate_file script3.txt <<'EOF'
 exec GOCALC.ELF
 EOF
@@ -84,6 +85,13 @@ if not os.path.exists(src):
 shutil.copy(src, os.path.join(share, "GOTABWM.ELF"))
 print("staged GOTABWM.ELF into share (%d bytes)" %
       os.path.getsize(os.path.join(share, "GOTABWM.ELF")))
+src = os.path.join(".build", "go", "GOSH.ELF")
+if not os.path.exists(src):
+    sys.exit("GOSH.ELF missing (expected " + src + ") - build it first: "
+             "bash tools/go/build-gosh.sh")
+shutil.copy(src, os.path.join(share, "GOSH.ELF"))
+print("staged GOSH.ELF into share (%d bytes)" %
+      os.path.getsize(os.path.join(share, "GOSH.ELF")))
 src = os.path.join(".build", "go", "GOCALC.ELF")
 if not os.path.exists(src):
     sys.exit("GOCALC.ELF missing (expected " + src + ") - build it first: "
@@ -106,6 +114,9 @@ print("staged GOSET.ELF into share (%d bytes)" %
 if os.path.exists(os.path.join(share, "SETTINGS.TXT")):
     sys.exit("SETTINGS.TXT already present in the share; boot 01 must boot "
              "with no persisted `wm`")
+if os.path.exists(os.path.join(share, "SESSION.TABS")):
+    sys.exit("SESSION.TABS already present in the share; boot 01 must prove "
+             "the missing-session first-boot branch")
 PY
 
 # The default-seat table with `wm=tabwm`, in the kernel's settings.zig init()
@@ -130,18 +141,19 @@ EOF
 # line edits and saves in a single keypress (Enter applies then publishes). The
 # keys ride the custom-virtio INPUT queue (headless HID reports, no view), the
 # same channel go-wm-hid's type-in boot uses, and they land in the FOCUSED
-# window -- which is the panel, because its declare took focus.
+# window -- which is GOSET, because its declare takes focus over the starter.
 vgate_run 01 -- \
     --screen '$RUN_DIR/screen' \
+    --screenshot-after 'M76B_FIRSTBOOT_CAPTURE' \
     --via-virtio \
     --script '$RUN_DIR/script.txt' \
     --script-after 'gotabwm: win focus' \
     --script2 '$RUN_DIR/script2.txt' \
-    --script2-after 'gotabwm: win gone' \
+    --script2-after 'gosh: prompt' --script2-delay 4 \
     --input-string $'wm=tabwm\n' \
     --input-string-after 'goset: ready ' \
     --script3 '$RUN_DIR/script3.txt' \
-    --script3-after 'gotabwm: tabs empty' \
+    --script3-after 'goset: close' \
     --script-expect 'goset: saved ' --script-expect-tail 90 --timeout 300
 
 # --- the flip: an untouched boot lands in the Go desktop ------------------
@@ -156,6 +168,13 @@ vgate_assert 01 serial-contains 'gotabwm: draw'
 vgate_assert 01 serial-contains 'gotabwm: holding seat'
 vgate_assert 01 serial-contains 'gotabwm: tick'
 vgate_assert 01 serial-contains 'gotabwm: present'
+# M76b: the empty SESSION.TABS branch launches one GOSH tab on the default
+# seat. The marker is the seat's successful sys_exec; these app/seat markers
+# prove that GOSH declared and the seat accepted it.
+vgate_assert 01 serial-contains 'gotabwm: first-boot workspace'
+vgate_assert 01 serial-contains 'gosh: declare accepted'
+vgate_assert 01 serial-contains 'gotabwm: tab open id='
+vgate_assert 01 serial-contains 'gosh: prompt'
 # The kernel's own report of the live seat, queried while it is up.
 vgate_assert 01 serial-contains 'wm: registered pid='
 vgate_assert 01 serial-contains 'wm: present_seq='
@@ -169,9 +188,9 @@ vgate_assert 01 serial-contains 'gotabwm: win close'
 vgate_assert 01 serial-contains 'gotabwm: win gone'
 
 # --- M71f (#1565): the DEFAULT seat's Go panel writes the setting ----------
-# The panel is the strip's FIRST tab: exec'd under the live default seat, it
-# decodes the ABSENT settings file as the compiled defaults (so `wm` is a row it
-# can set -- card D2), takes the typed command line, and publishes.
+# The panel is focused after its declare on the live default seat. It decodes
+# the ABSENT settings file as compiled defaults (so `wm` is a row it can set),
+# takes the typed command line, and publishes.
 vgate_assert 01 serial-contains 'exec: loaded GOSET.ELF'
 vgate_assert 01 serial-contains 'goset: open id='
 vgate_assert 01 serial-contains 'goset: ready keys=8 wm=gotabwm theme=dark mode=rw'
@@ -202,6 +221,61 @@ vgate_assert 01 serial-contains 'gotabwm OK'
 vgate_assert 01 serial-contains 'wm: unregistered, shim resumed'
 vgate_assert 01 serial-absent '[EXC] parking:'
 vgate_assert 01 serial-absent 'exited status=139'
+
+# The prompt capture happens before the first-boot GOSH tab's bounded single-
+# tab close. Count the green prompt glyphs to prove it reached scanout.
+vgate_assert 01 snapshot 'screen-after' <<'PY'
+import sys, zlib, struct
+path = sys.argv[1]
+d = open(path, 'rb').read()
+assert d[:8] == b'\x89PNG\r\n\x1a\n', "not a PNG"
+pos = 8; idat = b''; w = h = ct = 0
+while pos < len(d):
+    ln, typ = struct.unpack('>I4s', d[pos:pos+8])
+    data = d[pos+8:pos+8+ln]
+    if typ == b'IHDR':
+        w, h, bd, ct = struct.unpack('>IIBB', data[:10])
+    elif typ == b'IDAT':
+        idat += data
+    pos += 12 + ln
+raw = zlib.decompress(idat)
+bpp = 4 if ct == 6 else 3
+stride = w * bpp
+out = bytearray(); prev = bytearray(stride); i = 0
+for y in range(h):
+    f = raw[i]; i += 1
+    line = bytearray(raw[i:i+stride]); i += stride
+    if f == 1:
+        for x in range(bpp, stride): line[x] = (line[x] + line[x-bpp]) & 0xff
+    elif f == 2:
+        for x in range(stride): line[x] = (line[x] + prev[x]) & 0xff
+    elif f == 3:
+        for x in range(stride):
+            a = line[x-bpp] if x >= bpp else 0
+            line[x] = (line[x] + ((a + prev[x]) >> 1)) & 0xff
+    elif f == 4:
+        for x in range(stride):
+            a = line[x-bpp] if x >= bpp else 0
+            b = prev[x]; c = prev[x-bpp] if x >= bpp else 0
+            p = a + b - c
+            pa, pb, pc = abs(p-a), abs(p-b), abs(p-c)
+            pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
+            line[x] = (line[x] + pr) & 0xff
+    out += line
+    prev = line
+def px(x, y):
+    k = (y * w + x) * bpp
+    return out[k], out[k+1], out[k+2]
+scale = w / 1280.0
+green = 0
+for y in range(int(17 * scale), int(30 * scale)):
+    for x in range(int(1 * scale), int(56 * scale)):
+        r, g, b = px(x, y)
+        if g > r + 30 and g > b + 30:
+            green += 1
+print("first-boot terminal-green pixels: %d" % green)
+assert green >= 200, ("first-boot GOSH prompt absent from scanout (%d pixels)" % green)
+PY
 
 # --- boot 02: the PANEL's `wm=tabwm` from boot 01 -> the Zig fallback seat ---
 vgate_file script-02.txt <<'EOF'

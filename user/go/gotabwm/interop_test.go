@@ -41,6 +41,7 @@ func TestInteropMarkerShapes(t *testing.T) {
 		{MarkerSessionBad, "gotabwm: session bad"},
 		{MarkerDogfoodSeat, "dogfood: seat"},
 		{MarkerDogfoodOK, "dogfood: ok"},
+		{MarkerFirstBootWorkspace, "gotabwm: first-boot workspace"},
 	}
 	for _, c := range cases {
 		if c.got != c.want {

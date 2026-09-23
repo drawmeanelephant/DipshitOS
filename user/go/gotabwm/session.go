@@ -11,6 +11,14 @@ const (
 	sessionIDBase = uint32(0x100) // placeholder ids; records have no window id
 )
 
+type sessionLoadState uint8
+
+const (
+	sessionMissing sessionLoadState = iota
+	sessionRestored
+	sessionCorrupt
+)
+
 var (
 	sessionSeq     uint16 = 1
 	sessionWritten bool
@@ -73,21 +81,35 @@ func writeSession() bool {
 	return true
 }
 
-// loadSession reads SESSION.TABS. Missing is a no-op (first boot).
-// Corrupt/truncated bytes fail closed: empty strip + MarkerSessionBad.
-func loadSession() {
-	b, r := vi.ReadFileAll(sessionPath, tabsV2MaxBytes)
-	if r < 0 || b == nil {
-		return
+// restoreSessionBytes keeps the missing/corrupt/present decisions testable on
+// the host. A missing file is distinct from an invalid or valid empty session:
+// only missing can request the first-boot workspace.
+func restoreSessionBytes(strip *TabStrip, b []byte, readResult int64) (uint16, sessionLoadState) {
+	if readResult < 0 || b == nil {
+		return 0, sessionMissing
 	}
-	seq, ok := tabs.applyTabsV2(b)
+	seq, ok := strip.applyTabsV2(b)
 	if !ok {
+		return 0, sessionCorrupt
+	}
+	return seq, sessionRestored
+}
+
+// loadSession reads SESSION.TABS. Missing is the first-boot branch; corrupt
+// or truncated bytes fail closed, while a present valid file is restored.
+func loadSession() sessionLoadState {
+	b, r := vi.ReadFileAll(sessionPath, tabsV2MaxBytes)
+	seq, state := restoreSessionBytes(&tabs, b, r)
+	if state == sessionMissing {
+		return state
+	}
+	if state == sessionCorrupt {
 		vi.ConsoleLine(MarkerSessionBad)
-		return
+		return state
 	}
 	sessionSeq = seq + 1
 	if tabs.Count() == 0 {
-		return
+		return state
 	}
 	// Placeholder ids (sessionIDBase+) are not kernel windows. Leave
 	// hostedApp=0 so a later Wmctl* cannot aim at 0x100+i. stripDone
@@ -103,4 +125,33 @@ func loadSession() {
 	vi.ConsoleLine(MarkerSessionFreeze + vi.Itoa64(int64(tabs.FrozenCount())))
 	dumpOrder()
 	_ = writeLayoutFile()
+	return state
+}
+
+// firstBootWorkspace is only for the default Go seat. A deliberately selected
+// shim-only seat (wm=none) may exec GOTABWM for a gate, and the Zig fallback
+// (wm=tabwm) owns its own startup path.
+func firstBootWorkspace(state sessionLoadState, wm string) bool {
+	return state == sessionMissing && wm == "gotabwm"
+}
+
+func hasLiveGuestELF(rows []vi.ProcRow) bool {
+	for _, row := range rows {
+		if row.State != vi.ProcCreated && row.State != vi.ProcRunning {
+			continue
+		}
+		name := row.Name()
+		if name != "GOTABWM.ELF" && len(name) > 4 && name[len(name)-4:] == ".ELF" {
+			return true
+		}
+	}
+	return false
+}
+
+// anotherGuestProgram prevents an explicitly started app (for example,
+// GOSH in a gate script) from being duplicated by the first-boot default.
+func anotherGuestProgram() bool {
+	var rows [64]vi.ProcRow
+	n, r := vi.Procs(rows[:])
+	return r >= 0 && hasLiveGuestELF(rows[:n])
 }
