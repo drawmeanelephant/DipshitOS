@@ -72,6 +72,8 @@
 #   bash tools/go/build-web.sh browser    ->  .build/go/WEB.ELF (the name the
 #                                             app claims to the WM; the script
 #                                             defaults it now)
+#   bash tools/go/build-goterm.sh         ->  .build/go/GOTERM.ELF    (boot 04)
+#   bash tools/go/build-charmhello.sh     ->  .build/go/CHARMHELLO.ELF (boot 04)
 #   (the page is the pinned fixture user/go/browser/testdata/gate-page.html,
 #    staged as /host/DOGFOOD.HTML; no new fixture)
 #
@@ -86,9 +88,40 @@
 # only GOSH is hosted, so the captured frame's tab region is the shell's own
 # pixels and nothing else.
 #
+# M73z (#1638) adds a FOURTH boot: the M73 milestone acceptance, one boot in
+# which the default seat drives the whole terminal promise as a user would:
+# (a) Enter-summon + the docked Terminal entry (apps.txt:8, dock=true) through
+# the launcher -> M73c's honest goterm: markers; (b) a staged share script's
+# rows (box-drawing + wide rune, paste >256 B) drag-selected and pushed back
+# through GOTERM's bound tty with Ctrl+Shift+C/V (M73e's exact chain) -> every
+# line runs; (c) its clear+redraw burst followed by the monitor `tty` line
+# reading 0/0 (M73f-1 polarity + M73f-2's line, after the burst settles);
+# (d) `dui kresize` -> charmhello's own `charmhello: size` recomputed from the
+# NEW rect + repaint (M73j — there is no window-edge drag seam under the
+# seat: no kernel resize grip, no gotabwm gesture, so the card's "whichever
+# the spec pick supports" picks dui); (e) the captured scanout pixel-asserts
+# the rune row's box cells, the wide rune's cell pair, and no ink past col 79
+# (M73a-2 + M73g's width wall) at the END of the sequence. Staging rides the
+# STARTUP.SH contract (host-side file, silent run before GOTERM's first
+# prompt — the serial line cap is 256 B, so a >256 B line cannot be staged
+# through the console), and the phases mirror go-wm-hid's proven input set
+# (`--via-virtio` alone). The pick of this spec over live-term-depth is
+# evidence-made: live-term-depth boots WITHOUT GOTABWM by design (M73d
+# geometry, header), so the launcher half cannot exist there; only this spec
+# has the default seat + staging + snapshot shape. STARTUP.SH is shared by
+# all four boots on purpose: boot 03's pixel pin counts terminal-green pixels
+# in row 0 and the first staged row is a dense ASCII echo, so the assertion
+# still measures green ink, not a prompt.
+#
 # exec-order: assert-proven -- every phase gate is anchored on guest output
-# (the seat's or an app's own marker) and each run ends on a marker only its
-# stage script prints (`rx-dogfood-01-ok` / `rx-dogfood-02-ok`).
+# (the seat's, an app's, or the kernel's own marker: dogfood: seat ->
+# user-el0 reaped -> gotabwm: present (the seat's own first present, reached
+# only once NOTE's user window created render demand — boot 04's string
+# phase fires here, go-wm-hid's chords fire on this same marker);
+# goterm: prompt / dui: term sel end / goterm: done status=0 /
+# charmhello: ready are all program markers), and the run ends on
+# `charmhello: repainted` — a marker only charmhello prints after
+# ActionResized, so a program that never ran still fails the run.
 
 vgate_name go-dogfood "issue #1528 M69a: the DEFAULT Go seat hosts the daily-driver beat (GOSH+NOTE, then GOCALC+WEB) with ordered guest-printed dogfood: markers"
 vgate_share seed
@@ -131,7 +164,9 @@ for name, how in (("GOTABWM.ELF", "build-gotabwm.sh"),
                   ("GOSH.ELF", "build-gosh.sh"),
                   ("NOTE.ELF", "build-note.sh"),
                   ("GOCALC.ELF", "build-gocalc.sh"),
-                  ("WEB.ELF", "build-web.sh browser WEB")):
+                  ("WEB.ELF", "build-web.sh browser WEB"),
+                  ("GOTERM.ELF", "build-goterm.sh"),
+                  ("CHARMHELLO.ELF", "build-charmhello.sh")):
     src = os.path.join(".build", "go", name)
     if not os.path.exists(src):
         sys.exit(name + " missing (expected " + src + ") - build it first: "
@@ -491,4 +526,405 @@ for y in range(int(17 * scale), int(30 * scale)):
 print("terminal-green pixels on the tab's first line: %d" % green)
 assert green >= 200, ("GOSH's tab shows no prompt text (%d green pixels on "
                       "the first terminal line) - the tab is blank" % green)
+PY
+
+# Between-run cleanup for boot 04, on THIS tag's asserts: boots 01-03 share
+# one RUN_DIR, and the seat's close writes SESSION.TABS (writeSession,
+# once-only save-on-exit -- observed: boot 01 `session write n=2`, boots
+# 02/03 `session load n=2`). The restore side loads placeholder ids that
+# are not kernel windows, so closeHosted's WmctlWinClose fails on them,
+# the strip keeps its count, and boot 04's Enter-summon can never fire
+# (observed r4: `session load n=2`, rail n=3, no `tab close`, runner
+# reached --script-expect timeout with the seat at maxTicks). The setup
+# hooks all run before boot 01 (vgate.sh's setup loop), so the delete has
+# to live HERE: the run/assert loop evaluates tag-03 asserts after run 03
+# and before run 04 (vgate.sh tag filter). The harness itself uses this
+# between-run slot for WINDOWS.SAV (`rm -f "$SHARE/WINDOWS.SAV"` before
+# each run); this is the boot-04-specific instance of that pattern.
+vgate_assert 03 python <<'PY'
+import os, sys
+share = os.environ.get("VG_SHARE")
+if not share:
+    sys.exit("no armed share exported to the assert (vgate_share arm?)")
+ser = open(os.environ["VG_SER"], "rb").read()
+if b"gotabwm: session load" not in ser:
+    sys.exit("boot 03 did not load a session, but its close is what "
+             "leaves SESSION.TABS for boot 04 -- re-check the strip "
+             "assumption before moving this cleanup")
+st = os.path.join(share, "SESSION.TABS")
+if not os.path.exists(st):
+    sys.exit("boot 03 loaded SESSION.TABS but the file is gone at "
+             "between-run cleanup time")
+os.remove(st)
+assert not os.path.exists(st), "SESSION.TABS survived removal"
+print("between-run cleanup: removed SESSION.TABS "
+      "(boot 04 summons on an empty strip)")
+PY
+
+# --- boot 04: THE M73 ACCEPTANCE (M73z, #1638) ------------------------------
+# One boot, the default seat, the user's actual sequence. Every phase chains
+# off a guest-printed marker:
+#   user-el0 reaped -> script-04a: GOMAXPROCS + exec NOTE.ELF + the stage
+#                     marker. NOTE is the seat's wake-up call: its USER
+#                     window (owner>1) creates render demand, so the kernel
+#                     starts the composite-tick cadence and the seat reaches
+#                     `gotabwm: present` (observed run 1: a boot with no
+#                     user window ever — the kernel demo id2 is owner=1 —
+#                     sits at tick=0/present=0 forever and no input phase
+#                     can be trusted to land). NOTE declares as the rail's
+#                     ONLY tab (boot 03's tag-03 assert above deletes
+#                     SESSION.TABS between runs: restored ids are
+#                     placeholders that are not kernel windows, so
+#                     closeHosted would fail on them and the strip could
+#                     never empty), arming the seat's own 16-tick hostTicks
+#                     choreography: with n==1 it counts down, then
+#                     closeHosted closes NOTE's real id and prints
+#                     `gotabwm: host close id=` + `gotabwm: tab close id=`
+#                     (tabs.go / interop.go). Only then is the strip empty
+#                     for the Enter-summon below. `exec` returns to the prompt
+#                     (go-wm-hid run 03: `virelai>` prints right after its
+#                     `exec GOTABWM.ELF`), so the shell idle loop — which
+#                     is what pumps the queue-3 completions into
+#                     input.decode_keyboard_report (main.zig claim 9588) —
+#                     is live again before any key is injected.
+#   gotabwm: tab close id= -> --input-string Enter + `term` + Enter:
+#                     Enter-summons the launcher (tabs.Count()==0, hid.go's
+#                     M71e path), filters to the DOCKED Terminal entry
+#                     (apps.txt:8) and execs it — the same handleWmKey
+#                     handlers go-wm-hid proves live via chords after
+#                     `gotabwm: present` (go-wm-hid.spec input-chords-after,
+#                     green 4/4 in this worktree); string and chords are the
+#                     same EvWmKey fan at the kernel. GOTERM reuses NOTE's
+#                     freed slot (driving_award scans first-free ids), so
+#                     with GOTERM holding it, charmhello opens as id=4
+#   goterm: prompt  -> --pointer-virtio drag over the staged rows: STARTUP.SH
+#                     ran its rows silently before this first prompt (M49
+#                     SD5 kernel selection -> `dui: term sel end`). The
+#                     window is NOT fullscreen: boot 04's serial pins
+#                     `open: id=3 rect=64,48 640x400`, title_bar_h=16
+#                     (wnd_core.zig) and cell 8x16 (font_metrics), so the
+#                     text grid starts at y=64 and the five staged rows
+#                     occupy y 64..143 — press (68,70)=row0col0, release
+#                     (700,140)=row4, deliberately above the prompt row
+#                     (144..159) so no PS1 text joins the selection.
+#                     Observed r5: the old 4,24 press fell outside the
+#                     window (on the 24px dock bar) -> no selection.
+#   dui: term sel end -> --input-chords ctrl-shift-c, ctrl-shift-v, return:
+#                     copy the >256 B selection, paste it through GOTERM's
+#                     bound tty (GOSH requests DECSET 2004 at startup, so
+#                     the paste lands bracketed \e[200~..\e[201~ and the
+#                     chord's return submits the tail — input.zig:583,
+#                     live-term-depth.spec:15) — M73e's exact chain.
+#                     BLOCKED under the seat (finding on #1629, seam
+#                     claimed as #1688): selection begins only inside
+#                     pointer_tick AFTER the wm_owns_input return
+#                     (driving_award:3334), and gotabwm's handleWmPointer
+#                     forwards no content pointer events (hid.go:221-256),
+#                     so `dui: term sel end` never prints here — observed
+#                     r6: gotabwm: ptr x4, zero sel markers, drag provably
+#                     inside rect=64,48 640x400. Asserts stay red, intact. The first pasted row runs `clear` (the
+#                     clear+redraw burst, (c)), the next re-prints the rune
+#                     row at row 0 ((e)'s pixels)
+#   goterm: done status=0 -> script-04b (2 s delay, so the burst finished):
+#                     the monitor `tty` line (0/0), then exec CHARMHELLO.ELF
+#   charmhello: ready -> script-04c: `dui` registry dump (geometry
+#                     evidence), `dui kresize 4 -32 -16` (d) — 4 is the
+#                     first-free id while GOTERM holds the reused slot 3 —
+#                     then `dui lower 4` so (e)'s capture reads GOTERM's
+#                     row 0, not charmhello's fullscreen face
+#   charmhello: repainted -> ActionResized printed the NEW cells and
+#                     repainted; the harness captures the scanout here.
+#
+# STARTUP.SH is GENERATED into the share by the hook below (the serial line
+# cap is 256 B — observed run 1: `error: input refused: line longer than 256
+# bytes` — so a >256 B selection can never be staged through the console;
+# the share file is bounded 2048 B/file by the startup contract instead).
+# Its rows are DOUBLE-echoed so the screen shows runnable commands, and the
+# selected rows together exceed 256 B (the M73e unit: live-term-depth's
+# 259 B came from 20 screen rows the same way — a single on-screen row caps
+# at ~240 B with the kernel's glyph widths).
+vgate_file STARTUP.SH <<'EOF'
+echo echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+echo clear
+echo echo ┌─┐你 ppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+echo echo bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+echo echo cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+EOF
+
+# The hook computes the SELECTION host-side (the double-echo rows are what
+# lands on screen) and refuses to stage anything the old queue could hold.
+vgate_setup_python <<'PY'
+import os, shutil, sys
+rd = os.environ["RUN_DIR"]
+share = os.environ.get("VG_SHARE") or os.path.join(rd, "share")
+p = os.path.join(rd, "STARTUP.SH")
+if not os.path.exists(p):
+    sys.exit("vgate_file STARTUP.SH must precede this hook")
+rows = []
+for ln in open(p, encoding="utf-8").read().splitlines():
+    if ln.startswith("echo "):
+        rows.append(ln[5:])
+sel = "\n".join(rows)
+assert len(sel.encode()) > 256, \
+    "selection must exceed the old 256 B queue: %d" % len(sel.encode())
+assert "\u250c" in sel and "\u4f60" in sel, "selection lost its runes"
+for r in rows:
+    cells = len(r) + (1 if "\u4f60" in r else 0)
+    assert cells <= 79, "row would wrap at 80 cols: %d cells %r" % (cells, r)
+shutil.copy(p, os.path.join(share, "STARTUP.SH"))
+print("staged STARTUP.SH: %d rows, selection = %d bytes" %
+      (len(rows), len(sel.encode())))
+# The SESSION.TABS between-run cleanup lives on boot 03's tag-03 assert:
+# this hook runs before boot 01, when boots 02/03 have not yet restored
+# and re-written the file (the delete here was a no-op).
+PY
+
+vgate_file script-04a.txt <<'EOF'
+set GOMAXPROCS=1
+exec NOTE.ELF
+echo m73z-stage1
+EOF
+
+vgate_file script-04b.txt <<'EOF'
+tty
+exec CHARMHELLO.ELF
+EOF
+
+vgate_file script-04c.txt <<'EOF'
+dui
+dui kresize 4 -32 -16
+dui lower 4
+EOF
+
+vgate_run 04 -- \
+    --via-virtio \
+    --screen '$RUN_DIR/screen-04' \
+    --screenshot-after 'charmhello: repainted' \
+    --script '$RUN_DIR/script-04a.txt' \
+    --script-after 'user-el0 reaped' \
+    --input-string $'\nterm\n' \
+    --input-string-after 'gotabwm: tab close id=' \
+    --pointer-virtio '68,70;68,70,d;700,140;700,140,u' \
+    --pointer-virtio-after 'goterm: prompt' \
+    --input-chords 'ctrl-shift-c,ctrl-shift-v,return' \
+    --input-chords-after 'dui: term sel end' \
+    --script2 '$RUN_DIR/script-04b.txt' \
+    --script2-after 'goterm: done status=0' --script2-delay 2 \
+    --script3 '$RUN_DIR/script-04c.txt' \
+    --script3-after 'charmhello: ready' \
+    --script-expect 'charmhello: repainted' --timeout 300
+
+vgate_assert 04 share-contains APPS.TXT 'GOTERM.ELF | Terminal | t | dock=true'
+vgate_assert 04 serial-contains 'wm: autostart gotabwm (settings wm=gotabwm)'
+vgate_assert 04 serial-contains 'dogfood: seat'
+
+# --- (a) the docked Terminal entry opens through the launcher ---------------
+# The seat's own 16-tick choreography emptied the strip first; without it
+# Enter lands in the focused app's tty instead of summoning.
+vgate_assert 04 serial-contains 'gotabwm: tab close id='
+vgate_assert 04 serial-contains 'launcher open n='
+vgate_assert 04 serial-contains 'launcher filter q=term n=1'
+vgate_assert 04 serial-contains 'launcher exec GOTERM.ELF'
+vgate_assert 04 serial-contains 'exec: loaded GOTERM.ELF'
+vgate_assert 04 serial-contains 'goterm: open id='
+vgate_assert 04 serial-contains 'goterm: attached'
+vgate_assert 04 serial-contains 'goterm: ready'
+vgate_assert 04 serial-contains 'goterm: prompt'
+
+# --- (b) the staged rows selected, copied, pasted, and ran ------------------
+vgate_assert 04 serial-contains 'dui: term sel end'
+vgate_assert 04 serial-contains 'tty: paste '
+# startup lines run silently (no marker), so this `clear` line can only
+# have come from the PASTE — M73e's write-back, proven.
+vgate_assert 04 serial-contains 'goterm: line clear'
+vgate_assert 04 serial-contains 'goterm: done status=0'
+
+# --- (d) the dui resize seam: new cells + repaint ---------------------------
+vgate_assert 04 serial-contains 'exec: loaded CHARMHELLO.ELF'
+vgate_assert 04 serial-contains 'charmhello: open id='
+vgate_assert 04 serial-contains 'charmhello: ready'
+vgate_assert 04 serial-contains 'dui kresize: id=4'
+vgate_assert 04 serial-contains 'charmhello: repainted'
+vgate_assert 04 serial-absent 'keyboard resize failed'
+
+# Two tabs on the one strip: the docked Terminal and charmhello (the hosting
+# count idiom boot 01 uses; without it one hosted app could pass every marker
+# above).
+vgate_assert 04 serial-count 'gotabwm: tab open id=' 2
+vgate_assert 04 serial-absent '[EXC] parking:'
+vgate_assert 04 serial-absent 'exited status=139'
+
+# THE acceptance chain, in order, with the three cross-card pins:
+#  (b) the paste carries >256 B, every staged row reached the editor, and
+#      the rune row arrived with BOTH rune classes byte-intact (startup
+#      lines are silent, so each of these markers can only be the paste);
+#  (c) the tty line reads out_dropped=0 in_dropped=0 AFTER the burst
+#      (M73f-1's polarity plus M73f-2's line plus a repaint that happened);
+#  (d) charmhello's SECOND size marker is exactly the first minus the
+#      kresize deltas in CELLS (cols -32px/8 = -4, rows -16px/16 = -1),
+#      computed from whatever rect the seat gave it (main_test.go pins
+#      both kernel formulas), and it precedes the repaint marker.
+vgate_assert 04 python <<'PY'
+import os, re, sys
+
+ser = open(os.environ["VG_SER"], errors="replace").read()
+
+def at(sub, start=0):
+    i = ser.find(sub, start)
+    if i < 0:
+        sys.exit("missing %r (after %d)" % (sub, start))
+    return i
+
+# The chain, each link found AFTER the previous one. The string phase
+# fires on NOTE's tab close (the 16-tick hostTicks choreography that
+# empties the strip); stage1 prints before NOTE even declares and present
+# lands on the first composite tick, so the close — 16 ticks after that
+# declare — is strictly after both.
+i_seat = at("dogfood: seat")
+i_stage = at("m73z-stage1", i_seat)
+i_present = at("gotabwm: present", i_seat)
+i_close = at("gotabwm: tab close id=", max(i_stage, i_present))
+i_open = at("launcher open n=", i_close)
+i_prompt = at("goterm: prompt", i_open)
+i_sel = at("dui: term sel end", i_prompt)
+i_paste = at("tty: paste ", i_sel)
+
+# (b): paste bytes, all staged rows submitted, rune row byte-intact.
+m = re.search(r"tty: paste (\d+) bytes", ser)
+n = int(m.group(1))
+if n <= 256:
+    sys.exit("paste must exceed the old 256 B queue (got %d)" % n)
+i_clear = at("goterm: line clear", i_paste)
+i_rune = at("goterm: line echo \u250c", i_clear)
+rune_line = ser[i_rune:ser.find("\n", i_rune)]
+if "\u4f60" not in rune_line:
+    sys.exit("rune row lost its wide rune: %r" % rune_line[:70])
+n_lines = ser.count("goterm: line ", i_paste)
+if n_lines < 4:
+    sys.exit("only %d staged rows reached the editor (want >=4)" % n_lines)
+i_done = at("goterm: done status=0", i_rune)
+
+# (c): the tty counters, read by script2 (2 s after the first done), land
+# AFTER the burst and read 0/0.
+mtty = re.search(r"tty\[\d+\]: out_dropped=(\d+) in_dropped=(\d+)", ser[i_done:])
+if not mtty:
+    sys.exit("tty drop-counter line missing after the burst")
+i_tty = i_done + mtty.start()
+if mtty.group(1) != "0" or mtty.group(2) != "0":
+    sys.exit("drop counters must read 0/0 (got %r)" % mtty.group(0))
+
+# (d): size relation — the FIRST charmhello size line is the startup rect,
+# the SECOND comes only from ActionResized after `dui kresize 4 -32 -16`.
+i_kresize = at("dui kresize: id=", i_tty)
+ms0 = re.search(r"charmhello: size (\d+)x(\d+)", ser)
+if not ms0:
+    sys.exit("startup charmhello: size missing")
+c0, r0 = int(ms0.group(1)), int(ms0.group(2))
+ms1 = re.search(r"charmhello: size (\d+)x(\d+)", ser[ms0.end():])
+if not ms1:
+    sys.exit("no post-kresize charmhello: size marker")
+c1, r1 = int(ms1.group(1)), int(ms1.group(2))
+if (c1, r1) != (c0 - 4, r0 - 1):
+    sys.exit("resize cells %dx%d want %dx%d (startup %dx%d, kresize -32 -16)"
+             % (c1, r1, c0 - 4, r0 - 1, c0, r0))
+i_repaint = at("charmhello: repainted", i_kresize)
+
+print("acceptance chain OK: seat@%d stage@%d present@%d close@%d "
+      "launcher@%d prompt@%d sel@%d paste=%dB lines=%d clear@%d rune@%d "
+      "done@%d %s@%d kresize@%d repaint@%d size %dx%d -> %dx%d"
+      % (i_seat, i_stage, i_present, i_close, i_open, i_prompt, i_sel, n,
+         n_lines, i_clear, i_rune, i_done, mtty.group(0).split(":")[0],
+         i_tty, i_kresize, i_repaint, c0, r0, c1, r1))
+PY
+
+# --- (e) THE pixel proof: the pasted line's cells at the END of the run ------
+# The pasted `clear` wiped the screen and the pasted rune row re-printed at
+# row 0. Charmhello full-screen-declares like every rail app (boot 03's
+# passing green pin at y17..29 is the z-order evidence: a focused
+# fullscreen declare sits on top of the id2 demo window), so script3's
+# `dui lower 4` — z-order only, leaving charmhello's queued WIN_RESIZE to
+# print its second size + repaint marker afterwards — drops it BEHIND
+# GOTERM before the capture.
+# GOTERM declares full-viewport (kind 8) and the kernel draws a window
+# terminal's grid from its 16-row title band, so the row's first 80 cells
+# sit at device y16..31, x from 0 (the geometry boot 03's prompt pin
+# proved for the same seat shape). The row is
+#   [box \u250c\u2500\u2510 cells 0..2][wide \u4f60 cells 3..4][space cell 5][p... cell 6+]
+# so: ink in the box span, ink across BOTH cells of the wide rune's pair, a
+# BLANK cell where the wide rune's continuation must leave off, ink resuming
+# at the exact next cell boundary, and NOTHING at or past col 79 (x>=640) —
+# the alignment that fails if the wide rune ever consumed 1 cell (the gap
+# would land at [32..40) and p's would start at x40, tripping the blank-cell
+# and the past-wall pins at once). script3's `dui` dump records every window
+# rect as geometry evidence; if another window ever covered this band the
+# pins would fail rather than pass on someone else's pixels.
+vgate_assert 04 snapshot 'screen-04-after' <<'PY'
+import sys, zlib, struct
+path = sys.argv[1]
+d = open(path, 'rb').read()
+assert d[:8] == b'\x89PNG\r\n\x1a\n', "not a PNG"
+pos = 8; idat = b''; w = h = ct = 0
+while pos < len(d):
+    ln, typ = struct.unpack('>I4s', d[pos:pos+8])
+    data = d[pos+8:pos+8+ln]
+    if typ == b'IHDR':
+        w, h, bd, ct = struct.unpack('>IIBB', data[:10])
+    elif typ == b'IDAT':
+        idat += data
+    pos += 12 + ln
+raw = zlib.decompress(idat)
+bpp = 4 if ct == 6 else 3
+stride = w * bpp
+out = bytearray(); prev = bytearray(stride); i = 0
+for y in range(h):
+    f = raw[i]; i += 1
+    line = bytearray(raw[i:i+stride]); i += stride
+    if f == 1:
+        for x in range(bpp, stride): line[x] = (line[x] + line[x-bpp]) & 0xff
+    elif f == 2:
+        for x in range(stride): line[x] = (line[x] + prev[x]) & 0xff
+    elif f == 3:
+        for x in range(stride):
+            a = line[x-bpp] if x >= bpp else 0
+            line[x] = (line[x] + ((a + prev[x]) >> 1)) & 0xff
+    elif f == 4:
+        for x in range(stride):
+            a = line[x-bpp] if x >= bpp else 0
+            b = prev[x]; c = prev[x-bpp] if x >= bpp else 0
+            p = a + b - c
+            pa, pb, pc = abs(p-a), abs(p-b), abs(p-c)
+            pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
+            line[x] = (line[x] + pr) & 0xff
+    out += line
+    prev = line
+
+def px(x, y):
+    k = (y * w + x) * bpp
+    return out[k], out[k+1], out[k+2]
+
+def green(x0, x1, y0, y1):
+    n = 0
+    for y in range(int(y0), int(y1)):
+        for x in range(int(x0), int(x1)):
+            r, g, b = px(x, y)
+            if g > r + 30 and g > b + 30:
+                n += 1
+    return n
+
+scale = w / 1280.0
+y0, y1 = 16 * scale, 32 * scale          # grid row 0 (16-row title band)
+def X(dev): return dev * scale
+box    = green(X(0),   X(24), y0, y1)    # \u250c \u2500 \u2510, cells 0..2
+rune   = green(X(24),  X(40), y0, y1)    # \u4f60 across BOTH pair cells 3..4
+gap    = green(X(40),  X(48), y0, y1)    # cell 5 = the space after the rune
+pfield = green(X(48),  X(640), y0, y1)   # the P-run, cells 6..79
+past   = green(X(640), X(1280), y0, y1)  # col 79's wall and beyond
+print("cells: box=%d rune=%d gap=%d pfield=%d past-wall=%d (png %dx%d)"
+      % (box, rune, gap, pfield, past, w, h))
+assert box >= 20, "box-drawing cells absent (got %d green px)" % box
+assert rune >= 30, "wide rune did not paint its cell pair (got %d)" % rune
+assert gap <= 10, "cell after the wide rune must be blank (got %d)" % gap
+assert pfield >= 100, "the P-run after col 6 is absent (got %d)" % pfield
+assert past <= 20, "ink past col 79: the grid shifted (got %d)" % past
+print("(e) rune cell rendered, alignment exact, no ink past col 79")
 PY
