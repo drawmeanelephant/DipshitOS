@@ -102,6 +102,9 @@ const (
 	SlotFileDelete   uintptr = 34
 	SlotFileRename   uintptr = 35
 	SlotFileTruncate uintptr = 36
+	// M73j (#1636): sys_win_resize — the owner-side window resize; the
+	// kernel clamps, reflows the grid and pushes WIN_RESIZE (kind 10).
+	SlotWinResize    uintptr = 47
 	SlotAudioInfo    uintptr = 42
 	SlotAudioPlay    uintptr = 43
 	SlotAudioVolume  uintptr = 44
@@ -363,6 +366,14 @@ func WinFill(id int, x, y, w, h uint32, rgb uint32) int64 {
 
 // WinPresent flushes the window's pending fills to the compositor.
 func WinPresent(id int) int64 { return syscall1(SlotWinPresent, uintptr(id)) }
+
+// WinResize resizes the CALLER'S window (sys_win_resize, slot 47). The
+// kernel clamps to the resize bounds and on-scanout rule, reflows the
+// presentation grid, and pushes WIN_RESIZE (arg0=w, arg1=h, the clamped
+// values) to this pid — the seam M73j turns into tea.WindowSizeMsg.
+func WinResize(id int, w, h uint32) int64 {
+	return syscall3(SlotWinResize, uintptr(id), uintptr(w), uintptr(h))
+}
 
 // WinClose closes the caller's window.
 func WinClose(id int) int64 { return syscall1(SlotWinClose, uintptr(id)) }

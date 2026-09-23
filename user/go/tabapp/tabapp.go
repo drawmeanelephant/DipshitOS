@@ -138,5 +138,34 @@ func (t *TabApp) Layout(r Rect, fromW, fromH uint32) Rect {
 	return Scale(r, fromW, fromH, t.W, t.H)
 }
 
+// CellGrid maps a Virelai window rect in FRAME pixels to the terminal
+// grid's cell dimensions — M73j's (#1636) agreement pin, mirrored from
+// the kernel's two formulas for the SAME rect:
+//
+//	cols = clamp(w/8, 8, 80)  — terminal.zig syncWindowCols -> setCols
+//	                            (the M49 SD5-effective column count)
+//	rows = (h-16)/8            — driving_award.zig rows_visible, the 16 px
+//	                            title band (wnd_core title_bar_h) is not
+//	                            client area; kernel's `else 1` below it
+//
+// The TUI contract is cells, never pixels: a consumer can only ask for
+// geometry the kernel grid will actually render. TestCellGridPinsKernel
+// pins both formulas class-A; the class-B size marker proves the live
+// event carries the same numbers.
+func CellGrid(w, h uint32) (cols, rows int) {
+	cols = int(w / 8)
+	if cols < 8 {
+		cols = 8
+	}
+	if cols > 80 {
+		cols = 80
+	}
+	rows = 1
+	if h > 16 {
+		rows = int((h - 16) / 8)
+	}
+	return cols, rows
+}
+
 // FillRGB is the full-viewport clear colour from the Go token table (M69c).
 func FillRGB() uint32 { return theme.Current.Bg }
