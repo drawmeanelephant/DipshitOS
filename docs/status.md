@@ -106,7 +106,7 @@ The only threads not closed:
 | **EL0 `sys_exec` caller survival** | AddrSpaceSpec + argv on slot 28; class-B `live-el0-exec` | #1333 |
 | **M71 — Seat honesty** | Seat lane + first app retirements landed: M71c–e (chrome, reopen/duplicate, freeze + start surface), M71f `GOSET.ELF` (#1565), M71g `GOTOP.ELF` (#1566), M71h `GOVIEW.ELF` (#1567), M71i `DOC.BIN` → `WEB.ELF` (#1568), M71n `GOPING.ELF` + GOSH names the net CLIs (#1573, gates `live-n1-ping`/`live-net-offline`/`go-net-clis`). M71m (#1572): exec argv is 8×256, an over-long arg is refused, GOSSHD runs `GOSH.ELF -c` directly (gate `live-ssh-server`) | #1559 |
 | **M72 — Charm TUI** | Closed (#1578, all cards): loader bound split (`load_max` initialized / `map_max` 64 MiB mapped), window-tty VT (SGR/CUP/EL/ED/alt), Bubble Tea hello + host tape. The `u8` grid leftover moved to M73a-1. | #1578 |
-| **M73 — Terminal depth** | In flight: index #1624 + 14 cards; acceptance #1638 closes it. Merged: M73a-1, M73f-1, M73b (#1647), M73a-2 (#1649), M73f-2 (#1651), M73c (#1627), M73e (#1652), M73g (#1653), M73h (#1654). Open claim: M73i #1635 (this PR closes it). Claimable: M73j #1636, M73k #1637; M73z #1638 after wave 1. Wave 2 (TTF grid, palette theming) not yet filed. | #1624 |
+| **M73 — Terminal depth** | In flight: index #1624 + 14 cards; acceptance #1638 closes it. Merged: M73a-1, M73f-1, M73b (#1647), M73a-2 (#1649), M73f-2 (#1651), M73c (#1627), M73e (#1652), M73g (#1653), M73h (#1654), M73i (#1656). This PR closes M73k #1637. M73j #1636 is claimed; M73z #1638 after wave 1. Wave 2 (TTF grid, palette theming) not yet filed. | #1624 |
 | **M74 — TUI apps** | Split out of M73 wave 2: milestone 55 + index #1639 filed; app cards file after M73 wave 1 lands. | #1639 |
 
 ## Gate status

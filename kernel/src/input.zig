@@ -407,7 +407,8 @@ pub fn decode_keyboard_report(rep: []const u8) void {
     const alt = (flags & app_events.MOD_ALT) != 0;
     kb_mods = mods;
     var keys: [6]u8 = [_]u8{0} ** 6;
-    for (rep[2..8], 0..) |k, i| keys[i] = k; // Card U5 (ADR 0008 D4): Alt+Tab cycles window focus — the
+    for (rep[2..8], 0..) |k, i| keys[i] = k;
+    // Card U5 (ADR 0008 D4): Alt+Tab cycles window focus — the
     // chord is consumed as a window-manager signal across all windows.
     // C2 (M15): capture Shift for reverse cycling.
     for (keys) |k| {
