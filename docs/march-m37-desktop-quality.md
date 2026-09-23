@@ -3,7 +3,7 @@
 > [`docs/status.md`](status.md) is the canonical milestone-level source. This
 > file holds M37's per-card detail, order, and gate notes. A card's row flips
 > to ✅ only with real observed evidence.
-> Binding: **[desktop-quality scoping](desktop-quality-scoping.md)** (DRAFT,
+> Binding: **[desktop-quality scoping](archive/desktop-quality-scoping.md)** (DRAFT,
 > claim 8459) — split of umbrella issue **#821** (Phase 1: claim 7154).
 > Proposed GitHub milestone: **24 — M37 Desktop quality pass**
 > (created 2026-09-03: DQ1 #836, DQ2 #840, DQ3 #839, DQ4 #838, DQ5 #837).

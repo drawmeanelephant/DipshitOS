@@ -24,8 +24,9 @@ short version.
 
 Work lands as a **claim**:
 
-1. File one GitHub issue labeled `claim` (`just claim "<title>"`) with the
-   owner branch and the files it will touch in the body.
+1. File one GitHub issue labeled `claim` — for ad-hoc work run
+   `bash tools/status/new-claim.sh`, for a carded unit `just claim-card <issue>` —
+   with the owner branch and the files it will touch in the body.
 2. Implement on a branch, with host tests.
 3. Where hardware is involved, add a class B gate and save evidence under
    `artifacts/`.

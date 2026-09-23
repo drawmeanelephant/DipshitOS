@@ -4,7 +4,7 @@
 > forward roadmap (M19–M27) without file-level collisions. This document
 > is the coordination surface for parallel agent dispatch.
 >
-> **Canonical status:** [`docs/status.md`](status.md) remains the source of
+> **Canonical status:** [`docs/status.md`](../status.md) remains the source of
 > truth for what's done. This file governs *how* agents split the work.
 >
 > **Last updated:** 2026-08-22. M18 (T1–T15) landed on `main`; T16

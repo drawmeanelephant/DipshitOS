@@ -14,7 +14,7 @@ request.
 ## What it runs
 
 ```bash
-zig fmt --check boot/src/*.zig kernel/src/*.zig build.zig
+zig fmt --check boot/src/*.zig kernel/src/*.zig user/src/*.zig build.zig
 bash tools/verify-unit-tests.sh
 zig build test-console
 zig build
@@ -24,9 +24,16 @@ swift build --package-path host/vm-runner
 zig build context
 bash tools/status/verify-issue-coordination.sh
 bash tools/status/test-coordination.sh
+bash tools/inventory-gates.sh --check
 bash tools/lint-workflows.sh
 bash tools/verify-mmu-debt.sh
-python3 tools/decode-screen-glyphs.py --self-test
+bash tools/verify-glyph-raster.sh
+bash tools/verify-ttf-fonts.sh
+bash tools/verify-mutations.sh
+bash tools/verify-bss-budget.sh
+bash tools/verify-vf-class-a.sh
+bash tools/gate/test-gate-run.sh
+bash tools/go/test-ensure-guest-elf.sh
 ```
 
 The `just verify-portable` alias runs the same set locally.
@@ -50,6 +57,12 @@ The `just verify-portable` alias runs the same set locally.
   trigger/expression typos fail in CI instead of only surfacing when a
   workflow runs for real. Runner-label allowance in `.github/actionlint.yaml`.
   Self-bootstraps into `.build/` when actionlint isn't on PATH.
+- **`inventory-gates.sh --check`** — the gate fleet is discovered, not
+  listed: this enforces spec-order and locale invariance.
+- **budget & raster pins** — `verify-bss-budget`, `verify-glyph-raster`,
+  `verify-ttf-fonts`, `verify-mutations`, and `verify-vf-class-a` hold the
+  measured budgets; `gate/test-gate-run.sh` and `go/test-ensure-guest-elf.sh`
+  test the harness itself.
 - **`verify-mmu-debt.sh`** — the ADR 0006 MMU contract (T0SZ=16 + TLBI
   comments) stays enforced.
 - **glyph self-test** — the mirror-tripwire decoder renders the clock window

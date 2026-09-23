@@ -21,14 +21,15 @@ default VM stays byte-identical:
 | Flag | Attaches |
 |------|----------|
 | `--console` | an interactive stdin/stdout serial console |
-| `--display` / `--screenshot` | the virtio-gpu device (1280×720 scanout) for the graphical terminal and window manager |
+| `--display` / `--screen <path>` / `--screenshot-after` | the virtio-gpu device (1280×720 scanout) for the graphical terminal and window manager, with an optional screenshot dump after boot |
 | `--input` | the USB keyboard + pointing devices (an Apple XHCI controller) |
 | `--net` | the virtio-net device with a deterministic file-handle attachment |
 | `--net-nat` | the virtio-net device with a NAT attachment (real outbound connectivity) |
 
-The launcher also carries the deterministic scripted-input and network
-responder seams the live gates use (`--script`, `--input-string`,
-`--net-udp-respond`, `--net-dhcp-respond`, and so on). Those are test
+The launcher also carries the deterministic scripted-input, network
+responder, host-share, and console seams the live gates use (`--script`, `--input-string`,
+`--net-udp-respond`, `--net-dhcp-respond`, `--cvc-file <host-dir>`,
+`--console-tcp <port>`, `--usb-msd <image>`, and so on). Those are test
 harness surface, not something an end user typically drives by hand.
 
 ## What you should see
@@ -43,8 +44,8 @@ virelai>
 ```
 
 From there the interactive monitor serves the [[architecture|kernel]]'s
-command surface — `help` lists the registry (69 commands as of the current
-tree), from `mem` and `pages` through `exec`, `net`, `screen`, `win`, and
+command surface — `help` lists the registry (78 commands as of the current
+tree), from `mem` and `pages` through `exec`, `net`, `screen`, `dui`, and
 `smp`.
 
 <Aside kind="info">

@@ -19,3 +19,18 @@ always-current answers are `docs/status.md`, `docs/roadmap.md`, and
 always-current answers are `docs/status.md`, `docs/roadmap.md`, and
 `docs/march-m3.md` — keep completed-work docs out of `docs/` root so the
 root holds only active documentation.
+
+**M75b (issue #1671, 2026-09-23) moved the closed-arc scoping docs here:**
+`wms10-seam-b-scoping.md`, `crypto-scoping.md`,
+`desktop-quality-scoping.md`, `wasm-core-scoping.md`,
+`roadmap-post-arc5.md`, `agent-concurrency-plan.md`, and
+`concurrency-gameplan.md`. Every inbound link (march trackers, roadmap,
+TEAMS, wasm-import-contract, line-of-sight, the `syscall.zig` §8 comment)
+was rewritten to the `archive/` path in the same change. **Kept in
+`docs/` root (still binding, cited by live code or an ADR):**
+`wasm-import-contract.md` (frozen `env.*` surface — `wasm.zig`, tests,
+`live-wasm-abi`), `line-of-sight.md` (ZC tooling + ADR 0035),
+`host-file-channel-scoping.md` (HF contract — `virtio_custom.zig`, gate
+fixtures), `html-renderer-scoping.md` (ADR 0028), `ssh-scoping.md`
+(ADR 0025), `trust-scoping.md` (ADR 0024). The march trackers stay in
+`docs/` — `status.md` links them as per-arc detail.

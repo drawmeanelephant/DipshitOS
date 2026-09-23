@@ -101,7 +101,7 @@ pub const memmap = @import("memmap.zig"); // host tests: arm the physical alloca
 pub const slot_count: usize = 128;
 /// 56 through M18 + slot 58 `sys_font_size` (M20-U1); 56/57 are Lane A's
 /// reserved pipe slots (M19) — the gap is intentional, see
-/// docs/agent-concurrency-plan.md §8.
+/// docs/archive/agent-concurrency-plan.md §8.
 /// M19 P1 (issue #290): slots 56/57 are the bounded pipe.
 /// M26 N1 (issue #399): slots 59/60 are ping send/poll.
 /// M26 N2 (issue #400): slot 62 is the net-stats snapshot.

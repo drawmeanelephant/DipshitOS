@@ -17,12 +17,20 @@ to GitHub Pages).
 
 ## Status
 
-Every milestone through **M70** has landed and closed as of 2026-09-20, and
+Every milestone through **M74** has landed and closed (observed 2026-09-23),
+except **M73**, whose acceptance card is still open
+([#1624](https://github.com/drawmeanelephant/DipshitOS/issues/1624)), and
 the **boot default is the Go seat**: `GOTABWM.ELF` autostarts and hosts Go EL0
 clients over the `WM_RPC` tab contract, with Zig `TABWM.BIN` retained by
-decision as the `settings set wm tabwm` fallback. The tracker is open:
-**M71 seat honesty** ([#1559](https://github.com/drawmeanelephant/DipshitOS/issues/1559))
-and **M72 Charm TUI** ([#1578](https://github.com/drawmeanelephant/DipshitOS/issues/1578)).
+decision (ADR 0034) as the `settings set wm tabwm` fallback. Four fresh arcs
+are filed and claimable: docs & site truth-up
+([#1669](https://github.com/drawmeanelephant/DipshitOS/issues/1669), landing in
+[PR #1686](https://github.com/drawmeanelephant/DipshitOS/pull/1686)), boot past
+the wall ([#1673](https://github.com/drawmeanelephant/DipshitOS/issues/1673)),
+the tuios exploration
+([#1678](https://github.com/drawmeanelephant/DipshitOS/issues/1678)), and the
+Zig userland final pass
+([#1681](https://github.com/drawmeanelephant/DipshitOS/issues/1681)).
 [`docs/status.md`](docs/status.md) is the canonical accounting and the readable
 summary is the
 [documentation site](https://drawmeanelephant.github.io/DipshitOS/).
@@ -32,10 +40,10 @@ pipeline, the interactive `virelai>` monitor, userspace (allocator,
 scheduler, EL0 + syscalls), processes (IPC, wait, kill), networking
 (virtio-net → ARP → IPv4/ICMP → UDP → DHCP → TCP), graphics (framebuffer →
 Road Pops terminal → Driving Award window manager), input (USB XHCI + HID),
-usability, app events, the userland filesystem, the desktop platform
-(`CALC.BIN`, `NOTEPAD.BIN`, `TOP.BIN`, `GOFILES.ELF`, `DESKTOP.BIN` — of that
-M11 set the calculator and the editor are now the Go `GOCALC.ELF` / `NOTE.ELF`,
-with Zig `CALC.BIN` retired in M62h and Zig `NOTEPAD.BIN` in M66c), network
+usability, app events, the userland filesystem, the desktop platform —
+`CALC.BIN`, `NOTEPAD.BIN`, `TOP.BIN` are all retired Zig (M62h/M66c/M71g),
+now the Go `GOCALC.ELF` / `NOTE.ELF` / `GOTOP.ELF` — alongside `GOFILES.ELF`
+and `DESKTOP.BIN`, network
 apps, shared services (clipboard + app timers), audio, kernel consolidation,
 desktop completeness and the post-M17 arcs, and the M18–M27 experience layer
 (terminal & shell depth, shell programming, text rendering & Unicode, window
@@ -55,8 +63,9 @@ The 2026-08-27 hardware-depth trio rounded it out:
   executables (`CALC.ELF`, `NOTEPAD.ELF`, `FILE.ELF`, `DESKTOP.ELF`) with
   runtime `dlopen`/`dlsym` plugin loading.
 
-Also landed: an in-guest HTTP/1.1 web server (`HTTPD.BIN`, TCP passive open,
-claim 0750), offline preflight for the M26 network apps (N13/N14), and a
+Also landed: an in-guest HTTP/1.1 web server (claim 0750 — Zig `HTTPD.BIN` was
+retired to `GOHTTPD.ELF` in M71l), offline preflight for the M26 network apps
+(N13/N14), and a
 wall-clock bounding fix for `sys_tcp_connect` (#613).
 
 **Right now:** the boot default is the Go seat, and the Go toolchain runs

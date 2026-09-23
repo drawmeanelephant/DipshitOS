@@ -718,8 +718,8 @@ beat cannot see this.
     spawn further runs); without one the guard's live branch is exercised
     in-process against the throwaway issue.
 19. Run the live RX / transcript gate (class B, claim 6684):
-    `bash tools/verify-live-transcript.sh` (also `just
-    verify-live-transcript`) — boots the production image, forwards
+    `just gate live-transcript` (`tools/gate/specs/live-transcript.spec`) —
+    boots the production image, forwards
     scripted keystrokes (`help`/`version`/`mem`/`echo`) into the guest's
     virtio receive queue after the takeover, and asserts the live
     `virelai>` transcript (banner, echoed commands, command output, echo
@@ -935,7 +935,8 @@ it are load-bearing rather than incidental:
       `kernel_rc=0x0000000000000002`. Evidence:
       `artifacts/m2-badhandoff-fix-{before,after,gates,goodpath}.txt`.
 - [x] M1.5 live RX / transcript gate (class B, claim 6684): **passing
-      (2026-08-08)** — `bash tools/verify-live-transcript.sh` boots the
+      (2026-08-08)** — `bash tools/verify-live-transcript.sh` (now `just gate
+      live-transcript`) boots the
       production image, forwards scripted keystrokes (`help`/`version`/
       `mem`/`echo rx-live-ok`) into the guest's polled virtio receive
       queue after the takeover terminal state, and asserts the live
@@ -944,11 +945,11 @@ it are load-bearing rather than incidental:
       summary, and the `rx-live-ok` echo reply. 3/3 boots, byte-identical
       4421-byte transcripts. Evidence: `artifacts/live-transcript-*`
       (`live-transcript-gate.txt`, `live-transcript-report.txt`,
-      `live-transcript-run-<NN>.txt`, `live-transcript-serial-<NN>.log`).
-
-- [x] M1.5 live FAT32 storage gate (class B, claims 3475/6420):
-      **passing (2026-08-09, upgraded to the real FAT driver by claim
-      6420)** — `bash tools/verify-live-fs.sh` boots two VMs against the
+      `live-transcript-run-<NN>.txt`, `live-transcript-serial-<NN>.log`).- [x] M1.5 live FAT32 storage gate (class B, claims 3475/6420): **passing
+      (2026-08-09, upgraded to the real FAT driver by claim
+      6420)** — `bash tools/verify-live-fs.sh` (the script and the writable
+      FAT path were both retired with M34 HF6 — `live-fs` gates the host
+      share today) boots two VMs against the
       SAME disk image: run A (fresh image) drives `write hello.txt hello
       world` + `ls` + `cat hello.txt` and asserts the write-ok reply
       ("persisted .. bytes to FAT on the ESP"), the live volume listing

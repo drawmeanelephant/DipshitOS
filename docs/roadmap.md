@@ -101,7 +101,7 @@
   terminal depth, shell programming, Unicode, window management polish,
   developer tools, a text editor, CALC depth, file manager, network
   apps, and desktop polish. Full card detail:
-  [`docs/roadmap-post-arc5.md`](roadmap-post-arc5.md).
+  [`docs/archive/roadmap-post-arc5.md`](archive/roadmap-post-arc5.md).
 - Known open threads carried across milestones: M8 U4 pointer focus is
   class-C-only for its live proof (issue #151, claim 4769), and the
   synthesized keyboard seam reports `events=0` (issue #179).

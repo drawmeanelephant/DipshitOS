@@ -20,7 +20,8 @@ reboot, that a captured Ethernet frame is byte-exact.
 
 ## The shape of a gate
 
-Each gate is a `tools/verify-live-*.sh` script that:
+Each gate is a declarative spec under `tools/gate/specs/`, run with
+`just gate <id>` (the fleet is discovered by `tools/gate/fleet.sh`), and it:
 
 1. boots the VM with the right flag-gated device mode;
 2. drives a deterministic scripted session (marker-triggered, not sleep-based);
@@ -37,15 +38,15 @@ Each gate is a `tools/verify-live-*.sh` script that:
 - **Network** — `live-net-tx`, `-rx`, `-arp`, `-icmp`, `-udp`, `-udp-syscall`, `-nat`, `-dhcp`, `-dhcp-renew`, `-tcp`, `-tcp-rto`, `-tcp-syscall`, `-dns`, `-fetch`
 - **Graphics / input** — `live-screen`, `live-text`, `live-roadpops`, `live-glyphs`, `live-win`, `live-win-syscall`, `live-win-move`, `live-win-close`, `live-win-hig`, `live-xhci`, `live-usb`, `live-input`
 - **Usability / HIG** — `live-help`, `live-editing`, `live-settings`, plus the pointer seams: `pointer-manual` (class C, a human at the mouse), `live-pointer-cg` (class B, self-gating on Accessibility trust), and `live-pointer-virtio` (class B-headless — custom-virtio pointer injection, issue #151)
-- **Events / desktop / apps** — `live-events`, `live-sys-kill`, `live-desktop`, `go-files`
+- **Events / desktop / apps** — `live-events`, `live-sys-kill`, `live-desktop`, `go-fileman`
 - **Shared services** — `live-clipboard`, `live-timers`, `live-m14-composition`, `live-hardening`
 - **Sound** — `live-sound-device`, `live-sound-playback`, `live-sound-app`, `live-sound-control`, `live-m15-composition`
-- **Window depth / desktop (M21–M27)** — the `live-m21-*` set (tile-master, minimize-ws, max-fullscreen-aot, notif-dialog-transient, persist-title-orphan), `live-httpd` (TCP passive open), and the M25 file-manager sweep
-- **Hardware depth (M28–M31)** — `live-smp` (2 cores), `live-vm-depth` (demand paging / COW / mmap), `live-dynamic-linking` and `live-dynamic-ecosystem` (LD.SO, .ELF apps)
-- **Custom-virtio control plane** — `live-cvc-echo` (host-push round trip), `live-pointer-virtio`, and `live-virtio-e2e` (input + structured console + raw scanout in one headless boot)
+- **Window depth / desktop (M21–M27)** — the `live-m21-*` set (tile-master, minimize-ws, max-fullscreen-aot, notif-dialog-transient, persist-title-orphan), `live-httpd` (TCP passive open), and the file-manager sweeps (`live-filemanager-du`, `live-ls-l`, `go-fileman`)
+- **Hardware depth (M28–M31)** — `live-smp` (2 cores), `live-vm-depth` (mmap / fault frames / rlimit), `live-dynamic-linking` and `live-dynamic-ecosystem` (LD.SO, .ELF apps)
+- **Custom-virtio control plane** — `live-pointer-virtio` and `live-virtio-e2e` (input + structured console + raw scanout in one headless boot)
 
 The aggregate `verify-vz` sweep re-checks the shared seam across every
-subsystem in one run (136 live gate scripts at the current tree) — the
+subsystem in one run (247 gate specs at the current tree) — the
 standing regression proof that a new subsystem did not break the ones before
 it.
 

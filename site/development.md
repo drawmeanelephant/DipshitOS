@@ -16,7 +16,7 @@ engineering documents live.
 
 ```bash
 git clone https://github.com/drawmeanelephant/DipshitOS.git
-cd VirelaiOS
+cd DipshitOS
 zig build            # build
 just verify-portable # class A (mirrors CI)
 just verify-vz       # class B (Apple silicon, real VMs)
@@ -29,9 +29,9 @@ Read `AGENTS.md` before changing anything — it is the project's rulebook.
 There are deliberately two documentation surfaces:
 
 1. **This site** (`site/`) — the public front door, compiled by Boris.
-2. **The engineering warehouse** (`docs/`) — claims, decisions (ADRs),
-   gate inventory, hardware contract, status, roadmap, logs, and archived
-   prompts.
+2. **The engineering warehouse** (`docs/`) — decisions (ADRs), gate
+   inventory, hardware contract, status, roadmap, march trackers, and
+   archived prompts.
 
 The warehouse is source material, not automatically-published pages. The
 public site promotes and summarizes it, and links to the canonical files on
@@ -39,8 +39,9 @@ GitHub rather than duplicating them.
 
 ## Where to look for ugly detail
 
-- `docs/decisions/` — ADRs 0001–0007 (the binding decisions: kernel proper,
-  runtime function tables, MMU debt boundary, the syscall ABI).
+- `docs/decisions/` — the ADR set: binding decisions from kernel proper
+  (0004), runtime function tables, the MMU debt boundary, and the syscall
+  ABI (0007) onward.
 - GitHub issues labeled `claim` — per-claim scope and evidence (claims
   live on the tracker, not in repo files).
 - `docs/hardware-contract.md` — observed vs inferred hardware facts.

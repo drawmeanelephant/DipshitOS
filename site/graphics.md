@@ -44,8 +44,11 @@ all owner-restricted, with per-process ownership and auto-close on exit.
 
 Milestone eleven built the zero-heap `ui.zig` micro-widget toolkit (buttons,
 text inputs, list views — pure static BSS, no allocation) on top of the
-window seam, and four applications on top of that: `CALC.BIN` (calculator),
-`NOTEPAD.BIN` (editor), `TOP.BIN` (process monitor with click-to-kill), and
+window seam, and four applications on top of that: `CALC.BIN` (calculator, retired in
+M60; the calculator lane today is `go-calc` over `CALC.ELF`),
+`NOTEPAD.BIN` (editor — retired to Go `NOTE.ELF` in M66c, #1485),
+`TOP.BIN` (process monitor with click-to-kill — retired to Go `GOTOP.ELF`
+in M71g), and
 the `DESKTOP.BIN` launcher — later a file manager (now `GOFILES.ELF`;
 Zig `FILE.BIN` deleted in M60) and a Go editor (`NOTE.ELF`, `user/go/note`;
 Zig `NOTEPAD.BIN` deleted in M66c, #1485). Windows and clicks reach these apps as events through
@@ -54,7 +57,7 @@ milestone nine's per-process event queues (`sys_poll_event`/`sys_wait_event`).
 <Aside kind="info">
 
 **LIVE-GATED.** The pixel gates decode the actual framebuffer captures against
-the kernel's own font table. The mirror-tripwire gate (`verify-live-glyphs`)
+the kernel's own font table. The mirror-tripwire gate (`live-glyphs`)
 decodes both the terminal and the clock overlay in both orientations, so a
 mirrored-text regression fails mechanically. The window gates decode the
 window's own content at its composited position.
@@ -64,10 +67,11 @@ window's own content at its composited position.
 <Aside kind="warning">
 
 **LIMITATION.** Single display, 2D blits only, no accelerated/3D path.
-Pointer events are routed to focused applications (milestone nine), and the
-window chrome — title bars + focus rings — is live-gated, but the window
-manager's own pointer-driven focus still lacks a live hardware proof: the
-guest side is complete and host-tested, and the live seam is a real-mouse
-class-C gate plus a class-B CG gate that self-gates on Accessibility trust.
+Pointer events are routed to focused applications (milestone nine), andthe window
+chrome — title bars + focus rings — is live-gated. Pointer-driven focus and
+window selection are now live: `live-pointer-cg` drives a real CG mouse
+through press, release, drag, multi-window, and window-edge selection
+against scanout pixels, with `live-pointer-virtio` as the headless
+custom-virtio injection path (#151).
 
 </Aside>

@@ -7,15 +7,15 @@ tags: [architecture, syscalls, el0]
 
 # Userspace & syscalls
 
-Real EL0 user programs run under VirelaiOS, loaded from the disk by `exec` and
-scheduled as processes. The syscall boundary is a frozen, numbered ABI.
+Real EL0 user programs run under VirelaiOS, loaded from the host share by `exec`
+and scheduled as processes. The syscall boundary is a frozen, numbered ABI.
 
 ## The ABI (ADR 0007)
 
 The syscall ABI is frozen in `docs/decisions/0007-syscall-abi.md`: the syscall
 number goes in x8, arguments in x0–x5, the result in x0, dispatched through a
-runtime-built **128-slot** table. **Sixty-five slots are implemented**
-(0–64, with reserved gaps); the rest return `ENOSYS`.
+runtime-built **128-slot** table. **Seventy-eight slots are implemented**
+(0–77, contiguous); the rest return `ENOSYS`.
 
 | Slot | Name | What it does |
 |-----:|------|--------------|
@@ -32,19 +32,22 @@ runtime-built **128-slot** table. **Sixty-five slots are implemented**
 | 21/22 | `poll_event` / `wait_event` | non-blocking / blocking event queue reads |
 | 23–27 | `file_open` / `file_read` / `file_write` / `file_close` / `dir_list` | the userland file ABI |
 | 28 | `exec` | launch another EL0 program (the desktop launcher's seam) |
-| 29 | `kill` | terminate a running EL0 program (TOP.BIN's Kill button) |
+| 29 | `kill` | terminate a running EL0 program (the process monitor's kill button; `TOP.BIN` was retired to `GOTOP.ELF`) |
 | 30–33 | `tcp_connect` / `tcp_send` / `tcp_recv` / `tcp_close` | bounded TCP from EL0 |
-| 34–37 | `file_delete` / `file_rename` / `file_truncate` / `file_free` | mutate the DATA filesystem from EL0 |
+| 34–37 | `file_delete` / `file_rename` / `file_truncate` / `file_free` | mutate the file store from EL0 (host share since M34 HF6) |
 | 38/39 | `clipboard_set` / `clipboard_get` | the machine-global shared clipboard (the text apps' copy/paste) |
 | 40/41 | `timer_set` / `timer_cancel` | one countdown timer per process, posting `TIMER` events |
 | 42/43 | `audio_info` / `audio_play` | the EL0 audio seam: learn the negotiated PCM state, play bounded chunks |
 | 44/45 | `audio_volume` / `audio_mute` | bounded, process-only sound-state control |
 | 46 | `win_fill_batch` | batched window fills for the compositor |
 | 47 | `win_resize` | drag-to-resize (Arc2) |
+| 48 | `drag_start` | begin a drag-and-drop gesture (Arc4 #237) |
 | 49 | `win_raise_front` | raise to the front of the z-order |
 | 50 | `win_lower_back` | lower to the back of the z-order |
 | 51 | `notify` | post a system notification |
+| 52 | `win_move_to_workspace` | move a window to a workspace (Arc4 #241) |
 | 53 | `win_set_unsaved` | unsaved-changes marker (Arc4/Arc5) |
+| 54 | `setrlimit` | self-only resource limits (Arc5 #246) |
 | 55 | `drag_read` | read a drag-and-drop payload (Arc4) |
 | 56/57 | `pipe_read` / `pipe_write` | the M19 shell pipe (4 KiB bounded) |
 | 58 | `font_size` | terminal font size (M20) |
@@ -52,6 +55,18 @@ runtime-built **128-slot** table. **Sixty-five slots are implemented**
 | 61 | `win_set_title` | set a window title |
 | 62 | `net_stats` | net-stats snapshot (M26) |
 | 63/64 | `mmap` / `munmap` | anonymous user memory (M29) |
+| 65 | `wmctl` | the registered WM server's exclusive control surface (M32, ADR 0015) |
+| 66 | `time` | Unix wall-clock seconds from the EFI epoch (#1058) |
+| 67 | `tty_attach` | attach/detach the controlling terminal front-end (ADR 0020) |
+| 68 | `principal` | read the calling process's `{uid, caps}` (M50, ADR 0024) |
+| 69 | `file_mode` | owner-only chmod, persisted to `OWNERS.TXT` (M50, ADR 0024) |
+| 70 | `secret_get` | read `SECRETS.TXT` entries — never logged (M50, ADR 0024) |
+| 71 | `tty_net_auth` | the delegated net-auth challenge channel — never logged (M50, ADR 0024) |
+| 72 | `getrandom` | capped read from the kernel CSPRNG (M51, ADR 0025) |
+| 73/74 | `thread` / `futex` | the GOOS=virelai thread + futex seam (ADR 0027) |
+| 75 | `exnotify` | EL0 fault-handler register (#1228) |
+| 76 | `sock_ready` | socket readiness for the Go netpoll (#1163) |
+| 77 | `file_sync` | `fsync` for EL0 — push `/host` writes to the live fd (M66a, ADR 0007 amendment) |
 
 ## Fault-safe uaccess
 
@@ -63,8 +78,9 @@ clean `EFAULT`. The `uaccess` command proves the recovery live.
 
 ## Exec and processes
 
-`exec <file> [args...]` reads a flat `DSK1` image through the FAT path, strips
-its header, rebuilds the EL0 user root around its page, packs a bounded argv
+`exec <file> [args...]` streams a flat image out of the host share (a
+stateless channel read), strips its header, rebuilds the EL0 user root
+around its page, packs a bounded argv
 block into the text page, and spawns it. Dynamic ELF executables (M30/M31)
 ride the same seam: `LD.SO` inspects `PT_DYNAMIC`, resolves imports against
 the pre-staged shared-library aperture, relocates the GOT, and jumps to
@@ -93,9 +109,9 @@ cross-process access.
 **LIVE-GATED.** Concurrent programs, exit-status propagation, the IPC round
 trip, the UDP and TCP syscall seams, the event loop, the userland file ABI,
 and the desktop apps are each proven by a dedicated class B gate —
-`verify-live-concurrent`, `verify-live-wait`, `verify-live-ipc`,
-`verify-live-net-udp-syscall`, `verify-live-net-tcp-syscall`,
-`verify-live-events`, `verify-live-user-fs`, `verify-live-desktop`, and
-`verify-live-sys-kill`.
+`live-concurrent`, `live-wait`, `live-ipc`,
+`live-net-udp-syscall`, `live-net-tcp-syscall`,
+`live-events`, `live-user-fs`, `live-desktop`, and
+`live-sys-kill`.
 
 </Aside>

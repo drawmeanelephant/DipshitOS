@@ -35,20 +35,20 @@ status kept, and the allocator pages return at the reap.
 
 ## What's proven live
 
-- **Concurrency** — `verify-live-concurrent` shows two live processes.
-- **Long-lived peers** — `verify-live-long-lived` keeps one program running
+- **Concurrency** — `live-concurrent` shows two live processes.
+- **Long-lived peers** — `live-long-lived` keeps one program running
   across another's exit, reap, and re-exec.
-- **IPC round trip** — `verify-live-ipc` interleaves `ipc: ping N` sends with
+- **IPC round trip** — `live-ipc` interleaves `ipc: ping N` sends with
   byte-exact `peer: got ping N` echoes.
-- **Wait** — `verify-live-wait` shows two blocked tasks while the target is
+- **Wait** — `live-wait` shows two blocked tasks while the target is
   still `running`, then the status propagates.
-- **Scale** — `verify-live-scale` runs ten user programs at once inside
+- **Scale** — `live-scale` runs ten user programs at once inside
   the 16-slot pool (thirteen EL0 user slots after M65d / #1442).
 
 <Aside kind="info">
 
-**LIVE-GATED.** Each bullet above is a named class B gate in
-`tools/verify-live-*.sh`; the [[evidence]] page explains how they are
+**LIVE-GATED.** Each bullet above is a named class B gate spec in
+`tools/gate/specs/` (run with `just gate <id>`); the [[evidence]] page explains how they are
 classified and run.
 
 </Aside>

@@ -17,9 +17,10 @@ virelaios/
 ├── boot/src/main.zig          the AArch64 UEFI boot loader (handoff v2)
 ├── kernel/src/*.zig           the freestanding kernel + all subsystems
 ├── user/src/*.zig             the EL0 demo programs (built to .BIN images)
+├── user/go/                   the Go userland (apps + sh, GOOS=virelai)
 ├── host/vm-runner/            the Swift Virtualization.framework launcher
 ├── image/                     the pure-Python GPT+FAT32 image builder
-├── tools/                     gate scripts, elf2bin, status indexes
+├── tools/                     gate specs + fleet, elf2bin, mkdyn-elf, status indexes
 ├── site/                      THIS public documentation corpus (compiled by Boris)
 ├── themes/virelaios/          the site theme
 ├── docs/                      the engineering warehouse (claims/decisions/status/…)
@@ -35,11 +36,11 @@ virelaios/
 | `exceptions.zig`, `gic.zig`, `timer.zig` | vectors, GICv3, the timer PPI |
 | `scheduler.zig`, `process.zig`, `mailbox.zig` | tasks, processes, IPC |
 | `syscall.zig`, `uaccess.zig` | the frozen syscall ABI + fault-safe copies |
-| `fat.zig`, `virtio_blk.zig` | filesystem + block transport |
+| `fat32_ro.zig`, `virtio_file.zig`, `file_table.zig`, `usb_msc.zig` | read-only FAT, the host-share channel, the file ABI, USB mass storage |
 | `virtio_entropy.zig`, `csprng.zig` | entropy + ChaCha20 |
 | `virtio_net.zig`, `arp.zig`, `ipv4.zig`, `udp.zig`, `dhcp.zig`, `tcp.zig` | the network tower |
 | `virtio_gpu.zig`, `text.zig`, `road_pops.zig`, `driving_award.zig` | graphics + window manager |
-| `xhci.zig`, `input.zig` | USB XHCI + HID + event FIFO |
+| `xhci.zig`, `input.zig`, `usb_msc.zig` | USB XHCI + HID + MSC + event FIFO |
 | `console.zig`, `lineedit.zig`, `tokenizer.zig`, `shell.zig`, `monitor.zig` | the interactive monitor |
 
 The README's own layout block is the most current enumeration; this table is
