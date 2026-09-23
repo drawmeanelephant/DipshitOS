@@ -77,20 +77,63 @@ in-guest — a single boot autostarts `GOTABWM.ELF` and hosts Go clients as tabs
 
 ## Quick start
 
+To open a usable windowed desktop from a clean clone, run this from the
+repository root on Apple silicon with macOS 27 or newer:
+
 ```bash
 git clone https://github.com/drawmeanelephant/DipshitOS.git
-cd VirelaiOS
-zig build            # compile the AArch64 UEFI application
-zig build image      # build the GPT+FAT32 disk image
-zig build run        # boot it with Swift + Virtualization.framework
+cd DipshitOS
+source tools/env-check.sh
+just session
 ```
 
-`zig build run` boots the whole thing and writes the kernel's serial output to
-`artifacts/vm-serial.log`. `zig build console` boots an interactive `virelai>`
-console; `zig build test-console` runs the deterministic transcript test.
+`just session` builds the guest, disk image, and windowed VM runner, seeds the
+persistent share at `artifacts/session-share`, and opens the desktop. The VM
+window takes keyboard and mouse input; press Ctrl-C in the launching terminal
+to end the session. Guest serial output is saved to
+`artifacts/session-serial.log`. This is an interactive class-C session, so it
+does not run in CI.
 
-**Requirements:** Apple silicon, macOS 27+, Zig 0.16.0, Swift + Xcode command
-line tools, Python 3, bash. No root, no `mtools`, no Linux/QEMU path.
+The environment check verifies the modern Homebrew host tools. If it fails
+because macOS system tools appear first in `PATH`, run
+`brew install bash gnu-sed jq yq`, fix `PATH` as the check instructs, and
+source `tools/env-check.sh` again. The session also requires `just`, Zig,
+Swift/Xcode command-line tools, and Python 3.
+
+Session options (set before `just session`):
+
+```bash
+VIRELAI_SESSION_SHARE=/path/to/share just session
+VIRELAI_SESSION_NO_TABWM=1 just session
+VIRELAI_SESSION_NO_GOTABWM=1 just session
+VIRELAI_SESSION_SKIP_BUILD=1 bash tools/session.sh
+```
+
+`VIRELAI_SESSION_SHARE` relocates the persistent share. On a share without an
+existing `.virelairc`, `VIRELAI_SESSION_NO_TABWM=1` starts the classic floating
+window manager; `VIRELAI_SESSION_NO_GOTABWM=1` skips the Go seat and writes a
+startup file for the Zig TABWM fallback. Existing `.virelairc` files are kept
+as-is. `VIRELAI_SESSION_SKIP_BUILD=1` skips the script's own build steps when
+calling `tools/session.sh` directly; the runner, `artifacts/disk.img`, and
+staged files must already exist. `just session` retains its normal Zig image
+dependency.
+
+For serial-only development or deterministic builds, use the lower-level
+commands:
+
+```bash
+zig build            # compile the AArch64 UEFI application
+zig build image      # build the GPT+FAT32 disk image
+zig build run        # serial takeover path
+```
+
+`zig build run` writes kernel serial output to `artifacts/vm-serial.log`.
+`zig build console` opens an interactive `virelai>` console, and
+`zig build test-console` runs the deterministic transcript test.
+
+**Requirements:** Apple silicon, macOS 27+, Zig 0.16.0, `just`, Swift + Xcode
+command-line tools, Python 3, bash, and the Homebrew `bash`, `gnu-sed`, `jq`,
+and `yq` tools. No root, no `mtools`, no Linux/QEMU path.
 
 ## Verification
 

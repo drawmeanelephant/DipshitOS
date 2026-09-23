@@ -168,10 +168,9 @@ run:
 console:
     zig build console
 
-# Boot an interactive WINDOWED desktop session (class C — human at the keyboard; Apple silicon + macOS 27 only).
-# Seeds the persistent host share (apps + fonts + manifest), attaches the GPU window + USB keyboard/pointer, and
-# autostarts the tabbed TABWM desktop. Runs until Ctrl-C; serial log at artifacts/session-serial.log.
-# Set VIRELAI_SESSION_NO_TABWM=1 for the classic floating-window WM; VIRELAI_SESSION_SHARE=<dir> to relocate the share.
+# Boot an interactive WINDOWED desktop session from a clean checkout (class C — Apple silicon + macOS 27+).
+# Builds the guest, image, and SPIKE runner; seeds the persistent share; opens the Go seat's first-boot shell workspace.
+# Ctrl-C ends the session; serial log at artifacts/session-serial.log. See README for the VIRELAI_SESSION_* options.
 session:
     zig build session
 

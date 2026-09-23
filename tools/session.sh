@@ -18,9 +18,9 @@
 #   4. let the compiled boot default apply: M59 (issue #1298) flipped `wm`
 #      to the GO seat, so a boot lands in GOTABWM.ELF. The `.virelairc` in
 #      the share says so and offers the two escapes -- `settings set wm
-#      tabwm` for the older tabbed Zig desktop, VIRELAI_SESSION_NO_TABWM=1
-#      for the classic floating-window WM. When the Go seat cannot be built
-#      on this machine the rc falls back to `tabwm start` and says so.
+#      tabwm` for the Zig desktop, VIRELAI_SESSION_NO_TABWM=1
+#      for the classic floating-window WM. When the Go seat or its starter
+#      shell cannot be built, the rc falls back to `tabwm start` and says so.
 #
 # The canonical `artifacts/disk.img` is attached READ-ONLY through a
 # throwaway ASIF overlay, so a session never mutates the shared gate image.
@@ -31,14 +31,14 @@
 # This is NOT a gate and is not run in CI.
 #
 # Usage:
-#   bash tools/session.sh            # windowed tabbed desktop
+#   bash tools/session.sh            # windowed desktop
 #   just session
 #
 # Environment:
 #   VIRELAI_SESSION_SHARE=<dir>      share directory (default artifacts/session-share)
 #   VIRELAI_SESSION_NO_TABWM=1       no seat autostart: the floating-window WM
-#   VIRELAI_SESSION_NO_GOTABWM=1     do not build/stage the Go seat (the rc
-#                                    then falls back to `tabwm start`)
+#   VIRELAI_SESSION_NO_GOTABWM=1     do not build/stage the Go seat and shell
+#                                    (the rc then falls back to `tabwm start`)
 #   VIRELAI_SESSION_SKIP_BUILD=1     skip the build step (reuse the last build)
 #
 # Controls: the GUI window takes real keyboard + mouse. Ctrl-C in this
@@ -64,8 +64,8 @@ if [ "${VIRELAI_SESSION_SKIP_BUILD:-0}" != "1" ]; then
     codesign --force --sign - --entitlements host/vm-runner/entitlements.plist "$RUNNER"
 fi
 
-[ -x "$RUNNER" ] || { echo "session: ERROR — $RUNNER missing (run without VIRELAI_SESSION_SKIP_BUILD=1)"; exit 1; }
-[ -f "$ROOT/artifacts/disk.img" ] || { echo "session: ERROR — artifacts/disk.img missing (run 'zig build image')"; exit 1; }
+[ -x "$RUNNER" ] || { echo "session: ERROR — $RUNNER is missing; run 'just session' without VIRELAI_SESSION_SKIP_BUILD=1 (or build it with 'swift build --package-path host/vm-runner --configuration release -Xswiftc -DSPIKE')"; exit 1; }
+[ -f "$ROOT/artifacts/disk.img" ] || { echo "session: ERROR — artifacts/disk.img is missing; create it with 'zig build image'"; exit 1; }
 
 # --- 2. seed the persistent share (idempotent; never clobbers user files) ---
 mkdir -p "$SHARE"
@@ -97,15 +97,18 @@ fi
 # a default boot looks for GOTABWM.ELF ON THE SHARE. Build it with the
 # GOOS=virelai fork toolchain and stage it; if that is unavailable the
 # session still opens, with an honest warning and the Zig TABWM fallback (the
-# rc below says which).
+# rc below says which). The default first-boot workspace also needs GOSH.ELF.
 GO_SEAT_STAGED=0
 if [ "${VIRELAI_SESSION_NO_GOTABWM:-0}" != "1" ]; then
-    if bash "$ROOT/tools/go/build-gotabwm.sh"; then
+    if bash "$ROOT/tools/go/build-gotabwm.sh" && bash "$ROOT/tools/go/build-gosh.sh"; then
         cp "$ROOT/.build/go/GOTABWM.ELF" "$SHARE/GOTABWM.ELF"
+        cp "$ROOT/.build/go/GOSH.ELF" "$SHARE/GOSH.ELF"
         GO_SEAT_STAGED=1
     else
-        echo "session: WARNING — GOTABWM.ELF did not build (Go fork toolchain missing?)"
-        echo "session:           the Zig TABWM seat is the fallback; this session autostarts it."
+        echo "session: WARNING — the Go seat or its GOSH.ELF first-boot shell did not build."
+        echo "session:           build commands: 'bash tools/go/build-gotabwm.sh' and 'bash tools/go/build-gosh.sh'."
+        echo "session:           if the fork toolchain is missing, provision it with 'bash tools/go/apply.sh && just go-toolchain'."
+        echo "session:           the Zig TABWM seat is the fallback when this share has no .virelairc."
     fi
 fi
 
@@ -157,19 +160,20 @@ RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/virelai-session.XXXXXX")"
 cleanup() { rm -rf "$RUN_DIR"; }
 trap cleanup EXIT
 
+# The Go seat's startup probe waits for a focus-loss event after opening its
+# own window. In an automated gate the harness focuses the monitor window;
+# provide the same one-shot handoff here so a fresh desktop reaches its shell
+# workspace without requiring a startup click.
+printf '%s\n' 'dui focus 0' > "$RUN_DIR/session-start.txt"
+
 cat <<EOF
 
 >>>>>>>>>> VirelaiOS session <<<<<<<<<<
 
-A 1280x720 VM window is opening. Since M59 (issue #1298) the boot default is
-the GO seat (GOTABWM.ELF). It is deliberately thin today — M57 proved the seat
-and the Zig-app interop, not a desktop you live in: it paints the desktop,
-takes focus, hosts the shipped apps (GOCALC.ELF, NOTE.ELF — both Go since
-M62h/M66c), then exits. There is
-no sidebar, launcher or tab window yet; those are still the Zig TABWM seat.
+A 1280x720 VM window is opening. The default Go seat (GOTABWM.ELF) starts a
+first-boot GOSH shell workspace when there is no saved session. The Zig TABWM
+seat remains available with `settings set wm tabwm`.
 
-  * for the older tabbed desktop (sidebar + launcher + terminal window):
-      settings set wm tabwm      then Ctrl-C here and start again
   * the seat's markers and the guest shell output are in
       artifacts/session-serial.log
 
@@ -183,5 +187,6 @@ EOF
     --overlay-base "$ROOT/artifacts/disk.img" --vars "$RUN_DIR/efi-vars.bin" \
     --serial "$SERIAL_LOG" \
     --cvc-file "$SHARE" \
+    --script "$RUN_DIR/session-start.txt" --script-after 'gotabwm: win focus' \
     --display --input \
     --timeout 0
