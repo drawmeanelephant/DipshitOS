@@ -34,11 +34,11 @@ const (
 // decode is corrupt-fails-closed — one marker line, then the seat runs on its
 // own defaults, never a boot failure. A good decode names the `wm` seat the
 // file carries (the key the boot default turns on) and applies the theme.
-func loadSettings() {
+func loadSettings() string {
 	f := settings.Load()
 	if f.State == settings.StateCorrupt {
 		vi.ConsoleLine(MarkerSettingsBad)
-		return
+		return "gotabwm"
 	}
 	wm, ok := f.Effective("wm")
 	if !ok {
@@ -48,6 +48,7 @@ func loadSettings() {
 		_ = theme.Set(v)
 	}
 	vi.ConsoleLine(MarkerSettingsWM + wm + " keys=" + vi.Itoa64(int64(len(f.Rows))))
+	return wm
 }
 
 // emitTokens prints the serial token probe go-wm-hid greps. Same shape as Zig

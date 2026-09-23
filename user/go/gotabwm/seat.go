@@ -55,8 +55,9 @@ const (
 	// returned). MarkerDogfoodOK closes the boot's hosted phase: it is printed
 	// at host-done only when this boot actually hosted a tab (dogfoodHosted),
 	// so a bare seat boot can never claim the beat.
-	MarkerDogfoodSeat = "dogfood: seat"
-	MarkerDogfoodOK   = "dogfood: ok"
+	MarkerDogfoodSeat        = "dogfood: seat"
+	MarkerDogfoodOK          = "dogfood: ok"
+	MarkerFirstBootWorkspace = "gotabwm: first-boot workspace"
 )
 
 // blankRGB is the blank desktop's colour, packed 0x00RRGGBB as the fill seam
@@ -123,7 +124,7 @@ func main() {
 	// sit between boot and the decode). Missing is silent; corrupt fails
 	// closed — one marker line, then the seat runs on its own defaults. A
 	// marker only after its syscall returned.
-	loadSettings()
+	seatWM := loadSettings()
 	emitTokens()
 
 	// 5. The seat's OWN window lifecycle (M57b, issue #1317): open a Go
@@ -136,15 +137,30 @@ func main() {
 
 	// M62e: restore `.tabs` v2 from /host/SESSION.TABS if a prior boot
 	// wrote it. Missing is a no-op; corrupt fails closed (empty strip).
-	loadSession()
+	sessionState := loadSession()
+	firstBootStarted := false
+	if firstBootWorkspace(sessionState, seatWM) && !anotherGuestProgram() {
+		if _, err := vi.Exec("GOSH.ELF"); err == nil {
+			firstBootStarted = true
+			vi.ConsoleLine(MarkerFirstBootWorkspace)
+		} else {
+			vi.ConsoleLine("gotabwm: first-boot workspace failed " + err.Error())
+		}
+	}
 
 	// 6. Composite/present loop paced by the kind-18 tick - and the WM_RPC
 	//    serve loop (M57c / M62b): the seat hosts tabapp clients that declare
 	//    over the mailbox, keeps them on the in-process strip, and paints a
 	//    rail on the compose-N scanout. PollEvent (not WaitEvent) so a pending
 	//    request is serviced between ticks.
+	// Give the default GOSH starter its own normal hostTicks window before the
+	// seat's existing bounded demo loop expires. Other boot paths keep maxTicks.
+	tickLimit := maxTicks
+	if firstBootStarted {
+		tickLimit += hostTicks
+	}
 	presents, ticks := 0, 0
-	for events := 0; events < maxEvents && ticks < maxTicks; events++ {
+	for events := 0; events < maxEvents && ticks < tickLimit; events++ {
 		serviceRPC()
 		e, ok := vi.PollEvent()
 		if !ok {
