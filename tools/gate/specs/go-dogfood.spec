@@ -8,7 +8,7 @@
 # printed by guest programs -- the seat and the apps themselves -- so no staged
 # line and no harness echo can produce one (D2).
 #
-#   boot 01   exec GOSH.ELF -> exec NOTE.ELF        seat, gosh, note, ok
+#   boot 01   first-boot GOSH -> exec NOTE.ELF      seat, gosh, note, ok
 #   boot 02   exec GOCALC.ELF -> exec WEB.ELF PAGE  seat, calc, page, ok
 #
 # WHY TWO BOOTS, not one (both limits observed in-tree, neither invented here):
@@ -94,16 +94,25 @@ vgate_name go-dogfood "issue #1528 M69a: the DEFAULT Go seat hosts the daily-dri
 vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 
+# M76d (#1677): boot 01 also pins the boot-wide splash-to-shell chain. A
+# successful seat bind releases the splash silently, so this boot asserts the
+# observable kernel/banner/autostart/seat/first-boot/prompt order and that the
+# bounded no-seat splash timeout did NOT fire. The negative remains covered by
+# live-roadpops boot 01: a share without GOTABWM completes under --timeout 30,
+# prints the bounded splash timeout AND '(shim compositing)', and captures the
+# returned Road Pops terminal.
+
 # --- boot 01: the shell and the editor on the default seat -----------------
-# Phase 1 is released by the seat's own `dogfood: seat`, so GOSH starts only
-# once the default seat is live and exclusive.
+# Phase 1 hands focus away from the seat's startup probe. The default seat
+# then restores its missing SESSION.TABS branch and launches the starter GOSH;
+# do not explicitly exec GOSH here or the first-boot path is suppressed as a
+# duplicate client.
 vgate_file script-01a.txt <<'EOF'
-set GOMAXPROCS=1
-exec GOSH.ELF
+dui focus 0
 EOF
 
-# Phase 2 waits on GOSH's `dogfood: gosh`: the shell is HOSTED as a GOTABWM
-# tab before the editor is launched at all.
+# Phase 2 waits for the starter's prompt to reach the terminal, then launches
+# NOTE as the second client on the same default seat.
 vgate_file script-01b.txt <<'EOF'
 exec NOTE.ELF
 EOF
@@ -142,9 +151,9 @@ PY
 vgate_run 01 -- \
     --screen '$RUN_DIR/screen-01' \
     --script '$RUN_DIR/script-01a.txt' \
-    --script-after 'dogfood: seat' \
+    --script-after 'gotabwm: win focus' \
     --script2 '$RUN_DIR/script-01b.txt' \
-    --script2-after 'dogfood: gosh' \
+    --script2-after 'gosh: prompt' \
     --script3 '$RUN_DIR/script-01c.txt' \
     --script3-after 'dogfood: ok' \
     --script-expect 'rx-dogfood-01-ok' --timeout 300
@@ -156,9 +165,12 @@ vgate_assert 01 serial-contains 'gotabwm: registered'
 vgate_assert 01 serial-contains 'gotabwm: seat-taken'
 # dogfood: seat -- the seat's own announcement, after both returned.
 vgate_assert 01 serial-contains 'dogfood: seat'
+vgate_assert 01 serial-contains 'text: boot banner presented'
+vgate_assert 01 serial-contains 'gotabwm: first-boot workspace'
+vgate_assert 01 serial-contains 'gosh: prompt'
+vgate_assert 01 serial-absent 'splash: seat present not observed within 3s'
 
 # --- GOSH, HOSTED as a GOTABWM tab (not Zig TABWM) --------------------------
-vgate_assert 01 serial-contains 'exec: loaded GOSH.ELF'
 vgate_assert 01 serial-contains 'gosh: ready'
 vgate_assert 01 serial-contains 'gotabwm: rpc declare id='
 vgate_assert 01 serial-contains 'gosh: declare accepted'
@@ -225,6 +237,37 @@ if re.search(r"(?m)^tabwm: registered", ser):
     sys.exit("the Zig TABWM seat registered: this is not the default Go seat")
 print("boot 01 order ok: " + " < ".join(want) +
       " (and the calculator/browser half is absent)")
+PY
+
+# M76d: the splash success path is intentionally silent. Pin the complete
+# observable startup chain by line index, including the banner being presented
+# while the splash holds scanout and the first-boot shell's prompt after the
+# seat registers. The absent timeout above distinguishes the silent seat bind
+# from live-roadpops' bounded no-seat fallback.
+vgate_assert 01 python <<'PY'
+import os, re, sys
+
+ser = open(os.environ["VG_SER"], errors="replace").read()
+chain = [
+    "VirelaiOS kernel has seized control.",
+    "text: boot banner presented",
+    "wm: autostart gotabwm (settings wm=gotabwm)",
+    "gotabwm: registered",
+    "gotabwm: first-boot workspace",
+    "gosh: prompt",
+]
+positions = []
+for marker in chain:
+    match = re.search(r"(?m)^" + re.escape(marker) + r"$", ser)
+    if match is None:
+        sys.exit("M76d startup marker missing: " + marker)
+    positions.append(match.start())
+if positions != sorted(positions) or len(set(positions)) != len(positions):
+    sys.exit("M76d startup chain out of order: " + repr(list(zip(chain, positions))))
+if "splash: seat present not observed within 3s" in ser:
+    sys.exit("M76d seat-bound boot took the no-seat splash timeout path")
+print("M76d boot 01 chain ordered: " + " -> ".join(chain) +
+      " (silent splash handoff; no bounded-timeout marker)")
 PY
 
 # D1, re-checked between the boots (the staging guard only saw the pre-run
