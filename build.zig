@@ -577,73 +577,10 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_keytest.step);
 
     // ------------------------------------------------------------------
-    // Guest: eleventh ESP user program (milestone ten, card F4 — claim 0510)
-    // SAVETEXT.BIN. Writes data to /data/hello.txt via file syscalls.
+    // M78c: the three Zig storage demos are retired. The live storage proof
+    // now uses GOSH.ELF redirection/cat and GOFILES.ELF directory listing;
+    // no replacement Zig executable or install step remains here.
     // ------------------------------------------------------------------
-    const savetext = b.addExecutable(.{
-        .name = "user-savetext",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("user/src/savetext.zig"),
-            .target = kernel_target,
-            .optimize = .ReleaseSmall,
-        }),
-    });
-    savetext.linker_script = b.path("user/linker.ld");
-    const savetext_step = b.step("savetext", "Build the eleventh ESP user program (zig-out/bin/SAVETEXT.BIN)");
-    const savetext_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
-    savetext_elf2bin.addFileArg(savetext.getEmittedBin());
-    const savetext_bin = savetext_elf2bin.addOutputFileArg("SAVETEXT.BIN");
-    savetext_elf2bin.has_side_effects = true;
-    savetext_elf2bin.stdio = .inherit;
-    savetext_step.dependOn(&savetext_elf2bin.step);
-    const install_savetext = b.addInstallFileWithDir(savetext_bin, .bin, "SAVETEXT.BIN");
-    b.getInstallStep().dependOn(&install_savetext.step);
-
-    // ------------------------------------------------------------------
-    // Guest: twelfth ESP user program (milestone ten, card F4 — claim 0510)
-    // TYPE.BIN. Reads data from /data/hello.txt via file syscalls.
-    // ------------------------------------------------------------------
-    const type_prog = b.addExecutable(.{
-        .name = "user-type",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("user/src/type.zig"),
-            .target = kernel_target,
-            .optimize = .ReleaseSmall,
-        }),
-    });
-    type_prog.linker_script = b.path("user/linker.ld");
-    const type_step = b.step("type", "Build the twelfth ESP user program (zig-out/bin/TYPE.BIN)");
-    const type_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
-    type_elf2bin.addFileArg(type_prog.getEmittedBin());
-    const type_bin = type_elf2bin.addOutputFileArg("TYPE.BIN");
-    type_elf2bin.has_side_effects = true;
-    type_elf2bin.stdio = .inherit;
-    type_step.dependOn(&type_elf2bin.step);
-    const install_type = b.addInstallFileWithDir(type_bin, .bin, "TYPE.BIN");
-    b.getInstallStep().dependOn(&install_type.step);
-
-    // ------------------------------------------------------------------
-    // Guest: thirteenth ESP user program (milestone ten, card F4 — claim 0510)
-    // DIR.BIN. Enumerates directory entries via sys_dir_list.
-    // ------------------------------------------------------------------
-    const dir_prog = b.addExecutable(.{
-        .name = "user-dir",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("user/src/dir.zig"),
-            .target = kernel_target,
-            .optimize = .ReleaseSmall,
-        }),
-    });
-    dir_prog.linker_script = b.path("user/linker.ld");
-    const dir_step = b.step("dir", "Build the thirteenth ESP user program (zig-out/bin/DIR.BIN)");
-    const dir_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
-    dir_elf2bin.addFileArg(dir_prog.getEmittedBin());
-    const dir_bin = dir_elf2bin.addOutputFileArg("DIR.BIN");
-    dir_elf2bin.has_side_effects = true;
-    dir_elf2bin.stdio = .inherit;
-    dir_step.dependOn(&dir_elf2bin.step);
-    const install_dir = b.addInstallFileWithDir(dir_bin, .bin, "DIR.BIN");
-    b.getInstallStep().dependOn(&install_dir.step);
 
     // ------------------------------------------------------------------
     // Guest: M43 U3 EL0 consumer (issue #1034 — claim #1048) BLKD.BIN.
@@ -688,28 +625,10 @@ pub fn build(b: *std.Build) void {
     // ------------------------------------------------------------------
 
     // ------------------------------------------------------------------
-    // Guest: seventeenth ESP user program (milestone eleven, card A5 — claim 2427)
-    // DESKTOP.BIN. Desktop launcher & environment panel.
-    // DSK3 segmented (writable .data/.bss — the WMS9 fill-batcher global).
+    // M78c: the Zig desktop launcher is retired. GOTABWM.ELF is the shipping
+    // Go seat and APPS.TXT launcher; GOSH.ELF -c covers headless exec.
+    // The desktop live gates use those existing clients.
     // ------------------------------------------------------------------
-    const desktop_prog = b.addExecutable(.{
-        .name = "user-desktop",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("user/src/desktop.zig"),
-            .target = kernel_target,
-            .optimize = .ReleaseSmall,
-        }),
-    });
-    desktop_prog.linker_script = b.path("user/linker-segmented.ld");
-    const desktop_step = b.step("desktop", "Build the seventeenth ESP user program (zig-out/bin/DESKTOP.BIN) — DSK3 segmented (writable .data/.bss)");
-    const desktop_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
-    desktop_elf2bin.addFileArg(desktop_prog.getEmittedBin());
-    const desktop_bin = desktop_elf2bin.addOutputFileArg("DESKTOP.BIN");
-    desktop_elf2bin.has_side_effects = true;
-    desktop_elf2bin.stdio = .inherit;
-    desktop_step.dependOn(&desktop_elf2bin.step);
-    const install_desktop = b.addInstallFileWithDir(desktop_bin, .bin, "DESKTOP.BIN");
-    b.getInstallStep().dependOn(&install_desktop.step);
 
     // ------------------------------------------------------------------
     // Guest: eighteenth ESP user program (milestone twelve, card N1 — claim 7483)
@@ -797,28 +716,10 @@ pub fn build(b: *std.Build) void {
     // ------------------------------------------------------------------
 
     // ------------------------------------------------------------------
-    // Guest: twentieth ESP user program (milestone twelve, card N3 — claim 5416)
-    // CHAT.BIN. Userland graphical P2P chat application.
-    // DSK3 segmented (writable .data/.bss — the WMS9 fill-batcher global).
+    // M78c: the graphical Zig chat demo is retired. Its live-wm1 fixture role
+    // is filled by the existing one-window SB4DAM.BIN resident; UDP itself
+    // remains covered by the syscall and networking gates.
     // ------------------------------------------------------------------
-    const chat_prog = b.addExecutable(.{
-        .name = "user-chat",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("user/src/chat.zig"),
-            .target = kernel_target,
-            .optimize = .ReleaseSmall,
-        }),
-    });
-    chat_prog.linker_script = b.path("user/linker-segmented.ld");
-    const chat_step = b.step("chat", "Build the twentieth ESP user program (zig-out/bin/CHAT.BIN) — DSK3 segmented (writable .data/.bss)");
-    const chat_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py", "--segments" });
-    chat_elf2bin.addFileArg(chat_prog.getEmittedBin());
-    const chat_bin = chat_elf2bin.addOutputFileArg("CHAT.BIN");
-    chat_elf2bin.has_side_effects = true;
-    chat_elf2bin.stdio = .inherit;
-    chat_step.dependOn(&chat_elf2bin.step);
-    const install_chat = b.addInstallFileWithDir(chat_bin, .bin, "CHAT.BIN");
-    b.getInstallStep().dependOn(&install_chat.step);
 
     // ------------------------------------------------------------------
     // Guest: twenty-third ESP user program (milestone fourteen, card S2 — claim 7323)
@@ -991,29 +892,6 @@ pub fn build(b: *std.Build) void {
     guard_step.dependOn(&guard_elf2bin.step);
     const install_guard = b.addInstallFileWithDir(guard_bin, .bin, "GUARD.BIN");
     b.getInstallStep().dependOn(&install_guard.step);
-
-    // ------------------------------------------------------------------
-    // Guest: Arc5 hostile-consumer test — SPIN.BIN (Issue #246)
-    // Sets CPU tick limit via sys_setrlimit then spins until killed (status 141).
-    // ------------------------------------------------------------------
-    const spin_prog = b.addExecutable(.{
-        .name = "user-spin",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("user/src/spin.zig"),
-            .target = kernel_target,
-            .optimize = .ReleaseSmall,
-        }),
-    });
-    spin_prog.linker_script = b.path("user/linker.ld");
-    const spin_step = b.step("spin", "Build the Arc5 hostile-consumer test (zig-out/bin/SPIN.BIN) — CPU limit enforcement");
-    const spin_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
-    spin_elf2bin.addFileArg(spin_prog.getEmittedBin());
-    const spin_bin = spin_elf2bin.addOutputFileArg("SPIN.BIN");
-    spin_elf2bin.has_side_effects = true;
-    spin_elf2bin.stdio = .inherit;
-    spin_step.dependOn(&spin_elf2bin.step);
-    const install_spin = b.addInstallFileWithDir(spin_bin, .bin, "SPIN.BIN");
-    b.getInstallStep().dependOn(&install_spin.step);
 
     // ------------------------------------------------------------------
     // M71f (#1565): the Zig settings panel SETTINGS.BIN is RETIRED here.

@@ -43,7 +43,7 @@ Road Pops terminal → Driving Award window manager), input (USB XHCI + HID),
 usability, app events, the userland filesystem, the desktop platform —
 `CALC.BIN`, `NOTEPAD.BIN`, `TOP.BIN` are all retired Zig (M62h/M66c/M71g),
 now the Go `GOCALC.ELF` / `NOTE.ELF` / `GOTOP.ELF` — alongside `GOFILES.ELF`
-and `DESKTOP.BIN`, network
+and the `GOTABWM.ELF` seat, network
 apps, shared services (clipboard + app timers), audio, kernel consolidation,
 desktop completeness and the post-M17 arcs, and the M18–M27 experience layer
 (terminal & shell depth, shell programming, text rendering & Unicode, window

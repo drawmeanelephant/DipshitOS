@@ -50,10 +50,11 @@ virtio-net transport, built in bounded fixed-BSS staging.
 - **Userland network apps** — `TCP.BIN` (echo client), `GOFETCH.ELF` (HTTP
   client, successor to retired `FETCH.BIN`), `GOPING.ELF` (Zig `PING.BIN`
   retired in M71n), `GONETSTAT.ELF` (the slot-62 network dashboard),
-  `GODNS.ELF` (UDP A-record lookup), `GOTRACEROUTE.ELF` (bounded direct-peer
-  ICMP echo diagnostic), and `CHAT.BIN` (graphical UDP chat) run the seam end
-  to end. The three Go diagnostics replaced their Zig `.BIN` originals and are
-  built with `bash tools/go/build-netdiag.sh` before their live gates.
+  `GODNS.ELF` (UDP A-record lookup), and `GOTRACEROUTE.ELF` (bounded direct-peer
+  ICMP echo diagnostic) run the seam end to end. The Zig graphical chat demo
+  (`CHAT.BIN`) was retired in M78c; the UDP seam remains live-tested. The Go
+  diagnostics replace their Zig `.BIN` originals and are built with
+  `bash tools/go/build-netdiag.sh` before their live gates.
 
 <Aside kind="info">
 

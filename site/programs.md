@@ -28,16 +28,16 @@ staged by their gates.
 | `WINLOOP.BIN` | `user/src/winloop.zig` | a window kept alive across the pixel proof |
 | `WINMOVE.BIN` | `user/src/winmove.zig` | move/raise/get/query/set_visible — the full window seam |
 | `KEYTEST.BIN` | `user/src/keytest.zig` | the interactive event loop: `sys_poll_event`/`sys_wait_event` |
-| `SAVETEXT.BIN` | `user/src/savetext.zig` | `sys_file_write` — persist text on the host share |
-| `TYPE.BIN` | `user/src/type.zig` | `sys_file_open`/`read`/`close` — dump a file |
-| `DIR.BIN` | `user/src/dir.zig` | `sys_dir_list` — list a directory |
+| `SAVETEXT.BIN` | `user/src/savetext.zig` (deleted M78c) | retired storage demo; `GOSH.ELF` redirection now proves persistence in `live-user-fs` |
+| `TYPE.BIN` | `user/src/type.zig` (deleted M78c) | retired storage demo; `GOSH.ELF` `cat` now proves reads in `live-user-fs` |
+| `DIR.BIN` | `user/src/dir.zig` (deleted M78c) | retired storage demo; `GOFILES.ELF` now proves directory listing |
 | `CALC.BIN` | `user/src/calc.zig` | the graphical calculator (checked arithmetic, repeat, memory) — M62h (#1406): RETIRED, `user/src/calc.zig` deleted; the calculator is the Go `GOCALC.ELF` (`user/go/calc`) |
 | `NOTEPAD.BIN` | `user/src/notepad.zig` | the graphical editor, load/save `/data/notes.txt`, scrollable viewport — M66c (#1485): RETIRED, `user/src/notepad.zig` deleted; the editor is the Go `NOTE.ELF` (`user/go/note`) |
 | `TOP.BIN` | `user/src/top.zig` (deleted M71g) | the graphical process monitor with click-to-kill (`sys_kill`) — since retired to Go (`GOTOP.ELF`, gate `go-top`) |
-| `DESKTOP.BIN` | `user/src/desktop.zig` | the launcher: manifests the app catalog (`APPS.TXT`) and `sys_exec`s apps |
+| `DESKTOP.BIN` | `user/src/desktop.zig` (deleted M78c) | retired Zig launcher; `GOTABWM.ELF` owns the seat, manifest, launcher, and hosted `sys_exec` path |
 | `TCP.BIN` | `user/src/tcp_client.zig` | the TCP syscall seam: connect, send, receive echo, close, exit 18 |
 | `GOFETCH.ELF` | `user/go/fetch` | M67b: an HTTPS client over in-process TLS (windowed, exit on close); issue #1683: RETIRED `FETCH.BIN` and `DOWNLOAD.BIN`, `user/src/fetch.zig` and `user/src/download.zig` deleted — one binary now owns the cleartext fetch (`http://` on the console, exit 42) and `--download` (saves the body to the host share) |
-| `CHAT.BIN` | `user/src/chat.zig` | graphical UDP chat: windows + events + `sys_udp_*` |
+| `CHAT.BIN` | `user/src/chat.zig` (deleted M78c) | retired graphical UDP demo; the UDP seam remains live-tested without a product-app fixture |
 | `FSTEST.BIN` | `user/src/fstest.zig` (deleted M34 HF6) | the mutating filesystem seam: create/write → truncate → rename → free → delete — the proof was deleted with the second volume (#740); the slots remain |
 | `TIMER.BIN` | `user/src/timertest.zig` | the app-timer seam: arm → block on `TIMER` event → cancel |
 | `VICTIM.BIN` | `user/src/hardening_victim.zig` | the hostile-EL0 proof's victim: owns a window and yield-loops forever |
@@ -54,7 +54,6 @@ staged by their gates.
 | `EDIT.BIN` | `user/src/edit.zig` (deleted M60) | M23: the text editor (undo/redo, goto, tabs, syntax, console split) — since retired to Go (`GOEDIT.ELF`, gate `go-edit`) |
 | `SETTINGS.BIN` | `user/src/settings_panel.zig` | the persistent settings panel — M71f (#1565): RETIRED, `user/src/settings_panel.zig` deleted; the panel is the Go `GOSET.ELF` (`user/go/settings`), writing the same schema-v2 `SETTINGS.TXT` the seat reads |
 | `M21DEMO.BIN` | `user/src/m21demo.zig` | M21 W1/W2 tiling + master-detail gate payload |
-| `SPIN.BIN` | `user/src/spin.zig` | Arc5 #246: the hostile-consumer (CPU) test |
 | `SYSMON.BIN` | `user/src/sysmon.zig` (deleted M71g) | M27 G6: the system monitor dashboard — since retired; one successor `GOTOP.ELF` covers both rows |
 | `PING.BIN` | `user/src/ping.zig` (deleted M71n) | M26 N1: the ICMP ping seam (`sys_ping_send`/`sys_ping_poll`) — since retired to Go (`GOPING.ELF`, gate `go-net-clis`) |
 | `NETSTAT.BIN` | `user/src/netstat.zig` (deleted) | M26 N2: network dashboard — retired to Go (`GONETSTAT.ELF`, `user/go/netstat`, gate `live-netstat`) |

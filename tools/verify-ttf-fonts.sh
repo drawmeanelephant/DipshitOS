@@ -61,10 +61,9 @@ PATH="/opt/homebrew/opt/gnu-sed/libexec/gnubin:/opt/homebrew/bin:$PATH" zig test
 echo
 echo "[3/3] Compiling userland with font engine integrated"
 # M60 / #1297: EDIT.BIN is gone; M66c (#1485): the Zig notepad is gone too.
-# M71g (#1566): SYSMON.BIN is gone as well (GOTOP.ELF is Go and never touches
-# the Zig font engine), so the font-engine compiles are DESKTOP.BIN + DEVCONS.BIN
-# -- the two remaining font-heavy Zig apps.
-PATH="/opt/homebrew/opt/gnu-sed/libexec/gnubin:/opt/homebrew/bin:$PATH" zig build desktop devcons
+# M78c: the last other font-heavy Zig app is retired. DEVCONS.BIN remains the
+# compile-time owner of the Zig TrueType/text stack exercised by this gate.
+PATH="/opt/homebrew/opt/gnu-sed/libexec/gnubin:/opt/homebrew/bin:$PATH" zig build devcons
 
 echo
 echo "=== verify-ttf-fonts: PASS (Inter Regular/Bold/Italic & Fira Code verified) ==="
