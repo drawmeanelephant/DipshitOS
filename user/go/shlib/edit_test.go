@@ -702,3 +702,251 @@ func TestHistoryLoadIsBounded(t *testing.T) {
 		t.Fatalf("ring after load = %d entries want %d", got, historyMax)
 	}
 }
+
+// --- word motion, kill ring, transpose (M80l #1728) ------------------------
+
+// TestEditorWordMotion pins alt-f/alt-b: the end of the word under the
+// cursor, the next word's end from whitespace, the word's start backwards,
+// and silence at the line edges.
+func TestEditorWordMotion(t *testing.T) {
+	e := NewEditor("gosh> ", &History{})
+	feedE(e, "echo hello world")
+	feedE(e, "\x01")  // Home: start from the front
+	feedE(e, "\x1bf") // alt-f from 0: the end of "echo"
+	if e.cur != 4 {
+		t.Fatalf("alt-f cur = %d want 4", e.cur)
+	}
+	feedE(e, "\x1bf") // from the space: the end of "hello"
+	if e.cur != 10 {
+		t.Fatalf("alt-f from whitespace cur = %d want 10", e.cur)
+	}
+	feedE(e, "\x1bb") // back to the start of "hello"
+	if e.cur != 5 {
+		t.Fatalf("alt-b cur = %d want 5", e.cur)
+	}
+	feedE(e, "\x1bb") // over the space, to the start of "echo"
+	if e.cur != 0 {
+		t.Fatalf("alt-b over a space cur = %d want 0", e.cur)
+	}
+	if out := feedE(e, "\x1bb"); out != "" {
+		t.Fatalf("alt-b at the line start wrote %q, want nothing", out)
+	}
+	// Three more alt-f walk the cursor to the last byte.
+	feedE(e, "\x1bf\x1bf\x1bf")
+	if e.cur != len(e.buf) || string(e.buf) != "echo hello world" {
+		t.Fatalf("alt-f to the end = cur %d buf %q", e.cur, e.buf)
+	}
+	if out := feedE(e, "\x1bf"); out != "" {
+		t.Fatalf("alt-f at the line end wrote %q, want nothing", out)
+	}
+}
+
+// TestEditorAltKillWords pins alt-d (forward) and alt-backspace (backward),
+// including the readline detail that alt-d from whitespace eats the
+// whitespace and the word behind it.
+func TestEditorAltKillWords(t *testing.T) {
+	e := NewEditor("gosh> ", &History{})
+	feedE(e, "echo hello world")
+	feedE(e, "\x01")         // Home: start from the front
+	out := feedE(e, "\x1bd") // alt-d at 0: kills "echo"
+	if string(e.buf) != " hello world" {
+		t.Fatalf("alt-d = %q", e.buf)
+	}
+	if !strings.Contains(out, " hello world") {
+		t.Fatalf("alt-d repaint = %q", out)
+	}
+	feedE(e, "\x1bd") // from the leading space: kills " hello"
+	if string(e.buf) != " world" {
+		t.Fatalf("alt-d from whitespace = %q", e.buf)
+	}
+	// With nothing after the cursor, alt-d leaves the line alone.
+	feedE(e, "\x05") // Ctrl-E: to the end
+	feedE(e, "\x1bd")
+	if string(e.buf) != " world" || e.cur != 6 {
+		t.Fatalf("alt-d at the end = %q cur %d", e.buf, e.cur)
+	}
+	// Alt-Backspace is the same word-back kill as Ctrl-W, over ESC DEL and
+	// ESC BS alike.
+	e2 := NewEditor("gosh> ", &History{})
+	feedE(e2, "echo hello world")
+	feedE(e2, "\x1b\x7f")
+	if string(e2.buf) != "echo hello " {
+		t.Fatalf("alt-backspace = %q", e2.buf)
+	}
+	feedE(e2, "\x1b\x7f")
+	if string(e2.buf) != "echo " {
+		t.Fatalf("second alt-backspace = %q", e2.buf)
+	}
+	feedE(e2, "\x1b\x08")
+	if string(e2.buf) != "" {
+		t.Fatalf("alt-backspace on ESC BS = %q", e2.buf)
+	}
+}
+
+// TestEditorKillRingYank pins Ctrl-Y: it brings the last kill back at the
+// cursor from any kill chord, an empty ring is silent, and an oversized
+// yank bells instead of growing past the cap.
+func TestEditorKillRingYank(t *testing.T) {
+	e := NewEditor("gosh> ", &History{})
+	if out := feedE(e, "\x19"); out != "" {
+		t.Fatalf("Ctrl-Y on an empty ring wrote %q", out)
+	}
+	feedE(e, "echo hello")
+	feedE(e, "\x17") // Ctrl-W kills "hello"
+	feedE(e, "\x01") // Home
+	feedE(e, "\x19") // Ctrl-Y, at the front of the line
+	if string(e.buf) != "helloecho " {
+		t.Fatalf("yank = %q", e.buf)
+	}
+	if e.cur != 5 {
+		t.Fatalf("yank left the cursor at %d want 5", e.cur)
+	}
+	// Ctrl-K's kill is yankable from the other end of the line.
+	e2 := NewEditor("gosh> ", &History{})
+	feedE(e2, "echo hi")
+	feedE(e2, "\x01\x0b") // Home, Ctrl-K
+	feedE(e2, "\x19")
+	if string(e2.buf) != "echo hi" {
+		t.Fatalf("ctrl-k yank = %q", e2.buf)
+	}
+	// The line cap still applies: a full line in the ring plus a byte on the
+	// line is one byte too many.
+	e3 := NewEditor("gosh> ", &History{})
+	feedE(e3, strings.Repeat("x", maxLineBytes))
+	feedE(e3, "\x17") // the whole line goes into the ring
+	feedE(e3, "y")
+	out := feedE(e3, "\x19")
+	if !strings.Contains(out, "\x07") {
+		t.Fatalf("oversized yank = %q, want a bell", out)
+	}
+	if len(e3.buf) != 1 {
+		t.Fatalf("oversized yank grew the line to %d bytes", len(e3.buf))
+	}
+}
+
+// TestEditorConsecutiveKillMerge pins the readline merge rule: a second kill
+// in the same direction, with the cursor still where the first one left it,
+// grows the same ring entry -- backward prepends, forward appends -- and a
+// cursor move that actually moves starts a fresh entry.
+func TestEditorConsecutiveKillMerge(t *testing.T) {
+	e := NewEditor("gosh> ", &History{})
+	feedE(e, "echo hello world")
+	feedE(e, "\x17\x17") // Ctrl-W twice: "world", then "hello "
+	feedE(e, "\x19")     // Ctrl-Y: both words, in line order
+	if string(e.buf) != "echo hello world" {
+		t.Fatalf("merged backward yank = %q", e.buf)
+	}
+	// Forward kills append instead of prepending.
+	e2 := NewEditor("gosh> ", &History{})
+	feedE(e2, "echo hello world")
+	feedE(e2, "\x01")       // Home
+	feedE(e2, "\x1bd\x1bd") // alt-d twice
+	feedE(e2, "\x19")
+	if string(e2.buf) != "echo hello world" {
+		t.Fatalf("merged forward yank = %q", e2.buf)
+	}
+	// A real cursor move in between breaks the chain: the ring keeps only
+	// the second kill, so the yank reads " two", not "one two".
+	e3 := NewEditor("gosh> ", &History{})
+	feedE(e3, "one two three")
+	feedE(e3, "\x01")   // Home
+	feedE(e3, "\x1bd")  // kill "one"
+	feedE(e3, "\x1b[C") // Right: the chain is over
+	feedE(e3, "\x1bd")  // kill "two"
+	feedE(e3, "\x19")   // Ctrl-Y
+	if string(e3.buf) != " two three" {
+		t.Fatalf("yank after a break = %q", e3.buf)
+	}
+	// A move that cannot move is not an edit: Right at the end of the line
+	// changes nothing, so the chain survives and the third Ctrl-W merges
+	// into the same entry.
+	e4 := NewEditor("gosh> ", &History{})
+	feedE(e4, "echo hello world")
+	feedE(e4, "\x17\x17") // Ctrl-W twice: the ring holds "hello world"
+	feedE(e4, "\x1b[C")   // Right at the end: nothing moves
+	feedE(e4, "\x17")     // Ctrl-W: merges with the two before it
+	if string(e4.buf) != "" {
+		t.Fatalf("third ctrl-w = %q", e4.buf)
+	}
+	feedE(e4, "\x19")
+	if string(e4.buf) != "echo hello world" {
+		t.Fatalf("three-kill yank = %q", e4.buf)
+	}
+}
+
+// TestEditorTranspose pins Ctrl-T at the end of the line, between two
+// characters, and at the line start where there is nothing to transpose.
+func TestEditorTranspose(t *testing.T) {
+	e := NewEditor("gosh> ", &History{})
+	if out := feedE(e, "\x14"); out != "" {
+		t.Fatalf("Ctrl-T on an empty line wrote %q", out)
+	}
+	feedE(e, "a")
+	if out := feedE(e, "\x14"); out != "" {
+		t.Fatalf("Ctrl-T on a one-byte line wrote %q", out)
+	}
+	feedE(e, "bc") // "abc", cursor at 3
+	feedE(e, "\x14")
+	if string(e.buf) != "acb" || e.cur != 3 {
+		t.Fatalf("Ctrl-T at the end = %q cur %d", e.buf, e.cur)
+	}
+	feedE(e, "\x01")   // Home
+	feedE(e, "\x1b[C") // Right: between "a" and "c"
+	feedE(e, "\x14")
+	if string(e.buf) != "cab" || e.cur != 2 {
+		t.Fatalf("Ctrl-T mid-line = %q cur %d", e.buf, e.cur)
+	}
+	feedE(e, "\x01")
+	if out := feedE(e, "\x14"); out != "" {
+		t.Fatalf("Ctrl-T at the line start wrote %q", out)
+	}
+	if string(e.buf) != "cab" {
+		t.Fatalf("Ctrl-T at the line start changed the line to %q", e.buf)
+	}
+}
+
+// TestEditorAltPrefixAcrossChunks pins the ESC-prefixed chords when the
+// escape and its letter arrive in separate reads, the shape the kernel's
+// 64-byte tty reads can produce.
+func TestEditorAltPrefixAcrossChunks(t *testing.T) {
+	e := NewEditor("gosh> ", &History{})
+	feedE(e, "echo hello")
+	feedE(e, "\x01") // Home
+	if out, ev := e.Feed([]byte{0x1b}); ev.Kind != evNone || len(out) != 0 {
+		t.Fatalf("lone ESC = (%q, %+v)", out, ev)
+	}
+	out, ev := e.Feed([]byte("f"))
+	if ev.Kind != evNone {
+		t.Fatalf("ESC f produced event %d", ev.Kind)
+	}
+	if e.cur != 4 {
+		t.Fatalf("ESC f across chunks = cur %d want 4", e.cur)
+	}
+	if !strings.Contains(string(out), "echo hello") {
+		t.Fatalf("ESC f repaint = %q", out)
+	}
+	// ESC DEL across chunks is Alt-Backspace.
+	feedE(e, "\x1b")
+	feedE(e, "\x7f")
+	if string(e.buf) != " hello" {
+		t.Fatalf("ESC DEL across chunks = %q", e.buf)
+	}
+}
+
+// TestEditorKillBytesUnchanged pins the byte output of the three kill chords
+// this card rewired, no-ops included: Ctrl-K at the end, Ctrl-W's tail
+// overwrite and Ctrl-U on an empty line all still repaint exactly as before.
+func TestEditorKillBytesUnchanged(t *testing.T) {
+	e := NewEditor("gosh> ", &History{})
+	feedE(e, "echo")
+	if out := feedE(e, "\x0b"); out != "\rgosh> echo\rgosh> echo" {
+		t.Fatalf("ctrl-k at the end = %q", out)
+	}
+	out := feedE(e, "\x17")
+	if !strings.HasSuffix(out, "    \rgosh> ") || string(e.buf) != "" || e.cur != 0 {
+		t.Fatalf("ctrl-w = %q, buf %q, cur %d", out, e.buf, e.cur)
+	}
+	if out := feedE(e, "\x15"); out != "\rgosh> \rgosh> " {
+		t.Fatalf("ctrl-u on an empty line = %q", out)
+	}
+}
