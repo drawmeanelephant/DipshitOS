@@ -37,6 +37,11 @@
 # HOST PREREQUISITE (fails the gate honestly when missing):
 #   bash tools/go/build-goterm.sh   ->  .build/go/GOTERM.ELF
 #
+# M80f (#1723) run 03: DSR query through the real window tty. The reply is
+# synthesized by the kernel and enters the same bounded input FIFO as keys;
+# the next shell read and completion marker prove it cannot wedge the session.
+# The class-A corpus pins the exact reply bytes and queue ordering.
+#
 # M73m (#1662) run 02 — the palette the USER chose, live: same boot shape,
 # but after `goterm: done` has painted the DEFAULT (dark) grid, the monitor
 # writes a NON-default palette through the REAL store (`settings set theme
@@ -229,6 +234,24 @@ vgate_run 02 -- --display --input --via-virtio --screen '$RUN_DIR/screen-palette
     --cvc-snap --snapshot-after 'shot-palette' --snapshot-out '$RUN_DIR/palette' \
     --script-expect 'rx-live-palette-ok' \
     --timeout 150
+
+vgate_file script3-dsr.txt <<'EOF'
+echo rx-live-dsr-ok
+EOF
+
+vgate_run 03 -- --display --input --via-virtio --screen '$RUN_DIR/screen-dsr' \
+    --script '$RUN_DIR/script.txt' \
+    --input-string "printf '\\e[6n'"$'\n' \
+    --input-string-after 'goterm: attached' \
+    --script2 '$RUN_DIR/script3-dsr.txt' \
+    --script2-after 'goterm: done status=0' --script2-delay 1 \
+    --script-expect 'rx-live-dsr-ok' --timeout 150
+
+vgate_assert 03 serial-contains 'goterm: attached'
+vgate_assert 03 serial-contains 'goterm: line printf'
+vgate_assert 03 serial-contains 'goterm: done status=0'
+vgate_assert 03 serial-absent '\[EXC\]'
+vgate_assert 03 serial-absent '[EXC] parking:'
 
 vgate_assert 02 serial-contains 'goterm: ready'
 vgate_assert 02 serial-contains 'goterm: attached'

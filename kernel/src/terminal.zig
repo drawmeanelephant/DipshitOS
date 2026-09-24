@@ -44,6 +44,10 @@ const text = @import("text.zig");
 pub const out_capacity: usize = 4096;
 /// Input queue capacity (bytes a front-end has pushed, awaiting the owner).
 pub const in_capacity: usize = 1024;
+/// Bounded output-parser reply staging. DSR/CPR and DA replies are small;
+/// keeping this on the pure Screen lets the session drain it through the
+/// terminal's existing input FIFO without coupling presentation to Terminal.
+pub const reply_max: usize = 32;
 /// How many concurrent terminals the kernel tracks.
 pub const max_terminals: usize = 4;
 
@@ -352,6 +356,11 @@ pub const Screen = struct {
     csi_params: [16]u16 = [_]u16{0} ** 16,
     csi_count: usize = 0,
     csi_private: bool = false,
+    /// M80f (#1723): replies generated while parsing owner output. This is
+    /// presentation-side state, drained by the session pump into the bound
+    /// terminal's input FIFO; Screen never owns a Terminal pointer.
+    pending_reply: [reply_max]u8 = undefined,
+    pending_reply_len: usize = 0,
     /// M73a-1 (#1625): the in-flight UTF-8 sequence, if any. `utf_need` is
     /// the continuation bytes still expected (0 = idle), `utf_acc` the
     /// partial codepoint, `utf_len` the total sequence length (for the
@@ -810,6 +819,18 @@ pub const Screen = struct {
 
     fn dispatchCsi(self: *Screen, final: u8) void {
         const p0 = self.csiParam(0, 0);
+        // M80f (#1723): replies are output-parser side effects. Keep them
+        // bounded and ordered with other synthesised input; the session pump
+        // drains this FIFO after every grid feed.
+        if (!self.csi_private) {
+            if (final == 'n' and p0 == 5 and self.csi_count == 1) self.appendReply("\x1b[0n");
+            if (final == 'n' and p0 == 6 and self.csi_count == 1) self.appendReply(self.cursorReply());
+            if (final == 'c' and p0 == 0 and self.csi_count == 1) {
+                // VT100 with AVO: the grid is not xterm, and this is the
+                // oldest honest DA answer accepted by terminal clients.
+                self.appendReply("\x1b[?1;2c");
+            }
+        }
         if (self.csi_private) {
             if (p0 == 47 or p0 == 1049) {
                 if (final == 'h') self.setAlternate(true);
@@ -837,6 +858,39 @@ pub const Screen = struct {
             'K' => self.eraseLine(p0),
             else => {},
         }
+    }
+
+    fn cursorReply(self: *const Screen) []const u8 {
+        // This buffer is module scratch, like line(): one consumer at a time,
+        // consumed by appendReply before dispatchCsi returns.
+        cursor_reply_scratch[0] = 0x1b;
+        cursor_reply_scratch[1] = '[';
+        var n: usize = writeDecimal(cursor_reply_scratch[2..], self.cur + 1);
+        cursor_reply_scratch[n + 2] = ';';
+        n += 1;
+        n += 2 + writeDecimal(cursor_reply_scratch[n + 2 ..], self.col + 1);
+        cursor_reply_scratch[n] = 'R';
+        return cursor_reply_scratch[0 .. n + 1];
+    }
+
+    fn writeDecimal(buf: []u8, value: usize) usize {
+        var n: usize = 0;
+        var digits: [20]u8 = undefined;
+        var v = value;
+        while (v > 0) : (v /= 10) {
+            digits[n] = @intCast('0' + v % 10);
+            n += 1;
+        }
+        var i: usize = 0;
+        while (i < n) : (i += 1) buf[i] = digits[n - i - 1];
+        return n;
+    }
+
+    fn appendReply(self: *Screen, bytes: []const u8) void {
+        const room = reply_max - self.pending_reply_len;
+        const n = @min(room, bytes.len);
+        @memcpy(self.pending_reply[self.pending_reply_len..][0..n], bytes[0..n]);
+        self.pending_reply_len += n;
     }
 
     /// Feed one output byte. CSI is intentionally bounded to the sequences
@@ -1721,6 +1775,8 @@ var reflow_lines: [grid_lines][grid_cols]Cell = undefined;
 /// M73a-1 (#1625): `line()`'s ASCII projection scratch (module BSS). One
 /// consumer at a time — the paint path reads a line and moves on.
 var line_scratch: [grid_cols]u8 = undefined;
+/// M80f (#1723): output-parser reply scratch, consumed immediately by appendReply.
+var cursor_reply_scratch: [reply_max]u8 = undefined;
 var reflow_styles: [grid_lines][grid_cols]CellStyle = undefined;
 /// M73h: reflow scratch for the truecolour side arrays (module BSS).
 var reflow_fg_rgb: [grid_lines][grid_cols]Rgb = undefined;
@@ -2288,6 +2344,14 @@ pub fn pumpWindowOutput(handle: usize) usize {
         const n = t.readOut(&buf);
         if (n == 0) break;
         screens[handle].feed(buf[0..n]);
+        // M80f (#1723): output parsing may synthesize a DSR/CPR/DA answer.
+        // It is delivered through the same bounded input FIFO as keys,
+        // mouse reports, and paste bytes, preserving generation order.
+        const screen = &screens[handle];
+        if (screen.pending_reply_len > 0) {
+            _ = t.pushInput(screen.pending_reply[0..screen.pending_reply_len]);
+            screen.pending_reply_len = 0;
+        }
         total += n;
     }
     return total;
@@ -3021,6 +3085,19 @@ test "terminal: alternate screen restores the primary grid and DECTCEM hides the
     try std.testing.expect(s.cursor_visible);
 }
 
+test "terminal: DSR, CPR, and DA synthesize bounded input replies" {
+    var s = Screen{};
+    s.feed("\x1b[2;3H\x1b[5n\x1b[6n\x1b[c");
+    try std.testing.expectEqual(@as(usize, 17), s.pending_reply_len);
+    try std.testing.expectEqualStrings("\x1b[0n\x1b[2;3R\x1b[?1;2c", s.pending_reply[0..s.pending_reply_len]);
+}
+
+test "terminal: DSR private and malformed forms stay silent" {
+    var s = Screen{};
+    s.feed("\x1b[?6n\x1b[6;99n\x1b[2n");
+    try std.testing.expectEqual(@as(usize, 0), s.pending_reply_len);
+}
+
 test "terminal: unsupported CSI is swallowed rather than painted" {
     var s = Screen{};
     s.feed("before\x1b[999zafter");
@@ -3122,6 +3199,23 @@ test "terminal: window pump drains the output ring into the grid and screenOf fi
     _ = get(h2).?.write("x");
     try std.testing.expectEqual(@as(usize, 0), pumpWindowOutput(h2));
     try std.testing.expect(screenOf(99) == null);
+    for (&terminals) |*tt| tt.reset();
+    for (&screens) |*ss| ss.reset();
+}
+
+test "terminal: window pump serializes output replies behind existing input" {
+    for (&terminals) |*tt| tt.reset();
+    for (&screens) |*ss| ss.reset();
+    const h = create(3) orelse return error.TestUnexpectedResult;
+    const t = get(h).?;
+    try std.testing.expect(t.attachWindow(7));
+    try std.testing.expectEqual(@as(usize, 1), t.pushInput("k"));
+    _ = t.write("\x1b[2;3H\x1b[6n");
+    try std.testing.expectEqual(@as(usize, 10), pumpWindowOutput(h));
+    var buf: [32]u8 = undefined;
+    const n = t.readInput(&buf);
+    try std.testing.expectEqual(@as(usize, 7), n);
+    try std.testing.expectEqualStrings("k\x1b[2;3R", buf[0..n]);
     for (&terminals) |*tt| tt.reset();
     for (&screens) |*ss| ss.reset();
 }
