@@ -165,104 +165,26 @@ func main() {
 		tickLimit += hostTicks
 	}
 	presents, ticks := 0, 0
-	for events := 0; events < maxEvents && ticks < tickLimit; events++ {
+	for events := 0; events < maxEvents && ticks < tickLimit; {
 		serviceRPC()
 		e, ok := vi.PollEvent()
 		if !ok {
 			vi.Sleep(1)
 			continue
 		}
-		// Drain kinds 19/21 (and 20) before Sleep: Sleep runs only on an
-		// empty poll. Log ptr/key after a real event, never on empty.
-		if !consumeSeatEvent(e) {
-			continue
-		}
-		ticks++
-		vi.ConsoleLine(MarkerTick)
-		// Paint the blank desktop only while the strip is empty: the kernel
-		// paints a hosted app's window at the tick and this compose-N target
-		// sits above it, so a full-frame blank paint would overpaint the client.
-		// With tabs, paint only the rail band.
-		if tabs.Count() == 0 {
-			_ = paintBlank(scan, blankRGB())
-			// M71e (#1564): an empty strip is still a desktop. The start
-			// surface goes over the blank fill and logs its marker once.
-			startSurfaceTick(scan)
-		} else {
-			_ = paintRail(scan, vi.ScanoutWidth, vi.ScanoutHeight, RailHeight, &tabs)
-			markRail()
-		}
-		// M71c (#1562): the seat's own clock/status panel, repainted every
-		// tick AFTER whatever desktop layer this tick painted, so it sits
-		// above a hosted client (a tab's window is the whole scanout). It
-		// also emits the one-shot clock-source marker.
-		chromeTick(scan, uint64(ticks))
-		if launch.open {
-			_ = paintLauncher(scan, vi.ScanoutWidth, vi.ScanoutHeight)
-		}
-		if vi.WmctlRequestPresent() == 0 {
-			presents++
-			if presents == 1 {
-				vi.ConsoleLine(MarkerPresent)
+		// Drain the complete event queue before yielding to another empty
+		// poll. A virtio chord can enqueue several WM_KEY/POINTER events while
+		// the seat is between ticks; processing only one leaves focus-dependent
+		// input behind the heartbeat and makes the next chord race the prior
+		// focus transition. Each tick still gets its own composite/present pass.
+		events += drainSeatEvents(e, vi.PollEvent, consumeSeatEvent, maxEvents-events, func() bool {
+			if ticks >= tickLimit {
+				return false
 			}
-		}
-		if stripDone {
-			continue
-		}
-		n := tabs.Count()
-		// Two-tab choreography (M62b): after the rail has been presented with
-		// n>=2, close the focused tab, then the last. stripSawTwo stays set
-		// after the first close (n drops to 1) so we do not fall through to
-		// the single-tab countdown. The seat stays registered once empty.
-		if n >= 2 || stripSawTwo {
-			if !stripSawTwo {
-				stripSawTwo = true
-				stripStep = 0
-				stripHoldLeft = hidChordHold
-			}
-			if stripHoldLeft > 0 {
-				stripHoldLeft--
-			} else {
-				stripStep++
-				switch stripStep {
-				case 1:
-					_ = applySwapUnpinned()
-				case 2:
-					// M62e: persist this pin-stay snapshot only. Not a
-					// general save-on-exit; writeSession is once-only.
-					if applyPinStay() {
-						_ = writeSession()
-					}
-				case 3:
-					_ = applySplit(SplitVert)
-				case 4:
-					_ = applyUnsplit()
-				case 5:
-					_ = applySplit(SplitHoriz)
-				case 6:
-					_ = applyUnsplit()
-				case 7:
-					closePinnedFirst()
-					stripClosedOne = true
-					if tabs.Count() == 0 {
-						stripDone = true
-					}
-				default:
-					closeHosted()
-					stripDone = true
-				}
-			}
-			continue
-		}
-		// Single-tab close (go-wm-seat / go-wm-default). Counted on ticks,
-		// not empty polls, so a second declare can still land.
-		if n == 1 {
-			hostTicksLeft--
-			if hostTicksLeft <= 0 {
-				closeHosted()
-				stripDone = true
-			}
-		}
+			ticks++
+			compositeTick(scan, uint64(ticks), &presents)
+			return ticks < tickLimit
+		})
 	}
 	// M73z (#1638): the budget can expire with a tab still open — a late
 	// declare's single-tab countdown (hostTicks) needs 16 MORE ticks and
@@ -272,9 +194,7 @@ func main() {
 	// closed cleanly, pure timing variance). Sweep whatever remains so
 	// every hosted app still observes its close on the way out; a strip
 	// the choreography or countdown already emptied is a no-op.
-	for tabs.Count() > 0 {
-		closeHosted()
-	}
+	sweepHosted(closeHosted)
 	vi.ConsoleLine(MarkerHostDone)
 
 	// M69a (#1528): the beat's closing marker for THIS boot. Gated on the
@@ -296,6 +216,136 @@ func main() {
 	}
 	vi.ConsoleLine(MarkerOK)
 	vi.Exit(0)
+}
+
+// sweepHosted closes every remaining live tab before host-done. Restored
+// session records use placeholder ids rather than kernel windows, so discard
+// those local entries before asking the WM seam to close anything. A failed
+// live close is terminal rather than a reason to spin forever: the seat must
+// still publish its bounded-loop completion marker when the WM seam rejects a
+// stale window.
+func sweepHosted(close func() bool) {
+	// Remove all restored placeholders before closing a live tab. Otherwise
+	// closeHosted would try to taskbar-focus a placeholder while handling the
+	// first live close and block on the WM seam.
+	for i := 0; i < tabs.Count(); {
+		id := tabs.At(i).ID
+		if id >= sessionIDBase {
+			_ = tabs.CloseTab(id)
+			continue
+		}
+		i++
+	}
+	for tabs.Count() > 0 {
+		if !close() {
+			return
+		}
+	}
+}
+
+// compositeTick performs one bounded compositor pass after a COMPOSITE_TICK
+// event. Keeping it separate lets the event drain preserve each tick's paint,
+// present, and host-lifecycle ordering while still consuming a complete input
+// burst in one queue pass.
+func compositeTick(scan []byte, ticks uint64, presents *int) {
+	vi.ConsoleLine(MarkerTick)
+	if tabs.Count() == 0 {
+		_ = paintBlank(scan, blankRGB())
+		startSurfaceTick(scan)
+	} else {
+		_ = paintRail(scan, vi.ScanoutWidth, vi.ScanoutHeight, RailHeight, &tabs)
+		markRail()
+	}
+	chromeTick(scan, ticks)
+	if launch.open {
+		_ = paintLauncher(scan, vi.ScanoutWidth, vi.ScanoutHeight)
+	}
+	if vi.WmctlRequestPresent() == 0 {
+		*presents++
+		if *presents == 1 {
+			vi.ConsoleLine(MarkerPresent)
+		}
+	}
+	if stripDone {
+		return
+	}
+	n := tabs.Count()
+	if n >= 2 || stripSawTwo {
+		if !stripSawTwo {
+			stripSawTwo = true
+			stripStep = 0
+			stripHoldLeft = hidChordHold
+		}
+		if stripHoldLeft > 0 {
+			stripHoldLeft--
+		} else {
+			stripStep++
+			switch stripStep {
+			case 1:
+				_ = applySwapUnpinned()
+			case 2:
+				if applyPinStay() {
+					_ = writeSession()
+				}
+			case 3:
+				_ = applySplit(SplitVert)
+			case 4:
+				_ = applyUnsplit()
+			case 5:
+				_ = applySplit(SplitHoriz)
+			case 6:
+				_ = applyUnsplit()
+			case 7:
+				closePinnedFirst()
+				stripClosedOne = true
+				if tabs.Count() == 0 {
+					stripDone = true
+				}
+			default:
+				closeHosted()
+				stripDone = true
+			}
+		}
+		return
+	}
+	if n == 1 {
+		hostTicksLeft--
+		if hostTicksLeft <= 0 {
+			closeHosted()
+			stripDone = true
+		}
+	}
+}
+
+// drainSeatEvents consumes the first event and every event already queued
+// behind it, preserving kernel arrival order. The bound prevents a producer
+// that never stops from starving the composite loop. RPCs are serviced by the
+// caller before the first poll; they have a separate mailbox and therefore no
+// jointly observable arrival order with the kernel event queue.
+func drainSeatEvents(first vi.Event, poll func() (vi.Event, bool), consume func(vi.Event) bool, bound int, onTick func() bool) (events int) {
+	if bound < 1 {
+		return 0
+	}
+	consumeEvent := func(e vi.Event) bool {
+		events++
+		if !consume(e) || onTick == nil {
+			return true
+		}
+		return onTick()
+	}
+	if !consumeEvent(first) {
+		return events
+	}
+	for events < bound {
+		e, ok := poll()
+		if !ok {
+			break
+		}
+		if !consumeEvent(e) {
+			break
+		}
+	}
+	return events
 }
 
 // consumeSeatEvent handles one non-empty poll. Pointer and key log their
