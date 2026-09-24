@@ -500,8 +500,8 @@ var helpCatalog = map[string]helpEntry{
 	// listed only: the engine execs them like any other image, so D1 ("exec
 	// Go binaries; do not grow a POSIX inetutils builtin table") is
 	// untouched — no builtin, no tool, just a catalog row.
-	helpExternal:  {group: "externals", usage: "exec NAME [args...]", blurb: "(& backgrounds it; jobs/fg track it)", notes: "NAME resolves bare, then with .ELF and .BIN, case-insensitively, out of the share."},
-	"GOFETCH.ELF": {group: "externals", usage: "exec GOFETCH.ELF https://HOST[:PORT]/ [sni [name|expired|chain]]", blurb: "fetch a page over in-process TLS (Go)", notes: "The handshake is in-process (virelai/tls); an https URL is never rewritten to http."},
+	helpExternal:       {group: "externals", usage: "exec NAME [args...]", blurb: "(& backgrounds it; jobs/fg track it)", notes: "NAME resolves bare, then with .ELF and .BIN, case-insensitively, out of the share."},
+	"GOFETCH.ELF":      {group: "externals", usage: "exec GOFETCH.ELF {https://HOST[:PORT]/ [sni [name|expired|chain]] | http://HOST[:PORT]/[PATH] | --download [URL [DEST]]}", blurb: "fetch a page over in-process TLS, or fetch/save one over cleartext HTTP (Go)", notes: "An https URL is never rewritten to http. Cleartext fetch prints to the console (exit 42; 3 offline, 4 no route); --download saves the body to /host/DOWNLOAD.OUT (or DEST)."},
 	"GOPING.ELF":       {group: "externals", usage: "exec GOPING.ELF [-c count] <a.b.c.d>", blurb: "ICMP echo to a dotted IPv4 address (Go)", notes: "Exits 2 when no IP is set and 3 when the destination is not ARP-resolved."},
 	"GONETSTAT.ELF":    {group: "externals", usage: "exec GONETSTAT.ELF", blurb: "network interface and connection dashboard (Go)", notes: "Refreshes interface, DHCP, TCP, UDP, ARP and counters on the app timer."},
 	"GODNS.ELF":        {group: "externals", usage: "exec GODNS.ELF <hostname> [<server_ip>]", blurb: "resolve a DNS A record over UDP (Go)", notes: "The default resolver is 10.0.0.2; lookup failures exit nonzero."},

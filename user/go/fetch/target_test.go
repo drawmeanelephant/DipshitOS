@@ -79,18 +79,38 @@ func TestHTTPSNeverPlansCleartext(t *testing.T) {
 		if WouldSendCleartext(tgt) {
 			t.Fatalf("%q would send cleartext", in)
 		}
+		if _, ok := PlanClear(tgt); ok {
+			t.Fatalf("%q produced a cleartext plan", in)
+		}
 		if tgt.Kind == KindHTTPS {
 			if _, ok := PlanDial(tgt); !ok {
 				t.Fatalf("%q is https but has no dial plan", in)
 			}
 		}
 	}
-	http := Classify("http://10.0.0.2/")
-	if !WouldSendCleartext(http) {
-		t.Fatal("http URL must be classified as cleartext")
+}
+
+func TestPlanClearOnlyForExplicitHTTP(t *testing.T) {
+	plan, ok := PlanClear(Classify("http://10.0.0.2:8080/a/b.bin"))
+	if !ok {
+		t.Fatal("explicit http:// IP literal must plan cleartext")
 	}
-	if _, ok := PlanDial(http); ok {
-		t.Fatal("http URL must not be rewritten onto the TLS dial")
+	if plan.Addr != "10.0.0.2" || plan.Port != 8080 || plan.Path != "/a/b.bin" {
+		t.Fatalf("clear plan = %+v", plan)
+	}
+	if plan, ok := PlanClear(Classify("http://10.0.0.2/")); !ok || plan.Port != 80 {
+		t.Fatalf("default clear port = %+v ok=%v", plan, ok)
+	}
+	for _, in := range []string{
+		"http://example.com/",
+		"http://10.0.0.2:99999/",
+		"http://",
+		"ftp://10.0.0.2/",
+		"",
+	} {
+		if plan, ok := PlanClear(Classify(in)); ok {
+			t.Errorf("PlanClear(%q) = %+v, want refuse", in, plan)
+		}
 	}
 }
 
@@ -118,9 +138,21 @@ func TestFailClosedMatchesRequiresSpecificVerdict(t *testing.T) {
 	}
 }
 
-type errStr string
-
-func (e errStr) Error() string { return string(e) }
+func TestClassifyHTTPIPLiteral(t *testing.T) {
+	got := Classify("http://10.0.0.2:8080/a/b.bin")
+	if got.Kind != KindHTTP {
+		t.Fatalf("kind = %q want http", got.Kind)
+	}
+	if got.Host != "10.0.0.2" || got.Port != 8080 || got.Path != "/a/b.bin" {
+		t.Fatalf("target = %+v", got)
+	}
+	if got.IPv4 != [4]byte{10, 0, 0, 2} {
+		t.Fatalf("ipv4 = %v", got.IPv4)
+	}
+	if def := Classify("http://10.0.0.2/"); def.Port != 80 {
+		t.Fatalf("default port = %d want 80", def.Port)
+	}
+}
 
 func TestMarkersHaveNoFETCHS(t *testing.T) {
 	for _, s := range []string{

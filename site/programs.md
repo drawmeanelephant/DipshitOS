@@ -36,7 +36,7 @@ staged by their gates.
 | `TOP.BIN` | `user/src/top.zig` (deleted M71g) | the graphical process monitor with click-to-kill (`sys_kill`) — since retired to Go (`GOTOP.ELF`, gate `go-top`) |
 | `DESKTOP.BIN` | `user/src/desktop.zig` | the launcher: manifests the app catalog (`APPS.TXT`) and `sys_exec`s apps |
 | `TCP.BIN` | `user/src/tcp_client.zig` | the TCP syscall seam: connect, send, receive echo, close, exit 18 |
-| `FETCH.BIN` | `user/src/fetch.zig` | an HTTP/1.0 client over TCP: request, parse response, exit 42 |
+| `GOFETCH.ELF` | `user/go/fetch` | M67b: an HTTPS client over in-process TLS (windowed, exit on close); issue #1683: RETIRED `FETCH.BIN` and `DOWNLOAD.BIN`, `user/src/fetch.zig` and `user/src/download.zig` deleted — one binary now owns the cleartext fetch (`http://` on the console, exit 42) and `--download` (saves the body to the host share) |
 | `CHAT.BIN` | `user/src/chat.zig` | graphical UDP chat: windows + events + `sys_udp_*` |
 | `FSTEST.BIN` | `user/src/fstest.zig` (deleted M34 HF6) | the mutating filesystem seam: create/write → truncate → rename → free → delete — the proof was deleted with the second volume (#740); the slots remain |
 | `TIMER.BIN` | `user/src/timertest.zig` | the app-timer seam: arm → block on `TIMER` event → cancel |
@@ -61,7 +61,6 @@ staged by their gates.
 | `DNS.BIN` | `user/src/dns.zig` (deleted) | M26 N5: DNS lookup — retired to Go (`GODNS.ELF`, `user/go/dns`, gate `live-n5-dns`) |
 | `TRACEROUTE.BIN` | `user/src/traceroute.zig` (deleted) | M26 N7: direct-peer ICMP diagnostic — retired to Go (`GOTRACEROUTE.ELF`, `user/go/traceroute`, gate `live-n7-traceroute`) |
 
-| `DOWNLOAD.BIN` | `user/src/download.zig` | M26 N11: HTTP download manager |
 | `NETPROF.BIN` | `user/src/netprof.zig` | M26 N12: network profile manager |
 | `VMTEST.BIN` | `user/src/vmtest.zig` | M29: demand-fault, COW, mmap/munmap, zero-leak teardown |
 | `HTTPD.BIN` | `user/src/httpd.zig` (deleted M71l) | the in-guest HTTP/1.1 web server (TCP passive open, claim 0750) — since retired to Go (`GOHTTPD.ELF`, gate `live-httpd`) |

@@ -1,10 +1,14 @@
-// Target classification for the M67b Go HTTPS consumer (issue #1447).
+// Target classification for GOFETCH: the M67b windowed HTTPS consumer
+// (issue #1447) and, since M78b (issue #1683), the headless cleartext
+// consumer that succeeded FETCH.BIN/DOWNLOAD.BIN (legacy.go).
 //
 // The load-bearing rule is pure and host-tested: an https URL never turns
-// into a cleartext TCP GET. The only success path is an in-process TLS 1.3
-// dial (virelai/tls over vi.Dial). DNS hostnames are a defined error, not
+// into a cleartext TCP GET. Its only success path is an in-process TLS 1.3
+// dial (virelai/tls over vi.Dial). An explicit http:// URL is classified
+// KindHTTP and may be planned for a cleartext dial (PlanClear); every other
+// scheme is refused. DNS hostnames are a defined error on the TLS path, not
 // a resolve-and-hope — the live target is the runner TLS responder at an
-// IP literal. FETCHS.BIN is not referenced.
+// IP literal.
 package main
 
 import "strings"
@@ -61,8 +65,7 @@ func Classify(raw string) Target {
 	case strings.HasPrefix(low, "https://"):
 		return parseHTTPS(t, raw[len("https://"):])
 	case strings.HasPrefix(low, "http://"):
-		t.Kind = KindHTTP
-		return t
+		return parseHTTP(t, raw[len("http://"):])
 	default:
 		t.Kind = KindURL
 		return t
@@ -110,6 +113,50 @@ func parseHTTPS(t Target, rest string) Target {
 	return t
 }
 
+func parseHTTP(t Target, rest string) Target {
+	t.Kind = KindHTTP
+	if rest == "" {
+		t.Kind = KindURL
+		return t
+	}
+	hostport := rest
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		hostport = rest[:i]
+		t.Path = rest[i:]
+		if t.Path == "" {
+			t.Path = "/"
+		}
+	}
+	if hostport == "" {
+		t.Kind = KindURL
+		return t
+	}
+	host := hostport
+	if i := strings.LastIndexByte(hostport, ':'); i >= 0 {
+		host = hostport[:i]
+		p, ok := parsePort(hostport[i+1:])
+		if !ok {
+			t.Kind = KindURL
+			return t
+		}
+		t.Port = p
+	} else {
+		t.Port = 80
+	}
+	if host == "" {
+		t.Kind = KindURL
+		return t
+	}
+	t.Host = host
+	ip, ok := parseIPv4(host)
+	if !ok {
+		t.Kind = KindDNS
+		return t
+	}
+	t.IPv4 = ip
+	return t
+}
+
 // PlanDial returns the in-process TLS dial for an https IP-literal target.
 // Any other kind yields ok=false — including http, so a caller that only
 // dials when ok cannot send an https URL in the clear.
@@ -128,9 +175,23 @@ func PlanDial(t Target) (DialPlan, bool) {
 	return DialPlan{Addr: t.Host, Port: t.Port, SNI: sni, Path: path}, true
 }
 
-// WouldSendCleartext is true only for a classified http:// URL. This
-// consumer never opens a cleartext socket: http is refused, https goes
-// through tls.Dial.
+// PlanClear returns the cleartext dial for an explicit http:// IP-literal
+// target (M78b). https, DNS names, and malformed URLs yield ok=false, so
+// the cleartext socket is reachable only from an explicit http:// URL.
+func PlanClear(t Target) (DialPlan, bool) {
+	if t.Kind != KindHTTP {
+		return DialPlan{}, false
+	}
+	path := t.Path
+	if path == "" {
+		path = "/"
+	}
+	return DialPlan{Addr: t.Host, Port: t.Port, Path: path}, true
+}
+
+// WouldSendCleartext is true only for a classified http:// IP-literal URL.
+// The windowed consumer refuses it; the headless legacy path (legacy.go)
+// dials it deliberately.
 func WouldSendCleartext(t Target) bool {
 	return t.Kind == KindHTTP
 }

@@ -938,12 +938,20 @@ func TestHelpNamesTheNetCLIs(t *testing.T) {
 		!strings.Contains(strings.Join(helpGroupNames("externals"), " "), "exec") {
 		t.Error("the externals group does not mention the exec verb")
 	}
+	// M78b (#1683): GOFETCH also owns the cleartext fetch and --download
+	// rows now, so the help page must name both forms.
+	gofetch := helpCatalog["GOFETCH.ELF"]
+	for _, want := range []string{"http://", "--download"} {
+		if !strings.Contains(gofetch.usage, want) {
+			t.Errorf("GOFETCH.ELF help usage does not name %q: %q", want, gofetch.usage)
+		}
+	}
 }
 
 // TestHelpNamesNoDeletedBinaries is #1538 D2 inverted: a help page must never
 // advertise a binary M60 deleted (the NOTEPAD.BIN chord lesson).
 func TestHelpNamesNoDeletedBinaries(t *testing.T) {
-	dead := []string{"NOTEPAD.BIN", "EDIT.BIN", "CALC.BIN", "SH.BIN", "TABWM.BIN"}
+	dead := []string{"NOTEPAD.BIN", "EDIT.BIN", "CALC.BIN", "SH.BIN", "TABWM.BIN", "FETCH.BIN", "DOWNLOAD.BIN"}
 	texts := map[string]string{"catalog": helpCatalogText()}
 	for name, e := range helpCatalog {
 		texts[name] = name + " | " + e.usage + " | " + e.blurb + " | " + e.notes
