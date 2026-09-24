@@ -1,5 +1,7 @@
 package vi
 
+import "sync/atomic"
+
 // M56b (issue #1316): the tab-client WM_RPC wire + event dispatch. The frame
 // is byte-identical to kernel/src/wnd_core.zig's `WmRpc` (mirrored in
 // user/src/lib/ui/abi.zig): 38 bytes, little-endian, fitting the frozen
@@ -41,6 +43,18 @@ const (
 // WmRpc is the 38-byte app-to-WM mailbox frame. Field order and widths are the
 // kernel's: kind@0, id@1, seq@2, reply_to@3, applied@4, pad@5, x@6, y@8,
 // w@10, h@12, title[24]@14.
+//
+// Frozen wire fields:
+//   - kind: u8; bit 0x80 marks a reply, and additive kinds do not renumber
+//   - id: u8 window id; the low byte only, so WmMailRequest refuses values > 0xff
+//   - seq: u8 per-process monotonic request counter; zero is skipped
+//   - reply_to: u8 requester pid; the low byte only, so values > 0xff are refused
+//   - applied: u8, reply frames only
+//   - x, y, w, h: u16 little-endian
+//   - title: 24 NUL-padded bytes; nav-poll replies carry their path here
+//
+// The id and reply_to bounds are part of the client contract, not an
+// invitation to truncate a wider value silently.
 type WmRpc struct {
 	Kind    uint8
 	ID      uint8
@@ -123,16 +137,35 @@ func (m WmRpc) TitleString() string {
 // refusal; DeclareFullscreen callers already handle it).
 const wmMailWaitTicks = 8
 
+// wmSeq is process-local because the package-level helpers are the client
+// surface: there is no Client object to own the counter. Atomic allocation
+// keeps two goroutines making requests from receiving the same sequence.
+var wmSeq atomic.Uint32
+
+func nextWmSeq() uint8 {
+	for {
+		seq := wmSeq.Add(1)
+		if seq&0xff != 0 {
+			return uint8(seq)
+		}
+	}
+}
+
+func fitsWire8(v uint32) bool {
+	return v <= 0xff
+}
+
 // waitWmRpcAck polls the caller's inbox for a matching WM_RPC ack. A silent
 // mailbox parks between probes and returns (_, false) when the tick budget
-// runs out; it never yield-spins.
-func waitWmRpcAck(seq uint8) (WmRpc, bool) {
+// runs out; it never yield-spins. Replies with another sequence or requester
+// are foreign and are discarded rather than accepted as this request's ack.
+func waitWmRpcAck(seq, replyTo uint8) (WmRpc, bool) {
 	var raw [WmRpcMax]byte
 	for tick := uint64(0); tick < wmMailWaitTicks; tick++ {
 		n, _ := IpcRecv(raw[:])
 		if n >= 38 {
 			rep, ok := DecodeWmRpc(raw[:n])
-			if ok && rep.Kind&WmRpcReplyFlag != 0 && rep.Seq == seq {
+			if ok && rep.Kind&WmRpcReplyFlag != 0 && rep.Seq == seq && rep.ReplyTo == replyTo {
 				return rep, true
 			}
 		}
@@ -146,19 +179,23 @@ func waitWmRpcAck(seq uint8) (WmRpc, bool) {
 
 // WmMailRequest sends one WM_RPC request to the registered WM and polls the
 // CALLER's own inbox for the matching ack. It returns whether the WM applied
-// it. A missing WM seat or a bounded-poll timeout returns false (honest — the
+// it. A missing WM seat, an id or requester pid that does not fit the frozen
+// 8-bit wire fields, or a bounded-poll timeout returns false (honest — the
 // caller then falls back to the frozen syscall); recv reads the caller's own
-// ring, so no self-pid is needed on the wire beyond `reply_to`.
-func WmMailRequest(kind uint8, id uint32, x, y, w, h uint16, title, selfName string, seq uint8) bool {
+// ring, while the seat uses reply_to to route the ack.
+func WmMailRequest(kind uint8, id uint32, x, y, w, h uint16, title, selfName string) bool {
+	if !fitsWire8(id) {
+		return false
+	}
 	peers := WmPeers(selfName)
-	if peers.WM == 0 || peers.Self == 0 {
+	if peers.WM == 0 || peers.Self == 0 || !fitsWire8(peers.Self) {
 		return false
 	}
 	req := WmRpc{
 		Kind:    kind,
-		ID:      uint8(id & 0xff),
-		Seq:     seq,
-		ReplyTo: uint8(peers.Self & 0xff),
+		ID:      uint8(id),
+		Seq:     nextWmSeq(),
+		ReplyTo: uint8(peers.Self),
 		X:       x,
 		Y:       y,
 		W:       w,
@@ -169,7 +206,7 @@ func WmMailRequest(kind uint8, id uint32, x, y, w, h uint16, title, selfName str
 	if IpcSend(peers.WM, frame) < 0 {
 		return false
 	}
-	rep, ok := waitWmRpcAck(req.Seq)
+	rep, ok := waitWmRpcAck(req.Seq, req.ReplyTo)
 	if !ok {
 		return false
 	}
@@ -180,7 +217,7 @@ func WmMailRequest(kind uint8, id uint32, x, y, w, h uint16, title, selfName str
 // 8). TABWM accepts; WND.BIN and the shim refuse and the app keeps its legacy
 // size — the zero-regression path.
 func DeclareFullscreen(winID uint32, title, selfName string) bool {
-	return WmMailRequest(WmRpcKindDeclareFullscreen, winID, 0, 0, 0, 0, title, selfName, 1)
+	return WmMailRequest(WmRpcKindDeclareFullscreen, winID, 0, 0, 0, 0, title, selfName)
 }
 
 // DeclareNav tells the WM this tab navigated to path (kind 9) — the
@@ -189,28 +226,31 @@ func DeclareNav(winID uint32, path, selfName string) bool {
 	if path == "" {
 		return false
 	}
-	return WmMailRequest(WmRpcKindNavDeclare, winID, 0, 0, 0, 0, path, selfName, 6)
+	return WmMailRequest(WmRpcKindNavDeclare, winID, 0, 0, 0, 0, path, selfName)
 }
 
 // PollNav asks the WM for a back/forward target the user picked on the rail
 // (kind 10), returning the path when one is queued. Best-effort: a missing WM
 // seat or no pending target returns ("", false).
 func PollNav(winID uint32, selfName string) (string, bool) {
+	if !fitsWire8(winID) {
+		return "", false
+	}
 	peers := WmPeers(selfName)
-	if peers.WM == 0 || peers.Self == 0 {
+	if peers.WM == 0 || peers.Self == 0 || !fitsWire8(peers.Self) {
 		return "", false
 	}
 	req := WmRpc{
 		Kind:    WmRpcKindNavPoll,
-		ID:      uint8(winID & 0xff),
-		Seq:     7,
-		ReplyTo: uint8(peers.Self & 0xff),
+		ID:      uint8(winID),
+		Seq:     nextWmSeq(),
+		ReplyTo: uint8(peers.Self),
 	}
 	frame := req.Encode()
 	if IpcSend(peers.WM, frame) < 0 {
 		return "", false
 	}
-	rep, ok := waitWmRpcAck(req.Seq)
+	rep, ok := waitWmRpcAck(req.Seq, req.ReplyTo)
 	if !ok || rep.Applied == 0 {
 		return "", false
 	}
