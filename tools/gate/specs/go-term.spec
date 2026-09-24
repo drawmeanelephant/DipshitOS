@@ -1,13 +1,16 @@
 # go-term.spec -- M58c (issue #1307) class-B gate: a Go terminal window opens
 # over the existing /dev/tty seam, attaches selector 2, types a line, and
-# closes, full-viewport inside Zig TABWM.
+# closes, full-viewport inside Zig TABWM. M80j (#1726) also drives `exit`:
+# the default `term_restart=stay` keeps the same window/fd, announces the
+# shell status, and starts a second prompt before the harness closes it.
 #
 # user/go/term is a tabapp client: init -> declare (kind-8 WM_RPC) -> open
 # /dev/tty -> sys_tty_attach(2, window_id) -> startup block through the tty
 # (M73c #1627: startup contract banner, SETTINGS prompt load, history load,
 # `goterm: ready`, first prompt painted by shlib's editor) -> injected
 # keystrokes (ADR 0020 A5) feed editor.Feed, and each EvSubmit runs the line
-# through shlib's Shell.RunLine -> WIN_CLOSE detaches and exits.
+# through shlib's Shell.RunLine -> a shell exit restarts the session (or
+# closes it under term_restart=exit), and WIN_CLOSE detaches and exits.
 # Zig TERM.BIN / SH.BIN are untouched; kernel untouched; no second renderer.
 #
 # M73c (#1627) execution proof: observed on the first reshaped run --
@@ -30,10 +33,10 @@
 #
 # exec-order: assert-proven -- the run ends on `rx-goterm-ok`, which only the
 # script prints, and the stage gate that forwards the close waits on the app's
-# own second-line marker `goterm: line cd /nosuchdir`; a program that never
-# ran, or one that echoed without executing, cannot pass (the two
-# `goterm: done status=` markers carry engine-computed statuses 0 then
-# nonzero, and the ordering python asserts the whole chain).
+# own `goterm: restart` marker; a program that never ran, or one that echoed
+# without executing, cannot pass (the two `goterm: done status=` markers
+# carry engine-computed statuses 0 then nonzero, and the ordering python
+# asserts the whole chain).
 
 vgate_name go-term "issue #1307 M58c: a Go terminal attaches /dev/tty selector 2 in Zig TABWM on VZ"
 vgate_share seed
@@ -48,8 +51,8 @@ vgate_file script2.txt <<'EOF'
 exec GOTERM.ELF
 EOF
 
-# The close is driven from the harness after the app's own `goterm: line `
-# (the stage gate), so the typed line reached the tty before the window closes.
+# The close is driven from the harness after the app's own `goterm: restart`
+# marker, so the replacement session reached its prompt before teardown.
 vgate_file script3.txt <<'EOF'
 dui close 2
 echo rx-goterm-ok
@@ -78,10 +81,10 @@ vgate_run 01 -- \
     --script '$RUN_DIR/script.txt' \
     --script2 '$RUN_DIR/script2.txt' \
     --script2-after 'tabwm: sidebar-rendered' \
-    --input-chords 'c,d,space,/,d,a,t,a,return,c,d,space,/,n,o,s,u,c,h,d,i,r,return' \
+    --input-chords 'c,d,space,/,d,a,t,a,return,c,d,space,/,n,o,s,u,c,h,d,i,r,return,e,x,i,t,return' \
     --input-chords-after 'goterm: prompt' \
     --script3 '$RUN_DIR/script3.txt' \
-    --script3-after 'goterm: line cd /nosuchdir' \
+    --script3-after 'goterm: restart' \
     --script-expect 'rx-goterm-ok' --timeout 240
 
 vgate_assert 01 serial-contains 'VirelaiOS kernel has seized control.'
@@ -103,6 +106,7 @@ vgate_assert 01 serial-contains 'goterm: prompt'
 vgate_assert 01 serial-contains 'goterm: line cd /data'
 vgate_assert 01 serial-contains 'goterm: done status=0'
 vgate_assert 01 serial-contains 'goterm: line cd /nosuchdir'
+vgate_assert 01 serial-contains 'goterm: restart'
 vgate_assert 01 serial-contains 'goterm: close'
 vgate_assert 01 serial-contains 'goterm OK'
 vgate_assert 01 serial-contains 'rx-goterm-ok'
@@ -112,7 +116,7 @@ vgate_assert 01 serial-absent 'exited status=139'
 # done marker with status=0 (host.Chdir verified /data -- `data/` is
 # seeded), submit 2, its done marker with a NONZERO status (the negative
 # control: the status is the engine's, not a constant), then the
-# WIN_CLOSE teardown the harness only sends after submit 2's line marker.
+# WIN_CLOSE teardown the harness only sends after the restart marker.
 vgate_assert 01 python <<'PY'
 import os, re, sys
 ser = open(os.environ["VG_SER"], errors="replace").read().splitlines()
@@ -141,14 +145,15 @@ line2_i = first_after("goterm: line cd /nosuchdir", done1_i)
 done2_i, st2 = first_done_after(line2_i)
 if st2 == 0:
     sys.exit("cd /nosuchdir status=0: the status is not the engine's")
-# close is guaranteed after done2 (the app only polls window events after
-# its handle() finished). rx is guaranteed after the line2 marker (the
-# harness only types script3 once it sees that marker) but races close on
-# the console task -- observed: rx-goterm-ok lands BEFORE goterm: close --
-# so it is chained to line2, not to close.
-close_i = first_after("goterm: close", done2_i)
-rx_i = first_after("rx-goterm-ok", line2_i)
+# The replacement prompt is painted before restart is announced, and the
+# harness only types script3 after restart. rx can race close on the
+# console task, so it is chained to the restart rather than to close.
+prompt2_i = first_after("goterm: prompt", done2_i)
+restart_i = first_after("goterm: restart", prompt2_i)
+close_i = first_after("goterm: close", restart_i)
+rx_i = first_after("rx-goterm-ok", restart_i)
 print("order ok: ready@%d prompt@%d cd/data@%d status=%d "
-      "cd/nosuchdir@%d status=%d close@%d rx@%d" %
-      (ready_i, prompt_i, line1_i, st1, line2_i, st2, close_i, rx_i))
+      "cd/nosuchdir@%d status=%d prompt2@%d restart@%d close@%d rx@%d" %
+      (ready_i, prompt_i, line1_i, st1, line2_i, st2, prompt2_i,
+       restart_i, close_i, rx_i))
 PY
