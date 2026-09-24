@@ -194,23 +194,23 @@ func TestEditorCompletion(t *testing.T) {
 	if !strings.Contains(out, "gosh> echo ") {
 		t.Fatalf("single completion = %q", out)
 	}
-	// Several candidates: first Tab completes the common prefix ("c"),
-	// second Tab lists them.
+	// Several candidates that share nothing beyond the word itself: the
+	// first Tab opens the completion menu (M80m #1729) where it used to ring
+	// a bell, and the second Tab cycles to the first candidate.
 	feedE(e, "\r")
 	out = feedE(e, "c\t")
-	if !strings.Contains(out, "gosh> c") {
-		t.Fatalf("common prefix = %q", out)
+	if !strings.Contains(out, "\r\ncat    cd     clear\r\n") {
+		t.Fatalf("completion menu = %q", out)
 	}
-	out = feedE(e, "\t")
-	if !strings.Contains(out, "cat") || !strings.Contains(out, "cd") || !strings.Contains(out, "clear") {
-		t.Fatalf("candidate list = %q", out)
+	if !strings.HasSuffix(out, "\rgosh> c") {
+		t.Fatalf("menu repaint = %q, want the line under the listing", out)
 	}
 	if listed {
 		t.Fatalf("the no-candidate branch fired early")
 	}
-	out = feedE(e, "\t") // a third Tab after the list: nothing new
-	if strings.Count(out, "clear") != 0 {
-		t.Fatalf("post-list Tab re-listed = %q", out)
+	out = feedE(e, "\t")
+	if string(e.buf) != "cat " || e.cur != 4 {
+		t.Fatalf("menu cycle = %q cur %d, want \"cat \" at 4", e.buf, e.cur)
 	}
 	// File candidates complete to the common prefix without a space.
 	feedE(e, "\r")
@@ -948,5 +948,257 @@ func TestEditorKillBytesUnchanged(t *testing.T) {
 	}
 	if out := feedE(e, "\x15"); out != "\rgosh> \rgosh> " {
 		t.Fatalf("ctrl-u on an empty line = %q", out)
+	}
+}
+
+// --- the completion menu (M80m #1729) ---------------------------------------
+
+// menuHook is the completer the menu tests share: "c" is the ambiguous word
+// the card is about, "ec" the single-candidate case, and everything else a
+// miss.
+func menuHook(word string, first bool) []string {
+	switch word {
+	case "ec":
+		return []string{"echo "}
+	case "echo ":
+		return []string{"echo "}
+	case "c":
+		return []string{"cat ", "cd ", "clear "}
+	}
+	return nil
+}
+
+// TestCompletionMenuColumns pins the layout: column-major, padded to the
+// widest entry plus the gap, no trailing blanks, and a narrower grid folds
+// the listing into fewer columns.
+func TestCompletionMenuColumns(t *testing.T) {
+	cands := []string{"cat ", "cd ", "clear "}
+	got := menuRows(cands, 80, 0)
+	if len(got) != 1 || got[0] != "cat    cd     clear" {
+		t.Fatalf("menuRows at 80 = %q", got)
+	}
+	if strings.HasSuffix(got[0], " ") {
+		t.Fatalf("menu row ends in blanks: %q", got[0])
+	}
+	// 12 columns fit one 7-wide entry: one candidate per row.
+	got = menuRows(cands, 12, 0)
+	want := []string{"cat", "cd", "clear"}
+	if len(got) != len(want) {
+		t.Fatalf("menuRows at 12 = %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("menuRows at 12 row %d = %q want %q", i, got[i], want[i])
+		}
+	}
+	// A degenerate width still lays out one column rather than dividing by
+	// zero or looping.
+	if got = menuRows(cands, 1, 0); len(got) != 3 {
+		t.Fatalf("menuRows at 1 col = %q", got)
+	}
+	if menuRows(nil, 80, 0) != nil {
+		t.Fatalf("menuRows of no candidates should be nil")
+	}
+}
+
+// TestCompletionMenuPages pins paging: 30 three-character names in a 15-column
+// grid are three columns by ten rows, so the first Tab shows eight rows and
+// the next Tab shows the last two.
+func TestCompletionMenuPages(t *testing.T) {
+	var cands []string
+	for i := 1; i <= 30; i++ {
+		cands = append(cands, "f"+fmt.Sprintf("%02d", i))
+	}
+	e := NewEditor("gosh> ", &History{})
+	e.SetCols(15)
+	e.Complete = func(word string, first bool) []string { return cands }
+	feedE(e, "f")
+	out := feedE(e, "\t")
+	page0 := []string{
+		"f01  f11  f21", "f02  f12  f22", "f03  f13  f23", "f04  f14  f24",
+		"f05  f15  f25", "f06  f16  f26", "f07  f17  f27", "f08  f18  f28",
+	}
+	for _, row := range page0 {
+		if !strings.Contains(out, "\r\n"+row+"\r\n") {
+			t.Fatalf("page 0 missing row %q in %q", row, out)
+		}
+	}
+	if strings.Contains(out, "f09") {
+		t.Fatalf("page 0 leaked the second page: %q", out)
+	}
+	// The next Tab pages rather than cycling.
+	out = feedE(e, "\t")
+	for _, row := range []string{"f09  f19  f29", "f10  f20  f30"} {
+		if !strings.Contains(out, "\r\n"+row+"\r\n") {
+			t.Fatalf("page 1 missing row %q in %q", row, out)
+		}
+	}
+	if string(e.buf) != "f" {
+		t.Fatalf("paging changed the line to %q", e.buf)
+	}
+	// The last page pages no further: the next Tab starts cycling.
+	out = feedE(e, "\t")
+	if string(e.buf) != "f01" || e.cur != 3 {
+		t.Fatalf("cycle after the last page = %q cur %d", e.buf, e.cur)
+	}
+	if strings.Contains(out, "f02") {
+		t.Fatalf("the post-page Tab painted a page again: %q", out)
+	}
+}
+
+// TestCompletionMenuCycle pins the cycle order, the wrap, and that the text
+// after the completed word survives every cycle.
+func TestCompletionMenuCycle(t *testing.T) {
+	e := NewEditor("gosh> ", &History{})
+	e.Complete = menuHook
+	feedE(e, "c")
+	feedE(e, "\t") // the menu
+	for _, want := range []struct {
+		line string
+		cur  int
+	}{{"cat ", 4}, {"cd ", 3}, {"clear ", 6}, {"cat ", 4}} {
+		feedE(e, "\t")
+		if string(e.buf) != want.line || e.cur != want.cur {
+			t.Fatalf("cycle = %q cur %d, want %q at %d", e.buf, e.cur, want.line, want.cur)
+		}
+	}
+	// A tail after the cursor is preserved: the cycle replaces the word, not
+	// the rest of the line.
+	e2 := NewEditor("gosh> ", &History{})
+	e2.Complete = menuHook
+	feedE(e2, "c tail")
+	feedE(e2, "\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D") // back onto the "c"
+	feedE(e2, "\t")                             // the menu
+	feedE(e2, "\t")                             // cycle
+	if string(e2.buf) != "cat  tail" || e2.cur != 4 {
+		t.Fatalf("cycle with a tail = %q cur %d", e2.buf, e2.cur)
+	}
+}
+
+// TestCompletionMenuDismisses pins the dismissal rule: any byte that is not
+// Tab closes the menu, and the keystroke still does its own job.
+func TestCompletionMenuDismisses(t *testing.T) {
+	e := NewEditor("gosh> ", &History{})
+	e.Complete = menuHook
+	feedE(e, "c")
+	feedE(e, "\t")
+	if !e.menuOn {
+		t.Fatalf("the menu should be up after the first Tab")
+	}
+	out := feedE(e, "x")
+	if e.menuOn {
+		t.Fatalf("a printable key did not dismiss the menu")
+	}
+	if string(e.buf) != "cx" {
+		t.Fatalf("the printable key did not insert: %q", e.buf)
+	}
+	if !strings.HasSuffix(out, "\rgosh> cx") {
+		t.Fatalf("dismiss + insert repaint = %q", out)
+	}
+	// A chord dismisses too, and the word is recomputed on the next Tab.
+	// Backspace is the chord here precisely because Ctrl-W on "cx" would
+	// kill the whole word and leave nothing to complete.
+	feedE(e, "\x7f")
+	if e.menuOn {
+		t.Fatalf("Backspace did not dismiss the menu")
+	}
+	if string(e.buf) != "c" {
+		t.Fatalf("Backspace left %q, want \"c\"", e.buf)
+	}
+	// Arrows dismiss as well: the ESC of the sequence is enough.
+	feedE(e, "\t")
+	if !e.menuOn {
+		t.Fatalf("the menu should be up again")
+	}
+	feedE(e, "\x1b[D")
+	if e.menuOn {
+		t.Fatalf("an arrow did not dismiss the menu")
+	}
+}
+
+// TestCompletionMenuSingleCandidate pins the one-candidate rule: it inserts,
+// and a word that already spells the candidate is answered with silence
+// rather than a one-row menu.
+func TestCompletionMenuSingleCandidate(t *testing.T) {
+	e := NewEditor("gosh> ", &History{})
+	e.Complete = menuHook
+	feedE(e, "ec")
+	out := feedE(e, "\t")
+	if string(e.buf) != "echo " || e.menuOn {
+		t.Fatalf("single candidate = %q menuOn %v", e.buf, e.menuOn)
+	}
+	if !strings.HasSuffix(out, "\rgosh> echo ") {
+		t.Fatalf("single candidate repaint = %q", out)
+	}
+	// The word is already the whole candidate: nothing to add, nothing to
+	// show.
+	if out := feedE(e, "\t"); out != "" {
+		t.Fatalf("a complete word answered %q, want silence", out)
+	}
+	if e.menuOn {
+		t.Fatalf("a complete word opened a menu")
+	}
+}
+
+// TestCompletionMenuSubmitContract pins the M73d contract with a menu up:
+// Enter still echoes the bare newline and no prompt, and submits the line as
+// it stands.
+func TestCompletionMenuSubmitContract(t *testing.T) {
+	e := NewEditor("gosh> ", &History{})
+	e.Complete = menuHook
+	feedE(e, "c")
+	feedE(e, "\t")
+	out, ev := e.Feed([]byte("\r"))
+	if ev.Kind != EvSubmit || ev.Line != "c" {
+		t.Fatalf("submit with a menu up = %+v", ev)
+	}
+	if string(out) != "\r\n" {
+		t.Fatalf("submit echo = %q, want the bare CRLF", out)
+	}
+}
+
+// TestCompletionMenuRespectsLineCap pins the cap on a cycle: a candidate
+// that would push the line past maxLineBytes bells and changes nothing.
+func TestCompletionMenuRespectsLineCap(t *testing.T) {
+	// Two candidates with nothing in common, so the menu opens rather than
+	// the common-prefix insert: the first fits the cap exactly, the second
+	// is a byte too long for it.
+	fits := strings.Repeat("y", maxLineBytes)
+	tooLong := strings.Repeat("z", maxLineBytes+1)
+	e := NewEditor("gosh> ", &History{})
+	e.Complete = func(word string, first bool) []string {
+		return []string{fits, tooLong}
+	}
+	feedE(e, "q")
+	feedE(e, "\t")
+	if !e.menuOn {
+		t.Fatalf("the menu should be up")
+	}
+	feedE(e, "\t") // cycle to the first candidate: exactly the cap
+	if string(e.buf) != fits {
+		t.Fatalf("first cycle = %d bytes, want %d", len(e.buf), maxLineBytes)
+	}
+	out := feedE(e, "\t") // cycle to the longer one: over the cap
+	if string(e.buf) != fits {
+		t.Fatalf("the oversized cycle changed the line to %d bytes", len(e.buf))
+	}
+	if !strings.Contains(out, "\x07") {
+		t.Fatalf("oversized cycle = %d bytes of output, want a bell", len(out))
+	}
+}
+
+// TestSetCols pins the width seam the menu lays out against.
+func TestSetCols(t *testing.T) {
+	e := NewEditor("gosh> ", &History{})
+	if e.menuCols() != defaultCols {
+		t.Fatalf("default width = %d want %d", e.menuCols(), defaultCols)
+	}
+	e.SetCols(24)
+	if e.menuCols() != 24 {
+		t.Fatalf("SetCols(24) = %d", e.menuCols())
+	}
+	e.SetCols(0) // nonsense restores the default
+	if e.menuCols() != defaultCols {
+		t.Fatalf("SetCols(0) = %d want the default", e.menuCols())
 	}
 }
