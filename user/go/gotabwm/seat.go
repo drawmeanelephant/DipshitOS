@@ -72,7 +72,12 @@ func blankRGB() uint32 { return theme.Current.Bg }
 // budget in ticks. maxTicks must cover hostTicks + hidChordHold + the
 // two-tab choreography (9) so M63 HID (click, type-in, drag, chords)
 // lands before auto pin/close. Type-in and drag are separate boots.
-const maxTicks = 48
+// M73z (#1638): 48 ended go-dogfood boot 04 mid-chain (serial-04:
+// `gotabwm: OK` at tick 48, before the drag's chords, the pasted
+// submits, and script2's kresize could finish). 90 = the 16+32+9 = 57
+// choreography budget plus the acceptance chain that starts at
+// GOTERM's declare (~tick 20); maxEvents 500 stays above it.
+const maxTicks = 90
 
 // pointerClickHold is how many composite ticks one `--pointer-virtio` click
 // needs at the 1 Hz kind-18 heartbeat (3 messages × 2.5 s, rounded up).
@@ -258,6 +263,17 @@ func main() {
 				stripDone = true
 			}
 		}
+	}
+	// M73z (#1638): the budget can expire with a tab still open — a late
+	// declare's single-tab countdown (hostTicks) needs 16 MORE ticks and
+	// cannot beat maxTicks (observed go-wm-default boot 01: GOCALC
+	// declared near tick 88, the seat exited at 90, and the app never
+	// saw WIN_CLOSE — no `gocalc: close`; an earlier-declaring run
+	// closed cleanly, pure timing variance). Sweep whatever remains so
+	// every hosted app still observes its close on the way out; a strip
+	// the choreography or countdown already emptied is a no-op.
+	for tabs.Count() > 0 {
+		closeHosted()
 	}
 	vi.ConsoleLine(MarkerHostDone)
 

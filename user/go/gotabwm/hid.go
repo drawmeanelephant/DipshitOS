@@ -57,7 +57,11 @@ var execApp = vi.Exec
 // after first seeing n>=2, so a rail click (3×2.5 s), a press/release drag
 // (pointerDragHold), `--input-string` into GOEDIT, and `--input-chords`
 // land before auto reorder/pin. The type-in and drag boots are separate.
-const hidChordHold = 20
+// M73z (#1638): raised 20 -> 32 so go-dogfood boot 04's acceptance
+// chain (6-step pointer phase incl. the refocus rail click, chords,
+// script2 tail, expect) finishes before the choreography's first
+// close (n==2 + hold + 7 steps ~ tick 68).
+const hidChordHold = 32
 
 // pointerDragHold is one `--pointer-virtio 'x,y,d;x,y,u'` (4 messages × 2.5 s).
 const pointerDragHold = 12

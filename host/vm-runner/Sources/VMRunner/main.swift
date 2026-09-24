@@ -3597,7 +3597,12 @@ func startKeyInject() {
     let q = DispatchQueue(label: "virelaios.keyinject")
     q.async {
         let marker = inputKeyAfter ?? "usb: enumerated"
-        let waitDeadline = Date().addingTimeInterval(40)
+        // M73z (#1638): timeout-aware deadline, mirroring claim 0142's
+        // script-wait fix — a gate may anchor this key on a marker deep
+        // into a long run (boot 04's `gotabwm: alt-tab id=4` lands ~200 s
+        // in), and a marker can never arrive after --timeout.
+        let waitSeconds = max(40, timeout)
+        let waitDeadline = Date().addingTimeInterval(waitSeconds)
         var sent = false
         while Date() < waitDeadline {
             if let text = try? String(contentsOf: serialURL, encoding: .utf8),
@@ -3650,7 +3655,7 @@ func startKeyInject() {
             Thread.sleep(forTimeInterval: 0.1)
         }
         if !sent {
-            FileHandle.standardError.write(Data("ERROR: guest did not emit key-inject marker '\(marker)' within 40s; key not injected\n".utf8))
+            FileHandle.standardError.write(Data("ERROR: guest did not emit key-inject marker '\(marker)' within \(Int(waitSeconds))s; key not injected\n".utf8))
         }
     }
 }
