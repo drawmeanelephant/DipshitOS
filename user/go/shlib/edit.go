@@ -6,7 +6,9 @@
 // prefix, the same discipline the Zig editor (lib/tty.zig) used over this
 // seam. Pure code; main.go feeds it tty bytes and writes back what it
 // returns. Covered keymap: arrows, Home/End, Delete, Ctrl-A/E/K/U/W/L/C/D,
-// Backspace, Tab completion, and Up/Down history.
+// Backspace, Tab completion, Up/Down history, word motion and word
+// kill (alt-f / alt-b / alt-d / alt-backspace), Ctrl-T transpose and
+// Ctrl-Y yank.
 package shlib
 
 import "strings"
@@ -104,13 +106,23 @@ const (
 
 // Editor is the line editor for one tty session.
 type Editor struct {
-	prompt   string
-	buf      []byte
-	cur      int
-	hist     *History
-	hview    int // -1 = editing the live line
-	lastLen  int // painted prompt+line length, for the tail overwrite
-	lastTab  bool
+	prompt  string
+	buf     []byte
+	cur     int
+	hist    *History
+	hview   int // -1 = editing the live line
+	lastLen int // painted prompt+line length, for the tail overwrite
+	lastTab bool
+	// kill ring + consecutive-kill merge (M80l #1728). One entry is the
+	// minimum readline contract: every kill (Ctrl-K/U/W, alt-d,
+	// alt-backspace) parks what it removed, and a kill that continues the
+	// previous one -- same direction, cursor untouched since -- grows that
+	// entry instead of replacing it. killLo/killHi/killDir record where the
+	// last kill happened; breakKill ends the chain without emptying the ring.
+	kill     []byte
+	killLo   int
+	killHi   int
+	killDir  int    // killNone / killBackward / killForward
 	state    int    // edGround / edEsc / edCSI
 	csiParam int    // accumulated CSI parameter
 	csiGotP  bool   // saw at least one parameter digit
@@ -202,14 +214,30 @@ func (e *Editor) Feed(chunk []byte) ([]byte, EditEvent) {
 				e.csiParam, e.csiGotP = 0, false
 				continue
 			}
-			// A lone ESC (or ESC followed by anything but '[') is not a
-			// sequence this keymap consumes. Drop the ESC and treat THIS byte
-			// as ground input: eating it would mean Escape followed by typing
-			// a character silently loses the character. The kernel's keymap
-			// emits ESC [ X for every arrow/Home/End, so no SS3-style sequence
-			// (`ESC O A`) reaches here to be misread as text.
 			e.state = edGround
-			w, ev = e.keyGround(b)
+			// xterm's alt convention: Alt-X arrives as ESC X. Word motion and
+			// word kill are dispatched here (M80l #1728), so the ESC is
+			// consumed and the prefixed byte never reaches the ground editor:
+			// `ESC f` moves a word instead of typing an "f".
+			switch b {
+			case 'f':
+				w, ev = e.keyWordForward()
+			case 'b':
+				w, ev = e.keyWordBackward()
+			case 'd':
+				w, ev = e.keyKillWordForward()
+			case 0x7f, 0x08: // Alt-Backspace: kill the word before the cursor
+				w, ev = e.keyKillWordBack()
+			default:
+				// A lone ESC (or ESC followed by anything but '[' or an alt
+				// key) is not a sequence this keymap consumes. Drop the ESC and
+				// treat THIS byte as ground input: eating it would mean Escape
+				// followed by typing a character silently loses the character.
+				// The kernel's keymap emits ESC [ X for every arrow/Home/End,
+				// so no SS3-style sequence (`ESC O A`) reaches here to be
+				// misread as text.
+				w, ev = e.keyGround(b)
+			}
 		case edCSI:
 			switch {
 			case b >= '0' && b <= '9':
@@ -273,6 +301,7 @@ func (e *Editor) Pending() bool { return len(e.pending) > 0 }
 // searchEnter opens reverse-i-search, saving the draft line for a cancel.
 // Returns the paint for the search prompt.
 func (e *Editor) searchEnter() []byte {
+	e.breakKill()
 	e.draft = append(e.draft[:0], e.buf...)
 	e.draftCur = e.cur
 	e.searching = true
@@ -360,6 +389,7 @@ func (e *Editor) searchByte(b byte) ([]byte, bool) {
 // match loaded; on cancel the saved draft comes back. It repaints either way,
 // so the caller never has to.
 func (e *Editor) searchExit(accept bool) []byte {
+	e.breakKill()
 	e.searching = false
 	if !accept {
 		e.buf = append(e.buf[:0], e.draft...)
@@ -376,6 +406,7 @@ func (e *Editor) keyGround(b byte) ([]byte, EditEvent) {
 		e.state = edEsc
 		return nil, EditEvent{}
 	case '\r', '\n':
+		e.breakKill()
 		line := string(e.buf)
 		out := []byte("\r\n")
 		e.buf = e.buf[:0]
@@ -400,32 +431,22 @@ func (e *Editor) keyGround(b byte) ([]byte, EditEvent) {
 	case 0x05: // Ctrl-E
 		return e.keyEnd()
 	case 0x0b: // Ctrl-K: kill to end
-		e.buf = e.buf[:e.cur]
-		e.lastTab = false
-		return e.paint(), EditEvent{}
+		return e.killRegion(e.cur, len(e.buf), killForward)
 	case 0x15: // Ctrl-U: kill to start
-		e.buf = append([]byte{}, e.buf[e.cur:]...)
-		e.cur = 0
-		e.lastTab = false
-		return e.paint(), EditEvent{}
+		return e.killRegion(0, e.cur, killBackward)
 	case 0x17: // Ctrl-W: kill the word before the cursor
-		j := e.cur
-		for j > 0 && e.buf[j-1] == ' ' {
-			j--
-		}
-		for j > 0 && e.buf[j-1] != ' ' {
-			j--
-		}
-		e.buf = append(e.buf[:j], e.buf[e.cur:]...)
-		e.cur = j
-		e.lastTab = false
-		return e.paint(), EditEvent{}
+		return e.keyKillWordBack()
+	case 0x19: // Ctrl-Y: yank the last kill back onto the line
+		return e.keyYank()
+	case 0x14: // Ctrl-T: transpose the characters around the cursor
+		return e.keyTranspose()
 	case 0x0c: // Ctrl-L: clear the screen and repaint
 		e.lastTab = false
 		return append([]byte("\x1b[2J\x1b[H"), e.paint()...), EditEvent{}
 	case 0x12: // Ctrl+R: reverse-i-search through history (M45 SH3)
 		return e.searchEnter(), EditEvent{}
 	case 0x03: // Ctrl-C: abandon the line
+		e.breakKill()
 		e.buf = e.buf[:0]
 		e.cur = 0
 		e.hview = -1
@@ -448,6 +469,7 @@ func (e *Editor) keyGround(b byte) ([]byte, EditEvent) {
 		return []byte{0x07}, EditEvent{} // line full: bell, no insert
 	}
 	// Printable: insert at the cursor.
+	e.breakKill()
 	e.buf = append(e.buf, 0)
 	copy(e.buf[e.cur+1:], e.buf[e.cur:])
 	e.buf[e.cur] = b
@@ -460,6 +482,7 @@ func (e *Editor) keyBackspace() ([]byte, EditEvent) {
 	if e.cur == 0 {
 		return nil, EditEvent{}
 	}
+	e.breakKill()
 	e.buf = append(e.buf[:e.cur-1], e.buf[e.cur:]...)
 	e.cur--
 	e.lastTab = false
@@ -468,6 +491,7 @@ func (e *Editor) keyBackspace() ([]byte, EditEvent) {
 
 func (e *Editor) keyDelete() ([]byte, EditEvent) {
 	if e.cur < len(e.buf) {
+		e.breakKill()
 		e.buf = append(e.buf[:e.cur], e.buf[e.cur+1:]...)
 		e.lastTab = false
 		return e.paint(), EditEvent{}
@@ -477,6 +501,7 @@ func (e *Editor) keyDelete() ([]byte, EditEvent) {
 
 func (e *Editor) keyLeft() ([]byte, EditEvent) {
 	if e.cur > 0 {
+		e.breakKill()
 		e.cur--
 		e.lastTab = false
 		return e.paint(), EditEvent{}
@@ -486,6 +511,7 @@ func (e *Editor) keyLeft() ([]byte, EditEvent) {
 
 func (e *Editor) keyRight() ([]byte, EditEvent) {
 	if e.cur < len(e.buf) {
+		e.breakKill()
 		e.cur++
 		e.lastTab = false
 		return e.paint(), EditEvent{}
@@ -494,12 +520,14 @@ func (e *Editor) keyRight() ([]byte, EditEvent) {
 }
 
 func (e *Editor) keyHome() ([]byte, EditEvent) {
+	e.breakKill()
 	e.cur = 0
 	e.lastTab = false
 	return e.paint(), EditEvent{}
 }
 
 func (e *Editor) keyEnd() ([]byte, EditEvent) {
+	e.breakKill()
 	e.cur = len(e.buf)
 	e.lastTab = false
 	return e.paint(), EditEvent{}
@@ -517,6 +545,7 @@ func (e *Editor) histPrev() ([]byte, EditEvent) {
 	} else if e.hview > 0 {
 		e.hview--
 	}
+	e.breakKill()
 	e.buf = append(e.buf[:0], e.hist.entries[e.hview]...)
 	e.cur = len(e.buf)
 	e.lastTab = false
@@ -527,6 +556,7 @@ func (e *Editor) histNext() ([]byte, EditEvent) {
 	if e.hview == -1 {
 		return nil, EditEvent{}
 	}
+	e.breakKill()
 	if e.hview < len(e.hist.entries)-1 {
 		e.hview++
 		e.buf = append(e.buf[:0], e.hist.entries[e.hview]...)
@@ -580,6 +610,7 @@ func (e *Editor) ins(ins []byte) ([]byte, EditEvent) {
 	if len(e.buf)+len(ins) > maxLineBytes {
 		return []byte{0x07}, EditEvent{}
 	}
+	e.breakKill()
 	e.buf = insertAt(e.buf, e.cur, ins)
 	e.cur += len(ins)
 	e.lastTab = false
@@ -618,4 +649,180 @@ func stripSpaces(cands []string) []string {
 		out[i] = strings.TrimSuffix(c, " ")
 	}
 	return out
+}
+
+// -- word motion, the kill ring, transpose (M80l #1728) ---------------------
+//
+// A space is the only word separator, exactly as Ctrl-W already treated it.
+// readline's shell-delimiter set (quotes, \; & | and friends) is a different
+// keymap and stays out of this card.
+
+// Kill directions. The merge rule needs to know which way a kill went: a
+// backward kill prepends to the ring entry, a forward kill appends.
+const (
+	killNone     = 0
+	killBackward = -1
+	killForward  = 1
+)
+
+// wordForward is alt-f's landing index: the end of the word under the cursor,
+// or -- when the cursor already sits on spaces -- the end of the next word.
+// The end of the line is the floor.
+func (e *Editor) wordForward(i int) int {
+	j := i
+	for j < len(e.buf) && e.buf[j] != ' ' {
+		j++
+	}
+	if j > i {
+		return j // inside a word: stop at its end
+	}
+	for j < len(e.buf) && e.buf[j] == ' ' {
+		j++
+	}
+	for j < len(e.buf) && e.buf[j] != ' ' {
+		j++
+	}
+	return j
+}
+
+// wordBackward is alt-b's landing index: the start of the word under the
+// cursor, or -- on spaces -- the start of the previous word.
+func (e *Editor) wordBackward(i int) int {
+	j := i
+	if j > 0 && e.buf[j-1] == ' ' {
+		for j > 0 && e.buf[j-1] == ' ' {
+			j--
+		}
+		for j > 0 && e.buf[j-1] != ' ' {
+			j--
+		}
+		return j
+	}
+	for j > 0 && e.buf[j-1] != ' ' {
+		j--
+	}
+	return j
+}
+
+// keyWordForward/keyWordBackward are alt-f and alt-b. At a line edge they
+// write nothing at all, the same silence keyLeft and keyRight keep.
+func (e *Editor) keyWordForward() ([]byte, EditEvent) {
+	j := e.wordForward(e.cur)
+	if j == e.cur {
+		return nil, EditEvent{}
+	}
+	e.breakKill()
+	e.cur = j
+	e.lastTab = false
+	return e.paint(), EditEvent{}
+}
+
+func (e *Editor) keyWordBackward() ([]byte, EditEvent) {
+	j := e.wordBackward(e.cur)
+	if j == e.cur {
+		return nil, EditEvent{}
+	}
+	e.breakKill()
+	e.cur = j
+	e.lastTab = false
+	return e.paint(), EditEvent{}
+}
+
+// killRegion removes buf[lo:hi], parks the text in the kill ring and leaves
+// the cursor where the hole starts. A kill that continues the previous one --
+// same direction, and the cursor still sitting where that kill left it --
+// merges into the same ring entry instead of replacing it, which is what
+// makes `Ctrl-W Ctrl-W Ctrl-Y` read "foo bar" back instead of "bar". A
+// backward merge prepends (that text came earlier in the line) and a forward
+// merge appends.
+//
+// An empty region still repaints: Ctrl-K with the cursor at the end, Ctrl-U
+// at the start and Ctrl-W on a blank prefix all did before this card, and
+// their bytes are part of the existing wire contract.
+func (e *Editor) killRegion(lo, hi, dir int) ([]byte, EditEvent) {
+	if lo < 0 {
+		lo = 0
+	}
+	if hi > len(e.buf) {
+		hi = len(e.buf)
+	}
+	e.lastTab = false
+	if lo >= hi {
+		return e.paint(), EditEvent{}
+	}
+	killed := append([]byte(nil), e.buf[lo:hi]...)
+	if e.killDir == dir && e.cur == e.killLo {
+		if dir == killBackward {
+			e.kill = append(killed, e.kill...)
+		} else {
+			e.kill = append(e.kill, killed...)
+		}
+	} else {
+		e.kill = killed
+	}
+	e.killLo, e.killHi, e.killDir = lo, hi, dir
+	e.buf = append(e.buf[:lo], e.buf[hi:]...)
+	e.cur = lo
+	return e.paint(), EditEvent{}
+}
+
+// keyKillWordBack is Ctrl-W and Alt-Backspace: trailing spaces go first, then
+// the word in front of them. Ctrl-W's byte behaviour is unchanged -- it is the
+// same code as before this card, plus the ring.
+func (e *Editor) keyKillWordBack() ([]byte, EditEvent) {
+	j := e.cur
+	for j > 0 && e.buf[j-1] == ' ' {
+		j--
+	}
+	for j > 0 && e.buf[j-1] != ' ' {
+		j--
+	}
+	return e.killRegion(j, e.cur, killBackward)
+}
+
+// keyKillWordForward is alt-d: kill to the end of the word under the cursor,
+// or -- from whitespace -- through the end of the next word, so two alt-d
+// presses on "foo bar" leave nothing behind.
+func (e *Editor) keyKillWordForward() ([]byte, EditEvent) {
+	return e.killRegion(e.cur, e.wordForward(e.cur), killForward)
+}
+
+// keyYank is Ctrl-Y: insert the last kill at the cursor. An empty ring is a
+// no-op, and a yank that would pass the line cap bells like any other
+// oversized insert.
+func (e *Editor) keyYank() ([]byte, EditEvent) {
+	if len(e.kill) == 0 {
+		return nil, EditEvent{}
+	}
+	return e.ins(e.kill)
+}
+
+// keyTranspose is Ctrl-T: swap the two characters around the cursor. At the
+// end of the line that is the last two characters; in the middle it is the
+// pair the cursor sits between, and the cursor follows them right.
+func (e *Editor) keyTranspose() ([]byte, EditEvent) {
+	if len(e.buf) < 2 {
+		return nil, EditEvent{}
+	}
+	i := e.cur
+	if i == 0 {
+		return nil, EditEvent{}
+	}
+	if i == len(e.buf) {
+		i-- // at the end: transpose the final pair
+	}
+	e.buf[i-1], e.buf[i] = e.buf[i], e.buf[i-1]
+	if e.cur < len(e.buf) {
+		e.cur++
+	}
+	e.breakKill()
+	e.lastTab = false
+	return e.paint(), EditEvent{}
+}
+
+// breakKill ends a consecutive-kill chain. The ring keeps its text, so the
+// next Ctrl-Y still yanks, but the next kill starts a fresh entry. Every
+// operation that is not a kill calls this.
+func (e *Editor) breakKill() {
+	e.killLo, e.killHi, e.killDir = 0, 0, killNone
 }
