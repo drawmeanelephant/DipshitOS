@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"virelai/settings"
+	"virelai/vi"
+	"virelai/widgets"
 )
 
 // The panel's markers are gate grep targets: pin the exact shapes so a drift is
@@ -57,12 +59,12 @@ func TestPanelStartsWithTheTableInForce(t *testing.T) {
 // knows is applied; anything else is dropped and never reaches the table.
 func TestPanelAppliesATypedRowOnlyForKnownKeys(t *testing.T) {
 	a := newPanel(nil)
-	a.input = "wm=tabwm"
+	a.input.SetValue("wm=tabwm")
 	if !a.applyInput() {
 		t.Fatal("applyInput reported no change")
 	}
-	if a.input != "" {
-		t.Fatalf("input not consumed: %q", a.input)
+	if a.input.Value() != "" {
+		t.Fatalf("input not consumed: %q", a.input.Value())
 	}
 	if v, _ := settings.Get(a.disp, "wm"); v != "tabwm" {
 		t.Fatalf("wm = %q, want tabwm", v)
@@ -73,7 +75,7 @@ func TestPanelAppliesATypedRowOnlyForKnownKeys(t *testing.T) {
 
 	// An unknown key: named and dropped, table untouched.
 	before := len(a.disp)
-	a.input = "not_a_key=1"
+	a.input.SetValue("not_a_key=1")
 	a.applyInput()
 	if len(a.disp) != before {
 		t.Fatalf("unknown key was written: %+v", a.disp)
@@ -83,18 +85,52 @@ func TestPanelAppliesATypedRowOnlyForKnownKeys(t *testing.T) {
 	}
 
 	// A line with no '=' is dropped too, and the input is still consumed.
-	a.input = "tabwm"
+	a.input.SetValue("tabwm")
 	a.applyInput()
 	if v, _ := settings.Get(a.disp, "wm"); v != "tabwm" {
 		t.Fatalf("a bare word changed wm to %q", v)
 	}
-	if a.input != "" {
-		t.Fatalf("bare-word input not consumed: %q", a.input)
+	if a.input.Value() != "" {
+		t.Fatalf("bare-word input not consumed: %q", a.input.Value())
 	}
 }
 
 // Left/Right cycle the vocabularies the kernel declares; a free-text key is
 // left alone rather than guessed at.
+func TestPanelKeyboardUsesAppkitTextField(t *testing.T) {
+	a := newPanel(nil)
+	a.focus.Focus(1)
+	for _, r := range []rune{'w', 'm', '=', 't'} {
+		if !a.handle(vi.Event{Kind: vi.EvKeyDown, Arg1: uint32(r)}) {
+			t.Fatalf("key %c was not accepted", r)
+		}
+	}
+	if a.input.Value() != "wm=t" {
+		t.Fatalf("field value = %q", a.input.Value())
+	}
+	if !a.handle(vi.Event{Kind: vi.EvKeyDown, Arg0: 0x50}) || a.input.CaretPosition() != 3 {
+		t.Fatalf("left caret = %d", a.input.CaretPosition())
+	}
+	if !a.handle(vi.Event{Kind: vi.EvKeyDown, Arg1: 'a'}) || a.input.Value() != "wm=at" {
+		t.Fatalf("mid insert = %q", a.input.Value())
+	}
+}
+
+func TestPanelClickFocusesAndSelectsListRow(t *testing.T) {
+	a := newPanel(nil)
+	a.list = widgets.List{
+		R:     widgets.Rect{X: 0, Y: 0, W: 100, H: 20},
+		Items: []string{"one", "two"},
+		RowH:  10,
+	}
+	if !a.handle(vi.Event{Kind: vi.EvMouseDown, Flags: vi.BtnLeft, Arg0: 1, Arg1: 11}) {
+		t.Fatal("list click was not consumed")
+	}
+	if a.sel != 1 || a.list.Sel != 1 {
+		t.Fatalf("click selected row %d (list %d), want 1", a.sel, a.list.Sel)
+	}
+}
+
 func TestPanelCyclesOnlyKnownVocabularies(t *testing.T) {
 	a := newPanel(nil)
 	a.sel = rowOf(t, a, "wm")
@@ -200,17 +236,17 @@ func TestPaletteSurfaceRevealsTheColoursOnCustom(t *testing.T) {
 		}
 	}
 	// Typed edit: six hex digits apply...
-	a.input = "palette_fg=20ff9e"
+	a.input.SetValue("palette_fg=20ff9e")
 	a.applyInput()
 	if v, _ := settings.Get(a.disp, "palette_fg"); v != "20ff9e" {
 		t.Fatalf("palette_fg = %q, want 20ff9e", v)
 	}
 	// ...anything else is named and dropped, table untouched.
 	for _, bad := range []string{"palette_fg=zzz", "palette_bg=0x112233", "palette_accent=12345"} {
-		a.input = bad
+		a.input.SetValue(bad)
 		a.applyInput()
-		if a.input != "" {
-			t.Fatalf("input not consumed: %q", a.input)
+		if a.input.Value() != "" {
+			t.Fatalf("input not consumed: %q", a.input.Value())
 		}
 	}
 	if v, _ := settings.Get(a.disp, "palette_fg"); v != "20ff9e" {
@@ -220,7 +256,7 @@ func TestPaletteSurfaceRevealsTheColoursOnCustom(t *testing.T) {
 		t.Fatalf("palette_bg = %q, want the untouched default", v)
 	}
 	// And an unknown key is still dropped (the card-D1 rule holds).
-	a.input = "not_a_key=1"
+	a.input.SetValue("not_a_key=1")
 	a.applyInput()
 	if _, ok := settings.Get(a.disp, "not_a_key"); ok {
 		t.Fatal("unknown key landed in the table")

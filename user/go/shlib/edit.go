@@ -121,9 +121,8 @@ const (
 
 // Editor is the line editor for one tty session.
 type Editor struct {
+	LineBuffer
 	prompt  string
-	buf     []byte
-	cur     int
 	hist    *History
 	hview   int // -1 = editing the live line
 	lastLen int // painted prompt+line length, for the tail overwrite
@@ -167,7 +166,7 @@ type Editor struct {
 
 // NewEditor wires an editor over a history ring.
 func NewEditor(prompt string, h *History) *Editor {
-	return &Editor{prompt: prompt, hist: h, hview: -1, cols: defaultCols}
+	return &Editor{LineBuffer: NewLineBuffer(maxLineBytes), prompt: prompt, hist: h, hview: -1, cols: defaultCols}
 }
 
 // SetPrompt swaps the prompt (SETTINGS.TXT drives it at startup).
