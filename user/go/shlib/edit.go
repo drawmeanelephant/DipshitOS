@@ -29,6 +29,21 @@ const maxLineBytes = 2048
 // being allowed to grow without limit.
 const maxSearchQuery = 64
 
+// defaultCols is the width the completion menu lays out for when no
+// front-end has said otherwise: the kernel tty grid's 80 columns, which
+// is also GOTERM's 640px window at the default cell size. shlib is a
+// dumb-terminal editor and has no window-size query of its own, so a
+// front-end that knows better calls SetCols.
+const defaultCols = 80
+
+// menuRowsPerPage is how many menu rows one Tab shows before the next
+// Tab pages. There is no height query on this seam, so the page is a
+// fixed, tested budget rather than a measured screen.
+const menuRowsPerPage = 8
+
+// menuGap is the blank columns between menu entries.
+const menuGap = 2
+
 // History is the recall ring: dup-collapsed, bounded to historyMax, and
 // persisted across boots through the share (M69f1 / #1537, History.Load).
 // The monitor's HISTORY.TXT is a different file with a different owner; it
@@ -112,7 +127,18 @@ type Editor struct {
 	hist    *History
 	hview   int // -1 = editing the live line
 	lastLen int // painted prompt+line length, for the tail overwrite
-	lastTab bool
+	// Completion menu (M80m #1729). `menu` is the candidate snapshot the
+	// menu opened with -- kept so a cycle can step the same set without
+	// re-running Complete -- `menuStart` is where the completed word began,
+	// so a cycle replaces exactly that word, and `menuPage` walks the
+	// listing when it is taller than menuRowsPerPage. `cols` is the grid
+	// width the layout aims at.
+	menu      []string
+	menuStart int
+	menuPage  int
+	menuAt    int
+	menuOn    bool
+	cols      int
 	// kill ring + consecutive-kill merge (M80l #1728). One entry is the
 	// minimum readline contract: every kill (Ctrl-K/U/W, alt-d,
 	// alt-backspace) parks what it removed, and a kill that continues the
@@ -141,13 +167,23 @@ type Editor struct {
 
 // NewEditor wires an editor over a history ring.
 func NewEditor(prompt string, h *History) *Editor {
-	return &Editor{prompt: prompt, hist: h, hview: -1}
+	return &Editor{prompt: prompt, hist: h, hview: -1, cols: defaultCols}
 }
 
 // SetPrompt swaps the prompt (SETTINGS.TXT drives it at startup).
 func (e *Editor) SetPrompt(p string) {
 	e.prompt = p
 	e.lastLen = 0
+}
+
+// SetCols tells the editor how wide the terminal grid is, so the
+// completion menu can columnate to it. A non-positive value restores the
+// default.
+func (e *Editor) SetCols(n int) {
+	if n <= 0 {
+		n = defaultCols
+	}
+	e.cols = n
 }
 
 // Repaint renders the current state: the prompt and line from scratch.
@@ -205,6 +241,15 @@ func (e *Editor) Feed(chunk []byte) ([]byte, EditEvent) {
 	var out []byte
 	for i := 0; i < len(chunk); i++ {
 		b := chunk[i]
+		// Any byte that is not Tab ends the completion menu: a printable
+		// key dismisses it and inserts, a chord or an arrow dismisses it
+		// and does its own thing. Tab keeps it up so a repeat can page or
+		// cycle. This one line is the whole dismissal rule -- ESC is a
+		// non-Tab byte, so the ESC-prefixed chords dismiss on the escape
+		// itself and still act on the byte that follows.
+		if b != '\t' {
+			e.dismissMenu()
+		}
 		var w []byte
 		var ev EditEvent
 		switch e.state {
@@ -328,7 +373,6 @@ func (e *Editor) searchPaint() []byte {
 	// The search line is its own paint; the next ground paint starts from a
 	// clean slate rather than overwriting a tail it never measured.
 	e.lastLen = 0
-	e.lastTab = false
 	return out
 }
 
@@ -414,7 +458,6 @@ func (e *Editor) keyGround(b byte) ([]byte, EditEvent) {
 		e.hview = -1
 		e.lastLen = 0
 		e.hist.Push(line)
-		e.lastTab = false
 		// M73d (#1628): submit echoes ONLY the newline. The next prompt
 		// belongs AFTER the command's output — the reference shell loop
 		// (user/src/lib/shell.zig, SH.BIN/TERM.BIN) prints it after
@@ -441,7 +484,6 @@ func (e *Editor) keyGround(b byte) ([]byte, EditEvent) {
 	case 0x14: // Ctrl-T: transpose the characters around the cursor
 		return e.keyTranspose()
 	case 0x0c: // Ctrl-L: clear the screen and repaint
-		e.lastTab = false
 		return append([]byte("\x1b[2J\x1b[H"), e.paint()...), EditEvent{}
 	case 0x12: // Ctrl+R: reverse-i-search through history (M45 SH3)
 		return e.searchEnter(), EditEvent{}
@@ -451,7 +493,6 @@ func (e *Editor) keyGround(b byte) ([]byte, EditEvent) {
 		e.cur = 0
 		e.hview = -1
 		e.lastLen = 0
-		e.lastTab = false
 		out := append([]byte("^C\r\n"), e.paint()...)
 		return out, EditEvent{Kind: EvCancel}
 	case 0x04: // Ctrl-D on an empty line: EOF
@@ -474,7 +515,6 @@ func (e *Editor) keyGround(b byte) ([]byte, EditEvent) {
 	copy(e.buf[e.cur+1:], e.buf[e.cur:])
 	e.buf[e.cur] = b
 	e.cur++
-	e.lastTab = false
 	return e.paint(), EditEvent{}
 }
 
@@ -485,7 +525,6 @@ func (e *Editor) keyBackspace() ([]byte, EditEvent) {
 	e.breakKill()
 	e.buf = append(e.buf[:e.cur-1], e.buf[e.cur:]...)
 	e.cur--
-	e.lastTab = false
 	return e.paint(), EditEvent{}
 }
 
@@ -493,7 +532,6 @@ func (e *Editor) keyDelete() ([]byte, EditEvent) {
 	if e.cur < len(e.buf) {
 		e.breakKill()
 		e.buf = append(e.buf[:e.cur], e.buf[e.cur+1:]...)
-		e.lastTab = false
 		return e.paint(), EditEvent{}
 	}
 	return nil, EditEvent{}
@@ -503,7 +541,6 @@ func (e *Editor) keyLeft() ([]byte, EditEvent) {
 	if e.cur > 0 {
 		e.breakKill()
 		e.cur--
-		e.lastTab = false
 		return e.paint(), EditEvent{}
 	}
 	return nil, EditEvent{}
@@ -513,7 +550,6 @@ func (e *Editor) keyRight() ([]byte, EditEvent) {
 	if e.cur < len(e.buf) {
 		e.breakKill()
 		e.cur++
-		e.lastTab = false
 		return e.paint(), EditEvent{}
 	}
 	return nil, EditEvent{}
@@ -522,14 +558,12 @@ func (e *Editor) keyRight() ([]byte, EditEvent) {
 func (e *Editor) keyHome() ([]byte, EditEvent) {
 	e.breakKill()
 	e.cur = 0
-	e.lastTab = false
 	return e.paint(), EditEvent{}
 }
 
 func (e *Editor) keyEnd() ([]byte, EditEvent) {
 	e.breakKill()
 	e.cur = len(e.buf)
-	e.lastTab = false
 	return e.paint(), EditEvent{}
 }
 
@@ -548,7 +582,6 @@ func (e *Editor) histPrev() ([]byte, EditEvent) {
 	e.breakKill()
 	e.buf = append(e.buf[:0], e.hist.entries[e.hview]...)
 	e.cur = len(e.buf)
-	e.lastTab = false
 	return e.paint(), EditEvent{}
 }
 
@@ -566,16 +599,27 @@ func (e *Editor) histNext() ([]byte, EditEvent) {
 		e.buf = e.buf[:0]
 		e.cur = 0
 	}
-	e.lastTab = false
 	return e.paint(), EditEvent{}
 }
 
-// keyTab completes the word before the cursor from Complete's candidates:
-// one candidate completes it outright, several complete to the common
-// prefix, and a second Tab with nothing left to add lists the candidates.
+// keyTab completes the word before the cursor from Complete's candidates: one
+// candidate inserts outright and several complete to the common prefix. When
+// the prefix adds nothing there is nothing to insert, so Tab opens the
+// completion menu instead of ringing a bell; a further Tab pages the menu, and
+// once the last page is up it cycles the candidates.
 func (e *Editor) keyTab() ([]byte, EditEvent) {
 	if e.Complete == nil {
 		return nil, EditEvent{}
+	}
+	if e.menuOn {
+		// The word cannot have changed while the menu is up -- any other byte
+		// dismissed it -- so page or cycle the snapshot instead of asking
+		// Complete about a word we already asked about.
+		if e.menuPage+1 < e.menuPages() {
+			e.menuPage++
+			return e.menuPaint(), EditEvent{}
+		}
+		return e.menuCycle()
 	}
 	start := e.cur
 	for start > 0 && e.buf[start-1] != ' ' {
@@ -584,24 +628,29 @@ func (e *Editor) keyTab() ([]byte, EditEvent) {
 	word := string(e.buf[start:e.cur])
 	cands := e.Complete(word, start == 0)
 	if len(cands) == 0 {
-		e.lastTab = false
+		return nil, EditEvent{}
+	}
+	if len(cands) == 1 {
+		// One candidate: insert what is missing, which for a command is its
+		// trailing space. A candidate the word already spells adds nothing,
+		// and says so with silence rather than a one-row menu.
+		if rest := cands[0][len(word):]; rest != "" {
+			return e.ins([]byte(rest))
+		}
 		return nil, EditEvent{}
 	}
 	prefix := commonPrefix(cands)
 	if len(prefix) > len(word) {
 		return e.ins([]byte(prefix[len(word):]))
 	}
-	if len(cands) == 1 && strings.HasSuffix(cands[0], " ") {
-		// A command candidate: complete it with a trailing space.
-		return e.ins([]byte(cands[0][len(word):]))
-	}
-	if e.lastTab {
-		e.lastTab = false
-		out := []byte("\r\n" + strings.Join(stripSpaces(cands), "  ") + "\r\n")
-		return append(out, e.paint()...), EditEvent{}
-	}
-	e.lastTab = true
-	return []byte{0x07}, EditEvent{} // bell: candidates exist but need another Tab
+	// Own a copy of the candidates: the menu is a snapshot that outlives
+	// this call, and a completer is free to reuse the slice it returned.
+	e.menu = append([]string(nil), cands...)
+	e.menuStart = start
+	e.menuAt = -1
+	e.menuPage = 0
+	e.menuOn = true
+	return e.menuPaint(), EditEvent{}
 }
 
 // ins inserts ins at the cursor unless that would pass the line cap, in
@@ -613,7 +662,6 @@ func (e *Editor) ins(ins []byte) ([]byte, EditEvent) {
 	e.breakKill()
 	e.buf = insertAt(e.buf, e.cur, ins)
 	e.cur += len(ins)
-	e.lastTab = false
 	return e.paint(), EditEvent{}
 }
 
@@ -713,7 +761,6 @@ func (e *Editor) keyWordForward() ([]byte, EditEvent) {
 	}
 	e.breakKill()
 	e.cur = j
-	e.lastTab = false
 	return e.paint(), EditEvent{}
 }
 
@@ -724,7 +771,6 @@ func (e *Editor) keyWordBackward() ([]byte, EditEvent) {
 	}
 	e.breakKill()
 	e.cur = j
-	e.lastTab = false
 	return e.paint(), EditEvent{}
 }
 
@@ -746,7 +792,6 @@ func (e *Editor) killRegion(lo, hi, dir int) ([]byte, EditEvent) {
 	if hi > len(e.buf) {
 		hi = len(e.buf)
 	}
-	e.lastTab = false
 	if lo >= hi {
 		return e.paint(), EditEvent{}
 	}
@@ -816,7 +861,6 @@ func (e *Editor) keyTranspose() ([]byte, EditEvent) {
 		e.cur++
 	}
 	e.breakKill()
-	e.lastTab = false
 	return e.paint(), EditEvent{}
 }
 
@@ -825,4 +869,165 @@ func (e *Editor) keyTranspose() ([]byte, EditEvent) {
 // operation that is not a kill calls this.
 func (e *Editor) breakKill() {
 	e.killLo, e.killHi, e.killDir = 0, 0, killNone
+}
+
+// -- the completion menu (M80m #1729) ---------------------------------------
+
+// menuCols is the width the layout aims at, defaulting when a front-end never
+// called SetCols.
+func (e *Editor) menuCols() int {
+	if e.cols > 0 {
+		return e.cols
+	}
+	return defaultCols
+}
+
+// menuPages is how many Tabs the current listing needs.
+func (e *Editor) menuPages() int {
+	rows := menuRowCount(e.menu, e.menuCols())
+	pages := (rows + menuRowsPerPage - 1) / menuRowsPerPage
+	if pages < 1 {
+		pages = 1
+	}
+	return pages
+}
+
+// menuPaint renders the current page above the prompt line and repaints the
+// line from a clean slate, the discipline searchPaint already uses: the
+// listing is scrollback above the prompt, so the tail the next repaint
+// overwrites is only the line itself.
+func (e *Editor) menuPaint() []byte {
+	rows := menuRows(e.menu, e.menuCols(), e.menuPage)
+	e.lastLen = 0
+	out := make([]byte, 0, 64)
+	for _, r := range rows {
+		out = append(out, '\r', '\n')
+		out = append(out, r...)
+	}
+	out = append(out, '\r', '\n')
+	return append(out, e.paint()...)
+}
+
+// menuCycle replaces the completed word with the next candidate in the
+// snapshot -- readline's cycle-on-repeat-Tab. The snapshot is deliberately not
+// recomputed: the menu answers one word, and any other keystroke dismisses it
+// and starts a fresh completion pass.
+func (e *Editor) menuCycle() ([]byte, EditEvent) {
+	if len(e.menu) == 0 {
+		return nil, EditEvent{}
+	}
+	e.menuAt = (e.menuAt + 1) % len(e.menu)
+	cand := e.menu[e.menuAt]
+	tail := append([]byte(nil), e.buf[e.cur:]...)
+	if e.menuStart+len(cand)+len(tail) > maxLineBytes {
+		return []byte{0x07}, EditEvent{} // would pass the line cap: bell, no change
+	}
+	e.breakKill()
+	e.buf = append(e.buf[:e.menuStart], cand...)
+	e.buf = append(e.buf, tail...)
+	e.cur = e.menuStart + len(cand)
+	return e.paint(), EditEvent{}
+}
+
+// dismissMenu closes the completion menu. The line, the prompt and the kill
+// ring are untouched: the listing is scrollback above the prompt line, so
+// closing it is only a state change.
+func (e *Editor) dismissMenu() {
+	e.menu = nil
+	e.menuStart = 0
+	e.menuPage = 0
+	e.menuAt = -1
+	e.menuOn = false
+}
+
+// menuRowCount is how many rows the candidates need at this width.
+func menuRowCount(cands []string, width int) int {
+	n := len(cands)
+	if n == 0 {
+		return 0
+	}
+	cols := menuColumnCount(cands, width)
+	return (n + cols - 1) / cols
+}
+
+// menuColumnCount is how many columns fit at this width: every entry padded to
+// the widest one plus the gap, never more columns than there are candidates.
+func menuColumnCount(cands []string, width int) int {
+	colW := menuEntryWidth(cands)
+	cols := width / colW
+	if cols < 1 {
+		cols = 1
+	}
+	if cols > len(cands) {
+		cols = len(cands)
+	}
+	return cols
+}
+
+// menuEntryWidth is the column pitch: the widest displayed entry plus the gap.
+func menuEntryWidth(cands []string) int {
+	w := menuGap
+	for _, c := range stripSpaces(cands) {
+		if l := len(c) + menuGap; l > w {
+			w = l
+		}
+	}
+	return w
+}
+
+// menuRows lays the candidates out in columns that fit width and returns one
+// page of rendered rows. The fill is column-major, the way ls does it: the
+// first candidate is top-left and the listing runs downward before moving
+// right, so a set of similar names stays together instead of stretching into
+// one very long line. Each entry is padded to the column pitch except the last
+// on its row, so the columns line up and no row ends in painted-over blanks.
+func menuRows(cands []string, width, page int) []string {
+	disp := stripSpaces(cands)
+	n := len(disp)
+	if n == 0 {
+		return nil
+	}
+	if width < 1 {
+		width = 1
+	}
+	colW := menuEntryWidth(cands)
+	cols := width / colW
+	if cols < 1 {
+		cols = 1
+	}
+	if cols > n {
+		cols = n
+	}
+	rows := (n + cols - 1) / cols
+	pages := (rows + menuRowsPerPage - 1) / menuRowsPerPage
+	if pages < 1 {
+		pages = 1
+	}
+	if page < 0 {
+		page = 0
+	}
+	if page >= pages {
+		page = pages - 1
+	}
+	first := page * menuRowsPerPage
+	last := first + menuRowsPerPage
+	if last > rows {
+		last = rows
+	}
+	out := make([]string, 0, last-first)
+	for r := first; r < last; r++ {
+		var idx []int
+		for i := r; i < n; i += rows {
+			idx = append(idx, i)
+		}
+		var b strings.Builder
+		for k, i := range idx {
+			b.WriteString(disp[i])
+			if k < len(idx)-1 {
+				b.WriteString(strings.Repeat(" ", colW-len(disp[i])))
+			}
+		}
+		out = append(out, b.String())
+	}
+	return out
 }
