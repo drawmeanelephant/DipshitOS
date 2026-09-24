@@ -8,6 +8,7 @@
 package main
 
 import (
+	"virelai/appkit"
 	"virelai/tabapp"
 	"virelai/theme"
 	"virelai/vi"
@@ -89,34 +90,14 @@ func main() {
 	}
 
 	a := &app{ta: ta, path: path}
-	a.draw()
-	a.ta.Present()
-	vi.ConsoleLine(markerPresent)
-
-	for {
-		ev, r, ok := vi.PollEventRaw()
-		if !ok {
-			if r < 0 {
-				break
-			}
-			vi.Sleep(1)
-			continue
-		}
-		switch a.ta.Dispatch(ev) {
-		case tabapp.ActionClosed:
-			vi.ConsoleLine(markerClose)
-			vi.ConsoleLine(markerOK)
-			a.ta.CloseAndExit(0)
-		case tabapp.ActionResized:
-			a.draw()
-			a.ta.Present()
-		case tabapp.ActionNone:
-			if a.handle(ev) {
-				a.draw()
-				a.ta.Present()
-			}
-		}
+	loop := appkit.NewLoop(a.ta, a.draw, a.handle)
+	loop.OnInitialPresent = func() { vi.ConsoleLine(markerPresent) }
+	loop.OnExit = func(status int) {
+		vi.ConsoleLine(markerClose)
+		vi.ConsoleLine(markerOK)
+		a.ta.CloseAndExit(status)
 	}
+	loop.Run()
 }
 
 func (a *app) handle(ev vi.Event) bool {

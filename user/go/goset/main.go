@@ -43,6 +43,7 @@ package main
 import (
 	"strings"
 
+	"virelai/appkit"
 	"virelai/settings"
 	"virelai/tabapp"
 	"virelai/theme"
@@ -92,8 +93,9 @@ type panel struct {
 	sel  int
 	// input is the typed command line ("wm=tabwm"). Printable bytes only,
 	// bounded by inputMax.
-	input  string
-	status string
+	input         string
+	status        string
+	exitRequested bool
 
 	rowsTxt     widgets.Text
 	headTxt     widgets.Text
@@ -120,34 +122,20 @@ func main() {
 	}
 
 	a := newPanel(ta)
-	a.draw()
-	a.ta.Present()
-	vi.ConsoleLine(markerPresent)
-
-	for {
-		ev, r, ok := vi.PollEventRaw()
-		if !ok {
-			if r < 0 {
-				break
-			}
-			vi.Sleep(1)
-			continue
-		}
-		switch a.ta.Dispatch(ev) {
-		case tabapp.ActionClosed:
-			vi.ConsoleLine(markerClose)
-			vi.ConsoleLine(markerOK)
-			a.ta.CloseAndExit(0)
-		case tabapp.ActionResized:
-			a.draw()
-			a.ta.Present()
-		case tabapp.ActionNone:
-			if a.handle(ev) {
-				a.draw()
-				a.ta.Present()
-			}
-		}
+	loop := appkit.NewLoop(a.ta, a.draw, a.handle)
+	loop.OnInitialPresent = func() { vi.ConsoleLine(markerPresent) }
+	loop.OnExit = func(status int) {
+		vi.ConsoleLine(markerClose)
+		vi.ConsoleLine(markerOK)
+		a.ta.CloseAndExit(status)
 	}
+	loop.ShouldQuit = func() (int, bool) {
+		if a.exitRequested {
+			return 0, true
+		}
+		return 0, false
+	}
+	loop.Run()
 }
 
 // newPanel decodes the file, names its verdict, and builds the display table.
@@ -343,10 +331,8 @@ func (a *panel) handle(ev vi.Event) bool {
 			return true
 		}
 		if a.quitBtn.HitTest(x, y) {
-			vi.ConsoleLine(markerClose)
-			vi.ConsoleLine(markerOK)
-			a.ta.CloseAndExit(0)
-			return false
+			a.exitRequested = true
+			return true
 		}
 		if i := a.list.ItemAt(x, y); i >= 0 {
 			a.sel = i
@@ -381,10 +367,8 @@ func (a *panel) key(ev vi.Event) bool {
 		a.save()
 		return true
 	case codeEscape:
-		vi.ConsoleLine(markerClose)
-		vi.ConsoleLine(markerOK)
-		a.ta.CloseAndExit(0)
-		return false
+		a.exitRequested = true
+		return true
 	case codeBackspace, codeDelete:
 		if len(a.input) > 0 {
 			a.input = a.input[:len(a.input)-1]
