@@ -208,13 +208,15 @@ func (b *Button) colors() (face, border, label uint32) {
 // List is a fixed-row-height list of items with an optional selection. Row i
 // occupies RowRect(i); Draw and ItemAt derive from the SAME RowRect.
 type List struct {
-	R     Rect
-	Items []string
-	RowH  int
-	Sel   int
-	Fg    uint32
-	Bg    uint32
-	SelBg uint32
+	R         Rect
+	Items     []string
+	RowH      int
+	Sel       int
+	ScrollTop int
+	Focused   bool
+	Fg        uint32
+	Bg        uint32
+	SelBg     uint32
 }
 
 // Bounds is the list's full rect.
@@ -223,13 +225,13 @@ func (l *List) Bounds() Rect { return l.R }
 // HitTest agrees with Bounds by construction.
 func (l *List) HitTest(x, y int) bool { return l.R.Contains(x, y) }
 
-// RowRect is row i's rect — the single geometry source for Draw and ItemAt.
+// RowRect is item i's rect — the single geometry source for Draw and ItemAt.
 func (l *List) RowRect(i int) Rect {
 	h := l.RowH
 	if h <= 0 {
 		h = 1
 	}
-	return Rect{l.R.X, l.R.Y + i*h, l.R.W, h}
+	return Rect{l.R.X, l.R.Y + (i-l.ScrollTop)*h, l.R.W, h}
 }
 
 // VisibleRows is how many rows fit between the top and the bottom edge.
@@ -254,8 +256,9 @@ func (l *List) ItemAt(x, y int) int {
 	if h <= 0 {
 		h = 1
 	}
-	i := (y - l.R.Y) / h
-	if i < 0 || i >= len(l.Items) {
+	row := (y - l.R.Y) / h
+	i := row + l.ScrollTop
+	if row < 0 || i < 0 || i >= len(l.Items) {
 		return -1
 	}
 	return i
@@ -267,7 +270,14 @@ func (l *List) Draw(c Canvas) {
 		return
 	}
 	c.FillRect(l.R, l.Bg)
-	for i := range l.Items {
+	start := l.ScrollTop
+	if start < 0 {
+		start = 0
+	}
+	if start > len(l.Items) {
+		start = len(l.Items)
+	}
+	for i := start; i < len(l.Items); i++ {
 		rr := l.RowRect(i)
 		if rr.Y >= l.R.Bottom() {
 			break
@@ -281,6 +291,29 @@ func (l *List) Draw(c Canvas) {
 		}
 		drawGlyphRun(c, clip, l.Items[i], l.Fg)
 	}
+	if l.Focused {
+		fw := theme.Current.FocusW
+		if fw < 1 {
+			fw = 1
+		}
+		if fw > l.R.W {
+			fw = l.R.W
+		}
+		if fw > l.R.H {
+			fw = l.R.H
+		}
+		c.FillRect(Rect{X: l.R.X, Y: l.R.Y, W: l.R.W, H: fw}, theme.Current.Accent)
+		c.FillRect(Rect{X: l.R.X, Y: l.R.Bottom() - fw, W: l.R.W, H: fw}, theme.Current.Accent)
+		c.FillRect(Rect{X: l.R.X, Y: l.R.Y, W: fw, H: l.R.H}, theme.Current.Accent)
+		c.FillRect(Rect{X: l.R.Right() - fw, Y: l.R.Y, W: fw, H: l.R.H}, theme.Current.Accent)
+	}
+}
+
+// DrawText paints a clipped glyph run using the shared widget face. It is
+// exported for appkit controls that compose the same text primitive without
+// copying the rasterizer or its clipping rules.
+func DrawText(c Canvas, plate Rect, s string, rgb uint32) {
+	drawGlyphRun(c, plate, s, rgb)
 }
 
 // drawGlyphRun paints the VirelaiOS 8x8 face (the same bitmap NOTE uses),

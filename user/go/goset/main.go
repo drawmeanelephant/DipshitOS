@@ -70,19 +70,6 @@ const (
 	markerClose    = "goset: close"
 	markerOK       = "goset OK"
 
-	// Key codes. ADR 0009 row 1: arg0 is the HID usage, arg1 the decoded
-	// symbol byte — the same split user/go/note and user/go/edit read.
-	hidLeft  = 0x50
-	hidRight = 0x4F
-	hidUp    = 0x52
-	hidDown  = 0x51
-
-	codeEscape    = 0x1b
-	codeBackspace = 0x08
-	codeDelete    = 0x7f
-	codeReturn    = 0x0d
-	codeNewline   = 0x0a
-
 	inputMax = settings.MaxKey + settings.MaxVal + 2
 )
 
@@ -91,15 +78,18 @@ type panel struct {
 	file settings.File
 	disp []settings.Setting
 	sel  int
-	// input is the typed command line ("wm=tabwm"). Printable bytes only,
-	// bounded by inputMax.
-	input         string
+	// input is the typed command line ("wm=tabwm"). appkit owns the
+	// normalized key handling and shlib.LineBuffer owns the bounded bytes.
+	input         appkit.TextField
 	status        string
 	exitRequested bool
 
+	listCtl     *appkit.ListController
+	focus       *appkit.FocusRing
+	saveCtl     *appkit.ActionButton
+	quitCtl     *appkit.ActionButton
 	rowsTxt     widgets.Text
 	headTxt     widgets.Text
-	inputTxt    widgets.Text
 	statusT     widgets.Text
 	paletteTxt  widgets.Text
 	list        widgets.List
@@ -143,6 +133,17 @@ func main() {
 // the kernel's refusal means) and every write is refused.
 func newPanel(ta *tabapp.TabApp) *panel {
 	a := &panel{ta: ta}
+	a.input = appkit.NewTextField(widgets.Rect{}, inputMax)
+	a.input.Prefix = "> "
+	a.input.Placeholder = "<key=value>"
+	a.input.Fg = 0xe0e8f0
+	a.input.Bg = 0x161c24
+	a.input.Caret = theme.Current.Caret
+	a.listCtl = appkit.NewListController(&a.list)
+	a.saveCtl = &appkit.ActionButton{Button: &a.saveBtn, OnActivate: func() bool { a.save(); return true }}
+	a.quitCtl = &appkit.ActionButton{Button: &a.quitBtn, OnActivate: func() bool { a.exitRequested = true; return true }}
+	a.focus = appkit.NewFocusRing(a.listCtl, &a.input, a.saveCtl, a.quitCtl)
+	a.focus.Focus(1)
 	a.file = settings.Load()
 	switch a.file.State {
 	case settings.StateCorrupt:
@@ -226,11 +227,11 @@ func (a *panel) set(key, val string) bool {
 // applyInput consumes the typed command line: `key=value` for a key the kernel
 // table knows. Anything else is named and dropped, never written.
 func (a *panel) applyInput() bool {
-	if a.input == "" {
+	line := a.input.Value()
+	if line == "" {
 		return false
 	}
-	line := a.input
-	a.input = ""
+	a.input.Clear()
 	key, val, hasEq := strings.Cut(line, "=")
 	key = strings.TrimSpace(key)
 	val = strings.TrimSpace(val)
@@ -326,16 +327,15 @@ func (a *panel) handle(ev vi.Event) bool {
 			return false
 		}
 		x, y := int(ev.Arg0), int(ev.Arg1)
-		if a.saveBtn.HitTest(x, y) {
-			a.save()
-			return true
-		}
-		if a.quitBtn.HitTest(x, y) {
-			a.exitRequested = true
+		if a.focus.HandleClick(x, y) {
+			if current, _ := a.focus.Current(); current == a.listCtl {
+				a.sel = a.list.Sel
+			}
 			return true
 		}
 		if i := a.list.ItemAt(x, y); i >= 0 {
 			a.sel = i
+			a.list.Sel = i
 			return true
 		}
 	}
@@ -343,46 +343,34 @@ func (a *panel) handle(ev vi.Event) bool {
 }
 
 func (a *panel) key(ev vi.Event) bool {
-	switch ev.Arg0 {
-	case hidUp:
-		if a.sel > 0 {
-			a.sel--
-			return true
-		}
+	k, ok := appkit.NormalizeKey(ev)
+	if !ok {
 		return false
-	case hidDown:
-		if a.sel+1 < len(a.disp) {
-			a.sel++
-			return true
-		}
-		return false
-	case hidLeft:
-		return a.cycle(-1)
-	case hidRight:
-		return a.cycle(1)
 	}
-	switch ev.Arg1 {
-	case codeReturn, codeNewline:
+	switch k.Named() {
+	case appkit.NamedEscape:
+		a.exitRequested = true
+		return true
+	case appkit.NamedEnter:
 		a.applyInput()
 		a.save()
 		return true
-	case codeEscape:
-		a.exitRequested = true
-		return true
-	case codeBackspace, codeDelete:
-		if len(a.input) > 0 {
-			a.input = a.input[:len(a.input)-1]
-			return true
+	case appkit.NamedUp, appkit.NamedDown, appkit.NamedHome, appkit.NamedEnd:
+		changed := a.listCtl.HandleKey(k)
+		a.sel = a.list.Sel
+		return changed
+	case appkit.NamedLeft, appkit.NamedRight:
+		if current, _ := a.focus.Current(); current == &a.input {
+			return a.input.OnKey(k)
 		}
-		return false
-	}
-	if ev.Arg1 >= 0x20 && ev.Arg1 < 0x7f {
-		if len(a.input) < inputMax {
-			a.input += string(byte(ev.Arg1))
-			return true
+		// Preserve GOSET's row vocabulary cycling when the list owns focus;
+		// the text field gets the same normalized arrows for caret movement.
+		if k.Named() == appkit.NamedLeft {
+			return a.cycle(-1)
 		}
+		return a.cycle(1)
 	}
-	return false
+	return a.focus.HandleKey(k)
 }
 
 // --- paint ------------------------------------------------------------------
@@ -399,14 +387,17 @@ func (a *panel) layout() {
 	// M73m: 18px rows so all ELEVEN rows (the eight defaults + the three
 	// palette rows once `custom` is chosen) fit the 200px list — the surface
 	// never scrolls a chosen colour off-screen.
+	scrollTop, focused := a.list.ScrollTop, a.list.Focused
 	a.list = widgets.List{
-		R:     scaleR(ta, widgets.Rect{X: 8, Y: 36, W: w, H: 200}),
-		Items: a.labels(),
-		RowH:  scaleH(ta, 18),
-		Sel:   a.sel,
-		Fg:    theme.Current.Text,
-		Bg:    theme.Current.Bg,
-		SelBg: theme.Current.Surface,
+		R:         scaleR(ta, widgets.Rect{X: 8, Y: 36, W: w, H: 200}),
+		Items:     a.labels(),
+		RowH:      scaleH(ta, 18),
+		Sel:       a.sel,
+		ScrollTop: scrollTop,
+		Focused:   focused,
+		Fg:        theme.Current.Text,
+		Bg:        theme.Current.Bg,
+		SelBg:     theme.Current.Surface,
 	}
 	// M73m: the palette band — three swatches + their stored values, drawn
 	// under the list so the colours being chosen are visible, not just typed.
@@ -421,15 +412,13 @@ func (a *panel) layout() {
 		Fg: 0xa8b0b8,
 		Bg: 0x101418,
 	}
-	in := a.input
-	if in == "" {
-		in = "<key=value>"
-	}
-	a.inputTxt = widgets.Text{
-		R:     scaleR(ta, widgets.Rect{X: 8, Y: 258, W: w, H: 22}),
-		Label: "> " + in,
-		Fg:    0xe0e8f0,
-		Bg:    0x161c24,
+	a.input.R = scaleR(ta, widgets.Rect{X: 8, Y: 258, W: w, H: 22})
+	a.input.Fg = 0xe0e8f0
+	a.input.Bg = 0x161c24
+	a.input.Caret = theme.Current.Caret
+	a.input.Focused = false
+	if current, _ := a.focus.Current(); current == &a.input {
+		a.input.Focused = true
 	}
 	a.statusT = widgets.Text{
 		R:     scaleR(ta, widgets.Rect{X: 8, Y: 286, W: w, H: 18}),
@@ -510,7 +499,7 @@ func (a *panel) draw() {
 		cv.FillRect(r.Inset(1), c)
 	}
 	a.paletteTxt.Draw(cv)
-	a.inputTxt.Draw(cv)
+	a.input.Draw(cv)
 	a.statusT.Draw(cv)
 	a.saveBtn.Draw(cv)
 	a.quitBtn.Draw(cv)
