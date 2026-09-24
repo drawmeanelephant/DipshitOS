@@ -44,15 +44,14 @@ all owner-restricted, with per-process ownership and auto-close on exit.
 
 Milestone eleven built the zero-heap `ui.zig` micro-widget toolkit (buttons,
 text inputs, list views — pure static BSS, no allocation) on top of the
-window seam, and four applications on top of that: `CALC.BIN` (calculator, retired in
-M60; the calculator lane today is `go-calc` over `CALC.ELF`),
-`NOTEPAD.BIN` (editor — retired to Go `NOTE.ELF` in M66c, #1485),
-`TOP.BIN` (process monitor with click-to-kill — retired to Go `GOTOP.ELF`
-in M71g), and
-the `DESKTOP.BIN` launcher — later a file manager (now `GOFILES.ELF`;
-Zig `FILE.BIN` deleted in M60) and a Go editor (`NOTE.ELF`, `user/go/note`;
-Zig `NOTEPAD.BIN` deleted in M66c, #1485). Windows and clicks reach these apps as events through
-milestone nine's per-process event queues (`sys_poll_event`/`sys_wait_event`).
+window seam, and four original applications on top of that: `CALC.BIN` (retired
+in M60; the calculator lane today is `go-calc` over `CALC.ELF`), `NOTEPAD.BIN` (editor — retired to Go `NOTE.ELF` in M66c,
+#1485), `TOP.BIN` (process monitor with click-to-kill — retired to Go
+`GOTOP.ELF` in M71g), and the `DESKTOP.BIN` launcher (retired in M78c; the
+Go seat is now `GOTABWM.ELF`, with `GOFILES.ELF` and `NOTE.ELF` as hosted
+clients; Zig `FILE.BIN` was deleted in M60). Windows and clicks reach these
+apps as events through milestone nine's per-process event queues
+(`sys_poll_event`/`sys_wait_event`).
 
 <Aside kind="info">
 

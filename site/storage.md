@@ -44,8 +44,10 @@ reboot.
 Milestone ten opened storage to EL0: a per-process file-handle table
 (8 static handles, reset at process lifecycle) behind
 `sys_file_open`/`read`/`write`/`close` and `sys_dir_list` (slots 23–27).
-`SAVETEXT.BIN`, `TYPE.BIN`, and `DIR.BIN` prove the seam; `NOTE.ELF` (the
-editor since M66c) and `GOFILES.ELF` use it for real work. Milestone
+The original `SAVETEXT.BIN`, `TYPE.BIN`, and `DIR.BIN` demos (retired M78c)
+proved the seam; current `GOSH.ELF` redirection/`cat` and `GOFILES.ELF`
+listing exercise it, while `NOTE.ELF` (the editor since M66c) uses it for
+real work. Milestone
 thirteen's B1 card extended it with `sys_file_delete`/`rename`/`truncate`/
 `free` (slots 34–37); the original `FSTEST.BIN` proof was deleted with the
 second volume (M34 HF6 #740), and the wire it exercised is now pinned

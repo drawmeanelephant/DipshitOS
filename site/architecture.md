@@ -14,8 +14,8 @@ map; the satellites below carry the detail.
 
 ```text
 ┌───────────────────────────────────────────────┐
-│  EL0 user programs + desktop apps (CALC.ELF,   │
-│  DESKTOP.BIN, GO* Go apps, …)                 │
+│  EL0 user programs + desktop apps (GOCALC.ELF, │
+│  GOTABWM.ELF, GO* Go apps, …)                 │
 │  runtime linker LD.SO + LIBUI.SO/LIBFONT.SO   │
 │  syscalls: 78 implemented slots (of 128):     │
 │  ipc/win/events/file/exec/kill/tcp/fs/clip/   │
@@ -75,7 +75,7 @@ Three rules show up everywhere:
 | Events | keyboard/pointer/window events routed to focused EL0 apps (`sys_poll_event`/`sys_wait_event`), plus `TIMER` events from the app-timer facility |
 | Shared services | the machine-global clipboard (slots 38/39) + per-process app timers (slots 40/41) |
 | Dynamic linking | freestanding `LD.SO` runtime linker, `LIBUI.SO`/`LIBFONT.SO`, W^X multi-aperture userland (M30/M31) |
-| Desktop | the zero-heap `ui.zig` widget toolkit + CALC/TOP/DESKTOP applications, with the editor and file manager now in Go (`NOTE.ELF`, `GOFILES.ELF`) |
+| Desktop | the zero-heap `ui.zig` widget toolkit + the Go seat (`GOTABWM.ELF`) and hosted clients (`GOCALC.ELF`, `NOTE.ELF`, `GOTOP.ELF`, `GOFILES.ELF`) |
 
 <Aside kind="note">
 
