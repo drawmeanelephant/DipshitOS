@@ -96,10 +96,22 @@
 # through GOTERM's bound tty with Ctrl+Shift+C/V (M73e's exact chain) -> every
 # line runs; (c) its clear+redraw burst followed by the monitor `tty` line
 # reading 0/0 (M73f-1 polarity + M73f-2's line, after the burst settles);
-# (d) `dui kresize` -> charmhello's own `charmhello: size` recomputed from the
-# NEW rect + repaint (M73j — there is no window-edge drag seam under the
-# seat: no kernel resize grip, no gotabwm gesture, so the card's "whichever
-# the spec pick supports" picks dui); (e) the captured scanout pixel-asserts
+# (d) a LIVE resize -> charmhello's own `charmhello: size` with the NEW
+# cells + repaint (M73j — there is no window-edge drag seam under the
+# seat: no kernel resize grip, no gotabwm gesture, and the monitor's
+# `dui kresize` moves the rect WITHOUT notifying the owner
+# (resize_window_keyboard emits no WIN_RESIZE; driving_award.zig:3078
+# vs user_resize:1977 — observed serial-04: kresize marker, zero size
+# markers after), so the card's "whichever the spec pick supports"
+# picks M73j's OWN proven owner seam: one `r` keydown ->
+# vi.WinResize(512x384 -> 64x23, go-charmhello's green path) — with
+# `r` delivered by --input-key ANCHORED on the seat's own
+# `gotabwm: alt-tab id=4` marker, because the seat drains WM_KEY one
+# event per composite tick: an in-list `r` 0.25 s behind alt-tab
+# reaches the kernel BEFORE focus moves (observed serial-04: the `r`
+# fanned at 2002, the pin step forced focus 3 later, zero
+# charmhello key markers));
+# (e) the captured scanout pixel-asserts
 # the rune row's box cells, the wide rune's cell pair, and no ink past col 79
 # (M73a-2 + M73g's width wall) at the END of the sequence. Staging rides the
 # STARTUP.SH contract (host-side file, silent run before GOTERM's first
@@ -600,40 +612,117 @@ PY
 #   goterm: prompt  -> --pointer-virtio drag over the staged rows: STARTUP.SH
 #                     ran its rows silently before this first prompt (M49
 #                     SD5 kernel selection -> `dui: term sel end`). The
-#                     window is NOT fullscreen: boot 04's serial pins
-#                     `open: id=3 rect=64,48 640x400`, title_bar_h=16
-#                     (wnd_core.zig) and cell 8x16 (font_metrics), so the
-#                     text grid starts at y=64 and the five staged rows
-#                     occupy y 64..143 — press (68,70)=row0col0, release
-#                     (700,140)=row4, deliberately above the prompt row
-#                     (144..159) so no PS1 text joins the selection.
-#                     Observed r5: the old 4,24 press fell outside the
-#                     window (on the 24px dock bar) -> no selection.
-#   dui: term sel end -> --input-chords ctrl-shift-c, ctrl-shift-v, return:
-#                     copy the >256 B selection, paste it through GOTERM's
+#                     window IS fullscreen: the serial pins BOTH
+#                     `open: id=3 rect=64,48 640x400` (the exec) and then
+#                     `gotabwm: host view id=3` — the seat's declare
+#                     handler proposes the full viewport and
+#                     SetWindowRect(0,0,1280,720) returned 0 (interop.go;
+#                     asserted in the chain below from after launcher
+#                     open, so it is GOTERM's proposal, not NOTE's). That
+#                     is the same shape (e) already probes, and
+#                     live-term-depth run 02 proved the client origin
+#                     empirically (a 64,48-based drag landed row4/col8);
+#                     this run's `dui` dump is the authority: `dui[6]:
+#                     user rect=0,0,1280,720 owner=3` — origin 0,0.
+#                     title_bar_h=16 (wnd_core.zig), cell 8x16
+#                     (font_metrics): content top = 16, so the five
+#                     staged rows occupy y16..95 and prompt row 5
+#                     y96..111.
+#                     press (4,28)=row0col0 — y28 clears BOTH the title
+#                     band (y0..15) and the seat's 22px rail band
+#                     (RailHeight=22, tabs.go) — release (636,84) =
+#                     row4col79 selects lines 0..4 = 274 B > 256 and
+#                     stops above the prompt row so no PS1 text joins
+#                     the selection. Geometry was NEVER the blocker:
+#                     observed serial-04 had the press forwarded
+#                     (`gotabwm: ptr` x7) with zero sel markers because
+#                     CHARMHELLO's fullscreen face sat TOPMOST and its
+#                     M73i mouse capture (?1000/?1006) makes
+#                     mouseOwnsAt true there — mouse reports, never
+#                     selection (`tty: paste 0 bytes`). The pointer
+#                     phase is therefore gated on `charmhello: ready`
+#                     and opens with the rail click, which RAISES
+#                     GOTERM above charmhello before the press.
+#                     script3
+#                     fires on this same marker: `exec CHARMHELLO.ELF`
+#                     lands n==2 BEFORE the seat's 16-tick countdown
+#                     would close GOTERM (observed r7: `host close id=3`
+#                     between ptr 3 and 4 — the chords then found no
+#                     focused terminal, so no copy and no paste).
+#   dui: term sel end -> --input-chords ctrl-shift-c, ctrl-shift-v,
+#                     return, alt-tab — then --input-key 15 (`r`),
+#                     anchored on alt-tab's marker (see below). The
+#                     first three fire with
+#                     focus=3 (the pointer phase's rail click — see
+#                     (b) — pulled focus off charmhello, whose declare
+#                     steals it): applyRailClick -> focusHosted ->
+#                     WmctlTaskbarClick refocuses AND RAISES GOTERM
+#                     (id=3, marker `gotabwm: rail-click id=3`);
+#                     focus changes never clear the kernel selection
+#                     (sel_* clears only on reset/alt/resize/search,
+#                     terminal.zig:539/724/1164/1379/1502), so the
+#                     copy chord lands in the focused-terminal block,
+#                     not seat-gated
+#                     (input.zig:576/583), so they copy the >256 B
+#                     selection off the terminal and paste it through GOTERM's
 #                     bound tty (GOSH requests DECSET 2004 at startup, so
 #                     the paste lands bracketed \e[200~..\e[201~ and the
 #                     chord's return submits the tail — input.zig:583,
 #                     live-term-depth.spec:15) — M73e's exact chain.
-#                     BLOCKED under the seat (finding on #1629, seam
-#                     claimed as #1688): selection begins only inside
-#                     pointer_tick AFTER the wm_owns_input return
-#                     (driving_award:3334), and gotabwm's handleWmPointer
-#                     forwards no content pointer events (hid.go:221-256),
-#                     so `dui: term sel end` never prints here — observed
-#                     r6: gotabwm: ptr x4, zero sel markers, drag provably
-#                     inside rect=64,48 640x400. Asserts stay red, intact. The first pasted row runs `clear` (the
+#                     WAS BLOCKED under the seat (finding on #1629, seam
+#                     #1688): selection began only inside pointer_tick
+#                     AFTER the wm_owns_input return, and handleWmPointer
+#                     forwarded no content pointer events — observed r6:
+#                     gotabwm: ptr x4, zero sel markers. The seam landed
+#                     in PR #1694 (wm_content_pointer + the seat's content
+#                     forward, slot-65 cmd 15): the drag relays into
+#                     content_pointer_pass, proven green by
+#                     live-term-depth run 02 (sel begin/end + copy 259 B
+#                     through the forward). The first pasted row runs `clear` (the
 #                     clear+redraw burst, (c)), the next re-prints the rune
-#                     row at row 0 ((e)'s pixels)
-#   goterm: done status=0 -> script-04b (2 s delay, so the burst finished):
-#                     the monitor `tty` line (0/0), then exec CHARMHELLO.ELF
-#   charmhello: ready -> script-04c: `dui` registry dump (geometry
-#                     evidence), `dui kresize 4 -32 -16` (d) — 4 is the
-#                     first-free id while GOTERM holds the reused slot 3 —
-#                     then `dui lower 4` so (e)'s capture reads GOTERM's
-#                     row 0, not charmhello's fullscreen face
-#   charmhello: repainted -> ActionResized printed the NEW cells and
-#                     repainted; the harness captures the scanout here.
+#                     row at row 0 ((e)'s pixels). One more chord
+#                     follows the return: alt-tab — under a LIVE seat
+#                     input.zig only sets alt_tab_pending when
+#                     !wm_owns_input, so this is the SEAT's own
+#                     applyAltTab; the strip is {3,4}, next-from-3 = 4,
+#                     marker `gotabwm: alt-tab id=4` (serial-04's
+#                     `dui: alt-tab` was the SHIM, after maxTicks 48
+#                     had already killed the seat and its committed
+#                     charmhello received `tty: paste 277 bytes`) —
+#                     which lands focus on charmhello. `r` is deliberately
+#                     NOT the list's fifth chord: the seat drains WM_KEY
+#                     ONE event per composite tick (observed serial-04 fan
+#                     prints lagging HID receipt: copy 1729/1772, paste
+#                     1747/1833, alt 1943, r 2002), so an in-list `r`
+#                     0.25 s behind alt-tab hits the kernel while focus is
+#                     still 3 and lands in GOSH's line editor — silent,
+#                     no marker anywhere. --input-key 15 instead waits on
+#                     alt-tab's OWN marker (printed only after
+#                     focusHosted(4) -> WmctlTaskbarClick set focus=4),
+#                     so the delivered keydown -> charmhello's key
+#                     handler -> vi.WinResize(512,384) -> the M73j size
+#                     marker (d).
+#   charmhello: size 64x23 -> script-04b (2 s delay: the resize's
+#                     size+repaint print back-to-back, and 2 s keeps
+#                     the paste burst definitively behind it): the
+#                     monitor `tty` line (0/0 — the card's (c)), the
+#                     `dui` registry dump (geometry evidence), then
+#                     `dui lower 4` so (e)'s capture reads GOTERM's
+#                     row 0, not charmhello's resized face.
+#                     (script3 already fired at prompt:
+#                     its n==2 declare freezes the countdown that closed
+#                     GOTERM mid-drag in r7 and arms the two-tab
+#                     choreography's hidChordHold=32 grace window —
+#                     raised 20 -> 32 for M73z so the first destructive
+#                     step (n==2 + hold + 7 steps ~ tick 68) lands past
+#                     this chain's expect; maxTicks likewise 48 -> 90 in
+#                     seat.go.)
+#   dui lower: lowered=4 -> script-04b's last line dropped charmhello
+#                     behind GOTERM (its 512x384 face would cover the
+#                     rune row), strictly after size+repaint (script2
+#                     gates on that size marker) — so the harness
+#                     captures the scanout HERE; this last marker is
+#                     the run's expect and the screenshot barrier.
 #
 # STARTUP.SH is GENERATED into the share by the hook below (the serial line
 # cap is 256 B — observed run 1: `error: input refused: line longer than 256
@@ -685,34 +774,46 @@ exec NOTE.ELF
 echo m73z-stage1
 EOF
 
+# script-04b fires 2 s after `charmhello: size 64x23` (the `r`
+# resize, M73j's owner seam): tty counters read after the
+# clear+redraw burst (c), the registry dump (geometry evidence), then
+# the lower for (e) — last, so the capture happens after it.
 vgate_file script-04b.txt <<'EOF'
 tty
-exec CHARMHELLO.ELF
+dui
+dui lower 4
 EOF
 
+# script-04c fires at `goterm: prompt`: CHARMHELLO must be ON the strip
+# before the 16-tick single-tab countdown closes GOTERM (observed r7:
+# `host close id=3` mid-drag). Its declare makes n==2 — the countdown
+# only runs at n==1 — and arms the two-tab choreography whose
+# hidChordHold=32 (raised from 20 for M73z) gives the chain grace past
+# its expect: first destructive step = n==2 + hold + 7 steps ~ tick 68,
+# with maxTicks 90 (seat.go) bounding the boot above both.
 vgate_file script-04c.txt <<'EOF'
-dui
-dui kresize 4 -32 -16
-dui lower 4
+exec CHARMHELLO.ELF
 EOF
 
 vgate_run 04 -- \
     --via-virtio \
     --screen '$RUN_DIR/screen-04' \
-    --screenshot-after 'charmhello: repainted' \
+    --screenshot-after 'dui lower: lowered=4' \
     --script '$RUN_DIR/script-04a.txt' \
     --script-after 'user-el0 reaped' \
     --input-string $'\nterm\n' \
     --input-string-after 'gotabwm: tab close id=' \
-    --pointer-virtio '68,70;68,70,d;700,140;700,140,u' \
-    --pointer-virtio-after 'goterm: prompt' \
-    --input-chords 'ctrl-shift-c,ctrl-shift-v,return' \
+    --pointer-virtio '100,11,c;4,28,d;636,84;636,84,u' \
+    --pointer-virtio-after 'charmhello: ready' \
+    --input-chords 'ctrl-shift-c,ctrl-shift-v,return,alt-tab' \
     --input-chords-after 'dui: term sel end' \
+    --input-key 15 \
+    --input-key-after 'gotabwm: alt-tab id=4' \
     --script2 '$RUN_DIR/script-04b.txt' \
-    --script2-after 'goterm: done status=0' --script2-delay 2 \
+    --script2-after 'charmhello: size 64x23' --script2-delay 2 \
     --script3 '$RUN_DIR/script-04c.txt' \
-    --script3-after 'charmhello: ready' \
-    --script-expect 'charmhello: repainted' --timeout 300
+    --script3-after 'goterm: prompt' \
+    --script-expect 'dui lower: lowered=4' --timeout 300
 
 vgate_assert 04 share-contains APPS.TXT 'GOTERM.ELF | Terminal | t | dock=true'
 vgate_assert 04 serial-contains 'wm: autostart gotabwm (settings wm=gotabwm)'
@@ -725,25 +826,53 @@ vgate_assert 04 serial-contains 'gotabwm: tab close id='
 vgate_assert 04 serial-contains 'launcher open n='
 vgate_assert 04 serial-contains 'launcher filter q=term n=1'
 vgate_assert 04 serial-contains 'launcher exec GOTERM.ELF'
-vgate_assert 04 serial-contains 'exec: loaded GOTERM.ELF'
+# `exec: loaded GOTERM.ELF` is deliberately not asserted: that line is
+# the SHELL exec builtin's (script-04a's NOTE prints it) and the launcher
+# execs directly — GOTERM's own open/ready/prompt markers carry the load
+# proof below. Observed r7: the line is absent on exactly this path.
 vgate_assert 04 serial-contains 'goterm: open id='
 vgate_assert 04 serial-contains 'goterm: attached'
 vgate_assert 04 serial-contains 'goterm: ready'
 vgate_assert 04 serial-contains 'goterm: prompt'
 
 # --- (b) the staged rows selected, copied, pasted, and ran ------------------
+# begin+end: both markers of the FORWARDED selection (#1688) — end alone
+# could not distinguish a forward from a stray release.
+vgate_assert 04 serial-contains 'dui: term sel begin'
 vgate_assert 04 serial-contains 'dui: term sel end'
+# the pointer phase's FIRST step (right after `charmhello: ready`) is a
+# rail click: it pulls focus off charmhello (whose declare steals it)
+# AND raises GOTERM above charmhello's fullscreen face — without the
+# raise, terminalHitAt resolves the press to charmhello and M73i's
+# ?1000 capture reports it instead of selecting (observed serial-04:
+# press forwarded, zero sel markers, `tty: paste 0 bytes`). id=3 is
+# GOTERM's reused slot.
+vgate_assert 04 serial-contains 'gotabwm: rail-click id=3'
+# the SEAT's alt-tab flipped focus 3 -> 4 (under a live seat
+# input.zig never sets alt_tab_pending: serial-04's `dui:
+# alt-tab` was the shim, post-seat-death). Strip = {3,4}: next = 4.
+# --input-key 15 waits on THIS marker, so `r`'s kernel delivery
+# sees focus=4 — the drain-race fix above.
+vgate_assert 04 serial-contains 'gotabwm: alt-tab id=4'
 vgate_assert 04 serial-contains 'tty: paste '
 # startup lines run silently (no marker), so this `clear` line can only
 # have come from the PASTE — M73e's write-back, proven.
 vgate_assert 04 serial-contains 'goterm: line clear'
 vgate_assert 04 serial-contains 'goterm: done status=0'
 
-# --- (d) the dui resize seam: new cells + repaint ---------------------------
+# --- (d) the resize seam: new cells + repaint -------------------------------
+# M73j's owner seam (`r` via --input-key -> vi.WinResize(512,384)):
+# baseline is
+# the seat's host-view fullscreen grid, post is the self-resized grid.
+# `dui kresize` is deliberately NOT used: it moves the rect without
+# notifying the owner (no WIN_RESIZE — observed serial-04), so no size
+# marker can ever follow it.
 vgate_assert 04 serial-contains 'exec: loaded CHARMHELLO.ELF'
 vgate_assert 04 serial-contains 'charmhello: open id='
 vgate_assert 04 serial-contains 'charmhello: ready'
-vgate_assert 04 serial-contains 'dui kresize: id=4'
+vgate_assert 04 serial-contains 'charmhello: size 80x44'
+vgate_assert 04 serial-contains 'charmhello: size 64x23'
+vgate_assert 04 serial-contains 'dui lower: lowered=4'
 vgate_assert 04 serial-contains 'charmhello: repainted'
 vgate_assert 04 serial-absent 'keyboard resize failed'
 
@@ -755,15 +884,19 @@ vgate_assert 04 serial-absent '[EXC] parking:'
 vgate_assert 04 serial-absent 'exited status=139'
 
 # THE acceptance chain, in order, with the three cross-card pins:
-#  (b) the paste carries >256 B, every staged row reached the editor, and
-#      the rune row arrived with BOTH rune classes byte-intact (startup
-#      lines are silent, so each of these markers can only be the paste);
+#  (b) the paste carries >256 B INCLUDING row2's 12 rune bytes (floor
+#      270: the serial console cannot emit wide glyphs at all —
+#      observed serial-04: ZERO occurrences of the box rune in the
+#      whole log — so the glyph proof is (e)'s pixels, not a
+#      line-echo marker) and every staged row reached the editor
+#      (startup lines are silent, so each of these markers can only
+#      be the paste);
 #  (c) the tty line reads out_dropped=0 in_dropped=0 AFTER the burst
 #      (M73f-1's polarity plus M73f-2's line plus a repaint that happened);
-#  (d) charmhello's SECOND size marker is exactly the first minus the
-#      kresize deltas in CELLS (cols -32px/8 = -4, rows -16px/16 = -1),
-#      computed from whatever rect the seat gave it (main_test.go pins
-#      both kernel formulas), and it precedes the repaint marker.
+#  (d) charmhello's post-resize size marker is EXACTLY its M73j-pinned
+#      grid for a 512x384 rect (512/8 = 64 cols, (384-16)/16 = 23 rows
+#      — main_test.go pins the formula) after the 80x44 baseline, and
+#      the repaint marker follows it.
 vgate_assert 04 python <<'PY'
 import os, re, sys
 
@@ -785,8 +918,18 @@ i_stage = at("m73z-stage1", i_seat)
 i_present = at("gotabwm: present", i_seat)
 i_close = at("gotabwm: tab close id=", max(i_stage, i_present))
 i_open = at("launcher open n=", i_close)
+# GOTERM's own host-view proposal (fullscreen) — the origin the drag
+# coords and (e) assume. NOTE's identical marker sits before i_close,
+# so searching from i_open pins GOTERM's.
+i_hv = at("gotabwm: host view id=", i_open)
 i_prompt = at("goterm: prompt", i_open)
-i_sel = at("dui: term sel end", i_prompt)
+# The pointer phase runs only after charmhello's declare (its
+# fullscreen face would otherwise eat the press — mouse capture),
+# rail click FIRST (focus+raise GOTERM), then the drag: press -> sel
+# begin, release -> sel end; then copy/paste/return/alt-tab/r.
+i_ready = at("charmhello: ready", i_prompt)
+i_rail = at("gotabwm: rail-click id=", i_ready)
+i_sel = at("dui: term sel end", i_rail)
 i_paste = at("tty: paste ", i_sel)
 
 # (b): paste bytes, all staged rows submitted, rune row byte-intact.
@@ -794,57 +937,85 @@ m = re.search(r"tty: paste (\d+) bytes", ser)
 n = int(m.group(1))
 if n <= 256:
     sys.exit("paste must exceed the old 256 B queue (got %d)" % n)
+# Row 2 (echo + box-drawing + wide rune + p-run) contributes 12 rune
+# bytes: an ASCII-only copy of the five rows tops out near 265, so a
+# floor of 270 pins that the rune bytes travelled. The serial console
+# cannot PRINT wide glyphs (observed serial-04: zero box runes in the
+# entire log), so the pixel proof of the glyphs is (e)'s snapshot.
+if n < 270:
+    sys.exit("paste lost the rune bytes (got %d, want >= 270)" % n)
 i_clear = at("goterm: line clear", i_paste)
-i_rune = at("goterm: line echo \u250c", i_clear)
-rune_line = ser[i_rune:ser.find("\n", i_rune)]
-if "\u4f60" not in rune_line:
-    sys.exit("rune row lost its wide rune: %r" % rune_line[:70])
+# Row 4's ASCII line-echo: the LAST staged row reached the editor (the
+# row-2 marker prints without its wide glyphs — serial limitation —
+# so the chain anchors on ASCII rows only).
+i_lastrow = at("goterm: line echo ccc", i_clear)
 n_lines = ser.count("goterm: line ", i_paste)
-if n_lines < 4:
-    sys.exit("only %d staged rows reached the editor (want >=4)" % n_lines)
-i_done = at("goterm: done status=0", i_rune)
+if n_lines < 5:
+    sys.exit("only %d staged rows reached the editor (want all 5)" % n_lines)
+i_done = at("goterm: done status=0", i_lastrow)
 
-# (c): the tty counters, read by script2 (2 s after the first done), land
+# The seat's alt-tab flipped focus to charmhello, whose `r` handler
+# printed the new grid — script2 gates on THAT marker, so its `tty`
+# line lands after both the burst and the resize.
+i_alttab = at("gotabwm: alt-tab id=", i_done)
+i_rsize = at("charmhello: size 64x23", i_alttab)
+i_repaint = at("charmhello: repainted", i_rsize)
+
+# (c): the tty counters, read by script2 (2 s after size 64x23), land
 # AFTER the burst and read 0/0.
-mtty = re.search(r"tty\[\d+\]: out_dropped=(\d+) in_dropped=(\d+)", ser[i_done:])
+mtty = re.search(r"tty\[\d+\]: out_dropped=(\d+) in_dropped=(\d+)", ser[i_rsize:])
 if not mtty:
     sys.exit("tty drop-counter line missing after the burst")
-i_tty = i_done + mtty.start()
+i_tty = i_rsize + mtty.start()
+i_lower = at("dui lower: lowered=", i_tty)
 if mtty.group(1) != "0" or mtty.group(2) != "0":
     sys.exit("drop counters must read 0/0 (got %r)" % mtty.group(0))
 
-# (d): size relation — the FIRST charmhello size line is the startup rect,
-# the SECOND comes only from ActionResized after `dui kresize 4 -32 -16`.
-i_kresize = at("dui kresize: id=", i_tty)
-ms0 = re.search(r"charmhello: size (\d+)x(\d+)", ser)
-if not ms0:
-    sys.exit("startup charmhello: size missing")
-c0, r0 = int(ms0.group(1)), int(ms0.group(2))
-ms1 = re.search(r"charmhello: size (\d+)x(\d+)", ser[ms0.end():])
-if not ms1:
-    sys.exit("no post-kresize charmhello: size marker")
-c1, r1 = int(ms1.group(1)), int(ms1.group(2))
-if (c1, r1) != (c0 - 4, r0 - 1):
-    sys.exit("resize cells %dx%d want %dx%d (startup %dx%d, kresize -32 -16)"
-             % (c1, r1, c0 - 4, r0 - 1, c0, r0))
-i_repaint = at("charmhello: repainted", i_kresize)
+# (d): size relation — baseline = the LAST `charmhello: size` before
+# the `r` resize (tabapp.Init's declare is synchronous with the
+# seat's host-view — NOTE's `host view` prints before its `open`, r7
+# serial — so the startup marker reads the fullscreen 1280x720 grid as
+# 80x44 through M73l's class-A clamp cols=clamp(w/8,8,80); a queued
+# duplicate of the same grid may follow), post = the M73j-pinned grid
+# of the self-resized 512x384 rect (64x23), and i_repaint-after-i_rsize
+# is the repaint that pairs with it (size and repaint print back-to-back
+# after the app's one-tick Sleep).
+sizes = [(m.start(), int(m.group(1)), int(m.group(2)))
+         for m in re.finditer(r"charmhello: size (\d+)x(\d+)", ser)]
+before = [s for s in sizes if s[0] < i_rsize]
+if not before:
+    sys.exit("no pre-resize charmhello: size marker")
+_, c0, r0 = before[-1]
+pr = re.match(r"charmhello: size (\d+)x(\d+)", ser[i_rsize:])
+c1, r1 = int(pr.group(1)), int(pr.group(2))
+if (c0, r0) != (80, 44):
+    sys.exit("baseline grid %dx%d want 80x44 (host-view fullscreen)"
+             % (c0, r0))
+if (c1, r1) != (64, 23):
+    sys.exit("resize cells %dx%d want 64x23 (r key: 512x384)"
+             % (c1, r1))
 
 print("acceptance chain OK: seat@%d stage@%d present@%d close@%d "
-      "launcher@%d prompt@%d sel@%d paste=%dB lines=%d clear@%d rune@%d "
-      "done@%d %s@%d kresize@%d repaint@%d size %dx%d -> %dx%d"
-      % (i_seat, i_stage, i_present, i_close, i_open, i_prompt, i_sel, n,
-         n_lines, i_clear, i_rune, i_done, mtty.group(0).split(":")[0],
-         i_tty, i_kresize, i_repaint, c0, r0, c1, r1))
+      "launcher@%d prompt@%d ready@%d rail@%d sel@%d paste=%dB "
+      "lines=%d clear@%d lastrow@%d done@%d alt@%d rsize@%d "
+      "%s@%d lower@%d repaint@%d size %dx%d -> %dx%d"
+      % (i_seat, i_stage, i_present, i_close, i_open, i_prompt,
+         i_ready, i_rail, i_sel, n, n_lines, i_clear, i_lastrow, i_done,
+         i_alttab, i_rsize, mtty.group(0).split(":")[0], i_tty,
+         i_lower, i_repaint, c0, r0, c1, r1))
 PY
 
 # --- (e) THE pixel proof: the pasted line's cells at the END of the run ------
 # The pasted `clear` wiped the screen and the pasted rune row re-printed at
 # row 0. Charmhello full-screen-declares like every rail app (boot 03's
 # passing green pin at y17..29 is the z-order evidence: a focused
-# fullscreen declare sits on top of the id2 demo window), so script3's
-# `dui lower 4` — z-order only, leaving charmhello's queued WIN_RESIZE to
-# print its second size + repaint marker afterwards — drops it BEHIND
-# GOTERM before the capture.
+# fullscreen declare sits on top of the id2 demo window), so script2's
+# `dui lower 4` — z-order only — drops it BEHIND GOTERM; script2 runs ON
+# `charmhello: size 64x23` (the `r` resize, which prints size+repaint
+# first), so `dui lower: lowered=4` is strictly AFTER both — the
+# screenshot/expect barrier. Charmhello also repaints on its host-view
+# resize at startup, so `repainted` alone (or a startup size marker)
+# would end the run before the paste.
 # GOTERM declares full-viewport (kind 8) and the kernel draws a window
 # terminal's grid from its 16-row title band, so the row's first 80 cells
 # sit at device y16..31, x from 0 (the geometry boot 03's prompt pin

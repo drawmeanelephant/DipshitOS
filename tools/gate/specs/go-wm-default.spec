@@ -20,7 +20,8 @@
 #
 # Boot 02 proves the flip is a SETTING, not a hardcode: the same share boots
 # the Zig TABWM seat -- the fallback the card requires to stay reachable.
-# M63f (#1463): re-verified green after GOTABWM maxTicks 48. No HID here.
+# M63f (#1463): re-verified green after GOTABWM maxTicks 90 (M73z;
+# was 48). No HID here.
 #
 # M66b (#1444): boots 03/04 add the corrupt-settings story. Boot 03 stages
 # real corruption (the monitor's vf verbs overwrite SETTINGS.TXT with
@@ -43,6 +44,10 @@
 # --script-expect-tail so the hold covers the seat's own clean exit -- the
 # panel's save is the thing under test, and the tail keeps the `gotabwm OK` /
 # `wm: unregistered, shim resumed` asserts honest rather than dropping them.
+# Tail 90 -> 150 for M73z: the seat's budget went maxTicks 48 -> 90 (seat.go,
+# boot 04's acceptance chain), so the exit now lands near the OLD 90 s tail's
+# boundary -- observed 2026-09-23: serial cut at `gotabwm OK`, the kernel's
+# unregister line just outside the capture.
 
 vgate_name go-wm-default "issue #1298 M59 / M71f #1565: a DEFAULT boot seats the Go desktop (GOTABWM.ELF hosting GOCALC.ELF), and the GO PANEL (GOSET.ELF) writing wm=tabwm keeps the Zig fallback reachable across a reboot"
 vgate_share seed
@@ -154,7 +159,7 @@ vgate_run 01 -- \
     --input-string-after 'goset: ready ' \
     --script3 '$RUN_DIR/script3.txt' \
     --script3-after 'goset: close' \
-    --script-expect 'goset: saved ' --script-expect-tail 90 --timeout 300
+    --script-expect 'goset: saved ' --script-expect-tail 150 --timeout 300
 
 # --- the flip: an untouched boot lands in the Go desktop ------------------
 vgate_assert 01 serial-contains 'VirelaiOS kernel has seized control.'

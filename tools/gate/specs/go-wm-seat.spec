@@ -22,7 +22,8 @@
 # seat's explicit, opt-in registration path -- separate from the default flip
 # (go-wm-default.spec owns that). Its "shim at boot" asserts are therefore
 # about the seeded setting, not about the out-of-the-box boot.
-# M63f (#1463): re-verified green after GOTABWM maxTicks 48. No HID here.
+# M63f (#1463): re-verified green after GOTABWM maxTicks 90 (M73z;
+# was 48). No HID here.
 #
 # HOST PREREQUISITE (fails the gate honestly when missing):
 #   bash tools/go/build-gotabwm.sh   ->  .build/go/GOTABWM.ELF
