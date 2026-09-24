@@ -42,7 +42,7 @@ and [[roadmap]]:
 | Events | Per-process event queues: keyboard/pointer/window events to focused EL0 apps (`sys_poll_event`/`sys_wait_event`) | Done |
 | User filesystem ABI | Per-process file table, `/esp/` + `/data/` routing, file syscalls (slots 23–27), storage utilities | Done |
 | Desktop platform | ADR 0011: zero-heap `ui.zig` widget toolkit + `CALC.BIN`, `NOTEPAD.BIN`, `TOP.BIN`, `DESKTOP.BIN` launcher (Zig `NOTEPAD.BIN` since retired — the editor is the Go `NOTE.ELF`, M66c) | Done |
-| Network apps | TCP syscall seam (slots 30–33), RFC 1035 DNS, `TCP.BIN`/`FETCH.BIN`/`CHAT.BIN` | Done |
+| Network apps | TCP syscall seam (slots 30–33), RFC 1035 DNS, `TCP.BIN`/`GOFETCH.ELF`/`CHAT.BIN` (`FETCH.BIN` is retired) | Done |
 | Files & applications | Mutating filesystem seam (slots 34–37), `APPS.TXT` manifest, graphical data browser (now `GOFILES.ELF`), desktop composition | Done |
 | Shared services | Clipboard + app timers + composition capstone + isolation hardening (slots 38–41) | Done |
 | Audio | virtio-snd, PCM playback, `beep`, the EL0 audio seam (slots 42–45), `JINGLE.BIN` + the boot chime + `CHIME.BIN` | Done |
@@ -112,10 +112,11 @@ A single boot of VirelaiOS gets you, in order:
   (`NOTE.ELF`, which was Zig `NOTEPAD.BIN` until M66c), a click-to-kill
   process monitor (`GOTOP.ELF`, which was `TOP.BIN`/`SYSMON.BIN` until
   M71g), and a file browser over the host share (`GOFILES.ELF`).
-- Userland network applications: an HTTP/1.0 client (`FETCH.BIN`), a
-  peer-to-peer graphical chat app (`CHAT.BIN`), and an in-guest HTTP/1.1 web
-  server (`GOHTTPD.ELF`; the Zig `HTTPD.BIN` was retired in M71l) that
-  serves the guest's own files to the host.
+- Userland network applications: an HTTP client (`GOFETCH.ELF`, which
+  replaced retired `FETCH.BIN`), a peer-to-peer graphical chat app
+  (`CHAT.BIN`), and an in-guest HTTP/1.1 web server (`GOHTTPD.ELF`; the Zig
+  `HTTPD.BIN` was retired in M71l) that serves the guest's own files to the
+  host.
 - Keyboard, pointer, and window events routed to focused applications, so an
   EL0 program runs an interactive event loop.
 - A shared clipboard (copy/cut/paste across text apps) and per-process

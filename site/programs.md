@@ -36,7 +36,7 @@ staged by their gates.
 | `TOP.BIN` | `user/src/top.zig` (deleted M71g) | the graphical process monitor with click-to-kill (`sys_kill`) — since retired to Go (`GOTOP.ELF`, gate `go-top`) |
 | `DESKTOP.BIN` | `user/src/desktop.zig` | the launcher: manifests the app catalog (`APPS.TXT`) and `sys_exec`s apps |
 | `TCP.BIN` | `user/src/tcp_client.zig` | the TCP syscall seam: connect, send, receive echo, close, exit 18 |
-| `GOFETCH.ELF` | `user/go/fetch` | M67b: an HTTPS client over in-process TLS (windowed, exit on close); M78b (#1683): RETIRED `FETCH.BIN` and `DOWNLOAD.BIN`, `user/src/fetch.zig` and `user/src/download.zig` deleted — one binary now owns the cleartext fetch (`http://` on the console, exit 42) and `--download` (saves the body to the host share) |
+| `GOFETCH.ELF` | `user/go/fetch` | M67b: an HTTPS client over in-process TLS (windowed, exit on close); issue #1683: RETIRED `FETCH.BIN` and `DOWNLOAD.BIN`, `user/src/fetch.zig` and `user/src/download.zig` deleted — one binary now owns the cleartext fetch (`http://` on the console, exit 42) and `--download` (saves the body to the host share) |
 | `CHAT.BIN` | `user/src/chat.zig` | graphical UDP chat: windows + events + `sys_udp_*` |
 | `FSTEST.BIN` | `user/src/fstest.zig` (deleted M34 HF6) | the mutating filesystem seam: create/write → truncate → rename → free → delete — the proof was deleted with the second volume (#740); the slots remain |
 | `TIMER.BIN` | `user/src/timertest.zig` | the app-timer seam: arm → block on `TIMER` event → cancel |
