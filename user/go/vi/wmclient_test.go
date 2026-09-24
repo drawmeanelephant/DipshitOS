@@ -104,7 +104,7 @@ func TestTabClientDispatch(t *testing.T) {
 // Off-guest there is no WM seat, so every request is an honest false (never a
 // fabricated success).
 func TestWmMailRequestNoSeat(t *testing.T) {
-	if WmMailRequest(WmRpcKindRaise, 4, 0, 0, 0, 0, "", "DEMOAPP.ELF", 1) {
+	if WmMailRequest(WmRpcKindRaise, 4, 0, 0, 0, 0, "", "DEMOAPP.ELF") {
 		t.Fatal("host WmMailRequest should be false")
 	}
 	if DeclareFullscreen(4, "T", "DEMOAPP.ELF") {
@@ -144,10 +144,17 @@ type wmMailFake struct {
 	sleepCalls int
 	procsCalls int
 	sendTarget uint32
+	selfPID    uint64
+	sent       []WmRpc
 	// reply, when set, is copied into the caller's recv buffer starting at
 	// the replyAt-th recv (1-based). recvCalls < replyAt returns empty.
 	reply   []byte
 	replyAt int
+	// replies optionally script one distinct frame per recv, starting at
+	// replyAt. It lets a test prove that foreign acks are consumed and dropped.
+	replies [][]byte
+	// autoReply builds each ack from the most recently sent request.
+	autoReply bool
 }
 
 func namedProc(pid uint64, name string) ProcRow {
@@ -161,9 +168,13 @@ func (f *wmMailFake) hook(num uintptr, a0, a1, a2, a3 uintptr) int64 {
 	case SlotProcs:
 		f.procsCalls++
 		buf := hookBytes(a0, a1)
+		selfPID := f.selfPID
+		if selfPID == 0 {
+			selfPID = 9
+		}
 		rows := []ProcRow{
 			namedProc(3, "GOTABWM.ELF"),
-			namedProc(9, "NOTE.ELF"),
+			namedProc(selfPID, "NOTE.ELF"),
 		}
 		n := 0
 		for _, r := range rows {
@@ -181,13 +192,35 @@ func (f *wmMailFake) hook(num uintptr, a0, a1, a2, a3 uintptr) int64 {
 	case SlotIPCSend:
 		f.sendCalls++
 		f.sendTarget = uint32(a0)
+		if frame, ok := DecodeWmRpc(hookBytes(a1, a2)); ok {
+			f.sent = append(f.sent, frame)
+		}
 		return int64(a2)
 	case SlotIPCRecv:
 		f.recvCalls++
-		if f.reply != nil && f.replyAt > 0 && f.recvCalls >= f.replyAt {
+		var reply []byte
+		if f.autoReply && len(f.sent) > 0 {
+			req := f.sent[len(f.sent)-1]
+			ack := WmRpc{
+				Kind:    req.Kind | WmRpcReplyFlag,
+				ID:      req.ID,
+				Seq:     req.Seq,
+				ReplyTo: req.ReplyTo,
+				Applied: 1,
+			}
+			reply = ack.Encode()
+		} else if len(f.replies) > 0 && f.replyAt > 0 {
+			i := f.recvCalls - f.replyAt
+			if i >= 0 && i < len(f.replies) {
+				reply = f.replies[i]
+			}
+		} else if f.reply != nil && f.replyAt > 0 && f.recvCalls >= f.replyAt {
+			reply = f.reply
+		}
+		if reply != nil {
 			dst := hookBytes(a0, a1)
-			copy(dst, f.reply)
-			return int64(len(f.reply))
+			copy(dst, reply)
+			return int64(len(reply))
 		}
 		return 0
 	case SlotSleep:
@@ -199,6 +232,8 @@ func (f *wmMailFake) hook(num uintptr, a0, a1, a2, a3 uintptr) int64 {
 
 func startWmMailFake(t *testing.T) *wmMailFake {
 	t.Helper()
+	wmSeq.Store(0)
+	t.Cleanup(func() { wmSeq.Store(0) })
 	f := &wmMailFake{}
 	prev := SetSyscallHookForTest(f.hook)
 	t.Cleanup(func() { SetSyscallHookForTest(prev) })
@@ -212,13 +247,107 @@ func TestWmMailWaitTicksIsATickBound(t *testing.T) {
 	}
 }
 
+func TestFitsWire8(t *testing.T) {
+	for _, tc := range []struct {
+		value uint32
+		want  bool
+	}{
+		{0, true},
+		{0xff, true},
+		{0x100, false},
+		{^uint32(0), false},
+	} {
+		if got := fitsWire8(tc.value); got != tc.want {
+			t.Fatalf("fitsWire8(%#x) = %v want %v", tc.value, got, tc.want)
+		}
+	}
+}
+
+func TestWmMailRequestRefusesWideValuesBeforeSend(t *testing.T) {
+	f := startWmMailFake(t)
+	if WmMailRequest(WmRpcKindDeclareFullscreen, 0x100, 0, 0, 0, 0, "wide", "NOTE.ELF") {
+		t.Fatal("wide window id must refuse")
+	}
+	if f.procsCalls != 0 || f.sendCalls != 0 || f.recvCalls != 0 {
+		t.Fatalf("wide id touched the wire: procs=%d send=%d recv=%d", f.procsCalls, f.sendCalls, f.recvCalls)
+	}
+
+	f.selfPID = 0x100
+	if WmMailRequest(WmRpcKindDeclareFullscreen, 4, 0, 0, 0, 0, "wide-pid", "NOTE.ELF") {
+		t.Fatal("wide requester pid must refuse")
+	}
+	if f.sendCalls != 0 || f.recvCalls != 0 {
+		t.Fatalf("wide pid touched the wire: send=%d recv=%d", f.sendCalls, f.recvCalls)
+	}
+}
+
+func TestPollNavRefusesWideValuesBeforeSend(t *testing.T) {
+	f := startWmMailFake(t)
+	if path, ok := PollNav(0x100, "NOTE.ELF"); ok || path != "" {
+		t.Fatalf("wide PollNav id = (%q, %v) want refusal", path, ok)
+	}
+	if f.procsCalls != 0 || f.sendCalls != 0 || f.recvCalls != 0 {
+		t.Fatalf("wide PollNav id touched the wire: procs=%d send=%d recv=%d", f.procsCalls, f.sendCalls, f.recvCalls)
+	}
+
+	f.selfPID = 0x100
+	if path, ok := PollNav(4, "NOTE.ELF"); ok || path != "" {
+		t.Fatalf("wide PollNav pid = (%q, %v) want refusal", path, ok)
+	}
+	if f.sendCalls != 0 || f.recvCalls != 0 {
+		t.Fatalf("wide PollNav pid touched the wire: send=%d recv=%d", f.sendCalls, f.recvCalls)
+	}
+}
+
+func TestWmMailRequestAllocatesMonotonicSequences(t *testing.T) {
+	f := startWmMailFake(t)
+	f.autoReply = true
+	if !WmMailRequest(WmRpcKindDeclareFullscreen, 4, 0, 0, 0, 0, "first", "NOTE.ELF") {
+		t.Fatal("first request should receive its ack")
+	}
+	if !WmMailRequest(WmRpcKindRaise, 5, 0, 0, 0, 0, "second", "NOTE.ELF") {
+		t.Fatal("second request should receive its ack")
+	}
+	if len(f.sent) != 2 {
+		t.Fatalf("sent requests = %d want 2", len(f.sent))
+	}
+	if f.sent[0].Seq != 1 || f.sent[1].Seq != 2 {
+		t.Fatalf("request sequences = %d, %d want 1, 2", f.sent[0].Seq, f.sent[1].Seq)
+	}
+}
+
+func TestWaitWmRpcAckDropsForeignReplies(t *testing.T) {
+	f := startWmMailFake(t)
+	foreign := WmRpc{Kind: WmRpcKindDeclareFullscreen | WmRpcReplyFlag, ID: 4, Seq: 1, ReplyTo: 9, Applied: 1}
+	wrongRequester := WmRpc{Kind: WmRpcKindDeclareFullscreen | WmRpcReplyFlag, ID: 4, Seq: 2, ReplyTo: 8, Applied: 1}
+	matching := WmRpc{Kind: WmRpcKindDeclareFullscreen | WmRpcReplyFlag, ID: 4, Seq: 2, ReplyTo: 9, Applied: 1}
+	f.replies = [][]byte{foreign.Encode(), wrongRequester.Encode(), matching.Encode()}
+	f.replyAt = 1
+
+	rep, ok := waitWmRpcAck(2, 9)
+	if !ok || rep.Seq != 2 || rep.ReplyTo != 9 {
+		t.Fatalf("matched reply = (%+v, %v) want seq=2 reply_to=9", rep, ok)
+	}
+	if f.recvCalls != 3 || f.sleepCalls != 2 {
+		t.Fatalf("foreign replies were not dropped: recv=%d sleep=%d", f.recvCalls, f.sleepCalls)
+	}
+}
+
+func TestNextWmSeqSkipsZeroOnWrap(t *testing.T) {
+	wmSeq.Store(255)
+	t.Cleanup(func() { wmSeq.Store(0) })
+	if got := nextWmSeq(); got != 1 {
+		t.Fatalf("sequence after wrap = %d want 1 (zero is skipped)", got)
+	}
+}
+
 // A live WM pid that never acks must refuse in a handful of parks, not hang
 // inside a million-iteration yield-spin. This is the live-wm1 path: WinOpen
 // succeeded, DeclareFullscreen blocked tabapp.Init until the gate timed out.
 func TestWmMailRequestSilentSeatRefuses(t *testing.T) {
 	f := startWmMailFake(t)
 	start := time.Now()
-	if WmMailRequest(WmRpcKindDeclareFullscreen, 4, 0, 0, 0, 0, "T", "NOTE.ELF", 1) {
+	if WmMailRequest(WmRpcKindDeclareFullscreen, 4, 0, 0, 0, 0, "T", "NOTE.ELF") {
 		t.Fatal("silent seat must refuse, not succeed")
 	}
 	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
@@ -240,10 +369,10 @@ func TestWmMailRequestSilentSeatRefuses(t *testing.T) {
 
 func TestWmMailRequestAckApplied(t *testing.T) {
 	f := startWmMailFake(t)
-	rep := WmRpc{Kind: WmRpcKindDeclareFullscreen | WmRpcReplyFlag, ID: 4, Seq: 1, Applied: 1}
+	rep := WmRpc{Kind: WmRpcKindDeclareFullscreen | WmRpcReplyFlag, ID: 4, Seq: 1, ReplyTo: 9, Applied: 1}
 	f.reply = rep.Encode()
 	f.replyAt = 1
-	if !WmMailRequest(WmRpcKindDeclareFullscreen, 4, 0, 0, 0, 0, "T", "NOTE.ELF", 1) {
+	if !WmMailRequest(WmRpcKindDeclareFullscreen, 4, 0, 0, 0, 0, "T", "NOTE.ELF") {
 		t.Fatal("applied ack should succeed")
 	}
 	if f.recvCalls != 1 {
@@ -256,10 +385,10 @@ func TestWmMailRequestAckApplied(t *testing.T) {
 
 func TestWmMailRequestAckRefused(t *testing.T) {
 	f := startWmMailFake(t)
-	rep := WmRpc{Kind: WmRpcKindDeclareFullscreen | WmRpcReplyFlag, ID: 4, Seq: 1, Applied: 0}
+	rep := WmRpc{Kind: WmRpcKindDeclareFullscreen | WmRpcReplyFlag, ID: 4, Seq: 1, ReplyTo: 9, Applied: 0}
 	f.reply = rep.Encode()
 	f.replyAt = 1
-	if WmMailRequest(WmRpcKindDeclareFullscreen, 4, 0, 0, 0, 0, "T", "NOTE.ELF", 1) {
+	if WmMailRequest(WmRpcKindDeclareFullscreen, 4, 0, 0, 0, 0, "T", "NOTE.ELF") {
 		t.Fatal("applied=0 ack is a refusal")
 	}
 	if f.sleepCalls != 0 {
@@ -269,10 +398,10 @@ func TestWmMailRequestAckRefused(t *testing.T) {
 
 func TestWmMailRequestAckAfterPark(t *testing.T) {
 	f := startWmMailFake(t)
-	rep := WmRpc{Kind: WmRpcKindDeclareFullscreen | WmRpcReplyFlag, ID: 4, Seq: 1, Applied: 1}
+	rep := WmRpc{Kind: WmRpcKindDeclareFullscreen | WmRpcReplyFlag, ID: 4, Seq: 1, ReplyTo: 9, Applied: 1}
 	f.reply = rep.Encode()
 	f.replyAt = 3
-	if !WmMailRequest(WmRpcKindDeclareFullscreen, 4, 0, 0, 0, 0, "T", "NOTE.ELF", 1) {
+	if !WmMailRequest(WmRpcKindDeclareFullscreen, 4, 0, 0, 0, 0, "T", "NOTE.ELF") {
 		t.Fatal("ack after two empty probes should succeed")
 	}
 	if f.recvCalls != 3 {
@@ -300,7 +429,7 @@ func TestPollNavSilentSeatRefuses(t *testing.T) {
 
 func TestPollNavAckReturnsPath(t *testing.T) {
 	f := startWmMailFake(t)
-	rep := WmRpc{Kind: WmRpcKindNavPoll | WmRpcReplyFlag, ID: 4, Seq: 7, Applied: 1}
+	rep := WmRpc{Kind: WmRpcKindNavPoll | WmRpcReplyFlag, ID: 4, Seq: 1, ReplyTo: 9, Applied: 1}
 	rep.SetTitle("/host")
 	f.reply = rep.Encode()
 	f.replyAt = 1
