@@ -50,6 +50,15 @@
 # clipboard+timer composition); the theme-token boots were retired with it.
 #
 # HOST PREREQUISITE: bash tools/go/build-note.sh -> .build/go/NOTE.ELF
+#
+# M79a (#1704): the seat is LIVE by default -- no run budget, no auto-close,
+# no strip choreography. The bounded M57-era demo is DEMO mode, opted in by
+# the PRESENCE of /host/GOTABWM.DEMO; the setup below seeds it so runs 01-04
+# drive exactly the choreography they always have. Run 05 REMOVES the trigger
+# before exec and proves the product default: the loop ticks PAST the demo
+# ceiling (maxTicks 90) with the tab still open, nothing ever says `host
+# done`/`tab close`, and the run ends by KILLING the seat -- process exit,
+# which still unwinds through the kernel's exit seam (`wm: unregistered`).
 
 vgate_name go-wm-seat "issues #1313/#1317/#1318 M57a+b+c: a Go WM registers the slot-65 seat and HOSTS GOCALC.ELF/NOTE.ELF/GOVIEW.ELF on VZ"
 vgate_share seed
@@ -109,6 +118,13 @@ print("staged GOCALC.ELF into share (%d bytes)" %
 with open(os.path.join(share, "SETTINGS.TXT"), "w") as f:
     f.write("#v2\nwm=none\n")
 print("seeded SETTINGS.TXT (wm=none: shim-only boot, explicit seat opt-in)")
+# M79a (#1704): the demo choreography is opt-in (the trigger's PRESENCE).
+# Runs 01-04 drive it, so seed the fixture here; run 05 removes it with
+# `vf rm GOTABWM.DEMO` before exec and proves the live default instead.
+# A daily session never stages this file and gets the live seat.
+with open(os.path.join(share, "GOTABWM.DEMO"), "w") as f:
+    f.write("demo\n")
+print("seeded GOTABWM.DEMO (seat demo mode: bounded choreography)")
 PY
 
 vgate_setup_python <<'PY'
@@ -466,3 +482,64 @@ assert ink >= 20, ("only %d ink-white pixels in the panel rect - the clock face 
 assert green == 0, ("%d console-green pixels inside the panel rect - the kernel's "
                     "terminal is compositing over the seat's scanout" % green)
 PY
+
+# --- M79a (#1704) run 05: LIVE mode persistence --------------------------
+# Runs 01-04 opt into the bounded demo (the seeded trigger). This run removes
+# the trigger BEFORE exec, so the seat runs its product default: no run
+# budget, no auto-close, no choreography. It hosts GOCALC.ELF and simply keeps
+# going; `gotabwm: live steady tabs=` prints only once the loop has ticked
+# PAST the demo ceiling (maxTicks = 90), and the run then KILLS the seat
+# (process exit -- the kernel's exit seam still tears it down, M52). Nothing
+# may say `host done`, `tab close id=`, `host close id=`, or `gocalc: close`.
+vgate_file script-live.txt <<'EOF'
+vf rm GOTABWM.DEMO
+set GOMAXPROCS=1
+wm
+exec GOTABWM.ELF
+EOF
+
+vgate_file script2-live.txt <<'EOF'
+dui
+dui focus 0
+exec GOCALC.ELF
+EOF
+
+vgate_file script3-live.txt <<'EOF'
+kill GOTABWM.ELF
+wm
+echo rx-gotabwm-live-ok
+EOF
+
+vgate_run 05 -- \
+    --screen '$RUN_DIR/screen-live' \
+    --script '$RUN_DIR/script-live.txt' \
+    --script2 '$RUN_DIR/script2-live.txt' \
+    --script2-after 'gotabwm: win focus' \
+    --script3 '$RUN_DIR/script3-live.txt' \
+    --script3-after 'gotabwm: live steady ' \
+    --script-expect 'rx-gotabwm-live-ok' --script-expect-tail 30 --timeout 420
+
+vgate_assert 05 serial-contains 'exec: loaded GOTABWM.ELF'
+vgate_assert 05 serial-contains 'gotabwm: mode live'
+vgate_assert 05 serial-absent 'gotabwm: mode demo'
+vgate_assert 05 serial-contains 'gotabwm: registered'
+vgate_assert 05 serial-contains 'gotabwm: holding seat'
+vgate_assert 05 serial-contains 'gotabwm: present'
+vgate_assert 05 serial-contains 'exec: loaded GOCALC.ELF'
+vgate_assert 05 serial-contains 'gotabwm: rpc declare id='
+vgate_assert 05 serial-contains 'gocalc: declare accepted'
+vgate_assert 05 serial-contains 'gotabwm: host view id='
+vgate_assert 05 serial-contains 'gotabwm: tab open id='
+# The loop outlived the old ceiling, and the tab survived it: the steady
+# marker prints only at tick maxTicks+1, nothing auto-closed before then, and
+# the absent asserts below pin that nothing closed after.
+vgate_assert 05 serial-contains 'gotabwm: live steady tabs='
+vgate_assert 05 serial-count 'gotabwm: tick' 91
+vgate_assert 05 serial-absent 'gotabwm: host close id='
+vgate_assert 05 serial-absent 'gotabwm: tab close id='
+vgate_assert 05 serial-absent 'gotabwm: host done'
+vgate_assert 05 serial-absent 'gocalc: close'
+vgate_assert 05 serial-contains 'wm: unregistered, shim resumed'
+vgate_assert 05 serial-contains 'rx-gotabwm-live-ok'
+vgate_assert 05 serial-absent '[EXC] parking:'
+vgate_assert 05 serial-absent 'exited status=139'

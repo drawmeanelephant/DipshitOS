@@ -35,13 +35,19 @@
 # M71h (#1567): and the image viewer -- GOVIEW.ELF must be offered while
 # VIEW.BIN must not, for the same reason.
 #
-# Run 04 (M71d / #1563, M48 BT1): seat-only. One client (GOCALC.ELF via
+# Runs 04/05 (M71d / #1563, M48 BT1): seat-only. One client (GOCALC.ELF via
 # script2), whose single-tab path auto-closes it after hostTicks, recording the
-# bin in the reopen LIFO. The chord batch then fires on that close marker:
-# ctrl-shift-t reopens the closed bin and ctrl-shift-d duplicates the reopened
-# tab (--input-chords-delay spaces them so the clone has declared). Seat-only
-# because three Go runtimes is the #1449 wall. Run 02's M62e SESSION.TABS is
-# cleared before this boot: a restore sets stripDone and skips the auto-close.
+# bin in the reopen LIFO. Run 04's chord fires on that close marker
+# (ctrl-shift-t reopens the closed bin); run 05's chord fires on the client's
+# tab-open marker (ctrl-shift-d duplicates the focused tab). The two chords are
+# proven in SEPARATE boots on purpose: the cv-input chord transport paces at a
+# fixed 0.25 s/stroke and IGNORES --input-chords-delay (VMRunner main.swift,
+# DELIVERY TRANSPORT), so in one batch the duplicate chord always lands before
+# the re-exec'd clone has declared and DuplicateFocused() honest-no-ops --
+# measured 2026-09-24 (and identically at baseline 8bcda39): `reopen` prints,
+# `duplicate` does not. Seat-only because three Go runtimes is the #1449 wall.
+# Run 02's M62e SESSION.TABS is cleared before this boot: a restore sets
+# stripDone and skips the auto-close.
 #
 # Two equal-width cells on a 1280 rail: tab 0 [0,640)=(320,10), tab 1
 # [640,1280)=(960,10). Zig's left-rail (158,70) is the wrong target.
@@ -86,6 +92,22 @@ wm
 dui
 echo rx-gotabwm-hid-drag-ok
 EOF
+
+# M79a (#1704): the seat's bounded demo choreography (auto-close, the
+# reorder/pin/split chain, the run budget) is DEMO mode, opted in by the
+# PRESENCE of /host/GOTABWM.DEMO. This spec's runs drive it -- run 04's
+# reopen chord fires ON the single-tab auto-close, run 05's duplicate chord on
+# the tab-open marker -- so the trigger is seeded like any other share fixture;
+# a daily session never stages it and gets the live seat (go-wm-seat run 05
+# proves that path end to end).
+vgate_setup_python <<'PY'
+import os
+rd = os.environ["RUN_DIR"]
+share = os.environ.get("VG_SHARE") or os.path.join(rd, "share")
+with open(os.path.join(share, "GOTABWM.DEMO"), "w") as f:
+    f.write("demo\n")
+print("seeded GOTABWM.DEMO (seat demo mode: bounded choreography)")
+PY
 
 vgate_setup_python <<'PY'
 import os, shutil, sys
@@ -455,15 +477,18 @@ if os.path.exists(stale):
 PY
 
 # ---------------------------------------------------------------------------
-# Run 04 (M71d / #1563, M48 BT1): the reopen and duplicate chords.
+# Run 04 (M71d / #1563, M48 BT1): the reopen chord.
 #
-# Seat-only, one client. Boot 03 proves the launcher; this boot proves BT1.
+# Seat-only, one client. Boot 03 proves the launcher; these boots prove BT1.
 # The seat hosts GOCALC.ELF, whose single-tab path closes it after hostTicks
-# (~16) — that close is what populates the reopen LIFO. The chord batch fires
-# on that close marker: ctrl-shift-t reopens the just-closed bin, and after
-# --input-chords-delay the reopened client has declared, so the following
-# ctrl-shift-d duplicates it. Three Go runtimes (seat + two clients) is the
-# #1449 wall, which is why this is seat-only and not the GOEDIT+GOTERM pair.
+# (~16) — that close is what populates the reopen LIFO. The chord fires on
+# that close marker and re-execs the recorded bin; the clone declares and
+# joins as a fresh tab. The duplicate chord is run 05's, in its own boot: a
+# same-batch ctrl-shift-d lands 0.25 s after the reopen (cv-input pacing,
+# --input-chords-delay ignored) and before the clone's declare, where
+# DuplicateFocused() is an honest no-op (measured 2026-09-24). Three Go
+# runtimes (seat + two clients) is the #1449 wall, which is why this is
+# seat-only and not the GOEDIT+GOTERM pair.
 vgate_file script-bt1.txt <<'EOF'
 set GOMAXPROCS=1
 wm
@@ -487,9 +512,8 @@ vgate_run 04 -- \
     --script '$RUN_DIR/script-bt1.txt' \
     --script2 '$RUN_DIR/script2-bt1.txt' \
     --script2-after 'gotabwm: win focus' \
-    --input-chords 'ctrl-shift-t,ctrl-shift-d' \
+    --input-chords 'ctrl-shift-t' \
     --input-chords-after 'gotabwm: tab close id=' \
-    --input-chords-delay 4.0 \
     --script3 '$RUN_DIR/script3-bt1.txt' \
     --script3-after 'wm: unregistered, shim resumed' \
     --script-expect 'rx-gotabwm-bt1-ok' --timeout 300
@@ -499,12 +523,9 @@ vgate_assert 04 serial-contains 'exec: loaded GOTABWM.ELF'
 vgate_assert 04 serial-contains 'gotabwm: registered'
 vgate_assert 04 serial-contains 'exec: loaded GOCALC.ELF'
 vgate_assert 04 serial-contains 'gotabwm: tab open id='
-# BT1: the chord outcomes name the re-exec'd executable.
+# BT1: the chord outcome names the re-exec'd executable.
 vgate_assert 04 serial-contains 'gotabwm: reopen GOCALC.ELF'
-vgate_assert 04 serial-contains 'gotabwm: duplicate GOCALC.ELF'
-vgate_assert 04 serial-contains 'gotabwm: rail n=2 focus='
 vgate_assert 04 serial-absent 'gotabwm: reopen missing '
-vgate_assert 04 serial-absent 'gotabwm: duplicate missing '
 vgate_assert 04 serial-contains 'gotabwm: close'
 vgate_assert 04 serial-contains 'gotabwm OK'
 vgate_assert 04 serial-contains 'wm: unregistered, shim resumed'
@@ -523,29 +544,106 @@ def first_after(prefix, start=0):
 
 close_i = first_after("gotabwm: tab close id=")
 reopen_i = first_after("gotabwm: reopen GOCALC.ELF")
-dup_i = first_after("gotabwm: duplicate GOCALC.ELF")
 if reopen_i <= close_i:
     sys.exit("reopen must follow the close that recorded the bin (close@%d reopen@%d)" %
              (close_i, reopen_i))
-if dup_i <= reopen_i:
-    sys.exit("duplicate must follow reopen (reopen@%d dup@%d)" % (reopen_i, dup_i))
-# The seat's own markers are the authoritative evidence: each re-exec'd app
-# declared over WM_RPC and joined the strip as a fresh tab, so three opens.
+# The seat's own markers are the authoritative evidence: the re-exec'd app
+# declared over WM_RPC and joined the strip as a fresh tab.
 # NOT asserted: `exec: loaded GOCALC.ELF`, which is the MONITOR's exec-command
 # echo. The seat's vi.Exec goes through the ADR 0007 slot-28 syscall and does
 # not print it (measured 2026-09-21: exactly one such line, the script2 exec).
 opens = [i for i, l in enumerate(ser) if l.startswith("gotabwm: tab open id=")]
-if len(opens) < 3:
-    sys.exit("want 3 tab opens (initial + reopen + duplicate), got %d" % len(opens))
-if len([i for i in opens if i > reopen_i]) < 2:
-    sys.exit("want an open after BOTH chords (reopen@%d opens=%s)" % (reopen_i, opens))
+if len(opens) < 2:
+    sys.exit("want 2 tab opens (initial + reopen), got %d" % len(opens))
+if len([i for i in opens if i > reopen_i]) < 1:
+    sys.exit("want an open after the reopen chord (reopen@%d opens=%s)" % (reopen_i, opens))
 # Each re-exec is a real process that runs to a clean exit, not a fake ack.
-exits = [i for i, l in enumerate(ser) if l == "gocalc OK"]
-if len(exits) < 3:
-    sys.exit("want 3 GOCALC processes to exit cleanly, got %d" % len(exits))
-# Duplicate put a SECOND tab on the strip: the rail is n=2 with the clone focused.
+# Substring match, the house serial-contains semantic: teardown-time console
+# output can interleave a byte fragment onto the marker's line (measured
+# 2026-09-24: `40gocalc OK` while tasks were tearing down). The marker itself
+# is the evidence; an exact-line check rejected a real clean exit.
+exits = [i for i, l in enumerate(ser) if "gocalc OK" in l]
+if len(exits) < 2:
+    sys.exit("want 2 GOCALC processes to exit cleanly, got %d" % len(exits))
+print("BT1 reopen: close@%d reopen@%d; %d tab opens, %d clean GOCALC exits" % (
+    close_i, reopen_i, len(opens), len(exits)))
+PY
+
+# ---------------------------------------------------------------------------
+# Run 05 (M71d / #1563, M48 BT1): the duplicate chord.
+#
+# Same boot shape, one client. The chord fires on the client's own tab-open
+# marker -- the focused tab exists and carries its bin -- and ctrl-shift-d
+# re-execs it; the clone declares and the strip reads n=2 with the clone
+# focused. (Run 04 carries the reopen chord; see the transport note above for
+# why one batch cannot carry both.) The single-tab countdown window is
+# hostTicks (~16 ticks) and the clone's declare lands ~5 ticks after the chord
+# (measured 2026-09-24, by marker spacing), well inside it; seeing two tabs
+# latches stripSawTwo so the countdown never fires (compositeTick).
+vgate_file script3-bt1-dup.txt <<'EOF'
+wm
+dui
+echo rx-gotabwm-bt1-dup-ok
+EOF
+
+vgate_run 05 -- \
+    --screen '$RUN_DIR/screen-05' \
+    --via-virtio \
+    --script '$RUN_DIR/script-bt1.txt' \
+    --script2 '$RUN_DIR/script2-bt1.txt' \
+    --script2-after 'gotabwm: win focus' \
+    --input-chords 'ctrl-shift-d' \
+    --input-chords-after 'gotabwm: tab open id=' \
+    --script3 '$RUN_DIR/script3-bt1-dup.txt' \
+    --script3-after 'wm: unregistered, shim resumed' \
+    --script-expect 'rx-gotabwm-bt1-dup-ok' --timeout 300
+
+vgate_assert 05 serial-contains 'VirelaiOS kernel has seized control.'
+vgate_assert 05 serial-contains 'exec: loaded GOTABWM.ELF'
+vgate_assert 05 serial-contains 'gotabwm: registered'
+vgate_assert 05 serial-contains 'exec: loaded GOCALC.ELF'
+vgate_assert 05 serial-contains 'gotabwm: tab open id='
+# BT1: the chord outcome names the re-exec'd executable.
+vgate_assert 05 serial-contains 'gotabwm: duplicate GOCALC.ELF'
+vgate_assert 05 serial-absent 'gotabwm: duplicate missing '
+vgate_assert 05 serial-contains 'gotabwm: rail n=2 focus='
+vgate_assert 05 serial-contains 'gotabwm: close'
+vgate_assert 05 serial-contains 'gotabwm OK'
+vgate_assert 05 serial-contains 'wm: unregistered, shim resumed'
+vgate_assert 05 serial-contains 'rx-gotabwm-bt1-dup-ok'
+vgate_assert 05 serial-absent '[EXC] parking:'
+vgate_assert 05 serial-absent 'exited status=139'
+vgate_assert 05 python <<'PY'
+import os, sys
+ser = open(os.environ["VG_SER"], errors="replace").read().splitlines()
+
+def first_after(prefix, start=0):
+    for i in range(start, len(ser)):
+        if ser[i].startswith(prefix):
+            return i
+    sys.exit("missing %s after %d" % (prefix, start))
+
+open_i = first_after("gotabwm: tab open id=")
+dup_i = first_after("gotabwm: duplicate GOCALC.ELF")
+if dup_i <= open_i:
+    sys.exit("duplicate must follow the focused tab's open (open@%d dup@%d)" %
+             (open_i, dup_i))
+opens = [i for i, l in enumerate(ser) if l.startswith("gotabwm: tab open id=")]
+if len(opens) < 2:
+    sys.exit("want 2 tab opens (initial + clone), got %d" % len(opens))
+if len([i for i in opens if i > dup_i]) < 1:
+    sys.exit("want an open after the duplicate chord (dup@%d opens=%s)" % (dup_i, opens))
+# Each re-exec is a real process that runs to a clean exit, not a fake ack.
+# Substring match, the house serial-contains semantic: teardown-time console
+# output can interleave a byte fragment onto the marker's line (measured
+# 2026-09-24: `40gocalc OK` while tasks were tearing down). The marker itself
+# is the evidence; an exact-line check rejected a real clean exit.
+exits = [i for i, l in enumerate(ser) if "gocalc OK" in l]
+if len(exits) < 2:
+    sys.exit("want 2 GOCALC processes to exit cleanly, got %d" % len(exits))
+# The clone put a SECOND tab on the strip: the rail is n=2 with the clone focused.
 if not any(l.startswith("gotabwm: rail n=2 focus=") and i > dup_i for i, l in enumerate(ser)):
     sys.exit("duplicate left no n=2 rail after the chord")
-print("BT1: close@%d reopen@%d duplicate@%d; %d tab opens, %d clean GOCALC exits" % (
-    close_i, reopen_i, dup_i, len(opens), len(exits)))
+print("BT1 dup: open@%d duplicate@%d; %d tab opens, %d clean GOCALC exits" % (
+    open_i, dup_i, len(opens), len(exits)))
 PY
