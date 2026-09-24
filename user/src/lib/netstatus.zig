@@ -1,8 +1,10 @@
 //! N13/N14 (march-m26): network preflight for userland net apps.
 //!
-//! FETCH.BIN calls `check()` (one `sys_net_stats` snapshot, slot 62 — the
-//! M26 N2 seam, zero new kernel surface) before its first network operation.
-//! The pure classifier below turns the snapshot into a diagnosis so the app
+//! FETCH.BIN (retired with user/src/fetch.zig in M78b, #1683) used to call
+//! `check()` (one `sys_net_stats` snapshot, slot 62 — the M26 N2 seam, zero
+//! new kernel surface) before its first network operation; its successor,
+//! GOFETCH.ELF's cleartext mode, calls the Go twin below instead. The pure
+//! classifier in this file turns a snapshot into a diagnosis so the app
 //! exits FAST with a human message instead of burning its bounded timeout /
 //! printing generic send failures. PING.BIN was the other caller until M71n
 //! (#1573) retired it: its Go successor GOPING.ELF reads the same snapshot

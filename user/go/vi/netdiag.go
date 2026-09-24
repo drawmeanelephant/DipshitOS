@@ -1,9 +1,10 @@
 package vi
 
 // M71n (issue #1573): the Go twin of user/src/lib/netstatus.zig — the N13/N14
-// offline/no-route preflight. PING.BIN (Zig) and FETCH.BIN (Zig) got their
-// verdict from that file; GOPING.ELF is a Go program, so it needs the same
-// classifier on its side of the boundary, and this is it.
+// offline/no-route preflight. PING.BIN and FETCH.BIN (both Zig, both now
+// retired) got their verdict from that file; GOPING.ELF and GOFETCH.ELF's
+// cleartext mode (M78b, issue #1683) are Go programs, so they need the same
+// classifier on their side of the boundary, and this is it.
 //
 // The classification itself is pure (a snapshot in, a verdict out), which is
 // what makes it host-testable: only NetPreflight touches the kernel, with one

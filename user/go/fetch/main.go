@@ -1,14 +1,16 @@
-// Command fetch is the M67b (issue #1447) Go HTTPS consumer: GET https://
-// in-process via virelai/tls over vi.Dial (ADR 0029). FETCHS.BIN is not
-// exec'd. Full-viewport via tabapp inside Zig TABWM when that seat is
-// running; declare is best-effort so a raw-window live-web boot still
-// works.
+// Command fetch is the Go HTTP consumer. M67b (issue #1447) added the
+// windowed HTTPS mode: GET https:// in-process via virelai/tls over vi.Dial
+// (ADR 0029). M78b (issue #1683) added the headless cleartext mode that
+// succeeded the retired Zig FETCH.BIN/DOWNLOAD.BIN (legacy.go):
 //
-// Usage: exec GOFETCH.ELF https://10.0.0.2:24533/ [sni [expect-fail]]
+//	exec GOFETCH.ELF https://10.0.0.2:24533/ [sni [expect-fail]]  (windowed TLS)
+//	exec GOFETCH.ELF http://10.0.0.2/                           (console fetch, exit 42)
+//	exec GOFETCH.ELF --download [http://10.0.0.2/file.bin [DEST]] (save body, exit 0)
 //
 // expect-fail is name|expired|chain: the handshake must fail closed (the
 // live-tls13-equivalent negatives). An https URL is never rewritten to
-// http and never armed as a cleartext GET.
+// http and never armed as a cleartext GET; an explicit http:// URL is the
+// only path onto the cleartext socket.
 package main
 
 import (
@@ -65,6 +67,12 @@ type app struct {
 
 func main() {
 	argvPad[0] = 1
+	// M78b: an explicit http:// URL (or --download) is the headless legacy
+	// path and never opens a window; everything else (including no args)
+	// is the windowed HTTPS consumer.
+	if _, legacy := parseLegacyArgs(vi.Args()); legacy {
+		runLegacyCLI(vi.Args())
+	}
 	ta := tabapp.Init(tabapp.Config{Name: appName, Title: appTitle, X: 40, Y: 28, W: natW, H: natH})
 	if ta == nil {
 		vi.ConsoleLine("gofetch: error open -1")

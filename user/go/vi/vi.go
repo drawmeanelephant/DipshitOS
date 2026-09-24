@@ -282,9 +282,11 @@ func Yield() { _ = syscall0(SlotYield) }
 // Sleep blocks the calling task for ticks scheduler ticks.
 func Sleep(ticks uint64) { _ = syscall1(SlotSleep, uintptr(ticks)) }
 
-// Exit terminates the process with the given status.
+// Exit terminates the process with the given status. It routes through the
+// svc1 hook seam so a HOST test can observe the status without leaving the
+// Go runtime; the guest path is unchanged.
 func Exit(status int) {
-	_ = syscall1(SlotExit, uintptr(status))
+	_ = svc1(SlotExit, uintptr(status))
 	// The kernel never returns here; keep looping so a stray return cannot
 	// fall through into other code.
 	for {

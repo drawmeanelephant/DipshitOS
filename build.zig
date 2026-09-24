@@ -735,27 +735,15 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&install_tcp.step);
 
     // ------------------------------------------------------------------
-    // Guest: nineteenth ESP user program (milestone twelve, card N3 — claim 5416)
-    // FETCH.BIN. Userland HTTP/1.0 client.
+    // M78b (#1683): FETCH.BIN (milestone twelve, card N3) and DOWNLOAD.BIN
+    // (M26 N11, #438) are RETIRED with user/src/fetch.zig and
+    // user/src/download.zig. The HTTP client is Go: GOFETCH.ELF
+    // (user/go/fetch, built by tools/go/build-web.sh) answers an explicit
+    // http:// URL on the console with the old fetch: markers / 42 / 3 / 4
+    // contract, and --download saves the body to the host share. The Zig TLS
+    // consumer was already gone (M71k); there is no build step to replace
+    // these two (the same shape as the FETCHS.BIN retirement below).
     // ------------------------------------------------------------------
-    const fetch_prog = b.addExecutable(.{
-        .name = "user-fetch",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("user/src/fetch.zig"),
-            .target = kernel_target,
-            .optimize = .ReleaseSmall,
-        }),
-    });
-    fetch_prog.linker_script = b.path("user/linker.ld");
-    const fetch_step = b.step("fetch", "Build the nineteenth ESP user program (zig-out/bin/FETCH.BIN)");
-    const fetch_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
-    fetch_elf2bin.addFileArg(fetch_prog.getEmittedBin());
-    const fetch_bin = fetch_elf2bin.addOutputFileArg("FETCH.BIN");
-    fetch_elf2bin.has_side_effects = true;
-    fetch_elf2bin.stdio = .inherit;
-    fetch_step.dependOn(&fetch_elf2bin.step);
-    const install_fetch = b.addInstallFileWithDir(fetch_bin, .bin, "FETCH.BIN");
-    b.getInstallStep().dependOn(&install_fetch.step);
 
     // ------------------------------------------------------------------
     // Guest: M51 SSH1 (#1168) class-B proof program — SSHPACKET.BIN. The
@@ -1404,29 +1392,6 @@ pub fn build(b: *std.Build) void {
     m21demo_step.dependOn(&m21demo_elf2bin.step);
     const install_m21demo = b.addInstallFileWithDir(m21demo_bin, .bin, "M21DEMO.BIN");
     b.getInstallStep().dependOn(&install_m21demo.step);
-
-    // ------------------------------------------------------------------
-    // Guest: forty-first ESP user program (M26 N11 — issue #438) DOWNLOAD.BIN.
-    // HTTP file download manager saving response body to FAT32 storage.
-    // ------------------------------------------------------------------
-    const download_prog = b.addExecutable(.{
-        .name = "user-download",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("user/src/download.zig"),
-            .target = kernel_target,
-            .optimize = .ReleaseSmall,
-        }),
-    });
-    download_prog.linker_script = b.path("user/linker.ld");
-    const download_step = b.step("download", "Build the forty-first ESP user program (zig-out/bin/DOWNLOAD.BIN)");
-    const download_elf2bin = b.addSystemCommand(&.{ "python3", "tools/elf2bin.py" });
-    download_elf2bin.addFileArg(download_prog.getEmittedBin());
-    const download_bin = download_elf2bin.addOutputFileArg("DOWNLOAD.BIN");
-    download_elf2bin.has_side_effects = true;
-    download_elf2bin.stdio = .inherit;
-    download_step.dependOn(&download_elf2bin.step);
-    const install_download = b.addInstallFileWithDir(download_bin, .bin, "DOWNLOAD.BIN");
-    b.getInstallStep().dependOn(&install_download.step);
 
     // ------------------------------------------------------------------
     // Guest: forty-third ESP user program (M26 N12 — issue #439) NETPROF.BIN.
