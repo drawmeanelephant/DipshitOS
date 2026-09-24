@@ -168,6 +168,22 @@ vgate_file script-01c.txt <<'EOF'
 echo rx-dogfood-01-ok
 EOF
 
+# M79a (#1704): the seat's bounded demo choreography (auto-close, the
+# reorder/pin/split chain, the run budget + exit sweep) is DEMO mode, opted
+# in by the PRESENCE of /host/GOTABWM.DEMO. This spec's boots autostart the
+# seat and its acceptance chains are written against that choreography (boot
+# 04 ends on the budget + sweep), so the trigger is seeded here like any
+# other share fixture. A daily session never stages this file and gets the
+# live seat (go-wm-seat run 05 proves that path end to end).
+vgate_setup_python <<'PY'
+import os
+rd = os.environ["RUN_DIR"]
+share = os.environ.get("VG_SHARE") or os.path.join(rd, "share")
+with open(os.path.join(share, "GOTABWM.DEMO"), "w") as f:
+    f.write("demo\n")
+print("seeded GOTABWM.DEMO (seat demo mode: bounded choreography)")
+PY
+
 vgate_setup_python <<'PY'
 import os, shutil, sys
 rd = os.environ["RUN_DIR"]

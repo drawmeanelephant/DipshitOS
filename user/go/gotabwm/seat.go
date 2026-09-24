@@ -13,8 +13,19 @@
 //	WM_POINTER (kind 19)            -> gotabwm: ptr
 //	WM_KEY (kind 21)                -> gotabwm: key
 //	vi.WmctlRequestPresent (65/3)   -> gotabwm: present
-//	loop bound reached              -> gotabwm: close
+//	loop bound reached (demo only)  -> gotabwm: close
 //	clean exit                      -> gotabwm OK
+//
+// M79a (#1704): the loop is LIVE by default -- it runs until the process is
+// killed, never auto-closes a hosted tab, and never runs the strip
+// choreography. The bounded M57-era demo (the maxTicks ceiling, the hostTicks
+// auto-close, and the reorder/pin/split/close chain) is DEMO mode, entered
+// only when the harness seeds /host/GOTABWM.DEMO. The mode is decided once at
+// startup and named in one marker, before the window phase:
+//
+//	seeded /host/GOTABWM.DEMO       -> gotabwm: mode demo
+//	absent (the product default)    -> gotabwm: mode live
+//	live tick past the demo ceiling -> gotabwm: live steady tabs=<n>
 //
 // Each marker is printed ONLY after its syscall/step succeeded, so the marker
 // chain IS the syscall chain. The kernel's exit path unregisters the seat and
@@ -49,6 +60,14 @@ const (
 	MarkerPresent    = "gotabwm: present"
 	MarkerClose      = "gotabwm: close"
 	MarkerOK         = "gotabwm OK"
+	// M79a (#1704): the seat mode split. ModeDemo/ModeLive print once at
+	// startup; LiveSteady prints once, and only after the live loop has
+	// actually ticked PAST the demo ceiling (maxTicks) -- carrying the tab
+	// count so the persistence proof and the "tab still open" fact are one
+	// honest line.
+	MarkerModeDemo   = "gotabwm: mode demo"
+	MarkerModeLive   = "gotabwm: mode live"
+	MarkerLiveSteady = "gotabwm: live steady "
 	// M69a (issue #1528): the dogfood beat's own two markers, owned by
 	// go-dogfood.spec. MarkerDogfoodSeat is the DEFAULT seat announcing it owns
 	// the desktop (printed once the registration AND the one-seat probe both
@@ -63,6 +82,35 @@ const (
 // blankRGB is the blank desktop's colour, packed 0x00RRGGBB as the fill seam
 // takes it (the scanout stores it B,G,R,X).
 func blankRGB() uint32 { return theme.Current.Bg }
+
+// demoTriggerPath is the harness's explicit opt-in to the bounded M57-era
+// demo choreography (M79a). Its PRESENCE at seat startup selects demo mode;
+// absence is the product default (live). The class-B specs stage it (a
+// monitor `write GOTABWM.DEMO demo`, or a setup-python seed for autostart
+// boots) and the one live run removes it (`vf rm GOTABWM.DEMO`). Nothing
+// else may seed it -- a daily session must never run the choreography.
+const demoTriggerPath = "/host/GOTABWM.DEMO"
+
+// openFile is the FileOpen seam for the demo probe (the execApp pattern in
+// hid.go): host tests inject a stub so the detection is testable off the
+// guest, where every vi call degrades to -ENOSYS.
+var openFile = vi.FileOpen
+
+// demoMode is this process's seat mode, decided once in main via detectDemo.
+// False (live) is the product default and the zero value.
+var demoMode bool
+
+// detectDemo probes the trigger's existence: found -> demo, absent (or any
+// open error, including the host's -ENOSYS) -> live. Content is deliberately
+// irrelevant -- presence IS the opt-in.
+func detectDemo() bool {
+	h, r := openFile(demoTriggerPath, vi.ModeRead)
+	if r < 0 {
+		return false
+	}
+	vi.FileClose(uint32(h))
+	return true
+}
 
 // maxTicks bounds the composite loop so a boot can never hang (~1 tick/s).
 // Three Go runtimes (this seat + two clients) fit max_tasks=16 (M65d /
@@ -132,6 +180,16 @@ func main() {
 	seatWM := loadSettings()
 	emitTokens()
 
+	// M79a (#1704): decide the seat mode once, and name it before the window
+	// phase so every script anchor downstream sees it. Live is the product
+	// default; demo is the harness's explicit opt-in (the seeded trigger).
+	demoMode = detectDemo()
+	if demoMode {
+		vi.ConsoleLine(MarkerModeDemo)
+	} else {
+		vi.ConsoleLine(MarkerModeLive)
+	}
+
 	// 5. The seat's OWN window lifecycle (M57b, issue #1317): open a Go
 	//    window, submit a chrome descriptor and a kernel-clamped rect, take
 	//    focus and lose it, close through the WM seam, and leave a window
@@ -160,12 +218,15 @@ func main() {
 	//    request is serviced between ticks.
 	// Give the default GOSH starter its own normal hostTicks window before the
 	// seat's existing bounded demo loop expires. Other boot paths keep maxTicks.
+	// M79a (#1704): tickLimit and the whole run budget are DEMO mode only.
+	// In live mode the loop has no ceiling -- it ends only when the process is
+	// killed, and the kernel's exit seam still tears the seat down (M52).
 	tickLimit := maxTicks
 	if firstBootStarted {
 		tickLimit += hostTicks
 	}
 	presents, ticks := 0, 0
-	for events := 0; events < maxEvents && ticks < tickLimit; {
+	for events := 0; !demoMode || (events < maxEvents && ticks < tickLimit); {
 		serviceRPC()
 		e, ok := vi.PollEvent()
 		if !ok {
@@ -177,13 +238,25 @@ func main() {
 		// the seat is between ticks; processing only one leaves focus-dependent
 		// input behind the heartbeat and makes the next chord race the prior
 		// focus transition. Each tick still gets its own composite/present pass.
-		events += drainSeatEvents(e, vi.PollEvent, consumeSeatEvent, maxEvents-events, func() bool {
-			if ticks >= tickLimit {
+		bound := maxEvents - events
+		if !demoMode {
+			// Live mode has no run budget; the per-burst drain bound stays so
+			// a flood still cannot starve the composite loop.
+			bound = maxEvents
+		}
+		events += drainSeatEvents(e, vi.PollEvent, consumeSeatEvent, bound, func() bool {
+			if demoMode && ticks >= tickLimit {
 				return false
 			}
 			ticks++
 			compositeTick(scan, uint64(ticks), &presents)
-			return ticks < tickLimit
+			if !demoMode && ticks == maxTicks+1 {
+				// The live-persistence proof: printed only once the loop has
+				// ACTUALLY ticked past the demo ceiling, carrying how many
+				// tabs are still open (live mode auto-closes nothing).
+				vi.ConsoleLine(MarkerLiveSteady + "tabs=" + vi.Itoa64(int64(tabs.Count())))
+			}
+			return !demoMode || ticks < tickLimit
 		})
 	}
 	// M73z (#1638): the budget can expire with a tab still open — a late
@@ -266,7 +339,10 @@ func compositeTick(scan []byte, ticks uint64, presents *int) {
 			vi.ConsoleLine(MarkerPresent)
 		}
 	}
-	if stripDone {
+	if stripDone || !demoMode {
+		// M79a (#1704): the auto-reorder/pin/split/close chain and the
+		// single-tab hostTicks countdown are DEMO mode only. In live mode
+		// the seat never touches the user's tabs -- it paints and hosts.
 		return
 	}
 	n := tabs.Count()

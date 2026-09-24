@@ -79,6 +79,23 @@ vgate_file script3.txt <<'EOF'
 exec GOCALC.ELF
 EOF
 
+# M79a (#1704): the seat's bounded demo choreography (auto-close, the
+# two-tab close chain, the run budget) is DEMO mode, opted in by the PRESENCE
+# of /host/GOTABWM.DEMO. Boot 01/04 autostart the seat (no monitor exec to
+# seed anything at), and boot 01's stage chain is written against the
+# choreography's closes -- so the trigger is seeded here like any other share
+# fixture. "Untouched" stays true of the SETTINGS/SESSION state, which is
+# what this spec's boots actually pin. A daily session never stages this file
+# and gets the live seat (go-wm-seat run 05 proves that path end to end).
+vgate_setup_python <<'PY'
+import os
+rd = os.environ["RUN_DIR"]
+share = os.environ.get("VG_SHARE") or os.path.join(rd, "share")
+with open(os.path.join(share, "GOTABWM.DEMO"), "w") as f:
+    f.write("demo\n")
+print("seeded GOTABWM.DEMO (seat demo mode: bounded choreography)")
+PY
+
 vgate_setup_python <<'PY'
 import os, shutil, sys
 rd = os.environ["RUN_DIR"]
