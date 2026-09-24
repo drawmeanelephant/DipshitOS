@@ -17,6 +17,7 @@ func TestTermMarkerShapes(t *testing.T) {
 		{markerLine, "goterm: line "},
 		{markerDone, "goterm: done status="},
 		{markerClose, "goterm: close"},
+		{markerRestart, "goterm: restart"},
 		{markerOK, "goterm OK"},
 		{markerMonitor, "goterm: monitor"},
 		{markerMonErr, "goterm: monitor failed"},
@@ -59,6 +60,41 @@ func TestPromptFromSettings(t *testing.T) {
 	for _, c := range cases {
 		if got := promptFromSettings(c.body, defaultPrompt); got != c.want {
 			t.Errorf("%s: promptFromSettings(%q) = %q want %q", c.name, c.body, got, c.want)
+		}
+	}
+}
+
+func TestRestartPolicyFromSettings(t *testing.T) {
+	cases := []struct {
+		name, body, want string
+	}{
+		{"missing defaults to stay", "#v2\nprompt=term> \n", restartStay},
+		{"empty defaults to stay", "", restartStay},
+		{"stay is explicit and valid", "#v2\nterm_restart=stay\n", restartStay},
+		{"exit selects close", "#v2\nterm_restart=exit\n", restartExit},
+		{"unknown fails safe to stay", "#v2\nterm_restart=maybe\n", restartStay},
+		{"value is trimmed", "#v2\nterm_restart = exit \n", restartExit},
+		{"substring is not the key", "#v2\nxterm_restart=exit\n", restartStay},
+	}
+	for _, c := range cases {
+		if got := restartPolicyFromSettings(c.body); got != c.want {
+			t.Errorf("%s: restartPolicyFromSettings(%q) = %q want %q", c.name, c.body, got, c.want)
+		}
+	}
+}
+
+func TestRestartMessageAndCloseRequest(t *testing.T) {
+	if got := restartMessage(7); got != "\r\nshell exited status=7\r\n" {
+		t.Fatalf("restartMessage(7) = %q", got)
+	}
+	for _, line := range []string{"exit --close", "  exit --close  "} {
+		if !closeRequested(line) {
+			t.Errorf("closeRequested(%q) = false", line)
+		}
+	}
+	for _, line := range []string{"exit", "exit 7", "echo exit --close", "exit --close 7"} {
+		if closeRequested(line) {
+			t.Errorf("closeRequested(%q) = true", line)
 		}
 	}
 }

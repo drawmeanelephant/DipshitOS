@@ -15,6 +15,9 @@
 //!     table and a fresh SETTINGS.TXT stay byte-identical (M73m #1662)
 //!   - `scrollback`: terminal scrollback buffer lines (default: "1000")
 //!   - `shell`: boot login shell, "monitor"|"sh" (default: "monitor")
+//!   - `term_restart`: GOTERM shell-exit policy, "stay"|"exit" (default:
+//!     "stay"; accepted as an optional persisted key without changing the
+//!     seeded default table)
 //!   - `wm`: boot window-manager seat, "gotabwm"|"tabwm"|"none"
 //!     (default: "gotabwm" — M59 issue #1298 flipped it from TABWM)
 //!
@@ -180,6 +183,15 @@ pub fn login_shell() []const u8 {
 
 pub fn login_shell_is_sh() bool {
     return std.mem.eql(u8, login_shell(), "sh");
+}
+
+/// GOTERM's shell-exit policy. The terminal window survives a shell exit by
+/// default; the exact persisted value "exit" restores close-on-exit. Any
+/// missing or unrecognized value fails safe to the durable "stay" default.
+pub fn term_restart_policy() []const u8 {
+    const val = get("term_restart") orelse return "stay";
+    if (std.mem.eql(u8, val, "exit")) return "exit";
+    return "stay";
 }
 
 /// M59 (issue #1298): the boot window-manager seat, as named in `SETTINGS.TXT`.
@@ -724,6 +736,16 @@ test "settings: login shell defaults to monitor and accepts sh (M45 SH8)" {
     try std.testing.expectEqual(SetResult.ok, set("shell", "sh"));
     try std.testing.expect(login_shell_is_sh());
     init(); // restore defaults for other tests
+}
+
+test "settings: terminal restart defaults to stay and accepts explicit exit" {
+    init();
+    try std.testing.expectEqualStrings("stay", term_restart_policy());
+    try std.testing.expectEqual(SetResult.ok, set("term_restart", "exit"));
+    try std.testing.expectEqualStrings("exit", term_restart_policy());
+    try std.testing.expectEqual(SetResult.ok, set("term_restart", "bogus"));
+    try std.testing.expectEqualStrings("stay", term_restart_policy());
+    init();
 }
 
 test "settings: debug_font applies to the text layer (M20-U11)" {

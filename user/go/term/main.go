@@ -18,7 +18,9 @@
 //     the SETTINGS-driven prompt load, the history load, `goterm: ready`,
 //     and the first prompt paint
 //  5. key loop: editor.Feed / EvSubmit -> marker -> Shell.RunLine
-//  6. WIN_CLOSE (or EOF / exit / monitor) -> detach, close
+//  6. shell exit -> restart the session by default, or detach/close when
+//     term_restart=exit; `exit --close` and a second Ctrl-D always close
+//     the window, and WIN_CLOSE/monitor still use the close path
 //
 // The prompt comes from the shell's own loader (SETTINGS.TXT `prompt`,
 // falling back to the gosh default), not a hand-written constant: this is
@@ -77,6 +79,7 @@ const (
 	// verified the directory, `cd /nosuchdir` returns nonzero.
 	markerDone    = "goterm: done status="
 	markerClose   = "goterm: close"
+	markerRestart = "goterm: restart"
 	markerOK      = "goterm OK"
 	markerMonitor = "goterm: monitor"
 	markerMonErr  = "goterm: monitor failed"
@@ -130,90 +133,120 @@ func main() {
 func runSession(ta *tabapp.TabApp, fd uint32) {
 	hst := &termHost{fd: fd}
 	hist := &shlib.History{}
-	sh := shlib.NewShell(hst, hist)
-
-	for _, ln := range startupLines() {
-		_, act := sh.RunLine(ln)
-		if act != shlib.ActionContinue {
-			leave(ta, fd, sh, act)
-		}
-	}
-
-	editor := shlib.NewEditor(loadPrompt(), hist)
-	editor.Complete = completeFn(hst)
-
-	// M69f1 (#1537): seed recall from the share AFTER the startup banner
-	// and BEFORE the first prompt, so the startup lines never enter recall.
 	sink := &shlib.HistorySink{}
-	shlib.LoadHistory(hst, hist, sink)
+	sh := shlib.NewShell(hst, hist)
+	policy := loadRestartPolicy()
 
-	vi.ConsoleLine(markerReady)
-	_, _ = vi.FileWrite(fd, editor.Repaint())
-	vi.ConsoleLine(markerPrompt)
-
-	// handle applies one editor outcome. Feed returns at most one event per
-	// call and holds the remainder of its chunk, so the loop below keeps
-	// feeding until the editor has nothing left: the kernel's input queue
-	// can deliver several whole lines in a single read.
-	handle := func(out []byte, ev shlib.EditEvent) {
-		if len(out) > 0 {
-			writeTTY(fd, out)
+	// A terminal owns the window; a shell is one guest in that window. Keep
+	// the same fd, host, and history across restarts so the new shell has
+	// the same terminal contract and recall, but none of the old shell's
+	// jobs or environment.
+	for session := 0; ; session++ {
+		if session > 0 {
+			sh = shlib.NewShell(hst, hist)
 		}
-		switch ev.Kind {
-		case shlib.EvSubmit:
-			vi.ConsoleLine(markerLine + ev.Line)
-			shlib.SaveHistory(hst, hist, ev.Line, sink)
-			st, act := sh.RunLine(ev.Line)
-			// Only AFTER the engine answered: the gate sequences on this,
-			// so it can never claim an execution that did not happen.
-			vi.ConsoleLine(markerDone + vi.Itoa64(int64(st)))
+		for _, ln := range startupLines() {
+			_, act := sh.RunLine(ln)
 			if act != shlib.ActionContinue {
 				leave(ta, fd, sh, act)
 			}
-			// M73d (#1628): the editor's submit echo is a bare \r\n; the
-			// fresh prompt is this post-execution write — the reference
-			// shell loop's order (SH.BIN/TERM.BIN printed after running),
-			// without which a screen-clearing command (`ESC[2J`) erased
-			// the pre-painted prompt with nothing to repaint it:
-			// observed 2026-09-22 the steady-state grid held RED/box/TC
-			// rows but no prompt (fg=16 against the gate's threshold 20).
-			// At the cursor, no CR — a CR repaint would overwrite the
-			// truecolour row's cells (the M73h assert scans x64..79 of
-			// grid row 2), where the shell loop's bare prompt lands at
-			// x>=80 as the original gate observed.
-			_, _ = vi.FileWrite(fd, []byte(loadPrompt()))
-		case shlib.EvEOF:
-			shutdown(ta, fd, 0)
-		case shlib.EvCancel:
-			// The editor already painted ^C and the fresh prompt.
-		}
-	}
-
-	var readBuf [64]byte
-	for {
-		n, _ := vi.FileRead(fd, readBuf[:])
-		if n > 0 {
-			handle(editor.Feed(readBuf[:n]))
-		}
-		for editor.Pending() {
-			handle(editor.Feed(nil))
 		}
 
-		sh.ReapJobs()
+		editor := shlib.NewEditor(loadPrompt(), hist)
+		editor.Complete = completeFn(hst)
 
-		ev, r, ok := vi.PollEventRaw()
-		if !ok {
-			if r < 0 {
-				shutdown(ta, fd, 1)
+		// M69f1 (#1537): seed recall from the share AFTER the startup banner
+		// and BEFORE the first prompt, so the startup lines never enter recall.
+		// The ring and sink survive a restart; only the interpreter is fresh.
+		if session == 0 {
+			shlib.LoadHistory(hst, hist, sink)
+		}
+
+		vi.ConsoleLine(markerReady)
+		_, _ = vi.FileWrite(fd, editor.Repaint())
+		vi.ConsoleLine(markerPrompt)
+		if session > 0 {
+			// This marker is deliberately after the prompt write returned.
+			vi.ConsoleLine(markerRestart)
+		}
+
+		restart := false
+		eofPending := false
+		// handle applies one editor outcome. Feed returns at most one event per
+		// call and holds the remainder of its chunk, so the loop below keeps
+		// feeding until the editor has nothing left: the kernel's input queue
+		// can deliver several whole lines in a single read.
+		handle := func(out []byte, ev shlib.EditEvent) {
+			if len(out) > 0 {
+				writeTTY(fd, out)
 			}
-			if n <= 0 {
-				vi.Sleep(1)
+			switch ev.Kind {
+			case shlib.EvSubmit:
+				eofPending = false
+				vi.ConsoleLine(markerLine + ev.Line)
+				shlib.SaveHistory(hst, hist, ev.Line, sink)
+				if closeRequested(ev.Line) {
+					vi.ConsoleLine(markerDone + "0")
+					shutdown(ta, fd, 0)
+					return
+				}
+				st, act := sh.RunLine(ev.Line)
+				// Only AFTER the engine answered: the gate sequences on this,
+				// so it can never claim an execution that did not happen.
+				vi.ConsoleLine(markerDone + vi.Itoa64(int64(st)))
+				if act == shlib.ActionExit && policy == restartStay {
+					writeTTY(fd, []byte(restartMessage(st)))
+					restart = true
+				} else if act != shlib.ActionContinue {
+					leave(ta, fd, sh, act)
+				}
+				if !restart {
+					// At the cursor, no CR — a CR repaint would overwrite the
+					// truecolour row's cells (the M73h assert scans x64..79 of
+					// grid row 2), where the shell loop's bare prompt lands at
+					// x>=80 as the original gate observed.
+					writeTTY(fd, []byte(loadPrompt()))
+				}
+			case shlib.EvEOF:
+				if eofPending {
+					shutdown(ta, fd, 0)
+					return
+				}
+				eofPending = true
+				writeTTY(fd, []byte("\r\ngoterm: press Ctrl-D again to close\r\n"))
+				writeTTY(fd, editor.Repaint())
+			case shlib.EvCancel:
+				eofPending = false
+				// The editor already painted ^C and the fresh prompt.
 			}
-			continue
 		}
-		switch ta.Dispatch(ev) {
-		case tabapp.ActionClosed:
-			shutdown(ta, fd, 0)
+
+		var readBuf [64]byte
+		for !restart {
+			n, _ := vi.FileRead(fd, readBuf[:])
+			if n > 0 {
+				handle(editor.Feed(readBuf[:n]))
+			}
+			for editor.Pending() {
+				handle(editor.Feed(nil))
+			}
+
+			sh.ReapJobs()
+
+			ev, r, ok := vi.PollEventRaw()
+			if !ok {
+				if r < 0 {
+					shutdown(ta, fd, 1)
+				}
+				if n <= 0 {
+					vi.Sleep(1)
+				}
+				continue
+			}
+			switch ta.Dispatch(ev) {
+			case tabapp.ActionClosed:
+				shutdown(ta, fd, 0)
+			}
 		}
 	}
 }
@@ -256,6 +289,47 @@ func writeTTY(fd uint32, b []byte) {
 		}
 		b = b[n:]
 	}
+}
+
+// restartStay is the default: a shell exit leaves the terminal window alive.
+// restartExit is the explicit compatibility mode for close-on-exit.
+const (
+	restartStay = "stay"
+	restartExit = "exit"
+)
+
+// loadRestartPolicy reads term_restart from SETTINGS.TXT. A missing or
+// unknown value uses the documented default; only the exact value "exit"
+// selects close-on-exit.
+func loadRestartPolicy() string {
+	b, r := vi.ReadFileAll(settingsPath, maxStartupBytes)
+	if r < 0 {
+		return restartStay
+	}
+	return restartPolicyFromSettings(string(b))
+}
+
+func restartPolicyFromSettings(body string) string {
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		eq := strings.IndexByte(line, '=')
+		if eq < 0 || strings.TrimSpace(line[:eq]) != "term_restart" {
+			continue
+		}
+		if strings.TrimSpace(line[eq+1:]) == restartExit {
+			return restartExit
+		}
+		return restartStay
+	}
+	return restartStay
+}
+
+func restartMessage(status int) string {
+	return "\r\nshell exited status=" + vi.Itoa64(int64(status)) + "\r\n"
+}
+
+func closeRequested(line string) bool {
+	return strings.TrimSpace(line) == "exit --close"
 }
 
 // loadPrompt adopts the SETTINGS.TXT `prompt` key (SH.BIN's SH8 behavior,
