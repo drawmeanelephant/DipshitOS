@@ -122,6 +122,109 @@ func TestHidMarkerOnlyAfterRealEvent(t *testing.T) {
 	}
 }
 
+func TestDrainSeatEventsConsumesWholeBurstInArrivalOrder(t *testing.T) {
+	queue := []vi.Event{
+		{Kind: vi.EvWmKey, Arg0: 2},
+		{Kind: vi.EvCompositeTick},
+	}
+	var got []uint32
+	ticks := 0
+	consume := func(e vi.Event) bool {
+		if e.Kind == vi.EvWmKey {
+			got = append(got, e.Arg0)
+			return false
+		}
+		return e.Kind == vi.EvCompositeTick
+	}
+	onTick := func() bool {
+		ticks++
+		return true
+	}
+	poll := func() (vi.Event, bool) {
+		if len(queue) == 0 {
+			return vi.Event{}, false
+		}
+		e := queue[0]
+		queue = queue[1:]
+		return e, true
+	}
+	if n := drainSeatEvents(vi.Event{Kind: vi.EvWmKey, Arg0: 1}, poll, consume, 10, onTick); n != 3 {
+		t.Fatalf("drained %d events, want 3", n)
+	}
+	if len(got) != 2 || got[0] != 1 || got[1] != 2 {
+		t.Fatalf("key order = %v, want [1 2]", got)
+	}
+	if ticks != 1 {
+		t.Fatalf("composite ticks = %d, want 1", ticks)
+	}
+}
+
+func TestDrainSeatEventsStopsAtTickLimit(t *testing.T) {
+	queue := []vi.Event{{Kind: vi.EvWmKey, Arg0: 1}}
+	poll := func() (vi.Event, bool) {
+		if len(queue) == 0 {
+			return vi.Event{}, false
+		}
+		e := queue[0]
+		queue = queue[1:]
+		return e, true
+	}
+	consume := func(e vi.Event) bool { return e.Kind == vi.EvCompositeTick }
+	onTick := func() bool { return false }
+	if n := drainSeatEvents(vi.Event{Kind: vi.EvCompositeTick}, poll, consume, 10, onTick); n != 1 {
+		t.Fatalf("drained %d events after tick-limit refusal, want 1", n)
+	}
+	if len(queue) != 1 {
+		t.Fatalf("queue changed after tick-limit refusal: %d events remain", len(queue))
+	}
+}
+
+func TestSweepHostedStopsWhenCloseFails(t *testing.T) {
+	savedTabs := tabs
+	defer func() { tabs = savedTabs }()
+
+	tabs = TabStrip{}
+	if !tabs.OpenTab(4, "web") || !tabs.OpenTab(5, "calc") {
+		t.Fatal("OpenTab")
+	}
+	calls := 0
+	sweepHosted(func() bool {
+		calls++
+		return false
+	})
+	if calls != 1 {
+		t.Fatalf("close calls = %d, want 1 after failed close", calls)
+	}
+	if tabs.Count() != 2 {
+		t.Fatalf("tabs after failed close = %d, want 2", tabs.Count())
+	}
+}
+
+func TestSweepHostedDiscardsRestoredPlaceholders(t *testing.T) {
+	savedTabs := tabs
+	defer func() { tabs = savedTabs }()
+
+	tabs = TabStrip{}
+	if !tabs.OpenTab(sessionIDBase, "restored") || !tabs.OpenTab(4, "live") {
+		t.Fatal("OpenTab")
+	}
+	calls := 0
+	sweepHosted(func() bool {
+		calls++
+		id, ok := tabs.Focused()
+		if !ok {
+			return false
+		}
+		return tabs.CloseTab(id)
+	})
+	if calls != 1 {
+		t.Fatalf("close calls = %d, want 1 live close", calls)
+	}
+	if tabs.Count() != 0 {
+		t.Fatalf("tabs after sweep = %d, want 0", tabs.Count())
+	}
+}
+
 func TestConsumeSeatEventIgnoreNonTick(t *testing.T) {
 	savedBtn := prevPtrButtons
 	savedDrag := railDragFrom
