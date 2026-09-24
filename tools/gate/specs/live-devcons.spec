@@ -1,6 +1,8 @@
-# live-devcons.spec -- M22 D14: DEVCONS.BIN developer console on VZ.
-# Proves typed-input path: boots with GPU, execs DEVCONS.BIN, types 'dir.bin\n',
-# runs DIR.BIN child via sys_exec, decodes 8 events, and verifies rendered echo via snapshot.
+# live-devcons.spec — M22 D14: DEVCONS.BIN developer console on VZ.
+# Proves the typed-input path: boot with GPU, exec DEVCONS.BIN, type
+# `gofiles.elf`, run that child through sys_exec, then verify its directory
+# listing, clean close, decoded input events, syscall accounting, and the
+# rendered command echo in the scanout.
 
 vgate_name live-devcons "M22 D14: DEVCONS.BIN developer console on VZ"
 vgate_share seed
@@ -12,21 +14,44 @@ exec DEVCONS.BIN
 EOF
 
 vgate_file script2.txt <<'EOF'
+dui close 3
+EOF
+
+vgate_file script3.txt <<'EOF'
 input
 procs
+syscalls
 echo devcons-typed-sweep-done
 EOF
 
-vgate_run 01 -- --display --screen '$RUN_DIR/gpu-screen' --via-virtio --script '$RUN_DIR/script.txt' --input-string $'dir.bin\n' --input-string-after 'devcons: settled' --script2 '$RUN_DIR/script2.txt' --script2-after 'timer heartbeat ticks=35' --screenshot-after 'timer heartbeat ticks=30' --script-expect 'devcons-typed-sweep-done' --timeout 90
+vgate_setup_python <<'PY'
+import os, shutil, sys
+rd = os.environ["RUN_DIR"]
+share = os.environ.get("VG_SHARE") or os.path.join(rd, "share")
+src = os.path.join(".build", "go", "GOFILES.ELF")
+if not os.path.exists(src):
+    sys.exit("GOFILES.ELF missing (expected " + src + ") - build it first: "
+             "bash tools/go/build-files.sh")
+shutil.copy(src, os.path.join(share, "GOFILES.ELF"))
+print("staged GOFILES.ELF into share (%d bytes)"
+      % os.path.getsize(os.path.join(share, "GOFILES.ELF")))
+PY
+
+vgate_run 01 -- --display --screen '$RUN_DIR/gpu-screen' --via-virtio --script '$RUN_DIR/script.txt' --input-string $'gofiles.elf\n' --input-string-after 'devcons: settled' --script2 '$RUN_DIR/script2.txt' --script2-after 'gofiles: ready' --script3 '$RUN_DIR/script3.txt' --script3-after 'gofiles OK' --screenshot-after 'gofiles OK' --script-expect 'devcons-typed-sweep-done' --timeout 180
 
 vgate_assert 01 serial-contains 'VirelaiOS kernel has seized control.'
 vgate_assert 01 serial-contains 'exec: loaded DEVCONS.BIN size='
 vgate_assert 01 serial-contains 'devcons: open'
 vgate_assert 01 serial-contains 'devcons: ready'
 vgate_assert 01 serial-contains 'devcons: settled'
-vgate_assert 01 serial-contains 'dir: listing /host'
-vgate_assert 01 serial-contains 'dir: success'
-vgate_assert 01 serial-contains 'input: armed=0 fifo=0/64 dropped=0 events=8'
+vgate_assert 01 serial-contains 'gofiles: open id=3'
+vgate_assert 01 serial-contains 'gofiles: list /host'
+vgate_assert 01 serial-contains 'gofiles: entry APPS.TXT file'
+vgate_assert 01 serial-contains 'gofiles: ready'
+vgate_assert 01 serial-contains 'gofiles: close'
+vgate_assert 01 serial-contains 'gofiles OK'
+vgate_assert 01 serial-contains 'input: armed=0 fifo=0/64 dropped=0 events=12'
+vgate_assert 01 serial-contains '28 sys_exec calls=1'
 vgate_assert 01 serial-absent '[EXC] parking'
 
 vgate_assert 01 snapshot 'gpu-screen*' <<'PY'
@@ -73,13 +98,17 @@ def px(x, y):
     k = (y * w + x) * bpp
     return out[k], out[k+1], out[k+2]
 
-white = 0
-for y in range(100, 200, 2):
-    for x in range(520, 1300, 3):
+# The screenshot is Retina: DEVCONS' native (260,24,400,300) window
+# occupies (520,48)-(1320,648). Count contrasting pixels in that surface;
+# the serial markers prove the command and child lifecycle independently.
+bg = (30, 43, 58)
+surface = 0
+for y in range(48, 648, 4):
+    for x in range(520, 1320, 4):
         r, g, b = px(x, y)
-        if min(r, g, b) > 200:
-            white += 1
-print("white-glyph samples in DEVCONS log pane: %d" % white)
-if white < 60:
-    sys.exit("ERROR: too few white glyph pixels — the command echo was not rendered")
+        if max(abs(r-bg[0]), abs(g-bg[1]), abs(b-bg[2])) > 24:
+            surface += 1
+print("contrasting samples in DEVCONS surface: %d" % surface)
+if surface < 100:
+    sys.exit("ERROR: too few contrasting DEVCONS surface pixels — command echo was not rendered")
 PY

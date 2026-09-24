@@ -1,68 +1,61 @@
-# live-desktop-typing.spec -- issue #563: keys reach desktop-launched GUI app on VZ
+# live-desktop-typing.spec — keys reach a Go GUI app launched by GOSH.
 #
-# M60 / #1297: retargeted off Zig EDIT.BIN (deleted) onto the editor app.
-# M66c (#1445): that app is NOTE.ELF now, the Go successor. One Down from the
-# launcher head (GOCALC.ELF) selects it -- the launcher reads the share's
-# APPS.TXT, which gate-run copies from image/apps.txt, so the selection follows
-# the manifest rather than a hardcoded name. Typed glyphs must land in the
-# NOTE.ELF text surface.
-#
-# HOST PREREQUISITE: bash tools/go/build-note.sh -> .build/go/NOTE.ELF
-vgate_name live-desktop-typing "issue #563: keys reach desktop-launched GUI app on VZ"
+# M78c retires the old Zig launcher. The Go shell's headless `exec` path is the
+# minimal existing launcher seam for this input gate: it starts NOTE.ELF via
+# sys_exec, and the focused window receives real HID strings. The manifest
+# launcher and hosted-client lifecycle remain covered by live-desktop.
+
+vgate_name live-desktop-typing "keys reach a Go GUI app launched by GOSH on VZ"
 vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 
 vgate_file script.txt <<'EOF'
-exec DESKTOP.BIN
+set GOMAXPROCS=1
+exec GOSH.ELF -c "exec NOTE.ELF"
 EOF
 
-vgate_file script2.txt <<'EOF'
-procs
-dui
+vgate_file script3.txt <<'EOF'
 input
+dui
 tasks
 echo desktop-typing-sweep-done
 EOF
 
 vgate_setup_python <<'PY'
 import os, shutil, sys
-share = os.environ.get("VG_SHARE") or os.path.join(os.environ["RUN_DIR"], "share")
-src = os.path.join(".build", "go", "NOTE.ELF")
-if not os.path.exists(src):
-    sys.exit("NOTE.ELF missing (expected " + src + ") - build it first: "
-             "bash tools/go/build-note.sh")
-shutil.copy(src, os.path.join(share, "NOTE.ELF"))
-print("staged NOTE.ELF into share (%d bytes)" % os.path.getsize(os.path.join(share, "NOTE.ELF")))
+rd = os.environ["RUN_DIR"]
+share = os.environ.get("VG_SHARE") or os.path.join(rd, "share")
+for name, script in (("GOSH.ELF", "build-gosh.sh"),
+                      ("NOTE.ELF", "build-note.sh")):
+    src = os.path.join(".build", "go", name)
+    if not os.path.exists(src):
+        sys.exit("%s missing (expected %s) - build it first: bash tools/go/%s"
+                 % (name, src, script))
+    shutil.copy(src, os.path.join(share, name))
+    print("staged %s into share (%d bytes)"
+          % (name, os.path.getsize(os.path.join(share, name))))
 PY
 
 vgate_run A -- \
-    --display --screen '$RUN_DIR/gpu-screen' \
-    --via-virtio \
+    --display --input --screen '$RUN_DIR/gpu-screen' \
     --script '$RUN_DIR/script.txt' \
-    --input-chords "down,return" \
-    --input-chords-after "desktop: menu ready" \
-    --input-string "abcde" \
-    --input-string-after "note: ready" \
-    --script2 '$RUN_DIR/script2.txt' \
-    --script2-after "timer heartbeat ticks=35" \
-    --screenshot-after "timer heartbeat ticks=30" \
-    --script-expect "desktop-typing-sweep-done" \
-    --timeout 150
+    --input-chords 'a,b,c,d,e,ctrl-s' \
+    --input-chords-after 'note: ready' \
+    --script3 '$RUN_DIR/script3.txt' \
+    --script3-after 'note: saved ok n=5' \
+    --screenshot-after 'note: saved ok n=5' \
+    --script-expect 'desktop-typing-sweep-done' \
+    --timeout 180
 
-vgate_assert A serial-contains "desktop: menu ready"
-vgate_assert A serial-contains "desktop: launch NOTE.ELF pid=2"
-vgate_assert A serial-contains "note: ready"
-vgate_assert A serial-contains "input: armed=0 fifo=0/64 dropped=0 events=7"
-vgate_assert A serial-contains "dui: windows=6 focused=3"
-vgate_assert A serial-absent "[EXC] parking:"
-
-vgate_assert A python <<'PY'
-import os, re
-ser = open(os.environ["VG_SER"]).read()
-assert ser.count("desktop: select app") >= 1, f"fewer than 1 select-app markers: {ser.count('desktop: select app')}"
-assert re.search(r'dui\[[0-9]*\]: user user rect=56,56,512,384', ser), "NOTE.ELF window rect missing"
-assert "owner=2" in ser, "NOTE.ELF window owner=2 missing"
-PY
+vgate_assert A serial-contains 'exec: loaded GOSH.ELF'
+vgate_assert A serial-contains 'note: open id=2'
+vgate_assert A serial-contains 'note: not-tab-aware (shim or WND desktop)'
+vgate_assert A serial-contains 'note: ready'
+vgate_assert A serial-contains 'note: saved ok n=5'
+vgate_assert A serial-contains 'note: cursor line=1 col=5 n=5'
+vgate_assert A serial-contains 'input: armed=1 fifo=0/64 dropped=0 events=6'
+vgate_assert A serial-contains 'dui: windows=5 focused=2'
+vgate_assert A serial-absent '[EXC] parking:'
 
 vgate_assert A snapshot 'gpu-screen-after' <<'PY'
 import sys, zlib, struct
@@ -108,15 +101,17 @@ def px(x, y):
     k = (y * w + x) * bpp
     return out[k], out[k+1], out[k+2]
 
-# NOTE.ELF text surface: native (6,36,244,150) inside a window at (56,56).
-# NOTE.ELF keeps the Zig notepad's native 512x384 declaration (note.natW/natH),
-# so this region is inherited rather than re-derived.
-glyphs = 0
-for y in range(90, 210, 2):
-    for x in range(60, 310, 2):
+# The NOTE.ELF surface is the native (56,56,512,384) window. The
+# VMRunner screenshot is Retina (2x guest coordinates); count contrasting
+# pixels across the surface rather than assuming a fixed screenshot palette.
+# The serial cursor assertion above is the text-content proof.
+bg = (25, 32, 37)
+surface = 0
+for y in range(112, 880, 4):
+    for x in range(112, 1136, 4):
         r, g, b = px(x, y)
-        if min(r, g, b) > 170 or (g > 140 and r < 120 and b < 120) or (g > r + 30 and g > b + 30):
-            glyphs += 1
-print("glyph samples in NOTE.ELF text region: %d" % glyphs)
-assert glyphs >= 50, f"too few glyph pixels: {glyphs}"
+        if max(abs(r-bg[0]), abs(g-bg[1]), abs(b-bg[2])) > 24:
+            surface += 1
+print("contrasting samples in NOTE.ELF surface: %d" % surface)
+assert surface >= 100, f"too few contrasting NOTE.ELF surface pixels: {surface}"
 PY

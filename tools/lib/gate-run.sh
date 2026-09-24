@@ -29,7 +29,7 @@
 #     copies the app bundle (zig-out/bin) into it, generates the ELF/.SO
 #     fixtures (HELLO.ELF, CRASH.ELF, LD.SO, LIBUI.SO, ...) fresh, drops the
 #     APPS.TXT manifest in, and appends --cvc-file "$SHARE" to
-#     GATE_RUNNER_ARGS. A gate that execs an app or boots the desktop MUST
+#     GATE_RUNNER_ARGS. A gate that execs a guest app MUST
 #     call this; gates that only read the serial port can skip it.
 # gate_end:
 #   - removes RUN_DIR unless VIRELAI_KEEP_RUN=1 (post-mortem escape hatch).
@@ -108,13 +108,13 @@ gate_arm_share() {
 
 # gate_seed_share -- arm the host file channel with the app bundle.
 # M34 HF6 (issue #740): apps are NOT in the image anymore; a gate that
-# execs an app or boots the desktop seeds its private share from the
-# compiled bundle (zig-out/bin) + freshly generated ELF/.SO fixtures +
+# execs a guest app seeds its private share from the compiled bundle
+# (zig-out/bin) + freshly generated ELF/.SO fixtures +
 # image/apps.txt, then arms --cvc-file.
 gate_seed_share() {
     [ -n "$RUN_DIR" ] || { echo "gate-run: gate_seed_share called before gate_begin" >&2; exit 1; }
     gate_arm_share
-    # 1. The compiled app bundle (USER.BIN, GOCALC.ELF, DESKTOP.BIN, ...).
+    # 1. The compiled Zig app bundle (USER.BIN, GOCALC.ELF, ...).
     if [ -d zig-out/bin ]; then
         cp -R zig-out/bin/. "$SHARE/" 2>/dev/null || true
     fi

@@ -22,7 +22,8 @@
 #     delete:   vf rm hf3/renamed.bin -> verified gone; hf3 dir survived.
 #
 #   Phase 4 (HF4 -- issue #738): APP DELIVERY, one boot: drop-and-exec
-#   HF4APP.ELF with no image rebuild; DESKTOP.BIN reports manifest apps=2.
+#   HF4APP.ELF with no image rebuild; headless GOSH reads the two-row
+#   /host/APPS.TXT manifest over the same host file channel.
 #
 #   Phase 5/6 (HF7 -- issue #741): CLONE -> clonefile COW dedup:
 #     clone: 3 worktrees cloned via `vf clone repo wtN`.
@@ -96,7 +97,13 @@ vf ls sub
 vf cat sub/hello.txt
 vf ls
 exec HF4APP.ELF
-exec DESKTOP.BIN
+EOF
+
+vgate_file script-app2.txt <<'EOF'
+exec GOSH.ELF -c "cat /host/APPS.TXT"
+EOF
+
+vgate_file script-app3.txt <<'EOF'
 echo rx-hf4-app
 EOF
 
@@ -153,6 +160,7 @@ with open(os.path.join(base, "README"), "wb") as f:
     f.write(b"HF7 fixture repo\n")
 
 # 3. build HF4APP.ELF on host and write manifest
+import shutil
 hf4_src = os.path.join(run_dir, "hf4app.zig")
 hf4_dst = os.path.join(share, "HF4APP.ELF")
 res = subprocess.run([
@@ -166,10 +174,10 @@ if res.returncode != 0:
 with open(os.path.join(share, "APPS.TXT"), "w") as f:
     f.write("HF4APP.ELF | Host Hello | h\nGOCALC.ELF | 64-bit Calc | c\n")
 
-if os.path.exists("zig-out/bin/DESKTOP.BIN"):
-    with open("zig-out/bin/DESKTOP.BIN", "rb") as sf:
-        with open(os.path.join(share, "DESKTOP.BIN"), "wb") as df:
-            df.write(sf.read())
+gosh_src = os.path.join(".build", "go", "GOSH.ELF")
+if not os.path.exists(gosh_src):
+    sys.exit("GOSH.ELF missing (expected %s) - build it first: bash tools/go/build-gosh.sh" % gosh_src)
+shutil.copy(gosh_src, os.path.join(share, "GOSH.ELF"))
 PY
 
 # --- Run 1: mutate ---
@@ -271,7 +279,7 @@ if not os.path.isdir(hd):
 PY
 
 # --- Run 4: app ---
-vgate_run app -- --script '$RUN_DIR/script-app.txt' --script-after "tasks user-el0 exited status=7" --timeout 150
+vgate_run app -- --script '$RUN_DIR/script-app.txt' --script-after "tasks user-el0 exited status=7" --script2 '$RUN_DIR/script-app2.txt' --script2-after 'tasks user-exec exited status=43' --script3 '$RUN_DIR/script-app3.txt' --script3-after 'tasks user-exec exited status=0' --script-expect 'rx-hf4-app' --timeout 180
 vgate_allow_rc app 0 1
 vgate_assert app serial-contains "VirelaiOS kernel has seized control."
 vgate_assert app serial-contains "vf: probe 32k ok len=0x8000 cksum=0x0000 free=0020"
@@ -285,7 +293,11 @@ vgate_assert app serial-absent "vf: probe 32k FAILED"
 vgate_assert app serial-contains "exec: loaded HF4APP.ELF size="
 vgate_assert app serial-contains "hf4: hello from host"
 vgate_assert app serial-exact "tasks user-exec exited status=43" 1
-vgate_assert app serial-exact "desktop: manifest apps=2" 1
+vgate_assert app serial-contains "exec: loaded GOSH.ELF"
+# GOSH's headless exec/cat mode intentionally has no interactive ready marker.
+vgate_assert app serial-contains "HF4APP.ELF | Host Hello | h"
+vgate_assert app serial-contains "GOCALC.ELF | 64-bit Calc | c"
+vgate_assert app serial-exact "tasks user-exec exited status=0" 1
 vgate_assert app serial-exact "rx-hf4-app" 1
 vgate_assert app output-contains "VF-FILE: READ HF4APP.ELF"
 vgate_assert app output-contains "VF-FILE: READ APPS.TXT"

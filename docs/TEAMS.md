@@ -48,11 +48,11 @@ platform init. Everything from UEFI exit to the first shell prompt.
 | `kernel/src/xhci.zig` | — | XHCI USB host controller |
 | `kernel/src/clipboard.zig` | — | kernel clipboard |
 | `user/src/lib/ui.zig` | — | UI widget toolkit |
-| `user/src/desktop.zig` | — | desktop launcher |
-| `user/src/calc/` | — | calculator app |
-| `user/src/notepad.zig` | — | notepad app |
-| `user/src/top.zig` | — | task manager app |
-| `user/src/file_browser.zig` | — | file browser app |
+| `user/go/gotabwm/` | — | Go seat, manifest, launcher, and hosted tabs |
+| `user/go/calc/` | — | calculator app |
+| `user/go/note/` | — | notepad app |
+| `user/go/top/` | — | task manager app |
+| `user/go/files/` | — | file manager app |
 
 **Owns:** Screen, windows, mouse/keyboard input, UI toolkit, desktop apps.
 
@@ -69,9 +69,9 @@ platform init. Everything from UEFI exit to the first shell prompt.
 | `kernel/src/dns.zig` | — | DNS resolver |
 | `kernel/src/csprng.zig` | — | ChaCha20 CSPRNG |
 | `kernel/src/virtio_entropy.zig` | — | virtio entropy driver |
-| `user/src/fetch.zig` | — | HTTP fetch app |
-| `user/src/chat.zig` | — | chat app |
-| `user/src/tcp.zig` | — | TCP test app |
+| `user/go/fetch/` | — | HTTP fetch client |
+| `user/go/ping/` | — | ICMP ping client |
+| `user/src/tcp_client.zig` | — | TCP syscall proof |
 
 **Owns:** All network I/O from the virtio queue to the application socket.
 

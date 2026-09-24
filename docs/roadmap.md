@@ -49,14 +49,16 @@
   `sys_wait_event` 22, E0–E6) — done 2026-08-15 (claim 9328) →
   [roadmap-m9.md](archive/roadmap-m9.md).
 - **M10 — userland filesystem & storage ABI** (ADR 0010; per-process file
-  table, path canon, slots 23–27, SAVETEXT/TYPE/DIR.BIN, F0–F4) — done
-  2026-08-15 (claim 0510) → [roadmap-m10.md](archive/roadmap-m10.md).
-- **M11 — desktop platform** (ADR 0011; ui.zig toolkit, CALC/NOTEPAD/TOP/
-  DESKTOP.BIN, `sys_exec` 28 / `sys_kill` 29, A0–A5) — done 2026-08-16
-  (claim 2427) → [roadmap-m11.md](archive/roadmap-m11.md).
-- **M12 — userland network applications** (ADR 0012; TCP slots 30–33,
-  DNS, FETCH/CHAT.BIN, N0–N3) — done 2026-08-16, PR #160 (claim 5416) →
-  [roadmap-m12.md](archive/roadmap-m12.md).
+  table, path canon, slots 23–27, the original SAVETEXT/TYPE/DIR demos, F0–F4;
+  live storage coverage now uses GOSH/GOFILES) — done 2026-08-15 (claim 0510)
+  → [roadmap-m10.md](archive/roadmap-m10.md).
+- **M11 — desktop platform** (ADR 0011; ui.zig toolkit, the original
+  CALC/NOTEPAD/TOP/DESKTOP programs, `sys_exec` 28 / `sys_kill` 29, A0–A5;
+  launcher and client coverage now uses GOTABWM plus Go clients) — done
+  2026-08-16 (claim 2427) → [roadmap-m11.md](archive/roadmap-m11.md).
+- **M12 — userland network applications** (ADR 0012; TCP slots 30–33 and the
+  original DNS/FETCH/CHAT programs, N0–N3; product clients are now Go) — done
+  2026-08-16, PR #160 (claim 5416) → [roadmap-m12.md](archive/roadmap-m12.md).
 - **M13 — files & applications** (mutating FS slots 34–37, APPS.TXT
   manifest, FILE.BIN browser, manifest desktop; B1–B4) — done 2026-08-16
   (claims 5801/8877/4742/4046) → [roadmap-m13.md](archive/roadmap-m13.md).
