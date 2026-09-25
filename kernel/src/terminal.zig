@@ -557,7 +557,10 @@ pub const Screen = struct {
 
     /// M80e: soft reset (CSI ! p) resets parser-visible modes and rendition
     /// but deliberately leaves the grid, scrollback, and cursor untouched.
-    fn softReset(self: *Screen) void {
+    /// M80k (#1727) also reaches this from the Ctrl+Shift+R chord — the
+    /// escape path and the chord must not drift apart, so the chord calls
+    /// the same seam the parser does.
+    pub fn softReset(self: *Screen) void {
         // DECSTR clears the deferred right-margin state too; otherwise
         // col == cols would survive with pending_wrap false and the next
         // print would index one cell past the effective width.
@@ -589,8 +592,9 @@ pub const Screen = struct {
     /// the front-end, not the escape sequence, so preserve it across the
     /// state reset and re-mask the default tab table to that width. The
     /// M80g OSC queue clears with everything else — a dropped queue, never
-    /// a delivered blank title.
-    fn hardReset(self: *Screen) void {
+    /// a delivered blank title. M80k (#1727) reaches it from the
+    /// Ctrl+Shift+Alt+R chord (the full RIS) through this same seam.
+    pub fn hardReset(self: *Screen) void {
         const cols = self.cols;
         self.reset();
         self.cols = cols;
@@ -1343,8 +1347,10 @@ pub const Screen = struct {
     /// the next line. Nothing can resurrect a cleared row afterwards —
     /// the stash is gone with the scan. History belongs to the primary
     /// screen (M73k), so ED 3 on the alternate screen is consumed and
-    /// changes nothing (pinned).
-    fn clearScrollback(self: *Screen) void {
+    /// changes nothing (pinned). M80k (#1727) reaches it from the
+    /// Ctrl+Shift+K chord — the hygiene escape for a grid the user wants
+    /// wiped, byte-for-byte the ED 3 an app could have sent.
+    pub fn clearScrollback(self: *Screen) void {
         if (self.alt_active) return;
         self.searchExit();
         self.hist_count = 0;
@@ -2172,6 +2178,15 @@ pub const Screen = struct {
 
     pub fn viewOffset(self: *const Screen) usize {
         return self.view;
+    }
+
+    /// M80k (#1727): the surviving scrollback rows for this screen. Zero
+    /// on the alternate screen — the ring belongs to the primary grid
+    /// waiting underneath (M73k) — so the Ctrl+Shift+K chord's marker
+    /// counts what ACTUALLY went rather than what the user asked for.
+    pub fn historyCount(self: *const Screen) usize {
+        if (histOf(self)) |_| return self.hist_count;
+        return 0;
     }
 
     // -- M49 SD5 (#1132): resize reflow -------------------------------------

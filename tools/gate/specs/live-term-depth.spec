@@ -32,6 +32,11 @@
 # asserts count, with the prompt line excluded and `clip: LINE-00`
 # (not `clip: gosh> source ...`) back as the clipboard head.
 #
+# M80k (#1727) gets its OWN boot (run 03, below): the scrollback only
+# exists once the 128-row grid has actually scrolled, and a 20-line paste
+# never gets there. Runs 01/02 stay byte-identical to their M73d/#1688
+# shape.
+#
 # #1688: run 02 boots the SAME chain WITH the seat registered —
 # GOTABWM.ELF is staged by a tag-01 assert (the go-dogfood WINDOWS.SAV
 # precedent) so run 01's shim boot stays byte-identical — and the
@@ -76,6 +81,14 @@ for name, how in (("GOTERM.ELF", "build-goterm.sh"),):
 lines = ["echo LINE-%02d pppp" % i for i in range(20)]
 with open(os.path.join(share, "BIG.SH"), "w") as f:
     f.write("\n".join(lines) + "\n")
+# M80k (#1727): FILL.SH is the scrollback FILLER for run 03. 150 commands
+# plus 150 output rows is 300 grid rows against a 128-row grid, so the
+# ring really does hold history when the clear chord fires (a 20-line
+# script does not: `used` never reaches 128, so there is no history to
+# clear and the chord would honestly report 0).
+fill = ["echo FILL-%03d pppp" % i for i in range(150)]
+with open(os.path.join(share, "FILL.SH"), "w") as f:
+    f.write("\n".join(fill) + "\n")
 PY
 
 vgate_run 01 -- --display --input --via-virtio --screen '$RUN_DIR/screen' \
@@ -236,4 +249,144 @@ assert i_reg < i_src < i_begin < i_end, (
 assert i_done < i_copy < i_clip, (
     f"script/copy/readback out of order: done={i_done} copy={i_copy} clip={i_clip}")
 print("seated forward chain OK: registered < source < sel begin < sel end < copy < clip")
+PY
+# M80k (#1727): run 03 is a SHIM boot again — same shape as run 01 — so
+# drop the seat that run 01's #1688 assert staged between boots. Without
+# this, run 03 inherits the seat, the window lands at 0,0 1280x720, and
+# the seat's own input routing + single-tab countdown govern the chords.
+vgate_assert 02 python <<'PY'
+import os
+share = os.environ["VG_SHARE"]
+for name in ("GOTABWM.ELF", "SESSION.TABS"):
+    p = os.path.join(share, name)
+    if os.path.exists(p):
+        os.unlink(p)
+        print("unstaged %s from share (run 03 boots shim-only)" % p)
+print("share now: %s" % sorted(os.listdir(share)))
+PY
+
+# --- M80k (#1727): the terminal hygiene chords -------------------------------
+# Run 03 is a third boot of the SAME shim chain (no seat, so GOTERM's window
+# is the refused-declare 64,48 640x400 rect run 01 uses). FILL.SH scrolls the
+# 128-row grid until the ring genuinely holds history, then the three chords
+# are typed in order:
+#   ctrl-shift-k      clear the scrollback (ED 3) + snap the view to the tail
+#   ctrl-shift-r      soft reset — styles and modes, grid intact
+#   ctrl-shift-alt-r  full RIS — the grid goes too
+# Each is intercepted in kernel/src/input.zig BEFORE the tty queue, so the
+# guest never sees a byte and the run ends on a monitor command issued after
+# all three (script2 is forwarded on the RIS marker, which no script supplies
+# — the exec-order anchor). Three snapshots read the SCANOUT at three points:
+# filled, cleared (tail still painted), reset (client blank).
+#
+# exec-order: assert-proven — the run ends on `fill-chords-done`, which only
+# script2 prints, and script2 is held behind the `tty: reset full` chord
+# marker, so every chord has fired before the run can end.
+vgate_file fill.txt <<'EOF'
+tty
+echo fill-chords-done
+EOF
+
+vgate_run 03 -- --display --input --via-virtio --screen '$RUN_DIR/screen' \
+    --cvc-snap --snapshot-out '$RUN_DIR/snap-03' \
+    --script '$RUN_DIR/script.txt' \
+    --input-string 'source FILL.SH'$'\n' \
+    --input-string-after 'goterm: ready' \
+    --input-chords 'ctrl-shift-k,ctrl-shift-r,ctrl-shift-alt-r' \
+    --input-chords-after 'goterm: done status=0' \
+    --snapshot-after 'goterm: done status=0' \
+    --snapshot-after 'tty: clear' \
+    --snapshot-after 'tty: reset full' \
+    --script2 '$RUN_DIR/fill.txt' \
+    --script2-after 'tty: reset full' \
+    --script-expect 'fill-chords-done' \
+    --timeout 240
+
+vgate_assert 03 serial-contains 'goterm: ready'
+vgate_assert 03 serial-contains 'goterm: done status=0'
+vgate_assert 03 serial-contains 'tty: clear'
+vgate_assert 03 serial-contains 'tty: reset soft'
+vgate_assert 03 serial-contains 'tty: reset full'
+vgate_assert 03 serial-contains 'fill-chords-done'
+vgate_assert 03 serial-absent '\[EXC\]'
+vgate_assert 03 serial-absent '[EXC] parking:'
+
+# The clear marker counts what the ring ACTUALLY dropped (Screen.historyCount
+# before minus after), so a non-zero count is the only honest evidence that
+# the scrollback existed and went. The chord order is the contract: the RIS
+# is the ctrl+shift+alt-R one, and a mis-dispatch would show up as a
+# soft/full pair out of order or missing.
+vgate_assert 03 python <<'PY'
+import os, re
+ser = open(os.environ["VG_SER"], errors="replace").read()
+m = re.search(r"tty: clear (\d+) lines", ser)
+assert m, "clear-scrollback chord marker missing from serial"
+n = int(m.group(1))
+assert n > 0, f"FILL.SH must have scrolled the ring before the chord (cleared {n})"
+i_fill = ser.find("goterm: done status=0")
+i_clear = ser.find(m.group(0))
+i_soft = ser.find("tty: reset soft")
+i_ris = ser.find("tty: reset full")
+i_done = ser.find("fill-chords-done")
+for name, i in (("fill finished", i_fill), ("clear", i_clear),
+                ("soft reset", i_soft), ("RIS", i_ris), ("post-chord command", i_done)):
+    assert i >= 0, f"{name} marker missing from serial"
+assert i_fill < i_clear < i_soft < i_ris < i_done, (
+    f"chord chain out of order: fill={i_fill} clear={i_clear} "
+    f"soft={i_soft} ris={i_ris} done={i_done}")
+print(f"M80k chords OK: cleared {n} scrollback lines; clear < soft < RIS; guest alive after")
+PY
+
+# The scanout, in the same run. Window client = x 64..700, y 64..448 (run
+# 01's refused-declare rect: 79 cols x 24 rows at the M73l 8x16 cell).
+# "Ink" = every sampled pixel that differs from the client's own modal
+# background, so the measure is theme-agnostic. The three readings ARE the
+# deliverable:
+#   snap-0  filled   the scrollback tail is on screen
+#   snap-1  cleared  STILL on screen — ED 3 drops the ring, it does not blank
+#                    the grid the user is looking at
+#   snap-2  ris      gone — the full reset took the grid with it
+vgate_assert 03 python <<'PY'
+import os, sys
+RUN = os.environ["RUN_DIR"]
+W = 1280
+X, Y, CW, CH = 68, 68, 628, 372
+
+
+def ink(name):
+    d = open(os.path.join(RUN, name), "rb").read()
+    if len(d) < W * 720 * 4:
+        sys.exit("%s too small: %d bytes" % (name, len(d)))
+
+    def px(x, y):
+        k = (y * W + x) * 4
+        return (d[k + 2], d[k + 1], d[k])
+
+    hist = {}
+    for y in range(Y, Y + CH, 2):
+        for x in range(X, X + CW, 2):
+            p = px(x, y)
+            hist[p] = hist.get(p, 0) + 1
+    bg = max(hist, key=hist.get)
+    n = 0
+    for y in range(Y, Y + CH, 2):
+        for x in range(X, X + CW, 2):
+            p = px(x, y)
+            if max(abs(p[0] - bg[0]), abs(p[1] - bg[1]), abs(p[2] - bg[2])) > 40:
+                n += 1
+    return n
+
+
+filled = ink("snap-03-0.raw")
+cleared = ink("snap-03-1.raw")
+reset = ink("snap-03-2.raw")
+print("M80k client ink: filled=%d cleared=%d ris=%d" % (filled, cleared, reset))
+assert filled > 200, "the fill tail is not on the scanout (ink=%d)" % filled
+assert cleared * 2 >= filled, (
+    "ctrl-shift-K blanked the visible grid (filled=%d cleared=%d) — ED 3 "
+    "clears the SCROLLBACK, not the screen" % (filled, cleared))
+assert reset * 4 <= filled, (
+    "ctrl-shift-alt-R left the grid on the scanout (filled=%d ris=%d)"
+    % (filled, reset))
+print("M80k scanout OK: clear keeps the tail, RIS takes the grid")
 PY
