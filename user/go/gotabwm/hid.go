@@ -1,13 +1,15 @@
 // GOTABWM.ELF — M63b–e (issues #1420–#1423): chords, rail click/drag, type-in.
 //
-// Frozen table on #1418 (no new ADR, no new kernel cmd, no ctrl-tab), plus
-// M71d (#1563) BT1 reopen/duplicate:
+// Frozen table on #1418, plus M71d (#1563) BT1 reopen/duplicate and
+// M79f (#1717) keyboard parity:
 //
 //	ctrl-shift-p  -> Pin() the focused tab
 //	ctrl-shift-t  -> reopen the most recently closed tab (re-exec its bin)
 //	ctrl-shift-d  -> duplicate the focused tab (re-exec its bin)
 //	ctrl-shift-f  -> toggle the focused tab's frozen BADGE (M71e / #1564)
 //	alt-tab       -> FocusTab + WmctlTaskbarClick (cmd 12), wrapping
+//	ctrl-tab      -> the same wrapping cycle; shift reverses it (M79f)
+//	ctrl-1..9     -> focus the Nth rail cell; out-of-range is a no-op (M79f)
 //	rail click    -> top strip, equal-width cells, same TASKBAR+FocusTab
 //	rail drag     -> press/release over different cells → existing Reorder()
 //	rail close-x  -> the cell's rightmost railCloseW px: close that tab (M79b)
@@ -15,7 +17,7 @@
 //	ordinary keys -> ignored here (ADR 0009: KEY_DOWN still reaches the app)
 //
 // Markers print only after the mutation/syscall that made them true.
-// Ctrl+W is not bound (it collides with the editor). Ctrl+Tab waits on M63r.
+// Ctrl+W is not bound (it collides with the editor).
 // M79b (#1705): the rail's close-x and hover highlight live here. Sash and
 // hover-preview stay later cards. Client-area is ignored.
 //
@@ -100,6 +102,20 @@ func handleWmKey(e vi.Event) {
 		_ = applyAltTab(shift)
 		return
 	}
+	// M79f (#1717): the ctrl branch sits before ctrl-shift so tab and
+	// digits have one dispatch point while the launcher above keeps
+	// modal precedence. Ctrl+Shift+Tab reverses the same cycle; a
+	// digit outside the current strip is an honest no-op.
+	if ctrl && !alt {
+		if usage == hidUsageTab {
+			_ = applyAltTab(shift)
+			return
+		}
+		if i, ok := ctrlIndex(usage); ok {
+			_ = applyCtrlIndex(i)
+			return
+		}
+	}
 	if ctrl && shift && !alt {
 		switch usage {
 		case hidUsageP:
@@ -174,6 +190,15 @@ func applyDuplicate() bool {
 	return true
 }
 
+// ctrlIndex maps the USB HID number-row usages for 1..9 to rail indexes.
+// Ctrl+0 is not a rail shortcut.
+func ctrlIndex(usage uint8) (int, bool) {
+	if usage < 0x1e || usage > 0x26 {
+		return 0, false
+	}
+	return int(usage - 0x1d), true
+}
+
 // altTabNext is Zig TABWM's alt_tab_next: the tab after `focus`, wrapping.
 // Fewer than two tabs is a no-op. shift inverts. focus out of range starts at 0.
 func altTabNext(count, focus int, shift bool) (int, bool) {
@@ -206,9 +231,11 @@ func applyHidPin() bool {
 	return true
 }
 
-func applyAltTab(shift bool) bool {
-	i, ok := altTabNext(tabs.Count(), tabs.focus, shift)
-	if !ok {
+// focusByIndex is the shared success path for Alt+Tab, Ctrl+Tab, and
+// Ctrl+1..9. Tests replace it to pin dispatch without the guest-only
+// slot-65 syscall.
+var focusByIndex = func(i int) bool {
+	if i < 0 || i >= tabs.Count() {
 		return false
 	}
 	id := tabs.At(i).ID
@@ -220,6 +247,18 @@ func applyAltTab(shift bool) bool {
 	vi.ConsoleLine(MarkerHostFocus + vi.Itoa64(int64(id)))
 	dumpOrder()
 	return true
+}
+
+func applyAltTab(shift bool) bool {
+	i, ok := altTabNext(tabs.Count(), tabs.focus, shift)
+	if !ok {
+		return false
+	}
+	return focusByIndex(i)
+}
+
+func applyCtrlIndex(index int) bool {
+	return index >= 1 && index <= tabs.Count() && focusByIndex(index-1)
 }
 
 func focusHosted(id uint32) bool {
