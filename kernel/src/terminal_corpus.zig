@@ -30,6 +30,9 @@
 //!         The history half of ED 3 cannot live here (a corpus `Screen`
 //!         has no history bank): it is pinned by registry tests in
 //!         terminal.zig, the M73i mode-table precedent.
+//!       * M80e (#1722) deliberately replaced the old ESC charset
+//!         divergence pin with DECSC/DECRC, ESC motion, charset, reset,
+//!         and keypad rows. These are behavior changes, not silent fixes.
 //!       * Group I is a deterministic CSI parameter-soup FUZZ — not
 //!         goldens. It enforces INVARIANTS (no panic, whole wide pairs,
 //!         bounded indices, nothing below the used tail) under random
@@ -37,8 +40,7 @@
 //!         asserts it there.
 //!   - A row that DISAGREES with the code is wrong — or you found a bug.
 //!     The bug goes in a comment or an issue, never a silent "fix" inside
-//!     an unrelated parser card (M73g's non-goal; see the ESC group for a
-//!     pinned divergence).
+//!     an unrelated parser card.
 //!
 //! Placement: its own file so terminal.zig (~2,600 lines) gains no test
 //! bulk; ADR 0020 D1's `Screen` is pure (fixed arrays, no allocation), so
@@ -102,6 +104,8 @@ const Case = struct {
     alt: ?bool = null,
     /// Expected current SGR rendition.
     rendition: ?Rendition = null,
+    /// Expected keypad mode (DECKPAM=true, DECKPNM=false).
+    keypad: ?bool = null,
     cells: []const CellSpot = &.{},
     styles: []const StyleSpot = &.{},
 };
@@ -117,6 +121,7 @@ fn run(c: Case) !void {
     }
     if (c.visible) |v| try std.testing.expectEqual(v, s.cursor_visible);
     if (c.alt) |a| try std.testing.expectEqual(a, s.alt_active);
+    if (c.keypad) |k| try std.testing.expectEqual(k, s.keypadApplication());
     if (c.rendition) |r| {
         try std.testing.expectEqual(r.fg, t.styleForeground(s.style));
         try std.testing.expectEqual(r.bg, t.styleBackground(s.style));
@@ -1104,15 +1109,120 @@ const esc_cases = [_]Case{
         .cursor = .{ 0, 3 },
     },
     .{
-        // OBSERVED divergence pinned on purpose: only '[' enters CSI, so
-        // an xterm-style charset designator (ESC ( B) has its '(' consumed
-        // and its final byte PAINTED as text. xterm consumes the whole
-        // sequence. A fix must flip this row deliberately — M73g's
-        // non-goal is silently changing it.
-        .name = "ESC ( B paints its final byte (xterm divergence, pinned)",
-        .input = "\x1b(B",
-        .lines = &.{"B"},
-        .cursor = .{ 0, 1 },
+        .name = "ESC 7/8 save and restore cursor and rendition",
+        .input = "AB\x1b[31m\x1b7\x1b[0m\x1b[2;3HC\x1b8D",
+        .lines = &.{ "ABD", "  C" },
+        .cursor = .{ 0, 3 },
+        .rendition = .{ .fg = 1 },
+        .styles = &.{
+            .{ .row = 0, .col = 2, .fg = 1 },
+            .{ .row = 1, .col = 2, .default_exact = true },
+        },
+    },
+    .{
+        .name = "DECSC/DECRC restores the G0 line-drawing designation",
+        .input = "\x1b(0q\x1b7\x1b(B\x1b8q",
+        .lines = &.{"\x00\x00"},
+        .cursor = .{ 0, 2 },
+        .cells = &.{
+            .{ .row = 0, .col = 0, .base = 0x2500 },
+            .{ .row = 0, .col = 1, .base = 0x2500 },
+        },
+    },
+    .{
+        .name = "G0 line drawing maps box runes and SI returns to ASCII",
+        .input = "\x1b(0lqkxm\x0fZ",
+        .lines = &.{"\x00\x00\x00\x00\x00Z"},
+        .cursor = .{ 0, 6 },
+        .cells = &.{
+            .{ .row = 0, .col = 0, .base = 0x250c },
+            .{ .row = 0, .col = 1, .base = 0x2500 },
+            .{ .row = 0, .col = 2, .base = 0x2510 },
+            .{ .row = 0, .col = 3, .base = 0x2502 },
+            .{ .row = 0, .col = 4, .base = 0x2514 },
+        },
+    },
+    .{
+        .name = "SO invokes G1 line drawing and SI returns to ASCII",
+        .input = "\x1b)0\x0elqkxm\x0fZ",
+        .lines = &.{"\x00\x00\x00\x00\x00Z"},
+        .cursor = .{ 0, 6 },
+        .cells = &.{
+            .{ .row = 0, .col = 0, .base = 0x250c },
+            .{ .row = 0, .col = 1, .base = 0x2500 },
+            .{ .row = 0, .col = 2, .base = 0x2510 },
+            .{ .row = 0, .col = 3, .base = 0x2502 },
+            .{ .row = 0, .col = 4, .base = 0x2514 },
+        },
+    },
+    .{
+        .name = "IND moves down without a carriage return",
+        .input = "AB\x1bD C",
+        .lines = &.{ "AB", "   C" },
+        .cursor = .{ 1, 4 },
+        .used = 2,
+    },
+    .{
+        .name = "NEL performs a carriage return and index",
+        .input = "AB\x1bE C",
+        .lines = &.{ "AB", " C" },
+        .cursor = .{ 1, 2 },
+        .used = 2,
+    },
+    .{
+        .name = "RI moves up without changing the column",
+        .input = "A\r\nB\x1bM C",
+        .lines = &.{ "A C", "B" },
+        .cursor = .{ 0, 3 },
+        .used = 2,
+    },
+    .{
+        .name = "RI at the top edge scrolls the grid down",
+        .input = "A\x1bM B",
+        .lines = &.{ "  B", "A" },
+        .cursor = .{ 0, 3 },
+        .used = 2,
+    },
+    .{
+        .name = "keypad modes are consumed and never painted",
+        .input = "\x1b=X\x1b>Y",
+        .lines = &.{"XY"},
+        .cursor = .{ 0, 2 },
+        .keypad = false,
+    },
+    .{
+        .name = "soft reset restores modes and style but not the grid",
+        .input = "\x1b[31mA\x1b[?25l\x1b[?2004h\x1b[?1000h\x1b(0q\x1b[!pBq",
+        .lines = &.{"A\x00Bq"},
+        .cursor = .{ 0, 4 },
+        .visible = true,
+        .rendition = .{},
+        .keypad = false,
+        .cells = &.{
+            .{ .row = 0, .col = 0, .base = 'A' },
+            .{ .row = 0, .col = 1, .base = 0x2500 },
+            .{ .row = 0, .col = 2, .base = 'B' },
+            .{ .row = 0, .col = 3, .base = 'q' },
+        },
+        .styles = &.{
+            .{ .row = 0, .col = 0, .fg = 1 },
+            .{ .row = 0, .col = 1, .fg = 1 },
+            .{ .row = 0, .col = 2, .default_exact = true },
+            .{ .row = 0, .col = 3, .default_exact = true },
+        },
+    },
+    .{
+        .name = "RIS clears the grid and restores modes, style, and charset",
+        .input = "\x1b[31mA\x1b[?25l\x1b[?2004h\x1b[?1000h\x1b(0q\x1b=\x1bcBq",
+        .lines = &.{"Bq"},
+        .cursor = .{ 0, 2 },
+        .visible = true,
+        .rendition = .{},
+        .keypad = false,
+        .cells = &.{
+            .{ .row = 0, .col = 0, .base = 'B' },
+            .{ .row = 0, .col = 1, .base = 'q' },
+        },
     },
     .{
         .name = "an unknown CSI final is consumed, never printed",
