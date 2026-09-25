@@ -121,6 +121,7 @@ const (
 
 // Editor is the line editor for one tty session.
 type Editor struct {
+	LineBuffer
 	// prompt is the TEMPLATE -- the persisted SETTINGS.TXT value -- and
 	// promptOut is its expansion for the line being edited (M80n #1730).
 	// facts supplies what the escapes ask about; with no facts the
@@ -129,8 +130,6 @@ type Editor struct {
 	prompt    string
 	promptOut []byte
 	facts     func() PromptFacts
-	buf       []byte
-	cur       int
 	hist      *History
 	hview     int // -1 = editing the live line
 	lastLen   int // painted prompt+line length, for the tail overwrite
@@ -174,8 +173,14 @@ type Editor struct {
 
 // NewEditor wires an editor over a history ring.
 func NewEditor(prompt string, h *History) *Editor {
-	e := &Editor{prompt: prompt, hist: h, hview: -1, cols: defaultCols}
-	e.promptOut = []byte(prompt)
+	e := &Editor{
+		LineBuffer: NewLineBuffer(maxLineBytes),
+		prompt:     prompt,
+		promptOut:  []byte(prompt),
+		hist:       h,
+		hview:      -1,
+		cols:       defaultCols,
+	}
 	return e
 }
 

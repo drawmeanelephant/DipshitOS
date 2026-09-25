@@ -108,6 +108,21 @@ dui
 echo rx-gotabwm-apps-ok
 EOF
 
+# M79a (#1704): the seat's bounded demo choreography (auto-close, the
+# reorder/pin/split chain, the run budget) is DEMO mode, opted in by the
+# PRESENCE of /host/GOTABWM.DEMO. Every boot of this spec drives that
+# choreography (this spec IS the choreography's driver), so the trigger is
+# seeded like any other share fixture; a daily session never stages it and
+# gets the live seat (go-wm-seat run 05 proves that path end to end).
+vgate_setup_python <<'PY'
+import os
+rd = os.environ["RUN_DIR"]
+share = os.environ.get("VG_SHARE") or os.path.join(rd, "share")
+with open(os.path.join(share, "GOTABWM.DEMO"), "w") as f:
+    f.write("demo\n")
+print("seeded GOTABWM.DEMO (seat demo mode: bounded choreography)")
+PY
+
 vgate_setup_python <<'PY'
 import os, shutil, sys
 rd = os.environ["RUN_DIR"]

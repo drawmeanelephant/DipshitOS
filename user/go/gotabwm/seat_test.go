@@ -22,6 +22,9 @@ func TestMarkerShapes(t *testing.T) {
 		{MarkerPresent, "gotabwm: present"},
 		{MarkerClose, "gotabwm: close"},
 		{MarkerOK, "gotabwm OK"},
+		{MarkerModeDemo, "gotabwm: mode demo"},
+		{MarkerModeLive, "gotabwm: mode live"},
+		{MarkerLiveSteady, "gotabwm: live steady "},
 		{MarkerAltTab, "gotabwm: alt-tab id="},
 		{MarkerRailClick, "gotabwm: rail-click id="},
 		{MarkerTokens, "gotabwm: tokens "},
@@ -256,5 +259,101 @@ func TestConsumeSeatEventIgnoreNonTick(t *testing.T) {
 	}
 	if consumeSeatEvent(vi.Event{Kind: vi.EvMouseMove}) {
 		t.Fatal("app MOUSE_MOVE must stay on the ignore-non-tick path")
+	}
+}
+
+// M79a (#1704): the demo trigger is a bare PRESENCE probe of
+// /host/GOTABWM.DEMO through the openFile seam -- found -> demo, any open
+// error (including the host's -ENOSYS) -> live. Content is irrelevant.
+func TestDetectDemoIsPresenceProbe(t *testing.T) {
+	saved := openFile
+	defer func() { openFile = saved }()
+
+	openFile = func(path string, flags uint32) (int64, int64) {
+		if path != demoTriggerPath {
+			t.Fatalf("probe path = %q want %q", path, demoTriggerPath)
+		}
+		return 7, 0
+	}
+	if !detectDemo() {
+		t.Fatal("a found trigger must select demo mode")
+	}
+	openFile = func(path string, flags uint32) (int64, int64) { return -1, -2 }
+	if detectDemo() {
+		t.Fatal("an absent trigger (open refused) must leave live mode")
+	}
+}
+
+// M79a (#1704): in live mode the seat never choreographs and never
+// auto-closes -- two composite ticks of proof per behavior, with the demo
+// path as the control that still arms.
+func TestLiveModeNeverChoreographs(t *testing.T) {
+	savedTabs := tabs
+	savedDemo := demoMode
+	savedSaw := stripSawTwo
+	savedStep := stripStep
+	savedOne := stripClosedOne
+	savedDone := stripDone
+	savedHold := stripHoldLeft
+	savedCount := hostTicksLeft
+	defer func() {
+		tabs = savedTabs
+		demoMode = savedDemo
+		stripSawTwo = savedSaw
+		stripStep = savedStep
+		stripClosedOne = savedOne
+		stripDone = savedDone
+		stripHoldLeft = savedHold
+		hostTicksLeft = savedCount
+	}()
+
+	scan := make([]byte, vi.ScanoutWidth*vi.ScanoutHeight*4)
+	presents := 0
+
+	// Live, two tabs: no reorder/pin/split choreography arms, nothing closes.
+	demoMode = false
+	tabs = TabStrip{}
+	if !tabs.OpenTab(4, "a") || !tabs.OpenTab(5, "b") {
+		t.Fatal("OpenTab")
+	}
+	stripSawTwo, stripStep, stripDone = false, 0, false
+	hostTicksLeft = 3
+	for i := 1; i <= 3; i++ {
+		compositeTick(scan, uint64(i), &presents)
+	}
+	if stripSawTwo || stripStep != 0 || stripDone {
+		t.Fatalf("live mode armed the choreography: sawTwo=%v step=%d done=%v", stripSawTwo, stripStep, stripDone)
+	}
+	if tabs.Count() != 2 {
+		t.Fatalf("live mode closed tabs: count = %d want 2", tabs.Count())
+	}
+	if hostTicksLeft != 3 {
+		t.Fatalf("live mode ran the hostTicks countdown: %d want 3", hostTicksLeft)
+	}
+
+	// Demo (control): the same strip arms the choreography exactly as before.
+	demoMode = true
+	stripSawTwo, stripStep, stripDone, stripHoldLeft = false, 0, false, 0
+	compositeTick(scan, 1, &presents)
+	if !stripSawTwo {
+		t.Fatal("demo mode must still arm the two-tab choreography")
+	}
+	if stripStep != 0 {
+		t.Fatalf("choreography advanced before its hold expired: step=%d", stripStep)
+	}
+
+	// Demo, one tab: the single-tab countdown still runs (the control).
+	tabs = TabStrip{}
+	if !tabs.OpenTab(4, "a") {
+		t.Fatal("OpenTab")
+	}
+	stripSawTwo, stripDone = false, false
+	hostTicksLeft = 1
+	compositeTick(scan, 2, &presents)
+	if hostTicksLeft != 0 {
+		t.Fatalf("demo mode skipped the hostTicks countdown: %d want 0", hostTicksLeft)
+	}
+	if !stripDone {
+		t.Fatal("demo mode must still close the countdown tab at zero")
 	}
 }

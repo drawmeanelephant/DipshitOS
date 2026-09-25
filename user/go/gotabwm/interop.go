@@ -69,6 +69,8 @@ var (
 // enough composite ticks for the app to declare, take the viewport and relayout,
 // plus one `--pointer-virtio` click (pointerClickHold). Two tabs skip this
 // countdown and use the strip choreography in seat.go.
+// M79a (#1704): both the countdown and the choreography are DEMO mode only
+// (the seeded /host/GOTABWM.DEMO trigger); live mode never auto-closes.
 // M62g: GOEDIT starts slower than the other clients (the Zig CALC/NOTEPAD pair
 // when this was written; both are Go apps now — GOCALC.ELF/NOTE.ELF), so the
 // second declare needs more than three ticks or the first tab is closed.
