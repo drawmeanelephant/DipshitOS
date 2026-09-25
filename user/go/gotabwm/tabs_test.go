@@ -22,6 +22,7 @@ func TestTabMarkerShapes(t *testing.T) {
 		{MarkerPin, "gotabwm: pin "},
 		{MarkerReorder, "gotabwm: reorder "},
 		{MarkerOrder, "gotabwm: order "},
+		{MarkerSash, "gotabwm: sash "},
 		{MarkerSessionWrite, "gotabwm: session write n="},
 		{MarkerSessionLoad, "gotabwm: session load n="},
 		{MarkerSessionTitles, "gotabwm: session titles="},
@@ -819,5 +820,196 @@ func TestClosePinnedIsAllowed(t *testing.T) {
 	}
 	if s.At(0).Pinned {
 		t.Fatal("remaining tab inherited pin")
+	}
+}
+
+// M79c (#1706): an unset sash is the legacy tiling — SplitRectsSash with
+// sash <= 0 must be byte-identical to SplitRects, gutterless, so every
+// pre-M79c gate assertion still holds.
+func TestSplitRectsSashUnsetIsLegacy(t *testing.T) {
+	for _, kind := range []SplitKind{SplitVert, SplitHoriz, SplitNone} {
+		for _, sash := range []int{0, -5} {
+			a, b, oka := SplitRectsSash(kind, 1280, 720, sash)
+			c, d, okb := SplitRects(kind, 1280, 720)
+			if oka != okb || a != c || b != d {
+				t.Fatalf("kind=%s sash=%d: sash %+v %+v ok=%v != legacy %+v %+v ok=%v",
+					kind, sash, a, b, oka, c, d, okb)
+			}
+		}
+	}
+	// Odd-width remainder still goes to the far pane when unset.
+	a, b, ok := SplitRectsSash(SplitVert, 1281, 720, 0)
+	if !ok || a.W != 640 || b.W != 641 {
+		t.Fatalf("odd unset SplitV %+v %+v ok=%v", a, b, ok)
+	}
+}
+
+// M79c (#1706): a set sash centres the SashWidth gutter on the clamped
+// divider — the visible divider zone, as geometry the gate can grep.
+func TestSplitRectsSashGutter(t *testing.T) {
+	if SashWidth != 6 {
+		t.Fatalf("SashWidth = %d want 6", SashWidth)
+	}
+	a, b, ok := SplitRectsSash(SplitVert, 1280, 720, 800)
+	if !ok {
+		t.Fatal("SplitV sash=800")
+	}
+	if a != (Rect{0, 0, 797, 720}) || b != (Rect{803, 0, 477, 720}) {
+		t.Fatalf("SplitV sash=800: %+v %+v", a, b)
+	}
+	if a.W+SashWidth+b.W != 1280 {
+		t.Fatal("gutter must account every pixel")
+	}
+	a, b, ok = SplitRectsSash(SplitHoriz, 1280, 720, 500)
+	if !ok {
+		t.Fatal("SplitH sash=500")
+	}
+	if a != (Rect{0, 0, 1280, 497}) || b != (Rect{0, 503, 1280, 217}) {
+		t.Fatalf("SplitH sash=500: %+v %+v ok=%v", a, b, ok)
+	}
+	if a.H+SashWidth+b.H != 720 {
+		t.Fatal("gutter must account every pixel")
+	}
+}
+
+// M79c (#1706): the divider clamps into the pane minima — a drag past the
+// floor parks at it, and a scanout too small for two minima plus the
+// gutter refuses.
+func TestSplitRectsSashClamp(t *testing.T) {
+	a, b, ok := SplitRectsSash(SplitVert, 1280, 720, 10)
+	if !ok || a.W != 160 || b.X != 166 || b.W != 1280-166 {
+		t.Fatalf("clamp low SplitV: %+v %+v ok=%v", a, b, ok)
+	}
+	a, b, ok = SplitRectsSash(SplitVert, 1280, 720, 2000)
+	if !ok || b.W != 160 || a.W != 1117-3 {
+		t.Fatalf("clamp high SplitV: %+v %+v ok=%v", a, b, ok)
+	}
+	a, b, ok = SplitRectsSash(SplitHoriz, 1280, 720, 5)
+	if !ok || a.H != 120 || b.Y != 126 {
+		t.Fatalf("clamp low SplitH: %+v %+v ok=%v", a, b, ok)
+	}
+	a, b, ok = SplitRectsSash(SplitHoriz, 1280, 720, 999)
+	if !ok || b.H != 120 || a.H != 597-3 {
+		t.Fatalf("clamp high SplitH: %+v %+v ok=%v", a, b, ok)
+	}
+	if _, _, ok = SplitRectsSash(SplitVert, 200, 720, 100); ok {
+		t.Fatal("200-wide scanout must refuse even a centred sash")
+	}
+	if _, _, ok = SplitRectsSash(SplitKind(9), 1280, 720, 640); ok {
+		t.Fatal("bogus kind must refuse")
+	}
+}
+
+// M79c (#1706): SetSash guards and lifecycle. Refused off a split, a
+// no-op on the position already held, and reset by Unsplit and by any
+// close that drops the strip below two tabs.
+func TestSetSashGuards(t *testing.T) {
+	var s TabStrip
+	s.OpenTab(3, "Calc")
+	if s.SetSash(800, 1280, 720) {
+		t.Fatal("one tab must not take a sash")
+	}
+	s.OpenTab(4, "Notepad")
+	if s.SetSash(800, 1280, 720) {
+		t.Fatal("unsplit strip must not take a sash")
+	}
+	if !s.SplitV() {
+		t.Fatal("SplitV")
+	}
+	// A fresh split centres on the midpoint: setting exactly that is the
+	// press-on-the-divider release, an honest no-op.
+	if s.SetSash(640, 1280, 720) {
+		t.Fatal("midpoint set on an unset sash must be a no-op")
+	}
+	if !s.SetSash(800, 1280, 720) {
+		t.Fatal("SetSash 800")
+	}
+	if s.SetSash(800, 1280, 720) {
+		t.Fatal("same position twice must be a no-op")
+	}
+	if s.sashCenter(1280, 720) != 800 {
+		t.Fatalf("centre = %d want 800", s.sashCenter(1280, 720))
+	}
+	a, b, ok := s.PaneRects(1280, 720)
+	if !ok || a.W != 797 || b.X != 803 {
+		t.Fatalf("PaneRects follow the sash: %+v %+v ok=%v", a, b, ok)
+	}
+	if !s.Unsplit() {
+		t.Fatal("Unsplit")
+	}
+	if s.sashCenter(1280, 720) != -1 {
+		t.Fatal("Unsplit must clear the sash (no centre off a split)")
+	}
+	if !s.SplitH() || !s.SetSash(500, 1280, 720) {
+		t.Fatal("re-split H + sash")
+	}
+	if !s.CloseTab(4) {
+		t.Fatal("CloseTab")
+	}
+	if s.Split() != SplitNone || s.sashCenter(1280, 720) != -1 {
+		t.Fatal("close below two tabs must clear split and sash")
+	}
+}
+
+// M79c (#1706): the divider hit test. Half the SashWidth around the
+// centre, below the rail, clear of the bottom chrome; SplitNone never hits.
+func TestSashZoneAt(t *testing.T) {
+	v := SplitVert
+	if !sashZoneAt(640, 100, v, 640, 1280, 720) {
+		t.Fatal("dead centre must hit")
+	}
+	if !sashZoneAt(637, 100, v, 640, 1280, 720) || !sashZoneAt(643, 100, v, 640, 1280, 720) {
+		t.Fatal("gutter edges must hit")
+	}
+	if sashZoneAt(636, 100, v, 640, 1280, 720) || sashZoneAt(644, 100, v, 640, 1280, 720) {
+		t.Fatal("outside the gutter must miss")
+	}
+	if sashZoneAt(640, 10, v, 640, 1280, 720) {
+		t.Fatal("the rail owns y < RailHeight, even over the divider")
+	}
+	if !sashZoneAt(640, 698, v, 640, 1280, 720) {
+		t.Fatal("last chrome-clear row must hit")
+	}
+	if sashZoneAt(640, 699, v, 640, 1280, 720) {
+		t.Fatal("bottom chrome must miss")
+	}
+	if sashZoneAt(2000, 100, v, 640, 1280, 720) {
+		t.Fatal("off-scanout x must miss")
+	}
+	h := SplitHoriz
+	if !sashZoneAt(100, 360, h, 360, 1280, 720) {
+		t.Fatal("horizontal centre must hit")
+	}
+	if !sashZoneAt(100, 357, h, 360, 1280, 720) || sashZoneAt(100, 356, h, 360, 1280, 720) {
+		t.Fatal("horizontal gutter edges")
+	}
+	if sashZoneAt(100, 10, h, 360, 1280, 720) {
+		t.Fatal("horizontal rail exclusion")
+	}
+	if sashZoneAt(100, 100, SplitNone, -1, 1280, 720) {
+		t.Fatal("SplitNone must never hit")
+	}
+}
+
+// M79c (#1706): the sash rides into LAYOUT.txt's x=/w= fields — no new
+// field (ADR 0033 pins the line format); the pane x/w ARE the sash.
+func TestLayoutFileBodySash(t *testing.T) {
+	var s TabStrip
+	if !s.OpenTab(3, "Calc") || !s.OpenTab(4, "Notepad") {
+		t.Fatal("OpenTab")
+	}
+	if !s.SplitV() || !s.SetSash(800, 1280, 720) {
+		t.Fatal("split + sash")
+	}
+	_ = s.FocusTab(3)
+	body := layoutFileBody(&s, 1280, 720)
+	lines := strings.Split(strings.TrimSuffix(string(body), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("lines = %d want 2: %q", len(lines), body)
+	}
+	want0 := "tab=3 bin=GOCALC.ELF x=0 y=0 w=797 h=720 focus=1 split=v"
+	want1 := "tab=4 bin=NOTE.ELF x=803 y=0 w=477 h=720 focus=0 split=v"
+	if lines[0] != want0 || lines[1] != want1 {
+		t.Fatalf("got\n %q\n %q\nwant\n %q\n %q", lines[0], lines[1], want0, want1)
 	}
 }
