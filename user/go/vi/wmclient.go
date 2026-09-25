@@ -38,6 +38,9 @@ const (
 	// frozen-ABI change.
 	WmRpcKindNavDeclare uint8 = 9
 	WmRpcKindNavPoll    uint8 = 10
+	// Additive client -> seat title update. The request title carries the
+	// replacement; the ack keeps the same generic reply shape.
+	WmRpcKindSetTitle uint8 = 11
 )
 
 // WmRpc is the 38-byte app-to-WM mailbox frame. Field order and widths are the
@@ -51,7 +54,8 @@ const (
 //   - reply_to: u8 requester pid; the low byte only, so values > 0xff are refused
 //   - applied: u8, reply frames only
 //   - x, y, w, h: u16 little-endian
-//   - title: 24 NUL-padded bytes; nav-poll replies carry their path here
+//   - title: 24 NUL-padded bytes; set-title requests carry the tab title and
+//     nav-poll replies carry their path
 //
 // The id and reply_to bounds are part of the client contract, not an
 // invitation to truncate a wider value silently.
@@ -255,6 +259,15 @@ func PollNav(winID uint32, selfName string) (string, bool) {
 		return "", false
 	}
 	return rep.TitleString(), true
+}
+
+// SetTabTitle asks the seat to replace the title on winID (kind 11). An empty
+// title is refused before the mailbox: every open tab should remain named.
+func SetTabTitle(winID uint32, title, selfName string) bool {
+	if title == "" {
+		return false
+	}
+	return WmMailRequest(WmRpcKindSetTitle, winID, 0, 0, 0, 0, title, selfName)
 }
 
 // WmAction is what a tab client's event dispatch decided to do.

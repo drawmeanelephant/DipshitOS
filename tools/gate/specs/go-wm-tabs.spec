@@ -1,4 +1,5 @@
-# go-wm-tabs.spec -- M62b–h + #1426 + M66b (issues #1400–#1406/#1426/#1444)
+# go-wm-tabs.spec -- M62b–h + #1426 + M66b + M79d
+# (issues #1400–#1406/#1426/#1444/#1707)
 # class-B gate: GOTABWM tab strip, split, pin, session, LAYOUT.txt, then two
 # shipping Go ELFs as tabs. Boot 01 hosts GOCALC.ELF + NOTE.ELF
 # (Zig CALC.BIN is gone, M62h / #1406; Zig NOTEPAD.BIN is gone, M66c / #1485). Boot 03 hosts GOEDIT.ELF + GOTERM.ELF:
@@ -47,10 +48,14 @@
 # assertions below moved by prefix alone. The coverage that app alone had moved
 # to GOEDIT.ELF (find/goto, the unsaved-decline contract) or GOCOMP.ELF (its
 # clipboard+timer composition); the theme-token boots were retired with it.
+# M79d (#1707): NOTE follows its opened file with kind-11 set_title. Run 01
+# requires the seat's post-mutation marker and SESSION.TABS carries notes.txt;
+# run 02 restores that title while LAYOUT.txt still records bin=NOTE.ELF, so a
+# visible rename cannot corrupt reopen identity.
 #
 # HOST PREREQUISITE: bash tools/go/build-note.sh -> .build/go/NOTE.ELF
 
-vgate_name go-wm-tabs "issues #1400–#1405/#1426 + #1564: GOTABWM tabs, session, LAYOUT.txt, frozen badge, start surface on VZ"
+vgate_name go-wm-tabs "issues #1400–#1405/#1426 + #1564 + #1707: GOTABWM tabs, session, LAYOUT.txt, frozen badge, start surface, live titles on VZ"
 vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 
@@ -210,6 +215,16 @@ vgate_assert 01 serial-contains 'gotabwm: tab focus id='
 vgate_assert 01 serial-contains 'gotabwm: rail n=2 focus='
 vgate_assert 01 serial-contains 'gocalc: declare accepted'
 vgate_assert 01 serial-contains 'note: tab-aware (full-viewport)'
+# M79d: NOTE reports the rename only after the seat acked kind 11; the seat
+# prints its marker only after the strip mutation. Pin both sides of the RPC.
+vgate_assert 01 serial-contains 'note: tab title notes.txt'
+vgate_assert 01 python <<'PY'
+import os, re, sys
+ser = open(os.environ["VG_SER"], errors="replace").read()
+if not re.search(r"^gotabwm: title id=\d+ notes\.txt$", ser, re.M):
+    sys.exit("missing gotabwm: title id=<n> notes.txt after NOTE declaration")
+print("NOTE renamed its tab through WM_RPC kind 11")
+PY
 # M62d: reorder two unpinned tabs; pin jumps to the left and stays there
 # across a focus change. Order line names ids + pin bits (not LAYOUT.txt).
 # There is no kernel pin object: the first dump is Pin() on the strip; the
@@ -332,13 +347,13 @@ if b[1] != 1:
     sys.exit("active+1 = %d want 1 (Calc, index 0)" % b[1])
 title0 = b[6:38].split(b"\x00", 1)[0]
 title1 = b[75:107].split(b"\x00", 1)[0]
-if title0 != b"Calc" or title1 != b"Notepad":
-    sys.exit("titles %r %r want Calc, Notepad" % (title0, title1))
+if title0 != b"Calc" or title1 != b"notes.txt":
+    sys.exit("titles %r %r want Calc, notes.txt" % (title0, title1))
 if b[38] != 1:
     sys.exit("record 0 flags %#x want pinned" % b[38])
 if b[107] != 0:
     sys.exit("record 1 flags %#x want unpinned" % b[107])
-print("SESSION.TABS v2 n=2 Calc pinned left, Calc active")
+print("SESSION.TABS v2 n=2 Calc pinned left, live title notes.txt, Calc active")
 PY
 # M62f: LAYOUT.txt is closed before the serial line that names it. Last
 # two-tab write is the unsplit full-viewport dump (closes do not rewrite).
@@ -396,7 +411,7 @@ vgate_assert 02 serial-contains 'exec: loaded GOTABWM.ELF'
 vgate_assert 02 serial-contains 'gotabwm: registered'
 vgate_assert 02 serial-contains 'gotabwm: settings wm=none'
 vgate_assert 02 serial-contains 'gotabwm: session load n=2'
-vgate_assert 02 serial-contains 'gotabwm: session titles=Calc,Notepad pin=1,0 active=0'
+vgate_assert 02 serial-contains 'gotabwm: session titles=Calc,notes.txt pin=1,0 active=0'
 vgate_assert 02 serial-contains 'gotabwm: order ids='
 vgate_assert 02 serial-contains 'pin=1,0'
 vgate_assert 02 serial-contains 'gotabwm: rail n=2 focus='
@@ -429,7 +444,7 @@ if bins != ["GOCALC.ELF", "NOTE.ELF"]:
 if parsed[0].group(8) != "none" or parsed[1].group(8) != "none":
     sys.exit("restore dump must be unsplit")
 print("LAYOUT.txt restore n=2 ids=256,257 unsplit")
-# Boot 03 must not restore Calc/Notepad session placeholders.
+# Boot 03 must not restore the Calc/notes.txt session placeholders.
 stale = os.path.join(os.environ["VG_SHARE"], "SESSION.TABS")
 try:
     os.remove(stale)

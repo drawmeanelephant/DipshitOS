@@ -250,6 +250,21 @@ func (s *TabStrip) OpenTab(id uint32, title string) bool {
 	return true
 }
 
+// SetTitle replaces the visible label on an existing tab without touching its
+// recorded executable. The declaration title establishes Bin; later document
+// titles must not turn reopen into a request for a file named after the file.
+func (s *TabStrip) SetTitle(id uint32, title string) bool {
+	if title == "" {
+		return false
+	}
+	i := s.index(id)
+	if i < 0 {
+		return false
+	}
+	s.tabs[i].Title = title
+	return true
+}
+
 // CloseTab removes id. If it was focused, focus moves to the neighbour
 // that occupies its slot after the shift (or the new last tab). Closing
 // the last tab leaves the strip empty with no focus. Returns whether id

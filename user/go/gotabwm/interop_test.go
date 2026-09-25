@@ -15,6 +15,7 @@ func TestInteropMarkerShapes(t *testing.T) {
 		{MarkerRpcAttach, "gotabwm: rpc attach id="},
 		{MarkerRpcDetach, "gotabwm: rpc detach id="},
 		{MarkerRpcCycle, "gotabwm: rpc cycle"},
+		{MarkerTitle, "gotabwm: title id="},
 		{MarkerRpcOther, "gotabwm: rpc other kind="},
 		{MarkerHostFocus, "gotabwm: host focus id="},
 		{MarkerHostView, "gotabwm: host view id="},
@@ -82,6 +83,32 @@ func TestDogfoodHostedLatch(t *testing.T) {
 	}
 	if !dogfoodHosted {
 		t.Fatal("declare did not latch dogfoodHosted: `dogfood: ok` could never print")
+	}
+}
+
+// Set-title is a strip mutation, not a rename of executable identity.
+func TestApplySetTitlePreservesTabState(t *testing.T) {
+	saved := tabs
+	defer func() { tabs = saved }()
+	tabs = TabStrip{}
+	if !tabs.OpenTab(4, "Notepad") {
+		t.Fatal("OpenTab")
+	}
+
+	req := vi.WmRpc{Kind: vi.WmRpcKindSetTitle, ID: 4, Seq: 5}
+	req.SetTitle("notes.txt")
+	if !applyRPC(req) {
+		t.Fatal("set-title request refused")
+	}
+	if tabs.At(0).Title != "notes.txt" || tabs.At(0).Bin != "NOTE.ELF" {
+		t.Fatalf("set-title state = %+v", tabs.At(0))
+	}
+	if applyRPC(vi.WmRpc{Kind: vi.WmRpcKindSetTitle, ID: 99}) {
+		t.Fatal("set-title accepted an unknown tab")
+	}
+	empty := vi.WmRpc{Kind: vi.WmRpcKindSetTitle, ID: 4}
+	if applyRPC(empty) {
+		t.Fatal("set-title accepted an empty title")
 	}
 }
 

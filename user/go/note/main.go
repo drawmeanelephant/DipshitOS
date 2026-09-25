@@ -49,12 +49,9 @@ import (
 
 const (
 	appName = "NOTE.ELF"
-	// appTitle is the TITLE the app declares, and it is "Notepad" -- the Zig
-	// app's own title (user/src/notepad.zig `.title = "Notepad"`) -- because the
-	// seat's specs assert it (`gotabwm: session titles=Calc,Notepad`) and the
-	// session's bin field is guessed from it (gotabwm guessBin). Renaming the app
-	// is a spec retarget; sharing the title is what keeps that retarget a prefix
-	// change.
+	// appTitle is the identity NOTE declares. The seat maps it to
+	// NOTE.ELF for reopen; once the startup file is known, M79d sends the
+	// document name as a separate set-title RPC without changing that bin.
 	appTitle = "Notepad"
 	natW     = 512
 	natH     = 384
@@ -96,6 +93,7 @@ const (
 	markerOpen        = "note: open id="
 	markerTabAware    = "note: tab-aware (full-viewport)"
 	markerNotTabAware = "note: not-tab-aware (shim or WND desktop)"
+	markerTabTitle    = "note: tab title "
 	markerDogfood     = "dogfood: note" // M69a (#1528): go-dogfood.spec's marker
 	markerReady       = "note: ready"
 	markerSettled     = "note: settled"
@@ -206,6 +204,12 @@ func main() {
 	}
 
 	vi.ConsoleLine(a.load())
+	// NOTE owns one startup document. Once the open attempt has returned,
+	// name the rail for that document; the initial Notepad declaration still
+	// supplied NOTE.ELF to the seat's reopen/session bin field.
+	if title := tabTitleForPath(a.path); ta.SetTabTitle(title) {
+		vi.ConsoleLine(markerTabTitle + title)
+	}
 	a.top = a.buf.Follow(a.top, a.rowsIn())
 	a.draw()
 	// ready means the first frame is BUILT AND PRESENTED, which is why it comes
@@ -270,6 +274,18 @@ func main() {
 func (a *app) load() string {
 	data, rc := vi.ReadFileAll(a.path, readMax)
 	return a.loadMarker(data, rc)
+}
+
+// tabTitleForPath is the final path component. NOTE currently opens one fixed
+// file, but keeping the conversion local means a later open/save-as path uses
+// the same title rule instead of inventing another format.
+func tabTitleForPath(path string) string {
+	for i := len(path) - 1; i >= 0; i-- {
+		if path[i] == '/' {
+			return path[i+1:]
+		}
+	}
+	return path
 }
 
 // loadMarker is the decision load() makes from what the file channel returned,

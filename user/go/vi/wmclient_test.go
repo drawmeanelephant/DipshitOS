@@ -51,6 +51,21 @@ func TestWmRpcEncodeDecodeRoundTrip(t *testing.T) {
 	}
 }
 
+func TestWmRpcSetTitleFrameRoundTrip(t *testing.T) {
+	m := WmRpc{Kind: WmRpcKindSetTitle, ID: 4, Seq: 5, ReplyTo: 9}
+	m.SetTitle("notes.txt")
+	got, ok := DecodeWmRpc(m.Encode())
+	if !ok {
+		t.Fatal("set-title frame did not decode")
+	}
+	if got.Kind != WmRpcKindSetTitle || got.ID != 4 || got.Seq != 5 || got.ReplyTo != 9 {
+		t.Fatalf("set-title header = %+v", got)
+	}
+	if got.TitleString() != "notes.txt" {
+		t.Fatalf("set-title payload = %q", got.TitleString())
+	}
+}
+
 // The u16 rect fields are little-endian at the frozen offsets: x@6, y@8,
 // w@10, h@12.
 func TestWmRpcRectBytes(t *testing.T) {
@@ -116,6 +131,9 @@ func TestWmMailRequestNoSeat(t *testing.T) {
 	if _, ok := PollNav(4, "DEMOAPP.ELF"); ok {
 		t.Fatal("host PollNav should be false")
 	}
+	if SetTabTitle(4, "notes.txt", "DEMOAPP.ELF") {
+		t.Fatal("host SetTabTitle should be false")
+	}
 }
 
 func TestWmRpcKindConstants(t *testing.T) {
@@ -125,7 +143,7 @@ func TestWmRpcKindConstants(t *testing.T) {
 		{WmRpcKindRaise, 1}, {WmRpcKindConfig, 2}, {WmRpcKindRegisterAction, 3},
 		{WmRpcKindInvokeAction, 4}, {WmRpcKindAttachTab, 5}, {WmRpcKindDetachTab, 6},
 		{WmRpcKindCycleTab, 7}, {WmRpcKindDeclareFullscreen, 8},
-		{WmRpcKindNavDeclare, 9}, {WmRpcKindNavPoll, 10},
+		{WmRpcKindNavDeclare, 9}, {WmRpcKindNavPoll, 10}, {WmRpcKindSetTitle, 11},
 	}
 	for _, p := range pairs {
 		if p.got != p.want {
@@ -313,6 +331,31 @@ func TestWmMailRequestAllocatesMonotonicSequences(t *testing.T) {
 	}
 	if f.sent[0].Seq != 1 || f.sent[1].Seq != 2 {
 		t.Fatalf("request sequences = %d, %d want 1, 2", f.sent[0].Seq, f.sent[1].Seq)
+	}
+}
+
+func TestSetTabTitleRequest(t *testing.T) {
+	f := startWmMailFake(t)
+	f.autoReply = true
+	if !SetTabTitle(4, "notes.txt", "NOTE.ELF") {
+		t.Fatal("set-title request should receive its applied ack")
+	}
+	if len(f.sent) != 1 {
+		t.Fatalf("sent requests = %d want 1", len(f.sent))
+	}
+	got := f.sent[0]
+	if got.Kind != WmRpcKindSetTitle || got.ID != 4 || got.TitleString() != "notes.txt" {
+		t.Fatalf("set-title request = %+v title=%q", got, got.TitleString())
+	}
+}
+
+func TestSetTabTitleRefusesEmptyBeforeSend(t *testing.T) {
+	f := startWmMailFake(t)
+	if SetTabTitle(4, "", "NOTE.ELF") {
+		t.Fatal("empty title must refuse")
+	}
+	if f.procsCalls != 0 || f.sendCalls != 0 {
+		t.Fatalf("empty title touched the wire: procs=%d send=%d", f.procsCalls, f.sendCalls)
 	}
 }
 
