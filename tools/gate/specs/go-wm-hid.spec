@@ -647,3 +647,92 @@ if not any(l.startswith("gotabwm: rail n=2 focus=") and i > dup_i for i, l in en
 print("BT1 dup: open@%d duplicate@%d; %d tab opens, %d clean GOCALC exits" % (
     open_i, dup_i, len(opens), len(exits)))
 PY
+
+# ---------------------------------------------------------------------------
+# Run 06 (M79b / #1705): the close-x button and hover highlight.
+#
+# Same boot shape as run 01 (two clients: GOEDIT + GOTERM). The pointer phase
+# is two steps on the rail: a motion over cell 0 (the hover tint + entry
+# marker) and a press/release on cell 0's close-x (the cell's rightmost 16 px
+# at cellW=640: x in [624,640)). The close-x closes GOEDIT with NO focus
+# change first -- no rail-click, no tab focus -- and the rail marker drops to
+# n=1 with GOTERM keeping focus. The 2-step phase sits well inside the
+# choreography hold (hidChordHold=32 ticks; run 01 fits a click, a type-in
+# and a chord batch in the same window).
+#
+# The boot drops any stale SESSION.TABS first: vgate_setup_python runs ONCE
+# per spec (vgate.sh runs every setup body before the run loop), so the M62e
+# cleanup cannot protect a later boot. Run 05's two-tab chain writes the
+# session (`session write n=2`), and without the drop this boot restored it
+# (measured 2026-09-24: `session load n=2` titles=Calc,Calc -> the strip read
+# n=4 with the restored placeholders, the `rail n=2` trigger never fired, and
+# the pointer phase never ran). `vf rm` is the go-wm-seat run 05 pattern.
+vgate_file script-m79b.txt <<'EOF'
+set GOMAXPROCS=1
+vf rm SESSION.TABS
+wm
+exec GOTABWM.ELF
+EOF
+
+vgate_run 06 -- \
+    --screen '$RUN_DIR/screen-06' \
+    --via-virtio \
+    --script '$RUN_DIR/script-m79b.txt' \
+    --script2 '$RUN_DIR/script2.txt' \
+    --script2-after 'gotabwm: win focus' \
+    --pointer-virtio '320,10;632,10,d;632,10,u' \
+    --pointer-virtio-after 'gotabwm: rail n=2' \
+    --script3 '$RUN_DIR/script3.txt' \
+    --script3-after 'wm: unregistered, shim resumed' \
+    --script-expect 'rx-gotabwm-hid-ok' --timeout 300
+
+vgate_assert 06 serial-contains 'VirelaiOS kernel has seized control.'
+vgate_assert 06 serial-contains 'exec: loaded GOTABWM.ELF'
+vgate_assert 06 serial-contains 'gotabwm: registered'
+vgate_assert 06 serial-contains 'exec: loaded GOEDIT.ELF'
+vgate_assert 06 serial-contains 'exec: loaded GOTERM.ELF'
+vgate_assert 06 serial-contains 'gotabwm: rail n=2'
+# M79b: hover names the cell and the close-x closes that same tab with no
+# focus change first; the rail marker drops to n=1.
+vgate_assert 06 serial-contains 'gotabwm: rail-hover id='
+vgate_assert 06 serial-contains 'gotabwm: tab close id='
+vgate_assert 06 serial-contains 'gotabwm: rail n=1'
+vgate_assert 06 serial-absent 'gotabwm: rail-click id='
+vgate_assert 06 serial-contains 'gotabwm: close'
+vgate_assert 06 serial-contains 'gotabwm OK'
+vgate_assert 06 serial-contains 'wm: unregistered, shim resumed'
+vgate_assert 06 serial-contains 'rx-gotabwm-hid-ok'
+vgate_assert 06 serial-absent '[EXC] parking:'
+vgate_assert 06 serial-absent 'exited status=139'
+vgate_assert 06 python <<'PY'
+import os, sys
+ser = open(os.environ["VG_SER"], errors="replace").read().splitlines()
+
+def first_after(prefix, start=0):
+    for i in range(start, len(ser)):
+        if ser[i].startswith(prefix):
+            return i
+    sys.exit("missing %s after %d" % (prefix, start))
+
+hover_i = first_after("gotabwm: rail-hover id=")
+close_i = first_after("gotabwm: tab close id=")
+if close_i <= hover_i:
+    sys.exit("the close-x must follow the hover (hover@%d close@%d)" % (hover_i, close_i))
+hover_id = ser[hover_i].split("id=")[1]
+close_id = ser[close_i].split("id=")[1]
+if hover_id != close_id:
+    sys.exit("hover named id=%s but the close-x closed id=%s" % (hover_id, close_id))
+# Hit-test honesty: between the hover and the close there is no focus change
+# and no rail click -- the close-x closes a BUTTON, not a cell.
+for i in range(hover_i, close_i):
+    if ser[i].startswith(("gotabwm: rail-click id=", "gotabwm: tab focus id=", "gotabwm: host focus id=")):
+        sys.exit("focus changed before the close-x (line %d: %s)" % (i, ser[i]))
+rail_i = -1
+for i in range(close_i, len(ser)):
+    if ser[i].startswith("gotabwm: rail n=1 focus="):
+        rail_i = i
+        break
+if rail_i < 0:
+    sys.exit("the rail marker never dropped to n=1 after the close-x")
+print("M79b: hover@%d id=%s close-x@%d rail n=1@%d" % (hover_i, hover_id, close_i, rail_i))
+PY

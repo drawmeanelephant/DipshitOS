@@ -479,6 +479,176 @@ func TestRailDragMissesClientAreaAndSameCell(t *testing.T) {
 	}
 }
 
+// M79b (#1705): the close-x hit zone is the cell's rightmost railCloseW px —
+// pinned geometry including the min-48px cell (the zone is exactly a third of
+// the cell) and the honest non-targets: cell body, rail edge rows, the last
+// cell's remainder pixels, an empty strip.
+func TestRailCloseZoneAtGeometry(t *testing.T) {
+	if MarkerRailHover != "gotabwm: rail-hover id=" {
+		t.Fatalf("MarkerRailHover = %q (gate grep target)", MarkerRailHover)
+	}
+	const w, h = 1280, 22
+	// Two tabs: cellW = 640; zones are [624,640) and [1264,1280).
+	if i, ok := railCloseZoneAt(632, 10, w, 2, h); !ok || i != 0 {
+		t.Fatalf("cell 0 close-x = %d ok=%v want 0", i, ok)
+	}
+	if _, ok := railCloseZoneAt(623, 10, w, 2, h); ok {
+		t.Fatal("the cell body (x=623) must not be a close-x target")
+	}
+	if _, ok := railCloseZoneAt(320, 10, w, 2, h); ok {
+		t.Fatal("the cell centre must not be a close-x target")
+	}
+	if i, ok := railCloseZoneAt(1272, 10, w, 2, h); !ok || i != 1 {
+		t.Fatalf("cell 1 close-x = %d ok=%v want 1", i, ok)
+	}
+	if _, ok := railCloseZoneAt(1263, 10, w, 2, h); ok {
+		t.Fatal("x=1263 is cell 1 body, not its close-x")
+	}
+	if _, ok := railCloseZoneAt(632, 22, w, 2, h); ok {
+		t.Fatal("py == RailHeight is the pane, not the close-x")
+	}
+	if _, ok := railCloseZoneAt(632, 360, w, 2, h); ok {
+		t.Fatal("client area is never a close-x target")
+	}
+	if _, ok := railCloseZoneAt(632, 10, w, 0, h); ok {
+		t.Fatal("empty strip has no close-x")
+	}
+	// Min-48px cells (n*48 > width clamps cellW to 48): the zone is the
+	// rightmost third — [32,48) of cell 0, [80,96) of cell 1.
+	if i, ok := railCloseZoneAt(40, 10, w, 30, h); !ok || i != 0 {
+		t.Fatalf("min-cell close-x = %d ok=%v want 0", i, ok)
+	}
+	if _, ok := railCloseZoneAt(31, 10, w, 30, h); ok {
+		t.Fatal("x=31 is min-cell body")
+	}
+	if i, ok := railCloseZoneAt(88, 10, w, 30, h); !ok || i != 1 {
+		t.Fatalf("min-cell 1 close-x = %d ok=%v want 1", i, ok)
+	}
+	// The last cell's remainder pixels past n*cellW resolve to the last
+	// cell (railCellAt's rule) but sit outside its paint, so they stay
+	// click/drag territory and are never a close-x target.
+	if i, ok := railCloseZoneAt(1277, 10, w, 3, h); !ok || i != 2 {
+		t.Fatalf("cell 2 close-x = %d ok=%v want 2", i, ok)
+	}
+	if _, ok := railCloseZoneAt(1278, 10, w, 3, h); ok {
+		t.Fatal("the remainder pixel (x=1278) must not be a close-x target")
+	}
+	if _, ok := railCloseZoneAt(1279, 10, w, 3, h); ok {
+		t.Fatal("the remainder pixel (x=1279) must not be a close-x target")
+	}
+}
+
+// M79b (#1705): hover tracks the rail cell under the pointer and clears off
+// the rail. State only — the entry marker is motion-only (updateRailHover).
+func TestRailHoverTracksCells(t *testing.T) {
+	saved := tabs
+	savedHover := railHover
+	defer func() {
+		tabs = saved
+		railHover = savedHover
+	}()
+	tabs = TabStrip{}
+	railHover = -1
+	if !tabs.OpenTab(3, "A") || !tabs.OpenTab(4, "B") {
+		t.Fatal("OpenTab")
+	}
+	_ = tabs.FocusTab(4)
+	motion := func(px uint32) {
+		handleWmPointer(vi.Event{Kind: vi.EvWmPointer, Arg0: px | uint32(10)<<16, Flags: 0})
+	}
+	motion(320) // cell 0
+	if railHover != 0 {
+		t.Fatalf("hover over cell 0 tracked %d", railHover)
+	}
+	motion(321) // same cell: state holds
+	if railHover != 0 {
+		t.Fatalf("same-cell motion lost hover: %d", railHover)
+	}
+	motion(960) // cell 1
+	if railHover != 1 {
+		t.Fatalf("hover over cell 1 tracked %d", railHover)
+	}
+	// Below the rail: hover clears.
+	handleWmPointer(vi.Event{Kind: vi.EvWmPointer, Arg0: 320 | uint32(360)<<16, Flags: 0})
+	if railHover != -1 {
+		t.Fatalf("client-area motion must clear hover, got %d", railHover)
+	}
+}
+
+// M79b (#1705): the close-x click closes the CELL's tab through the WM seam
+// and nothing else — no focus change (the close tail never raises), no drag
+// armed. A press on the cell body keeps today's click/drag behaviour byte for
+// byte. The stubs are interop.go's closeWin / focusRaise seams (vi.Wmctl*
+// bypasses the host syscall hook — the raw gateway is hardwired -ENOSYS).
+func TestHandleWmPointerCloseXClosesWithoutFocusOrDrag(t *testing.T) {
+	saved := tabs
+	savedHosted := hostedApp
+	savedBtn := prevPtrButtons
+	savedDrag := railDragFrom
+	savedHover := railHover
+	closed := []uint32{}
+	raises := 0
+	prevClose, prevRaise := closeWin, focusRaise
+	closeWin = func(id uint32) int64 {
+		closed = append(closed, id)
+		return 0
+	}
+	focusRaise = func(id uint32) int64 {
+		raises++
+		return 0
+	}
+	defer func() {
+		tabs = saved
+		hostedApp = savedHosted
+		prevPtrButtons = savedBtn
+		railDragFrom = savedDrag
+		railHover = savedHover
+		closeWin, focusRaise = prevClose, prevRaise
+	}()
+	tabs = TabStrip{}
+	hostedApp = 0
+	prevPtrButtons = 0
+	railDragFrom = -1
+	railHover = -1
+	if !tabs.OpenTab(3, "A") || !tabs.OpenTab(4, "B") {
+		t.Fatal("OpenTab")
+	}
+	_ = tabs.FocusTab(4)
+	body := uint32(320) | uint32(10)<<16
+	zone := uint32(632) | uint32(10)<<16
+	// Cell body: the press still arms the drag (today's behaviour) and
+	// still tries the click — the close-x is not a target there.
+	handleWmPointer(vi.Event{Kind: vi.EvWmPointer, Arg0: body, Flags: uint16(hidBtnLeft)})
+	if railDragFrom != 0 {
+		t.Fatalf("body press armed drag %d want 0", railDragFrom)
+	}
+	if len(closed) != 0 {
+		t.Fatalf("a body press closed %v", closed)
+	}
+	handleWmPointer(vi.Event{Kind: vi.EvWmPointer, Arg0: body, Flags: 0})
+	if railDragFrom != -1 || tabs.At(0).ID != 3 || tabs.At(1).ID != 4 {
+		t.Fatal("same-cell release must not reorder")
+	}
+	// The close-x: press + release closes cell 0's tab and NOTHING else.
+	handleWmPointer(vi.Event{Kind: vi.EvWmPointer, Arg0: zone, Flags: uint16(hidBtnLeft)})
+	handleWmPointer(vi.Event{Kind: vi.EvWmPointer, Arg0: zone, Flags: 0})
+	if len(closed) != 1 || closed[0] != 3 {
+		t.Fatalf("close-x closed %v want [3]", closed)
+	}
+	if raises != 0 {
+		t.Fatalf("close-x must not focus: the close tail raised %d time(s)", raises)
+	}
+	if tabs.Count() != 1 || tabs.At(0).ID != 4 {
+		t.Fatalf("strip after close-x holds %+v, want only id 4", tabs.At(0))
+	}
+	if id, _ := tabs.Focused(); id != 4 {
+		t.Fatalf("focus moved to %d; close-x must not change focus", id)
+	}
+	if railDragFrom != -1 {
+		t.Fatalf("close-x armed a drag: %d", railDragFrom)
+	}
+}
+
 func TestHidUsageCharLetters(t *testing.T) {
 	if c, ok := hidUsageChar(0x06); !ok || c != 'c' {
 		t.Fatalf("HID c = %q ok=%v", c, ok)

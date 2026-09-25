@@ -36,6 +36,16 @@ const (
 	railBadgeInset = 4
 )
 
+// M79b (#1705): the close-x geometry. railCloseW is the hit zone's width —
+// the cell's rightmost railCloseW px, full strip height, mirrored exactly by
+// hid.go's railCloseZoneAt so the painted glyph and the hit target can never
+// disagree. railCloseInset keeps the 8x8 ✕ glyph clear of the frozen badge,
+// which sits hard against the cell's right edge.
+const (
+	railCloseW     = 16
+	railCloseInset = 2
+)
+
 // Tab is one strip entry. ID is the kernel window id the client declared.
 type Tab struct {
 	ID     uint32
@@ -189,6 +199,12 @@ func railIdleRGB() uint32   { return theme.Current.BtnIdle }
 func railFocusRGB() uint32  { return theme.Current.Accent }
 func railGapRGB() uint32    { return theme.Current.Bg }
 func railFrozenRGB() uint32 { return theme.Current.Warning }
+
+// M79b (#1705): the hover tint is the theme's own hover token — distinct
+// from idle (BtnIdle) and focus (Accent) by construction. The close-x glyph
+// is muted ink: visible on idle, hover, and focus cells without shouting.
+func railHoverRGB() uint32 { return theme.Current.BtnHover }
+func railCloseRGB() uint32 { return theme.Current.Muted }
 
 // Count is how many tabs are currently open.
 func (s *TabStrip) Count() int { return s.count }
@@ -611,10 +627,12 @@ func dec(v uint32) string {
 }
 
 // paintRail fills the top stripH rows of a width x height scanout with
-// one cell per tab. The focused cell uses railFocusRGB; the rest use
-// railIdleRGB. Returns how many pixels in the strip were written. No
-// syscalls — the seat paints, then presents, then prints the rail marker.
-func paintRail(scan []byte, width, height, stripH int, ts *TabStrip) int {
+// one cell per tab. The focused cell uses railFocusRGB; the hovered cell
+// (M79b #1705, `hover` is the cell index or -1) uses railHoverRGB; the rest
+// use railIdleRGB. Every cell carries the close-x glyph in its close zone.
+// Returns how many pixels in the strip were written. No syscalls — the seat
+// paints, then presents, then prints the rail marker.
+func paintRail(scan []byte, width, height, stripH int, ts *TabStrip, hover int) int {
 	n := ts.Count()
 	if n == 0 || width <= 0 || height <= 0 || stripH <= 0 || len(scan) < 4 {
 		return 0
@@ -656,6 +674,10 @@ func paintRail(scan []byte, width, height, stripH int, ts *TabStrip) int {
 		rgb := railIdleRGB()
 		if ts.At(i).ID == focus {
 			rgb = railFocusRGB()
+		} else if i == hover {
+			// M79b (#1705): the hover tint. Focus wins on the focused
+			// cell so the pointer never masks the keyboard's target.
+			rgb = railHoverRGB()
 		}
 		// 1px trough on the left, like kernel paint_tab_strip.
 		written += fillRect(pix, width, maxH, x+1, 0, w-1, stripH, rgb)
@@ -670,6 +692,14 @@ func paintRail(scan []byte, width, height, stripH int, ts *TabStrip) int {
 			if bw > 0 && stripH > 2*railBadgeInset {
 				written += fillRect(pix, width, maxH, x+w-1-bw, railBadgeInset, bw, stripH-2*railBadgeInset, railFrozenRGB())
 			}
+		}
+		// M79b (#1705): the close-x glyph — the 8x8 face's 'x', inside the
+		// cell's close zone and left of the frozen badge's edge strip.
+		// Painted on every cell (idle, hovered, focused): a user must be
+		// able to FIND the button before they can hover it. Cells too narrow
+		// for the zone get no glyph and no hit target (railCloseZoneAt).
+		if w >= railCloseW && stripH >= 8 {
+			written += drawText8(pix, width, maxH, x+w-railCloseW+railCloseInset, (stripH-8)/2, "x", railCloseRGB())
 		}
 	}
 	return written

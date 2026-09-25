@@ -326,7 +326,7 @@ func compositeTick(scan []byte, ticks uint64, presents *int) {
 		_ = paintBlank(scan, blankRGB())
 		startSurfaceTick(scan)
 	} else {
-		_ = paintRail(scan, vi.ScanoutWidth, vi.ScanoutHeight, RailHeight, &tabs)
+		_ = paintRail(scan, vi.ScanoutWidth, vi.ScanoutHeight, RailHeight, &tabs, railHover)
 		markRail()
 	}
 	chromeTick(scan, ticks)
