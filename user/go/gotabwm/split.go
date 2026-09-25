@@ -9,6 +9,13 @@ package main
 
 import "virelai/vi"
 
+// wmctlSetRect is the rect-proposal seam for the split/sash paths. It is
+// vi.WmctlSetWindowRect in the guest; the indirection exists because that
+// call goes out over syscall6, which bypasses vi's host-test syscall hook,
+// and would otherwise leave the sash-drag -> relayout path unobservable off
+// the guest. Same shape as hid.go's execApp.
+var wmctlSetRect = vi.WmctlSetWindowRect
+
 func applySplit(kind SplitKind) bool {
 	ok := false
 	switch kind {
@@ -55,11 +62,69 @@ func applyUnsplit() bool {
 // call so the kernel's move clamp sees the NEW size (see file comment).
 func applyRect(id uint32, r Rect) bool {
 	if r.X != 0 || r.Y != 0 {
-		if vi.WmctlSetWindowRect(id, 0, 0, r.W, r.H) != 0 {
+		if wmctlSetRect(id, 0, 0, r.W, r.H) != 0 {
 			return false
 		}
 	}
-	return vi.WmctlSetWindowRect(id, r.X, r.Y, r.W, r.H) == 0
+	return wmctlSetRect(id, r.X, r.Y, r.W, r.H) == 0
+}
+
+// applySashDrag commits a sash press-drag-release at divider position pos
+// (an x for SplitVert, a y for SplitHoriz). The motion is NOT applied live:
+// the seat paints no content-area chrome, so there is nothing truthful to
+// preview with, and one relayout on the release edge keeps the feedback
+// loop to a single WIN_RESIZE per pane. A release on the clamped position
+// it already holds is an honest no-op (no syscalls, no markers). On a true
+// change both rects go through applyRect first — the kernel clamp stays
+// authoritative — and the sash is stored, marked, dumped, and persisted
+// only after both calls returned.
+func applySashDrag(pos int) bool {
+	if tabs.Count() != 2 {
+		return false
+	}
+	kind := tabs.Split()
+	if kind != SplitVert && kind != SplitHoriz {
+		return false
+	}
+	scanW, scanH := uint32(vi.ScanoutWidth), uint32(vi.ScanoutHeight)
+	from := tabs.sashCenter(scanW, scanH)
+	to := clampSash(kind, pos, scanW, scanH)
+	if to <= 0 || to == from {
+		return false
+	}
+	ra, rb, ok := SplitRectsSash(kind, scanW, scanH, to)
+	if !ok {
+		return false
+	}
+	a, b := tabs.At(0), tabs.At(1)
+	if !applyRect(a.ID, ra) || !applyRect(b.ID, rb) {
+		return false
+	}
+	tabs.sash = to
+	vi.ConsoleLine(MarkerSash + kind.String() +
+		" from=" + vi.Itoa64(int64(from)) +
+		" to=" + vi.Itoa64(int64(to)))
+	dumpTab(a, ra, kind)
+	dumpTab(b, rb, kind)
+	_ = writeLayoutFile()
+	return true
+}
+
+// applySplitCycle is the M79c (#1706) keyboard entry to a split: none -> V
+// -> H -> none. Live mode has no other way to split — the choreography is
+// demo-only — so without this the sash drag is unreachable outside a gate.
+// Each step reuses the apply* path it lands on, so the markers and dumps
+// are the same shapes the choreography already prints; a step the strip
+// refuses (fewer than two tabs) is silent, like every other chord no-op.
+func applySplitCycle() bool {
+	switch tabs.Split() {
+	case SplitVert:
+		return applySplit(SplitHoriz)
+	case SplitHoriz:
+		return applyUnsplit()
+	default:
+		return applySplit(SplitVert)
+	}
 }
 
 func dumpTab(t Tab, applied Rect, kind SplitKind) {

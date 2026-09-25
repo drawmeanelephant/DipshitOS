@@ -67,6 +67,16 @@ type TabStrip struct {
 	count int
 	focus int // index into tabs[0:count]; ignored when count == 0
 	split SplitKind
+	// M79c (#1706): the drag-set divider position in scanout px. 0 means
+	// unset: the split tiles edge-to-edge at the midpoint exactly as
+	// SplitRects always did. A set sash carries a SashWidth gutter centred
+	// on it (the visible divider — the seat paints no content-area chrome,
+	// so the gap is background showing between the two client rects).
+	// Stored, not derived: PaneRects/layoutFileBody read it, so the sash
+	// survives relayout and lands in LAYOUT.txt's x=/w= fields (no new
+	// field: ADR 0033 pins that line format). Reset by setSplit, Unsplit,
+	// and any close that drops the strip below two tabs.
+	sash int
 	// M71d (#1563, M48 BT1): the bounded reopen LIFO. closed is a fixed
 	// array and closedCount is monotonic, exactly like Zig tabwm.closed_count,
 	// so the ring is BSS/fixed with no heap catalog of every close (D2).
@@ -115,6 +125,10 @@ const (
 	MarkerFreeze        = "gotabwm: freeze id="
 	MarkerThaw          = "gotabwm: thaw id="
 	MarkerSessionFreeze = "gotabwm: session freeze n="
+	// M79c (#1706): the sash-drag outcome. <kind> is v/h, from/to are the
+	// divider centres in scanout px. Printed only after both SET_WINDOW
+	// calls returned, like the split markers.
+	MarkerSash = "gotabwm: sash "
 )
 
 // FlagPinned / FlagFrozen are `.tabs` v2 bits 0 and 1 — the same values as
@@ -287,6 +301,7 @@ func (s *TabStrip) CloseTab(id uint32) bool {
 	if s.count == 0 {
 		s.focus = 0
 		s.split = SplitNone
+		s.sash = 0
 		return true
 	}
 	if s.focus > i {
@@ -296,6 +311,7 @@ func (s *TabStrip) CloseTab(id uint32) bool {
 	}
 	if s.count < 2 {
 		s.split = SplitNone
+		s.sash = 0
 	}
 	return true
 }
@@ -536,6 +552,7 @@ func (s *TabStrip) setSplit(k SplitKind) bool {
 		return false
 	}
 	s.split = k
+	s.sash = 0
 	return true
 }
 
@@ -545,6 +562,7 @@ func (s *TabStrip) Unsplit() bool {
 		return false
 	}
 	s.split = SplitNone
+	s.sash = 0
 	return true
 }
 
@@ -581,7 +599,160 @@ func (s *TabStrip) PaneRects(scanW, scanH uint32) (Rect, Rect, bool) {
 	if s.count != 2 {
 		return Rect{}, Rect{}, false
 	}
-	return SplitRects(s.split, scanW, scanH)
+	return SplitRectsSash(s.split, scanW, scanH, s.sash)
+}
+
+// SashWidth is the M79c (#1706) divider width in scanout px: the gutter the
+// seat leaves between split panes once the sash is dragged. The seat paints
+// no content-area chrome (clients own their rects), so the divider is a real
+// gap — background showing between the two client windows — not a painted
+// strip. It applies only to a SET sash; the unset split tiles edge-to-edge
+// exactly as before, so every pre-M79c gate assertion still holds.
+const SashWidth = 6
+
+// clampSash bounds a divider centre so both panes keep their ADR 0033
+// minimum outside the SashWidth gutter. SplitVert centres an x, SplitHoriz
+// a y; anything else (and a degenerate scanout) clamps to 0, which
+// SplitRectsSash reads as unset.
+func clampSash(kind SplitKind, pos int, scanW, scanH uint32) int {
+	half := SashWidth / 2
+	switch kind {
+	case SplitVert:
+		lo := int(PaneMinW) + half
+		hi := int(scanW) - int(PaneMinW) - half
+		if hi < lo {
+			return 0
+		}
+		if pos < lo {
+			return lo
+		}
+		if pos > hi {
+			return hi
+		}
+		return pos
+	case SplitHoriz:
+		lo := int(PaneMinH) + half
+		hi := int(scanH) - int(PaneMinH) - half
+		if hi < lo {
+			return 0
+		}
+		if pos < lo {
+			return lo
+		}
+		if pos > hi {
+			return hi
+		}
+		return pos
+	default:
+		return 0
+	}
+}
+
+// SplitRectsSash is SplitRects with a drag-set divider: sash <= 0 is the
+// unset midpoint tiling (byte-identical to SplitRects, gutterless), a set
+// sash centres a SashWidth gutter on the clamped position. Refused when a
+// pane would fall under PaneMinW×PaneMinH, like SplitRects.
+func SplitRectsSash(kind SplitKind, scanW, scanH uint32, sash int) (Rect, Rect, bool) {
+	if kind == SplitNone {
+		full := FullRect(scanW, scanH)
+		return full, full, true
+	}
+	if sash <= 0 {
+		return SplitRects(kind, scanW, scanH)
+	}
+	c := clampSash(kind, sash, scanW, scanH)
+	if c <= 0 {
+		return Rect{}, Rect{}, false
+	}
+	half := SashWidth / 2
+	if kind == SplitVert {
+		lw := c - half
+		rx := c + half
+		rw := int(scanW) - rx
+		if lw < int(PaneMinW) || rw < int(PaneMinW) || scanH < PaneMinH {
+			return Rect{}, Rect{}, false
+		}
+		return Rect{0, 0, uint32(lw), scanH}, Rect{uint32(rx), 0, uint32(rw), scanH}, true
+	}
+	if kind == SplitHoriz {
+		th := c - half
+		by := c + half
+		bh := int(scanH) - by
+		if scanW < PaneMinW || th < int(PaneMinH) || bh < int(PaneMinH) {
+			return Rect{}, Rect{}, false
+		}
+		return Rect{0, 0, scanW, uint32(th)}, Rect{0, uint32(by), scanW, uint32(bh)}, true
+	}
+	return Rect{}, Rect{}, false
+}
+
+// sashCenter is the strip's effective divider centre in scanout px for the
+// current split: the stored sash, or the midpoint when unset. -1 when there
+// is no split to divide.
+func (s *TabStrip) sashCenter(scanW, scanH uint32) int {
+	switch s.split {
+	case SplitVert:
+		if s.sash > 0 {
+			return clampSash(s.split, s.sash, scanW, scanH)
+		}
+		return int(scanW) / 2
+	case SplitHoriz:
+		if s.sash > 0 {
+			return clampSash(s.split, s.sash, scanW, scanH)
+		}
+		return int(scanH) / 2
+	default:
+		return -1
+	}
+}
+
+// SetSash stores a drag-set divider centre. Refused unless the strip is two
+// tabs in a split, and a no-op (false) when the clamped position equals the
+// current centre — a release where the press landed must not relayout or
+// mark. No syscalls: the seat applies the rects after a true change.
+func (s *TabStrip) SetSash(pos int, scanW, scanH uint32) bool {
+	if s.count != 2 || (s.split != SplitVert && s.split != SplitHoriz) {
+		return false
+	}
+	c := clampSash(s.split, pos, scanW, scanH)
+	if c <= 0 || c == s.sashCenter(scanW, scanH) {
+		return false
+	}
+	s.sash = c
+	return true
+}
+
+// sashZoneAt is the M79c (#1706) divider hit test: within half the SashWidth
+// of the divider centre, below the rail and clear of the bottom chrome, so
+// the zone can never disagree with the gutter SplitRectsSash leaves. It
+// mirrors railCellAt's shape (pure geometry, caller owns strip state).
+// False for SplitNone and off-zone points.
+func sashZoneAt(px, py uint32, kind SplitKind, center int, scanW, scanH int) bool {
+	if center < 0 || scanW <= 0 || scanH <= 0 {
+		return false
+	}
+	// The rail owns y < RailHeight and the bottom 22 px stay chrome-clear
+	// (the clock panel sits bottom-right); the sash owns neither.
+	if py < uint32(RailHeight) || int(py)+22 > scanH {
+		return false
+	}
+	half := SashWidth / 2
+	switch kind {
+	case SplitVert:
+		if int(px) >= scanW {
+			return false
+		}
+		d := int(px) - center
+		return d >= -half && d <= half
+	case SplitHoriz:
+		if int(px) >= scanW {
+			return false
+		}
+		d := int(py) - center
+		return d >= -half && d <= half
+	default:
+		return false
+	}
 }
 
 // rectsWithin reports whether a and b differ by at most tol on every edge.

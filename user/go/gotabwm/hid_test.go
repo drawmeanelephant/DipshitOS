@@ -793,3 +793,232 @@ func TestLaunchRowAtHitsFirstRow(t *testing.T) {
 		t.Fatal("outside panel must miss")
 	}
 }
+
+// M79c (#1706): the split-cycle chord is USB HID 'v' (0x19), like every
+// other ctrl-shift chord in the frozen table.
+func TestHidUsageVMatchesRunner(t *testing.T) {
+	if hidUsageV != 0x19 {
+		t.Fatalf("hidUsageV = %#x want 0x19 (USB HID 'v')", hidUsageV)
+	}
+}
+
+// rectCall is one wmctlSetRect proposal the seat made.
+type rectCall struct {
+	id, x, y, w, h uint32
+}
+
+// rectRecorder swaps the slot-65 rect seam for a recorder (success), so the
+// split/sash -> relayout path is observable off the guest. Same shape as
+// hid_test.go's execRecorder.
+func rectRecorder() (*[]rectCall, func()) {
+	calls := &[]rectCall{}
+	prev := wmctlSetRect
+	wmctlSetRect = func(id, x, y, w, h uint32) int64 {
+		*calls = append(*calls, rectCall{id, x, y, w, h})
+		return 0
+	}
+	return calls, func() { wmctlSetRect = prev }
+}
+
+// saveSeatState snapshots the globals a pointer/chord test can disturb.
+// tabs rides by value (fixed arrays); launch rides whole-struct, the
+// existing hid_test.go pattern.
+func saveSeatState() func() {
+	ts, pl := tabs, launch
+	pb, cd, rd, rh, sd := prevPtrButtons, contentDown, railDragFrom, railHover, sashDragging
+	return func() {
+		tabs, launch = ts, pl
+		prevPtrButtons, contentDown, railDragFrom, railHover, sashDragging = pb, cd, rd, rh, sd
+	}
+}
+
+func ptrEvent(x, y uint32, buttons uint8) vi.Event {
+	return vi.Event{Kind: vi.EvWmPointer, Arg0: x | y<<16, Flags: uint16(buttons)}
+}
+
+func openTwoTabs(t *testing.T) {
+	t.Helper()
+	tabs = TabStrip{}
+	if !tabs.OpenTab(3, "Calc") || !tabs.OpenTab(4, "Edit") {
+		t.Fatal("OpenTab")
+	}
+}
+
+// M79c (#1706): ctrl-shift-v cycles none -> V -> H -> none through the same
+// apply* paths the choreography uses, so the markers and dumps are shapes
+// the gates already pin. Fewer than two tabs is a silent no-op.
+func TestSplitCycleChord(t *testing.T) {
+	defer saveSeatState()()
+	tabs = TabStrip{}
+	if !tabs.OpenTab(3, "Calc") {
+		t.Fatal("OpenTab")
+	}
+	calls, restore := rectRecorder()
+	defer restore()
+	chord := func() {
+		handleWmKey(vi.Event{Kind: vi.EvWmKey, Flags: vi.ModCtrl | vi.ModShift, Arg0: uint32(hidUsageV)})
+	}
+	launch.open = false
+	chord()
+	if tabs.Split() != SplitNone || len(*calls) != 0 {
+		t.Fatalf("one tab: split=%s rects=%d (must be a silent no-op)", tabs.Split(), len(*calls))
+	}
+	if !tabs.OpenTab(4, "Edit") {
+		t.Fatal("OpenTab")
+	}
+	chord()
+	if tabs.Split() != SplitVert {
+		t.Fatalf("first chord: split=%s want v", tabs.Split())
+	}
+	// The right pane moves off-origin, so applyRect's two-step
+	// (shrink-at-origin, then move) proposes 3 rects, not 2.
+	if len(*calls) != 3 {
+		t.Fatalf("split v must propose 3 rects, got %d: %+v", len(*calls), *calls)
+	}
+	if (*calls)[0] != (rectCall{3, 0, 0, 640, 720}) ||
+		(*calls)[1] != (rectCall{4, 0, 0, 640, 720}) ||
+		(*calls)[2] != (rectCall{4, 640, 0, 640, 720}) {
+		t.Fatalf("split v rects = %+v", *calls)
+	}
+	chord()
+	if tabs.Split() != SplitHoriz {
+		t.Fatalf("second chord: split=%s want h", tabs.Split())
+	}
+	if len(*calls) != 6 {
+		t.Fatalf("split h must propose 3 more rects, got %d: %+v", len(*calls), *calls)
+	}
+	if (*calls)[3] != (rectCall{3, 0, 0, 1280, 360}) ||
+		(*calls)[4] != (rectCall{4, 0, 0, 1280, 360}) ||
+		(*calls)[5] != (rectCall{4, 0, 360, 1280, 360}) {
+		t.Fatalf("split h rects = %+v", *calls)
+	}
+	chord()
+	if tabs.Split() != SplitNone {
+		t.Fatalf("third chord: split=%s want none", tabs.Split())
+	}
+}
+
+// M79c (#1706): the pointer path end to end on the host — a down on the
+// divider arms the sash (no rail drag, no focus change, no content), motion
+// while armed stays swallowed, and the release commits the clamped divider
+// through the rect seam.
+func TestSashDragPointerPath(t *testing.T) {
+	defer saveSeatState()()
+	openTwoTabs(t)
+	launch.open = false
+	prevPtrButtons = 0
+	calls, restore := rectRecorder()
+	defer restore()
+	if !applySplit(SplitVert) {
+		t.Fatal("applySplit v")
+	}
+	*calls = (*calls)[:0]
+	// Down on the divider (midpoint x=640, y=100: below the rail, clear of
+	// the bottom chrome) arms the sash and consumes the press.
+	handleWmPointer(ptrEvent(640, 100, hidBtnLeft))
+	if !sashDragging {
+		t.Fatal("divider down must arm sashDragging")
+	}
+	if contentDown {
+		t.Fatal("sash down must not forward content")
+	}
+	if railDragFrom != -1 {
+		t.Fatal("sash down must not arm a rail drag")
+	}
+	// Held-button motion is an in-progress resize, not content: swallowed,
+	// and the divider does not move before the release edge.
+	handleWmPointer(ptrEvent(700, 100, hidBtnLeft))
+	if !sashDragging || contentDown {
+		t.Fatal("armed motion must stay armed and content-free")
+	}
+	if tabs.sash != 0 {
+		t.Fatal("motion must not move the divider (release-edge commit only)")
+	}
+	// Release at x=800 commits: the gutter pair goes out and the sash sticks.
+	handleWmPointer(ptrEvent(800, 100, 0))
+	if sashDragging {
+		t.Fatal("release must disarm")
+	}
+	if tabs.sash != 800 {
+		t.Fatalf("sash = %d want 800", tabs.sash)
+	}
+	// Left pane at the origin: 1 call. Right pane off-origin: the
+	// two-step shrink-then-move, 2 calls.
+	if len(*calls) != 3 {
+		t.Fatalf("sash commit must propose 3 rects, got %d: %+v", len(*calls), *calls)
+	}
+	if (*calls)[0] != (rectCall{3, 0, 0, 797, 720}) ||
+		(*calls)[1] != (rectCall{4, 0, 0, 477, 720}) ||
+		(*calls)[2] != (rectCall{4, 803, 0, 477, 720}) {
+		t.Fatalf("sash rects = %+v", *calls)
+	}
+	if contentDown {
+		t.Fatal("sash release must not leave a content latch")
+	}
+}
+
+// M79c (#1706): a release on the armed position is the press-on-the-divider
+// release — an honest no-op: no syscalls, no state change.
+func TestSashReleaseOnArmedPositionIsNoop(t *testing.T) {
+	defer saveSeatState()()
+	openTwoTabs(t)
+	launch.open = false
+	prevPtrButtons = 0
+	calls, restore := rectRecorder()
+	defer restore()
+	if !applySplit(SplitVert) {
+		t.Fatal("applySplit v")
+	}
+	*calls = (*calls)[:0]
+	handleWmPointer(ptrEvent(640, 100, hidBtnLeft))
+	if !sashDragging {
+		t.Fatal("divider down must arm")
+	}
+	handleWmPointer(ptrEvent(640, 100, 0))
+	if sashDragging || tabs.sash != 0 {
+		t.Fatal("same-position release must disarm without storing")
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("no-op release proposed %d rects", len(*calls))
+	}
+}
+
+// M79c (#1706): a reorder while split re-proposes both pane rects, so the
+// panes follow the tabs instead of silently swapping which app is left.
+// Unsplit reorders propose nothing.
+func TestRailReorderReappliesWhileSplit(t *testing.T) {
+	defer saveSeatState()()
+	openTwoTabs(t)
+	calls, restore := rectRecorder()
+	defer restore()
+	if !applySplit(SplitVert) {
+		t.Fatal("applySplit v")
+	}
+	*calls = (*calls)[:0]
+	if !applyRailReorder(0, 1) {
+		t.Fatal("applyRailReorder")
+	}
+	if tabs.At(0).ID != 4 || tabs.At(1).ID != 3 {
+		t.Fatalf("order = %d,%d want 4,3", tabs.At(0).ID, tabs.At(1).ID)
+	}
+	// Reordered panes follow the tabs (4 left, 3 right); the right pane's
+	// off-origin move is the two-step, so 3 proposals.
+	if len(*calls) != 3 {
+		t.Fatalf("split reorder must re-propose 3 rects, got %d: %+v", len(*calls), *calls)
+	}
+	if (*calls)[0] != (rectCall{4, 0, 0, 640, 720}) ||
+		(*calls)[1] != (rectCall{3, 0, 0, 640, 720}) ||
+		(*calls)[2] != (rectCall{3, 640, 0, 640, 720}) {
+		t.Fatalf("reordered pane rects = %+v", *calls)
+	}
+	if !tabs.Unsplit() {
+		t.Fatal("Unsplit")
+	}
+	*calls = (*calls)[:0]
+	if !applyRailReorder(0, 1) {
+		t.Fatal("applyRailReorder unsplit")
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("unsplit reorder proposed %d rects", len(*calls))
+	}
+}

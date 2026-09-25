@@ -14,12 +14,22 @@
 //	rail drag     -> press/release over different cells → existing Reorder()
 //	rail close-x  -> the cell's rightmost railCloseW px: close that tab (M79b)
 //	rail hover    -> the cell under the pointer tints; entry marker (M79b)
+//	sash drag     -> press-drag-release on the split divider re-proportions
+//	                 the panes through applySashDrag (M79c); motion while
+//	                 armed is chrome, never content
+//	ctrl-shift-v  -> split cycle none -> V -> H -> none (M79c: live mode has
+//	                 no other split entry; the choreography is demo-only)
 //	ordinary keys -> ignored here (ADR 0009: KEY_DOWN still reaches the app)
 //
 // Markers print only after the mutation/syscall that made them true.
 // Ctrl+W is not bound (it collides with the editor).
-// M79b (#1705): the rail's close-x and hover highlight live here. Sash and
-// hover-preview stay later cards. Client-area is ignored.
+// M79b (#1705): the rail's close-x and hover highlight live here. Hover-
+// preview stays a later card. Client-area is ignored.
+//
+// M79c (#1706): the sash drag and the split-cycle chord live here too. No
+// keyboard equivalent for the drag itself: a divider is a pointer target,
+// and the cycle chord is the keyboard story, stated here rather than
+// discovered later.
 //
 // M71d pick: Ctrl+Shift+T / Ctrl+Shift+D are Zig TABWM's own BT1 bindings
 // (user/src/tabwm.zig:151/:427). They are free on GOTABWM — the only
@@ -51,6 +61,7 @@ const (
 	hidUsageF   uint8 = 0x09 // 'f'; M71e (#1564) freeze-badge toggle
 	hidUsageP   uint8 = 0x13
 	hidUsageT   uint8 = 0x17 // 't'
+	hidUsageV   uint8 = 0x19 // 'v'; M79c (#1706) split cycle
 	hidUsageTab uint8 = 0x2B
 	hidBtnLeft  uint8 = 0x01
 )
@@ -88,6 +99,13 @@ var (
 	// the pointer rests off the rail. Paint state; updateRailHover owns it
 	// and the entry marker.
 	railHover = -1
+	// sashDragging is the M79c (#1706) sash latch: a pointer-down on the
+	// split divider arms it, the matching release commits the drag at the
+	// release x/y, and motion while armed is swallowed (chrome, never
+	// content — same discipline as contentDown/rail, inverted). It is
+	// disjoint from railDragFrom: a sash down returns before
+	// beginRailDrag, so endRailDrag can never also reorder.
+	sashDragging bool
 )
 
 func handleWmKey(e vi.Event) {
@@ -126,6 +144,8 @@ func handleWmKey(e vi.Event) {
 			_ = applyDuplicate()
 		case hidUsageF:
 			_ = applyFreezeToggle()
+		case hidUsageV:
+			_ = applySplitCycle()
 		}
 		return
 	}
@@ -313,6 +333,21 @@ func handleWmPointer(e vi.Event) {
 			applyRailClose(i)
 			return
 		}
+		// M79c (#1706): the sash is chrome between the rail and the
+		// content forward. A down on the divider arms the drag and
+		// consumes the press: no rail drag, no click/focus change, no
+		// content forward (a stray selection drag inside a pane would
+		// otherwise shadow the resize). The rail (y < RailHeight) and
+		// the divider zone are disjoint by construction (sashZoneAt),
+		// so the order against beginRailDrag below cannot matter — but
+		// the armed latch must be set before any of those run.
+		if sashZoneAt(px, py, tabs.Split(),
+			tabs.sashCenter(uint32(vi.ScanoutWidth), uint32(vi.ScanoutHeight)),
+			vi.ScanoutWidth, vi.ScanoutHeight) {
+			railDragFrom = -1
+			sashDragging = true
+			return
+		}
 		beginRailDrag(px, py)
 		_, onRail := railCellAt(px, py, vi.ScanoutWidth, tabs.Count(), RailHeight)
 		_ = applyRailClick(px, py)
@@ -328,6 +363,21 @@ func handleWmPointer(e vi.Event) {
 	}
 	if up {
 		updateRailHover(px, py, false)
+		// M79c (#1706): the sash release edge. The divider position is
+		// the release point (an x for a vertical split, a y for a
+		// horizontal one); applySashDrag clamps it into the pane minima
+		// and refuses a release on the armed position. A sash press
+		// never armed the rail drag and never set contentDown, so
+		// neither fires here — return with the drag consumed.
+		if sashDragging {
+			sashDragging = false
+			pos := int(px)
+			if tabs.Split() == SplitHoriz {
+				pos = int(py)
+			}
+			_ = applySashDrag(pos)
+			return
+		}
 		_ = endRailDrag(px, py)
 		if contentDown {
 			vi.WmctlContentPtr(px, py, btn)
@@ -340,6 +390,14 @@ func handleWmPointer(e vi.Event) {
 	// M79b (#1705): motion over the rail is hover — the tint follows the
 	// pointer and the entry marker prints on cell transitions only.
 	updateRailHover(px, py, true)
+	// M79c (#1706): motion with a sash armed is an in-progress resize, not
+	// content. Swallow it: forwarding held-button motion to the kernel's
+	// local path would start a selection drag inside the pane under the
+	// pointer. No live preview either (the seat paints no content-area
+	// chrome); the rects move once, on the release edge above.
+	if sashDragging {
+		return
+	}
 	if _, onRail := railCellAt(px, py, vi.ScanoutWidth, tabs.Count(), RailHeight); !onRail {
 		vi.WmctlContentPtr(px, py, btn)
 	}
@@ -480,11 +538,31 @@ func endRailDrag(px, py uint32) bool {
 // applyRailReorder is Zig TABWM reorder_tab: Reorder() then the existing
 // `gotabwm: reorder from->to` marker. Same-cell release is a click no-op.
 // Does not write SESSION.TABS (M62e stays the once-only pin-stay snapshot).
+//
+// M79c (#1706): a reorder while split re-proposes both pane rects. The
+// rects are positional (index 0 = first pane), so without this the panes
+// would silently swap which app is on the left — worse than the relayout.
+// The dumps are the record; no extra marker.
 func applyRailReorder(from, to int) bool {
 	if !tabs.Reorder(from, to) {
 		return false
 	}
 	vi.ConsoleLine(MarkerReorder + vi.Itoa64(int64(from)) + "->" + vi.Itoa64(int64(to)))
 	dumpOrder()
+	if tabs.Split() == SplitNone || tabs.Count() != 2 {
+		return true
+	}
+	ra, rb, ok := tabs.PaneRects(uint32(vi.ScanoutWidth), uint32(vi.ScanoutHeight))
+	if !ok {
+		return false
+	}
+	a, b := tabs.At(0), tabs.At(1)
+	if !applyRect(a.ID, ra) || !applyRect(b.ID, rb) {
+		return false
+	}
+	kind := tabs.Split()
+	dumpTab(a, ra, kind)
+	dumpTab(b, rb, kind)
+	_ = writeLayoutFile()
 	return true
 }

@@ -8,7 +8,7 @@
 # 3 kernel + 3×4 Ms + 1 spare). The GOMAXPROCS=1 path still fits
 # (GOTABWM+GOEDIT+GOTERM = 9 Ms + kernel 3; idle stays max_tasks-1).
 #
-# SIX vgate_runs share one seeded host share (`vgate_share seed`):
+# SEVEN vgate_runs share one seeded host share (`vgate_share seed`):
 #   01  GOCALC+NOTE.ELF; pin-stay writes SESSION.TABS; last unsplit writes
 #       LAYOUT.txt (closed before the serial line that names it).
 #   02  GOTABWM only. Restores the session; then drops SESSION.TABS.
@@ -21,6 +21,12 @@
 #   06  M71e (#1564): seat only, empty strip. A click on the panel opens the
 #       launcher the surface advertises (serial only; the launcher covers the
 #       panel, so run 05 owns the pixel assertion).
+#   07  M79c (#1706): GOCALC+NOTE.ELF. ctrl-shift-v splits (the cycle chord,
+#       live mode's only split entry) inside the choreography's 32-tick HID
+#       hold; a `--pointer-virtio` press-drag-release on the divider moves
+#       the sash 640 -> 800 with the 6 px gutter; the run ends at its own rx
+#       marker, so the choreography never fires and LAYOUT.txt keeps the
+#       sash geometry.
 #
 # Seed wm=none and exec GOTABWM.ELF like go-wm-seat. No HID. No framebuffer
 # golden. Do not overload go-wm-seat or go-wm-default. Boot 01 `reorder 0->1`
@@ -874,3 +880,191 @@ if launch <= surf:
     sys.exit("launcher opened before the surface was painted (surf@%d launch@%d)" % (surf, launch))
 print("start-surface@%d then launcher open@%d" % (surf, launch))
 PY
+
+# Run 07 needs the same empty strip as run 06 (no session is written by a
+# seat-only run, but a reused share must not restore one either).
+vgate_assert 06 python <<'PY'
+import os
+stale = os.path.join(os.environ["VG_SHARE"], "SESSION.TABS")
+if os.path.exists(stale):
+    os.remove(stale)
+    print("cleared SESSION.TABS for run 07")
+PY
+
+# ---------------------------------------------------------------------------
+# Run 07 (M79c / #1706): the sash drag, end to end.
+#
+# Two clients as in run 01, because the split needs exactly two tabs. The
+# split comes from the ctrl-shift-v cycle chord — live mode's only split
+# entry (the choreography is demo-only) — fired on `gotabwm: rail n=2`,
+# inside the choreography's 32-tick HID hold. The drag,
+# `--pointer-virtio '640,100,d;800,100,u'`, is anchored on
+# `gotabwm: split v`: the down lands on the midpoint divider (x=640,
+# y=100 — below the rail, clear of the bottom chrome), the release at
+# x=800 commits the sash with the 6 px gutter. The run ends at its own rx
+# marker while the seat is still up (the run-05 shape), so the
+# choreography never fires: no reorder, no unsplit, no session write, and
+# LAYOUT.txt keeps the sash geometry.
+#
+# Timing honesty: ticks advance only on the 1 Hz COMPOSITE_TICK and the
+# choreography steps split -> unsplit on consecutive ticks (~1 s apart),
+# while a via-virtio drag takes ~10 s of guest time. Anchoring the drag on
+# the choreography's own split could never land — which is why the chord
+# (and the hold window it splits inside of) is part of this card.
+vgate_file script-07.txt <<'EOF'
+set GOMAXPROCS=1
+wm
+exec GOTABWM.ELF
+EOF
+
+vgate_file script2-07.txt <<'EOF'
+dui focus 0
+exec GOCALC.ELF
+exec NOTE.ELF
+EOF
+
+vgate_file script3-07.txt <<'EOF'
+wm
+dui
+echo rx-gotabwm-sash-ok
+EOF
+
+vgate_run 07 -- \
+    --screen '$RUN_DIR/screen-07' \
+    --via-virtio \
+    --script '$RUN_DIR/script-07.txt' \
+    --script2 '$RUN_DIR/script2-07.txt' \
+    --script2-after 'gotabwm: win focus' \
+    --input-chords 'ctrl-shift-v' \
+    --input-chords-after 'gotabwm: rail n=2' \
+    --pointer-virtio '640,100,d;800,100,u' \
+    --pointer-virtio-after 'gotabwm: split v' \
+    --script3 '$RUN_DIR/script3-07.txt' \
+    --script3-after 'gotabwm: sash v from=640 to=800' \
+    --script-expect 'rx-gotabwm-sash-ok' --timeout 300
+
+vgate_assert 07 serial-contains 'VirelaiOS kernel has seized control.'
+vgate_assert 07 serial-contains 'exec: loaded GOTABWM.ELF'
+vgate_assert 07 serial-contains 'gotabwm: registered'
+vgate_assert 07 serial-contains 'gotabwm: settings wm=none'
+vgate_assert 07 serial-contains 'exec: loaded GOCALC.ELF'
+vgate_assert 07 serial-contains 'exec: loaded NOTE.ELF'
+vgate_assert 07 serial-contains 'gotabwm: rail n=2 focus='
+vgate_assert 07 serial-contains 'gocalc: declare accepted'
+vgate_assert 07 serial-contains 'note: tab-aware (full-viewport)'
+# The cycle chord split, verbatim through the choreography's own applySplit.
+vgate_assert 07 serial-contains 'gotabwm: split v'
+vgate_assert 07 serial-contains 'x=640 y=0 w=640 h=720'
+# The drag committed: divider 640 -> 800, the 6 px gutter as geometry.
+vgate_assert 07 serial-contains 'gotabwm: sash v from=640 to=800'
+vgate_assert 07 serial-contains 'x=0 y=0 w=797 h=720'
+vgate_assert 07 serial-contains 'x=803 y=0 w=477 h=720'
+# Both panes moved, so the hosted client observed its WIN_RESIZE after the
+# sash marker (the kernel pushes it once applyRect returns).
+vgate_assert 07 serial-contains 'note: resize relayout'
+vgate_assert 07 python <<'PY'
+import os, sys
+ser = open(os.environ["VG_SER"], errors="replace").read().splitlines()
+def first(prefix, start=0):
+    for i in range(start, len(ser)):
+        if prefix in ser[i]:
+            return i
+    sys.exit("missing " + prefix)
+split = first("gotabwm: split v")
+sash = first("gotabwm: sash v from=640 to=800")
+# NOTE relayouts on every resize — the chord split relayouts it too — so the
+# sash's WIN_RESIZE is the first relayout AFTER the sash marker, not the
+# first in the log.
+relayout = first("note: resize relayout", sash + 1)
+if not (split < sash < relayout):
+    sys.exit("split@%d sash@%d relayout@%d must order split < sash < relayout" % (
+        split, sash, relayout))
+print("split@%d sash@%d relayout@%d" % (split, sash, relayout))
+PY
+# Pair each sash-run layout dump with the applied pane line dumpTab prints
+# next. Every pair must match exactly (integer gutter, no remainder).
+vgate_assert 07 python <<'PY'
+import os, re, sys
+ser = open(os.environ["VG_SER"], errors="replace").read()
+lay_re = re.compile(
+    r"^gotabwm: layout tab=(\d+) bin=\S+ x=(\d+) y=(\d+) w=(\d+) h=(\d+) ")
+pane_re = re.compile(
+    r"^gotabwm: pane id=(\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)$")
+n = 0
+pending = None
+for line in ser.splitlines():
+    lm = lay_re.match(line)
+    if lm:
+        pending = lm
+        continue
+    pm = pane_re.match(line)
+    if not pm:
+        continue
+    if pending is None:
+        sys.exit("pane line with no preceding layout dump: " + line)
+    if pending.group(1) != pm.group(1):
+        sys.exit("layout tab=%s paired with pane id=%s" % (
+            pending.group(1), pm.group(1)))
+    for i, name in ((2, "x"), (3, "y"), (4, "w"), (5, "h")):
+        a, b = int(pending.group(i)), int(pm.group(i))
+        if a != b:
+            sys.exit("tab %s %s dump=%d applied=%d (want exact)" % (
+                pending.group(1), name, a, b))
+    n += 1
+    pending = None
+if n != 4:
+    sys.exit("only %d layout/pane pairs (want 4: chord split + sash x2)" % n)
+print("layout vs applied pane: %d pairs exact" % n)
+PY
+# The sash consumed its press: no rail click/focus change, no reorder, and
+# the choreography never fired (this run lives entirely inside its hold).
+vgate_assert 07 serial-contains 'gotabwm: ptr'
+vgate_assert 07 serial-absent 'gotabwm: rail-click id='
+vgate_assert 07 serial-absent 'gotabwm: reorder '
+vgate_assert 07 serial-absent 'gotabwm: unsplit'
+vgate_assert 07 serial-absent 'gotabwm: session write n='
+# LAYOUT.txt is the sash geometry: the run ends before anything rewrites it.
+vgate_assert 07 serial-contains 'gotabwm: layout file=/host/SELFTEST/LAYOUT.txt'
+vgate_assert 07 share-contains SELFTEST/LAYOUT.txt 'split=v'
+vgate_assert 07 share-contains SELFTEST/LAYOUT.txt 'x=803 y=0 w=477 h=720'
+vgate_assert 07 python <<'PY'
+import os, re, sys
+p = os.path.join(os.environ["VG_SHARE"], "SELFTEST/LAYOUT.txt")
+try:
+    raw = open(p, "rb").read()
+except FileNotFoundError:
+    sys.exit("SELFTEST/LAYOUT.txt missing on the share")
+if b"\r" in raw:
+    sys.exit("LAYOUT.txt contains CR")
+if not raw.endswith(b"\n"):
+    sys.exit("LAYOUT.txt is not LF-terminated")
+text = raw.decode("utf-8")
+line_re = re.compile(
+    r"^tab=(\d+) bin=(\S+) x=(\d+) y=(\d+) w=(\d+) h=(\d+) focus=([01]) split=(none|h|v)$")
+lines = text.splitlines()
+if len(lines) != 2:
+    sys.exit("LAYOUT.txt has %d lines, want 2" % len(lines))
+parsed = []
+for line in lines:
+    m = line_re.match(line)
+    if not m:
+        sys.exit("bad LAYOUT line: %r" % line)
+    parsed.append(m.groups())
+bins = {parsed[0][1], parsed[1][1]}
+if bins != {"GOCALC.ELF", "NOTE.ELF"}:
+    sys.exit("bins %s want GOCALC.ELF and NOTE.ELF" % (bins,))
+geoms = {tuple(row[2:6]) for row in parsed}
+if geoms != {("0", "0", "797", "720"), ("803", "0", "477", "720")}:
+    sys.exit("sash geometry %s want 797/803 gutter pair" % (geoms,))
+if not all(row[7] == "v" for row in parsed):
+    sys.exit("split field must stay v, got %s" % ([row[7] for row in parsed],))
+foci = {parsed[0][6], parsed[1][6]}
+if foci != {"0", "1"}:
+    sys.exit("need one focused tab, focus bits %s" % (foci,))
+print("LAYOUT.txt sash v 797/803 bins=GOCALC.ELF,NOTE.ELF focus ok")
+PY
+# This run ends at the rx marker (the seat never exits), so no `gotabwm OK`
+# and no `wm: unregistered` here — the run-05 shape.
+vgate_assert 07 serial-contains 'rx-gotabwm-sash-ok'
+vgate_assert 07 serial-absent '[EXC] parking:'
+vgate_assert 07 serial-absent 'exited status=139'
