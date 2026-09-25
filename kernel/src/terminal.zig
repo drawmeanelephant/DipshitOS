@@ -23,6 +23,13 @@ const console = @import("console.zig");
 const klog = @import("klog.zig");
 // M49 SD5 (#1132): copy a terminal selection into the shared clipboard.
 const clipboard = @import("clipboard.zig");
+// M80g (#1715): the OSC title's delivery sinks — the window title buffer
+// (what the shim paints and WMCTL's window-name resolves), the registered
+// seat, and the WM_RPC wire frame its kind-11 set_title rides.
+const driving_award = @import("driving_award.zig");
+const wm_server = @import("wm_server.zig");
+const mailbox = @import("mailbox.zig");
+const wnd_core = @import("wnd_core.zig");
 const font_metrics = @import("font_metrics.zig"); // M73l (#1661): THE cell geometry — terminal literals never say 8
 // SH7 (#1083, ADR 0020 Amendment B): the net front-end pumps bytes between
 // a terminal and the kernel's single bounded TCP connection.
@@ -48,6 +55,16 @@ pub const in_capacity: usize = 1024;
 /// keeping this on the pure Screen lets the session drain it through the
 /// terminal's existing input FIFO without coupling presentation to Terminal.
 pub const reply_max: usize = 32;
+/// M80g (#1715): the OSC string bound — one `ESC ] … ST/BEL` payload.
+/// Sized to carry a full OSC 52 copy (base64 of the 512 B clipboard is
+/// 684 bytes + the `c;` selector) with room for the Ps digits; a longer
+/// OSC is dropped whole at its terminator — consumed, never painted,
+/// never partially applied.
+pub const osc_max: usize = 768;
+/// M80g: the stored window-title bound. Delivery sinks truncate further:
+/// the window title buffer takes 63 bytes + NUL, the seat's kind-11
+/// frame the frozen 24-byte `wm_rpc_title_max` field.
+pub const title_max: usize = 64;
 /// How many concurrent terminals the kernel tracks.
 pub const max_terminals: usize = 4;
 
@@ -422,13 +439,33 @@ pub const Screen = struct {
     /// primary table unchanged.
     tab_stops: [2]u64 = default_tab_stops,
     alt_tab_stops: [2]u64 = default_tab_stops,
-    /// Parser state: 0 normal, 1 ESC, 2 CSI, 3 ESC character-set final.
+    /// Parser state: 0 normal, 1 ESC, 2 CSI, 3 ESC character-set final,
+    /// 4 OSC string, 5 OSC string after its ESC (ST pending).
     esc_state: u8 = 0,
     esc_charset_slot: u8 = 0,
     csi_params: [16]u16 = [_]u16{0} ** 16,
     csi_count: usize = 0,
     csi_private: bool = false,
     csi_intermediate: u8 = 0,
+    /// M80g (#1715): the in-flight OSC string and the effects it queued.
+    /// Stream state like the CSI parser's — not swapped with the alternate
+    /// screen. The EFFECTS (title, clipboard copy) are delivered by the
+    /// window pump, the M80f reply-drain pattern: a corpus Screen drives
+    /// the parser with no side effects at all.
+    osc_buf: [osc_max]u8 = undefined,
+    osc_len: usize = 0,
+    osc_overflow: bool = false,
+    /// M80g: the window title the stream asked for (Ps 0/2), bounded and
+    /// NUL-safe; `title_dirty` marks a change the pump still owes the
+    /// window buffer and (when a seat is registered) its kind-11 seam.
+    title: [title_max]u8 = undefined,
+    title_len: usize = 0,
+    title_dirty: bool = false,
+    /// M80g: OSC 52's decoded copy queued for the clipboard; a `?` read
+    /// query is refused (privacy) and never lands here.
+    clip_data: [clipboard.capacity]u8 = undefined,
+    clip_len: usize = 0,
+    clip_dirty: bool = false,
     /// M80a (#1712): REP (CSI b)'s "last printed rune" — the placement is
     /// repeated VERBATIM (rune, overlay mark and rendition). Stream state
     /// like the CSI parser's own: not swapped with the alternate screen,
@@ -550,12 +587,76 @@ pub const Screen = struct {
 
     /// M80e: RIS is a full grid reset. The effective window width belongs to
     /// the front-end, not the escape sequence, so preserve it across the
-    /// state reset and re-mask the default tab table to that width.
+    /// state reset and re-mask the default tab table to that width. The
+    /// M80g OSC queue clears with everything else — a dropped queue, never
+    /// a delivered blank title.
     fn hardReset(self: *Screen) void {
         const cols = self.cols;
         self.reset();
         self.cols = cols;
         self.maskTabStops();
+    }
+
+    /// M80g (#1715): drop the in-flight OSC string (abort, or after a
+    /// dispatch consumed it).
+    fn oscAbort(self: *Screen) void {
+        self.esc_state = 0;
+        self.osc_len = 0;
+        self.osc_overflow = false;
+    }
+
+    /// M80g: apply one COMPLETE OSC string — leading digits are Ps, `;`
+    /// separates them from the payload. Malformed forms, over-bound
+    /// strings and unknown Ps are consumed and dropped ("consumed, never
+    /// painted"); Ps 0/2 and 52 queue their effect for the pump. The grid
+    /// is never touched from here.
+    fn dispatchOsc(self: *Screen) void {
+        const len = self.osc_len;
+        const overflow = self.osc_overflow;
+        self.osc_len = 0;
+        self.osc_overflow = false;
+        if (overflow) return;
+        const raw = self.osc_buf[0..len];
+        var i: usize = 0;
+        while (i < len and raw[i] >= '0' and raw[i] <= '9') : (i += 1) {}
+        if (i == 0 or i == len or raw[i] != ';') return;
+        var num: usize = 0;
+        for (raw[0..i]) |d| num = num *% 10 +% (d - '0');
+        const payload = raw[i + 1 ..];
+        switch (num) {
+            0, 2 => self.setTitle(payload),
+            52 => self.osc52(payload),
+            else => {},
+        }
+    }
+
+    /// M80g: queue a window title (Ps 0/2). Empty is refused — a tab
+    /// keeps its name (the seat refuses empty kind-11 titles too); a
+    /// longer title truncates honestly at `title_max`.
+    fn setTitle(self: *Screen, payload: []const u8) void {
+        if (payload.len == 0) return;
+        const n = @min(payload.len, title_max);
+        @memcpy(self.title[0..n], payload[0..n]);
+        self.title_len = n;
+        self.title_dirty = true;
+    }
+
+    /// M80g: OSC 52 — `c;<base64>` queues a copy into the shared clipboard
+    /// (the pump bridges it). `c` is the only target; any other selector
+    /// is dropped. A `?` read query is refused honestly — privacy: no
+    /// reply is generated and nothing is copied. Malformed base64 refuses
+    /// WHOLE (decode to scratch, commit only on success); a valid but
+    /// over-long result truncates at the clipboard bound.
+    fn osc52(self: *Screen, payload: []const u8) void {
+        const sep = std.mem.indexOfScalar(u8, payload, ';') orelse return;
+        if (!std.mem.eql(u8, payload[0..sep], "c")) return;
+        const data = payload[sep + 1 ..];
+        if (std.mem.eql(u8, data, "?")) return;
+        var scratch: [clipboard.capacity]u8 = undefined;
+        const n = base64Decode(data, &scratch) orelse return;
+        @memcpy(self.clip_data[0..n], scratch[0..n]);
+        self.clip_len = n;
+        self.clip_dirty = true;
     }
 
     fn clearSavedCursor(self: *Screen) void {
@@ -1766,6 +1867,12 @@ pub const Screen = struct {
                         self.esc_state = 2;
                         self.resetCsi();
                     },
+                    ']' => {
+                        // M80g (#1715): OSC — a string until BEL or ST.
+                        self.esc_state = 4;
+                        self.osc_len = 0;
+                        self.osc_overflow = false;
+                    },
                     '7' => self.saveCursor(),
                     '8' => self.restoreCursor(),
                     'D' => self.index(),
@@ -1815,6 +1922,46 @@ pub const Screen = struct {
             3 => {
                 self.esc_state = 0;
                 self.setCharset(self.esc_charset_slot, b);
+                return;
+            },
+            4 => {
+                // M80g: OSC collection. BEL terminates, ESC starts the
+                // two-byte ST, CAN/SUB abort. Past the bound the string
+                // keeps consuming until its terminator and is then dropped
+                // WHOLE — bounded memory, never partially applied.
+                if (b == 0x07) {
+                    self.esc_state = 0;
+                    self.dispatchOsc();
+                    return;
+                }
+                if (b == 0x1b) {
+                    self.esc_state = 5;
+                    return;
+                }
+                if (b == 0x18 or b == 0x1a) {
+                    self.oscAbort();
+                    return;
+                }
+                if (self.osc_len < osc_max) {
+                    self.osc_buf[self.osc_len] = b;
+                    self.osc_len += 1;
+                } else {
+                    self.osc_overflow = true;
+                }
+                return;
+            },
+            5 => {
+                // M80g: the byte after an ESC inside an OSC. `\\` completes
+                // the ST and dispatches; anything else aborts the string
+                // and is processed as an escape final (ESC x), xterm-style.
+                if (b == '\\') {
+                    self.esc_state = 0;
+                    self.dispatchOsc();
+                    return;
+                }
+                self.oscAbort();
+                self.esc_state = 1;
+                self.putByte(b);
                 return;
             },
             else => self.esc_state = 0,
@@ -3235,6 +3382,11 @@ pub fn pumpWindowOutput(handle: usize) usize {
         }
         total += n;
     }
+    // M80g (#1715): parsing may also have queued OSC effects — the window
+    // title (its buffer of record plus M79d's kind-11 set_title seam when
+    // a seat is registered) and OSC 52 clipboard copies. Delivered once
+    // the bytes are parsed, beside the M80f reply drain above.
+    if (t.window_id) |wid| deliverScreenEffects(wid, &screens[handle]);
     return total;
 }
 
@@ -3324,6 +3476,100 @@ pub fn pasteFromClipboard(window_id: u8) usize {
     @memcpy(buf[6..][0..n], content[0..n]);
     @memcpy(buf[6 + n ..][0..6], "\x1b[201~");
     return t.pushInput(buf[0 .. 6 + n + 6]);
+}
+
+// ---------------------------------------------------------------------------
+// M80g (#1715) — OSC delivery: titles to the window and seat, copies to the
+// clipboard. The parser queues on the pure Screen; this is the pump side,
+// the only place the global effects happen.
+// ---------------------------------------------------------------------------
+
+/// M80g: the M79d seam frame — one WM_RPC kind-11 (set_title) for
+/// `window_id`. Pure: the title truncates at the frozen 24-byte wire
+/// field and the frame is zero-padded (ADR 0015's fixed layout, bounded
+/// by `wm_rpc_max`).
+fn titleFrame(window_id: u8, title: []const u8) wnd_core.WmRpc {
+    var frame: wnd_core.WmRpc = std.mem.zeroes(wnd_core.WmRpc);
+    frame.kind = wnd_core.wm_rpc_kind_set_title;
+    frame.id = window_id;
+    const n = @min(title.len, wnd_core.wm_rpc_title_max);
+    @memcpy(frame.title[0..n], title[0..n]);
+    return frame;
+}
+
+/// M80g: deliver what the parser queued while the pump drained output.
+/// The title lands in the window title buffer ALWAYS — the machine's
+/// title of record (the shim paints it; WMCTL's window-name resolves
+/// labels from it, the no-seat fallback `vi.WinSetTitle` performs from
+/// userland) — and, when a seat is registered, also rides M79d's kind-11
+/// set_title so the rail's tab follows live. OSC 52 copies bridge into
+/// the shared kernel clipboard through the existing setter.
+fn deliverScreenEffects(window_id: u8, s: *Screen) void {
+    if (s.title_dirty) {
+        s.title_dirty = false;
+        _ = driving_award.set_window_title(window_id, s.title[0..s.title_len]);
+        if (wm_server.registered_pid()) |pid| {
+            const frame = titleFrame(window_id, s.title[0..s.title_len]);
+            _ = mailbox.send(pid, std.mem.asBytes(&frame));
+        }
+    }
+    if (s.clip_dirty) {
+        s.clip_dirty = false;
+        _ = clipboard.set(s.clip_data[0..s.clip_len]);
+    }
+}
+
+/// M80g: strict RFC 4648 base64 decode with padding. Returns null on any
+/// malformed input (alphabet byte outside the table, padding before the
+/// tail, data after padding, length not a multiple of 4) so a refused
+/// OSC 52 copy never partially lands — `dst` may hold a partial write
+/// when a LATER group fails, so callers commit only on non-null (the
+/// osc52 scratch). A valid but over-long result truncates honestly at
+/// `dst.len` (the clipboard bound, the ipc/udp truncation pattern).
+fn base64Decode(src: []const u8, dst: []u8) ?usize {
+    if (src.len % 4 != 0) return null;
+    var out: usize = 0;
+    var g: usize = 0;
+    while (g < src.len) : (g += 4) {
+        const last = (g + 4) == src.len;
+        var v: [4]u8 = [_]u8{0} ** 4;
+        var pads: u8 = 0;
+        for (0..4) |k| {
+            const c = src[g + k];
+            if (c == '=') {
+                // '=' only in the final group, only the last two slots;
+                // once it starts it must run to the end of the string.
+                if (!last or k < 2) return null;
+                if (k == 2 and src[g + 3] != '=') return null;
+                pads += 1;
+                continue;
+            }
+            if (pads > 0) return null;
+            v[k] = base64Value(c) orelse return null;
+        }
+        const triple: u32 = (@as(u32, v[0]) << 18) | (@as(u32, v[1]) << 12) |
+            (@as(u32, v[2]) << 6) | @as(u32, v[3]);
+        const shifts = [_]u5{ 16, 8, 0 };
+        const emit: usize = 3 - pads;
+        var k: usize = 0;
+        while (k < emit) : (k += 1) {
+            if (out < dst.len) dst[out] = @truncate(triple >> shifts[k]);
+            out += 1;
+        }
+    }
+    return @min(out, dst.len);
+}
+
+/// M80g: one base64 sextet, strict alphabet (no URL-safe variants).
+fn base64Value(c: u8) ?u8 {
+    return switch (c) {
+        'A'...'Z' => c - 'A',
+        'a'...'z' => c - 'a' + 26,
+        '0'...'9' => c - '0' + 52,
+        '+' => 62,
+        '/' => 63,
+        else => null,
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -4975,6 +5221,126 @@ test "terminal: region-internal scrolling never feeds the primary history ring (
     try std.testing.expectEqual(@as(usize, 0), s.hist_count);
     try std.testing.expectEqualStrings("C", s.line(1));
     try std.testing.expectEqualStrings("D", s.line(2));
+}
+
+// ---------------------------------------------------------------------------
+// M80g (#1715) — OSC delivery: window/seat titles, the clipboard bridge
+// ---------------------------------------------------------------------------
+
+test "terminal: OSC titles queue on the Screen and the pump delivers them once (#1715)" {
+    for (&terminals) |*tm| tm.reset();
+    for (&screens) |*sc| sc.reset();
+    const h = create(7) orelse return error.TestUnexpectedResult;
+    const tm = get(h).?;
+    try std.testing.expect(tm.attachWindow(7));
+    const s = screenForWindow(7).?;
+    _ = writeWindow(h, "\x1b]0;desk\x07\x1b]2;edit\x1b\\");
+    // Last writer wins; the pump already handed the queue to the delivery
+    // seam (the dirty flag is spent) and the store keeps the title.
+    try std.testing.expectEqualStrings("edit", s.title[0..s.title_len]);
+    try std.testing.expect(!s.title_dirty);
+    // A title past the bound truncates honestly at title_max.
+    const long: [70]u8 = [_]u8{'t'} ** 70;
+    _ = writeWindow(h, "\x1b]2;");
+    _ = writeWindow(h, &long);
+    _ = writeWindow(h, "\x07");
+    try std.testing.expectEqual(@as(usize, title_max), s.title_len);
+    try std.testing.expectEqualStrings(long[0..title_max], s.title[0..s.title_len]);
+    // An empty title is refused: the stored title stays the last one.
+    _ = writeWindow(h, "\x1b]0;\x07");
+    try std.testing.expectEqualStrings(long[0..title_max], s.title[0..s.title_len]);
+    // RIS clears the stored queue (nothing is delivered as a blank title).
+    _ = writeWindow(h, "\x1bc");
+    try std.testing.expectEqual(@as(usize, 0), s.title_len);
+    try std.testing.expect(!s.title_dirty);
+}
+
+test "terminal: the kind-11 set_title frame is the frozen WM_RPC wire (#1715)" {
+    const long = "0123456789abcdefghijklmnopqrst"; // 30 > the 24-byte field
+    const frame = titleFrame(7, long);
+    try std.testing.expect(@sizeOf(wnd_core.WmRpc) <= wnd_core.wm_rpc_max);
+    try std.testing.expectEqual(wnd_core.wm_rpc_kind_set_title, frame.kind);
+    try std.testing.expectEqual(@as(u8, 11), frame.kind); // mirrors vi.WmRpcKindSetTitle
+    try std.testing.expectEqual(@as(u8, 7), frame.id);
+    try std.testing.expectEqual(@as(u8, 0), frame.reply_to); // no reply expected
+    try std.testing.expectEqualStrings(long[0..24], frame.title[0..wnd_core.wm_rpc_title_max]);
+}
+
+test "terminal: OSC 52 copies into the kernel clipboard through the pump (#1715)" {
+    clipboard.init();
+    for (&terminals) |*tm| tm.reset();
+    for (&screens) |*sc| sc.reset();
+    const h = create(7) orelse return error.TestUnexpectedResult;
+    const tm = get(h).?;
+    try std.testing.expect(tm.attachWindow(7));
+    const s = screenForWindow(7).?;
+    _ = writeWindow(h, "\x1b]52;c;aGVsbG8=\x07");
+    var buf: [16]u8 = undefined;
+    const n = clipboard.get(&buf);
+    try std.testing.expectEqualStrings("hello", buf[0..n]);
+    try std.testing.expect(!s.clip_dirty);
+    try std.testing.expectEqual(@as(u64, 1), clipboard.sets());
+    clipboard.init();
+}
+
+test "terminal: an OSC 52 read query is refused: no reply, no copy (#1715)" {
+    clipboard.init();
+    _ = clipboard.set("kept");
+    for (&terminals) |*tm| tm.reset();
+    for (&screens) |*sc| sc.reset();
+    const h = create(7) orelse return error.TestUnexpectedResult;
+    const tm = get(h).?;
+    try std.testing.expect(tm.attachWindow(7));
+    const s = screenForWindow(7).?;
+    _ = writeWindow(h, "\x1b]52;c;?\x07");
+    var buf: [16]u8 = undefined;
+    const n = clipboard.get(&buf);
+    try std.testing.expectEqualStrings("kept", buf[0..n]);
+    try std.testing.expectEqual(@as(usize, 0), s.pending_reply_len);
+    try std.testing.expect(!s.clip_dirty);
+    try std.testing.expectEqual(@as(usize, 0), s.clip_len);
+    clipboard.init();
+}
+
+test "terminal: malformed OSC 52 base64 is refused whole (#1715)" {
+    clipboard.init();
+    _ = clipboard.set("kept");
+    for (&terminals) |*tm| tm.reset();
+    for (&screens) |*sc| sc.reset();
+    const h = create(7) orelse return error.TestUnexpectedResult;
+    const tm = get(h).?;
+    try std.testing.expect(tm.attachWindow(7));
+    const s = screenForWindow(7).?;
+    // Valid first group, invalid byte later: nothing lands, ever.
+    _ = writeWindow(h, "\x1b]52;c;aGVsaG!=\x07");
+    var buf: [16]u8 = undefined;
+    const n = clipboard.get(&buf);
+    try std.testing.expectEqualStrings("kept", buf[0..n]);
+    try std.testing.expect(!s.clip_dirty);
+    try std.testing.expectEqual(@as(usize, 0), s.clip_len);
+    clipboard.init();
+}
+
+test "terminal: base64Decode is strict, padded, and truncates at the bound (#1715)" {
+    var dst: [512]u8 = undefined;
+    var n = base64Decode("aGVsbG8=", &dst) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("hello", dst[0..n]);
+    n = base64Decode("", &dst) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 0), n);
+    n = base64Decode("aH==", &dst) orelse return error.TestUnexpectedResult; // double pad
+    try std.testing.expectEqualStrings("h", dst[0..n]);
+    // Unpadded, padding before the tail, padding in a non-final group:
+    // each refuses WHOLE (null), never a partial commit.
+    try std.testing.expect(base64Decode("aGVsbG8", &dst) == null);
+    try std.testing.expect(base64Decode("a=Gs", &dst) == null);
+    try std.testing.expect(base64Decode("aGVs=bG8", &dst) == null);
+    // A valid over-long result truncates honestly at dst.len.
+    var wide: [800]u8 = undefined;
+    var i: usize = 0;
+    while (i < 200) : (i += 1) @memcpy(wide[i * 4 ..][0..4], "eHh4"); // "xxx", no padding
+    n = base64Decode(wide[0..800], &dst) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 512), n);
+    try std.testing.expectEqual(@as(u8, 'x'), dst[511]);
 }
 
 test "terminal: selection copies across lines and normalizes direction" {

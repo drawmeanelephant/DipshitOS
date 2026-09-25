@@ -482,6 +482,11 @@ pub const wm_rpc_kind_cycle_tab: u8 = 7;
 /// eligible. Additive kind; WND.BIN (which has no tab-aware concept) treats
 /// it as unknown and refuses, TABWM.BIN registers the declaration.
 pub const wm_rpc_kind_declare_fullscreen: u8 = 8;
+/// M79d (#1707) / M80g (#1715): the seat replaces a window's tab title
+/// (client -> seat; the kernel's tty-side producer is OSC 0/2's title).
+/// Mirrors `vi.WmRpcKindSetTitle` — kinds 9/10 (nav) stay Go-only. Additive
+/// like kind 8: WND.BIN treats an unknown kind as refused.
+pub const wm_rpc_kind_set_title: u8 = 11;
 pub const wm_rpc_reply_flag: u8 = 0x80;
 /// The frozen mailbox slot bound the message must fit (ADR 0015 size
 /// decision — the compact fixed layout fits 64 B, so message_max stays).
