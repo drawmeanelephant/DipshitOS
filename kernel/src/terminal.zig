@@ -834,7 +834,7 @@ pub const Screen = struct {
         if (self.cur >= self.used) return;
         const w = self.cols;
         var start = self.col;
-        if (self.cells[self.cur][start].cont != 0) start -= 1;
+        if (start > 0 and self.cells[self.cur][start].cont != 0) start -= 1;
         const count: usize = @min(@as(usize, n), w);
         const drop: usize = w - count;
         const cut_pair = count > 0 and drop > start and self.cells[self.cur][drop].cont != 0;
@@ -867,7 +867,7 @@ pub const Screen = struct {
         if (self.cur >= self.used) return;
         const w = self.cols;
         var start = self.col;
-        if (self.cells[self.cur][start].cont != 0) start -= 1;
+        if (start > 0 and self.cells[self.cur][start].cont != 0) start -= 1;
         var end = @min(self.col + @as(usize, n), w);
         if (end < w and self.cells[self.cur][end].cont != 0) end += 1;
         const m = end - start;

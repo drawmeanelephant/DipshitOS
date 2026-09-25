@@ -30,6 +30,11 @@
 //!         The history half of ED 3 cannot live here (a corpus `Screen`
 //!         has no history bank): it is pinned by registry tests in
 //!         terminal.zig, the M73i mode-table precedent.
+//!       * Group I is a deterministic CSI parameter-soup FUZZ — not
+//!         goldens. It enforces INVARIANTS (no panic, whole wide pairs,
+//!         bounded indices, nothing below the used tail) under random
+//!         load; a parser card that changes what "uncorrupted" means
+//!         asserts it there.
 //!   - A row that DISAGREES with the code is wrong — or you found a bug.
 //!     The bug goes in a comment or an issue, never a silent "fix" inside
 //!     an unrelated parser card (M73g's non-goal; see the ESC group for a
@@ -1298,4 +1303,195 @@ const sgr_depth_cases = [_]Case{
 
 test "terminal corpus: SGR depth — 256, truecolour, attributes (M73h)" {
     try runAll(&sgr_depth_cases);
+}
+
+// ---------------------------------------------------------------------------
+// Group I — CSI parameter-soup fuzz (M80b follow-up, #1713's hardening).
+// NOT a golden table: this group pins INVARIANTS under random load — the
+// parser must never panic and the grid must never corrupt. "Not corrupted"
+// is defined here as: every index inside its bound, wide pairs whole (a
+// continuation never stands without its base), row lengths inside the
+// width, and nothing left behind below the used tail (M80a's
+// materialise-on-write rule). Deterministic: fixed xorshift64 seeds, so a
+// failure reproduces byte-for-byte — the seed and step print on failure.
+//
+// The soup runs through a REGISTRY screen (the pub surface): unlike the
+// golden rows above it also exercises the history ring, the alternate
+// screen and the scan overlay paths (a corpus-local Screen has no history
+// bank).
+// ---------------------------------------------------------------------------
+
+/// Deterministic xorshift64 — no std.rand dependency, byte-stable across
+/// toolchains (the seeds below are part of the corpus).
+const SoupRng = struct {
+    s: u64,
+
+    fn init(seed: u64) SoupRng {
+        return .{ .s = if (seed == 0) 0x9E3779B97F4A7C15 else seed };
+    }
+
+    fn next(self: *SoupRng) u64 {
+        self.s ^= self.s << 13;
+        self.s ^= self.s >> 7;
+        self.s ^= self.s << 17;
+        return self.s;
+    }
+
+    fn pick(self: *SoupRng, n: u64) u64 {
+        return self.next() % n;
+    }
+};
+
+/// One soup chunk: mostly `ESC [ … final` with random params (empty,
+/// 1–2 digits, rarely 3 to hit the clamping paths), random separators
+/// (`;` mostly, `:` as the ITU sub-parameter probe), a random private
+/// prefix or intermediate byte, and a final drawn from the known dispatch
+/// set AND unknown finals ("consumed, never painted" territory).
+/// Occasionally the chunk is instead a short text/C0 run so the ops have
+/// content and cursor positions to act on (including a bare wide-rune
+/// lead byte, probing UTF-8 recovery), or an ABANDONED partial sequence
+/// probing stream-state recovery.
+fn soupChunk(rng: *SoupRng, buf: *[64]u8) []const u8 {
+    var n: usize = 0;
+    const roll = rng.pick(8);
+    if (roll < 2) {
+        // Text / C0 run.
+        const len = 1 + rng.pick(6);
+        var i: u64 = 0;
+        while (i < len) : (i += 1) {
+            buf[n] = switch (rng.pick(9)) {
+                0 => '\r',
+                1 => '\n',
+                2 => 0x08,
+                3 => '\t',
+                4 => 0x07,
+                5, 6 => 'a' + @as(u8, @intCast(rng.pick(26))),
+                7 => ' ',
+                else => 0xE4, // wide-rune lead byte, alone: UTF-8 recovery
+            };
+            n += 1;
+        }
+        return buf[0..n];
+    }
+    if (roll == 2) {
+        // Abandoned partial sequence: no final byte, the next chunk's
+        // bytes run through the parser mid-state.
+        buf[n] = 0x1b;
+        n += 1;
+        buf[n] = '[';
+        n += 1;
+        buf[n] = '1';
+        n += 1;
+        buf[n] = ';';
+        n += 1;
+        return buf[0..n];
+    }
+    buf[n] = 0x1b;
+    n += 1;
+    buf[n] = '[';
+    n += 1;
+    if (rng.pick(4) == 0) {
+        buf[n] = if (rng.pick(2) == 0) '?' else '>'; // private vs intermediate
+        n += 1;
+    }
+    if (rng.pick(8) == 0) {
+        buf[n] = ' '; // intermediate byte (the SL/SR form) — probe the skip
+        n += 1;
+    }
+    const nparams = 1 + rng.pick(5);
+    var p: u64 = 0;
+    while (p < nparams) : (p += 1) {
+        if (p > 0) {
+            buf[n] = if (rng.pick(8) == 0) ':' else ';';
+            n += 1;
+        }
+        switch (rng.pick(4)) {
+            0 => {}, // empty (the default)
+            1, 2 => {
+                buf[n] = '0' + @as(u8, @intCast(rng.pick(10)));
+                n += 1;
+            },
+            else => {
+                buf[n] = '1' + @as(u8, @intCast(rng.pick(9)));
+                n += 1;
+                buf[n] = '0' + @as(u8, @intCast(rng.pick(10)));
+                n += 1;
+            },
+        }
+        if (rng.pick(32) == 0) {
+            for ("999") |d| { // rare 3-digit: the out-of-range clamps
+                buf[n] = d;
+                n += 1;
+            }
+        }
+    }
+    const finals = "mHfJKABCDEFGdb@PXL" ++ "MSTnc" ++ "Z~ghiovwxyz";
+    buf[n] = finals[rng.pick(finals.len)];
+    n += 1;
+    return buf[0..n];
+}
+
+/// The definition of "the grid is not corrupted". Bounded indices,
+/// whole wide pairs, lengths inside the width, and nothing below the
+/// used tail.
+fn soupInvariants(s: *const t.Screen) !void {
+    try std.testing.expect(s.used >= 1 and s.used <= t.grid_lines);
+    try std.testing.expect(s.cur < t.grid_lines);
+    try std.testing.expect(s.col <= s.cols);
+    try std.testing.expect(s.cols <= t.grid_cols);
+    try std.testing.expect(s.viewOffset() < s.lineCount());
+    try std.testing.expect(s.hist_count <= t.history_lines);
+    try std.testing.expect(s.hist_start < t.history_lines);
+    for (0..t.grid_lines) |r| {
+        try std.testing.expect(s.lens[r] <= s.cols);
+        if (r >= s.used) try std.testing.expect(s.lens[r] == 0);
+        for (0..t.grid_cols) |c| {
+            const cell = s.cells[r][c];
+            if (cell.cont == 1) {
+                // A continuation always has its base to the left: never
+                // at column 0, never behind another continuation.
+                try std.testing.expect(c > 0);
+                try std.testing.expect(s.cells[r][c - 1].cont == 0);
+            }
+            if (r >= s.used) {
+                // Nothing survives below the used tail.
+                try std.testing.expect(cell.base == ' ');
+                try std.testing.expect(cell.mark == 0);
+                try std.testing.expect(cell.cont == 0);
+            }
+        }
+    }
+}
+
+test "terminal corpus: CSI parameter soup never panics or corrupts the grid" {
+    for (&t.terminals) |*tm| tm.reset();
+    for (&t.screens) |*sc| sc.reset();
+    const h = t.create(7) orelse return error.TestUnexpectedResult;
+    const tm = t.get(h).?;
+    try std.testing.expect(tm.attachWindow(7));
+    const s = t.screenForWindow(7).?;
+    const seeds = [_]u64{
+        0x1234_5678_9ABC_DEF0, 0xDEAD_BEEF_CAFE_F00D,
+        0x0000_0000_0000_0001, 0x8000_0000_0000_0001,
+        0xA5A5_5A5A_C3C3_3C3C, 0x0123_4567_89AB_CDEF,
+    };
+    for (seeds) |seed| {
+        s.reset();
+        var rng = SoupRng.init(seed);
+        var step: usize = 0;
+        while (step < 256) : (step += 1) {
+            var buf: [64]u8 = undefined;
+            s.feed(soupChunk(&rng, &buf));
+            if (step % 16 == 15) {
+                soupInvariants(s) catch |err| {
+                    std.debug.print("\ncorpus fuzz failed: seed 0x{x} step {d}\n", .{ seed, step });
+                    return err;
+                };
+            }
+        }
+        soupInvariants(s) catch |err| {
+            std.debug.print("\ncorpus fuzz failed: seed 0x{x} final sweep\n", .{seed});
+            return err;
+        };
+    }
 }
