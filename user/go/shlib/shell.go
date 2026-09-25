@@ -295,6 +295,17 @@ func NewShell(host Host, hist *History) *Shell {
 // Status reports the last line's exit status ($?).
 func (s *Shell) Status() int { return s.status }
 
+// Pwd is the shell's working directory as the shell itself tracks it: the
+// PWD that `cd` sets and `pwd` prints (NewEnv seeds "/"). The prompt's
+// `\w` and `\W` read this, so they cannot disagree with `pwd` -- the point
+// of the escape is to show the directory the shell is really in.
+func (s *Shell) Pwd() string {
+	if v, _ := s.env.Get("PWD"); v != "" {
+		return v
+	}
+	return "/"
+}
+
 // RunLine interprets one command line and returns (status, Action). An
 // empty or comment-only line is a no-op that leaves $? alone.
 func (s *Shell) RunLine(line string) (int, Action) { return s.runLine(line, 0) }

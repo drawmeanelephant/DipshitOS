@@ -260,6 +260,11 @@ func runSession(fd uint32, ta *tabapp.TabApp, auth *shlib.NetAuth) {
 	sh := shlib.NewShell(hst, hist)
 	editor := shlib.NewEditor(loadPrompt(), hist)
 	editor.Complete = completeFn(hst)
+	// M80n (#1730): the prompt escapes ask the shell where it is, at paint
+	// time. The provider is built once and read once per line, so `\w`
+	// follows a `cd` without SETTINGS.TXT or the directory being walked on
+	// every keystroke.
+	editor.SetPromptFacts(shlib.PromptFactsFor(sh, hst.Principal, shlib.PromptHost(settingsBody())))
 
 	// The startup contract (M49 SD2): STARTUP.SH, then PROFILE.SH, silent
 	// when either is missing, every line through the same engine.
@@ -303,7 +308,12 @@ func runSession(fd uint32, ta *tabapp.TabApp, auth *shlib.NetAuth) {
 			// and what keeps a screen-clearing command from erasing the
 			// prompt with nothing to repaint it. At the cursor, no CR: a
 			// CR repaint would overwrite output that ended mid-row.
-			_, _ = vi.FileWrite(fd, []byte(loadPrompt()))
+			// The template is re-read (a mid-session goset change still
+			// lands) and re-expanded against the facts NOW — the command may
+			// have been `cd` — and the editor's own bytes are written, so
+			// this prompt is the one the next in-line repaint uses.
+			editor.SetPrompt(loadPrompt())
+			_, _ = vi.FileWrite(fd, editor.PromptBytes())
 		case shlib.EvEOF:
 			shutdown(ta, fd, 0)
 		case shlib.EvCancel:
@@ -395,21 +405,21 @@ func writeTTY(fd uint32, b []byte) {
 	}
 }
 
-// loadPrompt adopts the SETTINGS.TXT `prompt` key (SH.BIN's SH8 behavior).
-func loadPrompt() string {
+// settingsBody is the raw SETTINGS.TXT, or "" when it cannot be read. The
+// prompt template and the hostname both come from here.
+func settingsBody() string {
 	b, r := vi.ReadFileAll(settingsPath, maxStartupBytes)
 	if r < 0 || len(b) == 0 {
-		return defaultPrompt
+		return ""
 	}
-	for _, line := range strings.Split(string(b), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "prompt=") {
-			if v := strings.TrimSpace(line[len("prompt="):]); v != "" {
-				return v + " "
-			}
-		}
-	}
-	return defaultPrompt
+	return string(b)
+}
+
+// loadPrompt adopts the SETTINGS.TXT `prompt` key (SH.BIN's SH8 behavior).
+// The value is the TEMPLATE: escapes are expanded at paint (M80n #1730), so
+// `prompt=\w` needs no rewriting when the directory moves.
+func loadPrompt() string {
+	return shlib.PromptFromSettings(settingsBody(), defaultPrompt)
 }
 
 // startupLines reads the startup contract files (CRLF-aware, bounded,

@@ -121,12 +121,19 @@ const (
 
 // Editor is the line editor for one tty session.
 type Editor struct {
-	prompt  string
-	buf     []byte
-	cur     int
-	hist    *History
-	hview   int // -1 = editing the live line
-	lastLen int // painted prompt+line length, for the tail overwrite
+	// prompt is the TEMPLATE -- the persisted SETTINGS.TXT value -- and
+	// promptOut is its expansion for the line being edited (M80n #1730).
+	// facts supplies what the escapes ask about; with no facts the
+	// template is written verbatim, so an editor nobody gave escapes to
+	// paints exactly what it always did.
+	prompt    string
+	promptOut []byte
+	facts     func() PromptFacts
+	buf       []byte
+	cur       int
+	hist      *History
+	hview     int // -1 = editing the live line
+	lastLen   int // painted prompt+line length, for the tail overwrite
 	// Completion menu (M80m #1729). `menu` is the candidate snapshot the
 	// menu opened with -- kept so a cycle can step the same set without
 	// re-running Complete -- `menuStart` is where the completed word began,
@@ -167,14 +174,46 @@ type Editor struct {
 
 // NewEditor wires an editor over a history ring.
 func NewEditor(prompt string, h *History) *Editor {
-	return &Editor{prompt: prompt, hist: h, hview: -1, cols: defaultCols}
+	e := &Editor{prompt: prompt, hist: h, hview: -1, cols: defaultCols}
+	e.promptOut = []byte(prompt)
+	return e
 }
 
-// SetPrompt swaps the prompt (SETTINGS.TXT drives it at startup).
+// SetPrompt swaps the prompt TEMPLATE (SETTINGS.TXT drives it at startup
+// and after every command, so a mid-session goset change still lands) and
+// re-expands it against the facts as they stand right now.
 func (e *Editor) SetPrompt(p string) {
 	e.prompt = p
+	e.RefreshPrompt()
+}
+
+// SetPromptFacts gives the prompt escapes something to ask about. The
+// provider is called once per line, not once per keystroke: the cwd cannot
+// change while a line is being edited, and a provider that walked the
+// directory on every repaint would make typing O(directory).
+func (e *Editor) SetPromptFacts(f func() PromptFacts) {
+	e.facts = f
+	e.RefreshPrompt()
+}
+
+// RefreshPrompt re-expands the template. Call it when the facts could have
+// moved under an unchanged template -- after a `cd`, say -- so the next
+// line's prompt is the one the shell is actually in.
+func (e *Editor) RefreshPrompt() {
+	if e.facts == nil {
+		e.promptOut = []byte(e.prompt)
+	} else {
+		e.promptOut = []byte(ExpandPrompt(e.prompt, e.facts()))
+	}
 	e.lastLen = 0
 }
+
+// PromptBytes is the expanded prompt, for the front-end's own post-submit
+// write. Both front-ends paint the prompt themselves after a command (M73d
+// #1628: the submit echo is a bare \r\n), so they must write the SAME bytes
+// the editor would repaint -- otherwise the fresh prompt and the first
+// in-line repaint disagree and the line jitters by a prompt's width.
+func (e *Editor) PromptBytes() []byte { return e.promptOut }
 
 // SetCols tells the editor how wide the terminal grid is, so the
 // completion menu can columnate to it. A non-positive value restores the
@@ -187,26 +226,32 @@ func (e *Editor) SetCols(n int) {
 }
 
 // Repaint renders the current state: the prompt and line from scratch.
+// It re-expands the prompt first -- this is what a front-end calls to open
+// a line, so it is the natural place to notice a `cd` from the last one.
 func (e *Editor) Repaint() []byte {
-	e.lastLen = 0
+	e.RefreshPrompt()
 	return e.paint()
 }
 
 // paint composes the repaint: `\r` + prompt + line, spaces over the old
 // tail, then `\r` + prompt + the line up to the cursor.
 func (e *Editor) paint() []byte {
-	content := len(e.prompt) + len(e.buf)
+	// Cells, not bytes: the grid is rune-based and a prompt can carry colour
+	// codes and bracket-marked spans that paint nothing (M80n #1730). A
+	// byte count here would write the wrong number of tail spaces and leave
+	// the old line's last cells on screen.
+	content := VisibleWidth(string(e.promptOut)) + VisibleWidth(string(e.buf))
 	tail := e.lastLen - content
 	if tail < 0 {
 		tail = 0
 	}
 	out := make([]byte, 0, content+tail+2+content)
 	out = append(out, '\r')
-	out = append(out, e.prompt...)
+	out = append(out, e.promptOut...)
 	out = append(out, e.buf...)
 	out = append(out, []byte(strings.Repeat(" ", tail))...)
 	out = append(out, '\r')
-	out = append(out, e.prompt...)
+	out = append(out, e.promptOut...)
 	out = append(out, e.buf[:e.cur]...)
 	e.lastLen = content
 	return out
@@ -493,6 +538,7 @@ func (e *Editor) keyGround(b byte) ([]byte, EditEvent) {
 		e.cur = 0
 		e.hview = -1
 		e.lastLen = 0
+		e.RefreshPrompt()
 		out := append([]byte("^C\r\n"), e.paint()...)
 		return out, EditEvent{Kind: EvCancel}
 	case 0x04: // Ctrl-D on an empty line: EOF

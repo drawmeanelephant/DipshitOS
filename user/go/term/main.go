@@ -154,6 +154,11 @@ func runSession(ta *tabapp.TabApp, fd uint32) {
 
 		editor := shlib.NewEditor(loadPrompt(), hist)
 		editor.Complete = completeFn(hst)
+		// M80n (#1730): the prompt escapes ask the shell where it is, at paint
+		// time. The provider is built once and read once per line, so `\w`
+		// follows a `cd` without SETTINGS.TXT or the directory being walked on
+		// every keystroke.
+		editor.SetPromptFacts(shlib.PromptFactsFor(sh, hst.Principal, shlib.PromptHost(settingsBody())))
 
 		// M69f1 (#1537): seed recall from the share AFTER the startup banner
 		// and BEFORE the first prompt, so the startup lines never enter recall.
@@ -204,8 +209,13 @@ func runSession(ta *tabapp.TabApp, fd uint32) {
 					// At the cursor, no CR — a CR repaint would overwrite the
 					// truecolour row's cells (the M73h assert scans x64..79 of
 					// grid row 2), where the shell loop's bare prompt lands at
-					// x>=80 as the original gate observed.
-					writeTTY(fd, []byte(loadPrompt()))
+					// x>=80 as the original gate observed. The template is
+					// re-read (a mid-session goset change still lands) and
+					// re-expanded against the facts NOW — the command may have
+					// been `cd` — and the editor's own bytes are written, so
+					// this prompt is the one the next in-line repaint uses.
+					editor.SetPrompt(loadPrompt())
+					writeTTY(fd, editor.PromptBytes())
 				}
 			case shlib.EvEOF:
 				if eofPending {
@@ -332,30 +342,22 @@ func closeRequested(line string) bool {
 	return strings.TrimSpace(line) == "exit --close"
 }
 
-// loadPrompt adopts the SETTINGS.TXT `prompt` key (SH.BIN's SH8 behavior,
-// the same loader GOSH uses — the prompt is the shell's, not this
-// front-end's).
-func loadPrompt() string {
+// settingsBody is the raw SETTINGS.TXT, or "" when it cannot be read. The
+// prompt template and the hostname both come from here.
+func settingsBody() string {
 	b, r := vi.ReadFileAll(settingsPath, maxStartupBytes)
 	if r < 0 {
-		return defaultPrompt
+		return ""
 	}
-	return promptFromSettings(string(b), defaultPrompt)
+	return string(b)
 }
 
-// promptFromSettings is loadPrompt's pure parsing half (host-testable):
-// the first `prompt=` key wins, its value is trimmed and separated from
-// the line by one space; a missing or empty value falls back.
-func promptFromSettings(body, def string) string {
-	for _, line := range strings.Split(body, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "prompt=") {
-			if v := strings.TrimSpace(line[len("prompt="):]); v != "" {
-				return v + " "
-			}
-		}
-	}
-	return def
+// loadPrompt adopts the SETTINGS.TXT `prompt` key (SH.BIN's SH8 behavior,
+// the same loader GOSH uses — the prompt is the shell's, not this
+// front-end's). The value is the TEMPLATE: escapes are expanded at paint
+// (M80n #1730), so `prompt=\w` needs no rewriting when the directory moves.
+func loadPrompt() string {
+	return shlib.PromptFromSettings(settingsBody(), defaultPrompt)
 }
 
 // startupLines reads the startup contract files (CRLF-aware, bounded,
