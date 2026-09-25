@@ -42,6 +42,14 @@
 # the next shell read and completion marker prove it cannot wedge the session.
 # The class-A corpus pins the exact reply bytes and queue ordering.
 #
+# M80g (#1715) run 05: OSC through the real window tty. The typed printf
+# carries `ESC ] 0 ; osctitle-1715 BEL` (window title) and
+# `ESC ] 52 ; c ; aGVsbG8= BEL` (clipboard copy). Both receipts print from
+# the MONITOR after the kernel parsed the sequence out of the typed line:
+# `dui`'s registry row shows the new title of record, `clip` prints the
+# decoded bytes. The class-A corpus pins the parser itself (consumed,
+# never painted); delivery rides the window pump beside the M80f replies.
+#
 # M73m (#1662) run 02 — the palette the USER chose, live: same boot shape,
 # but after `goterm: done` has painted the DEFAULT (dark) grid, the monitor
 # writes a NON-default palette through the REAL store (`settings set theme
@@ -273,6 +281,33 @@ vgate_run 04 -- --display --input --screen '$RUN_DIR/screen-fkey' \
 
 vgate_assert 04 serial-contains 'kb-usage=0x3f'
 vgate_assert 04 serial-contains 'kb-byte=~'
+
+# M80g (#1715): a title and a clipboard copy, both injected as a typed
+# printf through the REAL tty seam. Receipts are read back from the
+# kernel: the window title of record (`dui`) and the shared clipboard
+# (`clip`). Markers follow the readback, never precede it.
+vgate_file script2-osc.txt <<'EOF'
+dui
+clip
+echo rx-live-osc-ok
+EOF
+
+vgate_run 05 -- --display --input --via-virtio --screen '$RUN_DIR/screen-osc' \
+    --script '$RUN_DIR/script.txt' \
+    --input-string "printf '\\e]0;osctitle-1715\\x07\\e]52;c;aGVsbG8=\\x07'"$'\n' \
+    --input-string-after 'goterm: attached' \
+    --script2 '$RUN_DIR/script2-osc.txt' \
+    --script2-after 'goterm: done status=0' --script2-delay 4 \
+    --script-expect 'rx-live-osc-ok' \
+    --timeout 150
+
+vgate_assert 05 serial-contains 'goterm: attached'
+vgate_assert 05 serial-contains 'goterm: line printf'
+vgate_assert 05 serial-contains 'goterm: done status=0'
+vgate_assert 05 serial-contains 'osctitle-1715 user rect=64,48,640,400'
+vgate_assert 05 serial-contains 'clip: hello'
+vgate_assert 05 serial-absent '\[EXC\]'
+vgate_assert 05 serial-absent '[EXC] parking:'
 
 vgate_assert 02 serial-contains 'goterm: ready'
 vgate_assert 02 serial-contains 'goterm: attached'

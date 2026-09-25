@@ -37,6 +37,12 @@
 //!         group. Its VT-correct pending-wrap policy deliberately flips
 //!         the old CUB pending-wrap pin: motion resolves the wrap, then
 //!         applies its displacement.
+//!       * M80g (#1715) lands an OSC group: Ps 0/2 titles and OSC 52 rows
+//!         pin "consumed, never painted" plus the queue state (the
+//!         `title`/`clip` Case fields). Delivery — window title buffer,
+//!         M79d's kind-11 seam, the clipboard bridge — is pinned by
+//!         registry tests in terminal.zig (the M73i precedent): a corpus
+//!         Screen has no pump to deliver on.
 //!       * Group I is a deterministic CSI parameter-soup FUZZ — not
 //!         goldens. It enforces INVARIANTS (no panic, whole wide pairs,
 //!         bounded indices, nothing below the used tail) under random
@@ -110,6 +116,12 @@ const Case = struct {
     rendition: ?Rendition = null,
     /// Expected keypad mode (DECKPAM=true, DECKPNM=false).
     keypad: ?bool = null,
+    /// Expected OSC title queue (M80g #1715) — the bounded bytes the
+    /// parser stored for Ps 0/2, before any delivery.
+    title: ?[]const u8 = null,
+    /// Expected OSC 52 queue (M80g #1715) — the decoded clipboard bytes
+    /// awaiting the pump; empty means no copy landed.
+    clip: ?[]const u8 = null,
     cells: []const CellSpot = &.{},
     styles: []const StyleSpot = &.{},
 };
@@ -126,6 +138,8 @@ fn run(c: Case) !void {
     if (c.visible) |v| try std.testing.expectEqual(v, s.cursor_visible);
     if (c.alt) |a| try std.testing.expectEqual(a, s.alt_active);
     if (c.keypad) |k| try std.testing.expectEqual(k, s.keypadApplication());
+    if (c.title) |want| try std.testing.expectEqualStrings(want, s.title[0..s.title_len]);
+    if (c.clip) |want| try std.testing.expectEqualStrings(want, s.clip_data[0..s.clip_len]);
     if (c.rendition) |r| {
         try std.testing.expectEqual(r.fg, t.styleForeground(s.style));
         try std.testing.expectEqual(r.bg, t.styleBackground(s.style));
@@ -186,6 +200,10 @@ const a79: [79]u8 = [_]u8{'a'} ** 79;
 /// M80b: three spaces + 77 `a`s — an ICH that shoves 3 cells off the
 /// right margin of a full row.
 const spaces3_a77: [80]u8 = [_]u8{' '} ** 3 ++ [_]u8{'a'} ** 77;
+/// M80g: an over-bound OSC payload (780 > osc_max) and a 70-byte title
+/// (past title_max 64) — the overflow and truncation probes.
+const x780: [780]u8 = [_]u8{'x'} ** 780;
+const t70: [70]u8 = [_]u8{'t'} ** 70;
 
 // ---------------------------------------------------------------------------
 // Group A — ASCII control and line discipline.
@@ -1333,6 +1351,97 @@ test "terminal corpus: ESC and CSI policy pins" {
 }
 
 // ---------------------------------------------------------------------------
+// M80g (#1715) — OSC: window titles (Ps 0/2) and the OSC 52 clipboard.
+// OSC strings are consumed, never painted — these rows pin the side queue
+// (`title`/`clip`) and the grid's innocence. Delivery (window buffer, seat
+// kind-11 frame, clipboard bridge) is registry-tested in terminal.zig; a
+// corpus Screen has no pump.
+// ---------------------------------------------------------------------------
+
+const osc_cases = [_]Case{
+    .{
+        .name = "OSC 0 sets the window title and paints nothing",
+        .input = "\x1b]0;desk\x07A",
+        .lines = &.{"A"},
+        .cursor = .{ 0, 1 },
+        .title = "desk",
+    },
+    .{
+        .name = "OSC 2 sets the title; ST (ESC \\) terminates it",
+        .input = "\x1b]2;edit\x1b\\B",
+        .lines = &.{"B"},
+        .cursor = .{ 0, 1 },
+        .title = "edit",
+    },
+    .{
+        .name = "OSC 1/7/10 and a numberless string are consumed, never painted",
+        .input = "\x1b]1;icon\x07\x1b]7;cwd\x07\x1b]10;?\x07\x1b];p\x07C",
+        .lines = &.{"C"},
+        .cursor = .{ 0, 1 },
+        .title = "",
+    },
+    .{
+        .name = "an empty title is refused: a tab keeps its name",
+        .input = "\x1b]2;keep\x07\x1b]0;\x07",
+        .title = "keep",
+    },
+    .{
+        .name = "a title is truncated honestly at title_max",
+        .input = "\x1b]2;" ++ &t70 ++ "\x07",
+        .title = t70[0..64],
+    },
+    .{
+        .name = "an over-bound unterminated OSC is dropped whole; text resumes",
+        .input = "\x1b]0;" ++ &x780 ++ "\x07D",
+        .lines = &.{"D"},
+        .cursor = .{ 0, 1 },
+        .title = "",
+    },
+    .{
+        .name = "OSC 52 c;base64 queues the decoded clipboard bytes",
+        .input = "\x1b]52;c;aGVsbG8=\x07E",
+        .lines = &.{"E"},
+        .cursor = .{ 0, 1 },
+        .clip = "hello",
+    },
+    .{
+        .name = "an OSC 52 read query is refused: no copy, never painted",
+        .input = "\x1b]52;c;?\x07F",
+        .lines = &.{"F"},
+        .cursor = .{ 0, 1 },
+        .clip = "",
+    },
+    .{
+        .name = "OSC 52 to a non-clipboard target is dropped",
+        .input = "\x1b]52;p;aGVsbG8=\x07",
+        .clip = "",
+    },
+    .{
+        .name = "invalid base64 is refused whole: no partial copy",
+        .input = "\x1b]52;c;aG!sbG8=\x07",
+        .clip = "",
+    },
+    .{
+        .name = "ESC inside an OSC aborts it; the escape final still runs",
+        .input = "\x1b]2;title\x1bEG",
+        .lines = &.{ "", "G" },
+        .cursor = .{ 1, 1 },
+        .title = "",
+    },
+    .{
+        .name = "CAN aborts an OSC mid-payload; the next byte prints",
+        .input = "\x1b]2;t\x18H",
+        .lines = &.{"H"},
+        .cursor = .{ 0, 1 },
+        .title = "",
+    },
+};
+
+test "terminal corpus: OSC window titles and clipboard (M80g #1715)" {
+    try runAll(&osc_cases);
+}
+
+// ---------------------------------------------------------------------------
 // Group G — UTF-8 decode (M73a-1 #1625 policy). `line()` projects every
 // non-ASCII rune to one 0x00 byte, so rune expectations use cell spots.
 // ---------------------------------------------------------------------------
@@ -1655,6 +1764,38 @@ fn soupChunk(rng: *SoupRng, buf: *[64]u8) []const u8 {
         n += 1;
         return buf[0..n];
     }
+    if (roll == 3) {
+        // M80g: an OSC string — Ps, payload, terminator. Variants: a
+        // title, a clipboard copy, a refused `?` read, and a TRUNCATED
+        // string with no terminator (the next chunk probes recovery
+        // mid-OSC).
+        buf[n] = 0x1b;
+        n += 1;
+        buf[n] = ']';
+        n += 1;
+        const variant = rng.pick(4);
+        const ps: []const u8 = if (variant == 1) "52" else if (variant == 3) "0" else "2";
+        for (ps) |d| {
+            buf[n] = d;
+            n += 1;
+        }
+        buf[n] = ';';
+        n += 1;
+        const payload: []const u8 = switch (variant) {
+            1 => "c;aGVsbG8=",
+            2 => "c;?",
+            else => "soup",
+        };
+        for (payload) |c| {
+            buf[n] = c;
+            n += 1;
+        }
+        if (variant != 3) {
+            buf[n] = 0x07;
+            n += 1;
+        }
+        return buf[0..n];
+    }
     buf[n] = 0x1b;
     n += 1;
     buf[n] = '[';
@@ -1711,6 +1852,11 @@ fn soupInvariants(s: *const t.Screen) !void {
     try std.testing.expect(s.viewOffset() < s.lineCount());
     try std.testing.expect(s.hist_count <= t.history_lines);
     try std.testing.expect(s.hist_start < t.history_lines);
+    // M80g: the OSC queues stay inside their bounds whatever the soup
+    // feeds — the string bound, the title bound, the clipboard bound.
+    try std.testing.expect(s.osc_len <= t.osc_max);
+    try std.testing.expect(s.title_len <= t.title_max);
+    try std.testing.expect(s.clip_len <= s.clip_data.len);
     for (0..t.grid_lines) |r| {
         try std.testing.expect(s.lens[r] <= s.cols);
         if (r >= s.used) try std.testing.expect(s.lens[r] == 0);
