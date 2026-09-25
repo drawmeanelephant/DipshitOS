@@ -155,6 +155,20 @@ func TestHandleWmKeyIgnoresUnboundCtrlShiftKeys(t *testing.T) {
 	}
 }
 
+func TestCtrlIndexMapsHIDNumberRow(t *testing.T) {
+	for usage, want := range map[uint8]int{0x1e: 1, 0x1f: 2, 0x26: 9} {
+		got, ok := ctrlIndex(usage)
+		if !ok || got != want {
+			t.Fatalf("ctrlIndex(%#x) = %d ok=%v want %d", usage, got, ok, want)
+		}
+	}
+	for _, usage := range []uint8{0x04, 0x27, 0x2b} { // a, 0, Tab
+		if got, ok := ctrlIndex(usage); ok {
+			t.Fatalf("ctrlIndex(%#x) = %d ok=true want false", usage, got)
+		}
+	}
+}
+
 func TestAltTabNextPolicy(t *testing.T) {
 	if _, ok := altTabNext(0, 0, false); ok {
 		t.Fatal("zero tabs must no-op")
@@ -215,36 +229,89 @@ func TestHandleWmKeyPinFocused(t *testing.T) {
 	}
 }
 
-func TestHandleWmKeyIgnoresCtrlWAndCtrlTab(t *testing.T) {
+// focusIndexRecorder replaces the guest-only focus seam so dispatch tests can
+// observe the selected rail index without slot 65 or marker output.
+func focusIndexRecorder() (*[]int, func()) {
+	indices := &[]int{}
+	prev := focusByIndex
+	focusByIndex = func(i int) bool {
+		*indices = append(*indices, i)
+		return true
+	}
+	return indices, func() { focusByIndex = prev }
+}
+
+func TestHandleWmKeyCtrlTabAndDigitDispatch(t *testing.T) {
 	saved := tabs
 	defer func() { tabs = saved }()
 	tabs = TabStrip{}
-	if !tabs.OpenTab(3, "A") || !tabs.OpenTab(4, "B") {
-		t.Fatal("OpenTab")
+	for i, id := range []uint32{3, 4, 5} {
+		if !tabs.OpenTab(id, string(rune('A'+i))) {
+			t.Fatal("OpenTab")
+		}
 	}
-	_ = tabs.FocusTab(3)
-	handleWmKey(vi.Event{Kind: vi.EvWmKey, Flags: vi.ModCtrl, Arg0: 0x1A}) // w
-	if tabs.At(0).Pinned || tabs.At(1).Pinned {
-		t.Fatal("Ctrl+W must not pin")
+	if !tabs.FocusTab(5) {
+		t.Fatal("FocusTab")
 	}
-	id, _ := tabs.Focused()
-	if id != 3 {
-		t.Fatalf("Ctrl+Tab must not cycle yet, focus=%d", id)
+	indices, restore := focusIndexRecorder()
+	defer restore()
+	key := func(flags uint16, usage uint8) {
+		handleWmKey(vi.Event{Kind: vi.EvWmKey, Flags: flags, Arg0: uint32(usage)})
 	}
+
+	key(vi.ModCtrl, hidUsageTab)             // wrap 2 -> 0
+	key(vi.ModCtrl|vi.ModShift, hidUsageTab) // reverse 2 -> 1
+	key(vi.ModCtrl, 0x1f)                    // Ctrl+2 -> index 1
+	key(vi.ModCtrl, 0x23)                    // Ctrl+4 is past a 3-tab strip
+	key(vi.ModCtrl, 0x1a)                    // Ctrl+W remains app-owned
+	key(vi.ModCtrl|vi.ModAlt, hidUsageTab)   // Ctrl+Alt+Tab remains unbound
+	want := []int{0, 1, 1}
+	if len(*indices) != len(want) {
+		t.Fatalf("focus indexes = %v want %v", *indices, want)
+	}
+	for i := range want {
+		if (*indices)[i] != want[i] {
+			t.Fatalf("focus indexes = %v want %v", *indices, want)
+		}
+	}
+}
+
+func TestHandleWmKeyLauncherPrecedesCtrlChords(t *testing.T) {
+	savedTabs := tabs
+	savedLaunch := launch
+	defer func() {
+		tabs = savedTabs
+		launch = savedLaunch
+	}()
+	tabs = TabStrip{}
+	tabs.OpenTab(3, "A")
+	tabs.OpenTab(4, "B")
+	launch = launcherState{open: true}
+	indices, restore := focusIndexRecorder()
+	defer restore()
+
 	handleWmKey(vi.Event{Kind: vi.EvWmKey, Flags: vi.ModCtrl, Arg0: uint32(hidUsageTab)})
-	id, _ = tabs.Focused()
-	if id != 3 {
-		t.Fatalf("Ctrl+Tab (M63r) must not cycle, focus=%d", id)
+	handleWmKey(vi.Event{Kind: vi.EvWmKey, Flags: vi.ModCtrl, Arg0: 0x1f})
+	if len(*indices) != 0 {
+		t.Fatalf("launcher-open ctrl chords focused rail indexes %v", *indices)
 	}
-	// Ordinary characters are the app's KEY_DOWN path (M63e). The seat
-	// still sees kind 21, but must not treat them as chords.
+	if launch.filter != "2" {
+		t.Fatalf("launcher filter = %q want %q", launch.filter, "2")
+	}
+}
+
+func TestHandleWmKeyLeavesPlainKeysToApp(t *testing.T) {
+	saved := tabs
+	defer func() { tabs = saved }()
+	tabs = TabStrip{}
+	tabs.OpenTab(3, "A")
+	tabs.OpenTab(4, "B")
+	indices, restore := focusIndexRecorder()
+	defer restore()
+
 	handleWmKey(vi.Event{Kind: vi.EvWmKey, Arg0: 0x1B}) // HID 'x'
-	if tabs.At(0).Pinned || tabs.At(1).Pinned {
-		t.Fatal("printable x must not pin")
-	}
-	id, _ = tabs.Focused()
-	if id != 3 {
-		t.Fatalf("printable x must not cycle, focus=%d", id)
+	if len(*indices) != 0 {
+		t.Fatalf("plain x focused rail indexes %v", *indices)
 	}
 }
 

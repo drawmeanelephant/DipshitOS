@@ -49,6 +49,12 @@
 # Run 02's M62e SESSION.TABS is cleared before this boot: a restore sets
 # stripDone and skips the auto-close.
 #
+# Run 07 (M79f / #1717): four Go runtimes (seat + GOEDIT + GOTERM + GOCALC)
+# at GOMAXPROCS=1, exactly at the M65 max_tasks=16 budget. Once the rail
+# reaches n=3, one chord batch proves Ctrl+Tab wrapping from the focused third
+# cell to cell 1, then Ctrl+2 focusing cell 2. Both chords intentionally emit
+# the established alt-tab marker chain because they share the same focus path.
+#
 # Two equal-width cells on a 1280 rail: tab 0 [0,640)=(320,10), tab 1
 # [640,1280)=(960,10). Zig's left-rail (158,70) is the wrong target.
 # Pane rects include y=0. No client-area mouse. No edit/term rewrite.
@@ -65,7 +71,7 @@
 # `gotabwm: rail n=2`, `gotabwm: rail-click`, `goedit: dirty`,
 # `wm: unregistered, shim resumed`).
 
-vgate_name go-wm-hid "issues #1419–#1423 M63a-e + #1563 M71d: GOTABWM type-in, HID drag, BT1 reopen/duplicate on VZ"
+vgate_name go-wm-hid "issues #1419–#1423 M63a-e + #1563 M71d + #1717 M79f: GOTABWM type-in, HID drag, BT1, ctrl-tab/ctrl-digit on VZ"
 vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 
@@ -735,4 +741,110 @@ for i in range(close_i, len(ser)):
 if rail_i < 0:
     sys.exit("the rail marker never dropped to n=1 after the close-x")
 print("M79b: hover@%d id=%s close-x@%d rail n=1@%d" % (hover_i, hover_id, close_i, rail_i))
+PY
+
+# ---------------------------------------------------------------------------
+# Run 07 (M79f / #1717): Ctrl+Tab and Ctrl+2 across a three-tab strip.
+#
+# The last declared client (GOCALC) owns focus on arrival, so Ctrl+Tab must
+# wrap to rail cell 1 (GOEDIT) and Ctrl+2 must then focus cell 2 (GOTERM).
+# Four GOMAXPROCS=1 Go runtimes consume the M65 task budget exactly; the
+# runner starts this phase at rail n=3 before the demo choreography can close.
+vgate_file script-m79f.txt <<'EOF'
+set GOMAXPROCS=1
+vf rm SESSION.TABS
+wm
+exec GOTABWM.ELF
+EOF
+
+vgate_file script2-m79f.txt <<'EOF'
+dui focus 0
+exec GOEDIT.ELF
+exec GOTERM.ELF
+exec GOCALC.ELF
+EOF
+
+vgate_run 07 -- \
+    --screen '$RUN_DIR/screen-07' \
+    --via-virtio \
+    --script '$RUN_DIR/script-m79f.txt' \
+    --script2 '$RUN_DIR/script2-m79f.txt' \
+    --script2-after 'gotabwm: win focus' \
+    --input-chords 'ctrl-tab,ctrl-2' \
+    --input-chords-after 'gotabwm: rail n=3' \
+    --script3 '$RUN_DIR/script3.txt' \
+    --script3-after 'wm: unregistered, shim resumed' \
+    --script-expect 'rx-gotabwm-hid-ok' --timeout 300
+
+vgate_assert 07 serial-contains 'VirelaiOS kernel has seized control.'
+vgate_assert 07 serial-contains 'exec: loaded GOTABWM.ELF'
+vgate_assert 07 serial-contains 'exec: loaded GOEDIT.ELF'
+vgate_assert 07 serial-contains 'exec: loaded GOTERM.ELF'
+vgate_assert 07 serial-contains 'exec: loaded GOCALC.ELF'
+vgate_assert 07 serial-contains 'gotabwm: registered'
+vgate_assert 07 serial-contains 'gotabwm: rail n=3'
+vgate_assert 07 serial-contains 'gotabwm: alt-tab id='
+vgate_assert 07 serial-contains 'gotabwm: close'
+vgate_assert 07 serial-contains 'gotabwm OK'
+vgate_assert 07 serial-contains 'wm: unregistered, shim resumed'
+vgate_assert 07 serial-contains 'rx-gotabwm-hid-ok'
+vgate_assert 07 serial-absent '[EXC] parking:'
+vgate_assert 07 serial-absent 'exited status=139'
+vgate_assert 07 python <<'PY'
+import os, re, sys
+ser = open(os.environ["VG_SER"], errors="replace").read().splitlines()
+
+def first_after(prefix, start=0):
+    for i in range(start + 1, len(ser)):
+        if ser[i].startswith(prefix):
+            return i
+    sys.exit("missing %s after %d" % (prefix, start))
+
+def first_match(rx):
+    for i, line in enumerate(ser):
+        m = rx.match(line)
+        if m:
+            return i, m
+    sys.exit("missing /%s/" % rx.pattern)
+
+def first_order_after(start):
+    rx = re.compile(
+        r"^gotabwm: order ids=(\d+),(\d+),(\d+) pin=(\d),(\d),(\d) focus=(\d+)$")
+    for i in range(start + 1, len(ser)):
+        m = rx.match(ser[i])
+        if m:
+            return i, m
+    sys.exit("no order after index %d" % start)
+
+edit_i, edit_m = first_match(re.compile(r"^goedit: open id=(\d+)$"))
+term_i, term_m = first_match(re.compile(r"^goterm: open id=(\d+)$"))
+calc_i, calc_m = first_match(re.compile(r"^gocalc: open id=(\d+)$"))
+rail_i, rail_m = first_match(re.compile(r"^gotabwm: rail n=3 focus=(\d+)$"))
+wrap_i = first_after("gotabwm: alt-tab id=", rail_i)
+if wrap_i <= max(edit_i, term_i, calc_i):
+    sys.exit("M79f chords must follow all three client opens")
+ids = (int(edit_m.group(1)), int(term_m.group(1)), int(calc_m.group(1)))
+if len(set(ids)) != 3:
+    sys.exit("client ids are not distinct: %s" % (ids,))
+start = ids.index(int(rail_m.group(1)))
+want_wrap = ids[(start + 1) % len(ids)]
+want_direct = ids[1]
+
+wrap_o_i, wrap_o = first_order_after(wrap_i)
+direct_i = first_after("gotabwm: alt-tab id=", wrap_i)
+direct_o_i, direct_o = first_order_after(direct_i)
+if not (rail_i < wrap_i < wrap_o_i < direct_i < direct_o_i):
+    sys.exit("chord marker/order chain out of order")
+for order in (wrap_o, direct_o):
+    got_ids = tuple(int(order.group(i)) for i in range(1, 4))
+    if got_ids != ids:
+        sys.exit("chord changed rail order: got %s want %s" % (got_ids, ids))
+if int(wrap_o.group(7)) != want_wrap:
+    sys.exit("Ctrl+Tab focused %s want next rail cell %s" % (
+        wrap_o.group(7), want_wrap))
+if int(direct_o.group(7)) != want_direct:
+    sys.exit("Ctrl+2 focused %s want second rail cell %s" % (
+        direct_o.group(7), want_direct))
+print("M79f: focus %s --ctrl-tab--> %s --ctrl-2--> %s across three tabs" % (
+    rail_m.group(1), wrap_o.group(7), direct_o.group(7)))
 PY
