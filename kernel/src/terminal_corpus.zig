@@ -38,6 +38,11 @@
 //!         bounded indices, nothing below the used tail) under random
 //!         load; a parser card that changes what "uncorrupted" means
 //!         asserts it there.
+//!       * M80c (#1714) landed its DECSTBM/origin rows in the CSI group,
+//!         its autowrap rows in the wrap group, and its IND/RI/soft-
+//!         reset rows in the ESC group — no existing row flipped (the
+//!         default full-screen region and autowrap-on reduce to today's
+//!         behaviour exactly).
 //!   - A row that DISAGREES with the code is wrong — or you found a bug.
 //!     The bug goes in a comment or an issue, never a silent "fix" inside
 //!     an unrelated parser card.
@@ -182,6 +187,9 @@ const a79: [79]u8 = [_]u8{'a'} ** 79;
 /// M80b: three spaces + 77 `a`s — an ICH that shoves 3 cells off the
 /// right margin of a full row.
 const spaces3_a77: [80]u8 = [_]u8{' '} ** 3 ++ [_]u8{'a'} ** 77;
+/// M80c: 79 `a`s + one trailing char — the ?7l "stays put" rows.
+const a79_X: [80]u8 = [_]u8{'a'} ** 79 ++ [_]u8{'X'};
+const a79_nul: [80]u8 = [_]u8{'a'} ** 79 ++ [_]u8{0};
 
 // ---------------------------------------------------------------------------
 // Group A — ASCII control and line discipline.
@@ -287,6 +295,60 @@ const wrap_cases = [_]Case{
             .{ .row = 1, .col = 0, .base = 0x4F60 },
             .{ .row = 1, .col = 1, .base = ' ', .cont = 1 },
         },
+    },
+    // ---- M80c (#1714): autowrap (?7). On by default (the rows above pin
+    // that); under ?7l a write at the last column stays put and the next
+    // write replaces it — there is no pending wrap left to fire.
+    .{
+        .name = "?7l: writes at the last column replace it, never wrap",
+        .input = "\x1b[?7l" ++ &a80 ++ "XXX",
+        .lines = &.{&a79_X},
+        .cursor = .{ 0, 79 },
+        .used = 1,
+    },
+    .{
+        // A wide rune that cannot fit at the right margin is CLIPPED to
+        // one cell in the last column (its right half is lost) — pinned.
+        .name = "?7l: a wide rune at the last column is clipped to one cell",
+        .input = "\x1b[?7l" ++ &a79 ++ "\xe4\xbd\xa0",
+        .lines = &.{&a79_nul},
+        .cursor = .{ 0, 79 },
+        .used = 1,
+        .cells = &.{.{ .row = 0, .col = 79, .base = 0x4F60, .cont = 0 }},
+    },
+    .{
+        // A pending wrap set under ?7h does not fire after ?7l.
+        .name = "?7l defuses a pending wrap",
+        .input = &a80 ++ "\x1b[?7l" ++ "X",
+        .lines = &.{&a79_X},
+        .cursor = .{ 0, 79 },
+        .used = 1,
+    },
+    .{
+        .name = "?7h restores the wrap",
+        .input = "\x1b[?7l\x1b[?7h" ++ &a80 ++ "X",
+        .lines = &.{ &a80, "X" },
+        .cursor = .{ 1, 1 },
+        .used = 2,
+    },
+    .{
+        // Autowrap is a shared terminal-mode bit (DECTCEM's pattern): it
+        // survives the alternate-screen swap.
+        .name = "?7l survives the alternate-screen swap",
+        .input = "\x1b[?7l\x1b[?1049h" ++ &a80 ++ "X",
+        .lines = &.{&a79_X},
+        .cursor = .{ 0, 79 },
+        .used = 1,
+        .alt = true,
+    },
+    .{
+        // Wrap at the region's bottom margin scrolls the REGION, exactly
+        // like LF at that row.
+        .name = "a wrap at the bottom margin scrolls the region",
+        .input = "A\r\nB\r\nC\x1b[2;3r\x1b[3;1H" ++ &a80 ++ "X",
+        .lines = &.{ "A", &a80, "X" },
+        .cursor = .{ 2, 1 },
+        .used = 3,
     },
 };
 
@@ -897,6 +959,118 @@ const csi_cases = [_]Case{
         .cursor = .{ 0, 2 },
         .used = 1,
     },
+    // ---- M80c (#1714): DECSTBM scrolling regions and origin mode (?6;
+    // autowrap rows live in the wrap group). The region rows use [1,2]
+    // (0-based rows 1..2) over a four-line grid: the rows OUTSIDE the
+    // region are the witnesses. DECSTBM homes the cursor (to the region
+    // home under origin mode); invalid params are consumed and ignored.
+    .{
+        .name = "DECSTBM sets the region and homes the cursor",
+        .input = "AA\r\nBB\r\nCC\r\nDD\x1b[2;3r",
+        .lines = &.{ "AA", "BB", "CC", "DD" },
+        .cursor = .{ 0, 0 },
+        .used = 4,
+    },
+    .{
+        .name = "DECSTBM with inverted or out-of-range params is ignored",
+        .input = "HELLO\x1b[1;3H\x1b[5;3r",
+        .lines = &.{"HELLO"},
+        .cursor = .{ 0, 2 },
+    },
+    .{
+        .name = "zero and missing DECSTBM params default to the full grid",
+        .input = "HELLO\x1b[1;3H\x1b[0;0r",
+        .lines = &.{"HELLO"},
+        .cursor = .{ 0, 0 },
+    },
+    .{
+        // LF at the bottom MARGIN scrolls the region — the rows outside
+        // it (header and footer) do not move.
+        .name = "LF at the bottom margin scrolls only the region",
+        .input = "A\r\nB\r\nC\r\nD\x1b[2;3r\x1b[3;1H\nX",
+        .lines = &.{ "A", "C", "X", "D" },
+        .cursor = .{ 2, 1 },
+        .used = 4,
+    },
+    .{
+        // At the screen's bottom edge OUTSIDE the region nothing moves —
+        // no scroll, no row change (pinned).
+        .name = "LF at the screen bottom outside the region does nothing",
+        .input = "\x1b[2;3r\x1b[128;1H\nX",
+        .lines = &.{""},
+        .cursor = .{ 127, 1 },
+        .used = 128,
+        .cells = &.{.{ .row = 127, .col = 0, .base = 'X' }},
+    },
+    .{
+        .name = "SU scrolls only the region and never touches the cursor",
+        .input = "A\r\nB\r\nC\r\nD\x1b[2;3r\x1b[2S",
+        .lines = &.{ "A", "", "", "D" },
+        .cursor = .{ 0, 0 },
+        .used = 4,
+    },
+    .{
+        // IL pushes rows past the region's bottom edge — the footer
+        // below it survives (and the cursor takes the left margin).
+        .name = "IL inserts a blank line inside the region and stops at its edge",
+        .input = "A\r\nB\r\nC\r\nD\x1b[2;3r\x1b[2;1H\x1b[L",
+        .lines = &.{ "A", "", "B", "D" },
+        .cursor = .{ 1, 0 },
+        .used = 4,
+    },
+    .{
+        // xterm: IL/DL act only inside the scrolling region — outside it
+        // the sequence is consumed and the cursor stays put.
+        .name = "IL outside the region is a no-op and leaves the cursor",
+        .input = "A\r\nB\r\nC\r\nD\x1b[2;3r\x1b[4;5H\x1b[L",
+        .lines = &.{ "A", "B", "C", "D" },
+        .cursor = .{ 3, 4 },
+        .used = 4,
+    },
+    .{
+        .name = "DL deletes a line inside the region and leaves the footer",
+        .input = "A\r\nB\r\nC\r\nD\x1b[2;3r\x1b[2;1H\x1b[M",
+        .lines = &.{ "A", "C", "", "D" },
+        .cursor = .{ 1, 0 },
+        .used = 4,
+    },
+    // ---- M80c: origin mode (?6) — addressing relative to the region,
+    // clamped inside it, and every set/reset homes the cursor.
+    .{
+        .name = "?6h homes to the region top and makes CUP region-relative",
+        .input = "A\r\nB\r\nC\r\nD\x1b[2;3r\x1b[?6h\x1b[1;1HX",
+        .lines = &.{ "A", "X", "C", "D" },
+        .cursor = .{ 1, 1 },
+        .used = 4,
+    },
+    .{
+        .name = "CUP clamps at the region bottom under origin mode",
+        .input = "\x1b[2;3r\x1b[?6h\x1b[9;1H",
+        .cursor = .{ 2, 0 },
+        .used = 3,
+    },
+    .{
+        .name = "?6l homes to the screen top",
+        .input = "\x1b[2;3r\x1b[?6h\x1b[?6l",
+        .cursor = .{ 0, 0 },
+    },
+    .{
+        // Without ?6 the region does not constrain addressing at all.
+        .name = "without origin mode CUP is screen-absolute outside the region",
+        .input = "A\r\nB\r\nC\r\nD\x1b[2;3r\x1b[4;1H",
+        .cursor = .{ 3, 0 },
+        .used = 4,
+    },
+    .{
+        // The region is per screen (the M80d tab-table pattern): the
+        // primary's survives the alternate round trip while the alt
+        // screen carries its own.
+        .name = "the primary region survives the alternate round trip",
+        .input = "A\r\nB\r\nC\r\nD\x1b[2;3r\x1b[?1049h\x1b[3;4r\x1b[?1049l\x1b[3;1H\nX",
+        .lines = &.{ "A", "C", "X", "D" },
+        .cursor = .{ 2, 1 },
+        .used = 4,
+    },
 };
 
 test "terminal corpus: CSI cursor positioning and erase" {
@@ -1235,6 +1409,37 @@ const esc_cases = [_]Case{
         .input = "\x1b[!pX",
         .lines = &.{"X"},
         .cursor = .{ 0, 1 },
+    },
+    // ---- M80c (#1714): IND/RI at the region margins and the soft-reset
+    // hook (region + ?6/?7 defaults; the grid, scrollback and cursor stay
+    // M80e's contract).
+    .{
+        .name = "IND at the bottom margin scrolls the region only",
+        .input = "A\r\nB\r\nC\r\nD\x1b[2;3r\x1b[3;1H\x1bDX",
+        .lines = &.{ "A", "C", "X", "D" },
+        .cursor = .{ 2, 1 },
+        .used = 4,
+    },
+    .{
+        .name = "RI at the top margin scrolls the region down only",
+        .input = "A\r\nB\r\nC\r\nD\x1b[2;3r\x1b[2;1H\x1bMX",
+        .lines = &.{ "A", "X", "B", "D" },
+        .cursor = .{ 1, 1 },
+        .used = 4,
+    },
+    .{
+        .name = "RI at the screen top outside the region does nothing",
+        .input = "A\r\nB\x1b[2;3r\x1b[1;1H\x1bMX",
+        .lines = &.{ "X", "B" },
+        .cursor = .{ 0, 1 },
+        .used = 2,
+    },
+    .{
+        .name = "soft reset restores the full region and the mode defaults",
+        .input = "A\r\nB\r\nC\x1b[2;3r\x1b[3;1H\x1b[!p\nX",
+        .lines = &.{ "A", "B", "C", "X" },
+        .cursor = .{ 3, 1 },
+        .used = 4,
     },
 };
 
@@ -1604,7 +1809,7 @@ fn soupChunk(rng: *SoupRng, buf: *[64]u8) []const u8 {
             }
         }
     }
-    const finals = "mHfJKABCDEFGdb@PXL" ++ "MSTnc" ++ "Z~ghiovwxyz";
+    const finals = "mHfJKABCDEFGdb@PXLr" ++ "MSTnc" ++ "Z~ghiovwxyz";
     buf[n] = finals[rng.pick(finals.len)];
     n += 1;
     return buf[0..n];
@@ -1621,6 +1826,9 @@ fn soupInvariants(s: *const t.Screen) !void {
     try std.testing.expect(s.viewOffset() < s.lineCount());
     try std.testing.expect(s.hist_count <= t.history_lines);
     try std.testing.expect(s.hist_start < t.history_lines);
+    // A DECSTBM can never leave an invalid region behind (M80c).
+    try std.testing.expect(s.region.top < s.region.bot and s.region.bot < t.grid_lines);
+    try std.testing.expect(s.alt_region.top < s.alt_region.bot and s.alt_region.bot < t.grid_lines);
     for (0..t.grid_lines) |r| {
         try std.testing.expect(s.lens[r] <= s.cols);
         if (r >= s.used) try std.testing.expect(s.lens[r] == 0);

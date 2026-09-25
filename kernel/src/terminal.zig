@@ -329,6 +329,16 @@ fn histOf(s: *const Screen) ?*HistoryBank {
     return null;
 }
 
+/// M80c (#1714): a DECSTBM scrolling region — 0-based inclusive row
+/// bounds, default the whole grid. Per screen (the M80d tab-table
+/// pattern): `alt_region` is selected by `alt_active` and reset on
+/// alternate entry, so the primary's region survives the alternate
+/// round trip (pinned by the corpus).
+pub const Region = struct {
+    top: usize = 0,
+    bot: usize = grid_lines - 1,
+};
+
 pub const Screen = struct {
     cells: [grid_lines][grid_cols]Cell = [_][grid_cols]Cell{[_]Cell{empty_cell} ** grid_cols} ** grid_lines,
     styles: [grid_lines][grid_cols]CellStyle = [_][grid_cols]CellStyle{[_]CellStyle{default_cell_style} ** grid_cols} ** grid_lines,
@@ -403,6 +413,19 @@ pub const Screen = struct {
     /// primary table unchanged.
     tab_stops: [2]u64 = default_tab_stops,
     alt_tab_stops: [2]u64 = default_tab_stops,
+    /// M80c (#1714): DECSTBM scrolling region — per screen, selected by
+    /// `alt_active` like the tab tables.
+    region: Region = .{},
+    alt_region: Region = .{},
+    /// M80c: DECSET ?6 (DECOM, origin mode) — cursor addressing is
+    /// relative to the region and clamps inside it; every set/reset homes
+    /// the cursor (region home / screen home). Terminal-mode bit shared
+    /// across screens, like DECTCEM (pinned).
+    origin: bool = false,
+    /// M80c: DECSET ?7 (DECAWM, autowrap) — on by default (the grid has
+    /// always wrapped unconditionally). Under ?7l a write at the last
+    /// column stays put and the next write replaces it. Shared mode bit.
+    autowrap: bool = true,
     /// Parser state: 0 normal, 1 ESC, 2 CSI, 3 ESC character-set final.
     esc_state: u8 = 0,
     esc_charset_slot: u8 = 0,
@@ -518,6 +541,12 @@ pub const Screen = struct {
         self.charset_g1 = .ascii;
         self.charset_active = 0;
         self.keypad_application = false;
+        // M80c (#1714): the region, origin mode and autowrap are
+        // parser-visible modes too — full grid, off, on (pinned).
+        self.region = .{};
+        self.alt_region = .{};
+        self.origin = false;
+        self.autowrap = true;
     }
 
     /// M80e: RIS is a full grid reset. The effective window width belongs to
@@ -626,9 +655,17 @@ pub const Screen = struct {
     }
 
     /// M80e: IND moves down without the carriage return performed by LF.
-    /// At the bottom edge it scrolls through history exactly like `newline`.
+    /// At the bottom edge it scrolls through history exactly like
+    /// `newline`. M80c: "the bottom edge" is the region's bottom MARGIN —
+    /// the region scrolls there, mid-screen or not; outside the region,
+    /// at the screen's bottom edge, nothing moves (pinned).
     fn index(self: *Screen) void {
         self.cancelPendingWrap();
+        const reg = self.activeRegionConst();
+        if (self.cur == reg.bot) {
+            self.scrollAtBottomMargin();
+            return;
+        }
         if (self.cur + 1 < grid_lines) {
             self.cur += 1;
             if (self.cur >= self.used) {
@@ -636,24 +673,22 @@ pub const Screen = struct {
                 self.used = self.cur + 1;
                 self.noteTailGrowth();
             }
-            return;
         }
-        self.pushHistory();
-        var row: usize = 0;
-        while (row + 1 < grid_lines) : (row += 1) self.copyRow(row + 1, row);
-        self.clearLine(grid_lines - 1);
-        self.used = grid_lines;
-        self.noteTailGrowth();
     }
 
     /// M80e: RI is the reverse of IND, including the top-edge scroll.
+    /// M80c: the top edge is the region's top MARGIN (region scroll down);
+    /// outside the region, at the screen's top edge, nothing moves.
     fn reverseIndex(self: *Screen) void {
         self.cancelPendingWrap();
-        if (self.cur > 0) {
-            self.cur -= 1;
+        const reg = self.activeRegionConst();
+        if (self.cur == reg.top) {
+            self.scrollDown(1);
             return;
         }
-        self.scrollDown(1);
+        if (self.cur > 0) {
+            self.cur -= 1;
+        }
     }
 
     fn nextLine(self: *Screen) void {
@@ -739,35 +774,73 @@ pub const Screen = struct {
         self.lens[i] = 0;
     }
 
+    /// M80c: the active screen's scrolling region (per screen — see
+    /// `Region`).
+    fn activeRegion(self: *Screen) *Region {
+        return if (self.alt_active) &self.alt_region else &self.region;
+    }
+
+    fn activeRegionConst(self: *const Screen) *const Region {
+        return if (self.alt_active) &self.alt_region else &self.region;
+    }
+
+    /// M80c: scroll the region one row, `k` times — pure row work (`used`
+    /// and the view are the callers' business). Up: the top row leaves —
+    /// into the history ring ONLY when the region starts at the screen's
+    /// top edge (a mid-screen region feeds no scrollback: its evicted rows
+    /// never leave the screen) — and the bottom row blanks. Down: blank
+    /// rows enter at the top and rows past the region's bottom edge are
+    /// dropped (no scrollback for the bottom edge).
+    fn scrollRegionRows(self: *Screen, up: bool, k: usize) void {
+        const reg = self.activeRegionConst().*;
+        var sc: usize = 0;
+        while (sc < k) : (sc += 1) {
+            if (up) {
+                if (reg.top == 0) self.pushHistory();
+                var i: usize = reg.top;
+                while (i < reg.bot) : (i += 1) self.copyRow(i + 1, i);
+                self.clearLine(reg.bot);
+            } else {
+                var i: usize = reg.bot;
+                while (i > reg.top) : (i -= 1) self.copyRow(i - 1, i);
+                self.clearLine(reg.top);
+            }
+        }
+    }
+
+    /// M80c: LF/IND at the bottom MARGIN scroll the region up one row.
+    /// The `used` band follows the region's content (rows above and below
+    /// the region are untouched) and always covers the cursor row — the
+    /// margin row is the write target (the old whole-grid scroll set
+    /// `used = grid_lines` for exactly this reason).
+    fn scrollAtBottomMargin(self: *Screen) void {
+        self.scrollRegionRows(true, 1);
+        const reg = self.activeRegionConst();
+        if (self.used > reg.top) {
+            const below: usize = if (self.used > reg.bot + 1) self.used else 0;
+            const moved = @min(self.used, reg.bot + 1) - reg.top;
+            const tail_in = reg.top + (moved -| 1);
+            self.used = @max(below, @max(1, tail_in));
+        }
+        self.used = @max(self.used, self.cur + 1);
+        self.noteTailGrowth();
+    }
+
     fn newline(self: *Screen) void {
+        // M80c: LF at the bottom MARGIN scrolls the region; at the
+        // screen's bottom edge outside the region nothing moves (pinned).
+        const reg = self.activeRegionConst();
+        if (self.cur == reg.bot) {
+            self.scrollAtBottomMargin();
+            self.col = 0;
+            return;
+        }
         if (self.cur + 1 < grid_lines) {
             self.cur += 1;
             const grew = (self.cur >= self.used);
             if (grew) self.used = self.cur + 1;
             self.clearLine(self.cur);
             if (grew) self.noteTailGrowth();
-        } else {
-            // Scroll up one line. M73k (#1637): the evicted oldest row
-            // enters the history ring — pushed BEFORE the shift, which
-            // would otherwise overwrite row 0 and lose it (normal screen
-            // only — history belongs to the primary screen, pinned by
-            // test) — and a scrolled-back view PINS instead of snapping.
-            self.pushHistory();
-            var i: usize = 0;
-            while (i + 1 < grid_lines) : (i += 1) {
-                self.cells[i] = self.cells[i + 1];
-                self.styles[i] = self.styles[i + 1];
-                self.lens[i] = self.lens[i + 1];
-                // M73h fixup: the truecolour side arrays ride with their
-                // cells — otherwise a scroll repaints surviving rows
-                // with the wrong cell's rgb.
-                self.fg_rgb[i] = self.fg_rgb[i + 1];
-                self.bg_rgb[i] = self.bg_rgb[i + 1];
-            }
-            self.clearLine(grid_lines - 1);
-            self.cur = grid_lines - 1;
-            self.used = grid_lines;
-            self.noteTailGrowth();
         }
         self.col = 0;
     }
@@ -896,7 +969,7 @@ pub const Screen = struct {
     /// which restores a stored overlay verbatim. A write that would split
     /// a wide pair repairs the pair first.
     fn putRune(self: *Screen, cp: u21, mark: u21, style: CellStyle) void {
-        const width: usize = text.char_width(cp);
+        var width: usize = text.char_width(cp);
         if (width == 0) {
             if (text.is_zero_width_ignorable(cp)) return; // no cell, cursor unchanged
             self.materializeForWrite();
@@ -916,9 +989,21 @@ pub const Screen = struct {
         }
         self.materializeForWrite();
         if (width == 2 and self.col + 2 > self.cols) {
-            self.newline();
+            // M80c: a wide pair that does not fit at the right margin
+            // wraps under autowrap (?7h, the default); under ?7l it is
+            // CLIPPED to a single cell in the last column (pinned).
+            if (self.autowrap) {
+                self.newline();
+            } else {
+                self.col = self.cols - 1;
+                width = 1;
+            }
         } else if (self.col >= self.cols) {
-            self.newline();
+            // M80c: a pending wrap fires only under autowrap. Under ?7l a
+            // write at the last column stays put and the next write
+            // replaces it — a pending wrap set under ?7h is defused (all
+            // pinned).
+            if (self.autowrap) self.newline() else self.col = self.cols - 1;
         }
         // Pair repair: a continuation cell we overwrite loses its base, and
         // a continuation cell just past the written range belonged to a
@@ -948,7 +1033,8 @@ pub const Screen = struct {
         }
         const end = self.col + width;
         if (end > self.lens[self.cur]) self.lens[self.cur] = end;
-        self.col = end;
+        // M80c: without autowrap the cursor never leaves the last column.
+        self.col = if (self.autowrap) end else @min(end, self.cols - 1);
     }
 
     fn setForeground(self: *Screen, colour: colour_slot) void {
@@ -1200,23 +1286,29 @@ pub const Screen = struct {
     /// changelog: "modify IL/DL to set cursor to first column on row").
     /// Below the used tail there is nothing to slide: a no-op.
     fn insertLines(self: *Screen, n: u16) void {
+        // M80c: IL/DL act only inside the scrolling region (xterm) —
+        // outside it the sequence is consumed and the cursor stays put.
+        const reg = self.activeRegionConst();
+        if (self.cur < reg.top or self.cur > reg.bot) return;
         if (self.cur >= self.used) return;
         self.prepareRowSlide();
         const before = self.lineCount();
         const cnt: usize = n;
-        if (self.cur + cnt < grid_lines) {
-            var i: usize = grid_lines;
+        const win = reg.bot + 1; // the region's exclusive bottom bound
+        if (self.cur + cnt < win) {
+            var i: usize = win;
             while (i > self.cur + cnt) {
                 i -= 1;
                 self.copyRow(i - cnt, i);
             }
         }
         var j: usize = self.cur;
-        while (j < @min(self.cur + cnt, grid_lines)) : (j += 1) self.clearLine(j);
+        while (j < @min(self.cur + cnt, win)) : (j += 1) self.clearLine(j);
         self.col = 0;
-        const fit = grid_lines -| (self.cur + cnt);
-        const keep = @min(self.used - self.cur, fit);
-        self.used = @max(1, if (keep == 0) self.cur else self.cur + cnt + keep);
+        const fit = win -| (self.cur + cnt);
+        const keep = @min(@min(self.used, win) - self.cur, fit);
+        const below: usize = if (self.used > win) self.used else 0;
+        self.used = @max(below, @max(1, if (keep == 0) self.cur else self.cur + cnt + keep));
         self.noteLineCountChange(before);
     }
 
@@ -1224,16 +1316,21 @@ pub const Screen = struct {
     /// below slide up and the vacated rows at the bottom blank. Cursor
     /// to the left margin (xterm IL/DL). Below the used tail: a no-op.
     fn deleteLines(self: *Screen, n: u16) void {
+        // M80c: see insertLines — inside the region only.
+        const reg = self.activeRegionConst();
+        if (self.cur < reg.top or self.cur > reg.bot) return;
         if (self.cur >= self.used) return;
         self.prepareRowSlide();
         const before = self.lineCount();
-        const m = @min(@as(usize, n), grid_lines - self.cur);
+        const win = reg.bot + 1;
+        const m = @min(@as(usize, n), win - self.cur);
         var i: usize = self.cur;
-        while (i + m < grid_lines) : (i += 1) self.copyRow(i + m, i);
-        var j: usize = grid_lines - m;
-        while (j < grid_lines) : (j += 1) self.clearLine(j);
+        while (i + m < win) : (i += 1) self.copyRow(i + m, i);
+        var j: usize = win - m;
+        while (j < win) : (j += 1) self.clearLine(j);
         self.col = 0;
-        self.used = @max(1, @max(self.cur, self.used -| m));
+        const below: usize = if (self.used > win) self.used else 0;
+        self.used = @max(below, @max(1, @max(self.cur, @min(self.used, win) -| m)));
         self.noteLineCountChange(before);
     }
 
@@ -1248,15 +1345,15 @@ pub const Screen = struct {
     fn scrollUp(self: *Screen, n: u16) void {
         self.prepareRowSlide();
         const before = self.lineCount();
-        const k = @min(@as(usize, n), self.used + history_lines);
-        var sc: usize = 0;
-        while (sc < k) : (sc += 1) {
-            self.pushHistory();
-            var i: usize = 0;
-            while (i + 1 < grid_lines) : (i += 1) self.copyRow(i + 1, i);
-            self.clearLine(grid_lines - 1);
+        const reg = self.activeRegionConst().*;
+        const k = @min(@as(usize, n), (reg.bot - reg.top + 1) + history_lines);
+        self.scrollRegionRows(true, k);
+        if (self.used > reg.top) {
+            const below: usize = if (self.used > reg.bot + 1) self.used else 0;
+            const moved = @min(self.used, reg.bot + 1) - reg.top;
+            const tail_in = reg.top + (moved -| k);
+            self.used = @max(below, @max(1, tail_in));
         }
-        self.used = @max(1, self.used -| k);
         self.noteLineCountChange(before);
     }
 
@@ -1267,22 +1364,50 @@ pub const Screen = struct {
     fn scrollDown(self: *Screen, n: u16) void {
         self.prepareRowSlide();
         const before = self.lineCount();
+        const reg = self.activeRegionConst().*;
         const k = @min(@as(usize, n), grid_lines);
-        var i: usize = grid_lines;
-        while (i > k) {
-            i -= 1;
-            self.copyRow(i - k, i);
+        self.scrollRegionRows(false, k);
+        if (self.used > reg.top) {
+            const below: usize = if (self.used > reg.bot + 1) self.used else 0;
+            const moved = @min(self.used, reg.bot + 1) - reg.top;
+            const fit = (reg.bot - reg.top + 1) -| k;
+            const keep = @min(moved, fit);
+            self.used = @max(below, @max(1, if (keep == 0) reg.top else reg.top + k + keep));
         }
-        var j: usize = 0;
-        while (j < k) : (j += 1) self.clearLine(j);
-        const fit = grid_lines -| k;
-        const keep = @min(self.used, fit);
-        self.used = if (keep == 0) 1 else k + keep;
         self.noteLineCountChange(before);
     }
 
+    /// M80c (#1714): CSI r (DECSTBM) — set the scrolling region. Valid:
+    /// 1 <= top < bot <= grid rows; a zero/missing param defaults to 1 /
+    /// the last row (so `CSI r` is the full-screen reset). Anything else
+    /// is consumed and leaves the region unchanged (pinned). Setting the
+    /// region homes the cursor — to the region home under origin mode.
+    fn setScrollRegion(self: *Screen, top1: u16, bot1: u16) void {
+        if (top1 >= bot1 or bot1 > grid_lines) return;
+        const reg = self.activeRegion();
+        reg.top = top1 - 1;
+        reg.bot = bot1 - 1;
+        self.cur = if (self.origin) reg.top else 0;
+        self.col = 0;
+    }
+
+    /// M80c: DECSET ?6 (DECOM, origin mode) — every set/reset homes the
+    /// cursor (region home / screen home, DEC's rule).
+    fn setOrigin(self: *Screen, on: bool) void {
+        self.origin = on;
+        self.cur = if (on) self.activeRegionConst().top else 0;
+        self.col = 0;
+    }
+
     fn moveCursor(self: *Screen, row_one_based: u16, col_one_based: u16) void {
-        const row = @min(@as(usize, row_one_based - 1), grid_lines - 1);
+        // M80c: under origin mode (?6) row addresses are region-relative
+        // and clamp inside the region; otherwise they are screen-absolute
+        // and the cursor may leave the region (pinned).
+        const reg = self.activeRegionConst();
+        const row = if (self.origin)
+            @min(reg.top + @as(usize, row_one_based - 1), reg.bot)
+        else
+            @min(@as(usize, row_one_based - 1), grid_lines - 1);
         const column = @min(@as(usize, col_one_based - 1), self.cols - 1);
         while (self.used <= row) {
             self.clearLine(self.used);
@@ -1334,6 +1459,7 @@ pub const Screen = struct {
             // do not need a physical swap: reset the alternate table when
             // it is armed while leaving the primary table untouched.
             self.alt_tab_stops = default_tab_stops;
+            self.alt_region = .{}; // M80c: the alt screen gets a fresh region
             self.clearScreen();
             self.style = default_cell_style;
             self.fg_rgb_cur = empty_rgb;
@@ -1456,6 +1582,9 @@ pub const Screen = struct {
             if (p0 == 2004) {
                 self.bracketed_paste = (final == 'h');
             }
+            // M80c (#1714): DECSET ?6 (origin mode) and ?7 (autowrap).
+            if (p0 == 6) self.setOrigin(final == 'h');
+            if (p0 == 7) self.autowrap = (final == 'h');
             // M73i (#1635): mouse tracking modes — consumed, never painted.
             if (p0 == 1000) self.mouse_1000 = (final == 'h');
             if (p0 == 1002) self.mouse_1002 = (final == 'h');
@@ -1522,6 +1651,9 @@ pub const Screen = struct {
             },
             'I' => self.moveTabStops(self.csiParam(0, 1), true),
             'Z' => self.moveTabStops(self.csiParam(0, 1), false),
+            // M80c (#1714): DECSTBM — the scrolling region. Params read
+            // like CUP (zero/missing = 1 / the last row).
+            'r' => self.setScrollRegion(self.csiParam(0, 1), self.csiParam(1, grid_lines)),
             else => {},
         }
     }
@@ -4710,6 +4842,30 @@ test "terminal: IL/DL/SU/SD pin a scrolled-back view to its bottom (#1713)" {
         s.feed(seq);
         try std.testing.expectEqual(bottom, s.lineCount() - s.viewOffset());
     }
+}
+
+test "terminal: a mid-screen region scroll never feeds history (#1714)" {
+    for (&terminals) |*t| t.reset();
+    for (&screens) |*sc| sc.reset();
+    const h = create(7) orelse return error.TestUnexpectedResult;
+    const t = get(h).?;
+    try std.testing.expect(t.attachWindow(7));
+    const s = screenForWindow(7).?;
+    var i: usize = 0;
+    while (i < 40) : (i += 1) {
+        var b: [16]u8 = undefined;
+        const row = std.fmt.bufPrint(&b, "R{d:0>2}\n", .{i}) catch unreachable;
+        s.feed(row);
+    }
+    const hist_before = s.hist_count;
+    try std.testing.expectEqual(@as(usize, 0), hist_before);
+    // A region whose top is NOT the screen top feeds no scrollback — its
+    // evicted rows never leave the screen.
+    s.feed("\x1b[10;20r\x1b[3S");
+    try std.testing.expectEqual(hist_before, s.hist_count);
+    // The full-screen region keeps feeding it, exactly like an LF scroll.
+    s.feed("\x1b[r\x1b[3S");
+    try std.testing.expect(s.hist_count > hist_before);
 }
 
 test "terminal: selection copies across lines and normalizes direction" {
