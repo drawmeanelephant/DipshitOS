@@ -218,6 +218,14 @@ pub const empty_rgb: Rgb = .{};
 
 pub const default_cell_style: CellStyle = .{};
 
+/// M80e (#1722): the bounded character-set vocabulary needed by the
+/// classic DEC line-drawing designators. The parser stores the designation;
+/// `putRune` translates only ASCII input while the selected set is active.
+pub const Charset = enum(u8) {
+    ascii = 0,
+    line_drawing = 1,
+};
+
 /// The palette index of a cell's foreground, or null for default AND for
 /// truecolour cells (callers wanting RGB use `Screen.rgbAt`).
 pub fn styleForeground(style: CellStyle) ?u8 {
@@ -342,6 +350,38 @@ pub const Screen = struct {
     alt_view: usize = 0,
     alt_style: CellStyle = default_cell_style,
     alt_active: bool = false,
+    /// M80e (#1722): one DECSC/DECRC slot per screen. The active slot is
+    /// swapped with the alternate screen; ESC 7 saves cursor, rendition,
+    /// and character-set state, while ESC 8 restores it.
+    saved_cur: usize = 0,
+    saved_col: usize = 0,
+    saved_style: CellStyle = default_cell_style,
+    saved_fg_rgb: Rgb = empty_rgb,
+    saved_bg_rgb: Rgb = empty_rgb,
+    saved_charset_g0: Charset = .ascii,
+    saved_charset_g1: Charset = .ascii,
+    saved_charset_active: u8 = 0,
+    saved_valid: bool = false,
+    alt_saved_cur: usize = 0,
+    alt_saved_col: usize = 0,
+    alt_saved_style: CellStyle = default_cell_style,
+    alt_saved_fg_rgb: Rgb = empty_rgb,
+    alt_saved_bg_rgb: Rgb = empty_rgb,
+    alt_saved_charset_g0: Charset = .ascii,
+    alt_saved_charset_g1: Charset = .ascii,
+    alt_saved_charset_active: u8 = 0,
+    alt_saved_valid: bool = false,
+    /// M80e: the active G0/G1 character sets. G0 is selected with ESC (,
+    /// G1 with ESC ), and SO/SI switch the active set without painting.
+    charset_g0: Charset = .ascii,
+    charset_g1: Charset = .ascii,
+    charset_active: u8 = 0,
+    alt_charset_g0: Charset = .ascii,
+    alt_charset_g1: Charset = .ascii,
+    alt_charset_active: u8 = 0,
+    /// M80e: DECKPAM/DECKPNM is application-visible state only; the grid
+    /// never invents keypad glyphs. It is shared across primary/alternate.
+    keypad_application: bool = false,
     /// M73h (#1634): truecolour channels per cell, primary and alternate.
     /// Written by `putRune` from the current rendition state and read ONLY
     /// for cells whose slot marks `rgb_colour`; swapped and reflowed with
@@ -363,11 +403,13 @@ pub const Screen = struct {
     /// primary table unchanged.
     tab_stops: [2]u64 = default_tab_stops,
     alt_tab_stops: [2]u64 = default_tab_stops,
-    /// CSI state: 0 normal, 1 ESC, 2 CSI.
+    /// Parser state: 0 normal, 1 ESC, 2 CSI, 3 ESC character-set final.
     esc_state: u8 = 0,
+    esc_charset_slot: u8 = 0,
     csi_params: [16]u16 = [_]u16{0} ** 16,
     csi_count: usize = 0,
     csi_private: bool = false,
+    csi_intermediate: u8 = 0,
     /// M80a (#1712): REP (CSI b)'s "last printed rune" — the placement is
     /// repeated VERBATIM (rune, overlay mark and rendition). Stream state
     /// like the CSI parser's own: not swapped with the alternate screen,
@@ -455,6 +497,172 @@ pub const Screen = struct {
 
     pub fn reset(self: *Screen) void {
         self.* = .{};
+    }
+
+    /// M80e: soft reset (CSI ! p) resets parser-visible modes and rendition
+    /// but deliberately leaves the grid, scrollback, and cursor untouched.
+    fn softReset(self: *Screen) void {
+        self.style = default_cell_style;
+        self.fg_rgb_cur = empty_rgb;
+        self.bg_rgb_cur = empty_rgb;
+        self.last_cp = 0;
+        self.last_mark = 0;
+        self.last_style = default_cell_style;
+        self.cursor_visible = true;
+        self.bracketed_paste = false;
+        self.mouse_1000 = false;
+        self.mouse_1002 = false;
+        self.mouse_1003 = false;
+        self.mouse_1006 = false;
+        self.charset_g0 = .ascii;
+        self.charset_g1 = .ascii;
+        self.charset_active = 0;
+        self.keypad_application = false;
+    }
+
+    /// M80e: RIS is a full grid reset. The effective window width belongs to
+    /// the front-end, not the escape sequence, so preserve it across the
+    /// state reset and re-mask the default tab table to that width.
+    fn hardReset(self: *Screen) void {
+        const cols = self.cols;
+        self.reset();
+        self.cols = cols;
+        self.maskTabStops();
+    }
+
+    fn clearSavedCursor(self: *Screen) void {
+        self.saved_cur = 0;
+        self.saved_col = 0;
+        self.saved_style = default_cell_style;
+        self.saved_fg_rgb = empty_rgb;
+        self.saved_bg_rgb = empty_rgb;
+        self.saved_charset_g0 = .ascii;
+        self.saved_charset_g1 = .ascii;
+        self.saved_charset_active = 0;
+        self.saved_valid = false;
+    }
+
+    fn saveCursor(self: *Screen) void {
+        self.saved_cur = self.cur;
+        self.saved_col = self.col;
+        self.saved_style = self.style;
+        self.saved_fg_rgb = self.fg_rgb_cur;
+        self.saved_bg_rgb = self.bg_rgb_cur;
+        self.saved_charset_g0 = self.charset_g0;
+        self.saved_charset_g1 = self.charset_g1;
+        self.saved_charset_active = self.charset_active;
+        self.saved_valid = true;
+    }
+
+    fn restoreCursor(self: *Screen) void {
+        if (!self.saved_valid) return;
+        self.cur = @min(self.saved_cur, grid_lines - 1);
+        // `cols` is a pending-wrap position when equal to the width, so do
+        // not clamp to cols-1 here; resize is the only operation that may
+        // make a saved column too wide.
+        self.col = @min(self.saved_col, self.cols);
+        self.style = self.saved_style;
+        self.fg_rgb_cur = self.saved_fg_rgb;
+        self.bg_rgb_cur = self.saved_bg_rgb;
+        self.charset_g0 = self.saved_charset_g0;
+        self.charset_g1 = self.saved_charset_g1;
+        self.charset_active = self.saved_charset_active;
+    }
+
+    fn setCharset(self: *Screen, slot: u8, final: u8) void {
+        const selected: Charset = switch (final) {
+            '0' => .line_drawing,
+            'B' => .ascii,
+            else => return,
+        };
+        switch (slot) {
+            0 => self.charset_g0 = selected,
+            1 => self.charset_g1 = selected,
+            else => {},
+        }
+    }
+
+    /// DEC Special Graphics translation for the bytes 0x5f..0x7e. The
+    /// complete table is small and keeps the grid's existing Unicode-cell
+    /// and font path; unsupported code points stay literal ASCII.
+    fn translateCharset(self: *const Screen, b: u8) u21 {
+        const selected = if (self.charset_active == 1) self.charset_g1 else self.charset_g0;
+        if (selected != .line_drawing or b < 0x5f or b > 0x7e) return b;
+        return switch (b) {
+            0x5f => 0x00a0,
+            0x60 => 0x25c6,
+            0x61 => 0x2592,
+            0x62 => 0x2409,
+            0x63 => 0x240c,
+            0x64 => 0x240d,
+            0x65 => 0x240a,
+            0x66 => 0x00b0,
+            0x67 => 0x00b1,
+            0x68 => 0x2424,
+            0x69 => 0x240b,
+            0x6a => 0x2518,
+            0x6b => 0x2510,
+            0x6c => 0x250c,
+            0x6d => 0x2514,
+            0x6e => 0x253c,
+            0x6f => 0x23ba,
+            0x70 => 0x23bb,
+            0x71 => 0x2500,
+            0x72 => 0x23bc,
+            0x73 => 0x23bd,
+            0x74 => 0x251c,
+            0x75 => 0x2524,
+            0x76 => 0x2534,
+            0x77 => 0x252c,
+            0x78 => 0x2502,
+            0x79 => 0x2264,
+            0x7a => 0x2265,
+            0x7b => 0x03c0,
+            0x7c => 0x2260,
+            0x7d => 0x00a3,
+            0x7e => 0x00b7,
+            else => b,
+        };
+    }
+
+    /// M80e: IND moves down without the carriage return performed by LF.
+    /// At the bottom edge it scrolls through history exactly like `newline`.
+    fn index(self: *Screen) void {
+        self.cancelPendingWrap();
+        if (self.cur + 1 < grid_lines) {
+            self.cur += 1;
+            if (self.cur >= self.used) {
+                self.clearLine(self.cur);
+                self.used = self.cur + 1;
+                self.noteTailGrowth();
+            }
+            return;
+        }
+        self.pushHistory();
+        var row: usize = 0;
+        while (row + 1 < grid_lines) : (row += 1) self.copyRow(row + 1, row);
+        self.clearLine(grid_lines - 1);
+        self.used = grid_lines;
+        self.noteTailGrowth();
+    }
+
+    /// M80e: RI is the reverse of IND, including the top-edge scroll.
+    fn reverseIndex(self: *Screen) void {
+        self.cancelPendingWrap();
+        if (self.cur > 0) {
+            self.cur -= 1;
+            return;
+        }
+        self.scrollDown(1);
+    }
+
+    fn nextLine(self: *Screen) void {
+        self.col = 0;
+        self.index();
+    }
+
+    pub fn keypadApplication(self: *const Screen) bool {
+        return self.keypad_application;
     }
 
     fn activeTabStops(self: *Screen) *[2]u64 {
@@ -776,11 +984,12 @@ pub const Screen = struct {
         self.csi_params = [_]u16{0} ** self.csi_params.len;
         self.csi_count = 1;
         self.csi_private = false;
+        self.csi_intermediate = 0;
     }
 
-    fn csiParam(self: *const Screen, index: usize, fallback: u16) u16 {
-        if (index >= self.csi_count) return fallback;
-        const value = self.csi_params[index];
+    fn csiParam(self: *const Screen, param_index: usize, fallback: u16) u16 {
+        if (param_index >= self.csi_count) return fallback;
+        const value = self.csi_params[param_index];
         return if (value == 0) fallback else value;
     }
 
@@ -1096,6 +1305,15 @@ pub const Screen = struct {
         std.mem.swap(usize, &self.col, &self.alt_col);
         std.mem.swap(usize, &self.view, &self.alt_view);
         std.mem.swap(CellStyle, &self.style, &self.alt_style);
+        std.mem.swap(usize, &self.saved_cur, &self.alt_saved_cur);
+        std.mem.swap(usize, &self.saved_col, &self.alt_saved_col);
+        std.mem.swap(CellStyle, &self.saved_style, &self.alt_saved_style);
+        std.mem.swap(Rgb, &self.saved_fg_rgb, &self.alt_saved_fg_rgb);
+        std.mem.swap(Rgb, &self.saved_bg_rgb, &self.alt_saved_bg_rgb);
+        std.mem.swap(Charset, &self.charset_g0, &self.alt_charset_g0);
+        std.mem.swap(Charset, &self.charset_g1, &self.alt_charset_g1);
+        std.mem.swap(u8, &self.charset_active, &self.alt_charset_active);
+        std.mem.swap(bool, &self.saved_valid, &self.alt_saved_valid);
         std.mem.swap([grid_lines][grid_cols]Rgb, &self.fg_rgb, &self.alt_fg_rgb);
         std.mem.swap([grid_lines][grid_cols]Rgb, &self.bg_rgb, &self.alt_bg_rgb);
         std.mem.swap(Rgb, &self.fg_rgb_cur, &self.alt_fg_rgb_cur);
@@ -1120,6 +1338,10 @@ pub const Screen = struct {
             self.style = default_cell_style;
             self.fg_rgb_cur = empty_rgb;
             self.bg_rgb_cur = empty_rgb;
+            self.clearSavedCursor();
+            self.charset_g0 = .ascii;
+            self.charset_g1 = .ascii;
+            self.charset_active = 0;
         }
     }
 
@@ -1203,6 +1425,12 @@ pub const Screen = struct {
 
     fn dispatchCsi(self: *Screen, final: u8) void {
         const p0 = self.csiParam(0, 0);
+        if (!self.csi_private and final == 'p' and self.csi_intermediate == '!' and
+            self.csi_count == 1 and p0 == 0)
+        {
+            self.softReset();
+            return;
+        }
         // M80f (#1723): replies are output-parser side effects. Keep them
         // bounded and ordered with other synthesised input; the session pump
         // drains this FIFO after every grid feed.
@@ -1353,14 +1581,32 @@ pub const Screen = struct {
             0 => {},
             1 => {
                 self.esc_state = 0;
-                if (b == '[') {
-                    self.esc_state = 2;
-                    self.resetCsi();
-                } else if (b == 'H') {
-                    // M80d: HTS sets a stop at the current column. This
-                    // minimal final arm is the seam M80e's larger ESC
-                    // dispatch will grow.
-                    self.setTabStop(self.col);
+                switch (b) {
+                    '[' => {
+                        self.esc_state = 2;
+                        self.resetCsi();
+                    },
+                    '7' => self.saveCursor(),
+                    '8' => self.restoreCursor(),
+                    'D' => self.index(),
+                    'M' => self.reverseIndex(),
+                    'E' => self.nextLine(),
+                    'c' => self.hardReset(),
+                    '=' => self.keypad_application = true,
+                    '>' => self.keypad_application = false,
+                    '(' => {
+                        self.esc_state = 3;
+                        self.esc_charset_slot = 0;
+                    },
+                    ')' => {
+                        self.esc_state = 3;
+                        self.esc_charset_slot = 1;
+                    },
+                    'H' => {
+                        // M80d: HTS sets a stop at the current column.
+                        self.setTabStop(self.col);
+                    },
+                    else => {},
                 }
                 return;
             },
@@ -1378,15 +1624,25 @@ pub const Screen = struct {
                     self.csi_private = true;
                     return;
                 }
-                if (b >= 0x20 and b <= 0x3f) return; // unsupported intermediates
+                if (b >= 0x20 and b <= 0x3f) {
+                    if (self.csi_intermediate == 0) self.csi_intermediate = b;
+                    return;
+                }
                 self.esc_state = 0;
                 self.dispatchCsi(b);
+                return;
+            },
+            3 => {
+                self.esc_state = 0;
+                self.setCharset(self.esc_charset_slot, b);
                 return;
             },
             else => self.esc_state = 0,
         }
         switch (b) {
             0x1b => self.esc_state = 1,
+            0x0e => self.charset_active = 1, // SO: invoke G1
+            0x0f => self.charset_active = 0, // SI: invoke G0
             '\n' => self.newline(),
             '\r' => self.col = 0,
             0x08 => {
@@ -1397,7 +1653,7 @@ pub const Screen = struct {
             else => {
                 if (b < 0x20 or b == 0x7f) return;
                 if (b < 0x80) {
-                    self.putRune(b, 0, self.style);
+                    self.putRune(self.translateCharset(b), 0, self.style);
                 } else {
                     self.utfStart(b);
                 }
@@ -3524,6 +3780,23 @@ test "terminal: alternate screen restores the primary grid and DECTCEM hides the
     try std.testing.expectEqualStrings("primary", s.line(0));
     s.feed("\x1b[?25h");
     try std.testing.expect(s.cursor_visible);
+}
+
+test "terminal: DECSC/DECRC preserves truecolor rendition" {
+    var s = Screen{};
+    s.feed("\x1b[38;2;1;2;3mA\x1b7\x1b[0m\x1b[38;2;4;5;6mB\x1b8C");
+    try std.testing.expectEqualStrings("AC", s.line(0));
+    const style = s.styleAt(0, 1);
+    try std.testing.expectEqual(rgb_colour, style.fg);
+    const rgb = s.rgbAt(0, 1);
+    try std.testing.expectEqual(@as(?Rgb, Rgb{ .r = 1, .g = 2, .b = 3 }), rgb.fg);
+}
+
+test "terminal: DECSC save slot survives an alternate-screen round trip" {
+    var s = Screen{};
+    s.feed("A\x1b7\x1b[?1049hB\x1b7\x1b[?1049l\x1b8C");
+    try std.testing.expectEqualStrings("AC", s.line(0));
+    try std.testing.expectEqual(@as(usize, 2), s.cursorCol());
 }
 
 test "terminal: DSR, CPR, and DA synthesize bounded input replies" {
