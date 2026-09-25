@@ -482,6 +482,56 @@ const csi_cases = [_]Case{
         .cursor = .{ 3, 0 },
         .used = 1,
     },
+    // ---- M80d (#1721): HTS/TBC and CHT/CBT tab-stop control. ----
+    .{
+        .name = "TAB keeps xterm's next-multiple-of-eight rule from every column",
+        .input = "abc\x1b[1;4H\tZ\x1b[1;9H\tY\x1b[1;10H\tX",
+        .lines = &.{"abc     Z       X"},
+        .cursor = .{ 0, 17 },
+        .used = 1,
+    },
+    .{
+        .name = "HTS adds a non-default stop honoured by the next TAB",
+        .input = "\x1b[1;13H\x1bH\x1b[1;10H\tZ",
+        .lines = &.{"            Z"},
+        .cursor = .{ 0, 13 },
+        .used = 1,
+    },
+    .{
+        .name = "TBC 0 clears the stop under the cursor",
+        .input = "\x1b[1;13H\x1bH\x1b[1;13H\x1b[0g\x1b[1;10H\tZ",
+        .lines = &.{"                Z"},
+        .cursor = .{ 0, 17 },
+        .used = 1,
+    },
+    .{
+        .name = "TBC 3 clears every stop and TAB clamps at the right margin",
+        .input = "\x1b[H\x1b[3g\tZ",
+        .lines = &.{(" " ** 79) ++ "Z"},
+        .cursor = .{ 0, 80 },
+        .used = 1,
+    },
+    .{
+        .name = "CHT advances by stop count and CBT retreats by stop count",
+        .input = "\x1b[2I\x1b[1;17H\x1bZ\x1b[1;9H\x1b[2Z",
+        .lines = &.{""},
+        .cursor = .{ 0, 0 },
+        .used = 1,
+    },
+    .{
+        .name = "CBT at column 0 clamps and never wraps",
+        .input = "\x1b[999Z\x1b[1;3H\tZ",
+        .lines = &.{"        Z"},
+        .cursor = .{ 0, 9 },
+        .used = 1,
+    },
+    .{
+        .name = "unknown TBC modes are consumed without moving",
+        .input = "\x1b[2g\x1b[1;5H\tZ",
+        .lines = &.{"        Z"},
+        .cursor = .{ 0, 9 },
+        .used = 1,
+    },
     // ---- M80a: REP (CSI b) repeats the last printed rune. ----
     .{
         .name = "REP (b) repeats the last printed rune n more times",
@@ -600,6 +650,25 @@ const csi_cases = [_]Case{
 
 test "terminal corpus: CSI cursor positioning and erase" {
     try runAll(&csi_cases);
+}
+
+test "terminal corpus: resize drops tab stops and does not restore them (#1721)" {
+    var s: t.Screen = .{};
+    s.feed("\x1b[1;13H\x1bH");
+    try std.testing.expectEqual(@as(usize, 10), s.setCols(10));
+    try std.testing.expectEqual(@as(usize, 80), s.setCols(80));
+    s.feed("\x1b[H\tZ");
+    try std.testing.expectEqualStrings("        Z", s.line(0));
+    try std.testing.expectEqual(@as(usize, 9), s.cursorCol());
+}
+
+test "terminal corpus: tab stops round-trip with the alternate screen (#1721)" {
+    var s: t.Screen = .{};
+    s.feed("\x1b[1;13H\x1bH\x1b[?1049h\x1b[3g");
+    s.feed("\x1b[?1049l\x1b[1;10H\tZ");
+    try std.testing.expectEqualStrings("            Z", s.line(0));
+    s.feed("\x1b[?1049h\x1b[1;3H\tX");
+    try std.testing.expectEqualStrings("        X", s.line(0));
 }
 
 // ---------------------------------------------------------------------------

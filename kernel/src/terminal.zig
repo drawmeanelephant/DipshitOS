@@ -97,6 +97,11 @@ pub const NetAuthScheme = enum(u8) {
 pub const grid_cols: usize = 80;
 pub const grid_lines: usize = 128;
 
+/// Default horizontal tab stops at columns 8, 16, ..., 72. Column 0 is
+/// deliberately absent, matching xterm and the terminal's historical
+/// `(col + 8) & ~7` TAB rule.
+const default_tab_stops: [2]u64 = .{ 0x0101010101010100, 0x0000000000000101 };
+
 /// A bounded character grid with scrollback for one window-bound terminal.
 /// Bytes fed from the output ring are laid out (CR/LF/BS/TAB, a minimal CSI
 /// clear/home), wrapping at `cols` and scrolling one line at a time. Bytes
@@ -351,6 +356,13 @@ pub const Screen = struct {
     bg_rgb_cur: Rgb = empty_rgb,
     alt_fg_rgb_cur: Rgb = empty_rgb,
     alt_bg_rgb_cur: Rgb = empty_rgb,
+    /// M80d (#1721): horizontal tab stops, one bit per grid column. The
+    /// defaults match the historical fixed TAB rule: columns 8, 16, ...;
+    /// column 0 is not a stop unless HTS explicitly adds it. Stop tables
+    /// belong to the screen, so an alternate-screen round trip restores the
+    /// primary table unchanged.
+    tab_stops: [2]u64 = default_tab_stops,
+    alt_tab_stops: [2]u64 = default_tab_stops,
     /// CSI state: 0 normal, 1 ESC, 2 CSI.
     esc_state: u8 = 0,
     csi_params: [16]u16 = [_]u16{0} ** 16,
@@ -443,6 +455,72 @@ pub const Screen = struct {
 
     pub fn reset(self: *Screen) void {
         self.* = .{};
+    }
+
+    fn activeTabStops(self: *Screen) *[2]u64 {
+        return if (self.alt_active) &self.alt_tab_stops else &self.tab_stops;
+    }
+
+    fn setTabStop(self: *Screen, col: usize) void {
+        if (col >= self.cols) return;
+        const word = col / 64;
+        self.activeTabStops()[word] |= @as(u64, 1) << @intCast(col % 64);
+    }
+
+    fn clearTabStop(self: *Screen, col: usize) void {
+        if (col >= self.cols) return;
+        const word = col / 64;
+        self.activeTabStops()[word] &= ~(@as(u64, 1) << @intCast(col % 64));
+    }
+
+    fn hasTabStop(self: *const Screen, col: usize) bool {
+        if (col >= self.cols) return false;
+        const word = col / 64;
+        return (self.activeTabStopsConst()[word] & (@as(u64, 1) << @intCast(col % 64))) != 0;
+    }
+
+    fn activeTabStopsConst(self: *const Screen) *const [2]u64 {
+        return if (self.alt_active) &self.alt_tab_stops else &self.tab_stops;
+    }
+
+    /// Move by `count` tab stops, clamped to the effective width. TAB and
+    /// CHT search forward; CBT searches backward. Reaching either edge is
+    /// clamped (never a row wrap), and a pending right-margin wrap is
+    /// cancelled to the last visible column first.
+    fn moveTabStops(self: *Screen, count: u16, forward: bool) void {
+        self.cancelPendingWrap();
+        var remaining: usize = count;
+        while (remaining > 0) : (remaining -= 1) {
+            if (forward) {
+                var col = self.col + 1;
+                while (col < self.cols and !self.hasTabStop(col)) : (col += 1) {}
+                self.col = @min(col, self.cols - 1);
+                if (self.col == self.cols - 1 and !self.hasTabStop(self.col)) break;
+            } else {
+                var col = self.col;
+                while (col > 0) {
+                    col -= 1;
+                    if (self.hasTabStop(col)) break;
+                }
+                self.col = col;
+                if (col == 0 and !self.hasTabStop(0)) break;
+            }
+        }
+    }
+
+    /// xterm resize policy: stops beyond the new effective width are
+    /// discarded and do not return if the window later widens. Both screen
+    /// tables are masked because either may become active after the resize.
+    fn maskTabStops(self: *Screen) void {
+        if (self.cols >= grid_cols) return;
+        const low_mask: u64 = if (self.cols >= 64)
+            std.math.maxInt(u64)
+        else
+            (@as(u64, 1) << @intCast(self.cols)) - 1;
+        self.tab_stops[0] &= low_mask;
+        self.tab_stops[1] = 0;
+        self.alt_tab_stops[0] &= low_mask;
+        self.alt_tab_stops[1] = 0;
     }
 
     fn clearLine(self: *Screen, i: usize) void {
@@ -790,6 +868,10 @@ pub const Screen = struct {
         self.alt_active = enabled;
         self.clearSelection();
         if (enabled) {
+            // Unlike grid cells, tab tables are selected by alt_active and
+            // do not need a physical swap: reset the alternate table when
+            // it is armed while leaving the primary table untouched.
+            self.alt_tab_stops = default_tab_stops;
             self.clearScreen();
             self.style = default_cell_style;
             self.fg_rgb_cur = empty_rgb;
@@ -941,6 +1023,16 @@ pub const Screen = struct {
             },
             'd' => self.moveCursor(self.csiParam(0, 1), @intCast(self.col + 1)),
             'b' => self.repeatLast(self.csiParam(0, 1)),
+            // M80d (#1721): tab-stop control. TBC 0 clears the stop under
+            // the cursor; TBC 3 clears all. CHT/CBT move by a stop count
+            // (default 1). Other TBC modes are consumed and ignored.
+            'g' => switch (p0) {
+                0 => self.clearTabStop(self.col),
+                3 => self.activeTabStops().* = .{ 0, 0 },
+                else => {},
+            },
+            'I' => self.moveTabStops(self.csiParam(0, 1), true),
+            'Z' => self.moveTabStops(self.csiParam(0, 1), false),
             else => {},
         }
     }
@@ -1003,6 +1095,11 @@ pub const Screen = struct {
                 if (b == '[') {
                     self.esc_state = 2;
                     self.resetCsi();
+                } else if (b == 'H') {
+                    // M80d: HTS sets a stop at the current column. This
+                    // minimal final arm is the seam M80e's larger ESC
+                    // dispatch will grow.
+                    self.setTabStop(self.col);
                 }
                 return;
             },
@@ -1034,10 +1131,7 @@ pub const Screen = struct {
             0x08 => {
                 if (self.col > 0) self.col -= 1;
             },
-            '\t' => {
-                const next = (self.col + 8) & ~@as(usize, 7);
-                self.col = @min(next, self.cols - 1);
-            },
+            '\t' => self.moveTabStops(1, true),
             0x07 => {}, // bell — silent
             else => {
                 if (b < 0x20 or b == 0x7f) return;
@@ -1410,6 +1504,7 @@ pub const Screen = struct {
     pub fn setCols(self: *Screen, new_cols: usize) usize {
         const c = @max(@as(usize, 8), @min(new_cols, grid_cols));
         if (c != self.cols) self.reflow(c);
+        self.maskTabStops();
         return self.cols;
     }
 
@@ -4213,6 +4308,18 @@ test "terminal: selection copies UTF-8 runes once, overlays included" {
     s2.extendSelection(0, 1);
     const m = s2.copySelection(&buf);
     try std.testing.expectEqualStrings("e\xcc\x81", buf[0..m]);
+}
+
+test "terminal: HTS sets the current stop and the alternate screen restores it (#1721)" {
+    var s = Screen{};
+    s.feed("\x1b[1;13H\x1bH");
+    try std.testing.expect(s.hasTabStop(12));
+    s.feed("\x1b[1;10H\tZ");
+    try std.testing.expectEqualStrings("            Z", s.line(0));
+    s.feed("\x1b[?1049h");
+    try std.testing.expect(!s.hasTabStop(12));
+    s.feed("\x1b[?1049l");
+    try std.testing.expect(s.hasTabStop(12));
 }
 
 test "terminal: the alternate screen swap carries rune cells verbatim" {
