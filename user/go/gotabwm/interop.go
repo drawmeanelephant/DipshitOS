@@ -214,18 +214,29 @@ func buildReply(req vi.WmRpc, applied bool) vi.WmRpc {
 	return rep
 }
 
-// closeHosted closes the focused tab's window through the WM seam; the app
-// receives the real WIN_CLOSE and exits. Focus moves to the remaining tab
-// (M62b) or the strip goes empty. Returns whether a close was issued.
-func closeHosted() bool {
-	id, ok := tabs.Focused()
-	if !ok {
-		if hostedApp == 0 {
-			return false
-		}
-		id = hostedApp
+// closeWin / focusRaise are the close path's WM-primitive seams (the execApp
+// pattern in hid.go): vi.Wmctl* calls the raw syscall2 gateway and so bypasses
+// vi's host-test syscall hook, which would leave the close decision
+// unobservable off the guest. They are vi.WmctlWinClose / WmctlTaskbarClick
+// in the guest.
+var (
+	closeWin   = vi.WmctlWinClose
+	focusRaise = vi.WmctlTaskbarClick
+)
+
+// closeTabByID closes id's window through the WM seam; the app receives the
+// real WIN_CLOSE and exits. Every close path lands here (the choreography's
+// closeHosted, M79b's close-x), so `host close id=` / `tab close id=` carry
+// exactly one shape. A close of the FOCUSED tab moves focus to the remaining
+// tab (M62b) and says so; closing an unfocused tab (the close-x) changes no
+// focus and prints no focus markers. Returns whether a close was issued.
+func closeTabByID(id uint32) bool {
+	if id == 0 {
+		return false
 	}
-	if vi.WmctlWinClose(id) != 0 {
+	fid, focused := tabs.Focused()
+	wasFocused := focused && fid == id
+	if closeWin(id) != 0 {
 		return false
 	}
 	vi.ConsoleLine(MarkerHostClose + vi.Itoa64(int64(id)))
@@ -239,14 +250,32 @@ func closeHosted() bool {
 		if tabs.Count() == 1 {
 			_ = applyRect(nid, FullRect(uint32(vi.ScanoutWidth), uint32(vi.ScanoutHeight)))
 		}
-		if vi.WmctlTaskbarClick(nid) == 0 {
-			vi.ConsoleLine(MarkerTabFocus + vi.Itoa64(int64(nid)))
-			vi.ConsoleLine(MarkerHostFocus + vi.Itoa64(int64(nid)))
+		// The focus handoff is the focused close's story (M62b): an
+		// unfocused close-x leaves the keyboard where it was, so it
+		// neither raises nor reports a focus change.
+		if wasFocused {
+			if focusRaise(nid) == 0 {
+				vi.ConsoleLine(MarkerTabFocus + vi.Itoa64(int64(nid)))
+				vi.ConsoleLine(MarkerHostFocus + vi.Itoa64(int64(nid)))
+			}
 		}
 	} else {
 		vi.ConsoleLine(MarkerTabsEmpty)
 	}
 	return true
+}
+
+// closeHosted closes the focused tab's window (the M62b choreography close
+// seam). Focus moves to the remaining tab or the strip goes empty.
+func closeHosted() bool {
+	id, ok := tabs.Focused()
+	if !ok {
+		if hostedApp == 0 {
+			return false
+		}
+		id = hostedApp
+	}
+	return closeTabByID(id)
 }
 
 func syncHostedFromStrip() {

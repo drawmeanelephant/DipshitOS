@@ -366,7 +366,7 @@ func TestPaintRailFrozenBadge(t *testing.T) {
 	if !s.OpenTab(3, "Calc") {
 		t.Fatal("OpenTab")
 	}
-	thawed := paintRail(scan, w, h, RailHeight, &s)
+	thawed := paintRail(scan, w, h, RailHeight, &s, -1)
 	if n := countRGB(pix, w, RailHeight, railFrozenRGB()); n != 0 {
 		t.Fatalf("a thawed rail painted %d badge pixels", n)
 	}
@@ -377,7 +377,7 @@ func TestPaintRailFrozenBadge(t *testing.T) {
 	if !s.Freeze(3) {
 		t.Fatal("Freeze")
 	}
-	frozen := paintRail(scan, w, h, RailHeight, &s)
+	frozen := paintRail(scan, w, h, RailHeight, &s, -1)
 	badge := countRGB(pix, w, RailHeight, railFrozenRGB())
 	if badge == 0 {
 		t.Fatal("a frozen rail painted no Warning badge pixels")
@@ -413,6 +413,59 @@ func countRGB(pix []uint32, width, rows int, rgb uint32) int {
 	return n
 }
 
+// M79b (#1705): the hovered cell tints (theme BtnHover, distinct from idle
+// and focus), focus wins over hover, and every cell carries the close-x glyph
+// in its close zone.
+func TestPaintRailHoverTintAndCloseGlyph(t *testing.T) {
+	const w, h = 256, 32
+	buf := make([]byte, w*h*4)
+	pix := asUint32(buf)
+	var s TabStrip
+	if !s.OpenTab(3, "A") || !s.OpenTab(4, "B") {
+		t.Fatal("OpenTab")
+	}
+	_ = s.FocusTab(4) // cell 1 focused
+	// Hover the IDLE cell: it tints and no idle pixels remain there.
+	paintRail(buf, w, h, RailHeight, &s, 0)
+	if n := countRGB(pix, w, RailHeight, railHoverRGB()); n == 0 {
+		t.Fatal("hovering an idle cell painted no hover tint")
+	}
+	if n := countRGB(pix, w, RailHeight, railIdleRGB()); n != 0 {
+		t.Fatalf("the hovered idle cell left %d idle pixels", n)
+	}
+	// Hover the FOCUSED cell: focus wins, no hover tint anywhere.
+	for i := range pix {
+		pix[i] = 0
+	}
+	paintRail(buf, w, h, RailHeight, &s, 1)
+	if n := countRGB(pix, w, RailHeight, railHoverRGB()); n != 0 {
+		t.Fatalf("hover painted %d tint pixels over the focused cell", n)
+	}
+	if n := countRGB(pix, w, RailHeight, railFocusRGB()); n == 0 {
+		t.Fatal("the focused cell lost its focus fill")
+	}
+	// No hover: the close-x glyph (muted ink) sits in each cell's zone.
+	// Cell 0's zone at w=256 n=2 (cellW=128) is [112,128).
+	for i := range pix {
+		pix[i] = 0
+	}
+	paintRail(buf, w, h, RailHeight, &s, -1)
+	if n := countRGB(pix, w, RailHeight, railCloseRGB()); n == 0 {
+		t.Fatal("no close-x glyph pixels on the rail")
+	}
+	found := false
+	for row := 0; row < RailHeight; row++ {
+		for col := 112; col < 128; col++ {
+			if pix[row*w+col]&0xffffff == railCloseRGB() {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("cell 0's close zone holds no glyph pixels")
+	}
+}
+
 func TestNextIDWraps(t *testing.T) {
 	var s TabStrip
 	if _, ok := s.NextID(); ok {
@@ -443,13 +496,13 @@ func TestPaintRailFillsStripOnly(t *testing.T) {
 	const w, h, strip = 256, 32, 8
 	buf := make([]byte, w*h*4)
 	var s TabStrip
-	if n := paintRail(buf, w, h, strip, &s); n != 0 {
+	if n := paintRail(buf, w, h, strip, &s, -1); n != 0 {
 		t.Fatalf("empty strip wrote %d pixels", n)
 	}
 	s.OpenTab(1, "a")
 	s.OpenTab(2, "b")
 	s.FocusTab(2)
-	if n := paintRail(buf, w, h, strip, &s); n == 0 {
+	if n := paintRail(buf, w, h, strip, &s, -1); n == 0 {
 		t.Fatal("paintRail wrote nothing")
 	}
 	pix := func(x, y int) uint32 {

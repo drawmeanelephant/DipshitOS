@@ -10,11 +10,14 @@
 //	alt-tab       -> FocusTab + WmctlTaskbarClick (cmd 12), wrapping
 //	rail click    -> top strip, equal-width cells, same TASKBAR+FocusTab
 //	rail drag     -> press/release over different cells → existing Reorder()
+//	rail close-x  -> the cell's rightmost railCloseW px: close that tab (M79b)
+//	rail hover    -> the cell under the pointer tints; entry marker (M79b)
 //	ordinary keys -> ignored here (ADR 0009: KEY_DOWN still reaches the app)
 //
 // Markers print only after the mutation/syscall that made them true.
 // Ctrl+W is not bound (it collides with the editor). Ctrl+Tab waits on M63r.
-// Close-x, sash, and hover-preview are later cards. Client-area is ignored.
+// M79b (#1705): the rail's close-x and hover highlight live here. Sash and
+// hover-preview stay later cards. Client-area is ignored.
 //
 // M71d pick: Ctrl+Shift+T / Ctrl+Shift+D are Zig TABWM's own BT1 bindings
 // (user/src/tabwm.zig:151/:427). They are free on GOTABWM — the only
@@ -31,6 +34,9 @@ import "virelai/vi"
 const (
 	MarkerAltTab    = "gotabwm: alt-tab id="
 	MarkerRailClick = "gotabwm: rail-click id="
+	// M79b (#1705): hover entry on a rail cell (transitions only, markRail's
+	// discipline), naming the cell's tab id like rail-click does.
+	MarkerRailHover = "gotabwm: rail-hover id="
 	// M71d (#1563): the BT1 chord outcomes. <bin> is the re-exec'd executable,
 	// matching Zig's `tabwm: reopen <bin>` / `tabwm: duplicate <bin>`.
 	MarkerReopen           = "gotabwm: reopen "
@@ -76,6 +82,10 @@ var (
 	// (#1688): the matching release is content too, wherever it lands.
 	// Chrome downs (start surface, rail) never set it.
 	contentDown bool
+	// railHover is the M79b (#1705) hovered rail cell (index), or -1 while
+	// the pointer rests off the rail. Paint state; updateRailHover owns it
+	// and the entry marker.
+	railHover = -1
 )
 
 func handleWmKey(e vi.Event) {
@@ -254,6 +264,16 @@ func handleWmPointer(e vi.Event) {
 			openLauncher()
 			return
 		}
+		// M79b (#1705): the close-x zone is its own hit target — it closes
+		// the cell's tab and never focuses, never starts a drag, and never
+		// reaches content (hit-test honesty). The rest of the cell keeps
+		// the click/drag behaviour below, byte for byte.
+		updateRailHover(px, py, false)
+		if i, ok := railCloseZoneAt(px, py, vi.ScanoutWidth, tabs.Count(), RailHeight); ok {
+			railDragFrom = -1
+			applyRailClose(i)
+			return
+		}
 		beginRailDrag(px, py)
 		_, onRail := railCellAt(px, py, vi.ScanoutWidth, tabs.Count(), RailHeight)
 		_ = applyRailClick(px, py)
@@ -268,6 +288,7 @@ func handleWmPointer(e vi.Event) {
 		return
 	}
 	if up {
+		updateRailHover(px, py, false)
 		_ = endRailDrag(px, py)
 		if contentDown {
 			vi.WmctlContentPtr(px, py, btn)
@@ -277,6 +298,9 @@ func handleWmPointer(e vi.Event) {
 	}
 	// #1688: motion is content too, unless it rides the rail chrome —
 	// the only pointer consumer here besides the launcher above.
+	// M79b (#1705): motion over the rail is hover — the tint follows the
+	// pointer and the entry marker prints on cell transitions only.
+	updateRailHover(px, py, true)
 	if _, onRail := railCellAt(px, py, vi.ScanoutWidth, tabs.Count(), RailHeight); !onRail {
 		vi.WmctlContentPtr(px, py, btn)
 	}
@@ -290,9 +314,68 @@ func pointerUpEdge(btn, prev uint8) bool {
 	return btn&hidBtnLeft == 0 && prev&hidBtnLeft != 0
 }
 
+// railCloseZoneAt is the M79b (#1705) close-x hit test: the cell's rightmost
+// railCloseW px (tabs.go's railClose geometry), full strip height. It
+// resolves the cell exactly like railCellAt and the width exactly like
+// paintRail, so the hit zone can never disagree with the painted glyph.
+// False everywhere the close-x is not a target.
+func railCloseZoneAt(px, py uint32, width, n, stripH int) (int, bool) {
+	i, ok := railCellAt(px, py, width, n, stripH)
+	if !ok {
+		return 0, false
+	}
+	cellW := width / n
+	if cellW < 48 {
+		cellW = 48
+	}
+	x := i * cellW
+	w := cellW
+	if x+w > width {
+		w = width - x
+	}
+	// The zone is the PAINTED cell's rightmost railCloseW px. The upper
+	// bound matters for railCellAt's remainder rule: pixels past n*cellW
+	// resolve to the last cell but sit outside its paint, so they stay
+	// click/drag territory and are never a close-x target.
+	if w < railCloseW || int(px) < x+w-railCloseW || int(px) >= x+w {
+		return 0, false
+	}
+	return i, true
+}
+
+// updateRailHover tracks M79b (#1705) hover state: railHover is the rail
+// cell under the pointer (paintRail tints it), -1 anywhere else. The marker
+// is motion-only and prints on ENTRY (a transition, markRail's discipline) —
+// a press or release also rests the pointer on a cell, so state follows, but
+// `rail-hover` names a hover, never a click.
+func updateRailHover(px, py uint32, motion bool) {
+	prev := railHover
+	i, ok := railCellAt(px, py, vi.ScanoutWidth, tabs.Count(), RailHeight)
+	if !ok {
+		railHover = -1
+		return
+	}
+	railHover = i
+	if motion && i != prev {
+		vi.ConsoleLine(MarkerRailHover + vi.Itoa64(int64(tabs.At(i).ID)))
+	}
+}
+
+// applyRailClose is the M79b (#1705) close-x action: close the cell's tab by
+// id through the same closeTabByID seam every other close uses, so the
+// `host close id=` / `tab close id=` pair is exactly one shape. No focus
+// change first — the click targets a button, not a cell.
+func applyRailClose(i int) bool {
+	if i < 0 || i >= tabs.Count() {
+		return false
+	}
+	return closeTabByID(tabs.At(i).ID)
+}
+
 // railCellAt is the top-strip hit-test (M63c). Equal-width cells matching
 // paintRail (`cellW = width/n`, min 48). py must be in the rail; the rail
-// wins over any pane whose rect includes y=0. Close-x is not a target.
+// wins over any pane whose rect includes y=0. Close-x is not a target —
+// the cell body is the click/drag target (railCloseZoneAt takes the zone).
 func railCellAt(px, py uint32, width, n, stripH int) (int, bool) {
 	if n <= 0 || width <= 0 || stripH <= 0 || py >= uint32(stripH) {
 		return 0, false
