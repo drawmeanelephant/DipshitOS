@@ -24,6 +24,17 @@
 //!       * M80a (#1712) landed its cursor-motion and REP rows in the CSI
 //!         group next to the `H`/`f` rows — no existing row flipped (the
 //!         "unknown CSI final" pin uses `Z`, which stays unknown).
+//!       * M80b (#1713) landed its insert/delete/erase rows (@/P/X/L/M/
+//!         S/T) and the ED 3 row at the end of the CSI group — no
+//!         existing row flipped (ED 3 was lumped with ED 2 and unpinned).
+//!         The history half of ED 3 cannot live here (a corpus `Screen`
+//!         has no history bank): it is pinned by registry tests in
+//!         terminal.zig, the M73i mode-table precedent.
+//!       * Group I is a deterministic CSI parameter-soup FUZZ — not
+//!         goldens. It enforces INVARIANTS (no panic, whole wide pairs,
+//!         bounded indices, nothing below the used tail) under random
+//!         load; a parser card that changes what "uncorrupted" means
+//!         asserts it there.
 //!   - A row that DISAGREES with the code is wrong — or you found a bug.
 //!     The bug goes in a comment or an issue, never a silent "fix" inside
 //!     an unrelated parser card (M73g's non-goal; see the ESC group for a
@@ -163,6 +174,9 @@ fn runAll(cases: []const Case) !void {
 // Repeated inputs (comptime) so the tables stay readable.
 const a80: [80]u8 = [_]u8{'a'} ** 80;
 const a79: [79]u8 = [_]u8{'a'} ** 79;
+/// M80b: three spaces + 77 `a`s — an ICH that shoves 3 cells off the
+/// right margin of a full row.
+const spaces3_a77: [80]u8 = [_]u8{' '} ** 3 ++ [_]u8{'a'} ** 77;
 
 // ---------------------------------------------------------------------------
 // Group A — ASCII control and line discipline.
@@ -646,6 +660,238 @@ const csi_cases = [_]Case{
         .lines = &.{""},
         .cursor = .{ 0, 3 },
     },
+    // ---- M80b (#1713): insert/delete/erase finals — chars @/P/X, lines
+    // L/M, scroll S/T, and ED 3. Blanks are the erase default (empty
+    // cell + default rendition — the grid erases to the default, never
+    // the current SGR); moved cells carry their own rendition with them.
+    // The cursor is never touched except IL/DL, which take it to the
+    // left margin (xterm's VT102-compatible IL/DL — xterm changelog:
+    // "modify IL/DL to set cursor to first column on row"). A row edit
+    // at a pending wrap (col == cols) acts on the last column (BS
+    // parity), and an edit below the used tail is a no-op (the M80a
+    // rule: a row materialises on write, never on edit).
+    .{
+        .name = "ICH (@) inserts blanks at the cursor and slides the tail right",
+        .input = "abcdef\x1b[1;3H\x1b[2@",
+        .lines = &.{"ab  cdef"},
+        .cursor = .{ 0, 2 },
+    },
+    .{
+        .name = "ICH drops cells past the right margin",
+        .input = &a79 ++ "Z\x1b[1;1H\x1b[3@",
+        .lines = &.{&spaces3_a77},
+        .cursor = .{ 0, 0 },
+    },
+    .{
+        .name = "zero and missing ICH params insert one blank",
+        .input = "abcd\x1b[1;2H\x1b[0@\x1b[@",
+        .lines = &.{"a  bcd"},
+        .cursor = .{ 0, 1 },
+    },
+    .{
+        // The slide moves stored renditions with their cells; the
+        // inserted blank is default-styled (an erase default, not BCE).
+        .name = "ICH slides stored renditions right; the blank is default",
+        .input = "\x1b[31mabc\x1b[0m\x1b[1;2H\x1b[1@",
+        .lines = &.{"a bc"},
+        .cursor = .{ 0, 1 },
+        .styles = &.{
+            .{ .row = 0, .col = 0, .fg = 1 },
+            .{ .row = 0, .col = 1, .default_exact = true },
+            .{ .row = 0, .col = 2, .fg = 1 },
+            .{ .row = 0, .col = 3, .fg = 1 },
+        },
+    },
+    .{
+        // House rule (M73a-1): the slide never splits a wide pair — the
+        // insert point steps back to the pair's base so it moves whole.
+        .name = "ICH slides a straddling wide pair as a whole",
+        .input = "A\xe4\xbd\xa0B\x1b[1;2H\x1b[1@",
+        .lines = &.{"A \x00\x00B"},
+        .cursor = .{ 0, 1 },
+        .cells = &.{
+            .{ .row = 0, .col = 1, .base = ' ' },
+            .{ .row = 0, .col = 2, .base = 0x4F60 },
+            .{ .row = 0, .col = 3, .base = ' ', .cont = 1 },
+            .{ .row = 0, .col = 4, .base = 'B' },
+        },
+    },
+    .{
+        .name = "DCH (P) deletes chars at the cursor and pulls the tail left",
+        .input = "abcdef\x1b[1;3H\x1b[2P",
+        .lines = &.{"abef"},
+        .cursor = .{ 0, 2 },
+    },
+    .{
+        .name = "DCH past the row end shortens the line to the cursor",
+        .input = "abcdef\x1b[1;5H\x1b[4P",
+        .lines = &.{"abcd"},
+        .cursor = .{ 0, 4 },
+    },
+    .{
+        .name = "zero and missing DCH params delete one char",
+        .input = "abc\x1b[1;2H\x1b[0P\x1b[P",
+        .lines = &.{"a"},
+        .cursor = .{ 0, 1 },
+    },
+    .{
+        // A delete range that would split a wide pair extends over the
+        // pair edge (eraseLine's rule) — the pair goes WHOLE.
+        .name = "DCH deletes a straddling wide pair whole",
+        .input = "A\xe4\xbd\xa0B\x1b[1;2H\x1b[1P",
+        .lines = &.{"AB"},
+        .cursor = .{ 0, 1 },
+    },
+    .{
+        .name = "DCH at a pair's continuation deletes the pair whole",
+        .input = "A\xe4\xbd\xa0B\x1b[1;3H\x1b[1P",
+        .lines = &.{"AB"},
+        .cursor = .{ 0, 2 },
+    },
+    .{
+        .name = "ECH (X) erases cells in place without shifting the tail",
+        .input = "abcdef\x1b[1;3H\x1b[2X",
+        .lines = &.{"ab  ef"},
+        .cursor = .{ 0, 2 },
+    },
+    .{
+        .name = "ECH to the row end trims the line length",
+        .input = "abcdef\x1b[1;4H\x1b[9X",
+        .lines = &.{"abc"},
+        .cursor = .{ 0, 3 },
+    },
+    .{
+        // Two ECHs at the same un-moving cursor erase the same cell.
+        .name = "zero and missing ECH params erase one cell; the cursor stays",
+        .input = "abcdef\x1b[1;3H\x1b[0X\x1b[X",
+        .lines = &.{"ab def"},
+        .cursor = .{ 0, 2 },
+    },
+    .{
+        .name = "ECH erases a straddling wide pair whole",
+        .input = "A\xe4\xbd\xa0B\x1b[1;2H\x1b[1X",
+        .lines = &.{"A  B"},
+        .cursor = .{ 0, 1 },
+    },
+    .{
+        // A row edit from a pending wrap acts on the LAST column and
+        // resolves the wrap (BS parity) — the edit itself never wraps.
+        .name = "ECH from a pending wrap edits the last column",
+        .input = &a80 ++ "\x1b[2X",
+        .lines = &.{&a79},
+        .cursor = .{ 0, 79 },
+        .used = 1,
+    },
+    .{
+        .name = "ICH below the used tail is a no-op",
+        .input = "\x1b[3B\x1b[2@",
+        .cursor = .{ 3, 0 },
+        .used = 1,
+    },
+    .{
+        .name = "IL (L) inserts a blank line at the cursor and pushes rows down",
+        .input = "AA\r\nBB\r\nCC\x1b[2;1H\x1b[L",
+        .lines = &.{ "AA", "", "BB", "CC" },
+        .cursor = .{ 1, 0 },
+        .used = 4,
+    },
+    .{
+        // Rows pushed past the bottom of the grid are dropped (no
+        // scrollback for the bottom edge) — one row survives onto the
+        // last grid line.
+        .name = "IL past the bottom of the grid drops the pushed rows",
+        .input = "AA\r\nBB\x1b[2;1H\x1b[126L",
+        .lines = &.{"AA"},
+        .cursor = .{ 1, 0 },
+        .used = 128,
+        .cells = &.{
+            .{ .row = 127, .col = 0, .base = 'B' },
+            .{ .row = 127, .col = 1, .base = 'B' },
+        },
+    },
+    .{
+        .name = "IL below the used tail is a no-op",
+        .input = "\x1b[3B\x1b[2L",
+        .cursor = .{ 3, 0 },
+        .used = 1,
+    },
+    .{
+        .name = "DL (M) deletes lines at the cursor and pulls rows up",
+        .input = "AA\r\nBB\r\nCC\x1b[2;1H\x1b[M",
+        .lines = &.{ "AA", "CC" },
+        .cursor = .{ 1, 0 },
+        .used = 2,
+    },
+    .{
+        .name = "DL past the bottom empties the rows at and below the cursor",
+        .input = "AA\r\nBB\x1b[1;1H\x1b[999M",
+        .lines = &.{""},
+        .cursor = .{ 0, 0 },
+        .used = 1,
+    },
+    .{
+        .name = "zero and missing DL params delete one line",
+        .input = "AA\r\nBB\r\nCC\x1b[2;1H\x1b[0M\x1b[M",
+        .lines = &.{"AA"},
+        .cursor = .{ 1, 0 },
+        .used = 1,
+    },
+    .{
+        .name = "SU (S) scrolls the grid up and drops the top row",
+        .input = "AA\r\nBB\r\nCC\x1b[S",
+        .lines = &.{ "BB", "CC" },
+        .cursor = .{ 2, 2 },
+        .used = 2,
+    },
+    .{
+        .name = "zero and missing SU params scroll one row",
+        .input = "AA\r\nBB\r\nCC\r\nDD\x1b[0S\x1b[S",
+        .lines = &.{ "CC", "DD" },
+        .cursor = .{ 3, 2 },
+        .used = 2,
+    },
+    .{
+        // xterm: SU/SD never touch the cursor — a pending wrap survives
+        // (only IL/DL take the cursor to the left margin).
+        .name = "SU from a pending wrap leaves the cursor put",
+        .input = &a80 ++ "\x1b[S",
+        .lines = &.{""},
+        .cursor = .{ 0, 80 },
+        .used = 1,
+    },
+    .{
+        .name = "SD (T) scrolls the grid down and inserts a blank top row",
+        .input = "AA\r\nBB\x1b[T",
+        .lines = &.{ "", "AA", "BB" },
+        .cursor = .{ 1, 2 },
+        .used = 3,
+    },
+    .{
+        .name = "zero and missing SD params scroll one row",
+        .input = "AA\r\nBB\x1b[0T\x1b[T\x1b[T",
+        .lines = &.{ "", "", "", "AA", "BB" },
+        .cursor = .{ 1, 2 },
+        .used = 5,
+    },
+    .{
+        // CSI Ps;Ps;Ps;Ps;Ps T is XTHIMOUSE (highlight tracking), not SD
+        // — unsupported here, so consumed and never painted (M80 rule).
+        .name = "five-parameter CSI T is XTHIMOUSE — consumed, never painted",
+        .input = "AA\x1b[1;2;3;4;5T",
+        .lines = &.{"AA"},
+        .cursor = .{ 0, 2 },
+        .used = 1,
+    },
+    .{
+        // ED 3 is "Erase Saved Lines" (xterm ctlseqs #411): the grid and
+        // the cursor are untouched. The history half is pinned by
+        // registry tests in terminal.zig — a corpus Screen has no bank.
+        .name = "ED 3 leaves the grid and the cursor untouched",
+        .input = "HELLO\x1b[1;3H\x1b[3J",
+        .lines = &.{"HELLO"},
+        .cursor = .{ 0, 2 },
+        .used = 1,
+    },
 };
 
 test "terminal corpus: CSI cursor positioning and erase" {
@@ -1126,4 +1372,195 @@ const sgr_depth_cases = [_]Case{
 
 test "terminal corpus: SGR depth — 256, truecolour, attributes (M73h)" {
     try runAll(&sgr_depth_cases);
+}
+
+// ---------------------------------------------------------------------------
+// Group I — CSI parameter-soup fuzz (M80b follow-up, #1713's hardening).
+// NOT a golden table: this group pins INVARIANTS under random load — the
+// parser must never panic and the grid must never corrupt. "Not corrupted"
+// is defined here as: every index inside its bound, wide pairs whole (a
+// continuation never stands without its base), row lengths inside the
+// width, and nothing left behind below the used tail (M80a's
+// materialise-on-write rule). Deterministic: fixed xorshift64 seeds, so a
+// failure reproduces byte-for-byte — the seed and step print on failure.
+//
+// The soup runs through a REGISTRY screen (the pub surface): unlike the
+// golden rows above it also exercises the history ring, the alternate
+// screen and the scan overlay paths (a corpus-local Screen has no history
+// bank).
+// ---------------------------------------------------------------------------
+
+/// Deterministic xorshift64 — no std.rand dependency, byte-stable across
+/// toolchains (the seeds below are part of the corpus).
+const SoupRng = struct {
+    s: u64,
+
+    fn init(seed: u64) SoupRng {
+        return .{ .s = if (seed == 0) 0x9E3779B97F4A7C15 else seed };
+    }
+
+    fn next(self: *SoupRng) u64 {
+        self.s ^= self.s << 13;
+        self.s ^= self.s >> 7;
+        self.s ^= self.s << 17;
+        return self.s;
+    }
+
+    fn pick(self: *SoupRng, n: u64) u64 {
+        return self.next() % n;
+    }
+};
+
+/// One soup chunk: mostly `ESC [ … final` with random params (empty,
+/// 1–2 digits, rarely 3 to hit the clamping paths), random separators
+/// (`;` mostly, `:` as the ITU sub-parameter probe), a random private
+/// prefix or intermediate byte, and a final drawn from the known dispatch
+/// set AND unknown finals ("consumed, never painted" territory).
+/// Occasionally the chunk is instead a short text/C0 run so the ops have
+/// content and cursor positions to act on (including a bare wide-rune
+/// lead byte, probing UTF-8 recovery), or an ABANDONED partial sequence
+/// probing stream-state recovery.
+fn soupChunk(rng: *SoupRng, buf: *[64]u8) []const u8 {
+    var n: usize = 0;
+    const roll = rng.pick(8);
+    if (roll < 2) {
+        // Text / C0 run.
+        const len = 1 + rng.pick(6);
+        var i: u64 = 0;
+        while (i < len) : (i += 1) {
+            buf[n] = switch (rng.pick(9)) {
+                0 => '\r',
+                1 => '\n',
+                2 => 0x08,
+                3 => '\t',
+                4 => 0x07,
+                5, 6 => 'a' + @as(u8, @intCast(rng.pick(26))),
+                7 => ' ',
+                else => 0xE4, // wide-rune lead byte, alone: UTF-8 recovery
+            };
+            n += 1;
+        }
+        return buf[0..n];
+    }
+    if (roll == 2) {
+        // Abandoned partial sequence: no final byte, the next chunk's
+        // bytes run through the parser mid-state.
+        buf[n] = 0x1b;
+        n += 1;
+        buf[n] = '[';
+        n += 1;
+        buf[n] = '1';
+        n += 1;
+        buf[n] = ';';
+        n += 1;
+        return buf[0..n];
+    }
+    buf[n] = 0x1b;
+    n += 1;
+    buf[n] = '[';
+    n += 1;
+    if (rng.pick(4) == 0) {
+        buf[n] = if (rng.pick(2) == 0) '?' else '>'; // private vs intermediate
+        n += 1;
+    }
+    if (rng.pick(8) == 0) {
+        buf[n] = ' '; // intermediate byte (the SL/SR form) — probe the skip
+        n += 1;
+    }
+    const nparams = 1 + rng.pick(5);
+    var p: u64 = 0;
+    while (p < nparams) : (p += 1) {
+        if (p > 0) {
+            buf[n] = if (rng.pick(8) == 0) ':' else ';';
+            n += 1;
+        }
+        switch (rng.pick(4)) {
+            0 => {}, // empty (the default)
+            1, 2 => {
+                buf[n] = '0' + @as(u8, @intCast(rng.pick(10)));
+                n += 1;
+            },
+            else => {
+                buf[n] = '1' + @as(u8, @intCast(rng.pick(9)));
+                n += 1;
+                buf[n] = '0' + @as(u8, @intCast(rng.pick(10)));
+                n += 1;
+            },
+        }
+        if (rng.pick(32) == 0) {
+            for ("999") |d| { // rare 3-digit: the out-of-range clamps
+                buf[n] = d;
+                n += 1;
+            }
+        }
+    }
+    const finals = "mHfJKABCDEFGdb@PXL" ++ "MSTnc" ++ "Z~ghiovwxyz";
+    buf[n] = finals[rng.pick(finals.len)];
+    n += 1;
+    return buf[0..n];
+}
+
+/// The definition of "the grid is not corrupted". Bounded indices,
+/// whole wide pairs, lengths inside the width, and nothing below the
+/// used tail.
+fn soupInvariants(s: *const t.Screen) !void {
+    try std.testing.expect(s.used >= 1 and s.used <= t.grid_lines);
+    try std.testing.expect(s.cur < t.grid_lines);
+    try std.testing.expect(s.col <= s.cols);
+    try std.testing.expect(s.cols <= t.grid_cols);
+    try std.testing.expect(s.viewOffset() < s.lineCount());
+    try std.testing.expect(s.hist_count <= t.history_lines);
+    try std.testing.expect(s.hist_start < t.history_lines);
+    for (0..t.grid_lines) |r| {
+        try std.testing.expect(s.lens[r] <= s.cols);
+        if (r >= s.used) try std.testing.expect(s.lens[r] == 0);
+        for (0..t.grid_cols) |c| {
+            const cell = s.cells[r][c];
+            if (cell.cont == 1) {
+                // A continuation always has its base to the left: never
+                // at column 0, never behind another continuation.
+                try std.testing.expect(c > 0);
+                try std.testing.expect(s.cells[r][c - 1].cont == 0);
+            }
+            if (r >= s.used) {
+                // Nothing survives below the used tail.
+                try std.testing.expect(cell.base == ' ');
+                try std.testing.expect(cell.mark == 0);
+                try std.testing.expect(cell.cont == 0);
+            }
+        }
+    }
+}
+
+test "terminal corpus: CSI parameter soup never panics or corrupts the grid" {
+    for (&t.terminals) |*tm| tm.reset();
+    for (&t.screens) |*sc| sc.reset();
+    const h = t.create(7) orelse return error.TestUnexpectedResult;
+    const tm = t.get(h).?;
+    try std.testing.expect(tm.attachWindow(7));
+    const s = t.screenForWindow(7).?;
+    const seeds = [_]u64{
+        0x1234_5678_9ABC_DEF0, 0xDEAD_BEEF_CAFE_F00D,
+        0x0000_0000_0000_0001, 0x8000_0000_0000_0001,
+        0xA5A5_5A5A_C3C3_3C3C, 0x0123_4567_89AB_CDEF,
+    };
+    for (seeds) |seed| {
+        s.reset();
+        var rng = SoupRng.init(seed);
+        var step: usize = 0;
+        while (step < 256) : (step += 1) {
+            var buf: [64]u8 = undefined;
+            s.feed(soupChunk(&rng, &buf));
+            if (step % 16 == 15) {
+                soupInvariants(s) catch |err| {
+                    std.debug.print("\ncorpus fuzz failed: seed 0x{x} step {d}\n", .{ seed, step });
+                    return err;
+                };
+            }
+        }
+        soupInvariants(s) catch |err| {
+            std.debug.print("\ncorpus fuzz failed: seed 0x{x} final sweep\n", .{seed});
+            return err;
+        };
+    }
 }
