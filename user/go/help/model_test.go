@@ -118,6 +118,23 @@ func TestDetailFlow(t *testing.T) {
 	}
 }
 
+func TestShortcutSheetFlow(t *testing.T) {
+	m := testModel()
+	if got := key(&m, runeKey('s')); !hasLine(got, "gohelp: shortcuts") {
+		t.Fatalf("s did not open the shortcut sheet: %v", got)
+	}
+	if m.mode != modeShortcuts || m.status != "shortcuts" {
+		t.Fatalf("shortcut state: mode=%v status=%q", m.mode, m.status)
+	}
+	if got := key(&m, kEsc); !hasLine(got, "gohelp: browse") ||
+		!hasLine(got, "gohelp: focus clear group=shell") {
+		t.Fatalf("escape did not leave the shortcut sheet: %v", got)
+	}
+	if m.mode != modeBrowse {
+		t.Fatalf("mode after shortcut escape = %v", m.mode)
+	}
+}
+
 func TestDocsFlowErrorsHonestly(t *testing.T) {
 	m := testModel()
 	// Inject the list the seeded gate would produce (host reads are ENOSYS).

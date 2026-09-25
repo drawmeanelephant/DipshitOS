@@ -35,6 +35,9 @@ func TestBrowseFrameShape(t *testing.T) {
 	if !strings.Contains(body, testDetailAccent) {
 		t.Errorf("browse preview missing the detail accent")
 	}
+	if !strings.Contains(lines[len(lines)-1], "s keys") {
+		t.Errorf("browse hint does not advertise the shortcut sheet: %q", lines[len(lines)-1])
+	}
 }
 
 func TestDetailFrameIsAccentText(t *testing.T) {
@@ -54,6 +57,30 @@ func TestDetailFrameIsAccentText(t *testing.T) {
 	}
 	if !strings.Contains(body, "write ARG... separated by single spaces") {
 		t.Errorf("detail body missing the blurb")
+	}
+}
+
+func TestShortcutSheetFrame(t *testing.T) {
+	m := testModel()
+	m.mode = modeShortcuts
+	lines := m.renderLines()
+	if len(lines) != m.rows {
+		t.Fatalf("shortcut frame has %d lines, want rows=%d", len(lines), m.rows)
+	}
+	body := strings.Join(lines, "\n")
+	for _, want := range []string{
+		"desktop shortcuts",
+		"Ctrl+Tab",
+		"Focus the next tab",
+		"Ctrl+Shift+Tab",
+		"Focus the previous tab",
+		"Ctrl+1..9",
+		"Focus tab by rail position",
+		"esc back",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("shortcut frame missing %q: %s", want, body)
+		}
 	}
 }
 

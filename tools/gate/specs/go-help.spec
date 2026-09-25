@@ -1,8 +1,8 @@
 # go-help.spec -- M74c (issue #1646): GOHELP.ELF is a Bubble Tea TUI over
-# the bound /dev/tty: one chord batch group-jumps through the GOSH catalog,
-# browses the seeded /host/docs bundle, filters with `/`, and opens a full
-# detail page. The screenshot asserts the detail page's exact truecolour
-# accent (M73h) in the real scanout — not a host ANSI render.
+# the bound /dev/tty. Run 01 group-jumps through the GOSH catalog, browses
+# the seeded /host/docs bundle, filters with `/`, and opens a full detail
+# page whose exact truecolour accent is asserted in the real scanout. Run 02
+# opens the M79f in-app desktop-shortcut sheet and returns to the catalog.
 #
 # Shape: go-charmhello / go-fileman — direct exec on the kernel desktop
 # (no `tabwm start` seat), native 512x384 window = the kernel grid's 64x46
@@ -20,7 +20,7 @@
 # script3 prints, and script3 waits on the app's own settle marker; an app
 # that never ran, never opened a detail, or never settled cannot pass.
 
-vgate_name go-help "M74c #1646: the GOHELP.ELF Charm help browser group-jumps, filters, browses /host/docs and pixel-asserts a detail page over the bound tty"
+vgate_name go-help "M74c #1646 + M79f #1717: GOHELP.ELF group-jumps, shows desktop shortcuts, browses /host/docs and pixel-asserts a detail page over the bound tty"
 vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 
@@ -225,3 +225,37 @@ for y in range(96, 224):
 print("gohelp scanout: detail-accent=%d" % accent)
 assert accent >= 400, "detail accent (255,199,92, +/-20) absent from the detail text band (observed 1536)"
 PY
+
+# --- run 02: the M79f desktop-shortcut cheat sheet -----------------------
+# A separate boot keeps the established detail screenshot choreography (and
+# its timing) byte-for-byte. `s` paints the shortcut page; the marker is
+# flushed only after that frame exists. Backspace returns to the catalog and
+# the script-only close marker ends the boot.
+vgate_run 02 -- \
+    --screen '$RUN_DIR/help-shortcuts-screen' \
+    --input --via-virtio \
+    --script '$RUN_DIR/script.txt' \
+    --input-chords 's,backspace' \
+    --input-chords-after 'gohelp: ready' \
+    --script2 '$RUN_DIR/script2.txt' \
+    --script2-after 'gohelp: shortcuts' \
+    --script3 '$RUN_DIR/script3.txt' \
+    --script3-after 'gohelp: browse' \
+    --script-expect 'rx-gohelp-ok' --timeout 240
+
+vgate_assert 02 serial-contains 'exec: loaded GOHELP.ELF'
+vgate_assert 02 serial-contains 'gohelp: open id='
+vgate_assert 02 serial-contains 'gohelp: attached'
+vgate_assert 02 serial-contains 'gohelp: ready'
+vgate_assert 02 serial-contains 'gohelp: shortcuts'
+vgate_assert 02 serial-contains 'gohelp: key s'
+vgate_assert 02 serial-contains 'gohelp: browse'
+vgate_assert 02 serial-contains 'gohelp: key backspace'
+vgate_assert 02 serial-contains 'dui[4]: user user rect=32,32,512,384'
+vgate_assert 02 serial-contains 'gohelp: close'
+vgate_assert 02 serial-contains 'gohelp OK'
+vgate_assert 02 serial-contains 'rx-gohelp-ok'
+vgate_assert 02 serial-absent 'gohelp: no /dev/tty'
+vgate_assert 02 serial-absent 'gohelp: attach failed'
+vgate_assert 02 serial-absent '[EXC] parking:'
+vgate_assert 02 serial-absent 'exited status=139'

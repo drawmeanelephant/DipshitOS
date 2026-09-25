@@ -59,6 +59,8 @@ func (m model) render() string {
 
 func (m model) renderLines() []string {
 	switch m.mode {
+	case modeShortcuts:
+		return m.renderShortcuts()
 	case modeDetail:
 		return m.renderDetail()
 	case modeDocs:
@@ -113,11 +115,44 @@ func (m model) renderBrowse() []string {
 	}
 
 	lines = append(lines, m.statusLine())
-	hint := "j/k move · ←→ group · enter detail · / filter · d docs · q quit"
+	hint := "j/k · ←→ group · enter detail · / filter · d docs · s keys · q"
 	if m.filtering {
 		hint = "type to filter · enter apply · esc clear · ↑↓ move"
 	}
 	lines = append(lines, colDim+" "+clipVis(hint, m.cols-2)+colReset)
+	return lines
+}
+
+// desktopShortcuts is the in-app cheat sheet for the seat chords that are
+// otherwise invisible on the tab rail. Keep these names synchronized with
+// the real bindings in gotabwm/hid.go: they are user-facing claims.
+var desktopShortcuts = [...]struct {
+	keys  string
+	about string
+}{
+	{"Ctrl+Tab", "Focus the next tab"},
+	{"Ctrl+Shift+Tab", "Focus the previous tab"},
+	{"Ctrl+1..9", "Focus tab by rail position"},
+}
+
+// renderShortcuts is a full-page shortcut cheat sheet. It is deliberately
+// sparse: the key column is accent, actions are body text, and esc/backspace
+// returns to the command catalog.
+func (m model) renderShortcuts() []string {
+	const keyWidth = 15
+	lines := make([]string, 0, m.rows)
+	lines = append(lines, m.header(" GOHELP · desktop shortcuts"), "")
+	for _, row := range desktopShortcuts {
+		keys := clipVis(row.keys, keyWidth-1)
+		pad := keyWidth - visLen(keys)
+		lines = append(lines, colAccent+keys+colReset+
+			strings.Repeat(" ", pad)+colBody+clipVis(row.about, m.cols-keyWidth-1)+colReset)
+	}
+	for len(lines) < m.rows-2 {
+		lines = append(lines, "")
+	}
+	lines = append(lines, m.statusLine())
+	lines = append(lines, colDim+" esc back"+colReset)
 	return lines
 }
 

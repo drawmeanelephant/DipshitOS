@@ -35,15 +35,16 @@ func isDocName(name string) bool {
 	return strings.HasSuffix(l, ".txt") || strings.HasSuffix(l, ".md")
 }
 
-// viewMode is the browser's modal state: browse is home; detail, docs and
-// the doc reader each own the keyboard until they go back.
+// viewMode is the browser's modal state: browse is home; shortcut help,
+// detail, docs and the doc reader each own the keyboard until they go back.
 type viewMode uint8
 
 const (
-	modeBrowse  viewMode = iota
-	modeDetail           // full-page detail of one catalog row
-	modeDocs             // the /host/docs file list
-	modeDocView          // one doc's text
+	modeBrowse    viewMode = iota
+	modeShortcuts          // desktop keyboard cheat sheet
+	modeDetail             // full-page detail of one catalog row
+	modeDocs               // the /host/docs file list
+	modeDocView            // one doc's text
 )
 
 type model struct {
@@ -268,8 +269,8 @@ func (m *model) handleClick(x, y int) {
 }
 
 // handleKey runs one decoded key through the state machine. It is the whole
-// flow: browse ←→ detail, browse ←→ docs ←→ doc, `/` filter with esc to
-// clear, ←/→ group jumps, j/k or arrows to move, q to quit (browse only).
+// flow: browse → shortcut help/detail/docs, docs → doc, `/` filter with esc
+// to clear, ←/→ group jumps, j/k or arrows to move, q to quit (browse only).
 func (m *model) handleKey(ev keys.Event) {
 	if ev.Key == keys.KeyCtrlC {
 		m.quit = true
@@ -278,6 +279,14 @@ func (m *model) handleKey(ev keys.Event) {
 	switch m.mode {
 	case modeBrowse:
 		m.keyBrowse(ev)
+	case modeShortcuts:
+		switch ev.Key {
+		case keys.KeyBackspace, keys.KeyEsc:
+			m.mode = modeBrowse
+			m.status = "ready"
+			m.emit(markerBrowse)
+			m.emitFocus()
+		}
 	case modeDetail:
 		switch ev.Key {
 		case keys.KeyBackspace, keys.KeyEsc, keys.KeyEnter:
@@ -372,6 +381,10 @@ func (m *model) keyBrowse(ev keys.Event) {
 			m.emit(markerDocsOpen)
 			m.emitDocFocus()
 		}
+	case 's':
+		m.mode = modeShortcuts
+		m.status = "shortcuts"
+		m.emit(markerShortcuts)
 	case 'q':
 		m.quit = true
 	}

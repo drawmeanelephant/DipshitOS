@@ -29,10 +29,11 @@ const (
 	markerDocErr   = "gohelp: doc error "
 	markerDocFocus = "gohelp: docfocus "
 
-	// Navigation and detail.
-	markerFocus  = "gohelp: focus "
-	markerDetail = "gohelp: detail "
-	markerBrowse = "gohelp: browse"
+	// Navigation, shortcut help, and detail.
+	markerFocus     = "gohelp: focus "
+	markerShortcuts = "gohelp: shortcuts"
+	markerDetail    = "gohelp: detail "
+	markerBrowse    = "gohelp: browse"
 
 	// `/`-to-filter: one marker per edit (n = visible matches), then the
 	// clear. The gate pins `filter ec n=3` and the 44-row catalog clear.
