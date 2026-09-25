@@ -21,6 +21,9 @@
 //!       * UTF-8 decode rows (M73a-1's policy) live in the decode group —
 //!         that card landed before this corpus existed, so its behaviour is
 //!         pinned here now.
+//!       * M80a (#1712) landed its cursor-motion and REP rows in the CSI
+//!         group next to the `H`/`f` rows — no existing row flipped (the
+//!         "unknown CSI final" pin uses `Z`, which stays unknown).
 //!   - A row that DISAGREES with the code is wrong — or you found a bug.
 //!     The bug goes in a comment or an issue, never a silent "fix" inside
 //!     an unrelated parser card (M73g's non-goal; see the ESC group for a
@@ -307,6 +310,248 @@ const csi_cases = [_]Case{
         .input = "\x1b[;10H",
         .cursor = .{ 0, 9 },
         .used = 1,
+    },
+    // ---- M80a (#1712): cursor motion finals A/B/C/D/E/F/G/d and REP b. ----
+    // Relative moves clamp at the grid edges and never materialise rows
+    // (`used` grows on WRITE, in putRune); the absolute finals grow `used`
+    // exactly like CUP. A motion cancels a pending wrap (col == cols) by
+    // standing the cursor back on the last column (BS parity), and nothing
+    // here clears a row.
+    .{
+        .name = "CUU (A) moves up n rows and keeps the column",
+        .input = "\x1b[10;20H\x1b[3A",
+        .cursor = .{ 6, 19 },
+        .used = 10,
+    },
+    .{
+        .name = "CUU clamps at row 0",
+        .input = "\x1b[4;5H\x1b[99A",
+        .cursor = .{ 0, 4 },
+        .used = 4,
+    },
+    .{
+        .name = "CUD (B) moves down n rows without materialising them",
+        .input = "\x1b[5B",
+        .cursor = .{ 5, 0 },
+        .used = 1,
+    },
+    .{
+        .name = "CUD clamps at the last grid row (128 rows)",
+        .input = "\x1b[999B",
+        .cursor = .{ 127, 0 },
+        .used = 1,
+    },
+    .{
+        .name = "CUF (C) moves right n columns and keeps the row",
+        .input = "A\x1b[5C",
+        .lines = &.{"A"},
+        .cursor = .{ 0, 6 },
+        .used = 1,
+    },
+    .{
+        .name = "CUF clamps at the last column",
+        .input = "A\x1b[999C",
+        .cursor = .{ 0, 79 },
+        .used = 1,
+    },
+    .{
+        .name = "CUB (D) moves left n columns and keeps the row",
+        .input = "\x1b[1;20H\x1b[3D",
+        .cursor = .{ 0, 16 },
+        .used = 1,
+    },
+    .{
+        .name = "CUB clamps at column 0",
+        .input = "A\x1b[999D",
+        .cursor = .{ 0, 0 },
+        .used = 1,
+    },
+    .{
+        // Like CUP: a zero (or missing) motion param falls back to 1.
+        .name = "zero and missing motion params default to 1",
+        .input = "\x1b[5;5H\x1b[0A\x1b[A",
+        .cursor = .{ 2, 4 },
+        .used = 5,
+    },
+    .{
+        // CNL/CPL are NOT "down/up and keep the column": the column
+        // resets to 0 (a Charm header/footer layout depends on this).
+        .name = "CNL (E) moves down n rows and resets the column",
+        .input = "ABC\x1b[2E",
+        .lines = &.{"ABC"},
+        .cursor = .{ 2, 0 },
+        .used = 1,
+    },
+    .{
+        .name = "CNL clamps at the last grid row",
+        .input = "\x1b[999E",
+        .cursor = .{ 127, 0 },
+        .used = 1,
+    },
+    .{
+        .name = "CPL (F) moves up n rows and resets the column",
+        .input = "\x1b[5;10H\x1b[2F",
+        .cursor = .{ 2, 0 },
+        .used = 5,
+    },
+    .{
+        .name = "CPL clamps at row 0",
+        .input = "\x1b[5;10H\x1b[99F",
+        .cursor = .{ 0, 0 },
+        .used = 5,
+    },
+    .{
+        .name = "CHA (G) sets a 1-based absolute column",
+        .input = "AB\x1b[5G",
+        .lines = &.{"AB"},
+        .cursor = .{ 0, 4 },
+        .used = 1,
+    },
+    .{
+        .name = "out-of-range CHA clamps to the last column",
+        .input = "AB\x1b[999G",
+        .cursor = .{ 0, 79 },
+        .used = 1,
+    },
+    .{
+        .name = "zero CHA param defaults to 1 (column 0)",
+        .input = "AB\x1b[0G",
+        .cursor = .{ 0, 0 },
+        .used = 1,
+    },
+    .{
+        .name = "VPA (d) sets a 1-based absolute row and grows used like CUP",
+        .input = "\x1b[7d",
+        .cursor = .{ 6, 0 },
+        .used = 7,
+    },
+    .{
+        .name = "VPA keeps the column and clamps at the last grid row",
+        .input = "ABC\x1b[999d",
+        .lines = &.{"ABC"},
+        .cursor = .{ 127, 3 },
+        .used = 128,
+    },
+    .{
+        // xterm rule: the motion finals read param 0 only and never
+        // touch the rendition.
+        .name = "motion finals ignore extra params and leave the rendition",
+        .input = "\x1b[1;31m\x1b[5;5H\x1b[1;3A",
+        .cursor = .{ 3, 4 },
+        .used = 5,
+        .rendition = .{ .fg = 1, .bold = true },
+    },
+    .{
+        // A pending wrap (col == cols) is cancelled by a motion: the row
+        // move stands the cursor back on the last column — and CUD below
+        // the used tail still does not materialise the row.
+        .name = "CUD from a pending wrap cancels it and still moves rows",
+        .input = &a80 ++ "\x1b[B",
+        .lines = &.{&a80},
+        .cursor = .{ 1, 79 },
+        .used = 1,
+    },
+    .{
+        .name = "CUB from a pending wrap cancels it without moving further",
+        .input = &a80 ++ "\x1b[D",
+        .lines = &.{&a80},
+        .cursor = .{ 0, 79 },
+        .used = 1,
+    },
+    .{
+        .name = "CUF from a pending wrap stays on the last column",
+        .input = &a80 ++ "\x1b[C",
+        .lines = &.{&a80},
+        .cursor = .{ 0, 79 },
+        .used = 1,
+    },
+    .{
+        // The only growth path for a relative motion's target row: a
+        // WRITE materialises the rows up to the cursor.
+        .name = "a write below the used tail materialises the rows up to it",
+        .input = "\x1b[3BX",
+        .lines = &.{ "", "", "", "X" },
+        .cursor = .{ 3, 1 },
+        .used = 4,
+    },
+    .{
+        // Erasing a row that is already blank is not a write: the row
+        // stays unmaterialised (nothing to project).
+        .name = "an erase below the used tail does not materialise the row",
+        .input = "\x1b[3B\x1b[2K",
+        .cursor = .{ 3, 0 },
+        .used = 1,
+    },
+    // ---- M80a: REP (CSI b) repeats the last printed rune. ----
+    .{
+        .name = "REP (b) repeats the last printed rune n more times",
+        .input = "a\x1b[3b",
+        .lines = &.{"aaaa"},
+        .cursor = .{ 0, 4 },
+        .used = 1,
+    },
+    .{
+        .name = "zero and missing REP params repeat once",
+        .input = "a\x1b[0b\x1b[b",
+        .lines = &.{"aaa"},
+        .cursor = .{ 0, 3 },
+        .used = 1,
+    },
+    .{
+        .name = "REP with no prior print is a no-op",
+        .input = "\x1b[3bX",
+        .lines = &.{"X"},
+        .cursor = .{ 0, 1 },
+        .used = 1,
+    },
+    .{
+        // Stream state, not cell state: a cursor motion between the print
+        // and the REP does not reset it, and the repeats land at the
+        // cursor, not behind it.
+        .name = "REP survives a cursor motion",
+        .input = "a\x1b[5C\x1b[2b",
+        .lines = &.{"a     aa"},
+        .cursor = .{ 0, 8 },
+        .used = 1,
+    },
+    .{
+        // xterm behaviour, pinned on purpose: the pending wrap fires on
+        // the FIRST repeat (REP routes through putRune, never a direct
+        // cell write).
+        .name = "REP with a pending wrap wraps on the first repeat",
+        .input = &a80 ++ "\x1b[3b",
+        .lines = &.{ &a80, "aaa" },
+        .cursor = .{ 1, 3 },
+        .used = 2,
+    },
+    .{
+        .name = "REP repeats a wide rune as a whole pair",
+        .input = "\xe4\xbd\xa0\x1b[2b",
+        .lines = &.{"\x00\x00\x00\x00\x00\x00"},
+        .cursor = .{ 0, 6 },
+        .used = 1,
+        .cells = &.{
+            .{ .row = 0, .col = 0, .base = 0x4F60 },
+            .{ .row = 0, .col = 2, .base = 0x4F60 },
+            .{ .row = 0, .col = 3, .base = ' ', .cont = 1 },
+            .{ .row = 0, .col = 4, .base = 0x4F60 },
+            .{ .row = 0, .col = 5, .base = ' ', .cont = 1 },
+        },
+    },
+    .{
+        // REP re-places the stored rune VERBATIM: its stored rendition
+        // wins over the current one (the truecolour side channels follow
+        // the current state, like any placement).
+        .name = "REP repeats the stored rendition, not the current one",
+        .input = "\x1b[31mz\x1b[0m\x1b[2b",
+        .lines = &.{"zzz"},
+        .cursor = .{ 0, 3 },
+        .used = 1,
+        .styles = &.{
+            .{ .row = 0, .col = 0, .fg = 1 },
+            .{ .row = 0, .col = 1, .fg = 1 },
+            .{ .row = 0, .col = 2, .fg = 1 },
+        },
     },
     .{
         .name = "ED 2 clears the grid, homes the cursor, used = 1",
