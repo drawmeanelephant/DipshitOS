@@ -24,6 +24,12 @@
 //!       * M80a (#1712) landed its cursor-motion and REP rows in the CSI
 //!         group next to the `H`/`f` rows — no existing row flipped (the
 //!         "unknown CSI final" pin uses `Z`, which stays unknown).
+//!       * M80b (#1713) landed its insert/delete/erase rows (@/P/X/L/M/
+//!         S/T) and the ED 3 row at the end of the CSI group — no
+//!         existing row flipped (ED 3 was lumped with ED 2 and unpinned).
+//!         The history half of ED 3 cannot live here (a corpus `Screen`
+//!         has no history bank): it is pinned by registry tests in
+//!         terminal.zig, the M73i mode-table precedent.
 //!   - A row that DISAGREES with the code is wrong — or you found a bug.
 //!     The bug goes in a comment or an issue, never a silent "fix" inside
 //!     an unrelated parser card (M73g's non-goal; see the ESC group for a
@@ -163,6 +169,9 @@ fn runAll(cases: []const Case) !void {
 // Repeated inputs (comptime) so the tables stay readable.
 const a80: [80]u8 = [_]u8{'a'} ** 80;
 const a79: [79]u8 = [_]u8{'a'} ** 79;
+/// M80b: three spaces + 77 `a`s — an ICH that shoves 3 cells off the
+/// right margin of a full row.
+const spaces3_a77: [80]u8 = [_]u8{' '} ** 3 ++ [_]u8{'a'} ** 77;
 
 // ---------------------------------------------------------------------------
 // Group A — ASCII control and line discipline.
@@ -595,6 +604,238 @@ const csi_cases = [_]Case{
         .input = "ABC\x1b[2K",
         .lines = &.{""},
         .cursor = .{ 0, 3 },
+    },
+    // ---- M80b (#1713): insert/delete/erase finals — chars @/P/X, lines
+    // L/M, scroll S/T, and ED 3. Blanks are the erase default (empty
+    // cell + default rendition — the grid erases to the default, never
+    // the current SGR); moved cells carry their own rendition with them.
+    // The cursor is never touched except IL/DL, which take it to the
+    // left margin (xterm's VT102-compatible IL/DL — xterm changelog:
+    // "modify IL/DL to set cursor to first column on row"). A row edit
+    // at a pending wrap (col == cols) acts on the last column (BS
+    // parity), and an edit below the used tail is a no-op (the M80a
+    // rule: a row materialises on write, never on edit).
+    .{
+        .name = "ICH (@) inserts blanks at the cursor and slides the tail right",
+        .input = "abcdef\x1b[1;3H\x1b[2@",
+        .lines = &.{"ab  cdef"},
+        .cursor = .{ 0, 2 },
+    },
+    .{
+        .name = "ICH drops cells past the right margin",
+        .input = &a79 ++ "Z\x1b[1;1H\x1b[3@",
+        .lines = &.{&spaces3_a77},
+        .cursor = .{ 0, 0 },
+    },
+    .{
+        .name = "zero and missing ICH params insert one blank",
+        .input = "abcd\x1b[1;2H\x1b[0@\x1b[@",
+        .lines = &.{"a  bcd"},
+        .cursor = .{ 0, 1 },
+    },
+    .{
+        // The slide moves stored renditions with their cells; the
+        // inserted blank is default-styled (an erase default, not BCE).
+        .name = "ICH slides stored renditions right; the blank is default",
+        .input = "\x1b[31mabc\x1b[0m\x1b[1;2H\x1b[1@",
+        .lines = &.{"a bc"},
+        .cursor = .{ 0, 1 },
+        .styles = &.{
+            .{ .row = 0, .col = 0, .fg = 1 },
+            .{ .row = 0, .col = 1, .default_exact = true },
+            .{ .row = 0, .col = 2, .fg = 1 },
+            .{ .row = 0, .col = 3, .fg = 1 },
+        },
+    },
+    .{
+        // House rule (M73a-1): the slide never splits a wide pair — the
+        // insert point steps back to the pair's base so it moves whole.
+        .name = "ICH slides a straddling wide pair as a whole",
+        .input = "A\xe4\xbd\xa0B\x1b[1;2H\x1b[1@",
+        .lines = &.{"A \x00\x00B"},
+        .cursor = .{ 0, 1 },
+        .cells = &.{
+            .{ .row = 0, .col = 1, .base = ' ' },
+            .{ .row = 0, .col = 2, .base = 0x4F60 },
+            .{ .row = 0, .col = 3, .base = ' ', .cont = 1 },
+            .{ .row = 0, .col = 4, .base = 'B' },
+        },
+    },
+    .{
+        .name = "DCH (P) deletes chars at the cursor and pulls the tail left",
+        .input = "abcdef\x1b[1;3H\x1b[2P",
+        .lines = &.{"abef"},
+        .cursor = .{ 0, 2 },
+    },
+    .{
+        .name = "DCH past the row end shortens the line to the cursor",
+        .input = "abcdef\x1b[1;5H\x1b[4P",
+        .lines = &.{"abcd"},
+        .cursor = .{ 0, 4 },
+    },
+    .{
+        .name = "zero and missing DCH params delete one char",
+        .input = "abc\x1b[1;2H\x1b[0P\x1b[P",
+        .lines = &.{"a"},
+        .cursor = .{ 0, 1 },
+    },
+    .{
+        // A delete range that would split a wide pair extends over the
+        // pair edge (eraseLine's rule) — the pair goes WHOLE.
+        .name = "DCH deletes a straddling wide pair whole",
+        .input = "A\xe4\xbd\xa0B\x1b[1;2H\x1b[1P",
+        .lines = &.{"AB"},
+        .cursor = .{ 0, 1 },
+    },
+    .{
+        .name = "DCH at a pair's continuation deletes the pair whole",
+        .input = "A\xe4\xbd\xa0B\x1b[1;3H\x1b[1P",
+        .lines = &.{"AB"},
+        .cursor = .{ 0, 2 },
+    },
+    .{
+        .name = "ECH (X) erases cells in place without shifting the tail",
+        .input = "abcdef\x1b[1;3H\x1b[2X",
+        .lines = &.{"ab  ef"},
+        .cursor = .{ 0, 2 },
+    },
+    .{
+        .name = "ECH to the row end trims the line length",
+        .input = "abcdef\x1b[1;4H\x1b[9X",
+        .lines = &.{"abc"},
+        .cursor = .{ 0, 3 },
+    },
+    .{
+        // Two ECHs at the same un-moving cursor erase the same cell.
+        .name = "zero and missing ECH params erase one cell; the cursor stays",
+        .input = "abcdef\x1b[1;3H\x1b[0X\x1b[X",
+        .lines = &.{"ab def"},
+        .cursor = .{ 0, 2 },
+    },
+    .{
+        .name = "ECH erases a straddling wide pair whole",
+        .input = "A\xe4\xbd\xa0B\x1b[1;2H\x1b[1X",
+        .lines = &.{"A  B"},
+        .cursor = .{ 0, 1 },
+    },
+    .{
+        // A row edit from a pending wrap acts on the LAST column and
+        // resolves the wrap (BS parity) — the edit itself never wraps.
+        .name = "ECH from a pending wrap edits the last column",
+        .input = &a80 ++ "\x1b[2X",
+        .lines = &.{&a79},
+        .cursor = .{ 0, 79 },
+        .used = 1,
+    },
+    .{
+        .name = "ICH below the used tail is a no-op",
+        .input = "\x1b[3B\x1b[2@",
+        .cursor = .{ 3, 0 },
+        .used = 1,
+    },
+    .{
+        .name = "IL (L) inserts a blank line at the cursor and pushes rows down",
+        .input = "AA\r\nBB\r\nCC\x1b[2;1H\x1b[L",
+        .lines = &.{ "AA", "", "BB", "CC" },
+        .cursor = .{ 1, 0 },
+        .used = 4,
+    },
+    .{
+        // Rows pushed past the bottom of the grid are dropped (no
+        // scrollback for the bottom edge) — one row survives onto the
+        // last grid line.
+        .name = "IL past the bottom of the grid drops the pushed rows",
+        .input = "AA\r\nBB\x1b[2;1H\x1b[126L",
+        .lines = &.{"AA"},
+        .cursor = .{ 1, 0 },
+        .used = 128,
+        .cells = &.{
+            .{ .row = 127, .col = 0, .base = 'B' },
+            .{ .row = 127, .col = 1, .base = 'B' },
+        },
+    },
+    .{
+        .name = "IL below the used tail is a no-op",
+        .input = "\x1b[3B\x1b[2L",
+        .cursor = .{ 3, 0 },
+        .used = 1,
+    },
+    .{
+        .name = "DL (M) deletes lines at the cursor and pulls rows up",
+        .input = "AA\r\nBB\r\nCC\x1b[2;1H\x1b[M",
+        .lines = &.{ "AA", "CC" },
+        .cursor = .{ 1, 0 },
+        .used = 2,
+    },
+    .{
+        .name = "DL past the bottom empties the rows at and below the cursor",
+        .input = "AA\r\nBB\x1b[1;1H\x1b[999M",
+        .lines = &.{""},
+        .cursor = .{ 0, 0 },
+        .used = 1,
+    },
+    .{
+        .name = "zero and missing DL params delete one line",
+        .input = "AA\r\nBB\r\nCC\x1b[2;1H\x1b[0M\x1b[M",
+        .lines = &.{"AA"},
+        .cursor = .{ 1, 0 },
+        .used = 1,
+    },
+    .{
+        .name = "SU (S) scrolls the grid up and drops the top row",
+        .input = "AA\r\nBB\r\nCC\x1b[S",
+        .lines = &.{ "BB", "CC" },
+        .cursor = .{ 2, 2 },
+        .used = 2,
+    },
+    .{
+        .name = "zero and missing SU params scroll one row",
+        .input = "AA\r\nBB\r\nCC\r\nDD\x1b[0S\x1b[S",
+        .lines = &.{ "CC", "DD" },
+        .cursor = .{ 3, 2 },
+        .used = 2,
+    },
+    .{
+        // xterm: SU/SD never touch the cursor — a pending wrap survives
+        // (only IL/DL take the cursor to the left margin).
+        .name = "SU from a pending wrap leaves the cursor put",
+        .input = &a80 ++ "\x1b[S",
+        .lines = &.{""},
+        .cursor = .{ 0, 80 },
+        .used = 1,
+    },
+    .{
+        .name = "SD (T) scrolls the grid down and inserts a blank top row",
+        .input = "AA\r\nBB\x1b[T",
+        .lines = &.{ "", "AA", "BB" },
+        .cursor = .{ 1, 2 },
+        .used = 3,
+    },
+    .{
+        .name = "zero and missing SD params scroll one row",
+        .input = "AA\r\nBB\x1b[0T\x1b[T\x1b[T",
+        .lines = &.{ "", "", "", "AA", "BB" },
+        .cursor = .{ 1, 2 },
+        .used = 5,
+    },
+    .{
+        // CSI Ps;Ps;Ps;Ps;Ps T is XTHIMOUSE (highlight tracking), not SD
+        // — unsupported here, so consumed and never painted (M80 rule).
+        .name = "five-parameter CSI T is XTHIMOUSE — consumed, never painted",
+        .input = "AA\x1b[1;2;3;4;5T",
+        .lines = &.{"AA"},
+        .cursor = .{ 0, 2 },
+        .used = 1,
+    },
+    .{
+        // ED 3 is "Erase Saved Lines" (xterm ctlseqs #411): the grid and
+        // the cursor are untouched. The history half is pinned by
+        // registry tests in terminal.zig — a corpus Screen has no bank.
+        .name = "ED 3 leaves the grid and the cursor untouched",
+        .input = "HELLO\x1b[1;3H\x1b[3J",
+        .lines = &.{"HELLO"},
+        .cursor = .{ 0, 2 },
+        .used = 1,
     },
 };
 

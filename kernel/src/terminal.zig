@@ -741,13 +741,257 @@ pub const Screen = struct {
                 while (row < self.cur) : (row += 1) self.clearLine(row);
                 self.eraseLine(1);
             },
-            2, 3 => self.clearScreen(),
+            2 => self.clearScreen(),
+            // M80b (#1713): ED 3 is "Erase Saved Lines" (xterm ctlseqs
+            // #411) — it was lumped with ED 2 here and unpinned.
+            3 => self.clearScrollback(),
             else => {
                 self.eraseLine(0);
                 var row = self.cur + 1;
                 while (row < self.used) : (row += 1) self.clearLine(row);
             },
         }
+    }
+
+    /// M80b (#1713): blank one cell to the erase default — the grid
+    /// erases to the presentation default (eraseLine's rule), never to
+    /// the current rendition (the grid is not BCE).
+    fn blankCell(self: *Screen, row: usize, col: usize) void {
+        self.cells[row][col] = empty_cell;
+        self.styles[row][col] = default_cell_style;
+        self.fg_rgb[row][col] = empty_rgb;
+        self.bg_rgb[row][col] = empty_rgb;
+    }
+
+    /// M80b: move one grid row wholesale (cells, styles, truecolour side
+    /// arrays, length). Wide pairs never straddle rows, so a row copy
+    /// cannot tear one.
+    fn copyRow(self: *Screen, from: usize, to: usize) void {
+        self.cells[to] = self.cells[from];
+        self.styles[to] = self.styles[from];
+        self.lens[to] = self.lens[from];
+        self.fg_rgb[to] = self.fg_rgb[from];
+        self.bg_rgb[to] = self.bg_rgb[from];
+    }
+
+    /// M80b: ED 3 — "Erase Saved Lines" (xterm). The grid and the cursor
+    /// are untouched: the HISTORY goes (ring counters reset, the view
+    /// snaps back to the tail). The scan overlay is resolved BEFORE the
+    /// counters reset (searchExit — its restore is keyed by absolute
+    /// identity, which the reset would re-point at innocent rows): a
+    /// covered grid row gets its true content back (ED 3 never destroys
+    /// grid rows), a covered history row lands in the ring that dies on
+    /// the next line. Nothing can resurrect a cleared row afterwards —
+    /// the stash is gone with the scan. History belongs to the primary
+    /// screen (M73k), so ED 3 on the alternate screen is consumed and
+    /// changes nothing (pinned).
+    fn clearScrollback(self: *Screen) void {
+        if (self.alt_active) return;
+        self.searchExit();
+        self.hist_count = 0;
+        self.hist_start = 0;
+        self.hist_dropped = 0;
+        self.view = 0;
+    }
+
+    /// M80b: IL/DL/SU/SD restructure rows. The scan overlay is resolved
+    /// FIRST (searchExit — the stash must land before the rows move, or
+    /// the restore would write pre-slide content into post-slide rows)
+    /// and the selection goes: its absolute endpoints cannot follow
+    /// content through a slide (clearScreen's precedent).
+    fn prepareRowSlide(self: *Screen) void {
+        self.searchExit();
+        self.clearSelection();
+    }
+
+    /// M80b: a row-structure change moves `used` — and with it
+    /// `lineCount()`. Under a pinned (scrolled-back) view the window's
+    /// BOTTOM must stay put (M73k's rule): view counts from the tail, so
+    /// it follows the line count's delta exactly — growth and shrinkage.
+    fn noteLineCountChange(self: *Screen, before: usize) void {
+        if (self.view == 0) return;
+        const after = self.lineCount();
+        if (after >= before) {
+            self.view += after - before;
+            const max_view = self.lineCount() - 1;
+            if (self.view > max_view) self.view = max_view;
+        } else {
+            self.view -|= (before - after);
+        }
+    }
+
+    /// M80b: CSI @ (ICH) — insert n blanks at the cursor and slide the
+    /// tail right; cells pushed past the right margin are dropped. The
+    /// slide never splits a wide pair (the insert point steps back to
+    /// the pair's base) and a pair cut by the right margin is dropped
+    /// WHOLE (its surviving base is blanked). Moved cells carry their
+    /// own rendition; the blanks are the erase default. The cursor stays
+    /// put — at a pending wrap it stands on the last column (BS parity)
+    /// — and an edit below the used tail is a no-op (M80a's rule: a row
+    /// materialises on write, never on edit).
+    fn insertChars(self: *Screen, n: u16) void {
+        self.cancelPendingWrap();
+        if (self.cur >= self.used) return;
+        const w = self.cols;
+        var start = self.col;
+        if (self.cells[self.cur][start].cont != 0) start -= 1;
+        const count: usize = @min(@as(usize, n), w);
+        const drop: usize = w - count;
+        const cut_pair = count > 0 and drop > start and self.cells[self.cur][drop].cont != 0;
+        if (start + count < w) {
+            var i: usize = w;
+            while (i > start + count) {
+                i -= 1;
+                self.cells[self.cur][i] = self.cells[self.cur][i - count];
+                self.styles[self.cur][i] = self.styles[self.cur][i - count];
+                self.fg_rgb[self.cur][i] = self.fg_rgb[self.cur][i - count];
+                self.bg_rgb[self.cur][i] = self.bg_rgb[self.cur][i - count];
+            }
+        }
+        var j: usize = start;
+        while (j < start + count and j < w) : (j += 1) self.blankCell(self.cur, j);
+        if (cut_pair) self.blankCell(self.cur, w - 1);
+        if (start < self.lens[self.cur]) {
+            self.lens[self.cur] = @min(self.lens[self.cur] + count, w);
+        }
+    }
+
+    /// M80b: CSI P (DCH) — delete n cells at the cursor and pull the
+    /// tail left; the right end fills with erase-default blanks. A
+    /// delete range that would split a wide pair extends over the pair
+    /// edge (eraseLine's rule) — the pair goes WHOLE. The cursor stays
+    /// put (pending wrap as above), and a delete below the tail is a
+    /// no-op.
+    fn deleteChars(self: *Screen, n: u16) void {
+        self.cancelPendingWrap();
+        if (self.cur >= self.used) return;
+        const w = self.cols;
+        var start = self.col;
+        if (self.cells[self.cur][start].cont != 0) start -= 1;
+        var end = @min(self.col + @as(usize, n), w);
+        if (end < w and self.cells[self.cur][end].cont != 0) end += 1;
+        const m = end - start;
+        {
+            var i: usize = start;
+            while (i + m < w) : (i += 1) {
+                self.cells[self.cur][i] = self.cells[self.cur][i + m];
+                self.styles[self.cur][i] = self.styles[self.cur][i + m];
+                self.fg_rgb[self.cur][i] = self.fg_rgb[self.cur][i + m];
+                self.bg_rgb[self.cur][i] = self.bg_rgb[self.cur][i + m];
+            }
+        }
+        var j: usize = w - m;
+        while (j < w) : (j += 1) self.blankCell(self.cur, j);
+        if (start < self.lens[self.cur]) {
+            self.lens[self.cur] = @max(start, self.lens[self.cur] -| m);
+        }
+    }
+
+    /// M80b: CSI X (ECH) — erase n cells at the cursor IN PLACE (no
+    /// slide) to the erase default; the range extends over wide-pair
+    /// edges like eraseLine, and the length trims when the erase reaches
+    /// the row end. The cursor stays put (pending wrap as above).
+    fn eraseChars(self: *Screen, n: u16) void {
+        self.cancelPendingWrap();
+        if (self.cur >= self.used) return;
+        const w = self.cols;
+        var start = self.col;
+        var end = @min(self.col + @as(usize, n), w);
+        if (start > 0 and self.cells[self.cur][start].cont != 0) start -= 1;
+        if (end < w and self.cells[self.cur][end].cont != 0) end += 1;
+        var i: usize = start;
+        while (i < end) : (i += 1) self.blankCell(self.cur, i);
+        if (start < self.lens[self.cur] and end >= self.lens[self.cur]) {
+            self.lens[self.cur] = start;
+        }
+    }
+
+    /// M80b: CSI L (IL) — insert n blank rows at the cursor row; rows at
+    /// and below slide down, and rows pushed past the bottom of the grid
+    /// are dropped (the bottom edge has no scrollback). The cursor goes
+    /// to the LEFT MARGIN — xterm's VT102-compatible IL/DL (xterm
+    /// changelog: "modify IL/DL to set cursor to first column on row").
+    /// Below the used tail there is nothing to slide: a no-op.
+    fn insertLines(self: *Screen, n: u16) void {
+        if (self.cur >= self.used) return;
+        self.prepareRowSlide();
+        const before = self.lineCount();
+        const cnt: usize = n;
+        if (self.cur + cnt < grid_lines) {
+            var i: usize = grid_lines;
+            while (i > self.cur + cnt) {
+                i -= 1;
+                self.copyRow(i - cnt, i);
+            }
+        }
+        var j: usize = self.cur;
+        while (j < @min(self.cur + cnt, grid_lines)) : (j += 1) self.clearLine(j);
+        self.col = 0;
+        const fit = grid_lines -| (self.cur + cnt);
+        const keep = @min(self.used - self.cur, fit);
+        self.used = @max(1, if (keep == 0) self.cur else self.cur + cnt + keep);
+        self.noteLineCountChange(before);
+    }
+
+    /// M80b: CSI M (DL) — delete the n rows at the cursor row; rows
+    /// below slide up and the vacated rows at the bottom blank. Cursor
+    /// to the left margin (xterm IL/DL). Below the used tail: a no-op.
+    fn deleteLines(self: *Screen, n: u16) void {
+        if (self.cur >= self.used) return;
+        self.prepareRowSlide();
+        const before = self.lineCount();
+        const m = @min(@as(usize, n), grid_lines - self.cur);
+        var i: usize = self.cur;
+        while (i + m < grid_lines) : (i += 1) self.copyRow(i + m, i);
+        var j: usize = grid_lines - m;
+        while (j < grid_lines) : (j += 1) self.clearLine(j);
+        self.col = 0;
+        self.used = @max(1, @max(self.cur, self.used -| m));
+        self.noteLineCountChange(before);
+    }
+
+    /// M80b: CSI S (SU) — scroll the grid up n rows: the top row leaves
+    /// through the TOP edge into the history ring, exactly like an LF
+    /// scroll, and the bottom row blanks. The cursor is never touched
+    /// (xterm) — a pending wrap survives. The work saturates at
+    /// `used + history_lines` scrolls: past that every pushed row is
+    /// blank landing on blank — the same end state any larger n reaches
+    /// (a full ring of blanks over a blank grid), without letting a
+    /// hostile `CSI 65535 S` turn into gigabytes of row copies.
+    fn scrollUp(self: *Screen, n: u16) void {
+        self.prepareRowSlide();
+        const before = self.lineCount();
+        const k = @min(@as(usize, n), self.used + history_lines);
+        var sc: usize = 0;
+        while (sc < k) : (sc += 1) {
+            self.pushHistory();
+            var i: usize = 0;
+            while (i + 1 < grid_lines) : (i += 1) self.copyRow(i + 1, i);
+            self.clearLine(grid_lines - 1);
+        }
+        self.used = @max(1, self.used -| k);
+        self.noteLineCountChange(before);
+    }
+
+    /// M80b: CSI T (SD) — scroll the grid down n rows: blank rows enter
+    /// at the top and rows pushed past the BOTTOM edge are dropped (SD
+    /// never pulls from the history ring — scrollback grows at the top
+    /// edge only). The cursor is never touched (xterm).
+    fn scrollDown(self: *Screen, n: u16) void {
+        self.prepareRowSlide();
+        const before = self.lineCount();
+        const k = @min(@as(usize, n), grid_lines);
+        var i: usize = grid_lines;
+        while (i > k) {
+            i -= 1;
+            self.copyRow(i - k, i);
+        }
+        var j: usize = 0;
+        while (j < k) : (j += 1) self.clearLine(j);
+        const fit = grid_lines -| k;
+        const keep = @min(self.used, fit);
+        self.used = if (keep == 0) 1 else k + keep;
+        self.noteLineCountChange(before);
     }
 
     fn moveCursor(self: *Screen, row_one_based: u16, col_one_based: u16) void {
@@ -941,6 +1185,23 @@ pub const Screen = struct {
             },
             'd' => self.moveCursor(self.csiParam(0, 1), @intCast(self.col + 1)),
             'b' => self.repeatLast(self.csiParam(0, 1)),
+            // M80b (#1713): insert/delete/erase finals. @/P/X act at the
+            // cursor on its row (a pending wrap stands on the last
+            // column); L/M insert/delete whole rows and take the cursor
+            // to the left margin (xterm's VT102-compatible IL/DL); S/T
+            // scroll the grid and never touch the cursor. Only param 0
+            // is read — except T, where a five-parameter form is
+            // XTHIMOUSE (highlight tracking), not SD: unsupported here,
+            // so consumed and never painted (the M80 rule).
+            '@' => self.insertChars(self.csiParam(0, 1)),
+            'P' => self.deleteChars(self.csiParam(0, 1)),
+            'X' => self.eraseChars(self.csiParam(0, 1)),
+            'L' => self.insertLines(self.csiParam(0, 1)),
+            'M' => self.deleteLines(self.csiParam(0, 1)),
+            'S' => self.scrollUp(self.csiParam(0, 1)),
+            'T' => {
+                if (self.csi_count == 1) self.scrollDown(self.csiParam(0, 1));
+            },
             else => {},
         }
     }
@@ -3970,6 +4231,117 @@ test "terminal: search is rune-aware — accented match, non-ASCII exact (#1637)
     try std.testing.expect(s.searchOpen());
     try std.testing.expectEqual(@as(usize, 0), s.searchFeed(.{ .ch = '\u{c9}' }).?);
     _ = s.searchFeed(.esc);
+}
+
+test "terminal: ED 3 erases saved lines only; nothing resurrects them (#1713)" {
+    for (&terminals) |*t| t.reset();
+    for (&screens) |*sc| sc.reset();
+    const h = create(7) orelse return error.TestUnexpectedResult;
+    const t = get(h).?;
+    try std.testing.expect(t.attachWindow(7));
+    const s = screenForWindow(7).?;
+    var i: usize = 0;
+    while (i < 140) : (i += 1) {
+        var b: [16]u8 = undefined;
+        const row = std.fmt.bufPrint(&b, "L{d:0>3}\n", .{i}) catch unreachable;
+        s.feed(row);
+    }
+    try std.testing.expect(s.hist_count > 0);
+    // A scan parks the prompt bar over a row and stashes that row's
+    // content keyed by absolute identity.
+    try std.testing.expect(s.searchOpen());
+    _ = s.searchFeed(.{ .ch = 'L' });
+    try std.testing.expect(s.searchActive());
+    s.feed("\x1b[3J");
+    // The scan resolved BEFORE the counters reset: its covered row keeps
+    // its true content and the stash is gone, so no later restore can
+    // re-point cleared-row bytes at innocent rows.
+    try std.testing.expect(!s.searchActive());
+    try std.testing.expectEqual(@as(usize, 0), s.hist_count);
+    try std.testing.expectEqual(@as(usize, 0), s.hist_start);
+    try std.testing.expectEqual(@as(usize, 0), s.hist_dropped);
+    try std.testing.expectEqual(@as(usize, 0), s.viewOffset());
+    try std.testing.expectEqual(@as(usize, grid_lines), s.lineCount());
+    // The grid survives untouched: the newest row is still itself and no
+    // bar chrome was left behind on any row.
+    try std.testing.expectEqualStrings("L139", s.line(126));
+    for (0..grid_lines) |r| {
+        try std.testing.expect(!std.mem.startsWith(u8, s.line(r), "> "));
+    }
+}
+
+test "terminal: ED 3 on the alternate screen leaves the primary scrollback alone (#1713)" {
+    for (&terminals) |*t| t.reset();
+    for (&screens) |*sc| sc.reset();
+    const h = create(7) orelse return error.TestUnexpectedResult;
+    const t = get(h).?;
+    try std.testing.expect(t.attachWindow(7));
+    const s = screenForWindow(7).?;
+    var i: usize = 0;
+    while (i < 140) : (i += 1) {
+        var b: [16]u8 = undefined;
+        const row = std.fmt.bufPrint(&b, "N{d:0>3}\n", .{i}) catch unreachable;
+        s.feed(row);
+    }
+    const hist_before = s.hist_count;
+    try std.testing.expect(hist_before > 0);
+    s.feed("\x1b[?1049h");
+    s.feed("\x1b[3J"); // consumed on the alt screen — history lives below
+    try std.testing.expectEqual(hist_before, s.hist_count);
+    s.feed("\x1b[?1049l");
+    try std.testing.expectEqual(hist_before, s.hist_count);
+    try std.testing.expectEqualStrings("N000", s.line(0));
+}
+
+test "terminal: SU feeds history like an LF scroll; SD never pulls from it (#1713)" {
+    for (&terminals) |*t| t.reset();
+    for (&screens) |*sc| sc.reset();
+    const h = create(7) orelse return error.TestUnexpectedResult;
+    const t = get(h).?;
+    try std.testing.expect(t.attachWindow(7));
+    const s = screenForWindow(7).?;
+    s.feed("A\nB\nC");
+    s.feed("\x1b[2S");
+    // The two top rows left through the TOP edge — into the ring, same
+    // as an LF scroll; the grid holds only "C".
+    try std.testing.expectEqual(@as(usize, 2), s.hist_count);
+    try std.testing.expectEqualStrings("A", s.line(0));
+    try std.testing.expectEqualStrings("B", s.line(1));
+    try std.testing.expectEqualStrings("C", s.line(2));
+    // SD slides content down: a blank enters at the top, the bottom row
+    // is dropped (no scrollback for the bottom edge), and the ring is
+    // NOT consulted.
+    s.feed("\x1b[T");
+    try std.testing.expectEqual(@as(usize, 2), s.hist_count);
+    try std.testing.expectEqualStrings("", s.line(2));
+    try std.testing.expectEqualStrings("C", s.line(3));
+}
+
+test "terminal: IL/DL/SU/SD pin a scrolled-back view to its bottom (#1713)" {
+    for (&terminals) |*t| t.reset();
+    for (&screens) |*sc| sc.reset();
+    const h = create(7) orelse return error.TestUnexpectedResult;
+    const t = get(h).?;
+    try std.testing.expect(t.attachWindow(7));
+    const s = screenForWindow(7).?;
+    var i: usize = 0;
+    while (i < 200) : (i += 1) {
+        var b: [16]u8 = undefined;
+        const row = std.fmt.bufPrint(&b, "V{d:0>3}\n", .{i}) catch unreachable;
+        s.feed(row);
+    }
+    s.scrollBy(5);
+    const bottom = s.lineCount() - s.viewOffset();
+    const ops = [_][]const u8{
+        "\x1b[2;1H\x1b[3L",
+        "\x1b[3;1H\x1b[2M",
+        "\x1b[2S",
+        "\x1b[2T",
+    };
+    for (ops) |seq| {
+        s.feed(seq);
+        try std.testing.expectEqual(bottom, s.lineCount() - s.viewOffset());
+    }
 }
 
 test "terminal: selection copies across lines and normalizes direction" {
