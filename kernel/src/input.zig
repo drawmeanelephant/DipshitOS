@@ -35,8 +35,9 @@ const klog = @import("klog.zig"); // M49 SD5 (#1132): the terminal copy audit li
 
 pub const max_fifo: usize = 64;
 
-/// The longest key sequence the keymap can produce (Delete's `ESC [ 3 ~`).
-pub const max_key_bytes: usize = 4;
+/// The longest key sequence the keymap can produce (a modified function key
+/// or Insert, e.g. `ESC [ 15;5~`).
+pub const max_key_bytes: usize = 7;
 
 /// HID keyboard boot-protocol modifier bit masks.
 const mod_lctrl: u8 = 0x01;
@@ -181,54 +182,116 @@ pub fn hid_to_ascii(usage: u8, shift: bool) ?u8 {
     };
 }
 
-/// Decode one HID keyboard usage (with shift/ctrl modifiers) into 0-4
+fn navFinal(usage: u8) ?u8 {
+    return switch (usage) {
+        0x4f => 'C', // Right
+        0x50 => 'D', // Left
+        0x51 => 'B', // Down
+        0x52 => 'A', // Up
+        0x4a => 'H', // Home
+        0x4d => 'F', // End
+        else => null,
+    };
+}
+
+fn emitCsiTilde(out: *[max_key_bytes]u8, number: u8, modifier: u8) usize {
+    out[0] = 0x1b;
+    out[1] = '[';
+    var i: usize = 2;
+    if (number >= 10) {
+        out[i] = '0' + number / 10;
+        i += 1;
+    }
+    out[i] = '0' + number % 10;
+    i += 1;
+    if (modifier != 1) {
+        out[i] = ';';
+        out[i + 1] = '0' + modifier;
+        i += 2;
+    }
+    out[i] = '~';
+    return i + 1;
+}
+
+fn emitFunctionKey(out: *[max_key_bytes]u8, usage: u8, modifier: u8) usize {
+    switch (usage) {
+        0x3a...0x3d => { // F1-F4: xterm's unmodified SS3 form.
+            const final = 'P' + (usage - 0x3a);
+            if (modifier == 1) {
+                out[0] = 0x1b;
+                out[1] = 'O';
+                out[2] = final;
+                return 3;
+            }
+            out[0] = 0x1b;
+            out[1] = '[';
+            out[2] = '1';
+            out[3] = ';';
+            out[4] = '0' + modifier;
+            out[5] = final;
+            return 6;
+        },
+        0x3f => return emitCsiTilde(out, 15, modifier), // F5
+        0x40 => return emitCsiTilde(out, 17, modifier), // F6
+        0x41 => return emitCsiTilde(out, 18, modifier), // F7
+        0x42 => return emitCsiTilde(out, 19, modifier), // F8
+        0x43 => return emitCsiTilde(out, 20, modifier), // F9
+        0x44 => return emitCsiTilde(out, 21, modifier), // F10
+        0x46 => return emitCsiTilde(out, 23, modifier), // F11
+        0x45 => return emitCsiTilde(out, 24, modifier), // F12
+        else => return 0,
+    }
+}
+
+/// Decode one HID keyboard usage (with shift/alt/ctrl modifiers) into 0-7
 /// bytes of console input, written to `out`; returns the byte count (0 =
 /// the usage is outside the usable subset — no bytes are invented). The
-/// editing nav cluster arrives as `ESC [ <final>` sequences and ctrl + a-z
-/// as the ASCII control codes, both consumed by the line editor (ADR 0008
-/// D2); everything else is the printable `hid_to_ascii` mapping.
-pub fn hid_to_bytes(usage: u8, shift: bool, ctrl: bool, out: *[max_key_bytes]u8) usize {
+/// editing nav cluster arrives as `ESC [ <final>` sequences, modified nav
+/// uses xterm's `CSI 1;<modifier><final>` form, and F1-F12/Insert use
+/// xterm's SS3/CSI-tilde forms. Ctrl + a-z remains the ASCII control-code
+/// mapping (ADR 0008 D2); printable keys still use `hid_to_ascii`.
+pub fn hid_to_bytes(usage: u8, shift: bool, alt: bool, ctrl: bool, out: *[max_key_bytes]u8) usize {
+    const modifier: u8 = 1 + @as(u8, if (shift) 1 else 0) +
+        @as(u8, if (alt) 2 else 0) + @as(u8, if (ctrl) 4 else 0);
+
+    if (navFinal(usage)) |final| {
+        if (modifier == 1) {
+            out[0] = 0x1b;
+            out[1] = '[';
+            out[2] = final;
+            return 3;
+        }
+        out[0] = 0x1b;
+        out[1] = '[';
+        out[2] = '1';
+        out[3] = ';';
+        out[4] = '0' + modifier;
+        out[5] = final;
+        return 6;
+    }
+
+    // Function keys and Insert have xterm modifier forms too, so they are
+    // decoded before the ctrl-letter fast path below.
+    switch (usage) {
+        0x3a...0x3d, 0x3f...0x46 => return emitFunctionKey(out, usage, modifier),
+        0x70 => return emitCsiTilde(out, 2, modifier), // Insert
+        else => {},
+    }
+
     if (ctrl) {
         if (usage >= 0x04 and usage <= 0x1d) {
             out[0] = (usage - 0x04) + 0x01; // Ctrl-A..Ctrl-Z
             return 1;
         }
+        // Preserve the original honest refusal for Ctrl+Enter, Ctrl+Space,
+        // and every other non-letter/non-nav usage.
         return 0;
     }
+
     switch (usage) {
         0x29 => { // Escape (lone ESC — the line editor treats it as a no-op key)
             out[0] = 0x1b;
             return 1;
-        },
-        0x4f => { // Right arrow
-            out[0] = 0x1b;
-            out[1] = '[';
-            out[2] = 'C';
-            return 3;
-        },
-        0x50 => { // Left arrow
-            out[0] = 0x1b;
-            out[1] = '[';
-            out[2] = 'D';
-            return 3;
-        },
-        0x51 => { // Down arrow
-            out[0] = 0x1b;
-            out[1] = '[';
-            out[2] = 'B';
-            return 3;
-        },
-        0x52 => { // Up arrow
-            out[0] = 0x1b;
-            out[1] = '[';
-            out[2] = 'A';
-            return 3;
-        },
-        0x4a => { // Home
-            out[0] = 0x1b;
-            out[1] = '[';
-            out[2] = 'H';
-            return 3;
         },
         0x4b => { // PageUp (the shell's scroll interceptor consumes CSI 5 ~)
             out[0] = 0x1b;
@@ -236,12 +299,6 @@ pub fn hid_to_bytes(usage: u8, shift: bool, ctrl: bool, out: *[max_key_bytes]u8)
             out[2] = '5';
             out[3] = '~';
             return 4;
-        },
-        0x4d => { // End
-            out[0] = 0x1b;
-            out[1] = '[';
-            out[2] = 'F';
-            return 3;
         },
         0x4e => { // PageDown (the shell's scroll interceptor consumes CSI 6 ~)
             out[0] = 0x1b;
@@ -630,7 +687,7 @@ pub fn decode_keyboard_report(rep: []const u8) void {
                     }
                 }
                 var kout: [max_key_bytes]u8 = undefined;
-                const kn = hid_to_bytes(k, shift, ctrl, &kout);
+                const kn = hid_to_bytes(k, shift, alt, ctrl, &kout);
                 if (kn > 0) {
                     kb_last_byte = kout[kn - 1]; // the sequence's final byte
                     _ = tt.pushInput(kout[0..kn]);
@@ -770,7 +827,7 @@ pub fn decode_keyboard_report(rep: []const u8) void {
                     continue;
                 }
                 var out: [max_key_bytes]u8 = undefined;
-                const n = hid_to_bytes(k, shift, ctrl, &out);
+                const n = hid_to_bytes(k, shift, false, ctrl, &out);
                 if (n > 0) {
                     kb_last_byte = out[n - 1]; // the sequence's final byte
                     var i: usize = 0;
@@ -956,45 +1013,106 @@ test "input: usages outside the usable subset are refused (no invented bytes)" {
 test "input: hid_to_bytes maps the nav cluster to ESC sequences" {
     var out: [max_key_bytes]u8 = undefined;
     // Up arrow -> ESC [ A (3 bytes).
-    var n = hid_to_bytes(0x52, false, false, &out);
+    var n = hid_to_bytes(0x52, false, false, false, &out);
     try std.testing.expectEqual(@as(usize, 3), n);
     try std.testing.expectEqualSlices(u8, "\x1b[A", out[0..n]);
     // Left arrow -> ESC [ D.
-    n = hid_to_bytes(0x50, false, false, &out);
+    n = hid_to_bytes(0x50, false, false, false, &out);
     try std.testing.expectEqualSlices(u8, "\x1b[D", out[0..n]);
     // End -> ESC [ F; Delete -> ESC [ 3 ~ (4 bytes).
-    n = hid_to_bytes(0x4d, false, false, &out);
+    n = hid_to_bytes(0x4d, false, false, false, &out);
     try std.testing.expectEqualSlices(u8, "\x1b[F", out[0..n]);
-    n = hid_to_bytes(0x4c, false, false, &out);
+    n = hid_to_bytes(0x4c, false, false, false, &out);
     try std.testing.expectEqual(@as(usize, 4), n);
     try std.testing.expectEqualSlices(u8, "\x1b[3~", out[0..n]);
     // PageUp -> ESC [ 5 ~, PageDown -> ESC [ 6 ~ (4 bytes each) — the
     // shell's scroll interceptor consumes these (M18 T1).
-    n = hid_to_bytes(0x4b, false, false, &out);
+    n = hid_to_bytes(0x4b, false, false, false, &out);
     try std.testing.expectEqual(@as(usize, 4), n);
     try std.testing.expectEqualSlices(u8, "\x1b[5~", out[0..n]);
-    n = hid_to_bytes(0x4e, false, false, &out);
+    n = hid_to_bytes(0x4e, false, false, false, &out);
     try std.testing.expectEqual(@as(usize, 4), n);
     try std.testing.expectEqualSlices(u8, "\x1b[6~", out[0..n]);
     // Escape -> a lone ESC byte (the line editor treats it as a no-op).
-    n = hid_to_bytes(0x29, false, false, &out);
+    n = hid_to_bytes(0x29, false, false, false, &out);
     try std.testing.expectEqual(@as(usize, 1), n);
     try std.testing.expectEqual(@as(u8, 0x1b), out[0]);
     // Not a printable, not a nav key: no bytes invented.
-    try std.testing.expectEqual(@as(usize, 0), hid_to_bytes(0x39, false, false, &out)); // Caps Lock
+    try std.testing.expectEqual(@as(usize, 0), hid_to_bytes(0x39, false, false, false, &out)); // Caps Lock
+}
+
+test "input: hid_to_bytes maps the full function-key and Insert vocabulary" {
+    const cases = [_]struct { usage: u8, want: []const u8 }{
+        .{ .usage = 0x3a, .want = "\x1bOP" }, // F1
+        .{ .usage = 0x3b, .want = "\x1bOQ" }, // F2
+        .{ .usage = 0x3c, .want = "\x1bOR" }, // F3
+        .{ .usage = 0x3d, .want = "\x1bOS" }, // F4
+        .{ .usage = 0x3f, .want = "\x1b[15~" }, // F5
+        .{ .usage = 0x40, .want = "\x1b[17~" }, // F6
+        .{ .usage = 0x41, .want = "\x1b[18~" }, // F7
+        .{ .usage = 0x42, .want = "\x1b[19~" }, // F8
+        .{ .usage = 0x43, .want = "\x1b[20~" }, // F9
+        .{ .usage = 0x44, .want = "\x1b[21~" }, // F10
+        .{ .usage = 0x46, .want = "\x1b[23~" }, // F11
+        .{ .usage = 0x45, .want = "\x1b[24~" }, // F12
+        .{ .usage = 0x70, .want = "\x1b[2~" }, // Insert
+    };
+    for (cases) |tc| {
+        var out: [max_key_bytes]u8 = undefined;
+        const n = hid_to_bytes(tc.usage, false, false, false, &out);
+        try std.testing.expectEqualSlices(u8, tc.want, out[0..n]);
+    }
+
+    // Modified function keys use the same xterm modifier parameter as the
+    // navigation keys; this also exercises the seven-byte bound.
+    var out: [max_key_bytes]u8 = undefined;
+    var n = hid_to_bytes(0x3a, true, false, false, &out); // Shift-F1
+    try std.testing.expectEqualSlices(u8, "\x1b[1;2P", out[0..n]);
+    n = hid_to_bytes(0x3f, false, false, true, &out); // Ctrl-F5
+    try std.testing.expectEqualSlices(u8, "\x1b[15;5~", out[0..n]);
+}
+
+test "input: hid_to_bytes maps every modified navigation final" {
+    const nav = [_]struct { usage: u8, final: u8 }{
+        .{ .usage = 0x52, .final = 'A' }, // Up
+        .{ .usage = 0x51, .final = 'B' }, // Down
+        .{ .usage = 0x4f, .final = 'C' }, // Right
+        .{ .usage = 0x50, .final = 'D' }, // Left
+        .{ .usage = 0x4a, .final = 'H' }, // Home
+        .{ .usage = 0x4d, .final = 'F' }, // End
+    };
+    const modifiers = [_]struct { shift: bool, alt: bool, ctrl: bool, code: u8 }{
+        .{ .shift = true, .alt = false, .ctrl = false, .code = 2 },
+        .{ .shift = false, .alt = true, .ctrl = false, .code = 3 },
+        .{ .shift = false, .alt = false, .ctrl = true, .code = 5 },
+        .{ .shift = true, .alt = true, .ctrl = true, .code = 8 },
+    };
+    for (nav) |key| {
+        for (modifiers) |mod| {
+            var out: [max_key_bytes]u8 = undefined;
+            const n = hid_to_bytes(key.usage, mod.shift, mod.alt, mod.ctrl, &out);
+            try std.testing.expectEqual(@as(usize, 6), n);
+            try std.testing.expectEqual(@as(u8, 0x1b), out[0]);
+            try std.testing.expectEqual(@as(u8, '['), out[1]);
+            try std.testing.expectEqual(@as(u8, '1'), out[2]);
+            try std.testing.expectEqual(@as(u8, ';'), out[3]);
+            try std.testing.expectEqual(@as(u8, '0' + mod.code), out[4]);
+            try std.testing.expectEqual(key.final, out[5]);
+        }
+    }
 }
 
 test "input: hid_to_bytes maps ctrl+a-z to ASCII control codes" {
     var out: [max_key_bytes]u8 = undefined;
     // Ctrl-A (usage 0x04) -> 0x01; Ctrl-C (usage 0x06) -> 0x03; Ctrl-Z -> 0x1a.
-    try std.testing.expectEqual(@as(usize, 1), hid_to_bytes(0x04, false, true, &out));
+    try std.testing.expectEqual(@as(usize, 1), hid_to_bytes(0x04, false, false, true, &out));
     try std.testing.expectEqual(@as(u8, 0x01), out[0]);
-    try std.testing.expectEqual(@as(usize, 1), hid_to_bytes(0x06, false, true, &out));
+    try std.testing.expectEqual(@as(usize, 1), hid_to_bytes(0x06, false, false, true, &out));
     try std.testing.expectEqual(@as(u8, 0x03), out[0]);
-    try std.testing.expectEqual(@as(usize, 1), hid_to_bytes(0x1d, false, true, &out));
+    try std.testing.expectEqual(@as(usize, 1), hid_to_bytes(0x1d, false, false, true, &out));
     try std.testing.expectEqual(@as(u8, 0x1a), out[0]);
     // Ctrl + non-letter is outside the usable subset (no invented bytes).
-    try std.testing.expectEqual(@as(usize, 0), hid_to_bytes(0x28, false, true, &out)); // Ctrl+Enter
+    try std.testing.expectEqual(@as(usize, 0), hid_to_bytes(0x28, false, false, true, &out)); // Ctrl+Enter
 }
 
 test "input: WMS8 Gate 5 — the drained geometry chords fan out but the kernel no longer consumes them (claim 9879)" {

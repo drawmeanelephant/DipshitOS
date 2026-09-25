@@ -253,6 +253,27 @@ vgate_assert 03 serial-contains 'goterm: done status=0'
 vgate_assert 03 serial-absent '\[EXC\]'
 vgate_assert 03 serial-absent '[EXC] parking:'
 
+# M80h (#1724): F5 travels through the real XHCI/custom-virtio input path
+# into the bound GOTERM tty. The monitor report runs after the injected key
+# and pins both the HID usage and the xterm final byte; class-A encoder tests
+# pin the complete F1-F12/Insert vocabulary.
+vgate_file script3-fkey.txt <<'EOF'
+input
+echo rx-live-fkey-ok
+EOF
+
+vgate_run 04 -- --display --input --screen '$RUN_DIR/screen-fkey' \
+    --script '$RUN_DIR/script.txt' \
+    --input-chords 'f5' \
+    --input-chords-after 'goterm: attached' \
+    --script3 '$RUN_DIR/script3-fkey.txt' \
+    --script3-after 'goterm: prompt' --script3-delay 10 \
+    --script-expect 'rx-live-fkey-ok' \
+    --timeout 60
+
+vgate_assert 04 serial-contains 'kb-usage=0x3f'
+vgate_assert 04 serial-contains 'kb-byte=~'
+
 vgate_assert 02 serial-contains 'goterm: ready'
 vgate_assert 02 serial-contains 'goterm: attached'
 vgate_assert 02 serial-contains 'goterm: done status=0'
