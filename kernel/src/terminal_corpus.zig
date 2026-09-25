@@ -33,6 +33,10 @@
 //!       * M80e (#1722) deliberately replaced the old ESC charset
 //!         divergence pin with DECSC/DECRC, ESC motion, charset, reset,
 //!         and keypad rows. These are behavior changes, not silent fixes.
+//!       * M80c (#1714) adds DECSTBM/DECOM/DECAWM rows in the CSI
+//!         group. Its VT-correct pending-wrap policy deliberately flips
+//!         the old CUB pending-wrap pin: motion resolves the wrap, then
+//!         applies its displacement.
 //!       * Group I is a deterministic CSI parameter-soup FUZZ — not
 //!         goldens. It enforces INVARIANTS (no panic, whole wide pairs,
 //!         bounded indices, nothing below the used tail) under random
@@ -461,9 +465,11 @@ const csi_cases = [_]Case{
         .rendition = .{ .fg = 1, .bold = true },
     },
     .{
-        // A pending wrap (col == cols) is cancelled by a motion: the row
-        // move stands the cursor back on the last column — and CUD below
-        // the used tail still does not materialise the row.
+        // M80c (#1714): pending-wrap behavior is VT-correct. A motion first
+        // resolves the deferred wrap to the last visible column, then applies
+        // its own displacement; this row deliberately flips the old CUB
+        // "without moving further" pin. CUD below the used tail still does
+        // not materialise the row.
         .name = "CUD from a pending wrap cancels it and still moves rows",
         .input = &a80 ++ "\x1b[B",
         .lines = &.{&a80},
@@ -471,10 +477,10 @@ const csi_cases = [_]Case{
         .used = 1,
     },
     .{
-        .name = "CUB from a pending wrap cancels it without moving further",
+        .name = "CUB from a pending wrap resolves it, then moves one column",
         .input = &a80 ++ "\x1b[D",
         .lines = &.{&a80},
-        .cursor = .{ 0, 79 },
+        .cursor = .{ 0, 78 },
         .used = 1,
     },
     .{
@@ -901,6 +907,90 @@ const csi_cases = [_]Case{
 
 test "terminal corpus: CSI cursor positioning and erase" {
     try runAll(&csi_cases);
+}
+
+// ---------------------------------------------------------------------------
+// M80c (#1714) — DECSTBM, DECOM, and VT-correct pending-wrap/DECAWM.
+// ---------------------------------------------------------------------------
+
+const m80c_cases = [_]Case{
+    .{
+        .name = "an invalid DECSTBM region is refused and preserves the old margins",
+        .input = "\x1b[3;5r\x1b[5;5r\x1b[5;1HA",
+        .lines = &.{ "", "", "", "", "A" },
+        .cursor = .{ 4, 1 },
+        .used = 5,
+    },
+    .{
+        .name = "CSI r with no parameters restores the full-screen region",
+        .input = "\x1b[3;5r\x1b[2;3r\x1b[r\x1b[5;1HA",
+        .lines = &.{ "", "", "", "", "A" },
+        .cursor = .{ 4, 1 },
+        .used = 5,
+    },
+    .{
+        .name = "LF at a DECSTBM bottom scrolls only the region",
+        .input = "0\r\n1\r\n2\r\n3\r\n4\x1b[3;5r\x1b[5;1H\nZ",
+        .lines = &.{ "0", "1", "3", "4", "Z" },
+        .cursor = .{ 4, 1 },
+        .used = 5,
+    },
+    .{
+        .name = "a soft wrap at a DECSTBM bottom scrolls the region, not the full grid",
+        .input = "\x1b[2;3r\x1b[3;1H" ++ &a80 ++ "X",
+        .lines = &.{ "", &a80, "X" },
+        .cursor = .{ 2, 1 },
+        .used = 3,
+    },
+    .{
+        .name = "DECOM makes H and VPA region-relative and clamps at its bottom",
+        .input = "\x1b[3;5r\x1b[?6h\x1b[1;1HA\x1b[2d\x1b[1GB\x1b[99;1HC",
+        .lines = &.{ "", "", "A", "B", "C" },
+        .cursor = .{ 4, 1 },
+        .used = 5,
+    },
+    .{
+        .name = "DECAWM disabled makes the next write overwrite the last column",
+        .input = &a80 ++ "\x1b[?7lX",
+        .lines = &.{(("a") ** 79) ++ "X"},
+        .cursor = .{ 0, 79 },
+        .used = 1,
+    },
+    .{
+        .name = "SGR resolves a pending wrap before the next write",
+        .input = &a80 ++ "\x1b[31mX",
+        .lines = &.{(("a") ** 79) ++ "X"},
+        .cursor = .{ 0, 80 },
+        .used = 1,
+        .rendition = .{ .fg = 1 },
+        .styles = &.{.{ .row = 0, .col = 79, .fg = 1 }},
+    },
+    .{
+        .name = "soft reset also resolves a pending wrap",
+        .input = &a80 ++ "\x1b[!pX",
+        .lines = &.{(("a") ** 79) ++ "X"},
+        .cursor = .{ 0, 80 },
+        .used = 1,
+    },
+    .{
+        .name = "RIS restores full-screen margins, origin mode, and autowrap",
+        .input = "\x1b[3;5r\x1b[?6h\x1b[?7l\x1bc\x1b[5;1HX",
+        .lines = &.{ "", "", "", "", "X" },
+        .cursor = .{ 4, 1 },
+        .used = 5,
+    },
+    .{
+        .name = "alternate-screen margins do not replace the primary margins",
+        .input = "0\r\n1\r\n2\r\n3\r\n4\x1b[3;5r\x1b[?1049h\x1b[2;4r\x1b[?1049l\x1b[5;1H\nZ",
+        .lines = &.{ "0", "1", "3", "4", "Z" },
+        .cursor = .{ 4, 1 },
+        .used = 5,
+        .alt = false,
+    },
+};
+
+test "terminal corpus: M80c scroll region, origin mode, and autowrap" {
+    try runAll(&m80c_cases);
 }
 
 test "terminal corpus: resize drops tab stops and does not restore them (#1721)" {

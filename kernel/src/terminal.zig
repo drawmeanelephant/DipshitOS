@@ -335,9 +335,26 @@ pub const Screen = struct {
     lens: [grid_lines]usize = [_]usize{0} ** grid_lines,
     /// Number of lines in use (>= 1); grows to `grid_lines` then scrolls.
     used: usize = 1,
-    /// The cursor's line (0..used-1) and column.
+    /// The cursor's line (0..used-1) and column. `col == cols` is the
+    /// VT-correct pending-wrap position; `pending_wrap` distinguishes it
+    /// from a cursor deliberately parked by a motion.
     cur: usize = 0,
     col: usize = 0,
+    /// M80c (#1714): DECSTBM and DECOM belong to the screen, not the
+    /// terminal object. Rows are zero-based internally; the CSI form is
+    /// one-based and inclusive. The alternate screen has its own margins.
+    scroll_top: usize = 0,
+    scroll_bottom: usize = grid_lines - 1,
+    origin_mode: bool = false,
+    pending_wrap: bool = false,
+    alt_scroll_top: usize = 0,
+    alt_scroll_bottom: usize = grid_lines - 1,
+    alt_origin_mode: bool = false,
+    alt_pending_wrap: bool = false,
+    /// M80c: DECAWM is shared across primary and alternate screens, like
+    /// bracketed paste and the mouse modes. Only the DECSTBM/DECOM state
+    /// and the cursor's pending-wrap bit round-trip with each screen.
+    autowrap: bool = true,
     /// The alternate screen is a second bounded grid, not an allocation.
     /// Entering DECSET 47/1049 swaps the primary into this storage and clears
     /// the active grid; DECRST swaps it back unchanged.
@@ -361,6 +378,7 @@ pub const Screen = struct {
     saved_charset_g0: Charset = .ascii,
     saved_charset_g1: Charset = .ascii,
     saved_charset_active: u8 = 0,
+    saved_pending_wrap: bool = false,
     saved_valid: bool = false,
     alt_saved_cur: usize = 0,
     alt_saved_col: usize = 0,
@@ -370,6 +388,7 @@ pub const Screen = struct {
     alt_saved_charset_g0: Charset = .ascii,
     alt_saved_charset_g1: Charset = .ascii,
     alt_saved_charset_active: u8 = 0,
+    alt_saved_pending_wrap: bool = false,
     alt_saved_valid: bool = false,
     /// M80e: the active G0/G1 character sets. G0 is selected with ESC (,
     /// G1 with ESC ), and SO/SI switch the active set without painting.
@@ -502,6 +521,10 @@ pub const Screen = struct {
     /// M80e: soft reset (CSI ! p) resets parser-visible modes and rendition
     /// but deliberately leaves the grid, scrollback, and cursor untouched.
     fn softReset(self: *Screen) void {
+        // DECSTR clears the deferred right-margin state too; otherwise
+        // col == cols would survive with pending_wrap false and the next
+        // print would index one cell past the effective width.
+        self.cancelPendingWrap();
         self.style = default_cell_style;
         self.fg_rgb_cur = empty_rgb;
         self.bg_rgb_cur = empty_rgb;
@@ -518,6 +541,11 @@ pub const Screen = struct {
         self.charset_g1 = .ascii;
         self.charset_active = 0;
         self.keypad_application = false;
+        self.scroll_top = 0;
+        self.scroll_bottom = grid_lines - 1;
+        self.origin_mode = false;
+        self.pending_wrap = false;
+        self.autowrap = true;
     }
 
     /// M80e: RIS is a full grid reset. The effective window width belongs to
@@ -539,6 +567,7 @@ pub const Screen = struct {
         self.saved_charset_g0 = .ascii;
         self.saved_charset_g1 = .ascii;
         self.saved_charset_active = 0;
+        self.saved_pending_wrap = false;
         self.saved_valid = false;
     }
 
@@ -551,6 +580,7 @@ pub const Screen = struct {
         self.saved_charset_g0 = self.charset_g0;
         self.saved_charset_g1 = self.charset_g1;
         self.saved_charset_active = self.charset_active;
+        self.saved_pending_wrap = self.pending_wrap;
         self.saved_valid = true;
     }
 
@@ -567,6 +597,8 @@ pub const Screen = struct {
         self.charset_g0 = self.saved_charset_g0;
         self.charset_g1 = self.saved_charset_g1;
         self.charset_active = self.saved_charset_active;
+        self.pending_wrap = self.saved_pending_wrap;
+        if (!self.pending_wrap and self.col >= self.cols) self.col = self.cols - 1;
     }
 
     fn setCharset(self: *Screen, slot: u8, final: u8) void {
@@ -626,34 +658,42 @@ pub const Screen = struct {
     }
 
     /// M80e: IND moves down without the carriage return performed by LF.
-    /// At the bottom edge it scrolls through history exactly like `newline`.
+    /// M80c: the active scroll region is honored at its bottom edge.
     fn index(self: *Screen) void {
-        self.cancelPendingWrap();
-        if (self.cur + 1 < grid_lines) {
+        self.pending_wrap = false;
+        if (self.cur < self.scroll_bottom) {
             self.cur += 1;
             if (self.cur >= self.used) {
                 self.clearLine(self.cur);
                 self.used = self.cur + 1;
                 self.noteTailGrowth();
             }
-            return;
+        } else if (self.cur == self.scroll_bottom) {
+            self.scrollRegionUp(1);
+            if (self.used <= self.cur) self.used = self.cur + 1;
+        } else if (self.cur + 1 < grid_lines) {
+            self.cur += 1;
+            if (self.cur >= self.used) {
+                self.clearLine(self.cur);
+                self.used = self.cur + 1;
+                self.noteTailGrowth();
+            }
+        } else {
+            self.scrollFullUp(1);
         }
-        self.pushHistory();
-        var row: usize = 0;
-        while (row + 1 < grid_lines) : (row += 1) self.copyRow(row + 1, row);
-        self.clearLine(grid_lines - 1);
-        self.used = grid_lines;
-        self.noteTailGrowth();
     }
 
     /// M80e: RI is the reverse of IND, including the top-edge scroll.
+    /// M80c: the active scroll region is honored at its top edge.
     fn reverseIndex(self: *Screen) void {
-        self.cancelPendingWrap();
-        if (self.cur > 0) {
+        self.pending_wrap = false;
+        if (self.cur > self.scroll_top) {
             self.cur -= 1;
-            return;
+        } else if (self.cur == self.scroll_top) {
+            self.scrollRegionDown(1);
+        } else if (self.cur > 0) {
+            self.cur -= 1;
         }
-        self.scrollDown(1);
     }
 
     fn nextLine(self: *Screen) void {
@@ -739,37 +779,50 @@ pub const Screen = struct {
         self.lens[i] = 0;
     }
 
+    /// M80c: move down one line for LF. The active DECSTBM region owns
+    /// the scroll when the cursor is at its bottom; outside the region
+    /// the full grid still scrolls. A top-edge eviction is the only path
+    /// into scrollback, and it happens only when the region starts at row
+    /// zero on the primary screen.
     fn newline(self: *Screen) void {
-        if (self.cur + 1 < grid_lines) {
+        self.pending_wrap = false;
+        if (self.cur < self.scroll_bottom) {
             self.cur += 1;
-            const grew = (self.cur >= self.used);
+            const grew = self.cur >= self.used;
+            if (grew) self.used = self.cur + 1;
+            self.clearLine(self.cur);
+            if (grew) self.noteTailGrowth();
+        } else if (self.cur == self.scroll_bottom) {
+            self.scrollRegionUp(1);
+            if (self.used <= self.cur) self.used = self.cur + 1;
+        } else if (self.cur + 1 < grid_lines) {
+            self.cur += 1;
+            const grew = self.cur >= self.used;
             if (grew) self.used = self.cur + 1;
             self.clearLine(self.cur);
             if (grew) self.noteTailGrowth();
         } else {
-            // Scroll up one line. M73k (#1637): the evicted oldest row
-            // enters the history ring — pushed BEFORE the shift, which
-            // would otherwise overwrite row 0 and lose it (normal screen
-            // only — history belongs to the primary screen, pinned by
-            // test) — and a scrolled-back view PINS instead of snapping.
-            self.pushHistory();
-            var i: usize = 0;
-            while (i + 1 < grid_lines) : (i += 1) {
-                self.cells[i] = self.cells[i + 1];
-                self.styles[i] = self.styles[i + 1];
-                self.lens[i] = self.lens[i + 1];
-                // M73h fixup: the truecolour side arrays ride with their
-                // cells — otherwise a scroll repaints surviving rows
-                // with the wrong cell's rgb.
-                self.fg_rgb[i] = self.fg_rgb[i + 1];
-                self.bg_rgb[i] = self.bg_rgb[i + 1];
-            }
-            self.clearLine(grid_lines - 1);
-            self.cur = grid_lines - 1;
-            self.used = grid_lines;
-            self.noteTailGrowth();
+            self.scrollFullUp(1);
         }
         self.col = 0;
+    }
+
+    /// Scroll the full grid upward, retaining the historical M73k
+    /// policy. This is the fallback for a cursor below a non-full DECSTBM
+    /// region; region-internal scrolling uses `scrollRegionUp` instead.
+    fn scrollFullUp(self: *Screen, n: usize) void {
+        const count = @min(n, self.used + history_lines);
+        var i: usize = 0;
+        while (i < count) : (i += 1) {
+            self.pushHistory();
+            var row: usize = 0;
+            while (row + 1 < grid_lines) : (row += 1) self.copyRow(row + 1, row);
+            self.clearLine(grid_lines - 1);
+        }
+        // A cursor at the physical bottom makes the full grid the active
+        // line span even when it had only been motion-materialized.
+        self.used = grid_lines;
+        self.noteTailGrowth();
     }
 
     /// M73k: the tail grew (line pushed to history, or a new grid row
@@ -838,6 +891,7 @@ pub const Screen = struct {
         self.used = 1;
         self.cur = 0;
         self.col = 0;
+        self.pending_wrap = false;
         self.view = 0;
         self.clearSelection();
     }
@@ -868,11 +922,113 @@ pub const Screen = struct {
         self.cur = @min(self.cur + @as(usize, n), grid_lines - 1);
     }
 
-    /// M80a: a cursor motion cancels a pending wrap (col == cols) — the
-    /// cursor stands back on the last column (BS parity); only a write
-    /// can wrap.
+    /// M80c: the cursor's home row follows DECOM. With DECOM reset,
+    /// CUP/VPA address the full screen; with DECOM set, row 1 is the
+    /// scrolling region's top margin.
+    fn cursorHomeRow(self: *const Screen) usize {
+        return if (self.origin_mode) self.scroll_top else 0;
+    }
+
+    fn homeCursor(self: *Screen) void {
+        self.moveCursor(@intCast(self.cursorHomeRow() + 1), 1);
+    }
+
+    /// M80c: DECSTBM is one-based inclusive at the CSI boundary. Invalid
+    /// regions (including top == bottom) are refused without disturbing
+    /// the old margins or cursor.
+    fn setScrollRegion(self: *Screen, top_one: u16, bottom_one: u16) void {
+        if (top_one == 0 or bottom_one == 0) return;
+        const top: usize = @intCast(top_one - 1);
+        const bottom: usize = @intCast(bottom_one - 1);
+        if (top >= bottom or bottom >= grid_lines) return;
+        self.scroll_top = top;
+        self.scroll_bottom = bottom;
+        self.pending_wrap = false;
+        self.homeCursor();
+    }
+
+    /// M80c: DECOM changes the coordinate system, so changing it homes
+    /// the cursor just like a real DEC terminal.
+    fn setOriginMode(self: *Screen, enabled: bool) void {
+        self.origin_mode = enabled;
+        self.pending_wrap = false;
+        self.homeCursor();
+    }
+
+    /// M80c: a cursor/control motion cancels the deferred right-margin
+    /// wrap. `col == cols` is a logical position only while pending_wrap
+    /// is set; motions leave the visible cursor on the last column.
     fn cancelPendingWrap(self: *Screen) void {
+        self.pending_wrap = false;
         if (self.col >= self.cols) self.col = self.cols - 1;
+    }
+
+    /// Move to the next row for a soft wrap. This is deliberately not
+    /// `newline`: it clears the destination row and does not perform a
+    /// carriage return until the caller has established the new column.
+    fn wrapForPrint(self: *Screen) void {
+        self.pending_wrap = false;
+        if (self.cur < self.scroll_bottom) {
+            self.cur += 1;
+            const grew = self.cur >= self.used;
+            if (grew) self.used = self.cur + 1;
+            self.clearLine(self.cur);
+            if (grew) self.noteTailGrowth();
+        } else if (self.cur == self.scroll_bottom) {
+            self.scrollRegionUp(1);
+            if (self.used <= self.cur) self.used = self.cur + 1;
+        } else if (self.cur + 1 < grid_lines) {
+            self.cur += 1;
+            const grew = self.cur >= self.used;
+            if (grew) self.used = self.cur + 1;
+            self.clearLine(self.cur);
+            if (grew) self.noteTailGrowth();
+        } else {
+            self.scrollFullUp(1);
+        }
+        self.col = 0;
+    }
+
+    /// M80c: move one or more rows up inside DECSTBM. Rows outside the
+    /// region are never touched. Only a region whose top is row zero can
+    /// evict through the full-grid top, and therefore only that path can
+    /// feed the primary screen's history ring.
+    fn scrollRegionUp(self: *Screen, n: usize) void {
+        const height = self.scroll_bottom - self.scroll_top + 1;
+        const limit = if (self.scroll_top == 0) height + history_lines else height;
+        const count = @min(n, limit);
+        var i: usize = 0;
+        while (i < count) : (i += 1) {
+            if (self.scroll_top == 0) self.pushHistory();
+            var row = self.scroll_top;
+            while (row < self.scroll_bottom) : (row += 1) self.copyRow(row + 1, row);
+            self.clearLine(self.scroll_bottom);
+        }
+        if (self.scroll_top == 0 and self.used <= self.scroll_bottom + 1) {
+            self.used = @max(1, self.used -| count);
+        }
+    }
+
+    /// M80c: move one or more rows down inside DECSTBM. This never reads
+    /// or writes history; a bottom-edge drop is ordinary grid loss.
+    fn scrollRegionDown(self: *Screen, n: usize) void {
+        const height = self.scroll_bottom - self.scroll_top + 1;
+        const count = @min(n, height);
+        var i = self.scroll_bottom + 1;
+        while (i > self.scroll_top + count) {
+            i -= 1;
+            self.copyRow(i - count, i);
+        }
+        var row = self.scroll_top;
+        while (row < self.scroll_top + count) : (row += 1) self.clearLine(row);
+        if (self.used <= self.cur) self.used = self.cur + 1;
+        // A top-at-zero region is also the full-grid SD case: SD grows
+        // the used tail until the region bottom. A region below zero is
+        // internal and cannot grow the full-grid tail by itself.
+        if (self.scroll_top == 0 and self.used <= self.scroll_bottom + 1) {
+            self.used = @min(self.scroll_bottom + 1, self.used + count);
+            if (self.used <= self.cur) self.used = self.cur + 1;
+        }
     }
 
     /// M80a: REP (CSI b) — repeat the last printed rune `n` more times.
@@ -915,10 +1071,18 @@ pub const Screen = struct {
             return; // M73k: writes never touch the view (pin-while-scrolled)
         }
         self.materializeForWrite();
-        if (width == 2 and self.col + 2 > self.cols) {
-            self.newline();
-        } else if (self.col >= self.cols) {
-            self.newline();
+        if (self.pending_wrap) {
+            self.wrapForPrint();
+        } else if (width == 2 and self.col + 2 > self.cols) {
+            if (self.autowrap) {
+                self.wrapForPrint();
+            } else {
+                // A double-width rune cannot be split when autowrap is
+                // disabled. Keep the cursor total and make the refusal
+                // visible as one ordinary replacement cell.
+                self.putRune(0xFFFD, 0, style);
+                return;
+            }
         }
         // Pair repair: a continuation cell we overwrite loses its base, and
         // a continuation cell just past the written range belonged to a
@@ -948,7 +1112,13 @@ pub const Screen = struct {
         }
         const end = self.col + width;
         if (end > self.lens[self.cur]) self.lens[self.cur] = end;
-        self.col = end;
+        if (end == self.cols) {
+            self.col = if (self.autowrap) self.cols else self.cols - 1;
+            self.pending_wrap = self.autowrap;
+        } else {
+            self.col = end;
+            self.pending_wrap = false;
+        }
     }
 
     fn setForeground(self: *Screen, colour: colour_slot) void {
@@ -994,6 +1164,7 @@ pub const Screen = struct {
     }
 
     fn eraseLine(self: *Screen, mode: u16) void {
+        self.cancelPendingWrap();
         var start: usize = switch (mode) {
             1 => 0,
             2 => 0,
@@ -1193,96 +1364,75 @@ pub const Screen = struct {
         }
     }
 
-    /// M80b: CSI L (IL) — insert n blank rows at the cursor row; rows at
-    /// and below slide down, and rows pushed past the bottom of the grid
-    /// are dropped (the bottom edge has no scrollback). The cursor goes
-    /// to the LEFT MARGIN — xterm's VT102-compatible IL/DL (xterm
-    /// changelog: "modify IL/DL to set cursor to first column on row").
-    /// Below the used tail there is nothing to slide: a no-op.
+    /// M80c: IL/DL and the explicit scroll commands operate inside the
+    /// active DECSTBM region. Rows outside it are stable, so a partial
+    /// region never turns into a full-grid redraw.
     fn insertLines(self: *Screen, n: u16) void {
+        if (self.cur < self.scroll_top or self.cur > self.scroll_bottom) return;
         if (self.cur >= self.used) return;
+        self.cancelPendingWrap();
         self.prepareRowSlide();
         const before = self.lineCount();
-        const cnt: usize = n;
-        if (self.cur + cnt < grid_lines) {
-            var i: usize = grid_lines;
-            while (i > self.cur + cnt) {
-                i -= 1;
-                self.copyRow(i - cnt, i);
-            }
+        const cnt = @min(@as(usize, n), self.scroll_bottom - self.cur + 1);
+        var i = self.scroll_bottom + 1;
+        while (i > self.cur + cnt) {
+            i -= 1;
+            self.copyRow(i - cnt, i);
         }
-        var j: usize = self.cur;
-        while (j < @min(self.cur + cnt, grid_lines)) : (j += 1) self.clearLine(j);
+        var row = self.cur;
+        while (row < self.cur + cnt) : (row += 1) self.clearLine(row);
         self.col = 0;
-        const fit = grid_lines -| (self.cur + cnt);
-        const keep = @min(self.used - self.cur, fit);
-        self.used = @max(1, if (keep == 0) self.cur else self.cur + cnt + keep);
+        if (self.used <= self.scroll_bottom + 1) {
+            self.used = @min(self.scroll_bottom + 1, self.used + cnt);
+        }
+        if (self.used <= self.cur) self.used = self.cur + 1;
         self.noteLineCountChange(before);
     }
 
-    /// M80b: CSI M (DL) — delete the n rows at the cursor row; rows
-    /// below slide up and the vacated rows at the bottom blank. Cursor
-    /// to the left margin (xterm IL/DL). Below the used tail: a no-op.
+    /// M80c: delete lines only within the active scrolling region.
     fn deleteLines(self: *Screen, n: u16) void {
+        if (self.cur < self.scroll_top or self.cur > self.scroll_bottom) return;
         if (self.cur >= self.used) return;
+        self.cancelPendingWrap();
         self.prepareRowSlide();
         const before = self.lineCount();
-        const m = @min(@as(usize, n), grid_lines - self.cur);
-        var i: usize = self.cur;
-        while (i + m < grid_lines) : (i += 1) self.copyRow(i + m, i);
-        var j: usize = grid_lines - m;
-        while (j < grid_lines) : (j += 1) self.clearLine(j);
+        const m = @min(@as(usize, n), self.scroll_bottom - self.cur + 1);
+        var i = self.cur;
+        while (i + m <= self.scroll_bottom) : (i += 1) self.copyRow(i + m, i);
+        var row = (self.scroll_bottom + 1) - m;
+        while (row <= self.scroll_bottom) : (row += 1) self.clearLine(row);
         self.col = 0;
-        self.used = @max(1, @max(self.cur, self.used -| m));
+        if (self.used <= self.scroll_bottom + 1) {
+            self.used = @max(1, @max(self.cur, self.used -| m));
+        }
         self.noteLineCountChange(before);
     }
 
-    /// M80b: CSI S (SU) — scroll the grid up n rows: the top row leaves
-    /// through the TOP edge into the history ring, exactly like an LF
-    /// scroll, and the bottom row blanks. The cursor is never touched
-    /// (xterm) — a pending wrap survives. The work saturates at
-    /// `used + history_lines` scrolls: past that every pushed row is
-    /// blank landing on blank — the same end state any larger n reaches
-    /// (a full ring of blanks over a blank grid), without letting a
-    /// hostile `CSI 65535 S` turn into gigabytes of row copies.
+    /// M80b/M80c: CSI S (SU) — scroll the active region upward. The
+    /// cursor is never touched, so a pending wrap survives explicit SU.
     fn scrollUp(self: *Screen, n: u16) void {
         self.prepareRowSlide();
         const before = self.lineCount();
-        const k = @min(@as(usize, n), self.used + history_lines);
-        var sc: usize = 0;
-        while (sc < k) : (sc += 1) {
-            self.pushHistory();
-            var i: usize = 0;
-            while (i + 1 < grid_lines) : (i += 1) self.copyRow(i + 1, i);
-            self.clearLine(grid_lines - 1);
-        }
-        self.used = @max(1, self.used -| k);
+        self.scrollRegionUp(@intCast(n));
         self.noteLineCountChange(before);
     }
 
-    /// M80b: CSI T (SD) — scroll the grid down n rows: blank rows enter
-    /// at the top and rows pushed past the BOTTOM edge are dropped (SD
-    /// never pulls from the history ring — scrollback grows at the top
-    /// edge only). The cursor is never touched (xterm).
+    /// M80b/M80c: CSI T (SD) — scroll the active region downward. The
+    /// cursor is never touched and history is never pulled from the ring.
     fn scrollDown(self: *Screen, n: u16) void {
         self.prepareRowSlide();
         const before = self.lineCount();
-        const k = @min(@as(usize, n), grid_lines);
-        var i: usize = grid_lines;
-        while (i > k) {
-            i -= 1;
-            self.copyRow(i - k, i);
-        }
-        var j: usize = 0;
-        while (j < k) : (j += 1) self.clearLine(j);
-        const fit = grid_lines -| k;
-        const keep = @min(self.used, fit);
-        self.used = if (keep == 0) 1 else k + keep;
+        self.scrollRegionDown(@intCast(n));
         self.noteLineCountChange(before);
     }
 
     fn moveCursor(self: *Screen, row_one_based: u16, col_one_based: u16) void {
-        const row = @min(@as(usize, row_one_based - 1), grid_lines - 1);
+        self.pending_wrap = false;
+        const requested_row: usize = @intCast(row_one_based - 1);
+        const row = if (self.origin_mode)
+            self.scroll_top + @min(requested_row, self.scroll_bottom - self.scroll_top)
+        else
+            @min(requested_row, grid_lines - 1);
         const column = @min(@as(usize, col_one_based - 1), self.cols - 1);
         while (self.used <= row) {
             self.clearLine(self.used);
@@ -1308,12 +1458,17 @@ pub const Screen = struct {
         std.mem.swap(usize, &self.saved_cur, &self.alt_saved_cur);
         std.mem.swap(usize, &self.saved_col, &self.alt_saved_col);
         std.mem.swap(CellStyle, &self.saved_style, &self.alt_saved_style);
+        std.mem.swap(bool, &self.saved_pending_wrap, &self.alt_saved_pending_wrap);
         std.mem.swap(Rgb, &self.saved_fg_rgb, &self.alt_saved_fg_rgb);
         std.mem.swap(Rgb, &self.saved_bg_rgb, &self.alt_saved_bg_rgb);
         std.mem.swap(Charset, &self.charset_g0, &self.alt_charset_g0);
         std.mem.swap(Charset, &self.charset_g1, &self.alt_charset_g1);
         std.mem.swap(u8, &self.charset_active, &self.alt_charset_active);
         std.mem.swap(bool, &self.saved_valid, &self.alt_saved_valid);
+        std.mem.swap(usize, &self.scroll_top, &self.alt_scroll_top);
+        std.mem.swap(usize, &self.scroll_bottom, &self.alt_scroll_bottom);
+        std.mem.swap(bool, &self.origin_mode, &self.alt_origin_mode);
+        std.mem.swap(bool, &self.pending_wrap, &self.alt_pending_wrap);
         std.mem.swap([grid_lines][grid_cols]Rgb, &self.fg_rgb, &self.alt_fg_rgb);
         std.mem.swap([grid_lines][grid_cols]Rgb, &self.bg_rgb, &self.alt_bg_rgb);
         std.mem.swap(Rgb, &self.fg_rgb_cur, &self.alt_fg_rgb_cur);
@@ -1342,6 +1497,13 @@ pub const Screen = struct {
             self.charset_g0 = .ascii;
             self.charset_g1 = .ascii;
             self.charset_active = 0;
+            // DECSTBM/DECOM are per-screen. The newly armed alternate
+            // starts with the full-screen defaults; the primary state is
+            // already in the alternate storage after the swap above.
+            self.scroll_top = 0;
+            self.scroll_bottom = grid_lines - 1;
+            self.origin_mode = false;
+            self.pending_wrap = false;
         }
     }
 
@@ -1444,6 +1606,16 @@ pub const Screen = struct {
             }
         }
         if (self.csi_private) {
+            if (p0 == 6) {
+                if (final == 'h') self.setOriginMode(true);
+                if (final == 'l') self.setOriginMode(false);
+            }
+            if (p0 == 7) {
+                if (final == 'h' or final == 'l') {
+                    self.autowrap = final == 'h';
+                    self.cancelPendingWrap();
+                }
+            }
             if (p0 == 47 or p0 == 1049) {
                 if (final == 'h') self.setAlternate(true);
                 if (final == 'l') self.setAlternate(false);
@@ -1464,7 +1636,10 @@ pub const Screen = struct {
             return;
         }
         switch (final) {
-            'm' => self.applySgr(),
+            'm' => {
+                self.cancelPendingWrap();
+                self.applySgr();
+            },
             'H', 'f' => self.moveCursor(self.csiParam(0, 1), self.csiParam(1, 1)),
             'J' => self.eraseDisplay(p0),
             'K' => self.eraseLine(p0),
@@ -1477,9 +1652,11 @@ pub const Screen = struct {
             'A' => self.cursorUp(self.csiParam(0, 1)),
             'B' => self.cursorDown(self.csiParam(0, 1)),
             'C' => {
+                self.cancelPendingWrap();
                 self.col = @min(self.col + @as(usize, self.csiParam(0, 1)), self.cols - 1);
             },
             'D' => {
+                self.cancelPendingWrap();
                 self.col = self.col -| @as(usize, self.csiParam(0, 1));
             },
             'E' => {
@@ -1491,9 +1668,11 @@ pub const Screen = struct {
                 self.col = 0;
             },
             'G' => {
+                self.cancelPendingWrap();
                 self.col = @min(@as(usize, self.csiParam(0, 1) - 1), self.cols - 1);
             },
             'd' => self.moveCursor(self.csiParam(0, 1), @intCast(self.col + 1)),
+            'r' => self.setScrollRegion(self.csiParam(0, 1), self.csiParam(1, @intCast(grid_lines))),
             'b' => self.repeatLast(self.csiParam(0, 1)),
             // M80b (#1713): insert/delete/erase finals. @/P/X act at the
             // cursor on its row (a pending wrap stands on the last
@@ -1534,7 +1713,8 @@ pub const Screen = struct {
         var n: usize = writeDecimal(cursor_reply_scratch[2..], self.cur + 1);
         cursor_reply_scratch[n + 2] = ';';
         n += 1;
-        n += 2 + writeDecimal(cursor_reply_scratch[n + 2 ..], self.col + 1);
+        const report_col = if (self.col >= self.cols) self.cols else self.col + 1;
+        n += 2 + writeDecimal(cursor_reply_scratch[n + 2 ..], report_col);
         cursor_reply_scratch[n] = 'R';
         return cursor_reply_scratch[0 .. n + 1];
     }
@@ -1644,8 +1824,12 @@ pub const Screen = struct {
             0x0e => self.charset_active = 1, // SO: invoke G1
             0x0f => self.charset_active = 0, // SI: invoke G0
             '\n' => self.newline(),
-            '\r' => self.col = 0,
+            '\r' => {
+                self.cancelPendingWrap();
+                self.col = 0;
+            },
             0x08 => {
+                self.cancelPendingWrap();
                 if (self.col > 0) self.col -= 1;
             },
             '\t' => self.moveTabStops(1, true),
@@ -4710,6 +4894,87 @@ test "terminal: IL/DL/SU/SD pin a scrolled-back view to its bottom (#1713)" {
         s.feed(seq);
         try std.testing.expectEqual(bottom, s.lineCount() - s.viewOffset());
     }
+}
+
+test "terminal: DECSTBM scopes LF IND RI and IL/DL to the active region (#1714)" {
+    var s = Screen{};
+    s.feed("a\r\nb\r\nc\r\nd\r\ne");
+    s.feed("\x1b[2;4r\x1b[4;1H\nZ");
+    try std.testing.expectEqualStrings("a", s.line(0));
+    try std.testing.expectEqualStrings("c", s.line(1));
+    try std.testing.expectEqualStrings("d", s.line(2));
+    try std.testing.expectEqualStrings("Z", s.line(3));
+    try std.testing.expectEqualStrings("e", s.line(4));
+
+    s.reset();
+    s.feed("a\r\nb\r\nc");
+    s.feed("\x1b[2;3r\x1b[3;1H\x1bD");
+    try std.testing.expectEqualStrings("a", s.line(0));
+    try std.testing.expectEqualStrings("c", s.line(1));
+    try std.testing.expectEqualStrings("", s.line(2));
+    s.feed("\x1b[2;1H\x1bM");
+    try std.testing.expectEqualStrings("a", s.line(0));
+    try std.testing.expectEqualStrings("", s.line(1));
+    try std.testing.expectEqualStrings("c", s.line(2));
+
+    s.reset();
+    s.feed("A\r\nB\r\nC\r\nD\r\nE");
+    s.feed("\x1b[2;4r\x1b[3;1H\x1b[L");
+    try std.testing.expectEqualStrings("A", s.line(0));
+    try std.testing.expectEqualStrings("B", s.line(1));
+    try std.testing.expectEqualStrings("", s.line(2));
+    try std.testing.expectEqualStrings("C", s.line(3));
+    try std.testing.expectEqualStrings("E", s.line(4));
+    s.feed("\x1b[M");
+    try std.testing.expectEqualStrings("B", s.line(1));
+    try std.testing.expectEqualStrings("C", s.line(2));
+    try std.testing.expectEqualStrings("", s.line(3));
+    try std.testing.expectEqualStrings("E", s.line(4));
+}
+
+test "terminal: DECSTBM scopes SU and SD without inventing scrollback (#1714)" {
+    var s = Screen{};
+    s.feed("A\r\nB\r\nC\r\nD");
+    s.feed("\x1b[2;4r\x1b[S");
+    try std.testing.expectEqualStrings("A", s.line(0));
+    try std.testing.expectEqualStrings("C", s.line(1));
+    try std.testing.expectEqualStrings("D", s.line(2));
+    try std.testing.expectEqualStrings("", s.line(3));
+    s.feed("\x1b[T");
+    try std.testing.expectEqualStrings("A", s.line(0));
+    try std.testing.expectEqualStrings("", s.line(1));
+    try std.testing.expectEqualStrings("C", s.line(2));
+    try std.testing.expectEqualStrings("D", s.line(3));
+}
+
+test "terminal: DECSTBM and DECOM round-trip independently on alternate screens (#1714)" {
+    var s = Screen{};
+    s.feed("\x1b[3;5r\x1b[?6h\x1b[?7l\x1b[?1049h");
+    try std.testing.expectEqual(@as(usize, 0), s.scroll_top);
+    try std.testing.expectEqual(@as(usize, grid_lines - 1), s.scroll_bottom);
+    try std.testing.expect(!s.origin_mode);
+    try std.testing.expect(!s.autowrap); // DECAWM is shared, not per-screen.
+    s.feed("\x1b[2;4r\x1b[?6h");
+    s.feed("\x1b[?1049l");
+    try std.testing.expectEqual(@as(usize, 2), s.scroll_top);
+    try std.testing.expectEqual(@as(usize, 4), s.scroll_bottom);
+    try std.testing.expect(s.origin_mode);
+    try std.testing.expect(!s.autowrap);
+}
+
+test "terminal: region-internal scrolling never feeds the primary history ring (#1714)" {
+    for (&terminals) |*tm| tm.reset();
+    for (&screens) |*sc| sc.reset();
+    const h = create(7) orelse return error.TestUnexpectedResult;
+    const tm = get(h).?;
+    try std.testing.expect(tm.attachWindow(7));
+    const s = screenForWindow(7).?;
+    s.feed("A\r\nB\r\nC\r\nD\r\nE");
+    try std.testing.expectEqual(@as(usize, 0), s.hist_count);
+    s.feed("\x1b[2;4r\x1b[S");
+    try std.testing.expectEqual(@as(usize, 0), s.hist_count);
+    try std.testing.expectEqualStrings("C", s.line(1));
+    try std.testing.expectEqualStrings("D", s.line(2));
 }
 
 test "terminal: selection copies across lines and normalizes direction" {
