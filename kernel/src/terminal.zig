@@ -356,6 +356,14 @@ pub const Screen = struct {
     csi_params: [16]u16 = [_]u16{0} ** 16,
     csi_count: usize = 0,
     csi_private: bool = false,
+    /// M80a (#1712): REP (CSI b)'s "last printed rune" — the placement is
+    /// repeated VERBATIM (rune, overlay mark and rendition). Stream state
+    /// like the CSI parser's own: not swapped with the alternate screen,
+    /// not reset by cursor motion; 0 = nothing printed yet (the C0
+    /// controls and NUL never reach putRune).
+    last_cp: u21 = 0,
+    last_mark: u21 = 0,
+    last_style: CellStyle = default_cell_style,
     /// M80f (#1723): replies generated while parsing owner output. This is
     /// presentation-side state, drained by the session pump into the bound
     /// terminal's input FIFO; Screen never owns a Terminal pointer.
@@ -548,6 +556,51 @@ pub const Screen = struct {
         self.clearSelection();
     }
 
+    /// M80a (#1712): a relative motion (A-F) can park the cursor below the
+    /// used tail; a WRITE materialises the rows up to it — a written row is
+    /// in use. This is the only growth path for a relative motion's target
+    /// row (the absolute finals grow through moveCursor); erases and
+    /// motions alone leave the row unmaterialised.
+    fn materializeForWrite(self: *Screen) void {
+        while (self.used <= self.cur) {
+            self.clearLine(self.used);
+            self.used += 1;
+            self.noteTailGrowth(); // M73k: growth under a pinned view
+        }
+    }
+
+    /// M80a: cursor up/down (CUU/CUD, and CNL/CPL ride these) — clamp at
+    /// the grid edges (A/F at row 0, B/E at the last grid row) and never
+    /// grow `used`. The subtract saturates, so row 0 cannot underflow.
+    fn cursorUp(self: *Screen, n: u16) void {
+        self.cancelPendingWrap();
+        self.cur = self.cur -| @as(usize, n);
+    }
+
+    fn cursorDown(self: *Screen, n: u16) void {
+        self.cancelPendingWrap();
+        self.cur = @min(self.cur + @as(usize, n), grid_lines - 1);
+    }
+
+    /// M80a: a cursor motion cancels a pending wrap (col == cols) — the
+    /// cursor stands back on the last column (BS parity); only a write
+    /// can wrap.
+    fn cancelPendingWrap(self: *Screen) void {
+        if (self.col >= self.cols) self.col = self.cols - 1;
+    }
+
+    /// M80a: REP (CSI b) — repeat the last printed rune `n` more times.
+    /// Routed through putRune, never a direct cell write, so a pending
+    /// wrap fires on the first repeat exactly like a real print; a repeat
+    /// re-places the stored mark and rendition verbatim. No prior print
+    /// is a no-op.
+    fn repeatLast(self: *Screen, n: u16) void {
+        if (self.last_cp == 0) return;
+        const count: usize = n;
+        var i: usize = 0;
+        while (i < count) : (i += 1) self.putRune(self.last_cp, self.last_mark, self.last_style);
+    }
+
     /// M73a-1 (#1625): place one rune. Width comes from `text.char_width`:
     /// a double-width rune takes base + continuation cells and never splits
     /// across a wrap; a zero-width rune overlays its mark onto the base
@@ -560,6 +613,7 @@ pub const Screen = struct {
         const width: usize = text.char_width(cp);
         if (width == 0) {
             if (text.is_zero_width_ignorable(cp)) return; // no cell, cursor unchanged
+            self.materializeForWrite();
             if (self.col == 0) {
                 self.putRune(0xFFFD, 0, style); // no base behind: pin to U+FFFD
                 return;
@@ -574,6 +628,7 @@ pub const Screen = struct {
             self.cells[self.cur][base_col].mark = cp; // one overlay slot: last wins
             return; // M73k: writes never touch the view (pin-while-scrolled)
         }
+        self.materializeForWrite();
         if (width == 2 and self.col + 2 > self.cols) {
             self.newline();
         } else if (self.col >= self.cols) {
@@ -595,6 +650,9 @@ pub const Screen = struct {
         self.styles[self.cur][self.col] = style;
         self.fg_rgb[self.cur][self.col] = self.fg_rgb_cur;
         self.bg_rgb[self.cur][self.col] = self.bg_rgb_cur;
+        self.last_cp = cp; // M80a: REP's "last printed rune" (+ mark/style)
+        self.last_mark = mark;
+        self.last_style = style;
         if (width == 2) {
             self.cells[self.cur][self.col + 1] = empty_cell;
             self.cells[self.cur][self.col + 1].cont = 1;
@@ -856,6 +914,33 @@ pub const Screen = struct {
             'H', 'f' => self.moveCursor(self.csiParam(0, 1), self.csiParam(1, 1)),
             'J' => self.eraseDisplay(p0),
             'K' => self.eraseLine(p0),
+            // M80a (#1712): cursor motion finals. Only param 0 is read (a
+            // second param is ignored, like xterm) and the rendition is
+            // never touched. Relative moves clamp at the grid edges and
+            // never grow `used`; E/F are CNL/CPL — column 0, NOT "down/up
+            // and keep the column"; G is the absolute column, d the
+            // absolute row (grown like CUP via moveCursor, column kept).
+            'A' => self.cursorUp(self.csiParam(0, 1)),
+            'B' => self.cursorDown(self.csiParam(0, 1)),
+            'C' => {
+                self.col = @min(self.col + @as(usize, self.csiParam(0, 1)), self.cols - 1);
+            },
+            'D' => {
+                self.col = self.col -| @as(usize, self.csiParam(0, 1));
+            },
+            'E' => {
+                self.cursorDown(self.csiParam(0, 1));
+                self.col = 0;
+            },
+            'F' => {
+                self.cursorUp(self.csiParam(0, 1));
+                self.col = 0;
+            },
+            'G' => {
+                self.col = @min(@as(usize, self.csiParam(0, 1) - 1), self.cols - 1);
+            },
+            'd' => self.moveCursor(self.csiParam(0, 1), @intCast(self.col + 1)),
+            'b' => self.repeatLast(self.csiParam(0, 1)),
             else => {},
         }
     }
