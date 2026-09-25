@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"virelai/shlib"
+)
 
 // The marker values are gate contracts: go-term.spec asserts each of them
 // and go-wm-hid asserts `goterm: attached` (and the ABSENCE of
@@ -35,7 +39,10 @@ func TestTermMarkerShapes(t *testing.T) {
 
 // The default prompt is the shell's own (the same `gosh> ` GOSH falls
 // back to); the live prompt comes from SETTINGS.TXT via
-// promptFromSettings, never from a hand-written constant in this app.
+// shlib.PromptFromSettings, never from a hand-written constant in this app.
+// M80n (#1730) moved the loader into shlib so GOSH and GOTERM share one
+// implementation; this table is the GOTERM-side proof the shared loader still
+// answers exactly what this front-end always got.
 func TestDefaultPromptIsTheShellFallback(t *testing.T) {
 	if defaultPrompt != "gosh> " {
 		t.Fatalf("defaultPrompt = %q want %q", defaultPrompt, "gosh> ")
@@ -58,8 +65,8 @@ func TestPromptFromSettings(t *testing.T) {
 		{"substring of another key is not the key", "xprompt=nope\n", defaultPrompt},
 	}
 	for _, c := range cases {
-		if got := promptFromSettings(c.body, defaultPrompt); got != c.want {
-			t.Errorf("%s: promptFromSettings(%q) = %q want %q", c.name, c.body, got, c.want)
+		if got := shlib.PromptFromSettings(c.body, defaultPrompt); got != c.want {
+			t.Errorf("%s: PromptFromSettings(%q) = %q want %q", c.name, c.body, got, c.want)
 		}
 	}
 }

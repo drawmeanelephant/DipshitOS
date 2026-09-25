@@ -1202,3 +1202,146 @@ func TestSetCols(t *testing.T) {
 		t.Fatalf("SetCols(0) = %d want the default", e.menuCols())
 	}
 }
+
+// TestEditorSharesBoundedLineBuffer pins the seam introduced by #1710 and
+// used by #1730: the editor embeds the same bounded buffer that the GUI text
+// fields use, while prompt expansion and repainting still see that buffer's
+// bytes and caret. In particular, NewEditor must initialize the bound; a
+// zero-value embedded LineBuffer would silently make SetValue unbounded.
+func TestEditorSharesBoundedLineBuffer(t *testing.T) {
+	cwd := "/data"
+	e := NewEditor(`\w> `, &History{})
+	e.SetPromptFacts(promptFactsForTest(&cwd))
+
+	// Exercise the embedded API first: its bound and storage are the editor's
+	// storage, not a detached copy used only by the GUI controls.
+	e.SetValue(strings.Repeat("x", maxLineBytes+1))
+	if got := e.Value(); len(got) != maxLineBytes {
+		t.Fatalf("bounded value = %d bytes, want %d", len(got), maxLineBytes)
+	}
+	if got := e.Caret(); got != maxLineBytes {
+		t.Fatalf("bounded caret = %d, want %d", got, maxLineBytes)
+	}
+	e.Clear()
+	if e.Value() != "" || e.Caret() != 0 {
+		t.Fatalf("cleared buffer = %q at %d", e.Value(), e.Caret())
+	}
+
+	e.SetValue("abc")
+	if !e.InsertByte('X') || e.Value() != "abcX" || e.Caret() != 4 {
+		t.Fatalf("embedded insert = %q at %d", e.Value(), e.Caret())
+	}
+	if !e.Backspace() || e.Value() != "abc" || e.Caret() != 3 {
+		t.Fatalf("embedded backspace = %q at %d", e.Value(), e.Caret())
+	}
+	if got, want := string(e.Repaint()), "\r/data> abc\r/data> abc"; got != want {
+		t.Fatalf("editor repaint with embedded buffer = %q, want %q", got, want)
+	}
+}
+
+// --- prompt escapes (M80n #1730) -------------------------------------------
+
+// promptFactsForTest is the provider the prompt tests share: a user in /data
+// on the seeded hostname, with a settable cwd so a `cd` can be simulated.
+func promptFactsForTest(cwd *string) func() PromptFacts {
+	return func() PromptFacts {
+		return PromptFacts{User: "user", Host: "virelai", Cwd: *cwd}
+	}
+}
+
+// TestPromptEscapePaintsAtWidth pins the whole point of the card: a prompt
+// that expands is painted EXPANDED, measured in cells, and the bytes the
+// front-end writes after a command are the same bytes the editor repaints.
+func TestPromptEscapePaintsAtWidth(t *testing.T) {
+	cwd := "/data"
+	e := NewEditor(`\w> `, &History{})
+	e.SetPromptFacts(promptFactsForTest(&cwd))
+	if got := string(e.PromptBytes()); got != "/data> " {
+		t.Fatalf("expansion at construction = %q", got)
+	}
+	out := feedE(e, "x")
+	if out != "\r/data> x\r/data> x" {
+		t.Fatalf("expanded paint = %q", out)
+	}
+	// A `cd` moves the directory; the next repaint of a new line follows it,
+	// which is why the front-end re-reads the template after every command.
+	cwd = "/data/sub"
+	out = string(e.Repaint())
+	if !strings.HasPrefix(out, "\r/data/sub> ") {
+		t.Fatalf("repaint after cd = %q", out)
+	}
+	if got := string(e.PromptBytes()); got != "/data/sub> " {
+		t.Fatalf("PromptBytes after cd = %q", got)
+	}
+}
+
+// TestPromptColourTailMath pins the width contract where a byte count would
+// visibly break: a coloured prompt is many bytes but few cells, so the tail
+// the repaint overwrites must be counted in CELLS. One backspace on "abc"
+// leaves exactly one cell of tail -- a byte count would write nine.
+func TestPromptColourTailMath(t *testing.T) {
+	cwd := "/data"
+	e := NewEditor("\x1b[32m\\w\x1b[0m$ ", &History{})
+	e.SetPromptFacts(promptFactsForTest(&cwd))
+	const want = "\x1b[32m/data\x1b[0m$ "
+	if got := string(e.PromptBytes()); got != want {
+		t.Fatalf("colour expansion = %q want %q", got, want)
+	}
+	if w := VisibleWidth(want); w != 7 {
+		t.Fatalf("the expanded prompt is %d cells, want 7 (\"%s\")", w, want)
+	}
+	if len(want) <= 7 {
+		t.Fatalf("fixture is not a byte/cell mismatch: %d bytes", len(want))
+	}
+	feedE(e, "abc")
+	out := feedE(e, "\x7f")
+	// The tail between the shortened line and the repositioning CR is ONE
+	// space: the cell the deleted character occupied, and no more.
+	if !strings.HasSuffix(out, "ab \r\x1b[32m/data\x1b[0m$ ab") {
+		t.Fatalf("tail after backspace = %q", out)
+	}
+	if strings.Contains(out, "         \r") {
+		t.Fatalf("the tail was measured in bytes, not cells: %q", out)
+	}
+}
+
+// TestPromptPlainIsByteIdentical is the regression guard for every front-end
+// and gate that never asked for an escape: with no facts provider, a plain
+// prompt paints exactly the bytes it always painted.
+func TestPromptPlainIsByteIdentical(t *testing.T) {
+	e := NewEditor("gosh> ", &History{})
+	// One keystroke per Feed, because the editor repaints per byte: a chunk
+	// of two would return two paints concatenated.
+	if out := feedE(e, "e"); out != "\rgosh> e\rgosh> e" {
+		t.Fatalf("plain paint = %q", out)
+	}
+	if out := feedE(e, "c"); out != "\rgosh> ec\rgosh> ec" {
+		t.Fatalf("plain second paint = %q", out)
+	}
+	out := feedE(e, "\x7f")
+	if out != "\rgosh> e \rgosh> e" {
+		t.Fatalf("plain backspace = %q", out)
+	}
+	// A template with escapes and no provider is written AS WRITTEN: the
+	// editor never silently eats a backslash a front-end did not expand.
+	e2 := NewEditor(`\w> `, &History{})
+	if got := string(e2.PromptBytes()); got != `\w> ` {
+		t.Fatalf("unexpanded template = %q", got)
+	}
+}
+
+// TestPromptRuneWidth pins that a multi-byte character costs one cell, which
+// is what the rune-based VisibleWidth buys over the old byte count.
+func TestPromptRuneWidth(t *testing.T) {
+	e := NewEditor("é> ", &History{})
+	if w := VisibleWidth("é> "); w != 3 {
+		t.Fatalf("fixture width = %d want 3", w)
+	}
+	feedE(e, "ab")
+	out := feedE(e, "\x7f")
+	// One cell of tail for the deleted "b", even though the prompt is two
+	// bytes wider in bytes than in cells.
+	if !strings.HasSuffix(out, "a \r\u00e9> a") && !strings.HasSuffix(out, "a \r\xc3\xa9> a") {
+		t.Fatalf("rune tail = %q", out)
+	}
+}
