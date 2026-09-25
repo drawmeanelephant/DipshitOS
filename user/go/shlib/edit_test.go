@@ -1203,6 +1203,42 @@ func TestSetCols(t *testing.T) {
 	}
 }
 
+// TestEditorSharesBoundedLineBuffer pins the seam introduced by #1710 and
+// used by #1730: the editor embeds the same bounded buffer that the GUI text
+// fields use, while prompt expansion and repainting still see that buffer's
+// bytes and caret. In particular, NewEditor must initialize the bound; a
+// zero-value embedded LineBuffer would silently make SetValue unbounded.
+func TestEditorSharesBoundedLineBuffer(t *testing.T) {
+	cwd := "/data"
+	e := NewEditor(`\w> `, &History{})
+	e.SetPromptFacts(promptFactsForTest(&cwd))
+
+	// Exercise the embedded API first: its bound and storage are the editor's
+	// storage, not a detached copy used only by the GUI controls.
+	e.SetValue(strings.Repeat("x", maxLineBytes+1))
+	if got := e.Value(); len(got) != maxLineBytes {
+		t.Fatalf("bounded value = %d bytes, want %d", len(got), maxLineBytes)
+	}
+	if got := e.Caret(); got != maxLineBytes {
+		t.Fatalf("bounded caret = %d, want %d", got, maxLineBytes)
+	}
+	e.Clear()
+	if e.Value() != "" || e.Caret() != 0 {
+		t.Fatalf("cleared buffer = %q at %d", e.Value(), e.Caret())
+	}
+
+	e.SetValue("abc")
+	if !e.InsertByte('X') || e.Value() != "abcX" || e.Caret() != 4 {
+		t.Fatalf("embedded insert = %q at %d", e.Value(), e.Caret())
+	}
+	if !e.Backspace() || e.Value() != "abc" || e.Caret() != 3 {
+		t.Fatalf("embedded backspace = %q at %d", e.Value(), e.Caret())
+	}
+	if got, want := string(e.Repaint()), "\r/data> abc\r/data> abc"; got != want {
+		t.Fatalf("editor repaint with embedded buffer = %q, want %q", got, want)
+	}
+}
+
 // --- prompt escapes (M80n #1730) -------------------------------------------
 
 // promptFactsForTest is the provider the prompt tests share: a user in /data
