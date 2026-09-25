@@ -109,6 +109,12 @@ func (t *TabApp) DeclareNav(path string) { vi.DeclareNav(uint32(t.Win), path, t.
 // PollNav returns a back/forward target the user picked, or "",false.
 func (t *TabApp) PollNav() (string, bool) { return vi.PollNav(uint32(t.Win), t.Name) }
 
+// SetTabTitle asks the seat to rename this tab. The initial declaration still
+// establishes the executable identity; later titles only change the rail label.
+func (t *TabApp) SetTabTitle(title string) bool {
+	return vi.SetTabTitle(uint32(t.Win), title, t.Name)
+}
+
 // Scale maps r from a fromW x fromH canvas into toW x toH (integer math,
 // rounding toward the top-left, minimum 1px). At the identity mapping
 // (to == from) every rect maps to itself exactly — the zero-regression fixed

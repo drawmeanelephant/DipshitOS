@@ -109,6 +109,7 @@ The only threads not closed:
 | **M72 — Charm TUI** | Closed (#1578, all cards): loader bound split (`load_max` initialized / `map_max` 64 MiB mapped), window-tty VT (SGR/CUP/EL/ED/alt), Bubble Tea hello + host tape. The `u8` grid leftover moved to M73a-1. | #1578 |
 | **M73 — Terminal depth** | In flight: index #1624 + 14 cards; acceptance #1638 closes it. Merged: M73a-1, M73f-1, M73b (#1647), M73a-2 (#1649), M73f-2 (#1651), M73c (#1627), M73e (#1652), M73g (#1653), M73h (#1654), M73i (#1656), M73k (#1637), M73l (#1661, PR #1666). This PR closes M73m #1662 (palette theming: `theme=custom` + `palette_fg/bg/accent` resolved at paint, chosen in GOSET, applied live). M73j #1636 is claimed; M73z #1638 landed (class-B `go-dogfood` 4/4 — boot 04 drives the acceptance chain: tab close → launcher → GOTERM → drag-select → copy/paste/run → `tty` 0/0 → `r` resize 64x23 → lower → pixel capture; seat `maxTicks` 90 + exit sweep, `--input-key` marker-anchored delivery). | #1624 |
 | **M74 — TUI apps** | Split out of M73 wave 2: milestone 55 + index #1639 filed. M74a `GOFILES.ELF` Bubble Tea file manager landed (#1644, gate `go-fileman`). | #1639 |
+| **M79 — Go seat depth + appkit** | In flight: persistent live seat and appkit foundation landed; tab chrome/navigation/session and app-interface cards remain. | #1703 |
 
 ## Gate status
 

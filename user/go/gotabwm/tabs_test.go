@@ -62,6 +62,37 @@ func TestGuessBinShippingTitles(t *testing.T) {
 	}
 }
 
+func TestSetTitlePreservesBinAndSession(t *testing.T) {
+	var live TabStrip
+	if !live.OpenTab(4, "Notepad") {
+		t.Fatal("OpenTab")
+	}
+	if !live.SetTitle(4, "notes.txt") {
+		t.Fatal("SetTitle existing tab")
+	}
+	if live.At(0).Title != "notes.txt" || live.At(0).Bin != "NOTE.ELF" {
+		t.Fatalf("retitled tab = %+v", live.At(0))
+	}
+	if live.SetTitle(99, "other.txt") {
+		t.Fatal("SetTitle accepted an unknown id")
+	}
+	if live.SetTitle(4, "") {
+		t.Fatal("SetTitle accepted an empty title")
+	}
+
+	raw, ok := live.encodeTabsV2(1)
+	if !ok {
+		t.Fatal("encodeTabsV2")
+	}
+	var restored TabStrip
+	if _, ok := restored.applyTabsV2(raw); !ok {
+		t.Fatal("applyTabsV2")
+	}
+	if restored.At(0).Title != "notes.txt" || restored.At(0).Bin != "NOTE.ELF" {
+		t.Fatalf("restored title/bin = %+v", restored.At(0))
+	}
+}
+
 func TestOpenCloseFocusMachine(t *testing.T) {
 	var s TabStrip
 	if s.Count() != 0 {

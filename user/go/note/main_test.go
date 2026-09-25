@@ -138,6 +138,21 @@ func TestIsSave(t *testing.T) {
 	}
 }
 
+func TestTabTitleForPath(t *testing.T) {
+	for _, tc := range []struct {
+		path, want string
+	}{
+		{defaultPath, "notes.txt"},
+		{"notes.txt", "notes.txt"},
+		{"/host/", ""},
+		{"", ""},
+	} {
+		if got := tabTitleForPath(tc.path); got != tc.want {
+			t.Fatalf("tabTitleForPath(%q) = %q want %q", tc.path, got, tc.want)
+		}
+	}
+}
+
 // The frame geometry: how many rows and columns a canvas holds, and the clamps
 // that keep a tiny canvas drawable. A zero canvas falls back to the native size
 // rather than dividing by it.

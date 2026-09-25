@@ -19,6 +19,7 @@
 //	attach (5)                  gotabwm: tab open (if new); rpc attach id=<n>
 //	detach (6)                  gotabwm: rpc detach id=<n>
 //	cycle (7)                   gotabwm: tab focus id=<n>; rpc cycle
+//	set title (11)              gotabwm: title id=<n> <text>
 //	anything else               gotabwm: rpc other kind=<n>
 //	rail after paint            gotabwm: rail n=<n> focus=<id>
 //	close focused / last        gotabwm: host close / tab close id=<n>
@@ -44,6 +45,7 @@ const (
 	MarkerRpcAttach  = "gotabwm: rpc attach id="
 	MarkerRpcDetach  = "gotabwm: rpc detach id="
 	MarkerRpcCycle   = "gotabwm: rpc cycle"
+	MarkerTitle      = "gotabwm: title id="
 	MarkerRpcOther   = "gotabwm: rpc other kind="
 	MarkerHostFocus  = "gotabwm: host focus id="
 	MarkerHostView   = "gotabwm: host view id="
@@ -181,6 +183,15 @@ func applyRPC(req vi.WmRpc) bool {
 			}
 		}
 		vi.ConsoleLine(MarkerRpcCycle)
+		return true
+	case vi.WmRpcKindSetTitle: // 11, client -> seat
+		title := req.TitleString()
+		if !tabs.SetTitle(id, title) {
+			return false
+		}
+		// The strip is the rail's render model; the next composite tick paints
+		// the new label. The marker follows the successful state mutation.
+		vi.ConsoleLine(MarkerTitle + vi.Itoa64(int64(id)) + " " + title)
 		return true
 	default:
 		vi.ConsoleLine(MarkerRpcOther + vi.Itoa64(int64(req.Kind&0x7f)))

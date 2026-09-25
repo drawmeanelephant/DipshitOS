@@ -37,6 +37,13 @@ func TestDispatchTracksCanvas(t *testing.T) {
 	}
 }
 
+func TestSetTabTitleHostRefuses(t *testing.T) {
+	ta := &TabApp{Win: 4, Name: "NOTE.ELF"}
+	if ta.SetTabTitle("notes.txt") {
+		t.Fatal("host tab title request must refuse without a WM seat")
+	}
+}
+
 // Scale is the identity at the native canvas — the zero-regression fixed point.
 func TestScaleIdentity(t *testing.T) {
 	r := Rect{8, 104, 56, 20}
