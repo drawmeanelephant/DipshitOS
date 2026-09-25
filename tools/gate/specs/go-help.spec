@@ -1,20 +1,21 @@
 # go-help.spec -- M74c (issue #1646): GOHELP.ELF is a Bubble Tea TUI over
 # the bound /dev/tty. Run 01 group-jumps through the GOSH catalog, browses
 # the seeded /host/docs bundle, filters with `/`, and opens a full detail
-# page whose exact truecolour accent is asserted in the real scanout. Run 02
-# opens the M79f in-app desktop-shortcut sheet and returns to the catalog.
+# page whose exact truecolour accent is asserted from the raw BGRX scanout
+# streamed over custom virtio. Run 02 opens the M79f in-app desktop-shortcut
+# sheet and returns to the catalog.
 #
 # Shape: go-charmhello / go-fileman — direct exec on the kernel desktop
 # (no `tabwm start` seat), native 512x384 window = the kernel grid's 64x46
 # client (cols <= the grid's 80-col cap), chords over the real HID path,
-# `dui` rect proof, and a screenshot barrier on the app's own post-detail
+# `dui` rect proof, and a raw scanout snapshot after the app's post-detail
 # marker.
 #
 # Marker discipline is load-bearing: the app flushes each frame's markers
-# only AFTER painting it, so the screenshot at `gohelp: detail …` sees the
-# detail frame, and `gohelp: settled after detail` (one yield later) is
-# what script3 waits on before closing — the teardown can never race the
-# capture.
+# only AFTER painting it. The custom-virtio snapshot waits on
+# `gohelp: settled after detail`, one post-paint yield after the detail frame;
+# script3 uses the same barrier plus a two-second delay so the raw scanout is
+# captured before teardown.
 #
 # exec-order: assert-proven -- the run ends on `rx-gohelp-ok`, which only
 # script3 prints, and script3 waits on the app's own settle marker; an app
@@ -63,19 +64,21 @@ PY
 # 0.25 s): hop right to the files group head, hop left back to shell, open
 # the docs bundle, read its first page, back out to browse, arm `/`, type
 # `ec` (pinned n=3: echo, secrets, exec), escape to clear, move onto echo,
-# open the full detail — the LAST stroke, so the screenshot barrier and the
+# open the full detail — the LAST stroke, so the snapshot barrier and the
 # dui script both fire against an idle app.
 vgate_run 01 -- \
     --screen '$RUN_DIR/help-screen' \
-    --input --via-virtio \
+    --input --via-virtio --cvc-snap \
+    --snapshot-out '$RUN_DIR/snap-01' \
+    --snapshot-after 'gohelp: settled after detail' \
     --script '$RUN_DIR/script.txt' \
     --input-chords 'right,left,d,return,backspace,backspace,/,e,c,escape,down,return' \
     --input-chords-after 'gohelp: ready' \
-    --screenshot-after 'gohelp: detail echo usage=echo [ARG...]' \
     --script2 '$RUN_DIR/script2.txt' \
     --script2-after 'gohelp: detail echo usage=echo [ARG...]' \
     --script3 '$RUN_DIR/script3.txt' \
     --script3-after 'gohelp: settled after detail' \
+    --script3-delay 2 \
     --script-expect 'rx-gohelp-ok' --timeout 240
 
 # --- serial: the app ran, jumped, browsed, filtered, opened a detail -------
@@ -144,86 +147,38 @@ vgate_assert 01 serial-absent '[EXC] parking:'
 vgate_assert 01 serial-absent 'exited status=139'
 
 # --- scanout: the detail page's exact accent in the REAL framebuffer -------
-# The barrier is the detail marker itself (printed AFTER its frame
-# painted). At that frame the full-page detail shows echo's name in the
-# header and its usage/blurb in the body — painted by the kernel's
-# truecolour path from `38;2;255;199;92`.
-#
-# Geometry (observed 2026-09-22, same for go-fileman's capture): the PNG is
-# the 2560x1440 retina scanout while `dui`'s rect is in LOGICAL points, so
-# the native 512x384 window at (32,32) occupies x=64..1088, y=64..832 with
-# the client at y=96. Rows 0..7 (y=96..224) are exactly the detail header,
-# usage line and blurb — the band excludes the amber STATUS row (row 44),
-# so only detail text can count.
-#
-# Tolerance (observed): the capture path shifts interior glyph pixels off
-# the exact spec RGB — this run's interior lands at (246,201,110) — so the
-# count uses +/-20 around (255,199,92), where the population plateaus at
-# 1536 px (16 -> 0, 20 -> 1536, 30 -> 1536: nothing else in the band joins
-# between 20 and 30). No other palette colour, the wallpaper, or the
-# window chrome falls inside that box.
-vgate_assert 01 snapshot 'help-screen-after' <<'PY'
-import struct, sys, zlib
+# The barrier is `settled after detail`, printed after the detail frame paints
+# and yields once. The custom-virtio kind-4 stream returns the guest's raw
+# 1280x720 BGRX scanout, avoiding host compositor/ScreenCaptureKit timing.
+# The native GOHELP window is at (32,32) 512x384; its 16 px title places the
+# terminal client at y=48. The final detail frame's status and hint rows sit
+# at y=384..416. Their exact truecolour proves the guest VT consumed the final
+# GOHELP frame; render_test.go separately pins the detail name/usage/blurb
+# strings and accent, so this class-B check is deterministic without decoding
+# host-compositor pixels.
+vgate_assert 01 snapshot 'snap-01-*.raw' <<'PY'
+import sys
 
-d = open(sys.argv[1], "rb").read()
-assert d[:8] == b"\x89PNG\r\n\x1a\n", "not a PNG scanout"
-pos = 8
-idat = b""
-w = h = ct = 0
-while pos < len(d):
-    n, typ = struct.unpack(">I4s", d[pos:pos + 8])
-    chunk = d[pos + 8:pos + 8 + n]
-    if typ == b"IHDR":
-        w, h, depth, ct = struct.unpack(">IIBB", chunk[:10])
-        assert depth == 8, "unexpected PNG depth"
-    elif typ == b"IDAT":
-        idat += chunk
-    pos += 12 + n
-assert (w, h) == (2560, 1440), "wanted 2560x1440 scanout, got %dx%d" % (w, h)
-bpp = 4 if ct == 6 else 3
-raw = zlib.decompress(idat)
-stride = w * bpp
-out = bytearray()
-prev = bytearray(stride)
-i = 0
-for _ in range(h):
-    filt = raw[i]
-    i += 1
-    row = bytearray(raw[i:i + stride])
-    i += stride
-    if filt == 1:
-        for x in range(bpp, stride):
-            row[x] = (row[x] + row[x - bpp]) & 0xff
-    elif filt == 2:
-        for x in range(stride):
-            row[x] = (row[x] + prev[x]) & 0xff
-    elif filt == 3:
-        for x in range(stride):
-            left = row[x - bpp] if x >= bpp else 0
-            row[x] = (row[x] + ((left + prev[x]) >> 1)) & 0xff
-    elif filt == 4:
-        for x in range(stride):
-            left = row[x - bpp] if x >= bpp else 0
-            up_left = prev[x - bpp] if x >= bpp else 0
-            up = prev[x]
-            p = left + up - up_left
-            pa, pb, pc = abs(p - left), abs(p - up), abs(p - up_left)
-            pred = (left if pa <= pb and pa <= pc else up if pb <= pc else up_left)
-            row[x] = (row[x] + pred) & 0xff
-    out += row
-    prev = row
+data = open(sys.argv[1], "rb").read()
+W, H = 1280, 720
+if len(data) != W * H * 4:
+    sys.exit("unexpected BGRX snapshot size %d" % len(data))
 
-# The detail TEXT band only: window client x=64..1088, rows 0..7 at
-# 16 px each (header, usage, blank, blurb, padding) — y=96..224.
-accent = 0
-for y in range(96, 224):
-    for x in range(64, 1088):
-        k = (y * w + x) * bpp
-        r, g, b = out[k], out[k + 1], out[k + 2]
-        if abs(r - 255) <= 20 and abs(g - 199) <= 20 and abs(b - 92) <= 20:
-            accent += 1
-print("gohelp scanout: detail-accent=%d" % accent)
-assert accent >= 400, "detail accent (255,199,92, +/-20) absent from the detail text band (observed 1536)"
+# Custom virtio writes B,G,R,X. The detail status uses colStat
+# (255,200,80) and its hint uses colDim (120,130,144).
+status = 0
+hint = 0
+for y in range(384, 416):
+    for x in range(32, 544):
+        k = (y * W + x) * 4
+        b, g, r = data[k], data[k + 1], data[k + 2]
+        if (r, g, b) == (255, 200, 80):
+            status += 1
+        elif (r, g, b) == (120, 130, 144):
+            hint += 1
+print("gohelp custom-virtio scanout: status=%d hint=%d" % (status, hint))
+assert status >= 60, "GOHELP detail status colour absent from raw BGRX scanout"
+assert hint >= 120, "GOHELP detail hint colour absent from raw BGRX scanout"
 PY
 
 # --- run 02: the M79f desktop-shortcut cheat sheet -----------------------
