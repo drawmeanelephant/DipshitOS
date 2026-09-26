@@ -213,11 +213,16 @@ func applyFreezeToggle() bool {
 	if tabs.Freeze(id) {
 		vi.ConsoleLine(MarkerFreeze + vi.Itoa64(int64(id)) + " on")
 		dumpOrder()
+		// M79g (#1718): the badge is part of the session, so both
+		// directions persist — a freeze the file does not carry was
+		// never saved, only displayed.
+		noteSessionMutation()
 		return true
 	}
 	if tabs.Thaw(id) {
 		vi.ConsoleLine(MarkerThaw + vi.Itoa64(int64(id)))
 		dumpOrder()
+		noteSessionMutation()
 		return true
 	}
 	return false
@@ -293,6 +298,10 @@ func applyHidPin() bool {
 	}
 	vi.ConsoleLine(MarkerPin + "id=" + vi.Itoa64(int64(id)) + " on")
 	dumpOrder()
+	// M79g (#1718): Pin() re-partitions the strip (pinned left), so the
+	// file has to be rewritten — an already-pinned tab returns false above
+	// and costs nothing.
+	noteSessionMutation()
 	return true
 }
 
@@ -582,7 +591,8 @@ func endRailDrag(px, py uint32) bool {
 
 // applyRailReorder is Zig TABWM reorder_tab: Reorder() then the existing
 // `gotabwm: reorder from->to` marker. Same-cell release is a click no-op.
-// Does not write SESSION.TABS (M62e stays the once-only pin-stay snapshot).
+// M79g (#1718): a drag that moved a tab persists SESSION.TABS right here,
+// so the new order is what the next boot restores.
 //
 // M79c (#1706): a reorder while split re-proposes both pane rects. The
 // rects are positional (index 0 = first pane), so without this the panes
@@ -594,6 +604,7 @@ func applyRailReorder(from, to int) bool {
 	}
 	vi.ConsoleLine(MarkerReorder + vi.Itoa64(int64(from)) + "->" + vi.Itoa64(int64(to)))
 	dumpOrder()
+	noteSessionMutation()
 	if tabs.Split() == SplitNone || tabs.Count() != 2 {
 		return true
 	}

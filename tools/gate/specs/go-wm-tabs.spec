@@ -1,5 +1,5 @@
-# go-wm-tabs.spec -- M62b–h + #1426 + M66b + M79d
-# (issues #1400–#1406/#1426/#1444/#1707)
+# go-wm-tabs.spec -- M62b–h + #1426 + M66b + M79d + M79g
+# (issues #1400–#1406/#1426/#1444/#1707/#1718)
 # class-B gate: GOTABWM tab strip, split, pin, session, LAYOUT.txt, then two
 # shipping Go ELFs as tabs. Boot 01 hosts GOCALC.ELF + NOTE.ELF
 # (Zig CALC.BIN is gone, M62h / #1406; Zig NOTEPAD.BIN is gone, M66c / #1485). Boot 03 hosts GOEDIT.ELF + GOTERM.ELF:
@@ -8,13 +8,16 @@
 # 3 kernel + 3×4 Ms + 1 spare). The GOMAXPROCS=1 path still fits
 # (GOTABWM+GOEDIT+GOTERM = 9 Ms + kernel 3; idle stays max_tasks-1).
 #
-# SEVEN vgate_runs share one seeded host share (`vgate_share seed`):
+# NINE vgate_runs share one seeded host share (`vgate_share seed`):
 #   01  GOCALC+NOTE.ELF; pin-stay writes SESSION.TABS; last unsplit writes
 #       LAYOUT.txt (closed before the serial line that names it).
+#       M79g: the choreography's closes now persist too, so the file this
+#       boot leaves is the ONE tab it ended with.
 #   02  GOTABWM only. Restores the session; then drops SESSION.TABS.
 #   03  GOEDIT+GOTERM, empty strip. Same two-tab choreography.
-#   04  M71e (#1564): GOCALC+NOTE.ELF, ctrl-shift-f freezes the focused tab
-#       before the pin-stay snapshot, so the frozen bit lands in SESSION.TABS.
+#   04  M71e (#1564): GOCALC+NOTE.ELF, ctrl-shift-f freezes the tab that the
+#       choreography does NOT close first, so the frozen bit survives to
+#       SESSION.TABS (it is the only record left when the strip empties).
 #   05  M71e (#1564): seat only, empty strip, no click. The start surface is
 #       asserted as PIXELS on a settled frame (capture keyed to an rx marker,
 #       not to `gotabwm: present` - the host grab races the guest present).
@@ -33,6 +36,15 @@
 #       back on the app's nav-poll — the client marker `gofiles: nav back
 #       to` is the proof the round trip closed over the real wire. This is
 #       the first run where a HOSTED Go app drives the kinds 9/10 seam.
+#   09  M79g (#1718): LIVE mode (the GOTABWM.DEMO trigger is removed first),
+#       GOCALC+NOTE.ELF. One rail click focuses Calc, ctrl-shift-p pins it,
+#       ctrl-shift-f freezes it, and a rail DRAG moves it to the right — each
+#       mutation writes SESSION.TABS as it happens, and the run ends at its
+#       own rx marker with the seat still up.
+#   10  M79g (#1718): the second boot of that pair. No HID, no clients: the
+#       seat restores the file run 09 wrote and must report the ORDER, the
+#       pin bit and the frozen badge the user actually left — `session load
+#       n=2 mode=restore` plus the order/titles lines that carry them.
 #
 # Seed wm=none and exec GOTABWM.ELF like go-wm-seat. No HID. No framebuffer
 # golden. Do not overload go-wm-seat or go-wm-default. Boot 01 `reorder 0->1`
@@ -68,7 +80,7 @@
 #
 # HOST PREREQUISITE: bash tools/go/build-note.sh -> .build/go/NOTE.ELF
 
-vgate_name go-wm-tabs "issues #1400–#1405/#1426 + #1564 + #1707: GOTABWM tabs, session, LAYOUT.txt, frozen badge, start surface, live titles on VZ"
+vgate_name go-wm-tabs "issues #1400–#1405/#1426 + #1564 + #1707 + #1718: GOTABWM tabs, session, LAYOUT.txt, frozen badge, start surface, live titles, and a session file that records what the user did on VZ"
 vgate_share seed
 vgate_runner_flags -Xswiftc -DSPIKE
 
@@ -360,36 +372,41 @@ vgate_assert 01 serial-contains 'rx-gotabwm-tabs-ok'
 vgate_assert 01 serial-contains 'dui: windows=4 focused='
 vgate_assert 01 serial-absent '[EXC] parking:'
 vgate_assert 01 serial-absent 'exited status=139'
-# M62e: pin-stay wrote `.tabs` v2 while both tabs still existed. Closes
-# after that must not overwrite the file with an empty strip.
+# M62e: pin-stay wrote `.tabs` v2 while both tabs still existed.
+# M79g (#1718): a close is a mutation too, so the file this boot leaves is
+# the strip it ENDED with — one tab (the choreography closed Calc first,
+# because pin-stay pinned it) — and closing the last tab still must not
+# publish an empty session. The two-tab restore this used to prove moved to
+# the user-driven boot pair 09/10 below, where the tab order is the user's.
 vgate_assert 01 serial-contains 'gotabwm: session write n=2'
+vgate_assert 01 serial-contains 'gotabwm: session write n=1'
 vgate_assert 01 python <<'PY'
 import os, sys
 # Offsets match user/go/gotabwm/tabsv2.go: tabsV2HeaderBytes=6,
 # tabsV2RecordBytes=69, tabsV2TitleMax=32. Record 0 title at 6, flags at
-# 38; record 1 starts at 75, flags at 107.
+# 38, group at 39, bin at 51.
 p = os.path.join(os.environ["VG_SHARE"], "SESSION.TABS")
 try:
     b = open(p, "rb").read()
 except FileNotFoundError:
     sys.exit("SESSION.TABS missing on the share")
-if len(b) < 6 + 69 * 2:
+if len(b) < 6 + 69:
     sys.exit("SESSION.TABS too short: %d bytes" % len(b))
 if b[0] != 2:
     sys.exit("version byte %d want 2" % b[0])
-if b[2] != 2:
-    sys.exit("count %d want 2" % b[2])
+if b[2] != 1:
+    sys.exit("count %d want 1 (the choreography closed the pinned tab)" % b[2])
 if b[1] != 1:
-    sys.exit("active+1 = %d want 1 (Calc, index 0)" % b[1])
-title0 = b[6:38].split(b"\x00", 1)[0]
-title1 = b[75:107].split(b"\x00", 1)[0]
-if title0 != b"Calc" or title1 != b"notes.txt":
-    sys.exit("titles %r %r want Calc, notes.txt" % (title0, title1))
-if b[38] != 1:
-    sys.exit("record 0 flags %#x want pinned" % b[38])
-if b[107] != 0:
-    sys.exit("record 1 flags %#x want unpinned" % b[107])
-print("SESSION.TABS v2 n=2 Calc pinned left, live title notes.txt, Calc active")
+    sys.exit("active+1 = %d want 1 (the one surviving tab)" % b[1])
+title = b[6:38].split(b"\x00", 1)[0]
+if title != b"notes.txt":
+    sys.exit("title %r want notes.txt (M79d's live title)" % title)
+if b[38] != 0:
+    sys.exit("flags %#x want 0 (the pinned tab was the one closed)" % b[38])
+bin0 = b[51:75].split(b"\x00", 1)[0]
+if bin0 != b"NOTE.ELF":
+    sys.exit("bin %r want NOTE.ELF (reopen identity survives the rename)" % bin0)
+print("SESSION.TABS v2 n=1 notes.txt bin=NOTE.ELF: the strip the boot ended with")
 PY
 # M62f: LAYOUT.txt is closed before the serial line that names it. Last
 # two-tab write is the unsplit full-viewport dump (closes do not rewrite).
@@ -446,17 +463,22 @@ vgate_assert 02 serial-contains 'VirelaiOS kernel has seized control.'
 vgate_assert 02 serial-contains 'exec: loaded GOTABWM.ELF'
 vgate_assert 02 serial-contains 'gotabwm: registered'
 vgate_assert 02 serial-contains 'gotabwm: settings wm=none'
-vgate_assert 02 serial-contains 'gotabwm: session load n=2'
-vgate_assert 02 serial-contains 'gotabwm: session titles=Calc,notes.txt pin=1,0 active=0'
+# M79g (#1718): `mode=restore` is the seat saying these ids are placeholder
+# rows read back from the file, NOT apps this boot re-executed (re-exec is a
+# policy card of its own). Boot 01's file now carries the strip it ended
+# with — one tab — because a close is a mutation too.
+vgate_assert 02 serial-contains 'gotabwm: session load n=1 mode=restore'
+vgate_assert 02 serial-contains 'gotabwm: session titles=notes.txt pin=0 active=0'
+vgate_assert 02 serial-contains 'gotabwm: session freeze n=0'
 vgate_assert 02 serial-contains 'gotabwm: order ids='
-vgate_assert 02 serial-contains 'pin=1,0'
-vgate_assert 02 serial-contains 'gotabwm: rail n=2 focus='
+vgate_assert 02 serial-contains 'pin=0'
+vgate_assert 02 serial-contains 'gotabwm: rail n=1 focus='
 vgate_assert 02 serial-contains 'gotabwm: layout file=/host/SELFTEST/LAYOUT.txt'
 # Restored placeholder ids are not kernel windows: skip split/close.
 vgate_assert 02 serial-absent 'gotabwm: split '
 vgate_assert 02 serial-absent 'gotabwm: tab close id='
 vgate_assert 02 serial-absent 'gotabwm: session bad'
-vgate_assert 02 share-contains SELFTEST/LAYOUT.txt 'bin=GOCALC.ELF'
+vgate_assert 02 share-contains SELFTEST/LAYOUT.txt 'bin=NOTE.ELF'
 vgate_assert 02 python <<'PY'
 import os, re, sys
 p = os.path.join(os.environ["VG_SHARE"], "SELFTEST/LAYOUT.txt")
@@ -466,20 +488,22 @@ if b"\r" in raw or not raw.endswith(b"\n"):
 line_re = re.compile(
     r"^tab=(\d+) bin=(\S+) x=(\d+) y=(\d+) w=(\d+) h=(\d+) focus=([01]) split=(none|h|v)$")
 lines = raw.decode("utf-8").splitlines()
-if len(lines) != 2:
-    sys.exit("LAYOUT.txt has %d lines, want 2" % len(lines))
+if len(lines) != 1:
+    sys.exit("LAYOUT.txt has %d lines, want 1" % len(lines))
 parsed = [line_re.match(line) for line in lines]
 if not all(parsed):
     sys.exit("bad LAYOUT line in %r" % lines)
-ids = [parsed[0].group(1), parsed[1].group(1)]
-if ids != ["256", "257"]:
-    sys.exit("restored ids %s want 256,257 (sessionIDBase=0x100)" % ids)
-bins = [parsed[0].group(2), parsed[1].group(2)]
-if bins != ["GOCALC.ELF", "NOTE.ELF"]:
-    sys.exit("bins %s want GOCALC.ELF, NOTE.ELF" % bins)
-if parsed[0].group(8) != "none" or parsed[1].group(8) != "none":
+ids = [parsed[0].group(1)]
+if ids != ["256"]:
+    sys.exit("restored ids %s want 256 (sessionIDBase=0x100)" % ids)
+bins = [parsed[0].group(2)]
+if bins != ["NOTE.ELF"]:
+    sys.exit("bins %s want NOTE.ELF" % bins)
+if parsed[0].group(8) != "none":
     sys.exit("restore dump must be unsplit")
-print("LAYOUT.txt restore n=2 ids=256,257 unsplit")
+if parsed[0].group(7) != "1":
+    sys.exit("the restored tab must be the focused one, focus=%s" % parsed[0].group(7))
+print("LAYOUT.txt restore n=1 id=256 unsplit")
 # Boot 03 must not restore the Calc/notes.txt session placeholders.
 stale = os.path.join(os.environ["VG_SHARE"], "SESSION.TABS")
 try:
@@ -595,12 +619,15 @@ PY
 # ---------------------------------------------------------------------------
 # Run 04 (M71e / #1564, M48 BT6): the frozen badge, end to end.
 #
-# Two clients as in run 01, because the session write lives in the two-tab
-# pin-stay choreography — that is what puts the flag on disk. The chord fires
-# on `gocalc: declare accepted`, well inside the choreography's hidChordHold
-# (20 ticks) before case 2 writes SESSION.TABS, so the badge is already set
-# when the file is written. `ctrl-shift-f` is Zig's BT6 binding; GOTABWM has
+# Two clients as in run 01. `ctrl-shift-f` is Zig's BT6 binding; GOTABWM has
 # no conflicting ctrl-shift chord other than ctrl-shift-p.
+#
+# M79g (#1718): the chord is anchored on NOTE's declare (NOT GOCALC's, as it
+# was) on purpose. The choreography closes the PINNED tab first and pin-stay
+# pins Calc, so the tab whose badge can still be on disk when the strip
+# empties is the OTHER one — the text client. Freezing the focused tab at
+# `note: tab-aware` is that tab, well inside the choreography's hidChordHold
+# (32 ticks), so the flag is set long before the closes.
 #
 # This is a BADGE, not a lock: the run also asserts the frozen tab is still
 # closed by the ordinary choreography (the `tab close` count below), because
@@ -630,7 +657,7 @@ vgate_run 04 -- \
     --script2 '$RUN_DIR/script2-04.txt' \
     --script2-after 'gotabwm: win focus' \
     --input-chords 'ctrl-shift-f' \
-    --input-chords-after 'gocalc: declare accepted' \
+    --input-chords-after 'note: tab-aware (full-viewport)' \
     --script3 '$RUN_DIR/script3-04.txt' \
     --script3-after 'wm: unregistered, shim resumed' \
     --script-expect 'rx-gotabwm-freeze-ok' --timeout 300
@@ -651,25 +678,27 @@ vgate_assert 04 python <<'PY'
 import os, sys
 # The frozen bit must actually be ON DISK: this is the half of the card that
 # was missing (the codec knew 0x02; GOTABWM dropped it on encode AND decode).
-# Offsets match tabsv2.go: header 6, record 69, title 32 -> flags at 6+32=38
-# for record 0 and 6+69+32=107 for record 1.
+# M79g (#1718): the closes persist now, so what is on disk when the boot ends
+# is the ONE tab the choreography left, and it is the frozen one — the chord
+# is anchored on the client pin-stay does not pin (see the run's header).
+# Offsets match tabsv2.go: header 6, title 32 -> flags at 6+32=38, bin at 51.
 p = os.path.join(os.environ["VG_SHARE"], "SESSION.TABS")
 try:
     b = open(p, "rb").read()
 except FileNotFoundError:
     sys.exit("SESSION.TABS missing on the share")
-if len(b) < 6 + 69 * 2:
+if len(b) < 6 + 69:
     sys.exit("SESSION.TABS too short: %d bytes" % len(b))
-if b[0] != 2 or b[2] != 2:
-    sys.exit("version=%d count=%d want 2/2" % (b[0], b[2]))
-flags = [b[38], b[107]]
-frozen = [i for i, f in enumerate(flags) if f & 0x02]
-if len(frozen) != 1:
-    sys.exit("want exactly one frozen record, flags=%s" % [hex(f) for f in flags])
-title = b[6:38] if frozen[0] == 0 else b[75:107]
-title = title.split(b"\x00", 1)[0].decode()
-print("SESSION.TABS flags=%s frozen record=%d title=%s" % (
-    [hex(f) for f in flags], frozen[0], title))
+if b[0] != 2 or b[2] != 1:
+    sys.exit("version=%d count=%d want 2/1" % (b[0], b[2]))
+flags = b[38]
+if flags & 0x02 == 0:
+    sys.exit("flags=%#x: the frozen badge did not survive to disk" % flags)
+title = b[6:38].split(b"\x00", 1)[0].decode()
+bin0 = b[51:75].split(b"\x00", 1)[0].decode()
+if bin0 != "NOTE.ELF":
+    sys.exit("bin %r want NOTE.ELF (the frozen tab is the text client)" % bin0)
+print("SESSION.TABS flags=%#x frozen record=0 title=%s bin=%s" % (flags, title, bin0))
 PY
 
 # Run 05 needs the same empty strip as run 04 (run 04 just wrote a session).
@@ -1052,7 +1081,28 @@ vgate_assert 07 serial-contains 'gotabwm: ptr'
 vgate_assert 07 serial-absent 'gotabwm: rail-click id='
 vgate_assert 07 serial-absent 'gotabwm: reorder '
 vgate_assert 07 serial-absent 'gotabwm: unsplit'
-vgate_assert 07 serial-absent 'gotabwm: session write n='
+# M79g (#1718): the choreography never fired, so no CLOSE was ever written —
+# the file still names both clients (the declares wrote it). That is the
+# positive form of the old `session write` absence: the run ends inside the
+# hold with the two-tab strip intact.
+vgate_assert 07 serial-contains 'gotabwm: session write n=2'
+vgate_assert 07 python <<'PY'
+import os, sys
+p = os.path.join(os.environ["VG_SHARE"], "SESSION.TABS")
+try:
+    b = open(p, "rb").read()
+except FileNotFoundError:
+    sys.exit("SESSION.TABS missing on the share")
+if len(b) < 6 + 69 * 2:
+    sys.exit("SESSION.TABS too short: %d bytes" % len(b))
+if b[0] != 2 or b[2] != 2:
+    sys.exit("version=%d count=%d want 2/2 (no close ran)" % (b[0], b[2]))
+bins = sorted([b[51:75].split(b"\x00", 1)[0].decode(),
+               b[51 + 69:75 + 69].split(b"\x00", 1)[0].decode()])
+if bins != ["GOCALC.ELF", "NOTE.ELF"]:
+    sys.exit("bins %s want GOCALC.ELF + NOTE.ELF" % bins)
+print("SESSION.TABS n=2 bins=%s: the run ended before any close" % ",".join(bins))
+PY
 # LAYOUT.txt is the sash geometry: the run ends before anything rewrites it.
 vgate_assert 07 serial-contains 'gotabwm: layout file=/host/SELFTEST/LAYOUT.txt'
 vgate_assert 07 share-contains SELFTEST/LAYOUT.txt 'split=v'
@@ -1098,6 +1148,18 @@ PY
 vgate_assert 07 serial-contains 'rx-gotabwm-sash-ok'
 vgate_assert 07 serial-absent '[EXC] parking:'
 vgate_assert 07 serial-absent 'exited status=139'
+
+# Run 08 must start on an empty strip: run 07 now leaves a two-tab session
+# (M79g — the declares write it), which a restore would turn into placeholder
+# rows. Same clear the spec already does between the earlier runs.
+vgate_assert 07 python <<'PY'
+import os, sys
+stale = os.path.join(os.environ["VG_SHARE"], "SESSION.TABS")
+if os.path.exists(stale):
+    os.remove(stale)
+    print("cleared SESSION.TABS for run 08")
+PY
+
 # --- M79e (#1708): the nav round trip, over the real wire -------------------
 # GOFILES.ELF is the adopter: it declares a nav on every directory change and
 # polls the seat for a back/forward target. Two declares give the history
@@ -1231,4 +1293,225 @@ assert n_decl == 2, "expected exactly 2 seat-side nav declares, saw %d" % n_decl
 
 print("M79e nav round trip OK: %s -> %s -> back to %s, window id=%s, "
       "exactly %d declares (dedupe held)" % (p0, p1, p0, wid, n_decl))
+PY
+
+# --- M79g (#1718): SESSION.TABS records what the USER did -------------------
+#
+# Two boots on the same share, both LIVE (the GOTABWM.DEMO trigger is removed
+# before the exec, the go-wm-seat run 05 pattern): live mode is the product,
+# and it is also deterministic here — no bounded choreography is racing the
+# HID chain with its own reorder/pin/close steps.
+#
+# Boot 09 is the mutation boot. GOCALC+NOTE declare, then BY HAND:
+#   ctrl-1            focus the left cell (Calc — NOTE's declare took focus)
+#   ctrl-shift-p      pin it
+#   ctrl-shift-f      freeze it
+#   rail drag 0 -> 1  move it to the right, past the unpinned tab
+# Each of those is a real mutation and each one writes SESSION.TABS as it
+# happens (write-through), so the file is already correct when the run ends
+# at its own rx marker with the seat still up — no clean exit needed, which
+# is the whole point of writing through instead of saving on exit.
+#
+# The expected end state, and why it is a real test: the pin normalizes
+# pinned-left, and the DRAG then moves that pinned, frozen tab to index 1.
+# So the file must read notes.txt (unpinned) BEFORE Calc (pinned+frozen) —
+# the reverse of the declare order, which a file written from the declare
+# order alone could never produce.
+vgate_file script-09.txt <<'EOF'
+set GOMAXPROCS=1
+vf rm GOTABWM.DEMO
+vf rm SESSION.TABS
+wm
+exec GOTABWM.ELF
+EOF
+
+vgate_file script2-09.txt <<'EOF'
+dui focus 0
+exec GOCALC.ELF
+exec NOTE.ELF
+EOF
+
+vgate_file script3-09.txt <<'EOF'
+wm
+dui
+echo rx-gotabwm-session-write-ok
+EOF
+
+vgate_run 09 -- \
+    --screen '$RUN_DIR/screen-09' \
+    --via-virtio \
+    --script '$RUN_DIR/script-09.txt' \
+    --script2 '$RUN_DIR/script2-09.txt' \
+    --script2-after 'gotabwm: win focus' \
+    --input-chords 'ctrl-1,ctrl-shift-p,ctrl-shift-f' \
+    --input-chords-after 'note: tab title notes.txt' \
+    --pointer-virtio '100,8,d;700,8,u' \
+    --pointer-virtio-after 'gotabwm: freeze id=' \
+    --script3 '$RUN_DIR/script3-09.txt' \
+    --script3-after 'gotabwm: reorder 0->1' \
+    --script-expect 'rx-gotabwm-session-write-ok' --timeout 300
+
+vgate_assert 09 serial-contains 'VirelaiOS kernel has seized control.'
+vgate_assert 09 serial-contains 'exec: loaded GOTABWM.ELF'
+vgate_assert 09 serial-contains 'gotabwm: registered'
+# The product mode: no bounded loop, nothing auto-closes. (Run 09 removes
+# the trigger, so run 10 boots live too — one share, one removal.)
+vgate_assert 09 serial-contains 'gotabwm: mode live'
+vgate_assert 09 serial-contains 'gotabwm: settings wm=none'
+vgate_assert 09 serial-contains 'exec: loaded GOCALC.ELF'
+vgate_assert 09 serial-contains 'exec: loaded NOTE.ELF'
+vgate_assert 09 serial-contains 'gotabwm: rail n=2 focus='
+vgate_assert 09 serial-contains 'gocalc: declare accepted'
+vgate_assert 09 serial-contains 'note: tab-aware (full-viewport)'
+# M79d: NOTE renamed itself, which is the title the session must carry.
+vgate_assert 09 serial-contains 'gotabwm: title id='
+vgate_assert 09 serial-contains 'note: tab title notes.txt'
+# The three chords + the drag, each after the previous one's own marker.
+vgate_assert 09 serial-contains 'gotabwm: tab focus id='
+vgate_assert 09 serial-contains 'gotabwm: pin id='
+vgate_assert 09 serial-contains 'gotabwm: freeze id='
+vgate_assert 09 serial-contains 'gotabwm: order ids='
+vgate_assert 09 serial-contains 'pin=1,0'
+vgate_assert 09 serial-contains 'pin=0,1'
+vgate_assert 09 serial-contains 'gotabwm: reorder 0->1'
+# Write-through: every one of those mutations published the file.
+vgate_assert 09 serial-count 'gotabwm: session write n=' 4
+vgate_assert 09 serial-contains 'gotabwm: session write n=2'
+# Live mode closed nothing, so no close ever rewrote the file.
+vgate_assert 09 serial-absent 'gotabwm: tab close id='
+vgate_assert 09 serial-absent 'gotabwm: host close id='
+vgate_assert 09 serial-contains 'rx-gotabwm-session-write-ok'
+vgate_assert 09 serial-absent '[EXC] parking:'
+vgate_assert 09 serial-absent 'exited status=139'
+
+# The file itself: the ORDER, the pin bit, the frozen badge and the live
+# title, byte-level on the share (offsets per tabsv2.go: header 6, record
+# 69 = title 32 | flags 1 | group 12 | bin 24).
+vgate_assert 09 python <<'PY'
+import os, sys
+p = os.path.join(os.environ["VG_SHARE"], "SESSION.TABS")
+try:
+    b = open(p, "rb").read()
+except FileNotFoundError:
+    sys.exit("SESSION.TABS missing on the share")
+if len(b) < 6 + 69 * 2:
+    sys.exit("SESSION.TABS too short: %d bytes" % len(b))
+if b[0] != 2:
+    sys.exit("version %d want 2" % b[0])
+if b[2] != 2:
+    sys.exit("count %d want 2" % b[2])
+if b[1] != 2:
+    sys.exit("active+1 = %d want 2 (Calc, moved right and still focused)" % b[1])
+recs = []
+for i in (0, 1):
+    off = 6 + i * 69
+    recs.append((b[off:off + 32].split(b"\x00", 1)[0].decode(),
+                 b[off + 32],
+                 b[off + 45:off + 69].split(b"\x00", 1)[0].decode()))
+titles, flags, bins = ([r[0] for r in recs], [r[1] for r in recs], [r[2] for r in recs])
+if titles != ["notes.txt", "Calc"]:
+    sys.exit("titles %s want notes.txt,Calc (the drag moved Calc right)" % titles)
+if flags[0] != 0:
+    sys.exit("record 0 flags %#x want 0 (unpinned, thawed)" % flags[0])
+if flags[1] != 0x03:
+    sys.exit("record 1 flags %#x want 0x03 (pinned|frozen)" % flags[1])
+if bins != ["NOTE.ELF", "GOCALC.ELF"]:
+    sys.exit("bins %s want NOTE.ELF,GOCALC.ELF (identity follows the tab)" % bins)
+print("SESSION.TABS: notes.txt(0x00,NOTE.ELF) then Calc(0x03,GOCALC.ELF), "
+      "active=Calc — the user's order, pin and badge")
+PY
+
+# Ordering: the last publish came after the last mutation, so the file is
+# not a stale snapshot taken earlier in the boot.
+vgate_assert 09 python <<'PY'
+import os, sys
+ser = open(os.environ["VG_SER"], errors="replace").read()
+i_write = ser.rfind("gotabwm: session write n=")
+i_reorder = ser.find("gotabwm: reorder 0->1")
+i_freeze = ser.find("gotabwm: freeze id=")
+for name, i in (("reorder", i_reorder), ("freeze", i_freeze), ("last write", i_write)):
+    if i < 0:
+        sys.exit("missing " + name)
+if not (i_freeze < i_reorder < i_write):
+    sys.exit("order wrong: freeze=%d reorder=%d write=%d" % (i_freeze, i_reorder, i_write))
+print("last session write at %d, after reorder at %d" % (i_write, i_reorder))
+PY
+
+# --- M79g (#1718): the second boot restores it ------------------------------
+#
+# No HID, no clients: the seat boots on the share run 09 left and must report
+# the ORDER, the pin bit and the frozen badge the user actually left. This is
+# the card's restore half, and `mode=restore` is the seat saying these rows
+# came from the file (placeholder ids, nothing re-executed).
+vgate_file script-10.txt <<'EOF'
+set GOMAXPROCS=1
+wm
+exec GOTABWM.ELF
+EOF
+
+vgate_file script2-10.txt <<'EOF'
+dui focus 0
+EOF
+
+vgate_file script3-10.txt <<'EOF'
+wm
+dui
+echo rx-gotabwm-session-restore-ok
+EOF
+
+vgate_run 10 -- \
+    --screen '$RUN_DIR/screen-10' \
+    --script '$RUN_DIR/script-10.txt' \
+    --script2 '$RUN_DIR/script2-10.txt' \
+    --script2-after 'gotabwm: win focus' \
+    --script3 '$RUN_DIR/script3-10.txt' \
+    --script3-after 'gotabwm: session load n=2 mode=restore' \
+    --script-expect 'rx-gotabwm-session-restore-ok' --timeout 300
+
+vgate_assert 10 serial-contains 'exec: loaded GOTABWM.ELF'
+vgate_assert 10 serial-contains 'gotabwm: registered'
+vgate_assert 10 serial-contains 'gotabwm: mode live'
+vgate_assert 10 serial-contains 'gotabwm: session load n=2 mode=restore'
+# The order line the seat restored: notes.txt first, Calc pinned and frozen.
+vgate_assert 10 serial-contains 'gotabwm: session titles=notes.txt,Calc pin=0,1 active=1'
+vgate_assert 10 serial-contains 'gotabwm: session freeze n=1'
+vgate_assert 10 serial-contains 'gotabwm: order ids='
+vgate_assert 10 serial-contains 'pin=0,1'
+vgate_assert 10 serial-contains 'gotabwm: rail n=2 focus='
+vgate_assert 10 serial-contains 'gotabwm: layout file=/host/SELFTEST/LAYOUT.txt'
+# Restored rows are placeholders, not kernel windows: nothing split, closed
+# or re-executed, and no client ever declared.
+vgate_assert 10 serial-absent 'gotabwm: split '
+vgate_assert 10 serial-absent 'gotabwm: tab close id='
+vgate_assert 10 serial-absent 'gotabwm: tab open id='
+vgate_assert 10 serial-absent 'gotabwm: session bad'
+vgate_assert 10 serial-absent 'gotabwm: first-boot workspace'
+vgate_assert 10 serial-contains 'rx-gotabwm-session-restore-ok'
+vgate_assert 10 serial-absent '[EXC] parking:'
+vgate_assert 10 serial-absent 'exited status=139'
+vgate_assert 10 python <<'PY'
+import os, re, sys
+# LAYOUT.txt is the restore dump: two placeholder rows, in the restored order.
+p = os.path.join(os.environ["VG_SHARE"], "SELFTEST/LAYOUT.txt")
+try:
+    raw = open(p, "rb").read()
+except FileNotFoundError:
+    sys.exit("SELFTEST/LAYOUT.txt missing on the share")
+line_re = re.compile(
+    r"^tab=(\d+) bin=(\S+) x=(\d+) y=(\d+) w=(\d+) h=(\d+) focus=([01]) split=(none|h|v)$")
+lines = raw.decode("utf-8").splitlines()
+if len(lines) != 2:
+    sys.exit("LAYOUT.txt has %d lines, want 2" % len(lines))
+parsed = [line_re.match(line) for line in lines]
+if not all(parsed):
+    sys.exit("bad LAYOUT line in %r" % lines)
+ids = [parsed[0].group(1), parsed[1].group(1)]
+if ids != ["256", "257"]:
+    sys.exit("restored ids %s want 256,257 (sessionIDBase=0x100)" % ids)
+bins = [parsed[0].group(2), parsed[1].group(2)]
+if bins != ["NOTE.ELF", "GOCALC.ELF"]:
+    sys.exit("bins %s want NOTE.ELF,GOCALC.ELF in that order" % bins)
+if any(row[8] != "none" for row in parsed):
+    sys.exit("restore dump must be unsplit")
+print("LAYOUT.txt restore n=2 ids=256,257 bins=NOTE.ELF,GOCALC.ELF in the restored order")
 PY

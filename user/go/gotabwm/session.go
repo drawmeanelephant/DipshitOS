@@ -2,6 +2,13 @@
 // v2 on /host/SESSION.TABS. Encode/Decode is a guest-safe copy of the
 // host tabcodec layout (tabsv2.go); do not exec the host tool in-guest.
 // Corrupt bytes fail closed: empty strip, no trust.
+//
+// M79g (#1718): the file now records what the USER did, not what the demo
+// choreography staged. Every mutation that changes the strip writes it
+// through (noteSessionMutation at each call site) instead of waiting for the
+// one pin-stay snapshot — reorder a tab, pin it, freeze it, open or close
+// one, and the next boot restores that. The choreography's own write keeps
+// its marker.
 package main
 
 import "virelai/vi"
@@ -20,8 +27,15 @@ const (
 )
 
 var (
-	sessionSeq     uint16 = 1
-	sessionWritten bool
+	sessionSeq uint16 = 1
+	// sessionDirty is set by every mutation that changed the strip and
+	// cleared by a successful writeSession. It is the write-through guard:
+	// a mutation that changed nothing (a same-cell reorder, a pin of an
+	// already-pinned tab) never sets it, so a burst of no-ops costs no
+	// file write. The guard is on CHANGE, not on time — the seat has no
+	// timer to debounce with, and at a human interaction rate a handful of
+	// 2 KB crash-safe writes per boot is not a throughput problem.
+	sessionDirty bool
 )
 
 func sessionTitlesLine(s *TabStrip) string {
@@ -47,26 +61,73 @@ func sessionTitlesLine(s *TabStrip) string {
 }
 
 // writeHostFile replaces path with data through the M66b crash-safe
-// write: temp + fsync + delete/rename publish (vi.WriteFileSafe). M62e
+// write: temp + fsync + delete/rename publish (vi.WriteFileSafe). It is a
+// var so a host test can capture the bytes: vi.WriteFileSafe degrades to
+// -ENOSYS off the guest, which would otherwise make the persist path
+// unobservable (the execApp / closeWin pattern in hid.go and interop.go).
+// M62e
 // wrote in place — the write-open truncated the live file to zero before
 // the first chunk landed — so a crash mid-write left a partial
 // SESSION.TABS or LAYOUT.txt behind for the next boot to trust or trip
 // over; now the live path only ever appears atomically, and the crash
 // window leaves the previous bytes or none, which fail-closed readers
 // treat as defaults.
-func writeHostFile(path string, data []byte) bool {
+var writeHostFile = func(path string, data []byte) bool {
 	return vi.WriteFileSafe(path, data) == 0
 }
 
-// writeSession encodes the live strip and writes SESSION.TABS. M62e is
-// this one pin-stay snapshot (seat.go case 2), not save-on-exit/detach.
-// Refuses an empty strip and runs once (sessionWritten) so the two-tab
-// close path cannot clobber a good save.
+// sessionRows is the strip SESSION.TABS may honestly record: the tabs THIS
+// boot hosts. A row restored from a previous boot (a placeholder id, >=
+// sessionIDBase) was never re-exec'd — the card keeps re-exec out of scope —
+// so writing it back would grow the file with a row no app ever ran, and
+// across boots (restore, open one, reboot) that grows without bound. Focus
+// follows by id; a focus that sat on a dropped row records no active tab.
+func (s *TabStrip) sessionRows() TabStrip {
+	var out TabStrip
+	fid, has := s.Focused()
+	for i := 0; i < s.count; i++ {
+		t0 := s.tabs[i]
+		if t0.ID >= sessionIDBase {
+			continue
+		}
+		if !out.OpenTab(t0.ID, t0.Title) {
+			return TabStrip{}
+		}
+		j := out.count - 1
+		out.tabs[j].Bin = t0.Bin
+		out.tabs[j].Pinned = t0.Pinned
+		out.tabs[j].Frozen = t0.Frozen
+	}
+	out.focus = -1 // set AFTER the loop: OpenTab focuses the first row
+	if has {
+		if i := out.index(fid); i >= 0 {
+			out.focus = i
+		}
+	}
+	return out
+}
+
+// noteSessionMutation is the write-through hook: every mutation that changed
+// the strip calls it, and the file is correct the moment the mutation lands
+// (no debounce, no save-on-exit, so a killed seat still leaves the truth
+// behind). It writes only when the strip is dirty, which is what keeps the
+// write count bounded by CHANGES rather than by time.
+func noteSessionMutation() bool {
+	sessionDirty = true
+	return writeSession()
+}
+
+// writeSession encodes the live strip and writes SESSION.TABS. It refuses an
+// EMPTY strip: a boot that closed everything must not publish a file that
+// claims a session, and every reader already treats absent as defaults.
+// M79g: this is also the choreography's pin-stay snapshot (seat.go case 2)
+// and the write-through target of every user mutation.
 func writeSession() bool {
-	if tabs.Count() == 0 || sessionWritten {
+	live := tabs.sessionRows()
+	if live.count == 0 {
 		return false
 	}
-	raw, ok := tabs.encodeTabsV2(sessionSeq)
+	raw, ok := live.encodeTabsV2(sessionSeq)
 	if !ok {
 		vi.ConsoleLine("gotabwm: session write fail")
 		return false
@@ -75,9 +136,9 @@ func writeSession() bool {
 		vi.ConsoleLine("gotabwm: session write fail")
 		return false
 	}
-	sessionWritten = true
+	sessionDirty = false
 	sessionSeq++
-	vi.ConsoleLine(MarkerSessionWrite + vi.Itoa64(int64(tabs.Count())))
+	vi.ConsoleLine(MarkerSessionWrite + vi.Itoa64(int64(live.count)))
 	return true
 }
 
@@ -116,7 +177,14 @@ func loadSession() sessionLoadState {
 	// skips the live choreography that would close/split them.
 	hostedApp = 0
 	stripDone = true
-	vi.ConsoleLine(MarkerSessionLoad + vi.Itoa64(int64(tabs.Count())))
+	// M79g (#1718): `mode=restore` says what those ids ARE — placeholder
+	// rows (>= sessionIDBase) read back from the file, NOT apps this boot
+	// re-executed. Re-exec of restored tabs is a policy card of its own
+	// (explicitly out of scope here); until then the marker is the honest
+	// difference between a strip that came from disk and one that came
+	// from a declare. Suffixed, so every existing grep for the load line
+	// keeps matching.
+	vi.ConsoleLine(MarkerSessionLoad + vi.Itoa64(int64(tabs.Count())) + " mode=restore")
 	vi.ConsoleLine(MarkerSessionTitles + sessionTitlesLine(&tabs))
 	// M71e (#1564): how many restored tabs came back carrying the frozen
 	// badge — the observable that the flag survived the round-trip. A
