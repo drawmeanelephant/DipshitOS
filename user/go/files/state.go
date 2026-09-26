@@ -6,6 +6,7 @@
 package main
 
 import (
+	"virelai/mime"
 	"virelai/rss/keys"
 	"virelai/vi"
 )
@@ -18,6 +19,7 @@ const (
 	modeNormal editMode = iota
 	modeRename
 	modeConfirmDelete
+	modeOpenWith // M81b (#1762): the Open-with… candidate list owns the digits
 )
 
 // titleBarPx is the window title band the client area sits below: the
@@ -49,6 +51,14 @@ type model struct {
 	quit         bool
 	renamedBatch bool     // a rename landed this batch: main prints the settle marker
 	pending      []string // serial markers, flushed by main AFTER the frame paints
+	// M81b (#1762): the Open-with… list and the exec it queued. The model
+	// decides and marks; main owns vi.Exec (open.go).
+	openName  string
+	openPath  string
+	openID    mime.ID
+	openCands []mime.Handler
+	launch    launchReq
+
 	// notify is the M79k (#1720) toast this batch wants raised, drained by
 	// main alongside `pending`. The model stays pure: it decides WHAT
 	// happened, main owns the one seam that talks to the seat.
@@ -215,7 +225,11 @@ func (m *model) moveTo(i int) {
 	m.loadPreview()
 }
 
-// openSel enters the selected directory, or re-reads the selected file.
+// openSel enters the selected directory, or OPENS the selected file.
+//
+// M81b (#1762) changed the file half: a second click / Enter / `l` on a file
+// is "open this", which means dispatch to the type's default handler (the
+// preview is already loaded by the selection itself, so nothing is lost).
 func (m *model) openSel() {
 	e, ok := m.selEntry()
 	if !ok {
@@ -233,7 +247,7 @@ func (m *model) openSel() {
 		m.refresh()
 		return
 	}
-	m.loadPreview()
+	m.openFile()
 }
 
 // goUp walks to the parent directory.
@@ -290,6 +304,20 @@ func (m *model) handleKey(ev keys.Event) {
 			if len(m.input) < maxNameLen {
 				m.input += string(ev.Rune)
 			}
+		case keys.KeyCtrlC:
+			m.quit = true
+		}
+		return
+	}
+	if m.mode == modeOpenWith {
+		switch ev.Key {
+		case keys.KeyRune:
+			if ev.Rune >= '1' && ev.Rune <= '9' {
+				m.chooseOpen(int(ev.Rune - '0'))
+				return
+			}
+		case keys.KeyEsc, keys.KeyBackspace:
+			m.cancelOpenWith()
 		case keys.KeyCtrlC:
 			m.quit = true
 		}
@@ -359,6 +387,8 @@ func (m *model) handleKey(ev keys.Event) {
 			m.yankClip(true)
 		case 'p':
 			m.pasteClip()
+		case 'o':
+			m.startOpenWith()
 		}
 	}
 }

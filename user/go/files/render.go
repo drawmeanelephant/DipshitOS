@@ -4,7 +4,11 @@
 // Pure strings, no Bubble Tea import, so the host tests can pin the frame.
 package main
 
-import "strings"
+import (
+	"strings"
+
+	"virelai/vi"
+)
 
 // Colours are truecolour on purpose: the class-B snapshot asserts the
 // EXACT preview accent below, and no palette indirection may move it.
@@ -82,7 +86,7 @@ func (m model) renderLines() []string {
 	// Status (modal prompts take it over) and the key hints.
 	lines = append(lines, m.statusLine())
 	lines = append(lines, colDim+" "+
-		clipVis("j/k move · enter open · backspace up · r rename · d delete · c/x clip · p paste · q quit",
+		clipVis("j/k move · enter open · o open with · backspace up · r rename · d delete · c/x clip · p paste · q quit",
 			m.cols-2)+colReset)
 	return lines
 }
@@ -122,6 +126,8 @@ func (m model) statusLine() string {
 		return colWarn + " rename to: " + m.input + "_" + colReset
 	case modeConfirmDelete:
 		return colWarn + " " + m.status + colReset
+	case modeOpenWith:
+		return colWarn + " " + m.openWithLine() + colReset
 	}
 	line := " " + m.status
 	if m.clip != "" {
@@ -132,6 +138,25 @@ func (m model) statusLine() string {
 		line += colDim + "  [" + verb + ": " + baseName(m.clip) + "]" + colReset
 	}
 	return colStat + clipVis(line, m.cols-2) + colReset
+}
+
+// openWithLine is the M81b (#1762) candidate list: the file, the type the
+// sniff gave it, and one numbered entry per registered handler. The digits
+// are what the user presses, so the list IS the menu.
+func (m model) openWithLine() string {
+	var b strings.Builder
+	b.WriteString("open with ")
+	b.WriteString(m.openName)
+	b.WriteString(" (")
+	b.WriteString(m.openID.String())
+	b.WriteString("):")
+	for i, h := range m.openCands {
+		b.WriteString(" ")
+		b.WriteString(vi.Itoa64(int64(i + 1)))
+		b.WriteString(" ")
+		b.WriteString(h.Label)
+	}
+	return b.String()
 }
 
 // visLen is the printable width of s, skipping CSI escape sequences.
