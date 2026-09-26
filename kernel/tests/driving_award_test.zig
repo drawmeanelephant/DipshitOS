@@ -930,10 +930,16 @@ test "driving_award: ASCII cells paint the atlas fixture's own bytes (M73l #1661
     var s = terminal.Screen{};
     s.feed("\x1b[?25lA");
     render_terminal_screen(&buf, &window, &s);
+    // M80i (#1725): the fixture is now per-size; the painter reads the
+    // ACTIVE rung's blob/strides (boot default = MEDIUM), so this
+    // golden walk reads the same active metrics. Pin the rung — these
+    // pixel proofs size their loops (and their buffers) at 8x16.
+    const prev_size = driving_award.font_metrics.size;
+    defer driving_award.font_metrics.set_size(prev_size);
+    driving_award.font_metrics.set_size(.medium);
     const m = driving_award.font_metrics;
-    const atlas = driving_award.font_atlas;
-    const off: usize = ('A' - atlas.first_cp) * atlas.glyph_bytes;
-    const row_stride = atlas.glyph_bytes / m.cell_h;
+    const off: usize = ('A' - m.first_cp) * m.glyph_bytes;
+    const row_stride = m.row_bytes;
     var lvl15: usize = 0;
     var lvl0: usize = 0;
     var mid: usize = 0;
@@ -941,7 +947,7 @@ test "driving_award: ASCII cells paint the atlas fixture's own bytes (M73l #1661
     while (dy < m.cell_h) : (dy += 1) {
         var gx: usize = 0;
         while (gx < m.cell_w) : (gx += 1) {
-            const byte = atlas.blob[off + dy * row_stride + gx / 2];
+            const byte = m.blob[off + dy * row_stride + gx / 2];
             const lvl: u8 = if (@rem(gx, 2) == 0) byte >> 4 else byte & 0x0f;
             const k = ((y0 + dy) * W + gx) * 4;
             const pr: u32 = buf[k + 2];
@@ -977,6 +983,11 @@ test "driving_award: terminal hit-test resolves cells at the M73l metrics (8×16
     // stale /8 a click one-and-a-bit cells down resolved to row 2;
     // every number below is derived from the accessors, not literals.
     arm();
+    // M80i: pin the boot rung — the 8x16 expectations below (30 cols,
+    // 7 rows) assume the MEDIUM cell.
+    const prev_size = driving_award.font_metrics.size;
+    defer driving_award.font_metrics.set_size(prev_size);
+    driving_award.font_metrics.set_size(.medium);
     const m = driving_award.font_metrics;
     const o = user_open(300, 300, 240, 128, 7); // title 16 + exactly 7 rows of 16
     const id: u8 = switch (o) {
@@ -1589,6 +1600,72 @@ test "driving_award: wm_apply_rect emits WIN_RESIZE to the owner on size change 
     try std.testing.expectEqual(events.WIN_RESIZE, ev2.kind);
     try std.testing.expectEqual(@as(u32, 300), ev2.arg0);
     try std.testing.expectEqual(@as(u32, 200), ev2.arg1);
+}
+
+test "driving_award: apply_grid_font_size moves the ladder, re-flows the bound grid, and tells the owner (M80i #1725)" {
+    // The grid half of the `font_size` apply chain. The rung moves, a
+    // BOUND grid re-flows to the new cell before the next composite
+    // (columns re-derived from the new cell_w), and the owner hears the
+    // SAME payload shape `user_resize` pushes (a font change is a
+    // winsize change for a cell-addressed app). Unbound windows are
+    // silent: their canvas is app pixels, not grid font.
+    events.init();
+    arm();
+    const prev_size = driving_award.font_metrics.size;
+    defer driving_award.font_metrics.set_size(prev_size);
+    driving_award.font_metrics.set_size(.medium);
+    const o = user_open(300, 300, 240, 128, 7);
+    const id: u8 = switch (o) {
+        .opened => |i| i,
+        else => return error.TestUnexpectedResult,
+    };
+    defer _ = user_close(id);
+    const o2 = user_open(560, 300, 240, 128, 8);
+    const id2: u8 = switch (o2) {
+        .opened => |i| i,
+        else => return error.TestUnexpectedResult,
+    };
+    defer _ = user_close(id2);
+    // Drain the open-time focus traffic (window 2's open blurs window
+    // 1, so both owner queues carry focus events) — only the font
+    // zoom's own notification may remain below.
+    while (events.pop(7) != null) {}
+    while (events.pop(8) != null) {}
+
+    const h = terminal.create(null) orelse return error.TestUnexpectedResult;
+    const t = terminal.get(h).?;
+    try std.testing.expect(t.attachWindow(id));
+    terminal.syncWindowCols(id, 240);
+    // Boot look: 240 / cell_w(8) = 30 columns.
+    try std.testing.expectEqual(@as(usize, 30), terminal.screenForWindow(id).?.columns());
+    find_user_window(id).?.dirty = false;
+    find_user_window(id2).?.dirty = false;
+
+    // Up the ladder: metrics move, the bound grid re-flows, the owner
+    // is told (pixel rect — the app derives its cell grid from it).
+    driving_award.apply_grid_font_size(.large);
+    try std.testing.expectEqual(driving_award.font_metrics.Size.large, driving_award.font_metrics.size);
+    try std.testing.expectEqual(@as(u32, 10), driving_award.font_metrics.cell_w);
+    try std.testing.expectEqual(@as(u32, 21), driving_award.font_metrics.cell_h);
+    try std.testing.expectEqual(@as(usize, 24), terminal.screenForWindow(id).?.columns()); // 240 / 10
+    const ev = events.pop(7).?;
+    try std.testing.expectEqual(events.WIN_RESIZE, ev.kind);
+    try std.testing.expectEqual(@as(u32, 240), ev.arg0);
+    try std.testing.expectEqual(@as(u32, 128), ev.arg1);
+    try std.testing.expectEqual(@as(usize, 0), events.pending(7));
+    try std.testing.expect(find_user_window(id).?.dirty);
+    // The UNBOUND window hears nothing and is not dirtied.
+    try std.testing.expectEqual(@as(usize, 0), events.pending(8));
+    try std.testing.expect(!find_user_window(id2).?.dirty);
+
+    // Down the ladder: re-flow back, the owner hears again.
+    driving_award.apply_grid_font_size(.small);
+    try std.testing.expectEqual(driving_award.font_metrics.Size.small, driving_award.font_metrics.size);
+    try std.testing.expectEqual(@as(usize, 34), terminal.screenForWindow(id).?.columns()); // 240 / 7
+    const ev2 = events.pop(7).?;
+    try std.testing.expectEqual(events.WIN_RESIZE, ev2.kind);
+    try std.testing.expectEqual(@as(u32, 240), ev2.arg0);
+    try std.testing.expectEqual(@as(u32, 128), ev2.arg1);
 }
 
 test "driving_award: user_rect reads back the clamped geometry (the sys_win_get seam)" {

@@ -67,6 +67,22 @@
 //!                                   boot window-manager seat: the Go seat by
 //!                                   default, the Zig TABWM fallback seat, or
 //!                                   no seat at all (shim-only VM)
+//!   font_size  string  (none)        "small"|"medium"|"large" — TWO
+//!                                   consumers, same key (M80i #1725): the
+//!                                   legacy text layer (8x8/16x16/24x24,
+//!                                   M20-U1) AND the terminal grid's zoom
+//!                                   ladder (7x13/8x16/10x21 cells —
+//!                                   FiraCode at 11/13/17px, font_metrics).
+//!                                   Accepted key, NOT seeded (the
+//!                                   `color`/`palette_*` pattern): absent =
+//!                                   the boot look (text small + grid 8x16 —
+//!                                   unchanged), present = the rung applies
+//!                                   to both consumers. The vocabulary
+//!                                   collision is deliberate and said: the
+//!                                   grid's compiled default is the MEDIUM
+//!                                   rung (8x16), so `small` SHRINKS the
+//!                                   grid below the boot cell and `medium`
+//!                                   is the no-op rung at the classic rect.
 
 const std = @import("std");
 // M34 HF5 (issue #739): the host-share persistence path; HF6 (issue
@@ -438,6 +454,7 @@ fn set_internal(key: []const u8, val: []const u8) SetResult {
 
 const driving_award = @import("driving_award.zig");
 const text = @import("text.zig");
+const font_metrics = @import("font_metrics.zig"); // M80i (#1725): the grid half of font_size
 
 /// Set a configuration key-value pair in memory.
 pub fn set(key: []const u8, val: []const u8) SetResult {
@@ -455,7 +472,15 @@ pub fn set(key: []const u8, val: []const u8) SetResult {
         apply_debug_font(val);
     }
     // M20-U1 (claim 5127): font_size persists the terminal font choice.
+    // M80i (#1725): persist BEFORE the apply chain. apply_font_size moves
+    // the grid and pushes WIN_RESIZE to every bound TUI the moment it
+    // does, and a TUI that answers that event derives its cells from the
+    // STORED rung (the Go CellGrid mirror reads /host/SETTINGS.TXT) — the
+    // new row must already be on the share before that event can exist,
+    // so the app-side read can never observe the old rung. (cmd_settings'
+    // own save after this is then a byte-identical re-publish.)
     if (result == .ok and std.mem.eql(u8, key, "font_size")) {
+        _ = save_to_share();
         apply_font_size(val);
     }
     // M27 G13 (#456): focus_follows_mouse setting
@@ -470,7 +495,14 @@ fn apply_focus_follows_mouse(val: []const u8) void {
     driving_award.focus_follows_mouse = is_on;
 }
 
-/// Apply the font_size key to the framebuffer text layer.
+/// Apply the font_size key to BOTH consumers (M80i #1725): the legacy
+/// framebuffer text layer (8x8/16x16/24x24, M20-U1) and the terminal
+/// grid's zoom ladder (font_metrics 7x13/8x16/10x21). Same rung names,
+/// two ladders — the vocabulary collision the card documents. The grid
+/// half runs through driving_award.apply_grid_font_size, which moves the
+/// cell, re-flows every bound grid and tells each bound TUI (WIN_RESIZE)
+/// before the caller's repaint. An unrecognized value applies NOTHING
+/// (both consumers keep what they had).
 fn apply_font_size(val: []const u8) void {
     const size: ?text.FontSize = if (std.mem.eql(u8, val, "small") or std.mem.eql(u8, val, "0") or std.mem.eql(u8, val, "8x8"))
         .small
@@ -480,7 +512,14 @@ fn apply_font_size(val: []const u8) void {
         .large
     else
         null;
-    if (size) |s| text.set_font_size(s);
+    if (size) |s| {
+        text.set_font_size(s);
+        driving_award.apply_grid_font_size(switch (s) {
+            .small => .small,
+            .medium => .medium,
+            .large => .large,
+        });
+    }
 }
 
 /// Apply the debug_font key to the framebuffer text layer.
@@ -619,6 +658,11 @@ fn apply_bytes(bytes: []const u8) bool {
     // reaches this line (no file), and a seeded default file carries
     // theme=dark (id 0) — byte-identical either way.
     apply_palette();
+    // M80i (#1725): the LOAD half of the font_size chain, same shape. An
+    // ABSENT key applies nothing — the boot look (text small + grid 8x16)
+    // is the compiled default and stays put; the key moves the ladder
+    // only when the file actually carries it.
+    if (get("font_size")) |v| apply_font_size(v);
     return true;
 }
 
@@ -923,6 +967,13 @@ test "settings: drop-shadow flag (M37 DQ4)" {
 
 test "settings: font size getters and setters (M27 G21)" {
     init();
+    // M80i: the rung now also moves the grid; restore the boot look for
+    // the rest of the suite (text small + grid MEDIUM = the 13px cell).
+    defer {
+        text.set_font_size(.small);
+        driving_award.apply_grid_font_size(.medium);
+        init();
+    }
     try std.testing.expectEqual(@as(u8, 0), get_font_size());
 
     set_font_size(1);
@@ -936,6 +987,41 @@ test "settings: font size getters and setters (M27 G21)" {
     set_font_size(0);
     try std.testing.expectEqual(@as(u8, 0), get_font_size());
     try std.testing.expectEqualStrings("small", get("font_size").?);
+}
+
+test "settings: font_size drives BOTH consumers; absent keeps the boot look (M80i #1725)" {
+    init();
+    defer {
+        text.set_font_size(.small);
+        driving_award.apply_grid_font_size(.medium);
+        init();
+    }
+    // An ABSENT key applies nothing: the boot look is text small + the
+    // grid's MEDIUM rung (the 13px 8x16 cell — font_metrics' compiled
+    // default). Loading a file without the key must not move the ladder.
+    try std.testing.expectEqual(@as(u8, 0), get_font_size());
+    try std.testing.expect(apply_bytes("#v2\nhostname=x\n"));
+    try std.testing.expectEqual(font_metrics.Size.medium, font_metrics.size);
+    try std.testing.expectEqual(@as(u32, 8), font_metrics.cell_w);
+    try std.testing.expectEqual(text.FontSize.small, text.font_size);
+    // PRESENT: the rung applies to both ladders at load time.
+    try std.testing.expect(apply_bytes("#v2\nfont_size=large\n"));
+    try std.testing.expectEqual(font_metrics.Size.large, font_metrics.size);
+    try std.testing.expectEqual(@as(u32, 10), font_metrics.cell_w);
+    try std.testing.expectEqual(@as(u32, 21), font_metrics.cell_h);
+    try std.testing.expectEqual(text.FontSize.large, text.font_size);
+    // `small` shrinks the grid BELOW the boot cell — the said wart of
+    // one key with two ladders (the text layer's small is its default,
+    // the grid's default is medium).
+    try std.testing.expectEqual(SetResult.ok, set("font_size", "small"));
+    try std.testing.expectEqual(font_metrics.Size.small, font_metrics.size);
+    try std.testing.expectEqual(@as(u32, 7), font_metrics.cell_w);
+    try std.testing.expectEqual(@as(u32, 13), font_metrics.cell_h);
+    try std.testing.expectEqual(text.FontSize.small, text.font_size);
+    // An unrecognized value applies NOTHING: both consumers keep theirs.
+    try std.testing.expectEqual(SetResult.ok, set("font_size", "bogus"));
+    try std.testing.expectEqual(font_metrics.Size.small, font_metrics.size);
+    try std.testing.expectEqual(text.FontSize.small, text.font_size);
 }
 
 test "settings: the palette schema is additive — a fresh table stays dark (M73m #1662)" {

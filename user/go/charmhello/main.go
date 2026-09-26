@@ -44,12 +44,14 @@ const (
 //	        16 px title band (wnd_core title_bar_h) is NOT client area
 //
 // M73l (#1661): cellW/cellH mirror kernel/src/font_metrics.zig —
-// FiraCode at pixel size 13: advance 8, ascent+descent 16.
+// FiraCode at pixel size 13: advance 8, ascent+descent 16 (the boot
+// look). M80i (#1725): the cell is the ACTIVE zoom rung's, so the
+// callers pass vi.TerminalCell() — re-read per WIN_RESIZE, the same
+// rung the kernel's reflow just used.
 //
 // A TUI can therefore never ask for geometry the grid will not render;
-// TestSizeMsgPinsKernelCellMath pins the agreement class-A.
-func sizeMsg(w, h uint32) tea.WindowSizeMsg {
-	const cellW, cellH = 8, 16
+// TestSizeMsgPinsKernelCellMath pins the agreement class-A at every rung.
+func sizeMsg(w, h, cellW, cellH uint32) tea.WindowSizeMsg {
 	cols := int(w / cellW)
 	if cols < 8 {
 		cols = 8
@@ -262,7 +264,9 @@ func main() {
 	m := model{}
 	// M73j (#1636): the INITIAL WindowSizeMsg — the first frame paints at
 	// the declared rect's real grid (640x400 -> 80x48), not a guess.
-	next, _ := m.Update(sizeMsg(ta.W, ta.H))
+	// M80i: at the ACTIVE rung's cell (vi.TerminalCell).
+	cw, ch := vi.TerminalCell()
+	next, _ := m.Update(sizeMsg(ta.W, ta.H, cw, ch))
 	m = next.(model)
 	vi.ConsoleLine(sizeMarker(m))
 	if !paint(fd, m) {
@@ -286,7 +290,7 @@ func main() {
 			// M73j (#1636): the owner-side resize seam — sys_win_resize
 			// (slot 47) clamps + reflows and pushes WIN_RESIZE; the loop's
 			// ActionResized then delivers tea.WindowSizeMsg (512x384 ->
-			// 64x46 cells) with its serial marker, the class-B proof.
+			// 64x23 cells) with its serial marker, the class-B proof.
 			_ = vi.WinResize(ta.Win, 512, 384)
 		}
 		if !paint(fd, m) {
@@ -347,7 +351,11 @@ func main() {
 		case tabapp.ActionClosed:
 			shutdown(ta, fd, 0)
 		case tabapp.ActionResized:
-			next, _ := m.Update(sizeMsg(ev.Arg0, ev.Arg1))
+			// M80i (#1725): the rung may have moved (a `font` zoom is a
+			// winsize change for a cell-addressed app) — re-read the cell
+			// so the size msg agrees with the kernel's reflowed grid.
+			cw, ch := vi.TerminalCell()
+			next, _ := m.Update(sizeMsg(ev.Arg0, ev.Arg1, cw, ch))
 			m = next.(model)
 			if !paint(fd, m) {
 				shutdown(ta, fd, 4)

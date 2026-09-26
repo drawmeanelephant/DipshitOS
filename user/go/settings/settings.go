@@ -108,6 +108,38 @@ var PaletteKeys = []Key{
 	{Name: "palette_accent", Default: "3b82f6"},
 }
 
+// FontKeys is the M80i (#1725) accepted-not-seeded font_size row: one
+// key, two ladders (the framebuffer text layer 8x8/16x16/24x24 and the
+// terminal GRID's 7x13/8x16/10x21 — the kernel's apply_font_size drives
+// both). Not KnownKeys, for the same reason as the palette rows: the
+// kernel does not seed it either, so a default panel stays `keys=8` and
+// the SETTINGS.TXT a fresh share carries stays byte-identical. The panel
+// accepts it as typed input at any time and cycles it (small -> medium
+// -> large) once the row exists; it never fabricates the row, because an
+// ABSENT key is the boot look (text small + grid medium) — which no
+// single stored value can represent. Default is the grid's boot cell
+// only for readers asking what an absent row sizes to (the mirror is
+// vi.TerminalCellForSize, pinned against kernel/src/font_atlas_data.zig).
+var FontKeys = []Key{
+	{Name: "font_size", Default: "medium", Vocab: []string{"small", "medium", "large"}},
+}
+
+// FontKey returns the font_size row (found=false otherwise).
+func FontKey(key string) (Key, bool) {
+	for _, k := range FontKeys {
+		if k.Name == key {
+			return k, true
+		}
+	}
+	return Key{}, false
+}
+
+// IsFontKey reports whether key is the font_size row.
+func IsFontKey(key string) bool {
+	_, ok := FontKey(key)
+	return ok
+}
+
 // PaletteKey returns the palette row for key (found=false otherwise).
 func PaletteKey(key string) (Key, bool) {
 	for _, k := range PaletteKeys {
@@ -124,11 +156,12 @@ func IsPaletteKey(key string) bool {
 	return ok
 }
 
-// Editable is the panel's write gate: a kernel-table key or one of the
-// custom-palette keys. Anything else is named and dropped, never written.
+// Editable is the panel's write gate: a kernel-table key, one of the
+// custom-palette keys, or font_size (M80i). Anything else is named and
+// dropped, never written.
 func Editable(key string) bool {
 	_, known := Known(key)
-	return known || IsPaletteKey(key)
+	return known || IsPaletteKey(key) || IsFontKey(key)
 }
 
 // ValidColour is the palette value grammar, mirrored from the kernel's
@@ -185,12 +218,16 @@ func Default(key string) (string, bool) {
 	return "", false
 }
 
-// Vocab returns the values the panel may cycle key through, and whether key is
-// a known key at all. A known key with no vocabulary is free text.
+// Vocab returns the values the panel may cycle key through, and whether
+// key is cyclable at all. A kernel-table key with no vocabulary is free
+// text; font_size (M80i) carries its three-rung ladder.
 func Vocab(key string) ([]string, bool) {
 	k, ok := Known(key)
 	if !ok {
-		return nil, false
+		k, ok = FontKey(key)
+		if !ok {
+			return nil, false
+		}
 	}
 	return k.Vocab, true
 }
