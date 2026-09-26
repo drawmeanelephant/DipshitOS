@@ -1022,3 +1022,93 @@ func TestRailReorderReappliesWhileSplit(t *testing.T) {
 		t.Fatalf("unsplit reorder proposed %d rects", len(*calls))
 	}
 }
+
+// M79k (#1720): a press on a toast is CHROME. It dismisses the toast and
+// focuses its sender, and it is consumed there — no rail drag armed, no
+// start-surface summon, and no content forward on the press or the release
+// (a stray content drag inside a hosted pane would outlive the toast).
+//
+// The focus leg needs the kernel's taskbar seam, which is hardwired -ENOSYS
+// on the host, so the two halves are asserted separately and honestly: the
+// DISMISS is unconditional and observable here, and the focus leg is the
+// focusHosted helper every other focus path (alt-tab, rail click) already
+// runs. The class-B gate proves the focus lands on the guest.
+func TestHandleWmPointerPressOnToastIsChrome(t *testing.T) {
+	resetNotify(t)
+	saved := tabs
+	savedHosted := hostedApp
+	savedBtn := prevPtrButtons
+	savedDrag := railDragFrom
+	savedHover := railHover
+	savedSash := sashDragging
+	savedContent := contentDown
+	savedLaunch := launch
+	defer func() {
+		tabs = saved
+		hostedApp = savedHosted
+		prevPtrButtons = savedBtn
+		railDragFrom = savedDrag
+		railHover = savedHover
+		sashDragging = savedSash
+		contentDown = savedContent
+		launch = savedLaunch
+	}()
+	tabs = TabStrip{}
+	hostedApp = 0
+	prevPtrButtons = 0
+	railDragFrom = -1
+	railHover = -1
+	sashDragging = false
+	contentDown = false
+	launch = launcherState{}
+	if !tabs.OpenTab(4, "files") {
+		t.Fatal("OpenTab")
+	}
+	if _, ok, _ := notifyPush(4, "copied KNOWN.TXT", 0); !ok {
+		t.Fatal("push refused")
+	}
+
+	x, y, pw, ph := notifyRect(vi.ScanoutWidth, vi.ScanoutHeight, 0)
+	at := uint32(x+pw/2) | uint32(y+ph/2)<<16
+	handleWmPointer(vi.Event{Kind: vi.EvWmPointer, Arg0: at, Flags: uint16(hidBtnLeft)})
+	if notifyCount() != 0 {
+		t.Fatalf("a press on a toast left %d in the strip", notifyCount())
+	}
+	if railDragFrom != -1 {
+		t.Fatalf("a toast press armed the rail drag (from=%d)", railDragFrom)
+	}
+	if contentDown {
+		t.Fatal("a toast press set contentDown: the release would forward to the kernel as terminal content")
+	}
+	if launch.open {
+		t.Fatal("a toast press opened the launcher")
+	}
+	if sashDragging {
+		t.Fatal("a toast press armed the sash")
+	}
+	// The matching release forwards nothing: the press never set
+	// contentDown, so the release is a no-op.
+	handleWmPointer(vi.Event{Kind: vi.EvWmPointer, Arg0: at, Flags: 0})
+	if contentDown {
+		t.Fatal("the release after a toast press set contentDown")
+	}
+	if prevPtrButtons != 0 {
+		t.Fatalf("up must clear prevPtrButtons, got %#x", prevPtrButtons)
+	}
+
+	// A press ONE PIXEL outside the toast is not chrome: it falls through
+	// to the content path, which is what the boundary test in
+	// notify_test.go pins from the other side.
+	notifyPush(4, "copied KNOWN.TXT", 0)
+	_, y, _, _ = notifyRect(vi.ScanoutWidth, vi.ScanoutHeight, 0)
+	below := uint32(x+pw/2) | uint32(y+ph+2)<<16
+	contentDown = false
+	handleWmPointer(vi.Event{Kind: vi.EvWmPointer, Arg0: below, Flags: uint16(hidBtnLeft)})
+	if !contentDown {
+		t.Fatal("a press just below the toast was swallowed as chrome")
+	}
+	if notifyCount() != 1 {
+		t.Fatal("a press below the toast dismissed it")
+	}
+	contentDown = false
+}

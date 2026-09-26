@@ -41,6 +41,10 @@ const (
 	// Additive client -> seat title update. The request title carries the
 	// replacement; the ack keeps the same generic reply shape.
 	WmRpcKindSetTitle uint8 = 11
+	// M79k (#1720): the notify seam. The request title carries the message
+	// text (24 NUL-padded bytes, the whole budget), and the request id is
+	// the sender's own tab so the seat can click the toast back to it.
+	WmRpcKindNotify uint8 = 12
 )
 
 // WmRpc is the 38-byte app-to-WM mailbox frame. Field order and widths are the
@@ -268,6 +272,20 @@ func SetTabTitle(winID uint32, title, selfName string) bool {
 		return false
 	}
 	return WmMailRequest(WmRpcKindSetTitle, winID, 0, 0, 0, 0, title, selfName)
+}
+
+// Notify tells the seat to show a toast for winID (kind 12). The whole
+// message budget is the frame's 24-byte title, so text is a short human
+// string ("copied notes.txt"), not a path or a payload -- the same bound
+// SetTabTitle and DeclareNav already live inside. Best-effort: a missing
+// seat, an id that does not fit the 8-bit wire, or a refused/timeout ack
+// returns false, and the caller should say so rather than assume the user
+// was told.
+func Notify(winID uint32, text, selfName string) bool {
+	if text == "" {
+		return false
+	}
+	return WmMailRequest(WmRpcKindNotify, winID, 0, 0, 0, 0, text, selfName)
 }
 
 // WmAction is what a tab client's event dispatch decided to do.

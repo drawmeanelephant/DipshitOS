@@ -294,3 +294,66 @@ func TestKeyLabelsUseChordVocabulary(t *testing.T) {
 // itoa keeps the marker-rc assertions readable without importing strconv
 // style noise into every call site.
 func itoa(v int64) string { return vi.Itoa64(v) }
+
+// M79k (#1720): the model decides WHAT happened and main owns the seat
+// seam, so the toast text is queued on the model and drained exactly once.
+// A completed copy is the honest adopter: the status line already says
+// "copied KNOWN.TXT", and a refused paste raises nothing — a toast claiming
+// a copy that did not happen is the one thing this must never print.
+func TestPasteQueuesOneToastAndRefusalsQueueNone(t *testing.T) {
+	// Empty clip: refused, no toast.
+	m := testModel(entry("SUB", true), entry("KNOWN.TXT", false))
+	m.handleKey(runeKey('p'))
+	if got := m.takeNotify(); got != "" {
+		t.Fatalf("an empty-clip paste queued the toast %q", got)
+	}
+
+	// Yank a directory: refused, no toast.
+	m.handleKey(runeKey('c'))
+	if got := m.takeNotify(); got != "" {
+		t.Fatalf("a refused dir clip queued the toast %q", got)
+	}
+
+	// Yank KNOWN.TXT and paste into the same dir: the name exists, so the
+	// paste is refused and still no toast.
+	m.handleKey(keys.Event{Key: keys.KeyDown})
+	m.handleKey(runeKey('c'))
+	if got := pendingJoined(&m); !strings.Contains(got, markerClip+"copy KNOWN.TXT") {
+		t.Fatalf("copy marker missing: %q", got)
+	}
+	m.handleKey(runeKey('p'))
+	if got := pendingJoined(&m); !strings.Contains(got, markerPasteNo+"KNOWN.TXT exists") {
+		t.Fatalf("paste-over-self must refuse: %q", got)
+	}
+	if got := m.takeNotify(); got != "" {
+		t.Fatalf("a REFUSED paste queued the toast %q", got)
+	}
+}
+
+// The one queueing site the host can reach: the model's own notifyToast /
+// takeNotify pair, which is what the copy success path calls. takeNotify is
+// consume-on-use, so a toast can never be raised twice by the next frame.
+func TestNotifyToastIsConsumeOnUse(t *testing.T) {
+	m := testModel()
+	m.notifyToast("copied KNOWN.TXT")
+	if got := m.takeNotify(); got != "copied KNOWN.TXT" {
+		t.Fatalf("takeNotify = %q want the queued text", got)
+	}
+	if got := m.takeNotify(); got != "" {
+		t.Fatalf("a second takeNotify = %q, want empty (consume-on-use)", got)
+	}
+	// The LAST text in a batch wins: one keystroke must not raise three
+	// toasts describing states the user never saw.
+	m.notifyToast("first")
+	m.notifyToast("copied KNOWN.TXT")
+	if got := m.takeNotify(); got != "copied KNOWN.TXT" {
+		t.Fatalf("takeNotify = %q want the LAST queued text", got)
+	}
+	// The text budget is the WM_RPC frame title (24 bytes), so the adopter
+	// must keep the message inside it — a name long enough to overflow it
+	// would be cut mid-word on the toast while the app's own marker
+	// printed the whole thing.
+	if len("copied KNOWN.TXT") > 24 {
+		t.Fatalf("the adopter's message %q exceeds the 24-byte notify budget", "copied KNOWN.TXT")
+	}
+}

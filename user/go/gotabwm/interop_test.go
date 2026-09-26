@@ -261,3 +261,100 @@ func TestAttachSyncsHostState(t *testing.T) {
 		t.Fatalf("attach sync: focus=%d ok=%v hosted=%d ticks=%d", id, ok, hostedApp, hostTicksLeft)
 	}
 }
+
+// M79k (#1720): the kind-12 arm. The marker strings are gate grep targets,
+// so a drift is a host-test failure rather than a live run that asserts
+// nothing.
+func TestNotifyMarkerShapes(t *testing.T) {
+	cases := []struct{ got, want string }{
+		{MarkerNotify, "gotabwm: notify id="},
+		{MarkerNotifyDismiss, "gotabwm: notify dismiss id="},
+		{MarkerNotifyDrop, "gotabwm: notify drop n="},
+		{MarkerNotifyPaint, "gotabwm: notify paint id="},
+	}
+	for _, c := range cases {
+		if c.got != c.want {
+			t.Fatalf("marker = %q want %q", c.got, c.want)
+		}
+	}
+}
+
+// The arm's whole contract, on the host: a known sender's message is queued
+// and accepted, an unknown sender's and an empty one are REFUSED with
+// applied=0 (so the client's own ack is the honest answer), and the queue
+// bound drops the oldest.
+func TestApplyRpcNotify(t *testing.T) {
+	resetNotify(t)
+	savedTabs, savedStep, savedHold := tabs, stripStep, stripHoldLeft
+	savedDone, savedCount := stripDone, hostTicksLeft
+	t.Cleanup(func() {
+		tabs, stripStep, stripHoldLeft = savedTabs, savedStep, savedHold
+		stripDone, hostTicksLeft = savedDone, savedCount
+	})
+	tabs = TabStrip{}
+	stripStep, stripHoldLeft, stripDone, hostTicksLeft = 0, 0, false, 0
+	if !tabs.OpenTab(4, "files") {
+		t.Fatal("OpenTab")
+	}
+	seatTick = 7
+
+	if !applyRPC(navRPC(vi.WmRpcKindNotify, 4, "copied KNOWN.TXT")) {
+		t.Fatal("a notify from a known tab must be applied")
+	}
+	if notifyCount() != 1 {
+		t.Fatalf("queue depth = %d want 1", notifyCount())
+	}
+	e := notifyQueue[0]
+	if e.tabID != 4 || e.text != "copied KNOWN.TXT" {
+		t.Fatalf("queued entry = id %d %q", e.tabID, e.text)
+	}
+	// Born at the tick the seat last painted, so the lifetime is measured
+	// from a tick that actually happened.
+	if e.born != seatTick || e.expires != seatTick+NotifyTicks {
+		t.Fatalf("entry lifetime = [%d,%d) want [%d,%d)",
+			e.born, e.expires, seatTick, seatTick+NotifyTicks)
+	}
+	if applyRPC(navRPC(vi.WmRpcKindNotify, 99, "ghost")) {
+		t.Error("a notify from an UNKNOWN tab must be refused (applied=0)")
+	}
+	if applyRPC(navRPC(vi.WmRpcKindNotify, 4, "")) {
+		t.Error("an empty message must be refused (applied=0)")
+	}
+	if notifyCount() != 1 {
+		t.Fatalf("a refused notify queued something: depth = %d", notifyCount())
+	}
+	// The bound: one more push than the queue is deep evicts the oldest
+	// and COUNTS it. Two drops in total — the one above made the depth 5,
+	// and the 5th flood push is the one that overflows NotifyMax=4.
+	for i := 0; i < NotifyMax+1; i++ {
+		if !applyRPC(navRPC(vi.WmRpcKindNotify, 4, "flood")) {
+			t.Fatalf("flood push %d was refused", i)
+		}
+	}
+	if notifyCount() != NotifyMax {
+		t.Fatalf("depth after the flood = %d want NotifyMax", notifyCount())
+	}
+	if wantDrops := 1 + 1; notifyDropped != wantDrops {
+		t.Fatalf("notifyDropped = %d want %d (the first toast, plus the one the flood evicted)",
+			notifyDropped, wantDrops)
+	}
+}
+
+// Closing a tab takes its toasts with it, through the same CloseTab choke
+// point every close path uses (the M79e clearPendingNav rule).
+func TestClosingTheSenderDropsItsToasts(t *testing.T) {
+	resetNotify(t)
+	savedTabs := tabs
+	t.Cleanup(func() { tabs = savedTabs })
+	tabs = TabStrip{}
+	tabs.OpenTab(4, "a")
+	tabs.OpenTab(5, "b")
+	notifyPush(4, "from four", 0)
+	notifyPush(5, "from five", 0)
+	if !tabs.CloseTab(4) {
+		t.Fatal("CloseTab")
+	}
+	if notifyCount() != 1 || notifyQueue[0].tabID != 5 {
+		t.Fatalf("after closing tab 4 the strip holds %d entries, want tab 5's only", notifyCount())
+	}
+}

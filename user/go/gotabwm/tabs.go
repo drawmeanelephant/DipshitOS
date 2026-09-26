@@ -447,6 +447,9 @@ func (s *TabStrip) CloseTab(id uint32) bool {
 	// this is the one place the pending slot has to be cleared — otherwise
 	// a later window reusing the id polls and gets a dead tab's path.
 	clearPendingNav(id)
+	// M79k (#1720): same rule for a toast — a click-through whose sender is
+	// gone would focus nothing. clearNotify prints the dismiss markers.
+	clearNotify(id)
 	for j := i; j+1 < s.count; j++ {
 		s.tabs[j] = s.tabs[j+1]
 	}

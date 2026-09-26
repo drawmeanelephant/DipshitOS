@@ -134,6 +134,61 @@ func TestWmMailRequestNoSeat(t *testing.T) {
 	if SetTabTitle(4, "notes.txt", "DEMOAPP.ELF") {
 		t.Fatal("host SetTabTitle should be false")
 	}
+	if Notify(4, "copied notes.txt", "DEMOAPP.ELF") {
+		t.Fatal("host Notify should be false")
+	}
+}
+
+// M79k (#1720): the notify request is the same generic frame as every other
+// additive kind — kind 12, the sender's id, and the message in the title.
+// The 24-byte title IS the whole text budget, so a longer message is bounded
+// on the wire rather than refused.
+// The fake's process table names the requester NOTE.ELF (wmMailFake.hook is
+// hardwired) and WmPeers finds the SELF by process name, so the requester
+// name below must be that one — anything else is refused before the
+// mailbox, which is exactly the no-seat refusal TestWmMailRequestNoSeat pins.
+func TestNotifyRequest(t *testing.T) {
+	f := startWmMailFake(t)
+	f.autoReply = true
+	if !Notify(4, "copied KNOWN.TXT", "NOTE.ELF") {
+		t.Fatal("notify request should receive its applied ack")
+	}
+	if len(f.sent) != 1 {
+		t.Fatalf("sent requests = %d want 1", len(f.sent))
+	}
+	got := f.sent[0]
+	if got.Kind != WmRpcKindNotify || got.ID != 4 || got.TitleString() != "copied KNOWN.TXT" {
+		t.Fatalf("notify request = %+v title=%q", got, got.TitleString())
+	}
+}
+
+func TestNotifyRefusesEmptyBeforeSend(t *testing.T) {
+	f := startWmMailFake(t)
+	if Notify(4, "", "NOTE.ELF") {
+		t.Fatal("an empty message must refuse")
+	}
+	if f.procsCalls != 0 || f.sendCalls != 0 {
+		t.Fatalf("an empty message touched the wire: procs=%d send=%d", f.procsCalls, f.sendCalls)
+	}
+}
+
+// The text budget is the frame title, so a long message is BOUNDED (the
+// tail is cut) and never silently sent whole — the app's own marker prints
+// the bounded text, so the log and the screen agree.
+func TestNotifyBoundsTheMessageToTheTitle(t *testing.T) {
+	f := startWmMailFake(t)
+	f.autoReply = true
+	const long = "copied a-very-long-file-name.txt"
+	if !Notify(4, long, "NOTE.ELF") {
+		t.Fatal("notify request should receive its applied ack")
+	}
+	got := f.sent[0].TitleString()
+	if len(got) != WmRpcTitleMax {
+		t.Fatalf("bounded message is %d bytes, want exactly the %d-byte title budget", len(got), WmRpcTitleMax)
+	}
+	if long[:WmRpcTitleMax] != got {
+		t.Fatalf("bounded message = %q want the first %d bytes of the request", got, WmRpcTitleMax)
+	}
 }
 
 func TestWmRpcKindConstants(t *testing.T) {
@@ -144,6 +199,7 @@ func TestWmRpcKindConstants(t *testing.T) {
 		{WmRpcKindInvokeAction, 4}, {WmRpcKindAttachTab, 5}, {WmRpcKindDetachTab, 6},
 		{WmRpcKindCycleTab, 7}, {WmRpcKindDeclareFullscreen, 8},
 		{WmRpcKindNavDeclare, 9}, {WmRpcKindNavPoll, 10}, {WmRpcKindSetTitle, 11},
+		{WmRpcKindNotify, 12},
 	}
 	for _, p := range pairs {
 		if p.got != p.want {

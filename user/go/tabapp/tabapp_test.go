@@ -44,6 +44,20 @@ func TestSetTabTitleHostRefuses(t *testing.T) {
 	}
 }
 
+// M79k (#1720): Notify is the same best-effort contract as SetTabTitle —
+// no seat, no request, no ack, so false. An app that cannot tell the
+// difference between "the user was told" and "nobody heard" would print a
+// marker claiming a toast that is not on the screen.
+func TestNotifyHostRefuses(t *testing.T) {
+	ta := &TabApp{Win: 4, Name: "NOTE.ELF"}
+	if ta.Notify("copied notes.txt") {
+		t.Fatal("host notify must refuse without a WM seat")
+	}
+	if ta.Notify("") {
+		t.Fatal("an empty notify must refuse before the mailbox")
+	}
+}
+
 // Scale is the identity at the native canvas — the zero-regression fixed point.
 func TestScaleIdentity(t *testing.T) {
 	r := Rect{8, 104, 56, 20}

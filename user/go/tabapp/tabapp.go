@@ -115,6 +115,16 @@ func (t *TabApp) SetTabTitle(title string) bool {
 	return vi.SetTabTitle(uint32(t.Win), title, t.Name)
 }
 
+// Notify tells the seat to raise a toast for this tab. M79k (#1720): the
+// shared-service seam every app reaches for when it has something to say
+// the user should see. The message budget is 24 bytes (the WM_RPC frame
+// title), so keep it a short human string. The bool is the ack: false means
+// no seat, a refused request, or no reply -- the caller should say so
+// rather than assume the user was told.
+func (t *TabApp) Notify(text string) bool {
+	return vi.Notify(uint32(t.Win), text, t.Name)
+}
+
 // Scale maps r from a fromW x fromH canvas into toW x toH (integer math,
 // rounding toward the top-left, minimum 1px). At the identity mapping
 // (to == from) every rect maps to itself exactly — the zero-regression fixed
