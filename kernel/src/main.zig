@@ -1486,6 +1486,22 @@ var cv_push_ack_buf: [16]u8 align(16) = [_]u8{0} ** 16;
 /// downstream — per-process event FIFO (sys_poll_event / sys_wait_event)
 /// when an app window owns focus, console bytes + `input` counters at the
 /// terminal.
+/// Claim 1747: the queue-3 drain, moved OFF the console reader and onto
+/// the scheduler's idle pass. poll_input() used to be reachable only
+/// through M15Console.readByteFn, so the drain ran only when the SHELL
+/// idle loop happened to poll for a byte. That made input liveness
+/// depend on the shell making progress: with the serial-attached
+/// terminal and a shell-side synchronous GPU wait the loop is not
+/// guaranteed to run, completions are never scanned, and injected chords
+/// never reach the guest. OBSERVED on go-dogfood boot 04: the host
+/// enqueued every chord message and reported `sequence complete`, yet no
+/// `gotabwm: key` / `charmhello: key` / resize followed, while scheduler
+/// and WM output continued. Bounded and non-blocking: safe in main
+/// context on core 0 between the reap and the idle spin.
+fn cv_idle_input_pump() void {
+    if (virtio_custom.cv_ready and virtio_custom.input_armed) virtio_custom.poll_input();
+}
+
 fn cv_input_dispatch(rep: []const u8) void {
     input.decode_keyboard_report(rep);
 }
@@ -1783,10 +1799,15 @@ fn custom_virtio_spike() void {
     // honest line). Wire the decode hook FIRST (injected keys must decode
     // from the first completion on), then pre-arm the receive pool; the
     // host injects only after a shell marker, so the pool is guaranteed
-    // live long before the first message. Completions are pumped by
-    // poll_input() from the shell idle loop's RX seam (M15Console).
+    // live long before the first message. Claim 1747: completions are
+    // pumped by poll_input() from the scheduler's idle pass
+    // (scheduler.on_idle_pass), NOT the shell idle loop's RX seam.
     virtio_custom.on_input_report = &cv_input_dispatch;
     virtio_custom.on_pointer_report = &cv_pointer_dispatch;
+    // Claim 1747: the drain rides the scheduler's idle pass, not the
+    // console reader — one owner for the ring, and input liveness no
+    // longer depends on the shell idle loop running.
+    scheduler.on_idle_pass = cv_idle_input_pump;
     if (virtio_custom.has_input_queue) {
         if (!virtio_custom.arm_input_pool()) {
             uart_puts("cvspike: q3 arm failed\n");
@@ -2050,12 +2071,14 @@ const M15Console = struct {
         // Claim 6684: live RX through the polled virtio receive queue
         // (queue 0). Runs whenever the console is the virtio device — post-MMU
         // the transport is reachable (claim 1517). Never blocks.
-        // Claim 9588: pump the custom-virtio input channel here too — the
-        // shell idle loop calls readByte once per idle tick (shell.zig's
-        // non-blocking poll), making this main.zig-owned idle seam the
-        // drain point for queue-3 completions (decode + replenish). One
-        // cheap branch unless the four-queue device armed its pool.
-        if (virtio_custom.cv_ready and virtio_custom.input_armed) virtio_custom.poll_input();
+        // Claim 1747: the custom-virtio input channel is NO LONGER pumped
+        // here. It used to be, which tied the queue-3 drain to the shell
+        // idle loop calling readByte — and that loop is not guaranteed to
+        // run (serial-attached terminal + a shell-side synchronous GPU
+        // wait), so completions could sit unscanned and injected chords
+        // never arrive. The drain moved to the scheduler's idle pass
+        // (cv_idle_input_pump), which also leaves this reader with no
+        // dependency on the device being armed.
         // Claim 0680: service a pending framebuffer snapshot request (set
         // by a kind-4 control message) and flush any partial console-tee
         // line (the prompt case) — both once per idle tick, after the

@@ -2633,6 +2633,39 @@ pub fn reap_one_zombie() void {
     }
 }
 
+/// Claim 1747: the console-free background hook, run once per idle pass.
+///
+/// WHY THIS EXISTS. The custom-virtio INPUT channel (queue 3) was pumped
+/// only from `M15Console.readByteFn` — i.e. only when the SHELL idle loop
+/// happened to poll for a byte. That made input liveness depend on the
+/// shell making progress: with the serial-attached terminal and a
+/// shell-side synchronous GPU wait, the loop is not guaranteed to run, the
+/// completions are never scanned, and injected chords never reach the
+/// guest. OBSERVED on go-dogfood boot 04: the host enqueued every chord
+/// message and reported `sequence complete`, yet no `gotabwm: key` /
+/// `charmhello: key` / resize followed, while scheduler and WM output
+/// continued — the shell heartbeat alone had stopped.
+///
+/// The fix is to give the drain a home that does not depend on the shell.
+/// The idle task is the right one: scheduler-owned, core-0, always ready,
+/// MAIN context (never IRQ), and it already runs a bounded pass per
+/// iteration. `main.zig` registers the queue-3 pump here and the pump is
+/// REMOVED from the console reader, so the ring has exactly one owner.
+///
+/// Contract for a registrant: bounded and non-blocking. It runs on core-0
+/// in main context with IRQs enabled, between the reap and the spin, with
+/// NO scheduler lock held (`reap_one_zombie` has returned). Anything that
+/// can block does not belong here.
+pub var on_idle_pass: ?*const fn () void = null;
+
+/// One bounded idle pass: reap a zombie, then run the console-free hook.
+/// `idle_entry` calls this every iteration; host tests call it directly,
+/// because the entry loop itself never returns.
+pub fn idle_pass() void {
+    reap_one_zombie();
+    if (on_idle_pass) |f| f();
+}
+
 /// The scheduler-owned idle task (claim 6729): always ready and the
 /// lifecycle reaper — it reaps one zombie per iteration. It parks with a
 /// BOUNDED nop delay (not WFE): the shell's idle wait documents that a WFE
@@ -2641,7 +2674,7 @@ pub fn reap_one_zombie() void {
 /// proven bounded delay between reap passes.
 pub fn idle_entry() void {
     while (true) {
-        reap_one_zombie();
+        idle_pass();
         if (comptime builtin.cpu.arch == .aarch64) {
             var spins: usize = 0;
             while (spins < 100_000) : (spins += 1) asm volatile ("nop");

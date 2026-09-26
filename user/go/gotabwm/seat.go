@@ -125,7 +125,12 @@ func detectDemo() bool {
 // submits, and script2's kresize could finish). 90 = the 16+32+9 = 57
 // choreography budget plus the acceptance chain that starts at
 // GOTERM's declare (~tick 20); maxEvents 500 stays above it.
-const maxTicks = 90
+// Claim 1747: 90 -> 120. hidChordHold went 32 -> 64 (the per-chord
+// Sleep(1) amplification above), so the choreography's first
+// destructive step moved to n==2 + 64 + 7 ~ tick 87 and 90 no longer
+// cleared it. 120 keeps the same shape: 16+64+9 = 89 of choreography
+// budget, the acceptance chain above it, and the bound still finite.
+const maxTicks = 120
 
 // pointerClickHold is how many composite ticks one `--pointer-virtio` click
 // needs at the 1 Hz kind-18 heartbeat (3 messages × 2.5 s, rounded up).

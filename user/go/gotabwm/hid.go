@@ -85,7 +85,14 @@ var execApp = vi.Exec
 // chain (6-step pointer phase incl. the refocus rail click, chords,
 // script2 tail, expect) finishes before the choreography's first
 // close (n==2 + hold + 7 steps ~ tick 68).
-const hidChordHold = 32
+// Claim 1747: raised 32 -> 64 after the pump fix. The seat drains WM_KEY
+// ONE event per composite tick and Sleep(1)s after each while the
+// launcher is closed, so a virtio chord burst drained inside one outer
+// iteration costs N extra scheduler ticks of wall time. Observed on
+// go-dogfood boot 04: the demo seat's first auto-close beat script2's
+// `dui lower 4`, so the run's expect marker never arrived. The wider
+// hold keeps the acceptance tail bounded but unable to lose that step.
+const hidChordHold = 64
 
 // pointerDragHold is one `--pointer-virtio 'x,y,d;x,y,u'` (4 messages × 2.5 s).
 const pointerDragHold = 12
