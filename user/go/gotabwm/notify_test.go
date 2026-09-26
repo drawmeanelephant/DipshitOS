@@ -152,50 +152,80 @@ func TestNotifyFadeRampHasThreeExactSteps(t *testing.T) {
 	}
 }
 
-// TestNotifyRectIsBottomLeftStacked pins the geometry: the stack is
-// bottom-left, grows UPWARD with age, and is separated by notifyGap. It is
-// bottom-left because that is the one corner the seat's other chrome does
-// not occupy.
+// TestNotifyRectIsBottomLeftStacked pins the geometry in the ORIENTATION the
+// docs promise, because orientation is the thing that silently inverted once:
+// slot 0 is the top of the band and holds the OLDEST entry, slot n-1 is the
+// panel against the bottom edge and holds the NEWEST, and each arrival
+// therefore appears at the bottom and pushes the older ones up. The stack is
+// bottom-left because that is the one corner the seat's other chrome does not
+// occupy.
 func TestNotifyRectIsBottomLeftStacked(t *testing.T) {
 	const w, h = 1280, 720
-	x, y, pw, ph := notifyRect(w, h, 0)
+	// One toast: the band is one panel, flush with the bottom inset.
+	x, y, pw, ph := notifyRect(w, h, 0, 1)
 	if x != notifyInset || pw != NotifyW || ph != NotifyH {
-		t.Fatalf("slot 0 rect = (%d,%d %dx%d) want x=%d %dx%d",
+		t.Fatalf("slot 0 of 1 rect = (%d,%d %dx%d) want x=%d %dx%d",
 			x, y, pw, ph, notifyInset, NotifyW, NotifyH)
 	}
 	if y+ph+notifyInset != h {
 		t.Fatalf("slot 0 bottom edge = %d, want %d (flush with the scanout bottom)",
 			y+ph+notifyInset, h)
 	}
-	// Each older slot is exactly one panel + one gap higher.
-	for i := 1; i < NotifyMax; i++ {
-		xi, yi, w2, h2 := notifyRect(w, h, i)
-		if xi != x || w2 != pw || h2 != ph {
-			t.Fatalf("slot %d rect = (%d,%d %dx%d) want the same column as slot 0", i, xi, yi, w2, h2)
+	// Every stack depth: the NEWEST slot is the bottom panel, and each older
+	// slot is exactly one panel + one gap above the next newer one — so the
+	// band reads oldest-at-the-top and grows UPWARD with age.
+	for n := 1; n <= NotifyMax; n++ {
+		_, newestY, _, _ := notifyRect(w, h, n-1, n)
+		if newestY+ph+notifyInset != h {
+			t.Fatalf("with %d toasts the newest slot (%d) bottom edge = %d, want %d (flush with the scanout)",
+				n, n-1, newestY+ph+notifyInset, h)
 		}
-		_, y0, _, _ := notifyRect(w, h, i-1)
-		if yi >= y0 {
-			t.Fatalf("slot %d (y=%d) is not above slot %d (y=%d): the stack does not grow upward", i, yi, i-1, y0)
-		}
-		if y0-yi != NotifyH+notifyGap {
-			t.Fatalf("slot %d->%d gap = %d want NotifyH+notifyGap=%d", i, i-1, y0-yi, NotifyH+notifyGap)
+		for slot := 0; slot < n-1; slot++ {
+			xi, olderY, w2, h2 := notifyRect(w, h, slot, n)
+			_, newerY, _, _ := notifyRect(w, h, slot+1, n)
+			if xi != x || w2 != pw || h2 != ph {
+				t.Fatalf("n=%d slot %d rect = (%d,%d %dx%d) want the same column as slot 0", n, slot, xi, olderY, w2, h2)
+			}
+			if olderY >= newerY {
+				t.Fatalf("with %d toasts slot %d (y=%d) is not ABOVE slot %d (y=%d): the stack does not grow upward with age",
+					n, slot, olderY, slot+1, newerY)
+			}
+			if newerY-olderY != NotifyH+notifyGap {
+				t.Fatalf("with %d toasts the gap between slot %d and %d is %d, want NotifyH+notifyGap=%d",
+					n, slot, slot+1, newerY-olderY, NotifyH+notifyGap)
+			}
 		}
 	}
-	// A slot that would fall off the top, and any nonsense input, give up
-	// with the zero rect rather than a negative one.
-	if _, _, w2, h2 := notifyRect(40, h, 0); w2 <= 0 || h2 <= 0 {
+	// A new entry pushes the band up by exactly one panel + one gap, not by
+	// two gaps: the top slot of a two-toast band is the one-toast band minus
+	// (NotifyH + notifyGap).
+	_, twoTopY, _, _ := notifyRect(w, h, 0, 2)
+	if want := y - (NotifyH + notifyGap); twoTopY != want {
+		t.Fatalf("the top of a 2-toast band is at y=%d, want %d (the 1-toast band pushed up one panel + one gap)", twoTopY, want)
+	}
+	// A scanout too narrow for the full panel still gets a live rect (the
+	// panel clamps to the width); the seat's only hard give-up is a
+	// nonsensical slot, an empty stack, or one that does not fit.
+	if _, _, w2, h2 := notifyRect(40, h, 0, 1); w2 <= 0 || h2 <= 0 {
 		t.Fatalf("a 40px scanout produced a live rect %dx%d", w2, h2)
 	}
-	// A slot far enough up the stack to fall off the top gives up rather
-	// than painting above y=0. The seat only ever asks for 0..NotifyMax-1,
-	// so this is the guard against a caller that asks for more.
-	if _, _, w2, h2 := notifyRect(w, h, 1000); w2 != 0 || h2 != 0 {
+	// A slot outside 0..n-1 gives up with the zero rect rather than painting
+	// where no entry is: the seat only ever asks for 0..n-1, so this is the
+	// guard against a caller that asks for more (or for a slot in an empty
+	// stack).
+	if _, _, w2, h2 := notifyRect(w, h, 1, 1); w2 != 0 || h2 != 0 {
+		t.Fatalf("slot 1 of a 1-toast stack produced %dx%d, want the zero rect", w2, h2)
+	}
+	if _, _, w2, h2 := notifyRect(w, h, 1000, NotifyMax); w2 != 0 || h2 != 0 {
 		t.Fatalf("a slot 1000 panels up produced %dx%d, want the zero rect", w2, h2)
 	}
-	if _, _, w2, h2 := notifyRect(w, h, -1); w2 != 0 || h2 != 0 {
+	if _, _, w2, h2 := notifyRect(w, h, -1, NotifyMax); w2 != 0 || h2 != 0 {
 		t.Fatalf("a negative slot produced %dx%d, want the zero rect", w2, h2)
 	}
-	if _, _, w2, h2 := notifyRect(0, 0, 0); w2 != 0 || h2 != 0 {
+	if _, _, w2, h2 := notifyRect(w, h, 0, 0); w2 != 0 || h2 != 0 {
+		t.Fatalf("a slot of an empty stack produced %dx%d, want the zero rect", w2, h2)
+	}
+	if _, _, w2, h2 := notifyRect(0, 0, 0, 1); w2 != 0 || h2 != 0 {
 		t.Fatalf("a zero scanout produced %dx%d", w2, h2)
 	}
 }
@@ -212,7 +242,9 @@ func TestNotifyRectClearsTheSeatsOtherChrome(t *testing.T) {
 		cx, cy, cw, ch := chromeRect(w, h)
 		sx, sy, sw, sh := startSurfaceRect(w, h)
 		for i := 0; i < NotifyMax; i++ {
-			x, y, pw, ph := notifyRect(w, h, i)
+			// The TALLEST band, so this is the worst case: a slot only
+			// rises as entries are added below it.
+			x, y, pw, ph := notifyRect(w, h, i, NotifyMax)
 			if pw <= 0 || ph <= 0 {
 				continue
 			}
@@ -242,7 +274,9 @@ func TestNotifyHitZoneIsExactlyThePaintedRect(t *testing.T) {
 	if _, ok := notifyHit(10, 10, w, h); ok {
 		t.Fatal("an empty strip must not be a click target")
 	}
-	// Two toasts: index 0 is the top panel, index 1 the bottom one.
+	// Two toasts: index 0 is the top panel (the oldest), index 1 the one
+	// against the bottom edge (the newest). Queue index == stack slot, so
+	// the centre of slot i must resolve to entry i.
 	if _, ok, _ := notifyPush(4, "first", 0); !ok {
 		t.Fatal("push 1")
 	}
@@ -250,7 +284,7 @@ func TestNotifyHitZoneIsExactlyThePaintedRect(t *testing.T) {
 		t.Fatal("push 2")
 	}
 	for i := 0; i < notifyCount(); i++ {
-		x, y, pw, ph := notifyRect(w, h, i)
+		x, y, pw, ph := notifyRect(w, h, i, notifyCount())
 		cx, cy := uint32(x+pw/2), uint32(y+ph/2)
 		got, ok := notifyHit(cx, cy, w, h)
 		if !ok || got != i {
@@ -271,10 +305,12 @@ func TestNotifyHitZoneIsExactlyThePaintedRect(t *testing.T) {
 			}
 		}
 	}
-	// The gap between two stacked panels belongs to neither.
-	_, y0, _, _ := notifyRect(w, h, 0)
-	_, y1, _, h1 := notifyRect(w, h, 1)
-	gap := y0 - (y1 + h1)
+	// The gap between two stacked panels belongs to neither. Slot 0 is the
+	// top panel and slot 1 the bottom one, so the gap is measured from the
+	// bottom panel's TOP edge up to the top panel's BOTTOM edge.
+	_, y0, _, h0 := notifyRect(w, h, 0, 2)
+	_, y1, _, h1 := notifyRect(w, h, 1, 2)
+	gap := y1 - (y0 + h0)
 	if gap != notifyGap {
 		t.Fatalf("the gap between the two panels is %d, want notifyGap=%d", gap, notifyGap)
 	}
@@ -349,7 +385,7 @@ func TestPaintNotifyStaysInsideTheRectAndUsesTokens(t *testing.T) {
 		t.Fatal("paintNotify painted nothing")
 	}
 	pix := asUint32(scan)
-	x, y, pw, ph := notifyRect(w, h, 0)
+	x, y, pw, ph := notifyRect(w, h, 0, 1)
 	var fill, rule, ink int
 	for row := 0; row < h; row++ {
 		for col := 0; col < w; col++ {
@@ -407,10 +443,18 @@ func TestNotifyPaintStacksOldestOnTop(t *testing.T) {
 	scan := make([]byte, w*h*4)
 	paintNotify(scan, w, h, NotifyTicks-1)
 	pix := asUint32(scan)
-	_, y0, _, _ := notifyRect(w, h, 0)
-	_, y1, _, _ := notifyRect(w, h, 1)
-	top := pix[(y0+10)*w+notifyInset+NotifyW-4]
-	bot := pix[(y1+10)*w+notifyInset+NotifyW-4]
+	// Slot 0 is the TOP of the band and holds the older entry; slot n-1 is
+	// the panel against the bottom edge and holds the newer one. Named
+	// after what they ARE, not after where they were believed to be: this
+	// test once sampled the bottom panel into `top` and passed against an
+	// inverted stack.
+	_, topY, _, _ := notifyRect(w, h, 0, 2)
+	_, botY, _, _ := notifyRect(w, h, 1, 2)
+	if topY >= botY {
+		t.Fatalf("slot 0 (y=%d) is not above slot 1 (y=%d): the band does not read oldest-on-top", topY, botY)
+	}
+	top := pix[(topY+10)*w+notifyInset+NotifyW-4]
+	bot := pix[(botY+10)*w+notifyInset+NotifyW-4]
 	if top == bot {
 		t.Fatalf("both slots painted the same fill (#%06x): the two entries did not get their own remaining lifetime", top&0xffffff)
 	}
@@ -451,7 +495,7 @@ func TestToastSurvivesTheRestOfTheTick(t *testing.T) {
 	presents := 0
 	compositeTick(scan, 4, &presents) // born at seatTick 3, painted at tick 4
 
-	x, y, pw, ph := notifyRect(vi.ScanoutWidth, vi.ScanoutHeight, 0)
+	x, y, pw, ph := notifyRect(vi.ScanoutWidth, vi.ScanoutHeight, 0, 1)
 	pix := asUint32(scan)
 	rule := pix[(y+ph/2)*vi.ScanoutWidth+x+1] & 0xffffff
 	if rule != theme.Current.Accent {
@@ -496,9 +540,11 @@ func TestSeatTickTracksCompositeTick(t *testing.T) {
 }
 
 // The paint marker is the gate's choreography point, so its rules are
-// pinned: it is one-shot, it only fires on a tick that actually painted a
-// non-empty strip AND presented the frame, and it names the NEWEST entry's
-// sender.
+// pinned: it is one-shot PER BURST, it only fires on a tick that actually
+// painted a non-empty strip AND presented the frame, and it names the
+// NEWEST entry's sender. The re-arm is exercised through the real drain
+// path — a test that pokes the latch directly would keep passing if the
+// re-arm itself broke.
 func TestNotifyPaintMarkerIsOneShotAndOnlyOnAPaintedPresentedTick(t *testing.T) {
 	resetNotify(t)
 
@@ -517,14 +563,42 @@ func TestNotifyPaintMarkerIsOneShotAndOnlyOnAPaintedPresentedTick(t *testing.T) 
 	if !ok || line != MarkerNotifyPaint+"7" {
 		t.Fatalf("paint marker = %q,%v want %q7,true", line, ok, MarkerNotifyPaint)
 	}
-	// One-shot: the toast is painted on every tick of its life.
+	// One-shot within a burst: the toast is painted on every tick of its
+	// life.
 	if _, ok := notifyPaintMarker(true); ok {
-		t.Fatal("the paint marker fired twice")
+		t.Fatal("the paint marker fired twice in one burst")
 	}
-	// And it follows the NEWEST entry, not the oldest.
-	notifyPainted = false
+	// A second toast joins the SAME burst and must not re-announce: the user
+	// has already been told a toast reached the screen, and the gate greps
+	// the transition, not a per-tick (or per-toast) flood.
 	notifyPush(9, "second", 0)
-	if line, _ := notifyPaintMarker(true); line != MarkerNotifyPaint+"9" {
-		t.Fatalf("with two toasts the marker named %q, want the newest sender (9)", line)
+	if _, ok := notifyPaintMarker(true); ok {
+		t.Fatal("the paint marker fired again while the first burst was still up")
+	}
+	// Per BURST, not per process: expiry drains the strip and the latch
+	// re-arms, so a seat that lives for hours stays observable after toast
+	// #1. Drained through the real expiry path — a test that poked the flag
+	// would keep passing if the re-arm itself broke.
+	notifyTick(NotifyTicks)
+	if notifyCount() != 0 {
+		t.Fatalf("expiry at tick %d left %d toasts up", NotifyTicks, notifyCount())
+	}
+	if notifyPainted {
+		t.Fatal("the paint-marker latch is still armed on an empty strip")
+	}
+	// And the next burst names the NEWEST entry, not the oldest.
+	notifyPush(9, "second", 0)
+	notifyPush(10, "third", 0)
+	if line, ok := notifyPaintMarker(true); !ok || line != MarkerNotifyPaint+"10" {
+		t.Fatalf("the first toast of a new burst produced %q,%v want %q10,true", line, ok, MarkerNotifyPaint)
+	}
+	if _, ok := notifyPaintMarker(true); ok {
+		t.Fatal("the paint marker fired twice in the new burst")
+	}
+	// A click that empties the strip re-arms it as well.
+	notifyDismissByIndex(0)
+	notifyDismissByIndex(0)
+	if notifyPainted {
+		t.Fatal("clicking the last toast did not re-arm the paint marker")
 	}
 }

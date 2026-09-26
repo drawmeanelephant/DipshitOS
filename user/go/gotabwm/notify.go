@@ -19,12 +19,16 @@
 //     have. Three named Surface→Bg steps are a pixel-testable middle ground.
 //   - Paint order: the toast strip is painted AFTER the launcher and after
 //     chromeTick, so a notification fired by the app the user just launched
-//     is never hidden by the launcher they are typing into. Pinned by
-//     TestToastPaintsAboveLauncher.
+//     is never hidden by the launcher they are typing into. The pointer
+//     path is ordered to match — the toast is hit-tested BEFORE the
+//     launcher's own handling, so what is on top is what the click finds.
+//     Pinned by TestToastSurvivesTheRestOfTheTick and
+//     TestToastHitPrecedesTheLauncher.
 //   - Geometry: the stack lives in the bottom-LEFT corner, so it clears the
 //     22px top rail, the 148x20 bottom-right clock panel, and the centred
-//     start surface. The stack grows UPWARD with age, newest nearest the
-//     bottom edge.
+//     start surface. A new toast appears nearest the bottom edge and
+//     pushes the older ones UP; the oldest is the top of the band, the
+//     newest the panel against the bottom inset.
 //   - Click-to-focus uses focusHosted, the same helper alt-tab and rail
 //     clicks use, so a toast is one more way to the same focus transition
 //     (WIN_FOCUS to the sender) — not a private path.
@@ -52,10 +56,20 @@ const (
 	// never the queue slot.
 	MarkerNotifyDismiss = "gotabwm: notify dismiss id="
 	// MarkerNotifyDrop is printed when a full queue dropped its oldest
-	// entry, so a truncated notification stream is never silent.
-	MarkerNotifyDrop = "gotabwm: notify drop n="
-	// MarkerNotifyPaint is printed ONCE, the first tick that actually put
-	// a toast on the scanout and presented the frame. It is the third
+	// entry, so a truncated notification stream is never silent. The
+	// number is the CUMULATIVE count since boot, named `total=` because
+	// a per-event reading would be the useless 1: one push evicts at most
+	// one entry, so the only informative figure is how many the bound
+	// has thrown away in total.
+	MarkerNotifyDrop = "gotabwm: notify drop total="
+	// MarkerNotifyPaint is printed ONCE PER BURST — the first tick that
+	// actually put a toast of that burst on the scanout and presented the
+	// frame. The latch re-arms when the strip drains to empty (see
+	// notifyQueueSet), so a seat that runs for hours can still be watched
+	// showing its SECOND toast; a process-lifetime one-shot would leave
+	// every later gate blind after toast #1. Within one burst it stays
+	// one-shot, because the toast is painted on every tick of its life
+	// and a gate wants the transition, not a per-tick flood. It is the third
 	// point in the chain — queued (MarkerNotify), on screen
 	// (MarkerNotifyPaint), gone (MarkerNotifyDismiss) — and it exists
 	// because "the app asked and the seat acknowledged" says nothing about
@@ -90,15 +104,36 @@ type notifyToast struct {
 
 // notifyQueue is the seat's toast strip: oldest first, so the newest is
 // last and paints nearest the bottom edge. Bounded by NotifyMax.
+//
+// A queue INDEX is also a stack SLOT: slot i paints notifyQueue[i], with
+// slot 0 at the TOP of the band and slot n-1 nearest the bottom edge. That
+// identity is load-bearing — it is why notifyRect needs no remap and the
+// hit test is a straight lookup — so every REMOVAL goes through
+// notifyQueueSet rather than assigning the slice directly. (An append can
+// go straight in: growing the strip cannot drain it.)
 var notifyQueue []notifyToast
 
-// notifyDropped counts entries the bound threw away.
+// notifyDropped counts entries the bound threw away, since boot. The drop
+// marker reports this counter, not a per-event count.
 var notifyDropped int
 
 // notifyPainted guards the one-shot MarkerNotifyPaint (the chromeTick
 // one-shot discipline, for the same reason: the gate greps the transition,
-// not a per-tick flood).
+// not a per-tick flood) — per BURST, not per process: notifyQueueSet
+// re-arms it when the strip drains, so the next toast is announced again.
 var notifyPainted bool
+
+// notifyQueueSet installs a new queue and re-arms the one-shot paint
+// marker whenever the strip drains to empty. Every removal path (expiry,
+// click, a closed sender) goes through here, so "the latch is armed iff the
+// strip is non-empty" cannot drift: a fourth removal path added later gets
+// the re-arm for free instead of inheriting a latch that never re-arms.
+func notifyQueueSet(q []notifyToast) {
+	notifyQueue = q
+	if len(notifyQueue) == 0 {
+		notifyPainted = false
+	}
+}
 
 // notifyPush queues one notification for tabID at tick `ticks` and returns
 // the text as it was bounded onto the wire (NUL-trimmed at 24 bytes by the
@@ -148,7 +183,7 @@ func clearNotify(id uint32) int {
 		}
 		keep = append(keep, t)
 	}
-	notifyQueue = keep
+	notifyQueueSet(keep)
 	for i := 0; i < gone; i++ {
 		vi.ConsoleLine(MarkerNotifyDismiss + vi.Itoa64(int64(id)))
 	}
@@ -158,8 +193,14 @@ func clearNotify(id uint32) int {
 // notifyExpire drops every entry whose lifetime has run out and reports the
 // tab ids it dropped, so the caller can print the dismiss marker at the
 // moment the toast actually left the screen. Expiry is a strict `ticks >=
-// expires`: an entry born at tick T is visible on the tick that queued it
-// and for exactly NotifyTicks-1 more, and is gone on the NotifyTicks-th.
+// expires`.
+//
+// The lifetime is NotifyTicks-1 PAINTS, not NotifyTicks, and the difference
+// is not cosmetic: the WM_RPC is applied between ticks, so `born` is
+// seatTick — the last tick that actually painted — and the entry's first
+// paint is the tick AFTER it was queued. An entry born at T is therefore on
+// screen for ticks T+1 .. T+NotifyTicks-1 (7 paints, ~7s at the 1Hz tick,
+// not 8) and is gone on T+NotifyTicks.
 func notifyExpire(ticks uint64) []uint32 {
 	var gone []uint32
 	keep := notifyQueue[:0]
@@ -170,21 +211,33 @@ func notifyExpire(ticks uint64) []uint32 {
 		}
 		keep = append(keep, t)
 	}
-	notifyQueue = keep
+	notifyQueueSet(keep)
 	return gone
 }
 
-// notifyRect is the panel rect for slot i, where slot 0 is the TOP of the
-// stack (the OLDEST entry) and slot n-1 is nearest the bottom edge (the
-// newest). The queue is stored oldest-first, so slot i draws notifyQueue[i]:
-// a new toast appears at the bottom and pushes the older ones up, which is
-// where the eye already is after reading the newest. Pure — the host test
-// pins the hit zone against exactly this function, so the painted panel and
-// the clickable panel can never disagree. A scanout too small for the panel
-// gives up with the zero rect (paint nothing, click nothing) rather than a
-// negative rect.
-func notifyRect(width, height, i int) (x, y, w, h int) {
-	if i < 0 || width <= 0 || height <= 0 || NotifyH <= 0 {
+// notifyRect is the panel rect for slot i of an n-entry stack. Slot 0 is
+// the TOP of the band and holds the OLDEST entry; slot n-1 is nearest the
+// bottom edge and holds the NEWEST. The queue is stored oldest-first, so
+// slot i draws notifyQueue[i] — the same number, no remap, which is what
+// lets the hit test stay a straight lookup.
+//
+// The band is exactly n panels tall and sits flush with the bottom inset,
+// so a new toast appears at the bottom edge and pushes the older ones UP,
+// which is where the eye already is after reading the newest. (An earlier
+// version anchored slot 0 at the bottom, which painted the OLDEST nearest
+// the bottom edge and dropped each new arrival on TOP of the stack: the
+// newest sat furthest from the eye while four docs said the opposite, and
+// the host test passed because it was written against the code using the
+// docs' vocabulary. The docs were the intent; the code was the bug, and
+// the shape is now pinned from the bottom edge inward.)
+//
+// Pure — the host test pins the hit zone against exactly this function, so
+// the painted panel and the clickable panel can never disagree. A slot
+// outside 0..n-1, a scanout too small for the panel, or a band that does
+// not fit above y=0 gives up with the zero rect (paint nothing, click
+// nothing) rather than a negative rect.
+func notifyRect(width, height, slot, n int) (x, y, w, h int) {
+	if slot < 0 || n <= 0 || slot >= n || width <= 0 || height <= 0 || NotifyH <= 0 {
 		return 0, 0, 0, 0
 	}
 	w, h = NotifyW, NotifyH
@@ -194,9 +247,11 @@ func notifyRect(width, height, i int) (x, y, w, h int) {
 	if w <= 0 {
 		return 0, 0, 0, 0
 	}
-	// Slot i is i panels above the bottom one, each NotifyH tall with a
-	// notifyGap between neighbours.
-	y = height - notifyInset - (i+1)*NotifyH - i*notifyGap
+	// The newest slot is the bottom panel; each older slot is one panel
+	// plus one gap above it, so the band is n*NotifyH + (n-1)*notifyGap
+	// tall and its top edge rises as entries arrive.
+	below := n - 1 - slot
+	y = height - notifyInset - (below+1)*NotifyH - below*notifyGap
 	if y < 0 {
 		return 0, 0, 0, 0
 	}
@@ -206,10 +261,11 @@ func notifyRect(width, height, i int) (x, y, w, h int) {
 // notifySlotOf maps a scanout point to the queue index it lands on. It
 // walks the same notifyRect the paint walks, so a hit can only ever be
 // reported where a panel was actually drawn. Slot and queue index are the
-// same number, which is why this is a straight lookup and not a remap.
+// same number (see notifyRect), which is why this is a straight lookup and
+// not a remap.
 func notifySlotOf(px, py uint32, width, height, n int) (int, bool) {
 	for slot := 0; slot < n; slot++ {
-		x, y, w, h := notifyRect(width, height, slot)
+		x, y, w, h := notifyRect(width, height, slot, n)
 		if w <= 0 || h <= 0 {
 			continue
 		}
@@ -313,10 +369,11 @@ func paintNotify(scan []byte, width, height int, ticks uint64) int {
 	written := 0
 	n := len(notifyQueue)
 	for slot := 0; slot < n; slot++ {
-		// Slot i draws queue entry i: the queue is oldest-first and the
-		// stack grows upward, so the newest lands nearest the bottom.
+		// Slot i draws queue entry i (oldest-first at the top of the
+		// band), so the newest lands nearest the bottom edge and each
+		// arrival pushes the older ones up.
 		e := notifyQueue[slot]
-		x, y, w, h := notifyRect(width, height, slot)
+		x, y, w, h := notifyRect(width, height, slot, n)
 		if w <= 0 || h <= 0 {
 			continue
 		}
@@ -363,7 +420,7 @@ func notifyDismissByIndex(i int) (uint32, bool) {
 		return 0, false
 	}
 	id := notifyQueue[i].tabID
-	notifyQueue = append(notifyQueue[:i], notifyQueue[i+1:]...)
+	notifyQueueSet(append(notifyQueue[:i], notifyQueue[i+1:]...))
 	return id, true
 }
 

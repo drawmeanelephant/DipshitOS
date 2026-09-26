@@ -363,6 +363,30 @@ func handleWmPointer(e vi.Event) {
 	down := pointerDownEdge(btn, prevPtrButtons)
 	up := pointerUpEdge(btn, prevPtrButtons)
 	prevPtrButtons = btn
+	// M79k (#1720): the notify strip is chrome, so a press on a toast is
+	// consumed HERE — it dismisses the toast and focuses its SENDER, and
+	// it never reaches the content forward below (a stray content drag
+	// inside a hosted pane would outlive the toast). The HIT decides
+	// consumption, not whether the focus leg then succeeded: a press is
+	// either on the toast or it is not.
+	//
+	// It comes FIRST, ahead of the launcher's own block below, because the
+	// strip is painted LAST (compositeTick) and the pointer path has to
+	// agree with the paint order: what is on top has to be what the click
+	// finds. The launcher's block returns early for every button, so a
+	// press on a toast that fired while the launcher was open used to be
+	// swallowed there — it neither clicked the toast nor reached content,
+	// it just closed the launcher under a toast the user could see. The
+	// two rects are disjoint at 1280x720 anyway (the launcher panel starts
+	// at launchX=240, the toast column ends at 216), so hoisting changes
+	// no press outside a toast; TestToastHitPrecedesTheLauncher pins the
+	// order rather than the coincidence.
+	if down {
+		if _, onToast := notifyHit(px, py, vi.ScanoutWidth, vi.ScanoutHeight); onToast {
+			notifyClicked(px, py)
+			return
+		}
+	}
 	if launch.open {
 		if down {
 			i, ok := launchRowAt(px, py)
@@ -376,20 +400,6 @@ func handleWmPointer(e vi.Event) {
 		return
 	}
 	if down {
-		// M79k (#1720): the notify strip is chrome, so a press on a toast
-		// is consumed HERE — it dismisses the toast and focuses its
-		// SENDER, and it never reaches the content forward below (a
-		// stray content drag inside a hosted pane would outlive the
-		// toast). The HIT decides consumption, not whether the focus leg
-		// then succeeded: a press is either on the toast or it is not.
-		// It sits after the launcher's own handling above and before the
-		// start surface because a toast is the more specific target: the
-		// strip's rects are painted over the desktop, so a click on one
-		// is never a click on what is behind it.
-		if _, onToast := notifyHit(px, py, vi.ScanoutWidth, vi.ScanoutHeight); onToast {
-			notifyClicked(px, py)
-			return
-		}
 		// M71e (#1564): on an empty strip the start surface is the click
 		// target. Checked before the rail so it cannot be shadowed by a
 		// rail cell that happens to span the point (the rail has no cells
@@ -474,7 +484,8 @@ func handleWmPointer(e vi.Event) {
 		return
 	}
 	if _, onToast := notifyHit(px, py, vi.ScanoutWidth, vi.ScanoutHeight); onToast {
-		// Chrome under the pointer, like the rail: not content.
+		// Chrome under the pointer, like the rail: not content. A drag
+		// that starts on a toast is the toast's, not a content forward.
 		return
 	}
 	if _, onRail := railCellAt(px, py, vi.ScanoutWidth, tabs.Count(), RailHeight); !onRail {

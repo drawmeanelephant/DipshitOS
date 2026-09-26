@@ -1068,7 +1068,7 @@ func TestHandleWmPointerPressOnToastIsChrome(t *testing.T) {
 		t.Fatal("push refused")
 	}
 
-	x, y, pw, ph := notifyRect(vi.ScanoutWidth, vi.ScanoutHeight, 0)
+	x, y, pw, ph := notifyRect(vi.ScanoutWidth, vi.ScanoutHeight, 0, 1)
 	at := uint32(x+pw/2) | uint32(y+ph/2)<<16
 	handleWmPointer(vi.Event{Kind: vi.EvWmPointer, Arg0: at, Flags: uint16(hidBtnLeft)})
 	if notifyCount() != 0 {
@@ -1100,7 +1100,7 @@ func TestHandleWmPointerPressOnToastIsChrome(t *testing.T) {
 	// to the content path, which is what the boundary test in
 	// notify_test.go pins from the other side.
 	notifyPush(4, "copied KNOWN.TXT", 0)
-	_, y, _, _ = notifyRect(vi.ScanoutWidth, vi.ScanoutHeight, 0)
+	_, y, _, _ = notifyRect(vi.ScanoutWidth, vi.ScanoutHeight, 0, 1)
 	below := uint32(x+pw/2) | uint32(y+ph+2)<<16
 	contentDown = false
 	handleWmPointer(vi.Event{Kind: vi.EvWmPointer, Arg0: below, Flags: uint16(hidBtnLeft)})
@@ -1111,4 +1111,57 @@ func TestHandleWmPointerPressOnToastIsChrome(t *testing.T) {
 		t.Fatal("a press below the toast dismissed it")
 	}
 	contentDown = false
+}
+
+// TestToastHitPrecedesTheLauncher is the paint-order/hit-order agreement: the
+// strip is painted LAST, so a press on a toast has to be found FIRST. The
+// launcher's own block returns early for every button, which meant a press on
+// a toast that fired while the launcher was open never reached the toast at
+// all — it closed the launcher under a toast the user could plainly see. The
+// two rects happen to be disjoint at 1280x720 (the launcher panel starts at
+// launchX, the toast column ends at 216), so what this pins is the ORDER and
+// not that coincidence: widen the strip or move the launcher and the order is
+// still right.
+func TestToastHitPrecedesTheLauncher(t *testing.T) {
+	resetNotify(t)
+	saved := tabs
+	savedLaunch := launch
+	savedBtn := prevPtrButtons
+	defer func() {
+		tabs = saved
+		launch = savedLaunch
+		prevPtrButtons = savedBtn
+	}()
+	tabs = TabStrip{}
+	prevPtrButtons = 0
+	launch = launcherState{}
+	launch.open = true
+	launch.filtered = []int{0, 1}
+	if !tabs.OpenTab(4, "files") {
+		t.Fatal("OpenTab")
+	}
+	if _, ok, _ := notifyPush(4, "copied KNOWN.TXT", 0); !ok {
+		t.Fatal("push refused")
+	}
+
+	x, y, pw, ph := notifyRect(vi.ScanoutWidth, vi.ScanoutHeight, 0, 1)
+	handleWmPointer(vi.Event{Kind: vi.EvWmPointer,
+		Arg0:  uint32(x+pw/2) | uint32(y+ph/2)<<16,
+		Flags: uint16(hidBtnLeft)})
+	if notifyCount() != 0 {
+		t.Fatalf("a press on a toast left %d in the strip while the launcher was open", notifyCount())
+	}
+	if !launch.open {
+		t.Fatal("a press on a toast closed the launcher: the launcher's early return shadowed the strip")
+	}
+
+	// A press that is NOT on a toast still belongs to the launcher, exactly
+	// as before: on the empty desktop beside the strip it dismisses it.
+	handleWmPointer(vi.Event{Kind: vi.EvWmPointer, Arg0: uint32(x+pw/2) | uint32(y+ph/2)<<16, Flags: 0})
+	handleWmPointer(vi.Event{Kind: vi.EvWmPointer,
+		Arg0:  uint32(x+pw/2) | uint32(y+ph+2)<<16,
+		Flags: uint16(hidBtnLeft)})
+	if launch.open {
+		t.Fatal("a press on the desktop beside the toast no longer reaches the launcher")
+	}
 }

@@ -696,11 +696,23 @@ vgate_assert 06 serial-absent '[EXC] parking:'
 vgate_assert 06 serial-absent 'exited status=139'
 
 # The chain as an ORDERING check, because each of these markers can appear
-# without any of the others. The app's ack must come before the seat's own
-# line (the seat answers the mailbox round trip), the seat's line before the
-# paint, the paint before the dismiss, and every one of them after the paste
-# that caused them. One sender id throughout: the toast belongs to the tab
-# that raised it.
+# without any of the others. Only the CAUSAL orders are asserted: the paste
+# that caused the toast, the seat's queue line before the app's ack (the ack
+# is the ANSWER to that request, so the app cannot claim the user was told
+# before the seat had queued anything), the queue line before the paint (the
+# paint marker is printed after the push), and the paint before the dismiss
+# (run 06's click is anchored on the paint marker, so the toast was on screen
+# before anything dismissed it). One sender id throughout: the toast belongs
+# to the tab that raised it.
+#
+# `sent` and `painted` are deliberately NOT ordered against each other. Both
+# are downstream of `queued` with nothing causal in between: the seat prints
+# `queued` while servicing the request and paints on the next presented tick,
+# while the app prints `sent` when the ack makes the mailbox round trip back.
+# Which lands first is a scheduling race. An earlier version of this hook
+# asserted sent < painted and failed on a rebuild that changed nothing about
+# the chain (observed 2026-09-26: sent=25056 painted=25015) — asserting a
+# race is asserting a flake.
 vgate_assert 06 python <<'PY'
 import os, re, sys
 ser = open(os.environ["VG_SER"], errors="replace").read()
@@ -720,7 +732,8 @@ dismissed = at(r"(?m)^gotabwm: notify dismiss id=(\d+)$", "the click's dismiss m
 # the request, and the app's ack can only print once that answer has made
 # the mailbox round trip back. Getting this backwards would mean the app
 # claimed the user was told before the seat had queued anything.
-if not (pasted.start() < queued.start() < sent.start() < painted.start() < dismissed.start()):
+if not (pasted.start() < queued.start() < sent.start()
+        and queued.start() < painted.start() < dismissed.start()):
     sys.exit("notify chain out of order: paste=%d queued=%d sent=%d painted=%d dismissed=%d"
              % (pasted.start(), queued.start(), sent.start(), painted.start(), dismissed.start()))
 
@@ -751,12 +764,12 @@ i = hits[0]
 if lines[i + 1] != "gotabwm: tab focus id=" + wid or lines[i + 2] != "gotabwm: host focus id=" + wid:
     sys.exit("the dismiss at line %d is not the click's: followed by %r / %r, want the focus pair"
              % (i, lines[i + 1][:44], lines[i + 2][:44]))
-print("M79k notify chain OK: paste -> seat queue (id=%s) -> app ack -> paint -> CLICK dismiss -> focus"
+print("M79k notify chain OK: paste -> seat queue (id=%s) + app ack + paint -> CLICK dismiss -> focus"
       % wid)
 PY
 
 # THE pixel assert: the toast on the scanout, read out of the guest's own
-# composed frame. The panel is notifyRect(1280,720,0) = (8, 692, 208, 20): a
+# composed frame. The panel is notifyRect(1280,720,0,1) = (8, 692, 208, 20): a
 # 2px accent rule down the left edge, the 8x8 face text, and Surface between
 # them. Tokens are the dark palette's Accent 0x3b82f6, Surface 0x222d35, Ink
 # 0xe6edf3. The snapshot is raw BGRX at the scanout's own resolution.

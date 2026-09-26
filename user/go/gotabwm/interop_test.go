@@ -269,7 +269,7 @@ func TestNotifyMarkerShapes(t *testing.T) {
 	cases := []struct{ got, want string }{
 		{MarkerNotify, "gotabwm: notify id="},
 		{MarkerNotifyDismiss, "gotabwm: notify dismiss id="},
-		{MarkerNotifyDrop, "gotabwm: notify drop n="},
+		{MarkerNotifyDrop, "gotabwm: notify drop total="},
 		{MarkerNotifyPaint, "gotabwm: notify paint id="},
 	}
 	for _, c := range cases {
