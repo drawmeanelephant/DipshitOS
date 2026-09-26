@@ -344,8 +344,8 @@ assert i_fill < i_clear < i_soft < i_ris < i_done, (
 print(f"M80k chords OK: cleared {n} scrollback lines; clear < soft < RIS; guest alive after")
 PY
 
-# KNOWN SNAPSHOT-CHANNEL FLAKE (issue #1790, OBSERVED 2026-09-26 on this
-# host): when several `--snapshot-after` requests are in flight together the
+# KNOWN SNAPSHOT-CHANNEL FLAKE (the fixup #1757 carries; OBSERVED
+# 2026-09-26 on this host): when several `--snapshot-after` requests are in flight together the
 # channel coalesces them (guest `snap_pending` is a bool; the host's
 # `pendingSnapPath` is a single slot the next stream header steals) and the
 # FIRST request's frame is dropped — this run failed exactly that way in the
@@ -427,8 +427,8 @@ PY
 # serial report names both ladders — the boot look (text small + grid medium)
 # and the rung in force after (text large + grid large).
 #
-# TWO boots with ONE snapshot each, deliberately (issue #1790, OBSERVED
-# 2026-09-26): when more than one kind-4 request is in flight the channel
+# TWO boots with ONE snapshot each, deliberately (the flake #1757 carries
+# as a fixup; OBSERVED 2026-09-26): when more than one kind-4 request is in flight the channel
 # coalesces it — the guest's `snap_pending` is a bool and the host's
 # `pendingSnapPath` is a single slot the next stream header steals — so a
 # multi-snapshot run can lose its first frame and misfile the rest (run 03
