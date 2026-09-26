@@ -37,6 +37,13 @@
 # never gets there. Runs 01/02 stay byte-identical to their M73d/#1688
 # shape.
 #
+# M80i (#1725) gets its OWN boot (run 04, below): the zoom ladder leaves
+# the 8x16 cell. `font` reports BOTH ladders (the boot look is text small
+# + grid MEDIUM), `font large` moves both and re-flows the bound grid to
+# the 10x21 cell, and the scanout carries the pixel proof — ink below
+# y=112 in the client is impossible for three rows at 8x16 and is exactly
+# where the 10x21 cell paints row 2.
+#
 # #1688: run 02 boots the SAME chain WITH the seat registered —
 # GOTABWM.ELF is staged by a tag-01 assert (the go-dogfood WINDOWS.SAV
 # precedent) so run 01's shim boot stays byte-identical — and the
@@ -337,6 +344,17 @@ assert i_fill < i_clear < i_soft < i_ris < i_done, (
 print(f"M80k chords OK: cleared {n} scrollback lines; clear < soft < RIS; guest alive after")
 PY
 
+# KNOWN SNAPSHOT-CHANNEL FLAKE (the fixup #1757 carries; OBSERVED
+# 2026-09-26 on this host): when several `--snapshot-after` requests are in flight together the
+# channel coalesces them (guest `snap_pending` is a bool; the host's
+# `pendingSnapPath` is a single slot the next stream header steals) and the
+# FIRST request's frame is dropped — this run failed exactly that way in the
+# #1725 gate runs (3 requests, 2 streams, no snap-03-0.raw). It predates
+# M80i and hits any multi-snapshot run when the guest-idle service lags;
+# runs 04/05 below sidestep it with one snapshot per boot. This run keeps
+# its three-snapshot shape: the filled/cleared/ris triple IS the M80k
+# deliverable.
+#
 # The scanout, in the same run. Window client = x 64..700, y 64..448 (run
 # 01's refused-declare rect: 79 cols x 24 rows at the M73l 8x16 cell).
 # "Ink" = every sampled pixel that differs from the client's own modal
@@ -389,4 +407,201 @@ assert reset * 4 <= filled, (
     "ctrl-shift-alt-R left the grid on the scanout (filled=%d ris=%d)"
     % (filled, reset))
 print("M80k scanout OK: clear keeps the tail, RIS takes the grid")
+PY
+
+# --- M80i (#1725): the zoom ladder leaves 8x16 --------------------------------
+# Runs 04 and 05 are two more shim boots of the SAME chain (run 03's asserts
+# left the share seat-free, so the window is the refused-declare 64,48 640x400
+# rect). `echo pppp` paints THREE content rows (echo line, `pppp`, prompt);
+# the pair of scanout frames — one per boot — is the pixel proof that the
+# bound grid left 8x16:
+#   run 04  the boot cell (8x16: rows at y 64/80/96). Glyph descent stays
+#           inside the cell, so the client band y 112..127 is EMPTY: for
+#           three rows of content there IS no row 4.
+#   run 05  the large rung (10x21: rows at y 64/85/106) after the monitor
+#           `font` gesture. Row 2 (the prompt) now paints through the same
+#           band — glyph bodies and the `g` descender down to y 126, the
+#           block cursor filling the cell — so the band MUST carry ink.
+# Ink below y=112 is impossible at 8x16 for this content and unavoidable at
+# 10x21: its appearance is the glyph-at-the-large-size pixel proof. Run 05's
+# serial report names both ladders — the boot look (text small + grid medium)
+# and the rung in force after (text large + grid large).
+#
+# TWO boots with ONE snapshot each, deliberately (the flake #1757 carries
+# as a fixup; OBSERVED 2026-09-26): when more than one kind-4 request is in flight the channel
+# coalesces it — the guest's `snap_pending` is a bool and the host's
+# `pendingSnapPath` is a single slot the next stream header steals — so a
+# multi-snapshot run can lose its first frame and misfile the rest (run 03
+# and the first M80i draft both did). A lone request on an idle guest serves
+# promptly (observed: the surviving streams in those runs), which is the
+# live-web-ttf.spec single-trigger pattern this pair uses. The boots are the
+# identical chain and content, so the frame pair states the same relation a
+# one-boot before/after would.
+vgate_file font.txt <<'EOF'
+font
+font large
+font
+tty
+echo font-zoom-done
+EOF
+
+# Run 04: the pre-zoom control frame at the boot cell. This boot never runs
+# the gesture (asserted absent below), so the boot rung is the rung in force.
+vgate_run 04 -- --display --input --via-virtio --screen '$RUN_DIR/screen' \
+    --cvc-snap --snapshot-out '$RUN_DIR/snap-04' \
+    --script '$RUN_DIR/script.txt' \
+    --input-string 'echo pppp'$'\n' \
+    --input-string-after 'goterm: attached' \
+    --snapshot-after 'goterm: line echo pppp' \
+    --script-expect 'goterm: line echo pppp' \
+    --script-expect-tail 5 \
+    --timeout 150
+
+vgate_assert 04 serial-contains 'goterm: ready'
+vgate_assert 04 serial-contains 'goterm: line echo pppp'
+vgate_assert 04 serial-absent 'font: set (text + grid)'
+vgate_assert 04 serial-absent '  grid=large (10x21)'
+vgate_assert 04 serial-absent '\[EXC\]'
+vgate_assert 04 serial-absent '[EXC] parking:'
+
+# The control frame: nothing in the client band below y=112 at the boot
+# cell. Window client = x 64..704, y 64..448 (run 01's refused-declare
+# rect); the 4 px inset keeps the sample off the window chrome (the M80k
+# probe's rule). "Ink" is theme-agnostic — pixels far from the snapshot's
+# own modal client background.
+vgate_assert 04 python <<'PY'
+import os, sys
+RUN = os.environ["RUN_DIR"]
+W = 1280
+X, Y, CW, CH = 68, 68, 628, 372
+
+
+def band_ink(name):
+    d = open(os.path.join(RUN, name), "rb").read()
+    if len(d) < W * 720 * 4:
+        sys.exit("%s too small: %d bytes" % (name, len(d)))
+
+    def px(x, y):
+        k = (y * W + x) * 4
+        return (d[k + 2], d[k + 1], d[k])
+
+    hist = {}
+    for y in range(Y, Y + CH, 2):
+        for x in range(X, X + CW, 2):
+            p = px(x, y)
+            hist[p] = hist.get(p, 0) + 1
+    bg = max(hist, key=hist.get)
+    n = 0
+    for y in range(112, 128):
+        for x in range(X, X + CW):
+            p = px(x, y)
+            if max(abs(p[0] - bg[0]), abs(p[1] - bg[1]), abs(p[2] - bg[2])) > 40:
+                n += 1
+    return n
+
+
+pre = band_ink("snap-04-0.raw")
+print("M80i boot-cell band ink (y 112..127): %d" % pre)
+assert pre == 0, (
+    "the boot-cell 8x16 grid painted ink below y=112 (ink=%d) — three "
+    "16-px rows end at y=111; the control frame is not the boot cell" % pre)
+print("M80i control frame OK: empty band at the 8x16 cell")
+PY
+
+# Run 05: the gesture and the post-zoom frame — same chain, same content.
+# script2 is the monitor `font` workflow: report the boot look (both
+# ladders), move to `large`, report again, then a plain command after the
+# zoom (the exec-order anchor, same as run 03: the run ends on a marker
+# only script2 prints).
+vgate_run 05 -- --display --input --via-virtio --screen '$RUN_DIR/screen' \
+    --cvc-snap --snapshot-out '$RUN_DIR/snap-05' \
+    --script '$RUN_DIR/script.txt' \
+    --input-string 'echo pppp'$'\n' \
+    --input-string-after 'goterm: attached' \
+    --snapshot-after 'font: set (text + grid)' \
+    --script2 '$RUN_DIR/font.txt' \
+    --script2-after 'goterm: line echo pppp' \
+    --script-expect 'font-zoom-done' \
+    --script-expect-tail 5 \
+    --timeout 150
+
+vgate_assert 05 serial-contains 'goterm: ready'
+vgate_assert 05 serial-contains 'goterm: line echo pppp'
+vgate_assert 05 serial-contains '  text=small (8x8)'
+vgate_assert 05 serial-contains '  grid=medium (8x16)'
+vgate_assert 05 serial-contains 'font: set (text + grid)'
+vgate_assert 05 serial-contains '  text=large (24x24)'
+vgate_assert 05 serial-contains '  grid=large (10x21)'
+vgate_assert 05 serial-contains 'font-zoom-done'
+vgate_assert 05 serial-absent '\[EXC\]'
+vgate_assert 05 serial-absent '[EXC] parking:'
+
+# The gesture chain in order: the boot look is REPORTED before the zoom
+# (the one-key/two-ladders wart is visible in the report itself), the
+# zoom lands, the large rung is reported, and a monitor command still
+# runs after it (the guest is alive — same exec-order anchor as run 03).
+vgate_assert 05 python <<'PY'
+import os
+ser = open(os.environ["VG_SER"], errors="replace").read()
+i_boot = ser.find("  grid=medium (8x16)")
+i_set = ser.find("font: set (text + grid)")
+i_large = ser.find("  grid=large (10x21)")
+i_done = ser.find("font-zoom-done")
+for name, i in (("boot report", i_boot), ("font large", i_set),
+                ("large report", i_large), ("post command", i_done)):
+    assert i >= 0, f"{name} marker missing from serial"
+assert i_boot < i_set < i_large < i_done, (
+    f"font chain out of order: boot={i_boot} set={i_set} "
+    f"large={i_large} done={i_done}")
+print("font zoom chain OK: boot report < font large < large report < guest alive after")
+PY
+
+# The pair, in one probe: run 04's control frame and run 05's post-zoom
+# frame over the SAME band (y 112..127, the same 4 px inset and modal-bg
+# ink rule as run 04). The relation IS the deliverable — the identical
+# content's ink moved below y=111, which the 8x16 cell cannot do.
+# Thresholds: pre is strict zero by geometry (3 x 16-px rows end at
+# y=111); post > 60 is the measured scale of the prompt row's body and
+# descender ink (the probe prints the measured values).
+vgate_assert 05 python <<'PY'
+import os, sys
+RUN = os.environ["RUN_DIR"]
+W = 1280
+X, Y, CW, CH = 68, 68, 628, 372
+
+
+def band_ink(name):
+    d = open(os.path.join(RUN, name), "rb").read()
+    if len(d) < W * 720 * 4:
+        sys.exit("%s too small: %d bytes" % (name, len(d)))
+
+    def px(x, y):
+        k = (y * W + x) * 4
+        return (d[k + 2], d[k + 1], d[k])
+
+    hist = {}
+    for y in range(Y, Y + CH, 2):
+        for x in range(X, X + CW, 2):
+            p = px(x, y)
+            hist[p] = hist.get(p, 0) + 1
+    bg = max(hist, key=hist.get)
+    n = 0
+    for y in range(112, 128):
+        for x in range(X, X + CW):
+            p = px(x, y)
+            if max(abs(p[0] - bg[0]), abs(p[1] - bg[1]), abs(p[2] - bg[2])) > 40:
+                n += 1
+    return n
+
+
+pre = band_ink("snap-04-0.raw")
+post = band_ink("snap-05-0.raw")
+print("M80i band ink: boot-cell=%d large-cell=%d" % (pre, post))
+assert pre == 0, (
+    "the boot-cell 8x16 control frame has ink below y=112 (ink=%d) — the "
+    "pair's baseline is not the boot cell" % pre)
+assert post > 60, (
+    "no glyph ink below y=112 after `font large` (ink=%d) — the bound "
+    "grid did not re-flow to the 10x21 cell" % post)
+print("M80i scanout OK: the bound grid left 8x16 (ink moved below y=112)")
 PY

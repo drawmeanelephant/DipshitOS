@@ -1,13 +1,26 @@
 //! M73l (#1661) deliverable 2 — cell geometry: THE accessors.
+//! M80i (#1725) grows the one fixed cell into the zoom ladder: three
+//! rasterized sizes (small 11px 7×13, medium 13px 8×16, large 17px
+//! 10×21) and an ACTIVE cell the paint path reads.
 //!
-//! Before this card every terminal geometry site said `8` inline
+//! Before M73l every terminal geometry site said `8` inline
 //! (`/ 8`, `* 8`, `fill_rect(..., 8, 8, ...)`) — change the font and
 //! every one of them silently disagrees with the painter. After it,
-//! terminal geometry is sourced here and nowhere else: cell width is
-//! the face's advance at pixel size 13, cell height is ascent +
-//! descent (FiraCode Regular, upem 1950, M=W=x 1200 units → exactly
-//! 8 × 16). The numbers come from the generated fixture; the pins
-//! below fail if a regeneration ever moves them.
+//! terminal geometry is sourced here and nowhere else: the cell is the
+//! face's advance × (ascent + descent) at the active pixel size
+//! (FiraCode Regular, upem 1950 — M=W=x 1200 units, hhea 1800/-600).
+//! The numbers come from the generated fixture; the pins below fail if
+//! a regeneration ever moves them.
+//!
+//! The ACTIVE rung (M80i): `set_size` moves the ladder and rewrites the
+//! flat `pub var` metrics every existing geometry site already reads —
+//! so `font_metrics.cell_w` is always the cell in force. The compiled
+//! default is MEDIUM, the 13px 8×16 cell: the boot look. The persisted
+//! `font_size` key moves the rung only when the key is PRESENT (an
+//! unset key keeps the boot look — see settings.zig `apply_font_size`),
+//! and because `font_size` also drives the legacy text layer, the
+//! vocabulary has two meanings on purpose (small/medium/large = 8x8/
+//! 16x16/24x24 text AND 7x13/8x16/10x21 grid cells).
 //!
 //! Chrome/UI text (titles, dock, tooltips, the overview band) keeps
 //! font8x8 at literal 8 — it is NOT cell geometry (M73l non-goal).
@@ -21,37 +34,163 @@
 const std = @import("std");
 const data = @import("font_atlas_data.zig");
 
-/// Advance at pixel size 13 — one cell wide.
-pub const cell_w: u32 = data.cell_w;
-/// Ascent + descent — one cell tall. Visible rows in a client area of
-/// `h` pixels are exactly `h / cell_h`.
-pub const cell_h: u32 = data.cell_h;
-/// A wide (double) cell spans this many pixels.
-pub const wide_cell_w: u32 = 2 * cell_w;
-/// Baseline offset from the cell top (painters that shear or place
-/// descenders by hand read this, not `data`).
-pub const ascent: u32 = data.ascent;
-pub const descent: u32 = data.descent;
-/// The underline stroke sits on the cell's last pixel row.
-pub const underline_row: u32 = cell_h - 1;
+/// The zoom ladder's rungs — the persisted `font_size` vocabulary's
+/// three names, resolved against the three generated atlases.
+pub const Size = enum { small, medium, large };
 
-test "cell metrics pin at the measured values" {
-    try std.testing.expectEqual(@as(u32, 8), cell_w);
-    try std.testing.expectEqual(@as(u32, 16), cell_h);
-    try std.testing.expectEqual(@as(u32, 16), wide_cell_w);
-    try std.testing.expectEqual(@as(u32, 12), ascent);
-    try std.testing.expectEqual(@as(u32, 4), descent);
-    try std.testing.expectEqual(cell_h, ascent + descent);
-    try std.testing.expectEqual(cell_h - 1, underline_row);
-    // The fixture agrees with this module (one source of truth).
-    try std.testing.expectEqual(data.px_size, 13);
-    try std.testing.expectEqual(data.cell_w, cell_w);
-    try std.testing.expectEqual(data.cell_h, cell_h);
+/// One rung's complete cell geometry + atlas view: everything the
+/// painter and the geometry sites need, from ONE generated struct.
+pub const CellMetrics = struct {
+    cell_w: u32,
+    cell_h: u32,
+    /// A wide (double) cell spans this many pixels.
+    wide_cell_w: u32,
+    /// Baseline offset from the cell top (painters that shear or place
+    /// descenders by hand read this, not the fixture).
+    ascent: u32,
+    descent: u32,
+    /// The underline stroke sits on the cell's last pixel row.
+    underline_row: u32,
+    /// Atlas row stride and glyph stride at THIS size (the row stride
+    /// is per size: cell_w/2 rounded up, two 4-bit pixels per byte).
+    row_bytes: u32,
+    glyph_bytes: usize,
+    first_cp: u32,
+    last_cp: u32,
+    blob: [*]const u8,
+};
+
+fn metricsOf(comptime S: type) CellMetrics {
+    return .{
+        .cell_w = S.cell_w,
+        .cell_h = S.cell_h,
+        .wide_cell_w = 2 * S.cell_w,
+        .ascent = S.ascent,
+        .descent = S.descent,
+        .underline_row = S.cell_h - 1,
+        .row_bytes = S.row_bytes,
+        .glyph_bytes = S.glyph_bytes,
+        .first_cp = S.first_cp,
+        .last_cp = S.last_cp,
+        .blob = S.blob,
+    };
 }
 
-fn glyph_bytes(ch: u8) []const u8 {
-    const off: usize = (ch - data.first_cp) * data.glyph_bytes;
-    return data.blob[off .. off + data.glyph_bytes];
+/// The geometry for one ladder rung — pure, per size. The agreement
+/// pins (font_metrics tests, the Go CellGrid mirror) read this table.
+pub fn cellFor(s: Size) CellMetrics {
+    return switch (s) {
+        .small => metricsOf(data.small),
+        .medium => metricsOf(data.medium),
+        .large => metricsOf(data.large),
+    };
+}
+
+/// The rung in force. Compiled default MEDIUM = the M73l 13px cell —
+/// the boot look. `set_size` is the only writer.
+pub var size: Size = .medium;
+
+/// The ACTIVE metrics — the call-site surface every geometry site
+/// reads. Updated only by `set_size`; initialized to the medium (13px)
+/// defaults so a fresh boot compiles and paints exactly the M73l cell.
+pub var cell_w: u32 = data.medium.cell_w;
+pub var cell_h: u32 = data.medium.cell_h;
+pub var wide_cell_w: u32 = 2 * data.medium.cell_w;
+pub var ascent: u32 = data.medium.ascent;
+pub var descent: u32 = data.medium.descent;
+pub var underline_row: u32 = data.medium.cell_h - 1;
+pub var row_bytes: u32 = data.medium.row_bytes;
+pub var glyph_bytes: usize = data.medium.glyph_bytes;
+pub var first_cp: u32 = data.medium.first_cp;
+pub var last_cp: u32 = data.medium.last_cp;
+pub var blob: [*]const u8 = data.medium.blob;
+
+/// Move the zoom ladder to `s`. The flat metrics follow in one
+/// straight-line pass (one struct read, then the writes) — CONVENTION,
+/// not a guarantee: a cooperative kernel runs set_size to completion
+/// between paints so no painter sees a half-moved ladder, but the flats
+/// are `pub var` and nothing enforces set_size as their only writer. A
+/// future direct write to the flats would desync them from `size`
+/// (active()) silently — write through set_size. The caller owns
+/// the re-flow: the next
+/// `terminal.syncWindowCols` re-wraps the grid at the new cell (see
+/// driving_award.apply_grid_font_size, which also tells the bound TUIs).
+pub fn set_size(s: Size) void {
+    const m = cellFor(s);
+    size = s;
+    cell_w = m.cell_w;
+    cell_h = m.cell_h;
+    wide_cell_w = m.wide_cell_w;
+    ascent = m.ascent;
+    descent = m.descent;
+    underline_row = m.underline_row;
+    row_bytes = m.row_bytes;
+    glyph_bytes = m.glyph_bytes;
+    first_cp = m.first_cp;
+    last_cp = m.last_cp;
+    blob = m.blob;
+}
+
+/// The active metrics as a struct (tests and one-shot readers that want
+/// a consistent snapshot).
+pub fn active() CellMetrics {
+    return cellFor(size);
+}
+
+test "cell metrics pin at the measured values" {
+    // M80i (#1725): the ladder's three expectations, byte-for-byte the
+    // generator's pinned measurements (font_atlas_gen.zig tests derive
+    // the same numbers from the face's design units — one source).
+    const expect = [3]struct { s: Size, w: u32, h: u32, asc: u32, desc: u32 }{
+        .{ .s = .small, .w = 7, .h = 13, .asc = 10, .desc = 3 },
+        .{ .s = .medium, .w = 8, .h = 16, .asc = 12, .desc = 4 },
+        .{ .s = .large, .w = 10, .h = 21, .asc = 16, .desc = 5 },
+    };
+    for (expect) |e| {
+        const m = cellFor(e.s);
+        try std.testing.expectEqual(e.w, m.cell_w);
+        try std.testing.expectEqual(e.h, m.cell_h);
+        try std.testing.expectEqual(2 * e.w, m.wide_cell_w);
+        try std.testing.expectEqual(e.asc, m.ascent);
+        try std.testing.expectEqual(e.desc, m.descent);
+        try std.testing.expectEqual(m.cell_h, m.ascent + m.descent);
+        try std.testing.expectEqual(m.cell_h - 1, m.underline_row);
+        try std.testing.expectEqual((e.w + 1) / 2, m.row_bytes);
+    }
+    // The fixture agrees with this module (one source of truth).
+    try std.testing.expectEqual(@as(u32, 11), data.small.px_size);
+    try std.testing.expectEqual(@as(u32, 13), data.medium.px_size);
+    try std.testing.expectEqual(@as(u32, 17), data.large.px_size);
+    try std.testing.expectEqual(data.medium.cell_w, cellFor(.medium).cell_w);
+    try std.testing.expectEqual(data.medium.cell_h, cellFor(.medium).cell_h);
+}
+
+test "the active cell is the boot look and follows set_size" {
+    // Compiled default = the M73l 13px cell: a fresh boot paints exactly
+    // what it painted before M80i (the untouched-green gates' premise).
+    try std.testing.expectEqual(Size.medium, size);
+    try std.testing.expectEqual(@as(u32, 8), cell_w);
+    try std.testing.expectEqual(@as(u32, 16), cell_h);
+    try std.testing.expectEqual(@as(usize, 64), glyph_bytes);
+    try std.testing.expectEqual(@as(u32, 4), row_bytes);
+    defer set_size(.medium);
+    set_size(.large);
+    try std.testing.expectEqual(Size.large, size);
+    try std.testing.expectEqual(@as(u32, 10), cell_w);
+    try std.testing.expectEqual(@as(u32, 21), cell_h);
+    try std.testing.expectEqual(@as(u32, 20), wide_cell_w);
+    try std.testing.expectEqual(@as(u32, 20), underline_row);
+    set_size(.small);
+    try std.testing.expectEqual(Size.small, size);
+    try std.testing.expectEqual(@as(u32, 7), cell_w);
+    try std.testing.expectEqual(@as(u32, 13), cell_h);
+    try std.testing.expectEqual(@as(usize, 52), glyph_bytes);
+    try std.testing.expectEqual(@as(u32, 4), row_bytes);
+}
+
+fn glyphBytes(comptime S: type, ch: u8) []const u8 {
+    const off: usize = (ch - S.first_cp) * S.glyph_bytes;
+    return S.blob[off .. off + S.glyph_bytes];
 }
 
 test "atlas golden rows — the engine's own bytes, byte-pinned" {
@@ -59,6 +198,7 @@ test "atlas golden rows — the engine's own bytes, byte-pinned" {
     // (four 4-bit pixels per byte, high nibble = even x). First observed
     // render, pixel size 13, FiraCode-Regular — cap at rows 3..11 with
     // the baseline at 12, the 'g' descender dropping through rows 12..15.
+    // (The small/large blobs are pinned by the generator's own tests.)
     const m: [16][4]u8 = .{
         .{ 0x00, 0x00, 0x00, 0x00 }, .{ 0x00, 0x00, 0x00, 0x00 },
         .{ 0x00, 0x00, 0x00, 0x00 }, .{ 0xcf, 0x00, 0x4f, 0x80 },
@@ -100,13 +240,15 @@ test "atlas golden rows — the engine's own bytes, byte-pinned" {
         .{ 0xea, 0x88, 0xda, 0x00 }, .{ 0x16, 0x87, 0x40, 0x00 },
     };
     inline for (.{ .{ 'M', m }, .{ 'A', a }, .{ '0', zero }, .{ 'g', g } }) |ent| {
-        const bytes = glyph_bytes(ent[0]);
+        const bytes = glyphBytes(data.medium, ent[0]);
         for (ent[1], 0..) |row, y| {
             for (row, 0..) |b, i| {
                 try std.testing.expectEqual(b, bytes[y * 4 + i]);
             }
         }
     }
-    // Space is the empty cell.
-    for (glyph_bytes(' ')) |b| try std.testing.expectEqual(@as(u8, 0), b);
+    // Space is the empty cell at every size.
+    inline for (.{ data.small, data.medium, data.large }) |S| {
+        for (glyphBytes(S, ' ')) |b| try std.testing.expectEqual(@as(u8, 0), b);
+    }
 }

@@ -165,14 +165,16 @@ func (t *TabApp) Layout(r Rect, fromW, fromH uint32) Rect {
 //	                             client area; kernel's `else 1` below it
 //
 // M73l (#1661): cellW/cellH mirror kernel/src/font_metrics.zig —
-// FiraCode at pixel size 13: advance 8, ascent+descent 16.
+// FiraCode at pixel size 13: advance 8, ascent+descent 16 (the boot
+// look). M80i (#1725): the cell is the ACTIVE zoom rung's (7x13 / 8x16
+// / 10x21), so the caller passes vi.TerminalCell() — the same rung the
+// kernel's reflow just used — never a literal.
 //
 // The TUI contract is cells, never pixels: a consumer can only ask for
 // geometry the kernel grid will actually render. TestCellGridPinsKernel
-// pins both formulas class-A; the class-B size marker proves the live
-// event carries the same numbers.
-func CellGrid(w, h uint32) (cols, rows int) {
-	const cellW, cellH = 8, 16
+// pins both formulas class-A at EVERY rung; the class-B size marker
+// proves the live event carries the same numbers.
+func CellGrid(w, h, cellW, cellH uint32) (cols, rows int) {
 	cols = int(w / cellW)
 	if cols < 8 {
 		cols = 8

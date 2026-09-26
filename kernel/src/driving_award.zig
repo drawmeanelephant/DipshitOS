@@ -1498,6 +1498,37 @@ pub fn mark_palette_dirty() void {
     while (i < win_count) : (i += 1) windows[i].dirty = true;
 }
 
+/// M80i (#1725): the grid half of the `font_size` apply chain. Moves the
+/// zoom ladder (font_metrics.set_size), re-flows every bound grid to the
+/// new cell IMMEDIATELY (the next composite's syncWindowCols would get
+/// there anyway; doing it here makes the change atomic with the setting
+/// and runs before the repaint the caller triggers), and tells each
+/// bound TUI its canvas changed in CELL terms — a font change is a
+/// winsize change for a cell-addressed app — with the SAME payload
+/// shape `user_resize` pushes (the pixel rect, arg0=w arg1=h). The cell
+/// mapping the app derives from it (tabapp.CellGrid, the charm overlay's
+/// cellsForRect) mirrors font_metrics at that instant.
+pub fn apply_grid_font_size(s: font_metrics.Size) void {
+    font_metrics.set_size(s);
+    var i: usize = 0;
+    while (i < win_count) : (i += 1) {
+        const w = &windows[i];
+        if (w.kind != .user) continue;
+        if (terminal.screenForWindow(w.id) == null) continue;
+        terminal.syncWindowCols(w.id, w.w);
+        if (w.owner) |owner| {
+            events.push(owner, .{
+                .kind = events.WIN_RESIZE,
+                .flags = 0,
+                .seq = 0,
+                .arg0 = w.w,
+                .arg1 = w.h,
+            });
+        }
+        w.dirty = true;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Card G6 (claim 0487): the draw/window syscall seam — user windows
 // ---------------------------------------------------------------------------
@@ -3923,27 +3954,28 @@ pub fn draw_cell_glyph(buf: [*]u8, stride: usize, x0: usize, y0: usize, cell: te
         return;
     }
     // Fallback: composed rows (rune/overlay path), nearest-neighbour
-    // ×1 horizontally and ×2 vertically (cell_h / 8) into the tall cell.
+    // stretched over the WHOLE tall cell (M80i #1725: the zoom ladder's
+    // cells are 13/16/21 tall — no longer a multiple of 8 — so every
+    // output row samples its source row instead of a fixed ×1/×2
+    // repeat). At cell_h 8/16 the mapping is byte-identical to the old
+    // stretch; at 13/21 it fills the cell instead of stranding the
+    // bottom rows empty.
     const rows = rune_cell_rows(cell);
-    const sy_per: usize = font_metrics.cell_h / 8;
-    var gy: usize = 0;
-    while (gy < 8) : (gy += 1) {
-        const bits = rows[gy];
-        var sy: usize = 0;
-        while (sy < sy_per) : (sy += 1) {
-            const dy = gy * sy_per + sy;
-            // M73h (Amendment E): fake italic — top rows shift right up
-            // to 2px, bottom none, same ≤2px rendition over the taller
-            // cell. A pixel that would leave the cell is DROPPED (no
-            // column bleed: the pixel gates pin x extents).
-            const xoff: usize = if (italic) italic_shear(dy) else 0;
-            var gx: usize = 0;
-            while (gx < 8) : (gx += 1) {
-                if (font.row_pixel(bits, gx)) {
-                    if (gx + xoff < font_metrics.cell_w) {
-                        put_px(buf, stride, x0 + gx + xoff, y0 + dy, rgb);
-                        if (wide) put_px(buf, stride, x0 + gx + xoff + font_metrics.cell_w, y0 + dy, rgb);
-                    }
+    const ch: usize = font_metrics.cell_h;
+    var dy: usize = 0;
+    while (dy < ch) : (dy += 1) {
+        const bits = rows[dy * 8 / ch];
+        // M73h (Amendment E): fake italic — top rows shift right up
+        // to 2px, bottom none, same ≤2px rendition over the taller
+        // cell. A pixel that would leave the cell is DROPPED (no
+        // column bleed: the pixel gates pin x extents).
+        const xoff: usize = if (italic) italic_shear(dy) else 0;
+        var gx: usize = 0;
+        while (gx < 8) : (gx += 1) {
+            if (font.row_pixel(bits, gx)) {
+                if (gx + xoff < font_metrics.cell_w) {
+                    put_px(buf, stride, x0 + gx + xoff, y0 + dy, rgb);
+                    if (wide) put_px(buf, stride, x0 + gx + xoff + font_metrics.cell_w, y0 + dy, rgb);
                 }
             }
         }
@@ -3960,16 +3992,19 @@ fn italic_shear(dy: usize) usize {
 /// is baked into the fixture (baseline at `ascent` from the top), so
 /// this walks rows 0..cell_h and high/low nibbles per byte. Pixels the
 /// shear would push past the cell edge are dropped (M73h x-extent pin).
+/// M80i (#1725): the blob and its row/glyph strides come from the
+/// ACTIVE cell (font_metrics), so the painter follows the zoom ladder
+/// — each size's atlas is rasterized at its own pixel size.
 fn draw_atlas_glyph(buf: [*]u8, stride: usize, x0: usize, y0: usize, cp: u21, rgb: u32, italic: bool) void {
-    const off: usize = (cp - font_atlas.first_cp) * font_atlas.glyph_bytes;
-    const row_stride = font_atlas.glyph_bytes / font_metrics.cell_h; // 4 bytes = 8px × 4-bit
+    const off: usize = @as(usize, cp - font_metrics.first_cp) * font_metrics.glyph_bytes;
+    const row_stride = font_metrics.row_bytes; // cell_w/2 rounded up: 4-bit pixels
     var dy: usize = 0;
     while (dy < font_metrics.cell_h) : (dy += 1) {
         const xoff: usize = if (italic) italic_shear(dy) else 0;
         const row = off + dy * row_stride;
         var gx: usize = 0;
         while (gx < font_metrics.cell_w) : (gx += 1) {
-            const byte = font_atlas.blob[row + gx / 2];
+            const byte = font_metrics.blob[row + gx / 2];
             const lvl: u8 = if (@rem(gx, 2) == 0) byte >> 4 else byte & 0x0f;
             if (lvl == 0) continue;
             if (gx + xoff >= font_metrics.cell_w) continue;
@@ -4281,7 +4316,10 @@ pub fn render_terminal_screen(dst: [*]u8, w: *const Window, scr: *const terminal
             const line = scr.line(cl);
             const cell = scr.cellAt(cl, cc);
             const wide = fbtext.char_width(cell.base) >= 2 and cc + 1 < cols;
-            if (cc < line.len) draw_cell_glyph(dst, stride, cc * 8, cy, cell, colours.bg, wide, colours.italic);
+            // M80i (#1725): was `cc * 8` — the one geometry literal
+            // M73l missed. At the zoom sizes the cursor glyph landed a
+            // row-width away from its cell fill.
+            if (cc < line.len) draw_cell_glyph(dst, stride, cc * font_metrics.cell_w, cy, cell, colours.bg, wide, colours.italic);
         }
     }
 }

@@ -262,3 +262,49 @@ func TestPaletteSurfaceRevealsTheColoursOnCustom(t *testing.T) {
 		t.Fatal("unknown key landed in the table")
 	}
 }
+
+// M80i (#1725): the font_size surface. A default panel is UNCHANGED (eight
+// rows — go-wm-default pins keys=8); font_size is typed input at any time
+// and cycles small -> medium -> large once the row exists. The panel never
+// fabricates the row: an ABSENT key is the boot look (text small + grid
+// medium), which no single stored value can represent.
+func TestFontSurfaceCyclesWithoutMovingKeys(t *testing.T) {
+	a := newPanel(nil)
+	if len(a.disp) != len(settings.KnownKeys) {
+		t.Fatalf("default rows = %d, want %d (font_size is NOT a default row)", len(a.disp), len(settings.KnownKeys))
+	}
+	// Typed input applies (the accepted-not-seeded pattern)...
+	a.input.SetValue("font_size=large")
+	if !a.applyInput() {
+		t.Fatal("applyInput reported no change")
+	}
+	if v, _ := settings.Get(a.disp, "font_size"); v != "large" {
+		t.Fatalf("font_size = %q, want large", v)
+	}
+	if got := a.summary(); got != "keys=9 wm=gotabwm theme=dark" {
+		t.Fatalf("summary = %q (the typed row is real, so the count grew)", got)
+	}
+	// ...the row is first-class (no "(kept)") and cyclable.
+	for _, l := range a.labels() {
+		if strings.HasPrefix(l, "font_size") && strings.Contains(l, "(kept)") {
+			t.Fatalf("font_size row marked not-editable: %q", l)
+		}
+	}
+	a.sel = rowOf(t, a, "font_size")
+	a.cycle(1) // large wraps to small (the ladder's top)
+	if v, _ := settings.Get(a.disp, "font_size"); v != "small" {
+		t.Fatalf("font_size = %q after one step, want small (the wrap)", v)
+	}
+	a.cycle(1)
+	if v, _ := settings.Get(a.disp, "font_size"); v != "medium" {
+		t.Fatalf("font_size = %q after two steps, want medium", v)
+	}
+	// A value outside the vocabulary is still written verbatim (the
+	// kernel's reader is the authority); cycling from it restarts at the
+	// top rather than inventing a step.
+	a.set("font_size", "bogus")
+	a.cycle(1)
+	if v, _ := settings.Get(a.disp, "font_size"); v != "small" {
+		t.Fatalf("font_size = %q from outside the vocabulary, want small (the top)", v)
+	}
+}

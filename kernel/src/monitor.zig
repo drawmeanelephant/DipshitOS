@@ -52,6 +52,7 @@ pub const fat32_ro = @import("fat32_ro.zig"); // M70f F1 (issue #1458): the read
 pub const driving_award = @import("driving_award.zig"); // milestone six card G5 (claim 1543): Driving Award, the window manager behind `dui`
 pub const wm_server = @import("wm_server.zig"); // M32 WMS2 (issue #622): the render-server register behind `wm`
 pub const settings = @import("settings.zig"); // milestone eight card U8 (claim 2649): persistent settings engine
+pub const font_metrics = @import("font_metrics.zig"); // M80i (#1725): the grid's zoom ladder, reported by `font`
 pub const tombstone = @import("tombstone.zig"); // Arc5 issue #243: crash tombstone engine
 pub const forensics = @import("forensics.zig"); // #1278: the last-words recorder behind `forensics`
 pub const dns = @import("dns.zig"); // milestone twelve card N2 (claim 7566): DNS resolver
@@ -324,7 +325,7 @@ pub fn ensure_registry() []const Command {
             .{ .name = "calc", .dom = svclock.dom_bit(.file), .help = "calculator utilities: 'calc history' shows saved calculation history from /data/calc_hst.txt", .usage = "calc [history]", .category = .system, .max_args = 1, .handler = cmd_calc },
             .{ .name = "cat", .dom = svclock.dom_bit(.file), .help = "print a file from the host share (by name or path)", .usage = "cat <file|path>", .category = .storage, .min_args = 1, .max_args = 1, .handler = cmd_cat },
             .{ .name = "clear", .help = "clean up the crime scene", .usage = "clear", .category = .system, .handler = cmd_clear },
-            .{ .name = "font", .dom = svclock.dom_bit(.win), .help = "terminal font size: small 8x8 (default), medium 16x16, large 24x24 (M20-U1)", .usage = "font [small|medium|large]", .category = .graphics_input, .min_args = 0, .max_args = 1, .handler = cmd_font },
+            .{ .name = "font", .dom = svclock.dom_bit(.win), .help = "terminal font size: small 8x8 (default), medium 16x16, large 24x24 (M20-U1); the same rung zooms the bound terminal grid 7x13/8x16/10x21 (M80i)", .usage = "font [small|medium|large]", .category = .graphics_input, .min_args = 0, .max_args = 1, .handler = cmd_font },
             .{ .name = "compose", .help = "list available Alt+key compose sequences for accented characters", .usage = "compose", .category = .system, .handler = cmd_compose },
             .{ .name = "crash", .dom = svclock.dom_bit(.file), .help = "list recent crash tombstones from /data/crash/", .usage = "crash", .category = .system, .handler = cmd_crash },
             .{ .name = "clip", .help = "copy/paste the shared kernel clipboard ('clip <text...>' sets it, 'clip' prints it)", .usage = "clip [<text...>]", .category = .system, .handler = cmd_clip },
@@ -7021,14 +7022,23 @@ fn cmd_beep(m: *Monitor, args: []const []const u8) ExecError {
 
 /// `font` — report or switch the terminal's font size (M20-U1). The
 /// same setter slot 58 drives; the compositor repaints immediately.
+/// M80i (#1725): one key, two ladders — the report shows both. They
+/// can disagree at boot (the text layer's default is small, the grid's
+/// MEDIUM), so neither is inferred from the other.
 fn cmd_font(m: *Monitor, args: []const []const u8) ExecError {
     if (args.len == 0) {
         m.console.print_line("font:");
-        m.console.puts("  size=");
+        m.console.puts("  text=");
         m.console.print_line(switch (fbtext.font_size) {
             .small => "small (8x8)",
             .medium => "medium (16x16)",
             .large => "large (24x24)",
+        });
+        m.console.puts("  grid=");
+        m.console.print_line(switch (font_metrics.size) {
+            .small => "small (7x13)",
+            .medium => "medium (8x16)",
+            .large => "large (10x21)",
         });
         return .none;
     }
@@ -7044,14 +7054,35 @@ fn cmd_font(m: *Monitor, args: []const []const u8) ExecError {
         print_usage(m, lookup("font").?);
         return .usage;
     }
-    fbtext.set_font_size(target.?);
-    _ = settings.set("font_size", @tagName(target.?));
+    // The store's font_size apply chain moves BOTH ladders in one pass
+    // (settings.set -> apply_font_size -> text + driving_award grid; the
+    // flats' single writer is set_size BY CONVENTION — see its note) and
+    // publishes the row before the grid's WIN_RESIZE goes out (M80i).
+    // When the store refuses the row, NOTHING moves — the ladders never
+    // disagree.
+    const res = settings.set("font_size", @tagName(target.?));
+    if (res != .ok) {
+        // Report the store's actual reason — table_full is the only one
+        // this call site can reach today (the key and value lengths are
+        // bounded by the table above), but SetResult has three failures
+        // and the message must not assume which one arrived.
+        err_prefix(m);
+        m.console.puts("font_size not set: ");
+        m.console.puts(switch (res) {
+            .table_full => "settings table full",
+            .invalid_key => "invalid key",
+            .invalid_value => "value too long",
+            .ok => "not set",
+        });
+        m.console.puts("\n");
+        return .invalid_argument;
+    }
     // Repaint through the compositor when the gpu is up.
     if (virtio_gpu.gpu_ready) {
         driving_award.mark_terminal_dirty();
         _ = driving_award.composite();
     }
-    m.console.print_line("font: set to the terminal");
+    m.console.print_line("font: set (text + grid)");
     return .none;
 }
 

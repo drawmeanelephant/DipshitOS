@@ -426,3 +426,44 @@ func TestSaveRefusesOnlyACorruptDecode(t *testing.T) {
 		t.Fatal("SaveRefused must not look like success")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// M80i (#1725): the font_size row — accepted, NOT seeded (the PaletteKeys
+// pattern), with the rung vocabulary the kernel's apply_font_size maps onto
+// both ladders.
+// ---------------------------------------------------------------------------
+
+// font_size must stay OUT of KnownKeys (the kernel does not seed it — a
+// default panel stays keys=8 and the fresh-share bytes stay identical),
+// while its vocabulary is exactly the ladder the kernel applies.
+func TestFontKeysMirrorTheKernelVocabulary(t *testing.T) {
+	if len(FontKeys) != 1 || FontKeys[0].Name != "font_size" {
+		t.Fatalf("FontKeys = %+v, want the one font_size row", FontKeys)
+	}
+	if _, known := Known("font_size"); known {
+		t.Fatal("font_size must not be a KnownKeys row (the kernel does not seed it; keys=8 is pinned)")
+	}
+	if !Editable("font_size") {
+		t.Fatal("font_size is not editable — the panel could not choose the zoom rung")
+	}
+	if v, ok := Vocab("font_size"); !ok || !hasOnly(v, "small", "medium", "large") {
+		t.Fatalf("font_size vocabulary = %v ok=%v, want exactly small|medium|large", v, ok)
+	}
+	// The kernel's apply_font_size must accept every vocabulary name AND
+	// the M20 aliases (the panel cycles the names; the kernel also honours
+	// the aliases a hand-written file may carry).
+	src, err := os.ReadFile("../../../kernel/src/settings.zig")
+	if err != nil {
+		t.Fatalf("read kernel/src/settings.zig: %v (in-tree only)", err)
+	}
+	re := regexp.MustCompile(`fn apply_font_size[\s\S]*?\n}`)
+	block := re.FindString(string(src))
+	if block == "" {
+		t.Fatal("kernel/src/settings.zig: apply_font_size not found")
+	}
+	for _, name := range []string{"small", "medium", "large", "0", "1", "2", "8x8", "16x16", "24x24"} {
+		if !strings.Contains(block, "\""+name+"\"") {
+			t.Errorf("kernel apply_font_size does not accept %q", name)
+		}
+	}
+}
