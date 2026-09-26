@@ -53,6 +53,61 @@ const (
 	MarkerHostDone   = "gotabwm: host done"
 )
 
+// M79e (#1708): the pending navigation target. ONE slot, keyed by the window
+// id it belongs to and drained poll-once — Zig tabwm's pending_nav_id /
+// pending_nav_path, same bound. A second step before the first is polled
+// overwrites the first: the seat queues what the user most recently asked
+// for, not a backlog.
+var (
+	pendingNavID   uint32
+	pendingNavPath string
+)
+
+// rpcReplyPayload is the nav-poll channel's answer: the ack's `title` field
+// carries the target path the app must navigate to, which is exactly how
+// TABWM does it (Zig's rpc_reply_payload, consumed by the reply). Kept
+// separate from pendingNav* because they have different lifetimes — this
+// one lives for exactly one reply, that one until the app polls.
+var rpcReplyPayload string
+
+// setPendingNav queues a step target for one app.
+func setPendingNav(id uint32, path string) {
+	pendingNavID = id
+	pendingNavPath = path
+}
+
+// navPoll drains the queued target for id, clearing the slot. A slot queued
+// for a different window is NOT stolen — the poll is refused and the target
+// stays for its own app.
+func navPoll(id uint32) (string, bool) {
+	if id == 0 || pendingNavID != id || pendingNavPath == "" {
+		return "", false
+	}
+	p := pendingNavPath
+	pendingNavID = 0
+	pendingNavPath = ""
+	return p, true
+}
+
+// clearPendingNav drops any target queued for id. Called from the one place
+// a tab leaves the strip: Zig lets the slot outlive its tab, which means a
+// LATER window that reuses the same id can poll and receive a dead tab's
+// navigation. One line at the choke point is cheaper than that bug.
+func clearPendingNav(id uint32) {
+	if pendingNavID == id {
+		pendingNavID = 0
+		pendingNavPath = ""
+	}
+}
+
+// takeReplyPayload consumes the pending ack payload. Consume-on-use (not a
+// read) so a payload can never leak into the NEXT request's reply.
+func takeReplyPayload() string {
+	p := rpcReplyPayload
+	rpcReplyPayload = ""
+	return p
+}
+
 // tabs is the in-process strip (M62b). hostedApp is the focused client's
 // window id (0 = none) kept in sync so the M57c paint-suppression check
 // and go-wm-seat close path keep working with one hosted app.
@@ -184,6 +239,31 @@ func applyRPC(req vi.WmRpc) bool {
 		}
 		vi.ConsoleLine(MarkerRpcCycle)
 		return true
+	case vi.WmRpcKindNavDeclare: // 9, client -> seat: the app navigated
+		// The path rides the request title, exactly as TABWM reads it.
+		// A re-declaration of the current entry is a no-op that still
+		// ACKS applied=1 (the tab is known and the request was honoured)
+		// but prints no marker — the state did not move, and a marker
+		// claiming a record that was deduped would be a lie.
+		known, changed := tabs.NavDeclare(id, req.TitleString())
+		if !known {
+			return false
+		}
+		if !changed {
+			return true
+		}
+		vi.ConsoleLine(MarkerNavDeclare + vi.Itoa64(int64(id)) + " path=" + req.TitleString())
+		return true
+	case vi.WmRpcKindNavPoll: // 10, client -> seat: give me my back/forward
+		path, ok := navPoll(id)
+		if !ok {
+			// Nothing queued: applied=0, and NO marker. The client reads
+			// the empty ack as "no target", which is the honest answer.
+			return false
+		}
+		rpcReplyPayload = path
+		vi.ConsoleLine(MarkerNavPoll + vi.Itoa64(int64(id)) + " path=" + path)
+		return true
 	case vi.WmRpcKindSetTitle: // 11, client -> seat
 		title := req.TitleString()
 		if !tabs.SetTitle(id, title) {
@@ -203,17 +283,19 @@ func applyRPC(req vi.WmRpc) bool {
 // id/seq and carries the applied flag plus the reply bit, exactly like TABWM's
 // wnd_mail_reply, so an unmodified app accepts it.
 func replyRPC(req vi.WmRpc, applied bool) {
-	// The title carries the nav-poll payload in TABWM; the paths this card
-	// exercises carry none, so the ack's title stays zeroed (buildReply).
+	// M79e (#1708): the title carries the nav-poll payload, the same
+	// channel TABWM uses (Zig's rpc_reply_payload). takeReplyPayload is
+	// consume-on-use, so only the nav-poll reply carries a path and the
+	// next ack is zeroed again.
 	if req.ReplyTo != 0 {
-		_ = vi.IpcSend(uint32(req.ReplyTo), buildReply(req, applied).Encode())
+		_ = vi.IpcSend(uint32(req.ReplyTo), buildReply(req, applied, takeReplyPayload()).Encode())
 	}
 }
 
 // buildReply is the pure half of replyRPC: the ack frame for one request. Split
-// out so the host test pins the wire (reply bit, mirrored id/seq, applied flag)
-// without a guest.
-func buildReply(req vi.WmRpc, applied bool) vi.WmRpc {
+// out so the host test pins the wire (reply bit, mirrored id/seq, applied flag,
+// and the nav-poll title payload) without a guest.
+func buildReply(req vi.WmRpc, applied bool, payload string) vi.WmRpc {
 	var rep vi.WmRpc
 	rep.Kind = req.Kind | vi.WmRpcReplyFlag
 	rep.ID = req.ID
@@ -221,6 +303,15 @@ func buildReply(req vi.WmRpc, applied bool) vi.WmRpc {
 	rep.ReplyTo = req.ReplyTo
 	if applied {
 		rep.Applied = 1
+		// Only an applied ack carries a payload: a refused poll must not
+		// hand the client a path it was not given.
+		if payload != "" {
+			n := len(payload)
+			if n > len(rep.Title) {
+				n = len(rep.Title)
+			}
+			copy(rep.Title[:], payload[:n])
+		}
 	}
 	return rep
 }

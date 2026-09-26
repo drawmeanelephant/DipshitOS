@@ -27,6 +27,12 @@
 #       the sash 640 -> 800 with the 6 px gutter; the run ends at its own rx
 #       marker, so the choreography never fires and LAYOUT.txt keeps the
 #       sash geometry.
+#   08  M79e (#1708): GOFILES.ELF as the nav adopter. The app declares its
+#       start path, descends one directory (a second declare), the user
+#       presses ctrl-shift-[, the seat queues the older path and hands it
+#       back on the app's nav-poll — the client marker `gofiles: nav back
+#       to` is the proof the round trip closed over the real wire. This is
+#       the first run where a HOSTED Go app drives the kinds 9/10 seam.
 #
 # Seed wm=none and exec GOTABWM.ELF like go-wm-seat. No HID. No framebuffer
 # golden. Do not overload go-wm-seat or go-wm-default. Boot 01 `reorder 0->1`
@@ -42,6 +48,7 @@
 #   bash tools/go/build-goedit.sh    ->  .build/go/GOEDIT.ELF
 #   bash tools/go/build-gocalc.sh    ->  .build/go/GOCALC.ELF
 #   bash tools/go/build-goterm.sh    ->  .build/go/GOTERM.ELF
+#   bash tools/go/build-files.sh     ->  .build/go/GOFILES.ELF   (run 08)
 #
 # exec-order: assert-proven -- each run ends on a marker only its script
 # prints (`rx-gotabwm-tabs-ok` / `rx-gotabwm-session-ok` / `rx-gotabwm-apps-ok`).
@@ -197,6 +204,29 @@ if not os.path.exists(src):
              "bash tools/go/build-note.sh")
 shutil.copy(src, os.path.join(share, "NOTE.ELF"))
 print("staged NOTE.ELF into share (%d bytes)" % os.path.getsize(os.path.join(share, "NOTE.ELF")))
+PY
+
+vgate_setup_python <<'PY'
+import os, shutil, sys
+rd = os.environ["RUN_DIR"]
+share = os.environ.get("VG_SHARE") or os.path.join(rd, "share")
+src = os.path.join(".build", "go", "GOFILES.ELF")
+if not os.path.exists(src):
+    sys.exit("GOFILES.ELF missing (expected " + src + ") - build it first: "
+             "bash tools/go/build-files.sh")
+shutil.copy(src, os.path.join(share, "GOFILES.ELF"))
+# M79e (#1708): the nav fixture. GOFILES takes its start path from argv, so
+# run 08 starts it at /host/NAV, and NAV holds EXACTLY ONE entry which is a
+# directory. That makes the first Return deterministic: entry 0 is SUBDIR, so
+# the app descends to /host/NAV/SUBDIR without the gate having to know how the
+# share sorts. Two declared paths, which is the minimum a back-step needs.
+nav = os.path.join(share, "NAV")
+sub = os.path.join(nav, "SUBDIR")
+os.makedirs(sub, exist_ok=True)
+with open(os.path.join(sub, "INNER.TXT"), "w") as f:
+    f.write("inner\n")
+print("staged GOFILES.ELF (%d bytes) + %s/INNER.TXT" %
+      (os.path.getsize(os.path.join(share, "GOFILES.ELF")), sub))
 PY
 
 vgate_run 01 -- \
@@ -1068,3 +1098,137 @@ PY
 vgate_assert 07 serial-contains 'rx-gotabwm-sash-ok'
 vgate_assert 07 serial-absent '[EXC] parking:'
 vgate_assert 07 serial-absent 'exited status=139'
+# --- M79e (#1708): the nav round trip, over the real wire -------------------
+# GOFILES.ELF is the adopter: it declares a nav on every directory change and
+# polls the seat for a back/forward target. Two declares give the history
+# something to step back through, and the Ctrl+Shift+[ chord is the seat-side
+# affordance (M48/BT5's own binding).
+#
+# The two strokes are DELIBERATELY in two stages, each gated on a marker the
+# app prints. The cv-input transport paces chords at a fixed 0.25 s and the
+# guest tick is ~1 s on VZ, so a single 'return,ctrl-shift-[' batch could
+# deliver the chord BEFORE the seat had processed the declare it depends on —
+# a race that would make the gate intermittently green. Gating the chord on
+# `gofiles: nav declare` is the same discipline the other runs use: the stage
+# gate waits on guest output, never on the script's own echo.
+#
+# exec-order: assert-proven -- the run ends on `rx-gotabwm-nav-ok`, which only
+# script3 prints, and script3 is held behind `gofiles: nav back to`, a marker
+# only the hosted app can print (so a broken round trip fails the run rather
+# than being skipped).
+vgate_file script-08.txt <<'EOF'
+set GOMAXPROCS=1
+wm
+exec GOTABWM.ELF
+EOF
+
+vgate_file script2-08.txt <<'EOF'
+dui focus 0
+exec GOFILES.ELF /host/NAV
+EOF
+
+vgate_file script3-08.txt <<'EOF'
+wm
+dui
+echo rx-gotabwm-nav-ok
+EOF
+
+vgate_run 08 -- \
+    --screen '$RUN_DIR/screen-08' \
+    --via-virtio \
+    --script '$RUN_DIR/script-08.txt' \
+    --script2 '$RUN_DIR/script2-08.txt' \
+    --script2-after 'gotabwm: win focus' \
+    --input-string $'\n' \
+    --input-string-after 'gofiles: ready' \
+    --input-chords 'ctrl-shift-[' \
+    --input-chords-after 'gofiles: nav declare /host/NAV/SUBDIR' \
+    --script3 '$RUN_DIR/script3-08.txt' \
+    --script3-after 'gofiles: nav back to /host/NAV' \
+    --script-expect 'rx-gotabwm-nav-ok' --timeout 300
+
+vgate_assert 08 serial-contains 'VirelaiOS kernel has seized control.'
+vgate_assert 08 serial-contains 'exec: loaded GOTABWM.ELF'
+vgate_assert 08 serial-contains 'gotabwm: registered'
+vgate_assert 08 serial-contains 'exec: loaded GOFILES.ELF'
+vgate_assert 08 serial-contains 'gofiles: declare accepted'
+# The client's first declare: the app's start path, announced once the model
+# exists (never before).
+vgate_assert 08 serial-contains 'gofiles: nav declare /host/NAV'
+# The descent: the Return the gate typed opened the one directory in NAV.
+vgate_assert 08 serial-contains 'gofiles: cd /host/NAV/SUBDIR'
+vgate_assert 08 serial-contains 'gofiles: nav declare /host/NAV/SUBDIR'
+# The SEAT's half. Both markers are printed only after the state moved: the
+# declare reached the per-tab history, and the chord queued a target.
+vgate_assert 08 serial-contains 'gotabwm: nav declare id='
+vgate_assert 08 serial-contains 'gotabwm: nav back id='
+vgate_assert 08 serial-contains 'gotabwm: nav poll id='
+# The client half: the app received a path and ACTED on it. This marker is
+# the proof the round trip closed, because it can only print after the app
+# read a path out of the ack title.
+vgate_assert 08 serial-contains 'gofiles: nav back to /host/NAV'
+vgate_assert 08 serial-contains 'rx-gotabwm-nav-ok'
+vgate_assert 08 serial-absent '\[EXC\]'
+vgate_assert 08 serial-absent '[EXC] parking:'
+
+# The round trip itself, as an ordering + payload-identity check. The seat's
+# back target MUST be byte-identical to the path the client first declared —
+# that is the whole claim of the card: a path declared by the app comes back
+# to the same app through the ack title. Also pinned: a deduped re-declare
+# must not print, so exactly two seat-side nav declares exist.
+vgate_assert 08 python <<'PY'
+import os, re
+ser = open(os.environ["VG_SER"], errors="replace").read()
+
+first = re.search(r"gofiles: nav declare (/host/NAV)\b", ser)
+assert first, "the client never declared its start path"
+p0 = first.group(1)
+
+second = re.search(r"gofiles: nav declare (/host/NAV/SUBDIR)\b", ser)
+assert second, "the client never declared the descended path"
+p1 = second.group(1)
+assert p0 != p1, "both declares carry the same path; there is no history to step"
+
+# The seat recorded the descended path (kind 9 reached applyRPC) and queued
+# the older one for the chord.
+seat_rec = re.search(r"gotabwm: nav declare id=(\d+) path=" + re.escape(p1), ser)
+assert seat_rec, "the seat never recorded the client's declare (kind 9 arm)"
+wid = seat_rec.group(1)
+
+back = re.search(r"gotabwm: nav back id=(\d+) path=(\S+)", ser)
+assert back, "the chord did not queue a back target"
+assert back.group(1) == wid, "the chord queued for a different window (%s vs %s)" % (back.group(1), wid)
+assert back.group(2) == p0, "back target %r is not the path the client declared (%r)" % (back.group(2), p0)
+
+# The poll arm answered, with the SAME path, in the ack.
+poll = re.search(r"gotabwm: nav poll id=(\d+) path=(\S+)", ser)
+assert poll, "the poll arm (kind 10) never answered"
+assert poll.group(1) == wid, "the poll answered for a different window"
+assert poll.group(2) == p0, "the poll handed back %r, want %r" % (poll.group(2), p0)
+
+# And the client acted on it.
+back_to = ser.find("gofiles: nav back to " + p0)
+assert back_to >= 0, "the client never received the target"
+
+# Ordering: nothing may be answered before it was asked.
+i_start = ser.find("gofiles: nav declare " + p0)
+i_cd = ser.find("gofiles: cd " + p1)
+i_rec = ser.find(seat_rec.group(0))
+i_back = ser.find(back.group(0))
+i_poll = ser.find(poll.group(0))
+for name, i in (("start declare", i_start), ("cd", i_cd), ("seat record", i_rec),
+                ("chord back", i_back), ("poll answer", i_poll), ("client act", back_to)):
+    assert i >= 0, "%s marker missing" % name
+assert i_start < i_cd < i_rec < i_back < i_poll < back_to, (
+    "nav chain out of order: start=%d cd=%d record=%d back=%d poll=%d act=%d"
+    % (i_start, i_cd, i_rec, i_back, i_poll, back_to))
+
+# Exactly TWO seat-side declares: the app's initial path plus the descent.
+# A third would mean a re-declare of the current path was recorded instead of
+# deduped (the seat's consecutive-dedupe rule).
+n_decl = len(re.findall(r"gotabwm: nav declare id=", ser))
+assert n_decl == 2, "expected exactly 2 seat-side nav declares, saw %d" % n_decl
+
+print("M79e nav round trip OK: %s -> %s -> back to %s, window id=%s, "
+      "exactly %d declares (dedupe held)" % (p0, p1, p0, wid, n_decl))
+PY

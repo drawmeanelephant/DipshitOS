@@ -52,6 +52,16 @@ type Tab struct {
 	Title  string
 	Bin    string // `.tabs` v2 bin field (guessBin from the declared title)
 	Pinned bool   // FlagPinned (0x01); pinned tabs sit at the left of the rail
+	// M79e (#1708): the per-tab navigation history (M48/BT5). Zig keeps
+	// `hist` INSIDE Tab for the same reason this does: a reorder or a
+	// close moves the Tab value and the history travels with it for free,
+	// so there is no parallel index that can drift out of step with the
+	// strip. Fixed byte arrays, never strings — D2: the ring is BSS with
+	// no per-entry heap.
+	navHist  [navHistMax][navPathMax]byte
+	navLen   [navHistMax]int
+	navCount int
+	navPos   int
 	// Frozen is FlagFrozen (0x02). M71e (#1564): Zig's BT6 frozen is a
 	// STATUS BADGE (docs/march-m39-tabbed-desktop.md labels it "a frozen
 	// status badge (Ctrl+Shift+F)", and tabwm.zig's field comment calls it
@@ -129,6 +139,26 @@ const (
 	// divider centres in scanout px. Printed only after both SET_WINDOW
 	// calls returned, like the split markers.
 	MarkerSash = "gotabwm: sash "
+	// M79e (#1708): the per-tab nav seam. `declare`/`poll` are the two RPC
+	// arms (kinds 9/10); `back`/`forward` are the Ctrl+Shift+[ / ]
+	// affordance. All four print only after the state actually moved —
+	// a deduped declare, an exhausted step, and an empty poll are silent,
+	// exactly as Zig's nav_declare returns early on a no-op record.
+	MarkerNavDeclare = "gotabwm: nav declare id="
+	MarkerNavPoll    = "gotabwm: nav poll id="
+	MarkerNavBack    = "gotabwm: nav back id="
+	MarkerNavForward = "gotabwm: nav forward id="
+)
+
+// M79e (#1708): the nav-history bounds, taken from Zig's tabwm rather than
+// invented. navHistMax is `hist_max`; navPathMax is `hist_path_max`, which
+// is not a free choice — it is the WM_RPC title field, the only channel a
+// declared path and a polled target can travel in. A path longer than the
+// field is truncated at the wire, so the seat records what the client can
+// actually get back.
+const (
+	navHistMax = 8
+	navPathMax = 24
 )
 
 // FlagPinned / FlagFrozen are `.tabs` v2 bits 0 and 1 — the same values as
@@ -279,6 +309,125 @@ func (s *TabStrip) SetTitle(id uint32, title string) bool {
 	return true
 }
 
+// --- M79e (#1708): per-tab navigation history (M48/BT5) --------------------
+//
+// A line-for-line mirror of Zig tabwm.Tab.nav_record / nav_back /
+// nav_forward, including the two rules that are easy to get subtly wrong:
+// a declare DROPS the forward stack (you navigated somewhere new, so the
+// old forward entries are no longer reachable), and a declare at the cap
+// evicts the OLDEST entry rather than refusing.
+
+// navEntry is the recorded path at slot i, NUL-trimmed to its length.
+func (t *Tab) navEntry(i int) string {
+	return string(t.navHist[i][:t.navLen[i]])
+}
+
+// navSet stores path at slot i, truncated to the wire's title field.
+func (t *Tab) navSet(i int, path string) {
+	n := len(path)
+	if n > navPathMax {
+		n = navPathMax
+	}
+	copy(t.navHist[i][:], path[:n])
+	t.navLen[i] = n
+}
+
+// navRecord appends a declared path. False means NOTHING changed: an
+// empty path, or a re-declaration of the current entry (consecutive
+// dedupe, so a repaint that re-declares does not grow the history).
+func (t *Tab) navRecord(path string) bool {
+	if path == "" {
+		return false
+	}
+	if t.navCount > 0 && t.navEntry(t.navPos) == path {
+		return false
+	}
+	// Drop the forward stack: the entry after navPos was the next append
+	// slot, and everything past it is unreachable now.
+	if t.navCount != 0 {
+		t.navCount = t.navPos + 1
+	}
+	// At the cap, shift down one and drop the oldest. navLen shifts WITH
+	// navHist — they are parallel arrays, and a path copied without its
+	// length would read as trailing NULs from a stale entry.
+	if t.navCount == navHistMax {
+		for i := 1; i < navHistMax; i++ {
+			t.navHist[i-1] = t.navHist[i]
+			t.navLen[i-1] = t.navLen[i]
+		}
+		t.navCount = navHistMax - 1
+	}
+	t.navSet(t.navCount, path)
+	t.navCount++
+	t.navPos = t.navCount - 1
+	return true
+}
+
+// canNavBack / canNavForward: navPos is the CURRENT entry, so back needs a
+// previous one and forward needs a following one.
+func (t *Tab) canNavBack() bool    { return t.navCount > 0 && t.navPos > 0 }
+func (t *Tab) canNavForward() bool { return t.navPos+1 < t.navCount }
+
+// navBack steps the cursor back one entry and returns the new current path.
+// False when there is nothing behind the cursor.
+func (t *Tab) navBack() (string, bool) {
+	if !t.canNavBack() {
+		return "", false
+	}
+	t.navPos--
+	return t.navEntry(t.navPos), true
+}
+
+// navForward steps the cursor forward one entry. False at the newest entry.
+func (t *Tab) navForward() (string, bool) {
+	if !t.canNavForward() {
+		return "", false
+	}
+	t.navPos++
+	return t.navEntry(t.navPos), true
+}
+
+// NavDeclare records an app-declared navigation for id. False when the tab
+// is not on the strip (Zig's `manager.find_by_id(id) orelse return false`).
+// The caller must distinguish "no such tab" from "recorded but
+// deduped": only the latter is a state change worth a marker.
+func (s *TabStrip) NavDeclare(id uint32, path string) (known, changed bool) {
+	i := s.index(id)
+	if i < 0 {
+		return false, false
+	}
+	return true, s.tabs[i].navRecord(path)
+}
+
+// NavBack / NavForward step id's history. Both return the target path the
+// app must navigate to, ready to be queued and handed back on its poll.
+func (s *TabStrip) NavBack(id uint32) (string, bool) {
+	i := s.index(id)
+	if i < 0 {
+		return "", false
+	}
+	return s.tabs[i].navBack()
+}
+
+func (s *TabStrip) NavForward(id uint32) (string, bool) {
+	i := s.index(id)
+	if i < 0 {
+		return "", false
+	}
+	return s.tabs[i].navForward()
+}
+
+// NavDepth is the recorded entry count for id (0 when the tab is unknown).
+// Exported for the host test that pins the bound, and for any future rail
+// affordance that wants to grey out a back button at depth 1.
+func (s *TabStrip) NavDepth(id uint32) int {
+	i := s.index(id)
+	if i < 0 {
+		return 0
+	}
+	return s.tabs[i].navCount
+}
+
 // CloseTab removes id. If it was focused, focus moves to the neighbour
 // that occupies its slot after the shift (or the new last tab). Closing
 // the last tab leaves the strip empty with no focus. Returns whether id
@@ -293,6 +442,11 @@ func (s *TabStrip) CloseTab(id uint32) bool {
 	// the same close decision point, so every close path (HID, RPC detach,
 	// choreography) feeds the ring through this one seam.
 	s.recordClosed(s.tabs[i])
+	// M79e (#1708): a queued back/forward target dies with its tab. Every
+	// close path (HID, RPC detach, choreography) funnels through here, so
+	// this is the one place the pending slot has to be cleared — otherwise
+	// a later window reusing the id polls and gets a dead tab's path.
+	clearPendingNav(id)
 	for j := i; j+1 < s.count; j++ {
 		s.tabs[j] = s.tabs[j+1]
 	}

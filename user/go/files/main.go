@@ -119,7 +119,14 @@ func main() {
 	vi.ConsoleLine(markerPainted)
 	flush(&m)
 	vi.ConsoleLine(markerPresent)
+	// M79e (#1708): announce where this tab starts. Without a first
+	// declare the seat has no history and a back-step has nowhere to go.
+	// Declared AFTER the model exists, so the path is the real one; the
+	// marker follows the request, not the intent.
+	ta.DeclareNav(m.path)
+	vi.ConsoleLine(markerNavDeclare + m.path)
 	vi.ConsoleLine(markerReady)
+	declared := m.path
 
 	var in [64]byte
 	for {
@@ -165,10 +172,51 @@ func main() {
 			}
 		}
 
+		// M79e (#1708): a directory change is a navigation, so tell the
+		// seat. Only on a CHANGE: a re-declare of the current path is
+		// deduped seat-side anyway, and a marker per repaint would claim
+		// navigations that never happened.
+		if m.path != declared {
+			ta.DeclareNav(m.path)
+			vi.ConsoleLine(markerNavDeclare + m.path)
+			declared = m.path
+		}
+
 		if !progress {
+			// M79e (#1708): poll the seat for a back/forward target the
+			// user queued with Ctrl+Shift+[ / ]. This sits in the IDLE
+			// branch on purpose: every poll is a mailbox round trip, and
+			// while the user is typing there is nothing queued that a
+			// keypress did not just cause. With an empty queue the seat
+			// answers applied=0 immediately, so this costs one probe and
+			// never a parked tick.
+			if p, ok := ta.PollNav(); ok && navGoto(&m, p) {
+				if !paint(fd, m) {
+					shutdown(ta, fd, 4)
+				}
+				flush(&m)
+				vi.ConsoleLine(markerNavBack + p)
+			}
 			vi.Sleep(1)
 		}
 	}
+}
+
+// navGoto is the nav-poll arrival path (M79e #1708): the user pressed
+// back/forward and the seat handed us a path. It takes exactly the three
+// steps openSel/goUp take, so a back-step is indistinguishable from a manual
+// cd in this app's own log — the same `gofiles: cd` marker, the same
+// listing refresh. A target equal to the current path is a no-op, which is
+// what keeps a stale queued target from re-listing the same directory.
+func navGoto(m *model, path string) bool {
+	if path == "" || path == m.path {
+		return false
+	}
+	m.path = path
+	m.sel = 0
+	m.emit(markerCd + m.path)
+	m.refresh()
+	return true
 }
 
 // mouseTail holds an unterminated SGR report across reads (the kernel
