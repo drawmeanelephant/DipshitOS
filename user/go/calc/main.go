@@ -242,27 +242,11 @@ func (a *app) doBackspace() bool {
 	return true
 }
 
+// writeResult publishes the result line crash-safe (M81e #1765): one
+// temp+fsync+delete-then-rename publish, so the result file is either the old
+// line or the new one — never the tail of a torn write.
 func (a *app) writeResult(line string) bool {
-	h, rc := vi.FileOpen(a.path, vi.ModeWrite|vi.ModeCreate)
-	if rc < 0 {
-		return false
-	}
-	body := []byte(line + "\n")
-	written := 0
-	for written < len(body) {
-		n, wrc := vi.FileWrite(uint32(h), body[written:])
-		if wrc < 0 || n <= 0 {
-			vi.FileClose(uint32(h))
-			return false
-		}
-		written += n
-	}
-	if trc := vi.FileTruncate(uint32(h), uint32(written)); trc < 0 {
-		vi.FileClose(uint32(h))
-		return false
-	}
-	vi.FileClose(uint32(h))
-	return true
+	return vi.WriteFileSafe(a.path, []byte(line+"\n")) >= 0
 }
 
 func (a *app) layout() {

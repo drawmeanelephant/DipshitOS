@@ -655,7 +655,14 @@ func WriteFileSafe(path string, b []byte) int64 {
 	if path == "" {
 		return -ErrEINVAL
 	}
-	tmp := path + ".tmp"
+	// The temp is a ONE-byte sibling, not "path.tmp": the kernel's file
+	// table refuses any path longer than max_path_len (64, file_table.zig),
+	// so a four-byte suffix made the safe publish IMPOSSIBLE for deep
+	// paths — git's loose objects are "/host/G/.git/objects/ab/" + 38 hex
+	// = 61 bytes, and 61 + 4 is one over the cap. A one-byte suffix leaves
+	// that publish at 62. A path already AT the cap still cannot be
+	// published; the caller gets the kernel's honest EINVAL.
+	tmp := path + "~"
 	h, r := FileOpen(tmp, ModeWrite|ModeCreate)
 	if r < 0 {
 		return r

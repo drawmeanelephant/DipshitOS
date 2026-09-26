@@ -99,7 +99,8 @@ func (f *fakeFS) syscalls() *syscalls {
 			delete(f.handles, int64(h))
 			delete(f.hflags, int64(h))
 		},
-		win: f.windowSeam(),
+		writeSafe: f.writeSafe,
+		win:       f.windowSeam(),
 	}
 }
 
@@ -349,8 +350,9 @@ const wantReport = "case intake pass\ncase intake-altered pass\n" +
 	"case file-roundtrip pass\ncase file-truncate pass\n" +
 	"case file-delete pass\ncase file-list pass\n" +
 	"case file-append pass\ncase file-bigwrite pass\ncase file-clamp pass\n" +
-	"case file-fsync pass\ncase file-errors pass\ncase window pass\n" +
-	"summary cases=14 failed=0\n"
+	"case file-fsync pass\ncase file-errors pass\n" +
+	"case file-write-safe pass\ncase window pass\n" +
+	"summary cases=15 failed=0\n"
 
 // seedFixtures is the host's half of the intake contract: IN/fixture.txt holds
 // the canonical body, IN/altered.txt the altered one (ADR 0031 D2).
@@ -364,8 +366,8 @@ func TestRunCasesAllPassAndReportBytes(t *testing.T) {
 	seedFixtures(fs)
 	rs := runCases(fs.syscalls())
 
-	if len(rs) != 14 {
-		t.Fatalf("cases = %d, want 14", len(rs))
+	if len(rs) != 15 {
+		t.Fatalf("cases = %d, want 15", len(rs))
 	}
 	for _, r := range rs {
 		if !r.ok {
@@ -375,7 +377,7 @@ func TestRunCasesAllPassAndReportBytes(t *testing.T) {
 	if got := string(renderReport(rs)); got != wantReport {
 		t.Fatalf("report bytes:\n got %q\nwant %q", got, wantReport)
 	}
-	if got := string(renderSummary(rs)); got != "summary cases=14 failed=0\n" {
+	if got := string(renderSummary(rs)); got != "summary cases=15 failed=0\n" {
 		t.Fatalf("summary = %q", got)
 	}
 	if got := fs.files[helloPath]; !bytes.Equal(got, []byte(helloPayload)) {
@@ -437,7 +439,7 @@ func TestIntakeFailsOnAMutatedSeed(t *testing.T) {
 	if !strings.Contains(report, "case intake fail fixture mismatch") {
 		t.Fatalf("report lacks the intake failure: %q", report)
 	}
-	if !strings.Contains(report, "summary cases=14 failed=2") {
+	if !strings.Contains(report, "summary cases=15 failed=2") {
 		t.Fatalf("report summary wrong: %q", report)
 	}
 	if got := fs.files[intakeCopy]; !bytes.Equal(got, []byte(intakeAltered)) {
@@ -467,7 +469,7 @@ func TestIntakeFailsWhenTheFixtureIsMissing(t *testing.T) {
 	// The report is still complete: 14 cases, the 2 intake ones failed (the
 	// clock, file and window cases do not read IN/).
 	report := string(renderReport(rs))
-	if !strings.Contains(report, "summary cases=14 failed=2") {
+	if !strings.Contains(report, "summary cases=15 failed=2") {
 		t.Fatalf("report summary wrong: %q", report)
 	}
 	if lines := strings.Count(report, "\n"); lines != len(rs)+1 {
@@ -490,8 +492,8 @@ func TestWindowReceiptCarriesTheKernelsGeometry(t *testing.T) {
 	fs := newFakeFS()
 	seedFixtures(fs)
 	rs := runCases(fs.syscalls())
-	if !rs[13].ok || rs[13].id != "window" {
-		t.Fatalf("window should have passed, got %+v", rs[13])
+	if !rs[14].ok || rs[14].id != "window" {
+		t.Fatalf("window should have passed, got %+v", rs[14])
 	}
 	wantLine := "case window win=2 w=1100 h=720 present=ok\n"
 	if got := string(fs.files[windowReceipt]); got != wantLine {
@@ -511,8 +513,8 @@ func TestWindowReceiptFollowsTheQueryWhereverItPoints(t *testing.T) {
 	seedFixtures(fs)
 	fs.winGeometry = [8]uint32{32, 32, winReqW, winReqH, 0, 1, 1, 0}
 	rs := runCases(fs.syscalls())
-	if !rs[13].ok {
-		t.Fatalf("window should have passed, got %+v", rs[13])
+	if !rs[14].ok {
+		t.Fatalf("window should have passed, got %+v", rs[14])
 	}
 	wantLine := "case window win=2 w=640 h=400 present=ok\n"
 	if got := string(fs.files[windowReceipt]); got != wantLine {
@@ -527,11 +529,11 @@ func TestWindowFailsWithoutAWindow(t *testing.T) {
 	seedFixtures(fs)
 	fs.winID = -1
 	rs := runCases(fs.syscalls())
-	if rs[13].ok {
-		t.Fatalf("window passed with no window, got %+v", rs[13])
+	if rs[14].ok {
+		t.Fatalf("window passed with no window, got %+v", rs[14])
 	}
-	if !strings.Contains(rs[13].detail, "no window") {
-		t.Fatalf("detail = %q", rs[13].detail)
+	if !strings.Contains(rs[14].detail, "no window") {
+		t.Fatalf("detail = %q", rs[14].detail)
 	}
 	if _, ok := fs.files[windowReceipt]; ok {
 		t.Fatal("a window-less run still wrote a receipt")
@@ -554,11 +556,11 @@ func TestWindowNamesEachRefusal(t *testing.T) {
 			seedFixtures(fs)
 			tc.break_(fs)
 			rs := runCases(fs.syscalls())
-			if rs[13].ok {
-				t.Fatalf("window passed with %s refused, got %+v", tc.name, rs[13])
+			if rs[14].ok {
+				t.Fatalf("window passed with %s refused, got %+v", tc.name, rs[14])
 			}
-			if !strings.Contains(rs[13].detail, tc.want) {
-				t.Fatalf("detail = %q, want %q", rs[13].detail, tc.want)
+			if !strings.Contains(rs[14].detail, tc.want) {
+				t.Fatalf("detail = %q, want %q", rs[14].detail, tc.want)
 			}
 		})
 	}
@@ -571,11 +573,11 @@ func TestWindowCatchesAnEmptyWindow(t *testing.T) {
 	seedFixtures(fs)
 	fs.winGeometry = [8]uint32{0, 0, 0, 0, 0, 1, 1, 0}
 	rs := runCases(fs.syscalls())
-	if rs[13].ok {
-		t.Fatalf("window passed on an empty window, got %+v", rs[13])
+	if rs[14].ok {
+		t.Fatalf("window passed on an empty window, got %+v", rs[14])
 	}
-	if !strings.Contains(rs[13].detail, "query reports an empty window: 0x0") {
-		t.Fatalf("detail = %q", rs[13].detail)
+	if !strings.Contains(rs[14].detail, "query reports an empty window: 0x0") {
+		t.Fatalf("detail = %q", rs[14].detail)
 	}
 	// The receipt still holds what was measured, so the host sees the zeros.
 	if got := string(fs.files[windowReceipt]); got != "case window win=2 w=0 h=0 present=ok\n" {
@@ -664,7 +666,7 @@ func TestFileWriteCaseFailsWhenTheWriteIsRefused(t *testing.T) {
 	if !strings.Contains(report, "case file-write fail ") {
 		t.Fatalf("report lacks the fail detail: %q", report)
 	}
-	if !strings.Contains(report, "summary cases=14 failed=1") {
+	if !strings.Contains(report, "summary cases=15 failed=1") {
 		t.Fatalf("report summary wrong: %q", report)
 	}
 }
@@ -1199,4 +1201,87 @@ func TestEveryM66aCaseWritesAReceipt(t *testing.T) {
 			t.Fatalf("receipt %s = %q, want one 'case …' line", path, line)
 		}
 	}
+}
+
+// fakeWriteSafe models vi.WriteFileSafe's ORDER — temp, fsync, delete target,
+// rename — so a case that depends on the sequence is testable without the
+// kernel. The knobs fail the same way the real publish does: a refused write
+// or a refused fsync leaves the target as it was (vi.WriteFileSafe removes the
+// temp on every failure and never touches the live file before the rename).
+func (f *fakeFS) writeSafe(path string, b []byte) int64 {
+	tmp := path + "~"
+	if f.denyWrite || (f.denyPath != "" && (f.denyPath == path || f.denyPath == tmp)) {
+		return -2
+	}
+	f.files[tmp] = append([]byte(nil), b...)
+	if f.failSync {
+		delete(f.files, tmp)
+		return -1
+	}
+	f.files[path] = f.files[tmp]
+	delete(f.files, tmp)
+	return 0
+}
+
+// M81e (#1765): a shorter publish leaves no tail, the temp does not survive,
+// and the bytes the host compares are the bytes the case published.
+func TestFileWriteSafeReplacesWholeAndLeavesNoTemp(t *testing.T) {
+	fs := newFakeFS()
+	seedFixtures(fs)
+	rs := runCases(fs.syscalls())
+	var r result
+	idx := -1
+	for i, c := range rs {
+		if c.id == "file-write-safe" {
+			r, idx = c, i
+		}
+	}
+	if idx < 0 || !r.ok {
+		t.Fatalf("file-write-safe should have passed, got %+v", r)
+	}
+	if idx != 13 {
+		t.Fatalf("file-write-safe is case %d, want 13 (before window)", idx)
+	}
+	short := writeSafeShort()
+	if got := fs.files[writeSafeCopy]; !bytes.Equal(got, short) {
+		t.Fatalf("write-safe.copy = %d B, want the %d B short body", len(got), len(short))
+	}
+	if got := fs.files[writeSafePath]; !bytes.Equal(got, short) {
+		t.Fatalf("write-safe.txt = %d B, want the %d B short body (no tail)", len(got), len(short))
+	}
+	if _, ok := fs.files[writeSafeTmp]; ok {
+		t.Fatalf("the sacrificial temp %s survived the publish", writeSafeTmp)
+	}
+	want := "case file-write-safe path=OUT/write-safe.txt long=840 short=105 bytes=105 tail=none orphan=none match=yes\n"
+	if got := string(fs.files[writeSafeOk]); got != want {
+		t.Fatalf("write-safe receipt = %q, want %q", got, want)
+	}
+}
+
+// A refused publish is loud and leaves the PREVIOUS file alone: that is the
+// property an in-place writer cannot offer — its live file is already
+// truncated by the time anything can fail.
+func TestFileWriteSafeFailureKeepsTheOldBody(t *testing.T) {
+	fs := newFakeFS()
+	seedFixtures(fs)
+	fs.failSync = true
+	rs := runCases(fs.syscalls())
+	for _, c := range rs {
+		if c.id == "file-write-safe" {
+			if c.ok {
+				t.Fatalf("file-write-safe passed with a refused fsync, got %+v", c)
+			}
+			if !strings.Contains(c.detail, "publish rc=-1") {
+				t.Fatalf("detail = %q, want the refused publish named", c.detail)
+			}
+			if _, ok := fs.files[writeSafePath]; ok {
+				t.Fatalf("a refused publish left %s behind", writeSafePath)
+			}
+			if _, ok := fs.files[writeSafeTmp]; ok {
+				t.Fatalf("a refused publish left the temp %s behind", writeSafeTmp)
+			}
+			return
+		}
+	}
+	t.Fatal("file-write-safe did not run")
 }

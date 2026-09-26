@@ -92,20 +92,13 @@ func ledgerAppend(path, schema, row string) bool {
 
 // writeFileAll replaces a file's contents (open, truncate, write) — the
 // compaction half of delete/clear.
+// writeFileAll replaces a store's contents crash-safe (M81e #1765) — the
+// compaction half of delete/clear. vi.WriteFileSafe publishes via a
+// sacrificial temp (fsync before close, then delete-then-rename), so a crash
+// mid-compaction leaves the OLD ledger or none, never a half-written row. The
+// empty body still publishes an empty file: that is what clear means.
 func writeFileAll(path string, b []byte) bool {
-	h, rc := vi.FileOpen(path, vi.ModeWrite|vi.ModeCreate)
-	if rc < 0 {
-		return false
-	}
-	defer vi.FileClose(uint32(h))
-	if vi.FileTruncate(uint32(h), 0) < 0 {
-		return false
-	}
-	if len(b) == 0 {
-		return true
-	}
-	_, wrc := vi.FileWrite(uint32(h), b)
-	return wrc >= 0
+	return vi.WriteFileSafe(path, b) >= 0
 }
 
 // ledgerRewrite replaces a store with schema + rows (delete/clear).

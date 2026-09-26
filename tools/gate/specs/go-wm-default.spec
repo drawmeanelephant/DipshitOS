@@ -382,13 +382,13 @@ vgate_assert 04 serial-absent 'exited status=139'
 # panel published (declared above). `share-equals` lifts the compared file
 # into evidence automatically.
 vgate_assert 04 share-equals SETTINGS.TXT settings-healed.expected
-# The publish consumed its temp: a crash-safe save leaves no SETTINGS.TXT.tmp
+# The publish consumed its temp: a crash-safe save leaves no SETTINGS.TXT~
 # on the share (the rename is the publish).
 vgate_assert 04 python <<'PY'
 import os, sys
 share = os.environ["VG_SHARE"]
-stale = os.path.join(share, "SETTINGS.TXT.tmp")
+stale = os.path.join(share, "SETTINGS.TXT~")
 if os.path.exists(stale):
-    sys.exit("SETTINGS.TXT.tmp survived the publish - the rename did not run")
-print("crash-safe publish left no SETTINGS.TXT.tmp on the share")
+    sys.exit("SETTINGS.TXT~ survived the publish - the rename did not run")
+print("crash-safe publish left no SETTINGS.TXT~ on the share")
 PY
