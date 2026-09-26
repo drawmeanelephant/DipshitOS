@@ -88,12 +88,33 @@ func TestOpenFileRefusesATypeNothingOpens(t *testing.T) {
 	}
 }
 
+// "Unreadable" is the answer, not "unknown": the share refused the read, and
+// sending the user hunting for a file type would send them the wrong way.
 func TestOpenFileRefusesAnUnreadableFile(t *testing.T) {
 	withUnreadable(t)
 	m := testModel(entry("LOCKED.TXT", false))
 	m.handleKey(keys.Event{Key: keys.KeyEnter})
-	if got := pendingJoined(&m); !strings.Contains(got, markerOpenNo+"LOCKED.TXT type=unknown") {
-		t.Fatalf("an unreadable file is unknown, not text: %q", got)
+	got := pendingJoined(&m)
+	if !strings.Contains(got, markerOpenNo+"LOCKED.TXT (unreadable)") {
+		t.Fatalf("an unreadable file must say so: %q", got)
+	}
+	if strings.Contains(got, "type=") {
+		t.Fatalf("an unreadable file has no type to report: %q", got)
+	}
+	if _, ok := m.takeLaunch(); ok {
+		t.Fatal("an unreadable file must not queue an exec")
+	}
+	if m.status != "LOCKED.TXT: unreadable" {
+		t.Fatalf("status = %q", m.status)
+	}
+	// `o` on the same file says the same thing and arms no list.
+	m2 := testModel(entry("LOCKED.TXT", false))
+	m2.handleKey(runeKey('o'))
+	if m2.mode == modeOpenWith {
+		t.Fatal("an unreadable file must not arm the candidate list")
+	}
+	if got := pendingJoined(&m2); !strings.Contains(got, markerOpenNo+"LOCKED.TXT (unreadable)") {
+		t.Fatalf("open-with on an unreadable file: %q", got)
 	}
 }
 

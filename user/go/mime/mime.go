@@ -61,16 +61,26 @@ func (id ID) String() string {
 }
 
 // HeadBytes is how much of a file a caller should read before Sniff. It is
-// the longest magic in the table plus room for the one offset rule (RIFF's
-// subtype at +8), rounded up — a peek, not a read of the file.
+// the furthest byte any rule in the table looks at (RIFF's subtype at +8,
+// four bytes, so byte 12), rounded up — a peek, not a read of the file.
 const HeadBytes = 16
 
-// magicRule matches `magic` at byte `off` of the peeked head. A zero `off` is
-// the common case (every format whose signature starts the file).
+// magicRule matches `magic` at byte `off` of the peeked head, AND `magic2` at
+// byte `off2` when magic2 is set. A zero `off`/`off2` is the common case (a
+// signature at the start of the file).
+//
+// The second half is not decoration. Magic outranks the extension, so a rule
+// has to be RIGHT or a text file that happens to start with it is dispatched
+// to the wrong app: "BM" is two bytes, and prose starts with it ("BMW…").
+// Requiring the rest of the signature — BMP's zero reserved fields, RIFF's
+// "RIFF" before a "WAVE"/"WEBP" subtype at +8 — is what makes the rule a
+// signature rather than a coincidence.
 type magicRule struct {
-	id    ID
-	off   int
-	magic string
+	id     ID
+	off    int
+	magic  string
+	off2   int
+	magic2 string
 }
 
 // magic is the FIRST stage of Sniff. Order inside the table does not matter
@@ -82,11 +92,16 @@ var magic = []magicRule{
 	{id: Image, magic: "GIF87a"},
 	{id: Image, magic: "GIF89a"},
 	{id: Image, magic: "\xff\xd8\xff"}, // JPEG
-	{id: Image, magic: "BM"},           // Windows bitmap
-	{id: Image, off: 8, magic: "WEBP"},
+	// Windows bitmap: "BM" alone is two bytes of prose, so the rule also
+	// requires the two reserved u16 fields to be zero (bitmap_core.h), which
+	// every writer leaves that way. Six bytes of evidence, not two.
+	{id: Image, magic: "BM", off2: 6, magic2: "\x00\x00\x00\x00"},
+	// The RIFF container: "RIFF" at 0 and the form type at +8. Matching the
+	// subtype alone would call any file with the word WAVE at byte 8 a sound.
+	{id: Image, magic: "RIFF", off2: 8, magic2: "WEBP"},
 
 	// Audio: enough to tell a sound file from an image of the same name.
-	{id: Audio, off: 8, magic: "WAVE"}, // RIFF container
+	{id: Audio, magic: "RIFF", off2: 8, magic2: "WAVE"},
 	{id: Audio, magic: "OggS"},
 	{id: Audio, magic: "fLaC"},
 	{id: Audio, magic: "ID3"},
@@ -136,14 +151,24 @@ func Sniff(name string, head []byte) ID {
 
 func byMagic(head []byte) (ID, bool) {
 	for _, r := range magic {
-		if len(head) < r.off+len(r.magic) {
+		if !at(head, r.off, r.magic) {
 			continue
 		}
-		if string(head[r.off:r.off+len(r.magic)]) == r.magic {
-			return r.id, true
+		if r.magic2 != "" && !at(head, r.off2, r.magic2) {
+			continue
 		}
+		return r.id, true
 	}
 	return Unknown, false
+}
+
+// at reports whether the bytes at off are exactly want. A rule that would read
+// past the peek simply does not match: an unreadable tail is not evidence.
+func at(head []byte, off int, want string) bool {
+	if off < 0 || len(head) < off+len(want) {
+		return false
+	}
+	return string(head[off:off+len(want)]) == want
 }
 
 // byExt resolves the extension case-insensitively. A name with no dot, or a
@@ -160,6 +185,13 @@ func byExt(name string) (ID, bool) {
 // looksText is the last honest resort: no magic, no known extension, and the
 // bytes carry no control noise. Valid UTF-8 counts as text (a NOTES.TXT with
 // an em dash is still text); a NUL byte never does.
+//
+// The trailing-rune trim is the part that matters at HeadBytes = 16. The peek
+// is a byte count, not a character count, so a multi-byte character can
+// straddle the cut: 15 ASCII bytes then a 2-byte em dash leaves half a rune,
+// and utf8.Valid calls that invalid — an extensionless UTF-8 note would be
+// refused as unknown. A truncated TAIL is an artifact of the peek; only
+// invalid bytes anywhere else are a fact about the file.
 func looksText(head []byte) bool {
 	if len(head) == 0 {
 		return false
@@ -173,7 +205,43 @@ func looksText(head []byte) bool {
 			return false
 		}
 	}
+	if n := trimPartialRune(head); n < len(head) {
+		head = head[:n]
+		if len(head) == 0 {
+			return false // nothing but a severed rune: not text we can claim
+		}
+	}
 	return utf8.Valid(head)
+}
+
+// trimPartialRune returns the length of head with an incomplete trailing
+// multi-byte sequence removed, or len(head) when the tail is already whole.
+// A UTF-8 lead byte is 11xxxxxx; the sequence is 2, 3 or 4 bytes long, so at
+// most the last 3 bytes need looking at. Bytes that are all continuations
+// have no lead to find — utf8.Valid rejects them, which is the right answer.
+func trimPartialRune(head []byte) int {
+	for back := 1; back <= 3 && back <= len(head); back++ {
+		b := head[len(head)-back]
+		if b < 0x80 || b >= 0xc0 {
+			// b is a lead byte (or ASCII): does its sequence fit?
+			var want int
+			switch {
+			case b >= 0xf0:
+				want = 4
+			case b >= 0xe0:
+				want = 3
+			case b >= 0xc0:
+				want = 2
+			default:
+				return len(head) // plain ASCII tail
+			}
+			if back < want {
+				return len(head) - back // severed: drop it
+			}
+			return len(head)
+		}
+	}
+	return len(head)
 }
 
 // Handler is one app that can open a type: the binary to exec and the label a

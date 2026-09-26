@@ -32,15 +32,25 @@ const maxCandidates = 9
 // else in the model reads a file for this purpose.
 var readHead = func(path string, cap int) ([]byte, int64) { return readCapped(path, cap) }
 
-// sniffOf peeks mime.HeadBytes of path and asks the table. An unreadable file
-// sniffs as Unknown, which the registry has no handler for: the honest
-// outcome, and the same one a user gets for a file they cannot read.
-func sniffOf(path string) mime.ID {
+// sniffOf peeks mime.HeadBytes of path and asks the table.
+//
+// The bool is "could we read it at all", and it is deliberately NOT folded
+// into the type: a file the share will not hand over is not `unknown`, it is
+// unreadable, and the user is told which. Reporting it as unknown sends them
+// looking for a file type that was never the problem.
+func sniffOf(path string) (mime.ID, bool) {
 	head, rc := readHead(path, mime.HeadBytes)
 	if rc < 0 {
-		return mime.Unknown
+		return mime.Unknown, false
 	}
-	return mime.Sniff(baseName(path), head)
+	return mime.Sniff(baseName(path), head), true
+}
+
+// refuseUnreadable is the shared wording for "the share would not give us the
+// bytes" — the same `(reason)` shape the delete refusal uses for a directory.
+func (m *model) refuseUnreadable(name string) {
+	m.emit(markerOpenNo + name + " (unreadable)")
+	m.status = name + ": unreadable"
 }
 
 // openSelPath resolves the selected entry to an absolute share path.
@@ -66,7 +76,11 @@ func (m *model) openFile() {
 		m.status = "open: path too long"
 		return
 	}
-	id := sniffOf(path)
+	id, readable := sniffOf(path)
+	if !readable {
+		m.refuseUnreadable(name)
+		return
+	}
 	h, has := mime.Default(id)
 	if !has {
 		// A named refusal, not a silent no-op: the user learns the type AND
@@ -88,7 +102,11 @@ func (m *model) startOpenWith() {
 		m.status = "open with: path too long"
 		return
 	}
-	id := sniffOf(path)
+	id, readable := sniffOf(path)
+	if !readable {
+		m.refuseUnreadable(name)
+		return
+	}
 	cands := mime.Handlers(id)
 	if len(cands) == 0 {
 		m.emit(markerOpenNo + name + " type=" + id.String())

@@ -4,7 +4,10 @@
 // guessing. No guest, no syscall — the table is pure on purpose.
 package mime
 
-import "testing"
+import (
+	"bytes"
+	"testing"
+)
 
 // withRegistry runs f against a private handler table so a registering test
 // cannot leak into the next one (the guest's init registrations are the
@@ -27,16 +30,43 @@ func TestMagicBeatsTheExtension(t *testing.T) {
 		{"NOTES.TXT", []byte("qoif" + "\x00\x00\x00\x10"), Image},
 		{"SEED.TXT", []byte("GIF89a......"), Image},
 		{"SEED.TXT", []byte("\xff\xd8\xff\xe0"), Image},
-		{"SEED.TXT", []byte("BM......"), Image},
+		// BMP: "BM", a 4-byte file size, then the two reserved u16 fields at
+		// +6 that every writer leaves zero.
+		{"SEED.TXT", []byte("BM\x46\x00\x00\x00\x00\x00\x00\x00"), Image},
 		{"DATA.BIN", []byte("\x7fELF\x02\x01\x01"), Binary},
 		{"SEED.TXT", []byte("PK\x03\x04rest"), Archive},
 		{"SEED.TXT", []byte("\x1f\x8b\x08rest"), Archive},
-		// The two offset rules: RIFF alone is a container, the subtype at +8
-		// is what says which.
+		// The two-part rules: RIFF is the container, the form type at +8 says
+		// which. A subtype without the container in front is not a signature.
 		{"SOUND.TXT", []byte("RIFF\x00\x00\x00\x00WAVEfmt "), Audio},
 		{"PIC.TXT", []byte("RIFF\x00\x00\x00\x00WEBPVP8 "), Image},
+		// "RIFF" and nothing else is a container header with no form type
+		// yet: no rule fires, and the NULs are not prose.
+		{"NOTES", []byte("RIFF\x00\x00\x00\x00\x00\x00\x00"), Unknown},
 		// A magic match must not need the whole head: 3 bytes is enough.
 		{"PIC.QOI", []byte("qoi"), Image},
+	}
+	for _, c := range cases {
+		if got := Sniff(c.name, c.head); got != c.want {
+			t.Errorf("Sniff(%q, %q) = %s, want %s", c.name, c.head, got, c.want)
+		}
+	}
+}
+
+// Magic outranks the extension, so a rule that is too loose silently sends
+// text to the image viewer. These are the coincidences the two-part rules
+// exist for: prose beginning "BM", and a "WAVE" at byte 8 of a file that is
+// not RIFF at all.
+func TestShortMagicDoesNotOutrankProse(t *testing.T) {
+	cases := []struct {
+		name string
+		head []byte
+		want ID
+	}{
+		{"NOTES.TXT", []byte("BMW sold a hundred cars\n"), Text},
+		{"NOTES.TXT", []byte("BM\x8a\x00\x00\x00\x00 more prose\n"), Text},
+		{"SOUND.TXT", []byte("NOTRIFF!WAVEfmt whatever\n"), Text},
+		{"SOUND.TXT", []byte("        WAVE is a word, not a file\n"), Text},
 	}
 	for _, c := range cases {
 		if got := Sniff(c.name, c.head); got != c.want {
@@ -99,6 +129,41 @@ func TestPrintableBytesAreTheLastResort(t *testing.T) {
 	}
 }
 
+// The peek is HeadBytes of BYTES, so the last character of an extensionless
+// UTF-8 file can be cut in half. A severed tail is an artifact of the peek;
+// calling the file unknown for it refuses a text file the user can read.
+func TestRuneCutByThePeekIsStillText(t *testing.T) {
+	em := []byte("—")              // 2 bytes
+	euro := []byte("€")            // 3 bytes
+	rocket := []byte("\U0001F680") // 4 bytes
+	for _, r := range [][]byte{em, euro, rocket} {
+		// Fill to HeadBytes-1, then the FIRST byte of the rune: the tail
+		// hangs one byte short.
+		fill := HeadBytes - 1
+		head := append(bytes.Repeat([]byte("a"), fill), r[0])
+		if got := Sniff("NOTES", head); got != Text {
+			t.Errorf("a %d-byte rune cut at HeadBytes: got %s, want text", len(r), got)
+		}
+		// And the whole rune, one byte earlier in the peek, is of course fine.
+		head = append(bytes.Repeat([]byte("a"), fill-1), r...)
+		if got := Sniff("NOTES", head); got != Text {
+			t.Errorf("a whole %d-byte rune: got %s, want text", len(r), got)
+		}
+	}
+	// Continuation bytes with no lead byte are NOT a severed tail — they are
+	// invalid wherever they came from.
+	if got := Sniff("NOTES", []byte{0x80, 0x80, 0x80, 0x80}); got != Unknown {
+		t.Errorf("stray continuation bytes: got %s, want unknown", got)
+	}
+	// Nor is a head that is nothing but a severed rune.
+	if got := Sniff("NOTES", []byte{'a', 0xe2, 0x82}); got != Text {
+		t.Errorf("one ASCII byte then a 2-of-3 rune: got %s, want text", got)
+	}
+	if got := Sniff("NOTES", []byte{0xe2, 0x82}); got != Unknown {
+		t.Errorf("a head that is only a severed rune: got %s, want unknown", got)
+	}
+}
+
 // The peek a caller is told to read must cover every rule in the table —
 // otherwise a rule could never fire and the table would be lying about its
 // own constants.
@@ -108,6 +173,15 @@ func TestHeadBytesCoversEveryMagicRule(t *testing.T) {
 			t.Errorf("rule %q at +%d needs %d bytes, HeadBytes is %d",
 				r.magic, r.off, r.off+len(r.magic), HeadBytes)
 		}
+		if r.magic2 != "" && r.off2+len(r.magic2) > HeadBytes {
+			t.Errorf("rule %q second half %q at +%d needs %d bytes, HeadBytes is %d",
+				r.magic, r.magic2, r.off2, r.off2+len(r.magic2), HeadBytes)
+		}
+	}
+	// A rule that needs more than the peek can offer is a rule that can never
+	// fire: a short read must not read past the buffer (see `at`).
+	if got := Sniff("PIC.QOI", []byte("qoif")); got != Image {
+		t.Errorf("a 4-byte read of a QOI: got %s, want image", got)
 	}
 	// …and the peek must actually be enough for the two offset rules.
 	if got := Sniff("X", make([]byte, HeadBytes)); got == Unknown {
