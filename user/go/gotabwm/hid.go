@@ -57,13 +57,18 @@ const (
 	MarkerDuplicateMissing = "gotabwm: duplicate missing "
 
 	// USB HID keyboard usages (the kernel's WM_KEY arg0).
-	hidUsageD   uint8 = 0x07 // 'd'
-	hidUsageF   uint8 = 0x09 // 'f'; M71e (#1564) freeze-badge toggle
-	hidUsageP   uint8 = 0x13
-	hidUsageT   uint8 = 0x17 // 't'
-	hidUsageV   uint8 = 0x19 // 'v'; M79c (#1706) split cycle
-	hidUsageTab uint8 = 0x2B
-	hidBtnLeft  uint8 = 0x01
+	hidUsageD uint8 = 0x07 // 'd'
+	hidUsageF uint8 = 0x09 // 'f'; M71e (#1564) freeze-badge toggle
+	hidUsageP uint8 = 0x13
+	hidUsageT uint8 = 0x17 // 't'
+	hidUsageV uint8 = 0x19 // 'v'; M79c (#1706) split cycle
+	// M79e (#1708): M48/BT5's per-tab history chords, the SAME two Zig
+	// binds in the same ctrl+shift block (Zig tabwm's usage_left_bracket /
+	// usage_right_bracket). Additive: nothing existing is rebound.
+	hidUsageLeftBracket  uint8 = 0x2F // '['
+	hidUsageRightBracket uint8 = 0x30 // ']'
+	hidUsageTab          uint8 = 0x2B
+	hidBtnLeft           uint8 = 0x01
 )
 
 // execApp is the exec seam for the BT1 chords. It is vi.Exec in the guest;
@@ -146,6 +151,14 @@ func handleWmKey(e vi.Event) {
 			_ = applyFreezeToggle()
 		case hidUsageV:
 			_ = applySplitCycle()
+		// M79e (#1708): back/forward for the FOCUSED tab, queued for its
+		// app to poll. The step is refused (and silent) at either end of
+		// the history, so the chord is a no-op rather than a marker for
+		// a step that did not happen.
+		case hidUsageLeftBracket:
+			_ = applyNavStep(true)
+		case hidUsageRightBracket:
+			_ = applyNavStep(false)
 		}
 		return
 	}
@@ -154,6 +167,38 @@ func handleWmKey(e vi.Event) {
 	if !ctrl && !shift && !alt && usage == hidUsageEnter && tabs.Count() == 0 {
 		openLauncher()
 	}
+}
+
+// applyNavStep is Zig TABWM nav_back_active / nav_forward_active: step the
+// FOCUSED tab's history one entry and queue the target so the app picks it up
+// on its next nav-poll. `back` selects the direction. False when nothing is
+// focused, or the cursor is already at that end — an honest no-op that
+// leaves the queued slot alone, so a refused step cannot swallow the target
+// an earlier accepted step is still waiting to deliver.
+func applyNavStep(back bool) bool {
+	id, ok := tabs.Focused()
+	if !ok {
+		return false
+	}
+	var (
+		path  string
+		moved bool
+	)
+	if back {
+		path, moved = tabs.NavBack(id)
+	} else {
+		path, moved = tabs.NavForward(id)
+	}
+	if !moved {
+		return false
+	}
+	setPendingNav(id, path)
+	marker := MarkerNavForward
+	if back {
+		marker = MarkerNavBack
+	}
+	vi.ConsoleLine(marker + vi.Itoa64(int64(id)) + " path=" + path)
+	return true
 }
 
 // applyFreezeToggle is Zig TABWM freeze_toggle: flip the frozen badge on the

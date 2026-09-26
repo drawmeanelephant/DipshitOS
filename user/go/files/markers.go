@@ -18,6 +18,11 @@ const (
 	markerOK        = "gofiles OK"
 	markerListErr   = "gofiles: list error "
 	markerCd        = "gofiles: cd "
+	// M79e (#1708): the WM_RPC nav seam. `nav declare` is this app
+	// announcing where it navigated; `nav back` is the proof the round
+	// trip closed — the seat handed back a path and this app acted on it.
+	markerNavDeclare = "gofiles: nav declare "
+	markerNavBack    = "gofiles: nav back to "
 
 	markerAttach  = "gofiles: attached"
 	markerPainted = "gofiles: painted"
