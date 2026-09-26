@@ -29,6 +29,7 @@ type fakeFS struct {
 	denyWrite   bool   // every write-op fails
 	denyPath    string // write-opens of this path fail (the intake copy is unaffected)
 	zeroRead    bool   // reads return the right length of zeros (issue #1391)
+	refuseRead  bool   // reads fail outright (M81b: the mime case must notice)
 
 	denyTruncate bool // truncate fails with EACCES
 	lieDelete    bool // delete reports success and leaves the file
@@ -312,6 +313,9 @@ func (f *fakeFS) read(h uint32, buf []byte) (int, int64) {
 	if !ok {
 		return 0, -2
 	}
+	if f.refuseRead {
+		return 0, -5 // EIO: the share cannot hand this file over
+	}
 	cur := f.cursors[int64(h)]
 	body := f.files[p]
 	if cur >= len(body) {
@@ -351,8 +355,8 @@ const wantReport = "case intake pass\ncase intake-altered pass\n" +
 	"case file-delete pass\ncase file-list pass\n" +
 	"case file-append pass\ncase file-bigwrite pass\ncase file-clamp pass\n" +
 	"case file-fsync pass\ncase file-errors pass\n" +
-	"case file-write-safe pass\ncase window pass\n" +
-	"summary cases=15 failed=0\n"
+	"case file-write-safe pass\ncase mime pass\ncase window pass\n" +
+	"summary cases=16 failed=0\n"
 
 // seedFixtures is the host's half of the intake contract: IN/fixture.txt holds
 // the canonical body, IN/altered.txt the altered one (ADR 0031 D2).
@@ -366,8 +370,8 @@ func TestRunCasesAllPassAndReportBytes(t *testing.T) {
 	seedFixtures(fs)
 	rs := runCases(fs.syscalls())
 
-	if len(rs) != 15 {
-		t.Fatalf("cases = %d, want 15", len(rs))
+	if len(rs) != 16 {
+		t.Fatalf("cases = %d, want 16", len(rs))
 	}
 	for _, r := range rs {
 		if !r.ok {
@@ -377,7 +381,7 @@ func TestRunCasesAllPassAndReportBytes(t *testing.T) {
 	if got := string(renderReport(rs)); got != wantReport {
 		t.Fatalf("report bytes:\n got %q\nwant %q", got, wantReport)
 	}
-	if got := string(renderSummary(rs)); got != "summary cases=15 failed=0\n" {
+	if got := string(renderSummary(rs)); got != "summary cases=16 failed=0\n" {
 		t.Fatalf("summary = %q", got)
 	}
 	if got := fs.files[helloPath]; !bytes.Equal(got, []byte(helloPayload)) {
@@ -439,7 +443,7 @@ func TestIntakeFailsOnAMutatedSeed(t *testing.T) {
 	if !strings.Contains(report, "case intake fail fixture mismatch") {
 		t.Fatalf("report lacks the intake failure: %q", report)
 	}
-	if !strings.Contains(report, "summary cases=15 failed=2") {
+	if !strings.Contains(report, "summary cases=16 failed=2") {
 		t.Fatalf("report summary wrong: %q", report)
 	}
 	if got := fs.files[intakeCopy]; !bytes.Equal(got, []byte(intakeAltered)) {
@@ -469,7 +473,7 @@ func TestIntakeFailsWhenTheFixtureIsMissing(t *testing.T) {
 	// The report is still complete: 14 cases, the 2 intake ones failed (the
 	// clock, file and window cases do not read IN/).
 	report := string(renderReport(rs))
-	if !strings.Contains(report, "summary cases=15 failed=2") {
+	if !strings.Contains(report, "summary cases=16 failed=2") {
 		t.Fatalf("report summary wrong: %q", report)
 	}
 	if lines := strings.Count(report, "\n"); lines != len(rs)+1 {
@@ -492,8 +496,8 @@ func TestWindowReceiptCarriesTheKernelsGeometry(t *testing.T) {
 	fs := newFakeFS()
 	seedFixtures(fs)
 	rs := runCases(fs.syscalls())
-	if !rs[14].ok || rs[14].id != "window" {
-		t.Fatalf("window should have passed, got %+v", rs[14])
+	if !rs[15].ok || rs[15].id != "window" {
+		t.Fatalf("window should have passed, got %+v", rs[15])
 	}
 	wantLine := "case window win=2 w=1100 h=720 present=ok\n"
 	if got := string(fs.files[windowReceipt]); got != wantLine {
@@ -513,8 +517,8 @@ func TestWindowReceiptFollowsTheQueryWhereverItPoints(t *testing.T) {
 	seedFixtures(fs)
 	fs.winGeometry = [8]uint32{32, 32, winReqW, winReqH, 0, 1, 1, 0}
 	rs := runCases(fs.syscalls())
-	if !rs[14].ok {
-		t.Fatalf("window should have passed, got %+v", rs[14])
+	if !rs[15].ok {
+		t.Fatalf("window should have passed, got %+v", rs[15])
 	}
 	wantLine := "case window win=2 w=640 h=400 present=ok\n"
 	if got := string(fs.files[windowReceipt]); got != wantLine {
@@ -529,11 +533,11 @@ func TestWindowFailsWithoutAWindow(t *testing.T) {
 	seedFixtures(fs)
 	fs.winID = -1
 	rs := runCases(fs.syscalls())
-	if rs[14].ok {
-		t.Fatalf("window passed with no window, got %+v", rs[14])
+	if rs[15].ok {
+		t.Fatalf("window passed with no window, got %+v", rs[15])
 	}
-	if !strings.Contains(rs[14].detail, "no window") {
-		t.Fatalf("detail = %q", rs[14].detail)
+	if !strings.Contains(rs[15].detail, "no window") {
+		t.Fatalf("detail = %q", rs[15].detail)
 	}
 	if _, ok := fs.files[windowReceipt]; ok {
 		t.Fatal("a window-less run still wrote a receipt")
@@ -556,11 +560,11 @@ func TestWindowNamesEachRefusal(t *testing.T) {
 			seedFixtures(fs)
 			tc.break_(fs)
 			rs := runCases(fs.syscalls())
-			if rs[14].ok {
-				t.Fatalf("window passed with %s refused, got %+v", tc.name, rs[14])
+			if rs[15].ok {
+				t.Fatalf("window passed with %s refused, got %+v", tc.name, rs[15])
 			}
-			if !strings.Contains(rs[14].detail, tc.want) {
-				t.Fatalf("detail = %q, want %q", rs[14].detail, tc.want)
+			if !strings.Contains(rs[15].detail, tc.want) {
+				t.Fatalf("detail = %q, want %q", rs[15].detail, tc.want)
 			}
 		})
 	}
@@ -573,11 +577,11 @@ func TestWindowCatchesAnEmptyWindow(t *testing.T) {
 	seedFixtures(fs)
 	fs.winGeometry = [8]uint32{0, 0, 0, 0, 0, 1, 1, 0}
 	rs := runCases(fs.syscalls())
-	if rs[14].ok {
-		t.Fatalf("window passed on an empty window, got %+v", rs[14])
+	if rs[15].ok {
+		t.Fatalf("window passed on an empty window, got %+v", rs[15])
 	}
-	if !strings.Contains(rs[14].detail, "query reports an empty window: 0x0") {
-		t.Fatalf("detail = %q", rs[14].detail)
+	if !strings.Contains(rs[15].detail, "query reports an empty window: 0x0") {
+		t.Fatalf("detail = %q", rs[15].detail)
 	}
 	// The receipt still holds what was measured, so the host sees the zeros.
 	if got := string(fs.files[windowReceipt]); got != "case window win=2 w=0 h=0 present=ok\n" {
@@ -666,7 +670,7 @@ func TestFileWriteCaseFailsWhenTheWriteIsRefused(t *testing.T) {
 	if !strings.Contains(report, "case file-write fail ") {
 		t.Fatalf("report lacks the fail detail: %q", report)
 	}
-	if !strings.Contains(report, "summary cases=15 failed=1") {
+	if !strings.Contains(report, "summary cases=16 failed=1") {
 		t.Fatalf("report summary wrong: %q", report)
 	}
 }
@@ -1284,4 +1288,49 @@ func TestFileWriteSafeFailureKeepsTheOldBody(t *testing.T) {
 		}
 	}
 	t.Fatal("file-write-safe did not run")
+}
+
+// M81b (#1762): the `mime` case. The receipt is the proof — one line per
+// fixture, in table order, byte-comparable by the class-B gate.
+func TestMimeCaseSniffsTheBytesItReadBack(t *testing.T) {
+	fs := newFakeFS()
+	seedFixtures(fs)
+	rs := runCases(fs.syscalls())
+	if !rs[14].ok || rs[14].id != "mime" {
+		t.Fatalf("mime should have passed, got %+v", rs[14])
+	}
+	want := "sniff README.TXT image bytes=16\n" +
+		"sniff PIC.QOI image bytes=16\n" +
+		"sniff NOTES.TXT text bytes=16\n" +
+		"sniff SONG.OGG audio bytes=12\n" +
+		"sniff BUNDLE.ZIP archive bytes=10\n" +
+		"sniff GUEST.ELF binary bytes=12\n" +
+		"sniff MYSTERY.PS unknown bytes=6\n"
+	if got := string(fs.files[mimeReceipt]); got != want {
+		t.Fatalf("mime receipt =\n%q\nwant\n%q", got, want)
+	}
+	// The PNG-bytes-named-.TXT row is the claim: magic decides, and the
+	// receipt says image for a .TXT name.
+	if !strings.Contains(string(fs.files[mimeReceipt]), "sniff README.TXT image") {
+		t.Fatal("magic did not beat the extension in the receipt")
+	}
+	if got := string(fs.files[mimeOk]); !strings.Contains(got, "default-image=GOVIEW.ELF") ||
+		!strings.Contains(got, "default-text=GOEDIT.ELF") {
+		t.Fatalf("mime.ok receipt = %q", got)
+	}
+}
+
+// A share that cannot hand a fixture back must FAIL the case, not sniff an
+// empty buffer and call it unknown.
+func TestMimeCaseFailsWhenTheShareLies(t *testing.T) {
+	fs := newFakeFS()
+	seedFixtures(fs)
+	fs.refuseRead = true
+	rs := runCases(fs.syscalls())
+	if rs[14].ok {
+		t.Fatalf("mime passed with unreadable fixtures, got %+v", rs[14])
+	}
+	if !strings.Contains(rs[14].detail, "read ") {
+		t.Fatalf("detail = %q, want the refused read named", rs[14].detail)
+	}
 }

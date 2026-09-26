@@ -59,6 +59,33 @@ func paint(fd uint32, m model) bool {
 	return rc >= 0 && n == len(data)
 }
 
+// execApp is the exec seam (M81b #1762). It is vi.Exec in the guest; the
+// indirection exists so the launch path is one named call the model tests can
+// reason about, and so a refusal marker can never be printed for a launch
+// that did not happen.
+var execApp = vi.Exec
+
+// drainLaunch runs the exec the model queued for this frame, if any, and
+// prints the OUTCOME marker. It rides the same post-paint barrier as the
+// markers: the frame that says "opening …" is already on screen, and the
+// launched/refused line follows the syscall that decided it. A launch that
+// the kernel refuses (no such binary, bad argv) is named, never swallowed —
+// the file manager is the only place that knows which app it meant.
+func drainLaunch(m *model) {
+	r, ok := m.takeLaunch()
+	if !ok {
+		return
+	}
+	pid, err := execApp(r.bin, r.path)
+	if err != nil {
+		vi.ConsoleLine(markerOpenLaunchNo + baseName(r.path) +
+			" handler=" + r.bin + " err=" + err.Error())
+		return
+	}
+	vi.ConsoleLine(markerOpenLaunched + baseName(r.path) +
+		" handler=" + r.bin + " pid=" + vi.Itoa64(pid))
+}
+
 // flush prints the model's queued serial markers in order, then raises the
 // toast the model queued for this frame (M79k #1720). The notify rides the
 // SAME post-paint barrier as the markers: a toast that names a completed
@@ -313,6 +340,7 @@ func onKey(m *model, fd uint32, ev keys.Event, ta *tabapp.TabApp) bool {
 	}
 	vi.Sleep(1)
 	flush(m, ta)
+	drainLaunch(m)
 	vi.ConsoleLine(markerKey + keyLabel(ev))
 	vi.ConsoleLine(markerRepaint)
 	settle(m)
@@ -337,6 +365,7 @@ func onMouse(m *model, fd uint32, b, x, y int, ta *tabapp.TabApp) bool {
 		}
 		vi.Sleep(1)
 		flush(m, ta)
+		drainLaunch(m)
 		vi.ConsoleLine(markerRepaint)
 	}
 	vi.ConsoleLine(markerMouse + vi.Itoa64(int64(b)) +

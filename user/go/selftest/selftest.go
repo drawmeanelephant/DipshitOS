@@ -28,6 +28,7 @@ import (
 	"strconv"
 	"strings"
 
+	"virelai/mime"
 	"virelai/vi"
 )
 
@@ -310,6 +311,13 @@ func cases() []testCase {
 		// (no tail), and that the sacrificial temp did not survive. Inserted
 		// before the window case so the M61d report prefix stays untouched.
 		{id: "file-write-safe", run: caseFileWriteSafe},
+		// M81b (#1762): the MIME table itself, exercised through the file
+		// ABI — every fixture is WRITTEN to the share and READ BACK before it
+		// is sniffed, so the verdict is about the bytes that came back over
+		// the share, not about a constant compiled into this binary. Also
+		// inserted before the window case so the M61d report prefix stays
+		// untouched.
+		{id: "mime", run: caseMime},
 		// M61e (#1385): the window receipt — appended last so the M61d report
 		// prefix is untouched (the report is byte-compared).
 		{id: "window", run: caseWindow},
@@ -1274,4 +1282,101 @@ func caseFileWriteSafe(s *syscalls) error {
 		return errors.New("the sacrificial temp " + writeSafeTmp + " survived the publish")
 	}
 	return nil
+}
+
+// M81b (#1762): the paths and fixtures of the `mime` case. MIME/ holds the
+// fixture bytes this case wrote; mime.txt is the receipt the host byte-
+// compares, one `sniff <name> <type> bytes=<n>` line per fixture in table
+// order. The bytes are deliberately small and fixed so the receipt is
+// deterministic (ADR 0031's no-timestamps rule).
+const (
+	mimeDir     = outDir + "/MIME"
+	mimeReceipt = outDir + "/mime.txt"
+	mimeOk      = outDir + "/mime.ok"
+	mimeReadCap = mime.HeadBytes
+)
+
+// mimeFixture is one row: the name the file is given (which is what the
+// extension stage sees), the bytes written to it, and the type the sniff must
+// return for those bytes.
+type mimeFixture struct {
+	name string
+	body []byte
+	want string
+}
+
+var mimeFixtures = []mimeFixture{
+	// Magic decides: PNG bytes under a .TXT name are an image. This row is
+	// the case's whole reason for existing.
+	{"README.TXT", []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"), "image"},
+	{"PIC.QOI", []byte("qoif\x00\x00\x00\x10\x00\x00\x00\x10\x03\xff\xff\xff"), "image"},
+	// The extension decides when the bytes have no magic: text.
+	{"NOTES.TXT", []byte("goself mime case: one line of text\n"), "text"},
+	// Magic-only types.
+	{"SONG.OGG", []byte("OggS\x00\x02\x00\x00\x00\x00\x00\x00"), "audio"},
+	{"BUNDLE.ZIP", []byte("PK\x03\x04\x14\x00\x00\x00\x08\x00"), "archive"},
+	{"GUEST.ELF", []byte("\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00"), "binary"},
+	// No magic, no known extension, control noise: unknown — and unknown has
+	// no handler, which is the refusal GOFILES shows the user.
+	{"MYSTERY.PS", []byte{0x00, 0x01, 'P', 'S', 0x1a, 0x00}, "unknown"},
+}
+
+// caseMime writes each fixture to the share, reads it back through the file
+// ABI, sniffs the bytes that came back, and leaves the receipt. A fixture
+// whose sniff disagrees with the table FAILS the case naming both values, so
+// a wrong answer is never a quiet pass.
+func caseMime(s *syscalls) error {
+	s.mkdir(outDir)
+	s.mkdir(mimeDir)
+	var body strings.Builder
+	for _, f := range mimeFixtures {
+		path := mimeDir + "/" + f.name
+		if _, err := writeFile(s, path, f.body); err != nil {
+			return err
+		}
+		got, err := readBack(s, path, mimeReadCap)
+		if err != nil {
+			return err
+		}
+		id := mime.Sniff(f.name, got)
+		body.WriteString("sniff " + f.name + " " + id.String() +
+			" bytes=" + strconv.Itoa(len(got)) + "\n")
+		if id.String() != f.want {
+			return errors.New("sniff " + f.name + " = " + id.String() +
+				", want " + f.want)
+		}
+	}
+	if _, err := writeFile(s, mimeReceipt, []byte(body.String())); err != nil {
+		return err
+	}
+	return writeReceipt(s, mimeOk,
+		"case mime fixtures="+strconv.Itoa(len(mimeFixtures))+
+			" default-image="+defaultBin(mime.Image)+
+			" default-text="+defaultBin(mime.Text))
+}
+
+// defaultBin names a type's default handler for the one-line receipt, or
+// "none" — the refusal the receipt should be able to show.
+func defaultBin(id mime.ID) string {
+	if h, ok := mime.Default(id); ok {
+		return h.Bin
+	}
+	return "none"
+}
+
+// readBack opens path, reads up to cap bytes and closes it — the same
+// open/read/close the file-ABI cases drive, used here so the sniffed bytes
+// are the ones the share returned.
+func readBack(s *syscalls, path string, cap int) ([]byte, error) {
+	h, rc := s.open(path, vi.ModeRead)
+	if rc < 0 {
+		return nil, errors.New("open " + path + " rc=" + strconv.FormatInt(rc, 10))
+	}
+	defer s.close(uint32(h))
+	buf := make([]byte, cap)
+	n, rrc := s.read(uint32(h), buf)
+	if rrc < 0 {
+		return nil, errors.New("read " + path + " rc=" + strconv.FormatInt(rrc, 10))
+	}
+	return buf[:n], nil
 }
