@@ -28,13 +28,16 @@ const (
 
 var (
 	sessionSeq uint16 = 1
-	// sessionDirty is set by every mutation that changed the strip and
-	// cleared by a successful writeSession. It is the write-through guard:
-	// a mutation that changed nothing (a same-cell reorder, a pin of an
-	// already-pinned tab) never sets it, so a burst of no-ops costs no
-	// file write. The guard is on CHANGE, not on time — the seat has no
-	// timer to debounce with, and at a human interaction rate a handful of
-	// 2 KB crash-safe writes per boot is not a throughput problem.
+	// sessionDirty is set by noteSessionMutation and cleared by a
+	// successful writeSession. It is retry/observability state, not a
+	// write gate: the no-op guard lives at the call sites (a same-cell
+	// reorder, a pin of an already-pinned tab returns before the hook,
+	// so a burst of no-ops costs no file write). A failed publish or an
+	// empty-strip refusal leaves it set — there IS an unpersisted change;
+	// publishing it would be a lie, dropping it would be amnesia.
+	// The guard is on CHANGE, not on time — the seat has no timer to
+	// debounce with, and at a human interaction rate a handful of 2 KB
+	// crash-safe writes per boot is not a throughput problem.
 	sessionDirty bool
 )
 
@@ -110,8 +113,10 @@ func (s *TabStrip) sessionRows() TabStrip {
 // noteSessionMutation is the write-through hook: every mutation that changed
 // the strip calls it, and the file is correct the moment the mutation lands
 // (no debounce, no save-on-exit, so a killed seat still leaves the truth
-// behind). It writes only when the strip is dirty, which is what keeps the
-// write count bounded by CHANGES rather than by time.
+// behind). It always attempts the write — the write count stays bounded by
+// CHANGES because no-op mutations return before reaching this hook, never
+// by a timer. (The choreography's pin-stay snapshot in seat.go case 2 calls
+// writeSession directly; equivalent — the declares already left dirty set.)
 func noteSessionMutation() bool {
 	sessionDirty = true
 	return writeSession()

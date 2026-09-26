@@ -1374,8 +1374,14 @@ vgate_assert 09 serial-contains 'gotabwm: order ids='
 vgate_assert 09 serial-contains 'pin=1,0'
 vgate_assert 09 serial-contains 'pin=0,1'
 vgate_assert 09 serial-contains 'gotabwm: reorder 0->1'
-# Write-through: every one of those mutations published the file.
-vgate_assert 09 serial-count 'gotabwm: session write n=' 4
+# Write-through: every one of those mutations published the file. Six writes
+# minimum, each proven by its own marker above: the two kind-8 declares
+# (GOCALC n=1, NOTE n=2), NOTE's kind-11 retitle (the `gotabwm: title id=`
+# line — SetTitle has no same-value short-circuit, so it always persists),
+# then pin, freeze and the drag reorder. A missing write with the markers
+# present would mean a mutation the file does not carry — the crash window
+# this card exists to close.
+vgate_assert 09 serial-count 'gotabwm: session write n=' 6
 vgate_assert 09 serial-contains 'gotabwm: session write n=2'
 # Live mode closed nothing, so no close ever rewrote the file.
 vgate_assert 09 serial-absent 'gotabwm: tab close id='
