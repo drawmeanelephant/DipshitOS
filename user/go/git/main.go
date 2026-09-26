@@ -27,8 +27,6 @@ const (
 	markerOK     = "gotgit OK"
 	markerErr    = "gotgit: error "
 
-	maxWrite = 2048
-
 	// file_table MODE_DIR create returns -9 (EEXIST). ADR 0007 maps
 	// magnitude 9 to ENXIO; vi has no ErrEXIST.
 	errExist = int64(-9)
@@ -321,26 +319,13 @@ func mkdirAll(path string) bool {
 	return true
 }
 
+// writeFile publishes data to path crash-safe (M81e #1765): the sacrificial
+// temp is written, fsync'd, and published (delete-then-rename) by
+// vi.WriteFileSafe, so the live path is never truncated in place. A checkout
+// is a tree of small files; before this, a crash mid-write left a truncated
+// blob or ref where a valid one had been — a worktree the reader cannot trust.
 func writeFile(path string, data []byte) bool {
-	h, r := vi.FileOpen(path, vi.ModeWrite|vi.ModeCreate)
-	if r < 0 {
-		return false
-	}
-	defer vi.FileClose(uint32(h))
-	_ = vi.FileTruncate(uint32(h), 0)
-	off := 0
-	for off < len(data) {
-		n := len(data) - off
-		if n > maxWrite {
-			n = maxWrite
-		}
-		wn, wr := vi.FileWrite(uint32(h), data[off:off+n])
-		if wr < 0 || wn <= 0 {
-			return false
-		}
-		off += wn
-	}
-	return vi.FileTruncate(uint32(h), uint32(len(data))) >= 0
+	return vi.WriteFileSafe(path, data) >= 0
 }
 
 func readFile(path string) ([]byte, bool) {

@@ -470,12 +470,12 @@ func TestOnlineDownloadPublishesBodyAndExitsZero(t *testing.T) {
 	// The publish order is the crash-safe contract, not an implementation
 	// detail: open temp, write, fsync, close, delete target, rename.
 	wantOps := []string{
-		"open " + legacyDefaultDest + ".tmp",
-		"write " + legacyDefaultDest + ".tmp",
-		"sync " + legacyDefaultDest + ".tmp",
-		"close " + legacyDefaultDest + ".tmp",
+		"open " + legacyDefaultDest + "~",
+		"write " + legacyDefaultDest + "~",
+		"sync " + legacyDefaultDest + "~",
+		"close " + legacyDefaultDest + "~",
 		"delete " + legacyDefaultDest,
-		"rename " + legacyDefaultDest + ".tmp -> " + legacyDefaultDest,
+		"rename " + legacyDefaultDest + "~ -> " + legacyDefaultDest,
 	}
 	if strings.Join(ops, "|") != strings.Join(wantOps, "|") {
 		t.Fatalf("publish ops =\n%v\nwant\n%v", ops, wantOps)

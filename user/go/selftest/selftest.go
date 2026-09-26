@@ -114,6 +114,14 @@ const (
 	errDir     = outDir + "/ERR"
 	errOk      = outDir + "/file-errors.ok"
 
+	// M81e (#1765): the publish primitive. The temp is the one path allowed
+	// to exist mid-publish; the case proves it does not SURVIVE one, and
+	// that replacing a long body with a short one leaves no tail.
+	writeSafePath = outDir + "/write-safe.txt"
+	writeSafeTmp  = writeSafePath + "~"
+	writeSafeCopy = outDir + "/write-safe.copy"
+	writeSafeOk   = outDir + "/file-write-safe.ok"
+
 	// M61e window receipt (issue #1385), in the card's shape: the id the
 	// kernel assigned, the geometry the KERNEL reports for that window, and
 	// the present verdict.
@@ -168,6 +176,13 @@ func clampKept() []byte         { return []byte(strings.Repeat(fileUnit, clampKe
 func clampExtra() []byte        { return []byte(strings.Repeat(fileUnit, clampExtraUnits)) }
 func fsyncPayload() []byte      { return []byte(strings.Repeat(fileUnit, fsyncUnits)) }
 
+// The M81e publish bodies: a long body replaced by a short one, so the case
+// can prove the publish is whole-file. An in-place writer would leave the
+// long body's tail behind — trimming that tail is exactly what the old
+// FileTruncate(len) calls were doing by hand.
+func writeSafeLong() []byte  { return []byte(strings.Repeat(fileUnit, 40)) }
+func writeSafeShort() []byte { return []byte(strings.Repeat(fileUnit, 5)) }
+
 // syscalls is the slice of the ADR 0010 file ABI (plus the clock) the cases
 // use, as function fields so tests can fake every one of them. M61d added the
 // mutating/enumeration rows (`truncate`, `remove`, `list`): the file-ABI pack
@@ -186,6 +201,12 @@ type syscalls struct {
 	remove   func(path string) int64
 	list     func(path string, buf []vi.DirEntry) (int, int64)
 	close    func(h uint32)
+
+	// M81e (#1765): the publish primitive — vi.WriteFileSafe's temp +
+	// fsync + delete-then-rename, the one write path the app writers now
+	// stand on. It is a function, not a composition of the rows above,
+	// because the ORDER is the property under test.
+	writeSafe func(path string, b []byte) int64
 
 	// M61e (#1385): the window surface. Separate from the file rows above
 	// because id/reqW/reqH are STATE the shell copied out of tabapp.Init, not
@@ -224,14 +245,15 @@ func guestSyscalls() syscalls {
 			}
 			return rc
 		},
-		open:     vi.FileOpen,
-		read:     vi.FileRead,
-		write:    vi.FileWrite,
-		truncate: vi.FileTruncate,
-		sync:     vi.FileSync,
-		remove:   vi.FileDelete,
-		list:     vi.DirList,
-		close:    vi.FileClose,
+		open:      vi.FileOpen,
+		read:      vi.FileRead,
+		write:     vi.FileWrite,
+		truncate:  vi.FileTruncate,
+		sync:      vi.FileSync,
+		remove:    vi.FileDelete,
+		list:      vi.DirList,
+		close:     vi.FileClose,
+		writeSafe: vi.WriteFileSafe,
 		// M61e: the real window rows. id/reqW/reqH stay -1/0 here — the shell
 		// binds them from tabapp.Init, so this function never claims a window
 		// the app did not get.
@@ -283,6 +305,11 @@ func cases() []testCase {
 		{id: "file-clamp", run: caseFileClamp},
 		{id: "file-fsync", run: caseFileFsync},
 		{id: "file-errors", run: caseFileErrors},
+		// M81e (#1765): the publish primitive itself — replace a long body
+		// with a short one, prove the read-back is exactly the short body
+		// (no tail), and that the sacrificial temp did not survive. Inserted
+		// before the window case so the M61d report prefix stays untouched.
+		{id: "file-write-safe", run: caseFileWriteSafe},
 		// M61e (#1385): the window receipt — appended last so the M61d report
 		// prefix is untouched (the report is byte-compared).
 		{id: "window", run: caseWindow},
@@ -1187,4 +1214,64 @@ func oneLine(s string) string {
 		s = s[:maxDetail]
 	}
 	return s
+}
+
+// caseFileWriteSafe: the publish primitive the M81e (#1765) app conversions
+// stand on — vi.WriteFileSafe's temp + fsync + delete-then-rename. Two
+// properties, both invisible to the syscall rows above because the ORDER is
+// the contract:
+//
+//   - replacing a LONG body with a SHORT one leaves exactly the short body.
+//     An in-place writer that never truncates to size would leave a tail; the
+//     publish is whole-file by construction, so write-safe.txt is 105 B.
+//   - the sacrificial temp does not SURVIVE a completed publish. The temp is
+//     the one path allowed to exist mid-publish (it is what makes the live
+//     file never truncated), and an orphan would otherwise sit on the share
+//     forever — the publish replaces it on the next write, nothing removes it
+//     at boot.
+//
+// OUT/write-safe.copy holds the bytes read back after the second publish, so
+// the host byte-compares the file, not just the receipt.
+func caseFileWriteSafe(s *syscalls) error {
+	s.mkdir(outDir)
+	long := writeSafeLong()
+	short := writeSafeShort()
+	if rc := s.writeSafe(writeSafePath, long); rc < 0 {
+		return errors.New("first publish rc=" + strconv.FormatInt(rc, 10))
+	}
+	if rc := s.writeSafe(writeSafePath, short); rc < 0 {
+		return errors.New("second publish rc=" + strconv.FormatInt(rc, 10))
+	}
+	got, err := readFile(s, writeSafePath, len(long)+1)
+	if err != nil {
+		return err
+	}
+	tail := "none"
+	if len(got) > len(short) {
+		tail = strconv.Itoa(len(got)-len(short)) + "B"
+	}
+	match := bytes.Equal(got, short)
+	orphan := "none"
+	if h, rc := s.open(writeSafeTmp, vi.ModeRead); rc >= 0 {
+		s.close(uint32(h))
+		orphan = "survived"
+	}
+	if cerr := copyBytes(s, writeSafeCopy, got); cerr != nil {
+		return cerr
+	}
+	line := "case file-write-safe path=OUT/write-safe.txt long=" + strconv.Itoa(len(long)) +
+		" short=" + strconv.Itoa(len(short)) + " bytes=" + strconv.Itoa(len(got)) +
+		" tail=" + tail + " orphan=" + orphan + " match=" + yesNo(match)
+	if rerr := writeReceipt(s, writeSafeOk, line); rerr != nil {
+		return rerr
+	}
+	switch {
+	case !match || len(got) != len(short):
+		return errors.New("after the shorter publish the file read " +
+			strconv.Itoa(len(got)) + "B, want the " + strconv.Itoa(len(short)) +
+			"B body with no tail")
+	case orphan != "none":
+		return errors.New("the sacrificial temp " + writeSafeTmp + " survived the publish")
+	}
+	return nil
 }

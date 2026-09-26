@@ -117,6 +117,13 @@
 #                      EEXIST row), isdir=-1 (a WRITE open of a directory),
 #                      ninth=-5 (the 8-handle table full).
 #
+#   * file-write-safe — the publish primitive the M81e (#1765) app
+#                      conversions stand on: a long body replaced by a
+#                      short one. The read-back is exactly the short
+#                      body (a whole-file publish, no tail) and the
+#                      sacrificial temp does not survive, so the share
+#                      holds one file and no orphan.
+#
 # The report fixture below is byte-exact on purpose — the report is
 # deterministic (ADR 0031). Adding a case updates the fixture, the
 # share-contains case count, and want_summary in the python block.
@@ -155,8 +162,9 @@ case file-bigwrite pass
 case file-clamp pass
 case file-fsync pass
 case file-errors pass
+case file-write-safe pass
 case window pass
-summary cases=14 failed=0
+summary cases=15 failed=0
 EOF
 
 # The canonical intake fixture as the spec seeds it (see the setup hook). The
@@ -243,7 +251,7 @@ vgate_assert 01 share-equals SELFTEST/IN/fixture.txt intake-fixture.expected
 # share-contains is the substring kind: the guest's own summary count. Weaker
 # than the python's byte-exact summary.txt compare below, and kept deliberately
 # as the kind's pilot in a real gate.
-vgate_assert 01 share-contains SELFTEST/OUT/summary.txt 'summary cases=14 failed=0'
+vgate_assert 01 share-contains SELFTEST/OUT/summary.txt 'summary cases=15 failed=0'
 
 # The load-bearing assert: the copies and the receipts on the host's own
 # filesystem must be byte-exact, the share's directory state must agree with
@@ -278,6 +286,8 @@ append_body = unit * 5              # 105 B: base 3 units + 2 appended at EOF
 bigwrite_body = unit * 3500         # 73,500 B: 36 sys_file_write calls at the cap
 clamp_body = unit * 8               # 168 B: kept 5 + extra 3 at the clamp point
 fsync_body = unit * 7               # 147 B, fsync'd through slot 77 before close
+write_safe_long = unit * 40         # 840 B published, then replaced by the short one
+write_safe_short = unit * 5         # 105 B expected after the shorter publish
 
 # The window, from the outside: the app's tabapp.Config at open, and the
 # tab-aware content viewport TABWM proposes afterwards
@@ -286,7 +296,7 @@ win_open_rect = (32, 32, 640, 400)
 win_viewport_w = 1100
 win_viewport_h = 720
 
-want_summary = b"summary cases=14 failed=0\n"
+want_summary = b"summary cases=15 failed=0\n"
 want_hello = b"goself smoke\n"
 want_intake_receipt = b"case intake path=IN/fixture.txt bytes=25 match=yes\n"
 want_altered_receipt = b"case intake-altered path=IN/altered.txt bytes=25 differs=yes\n"
@@ -305,6 +315,8 @@ want_clamp_receipt = (b"case file-clamp path=OUT/clamp.txt wrote=840 kept=105 "
                       b"extra=63 bytes=168 match=yes\n")
 want_fsync_receipt = b"case file-fsync path=OUT/fsync.txt bytes=147 fsync=0 closed=-2\n"
 want_errors_receipt = b"case file-errors missing=-6 exists=-9 isdir=-1 ninth=-5\n"
+want_write_safe_receipt = (b"case file-write-safe path=OUT/write-safe.txt long=840 "
+                           b"short=105 bytes=105 tail=none orphan=none match=yes\n")
 
 st = os.path.join(share, "SELFTEST")
 out = os.path.join(st, "OUT")
@@ -358,12 +370,23 @@ require(os.path.join(out, "append.txt"), append_body, "APPEND FILE")
 require(os.path.join(out, "bigwrite.txt"), bigwrite_body, "BIGWRITE FILE")
 require(os.path.join(out, "clamp.txt"), clamp_body, "CLAMP FILE")
 require(os.path.join(out, "fsync.txt"), fsync_body, "FSYNC FILE")
+require(os.path.join(out, "file-write-safe.ok"), want_write_safe_receipt,
+        "WRITE-SAFE RECEIPT")
+require(os.path.join(out, "write-safe.copy"), write_safe_short,
+        "WRITE-SAFE COPY (no tail)")
 
 # The guest's claims, cross-checked against the filesystem its syscalls left
 # behind. These are independent of the receipts: the receipts say what the case
 # believed, this says what the share holds.
 require(os.path.join(out, "roundtrip.txt"), roundtrip_body, "ROUNDTRIP FILE")
 require(os.path.join(out, "truncate.txt"), truncate_kept, "TRUNCATE FILE (kept prefix)")
+# The publish's own state: the file is exactly the short body, and the
+# sacrificial temp is gone — the case's claims, checked against the share.
+require(os.path.join(out, "write-safe.txt"), write_safe_short,
+        "WRITE-SAFE FILE (no tail)")
+if os.path.exists(os.path.join(out, "write-safe.txt~")):
+    print("OUT/write-safe.txt~ survived the publish - the temp leaked")
+    raise SystemExit(1)
 if os.path.exists(os.path.join(out, "deleted.txt")):
     print("OUT/deleted.txt still exists - the delete case did not remove it")
     raise SystemExit(1)
@@ -452,6 +475,8 @@ for name, path in (("intake.txt", os.path.join(out, "intake.txt")),
                    ("file-clamp.ok", os.path.join(out, "file-clamp.ok")),
                    ("file-fsync.ok", os.path.join(out, "file-fsync.ok")),
                    ("file-errors.ok", os.path.join(out, "file-errors.ok")),
+                   ("file-write-safe.ok", os.path.join(out, "file-write-safe.ok")),
+                   ("write-safe.copy", os.path.join(out, "write-safe.copy")),
                    ("append.copy", os.path.join(out, "append.copy")),
                    ("bigwrite.copy", os.path.join(out, "bigwrite.copy")),
                    ("clamp.copy", os.path.join(out, "clamp.copy")),

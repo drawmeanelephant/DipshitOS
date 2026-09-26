@@ -385,7 +385,8 @@ func hookStr(a0, a1 uintptr) string {
 	return string(unsafe.Slice((*byte)(unsafe.Pointer(a0)), a1))
 }
 
-// WriteFileSafe's publish order is the contract: open the .tmp, write,
+// WriteFileSafe's publish order is the contract: open the one-byte temp
+// (~, M81e #1765 — a longer suffix cannot publish near max_path_len), write,
 // FSYNC, close, delete the live file, rename the temp over it. The fsync
 // and the rename are what make a crash leave either the old bytes or no
 // file — never a partial one.
@@ -395,7 +396,7 @@ func TestWriteFileSafePublishesByRename(t *testing.T) {
 		seq = append(seq, num)
 		switch num {
 		case SlotFileOpen:
-			if got := hookStr(a0, a1); got != "/host/SET.TXT.tmp" {
+			if got := hookStr(a0, a1); got != "/host/SET.TXT~" {
 				t.Fatalf("open = %q, want the temp path", got)
 			}
 			if a2 != uintptr(ModeWrite|ModeCreate) {
@@ -412,7 +413,7 @@ func TestWriteFileSafePublishesByRename(t *testing.T) {
 			}
 			return 0
 		case SlotFileRename:
-			if got := hookStr(a0, a1); got != "/host/SET.TXT.tmp" {
+			if got := hookStr(a0, a1); got != "/host/SET.TXT~" {
 				t.Fatalf("rename from = %q, want the temp", got)
 			}
 			if got := hookStr(a2, a3); got != "/host/SET.TXT" {

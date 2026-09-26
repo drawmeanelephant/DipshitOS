@@ -15,13 +15,14 @@ func keyDown(arg0, arg1 uint32) vi.Event {
 
 // The two paths the save test distinguishes, and the lengths a faked syscall
 // sees. A path argument reaches the hook as (pointer, length); the length alone
-// separates the sacrificial temp from the live file (they differ by ".tmp"), so
+// separates the sacrificial temp from the live file (they differ by the
+// one-byte "~" suffix, M81e #1765), so
 // the test needs no uintptr-to-pointer conversion -- virelai/vi's own tests do
 // that with unsafe, and duplicating the pattern here would add a second
 // `possible misuse of unsafe.Pointer` to `go vet` for no extra coverage.
 const (
 	livePathLen = uintptr(len(defaultPath))
-	tmpPathLen  = uintptr(len(defaultPath) + len(".tmp"))
+	tmpPathLen  = uintptr(len(defaultPath) + len("~"))
 )
 
 // The key path end to end, at the byte level: what arrives from the kernel
