@@ -69,6 +69,15 @@
 # anywhere, no PNG is compared, and nothing in the case knows what the window
 # looks like.
 #
+# M81b (#1762) adds the `mime` case: the file-type table, proved on the share.
+# The case WRITES seven fixtures under OUT/MIME/ and READS each one back
+# through the file ABI before sniffing it, so the receipt describes bytes that
+# came back over the share rather than a constant in the binary. The row that
+# carries the card is README.TXT — PNG magic under a .TXT name, reported as
+# `image`: magic decides before the extension ever does. The assert below
+# byte-compares the receipt AND reads OUT/MIME/ from the host, so a case that
+# printed a plausible table without landing the bytes cannot pass.
+#
 # REGRESSION TEST for #1391 (fixed in the kernel, ADR 0032): the first
 # kernel->user copy into a user buffer whose pages EL0 has never written used to
 # be silently lost on VZ — the syscall reported the right byte count and the app
@@ -163,8 +172,9 @@ case file-clamp pass
 case file-fsync pass
 case file-errors pass
 case file-write-safe pass
+case mime pass
 case window pass
-summary cases=15 failed=0
+summary cases=16 failed=0
 EOF
 
 # The canonical intake fixture as the spec seeds it (see the setup hook). The
@@ -251,7 +261,7 @@ vgate_assert 01 share-equals SELFTEST/IN/fixture.txt intake-fixture.expected
 # share-contains is the substring kind: the guest's own summary count. Weaker
 # than the python's byte-exact summary.txt compare below, and kept deliberately
 # as the kind's pilot in a real gate.
-vgate_assert 01 share-contains SELFTEST/OUT/summary.txt 'summary cases=15 failed=0'
+vgate_assert 01 share-contains SELFTEST/OUT/summary.txt 'summary cases=16 failed=0'
 
 # The load-bearing assert: the copies and the receipts on the host's own
 # filesystem must be byte-exact, the share's directory state must agree with
@@ -296,7 +306,7 @@ win_open_rect = (32, 32, 640, 400)
 win_viewport_w = 1100
 win_viewport_h = 720
 
-want_summary = b"summary cases=15 failed=0\n"
+want_summary = b"summary cases=16 failed=0\n"
 want_hello = b"goself smoke\n"
 want_intake_receipt = b"case intake path=IN/fixture.txt bytes=25 match=yes\n"
 want_altered_receipt = b"case intake-altered path=IN/altered.txt bytes=25 differs=yes\n"
@@ -317,6 +327,26 @@ want_fsync_receipt = b"case file-fsync path=OUT/fsync.txt bytes=147 fsync=0 clos
 want_errors_receipt = b"case file-errors missing=-6 exists=-9 isdir=-1 ninth=-5\n"
 want_write_safe_receipt = (b"case file-write-safe path=OUT/write-safe.txt long=840 "
                            b"short=105 bytes=105 tail=none orphan=none match=yes\n")
+
+# M81b (#1762): the MIME case. The fixture bodies are reconstructed here from
+# ONE expression each, exactly as selftest.go builds them, so the host checks
+# the share against its own reading of the table rather than against a copy of
+# whatever the guest wrote. README.TXT is the load-bearing row: PNG magic under
+# a .TXT name must report `image`.
+mime_fixtures = [
+    (b"README.TXT", b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR", b"image", 16),
+    (b"PIC.QOI", b"qoif\x00\x00\x00\x10\x00\x00\x00\x10\x03\xff\xff\xff", b"image", 16),
+    (b"NOTES.TXT", b"goself mime case: one line of text\n", b"text", 16),
+    (b"SONG.OGG", b"OggS\x00\x02\x00\x00\x00\x00\x00\x00", b"audio", 12),
+    (b"BUNDLE.ZIP", b"PK\x03\x04\x14\x00\x00\x00\x08\x00", b"archive", 10),
+    (b"GUEST.ELF", b"\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00", b"binary", 12),
+    (b"MYSTERY.PS", bytes([0x00, 0x01, 0x50, 0x53, 0x1a, 0x00]), b"unknown", 6),
+]
+want_mime_receipt = b"".join(
+    b"sniff " + name + b" " + kind + b" bytes=" + str(n).encode() + b"\n"
+    for name, body, kind, n in mime_fixtures)
+want_mime_ok = (b"case mime fixtures=7 default-image=GOVIEW.ELF "
+                b"default-text=GOEDIT.ELF\n")
 
 st = os.path.join(share, "SELFTEST")
 out = os.path.join(st, "OUT")
@@ -374,6 +404,21 @@ require(os.path.join(out, "file-write-safe.ok"), want_write_safe_receipt,
         "WRITE-SAFE RECEIPT")
 require(os.path.join(out, "write-safe.copy"), write_safe_short,
         "WRITE-SAFE COPY (no tail)")
+
+# M81b: the sniff receipt, the one-line summary of it, and the fixture bytes
+# the share itself holds. The receipt alone could be a table printed from
+# constants; OUT/MIME/ is what the guest actually wrote and read back.
+require(os.path.join(out, "mime.txt"), want_mime_receipt, "MIME RECEIPT")
+require(os.path.join(out, "mime.ok"), want_mime_ok, "MIME SUMMARY")
+mime_dir = os.path.join(out, "MIME")
+if not os.path.isdir(mime_dir):
+    print("OUT/MIME is not a directory - the mime case did not create it")
+    raise SystemExit(1)
+for name, body, kind, n in mime_fixtures:
+    got = read(os.path.join(mime_dir, name.decode()))
+    if got != body:
+        print("MIME FIXTURE %s MISMATCH:\n got %r\nwant %r" % (name, got, body))
+        raise SystemExit(1)
 
 # The guest's claims, cross-checked against the filesystem its syscalls left
 # behind. These are independent of the receipts: the receipts say what the case

@@ -52,4 +52,18 @@ const (
 	// script waits on it so the screenshot taken at the rename marker is
 	// never raced by the window teardown.
 	markerSettled = "gofiles: settled after rename"
+
+	// M81b (#1762): the open dispatch. The DECISION markers
+	// (`open`, `open no handler`, `open with`, `open chose`, `open
+	// cancelled`) are printed by the pure model after the frame that shows
+	// the status line; the OUTCOME markers (`open launched`, `open launch
+	// refused`) are printed by main after vi.Exec returned, so a gate can
+	// never read a launch that did not happen.
+	markerOpenFile     = "gofiles: open file "
+	markerOpenNo       = "gofiles: open refused "
+	markerOpenWith     = "gofiles: open with "
+	markerOpenChose    = "gofiles: open chose "
+	markerOpenCancel   = "gofiles: open cancelled "
+	markerOpenLaunched = "gofiles: open launched "
+	markerOpenLaunchNo = "gofiles: open launch refused "
 )

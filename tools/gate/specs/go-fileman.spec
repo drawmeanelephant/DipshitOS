@@ -16,9 +16,20 @@
 # what script3 waits on before closing — the teardown can never race the
 # capture.
 #
-# exec-order: assert-proven -- the run ends on `rx-go-fileman-ok`, which only
-# script3 prints, and script3 waits on the app's own settle marker; an app
-# that never ran, never renamed, or never settled cannot pass.
+# M81b (#1762) adds run 02: the OPEN dispatch. The same app, a second boot
+# with a QOI and an OGG seeded beside the text file, and one chord batch that
+# walks the whole decision — list the handlers (`o`), cancel, dispatch the
+# default (Enter → GOVIEW.ELF launched), then hit the type nothing opens and
+# read the named refusal. The proof is the pair of markers: the DECISION
+# (`gofiles: open file … type=image handler=GOVIEW.ELF`) and the OUTCOME
+# (`gofiles: open launched … pid=<n>`), which main prints only after vi.Exec
+# returned. GOVIEW.ELF's own `goview: open id=` line is the third reporter: the
+# image viewer really opened the file the manager named.
+#
+# exec-order: assert-proven -- each run ends on its own `rx-go-fileman-*`
+# marker, which only its closing script prints, and that script waits on the
+# app's own marker; an app that never ran, never renamed, never settled or
+# never refused cannot pass.
 
 vgate_name go-fileman "M74a #1644: the GOFILES.ELF Charm file manager navigates, previews (pixel-asserted) and renames over the bound tty"
 vgate_share seed
@@ -35,6 +46,19 @@ EOF
 vgate_file script3.txt <<'EOF'
 dui close 2
 echo rx-go-fileman-ok
+EOF
+
+vgate_file script6.txt <<'EOF'
+exec GOFILES.ELF /host/FM2
+EOF
+
+vgate_file script4.txt <<'EOF'
+dui
+EOF
+
+vgate_file script5.txt <<'EOF'
+dui close 2
+echo rx-go-fileman-open-ok
 EOF
 
 vgate_setup_python <<'PY'
@@ -56,9 +80,43 @@ os.makedirs(sub, exist_ok=True)
 inner = os.path.join(sub, "INNER.TXT")
 with open(inner, "w") as f:
     f.write("inner-file-preview\n")
-print("staged GOFILES.ELF into share (%d bytes), %s (%d bytes), %s (%d bytes)" %
+# M81b (#1762): the handler run 02 dispatches to, plus the two fixtures that
+# make the decision observable — an image the registry opens, and a sound file
+# that nothing on the system opens. GOVIEW.ELF is copied whole; a missing
+# build is named here rather than surfacing as a refused launch.
+view = os.path.join(".build", "go", "GOVIEW.ELF")
+if not os.path.exists(view):
+    sys.exit("GOVIEW.ELF missing (expected " + view + ") - build it first: "
+             "bash tools/go/build-goview.sh")
+shutil.copy(view, os.path.join(share, "GOVIEW.ELF"))
+# Run 02 starts the app in its OWN directory (FM2) so run 01's seeded listing
+# — and every assert pinned on its two entries — is untouched by this card.
+# A real 4x4 QOI: header, QOI_OP_RGB per pixel, the 8-byte end marker. Only the
+# first 16 bytes are sniffed, but the whole file must decode for GOVIEW to open
+# it — the sniff is not the interesting half of this run.
+W = H = 4
+qoi = bytearray(b"qoif") + (W).to_bytes(4, "big") + (H).to_bytes(4, "big") + bytes([4, 0])
+for y in range(H):
+    for x in range(W):
+        qoi += bytes([0xfe, 0x30 + 20 * x, 0x60 + 20 * y, 0x90])
+qoi += bytes([0, 0, 0, 0, 0, 0, 0, 1])
+om = os.path.join(share, "FM2")
+os.makedirs(om, exist_ok=True)
+pic = os.path.join(om, "PIC.QOI")
+with open(pic, "wb") as f:
+    f.write(bytes(qoi))
+# OggS magic: an audio type the registry has no handler for, so the run can
+# read the named refusal instead of only the happy path.
+ogg = os.path.join(om, "SONG.OGG")
+with open(ogg, "wb") as f:
+    f.write(b"OggS\x00\x02" + bytes(58))
+
+print("staged GOFILES.ELF into share (%d bytes), %s (%d bytes), %s (%d bytes), "
+      "GOVIEW.ELF (%d bytes), %s (%d bytes), %s (%d bytes)" %
       (os.path.getsize(os.path.join(share, "GOFILES.ELF")),
-       known, os.path.getsize(known), inner, os.path.getsize(inner)))
+       known, os.path.getsize(known), inner, os.path.getsize(inner),
+       os.path.getsize(os.path.join(share, "GOVIEW.ELF")),
+       pic, os.path.getsize(pic), ogg, os.path.getsize(ogg)))
 PY
 
 # The chord batch, in full (17 strokes at the cv-input transport's fixed
@@ -213,3 +271,71 @@ print("fileman scanout: preview-accent=%d sel-bg=%d" % (accent, selbg))
 assert accent >= 40, "preview pane accent (122,162,255) absent from the client rect"
 assert selbg >= 100, "selected-row background (44,58,76) absent from the client rect"
 PY
+
+# --- M81b (#1762): run 02, the OPEN dispatch -------------------------------
+# Same app, same share, new boot — started in /host/FM2, a directory holding
+# exactly the two files the decision turns on (PIC.QOI, SONG.OGG; the first is
+# selected on arrival). The batch is two chords long:
+#
+#   o           the Open-with… list on PIC.QOI (two candidates: GOVIEW, then
+#               GOEDIT on the raw bytes)
+#   1           take the FIRST entry of that list → GOVIEW.ELF on PIC.QOI
+#
+# Two chords, and the launch is the last one. vi.Exec blocks while the kernel
+# loads and maps a 1.2 MB image, and input that arrives inside that window is
+# not guaranteed to reach the app (observed on the first run 02 attempt: the
+# trailing chords were lost and the run ended on the expect timeout). The
+# closing script fires on the launch marker — the last thing the app says.
+#
+# The refusal half of the decision (a type with no handler) is NOT here: it
+# needs a second selection, and this run's value is proving the whole list ->
+# choice -> launch chain in ONE frame-budget. `gofiles: open refused SONG.OGG
+# type=audio` is pinned on the host instead (files/open_test.go:
+# TestOpenFileRefusesATypeNothingOpens), and the UNKNOWN row of the go-selftest
+# `mime` receipt is the class-B proof that unknown stays unhandled.
+vgate_run 02 -- \
+    --screen '$RUN_DIR/fileman-open-screen' \
+    --input --via-virtio \
+    --script '$RUN_DIR/script6.txt' \
+    --input-chords 'o,1' \
+    --input-chords-after 'gofiles: ready' \
+    --script2 '$RUN_DIR/script4.txt' \
+    --script2-after 'gofiles: open with PIC.QOI type=image candidates=2' \
+    --script3 '$RUN_DIR/script5.txt' \
+    --script3-after 'gofiles: open launched PIC.QOI handler=GOVIEW.ELF pid=' \
+    --script-expect 'rx-go-fileman-open-ok' --timeout 240
+
+# The app ran, and the listing this run acts on really held both new fixtures.
+vgate_assert 02 serial-contains 'exec: loaded GOFILES.ELF'
+vgate_assert 02 serial-contains 'gofiles: list /host/FM2 n=2'
+vgate_assert 02 serial-contains 'gofiles: entry PIC.QOI file'
+vgate_assert 02 serial-contains 'gofiles: entry SONG.OGG file'
+
+# Open with…: the candidate list is real (both registered image handlers) and
+# the digit took the first entry of it.
+vgate_assert 02 serial-contains 'gofiles: open with PIC.QOI type=image candidates=2'
+vgate_assert 02 serial-contains 'gofiles: open chose PIC.QOI type=image handler=GOVIEW.ELF'
+
+# The dispatch: the DECISION (model) and the OUTCOME (after vi.Exec returned).
+vgate_assert 02 serial-contains 'gofiles: open launched PIC.QOI handler=GOVIEW.ELF pid='
+# The second reporter: the image viewer really started and opened the file the
+# manager named (GOVIEW's own marker prefix is `gview:`). There is no
+# `exec: loaded GOVIEW.ELF` line to assert — that marker belongs to the
+# MONITOR's exec builtin, and a guest-initiated vi.Exec never prints it
+# (observed: only `gofiles: open launched … pid=<n>` and GOVIEW's own lines).
+vgate_assert 02 serial-contains 'gview: open id='
+vgate_assert 02 serial-contains 'gview: loaded PIC.QOI'
+
+# Nothing may be launched for a type with no handler, and no launch may fail
+# quietly: the SONG.OGG fixture is in the listing precisely so the run can
+# prove nothing was dispatched to it.
+vgate_assert 02 serial-absent 'gofiles: open file SONG.OGG'
+vgate_assert 02 serial-absent 'gofiles: open launch refused'
+
+vgate_assert 02 serial-contains 'rx-go-fileman-open-ok'
+
+# --- M81b: the refusals that must NOT happen ------------------------------
+vgate_assert 02 serial-absent 'gofiles: no /dev/tty'
+vgate_assert 02 serial-absent 'gofiles: attach failed'
+vgate_assert 02 serial-absent 'gofiles: list error'
+vgate_assert 02 serial-absent 'exited status=139'

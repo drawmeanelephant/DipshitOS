@@ -114,6 +114,7 @@ The only threads not closed:
 | **M79e — nav kinds 9/10** | Landed (PR #1758): the seat serves nav-declare/nav-poll, `Ctrl+Shift+[` / `]` steps per-tab history, GOFILES is the first live adopter. `go-wm-tabs` run 08 proves the round trip. `hid.go` overlaps #1747 by agreement; that claim rebases on top. | #1708 |
 | **M80 — Terminal you can live in** | In flight: index #1716 + 14 cards. Landed: M80a–e, M80g, M80h, and M80k (#1727 — Ctrl+Shift+K clears the scrollback (ED 3) + snaps to tail, Ctrl+Shift+R soft reset, Ctrl+Shift+Alt+R full RIS; kernel chrome chords, `help terminal`). | #1716 |
 | **M80i — font zoom** | Landing: one `font_size` key (small/medium/large) moves both ladders — text and the bound terminal grid (rasterized 11/13/17 px, cells 7×13 / 8×16 / 10×21), re-flows bound screens and notifies owners (WIN_RESIZE); `font` reports both ladders and sets the rung, GOSET cycles it. Class-B `live-term-depth` runs 04/05 (one snapshot per boot — flake fixup tracked in #1757). | #1725 |
+| **M81 — Files as a platform** | In flight: index #1781 + 7 cards. Landed: M81b (#1762 — one `mime` table: magic bytes first, extension second, printable-text last; one handler registry with GOVIEW.ELF + GOEDIT.ELF as the first two adopters. GOFILES' Enter / `l` / double-click dispatch a file and `o` lists the candidates; a type nothing opens is refused by name. `go-selftest` grew the `mime` case (write → read back → sniff → receipt), `go-fileman` run 02 the guest launch proof). | #1781 |
 
 ## Gate status
 
